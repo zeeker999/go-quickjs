@@ -27,7 +27,7 @@ type jitFields struct {
 	jit              *jitState
 }
 
-// A closure belongs to one runtime. Hotness and permanent bytecode refusals
+// A closure belongs to one runtime. Hotness and permanent selection refusals
 // live here without registering a weak key on cold or refused calls.
 type jitClosureFields struct {
 	jitRefused   bool
@@ -49,6 +49,7 @@ type jitState struct {
 	roots       [ir.MaxSlots]Value
 	arrays      [ir.MaxSlots]ir.ArrayView
 	hosts       uint64
+	fastHosts   uint64
 	rootCount   int
 	entries     uint64
 	guards      uint64
@@ -273,6 +274,7 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 		return Undefined, nil, false
 	}
 	if e.misses >= 8 {
+		f.cl.jitRefused = true
 		return Undefined, nil, false
 	}
 	wantDepth, ok := e.code.EntryDepth(pc)
@@ -286,13 +288,26 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 	if osr {
 		s.osrs++
 	}
+	budget := uint64(jit.MaxIterations)
 	for {
 		s.entries++
-		exit, err := e.code.RunArrays(s.slots[:n], s.arrays[:], pc, jit.MaxIterations)
+		exit, err := e.code.RunArrays(s.slots[:n], s.arrays[:], pc, budget)
 		runtime.KeepAlive(s)
 		if err != nil {
 			s.clearRoots()
 			return Undefined, err, true
+		}
+		budget -= exit.Steps
+		if exit.Kind == ir.HostExit {
+			s.hosts++
+			next, _ := r.jitHostFast(f, s, int(exit.State.PC), exit.State.Depth, int(min(budget, 16)))
+			if next != int(exit.State.PC) {
+				s.fastHosts++
+				budget -= uint64(next - int(exit.State.PC))
+				pc = next
+				f.pc = uint32(pc)
+				continue
+			}
 		}
 		s.publish(f, r.stack, exit.State.Depth)
 		f.pc = exit.State.PC
@@ -314,13 +329,13 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 			v, err := r.executeAt(f, f.base+exit.State.Depth, nil)
 			return v, err, true
 		case ir.HostExit:
-			s.hosts++
 			s.clearRoots()
-			sp, hostErr := r.jitHost(f, f.base+exit.State.Depth)
+			sp, hostErr := r.jitHost(f, f.base+exit.State.Depth, int(min(budget, 16)))
 			if hostErr != nil {
 				return r.jitInterpret(f, sp, hostErr)
 			}
 			pc = int(f.pc)
+			budget -= uint64(pc - int(exit.State.PC))
 			// A reentrant callback can release this cache or evict the parent.
 			// Reacquire it only after the callback has returned to Go.
 			e = r.jitFor(f.cl.fn)
@@ -336,8 +351,73 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 				return Undefined, err, true
 			}
 			pc = int(exit.State.PC)
+			budget = jit.MaxIterations
 		}
 	}
+}
+
+// jitHostFast only reads or overwrites ordinary own data properties. These
+// operations cannot call JavaScript or resize array storage, so scalar slots
+// and borrowed views stay valid without publishing/reencoding the whole frame.
+// Any accessor, proxy, exotic object, new property, or full root table takes
+// the normal callback boundary at its original instruction and stack depth.
+func (r *Runtime) jitHostFast(f *frame, s *jitState, pc, depth, limit int) (int, int) {
+	n := len(f.locals) + len(f.cl.upvalues)
+	for range limit {
+		in := f.cl.fn.Code[pc]
+		sp := n + depth
+		var value Value
+		dest, delta := sp, 1
+		switch in.Op {
+		case bytecode.OpSetLocalGet:
+			s.slots[in.A] = s.slots[sp-1]
+			s.slots[sp-1] = s.slots[in.B]
+			pc++
+			continue
+		case bytecode.OpPushThis:
+			var bound bool
+			value, bound = f.thisValue()
+			if !bound {
+				return pc, depth
+			}
+		case bytecode.OpGetProp, bytecode.OpGetPropThis:
+			obj := s.decode(s.slots[sp-1])
+			if !obj.IsObject() {
+				return pc, depth
+			}
+			var ok bool
+			value, ok = plainOwn(obj.Object(), f.cl.names[in.A])
+			if !ok {
+				return pc, depth
+			}
+			if in.Op == bytecode.OpGetProp {
+				dest, delta = sp-1, 0
+			}
+		case bytecode.OpSetProp:
+			obj := s.decode(s.slots[sp-2])
+			if !obj.IsObject() {
+				return pc, depth
+			}
+			o := obj.Object()
+			_, index, ok := plainOwnAt(o, f.cl.names[in.A])
+			if !ok || o.props[index].flags&propWritable == 0 {
+				return pc, depth
+			}
+			o.props[index].value = s.decode(s.slots[sp-1])
+			depth -= 2
+			pc++
+			continue
+		default:
+			return pc, depth
+		}
+		if s.rootCount == ir.MaxSlots {
+			return pc, depth
+		}
+		s.slots[dest] = s.encode(value)
+		depth += delta
+		pc++
+	}
+	return pc, depth
 }
 
 type jitTreeExit struct {
@@ -375,39 +455,71 @@ func (s *jitState) encodeFrame(f *frame, stack []Value, depth int) {
 }
 
 // jitHost runs an explicitly lowered host operation with normal VM ordering.
-// No borrowed view or native scalar root survives a callback.
-func (r *Runtime) jitHost(f *frame, sp int) (int, error) {
-	pc := int(f.pc)
-	in := f.cl.fn.Code[pc]
-	f.pc++
-	stack := r.stack
-	var v Value
-	var err error
-	switch in.Op {
-	case bytecode.OpCall, bytecode.OpCallMethod:
-		argc := int(in.A)
-		args := stack[sp-argc : sp]
-		callee := stack[sp-argc-1]
-		this := Undefined
-		sp -= argc + 1
-		if in.Op == bytecode.OpCallMethod {
-			sp--
-			this = stack[sp]
+// No borrowed view or native scalar root survives a callback. Consecutive host
+// operations and intervening fused local copies share one frame publication;
+// sixteen instructions bound the Go batch before native selection resumes.
+func (r *Runtime) jitHost(f *frame, sp, limit int) (int, error) {
+	for range limit {
+		pc := int(f.pc)
+		in := f.cl.fn.Code[pc]
+		if in.Op == bytecode.OpSetLocalGet {
+			f.locals[in.A] = r.stack[sp-1]
+			r.stack[sp-1] = f.locals[in.B]
+			f.pc++
+			continue
 		}
-		v, err = r.callDirect(callee, this, args)
-	case bytecode.OpGetGlobal:
-		c := tctx{r: r, f: f, cl: f.cl, locals: f.locals}
-		v, err = r.getGlobalAt(&c, in, pc)
-	case bytecode.OpGetPropThis:
-		v, err = r.getValueProp(stack[sp-1], f.cl.names[in.A])
-	default:
-		panic("invalid JIT host operation")
+		switch in.Op {
+		case bytecode.OpPushThis, bytecode.OpGetProp, bytecode.OpSetProp, bytecode.OpCall,
+			bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpGetPropThis:
+		default:
+			return sp, nil
+		}
+		f.pc++
+		stack := r.stack
+		var v Value
+		var err error
+		switch in.Op {
+		case bytecode.OpPushThis:
+			var bound bool
+			v, bound = f.thisValue()
+			if !bound {
+				err = r.throwError(errReference, "\"this\" is not bound until super() has been called")
+			}
+		case bytecode.OpGetProp:
+			sp--
+			v, err = r.getValueProp(stack[sp], f.cl.names[in.A])
+		case bytecode.OpSetProp:
+			sp -= 2
+			if err := r.setValueProp(stack[sp], f.cl.names[in.A], stack[sp+1], f.cl.fn.Strict); err != nil {
+				return sp, err
+			}
+			continue
+		case bytecode.OpCall, bytecode.OpCallMethod:
+			argc := int(in.A)
+			args := stack[sp-argc : sp]
+			callee := stack[sp-argc-1]
+			this := Undefined
+			sp -= argc + 1
+			if in.Op == bytecode.OpCallMethod {
+				sp--
+				this = stack[sp]
+			}
+			v, err = r.callDirect(callee, this, args)
+		case bytecode.OpGetGlobal:
+			c := tctx{r: r, f: f, cl: f.cl, locals: f.locals}
+			v, err = r.getGlobalAt(&c, in, pc)
+		case bytecode.OpGetPropThis:
+			v, err = r.getValueProp(stack[sp-1], f.cl.names[in.A])
+		default:
+			panic("invalid JIT host operation")
+		}
+		if err != nil {
+			return sp, err
+		}
+		r.stack[sp] = v
+		sp++
 	}
-	if err != nil {
-		return sp, err
-	}
-	r.stack[sp] = v
-	return sp + 1, nil
+	return sp, nil
 }
 
 func (r *Runtime) jitInterpret(f *frame, sp int, pending error) (Value, error, bool) {

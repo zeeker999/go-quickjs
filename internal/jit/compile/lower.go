@@ -69,20 +69,35 @@ func Lower(fn *bytecode.Function) (*ir.Program, error) {
 		}
 	}
 	effects := make([]effect, len(fn.Code))
-	host, loop, indexed := false, false, false
+	host, loop, indexed, property, bitwise := false, false, false, false, false
 	for pc, in := range fn.Code {
 		e, err := describe(fn, pc, in)
 		if err != nil {
 			return nil, err
 		}
 		effects[pc] = e
-		host = host || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis
+		host = host || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
+		property = property || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
+		raw := uint32(in.Op)
+		switch in.Op {
+		case bytecode.OpBinLocal, bytecode.OpBinImm:
+			raw = in.B
+		case bytecode.OpLocalBinImm:
+			raw = in.A >> 24
+		}
+		op, _ := operator(raw)
+		bitwise = bitwise || op >= ir.BitAnd && op <= ir.UShr || in.Op == bytecode.OpBitNot
 		loop = loop || e.branch && int(in.A) <= pc
 		indexed = indexed || in.Op == bytecode.OpGetIndex || in.Op == bytecode.OpSetIndex || in.Op == bytecode.OpGetLocalIndex || in.Op == bytecode.OpGetLocalIndexUpdate
 	}
 	// Tiny host-only wrappers pay the bridge overhead without enough native work.
 	if host && !loop && !indexed {
 		return nil, refuse(-1, "host operations without native loop or array work")
+	}
+	// Property-heavy object loops run faster in the tree tier. Require work
+	// that benefits from the new coverage before paying property boundaries.
+	if property && !indexed && !bitwise {
+		return nil, refuse(-1, "property operations without native array or bitwise work")
 	}
 	maps := make([]ir.StateMap, len(fn.Code))
 	for pc := range maps {
@@ -183,6 +198,8 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 		return effect{need: 1}, nil
 	case bytecode.OpToPropertyKeyOfBase:
 		return effect{need: 2}, nil
+	case bytecode.OpInsert2:
+		return effect{need: 2, delta: 1}, nil
 	case bytecode.OpInsert3:
 		return effect{need: 3, delta: 1}, nil
 	case bytecode.OpCall, bytecode.OpCallMethod:
@@ -194,13 +211,21 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 			n++
 		}
 		return effect{need: n, delta: 1 - n}, nil
-	case bytecode.OpGetGlobal, bytecode.OpGetPropThis:
+	case bytecode.OpGetGlobal, bytecode.OpGetPropThis, bytecode.OpGetProp, bytecode.OpSetProp:
 		if uint64(in.A) >= uint64(len(fn.Names)) || in.B == 0 || in.B > fn.PropSites {
 			return bad("invalid property site")
+		}
+		if in.Op == bytecode.OpSetProp {
+			return effect{need: 2, delta: -2}, nil
 		}
 		if in.Op == bytecode.OpGetPropThis {
 			return effect{need: 1, delta: 1}, nil
 		}
+		if in.Op == bytecode.OpGetProp {
+			return effect{need: 1}, nil
+		}
+		return effect{delta: 1}, nil
+	case bytecode.OpPushThis:
 		return effect{delta: 1}, nil
 	case bytecode.OpNop, bytecode.OpEndParams, bytecode.OpClearLocal:
 		return effect{}, nil
@@ -234,12 +259,13 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 		return effect{need: 2, delta: 2}, nil
 	case bytecode.OpDrop:
 		return effect{need: 1, delta: -1}, nil
-	case bytecode.OpAdd, bytecode.OpSub, bytecode.OpMul, bytecode.OpDiv,
+	case bytecode.OpBitAnd, bytecode.OpBitOr, bytecode.OpBitXor, bytecode.OpShl, bytecode.OpShr, bytecode.OpUShr,
+		bytecode.OpAdd, bytecode.OpSub, bytecode.OpMul, bytecode.OpDiv,
 		bytecode.OpLt, bytecode.OpLe, bytecode.OpGt, bytecode.OpGe,
 		bytecode.OpEq, bytecode.OpNe, bytecode.OpStrictEq, bytecode.OpStrictNe:
 		return effect{need: 2, delta: -1}, nil
 	case bytecode.OpNeg, bytecode.OpPos, bytecode.OpInc, bytecode.OpDec,
-		bytecode.OpToNumber, bytecode.OpToNumeric, bytecode.OpNot:
+		bytecode.OpToNumber, bytecode.OpToNumeric, bytecode.OpNot, bytecode.OpBitNot:
 		return effect{need: 1}, nil
 	case bytecode.OpIncLocal, bytecode.OpDecLocal:
 		return effect{}, nil
@@ -254,13 +280,7 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 			raw = in.A >> 24
 		}
 		op, ok := operator(raw)
-		if (in.Op == bytecode.OpBinImm || in.Op == bytecode.OpLocalBinImm) && raw == uint32(bytecode.OpBitOr) && (in.Op == bytecode.OpBinImm && in.A == 0 || in.Op == bytecode.OpLocalBinImm && in.B == 0) {
-			if in.Op == bytecode.OpLocalBinImm {
-				return effect{delta: 1}, nil
-			}
-			return effect{need: 1}, nil
-		}
-		if !ok || op > ir.Mul {
+		if !ok || op > ir.Mul && (op < ir.BitAnd || op > ir.UShr) {
 			return bad("unsupported fused arithmetic operator")
 		}
 		if in.Op == bytecode.OpLocalBinImm {
@@ -295,6 +315,18 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 
 func operator(raw uint32) (ir.Operator, bool) {
 	switch raw {
+	case uint32(bytecode.OpBitAnd):
+		return ir.BitAnd, true
+	case uint32(bytecode.OpBitOr):
+		return ir.BitOr, true
+	case uint32(bytecode.OpBitXor):
+		return ir.BitXor, true
+	case uint32(bytecode.OpShl):
+		return ir.Shl, true
+	case uint32(bytecode.OpShr):
+		return ir.Shr, true
+	case uint32(bytecode.OpUShr):
+		return ir.UShr, true
 	case uint32(bytecode.OpAdd):
 		return ir.Add, true
 	case uint32(bytecode.OpSub):
@@ -343,9 +375,11 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int) ir.Instruction {
 		return ir.Instruction{Op: ir.ArrayLength, Left: top, Dest: sp - 1}
 	case bytecode.OpToPropertyKeyOfBase:
 		return ir.Instruction{Op: ir.ArrayKey, Left: ir.Slot(sp - 2), Right: top}
+	case bytecode.OpInsert2:
+		return ir.Instruction{Op: ir.Insert2, Dest: sp - 2}
 	case bytecode.OpInsert3:
 		return ir.Instruction{Op: ir.Insert3, Dest: sp - 3}
-	case bytecode.OpCall, bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpGetPropThis:
+	case bytecode.OpCall, bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpGetPropThis, bytecode.OpPushThis, bytecode.OpGetProp, bytecode.OpSetProp:
 		return ir.Instruction{Op: ir.Host}
 	case bytecode.OpPushConst:
 		return copyTo(sp, ir.Literal(ir.Float(fn.Constants[in.A].Num)))
@@ -384,7 +418,8 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int) ir.Instruction {
 		return ir.Instruction{Op: ir.CopyPair, Dest: sp, Extra: sp + 1, Left: ir.Slot(sp - 2), Right: top}
 	case bytecode.OpSwap:
 		return ir.Instruction{Op: ir.Swap, Dest: sp - 2, Extra: sp - 1}
-	case bytecode.OpAdd, bytecode.OpSub, bytecode.OpMul, bytecode.OpDiv,
+	case bytecode.OpBitAnd, bytecode.OpBitOr, bytecode.OpBitXor, bytecode.OpShl, bytecode.OpShr, bytecode.OpUShr,
+		bytecode.OpAdd, bytecode.OpSub, bytecode.OpMul, bytecode.OpDiv,
 		bytecode.OpLt, bytecode.OpLe, bytecode.OpGt, bytecode.OpGe,
 		bytecode.OpEq, bytecode.OpNe, bytecode.OpStrictEq, bytecode.OpStrictNe:
 		op, _ := operator(uint32(in.Op))
@@ -393,21 +428,23 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int) ir.Instruction {
 		op, _ := operator(in.B)
 		return ir.Instruction{Op: ir.Binary, Operator: op, Dest: sp - 1, Left: top, Right: ir.Slot(int(in.A))}
 	case bytecode.OpBinImm:
-		if in.B == uint32(bytecode.OpBitOr) {
+		if in.B == uint32(bytecode.OpBitOr) && in.A == 0 {
 			return ir.Instruction{Op: ir.Unary, Operator: ir.Int32, Left: top, Dest: sp - 1}
 		}
 		op, _ := operator(in.B)
 		return ir.Instruction{Op: ir.Binary, Operator: op, Dest: sp - 1, Left: top, Right: number(int32(in.A))}
 	case bytecode.OpLocalBinImm:
-		if in.A>>24 == uint32(bytecode.OpBitOr) {
+		if in.A>>24 == uint32(bytecode.OpBitOr) && in.B == 0 {
 			return ir.Instruction{Op: ir.Unary, Operator: ir.Int32, Left: ir.Slot(int(in.A & (1<<24 - 1))), Dest: sp}
 		}
 		op, _ := operator(in.A >> 24)
 		return ir.Instruction{Op: ir.Binary, Operator: op, Dest: sp, Left: ir.Slot(int(in.A & (1<<24 - 1))), Right: number(int32(in.B))}
-	case bytecode.OpNeg, bytecode.OpPos, bytecode.OpToNumber, bytecode.OpToNumeric, bytecode.OpNot:
+	case bytecode.OpNeg, bytecode.OpPos, bytecode.OpToNumber, bytecode.OpToNumeric, bytecode.OpNot, bytecode.OpBitNot:
 		op := ir.Pos
 		if in.Op == bytecode.OpNeg {
 			op = ir.Neg
+		} else if in.Op == bytecode.OpBitNot {
+			op = ir.BitNot
 		} else if in.Op == bytecode.OpNot {
 			op = ir.Not
 		}

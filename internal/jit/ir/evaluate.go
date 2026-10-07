@@ -53,6 +53,10 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 			n := in.Dest
 			a, b, c := slots[n], slots[n+1], slots[n+2]
 			slots[n], slots[n+1], slots[n+2], slots[n+3] = c, a, b, c
+		case Insert2:
+			n := in.Dest
+			a, b := slots[n], slots[n+1]
+			slots[n], slots[n+1], slots[n+2] = b, a, b
 		case ArrayRead, ArrayWrite, ArrayKey, ArrayUpdate, ArrayLength:
 			obj := read(in.Left)
 			if obj.Kind != Opaque || obj.Bits >= uint64(len(arrays)) {
@@ -139,10 +143,10 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 				if a.Kind != Number {
 					return exit, nil
 				}
-				if in.Operator == Int32 {
-					n := math.Float64frombits(a.Bits)
-					if math.IsNaN(n) || n < math.MinInt32 || n > math.MaxInt32 {
-						return exit, nil
+				if in.Operator == Int32 || in.Operator == BitNot {
+					n := ToUint32(math.Float64frombits(a.Bits))
+					if in.Operator == BitNot {
+						n = ^n
 					}
 					a = Float(float64(int32(n)))
 				}
@@ -202,6 +206,24 @@ func binary(op Operator, a, b Value) (Value, bool) {
 		return Value{}, false
 	}
 	x, y := math.Float64frombits(a.Bits), math.Float64frombits(b.Bits)
+	if op >= BitAnd && op <= UShr {
+		l, r := ToUint32(x), ToUint32(y)
+		switch op {
+		case BitAnd:
+			l &= r
+		case BitOr:
+			l |= r
+		case BitXor:
+			l ^= r
+		case Shl:
+			l <<= r & 31
+		case Shr:
+			l = uint32(int32(l) >> (r & 31))
+		case UShr:
+			return Float(float64(l >> (r & 31))), true
+		}
+		return Float(float64(int32(l))), true
+	}
 	switch op {
 	case Add:
 		return Float(x + y), true
@@ -225,6 +247,20 @@ func binary(op Operator, a, b Value) (Value, bool) {
 		return Bool(x != y), true
 	}
 	return Value{}, false
+}
+
+// ToUint32 implements JavaScript's numeric truncation modulo 2^32. Native
+// emitters use it for literals; the oracle uses an independent remainder-based
+// algorithm to check the emitters' IEEE exponent/mantissa conversion paths.
+func ToUint32(n float64) uint32 {
+	if math.IsNaN(n) || math.IsInf(n, 0) {
+		return 0
+	}
+	n = math.Mod(math.Trunc(n), 4294967296)
+	if n < 0 {
+		n += 4294967296
+	}
+	return uint32(n)
 }
 
 func truth(v Value) (bool, bool) {

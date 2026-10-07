@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"os"
 	"reflect"
 	"runtime"
@@ -129,6 +130,113 @@ func TestNativeProgramInt32(t *testing.T) {
 			got, err := c.Run(y, 0, budget)
 			if err != nil || got != want || x[0] != y[0] {
 				t.Fatalf("input %v budget %d: %+v %v want %+v", n, budget, got, err, want)
+			}
+		}
+	}
+}
+
+func TestNativeProgramBitwise(t *testing.T) {
+	values := []float64{0, math.Copysign(0, -1), 2.9, -2.9, math.MinInt32, math.MaxInt32,
+		2147483648, 4294967295, 4294967296, 4294967297, -4294967297,
+		math.SmallestNonzeroFloat64, math.MaxFloat64, math.NaN(), math.Inf(-1), math.Inf(1)}
+	for exponent := 31; exponent <= 86; exponent++ {
+		x := math.Ldexp(1, exponent)
+		values = append(values, math.Nextafter(x, 0), x, math.Nextafter(x, math.Inf(1)), -math.Nextafter(x, math.Inf(1)))
+	}
+	random := rand.New(rand.NewPCG(187, 901))
+	for range 1000 {
+		values = append(values, math.Float64frombits(random.Uint64()))
+	}
+	for _, op := range []ir.Operator{ir.Int32, ir.BitNot, ir.BitAnd, ir.BitOr, ir.BitXor, ir.Shl, ir.Shr, ir.UShr} {
+		for _, dest := range []int{0, 1, 2} {
+			for _, literal := range []bool{false, true} {
+				in := ir.Instruction{Op: ir.Binary, Operator: op, Left: ir.Slot(0), Right: ir.Slot(1), Dest: dest}
+				if op == ir.Int32 || op == ir.BitNot {
+					in.Op = ir.Unary
+				}
+				if literal {
+					in.Right = ir.Literal(ir.Float(-4294967297))
+				}
+				p := &ir.Program{Locals: 3, Code: []ir.Instruction{in, {Op: ir.Return, Left: ir.Slot(dest)}}, Maps: []ir.StateMap{{PC: 0}, {PC: 1}}}
+				c := newTestCode(t, p)
+				for i, x := range values {
+					for _, y := range []float64{values[(i*17+3)%len(values)], float64(i%73 - 36)} {
+						for _, budget := range []uint64{0, 1, 2} {
+							a := []ir.Value{ir.Float(x), ir.Float(y), ir.Float(31)}
+							b := append([]ir.Value(nil), a...)
+							want, _ := p.Evaluate(a, 0, budget)
+							got, err := c.Run(b, 0, budget)
+							if err != nil || got != want || !reflect.DeepEqual(a, b) {
+								t.Fatalf("op %v dest %d literal %v x %x y %x budget %d: exit %+v/%+v slots %v/%v error %v", op, dest, literal, math.Float64bits(x), math.Float64bits(y), budget, got, want, b, a, err)
+							}
+						}
+					}
+				}
+				for _, slot := range []int{0, 1} {
+					if in.Op == ir.Unary && slot == 1 || literal && slot == 1 {
+						continue
+					}
+					a := []ir.Value{ir.Float(7), ir.Float(33), ir.Float(31)}
+					a[slot] = ir.Value{Kind: ir.Opaque, Bits: 3}
+					b := append([]ir.Value(nil), a...)
+					want, _ := p.Evaluate(a, 0, 2)
+					got, err := c.Run(b, 0, 2)
+					if err != nil || got != want || !reflect.DeepEqual(a, b) {
+						t.Fatalf("op %v guard slot %d: %+v / %+v %v", op, slot, got, want, err)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestNativeProgramBitwiseArrayCache(t *testing.T) {
+	p := &ir.Program{Locals: 4, Code: []ir.Instruction{
+		{Op: ir.ArrayRead, Left: ir.Slot(0), Right: ir.Slot(1), Dest: 2},
+		{Op: ir.Binary, Operator: ir.BitXor, Left: ir.Slot(2), Right: ir.Literal(ir.Float(5)), Dest: 3},
+		{Op: ir.ArrayRead, Left: ir.Slot(0), Right: ir.Slot(1), Dest: 2},
+		{Op: ir.Binary, Operator: ir.BitXor, Left: ir.Slot(2), Right: ir.Slot(3), Dest: 3},
+		{Op: ir.Return, Left: ir.Slot(3)},
+	}, Maps: []ir.StateMap{{PC: 0}, {PC: 1}, {PC: 2}, {PC: 3}, {PC: 4}}}
+	c := newTestCode(t, p)
+	cell := [2]uint64{math.Float64bits(math.Nextafter(math.Ldexp(1, 63), math.Inf(1))), 0}
+	views := make([]ir.ArrayView, ir.MaxSlots)
+	views[0] = ir.ArrayView{Data: unsafe.Pointer(&cell[0]), DenseLength: 1, Length: 1, NumberLimit: 0xfff8000000000000}
+	for pc := range p.Code {
+		for budget := uint64(0); budget <= 5; budget++ {
+			a := []ir.Value{{Kind: ir.Opaque}, ir.Float(0), ir.Float(7), ir.Float(3)}
+			b := append([]ir.Value(nil), a...)
+			want, _ := p.EvaluateArrays(a, views, pc, budget)
+			got, err := c.RunArrays(b, views, pc, budget)
+			if err != nil || got != want || !reflect.DeepEqual(a, b) {
+				t.Fatalf("pc %d budget %d: exit %+v/%+v slots %v/%v error %v", pc, budget, got, want, b, a, err)
+			}
+		}
+	}
+}
+
+func TestNativeProgramInserts(t *testing.T) {
+	values := []ir.Value{ir.Float(37), ir.Float(math.NaN()), ir.Bool(true), {Kind: ir.Null}, {Kind: ir.Uninitialized}, {Kind: ir.Opaque, Bits: 17}}
+	for _, op := range []ir.Op{ir.Insert2, ir.Insert3} {
+		locals := 2
+		if op == ir.Insert3 {
+			locals = 3
+		}
+		p := &ir.Program{Locals: locals, StackSize: 1, Code: []ir.Instruction{{Op: op}, {Op: ir.Return, Left: ir.Slot(locals)}}, Maps: []ir.StateMap{{PC: 0}, {PC: 1, Depth: 1}}}
+		c := newTestCode(t, p)
+		for _, l := range values {
+			for _, r := range values {
+				for pc := range p.Code {
+					for _, budget := range []uint64{0, 1, 2} {
+						a := []ir.Value{l, r, ir.Float(3), ir.Float(9)}[:locals+1]
+						b := append([]ir.Value(nil), a...)
+						want, _ := p.Evaluate(a, pc, budget)
+						got, err := c.Run(b, pc, budget)
+						if err != nil || got != want || !reflect.DeepEqual(a, b) {
+							t.Fatalf("insert %v pc %d budget %d: %+v/%+v slots %v/%v error %v", op, pc, budget, got, want, b, a, err)
+						}
+					}
+				}
 			}
 		}
 	}
@@ -540,6 +648,13 @@ func FuzzNativeProgram(f *testing.F) {
 	for _, code := range [][]bytecode.Instr{
 		{{Op: bytecode.OpReturnUndef}},
 		{{Op: bytecode.OpGetLocal2, B: 1}, {Op: bytecode.OpAdd}, {Op: bytecode.OpReturn}},
+		{{Op: bytecode.OpGetLocal2, B: 1}, {Op: bytecode.OpBitAnd}, {Op: bytecode.OpReturn}},
+		{{Op: bytecode.OpGetLocal2, B: 1}, {Op: bytecode.OpBitOr}, {Op: bytecode.OpReturn}},
+		{{Op: bytecode.OpGetLocal2, B: 1}, {Op: bytecode.OpBitXor}, {Op: bytecode.OpReturn}},
+		{{Op: bytecode.OpGetLocal2, B: 1}, {Op: bytecode.OpShl}, {Op: bytecode.OpReturn}},
+		{{Op: bytecode.OpGetLocal2, B: 1}, {Op: bytecode.OpShr}, {Op: bytecode.OpReturn}},
+		{{Op: bytecode.OpGetLocal2, B: 1}, {Op: bytecode.OpUShr}, {Op: bytecode.OpReturn}},
+		{{Op: bytecode.OpGetLocal}, {Op: bytecode.OpBitNot}, {Op: bytecode.OpReturn}},
 		{{Op: bytecode.OpJump}},
 	} {
 		data := make([]byte, 16+9*len(code))

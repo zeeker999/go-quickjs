@@ -71,7 +71,7 @@ function read(o) { return o.x }`
 		"jit slots: 3 locals + 6 operands",
 		"jit exit: pc=6 depth=0",
 		"jit exit: pc=7 depth=2",
-		"jit IR: refused: jit: pc 1: unsupported opcode get_prop",
+		"jit IR: refused: jit: host operations without native loop or array work",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("missing %q in\n%s", want, out.String())

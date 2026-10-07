@@ -135,10 +135,13 @@ branches, increments/decrements, and primitive returns. It handles fused local,
 immediate, and comparison instructions without exposing half-completed bytecode
 operations. It also accepts read-only captured bindings, dense numeric array
 access, length reads, fused index updates, assignment-result insertion, and
-numeric `x | 0` within the signed int32 domain. Ordinary calls, method calls,
-global reads, and method lookups exit to Go and resume native execution.
+numeric bitwise operations over the full double domain. Ordinary calls, method
+calls, receiver loads, global reads, property reads and writes, and method
+lookups exit to Go and resume native execution.
 Host-backed functions need a loop or indexed work to qualify; small wrappers
-without that work retain the existing tiers. Captured own locals, writes to
+without that work retain the existing tiers. The new receiver/property coverage
+also requires indexed or bitwise work: tree execution is faster for the
+object loops measured in DeltaBlue. Captured own locals, writes to
 upvalues, arguments objects, direct eval, non-simple parameters, handlers,
 `with`, and other unsupported opcodes are refused,
 including in unreachable code. Work is bounded to 4096 bytecode instructions and
@@ -181,7 +184,8 @@ Each runtime owns a weak-key cache of at most 128 entries, 8 MiB of executable
 code and its metadata, and 512 KiB of native metadata. Programs are limited to
 4096 instructions and 256 scalar slots. Dead weak keys are swept on cache
 misses; a full cache evicts one owner between entries. Eight guard misses
-suspend native selection for that cached function. Shared bytecode templates
+suspend native selection for that cached function, and closures that reach
+that cutoff remember it to avoid repeated weak-cache lookups. Shared bytecode templates
 carry no native address or mutable JIT state.
 
 Scratch values contain no pointers. Opaque indices refer to typed Go roots,
@@ -230,13 +234,32 @@ reconfigured properties, nonnumeric elements, unsupported keys, and coercions
 resume the interpreter before committing the failing bytecode instruction.
 Fused index updates commit only after all read guards succeed.
 
-Before a host operation the VM publishes locals and operands, then clears all
+Before a host operation that can invoke callbacks the VM publishes locals and operands, then clears all
 scalar roots and borrowed views. It runs the existing call/property semantics
 in Go with the fetched PC, propagates exact errors, reacquires code after any
 cache eviction or release, and rebuilds snapshots and views before reentry.
 Captured bindings and array storage can change during callbacks. Host operations
 use an iterative native/Go loop, so repeated helper calls do not recursively
 nest interpreter resumptions in one JavaScript frame.
+
+Receiver loads and ordinary own data property reads and overwrites can operate
+on scalar slots in Go without publishing the frame. The existing plain-property
+guards exclude proxies, accessors, private or deleted properties, indexed
+storage, and exotic objects. Writes use Go assignments with its write barrier;
+new or nonwritable properties use the normal VM operation. Root-table capacity
+is bounded; a full table takes the ordinary publication and refresh boundary.
+Up to sixteen adjacent host operations and fused local copies share each
+boundary. Native work and both host paths share one 4096-instruction budget,
+including across reentry, so a loop made of property operations cannot evade
+cancellation or memory checks.
+
+Numeric bitwise operations implement JavaScript's ToInt32/ToUint32 semantics
+for every double. Native conversion truncates the common range to int64 and
+uses the IEEE exponent and significand for large values, with NaNs and
+infinities becoming zero. Shift counts are masked to five bits, and unsigned
+right shifts produce positive numbers up to 4294967295. Nonnumeric operands
+still guard before coercion, preserving BigInt and callback semantics through
+the interpreter.
 
 Arithmetic reads allocated registers directly and guards both operands before
 writing the result. SSE2's destructive destination needs a temporary when it
@@ -419,7 +442,7 @@ go test -c -tags quickjs_jit -o /tmp/quickjs-jit-vm.test ./internal/vm
 /tmp/quickjs-jit-vm.test -test.run '^$' \
   -test.bench '^BenchmarkJITCallPromotion$' -test.benchtime 200ms -test.benchmem
 GOFLAGS=-tags=quickjs_jit go run ./internal/cmd/v8bench/placements build -label change
-go run ./internal/cmd/v8bench/placements compare -jit -dir /tmp/v8-v7 base change
+go run ./internal/cmd/v8bench/placements compare -jit -dir ../v8-v7 base change
 ```
 
 Build both placement labels with the tag in the same checkout. `compare -jit`
@@ -691,11 +714,11 @@ not by the complete V8 suite.
 
 ```sh
 go run ./internal/cmd/v8bench/external -engine node -cmd node \
-  -dir /tmp/v8-v7 -mode fixed -n 50
+  -dir ../v8-v7 -mode fixed -n 50
 go run ./internal/cmd/v8bench/external -engine node -cmd node -arg --jitless \
-  -dir /tmp/v8-v7 -mode fixed -n 50
+  -dir ../v8-v7 -mode fixed -n 50
 go run -tags quickjs_jit ./internal/cmd/v8bench -jit \
-  -dir /tmp/v8-v7 -mode fixed -n 50
+  -dir ../v8-v7 -mode fixed -n 50
 ```
 
 ### Upstream optimization integration
@@ -753,3 +776,112 @@ and JIT plus debugger compilation report 92,869 passed, zero failures, and
 342 existing skips; peak process RSS is 2948.4 and 2807.5 MiB respectively.
 The 5-10x goal remains active: selected dense kernels meet it, while the
 mixed suite and Crypto still require broader native coverage.
+
+### Bitwise arithmetic and property boundaries
+
+Both native backends now execute numeric AND, OR, XOR, complement, and all
+three shifts, including fused bytecode forms and full large-double conversion.
+Receiver loads and property reads/writes can resume in Go. Adjacent host
+operations share a bounded batch; ordinary own data reads and overwrites use
+scalar slots directly, while callbacks publish the frame, clear borrowed
+storage, and reacquire code before reentry. Assignment-result insertion keeps
+the value in its original stack position. The shared instruction budget covers
+both native work and host batches, including property-only numeric loops.
+
+Qualification matters as much as coverage. The new property operations need
+indexed or bitwise work to qualify; object loops alone remain in the tree
+tier. Closures also remember the eight-guard cutoff instead of looking up a
+program that can no longer run. Eight balanced placements, three fresh rounds
+per placement, compare this final build with the rebased JIT:
+
+| Suite | Rebased native | Bitwise/property native | Change |
+|---|---|---|---|
+| Richards | 5.7 ms | 5.7 ms | +0.4% |
+| DeltaBlue | 8.7 ms | 8.8 ms | +0.6% |
+| Crypto | 126.0 ms | 78.8 ms | -37.5% |
+| RayTrace | 49.6 ms | 49.8 ms | +0.5% |
+| EarleyBoyer | 148.8 ms | 149.6 ms | +0.6% |
+| RegExp | 104.4 ms | 103.8 ms | -0.5% |
+| Splay | 107.3 ms | 107.2 ms | -0.1% |
+| NavierStokes | 31.1 ms | 31.0 ms | -0.2% |
+| TOTAL | 599.2 ms | 548.0 ms | -8.5% |
+
+The external V8 fixture lives at `../v8-v7`, outside the repository and the
+system temporary directory. `TestJITCryptoCorpus` executes its encryption and
+decryption with the suite's plaintext assertion and checks that the actual
+`am3` method runs native code without guards. `BenchmarkJITCryptoLimb` uses
+that same external method, keeping Tom Wu's license with the source, and
+checks every output limb and the final carry against an independent uint64
+multiply/add model. Enable both with `QUICKJS_JIT_V8_DIR=../v8-v7`.
+
+Three fresh processes per measurement, Go 1.27 on macOS/arm64 (Apple M5 Max),
+give these warm-call means:
+
+| Kernel | Interpreter | Existing tree | Native | Speedup over interpreter |
+|---|---|---|---|---|
+| Vector, 8192 elements | 147.4 us | 100.3 us | 24.9 us | 5.9x |
+| Stencil, 8192 elements | 266.6 us | 180.3 us | 37.2 us | 7.2x |
+| Stencil with helper calls | 1112.8 us | 707.5 us | 146.7 us | 7.6x |
+| Crypto am3, 32 limbs | 2391.7 ns | 1669.7 ns | 675.0 ns | 3.5x |
+| Crypto am3, 8192 limbs | 542.0 us | 352.7 us | 82.4 us | 6.6x |
+
+Dense kernels allocate 368 bytes in three allocations per call; am3 allocates
+432 bytes and three allocations in all tiers. Native am3 owns 16384 bytes of
+code and 1184 bytes of metadata. Dense code/metadata sizes are unchanged.
+Kernel-process RSS is 31.2-31.9 MiB. First-use measurements use 100 independent
+runtimes per process, excluding construction, source compilation, and setup
+but including native compilation and OSR:
+
+| Kernel | First call existing | First call automatic | Go bytes / allocations existing | Go bytes / allocations automatic |
+|---|---|---|---|---|
+| Vector | 103.3 us | 88.8 us | 390 / 3 | 100605 / 66 |
+| Stencil | 183.8 us | 100.3 us | 404 / 3 | 127668 / 69 |
+| Helper | 728.8 us | 228.0 us | 424 / 3 | 186378 / 72 |
+
+First-use RSS is 27.9-29.4 MiB. Runtime construction still allocates no native
+code. The qjs binaries are 40,503,538 bytes default and 40,726,690 bytes tagged,
+an increase of 223,152 bytes (0.55%).
+
+Fifty-iteration fixed-work measurements alternate fresh processes of the
+current existing tiers, the rebased native build, the current native build,
+Node v26.8.1, and Node with `--jitless`. Three-process means are:
+
+| Suite | Existing tiers | Rebased native | Current native | Node | Node --jitless |
+|---|---|---|---|---|---|
+| Richards | 96.4 ms | 94.5 ms | 95.4 ms | 4.4 ms | 62.7 ms |
+| DeltaBlue | 145.4 ms | 147.2 ms | 153.4 ms | 6.4 ms | 105.8 ms |
+| Crypto | 2114.2 ms | 2112.6 ms | 1251.9 ms | 66.0 ms | 2174.7 ms |
+| RayTrace | 828.5 ms | 819.6 ms | 826.5 ms | 27.4 ms | 420.7 ms |
+| EarleyBoyer | 2490.6 ms | 2451.7 ms | 2455.4 ms | 114.6 ms | 1201.5 ms |
+| RegExp | 1209.5 ms | 1169.7 ms | 1171.8 ms | 198.6 ms | 707.4 ms |
+| Splay | 162.7 ms | 161.6 ms | 166.8 ms | 26.2 ms | 66.7 ms |
+| NavierStokes | 1349.8 ms | 378.1 ms | 377.3 ms | 102.6 ms | 1792.6 ms |
+| TOTAL | 8408.2 ms | 7345.7 ms | 6508.6 ms | 582.4 ms | 6570.0 ms |
+
+The new native build saves 11.4% overall and 40.7% on Crypto compared with the
+rebased native build. Its total is 22.6% lower than the existing tiers. These
+longer runs use one normal binary layout per version; current native DeltaBlue
+samples range from 141.9 to 172.3 ms, while the balanced placement comparison
+is within 1% of the baseline. Allocations are 4407.7 MB existing and 4420.0 MB
+native, with 9.4 and 9.4-9.5 MB live after collection. RSS ranges overlap:
+298.5-307.4 MiB existing, 298.6-331.7 MiB rebased native, and 287.3-328.8 MiB
+current native. Node is 184.5-204.0 MiB and Node `--jitless` 190.5-191.9 MiB.
+With JIT opted out, the eight-placement comparison is level overall
+(651.2 to 651.6 ms, +0.1%).
+
+The 5-10x target remains active. The longer actual Crypto limb loop now joins
+the dense kernels in that range, but the typical 32-limb call is still 3.5x,
+and Node remains 11.2x faster on the mixed suite. Native/Go boundary cost and
+coverage of the surrounding object and call paths remain optimization targets.
+
+Default and tagged full tests and vet pass. Native differential tests cover
+every bitwise operator, aliased destinations, arbitrary-PC entry, budget exits,
+nonfinite values, exponent boundaries, random IEEE doubles, and cached array
+views. Native fuzzing passes 4.6 million inputs. Callback tests cover coercion
+order, BigInt fallback, exact errors, proxy and accessor operations, cache
+release, GC, array resizing, root-table refresh, and cancellation. Race,
+checkptr, Go 1.24, Linux/amd64 execution under emulation, Windows cross-builds,
+and the Linux/386 length test pass. Actual Windows execution remains unverified.
+Test262 reports 92,869 passed, zero failures, and 342 existing skips, with
+2758.7 MiB peak RSS; debugger compilation reports the same results, with
+2994.0 MiB peak RSS.

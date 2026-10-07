@@ -17,6 +17,12 @@ Read-only captured bindings, guarded dense numeric array access and length,
 fused index updates, and ordinary calls through resumable Go exits are now
 implemented. Straight-line region budgets, local kind facts, and checked-view
 reuse reduce native bookkeeping while retaining exact arbitrary-PC fallback.
+Numeric bitwise operators now implement full ToInt32/ToUint32 conversion,
+including large doubles and nonfinite values. Receiver and property operations
+resume in Go; ordinary own data properties use scalar slots directly, while
+accessors and exotic objects publish the frame and clear borrowed views.
+Bounded host batches share the native instruction budget so property-heavy
+loops still check cancellation and limits.
 See [the implementation notes](../internal/jit/README.md)
 for contracts, validation, and current limits.
 
@@ -140,6 +146,9 @@ multiplication, division, negation, numeric comparisons, boolean branches,
 and primitive returns. Guard dynamic operands before consuming them. Leave
 remainder, bitwise conversions, BigInt, strings, properties, calls, and other
 operations to the existing executor until each has exact semantic tests.
+The current executor also supports numeric bitwise operations, read-only
+captured bindings, dense numeric arrays, and resumable calls and properties.
+Remainder, BigInt, and string operations still use interpreter fallback.
 
 A failed guard exits before the failing operation. Commit all earlier work,
 including completed loop iterations, exactly once, then resume that operation

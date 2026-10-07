@@ -84,6 +84,7 @@ const (
 	ArrayUpdate
 	Insert3
 	Host
+	Insert2
 )
 
 // Operator selects an arithmetic, comparison, or truthiness operation.
@@ -105,6 +106,13 @@ const (
 	Not
 	Truth
 	Int32
+	BitAnd
+	BitOr
+	BitXor
+	Shl
+	Shr
+	UShr
+	BitNot
 )
 
 // Instruction reads Left and Right and writes Dest (and Extra for paired

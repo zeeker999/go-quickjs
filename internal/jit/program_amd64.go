@@ -4,6 +4,7 @@ package jit
 
 import (
 	"encoding/binary"
+	"math"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
@@ -56,13 +57,17 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 			case ir.Host:
 				a.jump(a.host)
 				continue
-			case ir.Insert3:
-				a.load(ir.Slot(in.Dest+2), 8, 9)
-				a.store(in.Dest+3, 8, 9)
-				a.load(ir.Slot(in.Dest+1), 0, 2)
-				a.store(in.Dest+2, 0, 2)
-				a.load(ir.Slot(in.Dest), 0, 2)
-				a.store(in.Dest+1, 0, 2)
+			case ir.Insert2, ir.Insert3:
+				last := 2
+				if in.Op == ir.Insert2 {
+					last = 1
+				}
+				a.load(ir.Slot(in.Dest+last), 8, 9)
+				a.store(in.Dest+last+1, 8, 9)
+				for i := last - 1; i >= 0; i-- {
+					a.load(ir.Slot(in.Dest+i), 0, 2)
+					a.store(in.Dest+i+1, 0, 2)
+				}
 				a.store(in.Dest, 8, 9)
 			case ir.ArrayRead, ir.ArrayWrite, ir.ArrayKey, ir.ArrayLength, ir.ArrayUpdate:
 				a.array(in)
@@ -86,24 +91,18 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 				a.storeScalar(in.Extra, 0, 2)
 			case ir.Binary:
 				fp := a.binary(in.Operator, in.Left, in.Right, in.Dest)
-				if in.Operator <= ir.Div {
+				if in.Operator < ir.Lt || in.Operator > ir.Ne {
 					a.storeNumber(in.Dest, fp)
 				} else {
 					a.storeBool(in.Dest)
 				}
 			case ir.Unary:
-				if in.Operator == ir.Int32 {
-					fp := a.number(in.Left, 0)
-					a.immediate(0, 0xc1e0000000000000)
-					a.bytes(0x66, 0x48, 0x0f, 0x6e, 0xc8)
-					a.fpBinary(0x66, 0x2e, fp, 1)
-					a.conditional(2, a.guard)
-					a.immediate(0, 0x41dfffffffc00000)
-					a.bytes(0x66, 0x48, 0x0f, 0x6e, 0xc8)
-					a.fpBinary(0x66, 0x2e, fp, 1)
-					a.conditional(7, a.guard)
-					a.bytes(0xf2, 0x48|fp>>3, 0x0f, 0x2c, 0xc0|fp&7)
-					a.bytes(0xf2, 0x48, 0x0f, 0x2a, 0xc0)
+				if in.Operator == ir.Int32 || in.Operator == ir.BitNot {
+					a.integer(in.Left)
+					if in.Operator == ir.BitNot {
+						a.bytes(0xf7, 0xd0) // notl ax
+					}
+					a.bytes(0xf2, 0x0f, 0x2a, 0xc0) // cvtsi2sd eax,x0
 					a.storeNumber(in.Dest, 0)
 				} else if in.Operator == ir.Not {
 					a.truth(in.Left)
@@ -402,6 +401,9 @@ func (a *amd64Program) fpMove(dest, source byte) {
 }
 
 func (a *amd64Program) binary(op ir.Operator, left, right ir.Operand, dest int) byte {
+	if op >= ir.BitAnd && op <= ir.UShr {
+		return a.bitwise(op, left, right)
+	}
 	l := a.number(left, 0)
 	r := a.number(right, 1)
 	if op <= ir.Div {
@@ -432,6 +434,78 @@ func (a *amd64Program) binary(op ir.Operator, left, right ir.Operand, dest int) 
 		a.bytes(0x0f, 0x9b, 0xc2, 0x20, 0xd0) // setnp dl; andb dl, al
 	case ir.Ne:
 		a.bytes(0x0f, 0x9a, 0xc2, 0x08, 0xd0) // setp dl; orb dl, al
+	}
+	return 0
+}
+
+// integer leaves ToUint32's bits in EAX. CVTTSD2SI's overflow sentinel selects
+// a significand path for large doubles and nonfinite values. R8 and CX survive:
+// they hold the first operand and borrowed views. SSE2 shifts avoid using CL.
+func (a *amd64Program) integer(o ir.Operand) {
+	if o.Slot < 0 && o.Literal.Kind == ir.Number {
+		a.immediate(0, uint64(ir.ToUint32(math.Float64frombits(o.Literal.Bits))))
+		return
+	}
+	fp := a.number(o, 0)
+	slow, zero, right, shifted, done := a.label(), a.label(), a.label(), a.label(), a.label()
+	a.bytes(0xf2, 0x48|fp>>3, 0x0f, 0x2c, 0xc0|fp&7) // cvttsd2si xmm,rax
+	a.immediate(2, 1<<63)
+	a.bytes(0x48, 0x39, 0xd0)
+	a.conditional(4, slow)
+	a.jump(done)
+	a.mark(slow)
+	a.bytes(0x66, 0x49|(fp>>3)<<2, 0x0f, 0x7e, 0xc1|(fp&7)<<3) // movq xmm,r9: sign + exponent
+	a.move(0, 9)
+	a.move(2, 9)
+	a.bytes(0x48, 0xc1, 0xea, 52, 0x81, 0xe2)
+	a.word(2047)
+	a.bytes(0x81, 0xea)
+	a.word(1023)
+	a.bytes(0x83, 0xfa, 84)
+	a.conditional(3, zero) // unsigned: also rejects negative exponent
+	a.bytes(0x48, 0xc1, 0xe0, 12, 0x48, 0xc1, 0xe8, 12)
+	a.bytes(0x48, 0x0f, 0xba, 0xe8, 52) // bts rax,52: implicit leading bit
+	a.bytes(0x83, 0xea, 52)
+	a.conditional(8, right)               // JS: unbiased exponent < 52
+	a.bytes(0x66, 0x48, 0x0f, 0x6e, 0xc0) // movq rax,x0
+	a.bytes(0x66, 0x0f, 0x6e, 0xca)       // movd edx,x1
+	a.fpBinary(0x66, 0xf3, 0, 1)          // psllq x0,x1
+	a.jump(shifted)
+	a.mark(right)
+	a.bytes(0xf7, 0xda) // neg edx
+	a.bytes(0x66, 0x48, 0x0f, 0x6e, 0xc0)
+	a.bytes(0x66, 0x0f, 0x6e, 0xca)
+	a.fpBinary(0x66, 0xd3, 0, 1) // psrlq x0,x1
+	a.mark(shifted)
+	a.bytes(0x66, 0x0f, 0x7e, 0xc0) // movd x0,eax
+	a.bytes(0x4d, 0x85, 0xc9)       // testq r9,r9
+	a.conditional(9, done)          // JNS
+	a.bytes(0xf7, 0xd8)             // neg eax
+	a.jump(done)
+	a.mark(zero)
+	a.immediate(0, 0)
+	a.mark(done)
+}
+
+func (a *amd64Program) bitwise(op ir.Operator, left, right ir.Operand) byte {
+	a.integer(left)
+	a.move(8, 0)
+	a.integer(right)
+	a.move(2, 0)
+	a.move(0, 8)
+	if op <= ir.BitXor {
+		a.bytes([...]byte{0x21, 0x09, 0x31}[op-ir.BitAnd], 0xd0) // op edx,eax
+	} else {
+		a.bytes(0x83, 0xe2, 31)
+		a.bytes(0x66, 0x0f, 0x6e, 0xc0, 0x66, 0x0f, 0x6e, 0xca)
+		a.fpBinary(0x66, [...]byte{0xf2, 0xe2, 0xd2}[op-ir.Shl], 0, 1)
+		a.bytes(0x66, 0x0f, 0x7e, 0xc0)
+	}
+	if op == ir.UShr {
+		a.bytes(0x89, 0xc0) // zero-extend the unsigned result before 64-bit conversion
+		a.bytes(0xf2, 0x48, 0x0f, 0x2a, 0xc0)
+	} else {
+		a.bytes(0xf2, 0x0f, 0x2a, 0xc0)
 	}
 	return 0
 }

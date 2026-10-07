@@ -62,6 +62,10 @@ func (p *Program) Validate() error {
 			if in.Dest < 0 || in.Dest+2 >= active || !dest(in.Dest+3) {
 				return bad("invalid insert")
 			}
+		case Insert2:
+			if in.Dest < 0 || in.Dest+1 >= active || !dest(in.Dest+2) {
+				return bad("invalid insert")
+			}
 		case Copy:
 			left, write = true, true
 		case CopyPair, StoreLoad:
@@ -73,12 +77,12 @@ func (p *Program) Validate() error {
 			}
 		case Binary:
 			left, right, write = true, true, true
-			if in.Operator > Ne {
+			if in.Operator > Ne && (in.Operator < BitAnd || in.Operator > UShr) {
 				return bad("invalid binary operator")
 			}
 		case Unary:
 			left, write = true, true
-			if in.Operator != Neg && in.Operator != Pos && in.Operator != Not && in.Operator != Int32 {
+			if in.Operator != Neg && in.Operator != Pos && in.Operator != Not && in.Operator != Int32 && in.Operator != BitNot {
 				return bad("invalid unary operator")
 			}
 		case Update:

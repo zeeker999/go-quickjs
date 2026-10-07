@@ -131,8 +131,12 @@ func (a *programAssembler) allocateRegisters(p *ir.Program, available []int) {
 		case ir.ArrayLength:
 			read(in.Left)
 			uses[in.Dest]++
-		case ir.Insert3:
-			for slot := in.Dest; slot <= in.Dest+3; slot++ {
+		case ir.Insert2, ir.Insert3:
+			width := 3
+			if in.Op == ir.Insert2 {
+				width = 2
+			}
+			for slot := in.Dest; slot <= in.Dest+width; slot++ {
 				uses[slot] += 2
 			}
 		case ir.Branch:
@@ -263,7 +267,7 @@ func (a *programAssembler) inferKinds(p *ir.Program) {
 			refine(in.Right, ir.Number)
 			before = kinds
 			k := int8(ir.Number)
-			if in.Operator > ir.Div {
+			if in.Operator >= ir.Lt && in.Operator <= ir.Ne {
 				k = int8(ir.Boolean)
 			}
 			write(in.Dest, k)
@@ -303,13 +307,17 @@ func (a *programAssembler) inferKinds(p *ir.Program) {
 				write(in.Extra, int8(ir.Number))
 			}
 			simple = true
-		case ir.Insert3:
-			n := in.Dest
-			l, r, t := kinds[n], kinds[n+1], kinds[n+2]
+		case ir.Insert2, ir.Insert3:
+			n, last := in.Dest, 2
+			if in.Op == ir.Insert2 {
+				last = 1
+			}
+			t := kinds[n+last]
+			for i := last; i > 0; i-- {
+				write(n+i, kinds[n+i-1])
+			}
 			write(n, t)
-			write(n+1, l)
-			write(n+2, r)
-			write(n+3, t)
+			write(n+last+1, t)
 		}
 		if simple {
 			for slot := range kinds {

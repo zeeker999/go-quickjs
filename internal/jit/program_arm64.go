@@ -5,6 +5,7 @@ package jit
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
@@ -57,13 +58,17 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 			case ir.Host:
 				a.jump(a.host)
 				continue
-			case ir.Insert3:
-				a.load(ir.Slot(in.Dest+2), 5, 6)
-				a.store(in.Dest+3, 5, 6)
-				a.load(ir.Slot(in.Dest+1), 3, 4)
-				a.store(in.Dest+2, 3, 4)
-				a.load(ir.Slot(in.Dest), 3, 4)
-				a.store(in.Dest+1, 3, 4)
+			case ir.Insert2, ir.Insert3:
+				last := 2
+				if in.Op == ir.Insert2 {
+					last = 1
+				}
+				a.load(ir.Slot(in.Dest+last), 5, 6)
+				a.store(in.Dest+last+1, 5, 6)
+				for i := last - 1; i >= 0; i-- {
+					a.load(ir.Slot(in.Dest+i), 3, 4)
+					a.store(in.Dest+i+1, 3, 4)
+				}
 				a.store(in.Dest, 5, 6)
 			case ir.ArrayRead, ir.ArrayWrite, ir.ArrayKey, ir.ArrayLength, ir.ArrayUpdate:
 				a.array(in)
@@ -87,25 +92,18 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 				a.storeScalar(in.Extra, 0, 4)
 			case ir.Binary:
 				fp := a.binary(in.Operator, in.Left, in.Right, in.Dest)
-				if in.Operator <= ir.Div {
+				if in.Operator < ir.Lt || in.Operator > ir.Ne {
 					a.storeNumber(in.Dest, fp)
 				} else {
 					a.storeBool(in.Dest)
 				}
 			case ir.Unary:
-				if in.Operator == ir.Int32 {
-					fp := a.number(in.Left, 0)
-					a.immediate(7, 0xc1e0000000000000)
-					a.word(0x9e6700e1)
-					a.word(0x1e612000 | fp<<5)
-					a.conditional(4, a.guard)
-					a.conditional(6, a.guard)
-					a.immediate(7, 0x41dfffffffc00000)
-					a.word(0x9e6700e1)
-					a.word(0x1e612000 | fp<<5)
-					a.conditional(12, a.guard)
-					a.word(0x1e780007 | fp<<5) // fcvtzs w7,dN
-					a.word(0x1e6200e0)         // scvtf d0,w7
+				if in.Operator == ir.Int32 || in.Operator == ir.BitNot {
+					a.integer(in.Left)
+					if in.Operator == ir.BitNot {
+						a.word(0x2a2303e3) // mvn w3,w3
+					}
+					a.word(0x1e620060) // scvtf d0,w3
 					a.storeNumber(in.Dest, 0)
 				} else if in.Operator == ir.Not {
 					a.truth(in.Left)
@@ -401,6 +399,9 @@ func (a *arm64Program) number(o ir.Operand, fp uint32) uint32 {
 }
 
 func (a *arm64Program) binary(op ir.Operator, left, right ir.Operand, dest int) uint32 {
+	if op >= ir.BitAnd && op <= ir.UShr {
+		return a.bitwise(op, left, right)
+	}
 	l := a.number(left, 0)
 	r := a.number(right, 1)
 	if op <= ir.Div {
@@ -414,6 +415,62 @@ func (a *arm64Program) binary(op ir.Operator, left, right ir.Operand, dest int) 
 	}
 	a.word(0x1e602000 | r<<16 | l<<5)                // fcmp dN, dM
 	a.word(0x9a9f07e3 | (arm64Comparison(op)^1)<<12) // cset x3, condition
+	return 0
+}
+
+// integer leaves ToUint32's bits in W3. The common path truncates to int64;
+// large values use their IEEE significand modulo 2^32, including NaNs/infinities.
+// R6 and the checked view in R16 survive so a second operand can be converted.
+func (a *arm64Program) integer(o ir.Operand) {
+	if o.Slot < 0 && o.Literal.Kind == ir.Number {
+		a.immediate(3, uint64(ir.ToUint32(math.Float64frombits(o.Literal.Bits))))
+		return
+	}
+	fp := a.number(o, 0)
+	slow, zero, right, sign, done := a.label(), a.label(), a.label(), a.label(), a.label()
+	a.word(0x9e660007 | fp<<5)                  // fmov x7,dN
+	a.word(0xd3400004 | 52<<16 | 62<<10 | 7<<5) // ubfx x4,x7,#52,#11
+	a.compareImmediate(4, 1086)                 // exponent >= 63 + bias
+	a.conditional(2, slow)
+	a.word(0x9e780003 | fp<<5) // fcvtzs x3,dN
+	a.jump(done)
+	a.mark(slow)
+	a.word(0xd1000084 | 1023<<10) // sub x4,x4,#bias
+	a.compareImmediate(4, 84)
+	a.conditional(2, zero)             // too large, nonfinite, or exponent below zero
+	a.word(0xd3400003 | 51<<10 | 7<<5) // ubfx x3,x7,#0,#52
+	a.immediate(5, 1<<52)
+	a.word(0xaa050063) // orr x3,x3,x5: restore implicit leading bit
+	a.word(0xd1000084 | 52<<10)
+	a.compareImmediate(4, 0)
+	a.conditional(11, right)
+	a.word(0x9ac42063) // lslv x3,x3,x4
+	a.jump(sign)
+	a.mark(right)
+	a.word(0xcb0403e4) // neg x4,x4
+	a.word(0x9ac42463) // lsrv x3,x3,x4
+	a.mark(sign)
+	a.compareImmediate(7, 0)
+	a.conditional(10, done) // nonnegative IEEE bits
+	a.word(0x4b0303e3)      // neg w3,w3
+	a.jump(done)
+	a.mark(zero)
+	a.immediate(3, 0)
+	a.mark(done)
+}
+
+func (a *arm64Program) bitwise(op ir.Operator, left, right ir.Operand) uint32 {
+	a.integer(left)
+	a.word(0x2a0303e6) // mov w6,w3
+	a.integer(right)
+	word := [...]uint32{0x0a0300c3, 0x2a0300c3, 0x4a0300c3,
+		0x1ac320c3, 0x1ac328c3, 0x1ac324c3}[op-ir.BitAnd]
+	a.word(word)                  // AND/OR/XOR or a variable 32-bit shift, inherently masked to 31
+	convert := uint32(0x1e620060) // scvtf d0,w3
+	if op == ir.UShr {
+		convert = 0x1e630060 // ucvtf d0,w3
+	}
+	a.word(convert)
 	return 0
 }
 

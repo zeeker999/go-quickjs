@@ -39,7 +39,8 @@ func fixture(code ...bytecode.Instr) *bytecode.Function {
 
 func TestRefusals(t *testing.T) {
 	for _, tc := range []struct{ source, reason string }{
-		{`function f(a) { return a.x }`, "unsupported opcode get_prop"},
+		{`function f(a) { return a.x }`, "host operations without native loop or array work"},
+		{`function f(a,n) { for(let i=0;i<n;i++)a.x++;return a.x }`, "property operations without native array or bitwise work"},
 		{`function f(a) { return new a() }`, "unsupported opcode"},
 		{`function f() { try { return 1 } catch(e) { return 2 } }`, "unsupported opcode push_catch"},
 		{`function f() { eval('1') }`, "direct eval"},
