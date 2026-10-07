@@ -200,7 +200,7 @@ func (p *printer) header(fn *bytecode.Function, indent string) {
 	}
 	if p.jit {
 		if ir, err := jitcompile.Lower(fn); err == nil {
-			fmt.Fprintf(p.w, "%s  jit IR: eligible (native compilation and execution not enabled)\n", indent)
+			fmt.Fprintf(p.w, "%s  jit IR: eligible (this tool does not compile or execute native code)\n", indent)
 			fmt.Fprintf(p.w, "%s  jit slots: %d locals + %d operands\n", indent, ir.Locals, ir.StackSize)
 			for _, state := range ir.Maps {
 				if state.Depth >= 0 {

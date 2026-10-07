@@ -97,7 +97,7 @@ func TestNativeLoopBudgetAndClose(t *testing.T) {
 }
 
 func TestNativeInvalidCodeSize(t *testing.T) {
-	for _, instructions := range [][]byte{nil, make([]byte, os.Getpagesize()+1)} {
+	for _, instructions := range [][]byte{nil, make([]byte, MaxCodeBytes+1)} {
 		code, err := allocateCode(instructions)
 		if code != nil || err == nil {
 			t.Fatalf("allocateCode(%d bytes) = %v, %v", len(instructions), code, err)

@@ -11,6 +11,7 @@
 package main
 
 import (
+	"flag"
 	"os"
 	"strconv"
 
@@ -22,13 +23,19 @@ func main() { v8bench.Main("go-quickjs", engine{}) }
 
 type engine struct{}
 
+var jitFlag = flag.Bool("jit", false, "enable the optional native numeric tier")
+
 func (engine) Compile(name, src string) error {
 	_, err := quickjs.Compile(name, src)
 	return err
 }
 
 func (engine) NewRuntime(print func(string), load func(string) (string, error)) (v8bench.Runtime, error) {
-	rt := quickjs.New()
+	var opts []quickjs.Option
+	if *jitFlag {
+		opts = append(opts, quickjs.WithJIT())
+	}
+	rt := quickjs.New(opts...)
 	if err := rt.Set("print", print); err != nil {
 		return nil, err
 	}

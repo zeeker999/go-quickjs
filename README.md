@@ -56,6 +56,13 @@ long, the weak collections and BigInt arithmetic among them. See [Compared with 
 
 ## Documentation
 
+An experimental native numeric executor is available on `linux/amd64`,
+`windows/amd64`, and `darwin/arm64`. Build with `-tags quickjs_jit` and explicitly
+enable it with `quickjs.New(quickjs.WithJIT())`, or `qjs --jit`. Default builds
+and runtimes keep the existing execution tiers. Unsupported functions and
+unavailable executable memory fall back automatically. See the
+[JIT implementation notes](internal/jit/README.md) for coverage and limits.
+
 | | |
 |---|---|
 | [Status and conformance](docs/status.md) | what is implemented and what is not, and how test262 is run against it |

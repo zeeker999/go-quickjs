@@ -7,6 +7,12 @@ TEXT ·enter(SB), NOSPLIT|NOFRAME, $0-16
 	MOVD state+8(FP), R0
 	JMP (R16)
 
+TEXT ·enterProgram(SB), NOSPLIT|NOFRAME, $0-24
+	MOVD code+0(FP), R16
+	MOVD state+8(FP), R0
+	MOVD slots+16(FP), R2
+	JMP (R16)
+
 // Darwin's data caches are coherent and its instruction maintenance granule
 // is 64 bytes. Reading CTR_EL0 traps on Apple Silicon. A barrier after each
 // invalidation also covers CPUs requiring periodic barriers during a sweep.

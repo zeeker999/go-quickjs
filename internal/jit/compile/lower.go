@@ -10,12 +10,12 @@ import (
 )
 
 // Compiler work and scratch size are bounded even for permanently refused
-// functions. Runtime code/metadata ownership is handled by the future VM tier.
+// functions. Runtime code/metadata ownership is handled by the optional VM tier.
 const (
 	// MaxInstructions bounds control-flow analysis and IR allocation.
-	MaxInstructions = 4096
+	MaxInstructions = ir.MaxInstructions
 	// MaxSlots bounds the locals and operand scratch storage together.
-	MaxSlots = 256
+	MaxSlots = ir.MaxSlots
 )
 
 // Refusal identifies the first unsupported construct or invalid state map.

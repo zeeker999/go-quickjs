@@ -14,15 +14,17 @@ import (
 var flushInstructionCache = windows.NewLazySystemDLL("kernel32.dll").NewProc("FlushInstructionCache")
 
 func allocateCode(instructions []byte) ([]byte, error) {
-	if len(instructions) == 0 || len(instructions) > os.Getpagesize() {
+	if len(instructions) == 0 || len(instructions) > MaxCodeBytes {
 		return nil, fmt.Errorf("invalid native kernel size: %d", len(instructions))
 	}
-	address, err := windows.VirtualAlloc(0, uintptr(os.Getpagesize()),
+	page := os.Getpagesize()
+	size := (len(instructions) + page - 1) / page * page
+	address, err := windows.VirtualAlloc(0, uintptr(size),
 		windows.MEM_COMMIT|windows.MEM_RESERVE, windows.PAGE_READWRITE)
 	if err != nil {
 		return nil, fmt.Errorf("allocate code: %w", err)
 	}
-	code := foreignBytes(address, os.Getpagesize())
+	code := foreignBytes(address, size)
 	copy(code, instructions)
 	var oldProtect uint32
 	if err = windows.VirtualProtect(address, uintptr(len(code)), windows.PAGE_EXECUTE_READ, &oldProtect); err != nil {

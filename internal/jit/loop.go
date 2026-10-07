@@ -1,5 +1,5 @@
 // Package jit contains the optional native executor infrastructure. It is
-// experimental and is not yet connected to JavaScript execution.
+// experimental; the VM selects it only with a tagged build and runtime opt-in.
 package jit
 
 import (

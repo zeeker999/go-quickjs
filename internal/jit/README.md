@@ -1,18 +1,17 @@
-# Optional native boundary prototype
+# Optional native numeric executor
 
-This package implements the first experiments in [the JIT plan](../../docs/jit-plan.md).
-It emits a bounded numeric kernel directly as amd64 or arm64 machine code.
-Its `compile` subpackage now lowers numeric JavaScript bytecode into a slot IR,
-with a Go evaluator in `ir` for verifying interpreter exits. It does not yet
-emit native code for that IR, select a VM execution tier, or provide the proposed
-`WithJIT()` option.
+This package implements the experimental numeric executor in [the JIT plan](../../docs/jit-plan.md).
+It emits numeric JavaScript functions directly as amd64 or arm64 machine code.
+Its `compile` subpackage lowers bytecode into a slot IR, with a Go evaluator in
+`ir` for verifying native exits. `WithJIT()` selects the optional VM tier.
+The original bounded leaf kernel remains a bridge and allocation probe.
 
 Ordinary builds exclude the machine-code emitters, OS allocation backends,
 and assembly bridges. With `-tags quickjs_jit`, a backend is included only on
 `linux/amd64`, `windows/amd64`, or `darwin/arm64`. `Supported()` only describes
 the build; `NewLoop()` allocates lazily and reports `ErrUnavailable` when
-executable-memory policy prevents construction. Nothing enables native
-JavaScript execution in either build yet.
+executable-memory policy prevents construction. Native JavaScript execution
+additionally requires explicit runtime opt-in.
 
 ## Boundary contract
 
@@ -101,7 +100,8 @@ emission, allocation, sealing, cache publication, and release. These kernels
 are feasibility measurements, not JavaScript or VM speedup claims. OS code
 pages are not included in Go allocation figures.
 
-Local snapshot on October 7, 2026, with Go 1.27 on an Apple M5 Max:
+Boundary-prototype snapshot before VM integration, October 7, 2026, with Go
+1.27 on an Apple M5 Max (the binary sizes are historical):
 
 | Measurement | Result |
 |---|---|
@@ -146,12 +146,89 @@ infinite loop; budget exits can resume at any reachable map. VM publication must
 use `vm.Float` to normalize arithmetic NaNs, rather than copying raw IEEE bits
 into boxed values.
 
-`internal/vm/jit_state_test.go` uses test-only adapters to publish those maps into
-real frames and resume `executeAt`. The corpus compares every executed boundary
+`internal/vm/zjit_native.go` publishes those maps into real frames and resumes
+`executeAt`. Native compilation occurs at an eligible framed function's first
+entry; existing frameless paths still run first. `internal/vm/jit_state_test.go`
+compares native execution with the Go IR oracle and every executed boundary
 with uninterrupted interpretation, including signed zero, NaNs, subnormals,
 infinities, loops, and short-circuit branches. Guard tests pin earlier committed
 writes, exactly-once coercion, TDZ and BigInt error types/messages, and the saved
-bytecode location. The adapters are not wired into production execution.
+bytecode location. Integration tests assert native entries, cancellation,
+reentrant coercion, memory refusal, cached tree calls, and deferred cleanup.
+
+## Optional runtime execution
+
+Build with `-tags quickjs_jit`, then create a runtime with `quickjs.WithJIT()`.
+Both are required. The CLI accepts `--jit`; the conformance runner accepts
+`-conformance.jit`, and `internal/cmd/v8bench` accepts `-jit`. Ordinary builds
+and unsupported targets keep the existing tiers, even with the option set.
+`WithoutCodeGeneration()` independently controls eval and Function.
+
+Each runtime owns a weak-key cache of at most 128 entries, 8 MiB of executable
+code and its metadata, and 512 KiB of native metadata. Programs are limited to
+4096 instructions and 256 scalar slots. Dead weak keys are swept on cache
+misses; a full cache evicts one owner between entries. Eight guard misses
+suspend native selection for that cached function. Shared bytecode templates
+carry no native address or mutable JIT state.
+
+Scratch values contain no pointers. Opaque indices refer to typed Go roots,
+which are cleared before fallback can call JavaScript or the host. Native
+execution returns to Go after at most 4096 instructions, publishes frame
+state, and checks cancellation, closure, and memory limits before reentry.
+
+Code allocations are writable during construction and sealed executable
+before entry. `WithMemoryLimit` counts executable pages and native metadata.
+Optional compilation also checks a conservative transient work allowance;
+when it cannot fit, existing execution continues without stopping the script.
+Runtime construction allocates no JIT state or executable memory. Closing
+releases code after frames and host calls unwind; release failures retain
+ownership for retry. A Code finalizer provides backup reclamation for owners
+the host abandoned. Native execution is experimental and has no guaranteed
+speedup; first-entry compilation and guard fallback can cost more than the
+existing tree tier.
+
+### Integration validation snapshot
+
+On October 7, 2026, Go 1.27 on an Apple M5 Max:
+
+- Default and JIT-tagged full Go suites pass. Native VM tests also pass with
+  Go 1.24, race detection, and checkptr; Linux/amd64 executes under Docker
+  emulation. Windows/amd64 cross-builds and assembly vet pass; actual Windows
+  execution is covered by the native CI matrix.
+- JIT-enabled test262 runs pass 92,869 language, Annex B, and built-in variants,
+  with zero failures and the same 342 unsupported-feature skips. A separate
+  expression/statement comparison gives identical default and JIT results.
+  Fresh parallel conformance processes sample peak RSS at 657 MiB default and
+  402 MiB JIT-enabled; these peaks depend on worker and GC scheduling.
+- Eight placements per side, three rounds per placement, compare default builds
+  before and after dispatch hooks: total +0.5%, suites -0.4% to +0.9%.
+- qjs binaries are 40,169,570 bytes without the tag and 40,291,890 bytes with
+  it: 122,320 extra bytes (0.3%). Runtime opt-out allocates no native pages.
+- Three alternating fresh V8 processes per setting, using one tagged binary
+  and fixed work (`-n 5`), average 992 ms disabled and 1060 ms enabled: about
+  7% slower. Go allocations rise from 672.4 to 672.7 MB; peak RSS ranges overlap
+  (230-235 MiB). Live Go heap after GC is 9.4 MB for both.
+
+A separate precompiled 10,000-iteration sum, repeated in three fresh processes,
+shows the costs that aggregate V8 times hide:
+
+| Measurement | Default | JIT enabled |
+|---|---|---|
+| First run, var locals | 90-196 us; 24 KB, 37-39 Go allocations | 186-287 us; 41 KB, 47 Go allocations |
+| Warm run, var locals | 54-61 us | 124-125 us |
+| Warm run, lexical locals | 108-110 us | 128-133 us |
+| Warm allocations per whole script run | 852 Go bytes, 8 allocations | 852 Go bytes, 8 allocations |
+| Peak RSS of sum measurement process | 13.4-13.6 MiB | 13.8-14.1 MiB |
+
+Runtime construction allocates no JIT state; compilation cost occurs on first
+function entry. Warm script allocations are closure preparation, not per-budget
+native work. Go allocation figures omit executable pages, which are reported by
+`Code.Size()` and counted by the VM meter. Go heap after close in this small
+probe is about 4.5 MiB on either path because the stack pool retains the stack;
+integration tests independently assert that close releases native ownership.
+These results establish correctness and bounded ownership, not a performance
+release. Hotness selection, fewer scalar loads/guards, and less per-instruction
+budget bookkeeping are the next performance work.
 
 Inspect eligibility without native support or executable-memory allocation:
 

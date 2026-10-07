@@ -26,6 +26,7 @@ type Runtime struct {
 	// belongs to, or the one the host is evaluating in. Its fields are
 	// promoted, so r.proto and r.global are the current realm's.
 	*Realm
+	jitFields
 
 	atoms *atomTable
 
@@ -982,6 +983,7 @@ func (r *Runtime) ReleaseClosed() {
 		return
 	}
 	r.releaseAllWeakMaps()
+	r.releaseJIT()
 	if r.stack == nil {
 		return
 	}

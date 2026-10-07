@@ -175,7 +175,7 @@ func (m *memoryMeter) walk(r *Runtime) int64 {
 	if m.epoch == 0 {
 		m.epoch = 1
 	}
-	m.total = 0
+	m.total = r.jitCodeBytes()
 	clear(m.seen)
 
 	// The live part of the stack and of the call stack. What lies past them

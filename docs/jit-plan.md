@@ -1,12 +1,13 @@
 # Native JIT implementation plan
 
-Status: implementation started, October 7, 2026. The optional leaf-kernel
-boundary prototype is in `internal/jit`. The compiler foundation now includes
-numeric bytecode eligibility, a pointer-free slot IR, control-flow stack maps,
-and a bounded Go evaluator tested against actual interpreter resumption.
-`disasm -jit` reports eligibility and exit maps. JavaScript execution still uses
-the existing tiers; runtime code ownership, memory accounting, and native IR
-emission remain to be implemented. See [the implementation notes](../internal/jit/README.md)
+Status: experimental numeric executor implemented, October 7, 2026. Both amd64
+and arm64 emitters execute the pointer-free slot IR. A `quickjs_jit` build plus
+`WithJIT()` enables native execution of eligible framed functions, with guards
+that resume the interpreter and periodic exits for cancellation and limits.
+Runtime-owned caches, executable memory accounting, and deferred cleanup are
+implemented. `disasm -jit` reports IR eligibility and exit maps. Hotness tuning,
+OSR, wider opcode coverage, and performance qualification remain future work.
+See [the implementation notes](../internal/jit/README.md)
 for contracts, validation, and current limits.
 
 ## Objective and scope
@@ -215,11 +216,10 @@ existing files. Compare placements whenever integration changes hot layout.
 
 ## Configuration and diagnostics
 
-Propose a `quickjs_jit` build tag plus an explicit per-runtime `WithJIT()`
+Use a `quickjs_jit` build tag plus an explicit per-runtime `WithJIT()`
 option for the experimental release. The option remains callable in ordinary
 or unsupported builds and falls back to the existing tiers. Default runtimes
-allocate no JIT memory. These names are proposals until the API milestone;
-keep tuning knobs internal initially.
+allocate no JIT memory. Tuning knobs remain internal initially.
 
 Test all four combinations of native support included/excluded and runtime
 opt-in enabled/disabled. Only a supported build with opt-in may execute native

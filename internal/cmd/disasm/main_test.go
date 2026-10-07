@@ -67,7 +67,7 @@ function read(o) { return o.x }`
 	p.function(fn, "")
 	for _, want := range []string{
 		"jit IR: refused: jit: top-level or module code",
-		"jit IR: eligible (native compilation and execution not enabled)",
+		"jit IR: eligible (this tool does not compile or execute native code)",
 		"jit slots: 3 locals + 6 operands",
 		"jit exit: pc=6 depth=0",
 		"jit exit: pc=7 depth=2",

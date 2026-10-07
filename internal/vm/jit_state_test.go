@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+	"github.com/go-quickjs/go-quickjs/internal/jit"
 	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
@@ -23,8 +24,8 @@ func jitFunctionForTest(t *testing.T, source string) *bytecode.Function {
 	return nil
 }
 
-// These adapters live only in tests until the VM has runtime-owned native code
-// and budgets. References stay in a Go root slice; scratch holds only indices.
+// Independent test adapters verify publication at every interpreter boundary.
+// References stay in a Go root slice; scratch holds only indices.
 func jitEncodeForTest(v Value, roots *[]Value) ir.Value {
 	switch v.Kind() {
 	case KindNumber:
@@ -90,6 +91,45 @@ func jitSameValueForTest(a, b Value) bool {
 	return a.StrictEquals(b)
 }
 
+// Tagged supported builds execute actual native code and compare every exit
+// and scratch slot with the Go oracle. A native compilation refusal fails the
+// test, so successful numeric coverage cannot be hidden by interpreter fallback.
+func jitEvaluatorForTest(t *testing.T, p *ir.Program) func([]ir.Value, int, uint64) (ir.Exit, error) {
+	t.Helper()
+	if !jit.Supported() {
+		return p.Evaluate
+	}
+	code, err := jit.Compile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := code.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	same := func(a, b ir.Value) bool {
+		return a == b || a.Kind == ir.Number && b.Kind == ir.Number &&
+			math.IsNaN(math.Float64frombits(a.Bits)) && math.IsNaN(math.Float64frombits(b.Bits))
+	}
+	return func(slots []ir.Value, pc int, budget uint64) (ir.Exit, error) {
+		budget = min(budget, jit.MaxIterations)
+		oracle := append([]ir.Value(nil), slots...)
+		want, oracleErr := p.Evaluate(oracle, pc, budget)
+		got, nativeErr := code.Run(slots, pc, budget)
+		if oracleErr != nil || nativeErr != nil || got.Kind != want.Kind || got.State != want.State ||
+			got.Steps != want.Steps || !same(got.Value, want.Value) {
+			t.Fatalf("native exit %+v, %v; oracle %+v, %v", got, nativeErr, want, oracleErr)
+		}
+		for i := range slots {
+			if !same(slots[i], oracle[i]) {
+				t.Fatalf("native slot %d = %+v, oracle %+v; pc %d budget %d", i, slots[i], oracle[i], pc, budget)
+			}
+		}
+		return got, nativeErr
+	}
+}
+
 // Every budget up to the completed execution stops at an instruction boundary
 // and hands real locals and operand slots to executeAt. This detects replayed
 // writes, wrong branch depths, and confusion between fetched and resume PCs.
@@ -131,6 +171,7 @@ func TestJITStateEveryBoundary(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%v\n%s", err, fn.Disassemble())
 			}
+			evaluate := jitEvaluatorForTest(t, p)
 			r := New(Config{})
 			defer r.Close()
 			slots, roots := jitInitialForTest(p, tc.args)
@@ -138,13 +179,13 @@ func TestJITStateEveryBoundary(t *testing.T) {
 			if err != nil || !jitSameValueForTest(baseline, tc.want) {
 				t.Fatalf("interpreter = %v, %v; want %v", baseline, err, tc.want)
 			}
-			full, err := p.Evaluate(slots, 0, 10000)
+			full, err := evaluate(slots, 0, 10000)
 			if err != nil || full.Kind != ir.Returned || !jitSameValueForTest(jitDecodeForTest(full.Value, roots), tc.want) {
 				t.Fatalf("IR = %+v, %v; want %v", full, err, tc.want)
 			}
 			for budget := uint64(0); budget <= full.Steps; budget++ {
 				slots, roots := jitInitialForTest(p, tc.args)
-				exit, err := p.Evaluate(slots, 0, budget)
+				exit, err := evaluate(slots, 0, budget)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -168,6 +209,7 @@ func TestJITGuardPreservesEffects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	evaluate := jitEvaluatorForTest(t, p)
 	r := New(Config{})
 	defer r.Close()
 	conversions := 0
@@ -177,14 +219,14 @@ func TestJITGuardPreservesEffects(t *testing.T) {
 		return Int32(2), nil
 	}), propDefault)
 	slots, roots := jitInitialForTest(p, []Value{Obj(o)})
-	exit, err := p.Evaluate(slots, 0, 1000)
+	exit, err := evaluate(slots, 0, 1000)
 	if err != nil || exit.Kind != ir.GuardExit || conversions != 0 || slots[1] != ir.Float(1) {
 		t.Fatalf("guard = %+v, %v; conversions %d, sum %+v", exit, err, conversions, slots[1])
 	}
 	// Re-entering the failing instruction must guard again without consuming
 	// either operand, changing locals, or invoking valueOf.
 	before := append([]ir.Value(nil), slots...)
-	retry, err := p.Evaluate(slots, int(exit.State.PC), 1000)
+	retry, err := evaluate(slots, int(exit.State.PC), 1000)
 	if err != nil || retry.Kind != ir.GuardExit || retry.Steps != 0 || !reflect.DeepEqual(slots, before) {
 		t.Fatalf("guard changed state: %+v, %v", retry, err)
 	}
@@ -208,11 +250,12 @@ func TestJITGuardErrors(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			evaluate := jitEvaluatorForTest(t, p)
 			r := New(Config{})
 			defer r.Close()
 			slots, roots := jitInitialForTest(p, tc.args)
 			_, baselineErr := jitResumeForTest(r, fn, slots, roots, p.Maps[0])
-			exit, err := p.Evaluate(slots, 0, 1000)
+			exit, err := evaluate(slots, 0, 1000)
 			if err != nil || exit.Kind != ir.GuardExit {
 				t.Fatalf("guard = %+v, %v", exit, err)
 			}
@@ -252,8 +295,9 @@ func TestJITGuardFusedInstructions(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			evaluate := jitEvaluatorForTest(t, p)
 			slots, roots := jitInitialForTest(p, []Value{tc.arg})
-			exit, err := p.Evaluate(slots, 0, 1000)
+			exit, err := evaluate(slots, 0, 1000)
 			if err != nil || exit.Kind != ir.GuardExit || exit.State.Depth != tc.depth || fn.Code[exit.State.PC].Op != tc.op {
 				t.Fatalf("guard = %+v, %v; want %s at depth %d\n%s", exit, err, tc.op, tc.depth, fn.Disassemble())
 			}
@@ -280,6 +324,7 @@ func TestJITIEEEOperators(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			evaluate := jitEvaluatorForTest(t, p)
 			r := New(Config{})
 			defer r.Close()
 			for _, x := range values {
@@ -289,7 +334,7 @@ func TestJITIEEEOperators(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					exit, err := p.Evaluate(slots, 0, 100)
+					exit, err := evaluate(slots, 0, 100)
 					if err != nil || exit.Kind != ir.Returned || !jitSameValueForTest(jitDecodeForTest(exit.Value, roots), want) {
 						t.Fatalf("%g %s %g = %+v, %v; want %v", x, op, y, exit, err, want)
 					}

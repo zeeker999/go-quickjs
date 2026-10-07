@@ -5,6 +5,8 @@ package jit
 import (
 	"errors"
 	"testing"
+
+	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
 
 func TestBackendExcluded(t *testing.T) {
@@ -14,5 +16,9 @@ func TestBackendExcluded(t *testing.T) {
 	loop, err := NewLoop()
 	if loop != nil || !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("NewLoop = %v, %v; want nil, ErrUnavailable", loop, err)
+	}
+	code, err := Compile(&ir.Program{})
+	if code != nil || !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Compile = %v, %v; want nil, ErrUnavailable", code, err)
 	}
 }

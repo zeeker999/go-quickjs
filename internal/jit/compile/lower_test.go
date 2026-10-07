@@ -256,6 +256,9 @@ func FuzzLower(f *testing.F) {
 		if err != nil {
 			return
 		}
+		if err := p.Validate(); err != nil {
+			t.Fatal(err)
+		}
 		slots := make([]ir.Value, p.Locals+p.StackSize)
 		slots[0], slots[1] = ir.Float(2), ir.Float(3)
 		if _, err := p.Evaluate(slots, 0, 64); err != nil {
