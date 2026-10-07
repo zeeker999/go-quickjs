@@ -5,6 +5,7 @@ package vm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"runtime"
 	"sync"
 	"testing"
@@ -21,6 +22,9 @@ const jitSumSource = `function sum(n) { let s=0; for(let i=0;i<n;i++) s+=i; retu
 func jitRuntimeForTest(t *testing.T, cfg Config) *Runtime {
 	t.Helper()
 	r := New(cfg)
+	// Boundary tests force promotion so guard and budget assertions cannot
+	// pass by running only the existing tiers.
+	r.jitCallThreshold = 1
 	t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
 	return r
 }
@@ -62,7 +66,7 @@ func TestJITCachedTreeCall(t *testing.T) {
 	}
 	// Enable on the same runtime after repeated calls have cached their tree.
 	r.initJIT(true)
-	v, err := r.Run(compileForTest(t, `sum(10000); sum(10000)`))
+	v, err := r.Run(compileForTest(t, `for (var j=0;j<8;j++) sum(10000); sum(10000)`))
 	if err != nil || v.Number() != 49995000 {
 		t.Fatalf("cached call = %v, %v", v, err)
 	}
@@ -226,6 +230,7 @@ func TestJITSharedTemplateRuntimes(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			r := New(Config{JIT: true})
+			r.jitCallThreshold = 1
 			defer func() { r.Close(); r.ReleaseClosed() }()
 			for j := 0; j < 3; j++ {
 				v, err := r.Run(p)
@@ -287,6 +292,115 @@ func TestJITClosureRemembersRefusal(t *testing.T) {
 	}
 }
 
+func TestJITCallPromotion(t *testing.T) {
+	for _, keyword := range []string{"var", "let"} {
+		t.Run(keyword, func(t *testing.T) {
+			r := New(Config{JIT: true})
+			t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
+			v, err := r.Run(compileForTest(t, "function sum(n) { "+keyword+" s=0; for("+keyword+" i=0;i<n;i++) s+=i; return s } sum"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cl := v.Object().fn().closure
+			for i := 1; i <= jitHotCalls; i++ {
+				got, err := r.Call(v, Undefined, []Value{Int32(100)})
+				if err != nil || got.Number() != 4950 {
+					t.Fatalf("call %d = %v, %v", i, got, err)
+				}
+				if int(cl.jitCalls) != i {
+					t.Fatalf("call %d: hotness = %d", i, cl.jitCalls)
+				}
+				if i < jitHotCalls && r.jit != nil {
+					t.Fatalf("cold call %d allocated native state", i)
+				}
+			}
+			if r.jit == nil || r.jit.entries != 1 {
+				t.Fatal("hot function did not promote")
+			}
+			for i := 0; i < 300; i++ {
+				got, err := r.Call(v, Undefined, []Value{Int32(10)})
+				if err != nil || got.Number() != 45 {
+					t.Fatalf("hot call = %v, %v", got, err)
+				}
+			}
+			if cl.jitCalls != jitHotCalls || r.jit.entries != 301 {
+				t.Fatal("hot counter overflowed or native selection stopped")
+			}
+		})
+	}
+}
+
+func TestJITPromotionRetriesMemoryRefusal(t *testing.T) {
+	r := New(Config{JIT: true, MemoryLimit: 256 << 10})
+	t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
+	v, err := r.Run(compileForTest(t, jitSumSource+`; sum`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := v.Object().fn().closure
+	for i := 1; i < jitHotCalls; i++ {
+		if _, err := r.Call(v, Undefined, []Value{Int32(10)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if cl.jitRefused || cl.jitCalls != 0 || r.jit != nil {
+		t.Fatal("memory refusal was permanent or retained native state")
+	}
+	r.meter.limit = 32 << 20
+	for i := 1; i <= jitHotCalls; i++ {
+		got, err := r.Call(v, Undefined, []Value{Int32(10)})
+		if err != nil || got.Number() != 45 {
+			t.Fatalf("retry %d = %v, %v", i, got, err)
+		}
+		if i < jitHotCalls && r.jit != nil {
+			t.Fatal("temporary refusal retried before another warmup")
+		}
+	}
+	if r.jit == nil || r.jit.entries != 1 {
+		t.Fatal("temporary refusal never retried")
+	}
+}
+
+func TestJITPromotionRuntimeIsolation(t *testing.T) {
+	p := compileForTest(t, `function sum(n) { var s=0; for(var i=0;i<n;i++) s+=i; return s } sum`)
+	var cold *Runtime
+	for _, calls := range []int{1, jitHotCalls} {
+		r := New(Config{JIT: true})
+		t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
+		v, err := r.Run(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < calls; i++ {
+			got, err := r.Call(v, Undefined, []Value{Int32(10)})
+			if err != nil || got.Number() != 45 {
+				t.Fatalf("call = %v, %v", got, err)
+			}
+		}
+		if calls == 1 {
+			cold = r
+		} else if r.jit == nil || r.jit.entries != 1 {
+			t.Fatal("hot runtime did not promote")
+		}
+	}
+	if cold.jit != nil {
+		t.Fatal("shared template propagated promotion to a cold runtime")
+	}
+}
+
+func TestJITPromotionKeepsFramelessCalls(t *testing.T) {
+	r := New(Config{JIT: true})
+	t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
+	v, err := r.Run(compileForTest(t, `function f(a) { return a+1 } var result; for(var i=0;i<1000;i++) result=f(i); result`))
+	if err != nil || v.Number() != 1000 {
+		t.Fatalf("frameless calls = %v, %v", v, err)
+	}
+	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
+	if cl.jitCalls != 0 || r.jit != nil {
+		t.Fatal("frameless calls accumulated framed hotness")
+	}
+}
+
 func BenchmarkJITNumericLoop(b *testing.B) {
 	for _, keyword := range []string{"var", "let"} {
 		for _, enabled := range []bool{false, true} {
@@ -295,7 +409,7 @@ func BenchmarkJITNumericLoop(b *testing.B) {
 				name = keyword + "/native"
 			}
 			b.Run(name, func(b *testing.B) {
-				source := "function sum(n) { " + keyword + " s=0; for(" + keyword + " i=0;i<n;i++) s+=i; return s } sum(10000)"
+				source := "function sum(n) { " + keyword + " s=0; for(" + keyword + " i=0;i<n;i++) s+=i; return s }"
 				ast, err := parser.Parse(source, parser.Options{})
 				if err != nil {
 					b.Fatal(err)
@@ -309,6 +423,19 @@ func BenchmarkJITNumericLoop(b *testing.B) {
 				if _, err := r.Run(p); err != nil {
 					b.Fatal(err)
 				}
+				ast, err = parser.Parse("sum(10000)", parser.Options{})
+				if err != nil {
+					b.Fatal(err)
+				}
+				p, err = compiler.Compile(ast, compiler.Options{})
+				if err != nil {
+					b.Fatal(err)
+				}
+				for i := 0; i < jitHotCalls; i++ {
+					if _, err := r.Run(p); err != nil {
+						b.Fatal(err)
+					}
+				}
 				if enabled && (r.jit == nil || r.jit.entries == 0) {
 					b.Fatal("benchmark did not enter native code")
 				}
@@ -321,6 +448,49 @@ func BenchmarkJITNumericLoop(b *testing.B) {
 					}
 				}
 			})
+		}
+	}
+}
+
+func BenchmarkJITCallPromotion(b *testing.B) {
+	for _, iterations := range []int{100, 10000} {
+		for _, calls := range []int{1, 4, 16, 64} {
+			for _, mode := range []string{"existing", "eager", "delayed"} {
+				b.Run(fmt.Sprintf("iterations%d/calls%d/%s", iterations, calls, mode), func(b *testing.B) {
+					source := fmt.Sprintf(`function sum(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s }
+					var result; for(var k=0;k<%d;k++) result=sum(%d); result`, calls, iterations)
+					ast, err := parser.Parse(source, parser.Options{})
+					if err != nil {
+						b.Fatal(err)
+					}
+					p, err := compiler.Compile(ast, compiler.Options{})
+					if err != nil {
+						b.Fatal(err)
+					}
+					b.ReportAllocs()
+					b.ResetTimer()
+					for i := 0; i < b.N; i++ {
+						r := New(Config{JIT: mode != "existing"})
+						if mode == "eager" {
+							r.jitCallThreshold = 1
+						}
+						v, err := r.Run(p)
+						native := r.jit != nil && r.jit.entries != 0
+						coldState := r.jit != nil
+						r.Close()
+						r.ReleaseClosed()
+						if err != nil || v.Number() != float64(iterations*(iterations-1)/2) {
+							b.Fatalf("sum = %v, %v", v, err)
+						}
+						if mode != "existing" && (mode == "eager" || calls >= jitHotCalls) && !native {
+							b.Fatal("hot benchmark did not enter native code")
+						}
+						if mode == "delayed" && calls < jitHotCalls && coldState {
+							b.Fatal("cold benchmark allocated native state")
+						}
+					}
+				})
+			}
 		}
 	}
 }

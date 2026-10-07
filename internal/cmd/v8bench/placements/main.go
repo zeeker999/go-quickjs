@@ -87,7 +87,7 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   placements build -label NAME [-k 8] [-out DIR]
-  placements compare -dir SUITE [-k 8] [-rounds 3] [-suite NAMES] [-v] [-out DIR] A B`)
+  placements compare -dir SUITE [-k 8] [-rounds 3] [-suite NAMES] [-jit] [-v] [-out DIR] A B`)
 	os.Exit(2)
 }
 
@@ -301,6 +301,7 @@ func compareCmd(args []string) error {
 	k := fs.Int("k", 8, "how many placements")
 	rounds := fs.Int("rounds", 3, "runs of each placement of each label")
 	suite := fs.String("suite", "", "comma-separated suites to run, all by default")
+	jitEnabled := fs.Bool("jit", false, "enable the optional native tier in both tagged builds")
 	verbose := fs.Bool("v", false, "print each placement's figure")
 	out := fs.String("out", defaultOut(), "where the builds are")
 	fs.Parse(args)
@@ -323,7 +324,7 @@ func compareCmd(args []string) error {
 	for range *rounds {
 		for n := range *k {
 			for l := range labels {
-				got, err := runPlacement(exePath(*out, labels[l], n), *dir, *suite, n)
+				got, err := runPlacement(exePath(*out, labels[l], n), *dir, *suite, n, *jitEnabled)
 				if err != nil {
 					return err
 				}
@@ -367,9 +368,13 @@ type named struct {
 
 // runPlacement runs one build once and reads its times, in the order it
 // printed them.
-func runPlacement(exe, dir, suite string, n int) ([]named, error) {
+func runPlacement(exe, dir, suite string, n int, jitEnabled bool) ([]named, error) {
 	run := func(args ...string) ([]named, error) {
-		cmd := exec.Command(exe, append([]string{"-dir", dir}, args...)...)
+		base := []string{"-dir", dir}
+		if jitEnabled {
+			base = append(base, "-jit")
+		}
+		cmd := exec.Command(exe, append(base, args...)...)
 		cmd.Env = append(os.Environ(), "V8BENCH_STACKPAD="+strconv.Itoa(5*n))
 		outb, err := cmd.Output()
 		if err != nil {

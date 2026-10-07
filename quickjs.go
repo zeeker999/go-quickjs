@@ -130,7 +130,9 @@ type config struct {
 // with the quickjs_jit tag on linux/amd64, windows/amd64, or darwin/arm64.
 // Unsupported builds, denied executable memory, and unsupported functions
 // use the existing execution tiers. Native code is owned by this Runtime and
-// counts toward WithMemoryLimit. This is independent of WithoutCodeGeneration.
+// counts toward WithMemoryLimit. Eligible functions may promote after repeated
+// calls; native execution and speedup are not guaranteed. This is independent
+// of WithoutCodeGeneration.
 func WithJIT() Option { return func(c *config) { c.jit = true } }
 
 // WithMemoryLimit caps the memory a script may hold, beyond what the

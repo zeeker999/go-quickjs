@@ -6,9 +6,10 @@ and arm64 emitters execute the pointer-free slot IR. A `quickjs_jit` build plus
 that resume the interpreter and periodic exits for cancellation and limits.
 Runtime-owned caches, executable memory accounting, and deferred cleanup are
 implemented. Native budget/PC register bookkeeping and permanent closure refusal
-hints reduce instruction and selection overhead. `disasm -jit` reports IR
-eligibility and exit maps. Hotness tuning,
-OSR, wider opcode coverage, and performance qualification remain future work.
+hints reduce instruction and selection overhead. Framed calls promote hot
+closures after a bounded warmup without allocating state for cold calls.
+`disasm -jit` reports IR eligibility and exit maps. Back-edge hotness, OSR,
+wider opcode coverage, and performance qualification remain future work.
 See [the implementation notes](../internal/jit/README.md)
 for contracts, validation, and current limits.
 
@@ -67,7 +68,7 @@ frame publication, and fallback remain in `internal/vm`.
 The initial flow is:
 
 ```text
-Existing executor accumulates hotness
+Framed function entries accumulate hotness
     -> VM checks function eligibility
     -> bytecode becomes a small control-flow IR
     -> amd64 or arm64 emitter produces native code
@@ -133,10 +134,14 @@ comparisons, and canonical NaN boxing on both architectures.
 
 ### Hotness and tier selection
 
-Start with function-entry promotion based on per-runtime call counts and
-accumulated back edges. Compile synchronously between executions; put bounds
-on function size, compiler work, and code memory. Test controls may force
-compilation so correctness tests do not depend on threshold tuning.
+Function-entry promotion currently uses a saturating per-closure counter,
+with compilation allowed on the eighth framed call. Cold selection requires
+no map lookup or native state allocation. Temporary compilation refusals
+restart that warmup. Compile synchronously between executions; put bounds
+on function size, compiler work, and code memory. Internal test controls force
+compilation so boundary correctness tests do not depend on threshold tuning.
+Back-edge feedback remains future work; the call threshold alone does not
+estimate the work of a long first invocation.
 
 Instrument `runFD` and cached `callTree` execution without defeating the
 existing frameless shortcuts. A cached tree plan must observe promotion to

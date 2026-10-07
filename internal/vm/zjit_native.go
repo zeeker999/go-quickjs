@@ -17,16 +17,19 @@ import (
 const jitCacheEntries = 128
 const jitCacheBytes = 8 << 20
 const jitMetadataBytes = 512 << 10
+const jitHotCalls = 8
 
 type jitFields struct {
-	jitEnabled bool
-	jit        *jitState
+	jitEnabled       bool
+	jitCallThreshold uint8
+	jit              *jitState
 }
 
-// A closure belongs to one runtime. Permanent bytecode refusals can be
-// remembered here without repeatedly registering and looking up a weak key.
+// A closure belongs to one runtime. Hotness and permanent bytecode refusals
+// live here without registering a weak key on cold or refused calls.
 type jitClosureFields struct {
 	jitRefused bool
+	jitCalls   uint8
 }
 
 type jitEntry struct {
@@ -47,7 +50,10 @@ type jitState struct {
 	budgets     uint64
 }
 
-func (r *Runtime) initJIT(enabled bool) { r.jitEnabled = enabled }
+func (r *Runtime) initJIT(enabled bool) {
+	r.jitEnabled = enabled
+	r.jitCallThreshold = jitHotCalls
+}
 
 func (r *Runtime) jitCodeBytes() int64 {
 	var n int64
@@ -207,8 +213,19 @@ func (r *Runtime) tryJITFrame(f *frame) (Value, error, bool) {
 	if !r.jitEnabled || f.cl.jitRefused {
 		return Undefined, nil, false
 	}
+	// Cold calls stay in the existing tiers without allocating native state.
+	// Saturating the counter keeps hot selection independent of call overflow.
+	if f.cl.jitCalls < r.jitCallThreshold {
+		f.cl.jitCalls++
+		if f.cl.jitCalls < r.jitCallThreshold {
+			return Undefined, nil, false
+		}
+	}
 	e := r.jitFor(f.cl.fn)
 	if e == nil {
+		// Resource and OS refusals may change. Retry after another warmup,
+		// rather than charging every call for an unsuccessful compilation.
+		f.cl.jitCalls = 0
 		return Undefined, nil, false
 	}
 	if e.code == nil {

@@ -60,7 +60,9 @@ An experimental native numeric executor is available on `linux/amd64`,
 `windows/amd64`, and `darwin/arm64`. Build with `-tags quickjs_jit` and explicitly
 enable it with `quickjs.New(quickjs.WithJIT())`, or `qjs --jit`. Default builds
 and runtimes keep the existing execution tiers. Unsupported functions and
-unavailable executable memory fall back automatically. See the
+unavailable executable memory fall back automatically. Eligible functions
+promote after repeated framed calls; a cold invocation stays in its existing
+tier. See the
 [JIT implementation notes](internal/jit/README.md) for coverage and limits.
 
 | | |

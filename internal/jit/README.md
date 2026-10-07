@@ -147,8 +147,8 @@ use `vm.Float` to normalize arithmetic NaNs, rather than copying raw IEEE bits
 into boxed values.
 
 `internal/vm/zjit_native.go` publishes those maps into real frames and resumes
-`executeAt`. Native compilation occurs at an eligible framed function's first
-entry; existing frameless paths still run first. `internal/vm/jit_state_test.go`
+`executeAt`. Native compilation occurs after a closure becomes hot through
+framed calls; existing frameless paths still run first. `internal/vm/jit_state_test.go`
 compares native execution with the Go IR oracle and every executed boundary
 with uninterrupted interpretation, including signed zero, NaNs, subnormals,
 infinities, loops, and short-circuit branches. Guard tests pin earlier committed
@@ -184,7 +184,7 @@ Runtime construction allocates no JIT state or executable memory. Closing
 releases code after frames and host calls unwind; release failures retain
 ownership for retry. A Code finalizer provides backup reclamation for owners
 the host abandoned. Native execution is experimental and has no guaranteed
-speedup; first-entry compilation and guard fallback can cost more than the
+speedup; compilation and guard fallback can cost more than the
 existing tree tier.
 
 Native instruction bodies keep the remaining budget and pre-instruction PC in
@@ -197,6 +197,21 @@ instruction, preserving the exact exit state and 4096-instruction bound.
 Each runtime's closure remembers permanent bytecode refusals, avoiding repeated
 weak-cache registration and lookup. Memory, executable-policy, emission, and
 dynamic guard refusals are not permanent hints. Shared bytecode stays immutable.
+
+Framed calls accumulate a saturating counter on the closure. Currently the
+eighth call permits compilation; earlier calls allocate no JIT state and keep
+using the existing tier. These counts are per closure within a runtime, even
+when other closures or runtimes share the bytecode template. The counter fits
+existing closure padding. Cached tree calls pass through the same selection
+point, while frameless paths remain ahead of native selection. Temporary
+resource refusals reset the counter so compilation is retried after another
+warmup. The threshold is an internal policy, not an embedding API guarantee.
+
+There is no back-edge counting or OSR yet. One long invocation therefore stays
+in its existing tier when its closure is cold; call hotness cannot estimate
+how much work that invocation will do. Boundary tests force early promotion
+internally and assert native entries; separate tests exercise the default
+threshold, counter saturation, runtime isolation, and temporary refusals.
 
 ### Initial integration validation snapshot (8a96be4)
 
@@ -275,8 +290,71 @@ The final qjs binaries are 40,169,618 bytes without the tag and 40,291,858 bytes
 with it, a 122,240-byte (0.3%) difference.
 Default and tagged full suites, Go 1.24 native tests, race/checkptr tests, and
 all 92,869 executed JIT-enabled test262 variants pass after tuning.
-Hotness selection, OSR, broader numeric coverage, and fewer scalar loads/guards
-remain future work.
+Work-based hotness feedback, OSR, broader numeric coverage, and fewer scalar
+loads/guards remain future work.
+
+### Call-promotion measurements
+
+The entry policy's eight-call warmup reduces eager compilation for cold
+closures. Three fresh benchmark processes on the same host compare existing
+execution, eager native compilation, and delayed promotion. Each operation
+constructs and closes a runtime, defines a numeric function, then invokes it
+the given number of times. Source compilation is outside the measurement;
+native compilation, runtime construction, and release are included.
+
+| Loop iterations per call | Calls per closure | Existing | Eager native | Delayed promotion |
+|---|---|---|---|---|
+| 100 | 1 | 67.6 us | 97.8 us | 69.8 us |
+| 100 | 4 | 72.5 us | 99.8 us | 69.2 us |
+| 100 | 16 | 85.1 us | 108.4 us | 115.5 us |
+| 100 | 64 | 141.5 us | 145.4 us | 146.2 us |
+| 10,000 | 1 | 178.6 us | 150.7 us | 176.1 us |
+| 10,000 | 4 | 514.2 us | 315.3 us | 516.5 us |
+| 10,000 | 16 | 1832.8 us | 962.6 us | 1352.1 us |
+| 10,000 | 64 | 6926.5 us | 3675.8 us | 3947.5 us |
+
+Cold delayed operations retain the existing path's 1,210 Go allocations,
+versus 1,245 eager allocations, and allocate no native pages. Go byte totals
+are noisier (roughly 290 KB existing/delayed and 307 KB eager for one short
+call) because stack-pool reuse varies. These results show why a call threshold
+is only a conservative starting policy: cold short calls avoid compilation,
+but hot short calls can still fail to repay it, and a long first call can repay
+eager compilation immediately. Work-based feedback and OSR are needed to
+distinguish these cases. Eight calls is not a universal break-even point.
+
+The warm-loop benchmark now defines its function once, warms past promotion,
+and measures only the calling script. It averages about 53 us native versus
+107 us interpreted for lexical locals, retaining 244-245 Go bytes and three
+allocations per script run. The earlier benchmark redefined the function on
+each operation, so its allocation counts are not directly comparable.
+
+Three alternating fresh V8 processes average 1,043 ms eager, 1,023 ms delayed,
+and 1,025 ms disabled in the delayed binary. Eight placements per side, three
+rounds each, show effectively flat aggregate times: +0.7% with JIT enabled
+(individual suites -1.1% to +1.7%) and +0.1% with tagged runtime opt-out
+(individual suites -0.3% to +0.3%). These results do not establish an engine
+speedup. Default-build execution code is unchanged. Delayed Go
+allocations are 672.5-672.6 MB versus 672.4 MB disabled, with 9.4 MB live heap
+after GC for both. Peak RSS ranges overlap at 230-239 MiB delayed and
+232-238 MiB disabled.
+
+The final qjs binaries are 40,169,618 bytes without the tag and 40,291,874
+bytes with it: a 122,256-byte (0.3%) difference. Default and tagged full suites,
+both vet configurations, Go 1.24 VM tests, race/checkptr tests, Linux/amd64
+execution under emulation, and 92,869 JIT-enabled test262 variants pass.
+Windows/amd64 and fallback builds for Windows/arm64 and Linux/386 compile;
+actual Windows execution remains for the native CI runners.
+
+```sh
+go test -c -tags quickjs_jit -o /tmp/quickjs-jit-vm.test ./internal/vm
+/tmp/quickjs-jit-vm.test -test.run '^$' \
+  -test.bench '^BenchmarkJITCallPromotion$' -test.benchtime 200ms -test.benchmem
+GOFLAGS=-tags=quickjs_jit go run ./internal/cmd/v8bench/placements build -label change
+go run ./internal/cmd/v8bench/placements compare -jit -dir /tmp/v8-v7 base change
+```
+
+Build both placement labels with the tag in the same checkout. `compare -jit`
+enables native execution in both sets; omit it to measure tagged runtime opt-out.
 
 Inspect eligibility without native support or executable-memory allocation:
 
