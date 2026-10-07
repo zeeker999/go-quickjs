@@ -285,7 +285,9 @@ func padFile(p, m, tests int) []byte {
 	names := make([]string, m)
 	for i := range m {
 		names[i] = fmt.Sprintf("padF%d_%d", p, i)
-		fmt.Fprintf(&b, "func %s() int { return %d }\n\n", names[i], i+1)
+		// A constant-return leaf occupies only 16 bytes on arm64. Loading a
+		// global and computing from it fills a 32-byte slot on both CPUs.
+		fmt.Fprintf(&b, "//go:noinline\nfunc %s() int { return padSink*3 + %d }\n\n", names[i], i+1)
 	}
 	fmt.Fprintf(&b, "var padFuncs%d = []func() int{%s}\n", p, strings.Join(names, ", "))
 	return []byte(b.String())
