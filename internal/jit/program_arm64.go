@@ -9,7 +9,8 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
 
-// R0 owns programState and R2 scalar scratch. R1, R3-R7 and F0-F1 are scratch.
+// R0 owns programState and R2 scalar scratch. R8 holds the remaining budget,
+// R9 the pre-instruction PC. R1, R3-R7 and F0-F1 are scratch.
 // SP, FP, LR, R18 and Go's R28 remain untouched; no native calls occur.
 type arm64Program struct {
 	programAssembler
@@ -27,10 +28,8 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 			continue
 		}
 		a.mark(pc)
-		a.immediate(3, uint64(pc))
-		a.memory(false, false, 3, 0, 16)
-		a.memory(true, false, 1, 0, 0)
-		a.compareImmediate(1, 0)
+		a.immediate(9, uint64(pc))
+		a.compareImmediate(8, 0)
 		a.conditional(0, a.budget)
 		if in.Check {
 			a.memory(true, false, 4, 2, in.CheckSlot*16+8)
@@ -110,7 +109,6 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 				condition = 1
 			}
 			a.conditional(condition, in.Target)
-			a.jump(pc + 1)
 			continue
 		case ir.Return:
 			a.load(in.Left, 3, 4)
@@ -123,16 +121,29 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 			continue
 		}
 		a.commit()
-		a.jump(pc + 1)
 	}
 	for _, exit := range []struct {
 		label int
 		kind  ir.ExitKind
 	}{{a.guard, ir.GuardExit}, {a.budget, ir.BudgetExit}, {a.returned, ir.Returned}} {
 		a.mark(exit.label)
+		a.memory(false, false, 8, 0, 0)
+		a.memory(false, false, 9, 0, 16)
 		a.immediate(3, uint64(exit.kind))
 		a.memory(false, false, 3, 0, 8)
 		a.word(0xd65f03c0)
+	}
+	// External entries initialize the budget register; internal branches go
+	// straight to instruction bodies and preserve its current value.
+	entries := make([]int, len(p.Code))
+	for pc := range p.Code {
+		entries[pc] = -1
+		if p.Maps[pc].Depth < 0 {
+			continue
+		}
+		entries[pc] = len(a.code)
+		a.memory(true, false, 8, 0, 0)
+		a.jump(pc)
 	}
 	if err := a.valid(); err != nil {
 		return nil, nil, err
@@ -150,7 +161,7 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 			binary.LittleEndian.PutUint32(a.code[fixup.offset:], 0x14000000|uint32(int32(delta/4))&0x03ffffff)
 		}
 	}
-	return a.code, append([]int(nil), a.labels[:len(p.Code)]...), nil
+	return a.code, entries, nil
 }
 
 func (a *arm64Program) conditional(condition uint32, label int) {
@@ -204,9 +215,7 @@ func (a *arm64Program) compareImmediate(reg, value uint32) {
 }
 
 func (a *arm64Program) commit() {
-	a.memory(true, false, 1, 0, 0)
-	a.word(0xd1000421) // sub x1, x1, #1
-	a.memory(false, false, 1, 0, 0)
+	a.word(0xd1000508) // sub x8, x8, #1
 }
 
 func (a *arm64Program) number(o ir.Operand, fp uint32) {

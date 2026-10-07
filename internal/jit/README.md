@@ -187,7 +187,18 @@ the host abandoned. Native execution is experimental and has no guaranteed
 speedup; first-entry compilation and guard fallback can cost more than the
 existing tree tier.
 
-### Integration validation snapshot
+Native instruction bodies keep the remaining budget and pre-instruction PC in
+registers, publishing them only at shared guard, budget, and return exits.
+Every reachable external entry has a trampoline that loads the budget;
+internal branches target bodies directly. Straight-line and conditional
+fallthroughs need no extra jump. Budget checks still happen before every
+instruction, preserving the exact exit state and 4096-instruction bound.
+
+Each runtime's closure remembers permanent bytecode refusals, avoiding repeated
+weak-cache registration and lookup. Memory, executable-policy, emission, and
+dynamic guard refusals are not permanent hints. Shared bytecode stays immutable.
+
+### Initial integration validation snapshot (8a96be4)
 
 On October 7, 2026, Go 1.27 on an Apple M5 Max:
 
@@ -227,8 +238,45 @@ native work. Go allocation figures omit executable pages, which are reported by
 probe is about 4.5 MiB on either path because the stack pool retains the stack;
 integration tests independently assert that close releases native ownership.
 These results establish correctness and bounded ownership, not a performance
-release. Hotness selection, fewer scalar loads/guards, and less per-instruction
-budget bookkeeping are the next performance work.
+release.
+
+### Instruction and refusal overhead tuning
+
+Follow-up measurements on the same host and toolchain use three alternating
+fresh processes per setting. Keeping budget/PC in registers and removing
+fallthrough jumps reduces the native 10,000-iteration sum from about 124-125 us
+to 49-57 us, about 2.3 times faster. It now roughly matches the existing tree path
+for `var` locals and takes about half the interpreter time for `let` locals.
+This benchmark verifies that the enabled runtime actually enters native code:
+
+```sh
+go test -c -tags quickjs_jit -o /tmp/quickjs-jit-vm.test ./internal/vm
+/tmp/quickjs-jit-vm.test -test.run '^$' \
+  -test.bench '^BenchmarkJITNumericLoop$' -test.benchtime 300ms -test.benchmem
+```
+
+The whole-script VM benchmark retains 804-805 Go bytes and seven allocations;
+the public API probe retains 852 bytes and eight allocations. First native
+entry still takes 40,704 Go bytes and 47 allocations, with sampled latency
+138-356 us. Native pages are accounted separately. The probe's peak RSS is
+13.5-13.7 MiB; compilation remains a first-use cost.
+
+Remembering permanent closure refusals also reduces the mixed V8 suite's
+repeated lookup cost. Fresh fixed-work runs (`-n 5`) average 1,073 ms for the
+initial native tier, 978 ms for the tuned tier, and 983 ms with JIT disabled
+in the tuned binary. Enabled and disabled totals are effectively level in this
+sample; this is not an overall engine speedup claim. Enabled Go allocations
+remain 672.6-672.7 MB versus 672.4 MB disabled; both retain 9.4 MB after GC.
+Peak RSS overlaps at 232-237 MiB enabled and 230-238 MiB disabled.
+
+Eight default-build placements per side average -0.7% overall, with individual
+suites between -2.4% and +0.7%, showing no default regression in this sample.
+The final qjs binaries are 40,169,618 bytes without the tag and 40,291,858 bytes
+with it, a 122,240-byte (0.3%) difference.
+Default and tagged full suites, Go 1.24 native tests, race/checkptr tests, and
+all 92,869 executed JIT-enabled test262 variants pass after tuning.
+Hotness selection, OSR, broader numeric coverage, and fewer scalar loads/guards
+remain future work.
 
 Inspect eligibility without native support or executable-memory allocation:
 

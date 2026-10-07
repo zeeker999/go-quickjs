@@ -8,8 +8,9 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
 
-// DI owns programState and SI scalar scratch. AX, CX, DX, R8, R9 and X0-X1
-// are scratch. SP, BP and Go's R14 remain untouched; no native calls occur.
+// DI owns programState and SI scalar scratch. R10 holds the remaining budget,
+// R11 the pre-instruction PC. AX, CX, DX, R8, R9 and X0-X1 are scratch.
+// SP, BP and Go's R14 remain untouched; no native calls occur.
 type amd64Program struct {
 	programAssembler
 	guard, budget, returned int
@@ -26,10 +27,9 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 			continue
 		}
 		a.mark(pc)
-		a.stateImmediate(16, uint32(pc))
-		a.bytes(0x48, 0x83, 0xbf) // cmpq $0, remaining(di)
-		a.word(0)
-		a.bytes(0)
+		a.bytes(0x41, 0xbb) // movl $pc, r11d
+		a.word(uint32(pc))
+		a.bytes(0x4d, 0x85, 0xd2) // testq r10, r10
 		a.conditional(4, a.budget)
 		if in.Check {
 			a.kindCompare(in.CheckSlot, ir.Uninitialized)
@@ -107,7 +107,6 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 				condition = 5
 			}
 			a.conditional(condition, in.Target)
-			a.jump(pc + 1)
 			continue
 		case ir.Return:
 			a.load(in.Left, 0, 2)
@@ -120,15 +119,28 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 			continue
 		}
 		a.commit()
-		a.jump(pc + 1)
 	}
 	for _, exit := range []struct {
 		label int
 		kind  ir.ExitKind
 	}{{a.guard, ir.GuardExit}, {a.budget, ir.BudgetExit}, {a.returned, ir.Returned}} {
 		a.mark(exit.label)
+		a.memory(0x89, 10, 7, 0)
+		a.memory(0x89, 11, 7, 16)
 		a.stateImmediate(8, uint32(exit.kind))
 		a.bytes(0xc3)
+	}
+	// External entries initialize the budget register; internal branches go
+	// straight to instruction bodies and preserve its current value.
+	entries := make([]int, len(p.Code))
+	for pc := range p.Code {
+		entries[pc] = -1
+		if p.Maps[pc].Depth < 0 {
+			continue
+		}
+		entries[pc] = len(a.code)
+		a.memory(0x8b, 10, 7, 0)
+		a.jump(pc)
 	}
 	if err := a.valid(); err != nil {
 		return nil, nil, err
@@ -137,7 +149,7 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 		delta := a.labels[fixup.label] - (fixup.offset + 4)
 		binary.LittleEndian.PutUint32(a.code[fixup.offset:], uint32(int32(delta)))
 	}
-	return a.code, append([]int(nil), a.labels[:len(p.Code)]...), nil
+	return a.code, entries, nil
 }
 
 func (a *amd64Program) conditional(condition byte, label int) {
@@ -189,7 +201,7 @@ func (a *amd64Program) kindCompare(slot int, kind ir.Kind) {
 	a.bytes(byte(kind))
 }
 
-func (a *amd64Program) commit() { a.bytes(0x48, 0xff, 0x0f) }
+func (a *amd64Program) commit() { a.bytes(0x49, 0xff, 0xca) } // decq r10
 
 func (a *amd64Program) number(o ir.Operand, xmm byte) {
 	if o.Slot < 0 {

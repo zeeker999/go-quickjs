@@ -122,6 +122,49 @@ func TestNativeProgramMultiplePages(t *testing.T) {
 	}
 }
 
+func TestNativeProgramEveryEntry(t *testing.T) {
+	// Exercise transfers across a large scratch layout. Every reachable entry
+	// needs its own initialized budget register, including entries in the
+	// middle of a straight line.
+	p := &ir.Program{Locals: ir.MaxSlots,
+		Code: []ir.Instruction{
+			{Op: ir.CopyPair, Left: ir.Slot(30), Right: ir.Slot(32), Dest: 31, Extra: 200},
+			{Op: ir.StoreLoad, Left: ir.Slot(200), Right: ir.Slot(250), Dest: 250, Extra: 30},
+			{Op: ir.Swap, Dest: 31, Extra: 200},
+			{Op: ir.Binary, Operator: ir.Add, Left: ir.Slot(31), Right: ir.Slot(200), Dest: 0},
+			{Op: ir.Return, Left: ir.Slot(0)},
+		}, Maps: make([]ir.StateMap, 5)}
+	for pc := range p.Maps {
+		p.Maps[pc].PC = uint32(pc)
+	}
+	c := newTestCode(t, p)
+	for _, value := range []ir.Value{ir.Float(2), ir.Bool(true), {Kind: ir.Opaque, Bits: 123}, {Kind: ir.Uninitialized}} {
+		for pc := range p.Code {
+			for _, budget := range []uint64{0, 1, 2, 3, MaxIterations} {
+				oracle := make([]ir.Value, ir.MaxSlots)
+				for i := range oracle {
+					oracle[i] = ir.Float(float64(i))
+				}
+				oracle[30] = value
+				slots := append([]ir.Value(nil), oracle...)
+				want, err := p.Evaluate(oracle, pc, budget)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := c.Run(slots, pc, budget)
+				if err != nil || got != want {
+					t.Fatalf("pc %d budget %d: native %+v, %v; oracle %+v", pc, budget, got, err, want)
+				}
+				for i := range slots {
+					if slots[i] != oracle[i] {
+						t.Fatalf("pc %d budget %d: slot %d native %+v, oracle %+v", pc, budget, i, slots[i], oracle[i])
+					}
+				}
+			}
+		}
+	}
+}
+
 //go:noinline
 func runProgramGrowingStack(c *Code, depth int) (uint64, error) {
 	var padding [128]uint64

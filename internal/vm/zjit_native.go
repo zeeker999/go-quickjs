@@ -23,6 +23,12 @@ type jitFields struct {
 	jit        *jitState
 }
 
+// A closure belongs to one runtime. Permanent bytecode refusals can be
+// remembered here without repeatedly registering and looking up a weak key.
+type jitClosureFields struct {
+	jitRefused bool
+}
+
 type jitEntry struct {
 	code   *jit.Code
 	misses uint8
@@ -198,11 +204,18 @@ func (s *jitState) clearRoots() {
 }
 
 func (r *Runtime) tryJITFrame(f *frame) (Value, error, bool) {
-	if !r.jitEnabled {
+	if !r.jitEnabled || f.cl.jitRefused {
 		return Undefined, nil, false
 	}
 	e := r.jitFor(f.cl.fn)
-	if e == nil || e.code == nil || e.misses >= 8 {
+	if e == nil {
+		return Undefined, nil, false
+	}
+	if e.code == nil {
+		f.cl.jitRefused = true
+		return Undefined, nil, false
+	}
+	if e.misses >= 8 {
 		return Undefined, nil, false
 	}
 	s := r.jit

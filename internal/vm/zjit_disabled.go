@@ -3,6 +3,7 @@
 package vm
 
 type jitFields struct{}
+type jitClosureFields struct{}
 
 func (*Runtime) initJIT(bool)                            {}
 func (*Runtime) tryJITFrame(*frame) (Value, error, bool) { return Undefined, nil, false }

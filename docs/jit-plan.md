@@ -5,7 +5,9 @@ and arm64 emitters execute the pointer-free slot IR. A `quickjs_jit` build plus
 `WithJIT()` enables native execution of eligible framed functions, with guards
 that resume the interpreter and periodic exits for cancellation and limits.
 Runtime-owned caches, executable memory accounting, and deferred cleanup are
-implemented. `disasm -jit` reports IR eligibility and exit maps. Hotness tuning,
+implemented. Native budget/PC register bookkeeping and permanent closure refusal
+hints reduce instruction and selection overhead. `disasm -jit` reports IR
+eligibility and exit maps. Hotness tuning,
 OSR, wider opcode coverage, and performance qualification remain future work.
 See [the implementation notes](../internal/jit/README.md)
 for contracts, validation, and current limits.

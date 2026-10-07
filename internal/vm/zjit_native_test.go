@@ -12,6 +12,8 @@ import (
 	"weak"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+	"github.com/go-quickjs/go-quickjs/internal/compiler"
+	"github.com/go-quickjs/go-quickjs/internal/parser"
 )
 
 const jitSumSource = `function sum(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s } sum(10000)`
@@ -262,5 +264,63 @@ func TestJITBudgetAllocations(t *testing.T) {
 	// also allows small ABI temporaries checkptr forces onto the heap.
 	if bytes := (after.TotalAlloc - before.TotalAlloc) / 10; bytes > 16<<10 {
 		t.Fatalf("native budget loop allocated %d bytes per call", bytes)
+	}
+}
+
+func TestJITClosureRemembersRefusal(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	v, err := r.Run(compileForTest(t, `function f(n) { var s=0; for(var i=0;i<n;i++) s+=Math.abs(i); return s } f(3); f`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := v.Object().fn().closure
+	if !cl.jitRefused {
+		t.Fatal("unsupported function did not remember its refusal")
+	}
+	r.releaseJIT()
+	got, err := r.Call(v, Undefined, []Value{Int32(10)})
+	if err != nil || got.Number() != 45 {
+		t.Fatalf("refused call = %v, %v", got, err)
+	}
+	if r.jit != nil {
+		t.Fatal("permanent refusal repeated the weak-cache lookup")
+	}
+}
+
+func BenchmarkJITNumericLoop(b *testing.B) {
+	for _, keyword := range []string{"var", "let"} {
+		for _, enabled := range []bool{false, true} {
+			name := keyword + "/existing"
+			if enabled {
+				name = keyword + "/native"
+			}
+			b.Run(name, func(b *testing.B) {
+				source := "function sum(n) { " + keyword + " s=0; for(" + keyword + " i=0;i<n;i++) s+=i; return s } sum(10000)"
+				ast, err := parser.Parse(source, parser.Options{})
+				if err != nil {
+					b.Fatal(err)
+				}
+				p, err := compiler.Compile(ast, compiler.Options{})
+				if err != nil {
+					b.Fatal(err)
+				}
+				r := New(Config{JIT: enabled})
+				defer func() { r.Close(); r.ReleaseClosed() }()
+				if _, err := r.Run(p); err != nil {
+					b.Fatal(err)
+				}
+				if enabled && (r.jit == nil || r.jit.entries == 0) {
+					b.Fatal("benchmark did not enter native code")
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					v, err := r.Run(p)
+					if err != nil || v.Number() != 49995000 {
+						b.Fatalf("sum = %v, %v", v, err)
+					}
+				}
+			})
+		}
 	}
 }
