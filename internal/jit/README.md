@@ -194,6 +194,23 @@ internal branches target bodies directly. Straight-line and conditional
 fallthroughs need no extra jump. Budget checks still happen before every
 instruction, preserving the exact exit state and 4096-instruction bound.
 
+The emitters allocate the most frequently accessed scalar bits to fourteen FP
+registers. The first six kinds on arm64, or four on amd64, use integer registers;
+other kinds and unallocated slots remain in scratch. This is a bounded static
+allocation, independent of the scalar's JavaScript type. Copying an opaque
+handle or a NaN payload through an FP register preserves its bits exactly.
+Every external entry loads the registers through a shared initializer, and
+every guard, budget, or return exit spills them before returning to Go. Roots
+stay in Go-owned storage; generated code retains no pointers between entries.
+
+Arithmetic reads allocated registers directly and guards both operands before
+writing the result. SSE2's destructive destination needs a temporary when it
+aliases the right input. Numeric comparisons avoid internal control-flow
+branches: arm64 selects conditions with correct unordered behavior, while
+amd64 masks UCOMISD's unordered flags where needed. Arm64 comparison branches
+use those flags directly. These changes preserve operation order, NaN behavior,
+signed zero, TDZ checks, exact committed-step counts, and arbitrary-PC entry.
+
 Each runtime's closure remembers permanent bytecode refusals, avoiding repeated
 weak-cache registration and lookup. Memory, executable-policy, emission, and
 dynamic guard refusals are not permanent hints. Shared bytecode stays immutable.
@@ -416,6 +433,94 @@ native and VM tests under emulation pass. JIT-enabled test262 reports 92,869
 passed, zero failed, and 342 existing skips. Windows/amd64 and fallback builds
 for Windows/arm64 and Linux/386 compile; actual Windows execution remains
 unverified locally.
+
+### Scalar register-allocation measurements
+
+On the same Go 1.27 / Apple M5 Max host, three alternating fresh processes
+compare the OSR emitter with register allocation and direct comparisons. Each
+kernel runs 10,000 iterations. The function is defined and warmed once; timed
+calls include the calling script, native entry/exit, and budget checks. Native
+selection and the absence of guard exits are asserted, and results must match
+existing execution exactly. Source and native compilation are outside these
+warm measurements; all times are means in microseconds.
+
+| Kernel / locals | Existing tier | Previous JIT | Register JIT |
+|---|---|---|---|
+| Sum / var | 55.8 | 52.7 | 26.1 |
+| Sum / let | 107.0 | 53.4 | 26.9 |
+| Logistic recurrence / var | 89.5 | 55.5 | 25.0 |
+| Logistic recurrence / let | 156.2 | 57.8 | 25.9 |
+| Newton iteration / var | 108.0 | 88.3 | 53.2 |
+| Newton iteration / let | 207.5 | 87.0 | 53.2 |
+| Particle integration / var | 327.0 | 155.5 | 93.2 |
+| Particle integration / let | 595.1 | 161.9 | 93.1 |
+
+These kernels are about 2.0-3.6 times faster than the tree tier and 3.9-6.4
+times faster than the interpreter. Warm calling scripts still take three Go
+allocations and about 244-250 bytes. Register allocation introduces no
+per-budget Go allocations.
+
+Fresh-runtime measurements include construction, native compilation, and
+release. Automatic promotion takes 135.7 us for one long lexical call versus
+176.1 us existing, 531.2 us for sixteen long calls versus 1858.6 us, and
+1802.9 us for sixty-four versus 6973.0 us. Sixty-four short calls now take
+127.2 us versus 140.6 us existing, but sixteen short calls still lose
+(117.6 us versus 84.3 us). Cold calls keep 1,210 Go allocations and no native
+pages; promoted runs take 1,246 allocations, three more than before register
+allocation. A single long call takes about 314 KB versus 291 KB existing,
+with stack-pool reuse affecting the Go byte totals.
+
+The fresh-runtime kernel benchmark also includes construction, compilation,
+and release, with automatic OSR and 10,000 iterations per call. These long
+kernels repay native compilation on their first invocation in this sample:
+
+| Kernel / locals | First call existing | First call automatic | 16 calls existing | 16 calls automatic |
+|---|---|---|---|---|
+| Logistic recurrence / var | 155.1 us | 121.4 us | 1486.6 us | 483.2 us |
+| Logistic recurrence / let | 210.9 us | 126.7 us | 2430.1 us | 472.9 us |
+| Newton iteration / var | 161.3 us | 142.9 us | 1770.4 us | 934.7 us |
+| Newton iteration / let | 267.0 us | 158.0 us | 3532.9 us | 907.3 us |
+| Particle integration / var | 358.9 us | 201.8 us | 4951.8 us | 1545.4 us |
+| Particle integration / let | 620.7 us | 252.9 us | 8899.9 us | 1579.7 us |
+
+This break-even point applies to these workloads and this host; shorter calls
+still need enough repetitions to cover compilation. The kernel benchmark
+checks exact results and actual native execution. Process peak RSS for all its
+cases ranges from 32.1 to 34.7 MiB. Each live kernel owns one 16 KiB executable
+page on this host plus 488-1544 bytes of native metadata, reported by the warm
+benchmark's `native-B` and `metadata-B` metrics.
+
+The mixed fixed-work V8 suite remains effectively level. Three alternating
+fresh processes average 1027.3 ms before register allocation, 1012.2 ms after,
+and 1033.9 ms with JIT disabled in the new binary. Eight placements per side,
+three rounds each, show -0.6% with native execution enabled and -0.7% with
+tagged runtime opt-out. Individual suites range from -0.2% to +1.2% enabled
+and -1.0% to +0.0% opt-out. The small aggregate differences do not establish a
+broad JIT speedup. Most hot functions in this suite still require objects,
+arrays, calls, or upvalues that this numeric tier refuses.
+
+V8 Go allocations remain 672.6 MB enabled and 672.4 MB disabled, with 9.4 MB
+live after GC for both. Peak RSS is 233.7-238.9 MiB enabled and 230.5-235.0 MiB
+disabled. The qjs binary is 40,169,618 bytes ordinarily (unchanged) and
+40,309,506 bytes with the tag: a 139,888-byte (0.35%) difference.
+
+Default and tagged full suites, both vet configurations, Go 1.24 tests,
+race/checkptr tests, and Linux/amd64 native/VM tests under emulation pass.
+Boundary tests now exercise the complete register pool during stack growth,
+GC, and stack snapshots. Differential tests cover every entry and budget,
+cached and spilled values, opaque handles, NaN payloads, arithmetic aliases,
+and every numeric comparison with both branch directions. JIT-enabled test262
+reports 92,869 passed, zero failed, and 342 existing skips. Windows/amd64 and
+fallback builds for Windows/arm64 and Linux/386 compile; Windows execution
+remains unverified locally.
+
+```sh
+go test -c -tags quickjs_jit -o /tmp/quickjs-jit-vm.test ./internal/vm
+/tmp/quickjs-jit-vm.test -test.run '^$' \
+  -test.bench '^BenchmarkJITNumeric' -test.benchtime 200ms -test.benchmem
+/tmp/quickjs-jit-vm.test -test.run '^$' \
+  -test.bench '^BenchmarkJITKernelPromotion$' -test.benchtime 100ms -test.benchmem
+```
 
 Inspect eligibility without native support or executable-memory allocation:
 

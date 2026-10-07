@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -662,6 +663,133 @@ func BenchmarkJITCallPromotion(b *testing.B) {
 						}
 					}
 				})
+			}
+		}
+	}
+}
+
+func jitNumericKernelCases() []struct{ name, body string } {
+	return []struct{ name, body string }{
+		{"logistic", `VAR x=0.123; for(VAR i=0;i<n;i++) x=3.99*x*(1-x); return x`},
+		{"newton", `VAR x=1,s=0; for(VAR i=0;i<n;i++) { x=(x+2/x)*0.5; s+=x } return s`},
+		{"particle", `VAR x=0,y=0,vx=0.2,vy=0.3,s=0; for(VAR i=0;i<n;i++) { vx-=x*0.001; vy-=y*0.001; x+=vx; y+=vy; if(x>10||x< -10) vx=-vx; if(y>10||y< -10) vy=-vy; s+=x*x+y*y } return s`},
+	}
+}
+
+func BenchmarkJITNumericKernels(b *testing.B) {
+	for _, tc := range jitNumericKernelCases() {
+		for _, keyword := range []string{"var", "let"} {
+			source := "function kernel(n) { " + strings.ReplaceAll(tc.body, "VAR", keyword) + " }"
+			compile := func(source string) *bytecode.Function {
+				ast, err := parser.Parse(source, parser.Options{})
+				if err != nil {
+					b.Fatal(err)
+				}
+				p, err := compiler.Compile(ast, compiler.Options{})
+				if err != nil {
+					b.Fatal(err)
+				}
+				return p
+			}
+			definition, call := compile(source), compile("kernel(10000)")
+			baseline := New(Config{})
+			if _, err := baseline.Run(definition); err != nil {
+				b.Fatal(err)
+			}
+			want, err := baseline.Run(call)
+			baseline.Close()
+			baseline.ReleaseClosed()
+			if err != nil || !want.IsNumber() {
+				b.Fatalf("baseline = %v, %v", want, err)
+			}
+			for _, enabled := range []bool{false, true} {
+				mode := "existing"
+				if enabled {
+					mode = "native"
+				}
+				b.Run(tc.name+"/"+keyword+"/"+mode, func(b *testing.B) {
+					r := New(Config{JIT: enabled})
+					defer func() { r.Close(); r.ReleaseClosed() }()
+					if _, err := r.Run(definition); err != nil {
+						b.Fatal(err)
+					}
+					for i := 0; i < jitHotCalls; i++ {
+						v, err := r.Run(call)
+						if err != nil || !jitSameValueForTest(v, want) {
+							b.Fatalf("warmup = %v, %v; want %v", v, err, want)
+						}
+					}
+					if enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.guards != 0) {
+						b.Fatal("benchmark did not stay in native code")
+					}
+					b.ReportAllocs()
+					b.ResetTimer()
+					for i := 0; i < b.N; i++ {
+						v, err := r.Run(call)
+						if err != nil || !jitSameValueForTest(v, want) {
+							b.Fatalf("kernel = %v, %v; want %v", v, err, want)
+						}
+					}
+					b.StopTimer()
+					if enabled {
+						var codeBytes, metadataBytes int
+						for _, entry := range r.jit.cache {
+							codeBytes += entry.code.Size()
+							metadataBytes += entry.code.MetadataSize()
+						}
+						b.ReportMetric(float64(codeBytes), "native-B")
+						b.ReportMetric(float64(metadataBytes), "metadata-B")
+					}
+				})
+			}
+		}
+	}
+}
+
+func BenchmarkJITKernelPromotion(b *testing.B) {
+	for _, tc := range jitNumericKernelCases() {
+		for _, keyword := range []string{"var", "let"} {
+			for _, calls := range []int{1, 2, 4, 8, 16} {
+				source := "function kernel(n) { " + strings.ReplaceAll(tc.body, "VAR", keyword) + " }" +
+					fmt.Sprintf("var result; for(var k=0;k<%d;k++) result=kernel(10000); result", calls)
+				ast, err := parser.Parse(source, parser.Options{})
+				if err != nil {
+					b.Fatal(err)
+				}
+				p, err := compiler.Compile(ast, compiler.Options{})
+				if err != nil {
+					b.Fatal(err)
+				}
+				baseline := New(Config{})
+				want, err := baseline.Run(p)
+				baseline.Close()
+				baseline.ReleaseClosed()
+				if err != nil || !want.IsNumber() {
+					b.Fatalf("baseline = %v, %v", want, err)
+				}
+				for _, enabled := range []bool{false, true} {
+					mode := "existing"
+					if enabled {
+						mode = "automatic"
+					}
+					b.Run(fmt.Sprintf("%s/%s/calls%d/%s", tc.name, keyword, calls, mode), func(b *testing.B) {
+						b.ReportAllocs()
+						b.ResetTimer()
+						for i := 0; i < b.N; i++ {
+							r := New(Config{JIT: enabled})
+							v, err := r.Run(p)
+							native := r.jit != nil && r.jit.entries != 0 && r.jit.guards == 0
+							r.Close()
+							r.ReleaseClosed()
+							if err != nil || !jitSameValueForTest(v, want) {
+								b.Fatalf("kernel = %v, %v; want %v", v, err, want)
+							}
+							if enabled && !native {
+								b.Fatal("benchmark did not stay in native code")
+							}
+						}
+					})
+				}
 			}
 		}
 	}

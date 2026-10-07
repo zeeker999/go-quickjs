@@ -5,13 +5,14 @@ and arm64 emitters execute the pointer-free slot IR. A `quickjs_jit` build plus
 `WithJIT()` enables native execution of eligible framed functions, with guards
 that resume the interpreter and periodic exits for cancellation and limits.
 Runtime-owned caches, executable memory accounting, and deferred cleanup are
-implemented. Native budget/PC register bookkeeping and permanent closure refusal
-hints reduce instruction and selection overhead. Framed calls promote hot
+implemented. Native budget/PC bookkeeping, scalar register allocation, direct
+numeric comparisons, and permanent closure refusal hints reduce execution and
+selection overhead. Framed calls promote hot
 closures after a bounded warmup without allocating state for short cold calls.
 Long calls can enter native code at existing interpreter and tree back-edge
 checks using the completed branch's target and spilled state. `disasm -jit`
 reports IR eligibility and exit maps. More precise hotness feedback, wider
-opcode coverage, and performance qualification remain future work.
+opcode coverage, and qualification on mixed object workloads remain future work.
 See [the implementation notes](../internal/jit/README.md)
 for contracts, validation, and current limits.
 
@@ -109,8 +110,11 @@ unavoidable need and documents the supported Go versions and maintenance cost.
 
 Use basic blocks with explicit local/operand slots, primitive operations,
 guards, branches, returns, and exits. Track bytecode position and stack depth
-at every exit. Start with straightforward slot allocation; introduce register
-allocation after the executor is correct and its costs are measured.
+at every exit. The initial slot emitter now allocates frequently accessed scalar
+bits and kinds to registers, initializing them on external entry and spilling
+them at every exit. Unallocated slots retain the original scratch layout.
+Allocation is bounded and independent of JavaScript type; guard checks still
+precede any write by the failing instruction.
 
 The first eligible functions have simple parameters, local primitive
 operations, branches, loops, and returns. Exclude exception handlers,
@@ -307,6 +311,14 @@ Initial engineering gates, to revisit after milestone 0's measurements:
 
 These are acceptance targets, not predicted results. Stop expansion and
 revise the design if bridge costs or workload coverage cannot meet them.
+
+The scalar register-allocation snapshot meets the local numeric throughput and
+runtime opt-out overhead targets: all four measured kernels beat the best
+existing tier by at least 2x when warm, and their long invocations repay
+compilation on the first call. The mixed V8 suite remains effectively level;
+broader object and array coverage is still needed for an aggregate engine win.
+See the implementation notes for fresh-process results, placement comparisons,
+memory costs, validation, and the workloads where compilation still loses.
 
 ## Reference
 

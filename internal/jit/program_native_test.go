@@ -176,8 +176,149 @@ func TestNativeProgramEveryEntry(t *testing.T) {
 	}
 }
 
+func TestNativeProgramRegisterTransfers(t *testing.T) {
+	// Exceed the register pool and cross its boundary with overlapping copies.
+	// Compare every entry and budget so initialization, spills, and guards all
+	// preserve exact scalar bits, including opaque handles and NaN payloads.
+	p := &ir.Program{Locals: 24}
+	for slot := 0; slot < p.Locals; slot++ {
+		p.Code = append(p.Code, ir.Instruction{Op: ir.Swap, Dest: slot, Extra: (slot + 1) % p.Locals})
+	}
+	p.Code = append(p.Code,
+		ir.Instruction{Op: ir.CopyPair, Left: ir.Slot(0), Right: ir.Slot(14), Dest: 14, Extra: 0},
+		ir.Instruction{Op: ir.StoreLoad, Left: ir.Slot(15), Right: ir.Slot(0), Dest: 0, Extra: 15},
+		ir.Instruction{Op: ir.Update, Operator: ir.Add, Left: ir.Slot(0), Dest: 0, Extra: 15, Postfix: true},
+		ir.Instruction{Op: ir.Return, Left: ir.Slot(15)},
+	)
+	p.Maps = make([]ir.StateMap, len(p.Code))
+	for pc := range p.Maps {
+		p.Maps[pc].PC = uint32(pc)
+	}
+	c := newTestCode(t, p)
+	values := []ir.Value{
+		ir.Float(0), ir.Float(math.Copysign(0, -1)), ir.Float(math.Inf(1)),
+		{Kind: ir.Number, Bits: 0x7ff0000000000123},
+		{Kind: ir.Number, Bits: 0xfff8000000004567},
+		ir.Bool(true), {Kind: ir.Opaque, Bits: 123}, {Kind: ir.Uninitialized},
+	}
+	for pc := range p.Code {
+		for budget := uint64(0); budget <= uint64(len(p.Code)+1); budget++ {
+			oracle := make([]ir.Value, p.Locals)
+			for slot := range oracle {
+				oracle[slot] = values[slot%len(values)]
+			}
+			slots := append([]ir.Value(nil), oracle...)
+			want, err := p.Evaluate(oracle, pc, budget)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := c.Run(slots, pc, budget)
+			if err != nil || got != want {
+				t.Fatalf("pc %d budget %d: native %+v, %v; oracle %+v", pc, budget, got, err, want)
+			}
+			for slot := range slots {
+				if slots[slot] != oracle[slot] {
+					t.Fatalf("pc %d budget %d slot %d: native %+v; oracle %+v", pc, budget, slot, slots[slot], oracle[slot])
+				}
+			}
+		}
+	}
+}
+
+func TestNativeProgramComparisons(t *testing.T) {
+	values := []float64{math.Inf(-1), -1, math.Copysign(0, -1), 0, 1, math.Inf(1), math.NaN()}
+	for op := ir.Lt; op <= ir.Ne; op++ {
+		for _, branch := range []bool{false, true} {
+			for _, when := range []bool{false, true} {
+				p := &ir.Program{Locals: 3,
+					Code: []ir.Instruction{
+						{Op: ir.Binary, Operator: op, Left: ir.Slot(0), Right: ir.Slot(1), Dest: 2},
+						{Op: ir.Return, Left: ir.Slot(2)},
+						{Op: ir.Return, Left: ir.Literal(ir.Bool(true))},
+					}, Maps: []ir.StateMap{{PC: 0}, {PC: 1}, {PC: 2}},
+				}
+				if branch {
+					p.Code[0] = ir.Instruction{Op: ir.Branch, Operator: op, Left: ir.Slot(0), Right: ir.Slot(1), Target: 2, When: when}
+					p.Code[1].Left = ir.Literal(ir.Bool(false))
+				} else {
+					p.Maps[2].Depth = -1
+				}
+				c := newTestCode(t, p)
+				for _, x := range values {
+					for _, y := range values {
+						oracle := []ir.Value{ir.Float(x), ir.Float(y), ir.Bool(false)}
+						slots := append([]ir.Value(nil), oracle...)
+						want, err := p.Evaluate(oracle, 0, 2)
+						if err != nil {
+							t.Fatal(err)
+						}
+						got, err := c.Run(slots, 0, 2)
+						if err != nil || got != want || slots[2] != oracle[2] {
+							t.Fatalf("op %d branch %v when %v inputs %g,%g: native %+v, %v; oracle %+v", op, branch, when, x, y, got, err, want)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestNativeProgramArithmeticAliases(t *testing.T) {
+	for op := ir.Add; op <= ir.Div; op++ {
+		for _, left := range []int{0, 12, 20} {
+			right := left + 1
+			for _, dest := range []int{left, right, 23} {
+				p := &ir.Program{Locals: 24}
+				for slot := 0; slot < p.Locals; slot++ {
+					p.Code = append(p.Code, ir.Instruction{Op: ir.Copy, Left: ir.Slot(slot), Dest: slot})
+				}
+				// Put the middle inputs in extended FP registers, and the last
+				// pair outside the pool, by making earlier slots more frequent.
+				prime := 0
+				if left == 12 {
+					prime = 6
+				} else if left == 20 {
+					prime = 14
+				}
+				for slot := 0; slot < prime; slot++ {
+					for range 4 {
+						p.Code = append(p.Code, ir.Instruction{Op: ir.Copy, Left: ir.Slot(slot), Dest: slot})
+					}
+				}
+				p.Code = append(p.Code,
+					ir.Instruction{Op: ir.Binary, Operator: op, Left: ir.Slot(left), Right: ir.Slot(right), Dest: dest},
+					ir.Instruction{Op: ir.Return, Left: ir.Slot(dest)},
+				)
+				p.Maps = make([]ir.StateMap, len(p.Code))
+				for pc := range p.Maps {
+					p.Maps[pc].PC = uint32(pc)
+				}
+				c := newTestCode(t, p)
+				oracle := make([]ir.Value, p.Locals)
+				for slot := range oracle {
+					oracle[slot] = ir.Float(float64(slot + 2))
+				}
+				slots := append([]ir.Value(nil), oracle...)
+				want, err := p.Evaluate(oracle, 0, MaxIterations)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := c.Run(slots, 0, MaxIterations)
+				if err != nil || got != want {
+					t.Fatalf("op %d left %d right %d dest %d: native %+v, %v; oracle %+v", op, left, right, dest, got, err, want)
+				}
+				for slot := range slots {
+					if slots[slot] != oracle[slot] {
+						t.Fatalf("op %d left %d right %d dest %d slot %d: native %+v; oracle %+v", op, left, right, dest, slot, slots[slot], oracle[slot])
+					}
+				}
+			}
+		}
+	}
+}
+
 //go:noinline
-func runProgramGrowingStack(c *Code, depth int) (uint64, error) {
+func runProgramGrowingStack(c *Code, slots []ir.Value, depth int) (uint64, error) {
 	var padding [128]uint64
 	for i := range padding {
 		padding[i] = uint64(i + depth)
@@ -185,13 +326,13 @@ func runProgramGrowingStack(c *Code, depth int) (uint64, error) {
 	var steps uint64
 	if depth != 0 {
 		var err error
-		steps, err = runProgramGrowingStack(c, depth-1)
+		steps, err = runProgramGrowingStack(c, slots, depth-1)
 		if err != nil {
 			return 0, err
 		}
 	} else {
-		exit, err := c.Run(nil, 0, MaxIterations)
-		if err != nil || exit.Kind != ir.BudgetExit || exit.State.PC != 0 || exit.Steps != MaxIterations {
+		exit, err := c.Run(slots, 0, MaxIterations)
+		if err != nil || exit.Kind != ir.BudgetExit || exit.State.PC != uint32(MaxIterations%uint64(len(c.maps))) || exit.Steps != MaxIterations {
 			return 0, fmt.Errorf("bounded native loop: %+v, %v", exit, err)
 		}
 		steps = exit.Steps
@@ -203,8 +344,25 @@ func runProgramGrowingStack(c *Code, depth int) (uint64, error) {
 }
 
 func TestNativeProgramBoundary(t *testing.T) {
-	p := &ir.Program{Code: []ir.Instruction{{Op: ir.Jump, Target: 0}}, Maps: []ir.StateMap{{PC: 0}}}
+	// Exercise the full register pool, including cached kinds, while Go grows
+	// and scans stacks. Copies preserve handles and NaN payloads exactly.
+	p := &ir.Program{Locals: 24}
+	for slot := 0; slot < p.Locals; slot++ {
+		p.Code = append(p.Code, ir.Instruction{Op: ir.Copy, Left: ir.Slot(slot), Dest: slot})
+	}
+	p.Code = append(p.Code, ir.Instruction{Op: ir.Jump, Target: 0})
+	p.Maps = make([]ir.StateMap, len(p.Code))
+	for pc := range p.Maps {
+		p.Maps[pc].PC = uint32(pc)
+	}
 	c := newTestCode(t, p)
+	slots := make([]ir.Value, p.Locals)
+	for slot := range slots {
+		slots[slot] = ir.Float(float64(slot))
+	}
+	slots[1] = ir.Value{Kind: ir.Opaque, Bits: 123}
+	slots[2] = ir.Value{Kind: ir.Number, Bits: 0x7ff0000000004567}
+	wantSlots := append([]ir.Value(nil), slots...)
 	for _, procs := range []int{1, 2} {
 		t.Run(fmt.Sprint(procs), func(t *testing.T) {
 			previous := runtime.GOMAXPROCS(procs)
@@ -231,9 +389,14 @@ func TestNativeProgramBoundary(t *testing.T) {
 				}
 			}
 			for i := 0; i < 128; i++ {
-				got, err := runProgramGrowingStack(c, 64)
+				got, err := runProgramGrowingStack(c, slots, 64)
 				if err != nil || got != want {
 					t.Fatalf("native stack growth: %d, %v; want %d", got, err, want)
+				}
+				for slot := range slots {
+					if slots[slot] != wantSlots[slot] {
+						t.Fatalf("native stack growth changed slot %d: %+v; want %+v", slot, slots[slot], wantSlots[slot])
+					}
 				}
 				if i%8 == 0 {
 					runtime.Gosched()

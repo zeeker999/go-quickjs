@@ -9,7 +9,10 @@ import (
 )
 
 // DI owns programState and SI scalar scratch. R10 holds the remaining budget,
-// R11 the pre-instruction PC. AX, CX, DX, R8, R9 and X0-X1 are scratch.
+// R11 the pre-instruction PC. AX, CX, DX, R8, R9 and X0-X1 are scratch;
+// X2-X15 cache scalar bits; BX, R12, R13 and R15 cache the first four kinds.
+// All are spilled on every exit. This uses Go's ABI,
+// including on Windows, rather than the platform C calling convention.
 // SP, BP and Go's R14 remain untouched; no native calls occur.
 type amd64Program struct {
 	programAssembler
@@ -18,10 +21,12 @@ type amd64Program struct {
 
 func programInstructions(p *ir.Program) ([]byte, []int, error) {
 	a := &amd64Program{}
+	a.allocateRegisters(p, []int{2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15})
 	for range p.Code {
 		a.label()
 	}
 	a.guard, a.budget, a.returned = a.label(), a.label(), a.label()
+	initialize := a.label()
 	for pc, in := range p.Code {
 		if p.Maps[pc].Depth < 0 {
 			continue
@@ -38,27 +43,27 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 		switch in.Op {
 		case ir.Nop:
 		case ir.Copy:
-			a.load(in.Left, 0, 2)
-			a.store(in.Dest, 0, 2)
+			a.loadScalar(in.Left, 0, 2)
+			a.storeScalar(in.Dest, 0, 2)
 		case ir.CopyPair:
-			a.load(in.Left, 0, 2)
-			a.load(in.Right, 8, 9)
-			a.store(in.Dest, 0, 2)
-			a.store(in.Extra, 8, 9)
+			a.loadScalar(in.Left, 0, 2)
+			a.loadScalar(in.Right, 1, 9)
+			a.storeScalar(in.Dest, 0, 2)
+			a.storeScalar(in.Extra, 1, 9)
 		case ir.StoreLoad:
-			a.load(in.Left, 0, 2)
-			a.store(in.Dest, 0, 2)
-			a.load(in.Right, 0, 2)
-			a.store(in.Extra, 0, 2)
+			a.loadScalar(in.Left, 0, 2)
+			a.storeScalar(in.Dest, 0, 2)
+			a.loadScalar(in.Right, 0, 2)
+			a.storeScalar(in.Extra, 0, 2)
 		case ir.Swap:
-			a.load(ir.Slot(in.Dest), 0, 2)
-			a.load(ir.Slot(in.Extra), 8, 9)
-			a.store(in.Dest, 8, 9)
-			a.store(in.Extra, 0, 2)
+			a.loadScalar(ir.Slot(in.Dest), 0, 2)
+			a.loadScalar(ir.Slot(in.Extra), 1, 9)
+			a.storeScalar(in.Dest, 1, 9)
+			a.storeScalar(in.Extra, 0, 2)
 		case ir.Binary:
-			a.binary(in.Operator, in.Left, in.Right)
+			fp := a.binary(in.Operator, in.Left, in.Right, in.Dest)
 			if in.Operator <= ir.Div {
-				a.storeNumber(in.Dest)
+				a.storeNumber(in.Dest, fp)
 			} else {
 				a.storeBool(in.Dest)
 			}
@@ -81,13 +86,13 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 			if in.Postfix && in.Extra >= 0 {
 				a.load(in.Left, 8, 9)
 			}
-			a.binary(in.Operator, in.Left, ir.Literal(ir.Float(1)))
-			a.storeNumber(in.Dest)
+			fp := a.binary(in.Operator, in.Left, ir.Literal(ir.Float(1)), in.Dest)
+			a.storeNumber(in.Dest, fp)
 			if in.Extra >= 0 {
 				if in.Postfix {
 					a.store(in.Extra, 8, 9)
 				} else {
-					a.storeNumber(in.Extra)
+					a.storeNumber(in.Extra, fp)
 				}
 			}
 		case ir.Jump:
@@ -98,7 +103,7 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 			if in.Operator == ir.Truth {
 				a.truth(in.Left)
 			} else {
-				a.binary(in.Operator, in.Left, in.Right)
+				a.binary(in.Operator, in.Left, in.Right, -1)
 			}
 			a.commit()
 			a.bytes(0x48, 0x85, 0xc0) // testq ax, ax
@@ -125,6 +130,14 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 		kind  ir.ExitKind
 	}{{a.guard, ir.GuardExit}, {a.budget, ir.BudgetExit}, {a.returned, ir.Returned}} {
 		a.mark(exit.label)
+		for slot, reg := range a.registers {
+			if reg >= 0 {
+				a.fpMemory(0x11, byte(reg), uint32(slot*16))
+				if kind := a.kindRegister(slot); kind >= 0 {
+					a.memory(0x89, byte(kind), 6, uint32(slot*16+8))
+				}
+			}
+		}
 		a.memory(0x89, 10, 7, 0)
 		a.memory(0x89, 11, 7, 16)
 		a.stateImmediate(8, uint32(exit.kind))
@@ -139,9 +152,22 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 			continue
 		}
 		entries[pc] = len(a.code)
-		a.memory(0x8b, 10, 7, 0)
-		a.jump(pc)
+		a.bytes(0x48, 0x8d, 0x05) // leaq body(%rip), ax
+		a.fixups = append(a.fixups, relocation{offset: len(a.code), label: pc})
+		a.word(0)
+		a.jump(initialize)
 	}
+	a.mark(initialize)
+	a.memory(0x8b, 10, 7, 0)
+	for slot, reg := range a.registers {
+		if reg >= 0 {
+			a.fpMemory(0x10, byte(reg), uint32(slot*16))
+			if kind := a.kindRegister(slot); kind >= 0 {
+				a.memory(0x8b, byte(kind), 6, uint32(slot*16+8))
+			}
+		}
+	}
+	a.bytes(0xff, 0xe0) // jmp ax
 	if err := a.valid(); err != nil {
 		return nil, nil, err
 	}
@@ -180,13 +206,72 @@ func (a *amd64Program) load(o ir.Operand, bits, kind byte) {
 		a.immediate(kind, uint64(o.Literal.Kind))
 		return
 	}
-	a.memory(0x8b, bits, 6, uint32(o.Slot*16))
-	a.memory(0x8b, kind, 6, uint32(o.Slot*16+8))
+	if reg := a.registers[o.Slot]; reg >= 0 {
+		a.bytes(0x66, 0x48|byte(reg>>3)<<2|bits>>3, 0x0f, 0x7e, 0xc0|byte(reg&7)<<3|bits&7)
+	} else {
+		a.memory(0x8b, bits, 6, uint32(o.Slot*16))
+	}
+	a.loadKind(o.Slot, kind)
 }
 
 func (a *amd64Program) store(slot int, bits, kind byte) {
-	a.memory(0x89, bits, 6, uint32(slot*16))
-	a.memory(0x89, kind, 6, uint32(slot*16+8))
+	if reg := a.registers[slot]; reg >= 0 {
+		a.bytes(0x66, 0x48|byte(reg>>3)<<2|bits>>3, 0x0f, 0x6e, 0xc0|byte(reg&7)<<3|bits&7)
+	} else {
+		a.memory(0x89, bits, 6, uint32(slot*16))
+	}
+	a.storeKind(slot, kind)
+}
+
+func (a *amd64Program) kindRegister(slot int) int {
+	if reg := a.registers[slot]; reg >= 2 && reg < 6 {
+		return [...]int{3, 12, 13, 15}[reg-2]
+	}
+	return -1
+}
+
+func (a *amd64Program) move(dest, source byte) {
+	a.bytes(0x48|(source>>3)<<2|dest>>3, 0x89, 0xc0|(source&7)<<3|dest&7)
+}
+
+func (a *amd64Program) loadKind(slot int, kind byte) {
+	if reg := a.kindRegister(slot); reg >= 0 {
+		a.move(kind, byte(reg))
+	} else {
+		a.memory(0x8b, kind, 6, uint32(slot*16+8))
+	}
+}
+
+func (a *amd64Program) storeKind(slot int, kind byte) {
+	if reg := a.kindRegister(slot); reg >= 0 {
+		a.move(byte(reg), kind)
+	} else {
+		a.memory(0x89, kind, 6, uint32(slot*16+8))
+	}
+}
+
+func (a *amd64Program) loadScalar(o ir.Operand, xmm, kind byte) {
+	if o.Slot < 0 {
+		a.immediate(0, o.Literal.Bits)
+		a.bytes(0x66, 0x48, 0x0f, 0x6e, 0xc0|xmm<<3)
+		a.immediate(kind, uint64(o.Literal.Kind))
+	} else {
+		if reg := a.registers[o.Slot]; reg >= 0 {
+			a.fpMove(xmm, byte(reg))
+		} else {
+			a.fpMemory(0x10, xmm, uint32(o.Slot*16))
+		}
+		a.loadKind(o.Slot, kind)
+	}
+}
+
+func (a *amd64Program) storeScalar(slot int, xmm, kind byte) {
+	if reg := a.registers[slot]; reg >= 0 {
+		a.fpMove(byte(reg), xmm)
+	} else {
+		a.fpMemory(0x11, xmm, uint32(slot*16))
+	}
+	a.storeKind(slot, kind)
 }
 
 func (a *amd64Program) stateImmediate(offset, value uint32) {
@@ -196,6 +281,10 @@ func (a *amd64Program) stateImmediate(offset, value uint32) {
 }
 
 func (a *amd64Program) kindCompare(slot int, kind ir.Kind) {
+	if reg := a.kindRegister(slot); reg >= 0 {
+		a.bytes(0x48|byte(reg>>3), 0x83, 0xf8|byte(reg&7), byte(kind))
+		return
+	}
 	a.bytes(0x48, 0x83, 0xbe)
 	a.word(uint32(slot*16 + 8))
 	a.bytes(byte(kind))
@@ -203,52 +292,94 @@ func (a *amd64Program) kindCompare(slot int, kind ir.Kind) {
 
 func (a *amd64Program) commit() { a.bytes(0x49, 0xff, 0xca) } // decq r10
 
-func (a *amd64Program) number(o ir.Operand, xmm byte) {
+func (a *amd64Program) number(o ir.Operand, xmm byte) byte {
 	if o.Slot < 0 {
 		if o.Literal.Kind != ir.Number {
 			a.jump(a.guard)
 		}
 		a.immediate(0, o.Literal.Bits)
 		a.bytes(0x66, 0x48, 0x0f, 0x6e, 0xc0|xmm<<3) // movq ax, xmm
-		return
+		return xmm
 	}
 	a.kindCompare(o.Slot, ir.Number)
 	a.conditional(5, a.guard)
-	a.bytes(0xf2, 0x0f, 0x10, 0x86|xmm<<3)
-	a.word(uint32(o.Slot * 16))
+	if reg := a.registers[o.Slot]; reg >= 0 {
+		return byte(reg)
+	}
+	a.fpMemory(0x10, xmm, uint32(o.Slot*16))
+	return xmm
 }
 
-func (a *amd64Program) binary(op ir.Operator, left, right ir.Operand) {
-	a.number(left, 0)
-	a.number(right, 1)
-	if op <= ir.Div {
-		instruction := [...]byte{0x58, 0x5c, 0x59, 0x5e}[op]
-		a.bytes(0xf2, 0x0f, instruction, 0xc1)
-		return
+func (a *amd64Program) fpMemory(op, xmm byte, offset uint32) {
+	a.bytes(0xf2)
+	if xmm >= 8 {
+		a.bytes(0x44)
 	}
-	// UCOMISD sets parity on unordered operands. Handle that explicitly rather
-	// than reversing an ordered condition, which would mishandle NaNs.
-	nan, done := a.label(), a.label()
+	a.bytes(0x0f, op, 0x86|(xmm&7)<<3)
+	a.word(offset)
+}
+
+func (a *amd64Program) fpMove(dest, source byte) {
+	a.bytes(0xf2)
+	if dest >= 8 || source >= 8 {
+		a.bytes(0x40 | (dest>>3)<<2 | source>>3)
+	}
+	a.bytes(0x0f, 0x10, 0xc0|(dest&7)<<3|source&7)
+}
+
+func (a *amd64Program) binary(op ir.Operator, left, right ir.Operand, dest int) byte {
+	l := a.number(left, 0)
+	r := a.number(right, 1)
+	if op <= ir.Div {
+		fp := byte(0)
+		if reg := a.registers[dest]; reg >= 0 {
+			fp = byte(reg)
+		}
+		// SSE2 overwrites its left operand. Preserve an aliased right input
+		// until the operation has completed, then store the result normally.
+		if fp == r && fp != l {
+			fp = 0
+		}
+		if fp != l {
+			a.fpMove(fp, l)
+		}
+		instruction := [...]byte{0x58, 0x5c, 0x59, 0x5e}[op]
+		a.fpBinary(0xf2, instruction, fp, r)
+		return fp
+	}
+	// UCOMISD sets parity on unordered operands. Mask those out for <, <=,
+	// and ==; include them for !=. > and >= are already false when unordered.
 	a.immediate(0, 0)
-	a.bytes(0x66, 0x0f, 0x2e, 0xc1)
-	a.conditional(10, nan)
+	a.fpBinary(0x66, 0x2e, l, r)
 	condition := [...]byte{2, 6, 7, 3, 4, 5}[op-ir.Lt]
 	a.bytes(0x0f, 0x90+condition, 0xc0)
-	a.jump(done)
-	a.mark(nan)
-	nanResult := uint64(0)
-	if op == ir.Ne {
-		nanResult = 1
+	switch op {
+	case ir.Lt, ir.Le, ir.Eq:
+		a.bytes(0x0f, 0x9b, 0xc2, 0x20, 0xd0) // setnp dl; andb dl, al
+	case ir.Ne:
+		a.bytes(0x0f, 0x9a, 0xc2, 0x08, 0xd0) // setp dl; orb dl, al
 	}
-	a.immediate(0, nanResult)
-	a.mark(done)
+	return 0
 }
 
-func (a *amd64Program) storeNumber(slot int) {
-	a.bytes(0xf2, 0x0f, 0x11, 0x86)
-	a.word(uint32(slot * 16))
+func (a *amd64Program) fpBinary(prefix, op, left, right byte) {
+	a.bytes(prefix)
+	if left >= 8 || right >= 8 {
+		a.bytes(0x40 | (left>>3)<<2 | right>>3)
+	}
+	a.bytes(0x0f, op, 0xc0|(left&7)<<3|right&7)
+}
+
+func (a *amd64Program) storeNumber(slot int, fp byte) {
+	if reg := a.registers[slot]; reg >= 0 {
+		if byte(reg) != fp {
+			a.fpMove(byte(reg), fp)
+		}
+	} else {
+		a.fpMemory(0x11, fp, uint32(slot*16))
+	}
 	a.immediate(2, uint64(ir.Number))
-	a.memory(0x89, 2, 6, uint32(slot*16+8))
+	a.storeKind(slot, 2)
 }
 
 func (a *amd64Program) storeBool(slot int) {
