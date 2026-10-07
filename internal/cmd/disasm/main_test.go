@@ -54,3 +54,30 @@ async function run(a) { a[a.length - 1]++; await 0 }
 		t.Errorf("-func gen printed %d:\n%s", p.printed, got)
 	}
 }
+
+func TestJITReport(t *testing.T) {
+	src := `function sum(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s }
+function read(o) { return o.x }`
+	fn, err := compile("t.js", src, false, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	p := printer{w: &out, jit: true}
+	p.function(fn, "")
+	for _, want := range []string{
+		"jit IR: refused: jit: top-level or module code",
+		"jit IR: eligible (native compilation and execution not enabled)",
+		"jit slots: 3 locals + 6 operands",
+		"jit exit: pc=6 depth=0",
+		"jit exit: pc=7 depth=2",
+		"jit IR: refused: jit: pc 1: unsupported opcode get_prop",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("missing %q in\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "jit exit: pc=15") {
+		t.Errorf("reported unreachable trailing return:\n%s", out.String())
+	}
+}

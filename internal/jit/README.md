@@ -2,8 +2,10 @@
 
 This package implements the first experiments in [the JIT plan](../../docs/jit-plan.md).
 It emits a bounded numeric kernel directly as amd64 or arm64 machine code.
-It does not yet compile JavaScript bytecode, select a VM execution tier, or
-provide the proposed `WithJIT()` option.
+Its `compile` subpackage now lowers numeric JavaScript bytecode into a slot IR,
+with a Go evaluator in `ir` for verifying interpreter exits. It does not yet
+emit native code for that IR, select a VM execution tier, or provide the proposed
+`WithJIT()` option.
 
 Ordinary builds exclude the machine-code emitters, OS allocation backends,
 and assembly bridges. With `-tags quickjs_jit`, a backend is included only on
@@ -119,7 +121,50 @@ under emulation. Windows/amd64 was cross-compiled and vetted; execution on
 Windows and native Linux hardware remains for CI. Tagged fallback builds for
 Windows/arm64 and Linux/386 also compiled successfully.
 
-The next milestone adds VM-specific eligibility, bytecode state/exit maps,
-and bounded runtime ownership. Preserve the existing `Function.VMCode` tree
-cache and handle both `runFD` and cached `callTree` dispatch when integration
-begins. Add a runtime option only once it controls actual JavaScript execution.
+## Compiler and state-map foundation
+
+`compile.Lower` accepts a conservative numeric subset of the VM's bytecode:
+locals, primitive constants, stack copies, arithmetic, numeric comparisons,
+branches, increments/decrements, and primitive returns. It handles fused local,
+immediate, and comparison instructions without exposing half-completed bytecode
+operations. Captured locals, upvalues, arguments objects, direct eval, non-simple
+parameters, calls, handlers, `with`, and other unsupported opcodes are refused,
+including in unreachable code. Work is bounded to 4096 bytecode instructions and
+256 total local/operand slots. It never changes `Function.VMCode`.
+
+The analysis checks local/constant operands, branch targets, stack underflow,
+stack capacity, and agreement at control-flow joins. Each reachable instruction
+has a map of the next bytecode PC and live operand depth. Short-circuit branches
+preserve their operand on the taken edge and pop it on the fallthrough edge.
+The IR keeps locals first and operands next, in the interpreter's order.
+
+IR scratch contains only 16-byte pointer-free scalars. Reference values are
+opaque indices into Go-owned roots, and can be copied but cannot participate in
+numeric operations. Guards return before changing any operand or local of the
+failing instruction. The Go evaluator bounds executed instructions even in an
+infinite loop; budget exits can resume at any reachable map. VM publication must
+use `vm.Float` to normalize arithmetic NaNs, rather than copying raw IEEE bits
+into boxed values.
+
+`internal/vm/jit_state_test.go` uses test-only adapters to publish those maps into
+real frames and resume `executeAt`. The corpus compares every executed boundary
+with uninterrupted interpretation, including signed zero, NaNs, subnormals,
+infinities, loops, and short-circuit branches. Guard tests pin earlier committed
+writes, exactly-once coercion, TDZ and BigInt error types/messages, and the saved
+bytecode location. The adapters are not wired into production execution.
+
+Inspect eligibility without native support or executable-memory allocation:
+
+```sh
+go run ./internal/cmd/disasm -jit -func sum -e \
+  'function sum(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s }'
+go test ./internal/jit/... ./internal/cmd/disasm
+go test ./internal/vm -run '^TestJIT' -count=1
+go test -race ./internal/jit/compile ./internal/jit/ir
+go test ./internal/jit/compile -run '^$' -fuzz '^FuzzLower$' -fuzztime=15s
+```
+
+Next come bounded runtime ownership and memory accounting, then native IR
+emission and VM dispatch. Preserve the existing `Function.VMCode` tree cache and
+handle both `runFD` and cached `callTree` dispatch when integration begins.
+Add a runtime option only once it controls actual JavaScript execution.

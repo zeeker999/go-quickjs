@@ -1,9 +1,13 @@
 # Native JIT implementation plan
 
 Status: implementation started, October 7, 2026. The optional leaf-kernel
-boundary prototype is in `internal/jit`; JavaScript execution still uses the
-existing tiers. See [the prototype notes](../internal/jit/README.md) for its
-contract, validation, and current limits. The later milestones remain proposed.
+boundary prototype is in `internal/jit`. The compiler foundation now includes
+numeric bytecode eligibility, a pointer-free slot IR, control-flow stack maps,
+and a bounded Go evaluator tested against actual interpreter resumption.
+`disasm -jit` reports eligibility and exit maps. JavaScript execution still uses
+the existing tiers; runtime code ownership, memory accounting, and native IR
+emission remain to be implemented. See [the implementation notes](../internal/jit/README.md)
+for contracts, validation, and current limits.
 
 ## Objective and scope
 
@@ -49,11 +53,13 @@ SSA compiler are outside the first release.
 
 ## Architecture
 
-Keep machine-code infrastructure in a new `internal/jit` package, with no
+Keep machine-code infrastructure in `internal/jit`, with no
 dependency on `internal/vm`. Its responsibilities are a small intermediate
 representation, instruction emission, relocations, executable allocations,
-bridges, and code ownership. VM-specific eligibility, value conversion,
-hotness, frame publication, and fallback remain in `internal/vm`.
+bridges, and code ownership. `internal/jit/ir` defines the slot IR;
+`internal/jit/compile` owns the bytecode adapter and eligibility analysis without
+importing the VM or touching its hot-code layout. VM value conversion, hotness,
+frame publication, and fallback remain in `internal/vm`.
 
 The initial flow is:
 
