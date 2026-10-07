@@ -199,19 +199,36 @@ weak-cache registration and lookup. Memory, executable-policy, emission, and
 dynamic guard refusals are not permanent hints. Shared bytecode stays immutable.
 
 Framed calls accumulate a saturating counter on the closure. Currently the
-eighth call permits compilation; earlier calls allocate no JIT state and keep
-using the existing tier. These counts are per closure within a runtime, even
+eighth call permits compilation; short earlier calls allocate no JIT state and
+keep using the existing tier. These counts are per closure within a runtime, even
 when other closures or runtimes share the bytecode template. The counter fits
 existing closure padding. Cached tree calls pass through the same selection
 point, while frameless paths remain ahead of native selection. Temporary
 resource refusals reset the counter so compilation is retried after another
 warmup. The threshold is an internal policy, not an embedding API guarantee.
 
-There is no back-edge counting or OSR yet. One long invocation therefore stays
-in its existing tier when its closure is cold; call hotness cannot estimate
-how much work that invocation will do. Boundary tests force early promotion
-internally and assert native entries; separate tests exercise the default
-threshold, counter saturation, runtime isolation, and temporary refusals.
+Long invocations also promote at existing back-edge interrupt checks, using
+their runtime-wide 1024-back-edge budget as coarse work feedback. The initial
+interrupt check is not a completed work budget. Both interpreter and tree
+execution enter at the completed branch's target, after cancellation, memory,
+and stale-slot checks. Tree branch nodes already spill live operands there.
+The native entry map must match the live operand depth before locals and
+operands are encoded. Completed setup and branch effects are never replayed.
+Tree execution unwinds its branch nodes to `runTree` only after native execution
+or guard fallback finishes; ordinary tree exceptions retain their existing path.
+
+A failed guard selects interpretation for the rest of that invocation, even if
+coercion evicts its native cache entry. Nested calls can still enter native code.
+The suppression tracks bounded frame depth and restores the parent's value on
+return; it retains no frame pointer. Temporary refusals delay further loop
+attempts for eight check budgets as well as restarting call warmup. The extra
+closure/runtime fields fit existing padding. Ordinary builds inline empty
+hooks out of both executors; no new per-iteration counter is introduced.
+
+Boundary tests force early promotion internally and assert native entries.
+Separate tests cover call warmup, first-call OSR in both existing tiers, live
+opaque operands, cancellation, guard effects with eviction, exact BigInt/TDZ
+messages and trace PCs, counter saturation, runtime isolation, and refusals.
 
 ### Initial integration validation snapshot (8a96be4)
 
@@ -290,10 +307,10 @@ The final qjs binaries are 40,169,618 bytes without the tag and 40,291,858 bytes
 with it, a 122,240-byte (0.3%) difference.
 Default and tagged full suites, Go 1.24 native tests, race/checkptr tests, and
 all 92,869 executed JIT-enabled test262 variants pass after tuning.
-Work-based hotness feedback, OSR, broader numeric coverage, and fewer scalar
+More precise hotness feedback, broader numeric coverage, and fewer scalar
 loads/guards remain future work.
 
-### Call-promotion measurements
+### Call-promotion measurements (8c5769e)
 
 The entry policy's eight-call warmup reduces eager compilation for cold
 closures. Three fresh benchmark processes on the same host compare existing
@@ -356,6 +373,50 @@ go run ./internal/cmd/v8bench/placements compare -jit -dir /tmp/v8-v7 base chang
 Build both placement labels with the tag in the same checkout. `compare -jit`
 enables native execution in both sets; omit it to measure tagged runtime opt-out.
 
+### Loop-promotion measurements
+
+The same fresh-runtime benchmark now selects native code automatically on
+call warmup or a full back-edge check budget. Three fresh processes on the
+same host include runtime construction, native compilation, and release:
+
+| Loop iterations per call | Calls per closure | Existing | Eager native | Automatic promotion |
+|---|---|---|---|---|
+| 100 | 1 | 68.4 us | 100.6 us | 70.8 us |
+| 100 | 4 | 70.0 us | 104.5 us | 73.6 us |
+| 100 | 16 | 86.7 us | 114.5 us | 115.5 us |
+| 100 | 64 | 147.6 us | 141.9 us | 146.2 us |
+| 10,000 | 1 | 180.0 us | 154.7 us | 160.9 us |
+| 10,000 | 4 | 508.5 us | 323.7 us | 327.4 us |
+| 10,000 | 16 | 1922.5 us | 967.9 us | 976.2 us |
+| 10,000 | 64 | 7003.2 us | 3512.7 us | 3494.7 us |
+
+A single long call can now repay compilation without waiting for call warmup.
+Short cold calls still take 1,210 Go allocations and no native pages; eager
+compilation takes 1,245 allocations. Automatically promoted runs take 1,243
+allocations. A one-call long run uses about 307 KB of Go allocations versus
+290 KB existing. Warm lexical loops retain about 53.5 us native versus 108 us
+interpreted, with 244-245 Go bytes and three allocations per calling script.
+Call-based promotion of frequently called short loops still need not repay
+compilation; this policy has no universal performance guarantee.
+
+Three alternating fresh fixed-work V8 processes average 1,057 ms before OSR,
+1,045 ms with OSR, and 1,043 ms with JIT disabled in the OSR binary. Treat these
+totals as effectively level, not an aggregate speedup claim. Eight placements
+per side, three rounds each, confirm flat totals: -0.1% ordinary, effectively
+0.0% JIT enabled, and 0.0% tagged runtime opt-out. Individual suites range from
+-1.0% to +1.1% ordinary, -1.0% to +0.9% enabled, and -1.2% to +1.3% opt-out.
+Go allocations remain about 672.6 MB enabled and 672.4 MB
+disabled, with 9.4 MB live after GC for both. Peak RSS overlaps at 234-239 MiB
+enabled and 231-241 MiB disabled.
+
+The final qjs binaries are 40,169,618 bytes without the tag and 40,292,418
+bytes with it: a 122,800-byte (0.3%) difference. Default and tagged full suites,
+both vet configurations, Go 1.24 tests, race/checkptr tests, and Linux/amd64
+native and VM tests under emulation pass. JIT-enabled test262 reports 92,869
+passed, zero failed, and 342 existing skips. Windows/amd64 and fallback builds
+for Windows/arm64 and Linux/386 compile; actual Windows execution remains
+unverified locally.
+
 Inspect eligibility without native support or executable-memory allocation:
 
 ```sh
@@ -367,7 +428,7 @@ go test -race ./internal/jit/compile ./internal/jit/ir
 go test ./internal/jit/compile -run '^$' -fuzz '^FuzzLower$' -fuzztime=15s
 ```
 
-Next come bounded runtime ownership and memory accounting, then native IR
-emission and VM dispatch. Preserve the existing `Function.VMCode` tree cache and
-handle both `runFD` and cached `callTree` dispatch when integration begins.
-Add a runtime option only once it controls actual JavaScript execution.
+Future work includes more precise per-function work feedback, broader numeric
+coverage, and reducing scalar loads and guards. Runtime ownership, memory
+accounting, native emission, VM dispatch, and limited on-stack replacement are
+implemented; the existing `Function.VMCode` tree cache remains independent.

@@ -7,5 +7,10 @@ type jitClosureFields struct{}
 
 func (*Runtime) initJIT(bool)                            {}
 func (*Runtime) tryJITFrame(*frame) (Value, error, bool) { return Undefined, nil, false }
-func (*Runtime) jitCodeBytes() int64                     { return 0 }
-func (*Runtime) releaseJIT()                             {}
+func (*Runtime) tryJITLoop(*frame, uint32, int, bool) (Value, error, bool) {
+	return Undefined, nil, false
+}
+func (*Runtime) tryJITTreeLoop(*tctx, int, int, bool) {}
+func jitTreeResult(any) (Value, error, bool)          { return Undefined, nil, false }
+func (*Runtime) jitCodeBytes() int64                  { return 0 }
+func (*Runtime) releaseJIT()                          {}

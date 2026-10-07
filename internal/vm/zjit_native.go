@@ -22,14 +22,16 @@ const jitHotCalls = 8
 type jitFields struct {
 	jitEnabled       bool
 	jitCallThreshold uint8
+	jitDeoptDepth    uint32
 	jit              *jitState
 }
 
 // A closure belongs to one runtime. Hotness and permanent bytecode refusals
 // live here without registering a weak key on cold or refused calls.
 type jitClosureFields struct {
-	jitRefused bool
-	jitCalls   uint8
+	jitRefused   bool
+	jitCalls     uint8
+	jitLoopDelay uint8
 }
 
 type jitEntry struct {
@@ -48,6 +50,7 @@ type jitState struct {
 	entries     uint64
 	guards      uint64
 	budgets     uint64
+	osrs        uint64
 }
 
 func (r *Runtime) initJIT(enabled bool) {
@@ -221,11 +224,30 @@ func (r *Runtime) tryJITFrame(f *frame) (Value, error, bool) {
 			return Undefined, nil, false
 		}
 	}
+	return r.tryJITAt(f, 0, 0, false)
+}
+
+// The existing back-edge interrupt budget supplies coarse work feedback.
+// Promotion starts at the completed branch's target, never at function entry.
+func (r *Runtime) tryJITLoop(f *frame, pc uint32, sp int, fullBudget bool) (Value, error, bool) {
+	if !r.jitEnabled || !fullBudget || f.cl.jitRefused || int(r.jitDeoptDepth) == r.frameDepth || f.cl.fn.TopLevel || f.cl.fn.IsModule {
+		return Undefined, nil, false
+	}
+	if f.cl.jitLoopDelay != 0 {
+		f.cl.jitLoopDelay--
+		return Undefined, nil, false
+	}
+	f.cl.jitCalls = r.jitCallThreshold
+	return r.tryJITAt(f, int(pc), sp-f.base, true)
+}
+
+func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, bool) {
 	e := r.jitFor(f.cl.fn)
 	if e == nil {
 		// Resource and OS refusals may change. Retry after another warmup,
 		// rather than charging every call for an unsuccessful compilation.
 		f.cl.jitCalls = 0
+		f.cl.jitLoopDelay = jitHotCalls
 		return Undefined, nil, false
 	}
 	if e.code == nil {
@@ -235,13 +257,23 @@ func (r *Runtime) tryJITFrame(f *frame) (Value, error, bool) {
 	if e.misses >= 8 {
 		return Undefined, nil, false
 	}
+	wantDepth, ok := e.code.EntryDepth(pc)
+	if !ok || depth != wantDepth {
+		return Undefined, nil, false
+	}
+	f.cl.jitLoopDelay = 0
 	s := r.jit
 	n := len(f.locals) + f.cl.fn.MaxStack
 	clear(s.slots[:n])
 	for i, v := range f.locals {
 		s.slots[i] = s.encode(v)
 	}
-	pc := 0
+	for i, v := range r.stack[f.base : f.base+depth] {
+		s.slots[len(f.locals)+i] = s.encode(v)
+	}
+	if osr {
+		s.osrs++
+	}
 	for {
 		s.entries++
 		exit, err := e.code.Run(s.slots[:n], pc, jit.MaxIterations)
@@ -261,6 +293,12 @@ func (r *Runtime) tryJITFrame(f *frame) (Value, error, bool) {
 			s.guards++
 			e.misses++
 			s.clearRoots()
+			// A guard has already selected interpretation for this invocation.
+			// Suppress loop reentry even if coercion evicts the cached code.
+			previous := r.jitDeoptDepth
+			// Frame depth is bounded by maxGoRecursion and fits uint32.
+			r.jitDeoptDepth = uint32(r.frameDepth)
+			defer func() { r.jitDeoptDepth = previous }()
 			v, err := r.executeAt(f, f.base+exit.State.Depth, nil)
 			return v, err, true
 		case ir.BudgetExit:
@@ -272,4 +310,24 @@ func (r *Runtime) tryJITFrame(f *frame) (Value, error, bool) {
 			pc = int(exit.State.PC)
 		}
 	}
+}
+
+type jitTreeExit struct {
+	value Value
+	err   error
+}
+
+func (r *Runtime) tryJITTreeLoop(c *tctx, pc, depth int, fullBudget bool) {
+	if v, err, done := r.tryJITLoop(c.f, c.cl.fn.Code[pc].A, c.f.base+depth, fullBudget); done {
+		// Tree branch nodes return block indices. Unwind to runTree only
+		// after native execution or its interpreter fallback has completed.
+		panic(jitTreeExit{v, err})
+	}
+}
+
+func jitTreeResult(p any) (Value, error, bool) {
+	if exit, ok := p.(jitTreeExit); ok {
+		return exit.value, exit.err, true
+	}
+	return Undefined, nil, false
 }

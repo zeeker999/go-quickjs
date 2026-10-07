@@ -80,6 +80,9 @@ func TestNativeProgramLifecycle(t *testing.T) {
 		t.Fatalf("Run = %+v, %v", got, err)
 	}
 	for _, pc := range []int{-1, 1, math.MaxInt} {
+		if _, ok := c.EntryDepth(pc); ok {
+			t.Fatalf("invalid entry map %d", pc)
+		}
 		if _, err := c.Run(nil, pc, 1); !errors.Is(err, ir.ErrState) {
 			t.Fatalf("invalid pc %d: %v", pc, err)
 		}
@@ -95,6 +98,9 @@ func TestNativeProgramLifecycle(t *testing.T) {
 	}
 	if c.Size() != 0 || c.MetadataSize() != 0 {
 		t.Fatal("closed owner retained memory")
+	}
+	if _, ok := c.EntryDepth(0); ok {
+		t.Fatal("closed code exposed an entry")
 	}
 	if err := c.Close(); err != nil {
 		t.Fatal(err)
@@ -138,6 +144,11 @@ func TestNativeProgramEveryEntry(t *testing.T) {
 		p.Maps[pc].PC = uint32(pc)
 	}
 	c := newTestCode(t, p)
+	for pc := range p.Maps {
+		if depth, ok := c.EntryDepth(pc); !ok || depth != p.Maps[pc].Depth {
+			t.Fatalf("entry %d depth = %d, %v", pc, depth, ok)
+		}
+	}
 	for _, value := range []ir.Value{ir.Float(2), ir.Bool(true), {Kind: ir.Opaque, Bits: 123}, {Kind: ir.Uninitialized}} {
 		for pc := range p.Code {
 			for _, budget := range []uint64{0, 1, 2, 3, MaxIterations} {

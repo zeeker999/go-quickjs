@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"weak"
@@ -333,12 +334,12 @@ func TestJITCallPromotion(t *testing.T) {
 func TestJITPromotionRetriesMemoryRefusal(t *testing.T) {
 	r := New(Config{JIT: true, MemoryLimit: 256 << 10})
 	t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
-	v, err := r.Run(compileForTest(t, jitSumSource+`; sum`))
+	v, err := r.Run(compileForTest(t, `function sum(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s } sum`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	cl := v.Object().fn().closure
-	for i := 1; i < jitHotCalls; i++ {
+	for i := 0; i < jitHotCalls; i++ {
 		if _, err := r.Call(v, Undefined, []Value{Int32(10)}); err != nil {
 			t.Fatal(err)
 		}
@@ -401,6 +402,177 @@ func TestJITPromotionKeepsFramelessCalls(t *testing.T) {
 	}
 }
 
+func TestJITLoopPromotionFirstCall(t *testing.T) {
+	for _, keyword := range []string{"var", "let"} {
+		t.Run(keyword, func(t *testing.T) {
+			r := New(Config{JIT: true})
+			t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
+			source := "function sum(n) { " + keyword + " s=0; for(" + keyword + " i=0;i<n;i++) s+=i; return s } sum(10000)"
+			v, err := r.Run(compileForTest(t, source))
+			if err != nil || v.Number() != 49995000 {
+				t.Fatalf("first call = %v, %v", v, err)
+			}
+			if r.jit == nil || r.jit.osrs != 1 || r.jit.budgets == 0 || r.jit.rootCount != 0 {
+				t.Fatal("first long call did not complete bounded OSR")
+			}
+			cl := r.global.getOwn(r.atoms.intern("sum")).value.Object().fn().closure
+			tree := (*tree)(atomic.LoadPointer(&cl.fn.VMCode))
+			if keyword == "var" && (tree == nil || tree == noTree) || keyword == "let" && tree != noTree {
+				t.Fatal("test did not exercise its expected existing tier")
+			}
+			if r.jitDeoptDepth != 0 {
+				t.Fatal("completed call retained a deoptimized frame")
+			}
+		})
+	}
+}
+
+func TestJITLoopPromotionAtEntryPC(t *testing.T) {
+	r := New(Config{JIT: true})
+	t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
+	v, err := r.Run(compileForTest(t, `function f(n) { while(n) n--; return n } f(10000)`))
+	if err != nil || v.Number() != 0 {
+		t.Fatalf("entry loop = %v, %v", v, err)
+	}
+	if r.jit == nil || r.jit.osrs != 1 {
+		t.Fatal("loop targeting entry did not promote")
+	}
+}
+
+func TestJITLoopPromotionLiveOperands(t *testing.T) {
+	for _, keyword := range []string{"var", "let"} {
+		t.Run(keyword, func(t *testing.T) {
+			r := New(Config{JIT: true})
+			t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
+			original := jitFunctionForTest(t, "function f(a,n) { "+keyword+" s=0; for("+keyword+" i=0;i<n;i++) s+=i; return s }")
+			fn := *original
+			// Carry an opaque operand through the loop, then return it after
+			// a swap. Native return must guard and publish that exact operand.
+			fn.Code = []bytecode.Instr{{Op: bytecode.OpGetLocal}}
+			mapping := make([]uint32, len(original.Code))
+			for i, in := range original.Code {
+				mapping[i] = uint32(len(fn.Code))
+				if in.Op == bytecode.OpReturn {
+					fn.Code = append(fn.Code, bytecode.Instr{Op: bytecode.OpSwap})
+				}
+				fn.Code = append(fn.Code, in)
+			}
+			for i := 1; i < len(fn.Code); i++ {
+				switch fn.Code[i].Op {
+				case bytecode.OpJump, bytecode.OpJumpIfTrue, bytecode.OpJumpIfFalse,
+					bytecode.OpJumpIfTrueKeep, bytecode.OpJumpIfFalseKeep, bytecode.OpJumpIfCmpFalse:
+					fn.Code[i].A = mapping[fn.Code[i].A]
+				}
+			}
+			fn.MaxStack++
+			o := r.NewObject()
+			v, err := r.run(r.prepare(&fn), Undefined, []Value{Obj(o), Int32(10000)}, Undefined, nil)
+			if err != nil || !v.IsObject() || v.Object() != o {
+				t.Fatalf("live operand = %v, %v", v, err)
+			}
+			if r.jit == nil || r.jit.osrs != 1 || r.jit.guards != 1 || r.jit.rootCount != 0 {
+				t.Fatal("live operand was lost, unguarded, or retained")
+			}
+			for _, root := range r.jit.roots {
+				if root.IsObject() {
+					t.Fatal("OSR retained an opaque root")
+				}
+			}
+		})
+	}
+}
+
+func TestJITLoopGuardSuppressesReentry(t *testing.T) {
+	for _, keyword := range []string{"var", "let"} {
+		t.Run(keyword, func(t *testing.T) {
+			r := New(Config{JIT: true})
+			t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
+			count := 0
+			var state *jitState
+			o := r.NewObject()
+			o.setOwnRaw(r.atoms.intern("valueOf"), r.NewFunction("valueOf", 0,
+				func(rt *Runtime, _ Value, _ []Value) (Value, error) {
+					count++
+					if rt.jit != nil {
+						if state != nil {
+							t.Fatal("deoptimized invocation recompiled after eviction")
+						}
+						state = rt.jit
+						rt.releaseJIT()
+					}
+					return Int32(1), nil
+				}), propDefault)
+			r.global.setOwnRaw(r.atoms.intern("operand"), Obj(o), propDefault)
+			source := "function f(n,a) { " + keyword + " s=0; for(" + keyword + " i=0;i<n;i++) s+=a; return s } f(10000,operand)"
+			v, err := r.Run(compileForTest(t, source))
+			if err != nil || v.Number() != 10000 || count != 10000 {
+				t.Fatalf("guard = %v, %v; coercions %d", v, err, count)
+			}
+			if state == nil || state.osrs != 1 || state.guards != 1 || state.rootCount != 0 || r.jitDeoptDepth != 0 {
+				t.Fatal("guard did not exit once or restore ownership")
+			}
+		})
+	}
+}
+
+func TestJITLoopPromotionCancellation(t *testing.T) {
+	for _, keyword := range []string{"var", "let"} {
+		t.Run(keyword, func(t *testing.T) {
+			r := New(Config{JIT: true})
+			t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+			defer cancel()
+			r.SetContext(ctx)
+			_, err := r.Run(compileForTest(t, "function f() { "+keyword+" i=0; for(;;) i++ } f()"))
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("cancel = %v", err)
+			}
+			if r.jit == nil || r.jit.osrs != 1 || r.jit.budgets == 0 {
+				t.Fatal("first infinite call never entered bounded native code")
+			}
+		})
+	}
+}
+
+func TestJITLoopGuardErrors(t *testing.T) {
+	for _, tc := range []struct{ name, source, message string }{
+		{"bigint", `function f(n,a) { var s=0; for(var i=0;i<n;i++) { s+=i; if(i===2000) s+=a } return s } f(10000,1n)`,
+			"TypeError: cannot mix BigInt and other types"},
+		{"tdz", `function f(n) { let s=0; for(let i=0;i<n;i++) { s+=i; if(i===2000) { let x=x; s+=x } } return s } f(10000)`,
+			`ReferenceError: cannot access "x" before initialization`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := compileForTest(t, tc.source)
+			var baseline *Thrown
+			for _, enabled := range []bool{false, true} {
+				r := New(Config{JIT: enabled})
+				t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
+				_, err := r.Run(p)
+				var thrown *Thrown
+				if !errors.As(err, &thrown) || thrown.Error() != tc.message {
+					t.Fatalf("enabled %v: error = %v", enabled, err)
+				}
+				if !enabled {
+					baseline = thrown
+					continue
+				}
+				if r.jit == nil || r.jit.osrs != 1 || r.jit.guards != 1 || r.jit.rootCount != 0 || r.jitDeoptDepth != 0 {
+					t.Fatal("error did not follow OSR and guard fallback")
+				}
+				if len(thrown.trace.frames) != len(baseline.trace.frames) {
+					t.Fatal("OSR changed the thrown trace depth")
+				}
+				for i, frame := range thrown.trace.frames {
+					want := baseline.trace.frames[i]
+					if frame.fn != want.fn || frame.pc != want.pc {
+						t.Fatalf("trace frame %d = %+v, want %+v", i, frame, want)
+					}
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkJITNumericLoop(b *testing.B) {
 	for _, keyword := range []string{"var", "let"} {
 		for _, enabled := range []bool{false, true} {
@@ -455,7 +627,7 @@ func BenchmarkJITNumericLoop(b *testing.B) {
 func BenchmarkJITCallPromotion(b *testing.B) {
 	for _, iterations := range []int{100, 10000} {
 		for _, calls := range []int{1, 4, 16, 64} {
-			for _, mode := range []string{"existing", "eager", "delayed"} {
+			for _, mode := range []string{"existing", "eager", "automatic"} {
 				b.Run(fmt.Sprintf("iterations%d/calls%d/%s", iterations, calls, mode), func(b *testing.B) {
 					source := fmt.Sprintf(`function sum(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s }
 					var result; for(var k=0;k<%d;k++) result=sum(%d); result`, calls, iterations)
@@ -482,10 +654,10 @@ func BenchmarkJITCallPromotion(b *testing.B) {
 						if err != nil || v.Number() != float64(iterations*(iterations-1)/2) {
 							b.Fatalf("sum = %v, %v", v, err)
 						}
-						if mode != "existing" && (mode == "eager" || calls >= jitHotCalls) && !native {
+						if mode != "existing" && (mode == "eager" || calls >= jitHotCalls || iterations > backEdgeCheckInterval+1) && !native {
 							b.Fatal("hot benchmark did not enter native code")
 						}
-						if mode == "delayed" && calls < jitHotCalls && coldState {
+						if mode == "automatic" && calls < jitHotCalls && iterations < backEdgeCheckInterval && coldState {
 							b.Fatal("cold benchmark allocated native state")
 						}
 					}

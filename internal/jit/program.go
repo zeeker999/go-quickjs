@@ -47,6 +47,15 @@ func Compile(p *ir.Program) (*Code, error) {
 // work is bounded by the IR and code-size limits regardless of this budget.
 func CompileBudget(p *ir.Program, bytes int) (*Code, error) { return compileProgram(p, bytes) }
 
+// EntryDepth reports the live operand depth at a reachable native entry.
+// Closed code and unreachable or invalid PCs have no entry.
+func (c *Code) EntryDepth(pc int) (int, bool) {
+	if c == nil || len(c.code) == 0 || pc < 0 || pc >= len(c.entries) || c.entries[pc] < 0 {
+		return 0, false
+	}
+	return c.maps[pc].Depth, true
+}
+
 // Run enters at a reachable bytecode PC and executes at most MaxIterations
 // committed IR instructions before returning to Go. Guards commit no part of
 // their failing instruction. Reference handles remain the caller's ownership.

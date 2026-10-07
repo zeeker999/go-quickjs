@@ -133,7 +133,11 @@ func (r *Runtime) runTree(f *frame, t *tree) (v Value, err error) {
 		if p := recover(); p != nil {
 			th, ok := p.(treeThrow)
 			if !ok {
-				panic(p)
+				v, err, ok = jitTreeResult(p)
+				if !ok {
+					panic(p)
+				}
+				return
 			}
 			// The trees this one called without a recover of their own
 			// (runTreeNested) left their frames to it.
@@ -207,12 +211,14 @@ func (c *tctx) backEdge(pc, depth int) {
 // is inlined where a loop jumps back.
 func (c *tctx) backEdgeCheck(pc, depth int) {
 	r := c.r
+	fullBudget := r.backEdges == 1
 	r.backEdges = backEdgeCheckInterval
 	c.at(pc)
 	if err := r.checkInterruptNow(); err != nil {
 		c.throw(err)
 	}
 	r.sweepStaleSlots(c.f.base + depth)
+	r.tryJITTreeLoop(c, pc, depth, fullBudget)
 }
 
 func truthy(v Value) bool {

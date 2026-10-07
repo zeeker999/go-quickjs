@@ -7,9 +7,11 @@ that resume the interpreter and periodic exits for cancellation and limits.
 Runtime-owned caches, executable memory accounting, and deferred cleanup are
 implemented. Native budget/PC register bookkeeping and permanent closure refusal
 hints reduce instruction and selection overhead. Framed calls promote hot
-closures after a bounded warmup without allocating state for cold calls.
-`disasm -jit` reports IR eligibility and exit maps. Back-edge hotness, OSR,
-wider opcode coverage, and performance qualification remain future work.
+closures after a bounded warmup without allocating state for short cold calls.
+Long calls can enter native code at existing interpreter and tree back-edge
+checks using the completed branch's target and spilled state. `disasm -jit`
+reports IR eligibility and exit maps. More precise hotness feedback, wider
+opcode coverage, and performance qualification remain future work.
 See [the implementation notes](../internal/jit/README.md)
 for contracts, validation, and current limits.
 
@@ -68,7 +70,7 @@ frame publication, and fallback remain in `internal/vm`.
 The initial flow is:
 
 ```text
-Framed function entries accumulate hotness
+Framed function entries or full back-edge check budgets accumulate hotness
     -> VM checks function eligibility
     -> bytecode becomes a small control-flow IR
     -> amd64 or arm64 emitter produces native code
@@ -140,7 +142,9 @@ no map lookup or native state allocation. Temporary compilation refusals
 restart that warmup. Compile synchronously between executions; put bounds
 on function size, compiler work, and code memory. Internal test controls force
 compilation so boundary correctness tests do not depend on threshold tuning.
-Back-edge feedback remains future work; the call threshold alone does not
+Long calls also become hot at existing back-edge interrupt checks. These use
+the runtime's shared 1024-back-edge budget as coarse work feedback; the initial
+interrupt check does not count as work. The call threshold alone does not
 estimate the work of a long first invocation.
 
 Instrument `runFD` and cached `callTree` execution without defeating the
@@ -149,10 +153,14 @@ native code; changing only `runFD` would leave many hot calls on their trees.
 Keep per-runtime tier selection separate from `Function.VMCode` and avoid
 adding a map lookup to every JIT-disabled call.
 
-Entry promotion does not accelerate the first long invocation. Add on-stack
-replacement at selected loop headers as a later milestone, after the bailout
-maps work. That requires consistent entry state from both interpreter and tree
-execution; a tree's closure execution state is not automatically resumable.
+On-stack replacement now enters the completed backward branch's target from
+the interpreter or tree tier, after interrupt and memory checks. Tree branch
+nodes spill live operands before checking the budget. Native selection verifies
+the entry map's operand depth and copies both locals and live operands. It
+never restarts function setup or re-evaluates a completed branch. A guard
+suppresses further OSR for that invocation, including after cache eviction
+during coercion. Temporary refusals defer another loop attempt for eight check
+budgets. More frequent or exact per-function work profiling remains future work.
 
 Use guard-miss feedback to suspend native attempts for unsuitable functions.
 Cache permanent compilation refusals within bounded bookkeeping. Tune

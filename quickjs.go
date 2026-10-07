@@ -131,8 +131,8 @@ type config struct {
 // Unsupported builds, denied executable memory, and unsupported functions
 // use the existing execution tiers. Native code is owned by this Runtime and
 // counts toward WithMemoryLimit. Eligible functions may promote after repeated
-// calls; native execution and speedup are not guaranteed. This is independent
-// of WithoutCodeGeneration.
+// calls or sustained looping; native execution and speedup are not guaranteed.
+// This is independent of WithoutCodeGeneration.
 func WithJIT() Option { return func(c *config) { c.jit = true } }
 
 // WithMemoryLimit caps the memory a script may hold, beyond what the
