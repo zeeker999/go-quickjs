@@ -111,7 +111,7 @@ func (r *Runtime) callTree(o *Object, fd *funcData, this Value, args []Value, ne
 	}
 	v, err, native := r.tryJITFrame(f)
 	if !native {
-		if nested {
+		if nested && !r.jitTreeRecovery(f) {
 			v, err = r.runTreeNested(f, fd.treeCall)
 		} else {
 			v, err = r.runTree(f, fd.treeCall)

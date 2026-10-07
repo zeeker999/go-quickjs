@@ -57,8 +57,16 @@ type jitState struct {
 }
 
 func (r *Runtime) initJIT(enabled bool) {
-	r.jitEnabled = enabled
+	// Debugger interrupt callbacks may evaluate code and mutate frames or arrays.
+	// Native budget exits retain borrowed views, so debugger runtimes stay in Go.
+	r.jitEnabled = enabled && r.debug == nil
 	r.jitCallThreshold = jitHotCalls
+}
+
+// Loop promotion returns through a panic caught by the callee's runTree.
+// A nested tree without its own recovery would return from its caller instead.
+func (r *Runtime) jitTreeRecovery(f *frame) bool {
+	return r.jitEnabled && !f.cl.jitRefused
 }
 
 func (r *Runtime) jitCodeBytes() int64 {

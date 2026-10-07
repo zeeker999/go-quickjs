@@ -36,6 +36,8 @@ Optional execution is a requirement: the default build excludes native
 backends, and a build including them still leaves the JIT disabled unless the
 host opts in. Unsupported targets and unavailable executable memory retain
 normal execution. Runtime construction must not allocate executable memory.
+Debugger-enabled runtimes also retain Go execution: native budget exits cannot
+yet refresh borrowed views after debugger evaluation changes frames or arrays.
 
 The implementation uses Go code generation, Go assembly entry/exit bridges,
 and OS memory APIs. It requires no cgo, WebAssembly, C compiler, or external
@@ -55,7 +57,9 @@ SSA compiler are outside the first release.
 - `internal/vm/vm_call.go`: `runFD` prepares frames and chooses a tree or the
   interpreter. `callDirect` also has faster routes that bypass this choice.
 - `internal/vm/zcall_tree.go`: cached `funcData.treeCall` plans execute trees
-  directly. Promotion must reach these calls as well as `runFD`.
+  directly. Promotion must reach these calls as well as `runFD`. A nested tree
+  that can promote its loop needs its own return recovery; otherwise the native
+  return would unwind past the callee and skip its caller's remaining work.
 - `internal/vm/vm_leaf_pure.go`: some functions already execute without a
   frame. Keep those paths unless a measured native replacement is better.
 - `internal/bytecode/function.go`: `Function.VMCode` currently holds a shared

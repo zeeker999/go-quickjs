@@ -14,6 +14,11 @@ the build; `NewLoop()` allocates lazily and reports `ErrUnavailable` when
 executable-memory policy prevents construction. Native JavaScript execution
 additionally requires explicit runtime opt-in.
 
+Runtimes made with `WithDebugger()` use the existing Go execution tiers, even
+when `WithJIT()` is also requested. Debugger interrupt callbacks can evaluate
+code and mutate paused frames or arrays; native budget exits currently retain
+borrowed array views and cannot resume safely across those callbacks.
+
 ## Boundary contract
 
 `Loop.Run` performs these operations in order, at most 4096 times per entry:
@@ -570,6 +575,9 @@ implemented; the existing `Function.VMCode` tree cache remains independent.
 
 ### Dense-array coverage and region measurements
 
+This snapshot precedes the rebase onto upstream `5946c1a`; the refreshed
+measurements are recorded after the Node comparison.
+
 The active target is 5-10x over the bytecode interpreter on representative hot
 workloads. The following results reach that range for several workloads, while
 the mixed suite remains well below that target. All measurements use Go 1.27,
@@ -647,35 +655,36 @@ QuickJS's external runner retains `Date.now()`. The wall clock produced suite
 timings that exceeded the measured process total on this host, so those samples
 were replaced. Node's per-suite output now has 0.1 ms precision.
 
-The following figures are means of three fresh processes per configuration,
-with fifty fixed iterations and identical suite sources, on the same host.
+The following figures are refreshed after rebasing onto upstream `5946c1a`.
+They are means of three alternating fresh processes per configuration, with
+fifty fixed iterations and identical suite sources, on the same host.
 Times are milliseconds. The existing go-quickjs column includes its tree tier;
 Node `--jitless` is a separate engine with different interpreter and regexp
 implementations, not a control for go-quickjs's own native compiler.
 
 | Suite | Existing go-quickjs | Native go-quickjs | Node | Node --jitless |
 |---|---|---|---|---|
-| Richards | 102.3 | 104.1 | 4.4 | 64.7 |
-| DeltaBlue | 153.6 | 163.6 | 6.4 | 107.7 |
-| Crypto | 2123.6 | 2148.7 | 66.2 | 2210.4 |
-| RayTrace | 860.0 | 864.8 | 28.1 | 431.5 |
-| EarleyBoyer | 2637.2 | 2683.5 | 120.4 | 1221.2 |
-| RegExp | 1252.2 | 1239.3 | 208.6 | 730.9 |
-| Splay | 168.9 | 168.7 | 25.9 | 70.5 |
-| NavierStokes | 1470.7 | 387.6 | 105.9 | 1813.0 |
-| TOTAL | 8778.8 | 7771.0 | 602.7 | 6688.8 |
+| Richards | 94.9 | 94.4 | 4.3 | 63.4 |
+| DeltaBlue | 147.2 | 144.6 | 6.4 | 109.2 |
+| Crypto | 2103.5 | 2124.3 | 68.8 | 2201.6 |
+| RayTrace | 821.7 | 828.8 | 27.7 | 432.1 |
+| EarleyBoyer | 2467.1 | 2487.7 | 117.0 | 1213.7 |
+| RegExp | 1191.7 | 1186.2 | 203.3 | 720.8 |
+| Splay | 160.3 | 169.4 | 23.1 | 69.2 |
+| NavierStokes | 1343.3 | 380.5 | 105.7 | 1775.6 |
+| TOTAL | 8341.2 | 7426.5 | 593.7 | 6623.9 |
 
 The external TOTAL includes process startup, file loading, and source compilation;
 the Go TOTAL includes runtime construction, loading, compilation, and execution,
 but excludes launching the Go process. Per-suite timings include setup and
 teardown. Larger iteration counts reduce the relative contribution of startup;
-these are fixed-work timings, not V8's score mode. At five iterations, Node's
-total is 167.3 ms and Node `--jitless` 794.6 ms, versus 916.0 ms native and
+these are fixed-work timings, not V8's score mode. Before the rebase, at five
+iterations, Node's total is 167.3 ms and Node `--jitless` 794.6 ms, versus 916.0 ms native and
 1008.9 ms existing go-quickjs.
 
-At fifty iterations the native tier saves 11.5% of go-quickjs's total elapsed
-time. NavierStokes is 3.8x faster than the existing tiers, but Node remains 12.9x
-faster overall and 32.5x faster on Crypto. Crypto's bitwise arithmetic and its
+At fifty iterations the native tier saves 11.0% of go-quickjs's total elapsed
+time. NavierStokes is 3.5x faster than the existing tiers, but Node remains 12.5x
+faster overall and 30.9x faster on Crypto. Crypto's bitwise arithmetic and its
 property/receiver setup, followed by object-heavy EarleyBoyer, remain major
 coverage targets. The 5-10x target has been reached by selected hot kernels,
 not by the complete V8 suite.
@@ -688,3 +697,59 @@ go run ./internal/cmd/v8bench/external -engine node -cmd node -arg --jitless \
 go run -tags quickjs_jit ./internal/cmd/v8bench -jit \
   -dir /tmp/v8-v7 -mode fixed -n 50
 ```
+
+### Upstream optimization integration
+
+The nine local JIT commits have been rebased onto upstream `5946c1a`, including
+the performance changes through `363c64c` and the debugger/source-map support.
+The nested tree-call optimization now retains the callee's recovery boundary
+when its loop can promote: a native return must leave the callee, then run the
+remaining caller operations. Regression tests pin both ordinary and tail
+results, exceptions after guard fallback, frame cleanup, and subsequent calls.
+With debugger support enabled, native selection is disabled at runtime
+construction, including for hidden scripts without debugger instructions.
+Paused-frame evaluation and mutation remain covered with both options enabled.
+
+Eight balanced placements per build, three rounds per placement, compare the
+previous dense-array JIT build with the rebased build. With JIT enabled, total
+falls from 617.0 to 594.7 ms (-3.6%); EarleyBoyer improves 6.3%, while Crypto
+and NavierStokes stay essentially level. With JIT opted out, total falls from
+671.5 to 644.7 ms (-4.0%), including a 7.4% NavierStokes improvement. These
+comparisons measure the upstream integration, not additional native coverage.
+
+Warm dense benchmarks retain exact-result and native-entry assertions. Three
+fresh processes per sample set, at 8192 elements, now give:
+
+| Kernel | Interpreter | Existing tree | Native | Speedup over interpreter |
+|---|---|---|---|---|
+| Vector | 148.1 us | 100.4 us | 24.4 us | 6.1x |
+| Stencil | 264.3 us | 178.5 us | 36.5 us | 7.2x |
+| Stencil with helper calls | 1054.1 us | 707.5 us | 146.9 us | 7.2x |
+
+Warm calls still allocate 368 bytes in three allocations and own the same
+16920, 17112, and 34176 bytes of native code plus metadata. Peak RSS is
+25.5-28.3 MiB. First-use samples use three fresh processes, each measuring
+100 independently created runtimes; timing excludes runtime construction,
+source compilation, and array setup, but includes native compilation and OSR:
+
+| Kernel | First call existing | First call automatic | Go bytes / allocations existing | Go bytes / allocations automatic |
+|---|---|---|---|---|
+| Vector | 102.6 us | 84.1 us | 389 / 3 | 100605 / 66 |
+| Stencil | 181.2 us | 100.0 us | 404 / 3 | 127668 / 69 |
+| Helper | 717.9 us | 230.1 us | 424 / 3 | 186378 / 72 |
+
+First-use process RSS is 27.9-31.9 MiB. The fifty-iteration Go V8 run allocates
+4407.7 MB with existing tiers and 4413.5 MB with native selection, and both
+retain 9.4 MB after collection. Process RSS ranges overlap: 290.2-306.5 MiB
+existing and 298.3-324.5 MiB native. Node's process RSS is 184.4-202.9 MiB,
+and Node `--jitless` is 190.5-192.5 MiB. The qjs binaries are 40,503,538 bytes
+default and 40,694,130 bytes tagged, still a 190,592-byte (0.47%) difference.
+
+Default and tagged full Go suites and vet pass. Focused race/checkptr, Go 1.24,
+and Linux/amd64 native VM tests under emulation pass, as do Windows/amd64,
+Windows/arm64, and Linux/386 builds and the 386 length regression. Actual
+Windows execution remains unverified on this host. Both JIT-enabled test262
+and JIT plus debugger compilation report 92,869 passed, zero failures, and
+342 existing skips; peak process RSS is 2948.4 and 2807.5 MiB respectively.
+The 5-10x goal remains active: selected dense kernels meet it, while the
+mixed suite and Crypto still require broader native coverage.

@@ -132,6 +132,7 @@ type config struct {
 // use the existing execution tiers. Native code is owned by this Runtime and
 // counts toward WithMemoryLimit. Eligible functions may promote after repeated
 // calls or sustained looping; native execution and speedup are not guaranteed.
+// Runtimes made with WithDebugger use the existing execution tiers.
 // This is independent of WithoutCodeGeneration.
 func WithJIT() Option { return func(c *config) { c.jit = true } }
 

@@ -179,6 +179,71 @@ func TestJITCachedTreeCall(t *testing.T) {
 	}
 }
 
+func TestJITNestedTreeOSR(t *testing.T) {
+	for _, tail := range []bool{false, true} {
+		r := jitRuntimeForTest(t, Config{JIT: true})
+		r.jitCallThreshold = 100
+		body := `let value=sum(10000); return value+7`
+		want := float64(49995007)
+		if tail {
+			body = `return sum(10000)`
+			want = 49995000
+		}
+		source := `function sum(n){var s=0;for(var i=0;i<n;i++)s+=i;return s}
+			sum(2);sum(2);function outer(){` + body + `}outer()`
+		v, err := r.Run(compileForTest(t, source))
+		if err != nil || v.Number() != want {
+			t.Fatalf("tail=%v: result %v error %v, want %v", tail, v, err, want)
+		}
+		if r.jit == nil || r.jit.osrs == 0 {
+			t.Fatal("nested call never promoted its loop")
+		}
+		if r.frameDepth != 0 || r.stackTop != 0 {
+			t.Fatalf("nested promotion leaked frames: depth %d stack %d", r.frameDepth, r.stackTop)
+		}
+		v, err = r.Run(compileForTest(t, `sum(3)+11`))
+		if err != nil || v.Number() != 14 {
+			t.Fatalf("subsequent call: %v, %v", v, err)
+		}
+	}
+}
+
+func TestJITDebuggerFallback(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true, Debug: true})
+	// Hidden host scripts need not contain debugger instructions. The runtime
+	// still has debugger callbacks at interrupt checks, so it cannot borrow views.
+	v, err := r.Run(compileForTest(t, jitSumSource))
+	if err != nil || v.Number() != 49995000 {
+		t.Fatalf("debugger fallback: %v, %v", v, err)
+	}
+	if r.jitEnabled || r.jit != nil {
+		t.Fatal("debugger runtime allocated native state")
+	}
+}
+
+func TestJITNestedTreeOSRThrow(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitCallThreshold = 100
+	v, err := r.Run(compileForTest(t, `
+		function sum(n,a){var s=0;for(var i=0;i<n;i++)s+=i;return s+a}
+		sum(2,0);sum(2,0);
+		function outer(){return sum(10000,{valueOf(){throw new RangeError('nested')}})+7}
+		let result='';try{outer()}catch(e){result=e.name+':'+e.message}result`))
+	if err != nil || !v.IsString() || v.String().Go() != "RangeError:nested" {
+		t.Fatalf("nested exception: %v, %v", v, err)
+	}
+	if r.jit == nil || r.jit.osrs == 0 || r.jit.guards == 0 {
+		t.Fatal("nested call did not promote and guard to coercion")
+	}
+	if r.frameDepth != 0 || r.stackTop != 0 {
+		t.Fatalf("exception leaked frames: depth %d stack %d", r.frameDepth, r.stackTop)
+	}
+	v, err = r.Run(compileForTest(t, `sum(3,11)`))
+	if err != nil || v.Number() != 14 {
+		t.Fatalf("call after exception: %v, %v", v, err)
+	}
+}
+
 func TestJITRuntimeGuardReentry(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	v, err := r.Run(compileForTest(t, `
