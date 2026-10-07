@@ -1120,6 +1120,71 @@ func BenchmarkJITDenseKernels(b *testing.B) {
 // The external corpus keeps Tom Wu's license with its implementation. This
 // benchmark executes its actual am3 method, and checks every output limb using
 // an independent integer multiply/add model after stopping the timer.
+func BenchmarkJITCryptoWorkload(b *testing.B) {
+	dir := os.Getenv("QUICKJS_JIT_V8_DIR")
+	if dir == "" {
+		b.Skip("set QUICKJS_JIT_V8_DIR to the external V8 v7 suite")
+	}
+	var source strings.Builder
+	for _, name := range []string{"base.js", "crypto.js"} {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			b.Fatal(err)
+		}
+		source.Write(data)
+		source.WriteByte('\n')
+	}
+	compile := func(text string) *bytecode.Function {
+		ast, err := parser.Parse(text, parser.Options{})
+		if err != nil {
+			b.Fatal(err)
+		}
+		fn, err := compiler.Compile(ast, compiler.Options{})
+		if err != nil {
+			b.Fatal(err)
+		}
+		return fn
+	}
+	// The external decrypt function asserts the recovered plaintext, so every
+	// timed pair validates the whole RSA path, not only its limb kernel.
+	for _, mode := range []string{"interpreter", "existing", "native"} {
+		b.Run(mode, func(b *testing.B) {
+			previous := treeTier.Swap(mode != "interpreter")
+			defer treeTier.Store(previous)
+			// Bytecode caches its first tree decision; each tier needs fresh code.
+			setup := compile(source.String())
+			call := compile(`encrypt();decrypt();true`)
+			r := New(Config{JIT: mode == "native"})
+			defer func() { r.Close(); r.ReleaseClosed() }()
+			if _, err := r.Run(setup); err != nil {
+				b.Fatal(err)
+			}
+			run := func() {
+				if v, err := r.Run(call); err != nil || !v.IsBool() || !v.Truthy() {
+					b.Fatalf("Crypto pair: %v, %v", v, err)
+				}
+			}
+			for range jitHotCalls {
+				run()
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				run()
+			}
+			b.StopTimer()
+			if mode == "native" {
+				cl := r.global.getOwn(r.atoms.intern("am3")).value.Object().fn().closure
+				e := r.jit.cache[weak.Make(cl.fn)]
+				if e == nil || e.code == nil || e.misses != 0 || r.jit.rootCount != 0 {
+					b.Fatal("Crypto limb method did not stay native")
+				}
+				b.ReportMetric(float64(r.jitCodeBytes()), "code+metadata-B")
+			}
+		})
+	}
+}
+
 func BenchmarkJITCryptoLimb(b *testing.B) {
 	dir := os.Getenv("QUICKJS_JIT_V8_DIR")
 	if dir == "" {

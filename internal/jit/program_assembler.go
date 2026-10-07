@@ -30,6 +30,12 @@ type programAssembler struct {
 	arrayCacheID                   int
 	pc                             int
 	exits                          []programExit
+	conversions                    []integerConversion
+}
+
+type integerConversion struct {
+	entry, done int
+	fp          uint32
 }
 
 type programExit struct {

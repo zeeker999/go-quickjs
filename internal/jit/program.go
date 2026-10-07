@@ -27,6 +27,10 @@ type Code struct {
 	slots   int
 }
 
+// A host instruction exits before doing native work. Mark its external entry
+// separately from an unreachable PC (-1), avoiding a load/spill round trip.
+const hostProgramEntry = -2
+
 // programState is the native ABI. It contains no Go pointer. Scratch is passed
 // separately as a typed pointer to scalar storage rooted by Run's slots slice.
 type programState struct {
@@ -50,7 +54,7 @@ func CompileBudget(p *ir.Program, bytes int) (*Code, error) { return compileProg
 // EntryDepth reports the live operand depth at a reachable native entry.
 // Closed code and unreachable or invalid PCs have no entry.
 func (c *Code) EntryDepth(pc int) (int, bool) {
-	if c == nil || len(c.code) == 0 || pc < 0 || pc >= len(c.entries) || c.entries[pc] < 0 {
+	if c == nil || len(c.code) == 0 || pc < 0 || pc >= len(c.entries) || c.entries[pc] == -1 {
 		return 0, false
 	}
 	return c.maps[pc].Depth, true
@@ -66,6 +70,18 @@ func (c *Code) Run(slots []ir.Value, pc int, budget uint64) (ir.Exit, error) {
 // RunArrays borrows views only for this bounded entry. Native code may update
 // numeric bits of existing numeric cells, but never Go references or slice state.
 func (c *Code) RunArrays(slots []ir.Value, arrays []ir.ArrayView, pc int, budget uint64) (ir.Exit, error) {
+	return c.runArrays(slots, arrays, pc, budget, true)
+}
+
+// RunEncodedArrays enters with scalars produced by the VM encoder or a previous
+// native entry. The caller must preserve valid kinds and boolean bits when
+// updating them. It skips the redundant scalar scan but still checks storage
+// shape, reachable PC, closed code, and the instruction budget.
+func (c *Code) RunEncodedArrays(slots []ir.Value, arrays []ir.ArrayView, pc int, budget uint64) (ir.Exit, error) {
+	return c.runArrays(slots, arrays, pc, budget, false)
+}
+
+func (c *Code) runArrays(slots []ir.Value, arrays []ir.ArrayView, pc int, budget uint64, validate bool) (ir.Exit, error) {
 	if len(arrays) != 0 && len(arrays) != ir.MaxSlots {
 		return ir.Exit{}, ir.ErrState
 	}
@@ -75,13 +91,22 @@ func (c *Code) RunArrays(slots []ir.Value, arrays []ir.ArrayView, pc int, budget
 	if budget > MaxIterations {
 		return ir.Exit{}, ErrIterations
 	}
-	if len(slots) != c.slots || pc < 0 || pc >= len(c.entries) || c.entries[pc] < 0 {
+	if len(slots) != c.slots || pc < 0 || pc >= len(c.entries) || c.entries[pc] == -1 {
 		return ir.Exit{}, ir.ErrState
 	}
-	for _, slot := range slots {
-		if slot.Kind > ir.Opaque || slot.Kind == ir.Boolean && slot.Bits > 1 {
-			return ir.Exit{}, ir.ErrState
+	if validate {
+		for _, slot := range slots {
+			if slot.Kind > ir.Opaque || slot.Kind == ir.Boolean && slot.Bits > 1 {
+				return ir.Exit{}, ir.ErrState
+			}
 		}
+	}
+	if c.entries[pc] == hostProgramEntry {
+		kind := ir.HostExit
+		if budget == 0 {
+			kind = ir.BudgetExit
+		}
+		return ir.Exit{Kind: kind, State: c.maps[pc]}, nil
 	}
 	s := programState{remaining: budget, pc: uint64(pc)}
 	runProgramCode(c.code, c.entries[pc], &s, slots, arrays)

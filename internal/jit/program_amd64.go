@@ -232,6 +232,9 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 		}
 	}
 	a.bytes(0xff, 0xe0) // jmp ax
+	for _, conversion := range a.conversions {
+		a.integerSlow(conversion)
+	}
 	if err := a.valid(); err != nil {
 		return nil, nil, err
 	}
@@ -447,13 +450,20 @@ func (a *amd64Program) integer(o ir.Operand) {
 		return
 	}
 	fp := a.number(o, 0)
-	slow, zero, right, shifted, done := a.label(), a.label(), a.label(), a.label(), a.label()
+	slow, done := a.label(), a.label()
+	a.conversions = append(a.conversions, integerConversion{entry: slow, done: done, fp: uint32(fp)})
 	a.bytes(0xf2, 0x48|fp>>3, 0x0f, 0x2c, 0xc0|fp&7) // cvttsd2si xmm,rax
-	a.immediate(2, 1<<63)
-	a.bytes(0x48, 0x39, 0xd0)
-	a.conditional(4, slow)
-	a.jump(done)
-	a.mark(slow)
+	// Subtracting one overflows only for CVTTSD2SI's MinInt64 sentinel.
+	a.bytes(0x48, 0x83, 0xf8, 1) // cmp rax,1
+	a.conditional(0, slow)       // JO
+	a.mark(done)
+}
+
+// Keep the rare significand conversion out of the ordinary instruction body.
+func (a *amd64Program) integerSlow(conversion integerConversion) {
+	fp := byte(conversion.fp)
+	zero, right, shifted := a.label(), a.label(), a.label()
+	a.mark(conversion.entry)
 	a.bytes(0x66, 0x49|(fp>>3)<<2, 0x0f, 0x7e, 0xc1|(fp&7)<<3) // movq xmm,r9: sign + exponent
 	a.move(0, 9)
 	a.move(2, 9)
@@ -477,29 +487,39 @@ func (a *amd64Program) integer(o ir.Operand) {
 	a.bytes(0x66, 0x0f, 0x6e, 0xca)
 	a.fpBinary(0x66, 0xd3, 0, 1) // psrlq x0,x1
 	a.mark(shifted)
-	a.bytes(0x66, 0x0f, 0x7e, 0xc0) // movd x0,eax
-	a.bytes(0x4d, 0x85, 0xc9)       // testq r9,r9
-	a.conditional(9, done)          // JNS
-	a.bytes(0xf7, 0xd8)             // neg eax
-	a.jump(done)
+	a.bytes(0x66, 0x0f, 0x7e, 0xc0)   // movd x0,eax
+	a.bytes(0x4d, 0x85, 0xc9)         // testq r9,r9
+	a.conditional(9, conversion.done) // JNS
+	a.bytes(0xf7, 0xd8)               // neg eax
+	a.jump(conversion.done)
 	a.mark(zero)
 	a.immediate(0, 0)
-	a.mark(done)
+	a.jump(conversion.done)
 }
 
 func (a *amd64Program) bitwise(op ir.Operator, left, right ir.Operand) byte {
 	a.integer(left)
-	a.move(8, 0)
-	a.integer(right)
-	a.move(2, 0)
-	a.move(0, 8)
-	if op <= ir.BitXor {
-		a.bytes([...]byte{0x21, 0x09, 0x31}[op-ir.BitAnd], 0xd0) // op edx,eax
+	if right.Slot < 0 && right.Literal.Kind == ir.Number {
+		value := ir.ToUint32(math.Float64frombits(right.Literal.Bits))
+		if op <= ir.BitXor {
+			a.bytes([...]byte{0x25, 0x0d, 0x35}[op-ir.BitAnd]) // op eax,imm32
+			a.word(value)
+		} else if shift := byte(value & 31); shift != 0 {
+			a.bytes(0xc1, [...]byte{0xe0, 0xf8, 0xe8}[op-ir.Shl], shift)
+		}
 	} else {
-		a.bytes(0x83, 0xe2, 31)
-		a.bytes(0x66, 0x0f, 0x6e, 0xc0, 0x66, 0x0f, 0x6e, 0xca)
-		a.fpBinary(0x66, [...]byte{0xf2, 0xe2, 0xd2}[op-ir.Shl], 0, 1)
-		a.bytes(0x66, 0x0f, 0x7e, 0xc0)
+		a.move(8, 0)
+		a.integer(right)
+		a.move(2, 0)
+		a.move(0, 8)
+		if op <= ir.BitXor {
+			a.bytes([...]byte{0x21, 0x09, 0x31}[op-ir.BitAnd], 0xd0) // op edx,eax
+		} else {
+			a.bytes(0x83, 0xe2, 31)
+			a.bytes(0x66, 0x0f, 0x6e, 0xc0, 0x66, 0x0f, 0x6e, 0xca)
+			a.fpBinary(0x66, [...]byte{0xf2, 0xe2, 0xd2}[op-ir.Shl], 0, 1)
+			a.bytes(0x66, 0x0f, 0x7e, 0xc0)
+		}
 	}
 	if op == ir.UShr {
 		a.bytes(0x89, 0xc0) // zero-extend the unsigned result before 64-bit conversion

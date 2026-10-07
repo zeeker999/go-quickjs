@@ -23,6 +23,11 @@ resume in Go; ordinary own data properties use scalar slots directly, while
 accessors and exotic objects publish the frame and clear borrowed views.
 Bounded host batches share the native instruction budget so property-heavy
 loops still check cancellation and limits.
+Constant bitwise operands use immediate instructions; rare large-double
+conversions sit outside the hot instruction stream. External host entries
+return directly in Go, and primitive native returns avoid publishing locals
+that cannot remain observable. A full external Crypto workload benchmark
+compares fresh bytecode for the interpreter, tree, and native tiers.
 See [the implementation notes](../internal/jit/README.md)
 for contracts, validation, and current limits.
 

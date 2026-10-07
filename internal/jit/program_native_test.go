@@ -190,6 +190,57 @@ func TestNativeProgramBitwise(t *testing.T) {
 	}
 }
 
+func TestNativeProgramBitwiseImmediates(t *testing.T) {
+	constants := []float64{0, -1, 0x12345678, 4294967297, -4294967297,
+		1e20, math.MaxFloat64, math.NaN(), math.Inf(1), math.Inf(-1)}
+	// Enumerate every repeated circular run of bits by its bit positions,
+	// independently of the backend's logical-immediate encoding algorithm.
+	for width := 2; width <= 32; width *= 2 {
+		for start := 0; start < width; start++ {
+			for length := 1; length < width; length++ {
+				var mask uint32
+				for bit := 0; bit < 32; bit++ {
+					if (bit-start+32)%width < length {
+						mask |= 1 << bit
+					}
+				}
+				constants = append(constants, float64(mask))
+			}
+		}
+	}
+	for _, op := range []ir.Operator{ir.BitAnd, ir.BitOr, ir.BitXor, ir.Shl, ir.Shr, ir.UShr} {
+		right := constants
+		if op >= ir.Shl {
+			right = append([]float64(nil), constants[:10]...)
+			for count := -40; count <= 72; count++ {
+				right = append(right, float64(count)+0.25)
+			}
+		}
+		for _, value := range right {
+			p := &ir.Program{Locals: 1, Code: []ir.Instruction{
+				{Op: ir.Binary, Operator: op, Left: ir.Slot(0), Right: ir.Literal(ir.Float(value)), Dest: 0},
+				{Op: ir.Return, Left: ir.Slot(0)},
+			}, Maps: []ir.StateMap{{PC: 0}, {PC: 1}}}
+			c := newTestCode(t, p)
+			for _, input := range []ir.Value{ir.Float(0xabcdef01), ir.Float(-7.9), ir.Float(1e20), ir.Float(math.NaN()), {Kind: ir.Opaque, Bits: 3}} {
+				for pc := 0; pc < 2; pc++ {
+					for budget := uint64(0); budget <= 2; budget++ {
+						x, y := []ir.Value{input}, []ir.Value{input}
+						want, _ := p.Evaluate(x, pc, budget)
+						got, err := c.Run(y, pc, budget)
+						if err != nil || got != want || x[0] != y[0] {
+							t.Fatalf("op %v literal %v input %+v pc %d budget %d: native %+v/%v oracle %+v; slots %v/%v", op, value, input, pc, budget, got, err, want, y, x)
+						}
+					}
+				}
+			}
+			if err := c.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
 func TestNativeProgramBitwiseArrayCache(t *testing.T) {
 	p := &ir.Program{Locals: 4, Code: []ir.Instruction{
 		{Op: ir.ArrayRead, Left: ir.Slot(0), Right: ir.Slot(1), Dest: 2},
@@ -299,12 +350,24 @@ func TestNativeProgramLifecycle(t *testing.T) {
 		if _, err := c.Run(nil, pc, 1); !errors.Is(err, ir.ErrState) {
 			t.Fatalf("invalid pc %d: %v", pc, err)
 		}
+		if _, err := c.RunEncodedArrays(nil, nil, pc, 1); !errors.Is(err, ir.ErrState) {
+			t.Fatalf("encoded invalid pc %d: %v", pc, err)
+		}
 	}
 	if _, err := c.Run([]ir.Value{{}}, 0, 1); !errors.Is(err, ir.ErrState) {
 		t.Fatal("accepted invalid scratch size")
 	}
 	if _, err := c.Run(nil, 0, MaxIterations+1); !errors.Is(err, ErrIterations) {
 		t.Fatal("accepted excessive execution budget")
+	}
+	if _, err := c.RunEncodedArrays([]ir.Value{{}}, nil, 0, 1); !errors.Is(err, ir.ErrState) {
+		t.Fatal("encoded entry accepted invalid scratch size")
+	}
+	if _, err := c.RunEncodedArrays(nil, make([]ir.ArrayView, 1), 0, 1); !errors.Is(err, ir.ErrState) {
+		t.Fatal("encoded entry accepted invalid view-table size")
+	}
+	if _, err := c.RunEncodedArrays(nil, nil, 0, MaxIterations+1); !errors.Is(err, ErrIterations) {
+		t.Fatal("encoded entry accepted excessive execution budget")
 	}
 	if err := c.Close(); err != nil {
 		t.Fatal(err)
@@ -320,6 +383,9 @@ func TestNativeProgramLifecycle(t *testing.T) {
 	}
 	if _, err := c.Run(nil, 0, 0); !errors.Is(err, ErrClosed) {
 		t.Fatal("entered released native code")
+	}
+	if _, err := c.RunEncodedArrays(nil, nil, 0, 0); !errors.Is(err, ErrClosed) {
+		t.Fatal("encoded entry entered released native code")
 	}
 }
 
@@ -338,6 +404,47 @@ func TestNativeProgramMultiplePages(t *testing.T) {
 		if err != nil || got.Kind != ir.Returned || got.Value != ir.Float(7) || got.Steps != uint64(1000-pc) {
 			t.Fatalf("pc %d: %+v, %v", pc, got, err)
 		}
+	}
+}
+
+func TestNativeProgramHostEntries(t *testing.T) {
+	p := &ir.Program{Locals: 1, StackSize: 1,
+		Code: []ir.Instruction{
+			{Op: ir.Copy, Left: ir.Literal(ir.Float(8)), Dest: 1},
+			{Op: ir.Host},
+			{Op: ir.Host, Check: true, CheckSlot: 0},
+			{Op: ir.Return, Left: ir.Slot(1)},
+			{Op: ir.Host},
+		}, Maps: []ir.StateMap{{PC: 0}, {PC: 1, Depth: 1}, {PC: 2, Depth: 1}, {PC: 3, Depth: 1}, {PC: 4, Depth: -1}}}
+	c := newTestCode(t, p)
+	if c.entries[1] != hostProgramEntry || c.entries[2] < 0 || c.entries[4] != -1 {
+		t.Fatal("host entry must preserve checked and unreachable entries")
+	}
+	for _, input := range []ir.Value{ir.Float(3), {Kind: ir.Uninitialized}, {Kind: ir.Opaque, Bits: 1}} {
+		for pc := 0; pc < 4; pc++ {
+			if depth, ok := c.EntryDepth(pc); !ok || depth != p.Maps[pc].Depth {
+				t.Fatalf("host entry %d depth = %d, %v", pc, depth, ok)
+			}
+			for _, budget := range []uint64{0, 1, 2, MaxIterations} {
+				for _, encoded := range []bool{false, true} {
+					x, y := []ir.Value{input, ir.Float(7)}, []ir.Value{input, ir.Float(7)}
+					want, _ := p.Evaluate(x, pc, budget)
+					var got ir.Exit
+					var err error
+					if encoded {
+						got, err = c.RunEncodedArrays(y, nil, pc, budget)
+					} else {
+						got, err = c.Run(y, pc, budget)
+					}
+					if err != nil || got != want || x[0] != y[0] || x[1] != y[1] {
+						t.Fatalf("host pc %d budget %d encoded %v: native %+v/%v oracle %+v; slots %v/%v", pc, budget, encoded, got, err, want, y, x)
+					}
+				}
+			}
+		}
+	}
+	if _, err := c.Run([]ir.Value{{Kind: ir.Boolean, Bits: 2}, {}}, 1, 1); !errors.Is(err, ir.ErrState) {
+		t.Fatal("host entry skipped checked scalar validation")
 	}
 }
 
@@ -689,7 +796,12 @@ func FuzzNativeProgram(f *testing.F) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, err := c.Run(slots, 0, 64)
+		var got ir.Exit
+		if len(data)&1 == 0 {
+			got, err = c.RunEncodedArrays(slots, nil, 0, 64)
+		} else {
+			got, err = c.Run(slots, 0, 64)
+		}
 		same := func(a, b ir.Value) bool {
 			return a == b || a.Kind == ir.Number && b.Kind == ir.Number && sameFloat(math.Float64frombits(a.Bits), math.Float64frombits(b.Bits))
 		}

@@ -23,6 +23,11 @@ func compileProgram(p *ir.Program, limit int) (*Code, error) {
 	}
 	c := &Code{entries: entries, maps: make([]ir.StateMap, len(p.Maps)), slots: p.Locals + p.StackSize}
 	copy(c.maps, p.Maps)
+	for pc, in := range p.Code {
+		if in.Op == ir.Host && !in.Check && c.entries[pc] >= 0 {
+			c.entries[pc] = hostProgramEntry
+		}
+	}
 	page := os.Getpagesize()
 	allocation := (len(instructions) + page - 1) / page * page
 	if allocation+c.metadataBytes() > limit {

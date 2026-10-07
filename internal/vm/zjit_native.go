@@ -291,7 +291,8 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 	budget := uint64(jit.MaxIterations)
 	for {
 		s.entries++
-		exit, err := e.code.RunArrays(s.slots[:n], s.arrays[:], pc, budget)
+		// Encoding and the immutable native program preserve scalar validity.
+		exit, err := e.code.RunEncodedArrays(s.slots[:n], s.arrays[:], pc, budget)
 		runtime.KeepAlive(s)
 		if err != nil {
 			s.clearRoots()
@@ -309,13 +310,17 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 				continue
 			}
 		}
-		s.publish(f, r.stack, exit.State.Depth)
 		f.pc = exit.State.PC
-		switch exit.Kind {
-		case ir.Returned:
+		// Native returns carry a primitive value. Eligible locals cannot be
+		// observed after this frame leaves: captures, mapped arguments, eval,
+		// handlers, and debugger runtimes are excluded before native entry.
+		if exit.Kind == ir.Returned {
 			v := s.decode(exit.Value)
 			s.clearRoots()
 			return v, nil, true
+		}
+		s.publish(f, r.stack, exit.State.Depth)
+		switch exit.Kind {
 		case ir.GuardExit:
 			s.guards++
 			e.misses++
@@ -441,8 +446,9 @@ func jitTreeResult(p any) (Value, error, bool) {
 }
 
 func (s *jitState) encodeFrame(f *frame, stack []Value, depth int) {
-	n := len(f.locals) + len(f.cl.upvalues) + f.cl.fn.MaxStack
-	clear(s.slots[:n])
+	base := len(f.locals) + len(f.cl.upvalues)
+	// Live slots are overwritten below; only inactive operands need clearing.
+	clear(s.slots[base+depth : base+f.cl.fn.MaxStack])
 	for i, v := range f.locals {
 		s.slots[i] = s.encode(v)
 	}
@@ -450,7 +456,7 @@ func (s *jitState) encodeFrame(f *frame, stack []Value, depth int) {
 		s.slots[len(f.locals)+i] = s.encode(v.get())
 	}
 	for i, v := range stack[f.base : f.base+depth] {
-		s.slots[len(f.locals)+len(f.cl.upvalues)+i] = s.encode(v)
+		s.slots[base+i] = s.encode(v)
 	}
 }
 

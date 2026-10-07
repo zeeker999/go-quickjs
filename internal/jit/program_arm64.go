@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"math/bits"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
@@ -240,6 +241,9 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 		}
 	}
 	a.word(0xd61f0200) // br x16
+	for _, conversion := range a.conversions {
+		a.integerSlow(conversion)
+	}
 	if err := a.valid(); err != nil {
 		return nil, nil, err
 	}
@@ -427,15 +431,25 @@ func (a *arm64Program) integer(o ir.Operand) {
 		return
 	}
 	fp := a.number(o, 0)
-	slow, zero, right, sign, done := a.label(), a.label(), a.label(), a.label(), a.label()
-	a.word(0x9e660007 | fp<<5)                  // fmov x7,dN
-	a.word(0xd3400004 | 52<<16 | 62<<10 | 7<<5) // ubfx x4,x7,#52,#11
-	a.compareImmediate(4, 1086)                 // exponent >= 63 + bias
-	a.conditional(2, slow)
+	slow, done := a.label(), a.label()
+	a.conversions = append(a.conversions, integerConversion{entry: slow, done: done, fp: fp})
 	a.word(0x9e780003 | fp<<5) // fcvtzs x3,dN
-	a.jump(done)
-	a.mark(slow)
-	a.word(0xd1000084 | 1023<<10) // sub x4,x4,#bias
+	// Saturated values have different top two bits. Accept the signed
+	// 62-bit range directly; NaNs convert to zero, as ToUint32 requires.
+	a.word(0xca030464) // eor x4,x3,x3,lsl #1
+	a.compareImmediate(4, 0)
+	a.conditional(4, slow) // MI
+	a.mark(done)
+}
+
+// Cold conversion blocks stay after the entry/exit code so ordinary integer
+// operands fall through without jumping over a significand conversion body.
+func (a *arm64Program) integerSlow(conversion integerConversion) {
+	zero, right, sign := a.label(), a.label(), a.label()
+	a.mark(conversion.entry)
+	a.word(0x9e660007 | conversion.fp<<5)       // fmov x7,dN
+	a.word(0xd3400004 | 52<<16 | 62<<10 | 7<<5) // ubfx x4,x7,#52,#11
+	a.word(0xd1000084 | 1023<<10)               // sub x4,x4,#bias
 	a.compareImmediate(4, 84)
 	a.conditional(2, zero)             // too large, nonfinite, or exponent below zero
 	a.word(0xd3400003 | 51<<10 | 7<<5) // ubfx x3,x7,#0,#52
@@ -451,27 +465,74 @@ func (a *arm64Program) integer(o ir.Operand) {
 	a.word(0x9ac42463) // lsrv x3,x3,x4
 	a.mark(sign)
 	a.compareImmediate(7, 0)
-	a.conditional(10, done) // nonnegative IEEE bits
-	a.word(0x4b0303e3)      // neg w3,w3
-	a.jump(done)
+	a.conditional(10, conversion.done) // nonnegative IEEE bits
+	a.word(0x4b0303e3)                 // neg w3,w3
+	a.jump(conversion.done)
 	a.mark(zero)
 	a.immediate(3, 0)
-	a.mark(done)
+	a.jump(conversion.done)
 }
 
 func (a *arm64Program) bitwise(op ir.Operator, left, right ir.Operand) uint32 {
 	a.integer(left)
-	a.word(0x2a0303e6) // mov w6,w3
-	a.integer(right)
-	word := [...]uint32{0x0a0300c3, 0x2a0300c3, 0x4a0300c3,
-		0x1ac320c3, 0x1ac328c3, 0x1ac324c3}[op-ir.BitAnd]
-	a.word(word)                  // AND/OR/XOR or a variable 32-bit shift, inherently masked to 31
+	if right.Slot < 0 && right.Literal.Kind == ir.Number {
+		value := ir.ToUint32(math.Float64frombits(right.Literal.Bits))
+		if op <= ir.BitXor {
+			if immediate, ok := arm64LogicalImmediate(value); ok {
+				a.word([...]uint32{0x12000063, 0x32000063, 0x52000063}[op-ir.BitAnd] | immediate)
+			} else {
+				a.immediate(4, uint64(value))
+				a.word([...]uint32{0x0a040063, 0x2a040063, 0x4a040063}[op-ir.BitAnd])
+			}
+		} else if shift := value & 31; shift != 0 {
+			word := uint32(0x53000063 | shift<<16 | 31<<10) // lsr w3,w3,#shift
+			if op == ir.Shl {
+				word = 0x53000063 | ((32-shift)&31)<<16 | (31-shift)<<10
+			} else if op == ir.Shr {
+				word = 0x13000063 | shift<<16 | 31<<10 // asr w3,w3,#shift
+			}
+			a.word(word)
+		}
+	} else {
+		a.word(0x2a0303e6) // mov w6,w3
+		a.integer(right)
+		word := [...]uint32{0x0a0300c3, 0x2a0300c3, 0x4a0300c3,
+			0x1ac320c3, 0x1ac328c3, 0x1ac324c3}[op-ir.BitAnd]
+		a.word(word) // AND/OR/XOR or a variable 32-bit shift, inherently masked to 31
+	}
 	convert := uint32(0x1e620060) // scvtf d0,w3
 	if op == ir.UShr {
 		convert = 0x1e630060 // ucvtf d0,w3
 	}
 	a.word(convert)
 	return 0
+}
+
+// A logical immediate repeats a rotated run of ones in a power-of-two element.
+// Zero and all ones have no encoding and use an ordinary register operand.
+func arm64LogicalImmediate(value uint32) (uint32, bool) {
+	for size := uint32(2); size <= 32; size *= 2 {
+		mask := uint32((uint64(1) << size) - 1)
+		unit := value & mask
+		ones := uint32(bits.OnesCount32(unit))
+		if ones == 0 || ones == size {
+			continue
+		}
+		repeated := unit
+		for shift := size; shift < 32; shift += size {
+			repeated |= unit << shift
+		}
+		if repeated != value {
+			continue
+		}
+		run := (uint32(1) << ones) - 1
+		for rotate := uint32(0); rotate < size; rotate++ {
+			if ((run>>rotate | run<<(size-rotate)) & mask) == unit {
+				return rotate<<16 | (((^(size-1)<<1)|(ones-1))&63)<<10, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func arm64Comparison(op ir.Operator) uint32 {

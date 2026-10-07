@@ -812,7 +812,8 @@ decryption with the suite's plaintext assertion and checks that the actual
 `am3` method runs native code without guards. `BenchmarkJITCryptoLimb` uses
 that same external method, keeping Tom Wu's license with the source, and
 checks every output limb and the final carry against an independent uint64
-multiply/add model. Enable both with `QUICKJS_JIT_V8_DIR=../v8-v7`.
+multiply/add model. Enable both by setting `QUICKJS_JIT_V8_DIR` to the fixture's
+absolute path; Go tests run from their package directory.
 
 Three fresh processes per measurement, Go 1.27 on macOS/arm64 (Apple M5 Max),
 give these warm-call means:
@@ -885,3 +886,128 @@ and the Linux/386 length test pass. Actual Windows execution remains unverified.
 Test262 reports 92,869 passed, zero failures, and 342 existing skips, with
 2758.7 MiB peak RSS; debugger compilation reports the same results, with
 2994.0 MiB peak RSS.
+
+### Bitwise conversion and native entry costs
+
+Numeric literal masks and shifts now use architecture immediate instructions.
+Ordinary integer conversions fall through a short truncation/overflow check;
+the full IEEE significand conversion lives in cold blocks. ARM64 accepts the
+signed 62-bit range and handles saturation in the cold path; amd64 detects
+CVTTSD2SI's sentinel using subtraction overflow. Both retain complete
+ToInt32/ToUint32 behavior for fractional, large, and nonfinite doubles.
+
+External entries at unchecked host instructions return their host exit in Go
+without loading and spilling native registers. Zero-budget entries still
+return a budget exit; checked host instructions retain their native TDZ guard.
+The VM's encoder/native output entry skips a redundant scalar-validity scan,
+while the checked entry retains it. Both check storage shape, reachable PC,
+closed code, and the budget. Encoding only clears inactive operands, and
+primitive native returns avoid publishing locals that cannot be observed after
+the eligible frame leaves. Callback and interpreter boundaries still publish
+state and clear/reacquire borrowed storage.
+
+Eight balanced placements, three fresh rounds per placement, compare the
+previous bitwise/property commit with this change:
+
+| Suite | Previous native | Current native | Change |
+|---|---|---|---|
+| Richards | 5.6 ms | 5.5 ms | -0.6% |
+| DeltaBlue | 8.6 ms | 8.5 ms | -0.4% |
+| Crypto | 75.6 ms | 67.1 ms | -11.2% |
+| RayTrace | 48.2 ms | 48.0 ms | -0.2% |
+| EarleyBoyer | 143.6 ms | 145.0 ms | +1.0% |
+| RegExp | 98.6 ms | 98.0 ms | -0.6% |
+| Splay | 102.1 ms | 101.9 ms | -0.1% |
+| NavierStokes | 29.7 ms | 29.6 ms | -0.3% |
+| TOTAL | 525.9 ms | 516.6 ms | -1.8% |
+
+The JIT opt-out comparison is level (618.4 to 616.2 ms, -0.4%); individual
+changes range from -0.7% to +0.6%. Three alternating fresh processes per
+measurement on the same macOS/arm64 M5 Max and Go 1.27 give these warm means:
+
+| Kernel | Interpreter | Existing tree | Native | Interpreter speedup |
+|---|---|---|---|---|
+| Vector, 8192 elements | 147.2 us | 100.0 us | 24.8 us | 5.9x |
+| Stencil, 8192 elements | 264.6 us | 180.5 us | 37.2 us | 7.1x |
+| Stencil with helper calls | 1063.8 us | 707.8 us | 145.6 us | 7.3x |
+| Crypto am3, 32 limbs | 2425.3 ns | 1676.0 ns | 607.0 ns | 4.0x |
+| Crypto am3, 8192 limbs | 538.1 us | 353.7 us | 76.9 us | 7.0x |
+
+The previous native limb means in this paired measurement are 677.2 ns and
+82.3 us. Allocations remain 432 bytes/3 allocations for am3 and 368 bytes/3
+allocations for dense kernels; am3 code and metadata remain 17568 bytes.
+Kernel-process RSS is 31.4-35.0 MiB current, 30.0-34.3 MiB previous.
+First-use means (100 independent runtimes per process, three fresh processes,
+excluding source compilation/setup) are:
+
+| Kernel | Existing first call | Automatic first call | Automatic bytes / allocations |
+|---|---|---|---|
+| Vector | 103.9 us | 82.0 us | 100605 / 66 |
+| Stencil | 182.2 us | 107.1 us | 127668 / 69 |
+| Helper | 706.1 us | 217.4 us | 186378 / 72 |
+
+The automatic stencil samples vary from 91.0 to 126.4 us; the previous native
+first-use mean in these processes is 97.0 us. Construction still allocates no
+native code. First-use RSS is 27.9-31.7 MiB. The qjs binaries are 40,503,538
+bytes default and 40,726,946 bytes tagged (+223408 bytes, 0.55%).
+
+Fifty-iteration fixed-work measurements alternate fresh processes of bytecode
+(`QJS_NOTREE=1`), existing tiers, previous native, current native, and Node
+v26.8.1. Three-process means are:
+
+| Suite | Bytecode | Existing tiers | Previous native | Current native | Node |
+|---|---|---|---|---|---|
+| Richards | 128.4 ms | 91.9 ms | 92.9 ms | 95.1 ms | 4.1 ms |
+| DeltaBlue | 145.1 ms | 141.9 ms | 142.0 ms | 149.6 ms | 6.0 ms |
+| Crypto | 3145.0 ms | 2045.8 ms | 1214.5 ms | 1084.0 ms | 64.3 ms |
+| RayTrace | 865.7 ms | 801.1 ms | 783.1 ms | 796.9 ms | 26.9 ms |
+| EarleyBoyer | 3022.0 ms | 2384.4 ms | 2388.3 ms | 2412.0 ms | 110.9 ms |
+| RegExp | 1106.1 ms | 1100.5 ms | 1117.1 ms | 1135.4 ms | 197.1 ms |
+| Splay | 168.2 ms | 149.5 ms | 150.7 ms | 155.4 ms | 22.7 ms |
+| NavierStokes | 1875.3 ms | 1294.0 ms | 408.5 ms | 368.9 ms | 102.3 ms |
+| TOTAL | 10468.1 ms | 8019.2 ms | 6308.8 ms | 6207.3 ms | 568.0 ms |
+
+Current native Crypto is 10.8% faster than the previous native build, 1.9x
+the existing tiers, and 2.9x bytecode. The mixed total saves 1.6% versus the
+previous native build, 22.6% versus existing tiers, and 40.7% versus bytecode.
+These longer runs use one ordinary binary layout: current DeltaBlue is 5.4%
+slower here but level in the balanced comparison. Current native process RSS
+is 306.4-330.3 MiB; previous native is 308.7-321.8 MiB, existing tiers
+280.6-313.0 MiB, bytecode 286.8-321.3 MiB, and Node 185.9-203.9 MiB.
+Current native allocates 4419.5-4420.0 MB and retains 9.4-9.5 MB live after
+collection; the previous build allocates 4419.9-4421.1 MB and retains 9.5 MB.
+
+Three alternating fresh score-mode processes average 4831 for the previous
+native build and 4889 for the current build (+1.2%). Current samples are 4880,
+4893, and 4894. Separate single working-tree runs scored 5212 and 4739, so a
+single score is unsuitable for attributing this relatively small overall gain.
+
+`BenchmarkJITCryptoWorkload` times a whole external RSA encrypt/decrypt pair,
+whose decryption checks the plaintext each time. Each tier compiles fresh
+bytecode because its first tree decision is cached. Three fresh processes
+give 59.2 ms bytecode, 41.4 ms existing, and 21.3 ms native per pair: 2.8x
+bytecode and 1.9x existing, with 887 allocations and about 238 KB per pair in
+every tier. Native code plus metadata is 475848 bytes; process RSS is about
+30 MiB. This is a separate workload from the V8 driver's fixed work.
+
+The 5-10x target remains incomplete, and 5x is a minimum usefulness threshold.
+Short limb calls remain 4.0x, whole Crypto 2.8-2.9x bytecode, and Node is
+16.9x faster on fixed Crypto and 10.9x faster on the mixed total. The native
+Crypto profile spends only 28.7% of CPU samples in generated code; encoding,
+property boundaries, selection, and tree execution remain substantial.
+Guard diagnostics show output-array growth disabling native execution in
+copy, add, subtract, multiply, square, and Montgomery reduction. Nullish
+comparisons stop division; opaque returns stop exponentiation. Remainder
+also prevents lowering the bit-shift routines. These are coverage targets,
+not evidence that the performance goal has been reached.
+
+Full default/tagged suites, vet, native race/checkptr tests, Go 1.24,
+Linux/amd64 execution under emulation, Windows amd64/arm64 and Linux/386
+builds, and the Linux/386 length test pass. Native fuzzing passes 4.4 million
+inputs after the entry changes (6.1 million beforehand). Differential tests
+enumerate every ARM64 logical-immediate mask and shifted count, arbitrary-PC
+and tiny-budget entries, aliased destinations, and checked/unchecked host
+entries. Test262 normal and debugger runs each report 92,869 passed, zero
+failures, and 342 existing skips. The isolated native conformance run peaks
+at 2659.0 MiB; the debugger run peaks at 3119.5 MiB while other validation
+processes also run. Actual Windows execution remains unverified.
