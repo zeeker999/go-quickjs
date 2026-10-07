@@ -2,7 +2,21 @@
 // native executor. Its Go evaluator is a correctness oracle, not a VM tier.
 package ir
 
-import "math"
+import (
+	"math"
+	"unsafe"
+)
+
+// ArrayView borrows dense storage for one bounded native entry. Each cell is
+// sixteen bytes: numeric bits followed by a Go reference that native code must
+// never change. Bits below NumberLimit identify existing numeric data properties.
+// The caller owns and roots the storage, and rebuilds views after every callback.
+type ArrayView struct {
+	Data        unsafe.Pointer
+	DenseLength uint64
+	Length      uint64
+	NumberLimit uint64
+}
 
 // Kind identifies a scalar or a handle into Go-owned reference storage.
 type Kind uint64
@@ -63,6 +77,13 @@ const (
 	Jump
 	Branch
 	Return
+	ArrayRead
+	ArrayWrite
+	ArrayLength
+	ArrayKey
+	ArrayUpdate
+	Insert3
+	Host
 )
 
 // Operator selects an arithmetic, comparison, or truthiness operation.
@@ -83,6 +104,7 @@ const (
 	Pos
 	Not
 	Truth
+	Int32
 )
 
 // Instruction reads Left and Right and writes Dest (and Extra for paired
@@ -92,11 +114,16 @@ const (
 // either the old or new value there. Branch takes Target when its condition
 // equals When; otherwise execution falls through. Check guards CheckSlot
 // against the temporal dead zone before any writes.
+// ArrayRead/ArrayWrite use Left as the array handle and Right as the numeric
+// index; Third is the stored number. ArrayUpdate commits an updated index in
+// Extra only after the read succeeds. ArrayKey guards without converting a key.
+// Host exits before executing the corresponding VM instruction.
 type Instruction struct {
 	Op        Op
 	Operator  Operator
 	Left      Operand
 	Right     Operand
+	Third     Operand
 	Dest      int
 	Extra     int
 	Target    int
@@ -108,8 +135,8 @@ type Instruction struct {
 
 // StateMap describes state immediately before a bytecode instruction. PC is
 // the instruction to resume, not the VM's PC after fetching it. Depth is the
-// live operand count; -1 marks unreachable code. Slots [0, Locals) are locals,
-// and the next Depth slots are the operand stack, in interpreter order.
+// live operand count; -1 marks unreachable code. Slots [0, Locals) hold locals
+// and read-only captured-binding snapshots; the next Depth slots hold operands.
 type StateMap struct {
 	PC    uint32
 	Depth int
@@ -132,6 +159,7 @@ const (
 	Returned ExitKind = iota
 	GuardExit
 	BudgetExit
+	HostExit
 )
 
 // Exit records a result or the exact interpreter state to resume. Steps counts

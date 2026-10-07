@@ -37,7 +37,8 @@ func refuse(pc int, why string) error { return &Refusal{PC: pc, Reason: why} }
 // Lower checks eligibility, validates control-flow stack depths, and produces
 // one atomic IR instruction and pre-instruction map per bytecode instruction.
 // No executable memory is allocated. Unsupported code, even when unreachable,
-// is refused; in particular no call can create an alias to the local slots.
+// is refused. Captured own locals are excluded; read-only upvalues are snapshots
+// refreshed by the VM after host operations.
 func Lower(fn *bytecode.Function) (*ir.Program, error) {
 	if fn == nil {
 		return nil, refuse(-1, "nil function")
@@ -51,15 +52,13 @@ func Lower(fn *bytecode.Function) (*ir.Program, error) {
 		return nil, refuse(-1, "special function kind")
 	case fn.HasDirectEval || len(fn.EvalScopes) != 0:
 		return nil, refuse(-1, "direct eval")
-	case len(fn.Upvalues) != 0:
-		return nil, refuse(-1, "upvalues")
 	case fn.UsesArguments || fn.MappedArguments:
 		return nil, refuse(-1, "arguments object")
 	case !fn.HasSimpleParams || fn.HasRest || fn.ParamsAreLexical:
 		return nil, refuse(-1, "non-simple parameters")
 	case len(fn.Code) == 0 || len(fn.Code) > MaxInstructions:
 		return nil, refuse(-1, "instruction budget")
-	case fn.LocalCount < 0 || fn.MaxStack < 0 || fn.LocalCount > MaxSlots || fn.MaxStack > MaxSlots || fn.LocalCount+fn.MaxStack > MaxSlots:
+	case fn.LocalCount < 0 || fn.MaxStack < 0 || fn.LocalCount > MaxSlots || fn.MaxStack > MaxSlots || len(fn.Upvalues) > MaxSlots || fn.LocalCount+fn.MaxStack+len(fn.Upvalues) > MaxSlots:
 		return nil, refuse(-1, "slot budget")
 	case fn.ParamCount < 0 || fn.ParamCount > fn.LocalCount || len(fn.Locals) != fn.LocalCount:
 		return nil, refuse(-1, "invalid local layout")
@@ -70,12 +69,20 @@ func Lower(fn *bytecode.Function) (*ir.Program, error) {
 		}
 	}
 	effects := make([]effect, len(fn.Code))
+	host, loop, indexed := false, false, false
 	for pc, in := range fn.Code {
 		e, err := describe(fn, pc, in)
 		if err != nil {
 			return nil, err
 		}
 		effects[pc] = e
+		host = host || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis
+		loop = loop || e.branch && int(in.A) <= pc
+		indexed = indexed || in.Op == bytecode.OpGetIndex || in.Op == bytecode.OpSetIndex || in.Op == bytecode.OpGetLocalIndex || in.Op == bytecode.OpGetLocalIndexUpdate
+	}
+	// Tiny host-only wrappers pay the bridge overhead without enough native work.
+	if host && !loop && !indexed {
+		return nil, refuse(-1, "host operations without native loop or array work")
 	}
 	maps := make([]ir.StateMap, len(fn.Code))
 	for pc := range maps {
@@ -123,10 +130,10 @@ func Lower(fn *bytecode.Function) (*ir.Program, error) {
 			}
 		}
 	}
-	p := &ir.Program{Locals: fn.LocalCount, StackSize: fn.MaxStack, Maps: maps, Code: make([]ir.Instruction, len(fn.Code))}
+	p := &ir.Program{Locals: fn.LocalCount + len(fn.Upvalues), StackSize: fn.MaxStack, Maps: maps, Code: make([]ir.Instruction, len(fn.Code))}
 	for pc, in := range fn.Code {
 		if maps[pc].Depth >= 0 {
-			p.Code[pc] = lower(fn, in, fn.LocalCount+maps[pc].Depth)
+			p.Code[pc] = lower(fn, in, p.Locals+maps[pc].Depth)
 		}
 	}
 	return p, nil
@@ -150,7 +157,7 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 		if !local(in.A) {
 			return bad("local index out of bounds")
 		}
-	case bytecode.OpGetLocal2, bytecode.OpSetLocalGet:
+	case bytecode.OpGetLocal2, bytecode.OpSetLocalGet, bytecode.OpGetLocalIndex:
 		if !local(in.A) || !local(in.B) {
 			return bad("local index out of bounds")
 		}
@@ -159,7 +166,42 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 			return bad("local index out of bounds")
 		}
 	}
+	if in.Op == bytecode.OpGetLocalIndexUpdate && (!local(in.A) || !local(in.B>>2)) {
+		return bad("local index out of bounds")
+	}
+	if (in.Op == bytecode.OpGetUpvalue || in.Op == bytecode.OpGetUpvalueCheck) && uint64(in.A) >= uint64(len(fn.Upvalues)) {
+		return bad("upvalue index out of bounds")
+	}
 	switch in.Op {
+	case bytecode.OpGetUpvalue, bytecode.OpGetUpvalueCheck, bytecode.OpGetLocalIndex, bytecode.OpGetLocalIndexUpdate:
+		return effect{delta: 1}, nil
+	case bytecode.OpGetIndex:
+		return effect{need: 2, delta: -1}, nil
+	case bytecode.OpSetIndex:
+		return effect{need: 3, delta: -3}, nil
+	case bytecode.OpGetLength:
+		return effect{need: 1}, nil
+	case bytecode.OpToPropertyKeyOfBase:
+		return effect{need: 2}, nil
+	case bytecode.OpInsert3:
+		return effect{need: 3, delta: 1}, nil
+	case bytecode.OpCall, bytecode.OpCallMethod:
+		if in.A > MaxSlots {
+			return bad("argument budget")
+		}
+		n := int(in.A) + 1
+		if in.Op == bytecode.OpCallMethod {
+			n++
+		}
+		return effect{need: n, delta: 1 - n}, nil
+	case bytecode.OpGetGlobal, bytecode.OpGetPropThis:
+		if uint64(in.A) >= uint64(len(fn.Names)) || in.B == 0 || in.B > fn.PropSites {
+			return bad("invalid property site")
+		}
+		if in.Op == bytecode.OpGetPropThis {
+			return effect{need: 1, delta: 1}, nil
+		}
+		return effect{delta: 1}, nil
 	case bytecode.OpNop, bytecode.OpEndParams, bytecode.OpClearLocal:
 		return effect{}, nil
 	case bytecode.OpPushConst:
@@ -212,6 +254,12 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 			raw = in.A >> 24
 		}
 		op, ok := operator(raw)
+		if (in.Op == bytecode.OpBinImm || in.Op == bytecode.OpLocalBinImm) && raw == uint32(bytecode.OpBitOr) && (in.Op == bytecode.OpBinImm && in.A == 0 || in.Op == bytecode.OpLocalBinImm && in.B == 0) {
+			if in.Op == bytecode.OpLocalBinImm {
+				return effect{delta: 1}, nil
+			}
+			return effect{need: 1}, nil
+		}
 		if !ok || op > ir.Mul {
 			return bad("unsupported fused arithmetic operator")
 		}
@@ -278,6 +326,27 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int) ir.Instruction {
 	number := func(n int32) ir.Operand { return ir.Literal(ir.Float(float64(n))) }
 	top := ir.Slot(sp - 1)
 	switch in.Op {
+	case bytecode.OpGetUpvalue, bytecode.OpGetUpvalueCheck:
+		slot := fn.LocalCount + int(in.A)
+		out := copyTo(sp, ir.Slot(slot))
+		out.Check, out.CheckSlot = in.Op == bytecode.OpGetUpvalueCheck, slot
+		return out
+	case bytecode.OpGetIndex:
+		return ir.Instruction{Op: ir.ArrayRead, Dest: sp - 2, Left: ir.Slot(sp - 2), Right: top}
+	case bytecode.OpGetLocalIndex:
+		return ir.Instruction{Op: ir.ArrayRead, Dest: sp, Left: ir.Slot(int(in.A)), Right: ir.Slot(int(in.B))}
+	case bytecode.OpGetLocalIndexUpdate:
+		return ir.Instruction{Op: ir.ArrayUpdate, Dest: sp, Extra: int(in.B >> 2), Left: ir.Slot(int(in.A)), Right: ir.Slot(int(in.B >> 2)), Postfix: in.B&bytecode.UpdatePostfix != 0, Operator: ir.Operator(in.B & bytecode.UpdateDec)}
+	case bytecode.OpSetIndex:
+		return ir.Instruction{Op: ir.ArrayWrite, Left: ir.Slot(sp - 3), Right: ir.Slot(sp - 2), Third: top}
+	case bytecode.OpGetLength:
+		return ir.Instruction{Op: ir.ArrayLength, Left: top, Dest: sp - 1}
+	case bytecode.OpToPropertyKeyOfBase:
+		return ir.Instruction{Op: ir.ArrayKey, Left: ir.Slot(sp - 2), Right: top}
+	case bytecode.OpInsert3:
+		return ir.Instruction{Op: ir.Insert3, Dest: sp - 3}
+	case bytecode.OpCall, bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpGetPropThis:
+		return ir.Instruction{Op: ir.Host}
 	case bytecode.OpPushConst:
 		return copyTo(sp, ir.Literal(ir.Float(fn.Constants[in.A].Num)))
 	case bytecode.OpPushInt:
@@ -324,9 +393,15 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int) ir.Instruction {
 		op, _ := operator(in.B)
 		return ir.Instruction{Op: ir.Binary, Operator: op, Dest: sp - 1, Left: top, Right: ir.Slot(int(in.A))}
 	case bytecode.OpBinImm:
+		if in.B == uint32(bytecode.OpBitOr) {
+			return ir.Instruction{Op: ir.Unary, Operator: ir.Int32, Left: top, Dest: sp - 1}
+		}
 		op, _ := operator(in.B)
 		return ir.Instruction{Op: ir.Binary, Operator: op, Dest: sp - 1, Left: top, Right: number(int32(in.A))}
 	case bytecode.OpLocalBinImm:
+		if in.A>>24 == uint32(bytecode.OpBitOr) {
+			return ir.Instruction{Op: ir.Unary, Operator: ir.Int32, Left: ir.Slot(int(in.A & (1<<24 - 1))), Dest: sp}
+		}
 		op, _ := operator(in.A >> 24)
 		return ir.Instruction{Op: ir.Binary, Operator: op, Dest: sp, Left: ir.Slot(int(in.A & (1<<24 - 1))), Right: number(int32(in.B))}
 	case bytecode.OpNeg, bytecode.OpPos, bytecode.OpToNumber, bytecode.OpToNumeric, bytecode.OpNot:

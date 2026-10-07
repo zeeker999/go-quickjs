@@ -43,9 +43,25 @@ func (p *Program) Validate() error {
 		if in.Check && (in.CheckSlot < 0 || in.CheckSlot >= active) {
 			return bad("invalid guard slot")
 		}
-		left, right, write, extra := false, false, false, false
+		left, right, third, write, extra := false, false, false, false, false
 		switch in.Op {
-		case Nop:
+		case Nop, Host:
+		case ArrayRead, ArrayKey, ArrayUpdate:
+			left, right, write = true, true, in.Op != ArrayKey
+			if in.Op == ArrayUpdate {
+				extra = true
+				if in.Operator != Add && in.Operator != Sub || in.Extra >= active {
+					return bad("invalid array update")
+				}
+			}
+		case ArrayWrite:
+			left, right, third = true, true, true
+		case ArrayLength:
+			left, write = true, true
+		case Insert3:
+			if in.Dest < 0 || in.Dest+2 >= active || !dest(in.Dest+3) {
+				return bad("invalid insert")
+			}
 		case Copy:
 			left, write = true, true
 		case CopyPair, StoreLoad:
@@ -62,7 +78,7 @@ func (p *Program) Validate() error {
 			}
 		case Unary:
 			left, write = true, true
-			if in.Operator != Neg && in.Operator != Pos && in.Operator != Not {
+			if in.Operator != Neg && in.Operator != Pos && in.Operator != Not && in.Operator != Int32 {
 				return bad("invalid unary operator")
 			}
 		case Update:
@@ -84,7 +100,7 @@ func (p *Program) Validate() error {
 		default:
 			return bad("invalid opcode")
 		}
-		if left && !source(in.Left) || right && !source(in.Right) || write && !dest(in.Dest) || extra && !dest(in.Extra) {
+		if left && !source(in.Left) || right && !source(in.Right) || third && !source(in.Third) || write && !dest(in.Dest) || extra && !dest(in.Extra) {
 			return bad("invalid slot operand")
 		}
 		if in.Op != Return && in.Op != Jump && !target(pc+1) {

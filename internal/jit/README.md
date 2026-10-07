@@ -1,7 +1,8 @@
-# Optional native numeric executor
+# Optional native executor
 
 This package implements the experimental numeric executor in [the JIT plan](../../docs/jit-plan.md).
-It emits numeric JavaScript functions directly as amd64 or arm64 machine code.
+It emits numeric JavaScript functions and dense numeric array loops directly
+as amd64 or arm64 machine code.
 Its `compile` subpackage lowers bytecode into a slot IR, with a Go evaluator in
 `ir` for verifying native exits. `WithJIT()` selects the optional VM tier.
 The original bounded leaf kernel remains a bridge and allocation probe.
@@ -127,16 +128,23 @@ Windows/arm64 and Linux/386 also compiled successfully.
 locals, primitive constants, stack copies, arithmetic, numeric comparisons,
 branches, increments/decrements, and primitive returns. It handles fused local,
 immediate, and comparison instructions without exposing half-completed bytecode
-operations. Captured locals, upvalues, arguments objects, direct eval, non-simple
-parameters, calls, handlers, `with`, and other unsupported opcodes are refused,
+operations. It also accepts read-only captured bindings, dense numeric array
+access, length reads, fused index updates, assignment-result insertion, and
+numeric `x | 0` within the signed int32 domain. Ordinary calls, method calls,
+global reads, and method lookups exit to Go and resume native execution.
+Host-backed functions need a loop or indexed work to qualify; small wrappers
+without that work retain the existing tiers. Captured own locals, writes to
+upvalues, arguments objects, direct eval, non-simple parameters, handlers,
+`with`, and other unsupported opcodes are refused,
 including in unreachable code. Work is bounded to 4096 bytecode instructions and
-256 total local/operand slots. It never changes `Function.VMCode`.
+256 total local/captured-binding/operand slots. It never changes `Function.VMCode`.
 
 The analysis checks local/constant operands, branch targets, stack underflow,
 stack capacity, and agreement at control-flow joins. Each reachable instruction
 has a map of the next bytecode PC and live operand depth. Short-circuit branches
 preserve their operand on the taken edge and pop it on the fallthrough edge.
-The IR keeps locals first and operands next, in the interpreter's order.
+The IR keeps locals first, read-only captured-binding snapshots next, and
+operands last, in the interpreter's order.
 
 IR scratch contains only 16-byte pointer-free scalars. Reference values are
 opaque indices into Go-owned roots, and can be copied but cannot participate in
@@ -187,21 +195,43 @@ the host abandoned. Native execution is experimental and has no guaranteed
 speedup; compilation and guard fallback can cost more than the
 existing tree tier.
 
-Native instruction bodies keep the remaining budget and pre-instruction PC in
-registers, publishing them only at shared guard, budget, and return exits.
-Every reachable external entry has a trampoline that loads the budget;
-internal branches target bodies directly. Straight-line and conditional
-fallthroughs need no extra jump. Budget checks still happen before every
-instruction, preserving the exact exit state and 4096-instruction bound.
+Native instruction bodies keep the remaining budget in a register and set the
+exit PC only when exiting. Straight-line regions precharge their instruction
+count once. A guard refunds the uncommitted suffix; a small remaining budget
+uses the generic path with per-instruction checks. Every entry and exit retains
+exact state and committed-step counts, with at most 4096 committed instructions
+per entry. Region sizes fit arm64's immediate encoding, including a maximum-size
+4096-instruction program split across regions.
 
-The emitters allocate the most frequently accessed scalar bits to fourteen FP
-registers. The first six kinds on arm64, or four on amd64, use integer registers;
-other kinds and unallocated slots remain in scratch. This is a bounded static
-allocation, independent of the scalar's JavaScript type. Copying an opaque
-handle or a NaN payload through an FP register preserves its bits exactly.
-Every external entry loads the registers through a shared initializer, and
-every guard, budget, or return exit spills them before returning to Go. Roots
-stay in Go-owned storage; generated code retains no pointers between entries.
+The emitters allocate scalar bits to fourteen FP registers on arm64 and thirteen
+on amd64. Six kinds on arm64 and four on amd64 use integer registers; other
+kinds and unallocated slots remain in scratch. Copies of opaque handles and NaN
+payloads preserve exact bits. Within a region, kind facts remove redundant
+numeric guards and kind stores; copied scalar origins allow repeated accesses
+to reuse one checked array view. Every arbitrary external entry into a region's
+middle uses the generic path until reaching a region boundary. No unchecked
+facts or cached view can leak across entry, branch joins, or callbacks.
+Every exit spills the registers before returning to Go.
+
+An array handle indexes a separate, typed table of 32-byte borrowed views. Each
+view roots dense Go storage and records its dense length, JavaScript length,
+and numeric tag boundary. Only ordinary arrays qualify. Native reads and stores
+guard exact uint32 indices, bounds, and existing numeric cells. Stores change
+only the numeric eight-byte field and canonicalize NaNs; they never change a
+Go pointer, grow a slice, fill a hole, or bypass an accessor. The VM keeps owners
+alive until return, and typed view pointers also keep backing storage live.
+Native code does not retain any address between entries. Holes, proxies,
+reconfigured properties, nonnumeric elements, unsupported keys, and coercions
+resume the interpreter before committing the failing bytecode instruction.
+Fused index updates commit only after all read guards succeed.
+
+Before a host operation the VM publishes locals and operands, then clears all
+scalar roots and borrowed views. It runs the existing call/property semantics
+in Go with the fetched PC, propagates exact errors, reacquires code after any
+cache eviction or release, and rebuilds snapshots and views before reentry.
+Captured bindings and array storage can change during callbacks. Host operations
+use an iterative native/Go loop, so repeated helper calls do not recursively
+nest interpreter resumptions in one JavaScript frame.
 
 Arithmetic reads allocated registers directly and guards both operands before
 writing the result. SSE2's destructive destination needs a temporary when it
@@ -537,3 +567,124 @@ Future work includes more precise per-function work feedback, broader numeric
 coverage, and reducing scalar loads and guards. Runtime ownership, memory
 accounting, native emission, VM dispatch, and limited on-stack replacement are
 implemented; the existing `Function.VMCode` tree cache remains independent.
+
+### Dense-array coverage and region measurements
+
+The active target is 5-10x over the bytecode interpreter on representative hot
+workloads. The following results reach that range for several workloads, while
+the mixed suite remains well below that target. All measurements use Go 1.27,
+macOS/arm64, and Apple M5 Max. Warm results are means of three fresh processes;
+functions and arrays are initialized before timing. Each dense kernel processes
+8192 elements, and the helper case performs four stencil passes with ordinary
+JavaScript boundary calls. Benchmarks assert actual native entry, zero guard
+exits, and exact results.
+
+| Dense kernel | Interpreter | Existing tree tier | Native | Speedup over interpreter |
+|---|---|---|---|---|
+| Vector arithmetic | 149.4 us | 101.4 us | 25.0 us | 6.0x |
+| Three-point stencil | 273.8 us | 182.6 us | 36.7 us | 7.5x |
+| Stencil with helper calls | 1078.2 us | 715.8 us | 148.6 us | 7.3x |
+
+Warm dense calls retain three Go allocations and 368 bytes per calling script.
+The vector and stencil each own one 16 KiB code allocation plus 536 and 728 bytes
+of metadata; the helper owns two such allocations plus 1408 bytes of metadata.
+Warm numeric particle integration improves to 54.9 us from 315.0 us in the tree
+tier, and 54.5 us from 562.4 us in the interpreter: 5.7x and 10.3x respectively.
+Newton iteration remains about 4.0x over the interpreter, below the target.
+Process peak RSS for all warm cases is 26.6-28.1 MiB.
+
+First-use measurements create fresh runtimes with precompiled bytecode and
+initialized arrays. Timed first calls include automatic loop promotion and
+native compilation, but exclude runtime construction, source compilation, and
+array initialization. This separates the first native feature use from startup:
+
+| Kernel | First call existing | First call automatic | Go bytes / allocations existing | Go bytes / allocations automatic |
+|---|---|---|---|---|
+| Vector | 104.2 us | 72.1 us | 370 / 3 | 100585 / 66 |
+| Stencil | 181.3 us | 90.2 us | 373 / 3 | 127635 / 69 |
+| Helper | 704.5 us | 217.6 us | 401 / 3 | 186331 / 72 |
+
+These long calls repay native compilation in this sample; the warm speedup
+is not a first-call speedup or a guarantee for shorter loops. Runtime construction
+still allocates no JIT state or executable pages.
+
+The fixed-work V8 comparison uses eight balanced placements per build and three
+rounds per placement, at three iterations. NavierStokes falls from 91.7 ms to
+30.3 ms (-66.9%); total falls from 655.4 ms to 594.7 ms (-9.3%). The tagged
+runtime opt-out comparison is effectively level (-0.9%, with NavierStokes flat).
+Most other suites remain level. This is a mixed-workload improvement, not a
+5-10x aggregate improvement.
+
+Three alternating fresh processes of the final binary at five iterations give
+916.0 ms native versus 1008.9 ms opt-out, with NavierStokes at 45.8 versus
+153.3 ms. Native Go allocations rise from 672.4 to 677.5 MB for compilation and
+metadata; live heap after collection stays at 9.4 MB for both. Peak RSS overlaps:
+234.1-242.1 MiB native, 236.0-239.4 MiB opt-out. At fifty iterations the live heap
+still reports 9.4 MB, rather than growing with iteration count.
+
+The qjs binary is 40,169,618 bytes without the tag and 40,360,210 bytes with it:
+a 190,592-byte (0.47%) difference. Default/tagged full suites, vet, Go 1.24,
+race/checkptr, and Linux/amd64 native and VM tests under emulation pass. Native
+fuzzing completes 1.89 million executions without a failure. JIT-enabled test262
+reports 92,869 passed, zero failed, and the same 342 skips. Windows/amd64 and
+fallback Windows/arm64 and Linux/386 builds pass; actual Windows execution is
+not verified on this host.
+
+Reproduce the warm and first-use measurements with:
+
+```sh
+go test -tags quickjs_jit ./internal/vm -run '^$' \
+  -bench '^BenchmarkJIT(DenseKernels|DenseFirstUse|NumericKernels)$' -count=3
+```
+
+Use separate fresh processes for each sample when comparing changes.
+
+### Node comparison
+
+The external runner also measures Node v26.8.1 (V8 14.6.202.34-node.28).
+Its fixed-work suite timer now uses Node's monotonic `performance.now()`;
+QuickJS's external runner retains `Date.now()`. The wall clock produced suite
+timings that exceeded the measured process total on this host, so those samples
+were replaced. Node's per-suite output now has 0.1 ms precision.
+
+The following figures are means of three fresh processes per configuration,
+with fifty fixed iterations and identical suite sources, on the same host.
+Times are milliseconds. The existing go-quickjs column includes its tree tier;
+Node `--jitless` is a separate engine with different interpreter and regexp
+implementations, not a control for go-quickjs's own native compiler.
+
+| Suite | Existing go-quickjs | Native go-quickjs | Node | Node --jitless |
+|---|---|---|---|---|
+| Richards | 102.3 | 104.1 | 4.4 | 64.7 |
+| DeltaBlue | 153.6 | 163.6 | 6.4 | 107.7 |
+| Crypto | 2123.6 | 2148.7 | 66.2 | 2210.4 |
+| RayTrace | 860.0 | 864.8 | 28.1 | 431.5 |
+| EarleyBoyer | 2637.2 | 2683.5 | 120.4 | 1221.2 |
+| RegExp | 1252.2 | 1239.3 | 208.6 | 730.9 |
+| Splay | 168.9 | 168.7 | 25.9 | 70.5 |
+| NavierStokes | 1470.7 | 387.6 | 105.9 | 1813.0 |
+| TOTAL | 8778.8 | 7771.0 | 602.7 | 6688.8 |
+
+The external TOTAL includes process startup, file loading, and source compilation;
+the Go TOTAL includes runtime construction, loading, compilation, and execution,
+but excludes launching the Go process. Per-suite timings include setup and
+teardown. Larger iteration counts reduce the relative contribution of startup;
+these are fixed-work timings, not V8's score mode. At five iterations, Node's
+total is 167.3 ms and Node `--jitless` 794.6 ms, versus 916.0 ms native and
+1008.9 ms existing go-quickjs.
+
+At fifty iterations the native tier saves 11.5% of go-quickjs's total elapsed
+time. NavierStokes is 3.8x faster than the existing tiers, but Node remains 12.9x
+faster overall and 32.5x faster on Crypto. Crypto's bitwise arithmetic and its
+property/receiver setup, followed by object-heavy EarleyBoyer, remain major
+coverage targets. The 5-10x target has been reached by selected hot kernels,
+not by the complete V8 suite.
+
+```sh
+go run ./internal/cmd/v8bench/external -engine node -cmd node \
+  -dir /tmp/v8-v7 -mode fixed -n 50
+go run ./internal/cmd/v8bench/external -engine node -cmd node -arg --jitless \
+  -dir /tmp/v8-v7 -mode fixed -n 50
+go run -tags quickjs_jit ./internal/cmd/v8bench -jit \
+  -dir /tmp/v8-v7 -mode fixed -n 50
+```

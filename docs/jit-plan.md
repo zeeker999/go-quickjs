@@ -1,7 +1,7 @@
 # Native JIT implementation plan
 
-Status: experimental numeric executor implemented, October 7, 2026. Both amd64
-and arm64 emitters execute the pointer-free slot IR. A `quickjs_jit` build plus
+Status: experimental numeric and dense-array executor implemented, October 7,
+2026. Both amd64 and arm64 emitters execute the pointer-free slot IR. A `quickjs_jit` build plus
 `WithJIT()` enables native execution of eligible framed functions, with guards
 that resume the interpreter and periodic exits for cancellation and limits.
 Runtime-owned caches, executable memory accounting, and deferred cleanup are
@@ -12,9 +12,18 @@ closures after a bounded warmup without allocating state for short cold calls.
 Long calls can enter native code at existing interpreter and tree back-edge
 checks using the completed branch's target and spilled state. `disasm -jit`
 reports IR eligibility and exit maps. More precise hotness feedback, wider
-opcode coverage, and qualification on mixed object workloads remain future work.
+object coverage, and qualification on mixed object workloads remain future work.
+Read-only captured bindings, guarded dense numeric array access and length,
+fused index updates, and ordinary calls through resumable Go exits are now
+implemented. Straight-line region budgets, local kind facts, and checked-view
+reuse reduce native bookkeeping while retaining exact arbitrary-PC fallback.
 See [the implementation notes](../internal/jit/README.md)
 for contracts, validation, and current limits.
+
+The active performance target is a measured 5-10x improvement over the bytecode
+interpreter on representative hot workloads. Compare the existing tree tier
+separately, and report the mixed V8 suite as its own acceptance measure; a hot
+kernel improvement does not establish the same gain for the whole engine.
 
 ## Objective and scope
 

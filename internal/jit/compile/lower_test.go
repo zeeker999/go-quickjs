@@ -40,7 +40,7 @@ func fixture(code ...bytecode.Instr) *bytecode.Function {
 func TestRefusals(t *testing.T) {
 	for _, tc := range []struct{ source, reason string }{
 		{`function f(a) { return a.x }`, "unsupported opcode get_prop"},
-		{`function f(a) { return a() }`, "unsupported opcode"},
+		{`function f(a) { return new a() }`, "unsupported opcode"},
 		{`function f() { try { return 1 } catch(e) { return 2 } }`, "unsupported opcode push_catch"},
 		{`function f() { eval('1') }`, "direct eval"},
 		{`function f() { let a=1; return () => a }`, "captured local"},
@@ -112,7 +112,7 @@ func TestCompilerBudgets(t *testing.T) {
 		{"slots", func(f *bytecode.Function) { f.MaxStack = MaxSlots }},
 		{"negative", func(f *bytecode.Function) { f.LocalCount = -1 }},
 		{"layout", func(f *bytecode.Function) { f.Locals = nil }},
-		{"upvalues", func(f *bytecode.Function) { f.Upvalues = []bytecode.UpvalueDesc{{}} }},
+		{"upvalues", func(f *bytecode.Function) { f.Upvalues = make([]bytecode.UpvalueDesc, MaxSlots) }},
 		{"mapped arguments", func(f *bytecode.Function) { f.MappedArguments = true }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

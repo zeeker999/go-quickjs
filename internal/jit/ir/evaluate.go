@@ -3,6 +3,7 @@ package ir
 import (
 	"errors"
 	"math"
+	"unsafe"
 )
 
 // ErrState reports an invalid scratch size or a non-resumable entry PC.
@@ -13,6 +14,14 @@ var ErrState = errors.New("jit IR: invalid execution state")
 // leave all live slots in interpreter order; unused slots may hold stale values.
 // It can resume at every reachable state map, including with budget zero.
 func (p *Program) Evaluate(slots []Value, pc int, budget uint64) (Exit, error) {
+	return p.EvaluateArrays(slots, nil, pc, budget)
+}
+
+// EvaluateArrays is the correctness oracle for borrowed dense array storage.
+func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budget uint64) (Exit, error) {
+	if len(arrays) != 0 && len(arrays) != MaxSlots {
+		return Exit{}, ErrState
+	}
 	if p == nil || len(slots) != p.Locals+p.StackSize || pc < 0 || pc >= len(p.Code) ||
 		len(p.Maps) != len(p.Code) || p.Maps[pc].Depth < 0 {
 		return Exit{}, ErrState
@@ -37,6 +46,71 @@ func (p *Program) Evaluate(slots []Value, pc int, budget uint64) (Exit, error) {
 		next := pc + 1
 		switch in.Op {
 		case Nop:
+		case Host:
+			exit.Kind = HostExit
+			return exit, nil
+		case Insert3:
+			n := in.Dest
+			a, b, c := slots[n], slots[n+1], slots[n+2]
+			slots[n], slots[n+1], slots[n+2], slots[n+3] = c, a, b, c
+		case ArrayRead, ArrayWrite, ArrayKey, ArrayUpdate, ArrayLength:
+			obj := read(in.Left)
+			if obj.Kind != Opaque || obj.Bits >= uint64(len(arrays)) {
+				return exit, nil
+			}
+			view := arrays[obj.Bits]
+			if view.NumberLimit == 0 {
+				return exit, nil
+			}
+			if in.Op == ArrayLength {
+				slots[in.Dest] = Float(float64(view.Length))
+				break
+			}
+			key := read(in.Right)
+			old := key
+			if in.Op == ArrayUpdate {
+				var ok bool
+				key, ok = binary(in.Operator, old, Float(1))
+				if !ok {
+					return exit, nil
+				}
+				if in.Postfix {
+					key = old
+				}
+			}
+			if key.Kind != Number {
+				return exit, nil
+			}
+			x := math.Float64frombits(key.Bits)
+			if x < 0 || x > math.MaxUint32 || math.Trunc(x) != x {
+				return exit, nil
+			}
+			if in.Op == ArrayKey {
+				break
+			}
+			if uint64(x) >= view.DenseLength || view.Data == nil {
+				return exit, nil
+			}
+			cell := (*uint64)(unsafe.Add(view.Data, uintptr(x)*16))
+			if *cell >= view.NumberLimit {
+				return exit, nil
+			}
+			if in.Op == ArrayWrite {
+				v := read(in.Third)
+				if v.Kind != Number {
+					return exit, nil
+				}
+				if math.IsNaN(math.Float64frombits(v.Bits)) {
+					v.Bits = 0x7ff8000000000000
+				}
+				*cell = v.Bits
+			} else {
+				v := Value{Bits: *cell, Kind: Number}
+				if in.Op == ArrayUpdate {
+					slots[in.Extra], _ = binary(in.Operator, old, Float(1))
+				}
+				slots[in.Dest] = v
+			}
 		case Copy:
 			slots[in.Dest] = read(in.Left)
 		case CopyPair:
@@ -64,6 +138,13 @@ func (p *Program) Evaluate(slots []Value, pc int, budget uint64) (Exit, error) {
 			} else {
 				if a.Kind != Number {
 					return exit, nil
+				}
+				if in.Operator == Int32 {
+					n := math.Float64frombits(a.Bits)
+					if math.IsNaN(n) || n < math.MinInt32 || n > math.MaxInt32 {
+						return exit, nil
+					}
+					a = Float(float64(int32(n)))
 				}
 				if in.Operator == Neg {
 					a.Bits ^= 1 << 63

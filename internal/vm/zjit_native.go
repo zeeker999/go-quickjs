@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"runtime"
+	"unsafe"
 	"weak"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -46,6 +47,8 @@ type jitState struct {
 	cache       map[weak.Pointer[bytecode.Function]]*jitEntry
 	slots       [ir.MaxSlots]ir.Value
 	roots       [ir.MaxSlots]Value
+	arrays      [ir.MaxSlots]ir.ArrayView
+	hosts       uint64
 	rootCount   int
 	entries     uint64
 	guards      uint64
@@ -77,7 +80,7 @@ func (r *Runtime) releaseJIT() {
 			delete(r.jit.cache, key)
 		}
 	}
-	clear(r.jit.roots[:])
+	r.jit.clearRoots()
 	if len(r.jit.cache) == 0 {
 		r.jit = nil
 	}
@@ -177,6 +180,12 @@ func (s *jitState) encode(v Value) ir.Value {
 	}
 	i := s.rootCount
 	s.roots[i], s.rootCount = v, i+1
+	if v.IsObject() {
+		o := v.Object()
+		if o.class == ClassArray {
+			s.arrays[i] = ir.ArrayView{Data: unsafe.Pointer(unsafe.SliceData(o.elems)), DenseLength: uint64(len(o.elems)), Length: uint64(o.arrayLength()), NumberLimit: tagBase}
+		}
+	}
 	return ir.Value{Kind: ir.Opaque, Bits: uint64(i)}
 }
 
@@ -203,12 +212,13 @@ func (s *jitState) publish(f *frame, stack []Value, depth int) {
 		f.locals[i] = s.decode(s.slots[i])
 	}
 	for i := 0; i < depth; i++ {
-		stack[f.base+i] = s.decode(s.slots[len(f.locals)+i])
+		stack[f.base+i] = s.decode(s.slots[len(f.locals)+len(f.cl.upvalues)+i])
 	}
 }
 
 func (s *jitState) clearRoots() {
 	clear(s.roots[:s.rootCount])
+	clear(s.arrays[:s.rootCount])
 	s.rootCount = 0
 }
 
@@ -263,20 +273,14 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 	}
 	f.cl.jitLoopDelay = 0
 	s := r.jit
-	n := len(f.locals) + f.cl.fn.MaxStack
-	clear(s.slots[:n])
-	for i, v := range f.locals {
-		s.slots[i] = s.encode(v)
-	}
-	for i, v := range r.stack[f.base : f.base+depth] {
-		s.slots[len(f.locals)+i] = s.encode(v)
-	}
+	n := len(f.locals) + len(f.cl.upvalues) + f.cl.fn.MaxStack
+	s.encodeFrame(f, r.stack, depth)
 	if osr {
 		s.osrs++
 	}
 	for {
 		s.entries++
-		exit, err := e.code.Run(s.slots[:n], pc, jit.MaxIterations)
+		exit, err := e.code.RunArrays(s.slots[:n], s.arrays[:], pc, jit.MaxIterations)
 		runtime.KeepAlive(s)
 		if err != nil {
 			s.clearRoots()
@@ -301,6 +305,22 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 			defer func() { r.jitDeoptDepth = previous }()
 			v, err := r.executeAt(f, f.base+exit.State.Depth, nil)
 			return v, err, true
+		case ir.HostExit:
+			s.hosts++
+			s.clearRoots()
+			sp, hostErr := r.jitHost(f, f.base+exit.State.Depth)
+			if hostErr != nil {
+				return r.jitInterpret(f, sp, hostErr)
+			}
+			pc = int(f.pc)
+			// A reentrant callback can release this cache or evict the parent.
+			// Reacquire it only after the callback has returned to Go.
+			e = r.jitFor(f.cl.fn)
+			if e == nil || e.code == nil {
+				return r.jitInterpret(f, sp, nil)
+			}
+			s = r.jit
+			s.encodeFrame(f, r.stack, sp-f.base)
 		case ir.BudgetExit:
 			s.budgets++
 			if err := r.checkInterruptNow(); err != nil {
@@ -330,4 +350,62 @@ func jitTreeResult(p any) (Value, error, bool) {
 		return exit.value, exit.err, true
 	}
 	return Undefined, nil, false
+}
+
+func (s *jitState) encodeFrame(f *frame, stack []Value, depth int) {
+	n := len(f.locals) + len(f.cl.upvalues) + f.cl.fn.MaxStack
+	clear(s.slots[:n])
+	for i, v := range f.locals {
+		s.slots[i] = s.encode(v)
+	}
+	for i, v := range f.cl.upvalues {
+		s.slots[len(f.locals)+i] = s.encode(v.get())
+	}
+	for i, v := range stack[f.base : f.base+depth] {
+		s.slots[len(f.locals)+len(f.cl.upvalues)+i] = s.encode(v)
+	}
+}
+
+// jitHost runs an explicitly lowered host operation with normal VM ordering.
+// No borrowed view or native scalar root survives a callback.
+func (r *Runtime) jitHost(f *frame, sp int) (int, error) {
+	pc := int(f.pc)
+	in := f.cl.fn.Code[pc]
+	f.pc++
+	stack := r.stack
+	var v Value
+	var err error
+	switch in.Op {
+	case bytecode.OpCall, bytecode.OpCallMethod:
+		argc := int(in.A)
+		args := stack[sp-argc : sp]
+		callee := stack[sp-argc-1]
+		this := Undefined
+		sp -= argc + 1
+		if in.Op == bytecode.OpCallMethod {
+			sp--
+			this = stack[sp]
+		}
+		v, err = r.callDirect(callee, this, args)
+	case bytecode.OpGetGlobal:
+		c := tctx{r: r, f: f, cl: f.cl, locals: f.locals}
+		v, err = r.getGlobalAt(&c, in, pc)
+	case bytecode.OpGetPropThis:
+		v, err = r.getValueProp(stack[sp-1], f.cl.names[in.A])
+	default:
+		panic("invalid JIT host operation")
+	}
+	if err != nil {
+		return sp, err
+	}
+	r.stack[sp] = v
+	return sp + 1, nil
+}
+
+func (r *Runtime) jitInterpret(f *frame, sp int, pending error) (Value, error, bool) {
+	previous := r.jitDeoptDepth
+	r.jitDeoptDepth = uint32(r.frameDepth)
+	defer func() { r.jitDeoptDepth = previous }()
+	v, err := r.executeAt(f, sp, pending)
+	return v, err, true
 }

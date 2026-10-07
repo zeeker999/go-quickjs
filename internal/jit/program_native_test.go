@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"reflect"
 	"runtime"
 	"sync"
 	"testing"
@@ -42,6 +43,110 @@ func TestNativeProgramABI(t *testing.T) {
 	if unsafe.Sizeof(s) != 40 || unsafe.Offsetof(s.remaining) != 0 || unsafe.Offsetof(s.reason) != 8 ||
 		unsafe.Offsetof(s.pc) != 16 || unsafe.Offsetof(s.value) != 24 || unsafe.Sizeof(v) != 16 || unsafe.Offsetof(v.Kind) != 8 {
 		t.Fatal("native program ABI changed")
+	}
+	var view ir.ArrayView
+	if unsafe.Sizeof(view) != 32 || unsafe.Offsetof(view.DenseLength) != 8 || unsafe.Offsetof(view.Length) != 16 || unsafe.Offsetof(view.NumberLimit) != 24 {
+		t.Fatal("native array ABI changed")
+	}
+}
+
+func TestNativeProgramArrays(t *testing.T) {
+	type cell struct {
+		bits uint64
+		ref  unsafe.Pointer
+	}
+	for _, op := range []ir.Op{ir.ArrayRead, ir.ArrayWrite, ir.ArrayUpdate, ir.ArrayLength, ir.ArrayKey} {
+		for _, key := range []float64{0, math.Copysign(0, -1), 1, 2, -1, 0.5, 4294967295, 4294967296, math.NaN(), math.Inf(1)} {
+			for _, postfix := range []bool{false, true} {
+				for _, bits := range []uint64{math.Float64bits(3), 0xfff8000000000001, math.Float64bits(math.NaN())} {
+					in := ir.Instruction{Op: op, Left: ir.Slot(0), Right: ir.Slot(1), Third: ir.Slot(2), Dest: 3, Extra: 1, Operator: ir.Add, Postfix: postfix}
+					p := &ir.Program{Locals: 4, Code: []ir.Instruction{in, {Op: ir.Return, Left: ir.Slot(3)}}, Maps: []ir.StateMap{{PC: 0}, {PC: 1}}}
+					c := newTestCode(t, p)
+					for _, budget := range []uint64{0, 1, 2} {
+						a, b := []cell{{bits: bits}, {bits: math.Float64bits(7)}}, []cell{{bits: bits}, {bits: math.Float64bits(7)}}
+						va, vb := make([]ir.ArrayView, ir.MaxSlots), make([]ir.ArrayView, ir.MaxSlots)
+						va[0] = ir.ArrayView{Data: unsafe.Pointer(&a[0]), DenseLength: 2, Length: 4, NumberLimit: 0xfff8000000000000}
+						vb[0] = va[0]
+						vb[0].Data = unsafe.Pointer(&b[0])
+						x := []ir.Value{{Kind: ir.Opaque}, ir.Float(key), ir.Float(math.NaN()), ir.Float(19)}
+						y := append([]ir.Value(nil), x...)
+						want, err := p.EvaluateArrays(x, va, 0, budget)
+						if err != nil {
+							t.Fatal(err)
+						}
+						got, err := c.RunArrays(y, vb, 0, budget)
+						if err != nil || !reflect.DeepEqual(got, want) || !reflect.DeepEqual(x, y) || !reflect.DeepEqual(a, b) {
+							t.Fatalf("op %v key %v postfix %v bits %x budget %d: exit %+v/%+v slots %v/%v cells %v/%v err %v", op, key, postfix, bits, budget, got, want, y, x, b, a, err)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestNativeProgramArrayViewCache(t *testing.T) {
+	p := &ir.Program{Locals: 4, Code: []ir.Instruction{
+		{Op: ir.ArrayRead, Left: ir.Slot(0), Right: ir.Slot(1), Dest: 2},
+		{Op: ir.ArrayRead, Left: ir.Literal(ir.Value{Kind: ir.Opaque, Bits: 1}), Right: ir.Slot(1), Dest: 3},
+		{Op: ir.ArrayRead, Left: ir.Slot(0), Right: ir.Slot(1), Dest: 2},
+		{Op: ir.Binary, Operator: ir.Add, Left: ir.Slot(2), Right: ir.Slot(3), Dest: 2},
+		{Op: ir.Return, Left: ir.Slot(2)},
+	}, Maps: []ir.StateMap{{PC: 0}, {PC: 1}, {PC: 2}, {PC: 3}, {PC: 4}}}
+	c := newTestCode(t, p)
+	cells := [2][2]uint64{{math.Float64bits(2), 0}, {math.Float64bits(5), 0}}
+	views := make([]ir.ArrayView, ir.MaxSlots)
+	for i := 0; i < 2; i++ {
+		views[i] = ir.ArrayView{Data: unsafe.Pointer(&cells[i][0]), DenseLength: 1, Length: 1, NumberLimit: 0xfff8000000000000}
+	}
+	for _, handle := range []uint64{0, 1, 255, 256, ^uint64(0)} {
+		for _, budget := range []uint64{0, 1, 2, 3, 4, 5} {
+			x := []ir.Value{{Kind: ir.Opaque, Bits: handle}, ir.Float(0), ir.Float(0), ir.Float(0)}
+			y := append([]ir.Value(nil), x...)
+			want, _ := p.EvaluateArrays(x, views, 0, budget)
+			got, err := c.RunArrays(y, views, 0, budget)
+			if err != nil || got != want || !reflect.DeepEqual(x, y) {
+				t.Fatalf("handle %d budget %d: got %+v %v want %+v", handle, budget, got, err, want)
+			}
+		}
+	}
+	x := []ir.Value{{Kind: ir.Opaque}, ir.Float(0), ir.Float(0), ir.Float(0)}
+	if got, err := c.RunArrays(x, nil, 0, 5); err != nil || got.Kind != ir.GuardExit || got.Steps != 0 {
+		t.Fatalf("nil views: %+v %v", got, err)
+	}
+	if _, err := c.RunArrays(x, views[:1], 0, 5); !errors.Is(err, ir.ErrState) {
+		t.Fatalf("invalid views: %v", err)
+	}
+}
+
+func TestNativeProgramInt32(t *testing.T) {
+	p := &ir.Program{Locals: 1, Code: []ir.Instruction{{Op: ir.Unary, Operator: ir.Int32, Left: ir.Slot(0), Dest: 0}, {Op: ir.Return, Left: ir.Slot(0)}}, Maps: []ir.StateMap{{PC: 0}, {PC: 1}}}
+	c := newTestCode(t, p)
+	for _, n := range []float64{0, math.Copysign(0, -1), 2.9, -2.9, math.MinInt32, math.MaxInt32, math.MinInt32 - 1, math.MaxInt32 + 1, math.NaN(), math.Inf(-1), math.Inf(1)} {
+		for _, budget := range []uint64{0, 1, 2} {
+			x, y := []ir.Value{ir.Float(n)}, []ir.Value{ir.Float(n)}
+			want, _ := p.Evaluate(x, 0, budget)
+			got, err := c.Run(y, 0, budget)
+			if err != nil || got != want || x[0] != y[0] {
+				t.Fatalf("input %v budget %d: %+v %v want %+v", n, budget, got, err, want)
+			}
+		}
+	}
+}
+
+func TestNativeProgramMaximumRegion(t *testing.T) {
+	p := &ir.Program{Code: make([]ir.Instruction, ir.MaxInstructions), Maps: make([]ir.StateMap, ir.MaxInstructions)}
+	for pc := range p.Maps {
+		p.Maps[pc].PC = uint32(pc)
+	}
+	p.Code[len(p.Code)-1] = ir.Instruction{Op: ir.Return, Left: ir.Literal(ir.Float(7))}
+	c := newTestCode(t, p)
+	for _, budget := range []uint64{0, 1, 4094, 4095, 4096} {
+		want, _ := p.Evaluate(nil, 0, budget)
+		got, err := c.Run(nil, 0, budget)
+		if err != nil || got != want {
+			t.Fatalf("budget %d: %+v %v want %+v", budget, got, err, want)
+		}
 	}
 }
 

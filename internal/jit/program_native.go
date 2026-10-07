@@ -39,12 +39,17 @@ func compileProgram(p *ir.Program, limit int) (*Code, error) {
 	return c, nil
 }
 
-func runProgramCode(code []byte, offset int, state *programState, slots []ir.Value) {
+func runProgramCode(code []byte, offset int, state *programState, slots []ir.Value, arrays []ir.ArrayView) {
 	var first *ir.Value
 	if len(slots) != 0 {
 		first = &slots[0]
 	}
-	enterProgram(&code[offset], state, first)
+	var views *ir.ArrayView
+	if len(arrays) != 0 {
+		views = &arrays[0]
+	}
+	enterProgram(&code[offset], state, first, views)
+	runtime.KeepAlive(arrays)
 	runtime.KeepAlive(code)
 	runtime.KeepAlive(state)
 	runtime.KeepAlive(slots)
@@ -54,4 +59,4 @@ func runProgramCode(code []byte, offset int, state *programState, slots []ir.Val
 // stack changes, and every path is bounded by a checked instruction budget.
 //
 //go:noescape
-func enterProgram(code *byte, state *programState, slots *ir.Value)
+func enterProgram(code *byte, state *programState, slots *ir.Value, arrays *ir.ArrayView)

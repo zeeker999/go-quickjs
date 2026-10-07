@@ -6,12 +6,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 	"weak"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -20,6 +22,106 @@ import (
 )
 
 const jitSumSource = `function sum(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s } sum(10000)`
+
+func TestJITDenseArraysAndCallbacks(t *testing.T) {
+	var value Value
+	if unsafe.Sizeof(value) != 16 || unsafe.Offsetof(value.num) != 0 || unsafe.Offsetof(value.ref) != 8 {
+		t.Fatal("VM dense cell ABI changed")
+	}
+	for _, tc := range []struct {
+		name, source string
+		want         float64
+		guard        bool
+	}{
+		{"captured dimensions", `let n=3; function f(a,b){for(let i=0;i<n;i++)a[i]+=2*b[i];return a[0]+a[1]+a[2]} f([1,2,3],[4,5,6])`, 36, false},
+		{"alias", `function f(a,b){for(let i=0;i<a.length;i++)a[i]+=b[i];return a[0]+a[1]} let a=[2,3];f(a,a)`, 10, false},
+		{"prefix and postfix", `function f(a){let i=0,s=a[i++]+a[++i]+a[i--]+a[--i];return s*10+i}f([2,3,5])`, 140, false},
+		{"assignment result", `function f(a){let x=a[1]=7;return x+a[1]}f([2,3])`, 14, false},
+		{"callback snapshots", `let n=4;function step(a){n=2;a.push(9);a[0]=8}function f(a,cb){let s=0;for(let i=0;i<n;i++){s+=a[i];cb(a)}return s*10+a.length}f([1,2,3,4],step)`, 36, false},
+		{"method receiver", `function f(a){return Math.sqrt(a[0])+a.length}f([9,2])`, 5, false},
+		{"negative zero key", `function f(a){return a[-0]}f([7])`, 7, false},
+		{"NaN write", `function f(a){a[0]=0/0;return a[0]}f([1])`, math.NaN(), false},
+		{"numeric int32", `function f(a){return (a[0]|0)+(a[1]|0)}f([2.9,-1.9])`, 1, false},
+		{"int32 wrap fallback", `function f(a){return a[0]|0}f([4294967297])`, 1, true},
+		{"hole inherited read", `Array.prototype[0]=7;function f(a){return a[0]}f([,])`, 7, true},
+		{"accessor", `function f(a){let i=0;return a[i++]+i*10}let a=[1];Object.defineProperty(a,'0',{get(){return 7}});f(a)`, 17, true},
+		{"negative key", `function f(a){return a[-1]}let a=[1];a[-1]=9;f(a)`, 9, true},
+		{"fractional key", `function f(a){return a[.5]}let a=[1];a[.5]=8;f(a)`, 8, true},
+		{"proxy", `function f(a){return a[0]}f(new Proxy([1],{get(){return 8}}))`, 8, true},
+		{"inherited setter", `let hits=0;Object.defineProperty(Array.prototype,'0',{set(v){hits+=v}});function f(a){a[0]=3;return hits}f([,])`, 3, true},
+		{"frozen", `function f(a){a[0]=3;return a[0]}f(Object.freeze([7]))`, 7, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, trees := range []bool{false, true} {
+				r := jitRuntimeForTest(t, Config{JIT: true})
+				previous := treeTier.Swap(trees)
+				t.Cleanup(func() { treeTier.Store(previous) })
+				v, err := r.Run(compileForTest(t, tc.source))
+				if err != nil || !v.IsNumber() || v.Number() != tc.want && !(math.IsNaN(v.Number()) && math.IsNaN(tc.want)) {
+					t.Fatalf("result %v error %v, want %v", v, err, tc.want)
+				}
+				if r.jit == nil || r.jit.entries == 0 || (r.jit.guards > 0) != tc.guard || r.jit.rootCount != 0 {
+					t.Fatalf("native state %+v", r.jit)
+				}
+				for _, view := range r.jit.arrays {
+					if view.Data != nil {
+						t.Fatal("retained borrowed array")
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestJITHostReleaseAndGC(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	calls := 0
+	r.global.setOwnRaw(r.atoms.intern("host"), r.NewFunction("host", 1,
+		func(rt *Runtime, _ Value, args []Value) (Value, error) {
+			calls++
+			if rt.jit == nil || rt.jit.rootCount != 0 {
+				t.Fatal("callback retained native roots")
+			}
+			for _, view := range rt.jit.arrays {
+				if view.Data != nil {
+					t.Fatal("callback retained borrowed storage")
+				}
+			}
+			rt.releaseJIT()
+			runtime.GC()
+			return args[0], nil
+		}), propDefault)
+	v, err := r.Run(compileForTest(t, `function f(a){let s=0;for(let i=0;i<a.length;i++){s+=host(a[i]);a[i]=s}return s}f([1,2,3])`))
+	if err != nil || v.Number() != 6 || calls != 3 || r.jit == nil || r.jit.rootCount != 0 {
+		t.Fatalf("result %v err %v calls %d", v, err, calls)
+	}
+}
+
+func TestJITHostErrors(t *testing.T) {
+	for _, source := range []string{
+		`function f(a,cb){for(let i=0;i<a.length;i++)a[i]=cb();return 1} f([1],()=>{throw new RangeError('callback')})`,
+		`function f(a){return missing+a[0]} f([1])`,
+		`function f(a){return Math.noSuchMethod(a[0])} f([1])`,
+		`let a=[1]; Object.defineProperty(globalThis,'mathlike',{get(){throw new SyntaxError('getter')}});function f(a){return mathlike+a[0]}f(a)`,
+	} {
+		var want string
+		for _, enabled := range []bool{false, true} {
+			r := jitRuntimeForTest(t, Config{JIT: enabled})
+			_, err := r.Run(compileForTest(t, source))
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !enabled {
+				want = err.Error()
+			} else if err.Error() != want {
+				t.Fatalf("native error %q; want %q", err, want)
+			}
+			if enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.rootCount != 0) {
+				t.Fatal("did not exercise native host exit")
+			}
+		}
+	}
+}
 
 func jitRuntimeForTest(t *testing.T, cfg Config) *Runtime {
 	t.Helper()
@@ -276,7 +378,7 @@ func TestJITBudgetAllocations(t *testing.T) {
 
 func TestJITClosureRemembersRefusal(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	v, err := r.Run(compileForTest(t, `function f(n) { var s=0; for(var i=0;i<n;i++) s+=Math.abs(i); return s } f(3); f`))
+	v, err := r.Run(compileForTest(t, `function f(n) { var s=0; for(var i=0;i<n;i++) s+=new Number(i).valueOf(); return s } f(3); f`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -673,6 +775,114 @@ func jitNumericKernelCases() []struct{ name, body string } {
 		{"logistic", `VAR x=0.123; for(VAR i=0;i<n;i++) x=3.99*x*(1-x); return x`},
 		{"newton", `VAR x=1,s=0; for(VAR i=0;i<n;i++) { x=(x+2/x)*0.5; s+=x } return s`},
 		{"particle", `VAR x=0,y=0,vx=0.2,vy=0.3,s=0; for(VAR i=0;i<n;i++) { vx-=x*0.001; vy-=y*0.001; x+=vx; y+=vy; if(x>10||x< -10) vx=-vx; if(y>10||y< -10) vy=-vy; s+=x*x+y*y } return s`},
+	}
+}
+
+func jitDenseKernelCases() []struct{ name, body string } {
+	return []struct{ name, body string }{
+		{"vector", `for(var i=0;i<n;i++)a[i]=2*b[i]+1;return a[n-1]`},
+		{"stencil", `for(var i=1;i<n-1;i++)a[i]=(b[i-1]+b[i]+b[i+1])/3;return a[n-2]`},
+		{"helper", `for(var k=0;k<4;k++){for(var i=1;i<n-1;i++)a[i]=(b[i-1]+b[i]+b[i+1])/3;boundary(a)}return a[0]`},
+	}
+}
+
+func BenchmarkJITDenseKernels(b *testing.B) {
+	for _, tc := range jitDenseKernelCases() {
+		for _, mode := range []string{"interpreter", "existing", "native"} {
+			b.Run(tc.name+"/"+mode, func(b *testing.B) {
+				previous := treeTier.Swap(mode != "interpreter")
+				defer treeTier.Store(previous)
+				compile := func(src string) *bytecode.Function {
+					ast, err := parser.Parse(src, parser.Options{})
+					if err != nil {
+						b.Fatal(err)
+					}
+					p, err := compiler.Compile(ast, compiler.Options{})
+					if err != nil {
+						b.Fatal(err)
+					}
+					return p
+				}
+				setup := compile(`function make(n){function boundary(a){a[0]=a[1];a[n-1]=a[n-2]}return function kernel(a,b){` + tc.body + `}}var kernel=make(8192);var a=new Array(8192),b=new Array(8192);for(var i=0;i<8192;i++){a[i]=1;b[i]=1}`)
+				call := compile(`kernel(a,b)`)
+				r := New(Config{JIT: mode == "native"})
+				defer func() { r.Close(); r.ReleaseClosed() }()
+				if _, err := r.Run(setup); err != nil {
+					b.Fatal(err)
+				}
+				var want Value
+				for i := 0; i < jitHotCalls; i++ {
+					v, err := r.Run(call)
+					if err != nil {
+						b.Fatal(err)
+					}
+					want = v
+				}
+				if mode == "native" && (r.jit == nil || r.jit.entries == 0 || r.jit.guards != 0) {
+					b.Fatal("did not stay native")
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					v, err := r.Run(call)
+					if err != nil || !jitSameValueForTest(v, want) {
+						b.Fatalf("result %v error %v want %v", v, err, want)
+					}
+				}
+				b.StopTimer()
+				if r.jit != nil {
+					b.ReportMetric(float64(r.jitCodeBytes()), "code+metadata-B")
+				}
+			})
+		}
+	}
+}
+
+func BenchmarkJITDenseFirstUse(b *testing.B) {
+	for _, tc := range jitDenseKernelCases() {
+		for _, enabled := range []bool{false, true} {
+			mode := "existing"
+			if enabled {
+				mode = "automatic"
+			}
+			b.Run(tc.name+"/"+mode, func(b *testing.B) {
+				compile := func(src string) *bytecode.Function {
+					ast, err := parser.Parse(src, parser.Options{})
+					if err != nil {
+						b.Fatal(err)
+					}
+					p, err := compiler.Compile(ast, compiler.Options{})
+					if err != nil {
+						b.Fatal(err)
+					}
+					return p
+				}
+				setup := compile(`function make(n){function boundary(a){a[0]=a[1];a[n-1]=a[n-2]}return function kernel(a,b){` + tc.body + `}}var kernel=make(8192);var a=new Array(8192),b=new Array(8192);for(var i=0;i<8192;i++){a[i]=1;b[i]=1}`)
+				call := compile(`kernel(a,b)`)
+				b.ReportAllocs()
+				b.ResetTimer()
+				b.StopTimer()
+				for i := 0; i < b.N; i++ {
+					r := New(Config{JIT: enabled})
+					if _, err := r.Run(setup); err != nil {
+						b.Fatal(err)
+					}
+					b.StartTimer()
+					v, err := r.Run(call)
+					b.StopTimer()
+					native := r.jit != nil && r.jit.entries != 0 && r.jit.guards == 0
+					r.Close()
+					r.ReleaseClosed()
+					want := float64(1)
+					if tc.name == "vector" {
+						want = 3
+					}
+					if err != nil || v.Number() != want || enabled && !native {
+						b.Fatalf("first call %v error %v native %v", v, err, native)
+					}
+				}
+			})
+		}
 	}
 }
 

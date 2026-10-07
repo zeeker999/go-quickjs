@@ -60,6 +60,15 @@ func (c *Code) EntryDepth(pc int) (int, bool) {
 // committed IR instructions before returning to Go. Guards commit no part of
 // their failing instruction. Reference handles remain the caller's ownership.
 func (c *Code) Run(slots []ir.Value, pc int, budget uint64) (ir.Exit, error) {
+	return c.RunArrays(slots, nil, pc, budget)
+}
+
+// RunArrays borrows views only for this bounded entry. Native code may update
+// numeric bits of existing numeric cells, but never Go references or slice state.
+func (c *Code) RunArrays(slots []ir.Value, arrays []ir.ArrayView, pc int, budget uint64) (ir.Exit, error) {
+	if len(arrays) != 0 && len(arrays) != ir.MaxSlots {
+		return ir.Exit{}, ir.ErrState
+	}
 	if c == nil || len(c.code) == 0 {
 		return ir.Exit{}, ErrClosed
 	}
@@ -75,7 +84,7 @@ func (c *Code) Run(slots []ir.Value, pc int, budget uint64) (ir.Exit, error) {
 		}
 	}
 	s := programState{remaining: budget, pc: uint64(pc)}
-	runProgramCode(c.code, c.entries[pc], &s, slots)
+	runProgramCode(c.code, c.entries[pc], &s, slots, arrays)
 	runtime.KeepAlive(c)
 	return ir.Exit{Kind: ir.ExitKind(s.reason), State: c.maps[s.pc], Value: s.value, Steps: budget - s.remaining}, nil
 }

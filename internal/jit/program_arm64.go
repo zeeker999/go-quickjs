@@ -10,13 +10,14 @@ import (
 )
 
 // R0 owns programState and R2 scalar scratch. R8 holds the remaining budget,
-// R9 the pre-instruction PC. R1, R3-R7 and F0-F1 are scratch; F2-F7 and
+// R9 the exit PC, R1 borrowed array views. R16 caches a view within a region.
+// R3-R7 and F0-F1 are scratch; F24 holds tentative index updates. F2-F7 and
 // F16-F23 cache scalar bits, R10-R15 cache the first six kinds. All are
 // spilled on every exit.
 // SP, FP, LR, R18 and Go's R28 remain untouched; no native calls occur.
 type arm64Program struct {
 	programAssembler
-	guard, budget, returned int
+	guard, budget, returned, host int
 }
 
 func programInstructions(p *ir.Program) ([]byte, []int, error) {
@@ -25,120 +26,183 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 	for range p.Code {
 		a.label()
 	}
-	a.guard, a.budget, a.returned = a.label(), a.label(), a.label()
+	common := [4]int{a.label(), a.label(), a.label(), a.label()}
+	a.regions(p)
 	initialize := a.label()
-	for pc, in := range p.Code {
-		if p.Maps[pc].Depth < 0 {
-			continue
-		}
-		a.mark(pc)
-		a.immediate(9, uint64(pc))
-		a.compareImmediate(8, 0)
-		a.conditional(0, a.budget)
-		if in.Check {
-			a.loadKind(in.CheckSlot, 4)
-			a.compareImmediate(4, uint32(ir.Uninitialized))
-			a.conditional(0, a.guard)
-		}
-		switch in.Op {
-		case ir.Nop:
-		case ir.Copy:
-			a.loadScalar(in.Left, 0, 4)
-			a.storeScalar(in.Dest, 0, 4)
-		case ir.CopyPair:
-			a.loadScalar(in.Left, 0, 4)
-			a.loadScalar(in.Right, 1, 6)
-			a.storeScalar(in.Dest, 0, 4)
-			a.storeScalar(in.Extra, 1, 6)
-		case ir.StoreLoad:
-			a.loadScalar(in.Left, 0, 4)
-			a.storeScalar(in.Dest, 0, 4)
-			a.loadScalar(in.Right, 0, 4)
-			a.storeScalar(in.Extra, 0, 4)
-		case ir.Swap:
-			a.loadScalar(ir.Slot(in.Dest), 0, 4)
-			a.loadScalar(ir.Slot(in.Extra), 1, 6)
-			a.storeScalar(in.Dest, 1, 6)
-			a.storeScalar(in.Extra, 0, 4)
-		case ir.Binary:
-			fp := a.binary(in.Operator, in.Left, in.Right, in.Dest)
-			if in.Operator <= ir.Div {
-				a.storeNumber(in.Dest, fp)
+	for mode := 0; mode < 2; mode++ {
+		a.fast = mode == 1
+		for pc, in := range p.Code {
+			if p.Maps[pc].Depth < 0 {
+				continue
+			}
+			a.pc = pc
+			if a.starts[pc] || pc > 0 && a.tails[pc-1] == 1 {
+				a.arrayCacheID = -1
+			}
+			a.guard, a.budget, a.returned, a.host = a.exit(pc, ir.GuardExit), a.exit(pc, ir.BudgetExit), a.exit(pc, ir.Returned), a.exit(pc, ir.HostExit)
+			if a.fast {
+				a.mark(a.fastBodies[pc])
 			} else {
-				a.storeBool(in.Dest)
+				a.mark(pc)
+				a.compareImmediate(8, 0)
+				a.conditional(0, a.budget)
 			}
-		case ir.Unary:
-			if in.Operator == ir.Not {
-				a.truth(in.Left)
-				a.immediate(5, 1)
-				a.word(0xca050063) // eor x3, x3, x5
-				a.storeBool(in.Dest)
-			} else {
-				a.load(in.Left, 3, 4)
-				a.compareImmediate(4, uint32(ir.Number))
-				a.conditional(1, a.guard)
-				if in.Operator == ir.Neg {
-					a.immediate(5, 1<<63)
-					a.word(0xca050063)
-				}
-				a.store(in.Dest, 3, 4)
+			if in.Check {
+				a.loadKind(in.CheckSlot, 4)
+				a.compareImmediate(4, uint32(ir.Uninitialized))
+				a.conditional(0, a.guard)
 			}
-		case ir.Update:
-			if in.Postfix && in.Extra >= 0 {
-				a.load(in.Left, 5, 6)
-			}
-			fp := a.binary(in.Operator, in.Left, ir.Literal(ir.Float(1)), in.Dest)
-			a.storeNumber(in.Dest, fp)
-			if in.Extra >= 0 {
-				if in.Postfix {
-					a.store(in.Extra, 5, 6)
+			switch in.Op {
+			case ir.Nop:
+			case ir.Host:
+				a.jump(a.host)
+				continue
+			case ir.Insert3:
+				a.load(ir.Slot(in.Dest+2), 5, 6)
+				a.store(in.Dest+3, 5, 6)
+				a.load(ir.Slot(in.Dest+1), 3, 4)
+				a.store(in.Dest+2, 3, 4)
+				a.load(ir.Slot(in.Dest), 3, 4)
+				a.store(in.Dest+1, 3, 4)
+				a.store(in.Dest, 5, 6)
+			case ir.ArrayRead, ir.ArrayWrite, ir.ArrayKey, ir.ArrayLength, ir.ArrayUpdate:
+				a.array(in)
+			case ir.Copy:
+				a.loadScalar(in.Left, 0, 4)
+				a.storeScalar(in.Dest, 0, 4)
+			case ir.CopyPair:
+				a.loadScalar(in.Left, 0, 4)
+				a.loadScalar(in.Right, 1, 6)
+				a.storeScalar(in.Dest, 0, 4)
+				a.storeScalar(in.Extra, 1, 6)
+			case ir.StoreLoad:
+				a.loadScalar(in.Left, 0, 4)
+				a.storeScalar(in.Dest, 0, 4)
+				a.loadScalar(in.Right, 0, 4)
+				a.storeScalar(in.Extra, 0, 4)
+			case ir.Swap:
+				a.loadScalar(ir.Slot(in.Dest), 0, 4)
+				a.loadScalar(ir.Slot(in.Extra), 1, 6)
+				a.storeScalar(in.Dest, 1, 6)
+				a.storeScalar(in.Extra, 0, 4)
+			case ir.Binary:
+				fp := a.binary(in.Operator, in.Left, in.Right, in.Dest)
+				if in.Operator <= ir.Div {
+					a.storeNumber(in.Dest, fp)
 				} else {
-					a.storeNumber(in.Extra, fp)
+					a.storeBool(in.Dest)
 				}
-			}
-		case ir.Jump:
-			a.commit()
-			a.jump(in.Target)
-			continue
-		case ir.Branch:
-			if in.Operator == ir.Truth {
-				a.truth(in.Left)
-			} else {
-				left := a.number(in.Left, 0)
-				right := a.number(in.Right, 1)
-				a.word(0x1e602000 | right<<16 | left<<5) // fcmp dN, dM
-				a.commit()                               // sub does not change condition flags
-				condition := arm64Comparison(in.Operator)
-				if !in.When {
-					condition ^= 1
+			case ir.Unary:
+				if in.Operator == ir.Int32 {
+					fp := a.number(in.Left, 0)
+					a.immediate(7, 0xc1e0000000000000)
+					a.word(0x9e6700e1)
+					a.word(0x1e612000 | fp<<5)
+					a.conditional(4, a.guard)
+					a.conditional(6, a.guard)
+					a.immediate(7, 0x41dfffffffc00000)
+					a.word(0x9e6700e1)
+					a.word(0x1e612000 | fp<<5)
+					a.conditional(12, a.guard)
+					a.word(0x1e780007 | fp<<5) // fcvtzs w7,dN
+					a.word(0x1e6200e0)         // scvtf d0,w7
+					a.storeNumber(in.Dest, 0)
+				} else if in.Operator == ir.Not {
+					a.truth(in.Left)
+					a.immediate(5, 1)
+					a.word(0xca050063) // eor x3, x3, x5
+					a.storeBool(in.Dest)
+				} else {
+					a.load(in.Left, 3, 4)
+					a.compareImmediate(4, uint32(ir.Number))
+					a.conditional(1, a.guard)
+					if in.Operator == ir.Neg {
+						a.immediate(5, 1<<63)
+						a.word(0xca050063)
+					}
+					a.store(in.Dest, 3, 4)
 				}
-				a.conditional(condition, in.Target)
+			case ir.Update:
+				if in.Postfix && in.Extra >= 0 {
+					a.load(in.Left, 5, 6)
+				}
+				fp := a.binary(in.Operator, in.Left, ir.Literal(ir.Float(1)), in.Dest)
+				a.storeNumber(in.Dest, fp)
+				if in.Extra >= 0 {
+					if in.Postfix {
+						a.store(in.Extra, 5, 6)
+					} else {
+						a.storeNumber(in.Extra, fp)
+					}
+				}
+			case ir.Jump:
+				a.commit()
+				a.jump(a.target(in.Target))
+				continue
+			case ir.Branch:
+				if in.Operator == ir.Truth {
+					a.truth(in.Left)
+				} else {
+					left := a.number(in.Left, 0)
+					right := a.number(in.Right, 1)
+					a.word(0x1e602000 | right<<16 | left<<5) // fcmp dN, dM
+					a.commit()                               // sub does not change condition flags
+					condition := arm64Comparison(in.Operator)
+					if !in.When {
+						condition ^= 1
+					}
+					a.conditional(condition, a.target(in.Target))
+					a.jump(a.fastEntries[pc+1])
+					continue
+				}
+				a.commit()
+				a.compareImmediate(3, 0)
+				condition := uint32(0)
+				if in.When {
+					condition = 1
+				}
+				a.conditional(condition, a.target(in.Target))
+				a.jump(a.fastEntries[pc+1])
+				continue
+			case ir.Return:
+				a.load(in.Left, 3, 4)
+				a.compareImmediate(4, uint32(ir.Null))
+				a.conditional(8, a.guard)
+				a.memory(false, false, 3, 0, 24)
+				a.memory(false, false, 4, 0, 32)
+				a.commit()
+				a.jump(a.returned)
 				continue
 			}
 			a.commit()
-			a.compareImmediate(3, 0)
-			condition := uint32(0)
-			if in.When {
-				condition = 1
+			if a.tails[pc] == 1 {
+				a.jump(a.fastEntries[pc+1])
 			}
-			a.conditional(condition, in.Target)
-			continue
-		case ir.Return:
-			a.load(in.Left, 3, 4)
-			a.compareImmediate(4, uint32(ir.Null))
-			a.conditional(8, a.guard)
-			a.memory(false, false, 3, 0, 24)
-			a.memory(false, false, 4, 0, 32)
-			a.commit()
-			a.jump(a.returned)
+		}
+	}
+	a.fast = false
+	for _, exit := range a.exits {
+		a.mark(exit.label)
+		a.immediate(9, uint64(exit.pc))
+		if exit.refund != 0 {
+			a.word(0x91000108 | uint32(exit.refund)<<10)
+		} // add x8,x8,#refund
+		a.jump(common[exit.kind])
+	}
+	for pc := range p.Code {
+		if p.Maps[pc].Depth < 0 {
 			continue
 		}
-		a.commit()
+		a.mark(a.fastEntries[pc])
+		a.compareImmediate(8, uint32(a.tails[pc]))
+		a.conditional(3, pc)                         // LO: exact small-budget path
+		a.word(0xd1000108 | uint32(a.tails[pc])<<10) // sub x8,x8,#tail
+		a.jump(a.fastBodies[pc])
 	}
 	for _, exit := range []struct {
 		label int
 		kind  ir.ExitKind
-	}{{a.guard, ir.GuardExit}, {a.budget, ir.BudgetExit}, {a.returned, ir.Returned}} {
+	}{{common[ir.GuardExit], ir.GuardExit}, {common[ir.BudgetExit], ir.BudgetExit}, {common[ir.Returned], ir.Returned}, {common[ir.HostExit], ir.HostExit}} {
 		a.mark(exit.label)
 		for slot, reg := range a.registers {
 			if reg >= 0 {
@@ -163,7 +227,7 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 			continue
 		}
 		entries[pc] = len(a.code)
-		a.fixups = append(a.fixups, relocation{offset: len(a.code), label: pc, address: true})
+		a.fixups = append(a.fixups, relocation{offset: len(a.code), label: a.target(pc), address: true})
 		a.word(0x10000010) // adr x16, body
 		a.jump(initialize)
 	}
@@ -266,6 +330,9 @@ func (a *arm64Program) loadKind(slot int, reg uint32) {
 }
 
 func (a *arm64Program) storeKind(slot int, reg uint32) {
+	if a.fast && a.unchanged[a.pc][slot] {
+		return
+	}
 	if cache := a.registers[slot]; cache >= 0 && cache < 8 {
 		a.word(0xaa0003e0 | reg<<16 | uint32(cache+8))
 	} else {
@@ -302,6 +369,9 @@ func (a *arm64Program) compareImmediate(reg, value uint32) {
 }
 
 func (a *arm64Program) commit() {
+	if a.fast {
+		return
+	}
 	a.word(0xd1000508) // sub x8, x8, #1
 }
 
@@ -314,13 +384,15 @@ func (a *arm64Program) number(o ir.Operand, fp uint32) uint32 {
 		a.word(0x9e670000 | 7<<5 | fp) // fmov dN, x7
 		return fp
 	}
-	if reg := a.registers[o.Slot]; reg >= 0 && reg < 8 {
-		a.compareImmediate(uint32(reg+8), uint32(ir.Number))
-	} else {
-		a.loadKind(o.Slot, 4)
-		a.compareImmediate(4, uint32(ir.Number))
+	if !a.known(o, ir.Number) {
+		if reg := a.registers[o.Slot]; reg >= 0 && reg < 8 {
+			a.compareImmediate(uint32(reg+8), uint32(ir.Number))
+		} else {
+			a.loadKind(o.Slot, 4)
+			a.compareImmediate(4, uint32(ir.Number))
+		}
+		a.conditional(1, a.guard)
 	}
-	a.conditional(1, a.guard)
 	if reg := a.registers[o.Slot]; reg >= 0 {
 		return uint32(reg)
 	}
@@ -359,8 +431,10 @@ func (a *arm64Program) storeNumber(slot int, fp uint32) {
 	} else {
 		a.memory(false, true, fp, 2, slot*16)
 	}
-	a.immediate(4, uint64(ir.Number))
-	a.storeKind(slot, 4)
+	if !a.fast || !a.unchanged[a.pc][slot] {
+		a.immediate(4, uint64(ir.Number))
+		a.storeKind(slot, 4)
+	}
 }
 
 func (a *arm64Program) storeBool(slot int) {
@@ -393,4 +467,89 @@ func (a *arm64Program) truth(o ir.Operand) {
 	a.mark(zero)
 	a.immediate(3, 0)
 	a.mark(done)
+}
+
+// array resolves a borrowed view and guards every condition before any write.
+// X3 is the view/cell address, X5 the index, X6 the numeric tag boundary.
+func (a *arm64Program) array(in ir.Instruction) {
+	if a.arrayCached(in.Left) {
+		a.word(0xaa1003e3) // mov x3,x16: same view within this region
+		a.memory(true, false, 6, 3, 24)
+	} else {
+		a.compareImmediate(1, 0)
+		a.conditional(0, a.guard)
+		a.load(in.Left, 3, 4)
+		if !a.known(in.Left, ir.Opaque) {
+			a.compareImmediate(4, uint32(ir.Opaque))
+			a.conditional(1, a.guard)
+		}
+		a.compareImmediate(3, ir.MaxSlots)
+		a.conditional(2, a.guard) // HS
+		a.word(0x8b031423)        // add x3, x1, x3, lsl #5
+		a.memory(true, false, 6, 3, 24)
+		a.compareImmediate(6, 0)
+		a.conditional(0, a.guard)
+		if a.fast {
+			a.word(0xaa0303f0)
+		} // mov x16,x3
+	}
+	if in.Op == ir.ArrayLength {
+		a.memory(true, false, 5, 3, 16)
+		a.word(0x9e6300a0) // ucvtf d0, x5
+		a.storeNumber(in.Dest, 0)
+		return
+	}
+	fp := a.number(in.Right, 0)
+	if in.Op == ir.ArrayUpdate {
+		a.immediate(7, 0x3ff0000000000000)
+		a.word(0x9e6700e1) // fmov d1, x7
+		op := uint32(0x1e602800)
+		if in.Operator == ir.Sub {
+			op = 0x1e603800
+		}
+		a.word(op | 1<<16 | fp<<5 | 24) // tentative updated index in d24
+		if !in.Postfix {
+			fp = 24
+		}
+	}
+	a.word(0x1e790005 | fp<<5) // fcvtzu w5, dN
+	a.word(0x1e6300a1)         // ucvtf d1, w5
+	a.word(0x1e612000 | fp<<5) // fcmp dN, d1
+	a.conditional(1, a.guard)
+	if in.Op == ir.ArrayKey {
+		return
+	}
+	a.memory(true, false, 7, 3, 8)
+	a.word(0xeb0700bf) // cmp x5, x7
+	a.conditional(2, a.guard)
+	a.memory(true, false, 3, 3, 0)
+	a.compareImmediate(3, 0)
+	a.conditional(0, a.guard)
+	a.word(0x8b051063) // add x3, x3, x5, lsl #4
+	a.memory(true, false, 7, 3, 0)
+	a.word(0xeb0600ff) // cmp x7, x6
+	a.conditional(2, a.guard)
+	if in.Op == ir.ArrayWrite {
+		fp = a.number(in.Third, 0)
+		a.word(0x1e602000 | fp<<16 | fp<<5) // fcmp dN, dN
+		done := a.label()
+		a.conditional(7, done) // VC: ordered
+		a.immediate(7, 0x7ff8000000000000)
+		a.word(0x9e6700e0)
+		fp = 0
+		// Ordered inputs branch around the canonical NaN store.
+		a.memory(false, true, fp, 3, 0)
+		end := a.label()
+		a.jump(end)
+		a.mark(done)
+		fp = a.number(in.Third, 0)
+		a.memory(false, true, fp, 3, 0)
+		a.mark(end)
+	} else {
+		if in.Op == ir.ArrayUpdate {
+			a.storeNumber(in.Extra, 24)
+		}
+		a.word(0x9e6700e0) // fmov d0, x7
+		a.storeNumber(in.Dest, 0)
+	}
 }
