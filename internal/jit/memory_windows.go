@@ -28,16 +28,16 @@ func allocateCode(instructions []byte) ([]byte, error) {
 	copy(code, instructions)
 	var oldProtect uint32
 	if err = windows.VirtualProtect(address, uintptr(len(code)), windows.PAGE_EXECUTE_READ, &oldProtect); err != nil {
-		return nil, fmt.Errorf("seal code: %w", errors.Join(err, freeLoopCode(code)))
+		return nil, fmt.Errorf("seal code: %w", errors.Join(err, freeCode(code)))
 	}
 	ok, _, err := flushInstructionCache.Call(uintptr(windows.CurrentProcess()), address, uintptr(len(code)))
 	if ok == 0 {
-		return nil, fmt.Errorf("flush instruction cache: %w", errors.Join(err, freeLoopCode(code)))
+		return nil, fmt.Errorf("flush instruction cache: %w", errors.Join(err, freeCode(code)))
 	}
 	return code, nil
 }
 
-func freeLoopCode(code []byte) error {
+func freeCode(code []byte) error {
 	return windows.VirtualFree(uintptr(unsafe.Pointer(&code[0])), 0, windows.MEM_RELEASE)
 }
 

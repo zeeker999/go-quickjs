@@ -32,4 +32,4 @@ func allocateCode(instructions []byte) ([]byte, error) {
 	return code, nil
 }
 
-func freeLoopCode(code []byte) error { return unix.Munmap(code) }
+func freeCode(code []byte) error { return unix.Munmap(code) }

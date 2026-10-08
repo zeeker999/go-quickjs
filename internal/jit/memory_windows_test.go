@@ -10,7 +10,10 @@ import (
 )
 
 func TestWindowsExecutableProtectionAndRelease(t *testing.T) {
-	loop := newTestLoop(t)
+	loop, err := Compile(constantProgram())
+	if err != nil {
+		t.Fatal(err)
+	}
 	address := uintptr(unsafe.Pointer(&loop.code[0]))
 	var info windows.MemoryBasicInformation
 	if err := windows.VirtualQuery(address, &info, unsafe.Sizeof(info)); err != nil {

@@ -36,7 +36,7 @@ across sessions. Update it **in the same commit** as the work it records.
 | R7 | One exhaustive per-opcode table (stack effect + lowering, missing means refuse); kind inference's default clears all facts; `Validate` rejects non-scalar literals | todo | |
 | Z1 | `closure` stays 128 B in tagged builds (index, not pointer); compile-time size assertions in both builds | todo | |
 | Z2 | `jitTreeRecovery` only for frames whose function can enter a native loop | todo | |
-| C1 | Delete `dispatch*.go`/`.s` and `loop*.go` with their tests | todo | |
+| C1 | Delete `dispatch*.go`/`.s` and `loop*.go` with their tests | done | jit: delete the unused dispatch layer and loop prototype |
 | C2 | Delete the shape-matched selectors (`selectShortCountdown`, `selectArrayGrowth`, the 16-cell preallocation, name-based `charCodeAt`); re-measure | todo | |
 | C3 | CI: tagged `go tool nm -size` and struct-size checks against main for the hot functions | todo | |
 | D1 | Rewrite `internal/jit/README.md` as contracts; move measurements to `docs/jit-results.md`; `qjs --jit` warns when the build lacks the JIT | todo | |

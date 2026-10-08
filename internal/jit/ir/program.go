@@ -252,10 +252,10 @@ const (
 	GuardExit
 	BudgetExit
 	HostExit
-	CallExit
 )
 
-// MaxCallSites bounds a compiled function's native dispatch descriptors.
+// MaxCallSites bounds the call instructions in one program; each has its
+// index in Key.
 const MaxCallSites = 16
 
 // Exit records a result or the exact interpreter state to resume. Steps counts

@@ -22,16 +22,15 @@ type arm64Program struct {
 	guard, budget, returned, host int
 	integerShadows                [7]int
 	integerNext                   int
-	dispatch                      bool
 }
 
-func programInstructions(p *ir.Program, dispatch bool) ([]byte, []int, error) {
-	a := &arm64Program{dispatch: dispatch}
+func programInstructions(p *ir.Program) ([]byte, []int, error) {
+	a := &arm64Program{}
 	a.allocateRegisters(p, []int{2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23})
 	for range p.Code {
 		a.label()
 	}
-	common := [5]int{a.label(), a.label(), a.label(), a.label(), a.label()}
+	common := [4]int{a.label(), a.label(), a.label(), a.label()}
 	a.regions(p)
 	a.inferIntegerResults(p)
 	initialize := a.label()
@@ -72,16 +71,7 @@ func programInstructions(p *ir.Program, dispatch bool) ([]byte, []int, error) {
 				a.jump(a.host)
 				continue
 			case ir.Call:
-				if dispatch {
-					a.memory(true, false, 16, 0, 8)
-					a.compareImmediate(16, 0)
-					a.conditional(0, a.host)
-					a.immediate(3, uint64(in.Key))
-					a.memory(false, false, 3, 0, 24)
-					a.jump(a.exit(pc, ir.CallExit))
-				} else {
-					a.jump(a.host)
-				}
+				a.jump(a.host)
 				continue
 			case ir.Insert2, ir.Insert3:
 				last := 2
@@ -238,9 +228,6 @@ func programInstructions(p *ir.Program, dispatch bool) ([]byte, []int, error) {
 		a.jump(a.fastBodies[pc])
 	}
 	exitKinds := []ir.ExitKind{ir.GuardExit, ir.BudgetExit, ir.Returned, ir.HostExit}
-	if dispatch {
-		exitKinds = append(exitKinds, ir.CallExit)
-	}
 	for _, kind := range exitKinds {
 		exit := struct {
 			label int
@@ -257,17 +244,8 @@ func programInstructions(p *ir.Program, dispatch bool) ([]byte, []int, error) {
 		}
 		a.memory(false, false, 8, 0, 0)
 		a.memory(false, false, 9, 0, 16)
-		if dispatch && (exit.kind == ir.Returned || exit.kind == ir.CallExit) {
-			a.memory(true, false, 16, 0, 8)
-		}
 		a.immediate(3, uint64(exit.kind))
 		a.memory(false, false, 3, 0, 8)
-		if dispatch && exit.kind == ir.Returned {
-			a.word(0xb4000050) // cbz x16, ret
-			a.word(0xd61f0200) // br x16: bounded native dispatch
-		} else if dispatch && exit.kind == ir.CallExit {
-			a.word(0xd61f0200)
-		}
 		a.word(0xd65f03c0)
 	}
 	// External entries initialize the budget register; internal branches go
