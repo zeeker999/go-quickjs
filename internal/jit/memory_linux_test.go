@@ -38,7 +38,10 @@ func mappingAt(t *testing.T, address uint64) string {
 }
 
 func TestLinuxExecutableProtectionAndRelease(t *testing.T) {
-	loop := newTestLoop(t)
+	loop, err := Compile(constantProgram())
+	if err != nil {
+		t.Fatal(err)
+	}
 	address := uint64(uintptr(unsafe.Pointer(&loop.code[0])))
 	if permissions := mappingAt(t, address); permissions != "r-xp" {
 		t.Fatalf("published code has permissions %q, want r-xp", permissions)

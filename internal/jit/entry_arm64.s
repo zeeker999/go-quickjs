@@ -2,11 +2,6 @@
 
 #include "textflag.h"
 
-TEXT ·enter(SB), NOSPLIT|NOFRAME, $0-16
-	MOVD code+0(FP), R16
-	MOVD state+8(FP), R0
-	JMP (R16)
-
 TEXT ·enterProgram(SB), NOSPLIT|NOFRAME, $0-32
 	MOVD code+0(FP), R16
 	MOVD state+8(FP), R0

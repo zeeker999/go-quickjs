@@ -21,13 +21,13 @@ type amd64Program struct {
 	guard, budget, returned, host int
 }
 
-func programInstructions(p *ir.Program, dispatch bool) ([]byte, []int, error) {
+func programInstructions(p *ir.Program) ([]byte, []int, error) {
 	a := &amd64Program{}
 	a.allocateRegisters(p, []int{2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14})
 	for range p.Code {
 		a.label()
 	}
-	common := [5]int{a.label(), a.label(), a.label(), a.label(), a.label()}
+	common := [4]int{a.label(), a.label(), a.label(), a.label()}
 	a.regions(p)
 	initialize := a.label()
 	for mode := 0; mode < 2; mode++ {
@@ -60,15 +60,7 @@ func programInstructions(p *ir.Program, dispatch bool) ([]byte, []int, error) {
 				a.jump(a.host)
 				continue
 			case ir.Call:
-				if dispatch {
-					a.memory(0x8b, 0, 7, 8)
-					a.bytes(0x48, 0x85, 0xc0)
-					a.conditional(4, a.host)
-					a.stateImmediate(24, in.Key)
-					a.jump(a.exit(pc, ir.CallExit))
-				} else {
-					a.jump(a.host)
-				}
+				a.jump(a.host)
 				continue
 			case ir.Insert2, ir.Insert3:
 				last := 2
@@ -210,9 +202,6 @@ func programInstructions(p *ir.Program, dispatch bool) ([]byte, []int, error) {
 		a.jump(a.fastBodies[pc])
 	}
 	exitKinds := []ir.ExitKind{ir.GuardExit, ir.BudgetExit, ir.Returned, ir.HostExit}
-	if dispatch {
-		exitKinds = append(exitKinds, ir.CallExit)
-	}
 	for _, kind := range exitKinds {
 		exit := struct {
 			label int
@@ -229,15 +218,7 @@ func programInstructions(p *ir.Program, dispatch bool) ([]byte, []int, error) {
 		}
 		a.memory(0x89, 10, 7, 0)
 		a.memory(0x89, 11, 7, 16)
-		if dispatch && (exit.kind == ir.Returned || exit.kind == ir.CallExit) {
-			a.memory(0x8b, 0, 7, 8)
-		}
 		a.stateImmediate(8, uint32(exit.kind))
-		if dispatch && exit.kind == ir.Returned {
-			a.bytes(0x48, 0x85, 0xc0, 0x74, 0x02, 0xff, 0xe0) // test ax; jz ret; jmp ax
-		} else if dispatch && exit.kind == ir.CallExit {
-			a.bytes(0xff, 0xe0)
-		}
 		a.bytes(0xc3)
 	}
 	// External entries initialize the budget register; internal branches go
