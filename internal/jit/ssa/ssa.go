@@ -89,6 +89,10 @@ const (
 	// the cell, which an exit has Go copy from (origin.go).
 	OpPropCell // ptr -> source: the property's value's address
 	OpLoadCell // source -> tagged: the value at a cell
+	// A global name's cell (abi.Context.Global): the binding at Index of
+	// the global object's table, if it is Key's and plain, initialized
+	// data, and no script-level lexical binding of the name shadows it.
+	OpGlobalCell // -> source
 
 	// Boxing: a typed value as a slot value.
 	OpBoxF64
@@ -122,7 +126,7 @@ var opNames = [...]string{
 	OpInvalid: "invalid", OpLoadSlot: "load", OpConst: "const", OpConstF64: "constf", OpConstSource: "consts", OpPhi: "phi",
 	OpUnboxF64: "unbox", OpTruth: "truth", OpCheckInit: "checkinit", OpBoxF64: "boxf", OpBoxBool: "boxb",
 	OpArrayOf: "arrayof", OpElemKey: "elemkey", OpElemRead: "elemread", OpElemWrite: "elemwrite", OpArrayLen: "arraylen",
-	OpObjectOf: "objectof", OpPropRead: "propread", OpPropWrite: "propwrite", OpPropCell: "propcell", OpLoadCell: "loadcell",
+	OpObjectOf: "objectof", OpPropRead: "propread", OpPropWrite: "propwrite", OpPropCell: "propcell", OpLoadCell: "loadcell", OpGlobalCell: "globalcell",
 	OpAddF64: "addf", OpSubF64: "subf", OpMulF64: "mulf", OpDivF64: "divf", OpNegF64: "negf", OpCmpF64: "cmpf",
 	OpNot: "not", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
@@ -139,7 +143,7 @@ func (o Op) String() string {
 func (o Op) isGuard() bool {
 	switch o {
 	case OpUnboxF64, OpTruth, OpCheckInit, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite,
-		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell:
+		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell:
 		return true
 	}
 	return false
@@ -149,7 +153,8 @@ func (o Op) isGuard() bool {
 // or properties, which writes change: two of them are not the same guard.
 // (An array's length and an object's shape change only in Go.)
 func (o Op) readsMemory() bool {
-	return o == OpElemRead || o == OpElemWrite || o == OpPropRead || o == OpPropWrite || o == OpPropCell
+	return o == OpElemRead || o == OpElemWrite || o == OpPropRead || o == OpPropWrite || o == OpPropCell ||
+		o == OpGlobalCell
 }
 
 // Value is one SSA value.

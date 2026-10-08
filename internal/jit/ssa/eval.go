@@ -153,6 +153,10 @@ func EvaluateArrays(f *Func, pc int, slots []ir.Value, arrays []ir.ArrayView, po
 type Heap struct {
 	Arrays  []ir.ArrayView
 	Objects []Object
+	// Global is the object global names are read from, and Lexical the
+	// names script-level lexical bindings have.
+	Global  *Object
+	Lexical map[uint32]bool
 }
 
 // Object is an object as property operations see it: its shape, whether it
@@ -165,6 +169,7 @@ type Object struct {
 	Keys     []uint32
 	Data     []bool
 	Writable []bool
+	Uninit   []bool
 	Props    []ir.Value
 }
 
@@ -343,6 +348,13 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
 				vals[v.ID] = val{cell: &o.Props[i]}
+			case OpGlobalCell:
+				g, i := heap.Global, v.Index
+				if g == nil || heap.Lexical[v.Key] || i < 0 || i >= len(g.Props) ||
+					g.Keys[i] != v.Key || !g.Data[i] || g.Uninit[i] {
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
+				vals[v.ID] = val{cell: &g.Props[i]}
 			case OpLoadCell:
 				vals[v.ID] = val{t: *a.cell}
 			case OpCheckInit:

@@ -100,12 +100,13 @@ var testEncoding = abi.Encoding{
 	PropertyKey: int32(unsafe.Offsetof(testProperty{}.key)), PropertyFlags: int32(unsafe.Offsetof(testProperty{}.flags)),
 	ClassObject: testClassObject, PropNotData: testAccessor | testDeleted | testPrivate,
 	PropNotWritable: testAccessor | testDeleted | testPrivate | testUninit | testWritable, PropWritable: testWritable,
+	PropUninit: testUninit,
 }
 
-// testHeap is what handles 0 to 3 name, as in package ssa's tests: an
+// testHeap is what handles 0 to 4 name, as in package ssa's tests: an
 // array of numbers, an array with holes and other tags among them, an
-// object that is not an array, and an array whose length runs past its
-// dense elements.
+// object that is not an array, an array whose length runs past its dense
+// elements, and the global object.
 type testHeap []testArray
 
 type testArray struct {
@@ -165,6 +166,19 @@ func randomTestHeap(r *rand.Rand) testHeap {
 		}
 		h[i] = a
 	}
+	// The global object, handle 4: an ordinary object whose bindings may
+	// be in their temporal dead zone; its length's bits are which of the
+	// keys 10 to 13 script-level lexical bindings shadow.
+	g := testArray{shape: -1, length: uint64(r.IntN(16)) & uint64(r.IntN(16))}
+	for range 4 {
+		g.keys = append(g.keys, 10+uint32(r.IntN(4)))
+		g.flags = append(g.flags, testFlags[r.IntN(len(testFlags))])
+		g.props = append(g.props, ir.Float(float64(r.IntN(9)-3)))
+		if r.IntN(4) == 0 {
+			g.props[len(g.props)-1] = ir.Value{Kind: ir.Opaque, Bits: uint64(r.IntN(4))}
+		}
+	}
+	h = append(h, g)
 	return h
 }
 
@@ -178,6 +192,9 @@ type nativeHeap struct {
 	texts   [8]int
 	// evaluated is the objects' property values for the SSA evaluator.
 	evaluated [][]ir.Value
+	// lexNames is the names script-level lexical bindings have, a bit for
+	// each key: those of the global object's spec's length's bits.
+	lexNames []uint64
 }
 
 func (h testHeap) native() *nativeHeap {
@@ -205,6 +222,9 @@ func (h testHeap) native() *nativeHeap {
 		}
 		n.evaluated = append(n.evaluated, slices.Clone(a.props))
 	}
+	if len(h) > 4 {
+		n.lexNames = []uint64{h[4].length << 10}
+	}
 	return n
 }
 
@@ -219,8 +239,17 @@ func (n *nativeHeap) heap() ssa.Heap {
 			e.Keys = append(e.Keys, p.key)
 			e.Data = append(e.Data, p.flags&testEncoding.PropNotData == 0)
 			e.Writable = append(e.Writable, p.flags&testEncoding.PropNotWritable == testWritable)
+			e.Uninit = append(e.Uninit, p.flags&testUninit != 0)
 		}
 		h.Objects = append(h.Objects, e)
+	}
+	if len(h.Objects) > 4 {
+		h.Global, h.Lexical = &h.Objects[4], map[uint32]bool{}
+		for k := uint32(10); k < 14; k++ {
+			if n.lexNames[0]&(1<<k) != 0 {
+				h.Lexical[k] = true
+			}
+		}
 	}
 	return h
 }
@@ -387,6 +416,13 @@ func nativeTestValue(r *rand.Rand) ir.Value {
 type layout struct {
 	frame, this int
 	sites       map[int]site
+	globals     map[int]ssa.GlobalSite
+}
+
+// Global is ssa.Feedback's.
+func (l layout) Global(pc int) (ssa.GlobalSite, bool) {
+	s, ok := l.globals[pc]
+	return s, ok
 }
 
 // site is a property site's feedback.
@@ -416,17 +452,22 @@ func ssaTestProgram(r *rand.Rand) (*ir.Program, layout) {
 	ops := []ir.Op{ir.Copy, ir.Binary, ir.Binary, ir.Binary, ir.Unary, ir.Update, ir.Update, ir.Branch, ir.Branch,
 		ir.Jump, ir.Swap, ir.CopyPair, ir.StoreLoad, ir.Host, ir.Nop,
 		ir.ArrayRead, ir.ArrayWrite, ir.ArrayLength, ir.ArrayKey, ir.ArrayUpdate, ir.PropertyRead, ir.PropertyWrite,
-		ir.ReferenceRead, ir.ReferenceRead}
+		ir.ReferenceRead, ir.ReferenceRead, ir.BindingRead, ir.BindingRead}
 	operators := []ir.Operator{ir.Add, ir.Sub, ir.Mul, ir.Div, ir.Lt, ir.Le, ir.Gt, ir.Ge, ir.Eq, ir.Ne,
 		ir.BitAnd, ir.BitOr, ir.BitXor, ir.Shl, ir.Shr, ir.UShr}
 	p := &ir.Program{Locals: locals}
-	sites := map[int]site{}
+	sites, globals := map[int]site{}, map[int]ssa.GlobalSite{}
 	for pc := 0; pc < n; pc++ {
 		in := ir.Instruction{Op: ops[r.IntN(len(ops))], Left: operand(), Right: operand(), Third: operand(),
 			Dest: r.IntN(frameLocals), Extra: r.IntN(frameLocals), Target: r.IntN(n + 1), Postfix: r.IntN(2) == 0, When: r.IntN(2) == 0}
 		switch in.Op {
 		case ir.ArrayRead, ir.ArrayWrite, ir.ArrayLength, ir.ArrayKey:
 			in.Left = ir.Slot(r.IntN(locals))
+		case ir.BindingRead:
+			in.Left = ir.Literal(ir.Value{Kind: ir.Undefined})
+			if r.IntN(4) != 0 {
+				globals[pc] = ssa.GlobalSite{Key: 10 + uint32(r.IntN(4)), Index: int32(r.IntN(5)) - 1}
+			}
 		case ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead:
 			in.Left = ir.Slot(r.IntN(locals))
 			// Mostly a site the VM knows: a key, and sometimes a shape with the
@@ -477,7 +518,7 @@ func ssaTestProgram(r *rand.Rand) (*ir.Program, layout) {
 	if locals > frameLocals && r.IntN(2) == 0 {
 		this = locals - 1
 	}
-	return p, layout{frameLocals, this, sites}
+	return p, layout{frameLocals, this, sites, globals}
 }
 
 var exitNames = map[uint64]ir.ExitKind{abi.ExitReturn: ir.Returned, abi.ExitDeopt: ir.GuardExit,
@@ -564,6 +605,9 @@ func nativeMismatch(c *compiled, pc int, slots []ir.Value, poll int, heap testHe
 	}
 	if len(cells) > 0 {
 		ctx.Upvalues = unsafe.Pointer(&cells[0])
+	}
+	if len(nh.objects) > 4 {
+		ctx.Global, ctx.LexNames = unsafe.Pointer(&nh.objects[4]), unsafe.Pointer(&nh.lexNames)
 	}
 	if err := c.code.Run(pc, ctx); err != nil {
 		return err.Error()
@@ -745,7 +789,7 @@ func TestSSANativeCapturedShadow(t *testing.T) {
 	for pc := range p.Maps {
 		p.Maps[pc].PC = uint32(pc)
 	}
-	c, err := compileNative(p, layout{3, -1, nil})
+	c, err := compileNative(p, layout{3, -1, nil, nil})
 	if err != nil || c == nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -806,7 +850,7 @@ func TestSSANativeFromJavaScript(t *testing.T) {
 			if err != nil {
 				continue
 			}
-			if checkNative(t, r, p, layout{c.Fn.LocalCount, -1, nil}) {
+			if checkNative(t, r, p, layout{c.Fn.LocalCount, -1, nil, nil}) {
 				compiled++
 			}
 		}
@@ -824,7 +868,7 @@ func BenchmarkSSARoundTrip(b *testing.B) {
 		b.Run(fmt.Sprintf("%d-locals", locals), func(b *testing.B) {
 			p := &ir.Program{Locals: locals, Code: []ir.Instruction{{Op: ir.Host}, {Op: ir.Return, Left: ir.Slot(0)}},
 				Maps: []ir.StateMap{{PC: 0}, {PC: 1}}}
-			c, err := compileNative(p, layout{locals, -1, nil})
+			c, err := compileNative(p, layout{locals, -1, nil, nil})
 			if err != nil || c == nil {
 				b.Fatal(err)
 			}

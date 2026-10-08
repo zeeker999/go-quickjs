@@ -1239,6 +1239,38 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 	case ssa.OpPropCell:
 		c.property(v, guard)
 		c.setG(v, scratchA)
+	case ssa.OpGlobalCell:
+		// No script-level lexical binding of the name, which would shadow
+		// it: its bit clear, or past the set's words. Then the binding
+		// where it was, the name's, and plain, initialized data.
+		unshadowed := c.a.NewLabel()
+		word := int32(v.Key >> 6)
+		c.a.Load(scratchB, regCtx, abi.OffLexNames)
+		c.a.Load(scratchA, scratchB, 8)
+		c.a.OpImm(amd64.Cmp, scratchA, word, true)
+		c.a.Jcc(amd64.CondBE, unshadowed)
+		c.a.Load(scratchB, scratchB, 0)
+		c.a.Load(scratchB, scratchB, word*8)
+		c.a.MovImm(scratchA, 1<<(v.Key&63))
+		c.a.Op(amd64.Test, scratchB, scratchA, true)
+		guard(amd64.CondNE)
+		c.a.Bind(unshadowed)
+		c.a.Load(scratchA, regCtx, abi.OffGlobal)
+		c.a.Op(amd64.Test, scratchA, scratchA, true)
+		guard(amd64.CondE)
+		c.a.Load(scratchB, scratchA, c.enc.ObjectProps+8)
+		c.a.OpImm(amd64.Cmp, scratchB, int32(v.Index), true)
+		guard(amd64.CondBE)
+		c.a.Load(scratchA, scratchA, c.enc.ObjectProps)
+		c.a.OpImm(amd64.Add, scratchA, int32(v.Index)*c.enc.PropertySize, true)
+		c.a.LoadU32(scratchB, scratchA, c.enc.PropertyKey)
+		c.a.OpImm(amd64.Cmp, scratchB, int32(v.Key), false)
+		guard(amd64.CondNE)
+		c.a.LoadU8(scratchB, scratchA, c.enc.PropertyFlags)
+		c.a.OpImm(amd64.And, scratchB, int32(c.enc.PropNotData|c.enc.PropUninit), false)
+		guard(amd64.CondNE)
+		c.a.OpImm(amd64.Add, scratchA, c.enc.PropertyValue, true)
+		c.setG(v, scratchA)
 	case ssa.OpLoadCell:
 		c.a.Load(scratchA, c.gpr(arg(0), scratchA), c.enc.NumOffset)
 		c.setG(v, scratchA)
