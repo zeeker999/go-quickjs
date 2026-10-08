@@ -2283,14 +2283,12 @@ func BenchmarkJITNumericKernels(b *testing.B) {
 			if err != nil || !want.IsNumber() {
 				b.Fatalf("baseline = %v, %v", want, err)
 			}
-			for _, enabled := range []bool{false, true} {
-				mode := "existing"
-				if enabled {
-					mode = "native"
-				}
+			for _, mode := range []string{"existing", "native", "ssa"} {
+				enabled := mode != "existing"
 				b.Run(tc.name+"/"+keyword+"/"+mode, func(b *testing.B) {
 					r := New(Config{JIT: enabled})
 					defer func() { r.Close(); r.ReleaseClosed() }()
+					r.jitSSA = mode == "ssa"
 					if _, err := r.Run(definition); err != nil {
 						b.Fatal(err)
 					}
@@ -2302,6 +2300,9 @@ func BenchmarkJITNumericKernels(b *testing.B) {
 					}
 					if enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.guards != 0) {
 						b.Fatal("benchmark did not stay in native code")
+					}
+					if mode == "ssa" && r.JITStats().SSAEntries == 0 {
+						b.Fatal("benchmark did not run through the new pipeline")
 					}
 					b.ReportAllocs()
 					b.ResetTimer()
@@ -2544,15 +2545,13 @@ func BenchmarkJITHostRoundTrip(b *testing.B) {
 		{"remainder", `s=(s+i%3)|0`},
 		{"go-call", `s=(s+g(i))|0`},
 	} {
-		for _, enabled := range []bool{false, true} {
-			name := tc.name + "/existing"
-			if enabled {
-				name = tc.name + "/native"
-			}
-			b.Run(name, func(b *testing.B) {
+		for _, mode := range []string{"existing", "native", "ssa"} {
+			enabled := mode != "existing"
+			b.Run(tc.name+"/"+mode, func(b *testing.B) {
 				r := New(Config{JIT: enabled})
 				defer func() { r.Close(); r.ReleaseClosed() }()
 				r.jitCallThreshold = 1
+				r.jitSSA = mode == "ssa"
 				r.global.setOwnRaw(r.atoms.intern("g"), r.NewFunction("g", 1,
 					func(_ *Runtime, _ Value, args []Value) (Value, error) { return args[0], nil }), propDefault)
 				if _, err := r.Run(compileForTest(b, `function f(n){let s=0;for(let i=0;i<n;i++)`+tc.body+`;return s}`)); err != nil {
@@ -2565,6 +2564,9 @@ func BenchmarkJITHostRoundTrip(b *testing.B) {
 				}
 				if enabled && (r.jit == nil || r.jit.entries == 0) {
 					b.Fatal("did not run natively")
+				}
+				if mode == "ssa" && r.JITStats().SSAEntries == 0 {
+					b.Fatal("did not run through the new pipeline")
 				}
 				hostsBefore := r.JITStats().Hosts
 				b.ReportAllocs()
