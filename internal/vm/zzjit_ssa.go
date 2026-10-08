@@ -1,4 +1,4 @@
-//go:build quickjs_jit && !android && !ios && ((linux && amd64) || (windows && amd64))
+//go:build quickjs_jit && !android && !ios && ((linux && amd64) || (windows && amd64) || (darwin && arm64))
 
 package vm
 
@@ -95,7 +95,7 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, 
 		f.ThisSlot = fn.LocalCount + len(fn.Upvalues)
 	}
 	ssa.Optimize(f)
-	mc, err := mir.CompileAMD64(f, jitEncoding)
+	mc, err := mir.Compile(f, jitEncoding)
 	if err != nil || len(mc.Bytes) > limit {
 		return nil, nil
 	}

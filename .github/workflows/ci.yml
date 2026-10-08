@@ -139,7 +139,7 @@ jobs:
   jit-conformance:
     name: JIT test262 under stress (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -173,6 +173,14 @@ jobs:
       - name: Run test262
         shell: bash
         run: TEST262_DIR="$GITHUB_WORKSPACE/test262" go test -tags quickjs_jit ./conformance -run TestConformance -count=1 -timeout 35m -args -conformance.jit
+
+      # The new pipeline (docs/jit-phase2-design.md), wherever it compiles a
+      # function: amd64 on Linux and Windows, arm64 on macOS.
+      - name: Run test262 on the new pipeline
+        shell: bash
+        env:
+          QJS_JIT_PIPELINE: ssa
+        run: TEST262_DIR="$GITHUB_WORKSPACE/test262" go test -tags quickjs_jit ./conformance -run TestConformance -count=1 -timeout 35m -v -args -conformance.jit 2>&1 | tee test262-ssa.log | grep -E "test262:|native code ran|of those entries|FAIL|^ok"; test "${PIPESTATUS[0]}" -eq 0
 
   # Generated programs, run in the interpreter, the tree tier and the JIT
   # under stress, must give the same answer.

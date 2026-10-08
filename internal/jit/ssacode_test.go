@@ -1,4 +1,4 @@
-//go:build quickjs_jit && !android && !ios && (linux || windows)
+//go:build quickjs_jit && !android && !ios && (((linux || windows) && amd64) || (darwin && arm64))
 
 package jit
 
@@ -635,7 +635,7 @@ func compileNative(p *ir.Program, l layout) (*compiled, error) {
 	}
 	f.FrameLocals, f.ThisSlot = l.frame, l.this
 	ssa.Optimize(f)
-	mc, err := mir.CompileAMD64(f, testEncoding)
+	mc, err := mir.Compile(f, testEncoding)
 	if err != nil {
 		return nil, fmt.Errorf("CompileAMD64: %w\n%s", err, f)
 	}

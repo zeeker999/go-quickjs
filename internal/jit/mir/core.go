@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"runtime"
 	"sort"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
@@ -610,4 +611,13 @@ func (c *core) phiSchedule(to *ssa.Block, idx int) []phiStep {
 		}
 	}
 	return steps
+}
+
+// Compile compiles f for the architecture the program runs on, given the
+// VM's value encoding: amd64 or arm64.
+func Compile(f *ssa.Func, enc abi.Encoding) (*Code, error) {
+	if runtime.GOARCH == "arm64" {
+		return CompileARM64(f, enc)
+	}
+	return CompileAMD64(f, enc)
 }
