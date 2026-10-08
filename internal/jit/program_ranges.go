@@ -133,7 +133,7 @@ func (a *programAssembler) boundedInteger(o ir.Operand) bool {
 // still written at every instruction, including all guard and budget exits.
 func (a *programAssembler) inferIntegerResults(p *ir.Program) {
 	a.integerResults = make([]bool, len(p.Code))
-	uses := make([]uint16, ir.MaxInstructions*2+ir.MaxSlots)
+	uses := make([]uint16, a.originCount)
 	integer := func(in ir.Instruction) bool {
 		return in.Op == ir.Binary && in.Operator >= ir.BitAnd && in.Operator <= ir.UShr ||
 			in.Op == ir.Unary && (in.Operator == ir.Int32 || in.Operator == ir.BitNot)

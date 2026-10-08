@@ -554,3 +554,17 @@ func FuzzLower(f *testing.F) {
 		}
 	})
 }
+
+// A panic in analysis is a refusal, not a crashed host.
+func TestLowerPanicRefuses(t *testing.T) {
+	previous := lowerImpl
+	defer func() { lowerImpl = previous }()
+	lowerImpl = func(*bytecode.Function, bool, bool) (*ir.Program, error) { panic("analysis bug") }
+	for _, lower := range []func(*bytecode.Function) (*ir.Program, error){Lower, LowerCalls, LowerCallee} {
+		p, err := lower(&bytecode.Function{})
+		var refusal *Refusal
+		if p != nil || !errors.As(err, &refusal) {
+			t.Fatalf("lowering after a panic = %v, %v; want a refusal", p, err)
+		}
+	}
+}

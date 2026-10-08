@@ -31,8 +31,8 @@ across sessions. Update it **in the same commit** as the work it records.
 | R1 | Native loops honor `Halt`/`Close` after a host exit | done | jit: stop native loops at Halt after a host exit |
 | R2 | JIT code outside the script's memory budget, evictable, never the cause of `ErrMemoryLimit` | todo | |
 | R3 | No full heap walk per compile attempt; exponential back-off after refusals | todo | |
-| R4a | `recover` in compilation becomes a permanent refusal | todo | |
-| R4b | Size `inferIntegerResults`'s origin table from the final origin count, with an invariant test | todo | |
+| R4a | `recover` in compilation becomes a permanent refusal | done | jit: refuse instead of crashing when compilation panics |
+| R4b | Size `inferIntegerResults`'s origin table from the final origin count, with an invariant test | done | jit: refuse instead of crashing when compilation panics |
 | R7 | One exhaustive per-opcode table (stack effect + lowering, missing means refuse); kind inference's default clears all facts; `Validate` rejects non-scalar literals | todo | |
 | Z1 | `closure` stays 128 B in tagged builds (index, not pointer); compile-time size assertions in both builds | todo | |
 | Z2 | `jitTreeRecovery` only for frames whose function can enter a native loop | todo | |

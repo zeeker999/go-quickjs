@@ -101,3 +101,14 @@ func TestNativeCPUProfile(t *testing.T) {
 		t.Fatalf("CPU profile: %d bytes, %v", len(data), err)
 	}
 }
+
+// A panic while emitting is a refused program, not a crashed host.
+func TestNativeEmitPanicRefuses(t *testing.T) {
+	previous := emitInstructions
+	defer func() { emitInstructions = previous }()
+	emitInstructions = func(*ir.Program) ([]byte, []int, error) { panic("emitter bug") }
+	c, err := Compile(constantProgram())
+	if c != nil || !errors.Is(err, ErrProgram) {
+		t.Fatalf("Compile after an emitter panic = %v, %v; want nil, ErrProgram", c, err)
+	}
+}
