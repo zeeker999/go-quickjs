@@ -149,6 +149,11 @@ jobs:
       QUICKJS_REQUIRE_JIT: "1"
       QJS_JIT_STRESS: threshold,budget=3,deopt=7
     steps:
+      # test262 counts a source's bytes and line terminators: keep its LFs on
+      # Windows.
+      - name: Keep line endings
+        run: git config --global core.autocrlf false
+
       - name: Check out repository
         uses: actions/checkout@v4
 

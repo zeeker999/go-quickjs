@@ -2284,6 +2284,9 @@ func BenchmarkJITNumericKernels(b *testing.B) {
 				b.Fatalf("baseline = %v, %v", want, err)
 			}
 			for _, mode := range []string{"existing", "native", "ssa"} {
+				if mode == "ssa" && !jitSSABackend {
+					continue
+				}
 				enabled := mode != "existing"
 				b.Run(tc.name+"/"+keyword+"/"+mode, func(b *testing.B) {
 					r := New(Config{JIT: enabled})
@@ -2546,6 +2549,9 @@ func BenchmarkJITHostRoundTrip(b *testing.B) {
 		{"go-call", `s=(s+g(i))|0`},
 	} {
 		for _, mode := range []string{"existing", "native", "ssa"} {
+			if mode == "ssa" && !jitSSABackend {
+				continue
+			}
 			enabled := mode != "existing"
 			b.Run(tc.name+"/"+mode, func(b *testing.B) {
 				r := New(Config{JIT: enabled})

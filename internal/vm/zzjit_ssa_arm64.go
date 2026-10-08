@@ -11,7 +11,10 @@ import (
 // The new pipeline has no arm64 backend yet (P3 of docs/jit-progress.md):
 // every function goes to the slot IR emitters.
 
-const jitSSADefault = false
+const (
+	jitSSADefault = false
+	jitSSABackend = false
+)
 
 func (r *Runtime) compileSSA(*bytecode.Function, *ir.Program, int) *jit.SSACode { return nil }
 
