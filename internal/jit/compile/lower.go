@@ -209,6 +209,13 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 	selectNumericProperties(p)
 	if m.ssa {
 		for pc, in := range p.Code {
+			if in.Op == ir.Host && p.Maps[pc].Depth >= 0 {
+				// The new pipeline computes a remainder; the old one leaves
+				// it to Go.
+				if mod, ok := lowerMod(fn.Code[pc], p.Locals+p.Maps[pc].Depth); ok {
+					p.Code[pc] = mod
+				}
+			}
 			if in.Op == ir.BindingRead {
 				// The operand is the binding view's slot in the old pipeline;
 				// the new one reads the global object, through its context.
@@ -623,6 +630,25 @@ func operator(raw uint32) (ir.Operator, bool) {
 		return ir.Ne, true
 	}
 	return 0, false
+}
+
+// lowerMod is a remainder's instruction, in each form the bytecode has it:
+// the operator, with a local, with an immediate, and a local's with an
+// immediate.
+func lowerMod(in bytecode.Instr, sp int) (ir.Instruction, bool) {
+	mod := uint32(bytecode.OpMod)
+	top := ir.Slot(sp - 1)
+	switch {
+	case in.Op == bytecode.OpMod:
+		return ir.Instruction{Op: ir.Binary, Operator: ir.Mod, Dest: sp - 2, Left: ir.Slot(sp - 2), Right: top}, true
+	case in.Op == bytecode.OpBinLocal && in.B == mod:
+		return ir.Instruction{Op: ir.Binary, Operator: ir.Mod, Dest: sp - 1, Left: top, Right: ir.Slot(int(in.A))}, true
+	case in.Op == bytecode.OpBinImm && in.B == mod:
+		return ir.Instruction{Op: ir.Binary, Operator: ir.Mod, Dest: sp - 1, Left: top, Right: ir.Literal(ir.Float(float64(int32(in.A))))}, true
+	case in.Op == bytecode.OpLocalBinImm && in.A>>24 == mod:
+		return ir.Instruction{Op: ir.Binary, Operator: ir.Mod, Dest: sp, Left: ir.Slot(int(in.A & (1<<24 - 1))), Right: ir.Literal(ir.Float(float64(int32(in.B))))}, true
+	}
+	return ir.Instruction{}, false
 }
 
 func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this bool) ir.Instruction {

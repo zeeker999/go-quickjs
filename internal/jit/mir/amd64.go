@@ -39,12 +39,13 @@ const (
 	scratchB  = amd64.R11
 	xScratch0 = amd64.XReg(0)
 	xScratch1 = amd64.XReg(1)
+	xScratch2 = amd64.XReg(15)
 )
 
 var (
 	gprPool = []amd64.Reg{amd64.RBX, amd64.R8, amd64.R9, amd64.R10, amd64.R12, amd64.R13, amd64.R15}
 	xmmPool = func() (rs []amd64.XReg) {
-		for r := amd64.XReg(2); r < 16; r++ {
+		for r := amd64.XReg(2); r < xScratch2; r++ {
 			rs = append(rs, r)
 		}
 		return
@@ -1162,6 +1163,52 @@ func (c *compiler) property(v *ssa.Value, guard func(amd64.Cond)) {
 	c.a.Bind(found)
 }
 
+// remainder is JavaScript's % of two integers, by integer division: both
+// exact integers below 2**63 in magnitude, the divisor not zero. A zero
+// remainder takes the dividend's sign, -0 included, as fmod's does; a
+// divisor of -1 leaves exactly that without dividing, which could fault.
+// Anything else exits to Go, which computes it as math.Mod does: SSE has
+// no remainder, and Go computes one in software.
+func (c *compiler) remainder(v *ssa.Value, guard func(amd64.Cond)) {
+	if x := c.xmm(v.Args[0], xScratch0); x != xScratch0 {
+		c.a.SSEOp(amd64.MovAPD, xScratch0, x)
+	}
+	if y := c.xmm(v.Args[1], xScratch1); y != xScratch1 {
+		c.a.SSEOp(amd64.MovAPD, xScratch1, y)
+	}
+	for _, p := range []struct {
+		r amd64.Reg
+		x amd64.XReg
+	}{{scratchA, xScratch0}, {scratchC, xScratch1}} {
+		c.a.Cvttsd2si(p.r, p.x)
+		c.a.Cvtsi2sd(xScratch2, p.r, true)
+		c.a.SSEOp(amd64.UcomiSD, xScratch2, p.x)
+		guard(amd64.CondNE)
+		guard(amd64.CondP)
+	}
+	c.a.Op(amd64.Test, scratchC, scratchC, true)
+	guard(amd64.CondE)
+	zero, done := c.a.NewLabel(), c.a.NewLabel()
+	c.a.OpImm(amd64.Cmp, scratchC, -1, true)
+	c.a.Jcc(amd64.CondE, zero)
+	// IDIV takes RDX, the operands' base, which is reloaded after it.
+	c.a.Cqo()
+	c.a.Idiv(scratchC)
+	c.a.MovRR(scratchB, regStack)
+	c.a.Load(regStack, regCtx, abi.OffStack)
+	c.a.Op(amd64.Test, scratchB, scratchB, true)
+	c.a.Jcc(amd64.CondE, zero)
+	c.a.Cvtsi2sd(xScratch0, scratchB, true)
+	c.a.Jmp(done)
+	c.a.Bind(zero)
+	c.a.MovQFromX(scratchA, xScratch0)
+	c.a.MovImm(scratchB, 1<<63)
+	c.a.Op(amd64.And, scratchA, scratchB, true)
+	c.a.MovQToX(xScratch0, scratchA)
+	c.a.Bind(done)
+	c.setX(v, xScratch0)
+}
+
 // length is x.length: a string's, which it keeps rope or not, or an
 // array's, the dense count or a sparse array's length when that is larger,
 // as Object.arrayLength has it.
@@ -1409,6 +1456,8 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		}
 		c.a.SSEOp(op, xScratch0, c.xmm(arg(1), xScratch1))
 		c.setX(v, xScratch0)
+	case ssa.OpModF64:
+		c.remainder(v, guard)
 	case ssa.OpNegF64:
 		x := c.xmm(arg(0), xScratch0)
 		if x != xScratch0 {

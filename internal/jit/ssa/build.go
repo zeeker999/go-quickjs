@@ -130,8 +130,9 @@ func (b *builder) plan() error {
 			// it.
 			entries[pc+1] = true
 		case ir.Binary:
-			if in.Operator == ir.Eq || in.Operator == ir.Ne {
-				// A comparison of non-numbers exits to Go, which resumes after it.
+			if in.Operator == ir.Eq || in.Operator == ir.Ne || in.Operator == ir.Mod {
+				// A comparison or remainder of non-numbers exits to Go, which
+				// resumes after it.
 				entries[pc+1] = true
 			}
 		case ir.Jump:
@@ -524,10 +525,14 @@ func (b *builder) instruction(blk *Block, pc int) {
 		b.assign(n+2, blk, y)
 	case ir.Binary:
 		kind := ir.GuardExit
-		if in.Operator == ir.Eq || in.Operator == ir.Ne {
+		if in.Operator == ir.Eq || in.Operator == ir.Ne || in.Operator == ir.Mod {
 			kind = ir.HostExit
 		}
 		x, y := number(in.Left, kind), number(in.Right, kind)
+		if in.Operator == ir.Mod {
+			b.assign(in.Dest, blk, boxF(guard(OpModF64, Float64, ir.HostExit, x, y)))
+			break
+		}
 		b.assign(in.Dest, blk, b.binary(blk, in.Operator, x, y, boxF, boxB))
 	case ir.Unary:
 		if in.Operator == ir.Not {

@@ -113,6 +113,10 @@ const (
 	OpSubF64
 	OpMulF64
 	OpDivF64
+	// OpModF64 is JavaScript's % of two numbers that are integers below
+	// 2**63 in magnitude, the divisor not zero; for anything else it exits
+	// to Go (Aux), which computes it as math.Mod.
+	OpModF64
 	OpNegF64 // flips the sign bit, as the slot IR does, NaN included
 	OpCmpF64 // Aux: ir.Lt, ir.Le, ir.Gt, ir.Ge, ir.Eq or ir.Ne -> bool
 	OpNot    // bool -> bool
@@ -137,7 +141,7 @@ var opNames = [...]string{
 	OpArrayOf: "arrayof", OpElemKey: "elemkey", OpElemRead: "elemread", OpElemWrite: "elemwrite", OpLength: "length",
 	OpObjectOf: "objectof", OpPropRead: "propread", OpPropWrite: "propwrite", OpPropCell: "propcell", OpLoadCell: "loadcell", OpGlobalCell: "globalcell",
 	OpStringMethod: "stringmethod", OpStringCode: "stringcode",
-	OpAddF64: "addf", OpSubF64: "subf", OpMulF64: "mulf", OpDivF64: "divf", OpNegF64: "negf", OpCmpF64: "cmpf",
+	OpAddF64: "addf", OpSubF64: "subf", OpMulF64: "mulf", OpDivF64: "divf", OpModF64: "modf", OpNegF64: "negf", OpCmpF64: "cmpf",
 	OpNot: "not", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
 }
@@ -152,7 +156,7 @@ func (o Op) String() string {
 // isGuard reports whether an op exits when its operand is not what it needs.
 func (o Op) isGuard() bool {
 	switch o {
-	case OpUnboxF64, OpTruth, OpCheckInit, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite, OpLength,
+	case OpUnboxF64, OpTruth, OpCheckInit, OpModF64, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite, OpLength,
 		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell, OpStringMethod, OpStringCode:
 		return true
 	}

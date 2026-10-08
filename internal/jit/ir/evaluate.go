@@ -237,7 +237,7 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 		case Binary:
 			v, ok := binary(in.Operator, read(in.Left), read(in.Right))
 			if !ok {
-				if in.Operator == Eq || in.Operator == Ne {
+				if in.Operator == Eq || in.Operator == Ne || in.Operator == Mod {
 					exit.Kind = HostExit
 				}
 				return exit, nil
@@ -348,6 +348,8 @@ func binary(op Operator, a, b Value) (Value, bool) {
 		return Float(x * y), true
 	case Div:
 		return Float(x / y), true
+	case Mod:
+		return Float(math.Mod(x, y)), true
 	case Lt:
 		return Bool(x < y), true
 	case Le:

@@ -16,6 +16,11 @@ const (
 	numberLimit  = 0xFFF8000000000000
 )
 
+// integer64 reports whether x is an integer an int64 holds exactly.
+func integer64(x float64) bool {
+	return x >= -1<<63 && x < 1<<63 && math.Trunc(x) == x
+}
+
 // index converts an element's key, as the slot IR does: an integer in
 // [0, 2**32), negative zero included.
 func index(x float64) (uint64, bool) {
@@ -343,6 +348,11 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 				default:
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
+			case OpModF64:
+				if !integer64(a.f) || !integer64(b.f) || b.f == 0 {
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
+				vals[v.ID] = val{f: math.Mod(a.f, b.f)}
 			case OpObjectOf:
 				t := a.t
 				if t.Kind != ir.Opaque || t.Bits >= uint64(len(heap.Objects)) {

@@ -95,7 +95,7 @@ func (p *Program) Validate() error {
 			}
 		case Binary:
 			left, right, write = true, true, true
-			if in.Operator > Ne && (in.Operator < BitAnd || in.Operator > UShr) {
+			if in.Operator > Ne && (in.Operator < BitAnd || in.Operator > UShr) && in.Operator != Mod {
 				return bad("invalid binary operator")
 			}
 		case Unary:

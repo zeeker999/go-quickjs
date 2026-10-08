@@ -115,6 +115,13 @@ func encode(f func(a *amd64.Asm)) []byte {
 	return code
 }
 
+func TestAMD64Divide(t *testing.T) {
+	expect(t, "Cqo", encode(func(a *amd64.Asm) { a.Cqo() }), x86asm.CQO)
+	for _, r := range regs {
+		expect(t, fmt.Sprintf("Idiv r%d", r), encode(func(a *amd64.Asm) { a.Idiv(r) }), x86asm.IDIV, r64(r))
+	}
+}
+
 func TestAMD64Moves(t *testing.T) {
 	for _, d := range regs {
 		for _, s := range regs {
