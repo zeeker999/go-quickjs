@@ -932,9 +932,9 @@ func (a *arm64Program) array(in ir.Instruction) {
 		a.memory(true, false, 6, 3, 24)
 		a.compareImmediate(6, 0)
 		a.conditional(0, a.guard)
-		if a.fast || in.Grow {
-			a.word(0xaa0303f0)
-		} // mov x16,x3
+		if a.fast {
+			a.word(0xaa0303f0) // mov x16,x3
+		}
 	}
 	if in.Op == ir.ArrayLength {
 		a.memory(true, false, 5, 3, 16)
@@ -999,15 +999,6 @@ func (a *arm64Program) array(in ir.Instruction) {
 		fp = a.number(in.Third, 0)
 		a.memory(false, true, fp, 3, 0)
 		a.mark(end)
-		if in.Grow {
-			done := a.label()
-			a.word(0x910004a5) // add x5,x5,#1: the successfully stored index
-			a.memory(true, false, 7, 16, 16)
-			a.word(0xeb0700bf)     // cmp x5,x7
-			a.conditional(9, done) // LS
-			a.memory(false, false, 5, 16, 16)
-			a.mark(done)
-		}
 	} else {
 		if in.Op == ir.ArrayUpdate {
 			a.storeNumber(in.Extra, 24)

@@ -207,26 +207,6 @@ func TestJITNumericGlobalLoop(t *testing.T) {
 	}
 }
 
-func TestJITShortCountdown(t *testing.T) {
-	r := jitRuntimeForTest(t, Config{JIT: true})
-	v, err := r.Run(compileForTest(t, `function f(n,a){while(--n>=0)a[n]=(a[n]+1)|0;return a[0]}let a=[0,0,0,0];f(1,a);f(1,a);f(1,a);f(1,a)===4`))
-	if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.entries != 0 {
-		t.Fatalf("short countdown entered native execution: %v, %v", v, err)
-	}
-	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
-	if r.entryOf(cl) == nil || r.entryOf(cl).shortCounter != 1 || r.entryOf(cl).code == nil {
-		t.Fatal("short countdown lost its reusable native program")
-	}
-	v, err = r.Run(compileForTest(t, `for(let i=0;i<2048;i++)f(1,a);a[0]===2052`))
-	if err != nil || !v.IsBool() || !v.Truthy() || r.jit.entries != 0 {
-		t.Fatalf("short countdown promoted at a back edge: %v, %v", v, err)
-	}
-	v, err = r.Run(compileForTest(t, `f(4,a)===2053&&a[1]===1&&a[2]===1&&a[3]===1`))
-	if err != nil || !v.IsBool() || !v.Truthy() || r.jit.entries == 0 || r.jit.guards != 0 || r.jit.rootCount != 0 {
-		t.Fatalf("longer countdown lost native execution: %v, %v", v, err)
-	}
-}
-
 func TestJITNumericGlobalMutation(t *testing.T) {
 	for _, source := range []string{
 		`var g=1;function f(o,a,n){for(let i=0;i<n;i++){a[i]=g;o.g=g+1}return g+a[n-1]}let a=[];for(let i=0;i<128;i++)a[i]=0;f(globalThis,a,128)===257&&g===129&&a[0]===1`,

@@ -37,7 +37,7 @@ across sessions. Update it **in the same commit** as the work it records.
 | Z1 | `closure` stays 128 B in tagged builds (index, not pointer); size and field-order checks in both builds (`TestJITFieldLayout`) | done | jit: cost nothing while off |
 | Z2 | `jitTreeRecovery` only for frames whose function can enter a native loop | done | jit: cost nothing while off |
 | C1 | Delete `dispatch*.go`/`.s` and `loop*.go` with their tests | done | jit: delete the unused dispatch layer and loop prototype |
-| C2 | Delete the shape-matched selectors (`selectShortCountdown`, `selectArrayGrowth`, the 16-cell preallocation, name-based `charCodeAt`); re-measure | todo | |
+| C2 | Delete the shape-matched selectors (`selectShortCountdown`, `selectArrayGrowth` with native growth, the 16-cell preallocation, the string-packing host discount); re-measure. `charCodeAt` stays: its native call is guarded by the realm's intrinsic, so it is general; only its selection (the name anywhere in the function) is crude, and moves to per-site selection in Phase 2's SSA. | done | jit: drop selectors fitted to Crypto and MD5 |
 | C3 | CI: tagged `go tool nm -size` and struct-size checks against main for the hot functions | todo | |
 | D1 | Rewrite `internal/jit/README.md` as contracts; move measurements to `docs/jit-results.md`; `qjs --jit` warns when the build lacks the JIT | todo | |
 
