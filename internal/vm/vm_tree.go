@@ -133,11 +133,13 @@ func (r *Runtime) runTree(f *frame, t *tree) (v Value, err error) {
 		if p := recover(); p != nil {
 			th, ok := p.(treeThrow)
 			if !ok {
-				v, err, ok = jitTreeResult(p)
-				if !ok {
-					panic(p)
+				if jitBuilt {
+					if jv, jerr, native := jitTreeResult(p); native {
+						v, err = jv, jerr
+						return
+					}
 				}
-				return
+				panic(p)
 			}
 			// The trees this one called without a recover of their own
 			// (runTreeNested) left their frames to it.

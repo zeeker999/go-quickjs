@@ -2904,24 +2904,26 @@ func (r *Runtime) executeAt(f *frame, startSP int, pending error) (Value, error)
 		continue
 
 	interrupted:
-		{
-			// A backward jump has run the budget out: the check an unbounded
-			// program cannot run without reaching, since it runs no longer than
-			// its code is long but through a loop, or a call, which callObject
-			// counts.
-			fullBudget := r.backEdges == 0
-			r.backEdges = backEdgeCheckInterval
-			if err := r.checkInterruptNow(); err != nil {
-				// An interrupt is the host stopping the script rather than a
-				// JavaScript exception, so it is not catchable.
-				return Undefined, err
-			}
-			r.sweepStaleSlots(sp)
-			if v, err, done := r.tryJITLoop(f, pc, sp, fullBudget); done {
+		// A build with the JIT checks the same and may then promote the loop
+		// (jitBackEdge); without it, this block is compiled out.
+		if jitBuilt {
+			if v, err, done := r.jitBackEdge(f, pc, sp); done {
 				return v, err
 			}
 			continue
 		}
+		// A backward jump has run the budget out: the check an unbounded
+		// program cannot run without reaching, since it runs no longer than
+		// its code is long but through a loop, or a call, which callObject
+		// counts.
+		r.backEdges = backEdgeCheckInterval
+		if err := r.checkInterruptNow(); err != nil {
+			// An interrupt is the host stopping the script rather than a
+			// JavaScript exception, so it is not catchable.
+			return Undefined, err
+		}
+		r.sweepStaleSlots(sp)
+		continue
 
 	onError:
 		// An exception unwinds to the innermost handler registered in this

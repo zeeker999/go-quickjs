@@ -38,7 +38,7 @@ across sessions. Update it **in the same commit** as the work it records.
 | Z2 | `jitTreeRecovery` only for frames whose function can enter a native loop | done | jit: cost nothing while off |
 | C1 | Delete `dispatch*.go`/`.s` and `loop*.go` with their tests | done | jit: delete the unused dispatch layer and loop prototype |
 | C2 | Delete the shape-matched selectors (`selectShortCountdown`, `selectArrayGrowth` with native growth, the 16-cell preallocation, the string-packing host discount); re-measure. `charCodeAt` stays: its native call is guarded by the realm's intrinsic, so it is general; only its selection (the name anywhere in the function) is crude, and moves to per-site selection in Phase 2's SSA. | done | jit: drop selectors fitted to Crypto and MD5 |
-| C3 | CI: tagged `go tool nm -size` and struct-size checks against main for the hot functions | todo | |
+| C3 | Untagged hot functions identical to main: `internal/cmd/hotdiff` compares them instruction by instruction (ignoring NOP inline marks, padding and addresses); struct sizes by `TestJITFieldLayout`. A local gate like `placements`, not CI: an intended interpreter change would fail it. Run it before merging JIT work. | done | jit: compile the interpreter's hooks out of builds without the JIT |
 | D1 | Rewrite `internal/jit/README.md` as contracts; move measurements to `docs/jit-results.md`; `qjs --jit` warns when the build lacks the JIT | todo | |
 
 **Gate:**
@@ -108,9 +108,14 @@ hardened-runtime support (Phase 6).
 - **Struct sizes in a tagged build:** closure 144 B (main 128), Runtime 7952 B
   (main 7936), Realm 1264 B (main 1248). After Z1: closure 128 B, and
   Runtime and Realm grow only at their ends.
-- **Untagged hot functions after Z1/Z2:** `executeAt`, `runTree`,
-  `runTreeNested`, `callObject`, `runFD` and `backEdgeCheck` are
-  byte-identical to main. `callTree`'s instructions are identical except
-  for three `NOPL` inline marks left by the empty stubs, which push it past
-  a 32-byte boundary (1760 to 1792 B). C3 should compare instruction streams
-  with NOPs removed.
+- **Untagged hot functions:** symbol sizes alone hid a difference.
+  `executeAt` and `runTree` had main's sizes but different instruction
+  order and registers, perturbed by the hooks' stubs. Since C3, `hotdiff`
+  finds all seven hot functions identical to main. `callTree` still carries
+  three `NOPL` inline marks, which take it from 1760 to 1792 B.
+
+  ```sh
+  go build -o main.exe ./cmd/qjs   # in a main checkout
+  go build -o head.exe ./cmd/qjs   # here
+  go run ./internal/cmd/hotdiff main.exe head.exe
+  ```

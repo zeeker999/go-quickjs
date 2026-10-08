@@ -21,6 +21,9 @@ const jitCacheBytes = 8 << 20
 const jitMetadataBytes = 512 << 10
 const jitHotCalls = 8
 
+// jitBuilt guards the JIT's hooks in the interpreter; see zjit_disabled.go.
+const jitBuilt = true
+
 type jitFields struct {
 	jitEnabled       bool
 	jitCallThreshold uint8
@@ -534,6 +537,20 @@ func (r *Runtime) tryJITFrame(f *frame) (Value, error, bool) {
 		}
 	}
 	return r.tryJITAt(f, 0, 0, false)
+}
+
+// jitBackEdge is executeAt's interrupted block in a build with the JIT: the
+// same check, after which a loop that ran a full budget may promote.
+func (r *Runtime) jitBackEdge(f *frame, pc uint32, sp int) (Value, error, bool) {
+	fullBudget := r.backEdges == 0
+	r.backEdges = backEdgeCheckInterval
+	if err := r.checkInterruptNow(); err != nil {
+		// An interrupt is the host stopping the script rather than a
+		// JavaScript exception, so it is not catchable.
+		return Undefined, err, true
+	}
+	r.sweepStaleSlots(sp)
+	return r.tryJITLoop(f, pc, sp, fullBudget)
 }
 
 // The existing back-edge interrupt budget supplies coarse work feedback.
