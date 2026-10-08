@@ -25,7 +25,11 @@ var jitSSADefault = os.Getenv("QJS_JIT_PIPELINE") == "ssa"
 // jitSSABackend reports whether this architecture has the new pipeline.
 const jitSSABackend = true
 
-// jitEncoding is how a Value lies in memory, for generated code.
+// jitEncoding is how a Value lies in memory, for generated code, and what
+// of an Object it reads (D8): an array's class, flags, length and elements,
+// which no Go code changes while native code runs, since nothing else runs
+// on a runtime's goroutine then and no other goroutine may use the runtime.
+// TestJITObjectLayout holds the fields' widths to what native code loads.
 var jitEncoding = abi.Encoding{
 	ValueSize:     int32(unsafe.Sizeof(Value{})),
 	NumOffset:     int32(unsafe.Offsetof(Value{}.num)),
@@ -36,6 +40,14 @@ var jitEncoding = abi.Encoding{
 	False:         math.Float64bits(False.num),
 	Uninitialized: math.Float64bits(uninitialized.num),
 	CanonicalNaN:  canonicalNaN,
+	Object:        objectBits,
+
+	ObjectClass:    int32(unsafe.Offsetof(Object{}.class)),
+	ObjectFlags:    int32(unsafe.Offsetof(Object{}.flags)),
+	ObjectArrayLen: int32(unsafe.Offsetof(Object{}.arrayLen)),
+	ObjectElems:    int32(unsafe.Offsetof(Object{}.elems)),
+	ClassArray:     uint8(ClassArray),
+	FlagSparse:     uint8(objHasSparseElements),
 }
 
 // compileSSA compiles a lowered function with the new pipeline, or returns

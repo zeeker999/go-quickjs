@@ -49,7 +49,7 @@ func Optimize(f *Func) {
 					changed = true
 					continue
 				}
-				if v.Op.isGuard() && v.Op != OpCheckInit {
+				if v.Op.isGuard() && v.Op != OpCheckInit && !v.Op.readsMemory() {
 					key := [2]int{int(v.Op), v.Args[0].ID}
 					if first, ok := seen[key]; ok {
 						subst[v] = first

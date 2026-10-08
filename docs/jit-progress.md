@@ -22,8 +22,8 @@ across sessions. Update it **in the same commit** as the work it records.
     -run TestConformance -count=1 -timeout 60m -v -args -conformance.jit
   ```
 
-- **Next item:** P4b (arrays through views), while the 24-hour fuzz, the
-  last Phase 1 gate, runs.
+- **Next item:** P4c (properties, globals, captured bindings, strings,
+  calls), while the 24-hour fuzz, the last Phase 1 gate, runs.
 - **Stress test262:** `QJS_JIT_STRESS=threshold,budget=1 TEST262_DIR=d:/Data/test262 go test -tags quickjs_jit ./conformance -run TestConformance -v -args -conformance.jit`;
   `QJS_JIT_PIPELINE=ssa` runs the new pipeline wherever it compiles.
 
@@ -104,7 +104,8 @@ Design: [jit-phase2-design.md](jit-phase2-design.md). P2 gates the rest.
 | P3 | The skeleton on arm64, measured on a Mac or the macOS runner | todo | |
 | P4 | Coverage: every slot-IR operation built; stress corpus and fuzzer pass on the new pipeline | in progress | |
 | P4a | References carried natively: no entry check; exits leave references to Go through records (copy, store over, "maybe" for a phi of two slots, which carries a run-time *shadow* of its origin), `RetFrom` for returns; the evaluator checks every origin. `unboxPhis` unboxes a phi only for an unboxed use, so a phi that merely carries a number no longer guards an entry load that may hold a reference (kernels' code unchanged). Harness: 281 copies, 1,549 stores over references, 26,066 maybes, 273 reference returns over 2,000 programs; `TestJITSSAReferences`. | done | jit: carry references through native code |
-| P4b | Arrays through read-only views (D8): element reads and numeric writes | next | |
+| P4b | Arrays in place (D8): `ArrayOf` finds the array through its value's origin or shadow and checks the class; element reads of numbers, number stores into number elements, length (sparse included), index keys; holes, other values, other objects and other keys exit as the slot IR's views do (hole writes go to Go). Evaluators share the slot IR's view semantics; the harness lays out fake objects through `abi.Encoding`; sabotaged reads, writes, lengths and shadow lookups each fail it. `BenchmarkJITArrayKernels` (fuzzer running): vector 8.8 ns/element against 12.5 old and 40.5 tree; stencil 18.9 / 22.7 / 103.9; dot 7.7 / 11.3 / 45.7. | done | jit: read and write arrays in place |
+| P4b+ | Array loops at native speed: hoist `ArrayOf` and the elements' header out of loops (nothing changes them natively), int32 induction variables, bounds-check elimination. 7.7 ns per element of a dot product is ~50 instructions. | todo (Phase 3) | |
 | P4c | Properties, globals, captured bindings, strings; calls as helper exits | todo | |
 | P5 | Helpers: contained and reentrant, re-validation, generation counter; `%` and Go calls no slower than the tree tier | todo | |
 | P6 | Code arena (R8) | todo | |

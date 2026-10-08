@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"testing"
 	"unsafe"
 
@@ -28,19 +29,127 @@ type testValue struct {
 
 const testTagBase = 0xFFF8000000000000
 
-// testEncoding mirrors the VM's tags (internal/vm/value.go).
+// testObject is an object's layout as far as native code reads it.
+type testObject struct {
+	class    uint8
+	flags    uint8
+	arrayLen uint32
+	elems    []testValue
+}
+
+const (
+	testClassArray = 2
+	testFlagSparse = 4
+)
+
+// testEncoding mirrors the VM's tags (internal/vm/value.go), and its
+// objects as testObject lays them out.
 var testEncoding = abi.Encoding{
 	ValueSize: 16, NumOffset: 0, RefOffset: 8,
 	Undefined: testTagBase | 1, Null: testTagBase | 2,
 	True: testTagBase | 1<<8 | 3, False: testTagBase | 3,
 	Uninitialized: testTagBase | 8, CanonicalNaN: 0x7FF8000000000000,
+	Object:      testTagBase | 7,
+	ObjectClass: int32(unsafe.Offsetof(testObject{}.class)), ObjectFlags: int32(unsafe.Offsetof(testObject{}.flags)),
+	ObjectArrayLen: int32(unsafe.Offsetof(testObject{}.arrayLen)), ObjectElems: int32(unsafe.Offsetof(testObject{}.elems)),
+	ClassArray: testClassArray, FlagSparse: testFlagSparse,
 }
 
-// testObjects are what references point to: a slot IR handle's.
-var testObjects [8]int
+// testHeap is what handles 0 to 3 name, as in package ssa's tests: an
+// array of numbers, an array with holes and other tags among them, an
+// object that is not an array, and an array whose length runs past its
+// dense elements.
+type testHeap []testArray
+
+type testArray struct {
+	cells  []uint64 // number words
+	length uint64
+	array  bool
+}
+
+func randomTestHeap(r *rand.Rand) testHeap {
+	h := make(testHeap, 4)
+	for i := range h {
+		a := testArray{cells: make([]uint64, r.IntN(6)), array: i != 2}
+		for j := range a.cells {
+			switch k := r.IntN(6); {
+			case i == 1 && k == 0:
+				a.cells[j] = testEncoding.Uninitialized
+			case i == 1 && k == 1:
+				a.cells[j] = testEncoding.True
+			default:
+				a.cells[j] = math.Float64bits(float64(r.IntN(9) - 3))
+			}
+		}
+		a.length = uint64(len(a.cells))
+		if i == 3 {
+			a.length += uint64(r.IntN(4))
+		}
+		h[i] = a
+	}
+	return h
+}
+
+// nativeHeap is a heap's objects. Native code reads them; the evaluators
+// read and write the same cells through views. Every other handle refers to
+// an object that is not an array, and every string to text, each its own,
+// so that a reference copied from the wrong slot shows.
+type nativeHeap struct {
+	objects []testObject
+	others  [8]testObject
+	texts   [8]int
+}
+
+func (h testHeap) native() *nativeHeap {
+	n := &nativeHeap{}
+	for _, a := range h {
+		o := testObject{elems: make([]testValue, len(a.cells))}
+		for j, c := range a.cells {
+			o.elems[j].num = c
+		}
+		if a.array {
+			o.class = testClassArray
+		}
+		if a.length > uint64(len(a.cells)) {
+			o.flags, o.arrayLen = testFlagSparse, uint32(a.length)
+		}
+		n.objects = append(n.objects, o)
+	}
+	return n
+}
+
+// views are the slot IR's views of the objects, as the VM grants them.
+func (n *nativeHeap) views() []ir.ArrayView {
+	vs := make([]ir.ArrayView, ir.MaxSlots)
+	for i := range n.objects {
+		o := &n.objects[i]
+		v := ir.ArrayView{DenseLength: uint64(len(o.elems)), Length: uint64(len(o.elems))}
+		if o.flags&testFlagSparse != 0 && uint64(o.arrayLen) > v.Length {
+			v.Length = uint64(o.arrayLen)
+		}
+		if len(o.elems) > 0 {
+			v.Data = unsafe.Pointer(&o.elems[0])
+		}
+		if o.class == testClassArray {
+			v.NumberLimit = testTagBase
+		}
+		vs[i] = v
+	}
+	return vs
+}
+
+// same reports whether two instances' elements hold the same words.
+func (n *nativeHeap) same(m *nativeHeap) bool {
+	for i := range n.objects {
+		if !slices.Equal(n.objects[i].elems, m.objects[i].elems) {
+			return false
+		}
+	}
+	return true
+}
 
 // word encodes a slot IR value as the VM would hold it.
-func word(v ir.Value) testValue {
+func (n *nativeHeap) word(v ir.Value) testValue {
 	switch v.Kind {
 	case ir.Number:
 		if math.IsNaN(math.Float64frombits(v.Bits)) {
@@ -59,13 +168,15 @@ func word(v ir.Value) testValue {
 	case ir.Uninitialized:
 		return testValue{num: testEncoding.Uninitialized}
 	}
-	// A reference: its kind's tag, a payload, and a pointer. Two
-	// references of one kind may share a word, as two objects do in the VM.
-	kind := uint64(7)
+	// A reference: every object has one word, as in the VM, and so here does
+	// every string; the pointer tells them apart.
 	if v.Kind == ir.String {
-		kind = 4
+		return testValue{num: testTagBase | 4, ref: unsafe.Pointer(&n.texts[v.Bits%8])}
 	}
-	return testValue{num: testTagBase | v.Bits%2<<8 | kind, ref: unsafe.Pointer(&testObjects[v.Bits%8])}
+	if v.Bits < uint64(len(n.objects)) {
+		return testValue{num: testEncoding.Object, ref: unsafe.Pointer(&n.objects[v.Bits])}
+	}
+	return testValue{num: testEncoding.Object, ref: unsafe.Pointer(&n.others[v.Bits%8])}
 }
 
 // referenceExits counts the harness's exit records -- references copied,
@@ -127,6 +238,7 @@ var nativeTestValues = []ir.Value{
 	ir.Float(9007199254740993), ir.Float(1 << 63), ir.Float(-(1 << 63)), ir.Float(1 << 62), ir.Float(4294967295.5),
 	ir.Bool(true), ir.Bool(false), {Kind: ir.Undefined}, {Kind: ir.Null}, {Kind: ir.Uninitialized},
 	{Kind: ir.Opaque, Bits: 3}, {Kind: ir.Opaque, Bits: 4}, {Kind: ir.String, Bits: 5},
+	{Kind: ir.Opaque, Bits: 0}, {Kind: ir.Opaque, Bits: 1}, {Kind: ir.Opaque, Bits: 2}, {Kind: ir.String, Bits: 6},
 }
 
 func nativeTestValue(r *rand.Rand) ir.Value {
@@ -154,14 +266,21 @@ func ssaTestProgram(r *rand.Rand) *ir.Program {
 		return ir.Slot(r.IntN(locals))
 	}
 	ops := []ir.Op{ir.Copy, ir.Binary, ir.Binary, ir.Binary, ir.Unary, ir.Update, ir.Update, ir.Branch, ir.Branch,
-		ir.Jump, ir.Swap, ir.CopyPair, ir.StoreLoad, ir.Host, ir.Nop}
+		ir.Jump, ir.Swap, ir.CopyPair, ir.StoreLoad, ir.Host, ir.Nop,
+		ir.ArrayRead, ir.ArrayWrite, ir.ArrayLength, ir.ArrayKey, ir.ArrayUpdate}
 	operators := []ir.Operator{ir.Add, ir.Sub, ir.Mul, ir.Div, ir.Lt, ir.Le, ir.Gt, ir.Ge, ir.Eq, ir.Ne,
 		ir.BitAnd, ir.BitOr, ir.BitXor, ir.Shl, ir.Shr, ir.UShr}
 	p := &ir.Program{Locals: locals}
 	for pc := 0; pc < n; pc++ {
-		in := ir.Instruction{Op: ops[r.IntN(len(ops))], Left: operand(), Right: operand(),
+		in := ir.Instruction{Op: ops[r.IntN(len(ops))], Left: operand(), Right: operand(), Third: operand(),
 			Dest: r.IntN(locals), Extra: r.IntN(locals), Target: r.IntN(n + 1), Postfix: r.IntN(2) == 0, When: r.IntN(2) == 0}
 		switch in.Op {
+		case ir.ArrayRead, ir.ArrayWrite, ir.ArrayLength, ir.ArrayKey:
+			in.Left = ir.Slot(r.IntN(locals))
+		case ir.ArrayUpdate:
+			in.Left = ir.Slot(r.IntN(locals))
+			in.Right = ir.Slot(in.Extra)
+			in.Operator = []ir.Operator{ir.Add, ir.Sub}[r.IntN(2)]
 		case ir.Binary:
 			in.Operator = operators[r.IntN(len(operators))]
 		case ir.Unary:
@@ -222,14 +341,15 @@ func compileNative(p *ir.Program) (*compiled, error) {
 // nativeMismatch enters native code and the SSA evaluator at pc on the same
 // slots, with polls every poll back-edges (0: none), and describes any
 // difference in exit, return word or frame; "" if there is none.
-func nativeMismatch(c *compiled, pc int, slots []ir.Value, poll int) string {
+func nativeMismatch(c *compiled, pc int, slots []ir.Value, poll int, heap testHeap) string {
 	f := c.f
+	nh, eh := heap.native(), heap.native()
 	frame := make([]testValue, len(slots))
 	for i, v := range slots {
-		frame[i] = word(v)
+		frame[i] = nh.word(v)
 	}
 	want := append([]ir.Value(nil), slots...)
-	wantExit, err := ssa.Evaluate(f, pc, want, poll)
+	wantExit, err := ssa.EvaluateArrays(f, pc, want, eh.views(), poll)
 	if err != nil {
 		return err.Error()
 	}
@@ -246,8 +366,8 @@ func nativeMismatch(c *compiled, pc int, slots []ir.Value, poll int) string {
 	}
 	got := ir.Exit{Kind: exitNames[ctx.ExitKind], State: ir.StateMap{PC: uint32(ctx.ExitPC), Depth: int(ctx.ExitDepth)}}
 	report := func(why string) string {
-		return fmt.Sprintf("%s: from pc %d, poll %d, slots %v\nssa    %+v slots %v\nnative %+v ret %#x frame %v",
-			why, pc, poll, slots, wantExit, want, got, ctx.Ret, frame)
+		return fmt.Sprintf("%s: from pc %d, poll %d, slots %v, heap %v\nssa    %+v slots %v\nnative %+v ret %#x frame %v",
+			why, pc, poll, slots, heap, wantExit, want, got, ctx.Ret, frame)
 	}
 	if got.Kind != wantExit.Kind {
 		return report("exit kind")
@@ -258,8 +378,11 @@ func nativeMismatch(c *compiled, pc int, slots []ir.Value, poll int) string {
 			ret = frame[ctx.RetFrom-1]
 			referenceExits.returns++
 		}
-		if ret != word(wantExit.Value) {
+		if ret != nh.word(wantExit.Value) {
 			return report("return value")
+		}
+		if !nh.same(eh) {
+			return report("elements")
 		}
 		return ""
 	}
@@ -270,16 +393,19 @@ func nativeMismatch(c *compiled, pc int, slots []ir.Value, poll int) string {
 		return report("exit state")
 	}
 	for i := 0; i < f.Locals+wantExit.State.Depth; i++ {
-		if w := word(want[i]); frame[i] != w {
+		if w := nh.word(want[i]); frame[i] != w {
 			return report(fmt.Sprintf("slot %d", i))
 		}
+	}
+	if !nh.same(eh) {
+		return report("elements")
 	}
 	return ""
 }
 
 // minimize shrinks a failing program, turning instructions into Nop while
 // it still validates, compiles and fails the same way from the same entry.
-func minimize(p *ir.Program, pc int, slots []ir.Value, poll int) (*ir.Program, string) {
+func minimize(p *ir.Program, pc int, slots []ir.Value, poll int, heap testHeap) (*ir.Program, string) {
 	fails := func(q *ir.Program) string {
 		if q.Validate() != nil {
 			return ""
@@ -287,7 +413,7 @@ func minimize(p *ir.Program, pc int, slots []ir.Value, poll int) (*ir.Program, s
 		// Removing an instruction can make a loop endless; without polls
 		// neither side would come back.
 		probe := append([]ir.Value(nil), slots...)
-		if exit, err := q.Evaluate(probe, pc, 20000); err != nil || exit.Kind == ir.BudgetExit && poll == 0 {
+		if exit, err := q.EvaluateArrays(probe, heap.native().views(), pc, 20000); err != nil || exit.Kind == ir.BudgetExit && poll == 0 {
 			return ""
 		}
 		c, err := compileNative(q)
@@ -298,7 +424,7 @@ func minimize(p *ir.Program, pc int, slots []ir.Value, poll int) (*ir.Program, s
 		if !c.code.HasEntry(pc) {
 			return ""
 		}
-		return nativeMismatch(c, pc, append([]ir.Value(nil), slots...), poll)
+		return nativeMismatch(c, pc, append([]ir.Value(nil), slots...), poll, heap)
 	}
 	best := fails(p)
 	for changed := true; changed; {
@@ -337,8 +463,9 @@ func checkNative(t *testing.T, r *rand.Rand, p *ir.Program) (ok bool) {
 			for i := range slots {
 				slots[i] = nativeTestValue(r)
 			}
+			heap := randomTestHeap(r)
 			// Mostly primitives, so that code runs past the guards.
-			if trial < 3 {
+			if trial < 2 {
 				for i, v := range slots {
 					if v.Kind == ir.Opaque || v.Kind == ir.String {
 						slots[i] = ir.Float(7)
@@ -349,11 +476,11 @@ func checkNative(t *testing.T, r *rand.Rand, p *ir.Program) (ok bool) {
 				// The SSA evaluator runs forever where the program does; the
 				// slot IR tells which do not finish.
 				probe := append([]ir.Value(nil), slots...)
-				if exit, _ := p.Evaluate(probe, e.PC, 20000); exit.Kind == ir.BudgetExit && poll == 0 {
+				if exit, _ := p.EvaluateArrays(probe, heap.native().views(), e.PC, 20000); exit.Kind == ir.BudgetExit && poll == 0 {
 					continue
 				}
-				if why := nativeMismatch(c, e.PC, slots, poll); why != "" {
-					small, smallWhy := minimize(p, e.PC, slots, poll)
+				if why := nativeMismatch(c, e.PC, slots, poll, heap); why != "" {
+					small, smallWhy := minimize(p, e.PC, slots, poll, heap)
 					mc, _ := compileNative(small)
 					detail := ""
 					if mc != nil {

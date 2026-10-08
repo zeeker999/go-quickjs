@@ -484,6 +484,70 @@ func TestJITSSAReferences(t *testing.T) {
 	}
 }
 
+// The new pipeline reads arrays in place (D8): an array's elements that
+// hold numbers, read and written natively, and everything else -- holes,
+// other values, objects that are not arrays, keys that are not indices --
+// left to Go or to the interpreter. Each function must answer as the
+// interpreter does, under polls at every back-edge, and run natively.
+func TestJITSSAArrays(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, tc := range []struct{ name, src string }{
+		{"sum", `function f(a){let s=0;for(let i=0;i<a.length;i++)s+=a[i];return s}
+			[f([1,2,3,4.5]),f([]),f([1,,3]),f([1,'2',3]),f({length:2,0:5,1:6}),f(new Float64Array([1,2]))]`},
+		{"write", `function f(a,n){for(let i=0;i<n;i++)a[i]=a[i]*2+1;return a}
+			[f([1,2,3],3),f([1,2,3],5),f([1,,3],3),f(['x',2],2),f([0.5,NaN],2)].map(a=>a.join(':'))`},
+		{"update", `function f(a){let i=0,s=0;while(i<a.length)s+=a[i++];return s+i}
+			[f([1,2,3]),f([5]),f([])]`},
+		{"keys", `function f(a,k){let s=0;for(let i=0;i<3;i++)s+=a[k];return s}
+			[f([7,8],1),f([7,8],1.5),f([7,8],-0),f([7,8],-1),f([7,8],2**32),f([7,8],NaN),f([7,8],'1')]`},
+		{"sparse", `function f(a){let s=0;for(let i=0;i<a.length;i++)s+=a[i]|0;return s}
+			var b=[1,2];b[50000]=3;[f(b),f([1,2])]`},
+		{"swap", `function f(a,b,n){let s=0;for(let i=0;i<n;i++){let t=a;a=b;b=t;s+=a[0]}return s}
+			[f([1],[2],5),f([1],[2],4)]`},
+		{"arguments", `function f(a){let s=0;for(let i=0;i<a.length;i++)s+=a[i];return s}
+			function g(){return f(arguments)}
+			[g(1,2,3),f([4,5]),g()]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := tc.src + ".map(v=>JSON.stringify(v)).join('|')"
+			want := New(Config{})
+			defer func() { want.Close(); want.ReleaseClosed() }()
+			wv, err := want.Run(compileForTest(t, src))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := jitRuntimeForTest(t, Config{JIT: true})
+			r.jitSSA = true
+			r.jitStress = jitStressConfig{threshold: true, budget: 1}
+			gv, err := r.Run(compileForTest(t, src))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := gv.String().Go(), wv.String().Go(); got != want {
+				t.Fatalf("got %s, interpreter %s", got, want)
+			}
+			if st := r.JITStats(); st.SSAEntries == 0 {
+				t.Fatalf("never entered the new pipeline: %+v", st)
+			}
+		})
+	}
+}
+
+// TestJITObjectLayout holds Object's fields to the widths native code
+// loads them with (jitEncoding).
+func TestJITObjectLayout(t *testing.T) {
+	var o Object
+	if unsafe.Sizeof(o.class) != 1 || unsafe.Sizeof(o.flags) != 1 || unsafe.Sizeof(o.arrayLen) != 4 ||
+		unsafe.Sizeof(o.elems) != 3*unsafe.Sizeof(uintptr(0)) || unsafe.Sizeof(Value{}) != 16 {
+		t.Fatal("an Object field native code reads changed its width; update jitEncoding and mir")
+	}
+	if int(ClassArray) > 255 || int(objHasSparseElements) > 255 {
+		t.Fatal("a class or flag native code tests is out of a byte")
+	}
+}
+
 func TestJITEqualityBoundaries(t *testing.T) {
 	for _, tc := range []struct {
 		left, op, right string
@@ -1901,6 +1965,52 @@ func BenchmarkJITDenseKernels(b *testing.B) {
 				if r.jit != nil {
 					b.ReportMetric(float64(r.jitCodeBytes()), "code+metadata-B")
 				}
+			})
+		}
+	}
+}
+
+// BenchmarkJITArrayKernels runs array kernels whose every binding is a
+// parameter or a local, which the new pipeline compiles, in the tree tier
+// ("existing"), the old pipeline ("native") and the new one ("ssa").
+func BenchmarkJITArrayKernels(b *testing.B) {
+	for _, tc := range []struct{ name, body string }{
+		{"vector", `for(var i=0;i<n;i++)a[i]=2*b[i]+1;return a[n-1]`},
+		{"stencil", `for(var i=1;i<n-1;i++)a[i]=(b[i-1]+b[i]+b[i+1])/3;return a[n-2]`},
+		{"dot", `var s=0;for(var i=0;i<n;i++)s+=a[i]*b[i];return s`},
+	} {
+		for _, mode := range []string{"existing", "native", "ssa"} {
+			if mode == "ssa" && !jitSSABackend {
+				continue
+			}
+			b.Run(tc.name+"/"+mode, func(b *testing.B) {
+				r := New(Config{JIT: mode != "existing"})
+				defer func() { r.Close(); r.ReleaseClosed() }()
+				r.jitSSA = mode == "ssa"
+				setup := compileForTest(b, `function kernel(a,b,n){`+tc.body+`}var a=new Array(8192),b=new Array(8192);for(var i=0;i<8192;i++){a[i]=1;b[i]=i%7}`)
+				call := compileForTest(b, `kernel(a,b,8192)`)
+				if _, err := r.Run(setup); err != nil {
+					b.Fatal(err)
+				}
+				var want Value
+				for i := 0; i < jitHotCalls; i++ {
+					v, err := r.Run(call)
+					if err != nil {
+						b.Fatal(err)
+					}
+					want = v
+				}
+				if mode == "ssa" && (r.jit.ssaEntries == 0 || r.jit.guards != 0) {
+					b.Fatalf("did not stay in the new pipeline: %+v", r.JITStats())
+				}
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					v, err := r.Run(call)
+					if err != nil || !jitSameValueForTest(v, want) {
+						b.Fatalf("result %v error %v want %v", v, err, want)
+					}
+				}
+				b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/8192, "ns/elem")
 			})
 		}
 	}

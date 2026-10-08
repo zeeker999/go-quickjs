@@ -4,9 +4,35 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
+
+// canonicalNaN is the NaN a number cell holds.
+const canonicalNaN = 0x7ff8000000000000
+
+// index converts an element's key, as the slot IR does: an integer in
+// [0, 2**32), negative zero included.
+func index(x float64) (uint64, bool) {
+	if x < 0 || x > math.MaxUint32 || math.Trunc(x) != x {
+		return 0, false
+	}
+	return uint64(x), true
+}
+
+// element is the cell for key in an array view, if it holds a number.
+func element(view ir.ArrayView, key float64) (*uint64, bool) {
+	i, ok := index(key)
+	if !ok || i >= view.DenseLength || view.Data == nil {
+		return nil, false
+	}
+	cell := (*uint64)(unsafe.Add(view.Data, uintptr(i)*16))
+	if *cell >= view.NumberLimit {
+		return nil, false
+	}
+	return cell, true
+}
 
 // ErrOrigin reports a reference at an exit that is not where its origin
 // says: a bug in origin.go.
@@ -17,6 +43,7 @@ type val struct {
 	t ir.Value // Tagged
 	f float64  // Float64
 	i uint32   // Int32, as bits
+	p int      // Ptr: the array view's index
 	b bool     // Bool
 }
 
@@ -105,6 +132,13 @@ func truth(v ir.Value) (bool, bool) {
 // every exit and return, a reference is the value its origin slot held at
 // entry (origin.go), and it reports ErrOrigin when one is not.
 func Evaluate(f *Func, pc int, slots []ir.Value, pollEvery int) (ir.Exit, error) {
+	return EvaluateArrays(f, pc, slots, nil, pollEvery)
+}
+
+// EvaluateArrays is Evaluate with arrays, as the slot IR's EvaluateArrays
+// takes them: an Opaque value's Bits index arrays, and a view with a
+// NumberLimit is an array whose cells it reads and writes in place.
+func EvaluateArrays(f *Func, pc int, slots []ir.Value, arrays []ir.ArrayView, pollEvery int) (ir.Exit, error) {
 	e, ok := f.EntryFor(pc)
 	if !ok || len(slots) != f.Locals+f.StackSize {
 		return ir.Exit{}, ir.ErrState
@@ -195,6 +229,32 @@ func Evaluate(f *Func, pc int, slots []ir.Value, pollEvery int) (ir.Exit, error)
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
 				vals[v.ID] = val{b: t}
+			case OpArrayOf:
+				t := a.t
+				if t.Kind != ir.Opaque || t.Bits >= uint64(len(arrays)) || arrays[t.Bits].NumberLimit == 0 {
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
+				vals[v.ID] = val{p: int(t.Bits)}
+			case OpElemKey:
+				if _, ok := index(a.f); !ok {
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
+			case OpElemRead, OpElemWrite:
+				cell, ok := element(arrays[a.p], b.f)
+				if !ok {
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
+				if v.Op == OpElemRead {
+					vals[v.ID] = val{f: math.Float64frombits(*cell)}
+					break
+				}
+				bits := math.Float64bits(vals[v.Args[2].ID].f)
+				if math.IsNaN(math.Float64frombits(bits)) {
+					bits = canonicalNaN
+				}
+				*cell = bits
+			case OpArrayLen:
+				vals[v.ID] = val{f: float64(arrays[a.p].Length)}
 			case OpCheckInit:
 				if a.t.Kind == ir.Uninitialized {
 					return exit(v.State, ir.ExitKind(v.Aux))

@@ -201,6 +201,20 @@ func (a *Asm) Load(dst, base Reg, disp int32) {
 	a.modrmMem(byte(dst), base, disp)
 }
 
+// LoadU32 is dst = [base + disp], 32 bits, zero-extended.
+func (a *Asm) LoadU32(dst, base Reg, disp int32) {
+	a.rex(false, byte(dst), byte(base), false)
+	a.emit(0x8B)
+	a.modrmMem(byte(dst), base, disp)
+}
+
+// LoadU8 is dst = [base + disp], a byte, zero-extended.
+func (a *Asm) LoadU8(dst, base Reg, disp int32) {
+	a.rex(false, byte(dst), byte(base), false)
+	a.emit(0x0F, 0xB6)
+	a.modrmMem(byte(dst), base, disp)
+}
+
 // Store is [base + disp] = src, 64 bits.
 func (a *Asm) Store(base Reg, disp int32, src Reg) {
 	a.rex(true, byte(src), byte(base), false)

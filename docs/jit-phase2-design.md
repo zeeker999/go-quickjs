@@ -282,6 +282,16 @@ its shadow, says.
 The skeleton instead checked at every entry that every slot held a
 primitive, which sent any function holding a reference to the interpreter.
 
+**Arrays in place (P4b).** An array operation finds its array the same way:
+a value with the object word is its origin slot's object (every object has
+one word), so `ArrayOf` reads that slot's pointer word, through the shadow
+when there is one, and checks the class byte. Elements, the length and the
+sparse flag are read at the offsets `abi.Encoding` gives. The semantics are
+the slot IR's views': a read yields a number or exits, a store writes a
+number over a number or leaves the instruction to Go, and keys are integers
+below 2**32. Nothing native code reads of an object changes while it runs;
+Go changes it only between entries.
+
 **Kind tests are on the number word, with the VM's encoding passed in.** The
 JIT never imports the VM: the VM passes the encoding as data (`rt.Encoding`).
 - A number is a word whose top 13 bits are not all set.
