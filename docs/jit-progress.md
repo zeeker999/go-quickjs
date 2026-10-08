@@ -85,8 +85,12 @@ across sessions. Update it **in the same commit** as the work it records.
   it. Such runs are now inconclusive (`outOfMemory`), and the input is a
   seed. The meter itself lets a rope that shares itself be written out
   unmetered, past the limit, on main too: a main-branch follow-up, not the
-  JIT's. Restarted 2026-10-08 as a detached process (6 workers,
-  coverage-instrumented binary). Progress goes to
+  JIT's. The second run (from 10:46 EDT, built at 57dd1e7) stopped after
+  2 h 39 min, 8 million programs, on a hang in the interpreter's own run:
+  a BigInt squared in a loop under the harness's 16 MB limit, which main
+  now reserves before computing (6bf6058, cherry-picked); its input is a
+  seed. Restarted 2026-10-08 with a binary of the branch's head, P4a-P4d
+  included (6 workers). Progress goes to
   `D:/Data/quickjs-jit-results/2026-10-08-review/fuzz-24h.err` (stderr); a failing
   input lands in `fuzzwork/testdata/fuzz/FuzzJITDifferential/` beside it.
   Before that: 15 minutes in two runs, 700,000 programs, no divergence.
@@ -132,17 +136,18 @@ contents.
 | 2026-10-08 | JIT off must cost nothing, in both untagged and tagged builds. |
 | 2026-10-08 | Go-side calls use wazero's exit/resume on a native stack. No pointer stores or allocation from native code. |
 
-**Open:** D8's reference-reassignment question (Phase 4 spike), now
-blocking P4e's `ReferenceRead`; macOS hardened-runtime support (Phase 6).
-Proposed 2026-10-08, awaiting the user's decision: a reference loaded from
+**Open:** macOS hardened-runtime support (Phase 6).
+
+**Decided 2026-10-08 (the user chose it):** D8's reference question. A
+reference loaded from
 the heap (`o.a.b`, `this.items[i]`, a global function) carries its cell's
 address the way an ambiguous phi carries its slot (a shadow); native code
 reads through it and never stores it, and an exit record has Go copy from
 that cell. Sound while Go's heap does not move and the object graph does
 not change while native code runs -- it changes only between entries -- but
-outside `unsafe.Pointer`'s documented rules, so it needs the decision, a
-stress test, and a check with each new Go version. The alternative keeps
-such values out of native code: every read of one exits to Go.
+outside `unsafe.Pointer`'s documented rules, so it needs a stress test and
+a check with each new Go version. (Rejected: keeping such values out of
+native code, every read of one exiting to Go.)
 
 ## Baseline measurements (2026-10-08, Ryzen, Windows/amd64, Go 1.27.1)
 
