@@ -39,7 +39,7 @@ across sessions. Update it **in the same commit** as the work it records.
 | C1 | Delete `dispatch*.go`/`.s` and `loop*.go` with their tests | done | jit: delete the unused dispatch layer and loop prototype |
 | C2 | Delete the shape-matched selectors (`selectShortCountdown`, `selectArrayGrowth` with native growth, the 16-cell preallocation, the string-packing host discount); re-measure. `charCodeAt` stays: its native call is guarded by the realm's intrinsic, so it is general; only its selection (the name anywhere in the function) is crude, and moves to per-site selection in Phase 2's SSA. | done | jit: drop selectors fitted to Crypto and MD5 |
 | C3 | Untagged hot functions identical to main: `internal/cmd/hotdiff` compares them instruction by instruction (ignoring NOP inline marks, padding and addresses); struct sizes by `TestJITFieldLayout`. A local gate like `placements`, not CI: an intended interpreter change would fail it. Run it before merging JIT work. | done | jit: compile the interpreter's hooks out of builds without the JIT |
-| D1 | Rewrite `internal/jit/README.md` as contracts; move measurements to `docs/jit-results.md`; `qjs --jit` warns when the build lacks the JIT | todo | |
+| D1 | Rewrite `internal/jit/README.md` as contracts; move measurements to `docs/jit-results.md`; `qjs --jit` warns when the build lacks the JIT | done | jit: document contracts, not a diary |
 
 **Gate:**
 - [ ] Full suites (tagged and untagged) and stress-mode test262 pass.

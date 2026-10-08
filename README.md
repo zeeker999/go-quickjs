@@ -56,14 +56,12 @@ long, the weak collections and BigInt arithmetic among them. See [Compared with 
 
 ## Documentation
 
-An experimental native numeric executor is available on `linux/amd64`,
-`windows/amd64`, and `darwin/arm64`. Build with `-tags quickjs_jit` and explicitly
-enable it with `quickjs.New(quickjs.WithJIT())`, or `qjs --jit`. Default builds
-and runtimes keep the existing execution tiers. Unsupported functions and
-unavailable executable memory fall back automatically. Eligible functions
-promote after repeated framed calls or sustained looping. Short cold calls keep
-their existing tier. See the
-[JIT implementation notes](internal/jit/README.md) for coverage and limits.
+An experimental native tier for numeric and array loops is in development for
+`linux/amd64`, `windows/amd64` and `darwin/arm64`. It needs both a build with
+`-tags quickjs_jit` and a runtime made with `quickjs.WithJIT()` (or
+`qjs --jit`); anything else runs exactly as before. See
+[its notes](internal/jit/README.md) and
+[the plan for it](docs/jit-production-plan.md).
 
 | | |
 |---|---|
