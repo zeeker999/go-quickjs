@@ -5,7 +5,8 @@ package vm
 // that only could have. Compiled counts programs made; Entries native
 // entries; Guards guard failures; Hosts exits to Go for an operation;
 // Budgets returns to Go when an entry's instruction budget ran out; and
-// Interpreted invocations finished in the interpreter after native code.
+// Interpreted invocations finished in the interpreter after native code;
+// SSAEntries counts the entries into code the new pipeline compiled.
 type JITStats struct {
-	Compiled, Entries, Guards, Hosts, Budgets, Interpreted uint64
+	Compiled, Entries, Guards, Hosts, Budgets, Interpreted, SSAEntries uint64
 }

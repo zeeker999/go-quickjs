@@ -362,3 +362,30 @@ func TestSSANativeFromJavaScript(t *testing.T) {
 		t.Fatalf("only %d of %d functions compiled", compiled, len(ssaNativeCorpus))
 	}
 }
+
+// BenchmarkSSARoundTrip is the new pipeline's floor: Run, the bridge, an
+// entry's checks, a host exit's record, and the return to Go. P2's gate is
+// 15 ns or less.
+func BenchmarkSSARoundTrip(b *testing.B) {
+	for _, locals := range []int{1, 8} {
+		b.Run(fmt.Sprintf("%d-locals", locals), func(b *testing.B) {
+			p := &ir.Program{Locals: locals, Code: []ir.Instruction{{Op: ir.Host}, {Op: ir.Return, Left: ir.Slot(0)}},
+				Maps: []ir.StateMap{{PC: 0}, {PC: 1}}}
+			c, err := compileNative(p)
+			if err != nil || c == nil {
+				b.Fatal(err)
+			}
+			defer c.code.Close()
+			frame := make([]testValue, locals)
+			counter := 1 << 62
+			ctx := &abi.Context{Locals: unsafe.Pointer(&frame[0]), BackEdges: &counter}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := c.code.Run(0, ctx); err != nil || ctx.ExitKind != abi.ExitHost {
+					b.Fatal(err, ctx.ExitKind)
+				}
+			}
+		})
+	}
+}

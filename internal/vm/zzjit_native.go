@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit"
+	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
@@ -35,6 +36,9 @@ type jitFields struct {
 	// jitStress is QJS_JIT_STRESS's budget and deoptimization period, or
 	// zero; see jitStressConfig.
 	jitStress jitStressConfig
+	// jitSSA selects the new pipeline (internal/jit/ssa and mir) where it
+	// compiles a function: QJS_JIT_PIPELINE=ssa, an internal setting.
+	jitSSA bool
 }
 
 // jitStressConfig drives the JIT harder than ordinary use, so that tests and
@@ -80,7 +84,7 @@ func (r *Runtime) JITStats() JITStats {
 		return JITStats{}
 	}
 	return JITStats{Compiled: s.compiled, Entries: s.entries, Guards: s.guards,
-		Hosts: s.hosts, Budgets: s.budgets, Interpreted: s.interpreted}
+		Hosts: s.hosts, Budgets: s.budgets, Interpreted: s.interpreted, SSAEntries: s.ssaEntries}
 }
 
 // jitEntryBudget is the native instructions one entry may run: MaxIterations, or
@@ -161,7 +165,9 @@ func hintFor(e *jitEntry) uint32 {
 
 type jitEntry struct {
 	// hint is the slot and tag a closure remembers this entry by.
-	hint          uint32
+	hint uint32
+	// ssa is the new pipeline\'s code, when it compiled the function.
+	ssa           *jit.SSACode
 	code          *jit.Code
 	misses        uint8
 	probes        uint8
@@ -213,6 +219,8 @@ type jitState struct {
 	compiled      uint64
 	interpreted   uint64
 	stressExits   uint64
+	ssaCtx        *abi.Context
+	ssaEntries    uint64
 	referenceKeys []uint32
 	references    *jitReferences
 	callFrames    *jitCallFrames
@@ -234,6 +242,7 @@ func (r *Runtime) initJIT(enabled bool) {
 	r.jitEnabled = enabled && r.debug == nil
 	r.jitCallThreshold = jitHotCalls
 	r.jitStress = jitStressDefault
+	r.jitSSA = jitSSADefault
 	if r.jitStress.threshold {
 		r.jitCallThreshold = 1
 	}
@@ -250,7 +259,7 @@ func (r *Runtime) jitTreeRecovery(f *frame) bool {
 		return false
 	}
 	e := r.jit.hint(f.cl.hint())
-	return e == nil || e.deferred || e.code != nil && !e.calleeOnly && e.misses < 8
+	return e == nil || e.deferred || e.ssa != nil || e.code != nil && !e.calleeOnly && e.misses < 8
 }
 
 // jitCodeBytes is what the JIT holds: executable pages, their metadata, and
@@ -259,7 +268,7 @@ func (r *Runtime) jitCodeBytes() int64 {
 	var n int64
 	if r.jit != nil {
 		for _, e := range r.jit.cache {
-			n += int64(e.code.Size() + e.code.MetadataSize() + cap(e.globals)*int(unsafe.Sizeof(bytecode.Instr{})) + cap(e.referenceKeys)*4)
+			n += int64(e.ssa.Size() + e.code.Size() + e.code.MetadataSize() + cap(e.globals)*int(unsafe.Sizeof(bytecode.Instr{})) + cap(e.referenceKeys)*4)
 		}
 		if r.jit.references != nil {
 			n += int64(unsafe.Sizeof(jitReferences{}))
@@ -274,8 +283,8 @@ func (r *Runtime) jitCodeBytes() int64 {
 // dropEntry closes e's code and removes it from the cache, reporting false if
 // the OS would not release the code, which leaves e owned for a retry.
 func (s *jitState) dropEntry(key weak.Pointer[bytecode.Function], e *jitEntry) bool {
-	held := e.code.Size() != 0
-	if e.code.Close() != nil {
+	held := e.code.Size() != 0 || e.ssa.Size() != 0
+	if e.code.Close() != nil || e.ssa.Close() != nil {
 		return false
 	}
 	s.forget(key, e)
@@ -417,6 +426,14 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool) *jitEntry {
 		e.entrySlow = true
 	}
 	p, err := lower(fn)
+	if err == nil && r.jitSSA && !callee {
+		if code := r.compileSSA(fn, p, limit); code != nil {
+			e.ssa = code
+			s.compiled++
+			s.remember(weak.Make(fn), e)
+			return e
+		}
+	}
 	if err == nil {
 		e.this = p.This
 		for _, key := range p.Globals {
@@ -657,9 +674,12 @@ func (r *Runtime) tryJITLoop(f *frame, pc uint32, sp int, fullBudget bool) (Valu
 
 func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, bool) {
 	e := r.jit.hint(f.cl.hint())
-	if e == nil || e.code != nil && e.code.Size() == 0 {
+	if e == nil || e.code != nil && e.code.Size() == 0 || e.ssa != nil && e.ssa.Size() == 0 {
 		e = r.jitFor(f.cl.fn)
 		f.cl.setHint(hintFor(e))
+	}
+	if e != nil && e.ssa != nil {
+		return r.runSSA(f, e, pc, depth)
 	}
 	if e == nil {
 		// Resource and OS refusals may change. Retry after another warmup,
