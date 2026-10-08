@@ -710,6 +710,52 @@ func TestJITSSAGlobals(t *testing.T) {
 	}
 }
 
+// The new pipeline reads a string's length and code units in place, where
+// charCodeAt is still the intrinsic: ASCII strings, strings with code units
+// past ASCII, a rope, an empty string, and, after a script replaces
+// String.prototype.charCodeAt, the replacement, which Go calls.
+func TestJITSSAStrings(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function hash(s){let h=0;for(let i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))|0;return h}
+		var rope='ab';for(let i=0;i<6;i++)rope+=rope+i;hash('warm')`
+	rounds := []string{
+		`[hash('hello'),hash('αβγ'),hash(''),hash(rope),hash('mixed é')].join()`,
+		`String.prototype.charCodeAt=function(i){return 7};[hash('hello'),hash('αβγ')].join()`,
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	r.jitEnabled = false
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.jitEnabled = true
+	r.jitStress = jitStressConfig{threshold: true, budget: 1}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+	}
+	st := r.JITStats()
+	t.Logf("%+v", st)
+	if st.SSAEntries == 0 {
+		t.Fatalf("never entered the new pipeline: %+v", st)
+	}
+}
+
 // TestJITSSACellsUnderGC stresses D8's decision: native code carries a
 // reference read from an object by its cell's address, which Go reads back
 // at exit. That holds while Go's heap does not move and the graph does not

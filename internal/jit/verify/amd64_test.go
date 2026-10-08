@@ -125,6 +125,7 @@ func TestAMD64Moves(t *testing.T) {
 				expect(t, "Load "+name, encode(func(a *amd64.Asm) { a.Load(d, s, disp) }), x86asm.MOV, r64(d), mem{r64(s), int64(disp)})
 				expect(t, "Store "+name, encode(func(a *amd64.Asm) { a.Store(s, disp, d) }), x86asm.MOV, mem{r64(s), int64(disp)}, r64(d))
 				expectBytes(t, "LoadU32 "+name, encode(func(a *amd64.Asm) { a.LoadU32(d, s, disp) }), x86asm.MOV, 4, r32(d), mem{r64(s), int64(disp)})
+				expectBytes(t, "LoadU16 "+name, encode(func(a *amd64.Asm) { a.LoadU16(d, s, disp) }), x86asm.MOVZX, 2, r32(d), mem{r64(s), int64(disp)})
 				expectBytes(t, "LoadU8 "+name, encode(func(a *amd64.Asm) { a.LoadU8(d, s, disp) }), x86asm.MOVZX, 1, r32(d), mem{r64(s), int64(disp)})
 			}
 			expect(t, "MovZX8 "+name, encode(func(a *amd64.Asm) { a.MovZX8(d, s) }), x86asm.MOVZX, r32(d), r8(s))

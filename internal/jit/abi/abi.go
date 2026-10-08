@@ -55,6 +55,10 @@ type Context struct {
 	// have, which shadow them: a slice of uint64, a bit for each atom. Go
 	// sets both before every entry; native code only reads them.
 	Global, LexNames unsafe.Pointer
+	// CharCodeAt is String.prototype.charCodeAt, the intrinsic, when Go has
+	// found it still there before an entry of a function that reads it, and
+	// otherwise nothing (a nil pointer word).
+	CharCodeAt Slot
 	// This is the receiver, laid out as a VM value, which Go sets before
 	// every entry of a function that reads it; uninitialized in a derived
 	// constructor before super() returns.
@@ -90,6 +94,7 @@ var (
 	OffThis      = int32(unsafe.Offsetof(Context{}.This))
 	OffGlobal    = int32(unsafe.Offsetof(Context{}.Global))
 	OffLexNames  = int32(unsafe.Offsetof(Context{}.LexNames))
+	OffCharCode  = int32(unsafe.Offsetof(Context{}.CharCodeAt))
 	OffExitKind  = int32(unsafe.Offsetof(Context{}.ExitKind))
 	OffExitPC    = int32(unsafe.Offsetof(Context{}.ExitPC))
 	OffExitDepth = int32(unsafe.Offsetof(Context{}.ExitDepth))
@@ -142,6 +147,14 @@ type Encoding struct {
 	// slice: a pointer to the first value, then the count.
 	ObjectClass, ObjectFlags, ObjectArrayLen, ObjectElems int32
 	ClassArray, FlagSparse                                uint8
+
+	// String is every string's number word. A string's UTF-8 form's data
+	// pointer is at StringData, valid only when the pointer at StringLeft is
+	// nil (a rope's halves); StringLength is its length in UTF-16 code
+	// units, an int; a true byte at StringASCII says each byte is a code
+	// unit; and StringU16, when not nil, points to its code units.
+	String                                                       uint64
+	StringData, StringLeft, StringLength, StringASCII, StringU16 int32
 
 	// UpvalueSlot is the offset, in a captured binding's cell, of the
 	// pointer to its value (Context.Upvalues).

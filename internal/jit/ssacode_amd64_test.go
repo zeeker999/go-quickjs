@@ -37,6 +37,46 @@ type testUpvalue struct{ slot *testValue }
 // which native code must never read or write: their values are in cells.
 var testPoison = testValue{num: 0x0123456789abcdef}
 
+// testString is a string's layout as far as native code reads it.
+type testString struct {
+	s           string
+	left, right *testString
+	length      int
+	ascii       bool
+	u16         *uint16
+}
+
+// testText is a string's spec: its code units, and how it is held -- flat
+// ASCII, flat with its UTF-16 units cached, flat without them (which
+// native code leaves to Go), or a rope (likewise).
+type testText struct {
+	units []uint16
+	form  int
+}
+
+const (
+	textASCII = iota
+	textCached
+	textUncached
+	textRope
+)
+
+func randomText(r *rand.Rand) testText {
+	t := testText{form: r.IntN(4)}
+	for range r.IntN(5) {
+		u := uint16('a' + r.IntN(26))
+		if t.form == textCached || t.form == textUncached || r.IntN(2) == 0 {
+			u = uint16(0x100 + r.IntN(0x2000))
+		}
+		t.units = append(t.units, u)
+	}
+	return t
+}
+
+// testCharCodeAt is the handle of the object that is charCodeAt, the
+// intrinsic, in a heap whose context has it.
+const testCharCodeAt = 6
+
 // testObject is an object's layout as far as native code reads it.
 type testObject struct {
 	class    uint8
@@ -95,6 +135,9 @@ var testEncoding = abi.Encoding{
 	ObjectArrayLen: int32(unsafe.Offsetof(testObject{}.arrayLen)), ObjectElems: int32(unsafe.Offsetof(testObject{}.elems)),
 	ClassArray: testClassArray, FlagSparse: testFlagSparse,
 	UpvalueSlot: int32(unsafe.Offsetof(testUpvalue{}.slot)),
+	String:      testTagBase | 4, StringData: int32(unsafe.Offsetof(testString{}.s)),
+	StringLeft: int32(unsafe.Offsetof(testString{}.left)), StringLength: int32(unsafe.Offsetof(testString{}.length)),
+	StringASCII: int32(unsafe.Offsetof(testString{}.ascii)), StringU16: int32(unsafe.Offsetof(testString{}.u16)),
 	ObjectShape: int32(unsafe.Offsetof(testObject{}.shape)), ObjectProps: int32(unsafe.Offsetof(testObject{}.props)),
 	PropertySize: int32(unsafe.Sizeof(testProperty{})), PropertyValue: int32(unsafe.Offsetof(testProperty{}.value)),
 	PropertyKey: int32(unsafe.Offsetof(testProperty{}.key)), PropertyFlags: int32(unsafe.Offsetof(testProperty{}.flags)),
@@ -113,10 +156,14 @@ type testArray struct {
 	cells  []uint64 // number words
 	length uint64
 	array  bool
-	shape  int      // into testShapes, or -1 for none
-	keys   []uint32 // the table's keys, flags and values' number words
-	flags  []uint8
-	props  []ir.Value
+	shape  int // into testShapes, or -1 for none
+	// texts are the strings handles 5 and 6 name, and intrinsic says
+	// whether the context has charCodeAt: the global object's spec has them.
+	texts     []testText
+	intrinsic bool
+	keys      []uint32 // the table's keys, flags and values' number words
+	flags     []uint8
+	props     []ir.Value
 }
 
 func randomTestHeap(r *rand.Rand) testHeap {
@@ -169,7 +216,8 @@ func randomTestHeap(r *rand.Rand) testHeap {
 	// The global object, handle 4: an ordinary object whose bindings may
 	// be in their temporal dead zone; its length's bits are which of the
 	// keys 10 to 13 script-level lexical bindings shadow.
-	g := testArray{shape: -1, length: uint64(r.IntN(16)) & uint64(r.IntN(16))}
+	g := testArray{shape: -1, length: uint64(r.IntN(16)) & uint64(r.IntN(16)),
+		texts: []testText{randomText(r), randomText(r)}, intrinsic: r.IntN(4) != 0}
 	for range 4 {
 		g.keys = append(g.keys, 10+uint32(r.IntN(4)))
 		g.flags = append(g.flags, testFlags[r.IntN(len(testFlags))])
@@ -189,7 +237,10 @@ func randomTestHeap(r *rand.Rand) testHeap {
 type nativeHeap struct {
 	objects []testObject
 	others  [8]testObject
-	texts   [8]int
+	texts   [8]testString
+	specs   []testText // handles 5 and 6's
+	// intrinsic is the context's charCodeAt cell.
+	intrinsic testValue
 	// evaluated is the objects' property values for the SSA evaluator.
 	evaluated [][]ir.Value
 	// lexNames is the names script-level lexical bindings have, a bit for
@@ -224,6 +275,33 @@ func (h testHeap) native() *nativeHeap {
 	}
 	if len(h) > 4 {
 		n.lexNames = []uint64{h[4].length << 10}
+		n.specs = h[4].texts
+		for i, t := range h[4].texts {
+			s := &n.texts[5+i]
+			s.length = len(t.units)
+			switch t.form {
+			case textASCII:
+				b := make([]byte, len(t.units))
+				for j, u := range t.units {
+					b[j] = byte(u)
+				}
+				s.s, s.ascii = string(b), true
+			case textCached:
+				s.s = "not read"
+				if len(t.units) > 0 {
+					s.u16 = &slices.Clone(t.units)[0]
+				}
+			case textUncached:
+				s.s = "not read"
+			case textRope:
+				// A rope's flags are valid, as the VM's are; its UTF-8 is not.
+				s.left, s.right = &testString{}, &testString{}
+				s.ascii = !slices.ContainsFunc(t.units, func(u uint16) bool { return u >= 0x80 })
+			}
+		}
+		if h[4].intrinsic {
+			n.intrinsic = n.word(ir.Value{Kind: ir.Opaque, Bits: testCharCodeAt})
+		}
 	}
 	return n
 }
@@ -244,6 +322,15 @@ func (n *nativeHeap) heap() ssa.Heap {
 		h.Objects = append(h.Objects, e)
 	}
 	if len(h.Objects) > 4 {
+		h.Strings = map[uint64]ssa.String{}
+		for i, t := range n.specs {
+			// Read natively when flat and at hand: ASCII, or cached.
+			flat := t.form == textASCII || t.form == textCached || len(t.units) == 0 && t.form != textRope
+			h.Strings[uint64(5+i)] = ssa.String{Units: t.units, Flat: flat}
+		}
+		if n.intrinsic.ref != nil {
+			h.CharCodeAt = &ir.Value{Kind: ir.Opaque, Bits: testCharCodeAt}
+		}
 		h.Global, h.Lexical = &h.Objects[4], map[uint32]bool{}
 		for k := uint32(10); k < 14; k++ {
 			if n.lexNames[0]&(1<<k) != 0 {
@@ -315,7 +402,7 @@ func (n *nativeHeap) word(v ir.Value) testValue {
 	// A reference: every object has one word, as in the VM, and so here does
 	// every string; the pointer tells them apart.
 	if v.Kind == ir.String {
-		return testValue{num: testTagBase | 4, ref: unsafe.Pointer(&n.texts[v.Bits%8])}
+		return testValue{num: testEncoding.String, ref: unsafe.Pointer(&n.texts[v.Bits%8])}
 	}
 	if v.Bits < uint64(len(n.objects)) {
 		return testValue{num: testEncoding.Object, ref: unsafe.Pointer(&n.objects[v.Bits])}
@@ -396,6 +483,7 @@ var nativeTestValues = []ir.Value{
 	ir.Bool(true), ir.Bool(false), {Kind: ir.Undefined}, {Kind: ir.Null}, {Kind: ir.Uninitialized},
 	{Kind: ir.Opaque, Bits: 3}, {Kind: ir.Opaque, Bits: 4}, {Kind: ir.String, Bits: 5},
 	{Kind: ir.Opaque, Bits: 0}, {Kind: ir.Opaque, Bits: 1}, {Kind: ir.Opaque, Bits: 2}, {Kind: ir.String, Bits: 6},
+	{Kind: ir.Opaque, Bits: testCharCodeAt}, {Kind: ir.Opaque, Bits: testCharCodeAt},
 }
 
 func nativeTestValue(r *rand.Rand) ir.Value {
@@ -452,7 +540,7 @@ func ssaTestProgram(r *rand.Rand) (*ir.Program, layout) {
 	ops := []ir.Op{ir.Copy, ir.Binary, ir.Binary, ir.Binary, ir.Unary, ir.Update, ir.Update, ir.Branch, ir.Branch,
 		ir.Jump, ir.Swap, ir.CopyPair, ir.StoreLoad, ir.Host, ir.Nop,
 		ir.ArrayRead, ir.ArrayWrite, ir.ArrayLength, ir.ArrayKey, ir.ArrayUpdate, ir.PropertyRead, ir.PropertyWrite,
-		ir.ReferenceRead, ir.ReferenceRead, ir.BindingRead, ir.BindingRead}
+		ir.ReferenceRead, ir.ReferenceRead, ir.BindingRead, ir.BindingRead, ir.StringMethod, ir.StringCode, ir.StringCode}
 	operators := []ir.Operator{ir.Add, ir.Sub, ir.Mul, ir.Div, ir.Lt, ir.Le, ir.Gt, ir.Ge, ir.Eq, ir.Ne,
 		ir.BitAnd, ir.BitOr, ir.BitXor, ir.Shl, ir.Shr, ir.UShr}
 	p := &ir.Program{Locals: locals}
@@ -463,6 +551,10 @@ func ssaTestProgram(r *rand.Rand) (*ir.Program, layout) {
 		switch in.Op {
 		case ir.ArrayRead, ir.ArrayWrite, ir.ArrayLength, ir.ArrayKey:
 			in.Left = ir.Slot(r.IntN(locals))
+		case ir.StringMethod:
+			in.Left = ir.Slot(r.IntN(locals))
+		case ir.StringCode:
+			in.Left, in.Right = ir.Slot(r.IntN(locals)), ir.Slot(r.IntN(locals))
 		case ir.BindingRead:
 			in.Left = ir.Literal(ir.Value{Kind: ir.Undefined})
 			if r.IntN(4) != 0 {
@@ -608,6 +700,7 @@ func nativeMismatch(c *compiled, pc int, slots []ir.Value, poll int, heap testHe
 	}
 	if len(nh.objects) > 4 {
 		ctx.Global, ctx.LexNames = unsafe.Pointer(&nh.objects[4]), unsafe.Pointer(&nh.lexNames)
+		*(*testValue)(unsafe.Pointer(&ctx.CharCodeAt)) = nh.intrinsic
 	}
 	if err := c.code.Run(pc, ctx); err != nil {
 		return err.Error()
@@ -813,6 +906,60 @@ func TestSSANativeCapturedShadow(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestSSANativeStrings drives charCodeAt through every form a string has,
+// indexes in range and out, with the intrinsic in the context and without,
+// and with another callee: random programs seldom line a string, its method
+// and an index up. Each run must match the evaluator, and the code units
+// must be read natively for ASCII and cached strings alike.
+func TestSSANativeStrings(t *testing.T) {
+	// Slots: the string, the index, the method, the code.
+	p := &ir.Program{Locals: 4, Code: []ir.Instruction{
+		{Op: ir.StringMethod, Left: ir.Slot(0), Dest: 2},
+		{Op: ir.StringCode, Left: ir.Slot(2), Right: ir.Slot(0), Third: ir.Slot(1), Dest: 3},
+		{Op: ir.Return, Left: ir.Slot(3)},
+	}}
+	p.Maps = make([]ir.StateMap, len(p.Code))
+	for pc := range p.Maps {
+		p.Maps[pc].PC = uint32(pc)
+	}
+	c, err := compileNative(p, layout{4, -1, nil, nil})
+	if err != nil || c == nil {
+		t.Fatalf("compile: %v", err)
+	}
+	defer c.code.Close()
+	r := rand.New(rand.NewPCG(7, 8))
+	read := map[int]int{}
+	for form := textASCII; form <= textRope; form++ {
+		for _, intrinsic := range []bool{true, false} {
+			heap := randomTestHeap(r)
+			heap[4].texts = []testText{{units: []uint16{'h', 'i', '!'}, form: form}, {units: []uint16{0x3b1, 0x3b2}, form: form}}
+			if form == textASCII {
+				heap[4].texts[1].form = textCached
+			}
+			heap[4].intrinsic = intrinsic
+			for _, s := range []uint64{5, 6} {
+				for _, i := range []float64{0, 1, 2, 3, -1, 0.5, math.Copysign(0, -1)} {
+					for _, callee := range []ir.Value{{Kind: ir.Opaque, Bits: testCharCodeAt}, {Kind: ir.Opaque, Bits: 0}, ir.Float(1)} {
+						for _, pc := range []int{0, 1} {
+							slots := []ir.Value{{Kind: ir.String, Bits: s}, ir.Float(i), callee, ir.Float(0)}
+							if why := nativeMismatch(c, pc, slots, 0, heap); why != "" {
+								t.Fatalf("form %d, intrinsic %v, string %d, index %v, callee %v, pc %d: %s", form, intrinsic, s, i, callee, pc, why)
+							}
+							want := slices.Clone(slots)
+							if exit, _ := ssa.EvaluateHeap(c.f, pc, want, heap.native().heap(), 0); exit.Kind == ir.Returned {
+								read[heap[4].texts[s-5].form]++
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if read[textASCII] == 0 || read[textCached] == 0 || read[textUncached]+read[textRope] != 0 {
+		t.Fatalf("code units read by form: %v", read)
 	}
 }
 
