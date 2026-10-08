@@ -76,8 +76,15 @@ across sessions. Update it **in the same commit** as the work it records.
   sets `core.autocrlf false`). The macOS native job failed because the
   differential test required SSA entries on arm64, which has no SSA backend
   yet (`jitSSABackend`). Re-run pending.
-- [ ] Fuzzer runs 24 hours with no divergence. Started 2026-10-08 as a
-  detached process (6 workers, coverage-instrumented binary). Progress goes to
+- [ ] Fuzzer runs 24 hours with no divergence. The first start (2026-10-08,
+  10:16 EDT) stopped after 18 minutes on a program over the memory limit
+  that the interpreter finished and the JIT stopped: not a divergence, since
+  the meter measures on process-wide allocation, but the harness compared
+  it. Such runs are now inconclusive (`outOfMemory`), and the input is a
+  seed. The meter itself lets a rope that shares itself be written out
+  unmetered, past the limit, on main too: a main-branch follow-up, not the
+  JIT's. Restarted 2026-10-08 as a detached process (6 workers,
+  coverage-instrumented binary). Progress goes to
   `D:/Data/quickjs-jit-results/2026-10-08-review/fuzz-24h.err` (stderr); a failing
   input lands in `fuzzwork/testdata/fuzz/FuzzJITDifferential/` beside it.
   Before that: 15 minutes in two runs, 700,000 programs, no divergence.

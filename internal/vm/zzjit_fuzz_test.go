@@ -175,8 +175,11 @@ func jitDifferential(t *testing.T, src string) JITStats {
 		// A generated program can grow a string without bound -- o.x=s;
 		// s+=o.x doubles it -- which takes every tier seconds and gigabytes
 		// to reach the engine's length limit. The memory limit stops it
-		// early, the same way in every tier (the JIT's memory is not the
-		// script's), and keeps the fuzzer's workers responsive.
+		// early and keeps the fuzzer's workers responsive. Where it stops
+		// it is not the same in every tier: the meter measures once the
+		// process has allocated enough, the JIT's compiler included, and
+		// a rope that shares itself is written out unmetered, so a run
+		// over the limit may end either way (see outOfMemory).
 		r := New(Config{JIT: jit, MemoryLimit: 16 << 20})
 		defer func() { r.Close(); r.ReleaseClosed() }()
 		r.jitCallThreshold = 1
@@ -195,7 +198,10 @@ func jitDifferential(t *testing.T, src string) JITStats {
 		return s.Go(), r.JITStats()
 	}
 	want, _ := run(false, false, jitStressConfig{}, false)
-	if got, _ := run(true, false, jitStressConfig{}, false); got != want {
+	if outOfMemory(want) {
+		return JITStats{}
+	}
+	if got, _ := run(true, false, jitStressConfig{}, false); got != want && !outOfMemory(got) {
 		t.Fatalf("tree tier: %q\ninterpreter: %q\n%s", got, want, src)
 	}
 	var total JITStats
@@ -205,7 +211,7 @@ func jitDifferential(t *testing.T, src string) JITStats {
 		{threshold: true, budget: 5, deopt: 2},
 	} {
 		got, st := run(true, true, c, false)
-		if got != want {
+		if got != want && !outOfMemory(got) {
 			t.Fatalf("JIT %+v: %q\ninterpreter: %q\n%s", c, got, want, src)
 		}
 		total.Entries += st.Entries
@@ -214,7 +220,7 @@ func jitDifferential(t *testing.T, src string) JITStats {
 		// The new pipeline, where it compiles the function.
 		got, st = run(true, true, c, true)
 		total.SSAEntries += st.SSAEntries
-		if got != want {
+		if got != want && !outOfMemory(got) {
 			t.Fatalf("SSA pipeline %+v: %q\ninterpreter: %q\n%s", c, got, want, src)
 		}
 		total.Entries += st.Entries
@@ -222,6 +228,13 @@ func jitDifferential(t *testing.T, src string) JITStats {
 		total.Interpreted += st.Interpreted
 	}
 	return total
+}
+
+// outOfMemory reports whether a run stopped at its memory limit, which
+// decides nothing: whether a program over the limit is stopped, and where,
+// depends on when the meter measures.
+func outOfMemory(result string) bool {
+	return result == "uncaught: "+ErrMemoryLimit.Error()
 }
 
 // FuzzJITDifferential compares the JIT with the interpreter on generated
