@@ -282,7 +282,7 @@ func (r *Runtime) jitPushCall(s *jitState, q, child *jitCallFrame, in bytecode.I
 		return false
 	}
 	cl := fd.closure
-	fn, e := cl.fn, cl.jitEntry
+	fn, e := cl.fn, r.jit.hint(cl.hint())
 	if !fn.DirectCall || fn.HasTailCall {
 		return false
 	}
@@ -293,7 +293,7 @@ func (r *Runtime) jitPushCall(s *jitState, q, child *jitCallFrame, in bytecode.I
 			return false
 		}
 		e = r.jitForMode(fn, true)
-		cl.jitEntry = e
+		cl.setHint(hintFor(e))
 	}
 	if e == nil || e.code == nil || cl.jitRefused && !e.calleeOnly || e.misses >= 8 || len(e.referenceKeys) != 0 {
 		return false
@@ -440,7 +440,7 @@ func (r *Runtime) jitRebuildCalls(s *jitState, a *jitCallFrames, top int) (*jitS
 		q := &a.frames[i]
 		if _, live := q.e.code.EntryDepth(q.pc); !live || r.jit != s {
 			q.e = r.jitForMode(q.f.cl.fn, q.e.calleeOnly)
-			q.f.cl.jitEntry = q.e
+			q.f.cl.setHint(hintFor(q.e))
 			if q.e == nil || q.e.code == nil {
 				return s, false
 			}

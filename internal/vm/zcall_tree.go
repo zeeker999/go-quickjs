@@ -109,15 +109,17 @@ func (r *Runtime) callTree(o *Object, fd *funcData, this Value, args []Value, ne
 	if f.savedSP != 0 {
 		f.savedSP = 0
 	}
-	v, err, native := r.tryJITFrame(f)
-	if !native {
-		if nested && !r.jitTreeRecovery(f) {
-			v, err = r.runTreeNested(f, fd.treeCall)
-		} else {
-			v, err = r.runTree(f, fd.treeCall)
-		}
+	// The JIT, when it runs the frame, comes first. A nested tree whose loop
+	// may promote keeps runTree's recover (see jitTreeRecovery).
+	var v Value
+	var err error
+	var native bool
+	if v, err, native = r.tryJITFrame(f); native {
+	} else if nested && !r.jitTreeRecovery(f) {
+		v, err = r.runTreeNested(f, fd.treeCall)
+	} else {
+		v, err = r.runTree(f, fd.treeCall)
 	}
-
 	r.popFrameOf(f, base)
 	return v, err
 }

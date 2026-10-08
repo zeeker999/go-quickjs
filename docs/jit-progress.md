@@ -34,8 +34,8 @@ across sessions. Update it **in the same commit** as the work it records.
 | R4a | `recover` in compilation becomes a permanent refusal | done | jit: refuse instead of crashing when compilation panics |
 | R4b | Size `inferIntegerResults`'s origin table from the final origin count, with an invariant test | done | jit: refuse instead of crashing when compilation panics |
 | R7 | One exhaustive per-opcode table (stack effect + lowering, missing means refuse); kind inference's default clears all facts; `Validate` rejects non-scalar literals | todo | |
-| Z1 | `closure` stays 128 B in tagged builds (index, not pointer); compile-time size assertions in both builds | todo | |
-| Z2 | `jitTreeRecovery` only for frames whose function can enter a native loop | todo | |
+| Z1 | `closure` stays 128 B in tagged builds (index, not pointer); size and field-order checks in both builds (`TestJITFieldLayout`) | done | jit: cost nothing while off |
+| Z2 | `jitTreeRecovery` only for frames whose function can enter a native loop | done | jit: cost nothing while off |
 | C1 | Delete `dispatch*.go`/`.s` and `loop*.go` with their tests | done | jit: delete the unused dispatch layer and loop prototype |
 | C2 | Delete the shape-matched selectors (`selectShortCountdown`, `selectArrayGrowth`, the 16-cell preallocation, name-based `charCodeAt`); re-measure | todo | |
 | C3 | CI: tagged `go tool nm -size` and struct-size checks against main for the hot functions | todo | |
@@ -106,4 +106,11 @@ hardened-runtime support (Phase 6).
 - **test262 with `-conformance.jit`:** 99,599 passed, 0 failed, 342 skipped.
   Native entries in 452 of 99,941 runs; at threshold 1, in 4,484.
 - **Struct sizes in a tagged build:** closure 144 B (main 128), Runtime 7952 B
-  (main 7936), Realm 1264 B (main 1248).
+  (main 7936), Realm 1264 B (main 1248). After Z1: closure 128 B, and
+  Runtime and Realm grow only at their ends.
+- **Untagged hot functions after Z1/Z2:** `executeAt`, `runTree`,
+  `runTreeNested`, `callObject`, `runFD` and `backEdgeCheck` are
+  byte-identical to main. `callTree`'s instructions are identical except
+  for three `NOPL` inline marks left by the empty stubs, which push it past
+  a 32-byte boundary (1760 to 1792 B). C3 should compare instruction streams
+  with NOPs removed.

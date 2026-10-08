@@ -183,7 +183,7 @@ func TestJITCallChainCompileEviction(t *testing.T) {
 		t.Fatal("callee churn did not fill the bounded code cache")
 	}
 	f := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
-	if f.jitEntry.code.Size() == 0 {
+	if r.entryOf(f).code.Size() == 0 {
 		t.Fatal("callee compilation evicted its active caller")
 	}
 }

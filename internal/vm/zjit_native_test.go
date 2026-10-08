@@ -214,7 +214,7 @@ func TestJITShortCountdown(t *testing.T) {
 		t.Fatalf("short countdown entered native execution: %v, %v", v, err)
 	}
 	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
-	if cl.jitEntry == nil || cl.jitEntry.shortCounter != 1 || cl.jitEntry.code == nil {
+	if r.entryOf(cl) == nil || r.entryOf(cl).shortCounter != 1 || r.entryOf(cl).code == nil {
 		t.Fatal("short countdown lost its reusable native program")
 	}
 	v, err = r.Run(compileForTest(t, `for(let i=0;i<2048;i++)f(1,a);a[0]===2052`))
@@ -279,7 +279,7 @@ func TestJITCallbackTierSelection(t *testing.T) {
 		}
 	}
 	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
-	if cl.jitEntry == nil || !cl.jitEntry.entrySlow || cl.jitRefused {
+	if r.entryOf(cl) == nil || !r.entryOf(cl).entrySlow || cl.jitRefused {
 		t.Fatal("callback-heavy entry did not stay eligible for loop promotion")
 	}
 	before := r.jit.osrs
@@ -293,7 +293,7 @@ func TestJITBoundaryDensityBudget(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	v, err := r.Run(compileForTest(t, `function f(a,n){let s=0;for(let i=0;i<n;i++){s+=a[0]%3;a[0]+=3}return s}let a=[2];f(a,20000)===40000&&a[0]===60002`))
 	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
-	if err != nil || !v.IsBool() || !v.Truthy() || cl.jitEntry == nil || !cl.jitEntry.entrySlow || r.jit.budgets == 0 || r.jit.rootCount != 0 || r.jit.guards != 0 {
+	if err != nil || !v.IsBool() || !v.Truthy() || r.entryOf(cl) == nil || !r.entryOf(cl).entrySlow || r.jit.budgets == 0 || r.jit.rootCount != 0 || r.jit.guards != 0 {
 		t.Fatalf("boundary density changed effects or failed to select Go: %v, %v", v, err)
 	}
 }
@@ -307,10 +307,10 @@ func TestJITClosureCacheRelease(t *testing.T) {
 	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
 	for range 3 {
 		v, err := r.Run(call)
-		if err != nil || v.Number() != 3 || cl.jitEntry == nil || cl.jitEntry.code.Size() == 0 || r.jit.rootCount != 0 {
+		if err != nil || v.Number() != 3 || r.entryOf(cl) == nil || r.entryOf(cl).code.Size() == 0 || r.jit.rootCount != 0 {
 			t.Fatalf("closure cache entry: %v, %v", v, err)
 		}
-		e := cl.jitEntry
+		e := r.entryOf(cl)
 		r.releaseJIT()
 		if r.jit != nil || e.code.Size() != 0 || e.code.MetadataSize() != 0 {
 			t.Fatal("cached closure kept released executable storage")
@@ -2393,5 +2393,76 @@ func BenchmarkJITKernelPromotion(b *testing.B) {
 				}
 			}
 		}
+	}
+}
+
+// A nested tree call keeps runTree's recover only while its loop may still
+// promote to native code (see jitTreeRecovery): otherwise enabling the JIT
+// would undo runTreeNested for every function it never runs.
+func TestJITTreeRecoveryNarrow(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	fn := jitFunctionForTest(t, `function f(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s }`)
+	compiled := r.jitFor(fn)
+	if compiled == nil || compiled.code == nil {
+		t.Fatal("no program")
+	}
+	frameWith := func(set func(cl *closure)) *frame {
+		cl := &closure{fn: fn}
+		set(cl)
+		return &frame{cl: cl}
+	}
+	for _, tc := range []struct {
+		name string
+		set  func(cl *closure)
+		want bool
+	}{
+		{"not yet compiled", func(cl *closure) {}, true},
+		{"compiled", func(cl *closure) { cl.setHint(compiled.hint) }, true},
+		{"refused", func(cl *closure) { cl.jitRefused = true }, false},
+		{"callers only", func(cl *closure) {
+			e := &jitEntry{calleeOnly: true, code: compiled.code}
+			r.jit.remember(weak.Make(jitFunctionForTest(t, `function g() {}`)), e)
+			cl.setHint(e.hint)
+		}, false},
+		{"guards given up", func(cl *closure) {
+			e := &jitEntry{misses: 8, code: compiled.code}
+			r.jit.remember(weak.Make(jitFunctionForTest(t, `function h() {}`)), e)
+			cl.setHint(e.hint)
+		}, false},
+	} {
+		if got := r.jitTreeRecovery(frameWith(tc.set)); got != tc.want {
+			t.Errorf("%s: recovery %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	r.jitEnabled = false
+	if r.jitTreeRecovery(frameWith(func(*closure) {})) {
+		t.Error("recovery with the JIT off")
+	}
+}
+
+// A hint names its entry until the entry leaves the cache; a slot reused for
+// another entry has a new tag, so the old hint misses rather than aliasing.
+func TestJITHintReuse(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	first := jitFunctionForTest(t, `function f(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s }`)
+	e := r.jitFor(first)
+	if e == nil || r.jit.hint(e.hint) != e {
+		t.Fatal("fresh hint misses")
+	}
+	old := e.hint
+	for key, cached := range r.jit.cache {
+		if cached == e && !r.jit.dropEntry(key, e) {
+			t.Fatal("could not release")
+		}
+	}
+	if r.jit.hint(old) != nil {
+		t.Fatal("hint survived its entry")
+	}
+	other := r.jitFor(jitFunctionForTest(t, `function g(n) { let s=0; for(let i=0;i<n;i++) s-=i; return s }`))
+	if other == nil || other.hint&(1<<jitHintBits-1) != old&(1<<jitHintBits-1) {
+		t.Fatal("the freed slot was not reused")
+	}
+	if r.jit.hint(old) != nil {
+		t.Fatal("a stale hint aliased the slot's new entry")
 	}
 }

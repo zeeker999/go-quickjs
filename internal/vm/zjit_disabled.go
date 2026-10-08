@@ -13,7 +13,7 @@ type jitEntry struct{}
 func (*Runtime) recordJITStringIntrinsic() {}
 
 func (*Runtime) initJIT(bool)                            {}
-func (*Runtime) tryJITFrame(*frame) (Value, error, bool) { return Undefined, nil, false }
+func (*Runtime) tryJITFrame(*frame) (Value, error, bool) { return Value{}, nil, false }
 func (*Runtime) tryJITLoop(*frame, uint32, int, bool) (Value, error, bool) {
 	return Undefined, nil, false
 }
