@@ -1,10 +1,16 @@
 package ssa
 
 import (
+	"errors"
+	"fmt"
 	"math"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
+
+// ErrOrigin reports a reference at an exit that is not where its origin
+// says: a bug in origin.go.
+var ErrOrigin = errors.New("ssa: a reference is not its origin's")
 
 // val is a value at run time, in the representation its type names.
 type val struct {
@@ -94,6 +100,10 @@ func truth(v ir.Value) (bool, bool) {
 // is not counted. With pollEvery > 0, every pollEvery-th backward branch
 // exits as a budget exit at its loop header, where the function can be
 // entered again.
+//
+// It also checks what generated code relies on to move references: at
+// every exit and return, a reference is the value its origin slot held at
+// entry (origin.go), and it reports ErrOrigin when one is not.
 func Evaluate(f *Func, pc int, slots []ir.Value, pollEvery int) (ir.Exit, error) {
 	e, ok := f.EntryFor(pc)
 	if !ok || len(slots) != f.Locals+f.StackSize {
@@ -113,7 +123,25 @@ func Evaluate(f *Func, pc int, slots []ir.Value, pollEvery int) (ir.Exit, error)
 		}
 		return vals[v.ID].t
 	}
+	origin := Origins(f)
+	// The frame is the entry's until an exit writes it.
+	traced := func(v *Value) bool {
+		x := slot(v)
+		if x.Kind != ir.Opaque && x.Kind != ir.String {
+			return true
+		}
+		o := origin[v]
+		if v.Shadow != nil {
+			o = int(int32(vals[v.Shadow.ID].i))
+		}
+		return o >= 0 && o < len(slots) && slots[o] == x
+	}
 	exit := func(s *FrameState, kind ir.ExitKind) (ir.Exit, error) {
+		for i, v := range s.Slots {
+			if !traced(v) {
+				return ir.Exit{}, fmt.Errorf("%w: slot %d's %v at pc %d", ErrOrigin, i, v, s.PC)
+			}
+		}
 		for i, v := range s.Slots {
 			slots[i] = slot(v)
 		}
@@ -154,6 +182,8 @@ func Evaluate(f *Func, pc int, slots []ir.Value, pollEvery int) (ir.Exit, error)
 				vals[v.ID] = val{t: v.Const}
 			case OpConstF64:
 				vals[v.ID] = val{f: math.Float64frombits(v.Const.Bits)}
+			case OpConstI32:
+				vals[v.ID] = val{i: uint32(int32(v.Aux))}
 			case OpUnboxF64:
 				if a.t.Kind != ir.Number {
 					return exit(v.State, ir.ExitKind(v.Aux))
@@ -169,16 +199,15 @@ func Evaluate(f *Func, pc int, slots []ir.Value, pollEvery int) (ir.Exit, error)
 				if a.t.Kind == ir.Uninitialized {
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
-			case OpCheckScalar:
-				if a.t.Kind == ir.Opaque || a.t.Kind == ir.String {
-					return exit(v.State, ir.ExitKind(v.Aux))
-				}
 			default:
 				vals[v.ID] = apply(v.Op, v.Aux, a, b)
 			}
 		}
 		switch blk.Kind {
 		case BlockReturn:
+			if !traced(blk.Control) {
+				return ir.Exit{}, fmt.Errorf("%w: returned %v", ErrOrigin, blk.Control)
+			}
 			return ir.Exit{Kind: ir.Returned, Value: vals[blk.Control.ID].t}, nil
 		case BlockExit:
 			return exit(blk.State, blk.ExitKind)

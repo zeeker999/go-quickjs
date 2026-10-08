@@ -432,6 +432,58 @@ func TestJITReferenceReturns(t *testing.T) {
 	}
 }
 
+// The new pipeline carries references it never touches: native code holds
+// a reference's number word only, and an exit has Go copy it from the slot
+// it came from, or clear it where a primitive replaces it (abi.Record). Each
+// function here moves, returns or overwrites a reference across polls,
+// which a budget of one makes at every back-edge, and must answer as the
+// interpreter does, natively.
+func TestJITSSAReferences(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, tc := range []struct {
+		name, fn, run string
+		records       bool // whether exits must move or clear a reference
+	}{
+		{"return", `function f(o,n){let s=0;for(let i=0;i<n;i++)s+=i;return o}`,
+			`var o={k:1};[f(o,5)===o,f('str',5),f(7n,3)]`, false},
+		{"copy", `function f(o,n){let x=0;for(let i=0;i<n;i++){x=o}return x}`,
+			`var o=[1];[f(o,5)===o,f('a',2),f(o,0)]`, true},
+		{"overwrite", `function f(o,n){let x=o;for(let i=0;i<n;i++){x=i}return x}`,
+			`var o={};[f(o,5),f(o,0)===o,f(Symbol.iterator,1)]`, true},
+		{"merge", `function f(o,n){let r=o;for(let i=0;i<n;i++){if(i==3)r=i}return r}`,
+			`var o={};[f(o,2)===o,f(o,6),f('s',1)]`, true},
+		{"swap", `function f(a,b,n){for(let i=0;i<n;i++){let t=a;a=b;b=t}return a}`,
+			`var a={},b=[];[f(a,b,3)===b,f(a,b,4)===a,f(1,2,3)]`, false},
+		{"rotate", `function f(a,b,c,n){for(let i=0;i<n;i++){let t=a;a=b;b=c;c=t}return [a,b,c]}`,
+			`var a={},b=[],c='c';var r=f(a,b,c,4);[r[0]===b,r[1]===c,r[2]===a]`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := tc.fn + ";" + tc.run + ".map(String).join()"
+			want := New(Config{})
+			defer func() { want.Close(); want.ReleaseClosed() }()
+			wv, err := want.Run(compileForTest(t, src))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := jitRuntimeForTest(t, Config{JIT: true})
+			r.jitSSA = true
+			r.jitStress = jitStressConfig{threshold: true, budget: 1}
+			gv, err := r.Run(compileForTest(t, src))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := gv.String().Go(), wv.String().Go(); got != want {
+				t.Fatalf("got %q, interpreter %q", got, want)
+			}
+			if st := r.JITStats(); st.SSAEntries == 0 || tc.records && st.SSARecords == 0 {
+				t.Fatalf("never entered the new pipeline, or left no reference to Go: %+v", st)
+			}
+		})
+	}
+}
+
 func TestJITEqualityBoundaries(t *testing.T) {
 	for _, tc := range []struct {
 		left, op, right string

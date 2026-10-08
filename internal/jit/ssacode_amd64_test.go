@@ -36,7 +36,8 @@ var testEncoding = abi.Encoding{
 	Uninitialized: testTagBase | 8, CanonicalNaN: 0x7FF8000000000000,
 }
 
-var testObject = new(int)
+// testObjects are what references point to: a slot IR handle's.
+var testObjects [8]int
 
 // word encodes a slot IR value as the VM would hold it.
 func word(v ir.Value) testValue {
@@ -58,8 +59,65 @@ func word(v ir.Value) testValue {
 	case ir.Uninitialized:
 		return testValue{num: testEncoding.Uninitialized}
 	}
-	// A reference: an object's tag and a pointer.
-	return testValue{num: testTagBase | 7, ref: unsafe.Pointer(testObject)}
+	// A reference: its kind's tag, a payload, and a pointer. Two
+	// references of one kind may share a word, as two objects do in the VM.
+	kind := uint64(7)
+	if v.Kind == ir.String {
+		kind = 4
+	}
+	return testValue{num: testTagBase | v.Bits%2<<8 | kind, ref: unsafe.Pointer(&testObjects[v.Bits%8])}
+}
+
+// referenceExits counts the harness's exit records -- references copied,
+// primitives stored over references, slots known only at run time -- and
+// returned references, so that the test can tell it reaches them.
+var referenceExits struct{ copies, scalars, maybes, returns int }
+
+// applyRecords does what Go does with an exit's records (abi.Record),
+// checking that each names a slot of the state once.
+func applyRecords(ctx *abi.Context, frame []testValue, slots int) error {
+	n := int(ctx.Records)
+	if n > slots {
+		return fmt.Errorf("%d records for %d slots", n, slots)
+	}
+	seen := map[uint64]bool{}
+	src := make([]testValue, n)
+	for i, r := range ctx.Record[:n] {
+		slot := r.Slot &^ (abi.RecordScalar | abi.RecordMaybe)
+		if slot >= uint64(slots) || seen[slot] {
+			return fmt.Errorf("record %d: slot %d of %d, or twice", i, slot, slots)
+		}
+		seen[slot] = true
+		switch {
+		case r.Slot&abi.RecordScalar != 0:
+			if frame[slot].ref == nil {
+				return fmt.Errorf("record %d stores into slot %d, which holds no reference", i, slot)
+			}
+			src[i] = testValue{num: r.Word}
+			referenceExits.scalars++
+		case r.Slot&abi.RecordMaybe != 0:
+			src[i] = testValue{num: r.Word}
+			if from := int32(r.Arg); from >= 0 {
+				if int(from) >= len(frame) {
+					return fmt.Errorf("record %d reads slot %d", i, from)
+				}
+				if frame[from].ref != nil {
+					src[i] = frame[from]
+				}
+			}
+			referenceExits.maybes++
+		default:
+			if r.Arg >= uint64(len(frame)) || frame[r.Arg].ref == nil {
+				return fmt.Errorf("record %d copies slot %d, which holds no reference", i, r.Arg)
+			}
+			src[i] = frame[r.Arg]
+			referenceExits.copies++
+		}
+	}
+	for i, r := range ctx.Record[:n] {
+		frame[r.Slot&^(abi.RecordScalar|abi.RecordMaybe)] = src[i]
+	}
+	return nil
 }
 
 var nativeTestValues = []ir.Value{
@@ -68,7 +126,7 @@ var nativeTestValues = []ir.Value{
 	ir.Float(math.Inf(1)), ir.Float(math.Inf(-1)), ir.Float(5e-324), ir.Float(1e300), ir.Float(-1e300),
 	ir.Float(9007199254740993), ir.Float(1 << 63), ir.Float(-(1 << 63)), ir.Float(1 << 62), ir.Float(4294967295.5),
 	ir.Bool(true), ir.Bool(false), {Kind: ir.Undefined}, {Kind: ir.Null}, {Kind: ir.Uninitialized},
-	{Kind: ir.Opaque, Bits: 3},
+	{Kind: ir.Opaque, Bits: 3}, {Kind: ir.Opaque, Bits: 4}, {Kind: ir.String, Bits: 5},
 }
 
 func nativeTestValue(r *rand.Rand) ir.Value {
@@ -88,7 +146,7 @@ func ssaTestProgram(r *rand.Rand) *ir.Program {
 	operand := func() ir.Operand {
 		if r.IntN(4) == 0 {
 			v := nativeTestValue(r)
-			if v.Kind == ir.Opaque {
+			if v.Kind == ir.Opaque || v.Kind == ir.String {
 				v = ir.Float(2)
 			}
 			return ir.Literal(v)
@@ -195,10 +253,18 @@ func nativeMismatch(c *compiled, pc int, slots []ir.Value, poll int) string {
 		return report("exit kind")
 	}
 	if got.Kind == ir.Returned {
-		if w := word(wantExit.Value); ctx.Ret != w.num {
-			return report("return word")
+		ret := testValue{num: ctx.Ret}
+		if ctx.RetFrom != 0 && frame[ctx.RetFrom-1].ref != nil {
+			ret = frame[ctx.RetFrom-1]
+			referenceExits.returns++
+		}
+		if ret != word(wantExit.Value) {
+			return report("return value")
 		}
 		return ""
+	}
+	if err := applyRecords(ctx, frame, f.Locals+int(ctx.ExitDepth)); err != nil {
+		return report(err.Error())
 	}
 	if got.State != wantExit.State {
 		return report("exit state")
@@ -271,10 +337,10 @@ func checkNative(t *testing.T, r *rand.Rand, p *ir.Program) (ok bool) {
 			for i := range slots {
 				slots[i] = nativeTestValue(r)
 			}
-			// Mostly primitives, so that code runs past the entry guard.
-			if trial < 4 {
+			// Mostly primitives, so that code runs past the guards.
+			if trial < 3 {
 				for i, v := range slots {
-					if v.Kind == ir.Opaque {
+					if v.Kind == ir.Opaque || v.Kind == ir.String {
 						slots[i] = ir.Float(7)
 					}
 				}
@@ -316,6 +382,10 @@ func TestSSANativeMatchesEvaluator(t *testing.T) {
 	}
 	if compiled < 1000 {
 		t.Fatalf("only %d programs compiled", compiled)
+	}
+	t.Logf("%d programs; exits with references: %+v", compiled, referenceExits)
+	if referenceExits.copies == 0 || referenceExits.scalars == 0 || referenceExits.maybes == 0 || referenceExits.returns == 0 {
+		t.Fatalf("some kind of record or reference return never happened: %+v", referenceExits)
 	}
 }
 

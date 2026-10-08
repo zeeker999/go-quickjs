@@ -84,7 +84,7 @@ func (r *Runtime) JITStats() JITStats {
 		return JITStats{}
 	}
 	return JITStats{Compiled: s.compiled, Entries: s.entries, Guards: s.guards,
-		Hosts: s.hosts, Budgets: s.budgets, Interpreted: s.interpreted, SSAEntries: s.ssaEntries}
+		Hosts: s.hosts, Budgets: s.budgets, Interpreted: s.interpreted, SSAEntries: s.ssaEntries, SSARecords: s.ssaRecords}
 }
 
 // jitEntryBudget is the native instructions one entry may run: MaxIterations, or
@@ -166,7 +166,7 @@ func hintFor(e *jitEntry) uint32 {
 type jitEntry struct {
 	// hint is the slot and tag a closure remembers this entry by.
 	hint uint32
-	// ssa is the new pipeline\'s code, when it compiled the function.
+	// ssa is the new pipeline's code, when it compiled the function.
 	ssa           *jit.SSACode
 	code          *jit.Code
 	misses        uint8
@@ -221,6 +221,7 @@ type jitState struct {
 	stressExits   uint64
 	ssaCtx        *abi.Context
 	ssaEntries    uint64
+	ssaRecords    uint64
 	referenceKeys []uint32
 	references    *jitReferences
 	callFrames    *jitCallFrames
