@@ -164,9 +164,9 @@ section 4 removes each one:
 
 | # | Finding | Where |
 |---|---|---|
-| R1 | `Halt`/`Close` from a host call is ignored: native code re-enters for up to 4096 steps, including backward jumps and writes. `Halt` (runtime.go:1001) promises the script stops within its current straight-line code. | zjit_native.go:564-590, zjit_calls.go:258 |
+| R1 | `Halt`/`Close` from a host call is ignored: native code re-enters for up to 4096 steps, including backward jumps and writes. `Halt` (runtime.go:1001) promises the script stops within its current straight-line code. | zzjit_native.go:564-590, zzjit_calls.go:258 |
 | R2 | JIT code counts as live script memory and is never evicted. A script can fail with `ErrMemoryLimit` only because the JIT is on. | memory.go:178 |
-| R3 | Each compile attempt walks the whole heap. A refusal restarts warmup, so the walk repeats every 8 calls. | zjit_native.go:140, 455 |
+| R3 | Each compile attempt walks the whole heap. A refusal restarts warmup, so the walk repeats every 8 calls. | zzjit_native.go:140, 455 |
 | R4 | A panic in the compiler crashes the host. One is confirmed: an out-of-range index in `inferIntegerResults`. | program_native.go:13, program_ranges.go:136 |
 | R5 | A fault in native code kills the process on every OS. Go cannot recover a fault at a non-Go PC. | runtime behaviour |
 | R6 | About 310 hand-encoded instruction sites, never checked against a disassembler. Nothing verifies that reserved registers are untouched. `memory()` mis-encodes base registers 4 and 12. | program_amd64.go, program_arm64.go |
@@ -174,7 +174,7 @@ section 4 removes each one:
 | R8 | One OS mapping per compiled function. Many runtimes exhaust `vm.max_map_count`. | program_native.go:48 |
 | R9 | Call copying of up to 512 cells is charged 1 budget unit. | dispatch_*.s:177 |
 | Z1 | In a tagged build, `closure` is 144 bytes instead of 128, even with the JIT off. | runtime.go:554 |
-| Z2 | With the JIT on, every nested tree call goes through defer/recover. | zjit_native.go:110 |
+| Z2 | With the JIT on, every nested tree call goes through defer/recover. | zzjit_native.go:110 |
 
 ## 4. Target architecture
 
@@ -459,7 +459,7 @@ The checks are layered, so each kind of bug shows up in exactly one place:
 | VM hooks: back-edge OSR from the interpreter and the tree tier, tree recovery | **Keep and narrow** (Z1, Z2) |
 | Boundary, alias, callback and cancellation tests | **Keep**, retargeted to the new pipeline |
 | `program_assembler.go`, `program_amd64.go`, `program_arm64.go`, `program_ranges.go` | **Replace** with SSA, machine IR and verified encoders. They serve as reference until parity, then go. |
-| `zjit_native.go` `jitHost`/`jitHostFast`, `zjit_calls.go` coordinator | **Replace** with the helper table (D7) and inlining (D9) |
+| `zzjit_native.go` `jitHost`/`jitHostFast`, `zzjit_calls.go` coordinator | **Replace** with the helper table (D7) and inlining (D9) |
 | `dispatch*.go`/`.s`, `loop*.go` | **Delete** |
 | Countdown, array-growth and `charCodeAt`-name selectors | **Delete** (D10) |
 

@@ -16,6 +16,8 @@ type jitEntry struct{}
 
 func (*Runtime) recordJITStringIntrinsic() {}
 
+func (*Runtime) jitOn() bool { return false }
+
 func (*Runtime) initJIT(bool)                                         {}
 func (*Runtime) tryJITFrame(*frame) (Value, error, bool)              { return Value{}, nil, false }
 func (*Runtime) jitBackEdge(*frame, uint32, int) (Value, error, bool) { return Value{}, nil, false }

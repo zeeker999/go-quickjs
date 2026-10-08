@@ -21,8 +21,7 @@ across sessions. Update it **in the same commit** as the work it records.
     -run TestConformance -count=1 -timeout 60m -v -args -conformance.jit
   ```
 
-- **Next item:** the first unchecked one below, in order. Phase 0 items are
-  independent unless noted.
+- **Next item:** Phase 1, V1 onwards. Phase 0 is complete.
 
 ## Phase 0: stabilize and cut
 
@@ -41,10 +40,20 @@ across sessions. Update it **in the same commit** as the work it records.
 | C3 | Untagged hot functions identical to main: `internal/cmd/hotdiff` compares them instruction by instruction (ignoring NOP inline marks, padding and addresses); struct sizes by `TestJITFieldLayout`. A local gate like `placements`, not CI: an intended interpreter change would fail it. Run it before merging JIT work. | done | jit: compile the interpreter's hooks out of builds without the JIT |
 | D1 | Rewrite `internal/jit/README.md` as contracts; move measurements to `docs/jit-results.md`; `qjs --jit` warns when the build lacks the JIT | done | jit: document contracts, not a diary |
 
-**Gate:**
-- [ ] Full suites (tagged and untagged) and stress-mode test262 pass.
-- [ ] Untagged hot functions byte-identical to main.
-- [ ] Tagged JIT-off `placements` level (≤0.5% total, ≤1% for any suite).
+**Gate (met 2026-10-08):**
+- [x] Full suites (tagged and untagged) and stress-mode test262 pass: 99,599
+  passed, 0 failed, with native code in 452 runs (4,484 under stress), as
+  before Phase 0.
+- [x] Untagged hot functions identical to main (`hotdiff`, all seven).
+- [x] Tagged JIT-off `placements` level against main: -0.9% total. Richards
+  is +1.6% (13.7 to 13.9 ms, inside both sides' 13-14 ms spread); every other
+  suite is within -3.8% to +0.7%. The untagged build is -0.2% total.
+
+  The first tagged run was +2.1% (Crypto +7.0%, NavierStokes +6.6%), for two
+  reasons, both fixed in "jit: keep the JIT's code out of the interpreter's
+  way":
+  - the hooks did not inline, so every call paid a function call;
+  - zjit_*.go sorted before ztree_*.go and moved the tree tier's code.
 
 ## Phase 1: verification infrastructure
 
@@ -115,7 +124,7 @@ hardened-runtime support (Phase 6).
   three `NOPL` inline marks, which take it from 1760 to 1792 B.
 
   ```sh
-  go build -o main.exe ./cmd/qjs   # in a main checkout
+  go build -o main.exe ./cmd/qjs   # in a main checkout (or: git checkout --detach main here)
   go build -o head.exe ./cmd/qjs   # here
   go run ./internal/cmd/hotdiff main.exe head.exe
   ```

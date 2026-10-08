@@ -29,6 +29,26 @@ and are not reproducible from it.
 `runTreeNested`, `callObject`, `callTree`, `runFD` and `backEdgeCheck` the
 same as main in the untagged build.
 
+**JIT off against main** (`placements`, eight placements, three rounds,
+fixed work; main 6c3dd16):
+
+| Suite | main | tagged, JIT off | change | untagged |
+|---|---|---|---|---|
+| Richards | 13.7 | 13.9 | +1.6% | +0.7% |
+| DeltaBlue | 23.7 | 23.9 | +0.7% | -0.1% |
+| Crypto | 274.2 | 263.7 | -3.8% | -1.3% |
+| RayTrace | 137.1 | 137.6 | +0.3% | -0.2% |
+| EarleyBoyer | 375.0 | 377.0 | +0.5% | -0.4% |
+| RegExp | 274.0 | 272.2 | -0.6% | +1.6% |
+| Splay | 279.8 | 281.7 | +0.7% | +0.1% |
+| NavierStokes | 185.2 | 181.5 | -2.0% | -0.5% |
+| TOTAL | 1600.6 | 1585.7 | -0.9% | -0.2% |
+
+The untagged figures are from the run before the last fix, which touched only
+the tagged build's call path and file order (`hotdiff` shows the untagged hot
+code unchanged). Before that fix the tagged build was +2.1% overall, with
+Crypto +7.0% and NavierStokes +6.6%.
+
 **Removing the selectors fitted to Crypto and MD5** (70d2c86) costs nothing
 measurable. V8 fixed work, 20 iterations, JIT on, three alternating fresh
 processes on one layout:
