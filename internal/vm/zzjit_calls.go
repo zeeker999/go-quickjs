@@ -6,7 +6,6 @@ import (
 	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/jit"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
 
@@ -124,7 +123,7 @@ func (r *Runtime) jitRunCalls(f *frame, e *jitEntry, pc, depth, n int) (Value, e
 	a.frames[0].pc, a.frames[0].depth, a.frames[0].n = pc, depth, n
 	a.frames[0].steps, a.frames[0].hosts = 0, 0
 	top := 0
-	budget := uint64(jit.MaxIterations)
+	budget := r.jitEntryBudget()
 	for {
 		q := &a.frames[top]
 		s.entries++
@@ -185,7 +184,11 @@ func (r *Runtime) jitRunCalls(f *frame, e *jitEntry, pc, depth, n int) (Value, e
 				r.jitPublishCalls(s, a, top)
 				return r.jitInterpretCalls(a, top, nil)
 			}
-			budget = jit.MaxIterations
+			if r.jitStressDeopt(s) {
+				r.jitPublishCalls(s, a, top)
+				return r.jitInterpretCalls(a, top, nil)
+			}
+			budget = r.jitEntryBudget()
 		case ir.HostExit:
 			s.hosts++
 			q.hosts++
