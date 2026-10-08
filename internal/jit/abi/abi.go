@@ -46,6 +46,10 @@ type Context struct {
 	// BackEdges is the interpreter's back-edge counter, which every native
 	// back-edge decrements; at zero or below native code polls.
 	BackEdges *int
+	// Upvalues is the function's first captured binding's cell: an array of
+	// pointers to cells, each holding at Encoding.UpvalueSlot a pointer to
+	// the binding's value. Native code only reads them.
+	Upvalues unsafe.Pointer
 	// The exit record.
 	ExitKind  uint64
 	ExitPC    uint64
@@ -66,6 +70,7 @@ var (
 	OffLocals    = int32(unsafe.Offsetof(Context{}.Locals))
 	OffStack     = int32(unsafe.Offsetof(Context{}.Stack))
 	OffBackEdges = int32(unsafe.Offsetof(Context{}.BackEdges))
+	OffUpvalues  = int32(unsafe.Offsetof(Context{}.Upvalues))
 	OffExitKind  = int32(unsafe.Offsetof(Context{}.ExitKind))
 	OffExitPC    = int32(unsafe.Offsetof(Context{}.ExitPC))
 	OffExitDepth = int32(unsafe.Offsetof(Context{}.ExitDepth))
@@ -118,6 +123,10 @@ type Encoding struct {
 	// slice: a pointer to the first value, then the count.
 	ObjectClass, ObjectFlags, ObjectArrayLen, ObjectElems int32
 	ClassArray, FlagSparse                                uint8
+
+	// UpvalueSlot is the offset, in a captured binding's cell, of the
+	// pointer to its value (Context.Upvalues).
+	UpvalueSlot int32
 }
 
 // NumberLimit bounds number words: a word below it holds a number, and

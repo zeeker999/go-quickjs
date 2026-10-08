@@ -18,7 +18,8 @@ func Build(p *ir.Program) (*Func, error) {
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
-	b := &builder{p: p, f: &Func{Locals: p.Locals, StackSize: p.StackSize}, nslots: p.Locals + p.StackSize}
+	b := &builder{p: p, f: &Func{Locals: p.Locals, StackSize: p.StackSize, FrameLocals: p.Locals,
+		written: make([]bool, p.Locals+p.StackSize)}, nslots: p.Locals + p.StackSize}
 	if err := b.plan(); err != nil {
 		return nil, err
 	}
@@ -272,6 +273,13 @@ func (b *builder) seal(blk *Block) {
 	b.sealed[blk] = true
 }
 
+// assign is an instruction's write of a slot, which Func.Written records;
+// write is also how reads record the phis they make.
+func (b *builder) assign(slot int, blk *Block, v *Value) {
+	b.f.written[slot] = true
+	b.write(slot, blk, v)
+}
+
 func (b *builder) write(slot int, blk *Block, v *Value) {
 	d := b.defs[blk]
 	if d == nil {
@@ -419,42 +427,42 @@ func (b *builder) instruction(blk *Block, pc int) {
 	switch in.Op {
 	case ir.Nop, ir.Jump:
 	case ir.Copy:
-		b.write(in.Dest, blk, operand(in.Left))
+		b.assign(in.Dest, blk, operand(in.Left))
 	case ir.CopyPair:
 		l, r := operand(in.Left), operand(in.Right)
-		b.write(in.Dest, blk, l)
-		b.write(in.Extra, blk, r)
+		b.assign(in.Dest, blk, l)
+		b.assign(in.Extra, blk, r)
 	case ir.StoreLoad:
-		b.write(in.Dest, blk, operand(in.Left))
-		b.write(in.Extra, blk, operand(in.Right))
+		b.assign(in.Dest, blk, operand(in.Left))
+		b.assign(in.Extra, blk, operand(in.Right))
 	case ir.Swap:
 		d, e := b.read(in.Dest, blk), b.read(in.Extra, blk)
-		b.write(in.Dest, blk, e)
-		b.write(in.Extra, blk, d)
+		b.assign(in.Dest, blk, e)
+		b.assign(in.Extra, blk, d)
 	case ir.Insert3:
 		n := in.Dest
 		x, y, z := b.read(n, blk), b.read(n+1, blk), b.read(n+2, blk)
-		b.write(n, blk, z)
-		b.write(n+1, blk, x)
-		b.write(n+2, blk, y)
-		b.write(n+3, blk, z)
+		b.assign(n, blk, z)
+		b.assign(n+1, blk, x)
+		b.assign(n+2, blk, y)
+		b.assign(n+3, blk, z)
 	case ir.Insert2:
 		n := in.Dest
 		x, y := b.read(n, blk), b.read(n+1, blk)
-		b.write(n, blk, y)
-		b.write(n+1, blk, x)
-		b.write(n+2, blk, y)
+		b.assign(n, blk, y)
+		b.assign(n+1, blk, x)
+		b.assign(n+2, blk, y)
 	case ir.Binary:
 		kind := ir.GuardExit
 		if in.Operator == ir.Eq || in.Operator == ir.Ne {
 			kind = ir.HostExit
 		}
 		x, y := number(in.Left, kind), number(in.Right, kind)
-		b.write(in.Dest, blk, b.binary(blk, in.Operator, x, y, boxF, boxB))
+		b.assign(in.Dest, blk, b.binary(blk, in.Operator, x, y, boxF, boxB))
 	case ir.Unary:
 		if in.Operator == ir.Not {
 			t := guard(OpTruth, Bool, ir.GuardExit, operand(in.Left))
-			b.write(in.Dest, blk, boxB(f.newValue(blk, OpNot, Bool, t)))
+			b.assign(in.Dest, blk, boxB(f.newValue(blk, OpNot, Bool, t)))
 			break
 		}
 		x := number(in.Left, ir.GuardExit)
@@ -466,7 +474,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 		case ir.BitNot:
 			x = f.newValue(blk, OpI32ToF64, Float64, f.newValue(blk, OpNotI32, Int32, f.newValue(blk, OpToInt32, Int32, x)))
 		}
-		b.write(in.Dest, blk, boxF(x))
+		b.assign(in.Dest, blk, boxF(x))
 	case ir.Update:
 		old := operand(in.Left)
 		x := guard(OpUnboxF64, Float64, ir.GuardExit, old)
@@ -475,12 +483,12 @@ func (b *builder) instruction(blk *Block, pc int) {
 			op = OpSubF64
 		}
 		v := boxF(f.newValue(blk, op, Float64, x, one()))
-		b.write(in.Dest, blk, v)
+		b.assign(in.Dest, blk, v)
 		if in.Extra >= 0 {
 			if in.Postfix {
 				v = old
 			}
-			b.write(in.Extra, blk, v)
+			b.assign(in.Extra, blk, v)
 		}
 	case ir.Branch:
 		var c *Value
@@ -524,12 +532,12 @@ func (b *builder) instruction(blk *Block, pc int) {
 		}
 		elem := guard(OpElemRead, Float64, ir.GuardExit, array, key)
 		if updated != nil {
-			b.write(in.Extra, blk, boxF(updated))
+			b.assign(in.Extra, blk, boxF(updated))
 		}
-		b.write(in.Dest, blk, boxF(elem))
+		b.assign(in.Dest, blk, boxF(elem))
 	case ir.ArrayLength:
 		array := guard(OpArrayOf, Ptr, ir.GuardExit, operand(in.Left))
-		b.write(in.Dest, blk, boxF(f.newValue(blk, OpArrayLen, Float64, array)))
+		b.assign(in.Dest, blk, boxF(f.newValue(blk, OpArrayLen, Float64, array)))
 	case ir.ArrayKey:
 		guard(OpArrayOf, Ptr, ir.GuardExit, operand(in.Left))
 		guard(OpElemKey, None, ir.GuardExit, number(in.Right, ir.GuardExit))

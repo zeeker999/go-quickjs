@@ -104,6 +104,12 @@ func CompileAMD64(f *ssa.Func, enc abi.Encoding) (code *Code, err error) {
 	if n := f.Locals + f.StackSize; n > abi.MaxRecords {
 		return nil, fmt.Errorf("%w: %d slots", ErrUnsupported, n)
 	}
+	if f.FrameLocals < 0 || f.FrameLocals > f.Locals {
+		return nil, fmt.Errorf("%w: %d frame locals of %d", ErrUnsupported, f.FrameLocals, f.Locals)
+	}
+	if err := capturedUnchanged(f); err != nil {
+		return nil, err
+	}
 	c.origin = ssa.Origins(f)
 	for v, o := range c.origin {
 		if o == ssa.OriginAmbiguous && v.Shadow == nil {
@@ -147,6 +153,18 @@ func CompileAMD64(f *ssa.Func, enc abi.Encoding) (code *Code, err error) {
 		return nil, err
 	}
 	return &Code{Bytes: bytes, Entries: entries, Locations: c.describe()}, nil
+}
+
+// capturedUnchanged requires that no instruction write a captured binding:
+// every frame state then holds its value from entry there (in whatever
+// representation the optimizer chose), and exits leave those slots alone.
+func capturedUnchanged(f *ssa.Func) error {
+	for i := f.FrameLocals; i < f.Locals; i++ {
+		if f.Written(i) {
+			return fmt.Errorf("%w: captured slot %d is written", ErrUnsupported, i)
+		}
+	}
+	return nil
 }
 
 // layout orders blocks in reverse post-order from the entries, so that a
@@ -506,16 +524,26 @@ func (c *compiler) allocate() error {
 func (c *compiler) spillDisp(slot int) int32 { return abi.OffSpill + int32(slot)*8 }
 
 // slotAddr is the base register and displacement of a frame slot's word.
-func (c *compiler) slotAddr(slot int, ref bool) (amd64.Reg, int32) {
+// A captured binding's value is found through its cell, into scratch.
+func (c *compiler) slotAddr(slot int, ref bool, scratch amd64.Reg) (amd64.Reg, int32) {
 	off := c.enc.NumOffset
 	if ref {
 		off = c.enc.RefOffset
 	}
-	if slot < c.f.Locals {
+	switch {
+	case slot < c.f.FrameLocals:
 		return regLocals, int32(slot)*c.enc.ValueSize + off
+	case slot < c.f.Locals:
+		c.a.Load(scratch, regCtx, abi.OffUpvalues)
+		c.a.Load(scratch, scratch, int32(slot-c.f.FrameLocals)*8)
+		c.a.Load(scratch, scratch, c.enc.UpvalueSlot)
+		return scratch, off
 	}
 	return regStack, int32(slot-c.f.Locals)*c.enc.ValueSize + off
 }
+
+// captured reports whether a slot is a captured binding.
+func (c *compiler) captured(slot int) bool { return slot >= c.f.FrameLocals && slot < c.f.Locals }
 
 // gpr returns a register holding v's word, loading a spilled or lazy value
 // into scratch.
@@ -678,7 +706,8 @@ func (c *compiler) exitTo(s *ssa.FrameState, kind uint64) {
 	c.a.MovImm(scratchC, 0)
 	c.a.Store(regCtx, abi.OffRecords, scratchC)
 	for i, v := range s.Slots {
-		if v.Op == ssa.OpLoadSlot && v.Aux == i {
+		if v.Op == ssa.OpLoadSlot && v.Aux == i || c.captured(i) {
+			// Unchanged: a captured binding's own value (capturedUnchanged).
 			continue
 		}
 		var w amd64.Reg
@@ -704,11 +733,11 @@ func (c *compiler) exitTo(s *ssa.FrameState, kind uint64) {
 			c.a.Bind(scalar)
 		}
 		record := c.a.NewLabel()
-		base, disp := c.slotAddr(i, true)
+		base, disp := c.slotAddr(i, true, scratchC)
 		c.a.Load(scratchC, base, disp)
 		c.a.Op(amd64.Test, scratchC, scratchC, true)
 		c.a.Jcc(amd64.CondNE, record)
-		base, disp = c.slotAddr(i, false)
+		base, disp = c.slotAddr(i, false, scratchC)
 		c.a.Store(base, disp, w)
 		c.a.Jmp(next)
 		c.a.Bind(record)
@@ -724,12 +753,12 @@ func (c *compiler) exitTo(s *ssa.FrameState, kind uint64) {
 // slot's. Native code makes no word of a reference's kind, so an equal
 // word is the slot's value. It uses scratchC.
 func (c *compiler) isReference(v *ssa.Value, w amd64.Reg, o int, primitive amd64.Label) {
-	base, disp := c.slotAddr(o, true)
+	base, disp := c.slotAddr(o, true, scratchC)
 	c.a.Load(scratchC, base, disp)
 	c.a.Op(amd64.Test, scratchC, scratchC, true)
 	c.a.Jcc(amd64.CondE, primitive)
 	if v.Op != ssa.OpLoadSlot {
-		base, disp = c.slotAddr(o, false)
+		base, disp = c.slotAddr(o, false, scratchC)
 		c.a.Load(scratchC, base, disp)
 		c.a.Op(amd64.Cmp, w, scratchC, true)
 		c.a.Jcc(amd64.CondNE, primitive)
@@ -1006,15 +1035,26 @@ func (c *compiler) arrayOf(v *ssa.Value, guard func(amd64.Cond)) {
 	c.a.Op(amd64.Cmp, w, scratchB, true)
 	guard(amd64.CondNE)
 	if s := a.Shadow; s != nil {
-		// The slot is known at run time: a local, or an operand.
-		stack, found := c.a.NewLabel(), c.a.NewLabel()
+		// The slot is known at run time: a local, a captured binding, or an
+		// operand. scratchC becomes its value's address.
+		captured, stack, found := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
 		c.a.MovRR32(scratchC, c.gpr(s, scratchC))
 		c.a.Op(amd64.Test, scratchC, scratchC, false)
 		guard(amd64.CondS)
-		c.a.OpImm(amd64.Cmp, scratchC, int32(c.f.Locals), false)
-		c.a.Jcc(amd64.CondGE, stack)
+		c.a.OpImm(amd64.Cmp, scratchC, int32(c.f.FrameLocals), false)
+		c.a.Jcc(amd64.CondGE, captured)
 		c.a.ShiftImm(amd64.Shl, scratchC, 4, true)
 		c.a.Op(amd64.Add, scratchC, regLocals, true)
+		c.a.Jmp(found)
+		c.a.Bind(captured)
+		c.a.OpImm(amd64.Cmp, scratchC, int32(c.f.Locals), false)
+		c.a.Jcc(amd64.CondGE, stack)
+		c.a.OpImm(amd64.Sub, scratchC, int32(c.f.FrameLocals), false)
+		c.a.ShiftImm(amd64.Shl, scratchC, 3, true)
+		c.a.Load(scratchB, regCtx, abi.OffUpvalues)
+		c.a.Op(amd64.Add, scratchC, scratchB, true)
+		c.a.Load(scratchC, scratchC, 0)
+		c.a.Load(scratchC, scratchC, c.enc.UpvalueSlot)
 		c.a.Jmp(found)
 		c.a.Bind(stack)
 		c.a.OpImm(amd64.Sub, scratchC, int32(c.f.Locals), false)
@@ -1023,7 +1063,7 @@ func (c *compiler) arrayOf(v *ssa.Value, guard func(amd64.Cond)) {
 		c.a.Bind(found)
 		c.a.Load(scratchC, scratchC, c.enc.RefOffset)
 	} else {
-		base, disp := c.slotAddr(o, true)
+		base, disp := c.slotAddr(o, true, scratchC)
 		c.a.Load(scratchC, base, disp)
 	}
 	c.a.Op(amd64.Test, scratchC, scratchC, true)
@@ -1075,7 +1115,7 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 	}
 	switch v.Op {
 	case ssa.OpLoadSlot:
-		base, disp := c.slotAddr(v.Aux, false)
+		base, disp := c.slotAddr(v.Aux, false, scratchA)
 		c.a.Load(scratchA, base, disp)
 		c.setG(v, scratchA)
 	case ssa.OpConst:
