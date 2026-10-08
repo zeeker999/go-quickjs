@@ -64,18 +64,17 @@ across sessions. Update it **in the same commit** as the work it records.
 | V2 | `-conformance.jit` reports per area how many tests ran natively, and fails a JIT build in which none did (per-area failure was too strict: Intl areas rarely compile). Counters come from `vm.Runtime.JITStats` through `hostaccess`. | done | jit: stress mode and native coverage in test262 |
 | V3 | `FuzzJITDifferential` generates programs in the JIT's subset (numbers and edge values, arrays with holes and out-of-range indices, bitwise and comparison operators, properties and accessors, helper calls that throw, break/continue, BigInt and `valueOf` operands) and compares the interpreter, the tree tier and the JIT under three stress settings, including an effect log. `TestJITDifferentialRandom` runs 300 fixed programs in every test run. 10 minutes: 635,214 programs, no divergence. | done | jit: fuzz the JIT against the interpreter |
 | V4 | `internal/jit/verify`, a module of its own, disassembles every program both emitters make from a JavaScript corpus and 3,000 random IR programs with `x/arch` (v0.22.0, Go 1.24): each must decode in full, with no call, push, pop, system call or trap, and no use of Go's reserved registers. Both emitters now build on every supported target (`emit_x86.go`, `emit_a64.go`), so arm64 is checked off macOS. Per-instruction golden tests remain for Phase 2's encoders. | done | jit: check both emitters against a disassembler on every target |
-| V5 | CI: the native job runs all `internal/jit` tests, the VM's JIT tests, checkptr and the encoder verifier on the three targets with Go 1.24 and 1.27; `jit-conformance` runs test262 under `QJS_JIT_STRESS=threshold,budget=3,deopt=7` on the three targets (test262 pinned at 7ab7faf); `jit-fuzz` fuzzes for 5 minutes on Linux. Every command was run locally on windows/amd64; **not yet run on GitHub: the branch is not pushed.** | done (unpushed) | ci: run the JIT's verification on every target |
+| V5 | CI: the native job runs all `internal/jit` tests, the VM's JIT tests, checkptr and the encoder verifier on the three targets with Go 1.24 and 1.27; `jit-conformance` runs test262 under `QJS_JIT_STRESS=threshold,budget=3,deopt=7` on the three targets (test262 pinned at 7ab7faf); `jit-fuzz` fuzzes for 5 minutes on Linux. Every command was run locally on windows/amd64; Green on GitHub from run 37801457816. | done | ci: run the JIT's verification on every target |
 | V6 | Round trips measured on amd64 (`BenchmarkNativeRoundTrip`, `BenchmarkJITHostRoundTrip`): a bare entry and exit costs 23.7 ns (D7's target is 15 ns or less); a host exit as the VM takes one today costs 43 ns for `%` and 114 ns for a Go call, against 7 and 30 ns in the tree tier. arm64 is still to measure on a Mac. | done | jit: measure what a return to Go costs |
 
 **Gate:**
-- [ ] Stress test262 passes on all three platforms. Windows/amd64 passes locally
-  under four settings. First CI run (958ac22, run 37800144943): macOS passes;
-  Linux and Windows failed only off the JIT -- the runners' zone is Etc/UTC,
-  which go-quickjs named "Etc/UTC" instead of "UTC" (fixed on main, 24c5fa5,
-  cherry-picked), and Windows checked test262 out with CRLFs (the job now
-  sets `core.autocrlf false`). The macOS native job failed because the
-  differential test required SSA entries on arm64, which has no SSA backend
-  yet (`jitSSABackend`). Re-run pending.
+- [x] Stress test262 passes on all three platforms: CI run 37801457816
+  (2b0d682), every job green, linux/amd64, windows/amd64 and darwin/arm64.
+  The first run (958ac22) failed only off the JIT: the runners' zone,
+  Etc/UTC, was named "Etc/UTC" instead of "UTC" (fixed on main, 24c5fa5),
+  Windows checked test262 out with CRLFs (the job sets `core.autocrlf
+  false`), and the differential test wanted SSA entries on arm64, which has
+  no SSA backend yet (`jitSSABackend`).
 - [ ] Fuzzer runs 24 hours with no divergence. The first start (2026-10-08,
   10:16 EDT) stopped after 18 minutes on a program over the memory limit
   that the interpreter finished and the JIT stopped: not a divergence, since
