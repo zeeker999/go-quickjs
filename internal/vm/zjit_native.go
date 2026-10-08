@@ -60,6 +60,10 @@ type jitEntry struct {
 	calleeOnly    bool
 	strings       bool
 	grows         bool
+	// deferred marks a refusal for want of code budget, made at the cache
+	// generation in generation: it is retried once that has moved on.
+	deferred   bool
+	generation uint64
 }
 
 // Weak keys prevent a refusal or cached program from retaining a source graph.
@@ -74,21 +78,24 @@ type jitState struct {
 	callActive      bool
 	globals         []bytecode.Instr
 	cache           map[weak.Pointer[bytecode.Function]]*jitEntry
-	slots           [ir.MaxSlots]ir.Value
-	roots           [ir.MaxSlots]Value
-	arrays          [ir.MaxSlots]ir.ArrayView
-	hosts           uint64
-	fastHosts       uint64
-	rootCount       int
-	entries         uint64
-	guards          uint64
-	budgets         uint64
-	osrs            uint64
-	referenceKeys   []uint32
-	references      *jitReferences
-	callFrames      *jitCallFrames
-	transfers       uint64
-	charCodeAt      Value
+	// generation advances whenever the cache releases code, which is when a
+	// program refused for want of budget may fit.
+	generation    uint64
+	slots         [ir.MaxSlots]ir.Value
+	roots         [ir.MaxSlots]Value
+	arrays        [ir.MaxSlots]ir.ArrayView
+	hosts         uint64
+	fastHosts     uint64
+	rootCount     int
+	entries       uint64
+	guards        uint64
+	budgets       uint64
+	osrs          uint64
+	referenceKeys []uint32
+	references    *jitReferences
+	callFrames    *jitCallFrames
+	transfers     uint64
+	charCodeAt    Value
 }
 
 // Only selected own reference fields are prepared. The receiver bound keeps
@@ -112,14 +119,36 @@ func (r *Runtime) jitTreeRecovery(f *frame) bool {
 	return r.jitEnabled && !f.cl.jitRefused
 }
 
+// jitCodeBytes is what the JIT holds: executable pages, their metadata, and
+// its arenas. None of it is the script's memory (see jitBudget).
 func (r *Runtime) jitCodeBytes() int64 {
 	var n int64
 	if r.jit != nil {
 		for _, e := range r.jit.cache {
 			n += int64(e.code.Size() + e.code.MetadataSize() + cap(e.globals)*int(unsafe.Sizeof(bytecode.Instr{})) + cap(e.referenceKeys)*4)
 		}
+		if r.jit.references != nil {
+			n += int64(unsafe.Sizeof(jitReferences{}))
+		}
+		if r.jit.callFrames != nil {
+			n += int64(unsafe.Sizeof(jitCallFrames{}))
+		}
 	}
 	return n
+}
+
+// dropEntry closes e's code and removes it from the cache, reporting false if
+// the OS would not release the code, which leaves e owned for a retry.
+func (s *jitState) dropEntry(key weak.Pointer[bytecode.Function], e *jitEntry) bool {
+	held := e.code.Size() != 0
+	if e.code.Close() != nil {
+		return false
+	}
+	delete(s.cache, key)
+	if held {
+		s.generation++
+	}
+	return true
 }
 
 func (r *Runtime) releaseJIT() {
@@ -127,9 +156,7 @@ func (r *Runtime) releaseJIT() {
 		return
 	}
 	for key, e := range r.jit.cache {
-		if e.code.Close() == nil {
-			delete(r.jit.cache, key)
-		}
+		r.jit.dropEntry(key, e)
 	}
 	r.jit.clearRoots()
 	if len(r.jit.cache) == 0 {
@@ -137,21 +164,28 @@ func (r *Runtime) releaseJIT() {
 	}
 }
 
-// A compiler refusal must not stop a script merely because an optimization
-// cannot fit. Account for conservative transient work before allocating IR.
-func (r *Runtime) jitAllowance(fn *bytecode.Function) int {
-	limit := jitCacheBytes - int(r.jitCodeBytes())
+// jitBudget bounds what the JIT holds. The memory meter never counts it: a
+// script's memory, and so whether it fails with ErrMemoryLimit, is the same
+// with the JIT on and off. A runtime with a memory limit gives the JIT at
+// most an eighth of it, which keeps the process bounded.
+func (r *Runtime) jitBudget() int {
 	if r.meter != nil {
-		m := r.meter
-		m.live = max(0, m.walk(r)-m.baseline)
-		transient := int64(4*jit.MaxCodeBytes + len(fn.Code)*2048 + (32 << 10))
-		available := m.limit - m.live - transient
-		if available <= 0 {
-			return 0
-		}
-		limit = int(min(int64(limit), available))
+		return int(min(int64(jitCacheBytes), r.meter.limit/8))
 	}
-	return limit
+	return jitCacheBytes
+}
+
+// jitAllowance is what a new program for fn may take, or at most 0 to
+// refuse. It costs a few comparisons and never measures the heap, so a
+// refusal can be cheaply repeated.
+func (r *Runtime) jitAllowance(fn *bytecode.Function) int {
+	budget := r.jitBudget()
+	// The compiler's transient work: analysis tables over every slot for
+	// each instruction, and the code it emits.
+	if transient := len(fn.Code)*ir.MaxSlots*8 + 32<<10; transient > budget {
+		return 0
+	}
+	return budget - int(r.jitCodeBytes())
 }
 
 func (r *Runtime) jitFor(fn *bytecode.Function) *jitEntry {
@@ -166,12 +200,16 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool) *jitEntry {
 		return nil
 	}
 	if r.jit != nil {
-		if e := r.jit.cache[weak.Make(fn)]; e != nil && (!callee || e.calleeOnly || e.code != nil) {
-			return e
+		key := weak.Make(fn)
+		if e := r.jit.cache[key]; e != nil && (!callee || e.calleeOnly || e.code != nil) {
+			if !e.deferred || e.generation == r.jit.generation {
+				return e
+			}
+			delete(r.jit.cache, key)
 		}
 		for key, e := range r.jit.cache {
-			if key.Value() == nil && e.code.Close() == nil {
-				delete(r.jit.cache, key)
+			if key.Value() == nil {
+				r.jit.dropEntry(key, e)
 			}
 		}
 		if len(r.jit.cache) >= jitCacheEntries {
@@ -179,10 +217,9 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool) *jitEntry {
 				if r.jit.callEntryActive(e) {
 					continue
 				}
-				if e.code.Close() != nil {
+				if !r.jit.dropEntry(key, e) {
 					return nil
 				}
-				delete(r.jit.cache, key)
 				break
 			}
 			if len(r.jit.cache) >= jitCacheEntries {
@@ -270,23 +307,22 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool) *jitEntry {
 			if errors.Is(err, jit.ErrUnavailable) {
 				s.unavailable = true
 			}
-			// Budget and OS refusals may pass later, so they are retried after
-			// another warmup. A program the emitter rejects -- or panicked on --
-			// is rejected every time: cache the refusal.
-			if !errors.Is(err, jit.ErrProgram) {
+			e.code = nil
+			switch {
+			case errors.Is(err, jit.ErrCodeBudget):
+				// It may fit once the cache has released code. Until then the
+				// cached refusal spares a recompilation at every warmup.
+				e.deferred, e.generation = true, s.generation
+			case !errors.Is(err, jit.ErrProgram):
 				return nil
 			}
-			e.code = nil
+			// A program the emitter rejects -- or panicked on -- is rejected
+			// every time: cache the refusal.
 		} else if len(e.referenceKeys) != 0 && s.references == nil {
 			s.references = new(jitReferences)
 		}
 	}
 	s.cache[weak.Make(fn)] = e
-	if r.meter != nil {
-		// OS pages do not advance Go's allocation counter. Charge the new
-		// owner now so a subsequent JS allocation sees the reduced allowance.
-		r.meter.live = max(0, r.meter.walk(r)-r.meter.baseline)
-	}
 	return e
 }
 
@@ -452,6 +488,14 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 		return Undefined, nil, false
 	}
 	if e.code == nil {
+		if e.deferred {
+			// Out of code budget: warm up again and look again then, which
+			// costs a cache lookup until the cache releases code.
+			f.cl.jitEntry = nil
+			f.cl.jitCalls = 0
+			f.cl.jitLoopDelay = jitHotCalls
+			return Undefined, nil, false
+		}
 		f.cl.jitRefused = true
 		return Undefined, nil, false
 	}

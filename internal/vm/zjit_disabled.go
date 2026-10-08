@@ -6,6 +6,10 @@ type jitFields struct{}
 type jitClosureFields struct{}
 type jitRealmFields struct{}
 
+// The memory meter names these types; builds without the JIT have none.
+type jitState struct{}
+type jitEntry struct{}
+
 func (*Runtime) recordJITStringIntrinsic() {}
 
 func (*Runtime) initJIT(bool)                            {}
