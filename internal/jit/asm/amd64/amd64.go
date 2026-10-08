@@ -208,6 +208,17 @@ func (a *Asm) LoadU32(dst, base Reg, disp int32) {
 	a.modrmMem(byte(dst), base, disp)
 }
 
+// Cqo sign-extends RAX into RDX.
+func (a *Asm) Cqo() { a.emit(0x48, 0x99) }
+
+// Idiv divides RDX:RAX by src, signed, 64 bits: RAX is the quotient and RDX
+// the remainder. It faults on a zero divisor, or a quotient past 64 bits.
+func (a *Asm) Idiv(src Reg) {
+	a.rex(true, 0, byte(src), false)
+	a.emit(0xF7)
+	a.modrmRR(7, byte(src))
+}
+
 // LoadU16 is dst = [base + disp], 16 bits, zero-extended.
 func (a *Asm) LoadU16(dst, base Reg, disp int32) {
 	a.rex(false, byte(dst), byte(base), false)

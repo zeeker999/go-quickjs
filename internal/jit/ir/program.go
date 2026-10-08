@@ -170,6 +170,9 @@ const (
 	Shr
 	UShr
 	BitNot
+	// Mod is JavaScript's % on numbers, C's fmod: only the new pipeline's
+	// lowering makes it, and a non-number exits to Go, as Eq does.
+	Mod
 )
 
 // Instruction reads Left and Right and writes Dest (and Extra for paired

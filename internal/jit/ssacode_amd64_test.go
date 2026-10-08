@@ -542,7 +542,7 @@ func ssaTestProgram(r *rand.Rand) (*ir.Program, layout) {
 		ir.ArrayRead, ir.ArrayWrite, ir.ArrayLength, ir.ArrayKey, ir.ArrayUpdate, ir.PropertyRead, ir.PropertyWrite,
 		ir.ReferenceRead, ir.ReferenceRead, ir.BindingRead, ir.BindingRead, ir.StringMethod, ir.StringCode, ir.StringCode}
 	operators := []ir.Operator{ir.Add, ir.Sub, ir.Mul, ir.Div, ir.Lt, ir.Le, ir.Gt, ir.Ge, ir.Eq, ir.Ne,
-		ir.BitAnd, ir.BitOr, ir.BitXor, ir.Shl, ir.Shr, ir.UShr}
+		ir.BitAnd, ir.BitOr, ir.BitXor, ir.Shl, ir.Shr, ir.UShr, ir.Mod, ir.Mod}
 	p := &ir.Program{Locals: locals}
 	sites, globals := map[int]site{}, map[int]ssa.GlobalSite{}
 	for pc := 0; pc < n; pc++ {
@@ -960,6 +960,70 @@ func TestSSANativeStrings(t *testing.T) {
 	}
 	if read[textASCII] == 0 || read[textCached] == 0 || read[textUncached]+read[textRope] != 0 {
 		t.Fatalf("code units read by form: %v", read)
+	}
+}
+
+// TestSSANativeRemainder pins %'s fast path: integers divide natively, with
+// a zero remainder carrying the dividend's sign and -2**63 % -1 not
+// faulting; everything else exits to Go, where math.Mod answers.
+func TestSSANativeRemainder(t *testing.T) {
+	p := &ir.Program{Locals: 3, Code: []ir.Instruction{
+		{Op: ir.Binary, Operator: ir.Mod, Dest: 2, Left: ir.Slot(0), Right: ir.Slot(1)},
+		{Op: ir.Return, Left: ir.Slot(2)},
+	}}
+	p.Maps = make([]ir.StateMap, len(p.Code))
+	for pc := range p.Maps {
+		p.Maps[pc].PC = uint32(pc)
+	}
+	c, err := compileNative(p, layout{3, -1, nil, nil})
+	if err != nil || c == nil {
+		t.Fatalf("compile: %v", err)
+	}
+	defer c.code.Close()
+	negZero := math.Copysign(0, -1)
+	for _, tc := range []struct {
+		x, y   float64
+		native bool
+	}{
+		{7, 3, true}, {-7, 3, true}, {7, -3, true}, {-7, -3, true},
+		{-4, 2, true}, {4, -2, true}, {negZero, 5, true}, {0, -5, true},
+		{-1 << 63, -1, true}, {-1 << 63, 7, true}, {1 << 62, 3, true}, {9007199254740992, 10, true},
+		{5, 0, false}, {5.5, 2, false}, {5, 2.5, false}, {math.NaN(), 1, false}, {1, math.NaN(), false},
+		{math.Inf(1), 1, false}, {1, math.Inf(-1), false}, {1 << 63, 3, false},
+	} {
+		heap := randomTestHeap(rand.New(rand.NewPCG(1, 2)))
+		slots := []ir.Value{ir.Float(tc.x), ir.Float(tc.y), ir.Float(0)}
+		if why := nativeMismatch(c, 0, slots, 0, heap); why != "" {
+			t.Fatalf("%v %% %v: %s", tc.x, tc.y, why)
+		}
+		exit, _ := ssa.EvaluateHeap(c.f, 0, slices.Clone(slots), heap.native().heap(), 0)
+		if native := exit.Kind == ir.Returned; native != tc.native {
+			t.Fatalf("%v %% %v: native %v, want %v", tc.x, tc.y, native, tc.native)
+		}
+		if tc.native {
+			want := math.Mod(tc.x, tc.y)
+			if math.Float64bits(math.Float64frombits(exit.Value.Bits)) != math.Float64bits(want) {
+				t.Fatalf("%v %% %v = %v, want %v", tc.x, tc.y, math.Float64frombits(exit.Value.Bits), want)
+			}
+		}
+	}
+	// The division takes RDX, the operands' base: a remainder on the
+	// operand stack, stored there by a host exit's stub, must land in it.
+	q := &ir.Program{Locals: 2, StackSize: 1, Code: []ir.Instruction{
+		{Op: ir.Binary, Operator: ir.Mod, Dest: 2, Left: ir.Slot(0), Right: ir.Slot(1)},
+		{Op: ir.Host},
+		{Op: ir.Return, Left: ir.Slot(2)},
+	}, Maps: []ir.StateMap{{PC: 0}, {PC: 1, Depth: 1}, {PC: 2, Depth: 1}}}
+	d, err := compileNative(q, layout{2, -1, nil, nil})
+	if err != nil || d == nil {
+		t.Fatalf("compile: %v", err)
+	}
+	defer d.code.Close()
+	heap := randomTestHeap(rand.New(rand.NewPCG(1, 2)))
+	for _, x := range []float64{17, -17, 18} {
+		if why := nativeMismatch(d, 0, []ir.Value{ir.Float(x), ir.Float(6), ir.Float(0)}, 0, heap); why != "" {
+			t.Fatalf("%v %% 6 on the stack: %s", x, why)
+		}
 	}
 }
 
