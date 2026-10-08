@@ -49,6 +49,39 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 		case Host, Call:
 			exit.Kind = HostExit
 			return exit, nil
+		case StringMethod, StringCode:
+			exit.Kind = HostExit
+			receiver := read(in.Left)
+			if in.Op == StringCode {
+				callee := receiver
+				if callee.Kind != Opaque || callee.Bits >= uint64(len(arrays)) || arrays[callee.Bits].DenseLength != CharCodeAtBuiltin {
+					return exit, nil
+				}
+				receiver = read(in.Right)
+			}
+			if receiver.Kind != String || receiver.Bits >= uint64(len(arrays)) {
+				return exit, nil
+			}
+			view := arrays[receiver.Bits]
+			if in.Op == StringMethod {
+				if view.WritableHole == 0 || view.WritableHole > uint64(len(arrays)) {
+					return exit, nil
+				}
+				slots[in.Dest] = Value{Kind: Opaque, Bits: view.WritableHole - 1}
+			} else {
+				index := read(in.Third)
+				i := math.Float64frombits(index.Bits)
+				if index.Kind != Number || i < 0 || i >= float64(view.DenseLength) || i != math.Trunc(i) || view.Data == nil || view.Length != 1 && view.Length != 2 {
+					return exit, nil
+				}
+				var code uint16
+				if view.Length == 1 {
+					code = uint16(*(*byte)(unsafe.Add(view.Data, uintptr(i))))
+				} else {
+					code = *(*uint16)(unsafe.Add(view.Data, uintptr(i)*2))
+				}
+				slots[in.Dest] = Float(float64(code))
+			}
 		case ReferenceRead:
 			exit.Kind = HostExit
 			obj := read(in.Left)

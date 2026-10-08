@@ -451,6 +451,7 @@ type Realm struct {
 	// when the object names no species of its own.
 	arrayBufferCtor *Object
 	typedArrayProto *Object
+	jitRealmFields
 	// templateCache keeps the object identity that tagged templates require:
 	// the same template site must hand the same strings array to its tag on
 	// every evaluation.

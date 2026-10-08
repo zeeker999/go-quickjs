@@ -95,7 +95,7 @@ func lowerFunction(fn *bytecode.Function, calls, callee bool) (*ir.Program, erro
 			return nil, err
 		}
 		effects[pc] = e
-		host = host || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
+		host = host || in.Op == bytecode.OpNewArray || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 		property = property || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 		this = this || in.Op == bytecode.OpPushThis
 		raw := uint32(in.Op)
@@ -463,6 +463,11 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 		return bad("upvalue index out of bounds")
 	}
 	switch in.Op {
+	case bytecode.OpNewArray:
+		if in.A > MaxSlots {
+			return bad("array literal budget")
+		}
+		return effect{need: int(in.A), delta: 1 - int(in.A)}, nil
 	case bytecode.OpGetUpvalue, bytecode.OpGetUpvalueCheck, bytecode.OpGetLocalIndex, bytecode.OpGetLocalIndexUpdate:
 		return effect{delta: 1}, nil
 	case bytecode.OpGetIndex:
@@ -654,7 +659,21 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this bool) ir.Instr
 		return ir.Instruction{Op: ir.Insert2, Dest: sp - 2}
 	case bytecode.OpInsert3:
 		return ir.Instruction{Op: ir.Insert3, Dest: sp - 3}
-	case bytecode.OpCall, bytecode.OpCallMethod, bytecode.OpGetPropThis, bytecode.OpMod:
+	case bytecode.OpCallMethod:
+		if in.A == 1 && stringKernel(fn) {
+			for _, name := range fn.Names {
+				if name == "charCodeAt" {
+					return ir.Instruction{Op: ir.StringCode, Left: ir.Slot(sp - 2), Right: ir.Slot(sp - 3), Third: top, Dest: sp - 3}
+				}
+			}
+		}
+		return ir.Instruction{Op: ir.Host}
+	case bytecode.OpGetPropThis:
+		if fn.Names[in.A] == "charCodeAt" && stringKernel(fn) {
+			return ir.Instruction{Op: ir.StringMethod, Left: top, Dest: sp}
+		}
+		return ir.Instruction{Op: ir.Host}
+	case bytecode.OpNewArray, bytecode.OpCall, bytecode.OpMod:
 		return ir.Instruction{Op: ir.Host}
 	case bytecode.OpGetGlobal:
 		return ir.Instruction{Op: ir.BindingRead, Left: ir.Literal(ir.Value{Kind: ir.Opaque}), Dest: sp, Key: in.A}
@@ -771,4 +790,22 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this bool) ir.Instr
 		return ir.Instruction{Op: ir.Return, Left: ir.Literal(ir.Value{Kind: ir.Undefined})}
 	}
 	return ir.Instruction{Op: ir.Nop}
+}
+
+// An intrinsic snapshot and an extra root must amortize their entry cost.
+// One-off character helpers retain the existing call path.
+func stringKernel(fn *bytecode.Function) bool {
+	if len(fn.Code) >= 64 {
+		return true
+	}
+	for pc, in := range fn.Code {
+		switch in.Op {
+		case bytecode.OpJump, bytecode.OpJumpIfFalse, bytecode.OpJumpIfTrue,
+			bytecode.OpJumpIfFalseKeep, bytecode.OpJumpIfTrueKeep, bytecode.OpJumpIfCmpFalse:
+			if in.A <= uint32(pc) {
+				return true
+			}
+		}
+	}
+	return false
 }

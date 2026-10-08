@@ -1437,3 +1437,40 @@ future grants, closed-owner replacement and GC between batches. Windows amd64
 and arm64, and Linux/386 cross-builds pass; Windows native execution remains
 unverified locally. Evidence is in
 `../quickjs-jit-results/2026-10-08-native-dispatch`.
+
+## Native string packing
+
+The native adapter roots strings separately from ordinary object handles and
+borrows flat ASCII bytes or already prepared UTF-16 units through the same
+40-byte view. Guarded `charCodeAt` lookup and calls require the realm's original
+intrinsic and a live ordinary prototype property. Ropes, unprepared storage,
+coercion, changed methods and exceptional indices resume at an uncommitted host
+boundary. Every published callback discards views and refreshes permissions.
+Array literals now allocate at a published host boundary, allowing block packers
+to retain native execution. This does not add a library-specific hash shortcut.
+
+SparkMD5 3.0.2's complete validated 1 KB hash, in three alternating fresh
+processes before the structured-tree upstream rebase, averages about 71 us in
+the prior native build and 52 us with string packing. Allocations remain
+13208 B/108 per hash; code plus metadata grows from 358856 to 376320 B.
+There are still 272 host exits per hash: block-array allocation and growth.
+The local 50000-hash driver measures 2549 ms native and 4138 ms with trees;
+Node v26.8.1 `--jitless` measures 2891 ms in that same local driver. These Node
+numbers do not reproduce the user's 188 ms result and need separate investigation.
+Process peak RSS is 42.8 MB native, 40.8 MB trees and 53.5 MB Node; the tagged
+qjs binary is 41018274 B. The driver includes script startup and compilation
+in its 3.14 s native process wall time, but its hash timer excludes them.
+
+The eight-placement comparison against the committed dispatch foundation
+measures Crypto 64.1 -> 65.0 ms (+1.4%) and mixed total 542.1 -> 540.1 ms
+(-0.4%). Opt-out Crypto/total changes are +0.1%/+0.3%. The MD5 gain comes
+with a small measured Crypto cost; these are pre-rebase results, and neither
+the 5-10x representative target nor the complete RSA 10x target is met.
+
+Default/tagged full suites, tagged vet, JIT race/checkptr, Go 1.24 and native
+Linux/amd64 tests under emulation pass. Windows amd64/arm64 and Linux/386
+cross-builds pass; Windows native execution remains unverified. Forced-native
+language and built-in Test262 runs report 91492 passes, zero failures and 342
+existing skips. Tests cover ASCII, surrogates, coercion and method mutation,
+exact throws and committed prefixes, realm identity, full root tables and
+callee permissions. Evidence is in `../quickjs-jit-results/2026-10-08-md5`.

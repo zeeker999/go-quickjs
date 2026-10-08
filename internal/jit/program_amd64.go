@@ -88,6 +88,8 @@ func programInstructions(p *ir.Program, dispatch bool) ([]byte, []int, error) {
 				a.property(in)
 			case ir.ReferenceRead:
 				a.reference(in)
+			case ir.StringMethod, ir.StringCode:
+				a.string(in)
 			case ir.Copy:
 				a.loadScalar(in.Left, 0, 2)
 				a.storeScalar(in.Dest, 0, 2)
@@ -801,6 +803,75 @@ func (a *amd64Program) property(in ir.Instruction) {
 	a.mark(ordered)
 	a.bytes(0xf2, 0x41|(fp>>3)<<2, 0x0f, 0x11, 0x40|(fp&7)<<3, 8)
 	a.mark(end)
+}
+
+func (a *amd64Program) string(in ir.Instruction) {
+	guard := a.guard
+	a.guard = a.host
+	defer func() { a.guard = guard }()
+	a.arrayCacheID, a.propertyCacheID = -1, -1
+	view := func(o ir.Operand, kind ir.Kind) {
+		a.bytes(0x48, 0x85, 0xc9) // testq cx,cx
+		a.conditional(4, a.host)
+		a.load(o, 8, 2)
+		a.bytes(0x48, 0x83, 0xfa, byte(kind)) // cmpq dx,kind
+		a.conditional(5, a.host)
+		a.bytes(0x49, 0x81, 0xf8)
+		a.word(ir.MaxSlots)
+		a.conditional(3, a.host)
+		a.bytes(0x4f, 0x8d, 0x04, 0x80) // lea (r8,r8,4),r8
+		a.bytes(0x49, 0xc1, 0xe0, 3, 0x49, 0x01, 0xc8)
+	}
+	if in.Op == ir.StringMethod {
+		view(in.Left, ir.String)
+		a.memory(0x8b, 0, 8, 32)
+		a.bytes(0x48, 0x85, 0xc0)
+		a.conditional(4, a.host)
+		a.bytes(0x48, 0x3d)
+		a.word(ir.MaxSlots)
+		a.conditional(7, a.host)
+		a.bytes(0x48, 0xff, 0xc8) // decq ax
+		a.immediate(2, uint64(ir.Opaque))
+		a.store(in.Dest, 0, 2)
+		return
+	}
+	view(in.Left, ir.Opaque)
+	a.memory(0x8b, 9, 8, 8)
+	a.immediate(0, ir.CharCodeAtBuiltin)
+	a.bytes(0x49, 0x39, 0xc1) // cmpq r9,ax
+	a.conditional(5, a.host)
+	view(in.Right, ir.String)
+	a.move(11, 8)
+	fp := a.number(in.Third, 0)
+	a.bytes(0xf2, 0x48|fp>>3, 0x0f, 0x2c, 0xc0|fp&7)
+	a.immediate(2, 0xffffffff)
+	a.bytes(0x48, 0x39, 0xd0)
+	a.conditional(7, a.host)
+	a.bytes(0xf2, 0x48, 0x0f, 0x2a, 0xc8)
+	a.fpBinary(0x66, 0x2e, fp, 1)
+	a.conditional(5, a.host)
+	a.conditional(10, a.host)
+	a.memory(0x8b, 2, 11, 8)
+	a.bytes(0x48, 0x39, 0xd0)
+	a.conditional(3, a.host)
+	a.memory(0x8b, 9, 11, 16)
+	a.memory(0x8b, 8, 11, 0)
+	a.bytes(0x4d, 0x85, 0xc0)
+	a.conditional(4, a.host)
+	ascii, done := a.label(), a.label()
+	a.bytes(0x49, 0x83, 0xf9, 1)
+	a.conditional(4, ascii)
+	a.bytes(0x49, 0x83, 0xf9, 2)
+	a.conditional(5, a.host)
+	a.bytes(0x4d, 0x8d, 0x04, 0x40) // lea (r8,ax,2),r8
+	a.bytes(0x41, 0x0f, 0xb7, 0x00) // movzwl (r8),ax
+	a.jump(done)
+	a.mark(ascii)
+	a.bytes(0x49, 0x01, 0xc0)       // addq ax,r8
+	a.bytes(0x41, 0x0f, 0xb6, 0x00) // movzbl (r8),ax
+	a.mark(done)
+	a.bytes(0xf2, 0x0f, 0x2a, 0xc0) // cvtsi2sd ax,x0
+	a.storeNumber(in.Dest, 0)
 }
 
 func (a *amd64Program) array(in ir.Instruction) {

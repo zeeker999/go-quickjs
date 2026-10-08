@@ -117,7 +117,7 @@ func (c *Code) runArrays(slots []ir.Value, arrays []ir.ArrayView, pc int, budget
 	}
 	if validate {
 		for _, slot := range slots {
-			if slot.Kind > ir.Opaque || slot.Kind == ir.Boolean && slot.Bits > 1 {
+			if slot.Kind > ir.String || slot.Kind == ir.Boolean && slot.Bits > 1 {
 				return ir.Exit{}, ir.ErrState
 			}
 		}

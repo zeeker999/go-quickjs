@@ -37,6 +37,42 @@ func fixture(code ...bytecode.Instr) *bytecode.Function {
 	return &bytecode.Function{Code: code, LocalCount: 2, Locals: make([]bytecode.LocalDesc, 2), MaxStack: 4, HasSimpleParams: true}
 }
 
+func TestStringPackingLayout(t *testing.T) {
+	fn := compiledFunction(t, `function pack(s){let a=[];for(let i=0;i<64;i++)a[i]=s.charCodeAt(i);return a}`)
+	p, err := Lower(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	seen := [3]bool{}
+	for pc, in := range fn.Code {
+		sp := p.Locals + p.Maps[pc].Depth
+		out := p.Code[pc]
+		switch in.Op {
+		case bytecode.OpNewArray:
+			seen[0] = true
+			if out.Op != ir.Host {
+				t.Fatal(out)
+			}
+		case bytecode.OpGetPropThis:
+			seen[1] = true
+			if out.Op != ir.StringMethod || out.Left != ir.Slot(sp-1) || out.Dest != sp {
+				t.Fatal(out)
+			}
+		case bytecode.OpCallMethod:
+			seen[2] = true
+			if out.Op != ir.StringCode || out.Left != ir.Slot(sp-2) || out.Right != ir.Slot(sp-3) || out.Third != ir.Slot(sp-1) || out.Dest != sp-3 {
+				t.Fatal(out)
+			}
+		}
+	}
+	if seen != [3]bool{true, true, true} {
+		t.Fatal(seen)
+	}
+}
+
 func TestNumericPropertySelection(t *testing.T) {
 	fn := compiledFunction(t, `function f(o){let n=o.n;for(let i=0;i<n;i++)o.array[i]=o.array[i]+o.step;return o.array[0]}`)
 	p, err := Lower(fn)

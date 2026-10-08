@@ -100,6 +100,8 @@ func programInstructions(p *ir.Program, dispatch bool) ([]byte, []int, error) {
 				a.property(in)
 			case ir.ReferenceRead:
 				a.reference(in)
+			case ir.StringMethod, ir.StringCode:
+				a.string(in)
 			case ir.Copy:
 				a.loadScalar(in.Left, 0, 4)
 				a.storeScalar(in.Dest, 0, 4)
@@ -857,6 +859,69 @@ func (a *arm64Program) property(in ir.Instruction) {
 
 // array resolves a borrowed view and guards every condition before any write.
 // X3 is the view/cell address, X5 the index, X6 the numeric tag boundary.
+func (a *arm64Program) string(in ir.Instruction) {
+	guard := a.guard
+	a.guard = a.host
+	defer func() { a.guard = guard }()
+	a.arrayCacheID, a.propertyCacheID = -1, -1
+	view := func(o ir.Operand, kind ir.Kind) {
+		a.compareImmediate(1, 0)
+		a.conditional(0, a.host)
+		a.load(o, 3, 4)
+		a.compareImmediate(4, uint32(kind))
+		a.conditional(1, a.host)
+		a.compareImmediate(3, ir.MaxSlots)
+		a.conditional(2, a.host)
+		a.word(0x8b030863) // add x3,x3,x3,lsl #2
+		a.word(0x8b030c23) // add x3,x1,x3,lsl #3
+	}
+	if in.Op == ir.StringMethod {
+		view(in.Left, ir.String)
+		a.memory(true, false, 3, 3, 32)
+		a.compareImmediate(3, 0)
+		a.conditional(0, a.host)
+		a.compareImmediate(3, ir.MaxSlots)
+		a.conditional(8, a.host) // HI
+		a.word(0xd1000463)       // sub x3,x3,#1
+		a.immediate(4, uint64(ir.Opaque))
+		a.store(in.Dest, 3, 4)
+		return
+	}
+	view(in.Left, ir.Opaque)
+	a.memory(true, false, 7, 3, 8)
+	a.immediate(5, ir.CharCodeAtBuiltin)
+	a.word(0xeb0500ff) // cmp x7,x5
+	a.conditional(1, a.host)
+	view(in.Right, ir.String)
+	a.word(0xaa0303f0) // mov x16,x3
+	fp := a.number(in.Third, 0)
+	a.word(0x1e790005 | fp<<5) // fcvtzu w5,dN
+	a.word(0x1e6300a1)         // ucvtf d1,w5
+	a.word(0x1e612000 | fp<<5) // fcmp dN,d1
+	a.conditional(1, a.host)
+	a.memory(true, false, 7, 16, 8)
+	a.word(0xeb0700bf) // cmp x5,x7
+	a.conditional(2, a.host)
+	a.memory(true, false, 7, 16, 16)
+	a.memory(true, false, 3, 16, 0)
+	a.compareImmediate(3, 0)
+	a.conditional(0, a.host)
+	ascii, done := a.label(), a.label()
+	a.compareImmediate(7, 1)
+	a.conditional(0, ascii)
+	a.compareImmediate(7, 2)
+	a.conditional(1, a.host)
+	a.word(0x8b050463) // add x3,x3,x5,lsl #1
+	a.word(0x79400063) // ldrh w3,[x3]
+	a.jump(done)
+	a.mark(ascii)
+	a.word(0x8b050063) // add x3,x3,x5
+	a.word(0x39400063) // ldrb w3,[x3]
+	a.mark(done)
+	a.word(0x1e630060) // ucvtf d0,w3
+	a.storeNumber(in.Dest, 0)
+}
+
 func (a *arm64Program) array(in ir.Instruction) {
 	if in.Op == ir.ArrayWrite {
 		guard := a.guard

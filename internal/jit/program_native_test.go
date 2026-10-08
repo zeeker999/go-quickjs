@@ -59,6 +59,43 @@ func TestNativeProgramABI(t *testing.T) {
 	}
 }
 
+func TestNativeStringCode(t *testing.T) {
+	p := &ir.Program{Locals: 3, StackSize: 1, Code: []ir.Instruction{
+		{Op: ir.StringMethod, Left: ir.Slot(0), Dest: 3},
+		{Op: ir.StringCode, Left: ir.Slot(3), Right: ir.Slot(0), Third: ir.Slot(2), Dest: 3},
+		{Op: ir.Return, Left: ir.Slot(3)},
+	}, Maps: []ir.StateMap{{PC: 0}, {PC: 1, Depth: 1}, {PC: 2, Depth: 1}}}
+	c := newTestCode(t, p)
+	bytes := []byte("abcdef")
+	units := []uint16{0x61, 0x1234, 0xd83d, 0xde00, 0xd800, 0xdc00}
+	for _, width := range []uint64{0, 1, 2, 3} {
+		for _, grant := range []uint64{0, 18, ir.MaxSlots + 1} {
+			for _, index := range []float64{-1, math.Copysign(0, -1), 0, 1, 5, 6, 1.5, math.NaN(), math.Inf(1)} {
+				views := make([]ir.ArrayView, ir.MaxSlots)
+				views[5] = ir.ArrayView{Data: unsafe.Pointer(&bytes[0]), DenseLength: 6, Length: width, WritableHole: grant}
+				if width == 2 {
+					views[5].Data = unsafe.Pointer(&units[0])
+				}
+				views[17].DenseLength = ir.CharCodeAtBuiltin
+				for pc := 0; pc < 3; pc++ {
+					for budget := uint64(0); budget < 5; budget++ {
+						x := []ir.Value{{Kind: ir.String, Bits: 5}, ir.Float(7), ir.Float(index), {Kind: ir.Opaque, Bits: 17}}
+						y := append([]ir.Value(nil), x...)
+						want, err := p.EvaluateArrays(x, views, pc, budget)
+						if err != nil {
+							t.Fatal(err)
+						}
+						got, err := c.RunEncodedArrays(y, views, pc, budget)
+						if err != nil || want != got || !reflect.DeepEqual(x, y) {
+							t.Fatalf("width %d grant %d index %v pc %d budget %d: %+v/%+v, slots %+v/%+v, %v", width, grant, index, pc, budget, want, got, x, y, err)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 func TestNativeProgramReferences(t *testing.T) {
 	for _, dest := range []int{0, 1, 2} {
 		p := &ir.Program{Locals: 3, Code: []ir.Instruction{

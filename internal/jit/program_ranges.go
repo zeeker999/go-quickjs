@@ -95,6 +95,10 @@ func (a *programAssembler) inferRanges(p *ir.Program) {
 			}
 		case ir.ArrayRead, ir.ArrayLength, ir.PropertyRead, ir.BindingRead, ir.ReferenceRead:
 			bounds[in.Dest] = 0
+		case ir.StringMethod:
+			bounds[in.Dest] = 0
+		case ir.StringCode:
+			bounds[in.Dest] = 16
 		case ir.ArrayUpdate:
 			bounds[in.Dest], bounds[in.Extra] = 0, 0
 		case ir.Insert2, ir.Insert3:

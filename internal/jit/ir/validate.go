@@ -35,7 +35,7 @@ func (p *Program) Validate() error {
 		active := p.Locals + p.Maps[pc].Depth
 		source := func(o Operand) bool {
 			if o.Slot == -1 {
-				return o.Literal.Kind <= Opaque && (o.Literal.Kind != Boolean || o.Literal.Bits <= 1)
+				return o.Literal.Kind <= String && (o.Literal.Kind != Boolean || o.Literal.Bits <= 1)
 			}
 			return o.Slot >= 0 && o.Slot < active
 		}
@@ -47,6 +47,10 @@ func (p *Program) Validate() error {
 		left, right, third, write, extra := false, false, false, false, false
 		switch in.Op {
 		case Nop, Host:
+		case StringMethod:
+			left, write = true, true
+		case StringCode:
+			left, right, third, write = true, true, true, true
 		case Call:
 			if calls == MaxCallSites || in.Key != calls || in.Left.Slot < 0 ||
 				in.Right.Slot < 0 && in.Right != Literal(Value{}) ||

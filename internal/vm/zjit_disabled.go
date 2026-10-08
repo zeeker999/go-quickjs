@@ -4,6 +4,9 @@ package vm
 
 type jitFields struct{}
 type jitClosureFields struct{}
+type jitRealmFields struct{}
+
+func (*Runtime) recordJITStringIntrinsic() {}
 
 func (*Runtime) initJIT(bool)                            {}
 func (*Runtime) tryJITFrame(*frame) (Value, error, bool) { return Undefined, nil, false }

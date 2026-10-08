@@ -522,6 +522,17 @@ memory costs, validation, and the workloads where compilation still loses.
 
 ## Reference
 
+The MD5 coverage stage adds guarded native `charCodeAt` and published array
+literal allocation. Complete 1 KB SparkMD5 hashes improve from about 71 to
+52 us in alternating fresh native processes, while 272 array-allocation/growth
+boundaries remain per hash. Balanced Crypto is 1.4% slower and mixed total is
+effectively level. These measurements precede the new structured tree-loop
+baseline and must be repeated after rebase. Next, remove bounded growth exits
+and measure the remaining arithmetic and coordination costs. The requested
+5-10x representative speedup and 10x complete validated RSA goal remain unmet;
+native coverage counters alone do not satisfy either. The implementation notes
+record ownership, validation, memory and benchmark evidence.
+
 Study wazero's execution context, assembly entry/exit, code ownership, and
 OS allocation designs. Its statically typed Wasm semantics are not a substitute
 for JavaScript guards and fallback. Do not add wazero as a production dependency

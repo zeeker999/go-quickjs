@@ -31,6 +31,15 @@ type ArrayView struct {
 	WritableHole uint64
 }
 
+// String handles reuse the view ABI: Data borrows flat bytes or UTF-16 units,
+// DenseLength counts code units, and Length is the unit width (one or two).
+// WritableHole, when nonzero, is the rooted intrinsic charCodeAt handle plus
+// one, granted only after an ordinary live prototype lookup. String's distinct
+// kind prevents numeric array/property operations from using this storage.
+// The intrinsic's Opaque view has DenseLength=CharCodeAtBuiltin and no other
+// permissions. The adapter retains all owners and refreshes after callbacks.
+const CharCodeAtBuiltin = uint64(1 << 61)
+
 // MaxProperties bounds the native linear search within one IR instruction.
 const MaxProperties = 8
 
@@ -68,6 +77,7 @@ const (
 	Null
 	Uninitialized
 	Opaque
+	String
 )
 
 // Value is pointer-free. Opaque Bits is an index into a caller-owned root
@@ -130,6 +140,8 @@ const (
 	BindingRead
 	ReferenceRead
 	Call
+	StringMethod
+	StringCode
 )
 
 // Operator selects an arithmetic, comparison, or truthiness operation.
@@ -178,6 +190,9 @@ const (
 // Extra arguments starting at Third.Slot. Dest receives the result. Key is
 // the sequential call-site index. Ordinary evaluation exits before the call;
 // a prepared native dispatch graph may transfer to a guarded callee instead.
+// StringMethod reads Left's intrinsic permission into Dest. StringCode reads
+// the callee from Left, the string receiver from Right and the index from Third.
+// Failed string permissions take an uncommitted Host exit.
 type Instruction struct {
 	Op        Op
 	Operator  Operator

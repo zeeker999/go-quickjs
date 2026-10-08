@@ -136,7 +136,7 @@ type DispatchSnapshot struct {
 }
 
 func validDispatchScalar(v ir.Value) bool {
-	return v.Kind <= ir.Opaque && (v.Kind != ir.Boolean || v.Bits <= 1)
+	return v.Kind <= ir.String && (v.Kind != ir.Boolean || v.Bits <= 1)
 }
 
 func (c *Code) dispatchOffset(pc int) (int, error) {

@@ -27,6 +27,14 @@ type jitFields struct {
 	jit              *jitState
 }
 
+type jitRealmFields struct {
+	jitCharCodeAt Value
+}
+
+func (r *Runtime) recordJITStringIntrinsic() {
+	r.jitCharCodeAt = r.proto.str.getOwn(r.atoms.intern("charCodeAt")).value
+}
+
 // A closure belongs to one runtime. Hotness and permanent selection refusals
 // live here without registering a weak key on cold or refused calls.
 type jitClosureFields struct {
@@ -50,6 +58,7 @@ type jitEntry struct {
 	referenceKeys []uint32
 	calls         bool
 	calleeOnly    bool
+	strings       bool
 }
 
 // Weak keys prevent a refusal or cached program from retaining a source graph.
@@ -58,6 +67,7 @@ type jitState struct {
 	unavailable     bool
 	properties      bool
 	this            bool
+	strings         bool
 	referenceActive bool
 	callActive      bool
 	globals         []bytecode.Instr
@@ -76,6 +86,7 @@ type jitState struct {
 	references      *jitReferences
 	callFrames      *jitCallFrames
 	transfers       uint64
+	charCodeAt      Value
 }
 
 // Only selected own reference fields are prepared. The receiver bound keeps
@@ -182,7 +193,7 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool) *jitEntry {
 		return nil
 	}
 	if r.jit == nil {
-		r.jit = &jitState{cache: make(map[weak.Pointer[bytecode.Function]]*jitEntry)}
+		r.jit = &jitState{cache: make(map[weak.Pointer[bytecode.Function]]*jitEntry), charCodeAt: r.jitCharCodeAt}
 	}
 	s := r.jit
 	var meta int
@@ -226,6 +237,7 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool) *jitEntry {
 		}
 		for i := range p.Code {
 			in := &p.Code[i]
+			e.strings = e.strings || in.Op == ir.StringMethod || in.Op == ir.StringCode
 			if in.Op == ir.PropertyRead || in.Op == ir.PropertyWrite || in.Op == ir.BindingRead || in.Op == ir.ReferenceRead {
 				e.properties = e.properties || in.Op != ir.BindingRead
 				in.Key = uint32(r.atoms.intern(fn.Names[in.Key]))
@@ -291,10 +303,11 @@ func (s *jitState) encode(v Value) ir.Value {
 			if handle == 0 {
 				break
 			}
-			i := int(handle) - 1
+			i := int(handle&511) - 1
 			root := s.roots[i]
 			if root.ref == v.ref && math.Float64bits(root.num) == math.Float64bits(v.num) {
-				return ir.Value{Kind: ir.Opaque, Bits: uint64(i)}
+				kind := ir.Opaque + ir.Kind(handle>>15)
+				return ir.Value{Kind: kind, Bits: uint64(i)}
 			}
 			handleSlot = (handleSlot + 1) & 511
 		}
@@ -302,7 +315,11 @@ func (s *jitState) encode(v Value) ir.Value {
 	i := s.rootCount
 	s.roots[i], s.rootCount = v, i+1
 	if handleSlot >= 0 {
-		s.callFrames.handles[handleSlot] = uint16(i + 1)
+		handle := uint16(i + 1)
+		if v.IsString() {
+			handle |= 1 << 15
+		}
+		s.callFrames.handles[handleSlot] = handle
 	}
 	if v.IsObject() {
 		o := v.Object()
@@ -310,9 +327,30 @@ func (s *jitState) encode(v Value) ir.Value {
 			s.arrays[i] = jitArrayView(o)
 		} else if s.properties && o.class == ClassObject && o.shapeIndex() == nil && len(o.props) <= ir.MaxProperties {
 			s.arrays[i] = ir.ArrayView{Data: unsafe.Pointer(unsafe.SliceData(o.props)), DenseLength: uint64(len(o.props)), WritableHole: tagBase}
+		} else if s.strings && v.ref == s.charCodeAt.ref {
+			s.arrays[i] = ir.ArrayView{DenseLength: ir.CharCodeAtBuiltin}
 		}
 	}
+	if v.IsString() {
+		return s.encodeString(i, v.String())
+	}
 	return ir.Value{Kind: ir.Opaque, Bits: uint64(i)}
+}
+
+// Keep string borrowing out of the common numeric reference encoder.
+//
+//go:noinline
+func (s *jitState) encodeString(i int, str *String) ir.Value {
+	view := ir.ArrayView{DenseLength: uint64(str.length)}
+	if str.left == nil {
+		if str.ascii {
+			view.Data, view.Length = unsafe.Pointer(unsafe.StringData(str.s)), 1
+		} else if str.u16 != nil {
+			view.Data, view.Length = unsafe.Pointer(str.u16), 2
+		}
+	}
+	s.arrays[i] = view
+	return ir.Value{Kind: ir.String, Bits: uint64(i)}
 }
 
 func (s *jitState) decode(v ir.Value) Value {
@@ -327,7 +365,7 @@ func (s *jitState) decode(v ir.Value) Value {
 		return Null
 	case ir.Uninitialized:
 		return uninitialized
-	case ir.Opaque:
+	case ir.Opaque, ir.String:
 		return s.roots[v.Bits]
 	}
 	panic("invalid native scalar")
@@ -436,6 +474,7 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 	s.properties = e.properties
 	s.this = e.this
 	s.globals = e.globals
+	s.strings = e.strings
 	s.referenceActive = len(e.referenceKeys) != 0
 	if s.referenceActive {
 		s.referenceKeys = e.referenceKeys
@@ -467,6 +506,9 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 			s.hosts++
 			next, _, steps := r.jitHostFast(f, s, int(exit.State.PC), exit.State.Depth, int(min(budget, 16)))
 			if steps != 0 {
+				if e.strings {
+					hosts--
+				}
 				s.fastHosts++
 				budget -= uint64(steps)
 				pc = next
@@ -530,6 +572,7 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 			s.properties = e.properties
 			s.this = e.this
 			s.globals = e.globals
+			s.strings = e.strings
 			s.referenceActive = len(e.referenceKeys) != 0
 			if s.referenceActive {
 				s.referenceKeys = e.referenceKeys
@@ -652,17 +695,42 @@ func (r *Runtime) jitHostFast(f *frame, s *jitState, pc, depth, limit int) (int,
 			}
 		case bytecode.OpGetProp, bytecode.OpGetPropThis:
 			obj := s.decode(s.slots[sp-1])
-			if !obj.IsObject() {
-				return pc, depth, steps
-			}
 			var ok bool
-			value, ok = plainOwn(obj.Object(), f.cl.names[in.A])
+			if obj.IsString() && f.cl.names[in.A] == r.atoms.intern("charCodeAt") {
+				if p := r.proto.str.getOwn(f.cl.names[in.A]); p != nil && p.flags&^propDefault == 0 {
+					value, ok = p.value, true
+				}
+			} else if obj.IsObject() {
+				value, ok = plainOwn(obj.Object(), f.cl.names[in.A])
+			}
 			if !ok {
 				return pc, depth, steps
 			}
 			if in.Op == bytecode.OpGetProp {
 				dest, delta = sp-1, 0
 			}
+		case bytecode.OpCallMethod:
+			if in.A != 1 || !s.decode(s.slots[sp-2]).StrictEquals(r.jitCharCodeAt) {
+				return pc, depth, steps
+			}
+			receiver, index := s.decode(s.slots[sp-3]), s.decode(s.slots[sp-1])
+			if !receiver.IsString() || !index.IsNumber() {
+				return pc, depth, steps
+			}
+			str := receiver.String()
+			// Flattening or building UTF-16 storage stays at a published boundary.
+			if str.left != nil || !str.ascii && str.u16 == nil {
+				return pc, depth, steps
+			}
+			i := math.Trunc(index.Number())
+			if math.IsNaN(i) {
+				i = 0
+			}
+			value = Float(nan())
+			if i >= 0 && i < float64(str.Len()) {
+				value = Int(str.CharCodeAt(int(i)))
+			}
+			dest, delta = sp-3, -2
 		case bytecode.OpSetProp:
 			obj := s.decode(s.slots[sp-2])
 			if !obj.IsObject() {
@@ -871,6 +939,38 @@ func (s *jitState) encodeFrame(r *Runtime, f *frame, stack []Value, depth int) {
 	if s.referenceActive {
 		s.prepareReferences()
 	}
+	if s.strings {
+		s.prepareStringMethods(r)
+	}
+}
+
+func (s *jitState) prepareStringMethods(r *Runtime) {
+	s.charCodeAt = r.jitCharCodeAt
+	method := r.proto.str.getOwn(r.atoms.intern("charCodeAt"))
+	if method == nil || method.flags&^propDefault != 0 || !method.value.StrictEquals(s.charCodeAt) {
+		return
+	}
+	handle := -1
+	for i, root := range s.roots[:s.rootCount] {
+		if root.StrictEquals(s.charCodeAt) {
+			handle = i
+			break
+		}
+	}
+	if handle < 0 {
+		if s.rootCount == ir.MaxSlots {
+			return
+		}
+		handle = int(s.encode(s.charCodeAt).Bits)
+	}
+	// A numeric caller may already have rooted the intrinsic without granting
+	// string permissions. Upgrade that inert view before transferring a callee.
+	s.arrays[handle] = ir.ArrayView{DenseLength: ir.CharCodeAtBuiltin}
+	for i, root := range s.roots[:s.rootCount] {
+		if root.IsString() {
+			s.arrays[i].WritableHole = uint64(handle + 1)
+		}
+	}
 }
 
 func (s *jitState) prepareReferences() {
@@ -973,7 +1073,7 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 		}
 		switch in.Op {
 		case bytecode.OpPushThis, bytecode.OpGetProp, bytecode.OpSetProp, bytecode.OpCall,
-			bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpGetPropThis, bytecode.OpSetIndex:
+			bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpGetPropThis, bytecode.OpSetIndex, bytecode.OpNewArray:
 		default:
 			return sp, steps, nil
 		}
@@ -983,6 +1083,10 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 		var v Value
 		var err error
 		switch in.Op {
+		case bytecode.OpNewArray:
+			n := int(in.A)
+			v = Obj(r.newArrayFrom(stack[sp-n : sp]))
+			sp -= n
 		case bytecode.OpPushThis:
 			var bound bool
 			v, bound = f.thisValue()
