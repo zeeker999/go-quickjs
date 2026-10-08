@@ -22,7 +22,8 @@ across sessions. Update it **in the same commit** as the work it records.
     -run TestConformance -count=1 -timeout 60m -v -args -conformance.jit
   ```
 
-- **Next item:** P3 (the new pipeline on arm64) or P5 (helpers); P4 is done. The 24-hour fuzz, Phase 1's last
+- **Next item:** P3, the new pipeline on arm64 (the user: both arm64 and
+  amd64 must be supported); then P5's Go calls. The 24-hour fuzz, Phase 1's last
   gate item, runs at the next milestone.
 - **Stress test262:** `QJS_JIT_STRESS=threshold,budget=1 TEST262_DIR=d:/Data/test262 go test -tags quickjs_jit ./conformance -run TestConformance -v -args -conformance.jit`;
   `QJS_JIT_PIPELINE=ssa` runs the new pipeline wherever it compiles.
@@ -125,7 +126,13 @@ Design: [jit-phase2-design.md](jit-phase2-design.md). P2 gates the rest.
 
 **Gate:**
 - [ ] Every kernel and suite at least as fast as the old pipeline on both
-  architectures.
+  architectures. amd64, 2026-10-08 (a1e3973, idle Ryzen, medians of 3 at
+  300 ms): every `BenchmarkJIT*` kernel is, from 0.09x the old pipeline's
+  time (remainder) through 0.44x (particle), 0.62-0.67x (logistic), 0.65x
+  (dot), 0.74-0.81x (vector, stencil) and 0.88x (numeric globals) to 1.02x
+  (numeric fields, level). Against the tree tier one is behind: a Go call,
+  86 us per 1,000 iterations against 71.5 (P5). arm64: the new pipeline
+  has no backend yet (P3); everything there runs on the old one.
 - [ ] No divergence under the Phase 1 tools.
 - [ ] Compile budget met.
 
