@@ -252,8 +252,16 @@ func (b *builder) trySeal(blk *Block) {
 }
 
 func (b *builder) seal(blk *Block) {
-	for slot, phi := range b.incomplete[blk] {
-		b.addPhiOperands(slot, phi)
+	// Slot by slot, never in map order: completing a phi can make others,
+	// and their numbers must not vary from one build to the next.
+	pending := b.incomplete[blk]
+	slots := make([]int, 0, len(pending))
+	for slot := range pending {
+		slots = append(slots, slot)
+	}
+	sort.Ints(slots)
+	for _, slot := range slots {
+		b.addPhiOperands(slot, pending[slot])
 	}
 	delete(b.incomplete, blk)
 	b.sealed[blk] = true

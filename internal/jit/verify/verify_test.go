@@ -30,8 +30,11 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/compiler"
 	"github.com/go-quickjs/go-quickjs/internal/jit"
+	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
+	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 	"github.com/go-quickjs/go-quickjs/internal/parser"
 )
 
@@ -226,4 +229,46 @@ func TestEmittedFromRandomPrograms(t *testing.T) {
 	if valid < 1000 {
 		t.Fatalf("only %d valid random programs", valid)
 	}
+}
+
+// The new pipeline's code (internal/jit/mir) keeps the same rules, for every
+// function its random and JavaScript corpora compile.
+func TestMirEmitted(t *testing.T) {
+	enc := abi.Encoding{ValueSize: 16, NumOffset: 0, RefOffset: 8,
+		Undefined: 0xFFF8000000000001, Null: 0xFFF8000000000002, True: 0xFFF8000000000103,
+		False: 0xFFF8000000000003, Uninitialized: 0xFFF8000000000008, CanonicalNaN: 0x7FF8000000000000}
+	compile := func(name string, p *ir.Program) bool {
+		f, err := ssa.Build(p)
+		if err != nil {
+			return false
+		}
+		ssa.Optimize(f)
+		mc, err := mir.CompileAMD64(f, enc)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if err := check("amd64", mc.Bytes); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		return true
+	}
+	n := 0
+	for _, src := range jsCorpus {
+		for i, p := range lowered(t, src) {
+			if compile(fmt.Sprintf("%s (%d)", src, i), p) {
+				n++
+			}
+		}
+	}
+	r := rand.New(rand.NewPCG(5, 6))
+	for attempt := 0; attempt < 50000 && n < 2000; attempt++ {
+		p := randomProgram(r)
+		if p.Validate() == nil && compile(fmt.Sprintf("random %d", attempt), p) {
+			n++
+		}
+	}
+	if n < 500 {
+		t.Fatalf("only %d functions compiled", n)
+	}
+	t.Logf("%d functions", n)
 }
