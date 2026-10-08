@@ -314,9 +314,9 @@ func TestNativeProgramArrays(t *testing.T) {
 }
 
 func TestNativeProgramArrayViewCache(t *testing.T) {
-	p := &ir.Program{Locals: 4, Code: []ir.Instruction{
+	p := &ir.Program{Locals: 5, Code: []ir.Instruction{
 		{Op: ir.ArrayRead, Left: ir.Slot(0), Right: ir.Slot(1), Dest: 2},
-		{Op: ir.ArrayRead, Left: ir.Literal(ir.Value{Kind: ir.Opaque, Bits: 1}), Right: ir.Slot(1), Dest: 3},
+		{Op: ir.ArrayRead, Left: ir.Slot(4), Right: ir.Slot(1), Dest: 3},
 		{Op: ir.ArrayRead, Left: ir.Slot(0), Right: ir.Slot(1), Dest: 2},
 		{Op: ir.Binary, Operator: ir.Add, Left: ir.Slot(2), Right: ir.Slot(3), Dest: 2},
 		{Op: ir.Return, Left: ir.Slot(2)},
@@ -329,7 +329,7 @@ func TestNativeProgramArrayViewCache(t *testing.T) {
 	}
 	for _, handle := range []uint64{0, 1, 255, 256, ^uint64(0)} {
 		for _, budget := range []uint64{0, 1, 2, 3, 4, 5} {
-			x := []ir.Value{{Kind: ir.Opaque, Bits: handle}, ir.Float(0), ir.Float(0), ir.Float(0)}
+			x := []ir.Value{{Kind: ir.Opaque, Bits: handle}, ir.Float(0), ir.Float(0), ir.Float(0), {Kind: ir.Opaque, Bits: 1}}
 			y := append([]ir.Value(nil), x...)
 			want, _ := p.EvaluateArrays(x, views, 0, budget)
 			got, err := c.RunArrays(y, views, 0, budget)
@@ -338,7 +338,7 @@ func TestNativeProgramArrayViewCache(t *testing.T) {
 			}
 		}
 	}
-	x := []ir.Value{{Kind: ir.Opaque}, ir.Float(0), ir.Float(0), ir.Float(0)}
+	x := []ir.Value{{Kind: ir.Opaque}, ir.Float(0), ir.Float(0), ir.Float(0), {Kind: ir.Opaque, Bits: 1}}
 	if got, err := c.RunArrays(x, nil, 0, 5); err != nil || got.Kind != ir.GuardExit || got.Steps != 0 {
 		t.Fatalf("nil views: %+v %v", got, err)
 	}

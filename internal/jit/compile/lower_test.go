@@ -531,3 +531,45 @@ func TestLowerPanicRefuses(t *testing.T) {
 		}
 	}
 }
+
+// Every opcode describe accepts has a case in lower. One without would have
+// become a Nop carrying describe's stack effect, a silent miscompile; now it
+// panics, which lowering turns into a refusal, and this test fails.
+func TestLowerCoversDescribedOpcodes(t *testing.T) {
+	fn := &bytecode.Function{
+		ParamCount: 1, LocalCount: 4, PropSites: 4,
+		Code:      make([]bytecode.Instr, 16),
+		Constants: []bytecode.Constant{{Kind: bytecode.ConstNumber, Num: 1}},
+		Names:     []string{"x", "charCodeAt"},
+		Locals:    []bytecode.LocalDesc{{Mutable: true}, {Mutable: true}, {Mutable: true}, {Mutable: true}},
+		Upvalues:  make([]bytecode.UpvalueDesc, 2),
+	}
+	operands := []uint32{0, 1, 2, 3, uint32(bytecode.OpAdd), uint32(bytecode.OpLt), uint32(bytecode.OpBitAnd), 1<<24 | 1}
+	accepted := map[bytecode.Op]bool{}
+	for op := 0; op < 256; op++ {
+		code := bytecode.Op(op)
+		if strings.HasPrefix(code.String(), "op(") {
+			continue
+		}
+		for _, a := range operands {
+			for _, b := range operands {
+				in := bytecode.Instr{Op: code, A: a, B: b}
+				if _, err := describe(fn, 0, in); err != nil {
+					continue
+				}
+				accepted[code] = true
+				func() {
+					defer func() {
+						if v := recover(); v != nil {
+							t.Errorf("%v (A=%d B=%d) is described but not lowered: %v", code, a, b, v)
+						}
+					}()
+					lower(fn, in, 8, false)
+				}()
+			}
+		}
+	}
+	if len(accepted) < 40 {
+		t.Fatalf("only %d opcodes accepted: the fixture no longer exercises describe", len(accepted))
+	}
+}

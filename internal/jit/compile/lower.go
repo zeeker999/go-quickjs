@@ -758,8 +758,14 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this bool) ir.Instr
 		return ir.Instruction{Op: ir.Return, Left: top}
 	case bytecode.OpReturnUndef:
 		return ir.Instruction{Op: ir.Return, Left: ir.Literal(ir.Value{Kind: ir.Undefined})}
+	case bytecode.OpNop, bytecode.OpEndParams, bytecode.OpDrop:
+		// A pop writes no slot: the next map's depth is the whole effect.
+		return ir.Instruction{Op: ir.Nop}
 	}
-	return ir.Instruction{Op: ir.Nop}
+	// describe accepted an opcode this switch does not translate. Becoming a
+	// Nop with describe's stack effect would be a silent miscompile; the panic
+	// is a refusal (lowerRecovered).
+	panic(fmt.Sprintf("jit: no lowering for %v", in.Op))
 }
 
 // An intrinsic snapshot and an extra root must amortize their entry cost.

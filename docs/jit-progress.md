@@ -33,7 +33,7 @@ across sessions. Update it **in the same commit** as the work it records.
 | R3 | No full heap walk per compile attempt; budget refusals cached until code is released (instead of exponential back-off) | done | jit: keep native code out of the script's memory |
 | R4a | `recover` in compilation becomes a permanent refusal | done | jit: refuse instead of crashing when compilation panics |
 | R4b | Size `inferIntegerResults`'s origin table from the final origin count, with an invariant test | done | jit: refuse instead of crashing when compilation panics |
-| R7 | One exhaustive per-opcode table (stack effect + lowering, missing means refuse); kind inference's default clears all facts; `Validate` rejects non-scalar literals | todo | |
+| R7 | No silent miscompile paths: `lower` has no default `Nop` (an untranslated opcode panics and is refused), kind inference names every operation (else refused), `Validate` rejects handle literals; `TestLowerCoversDescribedOpcodes` walks every opcode. A single shared per-opcode table waits for Phase 2's lowering. | done | jit: refuse what lowering and kind inference do not know |
 | Z1 | `closure` stays 128 B in tagged builds (index, not pointer); size and field-order checks in both builds (`TestJITFieldLayout`) | done | jit: cost nothing while off |
 | Z2 | `jitTreeRecovery` only for frames whose function can enter a native loop | done | jit: cost nothing while off |
 | C1 | Delete `dispatch*.go`/`.s` and `loop*.go` with their tests | done | jit: delete the unused dispatch layer and loop prototype |

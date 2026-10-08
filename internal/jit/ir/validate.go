@@ -35,7 +35,10 @@ func (p *Program) Validate() error {
 		active := p.Locals + p.Maps[pc].Depth
 		source := func(o Operand) bool {
 			if o.Slot == -1 {
-				return o.Literal.Kind <= String && (o.Literal.Kind != Boolean || o.Literal.Bits <= 1)
+				// A literal is a scalar. A handle (Opaque, String) indexes the
+				// caller's root tables, so only a slot the caller filled may
+				// hold one: a literal handle would be a forged reference.
+				return o.Literal.Kind <= Uninitialized && (o.Literal.Kind != Boolean || o.Literal.Bits <= 1)
 			}
 			return o.Slot >= 0 && o.Slot < active
 		}
