@@ -20,7 +20,7 @@ func compileProgram(p *ir.Program, limit int) (*Code, error) {
 	if limit <= 0 {
 		return nil, ErrCodeBudget
 	}
-	instructions, entries, err := programInstructions(p)
+	instructions, entries, err := emitRecovered(p)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrProgram, err)
 	}
@@ -68,7 +68,23 @@ func runProgramCode(code []byte, offset int, state *programState, slots []ir.Val
 
 // enterProgram tail-jumps to the program: it retains the Go return address
 // and stack, and the program returns directly to the Go caller. There are no
-// native calls or stack changes, and every path is bounded by a checked instruction budget.
+// native calls or stack changes, and every path is bounded by a checked
+// instruction budget.
 //
 //go:noescape
 func enterProgram(code *byte, state *programState, slots *ir.Value, arrays *ir.ArrayView)
+
+// emitRecovered turns a panic in analysis or emission into an error, which
+// compileProgram reports as ErrProgram: an optional tier must never take down
+// its host, and the function then runs in the existing tiers.
+func emitRecovered(p *ir.Program) (instructions []byte, entries []int, err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			instructions, entries, err = nil, nil, fmt.Errorf("internal error: %v", v)
+		}
+	}()
+	return emitInstructions(p)
+}
+
+// emitInstructions is programInstructions, or a test's replacement for it.
+var emitInstructions = programInstructions

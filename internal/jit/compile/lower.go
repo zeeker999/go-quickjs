@@ -42,21 +42,36 @@ func refuse(pc int, why string) error { return &Refusal{PC: pc, Reason: why} }
 // Property keys are source-name indices; the VM resolves them to its runtime's
 // scalar property identifiers before emission or evaluation with borrowed views.
 func Lower(fn *bytecode.Function) (*ir.Program, error) {
-	return lowerFunction(fn, false, false)
+	return lowerRecovered(fn, false, false)
 }
 
 // LowerCalls additionally retains guarded numeric fields across call boundaries.
 // Its caller must refresh borrowed views after every potentially effectful call.
 func LowerCalls(fn *bytecode.Function) (*ir.Program, error) {
-	return lowerFunction(fn, true, false)
+	return lowerRecovered(fn, true, false)
 }
 
 // LowerCallee permits small guarded functions whose entry costs are amortized
 // by an encoded caller. It keeps reference fields on the coordinator's host
 // path and does not change the standalone profitability policy.
 func LowerCallee(fn *bytecode.Function) (*ir.Program, error) {
-	return lowerFunction(fn, true, true)
+	return lowerRecovered(fn, true, true)
 }
+
+// lowerRecovered turns a panic in analysis into a refusal: an optional tier
+// must never take down its host, and the function then runs in the existing
+// tiers.
+func lowerRecovered(fn *bytecode.Function, calls, callee bool) (p *ir.Program, err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			p, err = nil, refuse(-1, fmt.Sprintf("internal error: %v", v))
+		}
+	}()
+	return lowerImpl(fn, calls, callee)
+}
+
+// lowerImpl is lowerFunction, or a test's replacement for it.
+var lowerImpl = lowerFunction
 
 func lowerFunction(fn *bytecode.Function, calls, callee bool) (*ir.Program, error) {
 	if fn == nil {

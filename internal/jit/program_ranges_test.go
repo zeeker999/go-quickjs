@@ -158,3 +158,34 @@ func TestNativeRetainedIntegers(t *testing.T) {
 		}
 	}
 }
+
+// Insert3 hands out four origins per instruction, so a long run of them
+// alternating with bitwise operations once overran the integer-use table
+// (arm64 only uses it, but the analysis is shared).
+func TestIntegerResultsOriginBound(t *testing.T) {
+	p := &ir.Program{StackSize: 4}
+	add := func(in ir.Instruction, depth int) {
+		p.Code = append(p.Code, in)
+		p.Maps = append(p.Maps, ir.StateMap{PC: uint32(len(p.Maps)), Depth: depth})
+	}
+	for i := 0; i < 3; i++ {
+		add(ir.Instruction{Op: ir.Copy, Dest: i, Left: ir.Literal(ir.Float(float64(i + 5)))}, i)
+	}
+	for len(p.Code)+3 <= ir.MaxInstructions {
+		add(ir.Instruction{Op: ir.Insert3, Dest: 0}, 3)
+		add(ir.Instruction{Op: ir.Binary, Operator: ir.BitOr, Dest: 2, Left: ir.Slot(2), Right: ir.Slot(3)}, 4)
+	}
+	add(ir.Instruction{Op: ir.Return, Left: ir.Slot(2)}, 3)
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	a := &programAssembler{}
+	for range p.Code {
+		a.label()
+	}
+	a.regions(p)
+	if a.originCount <= ir.MaxInstructions*2+ir.MaxSlots {
+		t.Fatalf("origin count %d does not exercise the old bound", a.originCount)
+	}
+	a.inferIntegerResults(p)
+}

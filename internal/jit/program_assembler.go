@@ -28,14 +28,17 @@ type programAssembler struct {
 	ranges                         [][ir.MaxSlots]uint8
 	unchanged                      [][ir.MaxSlots]bool
 	origins                        [][ir.MaxSlots]uint16
-	arrayCacheID                   int
-	propertyCacheID                int
-	propertyCacheKey               uint32
-	pc                             int
-	exits                          []programExit
-	conversions                    []integerConversion
-	integerOrigin                  int
-	integerResults                 []bool
+	// originCount bounds every origin in origins: MaxSlots initial ones, and
+	// up to four per instruction in a region (Insert3).
+	originCount      int
+	arrayCacheID     int
+	propertyCacheID  int
+	propertyCacheKey uint32
+	pc               int
+	exits            []programExit
+	conversions      []integerConversion
+	integerOrigin    int
+	integerResults   []bool
 }
 
 // R3/AX retain the last ToUint32 result through scalar copies. The origin
@@ -268,6 +271,7 @@ func (a *programAssembler) inferKinds(p *ir.Program) {
 	var origins [ir.MaxSlots]uint16
 	next := uint16(ir.MaxSlots)
 	reset := func() {
+		a.originCount = max(a.originCount, int(next))
 		for i := range kinds {
 			kinds[i] = -1
 			origins[i] = uint16(i)
@@ -293,6 +297,7 @@ func (a *programAssembler) inferKinds(p *ir.Program) {
 		}
 	}
 	write := func(dest int, k int8) { kinds[dest] = k; origins[dest] = next; next++ }
+	defer func() { a.originCount = max(a.originCount, int(next)) }()
 	for pc, in := range p.Code {
 		if p.Maps[pc].Depth < 0 {
 			continue

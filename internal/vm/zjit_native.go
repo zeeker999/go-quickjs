@@ -270,9 +270,14 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool) *jitEntry {
 			if errors.Is(err, jit.ErrUnavailable) {
 				s.unavailable = true
 			}
-			return nil
-		}
-		if len(e.referenceKeys) != 0 && s.references == nil {
+			// Budget and OS refusals may pass later, so they are retried after
+			// another warmup. A program the emitter rejects -- or panicked on --
+			// is rejected every time: cache the refusal.
+			if !errors.Is(err, jit.ErrProgram) {
+				return nil
+			}
+			e.code = nil
+		} else if len(e.referenceKeys) != 0 && s.references == nil {
 			s.references = new(jitReferences)
 		}
 	}
