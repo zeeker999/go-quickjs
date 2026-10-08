@@ -1,4 +1,4 @@
-//go:build quickjs_jit && !android && !ios && (linux || windows)
+//go:build quickjs_jit && !android && !ios && ((linux && amd64) || (windows && amd64) || (darwin && arm64))
 
 package jit
 
@@ -21,7 +21,7 @@ type amd64Program struct {
 	guard, budget, returned, host int
 }
 
-func programInstructions(p *ir.Program) ([]byte, []int, error) {
+func amd64Instructions(p *ir.Program) ([]byte, []int, error) {
 	a := &amd64Program{}
 	a.allocateRegisters(p, []int{2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14})
 	for range p.Code {
@@ -277,6 +277,12 @@ func (a *amd64Program) immediate(reg byte, bits uint64) {
 }
 
 func (a *amd64Program) memory(op, reg, base byte, offset uint32) {
+	// ModRM alone cannot name RSP or R12 as a base: r/m 100 says a SIB byte
+	// follows. Neither is ever a base here; refuse rather than mis-encode
+	// (emitRecovered).
+	if base&7 == 4 {
+		panic("jit: memory operand based on RSP or R12 needs a SIB byte")
+	}
 	a.bytes(0x48|(reg>>3)<<2|base>>3, op, 0x80|(reg&7)<<3|base&7)
 	a.word(offset)
 }

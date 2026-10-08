@@ -24,7 +24,8 @@ This file states the contracts the code keeps. Where the work is going is in
 |---|---|
 | `ir` | The slot IR, one instruction per bytecode PC, with a state map at each. `Validate` checks a program, and `Evaluate`, a Go interpreter of the IR, is the oracle native code is tested against. |
 | `compile` | Lowers bytecode into the IR, or refuses it (`Refusal`). It never imports the VM. |
-| `program_*.go` | Analysis (`program_assembler.go`, `program_ranges.go`) and the two emitters: `program_amd64.go` and `program_arm64.go`. |
+| `program_*.go`, `emit_*.go` | Analysis (`program_assembler.go`, `program_ranges.go`) and the two emitters, `emit_x86.go` and `emit_a64.go`. Both build on every supported target; `emit_amd64.go` or `emit_arm64.go` picks this target's. |
+| `verify` | A module of its own that checks every emitted program against `golang.org/x/arch`'s disassemblers. |
 | `entry_*.s` | The bridges from Go into a program. |
 | `memory_*.go`, `policy_darwin.go` | Executable memory. |
 | `internal/vm/zzjit_native.go` | The VM's side: selection, the code cache, frame encoding and publication, host exits. |
@@ -74,8 +75,8 @@ text:
   turns into an error.
 
 So an emitter bug can take down the host. The defence is verification: the
-IR oracle, differential tests at every entry and budget, and (planned) encoder
-checks against a disassembler.
+IR oracle, differential tests at every entry and budget, and `verify`, which
+disassembles what both emitters make.
 
 **Compiler panics are refusals.** `compile.Lower` and `Compile` recover a
 panic in analysis or emission into a refusal (`Refusal`, `ErrProgram`), and
@@ -217,6 +218,7 @@ QUICKJS_REQUIRE_JIT=1 CGO_ENABLED=0 go test -tags quickjs_jit ./internal/jit/...
 go test -tags quickjs_jit -race -count=1 ./internal/jit/...
 go test -tags quickjs_jit -gcflags=all=-d=checkptr=2 ./internal/jit/... ./internal/vm
 go test -tags quickjs_jit ./internal/jit/compile -run '^$' -fuzz '^FuzzLower$' -fuzztime=30s
+(cd internal/jit/verify && go test -tags quickjs_jit ./...)   # encodings, both arches
 TEST262_DIR=/path/to/test262 go test -tags quickjs_jit ./conformance \
   -run TestConformance -count=1 -timeout 60m -args -conformance.jit
 ```
