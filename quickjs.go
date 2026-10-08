@@ -113,6 +113,7 @@ type Runtime struct {
 type Option func(*config)
 
 type config struct {
+	jit              bool
 	moduleFetchLimit int
 	memoryLimit      int64
 	stackSize        int
@@ -124,6 +125,16 @@ type config struct {
 	sourceMaps       bool
 	sourceMapLoader  SourceMapLoader
 }
+
+// WithJIT enables the experimental native numeric tier. It requires a build
+// with the quickjs_jit tag on linux/amd64, windows/amd64, or darwin/arm64.
+// Unsupported builds, denied executable memory, and unsupported functions
+// use the existing execution tiers. Native code is owned by this Runtime and
+// counts toward WithMemoryLimit. Eligible functions may promote after repeated
+// calls or sustained looping; native execution and speedup are not guaranteed.
+// Runtimes made with WithDebugger use the existing execution tiers.
+// This is independent of WithoutCodeGeneration.
+func WithJIT() Option { return func(c *config) { c.jit = true } }
 
 // WithMemoryLimit caps the memory a script may hold, beyond what the
 // runtime's built-ins take. A script that exceeds it is stopped, and the
@@ -267,6 +278,7 @@ func New(opts ...Option) *Runtime {
 		o(&c)
 	}
 	r := &Runtime{rt: vm.New(vm.Config{
+		JIT:          c.jit,
 		MemoryLimit:  c.memoryLimit,
 		StackSize:    c.stackSize,
 		MaxCallDepth: c.maxCallDepth,

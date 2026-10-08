@@ -34,6 +34,7 @@ import (
 // example, -conformance.force-feature=Temporal.
 
 var (
+	jitFlag    = flag.Bool("conformance.jit", false, "enable the optional native numeric tier")
 	reportPath = flag.String("conformance.report", "",
 		"write the list of failing tests to this file")
 	subdirFlag = flag.String("conformance.dir", "",
@@ -288,6 +289,9 @@ func runOne(suite *conformance.Suite, tc *conformance.Test,
 		}
 		if *debugger {
 			opts = append(opts, quickjs.WithDebugger())
+		}
+		if *jitFlag {
+			opts = append(opts, quickjs.WithJIT())
 		}
 		return quickjs.New(opts...)
 	}

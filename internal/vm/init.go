@@ -10,6 +10,8 @@ import (
 
 // Config configures a new Runtime.
 type Config struct {
+	// JIT enables the optional native numeric tier when built with quickjs_jit.
+	JIT bool
 	// MemoryLimit caps the bytes the runtime may account for, or 0 for no
 	// limit.
 	MemoryLimit int64
@@ -66,6 +68,7 @@ func New(cfg Config) *Runtime {
 	r.initWellKnownSymbols()
 	r.initRealm()
 	r.setMemoryLimit(cfg.MemoryLimit)
+	r.initJIT(cfg.JIT)
 	return r
 }
 
