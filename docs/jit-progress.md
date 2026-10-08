@@ -132,8 +132,17 @@ contents.
 | 2026-10-08 | JIT off must cost nothing, in both untagged and tagged builds. |
 | 2026-10-08 | Go-side calls use wazero's exit/resume on a native stack. No pointer stores or allocation from native code. |
 
-**Open:** D8's reference-reassignment question (Phase 4 spike); macOS
-hardened-runtime support (Phase 6).
+**Open:** D8's reference-reassignment question (Phase 4 spike), now
+blocking P4e's `ReferenceRead`; macOS hardened-runtime support (Phase 6).
+Proposed 2026-10-08, awaiting the user's decision: a reference loaded from
+the heap (`o.a.b`, `this.items[i]`, a global function) carries its cell's
+address the way an ambiguous phi carries its slot (a shadow); native code
+reads through it and never stores it, and an exit record has Go copy from
+that cell. Sound while Go's heap does not move and the object graph does
+not change while native code runs -- it changes only between entries -- but
+outside `unsafe.Pointer`'s documented rules, so it needs the decision, a
+stress test, and a check with each new Go version. The alternative keeps
+such values out of native code: every read of one exits to Go.
 
 ## Baseline measurements (2026-10-08, Ryzen, Windows/amd64, Go 1.27.1)
 
