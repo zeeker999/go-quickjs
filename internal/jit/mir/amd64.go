@@ -107,6 +107,9 @@ func CompileAMD64(f *ssa.Func, enc abi.Encoding) (code *Code, err error) {
 	if f.FrameLocals < 0 || f.FrameLocals > f.Locals {
 		return nil, fmt.Errorf("%w: %d frame locals of %d", ErrUnsupported, f.FrameLocals, f.Locals)
 	}
+	if f.ThisSlot != -1 && (f.ThisSlot < f.FrameLocals || f.ThisSlot >= f.Locals) {
+		return nil, fmt.Errorf("%w: the receiver at slot %d", ErrUnsupported, f.ThisSlot)
+	}
 	if err := capturedUnchanged(f); err != nil {
 		return nil, err
 	}
@@ -155,7 +158,8 @@ func CompileAMD64(f *ssa.Func, enc abi.Encoding) (code *Code, err error) {
 	return &Code{Bytes: bytes, Entries: entries, Locations: c.describe()}, nil
 }
 
-// capturedUnchanged requires that no instruction write a captured binding:
+// capturedUnchanged requires that no instruction write a captured binding,
+// or the receiver, past the frame's locals:
 // every frame state then holds its value from entry there (in whatever
 // representation the optimizer chose), and exits leave those slots alone.
 func capturedUnchanged(f *ssa.Func) error {
@@ -533,6 +537,8 @@ func (c *compiler) slotAddr(slot int, ref bool, scratch amd64.Reg) (amd64.Reg, i
 	switch {
 	case slot < c.f.FrameLocals:
 		return regLocals, int32(slot)*c.enc.ValueSize + off
+	case slot == c.f.ThisSlot:
+		return regCtx, abi.OffThis + off
 	case slot < c.f.Locals:
 		c.a.Load(scratch, regCtx, abi.OffUpvalues)
 		c.a.Load(scratch, scratch, int32(slot-c.f.FrameLocals)*8)
@@ -542,7 +548,8 @@ func (c *compiler) slotAddr(slot int, ref bool, scratch amd64.Reg) (amd64.Reg, i
 	return regStack, int32(slot-c.f.Locals)*c.enc.ValueSize + off
 }
 
-// captured reports whether a slot is a captured binding.
+// captured reports whether a slot is past the frame's locals: a captured
+// binding, or the receiver.
 func (c *compiler) captured(slot int) bool { return slot >= c.f.FrameLocals && slot < c.f.Locals }
 
 // gpr returns a register holding v's word, loading a spilled or lazy value
@@ -1019,16 +1026,30 @@ func (c *compiler) branch(b *ssa.Block, next *ssa.Block) {
 	c.edge(b, b.Succs[0], next)
 }
 
-// arrayOf finds the array a value is: the pointer word of the slot it came
-// from, which still holds it (origin.go). A value with an object's word is
-// its origin's object, since native code makes no such word.
+// arrayOf finds the array a value is, as objectOf finds an object, and
+// checks its class.
 func (c *compiler) arrayOf(v *ssa.Value, guard func(amd64.Cond)) {
+	if !c.objectOf(v, guard) {
+		return
+	}
+	c.a.LoadU8(scratchB, scratchC, c.enc.ObjectClass)
+	c.a.OpImm(amd64.Cmp, scratchB, int32(c.enc.ClassArray), false)
+	guard(amd64.CondNE)
+	c.setG(v, scratchC)
+}
+
+// objectOf finds the object a value is, into scratchC: the pointer word of
+// the slot it came from, which still holds it (origin.go). A value with an
+// object's word is its origin's object, since native code makes no such
+// word. It reports false when the value can never be one, having emitted
+// the jump to the exit.
+func (c *compiler) objectOf(v *ssa.Value, guard func(amd64.Cond)) bool {
 	a := v.Args[0]
 	o := c.origin[a]
 	if a.Shadow == nil && o < 0 {
-		// A primitive is never an array.
+		// A primitive is never an object.
 		c.a.Jmp(c.stubLabel(v.State, exitKind(v.Aux)))
-		return
+		return false
 	}
 	w := c.gpr(a, scratchA)
 	c.a.MovImm(scratchB, c.enc.Object)
@@ -1049,6 +1070,15 @@ func (c *compiler) arrayOf(v *ssa.Value, guard func(amd64.Cond)) {
 		c.a.Bind(captured)
 		c.a.OpImm(amd64.Cmp, scratchC, int32(c.f.Locals), false)
 		c.a.Jcc(amd64.CondGE, stack)
+		if t := c.f.ThisSlot; t >= 0 {
+			notThis := c.a.NewLabel()
+			c.a.OpImm(amd64.Cmp, scratchC, int32(t), false)
+			c.a.Jcc(amd64.CondNE, notThis)
+			c.a.MovRR(scratchC, regCtx)
+			c.a.OpImm(amd64.Add, scratchC, abi.OffThis, true)
+			c.a.Jmp(found)
+			c.a.Bind(notThis)
+		}
 		c.a.OpImm(amd64.Sub, scratchC, int32(c.f.FrameLocals), false)
 		c.a.ShiftImm(amd64.Shl, scratchC, 3, true)
 		c.a.Load(scratchB, regCtx, abi.OffUpvalues)
@@ -1068,10 +1098,59 @@ func (c *compiler) arrayOf(v *ssa.Value, guard func(amd64.Cond)) {
 	}
 	c.a.Op(amd64.Test, scratchC, scratchC, true)
 	guard(amd64.CondE)
-	c.a.LoadU8(scratchB, scratchC, c.enc.ObjectClass)
-	c.a.OpImm(amd64.Cmp, scratchB, int32(c.enc.ClassArray), false)
+	return true
+}
+
+// property finds the property a property operation names and leaves the
+// address of its value in scratchA. An object of the shape the site's cache
+// knows has it at the cached index: the shape settles where it is and what
+// it is. Any other ordinary object with a small table is searched for the
+// key, unrolled, as the VM's own small objects are; the entry must be plain
+// data, and writable for a write. It uses scratchB and scratchC.
+func (c *compiler) property(v *ssa.Value, guard func(amd64.Cond)) {
+	found, scan := c.a.NewLabel(), c.a.NewLabel()
+	if v.Const.Bits != 0 {
+		p := c.gpr(v.Args[0], scratchA)
+		c.a.Load(scratchB, p, c.enc.ObjectShape)
+		c.a.MovImm(scratchA, v.Const.Bits)
+		c.a.Op(amd64.Cmp, scratchB, scratchA, true)
+		c.a.Jcc(amd64.CondNE, scan)
+		p = c.gpr(v.Args[0], scratchA)
+		c.a.Load(scratchA, p, c.enc.ObjectProps)
+		c.a.OpImm(amd64.Add, scratchA, int32(v.Index)*c.enc.PropertySize+c.enc.PropertyValue, true)
+		c.a.Jmp(found)
+	}
+	c.a.Bind(scan)
+	p := c.gpr(v.Args[0], scratchA)
+	c.a.LoadU8(scratchB, p, c.enc.ObjectClass)
+	c.a.OpImm(amd64.Cmp, scratchB, int32(c.enc.ClassObject), false)
 	guard(amd64.CondNE)
-	c.setG(v, scratchC)
+	c.a.Load(scratchB, p, c.enc.ObjectProps+8)
+	c.a.OpImm(amd64.Cmp, scratchB, abi.MaxScan, true)
+	guard(amd64.CondA)
+	c.a.Load(scratchA, p, c.enc.ObjectProps)
+	mask, want := int32(c.enc.PropNotData), int32(0)
+	if v.Op == ssa.OpPropWrite {
+		mask, want = int32(c.enc.PropNotWritable), int32(c.enc.PropWritable)
+	}
+	for k := int32(0); k < abi.MaxScan; k++ {
+		next := c.a.NewLabel()
+		entry := k * c.enc.PropertySize
+		c.a.OpImm(amd64.Cmp, scratchB, k, true)
+		guard(amd64.CondBE)
+		c.a.LoadU32(scratchC, scratchA, entry+c.enc.PropertyKey)
+		c.a.OpImm(amd64.Cmp, scratchC, int32(v.Key), false)
+		c.a.Jcc(amd64.CondNE, next)
+		c.a.LoadU8(scratchC, scratchA, entry+c.enc.PropertyFlags)
+		c.a.OpImm(amd64.And, scratchC, mask, false)
+		c.a.OpImm(amd64.Cmp, scratchC, want, false)
+		guard(amd64.CondNE)
+		c.a.OpImm(amd64.Add, scratchA, entry+c.enc.PropertyValue, true)
+		c.a.Jmp(found)
+		c.a.Bind(next)
+	}
+	c.a.Jmp(c.stubLabel(v.State, exitKind(v.Aux)))
+	c.a.Bind(found)
 }
 
 // index converts an element's key, a double, to an index in scratchA,
@@ -1142,6 +1221,26 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.truth(v, guard)
 	case ssa.OpArrayOf:
 		c.arrayOf(v, guard)
+	case ssa.OpObjectOf:
+		if c.objectOf(v, guard) {
+			c.setG(v, scratchC)
+		}
+	case ssa.OpPropRead:
+		c.property(v, guard)
+		c.a.Load(scratchB, scratchA, c.enc.NumOffset)
+		c.a.MovImm(scratchC, abi.NumberLimit)
+		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+		guard(amd64.CondAE)
+		c.a.MovQToX(xScratch0, scratchB)
+		c.setX(v, xScratch0)
+	case ssa.OpPropWrite:
+		c.property(v, guard)
+		c.a.Load(scratchB, scratchA, c.enc.NumOffset)
+		c.a.MovImm(scratchC, abi.NumberLimit)
+		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+		guard(amd64.CondAE)
+		c.boxF64(c.xmm(arg(1), xScratch0), scratchB)
+		c.a.Store(scratchA, c.enc.NumOffset, scratchB)
 	case ssa.OpArrayLen:
 		// The dense count, or a sparse array's length when that is larger,
 		// as Object.arrayLength has it.

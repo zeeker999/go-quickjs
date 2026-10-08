@@ -16,7 +16,9 @@ const (
 	jitSSABackend = false
 )
 
-func (r *Runtime) compileSSA(*bytecode.Function, *ir.Program, int) *jit.SSACode { return nil }
+func (r *Runtime) compileSSA(*bytecode.Function, *closure, *ir.Program, int) (*jit.SSACode, []*shape) {
+	return nil, nil
+}
 
 func (r *Runtime) runSSA(*frame, *jitEntry, int, int) (Value, error, bool) {
 	return Undefined, nil, false

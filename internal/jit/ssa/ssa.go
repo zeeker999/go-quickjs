@@ -70,6 +70,17 @@ const (
 	OpElemRead  // ptr, f64 -> f64: the element, if the index's is a number
 	OpElemWrite // ptr, f64, f64 -> none: stores, if the index's is a number
 
+	// Properties, read in place (D8). Where the VM's cache for the site knows
+	// a shape (Const.Bits, the shape's address, which the VM keeps alive; 0
+	// if none), an object of it has the property at Index of its table, a
+	// writable one for a write. Any other ordinary object whose table is
+	// small is searched for Key, as the VM searches it: the property must be
+	// its own plain data, and writable for a write. Values are numbers, as
+	// in the slot IR; anything else exits to Go.
+	OpObjectOf  // tagged -> ptr, if an object
+	OpPropRead  // ptr -> f64: the property, if the shape's and a number
+	OpPropWrite // ptr, f64 -> none: stores, if the shape's and a number
+
 	// Boxing: a typed value as a slot value.
 	OpBoxF64
 	OpBoxBool
@@ -102,6 +113,7 @@ var opNames = [...]string{
 	OpInvalid: "invalid", OpLoadSlot: "load", OpConst: "const", OpConstF64: "constf", OpConstI32: "consti", OpPhi: "phi",
 	OpUnboxF64: "unbox", OpTruth: "truth", OpCheckInit: "checkinit", OpBoxF64: "boxf", OpBoxBool: "boxb",
 	OpArrayOf: "arrayof", OpElemKey: "elemkey", OpElemRead: "elemread", OpElemWrite: "elemwrite", OpArrayLen: "arraylen",
+	OpObjectOf: "objectof", OpPropRead: "propread", OpPropWrite: "propwrite",
 	OpAddF64: "addf", OpSubF64: "subf", OpMulF64: "mulf", OpDivF64: "divf", OpNegF64: "negf", OpCmpF64: "cmpf",
 	OpNot: "not", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
@@ -117,17 +129,18 @@ func (o Op) String() string {
 // isGuard reports whether an op exits when its operand is not what it needs.
 func (o Op) isGuard() bool {
 	switch o {
-	case OpUnboxF64, OpTruth, OpCheckInit, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite:
+	case OpUnboxF64, OpTruth, OpCheckInit, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite,
+		OpObjectOf, OpPropRead, OpPropWrite:
 		return true
 	}
 	return false
 }
 
-// readsMemory reports whether a guard's result or exit depends on elements,
-// which an OpElemWrite changes: two of them are not the same guard. (An
-// array's length changes only in Go.)
+// readsMemory reports whether a guard's result or exit depends on elements
+// or properties, which writes change: two of them are not the same guard.
+// (An array's length and an object's shape change only in Go.)
 func (o Op) readsMemory() bool {
-	return o == OpElemRead || o == OpElemWrite
+	return o == OpElemRead || o == OpElemWrite || o == OpPropRead || o == OpPropWrite
 }
 
 // Value is one SSA value.
@@ -138,6 +151,11 @@ type Value struct {
 	Args  []*Value
 	Aux   int
 	Const ir.Value
+	// Index is a property's index in tables of the shape a property
+	// operation knows, and Key the property's atom; their Aux is their exit
+	// kind, as every guard's is.
+	Index int
+	Key   uint32
 	// State is the frame to exit to, for guards.
 	State *FrameState
 	// Shadow is an ambiguous tagged phi's origin at run time: an Int32 phi
@@ -209,6 +227,10 @@ type Func struct {
 	// their cells (abi.Context.Upvalues) and never writes. Build sets it to
 	// Locals; a VM whose program has captured bindings lowers it.
 	FrameLocals int
+	// ThisSlot is the slot the receiver is read from, one of those past
+	// FrameLocals, which native code finds in the context
+	// (abi.Context.This); -1 if none.
+	ThisSlot int
 	// written marks the slots some instruction writes (Written).
 	written []bool
 	nextID  int

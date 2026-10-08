@@ -43,12 +43,45 @@ type testObject struct {
 	flags    uint8
 	arrayLen uint32
 	elems    []testValue
+	shape    uintptr
+	props    []testProperty
+}
+
+// testProperty is a property table's entry.
+type testProperty struct {
+	key   uint32
+	flags uint8
+	value testValue
+}
+
+// testShapes are the shapes test objects have, each with its table's keys
+// and flags: native code only compares a shape's address, so these are just
+// distinct numbers. A site's feedback names one, or one no object has.
+var testShapes = []struct {
+	shape uintptr
+	keys  []uint32
+	flags []uint8
+}{
+	{0x1000, []uint32{10, 11, 12}, []uint8{testWritable, testWritable, 0}},
+	{0x2000, []uint32{11}, []uint8{testWritable}},
+	{0x3000, []uint32{12, 10}, []uint8{testWritable, testAccessor}},
 }
 
 const (
-	testClassArray = 2
-	testFlagSparse = 4
+	testClassObject = 0
+	testClassArray  = 2
+	testFlagSparse  = 4
+
+	// A property's flags.
+	testWritable = 1 << iota
+	testAccessor
+	testDeleted
+	testPrivate
+	testUninit
 )
+
+// testFlags are the flags a shapeless object's properties have.
+var testFlags = []uint8{testWritable, testWritable, 0, testAccessor, testDeleted, testPrivate | testWritable, testUninit | testWritable}
 
 // testEncoding mirrors the VM's tags (internal/vm/value.go), and its
 // objects as testObject lays them out.
@@ -62,6 +95,11 @@ var testEncoding = abi.Encoding{
 	ObjectArrayLen: int32(unsafe.Offsetof(testObject{}.arrayLen)), ObjectElems: int32(unsafe.Offsetof(testObject{}.elems)),
 	ClassArray: testClassArray, FlagSparse: testFlagSparse,
 	UpvalueSlot: int32(unsafe.Offsetof(testUpvalue{}.slot)),
+	ObjectShape: int32(unsafe.Offsetof(testObject{}.shape)), ObjectProps: int32(unsafe.Offsetof(testObject{}.props)),
+	PropertySize: int32(unsafe.Sizeof(testProperty{})), PropertyValue: int32(unsafe.Offsetof(testProperty{}.value)),
+	PropertyKey: int32(unsafe.Offsetof(testProperty{}.key)), PropertyFlags: int32(unsafe.Offsetof(testProperty{}.flags)),
+	ClassObject: testClassObject, PropNotData: testAccessor | testDeleted | testPrivate,
+	PropNotWritable: testAccessor | testDeleted | testPrivate | testUninit | testWritable, PropWritable: testWritable,
 }
 
 // testHeap is what handles 0 to 3 name, as in package ssa's tests: an
@@ -74,6 +112,10 @@ type testArray struct {
 	cells  []uint64 // number words
 	length uint64
 	array  bool
+	shape  int      // into testShapes, or -1 for none
+	keys   []uint32 // the table's keys, flags and values' number words
+	flags  []uint8
+	props  []uint64
 }
 
 func randomTestHeap(r *rand.Rand) testHeap {
@@ -94,6 +136,26 @@ func randomTestHeap(r *rand.Rand) testHeap {
 		if i == 3 {
 			a.length += uint64(r.IntN(4))
 		}
+		a.shape = r.IntN(len(testShapes)+1) - 1
+		if i == 2 && r.IntN(2) == 0 {
+			// The ordinary object: often shapeless, so that it is searched.
+			a.shape = -1
+		}
+		if a.shape >= 0 {
+			a.keys, a.flags = testShapes[a.shape].keys, testShapes[a.shape].flags
+		} else {
+			for range r.IntN(4) {
+				a.keys = append(a.keys, 10+uint32(r.IntN(4)))
+				a.flags = append(a.flags, testFlags[r.IntN(len(testFlags))])
+			}
+		}
+		a.props = make([]uint64, len(a.keys))
+		for j := range a.props {
+			a.props[j] = math.Float64bits(float64(r.IntN(9) - 3))
+			if r.IntN(5) == 0 {
+				a.props[j] = testEncoding.True
+			}
+		}
 		h[i] = a
 	}
 	return h
@@ -107,6 +169,8 @@ type nativeHeap struct {
 	objects []testObject
 	others  [8]testObject
 	texts   [8]int
+	// evaluated is the objects' property words for the SSA evaluator.
+	evaluated [][]uint64
 }
 
 func (h testHeap) native() *nativeHeap {
@@ -122,9 +186,34 @@ func (h testHeap) native() *nativeHeap {
 		if a.length > uint64(len(a.cells)) {
 			o.flags, o.arrayLen = testFlagSparse, uint32(a.length)
 		}
+		if a.shape >= 0 {
+			o.shape = testShapes[a.shape].shape
+		}
+		o.props = make([]testProperty, len(a.props))
+		for j, w := range a.props {
+			o.props[j] = testProperty{key: a.keys[j], flags: a.flags[j], value: testValue{num: w}}
+		}
 		n.objects = append(n.objects, o)
+		n.evaluated = append(n.evaluated, slices.Clone(a.props))
 	}
 	return n
+}
+
+// heap is what the SSA evaluator reads: views of the arrays' cells, and the
+// objects' shapes with its own copy of their property words.
+func (n *nativeHeap) heap() ssa.Heap {
+	h := ssa.Heap{Arrays: n.views()}
+	for i := range n.objects {
+		o := &n.objects[i]
+		e := ssa.Object{Shape: o.shape, Ordinary: o.class == testClassObject, Props: n.evaluated[i]}
+		for _, p := range o.props {
+			e.Keys = append(e.Keys, p.key)
+			e.Data = append(e.Data, p.flags&testEncoding.PropNotData == 0)
+			e.Writable = append(e.Writable, p.flags&testEncoding.PropNotWritable == testWritable)
+		}
+		h.Objects = append(h.Objects, e)
+	}
+	return h
 }
 
 // views are the slot IR's views of the objects, as the VM grants them.
@@ -139,19 +228,27 @@ func (n *nativeHeap) views() []ir.ArrayView {
 		if len(o.elems) > 0 {
 			v.Data = unsafe.Pointer(&o.elems[0])
 		}
-		if o.class == testClassArray {
-			v.NumberLimit = testTagBase
+		if o.class != testClassArray {
+			// The VM grants no view of an object that is not an array.
+			continue
 		}
+		v.NumberLimit = testTagBase
 		vs[i] = v
 	}
 	return vs
 }
 
-// same reports whether two instances' elements hold the same words.
+// same reports whether native code's instance holds the same words as the
+// evaluator's: elements, and properties.
 func (n *nativeHeap) same(m *nativeHeap) bool {
 	for i := range n.objects {
 		if !slices.Equal(n.objects[i].elems, m.objects[i].elems) {
 			return false
+		}
+		for j, p := range n.objects[i].props {
+			if p.value.num != m.evaluated[i][j] || p.value.ref != nil {
+				return false
+			}
 		}
 	}
 	return true
@@ -261,9 +358,26 @@ func nativeTestValue(r *rand.Rand) ir.Value {
 	return v
 }
 
-// ssaTestProgram makes a program and says how many of its locals are the
-// frame's: the rest are captured bindings, which it reads and never writes.
-func ssaTestProgram(r *rand.Rand) (*ir.Program, int) {
+// layout is where a program's locals are: the first frame of them are the
+// frame's, and the rest captured bindings, or the receiver at slot this
+// (-1 if none), which the program reads and never writes. It also holds
+// what the VM knows of the program's property sites, by PC.
+type layout struct {
+	frame, this int
+	sites       map[int]site
+}
+
+// site is a property site's feedback.
+type site = ssa.PropertySite
+
+// Property is ssa.Feedback's.
+func (l layout) Property(pc int) (ssa.PropertySite, bool) {
+	s, ok := l.sites[pc]
+	return s, ok
+}
+
+// ssaTestProgram makes a program and says where its locals are.
+func ssaTestProgram(r *rand.Rand) (*ir.Program, layout) {
 	frameLocals := 1 + r.IntN(6)
 	locals := frameLocals + r.IntN(3)
 	n := 2 + r.IntN(24)
@@ -279,16 +393,37 @@ func ssaTestProgram(r *rand.Rand) (*ir.Program, int) {
 	}
 	ops := []ir.Op{ir.Copy, ir.Binary, ir.Binary, ir.Binary, ir.Unary, ir.Update, ir.Update, ir.Branch, ir.Branch,
 		ir.Jump, ir.Swap, ir.CopyPair, ir.StoreLoad, ir.Host, ir.Nop,
-		ir.ArrayRead, ir.ArrayWrite, ir.ArrayLength, ir.ArrayKey, ir.ArrayUpdate}
+		ir.ArrayRead, ir.ArrayWrite, ir.ArrayLength, ir.ArrayKey, ir.ArrayUpdate, ir.PropertyRead, ir.PropertyWrite}
 	operators := []ir.Operator{ir.Add, ir.Sub, ir.Mul, ir.Div, ir.Lt, ir.Le, ir.Gt, ir.Ge, ir.Eq, ir.Ne,
 		ir.BitAnd, ir.BitOr, ir.BitXor, ir.Shl, ir.Shr, ir.UShr}
 	p := &ir.Program{Locals: locals}
+	sites := map[int]site{}
 	for pc := 0; pc < n; pc++ {
 		in := ir.Instruction{Op: ops[r.IntN(len(ops))], Left: operand(), Right: operand(), Third: operand(),
 			Dest: r.IntN(frameLocals), Extra: r.IntN(frameLocals), Target: r.IntN(n + 1), Postfix: r.IntN(2) == 0, When: r.IntN(2) == 0}
 		switch in.Op {
 		case ir.ArrayRead, ir.ArrayWrite, ir.ArrayLength, ir.ArrayKey:
 			in.Left = ir.Slot(r.IntN(locals))
+		case ir.PropertyRead, ir.PropertyWrite:
+			in.Left = ir.Slot(r.IntN(locals))
+			// Mostly a site the VM knows: a key, and sometimes a shape with the
+			// property's index -- plain data, and writable for a write, as the
+			// VM's caches remember -- or a shape no object has.
+			if r.IntN(4) != 0 {
+				s := site{Key: 10 + uint32(r.IntN(4))}
+				switch r.IntN(3) {
+				case 0:
+					sh := testShapes[r.IntN(len(testShapes))]
+					i := r.IntN(len(sh.keys))
+					f := sh.flags[i]
+					if f&testEncoding.PropNotData == 0 && (in.Op == ir.PropertyRead || f&testEncoding.PropNotWritable == testWritable) {
+						s.Key, s.Shape, s.Index = sh.keys[i], sh.shape, int32(i)
+					}
+				case 1:
+					s.Shape = 0x9000
+				}
+				sites[pc] = s
+			}
 		case ir.ArrayUpdate:
 			in.Left = ir.Slot(r.IntN(locals))
 			in.Right = ir.Slot(in.Extra)
@@ -315,7 +450,11 @@ func ssaTestProgram(r *rand.Rand) (*ir.Program, int) {
 	for pc := range p.Maps {
 		p.Maps[pc].PC = uint32(pc)
 	}
-	return p, frameLocals
+	this := -1
+	if locals > frameLocals && r.IntN(2) == 0 {
+		this = locals - 1
+	}
+	return p, layout{frameLocals, this, sites}
 }
 
 var exitNames = map[uint64]ir.ExitKind{abi.ExitReturn: ir.Returned, abi.ExitDeopt: ir.GuardExit,
@@ -330,15 +469,15 @@ type compiled struct {
 
 // compileNative builds, optimizes and compiles p; it returns nil when the
 // SSA builder does not support p.
-func compileNative(p *ir.Program, frameLocals int) (*compiled, error) {
-	f, err := ssa.Build(p)
+func compileNative(p *ir.Program, l layout) (*compiled, error) {
+	f, err := ssa.BuildWith(p, l)
 	if errors.Is(err, ssa.ErrUnsupported) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	f.FrameLocals = frameLocals
+	f.FrameLocals, f.ThisSlot = l.frame, l.this
 	ssa.Optimize(f)
 	mc, err := mir.CompileAMD64(f, testEncoding)
 	if err != nil {
@@ -358,7 +497,10 @@ func nativeMismatch(c *compiled, pc int, slots []ir.Value, poll int, heap testHe
 	f := c.f
 	nh, eh := heap.native(), heap.native()
 	frame := make([]testValue, len(slots))
-	// Captured bindings live in cells; their numbers' entries are poison.
+	// Captured bindings live in cells, and the receiver in the context;
+	// their numbers' entries in the frame are poison.
+	ctx := &abi.Context{}
+	this := (*testValue)(unsafe.Pointer(&ctx.This))
 	captured := make([]testValue, f.Locals-f.FrameLocals)
 	cells := make([]*testUpvalue, len(captured))
 	for i, v := range slots {
@@ -366,24 +508,34 @@ func nativeMismatch(c *compiled, pc int, slots []ir.Value, poll int, heap testHe
 		if k := i - f.FrameLocals; k >= 0 && i < f.Locals {
 			captured[k], frame[i] = frame[i], testPoison
 			cells[k] = &testUpvalue{slot: &captured[k]}
+			if i == f.ThisSlot {
+				*this = captured[k]
+				captured[k] = testPoison
+			}
 		}
 	}
 	at := func(i int) *testValue {
+		if i == f.ThisSlot {
+			return this
+		}
 		if k := i - f.FrameLocals; k >= 0 && i < f.Locals {
 			return &captured[k]
 		}
 		return &frame[i]
 	}
 	want := append([]ir.Value(nil), slots...)
-	wantExit, err := ssa.EvaluateArrays(f, pc, want, eh.views(), poll)
+	wantExit, err := ssa.EvaluateHeap(f, pc, want, eh.heap(), poll)
 	if err != nil {
 		return err.Error()
 	}
-	counter := 1 << 62
+	// Without polls, a program finishes within 2,000 back-edges (finishes);
+	// native code that runs on far past that has gone wrong, and its poll
+	// says so.
+	counter := 1 << 20
 	if poll > 0 {
 		counter = poll
 	}
-	ctx := &abi.Context{Locals: unsafe.Pointer(&frame[0]), BackEdges: &counter}
+	ctx.Locals, ctx.BackEdges = unsafe.Pointer(&frame[0]), &counter
 	if f.StackSize > 0 {
 		ctx.Stack = unsafe.Pointer(&frame[f.Locals])
 	}
@@ -395,8 +547,8 @@ func nativeMismatch(c *compiled, pc int, slots []ir.Value, poll int, heap testHe
 	}
 	got := ir.Exit{Kind: exitNames[ctx.ExitKind], State: ir.StateMap{PC: uint32(ctx.ExitPC), Depth: int(ctx.ExitDepth)}}
 	report := func(why string) string {
-		return fmt.Sprintf("%s: from pc %d, poll %d, slots %v, heap %v, %d frame locals\nssa    %+v slots %v\nnative %+v ret %#x frame %v captured %v",
-			why, pc, poll, slots, heap, f.FrameLocals, wantExit, want, got, ctx.Ret, frame, captured)
+		return fmt.Sprintf("%s: from pc %d, poll %d, slots %v, heap %v, %d frame locals, receiver %d\nssa    %+v slots %v\nnative %+v ret %#x frame %v captured %v receiver %v",
+			why, pc, poll, slots, heap, f.FrameLocals, f.ThisSlot, wantExit, want, got, ctx.Ret, frame, captured, *this)
 	}
 	if got.Kind != wantExit.Kind {
 		return report("exit kind")
@@ -437,25 +589,29 @@ func nativeMismatch(c *compiled, pc int, slots []ir.Value, poll int, heap testHe
 	return ""
 }
 
+// finishes reports whether f, entered at pc, exits within 2,000 back-edges.
+// Feedback lets native code go further than the slot IR, which leaves every
+// property operation to Go, so the SSA evaluator itself is asked.
+func finishes(f *ssa.Func, pc int, slots []ir.Value, heap testHeap) bool {
+	exit, err := ssa.EvaluateHeap(f, pc, append([]ir.Value(nil), slots...), heap.native().heap(), 2000)
+	return err == nil && exit.Kind != ir.BudgetExit
+}
+
 // minimize shrinks a failing program, turning instructions into Nop while
 // it still validates, compiles and fails the same way from the same entry.
-func minimize(p *ir.Program, frameLocals, pc int, slots []ir.Value, poll int, heap testHeap) (*ir.Program, string) {
+func minimize(p *ir.Program, l layout, pc int, slots []ir.Value, poll int, heap testHeap) (*ir.Program, string) {
 	fails := func(q *ir.Program) string {
 		if q.Validate() != nil {
 			return ""
 		}
-		// Removing an instruction can make a loop endless; without polls
-		// neither side would come back.
-		probe := append([]ir.Value(nil), slots...)
-		if exit, err := q.EvaluateArrays(probe, heap.native().views(), pc, 20000); err != nil || exit.Kind == ir.BudgetExit && poll == 0 {
-			return ""
-		}
-		c, err := compileNative(q, frameLocals)
+		c, err := compileNative(q, l)
 		if err != nil || c == nil {
 			return ""
 		}
 		defer c.code.Close()
-		if !c.code.HasEntry(pc) {
+		// Removing an instruction can make a loop endless; without polls
+		// neither side would come back.
+		if !c.code.HasEntry(pc) || poll == 0 && !finishes(c.f, pc, slots, heap) {
 			return ""
 		}
 		return nativeMismatch(c, pc, append([]ir.Value(nil), slots...), poll, heap)
@@ -481,9 +637,9 @@ func minimize(p *ir.Program, frameLocals, pc int, slots []ir.Value, poll int, he
 // checkNative compiles p and compares native code with the SSA evaluator
 // from every entry on random slots. A failure is minimized and reported with
 // the function, its allocation and the program.
-func checkNative(t *testing.T, r *rand.Rand, p *ir.Program, frameLocals int) (ok bool) {
+func checkNative(t *testing.T, r *rand.Rand, p *ir.Program, l layout) (ok bool) {
 	t.Helper()
-	c, err := compileNative(p, frameLocals)
+	c, err := compileNative(p, l)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -507,15 +663,14 @@ func checkNative(t *testing.T, r *rand.Rand, p *ir.Program, frameLocals int) (ok
 				}
 			}
 			for _, poll := range []int{0, 1, 3} {
-				// The SSA evaluator runs forever where the program does; the
-				// slot IR tells which do not finish.
-				probe := append([]ir.Value(nil), slots...)
-				if exit, _ := p.EvaluateArrays(probe, heap.native().views(), e.PC, 20000); exit.Kind == ir.BudgetExit && poll == 0 {
+				// Without polls, a program that loops forever would never
+				// come back from either side.
+				if poll == 0 && !finishes(c.f, e.PC, slots, heap) {
 					continue
 				}
 				if why := nativeMismatch(c, e.PC, slots, poll, heap); why != "" {
-					small, smallWhy := minimize(p, frameLocals, e.PC, slots, poll, heap)
-					mc, _ := compileNative(small, frameLocals)
+					small, smallWhy := minimize(p, l, e.PC, slots, poll, heap)
+					mc, _ := compileNative(small, l)
 					detail := ""
 					if mc != nil {
 						detail = mc.f.String() + "\n" + mc.mc.Locations
@@ -533,11 +688,11 @@ func TestSSANativeMatchesEvaluator(t *testing.T) {
 	r := rand.New(rand.NewPCG(11, 12))
 	compiled := 0
 	for attempt := 0; attempt < 100000 && compiled < 2000; attempt++ {
-		p, frameLocals := ssaTestProgram(r)
+		p, l := ssaTestProgram(r)
 		if p.Validate() != nil {
 			continue
 		}
-		if checkNative(t, r, p, frameLocals) {
+		if checkNative(t, r, p, l) {
 			compiled++
 		}
 	}
@@ -566,7 +721,7 @@ func TestSSANativeCapturedShadow(t *testing.T) {
 	for pc := range p.Maps {
 		p.Maps[pc].PC = uint32(pc)
 	}
-	c, err := compileNative(p, 3)
+	c, err := compileNative(p, layout{3, -1, nil})
 	if err != nil || c == nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -627,7 +782,7 @@ func TestSSANativeFromJavaScript(t *testing.T) {
 			if err != nil {
 				continue
 			}
-			if checkNative(t, r, p, c.Fn.LocalCount) {
+			if checkNative(t, r, p, layout{c.Fn.LocalCount, -1, nil}) {
 				compiled++
 			}
 		}
@@ -645,7 +800,7 @@ func BenchmarkSSARoundTrip(b *testing.B) {
 		b.Run(fmt.Sprintf("%d-locals", locals), func(b *testing.B) {
 			p := &ir.Program{Locals: locals, Code: []ir.Instruction{{Op: ir.Host}, {Op: ir.Return, Left: ir.Slot(0)}},
 				Maps: []ir.StateMap{{PC: 0}, {PC: 1}}}
-			c, err := compileNative(p, locals)
+			c, err := compileNative(p, layout{locals, -1, nil})
 			if err != nil || c == nil {
 				b.Fatal(err)
 			}
