@@ -13,9 +13,6 @@ import (
 // WritableHole, when nonzero, permits replacing that pointer-free hole marker
 // with a number. The caller proves ordinary writable/extensible array storage
 // and absence of inherited indexed properties before granting this permission.
-// For write-only programs with Grow enabled, DenseLength may include prepared
-// spare cells. Native writes advance Length, and the adapter commits that length
-// and restores ordinary views before any Go work or another program executes.
 // The caller owns and roots the storage, and rebuilds views after every callback.
 // With NumberLimit zero, Data instead borrows an ordinary object's property
 // table, DenseLength counts at most MaxProperties cells, and WritableHole is
@@ -185,9 +182,6 @@ const (
 // ArrayRead/ArrayWrite use Left as the array handle and Right as the numeric
 // index; Third is the stored number. ArrayUpdate commits an updated index in
 // Extra only after the read succeeds. ArrayKey guards without converting a key.
-// Grow allows ArrayWrite to advance the view's Length after a successful store.
-// Such programs cannot read arrays; the adapter commits and normalizes storage
-// before exposing it to another program or to Go.
 // Host exits before executing the corresponding VM instruction.
 // PropertyRead/PropertyWrite and BindingRead search Left's table for Key. A
 // BindingRead borrows one resolved numeric binding cell. Right supplies
@@ -211,7 +205,6 @@ type Instruction struct {
 	When      bool
 	Postfix   bool
 	Check     bool
-	Grow      bool
 	CheckSlot int
 	Key       uint32
 }
@@ -237,11 +230,8 @@ type Program struct {
 	// Globals contains source-name indices for reserved binding-view slots,
 	// following captured bindings and the optional receiver snapshot.
 	Globals []uint32
-	// ShortCounter is a parameter slot plus one, or zero. A small single
-	// countdown loop can retain Go execution when its input is zero or one.
-	ShortCounter uint16
-	Code         []Instruction
-	Maps         []StateMap
+	Code    []Instruction
+	Maps    []StateMap
 }
 
 // ExitKind identifies a completed return or a resumable exit.

@@ -195,75 +195,7 @@ func lowerFunction(fn *bytecode.Function, calls, callee bool) (*ir.Program, erro
 	selectNumericProperties(p)
 	selectPropertyLoops(fn, p, calls, callee)
 	selectGlobalSlots(fn, p)
-	selectShortCountdown(fn, p)
-	selectArrayGrowth(fn, p)
 	return p, nil
-}
-
-// Spare capacity is borrowed only by string packers that never read an array's
-// elements or length. Every exit commits it before any other code can observe
-// an alias, so the adapter need not expose speculative storage to readers.
-func selectArrayGrowth(fn *bytecode.Function, p *ir.Program) {
-	strings, allocation := false, false
-	for pc, in := range p.Code {
-		if p.Maps[pc].Depth < 0 {
-			continue
-		}
-		if in.Op == ir.ArrayRead || in.Op == ir.ArrayUpdate || in.Op == ir.ArrayLength {
-			return
-		}
-		strings = strings || in.Op == ir.StringCode
-		allocation = allocation || fn.Code[pc].Op == bytecode.OpNewArray
-	}
-	if strings && allocation {
-		for pc := range p.Code {
-			p.Code[pc].Grow = p.Code[pc].Op == ir.ArrayWrite
-		}
-	}
-}
-
-// A small while (--parameter >= 0) has at most one iteration for inputs in
-// [0,1]. No other write may reset its counter, and other loops are excluded.
-// This is only an entry-cost hint: values and effects still run in a VM tier.
-func selectShortCountdown(fn *bytecode.Function, p *ir.Program) {
-	if len(p.Code) > 64 {
-		return
-	}
-	header := -1
-	for pc, in := range p.Code {
-		if (in.Op == ir.Jump || in.Op == ir.Branch) && in.Target <= pc {
-			if header >= 0 || in.Op != ir.Jump {
-				return
-			}
-			header = in.Target
-		}
-	}
-	if header < 0 || header+2 >= len(p.Code) {
-		return
-	}
-	u, zero, branch := p.Code[header], p.Code[header+1], p.Code[header+2]
-	if u.Op != ir.Update || u.Operator != ir.Sub || u.Postfix || u.Left.Slot != u.Dest || u.Extra < p.Locals || u.Dest >= fn.ParamCount ||
-		zero.Op != ir.Copy || zero.Left.Slot != -1 || zero.Left.Literal != ir.Float(0) ||
-		branch.Op != ir.Branch || branch.Operator != ir.Ge || branch.When || branch.Target <= header+2 || branch.Left.Slot != u.Extra || branch.Right.Slot != zero.Dest {
-		return
-	}
-	for pc, in := range p.Code {
-		if pc == header {
-			continue
-		}
-		write, extra := false, false
-		switch in.Op {
-		case ir.Copy, ir.Binary, ir.Unary, ir.Update, ir.ArrayRead, ir.ArrayLength, ir.PropertyRead, ir.BindingRead, ir.ReferenceRead:
-			write = true
-			extra = in.Op == ir.Update && in.Extra >= 0
-		case ir.CopyPair, ir.StoreLoad, ir.Swap, ir.ArrayUpdate:
-			write, extra = true, true
-		}
-		if write && in.Dest == u.Dest || extra && in.Extra == u.Dest {
-			return
-		}
-	}
-	p.ShortCounter = uint16(u.Dest + 1)
 }
 
 // Numeric global reads borrow live cells, rather than snapshotting their values.

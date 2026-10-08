@@ -51,7 +51,6 @@ func (s *jitState) callEntryActive(e *jitEntry) bool {
 func (s *jitState) callMode(e *jitEntry) {
 	s.properties, s.this, s.globals = e.properties, e.this, e.globals
 	s.strings = e.strings
-	s.grows = e.grows
 	s.referenceActive = false
 }
 
@@ -129,13 +128,7 @@ func (r *Runtime) jitRunCalls(f *frame, e *jitEntry, pc, depth, n int) (Value, e
 	for {
 		q := &a.frames[top]
 		s.entries++
-		if q.e.grows {
-			s.prepareArrayGrowth()
-		}
 		exit, err := q.e.code.RunEncodedArrays(s.slots[:q.n], s.arrays[:], q.pc, budget)
-		if q.e.grows {
-			s.commitArrayGrowth()
-		}
 		if err != nil {
 			return Undefined, err, true
 		}
@@ -236,11 +229,6 @@ func (r *Runtime) jitRunCalls(f *frame, e *jitEntry, pc, depth, n int) (Value, e
 			}
 			next, nextDepth, steps := r.jitHostFast(q.f, s, q.pc, q.depth, int(min(budget, 16)))
 			if steps != 0 {
-				// Native string packing amortizes its bounded array-growth helpers;
-				// count published callback boundaries for its entry policy.
-				if q.e.strings {
-					q.hosts--
-				}
 				q.pc, q.depth = next, nextDepth
 				budget -= uint64(steps)
 				q.steps += uint64(steps)

@@ -5,7 +5,6 @@ package vm
 import (
 	"context"
 	"errors"
-	"math"
 	"os"
 	"testing"
 	"time"
@@ -27,11 +26,13 @@ func TestJITStringPacking(t *testing.T) {
 	}
 }
 
+// Writes past an array's length grow it in Go, at a host exit; callbacks
+// between them see every committed element and none beyond.
 func TestJITStringArrayGrowth(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	v, err := r.Run(compileForTest(t, `function pack(s){let a=[];for(let i=0;i<64;i++)a[i]=s.charCodeAt(i);return a}let a=pack('A'.repeat(64));a.length===64&&a.every(n=>n===65)`))
-	if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.hosts != 3 || r.jit.rootCount != 0 {
-		t.Fatalf("native growth: %v, %v", v, err)
+	if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.entries == 0 || r.jit.rootCount != 0 {
+		t.Fatalf("growth: %v, %v", v, err)
 	}
 	for _, tc := range []struct{ name, setup, body, check string }{
 		{"dense", ``, `a[i]=s.charCodeAt(i);`, `a.length===64&&a.every((n,i)=>n===65+i)`},
@@ -58,29 +59,6 @@ func TestJITStringArrayGrowth(t *testing.T) {
 	v, err = r.Run(compileForTest(t, `function pack(s,a){let unused=[];for(let i=0;i<2;i++)a[i]=s.charCodeAt(i);return a}let a=[1];a.length=1000000;pack('AB',a);a.length===1000000&&a[0]===65&&a[1]===66`))
 	if err != nil || !v.IsBool() || !v.Truthy() {
 		t.Fatalf("sparse growth: %v, %v", v, err)
-	}
-}
-
-func TestJITArrayGrowthAliases(t *testing.T) {
-	r := jitRuntimeForTest(t, Config{JIT: true})
-	o := newArrayObject(r.proto.array, 16)
-	o.elems = o.elems[:0]
-	s := &jitState{}
-	s.encode(Obj(o))
-	s.encode(Obj(o))
-	s.prepareArrayGrowth()
-	if s.arrays[0].DenseLength != 16 || s.arrays[1].DenseLength != 16 {
-		t.Fatal("did not borrow every alias")
-	}
-	o.elems[:16][7] = Int(7)
-	s.arrays[0].Length, s.arrays[1].Length = 8, 6
-	s.commitArrayGrowth()
-	if len(o.elems) != 8 || o.elems[7].Number() != 7 || math.Float64bits(o.elems[6].num) != holeBits || o.elems[6].ref != nil || s.arrays[0].Length != 8 || s.arrays[1].Length != 8 || s.arrays[0].DenseLength != 8 || s.arrays[1].DenseLength != 8 {
-		t.Fatal("did not commit and normalize aliased lengths")
-	}
-	s.clearRoots()
-	if s.rootCount != 0 || s.arrays[0].Data != nil {
-		t.Fatal("retained growth storage")
 	}
 }
 

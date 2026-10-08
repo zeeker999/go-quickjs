@@ -68,31 +68,13 @@ func TestStringPackingLayout(t *testing.T) {
 			}
 		case bytecode.OpSetIndex:
 			seen[3] = true
-			if out.Op != ir.ArrayWrite || !out.Grow {
+			if out.Op != ir.ArrayWrite {
 				t.Fatal(out)
 			}
 		}
 	}
 	if seen != [4]bool{true, true, true, true} {
 		t.Fatal(seen)
-	}
-}
-
-func TestArrayGrowthSelection(t *testing.T) {
-	for _, source := range []string{
-		`function pack(s){let a=[];for(let i=0;i<64;i++)a[i]=s.charCodeAt(i);return a.length}`,
-		`function pack(s){let a=[];for(let i=0;i<64;i++)a[i]=s.charCodeAt(i);return a[0]}`,
-		`function pack(s){let a=[];for(let i=0;i<64;i++)a[i]=i;return a}`,
-	} {
-		p, err := Lower(compiledFunction(t, source))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, in := range p.Code {
-			if in.Grow {
-				t.Fatalf("granted write-only string storage: %s", source)
-			}
-		}
 	}
 }
 
@@ -235,25 +217,6 @@ func TestGlobalSlotBudget(t *testing.T) {
 	p, err := Lower(fn)
 	if err != nil || len(p.Globals) != 0 || p.Code[0].Op != ir.Host || p.Locals+p.StackSize != MaxSlots {
 		t.Fatalf("binding view exceeded scratch capacity: %+v, %v", p, err)
-	}
-}
-
-func TestShortCountdownSelection(t *testing.T) {
-	for _, tc := range []struct {
-		source  string
-		counter uint16
-	}{
-		{`function f(n,a){while(--n>=0)a[n]=(a[n]+1)|0;return a[0]}`, 1},
-		{`function f(a,n){while(--n>=0)a[n]=(a[n]+1)|0;return a[0]}`, 2},
-		{`function f(n,a){n=7;while(--n>=0)a[n]=(a[n]+1)|0;return a[0]}`, 0},
-		{`function f(n,a){while(--n>=0){a[n]=(a[n]+1)|0;n=7}return a[0]}`, 0},
-		{`function f(n,a){while(n-->=0)a[n]=(a[n]+1)|0;return a[0]}`, 0},
-		{`function f(n,a){while(--n>=0)a[n]=(a[n]+1)|0;while(--n>=0)a[n]+=1;return a[0]}`, 0},
-	} {
-		p, err := Lower(compiledFunction(t, tc.source))
-		if err != nil || p.ShortCounter != tc.counter {
-			t.Fatalf("countdown selection: %+v, %v; %s", p, err, tc.source)
-		}
 	}
 }
 

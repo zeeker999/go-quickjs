@@ -15,7 +15,7 @@ func (p *Program) Validate() error {
 	if p == nil || len(p.Code) == 0 || len(p.Code) > MaxInstructions || len(p.Code) != len(p.Maps) {
 		return fmt.Errorf("jit IR: invalid instruction layout")
 	}
-	if p.Locals < 0 || p.StackSize < 0 || p.Locals > MaxSlots || p.StackSize > MaxSlots || p.Locals+p.StackSize > MaxSlots || len(p.Globals) > p.Locals || p.This && p.Locals <= len(p.Globals) || int(p.ShortCounter) > p.Locals {
+	if p.Locals < 0 || p.StackSize < 0 || p.Locals > MaxSlots || p.StackSize > MaxSlots || p.Locals+p.StackSize > MaxSlots || len(p.Globals) > p.Locals || p.This && p.Locals <= len(p.Globals) {
 		return fmt.Errorf("jit IR: invalid slot layout")
 	}
 	for pc, state := range p.Maps {
@@ -27,17 +27,11 @@ func (p *Program) Validate() error {
 		return fmt.Errorf("jit IR: invalid initial stack depth")
 	}
 	calls := uint32(0)
-	growth, reads := false, false
 	for pc, in := range p.Code {
 		if p.Maps[pc].Depth < 0 {
 			continue
 		}
 		bad := func(why string) error { return fmt.Errorf("jit IR: pc %d: %s", pc, why) }
-		if in.Grow && in.Op != ArrayWrite {
-			return bad("growth on a non-array write")
-		}
-		growth = growth || in.Grow
-		reads = reads || in.Op == ArrayRead || in.Op == ArrayUpdate || in.Op == ArrayLength
 		active := p.Locals + p.Maps[pc].Depth
 		source := func(o Operand) bool {
 			if o.Slot == -1 {
@@ -131,9 +125,6 @@ func (p *Program) Validate() error {
 		if in.Op != Return && in.Op != Jump && !target(pc+1) {
 			return bad("invalid fallthrough")
 		}
-	}
-	if growth && reads {
-		return fmt.Errorf("jit IR: growing storage requires a write-only array program")
 	}
 	return nil
 }
