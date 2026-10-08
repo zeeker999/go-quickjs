@@ -85,7 +85,7 @@ Design: [jit-phase2-design.md](jit-phase2-design.md). P2 gates the rest.
 
 | ID | Item | Status | Commit |
 |---|---|---|---|
-| P1 | `internal/jit/ssa`: types, builder from the slot IR, evaluator, Phase 2 passes; SSA evaluator matches the slot-IR evaluator at every entry and budget | todo | |
+| P1 | `internal/jit/ssa`: types, builder (Braun et al.) from the slot IR, evaluator, Phase 2 passes, for the numeric subset (copies, stack shuffles, every arithmetic, bitwise and comparison operator, updates, branches, TDZ checks, returns; host operations as exits). Arrays, properties, strings and calls are refused until P4. 3,000 random programs and a JavaScript corpus match the slot IR on 172,809 comparisons, built and optimized, with and without polls. | done (numeric subset) | jit: build typed SSA from the slot IR |
 | P2 | Walking skeleton on amd64: `mir` selection and allocation, `asm/amd64`, `rt` (context block, native stack, entry/exit/resume; Return, Deopt, Poll), the VM running a numeric loop through it. Gate: bare round trip 15 ns or less, helper round trip 25 ns or less, sum loop at least as fast as the old pipeline | todo | |
 | P3 | The skeleton on arm64, measured on a Mac or the macOS runner | todo | |
 | P4 | Coverage: every slot-IR operation built; stress corpus and fuzzer pass on the new pipeline | todo | |
