@@ -563,7 +563,10 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 		case ir.HostExit:
 			s.clearRoots()
 			sp, steps, hostErr := r.jitHost(f, f.base+exit.State.Depth, int(min(budget, 16)))
-			if hostErr != nil {
+			// A callback that stopped the runtime -- Halt, Close -- leaves the
+			// rest of the frame to the interpreter, which stops at its next call
+			// or backward jump, where the native budget would not.
+			if hostErr != nil || r.stopped != nil {
 				return r.jitInterpret(f, sp, hostErr)
 			}
 			pc = int(f.pc)

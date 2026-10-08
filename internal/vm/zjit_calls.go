@@ -254,7 +254,8 @@ func (r *Runtime) jitRunCalls(f *frame, e *jitEntry, pc, depth, n int) (Value, e
 			q.pc, q.depth = int(q.f.pc), sp-q.f.base
 			budget -= uint64(steps)
 			q.steps += uint64(steps)
-			if hostErr != nil {
+			// As in tryJITAt: a stopped runtime finishes in the interpreter.
+			if hostErr != nil || r.stopped != nil {
 				return r.jitInterpretCalls(a, top, hostErr)
 			}
 			var rebuilt bool

@@ -1165,6 +1165,52 @@ func TestJITRuntimeCloseAfterGuard(t *testing.T) {
 	}
 }
 
+// Halt stops a script at its next call or backward jump: the straight-line
+// code after the host call that halted it still runs, and nothing after. A
+// native loop must stop where the interpreter does, whether the host exit is
+// an ordinary call (the call coordinator) or an accessor (the plain loop).
+func TestJITHaltAfterHostExit(t *testing.T) {
+	for _, tc := range []struct{ name, source string }{
+		{"call", `var arr = [0,0,0,0,0,0,0,0,0,0];
+			function f(a) { for (let i = 0; i < a.length; i++) { a[i] = 1; stop(i) } return 0 }
+			f(arr)`},
+		{"accessor", `var arr = [0,0,0,0,0,0,0,0,0,0], n = 0;
+			var o = { get x() { stop(n++); return 1 } };
+			function f(o, a) { let s = 0; for (let i = 0; i < a.length; i++) { a[i] = 1; s += o.x } return s }
+			f(o, arr)`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := func(jit bool) (string, *Runtime) {
+				r := jitRuntimeForTest(t, Config{JIT: jit})
+				r.global.setOwnRaw(r.atoms.intern("stop"), r.NewFunction("stop", 1,
+					func(rt *Runtime, _ Value, args []Value) (Value, error) {
+						if len(args) > 0 && args[0].Number() == 3 {
+							rt.Halt(context.Canceled)
+						}
+						return Undefined, nil
+					}), propDefault)
+				if _, err := r.Run(compileForTest(t, tc.source)); !errors.Is(err, context.Canceled) {
+					t.Fatalf("jit=%v: run = %v, want context.Canceled", jit, err)
+				}
+				r.ClearStop()
+				v, err := r.Run(compileForTest(t, `arr.join("")`))
+				if err != nil {
+					t.Fatal(err)
+				}
+				return v.String().Go(), r
+			}
+			want, _ := run(false)
+			got, r := run(true)
+			if r.jit == nil || r.jit.entries == 0 || r.jit.hosts == 0 {
+				t.Fatal("loop never reached a native host exit")
+			}
+			if got != want || want != "1111000000" {
+				t.Fatalf("after Halt: native %q, interpreter %q, want 1111000000", got, want)
+			}
+		})
+	}
+}
+
 func TestJITMemoryRefusal(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true, MemoryLimit: 256 << 10})
 	v, err := r.Run(compileForTest(t, jitSumSource))
