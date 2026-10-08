@@ -69,8 +69,13 @@ across sessions. Update it **in the same commit** as the work it records.
 
 **Gate:**
 - [ ] Stress test262 passes on all three platforms. Windows/amd64 passes locally
-  under four settings. Linux and macOS need the `jit-conformance` CI job, so
-  the branch must be pushed first.
+  under four settings. First CI run (958ac22, run 37800144943): macOS passes;
+  Linux and Windows failed only off the JIT -- the runners' zone is Etc/UTC,
+  which go-quickjs named "Etc/UTC" instead of "UTC" (fixed on main, 24c5fa5,
+  cherry-picked), and Windows checked test262 out with CRLFs (the job now
+  sets `core.autocrlf false`). The macOS native job failed because the
+  differential test required SSA entries on arm64, which has no SSA backend
+  yet (`jitSSABackend`). Re-run pending.
 - [ ] Fuzzer runs 24 hours with no divergence. Started 2026-10-08 as a
   detached process (6 workers, coverage-instrumented binary). Progress goes to
   `D:/Data/quickjs-jit-results/2026-10-08-review/fuzz-24h.err` (stderr); a failing

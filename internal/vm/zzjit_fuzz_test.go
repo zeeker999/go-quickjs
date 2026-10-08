@@ -265,7 +265,7 @@ func TestJITDifferentialRandom(t *testing.T) {
 		total.SSAEntries += st.SSAEntries
 	}
 	t.Logf("%d of %d programs ran natively: %+v", native, programs, total)
-	if total.SSAEntries == 0 {
+	if jitSSABackend && total.SSAEntries == 0 {
 		t.Fatal("no generated program ran through the new pipeline")
 	}
 	if native < programs/3 || total.Guards == 0 || total.Interpreted == 0 {

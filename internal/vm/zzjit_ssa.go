@@ -22,6 +22,9 @@ import (
 
 var jitSSADefault = os.Getenv("QJS_JIT_PIPELINE") == "ssa"
 
+// jitSSABackend reports whether this architecture has the new pipeline.
+const jitSSABackend = true
+
 // jitEncoding is how a Value lies in memory, for generated code.
 var jitEncoding = abi.Encoding{
 	ValueSize:     int32(unsafe.Sizeof(Value{})),
