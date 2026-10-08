@@ -15,7 +15,7 @@ func (p *Program) Validate() error {
 	if p == nil || len(p.Code) == 0 || len(p.Code) > MaxInstructions || len(p.Code) != len(p.Maps) {
 		return fmt.Errorf("jit IR: invalid instruction layout")
 	}
-	if p.Locals < 0 || p.StackSize < 0 || p.Locals > MaxSlots || p.StackSize > MaxSlots || p.Locals+p.StackSize > MaxSlots {
+	if p.Locals < 0 || p.StackSize < 0 || p.Locals > MaxSlots || p.StackSize > MaxSlots || p.Locals+p.StackSize > MaxSlots || len(p.Globals) > p.Locals || p.This && p.Locals <= len(p.Globals) || int(p.ShortCounter) > p.Locals {
 		return fmt.Errorf("jit IR: invalid slot layout")
 	}
 	for pc, state := range p.Maps {
@@ -58,6 +58,8 @@ func (p *Program) Validate() error {
 			left, right, third = true, true, true
 		case ArrayLength:
 			left, write = true, true
+		case PropertyRead, PropertyWrite, BindingRead:
+			left, right, write = true, in.Op == PropertyWrite, in.Op != PropertyWrite
 		case Insert3:
 			if in.Dest < 0 || in.Dest+2 >= active || !dest(in.Dest+3) {
 				return bad("invalid insert")

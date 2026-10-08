@@ -40,6 +40,7 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 			a.pc = pc
 			if a.starts[pc] || pc > 0 && a.tails[pc-1] == 1 {
 				a.arrayCacheID = -1
+				a.propertyCacheID = -1
 			}
 			a.guard, a.budget, a.returned, a.host = a.exit(pc, ir.GuardExit), a.exit(pc, ir.BudgetExit), a.exit(pc, ir.Returned), a.exit(pc, ir.HostExit)
 			if a.fast {
@@ -73,6 +74,8 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 				a.store(in.Dest, 5, 6)
 			case ir.ArrayRead, ir.ArrayWrite, ir.ArrayKey, ir.ArrayLength, ir.ArrayUpdate:
 				a.array(in)
+			case ir.PropertyRead, ir.PropertyWrite, ir.BindingRead:
+				a.property(in)
 			case ir.Copy:
 				a.loadScalar(in.Left, 0, 4)
 				a.storeScalar(in.Dest, 0, 4)
@@ -595,6 +598,88 @@ func (a *arm64Program) truth(o ir.Operand) {
 	a.mark(zero)
 	a.immediate(3, 0)
 	a.mark(done)
+}
+
+func (a *arm64Program) property(in ir.Instruction) {
+	guard := a.guard
+	a.guard = a.host
+	defer func() { a.guard = guard }()
+	if in.Op != ir.BindingRead && a.propertyCached(in.Left, in.Key) {
+		a.word(0xaa1003e3) // mov x3,x16: checked cell in this region
+		if in.Op == ir.PropertyWrite {
+			a.word(0x39401065)
+			a.immediate(7, 1)
+			a.word(0x6a0700bf)
+			a.conditional(0, a.host)
+		}
+		a.memory(true, false, 7, 3, 8)
+	} else {
+		a.load(in.Left, 3, 4)
+		if !a.known(in.Left, ir.Opaque) {
+			a.compareImmediate(4, uint32(ir.Opaque))
+			a.conditional(1, a.host)
+		}
+		a.compareImmediate(3, ir.MaxSlots)
+		a.conditional(2, a.host)
+		a.word(0x8b030863) // add x3,x3,x3,lsl #2
+		a.word(0x8b030c23) // add x3,x1,x3,lsl #3: 40-byte view
+		a.memory(true, false, 6, 3, 24)
+		a.compareImmediate(6, 0)
+		a.conditional(1, a.host) // array permission excludes property access
+		a.memory(true, false, 6, 3, 32)
+		a.compareImmediate(6, 0)
+		a.conditional(0, a.host)
+		a.memory(true, false, 4, 3, 8)
+		a.compareImmediate(4, ir.MaxProperties)
+		a.conditional(8, a.host)
+		a.compareImmediate(4, 0)
+		a.conditional(0, a.host)
+		a.memory(true, false, 3, 3, 0)
+		a.compareImmediate(3, 0)
+		a.conditional(0, a.host)
+		a.immediate(7, uint64(in.Key))
+		search, found := a.label(), a.label()
+		a.mark(search)
+		a.word(0xb9400065) // ldr w5,[x3]: property key
+		a.word(0x6b0700bf) // cmp w5,w7
+		a.conditional(0, found)
+		a.word(0x91006063) // add x3,x3,#24
+		a.word(0xd1000484) // sub x4,x4,#1
+		a.compareImmediate(4, 0)
+		a.conditional(1, search)
+		a.jump(a.host)
+		a.mark(found)
+		a.word(0x39401065) // ldrb w5,[x3,#4]: property flags
+		a.immediate(7, 0xf8)
+		a.word(0x6a0700bf) // tst w5,w7: only ordinary data attributes
+		a.conditional(1, a.host)
+		if in.Op == ir.PropertyWrite {
+			a.immediate(7, 1)
+			a.word(0x6a0700bf)
+			a.conditional(0, a.host)
+		}
+		a.memory(true, false, 7, 3, 8)
+		a.word(0xeb0600ff) // cmp x7,x6: existing numeric value
+		a.conditional(2, a.host)
+		if in.Op != ir.BindingRead {
+			a.word(0xaa0303f0) // mov x16,x3
+		}
+	}
+	if in.Op != ir.PropertyWrite {
+		a.word(0x9e6700e0) // fmov d0,x7
+		a.storeNumber(in.Dest, 0)
+		return
+	}
+	fp := a.number(in.Right, 0)
+	a.word(0x1e602000 | fp<<16 | fp<<5)
+	ordered, end := a.label(), a.label()
+	a.conditional(7, ordered)
+	a.immediate(7, 0x7ff8000000000000)
+	a.memory(false, false, 7, 3, 8)
+	a.jump(end)
+	a.mark(ordered)
+	a.memory(false, true, fp, 3, 8)
+	a.mark(end)
 }
 
 // array resolves a borrowed view and guards every condition before any write.

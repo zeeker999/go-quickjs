@@ -37,18 +37,25 @@ type jitClosureFields struct {
 }
 
 type jitEntry struct {
-	code       *jit.Code
-	misses     uint8
-	probes     uint8
-	entrySlow  bool
-	probeSteps uint64
-	probeHosts uint64
+	code         *jit.Code
+	misses       uint8
+	probes       uint8
+	entrySlow    bool
+	probeSteps   uint64
+	probeHosts   uint64
+	properties   bool
+	this         bool
+	globals      []bytecode.Instr
+	shortCounter uint16
 }
 
 // Weak keys prevent a refusal or cached program from retaining a source graph.
 // Native entry cannot call Go, so buffers are shared only until a guard exit.
 type jitState struct {
 	unavailable bool
+	properties  bool
+	this        bool
+	globals     []bytecode.Instr
 	cache       map[weak.Pointer[bytecode.Function]]*jitEntry
 	slots       [ir.MaxSlots]ir.Value
 	roots       [ir.MaxSlots]Value
@@ -79,7 +86,7 @@ func (r *Runtime) jitCodeBytes() int64 {
 	var n int64
 	if r.jit != nil {
 		for _, e := range r.jit.cache {
-			n += int64(e.code.Size() + e.code.MetadataSize())
+			n += int64(e.code.Size() + e.code.MetadataSize() + cap(e.globals)*int(unsafe.Sizeof(bytecode.Instr{})))
 		}
 	}
 	return n
@@ -153,7 +160,7 @@ func (r *Runtime) jitFor(fn *bytecode.Function) *jitEntry {
 	s := r.jit
 	var meta int
 	for _, e := range s.cache {
-		meta += e.code.MetadataSize()
+		meta += e.code.MetadataSize() + cap(e.globals)*int(unsafe.Sizeof(bytecode.Instr{}))
 	}
 	// Entry maps and offsets are bounded before emission as well as afterwards.
 	if meta+len(fn.Code)*32+1024 > jitMetadataBytes {
@@ -162,7 +169,30 @@ func (r *Runtime) jitFor(fn *bytecode.Function) *jitEntry {
 	p, err := jitcompile.Lower(fn)
 	e := &jitEntry{}
 	if err == nil {
-		e.code, err = jit.CompileBudget(p, limit)
+		e.this = p.This
+		e.shortCounter = p.ShortCounter
+		for _, key := range p.Globals {
+			for _, in := range fn.Code {
+				if in.Op == bytecode.OpGetGlobal && in.A == key {
+					e.globals = append(e.globals, in)
+					break
+				}
+			}
+		}
+		// Lowering uses immutable source-name indices. Each runtime resolves
+		// these to its own pointer-free atoms before emitting native searches.
+		for i := range p.Code {
+			in := &p.Code[i]
+			if in.Op == ir.PropertyRead || in.Op == ir.PropertyWrite || in.Op == ir.BindingRead {
+				e.properties = e.properties || in.Op != ir.BindingRead
+				in.Key = uint32(r.atoms.intern(fn.Names[in.Key]))
+			}
+		}
+		bindingBytes := cap(e.globals) * int(unsafe.Sizeof(bytecode.Instr{}))
+		if meta+len(fn.Code)*32+1024+bindingBytes > jitMetadataBytes {
+			return nil
+		}
+		e.code, err = jit.CompileBudget(p, limit-bindingBytes)
 		if err != nil {
 			if errors.Is(err, jit.ErrUnavailable) {
 				s.unavailable = true
@@ -198,6 +228,8 @@ func (s *jitState) encode(v Value) ir.Value {
 		o := v.Object()
 		if o.class == ClassArray {
 			s.arrays[i] = jitArrayView(o)
+		} else if s.properties && o.class == ClassObject && o.shapeIndex() == nil && len(o.props) <= ir.MaxProperties {
+			s.arrays[i] = ir.ArrayView{Data: unsafe.Pointer(unsafe.SliceData(o.props)), DenseLength: uint64(len(o.props)), WritableHole: tagBase}
 		}
 	}
 	return ir.Value{Kind: ir.Opaque, Bits: uint64(i)}
@@ -225,8 +257,13 @@ func (s *jitState) publish(f *frame, stack []Value, depth int) {
 	for i := range f.locals {
 		f.locals[i] = s.decode(s.slots[i])
 	}
+	base := len(f.locals) + len(f.cl.upvalues)
+	base += len(s.globals)
+	if s.this {
+		base++
+	}
 	for i := 0; i < depth; i++ {
-		stack[f.base+i] = s.decode(s.slots[len(f.locals)+len(f.cl.upvalues)+i])
+		stack[f.base+i] = s.decode(s.slots[base+i])
 	}
 }
 
@@ -282,6 +319,12 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 		f.cl.jitRefused = true
 		return Undefined, nil, false
 	}
+	if e.shortCounter != 0 {
+		counter := f.locals[e.shortCounter-1]
+		if counter.IsNumber() && counter.Number() >= 0 && counter.Number() <= 1 {
+			return Undefined, nil, false
+		}
+	}
 	if e.misses >= 8 {
 		f.cl.jitRefused = true
 		return Undefined, nil, false
@@ -293,7 +336,14 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 	f.cl.jitLoopDelay = 0
 	s := r.jit
 	n := len(f.locals) + len(f.cl.upvalues) + f.cl.fn.MaxStack
-	s.encodeFrame(f, r.stack, depth)
+	n += len(e.globals)
+	if e.this {
+		n++
+	}
+	s.properties = e.properties
+	s.this = e.this
+	s.globals = e.globals
+	s.encodeFrame(r, f, r.stack, depth)
 	if osr {
 		s.osrs++
 	}
@@ -375,7 +425,10 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 				}
 			}
 			s = r.jit
-			s.encodeFrame(f, r.stack, sp-f.base)
+			s.properties = e.properties
+			s.this = e.this
+			s.globals = e.globals
+			s.encodeFrame(r, f, r.stack, sp-f.base)
 		case ir.BudgetExit:
 			s.budgets++
 			if err := r.checkInterruptNow(); err != nil {
@@ -400,6 +453,10 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 // the normal callback boundary at its original instruction and stack depth.
 func (r *Runtime) jitHostFast(f *frame, s *jitState, pc, depth, limit int) (int, int, int) {
 	n := len(f.locals) + len(f.cl.upvalues)
+	n += len(s.globals)
+	if s.this {
+		n++
+	}
 	steps := 0
 	for range limit {
 		in := f.cl.fn.Code[pc]
@@ -650,8 +707,45 @@ func jitTreeResult(p any) (Value, error, bool) {
 	return Undefined, nil, false
 }
 
-func (s *jitState) encodeFrame(f *frame, stack []Value, depth int) {
+func (s *jitState) encodeFrame(r *Runtime, f *frame, stack []Value, depth int) {
 	base := len(f.locals) + len(f.cl.upvalues)
+	if s.this {
+		value, bound := f.thisValue()
+		if !bound {
+			value = uninitialized
+		}
+		s.slots[base] = s.encode(value)
+		base++
+	}
+	for _, in := range s.globals {
+		name, env := f.cl.names[in.A], f.cl.scope()
+		owner := env
+		var p *Property
+		if f.evalVars == nil && env.class == ClassObject {
+			if p = r.globalLexProp(env, name); p != nil {
+				owner = r.globalLex
+			} else {
+				site := &f.cl.ic[in.B]
+				if i := globalSlot(env, site, name); i >= 0 {
+					p = &env.props[i]
+					if site.p1 != env {
+						site.p1 = env
+					}
+				}
+			}
+		}
+		// A failed resolution is inert until the original read executes. No
+		// getter, proxy trap, coercion or TDZ error runs during preparation.
+		s.slots[base] = ir.Value{Kind: ir.Undefined}
+		if p != nil && p.flags&^propDefault == 0 && p.value.IsNumber() {
+			i := s.rootCount
+			s.rootCount++
+			s.roots[i] = Obj(owner)
+			s.arrays[i] = ir.ArrayView{Data: unsafe.Pointer(p), DenseLength: 1, WritableHole: tagBase}
+			s.slots[base] = ir.Value{Kind: ir.Opaque, Bits: uint64(i)}
+		}
+		base++
+	}
 	// Live slots are overwritten below; only inactive operands need clearing.
 	clear(s.slots[base+depth : base+f.cl.fn.MaxStack])
 	for i, v := range f.locals {

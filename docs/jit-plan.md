@@ -46,6 +46,63 @@ separately, and report the mixed V8 suite as its own acceptance measure; a hot
 kernel improvement does not establish the same gain for the whole engine.
 Five times is the minimum usefulness threshold; the target remains incomplete.
 
+## Crypto path to 10x
+
+Whole encryption/decryption, including plaintext validation, is the acceptance
+workload. At about 60 ms in bytecode and 20 ms with the current JIT, 10x means
+about 6 ms per pair on the same machine and work: another roughly 3.3x over the
+current JIT. Node remains a separate reference. The existing Go/tree tier must
+also be measured; reducing bytecode dispatch alone overstates progress.
+
+Only about 29% of the pre-field Crypto profile executes generated code. Improving
+that code alone cannot close the gap. Conversely, the long limb kernel's roughly
+7x bytecode speedup shows that coverage alone does not establish a 10x result.
+Both the surrounding execution and native integer throughput need improvement.
+
+Implement and measure these stages separately:
+
+1. Native own numeric fields. Borrow bounded ordinary property tables, guard
+   attributes and numeric cells, and preserve Go references. Keep reference
+   receivers on direct host exits. Refresh views after callbacks and mutation.
+   Measure complete RSA, short limb calls, and balanced V8 placements before
+   widening object-loop selection.
+2. Native numeric globals and stable reference fields. Read resolved ordinary
+   binding cells directly, preserving lexical shadowing, TDZ, missing bindings,
+   and accessor ordering. Keep references in Go-owned roots and refresh borrowed
+   cells and handles after callbacks. This covers constants such as limb masks
+   and receivers such as backing arrays without repeated Go bridges.
+3. Short entry and conversion costs. Measure limb counts 1, 4, 16, 32, and 8192.
+   Reduce repeated frame encoding, property preparation, and root/view work;
+   select Go when a generic trip-count or work estimate proves native entry
+   unprofitable. Do not select by benchmark or function name.
+4. Native calls and enclosing arithmetic loops. Introduce bounded native frame
+   storage and a shared instruction budget. Transfer scalar arguments and
+   rooted handles directly between eligible callers and callees. A callee host
+   exit must reconstruct its complete call chain without replaying effects;
+   cache eviction, exceptions, GC, cancellation, and recursion must retain their
+   existing ownership and error behavior. Then evaluate selective inlining.
+5. Integer representation and ranges. Keep bitwise results and proven bounded
+   arithmetic in integer registers across operations instead of repeatedly
+   converting between doubles and integers. Guard speculative input ranges.
+   Preserve JavaScript rounding, signed zero, NaN, overflow and shift masking;
+   multiplication cannot use integer modulo arithmetic when double rounding
+   could change the result. Compare both short and long limb throughput.
+6. Profile the remaining complete workload. Extend lowering and optimize the
+   remaining division/reduction, allocation and formatting paths where measured
+   time justifies it. Accept changes by complete RSA and mixed-suite results,
+   with code size, first use, allocations, live heap and peak RSS reported.
+
+These stages are hypotheses with measurable gates, not promised speedups. A
+faster isolated kernel or a compiled function does not count as completing a
+stage if whole RSA regresses or the work still spends most of its time in Go.
+
+The current implementation covers own numeric fields in selected host-free
+loops, live numeric global bindings, and a small-countdown entry hint. The hint
+retains Go execution for zero/one remaining iterations of a small single
+`while (--parameter >= 0)` loop, while preserving native entry and OSR for later
+larger calls. Stable reference handles, native call chains and integer register
+representation remain unimplemented; whole RSA remains about 3x bytecode.
+
 ## Objective and scope
 
 Add an optional native executor for `linux/amd64`, `windows/amd64`, and

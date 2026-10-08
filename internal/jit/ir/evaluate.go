@@ -49,6 +49,40 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 		case Host:
 			exit.Kind = HostExit
 			return exit, nil
+		case PropertyRead, PropertyWrite, BindingRead:
+			exit.Kind = HostExit
+			obj := read(in.Left)
+			if obj.Kind != Opaque || obj.Bits >= uint64(len(arrays)) {
+				return exit, nil
+			}
+			view := arrays[obj.Bits]
+			if view.NumberLimit != 0 || view.WritableHole == 0 || view.Data == nil || view.DenseLength > MaxProperties {
+				return exit, nil
+			}
+			var cell *PropertyCell
+			for i := uint64(0); i < view.DenseLength; i++ {
+				p := (*PropertyCell)(unsafe.Add(view.Data, uintptr(i)*unsafe.Sizeof(PropertyCell{})))
+				if p.Key == in.Key {
+					cell = p
+					break
+				}
+			}
+			if cell == nil || cell.Flags&^uint8(7) != 0 || cell.Bits >= view.WritableHole {
+				return exit, nil
+			}
+			if in.Op != PropertyWrite {
+				slots[in.Dest] = Value{Kind: Number, Bits: cell.Bits}
+			} else {
+				value := read(in.Right)
+				if cell.Flags&1 == 0 || value.Kind != Number {
+					return exit, nil
+				}
+				bits := value.Bits
+				if math.IsNaN(math.Float64frombits(bits)) {
+					bits = 0x7ff8000000000000
+				}
+				cell.Bits = bits
+			}
 		case Insert3:
 			n := in.Dest
 			a, b, c := slots[n], slots[n+1], slots[n+2]

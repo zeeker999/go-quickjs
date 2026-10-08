@@ -49,6 +49,118 @@ func TestNativeProgramABI(t *testing.T) {
 	if unsafe.Sizeof(view) != 40 || unsafe.Offsetof(view.DenseLength) != 8 || unsafe.Offsetof(view.Length) != 16 || unsafe.Offsetof(view.NumberLimit) != 24 || unsafe.Offsetof(view.WritableHole) != 32 {
 		t.Fatal("native array ABI changed")
 	}
+	var cell ir.PropertyCell
+	if unsafe.Sizeof(cell) != 24 || unsafe.Offsetof(cell.Flags) != 4 || unsafe.Offsetof(cell.Bits) != 8 || unsafe.Offsetof(cell.Reference) != 16 {
+		t.Fatal("native property ABI changed")
+	}
+}
+
+func TestNativeProgramProperties(t *testing.T) {
+	for _, op := range []ir.Op{ir.PropertyRead, ir.PropertyWrite, ir.BindingRead} {
+		for _, dest := range []int{0, 1, 2} {
+			p := &ir.Program{Locals: 3, Code: []ir.Instruction{
+				{Op: op, Left: ir.Slot(0), Right: ir.Slot(1), Dest: dest, Key: 0xdeadbeef},
+				{Op: ir.Return, Left: ir.Slot(dest)},
+			}, Maps: []ir.StateMap{{PC: 0}, {PC: 1}}}
+			c := newTestCode(t, p)
+			for _, count := range []uint64{0, 1, 3, 8, 9} {
+				for _, flags := range []uint8{0, 1, 7, 8, 16, 32, 64, 128} {
+					for _, bits := range []uint64{math.Float64bits(3), 0xfff8000000000001} {
+						for _, value := range []ir.Value{ir.Float(7), ir.Float(math.Copysign(0, -1)), {Kind: ir.Number, Bits: 0xfff8000000000100}, {Kind: ir.Opaque}} {
+							for _, budget := range []uint64{0, 1, 2} {
+								a, b := make([]ir.PropertyCell, 9), make([]ir.PropertyCell, 9)
+								for i := range a {
+									a[i] = ir.PropertyCell{Key: uint32(i), Flags: 7, Bits: math.Float64bits(11)}
+								}
+								a[2] = ir.PropertyCell{Key: 0xdeadbeef, Flags: flags, Bits: bits}
+								copy(b, a)
+								va, vb := make([]ir.ArrayView, ir.MaxSlots), make([]ir.ArrayView, ir.MaxSlots)
+								va[17] = ir.ArrayView{Data: unsafe.Pointer(&a[0]), DenseLength: count, WritableHole: 0xfff8000000000000}
+								vb[17] = va[17]
+								vb[17].Data = unsafe.Pointer(&b[0])
+								x := []ir.Value{{Kind: ir.Opaque, Bits: 17}, value, ir.Float(5)}
+								y := append([]ir.Value(nil), x...)
+								want, err := p.EvaluateArrays(x, va, 0, budget)
+								if err != nil {
+									t.Fatal(err)
+								}
+								got, err := c.RunArrays(y, vb, 0, budget)
+								if err != nil || got != want || !reflect.DeepEqual(x, y) || !reflect.DeepEqual(a, b) {
+									t.Fatalf("op %v dest %d count %d flags %x bits %x value %+v budget %d: %+v/%+v %v", op, dest, count, flags, bits, value, budget, got, want, err)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestNativeProgramPropertyPermission(t *testing.T) {
+	p := &ir.Program{Locals: 1, StackSize: 1, Code: []ir.Instruction{
+		{Op: ir.PropertyRead, Left: ir.Slot(0), Dest: 1, Key: 3},
+		{Op: ir.Return, Left: ir.Slot(1)},
+	}, Maps: []ir.StateMap{{PC: 0}, {PC: 1, Depth: 1}}}
+	c := newTestCode(t, p)
+	cell := ir.PropertyCell{Key: 3, Flags: 7, Bits: math.Float64bits(11)}
+	for _, permission := range []uint64{0, 1, 0xfff8000000000000} {
+		views := make([]ir.ArrayView, ir.MaxSlots)
+		views[0] = ir.ArrayView{Data: unsafe.Pointer(&cell), DenseLength: 1, NumberLimit: permission, WritableHole: 0xfff8000000000000}
+		slots := []ir.Value{{Kind: ir.Opaque}, ir.Float(0)}
+		want, err := p.EvaluateArrays(append([]ir.Value(nil), slots...), views, 0, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := c.RunArrays(slots, views, 0, 2)
+		if err != nil || got != want || permission != 0 && got.Kind != ir.HostExit || permission == 0 && got.Value != ir.Float(11) {
+			t.Fatalf("property read with array permission %x: %+v/%+v, %v", permission, got, want, err)
+		}
+	}
+}
+
+func TestNativeProgramPropertyCache(t *testing.T) {
+	p := &ir.Program{Locals: 6, Code: []ir.Instruction{
+		{Op: ir.Copy, Left: ir.Slot(0), Dest: 5},
+		{Op: ir.PropertyRead, Left: ir.Slot(0), Dest: 4, Key: 3},
+		{Op: ir.PropertyWrite, Left: ir.Slot(5), Right: ir.Slot(2), Key: 3},
+		{Op: ir.PropertyRead, Left: ir.Slot(5), Dest: 4, Key: 3},
+		{Op: ir.ArrayRead, Left: ir.Slot(3), Right: ir.Slot(1), Dest: 4},
+		{Op: ir.BindingRead, Left: ir.Slot(0), Dest: 4, Key: 3},
+		{Op: ir.ArrayRead, Left: ir.Slot(3), Right: ir.Slot(1), Dest: 4},
+		{Op: ir.PropertyRead, Left: ir.Slot(0), Dest: 4, Key: 9},
+		{Op: ir.PropertyRead, Left: ir.Slot(5), Dest: 4, Key: 3},
+		{Op: ir.PropertyRead, Left: ir.Slot(0), Dest: 4, Key: 3},
+		{Op: ir.Return, Left: ir.Slot(4)},
+	}}
+	for pc := range p.Code {
+		p.Maps = append(p.Maps, ir.StateMap{PC: uint32(pc)})
+	}
+	c := newTestCode(t, p)
+	for _, flags := range []uint8{0, 1, 7} {
+		for pc := range p.Code {
+			for budget := uint64(0); budget <= uint64(len(p.Code)+1); budget++ {
+				a := []ir.PropertyCell{{Key: 3, Flags: flags, Bits: math.Float64bits(2)}, {Key: 9, Flags: 7, Bits: math.Float64bits(11)}}
+				b := append([]ir.PropertyCell(nil), a...)
+				array := [2]uint64{math.Float64bits(13), 0}
+				va, vb := make([]ir.ArrayView, ir.MaxSlots), make([]ir.ArrayView, ir.MaxSlots)
+				va[0] = ir.ArrayView{Data: unsafe.Pointer(&a[0]), DenseLength: 2, WritableHole: 0xfff8000000000000}
+				va[1] = ir.ArrayView{Data: unsafe.Pointer(&array), DenseLength: 1, Length: 1, NumberLimit: 0xfff8000000000000}
+				copy(vb, va)
+				vb[0].Data = unsafe.Pointer(&b[0])
+				x := []ir.Value{{Kind: ir.Opaque}, ir.Float(0), ir.Float(7), {Kind: ir.Opaque, Bits: 1}, ir.Float(0), {Kind: ir.Opaque}}
+				y := append([]ir.Value(nil), x...)
+				want, err := p.EvaluateArrays(x, va, pc, budget)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := c.RunArrays(y, vb, pc, budget)
+				if err != nil || got != want || !reflect.DeepEqual(x, y) || !reflect.DeepEqual(a, b) {
+					t.Fatalf("cache flags %x pc %d budget %d: %+v/%+v %v", flags, pc, budget, got, want, err)
+				}
+			}
+		}
+	}
 }
 
 func TestNativeProgramArrays(t *testing.T) {

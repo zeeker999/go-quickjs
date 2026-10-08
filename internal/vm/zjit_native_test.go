@@ -20,10 +20,103 @@ import (
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/compiler"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/parser"
 )
 
 const jitSumSource = `function sum(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s } sum(10000)`
+
+func TestJITPropertyABI(t *testing.T) {
+	var p Property
+	var cell ir.PropertyCell
+	if unsafe.Sizeof(p) != unsafe.Sizeof(cell) || unsafe.Offsetof(p.key) != unsafe.Offsetof(cell.Key) || unsafe.Offsetof(p.flags) != unsafe.Offsetof(cell.Flags) || unsafe.Offsetof(p.value) != unsafe.Offsetof(cell.Bits) || unsafe.Offsetof(p.value)+unsafe.Offsetof(p.value.ref) != unsafe.Offsetof(cell.Reference) {
+		t.Fatal("VM property layout differs from borrowed native cells")
+	}
+	if propWritable != 1 || propDefault != 7 || propAccessor|propDeleted|propPrivate|propNamespaceExport|propUninit != 0xf8 {
+		t.Fatal("VM property permissions differ from native attributes")
+	}
+}
+
+func TestJITNumericProperties(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	v, err := r.Run(compileForTest(t, `function f(o,n){let s=0;for(let i=0;i<n;i++){s=(s+o.x)|0;o.x=o.x+1}return s}let o={a:7,x:3};f(o,1000)===502500&&o.x===1003&&o.a===7`))
+	if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 || r.jit.guards != 0 || r.jit.rootCount != 0 {
+		t.Fatalf("numeric fields did not stay native: %v, %v", v, err)
+	}
+}
+
+func TestJITThisSnapshot(t *testing.T) {
+	for _, source := range []string{
+		`function f(a){'use strict';let n=this;for(let i=0;i<4;i++)a[i]=n*2;return a[3]}f.call(3,[0,0,0,0])===6`,
+		`function f(a){a[0]+=1;return this}let o={x:3};f.call(o,[0])===o`,
+		`function f(a){'use strict';a[0]+=1;return this}f.call(null,[0])===null&&f.call(undefined,[0])===undefined`,
+		`function f(a){a[0]+=1;return this}let a=[0];f.call(null,a)===globalThis&&a[0]===1`,
+		`function f(a,cb){let x=this.x;cb();a[0]+=1;return this.x+x}let o={x:3};f.call(o,[0],()=>{o.x=7})===10`,
+		`let o={x:3,f(a){a[0]+=1;return ()=>{a[0]+=1;return this.x+a[0]}}};o.f([0])()===5`,
+		`let a=[0],good=false;class B{}class D extends B{constructor(){let f=()=>{a[0]+=1;return this};try{f()}catch(e){good=e instanceof ReferenceError}super();if(f()!==this)throw Error('receiver')}}new D();good&&a[0]===2`,
+	} {
+		for _, enabled := range []bool{false, true} {
+			r := jitRuntimeForTest(t, Config{JIT: enabled})
+			v, err := r.Run(compileForTest(t, source))
+			if err != nil || !v.IsBool() || !v.Truthy() || enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.rootCount != 0) {
+				t.Fatalf("receiver JIT %v: %v, %v; %s", enabled, v, err, source)
+			}
+		}
+	}
+}
+
+func TestJITPropertyFallbacks(t *testing.T) {
+	for _, tc := range []struct{ name, source string }{
+		{"reference", `function f(o,a){let v=o.x;a[0]+=1;return v}let x={};f({x},[0])===x`},
+		{"negative zero", `function f(o,a,v){o.x=v;a[0]+=1;return o.x}let o={x:2};Object.is(f(o,[0],-0),-0)&&Object.is(o.x,-0)`},
+		{"NaN", `function f(o,a,v){o.x=v;a[0]+=1;return o.x}let o={x:2};Number.isNaN(f(o,[0],NaN))&&Number.isNaN(o.x)`},
+		{"readonly", `function f(o,a){o.x=7;a[0]+=1;return o.x}let o={x:3};Object.defineProperty(o,'x',{writable:false});f(o,[0])===3`},
+		{"readonly strict", `function f(o,a){'use strict';a[0]+=1;o.x=7;return o.x}let a=[0],o={x:3};Object.defineProperty(o,'x',{writable:false});let good=false;try{f(o,a)}catch(e){good=e instanceof TypeError}good&&a[0]===1&&o.x===3`},
+		{"accessor", `let hits=0;function f(o,a){o.x=7;a[0]+=1;return o.x}let o={get x(){hits++;return 3},set x(v){hits+=v}};f(o,[0])===3&&hits===8`},
+		{"inherited", `function f(o,a){o.x=7;a[0]+=1;return o.x}let p={x:3},o=Object.create(p);f(o,[0])===7&&o.x===7&&p.x===3`},
+		{"deleted", `function f(o,a){let v=o.x;a[0]+=1;return v}let o={x:3};delete o.x;f(o,[0])===undefined`},
+		{"nonextensible", `function f(o,a){o.x=7;a[0]+=1;return o.x}let o={x:3};Object.preventExtensions(o);f(o,[0])===7`},
+		{"large table", `function f(o,a){o.x=7;a[0]+=1;return o.x}let o={x:3,a:1,b:2,c:3,d:4,e:5,f:6,g:7,h:8,i:9};f(o,[0])===7&&o.i===9`},
+		{"proxy", `let hits=0;function f(o,a){o.x=7;a[0]+=1;return o.x}let target={x:3},o=new Proxy(target,{get(t,k){hits++;return t[k]},set(t,k,v){hits++;t[k]=v;return true}});f(o,[0])===7&&hits===2`},
+		{"alias mutation", `function f(o,p,a){o.x=7;a[0]+=1;return p.x}let o={x:3};f(o,o,[0])===7`},
+		{"shape mutation", `function f(o,a,cb){o.x=7;cb(o);a[0]+=1;return o.x}let o={x:3};f(o,[0],o=>{for(let i=0;i<30;i++)o['p'+i]=i;Object.defineProperty(o,'x',{get(){return 11}})})===11`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, enabled := range []bool{false, true} {
+				r := jitRuntimeForTest(t, Config{JIT: enabled})
+				v, err := r.Run(compileForTest(t, tc.source))
+				if err != nil || !v.IsBool() || !v.Truthy() || enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.guards != 0 || r.jit.rootCount != 0) {
+					t.Fatalf("property JIT %v: %v, %v", enabled, v, err)
+				}
+			}
+		})
+	}
+}
+
+func TestJITPropertyViewNotArray(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	v, err := r.Run(compileForTest(t, `function f(o,a){return o.length+a[0]}f({length:7},[3])===10`))
+	if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.guards != 1 || r.jit.rootCount != 0 {
+		t.Fatalf("ordinary property view granted array length access: %v, %v", v, err)
+	}
+}
+
+func TestJITPropertyCallbackRelease(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.global.setOwnRaw(r.atoms.intern("host"), r.NewFunction("host", 0,
+		func(rt *Runtime, _ Value, _ []Value) (Value, error) {
+			if rt.jit == nil || rt.jit.rootCount != 0 {
+				t.Fatal("callback retained native property views")
+			}
+			rt.releaseJIT()
+			runtime.GC()
+			return Undefined, nil
+		}), propDefault)
+	v, err := r.Run(compileForTest(t, `function f(o,a,cb){o.x=7;cb();a[0]+=1;return o.x+a[0]}let o={x:3};f(o,[0],()=>{host();delete o.x;o.y=9;o.x=11})===12&&o.y===9`))
+	if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.rootCount != 0 || r.jit.guards != 0 {
+		t.Fatalf("property view release: %v, %v", v, err)
+	}
+}
 
 func TestJITRemainderBoundaries(t *testing.T) {
 	for _, tc := range []struct{ left, right, check string }{
@@ -100,6 +193,56 @@ func TestJITGlobalReads(t *testing.T) {
 		}
 		if calls != 1 || enabled && (r.jit == nil || r.jit.guards != 0 || r.jit.rootCount != 0) {
 			t.Fatal("global resolution did not preserve accessors or lexical shadowing")
+		}
+	}
+}
+
+func TestJITNumericGlobalLoop(t *testing.T) {
+	for _, keyword := range []string{"var", "let", "const"} {
+		r := jitRuntimeForTest(t, Config{JIT: true})
+		v, err := r.Run(compileForTest(t, keyword+` scale=3,offset=7;function f(a,n){for(let i=0;i<n;i++)a[i]=i*scale+offset;return a[n-1]}let a=[];for(let i=0;i<512;i++)a[i]=0;f(a,512)===1540&&a[0]===7`))
+		if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 || r.jit.guards != 0 || r.jit.rootCount != 0 {
+			t.Fatalf("%s numeric bindings did not stay native: %v, %v", keyword, v, err)
+		}
+	}
+}
+
+func TestJITShortCountdown(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	v, err := r.Run(compileForTest(t, `function f(n,a){while(--n>=0)a[n]=(a[n]+1)|0;return a[0]}let a=[0,0,0,0];f(1,a);f(1,a);f(1,a);f(1,a)===4`))
+	if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.entries != 0 {
+		t.Fatalf("short countdown entered native execution: %v, %v", v, err)
+	}
+	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
+	if cl.jitEntry == nil || cl.jitEntry.shortCounter != 1 || cl.jitEntry.code == nil {
+		t.Fatal("short countdown lost its reusable native program")
+	}
+	v, err = r.Run(compileForTest(t, `for(let i=0;i<2048;i++)f(1,a);a[0]===2052`))
+	if err != nil || !v.IsBool() || !v.Truthy() || r.jit.entries != 0 {
+		t.Fatalf("short countdown promoted at a back edge: %v, %v", v, err)
+	}
+	v, err = r.Run(compileForTest(t, `f(4,a)===2053&&a[1]===1&&a[2]===1&&a[3]===1`))
+	if err != nil || !v.IsBool() || !v.Truthy() || r.jit.entries == 0 || r.jit.guards != 0 || r.jit.rootCount != 0 {
+		t.Fatalf("longer countdown lost native execution: %v, %v", v, err)
+	}
+}
+
+func TestJITNumericGlobalMutation(t *testing.T) {
+	for _, source := range []string{
+		`var g=1;function f(o,a,n){for(let i=0;i<n;i++){a[i]=g;o.g=g+1}return g+a[n-1]}let a=[];for(let i=0;i<128;i++)a[i]=0;f(globalThis,a,128)===257&&g===129&&a[0]===1`,
+		`let g=3;function f(a,cb){a[0]+=g;cb();return g+a[0]}f([1],()=>{g=7})===11`,
+		`globalThis.g=3;function f(a,cb){a[0]+=g;cb();return g+a[0]}let hits=0;f([1],()=>{for(let i=0;i<100;i++)globalThis['p'+i]=i;Object.defineProperty(globalThis,'g',{get(){hits++;return 9}})})===13&&hits===1`,
+		`globalThis.g=3;function f(a,cb){a[0]+=g;cb();return g+a[0]}let a=[1],good=false;try{f(a,()=>{delete globalThis.g})}catch(e){good=e instanceof ReferenceError}good&&a[0]===4`,
+		`function f(a){a[0]+=1;return g+a[0]}let a=[1],good=false;try{f(a)}catch(e){good=e instanceof ReferenceError}let g=7;good&&a[0]===2&&f([1])===9`,
+		`let scale=3,offset=7;function f(a,n){'use strict';for(let i=0;i<n;i++)a[i]=this*scale+offset;return a[n-1]}let a=[];for(let i=0;i<128;i++)a[i]=0;f.call(2,a,128)===13`,
+		`globalThis.g=3;function f(a,cb){a[0]+=g;cb();return g+a[0]}f([1],()=>{g={valueOf(){return 7}}})===11`,
+	} {
+		for _, enabled := range []bool{false, true} {
+			r := jitRuntimeForTest(t, Config{JIT: enabled})
+			v, err := r.Run(compileForTest(t, source))
+			if err != nil || !v.IsBool() || !v.Truthy() || enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.rootCount != 0) {
+				t.Fatalf("binding mutation JIT %v: %v, %v; %s", enabled, v, err, source)
+			}
 		}
 	}
 }
@@ -866,8 +1009,8 @@ func TestJITPropertyLoopCancellation(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("property loop cancellation: %v", err)
 	}
-	if r.jit == nil || r.jit.fastHosts == 0 || r.jit.budgets == 0 || r.jit.rootCount != 0 {
-		t.Fatal("property loop did not spend its shared native/host budget")
+	if r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 || r.jit.budgets == 0 || r.jit.rootCount != 0 {
+		t.Fatal("native property loop did not check its budget")
 	}
 }
 
@@ -1581,7 +1724,7 @@ func BenchmarkJITCryptoLimb(b *testing.B) {
 		source.Write(data)
 		source.WriteByte('\n')
 	}
-	for _, n := range []int{32, 8192} {
+	for _, n := range []int{1, 4, 16, 32, 8192} {
 		for _, mode := range []string{"interpreter", "existing", "native"} {
 			b.Run(fmt.Sprintf("n%d/%s", n, mode), func(b *testing.B) {
 				previous := treeTier.Swap(mode != "interpreter")
@@ -1653,13 +1796,113 @@ func BenchmarkJITCryptoLimb(b *testing.B) {
 					}
 				}
 				if mode == "native" {
-					if r.jit == nil || r.jit.entries == 0 || r.jit.guards != 0 || r.jit.rootCount != 0 {
+					if r.jit == nil || n > 1 && r.jit.entries == 0 || r.jit.guards != 0 || r.jit.rootCount != 0 {
 						b.Fatal("limb loop did not stay native")
 					}
 					b.ReportMetric(float64(r.jitCodeBytes()), "code+metadata-B")
 				}
 			})
 		}
+	}
+}
+
+func BenchmarkJITNumericFields(b *testing.B) {
+	for _, mode := range []string{"interpreter", "existing", "native"} {
+		b.Run(mode, func(b *testing.B) {
+			previous := treeTier.Swap(mode != "interpreter")
+			defer treeTier.Store(previous)
+			compile := func(source string) *bytecode.Function {
+				ast, err := parser.Parse(source, parser.Options{})
+				if err != nil {
+					b.Fatal(err)
+				}
+				fn, err := compiler.Compile(ast, compiler.Options{})
+				if err != nil {
+					b.Fatal(err)
+				}
+				return fn
+			}
+			setup := compile(`function fields(o,n){let s=0;for(let i=0;i<n;i++){s=(s+o.x)|0;o.x=o.x+1}return s}var fieldObject={x:3}`)
+			call := compile(`fields(fieldObject,4096)`)
+			r := New(Config{JIT: mode == "native"})
+			defer func() { r.Close(); r.ReleaseClosed() }()
+			if _, err := r.Run(setup); err != nil {
+				b.Fatal(err)
+			}
+			x := uint64(3)
+			run := func() {
+				want := float64(int32(uint32(x*4096 + 4096*4095/2)))
+				v, err := r.Run(call)
+				if err != nil || !v.IsNumber() || v.Number() != want {
+					b.Fatalf("fields: %v, %v; want %v", v, err, want)
+				}
+				x += 4096
+			}
+			for range jitHotCalls {
+				run()
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				run()
+			}
+			b.StopTimer()
+			if mode == "native" {
+				if r.jit == nil || r.jit.hosts != 0 || r.jit.guards != 0 || r.jit.rootCount != 0 {
+					b.Fatal("numeric fields left native execution")
+				}
+				b.ReportMetric(float64(r.jitCodeBytes()), "code+metadata-B")
+			}
+		})
+	}
+}
+
+func BenchmarkJITNumericGlobals(b *testing.B) {
+	for _, mode := range []string{"interpreter", "existing", "native"} {
+		b.Run(mode, func(b *testing.B) {
+			previous := treeTier.Swap(mode != "interpreter")
+			defer treeTier.Store(previous)
+			compile := func(source string) *bytecode.Function {
+				ast, err := parser.Parse(source, parser.Options{})
+				if err != nil {
+					b.Fatal(err)
+				}
+				fn, err := compiler.Compile(ast, compiler.Options{})
+				if err != nil {
+					b.Fatal(err)
+				}
+				return fn
+			}
+			setup := compile(`var scale=3,offset=7;function globals(n){let s=0;for(let i=0;i<n;i++)s+=i*scale+offset;return s}`)
+			call := compile(`globals(4096)`)
+			r := New(Config{JIT: mode == "native"})
+			defer func() { r.Close(); r.ReleaseClosed() }()
+			if _, err := r.Run(setup); err != nil {
+				b.Fatal(err)
+			}
+			run := func() {
+				v, err := r.Run(call)
+				const want = 3*4096*4095/2 + 7*4096
+				if err != nil || !v.IsNumber() || v.Number() != want {
+					b.Fatalf("globals: %v, %v; want %d", v, err, want)
+				}
+			}
+			for range jitHotCalls {
+				run()
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				run()
+			}
+			b.StopTimer()
+			if mode == "native" {
+				if r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 || r.jit.guards != 0 || r.jit.rootCount != 0 {
+					b.Fatal("numeric globals left native execution")
+				}
+				b.ReportMetric(float64(r.jitCodeBytes()), "code+metadata-B")
+			}
+		})
 	}
 }
 

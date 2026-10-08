@@ -39,6 +39,7 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 			a.pc = pc
 			if a.starts[pc] || pc > 0 && a.tails[pc-1] == 1 {
 				a.arrayCacheID = -1
+				a.propertyCacheID = -1
 			}
 			a.guard, a.budget, a.returned, a.host = a.exit(pc, ir.GuardExit), a.exit(pc, ir.BudgetExit), a.exit(pc, ir.Returned), a.exit(pc, ir.HostExit)
 			if a.fast {
@@ -71,6 +72,8 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 				a.store(in.Dest, 8, 9)
 			case ir.ArrayRead, ir.ArrayWrite, ir.ArrayKey, ir.ArrayLength, ir.ArrayUpdate:
 				a.array(in)
+			case ir.PropertyRead, ir.PropertyWrite, ir.BindingRead:
+				a.property(in)
 			case ir.Copy:
 				a.loadScalar(in.Left, 0, 2)
 				a.storeScalar(in.Dest, 0, 2)
@@ -587,6 +590,82 @@ func (a *amd64Program) truth(o ir.Operand) {
 	a.mark(zero)
 	a.immediate(0, 0)
 	a.mark(done)
+}
+
+func (a *amd64Program) property(in ir.Instruction) {
+	guard := a.guard
+	a.guard = a.host
+	defer func() { a.guard = guard }()
+	if in.Op != ir.BindingRead && a.propertyCached(in.Left, in.Key) {
+		a.move(8, 11)
+		if in.Op == ir.PropertyWrite {
+			a.bytes(0x41, 0xf6, 0x40, 4, 1)
+			a.conditional(4, a.host)
+		}
+		a.memory(0x8b, 0, 8, 8)
+	} else {
+		a.load(in.Left, 0, 2)
+		if !a.known(in.Left, ir.Opaque) {
+			a.bytes(0x48, 0x83, 0xfa, byte(ir.Opaque))
+			a.conditional(5, a.host)
+		}
+		a.bytes(0x48, 0x3d)
+		a.word(ir.MaxSlots)
+		a.conditional(3, a.host)
+		a.bytes(0x48, 0x8d, 0x04, 0x80, 0x48, 0xc1, 0xe0, 3, 0x48, 0x01, 0xc8) // view = cx + ax*40
+		a.memory(0x8b, 2, 0, 24)
+		a.bytes(0x48, 0x85, 0xd2)
+		a.conditional(5, a.host) // array permission excludes property access
+		a.memory(0x8b, 2, 0, 32)
+		a.bytes(0x48, 0x85, 0xd2)
+		a.conditional(4, a.host)
+		a.bytes(0x66, 0x4c, 0x0f, 0x6e, 0xfa) // movq dx,x15: numeric tag boundary
+		a.memory(0x8b, 9, 0, 8)
+		a.bytes(0x49, 0x83, 0xf9, ir.MaxProperties)
+		a.conditional(7, a.host)
+		a.bytes(0x4d, 0x85, 0xc9)
+		a.conditional(4, a.host)
+		a.memory(0x8b, 8, 0, 0)
+		a.bytes(0x4d, 0x85, 0xc0)
+		a.conditional(4, a.host)
+		search, found := a.label(), a.label()
+		a.mark(search)
+		a.bytes(0x41, 0x81, 0x38) // cmpl key,(r8)
+		a.word(in.Key)
+		a.conditional(4, found)
+		a.bytes(0x49, 0x83, 0xc0, 24, 0x49, 0xff, 0xc9)
+		a.conditional(5, search)
+		a.jump(a.host)
+		a.mark(found)
+		a.bytes(0x41, 0xf6, 0x40, 4, 0xf8) // testb invalid attributes,4(r8)
+		a.conditional(5, a.host)
+		if in.Op == ir.PropertyWrite {
+			a.bytes(0x41, 0xf6, 0x40, 4, 1)
+			a.conditional(4, a.host)
+		}
+		a.memory(0x8b, 0, 8, 8)
+		a.bytes(0x66, 0x4c, 0x0f, 0x7e, 0xfa) // movq x15,dx
+		a.bytes(0x48, 0x39, 0xd0)
+		a.conditional(3, a.host)
+		if in.Op != ir.BindingRead {
+			a.move(11, 8)
+		}
+	}
+	if in.Op != ir.PropertyWrite {
+		a.bytes(0x66, 0x48, 0x0f, 0x6e, 0xc0)
+		a.storeNumber(in.Dest, 0)
+		return
+	}
+	fp := a.number(in.Right, 0)
+	a.fpBinary(0x66, 0x2e, fp, fp)
+	ordered, end := a.label(), a.label()
+	a.conditional(11, ordered)
+	a.immediate(0, 0x7ff8000000000000)
+	a.memory(0x89, 0, 8, 8)
+	a.jump(end)
+	a.mark(ordered)
+	a.bytes(0xf2, 0x41|(fp>>3)<<2, 0x0f, 0x11, 0x40|(fp&7)<<3, 8)
+	a.mark(end)
 }
 
 func (a *amd64Program) array(in ir.Instruction) {

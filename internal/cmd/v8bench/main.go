@@ -11,11 +11,13 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"os"
 	"strconv"
 
 	quickjs "github.com/go-quickjs/go-quickjs"
+	"github.com/go-quickjs/go-quickjs/internal/jit"
 	"github.com/go-quickjs/go-quickjs/internal/v8bench"
 )
 
@@ -31,6 +33,9 @@ func (engine) Compile(name, src string) error {
 }
 
 func (engine) NewRuntime(print func(string), load func(string) (string, error)) (v8bench.Runtime, error) {
+	if *jitFlag && !jit.Supported() {
+		return nil, errors.New("JIT benchmarking requires a supported build with -tags quickjs_jit")
+	}
 	var opts []quickjs.Option
 	if *jitFlag {
 		opts = append(opts, quickjs.WithJIT())

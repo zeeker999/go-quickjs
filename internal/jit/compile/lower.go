@@ -39,6 +39,8 @@ func refuse(pc int, why string) error { return &Refusal{PC: pc, Reason: why} }
 // No executable memory is allocated. Unsupported code, even when unreachable,
 // is refused. Captured own locals are excluded; read-only upvalues are snapshots
 // refreshed by the VM after host operations.
+// Property keys are source-name indices; the VM resolves them to its runtime's
+// scalar property identifiers before emission or evaluation with borrowed views.
 func Lower(fn *bytecode.Function) (*ir.Program, error) {
 	if fn == nil {
 		return nil, refuse(-1, "nil function")
@@ -69,7 +71,7 @@ func Lower(fn *bytecode.Function) (*ir.Program, error) {
 		}
 	}
 	effects := make([]effect, len(fn.Code))
-	host, loop, indexed, property, bitwise := false, false, false, false, false
+	host, loop, indexed, property, bitwise, this := false, false, false, false, false, false
 	for pc, in := range fn.Code {
 		e, err := describe(fn, pc, in)
 		if err != nil {
@@ -78,6 +80,7 @@ func Lower(fn *bytecode.Function) (*ir.Program, error) {
 		effects[pc] = e
 		host = host || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 		property = property || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
+		this = this || in.Op == bytecode.OpPushThis
 		raw := uint32(in.Op)
 		switch in.Op {
 		case bytecode.OpBinLocal, bytecode.OpBinImm:
@@ -95,8 +98,6 @@ func Lower(fn *bytecode.Function) (*ir.Program, error) {
 	if host && !loop && !indexed {
 		return nil, refuse(-1, "host operations without native loop or array work")
 	}
-	// Property-heavy object loops run faster in the tree tier. Require work
-	// that benefits from the new coverage before paying property boundaries.
 	if property && !indexed && !bitwise {
 		return nil, refuse(-1, "property operations without native array or bitwise work")
 	}
@@ -146,13 +147,229 @@ func Lower(fn *bytecode.Function) (*ir.Program, error) {
 			}
 		}
 	}
-	p := &ir.Program{Locals: fn.LocalCount + len(fn.Upvalues), StackSize: fn.MaxStack, Maps: maps, Code: make([]ir.Instruction, len(fn.Code))}
-	for pc, in := range fn.Code {
-		if maps[pc].Depth >= 0 {
-			p.Code[pc] = lower(fn, in, p.Locals+maps[pc].Depth)
+	p := &ir.Program{Locals: fn.LocalCount + len(fn.Upvalues), StackSize: fn.MaxStack, This: this, Maps: maps, Code: make([]ir.Instruction, len(fn.Code))}
+	if this {
+		if p.Locals+p.StackSize == MaxSlots {
+			p.This = false
+		} else {
+			p.Locals++
 		}
 	}
+	for pc, in := range fn.Code {
+		if maps[pc].Depth >= 0 {
+			p.Code[pc] = lower(fn, in, p.Locals+maps[pc].Depth, p.This)
+		}
+	}
+	selectNumericProperties(p)
+	selectPropertyLoops(fn, p)
+	selectGlobalSlots(fn, p)
+	selectShortCountdown(fn, p)
 	return p, nil
+}
+
+// A small while (--parameter >= 0) has at most one iteration for inputs in
+// [0,1]. No other write may reset its counter, and other loops are excluded.
+// This is only an entry-cost hint: values and effects still run in a VM tier.
+func selectShortCountdown(fn *bytecode.Function, p *ir.Program) {
+	if len(p.Code) > 64 {
+		return
+	}
+	header := -1
+	for pc, in := range p.Code {
+		if (in.Op == ir.Jump || in.Op == ir.Branch) && in.Target <= pc {
+			if header >= 0 || in.Op != ir.Jump {
+				return
+			}
+			header = in.Target
+		}
+	}
+	if header < 0 || header+2 >= len(p.Code) {
+		return
+	}
+	u, zero, branch := p.Code[header], p.Code[header+1], p.Code[header+2]
+	if u.Op != ir.Update || u.Operator != ir.Sub || u.Postfix || u.Left.Slot != u.Dest || u.Extra < p.Locals || u.Dest >= fn.ParamCount ||
+		zero.Op != ir.Copy || zero.Left.Slot != -1 || zero.Left.Literal != ir.Float(0) ||
+		branch.Op != ir.Branch || branch.Operator != ir.Ge || branch.When || branch.Target <= header+2 || branch.Left.Slot != u.Extra || branch.Right.Slot != zero.Dest {
+		return
+	}
+	for pc, in := range p.Code {
+		if pc == header {
+			continue
+		}
+		write, extra := false, false
+		switch in.Op {
+		case ir.Copy, ir.Binary, ir.Unary, ir.Update, ir.ArrayRead, ir.ArrayLength, ir.PropertyRead, ir.BindingRead:
+			write = true
+			extra = in.Op == ir.Update && in.Extra >= 0
+		case ir.CopyPair, ir.StoreLoad, ir.Swap, ir.ArrayUpdate:
+			write, extra = true, true
+		}
+		if write && in.Dest == u.Dest || extra && in.Extra == u.Dest {
+			return
+		}
+	}
+	p.ShortCounter = uint16(u.Dest + 1)
+}
+
+// Numeric global reads borrow live cells, rather than snapshotting their values.
+// Reserve one handle per name; excess bindings retain the original host path.
+func selectGlobalSlots(fn *bytecode.Function, p *ir.Program) {
+	base := p.Locals
+	for pc, in := range p.Code {
+		if in.Op != ir.BindingRead {
+			continue
+		}
+		i := 0
+		for i < len(p.Globals) && p.Globals[i] != in.Key {
+			i++
+		}
+		if i == len(p.Globals) {
+			if base+p.StackSize+len(p.Globals) == MaxSlots {
+				p.Code[pc] = ir.Instruction{Op: ir.Host}
+				continue
+			}
+			p.Globals = append(p.Globals, in.Key)
+		}
+		in.Left = ir.Slot(base + i)
+		p.Code[pc] = in
+	}
+	if len(p.Globals) == 0 {
+		return
+	}
+	p.Locals += len(p.Globals)
+	for pc, old := range p.Code {
+		if p.Maps[pc].Depth < 0 || old.Op == ir.Host {
+			continue
+		}
+		in := lower(fn, fn.Code[pc], p.Locals+p.Maps[pc].Depth, p.This)
+		if old.Op == ir.BindingRead {
+			in.Left = old.Left
+		}
+		p.Code[pc] = in
+	}
+}
+
+// Borrowing object tables and another receiver root costs something on every
+// entry. Keep mixed loops on their existing bridge until their remaining host
+// operations are covered; a native field loop must amortize that preparation.
+func selectPropertyLoops(fn *bytecode.Function, p *ir.Program) bool {
+	hosts := make([]int, len(p.Code)+1)
+	fields, loop, mixed, fieldCount := false, false, false, 0
+	for pc, in := range p.Code {
+		hosts[pc+1] = hosts[pc]
+		if in.Op == ir.Host {
+			hosts[pc+1]++
+		}
+		fields = fields || in.Op == ir.PropertyRead || in.Op == ir.PropertyWrite
+		if in.Op == ir.PropertyRead || in.Op == ir.PropertyWrite {
+			fieldCount++
+		}
+	}
+	for pc, in := range p.Code {
+		if (in.Op == ir.Jump || in.Op == ir.Branch) && in.Target <= pc {
+			loop = true
+			mixed = mixed || hosts[pc+1] != hosts[in.Target]
+		}
+	}
+	fields = fields && loop && !mixed
+	if p.This && !fields && hosts[len(p.Code)]+fieldCount != 0 {
+		p.This = false
+		p.Locals--
+		for pc, in := range fn.Code {
+			if p.Maps[pc].Depth >= 0 {
+				p.Code[pc] = lower(fn, in, p.Locals+p.Maps[pc].Depth, false)
+			}
+		}
+		selectNumericProperties(p)
+	}
+	if !fields {
+		for pc, in := range p.Code {
+			if in.Op == ir.PropertyRead || in.Op == ir.PropertyWrite {
+				p.Code[pc] = ir.Instruction{Op: ir.Host}
+			}
+		}
+	}
+	return loop && !mixed
+}
+
+// Native fields are profitable when their values feed numeric operations.
+// This bounded backward scan is a selection hint, not a type proof: emitted
+// guards still handle every path and value. Reference fields used as array or
+// method receivers keep their direct host exit instead of searching twice.
+func selectNumericProperties(p *ir.Program) {
+	var numeric [MaxSlots]bool
+	read := func(o ir.Operand, needed bool) {
+		if o.Slot >= 0 && needed {
+			numeric[o.Slot] = true
+		}
+	}
+	for pc := len(p.Code) - 1; pc >= 0; pc-- {
+		if p.Maps[pc].Depth < 0 {
+			continue
+		}
+		in := p.Code[pc]
+		switch in.Op {
+		case ir.PropertyRead, ir.BindingRead:
+			if !numeric[in.Dest] {
+				p.Code[pc] = ir.Instruction{Op: ir.Host}
+			}
+			numeric[in.Dest] = false
+		case ir.Copy:
+			needed := numeric[in.Dest]
+			numeric[in.Dest] = false
+			read(in.Left, needed)
+		case ir.CopyPair:
+			left, right := numeric[in.Dest], numeric[in.Extra]
+			numeric[in.Dest], numeric[in.Extra] = false, false
+			read(in.Left, left)
+			read(in.Right, right)
+		case ir.StoreLoad:
+			needed := numeric[in.Extra]
+			numeric[in.Extra] = false
+			read(in.Right, needed)
+			needed = numeric[in.Dest]
+			numeric[in.Dest] = false
+			read(in.Left, needed)
+		case ir.Swap:
+			numeric[in.Dest], numeric[in.Extra] = numeric[in.Extra], numeric[in.Dest]
+		case ir.Binary:
+			numeric[in.Dest] = false
+			read(in.Left, true)
+			read(in.Right, true)
+		case ir.Unary, ir.Update:
+			numeric[in.Dest] = false
+			if in.Op == ir.Update && in.Extra >= 0 {
+				numeric[in.Extra] = false
+			}
+			read(in.Left, in.Operator != ir.Not)
+		case ir.ArrayRead, ir.ArrayUpdate, ir.ArrayLength:
+			numeric[in.Dest] = false
+			if in.Op == ir.ArrayUpdate {
+				numeric[in.Extra] = false
+			}
+			read(in.Right, in.Op != ir.ArrayLength)
+		case ir.ArrayWrite, ir.ArrayKey:
+			read(in.Right, true)
+			read(in.Third, in.Op == ir.ArrayWrite)
+		case ir.PropertyWrite:
+			read(in.Right, true)
+		case ir.Branch:
+			read(in.Left, in.Operator != ir.Truth)
+			read(in.Right, in.Operator != ir.Truth)
+		case ir.Host:
+			clear(numeric[p.Locals:])
+		case ir.Insert2, ir.Insert3:
+			n, last := in.Dest, 2
+			if in.Op == ir.Insert2 {
+				last = 1
+			}
+			needed := numeric[n] || numeric[n+last+1]
+			for i := 0; i < last; i++ {
+				numeric[n+i] = numeric[n+i+1]
+			}
+			numeric[n+last], numeric[n+last+1] = needed, false
+		}
+	}
 }
 
 type effect struct {
@@ -352,7 +569,7 @@ func operator(raw uint32) (ir.Operator, bool) {
 	return 0, false
 }
 
-func lower(fn *bytecode.Function, in bytecode.Instr, sp int) ir.Instruction {
+func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this bool) ir.Instruction {
 	copyTo := func(dest int, source ir.Operand) ir.Instruction {
 		return ir.Instruction{Op: ir.Copy, Dest: dest, Left: source}
 	}
@@ -380,8 +597,20 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int) ir.Instruction {
 		return ir.Instruction{Op: ir.Insert2, Dest: sp - 2}
 	case bytecode.OpInsert3:
 		return ir.Instruction{Op: ir.Insert3, Dest: sp - 3}
-	case bytecode.OpCall, bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpGetPropThis, bytecode.OpPushThis, bytecode.OpGetProp, bytecode.OpSetProp, bytecode.OpMod:
+	case bytecode.OpCall, bytecode.OpCallMethod, bytecode.OpGetPropThis, bytecode.OpMod:
 		return ir.Instruction{Op: ir.Host}
+	case bytecode.OpGetGlobal:
+		return ir.Instruction{Op: ir.BindingRead, Left: ir.Literal(ir.Value{Kind: ir.Opaque}), Dest: sp, Key: in.A}
+	case bytecode.OpPushThis:
+		if !this {
+			return ir.Instruction{Op: ir.Host}
+		}
+		slot := fn.LocalCount + len(fn.Upvalues)
+		return ir.Instruction{Op: ir.Copy, Left: ir.Slot(slot), Dest: sp, Check: true, CheckSlot: slot}
+	case bytecode.OpGetProp:
+		return ir.Instruction{Op: ir.PropertyRead, Left: top, Dest: sp - 1, Key: in.A}
+	case bytecode.OpSetProp:
+		return ir.Instruction{Op: ir.PropertyWrite, Left: ir.Slot(sp - 2), Right: top, Key: in.A}
 	case bytecode.OpPushConst:
 		return copyTo(sp, ir.Literal(ir.Float(fn.Constants[in.A].Num)))
 	case bytecode.OpPushInt:

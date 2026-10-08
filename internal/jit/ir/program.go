@@ -14,12 +14,30 @@ import (
 // with a number. The caller proves ordinary writable/extensible array storage
 // and absence of inherited indexed properties before granting this permission.
 // The caller owns and roots the storage, and rebuilds views after every callback.
+// With NumberLimit zero, Data instead borrows an ordinary object's property
+// table, DenseLength counts at most MaxProperties cells, and WritableHole is
+// the numeric tag boundary. The two permissions are mutually exclusive.
+// Missing or nonnumeric fields exit to the host.
 type ArrayView struct {
 	Data         unsafe.Pointer
 	DenseLength  uint64
 	Length       uint64
 	NumberLimit  uint64
 	WritableHole uint64
+}
+
+// MaxProperties bounds the native linear search within one IR instruction.
+const MaxProperties = 8
+
+// PropertyCell describes borrowed own data. Only Flags' low three bits are
+// ordinary attributes; bit zero grants writes. Native stores change Bits only
+// after proving the existing value numeric, leaving Reference untouched.
+type PropertyCell struct {
+	Key       uint32
+	Flags     uint8
+	_         [3]byte
+	Bits      uint64
+	Reference unsafe.Pointer
 }
 
 // Kind identifies a scalar or a handle into Go-owned reference storage.
@@ -89,6 +107,9 @@ const (
 	Insert3
 	Host
 	Insert2
+	PropertyRead
+	PropertyWrite
+	BindingRead
 )
 
 // Operator selects an arithmetic, comparison, or truthiness operation.
@@ -130,6 +151,9 @@ const (
 // index; Third is the stored number. ArrayUpdate commits an updated index in
 // Extra only after the read succeeds. ArrayKey guards without converting a key.
 // Host exits before executing the corresponding VM instruction.
+// PropertyRead/PropertyWrite and BindingRead search Left's table for Key. A
+// BindingRead borrows one resolved numeric binding cell. Right supplies
+// the stored number; any failed permission or type check takes a host exit.
 type Instruction struct {
 	Op        Op
 	Operator  Operator
@@ -143,12 +167,14 @@ type Instruction struct {
 	Postfix   bool
 	Check     bool
 	CheckSlot int
+	Key       uint32
 }
 
 // StateMap describes state immediately before a bytecode instruction. PC is
 // the instruction to resume, not the VM's PC after fetching it. Depth is the
 // live operand count; -1 marks unreachable code. Slots [0, Locals) hold locals
-// and read-only captured-binding snapshots; the next Depth slots hold operands.
+// and read-only captured bindings, receiver snapshots and binding-view handles;
+// the next Depth slots hold operands.
 type StateMap struct {
 	PC    uint32
 	Depth int
@@ -160,8 +186,16 @@ type StateMap struct {
 type Program struct {
 	Locals    int
 	StackSize int
-	Code      []Instruction
-	Maps      []StateMap
+	// This reserves a read-only receiver snapshot after captured bindings.
+	This bool
+	// Globals contains source-name indices for reserved binding-view slots,
+	// following captured bindings and the optional receiver snapshot.
+	Globals []uint32
+	// ShortCounter is a parameter slot plus one, or zero. A small single
+	// countdown loop can retain Go execution when its input is zero or one.
+	ShortCounter uint16
+	Code         []Instruction
+	Maps         []StateMap
 }
 
 // ExitKind identifies a completed return or a resumable exit.

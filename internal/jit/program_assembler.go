@@ -28,6 +28,8 @@ type programAssembler struct {
 	unchanged                      [][ir.MaxSlots]bool
 	origins                        [][ir.MaxSlots]uint16
 	arrayCacheID                   int
+	propertyCacheID                int
+	propertyCacheKey               uint32
 	pc                             int
 	exits                          []programExit
 	conversions                    []integerConversion
@@ -134,9 +136,12 @@ func (a *programAssembler) allocateRegisters(p *ir.Program, available []int) {
 			if in.Op == ir.ArrayWrite {
 				read(in.Third)
 			}
-		case ir.ArrayLength:
+		case ir.ArrayLength, ir.PropertyRead, ir.BindingRead:
 			read(in.Left)
 			uses[in.Dest]++
+		case ir.PropertyWrite:
+			read(in.Left)
+			read(in.Right)
 		case ir.Insert2, ir.Insert3:
 			width := 3
 			if in.Op == ir.Insert2 {
@@ -297,6 +302,16 @@ func (a *programAssembler) inferKinds(p *ir.Program) {
 				write(in.Extra, int8(ir.Number))
 			}
 			simple = true
+		case ir.PropertyRead, ir.PropertyWrite, ir.BindingRead:
+			refine(in.Left, ir.Opaque)
+			if in.Op == ir.PropertyWrite {
+				refine(in.Right, ir.Number)
+			}
+			before = kinds
+			if in.Op != ir.PropertyWrite {
+				write(in.Dest, int8(ir.Number))
+			}
+			simple = true
 		case ir.ArrayRead, ir.ArrayWrite, ir.ArrayUpdate, ir.ArrayKey, ir.ArrayLength:
 			refine(in.Left, ir.Opaque)
 			if in.Op != ir.ArrayLength {
@@ -338,6 +353,7 @@ func (a *programAssembler) known(o ir.Operand, kind ir.Kind) bool {
 }
 
 func (a *programAssembler) arrayCached(o ir.Operand) bool {
+	a.propertyCacheID = -1
 	if !a.fast || o.Slot < 0 {
 		a.arrayCacheID = -1
 		return false
@@ -345,5 +361,20 @@ func (a *programAssembler) arrayCached(o ir.Operand) bool {
 	id := int(a.origins[a.pc][o.Slot])
 	hit := a.arrayCacheID == id
 	a.arrayCacheID = id
+	return hit
+}
+
+// A region has no callbacks, and native property stores preserve numeric kinds
+// and attributes. An aliased receiver and the same key can reuse its checked
+// cell; array access invalidates it because both caches share one register.
+func (a *programAssembler) propertyCached(o ir.Operand, key uint32) bool {
+	a.arrayCacheID = -1
+	if !a.fast || o.Slot < 0 {
+		a.propertyCacheID = -1
+		return false
+	}
+	id := int(a.origins[a.pc][o.Slot])
+	hit := a.propertyCacheID == id && a.propertyCacheKey == key
+	a.propertyCacheID, a.propertyCacheKey = id, key
 	return hit
 }

@@ -37,10 +37,130 @@ func fixture(code ...bytecode.Instr) *bytecode.Function {
 	return &bytecode.Function{Code: code, LocalCount: 2, Locals: make([]bytecode.LocalDesc, 2), MaxStack: 4, HasSimpleParams: true}
 }
 
+func TestNumericPropertySelection(t *testing.T) {
+	fn := compiledFunction(t, `function f(o){let a=o.array;let n=o.n;for(let i=0;i<n;i++)a[i]=a[i]+o.step;return a[0]}`)
+	p, err := Lower(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for pc, in := range fn.Code {
+		if in.Op != bytecode.OpGetProp {
+			continue
+		}
+		name := fn.Names[in.A]
+		seen[name] = true
+		want := ir.PropertyRead
+		if name == "array" {
+			want = ir.Host
+		}
+		if p.Code[pc].Op != want || want == ir.PropertyRead && p.Code[pc].Key != in.A {
+			t.Fatalf("property %s lowered to %+v, want %v", name, p.Code[pc], want)
+		}
+	}
+	if !seen["array"] || !seen["n"] || !seen["step"] {
+		t.Fatal("missing numeric or reference property fixture")
+	}
+}
+
+func TestNumericGlobalSelection(t *testing.T) {
+	fn := compiledFunction(t, `function f(a,n){for(let i=0;i<n;i++)a[i]=i*scale+offset;return a[n-1]}`)
+	p, err := Lower(fn)
+	if err != nil || len(p.Globals) != 2 || p.Locals != fn.LocalCount+len(fn.Upvalues)+2 {
+		t.Fatalf("numeric binding layout: %+v, %v", p, err)
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for pc, in := range fn.Code {
+		if in.Op == bytecode.OpGetGlobal {
+			got := p.Code[pc]
+			if got.Op != ir.BindingRead || got.Left.Slot < p.Locals-len(p.Globals) || got.Left.Slot >= p.Locals || got.Key != in.A {
+				t.Fatalf("binding read lost its reserved view: %+v", got)
+			}
+		}
+	}
+}
+
+func TestGlobalSlotBudget(t *testing.T) {
+	fn := fixture(bytecode.Instr{Op: bytecode.OpGetGlobal, B: 1}, bytecode.Instr{Op: bytecode.OpPushInt, A: 2}, bytecode.Instr{Op: bytecode.OpMul}, bytecode.Instr{Op: bytecode.OpDrop}, bytecode.Instr{Op: bytecode.OpJump})
+	fn.Names = []string{"scale"}
+	fn.PropSites = 1
+	fn.LocalCount, fn.MaxStack = MaxSlots-2, 2
+	fn.Locals = make([]bytecode.LocalDesc, fn.LocalCount)
+	p, err := Lower(fn)
+	if err != nil || len(p.Globals) != 0 || p.Code[0].Op != ir.Host || p.Locals+p.StackSize != MaxSlots {
+		t.Fatalf("binding view exceeded scratch capacity: %+v, %v", p, err)
+	}
+}
+
+func TestShortCountdownSelection(t *testing.T) {
+	for _, tc := range []struct {
+		source  string
+		counter uint16
+	}{
+		{`function f(n,a){while(--n>=0)a[n]=(a[n]+1)|0;return a[0]}`, 1},
+		{`function f(a,n){while(--n>=0)a[n]=(a[n]+1)|0;return a[0]}`, 2},
+		{`function f(n,a){n=7;while(--n>=0)a[n]=(a[n]+1)|0;return a[0]}`, 0},
+		{`function f(n,a){while(--n>=0){a[n]=(a[n]+1)|0;n=7}return a[0]}`, 0},
+		{`function f(n,a){while(n-->=0)a[n]=(a[n]+1)|0;return a[0]}`, 0},
+		{`function f(n,a){while(--n>=0)a[n]=(a[n]+1)|0;while(--n>=0)a[n]+=1;return a[0]}`, 0},
+	} {
+		p, err := Lower(compiledFunction(t, tc.source))
+		if err != nil || p.ShortCounter != tc.counter {
+			t.Fatalf("countdown selection: %+v, %v; %s", p, err, tc.source)
+		}
+	}
+}
+
+func TestReceiverSlot(t *testing.T) {
+	fn := compiledFunction(t, `function f(a){a[0]+=1;return this}`)
+	p, err := Lower(fn)
+	if err != nil || !p.This || p.Locals != fn.LocalCount+len(fn.Upvalues)+1 {
+		t.Fatalf("receiver layout: %+v, %v", p, err)
+	}
+	for pc, in := range fn.Code {
+		if in.Op == bytecode.OpPushThis {
+			got := p.Code[pc]
+			if got.Op != ir.Copy || got.Left.Slot != p.Locals-1 || !got.Check || got.CheckSlot != p.Locals-1 {
+				t.Fatalf("receiver load lost its binding guard: %+v", got)
+			}
+			return
+		}
+	}
+	t.Fatal("missing receiver load")
+}
+
+func TestReceiverSlotBudget(t *testing.T) {
+	fn := fixture(bytecode.Instr{Op: bytecode.OpPushThis}, bytecode.Instr{Op: bytecode.OpDrop}, bytecode.Instr{Op: bytecode.OpPushInt}, bytecode.Instr{Op: bytecode.OpBitNot}, bytecode.Instr{Op: bytecode.OpDrop}, bytecode.Instr{Op: bytecode.OpJump})
+	fn.LocalCount, fn.MaxStack = MaxSlots-1, 1
+	fn.Locals = make([]bytecode.LocalDesc, fn.LocalCount)
+	p, err := Lower(fn)
+	if err != nil || p.This || p.Locals+p.StackSize != MaxSlots || p.Code[0].Op != ir.Host {
+		t.Fatalf("receiver exceeded scratch storage instead of taking the host path: %+v, %v", p, err)
+	}
+}
+
+func TestMixedPropertyLoopSelection(t *testing.T) {
+	fn := compiledFunction(t, `function f(a,n,cb){for(let i=0;i<n;i++){a[i]=(this.x+i)|0;this.x+=1;cb()}return a[0]}`)
+	p, err := Lower(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.This || p.Locals != fn.LocalCount+len(fn.Upvalues) {
+		t.Fatal("mixed loop prepared an unprofitable receiver snapshot")
+	}
+	for _, in := range p.Code {
+		if in.Op == ir.PropertyRead || in.Op == ir.PropertyWrite {
+			t.Fatal("mixed loop prepared unprofitable numeric property views")
+		}
+	}
+}
+
 func TestRefusals(t *testing.T) {
 	for _, tc := range []struct{ source, reason string }{
 		{`function f(a) { return a.x }`, "host operations without native loop or array work"},
-		{`function f(a,n) { for(let i=0;i<n;i++)a.x++;return a.x }`, "property operations without native array or bitwise work"},
+		{`function f(a,n,cb) { for(let i=0;i<n;i++){a.x++;cb()}return a.x }`, "property operations without native array or bitwise work"},
 		{`function f(a) { return new a() }`, "unsupported opcode"},
 		{`function f() { try { return 1 } catch(e) { return 2 } }`, "unsupported opcode push_catch"},
 		{`function f() { eval('1') }`, "direct eval"},

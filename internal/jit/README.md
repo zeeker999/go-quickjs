@@ -135,14 +135,17 @@ branches, increments/decrements, and rooted reference returns. It handles fused 
 immediate, and comparison instructions without exposing half-completed bytecode
 operations. It also accepts read-only captured bindings, dense numeric array
 access, length reads, fused index updates, assignment-result insertion, and
-numeric bitwise operations over the full double domain. Ordinary calls, method
-calls, receiver loads, global reads, property reads and writes, and method
+numeric bitwise operations over the full double domain. Selected loops also
+read and write own numeric fields and use a guarded receiver snapshot. Ordinary
+calls, method calls, nonnumeric global reads, other property operations, and method
 lookups exit to Go and resume native execution. Remainder, including fused
 operands, and nonnumeric equality also use resumable Go boundaries.
 Host-backed functions need a loop or indexed work to qualify; small wrappers
-without that work retain the existing tiers. The new receiver/property coverage
-also requires indexed or bitwise work: tree execution is faster for the
-object loops measured in DeltaBlue. Captured own locals, writes to
+without that work retain the existing tiers. Own numeric fields require a loop
+without planned host operations; mixed object loops keep their prior property
+bridge until more of the surrounding work can run natively. Numeric use guides
+selection, and runtime guards still check every field's kind and permissions.
+Captured own locals, writes to
 upvalues, arguments objects, direct eval, non-simple parameters, handlers,
 `with`, and other unsupported opcodes are refused,
 including in unreachable code. Work is bounded to 4096 bytecode instructions and
@@ -223,7 +226,7 @@ middle uses the generic path until reaching a region boundary. No unchecked
 facts or cached view can leak across entry, branch joins, or callbacks.
 Every exit spills the registers before returning to Go.
 
-An array handle indexes a separate, typed table of 40-byte borrowed views. Each
+An array handle indexes a separate, typed table of 64-byte borrowed views. Each
 view roots dense Go storage and records its dense length, JavaScript length,
 and numeric tag boundary. A nonzero writable-hole marker grants permission to
 fill pointer-free holes after Go proves ordinary extensible storage, writable
@@ -1150,3 +1153,97 @@ by later loop promotion. Native fuzzing passes 11.5 million inputs. Native and
 debugger Test262 runs each report 92869 passed, zero failures, and 342 existing
 skips. The final isolated native run peaks at 2660.0 MiB RSS. Windows execution
 remains unverified; a cross-build is not native execution.
+
+## Numeric fields, globals and short calls
+
+Native object views now borrow at most eight ordinary own properties. The
+original 40-byte view uses mutually exclusive array and property permissions;
+object support adds no bytes to array views. Native
+field operations check the key, ordinary attributes and numeric representation;
+writes require a writable existing numeric cell, canonicalize NaNs and leave
+Go references untouched. Missing fields, accessors, proxies, inherited values,
+large tables and nonnumeric values resume the original operation in Go.
+Receiver snapshots preserve strict primitive receivers and unbound `this`.
+Callbacks discard roots and borrowed views before entering JavaScript, then
+rebuild them on return. A checked cell may be reused only inside a callback-free
+region for the same proven receiver and key.
+
+Numeric globals also use live borrowed cells, with one reserved handle per
+source name. Preparation consults ordinary data only and never invokes a
+getter, proxy trap, coercion or TDZ error ahead of its original instruction.
+Lexical bindings shadow globals; failed resolutions take the original host
+path. Reads see native and fast-host writes through aliases, and callbacks
+refresh the resolved storage. Binding reads preserve the array cache register.
+Reserved handles count against the slot limit, and retained descriptors count
+against native code and metadata budgets.
+
+Small single countdown loops now retain Go execution for numeric counter values
+in [0,1], both at function entry and at back-edge promotion. The compiler proves
+a `while (--parameter >= 0)` shape, no counter reset, no other loop and at most
+64 instructions. It preserves the cached native program for larger later calls,
+and never coerces an input during selection. This is a generic cost hint, not a
+function-name or benchmark selection rule.
+
+The Crypto roadmap now separates coverage from throughput: stable reference
+receivers, native calls and integer representation remain. Whole RSA, with
+plaintext checked on every
+pair, remains the acceptance workload. A dedicated 4096-iteration numeric field
+loop measures about 4.3x bytecode, with zero host/guard exits, 328 Go bytes and
+three allocations per call, and 16992 bytes of native code plus metadata.
+The final numeric-global loop measures 77.0 us bytecode versus 11.3 us native
+(6.8x), 260 Go bytes, three allocations and 16968 bytes of code plus metadata,
+also with zero host/guard exits.
+That result does not establish a Crypto speedup. Broad field selection regressed
+balanced Crypto by 3.3%, and admitting additional plain object loops regressed
+it by 2.4%; both policies were rejected. Selected field loops require indexed
+or bitwise work and no planned Go operation inside any loop.
+
+The rebased implementation passes default/tagged full suites, vet, race,
+checkptr, Go 1.24, Linux/amd64 native tests under emulation, and Windows
+amd64/arm64 and Linux/386 cross-builds. Language and built-in Test262 reports
+91492 passed, zero failures and 342 existing skips, with 2888073216 bytes peak
+RSS. Final field/global language and built-in conformance likewise reports
+91492 passed, zero failures and 342 existing skips, with 2994159616 bytes peak
+RSS. The full checkout's fourteen Intl Locale failures also occur with JIT
+disabled; they are separate from this change. Windows execution remains for CI.
+
+After fetching and rebasing onto origin/main at ab49ce6, the exact final eight
+balanced placements compare with the rebased prior JIT: Crypto 64.4 to 63.7 ms
+(-1.2%), mixed total 527.7 to 526.1 ms (-0.3%). With native execution disabled,
+the total is 618.1 to 619.2 ms (+0.2%, effectively level). These are three fixed
+iterations per suite, with the small suites separately scaled. Broader mixed
+field-loop selection was also rejected: a live global binding alone did not
+make repeated call boundaries profitable.
+
+Fresh short-limb samples reduce one-limb automatic calls from 307-316 ns to
+278-281 ns by retaining Go; the final standalone sample is 274.5 ns. Counts
+4/16/32/8192 measure 340.5/436.8/561.6/73743 ns. They still do not establish
+10x whole Crypto. Paired complete RSA samples for the field/global stage versus
+the final short-call stage average 19.75 versus 19.48 ms (-1.4%); the final
+standalone sample is 18.72 ms, 240535 Go bytes and 982 allocations per pair.
+Native code plus retained metadata is 581960 bytes, including binding descriptors.
+Fresh bytecode/tree pairs average 61.03/41.02 ms: complete RSA remains about
+3.1x bytecode and 2.1x the Go tiers. The 10x target remains incomplete.
+
+A fresh score process reports 5159 overall, Crypto 6458. A fifty-iteration
+fixed run reports Crypto 980.4 ms, total 5952.8 ms, 4422.8 MB allocated and
+9.5 MB live after collection, with 343474176 bytes peak RSS. Node v26.8.1 runs
+the same Crypto work in 68.7 ms, about 14.3x faster than this JIT. These ordinary
+layout snapshots are not the attribution comparison. The new Crypto CPU profile
+still spends 29.5% in generated code, 8.6% inclusive in frame encoding and 8.3%
+inclusive in fast host bridges; tree/call machinery dominates the rest.
+
+First-call vector/stencil/helper samples across 100 fresh runtimes each measure
+75.1/99.0/206.6 us with automatic promotion, versus 113.9/180.5/672.8 us in Go.
+Automatic first calls allocate 101917/128661/187464 bytes and 67/70/73 objects;
+source compilation, runtime creation and setup remain outside those timings.
+First-use process RSS is 32669696 bytes. The default qjs binary is 40538002
+bytes, the tagged binary 40812322 (+274320, 0.68%). Ordinary construction still
+allocates no executable code.
+
+Final default/tagged suites, vet, race/checkptr, Go 1.24, Linux/amd64 native VM
+execution under emulation and the Windows/386 cross-builds pass. Final native
+language/built-in Test262 reports 91492 passed, zero failed, 342 existing skips
+and 3123167232 bytes peak RSS; the corresponding opt-out run also passes and
+peaks at 3000827904 bytes. Conformance memory is reported separately from the
+small RSA benchmark's 28475392-byte process peak.
