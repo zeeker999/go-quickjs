@@ -97,6 +97,10 @@ func CompileAMD64(f *ssa.Func, enc abi.Encoding) (code *Code, err error) {
 		}
 	}()
 	c := &compiler{f: f, enc: enc, labels: map[*ssa.Block]amd64.Label{}, stubs: map[stubKey]amd64.Label{}}
+	if enc.ValueSize != 16 {
+		// Slots and elements are found by shifting an index by four.
+		return nil, fmt.Errorf("%w: %d-byte values", ErrUnsupported, enc.ValueSize)
+	}
 	if n := f.Locals + f.StackSize; n > abi.MaxRecords {
 		return nil, fmt.Errorf("%w: %d slots", ErrUnsupported, n)
 	}
@@ -986,6 +990,83 @@ func (c *compiler) branch(b *ssa.Block, next *ssa.Block) {
 	c.edge(b, b.Succs[0], next)
 }
 
+// arrayOf finds the array a value is: the pointer word of the slot it came
+// from, which still holds it (origin.go). A value with an object's word is
+// its origin's object, since native code makes no such word.
+func (c *compiler) arrayOf(v *ssa.Value, guard func(amd64.Cond)) {
+	a := v.Args[0]
+	o := c.origin[a]
+	if a.Shadow == nil && o < 0 {
+		// A primitive is never an array.
+		c.a.Jmp(c.stubLabel(v.State, exitKind(v.Aux)))
+		return
+	}
+	w := c.gpr(a, scratchA)
+	c.a.MovImm(scratchB, c.enc.Object)
+	c.a.Op(amd64.Cmp, w, scratchB, true)
+	guard(amd64.CondNE)
+	if s := a.Shadow; s != nil {
+		// The slot is known at run time: a local, or an operand.
+		stack, found := c.a.NewLabel(), c.a.NewLabel()
+		c.a.MovRR32(scratchC, c.gpr(s, scratchC))
+		c.a.Op(amd64.Test, scratchC, scratchC, false)
+		guard(amd64.CondS)
+		c.a.OpImm(amd64.Cmp, scratchC, int32(c.f.Locals), false)
+		c.a.Jcc(amd64.CondGE, stack)
+		c.a.ShiftImm(amd64.Shl, scratchC, 4, true)
+		c.a.Op(amd64.Add, scratchC, regLocals, true)
+		c.a.Jmp(found)
+		c.a.Bind(stack)
+		c.a.OpImm(amd64.Sub, scratchC, int32(c.f.Locals), false)
+		c.a.ShiftImm(amd64.Shl, scratchC, 4, true)
+		c.a.Op(amd64.Add, scratchC, regStack, true)
+		c.a.Bind(found)
+		c.a.Load(scratchC, scratchC, c.enc.RefOffset)
+	} else {
+		base, disp := c.slotAddr(o, true)
+		c.a.Load(scratchC, base, disp)
+	}
+	c.a.Op(amd64.Test, scratchC, scratchC, true)
+	guard(amd64.CondE)
+	c.a.LoadU8(scratchB, scratchC, c.enc.ObjectClass)
+	c.a.OpImm(amd64.Cmp, scratchB, int32(c.enc.ClassArray), false)
+	guard(amd64.CondNE)
+	c.setG(v, scratchC)
+}
+
+// index converts an element's key, a double, to an index in scratchA,
+// failing unless it is an integer in [0, 2**32): truncation and back must
+// give the key (NaN and anything past 2**63 do not), and the top half must
+// be clear. Negative zero is index 0. It uses scratchB and xScratch1.
+func (c *compiler) index(key *ssa.Value, fail func(amd64.Cond)) {
+	k := c.xmm(key, xScratch0)
+	c.a.Cvttsd2si(scratchA, k)
+	c.a.Cvtsi2sd(xScratch1, scratchA, true)
+	c.a.SSEOp(amd64.UcomiSD, xScratch1, k)
+	fail(amd64.CondNE)
+	fail(amd64.CondP)
+	c.a.MovRR(scratchB, scratchA)
+	c.a.ShiftImm(amd64.Shr, scratchB, 32, true)
+	fail(amd64.CondNE)
+}
+
+// element turns the index in scratchA into the address of an array's
+// element there, in scratchA, and its number word, in scratchB, failing
+// unless the element is present and holds a number. It uses scratchC.
+func (c *compiler) element(array *ssa.Value, fail func(amd64.Cond)) {
+	p := c.gpr(array, scratchC)
+	c.a.Load(scratchB, p, c.enc.ObjectElems+8)
+	c.a.Op(amd64.Cmp, scratchA, scratchB, true)
+	fail(amd64.CondAE)
+	c.a.Load(scratchB, p, c.enc.ObjectElems)
+	c.a.ShiftImm(amd64.Shl, scratchA, 4, true)
+	c.a.Op(amd64.Add, scratchA, scratchB, true)
+	c.a.Load(scratchB, scratchA, c.enc.NumOffset)
+	c.a.MovImm(scratchC, abi.NumberLimit)
+	c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+	fail(amd64.CondAE)
+}
+
 // value emits one value.
 func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 	arg := func(i int) *ssa.Value { return v.Args[i] }
@@ -1019,6 +1100,36 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		guard(amd64.CondE)
 	case ssa.OpTruth:
 		c.truth(v, guard)
+	case ssa.OpArrayOf:
+		c.arrayOf(v, guard)
+	case ssa.OpArrayLen:
+		// The dense count, or a sparse array's length when that is larger,
+		// as Object.arrayLength has it.
+		p := c.gpr(arg(0), scratchA)
+		dense := c.a.NewLabel()
+		c.a.Load(scratchC, p, c.enc.ObjectElems+8)
+		c.a.LoadU8(scratchB, p, c.enc.ObjectFlags)
+		c.a.OpImm(amd64.And, scratchB, int32(c.enc.FlagSparse), false)
+		c.a.Jcc(amd64.CondE, dense)
+		c.a.LoadU32(scratchB, p, c.enc.ObjectArrayLen)
+		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+		c.a.Jcc(amd64.CondBE, dense)
+		c.a.MovRR(scratchC, scratchB)
+		c.a.Bind(dense)
+		c.a.Cvtsi2sd(xScratch0, scratchC, true)
+		c.setX(v, xScratch0)
+	case ssa.OpElemKey:
+		c.index(arg(0), guard)
+	case ssa.OpElemRead:
+		c.index(arg(1), guard)
+		c.element(arg(0), guard)
+		c.a.MovQToX(xScratch0, scratchB)
+		c.setX(v, xScratch0)
+	case ssa.OpElemWrite:
+		c.index(arg(1), guard)
+		c.element(arg(0), guard)
+		c.boxF64(c.xmm(arg(2), xScratch0), scratchB)
+		c.a.Store(scratchA, c.enc.NumOffset, scratchB)
 	case ssa.OpBoxF64:
 		c.boxF64(c.xmm(arg(0), xScratch0), scratchA)
 		c.setG(v, scratchA)

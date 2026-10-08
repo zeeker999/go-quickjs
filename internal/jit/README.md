@@ -114,6 +114,20 @@ the host (a call, a getter, a coercion, a proxy trap), Go:
 reachable from Go across every entry. Native code keeps no address between
 entries.
 
+**The new pipeline** (`ssa`, `mir`, `abi`) uses the VM's frame and objects
+in place, under the same rule (docs/jit-phase2-design.md):
+- It holds a slot's number word, never its pointer word. A reference stays
+  in the slot that held it at entry, which native code does not write before
+  it exits; an exit has Go copy it where it goes, and store a primitive over
+  a reference (`abi.Record`). An ambiguous phi's shadow tells Go, at run
+  time, which slot a value came from.
+- It reads an object through the pointer word of the slot that holds it
+  (D8): an array's class, flags, length and elements, through the offsets
+  `abi.Encoding` gives. Go changes none of them while native code runs.
+- It writes only number words: into a slot whose pointer word is nil, and
+  into an element that holds a number.
+- It keeps no address between entries.
+
 ## Deoptimization
 
 **State maps.** Each reachable PC has a state map: the bytecode PC and the

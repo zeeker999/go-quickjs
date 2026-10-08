@@ -33,10 +33,13 @@ const (
 	Bool
 	// None is a value used only for its effect or control: a guard, a check.
 	None
+	// Ptr is an object's address, read from the frame slot that holds it.
+	// It never reaches a slot or crosses an exit.
+	Ptr
 )
 
 func (t Type) String() string {
-	return [...]string{"tagged", "f64", "i32", "bool", "none"}[t]
+	return [...]string{"tagged", "f64", "i32", "bool", "none", "ptr"}[t]
 }
 
 // Op is a value's operation.
@@ -57,6 +60,15 @@ const (
 	OpUnboxF64  // tagged -> f64, if a number
 	OpTruth     // tagged -> bool, if undefined, null, a boolean or a number
 	OpCheckInit // tagged -> none, if not uninitialized
+
+	// Arrays, read in place (D8). The guards' semantics are the slot IR's
+	// array views' (ir.ArrayView), less writes into holes: an array of class
+	// Array, elements that hold numbers, and an index that is an integer
+	// below 2**32.
+	OpArrayOf   // tagged -> ptr, if an array
+	OpElemKey   // f64 -> none, if an index
+	OpElemRead  // ptr, f64 -> f64: the element, if the index's is a number
+	OpElemWrite // ptr, f64, f64 -> none: stores, if the index's is a number
 
 	// Boxing: a typed value as a slot value.
 	OpBoxF64
@@ -82,11 +94,14 @@ const (
 	OpNotI32   //
 	OpI32ToF64 // signed
 	OpU32ToF64 // unsigned
+
+	OpArrayLen // ptr -> f64: an array's length
 )
 
 var opNames = [...]string{
 	OpInvalid: "invalid", OpLoadSlot: "load", OpConst: "const", OpConstF64: "constf", OpConstI32: "consti", OpPhi: "phi",
 	OpUnboxF64: "unbox", OpTruth: "truth", OpCheckInit: "checkinit", OpBoxF64: "boxf", OpBoxBool: "boxb",
+	OpArrayOf: "arrayof", OpElemKey: "elemkey", OpElemRead: "elemread", OpElemWrite: "elemwrite", OpArrayLen: "arraylen",
 	OpAddF64: "addf", OpSubF64: "subf", OpMulF64: "mulf", OpDivF64: "divf", OpNegF64: "negf", OpCmpF64: "cmpf",
 	OpNot: "not", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
@@ -101,7 +116,18 @@ func (o Op) String() string {
 
 // isGuard reports whether an op exits when its operand is not what it needs.
 func (o Op) isGuard() bool {
-	return o == OpUnboxF64 || o == OpTruth || o == OpCheckInit
+	switch o {
+	case OpUnboxF64, OpTruth, OpCheckInit, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite:
+		return true
+	}
+	return false
+}
+
+// readsMemory reports whether a guard's result or exit depends on elements,
+// which an OpElemWrite changes: two of them are not the same guard. (An
+// array's length changes only in Go.)
+func (o Op) readsMemory() bool {
+	return o == OpElemRead || o == OpElemWrite
 }
 
 // Value is one SSA value.

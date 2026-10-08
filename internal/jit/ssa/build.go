@@ -58,7 +58,11 @@ func (b *builder) plan() error {
 		}
 		switch in.Op {
 		case ir.Nop, ir.Copy, ir.CopyPair, ir.StoreLoad, ir.Swap, ir.Insert2, ir.Insert3,
-			ir.Unary, ir.Update, ir.Return:
+			ir.Unary, ir.Update, ir.Return, ir.ArrayRead, ir.ArrayUpdate, ir.ArrayLength, ir.ArrayKey:
+		case ir.ArrayWrite:
+			// A store native code does not make exits to Go, which resumes
+			// after it.
+			entries[pc+1] = true
 		case ir.Binary:
 			if in.Operator == ir.Eq || in.Operator == ir.Ne {
 				// A comparison of non-numbers exits to Go, which resumes after it.
@@ -386,8 +390,8 @@ func (b *builder) instruction(blk *Block, pc int) {
 		}
 		return b.read(o.Slot, blk)
 	}
-	guard := func(op Op, t Type, kind ir.ExitKind, arg *Value) *Value {
-		v := f.newValue(blk, op, t, arg)
+	guard := func(op Op, t Type, kind ir.ExitKind, args ...*Value) *Value {
+		v := f.newValue(blk, op, t, args...)
 		v.Aux = int(kind)
 		v.State = state()
 		v.State.addUse()
@@ -497,6 +501,44 @@ func (b *builder) instruction(blk *Block, pc int) {
 		guard(OpCheckInit, None, ir.GuardExit, v)
 		blk.Control = v
 		v.Uses++
+	case ir.ArrayRead, ir.ArrayUpdate:
+		// Every check exits to the state before the instruction, so their
+		// order is free; the key's update is written only once the read
+		// has succeeded, before the element, which wins if both name one
+		// slot.
+		array := guard(OpArrayOf, Ptr, ir.GuardExit, operand(in.Left))
+		var key, updated *Value
+		if in.Op == ir.ArrayUpdate {
+			old := guard(OpUnboxF64, Float64, ir.GuardExit, operand(in.Right))
+			op := OpAddF64
+			if in.Operator == ir.Sub {
+				op = OpSubF64
+			}
+			updated = f.newValue(blk, op, Float64, old, one())
+			key = updated
+			if in.Postfix {
+				key = old
+			}
+		} else {
+			key = number(in.Right, ir.GuardExit)
+		}
+		elem := guard(OpElemRead, Float64, ir.GuardExit, array, key)
+		if updated != nil {
+			b.write(in.Extra, blk, boxF(updated))
+		}
+		b.write(in.Dest, blk, boxF(elem))
+	case ir.ArrayLength:
+		array := guard(OpArrayOf, Ptr, ir.GuardExit, operand(in.Left))
+		b.write(in.Dest, blk, boxF(f.newValue(blk, OpArrayLen, Float64, array)))
+	case ir.ArrayKey:
+		guard(OpArrayOf, Ptr, ir.GuardExit, operand(in.Left))
+		guard(OpElemKey, None, ir.GuardExit, number(in.Right, ir.GuardExit))
+	case ir.ArrayWrite:
+		// Go stores what native code does not: a value that is not a
+		// number, or into an element that does not hold one.
+		array := guard(OpArrayOf, Ptr, ir.HostExit, operand(in.Left))
+		key, value := number(in.Right, ir.HostExit), number(in.Third, ir.HostExit)
+		guard(OpElemWrite, None, ir.HostExit, array, key, value)
 	case ir.Host, ir.Call:
 		blk.ExitKind = ir.HostExit
 		blk.State = state()

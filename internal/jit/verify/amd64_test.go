@@ -70,6 +70,16 @@ func decodeOne(t *testing.T, name string, code []byte) x86asm.Inst {
 
 // expect checks an instruction's operation and operands. An operand is an
 // x86asm.Reg, a mem, or an int64 immediate.
+// expectBytes is expect for an instruction that reads or writes memory,
+// checking the access's width as well.
+func expectBytes(t *testing.T, name string, code []byte, op x86asm.Op, width int, args ...any) {
+	t.Helper()
+	expect(t, name, code, op, args...)
+	if inst := decodeOne(t, name, code); inst.MemBytes != width {
+		t.Fatalf("%s: % x is %v, a %d-byte access, want %d", name, code, inst, inst.MemBytes, width)
+	}
+}
+
 func expect(t *testing.T, name string, code []byte, op x86asm.Op, args ...any) {
 	t.Helper()
 	inst := decodeOne(t, name, code)
@@ -114,6 +124,8 @@ func TestAMD64Moves(t *testing.T) {
 			for _, disp := range disps {
 				expect(t, "Load "+name, encode(func(a *amd64.Asm) { a.Load(d, s, disp) }), x86asm.MOV, r64(d), mem{r64(s), int64(disp)})
 				expect(t, "Store "+name, encode(func(a *amd64.Asm) { a.Store(s, disp, d) }), x86asm.MOV, mem{r64(s), int64(disp)}, r64(d))
+				expectBytes(t, "LoadU32 "+name, encode(func(a *amd64.Asm) { a.LoadU32(d, s, disp) }), x86asm.MOV, 4, r32(d), mem{r64(s), int64(disp)})
+				expectBytes(t, "LoadU8 "+name, encode(func(a *amd64.Asm) { a.LoadU8(d, s, disp) }), x86asm.MOVZX, 1, r32(d), mem{r64(s), int64(disp)})
 			}
 			expect(t, "MovZX8 "+name, encode(func(a *amd64.Asm) { a.MovZX8(d, s) }), x86asm.MOVZX, r32(d), r8(s))
 		}

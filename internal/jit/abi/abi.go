@@ -103,7 +103,26 @@ type Encoding struct {
 	Undefined, Null, True, False, Uninitialized uint64
 	// CanonicalNaN is the one NaN a number word may hold.
 	CanonicalNaN uint64
+	// Object is every object's number word: its pointer word tells objects
+	// apart.
+	Object uint64
+
+	// What native code reads of an object, at these offsets from the
+	// pointer a slot holds (docs/jit-production-plan.md, D8). It writes
+	// nothing there but the number words of elements that hold numbers.
+	//
+	// ObjectClass is the class byte, ClassArray an array's. ObjectFlags is
+	// a flags byte, in which FlagSparse marks an array with elements kept as
+	// properties past its dense ones, whose length is then the uint32 at
+	// ObjectArrayLen when that is larger. ObjectElems is the dense elements'
+	// slice: a pointer to the first value, then the count.
+	ObjectClass, ObjectFlags, ObjectArrayLen, ObjectElems int32
+	ClassArray, FlagSparse                                uint8
 }
 
+// NumberLimit bounds number words: a word below it holds a number, and
+// every tag is at or above it.
+const NumberLimit = 0xFFF8000000000000
+
 // IsNumber reports whether a number word holds a number.
-func IsNumber(word uint64) bool { return word>>51 != 0x1FFF }
+func IsNumber(word uint64) bool { return word < NumberLimit }

@@ -21,6 +21,7 @@ var testValues = []ir.Value{
 	ir.Float(5e-324), ir.Float(1e300), ir.Float(9007199254740993),
 	ir.Bool(true), ir.Bool(false), {Kind: ir.Undefined}, {Kind: ir.Null}, {Kind: ir.Uninitialized},
 	{Kind: ir.Opaque, Bits: 3}, {Kind: ir.String, Bits: 4},
+	{Kind: ir.Opaque, Bits: 0}, {Kind: ir.Opaque, Bits: 1}, {Kind: ir.Opaque, Bits: 2},
 }
 
 func randomValue(r *rand.Rand) ir.Value {
@@ -42,14 +43,21 @@ func randomProgram(r *rand.Rand) *ir.Program {
 		return ir.Slot(r.IntN(locals))
 	}
 	ops := []ir.Op{ir.Copy, ir.Binary, ir.Binary, ir.Binary, ir.Unary, ir.Update, ir.Update, ir.Branch, ir.Branch,
-		ir.Jump, ir.Swap, ir.CopyPair, ir.StoreLoad, ir.Host, ir.Nop}
+		ir.Jump, ir.Swap, ir.CopyPair, ir.StoreLoad, ir.Host, ir.Nop,
+		ir.ArrayRead, ir.ArrayWrite, ir.ArrayLength, ir.ArrayKey, ir.ArrayUpdate}
 	operators := []ir.Operator{ir.Add, ir.Sub, ir.Mul, ir.Div, ir.Lt, ir.Le, ir.Gt, ir.Ge, ir.Eq, ir.Ne,
 		ir.BitAnd, ir.BitOr, ir.BitXor, ir.Shl, ir.Shr, ir.UShr}
 	p := &ir.Program{Locals: locals}
 	for pc := 0; pc < n; pc++ {
-		in := ir.Instruction{Op: ops[r.IntN(len(ops))], Left: operand(), Right: operand(),
+		in := ir.Instruction{Op: ops[r.IntN(len(ops))], Left: operand(), Right: operand(), Third: operand(),
 			Dest: r.IntN(locals), Extra: r.IntN(locals), Target: r.IntN(n + 1), Postfix: r.IntN(2) == 0, When: r.IntN(2) == 0}
 		switch in.Op {
+		case ir.ArrayRead, ir.ArrayWrite, ir.ArrayLength, ir.ArrayKey:
+			in.Left = ir.Slot(r.IntN(locals))
+		case ir.ArrayUpdate:
+			in.Left = ir.Slot(r.IntN(locals))
+			in.Right = ir.Slot(in.Extra)
+			in.Operator = []ir.Operator{ir.Add, ir.Sub}[r.IntN(2)]
 		case ir.Binary:
 			in.Operator = operators[r.IntN(len(operators))]
 		case ir.Unary:
@@ -78,10 +86,11 @@ func randomProgram(r *rand.Rand) *ir.Program {
 // compare runs p's slot IR evaluator and f's SSA evaluator from an entry and
 // requires the same exit and live slots. It returns false when the slot IR
 // does not finish within its budget, which the test skips.
-func compare(t *testing.T, p *ir.Program, f *Func, pc int, slots []ir.Value, poll int) bool {
+func compare(t *testing.T, p *ir.Program, f *Func, pc int, slots []ir.Value, poll int, heap testHeap) bool {
 	t.Helper()
 	x := append([]ir.Value(nil), slots...)
-	want, err := p.Evaluate(x, pc, 20000)
+	hx, hy := heap.instance(), heap.instance()
+	want, err := p.EvaluateArrays(x, hx.views, pc, 20000)
 	if err != nil {
 		t.Fatalf("slot IR: %v", err)
 	}
@@ -92,13 +101,13 @@ func compare(t *testing.T, p *ir.Program, f *Func, pc int, slots []ir.Value, pol
 	var got ir.Exit
 	entry := pc
 	for round := 0; ; round++ {
-		got, err = Evaluate(f, entry, y, poll)
+		got, err = EvaluateArrays(f, entry, y, hy.views, poll)
 		if err != nil {
 			t.Fatalf("ssa from pc %d: %v\n%s", entry, err, f)
 		}
 		if got.Kind == ir.GuardExit {
 			// The interpreter takes over, as in the VM: here, the slot IR.
-			got, err = p.Evaluate(y, int(got.State.PC), 20000)
+			got, err = p.EvaluateArrays(y, hy.views, int(got.State.PC), 20000)
 			if err != nil {
 				t.Fatalf("slot IR after a guard: %v", err)
 			}
@@ -125,8 +134,12 @@ func compare(t *testing.T, p *ir.Program, f *Func, pc int, slots []ir.Value, pol
 			}
 		}
 	}
+	if !bad && !hx.same(hy) {
+		bad = true
+	}
 	if bad {
-		t.Fatalf("from pc %d, poll %d, slots %v:\nslot IR %+v slots %v\nssa     %+v slots %v\n%s", pc, poll, slots, want, x, got, y, f)
+		t.Fatalf("from pc %d, poll %d, slots %v, heap %v:\nslot IR %+v slots %v heap %v\nssa     %+v slots %v heap %v\n%s",
+			pc, poll, slots, heap, want, x, hx.cells, got, y, hy.cells, f)
 	}
 	return true
 }
@@ -159,8 +172,9 @@ func checkProgram(t *testing.T, r *rand.Rand, p *ir.Program) (*Func, int) {
 			for i := range slots {
 				slots[i] = randomValue(r)
 			}
+			heap := randomHeap(r)
 			for _, poll := range []int{0, 1, 3} {
-				if compare(t, p, f, e.PC, slots, poll) {
+				if compare(t, p, f, e.PC, slots, poll, heap) {
 					finished++
 				}
 			}
@@ -246,7 +260,7 @@ func TestBuildMatchesSlotIRFromJavaScript(t *testing.T) {
 
 func TestBuildRefusesUnsupported(t *testing.T) {
 	p := &ir.Program{Locals: 2, Code: []ir.Instruction{
-		{Op: ir.ArrayLength, Left: ir.Slot(0), Dest: 1},
+		{Op: ir.PropertyRead, Left: ir.Slot(0), Dest: 1},
 		{Op: ir.Return, Left: ir.Slot(1)},
 	}, Maps: []ir.StateMap{{PC: 0}, {PC: 1}}}
 	if _, err := Build(p); !errors.Is(err, ErrUnsupported) {
