@@ -17,6 +17,8 @@ func TestValidateNativeSafety(t *testing.T) {
 		{"destination", func(p *Program) { p.Code[0].Dest = 2 }},
 		{"literal", func(p *Program) { p.Code[0].Left = Literal(Value{Kind: Kind(99)}) }},
 		{"boolean", func(p *Program) { p.Code[0].Left = Literal(Value{Kind: Boolean, Bits: 2}) }},
+		{"handle-literal", func(p *Program) { p.Code[0].Left = Literal(Value{Kind: Opaque, Bits: 1}) }},
+		{"string-literal", func(p *Program) { p.Code[0].Left = Literal(Value{Kind: String}) }},
 		{"guard", func(p *Program) { p.Code[0].Check, p.Code[0].CheckSlot = true, 1 }},
 		{"initial-depth", func(p *Program) { p.Maps[0].Depth = 1 }},
 		{"map", func(p *Program) { p.Maps[1].PC = 2 }},

@@ -419,6 +419,15 @@ func (a *programAssembler) inferKinds(p *ir.Program) {
 			}
 			write(n, t)
 			write(n+last+1, t)
+		case ir.Nop:
+		case ir.Jump, ir.Branch, ir.Return, ir.Host, ir.Call:
+			// Each ends its region (regions), and the next region starts with
+			// no facts.
+		default:
+			// A fact kept across an operation that writes a slot would remove
+			// a guard. An operation without a case here is refused
+			// (emitRecovered) rather than assumed to write nothing.
+			panic(fmt.Sprintf("jit: kind inference has no case for operation %d", in.Op))
 		}
 		if simple {
 			for slot := range kinds {

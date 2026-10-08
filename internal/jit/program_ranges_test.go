@@ -189,3 +189,19 @@ func TestIntegerResultsOriginBound(t *testing.T) {
 	}
 	a.inferIntegerResults(p)
 }
+
+// Kind inference names every operation: one it did not know would keep facts
+// across a write and remove a guard, so it is refused instead.
+func TestInferKindsRefusesUnknownOperations(t *testing.T) {
+	p := &ir.Program{Locals: 1, Code: []ir.Instruction{{Op: ir.Op(250)}, {Op: ir.Return, Left: ir.Slot(0)}}, Maps: []ir.StateMap{{PC: 0}, {PC: 1}}}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("kind inference accepted an unknown operation")
+		}
+	}()
+	a := &programAssembler{}
+	for range p.Code {
+		a.label()
+	}
+	a.regions(p)
+}
