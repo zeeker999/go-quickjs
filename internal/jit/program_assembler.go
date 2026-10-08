@@ -112,7 +112,7 @@ func (a *programAssembler) regions(p *ir.Program) {
 		if in.Op == ir.Jump || in.Op == ir.Branch {
 			starts[in.Target] = true
 		}
-		if (in.Op == ir.Jump || in.Op == ir.Branch || in.Op == ir.Return || in.Op == ir.Host) && pc+1 < n {
+		if (in.Op == ir.Jump || in.Op == ir.Branch || in.Op == ir.Return || in.Op == ir.Host || in.Op == ir.Call) && pc+1 < n {
 			starts[pc+1] = true
 		}
 	}
@@ -123,7 +123,7 @@ func (a *programAssembler) regions(p *ir.Program) {
 		}
 		a.tails[pc] = 1
 		in := p.Code[pc]
-		if pc+1 < n && a.tails[pc+1] < 4095 && !starts[pc+1] && in.Op != ir.Jump && in.Op != ir.Branch && in.Op != ir.Return && in.Op != ir.Host {
+		if pc+1 < n && a.tails[pc+1] < 4095 && !starts[pc+1] && in.Op != ir.Jump && in.Op != ir.Branch && in.Op != ir.Return && in.Op != ir.Host && in.Op != ir.Call {
 			a.tails[pc] += a.tails[pc+1]
 		}
 	}

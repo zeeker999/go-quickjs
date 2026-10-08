@@ -46,7 +46,7 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 		next := pc + 1
 		switch in.Op {
 		case Nop:
-		case Host:
+		case Host, Call:
 			exit.Kind = HostExit
 			return exit, nil
 		case ReferenceRead:

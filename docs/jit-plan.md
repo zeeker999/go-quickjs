@@ -112,8 +112,8 @@ rooted handles between compiled callers and callees, retaining guarded numeric
 fields across calls. It resolves ordinary inherited data at the original read
 and materializes every suspended frame before callbacks or deoptimization.
 Small own-field callees can compile for this path while retaining the existing
-standalone policy. Reference globals, direct machine-code call transfers and
-full integer register representation remain unimplemented; whole RSA remains
+standalone policy. Reference globals, VM use of direct machine-code call
+transfers and full integer register representation remain unimplemented; whole RSA remains
 about 3x bytecode.
 
 The call coordinator is a foundation, not a completed performance milestone.
@@ -136,6 +136,16 @@ Host exits must materialize all active frames at their committed PCs, so a
 numeric array write is never replayed. Guard exits, exact exceptions, callback
 GC/reentry, code eviction, depth limits and cancellation are acceptance tests,
 along with complete RSA and balanced V8 comparisons.
+
+The native dispatch foundation now implements bounded calls and returns on
+arm64 and amd64, with exact suspended scalar frames and transactional graph
+restoration. Tests compare it with an independent IR call coordinator across
+budgets and quotas, including committed array effects, changed future grants,
+closed-owner replacement and fresh argument templates. The production VM still
+uses its Go coordinator. Next, connect dispatch lowering and lazy guarded call
+graphs to that VM, preserve canonical state before host work, and measure whole
+RSA before accepting the integration. Transfer-only benchmark wins do not meet
+the 10x target.
 
 ### Integer conversion retention and rejected return chaining
 

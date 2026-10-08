@@ -1400,3 +1400,40 @@ repeated assembly entries and Go method boundaries using guarded native call
 transfers, followed by integer register/range representation. Complete RSA must
 approach 5.75 ms on this measured 57.50 ms bytecode workload to satisfy 10x;
 another roughly 3.3x improvement over current native execution is required.
+
+## Native dispatch foundation
+
+`CompileDispatch` emits call and return transfer points independently of ordinary
+`Compile`, so existing VM entries retain their original return path. `Dispatch`
+borrows up to eight executable owners and supplies eight pointer-free scalar
+frames, with sixteen monomorphic call grants per program. Both assembly bridges
+tail-jump between compiled programs without changing Go's stack, frame pointer,
+goroutine register or original return address. Typed Go pointers root immutable
+descriptors, templates and owners; native stores change scalars only.
+
+Function and method receiver identities, frame depth, canonical stack capacity,
+call-check ticks and the shared instruction budget are checked before a call
+commits. Suspended callers retain the PC after the call, the pending result
+destination, and the original argument span. A denied call exits at its original
+PC. Host, guard and budget exits report exact active state. `Restore` validates
+and replaces the graph transactionally after host work, independently of future
+grants for already suspended calls. This allows a callback to change a binding
+or release code while an older invocation remains active.
+
+The native foundation is not connected to the VM in this stage and establishes
+no Crypto speedup. A transfer-only benchmark of 256 eight-slot calls measures
+about 2.65 us native versus 6.19 us through the Go coordinator, with zero measured
+allocations in both paths. Larger frames also favor native transfers, but template
+copying remains proportional to frame size. These measurements exclude source
+compilation, JavaScript frame recovery and reference preparation; complete RSA
+and balanced mixed-suite measurements remain the acceptance gates.
+
+Default and tagged full suites, IR/native dispatch tests, race and checkptr,
+Go 1.24, and native Linux/amd64 execution under emulation pass. Tests compare
+budgets, quotas, exact frames and scalar results against an independent IR call
+coordinator and cover nested/repeated calls, fresh/missing/extra arguments,
+constant zero-slot callees, committed array writes, host/guard recovery, changed
+future grants, closed-owner replacement and GC between batches. Windows amd64
+and arm64, and Linux/386 cross-builds pass; Windows native execution remains
+unverified locally. Evidence is in
+`../quickjs-jit-results/2026-10-08-native-dispatch`.

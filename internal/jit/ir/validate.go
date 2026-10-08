@@ -26,6 +26,7 @@ func (p *Program) Validate() error {
 	if p.Maps[0].Depth != 0 {
 		return fmt.Errorf("jit IR: invalid initial stack depth")
 	}
+	calls := uint32(0)
 	for pc, in := range p.Code {
 		if p.Maps[pc].Depth < 0 {
 			continue
@@ -46,6 +47,14 @@ func (p *Program) Validate() error {
 		left, right, third, write, extra := false, false, false, false, false
 		switch in.Op {
 		case Nop, Host:
+		case Call:
+			if calls == MaxCallSites || in.Key != calls || in.Left.Slot < 0 ||
+				in.Right.Slot < 0 && in.Right != Literal(Value{}) ||
+				in.Third.Slot < 0 || in.Extra < 0 || in.Extra > MaxSlots || in.Third.Slot > active-in.Extra {
+				return bad("invalid native call")
+			}
+			calls++
+			left, right, write = true, true, true
 		case ArrayRead, ArrayKey, ArrayUpdate:
 			left, right, write = true, true, in.Op != ArrayKey
 			if in.Op == ArrayUpdate {

@@ -21,10 +21,19 @@ var ErrCodeBudget = errors.New("native code memory budget exceeded")
 // and closing the same Code concurrently is unsupported. Separate owners may
 // execute the same lowered IR concurrently with independent scratch storage.
 type Code struct {
-	code    []byte
-	entries []int
-	maps    []ir.StateMap
-	slots   int
+	code            []byte
+	entries         []int
+	maps            []ir.StateMap
+	slots           int
+	locals          int
+	dispatch        bool
+	dispatchEntries []int
+	calls           []callEntry
+}
+
+type callEntry struct {
+	pc int
+	in ir.Instruction
 }
 
 // A host instruction exits before doing native work. Mark its external entry
@@ -49,7 +58,19 @@ func Compile(p *ir.Program) (*Code, error) {
 // CompileBudget additionally bounds page-rounded executable memory and retained
 // metadata together. A refusal occurs before OS allocation. Transient emission
 // work is bounded by the IR and code-size limits regardless of this budget.
-func CompileBudget(p *ir.Program, bytes int) (*Code, error) { return compileProgram(p, bytes) }
+func CompileBudget(p *ir.Program, bytes int) (*Code, error) { return compileProgram(p, bytes, false) }
+
+// CompileDispatch emits bounded native call/return transfer points. Ordinary
+// Code.Run execution still takes host exits at calls. A Dispatch supplies the
+// guarded targets and owns their scalar frames until execution returns to Go.
+func CompileDispatch(p *ir.Program) (*Code, error) {
+	return CompileDispatchBudget(p, MaxCodeBytes+ir.MaxInstructions*40+4096)
+}
+
+// CompileDispatchBudget bounds executable memory and retained dispatch maps.
+func CompileDispatchBudget(p *ir.Program, bytes int) (*Code, error) {
+	return compileProgram(p, bytes, true)
+}
 
 // EntryDepth reports the live operand depth at a reachable native entry.
 // Closed code and unreachable or invalid PCs have no entry.
@@ -132,7 +153,7 @@ func (c *Code) MetadataSize() int {
 }
 
 func (c *Code) metadataBytes() int {
-	return int(unsafe.Sizeof(*c)) + cap(c.entries)*int(unsafe.Sizeof(int(0))) + cap(c.maps)*int(unsafe.Sizeof(ir.StateMap{}))
+	return int(unsafe.Sizeof(*c)) + (cap(c.entries)+cap(c.dispatchEntries))*int(unsafe.Sizeof(int(0))) + cap(c.maps)*int(unsafe.Sizeof(ir.StateMap{})) + cap(c.calls)*int(unsafe.Sizeof(callEntry{}))
 }
 
 // Close releases code and metadata. An OS release failure retains ownership so
@@ -145,6 +166,7 @@ func (c *Code) Close() error {
 		return err
 	}
 	c.code, c.entries, c.maps = nil, nil, nil
+	c.dispatchEntries, c.calls = nil, nil
 	runtime.SetFinalizer(c, nil)
 	return nil
 }

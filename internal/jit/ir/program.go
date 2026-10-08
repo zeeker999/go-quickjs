@@ -129,6 +129,7 @@ const (
 	PropertyWrite
 	BindingRead
 	ReferenceRead
+	Call
 )
 
 // Operator selects an arithmetic, comparison, or truthiness operation.
@@ -173,6 +174,10 @@ const (
 // PropertyRead/PropertyWrite and BindingRead search Left's table for Key. A
 // BindingRead borrows one resolved numeric binding cell. Right supplies
 // the stored number; any failed permission or type check takes a host exit.
+// Call reads its function from Left, its optional receiver from Right, and
+// Extra arguments starting at Third.Slot. Dest receives the result. Key is
+// the sequential call-site index. Ordinary evaluation exits before the call;
+// a prepared native dispatch graph may transfer to a guarded callee instead.
 type Instruction struct {
 	Op        Op
 	Operator  Operator
@@ -225,7 +230,11 @@ const (
 	GuardExit
 	BudgetExit
 	HostExit
+	CallExit
 )
+
+// MaxCallSites bounds a compiled function's native dispatch descriptors.
+const MaxCallSites = 16
 
 // Exit records a result or the exact interpreter state to resume. Steps counts
 // committed IR instructions; a failing guard does not consume a step.
