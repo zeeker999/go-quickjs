@@ -6,7 +6,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
+	"os"
 	"runtime"
+	"strconv"
+	"strings"
 	"unsafe"
 	"weak"
 
@@ -29,6 +32,74 @@ type jitFields struct {
 	jitCallThreshold uint8
 	jitDeoptDepth    uint32
 	jit              *jitState
+	// jitStress is QJS_JIT_STRESS's budget and deoptimization period, or
+	// zero; see jitStressConfig.
+	jitStress jitStressConfig
+}
+
+// jitStressConfig drives the JIT harder than ordinary use, so that tests and
+// test262 reach the paths ordinary thresholds rarely do. QJS_JIT_STRESS holds
+// a comma-separated list:
+//
+//	threshold  compile on a function's first framed call
+//	budget=N   return to Go after at most N native instructions, so that
+//	           every exit, publication and re-entry is taken
+//	deopt=N    finish the invocation in the interpreter at every Nth such
+//	           return, from wherever native code had got to
+//
+// It is read once, as QJS_NOTREE is, and each runtime takes a copy.
+type jitStressConfig struct {
+	threshold bool
+	budget    uint16
+	deopt     uint16
+}
+
+var jitStressDefault = parseJITStress(os.Getenv("QJS_JIT_STRESS"))
+
+func parseJITStress(spec string) jitStressConfig {
+	var c jitStressConfig
+	for _, item := range strings.Split(spec, ",") {
+		name, value, _ := strings.Cut(strings.TrimSpace(item), "=")
+		n, _ := strconv.ParseUint(value, 10, 16)
+		switch name {
+		case "threshold", "1":
+			c.threshold = true
+		case "budget":
+			c.budget = uint16(min(n, jit.MaxIterations))
+		case "deopt":
+			c.deopt = uint16(n)
+		}
+	}
+	return c
+}
+
+// JITStats reports what the JIT has done in this runtime so far.
+func (r *Runtime) JITStats() JITStats {
+	s := r.jit
+	if s == nil {
+		return JITStats{}
+	}
+	return JITStats{Compiled: s.compiled, Entries: s.entries, Guards: s.guards,
+		Hosts: s.hosts, Budgets: s.budgets, Interpreted: s.interpreted}
+}
+
+// jitEntryBudget is the native instructions one entry may run: MaxIterations, or
+// fewer under stress.
+func (r *Runtime) jitEntryBudget() uint64 {
+	if r.jitStress.budget != 0 {
+		return uint64(r.jitStress.budget)
+	}
+	return jit.MaxIterations
+}
+
+// jitStressDeopt reports whether this budget exit should finish the
+// invocation in the interpreter (jitStressConfig.deopt).
+func (r *Runtime) jitStressDeopt(s *jitState) bool {
+	if r.jitStress.deopt == 0 {
+		return false
+	}
+	s.stressExits++
+	return s.stressExits%uint64(r.jitStress.deopt) == 0
 }
 
 type jitRealmFields struct {
@@ -139,6 +210,9 @@ type jitState struct {
 	guards        uint64
 	budgets       uint64
 	osrs          uint64
+	compiled      uint64
+	interpreted   uint64
+	stressExits   uint64
 	referenceKeys []uint32
 	references    *jitReferences
 	callFrames    *jitCallFrames
@@ -159,6 +233,10 @@ func (r *Runtime) initJIT(enabled bool) {
 	// Native budget exits retain borrowed views, so debugger runtimes stay in Go.
 	r.jitEnabled = enabled && r.debug == nil
 	r.jitCallThreshold = jitHotCalls
+	r.jitStress = jitStressDefault
+	if r.jitStress.threshold {
+		r.jitCallThreshold = 1
+	}
 }
 
 // Loop promotion returns through a panic caught by the callee's runTree.
@@ -398,8 +476,11 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool) *jitEntry {
 			}
 			// A program the emitter rejects -- or panicked on -- is rejected
 			// every time: cache the refusal.
-		} else if len(e.referenceKeys) != 0 && s.references == nil {
-			s.references = new(jitReferences)
+		} else {
+			s.compiled++
+			if len(e.referenceKeys) != 0 && s.references == nil {
+				s.references = new(jitReferences)
+			}
 		}
 	}
 	s.remember(weak.Make(fn), e)
@@ -634,7 +715,7 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 			return v, err, true
 		}
 	}
-	budget := uint64(jit.MaxIterations)
+	budget := r.jitEntryBudget()
 	var nativeSteps, hosts uint64
 	for {
 		s.entries++
@@ -735,8 +816,12 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 				s.clearRoots()
 				return r.jitInterpret(f, f.base+exit.State.Depth, nil)
 			}
+			if r.jitStressDeopt(s) {
+				s.clearRoots()
+				return r.jitInterpret(f, f.base+exit.State.Depth, nil)
+			}
 			pc = int(exit.State.PC)
-			budget = jit.MaxIterations
+			budget = r.jitEntryBudget()
 		}
 	}
 }
@@ -1307,6 +1392,9 @@ func (r *Runtime) jitFrameValue(f *frame, index int) Value {
 }
 
 func (r *Runtime) jitInterpret(f *frame, sp int, pending error) (Value, error, bool) {
+	if r.jit != nil {
+		r.jit.interpreted++
+	}
 	previous := r.jitDeoptDepth
 	r.jitDeoptDepth = uint32(r.frameDepth)
 	defer func() { r.jitDeoptDepth = previous }()

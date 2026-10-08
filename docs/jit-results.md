@@ -15,6 +15,22 @@ kept in git history, on branch `jit-wip-backup`, as `internal/jit/README.md`
 and `docs/jit-plan.md`. Its evidence directories lived outside the repository
 and are not reproducible from it.
 
+## 2026-10-08: Phase 1 stress test262 (Ryzen, Windows, amd64)
+
+`-conformance.jit` across language, built-ins, intl402 and annexB; every run
+99,599 passed, 0 failed, 342 skipped:
+
+| QJS_JIT_STRESS | Tests run natively | Programs compiled | Native entries | Guard failures | Finished in the interpreter |
+|---|---|---|---|---|---|
+| (none) | 2,277 | 2,776 | 276,943 | 9,603 | 6,647 |
+| threshold | 8,722 | 11,698 | 225,654 | 15,316 | 11,485 |
+| threshold,budget=1 | 8,722 | 11,698 | 815,375 | 15,316 | 11,490 |
+| threshold,budget=7,deopt=3 | 8,722 | 11,645 | 409,608 | 13,105 | 90,321 |
+
+Even compiling on the first call, native code runs in 8.7% of tests: test262
+is evidence for the fallback paths and for the JIT's edges, and the
+JavaScript differential fuzzer is the evidence for compiled code.
+
 ## 2026-10-08: Phase 0 (Ryzen 5 3600, Windows 10, amd64, Go 1.27.1)
 
 **Binary size** of `cmd/qjs` at 43efbe2:

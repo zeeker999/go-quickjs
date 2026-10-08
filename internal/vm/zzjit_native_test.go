@@ -2446,3 +2446,89 @@ func TestJITHintReuse(t *testing.T) {
 		t.Fatal("a stale hint aliased the slot's new entry")
 	}
 }
+
+func TestJITStressParse(t *testing.T) {
+	for _, tc := range []struct {
+		spec string
+		want jitStressConfig
+	}{
+		{"", jitStressConfig{}},
+		{"1", jitStressConfig{threshold: true}},
+		{"threshold, budget=3 ,deopt=5", jitStressConfig{threshold: true, budget: 3, deopt: 5}},
+		{"budget=99999", jitStressConfig{budget: 4096}},
+		{"budget=x,unknown,deopt=", jitStressConfig{}},
+	} {
+		if got := parseJITStress(tc.spec); got != tc.want {
+			t.Errorf("parseJITStress(%q) = %+v, want %+v", tc.spec, got, tc.want)
+		}
+	}
+}
+
+// jitStressCorpus is a set of programs over what the JIT compiles: numbers,
+// arrays, bitwise operations, properties, globals, calls, strings, and the
+// guards, callbacks and exceptions at their edges. Each ends with a string
+// that describes everything it did, so that runs can be compared.
+var jitStressCorpus = []string{
+	`function f(n){let s=0;for(let i=0;i<n;i++)s+=i*0.5;return s}String([f(100),f(1000),f(0)])`,
+	`function f(n){var x=0.1;for(var i=0;i<n;i++)x=3.7*x*(1-x);return x}String(f(500))`,
+	`function f(a){for(let i=1;i<a.length-1;i++)a[i]=(a[i-1]+a[i]+a[i+1])/3;return a}let a=[];for(let i=0;i<64;i++)a[i]=i%7;f(a).join()`,
+	`function f(a,n){for(let i=0;i<n;i++)a[i]=i*i;return a.length}let a=[];String([f(a,40),a.join()])`,
+	`function f(n){let h=0;for(let i=0;i<n;i++){h=(h<<5)-h+i|0;h^=h>>>13}return h}String([f(1000),f(1)])`,
+	`function f(o,n){for(let i=0;i<n;i++)o.x=(o.x*31+i)|0;return o.x}let o={x:1};String([f(o,500),o.x])`,
+	`var scale=3;function f(a){let s=0;for(let i=0;i<a.length;i++)s+=a[i]*scale;return s}String(f([1,2,3,4,5,6,7,8]))`,
+	`function g(x){return x*2+1}function f(n){let s=0;for(let i=0;i<n;i++)s+=g(i);return s}String(f(300))`,
+	`function f(s){let h=0;for(let i=0;i<s.length;i++)h=(h*33+s.charCodeAt(i))|0;return h}String(f('the quick brown fox'.repeat(5)))`,
+	`function f(a){let s=0;for(let i=0;i<a.length;i++)s+=a[i];return s}String([f([1,2,3]),f([1,'2',3]),f([1,,3]),f([1.5,{valueOf(){return 4}},3])])`,
+	`let log=[];let o={get x(){log.push('g');return 2}};function f(o,a){let s=0;for(let i=0;i<a.length;i++)s=(s+o.x+a[i])|0;return s}String([f(o,[1,2,3,4,5]),log.join('')])`,
+	`function boom(s){throw new RangeError('at '+s)}function f(a){let s=0;for(let i=0;i<10;i++){if(i===7)boom(s);s+=a[i]}return s}let r;try{f([1,2,3,4,5,6,7,8,9,10])}catch(e){r=e.name+':'+e.message}r`,
+	`function f(n){let s=0;for(let i=0;i<n;i++){s+=i;if(s>1e3)s-=0.25}return s}String([f(200),Object.is(f(0),0)])`,
+	`function f(n){let x=-0;for(let i=0;i<n;i++)x=x*-1;return x}String([Object.is(f(1),-0),Object.is(f(2),0)])`,
+	`function f(a){for(let i=0;i<a.length;i++)a[i]=a[i]|0;return a}f([1.7,-2.5,NaN,Infinity,2**33+0.5,-0]).join()`,
+	`function f(a){let s=0;for(let i=0;i<a.length;i++)s+=a[i];return s}let r=[String(f([1,2,3]))];try{f([1,2,3n])}catch(e){r.push(e.name+':'+e.message)}r.join()`,
+}
+
+// Every program in the corpus gives the same answer with the JIT off and
+// under each stress setting, and the settings reach what they are for: an
+// exit after a handful of instructions, and fallback from wherever native
+// code had got to.
+func TestJITStressDifferential(t *testing.T) {
+	configs := []jitStressConfig{
+		{threshold: true},
+		{threshold: true, budget: 1},
+		{threshold: true, budget: 1, deopt: 2},
+		{threshold: true, budget: 7, deopt: 3},
+		{threshold: true, budget: 3, deopt: 11},
+	}
+	run := func(src string, jit bool, c jitStressConfig) (string, JITStats) {
+		r := jitRuntimeForTest(t, Config{JIT: jit})
+		r.jitStress = c
+		v, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			return "error: " + err.Error(), r.JITStats()
+		}
+		str, err := r.ToString(v)
+		if err != nil {
+			return "error: " + err.Error(), r.JITStats()
+		}
+		return str.Go(), r.JITStats()
+	}
+	var total JITStats
+	for i, src := range jitStressCorpus {
+		want, _ := run(src, false, jitStressConfig{})
+		for _, c := range configs {
+			got, st := run(src, true, c)
+			if got != want {
+				t.Errorf("program %d under %+v: %q, want %q\n%s", i, c, got, want, src)
+			}
+			if c == configs[0] && st.Entries == 0 {
+				t.Errorf("program %d never ran natively, so the corpus no longer tests it\n%s", i, src)
+			}
+			total.Entries += st.Entries
+			total.Budgets += st.Budgets
+			total.Interpreted += st.Interpreted
+		}
+	}
+	if total.Entries == 0 || total.Budgets == 0 || total.Interpreted == 0 {
+		t.Fatalf("stress never reached its paths: %+v", total)
+	}
+}

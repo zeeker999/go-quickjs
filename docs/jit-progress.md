@@ -21,7 +21,8 @@ across sessions. Update it **in the same commit** as the work it records.
     -run TestConformance -count=1 -timeout 60m -v -args -conformance.jit
   ```
 
-- **Next item:** Phase 1, V1 onwards. Phase 0 is complete.
+- **Next item:** the first unchecked Phase 1 item.
+- **Stress test262:** `QJS_JIT_STRESS=threshold,budget=1 TEST262_DIR=d:/Data/test262 go test -tags quickjs_jit ./conformance -run TestConformance -v -args -conformance.jit`
 
 ## Phase 0: stabilize and cut
 
@@ -59,8 +60,8 @@ across sessions. Update it **in the same commit** as the work it records.
 
 | ID | Item | Status | Commit |
 |---|---|---|---|
-| V1 | Stress knobs: threshold 1, deoptimize every Nth guard, poll exit at every back-edge, force publish. Internal only. | todo | |
-| V2 | Conformance runner reports native entries, compiles, guards and host exits per area; an area with loops and no entries fails. Start from `D:/Data/quickjs-jit-results/2026-10-08-review/jit-stress-counters.patch` or rewrite it. | todo | |
+| V1 | Stress knobs, internal only: `QJS_JIT_STRESS=threshold,budget=N,deopt=N` (compile on the first call; return to Go every N native instructions; finish in the interpreter at every Nth return, from wherever native code got to). `TestJITStressDifferential` runs a corpus under five settings against the JIT off. | done | jit: stress mode and native coverage in test262 |
+| V2 | `-conformance.jit` reports per area how many tests ran natively, and fails a JIT build in which none did (per-area failure was too strict: Intl areas rarely compile). Counters come from `vm.Runtime.JITStats` through `hostaccess`. | done | jit: stress mode and native coverage in test262 |
 | V3 | JavaScript differential fuzzer: interpreter vs tree vs stress JIT, comparing result, error and an effect log | todo | |
 | V4 | Encoder golden tests and a register-discipline check (`x/arch`, nested test module) | todo | |
 | V5 | CI: stress test262 on linux/amd64, windows/amd64 and macos/arm64; the fuzzer; Go 1.24 and the newest Go | todo | |
