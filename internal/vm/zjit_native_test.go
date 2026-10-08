@@ -675,14 +675,135 @@ func TestJITDataProperties(t *testing.T) {
 
 func TestJITDataPropertyRootLimit(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	// Enough native work per reference keeps tier selection profitable while
-	// the repeated property reads exhaust and refresh the bounded root table.
+	// Repeated reads reuse a rooted handle rather than filling the root table.
 	v, err := r.Run(compileForTest(t, `function f(o,n){let s=0;for(let i=0;i<n;i++){let a=o.array;for(let j=0;j<16;j++)s+=a[0]}return s}f({array:[1]},2000)`))
 	if err != nil || v.Number() != 32000 {
 		t.Fatalf("root limit: %v, %v", v, err)
 	}
-	if r.jit == nil || r.jit.fastHosts < 1000 || r.jit.hosts == r.jit.fastHosts || r.jit.budgets == 0 || r.jit.rootCount != 0 {
-		t.Fatal("property loop did not refresh its bounded root table")
+	if r.jit == nil || r.jit.hosts != 0 || r.jit.budgets == 0 || r.jit.rootCount != 0 {
+		t.Fatal("property loop did not reuse its bounded root table")
+	}
+}
+
+func TestJITReferenceFields(t *testing.T) {
+	for _, source := range []string{
+		`function f(o,n){let s=0;for(let i=0;i<n;i++)s+=o.array[0];return s}f({array:[3]},1000)===3000`,
+		`function f(o,n){let s=0;for(let i=0;i<n;i++)s+=o.m.array[0];return s}f({m:{array:[3]}},1000)===3000`,
+		`function f(o,n){let s=0;for(let i=0;i<n;i++){s+=o.array[0];o.array[0]++}return s}let a=[3];f({array:a},1000)===502500&&a[0]===1003`,
+		`function f(o,n){for(let i=0;i<n;i++)o.x=(o.x+o.array[0])|0;return o.x+0}let o={array:[3],x:7};f(o,1000)===3007&&o.x===3007`,
+		`function f(o,n){let s=0;for(let i=0;i<n;i++)s+=o.next.array[0];return s}let o={array:[3]};o.next=o;f(o,1000)===3000`,
+		`function f(n){let s=0;for(let i=0;i<n;i++)s+=this.array[0];return s}f.call({array:[3]},1000)===3000`,
+		`var scale=7;function f(n){let s=0;for(let i=0;i<n;i++)s+=this.array[0]*scale;return s}f.call({array:[3]},1000)===21000`,
+	} {
+		for _, enabled := range []bool{false, true} {
+			r := jitRuntimeForTest(t, Config{JIT: enabled})
+			v, err := r.Run(compileForTest(t, source))
+			if err != nil || !v.IsBool() || !v.Truthy() {
+				t.Fatalf("JIT %v: %v, %v; %s", enabled, v, err, source)
+			}
+			if enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 || r.jit.guards != 0 || r.jit.rootCount != 0) {
+				t.Fatalf("reference field left native execution: %s", source)
+			}
+			if enabled {
+				for _, row := range r.jit.references.cells {
+					for _, ref := range row {
+						if ref.Cell != nil || ref.Reference != nil {
+							t.Fatal("borrowed reference retained after return")
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestJITReferenceFieldFallbacks(t *testing.T) {
+	for _, source := range []string{
+		`let hits=0;function f(o,n){let s=0;for(let i=0;i<n;i++)s+=o.array[0];return s}let o={get array(){hits++;return [3]}};f(o,10)===30&&hits===10`,
+		`let hits=0;function f(o,n){let s=0;for(let i=0;i<n;i++)s+=o.array[0];return s}let o=new Proxy({array:[3]},{get(t,k){hits++;return t[k]}});f(o,10)===30&&hits===10`,
+		`function f(o,n){let s=0;for(let i=0;i<n;i++)s+=o.array[0];return s}f(Object.create({array:[3]}),100)===300`,
+		`function f(o,n){let s=0;for(let i=0;i<n;i++)s+=o.array[0];return s}let o={array:[3]};Object.defineProperty(o,'array',{writable:false});f(o,100)===300`,
+		`function f(o,n){let s=0;for(let i=0;i<n;i++)s+=o.array[0];return s}let o={array:[3]};delete o.array;let good=false;try{f(o,10)}catch(e){good=e instanceof TypeError}good`,
+		`function f(o,n,cb){cb();let s=0;for(let i=0;i<n;i++)s+=o.array[0];return s}let o={array:[3]};f(o,100,()=>{o.array=[7]})===700`,
+		`function f(o,n,b){let a=o.array,s=0;for(let i=0;i<n;i++)s+=a[i];o.array=b;for(let i=0;i<n;i++)s+=o.array[0];return s}let o={array:[3,3,3]};f(o,3,[7])===30&&o.array[0]===7`,
+		`function f(o,n){let s=0;for(let i=0;i<n;i++){s+=o.array[0];o=o.next}return s}let o={array:[1]},head=o;for(let i=0;i<300;i++){o.next={array:[1]};o=o.next}f(head,300)===300`,
+	} {
+		for _, enabled := range []bool{false, true} {
+			r := jitRuntimeForTest(t, Config{JIT: enabled})
+			v, err := r.Run(compileForTest(t, source))
+			if err != nil || !v.IsBool() || !v.Truthy() {
+				t.Fatalf("fallback JIT %v: %v, %v; %s", enabled, v, err, source)
+			}
+			if enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.rootCount != 0) {
+				t.Fatalf("missing native fallback: %s", source)
+			}
+		}
+	}
+}
+
+func TestJITReferenceCallbackRelease(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	calls := 0
+	r.global.setOwnRaw(r.atoms.intern("host"), r.NewFunction("host", 0, func(rt *Runtime, _ Value, _ []Value) (Value, error) {
+		calls++
+		if rt.jit != nil {
+			if rt.jit.rootCount != 0 {
+				t.Fatal("callback retained native roots")
+			}
+			if rt.jit.references != nil {
+				for _, view := range rt.jit.arrays {
+					if view.Data != nil {
+						t.Fatal("callback retained reference permissions")
+					}
+				}
+			}
+		}
+		rt.releaseJIT()
+		runtime.GC()
+		return Undefined, nil
+	}), propDefault)
+	v, err := r.Run(compileForTest(t, `function f(o,n,cb){let s=0;for(let i=0;i<n;i++)s+=o.array[0];cb();for(let i=0;i<n;i++)s+=o.array[0];return s}let o={array:[3]};f(o,100,()=>{host();o.array=[7]})===1000`))
+	if err != nil || !v.IsBool() || !v.Truthy() || calls != 1 || r.jit == nil || r.jit.rootCount != 0 {
+		t.Fatalf("reference callback: %v, %v, calls %d", v, err, calls)
+	}
+}
+
+func TestJITReferenceCancellation(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	p := compileForTest(t, `function forever(o){let s=0;for(;;)s+=o.array[0]}forever({array:[1]})`)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	r.SetContext(ctx)
+	_, err := r.Run(p)
+	if !errors.Is(err, context.DeadlineExceeded) || r.jit == nil || r.jit.entries == 0 || r.jit.budgets == 0 || r.jit.hosts != 0 || r.jit.rootCount != 0 {
+		t.Fatalf("reference loop cancellation: %v", err)
+	}
+	for _, view := range r.jit.arrays {
+		if view.Data != nil {
+			t.Fatal("cancel retained reference permissions")
+		}
+	}
+}
+
+func TestJITReferenceMemoryRefusal(t *testing.T) {
+	for _, limit := range []int64{256 << 10, 32 << 20} {
+		r := jitRuntimeForTest(t, Config{JIT: true, MemoryLimit: limit})
+		v, err := r.Run(compileForTest(t, `function f(o,n){let s=0;for(let i=0;i<n;i++)s+=o.array[0];return s}f({array:[3]},1000)`))
+		if err != nil || v.Number() != 3000 {
+			t.Fatalf("reference memory refusal: %v, %v", v, err)
+		}
+		if limit == 256<<10 {
+			if r.jitCodeBytes() != 0 || r.jit != nil && r.jit.references != nil {
+				t.Fatal("prepared native references beyond optional allowance")
+			}
+		} else {
+			if r.jit == nil || r.jit.references == nil || r.jit.entries == 0 || r.jit.hosts != 0 {
+				t.Fatal("reference loop did not enter native code")
+			}
+			if r.meter.live < r.jitCodeBytes()+int64(unsafe.Sizeof(jitReferences{})) {
+				t.Fatal("reference arena not charged to memory limit")
+			}
+		}
 	}
 }
 
@@ -1901,6 +2022,97 @@ func BenchmarkJITNumericGlobals(b *testing.B) {
 					b.Fatal("numeric globals left native execution")
 				}
 				b.ReportMetric(float64(r.jitCodeBytes()), "code+metadata-B")
+			}
+		})
+	}
+}
+
+func BenchmarkJITReferenceFields(b *testing.B) {
+	for _, mode := range []string{"interpreter", "existing", "native"} {
+		b.Run(mode, func(b *testing.B) {
+			previous := treeTier.Swap(mode != "interpreter")
+			defer treeTier.Store(previous)
+			compile := func(source string) *bytecode.Function {
+				ast, err := parser.Parse(source, parser.Options{})
+				if err != nil {
+					b.Fatal(err)
+				}
+				fn, err := compiler.Compile(ast, compiler.Options{})
+				if err != nil {
+					b.Fatal(err)
+				}
+				return fn
+			}
+			setup := compile(`function references(o,n){let s=0;for(let i=0;i<n;i++)s+=o.m.array[0];return s}var referenceObject={m:{array:[3]}}`)
+			call := compile(`references(referenceObject,4096)`)
+			r := New(Config{JIT: mode == "native"})
+			defer func() { r.Close(); r.ReleaseClosed() }()
+			if _, err := r.Run(setup); err != nil {
+				b.Fatal(err)
+			}
+			run := func() {
+				v, err := r.Run(call)
+				const want = 3 * 4096
+				if err != nil || !v.IsNumber() || v.Number() != want {
+					b.Fatalf("references: %v, %v; want %d", v, err, want)
+				}
+			}
+			for range jitHotCalls {
+				run()
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				run()
+			}
+			b.StopTimer()
+			if mode == "native" {
+				if r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 || r.jit.guards != 0 || r.jit.rootCount != 0 {
+					b.Fatal("reference fields left native execution")
+				}
+				b.ReportMetric(float64(r.jitCodeBytes()), "code+metadata-B")
+			}
+		})
+	}
+}
+
+func BenchmarkJITReferenceFirstUse(b *testing.B) {
+	compile := func(source string) *bytecode.Function {
+		ast, err := parser.Parse(source, parser.Options{})
+		if err != nil {
+			b.Fatal(err)
+		}
+		fn, err := compiler.Compile(ast, compiler.Options{})
+		if err != nil {
+			b.Fatal(err)
+		}
+		return fn
+	}
+	setup := compile(`function references(o,n){let s=0;for(let i=0;i<n;i++)s+=o.m.array[0];return s}var referenceObject={m:{array:[3]}}`)
+	call := compile(`references(referenceObject,4096)`)
+	for _, enabled := range []bool{false, true} {
+		mode := "existing"
+		if enabled {
+			mode = "automatic"
+		}
+		b.Run(mode, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.StopTimer()
+			for range b.N {
+				r := New(Config{JIT: enabled})
+				if _, err := r.Run(setup); err != nil {
+					b.Fatal(err)
+				}
+				b.StartTimer()
+				v, err := r.Run(call)
+				b.StopTimer()
+				native := r.jit != nil && r.jit.entries != 0 && r.jit.hosts == 0 && r.jit.guards == 0
+				r.Close()
+				r.ReleaseClosed()
+				if err != nil || v.Number() != 12288 || enabled && !native {
+					b.Fatalf("first reference call: %v, %v, native %v", v, err, native)
+				}
 			}
 		})
 	}

@@ -74,6 +74,8 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 				a.array(in)
 			case ir.PropertyRead, ir.PropertyWrite, ir.BindingRead:
 				a.property(in)
+			case ir.ReferenceRead:
+				a.reference(in)
 			case ir.Copy:
 				a.loadScalar(in.Left, 0, 2)
 				a.storeScalar(in.Dest, 0, 2)
@@ -592,6 +594,66 @@ func (a *amd64Program) truth(o ir.Operand) {
 	a.mark(done)
 }
 
+func (a *amd64Program) reference(in ir.Instruction) {
+	a.bytes(0x48, 0x85, 0xc9)
+	a.conditional(4, a.host)
+	a.load(in.Left, 0, 2)
+	if !a.known(in.Left, ir.Opaque) {
+		a.bytes(0x48, 0x83, 0xfa, byte(ir.Opaque))
+		a.conditional(5, a.host)
+	}
+	a.bytes(0x48, 0x3d)
+	a.word(ir.MaxSlots)
+	a.conditional(3, a.host)
+	a.bytes(0x48, 0x8d, 0x04, 0x80, 0x48, 0xc1, 0xe0, 3, 0x48, 0x01, 0xc8)
+	a.move(8, 0)
+	a.memory(0x8b, 2, 8, 24)
+	a.bytes(0x48, 0x85, 0xd2)
+	a.conditional(5, a.host)
+	a.memory(0x8b, 2, 8, 32)
+	a.bytes(0x48, 0x85, 0xd2)
+	a.conditional(5, a.host)
+	a.memory(0x8b, 2, 8, 16)
+	a.bytes(0x48, 0x85, 0xd2)
+	a.conditional(4, a.host)
+	a.memory(0x8b, 9, 8, 8)
+	a.bytes(0x49, 0x83, 0xf9, ir.MaxProperties)
+	a.conditional(7, a.host)
+	a.bytes(0x4d, 0x85, 0xc9)
+	a.conditional(4, a.host)
+	a.memory(0x8b, 8, 8, 0)
+	a.bytes(0x4d, 0x85, 0xc0)
+	a.conditional(4, a.host)
+	search, found := a.label(), a.label()
+	a.mark(search)
+	a.bytes(0x41, 0x81, 0x38)
+	a.word(in.Key)
+	a.conditional(4, found)
+	a.bytes(0x49, 0x83, 0xc0, 40, 0x49, 0xff, 0xc9)
+	a.conditional(5, search)
+	a.jump(a.host)
+	a.mark(found)
+	a.memory(0x8b, 2, 8, 24)
+	a.bytes(0x48, 0x85, 0xd2)
+	a.conditional(4, a.host)
+	a.bytes(0x81, 0x3a)
+	a.word(in.Key)
+	a.conditional(5, a.host)
+	a.bytes(0xf6, 0x42, 4, 0xf8)
+	a.conditional(5, a.host)
+	for _, offset := range []uint32{8, 16} {
+		a.memory(0x8b, 0, 8, offset)
+		a.memory(0x3b, 0, 2, offset)
+		a.conditional(5, a.host)
+	}
+	a.memory(0x8b, 0, 8, 32)
+	a.bytes(0x48, 0x3d)
+	a.word(ir.MaxSlots)
+	a.conditional(3, a.host)
+	a.immediate(2, uint64(ir.Opaque))
+	a.store(in.Dest, 0, 2)
+}
+
 func (a *amd64Program) property(in ir.Instruction) {
 	guard := a.guard
 	a.guard = a.host
@@ -604,6 +666,9 @@ func (a *amd64Program) property(in ir.Instruction) {
 		}
 		a.memory(0x8b, 0, 8, 8)
 	} else {
+		referenceTable, attributes := a.label(), a.label()
+		a.bytes(0x48, 0x85, 0xc9)
+		a.conditional(4, a.host)
 		a.load(in.Left, 0, 2)
 		if !a.known(in.Left, ir.Opaque) {
 			a.bytes(0x48, 0x83, 0xfa, byte(ir.Opaque))
@@ -618,7 +683,11 @@ func (a *amd64Program) property(in ir.Instruction) {
 		a.conditional(5, a.host) // array permission excludes property access
 		a.memory(0x8b, 2, 0, 32)
 		a.bytes(0x48, 0x85, 0xd2)
-		a.conditional(4, a.host)
+		if in.Op == ir.BindingRead {
+			a.conditional(4, a.host)
+		} else {
+			a.conditional(4, referenceTable)
+		}
 		a.bytes(0x66, 0x4c, 0x0f, 0x6e, 0xfa) // movq dx,x15: numeric tag boundary
 		a.memory(0x8b, 9, 0, 8)
 		a.bytes(0x49, 0x83, 0xf9, ir.MaxProperties)
@@ -637,6 +706,39 @@ func (a *amd64Program) property(in ir.Instruction) {
 		a.conditional(5, search)
 		a.jump(a.host)
 		a.mark(found)
+		if in.Op != ir.BindingRead {
+			a.jump(attributes)
+			a.mark(referenceTable)
+			a.memory(0x8b, 2, 0, 16)
+			a.bytes(0x48, 0x85, 0xd2)
+			a.conditional(4, a.host)
+			a.bytes(0x66, 0x4c, 0x0f, 0x6e, 0xfa)
+			a.memory(0x8b, 9, 0, 8)
+			a.bytes(0x49, 0x83, 0xf9, ir.MaxProperties)
+			a.conditional(7, a.host)
+			a.bytes(0x4d, 0x85, 0xc9)
+			a.conditional(4, a.host)
+			a.memory(0x8b, 8, 0, 0)
+			a.bytes(0x4d, 0x85, 0xc0)
+			a.conditional(4, a.host)
+			refSearch, refFound := a.label(), a.label()
+			a.mark(refSearch)
+			a.bytes(0x41, 0x81, 0x38)
+			a.word(in.Key)
+			a.conditional(4, refFound)
+			a.bytes(0x49, 0x83, 0xc0, 40, 0x49, 0xff, 0xc9)
+			a.conditional(5, refSearch)
+			a.jump(a.host)
+			a.mark(refFound)
+			a.memory(0x8b, 8, 8, 24)
+			a.bytes(0x4d, 0x85, 0xc0)
+			a.conditional(4, a.host)
+			a.bytes(0x41, 0x81, 0x38)
+			a.word(in.Key)
+			a.conditional(5, a.host)
+			a.mark(attributes)
+		}
+
 		a.bytes(0x41, 0xf6, 0x40, 4, 0xf8) // testb invalid attributes,4(r8)
 		a.conditional(5, a.host)
 		if in.Op == ir.PropertyWrite {

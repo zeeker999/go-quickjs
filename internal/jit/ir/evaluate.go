@@ -49,6 +49,32 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 		case Host:
 			exit.Kind = HostExit
 			return exit, nil
+		case ReferenceRead:
+			exit.Kind = HostExit
+			obj := read(in.Left)
+			if obj.Kind != Opaque || obj.Bits >= uint64(len(arrays)) {
+				return exit, nil
+			}
+			view := arrays[obj.Bits]
+			if view.Data == nil || view.DenseLength > MaxProperties || view.NumberLimit != 0 || view.WritableHole != 0 || view.Length == 0 {
+				return exit, nil
+			}
+			found := false
+			for _, ref := range unsafe.Slice((*ReferenceCell)(view.Data), int(view.DenseLength)) {
+				if ref.Key != in.Key {
+					continue
+				}
+				cell := ref.Cell
+				if cell == nil || cell.Key != in.Key || cell.Flags&^uint8(7) != 0 || cell.Bits != ref.Bits || cell.Reference != ref.Reference || ref.Handle >= MaxSlots {
+					return exit, nil
+				}
+				slots[in.Dest] = Value{Kind: Opaque, Bits: ref.Handle}
+				found = true
+				break
+			}
+			if !found {
+				return exit, nil
+			}
 		case PropertyRead, PropertyWrite, BindingRead:
 			exit.Kind = HostExit
 			obj := read(in.Left)
@@ -56,18 +82,31 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 				return exit, nil
 			}
 			view := arrays[obj.Bits]
-			if view.NumberLimit != 0 || view.WritableHole == 0 || view.Data == nil || view.DenseLength > MaxProperties {
+			if view.NumberLimit != 0 || view.Data == nil || view.DenseLength > MaxProperties || view.WritableHole == 0 && (view.Length == 0 || in.Op == BindingRead) {
 				return exit, nil
 			}
 			var cell *PropertyCell
 			for i := uint64(0); i < view.DenseLength; i++ {
-				p := (*PropertyCell)(unsafe.Add(view.Data, uintptr(i)*unsafe.Sizeof(PropertyCell{})))
-				if p.Key == in.Key {
+				var p *PropertyCell
+				if view.WritableHole != 0 {
+					p = (*PropertyCell)(unsafe.Add(view.Data, uintptr(i)*unsafe.Sizeof(PropertyCell{})))
+				} else {
+					ref := (*ReferenceCell)(unsafe.Add(view.Data, uintptr(i)*unsafe.Sizeof(ReferenceCell{})))
+					if ref.Key != in.Key {
+						continue
+					}
+					p = ref.Cell
+				}
+				if p != nil && p.Key == in.Key {
 					cell = p
 					break
 				}
 			}
-			if cell == nil || cell.Flags&^uint8(7) != 0 || cell.Bits >= view.WritableHole {
+			limit := view.WritableHole
+			if limit == 0 {
+				limit = view.Length
+			}
+			if cell == nil || cell.Flags&^uint8(7) != 0 || cell.Bits >= limit {
 				return exit, nil
 			}
 			if in.Op != PropertyWrite {

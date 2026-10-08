@@ -136,7 +136,7 @@ func (a *programAssembler) allocateRegisters(p *ir.Program, available []int) {
 			if in.Op == ir.ArrayWrite {
 				read(in.Third)
 			}
-		case ir.ArrayLength, ir.PropertyRead, ir.BindingRead:
+		case ir.ArrayLength, ir.PropertyRead, ir.BindingRead, ir.ReferenceRead:
 			read(in.Left)
 			uses[in.Dest]++
 		case ir.PropertyWrite:
@@ -302,14 +302,18 @@ func (a *programAssembler) inferKinds(p *ir.Program) {
 				write(in.Extra, int8(ir.Number))
 			}
 			simple = true
-		case ir.PropertyRead, ir.PropertyWrite, ir.BindingRead:
+		case ir.PropertyRead, ir.PropertyWrite, ir.BindingRead, ir.ReferenceRead:
 			refine(in.Left, ir.Opaque)
 			if in.Op == ir.PropertyWrite {
 				refine(in.Right, ir.Number)
 			}
 			before = kinds
 			if in.Op != ir.PropertyWrite {
-				write(in.Dest, int8(ir.Number))
+				kind := ir.Number
+				if in.Op == ir.ReferenceRead {
+					kind = ir.Opaque
+				}
+				write(in.Dest, int8(kind))
 			}
 			simple = true
 		case ir.ArrayRead, ir.ArrayWrite, ir.ArrayUpdate, ir.ArrayKey, ir.ArrayLength:

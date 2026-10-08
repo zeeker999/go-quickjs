@@ -136,9 +136,11 @@ immediate, and comparison instructions without exposing half-completed bytecode
 operations. It also accepts read-only captured bindings, dense numeric array
 access, length reads, fused index updates, assignment-result insertion, and
 numeric bitwise operations over the full double domain. Selected loops also
-read and write own numeric fields and use a guarded receiver snapshot. Ordinary
+read and write own numeric fields, read rooted own reference fields, and use a guarded receiver snapshot. Ordinary
 calls, method calls, nonnumeric global reads, other property operations, and method
-lookups exit to Go and resume native execution. Remainder, including fused
+lookups exit to Go and resume native execution. Reference-field reads require
+repeated use inside a host-free loop; reads only before a loop retain Go.
+Remainder, including fused
 operands, and nonnumeric equality also use resumable Go boundaries.
 Host-backed functions need a loop or indexed work to qualify; small wrappers
 without that work retain the existing tiers. Own numeric fields require a loop
@@ -226,7 +228,7 @@ middle uses the generic path until reaching a region boundary. No unchecked
 facts or cached view can leak across entry, branch joins, or callbacks.
 Every exit spills the registers before returning to Go.
 
-An array handle indexes a separate, typed table of 64-byte borrowed views. Each
+An array handle indexes a separate, typed table of 40-byte borrowed views. Each
 view roots dense Go storage and records its dense length, JavaScript length,
 and numeric tag boundary. A nonzero writable-hole marker grants permission to
 fill pointer-free holes after Go proves ordinary extensible storage, writable
@@ -243,6 +245,19 @@ resume in Go, then reenter native code. Ordinary bounded growth updates every
 alias's view; accessors, exotic objects, and coercions publish the frame and
 clear views before invoking the existing VM semantics.
 Fused index updates commit only after all read guards succeed.
+
+Selected own reference reads use guarded cells through the existing borrowed
+view table, preserving the array and entry ABIs. Go prepares at most eight selected keys for each of 32 receiver
+handles, sharing existing object roots across aliases and cycles. A permission
+holds a typed live-cell pointer, a snapshot of its value identity, and a rooted
+result handle. Native code checks the key, ordinary attributes, live bits and
+reference identity before copying that handle. It never writes a Go reference.
+Preparation does not invoke getters, traverse prototypes or run coercions.
+Missing, inherited, exotic, changed or excess references take the original host
+operation. Callback boundaries clear all permissions and rebuild after return.
+The permission arena is allocated lazily, occupies 10240 bytes per runtime,
+and is counted by the existing memory walker. It is separate from code/metadata
+figures and is released with the JIT state.
 
 Before a host operation that can invoke callbacks the VM publishes locals and operands, then clears all
 scalar roots and borrowed views. It runs the existing call/property semantics
@@ -1247,3 +1262,49 @@ language/built-in Test262 reports 91492 passed, zero failed, 342 existing skips
 and 3123167232 bytes peak RSS; the corresponding opt-out run also passes and
 peaks at 3000827904 bytes. Conformance memory is reported separately from the
 small RSA benchmark's 28475392-byte process peak.
+
+### Rooted own reference fields, October 8, 2026
+
+Selected host-free loops can now follow ordinary own reference fields, including
+`o.m.array`. Numeric fields in the same loop remain live through the guarded
+table's cell pointers. Aliases and cycles share rooted objects; excess receivers
+fall back rather than growing the arena beyond 32 receivers and eight keys.
+The numeric entry ABI and scratch offsets remain unchanged. Reference metadata
+is installed only when active, avoiding write-barrier stores on every short
+numeric call; reference cleanup also leaves the common numeric path small.
+
+The exact final eight placements compare with d4c42ee's field/global/countdown
+milestone: Crypto 61.1 to 61.0 ms (-0.2%), mixed total 502.2 to 501.7 ms (-0.1%).
+The corresponding opt-out total is 614.5 to 613.1 ms (-0.2%). These differences
+are effectively level. Earlier reference entry designs regressed Crypto by
+7.4%, 4.2% and 3.8%; none is the accepted implementation.
+
+Three fresh reference-loop processes average 86.1 us bytecode, 79.7 us tree and
+18.2 us native (about 4.7x bytecode), with 328 bytes and three allocations per
+call, 16952 bytes of code/metadata and zero host or guard exits. The separately
+owned permission arena adds 10240 bytes per runtime when first needed.
+First calls across 100 fresh runtimes per process average 93.9 us tree and
+94.7 us automatic: compilation has not disappeared. Automatic first calls
+allocate about 119626 Go bytes in 69 allocations, excluding source compilation,
+runtime construction and setup. First-use process RSS is 27.1-32.1 MB.
+
+Four alternating complete-RSA samples average 19.13 ms before and 19.23 ms
+after (+0.5%, level), with about 240535 bytes and 982 allocations per pair.
+Fresh bytecode/tree samples are 59.13/41.05 ms, so complete RSA remains about
+3.1x bytecode. Retained native code/metadata is 614728 bytes (+32768 bytes);
+additional property paths occupy two more executable pages. RSA process RSS is
+27.7-31.7 MB.
+Native call chains and integer representation remain the main missing work;
+this coverage milestone does not meet the 10x Crypto goal.
+
+An ordinary-layout score snapshot is 5338 overall and 6574 for Crypto. A fixed
+50-iteration run reports Crypto 953.8 ms, total 5883.5 ms, 4422.8 MB allocated,
+9.5 MB live after collection and 320012288 bytes peak RSS. Score-process RSS is
+1226440704 bytes. These are snapshots, not the balanced attribution comparison.
+Default/tagged qjs binaries are 40538002/40879250 bytes (+341248, 0.84%).
+
+Final default/tagged full suites, vet, race/checkptr, Go 1.24 and Linux/amd64
+native emitter/VM execution under emulation pass. Windows amd64/arm64 and
+Linux/386 cross-builds pass; Windows execution remains for CI. Native language
+and built-in Test262 reports 91492 passed, zero failed and 342 existing skips,
+with 2909323264 bytes peak RSS. No conformance expectations were changed.

@@ -76,6 +76,8 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 				a.array(in)
 			case ir.PropertyRead, ir.PropertyWrite, ir.BindingRead:
 				a.property(in)
+			case ir.ReferenceRead:
+				a.reference(in)
 			case ir.Copy:
 				a.loadScalar(in.Left, 0, 4)
 				a.storeScalar(in.Dest, 0, 4)
@@ -600,6 +602,70 @@ func (a *arm64Program) truth(o ir.Operand) {
 	a.mark(done)
 }
 
+func (a *arm64Program) reference(in ir.Instruction) {
+	a.compareImmediate(1, 0)
+	a.conditional(0, a.host)
+	a.load(in.Left, 3, 4)
+	if !a.known(in.Left, ir.Opaque) {
+		a.compareImmediate(4, uint32(ir.Opaque))
+		a.conditional(1, a.host)
+	}
+	a.compareImmediate(3, ir.MaxSlots)
+	a.conditional(2, a.host)
+	a.word(0x8b030863)
+	a.word(0x8b030c23) // add x3,x1,handle*40
+	a.memory(true, false, 7, 3, 24)
+	a.compareImmediate(7, 0)
+	a.conditional(1, a.host)
+	a.memory(true, false, 7, 3, 32)
+	a.compareImmediate(7, 0)
+	a.conditional(1, a.host)
+	a.memory(true, false, 7, 3, 16)
+	a.compareImmediate(7, 0)
+	a.conditional(0, a.host)
+	a.memory(true, false, 4, 3, 8)
+	a.compareImmediate(4, ir.MaxProperties)
+	a.conditional(8, a.host)
+	a.compareImmediate(4, 0)
+	a.conditional(0, a.host)
+	a.memory(true, false, 3, 3, 0)
+	a.compareImmediate(3, 0)
+	a.conditional(0, a.host)
+	a.immediate(7, uint64(in.Key))
+	search, found := a.label(), a.label()
+	a.mark(search)
+	a.word(0xb9400065) // ldr w5,[x3]: permission key
+	a.word(0x6b0700bf)
+	a.conditional(0, found)
+	a.word(0x9100a063) // add x3,x3,#40
+	a.word(0xd1000484)
+	a.compareImmediate(4, 0)
+	a.conditional(1, search)
+	a.jump(a.host)
+	a.mark(found)
+	a.memory(true, false, 5, 3, 24)
+	a.compareImmediate(5, 0)
+	a.conditional(0, a.host)
+	a.word(0xb94000a6) // ldr w6,[x5]: live key
+	a.word(0x6b0700df) // cmp w6,w7
+	a.conditional(1, a.host)
+	a.word(0x394010a6) // ldrb w6,[x5,#4]: live flags
+	a.immediate(7, 0xf8)
+	a.word(0x6a0700df)
+	a.conditional(1, a.host)
+	for _, offset := range []int{8, 16} {
+		a.memory(true, false, 6, 3, offset)
+		a.memory(true, false, 7, 5, offset)
+		a.word(0xeb0700df) // cmp x6,x7: snapshot bits/reference
+		a.conditional(1, a.host)
+	}
+	a.memory(true, false, 3, 3, 32)
+	a.compareImmediate(3, ir.MaxSlots)
+	a.conditional(2, a.host)
+	a.immediate(4, uint64(ir.Opaque))
+	a.store(in.Dest, 3, 4)
+}
+
 func (a *arm64Program) property(in ir.Instruction) {
 	guard := a.guard
 	a.guard = a.host
@@ -614,6 +680,9 @@ func (a *arm64Program) property(in ir.Instruction) {
 		}
 		a.memory(true, false, 7, 3, 8)
 	} else {
+		referenceTable, attributes := a.label(), a.label()
+		a.compareImmediate(1, 0)
+		a.conditional(0, a.host)
 		a.load(in.Left, 3, 4)
 		if !a.known(in.Left, ir.Opaque) {
 			a.compareImmediate(4, uint32(ir.Opaque))
@@ -628,7 +697,11 @@ func (a *arm64Program) property(in ir.Instruction) {
 		a.conditional(1, a.host) // array permission excludes property access
 		a.memory(true, false, 6, 3, 32)
 		a.compareImmediate(6, 0)
-		a.conditional(0, a.host)
+		if in.Op == ir.BindingRead {
+			a.conditional(0, a.host)
+		} else {
+			a.conditional(0, referenceTable)
+		}
 		a.memory(true, false, 4, 3, 8)
 		a.compareImmediate(4, ir.MaxProperties)
 		a.conditional(8, a.host)
@@ -649,6 +722,41 @@ func (a *arm64Program) property(in ir.Instruction) {
 		a.conditional(1, search)
 		a.jump(a.host)
 		a.mark(found)
+		if in.Op != ir.BindingRead {
+			a.jump(attributes)
+			a.mark(referenceTable)
+			a.memory(true, false, 6, 3, 16)
+			a.compareImmediate(6, 0)
+			a.conditional(0, a.host)
+			a.memory(true, false, 4, 3, 8)
+			a.compareImmediate(4, ir.MaxProperties)
+			a.conditional(8, a.host)
+			a.compareImmediate(4, 0)
+			a.conditional(0, a.host)
+			a.memory(true, false, 3, 3, 0)
+			a.compareImmediate(3, 0)
+			a.conditional(0, a.host)
+			a.immediate(7, uint64(in.Key))
+			refSearch, refFound := a.label(), a.label()
+			a.mark(refSearch)
+			a.word(0xb9400065)
+			a.word(0x6b0700bf)
+			a.conditional(0, refFound)
+			a.word(0x9100a063)
+			a.word(0xd1000484)
+			a.compareImmediate(4, 0)
+			a.conditional(1, refSearch)
+			a.jump(a.host)
+			a.mark(refFound)
+			a.memory(true, false, 3, 3, 24)
+			a.compareImmediate(3, 0)
+			a.conditional(0, a.host)
+			a.word(0xb9400065)
+			a.word(0x6b0700bf)
+			a.conditional(1, a.host)
+			a.mark(attributes)
+		}
+
 		a.word(0x39401065) // ldrb w5,[x3,#4]: property flags
 		a.immediate(7, 0xf8)
 		a.word(0x6a0700bf) // tst w5,w7: only ordinary data attributes

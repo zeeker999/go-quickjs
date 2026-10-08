@@ -37,36 +37,48 @@ type jitClosureFields struct {
 }
 
 type jitEntry struct {
-	code         *jit.Code
-	misses       uint8
-	probes       uint8
-	entrySlow    bool
-	probeSteps   uint64
-	probeHosts   uint64
-	properties   bool
-	this         bool
-	globals      []bytecode.Instr
-	shortCounter uint16
+	code          *jit.Code
+	misses        uint8
+	probes        uint8
+	entrySlow     bool
+	probeSteps    uint64
+	probeHosts    uint64
+	properties    bool
+	this          bool
+	globals       []bytecode.Instr
+	shortCounter  uint16
+	referenceKeys []uint32
 }
 
 // Weak keys prevent a refusal or cached program from retaining a source graph.
 // Native entry cannot call Go, so buffers are shared only until a guard exit.
 type jitState struct {
-	unavailable bool
-	properties  bool
-	this        bool
-	globals     []bytecode.Instr
-	cache       map[weak.Pointer[bytecode.Function]]*jitEntry
-	slots       [ir.MaxSlots]ir.Value
-	roots       [ir.MaxSlots]Value
-	arrays      [ir.MaxSlots]ir.ArrayView
-	hosts       uint64
-	fastHosts   uint64
-	rootCount   int
-	entries     uint64
-	guards      uint64
-	budgets     uint64
-	osrs        uint64
+	unavailable     bool
+	properties      bool
+	this            bool
+	referenceActive bool
+	globals         []bytecode.Instr
+	cache           map[weak.Pointer[bytecode.Function]]*jitEntry
+	slots           [ir.MaxSlots]ir.Value
+	roots           [ir.MaxSlots]Value
+	arrays          [ir.MaxSlots]ir.ArrayView
+	hosts           uint64
+	fastHosts       uint64
+	rootCount       int
+	entries         uint64
+	guards          uint64
+	budgets         uint64
+	osrs            uint64
+	referenceKeys   []uint32
+	references      *jitReferences
+}
+
+// Only selected own reference fields are prepared. The receiver bound keeps
+// cycles and unusually large object graphs on the ordinary host path.
+const jitReferenceReceivers = 32
+
+type jitReferences struct {
+	cells [jitReferenceReceivers][ir.MaxProperties]ir.ReferenceCell
 }
 
 func (r *Runtime) initJIT(enabled bool) {
@@ -86,7 +98,7 @@ func (r *Runtime) jitCodeBytes() int64 {
 	var n int64
 	if r.jit != nil {
 		for _, e := range r.jit.cache {
-			n += int64(e.code.Size() + e.code.MetadataSize() + cap(e.globals)*int(unsafe.Sizeof(bytecode.Instr{})))
+			n += int64(e.code.Size() + e.code.MetadataSize() + cap(e.globals)*int(unsafe.Sizeof(bytecode.Instr{})) + cap(e.referenceKeys)*4)
 		}
 	}
 	return n
@@ -160,7 +172,7 @@ func (r *Runtime) jitFor(fn *bytecode.Function) *jitEntry {
 	s := r.jit
 	var meta int
 	for _, e := range s.cache {
-		meta += e.code.MetadataSize() + cap(e.globals)*int(unsafe.Sizeof(bytecode.Instr{}))
+		meta += e.code.MetadataSize() + cap(e.globals)*int(unsafe.Sizeof(bytecode.Instr{})) + cap(e.referenceKeys)*4
 	}
 	// Entry maps and offsets are bounded before emission as well as afterwards.
 	if meta+len(fn.Code)*32+1024 > jitMetadataBytes {
@@ -181,14 +193,33 @@ func (r *Runtime) jitFor(fn *bytecode.Function) *jitEntry {
 		}
 		// Lowering uses immutable source-name indices. Each runtime resolves
 		// these to its own pointer-free atoms before emitting native searches.
+		hasReferences := false
+		for _, in := range p.Code {
+			hasReferences = hasReferences || in.Op == ir.ReferenceRead
+		}
 		for i := range p.Code {
 			in := &p.Code[i]
-			if in.Op == ir.PropertyRead || in.Op == ir.PropertyWrite || in.Op == ir.BindingRead {
+			if in.Op == ir.PropertyRead || in.Op == ir.PropertyWrite || in.Op == ir.BindingRead || in.Op == ir.ReferenceRead {
 				e.properties = e.properties || in.Op != ir.BindingRead
 				in.Key = uint32(r.atoms.intern(fn.Names[in.Key]))
+				if hasReferences && in.Op != ir.BindingRead {
+					found := false
+					for _, key := range e.referenceKeys {
+						found = found || key == in.Key
+					}
+					if !found && len(e.referenceKeys) < ir.MaxProperties {
+						e.referenceKeys = append(e.referenceKeys, in.Key)
+					}
+				}
 			}
 		}
-		bindingBytes := cap(e.globals) * int(unsafe.Sizeof(bytecode.Instr{}))
+		bindingBytes := cap(e.globals)*int(unsafe.Sizeof(bytecode.Instr{})) + cap(e.referenceKeys)*4
+		if len(e.referenceKeys) != 0 && s.references == nil {
+			limit -= int(unsafe.Sizeof(jitReferences{}))
+			if limit <= bindingBytes {
+				return nil
+			}
+		}
 		if meta+len(fn.Code)*32+1024+bindingBytes > jitMetadataBytes {
 			return nil
 		}
@@ -198,6 +229,9 @@ func (r *Runtime) jitFor(fn *bytecode.Function) *jitEntry {
 				s.unavailable = true
 			}
 			return nil
+		}
+		if len(e.referenceKeys) != 0 && s.references == nil {
+			s.references = new(jitReferences)
 		}
 	}
 	s.cache[weak.Make(fn)] = e
@@ -270,7 +304,17 @@ func (s *jitState) publish(f *frame, stack []Value, depth int) {
 func (s *jitState) clearRoots() {
 	clear(s.roots[:s.rootCount])
 	clear(s.arrays[:s.rootCount])
+	if s.referenceActive {
+		s.clearReferences()
+	}
 	s.rootCount = 0
+}
+
+// Keep optional reference cleanup outside the frequent numeric return path.
+//
+//go:noinline
+func (s *jitState) clearReferences() {
+	clear(s.references.cells[:min(s.rootCount, jitReferenceReceivers)])
 }
 
 func (r *Runtime) tryJITFrame(f *frame) (Value, error, bool) {
@@ -343,6 +387,10 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 	s.properties = e.properties
 	s.this = e.this
 	s.globals = e.globals
+	s.referenceActive = len(e.referenceKeys) != 0
+	if s.referenceActive {
+		s.referenceKeys = e.referenceKeys
+	}
 	s.encodeFrame(r, f, r.stack, depth)
 	if osr {
 		s.osrs++
@@ -428,6 +476,10 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 			s.properties = e.properties
 			s.this = e.this
 			s.globals = e.globals
+			s.referenceActive = len(e.referenceKeys) != 0
+			if s.referenceActive {
+				s.referenceKeys = e.referenceKeys
+			}
 			s.encodeFrame(r, f, r.stack, sp-f.base)
 		case ir.BudgetExit:
 			s.budgets++
@@ -452,6 +504,11 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 // Any accessor, proxy, exotic object, new property, or full root table takes
 // the normal callback boundary at its original instruction and stack depth.
 func (r *Runtime) jitHostFast(f *frame, s *jitState, pc, depth, limit int) (int, int, int) {
+	// A reference write can invalidate frozen permissions. Reference programs
+	// use the full publication and refresh boundary for every host operation.
+	if s.referenceActive {
+		return pc, depth, 0
+	}
 	n := len(f.locals) + len(f.cl.upvalues)
 	n += len(s.globals)
 	if s.this {
@@ -741,7 +798,7 @@ func (s *jitState) encodeFrame(r *Runtime, f *frame, stack []Value, depth int) {
 			i := s.rootCount
 			s.rootCount++
 			s.roots[i] = Obj(owner)
-			s.arrays[i] = ir.ArrayView{Data: unsafe.Pointer(p), DenseLength: 1, WritableHole: tagBase}
+			s.arrays[i] = ir.ArrayView{Data: unsafe.Pointer(p), DenseLength: 1, Length: 1, WritableHole: tagBase}
 			s.slots[base] = ir.Value{Kind: ir.Opaque, Bits: uint64(i)}
 		}
 		base++
@@ -756,6 +813,54 @@ func (s *jitState) encodeFrame(r *Runtime, f *frame, stack []Value, depth int) {
 	}
 	for i, v := range stack[f.base : f.base+depth] {
 		s.slots[base+i] = s.encode(v)
+	}
+	if s.referenceActive {
+		s.prepareReferences()
+	}
+}
+
+func (s *jitState) prepareReferences() {
+	for i := 0; i < min(s.rootCount, jitReferenceReceivers); i++ {
+		// Binding handles grant access to one numeric cell, not to their owner.
+		view := s.arrays[i]
+		if view.NumberLimit == 0 && view.WritableHole != 0 && view.Length == 1 {
+			continue
+		}
+		root := s.roots[i]
+		if !root.IsObject() || root.Object().class != ClassObject {
+			continue
+		}
+		o := root.Object()
+		var count int
+		for _, key := range s.referenceKeys {
+			value, index, ok := plainOwnAt(o, Atom(key))
+			if !ok || o.props[index].flags&^propDefault != 0 {
+				continue
+			}
+			handle := ir.MaxSlots
+			if value.IsObject() {
+				handle = 0
+				for handle < s.rootCount {
+					v := s.roots[handle]
+					if v.IsObject() && v.Object() == value.Object() {
+						break
+					}
+					handle++
+				}
+				if handle == s.rootCount {
+					if handle == ir.MaxSlots {
+						continue
+					}
+					s.encode(value)
+				}
+			}
+			cell := &o.props[index]
+			s.references.cells[i][count] = ir.ReferenceCell{Key: key, Bits: math.Float64bits(value.num), Reference: value.ref, Cell: (*ir.PropertyCell)(unsafe.Pointer(cell)), Handle: uint64(handle)}
+			count++
+		}
+		if count != 0 {
+			s.arrays[i] = ir.ArrayView{Data: unsafe.Pointer(&s.references.cells[i][0]), DenseLength: uint64(count), Length: tagBase}
+		}
 	}
 }
 

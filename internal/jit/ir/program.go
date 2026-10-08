@@ -17,7 +17,12 @@ import (
 // With NumberLimit zero, Data instead borrows an ordinary object's property
 // table, DenseLength counts at most MaxProperties cells, and WritableHole is
 // the numeric tag boundary. The two permissions are mutually exclusive.
-// Missing or nonnumeric fields exit to the host.
+// With both NumberLimit and WritableHole zero, a nonzero Length grants a
+// ReferenceCell table instead: Length is its numeric tag boundary. Numeric
+// operations follow Cell to live storage; reference reads additionally check
+// the snapshot identity before copying its rooted handle. These permissions
+// preserve the same 40-byte view and numeric native-entry ABI.
+// Missing or incompatible fields exit to the host.
 type ArrayView struct {
 	Data         unsafe.Pointer
 	DenseLength  uint64
@@ -38,6 +43,19 @@ type PropertyCell struct {
 	_         [3]byte
 	Bits      uint64
 	Reference unsafe.Pointer
+}
+
+// ReferenceCell grants a read of one selected own field. Cell borrows
+// the live property; Bits and Reference must still match before Handle is used.
+// Handle equal to MaxSlots denies a reference read. Numeric reads and writes
+// use Cell's live value. Native code never writes or publishes the Go pointers.
+type ReferenceCell struct {
+	Key       uint32
+	_         [4]byte
+	Bits      uint64
+	Reference unsafe.Pointer
+	Cell      *PropertyCell
+	Handle    uint64
 }
 
 // Kind identifies a scalar or a handle into Go-owned reference storage.
@@ -110,6 +128,7 @@ const (
 	PropertyRead
 	PropertyWrite
 	BindingRead
+	ReferenceRead
 )
 
 // Operator selects an arithmetic, comparison, or truthiness operation.

@@ -38,7 +38,7 @@ func fixture(code ...bytecode.Instr) *bytecode.Function {
 }
 
 func TestNumericPropertySelection(t *testing.T) {
-	fn := compiledFunction(t, `function f(o){let a=o.array;let n=o.n;for(let i=0;i<n;i++)a[i]=a[i]+o.step;return a[0]}`)
+	fn := compiledFunction(t, `function f(o){let n=o.n;for(let i=0;i<n;i++)o.array[i]=o.array[i]+o.step;return o.array[0]}`)
 	p, err := Lower(fn)
 	if err != nil {
 		t.Fatal(err)
@@ -52,14 +52,47 @@ func TestNumericPropertySelection(t *testing.T) {
 		seen[name] = true
 		want := ir.PropertyRead
 		if name == "array" {
-			want = ir.Host
+			want = ir.ReferenceRead
 		}
-		if p.Code[pc].Op != want || want == ir.PropertyRead && p.Code[pc].Key != in.A {
+		if p.Code[pc].Op != want || p.Code[pc].Key != in.A {
 			t.Fatalf("property %s lowered to %+v, want %v", name, p.Code[pc], want)
 		}
 	}
 	if !seen["array"] || !seen["n"] || !seen["step"] {
 		t.Fatal("missing numeric or reference property fixture")
+	}
+}
+
+func TestReferencePropertySelection(t *testing.T) {
+	for _, tc := range []struct {
+		source string
+		want   ir.Op
+	}{
+		{`function f(o,n){let a=o.array;for(let i=0;i<n;i++)a[i]+=1;return a[0]}`, ir.Host},
+		{`function f(o,n){let s=0;for(let i=0;i<n;i++)s+=o.array[0];return s}`, ir.ReferenceRead},
+		{`function f(o,n,cb){let s=0;for(let i=0;i<n;i++){s+=o.array[0];cb()}return s}`, ir.Host},
+		{`function f(o,n){let s=0;for(let i=0;i<n;i++)s+=o.array[0]*scale;return s}`, ir.ReferenceRead},
+	} {
+		fn := compiledFunction(t, tc.source)
+		p, err := Lower(fn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for pc, in := range fn.Code {
+			if in.Op == bytecode.OpGetProp {
+				found = true
+				if p.Code[pc].Op != tc.want {
+					t.Fatalf("%s: %+v, want %v", tc.source, p.Code[pc], tc.want)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("missing reference read")
+		}
 	}
 }
 

@@ -198,7 +198,7 @@ func selectShortCountdown(fn *bytecode.Function, p *ir.Program) {
 		}
 		write, extra := false, false
 		switch in.Op {
-		case ir.Copy, ir.Binary, ir.Unary, ir.Update, ir.ArrayRead, ir.ArrayLength, ir.PropertyRead, ir.BindingRead:
+		case ir.Copy, ir.Binary, ir.Unary, ir.Update, ir.ArrayRead, ir.ArrayLength, ir.PropertyRead, ir.BindingRead, ir.ReferenceRead:
 			write = true
 			extra = in.Op == ir.Update && in.Extra >= 0
 		case ir.CopyPair, ir.StoreLoad, ir.Swap, ir.ArrayUpdate:
@@ -245,6 +245,9 @@ func selectGlobalSlots(fn *bytecode.Function, p *ir.Program) {
 		if old.Op == ir.BindingRead {
 			in.Left = old.Left
 		}
+		if old.Op == ir.ReferenceRead {
+			in.Op = ir.ReferenceRead
+		}
 		p.Code[pc] = in
 	}
 }
@@ -253,6 +256,23 @@ func selectGlobalSlots(fn *bytecode.Function, p *ir.Program) {
 // entry. Keep mixed loops on their existing bridge until their remaining host
 // operations are covered; a native field loop must amortize that preparation.
 func selectPropertyLoops(fn *bytecode.Function, p *ir.Program) bool {
+	// Preparing a reference graph cannot amortize a read performed only once
+	// before the loop. Keep those entries on the existing cheap Go bridge.
+	loopReference := false
+	for pc, in := range p.Code {
+		if (in.Op == ir.Jump || in.Op == ir.Branch) && in.Target <= pc {
+			for _, body := range p.Code[in.Target : pc+1] {
+				loopReference = loopReference || body.Op == ir.ReferenceRead
+			}
+		}
+	}
+	if !loopReference {
+		for pc, in := range p.Code {
+			if in.Op == ir.ReferenceRead {
+				p.Code[pc] = ir.Instruction{Op: ir.Host}
+			}
+		}
+	}
 	hosts := make([]int, len(p.Code)+1)
 	fields, loop, mixed, fieldCount := false, false, false, 0
 	for pc, in := range p.Code {
@@ -260,8 +280,8 @@ func selectPropertyLoops(fn *bytecode.Function, p *ir.Program) bool {
 		if in.Op == ir.Host {
 			hosts[pc+1]++
 		}
-		fields = fields || in.Op == ir.PropertyRead || in.Op == ir.PropertyWrite
-		if in.Op == ir.PropertyRead || in.Op == ir.PropertyWrite {
+		fields = fields || in.Op == ir.PropertyRead || in.Op == ir.PropertyWrite || in.Op == ir.ReferenceRead
+		if in.Op == ir.PropertyRead || in.Op == ir.PropertyWrite || in.Op == ir.ReferenceRead {
 			fieldCount++
 		}
 	}
@@ -284,7 +304,7 @@ func selectPropertyLoops(fn *bytecode.Function, p *ir.Program) bool {
 	}
 	if !fields {
 		for pc, in := range p.Code {
-			if in.Op == ir.PropertyRead || in.Op == ir.PropertyWrite {
+			if in.Op == ir.PropertyRead || in.Op == ir.PropertyWrite || in.Op == ir.ReferenceRead {
 				p.Code[pc] = ir.Instruction{Op: ir.Host}
 			}
 		}
@@ -292,17 +312,18 @@ func selectPropertyLoops(fn *bytecode.Function, p *ir.Program) bool {
 	return loop && !mixed
 }
 
-// Native fields are profitable when their values feed numeric operations.
-// This bounded backward scan is a selection hint, not a type proof: emitted
-// guards still handle every path and value. Reference fields used as array or
-// method receivers keep their direct host exit instead of searching twice.
+// This bounded backward scan chooses field reads whose results feed numeric
+// operations or reference receivers. It is a profitability hint; every native
+// read still checks its live type and permissions before committing.
 func selectNumericProperties(p *ir.Program) {
-	var numeric [MaxSlots]bool
-	read := func(o ir.Operand, needed bool) {
-		if o.Slot >= 0 && needed {
-			numeric[o.Slot] = true
+	const number, reference uint8 = 1, 2
+	var needed [MaxSlots]uint8
+	read := func(o ir.Operand, kind uint8) {
+		if o.Slot >= 0 {
+			needed[o.Slot] |= kind
 		}
 	}
+	take := func(slot int) uint8 { k := needed[slot]; needed[slot] = 0; return k }
 	for pc := len(p.Code) - 1; pc >= 0; pc-- {
 		if p.Maps[pc].Depth < 0 {
 			continue
@@ -310,64 +331,76 @@ func selectNumericProperties(p *ir.Program) {
 		in := p.Code[pc]
 		switch in.Op {
 		case ir.PropertyRead, ir.BindingRead:
-			if !numeric[in.Dest] {
-				p.Code[pc] = ir.Instruction{Op: ir.Host}
+			kind := take(in.Dest)
+			if kind&number == 0 {
+				if in.Op == ir.PropertyRead && kind&reference != 0 {
+					in.Op = ir.ReferenceRead
+					p.Code[pc] = in
+				} else {
+					p.Code[pc] = ir.Instruction{Op: ir.Host}
+				}
 			}
-			numeric[in.Dest] = false
+			if in.Op != ir.BindingRead {
+				read(in.Left, reference)
+			}
 		case ir.Copy:
-			needed := numeric[in.Dest]
-			numeric[in.Dest] = false
-			read(in.Left, needed)
+			read(in.Left, take(in.Dest))
 		case ir.CopyPair:
-			left, right := numeric[in.Dest], numeric[in.Extra]
-			numeric[in.Dest], numeric[in.Extra] = false, false
+			left, right := take(in.Dest), take(in.Extra)
 			read(in.Left, left)
 			read(in.Right, right)
 		case ir.StoreLoad:
-			needed := numeric[in.Extra]
-			numeric[in.Extra] = false
-			read(in.Right, needed)
-			needed = numeric[in.Dest]
-			numeric[in.Dest] = false
-			read(in.Left, needed)
+			read(in.Right, take(in.Extra))
+			read(in.Left, take(in.Dest))
 		case ir.Swap:
-			numeric[in.Dest], numeric[in.Extra] = numeric[in.Extra], numeric[in.Dest]
+			needed[in.Dest], needed[in.Extra] = needed[in.Extra], needed[in.Dest]
 		case ir.Binary:
-			numeric[in.Dest] = false
-			read(in.Left, true)
-			read(in.Right, true)
+			take(in.Dest)
+			read(in.Left, number)
+			read(in.Right, number)
 		case ir.Unary, ir.Update:
-			numeric[in.Dest] = false
+			take(in.Dest)
 			if in.Op == ir.Update && in.Extra >= 0 {
-				numeric[in.Extra] = false
+				take(in.Extra)
 			}
-			read(in.Left, in.Operator != ir.Not)
+			if in.Operator != ir.Not {
+				read(in.Left, number)
+			}
 		case ir.ArrayRead, ir.ArrayUpdate, ir.ArrayLength:
-			numeric[in.Dest] = false
+			take(in.Dest)
 			if in.Op == ir.ArrayUpdate {
-				numeric[in.Extra] = false
+				take(in.Extra)
 			}
-			read(in.Right, in.Op != ir.ArrayLength)
+			read(in.Left, reference)
+			if in.Op != ir.ArrayLength {
+				read(in.Right, number)
+			}
 		case ir.ArrayWrite, ir.ArrayKey:
-			read(in.Right, true)
-			read(in.Third, in.Op == ir.ArrayWrite)
+			read(in.Left, reference)
+			read(in.Right, number)
+			if in.Op == ir.ArrayWrite {
+				read(in.Third, number)
+			}
 		case ir.PropertyWrite:
-			read(in.Right, true)
+			read(in.Left, reference)
+			read(in.Right, number)
 		case ir.Branch:
-			read(in.Left, in.Operator != ir.Truth)
-			read(in.Right, in.Operator != ir.Truth)
+			if in.Operator != ir.Truth {
+				read(in.Left, number)
+				read(in.Right, number)
+			}
 		case ir.Host:
-			clear(numeric[p.Locals:])
+			clear(needed[p.Locals:])
 		case ir.Insert2, ir.Insert3:
 			n, last := in.Dest, 2
 			if in.Op == ir.Insert2 {
 				last = 1
 			}
-			needed := numeric[n] || numeric[n+last+1]
+			kind := needed[n] | needed[n+last+1]
 			for i := 0; i < last; i++ {
-				numeric[n+i] = numeric[n+i+1]
+				needed[n+i] = needed[n+i+1]
 			}
-			numeric[n+last], numeric[n+last+1] = needed, false
+			needed[n+last], needed[n+last+1] = kind, 0
 		}
 	}
 }

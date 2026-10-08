@@ -58,7 +58,7 @@ func (p *Program) Validate() error {
 			left, right, third = true, true, true
 		case ArrayLength:
 			left, write = true, true
-		case PropertyRead, PropertyWrite, BindingRead:
+		case PropertyRead, PropertyWrite, BindingRead, ReferenceRead:
 			left, right, write = true, in.Op == PropertyWrite, in.Op != PropertyWrite
 		case Insert3:
 			if in.Dest < 0 || in.Dest+2 >= active || !dest(in.Dest+3) {

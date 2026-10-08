@@ -45,6 +45,8 @@ interpreter on representative hot workloads. Compare the existing tree tier
 separately, and report the mixed V8 suite as its own acceptance measure; a hot
 kernel improvement does not establish the same gain for the whole engine.
 Five times is the minimum usefulness threshold; the target remains incomplete.
+For complete Crypto encryption/decryption, the active acceptance target is 10x;
+a 5x isolated kernel or a 5x complete result does not complete that target.
 
 ## Crypto path to 10x
 
@@ -100,8 +102,26 @@ The current implementation covers own numeric fields in selected host-free
 loops, live numeric global bindings, and a small-countdown entry hint. The hint
 retains Go execution for zero/one remaining iterations of a small single
 `while (--parameter >= 0)` loop, while preserving native entry and OSR for later
-larger calls. Stable reference handles, native call chains and integer register
-representation remain unimplemented; whole RSA remains about 3x bytecode.
+larger calls. Selected loops now read ordinary own reference fields using a
+bounded graph of rooted handles, including backing arrays and chained receivers.
+Only live data cells matching their preparation-time identity grant a read;
+callbacks discard and rebuild these permissions. A read performed only before
+a loop retains its Go bridge because reference preparation regressed complete
+RSA on short calls. Inherited method reads, reference globals, native call chains
+and integer register representation remain unimplemented; whole RSA remains
+about 3x bytecode.
+
+The next coverage milestone must combine method resolution with calls. Compiling
+the limb callee alone still pays for the caller's tree execution, argument/frame
+conversion and repeated native entry. A bounded native frame arena should hold
+scalar slots and return PCs, while typed Go owners root closures, references and
+code mappings. Native transfers must preserve the Go SP/FP/g registers and use a
+shared instruction budget. Begin with eligible non-recursive callees and exact
+callee-exit reconstruction; only then extend to recursive or polymorphic calls.
+Host exits must materialize all active frames at their committed PCs, so a
+numeric array write is never replayed. Guard exits, exact exceptions, callback
+GC/reentry, code eviction, depth limits and cancellation are acceptance tests,
+along with complete RSA and balanced V8 comparisons.
 
 ## Objective and scope
 
