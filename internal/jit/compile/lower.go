@@ -42,6 +42,23 @@ func refuse(pc int, why string) error { return &Refusal{PC: pc, Reason: why} }
 // Property keys are source-name indices; the VM resolves them to its runtime's
 // scalar property identifiers before emission or evaluation with borrowed views.
 func Lower(fn *bytecode.Function) (*ir.Program, error) {
+	return lowerFunction(fn, false, false)
+}
+
+// LowerCalls additionally retains guarded numeric fields across call boundaries.
+// Its caller must refresh borrowed views after every potentially effectful call.
+func LowerCalls(fn *bytecode.Function) (*ir.Program, error) {
+	return lowerFunction(fn, true, false)
+}
+
+// LowerCallee permits small guarded functions whose entry costs are amortized
+// by an encoded caller. It keeps reference fields on the coordinator's host
+// path and does not change the standalone profitability policy.
+func LowerCallee(fn *bytecode.Function) (*ir.Program, error) {
+	return lowerFunction(fn, true, true)
+}
+
+func lowerFunction(fn *bytecode.Function, calls, callee bool) (*ir.Program, error) {
 	if fn == nil {
 		return nil, refuse(-1, "nil function")
 	}
@@ -95,10 +112,10 @@ func Lower(fn *bytecode.Function) (*ir.Program, error) {
 		indexed = indexed || in.Op == bytecode.OpGetIndex || in.Op == bytecode.OpSetIndex || in.Op == bytecode.OpGetLocalIndex || in.Op == bytecode.OpGetLocalIndexUpdate
 	}
 	// Tiny host-only wrappers pay the bridge overhead without enough native work.
-	if host && !loop && !indexed {
+	if host && !loop && !indexed && !callee {
 		return nil, refuse(-1, "host operations without native loop or array work")
 	}
-	if property && !indexed && !bitwise {
+	if property && !indexed && !bitwise && !callee {
 		return nil, refuse(-1, "property operations without native array or bitwise work")
 	}
 	maps := make([]ir.StateMap, len(fn.Code))
@@ -161,7 +178,7 @@ func Lower(fn *bytecode.Function) (*ir.Program, error) {
 		}
 	}
 	selectNumericProperties(p)
-	selectPropertyLoops(fn, p)
+	selectPropertyLoops(fn, p, calls, callee)
 	selectGlobalSlots(fn, p)
 	selectShortCountdown(fn, p)
 	return p, nil
@@ -255,7 +272,7 @@ func selectGlobalSlots(fn *bytecode.Function, p *ir.Program) {
 // Borrowing object tables and another receiver root costs something on every
 // entry. Keep mixed loops on their existing bridge until their remaining host
 // operations are covered; a native field loop must amortize that preparation.
-func selectPropertyLoops(fn *bytecode.Function, p *ir.Program) bool {
+func selectPropertyLoops(fn *bytecode.Function, p *ir.Program, calls, callee bool) bool {
 	// Preparing a reference graph cannot amortize a read performed only once
 	// before the loop. Keep those entries on the existing cheap Go bridge.
 	loopReference := false
@@ -291,7 +308,14 @@ func selectPropertyLoops(fn *bytecode.Function, p *ir.Program) bool {
 			mixed = mixed || hosts[pc+1] != hosts[in.Target]
 		}
 	}
-	fields = fields && loop && !mixed
+	if callee || calls && mixed {
+		for pc, in := range p.Code {
+			if in.Op == ir.ReferenceRead {
+				p.Code[pc] = ir.Instruction{Op: ir.Host}
+			}
+		}
+	}
+	fields = fields && (loop || callee) && (!mixed || calls)
 	if p.This && !fields && hosts[len(p.Code)]+fieldCount != 0 {
 		p.This = false
 		p.Locals--

@@ -1308,3 +1308,85 @@ native emitter/VM execution under emulation pass. Windows amd64/arm64 and
 Linux/386 cross-builds pass; Windows execution remains for CI. Native language
 and built-in Test262 reports 91492 passed, zero failed and 342 existing skips,
 with 2909323264 bytes peak RSS. No conformance expectations were changed.
+
+### Encoded call-chain foundation, October 8, 2026
+
+After rebasing onto upstream bf3db95, selected callers use an eight-frame,
+34376-byte lazy arena. A Go coordinator transfers pointer-free arguments and
+results and shares one 4096-instruction budget across callees. It preserves
+ordinary Go frames for exact exceptions and stack/depth limits; canonical locals
+and operands are published before callbacks, memory walks and deoptimization.
+Rooted handles are shared, with a bounded 512-entry lookup table for reuse.
+The emitters and assembly entry ABI are unchanged: each callee still returns
+through Go. This implements call-state ownership and recovery, not direct
+native-to-native machine control flow.
+
+Ordinary inherited data is read at its original instruction, using live
+prototype tables. Getters, proxies, exotic receivers, lexical-this functions,
+cross-realm calls and cycles in the active native chain use normal boundaries.
+Numeric fields can remain native across calls; reference fields in mixed calls
+retain their Go reads. Small guarded callees have a separate lowering policy
+and continue using the existing tier when called independently. Cold targets
+in memory-limited runtimes compile through published ordinary calls instead.
+Active code owners are pinned during callee compilation. Explicit callback
+release remains supported: the coordinator rebuilds all entries and views or
+resumes canonical frames if rebuilding cannot fit. Node-quirks legacy argument
+reflection preserves extra arguments and observes current parameter values.
+`disasm -jit` reports the call-aware standalone IR and identifies functions
+eligible only with an encoded caller.
+
+The final balanced comparison (`calls-rebased-base` versus
+`calls-callee-final`, eight placements, three rounds, fixed work) reports:
+
+| Work | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| Crypto | 61.2 ms | 61.8 ms | +1.0% |
+| Mixed total | 503.7 ms | 505.4 ms | +0.3% |
+| JIT opt-out total | 614.3 ms | 613.4 ms | -0.1% |
+
+An earlier coordinator prototype regressed balanced Crypto by 3.9%; retaining
+numeric fields across calls, reducing arena cleanup and root lookup costs, and
+batching callee preheaders reduced that cost. The final result still does not
+establish an end-to-end performance win or complete the native-call milestone.
+
+Three alternating fresh RSA processes per side average 18.87 ms before and
+19.04 ms after (+0.9%, approximately level). Fresh current bytecode/tree are
+57.50/39.96 ms, so complete validated RSA remains 3.0x bytecode and 2.1x tree.
+Allocations change from 240793 B/983 allocations to 244915 B/907 allocations
+per pair. Code plus metadata grows from 614728 to 698120 bytes; the lazy arena
+is separate. RSA-process peak RSS is 27.3-31.0 MB. The eight-pair corpus records
+581954 scalar transfers, zero guards, and no retained roots. Broader execution
+counters are coverage evidence, not speedup evidence.
+
+The repeated four-iteration callee corpus, in three fresh processes, has median
+bytecode/tree/native times 149.5/150.0/71.7 us (2.1x bytecode and tree), with
+488 B/four allocations per call. First use of the longer 8192-call version,
+100 fresh runtimes per process, measures median tree/automatic times
+1217.7/700.7 us. Source compilation, runtime construction and declarations are
+excluded; native compilation and promotion are included. Automatic first use
+allocates about 248.9 KB/132 allocations, versus 496 B/four for the tree tier;
+process RSS is 27.7-29.4 MB. This remains below the 5-10x active target.
+
+The ordinary-layout score snapshot is 5226 overall, Crypto 6323. The fixed
+50-iteration snapshot reports Crypto 932.6 ms, total 5953.1 ms, 4423.8 MB
+allocated and 9.5 MB live after GC. Fixed/score peak RSS is 312655872/1224343552
+bytes. These snapshots do not establish attribution across the upstream rebase.
+Default/tagged qjs sizes are 40575074/40967298 bytes (+392224, 0.97%);
+ordinary runtime construction still allocates no executable memory.
+
+Default/tagged full suites and vet, native VM/JIT race and checkptr, Go 1.24,
+and Linux/amd64 native VM/emitter execution under emulation pass. Windows
+amd64/arm64 and Linux/386 cross-builds pass, as does the 386 length regression.
+Windows native execution remains unverified locally. Both native and debugger
+language/built-in Test262 runs report 91492 passed, zero failed, 342 skips;
+native conformance peak RSS is 3015802880 bytes. Tests cover nested transfers,
+reference returns, missing/extra arguments, captured bindings, prototype
+mutation, committed writes before coercion/throw, legacy reflection, callback
+GC/reentry/release, code churn, bounded fallback and cancellation.
+
+Evidence is retained outside temporary directories at
+`../quickjs-jit-results/2026-10-08-call-frames`. The next step is to eliminate
+repeated assembly entries and Go method boundaries using guarded native call
+transfers, followed by integer register/range representation. Complete RSA must
+approach 5.75 ms on this measured 57.50 ms bytecode workload to satisfy 10x;
+another roughly 3.3x improvement over current native execution is required.

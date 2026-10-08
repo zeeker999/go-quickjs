@@ -837,8 +837,13 @@ func TestJITCryptoCorpus(t *testing.T) {
 	if entry == nil || entry.code == nil || entry.misses != 0 || r.jit.entries == 0 || r.jit.fastHosts == 0 || r.jit.rootCount != 0 {
 		t.Fatal("am3 did not execute native code without guards")
 	}
-	t.Logf("native entries=%d fast hosts=%d callback hosts=%d guards=%d budgets=%d am3 code=%d metadata=%d",
-		r.jit.entries, r.jit.fastHosts, r.jit.hosts-r.jit.fastHosts, r.jit.guards, r.jit.budgets, entry.code.Size(), entry.code.MetadataSize())
+	t.Logf("native entries=%d fast hosts=%d callback hosts=%d guards=%d budgets=%d transfers=%d am3 code=%d metadata=%d",
+		r.jit.entries, r.jit.fastHosts, r.jit.hosts-r.jit.fastHosts, r.jit.guards, r.jit.budgets, r.jit.transfers, entry.code.Size(), entry.code.MetadataSize())
+	for key, e := range r.jit.cache {
+		if fn := key.Value(); fn != nil && e.calls && e.probeHosts != 0 {
+			t.Logf("caller %s steps/host=%d slow=%v", fn.Name, e.probeSteps/e.probeHosts, e.entrySlow)
+		}
+	}
 }
 
 func TestJITDenseArraysAndCallbacks(t *testing.T) {

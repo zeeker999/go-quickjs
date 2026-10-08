@@ -107,11 +107,25 @@ bounded graph of rooted handles, including backing arrays and chained receivers.
 Only live data cells matching their preparation-time identity grant a read;
 callbacks discard and rebuild these permissions. A read performed only before
 a loop retains its Go bridge because reference preparation regressed complete
-RSA on short calls. Inherited method reads, reference globals, native call chains
-and integer register representation remain unimplemented; whole RSA remains
-about 3x bytecode.
+RSA on short calls. A bounded Go coordinator now transfers scalar arguments and
+rooted handles between compiled callers and callees, retaining guarded numeric
+fields across calls. It resolves ordinary inherited data at the original read
+and materializes every suspended frame before callbacks or deoptimization.
+Small own-field callees can compile for this path while retaining the existing
+standalone policy. Reference globals, direct machine-code call transfers and
+integer register representation remain unimplemented; whole RSA remains about
+3x bytecode.
 
-The next coverage milestone must combine method resolution with calls. Compiling
+The call coordinator is a foundation, not a completed performance milestone.
+Final eight-placement measurements against the rebased pre-call implementation
+show Crypto 61.2 -> 61.8 ms (+1.0%), mixed total 503.7 -> 505.4 ms (+0.3%), and
+opt-out total 614.3 -> 613.4 ms (-0.1%). Fresh full RSA averages 19.04 ms versus
+18.87 ms in the prior JIT; bytecode/tree are 57.50/39.96 ms. The 10x complete
+Crypto target remains unmet. Do not count added compiled functions or scalar
+transfer counters as an end-to-end speedup.
+
+The next coverage milestone must eliminate the coordinator's repeated assembly
+entries and retain more enclosing execution in native code. Compiling
 the limb callee alone still pays for the caller's tree execution, argument/frame
 conversion and repeated native entry. A bounded native frame arena should hold
 scalar slots and return PCs, while typed Go owners root closures, references and

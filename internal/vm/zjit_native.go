@@ -48,6 +48,8 @@ type jitEntry struct {
 	globals       []bytecode.Instr
 	shortCounter  uint16
 	referenceKeys []uint32
+	calls         bool
+	calleeOnly    bool
 }
 
 // Weak keys prevent a refusal or cached program from retaining a source graph.
@@ -57,6 +59,7 @@ type jitState struct {
 	properties      bool
 	this            bool
 	referenceActive bool
+	callActive      bool
 	globals         []bytecode.Instr
 	cache           map[weak.Pointer[bytecode.Function]]*jitEntry
 	slots           [ir.MaxSlots]ir.Value
@@ -71,6 +74,8 @@ type jitState struct {
 	osrs            uint64
 	referenceKeys   []uint32
 	references      *jitReferences
+	callFrames      *jitCallFrames
+	transfers       uint64
 }
 
 // Only selected own reference fields are prepared. The receiver bound keeps
@@ -137,6 +142,10 @@ func (r *Runtime) jitAllowance(fn *bytecode.Function) int {
 }
 
 func (r *Runtime) jitFor(fn *bytecode.Function) *jitEntry {
+	return r.jitForMode(fn, false)
+}
+
+func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool) *jitEntry {
 	if r.jit != nil && r.jit.unavailable {
 		return nil
 	}
@@ -144,7 +153,7 @@ func (r *Runtime) jitFor(fn *bytecode.Function) *jitEntry {
 		return nil
 	}
 	if r.jit != nil {
-		if e := r.jit.cache[weak.Make(fn)]; e != nil {
+		if e := r.jit.cache[weak.Make(fn)]; e != nil && (!callee || e.calleeOnly || e.code != nil) {
 			return e
 		}
 		for key, e := range r.jit.cache {
@@ -154,11 +163,17 @@ func (r *Runtime) jitFor(fn *bytecode.Function) *jitEntry {
 		}
 		if len(r.jit.cache) >= jitCacheEntries {
 			for key, e := range r.jit.cache {
+				if r.jit.callEntryActive(e) {
+					continue
+				}
 				if e.code.Close() != nil {
 					return nil
 				}
 				delete(r.jit.cache, key)
 				break
+			}
+			if len(r.jit.cache) >= jitCacheEntries {
+				return nil
 			}
 		}
 	}
@@ -178,8 +193,20 @@ func (r *Runtime) jitFor(fn *bytecode.Function) *jitEntry {
 	if meta+len(fn.Code)*32+1024 > jitMetadataBytes {
 		return nil
 	}
-	p, err := jitcompile.Lower(fn)
 	e := &jitEntry{}
+	for _, in := range fn.Code {
+		e.calls = e.calls || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod
+	}
+	lower := jitcompile.Lower
+	if e.calls {
+		lower = jitcompile.LowerCalls
+	}
+	if callee {
+		lower = jitcompile.LowerCallee
+		e.calleeOnly = true
+		e.entrySlow = true
+	}
+	p, err := lower(fn)
 	if err == nil {
 		e.this = p.This
 		e.shortCounter = p.ShortCounter
@@ -256,8 +283,27 @@ func (s *jitState) encode(v Value) ir.Value {
 	case KindUninitialized:
 		return ir.Value{Kind: ir.Uninitialized}
 	}
+	handleSlot := -1
+	if s.callActive {
+		handleSlot = int((uintptr(v.ref) >> 4) & 511)
+		for {
+			handle := s.callFrames.handles[handleSlot]
+			if handle == 0 {
+				break
+			}
+			i := int(handle) - 1
+			root := s.roots[i]
+			if root.ref == v.ref && math.Float64bits(root.num) == math.Float64bits(v.num) {
+				return ir.Value{Kind: ir.Opaque, Bits: uint64(i)}
+			}
+			handleSlot = (handleSlot + 1) & 511
+		}
+	}
 	i := s.rootCount
 	s.roots[i], s.rootCount = v, i+1
+	if handleSlot >= 0 {
+		s.callFrames.handles[handleSlot] = uint16(i + 1)
+	}
 	if v.IsObject() {
 		o := v.Object()
 		if o.class == ClassArray {
@@ -363,6 +409,9 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 		f.cl.jitRefused = true
 		return Undefined, nil, false
 	}
+	if e.calleeOnly {
+		return Undefined, nil, false
+	}
 	if e.shortCounter != 0 {
 		counter := f.locals[e.shortCounter-1]
 		if counter.IsNumber() && counter.Number() >= 0 && counter.Number() <= 1 {
@@ -394,6 +443,11 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 	s.encodeFrame(r, f, r.stack, depth)
 	if osr {
 		s.osrs++
+	}
+	if e.calls && !s.referenceActive && (s.callFrames == nil || !s.callFrames.active) {
+		if v, err, done := r.jitRunCalls(f, e, pc, depth, n); done {
+			return v, err, true
+		}
 	}
 	budget := uint64(jit.MaxIterations)
 	var nativeSteps, hosts uint64

@@ -63,6 +63,58 @@ func TestNumericPropertySelection(t *testing.T) {
 	}
 }
 
+func TestCallFieldSelection(t *testing.T) {
+	fn := compiledFunction(t, `function f(o,cb,n){let s=0;for(let i=0;i<n;i++){s+=o.array[0]+o.step;cb()}return s}`)
+	for _, lower := range []struct {
+		fn     func(*bytecode.Function) (*ir.Program, error)
+		fields bool
+	}{{Lower, false}, {LowerCalls, true}} {
+		p, err := lower.fn(fn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		for pc, in := range fn.Code {
+			if in.Op != bytecode.OpGetProp {
+				continue
+			}
+			want := ir.Host
+			if lower.fields && fn.Names[in.A] == "step" {
+				want = ir.PropertyRead
+			}
+			if p.Code[pc].Op != want {
+				t.Fatalf("call field %s: got %v, want %v", fn.Names[in.A], p.Code[pc].Op, want)
+			}
+		}
+	}
+}
+
+func TestSmallCalleeSelection(t *testing.T) {
+	fn := compiledFunction(t, `function f(){return this.x<0?0:this}`)
+	if _, err := Lower(fn); err == nil {
+		t.Fatal("small field callee entered the standalone policy")
+	}
+	p, err := LowerCallee(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !p.This {
+		t.Fatal("callee lost its receiver snapshot")
+	}
+	found := false
+	for _, in := range p.Code {
+		found = found || in.Op == ir.PropertyRead
+	}
+	if !found {
+		t.Fatal("small callee lost its guarded numeric field")
+	}
+}
+
 func TestReferencePropertySelection(t *testing.T) {
 	for _, tc := range []struct {
 		source string

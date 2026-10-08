@@ -72,6 +72,7 @@ function read(o) { return o.x }`
 		"jit exit: pc=6 depth=0",
 		"jit exit: pc=7 depth=2",
 		"jit IR: refused: jit: host operations without native loop or array work",
+		"jit callee IR: eligible with encoded caller (standalone remains in Go)",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("missing %q in\n%s", want, out.String())
