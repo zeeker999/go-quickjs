@@ -655,6 +655,61 @@ func TestJITSSAProperties(t *testing.T) {
 	}
 }
 
+// The new pipeline reads globals where the interpreter last found them, in
+// place, as cells: numbers, a function a call is given, an object whose
+// property is read, Math. Later scripts declare script-level lexical
+// bindings -- one of them shadowing a global property, which reads must
+// then see past -- and assign the globals new values.
+func TestJITSSAGlobals(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `var N=10,O={x:2};function g(x){return x+1}
+		function count(){let s=0;for(let i=0;i<N;i++)s+=i;return s}
+		function calls(n){let s=0;for(let i=0;i<n;i++)s=g(s);return s}
+		function field(n){let s=0;for(let i=0;i<n;i++)s+=O.x;return s}
+		function math(n){let s=0;for(let i=0;i<n;i++)s+=Math.abs(-i);return s}
+		globalThis.P=5;function readP(n){let s=0;for(let i=0;i<n;i++)s+=P;return s}
+		count();calls(2);field(2);math(2);readP(2)`
+	rounds := []string{
+		`[count(),calls(5),field(5),math(5),readP(3)].join()`,
+		`let L=1;N=4;O={y:1,x:3};g=function(x){return x+2};[count(),calls(5),field(5),math(5),L].join()`,
+		// A lexical binding shadows the global property P from here on.
+		`let P=7;[readP(3),count()].join()`,
+		`globalThis.N='3';[count(),field(2)].join()`,
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	r.jitEnabled = false
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.jitEnabled = true
+	r.jitStress = jitStressConfig{threshold: true, budget: 1}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+	}
+	if st := r.JITStats(); st.SSAEntries == 0 {
+		t.Fatalf("never entered the new pipeline: %+v", st)
+	} else {
+		t.Logf("%+v", st)
+	}
+}
+
 // TestJITSSACellsUnderGC stresses D8's decision: native code carries a
 // reference read from an object by its cell's address, which Go reads back
 // at exit. That holds while Go's heap does not move and the graph does not

@@ -50,6 +50,11 @@ type Context struct {
 	// pointers to cells, each holding at Encoding.UpvalueSlot a pointer to
 	// the binding's value. Native code only reads them.
 	Upvalues unsafe.Pointer
+	// Global is the object a function's global names are read from, its
+	// closure's scope, and LexNames the names script-level lexical bindings
+	// have, which shadow them: a slice of uint64, a bit for each atom. Go
+	// sets both before every entry; native code only reads them.
+	Global, LexNames unsafe.Pointer
 	// This is the receiver, laid out as a VM value, which Go sets before
 	// every entry of a function that reads it; uninitialized in a derived
 	// constructor before super() returns.
@@ -83,6 +88,8 @@ var (
 	OffBackEdges = int32(unsafe.Offsetof(Context{}.BackEdges))
 	OffUpvalues  = int32(unsafe.Offsetof(Context{}.Upvalues))
 	OffThis      = int32(unsafe.Offsetof(Context{}.This))
+	OffGlobal    = int32(unsafe.Offsetof(Context{}.Global))
+	OffLexNames  = int32(unsafe.Offsetof(Context{}.LexNames))
 	OffExitKind  = int32(unsafe.Offsetof(Context{}.ExitKind))
 	OffExitPC    = int32(unsafe.Offsetof(Context{}.ExitPC))
 	OffExitDepth = int32(unsafe.Offsetof(Context{}.ExitDepth))
@@ -150,8 +157,8 @@ type Encoding struct {
 	// MaxScan entries, may be searched for a key, as the VM's own small
 	// objects are. A property is plain data when its flags have none of
 	// PropNotData, and a plain writable one when they have PropWritable of
-	// PropNotWritable.
-	ClassObject, PropNotData, PropNotWritable, PropWritable uint8
+	// PropNotWritable. PropUninit marks a binding in its temporal dead zone.
+	ClassObject, PropNotData, PropNotWritable, PropWritable, PropUninit uint8
 }
 
 // MaxScan bounds the table native code searches for a key.

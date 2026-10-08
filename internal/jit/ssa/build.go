@@ -22,6 +22,16 @@ type Feedback interface {
 	// Property is the property a PropertyRead or PropertyWrite at pc names,
 	// or false to leave the site to Go.
 	Property(pc int) (PropertySite, bool)
+	// Global is where the global a BindingRead at pc names was last found,
+	// or false to leave the site to Go.
+	Global(pc int) (GlobalSite, bool)
+}
+
+// GlobalSite is a global read's site: its name, the VM's atom, and the
+// index in the global object's table where the binding was found.
+type GlobalSite struct {
+	Key   uint32
+	Index int32
 }
 
 // PropertySite is a property site: its key, the VM's atom; and, if the
@@ -83,8 +93,19 @@ func (b *builder) host(pc int) bool {
 	case ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead:
 		_, ok := b.property(pc)
 		return !ok
+	case ir.BindingRead:
+		_, ok := b.global(pc)
+		return !ok
 	}
 	return false
+}
+
+// global is the feedback for a global read at pc, if any.
+func (b *builder) global(pc int) (GlobalSite, bool) {
+	if b.fb == nil || b.p.Code[pc].Op != ir.BindingRead {
+		return GlobalSite{}, false
+	}
+	return b.fb.Global(pc)
 }
 
 func reachable(p *ir.Program, pc int) bool {
@@ -103,7 +124,7 @@ func (b *builder) plan() error {
 		switch in.Op {
 		case ir.Nop, ir.Copy, ir.CopyPair, ir.StoreLoad, ir.Swap, ir.Insert2, ir.Insert3,
 			ir.Unary, ir.Update, ir.Return, ir.ArrayRead, ir.ArrayUpdate, ir.ArrayLength, ir.ArrayKey:
-		case ir.ArrayWrite, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead:
+		case ir.ArrayWrite, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead:
 			// What native code does not do exits to Go, which resumes after
 			// it.
 			entries[pc+1] = true
@@ -185,7 +206,7 @@ func (b *builder) plan() error {
 			}
 		case ir.Return:
 			blk.Kind = BlockReturn
-		case ir.Host, ir.Call, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead:
+		case ir.Host, ir.Call, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead:
 			if !b.host(end) {
 				blk.Kind = BlockPlain
 				b.edge(blk, b.blockAt[end+1])
@@ -595,6 +616,19 @@ func (b *builder) instruction(blk *Block, pc int) {
 		array := guard(OpArrayOf, Ptr, ir.HostExit, operand(in.Left))
 		key, value := number(in.Right, ir.HostExit), number(in.Third, ir.HostExit)
 		guard(OpElemWrite, None, ir.HostExit, array, key, value)
+	case ir.BindingRead:
+		site, ok := b.global(pc)
+		if !ok {
+			blk.ExitKind = ir.HostExit
+			blk.State = state()
+			blk.State.addUse()
+			break
+		}
+		cell := guard(OpGlobalCell, Source, ir.HostExit)
+		cell.Index, cell.Key = int(site.Index), site.Key
+		v := f.newValue(blk, OpLoadCell, Tagged, cell)
+		v.Shadow = cell
+		b.assign(in.Dest, blk, v)
 	case ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead:
 		site, ok := b.property(pc)
 		if !ok {

@@ -53,6 +53,7 @@ var jitEncoding = abi.Encoding{
 	PropNotData:     uint8(propAccessor | propPrivate | propDeleted),
 	PropNotWritable: uint8(propAccessor | propPrivate | propDeleted | propUninit | propWritable),
 	PropWritable:    uint8(propWritable),
+	PropUninit:      uint8(propUninit),
 
 	ObjectClass:    int32(unsafe.Offsetof(Object{}.class)),
 	ObjectFlags:    int32(unsafe.Offsetof(Object{}.flags)),
@@ -77,7 +78,7 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, 
 	if len(p.Globals) != 0 || p.Locals != fn.LocalCount+len(fn.Upvalues)+this {
 		return nil, nil
 	}
-	fb := &jitFeedback{fn: fn, cl: cl}
+	fb := &jitFeedback{r: r, fn: fn, cl: cl}
 	f, err := ssa.BuildWith(p, fb)
 	if err != nil {
 		return nil, nil
@@ -108,9 +109,30 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, 
 // of none -- the VM gives a small object a shape only when a cache asks --
 // are searched for the key.
 type jitFeedback struct {
+	r      *Runtime
 	fn     *bytecode.Function
 	cl     *closure
 	shapes []*shape
+}
+
+// Global is where the global a site reads was last found in the closure's
+// scope (the site's idx, which the interpreter keeps there). Native code
+// checks, as the interpreter does, that no script-level lexical binding of
+// the name shadows it (lexShadows).
+func (fb *jitFeedback) Global(pc int) (ssa.GlobalSite, bool) {
+	if fb.cl == nil || pc >= len(fb.fn.Code) {
+		return ssa.GlobalSite{}, false
+	}
+	in := fb.fn.Code[pc]
+	if in.Op != bytecode.OpGetGlobal || int(in.A) >= len(fb.cl.names) || int(in.B) >= len(fb.cl.ic) {
+		return ssa.GlobalSite{}, false
+	}
+	name, env := fb.cl.names[in.A], fb.cl.scope()
+	i := fb.cl.ic[in.B].idx
+	if env == nil || i < 0 || int(i) >= len(env.props) || env.props[i].key != name {
+		return ssa.GlobalSite{}, false
+	}
+	return ssa.GlobalSite{Key: uint32(name), Index: i}, true
 }
 
 func (fb *jitFeedback) Property(pc int) (ssa.PropertySite, bool) {
@@ -218,6 +240,7 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 		ctx.Stack = unsafe.Pointer(&r.stack[f.base])
 		ctx.BackEdges = &r.backEdges
 		ctx.Upvalues = unsafe.Pointer(unsafe.SliceData(f.cl.upvalues))
+		ctx.Global, ctx.LexNames = unsafe.Pointer(f.cl.scope()), unsafe.Pointer(&r.lexNames)
 		if e.this {
 			this, bound := f.thisValue()
 			if !bound {
