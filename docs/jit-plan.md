@@ -113,8 +113,8 @@ fields across calls. It resolves ordinary inherited data at the original read
 and materializes every suspended frame before callbacks or deoptimization.
 Small own-field callees can compile for this path while retaining the existing
 standalone policy. Reference globals, direct machine-code call transfers and
-integer register representation remain unimplemented; whole RSA remains about
-3x bytecode.
+full integer register representation remain unimplemented; whole RSA remains
+about 3x bytecode.
 
 The call coordinator is a foundation, not a completed performance milestone.
 Final eight-placement measurements against the rebased pre-call implementation
@@ -136,6 +136,66 @@ Host exits must materialize all active frames at their committed PCs, so a
 numeric array write is never replayed. Guard exits, exact exceptions, callback
 GC/reentry, code eviction, depth limits and cancellation are acceptance tests,
 along with complete RSA and balanced V8 comparisons.
+
+### Integer conversion retention and rejected return chaining
+
+A native return-chain prototype resumed suspended callers directly through a
+bounded assembly trampoline. It passed exact exit/budget comparisons and the
+call-chain semantic corpus, and transferred all 581,954 returns in the Crypto
+corpus. Nevertheless, eight-placement comparisons measured Crypto 62.4 ->
+68.2 ms (+9.3%). Preparing and reconciling the chain outweighed the removed
+transition. The prototype is preserved with its measurements outside the
+checkout, and is not part of production. Future native call work must transfer
+both directions and retain the enclosing execution, rather than add return
+bookkeeping to every existing entry.
+
+The arithmetic step now tracks conservative finite magnitude bounds within a
+precharged region. Masks, shifts, copies and bounded arithmetic can prove that
+integer conversion cannot overflow. Both emitters omit the general overflow
+path for those operands and retain the last converted scalar through copies
+and chained bitwise operations. Arm64 additionally retains seven conversion
+results in Go's permanent scratch registers R19-R25, keyed by immutable scalar
+origins. Copies preserve identity; writes acquire new identities; branches,
+external entries and exact small-budget paths discard these facts. Floating
+point results are still stored normally: this does not reassociate arithmetic,
+replace multiplication with modular integer multiplication, or remove state
+needed by a guard exit.
+
+Eight-placement comparisons against e0b2b35 measured Crypto 64.2 -> 63.1 ms
+(-1.8%) and mixed total 534.0 -> 533.0 ms (-0.2%). Fresh alternating processes
+measured full RSA 19.28 -> 19.17 ms (-0.5%), versus current bytecode/tree
+59.91/40.77 ms: approximately 3.1x bytecode, far below the 10x gate. Every pair
+checks the decrypted plaintext. Crypto's retained code/metadata shrank from
+698,120 to 665,352 bytes; warm allocations stayed about 239.6 KB/918 per pair.
+Full-RSA process RSS was 30.6-34.0 MiB for the baseline and 30.9-31.5 MiB for
+the change. These small throughput changes do not establish a broad engine win.
+
+The existing first-use call corpus (8192 calls, 100 fresh runtimes per process,
+three fresh processes) measured median native latency 717 -> 724 us. Its timed
+region includes native compilation/promotion, but excludes runtime construction,
+JavaScript compilation and declarations. Allocations rose from about 248.8 to
+261.5 KB and 132 to 134 allocations. The range table is compilation-only and
+bounded by 4096 instructions times 256 scalar slots (1 MiB); runtime scalar
+arenas, rooting, instruction budgets and the opt-in API do not grow.
+
+The balanced opt-out total was 619.7 -> 618.2 ms (-0.2%). Default/tagged qjs
+binaries are 40,575,074/40,984,210 bytes: the ordinary build is unchanged and
+the tagged binary grew 16,912 bytes. Ordinary runtime construction still does
+not compile or allocate executable memory. Full default/tagged Go suites,
+vet, race/checkptr, Go 1.24, Linux/amd64 native execution under emulation,
+Windows amd64/arm64 and Linux 386 cross-builds, and the 386 length regression
+pass. Native language/built-ins Test262 reports 91,492 passed, zero failed,
+342 skips, with peak RSS 2,736,275,456 bytes. Native Windows execution remains
+a CI/target-machine check. Evidence and the rejected return prototype are in
+`../quickjs-jit-results/2026-10-08-native-returns`.
+
+The remaining architectural priorities are direct guarded native calls and
+method dispatch, live reference/binding coverage in enclosing reduction and
+squaring loops, and integer register allocation across larger arithmetic
+regions. The current profile still spends substantial time on both generated
+instructions and Go coordination, so improving only one side cannot meet 10x.
+Measure each next step with complete RSA and balanced placements; do not use
+native-entry counts or an isolated limb loop as the acceptance result.
 
 ## Objective and scope
 

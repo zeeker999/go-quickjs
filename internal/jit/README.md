@@ -21,6 +21,16 @@ borrowed array views and cannot resume safely across those callbacks.
 
 ## Boundary contract
 
+The slot-program emitters keep JavaScript numbers in their ordinary floating
+point representation at every exit. Within a checked region they also retain
+ToUint32 results across scalar copies and bitwise operations. Arm64 uses seven
+additional permanent scratch registers for conversion shadows; these contain
+scalar bits only. Immutable operand origins and conservative magnitude bounds
+permit reuse and omission of overflow handling, without changing arithmetic
+rounding or the external entry ABI. External entries, control-flow joins and
+small-budget paths keep the full conversion semantics. See the JIT plan for
+complete Crypto results and first-use costs.
+
 `Loop.Run` performs these operations in order, at most 4096 times per entry:
 
 ```go

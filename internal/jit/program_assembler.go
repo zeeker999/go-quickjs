@@ -25,6 +25,7 @@ type programAssembler struct {
 	fastBodies, fastEntries, tails []int
 	starts                         []bool
 	facts                          [][ir.MaxSlots]int8
+	ranges                         [][ir.MaxSlots]uint8
 	unchanged                      [][ir.MaxSlots]bool
 	origins                        [][ir.MaxSlots]uint16
 	arrayCacheID                   int
@@ -33,6 +34,57 @@ type programAssembler struct {
 	pc                             int
 	exits                          []programExit
 	conversions                    []integerConversion
+	integerOrigin                  int
+}
+
+// R3/AX retain the last ToUint32 result through scalar copies. The origin
+// table follows immutable values across aliases within a checked region.
+func (a *programAssembler) beginInteger(in ir.Instruction) {
+	if !a.fast || a.starts[a.pc] || a.pc > 0 && a.tails[a.pc-1] == 1 {
+		a.integerOrigin = -1
+	}
+	switch in.Op {
+	case ir.Nop:
+	case ir.Binary:
+		if in.Operator < ir.BitAnd || in.Operator > ir.UShr {
+			a.integerOrigin = -1
+		}
+	case ir.Unary:
+		if in.Operator != ir.Int32 && in.Operator != ir.BitNot {
+			a.integerOrigin = -1
+		}
+	case ir.Copy:
+		if in.Left.Slot < 0 {
+			a.integerOrigin = -1
+		}
+	case ir.CopyPair, ir.StoreLoad:
+		if in.Left.Slot < 0 || in.Right.Slot < 0 {
+			a.integerOrigin = -1
+		}
+	default:
+		a.integerOrigin = -1
+	}
+}
+
+func (a *programAssembler) finishInteger(in ir.Instruction) {
+	if a.fast && (in.Op == ir.Binary && in.Operator >= ir.BitAnd && in.Operator <= ir.UShr ||
+		in.Op == ir.Unary && (in.Operator == ir.Int32 || in.Operator == ir.BitNot)) {
+		a.integerOrigin = -1
+		if a.pc+1 < len(a.origins) && !a.starts[a.pc+1] && a.tails[a.pc] != 1 {
+			a.integerOrigin = int(a.origins[a.pc+1][in.Dest])
+		}
+	}
+}
+
+func (a *programAssembler) integerCached(o ir.Operand) bool {
+	if !a.fast || o.Slot < 0 {
+		a.integerOrigin = -1
+		return false
+	}
+	origin := int(a.origins[a.pc][o.Slot])
+	hit := a.integerOrigin == origin
+	a.integerOrigin = origin
+	return hit
 }
 
 type integerConversion struct {
@@ -76,6 +128,7 @@ func (a *programAssembler) regions(p *ir.Program) {
 		}
 	}
 	a.inferKinds(p)
+	a.inferRanges(p)
 }
 
 func (a *programAssembler) target(pc int) int {

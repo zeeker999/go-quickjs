@@ -37,6 +37,7 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 				continue
 			}
 			a.pc = pc
+			a.beginInteger(in)
 			if a.starts[pc] || pc > 0 && a.tails[pc-1] == 1 {
 				a.arrayCacheID = -1
 				a.propertyCacheID = -1
@@ -165,6 +166,7 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 				a.jump(a.returned)
 				continue
 			}
+			a.finishInteger(in)
 			a.commit()
 			if a.tails[pc] == 1 {
 				a.jump(a.fastEntries[pc+1])
@@ -455,11 +457,18 @@ func (a *amd64Program) binary(op ir.Operator, left, right ir.Operand, dest int) 
 // a significand path for large doubles and nonfinite values. R8 and CX survive:
 // they hold the first operand and borrowed views. SSE2 shifts avoid using CL.
 func (a *amd64Program) integer(o ir.Operand) {
+	if a.integerCached(o) {
+		return
+	}
 	if o.Slot < 0 && o.Literal.Kind == ir.Number {
 		a.immediate(0, uint64(ir.ToUint32(math.Float64frombits(o.Literal.Bits))))
 		return
 	}
 	fp := a.number(o, 0)
+	if a.boundedInteger(o) {
+		a.bytes(0xf2, 0x48|fp>>3, 0x0f, 0x2c, 0xc0|fp&7) // cvttsd2si xmm,rax: no overflow possible
+		return
+	}
 	slow, done := a.label(), a.label()
 	a.conversions = append(a.conversions, integerConversion{entry: slow, done: done, fp: uint32(fp)})
 	a.bytes(0xf2, 0x48|fp>>3, 0x0f, 0x2c, 0xc0|fp&7) // cvttsd2si xmm,rax

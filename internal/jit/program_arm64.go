@@ -15,11 +15,13 @@ import (
 // R9 the exit PC, R1 borrowed array views. R16 caches a view within a region.
 // R3-R7 and F0-F1 are scratch; F24 holds tentative index updates. F2-F7 and
 // F16-F23 cache scalar bits, R10-R15 cache the first six kinds. All are
-// spilled on every exit.
+// spilled on every exit. R19-R25 retain integer conversions within a region.
 // SP, FP, LR, R18 and Go's R28 remain untouched; no native calls occur.
 type arm64Program struct {
 	programAssembler
 	guard, budget, returned, host int
+	integerShadows                [7]int
+	integerNext                   int
 }
 
 func programInstructions(p *ir.Program) ([]byte, []int, error) {
@@ -38,6 +40,13 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 				continue
 			}
 			a.pc = pc
+			a.beginInteger(in)
+			if !a.fast || a.starts[pc] || pc > 0 && a.tails[pc-1] == 1 {
+				for i := range a.integerShadows {
+					a.integerShadows[i] = -1
+				}
+				a.integerNext = 0
+			}
 			if a.starts[pc] || pc > 0 && a.tails[pc-1] == 1 {
 				a.arrayCacheID = -1
 				a.propertyCacheID = -1
@@ -183,6 +192,7 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 				a.jump(a.returned)
 				continue
 			}
+			a.finishInteger(in)
 			a.commit()
 			if a.tails[pc] == 1 {
 				a.jump(a.fastEntries[pc+1])
@@ -441,11 +451,28 @@ func (a *arm64Program) binary(op ir.Operator, left, right ir.Operand, dest int) 
 // large values use their IEEE significand modulo 2^32, including NaNs/infinities.
 // R6 and the checked view in R16 survive so a second operand can be converted.
 func (a *arm64Program) integer(o ir.Operand) {
+	if a.integerCached(o) {
+		return
+	}
+	if a.fast && o.Slot >= 0 {
+		origin := int(a.origins[a.pc][o.Slot])
+		for i, cached := range a.integerShadows {
+			if origin == cached {
+				a.word(0x2a0003e3 | uint32(19+i)<<16) // mov w3,wN: retained ToUint32 bits
+				return
+			}
+		}
+	}
 	if o.Slot < 0 && o.Literal.Kind == ir.Number {
 		a.immediate(3, uint64(ir.ToUint32(math.Float64frombits(o.Literal.Bits))))
 		return
 	}
 	fp := a.number(o, 0)
+	if a.boundedInteger(o) {
+		a.word(0x9e780003 | fp<<5) // fcvtzs x3,dN: proved finite and within int64
+		a.retainInteger(o)
+		return
+	}
 	slow, done := a.label(), a.label()
 	a.conversions = append(a.conversions, integerConversion{entry: slow, done: done, fp: fp})
 	a.word(0x9e780003 | fp<<5) // fcvtzs x3,dN
@@ -455,6 +482,17 @@ func (a *arm64Program) integer(o ir.Operand) {
 	a.compareImmediate(4, 0)
 	a.conditional(4, slow) // MI
 	a.mark(done)
+	a.retainInteger(o)
+}
+
+func (a *arm64Program) retainInteger(o ir.Operand) {
+	if !a.fast || o.Slot < 0 {
+		return
+	}
+	i := a.integerNext
+	a.integerShadows[i] = int(a.origins[a.pc][o.Slot])
+	a.integerNext = (i + 1) % len(a.integerShadows)
+	a.word(0x2a0303e0 | uint32(19+i)) // mov wN,w3: shadow scalar bits, never a Go pointer
 }
 
 // Cold conversion blocks stay after the entry/exit code so ordinary integer
