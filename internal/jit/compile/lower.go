@@ -49,8 +49,8 @@ func Lower(fn *bytecode.Function) (*ir.Program, error) {
 // not the slot IR emitters': it reads properties and the receiver in place
 // where the VM's caches know the shape, so it keeps every property
 // operation and the receiver, which Lower keeps only in loops worth a view's
-// preparation; and it leaves global reads and reads of references to Go,
-// which it does not read natively yet.
+// preparation; and it leaves global reads to Go, which it does not read
+// natively yet.
 func LowerSSA(fn *bytecode.Function) (*ir.Program, error) {
 	return lowerRecovered(fn, lowering{ssa: true})
 }
@@ -209,7 +209,7 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 	selectNumericProperties(p)
 	if m.ssa {
 		for pc, in := range p.Code {
-			if in.Op == ir.BindingRead || in.Op == ir.ReferenceRead {
+			if in.Op == ir.BindingRead {
 				p.Code[pc] = ir.Instruction{Op: ir.Host}
 			}
 		}

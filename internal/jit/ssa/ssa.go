@@ -36,10 +36,14 @@ const (
 	// Ptr is an object's address, read from the frame slot that holds it.
 	// It never reaches a slot or crosses an exit.
 	Ptr
+	// Source is where a tagged value came from, at run time: a slot's index,
+	// -1 for a primitive, or the address of the heap cell it was loaded
+	// from, which is at or above abi.MaxRecords (origin.go).
+	Source
 )
 
 func (t Type) String() string {
-	return [...]string{"tagged", "f64", "i32", "bool", "none", "ptr"}[t]
+	return [...]string{"tagged", "f64", "i32", "bool", "none", "ptr", "source"}[t]
 }
 
 // Op is a value's operation.
@@ -49,11 +53,11 @@ const (
 	OpInvalid Op = iota
 
 	// Values.
-	OpLoadSlot // Aux: the slot, read from the frame at an entry.
-	OpConst    // Const: a tagged constant.
-	OpConstF64 // Const.Bits: the number's bits.
-	OpConstI32 // Aux: the integer.
-	OpPhi      // Args: one per predecessor, in Block.Preds order.
+	OpLoadSlot    // Aux: the slot, read from the frame at an entry.
+	OpConst       // Const: a tagged constant.
+	OpConstF64    // Const.Bits: the number's bits.
+	OpConstSource // Aux: a slot's index, or -1: a source (origin.go)
+	OpPhi         // Args: one per predecessor, in Block.Preds order.
 
 	// Guards and checks: each has a frame state and exits to it when it
 	// fails. Aux is the exit kind (ir.GuardExit or ir.HostExit).
@@ -80,6 +84,11 @@ const (
 	OpObjectOf  // tagged -> ptr, if an object
 	OpPropRead  // ptr -> f64: the property, if the shape's and a number
 	OpPropWrite // ptr, f64 -> none: stores, if the shape's and a number
+	// A reference read from an object: the property's cell, found as a read
+	// finds it, and the value there, whatever it is. The value's Shadow is
+	// the cell, which an exit has Go copy from (origin.go).
+	OpPropCell // ptr -> source: the property's value's address
+	OpLoadCell // source -> tagged: the value at a cell
 
 	// Boxing: a typed value as a slot value.
 	OpBoxF64
@@ -110,10 +119,10 @@ const (
 )
 
 var opNames = [...]string{
-	OpInvalid: "invalid", OpLoadSlot: "load", OpConst: "const", OpConstF64: "constf", OpConstI32: "consti", OpPhi: "phi",
+	OpInvalid: "invalid", OpLoadSlot: "load", OpConst: "const", OpConstF64: "constf", OpConstSource: "consts", OpPhi: "phi",
 	OpUnboxF64: "unbox", OpTruth: "truth", OpCheckInit: "checkinit", OpBoxF64: "boxf", OpBoxBool: "boxb",
 	OpArrayOf: "arrayof", OpElemKey: "elemkey", OpElemRead: "elemread", OpElemWrite: "elemwrite", OpArrayLen: "arraylen",
-	OpObjectOf: "objectof", OpPropRead: "propread", OpPropWrite: "propwrite",
+	OpObjectOf: "objectof", OpPropRead: "propread", OpPropWrite: "propwrite", OpPropCell: "propcell", OpLoadCell: "loadcell",
 	OpAddF64: "addf", OpSubF64: "subf", OpMulF64: "mulf", OpDivF64: "divf", OpNegF64: "negf", OpCmpF64: "cmpf",
 	OpNot: "not", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
@@ -130,7 +139,7 @@ func (o Op) String() string {
 func (o Op) isGuard() bool {
 	switch o {
 	case OpUnboxF64, OpTruth, OpCheckInit, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite,
-		OpObjectOf, OpPropRead, OpPropWrite:
+		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell:
 		return true
 	}
 	return false
@@ -140,7 +149,7 @@ func (o Op) isGuard() bool {
 // or properties, which writes change: two of them are not the same guard.
 // (An array's length and an object's shape change only in Go.)
 func (o Op) readsMemory() bool {
-	return o == OpElemRead || o == OpElemWrite || o == OpPropRead || o == OpPropWrite
+	return o == OpElemRead || o == OpElemWrite || o == OpPropRead || o == OpPropWrite || o == OpPropCell
 }
 
 // Value is one SSA value.
@@ -158,8 +167,9 @@ type Value struct {
 	Key   uint32
 	// State is the frame to exit to, for guards.
 	State *FrameState
-	// Shadow is an ambiguous tagged phi's origin at run time: an Int32 phi
-	// holding the slot whose reference it may be, or -1 (origin.go).
+	// Shadow is a tagged value's origin at run time, where no compiler can
+	// name it: an ambiguous phi's is a Source phi; a value loaded from a cell
+	// has the cell (origin.go).
 	Shadow *Value
 	Block  *Block
 	// Uses counts the values, frame states and controls that use this one.

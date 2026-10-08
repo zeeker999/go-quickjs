@@ -314,6 +314,19 @@ for one. Values are numbers; anything else exits to Go. The new pipeline
 lowers functions itself (`jitcompile.LowerSSA`), without the old pipeline's
 rules for when a property view pays for itself.
 
+**References read from objects (P4e).** A reference loaded from an object
+did not come from a slot, so no exit could find it there. Its origin is the
+heap cell it was loaded from: `PropCell` finds the cell, `LoadCell` reads the
+value, and the value's shadow is the cell's address. Shadows are 64-bit
+sources -- a slot's index, -1 for a primitive, or an address, at or above
+`abi.MaxRecords` -- so a phi merging a loaded value with a slot's, as
+`n = n.next` does, carries either at run time. An exit has Go copy from the
+cell, which still holds the reference: native code stores no pointer, and
+nothing else ran. `ObjectOf` reads an object's pointer through a cell as
+through a slot. This relies on Go's heap not moving, outside what
+`unsafe.Pointer`'s rules promise; the user chose it on 2026-10-08 over
+leaving every such read to Go, and `TestJITSSACellsUnderGC` stresses it.
+
 **Kind tests are on the number word, with the VM's encoding passed in.** The
 JIT never imports the VM: the VM passes the encoding as data (`rt.Encoding`).
 - A number is a word whose top 13 bits are not all set.

@@ -115,7 +115,7 @@ type testArray struct {
 	shape  int      // into testShapes, or -1 for none
 	keys   []uint32 // the table's keys, flags and values' number words
 	flags  []uint8
-	props  []uint64
+	props  []ir.Value
 }
 
 func randomTestHeap(r *rand.Rand) testHeap {
@@ -149,11 +149,18 @@ func randomTestHeap(r *rand.Rand) testHeap {
 				a.flags = append(a.flags, testFlags[r.IntN(len(testFlags))])
 			}
 		}
-		a.props = make([]uint64, len(a.keys))
+		a.props = make([]ir.Value, len(a.keys))
 		for j := range a.props {
-			a.props[j] = math.Float64bits(float64(r.IntN(9) - 3))
-			if r.IntN(5) == 0 {
-				a.props[j] = testEncoding.True
+			switch r.IntN(8) {
+			case 0:
+				a.props[j] = ir.Bool(true)
+			case 1, 2:
+				// A reference: to one of the heap's objects, another, or text.
+				a.props[j] = ir.Value{Kind: ir.Opaque, Bits: uint64(r.IntN(6))}
+			case 3:
+				a.props[j] = ir.Value{Kind: ir.String, Bits: 5}
+			default:
+				a.props[j] = ir.Float(float64(r.IntN(9) - 3))
 			}
 		}
 		h[i] = a
@@ -169,14 +176,17 @@ type nativeHeap struct {
 	objects []testObject
 	others  [8]testObject
 	texts   [8]int
-	// evaluated is the objects' property words for the SSA evaluator.
-	evaluated [][]uint64
+	// evaluated is the objects' property values for the SSA evaluator.
+	evaluated [][]ir.Value
 }
 
 func (h testHeap) native() *nativeHeap {
-	n := &nativeHeap{}
-	for _, a := range h {
-		o := testObject{elems: make([]testValue, len(a.cells))}
+	// The objects are made first, at the addresses they keep, so that
+	// properties can refer to them.
+	n := &nativeHeap{objects: make([]testObject, len(h))}
+	for i, a := range h {
+		o := &n.objects[i]
+		o.elems = make([]testValue, len(a.cells))
 		for j, c := range a.cells {
 			o.elems[j].num = c
 		}
@@ -190,10 +200,9 @@ func (h testHeap) native() *nativeHeap {
 			o.shape = testShapes[a.shape].shape
 		}
 		o.props = make([]testProperty, len(a.props))
-		for j, w := range a.props {
-			o.props[j] = testProperty{key: a.keys[j], flags: a.flags[j], value: testValue{num: w}}
+		for j, v := range a.props {
+			o.props[j] = testProperty{key: a.keys[j], flags: a.flags[j], value: n.word(v)}
 		}
-		n.objects = append(n.objects, o)
 		n.evaluated = append(n.evaluated, slices.Clone(a.props))
 	}
 	return n
@@ -246,7 +255,7 @@ func (n *nativeHeap) same(m *nativeHeap) bool {
 			return false
 		}
 		for j, p := range n.objects[i].props {
-			if p.value.num != m.evaluated[i][j] || p.value.ref != nil {
+			if p.value != n.word(m.evaluated[i][j]) {
 				return false
 			}
 		}
@@ -286,9 +295,24 @@ func (n *nativeHeap) word(v ir.Value) testValue {
 }
 
 // referenceExits counts the harness's exit records -- references copied,
-// primitives stored over references, slots known only at run time -- and
-// returned references, so that the test can tell it reaches them.
-var referenceExits struct{ copies, scalars, maybes, returns int }
+// primitives stored over references, sources known only at run time, and
+// among them heap cells -- and returned references, so that the test can
+// tell it reaches them.
+var referenceExits struct{ copies, scalars, maybes, cells, returns int }
+
+// source is the value a run-time source names (origin.go): a slot's, or,
+// at or above abi.MaxRecords, the value at a heap cell's address; nil for a
+// primitive's -1. word holds the source, as native code wrote it.
+func source(word *uint64, at func(int) *testValue) *testValue {
+	switch from := int64(*word); {
+	case from < 0:
+		return nil
+	case from < abi.MaxRecords:
+		return at(int(from))
+	}
+	referenceExits.cells++
+	return *(**testValue)(unsafe.Pointer(word))
+}
 
 // applyRecords does what Go does with an exit's records (abi.Record),
 // checking that each names a slot of the state once.
@@ -314,13 +338,11 @@ func applyRecords(ctx *abi.Context, at func(int) *testValue, slots int) error {
 			referenceExits.scalars++
 		case r.Slot&abi.RecordMaybe != 0:
 			src[i] = testValue{num: r.Word}
-			if from := int32(r.Arg); from >= 0 {
-				if int(from) >= slots {
-					return fmt.Errorf("record %d reads slot %d", i, from)
-				}
-				if at(int(from)).ref != nil {
-					src[i] = *at(int(from))
-				}
+			if from := int64(r.Arg); from >= int64(slots) && from < abi.MaxRecords {
+				return fmt.Errorf("record %d reads slot %d", i, from)
+			}
+			if v := source(&ctx.Record[i].Arg, at); v != nil && v.ref != nil {
+				src[i] = *v
 			}
 			referenceExits.maybes++
 		default:
@@ -393,7 +415,8 @@ func ssaTestProgram(r *rand.Rand) (*ir.Program, layout) {
 	}
 	ops := []ir.Op{ir.Copy, ir.Binary, ir.Binary, ir.Binary, ir.Unary, ir.Update, ir.Update, ir.Branch, ir.Branch,
 		ir.Jump, ir.Swap, ir.CopyPair, ir.StoreLoad, ir.Host, ir.Nop,
-		ir.ArrayRead, ir.ArrayWrite, ir.ArrayLength, ir.ArrayKey, ir.ArrayUpdate, ir.PropertyRead, ir.PropertyWrite}
+		ir.ArrayRead, ir.ArrayWrite, ir.ArrayLength, ir.ArrayKey, ir.ArrayUpdate, ir.PropertyRead, ir.PropertyWrite,
+		ir.ReferenceRead, ir.ReferenceRead}
 	operators := []ir.Operator{ir.Add, ir.Sub, ir.Mul, ir.Div, ir.Lt, ir.Le, ir.Gt, ir.Ge, ir.Eq, ir.Ne,
 		ir.BitAnd, ir.BitOr, ir.BitXor, ir.Shl, ir.Shr, ir.UShr}
 	p := &ir.Program{Locals: locals}
@@ -404,7 +427,7 @@ func ssaTestProgram(r *rand.Rand) (*ir.Program, layout) {
 		switch in.Op {
 		case ir.ArrayRead, ir.ArrayWrite, ir.ArrayLength, ir.ArrayKey:
 			in.Left = ir.Slot(r.IntN(locals))
-		case ir.PropertyRead, ir.PropertyWrite:
+		case ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead:
 			in.Left = ir.Slot(r.IntN(locals))
 			// Mostly a site the VM knows: a key, and sometimes a shape with the
 			// property's index -- plain data, and writable for a write, as the
@@ -555,8 +578,9 @@ func nativeMismatch(c *compiled, pc int, slots []ir.Value, poll int, heap testHe
 	}
 	if got.Kind == ir.Returned {
 		ret := testValue{num: ctx.Ret}
-		if ctx.RetFrom != 0 && at(int(ctx.RetFrom)-1).ref != nil {
-			ret = *at(int(ctx.RetFrom) - 1)
+		from := ctx.RetFrom - 1
+		if v := source(&from, at); v != nil && v.ref != nil {
+			ret = *v
 			referenceExits.returns++
 		}
 		if ret != nh.word(wantExit.Value) {
@@ -700,7 +724,7 @@ func TestSSANativeMatchesEvaluator(t *testing.T) {
 		t.Fatalf("only %d programs compiled", compiled)
 	}
 	t.Logf("%d programs; exits with references: %+v", compiled, referenceExits)
-	if referenceExits.copies == 0 || referenceExits.scalars == 0 || referenceExits.maybes == 0 || referenceExits.returns == 0 {
+	if referenceExits.copies == 0 || referenceExits.scalars == 0 || referenceExits.maybes == 0 || referenceExits.cells == 0 || referenceExits.returns == 0 {
 		t.Fatalf("some kind of record or reference return never happened: %+v", referenceExits)
 	}
 }
@@ -726,7 +750,7 @@ func TestSSANativeCapturedShadow(t *testing.T) {
 		t.Fatalf("compile: %v", err)
 	}
 	defer c.code.Close()
-	if !strings.Contains(c.f.String(), "consti") {
+	if !strings.Contains(c.f.String(), "consts") {
 		t.Fatalf("x has no shadow:\n%s", c.f)
 	}
 	r := rand.New(rand.NewPCG(5, 6))

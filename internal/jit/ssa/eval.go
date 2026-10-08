@@ -46,9 +46,11 @@ var ErrOrigin = errors.New("ssa: a reference is not its origin's")
 type val struct {
 	t ir.Value // Tagged
 	f float64  // Float64
-	i uint32   // Int32, as bits
+	i uint32   // Int32, as bits; Source, a slot's index or -1
 	p int      // Ptr: the array view's index
-	b bool     // Bool
+	// cell is a Source that is a heap cell, which an object's table holds.
+	cell *ir.Value
+	b    bool // Bool
 }
 
 // apply computes a pure, non-guard op. It is the definition of each op's
@@ -156,14 +158,14 @@ type Heap struct {
 // Object is an object as property operations see it: its shape, whether it
 // is an ordinary object whose table may be searched, and its table: each
 // entry's key, whether it is plain data and plain writable data, and its
-// value's number word.
+// value.
 type Object struct {
 	Shape    uintptr
 	Ordinary bool
 	Keys     []uint32
 	Data     []bool
 	Writable []bool
-	Props    []uint64
+	Props    []ir.Value
 }
 
 // maxScan is abi.MaxScan.
@@ -220,7 +222,11 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 		}
 		o := origin[v]
 		if v.Shadow != nil {
-			o = int(int32(vals[v.Shadow.ID].i))
+			s := vals[v.Shadow.ID]
+			if s.cell != nil {
+				return *s.cell == x
+			}
+			o = int(int32(s.i))
 		}
 		return o >= 0 && o < len(slots) && slots[o] == x
 	}
@@ -270,7 +276,7 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 				vals[v.ID] = val{t: v.Const}
 			case OpConstF64:
 				vals[v.ID] = val{f: math.Float64frombits(v.Const.Bits)}
-			case OpConstI32:
+			case OpConstSource:
 				vals[v.ID] = val{i: uint32(int32(v.Aux))}
 			case OpUnboxF64:
 				if a.t.Kind != ir.Number {
@@ -318,18 +324,27 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 			case OpPropRead, OpPropWrite:
 				o := &heap.Objects[a.p]
 				i := o.property(v)
-				if i < 0 || i >= len(o.Props) || o.Props[i] >= numberLimit {
+				if i < 0 || i >= len(o.Props) || o.Props[i].Kind != ir.Number {
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
 				if v.Op == OpPropRead {
-					vals[v.ID] = val{f: math.Float64frombits(o.Props[i])}
+					vals[v.ID] = val{f: math.Float64frombits(o.Props[i].Bits)}
 					break
 				}
 				bits := math.Float64bits(b.f)
 				if math.IsNaN(math.Float64frombits(bits)) {
 					bits = canonicalNaN
 				}
-				o.Props[i] = bits
+				o.Props[i] = ir.Value{Kind: ir.Number, Bits: bits}
+			case OpPropCell:
+				o := &heap.Objects[a.p]
+				i := o.property(v)
+				if i < 0 || i >= len(o.Props) {
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
+				vals[v.ID] = val{cell: &o.Props[i]}
+			case OpLoadCell:
+				vals[v.ID] = val{t: *a.cell}
 			case OpCheckInit:
 				if a.t.Kind == ir.Uninitialized {
 					return exit(v.State, ir.ExitKind(v.Aux))

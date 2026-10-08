@@ -68,7 +68,7 @@ type builder struct {
 
 // property is the feedback for a property operation at pc, if any.
 func (b *builder) property(pc int) (PropertySite, bool) {
-	if op := b.p.Code[pc].Op; b.fb == nil || op != ir.PropertyRead && op != ir.PropertyWrite {
+	if op := b.p.Code[pc].Op; b.fb == nil || op != ir.PropertyRead && op != ir.PropertyWrite && op != ir.ReferenceRead {
 		return PropertySite{}, false
 	}
 	return b.fb.Property(pc)
@@ -80,7 +80,7 @@ func (b *builder) host(pc int) bool {
 	switch b.p.Code[pc].Op {
 	case ir.Host, ir.Call:
 		return true
-	case ir.PropertyRead, ir.PropertyWrite:
+	case ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead:
 		_, ok := b.property(pc)
 		return !ok
 	}
@@ -103,7 +103,7 @@ func (b *builder) plan() error {
 		switch in.Op {
 		case ir.Nop, ir.Copy, ir.CopyPair, ir.StoreLoad, ir.Swap, ir.Insert2, ir.Insert3,
 			ir.Unary, ir.Update, ir.Return, ir.ArrayRead, ir.ArrayUpdate, ir.ArrayLength, ir.ArrayKey:
-		case ir.ArrayWrite, ir.PropertyRead, ir.PropertyWrite:
+		case ir.ArrayWrite, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead:
 			// What native code does not do exits to Go, which resumes after
 			// it.
 			entries[pc+1] = true
@@ -185,7 +185,7 @@ func (b *builder) plan() error {
 			}
 		case ir.Return:
 			blk.Kind = BlockReturn
-		case ir.Host, ir.Call, ir.PropertyRead, ir.PropertyWrite:
+		case ir.Host, ir.Call, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead:
 			if !b.host(end) {
 				blk.Kind = BlockPlain
 				b.edge(blk, b.blockAt[end+1])
@@ -595,7 +595,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 		array := guard(OpArrayOf, Ptr, ir.HostExit, operand(in.Left))
 		key, value := number(in.Right, ir.HostExit), number(in.Third, ir.HostExit)
 		guard(OpElemWrite, None, ir.HostExit, array, key, value)
-	case ir.PropertyRead, ir.PropertyWrite:
+	case ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead:
 		site, ok := b.property(pc)
 		if !ok {
 			blk.ExitKind = ir.HostExit
@@ -604,6 +604,14 @@ func (b *builder) instruction(blk *Block, pc int) {
 			break
 		}
 		object := guard(OpObjectOf, Ptr, ir.HostExit, operand(in.Left))
+		if in.Op == ir.ReferenceRead {
+			cell := guard(OpPropCell, Source, ir.HostExit, object)
+			cell.Const, cell.Index, cell.Key = ir.Value{Bits: uint64(site.Shape)}, int(site.Index), site.Key
+			v := f.newValue(blk, OpLoadCell, Tagged, cell)
+			v.Shadow = cell
+			b.assign(in.Dest, blk, v)
+			break
+		}
 		if in.Op == ir.PropertyRead {
 			v := guard(OpPropRead, Float64, ir.HostExit, object)
 			v.Const, v.Index, v.Key = ir.Value{Bits: uint64(site.Shape)}, int(site.Index), site.Key
