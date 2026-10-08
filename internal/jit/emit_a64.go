@@ -1,4 +1,4 @@
-//go:build quickjs_jit && !android && !ios && darwin
+//go:build quickjs_jit && !android && !ios && ((linux && amd64) || (windows && amd64) || (darwin && arm64))
 
 package jit
 
@@ -24,7 +24,7 @@ type arm64Program struct {
 	integerNext                   int
 }
 
-func programInstructions(p *ir.Program) ([]byte, []int, error) {
+func arm64Instructions(p *ir.Program) ([]byte, []int, error) {
 	a := &arm64Program{}
 	a.allocateRegisters(p, []int{2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23})
 	for range p.Code {

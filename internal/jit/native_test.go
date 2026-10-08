@@ -112,3 +112,19 @@ func TestNativeEmitPanicRefuses(t *testing.T) {
 		t.Fatalf("Compile after an emitter panic = %v, %v; want nil, ErrProgram", c, err)
 	}
 }
+
+// memory cannot encode RSP or R12 as a base without a SIB byte, so it refuses
+// them instead of emitting a different instruction.
+func TestAMD64MemoryBaseNeedsNoSIB(t *testing.T) {
+	for _, base := range []byte{4, 12} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("base %d encoded without a SIB byte", base)
+				}
+			}()
+			(&amd64Program{}).memory(0x8b, 0, base, 8)
+		}()
+	}
+	(&amd64Program{}).memory(0x8b, 0, 13, 8) // R13 needs none with a displacement
+}

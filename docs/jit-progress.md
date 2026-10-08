@@ -63,7 +63,7 @@ across sessions. Update it **in the same commit** as the work it records.
 | V1 | Stress knobs, internal only: `QJS_JIT_STRESS=threshold,budget=N,deopt=N` (compile on the first call; return to Go every N native instructions; finish in the interpreter at every Nth return, from wherever native code got to). `TestJITStressDifferential` runs a corpus under five settings against the JIT off. | done | jit: stress mode and native coverage in test262 |
 | V2 | `-conformance.jit` reports per area how many tests ran natively, and fails a JIT build in which none did (per-area failure was too strict: Intl areas rarely compile). Counters come from `vm.Runtime.JITStats` through `hostaccess`. | done | jit: stress mode and native coverage in test262 |
 | V3 | JavaScript differential fuzzer: interpreter vs tree vs stress JIT, comparing result, error and an effect log | todo | |
-| V4 | Encoder golden tests and a register-discipline check (`x/arch`, nested test module) | todo | |
+| V4 | `internal/jit/verify`, a module of its own, disassembles every program both emitters make from a JavaScript corpus and 3,000 random IR programs with `x/arch` (v0.22.0, Go 1.24): each must decode in full, with no call, push, pop, system call or trap, and no use of Go's reserved registers. Both emitters now build on every supported target (`emit_x86.go`, `emit_a64.go`), so arm64 is checked off macOS. Per-instruction golden tests remain for Phase 2's encoders. | done | jit: check both emitters against a disassembler on every target |
 | V5 | CI: stress test262 on linux/amd64, windows/amd64 and macos/arm64; the fuzzer; Go 1.24 and the newest Go | todo | |
 | V6 | Measure the helper round trip and region-entry cost per architecture | todo | |
 
