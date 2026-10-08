@@ -72,8 +72,8 @@ across sessions. Update it **in the same commit** as the work it records.
   under four settings. Linux and macOS need the `jit-conformance` CI job, so
   the branch must be pushed first.
 - [ ] Fuzzer runs 24 hours with no divergence. Started 2026-10-08 as a
-  detached process (6 workers, coverage-instrumented binary). Log:
-  `D:/Data/quickjs-jit-results/2026-10-08-review/fuzz-24h.log`; a failing
+  detached process (6 workers, coverage-instrumented binary). Progress goes to
+  `D:/Data/quickjs-jit-results/2026-10-08-review/fuzz-24h.err` (stderr); a failing
   input lands in `fuzzwork/testdata/fuzz/FuzzJITDifferential/` beside it.
   Before that: 15 minutes in two runs, 700,000 programs, no divergence.
 - [x] Round-trip costs published (amd64; arm64 waits for a Mac or the macOS
@@ -86,7 +86,7 @@ Design: [jit-phase2-design.md](jit-phase2-design.md). P2 gates the rest.
 | ID | Item | Status | Commit |
 |---|---|---|---|
 | P1 | `internal/jit/ssa`: types, builder (Braun et al.) from the slot IR, evaluator, Phase 2 passes, for the numeric subset (copies, stack shuffles, every arithmetic, bitwise and comparison operator, updates, branches, TDZ checks, returns; host operations as exits). Arrays, properties, strings and calls are refused until P4. 3,000 random programs and a JavaScript corpus match the slot IR on 172,809 comparisons, built and optimized, with and without polls. | done (numeric subset) | jit: build typed SSA from the slot IR |
-| P2 | Walking skeleton on amd64: `mir` selection and allocation, `asm/amd64`, `rt` (context block, native stack, entry/exit/resume; Return, Deopt, Poll), the VM running a numeric loop through it. Gate: bare round trip 15 ns or less, helper round trip 25 ns or less, sum loop at least as fast as the old pipeline | todo | |
+| P2 | Walking skeleton on amd64 (P2a `asm/amd64` with golden tests: done). `mir` selection and allocation, `rt` (context block, native stack, entry/exit/resume; Return, Deopt, Poll), the VM running a numeric loop through it. Gate: bare round trip 15 ns or less, helper round trip 25 ns or less, sum loop at least as fast as the old pipeline | todo | |
 | P3 | The skeleton on arm64, measured on a Mac or the macOS runner | todo | |
 | P4 | Coverage: every slot-IR operation built; stress corpus and fuzzer pass on the new pipeline | todo | |
 | P5 | Helpers: contained and reentrant, re-validation, generation counter; `%` and Go calls no slower than the tree tier | todo | |
