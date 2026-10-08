@@ -243,12 +243,18 @@ func TestMirEmitted(t *testing.T) {
 			return false
 		}
 		ssa.Optimize(f)
-		mc, err := mir.CompileAMD64(f, enc)
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		if err := check("amd64", mc.Bytes); err != nil {
-			t.Fatalf("%s: %v", name, err)
+		for _, arch := range arches {
+			compile := mir.CompileAMD64
+			if arch == "arm64" {
+				compile = mir.CompileARM64
+			}
+			mc, err := compile(f, enc)
+			if err != nil {
+				t.Fatalf("%s, %s: %v", name, arch, err)
+			}
+			if err := check(arch, mc.Bytes); err != nil {
+				t.Fatalf("%s, %s: %v", name, arch, err)
+			}
 		}
 		return true
 	}

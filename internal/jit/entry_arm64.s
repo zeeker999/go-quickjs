@@ -9,6 +9,14 @@ TEXT ·enterProgram(SB), NOSPLIT|NOFRAME, $0-32
 	MOVD arrays+24(FP), R1
 	JMP (R16)
 
+// enterSSA tail-jumps to a function compiled by the new pipeline, with the
+// context block in R0. The code returns through the link register directly
+// to enterSSA's Go caller.
+TEXT ·enterSSA(SB), NOSPLIT|NOFRAME, $0-16
+	MOVD code+0(FP), R16
+	MOVD ctx+8(FP), R0
+	JMP (R16)
+
 // Darwin's data caches are coherent and its instruction maintenance granule
 // is 64 bytes. Reading CTR_EL0 traps on Apple Silicon. A barrier after each
 // invalidation also covers CPUs requiring periodic barriers during a sweep.
