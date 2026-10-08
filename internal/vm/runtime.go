@@ -26,6 +26,7 @@ type Runtime struct {
 	// belongs to, or the one the host is evaluating in. Its fields are
 	// promoted, so r.proto and r.global are the current realm's.
 	*Realm
+	jitFields
 
 	atoms *atomTable
 
@@ -450,6 +451,7 @@ type Realm struct {
 	// when the object names no species of its own.
 	arrayBufferCtor *Object
 	typedArrayProto *Object
+	jitRealmFields
 	// templateCache keeps the object identity that tagged templates require:
 	// the same template site must hand the same strings array to its tag on
 	// every evaluation.
@@ -549,6 +551,7 @@ type closure struct {
 	// environment for module code -- which inherits from the global object, so
 	// the prototype chain performs the scope lookup.
 	env *Object
+	jitClosureFields
 	// pureMiss counts the calls pureCall gave up on, for a body LeafPure
 	// marks: past pureMissLimit it is not tried.
 	pureMiss uint8
@@ -982,6 +985,7 @@ func (r *Runtime) ReleaseClosed() {
 		return
 	}
 	r.releaseAllWeakMaps()
+	r.releaseJIT()
 	if r.stack == nil {
 		return
 	}

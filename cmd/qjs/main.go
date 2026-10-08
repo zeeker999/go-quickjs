@@ -96,6 +96,7 @@ type options struct {
 
 	// sourceMaps is --enable-source-maps.
 	sourceMaps bool
+	jit        bool
 }
 
 func run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -216,6 +217,9 @@ func run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // files, as node does: the program's, and each of its workers'.
 func newRuntime(opts *options) (*quickjs.Runtime, error) {
 	rtOpts := []quickjs.Option{}
+	if opts.jit {
+		rtOpts = append(rtOpts, quickjs.WithJIT())
+	}
 	if opts.memoryLimit > 0 {
 		rtOpts = append(rtOpts, quickjs.WithMemoryLimit(opts.memoryLimit))
 	}
@@ -1251,6 +1255,8 @@ func parseArgs(argv []string, stdout io.Writer) (*options, error) {
 			opts.timeout = d
 		case "--no-code-generation":
 			opts.noCodegen = true
+		case "--jit":
+			opts.jit = true
 		case "--node-quirks":
 			opts.nodeQuirks = true
 		case "--enable-source-maps":
@@ -1360,6 +1366,7 @@ bounds:
       --memory-limit N    stop the script at N bytes (64m, 1g)
       --stack-size N      value slots for all call frames
       --timeout D         stop after a duration such as 5s
+      --jit               enable the optional native numeric tier (quickjs_jit build)
       --no-code-generation   remove eval and the Function constructor
 
 compatibility:

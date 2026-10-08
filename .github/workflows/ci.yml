@@ -93,6 +93,37 @@ jobs:
       - name: Run tests
         run: go test -count=1 ./...
 
+  native-boundary:
+    name: Native boundary (${{ matrix.os }}, Go ${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-15]
+        go: ["1.24", "1.27"]
+    env:
+      CGO_ENABLED: "0"
+      QUICKJS_REQUIRE_JIT: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: Check native code and assembly
+        run: go vet -tags quickjs_jit ./internal/jit/... ./internal/vm
+
+      - name: Exercise native execution
+        run: go test -tags quickjs_jit -count=1 -timeout=5m ./internal/jit/... ./internal/vm . -run 'JIT|Native|Program|Loop|Validate|Lower'
+
+      - name: Check native pointer lifetimes
+        run: go test -tags quickjs_jit -gcflags=all=-d=checkptr=2 -count=1 -timeout=5m ./internal/jit/... ./internal/vm . -run 'JIT|Native|Program|Loop|Validate|Lower'
+
   race:
     name: Race detector
     runs-on: ubuntu-latest
