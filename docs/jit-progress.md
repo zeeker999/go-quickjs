@@ -68,9 +68,16 @@ across sessions. Update it **in the same commit** as the work it records.
 | V6 | Round trips measured on amd64 (`BenchmarkNativeRoundTrip`, `BenchmarkJITHostRoundTrip`): a bare entry and exit costs 23.7 ns (D7's target is 15 ns or less); a host exit as the VM takes one today costs 43 ns for `%` and 114 ns for a Go call, against 7 and 30 ns in the tree tier. arm64 is still to measure on a Mac. | done | jit: measure what a return to Go costs |
 
 **Gate:**
-- [ ] Stress test262 passes on all three platforms.
-- [ ] Fuzzer runs 24 hours with no divergence.
-- [ ] Round-trip costs published.
+- [ ] Stress test262 passes on all three platforms. Windows/amd64 passes locally
+  under four settings. Linux and macOS need the `jit-conformance` CI job, so
+  the branch must be pushed first.
+- [ ] Fuzzer runs 24 hours with no divergence. Started 2026-10-08 as a
+  detached process (6 workers, coverage-instrumented binary). Log:
+  `D:/Data/quickjs-jit-results/2026-10-08-review/fuzz-24h.log`; a failing
+  input lands in `fuzzwork/testdata/fuzz/FuzzJITDifferential/` beside it.
+  Before that: 15 minutes in two runs, 700,000 programs, no divergence.
+- [x] Round-trip costs published (amd64; arm64 waits for a Mac or the macOS
+  runner).
 
 ## Phase 2: the new pipeline at parity
 
