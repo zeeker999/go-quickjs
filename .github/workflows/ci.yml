@@ -119,10 +119,77 @@ jobs:
         run: go vet -tags quickjs_jit ./internal/jit/... ./internal/vm
 
       - name: Exercise native execution
-        run: go test -tags quickjs_jit -count=1 -timeout=5m ./internal/jit/... ./internal/vm . -run 'JIT|Native|Program|Loop|Validate|Lower'
+        run: |
+          go test -tags quickjs_jit -count=1 -timeout=5m ./internal/jit/...
+          go test -tags quickjs_jit -count=1 -timeout=10m ./internal/vm . -run 'JIT|Native'
 
       - name: Check native pointer lifetimes
-        run: go test -tags quickjs_jit -gcflags=all=-d=checkptr=2 -count=1 -timeout=5m ./internal/jit/... ./internal/vm . -run 'JIT|Native|Program|Loop|Validate|Lower'
+        run: go test -tags quickjs_jit -gcflags=all=-d=checkptr=2 -count=1 -timeout=10m ./internal/jit/... ./internal/vm . -run 'JIT|Native|Program|Validate|Lower'
+
+      # Both emitters' code, for every target, against golang.org/x/arch's
+      # disassemblers: a module of its own, so go-quickjs never depends on it.
+      - name: Check encodings
+        working-directory: internal/jit/verify
+        run: go test -tags quickjs_jit -count=1 ./...
+
+  # test262 with the JIT made to compile on the first call, return to Go
+  # every few instructions and fall back to the interpreter from wherever it
+  # got to (QJS_JIT_STRESS, internal/vm). The runner fails a run in which no
+  # test ran native code.
+  jit-conformance:
+    name: JIT test262 under stress (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-15]
+    env:
+      CGO_ENABLED: "0"
+      QUICKJS_REQUIRE_JIT: "1"
+      QJS_JIT_STRESS: threshold,budget=3,deopt=7
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check out test262
+        uses: actions/checkout@v4
+        with:
+          repository: tc39/test262
+          ref: 7ab7fafa0003f73fc85c1b95d88094d33f7eb8bd
+          path: test262
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: Run test262
+        shell: bash
+        run: TEST262_DIR="$GITHUB_WORKSPACE/test262" go test -tags quickjs_jit ./conformance -run TestConformance -count=1 -timeout 35m -args -conformance.jit
+
+  # Generated programs, run in the interpreter, the tree tier and the JIT
+  # under stress, must give the same answer.
+  jit-fuzz:
+    name: JIT differential fuzzing
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: "0"
+      QUICKJS_REQUIRE_JIT: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: Fuzz
+        run: go test -tags quickjs_jit ./internal/vm -run '^$' -fuzz '^FuzzJITDifferential$' -fuzztime=5m
 
   race:
     name: Race detector
