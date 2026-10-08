@@ -86,6 +86,7 @@ func Lower(fn *bytecode.Function) (*ir.Program, error) {
 			raw = in.A >> 24
 		}
 		op, _ := operator(raw)
+		host = host || raw == uint32(bytecode.OpMod)
 		bitwise = bitwise || op >= ir.BitAnd && op <= ir.UShr || in.Op == bytecode.OpBitNot
 		loop = loop || e.branch && int(in.A) <= pc
 		indexed = indexed || in.Op == bytecode.OpGetIndex || in.Op == bytecode.OpSetIndex || in.Op == bytecode.OpGetLocalIndex || in.Op == bytecode.OpGetLocalIndexUpdate
@@ -260,7 +261,7 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 	case bytecode.OpDrop:
 		return effect{need: 1, delta: -1}, nil
 	case bytecode.OpBitAnd, bytecode.OpBitOr, bytecode.OpBitXor, bytecode.OpShl, bytecode.OpShr, bytecode.OpUShr,
-		bytecode.OpAdd, bytecode.OpSub, bytecode.OpMul, bytecode.OpDiv,
+		bytecode.OpAdd, bytecode.OpSub, bytecode.OpMul, bytecode.OpDiv, bytecode.OpMod,
 		bytecode.OpLt, bytecode.OpLe, bytecode.OpGt, bytecode.OpGe,
 		bytecode.OpEq, bytecode.OpNe, bytecode.OpStrictEq, bytecode.OpStrictNe:
 		return effect{need: 2, delta: -1}, nil
@@ -280,7 +281,7 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 			raw = in.A >> 24
 		}
 		op, ok := operator(raw)
-		if !ok || op > ir.Mul && (op < ir.BitAnd || op > ir.UShr) {
+		if raw != uint32(bytecode.OpMod) && (!ok || op > ir.Mul && (op < ir.BitAnd || op > ir.UShr)) {
 			return bad("unsupported fused arithmetic operator")
 		}
 		if in.Op == bytecode.OpLocalBinImm {
@@ -379,7 +380,7 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int) ir.Instruction {
 		return ir.Instruction{Op: ir.Insert2, Dest: sp - 2}
 	case bytecode.OpInsert3:
 		return ir.Instruction{Op: ir.Insert3, Dest: sp - 3}
-	case bytecode.OpCall, bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpGetPropThis, bytecode.OpPushThis, bytecode.OpGetProp, bytecode.OpSetProp:
+	case bytecode.OpCall, bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpGetPropThis, bytecode.OpPushThis, bytecode.OpGetProp, bytecode.OpSetProp, bytecode.OpMod:
 		return ir.Instruction{Op: ir.Host}
 	case bytecode.OpPushConst:
 		return copyTo(sp, ir.Literal(ir.Float(fn.Constants[in.A].Num)))
@@ -425,15 +426,24 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int) ir.Instruction {
 		op, _ := operator(uint32(in.Op))
 		return ir.Instruction{Op: ir.Binary, Operator: op, Dest: sp - 2, Left: ir.Slot(sp - 2), Right: top}
 	case bytecode.OpBinLocal:
+		if in.B == uint32(bytecode.OpMod) {
+			return ir.Instruction{Op: ir.Host}
+		}
 		op, _ := operator(in.B)
 		return ir.Instruction{Op: ir.Binary, Operator: op, Dest: sp - 1, Left: top, Right: ir.Slot(int(in.A))}
 	case bytecode.OpBinImm:
+		if in.B == uint32(bytecode.OpMod) {
+			return ir.Instruction{Op: ir.Host}
+		}
 		if in.B == uint32(bytecode.OpBitOr) && in.A == 0 {
 			return ir.Instruction{Op: ir.Unary, Operator: ir.Int32, Left: top, Dest: sp - 1}
 		}
 		op, _ := operator(in.B)
 		return ir.Instruction{Op: ir.Binary, Operator: op, Dest: sp - 1, Left: top, Right: number(int32(in.A))}
 	case bytecode.OpLocalBinImm:
+		if in.A>>24 == uint32(bytecode.OpMod) {
+			return ir.Instruction{Op: ir.Host}
+		}
 		if in.A>>24 == uint32(bytecode.OpBitOr) && in.B == 0 {
 			return ir.Instruction{Op: ir.Unary, Operator: ir.Int32, Left: ir.Slot(int(in.A & (1<<24 - 1))), Dest: sp}
 		}

@@ -152,8 +152,8 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 				continue
 			case ir.Return:
 				a.load(in.Left, 0, 2)
-				a.bytes(0x48, 0x83, 0xfa, byte(ir.Null))
-				a.conditional(7, a.guard) // opaque/uninitialized are not primitive returns
+				a.bytes(0x48, 0x83, 0xfa, byte(ir.Uninitialized))
+				a.conditional(4, a.guard)
 				a.memory(0x89, 0, 7, 24)
 				a.memory(0x89, 2, 7, 32)
 				a.commit()
@@ -407,8 +407,13 @@ func (a *amd64Program) binary(op ir.Operator, left, right ir.Operand, dest int) 
 	if op >= ir.BitAnd && op <= ir.UShr {
 		return a.bitwise(op, left, right)
 	}
+	guard := a.guard
+	if op == ir.Eq || op == ir.Ne {
+		a.guard = a.host
+	}
 	l := a.number(left, 0)
 	r := a.number(right, 1)
+	a.guard = guard
 	if op <= ir.Div {
 		fp := byte(0)
 		if reg := a.registers[dest]; reg >= 0 {
@@ -585,6 +590,11 @@ func (a *amd64Program) truth(o ir.Operand) {
 }
 
 func (a *amd64Program) array(in ir.Instruction) {
+	if in.Op == ir.ArrayWrite {
+		guard := a.guard
+		a.guard = a.host
+		defer func() { a.guard = guard }()
+	}
 	if a.arrayCached(in.Left) {
 		a.move(8, 11)
 		a.memory(0x8b, 9, 8, 24)
@@ -599,7 +609,8 @@ func (a *amd64Program) array(in ir.Instruction) {
 		a.bytes(0x49, 0x81, 0xf8)
 		a.word(ir.MaxSlots)
 		a.conditional(3, a.guard)                      // JAE
-		a.bytes(0x49, 0xc1, 0xe0, 5, 0x49, 0x01, 0xc8) // shlq $5,r8; addq cx,r8
+		a.bytes(0x4f, 0x8d, 0x04, 0x80)                // lea (r8,r8,4),r8
+		a.bytes(0x49, 0xc1, 0xe0, 3, 0x49, 0x01, 0xc8) // 40-byte view
 		a.memory(0x8b, 9, 8, 24)
 		a.bytes(0x4d, 0x85, 0xc9)
 		a.conditional(4, a.guard)
@@ -612,6 +623,10 @@ func (a *amd64Program) array(in ir.Instruction) {
 		a.bytes(0xf2, 0x48, 0x0f, 0x2a, 0xc0) // cvtsi2sd ax,x0
 		a.storeNumber(in.Dest, 0)
 		return
+	}
+	if in.Op == ir.ArrayWrite {
+		a.memory(0x8b, 2, 8, 32)
+		a.bytes(0x66, 0x4c, 0x0f, 0x6e, 0xfa) // movq dx,x15
 	}
 	fp := a.number(in.Right, 0)
 	if in.Op == ir.ArrayUpdate {
@@ -647,7 +662,16 @@ func (a *amd64Program) array(in ir.Instruction) {
 	a.bytes(0x48, 0xc1, 0xe0, 4, 0x49, 0x01, 0xc0)
 	a.memory(0x8b, 0, 8, 0)
 	a.bytes(0x4c, 0x39, 0xc8)
-	a.conditional(3, a.guard)
+	if in.Op == ir.ArrayWrite {
+		numeric := a.label()
+		a.conditional(2, numeric)             // JB
+		a.bytes(0x66, 0x4c, 0x0f, 0x7e, 0xfa) // movq x15,dx
+		a.bytes(0x48, 0x39, 0xd0)
+		a.conditional(5, a.guard)
+		a.mark(numeric)
+	} else {
+		a.conditional(3, a.guard)
+	}
 	if in.Op == ir.ArrayWrite {
 		fp = a.number(in.Third, 0)
 		a.fpBinary(0x66, 0x2e, fp, fp)

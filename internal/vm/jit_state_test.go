@@ -274,20 +274,21 @@ func TestJITGuardErrors(t *testing.T) {
 	}
 }
 
-func TestJITGuardFusedInstructions(t *testing.T) {
+func TestJITFusedInstructionExits(t *testing.T) {
 	for _, tc := range []struct {
 		name, source string
 		arg, want    Value
 		op           bytecode.Op
 		depth        int
+		kind         ir.ExitKind
 	}{
-		{"local-immediate", `function f(a) { let b=0; b++; return (a+1)+b }`, Str(NewString("x")), Str(NewString("x11")), bytecode.OpLocalBinImm, 0},
-		{"binary-local", `function f(a) { let b=1; return b*2+a }`, Str(NewString("x")), Str(NewString("2x")), bytecode.OpBinLocal, 1},
-		{"postfix", `function f(a) { let b=0; b++; return a++ + b }`, Str(NewString("2")), Int32(3), bytecode.OpUpdateLocal, 0},
-		{"comparison-branch", `function f(a) { let b=0; b++; if(a<3) return b; return b+2 }`, Str(NewString("2")), Int32(1), bytecode.OpJumpIfCmpFalse, 2},
-		{"short-circuit", `function f(a) { return a && 7 }`, Str(NewString("")), Str(NewString("")), bytecode.OpJumpIfFalseKeep, 1},
-		{"boolean-equality", `function f(a) { return a===true }`, True, True, bytecode.OpStrictEq, 2},
-		{"opaque-return", `function f(a) { let b=a; return b }`, Str(NewString("kept")), Str(NewString("kept")), bytecode.OpReturn, 1},
+		{"local-immediate", `function f(a) { let b=0; b++; return (a+1)+b }`, Str(NewString("x")), Str(NewString("x11")), bytecode.OpLocalBinImm, 0, ir.GuardExit},
+		{"binary-local", `function f(a) { let b=1; return b*2+a }`, Str(NewString("x")), Str(NewString("2x")), bytecode.OpBinLocal, 1, ir.GuardExit},
+		{"postfix", `function f(a) { let b=0; b++; return a++ + b }`, Str(NewString("2")), Int32(3), bytecode.OpUpdateLocal, 0, ir.GuardExit},
+		{"comparison-branch", `function f(a) { let b=0; b++; if(a<3) return b; return b+2 }`, Str(NewString("2")), Int32(1), bytecode.OpJumpIfCmpFalse, 2, ir.GuardExit},
+		{"short-circuit", `function f(a) { return a && 7 }`, Str(NewString("")), Str(NewString("")), bytecode.OpJumpIfFalseKeep, 1, ir.GuardExit},
+		{"boolean-equality", `function f(a) { return a===true }`, True, True, bytecode.OpStrictEq, 2, ir.HostExit},
+		{"opaque-return", `function f(a) { let b=a; return b }`, Str(NewString("kept")), Str(NewString("kept")), bytecode.OpReturn, 1, ir.Returned},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fn := jitFunctionForTest(t, tc.source)
@@ -298,12 +299,15 @@ func TestJITGuardFusedInstructions(t *testing.T) {
 			evaluate := jitEvaluatorForTest(t, p)
 			slots, roots := jitInitialForTest(p, []Value{tc.arg})
 			exit, err := evaluate(slots, 0, 1000)
-			if err != nil || exit.Kind != ir.GuardExit || exit.State.Depth != tc.depth || fn.Code[exit.State.PC].Op != tc.op {
-				t.Fatalf("guard = %+v, %v; want %s at depth %d\n%s", exit, err, tc.op, tc.depth, fn.Disassemble())
+			if err != nil || exit.Kind != tc.kind || exit.State.Depth != tc.depth || fn.Code[exit.State.PC].Op != tc.op {
+				t.Fatalf("exit = %+v, %v; want kind %v at %s depth %d\n%s", exit, err, tc.kind, tc.op, tc.depth, fn.Disassemble())
 			}
 			r := New(Config{})
 			defer r.Close()
-			got, err := jitResumeForTest(r, fn, slots, roots, exit.State)
+			got := jitDecodeForTest(exit.Value, roots)
+			if exit.Kind != ir.Returned {
+				got, err = jitResumeForTest(r, fn, slots, roots, exit.State)
+			}
 			if err != nil || !jitSameValueForTest(got, tc.want) {
 				t.Fatalf("resumed value = %v, %v; want %v", got, err, tc.want)
 			}

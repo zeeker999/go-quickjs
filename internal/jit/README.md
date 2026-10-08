@@ -131,13 +131,14 @@ Windows/arm64 and Linux/386 also compiled successfully.
 
 `compile.Lower` accepts a conservative numeric subset of the VM's bytecode:
 locals, primitive constants, stack copies, arithmetic, numeric comparisons,
-branches, increments/decrements, and primitive returns. It handles fused local,
+branches, increments/decrements, and rooted reference returns. It handles fused local,
 immediate, and comparison instructions without exposing half-completed bytecode
 operations. It also accepts read-only captured bindings, dense numeric array
 access, length reads, fused index updates, assignment-result insertion, and
 numeric bitwise operations over the full double domain. Ordinary calls, method
 calls, receiver loads, global reads, property reads and writes, and method
-lookups exit to Go and resume native execution.
+lookups exit to Go and resume native execution. Remainder, including fused
+operands, and nonnumeric equality also use resumable Go boundaries.
 Host-backed functions need a loop or indexed work to qualify; small wrappers
 without that work retain the existing tiers. The new receiver/property coverage
 also requires indexed or bitwise work: tree execution is faster for the
@@ -222,16 +223,22 @@ middle uses the generic path until reaching a region boundary. No unchecked
 facts or cached view can leak across entry, branch joins, or callbacks.
 Every exit spills the registers before returning to Go.
 
-An array handle indexes a separate, typed table of 32-byte borrowed views. Each
+An array handle indexes a separate, typed table of 40-byte borrowed views. Each
 view roots dense Go storage and records its dense length, JavaScript length,
-and numeric tag boundary. Only ordinary arrays qualify. Native reads and stores
-guard exact uint32 indices, bounds, and existing numeric cells. Stores change
+and numeric tag boundary. A nonzero writable-hole marker grants permission to
+fill pointer-free holes after Go proves ordinary extensible storage, writable
+length, no own indexed descriptors, and no exotic or indexed prototype. Only
+ordinary arrays qualify. Native reads and stores guard exact uint32 indices,
+bounds, and existing numeric cells; stores also accept the approved hole marker.
+Stores change
 only the numeric eight-byte field and canonicalize NaNs; they never change a
-Go pointer, grow a slice, fill a hole, or bypass an accessor. The VM keeps owners
+Go pointer, grow a slice, or bypass an accessor. The VM keeps owners
 alive until return, and typed view pointers also keep backing storage live.
-Native code does not retain any address between entries. Holes, proxies,
-reconfigured properties, nonnumeric elements, unsupported keys, and coercions
-resume the interpreter before committing the failing bytecode instruction.
+Native code does not retain any address between entries. Read guards resume the
+interpreter before committing the failing instruction. Indexed write guards
+resume in Go, then reenter native code. Ordinary bounded growth updates every
+alias's view; accessors, exotic objects, and coercions publish the frame and
+clear views before invoking the existing VM semantics.
 Fused index updates commit only after all read guards succeed.
 
 Before a host operation that can invoke callbacks the VM publishes locals and operands, then clears all
@@ -1011,3 +1018,135 @@ entries. Test262 normal and debugger runs each report 92,869 passed, zero
 failures, and 342 existing skips. The isolated native conformance run peaks
 at 2659.0 MiB; the debugger run peaks at 3119.5 MiB while other validation
 processes also run. Actual Windows execution remains unverified.
+
+## Resumable references, comparisons, and dense growth
+
+Reference returns now carry an opaque handle that the VM decodes before clearing
+its typed roots. Eligible locals remain unobservable after return. Equality over
+nonnumeric values exits to the original bytecode semantics and then resumes
+native execution, preserving strict/loose differences and Annex B HTMLDDA.
+Same-kind and nullish comparisons need no JavaScript callbacks; other coercions
+publish the frame and clear views before running hooks. Host batches charge
+committed instruction counts rather than PC differences, including comparison
+branches that jump backward or to the same instruction.
+
+Indexed writes now resume through Go instead of permanently guarding on array
+growth, reference values, or special property semantics. Ordinary bounded growth
+uses the existing dense-storage helper and refreshes all duplicate root handles
+for its receiver. Each 40-byte view can also grant native permission to replace
+a pointer-free hole with a number, after Go excludes indexed descriptors and
+exotic prototypes. Numeric stores still never change Go references or slice
+headers. Callbacks revoke and recompute permissions, including after prototype
+setters, nonextensibility, readonly length, storage resize, cache release, or GC.
+Descending initialization therefore grows once in Go and fills its remaining
+holes natively. Sparse, mapped, typed, proxy, accessor, and coercing writes retain
+the full VM boundary.
+
+Remainder lowers to a resumable host instruction, including local/immediate
+fusions. Numbers use the existing `jsMod` fast path; other types use the existing
+coercion and BigInt implementation. Ordinary global data and lexical reads avoid
+frame publication, while TDZ, accessors, and unusual scopes take the full
+boundary. Closure-local executable hints avoid weak-key registration on hot
+entries. The hint owns no source graph beyond its existing closure, and a closed
+executable is detected before reuse; release clears its pages and metadata.
+
+Coverage alone initially doubled whole-RSA time and regressed Richards by 51%.
+The final selection policy samples native work per host boundary across eight
+completed native invocations. At least sixteen boundaries averaging fewer than
+64 native instructions suspend function-entry promotion. A long invocation can
+still promote its loop. A budget exit with at least 256 boundaries and the same
+low density also resumes Go for the current invocation, preserving committed
+state and checking interruption/memory before fallback. These are internal
+empirical thresholds, not API promises or semantic guard failures.
+
+Eight balanced placements, three alternating fresh rounds per placement, compare
+`bitwise-entry` with `array-final` on macOS/arm64, M5 Max, Go 1.27:
+
+| Suite | Previous JIT | Current JIT | Change |
+|---|---|---|---|
+| Richards | 5.6 ms | 5.6 ms | +0.4% |
+| DeltaBlue | 8.6 ms | 8.5 ms | -0.8% |
+| Crypto | 66.9 ms | 64.3 ms | -3.8% |
+| RayTrace | 48.1 ms | 47.8 ms | -0.7% |
+| EarleyBoyer | 145.1 ms | 144.0 ms | -0.7% |
+| RegExp | 99.3 ms | 98.7 ms | -0.6% |
+| Splay | 102.5 ms | 101.0 ms | -1.4% |
+| NavierStokes | 30.0 ms | 30.2 ms | +0.7% |
+| TOTAL | 518.6 ms | 514.0 ms | -0.9% |
+
+The opt-out comparison is level: 625.3 to 624.5 ms (-0.1%), with individual
+changes between -0.4% and +0.9%. Default execution gains no native coverage.
+
+Three alternating fresh ordinary-layout processes per mode, fifty fixed-work
+iterations, use `QJS_NOTREE=1` for bytecode and Node v26.8.1 through the external
+runner. These ordinary-layout, score, RSA, and first-use measurements precede
+the final global inline-cache owner bookkeeping fix; the balanced comparison
+above includes it. Their means are:
+
+| Suite | Bytecode | Existing Go tiers | Previous JIT | Current JIT | Node |
+|---|---|---|---|---|---|
+| Richards | 126.8 ms | 96.1 ms | 98.6 ms | 96.3 ms | 4.1 ms |
+| DeltaBlue | 147.2 ms | 141.2 ms | 143.3 ms | 147.2 ms | 5.9 ms |
+| Crypto | 2991.4 ms | 2066.2 ms | 1062.2 ms | 1017.3 ms | 69.2 ms |
+| RayTrace | 858.2 ms | 790.6 ms | 789.9 ms | 793.8 ms | 26.7 ms |
+| EarleyBoyer | 3001.4 ms | 2369.0 ms | 2408.0 ms | 2422.4 ms | 109.8 ms |
+| RegExp | 1118.2 ms | 1127.5 ms | 1110.8 ms | 1117.9 ms | 194.4 ms |
+| Splay | 179.6 ms | 153.0 ms | 152.7 ms | 151.6 ms | 23.3 ms |
+| NavierStokes | 1859.9 ms | 1299.0 ms | 364.3 ms | 369.7 ms | 98.1 ms |
+| TOTAL | 10294.4 ms | 8052.1 ms | 6141.3 ms | 6127.1 ms | 563.9 ms |
+
+Current Crypto saves 4.2% versus the previous build, is 2.9x bytecode and 2.0x
+the existing Go tiers, and remains 14.7x slower than Node. The mixed total is
+1.7x bytecode and 1.3x existing Go, with Node still 10.9x faster. DeltaBlue's
+ordinary layout moves by 2.7% while its balanced result is level, so the placement
+comparison remains the attribution check. Three paired score processes give
+5083 previous and 5111 current (+0.5%, effectively level); current samples are
+5116, 5130, and 5086. Compare these paired measurements rather than earlier
+standalone scores under different machine conditions.
+
+Whole-RSA benchmark means, including a plaintext check on every pair, are
+60.1 ms bytecode, 40.9 ms existing Go, and 20.2 ms JIT: 3.0x bytecode and 2.0x
+existing Go. Previous JIT is 21.0 ms in the same alternation (-4.1%). Native
+allocations rise from 887/about 238 KB to about 1000/241 KB per pair, including
+tree-loop promotion returns; native code plus metadata grows from 475848 to
+581696 bytes. Crypto benchmark process RSS is 32.1-34.5 MiB current versus
+32.4-33.1 MiB previous. Short am3 remains 2363.3/1627.3/598.0 ns
+bytecode/tree/JIT (4.0x bytecode), and long am3 remains
+529.6/348.7/74.2 us (7.1x). This milestone improves whole-workload coverage,
+not the limb emitter's throughput.
+
+First-use means from three fresh processes, 100 independent runtimes each,
+exclude source compilation and runtime/setup work, as in the prior measurement:
+
+| Kernel | Existing first call | Automatic first call | Automatic bytes / allocations |
+|---|---|---|---|
+| Vector | 102.1 us | 75.5 us | 101277 / 66 |
+| Stencil | 181.3 us | 99.9 us | 128340 / 69 |
+| Helper | 701.4 us | 213.1 us | 187048 / 72 |
+
+First-use RSS is 27.7-28.5 MiB. Construction still allocates no executable code.
+The default qjs binary remains 40503538 bytes; the tagged binary is 40743986
+bytes (+240448, 0.59%). Fifty-iteration native runs allocate 4421.5-4423.1 MB,
+retain 9.5 MB live after collection, and peak at 303.8-332.6 MiB RSS. Previous
+JIT retains the same 9.5 MB, allocates 4419.8-4420.9 MB, and peaks at
+309.2-323.6 MiB. The additional view/profiling state and tier transitions are
+measured costs, not free coverage.
+
+The 5-10x goal remains incomplete: 5x is the minimum useful target, and selected
+long kernels do not establish it for Crypto or the mixed engine. Only about
+29% of the current Crypto profile's samples execute generated code. Encoding,
+property boundaries, short calls, and tree execution still dominate the remaining
+work. The next substantial improvement must remove those costs or move their
+work into native execution; making the existing limb instructions faster alone
+cannot provide the required end-to-end gain.
+
+Full default/tagged suites, vet, race/checkptr, Go 1.24, native Linux/amd64
+execution under emulation, Windows amd64/arm64 builds, Linux/386 builds and its
+length regression pass. Differential tests cover the new view stride, approved
+and denied holes, NaN/negative-zero stores, all exit budgets, and rooted returns.
+VM tests cover aliases, callbacks, GC/cache release, HTMLDDA, coercion order,
+prototype changes, exact error types, memory/cancellation, and selection followed
+by later loop promotion. Native fuzzing passes 11.5 million inputs. Native and
+debugger Test262 runs each report 92869 passed, zero failures, and 342 existing
+skips. The final isolated native run peaks at 2660.0 MiB RSS. Windows execution
+remains unverified; a cross-build is not native execution.

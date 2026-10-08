@@ -58,6 +58,9 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 			a, b := slots[n], slots[n+1]
 			slots[n], slots[n+1], slots[n+2] = b, a, b
 		case ArrayRead, ArrayWrite, ArrayKey, ArrayUpdate, ArrayLength:
+			if in.Op == ArrayWrite {
+				exit.Kind = HostExit
+			}
 			obj := read(in.Left)
 			if obj.Kind != Opaque || obj.Bits >= uint64(len(arrays)) {
 				return exit, nil
@@ -96,7 +99,7 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 				return exit, nil
 			}
 			cell := (*uint64)(unsafe.Add(view.Data, uintptr(x)*16))
-			if *cell >= view.NumberLimit {
+			if *cell >= view.NumberLimit && !(in.Op == ArrayWrite && view.WritableHole != 0 && *cell == view.WritableHole) {
 				return exit, nil
 			}
 			if in.Op == ArrayWrite {
@@ -128,6 +131,9 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 		case Binary:
 			v, ok := binary(in.Operator, read(in.Left), read(in.Right))
 			if !ok {
+				if in.Operator == Eq || in.Operator == Ne {
+					exit.Kind = HostExit
+				}
 				return exit, nil
 			}
 			slots[in.Dest] = v
@@ -181,6 +187,9 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 				condition = v.Bits != 0
 			}
 			if !ok {
+				if in.Operator == Eq || in.Operator == Ne {
+					exit.Kind = HostExit
+				}
 				return exit, nil
 			}
 			if condition == in.When {
@@ -188,7 +197,7 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 			}
 		case Return:
 			v := read(in.Left)
-			if v.Kind == Opaque || v.Kind == Uninitialized {
+			if v.Kind == Uninitialized {
 				return exit, nil
 			}
 			exit.Kind, exit.Value, exit.Steps = Returned, v, steps+1

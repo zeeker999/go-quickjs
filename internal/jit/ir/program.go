@@ -10,12 +10,16 @@ import (
 // ArrayView borrows dense storage for one bounded native entry. Each cell is
 // sixteen bytes: numeric bits followed by a Go reference that native code must
 // never change. Bits below NumberLimit identify existing numeric data properties.
+// WritableHole, when nonzero, permits replacing that pointer-free hole marker
+// with a number. The caller proves ordinary writable/extensible array storage
+// and absence of inherited indexed properties before granting this permission.
 // The caller owns and roots the storage, and rebuilds views after every callback.
 type ArrayView struct {
-	Data        unsafe.Pointer
-	DenseLength uint64
-	Length      uint64
-	NumberLimit uint64
+	Data         unsafe.Pointer
+	DenseLength  uint64
+	Length       uint64
+	NumberLimit  uint64
+	WritableHole uint64
 }
 
 // Kind identifies a scalar or a handle into Go-owned reference storage.

@@ -25,6 +25,386 @@ import (
 
 const jitSumSource = `function sum(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s } sum(10000)`
 
+func TestJITRemainderBoundaries(t *testing.T) {
+	for _, tc := range []struct{ left, right, check string }{
+		{`13`, `5`, `v===3`}, {`-12`, `3`, `Object.is(v,-0)`},
+		{`-0`, `2`, `Object.is(v,-0)`}, {`13.5`, `2.5`, `v===1`},
+		{`1e100`, `3`, `v===1`}, {`Infinity`, `3`, `Number.isNaN(v)`},
+		{`13`, `0`, `Number.isNaN(v)`}, {`13`, `Infinity`, `v===13`},
+		{`'13'`, `5`, `v===3`}, {`13n`, `5n`, `v===3n`},
+	} {
+		r := jitRuntimeForTest(t, Config{JIT: true})
+		if _, err := r.Run(compileForTest(t, `function f(a,x,y){a[0]+=1;return x%y}`)); err != nil {
+			t.Fatal(err)
+		}
+		fn := compileForTest(t, `let v=f([1],`+tc.left+`,`+tc.right+`);`+tc.check)
+		v, err := r.Run(fn)
+		if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.guards != 0 || r.jit.rootCount != 0 {
+			t.Fatalf("%s %% %s: %v, %v", tc.left, tc.right, v, err)
+		}
+	}
+	for _, source := range []string{
+		`function f(a,x){a[0]+=1;return x%3}f([1],14)===2`,
+		`function f(a,x){a[0]+=1;let y=x%3;return y}f([1],14)===2`,
+		`function f(a,x,y){a[0]+=1;return x%y}let good=false;try{f([1],1n,0n)}catch(e){good=e instanceof RangeError}good`,
+		`function f(a,x,y){a[0]+=1;return x%y}let good=false;try{f([1],1n,2)}catch(e){good=e instanceof TypeError}good`,
+	} {
+		r := jitRuntimeForTest(t, Config{JIT: true})
+		v, err := r.Run(compileForTest(t, source))
+		if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.entries == 0 || r.jit.guards != 0 || r.jit.rootCount != 0 {
+			t.Fatalf("remainder fused/error result: %v, %v", v, err)
+		}
+	}
+}
+
+func TestJITRemainderCoercionRelease(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.global.setOwnRaw(r.atoms.intern("host"), r.NewFunction("host", 0,
+		func(rt *Runtime, _ Value, _ []Value) (Value, error) {
+			if rt.jit == nil || rt.jit.rootCount != 0 {
+				t.Fatal("remainder coercion retained native roots")
+			}
+			rt.releaseJIT()
+			runtime.GC()
+			return Undefined, nil
+		}), propDefault)
+	v, err := r.Run(compileForTest(t, `let order='';let a=[1];function f(a,x,y){a[0]+=1;let rem=x%y;return rem+a[0]+a.length}f(a,{valueOf(){order+='x';host();a.push(7);return 13}},{valueOf(){order+='y';return 5}})===7&&order==='xy'`))
+	if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.rootCount != 0 || r.jit.guards != 0 {
+		t.Fatalf("remainder callback order/release: %v, %v", v, err)
+	}
+}
+
+func TestJITGlobalReads(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		r := jitRuntimeForTest(t, Config{JIT: enabled})
+		calls := 0
+		r.global.setOwnRaw(r.atoms.intern("host"), r.NewFunction("host", 0,
+			func(rt *Runtime, _ Value, _ []Value) (Value, error) {
+				calls++
+				if enabled && rt.jit.rootCount != 0 {
+					t.Fatal("global accessor retained native roots")
+				}
+				return Undefined, nil
+			}), propDefault)
+		for _, source := range []string{
+			`globalThis.g=3;function f(a){return g+a[0]}f([1])===4`,
+			`g=7;f([1])===8`,
+			`Object.defineProperty(globalThis,'g',{get(){host();return 9},configurable:true});f([1])===10`,
+			`delete globalThis.g;let good=false;try{f([1])}catch(e){good=e instanceof ReferenceError}good`,
+			`globalThis.g=20;let g=13;f([1])===14`,
+		} {
+			v, err := r.Run(compileForTest(t, source))
+			if err != nil || !v.IsBool() || !v.Truthy() {
+				t.Fatalf("global read JIT %v: %v, %v", enabled, v, err)
+			}
+		}
+		if calls != 1 || enabled && (r.jit == nil || r.jit.guards != 0 || r.jit.rootCount != 0) {
+			t.Fatal("global resolution did not preserve accessors or lexical shadowing")
+		}
+	}
+}
+
+func TestJITGlobalCacheOwner(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	if _, err := r.Run(compileForTest(t, `globalThis.g=3;function f(a){return g+a[0]}f([1])`)); err != nil {
+		t.Fatal(err)
+	}
+	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
+	for _, in := range cl.fn.Code {
+		if in.Op != bytecode.OpGetGlobal {
+			continue
+		}
+		site := &cl.ic[in.B]
+		site.p1 = r.NewObject()
+		v, err := r.Run(compileForTest(t, `f([1])`))
+		if err != nil || v.Number() != 4 || site.p1 != cl.scope() || r.jit.rootCount != 0 {
+			t.Fatalf("global cache retained a stale environment: %v, %v", v, err)
+		}
+		return
+	}
+	t.Fatal("missing global cache site")
+}
+
+func TestJITCallbackTierSelection(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	if _, err := r.Run(compileForTest(t, `function cb(){};function f(a,n,cb){for(let i=0;i<n;i++){a[0]+=1;cb()}return a[0]}f([0],64,cb)`)); err != nil {
+		t.Fatal(err)
+	}
+	for range 7 {
+		if _, err := r.Run(compileForTest(t, `f([0],64,cb)`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
+	if cl.jitEntry == nil || !cl.jitEntry.entrySlow || cl.jitRefused {
+		t.Fatal("callback-heavy entry did not stay eligible for loop promotion")
+	}
+	before := r.jit.osrs
+	v, err := r.Run(compileForTest(t, `f([0],10000,cb)`))
+	if err != nil || v.Number() != 10000 || r.jit.osrs == before || r.jit.guards != 0 || r.jit.rootCount != 0 {
+		t.Fatalf("later long call did not promote its hot loop: %v, %v", v, err)
+	}
+}
+
+func TestJITBoundaryDensityBudget(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	v, err := r.Run(compileForTest(t, `function f(a,n){let s=0;for(let i=0;i<n;i++){s+=a[0]%3;a[0]+=3}return s}let a=[2];f(a,20000)===40000&&a[0]===60002`))
+	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
+	if err != nil || !v.IsBool() || !v.Truthy() || cl.jitEntry == nil || !cl.jitEntry.entrySlow || r.jit.budgets == 0 || r.jit.rootCount != 0 || r.jit.guards != 0 {
+		t.Fatalf("boundary density changed effects or failed to select Go: %v, %v", v, err)
+	}
+}
+
+func TestJITClosureCacheRelease(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	if _, err := r.Run(compileForTest(t, `function f(a){return a[0]+1}`)); err != nil {
+		t.Fatal(err)
+	}
+	call := compileForTest(t, `f([2])`)
+	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
+	for range 3 {
+		v, err := r.Run(call)
+		if err != nil || v.Number() != 3 || cl.jitEntry == nil || cl.jitEntry.code.Size() == 0 || r.jit.rootCount != 0 {
+			t.Fatalf("closure cache entry: %v, %v", v, err)
+		}
+		e := cl.jitEntry
+		r.releaseJIT()
+		if r.jit != nil || e.code.Size() != 0 || e.code.MetadataSize() != 0 {
+			t.Fatal("cached closure kept released executable storage")
+		}
+	}
+}
+
+func TestJITArrayGrowth(t *testing.T) {
+	for _, tc := range []struct{ name, source string }{
+		{"descending", `function f(a){for(let i=31;i>=0;i--)a[i]=i;return a[0]+a[31]+a.length}f([])===63`},
+		{"aliases", `function f(a,b){let s=0;for(let i=0;i<300;i++){a[i]=i;s+=b[i]+b.length}return s}let a=[];f(a,a)===90000`},
+		{"holes", `function f(a){a[4]=7;a[0]=3;a[2]=5;return a.length+a[0]+a[2]+a[4]}let a=[];f(a)===20&&!(1 in a)&&!(3 in a)`},
+		{"reference barrier", `function f(a,v){a[0]=v;a[16]=v;return a.length}let v={x:9},a=[];f(a,v)===17&&a[0]===v&&a[16]===v`},
+		{"readonly length", `function f(a){a[1]=9;return a.length}let a=[2];Object.defineProperty(a,'length',{writable:false});f(a)===1&&!(1 in a)`},
+		{"nonextensible hole", `function f(a){a[0]=9;return a.length}let a=[,];Object.preventExtensions(a);f(a)===1&&!(0 in a)`},
+		{"inherited readonly", `Object.defineProperty(Array.prototype,'2',{value:8,writable:false});function f(a){a[2]=9;return a.length}let a=[];f(a)===0&&a[2]===8`},
+		{"inherited setter", `let hits=0;Object.defineProperty(Array.prototype,'2',{set(v){hits+=v}});function f(a){a[2]=9;return a.length}let a=[];f(a)===0&&hits===9&&!(Object.hasOwn(a,'2'))`},
+		{"sparse gap", `function f(a){a[2000]=9;return a.length}let a=[];f(a)===2001&&a[2000]===9&&!(1999 in a)`},
+		{"nonindex", `function f(a,k){a[k]=9;return a.length}let a=[];f(a,4294967295)===0&&a[4294967295]===9&&f(a,-1)===0&&a[-1]===9`},
+		{"proxy", `let hits=0;function f(a){a[2]=9;return 7}let a=[];let p=new Proxy(a,{set(t,k,v){hits++;return Reflect.set(t,k,v)}});f(p)===7&&hits===1&&a[2]===9`},
+		{"typed array", `function f(a){a[0]=257;return 7}let a=new Uint8Array(1);f(a)===7&&a[0]===1`},
+		{"strict error", `function f(a){'use strict';a[1]=9;return 7}let a=[2];Object.freeze(a);let good=false;try{f(a)}catch(e){good=e instanceof TypeError}good&&a.length===1`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, enabled := range []bool{false, true} {
+				r := jitRuntimeForTest(t, Config{JIT: enabled})
+				v, err := r.Run(compileForTest(t, tc.source))
+				if err != nil || !v.IsBool() || !v.Truthy() {
+					t.Fatalf("JIT %v: %v, %v", enabled, v, err)
+				}
+				if enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.rootCount != 0) {
+					t.Fatal("array write did not enter native code or retained roots")
+				}
+				if enabled && (tc.name == "descending" || tc.name == "aliases" || tc.name == "holes") && r.jit.guards != 0 {
+					t.Fatal("ordinary array growth permanently guarded")
+				}
+			}
+		})
+	}
+}
+
+func TestJITArrayHolePermissionCallbacks(t *testing.T) {
+	for _, source := range []string{
+		`let hits=0;function cb(){Object.defineProperty(Array.prototype,'1',{set(v){hits+=v}})}function f(a,cb){a[0]=2;cb();a[1]=3;return a.length}let a=new Array(2);f(a,cb)===2&&hits===3&&!Object.hasOwn(a,'1')&&a[0]===2`,
+		`function cb(a){Object.defineProperty(a,'length',{writable:false});Object.preventExtensions(a)}function f(a,cb){a[0]=2;cb(a);a[1]=3;return a.length}let a=new Array(2);f(a,cb)===2&&!Object.hasOwn(a,'1')&&a[0]===2`,
+		`function cb(a){a.length=40;a[39]=9}function f(a,b,cb){a[0]=2;cb(a);b[1]=3;return b[0]+b[1]+b[39]+b.length}let a=new Array(2);f(a,a,cb)===54`,
+	} {
+		r := jitRuntimeForTest(t, Config{JIT: true})
+		v, err := r.Run(compileForTest(t, source))
+		if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.guards != 0 || r.jit.rootCount != 0 {
+			t.Fatalf("hole permission after callback: %v, %v", v, err)
+		}
+	}
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	v, err := r.Run(compileForTest(t, `function f(a){for(let i=31;i>=0;i--)a[i]=i;return a[31]+a.length}f([])`))
+	if err != nil || v.Number() != 63 || r.jit == nil || r.jit.hosts != 1 || r.jit.fastHosts != 1 || r.jit.guards != 0 {
+		t.Fatalf("descending initialization did not fill holes natively: %v, %v", v, err)
+	}
+}
+
+func TestJITArrayWriteCoercionRelease(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	calls := 0
+	r.global.setOwnRaw(r.atoms.intern("host"), r.NewFunction("host", 0,
+		func(rt *Runtime, _ Value, _ []Value) (Value, error) {
+			calls++
+			if rt.jit == nil || rt.jit.rootCount != 0 {
+				t.Fatal("array coercion retained native roots")
+			}
+			for _, view := range rt.jit.arrays {
+				if view.Data != nil {
+					t.Fatal("array coercion retained borrowed storage")
+				}
+			}
+			rt.releaseJIT()
+			runtime.GC()
+			return Undefined, nil
+		}), propDefault)
+	v, err := r.Run(compileForTest(t, `let a=[1];function f(a,k){a[k]=9;return a[0]+a[1]+a.length}f(a,{toString(){host();a.push(3);a[0]=5;return '1'}})`))
+	if err != nil || v.Number() != 16 || calls != 1 || r.jit.rootCount != 0 {
+		t.Fatalf("array coercion: %v, %v, calls %d", v, err, calls)
+	}
+}
+
+func TestJITArrayGrowthLimits(t *testing.T) {
+	for _, memory := range []bool{false, true} {
+		cfg := Config{JIT: true}
+		if memory {
+			cfg.MemoryLimit = 8 << 20
+		}
+		r := jitRuntimeForTest(t, cfg)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if !memory {
+			cancel()
+			ctx, cancel = context.WithTimeout(context.Background(), 30*time.Millisecond)
+		}
+		defer cancel()
+		r.SetContext(ctx)
+		_, err := r.Run(compileForTest(t, `function f(a){let i=0;for(;;){a[i]=i;i++}}f([])`))
+		want := error(context.DeadlineExceeded)
+		if memory {
+			want = ErrMemoryLimit
+		}
+		if !errors.Is(err, want) || r.jit == nil || r.jit.fastHosts == 0 || r.jit.budgets == 0 || r.jit.rootCount != 0 {
+			t.Fatalf("array growth memory %v: %v", memory, err)
+		}
+	}
+}
+
+func TestJITReferenceReturns(t *testing.T) {
+	for _, tc := range []struct{ expression, check string }{
+		{`{x:9}`, `v.x===9`},
+		{`[7,8]`, `v.length===2&&v[0]===7&&v[1]===8`},
+		{`'kept'`, `v==='kept'`},
+		{`12345678901234567890n`, `v===12345678901234567890n`},
+		{`Symbol('kept')`, `typeof v==='symbol'&&v.description==='kept'`},
+		{`function(){return 11}`, `v()===11`},
+	} {
+		r := jitRuntimeForTest(t, Config{JIT: true})
+		if _, err := r.Run(compileForTest(t, `function f(a,out){a[0]+=1;return out}`)); err != nil {
+			t.Fatal(err)
+		}
+		fn := compileForTest(t, `f([1],`+tc.expression+`)`)
+		for range 12 {
+			v, err := r.Run(fn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime.GC()
+			r.global.setOwnRaw(r.atoms.intern("v"), v, propDefault)
+			check, err := r.Run(compileForTest(t, tc.check))
+			if err != nil || !check.IsBool() || !check.Truthy() {
+				t.Fatalf("returned %s did not survive root clearing: %v, %v", tc.expression, check, err)
+			}
+		}
+		if r.jit == nil || r.jit.guards != 0 || r.jit.rootCount != 0 {
+			t.Fatal("reference return guarded or retained scratch roots")
+		}
+	}
+}
+
+func TestJITEqualityBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		left, op, right string
+		want            bool
+	}{
+		{`null`, `==`, `undefined`, true}, {`null`, `===`, `undefined`, false},
+		{`dda`, `==`, `null`, true}, {`undefined`, `==`, `dda`, true},
+		{`dda`, `===`, `undefined`, false}, {`dda`, `!==`, `null`, true},
+		{`{}`, `!=`, `null`, true}, {`false`, `==`, `null`, false},
+		{`true`, `===`, `true`, true}, {`true`, `==`, `1`, true},
+		{`'3'`, `==`, `3`, true}, {`3n`, `==`, `'3'`, true},
+		{`3n`, `===`, `3`, false}, {`Symbol()`, `==`, `3`, false},
+		{`NaN`, `===`, `NaN`, false}, {`-0`, `===`, `0`, true},
+	} {
+		for _, branch := range []bool{false, true} {
+			r := jitRuntimeForTest(t, Config{JIT: true})
+			dda := r.NewObject()
+			dda.MarkHTMLDDA()
+			r.global.setOwnRaw(r.atoms.intern("dda"), Obj(dda), propDefault)
+			body := `return x` + tc.op + `y`
+			if branch {
+				body = `if(x` + tc.op + `y)return true;return false`
+			}
+			fn := compileForTest(t, `function f(a,x,y){a[0]+=1;`+body+`};f([1],`+tc.left+`,`+tc.right+`)`)
+			for range 12 {
+				v, err := r.Run(fn)
+				if err != nil || !v.IsBool() || v.Truthy() != tc.want {
+					t.Fatalf("%s %s %s branch %v: %v, %v; want %v", tc.left, tc.op, tc.right, branch, v, err, tc.want)
+				}
+			}
+			if r.jit == nil || r.jit.entries == 0 || r.jit.guards != 0 || r.jit.rootCount != 0 {
+				t.Fatal("equality did not resume native execution or retained roots")
+			}
+		}
+	}
+}
+
+func TestJITEqualityBranchBudget(t *testing.T) {
+	for _, value := range []string{`null`, `{}`} {
+		r := jitRuntimeForTest(t, Config{JIT: true})
+		v, err := r.Run(compileForTest(t, `function f(a,x){let n=0;for(let i=0;i<20000;i++){if(x!=null)n+=a[0]}return n}f([2],`+value+`)`))
+		want := float64(40000)
+		if value == `null` {
+			want = 0
+		}
+		if err != nil || v.Number() != want || r.jit == nil || r.jit.budgets == 0 || r.jit.guards != 0 {
+			t.Fatalf("branch budget %s: %v, %v", value, v, err)
+		}
+	}
+}
+
+func TestJITEqualityCoercionRelease(t *testing.T) {
+	for _, branch := range []bool{false, true} {
+		r := jitRuntimeForTest(t, Config{JIT: true})
+		calls := 0
+		r.global.setOwnRaw(r.atoms.intern("host"), r.NewFunction("host", 0,
+			func(rt *Runtime, _ Value, _ []Value) (Value, error) {
+				calls++
+				if rt.jit == nil || rt.jit.rootCount != 0 {
+					t.Fatal("equality coercion retained native roots")
+				}
+				for _, view := range rt.jit.arrays {
+					if view.Data != nil {
+						t.Fatal("equality coercion retained borrowed storage")
+					}
+				}
+				rt.releaseJIT()
+				runtime.GC()
+				return Undefined, nil
+			}), propDefault)
+		body := `let same=o==7;return same?a[0]+a.length:0`
+		if branch {
+			body = `if(o!=7)return 0;return a[0]+a.length`
+		}
+		v, err := r.Run(compileForTest(t, `let a=[1];let o={valueOf(){host();a.push(9);a[0]=5;return 7}};function f(a,o){a[0]+=1;`+body+`}f(a,o)`))
+		if err != nil || v.Number() != 7 || calls != 1 || r.jit == nil || r.jit.rootCount != 0 {
+			t.Fatalf("equality callback branch %v: %v, %v, calls %d", branch, v, err, calls)
+		}
+	}
+	for _, body := range []string{`return o==7`, `if(o!=7)return 0;return 1`} {
+		var baseline string
+		for _, enabled := range []bool{false, true} {
+			r := jitRuntimeForTest(t, Config{JIT: enabled})
+			_, err := r.Run(compileForTest(t, `function f(a,o){a[0]+=1;`+body+`}f([1],{valueOf(){throw new RangeError('compare')}})`))
+			if err == nil {
+				t.Fatal("equality coercion did not throw")
+			}
+			if !enabled {
+				baseline = err.Error()
+			} else if err.Error() != baseline {
+				t.Fatalf("equality error %v; want %s", err, baseline)
+			}
+		}
+	}
+}
+
 func TestJITBitwiseAndReceiver(t *testing.T) {
 	for _, tc := range []struct{ left, op, right, want string }{
 		{"4294967297", "|", "2", "3"},
@@ -152,8 +532,10 @@ func TestJITDataProperties(t *testing.T) {
 
 func TestJITDataPropertyRootLimit(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	v, err := r.Run(compileForTest(t, `function f(o,n){let s=0;for(let i=0;i<n;i++){let a=o.array;s+=a[0]}return s}f({array:[1]},2000)`))
-	if err != nil || v.Number() != 2000 {
+	// Enough native work per reference keeps tier selection profitable while
+	// the repeated property reads exhaust and refresh the bounded root table.
+	v, err := r.Run(compileForTest(t, `function f(o,n){let s=0;for(let i=0;i<n;i++){let a=o.array;for(let j=0;j<16;j++)s+=a[0]}return s}f({array:[1]},2000)`))
+	if err != nil || v.Number() != 32000 {
 		t.Fatalf("root limit: %v, %v", v, err)
 	}
 	if r.jit == nil || r.jit.fastHosts < 1000 || r.jit.hosts == r.jit.fastHosts || r.jit.budgets == 0 || r.jit.rootCount != 0 {
@@ -220,7 +602,7 @@ func TestJITDenseArraysAndCallbacks(t *testing.T) {
 		{"negative key", `function f(a){return a[-1]}let a=[1];a[-1]=9;f(a)`, 9, true},
 		{"fractional key", `function f(a){return a[.5]}let a=[1];a[.5]=8;f(a)`, 8, true},
 		{"proxy", `function f(a){return a[0]}f(new Proxy([1],{get(){return 8}}))`, 8, true},
-		{"inherited setter", `let hits=0;Object.defineProperty(Array.prototype,'0',{set(v){hits+=v}});function f(a){a[0]=3;return hits}f([,])`, 3, true},
+		{"inherited setter", `let hits=0;Object.defineProperty(Array.prototype,'0',{set(v){hits+=v}});function f(a){a[0]=3;return hits}f([,])`, 3, false},
 		{"frozen", `function f(a){a[0]=3;return a[0]}f(Object.freeze([7]))`, 7, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -829,7 +1211,7 @@ func TestJITLoopPromotionLiveOperands(t *testing.T) {
 			original := jitFunctionForTest(t, "function f(a,n) { "+keyword+" s=0; for("+keyword+" i=0;i<n;i++) s+=i; return s }")
 			fn := *original
 			// Carry an opaque operand through the loop, then return it after
-			// a swap. Native return must guard and publish that exact operand.
+			// a swap. Native return must decode that exact rooted operand.
 			fn.Code = []bytecode.Instr{{Op: bytecode.OpGetLocal}}
 			mapping := make([]uint32, len(original.Code))
 			for i, in := range original.Code {
@@ -852,8 +1234,8 @@ func TestJITLoopPromotionLiveOperands(t *testing.T) {
 			if err != nil || !v.IsObject() || v.Object() != o {
 				t.Fatalf("live operand = %v, %v", v, err)
 			}
-			if r.jit == nil || r.jit.osrs != 1 || r.jit.guards != 1 || r.jit.rootCount != 0 {
-				t.Fatal("live operand was lost, unguarded, or retained")
+			if r.jit == nil || r.jit.osrs != 1 || r.jit.guards != 0 || r.jit.rootCount != 0 {
+				t.Fatal("live operand was lost, guarded, or retained")
 			}
 			for _, root := range r.jit.roots {
 				if root.IsObject() {

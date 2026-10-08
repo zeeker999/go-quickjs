@@ -142,8 +142,13 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 				if in.Operator == ir.Truth {
 					a.truth(in.Left)
 				} else {
+					guard := a.guard
+					if in.Operator == ir.Eq || in.Operator == ir.Ne {
+						a.guard = a.host
+					}
 					left := a.number(in.Left, 0)
 					right := a.number(in.Right, 1)
+					a.guard = guard
 					a.word(0x1e602000 | right<<16 | left<<5) // fcmp dN, dM
 					a.commit()                               // sub does not change condition flags
 					condition := arm64Comparison(in.Operator)
@@ -165,8 +170,8 @@ func programInstructions(p *ir.Program) ([]byte, []int, error) {
 				continue
 			case ir.Return:
 				a.load(in.Left, 3, 4)
-				a.compareImmediate(4, uint32(ir.Null))
-				a.conditional(8, a.guard)
+				a.compareImmediate(4, uint32(ir.Uninitialized))
+				a.conditional(0, a.guard)
 				a.memory(false, false, 3, 0, 24)
 				a.memory(false, false, 4, 0, 32)
 				a.commit()
@@ -406,8 +411,13 @@ func (a *arm64Program) binary(op ir.Operator, left, right ir.Operand, dest int) 
 	if op >= ir.BitAnd && op <= ir.UShr {
 		return a.bitwise(op, left, right)
 	}
+	guard := a.guard
+	if op == ir.Eq || op == ir.Ne {
+		a.guard = a.host
+	}
 	l := a.number(left, 0)
 	r := a.number(right, 1)
+	a.guard = guard
 	if op <= ir.Div {
 		fp := uint32(0)
 		if reg := a.registers[dest]; reg >= 0 {
@@ -590,6 +600,11 @@ func (a *arm64Program) truth(o ir.Operand) {
 // array resolves a borrowed view and guards every condition before any write.
 // X3 is the view/cell address, X5 the index, X6 the numeric tag boundary.
 func (a *arm64Program) array(in ir.Instruction) {
+	if in.Op == ir.ArrayWrite {
+		guard := a.guard
+		a.guard = a.host
+		defer func() { a.guard = guard }()
+	}
 	if a.arrayCached(in.Left) {
 		a.word(0xaa1003e3) // mov x3,x16: same view within this region
 		a.memory(true, false, 6, 3, 24)
@@ -603,7 +618,8 @@ func (a *arm64Program) array(in ir.Instruction) {
 		}
 		a.compareImmediate(3, ir.MaxSlots)
 		a.conditional(2, a.guard) // HS
-		a.word(0x8b031423)        // add x3, x1, x3, lsl #5
+		a.word(0x8b030863)        // add x3,x3,x3,lsl #2
+		a.word(0x8b030c23)        // add x3,x1,x3,lsl #3: 40-byte view
 		a.memory(true, false, 6, 3, 24)
 		a.compareImmediate(6, 0)
 		a.conditional(0, a.guard)
@@ -616,6 +632,9 @@ func (a *arm64Program) array(in ir.Instruction) {
 		a.word(0x9e6300a0) // ucvtf d0, x5
 		a.storeNumber(in.Dest, 0)
 		return
+	}
+	if in.Op == ir.ArrayWrite {
+		a.memory(true, false, 17, 3, 32)
 	}
 	fp := a.number(in.Right, 0)
 	if in.Op == ir.ArrayUpdate {
@@ -646,7 +665,15 @@ func (a *arm64Program) array(in ir.Instruction) {
 	a.word(0x8b051063) // add x3, x3, x5, lsl #4
 	a.memory(true, false, 7, 3, 0)
 	a.word(0xeb0600ff) // cmp x7, x6
-	a.conditional(2, a.guard)
+	if in.Op == ir.ArrayWrite {
+		numeric := a.label()
+		a.conditional(3, numeric) // LO
+		a.word(0xeb1100ff)        // cmp x7,x17: approved pointer-free hole
+		a.conditional(1, a.guard)
+		a.mark(numeric)
+	} else {
+		a.conditional(2, a.guard)
+	}
 	if in.Op == ir.ArrayWrite {
 		fp = a.number(in.Third, 0)
 		a.word(0x1e602000 | fp<<16 | fp<<5) // fcmp dN, dN

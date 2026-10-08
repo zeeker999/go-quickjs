@@ -33,11 +33,16 @@ type jitClosureFields struct {
 	jitRefused   bool
 	jitCalls     uint8
 	jitLoopDelay uint8
+	jitEntry     *jitEntry
 }
 
 type jitEntry struct {
-	code   *jit.Code
-	misses uint8
+	code       *jit.Code
+	misses     uint8
+	probes     uint8
+	entrySlow  bool
+	probeSteps uint64
+	probeHosts uint64
 }
 
 // Weak keys prevent a refusal or cached program from retaining a source graph.
@@ -192,7 +197,7 @@ func (s *jitState) encode(v Value) ir.Value {
 	if v.IsObject() {
 		o := v.Object()
 		if o.class == ClassArray {
-			s.arrays[i] = ir.ArrayView{Data: unsafe.Pointer(unsafe.SliceData(o.elems)), DenseLength: uint64(len(o.elems)), Length: uint64(o.arrayLength()), NumberLimit: tagBase}
+			s.arrays[i] = jitArrayView(o)
 		}
 	}
 	return ir.Value{Kind: ir.Opaque, Bits: uint64(i)}
@@ -232,7 +237,7 @@ func (s *jitState) clearRoots() {
 }
 
 func (r *Runtime) tryJITFrame(f *frame) (Value, error, bool) {
-	if !r.jitEnabled || f.cl.jitRefused {
+	if !r.jitEnabled || f.cl.jitRefused || f.cl.jitEntry != nil && f.cl.jitEntry.entrySlow {
 		return Undefined, nil, false
 	}
 	// Cold calls stay in the existing tiers without allocating native state.
@@ -261,7 +266,11 @@ func (r *Runtime) tryJITLoop(f *frame, pc uint32, sp int, fullBudget bool) (Valu
 }
 
 func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, bool) {
-	e := r.jitFor(f.cl.fn)
+	e := f.cl.jitEntry
+	if e == nil || e.code != nil && e.code.Size() == 0 {
+		e = r.jitFor(f.cl.fn)
+		f.cl.jitEntry = e
+	}
 	if e == nil {
 		// Resource and OS refusals may change. Retry after another warmup,
 		// rather than charging every call for an unsuccessful compilation.
@@ -289,6 +298,7 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 		s.osrs++
 	}
 	budget := uint64(jit.MaxIterations)
+	var nativeSteps, hosts uint64
 	for {
 		s.entries++
 		// Encoding and the immutable native program preserve scalar validity.
@@ -299,22 +309,35 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 			return Undefined, err, true
 		}
 		budget -= exit.Steps
+		nativeSteps += exit.Steps
 		if exit.Kind == ir.HostExit {
+			hosts++
 			s.hosts++
-			next, _ := r.jitHostFast(f, s, int(exit.State.PC), exit.State.Depth, int(min(budget, 16)))
-			if next != int(exit.State.PC) {
+			next, _, steps := r.jitHostFast(f, s, int(exit.State.PC), exit.State.Depth, int(min(budget, 16)))
+			if steps != 0 {
 				s.fastHosts++
-				budget -= uint64(next - int(exit.State.PC))
+				budget -= uint64(steps)
 				pc = next
 				f.pc = uint32(pc)
 				continue
 			}
 		}
 		f.pc = exit.State.PC
-		// Native returns carry a primitive value. Eligible locals cannot be
-		// observed after this frame leaves: captures, mapped arguments, eval,
-		// handlers, and debugger runtimes are excluded before native entry.
+		// Decode a scalar or rooted handle before clearing its owner. Eligible
+		// locals cannot be observed after this frame leaves: captures, mapped
+		// arguments, eval, handlers, and debugger runtimes are excluded.
 		if exit.Kind == ir.Returned {
+			// Sample several calls so a short tail call cannot hide profitable
+			// longer calls to the same kernel. Boundary-heavy entries stay in Go;
+			// long invocations can still promote through the back-edge path.
+			if e.probes < jitHotCalls {
+				e.probes++
+				e.probeSteps += nativeSteps
+				e.probeHosts += hosts
+				if e.probes == jitHotCalls && e.probeHosts >= 16 && e.probeSteps/e.probeHosts < 64 {
+					e.entrySlow = true
+				}
+			}
 			v := s.decode(exit.Value)
 			s.clearRoots()
 			return v, nil, true
@@ -335,17 +358,21 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 			return v, err, true
 		case ir.HostExit:
 			s.clearRoots()
-			sp, hostErr := r.jitHost(f, f.base+exit.State.Depth, int(min(budget, 16)))
+			sp, steps, hostErr := r.jitHost(f, f.base+exit.State.Depth, int(min(budget, 16)))
 			if hostErr != nil {
 				return r.jitInterpret(f, sp, hostErr)
 			}
 			pc = int(f.pc)
-			budget -= uint64(pc - int(exit.State.PC))
-			// A reentrant callback can release this cache or evict the parent.
-			// Reacquire it only after the callback has returned to Go.
-			e = r.jitFor(f.cl.fn)
-			if e == nil || e.code == nil {
-				return r.jitInterpret(f, sp, nil)
+			budget -= uint64(steps)
+			// Most callbacks preserve this cache and executable owner. EntryDepth
+			// rejects an owner closed by eviction; a released cache changes s.
+			_, live := e.code.EntryDepth(pc)
+			if r.jit != s || !live {
+				e = r.jitFor(f.cl.fn)
+				f.cl.jitEntry = e
+				if e == nil || e.code == nil {
+					return r.jitInterpret(f, sp, nil)
+				}
 			}
 			s = r.jit
 			s.encodeFrame(f, r.stack, sp-f.base)
@@ -355,22 +382,67 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 				s.clearRoots()
 				return Undefined, err, true
 			}
+			if hosts >= 256 && nativeSteps/hosts < 64 {
+				e.entrySlow = true
+				s.clearRoots()
+				return r.jitInterpret(f, f.base+exit.State.Depth, nil)
+			}
 			pc = int(exit.State.PC)
 			budget = jit.MaxIterations
 		}
 	}
 }
 
-// jitHostFast only reads or overwrites ordinary own data properties. These
-// operations cannot call JavaScript or resize array storage, so scalar slots
-// and borrowed views stay valid without publishing/reencoding the whole frame.
+// jitHostFast handles comparisons and ordinary own data properties without
+// JavaScript callbacks. Array growth refreshes every alias's borrowed view;
+// scalar slots stay valid without publishing/reencoding the whole frame.
 // Any accessor, proxy, exotic object, new property, or full root table takes
 // the normal callback boundary at its original instruction and stack depth.
-func (r *Runtime) jitHostFast(f *frame, s *jitState, pc, depth, limit int) (int, int) {
+func (r *Runtime) jitHostFast(f *frame, s *jitState, pc, depth, limit int) (int, int, int) {
 	n := len(f.locals) + len(f.cl.upvalues)
+	steps := 0
 	for range limit {
 		in := f.cl.fn.Code[pc]
 		sp := n + depth
+		if jitBinaryBoundary(in) {
+			cmp, _ := jitBinaryAt(in, sp)
+			left := s.decode(s.slots[cmp.left])
+			right := cmp.literal
+			if cmp.right >= 0 {
+				right = s.decode(s.slots[cmp.right])
+			}
+			if cmp.op == bytecode.OpMod {
+				if !left.IsNumber() || !right.IsNumber() {
+					return pc, depth, steps
+				}
+				s.slots[cmp.dest] = ir.Float(jsMod(left.Number(), right.Number()))
+				depth += cmp.delta
+				pc++
+				steps++
+				continue
+			}
+			if !cmp.strict && !left.IsNullish() && !right.IsNullish() && left.Kind() != right.Kind() {
+				return pc, depth, steps
+			}
+			result := left.StrictEquals(right)
+			if !cmp.strict {
+				// Same-kind and nullish comparisons never invoke coercion hooks,
+				// including Annex B's special HTMLDDA/nullish comparison.
+				result, _ = r.looseEquals(left, right)
+			}
+			result = result != cmp.negate
+			depth += cmp.delta
+			pc++
+			if cmp.branch {
+				if !result {
+					pc = int(in.A)
+				}
+			} else {
+				s.slots[cmp.dest] = ir.Bool(result)
+			}
+			steps++
+			continue
+		}
 		var value Value
 		dest, delta := sp, 1
 		switch in.Op {
@@ -378,22 +450,47 @@ func (r *Runtime) jitHostFast(f *frame, s *jitState, pc, depth, limit int) (int,
 			s.slots[in.A] = s.slots[sp-1]
 			s.slots[sp-1] = s.slots[in.B]
 			pc++
+			steps++
 			continue
 		case bytecode.OpPushThis:
 			var bound bool
 			value, bound = f.thisValue()
 			if !bound {
-				return pc, depth
+				return pc, depth, steps
+			}
+		case bytecode.OpGetGlobal:
+			name, env := f.cl.names[in.A], f.cl.scope()
+			if f.evalVars != nil {
+				return pc, depth, steps
+			}
+			if p := r.globalLexProp(env, name); p != nil {
+				if p.value.IsUninitialized() {
+					return pc, depth, steps
+				}
+				value = p.value
+			} else {
+				if env.class != ClassObject {
+					return pc, depth, steps
+				}
+				site := &f.cl.ic[in.B]
+				i := globalSlot(env, site, name)
+				if i < 0 || env.props[i].flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 {
+					return pc, depth, steps
+				}
+				if site.p1 != env {
+					site.p1 = env
+				}
+				value = env.props[i].value
 			}
 		case bytecode.OpGetProp, bytecode.OpGetPropThis:
 			obj := s.decode(s.slots[sp-1])
 			if !obj.IsObject() {
-				return pc, depth
+				return pc, depth, steps
 			}
 			var ok bool
 			value, ok = plainOwn(obj.Object(), f.cl.names[in.A])
 			if !ok {
-				return pc, depth
+				return pc, depth, steps
 			}
 			if in.Op == bytecode.OpGetProp {
 				dest, delta = sp-1, 0
@@ -401,28 +498,136 @@ func (r *Runtime) jitHostFast(f *frame, s *jitState, pc, depth, limit int) (int,
 		case bytecode.OpSetProp:
 			obj := s.decode(s.slots[sp-2])
 			if !obj.IsObject() {
-				return pc, depth
+				return pc, depth, steps
 			}
 			o := obj.Object()
 			_, index, ok := plainOwnAt(o, f.cl.names[in.A])
 			if !ok || o.props[index].flags&propWritable == 0 {
-				return pc, depth
+				return pc, depth, steps
 			}
 			o.props[index].value = s.decode(s.slots[sp-1])
 			depth -= 2
 			pc++
+			steps++
+			continue
+		case bytecode.OpSetIndex:
+			obj, key, value := s.decode(s.slots[sp-3]), s.decode(s.slots[sp-2]), s.decode(s.slots[sp-1])
+			if !obj.IsObject() || !key.IsNumber() {
+				return pc, depth, steps
+			}
+			if !setElem(obj, key, value) {
+				o := obj.Object()
+				if !jitGrowElem(o, key.Number(), value) {
+					return pc, depth, steps
+				}
+				// Encoding may hold multiple handles for the same receiver. A
+				// reallocation invalidates all of their previous storage pointers.
+				for i, root := range s.roots[:s.rootCount] {
+					if root.IsObject() && root.Object() == o {
+						s.arrays[i] = jitArrayView(o)
+					}
+				}
+			}
+			depth -= 3
+			pc++
+			steps++
 			continue
 		default:
-			return pc, depth
+			return pc, depth, steps
 		}
 		if s.rootCount == ir.MaxSlots {
-			return pc, depth
+			return pc, depth, steps
 		}
 		s.slots[dest] = s.encode(value)
 		depth += delta
 		pc++
+		steps++
 	}
-	return pc, depth
+	return pc, depth, steps
+}
+
+// A borrowed hole can be written natively only when an indexed assignment
+// cannot consult a setter, a non-writable property, or an exotic prototype.
+func jitArrayView(o *Object) ir.ArrayView {
+	view := ir.ArrayView{Data: unsafe.Pointer(unsafe.SliceData(o.elems)), DenseLength: uint64(len(o.elems)), Length: uint64(o.arrayLength()), NumberLimit: tagBase}
+	if jitDenseWritable(o) {
+		view.WritableHole = holeBits
+	}
+	return view
+}
+
+func jitDenseWritable(o *Object) bool {
+	const want = objExtensible | objArrayLengthWritable
+	if o.class != ClassArray || o.flags&(want|objHasSparseElements|objMappedArguments) != want || !o.noIndexKeys() {
+		return false
+	}
+	for p := o.proto; p != nil; p = p.proto {
+		if p.class != ClassObject && p.class != ClassArray || len(p.elems) != 0 || !p.noIndexKeys() {
+			return false
+		}
+	}
+	return true
+}
+
+// The ordinary helper bounds the allocation caused by a single gap write.
+func jitGrowElem(o *Object, n float64, value Value) bool {
+	if n < 0 || n >= math.MaxUint32 || !jitDenseWritable(o) {
+		return false
+	}
+	i := uint32(n)
+	if float64(i) != n {
+		return false
+	}
+	return o.setElem(i, value)
+}
+
+type jitBinary struct {
+	left, right, dest, delta int
+	literal                  Value
+	strict, negate, branch   bool
+	op                       bytecode.Op
+}
+
+func jitBinaryBoundary(in bytecode.Instr) bool {
+	op := in.Op
+	switch in.Op {
+	case bytecode.OpBinLocal, bytecode.OpBinImm, bytecode.OpJumpIfCmpFalse:
+		op = bytecode.Op(in.B)
+	case bytecode.OpLocalBinImm:
+		op = bytecode.Op(in.A >> 24)
+	}
+	return op == bytecode.OpMod || op >= bytecode.OpEq && op <= bytecode.OpStrictNe
+}
+
+// Operands use the native layout: locals, upvalues, then the live stack.
+// The original bytecode retains strict/loose comparison semantics. Remainder
+// also uses this layout, including fused local and immediate operands.
+func jitBinaryAt(in bytecode.Instr, sp int) (jitBinary, bool) {
+	c := jitBinary{left: sp - 2, right: sp - 1, dest: sp - 2, delta: -1}
+	op := in.Op
+	switch in.Op {
+	case bytecode.OpEq, bytecode.OpNe, bytecode.OpStrictEq, bytecode.OpStrictNe, bytecode.OpMod:
+	case bytecode.OpJumpIfCmpFalse:
+		op = bytecode.Op(in.B)
+		c.branch, c.delta = true, -2
+	case bytecode.OpBinLocal:
+		op = bytecode.Op(in.B)
+		c.left, c.right, c.dest, c.delta = sp-1, int(in.A), sp-1, 0
+	case bytecode.OpBinImm:
+		op = bytecode.Op(in.B)
+		c.left, c.right, c.dest, c.delta = sp-1, -1, sp-1, 0
+		c.literal = Float(float64(int32(in.A)))
+	case bytecode.OpLocalBinImm:
+		op = bytecode.Op(in.A >> 24)
+		c.left, c.right, c.dest, c.delta = int(in.A&0xffffff), -1, sp, 1
+		c.literal = Float(float64(int32(in.B)))
+	default:
+		return c, false
+	}
+	c.op = op
+	c.strict = op == bytecode.OpStrictEq || op == bytecode.OpStrictNe
+	c.negate = op == bytecode.OpNe || op == bytecode.OpStrictNe
+	return c, c.strict || op == bytecode.OpEq || op == bytecode.OpNe || op == bytecode.OpMod
 }
 
 type jitTreeExit struct {
@@ -464,23 +669,63 @@ func (s *jitState) encodeFrame(f *frame, stack []Value, depth int) {
 // No borrowed view or native scalar root survives a callback. Consecutive host
 // operations and intervening fused local copies share one frame publication;
 // sixteen instructions bound the Go batch before native selection resumes.
-func (r *Runtime) jitHost(f *frame, sp, limit int) (int, error) {
+func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
+	steps := 0
 	for range limit {
 		pc := int(f.pc)
 		in := f.cl.fn.Code[pc]
+		n := len(f.locals) + len(f.cl.upvalues)
+		if jitBinaryBoundary(in) {
+			cmp, _ := jitBinaryAt(in, n+sp-f.base)
+			left := r.jitFrameValue(f, cmp.left)
+			right := cmp.literal
+			if cmp.right >= 0 {
+				right = r.jitFrameValue(f, cmp.right)
+			}
+			f.pc++
+			sp += cmp.delta
+			steps++
+			if cmp.op == bytecode.OpMod {
+				value, err := r.arith(cmp.op, left, right)
+				if err != nil {
+					return sp, steps, err
+				}
+				r.stack[f.base+cmp.dest-n] = value
+				continue
+			}
+			result := left.StrictEquals(right)
+			if !cmp.strict {
+				var err error
+				result, err = r.looseEquals(left, right)
+				if err != nil {
+					return sp, steps, err
+				}
+			}
+			result = result != cmp.negate
+			if cmp.branch {
+				if !result {
+					f.pc = in.A
+				}
+			} else {
+				r.stack[f.base+cmp.dest-n] = Bool(result)
+			}
+			continue
+		}
 		if in.Op == bytecode.OpSetLocalGet {
 			f.locals[in.A] = r.stack[sp-1]
 			r.stack[sp-1] = f.locals[in.B]
 			f.pc++
+			steps++
 			continue
 		}
 		switch in.Op {
 		case bytecode.OpPushThis, bytecode.OpGetProp, bytecode.OpSetProp, bytecode.OpCall,
-			bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpGetPropThis:
+			bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpGetPropThis, bytecode.OpSetIndex:
 		default:
-			return sp, nil
+			return sp, steps, nil
 		}
 		f.pc++
+		steps++
 		stack := r.stack
 		var v Value
 		var err error
@@ -497,7 +742,16 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, error) {
 		case bytecode.OpSetProp:
 			sp -= 2
 			if err := r.setValueProp(stack[sp], f.cl.names[in.A], stack[sp+1], f.cl.fn.Strict); err != nil {
-				return sp, err
+				return sp, steps, err
+			}
+			continue
+		case bytecode.OpSetIndex:
+			sp -= 3
+			obj, key, value := stack[sp], stack[sp+1], stack[sp+2]
+			if !(key.IsNumber() && setElem(obj, key, value)) {
+				if err := r.setIndexed(obj, key, value, f.cl.fn.Strict); err != nil {
+					return sp, steps, err
+				}
 			}
 			continue
 		case bytecode.OpCall, bytecode.OpCallMethod:
@@ -520,12 +774,23 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, error) {
 			panic("invalid JIT host operation")
 		}
 		if err != nil {
-			return sp, err
+			return sp, steps, err
 		}
 		r.stack[sp] = v
 		sp++
 	}
-	return sp, nil
+	return sp, steps, nil
+}
+
+func (r *Runtime) jitFrameValue(f *frame, index int) Value {
+	if index < len(f.locals) {
+		return f.locals[index]
+	}
+	index -= len(f.locals)
+	if index < len(f.cl.upvalues) {
+		return f.cl.upvalues[index].get()
+	}
+	return r.stack[f.base+index-len(f.cl.upvalues)]
 }
 
 func (r *Runtime) jitInterpret(f *frame, sp int, pending error) (Value, error, bool) {

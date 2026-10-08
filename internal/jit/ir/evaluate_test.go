@@ -39,7 +39,7 @@ func TestGuardAtomicity(t *testing.T) {
 		{Op: Branch, Operator: Lt, Left: Slot(0), Right: Slot(1), Target: 0},
 		{Op: Branch, Operator: Truth, Left: Slot(1), Target: 0},
 		{Op: Update, Operator: Add, Left: Slot(1), Dest: 1, Extra: 0},
-		{Op: Return, Left: Slot(1)},
+		{Op: Return, Left: Slot(2)},
 		{Op: Copy, Left: Slot(0), Dest: 1, Check: true, CheckSlot: 2},
 	} {
 		slots := []Value{Float(42), {Kind: Opaque, Bits: 17}, {Kind: Uninitialized}}
@@ -49,6 +49,15 @@ func TestGuardAtomicity(t *testing.T) {
 		if err != nil || exit.Kind != GuardExit || exit.Steps != 0 || exit.State.PC != 8 || !reflect.DeepEqual(slots, before) {
 			t.Fatalf("op %d: exit %+v, %v; slots %+v", in.Op, exit, err, slots)
 		}
+	}
+}
+
+func TestReferenceReturn(t *testing.T) {
+	slots := []Value{{Kind: Opaque, Bits: 17}}
+	p := &Program{Locals: 1, Code: []Instruction{{Op: Return, Left: Slot(0)}}, Maps: []StateMap{{PC: 8}}}
+	exit, err := p.Evaluate(slots, 0, 1)
+	if err != nil || exit.Kind != Returned || exit.Value != slots[0] || exit.Steps != 1 || exit.State.PC != 8 {
+		t.Fatalf("rooted return %+v, %v", exit, err)
 	}
 }
 

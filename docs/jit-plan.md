@@ -26,7 +26,16 @@ loops still check cancellation and limits.
 Constant bitwise operands use immediate instructions; rare large-double
 conversions sit outside the hot instruction stream. External host entries
 return directly in Go, and primitive native returns avoid publishing locals
-that cannot remain observable. A full external Crypto workload benchmark
+that cannot remain observable. Reference returns now decode their rooted handle
+before clearing native scratch. Nonnumeric equality and indexed writes resume
+through Go exits; ordinary array growth refreshes every borrowed alias. Proven
+ordinary writable holes can be filled with numbers directly in native code.
+Remainder resumes through the existing numeric/coercion implementation, including
+fused operands. Ordinary globals avoid frame publication, and closure-local
+executable hints avoid repeated weak-key lookups. Sampled native work per host
+boundary keeps unsuitable short entries in Go while allowing long-call loop
+promotion; budget checks also bound an unsuitable first long invocation.
+A full external Crypto workload benchmark
 compares fresh bytecode for the interpreter, tree, and native tiers.
 See [the implementation notes](../internal/jit/README.md)
 for contracts, validation, and current limits.
@@ -35,6 +44,7 @@ The active performance target is a measured 5-10x improvement over the bytecode
 interpreter on representative hot workloads. Compare the existing tree tier
 separately, and report the mixed V8 suite as its own acceptance measure; a hot
 kernel improvement does not establish the same gain for the whole engine.
+Five times is the minimum usefulness threshold; the target remains incomplete.
 
 ## Objective and scope
 
@@ -153,7 +163,9 @@ remainder, bitwise conversions, BigInt, strings, properties, calls, and other
 operations to the existing executor until each has exact semantic tests.
 The current executor also supports numeric bitwise operations, read-only
 captured bindings, dense numeric arrays, and resumable calls and properties.
-Remainder, BigInt, and string operations still use interpreter fallback.
+Remainder and nonnumeric equality have resumable Go boundaries, and reference
+values can return through rooted handles. Other BigInt and string operations
+still use interpreter fallback.
 
 A failed guard exits before the failing operation. Commit all earlier work,
 including completed loop iterations, exactly once, then resume that operation

@@ -50,7 +50,7 @@ func TestRefusals(t *testing.T) {
 		{`function* f() { yield 1 }`, "async or generator"},
 		{`async function f() { return 1 }`, "async or generator"},
 		{`function f() { with ({}) { return 1 } }`, "unsupported opcode"},
-		{`function f(a) { return a % 2 }`, "unsupported opcode mod"},
+		{`function f(a) { return a ** 2 }`, "unsupported opcode pow"},
 		{`function f() { const a=1; a=2; return a }`, "unsupported opcode"},
 	} {
 		t.Run(tc.reason+tc.source, func(t *testing.T) {
@@ -59,6 +59,29 @@ func TestRefusals(t *testing.T) {
 				t.Fatalf("refusal = %v, want %q", err, tc.reason)
 			}
 		})
+	}
+}
+
+func TestRemainderHostBoundaries(t *testing.T) {
+	for _, code := range [][]bytecode.Instr{
+		{{Op: bytecode.OpGetLocalIndex, B: 1}, {Op: bytecode.OpPushInt, A: 3}, {Op: bytecode.OpMod}, {Op: bytecode.OpReturn}},
+		{{Op: bytecode.OpGetLocalIndex, B: 1}, {Op: bytecode.OpBinLocal, A: 1, B: uint32(bytecode.OpMod)}, {Op: bytecode.OpReturn}},
+		{{Op: bytecode.OpGetLocalIndex, B: 1}, {Op: bytecode.OpBinImm, A: 3, B: uint32(bytecode.OpMod)}, {Op: bytecode.OpReturn}},
+		{{Op: bytecode.OpGetLocalIndex, B: 1}, {Op: bytecode.OpDrop}, {Op: bytecode.OpLocalBinImm, A: uint32(bytecode.OpMod) << 24, B: 3}, {Op: bytecode.OpReturn}},
+	} {
+		p, err := Lower(fixture(code...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pc := len(code) - 2
+		if p.Code[pc].Op != ir.Host {
+			t.Fatalf("remainder at %d did not retain its host boundary", pc)
+		}
+		slots := make([]ir.Value, p.Locals+p.StackSize)
+		exit, err := p.Evaluate(slots, pc, 1)
+		if err != nil || exit.Kind != ir.HostExit || exit.State != p.Maps[pc] || exit.Steps != 0 {
+			t.Fatalf("remainder exit %+v, %v", exit, err)
+		}
 	}
 }
 

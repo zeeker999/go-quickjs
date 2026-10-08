@@ -46,7 +46,7 @@ func TestNativeProgramABI(t *testing.T) {
 		t.Fatal("native program ABI changed")
 	}
 	var view ir.ArrayView
-	if unsafe.Sizeof(view) != 32 || unsafe.Offsetof(view.DenseLength) != 8 || unsafe.Offsetof(view.Length) != 16 || unsafe.Offsetof(view.NumberLimit) != 24 {
+	if unsafe.Sizeof(view) != 40 || unsafe.Offsetof(view.DenseLength) != 8 || unsafe.Offsetof(view.Length) != 16 || unsafe.Offsetof(view.NumberLimit) != 24 || unsafe.Offsetof(view.WritableHole) != 32 {
 		t.Fatal("native array ABI changed")
 	}
 }
@@ -117,6 +117,42 @@ func TestNativeProgramArrayViewCache(t *testing.T) {
 	}
 	if _, err := c.RunArrays(x, views[:1], 0, 5); !errors.Is(err, ir.ErrState) {
 		t.Fatalf("invalid views: %v", err)
+	}
+}
+
+func TestNativeProgramHoleWrites(t *testing.T) {
+	const hole = 0xfff8000000000008
+	type cell struct {
+		bits uint64
+		ref  unsafe.Pointer
+	}
+	p := &ir.Program{Locals: 3, Code: []ir.Instruction{
+		{Op: ir.ArrayWrite, Left: ir.Slot(0), Right: ir.Slot(1), Third: ir.Slot(2)},
+		{Op: ir.Return, Left: ir.Slot(2)},
+	}, Maps: []ir.StateMap{{PC: 0}, {PC: 1}}}
+	c := newTestCode(t, p)
+	for _, bits := range []uint64{hole, 0xfff8000000000001, math.Float64bits(7)} {
+		for _, permission := range []uint64{0, hole} {
+			for _, value := range []float64{3, math.NaN(), math.Copysign(0, -1)} {
+				for _, budget := range []uint64{0, 1, 2} {
+					a, b := cell{bits: bits}, cell{bits: bits}
+					va, vb := make([]ir.ArrayView, ir.MaxSlots), make([]ir.ArrayView, ir.MaxSlots)
+					va[1] = ir.ArrayView{Data: unsafe.Pointer(&a), DenseLength: 1, Length: 1, NumberLimit: 0xfff8000000000000, WritableHole: permission}
+					vb[1] = va[1]
+					vb[1].Data = unsafe.Pointer(&b)
+					x := []ir.Value{{Kind: ir.Opaque, Bits: 1}, ir.Float(0), ir.Float(value)}
+					y := append([]ir.Value(nil), x...)
+					want, err := p.EvaluateArrays(x, va, 0, budget)
+					if err != nil {
+						t.Fatal(err)
+					}
+					got, err := c.RunArrays(y, vb, 0, budget)
+					if err != nil || got != want || a != b || !reflect.DeepEqual(x, y) || b.ref != nil {
+						t.Fatalf("hole %x permission %x budget %d: %+v/%+v, %v", bits, permission, budget, got, want, err)
+					}
+				}
+			}
+		}
 	}
 }
 
