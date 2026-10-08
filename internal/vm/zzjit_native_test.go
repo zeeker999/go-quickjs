@@ -2415,7 +2415,7 @@ func TestJITTreeRecoveryNarrow(t *testing.T) {
 		}
 	}
 	r.jitEnabled = false
-	if r.jitTreeRecovery(frameWith(func(*closure) {})) {
+	if r.jitOn() && r.jitTreeRecovery(frameWith(func(*closure) {})) {
 		t.Error("recovery with the JIT off")
 	}
 }

@@ -565,7 +565,9 @@ start:
 	var v Value
 	var err error
 	var native bool
-	v, err, native = r.tryJITFrame(f)
+	if r.jitOn() {
+		v, err, native = r.tryJITFrame(f)
+	}
 	if !native {
 		t := (*tree)(atomic.LoadPointer(&fn.VMCode))
 		if t == nil {

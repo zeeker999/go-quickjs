@@ -1,7 +1,7 @@
 # Native JIT tier
 
 This package is the optional native tier's machine-code side. The VM side
-lives in `internal/vm/zjit_*.go`.
+lives in `internal/vm/zzjit_*.go`.
 
 The tier is **experimental and opt-in**, and it needs two things:
 
@@ -27,9 +27,13 @@ This file states the contracts the code keeps. Where the work is going is in
 | `program_*.go` | Analysis (`program_assembler.go`, `program_ranges.go`) and the two emitters: `program_amd64.go` and `program_arm64.go`. |
 | `entry_*.s` | The bridges from Go into a program. |
 | `memory_*.go`, `policy_darwin.go` | Executable memory. |
-| `internal/vm/zjit_native.go` | The VM's side: selection, the code cache, frame encoding and publication, host exits. |
-| `internal/vm/zjit_calls.go` | The call coordinator. |
-| `internal/vm/zjit_disabled.go` | The stubs for builds without the tier. |
+| `internal/vm/zzjit_native.go` | The VM's side: selection, the code cache, frame encoding and publication, host exits. |
+| `internal/vm/zzjit_calls.go` | The call coordinator. |
+| `internal/vm/zzjit_disabled.go` | The stubs for builds without the tier. |
+
+The VM files are named `zzjit_` so that they sort after `ztree_*.go`.
+Package vm's code is laid out in file-name order, so this placement moves
+nothing the interpreter or the tree tier runs.
 
 ## The execution boundary
 

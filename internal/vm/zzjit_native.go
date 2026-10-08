@@ -21,7 +21,7 @@ const jitCacheBytes = 8 << 20
 const jitMetadataBytes = 512 << 10
 const jitHotCalls = 8
 
-// jitBuilt guards the JIT's hooks in the interpreter; see zjit_disabled.go.
+// jitBuilt guards the JIT's hooks in the interpreter; see zzjit_disabled.go.
 const jitBuilt = true
 
 type jitFields struct {
@@ -166,8 +166,9 @@ func (r *Runtime) initJIT(enabled bool) {
 // instead, so a nested call keeps runTree's recover while its loop may still
 // promote, and only then: once the JIT has refused the function, keeps it for
 // callers, or has given up on its guards, it costs nothing to trees.
+// callTree asks only when jitOn.
 func (r *Runtime) jitTreeRecovery(f *frame) bool {
-	if !r.jitEnabled || f.cl.jitRefused {
+	if f.cl.jitRefused {
 		return false
 	}
 	e := r.jit.hint(f.cl.hint())
@@ -524,8 +525,14 @@ func (s *jitState) clearReferences() {
 	clear(s.references.cells[:min(s.rootCount, jitReferenceReceivers)])
 }
 
+// jitOn reports whether this runtime runs the JIT. The call path tests it
+// before each hook, so with the JIT off a call pays this flag test and
+// nothing else; without the JIT built in it is the constant false.
+func (r *Runtime) jitOn() bool { return r.jitEnabled }
+
+// tryJITFrame is the call path's hook, for a runtime that runs the JIT.
 func (r *Runtime) tryJITFrame(f *frame) (Value, error, bool) {
-	if !r.jitEnabled || f.cl.jitRefused || r.jit.hint(f.cl.hint()) != nil && r.jit.hint(f.cl.hint()).entrySlow {
+	if f.cl.jitRefused || r.jit.hint(f.cl.hint()) != nil && r.jit.hint(f.cl.hint()).entrySlow {
 		return Undefined, nil, false
 	}
 	// Cold calls stay in the existing tiers without allocating native state.
@@ -1010,7 +1017,15 @@ type jitTreeExit struct {
 	err   error
 }
 
+// tryJITTreeLoop is the tree's back-edge hook. Its gate inlines into
+// backEdgeCheck, so with the JIT off a check pays a flag test.
 func (r *Runtime) tryJITTreeLoop(c *tctx, pc, depth int, fullBudget bool) {
+	if r.jitEnabled {
+		r.tryJITTreeLoopEnabled(c, pc, depth, fullBudget)
+	}
+}
+
+func (r *Runtime) tryJITTreeLoopEnabled(c *tctx, pc, depth int, fullBudget bool) {
 	if v, err, done := r.tryJITLoop(c.f, c.cl.fn.Code[pc].A, c.f.base+depth, fullBudget); done {
 		// Tree branch nodes return block indices. Unwind to runTree only
 		// after native execution or its interpreter fallback has completed.
