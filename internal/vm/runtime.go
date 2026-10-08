@@ -26,7 +26,6 @@ type Runtime struct {
 	// belongs to, or the one the host is evaluating in. Its fields are
 	// promoted, so r.proto and r.global are the current realm's.
 	*Realm
-	jitFields
 
 	atoms *atomTable
 
@@ -273,6 +272,11 @@ type Runtime struct {
 	// debug is the debugger of a runtime made for one, and nil for any
 	// other; see zdebug.go.
 	debug *debugState
+	// jitFields is the optional native tier's state, empty in builds
+	// without it. It comes after everything the interpreter reads, so that
+	// a build with the tier moves none of their offsets, and before the last
+	// field, so that an empty one adds no padding.
+	jitFields
 	// sourceMaps maps stack traces through scripts' source maps, once a
 	// host gives a loader; see zsourcemap.go.
 	sourceMaps *sourceMaps

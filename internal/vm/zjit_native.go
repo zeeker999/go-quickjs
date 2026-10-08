@@ -3,6 +3,7 @@
 package vm
 
 import (
+	"encoding/binary"
 	"errors"
 	"math"
 	"runtime"
@@ -36,15 +37,57 @@ func (r *Runtime) recordJITStringIntrinsic() {
 }
 
 // A closure belongs to one runtime. Hotness and permanent selection refusals
-// live here without registering a weak key on cold or refused calls.
+// live here without registering a weak key on cold or refused calls. The
+// fields fit the closure's padding beside pureMiss, so it keeps its 128-byte
+// size class: jitHint is not a pointer but a slot and tag in the runtime's
+// hint table (jitState.hint), and bytes, so that nothing is aligned past it.
 type jitClosureFields struct {
 	jitRefused   bool
 	jitCalls     uint8
 	jitLoopDelay uint8
-	jitEntry     *jitEntry
+	jitHint      [4]byte
+}
+
+func (c *jitClosureFields) hint() uint32 { return binary.LittleEndian.Uint32(c.jitHint[:]) }
+
+func (c *jitClosureFields) setHint(h uint32) { binary.LittleEndian.PutUint32(c.jitHint[:], h) }
+
+type jitHintSlot struct {
+	e   *jitEntry
+	tag uint32
+}
+
+// jitHintBits is the slot part of a hint; the tag is the rest.
+const jitHintBits = 8
+
+// hint returns the entry a closure's hint names, or nil if the hint is empty
+// or stale. The state is discarded only when a closed runtime releases it, so
+// a hint never outlives the table it indexes.
+func (s *jitState) hint(h uint32) *jitEntry {
+	if h == 0 || s == nil {
+		return nil
+	}
+	slot := &s.hints[h&(1<<jitHintBits-1)]
+	if slot.tag != h>>jitHintBits {
+		return nil
+	}
+	return slot.e
+}
+
+// entryOf is the program cached for cl's function, as cl's hint names it.
+func (r *Runtime) entryOf(cl *closure) *jitEntry { return r.jit.hint(cl.hint()) }
+
+// hintFor is the hint naming e, or 0 for none.
+func hintFor(e *jitEntry) uint32 {
+	if e == nil {
+		return 0
+	}
+	return e.hint
 }
 
 type jitEntry struct {
+	// hint is the slot and tag a closure remembers this entry by.
+	hint          uint32
 	code          *jit.Code
 	misses        uint8
 	probes        uint8
@@ -80,7 +123,12 @@ type jitState struct {
 	cache           map[weak.Pointer[bytecode.Function]]*jitEntry
 	// generation advances whenever the cache releases code, which is when a
 	// program refused for want of budget may fit.
-	generation    uint64
+	generation uint64
+	// hints holds each cached entry in a slot, 1 to jitCacheEntries, that a
+	// closure remembers with the slot's tag as of then (jitClosureFields): a
+	// slot reused for another entry has a new tag, so a stale hint misses.
+	hints         [jitCacheEntries + 1]jitHintSlot
+	nextTag       uint32
 	slots         [ir.MaxSlots]ir.Value
 	roots         [ir.MaxSlots]Value
 	arrays        [ir.MaxSlots]ir.ArrayView
@@ -114,9 +162,16 @@ func (r *Runtime) initJIT(enabled bool) {
 }
 
 // Loop promotion returns through a panic caught by the callee's runTree.
-// A nested tree without its own recovery would return from its caller instead.
+// A nested tree without its own recovery would return from its caller
+// instead, so a nested call keeps runTree's recover while its loop may still
+// promote, and only then: once the JIT has refused the function, keeps it for
+// callers, or has given up on its guards, it costs nothing to trees.
 func (r *Runtime) jitTreeRecovery(f *frame) bool {
-	return r.jitEnabled && !f.cl.jitRefused
+	if !r.jitEnabled || f.cl.jitRefused {
+		return false
+	}
+	e := r.jit.hint(f.cl.hint())
+	return e == nil || e.deferred || e.code != nil && !e.calleeOnly && e.misses < 8
 }
 
 // jitCodeBytes is what the JIT holds: executable pages, their metadata, and
@@ -144,11 +199,37 @@ func (s *jitState) dropEntry(key weak.Pointer[bytecode.Function], e *jitEntry) b
 	if e.code.Close() != nil {
 		return false
 	}
-	delete(s.cache, key)
+	s.forget(key, e)
 	if held {
 		s.generation++
 	}
 	return true
+}
+
+// forget removes e from the cache and frees its hint slot.
+func (s *jitState) forget(key weak.Pointer[bytecode.Function], e *jitEntry) {
+	delete(s.cache, key)
+	if e.hint != 0 {
+		s.hints[e.hint&(1<<jitHintBits-1)] = jitHintSlot{}
+		e.hint = 0
+	}
+}
+
+// remember caches e for key, in a free hint slot. The cache never holds more
+// than jitCacheEntries entries, so there always is one.
+func (s *jitState) remember(key weak.Pointer[bytecode.Function], e *jitEntry) {
+	s.cache[key] = e
+	for i := 1; i < len(s.hints); i++ {
+		if s.hints[i].e == nil {
+			s.nextTag = (s.nextTag + 1) & (1<<(32-jitHintBits) - 1)
+			if s.nextTag == 0 {
+				s.nextTag = 1
+			}
+			s.hints[i] = jitHintSlot{e: e, tag: s.nextTag}
+			e.hint = uint32(i) | s.nextTag<<jitHintBits
+			return
+		}
+	}
 }
 
 func (r *Runtime) releaseJIT() {
@@ -205,7 +286,7 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool) *jitEntry {
 			if !e.deferred || e.generation == r.jit.generation {
 				return e
 			}
-			delete(r.jit.cache, key)
+			r.jit.forget(key, e)
 		}
 		for key, e := range r.jit.cache {
 			if key.Value() == nil {
@@ -322,7 +403,7 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool) *jitEntry {
 			s.references = new(jitReferences)
 		}
 	}
-	s.cache[weak.Make(fn)] = e
+	s.remember(weak.Make(fn), e)
 	return e
 }
 
@@ -446,7 +527,7 @@ func (s *jitState) clearReferences() {
 }
 
 func (r *Runtime) tryJITFrame(f *frame) (Value, error, bool) {
-	if !r.jitEnabled || f.cl.jitRefused || f.cl.jitEntry != nil && f.cl.jitEntry.entrySlow {
+	if !r.jitEnabled || f.cl.jitRefused || r.jit.hint(f.cl.hint()) != nil && r.jit.hint(f.cl.hint()).entrySlow {
 		return Undefined, nil, false
 	}
 	// Cold calls stay in the existing tiers without allocating native state.
@@ -475,10 +556,10 @@ func (r *Runtime) tryJITLoop(f *frame, pc uint32, sp int, fullBudget bool) (Valu
 }
 
 func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, bool) {
-	e := f.cl.jitEntry
+	e := r.jit.hint(f.cl.hint())
 	if e == nil || e.code != nil && e.code.Size() == 0 {
 		e = r.jitFor(f.cl.fn)
-		f.cl.jitEntry = e
+		f.cl.setHint(hintFor(e))
 	}
 	if e == nil {
 		// Resource and OS refusals may change. Retry after another warmup,
@@ -491,7 +572,7 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 		if e.deferred {
 			// Out of code budget: warm up again and look again then, which
 			// costs a cache lookup until the cache releases code.
-			f.cl.jitEntry = nil
+			f.cl.setHint(0)
 			f.cl.jitCalls = 0
 			f.cl.jitLoopDelay = jitHotCalls
 			return Undefined, nil, false
@@ -625,7 +706,7 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 			_, live := e.code.EntryDepth(pc)
 			if r.jit != s || !live {
 				e = r.jitFor(f.cl.fn)
-				f.cl.jitEntry = e
+				f.cl.setHint(hintFor(e))
 				if e == nil || e.code == nil {
 					return r.jitInterpret(f, sp, nil)
 				}
