@@ -334,10 +334,17 @@ func (b *builder) fill(blk *Block) {
 	f := b.f
 	if blk.PC < 0 {
 		e, _ := f.entryForBlock(blk)
-		for i := 0; i < b.p.Locals+e.Depth; i++ {
+		blk.Header = &FrameState{PC: b.p.Maps[e.PC].PC, Depth: e.Depth, Slots: make([]*Value, b.p.Locals+e.Depth)}
+		for i := range blk.Header.Slots {
 			v := f.newValue(blk, OpLoadSlot, Tagged)
 			v.Aux = i
 			b.write(i, blk, v)
+			blk.Header.Slots[i] = v
+		}
+		for _, v := range blk.Header.Slots {
+			c := f.newValue(blk, OpCheckScalar, None, v)
+			c.Aux = int(ir.GuardExit)
+			c.State = blk.Header
 		}
 		return
 	}

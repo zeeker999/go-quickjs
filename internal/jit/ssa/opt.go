@@ -61,6 +61,9 @@ func Optimize(f *Func) {
 		if len(subst) > 0 {
 			rewrite(f, find)
 		}
+		if unboxPhis(f) {
+			changed = true
+		}
 		removed := removeDead(f)
 		if !changed && !removed {
 			break
@@ -126,6 +129,145 @@ func simplify(f *Func, v *Value) *Value {
 		v.Op, v.Const, v.Args = OpConstF64, ir.Value{Kind: ir.Number, Bits: math.Float64bits(r.f)}, nil
 	}
 	return nil
+}
+
+// unboxPhis gives a phi that only ever carries numbers a Float64 phi, so a
+// loop's numbers stay unboxed. A candidate's arguments are boxed numbers,
+// numeric constants, other candidates, or slots loaded at an entry; a loaded
+// slot is unboxed by a guard in its entry block, which exits there if the
+// slot is not a number (a speculation, as Phase 3 makes more of). A candidate
+// needs evidence that it is a number: a boxed number or numeric constant
+// among its inputs, directly or through candidates, or a use that unboxes it.
+// Phis of loads nobody unboxes are left as they are. The old phi becomes a
+// box of the new one, which other passes then cancel.
+func unboxPhis(f *Func) bool {
+	cand := map[*Value]bool{}
+	unboxedUse := map[*Value]bool{}
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == OpPhi && v.Type == Tagged {
+				cand[v] = true
+			}
+			if v.Op == OpUnboxF64 {
+				unboxedUse[v.Args[0]] = true
+			}
+		}
+	}
+	numeric := func(a *Value) bool {
+		return a.Op == OpBoxF64 || a.Op == OpConst && a.Const.Kind == ir.Number
+	}
+	// Filter until stable: a candidate's arguments must be acceptable, and it
+	// needs evidence, directly or through candidates. Removing one candidate
+	// can disqualify another, so both filters repeat.
+	for changed := true; changed; {
+		changed = false
+		for v := range cand {
+			for _, a := range v.Args {
+				if !numeric(a) && !cand[a] && !(a.Op == OpLoadSlot && a.Block.PC < 0) {
+					delete(cand, v)
+					changed = true
+					break
+				}
+			}
+		}
+		boxed := map[*Value]bool{}
+		for v := range cand {
+			boxed[v] = unboxedUse[v]
+		}
+		for grew := true; grew; {
+			grew = false
+			for v := range cand {
+				if boxed[v] {
+					continue
+				}
+				for _, a := range v.Args {
+					if numeric(a) || boxed[a] {
+						boxed[v] = true
+						grew = true
+						break
+					}
+				}
+			}
+		}
+		for v := range cand {
+			if !boxed[v] {
+				delete(cand, v)
+				changed = true
+			}
+		}
+	}
+	if len(cand) == 0 {
+		return false
+	}
+	fp := map[*Value]*Value{}
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if cand[v] {
+				p := &Value{ID: f.nextID, Op: OpPhi, Type: Float64, Block: b}
+				f.nextID++
+				fp[v] = p
+			}
+		}
+	}
+	unboxed := map[*Value]*Value{}
+	for v, p := range fp {
+		for _, a := range v.Args {
+			var x *Value
+			switch {
+			case a.Op == OpBoxF64:
+				x = a.Args[0]
+			case a.Op == OpConst:
+				// A numeric constant: its number, defined beside it.
+				x = unboxed[a]
+				if x == nil {
+					x = &Value{ID: f.nextID, Op: OpConstF64, Type: Float64, Const: a.Const, Block: a.Block}
+					f.nextID++
+					insertAfter(a, x)
+					unboxed[a] = x
+				}
+			case cand[a]:
+				x = fp[a]
+			default:
+				x = unboxed[a]
+				if x == nil {
+					e := a.Block
+					x = &Value{ID: f.nextID, Op: OpUnboxF64, Type: Float64, Args: []*Value{a},
+						Aux: int(ir.GuardExit), State: e.Header, Block: e}
+					f.nextID++
+					e.Values = append(e.Values, x)
+					unboxed[a] = x
+				}
+			}
+			p.Args = append(p.Args, x)
+		}
+	}
+	subst := map[*Value]*Value{}
+	for _, b := range f.Blocks {
+		var phis, boxes, rest []*Value
+		for _, v := range b.Values {
+			switch {
+			case v.Op == OpPhi:
+				phis = append(phis, v)
+				if p := fp[v]; p != nil {
+					phis = append(phis, p)
+					box := &Value{ID: f.nextID, Op: OpBoxF64, Type: Tagged, Args: []*Value{p}, Block: b}
+					f.nextID++
+					boxes = append(boxes, box)
+					subst[v] = box
+				}
+			default:
+				rest = append(rest, v)
+			}
+		}
+		b.Values = append(append(phis, boxes...), rest...)
+	}
+	rewrite(f, func(v *Value) *Value {
+		if w, ok := subst[v]; ok {
+			return w
+		}
+		return v
+	})
+	return true
 }
 
 // rewrite replaces every use of a value with find's answer for it.
@@ -241,4 +383,16 @@ func recount(f *Func) {
 		state(b.State)
 		state(b.Header)
 	}
+}
+
+// insertAfter places v in a's block right after a.
+func insertAfter(a, v *Value) {
+	b := a.Block
+	for i, w := range b.Values {
+		if w == a {
+			b.Values = append(b.Values[:i+1], append([]*Value{v}, b.Values[i+1:]...)...)
+			return
+		}
+	}
+	panic("ssa: insertAfter: value not in its block")
 }

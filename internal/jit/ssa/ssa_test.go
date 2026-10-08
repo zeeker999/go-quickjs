@@ -96,6 +96,17 @@ func compare(t *testing.T, p *ir.Program, f *Func, pc int, slots []ir.Value, pol
 		if err != nil {
 			t.Fatalf("ssa from pc %d: %v\n%s", entry, err, f)
 		}
+		if got.Kind == ir.GuardExit {
+			// The interpreter takes over, as in the VM: here, the slot IR.
+			got, err = p.Evaluate(y, int(got.State.PC), 20000)
+			if err != nil {
+				t.Fatalf("slot IR after a guard: %v", err)
+			}
+			if got.Kind == ir.BudgetExit {
+				return false
+			}
+			break
+		}
 		if got.Kind != ir.BudgetExit {
 			break
 		}
@@ -132,8 +143,14 @@ func checkProgram(t *testing.T, r *rand.Rand, p *ir.Program) (*Func, int) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := Check(f); err != nil {
+		t.Fatalf("built: %v\n%s", err, f)
+	}
 	if optimizeAll {
 		Optimize(f)
+		if err := Check(f); err != nil {
+			t.Fatalf("optimized: %v\n%s", err, f)
+		}
 	}
 	finished := 0
 	for _, e := range f.Entries {

@@ -100,9 +100,22 @@ func Evaluate(f *Func, pc int, slots []ir.Value, pollEvery int) (ir.Exit, error)
 		return ir.Exit{}, ir.ErrState
 	}
 	vals := make([]val, f.nextID)
+	// An exit rematerializes boxes and constants from their operands, as
+	// generated code does: a loop header's state names boxes of its phis,
+	// which a poll exits to before the boxes themselves are computed.
+	var slot func(v *Value) ir.Value
+	slot = func(v *Value) ir.Value {
+		switch v.Op {
+		case OpConst:
+			return v.Const
+		case OpBoxF64, OpBoxBool:
+			return apply(v.Op, v.Aux, vals[v.Args[0].ID], val{}).t
+		}
+		return vals[v.ID].t
+	}
 	exit := func(s *FrameState, kind ir.ExitKind) (ir.Exit, error) {
 		for i, v := range s.Slots {
-			slots[i] = vals[v.ID].t
+			slots[i] = slot(v)
 		}
 		return ir.Exit{Kind: kind, State: ir.StateMap{PC: s.PC, Depth: s.Depth}}, nil
 	}
@@ -154,6 +167,10 @@ func Evaluate(f *Func, pc int, slots []ir.Value, pollEvery int) (ir.Exit, error)
 				vals[v.ID] = val{b: t}
 			case OpCheckInit:
 				if a.t.Kind == ir.Uninitialized {
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
+			case OpCheckScalar:
+				if a.t.Kind == ir.Opaque || a.t.Kind == ir.String {
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
 			default:
