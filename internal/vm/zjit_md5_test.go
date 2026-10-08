@@ -3,9 +3,14 @@
 package vm
 
 import (
+	"context"
+	"errors"
+	"math"
 	"os"
 	"testing"
+	"time"
 
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/compiler"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/parser"
@@ -19,6 +24,74 @@ func TestJITStringPacking(t *testing.T) {
 			t.Logf("hosts=%d guards=%d fast=%d", r.jit.hosts, r.jit.guards, r.jit.fastHosts)
 		}
 		t.Fatalf("packing: %v, %v", v, err)
+	}
+}
+
+func TestJITStringArrayGrowth(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	v, err := r.Run(compileForTest(t, `function pack(s){let a=[];for(let i=0;i<64;i++)a[i]=s.charCodeAt(i);return a}let a=pack('A'.repeat(64));a.length===64&&a.every(n=>n===65)`))
+	if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.hosts != 3 || r.jit.rootCount != 0 {
+		t.Fatalf("native growth: %v, %v", v, err)
+	}
+	for _, tc := range []struct{ name, setup, body, check string }{
+		{"dense", ``, `a[i]=s.charCodeAt(i);`, `a.length===64&&a.every((n,i)=>n===65+i)`},
+		{"gap", ``, `a[i*3]=s.charCodeAt(i);`, `a.length===190&&Object.keys(a).length===64&&!(1 in a)&&a[189]===128`},
+		{"alias callback", `function see(a,i){if(a.length!==i+1||a[i]!==65+i)throw Error('uncommitted')}`, `a[i]=s.charCodeAt(i);see(a,i);`, `a.length===64&&a[63]===128`},
+		{"method mutation", `function see(a,i){if(i===3)String.prototype.charCodeAt=function(){return 42}}`, `a[i]=s.charCodeAt(i);see(a,i);`, `a.length===64&&a[3]===68&&a[4]===42`},
+		{"inherited setter", `let hits=0;function see(a,i){if(i===3)Object.defineProperty(Array.prototype,'4',{set(v){hits++},configurable:true})}`, `a[i]=s.charCodeAt(i);see(a,i);`, `a.length===64&&hits===1&&!Object.hasOwn(a,4)&&a[5]===70`},
+		{"freeze", `function see(a,i){if(i===3)Object.freeze(a)}`, `a[i]=s.charCodeAt(i);see(a,i);`, `good&&a.length===4&&a[3]===68`},
+		{"throw", `let hits=0;function see(a,i){if(i===3)String.prototype.charCodeAt=function(){throw new TypeError('stop')}}`, `a[i]=s.charCodeAt(i);see(a,i);`, `good&&a.length===4&&a[3]===68`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, enabled := range []bool{false, true} {
+				r := jitRuntimeForTest(t, Config{JIT: enabled})
+				source := `'use strict';` + tc.setup + `let a,good=false;function save(v){a=v}function pack(s){let a=[];save(a);for(let i=0;i<64;i++){` + tc.body + `}return a}let s='';for(let i=0;i<64;i++)s+=String.fromCharCode(65+i);try{pack(s)}catch(e){good=e instanceof TypeError};` + tc.check
+				v, err := r.Run(compileForTest(t, source))
+				if err != nil || !v.IsBool() || !v.Truthy() || enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.rootCount != 0) {
+					t.Fatalf("growth JIT %v: %v, %v", enabled, v, err)
+				}
+			}
+		})
+	}
+	// Sparse lengths must never be committed as a dense slice bound.
+	r = jitRuntimeForTest(t, Config{JIT: true})
+	v, err = r.Run(compileForTest(t, `function pack(s,a){let unused=[];for(let i=0;i<2;i++)a[i]=s.charCodeAt(i);return a}let a=[1];a.length=1000000;pack('AB',a);a.length===1000000&&a[0]===65&&a[1]===66`))
+	if err != nil || !v.IsBool() || !v.Truthy() {
+		t.Fatalf("sparse growth: %v, %v", v, err)
+	}
+}
+
+func TestJITArrayGrowthAliases(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	o := newArrayObject(r.proto.array, 16)
+	o.elems = o.elems[:0]
+	s := &jitState{}
+	s.encode(Obj(o))
+	s.encode(Obj(o))
+	s.prepareArrayGrowth()
+	if s.arrays[0].DenseLength != 16 || s.arrays[1].DenseLength != 16 {
+		t.Fatal("did not borrow every alias")
+	}
+	o.elems[:16][7] = Int(7)
+	s.arrays[0].Length, s.arrays[1].Length = 8, 6
+	s.commitArrayGrowth()
+	if len(o.elems) != 8 || o.elems[7].Number() != 7 || math.Float64bits(o.elems[6].num) != holeBits || o.elems[6].ref != nil || s.arrays[0].Length != 8 || s.arrays[1].Length != 8 || s.arrays[0].DenseLength != 8 || s.arrays[1].DenseLength != 8 {
+		t.Fatal("did not commit and normalize aliased lengths")
+	}
+	s.clearRoots()
+	if s.rootCount != 0 || s.arrays[0].Data != nil {
+		t.Fatal("retained growth storage")
+	}
+}
+
+func TestJITArrayGrowthCancellation(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	r.SetContext(ctx)
+	_, err := r.Run(compileForTest(t, `function pack(s){let a=[];for(let i=0;;i=(i+1)&15)a[i]=s.charCodeAt(i);return a}pack('A'.repeat(16))`))
+	if !errors.Is(err, context.DeadlineExceeded) || r.jit == nil || r.jit.budgets == 0 || r.jit.rootCount != 0 {
+		t.Fatalf("bounded growth cancellation: %v", err)
 	}
 }
 
@@ -112,6 +185,53 @@ func TestJITStringRealms(t *testing.T) {
 }
 
 // Use the external library unchanged and validate every complete hash.
+func BenchmarkJITMD5FirstUse(b *testing.B) {
+	path := os.Getenv("QUICKJS_JIT_MD5_SOURCE")
+	if path == "" {
+		b.Skip("set QUICKJS_JIT_MD5_SOURCE to SparkMD5 3.0.2")
+	}
+	source, err := os.ReadFile(path)
+	if err != nil {
+		b.Fatal(err)
+	}
+	compile := func(source string) *bytecode.Function {
+		ast, err := parser.Parse(source, parser.Options{})
+		if err != nil {
+			b.Fatal(err)
+		}
+		fn, err := compiler.Compile(ast, compiler.Options{})
+		if err != nil {
+			b.Fatal(err)
+		}
+		return fn
+	}
+	setup := compile("var module={exports:{}},exports=module.exports;" + string(source) + `var spark=module.exports, input='a'.repeat(1024);function hashes(){return spark.hash(input)}`)
+	call := compile(`hashes()`)
+	for _, mode := range []string{"existing", "native"} {
+		b.Run(mode, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.StopTimer()
+			for range b.N {
+				r := New(Config{JIT: mode == "native"})
+				if _, err := r.Run(setup); err != nil {
+					b.Fatal(err)
+				}
+				// Construction, parsing and declarations are excluded. Native
+				// compilation triggered by this first complete hash is included.
+				b.StartTimer()
+				v, err := r.Run(call)
+				b.StopTimer()
+				if err != nil || !v.IsString() || v.String().Go() != "c9a34cfc85d982698c6ac89f76071abd" || mode == "native" && (r.jit == nil || r.jit.entries == 0) {
+					b.Fatalf("first MD5: %v, %v", v, err)
+				}
+				r.Close()
+				r.ReleaseClosed()
+			}
+		})
+	}
+}
+
 func BenchmarkJITMD5(b *testing.B) {
 	path := os.Getenv("QUICKJS_JIT_MD5_SOURCE")
 	if path == "" {

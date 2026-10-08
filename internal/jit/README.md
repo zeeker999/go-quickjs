@@ -1474,3 +1474,80 @@ language and built-in Test262 runs report 91492 passes, zero failures and 342
 existing skips. Tests cover ASCII, surrogates, coercion and method mutation,
 exact throws and committed prefixes, realm identity, full root tables and
 callee permissions. Evidence is in `../quickjs-jit-results/2026-10-08-md5`.
+
+## Bounded packing growth and integer results
+
+After rebasing onto the structured tree-loop change, native string packing
+retains its gain. Its eight-placement comparison against the rebased dispatch
+foundation measures Crypto +1.3%, mixed +0.4%, and opt-out total +0.8%.
+The following stage retains bitwise results needed by later bitwise consumers
+in arm64 integer registers, without changing the ordinary floating result at
+any exit. Three alternating processes measure MD5 51.1 -> 45.9 us; complete
+RSA remains approximately level. The amd64 emitter retains its existing scalar
+representation.
+
+Write-only string packers that allocate an array can now borrow up to 64
+initialized spare cells per rooted array. Empty literals in those entries use
+the existing sixteen-cell inline allocation. Successful native writes update
+the view's logical length. On every assembly return, the adapter commits the
+largest written length across aliases and restores ordinary bounds before
+host work, cancellation, return or callee transfer. No Go reference or slice
+pointer is written natively. Programs with array reads or length reads cannot
+borrow this capacity; allocation, capacity exhaustion and denied prototype or
+attribute permissions retain the host path. Both native emitters implement
+the same growth operation, and the IR oracle tracks exact committed lengths.
+
+Three alternating fresh-process means for complete validated 1 KB hashes:
+
+| Tier | Time/hash | Bytes/hash | Allocations/hash |
+| --- | ---: | ---: | ---: |
+| Bytecode | 102.0 us | 13208 | 108 |
+| Structured trees | 83.0 us | 13208 | 108 |
+| Native string stage | 51.5 us | 13208 | 108 |
+| Native growth/integer stage | 37.3 us | 10136 | 76 |
+
+Host exits fall from 272 to 16 per hash, with zero guard misses; code plus
+metadata remains 376320 B. This is 2.7x bytecode and 2.2x trees, below the
+5-10x target. Complete validated RSA is 20.063 -> 20.057 ms, effectively level.
+Against the rebased string stage, eight placements measure Crypto +0.7%, mixed
+total -0.7% and opt-out total -0.3%; these do not establish an overall suite win.
+
+The unchanged user script measures 1863.96 ms for 50000 small hashes, 32.9061 ms
+per 1 MB hash and 326.2991 ms per incremental 10 MB hash. Node v26.8.1 measures
+2905.18/56.7187/571.8588 ms with `--jitless`, and
+180.45/3.3447/32.5409 ms with JIT enabled. The user's approximately 188 ms
+result was likely JIT-enabled; our native tier beats local jitless Node but
+remains about 10x slower than Node's JIT on this workload. The offline driver
+also validates the small digest and measures 1916/4152/2980/183 ms for
+native/trees/jitless Node/JIT Node respectively.
+
+First complete hash in a fresh runtime, with construction, parsing and
+declarations excluded but native compilation included, measures 2.049 ms,
+9087296 B and 316 allocations native versus 0.103 ms, 16689 B and 126
+allocations in trees (five fresh runtimes). About 43 further small hashes repay
+that measured first-use cost at the steady-state rates. Three fresh CLI
+processes give median first-hash times 2.523/0.113 ms native/trees. The offline
+50000-hash native process peaks at 42.8 MB RSS, versus 41.0 MB with trees;
+the full original native script peaks at 116.9 MB RSS. Default/tagged qjs
+sizes are 40716802/41160210 B (+443408 B, 1.09%). Default runtimes allocate
+no executable memory. The ordinary-layout V8 score snapshot is 4811 overall,
+Crypto 5818; score-mode peak RSS is 1029357568 B and live heap after GC is
+9.8 MB. Score snapshots are not attribution across placements.
+
+Default/tagged full suites, tagged vet, race, checkptr and Go 1.24 pass.
+Linux/amd64 native emitter and VM tests pass under emulation, Windows
+amd64/arm64 and Linux/386 builds pass, and the 386 length regression passes.
+Windows native execution remains unverified locally. Forced-native Test262
+language and built-ins report 91492 passed, zero failed and 342 existing skips,
+with peak RSS 2947366912 B. Growth tests cover exact native/oracle state at
+every PC and budget, aliases, holes, capacity exhaustion, sparse lengths,
+prototype setters, mutation, frozen arrays, throws, cancellation and release.
+
+The final MD5 CPU profile samples 60.56% generated code. Even eliminating all
+remaining Go time would fall short of 5x bytecode at these measured rates.
+The next major step is to keep arithmetic kernels in integer representation
+across operations and copies, materializing exact JavaScript numbers at exits,
+followed by broader caller/method coverage. The 10x complete RSA acceptance
+target remains separate and unmet. Measurements, profiles, placement builds
+and validation logs remain in `../quickjs-jit-results/2026-10-08-md5`;
+`md5-benchmark.js` is unchanged.

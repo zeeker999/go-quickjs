@@ -35,6 +35,7 @@ type programAssembler struct {
 	exits                          []programExit
 	conversions                    []integerConversion
 	integerOrigin                  int
+	integerResults                 []bool
 }
 
 // R3/AX retain the last ToUint32 result through scalar copies. The origin

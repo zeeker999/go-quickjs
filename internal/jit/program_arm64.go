@@ -33,6 +33,7 @@ func programInstructions(p *ir.Program, dispatch bool) ([]byte, []int, error) {
 	}
 	common := [5]int{a.label(), a.label(), a.label(), a.label(), a.label()}
 	a.regions(p)
+	a.inferIntegerResults(p)
 	initialize := a.label()
 	for mode := 0; mode < 2; mode++ {
 		a.fast = mode == 1
@@ -208,6 +209,9 @@ func programInstructions(p *ir.Program, dispatch bool) ([]byte, []int, error) {
 				continue
 			}
 			a.finishInteger(in)
+			if a.fast && a.integerOrigin >= 0 && a.integerResults[pc] {
+				a.retainIntegerOrigin(a.integerOrigin)
+			}
 			a.commit()
 			if a.tails[pc] == 1 {
 				a.jump(a.fastEntries[pc+1])
@@ -518,8 +522,12 @@ func (a *arm64Program) retainInteger(o ir.Operand) {
 	if !a.fast || o.Slot < 0 {
 		return
 	}
+	a.retainIntegerOrigin(int(a.origins[a.pc][o.Slot]))
+}
+
+func (a *arm64Program) retainIntegerOrigin(origin int) {
 	i := a.integerNext
-	a.integerShadows[i] = int(a.origins[a.pc][o.Slot])
+	a.integerShadows[i] = origin
 	a.integerNext = (i + 1) % len(a.integerShadows)
 	a.word(0x2a0303e0 | uint32(19+i)) // mov wN,w3: shadow scalar bits, never a Go pointer
 }
@@ -946,7 +954,7 @@ func (a *arm64Program) array(in ir.Instruction) {
 		a.memory(true, false, 6, 3, 24)
 		a.compareImmediate(6, 0)
 		a.conditional(0, a.guard)
-		if a.fast {
+		if a.fast || in.Grow {
 			a.word(0xaa0303f0)
 		} // mov x16,x3
 	}
@@ -1013,6 +1021,15 @@ func (a *arm64Program) array(in ir.Instruction) {
 		fp = a.number(in.Third, 0)
 		a.memory(false, true, fp, 3, 0)
 		a.mark(end)
+		if in.Grow {
+			done := a.label()
+			a.word(0x910004a5) // add x5,x5,#1: the successfully stored index
+			a.memory(true, false, 7, 16, 16)
+			a.word(0xeb0700bf)     // cmp x5,x7
+			a.conditional(9, done) // LS
+			a.memory(false, false, 5, 16, 16)
+			a.mark(done)
+		}
 	} else {
 		if in.Op == ir.ArrayUpdate {
 			a.storeNumber(in.Extra, 24)

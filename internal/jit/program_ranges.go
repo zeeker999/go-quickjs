@@ -127,3 +127,42 @@ func boundedExponent(exponent int) uint8 {
 func (a *programAssembler) boundedInteger(o ir.Operand) bool {
 	return a.fast && o.Slot >= 0 && a.ranges[a.pc][o.Slot] != 0
 }
+
+// Retain an integer result only if another bitwise operation consumes its
+// immutable origin before the next arbitrary entry. Ordinary numbers are
+// still written at every instruction, including all guard and budget exits.
+func (a *programAssembler) inferIntegerResults(p *ir.Program) {
+	a.integerResults = make([]bool, len(p.Code))
+	uses := make([]uint16, ir.MaxInstructions*2+ir.MaxSlots)
+	integer := func(in ir.Instruction) bool {
+		return in.Op == ir.Binary && in.Operator >= ir.BitAnd && in.Operator <= ir.UShr ||
+			in.Op == ir.Unary && (in.Operator == ir.Int32 || in.Operator == ir.BitNot)
+	}
+	for pc := len(p.Code) - 1; pc >= 0; pc-- {
+		if p.Maps[pc].Depth < 0 {
+			continue
+		}
+		if a.tails[pc] == 1 {
+			clear(uses)
+		}
+		in := p.Code[pc]
+		if !integer(in) {
+			continue
+		}
+		if pc+1 < len(p.Code) && !a.starts[pc+1] && a.tails[pc] != 1 {
+			origin := a.origins[pc+1][in.Dest]
+			use := uses[origin]
+			// The immediate left consumer already has the result in scratch.
+			next := p.Code[pc+1]
+			direct := integer(next) && next.Left.Slot >= 0 && a.origins[pc+1][next.Left.Slot] == origin
+			a.integerResults[pc] = use > 1 || use == 1 && !direct
+			uses[origin] = 0
+		}
+		if in.Left.Slot >= 0 {
+			uses[a.origins[pc][in.Left.Slot]]++
+		}
+		if in.Op == ir.Binary && in.Right.Slot >= 0 {
+			uses[a.origins[pc][in.Right.Slot]]++
+		}
+	}
+}

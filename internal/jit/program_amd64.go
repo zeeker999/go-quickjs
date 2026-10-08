@@ -899,7 +899,7 @@ func (a *amd64Program) array(in ir.Instruction) {
 		a.memory(0x8b, 9, 8, 24)
 		a.bytes(0x4d, 0x85, 0xc9)
 		a.conditional(4, a.guard)
-		if a.fast {
+		if a.fast || in.Grow {
 			a.move(11, 8)
 		}
 	}
@@ -969,6 +969,18 @@ func (a *amd64Program) array(in ir.Instruction) {
 		a.bytes(0xf2)
 		a.bytes(0x41|(fp>>3)<<2, 0x0f, 0x11, (fp&7)<<3) // movsd xmm,(r8)
 		a.mark(end)
+		if in.Grow {
+			done := a.label()
+			a.move(0, 8)
+			a.memory(0x8b, 2, 11, 0)
+			a.bytes(0x48, 0x29, 0xd0) // subq dx,ax: recover the cell index
+			a.bytes(0x48, 0xc1, 0xe8, 4, 0x48, 0xff, 0xc0)
+			a.memory(0x8b, 2, 11, 16)
+			a.bytes(0x48, 0x39, 0xd0)
+			a.conditional(6, done) // JBE
+			a.memory(0x89, 0, 11, 16)
+			a.mark(done)
+		}
 	} else {
 		if in.Op == ir.ArrayUpdate {
 			a.storeNumber(in.Extra, 15)

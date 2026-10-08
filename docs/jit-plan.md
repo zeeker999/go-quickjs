@@ -207,6 +207,28 @@ instructions and Go coordination, so improving only one side cannot meet 10x.
 Measure each next step with complete RSA and balanced placements; do not use
 native-entry counts or an isolated limb loop as the acceptance result.
 
+## MD5 coverage and arithmetic
+
+The user's small-hash timing of approximately 188 ms aligns with local Node's
+JIT-enabled 180.45 ms, rather than its `--jitless` 2905.18 ms. After the
+structured tree rebase, guarded string packing, retained integer results and
+bounded write-only array growth reduce the unchanged script's 50000 hashes to
+1863.96 ms. Complete validated hashes measure 102.0/83.0/37.3 us in
+bytecode/trees/native, with 16 host exits, zero guards and 76 allocations per
+hash. Native now beats local jitless Node, but neither the 5-10x bytecode target
+nor the complete RSA 10x target is achieved. Balanced mixed-suite results remain
+effectively level; Crypto carries a small cost rather than a demonstrated win.
+
+The final profile samples about 61% in generated code. Coverage alone cannot
+reach 5x: even removing all other time leaves roughly 22.6 us versus the
+20.4 us required. Prioritize integer representation through arithmetic and
+copies, with exact floating-number materialization at all guards, budgets,
+host exits and returns; then expand caller/method coverage. Current 37.3 us
+needs another 1.8x improvement for 5x, or 3.7x for 10x. Preserve independent
+complete RSA validation and mixed/opt-out placement comparisons throughout.
+The implementation notes include cold compilation, memory, Node comparisons
+and the validation evidence for these stages.
+
 ## Objective and scope
 
 Add an optional native executor for `linux/amd64`, `windows/amd64`, and
@@ -521,17 +543,6 @@ See the implementation notes for fresh-process results, placement comparisons,
 memory costs, validation, and the workloads where compilation still loses.
 
 ## Reference
-
-The MD5 coverage stage adds guarded native `charCodeAt` and published array
-literal allocation. Complete 1 KB SparkMD5 hashes improve from about 71 to
-52 us in alternating fresh native processes, while 272 array-allocation/growth
-boundaries remain per hash. Balanced Crypto is 1.4% slower and mixed total is
-effectively level. These measurements precede the new structured tree-loop
-baseline and must be repeated after rebase. Next, remove bounded growth exits
-and measure the remaining arithmetic and coordination costs. The requested
-5-10x representative speedup and 10x complete validated RSA goal remain unmet;
-native coverage counters alone do not satisfy either. The implementation notes
-record ownership, validation, memory and benchmark evidence.
 
 Study wazero's execution context, assembly entry/exit, code ownership, and
 OS allocation designs. Its statically typed Wasm semantics are not a substitute

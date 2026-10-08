@@ -18,6 +18,7 @@ func TestValidateNativeSafety(t *testing.T) {
 		{"literal", func(p *Program) { p.Code[0].Left = Literal(Value{Kind: Kind(99)}) }},
 		{"boolean", func(p *Program) { p.Code[0].Left = Literal(Value{Kind: Boolean, Bits: 2}) }},
 		{"guard", func(p *Program) { p.Code[0].Check, p.Code[0].CheckSlot = true, 1 }},
+		{"growth-op", func(p *Program) { p.Code[0].Grow = true }},
 		{"initial-depth", func(p *Program) { p.Maps[0].Depth = 1 }},
 		{"map", func(p *Program) { p.Maps[1].PC = 2 }},
 		{"capacity", func(p *Program) { p.StackSize = MaxSlots }},
@@ -43,6 +44,23 @@ func TestValidateNativeSafety(t *testing.T) {
 	}
 	if err := (*Program)(nil).Validate(); err == nil {
 		t.Fatal("accepted nil program")
+	}
+}
+
+func TestValidateGrowthReaders(t *testing.T) {
+	for _, read := range []Op{ArrayRead, ArrayUpdate, ArrayLength} {
+		p := &Program{Locals: 3, Code: []Instruction{
+			{Op: ArrayWrite, Grow: true, Left: Slot(0), Right: Slot(1), Third: Slot(2)},
+			{Op: read, Left: Slot(0), Right: Slot(1), Dest: 2, Extra: 2, Operator: Add},
+			{Op: Return, Left: Slot(2)},
+		}, Maps: []StateMap{{PC: 0}, {PC: 1}, {PC: 2}}}
+		if err := p.Validate(); err == nil {
+			t.Fatalf("accepted growth with %v", read)
+		}
+		p.Code[0].Grow = false
+		if err := p.Validate(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

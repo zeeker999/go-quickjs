@@ -27,11 +27,17 @@ func (p *Program) Validate() error {
 		return fmt.Errorf("jit IR: invalid initial stack depth")
 	}
 	calls := uint32(0)
+	growth, reads := false, false
 	for pc, in := range p.Code {
 		if p.Maps[pc].Depth < 0 {
 			continue
 		}
 		bad := func(why string) error { return fmt.Errorf("jit IR: pc %d: %s", pc, why) }
+		if in.Grow && in.Op != ArrayWrite {
+			return bad("growth on a non-array write")
+		}
+		growth = growth || in.Grow
+		reads = reads || in.Op == ArrayRead || in.Op == ArrayUpdate || in.Op == ArrayLength
 		active := p.Locals + p.Maps[pc].Depth
 		source := func(o Operand) bool {
 			if o.Slot == -1 {
@@ -125,6 +131,9 @@ func (p *Program) Validate() error {
 		if in.Op != Return && in.Op != Jump && !target(pc+1) {
 			return bad("invalid fallthrough")
 		}
+	}
+	if growth && reads {
+		return fmt.Errorf("jit IR: growing storage requires a write-only array program")
 	}
 	return nil
 }

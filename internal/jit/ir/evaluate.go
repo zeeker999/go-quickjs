@@ -217,6 +217,9 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 					v.Bits = 0x7ff8000000000000
 				}
 				*cell = v.Bits
+				if in.Grow && uint64(x)+1 > view.Length {
+					arrays[obj.Bits].Length = uint64(x) + 1
+				}
 			} else {
 				v := Value{Bits: *cell, Kind: Number}
 				if in.Op == ArrayUpdate {

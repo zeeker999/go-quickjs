@@ -181,7 +181,30 @@ func lowerFunction(fn *bytecode.Function, calls, callee bool) (*ir.Program, erro
 	selectPropertyLoops(fn, p, calls, callee)
 	selectGlobalSlots(fn, p)
 	selectShortCountdown(fn, p)
+	selectArrayGrowth(fn, p)
 	return p, nil
+}
+
+// Spare capacity is borrowed only by string packers that never read an array's
+// elements or length. Every exit commits it before any other code can observe
+// an alias, so the adapter need not expose speculative storage to readers.
+func selectArrayGrowth(fn *bytecode.Function, p *ir.Program) {
+	strings, allocation := false, false
+	for pc, in := range p.Code {
+		if p.Maps[pc].Depth < 0 {
+			continue
+		}
+		if in.Op == ir.ArrayRead || in.Op == ir.ArrayUpdate || in.Op == ir.ArrayLength {
+			return
+		}
+		strings = strings || in.Op == ir.StringCode
+		allocation = allocation || fn.Code[pc].Op == bytecode.OpNewArray
+	}
+	if strings && allocation {
+		for pc := range p.Code {
+			p.Code[pc].Grow = p.Code[pc].Op == ir.ArrayWrite
+		}
+	}
 }
 
 // A small while (--parameter >= 0) has at most one iteration for inputs in

@@ -46,7 +46,7 @@ func TestStringPackingLayout(t *testing.T) {
 	if err := p.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	seen := [3]bool{}
+	seen := [4]bool{}
 	for pc, in := range fn.Code {
 		sp := p.Locals + p.Maps[pc].Depth
 		out := p.Code[pc]
@@ -66,10 +66,33 @@ func TestStringPackingLayout(t *testing.T) {
 			if out.Op != ir.StringCode || out.Left != ir.Slot(sp-2) || out.Right != ir.Slot(sp-3) || out.Third != ir.Slot(sp-1) || out.Dest != sp-3 {
 				t.Fatal(out)
 			}
+		case bytecode.OpSetIndex:
+			seen[3] = true
+			if out.Op != ir.ArrayWrite || !out.Grow {
+				t.Fatal(out)
+			}
 		}
 	}
-	if seen != [3]bool{true, true, true} {
+	if seen != [4]bool{true, true, true, true} {
 		t.Fatal(seen)
+	}
+}
+
+func TestArrayGrowthSelection(t *testing.T) {
+	for _, source := range []string{
+		`function pack(s){let a=[];for(let i=0;i<64;i++)a[i]=s.charCodeAt(i);return a.length}`,
+		`function pack(s){let a=[];for(let i=0;i<64;i++)a[i]=s.charCodeAt(i);return a[0]}`,
+		`function pack(s){let a=[];for(let i=0;i<64;i++)a[i]=i;return a}`,
+	} {
+		p, err := Lower(compiledFunction(t, source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, in := range p.Code {
+			if in.Grow {
+				t.Fatalf("granted write-only string storage: %s", source)
+			}
+		}
 	}
 }
 

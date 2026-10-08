@@ -59,6 +59,7 @@ type jitEntry struct {
 	calls         bool
 	calleeOnly    bool
 	strings       bool
+	grows         bool
 }
 
 // Weak keys prevent a refusal or cached program from retaining a source graph.
@@ -68,6 +69,7 @@ type jitState struct {
 	properties      bool
 	this            bool
 	strings         bool
+	grows           bool
 	referenceActive bool
 	callActive      bool
 	globals         []bytecode.Instr
@@ -238,6 +240,7 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool) *jitEntry {
 		for i := range p.Code {
 			in := &p.Code[i]
 			e.strings = e.strings || in.Op == ir.StringMethod || in.Op == ir.StringCode
+			e.grows = e.grows || in.Grow
 			if in.Op == ir.PropertyRead || in.Op == ir.PropertyWrite || in.Op == ir.BindingRead || in.Op == ir.ReferenceRead {
 				e.properties = e.properties || in.Op != ir.BindingRead
 				in.Key = uint32(r.atoms.intern(fn.Names[in.Key]))
@@ -475,6 +478,7 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 	s.this = e.this
 	s.globals = e.globals
 	s.strings = e.strings
+	s.grows = e.grows
 	s.referenceActive = len(e.referenceKeys) != 0
 	if s.referenceActive {
 		s.referenceKeys = e.referenceKeys
@@ -493,7 +497,13 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 	for {
 		s.entries++
 		// Encoding and the immutable native program preserve scalar validity.
+		if e.grows {
+			s.prepareArrayGrowth()
+		}
 		exit, err := e.code.RunEncodedArrays(s.slots[:n], s.arrays[:], pc, budget)
+		if e.grows {
+			s.commitArrayGrowth()
+		}
 		runtime.KeepAlive(s)
 		if err != nil {
 			s.clearRoots()
@@ -573,6 +583,7 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 			s.this = e.this
 			s.globals = e.globals
 			s.strings = e.strings
+			s.grows = e.grows
 			s.referenceActive = len(e.referenceKeys) != 0
 			if s.referenceActive {
 				s.referenceKeys = e.referenceKeys
@@ -815,6 +826,45 @@ func jitGrowElem(o *Object, n float64, value Value) bool {
 		return false
 	}
 	return o.setElem(i, value)
+}
+
+// Only write-only entries may borrow initialized spare capacity. Length stays
+// private to their views until the assembly return; no callback or callee sees
+// it until commitArrayGrowth restores every alias's ordinary storage bounds.
+func (s *jitState) prepareArrayGrowth() {
+	for i, root := range s.roots[:s.rootCount] {
+		if !root.IsObject() {
+			continue
+		}
+		o := root.Object()
+		if cap(o.elems) <= len(o.elems) || !jitDenseWritable(o) {
+			continue
+		}
+		end := len(o.elems) + min(cap(o.elems)-len(o.elems), 64)
+		spare := o.elems[len(o.elems):end]
+		for j := range spare {
+			spare[j] = elemHole
+		}
+		s.arrays[i].DenseLength = uint64(end)
+	}
+}
+
+func (s *jitState) commitArrayGrowth() {
+	for i, root := range s.roots[:s.rootCount] {
+		if root.IsObject() {
+			o := root.Object()
+			view := s.arrays[i]
+			if o.class == ClassArray && view.Length > uint64(len(o.elems)) && view.Length <= view.DenseLength && view.DenseLength <= uint64(cap(o.elems)) {
+				o.elems = o.elems[:int(s.arrays[i].Length)]
+			}
+		}
+	}
+	for i, root := range s.roots[:s.rootCount] {
+		if root.IsObject() && root.Object().class == ClassArray {
+			s.arrays[i].DenseLength = uint64(len(root.Object().elems))
+			s.arrays[i].Length = uint64(root.Object().arrayLength())
+		}
+	}
 }
 
 type jitBinary struct {
@@ -1085,7 +1135,14 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 		switch in.Op {
 		case bytecode.OpNewArray:
 			n := int(in.A)
-			v = Obj(r.newArrayFrom(stack[sp-n : sp]))
+			var o *Object
+			if s := r.jit; s != nil && s.grows && n == 0 {
+				o = newArrayObject(r.proto.array, 16)
+				o.elems = o.elems[:0]
+			} else {
+				o = r.newArrayFrom(stack[sp-n : sp])
+			}
+			v = Obj(o)
 			sp -= n
 		case bytecode.OpPushThis:
 			var bound bool

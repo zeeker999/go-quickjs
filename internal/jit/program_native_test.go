@@ -453,6 +453,99 @@ func TestNativeProgramBitwise(t *testing.T) {
 	}
 }
 
+func TestNativeProgramArrayGrowth(t *testing.T) {
+	p := &ir.Program{Locals: 4, Code: []ir.Instruction{
+		{Op: ir.ArrayWrite, Grow: true, Left: ir.Slot(0), Right: ir.Slot(1), Third: ir.Slot(2)},
+		{Op: ir.Binary, Operator: ir.Add, Left: ir.Slot(1), Right: ir.Literal(ir.Float(2)), Dest: 1},
+		{Op: ir.ArrayWrite, Grow: true, Left: ir.Slot(3), Right: ir.Slot(1), Third: ir.Slot(2)},
+		{Op: ir.Return, Left: ir.Slot(0)},
+	}, Maps: []ir.StateMap{{PC: 0}, {PC: 1}, {PC: 2}, {PC: 3}}}
+	c := newTestCode(t, p)
+	for _, length := range []uint64{0, 1, 4, 8} {
+		for _, grant := range []uint64{0, 0xfff8000000000000} {
+			for _, index := range []float64{-1, math.Copysign(0, -1), 0, 1, 3, 6, 7, 8, 0.5, math.NaN(), math.Inf(1)} {
+				for _, value := range []ir.Value{ir.Float(-123), ir.Float(math.NaN()), ir.Value{Kind: ir.Opaque}} {
+					for pc := range p.Code {
+						for budget := uint64(0); budget <= 5; budget++ {
+							var a, b [8]struct {
+								bits uint64
+								ref  *int
+							}
+							for i := range a {
+								a[i].bits = 0xfff8000000000000
+							}
+							b = a
+							va, vb := make([]ir.ArrayView, ir.MaxSlots), make([]ir.ArrayView, ir.MaxSlots)
+							va[0] = ir.ArrayView{Data: unsafe.Pointer(&a[0]), DenseLength: 8, Length: length, NumberLimit: 0xfff0000000000000, WritableHole: grant}
+							vb[0] = va[0]
+							vb[0].Data = unsafe.Pointer(&b[0])
+							va[1], vb[1] = va[0], vb[0]
+							x := []ir.Value{{Kind: ir.Opaque}, ir.Float(index), value, {Kind: ir.Opaque, Bits: 1}}
+							y := append([]ir.Value(nil), x...)
+							want, err := p.EvaluateArrays(x, va, pc, budget)
+							if err != nil {
+								t.Fatal(err)
+							}
+							got, err := c.RunArrays(y, vb, pc, budget)
+							if err != nil || got != want || !reflect.DeepEqual(x, y) || a != b || va[0].Length != vb[0].Length || va[1].Length != vb[1].Length {
+								t.Fatalf("length %d grant %x index %v value %+v pc %d budget %d: %+v/%v want %+v lengths %d/%d %d/%d", length, grant, index, value, pc, budget, got, err, want, va[0].Length, vb[0].Length, va[1].Length, vb[1].Length)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestNativeProgramIntegerResultReuse(t *testing.T) {
+	for _, boundary := range []ir.Op{ir.Nop, ir.Host, ir.Jump} {
+		p := &ir.Program{Locals: 24}
+		for i := 0; i < 10; i++ {
+			p.Code = append(p.Code, ir.Instruction{Op: ir.Binary, Operator: ir.UShr, Left: ir.Slot(i), Right: ir.Literal(ir.Float(float64(i))), Dest: i + 12})
+		}
+		p.Code = append(p.Code, ir.Instruction{Op: boundary, Target: len(p.Code) + 1})
+		for i := 0; i < 10; i++ {
+			p.Code = append(p.Code,
+				ir.Instruction{Op: ir.Copy, Left: ir.Slot(i + 12), Dest: 23},
+				ir.Instruction{Op: ir.Binary, Operator: ir.Add, Left: ir.Slot(i), Right: ir.Literal(ir.Float(0.25)), Dest: i},
+				ir.Instruction{Op: ir.Binary, Operator: ir.BitXor, Left: ir.Slot(i), Right: ir.Slot(23), Dest: i},
+				ir.Instruction{Op: ir.Binary, Operator: ir.BitOr, Left: ir.Slot(i + 12), Right: ir.Slot(i), Dest: i + 12},
+			)
+		}
+		p.Code = append(p.Code, ir.Instruction{Op: ir.Return, Left: ir.Slot(12)})
+		p.Maps = make([]ir.StateMap, len(p.Code))
+		for pc := range p.Maps {
+			p.Maps[pc].PC = uint32(pc)
+		}
+		c := newTestCode(t, p)
+		for _, value := range []float64{math.NaN(), math.Inf(-1), math.MaxFloat64, math.Copysign(0, -1), -4294967297, 2147483648, 3.75} {
+			for entry := range p.Code {
+				for budget := uint64(0); budget <= uint64(len(p.Code)+1); budget++ {
+					for _, bad := range []bool{false, true} {
+						a := make([]ir.Value, p.Locals)
+						for i := range a {
+							a[i] = ir.Float(value + float64(i))
+						}
+						if bad {
+							a[5] = ir.Value{Kind: ir.Opaque, Bits: 0}
+						}
+						b := append([]ir.Value(nil), a...)
+						want, err := p.Evaluate(a, entry, budget)
+						if err != nil {
+							t.Fatal(err)
+						}
+						got, err := c.Run(b, entry, budget)
+						if err != nil || got != want || !reflect.DeepEqual(a, b) {
+							t.Fatalf("boundary %v value %v entry %d budget %d bad %v: native %+v/%v oracle %+v", boundary, value, entry, budget, bad, got, err, want)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 func TestNativeProgramBitwiseImmediates(t *testing.T) {
 	constants := []float64{0, -1, 0x12345678, 4294967297, -4294967297,
 		1e20, math.MaxFloat64, math.NaN(), math.Inf(1), math.Inf(-1)}
