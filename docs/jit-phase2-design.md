@@ -250,6 +250,40 @@ Each back-edge decrements `*backEdges` and exits with `Poll` at zero or below.
 This is the interpreter's counter, so `Halt`, cancellation and the memory
 limit apply at the same points.
 
+### The walking skeleton's simplifications (P2)
+
+These were fixed while designing P2, and each is lifted by a later milestone.
+
+**Tagged values are number words only.** Native code holds a slot's `num`
+word and never its `ref` word. A slot holding an object may be *read* (its
+tag tested), but moving it to another slot would be a pointer store. At an
+exit, each frame-state slot is one of three things:
+- the value loaded from that same slot at this entry, unchanged, so nothing is
+  written;
+- a scalar produced natively (a number, a boolean, a scalar constant), written
+  natively into `num` when the slot's `ref` is nil, and otherwise by Go from
+  the exit record;
+- anything else, such as a value loaded from another slot. The compiler
+  refuses the function for now. P4 adds a record entry, "Go copies slot k to
+  slot i", which is legitimate because native code never changes a slot
+  holding a reference.
+
+**Kind tests are on the number word, with the VM's encoding passed in.** The
+JIT never imports the VM: the VM passes the encoding as data (`rt.Encoding`).
+- A number is a word whose top 13 bits are not all set.
+- A tagged word at or above `heapBigBits` is a BigInt; otherwise its low byte
+  is the kind and bits 8-15 its payload.
+- Booleans, `undefined`, `null` and the uninitialized marker are exact
+  words.
+- Boxing a NaN writes the canonical NaN, because a negative NaN would collide
+  with the tag range.
+
+**No native stack yet.** A host exit stores the frame state and returns.
+Go runs the one bytecode instruction and re-enters at the next PC's entry,
+so an activation's spill area is dead once it exits, and a fixed area in the
+context block serves. The native stack arrives with true resume (P5) and
+native calls (Phase 5). The entry bridge stays a tail jump, as it is today.
+
 ## Migration
 
 - **Side by side.** The new pipeline is chosen per runtime by an internal
