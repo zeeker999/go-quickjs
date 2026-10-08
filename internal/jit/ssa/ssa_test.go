@@ -258,13 +258,31 @@ func TestBuildMatchesSlotIRFromJavaScript(t *testing.T) {
 	}
 }
 
-func TestBuildRefusesUnsupported(t *testing.T) {
-	p := &ir.Program{Locals: 2, Code: []ir.Instruction{
-		{Op: ir.StringMethod, Left: ir.Slot(0), Dest: 1},
-		{Op: ir.Return, Left: ir.Slot(1)},
-	}, Maps: []ir.StateMap{{PC: 0}, {PC: 1}}}
-	if _, err := Build(p); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("Build = %v, want ErrUnsupported", err)
+// TestBuildEveryOperation pins P4's coverage: every slot IR operation
+// builds, each in a program of its own followed by a return.
+func TestBuildEveryOperation(t *testing.T) {
+	for op := ir.Nop; op <= ir.StringCode; op++ {
+		in := ir.Instruction{Op: op, Left: ir.Slot(0), Right: ir.Slot(1), Third: ir.Slot(2), Dest: 3, Extra: 2, Target: 1}
+		switch op {
+		case ir.ArrayUpdate:
+			in.Right = ir.Slot(in.Extra)
+		case ir.Unary:
+			in.Operator = ir.Neg
+		case ir.Branch:
+			in.Operator = ir.Lt
+		case ir.BindingRead:
+			in.Left = ir.Literal(ir.Value{Kind: ir.Undefined})
+		case ir.Insert2, ir.Insert3:
+			in.Dest = 0
+		}
+		p := &ir.Program{Locals: 8, Code: []ir.Instruction{in, {Op: ir.Return, Left: ir.Slot(3)}},
+			Maps: []ir.StateMap{{PC: 0}, {PC: 1}}}
+		if err := p.Validate(); err != nil {
+			t.Fatalf("op %d: the test's program is invalid: %v", op, err)
+		}
+		if _, err := Build(p); err != nil {
+			t.Errorf("op %d: %v", op, err)
+		}
 	}
 }
 

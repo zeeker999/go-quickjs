@@ -124,7 +124,8 @@ func (b *builder) plan() error {
 		switch in.Op {
 		case ir.Nop, ir.Copy, ir.CopyPair, ir.StoreLoad, ir.Swap, ir.Insert2, ir.Insert3,
 			ir.Unary, ir.Update, ir.Return, ir.ArrayRead, ir.ArrayUpdate, ir.ArrayLength, ir.ArrayKey:
-		case ir.ArrayWrite, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead:
+		case ir.ArrayWrite, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead,
+			ir.StringMethod, ir.StringCode:
 			// What native code does not do exits to Go, which resumes after
 			// it.
 			entries[pc+1] = true
@@ -605,8 +606,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 		}
 		b.assign(in.Dest, blk, boxF(elem))
 	case ir.ArrayLength:
-		array := guard(OpArrayOf, Ptr, ir.GuardExit, operand(in.Left))
-		b.assign(in.Dest, blk, boxF(f.newValue(blk, OpArrayLen, Float64, array)))
+		b.assign(in.Dest, blk, boxF(guard(OpLength, Float64, ir.GuardExit, operand(in.Left))))
 	case ir.ArrayKey:
 		guard(OpArrayOf, Ptr, ir.GuardExit, operand(in.Left))
 		guard(OpElemKey, None, ir.GuardExit, number(in.Right, ir.GuardExit))
@@ -616,6 +616,14 @@ func (b *builder) instruction(blk *Block, pc int) {
 		array := guard(OpArrayOf, Ptr, ir.HostExit, operand(in.Left))
 		key, value := number(in.Right, ir.HostExit), number(in.Third, ir.HostExit)
 		guard(OpElemWrite, None, ir.HostExit, array, key, value)
+	case ir.StringMethod:
+		cell := guard(OpStringMethod, Source, ir.HostExit, operand(in.Left))
+		v := f.newValue(blk, OpLoadCell, Tagged, cell)
+		v.Shadow = cell
+		b.assign(in.Dest, blk, v)
+	case ir.StringCode:
+		code := guard(OpStringCode, Float64, ir.HostExit, operand(in.Left), operand(in.Right), number(in.Third, ir.HostExit))
+		b.assign(in.Dest, blk, boxF(code))
 	case ir.BindingRead:
 		site, ok := b.global(pc)
 		if !ok {

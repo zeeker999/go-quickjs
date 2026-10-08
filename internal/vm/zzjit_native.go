@@ -169,8 +169,11 @@ type jitEntry struct {
 	// ssa is the new pipeline's code, when it compiled the function, and
 	// ssaShapes the shapes its guards compare objects with, which it holds
 	// by address and this keeps alive.
-	ssa           *jit.SSACode
-	ssaShapes     []*shape
+	ssa       *jit.SSACode
+	ssaShapes []*shape
+	// ssaStrings marks code that calls charCodeAt, for which Go looks up the
+	// intrinsic before every entry.
+	ssaStrings    bool
 	code          *jit.Code
 	misses        uint8
 	probes        uint8
@@ -437,6 +440,9 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool, cl *closure) *j
 		if p, err := jitcompile.LowerSSA(fn); err == nil {
 			if code, shapes := r.compileSSA(fn, cl, p, limit); code != nil {
 				e.ssa, e.this, e.ssaShapes = code, p.This, shapes
+				for _, in := range p.Code {
+					e.ssaStrings = e.ssaStrings || in.Op == ir.StringMethod || in.Op == ir.StringCode
+				}
 				s.compiled++
 				s.remember(weak.Make(fn), e)
 				return e

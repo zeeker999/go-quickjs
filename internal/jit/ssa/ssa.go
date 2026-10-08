@@ -73,6 +73,9 @@ const (
 	OpElemKey   // f64 -> none, if an index
 	OpElemRead  // ptr, f64 -> f64: the element, if the index's is a number
 	OpElemWrite // ptr, f64, f64 -> none: stores, if the index's is a number
+	// OpLength is x.length of an array, as the slot IR's views have it, or
+	// of a string, whose length is always at hand, rope or not.
+	OpLength // tagged -> f64
 
 	// Properties, read in place (D8). Where the VM's cache for the site knows
 	// a shape (Const.Bits, the shape's address, which the VM keeps alive; 0
@@ -93,6 +96,13 @@ const (
 	// the global object's table, if it is Key's and plain, initialized
 	// data, and no script-level lexical binding of the name shadows it.
 	OpGlobalCell // -> source
+	// charCodeAt, as the slot IR's string kernels call it. OpStringMethod is
+	// a string's charCodeAt: the context's cell (abi.Context.CharCodeAt),
+	// if the receiver is a string and the cell holds the intrinsic.
+	// OpStringCode is a call of it: the code unit at an index of a flat
+	// string, if the callee is the intrinsic.
+	OpStringMethod // tagged -> source
+	OpStringCode   // tagged callee, tagged string, f64 index -> f64
 
 	// Boxing: a typed value as a slot value.
 	OpBoxF64
@@ -119,14 +129,14 @@ const (
 	OpI32ToF64 // signed
 	OpU32ToF64 // unsigned
 
-	OpArrayLen // ptr -> f64: an array's length
 )
 
 var opNames = [...]string{
 	OpInvalid: "invalid", OpLoadSlot: "load", OpConst: "const", OpConstF64: "constf", OpConstSource: "consts", OpPhi: "phi",
 	OpUnboxF64: "unbox", OpTruth: "truth", OpCheckInit: "checkinit", OpBoxF64: "boxf", OpBoxBool: "boxb",
-	OpArrayOf: "arrayof", OpElemKey: "elemkey", OpElemRead: "elemread", OpElemWrite: "elemwrite", OpArrayLen: "arraylen",
+	OpArrayOf: "arrayof", OpElemKey: "elemkey", OpElemRead: "elemread", OpElemWrite: "elemwrite", OpLength: "length",
 	OpObjectOf: "objectof", OpPropRead: "propread", OpPropWrite: "propwrite", OpPropCell: "propcell", OpLoadCell: "loadcell", OpGlobalCell: "globalcell",
+	OpStringMethod: "stringmethod", OpStringCode: "stringcode",
 	OpAddF64: "addf", OpSubF64: "subf", OpMulF64: "mulf", OpDivF64: "divf", OpNegF64: "negf", OpCmpF64: "cmpf",
 	OpNot: "not", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
@@ -142,8 +152,8 @@ func (o Op) String() string {
 // isGuard reports whether an op exits when its operand is not what it needs.
 func (o Op) isGuard() bool {
 	switch o {
-	case OpUnboxF64, OpTruth, OpCheckInit, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite,
-		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell:
+	case OpUnboxF64, OpTruth, OpCheckInit, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite, OpLength,
+		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell, OpStringMethod, OpStringCode:
 		return true
 	}
 	return false

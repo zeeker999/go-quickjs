@@ -157,6 +157,17 @@ type Heap struct {
 	// names script-level lexical bindings have.
 	Global  *Object
 	Lexical map[uint32]bool
+	// CharCodeAt is the context's cell for charCodeAt, which holds the
+	// intrinsic, or is nil; Strings are strings by their handles: their
+	// code units, and whether they are flat.
+	CharCodeAt *ir.Value
+	Strings    map[uint64]String
+}
+
+// String is a string as charCodeAt sees it.
+type String struct {
+	Units []uint16
+	Flat  bool
 }
 
 // Object is an object as property operations see it: its shape, whether it
@@ -318,8 +329,20 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 					bits = canonicalNaN
 				}
 				*cell = bits
-			case OpArrayLen:
-				vals[v.ID] = val{f: float64(arrays[a.p].Length)}
+			case OpLength:
+				t := a.t
+				switch {
+				case t.Kind == ir.Opaque && t.Bits < uint64(len(arrays)) && arrays[t.Bits].NumberLimit != 0:
+					vals[v.ID] = val{f: float64(arrays[t.Bits].Length)}
+				case t.Kind == ir.String && heap.Strings != nil:
+					s, ok := heap.Strings[t.Bits]
+					if !ok {
+						return exit(v.State, ir.ExitKind(v.Aux))
+					}
+					vals[v.ID] = val{f: float64(len(s.Units))}
+				default:
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
 			case OpObjectOf:
 				t := a.t
 				if t.Kind != ir.Opaque || t.Bits >= uint64(len(heap.Objects)) {
@@ -355,6 +378,19 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
 				vals[v.ID] = val{cell: &g.Props[i]}
+			case OpStringMethod:
+				if a.t.Kind != ir.String || heap.CharCodeAt == nil {
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
+				vals[v.ID] = val{cell: heap.CharCodeAt}
+			case OpStringCode:
+				s, ok := heap.Strings[b.t.Bits]
+				i, isIndex := index(vals[v.Args[2].ID].f)
+				if heap.CharCodeAt == nil || a.t != *heap.CharCodeAt || b.t.Kind != ir.String || !ok || !s.Flat ||
+					!isIndex || i >= uint64(len(s.Units)) {
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
+				vals[v.ID] = val{f: float64(s.Units[i])}
 			case OpLoadCell:
 				vals[v.ID] = val{t: *a.cell}
 			case OpCheckInit:

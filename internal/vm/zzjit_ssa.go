@@ -55,6 +55,13 @@ var jitEncoding = abi.Encoding{
 	PropWritable:    uint8(propWritable),
 	PropUninit:      uint8(propUninit),
 
+	String:       math.Float64bits(mkTag(KindString, 0)),
+	StringData:   int32(unsafe.Offsetof(String{}.s)),
+	StringLeft:   int32(unsafe.Offsetof(String{}.left)),
+	StringLength: int32(unsafe.Offsetof(String{}.length)),
+	StringASCII:  int32(unsafe.Offsetof(String{}.ascii)),
+	StringU16:    int32(unsafe.Offsetof(String{}.u16)),
+
 	ObjectClass:    int32(unsafe.Offsetof(Object{}.class)),
 	ObjectFlags:    int32(unsafe.Offsetof(Object{}.flags)),
 	ObjectArrayLen: int32(unsafe.Offsetof(Object{}.arrayLen)),
@@ -173,6 +180,20 @@ func (r *Runtime) jitSlot(f *frame, e *jitEntry, i int) *Value {
 	return &r.stack[f.base+i-n-u]
 }
 
+// jitStringMethod is String.prototype.charCodeAt for native code: the
+// intrinsic, while the prototype still has it as it was made, which is
+// what the old pipeline's string views asked too; and otherwise nothing.
+func (r *Runtime) jitStringMethod() Value {
+	if r.jitCharCodeAt.ref == nil {
+		return Value{}
+	}
+	m := r.proto.str.getOwn(r.atoms.intern("charCodeAt"))
+	if m == nil || m.flags&^propDefault != 0 || !m.value.StrictEquals(r.jitCharCodeAt) {
+		return Value{}
+	}
+	return r.jitCharCodeAt
+}
+
 // jitSource is the value a run-time source names (internal/jit/ssa,
 // origin.go), which word holds as native code wrote it: a slot's, or, at or
 // above abi.MaxRecords, the value at a heap cell native code loaded a
@@ -241,6 +262,9 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 		ctx.BackEdges = &r.backEdges
 		ctx.Upvalues = unsafe.Pointer(unsafe.SliceData(f.cl.upvalues))
 		ctx.Global, ctx.LexNames = unsafe.Pointer(f.cl.scope()), unsafe.Pointer(&r.lexNames)
+		if e.ssaStrings {
+			*(*Value)(unsafe.Pointer(&ctx.CharCodeAt)) = r.jitStringMethod()
+		}
 		if e.this {
 			this, bound := f.thisValue()
 			if !bound {

@@ -1044,15 +1044,21 @@ func (c *compiler) arrayOf(v *ssa.Value, guard func(amd64.Cond)) {
 // word. It reports false when the value can never be one, having emitted
 // the jump to the exit.
 func (c *compiler) objectOf(v *ssa.Value, guard func(amd64.Cond)) bool {
-	a := v.Args[0]
+	return c.reference(v, v.Args[0], c.enc.Object, guard)
+}
+
+// reference finds the reference a is, of the kind whose word is word, into
+// scratchC, as objectOf finds an object, exiting to v's state when a is not
+// one. It uses scratchA and scratchB.
+func (c *compiler) reference(v, a *ssa.Value, word uint64, guard func(amd64.Cond)) bool {
 	o := c.origin[a]
 	if a.Shadow == nil && o < 0 {
-		// A primitive is never an object.
+		// A primitive is never a reference.
 		c.a.Jmp(c.stubLabel(v.State, exitKind(v.Aux)))
 		return false
 	}
 	w := c.gpr(a, scratchA)
-	c.a.MovImm(scratchB, c.enc.Object)
+	c.a.MovImm(scratchB, word)
 	c.a.Op(amd64.Cmp, w, scratchB, true)
 	guard(amd64.CondNE)
 	if s := a.Shadow; s != nil {
@@ -1154,6 +1160,83 @@ func (c *compiler) property(v *ssa.Value, guard func(amd64.Cond)) {
 	}
 	c.a.Jmp(c.stubLabel(v.State, exitKind(v.Aux)))
 	c.a.Bind(found)
+}
+
+// length is x.length: a string's, which it keeps rope or not, or an
+// array's, the dense count or a sparse array's length when that is larger,
+// as Object.arrayLength has it.
+func (c *compiler) length(v *ssa.Value, guard func(amd64.Cond)) {
+	a := v.Args[0]
+	if a.Shadow == nil && c.origin[a] < 0 {
+		c.a.Jmp(c.stubLabel(v.State, exitKind(v.Aux)))
+		return
+	}
+	array, have := c.a.NewLabel(), c.a.NewLabel()
+	c.a.MovImm(scratchB, c.enc.String)
+	c.a.Op(amd64.Cmp, c.gpr(a, scratchA), scratchB, true)
+	c.a.Jcc(amd64.CondNE, array)
+	c.reference(v, a, c.enc.String, guard)
+	c.a.Load(scratchC, scratchC, c.enc.StringLength)
+	c.a.Jmp(have)
+	c.a.Bind(array)
+	c.reference(v, a, c.enc.Object, guard)
+	c.a.LoadU8(scratchB, scratchC, c.enc.ObjectClass)
+	c.a.OpImm(amd64.Cmp, scratchB, int32(c.enc.ClassArray), false)
+	guard(amd64.CondNE)
+	p := scratchA
+	c.a.MovRR(p, scratchC)
+	c.a.Load(scratchC, p, c.enc.ObjectElems+8)
+	c.a.LoadU8(scratchB, p, c.enc.ObjectFlags)
+	c.a.OpImm(amd64.And, scratchB, int32(c.enc.FlagSparse), false)
+	c.a.Jcc(amd64.CondE, have)
+	c.a.LoadU32(scratchB, p, c.enc.ObjectArrayLen)
+	c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+	c.a.Jcc(amd64.CondBE, have)
+	c.a.MovRR(scratchC, scratchB)
+	c.a.Bind(have)
+	c.a.Cvtsi2sd(xScratch0, scratchC, true)
+	c.setX(v, xScratch0)
+}
+
+// stringCode is charCodeAt called on a string: the callee must be the
+// intrinsic, the string flat, and the index an integer below its length;
+// the code unit is a byte of an ASCII string's UTF-8, or one of the code
+// units a string caches, and anything else exits.
+func (c *compiler) stringCode(v *ssa.Value, guard func(amd64.Cond)) {
+	if !c.reference(v, v.Args[0], c.enc.Object, guard) {
+		return
+	}
+	c.a.Load(scratchB, regCtx, abi.OffCharCode+c.enc.RefOffset)
+	c.a.Op(amd64.Cmp, scratchC, scratchB, true)
+	guard(amd64.CondNE)
+	if !c.reference(v, v.Args[1], c.enc.String, guard) {
+		return
+	}
+	c.a.Load(scratchB, scratchC, c.enc.StringLeft)
+	c.a.Op(amd64.Test, scratchB, scratchB, true)
+	guard(amd64.CondNE)
+	c.index(v.Args[2], guard)
+	c.a.Load(scratchB, scratchC, c.enc.StringLength)
+	c.a.Op(amd64.Cmp, scratchA, scratchB, true)
+	guard(amd64.CondAE)
+	units, done := c.a.NewLabel(), c.a.NewLabel()
+	c.a.LoadU8(scratchB, scratchC, c.enc.StringASCII)
+	c.a.Op(amd64.Test, scratchB, scratchB, false)
+	c.a.Jcc(amd64.CondE, units)
+	c.a.Load(scratchB, scratchC, c.enc.StringData)
+	c.a.Op(amd64.Add, scratchB, scratchA, true)
+	c.a.LoadU8(scratchA, scratchB, 0)
+	c.a.Jmp(done)
+	c.a.Bind(units)
+	c.a.Load(scratchB, scratchC, c.enc.StringU16)
+	c.a.Op(amd64.Test, scratchB, scratchB, true)
+	guard(amd64.CondE)
+	c.a.Op(amd64.Add, scratchA, scratchA, true)
+	c.a.Op(amd64.Add, scratchB, scratchA, true)
+	c.a.LoadU16(scratchA, scratchB, 0)
+	c.a.Bind(done)
+	c.a.Cvtsi2sd(xScratch0, scratchA, true)
+	c.setX(v, xScratch0)
 }
 
 // index converts an element's key, a double, to an index in scratchA,
@@ -1271,6 +1354,20 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		guard(amd64.CondNE)
 		c.a.OpImm(amd64.Add, scratchA, c.enc.PropertyValue, true)
 		c.setG(v, scratchA)
+	case ssa.OpStringMethod:
+		// A string's charCodeAt is the context's cell, if it holds the
+		// intrinsic.
+		c.a.MovImm(scratchB, c.enc.String)
+		c.a.Op(amd64.Cmp, c.gpr(arg(0), scratchA), scratchB, true)
+		guard(amd64.CondNE)
+		c.a.Load(scratchB, regCtx, abi.OffCharCode+c.enc.RefOffset)
+		c.a.Op(amd64.Test, scratchB, scratchB, true)
+		guard(amd64.CondE)
+		c.a.MovRR(scratchA, regCtx)
+		c.a.OpImm(amd64.Add, scratchA, abi.OffCharCode, true)
+		c.setG(v, scratchA)
+	case ssa.OpStringCode:
+		c.stringCode(v, guard)
 	case ssa.OpLoadCell:
 		c.a.Load(scratchA, c.gpr(arg(0), scratchA), c.enc.NumOffset)
 		c.setG(v, scratchA)
@@ -1282,23 +1379,10 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		guard(amd64.CondAE)
 		c.boxF64(c.xmm(arg(1), xScratch0), scratchB)
 		c.a.Store(scratchA, c.enc.NumOffset, scratchB)
-	case ssa.OpArrayLen:
-		// The dense count, or a sparse array's length when that is larger,
-		// as Object.arrayLength has it.
-		p := c.gpr(arg(0), scratchA)
-		dense := c.a.NewLabel()
-		c.a.Load(scratchC, p, c.enc.ObjectElems+8)
-		c.a.LoadU8(scratchB, p, c.enc.ObjectFlags)
-		c.a.OpImm(amd64.And, scratchB, int32(c.enc.FlagSparse), false)
-		c.a.Jcc(amd64.CondE, dense)
-		c.a.LoadU32(scratchB, p, c.enc.ObjectArrayLen)
-		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
-		c.a.Jcc(amd64.CondBE, dense)
-		c.a.MovRR(scratchC, scratchB)
-		c.a.Bind(dense)
-		c.a.Cvtsi2sd(xScratch0, scratchC, true)
-		c.setX(v, xScratch0)
+	case ssa.OpLength:
+		c.length(v, guard)
 	case ssa.OpElemKey:
+
 		c.index(arg(0), guard)
 	case ssa.OpElemRead:
 		c.index(arg(1), guard)
