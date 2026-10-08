@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -127,4 +128,32 @@ func TestAMD64MemoryBaseNeedsNoSIB(t *testing.T) {
 		}()
 	}
 	(&amd64Program{}).memory(0x8b, 0, 13, 8) // R13 needs none with a displacement
+}
+
+// BenchmarkNativeRoundTrip measures one entry into native code and one exit
+// back to Go: the Go-side Run, the bridge, the entry's register loads, one
+// jump, a host exit and its spills. It is the floor under every helper call
+// and every return to Go, which the plan's cost model (D10) prices.
+func BenchmarkNativeRoundTrip(b *testing.B) {
+	for _, locals := range []int{1, 8, 24} {
+		b.Run(fmt.Sprintf("%d-locals", locals), func(b *testing.B) {
+			p := &ir.Program{Locals: locals, Code: []ir.Instruction{
+				{Op: ir.Host},
+				{Op: ir.Jump, Target: 0},
+			}, Maps: []ir.StateMap{{PC: 0}, {PC: 1}}}
+			c := newTestCode(b, p)
+			slots := make([]ir.Value, locals)
+			for i := range slots {
+				slots[i] = ir.Float(float64(i))
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				exit, err := c.RunEncodedArrays(slots, nil, 1, MaxIterations)
+				if err != nil || exit.Kind != ir.HostExit {
+					b.Fatalf("%+v %v", exit, err)
+				}
+			}
+		})
+	}
 }

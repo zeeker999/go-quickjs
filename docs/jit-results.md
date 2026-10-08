@@ -15,6 +15,38 @@ kept in git history, on branch `jit-wip-backup`, as `internal/jit/README.md`
 and `docs/jit-plan.md`. Its evidence directories lived outside the repository
 and are not reproducible from it.
 
+## 2026-10-08: what a return to Go costs (Ryzen, Windows, amd64, Go 1.27.1)
+
+Fastest of five samples; machine not fully idle (VS Code at about 45% of a
+core), so treat the figures as indicative to about 10%.
+
+`BenchmarkNativeRoundTrip`: `Code.RunEncodedArrays` entering at a jump that
+reaches a host exit, so one entry, one instruction and one exit:
+
+| Locals | ns per round trip |
+|---|---|
+| 1 | 23.7 |
+| 8 | 23.8 |
+| 24 | 23.8 |
+
+`BenchmarkJITHostRoundTrip`: `f(1000)`, a loop of `s=(s+X)|0`, per iteration:
+
+| X | Tree tier | JIT | JIT against tree |
+|---|---|---|---|
+| `i*3` | 36.5 ns | 6.1 ns | 6.0x faster |
+| `i%3` (a host exit) | 43.6 ns | 49.1 ns | 1.13x slower |
+| `g(i)`, a Go function (a host exit through the call coordinator) | 66.0 ns | 120.2 ns | 1.8x slower |
+
+The extra over the pure loop is what one operation costs in Go:
+
+| Operation | Tree tier | JIT |
+|---|---|---|
+| `%` | 7 ns | 43 ns |
+| a Go call | 30 ns | 114 ns |
+
+The JIT's numbers include publishing the frame, running the operation, and
+re-encoding before re-entry.
+
 ## 2026-10-08: Phase 1 stress test262 (Ryzen, Windows, amd64)
 
 `-conformance.jit` across language, built-ins, intl402 and annexB; every run

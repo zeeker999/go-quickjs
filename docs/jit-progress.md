@@ -65,7 +65,7 @@ across sessions. Update it **in the same commit** as the work it records.
 | V3 | `FuzzJITDifferential` generates programs in the JIT's subset (numbers and edge values, arrays with holes and out-of-range indices, bitwise and comparison operators, properties and accessors, helper calls that throw, break/continue, BigInt and `valueOf` operands) and compares the interpreter, the tree tier and the JIT under three stress settings, including an effect log. `TestJITDifferentialRandom` runs 300 fixed programs in every test run. 10 minutes: 635,214 programs, no divergence. | done | jit: fuzz the JIT against the interpreter |
 | V4 | `internal/jit/verify`, a module of its own, disassembles every program both emitters make from a JavaScript corpus and 3,000 random IR programs with `x/arch` (v0.22.0, Go 1.24): each must decode in full, with no call, push, pop, system call or trap, and no use of Go's reserved registers. Both emitters now build on every supported target (`emit_x86.go`, `emit_a64.go`), so arm64 is checked off macOS. Per-instruction golden tests remain for Phase 2's encoders. | done | jit: check both emitters against a disassembler on every target |
 | V5 | CI: stress test262 on linux/amd64, windows/amd64 and macos/arm64; the fuzzer; Go 1.24 and the newest Go | todo | |
-| V6 | Measure the helper round trip and region-entry cost per architecture | todo | |
+| V6 | Round trips measured on amd64 (`BenchmarkNativeRoundTrip`, `BenchmarkJITHostRoundTrip`): a bare entry and exit costs 23.7 ns (D7's target is 15 ns or less); a host exit as the VM takes one today costs 43 ns for `%` and 114 ns for a Go call, against 7 and 30 ns in the tree tier. arm64 is still to measure on a Mac. | done | jit: measure what a return to Go costs |
 
 **Gate:**
 - [ ] Stress test262 passes on all three platforms.
@@ -90,6 +90,11 @@ across sessions. Update it **in the same commit** as the work it records.
   architectures.
 - [ ] No divergence under the Phase 1 tools.
 - [ ] Compile budget met.
+
+**Phase 2 inputs from V6:** a host exit costs as much as about 7 iterations of
+native arithmetic, so a loop with one `%` or one Go call is slower natively
+than in the tree tier. The boundary redesign (D5, D7) is the core of Phase 2,
+not an optimization. Compiling `%` natively for numbers is a cheap early win.
 
 ## Phases 3-6
 

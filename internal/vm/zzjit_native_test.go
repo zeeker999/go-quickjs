@@ -2532,3 +2532,55 @@ func TestJITStressDifferential(t *testing.T) {
 		t.Fatalf("stress never reached its paths: %+v", total)
 	}
 }
+
+// BenchmarkJITHostRoundTrip prices a helper call as the VM makes one today:
+// the same loop with and without one host operation per iteration, a call to
+// a Go function or a remainder (which the JIT hands to Go). The difference,
+// per iteration, is what a return to Go costs with publication and
+// re-encoding, the input D7's design and D10's cost model need.
+func BenchmarkJITHostRoundTrip(b *testing.B) {
+	for _, tc := range []struct{ name, body string }{
+		{"pure", `s=(s+i*3)|0`},
+		{"remainder", `s=(s+i%3)|0`},
+		{"go-call", `s=(s+g(i))|0`},
+	} {
+		for _, enabled := range []bool{false, true} {
+			name := tc.name + "/existing"
+			if enabled {
+				name = tc.name + "/native"
+			}
+			b.Run(name, func(b *testing.B) {
+				r := New(Config{JIT: enabled})
+				defer func() { r.Close(); r.ReleaseClosed() }()
+				r.jitCallThreshold = 1
+				r.global.setOwnRaw(r.atoms.intern("g"), r.NewFunction("g", 1,
+					func(_ *Runtime, _ Value, args []Value) (Value, error) { return args[0], nil }), propDefault)
+				if _, err := r.Run(compileForTest(b, `function f(n){let s=0;for(let i=0;i<n;i++)`+tc.body+`;return s}`)); err != nil {
+					b.Fatal(err)
+				}
+				call := compileForTest(b, `f(1000)`)
+				want, err := r.Run(call)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if enabled && (r.jit == nil || r.jit.entries == 0) {
+					b.Fatal("did not run natively")
+				}
+				hostsBefore := r.JITStats().Hosts
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					v, err := r.Run(call)
+					if err != nil || !jitSameValueForTest(v, want) {
+						b.Fatalf("f = %v, %v", v, err)
+					}
+				}
+				b.StopTimer()
+				b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/1000, "ns/iter")
+				if enabled {
+					b.ReportMetric(float64(r.JITStats().Hosts-hostsBefore)/float64(b.N)/1000, "hosts/iter")
+				}
+			})
+		}
+	}
+}
