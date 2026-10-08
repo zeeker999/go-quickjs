@@ -41,6 +41,7 @@ var jitEncoding = abi.Encoding{
 	Uninitialized: math.Float64bits(uninitialized.num),
 	CanonicalNaN:  canonicalNaN,
 	Object:        objectBits,
+	UpvalueSlot:   int32(unsafe.Offsetof(upvalue{}.slot)),
 
 	ObjectClass:    int32(unsafe.Offsetof(Object{}.class)),
 	ObjectFlags:    int32(unsafe.Offsetof(Object{}.flags)),
@@ -51,17 +52,18 @@ var jitEncoding = abi.Encoding{
 }
 
 // compileSSA compiles a lowered function with the new pipeline, or returns
-// nil. The walking skeleton takes functions whose slots are exactly the
-// frame's locals and operands: no captured bindings, receiver snapshot or
-// global slots.
+// nil. It takes functions whose slots are the frame's locals, its captured
+// bindings, read through their cells, and its operands: no receiver
+// snapshot or global slots yet.
 func (r *Runtime) compileSSA(fn *bytecode.Function, p *ir.Program, limit int) *jit.SSACode {
-	if p.This || len(p.Globals) != 0 || p.Locals != fn.LocalCount {
+	if p.This || len(p.Globals) != 0 || p.Locals != fn.LocalCount+len(fn.Upvalues) {
 		return nil
 	}
 	f, err := ssa.Build(p)
 	if err != nil {
 		return nil
 	}
+	f.FrameLocals = fn.LocalCount
 	ssa.Optimize(f)
 	mc, err := mir.CompileAMD64(f, jitEncoding)
 	if err != nil || len(mc.Bytes) > limit {
@@ -74,13 +76,17 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, p *ir.Program, limit int) *j
 	return code
 }
 
-// jitSlot is a frame's slot as the JIT numbers them: its locals, then its
-// operands.
+// jitSlot is a frame's slot as the JIT numbers them: its locals, its
+// captured bindings, then its operands.
 func (r *Runtime) jitSlot(f *frame, i int) *Value {
-	if n := f.cl.fn.LocalCount; i >= n {
-		return &r.stack[f.base+i-n]
+	n, u := f.cl.fn.LocalCount, len(f.cl.upvalues)
+	switch {
+	case i < n:
+		return &f.locals[i]
+	case i < n+u:
+		return f.cl.upvalues[i-n].slot
 	}
-	return &f.locals[i]
+	return &r.stack[f.base+i-n-u]
 }
 
 // jitApplyRecords writes the slots an exit left to Go (abi.Record): the
@@ -132,6 +138,7 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 		ctx.Locals = unsafe.Pointer(unsafe.SliceData(f.locals))
 		ctx.Stack = unsafe.Pointer(&r.stack[f.base])
 		ctx.BackEdges = &r.backEdges
+		ctx.Upvalues = unsafe.Pointer(unsafe.SliceData(f.cl.upvalues))
 		s.entries++
 		s.ssaEntries++
 		if err := e.ssa.Run(pc, ctx); err != nil {

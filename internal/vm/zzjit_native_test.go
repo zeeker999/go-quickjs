@@ -535,6 +535,51 @@ func TestJITSSAArrays(t *testing.T) {
 	}
 }
 
+// The new pipeline reads captured bindings in place, through their cells:
+// a count, an array, a binding another closure changes between calls, a
+// reference that leaves through a record, and one still in its temporal
+// dead zone.
+func TestJITSSACaptured(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, tc := range []struct{ name, src string }{
+		{"count", `function make(n){return function(a){let s=0;for(let i=0;i<n;i++)s+=a[i];return s}}
+			var f=make(3);[f([1,2,3,4]),f([5,6,7]),make(0)([1])]`},
+		{"array", `function make(a){return function(n){let s=0;for(let i=0;i<n;i++)s+=a[i];a[0]=s;return s}}
+			var f=make([1,2,3]);[f(3),f(3),f(1)]`},
+		{"changed", `function make(){let k=1;return [function(){let s=0;for(let i=0;i<10;i++)s+=k;return s},function(v){k=v}]}
+			var p=make();var r=[p[0]()];p[1](2);r.push(p[0]());p[1]('x');r.push(p[0]());r`},
+		{"reference", `function make(o){return function(n){let x=0;for(let i=0;i<n;i++)x=o;return x}}
+			var o={k:1};var f=make(o);[f(3)===o,f(0),make('s')(2)]`},
+		{"dead", `function g(){let f=function(n){let s=0;for(let i=0;i<n;i++)s+=x;return s};let r;try{r=f(3)}catch(e){r=e.name}let x=2;return [r,f(3)]}
+			g()`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := tc.src + ".map(v=>JSON.stringify(v)).join('|')"
+			want := New(Config{})
+			defer func() { want.Close(); want.ReleaseClosed() }()
+			wv, err := want.Run(compileForTest(t, src))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := jitRuntimeForTest(t, Config{JIT: true})
+			r.jitSSA = true
+			r.jitStress = jitStressConfig{threshold: true, budget: 1}
+			gv, err := r.Run(compileForTest(t, src))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := gv.String().Go(), wv.String().Go(); got != want {
+				t.Fatalf("got %s, interpreter %s", got, want)
+			}
+			if st := r.JITStats(); st.SSAEntries == 0 {
+				t.Fatalf("never entered the new pipeline: %+v", st)
+			}
+		})
+	}
+}
+
 // TestJITObjectLayout holds Object's fields to the widths native code
 // loads them with (jitEncoding).
 func TestJITObjectLayout(t *testing.T) {
@@ -1920,7 +1965,10 @@ func jitDenseKernelCases() []struct{ name, body string } {
 
 func BenchmarkJITDenseKernels(b *testing.B) {
 	for _, tc := range jitDenseKernelCases() {
-		for _, mode := range []string{"interpreter", "existing", "native"} {
+		for _, mode := range []string{"interpreter", "existing", "native", "ssa"} {
+			if mode == "ssa" && !jitSSABackend {
+				continue
+			}
 			b.Run(tc.name+"/"+mode, func(b *testing.B) {
 				previous := treeTier.Swap(mode != "interpreter")
 				defer treeTier.Store(previous)
@@ -1937,8 +1985,9 @@ func BenchmarkJITDenseKernels(b *testing.B) {
 				}
 				setup := compile(`function make(n){function boundary(a){a[0]=a[1];a[n-1]=a[n-2]}return function kernel(a,b){` + tc.body + `}}var kernel=make(8192);var a=new Array(8192),b=new Array(8192);for(var i=0;i<8192;i++){a[i]=1;b[i]=1}`)
 				call := compile(`kernel(a,b)`)
-				r := New(Config{JIT: mode == "native"})
+				r := New(Config{JIT: mode == "native" || mode == "ssa"})
 				defer func() { r.Close(); r.ReleaseClosed() }()
+				r.jitSSA = mode == "ssa"
 				if _, err := r.Run(setup); err != nil {
 					b.Fatal(err)
 				}
@@ -1952,6 +2001,9 @@ func BenchmarkJITDenseKernels(b *testing.B) {
 				}
 				if mode == "native" && (r.jit == nil || r.jit.entries == 0 || r.jit.guards != 0) {
 					b.Fatal("did not stay native")
+				}
+				if mode == "ssa" && (r.jit.ssaEntries == 0 || r.jit.guards != 0) {
+					b.Fatalf("did not stay in the new pipeline: %+v", r.JITStats())
 				}
 				b.ReportAllocs()
 				b.ResetTimer()

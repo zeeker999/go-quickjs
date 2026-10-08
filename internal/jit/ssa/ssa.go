@@ -204,7 +204,14 @@ type Func struct {
 	Entries []Entry
 	// Locals and StackSize are the slot IR program's: the frame's shape.
 	Locals, StackSize int
-	nextID            int
+	// FrameLocals is how many of the Locals are the frame's own; the rest,
+	// up to Locals, are captured bindings, which native code reads through
+	// their cells (abi.Context.Upvalues) and never writes. Build sets it to
+	// Locals; a VM whose program has captured bindings lowers it.
+	FrameLocals int
+	// written marks the slots some instruction writes (Written).
+	written []bool
+	nextID  int
 }
 
 func (f *Func) newBlock(pc int) *Block {
@@ -222,6 +229,10 @@ func (f *Func) newValue(b *Block, op Op, t Type, args ...*Value) *Value {
 	b.Values = append(b.Values, v)
 	return v
 }
+
+// Written reports whether any instruction writes a slot: a slot no
+// instruction writes holds its value from entry in every frame state.
+func (f *Func) Written(slot int) bool { return f.written[slot] }
 
 // EntryFor returns the entry for a bytecode PC.
 func (f *Func) EntryFor(pc int) (Entry, bool) {

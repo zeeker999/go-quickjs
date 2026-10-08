@@ -292,6 +292,14 @@ number over a number or leaves the instruction to Go, and keys are integers
 below 2**32. Nothing native code reads of an object changes while it runs;
 Go changes it only between entries.
 
+**Captured bindings (P4c).** The slot IR numbers a function's captured
+bindings after its locals, and only reads them. Native code reads each
+through its cell -- the context's `Upvalues`, the cell's pointer to the
+value -- and an exit never writes one: the builder records which slots
+instructions write (`Func.Written`), and a function that writes a captured
+binding is refused. Records and returns that name one are resolved by Go
+through the same cells.
+
 **Kind tests are on the number word, with the VM's encoding passed in.** The
 JIT never imports the VM: the VM passes the encoding as data (`rt.Encoding`).
 - A number is a word whose top 13 bits are not all set.
