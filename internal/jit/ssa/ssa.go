@@ -49,6 +49,7 @@ const (
 	OpLoadSlot // Aux: the slot, read from the frame at an entry.
 	OpConst    // Const: a tagged constant.
 	OpConstF64 // Const.Bits: the number's bits.
+	OpConstI32 // Aux: the integer.
 	OpPhi      // Args: one per predecessor, in Block.Preds order.
 
 	// Guards and checks: each has a frame state and exits to it when it
@@ -56,10 +57,6 @@ const (
 	OpUnboxF64  // tagged -> f64, if a number
 	OpTruth     // tagged -> bool, if undefined, null, a boolean or a number
 	OpCheckInit // tagged -> none, if not uninitialized
-	// OpCheckScalar exits unless a slot holds a primitive: an entry checks
-	// every live slot, so that native code never holds a reference (see
-	// docs/jit-phase2-design.md, the walking skeleton).
-	OpCheckScalar
 
 	// Boxing: a typed value as a slot value.
 	OpBoxF64
@@ -88,8 +85,8 @@ const (
 )
 
 var opNames = [...]string{
-	OpInvalid: "invalid", OpLoadSlot: "load", OpConst: "const", OpConstF64: "constf", OpPhi: "phi",
-	OpUnboxF64: "unbox", OpTruth: "truth", OpCheckInit: "checkinit", OpCheckScalar: "checkscalar", OpBoxF64: "boxf", OpBoxBool: "boxb",
+	OpInvalid: "invalid", OpLoadSlot: "load", OpConst: "const", OpConstF64: "constf", OpConstI32: "consti", OpPhi: "phi",
+	OpUnboxF64: "unbox", OpTruth: "truth", OpCheckInit: "checkinit", OpBoxF64: "boxf", OpBoxBool: "boxb",
 	OpAddF64: "addf", OpSubF64: "subf", OpMulF64: "mulf", OpDivF64: "divf", OpNegF64: "negf", OpCmpF64: "cmpf",
 	OpNot: "not", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
@@ -104,7 +101,7 @@ func (o Op) String() string {
 
 // isGuard reports whether an op exits when its operand is not what it needs.
 func (o Op) isGuard() bool {
-	return o == OpUnboxF64 || o == OpTruth || o == OpCheckInit || o == OpCheckScalar
+	return o == OpUnboxF64 || o == OpTruth || o == OpCheckInit
 }
 
 // Value is one SSA value.
@@ -117,7 +114,10 @@ type Value struct {
 	Const ir.Value
 	// State is the frame to exit to, for guards.
 	State *FrameState
-	Block *Block
+	// Shadow is an ambiguous tagged phi's origin at run time: an Int32 phi
+	// holding the slot whose reference it may be, or -1 (origin.go).
+	Shadow *Value
+	Block  *Block
 	// Uses counts the values, frame states and controls that use this one.
 	Uses int
 }

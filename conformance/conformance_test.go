@@ -188,6 +188,8 @@ func TestConformance(t *testing.T) {
 			st.jit.Entries += js.Entries
 			st.jit.Guards += js.Guards
 			st.jit.Interpreted += js.Interpreted
+			st.jit.SSAEntries += js.SSAEntries
+			st.jit.SSARecords += js.SSARecords
 		}
 		st.jit.Compiled += outcomes[i].jit.Compiled
 
@@ -271,7 +273,7 @@ type areaStats struct {
 // internal/vm) compiles on the first call and drives exits and fallbacks.
 func reportJIT(t *testing.T, byArea map[string]*areaStats) {
 	areas := make([]string, 0, len(byArea))
-	var native, compiled, entries, guards, interpreted uint64
+	var native, compiled, entries, guards, interpreted, ssaEntries, ssaRecords uint64
 	for a, st := range byArea {
 		areas = append(areas, a)
 		native += uint64(st.native)
@@ -279,10 +281,15 @@ func reportJIT(t *testing.T, byArea map[string]*areaStats) {
 		entries += st.jit.Entries
 		guards += st.jit.Guards
 		interpreted += st.jit.Interpreted
+		ssaEntries += st.jit.SSAEntries
+		ssaRecords += st.jit.SSARecords
 	}
 	sort.Strings(areas)
 	t.Logf("native code ran in %d tests: %d programs compiled, %d entries, %d guard failures, %d finished in the interpreter",
 		native, compiled, entries, guards, interpreted)
+	if ssaEntries != 0 {
+		t.Logf("  of those entries, %d into the new pipeline, whose exits left %d slots to Go", ssaEntries, ssaRecords)
+	}
 	for _, a := range areas {
 		if st := byArea[a]; st.native != 0 {
 			t.Logf("  %-44s %5d of %5d tests native, %d entries", a, st.native, st.pass+st.fail, st.jit.Entries)

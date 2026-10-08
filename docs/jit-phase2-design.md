@@ -255,18 +255,32 @@ limit apply at the same points.
 These were fixed while designing P2, and each is lifted by a later milestone.
 
 **Tagged values are number words only.** Native code holds a slot's `num`
-word and never its `ref` word. A slot holding an object may be *read* (its
-tag tested), but moving it to another slot would be a pointer store. At an
-exit, each frame-state slot is one of three things:
-- the value loaded from that same slot at this entry, unchanged, so nothing is
-  written;
-- a scalar produced natively (a number, a boolean, a scalar constant), written
-  natively into `num` when the slot's `ref` is nil, and otherwise by Go from
-  the exit record;
-- anything else, such as a value loaded from another slot. The compiler
-  refuses the function for now. P4 adds a record entry, "Go copies slot k to
-  slot i", which is legitimate because native code never changes a slot
-  holding a reference.
+word and never its `ref` word, and writes the frame only when it exits, so at
+every exit each slot still holds what it held at entry. A slot holding an
+object may be read (its tag tested) and its value moved: moving it is Go's
+job, which the exit asks for. Each tagged SSA value has an origin
+(`ssa.Origins`): a primitive made natively, or a slot whose value at entry it
+may be. At an exit, for each frame-state slot i whose value is not what was
+loaded from i itself (P4, `mir.exitTo`):
+- if its origin is slot k, and k's `ref` is not nil, and the word is k's
+  (native code makes no word of a reference's kind), the value is k's
+  reference: a record has Go copy slot k to slot i;
+- otherwise it is a primitive, written natively into `num` when i's `ref` is
+  nil, and by Go from a record when it is not, so that Go clears the
+  pointer.
+
+A phi can merge two slots' values (a loop doing `x=o`, entered at its header
+with `x` holding a reference already), and two references can share a word,
+as objects do. Such a phi has a *shadow*: an Int32 phi holding at run time
+the slot its value came from, or -1 (`ssa.shadowMerges`). Its exits leave the
+choice to Go: "slot r if it holds a reference, else this word". A return
+works the same way through `RetFrom`. Go reads every record's source before
+it writes any slot (`abi.Record`, `vm.jitApplyRecords`). The SSA evaluator
+checks at every exit and return that each reference is where its origin, or
+its shadow, says.
+
+The skeleton instead checked at every entry that every slot held a
+primitive, which sent any function holding a reference to the interpreter.
 
 **Kind tests are on the number word, with the VM's encoding passed in.** The
 JIT never imports the VM: the VM passes the encoding as data (`rt.Encoding`).

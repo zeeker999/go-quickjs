@@ -21,6 +21,8 @@ import (
 //   - values nothing uses are deleted. A guard that can fail is never
 //     deleted: it is an effect.
 func Optimize(f *Func) {
+	// Shadows are remade at the end, for the phis that are left.
+	clearShadows(f)
 	for round := 0; round < 32; round++ {
 		subst := map[*Value]*Value{}
 		find := func(v *Value) *Value {
@@ -69,6 +71,7 @@ func Optimize(f *Func) {
 			break
 		}
 	}
+	shadowMerges(f)
 	recount(f)
 }
 
@@ -136,10 +139,12 @@ func simplify(f *Func, v *Value) *Value {
 // numeric constants, other candidates, or slots loaded at an entry; a loaded
 // slot is unboxed by a guard in its entry block, which exits there if the
 // slot is not a number (a speculation, as Phase 3 makes more of). A candidate
-// needs evidence that it is a number: a boxed number or numeric constant
-// among its inputs, directly or through candidates, or a use that unboxes it.
-// Phis of loads nobody unboxes are left as they are. The old phi becomes a
-// box of the new one, which other passes then cancel.
+// needs a reason: a use that unboxes it, or a candidate with one that it
+// flows into. A phi that only carries a number -- x=i, returned -- gains
+// nothing unboxed, and its entry guard would exit every time the slot it is
+// loaded from holds anything else, such as the reference x held before the
+// loop. The old phi becomes a box of the new one, which other passes then
+// cancel.
 func unboxPhis(f *Func) bool {
 	cand := map[*Value]bool{}
 	unboxedUse := map[*Value]bool{}
@@ -177,14 +182,13 @@ func unboxPhis(f *Func) bool {
 		for grew := true; grew; {
 			grew = false
 			for v := range cand {
-				if boxed[v] {
+				if !boxed[v] {
 					continue
 				}
 				for _, a := range v.Args {
-					if numeric(a) || boxed[a] {
-						boxed[v] = true
+					if cand[a] && !boxed[a] {
+						boxed[a] = true
 						grew = true
-						break
 					}
 				}
 			}

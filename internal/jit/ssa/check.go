@@ -5,8 +5,8 @@ import "fmt"
 // Check verifies f's structural invariants, which every pass must keep:
 // phis lead their blocks with one argument per predecessor; every guard has a
 // frame state; every value used is defined in f; an exit and a loop header
-// have a frame state, as has an entry block for its guards; and a block's
-// successors match its kind.
+// have a frame state, as has an entry block for its guards; a block's
+// successors match its kind; and a phi of two slots' values has a shadow.
 func Check(f *Func) error {
 	defined := map[*Value]bool{}
 	for _, b := range f.Blocks {
@@ -90,6 +90,11 @@ func Check(f *Func) error {
 		}
 		if len(b.Backedge) != len(b.Preds) {
 			return fmt.Errorf("ssa: %s has %d back-edge marks for %d predecessors", where, len(b.Backedge), len(b.Preds))
+		}
+	}
+	for v, o := range Origins(f) {
+		if s := v.Shadow; o == OriginAmbiguous && (s == nil || s.Op != OpPhi || s.Type != Int32 || s.Block != v.Block) {
+			return fmt.Errorf("ssa: b%d %v merges two slots' values with no shadow", v.Block.ID, v)
 		}
 	}
 	return nil

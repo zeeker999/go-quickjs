@@ -11,6 +11,30 @@ import "unsafe"
 // keep in registers live there, 8 bytes each.
 const SpillSlots = 256
 
+// MaxRecords bounds an exit's records, one per slot at most, and so the
+// slots of a function the JIT compiles.
+const MaxRecords = 256
+
+// Record is an exit's instruction to Go for one slot, which native code
+// cannot write. Slot is the slot, and its flags say what to write there:
+//   - none: the value of slot Arg, a reference;
+//   - RecordScalar: the primitive whose number word is Word, over a
+//     reference, whose pointer word only Go may clear;
+//   - RecordMaybe: the value of slot int32(Arg) if that holds a reference,
+//     and otherwise -- or if int32(Arg) is negative -- the primitive Word.
+//
+// Every slot a record reads holds its value from entry still, so Go reads
+// them all before it writes any.
+type Record struct {
+	Slot, Arg, Word, _ uint64
+}
+
+// Record flags.
+const (
+	RecordScalar = 1 << 63
+	RecordMaybe  = 1 << 62
+)
+
 // Context is the block native code reaches through its context register.
 // Go sets the frame's addresses before every entry; native code writes the
 // exit record and spills. Native code only reads its pointers.
@@ -26,8 +50,13 @@ type Context struct {
 	ExitKind  uint64
 	ExitPC    uint64
 	ExitDepth uint64
-	// Ret is a return's number word.
-	Ret uint64
+	// Ret is a return's number word. RetFrom is 0 when that is the result,
+	// or 1 plus the slot whose value, a reference, is.
+	Ret, RetFrom uint64
+	// Records counts the Record entries an exit filled. Every other slot of
+	// its state is in the frame already.
+	Records uint64
+	Record  [MaxRecords]Record
 	// Spill holds what the allocator could not keep in registers.
 	Spill [SpillSlots]uint64
 }
@@ -41,12 +70,16 @@ var (
 	OffExitPC    = int32(unsafe.Offsetof(Context{}.ExitPC))
 	OffExitDepth = int32(unsafe.Offsetof(Context{}.ExitDepth))
 	OffRet       = int32(unsafe.Offsetof(Context{}.Ret))
+	OffRetFrom   = int32(unsafe.Offsetof(Context{}.RetFrom))
+	OffRecords   = int32(unsafe.Offsetof(Context{}.Records))
+	OffRecord    = int32(unsafe.Offsetof(Context{}.Record))
 	OffSpill     = int32(unsafe.Offsetof(Context{}.Spill))
 )
 
 // Exit kinds, written to Context.ExitKind.
 const (
-	// ExitReturn: Ret holds the result's number word.
+	// ExitReturn: Ret holds the result's number word, or RetFrom names
+	// the slot that holds it.
 	ExitReturn uint64 = iota
 	// ExitDeopt: a guard failed. The frame holds the state at ExitPC with
 	// ExitDepth operands; the interpreter runs from there.

@@ -23,6 +23,7 @@ func Build(p *ir.Program) (*Func, error) {
 		return nil, err
 	}
 	b.translate()
+	shadowMerges(b.f)
 	return b.f, nil
 }
 
@@ -348,11 +349,6 @@ func (b *builder) fill(blk *Block) {
 			v.Aux = i
 			b.write(i, blk, v)
 			blk.Header.Slots[i] = v
-		}
-		for _, v := range blk.Header.Slots {
-			c := f.newValue(blk, OpCheckScalar, None, v)
-			c.Aux = int(ir.GuardExit)
-			c.State = blk.Header
 		}
 		return
 	}

@@ -62,6 +62,47 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, p *ir.Program, limit int) *j
 	return code
 }
 
+// jitSlot is a frame's slot as the JIT numbers them: its locals, then its
+// operands.
+func (r *Runtime) jitSlot(f *frame, i int) *Value {
+	if n := f.cl.fn.LocalCount; i >= n {
+		return &r.stack[f.base+i-n]
+	}
+	return &f.locals[i]
+}
+
+// jitApplyRecords writes the slots an exit left to Go (abi.Record): the
+// references it moved, and the primitives it put where a reference was.
+// The slots records read hold their values from entry until the first
+// write, so every one is read first.
+func (r *Runtime) jitApplyRecords(f *frame, ctx *abi.Context) {
+	n := int(ctx.Records)
+	if n == 0 {
+		return
+	}
+	r.jit.ssaRecords += uint64(n)
+	var buf [8]Value
+	src := buf[:0]
+	for _, rec := range ctx.Record[:n] {
+		v := Value{num: math.Float64frombits(rec.Word)}
+		switch {
+		case rec.Slot&abi.RecordScalar != 0:
+		case rec.Slot&abi.RecordMaybe != 0:
+			if from := int32(rec.Arg); from >= 0 {
+				if s := r.jitSlot(f, int(from)); s.ref != nil {
+					v = *s
+				}
+			}
+		default:
+			v = *r.jitSlot(f, int(rec.Arg))
+		}
+		src = append(src, v)
+	}
+	for i, rec := range ctx.Record[:n] {
+		*r.jitSlot(f, int(rec.Slot&^(abi.RecordScalar|abi.RecordMaybe))) = src[i]
+	}
+}
+
 // runSSA runs a function compiled by the new pipeline from pc, where the
 // frame has depth operands, until it returns or leaves native code for the
 // rest of the invocation.
@@ -84,9 +125,16 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 		if err := e.ssa.Run(pc, ctx); err != nil {
 			return r.jitInterpret(f, f.base+depth, nil)
 		}
-		switch ctx.ExitKind {
-		case abi.ExitReturn:
+		if ctx.ExitKind == abi.ExitReturn {
+			if ctx.RetFrom != 0 {
+				if v := *r.jitSlot(f, int(ctx.RetFrom)-1); v.ref != nil {
+					return v, nil, true
+				}
+			}
 			return Value{num: math.Float64frombits(ctx.Ret)}, nil, true
+		}
+		r.jitApplyRecords(f, ctx)
+		switch ctx.ExitKind {
 		case abi.ExitDeopt:
 			// The frame holds the state at the guard; the interpreter runs
 			// the rest of this invocation.

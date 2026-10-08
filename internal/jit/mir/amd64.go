@@ -67,6 +67,9 @@ type compiler struct {
 	// rematerialized where needed.
 	lazy map[*ssa.Value]bool
 	locs map[*ssa.Value]loc
+	// origin is each tagged value's (ssa.Origins): the slot an exit looks
+	// in for the reference the value may be.
+	origin map[*ssa.Value]int
 	// label of each block's code.
 	labels map[*ssa.Block]amd64.Label
 	// stubs: one exit per frame state and kind.
@@ -94,6 +97,15 @@ func CompileAMD64(f *ssa.Func, enc abi.Encoding) (code *Code, err error) {
 		}
 	}()
 	c := &compiler{f: f, enc: enc, labels: map[*ssa.Block]amd64.Label{}, stubs: map[stubKey]amd64.Label{}}
+	if n := f.Locals + f.StackSize; n > abi.MaxRecords {
+		return nil, fmt.Errorf("%w: %d slots", ErrUnsupported, n)
+	}
+	c.origin = ssa.Origins(f)
+	for v, o := range c.origin {
+		if o == ssa.OriginAmbiguous && v.Shadow == nil {
+			return nil, fmt.Errorf("%w: %v merges two slots' values with no shadow", ErrUnsupported, v)
+		}
+	}
 	c.layout()
 	c.findLazy()
 	if err := c.allocate(); err != nil {
@@ -171,8 +183,7 @@ func (c *compiler) findLazy() {
 		}
 	}
 	// A slot loaded at an entry and named only by frame states for that same
-	// slot, or checked for a reference, needs no register: an exit leaves
-	// that slot as it is, and the check reads the frame.
+	// slot needs no register: an exit leaves that slot as it is.
 	elsewhere := map[*ssa.Value]bool{}
 	state := func(s *ssa.FrameState) {
 		if s == nil {
@@ -186,11 +197,9 @@ func (c *compiler) findLazy() {
 	}
 	for _, b := range c.f.Blocks {
 		for _, v := range b.Values {
-			if v.Op != ssa.OpCheckScalar {
-				for _, a := range v.Args {
-					if a.Op == ssa.OpLoadSlot {
-						elsewhere[a] = true
-					}
+			for _, a := range v.Args {
+				if a.Op == ssa.OpLoadSlot {
+					elsewhere[a] = true
 				}
 			}
 			state(v.State)
@@ -205,6 +214,8 @@ func (c *compiler) findLazy() {
 	for _, b := range c.f.Blocks {
 		for _, v := range b.Values {
 			switch v.Op {
+			case ssa.OpConstI32:
+				c.lazy[v] = true
 			case ssa.OpConst, ssa.OpBoxF64, ssa.OpBoxBool:
 				if !used[v] {
 					c.lazy[v] = true
@@ -265,6 +276,9 @@ func (c *compiler) allocate() error {
 				continue
 			}
 			uses = append(uses, use{v, at})
+			if v.Shadow != nil {
+				uses = append(uses, use{v.Shadow, at})
+			}
 		}
 	}
 	for _, b := range c.order {
@@ -284,6 +298,9 @@ func (c *compiler) allocate() error {
 				}
 			} else {
 				uses = append(uses, use{b.Control, end[b]})
+				if b.Control.Shadow != nil {
+					uses = append(uses, use{b.Control.Shadow, end[b]})
+				}
 			}
 		}
 		useState(b.State, end[b])
@@ -584,6 +601,8 @@ func (c *compiler) materialize(v *ssa.Value, dst amd64.Reg) {
 	switch v.Op {
 	case ssa.OpConst:
 		c.a.MovImm(dst, c.constWord(v.Const))
+	case ssa.OpConstI32:
+		c.a.MovImm(dst, uint64(int64(v.Aux)))
 	case ssa.OpBoxF64:
 		c.boxF64(c.xmm(v.Args[0], xScratch1), dst)
 	case ssa.OpBoxBool:
@@ -645,24 +664,103 @@ func remat(v *ssa.Value) bool {
 
 // exitTo writes a frame state into the frame and returns with an exit
 // record. A slot holding what was loaded from it at this entry is left as
-// it is; every other slot's word is written, boxes and constants
-// recomputed from their operands.
+// it is. Every other slot gets its value's word, boxes and constants
+// recomputed from their operands -- unless the value is the reference its
+// origin slot held, which Go copies, or the slot holds a reference, whose
+// pointer word Go clears: those are records (abi.Record). The frame is as
+// it was at entry until here, so the origin slot still holds the
+// reference, and a slot this stub has written held none.
 func (c *compiler) exitTo(s *ssa.FrameState, kind uint64) {
+	c.a.MovImm(scratchC, 0)
+	c.a.Store(regCtx, abi.OffRecords, scratchC)
 	for i, v := range s.Slots {
 		if v.Op == ssa.OpLoadSlot && v.Aux == i {
 			continue
 		}
-		var r amd64.Reg
+		var w amd64.Reg
 		if remat(v) {
 			c.materialize(v, scratchA)
-			r = scratchA
+			w = scratchA
 		} else {
-			r = c.gpr(v, scratchA)
+			w = c.gpr(v, scratchA)
 		}
-		base, disp := c.slotAddr(i, false)
-		c.a.Store(base, disp, r)
+		if v.Shadow != nil {
+			// Which slot it came from is known only at run time: Go looks.
+			c.appendRecord(uint64(i)|abi.RecordMaybe, c.gprAfter(v.Shadow), 0, false, &w)
+			continue
+		}
+		next := c.a.NewLabel()
+		if o, ok := c.origin[v]; ok && o >= 0 {
+			scalar := c.a.NewLabel()
+			c.isReference(v, w, o, scalar)
+			if o != i {
+				c.appendRecord(uint64(i), nil, uint64(o), true, nil)
+			}
+			c.a.Jmp(next)
+			c.a.Bind(scalar)
+		}
+		record := c.a.NewLabel()
+		base, disp := c.slotAddr(i, true)
+		c.a.Load(scratchC, base, disp)
+		c.a.Op(amd64.Test, scratchC, scratchC, true)
+		c.a.Jcc(amd64.CondNE, record)
+		base, disp = c.slotAddr(i, false)
+		c.a.Store(base, disp, w)
+		c.a.Jmp(next)
+		c.a.Bind(record)
+		c.appendRecord(uint64(i)|abi.RecordScalar, nil, 0, true, &w)
+		c.a.Bind(next)
 	}
 	c.record(kind, uint64(s.PC), uint64(s.Depth))
+}
+
+// isReference falls through when v, whose word is in w, is the reference
+// slot o held at entry, and jumps to primitive when it is not: when the
+// slot held none, or when v is not a load of it and its word is not the
+// slot's. Native code makes no word of a reference's kind, so an equal
+// word is the slot's value. It uses scratchC.
+func (c *compiler) isReference(v *ssa.Value, w amd64.Reg, o int, primitive amd64.Label) {
+	base, disp := c.slotAddr(o, true)
+	c.a.Load(scratchC, base, disp)
+	c.a.Op(amd64.Test, scratchC, scratchC, true)
+	c.a.Jcc(amd64.CondE, primitive)
+	if v.Op != ssa.OpLoadSlot {
+		base, disp = c.slotAddr(o, false)
+		c.a.Load(scratchC, base, disp)
+		c.a.Op(amd64.Cmp, w, scratchC, true)
+		c.a.Jcc(amd64.CondNE, primitive)
+	}
+}
+
+// appendRecord adds an abi.Record for slot: its Arg from arg, which
+// yields a register once the record's address is in scratchC, or imm when
+// useImm; and its Word from word, if not nil, which must not be scratchB
+// or scratchC. It uses scratchB and scratchC.
+func (c *compiler) appendRecord(slot uint64, arg func() amd64.Reg, imm uint64, useImm bool, word *amd64.Reg) {
+	c.a.Load(scratchC, regCtx, abi.OffRecords)
+	c.a.ShiftImm(amd64.Shl, scratchC, 5, true)
+	c.a.Op(amd64.Add, scratchC, regCtx, true)
+	if word != nil {
+		c.a.Store(scratchC, abi.OffRecord+16, *word)
+	}
+	c.a.MovImm(scratchB, slot)
+	c.a.Store(scratchC, abi.OffRecord, scratchB)
+	if useImm {
+		c.a.MovImm(scratchB, imm)
+		c.a.Store(scratchC, abi.OffRecord+8, scratchB)
+	} else {
+		c.a.Store(scratchC, abi.OffRecord+8, arg())
+	}
+	c.a.Load(scratchC, regCtx, abi.OffRecords)
+	c.a.OpImm(amd64.Add, scratchC, 1, true)
+	c.a.Store(regCtx, abi.OffRecords, scratchC)
+}
+
+// gprAfter returns a function yielding a register holding v, loading it
+// into scratchB if it has none; for appendRecord, which has freed scratchB
+// by then.
+func (c *compiler) gprAfter(v *ssa.Value) func() amd64.Reg {
+	return func() amd64.Reg { return c.gpr(v, scratchB) }
 }
 
 // record fills the exit record and returns to Go.
@@ -696,6 +794,21 @@ func (c *compiler) block(b *ssa.Block, next *ssa.Block) {
 	case ssa.BlockReturn:
 		r := c.gpr(b.Control, scratchA)
 		c.a.Store(regCtx, abi.OffRet, r)
+		c.a.MovImm(scratchC, 0)
+		c.a.Store(regCtx, abi.OffRetFrom, scratchC)
+		if s := b.Control.Shadow; s != nil {
+			// RetFrom is the shadow plus one, and 0 for a primitive's -1;
+			// Go checks that the slot holds a reference.
+			c.a.MovRR(scratchC, c.gpr(s, scratchC))
+			c.a.OpImm(amd64.Add, scratchC, 1, false)
+			c.a.Store(regCtx, abi.OffRetFrom, scratchC)
+		} else if o, ok := c.origin[b.Control]; ok && o >= 0 {
+			done := c.a.NewLabel()
+			c.isReference(b.Control, r, o, done)
+			c.a.MovImm(scratchC, uint64(o)+1)
+			c.a.Store(regCtx, abi.OffRetFrom, scratchC)
+			c.a.Bind(done)
+		}
 		c.a.MovImm(scratchA, abi.ExitReturn)
 		c.a.Store(regCtx, abi.OffExitKind, scratchA)
 		c.a.Ret()
@@ -884,11 +997,6 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		base, disp := c.slotAddr(v.Aux, false)
 		c.a.Load(scratchA, base, disp)
 		c.setG(v, scratchA)
-	case ssa.OpCheckScalar:
-		base, disp := c.slotAddr(arg(0).Aux, true)
-		c.a.Load(scratchA, base, disp)
-		c.a.Op(amd64.Test, scratchA, scratchA, true)
-		guard(amd64.CondNE)
 	case ssa.OpConst:
 		c.a.MovImm(scratchA, c.constWord(v.Const))
 		c.setG(v, scratchA)

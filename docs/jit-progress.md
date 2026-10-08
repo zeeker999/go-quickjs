@@ -6,8 +6,9 @@ across sessions. Update it **in the same commit** as the work it records.
 ## Resume here
 
 - **Worktree:** `D:\Data\go-quickjs-jit`, branch `jit-wip`, based on main
-  6c3dd16. It is not pushed; the remote branch `zk/codex/jit-wip` still has
-  the old history.
+  6c3dd16. Pushed to `zk/jit-wip` when CI is wanted on Linux or macOS (the
+  user allows that); `zk/codex/jit-wip` keeps the old history, never
+  force-pushed.
 - **Original history:** branch `jit-wip-backup` (82aa960). Everything up to
   that point is squashed into c55bc9e.
 - **Test commands** (Windows/amd64 here; `QUICKJS_REQUIRE_JIT=1` fails on
@@ -21,8 +22,10 @@ across sessions. Update it **in the same commit** as the work it records.
     -run TestConformance -count=1 -timeout 60m -v -args -conformance.jit
   ```
 
-- **Next item:** the first unchecked Phase 1 item.
-- **Stress test262:** `QJS_JIT_STRESS=threshold,budget=1 TEST262_DIR=d:/Data/test262 go test -tags quickjs_jit ./conformance -run TestConformance -v -args -conformance.jit`
+- **Next item:** P4b (arrays through views), while the 24-hour fuzz, the
+  last Phase 1 gate, runs.
+- **Stress test262:** `QJS_JIT_STRESS=threshold,budget=1 TEST262_DIR=d:/Data/test262 go test -tags quickjs_jit ./conformance -run TestConformance -v -args -conformance.jit`;
+  `QJS_JIT_PIPELINE=ssa` runs the new pipeline wherever it compiles.
 
 ## Phase 0: stabilize and cut
 
@@ -99,7 +102,10 @@ Design: [jit-phase2-design.md](jit-phase2-design.md). P2 gates the rest.
 | P1 | `internal/jit/ssa`: types, builder (Braun et al.) from the slot IR, evaluator, Phase 2 passes, for the numeric subset (copies, stack shuffles, every arithmetic, bitwise and comparison operator, updates, branches, TDZ checks, returns; host operations as exits). Arrays, properties, strings and calls are refused until P4. 3,000 random programs and a JavaScript corpus match the slot IR on 172,809 comparisons, built and optimized, with and without polls. | done (numeric subset) | jit: build typed SSA from the slot IR |
 | P2 | Walking skeleton on amd64: `asm/amd64` (golden tests), `mir` (SSA to amd64), `jit.SSACode`, and the VM running functions through it (`QJS_JIT_PIPELINE=ssa`, or `Runtime.jitSSA`). Gate: bare round trip **4.0 ns** (target 15 ns or less, met); numeric kernels faster than the old pipeline (met: logistic 1.47x, Newton 1.31x, particle 2.05x; 4-22x the tree tier); helper round trip **43 ns for `%`** (target 25 ns or less, not met). The profile puts that cost in Go re-decoding the bytecode instruction at every exit (`jitHost`, `jitBinaryAt`), which P5's helper table replaces, so it moves to P5's gate. A Go call through the new pipeline (66 ns per iteration) is level with the tree tier (72 ns). | done (helper cost moves to P5) | jit: run functions through the new pipeline |
 | P3 | The skeleton on arm64, measured on a Mac or the macOS runner | todo | |
-| P4 | Coverage: every slot-IR operation built; stress corpus and fuzzer pass on the new pipeline | todo | |
+| P4 | Coverage: every slot-IR operation built; stress corpus and fuzzer pass on the new pipeline | in progress | |
+| P4a | References carried natively: no entry check; exits leave references to Go through records (copy, store over, "maybe" for a phi of two slots, which carries a run-time *shadow* of its origin), `RetFrom` for returns; the evaluator checks every origin. `unboxPhis` unboxes a phi only for an unboxed use, so a phi that merely carries a number no longer guards an entry load that may hold a reference (kernels' code unchanged). Harness: 281 copies, 1,549 stores over references, 26,066 maybes, 273 reference returns over 2,000 programs; `TestJITSSAReferences`. | done | jit: carry references through native code |
+| P4b | Arrays through read-only views (D8): element reads and numeric writes | next | |
+| P4c | Properties, globals, captured bindings, strings; calls as helper exits | todo | |
 | P5 | Helpers: contained and reentrant, re-validation, generation counter; `%` and Go calls no slower than the tree tier | todo | |
 | P6 | Code arena (R8) | todo | |
 | P7 | Parity on both architectures, then delete the old pipeline | todo | |
