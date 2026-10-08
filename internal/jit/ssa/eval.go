@@ -9,8 +9,12 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
 
-// canonicalNaN is the NaN a number cell holds.
-const canonicalNaN = 0x7ff8000000000000
+// canonicalNaN is the NaN a number cell holds, and numberLimit bounds the
+// words that hold numbers (abi.NumberLimit).
+const (
+	canonicalNaN = 0x7ff8000000000000
+	numberLimit  = 0xFFF8000000000000
+)
 
 // index converts an element's key, as the slot IR does: an integer in
 // [0, 2**32), negative zero included.
@@ -139,6 +143,56 @@ func Evaluate(f *Func, pc int, slots []ir.Value, pollEvery int) (ir.Exit, error)
 // takes them: an Opaque value's Bits index arrays, and a view with a
 // NumberLimit is an array whose cells it reads and writes in place.
 func EvaluateArrays(f *Func, pc int, slots []ir.Value, arrays []ir.ArrayView, pollEvery int) (ir.Exit, error) {
+	return EvaluateHeap(f, pc, slots, Heap{Arrays: arrays}, pollEvery)
+}
+
+// Heap is what an evaluation reads and writes besides the slots, by an
+// Opaque value's Bits: arrays, as the slot IR's views, and objects.
+type Heap struct {
+	Arrays  []ir.ArrayView
+	Objects []Object
+}
+
+// Object is an object as property operations see it: its shape, whether it
+// is an ordinary object whose table may be searched, and its table: each
+// entry's key, whether it is plain data and plain writable data, and its
+// value's number word.
+type Object struct {
+	Shape    uintptr
+	Ordinary bool
+	Keys     []uint32
+	Data     []bool
+	Writable []bool
+	Props    []uint64
+}
+
+// maxScan is abi.MaxScan.
+const maxScan = 8
+
+// property finds the property a property operation names in o, as the
+// operation's semantics say (OpPropRead), or -1.
+func (o *Object) property(v *Value) int {
+	if v.Const.Bits != 0 && o.Shape == uintptr(v.Const.Bits) {
+		return v.Index
+	}
+	if !o.Ordinary || len(o.Keys) > maxScan {
+		return -1
+	}
+	for i, k := range o.Keys {
+		if k != v.Key {
+			continue
+		}
+		if !o.Data[i] || v.Op == OpPropWrite && !o.Writable[i] {
+			return -1
+		}
+		return i
+	}
+	return -1
+}
+
+// EvaluateHeap is Evaluate with a heap.
+func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (ir.Exit, error) {
+	arrays := heap.Arrays
 	e, ok := f.EntryFor(pc)
 	if !ok || len(slots) != f.Locals+f.StackSize {
 		return ir.Exit{}, ir.ErrState
@@ -255,6 +309,27 @@ func EvaluateArrays(f *Func, pc int, slots []ir.Value, arrays []ir.ArrayView, po
 				*cell = bits
 			case OpArrayLen:
 				vals[v.ID] = val{f: float64(arrays[a.p].Length)}
+			case OpObjectOf:
+				t := a.t
+				if t.Kind != ir.Opaque || t.Bits >= uint64(len(heap.Objects)) {
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
+				vals[v.ID] = val{p: int(t.Bits)}
+			case OpPropRead, OpPropWrite:
+				o := &heap.Objects[a.p]
+				i := o.property(v)
+				if i < 0 || i >= len(o.Props) || o.Props[i] >= numberLimit {
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
+				if v.Op == OpPropRead {
+					vals[v.ID] = val{f: math.Float64frombits(o.Props[i])}
+					break
+				}
+				bits := math.Float64bits(b.f)
+				if math.IsNaN(math.Float64frombits(bits)) {
+					bits = canonicalNaN
+				}
+				o.Props[i] = bits
 			case OpCheckInit:
 				if a.t.Kind == ir.Uninitialized {
 					return exit(v.State, ir.ExitKind(v.Aux))

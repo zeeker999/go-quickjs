@@ -22,8 +22,8 @@ across sessions. Update it **in the same commit** as the work it records.
     -run TestConformance -count=1 -timeout 60m -v -args -conformance.jit
   ```
 
-- **Next item:** P4d (receiver, globals, properties), while the 24-hour
-  fuzz, the last Phase 1 gate, runs.
+- **Next item:** P4e (globals, references read from objects, strings),
+  while the 24-hour fuzz, the last Phase 1 gate, runs.
 - **Stress test262:** `QJS_JIT_STRESS=threshold,budget=1 TEST262_DIR=d:/Data/test262 go test -tags quickjs_jit ./conformance -run TestConformance -v -args -conformance.jit`;
   `QJS_JIT_PIPELINE=ssa` runs the new pipeline wherever it compiles.
 
@@ -107,8 +107,8 @@ Design: [jit-phase2-design.md](jit-phase2-design.md). P2 gates the rest.
 | P4b | Arrays in place (D8): `ArrayOf` finds the array through its value's origin or shadow and checks the class; element reads of numbers, number stores into number elements, length (sparse included), index keys; holes, other values, other objects and other keys exit as the slot IR's views do (hole writes go to Go). Evaluators share the slot IR's view semantics; the harness lays out fake objects through `abi.Encoding`; sabotaged reads, writes, lengths and shadow lookups each fail it. `BenchmarkJITArrayKernels` (fuzzer running): vector 8.8 ns/element against 12.5 old and 40.5 tree; stencil 18.9 / 22.7 / 103.9; dot 7.7 / 11.3 / 45.7. | done | jit: read and write arrays in place |
 | P4b+ | Array loops at native speed: hoist `ArrayOf` and the elements' header out of loops (nothing changes them natively), int32 induction variables, bounds-check elimination. 7.7 ns per element of a dot product is ~50 instructions. | todo (Phase 3) | |
 | P4c | Captured bindings read in place through their cells (`Context.Upvalues`, `Func.FrameLocals`), the shadow lookup included; the builder records the slots instructions write (`Func.Written`, apart from the phis reads record), and mir refuses a function that writes a captured binding. Harness: captured values in cells, the frame's entries poisoned; `TestSSANativeCapturedShadow`; `TestJITSSACaptured`. `BenchmarkJITDenseKernels` (closures over n): vector 41 us against 65 old and 297 tree; stencil 89 / 164 / 542; helper 504 / 548 / 1,911. | done | jit: read captured bindings in place |
-| P4d | The receiver snapshot (`this`), globals (`BindingRead`), properties (`PropertyRead`/`Write`, `ReferenceRead`) | next | |
-| P4e | Strings (`StringMethod`, `StringCode`) | todo | |
+| P4d | The receiver, read from the context (`Context.This`, `Func.ThisSlot`), and properties in place (D8): a shape guard against the site's cache (`ssa.Feedback`, kept alive by the entry) gives the index; any other ordinary object with at most 8 properties is searched for the key, unrolled, as the VM's small objects are (they have no shape until a cache asks); numbers only, the rest exits to Go. `jitcompile.LowerSSA` drops the old pipeline's profitability rules (properties only in loops with arrays or bitwise work, the receiver only in property loops) and leaves global and reference reads to Go; the VM lowers for the new pipeline first. Harness: shapes, keys and flags; unpolled runs bounded at 2**20 back-edges, so a diverging loop fails rather than hangs. `BenchmarkJITNumericFields`: 55 us against 69 old and 651 tree. | done | jit: read the receiver and properties in place |
+| P4e | Globals (`BindingRead`), references read from objects (`ReferenceRead`), strings (`StringMethod`, `StringCode`) | next | |
 | P5 | Helpers: contained and reentrant, re-validation, generation counter; `%` and Go calls no slower than the tree tier | todo | |
 | P6 | Code arena (R8) | todo | |
 | P7 | Parity on both architectures, then delete the old pipeline | todo | |

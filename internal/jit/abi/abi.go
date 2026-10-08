@@ -50,6 +50,10 @@ type Context struct {
 	// pointers to cells, each holding at Encoding.UpvalueSlot a pointer to
 	// the binding's value. Native code only reads them.
 	Upvalues unsafe.Pointer
+	// This is the receiver, laid out as a VM value, which Go sets before
+	// every entry of a function that reads it; uninitialized in a derived
+	// constructor before super() returns.
+	This Slot
 	// The exit record.
 	ExitKind  uint64
 	ExitPC    uint64
@@ -65,12 +69,20 @@ type Context struct {
 	Spill [SpillSlots]uint64
 }
 
+// Slot is a VM value's layout -- a number word, then a pointer word -- held
+// where the garbage collector sees the pointer.
+type Slot struct {
+	Num uint64
+	Ref unsafe.Pointer
+}
+
 // Offsets of Context's fields, which generated code addresses.
 var (
 	OffLocals    = int32(unsafe.Offsetof(Context{}.Locals))
 	OffStack     = int32(unsafe.Offsetof(Context{}.Stack))
 	OffBackEdges = int32(unsafe.Offsetof(Context{}.BackEdges))
 	OffUpvalues  = int32(unsafe.Offsetof(Context{}.Upvalues))
+	OffThis      = int32(unsafe.Offsetof(Context{}.This))
 	OffExitKind  = int32(unsafe.Offsetof(Context{}.ExitKind))
 	OffExitPC    = int32(unsafe.Offsetof(Context{}.ExitPC))
 	OffExitDepth = int32(unsafe.Offsetof(Context{}.ExitDepth))
@@ -127,7 +139,23 @@ type Encoding struct {
 	// UpvalueSlot is the offset, in a captured binding's cell, of the
 	// pointer to its value (Context.Upvalues).
 	UpvalueSlot int32
+
+	// An object's properties (D8): ObjectShape is the offset of its shape
+	// pointer, which says where each property is and what it is, and
+	// ObjectProps of its property table's slice. Each entry is PropertySize
+	// bytes: its key, a uint32 atom, at PropertyKey, a flags byte at
+	// PropertyFlags, and its value at PropertyValue.
+	ObjectShape, ObjectProps, PropertySize, PropertyKey, PropertyFlags, PropertyValue int32
+	// An ordinary object of class ClassObject, whose table has at most
+	// MaxScan entries, may be searched for a key, as the VM's own small
+	// objects are. A property is plain data when its flags have none of
+	// PropNotData, and a plain writable one when they have PropWritable of
+	// PropNotWritable.
+	ClassObject, PropNotData, PropNotWritable, PropWritable uint8
 }
+
+// MaxScan bounds the table native code searches for a key.
+const MaxScan = 8
 
 // NumberLimit bounds number words: a word below it holds a number, and
 // every tag is at or above it.

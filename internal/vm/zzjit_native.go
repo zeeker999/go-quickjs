@@ -166,8 +166,11 @@ func hintFor(e *jitEntry) uint32 {
 type jitEntry struct {
 	// hint is the slot and tag a closure remembers this entry by.
 	hint uint32
-	// ssa is the new pipeline's code, when it compiled the function.
+	// ssa is the new pipeline's code, when it compiled the function, and
+	// ssaShapes the shapes its guards compare objects with, which it holds
+	// by address and this keeps alive.
 	ssa           *jit.SSACode
+	ssaShapes     []*shape
 	code          *jit.Code
 	misses        uint8
 	probes        uint8
@@ -358,11 +361,13 @@ func (r *Runtime) jitAllowance(fn *bytecode.Function) int {
 	return budget - int(r.jitCodeBytes())
 }
 
-func (r *Runtime) jitFor(fn *bytecode.Function) *jitEntry {
-	return r.jitForMode(fn, false)
+// jitFor is the entry for a closure's function, compiling it if need be with
+// what the closure's caches know of its sites.
+func (r *Runtime) jitFor(cl *closure) *jitEntry {
+	return r.jitForMode(cl.fn, false, cl)
 }
 
-func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool) *jitEntry {
+func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool, cl *closure) *jitEntry {
 	if r.jit != nil && r.jit.unavailable {
 		return nil
 	}
@@ -426,15 +431,19 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool) *jitEntry {
 		e.calleeOnly = true
 		e.entrySlow = true
 	}
-	p, err := lower(fn)
-	if err == nil && r.jitSSA && !callee {
-		if code := r.compileSSA(fn, p, limit); code != nil {
-			e.ssa = code
-			s.compiled++
-			s.remember(weak.Make(fn), e)
-			return e
+	if r.jitSSA && !callee {
+		// The new pipeline lowers for itself; what it does not compile goes
+		// to the slot IR emitters.
+		if p, err := jitcompile.LowerSSA(fn); err == nil {
+			if code, shapes := r.compileSSA(fn, cl, p, limit); code != nil {
+				e.ssa, e.this, e.ssaShapes = code, p.This, shapes
+				s.compiled++
+				s.remember(weak.Make(fn), e)
+				return e
+			}
 		}
 	}
+	p, err := lower(fn)
 	if err == nil {
 		e.this = p.This
 		for _, key := range p.Globals {
@@ -676,7 +685,7 @@ func (r *Runtime) tryJITLoop(f *frame, pc uint32, sp int, fullBudget bool) (Valu
 func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, bool) {
 	e := r.jit.hint(f.cl.hint())
 	if e == nil || e.code != nil && e.code.Size() == 0 || e.ssa != nil && e.ssa.Size() == 0 {
-		e = r.jitFor(f.cl.fn)
+		e = r.jitFor(f.cl)
 		f.cl.setHint(hintFor(e))
 	}
 	if e != nil && e.ssa != nil {
@@ -810,7 +819,7 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 			// rejects an owner closed by eviction; a released cache changes s.
 			_, live := e.code.EntryDepth(pc)
 			if r.jit != s || !live {
-				e = r.jitFor(f.cl.fn)
+				e = r.jitFor(f.cl)
 				f.cl.setHint(hintFor(e))
 				if e == nil || e.code == nil {
 					return r.jitInterpret(f, sp, nil)

@@ -42,6 +42,17 @@ var jitEncoding = abi.Encoding{
 	CanonicalNaN:  canonicalNaN,
 	Object:        objectBits,
 	UpvalueSlot:   int32(unsafe.Offsetof(upvalue{}.slot)),
+	ObjectShape:   int32(unsafe.Offsetof(Object{}.shape)),
+	ObjectProps:   int32(unsafe.Offsetof(Object{}.props)),
+	PropertySize:  int32(unsafe.Sizeof(Property{})),
+	PropertyKey:   int32(unsafe.Offsetof(Property{}.key)),
+	PropertyFlags: int32(unsafe.Offsetof(Property{}.flags)),
+	PropertyValue: int32(unsafe.Offsetof(Property{}.value)),
+
+	ClassObject:     uint8(ClassObject),
+	PropNotData:     uint8(propAccessor | propPrivate | propDeleted),
+	PropNotWritable: uint8(propAccessor | propPrivate | propDeleted | propUninit | propWritable),
+	PropWritable:    uint8(propWritable),
 
 	ObjectClass:    int32(unsafe.Offsetof(Object{}.class)),
 	ObjectFlags:    int32(unsafe.Offsetof(Object{}.flags)),
@@ -53,38 +64,89 @@ var jitEncoding = abi.Encoding{
 
 // compileSSA compiles a lowered function with the new pipeline, or returns
 // nil. It takes functions whose slots are the frame's locals, its captured
-// bindings, read through their cells, and its operands: no receiver
-// snapshot or global slots yet.
-func (r *Runtime) compileSSA(fn *bytecode.Function, p *ir.Program, limit int) *jit.SSACode {
-	if p.This || len(p.Globals) != 0 || p.Locals != fn.LocalCount+len(fn.Upvalues) {
-		return nil
+// bindings, read through their cells, the receiver, which Go puts in the
+// context, and its operands: no global slots yet.
+//
+// The closure's caches say where its sites' properties are (jitFeedback);
+// it returns the shapes the code compares objects with, to be kept alive.
+func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, limit int) (*jit.SSACode, []*shape) {
+	this := 0
+	if p.This {
+		this = 1
 	}
-	f, err := ssa.Build(p)
+	if len(p.Globals) != 0 || p.Locals != fn.LocalCount+len(fn.Upvalues)+this {
+		return nil, nil
+	}
+	fb := &jitFeedback{fn: fn, cl: cl}
+	f, err := ssa.BuildWith(p, fb)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	f.FrameLocals = fn.LocalCount
+	if p.This {
+		f.ThisSlot = fn.LocalCount + len(fn.Upvalues)
+	}
 	ssa.Optimize(f)
 	mc, err := mir.CompileAMD64(f, jitEncoding)
 	if err != nil || len(mc.Bytes) > limit {
-		return nil
+		return nil, nil
 	}
 	code, err := jit.NewSSACode(mc)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	return code
+	return code, fb.shapes
+}
+
+// jitFeedback is ssa.Feedback from a closure: its names' atoms, and its
+// property caches. A site that has met objects of one shape, the property
+// their own plain data -- and writable, for a write -- knows where it is in
+// any object of that shape: the shape settles the table's layout and the
+// attributes. A shape a cache remembers is marked seen, so the VM replaces
+// it rather than change it when an object's layout changes; the code holds
+// it by address, and the entry keeps it alive. Objects of other shapes, and
+// of none -- the VM gives a small object a shape only when a cache asks --
+// are searched for the key.
+type jitFeedback struct {
+	fn     *bytecode.Function
+	cl     *closure
+	shapes []*shape
+}
+
+func (fb *jitFeedback) Property(pc int) (ssa.PropertySite, bool) {
+	if fb.cl == nil || pc >= len(fb.fn.Code) {
+		return ssa.PropertySite{}, false
+	}
+	in := fb.fn.Code[pc]
+	if in.Op != bytecode.OpGetProp && in.Op != bytecode.OpSetProp || int(in.A) >= len(fb.cl.names) {
+		return ssa.PropertySite{}, false
+	}
+	site := ssa.PropertySite{Key: uint32(fb.cl.names[in.A])}
+	if int(in.B) < len(fb.cl.ic) {
+		c := &fb.cl.ic[in.B]
+		if c.shape != nil && c.shape != noShape && c.p1 == nil && !c.getter && c.next == nil && c.idx >= 0 && c.idx < c.shape.n {
+			fb.shapes = append(fb.shapes, remember(c.shape))
+			site.Shape, site.Index = uintptr(unsafe.Pointer(c.shape)), c.idx
+		}
+	}
+	return site, true
 }
 
 // jitSlot is a frame's slot as the JIT numbers them: its locals, its
-// captured bindings, then its operands.
-func (r *Runtime) jitSlot(f *frame, i int) *Value {
+// captured bindings, the receiver if the code reads it (from the context,
+// where Go put it), then its operands.
+func (r *Runtime) jitSlot(f *frame, e *jitEntry, i int) *Value {
 	n, u := f.cl.fn.LocalCount, len(f.cl.upvalues)
 	switch {
 	case i < n:
 		return &f.locals[i]
 	case i < n+u:
 		return f.cl.upvalues[i-n].slot
+	case e.this && i == n+u:
+		return (*Value)(unsafe.Pointer(&r.jit.ssaCtx.This))
+	}
+	if e.this {
+		u++
 	}
 	return &r.stack[f.base+i-n-u]
 }
@@ -93,7 +155,7 @@ func (r *Runtime) jitSlot(f *frame, i int) *Value {
 // references it moved, and the primitives it put where a reference was.
 // The slots records read hold their values from entry until the first
 // write, so every one is read first.
-func (r *Runtime) jitApplyRecords(f *frame, ctx *abi.Context) {
+func (r *Runtime) jitApplyRecords(f *frame, e *jitEntry, ctx *abi.Context) {
 	n := int(ctx.Records)
 	if n == 0 {
 		return
@@ -107,17 +169,17 @@ func (r *Runtime) jitApplyRecords(f *frame, ctx *abi.Context) {
 		case rec.Slot&abi.RecordScalar != 0:
 		case rec.Slot&abi.RecordMaybe != 0:
 			if from := int32(rec.Arg); from >= 0 {
-				if s := r.jitSlot(f, int(from)); s.ref != nil {
+				if s := r.jitSlot(f, e, int(from)); s.ref != nil {
 					v = *s
 				}
 			}
 		default:
-			v = *r.jitSlot(f, int(rec.Arg))
+			v = *r.jitSlot(f, e, int(rec.Arg))
 		}
 		src = append(src, v)
 	}
 	for i, rec := range ctx.Record[:n] {
-		*r.jitSlot(f, int(rec.Slot&^(abi.RecordScalar|abi.RecordMaybe))) = src[i]
+		*r.jitSlot(f, e, int(rec.Slot&^(abi.RecordScalar|abi.RecordMaybe))) = src[i]
 	}
 }
 
@@ -139,6 +201,13 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 		ctx.Stack = unsafe.Pointer(&r.stack[f.base])
 		ctx.BackEdges = &r.backEdges
 		ctx.Upvalues = unsafe.Pointer(unsafe.SliceData(f.cl.upvalues))
+		if e.this {
+			this, bound := f.thisValue()
+			if !bound {
+				this = uninitialized
+			}
+			*(*Value)(unsafe.Pointer(&ctx.This)) = this
+		}
 		s.entries++
 		s.ssaEntries++
 		if err := e.ssa.Run(pc, ctx); err != nil {
@@ -146,13 +215,13 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 		}
 		if ctx.ExitKind == abi.ExitReturn {
 			if ctx.RetFrom != 0 {
-				if v := *r.jitSlot(f, int(ctx.RetFrom)-1); v.ref != nil {
+				if v := *r.jitSlot(f, e, int(ctx.RetFrom)-1); v.ref != nil {
 					return v, nil, true
 				}
 			}
 			return Value{num: math.Float64frombits(ctx.Ret)}, nil, true
 		}
-		r.jitApplyRecords(f, ctx)
+		r.jitApplyRecords(f, e, ctx)
 		switch ctx.ExitKind {
 		case abi.ExitDeopt:
 			// The frame holds the state at the guard; the interpreter runs

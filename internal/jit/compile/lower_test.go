@@ -522,7 +522,7 @@ func FuzzLower(f *testing.F) {
 func TestLowerPanicRefuses(t *testing.T) {
 	previous := lowerImpl
 	defer func() { lowerImpl = previous }()
-	lowerImpl = func(*bytecode.Function, bool, bool) (*ir.Program, error) { panic("analysis bug") }
+	lowerImpl = func(*bytecode.Function, lowering) (*ir.Program, error) { panic("analysis bug") }
 	for _, lower := range []func(*bytecode.Function) (*ir.Program, error){Lower, LowerCalls, LowerCallee} {
 		p, err := lower(&bytecode.Function{})
 		var refusal *Refusal

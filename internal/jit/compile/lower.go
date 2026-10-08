@@ -42,38 +42,52 @@ func refuse(pc int, why string) error { return &Refusal{PC: pc, Reason: why} }
 // Property keys are source-name indices; the VM resolves them to its runtime's
 // scalar property identifiers before emission or evaluation with borrowed views.
 func Lower(fn *bytecode.Function) (*ir.Program, error) {
-	return lowerRecovered(fn, false, false)
+	return lowerRecovered(fn, lowering{})
+}
+
+// LowerSSA lowers for the new pipeline (internal/jit/ssa), whose costs are
+// not the slot IR emitters': it reads properties and the receiver in place
+// where the VM's caches know the shape, so it keeps every property
+// operation and the receiver, which Lower keeps only in loops worth a view's
+// preparation; and it leaves global reads and reads of references to Go,
+// which it does not read natively yet.
+func LowerSSA(fn *bytecode.Function) (*ir.Program, error) {
+	return lowerRecovered(fn, lowering{ssa: true})
 }
 
 // LowerCalls additionally retains guarded numeric fields across call boundaries.
 // Its caller must refresh borrowed views after every potentially effectful call.
 func LowerCalls(fn *bytecode.Function) (*ir.Program, error) {
-	return lowerRecovered(fn, true, false)
+	return lowerRecovered(fn, lowering{calls: true})
 }
 
 // LowerCallee permits small guarded functions whose entry costs are amortized
 // by an encoded caller. It keeps reference fields on the coordinator's host
 // path and does not change the standalone profitability policy.
 func LowerCallee(fn *bytecode.Function) (*ir.Program, error) {
-	return lowerRecovered(fn, true, true)
+	return lowerRecovered(fn, lowering{calls: true, callee: true})
 }
+
+// lowering is how a function is lowered: for which entry points, and for
+// which pipeline.
+type lowering struct{ calls, callee, ssa bool }
 
 // lowerRecovered turns a panic in analysis into a refusal: an optional tier
 // must never take down its host, and the function then runs in the existing
 // tiers.
-func lowerRecovered(fn *bytecode.Function, calls, callee bool) (p *ir.Program, err error) {
+func lowerRecovered(fn *bytecode.Function, m lowering) (p *ir.Program, err error) {
 	defer func() {
 		if v := recover(); v != nil {
 			p, err = nil, refuse(-1, fmt.Sprintf("internal error: %v", v))
 		}
 	}()
-	return lowerImpl(fn, calls, callee)
+	return lowerImpl(fn, m)
 }
 
 // lowerImpl is lowerFunction, or a test's replacement for it.
 var lowerImpl = lowerFunction
 
-func lowerFunction(fn *bytecode.Function, calls, callee bool) (*ir.Program, error) {
+func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 	if fn == nil {
 		return nil, refuse(-1, "nil function")
 	}
@@ -127,10 +141,10 @@ func lowerFunction(fn *bytecode.Function, calls, callee bool) (*ir.Program, erro
 		indexed = indexed || in.Op == bytecode.OpGetIndex || in.Op == bytecode.OpSetIndex || in.Op == bytecode.OpGetLocalIndex || in.Op == bytecode.OpGetLocalIndexUpdate
 	}
 	// Tiny host-only wrappers pay the bridge overhead without enough native work.
-	if host && !loop && !indexed && !callee {
+	if host && !loop && !indexed && !m.callee {
 		return nil, refuse(-1, "host operations without native loop or array work")
 	}
-	if property && !indexed && !bitwise && !callee {
+	if property && !indexed && !bitwise && !m.callee && !m.ssa {
 		return nil, refuse(-1, "property operations without native array or bitwise work")
 	}
 	maps := make([]ir.StateMap, len(fn.Code))
@@ -193,7 +207,15 @@ func lowerFunction(fn *bytecode.Function, calls, callee bool) (*ir.Program, erro
 		}
 	}
 	selectNumericProperties(p)
-	selectPropertyLoops(fn, p, calls, callee)
+	if m.ssa {
+		for pc, in := range p.Code {
+			if in.Op == ir.BindingRead || in.Op == ir.ReferenceRead {
+				p.Code[pc] = ir.Instruction{Op: ir.Host}
+			}
+		}
+		return p, nil
+	}
+	selectPropertyLoops(fn, p, m.calls, m.callee)
 	selectGlobalSlots(fn, p)
 	return p, nil
 }

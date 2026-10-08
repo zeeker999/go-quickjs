@@ -260,7 +260,7 @@ func TestBuildMatchesSlotIRFromJavaScript(t *testing.T) {
 
 func TestBuildRefusesUnsupported(t *testing.T) {
 	p := &ir.Program{Locals: 2, Code: []ir.Instruction{
-		{Op: ir.PropertyRead, Left: ir.Slot(0), Dest: 1},
+		{Op: ir.BindingRead, Left: ir.Slot(0), Dest: 1},
 		{Op: ir.Return, Left: ir.Slot(1)},
 	}, Maps: []ir.StateMap{{PC: 0}, {PC: 1}}}
 	if _, err := Build(p); !errors.Is(err, ErrUnsupported) {

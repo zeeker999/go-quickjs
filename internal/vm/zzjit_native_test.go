@@ -580,6 +580,62 @@ func TestJITSSACaptured(t *testing.T) {
 	}
 }
 
+// The new pipeline reads and writes properties in place where the site's
+// cache knows the shape (D8). Each case warms its sites with the JIT off,
+// so that the caches are filled when the function compiles, then runs
+// under polls at every back-edge, with objects of the cached shape and
+// others: another layout, an accessor, a value that is not a number.
+func TestJITSSAProperties(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, tc := range []struct{ name, setup, warm, run string }{
+		{"read", `function f(o,n){let s=0;for(let i=0;i<n;i++)s+=o.x*o.y;return s}`,
+			`f({x:1,y:2},3)`,
+			`[f({x:1.5,y:2},10),f({y:2,x:3},4),f({x:'2',y:3},2),f({get x(){return 4},y:1},2),f({x:1,y:2,z:3},2)]`},
+		{"write", `function f(o,n){for(let i=0;i<n;i++)o.x=o.x+o.y;return o}`,
+			`f({x:1,y:2},3)`,
+			`[f({x:1,y:0.5},10),f({y:1,x:2},3),f(Object.freeze({x:1,y:2}),2),f({x:'a',y:1},2)].map(o=>JSON.stringify(o))`},
+		{"method", `function P(x){this.x=x;this.v=1}P.prototype.run=function(n){let s=0;for(let i=0;i<n;i++)s+=this.x*this.v;return s}`,
+			`new P(1).run(3)`,
+			`[new P(2).run(10),new P(0.5).run(4)]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := tc.setup + ";" + tc.warm + ";"
+			run := tc.run + ".map(v=>JSON.stringify(v)).join('|')"
+			want := New(Config{})
+			defer func() { want.Close(); want.ReleaseClosed() }()
+			if _, err := want.Run(compileForTest(t, src)); err != nil {
+				t.Fatal(err)
+			}
+			wv, err := want.Run(compileForTest(t, run))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := jitRuntimeForTest(t, Config{JIT: true})
+			r.jitSSA = true
+			r.jitEnabled = false
+			if _, err := r.Run(compileForTest(t, src)); err != nil {
+				t.Fatal(err)
+			}
+			r.jitEnabled = true
+			r.jitStress = jitStressConfig{threshold: true, budget: 1}
+			gv, err := r.Run(compileForTest(t, run))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := gv.String().Go(), wv.String().Go(); got != want {
+				t.Fatalf("got %s, interpreter %s", got, want)
+			}
+			st := r.JITStats()
+			t.Logf("%+v", st)
+			if st.SSAEntries == 0 {
+				t.Fatalf("never entered the new pipeline: %+v", st)
+			}
+		})
+	}
+}
+
 // TestJITObjectLayout holds Object's fields to the widths native code
 // loads them with (jitEncoding).
 func TestJITObjectLayout(t *testing.T) {
@@ -1422,14 +1478,14 @@ func TestJITBudgetRefusalWaitsForRelease(t *testing.T) {
 	var deferred *jitEntry
 	for i := 0; i < 64 && deferred == nil; i++ {
 		fn := jitFunctionForTest(t, fmt.Sprintf(`function f(n) { let s=0; for(let i=0;i<n;i++) s+=i*%d; return s }`, i+1))
-		if e := r.jitFor(fn); e != nil && e.deferred {
+		if e := r.jitForMode(fn, false, nil); e != nil && e.deferred {
 			refused, deferred = fn, e
 		}
 	}
 	if deferred == nil || deferred.code != nil {
 		t.Fatalf("no refusal for want of budget within %d bytes", r.jitBudget())
 	}
-	if e := r.jitFor(refused); e != deferred {
+	if e := r.jitForMode(refused, false, nil); e != deferred {
 		t.Fatal("a budget refusal was retried before any code was released")
 	}
 	for key, e := range r.jit.cache {
@@ -1440,7 +1496,7 @@ func TestJITBudgetRefusalWaitsForRelease(t *testing.T) {
 			break
 		}
 	}
-	if e := r.jitFor(refused); e == nil || e == deferred || e.code == nil {
+	if e := r.jitForMode(refused, false, nil); e == nil || e == deferred || e.code == nil {
 		t.Fatal("a budget refusal was not retried once code was released")
 	}
 }
@@ -1448,7 +1504,7 @@ func TestJITBudgetRefusalWaitsForRelease(t *testing.T) {
 //go:noinline
 func jitWeakOwnerForTest(t *testing.T, r *Runtime) weak.Pointer[bytecode.Function] {
 	fn := jitFunctionForTest(t, `function f(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s }`)
-	if e := r.jitFor(fn); e == nil || e.code == nil {
+	if e := r.jitForMode(fn, false, nil); e == nil || e.code == nil {
 		t.Fatal("native compilation refused")
 	}
 	return weak.Make(fn)
@@ -1466,7 +1522,7 @@ func TestJITWeakCache(t *testing.T) {
 		t.Fatal("native cache retained function graph")
 	}
 	fn := jitFunctionForTest(t, `function g(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s }`)
-	if e := r.jitFor(fn); e == nil || e.code == nil {
+	if e := r.jitForMode(fn, false, nil); e == nil || e.code == nil {
 		t.Fatal("compilation refused")
 	}
 	if len(r.jit.cache) != 1 {
@@ -1483,7 +1539,7 @@ func TestJITCacheBounds(t *testing.T) {
 		fn := new(bytecode.Function)
 		*fn = *template
 		functions = append(functions, fn)
-		if e := r.jitFor(fn); e == nil || e.code == nil {
+		if e := r.jitForMode(fn, false, nil); e == nil || e.code == nil {
 			t.Fatalf("entry %d refused", i)
 		}
 		if len(r.jit.cache) > jitCacheEntries || r.jitCodeBytes() > jitCacheBytes {
@@ -2233,7 +2289,10 @@ func BenchmarkJITCryptoLimb(b *testing.B) {
 }
 
 func BenchmarkJITNumericFields(b *testing.B) {
-	for _, mode := range []string{"interpreter", "existing", "native"} {
+	for _, mode := range []string{"interpreter", "existing", "native", "ssa"} {
+		if mode == "ssa" && !jitSSABackend {
+			continue
+		}
 		b.Run(mode, func(b *testing.B) {
 			previous := treeTier.Swap(mode != "interpreter")
 			defer treeTier.Store(previous)
@@ -2250,8 +2309,9 @@ func BenchmarkJITNumericFields(b *testing.B) {
 			}
 			setup := compile(`function fields(o,n){let s=0;for(let i=0;i<n;i++){s=(s+o.x)|0;o.x=o.x+1}return s}var fieldObject={x:3}`)
 			call := compile(`fields(fieldObject,4096)`)
-			r := New(Config{JIT: mode == "native"})
+			r := New(Config{JIT: mode == "native" || mode == "ssa"})
 			defer func() { r.Close(); r.ReleaseClosed() }()
+			r.jitSSA = mode == "ssa"
 			if _, err := r.Run(setup); err != nil {
 				b.Fatal(err)
 			}
@@ -2278,6 +2338,9 @@ func BenchmarkJITNumericFields(b *testing.B) {
 					b.Fatal("numeric fields left native execution")
 				}
 				b.ReportMetric(float64(r.jitCodeBytes()), "code+metadata-B")
+			}
+			if mode == "ssa" && (r.jit.ssaEntries == 0 || r.jit.hosts != 0 || r.jit.guards != 0) {
+				b.Fatalf("numeric fields left the new pipeline: %+v", r.JITStats())
 			}
 		})
 	}
@@ -2600,7 +2663,7 @@ func BenchmarkJITKernelPromotion(b *testing.B) {
 func TestJITTreeRecoveryNarrow(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	fn := jitFunctionForTest(t, `function f(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s }`)
-	compiled := r.jitFor(fn)
+	compiled := r.jitForMode(fn, false, nil)
 	if compiled == nil || compiled.code == nil {
 		t.Fatal("no program")
 	}
@@ -2643,7 +2706,7 @@ func TestJITTreeRecoveryNarrow(t *testing.T) {
 func TestJITHintReuse(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	first := jitFunctionForTest(t, `function f(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s }`)
-	e := r.jitFor(first)
+	e := r.jitForMode(first, false, nil)
 	if e == nil || r.jit.hint(e.hint) != e {
 		t.Fatal("fresh hint misses")
 	}
@@ -2656,7 +2719,7 @@ func TestJITHintReuse(t *testing.T) {
 	if r.jit.hint(old) != nil {
 		t.Fatal("hint survived its entry")
 	}
-	other := r.jitFor(jitFunctionForTest(t, `function g(n) { let s=0; for(let i=0;i<n;i++) s-=i; return s }`))
+	other := r.jitForMode(jitFunctionForTest(t, `function g(n) { let s=0; for(let i=0;i<n;i++) s-=i; return s }`), false, nil)
 	if other == nil || other.hint&(1<<jitHintBits-1) != old&(1<<jitHintBits-1) {
 		t.Fatal("the freed slot was not reused")
 	}

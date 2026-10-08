@@ -300,6 +300,20 @@ instructions write (`Func.Written`), and a function that writes a captured
 binding is refused. Records and returns that name one are resolved by Go
 through the same cells.
 
+**The receiver and properties (P4d).** Go puts the receiver in the context
+before each entry -- uninitialized in a derived constructor before super()
+-- and native code reads it as one more slot it never writes. A property
+operation reads the object in place. Where the site's cache (the closure's
+`ic`) has met one shape and found the property its own plain data --
+writable, for a write -- an object of that shape has it at the cached index:
+shapes a cache remembers are replaced, not changed, when a layout changes,
+and the code holds them by address while its entry keeps them alive. Any
+other ordinary object with at most eight properties is searched for the key,
+as the VM searches its small objects, which have no shape until a cache asks
+for one. Values are numbers; anything else exits to Go. The new pipeline
+lowers functions itself (`jitcompile.LowerSSA`), without the old pipeline's
+rules for when a property view pays for itself.
+
 **Kind tests are on the number word, with the VM's encoding passed in.** The
 JIT never imports the VM: the VM passes the encoding as data (`rt.Encoding`).
 - A number is a word whose top 13 bits are not all set.

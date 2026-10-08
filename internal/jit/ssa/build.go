@@ -14,11 +14,32 @@ var ErrUnsupported = errors.New("ssa: unsupported operation")
 
 // Build translates a validated slot IR program into SSA. Its entries are
 // PC 0, each loop header, and each PC a host exit resumes at.
-func Build(p *ir.Program) (*Func, error) {
+func Build(p *ir.Program) (*Func, error) { return BuildWith(p, nil) }
+
+// Feedback is what the VM knows of a function's sites, which Build would
+// otherwise leave to Go.
+type Feedback interface {
+	// Property is the property a PropertyRead or PropertyWrite at pc names,
+	// or false to leave the site to Go.
+	Property(pc int) (PropertySite, bool)
+}
+
+// PropertySite is a property site: its key, the VM's atom; and, if the
+// site has met objects of one shape, that shape's address, which the VM
+// keeps alive and unchanged, with the index of the property -- a writable
+// data property, for a write -- in their tables. Shape is 0 otherwise.
+type PropertySite struct {
+	Key   uint32
+	Shape uintptr
+	Index int32
+}
+
+// BuildWith is Build with what the VM knows of the sites.
+func BuildWith(p *ir.Program, fb Feedback) (*Func, error) {
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
-	b := &builder{p: p, f: &Func{Locals: p.Locals, StackSize: p.StackSize, FrameLocals: p.Locals,
+	b := &builder{p: p, fb: fb, f: &Func{Locals: p.Locals, StackSize: p.StackSize, FrameLocals: p.Locals, ThisSlot: -1,
 		written: make([]bool, p.Locals+p.StackSize)}, nslots: p.Locals + p.StackSize}
 	if err := b.plan(); err != nil {
 		return nil, err
@@ -30,6 +51,7 @@ func Build(p *ir.Program) (*Func, error) {
 
 type builder struct {
 	p      *ir.Program
+	fb     Feedback
 	f      *Func
 	nslots int
 
@@ -42,6 +64,27 @@ type builder struct {
 	sealed     map[*Block]bool
 	filled     map[*Block]bool
 	incomplete map[*Block]map[int]*Value
+}
+
+// property is the feedback for a property operation at pc, if any.
+func (b *builder) property(pc int) (PropertySite, bool) {
+	if op := b.p.Code[pc].Op; b.fb == nil || op != ir.PropertyRead && op != ir.PropertyWrite {
+		return PropertySite{}, false
+	}
+	return b.fb.Property(pc)
+}
+
+// host reports whether the instruction at pc is left to Go whole: it ends
+// its block, and the next PC is an entry.
+func (b *builder) host(pc int) bool {
+	switch b.p.Code[pc].Op {
+	case ir.Host, ir.Call:
+		return true
+	case ir.PropertyRead, ir.PropertyWrite:
+		_, ok := b.property(pc)
+		return !ok
+	}
+	return false
 }
 
 func reachable(p *ir.Program, pc int) bool {
@@ -60,9 +103,9 @@ func (b *builder) plan() error {
 		switch in.Op {
 		case ir.Nop, ir.Copy, ir.CopyPair, ir.StoreLoad, ir.Swap, ir.Insert2, ir.Insert3,
 			ir.Unary, ir.Update, ir.Return, ir.ArrayRead, ir.ArrayUpdate, ir.ArrayLength, ir.ArrayKey:
-		case ir.ArrayWrite:
-			// A store native code does not make exits to Go, which resumes
-			// after it.
+		case ir.ArrayWrite, ir.PropertyRead, ir.PropertyWrite:
+			// What native code does not do exits to Go, which resumes after
+			// it.
 			entries[pc+1] = true
 		case ir.Binary:
 			if in.Operator == ir.Eq || in.Operator == ir.Ne {
@@ -87,8 +130,8 @@ func (b *builder) plan() error {
 		default:
 			return fmt.Errorf("%w: %d at pc %d", ErrUnsupported, in.Op, pc)
 		}
-		switch in.Op {
-		case ir.Jump, ir.Branch, ir.Return, ir.Host, ir.Call:
+		switch {
+		case in.Op == ir.Jump || in.Op == ir.Branch || in.Op == ir.Return || b.host(pc):
 			leaders[pc+1] = true
 		}
 	}
@@ -118,7 +161,7 @@ func (b *builder) plan() error {
 			end = starts[i+1] - 1
 		}
 		for q := pc; q <= end; q++ {
-			if op := p.Code[q].Op; op == ir.Jump || op == ir.Branch || op == ir.Return || op == ir.Host || op == ir.Call {
+			if op := p.Code[q].Op; op == ir.Jump || op == ir.Branch || op == ir.Return || b.host(q) {
 				end = q
 				break
 			}
@@ -142,7 +185,12 @@ func (b *builder) plan() error {
 			}
 		case ir.Return:
 			blk.Kind = BlockReturn
-		case ir.Host, ir.Call:
+		case ir.Host, ir.Call, ir.PropertyRead, ir.PropertyWrite:
+			if !b.host(end) {
+				blk.Kind = BlockPlain
+				b.edge(blk, b.blockAt[end+1])
+				break
+			}
 			blk.Kind = BlockExit
 		default:
 			blk.Kind = BlockPlain
@@ -547,6 +595,23 @@ func (b *builder) instruction(blk *Block, pc int) {
 		array := guard(OpArrayOf, Ptr, ir.HostExit, operand(in.Left))
 		key, value := number(in.Right, ir.HostExit), number(in.Third, ir.HostExit)
 		guard(OpElemWrite, None, ir.HostExit, array, key, value)
+	case ir.PropertyRead, ir.PropertyWrite:
+		site, ok := b.property(pc)
+		if !ok {
+			blk.ExitKind = ir.HostExit
+			blk.State = state()
+			blk.State.addUse()
+			break
+		}
+		object := guard(OpObjectOf, Ptr, ir.HostExit, operand(in.Left))
+		if in.Op == ir.PropertyRead {
+			v := guard(OpPropRead, Float64, ir.HostExit, object)
+			v.Const, v.Index, v.Key = ir.Value{Bits: uint64(site.Shape)}, int(site.Index), site.Key
+			b.assign(in.Dest, blk, boxF(v))
+			break
+		}
+		v := guard(OpPropWrite, None, ir.HostExit, object, number(in.Right, ir.HostExit))
+		v.Const, v.Index, v.Key = ir.Value{Bits: uint64(site.Shape)}, int(site.Index), site.Key
 	case ir.Host, ir.Call:
 		blk.ExitKind = ir.HostExit
 		blk.State = state()
