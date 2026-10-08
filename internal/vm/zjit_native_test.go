@@ -800,8 +800,8 @@ func TestJITReferenceMemoryRefusal(t *testing.T) {
 			if r.jit == nil || r.jit.references == nil || r.jit.entries == 0 || r.jit.hosts != 0 {
 				t.Fatal("reference loop did not enter native code")
 			}
-			if r.meter.live < r.jitCodeBytes()+int64(unsafe.Sizeof(jitReferences{})) {
-				t.Fatal("reference arena not charged to memory limit")
+			if r.jitCodeBytes() < int64(unsafe.Sizeof(jitReferences{})) {
+				t.Fatal("reference arena not charged to the JIT's budget")
 			}
 		}
 	}
@@ -1232,15 +1232,75 @@ func TestJITMemoryRefusal(t *testing.T) {
 	if large.jitCodeBytes() == 0 {
 		t.Fatal("ample memory prevented native compilation")
 	}
-	if large.meter.live < large.jitCodeBytes() {
-		t.Fatal("new native pages were not immediately charged")
-	}
+	// Native code is not the script's memory: the script's measure, and so
+	// whether it fails with ErrMemoryLimit, is the same with the JIT on and off.
 	with := large.meter.walk(large)
-	codeBytes := large.jitCodeBytes()
 	large.releaseJIT()
-	without := large.meter.walk(large)
-	if with-without < codeBytes {
-		t.Fatal("meter omitted native allocation")
+	if without := large.meter.walk(large); with != without {
+		t.Fatalf("meter counted native code: %d bytes with it, %d without", with, without)
+	}
+	if int64(large.jitBudget()) != large.meter.limit/8 {
+		t.Fatalf("JIT budget %d under a %d-byte limit", large.jitBudget(), large.meter.limit)
+	}
+}
+
+// Compiling must not measure the heap: before, every attempt walked it, and
+// a refusal retried every warmup, so a memory-limited runtime walked its whole
+// heap every few calls of each hot function.
+func TestJITNoHeapWalks(t *testing.T) {
+	walks := func(jit bool, limit int64) uint16 {
+		r := jitRuntimeForTest(t, Config{JIT: jit, MemoryLimit: limit})
+		v, err := r.Run(compileForTest(t, `function sum(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s } sum`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := r.meter.epoch
+		for i := 0; i < 200; i++ {
+			if got, err := r.Call(v, Undefined, []Value{Int32(10)}); err != nil || got.Number() != 45 {
+				t.Fatalf("sum = %v, %v", got, err)
+			}
+		}
+		if jit && limit > 1<<20 && (r.jit == nil || r.jit.entries == 0) {
+			t.Fatal("the function never ran natively")
+		}
+		return r.meter.epoch - before
+	}
+	// A small limit refuses every attempt; a large one compiles.
+	for _, limit := range []int64{256 << 10, 32 << 20} {
+		if off, on := walks(false, limit), walks(true, limit); on != off {
+			t.Fatalf("limit %d: %d heap walks with the JIT, %d without", limit, on, off)
+		}
+	}
+}
+
+// A program refused for want of code budget is not recompiled at every
+// warmup: the refusal is cached until the cache has released code.
+func TestJITBudgetRefusalWaitsForRelease(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true, MemoryLimit: 1 << 20})
+	var refused *bytecode.Function
+	var deferred *jitEntry
+	for i := 0; i < 64 && deferred == nil; i++ {
+		fn := jitFunctionForTest(t, fmt.Sprintf(`function f(n) { let s=0; for(let i=0;i<n;i++) s+=i*%d; return s }`, i+1))
+		if e := r.jitFor(fn); e != nil && e.deferred {
+			refused, deferred = fn, e
+		}
+	}
+	if deferred == nil || deferred.code != nil {
+		t.Fatalf("no refusal for want of budget within %d bytes", r.jitBudget())
+	}
+	if e := r.jitFor(refused); e != deferred {
+		t.Fatal("a budget refusal was retried before any code was released")
+	}
+	for key, e := range r.jit.cache {
+		if e.code != nil && key.Value() != refused {
+			if !r.jit.dropEntry(key, e) {
+				t.Fatal("could not release code")
+			}
+			break
+		}
+	}
+	if e := r.jitFor(refused); e == nil || e == deferred || e.code == nil {
+		t.Fatal("a budget refusal was not retried once code was released")
 	}
 }
 

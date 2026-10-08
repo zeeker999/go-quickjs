@@ -29,8 +29,8 @@ across sessions. Update it **in the same commit** as the work it records.
 | ID | Item | Status | Commit |
 |---|---|---|---|
 | R1 | Native loops honor `Halt`/`Close` after a host exit | done | jit: stop native loops at Halt after a host exit |
-| R2 | JIT code outside the script's memory budget, evictable, never the cause of `ErrMemoryLimit` | todo | |
-| R3 | No full heap walk per compile attempt; exponential back-off after refusals | todo | |
+| R2 | JIT code outside the script's memory budget, evictable, never the cause of `ErrMemoryLimit` | done | jit: keep native code out of the script's memory |
+| R3 | No full heap walk per compile attempt; budget refusals cached until code is released (instead of exponential back-off) | done | jit: keep native code out of the script's memory |
 | R4a | `recover` in compilation becomes a permanent refusal | done | jit: refuse instead of crashing when compilation panics |
 | R4b | Size `inferIntegerResults`'s origin table from the final origin count, with an invariant test | done | jit: refuse instead of crashing when compilation panics |
 | R7 | One exhaustive per-opcode table (stack effect + lowering, missing means refuse); kind inference's default clears all facts; `Validate` rejects non-scalar literals | todo | |
