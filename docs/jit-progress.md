@@ -22,8 +22,8 @@ across sessions. Update it **in the same commit** as the work it records.
     -run TestConformance -count=1 -timeout 60m -v -args -conformance.jit
   ```
 
-- **Next item:** P4f (globals, strings), while the 24-hour fuzz, the
-  last Phase 1 gate, runs.
+- **Next item:** P4f (globals, strings). The 24-hour fuzz, Phase 1's last
+  gate item, runs at the next milestone.
 - **Stress test262:** `QJS_JIT_STRESS=threshold,budget=1 TEST262_DIR=d:/Data/test262 go test -tags quickjs_jit ./conformance -run TestConformance -v -args -conformance.jit`;
   `QJS_JIT_PIPELINE=ssa` runs the new pipeline wherever it compiles.
 
@@ -89,8 +89,11 @@ across sessions. Update it **in the same commit** as the work it records.
   2 h 39 min, 8 million programs, on a hang in the interpreter's own run:
   a BigInt squared in a loop under the harness's 16 MB limit, which main
   now reserves before computing (6bf6058, cherry-picked); its input is a
-  seed. Restarted 2026-10-08 with a binary of the branch's head, P4a-P4d
-  included (6 workers). Progress goes to
+  seed. A third run (from 17:35, at 72f22fd) was stopped clean after 20
+  minutes and 689,000 programs: by the user's rule, the 24-hour run is made
+  when a milestone is reached -- here, with Phase 2's other gate items --
+  not left running during development. Meanwhile the seeds run in `go
+  test` and CI fuzzes for 5 minutes on every push. Progress goes to
   `D:/Data/quickjs-jit-results/2026-10-08-review/fuzz-24h.err` (stderr); a failing
   input lands in `fuzzwork/testdata/fuzz/FuzzJITDifferential/` beside it.
   Before that: 15 minutes in two runs, 700,000 programs, no divergence.
