@@ -1,0 +1,1114 @@
+// Package mir compiles the JIT's SSA (internal/jit/ssa) to machine code:
+// it orders blocks, computes liveness, allocates registers by linear scan and
+// selects instructions, then encodes them (internal/jit/asm). The walking
+// skeleton of docs/jit-phase2-design.md: amd64 first, and plain code over
+// clever code, verified against the SSA evaluator.
+package mir
+
+import (
+	"errors"
+	"fmt"
+	"math"
+	"sort"
+
+	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
+	"github.com/go-quickjs/go-quickjs/internal/jit/asm/amd64"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
+)
+
+// ErrUnsupported reports a function the backend does not compile yet.
+var ErrUnsupported = errors.New("mir: unsupported")
+
+// Code is a compiled function: its bytes, and the offset of the entry for
+// each slot IR PC that has one.
+type Code struct {
+	Bytes   []byte
+	Entries map[int]int
+	// Locations lists where each value lives, for tests and debugging.
+	Locations string
+}
+
+// The fixed registers. RSP, RBP and R14 (Go's g) are never touched.
+const (
+	regCtx    = amd64.RDI
+	regLocals = amd64.RSI
+	regStack  = amd64.RDX
+	scratchA  = amd64.RAX
+	scratchC  = amd64.RCX // also shift counts
+	scratchB  = amd64.R11
+	xScratch0 = amd64.XReg(0)
+	xScratch1 = amd64.XReg(1)
+)
+
+var (
+	gprPool = []amd64.Reg{amd64.RBX, amd64.R8, amd64.R9, amd64.R10, amd64.R12, amd64.R13, amd64.R15}
+	xmmPool = func() (rs []amd64.XReg) {
+		for r := amd64.XReg(2); r < 16; r++ {
+			rs = append(rs, r)
+		}
+		return
+	}()
+)
+
+// loc is where a value lives: a register of its class, or a spill slot.
+type loc struct {
+	reg   int // register number, or -1
+	spill int // spill slot, or -1
+}
+
+type compiler struct {
+	f     *ssa.Func
+	enc   abi.Encoding
+	a     amd64.Asm
+	order []*ssa.Block
+	// lazy values have no location: constants used only by frame states,
+	// and boxes used only by frame states and returns, which are
+	// rematerialized where needed.
+	lazy map[*ssa.Value]bool
+	locs map[*ssa.Value]loc
+	// label of each block's code.
+	labels map[*ssa.Block]amd64.Label
+	// stubs: one exit per frame state and kind.
+	stubs   map[stubKey]amd64.Label
+	stubFor []stub
+	// cold code, emitted after everything else.
+	cold []func()
+}
+
+type stubKey struct {
+	state *ssa.FrameState
+	kind  uint64
+}
+
+type stub struct {
+	key   stubKey
+	label amd64.Label
+}
+
+// CompileAMD64 compiles f for amd64, given the VM's value encoding.
+func CompileAMD64(f *ssa.Func, enc abi.Encoding) (code *Code, err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			code, err = nil, fmt.Errorf("%w: %v", ErrUnsupported, v)
+		}
+	}()
+	c := &compiler{f: f, enc: enc, labels: map[*ssa.Block]amd64.Label{}, stubs: map[stubKey]amd64.Label{}}
+	c.layout()
+	c.findLazy()
+	if err := c.allocate(); err != nil {
+		return nil, err
+	}
+	entries := map[int]int{}
+	for _, b := range c.order {
+		c.labels[b] = c.a.NewLabel()
+	}
+	for i, b := range c.order {
+		c.a.Bind(c.labels[b])
+		if b.PC < 0 {
+			for _, e := range f.Entries {
+				if e.Block == b {
+					entries[e.PC] = c.a.Len()
+				}
+			}
+		}
+		var next *ssa.Block
+		if i+1 < len(c.order) {
+			next = c.order[i+1]
+		}
+		c.block(b, next)
+	}
+	for i := 0; i < len(c.stubFor); i++ {
+		s := c.stubFor[i]
+		c.a.Bind(s.label)
+		c.exitTo(s.key.state, s.key.kind)
+	}
+	for i := 0; i < len(c.cold); i++ {
+		c.cold[i]()
+	}
+	bytes, err := c.a.Finish()
+	if err != nil {
+		return nil, err
+	}
+	return &Code{Bytes: bytes, Entries: entries, Locations: c.describe()}, nil
+}
+
+// layout orders blocks in reverse post-order from the entries, so that a
+// loop's body follows its header.
+func (c *compiler) layout() {
+	seen := map[*ssa.Block]bool{}
+	var post []*ssa.Block
+	var visit func(*ssa.Block)
+	visit = func(b *ssa.Block) {
+		if seen[b] {
+			return
+		}
+		seen[b] = true
+		for i := len(b.Succs) - 1; i >= 0; i-- {
+			visit(b.Succs[i])
+		}
+		post = append(post, b)
+	}
+	for i := len(c.f.Entries) - 1; i >= 0; i-- {
+		visit(c.f.Entries[i].Block)
+	}
+	for i := len(post) - 1; i >= 0; i-- {
+		c.order = append(c.order, post[i])
+	}
+}
+
+// findLazy marks values that need no location of their own.
+func (c *compiler) findLazy() {
+	used := map[*ssa.Value]bool{} // by an argument, a control or a phi
+	for _, b := range c.f.Blocks {
+		for _, v := range b.Values {
+			for _, a := range v.Args {
+				used[a] = true
+			}
+		}
+		if b.Control != nil && b.Kind != ssa.BlockReturn {
+			used[b.Control] = true
+		}
+	}
+	// A slot loaded at an entry and named only by frame states for that same
+	// slot, or checked for a reference, needs no register: an exit leaves
+	// that slot as it is, and the check reads the frame.
+	elsewhere := map[*ssa.Value]bool{}
+	state := func(s *ssa.FrameState) {
+		if s == nil {
+			return
+		}
+		for i, v := range s.Slots {
+			if !(v.Op == ssa.OpLoadSlot && v.Aux == i) {
+				elsewhere[v] = true
+			}
+		}
+	}
+	for _, b := range c.f.Blocks {
+		for _, v := range b.Values {
+			if v.Op != ssa.OpCheckScalar {
+				for _, a := range v.Args {
+					if a.Op == ssa.OpLoadSlot {
+						elsewhere[a] = true
+					}
+				}
+			}
+			state(v.State)
+		}
+		state(b.State)
+		state(b.Header)
+		if b.Control != nil && b.Control.Op == ssa.OpLoadSlot {
+			elsewhere[b.Control] = true
+		}
+	}
+	c.lazy = map[*ssa.Value]bool{}
+	for _, b := range c.f.Blocks {
+		for _, v := range b.Values {
+			switch v.Op {
+			case ssa.OpConst, ssa.OpBoxF64, ssa.OpBoxBool:
+				if !used[v] {
+					c.lazy[v] = true
+				}
+			case ssa.OpLoadSlot:
+				if !elsewhere[v] {
+					c.lazy[v] = true
+				}
+			}
+		}
+	}
+}
+
+// class reports a value's register class: true for SSE.
+func isFloat(v *ssa.Value) bool { return v.Type == ssa.Float64 }
+
+func hasResult(v *ssa.Value) bool { return v.Type != ssa.None }
+
+// interval is a value's live range over the linear instruction numbering.
+type interval struct {
+	v          *ssa.Value
+	start, end int
+}
+
+// allocate computes liveness and assigns locations by linear scan.
+func (c *compiler) allocate() error {
+	// Number positions: each block has a start, one position per value, and
+	// an end.
+	pos := map[*ssa.Value]int{}
+	start, end := map[*ssa.Block]int{}, map[*ssa.Block]int{}
+	n := 0
+	for _, b := range c.order {
+		start[b] = n
+		n++
+		for _, v := range b.Values {
+			pos[v] = n
+			n++
+		}
+		end[b] = n
+		n++
+	}
+	// Uses: each value's uses, by the position of the use.
+	type use struct {
+		v   *ssa.Value
+		pos int
+	}
+	var uses []use
+	need := func(v *ssa.Value) bool { return hasResult(v) && !c.lazy[v] }
+	useState := func(s *ssa.FrameState, at int) {
+		if s == nil {
+			return
+		}
+		for _, v := range s.Slots {
+			if c.lazy[v] || remat(v) {
+				for _, a := range v.Args {
+					uses = append(uses, use{a, at})
+				}
+				continue
+			}
+			uses = append(uses, use{v, at})
+		}
+	}
+	for _, b := range c.order {
+		for _, v := range b.Values {
+			if v.Op == ssa.OpPhi {
+				continue // phi arguments are used at their predecessors' ends
+			}
+			for _, a := range v.Args {
+				uses = append(uses, use{a, pos[v]})
+			}
+			useState(v.State, pos[v])
+		}
+		if b.Control != nil {
+			if c.lazy[b.Control] {
+				for _, a := range b.Control.Args {
+					uses = append(uses, use{a, end[b]})
+				}
+			} else {
+				uses = append(uses, use{b.Control, end[b]})
+			}
+		}
+		useState(b.State, end[b])
+		if b.LoopHeader {
+			useState(b.Header, start[b])
+		}
+		for _, s := range b.Succs {
+			for i, p := range s.Preds {
+				if p != b {
+					continue
+				}
+				for _, phi := range s.Values {
+					if phi.Op != ssa.OpPhi {
+						break
+					}
+					uses = append(uses, use{phi.Args[i], end[b]})
+				}
+				if s.LoopHeader && s.Backedge[i] {
+					// A poll on this edge exits to the header's state.
+					useState(s.Header, end[b])
+				}
+			}
+		}
+	}
+	// Block-level liveness, so that values live around a loop stay live for
+	// all of it.
+	liveIn := map[*ssa.Block]map[*ssa.Value]bool{}
+	usesIn := map[*ssa.Block][]*ssa.Value{}
+	defsIn := map[*ssa.Block]map[*ssa.Value]bool{}
+	blockAt := func(p int) *ssa.Block {
+		for _, b := range c.order {
+			if p >= start[b] && p <= end[b] {
+				return b
+			}
+		}
+		return nil
+	}
+	for _, b := range c.order {
+		defsIn[b] = map[*ssa.Value]bool{}
+		for _, v := range b.Values {
+			defsIn[b][v] = true
+		}
+	}
+	for _, u := range uses {
+		if !need(u.v) {
+			continue
+		}
+		b := blockAt(u.pos)
+		if !defsIn[b][u.v] {
+			usesIn[b] = append(usesIn[b], u.v)
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for i := len(c.order) - 1; i >= 0; i-- {
+			b := c.order[i]
+			in := map[*ssa.Value]bool{}
+			for _, v := range usesIn[b] {
+				in[v] = true
+			}
+			for _, s := range b.Succs {
+				for v := range liveIn[s] {
+					if !defsIn[b][v] {
+						in[v] = true
+					}
+				}
+			}
+			if len(in) != len(liveIn[b]) {
+				liveIn[b] = in
+				changed = true
+			}
+		}
+	}
+	// Intervals: from definition to last use, stretched over every block
+	// where the value is live in or out.
+	iv := map[*ssa.Value]*interval{}
+	get := func(v *ssa.Value) *interval {
+		if iv[v] == nil {
+			p, ok := pos[v]
+			if !ok {
+				panic(fmt.Sprintf("use of %v defined outside the function", v))
+			}
+			if v.Op == ssa.OpPhi {
+				p = start[v.Block]
+			}
+			iv[v] = &interval{v: v, start: p, end: p}
+		}
+		return iv[v]
+	}
+	for _, b := range c.order {
+		for _, v := range b.Values {
+			if need(v) {
+				get(v)
+			}
+		}
+	}
+	for _, u := range uses {
+		if need(u.v) {
+			if it := get(u.v); u.pos > it.end {
+				it.end = u.pos
+			}
+		}
+	}
+	for _, b := range c.order {
+		for v := range liveIn[b] {
+			it := get(v)
+			if start[b] < it.start {
+				it.start = start[b]
+			}
+			if start[b] > it.end {
+				it.end = start[b]
+			}
+		}
+		for _, s := range b.Succs {
+			for v := range liveIn[s] {
+				if !need(v) {
+					continue
+				}
+				if v.Block == s && v.Op == ssa.OpPhi {
+					continue
+				}
+				it := get(v)
+				if end[b] > it.end {
+					it.end = end[b]
+				}
+				if start[b] < it.start && !defsIn[b][v] {
+					it.start = start[b]
+				}
+			}
+		}
+	}
+	var all []*interval
+	for _, it := range iv {
+		all = append(all, it)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].start != all[j].start {
+			return all[i].start < all[j].start
+		}
+		return all[i].v.ID < all[j].v.ID
+	})
+	c.locs = map[*ssa.Value]loc{}
+	spills := 0
+	for _, float := range []bool{false, true} {
+		var free []int
+		if float {
+			for _, r := range xmmPool {
+				free = append(free, int(r))
+			}
+		} else {
+			for _, r := range gprPool {
+				free = append(free, int(r))
+			}
+		}
+		var active []*interval
+		for _, it := range all {
+			if isFloat(it.v) != float {
+				continue
+			}
+			kept := active[:0]
+			for _, a := range active {
+				if a.end < it.start {
+					free = append(free, c.locs[a.v].reg)
+				} else {
+					kept = append(kept, a)
+				}
+			}
+			active = kept
+			if len(free) > 0 {
+				c.locs[it.v] = loc{reg: free[len(free)-1], spill: -1}
+				free = free[:len(free)-1]
+				active = append(active, it)
+				continue
+			}
+			// Spill whichever interval ends last.
+			victim := it
+			vi := -1
+			for i, a := range active {
+				if a.end > victim.end {
+					victim, vi = a, i
+				}
+			}
+			if spills == abi.SpillSlots {
+				return fmt.Errorf("%w: more than %d spills", ErrUnsupported, abi.SpillSlots)
+			}
+			if victim == it {
+				c.locs[it.v] = loc{reg: -1, spill: spills}
+			} else {
+				c.locs[it.v] = loc{reg: c.locs[victim.v].reg, spill: -1}
+				c.locs[victim.v] = loc{reg: -1, spill: spills}
+				active[vi] = it
+			}
+			spills++
+		}
+	}
+	return nil
+}
+
+func (c *compiler) spillDisp(slot int) int32 { return abi.OffSpill + int32(slot)*8 }
+
+// slotAddr is the base register and displacement of a frame slot's word.
+func (c *compiler) slotAddr(slot int, ref bool) (amd64.Reg, int32) {
+	off := c.enc.NumOffset
+	if ref {
+		off = c.enc.RefOffset
+	}
+	if slot < c.f.Locals {
+		return regLocals, int32(slot)*c.enc.ValueSize + off
+	}
+	return regStack, int32(slot-c.f.Locals)*c.enc.ValueSize + off
+}
+
+// gpr returns a register holding v's word, loading a spilled or lazy value
+// into scratch.
+func (c *compiler) gpr(v *ssa.Value, scratch amd64.Reg) amd64.Reg {
+	if c.lazy[v] {
+		c.materialize(v, scratch)
+		return scratch
+	}
+	l, ok := c.locs[v]
+	if !ok {
+		panic(fmt.Sprintf("no location for %v (%v)", v, v.Op))
+	}
+	if l.reg >= 0 {
+		return amd64.Reg(l.reg)
+	}
+	c.a.Load(scratch, regCtx, c.spillDisp(l.spill))
+	return scratch
+}
+
+// xmm returns an SSE register holding v.
+func (c *compiler) xmm(v *ssa.Value, scratch amd64.XReg) amd64.XReg {
+	l, ok := c.locs[v]
+	if !ok {
+		panic(fmt.Sprintf("no location for %v (%v)", v, v.Op))
+	}
+	if l.reg >= 0 {
+		return amd64.XReg(l.reg)
+	}
+	c.a.LoadSD(scratch, regCtx, c.spillDisp(l.spill))
+	return scratch
+}
+
+// setG stores src into v's location.
+func (c *compiler) setG(v *ssa.Value, src amd64.Reg) {
+	l := c.locs[v]
+	if l.reg >= 0 {
+		if amd64.Reg(l.reg) != src {
+			c.a.MovRR(amd64.Reg(l.reg), src)
+		}
+		return
+	}
+	c.a.Store(regCtx, c.spillDisp(l.spill), src)
+}
+
+// setX stores src into v's location.
+func (c *compiler) setX(v *ssa.Value, src amd64.XReg) {
+	l := c.locs[v]
+	if l.reg >= 0 {
+		if amd64.XReg(l.reg) != src {
+			c.a.SSEOp(amd64.MovAPD, amd64.XReg(l.reg), src)
+		}
+		return
+	}
+	c.a.StoreSD(regCtx, c.spillDisp(l.spill), src)
+}
+
+// numberWord is a number's bits as a word: NaN canonical.
+func (c *compiler) numberWord(bits uint64) uint64 {
+	if math.IsNaN(math.Float64frombits(bits)) {
+		return c.enc.CanonicalNaN
+	}
+	return bits
+}
+
+// constWord is a tagged constant's word.
+func (c *compiler) constWord(k ir.Value) uint64 {
+	switch k.Kind {
+	case ir.Number:
+		return c.numberWord(k.Bits)
+	case ir.Undefined:
+		return c.enc.Undefined
+	case ir.Null:
+		return c.enc.Null
+	case ir.Boolean:
+		if k.Bits != 0 {
+			return c.enc.True
+		}
+		return c.enc.False
+	case ir.Uninitialized:
+		return c.enc.Uninitialized
+	}
+	panic(fmt.Sprintf("tagged constant of kind %d", k.Kind))
+}
+
+// materialize computes a lazy value's word into dst.
+func (c *compiler) materialize(v *ssa.Value, dst amd64.Reg) {
+	switch v.Op {
+	case ssa.OpConst:
+		c.a.MovImm(dst, c.constWord(v.Const))
+	case ssa.OpBoxF64:
+		c.boxF64(c.xmm(v.Args[0], xScratch1), dst)
+	case ssa.OpBoxBool:
+		c.boxBool(c.gpr(v.Args[0], scratchB), dst)
+	default:
+		panic("materialize " + v.Op.String())
+	}
+}
+
+// boxF64 puts x's bits in dst, with NaN canonical.
+func (c *compiler) boxF64(x amd64.XReg, dst amd64.Reg) {
+	done := c.a.NewLabel()
+	c.a.MovQFromX(dst, x)
+	c.a.SSEOp(amd64.UcomiSD, x, x)
+	c.a.Jcc(amd64.CondNP, done)
+	c.a.MovImm(dst, c.enc.CanonicalNaN)
+	c.a.Bind(done)
+}
+
+// boxBool puts the word for b (0 or 1) in dst. dst may be b.
+func (c *compiler) boxBool(b, dst amd64.Reg) {
+	tr, done := c.a.NewLabel(), c.a.NewLabel()
+	c.a.Op(amd64.Test, b, b, false)
+	c.a.Jcc(amd64.CondNE, tr)
+	c.a.MovImm(dst, c.enc.False)
+	c.a.Jmp(done)
+	c.a.Bind(tr)
+	c.a.MovImm(dst, c.enc.True)
+	c.a.Bind(done)
+}
+
+// stubLabel returns the exit stub for a state and kind.
+func (c *compiler) stubLabel(s *ssa.FrameState, kind uint64) amd64.Label {
+	k := stubKey{s, kind}
+	if l, ok := c.stubs[k]; ok {
+		return l
+	}
+	l := c.a.NewLabel()
+	c.stubs[k] = l
+	c.stubFor = append(c.stubFor, stub{k, l})
+	return l
+}
+
+func exitKind(aux int) uint64 {
+	if ir.ExitKind(aux) == ir.HostExit {
+		return abi.ExitHost
+	}
+	return abi.ExitDeopt
+}
+
+// remat reports a value an exit recomputes from its operands rather than
+// reads from its location. A poll exits on a back-edge, after the phi moves
+// and before the header runs again, so a box the header computed of a phi
+// would still hold the last iteration's value; its operand, the phi, holds
+// this one's.
+func remat(v *ssa.Value) bool {
+	return v.Op == ssa.OpBoxF64 || v.Op == ssa.OpBoxBool || v.Op == ssa.OpConst
+}
+
+// exitTo writes a frame state into the frame and returns with an exit
+// record. A slot holding what was loaded from it at this entry is left as
+// it is; every other slot's word is written, boxes and constants
+// recomputed from their operands.
+func (c *compiler) exitTo(s *ssa.FrameState, kind uint64) {
+	for i, v := range s.Slots {
+		if v.Op == ssa.OpLoadSlot && v.Aux == i {
+			continue
+		}
+		var r amd64.Reg
+		if remat(v) {
+			c.materialize(v, scratchA)
+			r = scratchA
+		} else {
+			r = c.gpr(v, scratchA)
+		}
+		base, disp := c.slotAddr(i, false)
+		c.a.Store(base, disp, r)
+	}
+	c.record(kind, uint64(s.PC), uint64(s.Depth))
+}
+
+// record fills the exit record and returns to Go.
+func (c *compiler) record(kind, pc, depth uint64) {
+	c.a.MovImm(scratchA, kind)
+	c.a.Store(regCtx, abi.OffExitKind, scratchA)
+	c.a.MovImm(scratchA, pc)
+	c.a.Store(regCtx, abi.OffExitPC, scratchA)
+	c.a.MovImm(scratchA, depth)
+	c.a.Store(regCtx, abi.OffExitDepth, scratchA)
+	c.a.Ret()
+}
+
+// block emits one block. next is the block laid out after it.
+func (c *compiler) block(b *ssa.Block, next *ssa.Block) {
+	if b.PC < 0 {
+		c.a.Load(regLocals, regCtx, abi.OffLocals)
+		c.a.Load(regStack, regCtx, abi.OffStack)
+	}
+	for _, v := range b.Values {
+		if v.Op == ssa.OpPhi || c.lazy[v] {
+			continue
+		}
+		c.value(v, b)
+	}
+	switch b.Kind {
+	case ssa.BlockPlain:
+		c.edge(b, b.Succs[0], next)
+	case ssa.BlockIf:
+		c.branch(b, next)
+	case ssa.BlockReturn:
+		r := c.gpr(b.Control, scratchA)
+		c.a.Store(regCtx, abi.OffRet, r)
+		c.a.MovImm(scratchA, abi.ExitReturn)
+		c.a.Store(regCtx, abi.OffExitKind, scratchA)
+		c.a.Ret()
+	case ssa.BlockExit:
+		c.exitTo(b.State, exitKind(int(b.ExitKind)))
+	}
+}
+
+// edge emits the moves for an edge's phis, a poll on a back-edge, and a jump
+// unless the target is laid out next.
+func (c *compiler) edge(from, to, next *ssa.Block) {
+	idx := -1
+	for i, p := range to.Preds {
+		if p == from {
+			idx = i
+		}
+	}
+	c.phiMoves(to, idx)
+	if to.LoopHeader && to.Backedge[idx] {
+		poll := c.a.NewLabel()
+		c.a.Load(scratchB, regCtx, abi.OffBackEdges)
+		c.a.DecMem(scratchB, 0)
+		c.a.Jcc(amd64.CondLE, poll)
+		header := to.Header
+		c.cold = append(c.cold, func() {
+			c.a.Bind(poll)
+			// The phis hold the header's values now; the state names them,
+			// or values live across the loop.
+			c.exitTo(header, abi.ExitPoll)
+		})
+	}
+	if to != next {
+		c.a.Jmp(c.labels[to])
+	}
+}
+
+// phiMoves performs the parallel move of an edge's phi arguments into the
+// phis' locations.
+func (c *compiler) phiMoves(to *ssa.Block, idx int) {
+	type move struct{ dst, src *ssa.Value }
+	var moves []move
+	for _, phi := range to.Values {
+		if phi.Op != ssa.OpPhi {
+			break
+		}
+		if _, ok := c.locs[phi]; !ok {
+			continue // dead
+		}
+		src := phi.Args[idx]
+		if !c.lazy[src] && c.locs[src] == c.locs[phi] {
+			continue
+		}
+		moves = append(moves, move{phi, src})
+	}
+	// Locations of different classes never coincide: R10 is not X10.
+	same := func(a, b *ssa.Value) bool {
+		if c.lazy[a] || c.lazy[b] || isFloat(a) != isFloat(b) {
+			return false
+		}
+		return c.locs[a] == c.locs[b]
+	}
+	// Emit a move once no pending move still reads its destination; break a
+	// cycle by parking one source in scratch.
+	parked := map[*ssa.Value]bool{}
+	for len(moves) > 0 {
+		progress := false
+		for i := 0; i < len(moves); i++ {
+			m := moves[i]
+			blocked := false
+			for j, o := range moves {
+				if j != i && same(o.src, m.dst) && !parked[o.src] {
+					blocked = true
+					break
+				}
+			}
+			if blocked {
+				continue
+			}
+			c.moveValue(m.dst, m.src, parked[m.src])
+			moves = append(moves[:i], moves[i+1:]...)
+			i--
+			progress = true
+		}
+		if !progress {
+			// Every move is blocked, so they form cycles. Park the value
+			// that blocks the first move -- the one in its destination -- in
+			// scratch, which frees that destination. Its own move then reads
+			// scratch. The cycle unwinds before another needs scratch.
+			var blocker *ssa.Value
+			for _, o := range moves {
+				if same(o.src, moves[0].dst) && !parked[o.src] {
+					blocker = o.src
+					break
+				}
+			}
+			if blocker == nil {
+				panic("phi moves: blocked without a blocker")
+			}
+			// One scratch register per class: a second value parked while
+			// another of its class still waits would overwrite it. A cycle
+			// unwinds before the next needs scratch, so this cannot happen;
+			// if it did, the function is refused, never miscompiled.
+			for _, o := range moves {
+				if parked[o.src] && isFloat(o.src) == isFloat(blocker) {
+					panic("phi moves: scratch already holds a parked value")
+				}
+			}
+			if isFloat(blocker) {
+				c.a.SSEOp(amd64.MovAPD, xScratch0, c.xmm(blocker, xScratch0))
+			} else {
+				c.a.MovRR(scratchC, c.gpr(blocker, scratchC))
+			}
+			parked[blocker] = true
+		}
+	}
+}
+
+// moveValue copies src into dst's location; parked sources are in scratch.
+func (c *compiler) moveValue(dst, src *ssa.Value, parked bool) {
+	if isFloat(dst) {
+		// A spilled source loads through xScratch1: xScratch0 may hold a
+		// parked value still to be moved.
+		x := xScratch0
+		if !parked {
+			x = c.xmm(src, xScratch1)
+		}
+		c.setX(dst, x)
+		return
+	}
+	r := scratchC
+	if !parked {
+		r = c.gpr(src, scratchA)
+	}
+	c.setG(dst, r)
+}
+
+// branch emits an If block's end, fusing a float comparison into the jump.
+func (c *compiler) branch(b *ssa.Block, next *ssa.Block) {
+	yes, no := c.a.NewLabel(), c.a.NewLabel()
+	ctl := b.Control
+	if ctl.Op == ssa.OpCmpF64 && ctl.Uses == 1 && ctl.Block == b {
+		x, y := c.xmm(ctl.Args[0], xScratch0), c.xmm(ctl.Args[1], xScratch1)
+		switch ir.Operator(ctl.Aux) {
+		case ir.Lt:
+			c.a.SSEOp(amd64.UcomiSD, y, x)
+			c.a.Jcc(amd64.CondA, yes)
+		case ir.Le:
+			c.a.SSEOp(amd64.UcomiSD, y, x)
+			c.a.Jcc(amd64.CondAE, yes)
+		case ir.Gt:
+			c.a.SSEOp(amd64.UcomiSD, x, y)
+			c.a.Jcc(amd64.CondA, yes)
+		case ir.Ge:
+			c.a.SSEOp(amd64.UcomiSD, x, y)
+			c.a.Jcc(amd64.CondAE, yes)
+		case ir.Eq:
+			c.a.SSEOp(amd64.UcomiSD, x, y)
+			c.a.Jcc(amd64.CondNE, no)
+			c.a.Jcc(amd64.CondNP, yes)
+		case ir.Ne:
+			c.a.SSEOp(amd64.UcomiSD, x, y)
+			c.a.Jcc(amd64.CondNE, yes)
+			c.a.Jcc(amd64.CondP, yes)
+		}
+		c.a.Jmp(no)
+	} else {
+		r := c.gpr(ctl, scratchA)
+		c.a.Op(amd64.Test, r, r, false)
+		c.a.Jcc(amd64.CondNE, yes)
+		c.a.Jmp(no)
+	}
+	c.a.Bind(no)
+	c.edge(b, b.Succs[1], nil)
+	c.a.Bind(yes)
+	c.edge(b, b.Succs[0], next)
+}
+
+// value emits one value.
+func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
+	arg := func(i int) *ssa.Value { return v.Args[i] }
+	guard := func(cond amd64.Cond) {
+		c.a.Jcc(cond, c.stubLabel(v.State, exitKind(v.Aux)))
+	}
+	switch v.Op {
+	case ssa.OpLoadSlot:
+		base, disp := c.slotAddr(v.Aux, false)
+		c.a.Load(scratchA, base, disp)
+		c.setG(v, scratchA)
+	case ssa.OpCheckScalar:
+		base, disp := c.slotAddr(arg(0).Aux, true)
+		c.a.Load(scratchA, base, disp)
+		c.a.Op(amd64.Test, scratchA, scratchA, true)
+		guard(amd64.CondNE)
+	case ssa.OpConst:
+		c.a.MovImm(scratchA, c.constWord(v.Const))
+		c.setG(v, scratchA)
+	case ssa.OpConstF64:
+		c.a.MovImm(scratchA, v.Const.Bits)
+		c.a.MovQToX(xScratch0, scratchA)
+		c.setX(v, xScratch0)
+	case ssa.OpUnboxF64:
+		r := c.gpr(arg(0), scratchB)
+		c.a.MovRR(scratchA, r)
+		c.a.ShiftImm(amd64.Shr, scratchA, 51, true)
+		c.a.OpImm(amd64.Cmp, scratchA, 0x1FFF, false)
+		guard(amd64.CondE)
+		c.a.MovQToX(xScratch0, r)
+		c.setX(v, xScratch0)
+	case ssa.OpCheckInit:
+		r := c.gpr(arg(0), scratchB)
+		c.a.MovImm(scratchA, c.enc.Uninitialized)
+		c.a.Op(amd64.Cmp, r, scratchA, true)
+		guard(amd64.CondE)
+	case ssa.OpTruth:
+		c.truth(v, guard)
+	case ssa.OpBoxF64:
+		c.boxF64(c.xmm(arg(0), xScratch0), scratchA)
+		c.setG(v, scratchA)
+	case ssa.OpBoxBool:
+		c.boxBool(c.gpr(arg(0), scratchB), scratchA)
+		c.setG(v, scratchA)
+	case ssa.OpAddF64, ssa.OpSubF64, ssa.OpMulF64, ssa.OpDivF64:
+		op := map[ssa.Op]amd64.SSE{ssa.OpAddF64: amd64.AddSD, ssa.OpSubF64: amd64.SubSD,
+			ssa.OpMulF64: amd64.MulSD, ssa.OpDivF64: amd64.DivSD}[v.Op]
+		x := c.xmm(arg(0), xScratch0)
+		if x != xScratch0 {
+			c.a.SSEOp(amd64.MovAPD, xScratch0, x)
+		}
+		c.a.SSEOp(op, xScratch0, c.xmm(arg(1), xScratch1))
+		c.setX(v, xScratch0)
+	case ssa.OpNegF64:
+		x := c.xmm(arg(0), xScratch0)
+		if x != xScratch0 {
+			c.a.SSEOp(amd64.MovAPD, xScratch0, x)
+		}
+		c.a.MovImm(scratchA, 1<<63)
+		c.a.MovQToX(xScratch1, scratchA)
+		c.a.SSEOp(amd64.XorPD, xScratch0, xScratch1)
+		c.setX(v, xScratch0)
+	case ssa.OpCmpF64:
+		if v.Uses == 1 && b.Control == v && b.Kind == ssa.BlockIf {
+			return // fused into the branch
+		}
+		c.compare(v)
+	case ssa.OpNot:
+		c.a.MovRR32(scratchA, c.gpr(arg(0), scratchA))
+		c.a.OpImm(amd64.Xor, scratchA, 1, false)
+		c.setG(v, scratchA)
+	case ssa.OpToInt32:
+		c.toInt32(v)
+	case ssa.OpAndI32, ssa.OpOrI32, ssa.OpXorI32:
+		op := map[ssa.Op]amd64.ALU{ssa.OpAndI32: amd64.And, ssa.OpOrI32: amd64.Or, ssa.OpXorI32: amd64.Xor}[v.Op]
+		c.a.MovRR32(scratchA, c.gpr(arg(0), scratchA))
+		c.a.Op(op, scratchA, c.gpr(arg(1), scratchB), false)
+		c.setG(v, scratchA)
+	case ssa.OpShlI32, ssa.OpSarI32, ssa.OpShrU32:
+		op := map[ssa.Op]amd64.Shift{ssa.OpShlI32: amd64.Shl, ssa.OpSarI32: amd64.Sar, ssa.OpShrU32: amd64.Shr}[v.Op]
+		c.a.MovRR32(scratchC, c.gpr(arg(1), scratchC))
+		c.a.MovRR32(scratchA, c.gpr(arg(0), scratchA))
+		c.a.ShiftCL(op, scratchA, false)
+		c.setG(v, scratchA)
+	case ssa.OpNotI32:
+		c.a.MovRR32(scratchA, c.gpr(arg(0), scratchA))
+		c.a.Not32(scratchA)
+		c.setG(v, scratchA)
+	case ssa.OpI32ToF64:
+		c.a.Cvtsi2sd(xScratch0, c.gpr(arg(0), scratchA), false)
+		c.setX(v, xScratch0)
+	case ssa.OpU32ToF64:
+		c.a.MovRR32(scratchA, c.gpr(arg(0), scratchA))
+		c.a.Cvtsi2sd(xScratch0, scratchA, true)
+		c.setX(v, xScratch0)
+	default:
+		panic("value " + v.Op.String())
+	}
+}
+
+// compare materializes a float comparison as 0 or 1.
+func (c *compiler) compare(v *ssa.Value) {
+	x, y := c.xmm(v.Args[0], xScratch0), c.xmm(v.Args[1], xScratch1)
+	switch ir.Operator(v.Aux) {
+	case ir.Lt:
+		c.a.SSEOp(amd64.UcomiSD, y, x)
+		c.a.Setcc(amd64.CondA, scratchA)
+	case ir.Le:
+		c.a.SSEOp(amd64.UcomiSD, y, x)
+		c.a.Setcc(amd64.CondAE, scratchA)
+	case ir.Gt:
+		c.a.SSEOp(amd64.UcomiSD, x, y)
+		c.a.Setcc(amd64.CondA, scratchA)
+	case ir.Ge:
+		c.a.SSEOp(amd64.UcomiSD, x, y)
+		c.a.Setcc(amd64.CondAE, scratchA)
+	case ir.Eq:
+		c.a.SSEOp(amd64.UcomiSD, x, y)
+		c.a.Setcc(amd64.CondE, scratchA)
+		c.a.Setcc(amd64.CondNP, scratchC)
+		c.a.Op(amd64.And, scratchA, scratchC, false)
+	case ir.Ne:
+		c.a.SSEOp(amd64.UcomiSD, x, y)
+		c.a.Setcc(amd64.CondNE, scratchA)
+		c.a.Setcc(amd64.CondP, scratchC)
+		c.a.Op(amd64.Or, scratchA, scratchC, false)
+	}
+	c.a.MovZX8(scratchA, scratchA)
+	c.setG(v, scratchA)
+}
+
+// truth computes JavaScript truthiness for the kinds the slot IR decides it
+// for, exiting for the rest.
+func (c *compiler) truth(v *ssa.Value, guard func(amd64.Cond)) {
+	r := c.gpr(v.Args[0], scratchB)
+	number, yes, no, done := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+	c.a.MovRR(scratchA, r)
+	c.a.ShiftImm(amd64.Shr, scratchA, 51, true)
+	c.a.OpImm(amd64.Cmp, scratchA, 0x1FFF, false)
+	c.a.Jcc(amd64.CondNE, number)
+	for _, w := range []struct {
+		word uint64
+		to   amd64.Label
+	}{{c.enc.True, yes}, {c.enc.False, no}, {c.enc.Undefined, no}, {c.enc.Null, no}} {
+		c.a.MovImm(scratchA, w.word)
+		c.a.Op(amd64.Cmp, r, scratchA, true)
+		c.a.Jcc(amd64.CondE, w.to)
+	}
+	// Anything else -- the uninitialized marker -- is not decided here.
+	c.a.Op(amd64.Cmp, r, r, true)
+	guard(amd64.CondE)
+	c.a.Bind(number)
+	// A number is true unless zero or NaN: ucomisd sets ZF for zero and for
+	// NaN, and PF only for NaN.
+	c.a.MovQToX(xScratch0, r)
+	c.a.SSEOp(amd64.XorPD, xScratch1, xScratch1)
+	c.a.SSEOp(amd64.UcomiSD, xScratch0, xScratch1)
+	c.a.Setcc(amd64.CondNE, scratchA)
+	c.a.Setcc(amd64.CondNP, scratchC)
+	c.a.Op(amd64.And, scratchA, scratchC, false)
+	c.a.MovZX8(scratchA, scratchA)
+	c.a.Jmp(done)
+	c.a.Bind(yes)
+	c.a.MovImm(scratchA, 1)
+	c.a.Jmp(done)
+	c.a.Bind(no)
+	c.a.MovImm(scratchA, 0)
+	c.a.Bind(done)
+	c.setG(v, scratchA)
+}
+
+// toInt32 is ToUint32's bits: CVTTSD2SI covers |x| < 2^63; beyond, and for
+// NaN and the infinities, a cold path works from the exponent and
+// significand.
+func (c *compiler) toInt32(v *ssa.Value) {
+	xv := v.Args[0]
+	slow, back := c.a.NewLabel(), c.a.NewLabel()
+	x := c.xmm(xv, xScratch0)
+	c.a.Cvttsd2si(scratchA, x)
+	c.a.MovImm(scratchB, 1<<63)
+	c.a.Op(amd64.Cmp, scratchA, scratchB, true)
+	c.a.Jcc(amd64.CondE, slow)
+	c.a.Bind(back)
+	c.a.MovRR32(scratchA, scratchA)
+	c.setG(v, scratchA)
+	c.cold = append(c.cold, func() {
+		zero, positive := c.a.NewLabel(), c.a.NewLabel()
+		c.a.Bind(slow)
+		c.a.MovQFromX(scratchA, c.xmm(xv, xScratch0))
+		// e = exponent; NaN and the infinities give 0.
+		c.a.MovRR(scratchC, scratchA)
+		c.a.ShiftImm(amd64.Shr, scratchC, 52, true)
+		c.a.OpImm(amd64.And, scratchC, 0x7FF, false)
+		c.a.OpImm(amd64.Cmp, scratchC, 0x7FF, false)
+		c.a.Jcc(amd64.CondE, zero)
+		// |x| >= 2^63 here, so e = exponent - 1075 >= 11, and the low 32
+		// bits of the integer are the significand's low bits shifted by e,
+		// zero once e >= 32; the implicit leading bit lands past bit 62.
+		c.a.OpImm(amd64.Sub, scratchC, 1075, false)
+		c.a.OpImm(amd64.Cmp, scratchC, 32, false)
+		c.a.Jcc(amd64.CondAE, zero)
+		c.a.MovRR(scratchB, scratchA) // the sign is bit 63
+		c.a.ShiftImm(amd64.Shl, scratchA, 12, true)
+		c.a.ShiftImm(amd64.Shr, scratchA, 12, true)
+		c.a.ShiftCL(amd64.Shl, scratchA, true)
+		c.a.Op(amd64.Test, scratchB, scratchB, true)
+		c.a.Jcc(amd64.CondNS, positive)
+		c.a.MovRR32(scratchC, scratchA)
+		c.a.Op(amd64.Xor, scratchA, scratchA, false)
+		c.a.Op(amd64.Sub, scratchA, scratchC, false)
+		c.a.Bind(positive)
+		c.a.Jmp(back)
+		c.a.Bind(zero)
+		c.a.Op(amd64.Xor, scratchA, scratchA, false)
+		c.a.Jmp(back)
+	})
+}
+
+// describe lists each value's location, in block order.
+func (c *compiler) describe() string {
+	out := ""
+	for _, b := range c.order {
+		for _, v := range b.Values {
+			l, ok := c.locs[v]
+			switch {
+			case c.lazy[v]:
+				out += fmt.Sprintf("%v:lazy ", v)
+			case !ok:
+			case l.reg >= 0 && isFloat(v):
+				out += fmt.Sprintf("%v:x%d ", v, l.reg)
+			case l.reg >= 0:
+				out += fmt.Sprintf("%v:r%d ", v, l.reg)
+			default:
+				out += fmt.Sprintf("%v:spill%d ", v, l.spill)
+			}
+		}
+	}
+	return out
+}

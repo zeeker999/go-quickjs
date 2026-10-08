@@ -224,6 +224,9 @@ func (f *Func) String() string {
 		if blk.LoopHeader {
 			b.WriteString(" loop")
 		}
+		if blk.Header != nil {
+			fmt.Fprintf(&b, " state %v", blk.Header.Slots)
+		}
 		b.WriteString("\n")
 		for _, v := range blk.Values {
 			fmt.Fprintf(&b, "  %v = %v %v", v, v.Op, v.Type)

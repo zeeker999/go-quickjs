@@ -199,18 +199,23 @@ func unboxPhis(f *Func) bool {
 	if len(cand) == 0 {
 		return false
 	}
+	// In block order, never map order: value numbers, and so register
+	// allocation and code, must not vary from one compilation to the next.
 	fp := map[*Value]*Value{}
+	var ordered []*Value
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
 			if cand[v] {
 				p := &Value{ID: f.nextID, Op: OpPhi, Type: Float64, Block: b}
 				f.nextID++
 				fp[v] = p
+				ordered = append(ordered, v)
 			}
 		}
 	}
 	unboxed := map[*Value]*Value{}
-	for v, p := range fp {
+	for _, v := range ordered {
+		p := fp[v]
 		for _, a := range v.Args {
 			var x *Value
 			switch {
