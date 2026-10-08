@@ -56,6 +56,10 @@ const (
 	OpUnboxF64  // tagged -> f64, if a number
 	OpTruth     // tagged -> bool, if undefined, null, a boolean or a number
 	OpCheckInit // tagged -> none, if not uninitialized
+	// OpCheckScalar exits unless a slot holds a primitive: an entry checks
+	// every live slot, so that native code never holds a reference (see
+	// docs/jit-phase2-design.md, the walking skeleton).
+	OpCheckScalar
 
 	// Boxing: a typed value as a slot value.
 	OpBoxF64
@@ -85,7 +89,7 @@ const (
 
 var opNames = [...]string{
 	OpInvalid: "invalid", OpLoadSlot: "load", OpConst: "const", OpConstF64: "constf", OpPhi: "phi",
-	OpUnboxF64: "unbox", OpTruth: "truth", OpCheckInit: "checkinit", OpBoxF64: "boxf", OpBoxBool: "boxb",
+	OpUnboxF64: "unbox", OpTruth: "truth", OpCheckInit: "checkinit", OpCheckScalar: "checkscalar", OpBoxF64: "boxf", OpBoxBool: "boxb",
 	OpAddF64: "addf", OpSubF64: "subf", OpMulF64: "mulf", OpDivF64: "divf", OpNegF64: "negf", OpCmpF64: "cmpf",
 	OpNot: "not", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
@@ -99,7 +103,9 @@ func (o Op) String() string {
 }
 
 // isGuard reports whether an op exits when its operand is not what it needs.
-func (o Op) isGuard() bool { return o == OpUnboxF64 || o == OpTruth || o == OpCheckInit }
+func (o Op) isGuard() bool {
+	return o == OpUnboxF64 || o == OpTruth || o == OpCheckInit || o == OpCheckScalar
+}
 
 // Value is one SSA value.
 type Value struct {
@@ -147,7 +153,8 @@ type Block struct {
 	// State and ExitKind describe a BlockExit's exit.
 	State    *FrameState
 	ExitKind ir.ExitKind
-	// Header is a loop header's state on entry, where a poll exits to.
+	// Header is a loop header's state on entry, where a poll exits to, and
+	// an entry block's state, where its guards exit to.
 	Header *FrameState
 	// PC is the bytecode PC the block starts at, or -1 for an entry block.
 	PC int
