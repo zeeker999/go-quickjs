@@ -81,27 +81,23 @@ across sessions. Update it **in the same commit** as the work it records.
 
 ## Phase 2: the new pipeline at parity
 
+Design: [jit-phase2-design.md](jit-phase2-design.md). P2 gates the rest.
+
 | ID | Item | Status | Commit |
 |---|---|---|---|
-| P1 | Typed SSA from the slot IR (CFG, loops, phis, guards with frame state) | todo | |
-| P2 | SSA evaluator and differential check against the slot IR | todo | |
-| P3 | Machine IR, linear-scan register allocation, amd64 and arm64 encoders | todo | |
-| P4 | Native stack and wazero-style exit/resume (D7 mechanism) | todo | |
-| P5 | Direct frame entry and exit (D5); back-edge polling through `r.backEdges` (D6) | todo | |
-| P6 | Deoptimization from SSA frame state (D4) | todo | |
-| P7 | Chunked per-runtime code arena (R8) | todo | |
-| P8 | Parity, then delete the old emitters | todo | |
+| P1 | `internal/jit/ssa`: types, builder from the slot IR, evaluator, Phase 2 passes; SSA evaluator matches the slot-IR evaluator at every entry and budget | todo | |
+| P2 | Walking skeleton on amd64: `mir` selection and allocation, `asm/amd64`, `rt` (context block, native stack, entry/exit/resume; Return, Deopt, Poll), the VM running a numeric loop through it. Gate: bare round trip 15 ns or less, helper round trip 25 ns or less, sum loop at least as fast as the old pipeline | todo | |
+| P3 | The skeleton on arm64, measured on a Mac or the macOS runner | todo | |
+| P4 | Coverage: every slot-IR operation built; stress corpus and fuzzer pass on the new pipeline | todo | |
+| P5 | Helpers: contained and reentrant, re-validation, generation counter; `%` and Go calls no slower than the tree tier | todo | |
+| P6 | Code arena (R8) | todo | |
+| P7 | Parity on both architectures, then delete the old pipeline | todo | |
 
 **Gate:**
 - [ ] Every kernel and suite at least as fast as the old pipeline on both
   architectures.
 - [ ] No divergence under the Phase 1 tools.
 - [ ] Compile budget met.
-
-**Phase 2 inputs from V6:** a host exit costs as much as about 7 iterations of
-native arithmetic, so a loop with one `%` or one Go call is slower natively
-than in the tree tier. The boundary redesign (D5, D7) is the core of Phase 2,
-not an optimization. Compiling `%` natively for numbers is a cheap early win.
 
 ## Phases 3-6
 
