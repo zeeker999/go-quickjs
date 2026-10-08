@@ -298,6 +298,9 @@ func rewrite(f *Func, find func(*Value) *Value) {
 			for i, a := range v.Args {
 				v.Args[i] = find(a)
 			}
+			if v.Op == OpLoadCell {
+				v.Shadow = v.Args[0]
+			}
 			state(v.State)
 			kept = append(kept, v)
 		}

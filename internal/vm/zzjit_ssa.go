@@ -151,6 +151,24 @@ func (r *Runtime) jitSlot(f *frame, e *jitEntry, i int) *Value {
 	return &r.stack[f.base+i-n-u]
 }
 
+// jitSource is the value a run-time source names (internal/jit/ssa,
+// origin.go), which word holds as native code wrote it: a slot's, or, at or
+// above abi.MaxRecords, the value at a heap cell native code loaded a
+// reference from; nil for a primitive's -1. The cell still holds the
+// reference: native code stores no pointer, and nothing else has run since
+// it read it. Reading the address back as a pointer is outside
+// unsafe.Pointer's documented rules, and sound while Go's heap does not
+// move (docs/jit-progress.md, D8, decided 2026-10-08).
+func (r *Runtime) jitSource(f *frame, e *jitEntry, word *uint64) *Value {
+	switch from := int64(*word); {
+	case from < 0:
+		return nil
+	case from < abi.MaxRecords:
+		return r.jitSlot(f, e, int(from))
+	}
+	return *(**Value)(unsafe.Pointer(word))
+}
+
 // jitApplyRecords writes the slots an exit left to Go (abi.Record): the
 // references it moved, and the primitives it put where a reference was.
 // The slots records read hold their values from entry until the first
@@ -163,15 +181,14 @@ func (r *Runtime) jitApplyRecords(f *frame, e *jitEntry, ctx *abi.Context) {
 	r.jit.ssaRecords += uint64(n)
 	var buf [8]Value
 	src := buf[:0]
-	for _, rec := range ctx.Record[:n] {
+	for i := range ctx.Record[:n] {
+		rec := &ctx.Record[i]
 		v := Value{num: math.Float64frombits(rec.Word)}
 		switch {
 		case rec.Slot&abi.RecordScalar != 0:
 		case rec.Slot&abi.RecordMaybe != 0:
-			if from := int32(rec.Arg); from >= 0 {
-				if s := r.jitSlot(f, e, int(from)); s.ref != nil {
-					v = *s
-				}
+			if s := r.jitSource(f, e, &rec.Arg); s != nil && s.ref != nil {
+				v = *s
 			}
 		default:
 			v = *r.jitSlot(f, e, int(rec.Arg))
@@ -214,10 +231,9 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 			return r.jitInterpret(f, f.base+depth, nil)
 		}
 		if ctx.ExitKind == abi.ExitReturn {
-			if ctx.RetFrom != 0 {
-				if v := *r.jitSlot(f, e, int(ctx.RetFrom)-1); v.ref != nil {
-					return v, nil, true
-				}
+			from := ctx.RetFrom - 1
+			if s := r.jitSource(f, e, &from); s != nil && s.ref != nil {
+				return *s, nil, true
 			}
 			return Value{num: math.Float64frombits(ctx.Ret)}, nil, true
 		}

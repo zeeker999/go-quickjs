@@ -115,7 +115,7 @@ func CompileAMD64(f *ssa.Func, enc abi.Encoding) (code *Code, err error) {
 	}
 	c.origin = ssa.Origins(f)
 	for v, o := range c.origin {
-		if o == ssa.OriginAmbiguous && v.Shadow == nil {
+		if (o == ssa.OriginAmbiguous || o == ssa.OriginHeap) && v.Shadow == nil {
 			return nil, fmt.Errorf("%w: %v merges two slots' values with no shadow", ErrUnsupported, v)
 		}
 	}
@@ -240,7 +240,7 @@ func (c *compiler) findLazy() {
 	for _, b := range c.f.Blocks {
 		for _, v := range b.Values {
 			switch v.Op {
-			case ssa.OpConstI32:
+			case ssa.OpConstSource:
 				c.lazy[v] = true
 			case ssa.OpConst, ssa.OpBoxF64, ssa.OpBoxBool:
 				if !used[v] {
@@ -640,7 +640,7 @@ func (c *compiler) materialize(v *ssa.Value, dst amd64.Reg) {
 	switch v.Op {
 	case ssa.OpConst:
 		c.a.MovImm(dst, c.constWord(v.Const))
-	case ssa.OpConstI32:
+	case ssa.OpConstSource:
 		c.a.MovImm(dst, uint64(int64(v.Aux)))
 	case ssa.OpBoxF64:
 		c.boxF64(c.xmm(v.Args[0], xScratch1), dst)
@@ -837,10 +837,10 @@ func (c *compiler) block(b *ssa.Block, next *ssa.Block) {
 		c.a.MovImm(scratchC, 0)
 		c.a.Store(regCtx, abi.OffRetFrom, scratchC)
 		if s := b.Control.Shadow; s != nil {
-			// RetFrom is the shadow plus one, and 0 for a primitive's -1;
-			// Go checks that the slot holds a reference.
+			// RetFrom is the source plus one, and 0 for a primitive's -1;
+			// Go checks that the slot or cell holds a reference.
 			c.a.MovRR(scratchC, c.gpr(s, scratchC))
-			c.a.OpImm(amd64.Add, scratchC, 1, false)
+			c.a.OpImm(amd64.Add, scratchC, 1, true)
 			c.a.Store(regCtx, abi.OffRetFrom, scratchC)
 		} else if o, ok := c.origin[b.Control]; ok && o >= 0 {
 			done := c.a.NewLabel()
@@ -1056,12 +1056,15 @@ func (c *compiler) objectOf(v *ssa.Value, guard func(amd64.Cond)) bool {
 	c.a.Op(amd64.Cmp, w, scratchB, true)
 	guard(amd64.CondNE)
 	if s := a.Shadow; s != nil {
-		// The slot is known at run time: a local, a captured binding, or an
-		// operand. scratchC becomes its value's address.
+		// The source is known at run time: a local, a captured binding, the
+		// receiver, an operand, or a heap cell (origin.go). scratchC becomes
+		// its value's address.
 		captured, stack, found := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
-		c.a.MovRR32(scratchC, c.gpr(s, scratchC))
-		c.a.Op(amd64.Test, scratchC, scratchC, false)
+		c.a.MovRR(scratchC, c.gpr(s, scratchC))
+		c.a.Op(amd64.Test, scratchC, scratchC, true)
 		guard(amd64.CondS)
+		c.a.OpImm(amd64.Cmp, scratchC, abi.MaxRecords, true)
+		c.a.Jcc(amd64.CondAE, found)
 		c.a.OpImm(amd64.Cmp, scratchC, int32(c.f.FrameLocals), false)
 		c.a.Jcc(amd64.CondGE, captured)
 		c.a.ShiftImm(amd64.Shl, scratchC, 4, true)
@@ -1233,6 +1236,12 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		guard(amd64.CondAE)
 		c.a.MovQToX(xScratch0, scratchB)
 		c.setX(v, xScratch0)
+	case ssa.OpPropCell:
+		c.property(v, guard)
+		c.setG(v, scratchA)
+	case ssa.OpLoadCell:
+		c.a.Load(scratchA, c.gpr(arg(0), scratchA), c.enc.NumOffset)
+		c.setG(v, scratchA)
 	case ssa.OpPropWrite:
 		c.property(v, guard)
 		c.a.Load(scratchB, scratchA, c.enc.NumOffset)

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -599,6 +600,24 @@ func TestJITSSAProperties(t *testing.T) {
 		{"method", `function P(x){this.x=x;this.v=1}P.prototype.run=function(n){let s=0;for(let i=0;i<n;i++)s+=this.x*this.v;return s}`,
 			`new P(1).run(3)`,
 			`[new P(2).run(10),new P(0.5).run(4)]`},
+		// References read from objects, which native code carries by their
+		// cells (D8): nested, followed down a list, an array held in a
+		// property, one returned, and one a method reads through this.
+		{"nested", `function f(o,n){let s=0;for(let i=0;i<n;i++)s+=o.p.x*o.p.y;return s}`,
+			`f({p:{x:1,y:2}},3)`,
+			`[f({p:{x:1.5,y:2}},10),f({p:{y:2,x:3}},4),f({p:{x:1}},2),f({p:{x:'s',y:1}},2),f({q:1,p:{x:2,y:3}},1)]`},
+		{"list", `function f(h){let s=0,n=h;while(n){s+=n.v;n=n.next}return s}`,
+			`f({v:1,next:{v:2,next:null}})`,
+			`[f({v:1,next:{v:2,next:{v:3,next:null}}}),f(null),f({v:4,next:{v:'x',next:null}}),f({v:5,next:{w:1,next:undefined}})]`},
+		{"array", `function f(o){let s=0;for(let i=0;i<o.a.length;i++)s+=o.a[i];return s}`,
+			`f({a:[1,2]})`,
+			`[f({a:[1,2,3]}),f({a:[]}),f({a:[1,'2']}),f({a:{length:1,0:5}})]`},
+		{"returned", `function f(o,n){let r=0;for(let i=0;i<n;i++)r=o.p;return r}`,
+			`f({p:{}},2)`,
+			`var q={k:1};[f({p:q},3)===q,f({p:'s'},2),f({p:q},0)]`},
+		{"items", `function B(){this.items=[1,2,3]}B.prototype.sum=function(){let s=0;for(let i=0;i<this.items.length;i++)s+=this.items[i];return s}`,
+			`new B().sum()`,
+			`[new B().sum(),new B().sum()]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			src := tc.setup + ";" + tc.warm + ";"
@@ -633,6 +652,50 @@ func TestJITSSAProperties(t *testing.T) {
 				t.Fatalf("never entered the new pipeline: %+v", st)
 			}
 		})
+	}
+}
+
+// TestJITSSACellsUnderGC stresses D8's decision: native code carries a
+// reference read from an object by its cell's address, which Go reads back
+// at exit. That holds while Go's heap does not move and the graph does not
+// change while native code runs. Here the collector runs continuously, on
+// another goroutine, while lists are built, walked natively and dropped.
+func TestJITSSACellsUnderGC(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	defer debug.SetGCPercent(debug.SetGCPercent(1))
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				runtime.GC()
+			}
+		}
+	}()
+	defer func() { close(stop); <-done }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	src := `function walk(h){let s=0,n=h;while(n){s+=n.v;n=n.next}return s}
+		function last(h){let n=h;while(n.next)n=n.next;return n}
+		function list(k){let h=null;for(let i=0;i<k;i++)h={v:i,next:h,pad:[i,i]};return h}
+		let ok=true;
+		for(let round=0;round<300;round++){
+			const h=list(50);
+			ok=ok&&walk(h)===1225&&last(h).v===0&&walk(list(3))===3;
+		}
+		ok`
+	v, err := r.Run(compileForTest(t, src))
+	if err != nil || !v.IsBool() || !v.Truthy() {
+		t.Fatalf("= %v, %v", v, err)
+	}
+	if st := r.JITStats(); st.SSAEntries == 0 || st.SSARecords == 0 {
+		t.Fatalf("the walks did not run natively or leave cells to Go: %+v", st)
 	}
 }
 

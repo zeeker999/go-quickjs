@@ -93,8 +93,11 @@ func Check(f *Func) error {
 		}
 	}
 	for v, o := range Origins(f) {
-		if s := v.Shadow; o == OriginAmbiguous && (s == nil || s.Op != OpPhi || s.Type != Int32 || s.Block != v.Block) {
+		if s := v.Shadow; o == OriginAmbiguous && (s == nil || s.Op != OpPhi || s.Type != Source || s.Block != v.Block) {
 			return fmt.Errorf("ssa: b%d %v merges two slots' values with no shadow", v.Block.ID, v)
+		}
+		if o == OriginHeap && (v.Shadow == nil || v.Shadow != v.Args[0]) {
+			return fmt.Errorf("ssa: b%d %v is loaded from a cell it does not name", v.Block.ID, v)
 		}
 	}
 	return nil
