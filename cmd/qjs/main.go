@@ -51,6 +51,7 @@ import (
 
 	quickjs "github.com/go-quickjs/go-quickjs"
 	"github.com/go-quickjs/go-quickjs/inspector"
+	"github.com/go-quickjs/go-quickjs/internal/jit"
 	"github.com/go-quickjs/go-quickjs/stdlib"
 )
 
@@ -112,6 +113,10 @@ func run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if opts == nil {
 		// --help or --version, which have already been printed.
 		return 0
+	}
+	if opts.jit && !jit.Supported() {
+		// The script still runs, in the interpreter and the tree tier.
+		fmt.Fprintln(stderr, "qjs: --jit has no effect: this build has no native tier (build with -tags quickjs_jit on linux/amd64, windows/amd64 or darwin/arm64)")
 	}
 
 	rt, err := newRuntime(opts)
