@@ -4027,6 +4027,10 @@ func TestJITSSAPolymorphicReads(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	// While the collector marks, Go makes native calls, and a function all
+	// of whose calls Go then makes is rightly demoted: not here.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	setup := `function A(){this.a=1}A.prototype.k=1;A.prototype.m=function(){return 10};
 		function B(){this.b=2;this.a=0}B.prototype.k=2;B.prototype.m=function(){return 20};
 		function C(){}C.prototype=Object.create({k:3,m(){return 30}});
@@ -4059,8 +4063,6 @@ func TestJITSSAPolymorphicReads(t *testing.T) {
 		}
 		var hosts uint64
 		if i == 3 {
-			runtime.GC()
-			defer debug.SetGCPercent(debug.SetGCPercent(-1))
 			hosts = entry("reads").ssaStats.hosts
 		}
 		gv, err := r.Run(compileForTest(t, src))
@@ -4088,6 +4090,10 @@ func TestJITSSAStoreOverLiveCell(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	// While the collector marks, Go makes native calls, and a function all
+	// of whose calls Go then makes is rightly demoted: not here.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	setup := `function L(v){this.v=v;this.link=null}
 		L.prototype.append=function(queue){this.link=null;if(queue==null)return this;var peek,next=queue;while((peek=next.link)!=null)next=peek;next.link=this;return queue};
 		var append=L.prototype.append;
@@ -4115,8 +4121,6 @@ func TestJITSSAStoreOverLiveCell(t *testing.T) {
 		}
 		var hosts uint64
 		if i == 3 {
-			runtime.GC()
-			defer debug.SetGCPercent(debug.SetGCPercent(-1))
 			hosts = entry("append").ssaStats.hosts
 		}
 		gv, err := r.Run(compileForTest(t, src))
@@ -4162,6 +4166,10 @@ func TestJITSSANativeCallsGoOn(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	// While the collector marks, Go makes native calls, and a function all
+	// of whose calls Go then makes is rightly demoted: not here.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	setup := `var A={v:3},B={v:5},o={p:A},c={n:0};
 		function tick(){c.n++;o.p=(c.n&1)?B:A;if(c.n%50===0)return String(c.n).length;return c.n&3}
 		function zero(){return tick()}
@@ -4309,6 +4317,10 @@ func TestJITSSANativeCalls(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	// While the collector marks, Go makes native calls, and a function all
+	// of whose calls Go then makes is rightly demoted: not here.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	setup := `function add(a,b){let s=a;for(let i=0;i<3;i++)s=(s*3+(b===undefined?5:b))|0;return s}
 		function P(v){this.v=v}P.prototype.m=function(k){let s=this.v;for(let i=0;i<2;i++)s=(s+k*i)|0;return s};
 		function sum(n){let t=0;for(let i=0;i<n;i++){t=(t+add(i,t&7))|0;t^=t>>>3}return t}
@@ -4349,11 +4361,6 @@ func TestJITSSANativeCalls(t *testing.T) {
 		var hosts, entries uint64
 		if e := entry("sum"); e != nil {
 			hosts, entries = e.ssaStats.hosts, e.ssaStats.entries
-		}
-		if i == 2 {
-			// While the collector marks, Go makes the calls: none does.
-			runtime.GC()
-			defer debug.SetGCPercent(debug.SetGCPercent(-1))
 		}
 		gv, err := r.Run(compileForTest(t, src))
 		if err != nil {
@@ -4468,6 +4475,10 @@ func TestJITSSANativeCallTargets(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	// While the collector marks, Go makes native calls, and a function all
+	// of whose calls Go then makes is rightly demoted: not here.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	setup := `function A(v){this.v=v}A.prototype.get=function(k){this.n=k;return this.v+k};
 		function B(v){this.w=v;this.v=v*2}B.prototype.get=function(k){this.n=k;return this.v*k};
 		function C(v){this.v=v}C.prototype.get=function(k){return (this.v^k)+this.v};
@@ -4513,9 +4524,6 @@ func TestJITSSANativeCallTargets(t *testing.T) {
 		var polyCalls, leafHosts uint64
 		if i == 3 {
 			polyCalls, leafHosts = calledNatively(), entry("useLeaf").ssaStats.hosts
-			// While the collector marks, Go makes the calls: none does.
-			runtime.GC()
-			defer debug.SetGCPercent(debug.SetGCPercent(-1))
 		}
 		unwound := r.jit.unwound
 		gv, err := r.Run(compileForTest(t, src))
