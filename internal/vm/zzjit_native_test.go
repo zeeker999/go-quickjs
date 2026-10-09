@@ -5089,11 +5089,12 @@ func TestJITSSAPolymorphicReadsSettle(t *testing.T) {
 	}
 }
 
-// The method calls the existing tiers have made are decided when a
-// function's code is first compiled, from their method reads' caches
-// (jitSeedCalls): run's loop, promoted after the tree tier ran it, inlines
-// get and calls big natively, which has code of its own by then, without
-// being compiled again to learn either from its exits.
+// The calls the existing tiers have made are decided when a function's
+// code is first compiled, from the caches of the reads of their callees,
+// methods' and globals' (jitSeedCalls): run's loop, promoted after the
+// tree tier ran it, inlines get and sq and calls big and heavy natively,
+// which have code of their own by then, without being compiled again to
+// learn any from its exits.
 // A call whose read met no method, or another object's, is left to be
 // learned as before: what takes the place of get later is called as it
 // is.
@@ -5105,9 +5106,11 @@ func TestJITSSASeedsMethodCalls(t *testing.T) {
 		P.prototype.get=function(){return this.x};
 		P.prototype.big=function(n){let s=0;for(let i=0;i<n;i++)s=(s+i*this.x)|0;return s};
 		function Q(x){this.x=x}Q.prototype.get=function(){return this.x+1};
+		function sq(x){return x*x}
+		function heavy(n){let s=1;for(let i=0;i<n;i++)s=(s*3+i)|0;return s}
 		var p=new P(3),q=new Q(5);
-		for(let i=0;i<2000;i++)p.big(40);
-		function run(o,n){let t=0;for(let i=0;i<n;i++){t=(t+o.get()+o.big(4))|0}return t}`
+		for(let i=0;i<2000;i++){p.big(40);heavy(40)}
+		function run(o,n){let t=0;for(let i=0;i<n;i++){t=(t+o.get()+o.big(4)+sq(i&7)+heavy(2))|0}return t}`
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := New(Config{JIT: true})
@@ -5121,6 +5124,14 @@ func TestJITSSASeedsMethodCalls(t *testing.T) {
 	cl := r.global.getOwn(r.atoms.intern("run")).value.Object().fn().closure
 	proto := r.global.getOwn(r.atoms.intern("P")).value.Object().getOwn(atomPrototype).value.Object()
 	get, big := proto.getOwn(r.atoms.intern("get")).value.Object(), proto.getOwn(r.atoms.intern("big")).value.Object()
+	sq, heavy := r.global.getOwn(r.atoms.intern("sq")).value.Object(), r.global.getOwn(r.atoms.intern("heavy")).value.Object()
+	targets := func(list []jitInline) []*Object {
+		var objs []*Object
+		for _, x := range list {
+			objs = append(objs, x.obj)
+		}
+		return objs
+	}
 	for i, src := range []string{`String(run(p,20000))`, `String(run(p,20000))`, `Q.prototype.big=P.prototype.big;String(run(q,20000))`} {
 		wv, err := want.Run(compileForTest(t, src))
 		if err != nil {
@@ -5138,13 +5149,64 @@ func TestJITSSASeedsMethodCalls(t *testing.T) {
 			t.Fatalf("round %d: run has no code", i)
 		}
 		if i == 1 {
-			if len(e.inlines) != 1 || e.inlines[0].obj != get || len(e.nativeCalls) != 1 || e.nativeCalls[0].obj != big {
-				t.Fatalf("run inlines %d calls and makes %d natively", len(e.inlines), len(e.nativeCalls))
+			if in, native := targets(e.inlines), targets(e.nativeCalls); !slices.Equal(in, []*Object{get, sq}) || !slices.Equal(native, []*Object{big, heavy}) {
+				t.Fatalf("run inlines %d calls and makes %d natively", len(in), len(native))
 			}
 			if n := int(e.reopts) + int(e.inlineReopts) + int(e.upgradeReopts); n != 0 {
 				t.Fatalf("run was compiled again %d times", n)
 			}
 		}
+	}
+}
+
+// A construction the existing tiers have made is decided when a function's
+// code is first compiled, as a call is (jitSeedCalls), once its
+// constructor has code: mk1 learns new V from its exits, which compiles V
+// for native callers; mk2's first code then makes it natively, from a
+// pool, without being compiled again for it.
+func TestJITSSASeedsConstructions(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	defer func(was bool) { jitcompile.SSAConstruct = was }(jitcompile.SSAConstruct)
+	jitcompile.SSAConstruct = true
+	setup := `function V(x){this.x=x;this.y=x+1}
+		function mk1(n){let t=0;for(let i=0;i<n;i++){const v=new V(i);t=(t+v.y)|0}return t}
+		function mk2(n){let t=0;for(let i=0;i<n;i++){const v=new V(i&15);t=(t*3+v.x)|0}return t}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := New(Config{JIT: true})
+	defer func() { r.Close(); r.ReleaseClosed() }()
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	v := r.global.getOwn(r.atoms.intern("V")).value.Object()
+	cl := r.global.getOwn(r.atoms.intern("mk2")).value.Object().fn().closure
+	for i, src := range []string{`String(mk1(20000))`, `String(mk1(20000))`, `String(mk2(20000))`, `String(mk2(20000))`} {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+	}
+	e := r.jit.hint(cl.hint())
+	if e == nil || e.ssa == nil {
+		t.Fatal("mk2 has no code")
+	}
+	if !slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.obj == v && x.pool != nil }) {
+		t.Fatal("mk2 does not construct V natively")
+	}
+	if n := int(e.reopts) + int(e.inlineReopts) + int(e.upgradeReopts); n != 0 {
+		t.Fatalf("mk2 was compiled again %d times", n)
 	}
 }
 
