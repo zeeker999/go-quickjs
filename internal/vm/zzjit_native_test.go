@@ -4097,6 +4097,51 @@ func TestJITSSANestedInline(t *testing.T) {
 	}
 }
 
+// What native calls' contexts share with the context code was entered in
+// -- how deep calls may go among it -- Go writes into them when it
+// changes, not each call (jitShareContexts): code entered shallow, then
+// deep, recurses natively only as deep as the call depth limit allows,
+// and throws where the interpreter does.
+func TestJITSSASharedContextsFollowDepth(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function rec(n){if(n===0)return 0;let s=0;for(let j=0;j<2;j++)s+=j;return s+rec(n-1)}
+		function at(d,n){return d===0?rec(n):at(d-1,n)}
+		function tryAt(d,n){try{return String(at(d,n))}catch(e){return e.constructor.name}}`
+	rounds := []string{`tryAt(0,10)`, `tryAt(0,10)`, `tryAt(0,10)`, `tryAt(0,10)`, `tryAt(185,20)`, `tryAt(0,10)`, `tryAt(185,20)`}
+	want := New(Config{MaxCallDepth: 200})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true, MaxCallDepth: 200})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d, %s: got %s, interpreter %s", i, src, got, want)
+		}
+	}
+	if wv, _ := want.Run(compileForTest(t, `tryAt(185,20)`)); wv.String().Go() != "RangeError" {
+		t.Fatalf("the interpreter did not run out of depth: %s", wv.String().Go())
+	}
+	cl := r.global.getOwn(r.atoms.intern("rec")).value.Object().fn().closure
+	if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil || !slices.Contains(e.callSites, jitCallNative) {
+		t.Fatal("rec does not call itself natively")
+	}
+}
+
 // A function whose calls are on branches taken one after another learns
 // each at a different time, and is compiled again for each, up to
 // jitInlineReoptimizations; a call met after those that keeps leaving

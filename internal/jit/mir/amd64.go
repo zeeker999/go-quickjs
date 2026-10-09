@@ -427,18 +427,11 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 	c.a.ShiftImm(amd64.Shl, tmp, 4, true)
 	c.a.Op(amd64.Add, locals, tmp, true)
 	c.a.Store(calleeCtx, abi.OffLocals, locals)
-	// What the callee's context shares with this one, and its own.
-	for _, off := range []int32{abi.OffBackEdges, abi.OffGlobal, abi.OffLexNames, abi.OffLevelLimit,
-		abi.OffStackBase, abi.OffStackEnd, abi.OffStackTop, abi.OffStackHigh} {
-		c.a.Load(tmp, regCtx, off)
-		c.a.Store(calleeCtx, off, tmp)
-	}
+	// The callee's context's own; what it shares with this one, and its
+	// level, Go wrote (abi.Context).
 	c.a.MovImm(tmp, 0)
 	c.a.Store(calleeCtx, abi.OffUpvalues, tmp)
 	c.a.Store(calleeCtx, abi.OffTailReturn, tmp)
-	c.a.Load(tmp, regCtx, abi.OffLevel)
-	c.a.OpImm(amd64.Add, tmp, 1, true)
-	c.a.Store(calleeCtx, abi.OffLevel, tmp)
 	c.a.Store(calleeCtx, abi.OffBase, base)
 	c.a.MovImm(tmp, 1)
 	c.a.Store(calleeCtx, abi.OffLive, tmp)
