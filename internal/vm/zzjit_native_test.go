@@ -4326,6 +4326,76 @@ func TestJITSSANativeCallThroughCall(t *testing.T) {
 	}
 }
 
+// a.push(v) appends natively where Array.prototype.push's fast path does:
+// numbers and references, the length its result; native code leaves only
+// for the array to grow. One whose array or prototypes it may not -- a
+// setter for an index on Array.prototype, an array that is not
+// extensible, or whose length is not writable -- is Go's.
+func TestJITSSANativePush(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	// Each case its own copy of fill, compiled first: what one leaves to
+	// Go must not have another demoted.
+	const fill = `function(a,n){let t=0;for(let i=0;i<n;i++)t=(t+a.push(i&1?o:i))|0;return t}`
+	setup := `var o={k:1},hits=0;
+		function show(a){let t=0;for(let i=0;i<a.length;i++)t=(t+(a[i]===o?1000:a[i]))|0;return [t,a.length].join()}
+		var plain=` + fill + `, setter=` + fill + `, stopped=` + fill + `, fixed=` + fill + `;`
+	cases := []struct{ name, fn, src string }{
+		{"plain", "plain", `{const a=[];[plain(a,300),show(a)].join()}`},
+		{"not extensible", "stopped", `{const a=[];Object.preventExtensions(a);try{stopped(a,10)}catch(e){e.constructor.name+a.length}}`},
+		{"length not writable", "fixed", `{const a=[];Object.defineProperty(a,'length',{writable:false});try{fixed(a,10)}catch(e){e.constructor.name+a.length}}`},
+		// Last: once a prototype has had an index, its fast path, the VM's
+		// and native code's, is not taken again.
+		{"a setter for an index on Object.prototype", "setter",
+			`Object.defineProperty(Object.prototype,'250',{set(v){hits++},configurable:true});` +
+				`try{const a=[];[setter(a,300),show(a),hits].join()}finally{delete Object.prototype['250']}`},
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	run := func(name, src string) {
+		t.Helper()
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("%s: got %s, interpreter %s", name, got, want)
+		}
+	}
+	for _, c := range cases {
+		warm := `{const a=[];[` + c.fn + `(a,300),show(a)].join()}`
+		for range 4 {
+			run(c.name, warm)
+		}
+		e := r.jit.hint(r.global.getOwn(r.atoms.intern(c.fn)).value.Object().fn().closure.hint())
+		if e == nil || !slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.push }) {
+			t.Fatalf("%s: %s does not push natively", c.name, c.fn)
+		}
+		hosts, entries, reoptimized := e.ssaStats.hosts, e.ssaStats.entries, r.jit.reoptimized
+		run(c.name, c.src)
+		if c.fn == "plain" && r.jit.reoptimized == reoptimized {
+			// The array grows a doubling at a time: a dozen times for 300.
+			if e.entrySlow || e.ssaStats.entries == entries || e.ssaStats.hosts-hosts > 16 {
+				t.Fatalf("plain entered %d times, left %d for 300 pushes", e.ssaStats.entries-entries, e.ssaStats.hosts-hosts)
+			}
+		}
+	}
+}
+
 // A write whose cache adds its property adds it natively, as V8's stores do
 // along a map's transition: fill never leaves for its fresh objects. One
 // that may not -- a prototype's setter intercepts the name, the object is
