@@ -561,6 +561,10 @@ func (c *a64Compiler) eqTagged(v *ssa.Value, guard func(arm64.Cond)) {
 		c.a.Cmp(wx, a64C, true)
 		c.a.BCond(arm64.EQ, yes)
 	}
+	strings := c.a.NewLabel()
+	c.a.MovImm(a64C, c.enc.String)
+	c.a.Cmp(wx, a64C, true)
+	c.a.BCond(arm64.EQ, strings)
 	c.a.MovImm(a64C, c.enc.Object)
 	c.a.Cmp(wx, a64C, true)
 	c.a.BCond(arm64.NE, exit)
@@ -571,6 +575,20 @@ func (c *a64Compiler) eqTagged(v *ssa.Value, guard func(arm64.Cond)) {
 			c.a.Cmp(a64A, a64C, true)
 			c.a.BCond(arm64.EQ, yes)
 			c.a.B(no)
+		}
+	}
+	c.a.Bind(strings)
+	if c.reference(v, x, c.enc.String, guard) {
+		c.a.FMovToF(a64F1, a64C)
+		if c.reference(v, y, c.enc.String, guard) {
+			c.a.FMovFromF(a64A, a64F1)
+			c.a.Cmp(a64A, a64C, true)
+			c.a.BCond(arm64.EQ, yes)
+			c.a.Load(a64A, a64A, c.enc.StringLength)
+			c.a.Load(a64B, a64C, c.enc.StringLength)
+			c.a.Cmp(a64A, a64B, true)
+			c.a.BCond(arm64.NE, no)
+			c.a.B(exit)
 		}
 	}
 	c.a.Bind(number)

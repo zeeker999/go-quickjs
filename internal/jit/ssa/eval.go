@@ -46,9 +46,11 @@ func element(view ir.ArrayView, key float64) (*uint64, bool) {
 // eqTagged is OpEqTagged's comparison, by the words native code sees: two
 // numbers compare as numbers; equal words (objects' are one word, strings'
 // another) are equal values but for objects, the same only if they are one,
-// and strings, left to Go; other words differ, strictly unequal and left to
-// Go loosely. It reports false where Go decides.
-func eqTagged(x, y ir.Value, strict bool) (bool, bool) {
+// and strings, the same if one and unequal if of different lengths (a
+// string the heap does not describe is empty), else left to Go; other
+// words differ, strictly unequal and left to Go loosely. It reports false
+// where Go decides.
+func eqTagged(x, y ir.Value, strict bool, strings map[uint64]String) (bool, bool) {
 	if x.Kind == ir.Number && y.Kind == ir.Number {
 		return math.Float64frombits(x.Bits) == math.Float64frombits(y.Bits), true
 	}
@@ -58,6 +60,13 @@ func eqTagged(x, y ir.Value, strict bool) (bool, bool) {
 			return true, true
 		case ir.Opaque:
 			return x.Bits == y.Bits, true
+		case ir.String:
+			if x.Bits == y.Bits {
+				return true, true
+			}
+			if len(strings[x.Bits].Units) != len(strings[y.Bits].Units) {
+				return false, true
+			}
 		}
 		return false, false
 	}
@@ -336,7 +345,7 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 				}
 				vals[v.ID] = val{f: math.Float64frombits(a.t.Bits)}
 			case OpEqTagged:
-				r, ok := eqTagged(a.t, b.t, v.Index == 1)
+				r, ok := eqTagged(a.t, b.t, v.Index == 1, heap.Strings)
 				if !ok {
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}

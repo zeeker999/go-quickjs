@@ -1101,6 +1101,10 @@ func (c *compiler) eqTagged(v *ssa.Value, guard func(amd64.Cond)) {
 		c.a.Op(amd64.Cmp, wx, scratchC, true)
 		c.a.Jcc(amd64.CondE, yes)
 	}
+	strings := c.a.NewLabel()
+	c.a.MovImm(scratchC, c.enc.String)
+	c.a.Op(amd64.Cmp, wx, scratchC, true)
+	c.a.Jcc(amd64.CondE, strings)
 	c.a.MovImm(scratchC, c.enc.Object)
 	c.a.Op(amd64.Cmp, wx, scratchC, true)
 	c.a.Jcc(amd64.CondNE, exit)
@@ -1111,6 +1115,22 @@ func (c *compiler) eqTagged(v *ssa.Value, guard func(amd64.Cond)) {
 			c.a.Op(amd64.Cmp, scratchA, scratchC, true)
 			c.a.Jcc(amd64.CondE, yes)
 			c.a.Jmp(no)
+		}
+	}
+	// Two strings: one string, or of different lengths; Go compares the
+	// rest.
+	c.a.Bind(strings)
+	if c.reference(v, x, c.enc.String, guard) {
+		c.a.MovQToX(xScratch1, scratchC)
+		if c.reference(v, y, c.enc.String, guard) {
+			c.a.MovQFromX(scratchA, xScratch1)
+			c.a.Op(amd64.Cmp, scratchA, scratchC, true)
+			c.a.Jcc(amd64.CondE, yes)
+			c.a.Load(scratchA, scratchA, c.enc.StringLength)
+			c.a.Load(scratchB, scratchC, c.enc.StringLength)
+			c.a.Op(amd64.Cmp, scratchA, scratchB, true)
+			c.a.Jcc(amd64.CondNE, no)
+			c.a.Jmp(exit)
 		}
 	}
 	c.a.Bind(number)
