@@ -335,6 +335,9 @@ type Entry struct {
 
 // Func is a function in SSA form.
 type Func struct {
+	// Blocks are every block an entry reaches, in reverse post-order from
+	// the entries -- a block after its dominator, a loop's body after its
+	// header -- and numbered so (Build).
 	Blocks  []*Block
 	Entries []Entry
 	// Locals and StackSize are the slot IR program's: the frame's shape.
