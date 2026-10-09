@@ -238,12 +238,20 @@ func (c *a64Compiler) exitTo(s *ssa.FrameState, kind uint64) {
 		} else {
 			w = c.gpr(v, a64A)
 		}
-		if v.Shadow != nil {
-			c.appendRecord(uint64(i)|abi.RecordMaybe, c.gprAfter(v.Shadow), 0, false, &w)
-			continue
-		}
 		next := c.a.NewLabel()
-		if o, ok := c.origin[v]; ok && o >= 0 {
+		if v.Shadow != nil {
+			// As amd64's: a record unless the value is a primitive or this
+			// slot's reference.
+			scalar := c.a.NewLabel()
+			from := c.gpr(v.Shadow, a64B)
+			c.a.CmpImm(from, -1, true)
+			c.a.BCond(arm64.EQ, scalar)
+			c.a.CmpImm(from, int64(i), true)
+			c.a.BCond(arm64.EQ, next)
+			c.appendRecord(uint64(i)|abi.RecordMaybe, c.gprAfter(v.Shadow), 0, false, &w)
+			c.a.B(next)
+			c.a.Bind(scalar)
+		} else if o, ok := c.origin[v]; ok && o >= 0 {
 			scalar := c.a.NewLabel()
 			c.isReference(v, w, o, scalar)
 			if o != i {

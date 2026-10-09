@@ -206,7 +206,7 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 			p.Code[pc] = lower(fn, in, p.Locals+maps[pc].Depth, p.This)
 		}
 	}
-	selectNumericProperties(p)
+	selectNumericProperties(p, m.ssa)
 	if m.ssa {
 		for pc, in := range p.Code {
 			if in.Op == ir.Host && p.Maps[pc].Depth >= 0 {
@@ -325,7 +325,7 @@ func selectPropertyLoops(fn *bytecode.Function, p *ir.Program, calls, callee boo
 				p.Code[pc] = lower(fn, in, p.Locals+p.Maps[pc].Depth, false)
 			}
 		}
-		selectNumericProperties(p)
+		selectNumericProperties(p, false)
 	}
 	if !fields {
 		for pc, in := range p.Code {
@@ -339,8 +339,12 @@ func selectPropertyLoops(fn *bytecode.Function, p *ir.Program, calls, callee boo
 
 // This bounded backward scan chooses field reads whose results feed numeric
 // operations or reference receivers. It is a profitability hint; every native
-// read still checks its live type and permissions before committing.
-func selectNumericProperties(p *ir.Program) {
+// read still checks its live type and permissions before committing. With
+// cells, the new pipeline carries any value a read finds by where it found
+// it, so a read no native operation consumes -- a call's callee or argument,
+// which Go takes from the frame -- stays native there, as a global's cell or
+// a reference, rather than add an exit.
+func selectNumericProperties(p *ir.Program, cells bool) {
 	const number, reference uint8 = 1, 2
 	var needed [MaxSlots]uint8
 	read := func(o ir.Operand, kind uint8) {
@@ -357,8 +361,8 @@ func selectNumericProperties(p *ir.Program) {
 		switch in.Op {
 		case ir.PropertyRead, ir.BindingRead:
 			kind := take(in.Dest)
-			if kind&number == 0 {
-				if in.Op == ir.PropertyRead && kind&reference != 0 {
+			if kind&number == 0 && !(cells && in.Op == ir.BindingRead) {
+				if in.Op == ir.PropertyRead && (kind&reference != 0 || cells) {
 					in.Op = ir.ReferenceRead
 					p.Code[pc] = in
 				} else {

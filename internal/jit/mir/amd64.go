@@ -225,7 +225,10 @@ func (c *compiler) stubLabel(s *ssa.FrameState, kind uint64) amd64.Label {
 // origin slot held, which Go copies, or the slot holds a reference, whose
 // pointer word Go clears: those are records (abi.Record). The frame is as
 // it was at entry until here, so the origin slot still holds the
-// reference, and a slot this stub has written held none.
+// reference, and a slot this stub has written held none. So a value whose
+// origin is known only at run time (a shadow) needs no record when it
+// turns out to be a primitive, stored where no reference is, or the
+// reference the slot itself held.
 func (c *compiler) exitTo(s *ssa.FrameState, kind uint64) {
 	c.a.MovImm(scratchC, 0)
 	c.a.Store(regCtx, abi.OffRecords, scratchC)
@@ -241,13 +244,20 @@ func (c *compiler) exitTo(s *ssa.FrameState, kind uint64) {
 		} else {
 			w = c.gpr(v, scratchA)
 		}
-		if v.Shadow != nil {
-			// Which slot it came from is known only at run time: Go looks.
-			c.appendRecord(uint64(i)|abi.RecordMaybe, c.gprAfter(v.Shadow), 0, false, &w)
-			continue
-		}
 		next := c.a.NewLabel()
-		if o, ok := c.origin[v]; ok && o >= 0 {
+		if v.Shadow != nil {
+			// Which slot it came from is known only at run time: Go looks,
+			// unless it is none or this one.
+			scalar := c.a.NewLabel()
+			from := c.gpr(v.Shadow, scratchB)
+			c.a.OpImm(amd64.Cmp, from, -1, true)
+			c.a.Jcc(amd64.CondE, scalar)
+			c.a.OpImm(amd64.Cmp, from, int32(i), true)
+			c.a.Jcc(amd64.CondE, next)
+			c.appendRecord(uint64(i)|abi.RecordMaybe, c.gprAfter(v.Shadow), 0, false, &w)
+			c.a.Jmp(next)
+			c.a.Bind(scalar)
+		} else if o, ok := c.origin[v]; ok && o >= 0 {
 			scalar := c.a.NewLabel()
 			c.isReference(v, w, o, scalar)
 			if o != i {

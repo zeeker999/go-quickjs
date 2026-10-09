@@ -451,8 +451,11 @@ func TestJITSSAReferences(t *testing.T) {
 			`var o={k:1};[f(o,5)===o,f('str',5),f(7n,3)]`, false},
 		{"copy", `function f(o,n){let x=0;for(let i=0;i<n;i++){x=o}return x}`,
 			`var o=[1];[f(o,5)===o,f('a',2),f(o,0)]`, true},
-		{"overwrite", `function f(o,n){let x=o;for(let i=0;i<n;i++){x=i}return x}`,
-			`var o={};[f(o,5),f(o,0)===o,f(Symbol.iterator,1)]`, true},
+		// A remainder by 1.5 exits to Go at every iteration: the first exit
+		// has Go copy o into x's slot, and the next replaces it with a
+		// number there, which Go must clear.
+		{"overwrite", `function f(o,n){let x=o,y=0;for(let i=0;i<n;i++){if(i>0)x=i;y+=i%1.5}return y>99?y:x}`,
+			`var o={};[f(o,5),f(o,1)===o,f(o,0)===o,f(Symbol.iterator,1)===Symbol.iterator]`, true},
 		{"merge", `function f(o,n){let r=o;for(let i=0;i<n;i++){if(i==3)r=i}return r}`,
 			`var o={};[f(o,2)===o,f(o,6),f('s',1)]`, true},
 		{"swap", `function f(a,b,n){for(let i=0;i<n;i++){let t=a;a=b;b=t}return a}`,
@@ -707,6 +710,63 @@ func TestJITSSAGlobals(t *testing.T) {
 		t.Fatalf("never entered the new pipeline: %+v", st)
 	} else {
 		t.Logf("%+v", st)
+	}
+}
+
+// A call leaves the new pipeline's code once: the callee, a global, and an
+// argument read from an object stay native, carried by their cells, though
+// only Go uses them. A function compiled at its first call, before the
+// interpreter has run its global reads, finds the global where the global
+// object has it; deleting and defining it again moves it, which the cell's
+// key check sees.
+func TestJITSSACallExits(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `var O={p:[1,2,3]};function h(a){return a.length}
+		function f(n){let s=0;for(let i=0;i<n;i++)s=(s+g(i))|0;return s}
+		function k(n){let s=0;for(let i=0;i<n;i++)s=(s+h(O.p))|0;return s}`
+	rounds := []struct {
+		src   string
+		hosts uint64 // the exits it makes, if it must make that many
+	}{
+		{`f(100)`, 100},
+		{`k(100)`, 100},
+		{`delete globalThis.g;globalThis.x0=1;globalThis.g=function(i){return i*2};f(10)`, 0},
+		{`O={q:0,p:'abcd'};k(10)`, 0},
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	r.jitCallThreshold = 1
+	for _, rt := range []*Runtime{want, r} {
+		rt.global.setOwnRaw(rt.atoms.intern("g"), rt.NewFunction("g", 1,
+			func(_ *Runtime, _ Value, args []Value) (Value, error) { return args[0], nil }), propDefault)
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, round := range rounds {
+		wv, err := want.Run(compileForTest(t, round.src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := r.JITStats()
+		gv, err := r.Run(compileForTest(t, round.src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !jitSameValueForTest(gv, wv) {
+			t.Fatalf("round %d: got %v, interpreter %v", i, gv, wv)
+		}
+		st := r.JITStats()
+		if st.SSAEntries == before.SSAEntries {
+			t.Fatalf("round %d never entered the new pipeline: %+v", i, st)
+		}
+		if hosts := st.Hosts - before.Hosts; round.hosts != 0 && hosts != round.hosts {
+			t.Fatalf("round %d: %d exits to Go, want one per call (%d)", i, hosts, round.hosts)
+		}
 	}
 }
 
