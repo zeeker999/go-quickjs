@@ -4894,6 +4894,62 @@ func TestJITSSANativeCallResumes(t *testing.T) {
 	}
 }
 
+// A value read from an element and used after a native call is kept across
+// it, as one read from a property is: the callee may write the element.
+// put leaves native code for Go to store, after which f goes on natively
+// with x, which a[0] no longer holds -- until put, which always leaves, is
+// left to Go; take pops natively the element g's x came from.
+func TestJITSSAElementsKeptAcrossCalls(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var A={v:3},B={v:5};
+		function put(a,i){a[0]=(i&1)?B:A;return i&1}
+		function f(a,n){let t=0;for(let i=0;i<n;i++){const x=a[0];t=(t+put(a,i))|0;t=(t*3+x.v)|0}return t}
+		function take(a){return a.pop()}
+		function g(a,n){let t=0;for(let i=0;i<n;i++){const x=a[a.length-1];const y=take(a);a.push((i&1)?A:B);t=(t*3+x.v+(x===y?1:0))|0}return t}`
+	for _, c := range []struct {
+		name, src string
+		resumes   bool
+	}{{"f", `String(f([A],300))`, true}, {"g", `String(g([A,B],300))`, false}} {
+		t.Run(c.name, func(t *testing.T) {
+			want := New(Config{})
+			defer func() { want.Close(); want.ReleaseClosed() }()
+			r := jitRuntimeForTest(t, Config{JIT: true})
+			r.jitSSA = true
+			for _, rt := range []*Runtime{want, r} {
+				if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cl := r.global.getOwn(r.atoms.intern(c.name)).value.Object().fn().closure
+			native := false
+			for i := range 6 {
+				wv, err := want.Run(compileForTest(t, c.src))
+				if err != nil {
+					t.Fatal(err)
+				}
+				resumed := r.jit.resumed
+				gv, err := r.Run(compileForTest(t, c.src))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, want := gv.String().Go(), wv.String().Go(); got != want {
+					t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+				}
+				if e := r.jit.hint(cl.hint()); e != nil && len(e.nativeCalls) != 0 && (!c.resumes || r.jit.resumed > resumed) {
+					native = true
+				}
+			}
+			if !native {
+				t.Fatalf("%s does not call natively", c.name)
+			}
+		})
+	}
+}
+
 // Native code that calls through Go another function's native code shares
 // the context with it (jitState.ssaCtx): an exit's PC must be read before
 // Go runs anything. Here inner's last exit, a call near its end, is past
