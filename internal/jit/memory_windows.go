@@ -3,9 +3,6 @@
 package jit
 
 import (
-	"errors"
-	"fmt"
-	"os"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -13,32 +10,39 @@ import (
 
 var flushInstructionCache = windows.NewLazySystemDLL("kernel32.dll").NewProc("FlushInstructionCache")
 
-func allocateCode(instructions []byte) ([]byte, error) {
-	if len(instructions) == 0 || len(instructions) > MaxCodeBytes {
-		return nil, fmt.Errorf("invalid native kernel size: %d", len(instructions))
-	}
-	page := os.Getpagesize()
-	size := (len(instructions) + page - 1) / page * page
-	address, err := windows.VirtualAlloc(0, uintptr(size),
-		windows.MEM_COMMIT|windows.MEM_RESERVE, windows.PAGE_READWRITE)
+func executablePolicy() error { return nil }
+
+// mapCode reserves and commits size bytes, zeroed, readable and writable,
+// for an Arena.
+func mapCode(size int) ([]byte, error) {
+	address, err := windows.VirtualAlloc(0, uintptr(size), windows.MEM_COMMIT|windows.MEM_RESERVE, windows.PAGE_READWRITE)
 	if err != nil {
-		return nil, fmt.Errorf("allocate code: %w", err)
+		return nil, err
 	}
-	code := foreignBytes(address, size)
-	copy(code, instructions)
-	var oldProtect uint32
-	if err = windows.VirtualProtect(address, uintptr(len(code)), windows.PAGE_EXECUTE_READ, &oldProtect); err != nil {
-		return nil, fmt.Errorf("seal code: %w", errors.Join(err, freeCode(code)))
-	}
-	ok, _, err := flushInstructionCache.Call(uintptr(windows.CurrentProcess()), address, uintptr(len(code)))
-	if ok == 0 {
-		return nil, fmt.Errorf("flush instruction cache: %w", errors.Join(err, freeCode(code)))
-	}
-	return code, nil
+	return foreignBytes(address, size), nil
 }
 
-func freeCode(code []byte) error {
-	return windows.VirtualFree(uintptr(unsafe.Pointer(&code[0])), 0, windows.MEM_RELEASE)
+// protectCode makes whole pages executable and not writable, or writable
+// and not executable.
+func protectCode(pages []byte, executable bool) error {
+	protect := uint32(windows.PAGE_READWRITE)
+	if executable {
+		protect = windows.PAGE_EXECUTE_READ
+	}
+	var old uint32
+	return windows.VirtualProtect(uintptr(unsafe.Pointer(&pages[0])), uintptr(len(pages)), protect, &old)
+}
+
+func flushCode(code []byte) error {
+	ok, _, err := flushInstructionCache.Call(uintptr(windows.CurrentProcess()), uintptr(unsafe.Pointer(&code[0])), uintptr(len(code)))
+	if ok == 0 {
+		return err
+	}
+	return nil
+}
+
+func unmapCode(mem []byte) error {
+	return windows.VirtualFree(uintptr(unsafe.Pointer(&mem[0])), 0, windows.MEM_RELEASE)
 }
 
 // foreignBytes represents a VirtualAlloc allocation as a slice. Its address

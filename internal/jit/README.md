@@ -180,12 +180,21 @@ native-work-per-host-exit ratio stays low is kept for long invocations only
 ## Memory
 
 **Allocation.**
-- Code is allocated writable, filled, then sealed read/execute. Pages are
-  never writable and executable at once, and published code is never
-  patched.
+- A runtime's code lives in its `Arena`: chunks of 64 KiB (a larger
+  function gets a chunk of its own), each function placed after the last
+  at 64-byte alignment. A runtime compiling 101 functions holds them in 2
+  mappings with the new pipeline, 6 with the old (`TestJITArenaMappings`),
+  where each used to be a mapping of its own -- and, on Windows, 64 KiB of
+  address space.
+- Placing a function makes the pages it touches writable, copies it, and
+  seals them read/execute again. Pages are never writable and executable at
+  once, and published code is never patched. Other code in those pages does
+  not run meanwhile: an arena is one runtime's, and its native code always
+  returns to Go before Go compiles anything.
+- A chunk is unmapped when the last function in it is released. The arena
+  locks, since a finalizer can release code on another goroutine.
 - Windows flushes the instruction cache with `FlushInstructionCache`.
 - Darwin uses `ic ivau` with barriers.
-- Each program is its own mapping (a chunked arena is planned).
 
 **Darwin policy.** Darwin refuses executable memory to hardened or
 code-signing-enforced processes (`ErrUnavailable`). There is no `MAP_JIT`
@@ -200,7 +209,7 @@ the JIT on and off. The JIT has a budget of its own (`jitBudget`):
 **Release.**
 - `ReleaseClosed` releases code once native frames have unwound.
 - A failed release keeps ownership for a retry.
-- A finalizer on `Code` reclaims what a host abandoned.
+- A finalizer on `Code` and `SSACode` reclaims what a host abandoned.
 
 Runtime construction allocates nothing for the JIT.
 

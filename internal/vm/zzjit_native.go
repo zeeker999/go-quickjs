@@ -204,6 +204,9 @@ type jitState struct {
 	callActive      bool
 	globals         []bytecode.Instr
 	cache           map[weak.Pointer[bytecode.Function]]*jitEntry
+	// arena holds the code of every entry: a few mappings, however many
+	// functions the runtime compiles.
+	arena *jit.Arena
 	// generation advances whenever the cache releases code, which is when a
 	// program refused for want of budget may fit.
 	generation uint64
@@ -410,7 +413,7 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool, cl *closure) *j
 		return nil
 	}
 	if r.jit == nil {
-		r.jit = &jitState{cache: make(map[weak.Pointer[bytecode.Function]]*jitEntry), charCodeAt: r.jitCharCodeAt}
+		r.jit = &jitState{cache: make(map[weak.Pointer[bytecode.Function]]*jitEntry), charCodeAt: r.jitCharCodeAt, arena: jit.NewArena()}
 	}
 	s := r.jit
 	var meta int
@@ -493,7 +496,7 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool, cl *closure) *j
 		if meta+len(fn.Code)*32+1024+bindingBytes > jitMetadataBytes {
 			return nil
 		}
-		e.code, err = jit.CompileBudget(p, limit-bindingBytes)
+		e.code, err = jit.CompileIn(s.arena, p, limit-bindingBytes)
 		if err != nil {
 			if errors.Is(err, jit.ErrUnavailable) {
 				s.unavailable = true

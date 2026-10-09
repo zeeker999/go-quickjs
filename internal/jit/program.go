@@ -22,6 +22,7 @@ var ErrCodeBudget = errors.New("native code memory budget exceeded")
 // execute the same lowered IR concurrently with independent scratch storage.
 type Code struct {
 	code    []byte
+	arena   *Arena
 	entries []int
 	maps    []ir.StateMap
 	slots   int
@@ -47,10 +48,15 @@ func Compile(p *ir.Program) (*Code, error) {
 	return CompileBudget(p, MaxCodeBytes+ir.MaxInstructions*32+1024)
 }
 
-// CompileBudget additionally bounds page-rounded executable memory and retained
-// metadata together. A refusal occurs before OS allocation. Transient emission
-// work is bounded by the IR and code-size limits regardless of this budget.
-func CompileBudget(p *ir.Program, bytes int) (*Code, error) { return compileProgram(p, bytes) }
+// CompileBudget additionally bounds executable memory and retained metadata
+// together. A refusal occurs before OS allocation. Transient emission work is
+// bounded by the IR and code-size limits regardless of this budget. The code
+// has an arena of its own.
+func CompileBudget(p *ir.Program, bytes int) (*Code, error) { return compileProgram(nil, p, bytes) }
+
+// CompileIn is CompileBudget placing the code in a, a runtime's arena; nil
+// gives it an arena of its own.
+func CompileIn(a *Arena, p *ir.Program, bytes int) (*Code, error) { return compileProgram(a, p, bytes) }
 
 // EntryDepth reports the live operand depth at a reachable native entry.
 // Closed code and unreachable or invalid PCs have no entry.
@@ -142,10 +148,10 @@ func (c *Code) Close() error {
 	if c == nil || len(c.code) == 0 {
 		return nil
 	}
-	if err := freeCode(c.code); err != nil {
+	if err := c.arena.release(c.code); err != nil {
 		return err
 	}
-	c.code, c.entries, c.maps = nil, nil, nil
+	c.code, c.arena, c.entries, c.maps = nil, nil, nil, nil
 	runtime.SetFinalizer(c, nil)
 	return nil
 }

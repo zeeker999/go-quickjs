@@ -5,13 +5,18 @@ package jit
 import (
 	"fmt"
 	"os"
+	"sync"
 	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
 
-func executablePolicy() error {
+// executablePolicy asks once: a process's code-signing flags are set when
+// it starts, and every arena placement asks.
+var executablePolicy = sync.OnceValue(readExecutablePolicy)
+
+func readExecutablePolicy() error {
 	// CS_OPS_STATUS writes p_csflags. Hardened/enforced executables can allow
 	// mprotect yet kill the process when it enters an unsigned code page.
 	// This backend does not implement the entitled MAP_JIT path, so refuse

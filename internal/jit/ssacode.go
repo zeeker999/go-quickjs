@@ -13,15 +13,20 @@ import (
 // SSACode owns a function the new pipeline compiled (internal/jit/mir) and
 // its executable memory. Like Code, it belongs to one runtime.
 type SSACode struct {
-	code []byte
+	code  []byte
+	arena *Arena
 	// entries is each slot IR PC's code offset, or -1: a slice, since every
 	// exit to Go looks one up.
 	entries []int32
 }
 
-// NewSSACode publishes compiled code: written, then sealed executable.
-func NewSSACode(c *mir.Code) (*SSACode, error) {
-	code, err := allocateCode(c.Bytes)
+// NewSSACode publishes compiled code in a, a runtime's arena (nil gives it
+// one of its own): written, then sealed executable.
+func NewSSACode(a *Arena, c *mir.Code) (*SSACode, error) {
+	if a == nil {
+		a = NewArena()
+	}
+	code, err := a.place(c.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
@@ -36,7 +41,7 @@ func NewSSACode(c *mir.Code) (*SSACode, error) {
 	for pc, off := range c.Entries {
 		entries[pc] = int32(off)
 	}
-	s := &SSACode{code: code, entries: entries}
+	s := &SSACode{code: code, arena: a, entries: entries}
 	runtime.SetFinalizer(s, func(s *SSACode) { _ = s.Close() })
 	return s, nil
 }
@@ -75,10 +80,10 @@ func (s *SSACode) Close() error {
 	if s == nil || len(s.code) == 0 {
 		return nil
 	}
-	if err := freeCode(s.code); err != nil {
+	if err := s.arena.release(s.code); err != nil {
 		return err
 	}
-	s.code = nil
+	s.code, s.arena = nil, nil
 	runtime.SetFinalizer(s, nil)
 	return nil
 }

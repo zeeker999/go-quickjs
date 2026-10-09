@@ -1404,6 +1404,44 @@ func jitRuntimeForTest(t *testing.T, cfg Config) *Runtime {
 	return r
 }
 
+// A runtime's compiled functions share a few mappings, its arena's chunks,
+// rather than taking one each, in both pipelines; closing the runtime
+// releases every one.
+func TestJITArenaMappings(t *testing.T) {
+	for _, ssa := range []bool{false, true} {
+		if ssa && !jitSSABackend {
+			continue
+		}
+		r := New(Config{JIT: true})
+		r.jitCallThreshold = 1
+		r.jitSSA = ssa
+		var src strings.Builder
+		for i := 0; i < 100; i++ {
+			fmt.Fprintf(&src, "function f%d(n){let s=%d;for(let i=0;i<n;i++)s+=i;return s}\nf%d(3);\n", i, i, i)
+		}
+		if _, err := r.Run(compileForTest(t, src.String())); err != nil {
+			t.Fatal(err)
+		}
+		if r.jit == nil || len(r.jit.cache) < 100 {
+			t.Fatalf("ssa %v: compiled too few functions", ssa)
+		}
+		arena, bytes := r.jit.arena, 0
+		for _, e := range r.jit.cache {
+			bytes += e.code.Size() + e.ssa.Size()
+		}
+		if chunks := arena.Chunks(); chunks == 0 || chunks > bytes/(64<<10)+1 {
+			t.Fatalf("ssa %v: %d functions, %d bytes of code, in %d mappings", ssa, len(r.jit.cache), bytes, chunks)
+		} else {
+			t.Logf("ssa %v: %d functions, %d bytes of code, in %d mappings", ssa, len(r.jit.cache), bytes, chunks)
+		}
+		r.Close()
+		r.ReleaseClosed()
+		if arena.Chunks() != 0 {
+			t.Fatalf("ssa %v: a closed runtime keeps %d mappings", ssa, arena.Chunks())
+		}
+	}
+}
+
 func TestJITRuntimeOptIn(t *testing.T) {
 	p := compileForTest(t, jitSumSource)
 	for _, enabled := range []bool{false, true} {

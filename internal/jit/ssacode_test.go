@@ -617,6 +617,10 @@ var exitNames = map[uint64]ir.ExitKind{abi.ExitReturn: ir.Returned, abi.ExitDeop
 	abi.ExitHost: ir.HostExit, abi.ExitPoll: ir.BudgetExit}
 
 // compiled is a program compiled by the new pipeline, for the harness.
+// testArena holds every program the harness compiles, packed next to each
+// other, as a runtime's are.
+var testArena = NewArena()
+
 type compiled struct {
 	f    *ssa.Func
 	mc   *mir.Code
@@ -639,7 +643,7 @@ func compileNative(p *ir.Program, l layout) (*compiled, error) {
 	if err != nil {
 		return nil, fmt.Errorf("CompileAMD64: %w\n%s", err, f)
 	}
-	code, err := NewSSACode(mc)
+	code, err := NewSSACode(testArena, mc)
 	if err != nil {
 		return nil, err
 	}
