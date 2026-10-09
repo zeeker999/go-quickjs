@@ -207,11 +207,18 @@ func TestJITCallChainCancellation(t *testing.T) {
 func BenchmarkJITScalarCalls(b *testing.B) {
 	const setup = `function h(a,n){let s=0;for(let i=0;i<n;i++){a[0]+=1;s+=a[0]}return s}
                    function f(a,h,n){let s=0;for(let i=0;i<n;i++)s+=h(a,4);return s+a[0]}`
-	for _, mode := range []string{"interpreter", "existing", "native"} {
+	// native is the old pipeline, whose calls between compiled functions go
+	// through its coordinator (transfers); ssa the new, whose calls leave
+	// native code for Go.
+	for _, mode := range []string{"interpreter", "existing", "native", "ssa"} {
+		if mode == "ssa" && !jitSSABackend {
+			continue
+		}
 		b.Run(mode, func(b *testing.B) {
 			previous := treeTier.Swap(mode != "interpreter")
 			defer treeTier.Store(previous)
-			r := New(Config{JIT: mode == "native"})
+			r := New(Config{JIT: mode == "native" || mode == "ssa"})
+			r.jitSSA = mode == "ssa"
 			defer func() { r.Close(); r.ReleaseClosed() }()
 			for _, source := range []string{setup, `for(let i=0;i<16;i++){h([0],4);f([0],h,16)}`} {
 				ast, err := parser.Parse(source, parser.Options{})
@@ -245,6 +252,9 @@ func BenchmarkJITScalarCalls(b *testing.B) {
 			b.StopTimer()
 			if mode == "native" && r.jit.transfers == 0 {
 				b.Fatal("no scalar transfers")
+			}
+			if mode == "ssa" && r.JITStats().SSAEntries == 0 {
+				b.Fatal("never entered the new pipeline")
 			}
 		})
 	}
