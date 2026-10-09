@@ -263,6 +263,14 @@ func (r *Runtime) jitRecordValue(f *frame, e *jitEntry, rec *abi.Record) Value {
 	return Value{num: math.Float64frombits(rec.Word)}
 }
 
+// jitSSAStats counts what one function's new-pipeline code does.
+type jitSSAStats struct {
+	entries, hosts, guards, polls, records uint64
+	// guardsAt counts failed guards by the bytecode PC they exit to; nil
+	// until one fails.
+	guardsAt map[uint32]uint64
+}
+
 // runSSA runs a function compiled by the new pipeline from pc, where the
 // frame has depth operands, until it returns or leaves native code for the
 // rest of the invocation.
@@ -294,6 +302,7 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 		}
 		s.entries++
 		s.ssaEntries++
+		e.ssaStats.entries++
 		if err := e.ssa.Run(pc, ctx); err != nil {
 			return r.jitInterpret(f, f.base+depth, nil)
 		}
@@ -304,18 +313,25 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 			}
 			return Value{num: math.Float64frombits(ctx.Ret)}, nil, true
 		}
+		e.ssaStats.records += ctx.Records
 		r.jitApplyRecords(f, e, ctx)
 		switch ctx.ExitKind {
 		case abi.ExitDeopt:
 			// The frame holds the state at the guard; the interpreter runs
 			// the rest of this invocation.
 			s.guards++
+			e.ssaStats.guards++
+			if e.ssaStats.guardsAt == nil {
+				e.ssaStats.guardsAt = map[uint32]uint64{}
+			}
+			e.ssaStats.guardsAt[uint32(ctx.ExitPC)]++
 			f.pc = uint32(ctx.ExitPC)
 			return r.jitInterpret(f, f.base+int(ctx.ExitDepth), nil)
 		case abi.ExitHost:
 			// Go runs the one instruction, then native code goes on from the
 			// next entry, if there is one.
 			s.hosts++
+			e.ssaStats.hosts++
 			f.pc = uint32(ctx.ExitPC)
 			sp, steps, err := r.jitHost(f, f.base+int(ctx.ExitDepth), 1)
 			if err != nil || r.stopped != nil || steps == 0 {
@@ -329,6 +345,7 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 			// The interpreter's back-edge check, at a loop header native
 			// code can be entered again at.
 			s.budgets++
+			e.ssaStats.polls++
 			r.backEdges = backEdgeCheckInterval
 			if err := r.checkInterruptNow(); err != nil {
 				return Undefined, err, true
