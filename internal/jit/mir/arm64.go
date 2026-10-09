@@ -150,6 +150,39 @@ func (c *a64Compiler) fpr(v *ssa.Value, scratch arm64.FReg) arm64.FReg {
 	return scratch
 }
 
+// gdst and fdst are the register an instruction computing v writes: v's
+// own, or scratch A or F0 when v is spilled, which setG and setF then
+// store. A64's instructions read their operands before they write, so the
+// register may be an operand's.
+func (c *a64Compiler) gdst(v *ssa.Value) arm64.Reg {
+	if l := c.locAt(v); l.reg >= 0 {
+		return arm64.Reg(l.reg)
+	}
+	return a64A
+}
+
+func (c *a64Compiler) fdst(v *ssa.Value) arm64.FReg {
+	if l := c.locAt(v); l.reg >= 0 {
+		return arm64.FReg(l.reg)
+	}
+	return a64F0
+}
+
+// constF64 puts a double's bits in dst: from the zero register, as an
+// FMOV immediate, or through A.
+func (c *a64Compiler) constF64(dst arm64.FReg, bits uint64) {
+	if bits == 0 {
+		c.a.FMovToF(dst, arm64.ZR)
+		return
+	}
+	if imm, ok := arm64.FloatImm(bits); ok {
+		c.a.FMovImm(dst, imm)
+		return
+	}
+	c.a.MovImm(a64A, bits)
+	c.a.FMovToF(dst, a64A)
+}
+
 // setG stores src into v's location.
 func (c *a64Compiler) setG(v *ssa.Value, src arm64.Reg) {
 	l := c.locAt(v)
@@ -454,11 +487,10 @@ func (c *a64Compiler) branch(b *ssa.Block, next *ssa.Block) {
 	if ctl.Op == ssa.OpCmpF64 && ctl.Uses == 1 && ctl.Block == b {
 		c.a.FCmp(c.fpr(ctl.Args[0], a64F0), c.fpr(ctl.Args[1], a64F1))
 		c.a.BCond(a64Compare(ir.Operator(ctl.Aux)), yes)
-		c.a.B(no)
 	} else {
 		c.a.Cbnz(c.gpr(ctl, a64A), yes, false)
-		c.a.B(no)
 	}
+	// The false edge follows.
 	c.a.Bind(no)
 	c.edge(b, b.Succs[1], nil)
 	c.a.Bind(yes)
@@ -747,16 +779,17 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.MovImm(a64A, c.constWord(v.Const))
 		c.setG(v, a64A)
 	case ssa.OpConstF64:
-		c.a.MovImm(a64A, v.Const.Bits)
-		c.a.FMovToF(a64F0, a64A)
-		c.setF(v, a64F0)
+		d := c.fdst(v)
+		c.constF64(d, v.Const.Bits)
+		c.setF(v, d)
 	case ssa.OpUnboxF64:
 		r := c.gpr(arg(0), a64B)
 		c.a.ShiftImm(arm64.Lsr, a64A, r, 51, true)
 		c.a.CmpImm(a64A, 0x1FFF, false)
 		guard(arm64.EQ)
-		c.a.FMovToF(a64F0, r)
-		c.setF(v, a64F0)
+		d := c.fdst(v)
+		c.a.FMovToF(d, r)
+		c.setF(v, d)
 	case ssa.OpCheckInit:
 		r := c.gpr(arg(0), a64B)
 		c.a.MovImm(a64A, c.enc.Uninitialized)
@@ -846,36 +879,39 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.boxBool(c.gpr(arg(0), a64B), a64A)
 		c.setG(v, a64A)
 	case ssa.OpAddF64, ssa.OpSubF64, ssa.OpMulF64, ssa.OpDivF64:
-		op := a64FOp(v.Op)
-		c.a.FArith(op, a64F0, c.fpr(arg(0), a64F0), c.fpr(arg(1), a64F1))
-		c.setF(v, a64F0)
+		d := c.fdst(v)
+		c.a.FArith(a64FOp(v.Op), d, c.fpr(arg(0), a64F0), c.fpr(arg(1), a64F1))
+		c.setF(v, d)
 	case ssa.OpModF64:
 		c.remainder(v, guard)
 	case ssa.OpNegF64:
-		c.a.FNeg(a64F0, c.fpr(arg(0), a64F0))
-		c.setF(v, a64F0)
+		d := c.fdst(v)
+		c.a.FNeg(d, c.fpr(arg(0), a64F0))
+		c.setF(v, d)
 	case ssa.OpCmpF64:
 		if v.Uses == 1 && b.Control == v && b.Kind == ssa.BlockIf {
 			return // fused into the branch
 		}
 		c.a.FCmp(c.fpr(arg(0), a64F0), c.fpr(arg(1), a64F1))
-		c.a.Cset(a64A, a64Compare(ir.Operator(v.Aux)))
-		c.setG(v, a64A)
+		d := c.gdst(v)
+		c.a.Cset(d, a64Compare(ir.Operator(v.Aux)))
+		c.setG(v, d)
 	case ssa.OpNot:
 		c.a.CmpImm(c.gpr(arg(0), a64A), 0, false)
-		c.a.Cset(a64A, arm64.EQ)
-		c.setG(v, a64A)
+		d := c.gdst(v)
+		c.a.Cset(d, arm64.EQ)
+		c.setG(v, d)
 	case ssa.OpToInt32:
 		c.toInt32(v)
 	case ssa.OpAndI32, ssa.OpOrI32, ssa.OpXorI32:
-		op := a64ALU(v.Op)
-		c.a.Op(op, a64A, c.gpr(arg(0), a64A), c.gpr(arg(1), a64B), false)
-		c.setG(v, a64A)
+		d := c.gdst(v)
+		c.a.Op(a64ALU(v.Op), d, c.gpr(arg(0), a64A), c.gpr(arg(1), a64B), false)
+		c.setG(v, d)
 	case ssa.OpShlI32, ssa.OpSarI32, ssa.OpShrU32:
 		// The W forms take the count modulo 32, as JavaScript does.
-		op := a64Shift(v.Op)
-		c.a.ShiftReg(op, a64A, c.gpr(arg(0), a64A), c.gpr(arg(1), a64C), false)
-		c.setG(v, a64A)
+		d := c.gdst(v)
+		c.a.ShiftReg(a64Shift(v.Op), d, c.gpr(arg(0), a64A), c.gpr(arg(1), a64C), false)
+		c.setG(v, d)
 	case ssa.OpNotI32:
 		c.a.Mvn(a64A, c.gpr(arg(0), a64A), false)
 		c.setG(v, a64A)
