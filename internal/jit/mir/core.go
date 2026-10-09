@@ -36,12 +36,18 @@ type core struct {
 	origin ssa.OriginMap
 	// gprs and fprs are the architecture's allocatable registers, by number.
 	gprs, fprs []int
+	// ws is the workspace the compile takes its tables from, or nil.
+	ws *Workspace
+	// moves and steps are phiSchedule's, reused from edge to edge.
+	moves  []phiMove
+	steps  []phiStep
+	parked []*ssa.Value
 }
 
 // prepare checks that f is one the backends compile, and analyses and
 // allocates it, with the architecture's allocatable registers.
-func prepare(f *ssa.Func, enc abi.Encoding, gprs, fprs []int) (*core, error) {
-	c := &core{f: f, enc: enc, gprs: gprs, fprs: fprs}
+func prepare(w *Workspace, f *ssa.Func, enc abi.Encoding, gprs, fprs []int) (*core, error) {
+	c := &core{f: f, enc: enc, gprs: gprs, fprs: fprs, ws: w}
 	if enc.ValueSize != 16 {
 		// Slots and elements are found by shifting an index by four.
 		return nil, fmt.Errorf("%w: %d-byte values", ErrUnsupported, enc.ValueSize)
@@ -120,7 +126,6 @@ func (c *core) setLoc(v *ssa.Value, l loc) {
 // valueSet is a set of value IDs.
 type valueSet []uint64
 
-func newValueSet(n int) valueSet  { return make(valueSet, (n+63)/64) }
 func (s valueSet) add(i int)      { s[i>>6] |= 1 << (i & 63) }
 func (s valueSet) has(i int) bool { return s[i>>6]&(1<<(i&63)) != 0 }
 func (s valueSet) each(f func(int)) {
@@ -153,8 +158,8 @@ func capturedUnchanged(f *ssa.Func) error {
 // layout orders blocks in reverse post-order from the entries, so that a
 // loop's body follows its header.
 func (c *core) layout() {
-	seen := make([]bool, numBlocks(c.f))
-	var post []*ssa.Block
+	seen := c.bools(numBlocks(c.f))
+	post := c.blockList(len(c.f.Blocks))[:0]
 	var visit func(*ssa.Block)
 	visit = func(b *ssa.Block) {
 		if seen[b.ID] {
@@ -169,6 +174,7 @@ func (c *core) layout() {
 	for i := len(c.f.Entries) - 1; i >= 0; i-- {
 		visit(c.f.Entries[i].Block)
 	}
+	c.order = c.blockList(len(post))[:0]
 	for i := len(post) - 1; i >= 0; i-- {
 		c.order = append(c.order, post[i])
 	}
@@ -177,7 +183,7 @@ func (c *core) layout() {
 // findLazy marks values that need no location of their own.
 func (c *core) findLazy() {
 	n := c.f.NumValues()
-	used := make([]bool, n) // by an argument, a control or a phi
+	used := c.bools(n) // by an argument, a control or a phi
 	for _, b := range c.f.Blocks {
 		for _, v := range b.Values {
 			for _, a := range v.Args {
@@ -190,7 +196,7 @@ func (c *core) findLazy() {
 	}
 	// A slot loaded at an entry and named only by frame states for that same
 	// slot needs no register: an exit leaves that slot as it is.
-	elsewhere := make([]bool, n)
+	elsewhere := c.bools(n)
 	state := func(s *ssa.FrameState) {
 		if s == nil {
 			return
@@ -216,7 +222,7 @@ func (c *core) findLazy() {
 			elsewhere[b.Control.ID] = true
 		}
 	}
-	c.lazy = make([]bool, n)
+	c.lazy = c.bools(n)
 	for _, b := range c.f.Blocks {
 		for _, v := range b.Values {
 			switch v.Op {
@@ -251,16 +257,16 @@ func (c *core) allocate() error {
 	nv, nb := c.f.NumValues(), numBlocks(c.f)
 	// Number positions: each block has a start, one position per value, and
 	// an end. at is the block of each position.
-	pos := make([]int, nv)
+	pos := c.ints(nv)
 	for i := range pos {
 		pos[i] = -1
 	}
-	start, end := make([]int, nb), make([]int, nb)
+	start, end := c.ints(nb), c.ints(nb)
 	count := 0
 	for _, b := range c.order {
 		count += len(b.Values) + 2
 	}
-	at := make([]*ssa.Block, 0, count)
+	at := c.blockList(count)[:0]
 	for _, b := range c.order {
 		start[b.ID] = len(at)
 		at = append(at, b)
@@ -272,11 +278,7 @@ func (c *core) allocate() error {
 		at = append(at, b)
 	}
 	// Uses: each value's uses, by the position of the use.
-	type use struct {
-		v   *ssa.Value
-		pos int
-	}
-	uses := make([]use, 0, 4*count)
+	uses := c.useList(4 * count)[:0]
 	need := func(v *ssa.Value) bool { return hasResult(v) && !c.isLazy(v) }
 	useState := func(s *ssa.FrameState, at int) {
 		if s == nil {
@@ -341,11 +343,11 @@ func (c *core) allocate() error {
 	}
 	// Block-level liveness, so that values live around a loop stay live for
 	// all of it. byID finds a value from its ID.
-	byID := make([]*ssa.Value, nv)
+	byID := c.valueList(nv)
 	// The three sets of every block share one array.
 	words := (nv + 63) / 64
-	sets := make(valueSet, 3*nb*words)
-	defsIn, usesIn, liveIn := make([]valueSet, nb), make([]valueSet, nb), make([]valueSet, nb)
+	sets := c.words(3 * nb * words)
+	defsIn, usesIn, liveIn := c.setList(nb), c.setList(nb), c.setList(nb)
 	for _, b := range c.order {
 		at := 3 * b.ID * words
 		defsIn[b.ID], usesIn[b.ID], liveIn[b.ID] = sets[at:at+words:at+words], sets[at+words:at+2*words:at+2*words], sets[at+2*words:at+3*words:at+3*words]
@@ -364,7 +366,7 @@ func (c *core) allocate() error {
 			usesIn[b.ID].add(u.v.ID)
 		}
 	}
-	in := newValueSet(nv)
+	in := c.words(words)
 	for changed := true; changed; {
 		changed = false
 		for i := len(c.order) - 1; i >= 0; i-- {
@@ -386,7 +388,7 @@ func (c *core) allocate() error {
 	}
 	// Intervals: from definition to last use, stretched over every block
 	// where the value is live in or out.
-	iv := make([]interval, nv) // by value ID; v is nil until made
+	iv := c.intervalList(nv) // by value ID; v is nil until made
 	get := func(v *ssa.Value) *interval {
 		it := &iv[v.ID]
 		if it.v == nil {
@@ -445,7 +447,7 @@ func (c *core) allocate() error {
 			})
 		}
 	}
-	all := make([]*interval, 0, nv)
+	all := c.intervalRefs(nv)[:0]
 	for i := range iv {
 		if iv[i].v != nil {
 			all = append(all, &iv[i])
@@ -457,7 +459,7 @@ func (c *core) allocate() error {
 		}
 		return a.v.ID - b.v.ID
 	})
-	c.locs, c.hasLoc = make([]loc, nv), make([]bool, nv)
+	c.locs, c.hasLoc = c.locList(nv), c.bools(nv)
 	spills := 0
 	for _, float := range []bool{false, true} {
 		var free []int
@@ -580,6 +582,12 @@ func isFloat(v *ssa.Value) bool { return v.Type == ssa.Float64 }
 
 func hasResult(v *ssa.Value) bool { return v.Type != ssa.None }
 
+// use is a value's use, at the position of the instruction that uses it.
+type use struct {
+	v   *ssa.Value
+	pos int
+}
+
 // interval is a value's live range over the linear instruction numbering.
 type interval struct {
 	v          *ssa.Value
@@ -603,9 +611,11 @@ type phiStep struct {
 // phiSchedule orders the parallel move of an edge's phi arguments into the
 // phis' locations: a move once no pending move still reads its destination,
 // and a cycle broken by parking one source in scratch.
+// phiMove is a move phiSchedule orders.
+type phiMove struct{ dst, src *ssa.Value }
+
 func (c *core) phiSchedule(to *ssa.Block, idx int) []phiStep {
-	type move struct{ dst, src *ssa.Value }
-	var moves []move
+	moves := c.moves[:0]
 	for _, phi := range to.Values {
 		if phi.Op != ssa.OpPhi {
 			break
@@ -617,7 +627,7 @@ func (c *core) phiSchedule(to *ssa.Block, idx int) []phiStep {
 		if !c.isLazy(src) && c.locAt(src) == c.locAt(phi) {
 			continue
 		}
-		moves = append(moves, move{phi, src})
+		moves = append(moves, phiMove{phi, src})
 	}
 	// Locations of different classes never coincide: R10 is not X10.
 	same := func(a, b *ssa.Value) bool {
@@ -626,15 +636,16 @@ func (c *core) phiSchedule(to *ssa.Block, idx int) []phiStep {
 		}
 		return c.locAt(a) == c.locAt(b)
 	}
-	var steps []phiStep
-	parked := map[*ssa.Value]bool{}
+	steps := c.steps[:0]
+	c.parked = c.parked[:0]
+	isParked := func(v *ssa.Value) bool { return slices.Contains(c.parked, v) }
 	for len(moves) > 0 {
 		progress := false
 		for i := 0; i < len(moves); i++ {
 			m := moves[i]
 			blocked := false
 			for j, o := range moves {
-				if j != i && same(o.src, m.dst) && !parked[o.src] {
+				if j != i && same(o.src, m.dst) && !isParked(o.src) {
 					blocked = true
 					break
 				}
@@ -642,7 +653,7 @@ func (c *core) phiSchedule(to *ssa.Block, idx int) []phiStep {
 			if blocked {
 				continue
 			}
-			steps = append(steps, phiStep{dst: m.dst, src: m.src, parked: parked[m.src]})
+			steps = append(steps, phiStep{dst: m.dst, src: m.src, parked: isParked(m.src)})
 			moves = append(moves[:i], moves[i+1:]...)
 			i--
 			progress = true
@@ -654,7 +665,7 @@ func (c *core) phiSchedule(to *ssa.Block, idx int) []phiStep {
 			// scratch. The cycle unwinds before another needs scratch.
 			var blocker *ssa.Value
 			for _, o := range moves {
-				if same(o.src, moves[0].dst) && !parked[o.src] {
+				if same(o.src, moves[0].dst) && !isParked(o.src) {
 					blocker = o.src
 					break
 				}
@@ -667,14 +678,15 @@ func (c *core) phiSchedule(to *ssa.Block, idx int) []phiStep {
 			// unwinds before the next needs scratch, so this cannot happen;
 			// if it did, the function is refused, never miscompiled.
 			for _, o := range moves {
-				if parked[o.src] && isFloat(o.src) == isFloat(blocker) {
+				if isParked(o.src) && isFloat(o.src) == isFloat(blocker) {
 					panic("phi moves: scratch already holds a parked value")
 				}
 			}
 			steps = append(steps, phiStep{park: blocker})
-			parked[blocker] = true
+			c.parked = append(c.parked, blocker)
 		}
 	}
+	c.moves, c.steps = moves[:0], steps
 	return steps
 }
 

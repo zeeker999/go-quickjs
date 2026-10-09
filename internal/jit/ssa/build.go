@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"sort"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
@@ -52,12 +51,15 @@ type PropertySite struct {
 }
 
 // BuildWith is Build with what the VM knows of the sites.
-func BuildWith(p *ir.Program, fb Feedback) (*Func, error) {
+func BuildWith(p *ir.Program, fb Feedback) (*Func, error) { return build(nil, p, fb) }
+
+func build(w *Workspace, p *ir.Program, fb Feedback) (*Func, error) {
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
-	b := &builder{p: p, fb: fb, f: &Func{Locals: p.Locals, StackSize: p.StackSize, FrameLocals: p.Locals, ThisSlot: -1,
-		written: make([]bool, p.Locals+p.StackSize)}, nslots: p.Locals + p.StackSize}
+	f := &Func{Locals: p.Locals, StackSize: p.StackSize, FrameLocals: p.Locals, ThisSlot: -1, ws: w}
+	f.written = f.bools(p.Locals + p.StackSize)
+	b := &builder{p: p, fb: fb, f: f, nslots: p.Locals + p.StackSize}
 	if err := b.plan(); err != nil {
 		return nil, err
 	}
@@ -73,7 +75,7 @@ type builder struct {
 	nslots int
 
 	entryPCs []int
-	blockAt  map[int]*Block // by the PC a block starts at
+	blockAt  []*Block // by the PC a block starts at
 	// endOf is the last PC of each block, by block ID.
 	endOf []int
 
@@ -125,8 +127,9 @@ func reachable(p *ir.Program, pc int) bool {
 // plan finds entries and blocks, and checks every operation is translatable.
 func (b *builder) plan() error {
 	p := b.p
-	entries := map[int]bool{0: true}
-	leaders := map[int]bool{0: true}
+	// By PC, one past the end included.
+	entries, leaders := b.f.bools(len(p.Code)+2), b.f.bools(len(p.Code)+2)
+	entries[0], leaders[0] = true, true
 	for pc, in := range p.Code {
 		if !reachable(p, pc) {
 			continue
@@ -177,26 +180,24 @@ func (b *builder) plan() error {
 			leaders[pc+1] = true
 		}
 	}
-	for pc := range entries {
-		if reachable(p, pc) {
+	for pc, entry := range entries {
+		if entry && reachable(p, pc) {
 			b.entryPCs = append(b.entryPCs, pc)
 			leaders[pc] = true
 		}
 	}
-	sort.Ints(b.entryPCs)
 
-	b.blockAt = map[int]*Block{}
+	b.blockAt = make([]*Block, len(p.Code)+2)
 	var starts []int
-	for pc := range leaders {
-		if reachable(b.p, pc) {
+	for pc, leader := range leaders {
+		if leader && reachable(b.p, pc) {
 			starts = append(starts, pc)
 		}
 	}
-	sort.Ints(starts)
 	for _, pc := range starts {
 		b.blockAt[pc] = b.f.newBlock(pc)
 	}
-	b.endOf = make([]int, len(b.f.Blocks))
+	b.endOf = b.f.ints(len(b.f.Blocks))
 	for i, pc := range starts {
 		end := len(p.Code) - 1
 		if i+1 < len(starts) {
@@ -248,7 +249,7 @@ func (b *builder) plan() error {
 	}
 	// A loop header is reached by an edge from a block at or after it.
 	for _, blk := range b.f.Blocks {
-		blk.Backedge = make([]bool, len(blk.Preds))
+		blk.Backedge = b.f.bools(len(blk.Preds))
 		for i, pred := range blk.Preds {
 			if pred.PC >= 0 && blk.PC >= 0 && pred.PC >= blk.PC {
 				blk.Backedge[i] = true
@@ -263,8 +264,8 @@ func (b *builder) edge(from, to *Block) {
 	if to == nil {
 		panic("ssa: edge to an unreachable PC")
 	}
-	from.Succs = append(from.Succs, to)
-	to.Preds = append(to.Preds, from)
+	from.Succs = b.f.appendBlock(from.Succs, to)
+	to.Preds = b.f.appendBlock(to.Preds, from)
 }
 
 // translate fills every block, sealing each once its predecessors are filled
@@ -273,13 +274,13 @@ func (b *builder) edge(from, to *Block) {
 func (b *builder) translate() {
 	n := len(b.f.Blocks)
 	b.defs = make([][]*Value, n)
-	b.sealed, b.filled = make([]bool, n), make([]bool, n)
+	b.sealed, b.filled = b.f.bools(n), b.f.bools(n)
 	b.incomplete = make([][]slotPhi, n)
 
 	// Reverse post-order from the entries, so that a block's forward
 	// predecessors are filled before it.
 	order := make([]*Block, 0, n)
-	seen := make([]bool, n)
+	seen := b.f.bools(n)
 	var visit func(*Block)
 	visit = func(blk *Block) {
 		if seen[blk.ID] {
@@ -408,13 +409,13 @@ func (b *builder) read(slot int, blk *Block) *Value {
 
 func (b *builder) newPhi(blk *Block) *Value {
 	v := b.f.alloc(Value{Op: OpPhi, Type: Tagged, Block: blk})
-	prepend(blk, v)
+	prepend(b.f, blk, v)
 	return v
 }
 
 // prepend puts v first in blk's values.
-func prepend(blk *Block, v *Value) {
-	blk.Values = append(blk.Values, nil)
+func prepend(f *Func, blk *Block, v *Value) {
+	blk.Values = f.appendValue(blk.Values, nil)
 	copy(blk.Values[1:], blk.Values)
 	blk.Values[0] = v
 }
@@ -434,7 +435,7 @@ func (b *builder) addPhiOperands(slot int, phi *Value) {
 // constIn makes a tagged constant at the start of a block.
 func (b *builder) constIn(blk *Block, c ir.Value) *Value {
 	v := b.f.alloc(Value{Op: OpConst, Type: Tagged, Const: c, Block: blk})
-	prepend(blk, v)
+	prepend(b.f, blk, v)
 	return v
 }
 

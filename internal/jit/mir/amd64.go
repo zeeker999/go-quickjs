@@ -27,7 +27,7 @@ type compiler struct {
 	*core
 	a amd64.Asm
 	// label of each block's code.
-	labels map[*ssa.Block]amd64.Label
+	labels []amd64.Label // by block ID
 	// stubs: one exit per frame state and kind.
 	stubs   map[stubKey]amd64.Label
 	stubFor []stub
@@ -41,7 +41,9 @@ type stub struct {
 }
 
 // CompileAMD64 compiles f for amd64, given the VM's value encoding.
-func CompileAMD64(f *ssa.Func, enc abi.Encoding) (code *Code, err error) {
+func CompileAMD64(f *ssa.Func, enc abi.Encoding) (*Code, error) { return compileAMD64(nil, f, enc) }
+
+func compileAMD64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err error) {
 	defer func() {
 		if v := recover(); v != nil {
 			code, err = nil, fmt.Errorf("%w: %v", ErrUnsupported, v)
@@ -52,18 +54,18 @@ func CompileAMD64(f *ssa.Func, enc abi.Encoding) (code *Code, err error) {
 	for r := amd64.XReg(2); r < xScratch2; r++ {
 		xmms = append(xmms, int(r))
 	}
-	k, err := prepare(f, enc, pools(int(amd64.RBX), int(amd64.R8), int(amd64.R9), int(amd64.R10),
+	k, err := prepare(w, f, enc, pools(int(amd64.RBX), int(amd64.R8), int(amd64.R9), int(amd64.R10),
 		int(amd64.R12), int(amd64.R13), int(amd64.R15)), xmms)
 	if err != nil {
 		return nil, err
 	}
-	c := &compiler{core: k, labels: map[*ssa.Block]amd64.Label{}, stubs: map[stubKey]amd64.Label{}}
+	c := &compiler{core: k, labels: make([]amd64.Label, numBlocks(f)), stubs: map[stubKey]amd64.Label{}}
 	entries := map[int]int{}
 	for _, b := range c.order {
-		c.labels[b] = c.a.NewLabel()
+		c.labels[b.ID] = c.a.NewLabel()
 	}
 	for i, b := range c.order {
-		c.a.Bind(c.labels[b])
+		c.a.Bind(c.labels[b.ID])
 		if b.PC < 0 {
 			for _, e := range f.Entries {
 				if e.Block == b {
@@ -410,7 +412,7 @@ func (c *compiler) edge(from, to, next *ssa.Block) {
 		})
 	}
 	if to != next {
-		c.a.Jmp(c.labels[to])
+		c.a.Jmp(c.labels[to.ID])
 	}
 }
 

@@ -3,8 +3,10 @@
 package jit
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"math/rand/v2"
 	"slices"
@@ -908,6 +910,53 @@ func TestSSANativeMatchesEvaluator(t *testing.T) {
 	t.Logf("%d programs; exits with references: %+v", compiled, referenceExits)
 	if referenceExits.copies == 0 || referenceExits.scalars == 0 || referenceExits.maybes == 0 || referenceExits.cells == 0 || referenceExits.returns == 0 {
 		t.Fatalf("some kind of record or reference return never happened: %+v", referenceExits)
+	}
+}
+
+// A workspace changes where a compile's memory comes from, never what it
+// makes: random programs built in one workspace, rewound between them as a
+// runtime rewinds it, compile to the same code as programs built on their
+// own; so a workspace whose rewinding leaves something behind, or hands out
+// memory still in use, shows here.
+func TestWorkspaceCompilesTheSame(t *testing.T) {
+	r := rand.New(rand.NewPCG(31, 32))
+	var ws ssa.Workspace
+	var mws mir.Workspace
+	n := 0
+	for attempt := 0; attempt < 20000 && n < 1500; attempt++ {
+		p, l := ssaTestProgram(r)
+		if p.Validate() != nil {
+			continue
+		}
+		alone, err := ssa.BuildWith(p, l)
+		if err != nil {
+			continue
+		}
+		alone.FrameLocals, alone.ThisSlot = l.frame, l.this
+		ssa.Optimize(alone)
+		want, err := mir.Compile(alone, testEncoding)
+		if err != nil {
+			continue
+		}
+		shared, err := ssa.BuildIn(&ws, p, l)
+		if err != nil {
+			t.Fatalf("built alone, not in a workspace: %v", err)
+		}
+		shared.FrameLocals, shared.ThisSlot = l.frame, l.this
+		ssa.Optimize(shared)
+		got, err := mir.CompileIn(&mws, shared, testEncoding)
+		if err != nil {
+			t.Fatalf("compiled alone, not in a workspace: %v", err)
+		}
+		if !bytes.Equal(got.Bytes, want.Bytes) || !maps.Equal(got.Entries, want.Entries) {
+			t.Fatalf("program %d compiles differently in a workspace:\n%s", attempt, alone)
+		}
+		ws.Rewind()
+		mws.Rewind()
+		n++
+	}
+	if n < 1000 {
+		t.Fatalf("only %d programs compiled", n)
 	}
 }
 

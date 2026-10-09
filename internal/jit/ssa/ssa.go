@@ -296,10 +296,17 @@ type Func struct {
 		flags []bool
 		vals  []*Value
 	}
+	// ws is the workspace the Func was built in, or nil (Workspace).
+	ws *Workspace
 }
 
 // newState returns a new frame state like s, from a slab.
 func (f *Func) newState(s FrameState) *FrameState {
+	if f.ws != nil {
+		p := &f.ws.states.Make(1)[0]
+		*p = s
+		return p
+	}
 	if len(f.states) == 0 {
 		f.states = make([]FrameState, 32)
 	}
@@ -311,6 +318,13 @@ func (f *Func) newState(s FrameState) *FrameState {
 
 // alloc returns a new value like v, numbered next.
 func (f *Func) alloc(v Value) *Value {
+	if f.ws != nil {
+		p := &f.ws.values.Make(1)[0]
+		*p = v
+		p.ID = f.nextID
+		f.nextID++
+		return p
+	}
 	if len(f.values) == 0 {
 		f.valueChunk = min(max(2*f.valueChunk, 16), 256)
 		f.values = make([]Value, f.valueChunk)
@@ -329,6 +343,9 @@ func (f *Func) refsOf(n int) []*Value {
 	if n == 0 {
 		return nil
 	}
+	if f.ws != nil {
+		return f.ws.refs.Make(n)
+	}
 	if len(f.refs) < n {
 		f.refChunk = min(max(2*f.refChunk, 64), 1024)
 		f.refs = make([]*Value, max(f.refChunk, n))
@@ -339,8 +356,14 @@ func (f *Func) refsOf(n int) []*Value {
 }
 
 func (f *Func) newBlock(pc int) *Block {
-	b := &Block{ID: len(f.Blocks), PC: pc}
-	f.Blocks = append(f.Blocks, b)
+	var b *Block
+	if f.ws != nil {
+		b = &f.ws.blocks.Make(1)[0]
+		*b = Block{ID: len(f.Blocks), PC: pc}
+	} else {
+		b = &Block{ID: len(f.Blocks), PC: pc}
+	}
+	f.Blocks = f.appendBlock(f.Blocks, b)
 	return b
 }
 
@@ -350,7 +373,7 @@ func (f *Func) newValue(b *Block, op Op, t Type, args ...*Value) *Value {
 	for _, a := range args {
 		a.Uses++
 	}
-	b.Values = append(b.Values, v)
+	b.Values = f.appendValue(b.Values, v)
 	return v
 }
 

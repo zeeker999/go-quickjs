@@ -282,7 +282,7 @@ func unboxPhis(f *Func) bool {
 					x = f.alloc(Value{Op: OpUnboxF64, Type: Float64, Args: f.refsOf(1),
 						Aux: int(ir.GuardExit), State: e.Header, Block: e})
 					x.Args[0] = a
-					e.Values = append(e.Values, x)
+					e.Values = f.appendValue(e.Values, x)
 					unboxed[a.ID] = x
 				}
 			}
@@ -367,7 +367,7 @@ func rewrite(f *Func, find func(*Value) *Value) {
 // controls, and the frame states of exits, guards and loop headers are what
 // keeps values live.
 func removeDead(f *Func) bool {
-	live := make([]bool, f.nextID)
+	live := f.bools(f.nextID)
 	var work []*Value
 	mark := func(v *Value) {
 		if v != nil && !live[v.ID] {

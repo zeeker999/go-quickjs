@@ -63,7 +63,7 @@ func (m OriginMap) At(v *Value) int {
 // whose value at entry it may be -- when it is not a primitive -- or
 // OriginAmbiguous.
 func Origins(f *Func) OriginMap {
-	origin := make([]int, f.nextID)
+	origin := f.ints(f.nextID)
 	for i := range origin {
 		origin[i] = originAbsent
 	}
@@ -189,7 +189,7 @@ func shadowMerges(f *Func) {
 // constSource makes a source constant at the end of a block.
 func (f *Func) constSource(b *Block, k int) *Value {
 	v := f.alloc(Value{Op: OpConstSource, Type: Source, Aux: k, Block: b})
-	b.Values = append(b.Values, v)
+	b.Values = f.appendValue(b.Values, v)
 	return v
 }
 
