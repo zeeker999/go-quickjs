@@ -292,12 +292,24 @@ type Func struct {
 	refChunk   int
 	// scratch is unboxPhis's tables, kept from one round of Optimize to
 	// the next.
-	scratch struct {
-		flags []bool
-		vals  []*Value
-	}
+	own scratch
 	// ws is the workspace the Func was built in, or nil (Workspace).
 	ws *Workspace
+}
+
+// scratch is the optimizer's tables and lists, which it reuses: the
+// workspace's, kept from compile to compile, or the Func's own.
+type scratch struct {
+	flags                                         []bool
+	vals, phis, ordered, front, boxes, rest, work []*Value
+}
+
+// scr is the scratch the Func's passes use.
+func (f *Func) scr() *scratch {
+	if f.ws != nil {
+		return &f.ws.scratch
+	}
+	return &f.own
 }
 
 // newState returns a new frame state like s, from a slab.

@@ -182,7 +182,7 @@ func shadowMerges(f *Func) {
 			v.Shadow.Args[i] = s
 			s.Uses++
 		}
-		insertAfter(v, v.Shadow)
+		insertAfter(f, v, v.Shadow)
 	}
 }
 

@@ -161,7 +161,7 @@ func unboxPhis(f *Func) bool {
 	// By value ID: n bounds the IDs of the values there are now; the values
 	// this pass makes are numbered from n.
 	n := f.nextID
-	var phis []*Value // the candidates, in block order
+	phis := f.scr().phis[:0] // the candidates, in block order
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
 			if v.Op == OpPhi && v.Type == Tagged {
@@ -169,16 +169,17 @@ func unboxPhis(f *Func) bool {
 			}
 		}
 	}
+	f.scr().phis = phis[:0] // kept for the next round
 	if len(phis) == 0 {
 		return false
 	}
 	// Three tables of flags and three of values, by ID, from scratch the
 	// Func keeps.
-	flags := idTable(f.scratch.flags, 3*n)
-	f.scratch.flags = flags
+	flags := idTable(f.scr().flags, 3*n)
+	f.scr().flags = flags
 	cand, unboxedUse, boxed := flags[:n:n], flags[n:2*n:2*n], flags[2*n:]
-	vals := idTable(f.scratch.vals, 3*n)
-	f.scratch.vals = vals
+	vals := idTable(f.scr().vals, 3*n)
+	f.scr().vals = vals
 	for _, v := range phis {
 		cand[v.ID] = true
 	}
@@ -246,7 +247,7 @@ func unboxPhis(f *Func) bool {
 	// In block order: value numbers, and so register allocation and code,
 	// must not vary from one compilation to the next.
 	fp := vals[:n:n]
-	var ordered []*Value
+	ordered := f.scr().ordered[:0]
 	for _, v := range phis {
 		if cand[v.ID] {
 			p := f.alloc(Value{Op: OpPhi, Type: Float64, Block: v.Block})
@@ -254,6 +255,7 @@ func unboxPhis(f *Func) bool {
 			ordered = append(ordered, v)
 		}
 	}
+	f.scr().ordered = ordered[:0]
 	if len(ordered) == 0 {
 		return false
 	}
@@ -270,7 +272,7 @@ func unboxPhis(f *Func) bool {
 				x = unboxed[a.ID]
 				if x == nil {
 					x = f.alloc(Value{Op: OpConstF64, Type: Float64, Const: a.Const, Block: a.Block})
-					insertAfter(a, x)
+					insertAfter(f, a, x)
 					unboxed[a.ID] = x
 				}
 			case isCand(a):
@@ -293,7 +295,7 @@ func unboxPhis(f *Func) bool {
 	// Each block's values become its phis, with the new numeric ones beside
 	// those they replace, the boxes of those, then the rest, in order:
 	// built in buffers the pass reuses.
-	var front, boxes, rest []*Value
+	front, boxes, rest := f.scr().front, f.scr().boxes, f.scr().rest
 	for _, b := range f.Blocks {
 		front, boxes, rest = front[:0], boxes[:0], rest[:0]
 		for _, v := range b.Values {
@@ -313,13 +315,14 @@ func unboxPhis(f *Func) bool {
 		}
 		total := len(front) + len(boxes) + len(rest)
 		if cap(b.Values) < total {
-			b.Values = make([]*Value, total)
+			b.Values = f.refsOf(total)
 		}
 		b.Values = b.Values[:total]
 		copy(b.Values, front)
 		copy(b.Values[len(front):], boxes)
 		copy(b.Values[len(front)+len(boxes):], rest)
 	}
+	f.scr().front, f.scr().boxes, f.scr().rest = front[:0], boxes[:0], rest[:0]
 	rewrite(f, func(v *Value) *Value {
 		if v.ID < n && subst[v.ID] != nil {
 			return subst[v.ID]
@@ -368,7 +371,7 @@ func rewrite(f *Func, find func(*Value) *Value) {
 // keeps values live.
 func removeDead(f *Func) bool {
 	live := f.bools(f.nextID)
-	var work []*Value
+	work := f.scr().work[:0]
 	mark := func(v *Value) {
 		if v != nil && !live[v.ID] {
 			live[v.ID] = true
@@ -400,6 +403,7 @@ func removeDead(f *Func) bool {
 		}
 		markState(v.State)
 	}
+	f.scr().work = work[:0] // kept for the next round
 	removed := false
 	for _, b := range f.Blocks {
 		kept := b.Values[:0]
@@ -448,11 +452,13 @@ func recount(f *Func) {
 }
 
 // insertAfter places v in a's block right after a.
-func insertAfter(a, v *Value) {
+func insertAfter(f *Func, a, v *Value) {
 	b := a.Block
 	for i, w := range b.Values {
 		if w == a {
-			b.Values = append(b.Values[:i+1], append([]*Value{v}, b.Values[i+1:]...)...)
+			b.Values = f.appendValue(b.Values, nil)
+			copy(b.Values[i+2:], b.Values[i+1:])
+			b.Values[i+1] = v
 			return
 		}
 	}

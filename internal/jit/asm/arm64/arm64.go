@@ -74,6 +74,11 @@ const (
 // Len is the bytes emitted so far.
 func (a *Asm) Len() int { return 4 * len(a.buf) }
 
+// Reset empties the assembler for the next function, keeping its memory.
+func (a *Asm) Reset() {
+	a.buf, a.labels, a.fixups = a.buf[:0], a.labels[:0], a.fixups[:0]
+}
+
 // NewLabel makes an unbound label.
 func (a *Asm) NewLabel() Label {
 	a.labels = append(a.labels, -1)

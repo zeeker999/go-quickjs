@@ -38,7 +38,14 @@ type core struct {
 	gprs, fprs []int
 	// ws is the workspace the compile takes its tables from, or nil.
 	ws *Workspace
-	// moves and steps are phiSchedule's, reused from edge to edge.
+	// sched is phiSchedule's lists, reused from edge to edge: the
+	// workspace's, kept from compile to compile, or the core's own.
+	sched *schedule
+	own   schedule
+}
+
+// schedule is phiSchedule's lists.
+type schedule struct {
 	moves  []phiMove
 	steps  []phiStep
 	parked []*ssa.Value
@@ -48,6 +55,10 @@ type core struct {
 // allocates it, with the architecture's allocatable registers.
 func prepare(w *Workspace, f *ssa.Func, enc abi.Encoding, gprs, fprs []int) (*core, error) {
 	c := &core{f: f, enc: enc, gprs: gprs, fprs: fprs, ws: w}
+	c.sched = &c.own
+	if w != nil {
+		c.sched = &w.sched
+	}
 	if enc.ValueSize != 16 {
 		// Slots and elements are found by shifting an index by four.
 		return nil, fmt.Errorf("%w: %d-byte values", ErrUnsupported, enc.ValueSize)
@@ -615,7 +626,7 @@ type phiStep struct {
 type phiMove struct{ dst, src *ssa.Value }
 
 func (c *core) phiSchedule(to *ssa.Block, idx int) []phiStep {
-	moves := c.moves[:0]
+	moves := c.sched.moves[:0]
 	for _, phi := range to.Values {
 		if phi.Op != ssa.OpPhi {
 			break
@@ -636,9 +647,9 @@ func (c *core) phiSchedule(to *ssa.Block, idx int) []phiStep {
 		}
 		return c.locAt(a) == c.locAt(b)
 	}
-	steps := c.steps[:0]
-	c.parked = c.parked[:0]
-	isParked := func(v *ssa.Value) bool { return slices.Contains(c.parked, v) }
+	steps := c.sched.steps[:0]
+	c.sched.parked = c.sched.parked[:0]
+	isParked := func(v *ssa.Value) bool { return slices.Contains(c.sched.parked, v) }
 	for len(moves) > 0 {
 		progress := false
 		for i := 0; i < len(moves); i++ {
@@ -683,10 +694,10 @@ func (c *core) phiSchedule(to *ssa.Block, idx int) []phiStep {
 				}
 			}
 			steps = append(steps, phiStep{park: blocker})
-			c.parked = append(c.parked, blocker)
+			c.sched.parked = append(c.sched.parked, blocker)
 		}
 	}
-	c.moves, c.steps = moves[:0], steps
+	c.sched.moves, c.sched.steps = moves[:0], steps
 	return steps
 }
 
