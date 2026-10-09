@@ -22,10 +22,9 @@ across sessions. Update it **in the same commit** as the work it records.
     -run TestConformance -count=1 -timeout 60m -v -args -conformance.jit
   ```
 
-- **Next item:** P7. The V8 suite is level with the old pipeline (P7f);
-  left before retiring it: deoptimize-and-reoptimize with a failed site
-  made generic and a give-up limit (deopt loops now only run in the
-  interpreter); native prototype method lookups and cheaper exits, so
+- **Next item:** P7. The V8 suite is level with the old pipeline (P7f),
+  and failed speculations are compiled again generic (P7g); left before
+  retiring it: native prototype method lookups and cheaper exits, so
   object-oriented code is worth running natively rather than demoted;
   same-length string contents; make the new pipeline the default and run
   the 24-hour fuzz; then delete the old pipeline. Both architectures are
@@ -138,6 +137,7 @@ Design: [jit-phase2-design.md](jit-phase2-design.md). P2 gates the rest.
 | P7d | Element reads by cell (`ElemCell`, an IR `Reference` flag lowering sets for a result no native operation takes as a number) and equality reading its operands as they are; then a profitability policy instead of the old pipeline's probes: each native stretch's work is estimated (IR instructions from entry to exit, a mean loop length per native back-edge) and a function whose stretches mostly end leaving for Go after fewer than ten instructions runs in the tree tier (`jitSSAProfit`, `entrySlow`), mid-invocation too; `jitHost` uses the site caches. DeltaBlue 40 to 25 ms. | done | jit: read elements carried as references by their cells; jit: let equality take its operands as they are; jit: run in the tree tier what costs more native than it saves |
 | P7e | Compile allocations, V8's way: `ssa.Workspace` and `mir.Workspace` (arenas a runtime rewinds after each compile, `arena.KeepBig` for big tables), tables by ID instead of maps, reused assemblers. `BenchmarkJITCompile` against the old pipeline: sum 52 allocations, 6.5 KB, 26 us (61, 62 KB, 40 us); region 82, 41 KB, 115 us (90, 762 KB, 340 us). The V8 suite's allocations within 15-30% of the old pipeline's (Crypto 63,881 to 11,170; old 9,673). `TestWorkspaceCompilesTheSame` checks the bytes are the same. | done | jit: allocate less to compile; jit: compile in workspaces a runtime rewinds; jit: keep a compile's tables, lists and assembler from one to the next |
 | P7f | Spill slots reused once their values die (a slot only where its last occupant ended before the spilled interval began: taking any freed one miscompiled, `TestJITSSAManySpills`, `TestSSANativeHighPressure`), so NavierStokes' project and lin_solve2 compile; native equality of any two values (`OpEqTagged`: words, objects by pointer through their origins, numbers as numbers, strings by identity and length) so EarleyBoyer's sc_assq stays native. V8 suite, medians of five: new 1,413.9 ms against old 1,425.6; Crypto ahead (153 against 164), Richards and DeltaBlue about level, EarleyBoyer about 7 ms behind (same-length strings still go to Go). | done | jit: reuse spill slots once their values are dead; jit: compare any two values natively where their words tell; jit: compare strings natively by identity and length |
+| P7g | Deoptimize and reoptimize, V8's way: a failed guard records its site (`ExitSite`) or, for an entry's speculation, the entry, and the function is compiled again at its next entry with them generic (`ssa.Feedback`'s `Generic` and `EntryGeneric`; `jitDeoptimized`, `jitReoptimize`): an arithmetic operation or comparison keeps its native path for numbers and sends anything else to Go, which resumes after it (`jitHost` runs every binary operator, `jitArith`); an element read is carried by its cell; an entry loads its slots as they are, so no phi takes them for numbers. After `jitReoptimizations` (4) compiles a function keeps its code and `jitSSAProfit` decides. `TestJITSSAReoptimize` (valueOf counted, sabotaged both ways). The V8 suite, which seldom fails a guard, is level: 1,403.8 ms against 1,407.8 (medians of five; the old pipeline 1,419.3, Richards 16.4 against the new pipeline's 20.6). | done | jit: compile again with the sites that failed made generic |
 
 **Gate:**
 - [ ] Every kernel and suite at least as fast as the old pipeline on both

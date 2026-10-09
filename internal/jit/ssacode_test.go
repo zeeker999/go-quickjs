@@ -533,7 +533,14 @@ type layout struct {
 	frame, this int
 	sites       map[int]site
 	globals     map[int]ssa.GlobalSite
+	// generic and genericEntries are the sites and entries whose
+	// speculation failed before, by PC (ssa.Feedback's Generic).
+	generic, genericEntries map[int]bool
 }
+
+// Generic and EntryGeneric are ssa.Feedback's.
+func (l layout) Generic(pc int) bool      { return l.generic[pc] }
+func (l layout) EntryGeneric(pc int) bool { return l.genericEntries[pc] }
 
 // Global is ssa.Feedback's.
 func (l layout) Global(pc int) (ssa.GlobalSite, bool) {
@@ -657,7 +664,21 @@ func ssaTestProgram(r *rand.Rand) (*ir.Program, layout) {
 	if locals > frameLocals && r.IntN(2) == 0 {
 		this = locals - 1
 	}
-	return p, layout{frameLocals, this, sites, globals}
+	// A few operations and entries are built as after their speculation
+	// failed (ssa.Feedback's Generic).
+	// They are drawn from a generator of their own, so the programs drawn
+	// after this one are what they were before there were any.
+	g := rand.New(rand.NewPCG(uint64(len(p.Code)), uint64(frameLocals)))
+	generic, genericEntries := map[int]bool{}, map[int]bool{}
+	for pc := range p.Code {
+		if g.IntN(10) == 0 {
+			generic[pc] = true
+		}
+		if g.IntN(8) == 0 {
+			genericEntries[pc] = true
+		}
+	}
+	return p, layout{frameLocals, this, sites, globals, generic, genericEntries}
 }
 
 var exitNames = map[uint64]ir.ExitKind{abi.ExitReturn: ir.Returned, abi.ExitDeopt: ir.GuardExit,
@@ -1011,7 +1032,7 @@ func TestSSANativeCapturedShadow(t *testing.T) {
 	for pc := range p.Maps {
 		p.Maps[pc].PC = uint32(pc)
 	}
-	c, err := compileNative(p, layout{3, -1, nil, nil})
+	c, err := compileNative(p, layout{3, -1, nil, nil, nil, nil})
 	if err != nil || c == nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -1054,7 +1075,7 @@ func TestSSANativeStrings(t *testing.T) {
 	for pc := range p.Maps {
 		p.Maps[pc].PC = uint32(pc)
 	}
-	c, err := compileNative(p, layout{4, -1, nil, nil})
+	c, err := compileNative(p, layout{4, -1, nil, nil, nil, nil})
 	if err != nil || c == nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -1115,7 +1136,7 @@ func TestSSANativeEquality(t *testing.T) {
 		for pc := range p.Maps {
 			p.Maps[pc].PC = uint32(pc)
 		}
-		c, err := compileNative(p, layout{3, -1, nil, nil})
+		c, err := compileNative(p, layout{3, -1, nil, nil, nil, nil})
 		if err != nil || c == nil {
 			t.Fatalf("compile: %v", err)
 		}
@@ -1165,7 +1186,7 @@ func TestSSANativeElementCells(t *testing.T) {
 	for pc := range p.Maps {
 		p.Maps[pc].PC = uint32(pc)
 	}
-	c, err := compileNative(p, layout{3, -1, nil, nil})
+	c, err := compileNative(p, layout{3, -1, nil, nil, nil, nil})
 	if err != nil || c == nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -1203,7 +1224,7 @@ func TestSSANativeRemainder(t *testing.T) {
 	for pc := range p.Maps {
 		p.Maps[pc].PC = uint32(pc)
 	}
-	c, err := compileNative(p, layout{3, -1, nil, nil})
+	c, err := compileNative(p, layout{3, -1, nil, nil, nil, nil})
 	if err != nil || c == nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -1242,7 +1263,7 @@ func TestSSANativeRemainder(t *testing.T) {
 		{Op: ir.Host},
 		{Op: ir.Return, Left: ir.Slot(2)},
 	}, Maps: []ir.StateMap{{PC: 0}, {PC: 1, Depth: 1}, {PC: 2, Depth: 1}}}
-	d, err := compileNative(q, layout{2, -1, nil, nil})
+	d, err := compileNative(q, layout{2, -1, nil, nil, nil, nil})
 	if err != nil || d == nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -1289,7 +1310,7 @@ func TestSSANativeFromJavaScript(t *testing.T) {
 			if err != nil {
 				continue
 			}
-			if checkNative(t, r, p, layout{c.Fn.LocalCount, -1, nil, nil}) {
+			if checkNative(t, r, p, layout{c.Fn.LocalCount, -1, nil, nil, nil, nil}) {
 				compiled++
 			}
 		}
@@ -1307,7 +1328,7 @@ func BenchmarkSSARoundTrip(b *testing.B) {
 		b.Run(fmt.Sprintf("%d-locals", locals), func(b *testing.B) {
 			p := &ir.Program{Locals: locals, Code: []ir.Instruction{{Op: ir.Host}, {Op: ir.Return, Left: ir.Slot(0)}},
 				Maps: []ir.StateMap{{PC: 0}, {PC: 1}}}
-			c, err := compileNative(p, layout{locals, -1, nil, nil})
+			c, err := compileNative(p, layout{locals, -1, nil, nil, nil, nil})
 			if err != nil || c == nil {
 				b.Fatal(err)
 			}
