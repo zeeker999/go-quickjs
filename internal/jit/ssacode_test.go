@@ -1248,8 +1248,10 @@ func TestSSANativeStrings(t *testing.T) {
 // TestSSANativeEquality compares pairs of values with == and === natively
 // (ssa.OpEqTagged): numbers, +0 and -0 included, and NaN; one object and
 // two; null, undefined and booleans; one string; values of different
-// kinds, which loosely go to Go. Each outcome -- the answer, or an exit -- is the
-// evaluator's and is pinned. Random programs seldom meet -0 this way.
+// kinds, which loosely go to Go -- but null and undefined, which equal
+// each other and an object with [[IsHTMLDDA]] alone, unconverted. Each
+// outcome -- the answer, or an exit -- is the evaluator's and is pinned.
+// Random programs seldom meet -0 this way.
 func TestSSANativeEquality(t *testing.T) {
 	negZero := ir.Value{Kind: ir.Number, Bits: math.Float64bits(math.Copysign(0, -1))}
 	nan := ir.Float(math.NaN())
@@ -1280,6 +1282,7 @@ func TestSSANativeEquality(t *testing.T) {
 			{null, null, true, true}, {undef, undef, true, true}, {ir.Bool(true), ir.Bool(true), true, true},
 			{ir.Bool(true), ir.Bool(false), false, true}, {null, undef, false, true}, {ir.Float(1), obj0, false, true},
 			{str, str, true, true}, {ir.Float(1), str, false, true},
+			{null, obj0, false, true}, {ir.Float(1), undef, false, true}, {undef, str, false, true}, {ir.Bool(false), null, false, true},
 		} {
 			heap := randomTestHeap(rand.New(rand.NewPCG(1, 2)))
 			slots := []ir.Value{tc.x, tc.y, ir.Float(0)}
@@ -1289,12 +1292,23 @@ func TestSSANativeEquality(t *testing.T) {
 			exit, _ := ssa.EvaluateHeap(c.f, 0, slices.Clone(slots), heap.native().heap(), 0)
 			sameWord := tc.x.Kind == tc.y.Kind && (tc.x.Kind == ir.Opaque || tc.x.Kind == ir.String || tc.x.Bits == tc.y.Bits)
 			bothNumbers := tc.x.Kind == ir.Number && tc.y.Kind == ir.Number
-			native := tc.native && (strict || sameWord || bothNumbers)
+			nullish := func(v ir.Value) bool { return v.Kind == ir.Null || v.Kind == ir.Undefined }
+			loosely := !strict && (nullish(tc.x) || nullish(tc.y))
+			native := tc.native && (strict || sameWord || bothNumbers || loosely)
 			if got := exit.Kind == ir.Returned; got != native {
 				t.Fatalf("strict %v, %v == %v: native %v, want %v", strict, tc.x, tc.y, got, native)
 			}
-			if native && exit.Value != ir.Bool(tc.equal) {
-				t.Fatalf("strict %v, %v == %v = %v, want %v", strict, tc.x, tc.y, exit.Value, tc.equal)
+			equal := tc.equal
+			if loosely && !sameWord {
+				// The other null or undefined, or an object with
+				// [[IsHTMLDDA]], as the heap's may have.
+				equal = nullish(tc.x) && nullish(tc.y)
+				for _, v := range []ir.Value{tc.x, tc.y} {
+					equal = equal || v.Kind == ir.Opaque && heap[v.Bits].htmldda
+				}
+			}
+			if native && exit.Value != ir.Bool(equal) {
+				t.Fatalf("strict %v, %v == %v = %v, want %v", strict, tc.x, tc.y, exit.Value, equal)
 			}
 		}
 		// Two strings, handles 5 and 6, of one length: the same content

@@ -143,8 +143,10 @@ const (
 	// their pointers, read through their origins, are; two numbers compare
 	// as numbers; any other two words are strictly unequal. Two strings are
 	// the same if they are one string, and unequal if their lengths differ;
-	// two others of one length, and loose comparisons of values of different
-	// words, which may convert, exit to Go (Aux).
+	// two others of one length exit to Go (Aux). Loosely, null and undefined
+	// equal each other and an object with [[IsHTMLDDA]] alone, read as
+	// OpLooseNullish reads it, with nothing converted; any other two words,
+	// which may convert, exit to Go (Aux).
 	OpEqTagged // tagged, tagged -> bool
 
 	// Integer conversions and bitwise operations, as JavaScript defines them.

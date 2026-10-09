@@ -51,9 +51,11 @@ func element(view ir.ArrayView, key float64) (*uint64, bool) {
 // and strings, the same if one, unequal if of different lengths (a string
 // the heap does not describe is empty), and otherwise compared by their
 // code units if neither is a rope nor longer than maxEqualUnits, else left
-// to Go; other words differ, strictly unequal and left to Go loosely. It
-// reports false where Go decides.
-func eqTagged(x, y ir.Value, strict bool, strings map[uint64]String) (bool, bool) {
+// to Go; other words differ, strictly unequal. Loosely, null and undefined
+// equal each other and an object with [[IsHTMLDDA]] alone, with nothing
+// converted; any other two are left to Go. It reports false where Go
+// decides.
+func eqTagged(x, y ir.Value, strict bool, strings map[uint64]String, objects []Object) (bool, bool) {
 	if x.Kind == ir.Number && y.Kind == ir.Number {
 		return math.Float64frombits(x.Bits) == math.Float64frombits(y.Bits), true
 	}
@@ -76,6 +78,20 @@ func eqTagged(x, y ir.Value, strict bool, strings map[uint64]String) (bool, bool
 			}
 		}
 		return false, false
+	}
+	if !strict {
+		nullish := func(v ir.Value) bool { return v.Kind == ir.Null || v.Kind == ir.Undefined }
+		htmldda := func(v ir.Value) bool { return v.Bits < uint64(len(objects)) && objects[v.Bits].HTMLDDA }
+		switch {
+		case nullish(x) && nullish(y):
+			return true, true
+		case nullish(x) && y.Kind == ir.Opaque:
+			return htmldda(y), true
+		case nullish(y) && x.Kind == ir.Opaque:
+			return htmldda(x), true
+		case nullish(x) || nullish(y):
+			return false, true
+		}
 	}
 	return false, strict
 }
@@ -408,7 +424,7 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 				}
 				vals[v.ID] = val{f: math.Float64frombits(a.t.Bits)}
 			case OpEqTagged:
-				r, ok := eqTagged(a.t, b.t, v.Index == 1, heap.Strings)
+				r, ok := eqTagged(a.t, b.t, v.Index == 1, heap.Strings, heap.Objects)
 				if !ok {
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}

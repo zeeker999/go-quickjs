@@ -2398,11 +2398,45 @@ func (c *compiler) eqTagged(v *ssa.Value, guard func(amd64.Cond)) {
 	c.a.Jcc(amd64.CondP, no)
 	c.a.Jmp(yes)
 	// Two words: two numbers compare as numbers; anything else is
-	// strictly unequal, and loosely Go's.
+	// strictly unequal. Loosely, null and undefined equal each other and
+	// an object with [[IsHTMLDDA]] alone, with nothing converted; any
+	// other two are Go's.
 	c.a.Bind(differ)
 	other := no
 	if v.Index != 1 {
 		other = exit
+		numbers, xNullish, yNullish := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+		for _, w := range []uint64{c.enc.Null, c.enc.Undefined} {
+			c.a.MovImm(scratchC, w)
+			c.a.Op(amd64.Cmp, wx, scratchC, true)
+			c.a.Jcc(amd64.CondE, xNullish)
+			c.a.Op(amd64.Cmp, wy, scratchC, true)
+			c.a.Jcc(amd64.CondE, yNullish)
+		}
+		c.a.Jmp(numbers)
+		// One is null or undefined, the other of another word.
+		for _, k := range []struct {
+			at    amd64.Label
+			other *ssa.Value
+			w     amd64.Reg
+		}{{xNullish, y, wy}, {yNullish, x, wx}} {
+			c.a.Bind(k.at)
+			for _, w := range []uint64{c.enc.Null, c.enc.Undefined} {
+				c.a.MovImm(scratchC, w)
+				c.a.Op(amd64.Cmp, k.w, scratchC, true)
+				c.a.Jcc(amd64.CondE, yes)
+			}
+			c.a.MovImm(scratchC, c.enc.Object)
+			c.a.Op(amd64.Cmp, k.w, scratchC, true)
+			c.a.Jcc(amd64.CondNE, no)
+			if c.reference(v, k.other, c.enc.Object, guard) {
+				c.a.LoadU8(scratchC, scratchC, c.enc.ObjectFlags)
+				c.a.OpImm(amd64.And, scratchC, int32(c.enc.FlagHTMLDDA), false)
+				c.a.Jcc(amd64.CondNE, yes)
+			}
+			c.a.Jmp(no)
+		}
+		c.a.Bind(numbers)
 	}
 	c.a.MovImm(scratchC, abi.NumberLimit)
 	c.a.Op(amd64.Cmp, wx, scratchC, true)
