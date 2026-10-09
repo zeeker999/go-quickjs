@@ -91,7 +91,9 @@ const (
 	// in the slot IR; anything else exits to Go.
 	OpObjectOf  // tagged -> ptr, if an object
 	OpPropRead  // ptr -> f64: the property, if the shape's and a number
-	OpPropWrite // ptr, tagged, source... -> none: stores, if the shape's
+	OpPropWrite // ptr, tagged, source... -> none: stores, if the shape's;
+	// or, for a write whose cache adds the property (Add), adds it to an
+	// object it may be added to, and stores it into one that has it.
 	// A reference read from an object: the property's cell, found as a read
 	// finds it, and the value there, whatever it is. The value's Shadow is
 	// the cell, which an exit has Go copy from (origin.go).
@@ -253,6 +255,8 @@ type Value struct {
 	// after Const's.
 	Holders *[2]Holder
 	Cases   []PropertyCase
+	// Add, for a write whose cache adds its property, is how (OpPropWrite).
+	Add *PropertyAdd
 	// Calls, for a call, are the functions it may call natively (OpCall).
 	Calls []*CallSite
 	// State is the frame to exit to, for guards.

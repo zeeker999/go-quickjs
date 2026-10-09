@@ -913,6 +913,13 @@ func (c *a64Compiler) propStore(v *ssa.Value, guard func(arm64.Cond)) {
 	c.a.MovImm(a64B, 0)
 	c.a.Bind(have)
 	c.a.FMovToF(a64F1, a64B)
+	added := c.a.NewLabel()
+	if v.Add != nil {
+		has := c.a.NewLabel()
+		c.addAlong(v, has)
+		c.a.B(added)
+		c.a.Bind(has)
+	}
 	c.property(v, guard)
 	for _, s := range v.Args[2:] {
 		// As amd64's: only a pointer word there is lost.
@@ -935,6 +942,65 @@ func (c *a64Compiler) propStore(v *ssa.Value, guard func(arm64.Cond)) {
 	c.a.Bind(scalar)
 	c.a.Store(a64A, c.enc.NumOffset, c.gpr(x, a64B))
 	c.a.Store(a64A, c.enc.RefOffset, a64C)
+	c.a.Bind(added)
+}
+
+// addAlong adds the property a write's cache adds, as amd64's does, or
+// goes to miss. It uses A, B, C and D.
+func (c *a64Compiler) addAlong(v *ssa.Value, miss arm64.Label) {
+	add, x := v.Add, v.Args[1]
+	if c.enc.PropertyFlags != c.enc.PropertyKey+4 || c.enc.PropertySize != 24 {
+		c.a.B(miss)
+		return
+	}
+	c.a.MovImm(a64B, c.enc.WriteBarrier)
+	c.a.LoadU8(a64B, a64B, 0)
+	c.a.Cbnz(a64B, miss, false)
+	o := c.gpr(v.Args[0], a64D)
+	c.a.Load(a64B, o, c.enc.ObjectShape)
+	c.a.MovImm(a64C, uint64(add.From))
+	c.a.Cmp(a64B, a64C, true)
+	c.a.BCond(arm64.NE, miss)
+	c.a.LoadU8(a64B, o, c.enc.ObjectFlags)
+	c.a.MovImm(a64C, uint64(c.enc.FlagExtensible))
+	c.a.Tst(a64B, a64C, false)
+	c.a.BCond(arm64.EQ, miss)
+	c.a.Load(a64B, o, c.enc.ObjectProto)
+	for _, h := range add.Protos {
+		c.a.MovImm(a64C, uint64(h.Object))
+		c.a.Cmp(a64B, a64C, true)
+		c.a.BCond(arm64.NE, miss)
+		if h.Object == 0 {
+			break
+		}
+		c.a.Load(a64B, a64C, c.enc.ObjectShape)
+		c.a.MovImm(a64A, uint64(h.Shape))
+		c.a.Cmp(a64B, a64A, true)
+		c.a.BCond(arm64.NE, miss)
+		c.a.Load(a64B, a64C, c.enc.ObjectProto)
+	}
+	if add.Protos[1].Object != 0 {
+		c.a.Cbnz(a64B, miss, true)
+	}
+	c.a.Load(a64B, o, c.enc.ObjectProps+8)
+	c.a.Load(a64C, o, c.enc.ObjectProps+16)
+	c.a.Cmp(a64B, a64C, true)
+	c.a.BCond(arm64.HS, miss)
+	c.a.AddImm(a64C, a64B, 1, true)
+	c.a.Store(o, c.enc.ObjectProps+8, a64C)
+	c.a.MovImm(a64C, uint64(add.Next))
+	c.a.Store(o, c.enc.ObjectShape, a64C)
+	// The entry's address: the old length times 24, past the table's start.
+	c.a.ShiftImm(arm64.Lsl, a64C, a64B, 1, true)
+	c.a.Op(arm64.Add, a64B, a64B, a64C, true)
+	c.a.ShiftImm(arm64.Lsl, a64B, a64B, 3, true)
+	c.a.Load(a64C, o, c.enc.ObjectProps)
+	c.a.Op(arm64.Add, a64C, a64C, a64B, true)
+	c.a.MovImm(a64B, uint64(v.Key)|uint64(add.Flags)<<32)
+	c.a.Store(a64C, c.enc.PropertyKey, a64B)
+	c.a.FMovFromF(a64B, a64F1)
+	c.a.Store(a64C, c.enc.PropertyValue+c.enc.RefOffset, a64B)
+	c.a.Store(a64C, c.enc.PropertyValue+c.enc.NumOffset, c.gpr(x, a64A))
 }
 
 // property finds the property a property operation names and leaves the
