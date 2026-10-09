@@ -182,6 +182,62 @@ jobs:
           QJS_JIT_PIPELINE: ssa
         run: TEST262_DIR="$GITHUB_WORKSPACE/test262" go test -tags quickjs_jit ./conformance -run TestConformance -count=1 -timeout 35m -v -args -conformance.jit 2>&1 | tee test262-ssa.log | grep -E "test262:|native code ran|of those entries|FAIL|^ok"; test "${PIPESTATUS[0]}" -eq 0
 
+  # The JIT's kernels in each pipeline and the tree tier, on arm64 (macOS)
+  # and amd64 (Linux), for the JIT branch's parity work
+  # (docs/jit-progress.md, P7). A shared runner's times are noisy, so the
+  # summary compares the pipelines within one run: medians of five, and
+  # the new pipeline's time over the old's and the tree tier's.
+  jit-bench:
+    name: JIT kernels (${{ matrix.os }})
+    if: github.event_name == 'push' && github.ref == 'refs/heads/jit-wip'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    env:
+      CGO_ENABLED: "0"
+      QUICKJS_REQUIRE_JIT: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: Run the kernels
+        run: go test -tags quickjs_jit -run '^$' -bench '^BenchmarkJIT(NumericKernels|ArrayKernels|DenseKernels|NumericFields|HostRoundTrip)$' -benchtime 300ms -count 5 ./internal/vm | tee bench.txt
+
+      - name: Summarize
+        shell: python
+        run: |
+          import collections, os, re, statistics
+          runs = collections.defaultdict(list)
+          for line in open("bench.txt"):
+              m = re.match(r"(Benchmark\S+?)(?:-\d+)?\s+\d+\s+([\d.]+) ns/op", line)
+              if m:
+                  runs[m.group(1)].append(float(m.group(2)))
+          kernels = collections.defaultdict(dict)
+          for name, times in runs.items():
+              kernel, mode = name.rsplit("/", 1)
+              kernels[kernel][mode] = statistics.median(times)
+          out = ["| Kernel | tree tier (us) | old JIT (us) | new JIT (us) | new / old | new / tree |", "|---|---:|---:|---:|---:|---:|"]
+          for kernel, modes in sorted(kernels.items()):
+              if "ssa" not in modes:
+                  continue
+              tree, old, new = modes.get("existing"), modes.get("native"), modes["ssa"]
+              ratio = lambda base: f"{new / base:.2f}x" if base else "-"
+              us = lambda t: f"{t / 1000:.1f}" if t else "-"
+              out.append(f"| {kernel.removeprefix('BenchmarkJIT')} | {us(tree)} | {us(old)} | {us(new)} | {ratio(old)} | {ratio(tree)} |")
+          table = "\n".join(out)
+          print(table)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(f"### {os.environ['RUNNER_OS']} {os.environ['RUNNER_ARCH']}\n\n{table}\n")
+
   # Generated programs, run in the interpreter, the tree tier and the JIT
   # under stress, must give the same answer.
   jit-fuzz:
