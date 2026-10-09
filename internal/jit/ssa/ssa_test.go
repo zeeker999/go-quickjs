@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/compiler"
+	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/parser"
@@ -379,4 +380,11 @@ func trivial(phi *Value) bool {
 		same = a
 	}
 	return true
+}
+
+// The evaluator's limits are the native code's (abi).
+func TestLimitsMatchABI(t *testing.T) {
+	if maxScan != abi.MaxScan || maxEqualUnits != abi.MaxEqualUnits {
+		t.Fatalf("maxScan %d, maxEqualUnits %d; abi's %d, %d", maxScan, maxEqualUnits, abi.MaxScan, abi.MaxEqualUnits)
+	}
 }

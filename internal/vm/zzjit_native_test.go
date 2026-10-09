@@ -3642,3 +3642,53 @@ func TestJITSSAPrototypeMethods(t *testing.T) {
 		}
 	}
 }
+
+// Two strings of one length are compared natively by their bytes when both
+// are flat, as String.Equals compares them: symbols made at run time, as
+// EarleyBoyer's are, each its own string, find their match without
+// leaving native code. A rope, which Go flattens, and a string longer than
+// abi.MaxEqualUnits go to Go. Each answer is the interpreter's.
+func TestJITSSAStringEquality(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function count(a,k,n){let c=0;for(let i=0;i<n;i++){const s=a[i%a.length];if(s===k)c+=1;if(s==k)c+=10;if(s!==k)c+=100}return c}
+		var syms=[],u=[],long=[];for(let i=0;i<8;i++){syms.push(String.fromCharCode(0x1E9C)+'sym'+i);u.push('āĂ'+i+'\uD800')}
+		const big='x'.repeat(300);long.push(big+'a',big+'b');
+		var key=['ẜsym',3].join(''),ukey=['āĂ',5,'\uD800'].join('');`
+	rounds := []string{
+		`''+count(syms,key,200)`,
+		`''+count(syms,key,200)`,
+		`[count(u,ukey,200),count(syms,'ẜsym'+'7',200),count(long,'x'.repeat(300)+'b',50)].join()`,
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		hosts := r.jit.hosts
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 1 && r.jit.hosts != hosts {
+			t.Fatalf("count left native code %d times", r.jit.hosts-hosts)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("count")).value.Object().fn().closure
+	if e := r.jit.hint(cl.hint()); e == nil || e.ssa == nil || e.entrySlow || e.ssaStats.entries == 0 {
+		t.Fatalf("count did not stay native: %+v", e)
+	}
+}

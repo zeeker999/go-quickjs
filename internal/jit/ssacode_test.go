@@ -12,6 +12,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf16"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -68,11 +70,37 @@ func randomText(r *rand.Rand) testText {
 	for range r.IntN(5) {
 		u := uint16('a' + r.IntN(26))
 		if t.form == textCached || t.form == textUncached || r.IntN(2) == 0 {
-			u = uint16(0x100 + r.IntN(0x2000))
+			// An ASCII string's units are ASCII, as its flag says; the
+			// number is drawn all the same, so the programs drawn after
+			// it are the same.
+			if n := r.IntN(0x2000); t.form != textASCII {
+				u = uint16(0x100 + n)
+			}
 		}
 		t.units = append(t.units, u)
 	}
 	return t
+}
+
+// testWTF8 is units' WTF-8, the VM's UTF-8 form of a flat string, which it
+// compares by its bytes: a pair is one code point, a lone surrogate three
+// bytes of its own.
+func testWTF8(units []uint16) string {
+	var b []byte
+	for i := 0; i < len(units); i++ {
+		u := rune(units[i])
+		if u >= 0xD800 && u < 0xDC00 && i+1 < len(units) && units[i+1] >= 0xDC00 && units[i+1] < 0xE000 {
+			b = utf8.AppendRune(b, utf16.DecodeRune(u, rune(units[i+1])))
+			i++
+			continue
+		}
+		if u >= 0xD800 && u < 0xE000 {
+			b = append(b, 0xE0|byte(u>>12), 0x80|byte(u>>6&0x3F), 0x80|byte(u&0x3F))
+			continue
+		}
+		b = utf8.AppendRune(b, u)
+	}
+	return string(b)
 }
 
 // testCharCodeAt is the handle of the object that is charCodeAt, the
@@ -274,6 +302,14 @@ func randomTestHeap(r *rand.Rand) testHeap {
 	// keys 10 to 13 script-level lexical bindings shadow.
 	g := testArray{shape: -1, proto: -1, length: uint64(r.IntN(16)) & uint64(r.IntN(16)),
 		texts: []testText{randomText(r), randomText(r)}, intrinsic: r.IntN(4) != 0}
+	if t := g.texts; (len(t[0].units)+len(t[1].units))%3 == 0 {
+		// Often two strings of one content, held as two: flat, or one a
+		// rope. Decided by what was drawn, drawing nothing more.
+		t[1].units = slices.Clone(t[0].units)
+		if t[1].form != textRope {
+			t[1].form = t[0].form
+		}
+	}
 	for range 4 {
 		g.keys = append(g.keys, 10+uint32(r.IntN(4)))
 		g.flags = append(g.flags, testFlags[r.IntN(len(testFlags))])
@@ -349,12 +385,12 @@ func (h testHeap) native() *nativeHeap {
 				}
 				s.s, s.ascii = string(b), true
 			case textCached:
-				s.s = "not read"
+				s.s = testWTF8(t.units)
 				if len(t.units) > 0 {
 					s.u16 = &slices.Clone(t.units)[0]
 				}
 			case textUncached:
-				s.s = "not read"
+				s.s = testWTF8(t.units)
 			case textRope:
 				// A rope's flags are valid, as the VM's are; its UTF-8 is not.
 				s.left, s.right = &testString{}, &testString{}
@@ -393,7 +429,7 @@ func (n *nativeHeap) heap() ssa.Heap {
 		for i, t := range n.specs {
 			// Read natively when flat and at hand: ASCII, or cached.
 			flat := t.form == textASCII || t.form == textCached || len(t.units) == 0 && t.form != textRope
-			h.Strings[uint64(5+i)] = ssa.String{Units: t.units, Flat: flat}
+			h.Strings[uint64(5+i)] = ssa.String{Units: t.units, Flat: flat, Rope: t.form == textRope}
 		}
 		if n.intrinsic.ref != nil {
 			h.CharCodeAt = &ir.Value{Kind: ir.Opaque, Bits: testCharCodeAt}
@@ -1227,6 +1263,49 @@ func TestSSANativeEquality(t *testing.T) {
 			}
 			if native && exit.Value != ir.Bool(tc.equal) {
 				t.Fatalf("strict %v, %v == %v = %v, want %v", strict, tc.x, tc.y, exit.Value, tc.equal)
+			}
+		}
+		// Two strings, handles 5 and 6, of one length: the same content
+		// in two strings, flat in any form, is equal, compared by bytes a
+		// word at a time and then one at a time; a byte that differs in
+		// either part, or byte lengths that differ, make them unequal; a
+		// rope, and strings longer than abi.MaxEqualUnits, go to Go.
+		units := func(s string) []uint16 { return utf16.Encode([]rune(s)) }
+		wide := func(n int, last uint16) []uint16 {
+			u := make([]uint16, n)
+			for i := range u {
+				u[i] = uint16(0x100 + i)
+			}
+			u[n-1] = last
+			return u
+		}
+		long := units(strings.Repeat("x", abi.MaxEqualUnits+1))
+		for _, tc := range []struct {
+			a, b          testText
+			equal, native bool
+		}{
+			{testText{units("abcdefghij"), textASCII}, testText{units("abcdefghij"), textASCII}, true, true},
+			{testText{units("abcdefghij"), textASCII}, testText{units("abcdefghiX"), textASCII}, false, true},
+			{testText{units("abcXefghij"), textASCII}, testText{units("abcdefghij"), textASCII}, false, true},
+			{testText{wide(10, 0x200), textCached}, testText{wide(10, 0x200), textUncached}, true, true},
+			{testText{wide(10, 0x200), textCached}, testText{wide(10, 0x201), textUncached}, false, true},
+			{testText{units("ab"), textASCII}, testText{wide(2, 0x101), textCached}, false, true},
+			{testText{nil, textASCII}, testText{nil, textCached}, true, true},
+			{testText{units("abcdefghij"), textASCII}, testText{units("abcdefghij"), textRope}, false, false},
+			{testText{long, textASCII}, testText{slices.Clone(long), textASCII}, false, false},
+		} {
+			heap := randomTestHeap(rand.New(rand.NewPCG(1, 2)))
+			heap[4].texts = []testText{tc.a, tc.b}
+			slots := []ir.Value{{Kind: ir.String, Bits: 5}, {Kind: ir.String, Bits: 6}, ir.Float(0)}
+			if why := nativeMismatch(c, 0, slots, 0, heap); why != "" {
+				t.Fatalf("strict %v, %v == %v: %s", strict, tc.a.units, tc.b.units, why)
+			}
+			exit, _ := ssa.EvaluateHeap(c.f, 0, slices.Clone(slots), heap.native().heap(), 0)
+			if got := exit.Kind == ir.Returned; got != tc.native {
+				t.Fatalf("strict %v, %v == %v: native %v, want %v", strict, tc.a.units, tc.b.units, got, tc.native)
+			}
+			if tc.native && exit.Value != ir.Bool(tc.equal) {
+				t.Fatalf("strict %v, %v == %v = %v, want %v", strict, tc.a.units, tc.b.units, exit.Value, tc.equal)
 			}
 		}
 		c.code.Close()

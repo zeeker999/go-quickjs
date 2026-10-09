@@ -645,6 +645,59 @@ func (c *compiler) property(v *ssa.Value, guard func(amd64.Cond)) {
 	c.a.Bind(found)
 }
 
+// stringBytes compares two strings of one length, in code units, by their
+// bytes, as the VM does (String.Equals): their pointers are in xScratch1
+// and scratchC, the length in scratchA. A rope, which Go flattens, and a
+// string longer than abi.MaxEqualUnits exit; strings of different byte
+// lengths differ. The loop borrows regLocals and regStack, as remainder
+// does, and reloads them from the context before it leaves.
+func (c *compiler) stringBytes(exit, yes, no amd64.Label) {
+	c.a.OpImm(amd64.Cmp, scratchA, abi.MaxEqualUnits, true)
+	c.a.Jcc(amd64.CondA, exit)
+	c.a.MovQFromX(scratchA, xScratch1)
+	for _, s := range []amd64.Reg{scratchA, scratchC} {
+		c.a.Load(scratchB, s, c.enc.StringLeft)
+		c.a.Op(amd64.Test, scratchB, scratchB, true)
+		c.a.Jcc(amd64.CondNE, exit)
+	}
+	c.a.Load(scratchB, scratchC, c.enc.StringData+8)
+	c.a.Load(scratchA, scratchA, c.enc.StringData+8)
+	c.a.Op(amd64.Cmp, scratchA, scratchB, true)
+	c.a.Jcc(amd64.CondNE, no)
+	c.a.MovQFromX(scratchA, xScratch1)
+	c.a.Load(scratchA, scratchA, c.enc.StringData)
+	c.a.Load(scratchC, scratchC, c.enc.StringData)
+	words, bytes, same, differ := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+	c.a.Bind(words)
+	c.a.OpImm(amd64.Cmp, scratchB, 8, true)
+	c.a.Jcc(amd64.CondB, bytes)
+	c.a.Load(regLocals, scratchA, 0)
+	c.a.Load(regStack, scratchC, 0)
+	c.a.Op(amd64.Cmp, regLocals, regStack, true)
+	c.a.Jcc(amd64.CondNE, differ)
+	c.a.OpImm(amd64.Add, scratchA, 8, true)
+	c.a.OpImm(amd64.Add, scratchC, 8, true)
+	c.a.OpImm(amd64.Sub, scratchB, 8, true)
+	c.a.Jmp(words)
+	c.a.Bind(bytes)
+	c.a.Op(amd64.Test, scratchB, scratchB, true)
+	c.a.Jcc(amd64.CondE, same)
+	c.a.LoadU8(regLocals, scratchA, 0)
+	c.a.LoadU8(regStack, scratchC, 0)
+	c.a.Op(amd64.Cmp, regLocals, regStack, false)
+	c.a.Jcc(amd64.CondNE, differ)
+	c.a.OpImm(amd64.Add, scratchA, 1, true)
+	c.a.OpImm(amd64.Add, scratchC, 1, true)
+	c.a.OpImm(amd64.Sub, scratchB, 1, true)
+	c.a.Jmp(bytes)
+	for _, l := range []struct{ at, to amd64.Label }{{same, yes}, {differ, no}} {
+		c.a.Bind(l.at)
+		c.a.Load(regLocals, regCtx, abi.OffLocals)
+		c.a.Load(regStack, regCtx, abi.OffStack)
+		c.a.Jmp(l.to)
+	}
+}
+
 // holder is property for a read the receiver's prototypes answered
 // (ssa.PropertySite's Holders): the receiver of the shape the site knows,
 // which says it has no such property of its own, each prototype the one
@@ -1164,7 +1217,7 @@ func (c *compiler) eqTagged(v *ssa.Value, guard func(amd64.Cond)) {
 			c.a.Load(scratchB, scratchC, c.enc.StringLength)
 			c.a.Op(amd64.Cmp, scratchA, scratchB, true)
 			c.a.Jcc(amd64.CondNE, no)
-			c.a.Jmp(exit)
+			c.stringBytes(exit, yes, no)
 		}
 	}
 	c.a.Bind(number)
