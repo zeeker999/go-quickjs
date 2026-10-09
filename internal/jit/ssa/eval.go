@@ -510,6 +510,10 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 				}
 				vals[v.ID] = val{f: math.Float64frombits(o.Props[i].Bits)}
 			case OpPropWrite:
+				if v.Add != nil {
+					// The heap model's objects have no shapes to add along.
+					return ir.Exit{}, fmt.Errorf("%w: a property added", ErrUnsupported)
+				}
 				// Any value, unless it changes a reference while the
 				// collector marks, or the cell is one a live reference was
 				// loaded from (storeChecks).

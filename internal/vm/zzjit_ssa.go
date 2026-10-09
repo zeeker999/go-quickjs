@@ -74,6 +74,7 @@ var jitEncoding = abi.Encoding{
 	ClassArray:     uint8(ClassArray),
 	FlagSparse:     uint8(objHasSparseElements),
 	FlagHTMLDDA:    uint8(objHTMLDDA),
+	FlagExtensible: uint8(objExtensible),
 }
 
 // jitReoptimizations is how many times a function's code is compiled again
@@ -900,6 +901,10 @@ func (fb *jitFeedback) property(pc int) (ssa.PropertySite, bool) {
 	}
 	c := &fb.cl.ic[in.B]
 	k := fb.keep()
+	if in.Op == bytecode.OpSetProp && c.next != nil && c.next != setterNext && !c.getter {
+		site.Add = fb.add(c)
+		return site, true
+	}
 	if c.shape == nil || c.shape == noShape || c.getter || c.next != nil || c.idx < 0 {
 		return site, true
 	}
@@ -931,6 +936,41 @@ func (fb *jitFeedback) property(pc int) (ssa.PropertySite, bool) {
 	}
 	site.Shape, site.Index = uintptr(unsafe.Pointer(c.shape)), c.idx
 	return site, true
+}
+
+// add is what a write whose cache adds its property adds (propCache.adds),
+// as ssa.PropertyAdd has it, or nil for one native code leaves to Go: one
+// whose next shape wants its table's index built (appendTransition). The
+// code keeps the shapes and prototypes it compares.
+func (fb *jitFeedback) add(c *propCache) *ssa.PropertyAdd {
+	next := c.next
+	if c.shape == nil || c.shape == noShape || next.index == nil && int(next.n) > linearScanLimit {
+		return nil
+	}
+	add := &ssa.PropertyAdd{From: uintptr(unsafe.Pointer(c.shape)), Next: uintptr(unsafe.Pointer(next)), Flags: uint8(next.flags)}
+	for i, h := range [2]struct {
+		p *Object
+		s *shape
+	}{{c.p1, c.s1}, {c.p2, c.s2}} {
+		if h.p == nil {
+			break
+		}
+		if h.s == nil || h.s == noShape {
+			return nil
+		}
+		add.Protos[i] = ssa.Holder{Object: uintptr(unsafe.Pointer(h.p)), Shape: uintptr(unsafe.Pointer(h.s))}
+	}
+	k := fb.keep()
+	k.shapes = append(k.shapes, remember(c.shape), remember(next))
+	for i, h := range [2]struct {
+		p *Object
+		s *shape
+	}{{c.p1, c.s1}, {c.p2, c.s2}} {
+		if add.Protos[i].Object != 0 {
+			k.shapes, k.holders = append(k.shapes, remember(h.s)), append(k.holders, h.p)
+		}
+	}
+	return add
 }
 
 // jitSlot is a frame's slot as the JIT numbers them: its locals, its

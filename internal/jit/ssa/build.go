@@ -162,6 +162,22 @@ type PropertySite struct {
 	Index   int32
 	Holders [2]Holder
 	Cases   []PropertyCase
+	// Add, for a write whose cache adds the property, says how; Shape is
+	// then 0.
+	Add *PropertyAdd
+}
+
+// PropertyAdd is a write that adds its property, as the VM's cache has it
+// (its propCache.adds): to an object of shape From that is extensible, whose prototypes are Protos -- each object, with its shape,
+// the first's prototype the second, the last's none; an Object of 0 ends
+// the chain -- the property goes at the end of its table, if the table
+// has room, with Flags, and the object takes the shape Next. Nothing up
+// the chain intercepts the write: the cache found so for those shapes.
+type PropertyAdd struct {
+	From   uintptr
+	Next   uintptr
+	Flags  uint8
+	Protos [2]Holder
 }
 
 // PropertyCase is one more shape a read's site met (PropertySite.Cases):
@@ -1297,6 +1313,9 @@ func (b *builder) instruction(blk *Block, pc int) {
 		}
 		v := guard(OpPropWrite, None, ir.HostExit, object, operand(in.Right))
 		v.Const, v.Index, v.Key = ir.Value{Bits: uint64(site.Shape)}, int(site.Index), site.Key
+		// A property the write adds, as V8's stores do along a map's
+		// transition; or, to an object that has it, stores.
+		v.Add = site.Add
 	case ir.Host, ir.Call:
 		if fr := b.inlinedAt(pc); fr != nil {
 			b.inlineCall(blk, pc, fr, guard, state)

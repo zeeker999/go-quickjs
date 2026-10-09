@@ -4097,6 +4097,80 @@ func TestJITSSANestedInline(t *testing.T) {
 	}
 }
 
+// A write whose cache adds its property adds it natively, as V8's stores do
+// along a map's transition: fill never leaves for its fresh objects. One
+// that may not -- a prototype's setter intercepts the name, the object is
+// not extensible, the collector marks -- is Go's, as is one past the
+// table's room, fill4's fourth; one the object has already is stored.
+func TestJITSSAPropertyAdds(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	// Each case its own copy of fill, compiled first: what one leaves to
+	// Go must not have another demoted.
+	const fill = `function(a,n,v){for(let i=0;i<n;i++){const o=a[i];o.x=i;o.r=v}return a}`
+	const fill4 = `function(a,n){for(let i=0;i<n;i++){const o=a[i];o.p=i;o.q=2;o.s=3;o.t=4}return a}`
+	setup := `function mk(n){const a=[];for(let i=0;i<n;i++)a.push({});return a}
+		var P={set x(v){this.y=v}};
+		function mkP(n){const a=[];for(let i=0;i<n;i++)a.push(Object.create(P));return a}
+		function show(a,v){const l=a[a.length-1];return [l.x,l.y,l.r===v,Object.keys(l).join('')].join()}
+		function show4(a){const l=a[a.length-1];return [l.p,l.q,l.s,l.t,Object.keys(l).join('')].join()}
+		var v={k:1}, fresh=` + fill + `, inProto=` + fill + `, protoSet=` + fill + `, stopped=` + fill + `, owned=` + fill + `, marked=` + fill + `, four=` + fill4 + `;`
+	cases := []struct{ name, fn, warm, src string }{
+		{"fresh", "fresh", `show(fresh(mk(300),300,v),v)`, `show(fresh(mk(300),300,v),v)`},
+		{"prototype's setter", "inProto", `show(inProto(mk(300),300,v),v)`, `show(inProto(mkP(300),300,v),v)`},
+		{"setter added to Object.prototype", "protoSet", `show(protoSet(mk(300),300,v),v)`,
+			`Object.defineProperty(Object.prototype,'x',{set(w){this.y=w},configurable:true});` +
+				`try{show(protoSet(mk(300),300,v),v)}finally{delete Object.prototype.x}`},
+		{"not extensible", "stopped", `show(stopped(mk(300),300,v),v)`, `{const a=mk(300);a.forEach(Object.preventExtensions);show(stopped(a,300,v),v)}`},
+		{"already its own", "owned", `show(owned(mk(300),300,v),v)`, `{const a=mk(300);owned(a,300,v);show(owned(a,300,v),v)}`},
+		{"past the room", "four", `show4(four(mk(300),300))`, `show4(four(mk(300),300))`},
+		{"collector marking", "marked", `show(marked(mk(300),300,v),v)`, `show(marked(mk(300),300,v),v)`},
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	run := func(name, src string) {
+		t.Helper()
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("%s: got %s, interpreter %s", name, got, want)
+		}
+	}
+	for _, c := range cases {
+		for range 4 {
+			run(c.name, c.warm)
+		}
+		e := r.jit.hint(r.global.getOwn(r.atoms.intern(c.fn)).value.Object().fn().closure.hint())
+		if e == nil || e.ssa == nil {
+			t.Fatalf("%s: %s has no code", c.name, c.fn)
+		}
+		hosts := e.ssaStats.hosts
+		if c.fn == "marked" {
+			jitMarkingForTest(t)
+		}
+		run(c.name, c.src)
+		if c.fn == "fresh" && e.ssaStats.hosts != hosts {
+			t.Fatalf("fresh left native code adding properties %d times", e.ssaStats.hosts-hosts)
+		}
+	}
+}
+
 // What native calls' contexts share with the context code was entered in
 // -- how deep calls may go among it -- Go writes into them when it
 // changes, not each call (jitShareContexts): code entered shallow, then

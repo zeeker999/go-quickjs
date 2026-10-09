@@ -1196,6 +1196,14 @@ func (c *compiler) propStore(v *ssa.Value, guard func(amd64.Cond)) {
 	c.a.MovImm(scratchB, 0)
 	c.a.Bind(have)
 	c.a.MovQToX(xScratch1, scratchB)
+	added := c.a.NewLabel()
+	if v.Add != nil {
+		// A property the cache adds, or else one the object has.
+		has := c.a.NewLabel()
+		c.addAlong(v, has)
+		c.a.Jmp(added)
+		c.a.Bind(has)
+	}
 	c.property(v, guard)
 	for _, s := range v.Args[2:] {
 		// A live value read from this cell keeps its pointer word there:
@@ -1220,6 +1228,81 @@ func (c *compiler) propStore(v *ssa.Value, guard func(amd64.Cond)) {
 	c.a.Bind(scalar)
 	c.a.Store(scratchA, c.enc.NumOffset, c.gpr(x, scratchB))
 	c.a.Store(scratchA, c.enc.RefOffset, scratchC)
+	c.a.Bind(added)
+}
+
+// addAlong adds the property a write's cache adds (ssa.PropertyAdd), as
+// the VM's appendTransition does, when the object may take it -- of the
+// shape it is added to, extensible, its prototypes those the cache found
+// nothing on that intercepts the write, room in its table -- and goes to
+// miss otherwise, before it writes anything. It writes the length, the
+// next shape, a pointer, so the collector must not be marking, and the
+// entry past the last, the value's pointer word from xScratch1. It uses
+// every scratch register.
+func (c *compiler) addAlong(v *ssa.Value, miss amd64.Label) {
+	add, x := v.Add, v.Args[1]
+	if c.enc.PropertyFlags != c.enc.PropertyKey+4 || c.enc.PropertySize != 24 {
+		// The key and flags are written as one word, the offset as a sum.
+		c.a.Jmp(miss)
+		return
+	}
+	c.a.MovImm(scratchB, c.enc.WriteBarrier)
+	c.a.LoadU8(scratchB, scratchB, 0)
+	c.a.Op(amd64.Test, scratchB, scratchB, false)
+	c.a.Jcc(amd64.CondNE, miss)
+	o := c.gpr(v.Args[0], scratchA)
+	c.a.Load(scratchB, o, c.enc.ObjectShape)
+	c.a.MovImm(scratchC, uint64(add.From))
+	c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+	c.a.Jcc(amd64.CondNE, miss)
+	c.a.LoadU8(scratchB, o, c.enc.ObjectFlags)
+	c.a.OpImm(amd64.And, scratchB, int32(c.enc.FlagExtensible), false)
+	c.a.Jcc(amd64.CondE, miss)
+	// The prototype chain the cache found, object by object, then none.
+	c.a.Load(scratchB, o, c.enc.ObjectProto)
+	for _, h := range add.Protos {
+		c.a.MovImm(scratchC, uint64(h.Object))
+		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+		c.a.Jcc(amd64.CondNE, miss)
+		if h.Object == 0 {
+			break
+		}
+		c.a.Load(scratchB, scratchC, c.enc.ObjectShape)
+		c.a.MovImm(scratchC, uint64(h.Shape))
+		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+		c.a.Jcc(amd64.CondNE, miss)
+		c.a.MovImm(scratchC, uint64(h.Object))
+		c.a.Load(scratchB, scratchC, c.enc.ObjectProto)
+	}
+	if add.Protos[1].Object != 0 {
+		c.a.Op(amd64.Test, scratchB, scratchB, true)
+		c.a.Jcc(amd64.CondNE, miss)
+	}
+	// Room: the table's length below its capacity.
+	c.a.Load(scratchB, o, c.enc.ObjectProps+8)
+	c.a.Load(scratchC, o, c.enc.ObjectProps+16)
+	c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+	c.a.Jcc(amd64.CondAE, miss)
+	// The length, then the shape, then the entry, at the old length times
+	// the entry's size, 24.
+	c.a.MovRR(scratchC, scratchB)
+	c.a.OpImm(amd64.Add, scratchB, 1, true)
+	c.a.Store(o, c.enc.ObjectProps+8, scratchB)
+	c.a.MovImm(scratchB, uint64(add.Next))
+	c.a.Store(o, c.enc.ObjectShape, scratchB)
+	c.a.MovRR(scratchB, scratchC)
+	c.a.ShiftImm(amd64.Shl, scratchB, 1, true)
+	c.a.Op(amd64.Add, scratchC, scratchB, true)
+	c.a.ShiftImm(amd64.Shl, scratchC, 3, true)
+	c.a.Load(scratchB, o, c.enc.ObjectProps)
+	c.a.Op(amd64.Add, scratchC, scratchB, true)
+	c.a.MovImm(scratchB, uint64(v.Key)|uint64(add.Flags)<<32)
+	c.a.Store(scratchC, c.enc.PropertyKey, scratchB)
+	// The pointer word first: making a lazy value's number word may use
+	// xScratch1.
+	c.a.MovQFromX(scratchB, xScratch1)
+	c.a.Store(scratchC, c.enc.PropertyValue+c.enc.RefOffset, scratchB)
+	c.a.Store(scratchC, c.enc.PropertyValue+c.enc.NumOffset, c.gpr(x, scratchA))
 }
 
 // property finds the property a property operation names and leaves the
