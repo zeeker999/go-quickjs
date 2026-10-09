@@ -908,8 +908,7 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.boxBool(c.gpr(arg(0), scratchB), scratchA)
 		c.setG(v, scratchA)
 	case ssa.OpAddF64, ssa.OpSubF64, ssa.OpMulF64, ssa.OpDivF64:
-		op := map[ssa.Op]amd64.SSE{ssa.OpAddF64: amd64.AddSD, ssa.OpSubF64: amd64.SubSD,
-			ssa.OpMulF64: amd64.MulSD, ssa.OpDivF64: amd64.DivSD}[v.Op]
+		op := sseOp(v.Op)
 		x := c.xmm(arg(0), xScratch0)
 		if x != xScratch0 {
 			c.a.SSEOp(amd64.MovAPD, xScratch0, x)
@@ -939,12 +938,12 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 	case ssa.OpToInt32:
 		c.toInt32(v)
 	case ssa.OpAndI32, ssa.OpOrI32, ssa.OpXorI32:
-		op := map[ssa.Op]amd64.ALU{ssa.OpAndI32: amd64.And, ssa.OpOrI32: amd64.Or, ssa.OpXorI32: amd64.Xor}[v.Op]
+		op := aluOp(v.Op)
 		c.a.MovRR32(scratchA, c.gpr(arg(0), scratchA))
 		c.a.Op(op, scratchA, c.gpr(arg(1), scratchB), false)
 		c.setG(v, scratchA)
 	case ssa.OpShlI32, ssa.OpSarI32, ssa.OpShrU32:
-		op := map[ssa.Op]amd64.Shift{ssa.OpShlI32: amd64.Shl, ssa.OpSarI32: amd64.Sar, ssa.OpShrU32: amd64.Shr}[v.Op]
+		op := shiftOp(v.Op)
 		c.a.MovRR32(scratchC, c.gpr(arg(1), scratchC))
 		c.a.MovRR32(scratchA, c.gpr(arg(0), scratchA))
 		c.a.ShiftCL(op, scratchA, false)
@@ -1081,4 +1080,38 @@ func (c *compiler) toInt32(v *ssa.Value) {
 		c.a.Op(amd64.Xor, scratchA, scratchA, false)
 		c.a.Jmp(back)
 	})
+}
+
+// sseOp, aluOp and shiftOp are the instructions for SSA's arithmetic,
+// bitwise and shift operations.
+func sseOp(op ssa.Op) amd64.SSE {
+	switch op {
+	case ssa.OpAddF64:
+		return amd64.AddSD
+	case ssa.OpSubF64:
+		return amd64.SubSD
+	case ssa.OpMulF64:
+		return amd64.MulSD
+	}
+	return amd64.DivSD
+}
+
+func aluOp(op ssa.Op) amd64.ALU {
+	switch op {
+	case ssa.OpAndI32:
+		return amd64.And
+	case ssa.OpOrI32:
+		return amd64.Or
+	}
+	return amd64.Xor
+}
+
+func shiftOp(op ssa.Op) amd64.Shift {
+	switch op {
+	case ssa.OpShlI32:
+		return amd64.Shl
+	case ssa.OpSarI32:
+		return amd64.Sar
+	}
+	return amd64.Shr
 }

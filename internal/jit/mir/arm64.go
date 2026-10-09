@@ -846,8 +846,7 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.boxBool(c.gpr(arg(0), a64B), a64A)
 		c.setG(v, a64A)
 	case ssa.OpAddF64, ssa.OpSubF64, ssa.OpMulF64, ssa.OpDivF64:
-		op := map[ssa.Op]arm64.FOp{ssa.OpAddF64: arm64.FAdd, ssa.OpSubF64: arm64.FSub,
-			ssa.OpMulF64: arm64.FMul, ssa.OpDivF64: arm64.FDiv}[v.Op]
+		op := a64FOp(v.Op)
 		c.a.FArith(op, a64F0, c.fpr(arg(0), a64F0), c.fpr(arg(1), a64F1))
 		c.setF(v, a64F0)
 	case ssa.OpModF64:
@@ -869,12 +868,12 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 	case ssa.OpToInt32:
 		c.toInt32(v)
 	case ssa.OpAndI32, ssa.OpOrI32, ssa.OpXorI32:
-		op := map[ssa.Op]arm64.ALU{ssa.OpAndI32: arm64.And, ssa.OpOrI32: arm64.Orr, ssa.OpXorI32: arm64.Eor}[v.Op]
+		op := a64ALU(v.Op)
 		c.a.Op(op, a64A, c.gpr(arg(0), a64A), c.gpr(arg(1), a64B), false)
 		c.setG(v, a64A)
 	case ssa.OpShlI32, ssa.OpSarI32, ssa.OpShrU32:
 		// The W forms take the count modulo 32, as JavaScript does.
-		op := map[ssa.Op]arm64.Shift{ssa.OpShlI32: arm64.Lsl, ssa.OpSarI32: arm64.Asr, ssa.OpShrU32: arm64.Lsr}[v.Op]
+		op := a64Shift(v.Op)
 		c.a.ShiftReg(op, a64A, c.gpr(arg(0), a64A), c.gpr(arg(1), a64C), false)
 		c.setG(v, a64A)
 	case ssa.OpNotI32:
@@ -971,4 +970,38 @@ func (c *a64Compiler) toInt32(v *ssa.Value) {
 		c.a.MovImm(a64A, 0)
 		c.a.B(back)
 	})
+}
+
+// a64FOp, a64ALU and a64Shift are the instructions for SSA's arithmetic,
+// bitwise and shift operations.
+func a64FOp(op ssa.Op) arm64.FOp {
+	switch op {
+	case ssa.OpAddF64:
+		return arm64.FAdd
+	case ssa.OpSubF64:
+		return arm64.FSub
+	case ssa.OpMulF64:
+		return arm64.FMul
+	}
+	return arm64.FDiv
+}
+
+func a64ALU(op ssa.Op) arm64.ALU {
+	switch op {
+	case ssa.OpAndI32:
+		return arm64.And
+	case ssa.OpOrI32:
+		return arm64.Orr
+	}
+	return arm64.Eor
+}
+
+func a64Shift(op ssa.Op) arm64.Shift {
+	switch op {
+	case ssa.OpShlI32:
+		return arm64.Lsl
+	case ssa.OpSarI32:
+		return arm64.Asr
+	}
+	return arm64.Lsr
 }
