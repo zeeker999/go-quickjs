@@ -2,6 +2,7 @@ package ssa
 
 import (
 	"math"
+	"strconv"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
@@ -497,8 +498,12 @@ func insertAfter(f *Func, a, v *Value) {
 
 // domTree is a function's dominator tree: each block's immediate dominator,
 // by block ID, -1 for an entry block, whose dominator is the function's
-// (virtual) start.
-type domTree struct{ idom []int }
+// (virtual) start; and each block's dominators as a bitset, words of them
+// by block, for dominates to test.
+type domTree struct {
+	idom, set []int
+	words     int
+}
 
 // dominators computes the dominator tree, by Cooper, Harvey and Kennedy's
 // iteration over the blocks in reverse post-order, which their IDs are
@@ -543,15 +548,21 @@ func dominators(f *Func) *domTree {
 			}
 		}
 	}
+	// A block's dominators are its immediate dominator's and itself; that
+	// one comes first in the blocks' order.
+	d.words = (len(f.Blocks) + strconv.IntSize - 1) / strconv.IntSize
+	d.set = f.ints(len(f.Blocks) * d.words)
+	for _, b := range f.Blocks {
+		row := d.set[b.ID*d.words : (b.ID+1)*d.words]
+		if up := d.idom[b.ID]; up >= 0 {
+			copy(row, d.set[up*d.words:(up+1)*d.words])
+		}
+		row[b.ID/strconv.IntSize] |= 1 << (b.ID % strconv.IntSize)
+	}
 	return d
 }
 
 // dominates reports whether every path from an entry to b passes a.
 func (d *domTree) dominates(a, b *Block) bool {
-	for x := b.ID; x >= 0; x = d.idom[x] {
-		if x == a.ID {
-			return true
-		}
-	}
-	return false
+	return d.set[b.ID*d.words+a.ID/strconv.IntSize]&(1<<(a.ID%strconv.IntSize)) != 0
 }
