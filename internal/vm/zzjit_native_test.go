@@ -4759,6 +4759,62 @@ func TestJITSSANativeCallsGoOn(t *testing.T) {
 	}
 }
 
+// A native call whose callee left native code, which Go finished, goes on
+// in its caller's code after the call, where the callee would have
+// returned to (runSSA's resume), as V8's lazy deoptimization leaves the
+// caller's frame alone: s, t and p, live across the call in registers and
+// a keep cell, are as they were. A callee that throws (boom, through raise)
+// is finished as before, the throw going through its caller; as is one
+// while the collector marks. Each answer is the interpreter's.
+func TestJITSSANativeCallResumes(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var A={v:3},B={v:5},o={p:A},c={n:0};
+		function tick(){c.n++;o.p=(c.n&1)?B:A;if(c.n%50===0)return String(c.n).length;return c.n&3}
+		function f(n){let s=0.5,t=0,p=o.p;for(let i=0;i<n;i++){s=s*1.0001+tick();t=(t+p.v)|0;s+=i*0.5}return [s,t,p.v,c.n].join()}
+		function raise(s){throw new Error("e"+s)}
+		function boom(i){let s=i;for(let j=0;j<2;j++)s=s*2;if(c.n++%97===0)raise(s);return s}
+		function g(n){let t=0,u=0.25;for(let i=0;i<n;i++){t=(t+boom(i))|0;u=u*1.5+1}return [t,u].join()}
+		function tryG(n){try{return g(n)}catch(e){return e.message+c.n}}`
+	src := `o.p=A;[f(300),tryG(300)].join()`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resumedLate := uint64(0)
+	for i := range 6 {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 5 {
+			jitMarkingForTest(t)
+		}
+		resumed := r.jit.resumed
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 3 || i == 4 {
+			resumedLate += r.jit.resumed - resumed
+		}
+	}
+	if resumedLate == 0 {
+		t.Fatal("no caller went on natively after its callee left native code")
+	}
+}
+
 // Native code that calls through Go another function's native code shares
 // the context with it (jitState.ssaCtx): an exit's PC must be read before
 // Go runs anything. Here inner's last exit, a call near its end, is past

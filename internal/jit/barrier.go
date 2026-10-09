@@ -20,3 +20,7 @@ var writeBarrier struct {
 // WriteBarrier is the address of the runtime's write-barrier flag, a byte
 // that is not zero while the collector marks (abi.Encoding.WriteBarrier).
 func WriteBarrier() uint64 { return uint64(uintptr(unsafe.Pointer(&writeBarrier.enabled))) }
+
+// Marking reports whether the collector marks, which it starts and stops
+// only while no native code runs.
+func Marking() bool { return writeBarrier.enabled }

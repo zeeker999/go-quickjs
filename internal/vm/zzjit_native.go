@@ -288,6 +288,9 @@ type jitState struct {
 	callActive      bool
 	globals         []bytecode.Instr
 	cache           map[weak.Pointer[bytecode.Function]]*jitEntry
+	// resumed counts native calls whose callee Go finished, after which
+	// their callers' code went on natively (runSSA).
+	resumed uint64
 	// ssaShared is what the contexts from ssaSharedFrom on hold of what
 	// they share (jitShareContexts).
 	ssaShared     jitShared
