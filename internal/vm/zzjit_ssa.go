@@ -619,37 +619,41 @@ type jitSSAStats struct {
 
 // jitSSAProbe is how many native stretches a function runs between looks
 // at whether its native code pays (jitSSAProfit), and jitSSAMinWork the
-// work a stretch that ends in an exit to Go must do, on average, for it to:
-// an exit and the entry after it cost what the tree tier takes for about
-// that many instructions (BenchmarkJITHostRoundTrip's go-call: a stretch
-// of about ten is level with the tree tier).
+// work a stretch must do, on average, for it to: an entry, and the exit or
+// return that ends the stretch, cost what the tree tier takes for about
+// that many instructions (the V8 suite's medians of five: 10 left Richards'
+// task methods, called from the tree tier and calling out again, native at
+// a loss; 20 is best overall, 1,374.8 ms against 1,413.6).
 const (
 	jitSSAProbe   = 64
-	jitSSAMinWork = 10
+	jitSSAMinWork = 20
 )
 
 // jitSSAProfit accounts for a native stretch that started at pc, with the
 // back-edge counter at edges, and ended as ctx says; every jitSSAProbe
 // stretches it decides whether the function's native code pays. Code whose
-// stretches mostly end leaving for Go, after little work -- a method call
-// at every iteration, through Go -- costs more there than it saves, and the
-// tree tier runs it from then on. The work is estimated: the distance from
-// the entry to the exit, in slot IR instructions, and a loop's mean length
-// for each back-edge taken natively.
+// stretches do little work before they end -- leaving for Go, a method
+// call at every iteration, or returning, a small method the tree tier calls
+// that calls out again -- costs more there than it saves, and the tree tier
+// runs it from then on. The work is estimated: the distance from the entry
+// to the exit or return (the return's block), in slot IR instructions, and
+// a loop's mean length for each back-edge taken natively.
 func (r *Runtime) jitSSAProfit(e *jitEntry, ctx *abi.Context, start, edges int) {
 	st := &e.ssaStats
 	work := uint64(0)
 	if back := edges - r.backEdges; back > 0 {
 		work = uint64(back) * uint64(e.ssaLoop)
 	}
-	if ctx.ExitKind == abi.ExitHost || ctx.ExitKind == abi.ExitDeopt {
-		st.ended++
+	if ctx.ExitKind == abi.ExitHost || ctx.ExitKind == abi.ExitDeopt || ctx.ExitKind == abi.ExitReturn {
+		if ctx.ExitKind != abi.ExitReturn {
+			st.ended++
+		}
 		if site := int64(ctx.ExitSite); site > int64(start) {
 			work += uint64(site - int64(start))
 		}
 	}
 	st.work += work
-	if st.entries%jitSSAProbe == 0 && st.ended*2 > st.entries && st.work < st.entries*jitSSAMinWork {
+	if st.entries%jitSSAProbe == 0 && st.work < st.entries*jitSSAMinWork {
 		e.entrySlow = true
 	}
 }
