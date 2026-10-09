@@ -7,6 +7,7 @@ import (
 	"slices"
 	"unsafe"
 
+	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
 
@@ -362,6 +363,8 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 		}
 		return ir.Exit{Kind: kind, State: ir.StateMap{PC: s.PC, Depth: s.Depth}}, nil
 	}
+	// keep is the context's keep cells (OpKeep).
+	var keep [abi.MaxKeeps]ir.Value
 	polls := 0
 	blk, from := e.Block, -1
 	for {
@@ -520,7 +523,7 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
 				for _, s := range v.Args[2:] {
-					if vals[s.ID].cell == &o.Props[i] {
+					if vals[s.ID].cell == &o.Props[i] && isReference(o.Props[i]) {
 						return exit(v.State, ir.ExitKind(v.Aux))
 					}
 				}
@@ -560,6 +563,27 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 				vals[v.ID] = val{f: float64(s.Units[i])}
 			case OpLoadCell:
 				vals[v.ID] = val{t: *a.cell}
+			case OpKeep:
+				// The value's source while the collector marks, else a copy.
+				if heap.WriteBarrier {
+					x := v.Args[0]
+					switch o := origin.At(x); {
+					case x.Shadow != nil:
+						vals[v.ID] = vals[x.Shadow.ID]
+					case o >= 0:
+						vals[v.ID] = val{i: uint32(int32(o))}
+					default:
+						vals[v.ID] = val{i: uint32(0xFFFFFFFF)}
+					}
+					break
+				}
+				keep[v.Index] = a.t
+				vals[v.ID] = val{cell: &keep[v.Index]}
+			case OpKept:
+				vals[v.ID] = b
+			case OpKeepRef:
+				// The evaluator keeps whole values (OpKeep).
+				vals[v.ID] = val{}
 			case OpCheckInit:
 				if a.t.Kind == ir.Uninitialized {
 					return exit(v.State, ir.ExitKind(v.Aux))

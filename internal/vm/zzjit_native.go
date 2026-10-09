@@ -207,12 +207,16 @@ type jitEntry struct {
 	// caller's code holds its address, which keeps the entry alive
 	// (ssaCallees).
 	nativeEntry uintptr
-	// nativeIn counts the calls native code made to it, which that code
-	// counts, and nativeOut those that left native code from inside it
-	// (jitUnwindNative); notNative marks code native callers no longer
-	// call, for leaving on too many (jitUnwindShare).
+	// nativeIn counts the calls native code made to it since it was last
+	// compiled, which that code counts, and nativeOut those that left
+	// native code from inside it (jitUnwindNative); notNative marks code
+	// native callers no longer call, for leaving on too many
+	// (jitUnwindShare), until Go has made nativeRetry calls to it, more
+	// for each time it was found to (nativeBackoff, jitNativeRetry).
 	nativeIn, nativeOut uint64
 	notNative           bool
+	nativeRetry         uint32
+	nativeBackoff       uint8
 	// ssaCallees are the entries of the functions the code calls natively,
 	// and ssaInlined the closures of those it inlines, whose frames Go makes
 	// at an exit inside them (jitUnwindNative).
@@ -783,6 +787,9 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 		f.cl.setHint(hintFor(e))
 	}
 	if e != nil && e.ssa != nil {
+		if e.notNative {
+			jitRetryNative(e)
+		}
 		if e.inlinePending && e.inlineReopts < jitInlineReoptimizations {
 			e.inlinePending, e.inlineReopt = false, true
 		}

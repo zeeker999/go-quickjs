@@ -318,6 +318,10 @@ func (c *core) allocate() error {
 			}
 			for _, a := range v.Args {
 				uses = append(uses, use{a, pos[v.ID]})
+				if (v.Op == ssa.OpKeep || v.Op == ssa.OpKeepRef) && a == v.Args[0] && a.Shadow != nil {
+					// It reads where its value came from (mir's keep).
+					uses = append(uses, use{a.Shadow, pos[v.ID]})
+				}
 			}
 			useState(v.State, pos[v.ID])
 		}

@@ -1021,8 +1021,15 @@ func (c *compiler) propStore(v *ssa.Value, guard func(amd64.Cond)) {
 	c.a.MovQToX(xScratch1, scratchC)
 	c.property(v, guard)
 	for _, s := range v.Args[2:] {
+		// A live value read from this cell keeps its pointer word there:
+		// unless it is none, a primitive's (storeChecks).
+		other := c.a.NewLabel()
 		c.a.Op(amd64.Cmp, c.gpr(s, scratchB), scratchA, true)
-		guard(amd64.CondE)
+		c.a.Jcc(amd64.CondNE, other)
+		c.a.Load(scratchB, scratchA, c.enc.RefOffset)
+		c.a.Op(amd64.Test, scratchB, scratchB, true)
+		guard(amd64.CondNE)
+		c.a.Bind(other)
 	}
 	scalar := c.a.NewLabel()
 	c.a.MovQFromX(scratchC, xScratch1)
@@ -1145,6 +1152,70 @@ func (c *compiler) stringBytes(exit, yes, no amd64.Label) {
 		c.a.Load(regStack, regCtx, abi.OffStack)
 		c.a.Jmp(l.to)
 	}
+}
+
+// keepSource leaves in scratchC where a tagged value came from, as an
+// exit's record has it: its shadow; the slot its origin is, if the value is
+// that slot's reference at entry; or -1 for a primitive. It uses scratchA.
+func (c *compiler) keepSource(x *ssa.Value) {
+	switch o, static := c.origin.Of(x); {
+	case x.Shadow != nil:
+		if r := c.gpr(x.Shadow, scratchC); r != scratchC {
+			c.a.MovRR(scratchC, r)
+		}
+	case static && o >= 0:
+		scalar, done := c.a.NewLabel(), c.a.NewLabel()
+		c.isReference(x, c.gpr(x, scratchA), o, scalar)
+		c.a.MovImm(scratchC, uint64(o))
+		c.a.Jmp(done)
+		c.a.Bind(scalar)
+		c.a.MovImm(scratchC, ^uint64(0))
+		c.a.Bind(done)
+	default:
+		c.a.MovImm(scratchC, ^uint64(0))
+	}
+}
+
+// keepRef is a tagged value's pointer word, read where it came from
+// (keepSource), or 0 for a primitive's or while the collector marks (ssa's
+// OpKeepRef).
+func (c *compiler) keepRef(v *ssa.Value) {
+	x := v.Args[0]
+	scalar := c.a.NewLabel()
+	c.keepSource(x)
+	c.a.MovImm(scratchA, 0)
+	c.a.MovImm(scratchB, c.enc.WriteBarrier)
+	c.a.LoadU8(scratchB, scratchB, 0)
+	c.a.Op(amd64.Test, scratchB, scratchB, false)
+	c.a.Jcc(amd64.CondNE, scalar)
+	c.a.OpImm(amd64.Cmp, scratchC, -1, true)
+	c.a.Jcc(amd64.CondE, scalar)
+	c.sourceAddr()
+	c.a.Load(scratchA, scratchC, c.enc.RefOffset)
+	c.a.Bind(scalar)
+	c.setG(v, scratchA)
+}
+
+// keep copies a value, its pointer word read before (keepRef), into the
+// context's keep cell v.Index, and leaves the cell's address as v (ssa's
+// OpKeep); while the collector marks, it writes nothing and v is where the
+// value came from (keepSource).
+func (c *compiler) keep(v *ssa.Value) {
+	x := v.Args[0]
+	done := c.a.NewLabel()
+	c.keepSource(x)
+	c.a.MovRR(scratchA, scratchC)
+	c.a.MovImm(scratchB, c.enc.WriteBarrier)
+	c.a.LoadU8(scratchB, scratchB, 0)
+	c.a.Op(amd64.Test, scratchB, scratchB, false)
+	c.a.Jcc(amd64.CondNE, done)
+	at := abi.OffKeep + int32(v.Index)*int32(c.enc.ValueSize)
+	c.a.Store(regCtx, at+c.enc.RefOffset, c.gpr(v.Args[1], scratchB))
+	c.a.Store(regCtx, at+c.enc.NumOffset, c.gpr(x, scratchB))
+	c.a.MovRR(scratchA, regCtx)
+	c.a.OpImm(amd64.Add, scratchA, at, true)
+	c.a.Bind(done)
+	c.setG(v, scratchA)
 }
 
 // holder finds the property a read whose receiver's shape it knows names
@@ -1414,6 +1485,12 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.MovImm(scratchB, v.Const.Bits)
 		c.a.Op(amd64.Cmp, c.gpr(arg(0), scratchA), scratchB, true)
 		guard(amd64.CondNE)
+	case ssa.OpKeepRef:
+		c.keepRef(v)
+	case ssa.OpKeep:
+		c.keep(v)
+	case ssa.OpKept:
+		c.setG(v, c.gpr(arg(1), scratchA))
 	case ssa.OpFrameRoom:
 		c.a.MovRR(scratchA, regStack)
 		c.a.Load(scratchB, regCtx, abi.OffStackBase)

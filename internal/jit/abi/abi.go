@@ -13,6 +13,9 @@ const SpillSlots = 256
 
 // MaxRecords bounds an exit's records, one per slot at most, and so the
 // slots of a function the JIT compiles.
+// MaxKeeps is how many references a function's code keeps (Context.Keep).
+const MaxKeeps = 8
+
 const MaxRecords = 256
 
 // Record is an exit's instruction to Go for one slot, which native code
@@ -114,6 +117,11 @@ type Context struct {
 	Record  [MaxRecords]Record
 	// Spill holds what the allocator could not keep in registers.
 	Spill [SpillSlots]uint64
+	// Keep holds references copied out of cells a store then overwrites
+	// while slots still hold them (ssa's OpKeep), read from here since: the
+	// collector sees them, as it does the frame's; they are written only
+	// while it does not mark. Go clears them when the code returns.
+	Keep [MaxKeeps]Slot
 }
 
 // Slot is a VM value's layout -- a number word, then a pointer word -- held
@@ -142,6 +150,7 @@ var (
 	OffRecords   = int32(unsafe.Offsetof(Context{}.Records))
 	OffRecord    = int32(unsafe.Offsetof(Context{}.Record))
 	OffSpill     = int32(unsafe.Offsetof(Context{}.Spill))
+	OffKeep      = int32(unsafe.Offsetof(Context{}.Keep))
 
 	OffReturnTo   = int32(unsafe.Offsetof(Context{}.ReturnTo))
 	OffRetValue   = int32(unsafe.Offsetof(Context{}.RetValue))
