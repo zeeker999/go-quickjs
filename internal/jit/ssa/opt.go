@@ -345,7 +345,9 @@ func rewrite(f *Func, find func(*Value) *Value) {
 			return
 		}
 		for i, v := range s.Slots {
-			s.Slots[i] = find(v)
+			if v != nil {
+				s.Slots[i] = find(v)
+			}
 		}
 	}
 	for _, b := range f.Blocks {
@@ -387,7 +389,9 @@ func removeDead(f *Func) bool {
 	markState := func(s *FrameState) {
 		if s != nil {
 			for _, v := range s.Slots {
-				mark(v)
+				if v != nil {
+					mark(v)
+				}
 			}
 		}
 	}
@@ -440,7 +444,9 @@ func recount(f *Func) {
 	state := func(s *FrameState) {
 		if s != nil {
 			for _, v := range s.Slots {
-				use(v)
+				if v != nil {
+					use(v)
+				}
 			}
 		}
 	}

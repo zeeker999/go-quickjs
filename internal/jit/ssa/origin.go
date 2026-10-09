@@ -281,7 +281,9 @@ func storeChecks(f *Func) {
 			}
 			if v.State != nil {
 				for _, s := range v.State.Slots {
-					use(s, b, i)
+					if s != nil {
+						use(s, b, i)
+					}
 				}
 			}
 		}
@@ -290,7 +292,9 @@ func storeChecks(f *Func) {
 		}
 		if b.State != nil {
 			for _, s := range b.State.Slots {
-				use(s, b, len(b.Values))
+				if s != nil {
+					use(s, b, len(b.Values))
+				}
 			}
 		}
 	}

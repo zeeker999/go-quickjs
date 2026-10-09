@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3864,13 +3865,12 @@ func jitMarkingForTest(t *testing.T) {
 	})
 }
 
-// A small method whose native code has no effect is inlined at a call the
-// new pipeline has seen call it (jitCallSeen, ssa.InlineSite): the loop
-// then never leaves native code, a missing argument is undefined, and the
-// receiver is the call's. A method replaced fails the call's check, and Go
-// makes the call, native code going on after it; after jitInlineExits the
-// code is compiled again without inlining it. Each answer is the
-// interpreter's.
+// A small method is inlined at a call the new pipeline has seen call it
+// (jitCallSeen, ssa.InlineSite): the loop then never leaves native code, a
+// missing argument is undefined, and the receiver is the call's. A method
+// replaced fails the call's check, Go makes the call, and the call is no
+// longer inlined but made natively, to either function, as V8's feedback
+// goes polymorphic (jitInlinedCalls). Each answer is the interpreter's.
 func TestJITSSAInline(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -3921,12 +3921,97 @@ func TestJITSSAInline(t *testing.T) {
 			}
 		}
 	}
-	// isHeld, replaced, failed the check jitInlineExits times, through Go,
-	// and stopped being inlined; plus stays.
+	// isHeld, replaced, is called natively instead; plus stays inlined.
 	e := entry("count")
 	if e == nil || e.ssa == nil || len(e.inlines) != 2 || len(e.notInline) != 1 || e.notInline[0] != e.inlines[0].pc ||
-		e.inlines[0].exits < jitInlineExits || e.inlineReopts != 2 || len(e.failed) != 0 {
-		t.Fatalf("count was not inlined, then compiled again without isHeld: %+v", e)
+		!slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.pc == e.inlines[0].pc }) || len(e.failed) != 0 {
+		t.Fatalf("count was not inlined, then compiled again calling isHeld natively: %+v", e)
+	}
+}
+
+// A callee that writes properties is inlined too, and an exit inside it
+// makes its frame, as V8's deoptimizer does (ssa.InlineState): what it did
+// before the exit is not done again, Go does what it left for, and native
+// code goes on after the call. Here bump's multiplication fails its guard
+// once x is a string, after bump has counted the call in n, with operands
+// and a receiver to put in the frame and t, a reference, live in it; in a
+// callee mid calls natively too, two levels down. Run with the collector
+// marking, the exit leaves its records to Go, which applies them before it
+// makes the frame: code compiled while it marks from the start; from the
+// fourth round, only code compiled again, which a native call from older
+// code may reach, whose records Go applies too. Each answer, n's count
+// among them, is the interpreter's.
+func TestJITSSAInlineEffects(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []int{-1, 0, 3} {
+		t.Run(fmt.Sprint("marking=", marking), func(t *testing.T) {
+			setup := `function C(){this.n=0;this.t={x:3}}
+				C.prototype.bump=function(k){const t=this.t;this.n=this.n+1;return t.x*k+this.n};
+				function run(o,n){let s=0;for(let i=0;i<n;i++)s=(s+o.bump(i))|0;return s}
+				function mid(o,i){return o.bump(i)+o.bump(1)}
+				function deep(o,n){let s=0;for(let i=0;i<n;i++)s=(s+mid(o,i))|0;return s}
+				var a=new C,b=new C;`
+			rounds := []string{
+				`[run(a,200),deep(b,100),a.n,b.n].join()`,
+				`[run(a,200),deep(b,100),a.n,b.n].join()`,
+				`[run(a,200),deep(b,100),a.n,b.n].join()`,
+				`a.t.x='5';b.t.x='7';[run(a,200),deep(b,100),a.n,b.n].join()`,
+				`[run(a,200),deep(b,100),a.n,b.n].join()`,
+			}
+			want := New(Config{})
+			defer func() { want.Close(); want.ReleaseClosed() }()
+			r := jitRuntimeForTest(t, Config{JIT: true})
+			r.jitSSA = true
+			for _, rt := range []*Runtime{want, r} {
+				if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			entry := func(name string) *jitEntry {
+				cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+				return r.jit.hint(cl.hint())
+			}
+			if marking == 0 {
+				jitMarkingForTest(t)
+			}
+			for i, src := range rounds {
+				wv, err := want.Run(compileForTest(t, src))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var hosts uint64
+				if i == 2 {
+					runtime.GC()
+					defer debug.SetGCPercent(debug.SetGCPercent(-1))
+					hosts = entry("run").ssaStats.hosts
+				}
+				if i == 3 && marking == 3 {
+					jitMarkingForTest(t)
+				}
+				unwound := r.jit.unwound
+				gv, err := r.Run(compileForTest(t, src))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, want := gv.String().Go(), wv.String().Go(); got != want {
+					t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+				}
+				switch i {
+				case 2:
+					// bump inlined, stores and all: run never leaves. (While the
+					// collector marks, its reference stores leave.)
+					if e := entry("run"); len(e.inlines) == 0 || marking != 0 && e.ssaStats.hosts != hosts {
+						t.Fatalf("run left native code %d times; inlines %d", e.ssaStats.hosts-hosts, len(e.inlines))
+					}
+				case 3:
+					if r.jit.unwound == unwound {
+						t.Fatal("no exit inside an inlined callee made its frame")
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -4190,7 +4275,8 @@ func TestJITSSANativeCallsWhileMarking(t *testing.T) {
 // A call that calls several functions calls each natively, up to
 // jitCallTargets, as V8's polymorphic call feedback does: one more leaves
 // for Go. A callee with no loop, which Go would not enter (LowerSSA), is
-// compiled for its native callers alone (LowerSSAInline). One that leaves
+// compiled for its native callers alone (LowerSSAInline); leaf's calls keep
+// it from being inlined. One that leaves
 // native code on too many of its calls (jitUnwindShare) is called by Go
 // again. And Go finishes native calls that left native code inside native
 // calls of frames it is finishing, its unwinds nested. Each answer is the
@@ -4205,7 +4291,8 @@ func TestJITSSANativeCallTargets(t *testing.T) {
 		function D(){}D.prototype.get=function(k){this.k=k;return k+1};
 		function E(){}E.prototype.get=function(k){return -k};
 		function poly(os,n){let t=0;for(let i=0;i<n;i++){t=(t+os[i%os.length].get(i))|0;t^=t>>>3}return t}
-		function leaf(x){x.c=(x.c|0)+1;return x.c}
+		function inc(x){x.c=(x.c|0)+1;return x.c}
+		function leaf(x){return inc(x)+inc(x)}
 		function useLeaf(o,n){let t=0;for(let i=0;i<n;i++)t=(t+leaf(o))|0;return t}
 		function leave(i){return String(i).length}
 		function useLeave(n){let t=0;for(let i=0;i<n;i++)t=(t+leave(i))|0;return t}

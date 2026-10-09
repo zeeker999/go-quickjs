@@ -160,6 +160,11 @@ const (
 	// OpSameObject guards that an object is the one at Const.Bits, an
 	// address the VM keeps alive: an inlined call's function (inline).
 	OpSameObject // ptr -> none
+	// OpFrameRoom guards that the VM's stack has Index slots past the
+	// operands' first and that a context follows this one: room for an
+	// inlined callee's frame, which an exit inside it writes there
+	// (InlineState).
+	OpFrameRoom // -> none
 )
 
 var opNames = [...]string{
@@ -171,7 +176,7 @@ var opNames = [...]string{
 	OpAddF64: "addf", OpSubF64: "subf", OpMulF64: "mulf", OpDivF64: "divf", OpModF64: "modf", OpNegF64: "negf", OpCmpF64: "cmpf",
 	OpNot: "not", OpStrictNullish: "strictnullish", OpLooseNullish: "loosenullish", OpEqTagged: "eqtagged", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
-	OpSameObject: "sameobject",
+	OpSameObject: "sameobject", OpFrameRoom: "frameroom",
 }
 
 func (o Op) String() string {
@@ -186,7 +191,7 @@ func (o Op) isGuard() bool {
 	switch o {
 	case OpUnboxF64, OpTruth, OpCheckInit, OpModF64, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite, OpElemCell, OpLength,
 		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell, OpStringMethod, OpStringCode, OpLooseNullish, OpEqTagged,
-		OpSameObject:
+		OpSameObject, OpFrameRoom:
 		return true
 	}
 	return false
@@ -239,6 +244,30 @@ type FrameState struct {
 	// this state, or -1 for a block's entry or loop header (abi.Context's
 	// ExitSite).
 	Site int
+	// Inline, for a state inside an inlined callee, is the callee's frame,
+	// whose slots are Slots' from Inline.Base on; the others are the
+	// caller's at the call, which PC, Depth and Site are, and those between
+	// are nil.
+	Inline *InlineState
+}
+
+// InlineState is an inlined callee's frame at an exit inside it, which,
+// as V8's deoptimizer does, makes the frame the callee would have had: the
+// exit writes the caller's state at the call and the callee's slots past
+// it, in the caller's operand stack, and says in the next context where
+// they are (abi.Context's Inline fields), for Go to make the VM's frame
+// from, as for a native call's callee that left native code. Closure is
+// the callee's closure's address (InlineSite); Base its first slot among
+// the function's; Locals its program's locals, its receiver among them,
+// at ThisSlot, or -1; PC, Depth and Site where in it the exit is.
+type InlineState struct {
+	Closure  uintptr
+	Base     int
+	Locals   int
+	ThisSlot int
+	PC       uint32
+	Depth    int
+	Site     int
 }
 
 // Kind is how a block ends.

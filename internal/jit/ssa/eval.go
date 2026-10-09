@@ -341,6 +341,9 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 		return o >= 0 && o < len(slots) && slots[o] == x
 	}
 	exit := func(s *FrameState, kind ir.ExitKind) (ir.Exit, error) {
+		if s.Inline != nil {
+			return ir.Exit{}, fmt.Errorf("%w: an inlined callee's frame", ErrUnsupported)
+		}
 		for i, v := range s.Slots {
 			if !traced(v) {
 				return ir.Exit{}, fmt.Errorf("%w: slot %d's %v at pc %d", ErrOrigin, i, v, s.PC)
