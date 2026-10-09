@@ -245,3 +245,22 @@ func TestAMD64Branches(t *testing.T) {
 		t.Fatalf("Jmp back: %v", inst)
 	}
 }
+
+// JmpReg jumps through every register, and LeaLabel takes a label's
+// address, RIP-relative, into every register.
+func TestAMD64IndirectJumps(t *testing.T) {
+	for _, r := range regs {
+		expect(t, "JmpReg", encode(func(a *amd64.Asm) { a.JmpReg(r) }), x86asm.JMP, r64(r))
+		code := encode(func(a *amd64.Asm) {
+			l := a.NewLabel()
+			a.LeaLabel(r, l)
+			a.Ret()
+			a.Bind(l)
+		})
+		inst := decodeOne(t, "LeaLabel", code[:7])
+		m, ok := inst.Args[1].(x86asm.Mem)
+		if inst.Op != x86asm.LEA || inst.Args[0] != r64(r) || !ok || m.Base != x86asm.RIP || m.Disp != 1 {
+			t.Fatalf("LeaLabel %v: % x is %v", r, code, inst)
+		}
+	}
+}

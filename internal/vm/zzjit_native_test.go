@@ -732,7 +732,8 @@ func TestJITSSACallExits(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
-	setup := `var O={p:[1,2,3]};function h(a){a.n=1;return a.length}
+	// h reads arguments: Go calls it, never native code (jitNativeCallee).
+	setup := `var O={p:[1,2,3]};function h(a){a.n=arguments.length;return a.length}
 		function f(n){let s=0;for(let i=0;i<n;i++){s=(s+g(i))|0;s=(s*31+i)|0;s^=s>>>3;s=(s+i*7)|0;s^=s<<2}return s}
 		function k(n){let s=0;for(let i=0;i<n;i++){s=(s+h(O.p))|0;s=(s*31+i)|0;s^=s>>>3;s=(s+i*7)|0;s^=s<<2}return s}`
 	rounds := []struct {
@@ -1540,7 +1541,8 @@ func TestJITSSAProfitability(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
-	setup := `function O(){this.v=0}O.prototype.m=function(i){this.v+=i;return this.v};
+	// m reads arguments: Go calls it, never native code (jitNativeCallee).
+	setup := `function O(){this.v=0}O.prototype.m=function(i){this.v+=arguments[0];return this.v};
 		function calls(o,n){let s=0;for(let i=0;i<n;i++)s+=o.m(i);return s}
 		function work(n){let s=0;for(let i=0;i<n;i++){s=(s*31+i)|0;s^=s>>>7;s=(s+i*i)|0;if(i%100==0)s+=Math.abs(i)}return s}
 		var o=new O;`
@@ -3602,7 +3604,8 @@ func TestJITSSAPrototypeMethods(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
-	setup := `function A(){this.v=1}A.prototype.m=function(){this.n=1;return this.v+1};
+	// m reads arguments: Go calls it, never native code (jitNativeCallee).
+	setup := `function A(){this.v=1}A.prototype.m=function(){this.n=arguments.length;return this.v+1};
 		function B(){this.v=2}B.prototype=Object.create(A.prototype);
 		function run(o,n){let s=0;for(let i=0;i<n;i++){s+=o.m();for(let j=0;j<12;j++)s=(s*3+j)%1000003}return s}
 		function swap(o,n){let s=0;for(let i=0;i<n;i++){s+=o.m();for(let j=0;j<12;j++)s=(s*3+j)%1000003;if(i==20)change()}return s}
@@ -3984,10 +3987,12 @@ func TestJITSSAProfitReturns(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
-	setup := `function T(){this.n=0;this.v=1}T.prototype.bump=function(){this.n++};
+	// Go calls bump, which reads arguments, and step, through call: native
+	// code calls neither (jitNativeCallee).
+	setup := `function T(){this.n=0;this.v=1}T.prototype.bump=function(){this.n+=arguments.length+1};
 		T.prototype.step=function(k){let s=this.v;for(let i=0;i<2;i++)s=(s*3+i)|0;this.bump();return s+k};
 		function heavy(n){let s=0;for(let i=0;i<n;i++){s=(s*31+i)|0;s^=s>>>7}return s}
-		function drive(){let s=0;for(let i=0;i<300;i++)s=(s+t.step(i))|0;return [s,t.n,heavy(500)].join()}
+		function drive(){let s=0;for(let i=0;i<300;i++)s=(s+t.step.call(t,i))|0;return [s,t.n,heavy(500)].join()}
 		var t=new T;`
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
@@ -4020,5 +4025,261 @@ func TestJITSSAProfitReturns(t *testing.T) {
 	heavy := r.global.getOwn(r.atoms.intern("heavy")).value.Object().fn().closure
 	if e := r.jit.hint(heavy.hint()); e == nil || e.ssa == nil || e.entrySlow {
 		t.Fatalf("heavy left native code: %+v", e)
+	}
+}
+
+// A call the new pipeline has seen call one compiled function is made in
+// native code (mir's native calls), the callee's frame and context made
+// there, as V8's code calls another's: a loop of such calls never leaves
+// native code. Arguments missing are undefined and extra ones dropped; a
+// method gets its receiver; recursion goes as deep as there are contexts
+// (jitContexts), then through Go. A callee that leaves native code -- for
+// a builtin, a throw the caller catches, a speculation that fails -- has
+// its frame and its callers' made by Go (jitUnwindNative), which finishes
+// them. Each answer is the interpreter's.
+func TestJITSSANativeCalls(t *testing.T) {
+	if !jitSSABackend || runtime.GOARCH != "amd64" {
+		t.Skip("native calls are amd64's so far")
+	}
+	setup := `function add(a,b){let s=a;for(let i=0;i<3;i++)s=(s*3+(b===undefined?5:b))|0;return s}
+		function P(v){this.v=v}P.prototype.m=function(k){let s=this.v;for(let i=0;i<2;i++)s=(s+k*i)|0;return s};
+		function sum(n){let t=0;for(let i=0;i<n;i++){t=(t+add(i,t&7))|0;t^=t>>>3}return t}
+		function few(n){let t=0;for(let i=0;i<n;i++){t=(t+add(i))|0;t=(t+add(i,1,2))|0;t^=t>>>3}return t}
+		function meth(o,n){let t=0;for(let i=0;i<n;i++){t=(t+o.m(i))|0;t^=t>>>2}return t}
+		function fib(n){if(n<2)return n;let a=fib(n-1);let b=fib(n-2);for(let i=0;i<1;i++)a=a|0;return a+b}
+		function floor(x){let s=0;for(let i=0;i<2;i++)s=(s+Math.floor(x/3))|0;return s}
+		function useFloor(n){let t=0;for(let i=0;i<n;i++){t=(t+floor(i))|0;t^=t>>>3}return t}
+		function thrower(x){let s=x;for(let i=0;i<2;i++)s=s*2;if(x===37)throw new Error("x"+s);return s}
+		function catcher(n){let t=0;for(let i=0;i<n;i++){try{t=(t+thrower(i))|0}catch(e){t=(t+e.message.length)|0}t^=t>>>3}return t}
+		function num(x){let s=0;for(let i=0;i<2;i++)s=s+x*2;return s}
+		function deopt(xs,n){let t=0;for(let i=0;i<n;i++){t=t+num(xs[i%xs.length]);t=t|0}return t}
+		var p=new P(3),xs=[1,2,3,4,5,6,7,8];`
+	rounds := []string{
+		`[sum(200),few(100),meth(p,200),fib(12),useFloor(100),catcher(60),deopt(xs,100)].join()`,
+		`[sum(200),few(100),meth(p,200),fib(12),useFloor(100),catcher(60),deopt(xs,100)].join()`,
+		`[sum(200),few(100),meth(p,200),fib(20),useFloor(100),catcher(60),deopt(xs,100)].join()`,
+		`xs[3]='s';[sum(200),meth(new P(9),200),catcher(60),deopt(xs,100)].join()`,
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry := func(name string) *jitEntry {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		return r.jit.hint(cl.hint())
+	}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts, entries uint64
+		if e := entry("sum"); e != nil {
+			hosts, entries = e.ssaStats.hosts, e.ssaStats.entries
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 2 {
+			// Native, entered, and never leaving native code for its calls.
+			if e := entry("sum"); e == nil || e.ssa == nil || len(e.nativeCalls) == 0 || e.entrySlow ||
+				e.ssaStats.entries == entries || e.ssaStats.hosts != hosts {
+				t.Fatalf("sum's calls left native code: %+v", e)
+			}
+		}
+	}
+	// The callees that left native code -- floor for Math.floor, thrower,
+	// num with a string -- had their frames made by Go.
+	if r.jit.unwound == 0 {
+		t.Fatal("no native call's callee left native code")
+	}
+}
+
+// Native calls pass and return references, and make frames in the VM's
+// stack, while the collector runs continuously: natively while it does not
+// mark, through Go while it does (abi.Encoding's WriteBarrier). Nothing is
+// lost or freed early; run with GODEBUG=gccheckmark=1 too.
+func TestJITSSANativeCallsUnderGC(t *testing.T) {
+	if !jitSSABackend || runtime.GOARCH != "amd64" {
+		t.Skip("native calls are amd64's so far")
+	}
+	defer debug.SetGCPercent(debug.SetGCPercent(1))
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				runtime.GC()
+			}
+		}
+	}()
+	defer func() { close(stop); <-done }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	src := `function link(a,b){let n=a;for(let i=0;i<1;i++)n.next=b;return a}
+		function pick(o,k){let x=o;for(let i=0;i<k;i++)x=x.next;return x}
+		function build(n){let h={v:-1,next:null};for(let i=0;i<n;i++){h=link({v:i,pad:[i,i]},h)}return h}
+		function walk(h,n){let s=0;for(let i=0;i<n;i++){s=(s+pick(h,i%5).v)|0}return s}
+		let ok=true;
+		for(let round=0;round<200;round++){
+			const h=build(40);
+			ok=ok&&walk(h,100)===walk(h,100)&&pick(h,39).v===0;
+		}
+		ok`
+	v, err := r.Run(compileForTest(t, src))
+	if err != nil || !v.IsBool() || !v.Truthy() {
+		t.Fatalf("= %v, %v", v, err)
+	}
+	cl := r.global.getOwn(r.atoms.intern("walk")).value.Object().fn().closure
+	if e := r.jit.hint(cl.hint()); e == nil || e.ssa == nil || len(e.nativeCalls) == 0 {
+		t.Fatalf("walk made no native calls: %+v", e)
+	}
+}
+
+// While the collector marks, a native call is Go's: the frames and the
+// callee's context take pointers.
+func TestJITSSANativeCallsWhileMarking(t *testing.T) {
+	if !jitSSABackend || runtime.GOARCH != "amd64" {
+		t.Skip("native calls are amd64's so far")
+	}
+	jitMarkingForTest(t)
+	setup := `function add(a,b){let s=a;for(let i=0;i<3;i++)s=(s*3+b)|0;return s}
+		function sum(n){let t=0;for(let i=0;i<n;i++){t=(t+add(i,t&7))|0;t^=t>>>3;t=(t*5+i)|0;t^=t>>>7}return t}`
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	if _, err := r.Run(compileForTest(t, setup)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := r.Run(compileForTest(t, `sum(300)`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("sum")).value.Object().fn().closure
+	e := r.jit.hint(cl.hint())
+	if e == nil || e.ssa == nil || len(e.nativeCalls) == 0 {
+		t.Fatalf("sum was not compiled to call natively: %+v", e)
+	}
+	hosts := e.ssaStats.hosts
+	if _, err := r.Run(compileForTest(t, `sum(300)`)); err != nil {
+		t.Fatal(err)
+	}
+	if e.ssaStats.hosts-hosts < 300 {
+		t.Fatalf("sum called natively while the collector marked: %d exits for 300 calls", e.ssaStats.hosts-hosts)
+	}
+}
+
+// A call that calls several functions calls each natively, up to
+// jitCallTargets, as V8's polymorphic call feedback does: one more leaves
+// for Go. A callee with no loop, which Go would not enter (LowerSSA), is
+// compiled for its native callers alone (LowerSSAInline). One that leaves
+// native code on too many of its calls (jitUnwindShare) is called by Go
+// again. And Go finishes native calls that left native code inside native
+// calls of frames it is finishing, its unwinds nested. Each answer is the
+// interpreter's.
+func TestJITSSANativeCallTargets(t *testing.T) {
+	if !jitSSABackend || runtime.GOARCH != "amd64" {
+		t.Skip("native calls are amd64's so far")
+	}
+	setup := `function A(v){this.v=v}A.prototype.get=function(k){this.n=k;return this.v+k};
+		function B(v){this.w=v;this.v=v*2}B.prototype.get=function(k){this.n=k;return this.v*k};
+		function C(v){this.v=v}C.prototype.get=function(k){return (this.v^k)+this.v};
+		function D(){}D.prototype.get=function(k){this.k=k;return k+1};
+		function E(){}E.prototype.get=function(k){return -k};
+		function poly(os,n){let t=0;for(let i=0;i<n;i++){t=(t+os[i%os.length].get(i))|0;t^=t>>>3}return t}
+		function leaf(x){x.c=(x.c|0)+1;return x.c}
+		function useLeaf(o,n){let t=0;for(let i=0;i<n;i++)t=(t+leaf(o))|0;return t}
+		function leave(i){return String(i).length}
+		function useLeave(n){let t=0;for(let i=0;i<n;i++)t=(t+leave(i))|0;return t}
+		function two(n,k){if(n===0)return k%16===0?String(k).length:1;let a=two(n-1,k);let b=two(n-1,k);return a+b}
+		function drive(n){let t=0;for(let i=0;i<n;i++)t=(t+two(4,i))|0;return t}
+		var four=[new A(1),new B(2),new C(3),new D],five=[new A(4),new B(5),new C(6),new D,new E],lo={c:0};`
+	src := `[poly(four,400),useLeaf(lo,300),useLeave(300),drive(64)].join()`
+	rounds := []string{src, src, src, src, `[poly(five,400),poly(four,40),drive(64)].join()`}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry := func(name string) *jitEntry {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		return r.jit.hint(cl.hint())
+	}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The calls made natively to poly's callees: its exits are its
+		// reads of get, which one shape answers natively.
+		calledNatively := func() (n uint64) {
+			for _, x := range entry("poly").nativeCalls {
+				n += r.jit.cache[weak.Make(x.cl.fn)].nativeIn
+			}
+			return n
+		}
+		var polyCalls, leafHosts uint64
+		if i == 3 {
+			polyCalls, leafHosts = calledNatively(), entry("useLeaf").ssaStats.hosts
+		}
+		unwound := r.jit.unwound
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 3 {
+			if n := calledNatively() - polyCalls; len(entry("poly").nativeCalls) != 4 || n != 400 {
+				t.Fatalf("poly called its four callees natively %d times of 400", n)
+			}
+			if e := entry("leaf"); e == nil || e.ssa == nil || !e.ssaCallee || entry("useLeaf").ssaStats.hosts != leafHosts {
+				t.Fatalf("leaf, with no loop, was not called natively: %+v", e)
+			}
+			if e := entry("leave"); e == nil || !e.notNative || e.nativeEntry != 0 {
+				t.Fatalf("leave, leaving native code at every call, is still called natively: %+v", e)
+			}
+			if r.jit.unwound == unwound {
+				t.Fatal("two's calls never left native code")
+			}
+		}
+	}
+	// A callee whose code is gone when its caller is compiled again is not
+	// compiled then, inside the caller's compile, whose workspaces it would
+	// share: the call leaves for Go.
+	leaf := r.global.getOwn(r.atoms.intern("leaf")).value.Object().fn().closure
+	if !r.jit.dropEntry(weak.Make(leaf.fn), entry("leaf")) {
+		t.Fatal("leaf's code was not dropped")
+	}
+	entry("useLeaf").inlineReopt = true
+	src = `[useLeaf(lo,300),useLeaf(lo,300)].join()`
+	wv, err := want.Run(compileForTest(t, src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gv, err := r.Run(compileForTest(t, src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := gv.String().Go(), wv.String().Go(); got != want {
+		t.Fatalf("after leaf's code was dropped: got %s, interpreter %s", got, want)
 	}
 }

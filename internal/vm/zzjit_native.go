@@ -196,6 +196,23 @@ type jitEntry struct {
 	// fed are the property sites, each with the shape the code was
 	// compiled for there, or none (jitFed).
 	fed []jitFedSite
+	// nativeEntry is the address of the code's entry at its start, which
+	// native callers jump to (mir's native calls), or 0 while there is none
+	// they may: no code, or code that leaves too often (notNative). A
+	// caller's code holds its address, which keeps the entry alive
+	// (ssaCallees).
+	nativeEntry uintptr
+	// nativeIn counts the calls native code made to it, which that code
+	// counts, and nativeOut those that left native code from inside it
+	// (jitUnwindNative); notNative marks code native callers no longer
+	// call, for leaving on too many (jitUnwindShare).
+	nativeIn, nativeOut uint64
+	notNative           bool
+	// ssaCallees are the entries of the functions the code calls natively.
+	ssaCallees []*jitEntry
+	// nativeCalls are the calls the code makes natively, or will when
+	// compiled again, each with the function it was seen to call.
+	nativeCalls []jitInline
 	// inlines are the calls the code inlines, or will when compiled again,
 	// each with the function it was seen to call (jitCallSeen); notInline
 	// are those that stopped being: what the callee does kept leaving
@@ -211,8 +228,11 @@ type jitEntry struct {
 	inlinePending bool
 	// inlineReopt marks code to be compiled again for the calls found to
 	// inline, and inlineReopts counts the times it was, apart from reopts.
-	inlineReopt   bool
-	inlineReopts  uint8
+	inlineReopt  bool
+	inlineReopts uint8
+	// ssaCallee marks code compiled for native callers alone, from
+	// LowerSSAInline (jitNativeCallee).
+	ssaCallee     bool
 	code          *jit.Code
 	misses        uint8
 	probes        uint8
@@ -270,10 +290,23 @@ type jitState struct {
 	osrs        uint64
 	compiled    uint64
 	reoptimized uint64
+	// unwound counts the native calls whose callees left native code, which
+	// Go finished (jitUnwindNative).
+	unwound uint64
+	// unwinding holds the levels and frames of the native calls Go is
+	// finishing (jitUnwindNative), each unwind's past those of the ones it
+	// runs inside: reused, not allocated each time.
+	unwinding       []jitNativeLevel
+	unwindingFrames []*frame
 	// inlinable is whether each function may be inlined (jitInlinable).
-	inlinable     map[weak.Pointer[bytecode.Function]]bool
-	interpreted   uint64
-	stressExits   uint64
+	inlinable   map[weak.Pointer[bytecode.Function]]bool
+	interpreted uint64
+	stressExits uint64
+	// ssaCtxs are the contexts native code runs in, one for each runSSA
+	// running and each native call (abi.Context's Level), ctxTop the
+	// first free; ssaCtx is the one Go entered last, whose exit it reads.
+	ssaCtxs       *[jitContexts]abi.Context
+	ctxTop        int
 	ssaCtx        *abi.Context
 	ssaEntries    uint64
 	ssaRecords    uint64
@@ -340,6 +373,7 @@ func (r *Runtime) jitCodeBytes() int64 {
 // the OS would not release the code, which leaves e owned for a retry.
 func (s *jitState) dropEntry(key weak.Pointer[bytecode.Function], e *jitEntry) bool {
 	held := e.code.Size() != 0 || e.ssa.Size() != 0
+	e.nativeEntry = 0
 	if e.code.Close() != nil || e.ssa.Close() != nil {
 		return false
 	}
@@ -488,12 +522,7 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool, cl *closure) *j
 		// to the slot IR emitters.
 		if p, err := jitcompile.LowerSSA(fn); err == nil {
 			if code, fb := r.compileSSA(fn, cl, p, limit, e); code != nil {
-				e.ssa, e.this, e.ssaShapes, e.ssaHolders, e.fed = code, p.This, fb.shapes, fb.holders, fb.fed
-				e.ssaStrings = fb.strings
-				e.ssaLoop = jitLoopLength(fn)
-				for _, in := range p.Code {
-					e.ssaStrings = e.ssaStrings || in.Op == ir.StringMethod || in.Op == ir.StringCode
-				}
+				e.setSSA(fn, p, code, fb)
 				s.compiled++
 				s.remember(weak.Make(fn), e)
 				return e

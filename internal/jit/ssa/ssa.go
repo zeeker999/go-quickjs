@@ -274,6 +274,10 @@ type Block struct {
 	// Generic marks an entry block whose speculation failed before: the
 	// slots it loads are not unboxed there (Feedback's EntryGeneric).
 	Generic bool
+	// Calls, on a BlockExit at a call, are the functions it may call
+	// natively first, if it can (CallSite); its exit is where it goes
+	// otherwise.
+	Calls []*CallSite
 }
 
 // Entry is a place native code can be entered: an entry block, which loads

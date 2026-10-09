@@ -37,7 +37,7 @@ const (
 
 // Context is the block native code reaches through its context register.
 // Go sets the frame's addresses before every entry; native code writes the
-// exit record and spills. Native code only reads its pointers.
+// exit record and spills, and, for a native call, the callee's context.
 type Context struct {
 	// Locals and Stack are the frame's first local and first operand: each
 	// slot is an Encoding.ValueSize-byte VM value.
@@ -75,6 +75,31 @@ type Context struct {
 	// Ret is a return's number word. RetFrom is 0 when that is the result,
 	// or 1 plus the slot whose value, a reference, is.
 	Ret, RetFrom uint64
+	// A native call (mir's): a caller's code sets up its callee's frame in
+	// the VM's stack, and its context, the next in the runtime's array of
+	// them (ContextSize apart), and jumps to its code. ReturnTo is where a
+	// return goes in its caller's code, or 0 for Run's caller in Go;
+	// RetValue is the value it returns there, both words. Live marks a
+	// context a native call runs in; Closure, Base and Level say whose
+	// frame it is -- the VM's closure, the frame's index in the VM's stack,
+	// and the context's in the array -- for Go to make the VM's frames from
+	// when a callee leaves native code; Level stays below LevelLimit.
+	// StackBase and StackEnd are the VM's stack's first value and length,
+	// StackTop and StackHigh its next free and highest used indices, which
+	// a call moves. TailReturn is where the records' tail goes on, in a
+	// caller's code, instead of returning to Go: 0 but during a call.
+	ReturnTo   uintptr
+	RetValue   Slot
+	Live       uint64
+	Closure    unsafe.Pointer
+	Base       uint64
+	Level      uint64
+	LevelLimit uint64
+	StackBase  unsafe.Pointer
+	StackEnd   uint64
+	StackTop   *int
+	StackHigh  *int
+	TailReturn uintptr
 	// Records counts the Record entries an exit filled. Every other slot of
 	// its state is in the frame already.
 	Records uint64
@@ -109,6 +134,23 @@ var (
 	OffRecords   = int32(unsafe.Offsetof(Context{}.Records))
 	OffRecord    = int32(unsafe.Offsetof(Context{}.Record))
 	OffSpill     = int32(unsafe.Offsetof(Context{}.Spill))
+
+	OffReturnTo   = int32(unsafe.Offsetof(Context{}.ReturnTo))
+	OffRetValue   = int32(unsafe.Offsetof(Context{}.RetValue))
+	OffLive       = int32(unsafe.Offsetof(Context{}.Live))
+	OffClosure    = int32(unsafe.Offsetof(Context{}.Closure))
+	OffBase       = int32(unsafe.Offsetof(Context{}.Base))
+	OffLevel      = int32(unsafe.Offsetof(Context{}.Level))
+	OffLevelLimit = int32(unsafe.Offsetof(Context{}.LevelLimit))
+	OffStackBase  = int32(unsafe.Offsetof(Context{}.StackBase))
+	OffStackEnd   = int32(unsafe.Offsetof(Context{}.StackEnd))
+	OffStackTop   = int32(unsafe.Offsetof(Context{}.StackTop))
+	OffStackHigh  = int32(unsafe.Offsetof(Context{}.StackHigh))
+	OffTailReturn = int32(unsafe.Offsetof(Context{}.TailReturn))
+
+	// ContextSize is a Context's size, and so the distance from one to the
+	// next in an array of them.
+	ContextSize = int32(unsafe.Sizeof(Context{}))
 )
 
 // Exit kinds, written to Context.ExitKind.
