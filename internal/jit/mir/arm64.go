@@ -874,26 +874,26 @@ func (c *a64Compiler) sourceAddr() {
 // scratch register and F1.
 func (c *a64Compiler) propStore(v *ssa.Value, guard func(arm64.Cond)) {
 	x := v.Args[1]
-	none, have := c.a.NewLabel(), c.a.NewLabel()
-	w := c.gpr(x, a64A)
-	c.a.MovImm(a64B, abi.NumberLimit)
-	c.a.Cmp(w, a64B, true)
-	c.a.BCond(arm64.LO, none)
-	for _, p := range []uint64{c.enc.Undefined, c.enc.Null, c.enc.True, c.enc.False, c.enc.Uninitialized} {
-		c.a.MovImm(a64B, p)
-		c.a.Cmp(w, a64B, true)
-		c.a.BCond(arm64.EQ, none)
-	}
-	if x.Shadow == nil && c.origin.At(x) < 0 {
-		c.a.B(c.stubLabel(v.State, exitKind(v.Aux)))
+	var w arm64.Reg
+	if remat(x) {
+		c.materialize(x, a64A)
+		w = a64A
 	} else {
-		c.sourceRef(x, guard)
-		c.a.B(have)
+		w = c.gpr(x, a64A)
 	}
-	c.a.Bind(none)
-	c.a.MovImm(a64C, 0)
+	// As amd64's: a number has none.
+	number, have := c.a.NewLabel(), c.a.NewLabel()
+	if x.Shadow != nil || c.origin.At(x) >= 0 {
+		c.a.MovImm(a64B, abi.NumberLimit)
+		c.a.Cmp(w, a64B, true)
+		c.a.BCond(arm64.LO, number)
+	}
+	c.pointerWord(x, w)
+	c.a.B(have)
+	c.a.Bind(number)
+	c.a.MovImm(a64B, 0)
 	c.a.Bind(have)
-	c.a.FMovToF(a64F1, a64C)
+	c.a.FMovToF(a64F1, a64B)
 	c.property(v, guard)
 	for _, s := range v.Args[2:] {
 		// As amd64's: only a pointer word there is lost.
