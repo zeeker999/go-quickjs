@@ -497,6 +497,10 @@ func (c *compiler) block(b *ssa.Block, next *ssa.Block) {
 		}
 		c.a.MovImm(scratchA, abi.ExitReturn)
 		c.a.Store(regCtx, abi.OffExitKind, scratchA)
+		// Where it returned from, roughly -- its block's PC -- for the work
+		// the stretch did (the VM's jitSSAProfit).
+		c.a.MovImm(scratchA, uint64(b.PC))
+		c.a.Store(regCtx, abi.OffExitSite, scratchA)
 		c.a.Ret()
 	case ssa.BlockExit:
 		c.exitTo(b.State, exitKind(int(b.ExitKind)))

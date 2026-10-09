@@ -723,7 +723,8 @@ func TestJITSSAGlobals(t *testing.T) {
 // A call leaves the new pipeline's code once: the callee, a global, and an
 // argument read from an object stay native, carried by their cells, though
 // only Go uses them. (h stores, so it is not inlined; TestJITSSAInline
-// inlines.) A function compiled at its first call, before the
+// inlines.) The loops do enough besides to be worth running natively
+// (jitSSAProfit). A function compiled at its first call, before the
 // interpreter has run its global reads, finds the global where the global
 // object has it; deleting and defining it again moves it, which the cell's
 // key check sees.
@@ -732,8 +733,8 @@ func TestJITSSACallExits(t *testing.T) {
 		t.Skip("no SSA backend on this architecture")
 	}
 	setup := `var O={p:[1,2,3]};function h(a){a.n=1;return a.length}
-		function f(n){let s=0;for(let i=0;i<n;i++)s=(s+g(i))|0;return s}
-		function k(n){let s=0;for(let i=0;i<n;i++)s=(s+h(O.p))|0;return s}`
+		function f(n){let s=0;for(let i=0;i<n;i++){s=(s+g(i))|0;s=(s*31+i)|0;s^=s>>>3;s=(s+i*7)|0;s^=s<<2}return s}
+		function k(n){let s=0;for(let i=0;i<n;i++){s=(s+h(O.p))|0;s=(s*31+i)|0;s^=s>>>3;s=(s+i*7)|0;s^=s<<2}return s}`
 	rounds := []struct {
 		src   string
 		hosts uint64 // the exits it makes, if it must make that many
@@ -3573,9 +3574,11 @@ func TestJITSSAReoptimize(t *testing.T) {
 		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
 		return r.jit.hint(cl.hint())
 	}
+	// cmp's comparisons of objects go to Go at every iteration, which makes
+	// the tree tier run it (jitSSAProfit); scale's addition goes once a call.
 	for _, name := range []string{"scale", "cmp"} {
 		e := entry(name)
-		if e == nil || e.ssa == nil || e.reopts == 0 || e.reopts >= jitReoptimizations || e.entrySlow ||
+		if e == nil || e.ssa == nil || e.reopts == 0 || e.reopts >= jitReoptimizations || name == "scale" && e.entrySlow ||
 			e.ssaStats.entries == 0 || e.ssaStats.guards != 0 {
 			t.Fatalf("%s was not compiled again to run without failing: %+v", name, e)
 		}
@@ -3968,5 +3971,54 @@ func TestJITSSANestedExits(t *testing.T) {
 		if name == "outer" && len(cl.fn.Code) > 30 {
 			t.Fatalf("outer has %d instructions: inner's last exit must be past its end", len(cl.fn.Code))
 		}
+	}
+}
+
+// A small method the tree tier calls, which calls out again and returns,
+// costs more native than in the tree tier: each call is an entry, an exit
+// for its call, an entry after it and a return, around a few instructions.
+// Its stretches, returns counted (their exit site, the return's block), do
+// less than jitSSAMinWork, and the tree tier runs it from then on; a loop
+// that does enough work stays native.
+func TestJITSSAProfitReturns(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function T(){this.n=0;this.v=1}T.prototype.bump=function(){this.n++};
+		T.prototype.step=function(k){let s=this.v;for(let i=0;i<2;i++)s=(s*3+i)|0;this.bump();return s+k};
+		function heavy(n){let s=0;for(let i=0;i<n;i++){s=(s*31+i)|0;s^=s>>>7}return s}
+		function drive(){let s=0;for(let i=0;i<300;i++)s=(s+t.step(i))|0;return [s,t.n,heavy(500)].join()}
+		var t=new T;`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src := `drive()`
+	for i := 0; i < 2; i++ {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+	}
+	proto := r.global.getOwn(r.atoms.intern("T")).value.Object().getOwn(r.atoms.intern("prototype")).value.Object()
+	step := proto.getOwn(r.atoms.intern("step")).value.Object().fn().closure
+	if e := r.jit.hint(step.hint()); e == nil || e.ssa == nil || !e.entrySlow || e.ssaStats.entries > 2*jitSSAProbe {
+		t.Fatalf("step kept running natively: %+v", e)
+	}
+	heavy := r.global.getOwn(r.atoms.intern("heavy")).value.Object().fn().closure
+	if e := r.jit.hint(heavy.hint()); e == nil || e.ssa == nil || e.entrySlow {
+		t.Fatalf("heavy left native code: %+v", e)
 	}
 }

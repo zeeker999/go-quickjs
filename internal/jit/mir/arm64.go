@@ -491,6 +491,8 @@ func (c *a64Compiler) block(b *ssa.Block, next *ssa.Block) {
 		}
 		c.a.MovImm(a64A, abi.ExitReturn)
 		c.a.Store(a64Ctx, abi.OffExitKind, a64A)
+		c.a.MovImm(a64A, uint64(b.PC))
+		c.a.Store(a64Ctx, abi.OffExitSite, a64A)
 		c.a.Ret()
 	case ssa.BlockExit:
 		c.exitTo(b.State, exitKind(int(b.ExitKind)))
