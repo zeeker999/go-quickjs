@@ -474,13 +474,12 @@ func (c *compiler) branch(b *ssa.Block, next *ssa.Block) {
 			c.a.Jcc(amd64.CondNE, yes)
 			c.a.Jcc(amd64.CondP, yes)
 		}
-		c.a.Jmp(no)
 	} else {
 		r := c.gpr(ctl, scratchA)
 		c.a.Op(amd64.Test, r, r, false)
 		c.a.Jcc(amd64.CondNE, yes)
-		c.a.Jmp(no)
 	}
+	// The false edge follows.
 	c.a.Bind(no)
 	c.edge(b, b.Succs[1], nil)
 	c.a.Bind(yes)
@@ -908,13 +907,18 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.boxBool(c.gpr(arg(0), scratchB), scratchA)
 		c.setG(v, scratchA)
 	case ssa.OpAddF64, ssa.OpSubF64, ssa.OpMulF64, ssa.OpDivF64:
-		op := sseOp(v.Op)
-		x := c.xmm(arg(0), xScratch0)
-		if x != xScratch0 {
-			c.a.SSEOp(amd64.MovAPD, xScratch0, x)
+		// SSE's form is d op= y: d is v's own register, unless v is spilled
+		// or that register is y's, which d's copy of x would overwrite.
+		x, y := c.xmm(arg(0), xScratch0), c.xmm(arg(1), xScratch1)
+		d := xScratch0
+		if l := c.locAt(v); l.reg >= 0 && (amd64.XReg(l.reg) != y || y == x) {
+			d = amd64.XReg(l.reg)
 		}
-		c.a.SSEOp(op, xScratch0, c.xmm(arg(1), xScratch1))
-		c.setX(v, xScratch0)
+		if x != d {
+			c.a.SSEOp(amd64.MovAPD, d, x)
+		}
+		c.a.SSEOp(sseOp(v.Op), d, y)
+		c.setX(v, d)
 	case ssa.OpModF64:
 		c.remainder(v, guard)
 	case ssa.OpNegF64:

@@ -3,6 +3,8 @@ package verify
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -123,6 +125,30 @@ func TestARM64Float(t *testing.T) {
 	expectA64(t, "scvtf d3, x4", func(a *arm64.Asm) { a.Scvtf(3, 4, true) })
 	expectA64(t, "scvtf d3, w4", func(a *arm64.Asm) { a.Scvtf(3, 4, false) })
 	expectA64(t, "ucvtf d3, w4", func(a *arm64.Asm) { a.Ucvtf(3, 4, false) })
+}
+
+// Every FMOV immediate: its double, by the architecture's VFPExpandImm,
+// has that immediate by FloatImm, and the disassembler reads the
+// instruction as that double. Doubles with none are refused.
+func TestARM64FloatImmediates(t *testing.T) {
+	for imm := 0; imm < 256; imm++ {
+		a, b, rest := uint64(imm>>7), uint64(imm>>6&1), uint64(imm&0x3F)
+		bits := a<<63 | (b^1)<<62 | 0xFF*b<<54 | rest<<48
+		if got, ok := arm64.FloatImm(bits); !ok || got != uint8(imm) {
+			t.Fatalf("FloatImm(%v) = %#x, %v, want %#x", math.Float64frombits(bits), got, ok, imm)
+		}
+		text := a64(t, func(a *arm64.Asm) { a.FMovImm(3, uint8(imm)) })[0]
+		number, found := strings.CutPrefix(text, "fmov d3, #")
+		if v, err := strconv.ParseFloat(number, 64); !found || err != nil || v != math.Float64frombits(bits) {
+			t.Fatalf("imm %#x: %s, want %v", imm, text, math.Float64frombits(bits))
+		}
+	}
+	for _, v := range []float64{0, math.Copysign(0, -1), 0.1, 3.99, 32, 0.0625, 1e10, math.Inf(1), math.NaN()} {
+		if imm, ok := arm64.FloatImm(math.Float64bits(v)); ok {
+			t.Fatalf("FloatImm(%v) = %#x, but it has no immediate", v, imm)
+		}
+	}
+	expectA64(t, "fmov d3, xzr", func(a *arm64.Asm) { a.FMovToF(3, arm64.ZR) })
 }
 
 func TestARM64Control(t *testing.T) {

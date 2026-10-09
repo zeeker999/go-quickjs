@@ -367,6 +367,23 @@ func (a *Asm) FMovFromF(dst Reg, src FReg) { a.emit(0x9E660000 | uint32(src)<<5 
 // FMov is dst = src.
 func (a *Asm) FMov(dst, src FReg) { a.emit(0x1E604000 | uint32(src)<<5 | uint32(dst)) }
 
+// FloatImm is the 8-bit immediate FMovImm encodes a double with, if it has
+// one: +-(16 to 31)/16 times a power of two from 2**-3 to 2**4, such as 1,
+// 0.5, 2, 3 or 10. Zero has none.
+func FloatImm(bits uint64) (uint8, bool) {
+	if bits&(1<<48-1) != 0 {
+		return 0, false
+	}
+	b := bits >> 54 & 1
+	if repl := bits >> 54 & 0xFF; repl != 0 && repl != 0xFF || bits>>62&1 == b {
+		return 0, false
+	}
+	return uint8(bits>>63<<7 | b<<6 | bits>>48&0x3F), true
+}
+
+// FMovImm is dst = the double imm encodes (FloatImm).
+func (a *Asm) FMovImm(dst FReg, imm uint8) { a.emit(0x1E601000 | uint32(imm)<<13 | uint32(dst)) }
+
 // FOp is a two-operand double operation.
 type FOp uint32
 
