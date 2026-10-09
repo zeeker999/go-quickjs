@@ -187,6 +187,29 @@ var (
 	ContextSize = int32(unsafe.Sizeof(Context{}))
 )
 
+// ObjectPool is the objects a construction site native code makes, `new
+// C(...)`, takes for C's receiver: made by Go as the VM makes them for a
+// construction -- C's prototype, its root shape, room for what its body
+// adds -- the last Count of Objects, each cleared as native code takes it;
+// Proto is the prototype they were made with, which native code compares
+// C's own with first. Go fills it when the site leaves native code for
+// want of one.
+type ObjectPool struct {
+	Objects [PoolSize]unsafe.Pointer
+	Count   uint64
+	Proto   unsafe.Pointer
+}
+
+// PoolSize is how many objects an ObjectPool holds.
+const PoolSize = 16
+
+// ObjectPool's offsets.
+const (
+	OffPoolObjects = int32(unsafe.Offsetof(ObjectPool{}.Objects))
+	OffPoolCount   = int32(unsafe.Offsetof(ObjectPool{}.Count))
+	OffPoolProto   = int32(unsafe.Offsetof(ObjectPool{}.Proto))
+)
+
 // What a context's Live says: a native call's callee runs in it, or an
 // inlined callee's frame is described in it.
 const (

@@ -378,9 +378,12 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 		c.a.Load(scratchB, regCtx, abi.OffStackTop)
 		c.a.Load(scratchB, scratchB, 0)
 		c.a.OpImm(amd64.Add, scratchB, int32(t.LocalCount+t.MaxStack), true)
-		c.a.Load(scratchC, regCtx, abi.OffStackEnd)
-		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+		c.a.Load(scratchA, regCtx, abi.OffStackEnd)
+		c.a.Op(amd64.Cmp, scratchB, scratchA, true)
 		guard(amd64.CondA)
+		if t.Pool != 0 {
+			c.constructGuards(t, guard)
+		}
 		c.a.Jmp(checked)
 		c.a.Bind(next)
 	}
@@ -391,7 +394,7 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 	// them (directOperand), not recorded: Go never reads them, as a callee
 	// that leaves native code is finished from its own frame, and its
 	// result replaces them (the VM's jitCallResult).
-	direct, ops := len(sites) == 1 && (site.ThisSlot < 0 || site.Method), calleeSlot
+	direct, ops := len(sites) == 1 && (site.ThisSlot < 0 || site.Method || site.Pool != 0), calleeSlot
 	if site.Method {
 		ops--
 	}
@@ -446,7 +449,7 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 		for i := 0; i < site.Params && i < site.Argc && i < site.LocalCount; i++ {
 			c.directOperand(s.Slots[sp-site.Argc+i], true, int32(i)*vs)
 		}
-		if site.ThisSlot >= 0 {
+		if site.ThisSlot >= 0 && site.Pool == 0 {
 			c.directOperand(s.Slots[calleeSlot-1], false, abi.ContextSize+abi.OffThis)
 		}
 	}
@@ -523,7 +526,21 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 			c.a.MovImm(top, 0)
 			c.a.Store(locals, at+c.enc.RefOffset, top)
 		}
-		if t.ThisSlot >= 0 && !direct {
+		if t.Pool != 0 {
+			// The receiver: the pool's last object, its cell cleared.
+			c.a.MovImm(tmp, uint64(t.Pool))
+			c.a.Load(top, tmp, abi.OffPoolCount)
+			c.a.OpImm(amd64.Sub, top, 1, true)
+			c.a.Store(tmp, abi.OffPoolCount, top)
+			c.a.ShiftImm(amd64.Shl, top, 3, true)
+			c.a.Op(amd64.Add, top, tmp, true)
+			c.a.Load(high2, top, abi.OffPoolObjects)
+			c.a.MovImm(tmp, 0)
+			c.a.Store(top, abi.OffPoolObjects, tmp)
+			c.a.Store(calleeCtx, abi.OffThis+c.enc.RefOffset, high2)
+			c.a.MovImm(tmp, c.enc.Object)
+			c.a.Store(calleeCtx, abi.OffThis+c.enc.NumOffset, tmp)
+		} else if t.ThisSlot >= 0 && !direct {
 			nb, nd, rb, rd := words(calleeSlot - 1)
 			c.a.Load(top, nb, nd)
 			c.a.Store(calleeCtx, abi.OffThis+c.enc.NumOffset, top)
@@ -564,9 +581,23 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 	c.a.Load(regLocals, regCtx, abi.OffLocals)
 	c.a.Load(regStack, regCtx, abi.OffStack)
 	at := abi.OffKeep + int32(v.Index)*vs
-	c.a.Load(tmp, calleeCtx, abi.OffRetValue+c.enc.RefOffset)
+	result := abi.OffRetValue
+	if site.Pool != 0 {
+		// A construction's result, if not an object, is its receiver.
+		object := c.a.NewLabel()
+		c.a.Load(scratchA, calleeCtx, abi.OffRetValue+c.enc.NumOffset)
+		c.a.MovImm(scratchB, c.enc.Object)
+		c.a.Op(amd64.Cmp, scratchA, scratchB, true)
+		c.a.Jcc(amd64.CondE, object)
+		c.a.Load(tmp, calleeCtx, abi.OffThis+c.enc.RefOffset)
+		c.a.Store(calleeCtx, abi.OffRetValue+c.enc.RefOffset, tmp)
+		c.a.Load(tmp, calleeCtx, abi.OffThis+c.enc.NumOffset)
+		c.a.Store(calleeCtx, abi.OffRetValue+c.enc.NumOffset, tmp)
+		c.a.Bind(object)
+	}
+	c.a.Load(tmp, calleeCtx, result+c.enc.RefOffset)
 	c.a.Store(regCtx, at+c.enc.RefOffset, tmp)
-	c.a.Load(scratchA, calleeCtx, abi.OffRetValue+c.enc.NumOffset)
+	c.a.Load(scratchA, calleeCtx, result+c.enc.NumOffset)
 	c.a.Store(regCtx, at+c.enc.NumOffset, scratchA)
 	c.a.Load(tmp, regCtx, abi.OffStackTop)
 	c.a.Load(top, calleeCtx, abi.OffBase)
@@ -582,6 +613,29 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 		}
 	}
 	c.setG(v, scratchA)
+}
+
+// constructGuards checks a construction can take its receiver from its
+// pool (abi.ObjectPool): the pool has one, and the function, whose pointer
+// is in scratchC, has the prototype the pool's were made with still, its
+// own property where it was. It uses every scratch register.
+func (c *compiler) constructGuards(t *ssa.CallSite, guard func(amd64.Cond)) {
+	c.a.MovImm(scratchA, uint64(t.Pool))
+	c.a.Load(scratchB, scratchA, abi.OffPoolCount)
+	c.a.Op(amd64.Test, scratchB, scratchB, true)
+	guard(amd64.CondE)
+	c.a.Load(scratchB, scratchC, c.enc.ObjectProps+8)
+	c.a.OpImm(amd64.Cmp, scratchB, int32(t.ProtoIndex), true)
+	guard(amd64.CondBE)
+	at := int32(t.ProtoIndex) * c.enc.PropertySize
+	c.a.Load(scratchB, scratchC, c.enc.ObjectProps)
+	c.a.LoadU32(scratchC, scratchB, at+c.enc.PropertyKey)
+	c.a.OpImm(amd64.Cmp, scratchC, int32(t.ProtoKey), false)
+	guard(amd64.CondNE)
+	c.a.Load(scratchC, scratchB, at+c.enc.PropertyValue+c.enc.RefOffset)
+	c.a.Load(scratchB, scratchA, abi.OffPoolProto)
+	c.a.Op(amd64.Cmp, scratchC, scratchB, true)
+	guard(amd64.CondNE)
 }
 
 // directOperand writes a call's operand x, both words, where its callee
