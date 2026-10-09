@@ -69,6 +69,7 @@ type fixup struct {
 const (
 	fixB    = iota // imm26
 	fixCond        // imm19 at bit 5
+	fixAdr         // ADR's imm21, of bytes: immhi at bit 5, immlo (0) at 29
 )
 
 // Len is the bytes emitted so far.
@@ -110,6 +111,12 @@ func (a *Asm) Finish() ([]byte, error) {
 		case fixCond:
 			if d < -1<<18 || d >= 1<<18 {
 				return nil, fmt.Errorf("arm64: conditional branch out of range")
+			}
+			a.buf[f.at] |= (uint32(d) & (1<<19 - 1)) << 5
+		case fixAdr:
+			// d instructions are 4d bytes: immlo is 0, immhi d.
+			if d < -1<<18 || d >= 1<<18 {
+				return nil, fmt.Errorf("arm64: address out of range")
 			}
 			a.buf[f.at] |= (uint32(d) & (1<<19 - 1)) << 5
 		}
@@ -452,3 +459,12 @@ func (a *Asm) Cbnz(r Reg, l Label, wide bool) {
 
 // Ret returns through X30.
 func (a *Asm) Ret() { a.emit(0xD65F03C0) }
+
+// Br jumps to the address in r.
+func (a *Asm) Br(r Reg) { a.emit(0xD61F0000 | uint32(r)<<5) }
+
+// Adr is dst = l's address.
+func (a *Asm) Adr(dst Reg, l Label) {
+	a.fixups = append(a.fixups, fixup{len(a.buf), l, fixAdr})
+	a.emit(0x10000000 | uint32(dst))
+}

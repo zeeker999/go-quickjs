@@ -4038,8 +4038,8 @@ func TestJITSSAProfitReturns(t *testing.T) {
 // its frame and its callers' made by Go (jitUnwindNative), which finishes
 // them. Each answer is the interpreter's.
 func TestJITSSANativeCalls(t *testing.T) {
-	if !jitSSABackend || runtime.GOARCH != "amd64" {
-		t.Skip("native calls are amd64's so far")
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
 	}
 	setup := `function add(a,b){let s=a;for(let i=0;i<3;i++)s=(s*3+(b===undefined?5:b))|0;return s}
 		function P(v){this.v=v}P.prototype.m=function(k){let s=this.v;for(let i=0;i<2;i++)s=(s+k*i)|0;return s};
@@ -4114,8 +4114,8 @@ func TestJITSSANativeCalls(t *testing.T) {
 // mark, through Go while it does (abi.Encoding's WriteBarrier). Nothing is
 // lost or freed early; run with GODEBUG=gccheckmark=1 too.
 func TestJITSSANativeCallsUnderGC(t *testing.T) {
-	if !jitSSABackend || runtime.GOARCH != "amd64" {
-		t.Skip("native calls are amd64's so far")
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
 	}
 	defer debug.SetGCPercent(debug.SetGCPercent(1))
 	stop := make(chan struct{})
@@ -4157,8 +4157,8 @@ func TestJITSSANativeCallsUnderGC(t *testing.T) {
 // While the collector marks, a native call is Go's: the frames and the
 // callee's context take pointers.
 func TestJITSSANativeCallsWhileMarking(t *testing.T) {
-	if !jitSSABackend || runtime.GOARCH != "amd64" {
-		t.Skip("native calls are amd64's so far")
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
 	}
 	jitMarkingForTest(t)
 	setup := `function add(a,b){let s=a;for(let i=0;i<3;i++)s=(s*3+b)|0;return s}
@@ -4196,8 +4196,8 @@ func TestJITSSANativeCallsWhileMarking(t *testing.T) {
 // calls of frames it is finishing, its unwinds nested. Each answer is the
 // interpreter's.
 func TestJITSSANativeCallTargets(t *testing.T) {
-	if !jitSSABackend || runtime.GOARCH != "amd64" {
-		t.Skip("native calls are amd64's so far")
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
 	}
 	setup := `function A(v){this.v=v}A.prototype.get=function(k){this.n=k;return this.v+k};
 		function B(v){this.w=v;this.v=v*2}B.prototype.get=function(k){this.n=k;return this.v*k};
