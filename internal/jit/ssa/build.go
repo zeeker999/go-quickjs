@@ -3,6 +3,7 @@ package ssa
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
@@ -73,13 +74,16 @@ type builder struct {
 
 	entryPCs []int
 	blockAt  map[int]*Block // by the PC a block starts at
-	// endOf is the last PC of each block.
-	endOf map[*Block]int
+	// endOf is the last PC of each block, by block ID.
+	endOf []int
 
-	defs       map[*Block][]*Value
-	sealed     map[*Block]bool
-	filled     map[*Block]bool
-	incomplete map[*Block]map[int]*Value
+	// By block ID, which is unique while the builder runs: each block's
+	// definitions by slot, whether it is sealed and filled, and the phis
+	// it made before it was sealed.
+	defs       [][]*Value
+	sealed     []bool
+	filled     []bool
+	incomplete [][]slotPhi
 }
 
 // property is the feedback for a property operation at pc, if any.
@@ -182,7 +186,6 @@ func (b *builder) plan() error {
 	sort.Ints(b.entryPCs)
 
 	b.blockAt = map[int]*Block{}
-	b.endOf = map[*Block]int{}
 	var starts []int
 	for pc := range leaders {
 		if reachable(b.p, pc) {
@@ -193,6 +196,7 @@ func (b *builder) plan() error {
 	for _, pc := range starts {
 		b.blockAt[pc] = b.f.newBlock(pc)
 	}
+	b.endOf = make([]int, len(b.f.Blocks))
 	for i, pc := range starts {
 		end := len(p.Code) - 1
 		if i+1 < len(starts) {
@@ -205,7 +209,7 @@ func (b *builder) plan() error {
 			}
 		}
 		blk := b.blockAt[pc]
-		b.endOf[blk] = end
+		b.endOf[blk.ID] = end
 		last := p.Code[end]
 		switch last.Op {
 		case ir.Jump:
@@ -267,21 +271,21 @@ func (b *builder) edge(from, to *Block) {
 // (Braun et al., "Simple and Efficient Construction of Static Single
 // Assignment Form").
 func (b *builder) translate() {
-	b.defs = map[*Block][]*Value{}
-	b.sealed = map[*Block]bool{}
-	b.filled = map[*Block]bool{}
-	b.incomplete = map[*Block]map[int]*Value{}
+	n := len(b.f.Blocks)
+	b.defs = make([][]*Value, n)
+	b.sealed, b.filled = make([]bool, n), make([]bool, n)
+	b.incomplete = make([][]slotPhi, n)
 
 	// Reverse post-order from the entries, so that a block's forward
 	// predecessors are filled before it.
-	var order []*Block
-	seen := map[*Block]bool{}
+	order := make([]*Block, 0, n)
+	seen := make([]bool, n)
 	var visit func(*Block)
 	visit = func(blk *Block) {
-		if seen[blk] {
+		if seen[blk.ID] {
 			return
 		}
-		seen[blk] = true
+		seen[blk.ID] = true
 		for i := len(blk.Succs) - 1; i >= 0; i-- {
 			visit(blk.Succs[i])
 		}
@@ -296,7 +300,7 @@ func (b *builder) translate() {
 	// Blocks no entry reaches are dropped.
 	kept := b.f.Blocks[:0]
 	for _, blk := range b.f.Blocks {
-		if seen[blk] {
+		if seen[blk.ID] {
 			kept = append(kept, blk)
 		}
 	}
@@ -305,7 +309,7 @@ func (b *builder) translate() {
 		preds := blk.Preds[:0]
 		backedge := blk.Backedge[:0]
 		for i, pred := range blk.Preds {
-			if seen[pred] {
+			if seen[pred.ID] {
 				preds = append(preds, pred)
 				backedge = append(backedge, blk.Backedge[i])
 			}
@@ -316,13 +320,13 @@ func (b *builder) translate() {
 	for _, blk := range order {
 		b.trySeal(blk)
 		b.fill(blk)
-		b.filled[blk] = true
+		b.filled[blk.ID] = true
 		for _, s := range blk.Succs {
 			b.trySeal(s)
 		}
 	}
 	for _, blk := range order {
-		if !b.sealed[blk] {
+		if !b.sealed[blk.ID] {
 			b.seal(blk)
 		}
 	}
@@ -332,31 +336,33 @@ func (b *builder) translate() {
 }
 
 func (b *builder) trySeal(blk *Block) {
-	if b.sealed[blk] {
+	if b.sealed[blk.ID] {
 		return
 	}
 	for _, p := range blk.Preds {
-		if !b.filled[p] {
+		if !b.filled[p.ID] {
 			return
 		}
 	}
 	b.seal(blk)
 }
 
+// slotPhi is a phi a block made for a slot before it was sealed.
+type slotPhi struct {
+	slot int
+	phi  *Value
+}
+
 func (b *builder) seal(blk *Block) {
-	// Slot by slot, never in map order: completing a phi can make others,
-	// and their numbers must not vary from one build to the next.
-	pending := b.incomplete[blk]
-	slots := make([]int, 0, len(pending))
-	for slot := range pending {
-		slots = append(slots, slot)
+	// Slot by slot: completing a phi can make others, and their numbers
+	// must not vary from one build to the next.
+	pending := b.incomplete[blk.ID]
+	slices.SortFunc(pending, func(x, y slotPhi) int { return x.slot - y.slot })
+	for _, p := range pending {
+		b.addPhiOperands(p.slot, p.phi)
 	}
-	sort.Ints(slots)
-	for _, slot := range slots {
-		b.addPhiOperands(slot, pending[slot])
-	}
-	delete(b.incomplete, blk)
-	b.sealed[blk] = true
+	b.incomplete[blk.ID] = nil
+	b.sealed[blk.ID] = true
 }
 
 // assign is an instruction's write of a slot, which Func.Written records;
@@ -367,26 +373,23 @@ func (b *builder) assign(slot int, blk *Block, v *Value) {
 }
 
 func (b *builder) write(slot int, blk *Block, v *Value) {
-	d := b.defs[blk]
+	d := b.defs[blk.ID]
 	if d == nil {
-		d = make([]*Value, b.nslots)
-		b.defs[blk] = d
+		d = b.f.refsOf(b.nslots)
+		b.defs[blk.ID] = d
 	}
 	d[slot] = v
 }
 
 func (b *builder) read(slot int, blk *Block) *Value {
-	if d := b.defs[blk]; d != nil && d[slot] != nil {
+	if d := b.defs[blk.ID]; d != nil && d[slot] != nil {
 		return d[slot]
 	}
 	var v *Value
 	switch {
-	case !b.sealed[blk]:
+	case !b.sealed[blk.ID]:
 		v = b.newPhi(blk)
-		if b.incomplete[blk] == nil {
-			b.incomplete[blk] = map[int]*Value{}
-		}
-		b.incomplete[blk][slot] = v
+		b.incomplete[blk.ID] = append(b.incomplete[blk.ID], slotPhi{slot, v})
 	case len(blk.Preds) == 1:
 		v = b.read(slot, blk.Preds[0])
 	case len(blk.Preds) == 0:
@@ -405,12 +408,23 @@ func (b *builder) read(slot int, blk *Block) *Value {
 
 func (b *builder) newPhi(blk *Block) *Value {
 	v := b.f.alloc(Value{Op: OpPhi, Type: Tagged, Block: blk})
-	blk.Values = append([]*Value{v}, blk.Values...)
+	prepend(blk, v)
 	return v
 }
 
+// prepend puts v first in blk's values.
+func prepend(blk *Block, v *Value) {
+	blk.Values = append(blk.Values, nil)
+	copy(blk.Values[1:], blk.Values)
+	blk.Values[0] = v
+}
+
 func (b *builder) addPhiOperands(slot int, phi *Value) {
-	for _, p := range phi.Block.Preds {
+	preds := phi.Block.Preds
+	if phi.Args == nil {
+		phi.Args = b.f.refsOf(len(preds))[:0]
+	}
+	for _, p := range preds {
 		a := b.read(slot, p)
 		a.Uses++
 		phi.Args = append(phi.Args, a)
@@ -420,7 +434,7 @@ func (b *builder) addPhiOperands(slot int, phi *Value) {
 // constIn makes a tagged constant at the start of a block.
 func (b *builder) constIn(blk *Block, c ir.Value) *Value {
 	v := b.f.alloc(Value{Op: OpConst, Type: Tagged, Const: c, Block: blk})
-	blk.Values = append([]*Value{v}, blk.Values...)
+	prepend(blk, v)
 	return v
 }
 
@@ -459,7 +473,7 @@ func (b *builder) nullish(blk *Block, in ir.Instruction, operand func(ir.Operand
 // state captures the frame at a PC: every live slot's current value.
 func (b *builder) state(blk *Block, pc int) *FrameState {
 	depth := b.p.Maps[pc].Depth
-	s := &FrameState{PC: b.p.Maps[pc].PC, Depth: depth, Slots: b.f.refsOf(b.p.Locals + depth), Site: pc}
+	s := b.f.newState(FrameState{PC: b.p.Maps[pc].PC, Depth: depth, Slots: b.f.refsOf(b.p.Locals + depth), Site: pc})
 	for i := range s.Slots {
 		s.Slots[i] = b.read(i, blk)
 		s.Slots[i].Uses++
@@ -471,7 +485,7 @@ func (b *builder) fill(blk *Block) {
 	f := b.f
 	if blk.PC < 0 {
 		e, _ := f.entryForBlock(blk)
-		blk.Header = &FrameState{PC: b.p.Maps[e.PC].PC, Depth: e.Depth, Slots: f.refsOf(b.p.Locals + e.Depth), Site: -1}
+		blk.Header = f.newState(FrameState{PC: b.p.Maps[e.PC].PC, Depth: e.Depth, Slots: f.refsOf(b.p.Locals + e.Depth), Site: -1})
 		for i := range blk.Header.Slots {
 			v := f.newValue(blk, OpLoadSlot, Tagged)
 			v.Aux = i
@@ -484,7 +498,7 @@ func (b *builder) fill(blk *Block) {
 		blk.Header = b.state(blk, blk.PC)
 		blk.Header.Site = -1
 	}
-	for pc := blk.PC; pc <= b.endOf[blk]; pc++ {
+	for pc := blk.PC; pc <= b.endOf[blk.ID]; pc++ {
 		b.instruction(blk, pc)
 	}
 }
