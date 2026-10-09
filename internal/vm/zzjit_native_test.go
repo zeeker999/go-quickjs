@@ -4744,8 +4744,9 @@ func TestJITSSAStoreOverLiveCell(t *testing.T) {
 		}
 	}
 	entry := func(name string) *jitEntry {
+		// By its function: a native callee's closure need not know it.
 		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
-		return r.jit.hint(cl.hint())
+		return r.jit.cache[weak.Make(cl.fn)]
 	}
 	for i := 0; i < 4; i++ {
 		wv, err := want.Run(compileForTest(t, src))
@@ -5283,6 +5284,172 @@ func TestJITLoopPromotedPastCalleesLoops(t *testing.T) {
 	}
 	if len(seen) < 32 {
 		t.Fatalf("%d budgets in 64", len(seen))
+	}
+}
+
+// A call whose target has no code is decided at the caller's first
+// compile all the same, its target compiled for native callers then
+// (jitSeedCalls): put makes a call, so it is not inlined, and Go does not
+// compile it for its own entries.
+func TestJITSSASeedsCalleesWithoutCode(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	// While the collector marks, Go makes native calls, which would count
+	// as calls leaving native code.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function P(x){this.x=x}
+		P.prototype.f=function(i){return (i*this.x)|0};
+		P.prototype.put=function(i){return this.f(i)+1};
+		var p=new P(3);
+		function run(o,n){let t=0;for(let i=0;i<n;i++){t=(t+o.put(i))|0}return t}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := New(Config{JIT: true})
+	defer func() { r.Close(); r.ReleaseClosed() }()
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	proto := r.global.getOwn(r.atoms.intern("P")).value.Object().getOwn(atomPrototype).value.Object()
+	put := proto.getOwn(r.atoms.intern("put")).value.Object()
+	cl := r.global.getOwn(r.atoms.intern("run")).value.Object().fn().closure
+	for i, src := range []string{`String(run(p,20000))`, `String(run(p,20000))`} {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+	}
+	e := r.jit.hint(cl.hint())
+	if e == nil || e.ssa == nil {
+		t.Fatal("run has no code")
+	}
+	if !slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.obj == put }) {
+		t.Fatal("run does not call put natively")
+	}
+	if n := int(e.reopts) + int(e.inlineReopts) + int(e.upgradeReopts); n != 0 {
+		t.Fatalf("run was compiled again %d times", n)
+	}
+}
+
+// Code compiled again for any reason decides the calls whose targets the
+// existing tiers have met since (jitSeedCalls): f's call of o.m, on a
+// branch first taken after f was compiled, leaves its read of m for Go,
+// which fills the read's cache and has f compiled again at once (jitFed);
+// that compile decides the call too, which is not left to leave native
+// code four times more and have f compiled once again.
+func TestJITSSASeedsWhenCompiledAgain(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	// While the collector marks, Go makes native calls, which would count
+	// as calls leaving native code.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function P(x){this.x=x}
+		P.prototype.m=function(){return this.x*2};
+		var p=new P(3);
+		function f(o,flag,n){let t=0;for(let i=0;i<n;i++){t=(t+o.x)|0;if(flag)t=(t+o.m())|0}return t}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := New(Config{JIT: true})
+	defer func() { r.Close(); r.ReleaseClosed() }()
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := r.global.getOwn(r.atoms.intern("P")).value.Object().getOwn(atomPrototype).value.Object().getOwn(r.atoms.intern("m")).value.Object()
+	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
+	for i, src := range []string{`String(f(p,false,20000))`, `String(f(p,false,20000))`, `String(f(p,true,20000))`, `String(f(p,true,20000))`} {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 1 {
+			if e := r.jit.hint(cl.hint()); e == nil || e.ssa == nil {
+				t.Fatal("f has no code before the branch is taken")
+			}
+		}
+	}
+	e := r.jit.hint(cl.hint())
+	if !slices.ContainsFunc(e.inlines, func(x jitInline) bool { return x.obj == m }) {
+		t.Fatal("f does not inline m")
+	}
+	if e.inlineReopts != 0 {
+		t.Fatalf("f was compiled again %d times for its calls", e.inlineReopts)
+	}
+	// A call still counted toward being decided from its exits is decided
+	// when the code is compiled again all the same.
+	pc := int(e.inlines[slices.IndexFunc(e.inlines, func(x jitInline) bool { return x.obj == m })].pc)
+	e.inlines = slices.DeleteFunc(e.inlines, func(x jitInline) bool { return x.obj == m })
+	e.callSites[pc] = jitCallsToInline - 1
+	p, err := jitcompile.LowerSSA(cl.fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.jitSeedCalls(cl, e, p)
+	if e.callSites[pc] != jitCallInlined {
+		t.Fatalf("a call counted toward its decision is left at %d", e.callSites[pc])
+	}
+}
+
+// Seeding compiles a call's target, but what it compiles does not compile
+// in turn: ping and pong call each other, and each compile of one would
+// otherwise compile the other, again and again, the first not yet known
+// to have code.
+func TestJITSSASeedsMutualRecursion(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function P(){}
+		P.prototype.ping=function(n){return n<=0?0:(this.pong(n-1)+1)|0};
+		P.prototype.pong=function(n){return n<=0?0:(this.ping(n-1)*2)|0};
+		var p=new P();
+		function run(o,n){let t=0;for(let i=0;i<n;i++)t=(t+o.ping(i&7))|0;return t}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := New(Config{JIT: true})
+	defer func() { r.Close(); r.ReleaseClosed() }()
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, src := range []string{`String(run(p,20000))`, `String(run(p,20000))`} {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+	}
+	if r.jit.compiled > 16 {
+		t.Fatalf("%d functions compiled for three", r.jit.compiled)
 	}
 }
 

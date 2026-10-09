@@ -236,6 +236,8 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	if err != nil {
 		return
 	}
+	// The calls whose targets the existing tiers have met since.
+	r.jitSeedCalls(cl, e, p)
 	code, fb := r.compileSSA(fn, cl, p, r.jitAllowance(fn)+e.ssa.Size(), e)
 	if code == nil {
 		return
@@ -773,14 +775,15 @@ func (r *Runtime) jitInlineSite(fn *bytecode.Function, pc, depth int) (jitInline
 	return in, true
 }
 
-// jitSeedCalls decides, before e's code for cl's function is compiled, the
-// calls and constructions whose target the existing tiers have met
-// (jitCalleeAt): each is inlined, or made natively if its target has code,
-// at once -- as jitCallSeen would decide it once the call had left native
-// code, which costs a compile for each call learned so, and as V8's
-// TurboFan takes a call's target from its load's feedback. A call whose
-// target has no code yet, or that is not seen so, is left to jitCallSeen.
-// A target that turns out wrong costs an exit: a call checks its callee.
+// jitSeedCalls decides, before e's code for cl's function is compiled --
+// first, or again for whatever reason -- the calls and constructions whose
+// target the existing tiers have met (jitCalleeAt): each is inlined, or
+// made natively if its target has code, at once -- as jitCallSeen would
+// decide it once the call had left native code, which costs a compile for
+// each call learned so, and as V8's TurboFan takes a call's target from
+// its load's feedback. A target with no code is compiled for native
+// callers then. A call that is not seen so is left to jitCallSeen. A
+// target that turns out wrong costs an exit: a call checks its callee.
 func (r *Runtime) jitSeedCalls(cl *closure, e *jitEntry, p *ir.Program) {
 	fn := cl.fn
 	if len(p.Maps) != len(fn.Code) {
@@ -792,7 +795,8 @@ func (r *Runtime) jitSeedCalls(cl *closure, e *jitEntry, p *ir.Program) {
 		default:
 			continue
 		}
-		if e.callSites != nil && e.callSites[pc] != 0 {
+		if e.callSites != nil && e.callSites[pc] >= jitCallNative {
+			// Decided; one still counted toward its decision is not.
 			continue
 		}
 		o, callee := r.jitCalleeAt(cl, p, pc)
@@ -808,9 +812,25 @@ func (r *Runtime) jitSeedCalls(cl *closure, e *jitEntry, p *ir.Program) {
 			continue
 		}
 		cf := callee.fn
-		ce := r.jit.cache[weak.Make(cf)]
-		if ce == nil || ce.ssa == nil || cf.TopLevel || cf.IsModule || cf.UsesArguments || cf.HasDirectEval || len(cf.Upvalues) != 0 {
+		if cf == fn || cf.TopLevel || cf.IsModule || cf.UsesArguments || cf.HasDirectEval || len(cf.Upvalues) != 0 {
 			continue
+		}
+		ce := r.jit.cache[weak.Make(cf)]
+		if ce == nil || ce.ssa == nil {
+			// A target the existing tiers have met is compiled for native
+			// callers now, as the call would have it compiled once learned
+			// -- but not by a compile seeding started: one level, and no
+			// cycle. How often it was called is not known: the tree tier
+			// may run a call without one (closure.jitCalls).
+			if r.jit.seeding {
+				continue
+			}
+			r.jit.seeding = true
+			ce = r.jitNativeCallee(callee)
+			r.jit.seeding = false
+			if ce == nil {
+				continue
+			}
 		}
 		e.nativeCalls = append(e.nativeCalls, r.jitNativeTarget(int32(pc), callee, o, in))
 		e.callSites[pc] = jitCallNative
@@ -941,7 +961,7 @@ func (r *Runtime) jitCallTarget(f *frame, e *jitEntry, pc, sp int, in bytecode.I
 				// One it calls, or a built-in's construction, which a site
 				// makes alone. One it calls whose code native callers do not
 				// call for now is called again after so many such calls.
-				if ce := r.jit.hint(cl.hint()); x.obj == o && ce != nil && ce.notNative {
+				if ce := r.jit.cache[weak.Make(cl.fn)]; x.obj == o && ce != nil && ce.notNative {
 					jitRetryNative(ce)
 				}
 				return
