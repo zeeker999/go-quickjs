@@ -923,9 +923,14 @@ func (r *Runtime) jitFillPool(pool *abi.ObjectPool, o *Object) {
 	clear(pool.Objects[:])
 	pool.Count, pool.Proto = 0, nil
 	if o == r.proto.arrayCtor {
-		// `new Array()`: an empty array, of the realm's prototype.
+		// `new Array()`: an empty array, of the realm's prototype, with the
+		// layout a property cache gives an array it meets (ensureShape),
+		// which native code compares receivers' with: a method read on one
+		// it made, a.push, would leave for Go to give it.
 		for i := range pool.Objects {
-			pool.Objects[i] = unsafe.Pointer(r.newArrayFrom(nil))
+			a := r.newArrayFrom(nil)
+			r.ensureShape(a)
+			pool.Objects[i] = unsafe.Pointer(a)
 		}
 		pool.Count, pool.Proto = abi.PoolSize, unsafe.Pointer(r.proto.array)
 		return

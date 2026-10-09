@@ -1594,6 +1594,12 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 			callee := stack[sp-argc-1]
 			sp -= argc + 1
 			v, err = r.construct(callee, args)
+			if err == nil && v.IsObject() && callee.IsObject() && callee.Object() == r.proto.arrayCtor {
+				// With the layout the arrays native code makes have
+				// (jitFillPool): one made at an exit for its pool is used
+				// as they are.
+				r.ensureShape(v.Object())
+			}
 		case bytecode.OpGetGlobal:
 			c := tctx{r: r, f: f, cl: f.cl, locals: f.locals}
 			v, err = r.getGlobalAt(&c, in, pc)
