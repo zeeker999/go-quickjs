@@ -79,6 +79,13 @@ func Optimize(f *Func) {
 		}
 	}
 	shadowMerges(f)
+	if keepAcrossStores(f) {
+		// The phis' shadows again, for the phis the keeps made; those
+		// made before, now unused, go.
+		clearShadows(f)
+		removeDead(f)
+		shadowMerges(f)
+	}
 	storeChecks(f)
 	recount(f)
 }
@@ -359,7 +366,7 @@ func rewrite(f *Func, find func(*Value) *Value) {
 			for i, a := range v.Args {
 				v.Args[i] = find(a)
 			}
-			if v.Op == OpLoadCell {
+			if v.Op == OpLoadCell || v.Op == OpKept {
 				v.Shadow = v.Args[0]
 			}
 			state(v.State)

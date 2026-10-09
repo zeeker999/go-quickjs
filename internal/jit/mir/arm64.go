@@ -1043,8 +1043,13 @@ func (c *a64Compiler) propStore(v *ssa.Value, guard func(arm64.Cond)) {
 	c.a.FMovToF(a64F1, a64C)
 	c.property(v, guard)
 	for _, s := range v.Args[2:] {
+		// As amd64's: only a pointer word there is lost.
+		other := c.a.NewLabel()
 		c.a.Cmp(c.gpr(s, a64B), a64A, true)
-		guard(arm64.EQ)
+		c.a.BCond(arm64.NE, other)
+		c.a.Load(a64B, a64A, c.enc.RefOffset)
+		c.a.Cbnz(a64B, c.stubLabel(v.State, exitKind(v.Aux)), true)
+		c.a.Bind(other)
 	}
 	scalar := c.a.NewLabel()
 	c.a.FMovFromF(a64C, a64F1)
@@ -1157,6 +1162,61 @@ func (c *a64Compiler) stringBytes(exit, yes, no arm64.Label) {
 		c.a.Load(a64Stack, a64Ctx, abi.OffStack)
 		c.a.B(l.to)
 	}
+}
+
+// keepSource leaves in C where a tagged value came from, as amd64's does.
+// It uses A.
+func (c *a64Compiler) keepSource(x *ssa.Value) {
+	switch o, static := c.origin.Of(x); {
+	case x.Shadow != nil:
+		if r := c.gpr(x.Shadow, a64C); r != a64C {
+			c.a.MovRR(a64C, r)
+		}
+	case static && o >= 0:
+		scalar, done := c.a.NewLabel(), c.a.NewLabel()
+		c.isReference(x, c.gpr(x, a64A), o, scalar)
+		c.a.MovImm(a64C, uint64(o))
+		c.a.B(done)
+		c.a.Bind(scalar)
+		c.a.MovImm(a64C, ^uint64(0))
+		c.a.Bind(done)
+	default:
+		c.a.MovImm(a64C, ^uint64(0))
+	}
+}
+
+// keepRef is a tagged value's pointer word, as amd64's.
+func (c *a64Compiler) keepRef(v *ssa.Value) {
+	x := v.Args[0]
+	scalar := c.a.NewLabel()
+	c.keepSource(x)
+	c.a.MovImm(a64A, 0)
+	c.a.MovImm(a64B, c.enc.WriteBarrier)
+	c.a.LoadU8(a64B, a64B, 0)
+	c.a.Cbnz(a64B, scalar, false)
+	c.a.CmpImm(a64C, -1, true)
+	c.a.BCond(arm64.EQ, scalar)
+	c.sourceAddr()
+	c.a.Load(a64A, a64C, c.enc.RefOffset)
+	c.a.Bind(scalar)
+	c.setG(v, a64A)
+}
+
+// keep copies a value into a keep cell, as amd64's.
+func (c *a64Compiler) keep(v *ssa.Value) {
+	x := v.Args[0]
+	done := c.a.NewLabel()
+	c.keepSource(x)
+	c.a.MovRR(a64A, a64C)
+	c.a.MovImm(a64B, c.enc.WriteBarrier)
+	c.a.LoadU8(a64B, a64B, 0)
+	c.a.Cbnz(a64B, done, false)
+	at := abi.OffKeep + int32(v.Index)*int32(c.enc.ValueSize)
+	c.a.Store(a64Ctx, at+c.enc.RefOffset, c.gpr(v.Args[1], a64B))
+	c.a.Store(a64Ctx, at+c.enc.NumOffset, c.gpr(x, a64B))
+	c.a.AddImm(a64A, a64Ctx, int64(at), true)
+	c.a.Bind(done)
+	c.setG(v, a64A)
 }
 
 // holder finds the property a read whose receiver's shape it knows names,
@@ -1409,6 +1469,12 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		if c.objectOf(v, guard) {
 			c.setG(v, a64C)
 		}
+	case ssa.OpKeepRef:
+		c.keepRef(v)
+	case ssa.OpKeep:
+		c.keep(v)
+	case ssa.OpKept:
+		c.setG(v, c.gpr(arg(1), a64A))
 	case ssa.OpFrameRoom:
 		c.a.Load(a64B, a64Ctx, abi.OffStackBase)
 		c.a.Op(arm64.Sub, a64A, a64Stack, a64B, true)

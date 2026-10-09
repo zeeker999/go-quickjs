@@ -3716,15 +3716,16 @@ func TestJITSSAStringEquality(t *testing.T) {
 // from an array, which with collection off never leaves native code; and
 // a list reversed in place and two properties swapped, whose reads are
 // from the cells their stores then write while what was read is still
-// needed, so those stores are Go's (ssa's storeChecks). Each answer is the
-// interpreter's.
+// needed, which native code keeps first (ssa's keep.go), round the loop
+// too; walk stops at 1,000 links, so that a list a lost pointer made
+// circular fails rather than hangs. Each answer is the interpreter's.
 func TestJITSSAReferenceStores(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	setup := `function list(k){let h=null;for(let i=0;i<k;i++)h={v:i,next:h};return h}
-		function walk(h){let s=0,n=h,i=1;while(n){s+=n.v*i;i++;n=n.next}return s}
+		function walk(h){let s=0,n=h,i=1;while(n&&i<1000){s+=n.v*i;i++;n=n.next}return s}
 		function rev(h){let p=null,n=h;while(n){const x=n.next;n.next=p;p=n;n=x}return p}
 		function relink(a,n,tags){for(let i=0;i<n;i++){const o=a[i];o.next=a[i+1];o.tag=tags[i&3];o.v=i}return a[0]}
 		function swap(o){const t=o.a;o.a=o.b;o.b=t;return t}
@@ -3764,8 +3765,8 @@ func TestJITSSAReferenceStores(t *testing.T) {
 	if e := entry("relink"); e == nil || e.ssa == nil || e.entrySlow || e.ssaStats.entries == 0 || e.ssaStats.hosts != 0 || e.ssaStats.guards != 0 {
 		t.Fatalf("relink's stores left native code: %+v", e)
 	}
-	if e := entry("rev"); e == nil || e.ssa == nil || e.ssaStats.guards != 0 || e.ssaStats.hosts == 0 {
-		t.Fatalf("rev's store to the cell it read was not Go's: %+v", e)
+	if e := entry("rev"); e == nil || e.ssa == nil || e.ssaStats.guards != 0 || e.ssaStats.hosts != 0 {
+		t.Fatalf("rev's store to the cell it read left native code: %+v", e)
 	}
 }
 
@@ -4075,6 +4076,79 @@ func TestJITSSAPolymorphicReads(t *testing.T) {
 			}
 		}
 	}
+}
+
+// A store to a cell a live value was read from leaves for Go if the cell
+// holds a pointer word, which the value needs (storeChecks), and only then
+// (the native harness's "read, store, use" checks which): swap's a, an
+// object, needs its cell, and Go writes it. append, Richards' Packet.addTo,
+// whose walk reads the cell it then writes, runs natively. Each answer is
+// the interpreter's.
+func TestJITSSAStoreOverLiveCell(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function L(v){this.v=v;this.link=null}
+		L.prototype.append=function(queue){this.link=null;if(queue==null)return this;var peek,next=queue;while((peek=next.link)!=null)next=peek;next.link=this;return queue};
+		var append=L.prototype.append;
+		function run(ps,n){let s=0;for(let k=0;k<n;k++){let q=ps[0];q.link=null;for(let i=1;i<ps.length;i++)q=ps[i].append(q);for(let p=q;p!=null;p=p.link)s=(s+p.v)|0}return s}
+		function swap(o,n){let s=0;for(let i=0;i<n;i++){const a=o.x;o.x=o.y;o.y=a;s=(s*3+a.v)|0}return s}
+		var ps=[new L(1),new L(2),new L(3),new L(4),new L(5)],o={x:{v:1},y:{v:2}};`
+	src := `[run(ps,40),swap(o,60)].join()`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry := func(name string) *jitEntry {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		return r.jit.hint(cl.hint())
+	}
+	for i := 0; i < 4; i++ {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts uint64
+		if i == 3 {
+			runtime.GC()
+			defer debug.SetGCPercent(debug.SetGCPercent(-1))
+			hosts = entry("append").ssaStats.hosts
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if e := entry("append"); i == 3 && (e == nil || e.ssa == nil || e.ssaStats.hosts != hosts) {
+			t.Fatalf("append's store left native code: %+v", e)
+		}
+	}
+}
+
+// A value kept before a store (ssa's keep.go) that goes round a loop is
+// kept again at the store from its own keep cell, whose pointer word is
+// read before the cell is written: here o, the object stored to, once its
+// phi merges the copy. Found by the differential fuzzer; every tier's
+// answer is the interpreter's (jitDifferential).
+func TestJITSSAKeepRoundLoop(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	jitDifferential(t, `var log=[];
+function h(s,i){return (s+i)|0}
+function f(a,o,n){let s=0.5,t=0;for(let i=0;i<n;i++){s=h(s,i);if(a.length){if(i===3)continue;}else{s=h(s,i);}o.x=(a.length !== a.length ? NaN : i);}return [s,t]}
+function show(v){return typeof v==='number'&&Object.is(v,-0)?'-0':String(v)}
+function run(a,o,n){try{let r=f(a,o,n);log.push(show(r[0])+','+show(r[1]))}catch(e){log.push(e.name+':'+e.message)}log.push(a.length+':'+Array.from(a,show).join(','),show(o.x))}
+run([3,undefined,(-2147483649),,0],{x:5n},35);
+run([(-1.5),true,(-1),(-2147483649)],{x:0.5},34);
+log.join('|')`)
 }
 
 // Native code that calls through Go another function's native code shares
@@ -4411,8 +4485,8 @@ func TestJITSSANativeCallTargets(t *testing.T) {
 			if e := entry("leaf"); e == nil || e.ssa == nil || !e.ssaCallee || entry("useLeaf").ssaStats.hosts != leafHosts {
 				t.Fatalf("leaf, with no loop, was not called natively: %+v", e)
 			}
-			if e := entry("leave"); e == nil || !e.notNative || e.nativeEntry != 0 {
-				t.Fatalf("leave, leaving native code at every call, is still called natively: %+v", e)
+			if e := entry("leave"); e == nil || e.nativeBackoff == 0 {
+				t.Fatalf("leave, leaving native code at every call, was never called by Go instead: %+v", e)
 			}
 			if r.jit.unwound == unwound {
 				t.Fatal("two's calls never left native code")

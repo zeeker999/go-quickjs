@@ -90,7 +90,7 @@ func Origins(f *Func) OriginMap {
 				phis = append(phis, v)
 			case OpLoadSlot:
 				origin[v.ID] = v.Aux
-			case OpLoadCell:
+			case OpLoadCell, OpKept:
 				origin[v.ID] = OriginHeap
 			default:
 				origin[v.ID] = OriginScalar
@@ -217,9 +217,72 @@ func clearShadows(f *Func) {
 // value's number word and reads its pointer word where its shadow says
 // when Go needs it; a store to that cell would change the pointer word
 // under it. The store compares each with the property's address, and
-// leaves the write to Go on a match. They are its operands after the
-// object and the value.
+// leaves the write to Go on a match while the cell holds a pointer word:
+// one it does not hold, a primitive's, is not lost -- and a cell a live
+// reference was read from cannot have changed since, every store to it
+// having left. They are its operands after the object and the value.
 func storeChecks(f *Func) {
+	stores, live := liveAcross(f)
+	a := newAliases()
+	for i, s := range stores {
+		for _, c := range live[i] {
+			if sh := c.Shadow; a.may(s.Key, sh) && !slices.Contains(s.Args[2:], sh) {
+				s.Args = f.appendValue(s.Args, sh)
+				sh.Uses++
+			}
+		}
+	}
+}
+
+// aliases says which sources a property store may write: a property's cell
+// read through the store's key, a global binding's of that name; through a
+// phi, any of its arguments' -- and a keep's, while the collector marks,
+// its value's own (OpKeep). Elements, frame slots and the context's cells
+// are no property's, and a cell read through another key is another
+// property's. Answers are kept, by phi and key.
+type aliases struct{ key map[aliasKey]int }
+
+type aliasKey struct {
+	v   *Value
+	key uint32
+}
+
+func newAliases() *aliases { return &aliases{map[aliasKey]int{}} }
+
+// may reports whether a store through key may write the cell at s.
+func (a *aliases) may(key uint32, s *Value) bool {
+	switch s.Op {
+	case OpPropCell, OpGlobalCell:
+		return s.Key == key
+	case OpElemCell, OpStringMethod, OpConstSource:
+		return false
+	case OpKeep:
+		if x := s.Args[0]; x.Shadow != nil {
+			return a.may(key, x.Shadow)
+		}
+		return false
+	case OpPhi:
+		// 1 while it is looked at, round a loop; then 0 or 2.
+		k := aliasKey{s, key}
+		if r, ok := a.key[k]; ok {
+			return r == 2
+		}
+		a.key[k] = 1
+		for _, x := range s.Args {
+			if a.may(key, x) {
+				a.key[k] = 2
+				return true
+			}
+		}
+		a.key[k] = 0
+		return false
+	}
+	return true
+}
+
+// liveAcross is every property store, and for each the values with a
+// shadow -- read from cells, and phis that may hold such -- used after it.
+func liveAcross(f *Func) ([]*Value, [][]*Value) {
 	var stores, cands []*Value
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
@@ -227,12 +290,14 @@ func storeChecks(f *Func) {
 			case v.Op == OpPropWrite:
 				stores = append(stores, v)
 			case v.Type == Tagged && v.Shadow != nil:
+				// A kept value's too: while the collector marks, it is still
+				// read from its cell (OpKeep).
 				cands = append(cands, v)
 			}
 		}
 	}
 	if len(stores) == 0 || len(cands) == 0 {
-		return
+		return stores, make([][]*Value, len(stores))
 	}
 	nb := 0
 	for _, b := range f.Blocks {
@@ -324,7 +389,8 @@ func storeChecks(f *Func) {
 			}
 		}
 	}
-	for _, s := range stores {
+	live := make([][]*Value, len(stores))
+	for i, s := range stores {
 		at := pos[s.ID]
 		for k, c := range cands {
 			if c.Block == s.Block && pos[c.ID] > at {
@@ -333,12 +399,10 @@ func storeChecks(f *Func) {
 			if !out[k*nb+s.Block.ID] && last[k*nb+s.Block.ID] <= at {
 				continue // dead after it
 			}
-			if sh := c.Shadow; !slices.Contains(s.Args[2:], sh) {
-				s.Args = f.appendValue(s.Args, sh)
-				sh.Uses++
-			}
+			live[i] = append(live[i], c)
 		}
 	}
+	return stores, live
 }
 
 // clearStoreChecks drops the stores' checks, for storeChecks to remake.

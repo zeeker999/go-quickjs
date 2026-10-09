@@ -220,6 +220,9 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	if !e.notNative {
 		e.nativeEntry = code.EntryAddress(0)
 	}
+	// What it leaves on is counted afresh: it may have left on what it was
+	// compiled for now.
+	e.nativeIn, e.nativeOut = 0, 0
 	old.Close()
 	r.jit.reoptimized++
 }
@@ -360,7 +363,7 @@ func (fb *jitFeedback) NativeCalls(pc int) []ssa.CallSite {
 		// Only looked up: a compile here would share the workspaces of the
 		// one asking. jitCallSeen compiled it.
 		ce := fb.r.jit.cache[weak.Make(in.cl.fn)]
-		if ce == nil || ce.ssa == nil || ce.ssaStrings || ce.notNative || len(in.cl.fn.Upvalues) != 0 {
+		if ce == nil || ce.ssa == nil || ce.ssaStrings || len(in.cl.fn.Upvalues) != 0 {
 			continue
 		}
 		call, fn := fb.fn.Code[pc], in.cl.fn
@@ -393,10 +396,12 @@ type jitInline struct {
 // jitCallsToInline is how often a call leaves native code before it is
 // looked at for inlining: a call seldom made is not worth compiling for.
 // jitInlineReoptimizations is how many times a function's code is
-// compiled again for its calls, apart from jitReoptimizations.
+// compiled again for its calls, apart from jitReoptimizations: a method
+// whose calls are on different branches, as Richards' tasks' are, learns
+// them at different times.
 const (
 	jitCallsToInline         = 4
-	jitInlineReoptimizations = 2
+	jitInlineReoptimizations = 4
 )
 
 // What jitCallSeen knows of a call (jitEntry.callSites), past its count: that
@@ -957,7 +962,11 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 		return Undefined, nil, false
 	}
 	s.ctxTop++
-	defer func() { s.ctxTop-- }()
+	defer func() {
+		s.ctxTop--
+		// What native code kept (abi.Context.Keep) is not kept past it.
+		clear(s.ssaCtxs[idx].Keep[:])
+	}()
 	ctx := &s.ssaCtxs[idx]
 	for {
 		// The stack can move between entries, after Go has run something.
@@ -1249,7 +1258,28 @@ const (
 // (jitUnwindShare): they leave for Go at the call instead, which makes it.
 func (r *Runtime) jitUnwound(e *jitEntry) {
 	if e.nativeOut++; e.nativeOut%jitUnwindProbe == 0 && e.nativeOut*jitUnwindShare > e.nativeIn {
-		e.notNative, e.nativeEntry = true, 0
+		e.notNative, e.nativeEntry, e.nativeRetry = true, 0, 0
+		e.nativeBackoff = min(e.nativeBackoff+1, jitNativeBackoffs)
+	}
+}
+
+// jitNativeRetry is how many calls Go makes to code native callers no
+// longer call before they call it again, doubled for each time it was
+// found to leave too often, up to jitNativeBackoffs times: code that left
+// while it learned what to compile for, or whose callers' objects changed,
+// may not now.
+const (
+	jitNativeRetry    = 1024
+	jitNativeBackoffs = 8
+)
+
+// jitRetryNative counts a call Go makes to e's code, which native callers
+// no longer call (notNative), and has them call it again after
+// jitNativeRetry, counting its leaving afresh.
+func jitRetryNative(e *jitEntry) {
+	if e.nativeRetry++; e.nativeRetry >= jitNativeRetry<<(e.nativeBackoff-1) {
+		e.notNative, e.nativeIn, e.nativeOut = false, 0, 0
+		e.nativeEntry = e.ssa.EntryAddress(0)
 	}
 }
 

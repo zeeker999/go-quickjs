@@ -165,6 +165,19 @@ const (
 	// inlined callee's frame, which an exit inside it writes there
 	// (InlineState).
 	OpFrameRoom // -> none
+	// OpKeepRef is a tagged value's pointer word (Args[0]), read where it
+	// came from (origin.go), or 0 for a primitive's; 0 while the collector
+	// marks. Every keep at a store reads first (keep.go).
+	OpKeepRef // tagged -> ptr
+	// OpKeep copies a tagged value (Args[0]) into the context's keep cell
+	// Index (abi.Context.Keep) -- its number word, and its pointer word
+	// (Args[1], OpKeepRef) -- and is that cell's address: a value read from
+	// a cell a store then overwrites is read from there since (keep.go).
+	// While the collector marks it writes no pointer and is the value's own
+	// source, which the store checks as before (storeChecks).
+	OpKeep // tagged, ptr -> source
+	// OpKept is a tagged value (Args[1]) whose shadow is a keep (Args[0]).
+	OpKept // source, tagged -> tagged
 )
 
 var opNames = [...]string{
@@ -176,7 +189,7 @@ var opNames = [...]string{
 	OpAddF64: "addf", OpSubF64: "subf", OpMulF64: "mulf", OpDivF64: "divf", OpModF64: "modf", OpNegF64: "negf", OpCmpF64: "cmpf",
 	OpNot: "not", OpStrictNullish: "strictnullish", OpLooseNullish: "loosenullish", OpEqTagged: "eqtagged", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
-	OpSameObject: "sameobject", OpFrameRoom: "frameroom",
+	OpSameObject: "sameobject", OpFrameRoom: "frameroom", OpKeepRef: "keepref", OpKeep: "keep", OpKept: "kept",
 }
 
 func (o Op) String() string {
@@ -202,7 +215,7 @@ func (o Op) isGuard() bool {
 // (An array's length and an object's shape change only in Go.)
 func (o Op) readsMemory() bool {
 	return o == OpElemRead || o == OpElemWrite || o == OpElemCell || o == OpPropRead || o == OpPropWrite || o == OpPropCell ||
-		o == OpGlobalCell
+		o == OpGlobalCell || o == OpKeep
 }
 
 // Value is one SSA value.
@@ -335,6 +348,8 @@ type Func struct {
 	// FrameLocals, which native code finds in the context
 	// (abi.Context.This); -1 if none.
 	ThisSlot int
+	// Keeps counts the keep cells the code uses (OpKeep).
+	Keeps int
 	// written marks the slots some instruction writes (Written).
 	written []bool
 	nextID  int

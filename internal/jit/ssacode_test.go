@@ -1544,13 +1544,13 @@ func TestSSANativeStores(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		p    *ir.Program
-		// alias: the store never happens natively; read: what is returned
-		// is what was stored, else what object 2 held.
-		alias, stored bool
+		// returns is what is returned: what was read before the store, what
+		// was stored, or what object 2 held.
+		returns string
 	}{
-		{"read, store, use", program(read(0), write), true, false},
-		{"store, read", program(write, read(0)), false, true},
-		{"read another, store, use", program(read(2), write), false, false},
+		{"read, store, use", program(read(0), write), "old"},
+		{"store, read", program(write, read(0)), "stored"},
+		{"read another, store, use", program(read(2), write), "other"},
 	} {
 		c, err := compileNative(tc.p, layout{4, -1, map[int]site{0: cached, 1: cached}, nil, nil, nil})
 		if err != nil || c == nil {
@@ -1577,15 +1577,15 @@ func TestSSANativeStores(t *testing.T) {
 					if err != nil {
 						t.Fatalf("%s: %v", name, err)
 					}
+					// While the collector marks, a store of a pointer word, or
+					// over one, leaves; otherwise the value read before it was
+					// kept (OpKeep).
 					pointers := isTestReference(value) || isTestReference(old)
-					native := !tc.alias && !(barrier && pointers)
+					native := !(barrier && pointers)
 					if got := exit.Kind == ir.Returned; got != native {
 						t.Fatalf("%s: native %v, want %v", name, got, native)
 					}
-					want := ir.Value{Kind: ir.Opaque, Bits: 2}
-					if tc.stored {
-						want = value
-					}
+					want := map[string]ir.Value{"old": old, "stored": value, "other": {Kind: ir.Opaque, Bits: 2}}[tc.returns]
 					if native && exit.Value != want {
 						t.Fatalf("%s: returned %v, want %v", name, exit.Value, want)
 					}
