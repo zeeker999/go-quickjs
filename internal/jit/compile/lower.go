@@ -385,8 +385,12 @@ func selectNumericProperties(p *ir.Program, cells bool) {
 			needed[in.Dest], needed[in.Extra] = needed[in.Extra], needed[in.Dest]
 		case ir.Binary:
 			take(in.Dest)
-			read(in.Left, number)
-			read(in.Right, number)
+			if !(cells && (in.Operator == ir.Eq || in.Operator == ir.Ne)) {
+				// The new pipeline compares any value: equality takes a read
+				// as it finds it, as a reference if it is one.
+				read(in.Left, number)
+				read(in.Right, number)
+			}
 		case ir.Unary, ir.Update:
 			take(in.Dest)
 			if in.Op == ir.Update && in.Extra >= 0 {
@@ -417,7 +421,7 @@ func selectNumericProperties(p *ir.Program, cells bool) {
 			read(in.Left, reference)
 			read(in.Right, number)
 		case ir.Branch:
-			if in.Operator != ir.Truth {
+			if in.Operator != ir.Truth && !(cells && (in.Operator == ir.Eq || in.Operator == ir.Ne)) {
 				read(in.Left, number)
 				read(in.Right, number)
 			}

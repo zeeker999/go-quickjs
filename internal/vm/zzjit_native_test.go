@@ -1468,6 +1468,46 @@ func TestJITSSANullish(t *testing.T) {
 	}
 }
 
+// A property or element compared with == or != is read as it is, whatever
+// it holds: the new pipeline compares any value, so lowering does not take
+// the operands for numbers, which sent `o.next != null` to Go at every
+// iteration where next holds an object.
+func TestJITSSACompareReferences(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function f(o,a,n){let k=0;for(let i=0;i<n;i++){if(o.next!=null)k++;if(a[i%2]==null)k+=10;if(o.v==3)k+=100}return k}
+		var o={next:{},v:3},a=[{},null];`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, src := range []string{`''+f(o,a,40)`, `o.next=null;o.v=4;''+f(o,a,40)`, `o.next=7;o.v='3';''+f(o,a,40)`} {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("%s: got %s, interpreter %s", src, got, want)
+		}
+		if src == `''+f(o,a,40)` {
+			fn := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
+			if e := r.jit.hint(fn.hint()); e == nil || e.ssa == nil || e.ssaStats.hosts != 0 || e.ssaStats.guards != 0 {
+				t.Fatalf("comparisons of references left native code: %+v", e)
+			}
+		}
+	}
+}
+
 // The new pipeline reads an element it carries as a reference by the
 // element's cell, whatever it holds -- objects read from an array and used
 // as receivers, as Richards' scheduler does, or returned -- where it took
