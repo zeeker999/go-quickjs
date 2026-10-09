@@ -463,28 +463,35 @@ func TestJITSSAReferences(t *testing.T) {
 		{"rotate", `function f(a,b,c,n){for(let i=0;i<n;i++){let t=a;a=b;b=c;c=t}return [a,b,c]}`,
 			`var a={},b=[],c='c';var r=f(a,b,c,4);[r[0]===b,r[1]===c,r[2]===a]`, false},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			src := tc.fn + ";" + tc.run + ".map(String).join()"
-			want := New(Config{})
-			defer func() { want.Close(); want.ReleaseClosed() }()
-			wv, err := want.Run(compileForTest(t, src))
-			if err != nil {
-				t.Fatal(err)
-			}
-			r := jitRuntimeForTest(t, Config{JIT: true})
-			r.jitSSA = true
-			r.jitStress = jitStressConfig{threshold: true, budget: 1}
-			gv, err := r.Run(compileForTest(t, src))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got, want := gv.String().Go(), wv.String().Go(); got != want {
-				t.Fatalf("got %q, interpreter %q", got, want)
-			}
-			if st := r.JITStats(); st.SSAEntries == 0 || tc.records && st.SSARecords == 0 {
-				t.Fatalf("never entered the new pipeline, or left no reference to Go: %+v", st)
-			}
-		})
+		// Native code applies an exit's records itself unless the collector
+		// marks; marking, they are Go's.
+		for _, marking := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/marking=%v", tc.name, marking), func(t *testing.T) {
+				if marking {
+					jitMarkingForTest(t)
+				}
+				src := tc.fn + ";" + tc.run + ".map(String).join()"
+				want := New(Config{})
+				defer func() { want.Close(); want.ReleaseClosed() }()
+				wv, err := want.Run(compileForTest(t, src))
+				if err != nil {
+					t.Fatal(err)
+				}
+				r := jitRuntimeForTest(t, Config{JIT: true})
+				r.jitSSA = true
+				r.jitStress = jitStressConfig{threshold: true, budget: 1}
+				gv, err := r.Run(compileForTest(t, src))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, want := gv.String().Go(), wv.String().Go(); got != want {
+					t.Fatalf("got %q, interpreter %q", got, want)
+				}
+				if st := r.JITStats(); st.SSAEntries == 0 || marking && tc.records && st.SSARecords == 0 {
+					t.Fatalf("never entered the new pipeline, or left no reference to Go: %+v", st)
+				}
+			})
+		}
 	}
 }
 
@@ -3803,9 +3810,7 @@ func TestJITSSAReferenceStoresWhileMarking(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
-	marking := uint8(1)
-	defer func(old uint64) { jitEncoding.WriteBarrier = old }(jitEncoding.WriteBarrier)
-	jitEncoding.WriteBarrier = uint64(uintptr(unsafe.Pointer(&marking)))
+	jitMarkingForTest(t)
 	setup := `function relink(a,n){for(let i=0;i<n;i++){const o=a[i];o.next=a[i+1];o.v=i}return a[0]}
 		function count(a,n){for(let i=0;i<n;i++)a[i].v=i*2;return a[n-1].v}
 		function total(){let s=0;for(let n=relink(arr,40);n;n=n.next)s+=n.v;return s+':'+count(arr,40)}
@@ -3832,4 +3837,19 @@ func TestJITSSAReferenceStoresWhileMarking(t *testing.T) {
 	if e := entry("count"); e == nil || e.ssa == nil || e.ssaStats.entries == 0 || e.ssaStats.hosts != 0 {
 		t.Fatalf("count's numbers went to Go: %+v", e)
 	}
+}
+
+// jitMarkingForTest has code compiled for the rest of the test see the
+// collector's write-barrier flag set (jitEncoding.WriteBarrier), as while
+// it marks: every store that changes a pointer word, and every exit's
+// records, are Go's.
+func jitMarkingForTest(t *testing.T) {
+	marking := new(uint8)
+	*marking = 1
+	old := jitEncoding.WriteBarrier
+	jitEncoding.WriteBarrier = uint64(uintptr(unsafe.Pointer(marking)))
+	t.Cleanup(func() {
+		jitEncoding.WriteBarrier = old
+		runtime.KeepAlive(marking)
+	})
 }
