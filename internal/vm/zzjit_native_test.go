@@ -3081,6 +3081,58 @@ func TestJITStressDifferential(t *testing.T) {
 // a Go function or a remainder (which the JIT hands to Go). The difference,
 // per iteration, is what a return to Go costs with publication and
 // re-encoding, the input D7's design and D10's cost model need.
+// BenchmarkJITCompile is what compiling a function costs, as the VM does at
+// first use -- lowering, building, optimizing, emitting and placing the code
+// -- in each pipeline: a small loop, a numeric kernel, and a loop of about
+// 200 instructions, the size the plan's compile budget names (below 50 us
+// and 64 KB of transient memory; docs/jit-production-plan.md, D2).
+func BenchmarkJITCompile(b *testing.B) {
+	var region strings.Builder
+	region.WriteString("function f(n){let a=1,b=2,c=3,d=4;for(let i=0;i<n;i++){")
+	for range 8 {
+		region.WriteString("a=(a+b*i)|0;b=b+c*0.5;c=(c^a)&255;d=d+a-b;")
+	}
+	region.WriteString("}return a+b+c+d}")
+	particle := jitNumericKernelCases()[2].body
+	for _, tc := range []struct{ name, src string }{
+		{"sum", `function f(n){let s=0;for(let i=0;i<n;i++)s+=i;return s}`},
+		{"particle", "function f(n){" + strings.ReplaceAll(particle, "VAR", "let") + "}"},
+		{"region", region.String()},
+	} {
+		for _, mode := range []string{"native", "ssa"} {
+			if mode == "ssa" && !jitSSABackend {
+				continue
+			}
+			b.Run(tc.name+"/"+mode, func(b *testing.B) {
+				r := New(Config{JIT: true})
+				defer func() { r.Close(); r.ReleaseClosed() }()
+				r.jitSSA = mode == "ssa"
+				if _, err := r.Run(compileForTest(b, tc.src+";f(2)")); err != nil {
+					b.Fatal(err)
+				}
+				cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
+				compile := func() *jitEntry {
+					if r.jit != nil {
+						for key, e := range r.jit.cache {
+							r.jit.dropEntry(key, e)
+						}
+					}
+					return r.jitFor(cl)
+				}
+				if e := compile(); e == nil || mode == "ssa" && e.ssa == nil || mode == "native" && e.code == nil {
+					b.Fatalf("%s did not compile in the %s pipeline", tc.name, mode)
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for range b.N {
+					compile()
+				}
+				b.ReportMetric(float64(len(cl.fn.Code)), "instructions")
+			})
+		}
+	}
+}
+
 func BenchmarkJITHostRoundTrip(b *testing.B) {
 	for _, tc := range []struct{ name, body string }{
 		{"pure", `s=(s+i*3)|0`},
