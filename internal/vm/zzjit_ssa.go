@@ -199,9 +199,12 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 		e.reopts++
 	case e.inlineReopt:
 		e.inlineReopts++
+	case e.upgradeReopt:
+		e.upgradeReopts++
 	}
-	e.reopt, e.inlineReopt, e.polyReopt = false, false, false
+	e.reopt, e.inlineReopt, e.polyReopt, e.upgradeReopt = false, false, false, false
 	fn := cl.fn
+	r.jitInlineNativeCalls(e)
 	lower := jitcompile.LowerSSA
 	if e.ssaCallee {
 		lower = jitcompile.LowerSSAInline
@@ -215,6 +218,11 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 		return
 	}
 	old := e.ssa
+	if len(fb.inlined) > len(e.ssaInlined) {
+		// It inlines more: its native callers may inline it now, and
+		// theirs, with it.
+		r.jitCallersReopt(e, jitInlineDepth)
+	}
 	e.ssa, e.ssaShapes, e.ssaHolders, e.fed, e.ssaStats = code, fb.shapes, fb.holders, fb.fed, jitSSAStats{}
 	e.ssaStrings, e.ssaCallees, e.ssaInlined = e.ssaStrings || fb.strings, fb.callees, fb.inlined
 	if !e.notNative {
@@ -316,10 +324,21 @@ func (fb *jitFeedback) keep() *jitFeedback {
 // Inline is ssa.Feedback's: a call jitCallSeen has seen call one function
 // it may inline, unless that stopped. A callee inlines nothing itself.
 func (fb *jitFeedback) Inline(pc int) (ssa.InlineSite, bool) {
-	if fb.e == nil || fb.root != nil || pc >= len(fb.fn.Code) || slices.Contains(fb.e.notInline, int32(pc)) {
+	if pc >= len(fb.fn.Code) {
 		return ssa.InlineSite{}, false
 	}
-	for _, in := range fb.e.inlines {
+	var targets []jitInline
+	if fb.root != nil {
+		// An inlined callee's calls, inlined in it as its own code calls
+		// them (jitInlineSite).
+		if in, ok := fb.r.jitInlineSite(fb.fn, pc, jitInlineDepth-1); ok {
+			targets = []jitInline{in}
+		}
+	} else if fb.e != nil && !slices.Contains(fb.e.notInline, int32(pc)) {
+		targets = fb.e.inlines
+	}
+	k := fb.keep()
+	for _, in := range targets {
 		if int(in.pc) != pc {
 			continue
 		}
@@ -333,12 +352,12 @@ func (fb *jitFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 			this = in.cl.fn.LocalCount + len(in.cl.fn.Upvalues)
 		}
 		for _, x := range p.Code {
-			fb.strings = fb.strings || x.Op == ir.StringMethod || x.Op == ir.StringCode
+			k.strings = k.strings || x.Op == ir.StringMethod || x.Op == ir.StringCode
 		}
-		fb.holders = append(fb.holders, in.obj)
-		fb.inlined = append(fb.inlined, in.cl)
+		k.holders = append(k.holders, in.obj)
+		k.inlined = append(k.inlined, in.cl)
 		return ssa.InlineSite{
-			Program: p, Feedback: &jitFeedback{r: fb.r, fn: in.cl.fn, cl: in.cl, root: fb},
+			Program: p, Feedback: &jitFeedback{r: fb.r, fn: in.cl.fn, cl: in.cl, root: k},
 			Callee: uintptr(unsafe.Pointer(in.obj)), Closure: uintptr(unsafe.Pointer(in.cl)),
 			Argc: int(call.A), Method: call.Op == bytecode.OpCallMethod,
 			Params: in.cl.fn.ParamCount, ThisSlot: this, Coerce: in.cl.fn.CoerceThis,
@@ -399,9 +418,12 @@ type jitInline struct {
 // compiled again for its calls, apart from jitReoptimizations: a method
 // whose calls are on different branches, as Richards' tasks' are, learns
 // them at different times.
+// jitCallsHot is how often a call leaves native code, its function past
+// those compiles, before it is looked at all the same: up to twice as many.
 const (
 	jitCallsToInline         = 4
 	jitInlineReoptimizations = 4
+	jitCallsHot              = 128
 )
 
 // What jitCallSeen knows of a call (jitEntry.callSites), past its count: that
@@ -439,27 +461,33 @@ func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 	}
 	if e.callSites != nil && e.callSites[pc] == jitCallNative {
 		r.jitCallTarget(f, e, pc, sp, in)
-		if e.inlinePending && e.inlineReopts < jitInlineReoptimizations {
+		if e.inlinePending && e.inlineReopts < 2*jitInlineReoptimizations {
 			e.inlinePending, e.inlineReopt = false, true
 		}
 		return
 	}
-	if e.inlineReopts >= jitInlineReoptimizations {
+	if e.inlineReopts >= 2*jitInlineReoptimizations {
 		return
+	}
+	// Past its compiles for its calls, a call that keeps leaving earns one
+	// more, which every call left to Go costs less than.
+	settle := uint8(jitCallsToInline)
+	if e.inlineReopts >= jitInlineReoptimizations {
+		settle = jitCallsHot
 	}
 	if e.callSites == nil {
 		e.callSites = make([]uint8, len(f.cl.fn.Code))
 	}
 	switch n := e.callSites[pc]; {
 	case n == jitCallInlined:
-		jitInlineLeft(e, pc)
+		r.jitInlineLeft(e, pc)
 		fallthrough
 	case n == jitCallDone:
 		if e.inlinePending {
 			e.inlinePending, e.inlineReopt = false, true
 		}
 		return
-	case n+1 < jitCallsToInline:
+	case n+1 < settle:
 		e.callSites[pc]++
 		if e.inlinePending && n > 0 {
 			e.inlinePending, e.inlineReopt = false, true
@@ -471,7 +499,7 @@ func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 	if cl == nil {
 		return
 	}
-	if cl.fn != f.cl.fn && r.jitInlinable(cl.fn) {
+	if cl.fn != f.cl.fn && (r.jitInlinable(cl.fn) || r.jitInlinesCalls(cl.fn, jitInlineDepth-1)) {
 		e.inlines = append(e.inlines, jitInline{pc: int32(pc), cl: cl, obj: o})
 		e.callSites[pc] = jitCallInlined
 		e.inlinePending = true
@@ -483,24 +511,151 @@ func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 		e.nativeCalls = append(e.nativeCalls, jitInline{pc: int32(pc), cl: cl, obj: o})
 		e.callSites[pc] = jitCallNative
 		e.inlinePending = true
+		if ce != e && len(ce.nativeCallers) < jitNativeCallers && !slices.Contains(ce.nativeCallers, e) {
+			ce.nativeCallers = append(ce.nativeCallers, e)
+		}
 	}
 }
 
+// jitNativeCallers is how many callers' entries an entry tells when it
+// inlines more (jitEntry.nativeCallers).
+const jitNativeCallers = 8
+
+// jitCallersReopt has the code of e's native callers, and theirs, depth
+// levels up, compiled again where it would inline a call it makes
+// natively now (jitInlineNativeCalls): one entered from Go is, at its next
+// entry or exit, up to jitInlineReoptimizations times, apart from those
+// its own calls have.
+func (r *Runtime) jitCallersReopt(e *jitEntry, depth int) {
+	if depth == 0 {
+		return
+	}
+	for _, c := range e.nativeCallers {
+		if c.upgradeReopts < jitInlineReoptimizations && r.jitNativeCallsInline(c, nil) {
+			c.upgradeReopt = true
+		}
+		r.jitCallersReopt(c, depth-1)
+	}
+}
+
+// jitInlineNativeCalls has e's code, compiled again, inline the calls
+// it made natively to one function that may now be inlined with the calls
+// it makes, which its own code has come to inline (jitInlinesCalls), as V8
+// inlines a callee's callees when it optimizes again.
+func (r *Runtime) jitInlineNativeCalls(e *jitEntry) {
+	r.jitNativeCallsInline(e, func(i int) {
+		x := e.nativeCalls[i]
+		e.nativeCalls = slices.Delete(e.nativeCalls, i, i+1)
+		e.inlines = append(e.inlines, jitInline{pc: x.pc, cl: x.cl, obj: x.obj})
+		e.callSites[x.pc] = jitCallInlined
+	})
+}
+
+// jitNativeCallsInline reports whether e's code calls natively, at a call
+// that calls it alone, a function that may be inlined with its calls
+// now, calling inline with the index of each in e.nativeCalls, which it
+// may delete, if it is not nil.
+func (r *Runtime) jitNativeCallsInline(e *jitEntry, inline func(int)) bool {
+	found := false
+	for i := 0; i < len(e.nativeCalls); i++ {
+		x := e.nativeCalls[i]
+		pc := int(x.pc)
+		one := !slices.ContainsFunc(e.nativeCalls, func(y jitInline) bool { return y.pc == x.pc && y.cl != x.cl })
+		if !one || r.jit.cache[weak.Make(x.cl.fn)] == e || e.callSites == nil || pc >= len(e.callSites) ||
+			e.callSites[pc] != jitCallNative || slices.Contains(e.notInline, x.pc) || !r.jitInlinesCalls(x.cl.fn, jitInlineDepth-1) {
+			continue
+		}
+		found = true
+		if inline == nil {
+			return true
+		}
+		inline(i)
+		i--
+	}
+	return found
+}
+
 // jitInlineLeft counts an exit from the callee inlined at pc, or from its
-// call's checks: after jitInlineExits the call is not inlined, and the
-// code is compiled again.
-func jitInlineLeft(e *jitEntry, pc int) {
+// call's checks: after jitInlineExits the call is not inlined but made
+// natively, if the callee's code allows it, and the code is compiled
+// again.
+func (r *Runtime) jitInlineLeft(e *jitEntry, pc int) {
 	for i := range e.inlines {
 		if x := &e.inlines[i]; int(x.pc) == pc && !slices.Contains(e.notInline, x.pc) {
 			if x.exits++; x.exits >= jitInlineExits {
 				e.notInline = append(e.notInline, x.pc)
 				if e.callSites != nil {
 					e.callSites[pc] = jitCallDone
+					if r.jitNativeCallee(x.cl) != nil {
+						e.nativeCalls = append(e.nativeCalls, jitInline{pc: x.pc, cl: x.cl, obj: x.obj})
+						e.callSites[pc] = jitCallNative
+					}
 				}
 				e.inlineReopt = true
 			}
 		}
 	}
+}
+
+// jitInlineDepth is how many levels of calls are inlined: a callee, the
+// calls it makes, theirs (ssa's maxInlineDepth).
+const jitInlineDepth = 3
+
+// jitInlinesCalls reports whether a function that makes calls may be
+// inlined with them, as V8 inlines a callee's callees: it may be but for
+// its calls (ssa.InlineCalls), and its own code inlines every one, each a
+// function that may be inlined, with its calls if depth allows.
+func (r *Runtime) jitInlinesCalls(fn *bytecode.Function, depth int) bool {
+	if depth <= 0 || len(fn.Upvalues) != 0 || fn.TopLevel || fn.IsModule || fn.UsesArguments || fn.HasDirectEval {
+		return false
+	}
+	e := r.jit.cache[weak.Make(fn)]
+	if e == nil || e.callSites == nil {
+		return false
+	}
+	p, err := jitcompile.LowerSSAInline(fn)
+	if err != nil {
+		return false
+	}
+	calls, ok := ssa.InlineCalls(p)
+	if !ok || len(calls) == 0 {
+		return false
+	}
+	for _, pc := range calls {
+		if _, ok := r.jitInlineSite(fn, pc, depth); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// jitInlineSite is the function fn's call at pc is inlined with, inside a
+// callee inlined with fn, depth levels allowing: the one fn's own code
+// inlines there, or the one it calls natively there, and no other, which
+// may be inlined, with its own calls if depth allows (jitInlinesCalls).
+func (r *Runtime) jitInlineSite(fn *bytecode.Function, pc, depth int) (jitInline, bool) {
+	e := r.jit.cache[weak.Make(fn)]
+	if e == nil || pc >= len(e.callSites) || slices.Contains(e.notInline, int32(pc)) {
+		return jitInline{}, false
+	}
+	var list []jitInline
+	switch e.callSites[pc] {
+	case jitCallInlined:
+		list = e.inlines
+	case jitCallNative:
+		list = e.nativeCalls
+	}
+	var in jitInline
+	n := 0
+	for _, x := range list {
+		if int(x.pc) == pc {
+			in, n = x, n+1
+		}
+	}
+	if n != 1 || in.cl.fn == fn || !r.jitInlinable(in.cl.fn) && !r.jitInlinesCalls(in.cl.fn, depth-1) {
+		return jitInline{}, false
+	}
+	return in, true
 }
 
 // jitInlinedCalls has a call inlined for one function that calls another,
@@ -1027,7 +1182,7 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 				return r.jitInterpret(f, sp, err)
 			}
 			pc, depth = int(f.pc), sp-f.base
-			if e.reopt || e.inlineReopt || e.polyReopt {
+			if e.reopt || e.inlineReopt || e.polyReopt || e.upgradeReopt {
 				r.jitReoptimize(f.cl, e)
 			}
 			if !e.ssa.HasEntry(pc) || e.entrySlow {
@@ -1081,7 +1236,7 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 			case bytecode.OpGetProp, bytecode.OpGetPropThis, bytecode.OpSetProp:
 				jitFed(f.cl, e, uint32(exitPC))
 			}
-			if e.reopt || e.inlineReopt || e.polyReopt {
+			if e.reopt || e.inlineReopt || e.polyReopt || e.upgradeReopt {
 				// The code is compiled again now, not at the next call: a
 				// loop in this one may run long.
 				r.jitReoptimize(f.cl, e)
@@ -1146,10 +1301,16 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry) (Value, error) {
 			// The callee its caller -- e's code or a native call's callee's
 			// -- inlined at the call it left at.
 			l.inline, l.locals, l.thisSlot = true, int(c.InlineLocals), int(c.InlineThis)
+			// Its code is that of the nearest level below it not inlined,
+			// or e's, which inlined it, and the callees it is inlined in.
 			parent, parentPC := e, s.ssaCtxs[idx].ExitPC
-			if len(s.unwinding) > start {
-				caller := &s.unwinding[len(s.unwinding)-1]
-				parent, parentPC = s.cache[weak.Make(caller.cl.fn)], caller.pc
+			outer := true
+			for k := len(s.unwinding) - 1; k >= start; k-- {
+				if caller := &s.unwinding[k]; !caller.inline {
+					parent, parentPC = s.cache[weak.Make(caller.cl.fn)], caller.pc
+					break
+				}
+				outer = false
 			}
 			for _, cl := range parent.ssaInlined {
 				if uintptr(unsafe.Pointer(cl)) == uintptr(c.InlineClosure) {
@@ -1159,7 +1320,10 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry) (Value, error) {
 			if l.cl == nil {
 				panic("jit: an inlined callee's closure is not its caller's")
 			}
-			jitInlineLeft(parent, int(parentPC))
+			if outer {
+				// Counted once, for the call the outermost is inlined at.
+				r.jitInlineLeft(parent, int(parentPC))
+			}
 		} else {
 			l.cl, l.this = (*closure)(c.Closure), *(*Value)(unsafe.Pointer(&c.This))
 		}
@@ -1324,10 +1488,10 @@ func (r *Runtime) jitFinishExit(f *frame, e *jitEntry, l *jitNativeLevel) (Value
 			case bytecode.OpGetProp, bytecode.OpGetPropThis, bytecode.OpSetProp:
 				jitFed(f.cl, e, uint32(pc))
 			}
-			if e.inlinePending && e.inlineReopts < jitInlineReoptimizations {
+			if e.inlinePending && e.inlineReopts < 2*jitInlineReoptimizations {
 				e.inlinePending, e.inlineReopt = false, true
 			}
-			if e.reopt || e.inlineReopt || e.polyReopt {
+			if e.reopt || e.inlineReopt || e.polyReopt || e.upgradeReopt {
 				r.jitReoptimize(f.cl, e)
 			}
 		}

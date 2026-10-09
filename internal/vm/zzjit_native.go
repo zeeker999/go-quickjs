@@ -231,6 +231,10 @@ type jitEntry struct {
 	// native code.
 	inlines   []jitInline
 	notInline []int32
+	// nativeCallers are the entries whose code calls this one's natively,
+	// up to jitNativeCallers: when this code is compiled again to inline
+	// more, they are too, to inline it with its calls (jitInlineNativeCalls).
+	nativeCallers []*jitEntry
 	// callSites is what jitCallSeen knows of each call, by PC: how often it has
 	// left native code, up to jitCallsToInline, then jitCallDone or
 	// jitCallInlined; nil until a call does. inlinePending marks calls
@@ -242,6 +246,12 @@ type jitEntry struct {
 	// inline, and inlineReopts counts the times it was, apart from reopts.
 	inlineReopt  bool
 	inlineReopts uint8
+	// upgradeReopt marks code to be compiled again to inline a call it
+	// makes natively, its callee now inlining its own calls
+	// (jitCallersReopt), and upgradeReopts counts the times it was, apart
+	// from the others, which its own calls need.
+	upgradeReopt  bool
+	upgradeReopts uint8
 	// ssaCallee marks code compiled for native callers alone, from
 	// LowerSSAInline (jitNativeCallee).
 	ssaCallee     bool
@@ -793,7 +803,7 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 		if e.inlinePending && e.inlineReopts < jitInlineReoptimizations {
 			e.inlinePending, e.inlineReopt = false, true
 		}
-		if e.reopt || e.inlineReopt || e.polyReopt {
+		if e.reopt || e.inlineReopt || e.polyReopt || e.upgradeReopt {
 			r.jitReoptimize(f.cl, e)
 		}
 		if e.entrySlow {

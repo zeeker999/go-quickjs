@@ -161,9 +161,9 @@ const (
 	// address the VM keeps alive: an inlined call's function (inline).
 	OpSameObject // ptr -> none
 	// OpFrameRoom guards that the VM's stack has Index slots past the
-	// operands' first and that a context follows this one: room for an
-	// inlined callee's frame, which an exit inside it writes there
-	// (InlineState).
+	// operands' first and that Const.Bits contexts follow this one: room
+	// for an inlined callee's frame, and its callers' if they are inlined
+	// too, which an exit inside it writes there (InlineState).
 	OpFrameRoom // -> none
 	// OpKeepRef is a tagged value's pointer word (Args[0]), read where it
 	// came from (origin.go), or 0 for a primitive's; 0 while the collector
@@ -293,8 +293,11 @@ type FrameState struct {
 // from, as for a native call's callee that left native code. Closure is
 // the callee's closure's address (InlineSite); Base its first slot among
 // the function's; Locals its program's locals, its receiver among them,
-// at ThisSlot, or -1; PC, Depth and Site where in it the exit is.
+// at ThisSlot, or -1; PC, Depth and Site where in it the exit is. Parent is
+// its caller's, at the call, when that is inlined too, and the exit makes
+// both frames, each in a context of its own, the outermost first.
 type InlineState struct {
+	Parent   *InlineState
 	Closure  uintptr
 	Base     int
 	Locals   int
