@@ -2,6 +2,7 @@ package mir
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	"github.com/go-quickjs/go-quickjs/internal/jit/asm/amd64"
@@ -25,7 +26,7 @@ const (
 // compiler is amd64's code generator over the shared core.
 type compiler struct {
 	*core
-	a amd64.Asm
+	a *amd64.Asm
 	// label of each block's code.
 	labels []amd64.Label // by block ID
 	// stubs: one exit per frame state and kind.
@@ -59,7 +60,21 @@ func compileAMD64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err 
 	if err != nil {
 		return nil, err
 	}
-	c := &compiler{core: k, labels: make([]amd64.Label, numBlocks(f)), stubs: map[stubKey]amd64.Label{}}
+	c := &compiler{core: k}
+	if w != nil {
+		g := &w.amd64
+		if g.stubs == nil {
+			g.stubs = map[stubKey]amd64.Label{}
+		}
+		g.a.Reset()
+		clear(g.stubs)
+		c.a, c.stubs, c.stubFor, c.cold = &g.a, g.stubs, g.stubFor[:0], g.cold[:0]
+		c.labels = slices.Grow(g.labels[:0], numBlocks(f))[:numBlocks(f)]
+		defer func() { g.labels, g.stubFor, g.cold = c.labels[:0], c.stubFor[:0], clearFuncs(c.cold) }()
+	} else {
+		c.a, c.stubs = &amd64.Asm{}, map[stubKey]amd64.Label{}
+		c.labels = make([]amd64.Label, numBlocks(f))
+	}
 	entries := map[int]int{}
 	for _, b := range c.order {
 		c.labels[b.ID] = c.a.NewLabel()

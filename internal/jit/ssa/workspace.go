@@ -20,6 +20,23 @@ type Workspace struct {
 	blockRefs arena.Arena[*Block]
 	bools     arena.Arena[bool]
 	ints      arena.Arena[int]
+	scratch   scratch
+	ready     bool
+}
+
+// init has the workspace's arenas keep the big tables a compile makes.
+func (w *Workspace) init() {
+	if w.ready {
+		return
+	}
+	w.ready = true
+	w.values.KeepBig()
+	w.refs.KeepBig()
+	w.states.KeepBig()
+	w.blocks.KeepBig()
+	w.blockRefs.KeepBig()
+	w.bools.KeepBig()
+	w.ints.KeepBig()
 }
 
 // Rewind takes back everything built in the workspace.
@@ -35,6 +52,7 @@ func (w *Workspace) Rewind() {
 
 // BuildIn is BuildWith, building in w.
 func BuildIn(w *Workspace, p *ir.Program, fb Feedback) (*Func, error) {
+	w.init()
 	return build(w, p, fb)
 }
 

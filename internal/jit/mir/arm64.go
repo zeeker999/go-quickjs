@@ -3,6 +3,7 @@ package mir
 import (
 	"fmt"
 	"math"
+	"slices"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	"github.com/go-quickjs/go-quickjs/internal/jit/asm/arm64"
@@ -31,7 +32,7 @@ const (
 // why.
 type a64Compiler struct {
 	*core
-	a       arm64.Asm
+	a       *arm64.Asm
 	labels  []arm64.Label // by block ID
 	stubs   map[stubKey]arm64.Label
 	stubFor []a64Stub
@@ -66,7 +67,21 @@ func compileARM64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err 
 	if err != nil {
 		return nil, err
 	}
-	c := &a64Compiler{core: k, labels: make([]arm64.Label, numBlocks(f)), stubs: map[stubKey]arm64.Label{}}
+	c := &a64Compiler{core: k}
+	if w != nil {
+		g := &w.arm64
+		if g.stubs == nil {
+			g.stubs = map[stubKey]arm64.Label{}
+		}
+		g.a.Reset()
+		clear(g.stubs)
+		c.a, c.stubs, c.stubFor, c.cold = &g.a, g.stubs, g.stubFor[:0], g.cold[:0]
+		c.labels = slices.Grow(g.labels[:0], numBlocks(f))[:numBlocks(f)]
+		defer func() { g.labels, g.stubFor, g.cold = c.labels[:0], c.stubFor[:0], clearFuncs(c.cold) }()
+	} else {
+		c.a, c.stubs = &arm64.Asm{}, map[stubKey]arm64.Label{}
+		c.labels = make([]arm64.Label, numBlocks(f))
+	}
 	entries := map[int]int{}
 	for _, b := range c.order {
 		c.labels[b.ID] = c.a.NewLabel()

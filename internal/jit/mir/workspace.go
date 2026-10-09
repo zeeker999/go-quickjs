@@ -5,6 +5,8 @@ import (
 
 	"github.com/go-quickjs/go-quickjs/internal/arena"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
+	"github.com/go-quickjs/go-quickjs/internal/jit/asm/amd64"
+	"github.com/go-quickjs/go-quickjs/internal/jit/asm/arm64"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
@@ -24,6 +26,49 @@ type Workspace struct {
 	intervals arena.Arena[interval]
 	ivRefs    arena.Arena[*interval]
 	locs      arena.Arena[loc]
+	sched     schedule
+	ready     bool
+	// Each code generator's assembler and tables. A Code's Bytes from
+	// CompileIn are the assembler's: they hold until the workspace's next
+	// compile.
+	amd64 struct {
+		a       amd64.Asm
+		labels  []amd64.Label
+		stubs   map[stubKey]amd64.Label
+		stubFor []stub
+		cold    []func()
+	}
+	arm64 struct {
+		a       arm64.Asm
+		labels  []arm64.Label
+		stubs   map[stubKey]arm64.Label
+		stubFor []a64Stub
+		cold    []func()
+	}
+}
+
+// clearFuncs empties fs, dropping the closures it held, for reuse.
+func clearFuncs(fs []func()) []func() {
+	clear(fs)
+	return fs[:0]
+}
+
+// init has the workspace's arenas keep the big tables a compile makes.
+func (w *Workspace) init() {
+	if w.ready {
+		return
+	}
+	w.ready = true
+	w.bools.KeepBig()
+	w.ints.KeepBig()
+	w.words.KeepBig()
+	w.sets.KeepBig()
+	w.values.KeepBig()
+	w.blocks.KeepBig()
+	w.uses.KeepBig()
+	w.intervals.KeepBig()
+	w.ivRefs.KeepBig()
+	w.locs.KeepBig()
 }
 
 // Rewind takes back everything a compile in the workspace used.
@@ -42,6 +87,7 @@ func (w *Workspace) Rewind() {
 
 // CompileIn is Compile, in w.
 func CompileIn(w *Workspace, f *ssa.Func, enc abi.Encoding) (*Code, error) {
+	w.init()
 	if runtime.GOARCH == "arm64" {
 		return compileARM64(w, f, enc)
 	}

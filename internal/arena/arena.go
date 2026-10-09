@@ -17,14 +17,23 @@ type Arena[T any] struct {
 	chunks [][]T
 	// cur is the chunk being cut from, and off how much of it is cut.
 	cur, off int
+	// keepBig makes a request bigger than a chunk a chunk of its own that
+	// the arena keeps (KeepBig).
+	keepBig bool
 }
+
+// KeepBig has the arena keep a request bigger than its next chunk as a
+// chunk of its own, for the next job to cut from, rather than hand it out
+// and forget it: for jobs that make a few big tables each time, as a
+// compile does, at the cost of keeping memory as big as the biggest job's.
+func (a *Arena[T]) KeepBig() { a.keepBig = true }
 
 // firstChunk is the length of an arena's first chunk.
 const firstChunk = 64
 
 // Make is n zeroed slots, with a capacity of n: appending to it copies it
 // out of the arena. A request bigger than a chunk is a slice of its own,
-// which the arena does not keep.
+// which the arena does not keep, unless it keeps big ones (KeepBig).
 func (a *Arena[T]) Make(n int) []T {
 	if n <= 0 {
 		return nil
@@ -42,7 +51,10 @@ func (a *Arena[T]) Make(n int) []T {
 	// No chunk kept has room: a new one, unless n is more than one holds.
 	l := a.nextLen()
 	if n > l {
-		return make([]T, n)
+		if !a.keepBig {
+			return make([]T, n)
+		}
+		l = n
 	}
 	a.chunks = append(a.chunks, make([]T, l))
 	a.cur, a.off = len(a.chunks)-1, n

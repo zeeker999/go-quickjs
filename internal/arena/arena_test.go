@@ -84,3 +84,29 @@ func TestForget(t *testing.T) {
 		t.Error("Forget did not hand back the same slots as they were")
 	}
 }
+
+// TestKeepBig pins that an arena that keeps big requests (KeepBig) cuts
+// the next job's big slice from the chunk the last one made, allocating
+// nothing; one that does not hands big slices out on their own each time.
+func TestKeepBig(t *testing.T) {
+	job := func(a *Arena[int]) {
+		a.Make(10)
+		a.Make(5000)
+		a.Make(3)
+		a.Rewind()
+	}
+	var kept Arena[int]
+	kept.KeepBig()
+	job(&kept)
+	if n := testing.AllocsPerRun(10, func() { job(&kept) }); n != 0 {
+		t.Fatalf("a job no bigger than the last allocated %v times", n)
+	}
+	if s := kept.Make(5000); len(s) != 5000 || cap(s) != 5000 {
+		t.Fatalf("Make(5000): len %d cap %d", len(s), cap(s))
+	}
+	var plain Arena[int]
+	job(&plain)
+	if n := testing.AllocsPerRun(10, func() { job(&plain) }); n == 0 {
+		t.Fatal("an arena that does not keep big requests kept one")
+	}
+}
