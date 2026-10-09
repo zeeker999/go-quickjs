@@ -800,7 +800,11 @@ func (r *Runtime) jitCallTarget(f *frame, e *jitEntry, pc, sp int, in bytecode.I
 		if int(x.pc) == pc {
 			if x.obj == o || x.cl == nil {
 				// One it calls, or a built-in's construction, which a site
-				// makes alone.
+				// makes alone. One it calls whose code native callers do not
+				// call for now is called again after so many such calls.
+				if ce := r.jit.hint(cl.hint()); x.obj == o && ce != nil && ce.notNative {
+					jitRetryNative(ce)
+				}
 				return
 			}
 			n++
@@ -975,7 +979,10 @@ func (r *Runtime) jitRefillPools(f *frame, e *jitEntry, pc, sp int, in bytecode.
 // it is compiled for native callers alone, who pay none of that, from
 // LowerSSAInline, and Go does not enter it (entrySlow). It is compiled
 // here, not when a caller's code asks for it: that compile would share the
-// caller's workspaces.
+// caller's workspaces. Code native callers do not call for now, for
+// leaving too often (notNative), is the entry all the same: a call's code
+// reads where to call at each call, and leaves for Go while there is
+// nowhere, until the callee is called natively again (jitRetryNative).
 func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
 	fn := cl.fn
 	if fn.TopLevel || fn.IsModule || fn.UsesArguments || fn.HasDirectEval || len(fn.Upvalues) != 0 {
@@ -983,7 +990,7 @@ func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
 	}
 	e := r.jitFor(cl)
 	if e == nil || e.ssa != nil || e.code != nil || e.deferred || !r.jitSSA {
-		if e != nil && e.ssa != nil && !e.notNative {
+		if e != nil && e.ssa != nil {
 			return e
 		}
 		return nil
@@ -1824,8 +1831,10 @@ const (
 )
 
 // jitRetryNative counts a call Go makes to e's code, which native callers
-// no longer call (notNative), and has them call it again after
-// jitNativeRetry, counting its leaving afresh.
+// no longer call (notNative) -- one Go enters it for, or one a native
+// caller left for Go to make (jitCallTarget), which a function Go does not
+// enter, or calls without a frame, has only -- and has them call it again
+// after jitNativeRetry, counting its leaving afresh.
 func jitRetryNative(e *jitEntry) {
 	if e.nativeRetry++; e.nativeRetry >= jitNativeRetry<<(e.nativeBackoff-1) {
 		e.notNative, e.nativeIn, e.nativeOut = false, 0, 0
