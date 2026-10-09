@@ -373,6 +373,13 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 		if t.Via != 0 {
 			c.viaGuards(t, v.Args[0], guard)
 		}
+		if t.Push {
+			// Array.prototype.push, its fast path's.
+			c.pushGuards(t, v.Args[0], guard)
+			c.a.Jmp(checked)
+			c.a.Bind(next)
+			continue
+		}
 		if t.Alloc {
 			// A built-in's construction with nothing to run: its object.
 			c.constructGuards(t, guard)
@@ -411,6 +418,10 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 	}
 	c.a.Jmp(c.stubLabel(s, exitKind(v.Aux)))
 	c.a.Bind(checked)
+	if site.Push {
+		c.push(v)
+		return
+	}
 	if site.Alloc {
 		// The pool's last object, its cell cleared, is the result, kept
 		// (OpCallCell): nothing runs, so nothing is recorded or saved.
@@ -665,6 +676,118 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 			c.a.Load(amd64.Reg(sv.reg), regCtx, c.spillDisp(sv.slot))
 		}
 	}
+	c.setG(v, scratchA)
+}
+
+// pushGuards checks a call of Array.prototype.push may append as its fast
+// path does (ssa.CallSite's Push): the receiver, recv, a dense array,
+// extensible, its length writable, with room, of the first of the
+// prototypes, which are as they were, with no elements. It uses every
+// scratch register.
+func (c *compiler) pushGuards(t *ssa.CallSite, recv *ssa.Value, guard func(amd64.Cond)) {
+	if recv.Shadow == nil && c.origin.At(recv) < 0 {
+		// A primitive, never an array: scratchC, the callee, is not 0.
+		c.a.Op(amd64.Test, scratchC, scratchC, true)
+		guard(amd64.CondNE)
+		return
+	}
+	c.a.MovImm(scratchB, c.enc.Object)
+	c.a.Op(amd64.Cmp, c.gpr(recv, scratchA), scratchB, true)
+	guard(amd64.CondNE)
+	c.sourceRef(recv, guard)
+	c.a.LoadU8(scratchB, scratchC, c.enc.ObjectClass)
+	c.a.OpImm(amd64.Cmp, scratchB, int32(c.enc.ClassArray), false)
+	guard(amd64.CondNE)
+	c.a.LoadU8(scratchB, scratchC, c.enc.ObjectFlags)
+	want := c.enc.FlagExtensible | c.enc.FlagLengthWritable
+	c.a.OpImm(amd64.And, scratchB, int32(want|c.enc.FlagSparse), false)
+	c.a.OpImm(amd64.Cmp, scratchB, int32(want), false)
+	guard(amd64.CondNE)
+	c.a.Load(scratchB, scratchC, c.enc.ObjectElems+8)
+	c.a.Load(scratchA, scratchC, c.enc.ObjectElems+16)
+	c.a.Op(amd64.Cmp, scratchB, scratchA, true)
+	guard(amd64.CondAE)
+	c.a.Load(scratchB, scratchC, c.enc.ObjectProto)
+	c.a.MovImm(scratchA, uint64(t.Protos[0].Object))
+	c.a.Op(amd64.Cmp, scratchB, scratchA, true)
+	guard(amd64.CondNE)
+	for i, h := range t.Protos {
+		c.a.MovImm(scratchA, uint64(h.Object))
+		c.a.Load(scratchB, scratchA, c.enc.ObjectShape)
+		c.a.MovImm(scratchC, uint64(h.Shape))
+		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+		guard(amd64.CondNE)
+		c.a.Load(scratchB, scratchA, c.enc.ObjectElems+8)
+		c.a.Op(amd64.Test, scratchB, scratchB, true)
+		guard(amd64.CondNE)
+		c.a.LoadU8(scratchB, scratchA, c.enc.ObjectFlags)
+		c.a.OpImm(amd64.And, scratchB, int32(c.enc.FlagSparse), false)
+		guard(amd64.CondNE)
+		// Its prototype: the next, or none.
+		c.a.Load(scratchB, scratchA, c.enc.ObjectProto)
+		if i == 0 {
+			c.a.MovImm(scratchC, uint64(t.Protos[1].Object))
+			c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+		} else {
+			c.a.Op(amd64.Test, scratchB, scratchB, true)
+		}
+		guard(amd64.CondNE)
+	}
+}
+
+// push appends a call of Array.prototype.push's argument to its receiver,
+// checked (pushGuards): the value's words past the last element, the
+// length one more, which is the call's result, kept (OpCallCell). It uses
+// every scratch register, xScratch0 and xScratch1.
+func (c *compiler) push(v *ssa.Value) {
+	vs := int32(c.enc.ValueSize)
+	recv, x := v.Args[0], v.Args[2]
+	if vs != 16 {
+		panic("mir: a value that is not 16 bytes")
+	}
+	// The value's words: its pointer word in xScratch1, its number word
+	// in xScratch0.
+	var w amd64.Reg
+	if remat(x) {
+		c.materialize(x, scratchA)
+		w = scratchA
+	} else {
+		w = c.gpr(x, scratchA)
+	}
+	c.a.MovQToX(xScratch0, w)
+	number, have := c.a.NewLabel(), c.a.NewLabel()
+	if x.Shadow != nil || c.origin.At(x) >= 0 {
+		c.a.MovImm(scratchB, abi.NumberLimit)
+		c.a.Op(amd64.Cmp, w, scratchB, true)
+		c.a.Jcc(amd64.CondB, number)
+	}
+	c.pointerWord(x, w)
+	c.a.Jmp(have)
+	c.a.Bind(number)
+	c.a.MovImm(scratchB, 0)
+	c.a.Bind(have)
+	c.a.MovQToX(xScratch1, scratchB)
+	// The array, checked: its length grown, then the element's address.
+	c.sourceRef(recv, func(amd64.Cond) {})
+	c.a.Load(scratchB, scratchC, c.enc.ObjectElems+8)
+	c.a.OpImm(amd64.Add, scratchB, 1, true)
+	c.a.Store(scratchC, c.enc.ObjectElems+8, scratchB)
+	c.a.Load(scratchA, scratchC, c.enc.ObjectElems)
+	c.a.MovRR(scratchC, scratchB)
+	c.a.OpImm(amd64.Sub, scratchC, 1, true)
+	c.a.ShiftImm(amd64.Shl, scratchC, 4, true)
+	c.a.Op(amd64.Add, scratchA, scratchC, true)
+	c.a.MovQFromX(scratchC, xScratch0)
+	c.a.Store(scratchA, c.enc.NumOffset, scratchC)
+	c.a.MovQFromX(scratchC, xScratch1)
+	c.a.Store(scratchA, c.enc.RefOffset, scratchC)
+	// The result: the length, a number.
+	c.a.Cvtsi2sd(xScratch0, scratchB, true)
+	c.a.MovQFromX(scratchA, xScratch0)
+	at := abi.OffKeep + int32(v.Index)*vs
+	c.a.Store(regCtx, at+c.enc.NumOffset, scratchA)
+	c.a.MovImm(scratchB, 0)
+	c.a.Store(regCtx, at+c.enc.RefOffset, scratchB)
 	c.setG(v, scratchA)
 }
 

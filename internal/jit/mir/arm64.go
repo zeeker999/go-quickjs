@@ -1158,6 +1158,12 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		if t.Via != 0 {
 			c.viaGuards(t, v.Args[0], guard)
 		}
+		if t.Push {
+			c.pushGuards(t, v.Args[0], guard)
+			c.a.B(checked)
+			c.a.Bind(next)
+			continue
+		}
 		if t.Alloc {
 			c.constructGuards(t, guard)
 			c.a.B(checked)
@@ -1190,6 +1196,10 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 	}
 	c.a.B(stub)
 	c.a.Bind(checked)
+	if site.Push {
+		c.push(v)
+		return
+	}
 	if site.Alloc {
 		// As amd64's: the pool's last object is the result.
 		c.a.MovImm(a64A, uint64(site.Pool))
@@ -1417,6 +1427,106 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 			c.a.Load(arm64.Reg(sv.reg), a64Ctx, c.spillDisp(sv.slot))
 		}
 	}
+	c.setG(v, a64A)
+}
+
+// pushGuards checks a call of Array.prototype.push may append, as amd64's
+// does. It uses A, B and C.
+func (c *a64Compiler) pushGuards(t *ssa.CallSite, recv *ssa.Value, guard func(arm64.Cond)) {
+	if recv.Shadow == nil && c.origin.At(recv) < 0 {
+		c.a.CmpImm(a64C, 0, true)
+		guard(arm64.NE)
+		return
+	}
+	c.a.MovImm(a64B, c.enc.Object)
+	c.a.Cmp(c.gpr(recv, a64A), a64B, true)
+	guard(arm64.NE)
+	c.sourceRef(recv, guard)
+	c.a.LoadU8(a64B, a64C, c.enc.ObjectClass)
+	c.a.CmpImm(a64B, int64(c.enc.ClassArray), false)
+	guard(arm64.NE)
+	c.a.LoadU8(a64B, a64C, c.enc.ObjectFlags)
+	want := c.enc.FlagExtensible | c.enc.FlagLengthWritable
+	c.a.MovImm(a64A, uint64(want|c.enc.FlagSparse))
+	c.a.Op(arm64.And, a64B, a64B, a64A, false)
+	c.a.CmpImm(a64B, int64(want), false)
+	guard(arm64.NE)
+	c.a.Load(a64B, a64C, c.enc.ObjectElems+8)
+	c.a.Load(a64A, a64C, c.enc.ObjectElems+16)
+	c.a.Cmp(a64B, a64A, true)
+	guard(arm64.HS)
+	c.a.Load(a64B, a64C, c.enc.ObjectProto)
+	c.a.MovImm(a64A, uint64(t.Protos[0].Object))
+	c.a.Cmp(a64B, a64A, true)
+	guard(arm64.NE)
+	for i, h := range t.Protos {
+		c.a.MovImm(a64A, uint64(h.Object))
+		c.a.Load(a64B, a64A, c.enc.ObjectShape)
+		c.a.MovImm(a64C, uint64(h.Shape))
+		c.a.Cmp(a64B, a64C, true)
+		guard(arm64.NE)
+		c.a.Load(a64B, a64A, c.enc.ObjectElems+8)
+		c.a.CmpImm(a64B, 0, true)
+		guard(arm64.NE)
+		c.a.LoadU8(a64B, a64A, c.enc.ObjectFlags)
+		c.a.MovImm(a64C, uint64(c.enc.FlagSparse))
+		c.a.Tst(a64B, a64C, false)
+		guard(arm64.NE)
+		c.a.Load(a64B, a64A, c.enc.ObjectProto)
+		if i == 0 {
+			c.a.MovImm(a64C, uint64(t.Protos[1].Object))
+			c.a.Cmp(a64B, a64C, true)
+		} else {
+			c.a.CmpImm(a64B, 0, true)
+		}
+		guard(arm64.NE)
+	}
+}
+
+// push appends a call of Array.prototype.push's argument, as amd64's
+// does. It uses A, B, C, D and F1.
+func (c *a64Compiler) push(v *ssa.Value) {
+	vs := int32(c.enc.ValueSize)
+	recv, x := v.Args[0], v.Args[2]
+	if vs != 16 {
+		panic("mir: a value that is not 16 bytes")
+	}
+	var w arm64.Reg
+	if remat(x) {
+		c.materialize(x, a64A)
+		w = a64A
+	} else {
+		w = c.gpr(x, a64A)
+	}
+	c.a.MovRR(a64D, w)
+	number, have := c.a.NewLabel(), c.a.NewLabel()
+	if x.Shadow != nil || c.origin.At(x) >= 0 {
+		c.a.MovImm(a64B, abi.NumberLimit)
+		c.a.Cmp(w, a64B, true)
+		c.a.BCond(arm64.LO, number)
+	}
+	c.pointerWord(x, w)
+	c.a.B(have)
+	c.a.Bind(number)
+	c.a.MovImm(a64B, 0)
+	c.a.Bind(have)
+	c.a.FMovToF(a64F1, a64B)
+	c.sourceRef(recv, func(arm64.Cond) {})
+	c.a.Load(a64B, a64C, c.enc.ObjectElems+8)
+	c.a.AddImm(a64B, a64B, 1, true)
+	c.a.Store(a64C, c.enc.ObjectElems+8, a64B)
+	c.a.Load(a64A, a64C, c.enc.ObjectElems)
+	c.a.AddImm(a64C, a64B, -1, true)
+	c.a.ShiftImm(arm64.Lsl, a64C, a64C, 4, true)
+	c.a.Op(arm64.Add, a64A, a64A, a64C, true)
+	c.a.Store(a64A, c.enc.NumOffset, a64D)
+	c.a.FMovFromF(a64C, a64F1)
+	c.a.Store(a64A, c.enc.RefOffset, a64C)
+	c.a.Scvtf(a64F1, a64B, true)
+	c.a.FMovFromF(a64A, a64F1)
+	at := abi.OffKeep + int32(v.Index)*vs
+	c.a.Store(a64Ctx, at+c.enc.NumOffset, a64A)
+	c.a.Store(a64Ctx, at+c.enc.RefOffset, arm64.ZR)
 	c.setG(v, a64A)
 }
 

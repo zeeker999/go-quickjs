@@ -262,8 +262,9 @@ type Encoding struct {
 	// FlagHTMLDDA is the flags byte's bit for Annex B's [[IsHTMLDDA]],
 	// which makes an object == null and == undefined.
 	FlagHTMLDDA uint8
-	// FlagExtensible is its bit for an object properties may be added to.
-	FlagExtensible uint8
+	// FlagExtensible is its bit for an object properties may be added to,
+	// FlagLengthWritable an array's whose length may change.
+	FlagExtensible, FlagLengthWritable uint8
 
 	// String is every string's number word. A string's UTF-8 form's data
 	// pointer is at StringData, valid only when the pointer at StringLeft is

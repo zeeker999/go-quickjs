@@ -67,14 +67,15 @@ var jitEncoding = abi.Encoding{
 	StringASCII:  int32(unsafe.Offsetof(String{}.ascii)),
 	StringU16:    int32(unsafe.Offsetof(String{}.u16)),
 
-	ObjectClass:    int32(unsafe.Offsetof(Object{}.class)),
-	ObjectFlags:    int32(unsafe.Offsetof(Object{}.flags)),
-	ObjectArrayLen: int32(unsafe.Offsetof(Object{}.arrayLen)),
-	ObjectElems:    int32(unsafe.Offsetof(Object{}.elems)),
-	ClassArray:     uint8(ClassArray),
-	FlagSparse:     uint8(objHasSparseElements),
-	FlagHTMLDDA:    uint8(objHTMLDDA),
-	FlagExtensible: uint8(objExtensible),
+	ObjectClass:        int32(unsafe.Offsetof(Object{}.class)),
+	ObjectFlags:        int32(unsafe.Offsetof(Object{}.flags)),
+	ObjectArrayLen:     int32(unsafe.Offsetof(Object{}.arrayLen)),
+	ObjectElems:        int32(unsafe.Offsetof(Object{}.elems)),
+	ClassArray:         uint8(ClassArray),
+	FlagSparse:         uint8(objHasSparseElements),
+	FlagHTMLDDA:        uint8(objHTMLDDA),
+	FlagExtensible:     uint8(objExtensible),
+	FlagLengthWritable: uint8(objArrayLengthWritable),
 }
 
 // jitReoptimizations is how many times a function's code is compiled again
@@ -382,6 +383,21 @@ func (fb *jitFeedback) NativeCalls(pc int) []ssa.CallSite {
 		if int(in.pc) != pc {
 			continue
 		}
+		if in.cl == nil && in.push {
+			// Array.prototype.push, whose fast path the call's checks
+			// keep to: the prototypes as they are now.
+			ap, op := fb.r.proto.array, fb.r.proto.object
+			if ap.shape == nil || op.shape == nil || ap.proto != op || op.proto != nil {
+				continue
+			}
+			k := fb.keep()
+			k.shapes = append(k.shapes, remember(ap.shape), remember(op.shape))
+			k.holders = append(k.holders, in.obj, ap, op)
+			sites = append(sites, ssa.CallSite{Callee: uintptr(unsafe.Pointer(in.obj)), ThisSlot: -1, Argc: 1, Method: true, Push: true,
+				Protos: [2]ssa.Holder{{Object: uintptr(unsafe.Pointer(ap)), Shape: uintptr(unsafe.Pointer(ap.shape))},
+					{Object: uintptr(unsafe.Pointer(op)), Shape: uintptr(unsafe.Pointer(op.shape))}}})
+			continue
+		}
 		if in.cl == nil {
 			// A built-in's construction with nothing to run.
 			fb.holders, fb.pools = append(fb.holders, in.obj), append(fb.pools, in.pool)
@@ -439,6 +455,8 @@ type jitInline struct {
 	// that calls cl's function (jitCalledVia).
 	pool *abi.ObjectPool
 	via  bool
+	// push marks a call of Array.prototype.push (jitPushes).
+	push bool
 }
 
 // jitCallsToInline is how often a call leaves native code before it is
@@ -536,6 +554,13 @@ func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 				e.callSites[pc] = jitCallNative
 				e.inlinePending = true
 			}
+			return
+		}
+		if o := r.jitPushes(sp, in); o != nil {
+			// a.push(v), made natively where its fast path makes it.
+			e.nativeCalls = append(e.nativeCalls, jitInline{pc: int32(pc), obj: o, push: true})
+			e.callSites[pc] = jitCallNative
+			e.inlinePending = true
 			return
 		}
 		if o := r.jitAllocates(sp, in); o != nil {
@@ -804,6 +829,28 @@ func (r *Runtime) jitCalledVia(f *frame, sp int, in bytecode.Instr) (*Object, *c
 		return nil, nil
 	}
 	return o, fd.closure
+}
+
+// jitPushes is Array.prototype.push, the realm's own, if a method call at
+// the top of the stack calls it with one argument on an array its fast
+// path appends to -- dense, of the realm's prototype, which with its own
+// has no element or indexed property (noInheritedIndices) -- or nil.
+func (r *Runtime) jitPushes(sp int, in bytecode.Instr) *Object {
+	if in.Op != bytecode.OpCallMethod || in.A != 1 {
+		return nil
+	}
+	callee, recv := r.stack[sp-2], r.stack[sp-3]
+	if !callee.IsObject() {
+		return nil
+	}
+	fd := callee.Object().fn()
+	if fd == nil || fd.elemOp != elemPush || fd.realm != r.Realm {
+		return nil
+	}
+	if o := r.plainArray(recv); o == nil || !r.noInheritedIndices(o) {
+		return nil
+	}
+	return callee.Object()
 }
 
 // jitAllocates is the built-in a construction at the top of the stack

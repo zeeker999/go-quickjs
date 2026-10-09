@@ -60,7 +60,12 @@ type Feedback interface {
 // the pool's object, whose prototype the realm fixed. One with Via calls
 // Function.prototype.call, at Via, of the function at Callee, its receiver:
 // that function is called, with the first argument as its receiver and
-// the others as its arguments.
+// the others as its arguments. One with Push calls Array.prototype.push,
+// the realm's, at Callee, with one argument: on a dense array of its own,
+// extensible, its length writable, with room, whose prototypes are Protos
+// with their shapes and no elements -- none with an indexed property a
+// setter could be asked about -- the argument is its new last element,
+// and the result its length.
 type CallSite struct {
 	Callee, Closure, Entry, Count uintptr
 	Argc                          int
@@ -73,13 +78,16 @@ type CallSite struct {
 	ProtoKey                      uint32
 	Alloc                         bool
 	Via                           uintptr
+	Push                          bool
+	Protos                        [2]Holder
 }
 
-// allocOnly reports whether a call makes nothing but a pool's object
-// (CallSite.Alloc): nothing it runs can write the heap.
+// allocOnly reports whether a call runs nothing that can write the heap
+// but past what any value was read from: it makes a pool's object
+// (CallSite.Alloc), or adds an element past an array's last (Push).
 func allocOnly(v *Value) bool {
 	for _, c := range v.Calls {
-		if !c.Alloc {
+		if !c.Alloc && !c.Push {
 			return false
 		}
 	}
