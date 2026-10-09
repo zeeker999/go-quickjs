@@ -273,13 +273,73 @@ func (r *Runtime) jitRecordValue(f *frame, e *jitEntry, rec *abi.Record) Value {
 	return Value{num: math.Float64frombits(rec.Word)}
 }
 
-// jitSSAStats counts what one function's new-pipeline code does.
+// jitSSAStats counts what one function's new-pipeline code does. Each
+// entry starts a native stretch, which ends in a return, an exit to Go or
+// a failed guard (ended counts those two), or a poll; work estimates, in
+// slot IR instructions, what the stretches did natively.
 type jitSSAStats struct {
 	entries, hosts, guards, polls, records uint64
+	ended, work                            uint64
 	// guardsAt counts failed guards by their site (abi.Context.ExitSite:
 	// the slot IR PC of the operation, or -1 for an entry's speculation);
 	// nil until one fails.
 	guardsAt map[int32]uint64
+}
+
+// jitSSAProbe is how many native stretches a function runs between looks
+// at whether its native code pays (jitSSAProfit), and jitSSAMinWork the
+// work a stretch that ends in an exit to Go must do, on average, for it to:
+// an exit and the entry after it cost what the tree tier takes for about
+// that many instructions (BenchmarkJITHostRoundTrip's go-call: a stretch
+// of about ten is level with the tree tier).
+const (
+	jitSSAProbe   = 64
+	jitSSAMinWork = 10
+)
+
+// jitSSAProfit accounts for a native stretch that started at pc, with the
+// back-edge counter at edges, and ended as ctx says; every jitSSAProbe
+// stretches it decides whether the function's native code pays. Code whose
+// stretches mostly end leaving for Go, after little work -- a method call
+// at every iteration, through Go -- costs more there than it saves, and the
+// tree tier runs it from then on. The work is estimated: the distance from
+// the entry to the exit, in slot IR instructions, and a loop's mean length
+// for each back-edge taken natively.
+func (r *Runtime) jitSSAProfit(e *jitEntry, ctx *abi.Context, start, edges int) {
+	st := &e.ssaStats
+	work := uint64(0)
+	if back := edges - r.backEdges; back > 0 {
+		work = uint64(back) * uint64(e.ssaLoop)
+	}
+	if ctx.ExitKind == abi.ExitHost || ctx.ExitKind == abi.ExitDeopt {
+		st.ended++
+		if site := int64(ctx.ExitSite); site > int64(start) {
+			work += uint64(site - int64(start))
+		}
+	}
+	st.work += work
+	if st.entries%jitSSAProbe == 0 && st.ended*2 > st.entries && st.work < st.entries*jitSSAMinWork {
+		e.entrySlow = true
+	}
+}
+
+// jitLoopLength is the mean length of fn's loops, in instructions: the
+// distance each backward branch jumps; 1 for a function with none.
+func jitLoopLength(fn *bytecode.Function) uint32 {
+	total, loops := 0, 0
+	for pc, in := range fn.Code {
+		switch in.Op {
+		case bytecode.OpJump, bytecode.OpJumpIfFalse, bytecode.OpJumpIfTrue, bytecode.OpJumpIfCmpFalse:
+			if int(in.A) <= pc {
+				total += pc - int(in.A) + 1
+				loops++
+			}
+		}
+	}
+	if loops == 0 {
+		return 1
+	}
+	return uint32(total / loops)
 }
 
 // runSSA runs a function compiled by the new pipeline from pc, where the
@@ -314,9 +374,11 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 		s.entries++
 		s.ssaEntries++
 		e.ssaStats.entries++
+		start, edges := pc, r.backEdges
 		if err := e.ssa.Run(pc, ctx); err != nil {
 			return r.jitInterpret(f, f.base+depth, nil)
 		}
+		r.jitSSAProfit(e, ctx, start, edges)
 		if ctx.ExitKind == abi.ExitReturn {
 			from := ctx.RetFrom - 1
 			if s := r.jitSource(f, e, &from); s != nil && s.ref != nil {
@@ -349,7 +411,9 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 				return r.jitInterpret(f, sp, err)
 			}
 			pc, depth = int(f.pc), sp-f.base
-			if !e.ssa.HasEntry(pc) {
+			if !e.ssa.HasEntry(pc) || e.entrySlow {
+				// No entry here; or native code does not pay (jitSSAProfit),
+				// and the interpreter runs the rest of this invocation.
 				return r.jitInterpret(f, sp, nil)
 			}
 		case abi.ExitPoll:
