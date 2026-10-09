@@ -51,7 +51,10 @@ func Optimize(f *Func) {
 					changed = true
 					continue
 				}
-				if v.Op.isGuard() && v.Op != OpCheckInit && !v.Op.readsMemory() {
+				// A guard of one operand repeats another of the same op and
+				// operand; one of more operands is never merged, since the
+				// key names only the first.
+				if v.Op.isGuard() && v.Op != OpCheckInit && !v.Op.readsMemory() && len(v.Args) == 1 {
 					key := [2]int{int(v.Op), v.Args[0].ID}
 					if first, ok := seen[key]; ok {
 						subst[v.ID], replaced = first, true

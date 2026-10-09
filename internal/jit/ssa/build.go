@@ -439,6 +439,26 @@ func (b *builder) constIn(blk *Block, c ir.Value) *Value {
 	return v
 }
 
+// equality is an Eq or Ne as a bool, of any two values: with null or
+// undefined (nullish), or as OpEqTagged compares them. It returns nil for
+// any other operation.
+func (b *builder) equality(blk *Block, in ir.Instruction, operand func(ir.Operand) *Value, guard func(Op, Type, ir.ExitKind, ...*Value) *Value) *Value {
+	if in.Operator != ir.Eq && in.Operator != ir.Ne {
+		return nil
+	}
+	if c := b.nullish(blk, in, operand, guard); c != nil {
+		return c
+	}
+	c := guard(OpEqTagged, Bool, ir.HostExit, operand(in.Left), operand(in.Right))
+	if in.Strict {
+		c.Index = 1
+	}
+	if in.Operator == ir.Ne {
+		c = b.f.newValue(blk, OpNot, Bool, c)
+	}
+	return c
+}
+
 // nullish is an Eq or Ne with null or undefined, as a bool, whatever the
 // other operand is: compared natively, rather than taken for a number.
 // It returns nil for any other comparison.
@@ -585,7 +605,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 		b.assign(n+1, blk, x)
 		b.assign(n+2, blk, y)
 	case ir.Binary:
-		if c := b.nullish(blk, in, operand, guard); c != nil {
+		if c := b.equality(blk, in, operand, guard); c != nil {
 			b.assign(in.Dest, blk, boxB(c))
 			break
 		}
@@ -634,7 +654,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 		var c *Value
 		if in.Operator == ir.Truth {
 			c = guard(OpTruth, Bool, ir.GuardExit, operand(in.Left))
-		} else if n := b.nullish(blk, in, operand, guard); n != nil {
+		} else if n := b.equality(blk, in, operand, guard); n != nil {
 			c = n
 		} else {
 			kind := ir.GuardExit

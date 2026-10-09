@@ -1570,6 +1570,54 @@ func TestJITSSAProfitability(t *testing.T) {
 	}
 }
 
+// The new pipeline compares any two values natively where their words tell
+// (ssa.OpEqTagged): objects by identity, as EarleyBoyer's association lists
+// do with ===, numbers as numbers, primitives by their words. Strings, and
+// loose comparisons of values of different kinds, go to Go. Each answer is
+// the interpreter's, and the list walk never leaves native code.
+func TestJITSSAEquality(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function assq(o,al){while(al!==null){if(al.car.car===o)return al.car;al=al.cdr}return false}
+		function cons(a,d){return {car:a,cdr:d}}
+		var k1={},k2={},k3={},al=cons(cons(k1,1),cons(cons(k2,2),cons(cons(k3,3),null)));
+		function walk(n){let s=0;for(let i=0;i<n;i++){const p=assq([k1,k2,k3][i%3],al);s+=p.cdr}return s}
+		function mixed(a,b,n){let s=0;for(let i=0;i<n;i++){if(a==b)s+=1;if(a===b)s+=10;if(a!=b)s+=100;if(a!==b)s+=1000}return s}`
+	rounds := []string{
+		`''+walk(60)`,
+		`[mixed(1,1,3),mixed(0,-0,3),mixed(NaN,NaN,3),mixed(k1,k1,3),mixed(k1,k2,3),mixed('a','a',3),mixed('a','b',3),
+			mixed(1,'1',3),mixed(true,1,3),mixed(null,undefined,3),mixed(true,false,3),mixed(k1,1,3)].join()`,
+		`''+(assq(k2,al)===al.cdr.car)+assq({},al)`,
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+	}
+	assq := r.global.getOwn(r.atoms.intern("assq")).value.Object().fn().closure
+	if e := r.jit.hint(assq.hint()); e == nil || e.ssa == nil || e.ssaStats.entries == 0 || e.ssaStats.hosts != 0 || e.ssaStats.guards != 0 {
+		t.Fatalf("assq left native code: %+v", e)
+	}
+}
+
 // A property or element compared with == or != is read as it is, whatever
 // it holds: the new pipeline compares any value, so lowering does not take
 // the operands for numbers, which sent `o.next != null` to Go at every

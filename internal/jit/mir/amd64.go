@@ -989,6 +989,8 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.setG(v, scratchA)
 	case ssa.OpLooseNullish:
 		c.looseNullish(v, guard)
+	case ssa.OpEqTagged:
+		c.eqTagged(v, guard)
 	case ssa.OpNot:
 		c.a.MovRR32(scratchA, c.gpr(arg(0), scratchA))
 		c.a.OpImm(amd64.Xor, scratchA, 1, false)
@@ -1077,6 +1079,67 @@ func (c *compiler) looseNullish(v *ssa.Value, guard func(amd64.Cond)) {
 	c.a.Jmp(done)
 	c.a.Bind(yes)
 	c.a.MovImm(scratchA, 1)
+	c.a.Bind(done)
+	c.setG(v, scratchA)
+}
+
+// eqTagged is OpEqTagged: x == y or x === y by the two words, and for two
+// objects by their pointers, found as objectOf finds an object's.
+func (c *compiler) eqTagged(v *ssa.Value, guard func(amd64.Cond)) {
+	x, y := v.Args[0], v.Args[1]
+	yes, no, done, differ, number := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+	exit := c.stubLabel(v.State, exitKind(v.Aux))
+	wx, wy := c.gpr(x, scratchA), c.gpr(y, scratchB)
+	c.a.Op(amd64.Cmp, wx, wy, true)
+	c.a.Jcc(amd64.CondNE, differ)
+	// One word: a number (NaN unequal to itself), a primitive, or objects.
+	c.a.MovImm(scratchC, abi.NumberLimit)
+	c.a.Op(amd64.Cmp, wx, scratchC, true)
+	c.a.Jcc(amd64.CondB, number)
+	for _, w := range []uint64{c.enc.Null, c.enc.Undefined, c.enc.True, c.enc.False} {
+		c.a.MovImm(scratchC, w)
+		c.a.Op(amd64.Cmp, wx, scratchC, true)
+		c.a.Jcc(amd64.CondE, yes)
+	}
+	c.a.MovImm(scratchC, c.enc.Object)
+	c.a.Op(amd64.Cmp, wx, scratchC, true)
+	c.a.Jcc(amd64.CondNE, exit)
+	if c.reference(v, x, c.enc.Object, guard) {
+		c.a.MovQToX(xScratch1, scratchC)
+		if c.reference(v, y, c.enc.Object, guard) {
+			c.a.MovQFromX(scratchA, xScratch1)
+			c.a.Op(amd64.Cmp, scratchA, scratchC, true)
+			c.a.Jcc(amd64.CondE, yes)
+			c.a.Jmp(no)
+		}
+	}
+	c.a.Bind(number)
+	c.a.MovQToX(xScratch0, wx)
+	c.a.SSEOp(amd64.UcomiSD, xScratch0, xScratch0)
+	c.a.Jcc(amd64.CondP, no)
+	c.a.Jmp(yes)
+	// Two words: two numbers compare as numbers; anything else is
+	// strictly unequal, and loosely Go's.
+	c.a.Bind(differ)
+	other := no
+	if v.Index != 1 {
+		other = exit
+	}
+	c.a.MovImm(scratchC, abi.NumberLimit)
+	c.a.Op(amd64.Cmp, wx, scratchC, true)
+	c.a.Jcc(amd64.CondAE, other)
+	c.a.Op(amd64.Cmp, wy, scratchC, true)
+	c.a.Jcc(amd64.CondAE, other)
+	c.a.MovQToX(xScratch0, wx)
+	c.a.MovQToX(xScratch1, wy)
+	c.a.SSEOp(amd64.UcomiSD, xScratch0, xScratch1)
+	c.a.Jcc(amd64.CondNE, no)
+	c.a.Jcc(amd64.CondP, no)
+	c.a.Bind(yes)
+	c.a.MovImm(scratchA, 1)
+	c.a.Jmp(done)
+	c.a.Bind(no)
+	c.a.MovImm(scratchA, 0)
 	c.a.Bind(done)
 	c.setG(v, scratchA)
 }
