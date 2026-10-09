@@ -5089,6 +5089,65 @@ func TestJITSSAPolymorphicReadsSettle(t *testing.T) {
 	}
 }
 
+// The method calls the existing tiers have made are decided when a
+// function's code is first compiled, from their method reads' caches
+// (jitSeedCalls): run's loop, promoted after the tree tier ran it, inlines
+// get and calls big natively, which has code of its own by then, without
+// being compiled again to learn either from its exits.
+// A call whose read met no method, or another object's, is left to be
+// learned as before: what takes the place of get later is called as it
+// is.
+func TestJITSSASeedsMethodCalls(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function P(x){this.x=x}
+		P.prototype.get=function(){return this.x};
+		P.prototype.big=function(n){let s=0;for(let i=0;i<n;i++)s=(s+i*this.x)|0;return s};
+		function Q(x){this.x=x}Q.prototype.get=function(){return this.x+1};
+		var p=new P(3),q=new Q(5);
+		for(let i=0;i<2000;i++)p.big(40);
+		function run(o,n){let t=0;for(let i=0;i<n;i++){t=(t+o.get()+o.big(4))|0}return t}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := New(Config{JIT: true})
+	defer func() { r.Close(); r.ReleaseClosed() }()
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("run")).value.Object().fn().closure
+	proto := r.global.getOwn(r.atoms.intern("P")).value.Object().getOwn(atomPrototype).value.Object()
+	get, big := proto.getOwn(r.atoms.intern("get")).value.Object(), proto.getOwn(r.atoms.intern("big")).value.Object()
+	for i, src := range []string{`String(run(p,20000))`, `String(run(p,20000))`, `Q.prototype.big=P.prototype.big;String(run(q,20000))`} {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		e := r.jit.hint(cl.hint())
+		if e == nil || e.ssa == nil {
+			t.Fatalf("round %d: run has no code", i)
+		}
+		if i == 1 {
+			if len(e.inlines) != 1 || e.inlines[0].obj != get || len(e.nativeCalls) != 1 || e.nativeCalls[0].obj != big {
+				t.Fatalf("run inlines %d calls and makes %d natively", len(e.inlines), len(e.nativeCalls))
+			}
+			if n := int(e.reopts) + int(e.inlineReopts) + int(e.upgradeReopts); n != 0 {
+				t.Fatalf("run was compiled again %d times", n)
+			}
+		}
+	}
+}
+
 // Native code that calls through Go another function's native code shares
 // the context with it (jitState.ssaCtx): an exit's PC must be read before
 // Go runs anything. Here inner's last exit, a call near its end, is past

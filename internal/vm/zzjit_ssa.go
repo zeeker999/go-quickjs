@@ -773,6 +773,102 @@ func (r *Runtime) jitInlineSite(fn *bytecode.Function, pc, depth int) (jitInline
 	return in, true
 }
 
+// jitSeedCalls decides, before e's code for cl's function is compiled, the
+// method calls whose target the existing tiers have met (jitMethodAt): each
+// is inlined, or called natively if its target has code, at once -- as
+// jitCallSeen would decide it once the call had left native code, which
+// costs a compile for each call learned so, and as V8's TurboFan takes a
+// call's target from its method load's feedback. A call whose target has
+// no code yet, or that is not seen so, is left to jitCallSeen. A target
+// that turns out wrong costs an exit: a call checks its callee.
+func (r *Runtime) jitSeedCalls(cl *closure, e *jitEntry, p *ir.Program) {
+	fn := cl.fn
+	if len(p.Maps) != len(fn.Code) {
+		return
+	}
+	for pc, in := range fn.Code {
+		if in.Op != bytecode.OpCallMethod || e.callSites != nil && e.callSites[pc] != 0 {
+			continue
+		}
+		o, callee := r.jitMethodAt(cl, p, pc)
+		if callee == nil {
+			continue
+		}
+		if e.callSites == nil {
+			e.callSites = make([]uint8, len(fn.Code))
+		}
+		if callee.fn != fn && (r.jitInlinable(callee.fn) || r.jitInlinesCalls(callee.fn, jitInlineDepth-1)) {
+			e.inlines = append(e.inlines, jitInline{pc: int32(pc), cl: callee, obj: o})
+			e.callSites[pc] = jitCallInlined
+			continue
+		}
+		cf := callee.fn
+		ce := r.jit.cache[weak.Make(cf)]
+		if ce == nil || ce.ssa == nil || cf.TopLevel || cf.IsModule || cf.UsesArguments || cf.HasDirectEval || len(cf.Upvalues) != 0 {
+			continue
+		}
+		e.nativeCalls = append(e.nativeCalls, jitInline{pc: int32(pc), cl: callee, obj: o})
+		e.callSites[pc] = jitCallNative
+		if ce != e && len(ce.nativeCallers) < jitNativeCallers && !slices.Contains(ce.nativeCallers, e) {
+			ce.nativeCallers = append(ce.nativeCallers, e)
+		}
+	}
+}
+
+// jitMethodAt is the function the method call at pc calls as the existing
+// tiers have met it, and its closure: the get_prop_this that read the
+// call's callee -- the nearest before it at the callee's depth, with
+// nothing between but the arguments, above it -- whose cache found one
+// plain data property on a prototype, a function jitCalled would take.
+// Or nil.
+func (r *Runtime) jitMethodAt(cl *closure, p *ir.Program, pc int) (*Object, *closure) {
+	fn := cl.fn
+	depth := p.Maps[pc].Depth
+	slot := depth - int(fn.Code[pc].A) - 1
+	if depth < 0 || slot < 1 {
+		return nil, nil
+	}
+	read := -1
+	for q := pc - 1; q >= 0; q-- {
+		d := p.Maps[q].Depth
+		if d == slot && fn.Code[q].Op == bytecode.OpGetPropThis {
+			read = q
+			break
+		}
+		// Only the arguments' instructions, which leave the callee be: the
+		// first pushes on it, and the rest work above.
+		if d < slot+1 || d == slot+1 && p.Maps[q+1].Depth < slot+2 {
+			return nil, nil
+		}
+	}
+	if read < 0 {
+		return nil, nil
+	}
+	in := fn.Code[read]
+	if int(in.B) >= len(cl.ic) {
+		return nil, nil
+	}
+	c := &cl.ic[in.B]
+	h := c.p1
+	if c.p2 != nil {
+		h = c.p2
+	}
+	if c.shape == nil || c.shape == noShape || c.getter || h == nil || c.idx < 0 || int(c.idx) >= len(h.props) {
+		return nil, nil
+	}
+	prop := &h.props[c.idx]
+	if prop.flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 || !prop.value.IsObject() {
+		return nil, nil
+	}
+	o := prop.value.Object()
+	fd := o.fn()
+	if fd == nil || fd.native != nil || fd.bound || fd.closure == nil || fd.closure.realm != r.Realm ||
+		fd.closure.scope() != cl.scope() {
+		return nil, nil
+	}
+	return o, fd.closure
+}
+
 // jitInlinedCalls has a call inlined for one function that calls another,
 // o, cl's, call them natively instead, and others, up to jitCallTargets
 // (jitCallTarget): the code is compiled again for it at once.
@@ -1025,6 +1121,7 @@ func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
 	if err != nil {
 		return nil
 	}
+	r.jitSeedCalls(cl, e, p)
 	code, fb := r.compileSSA(fn, cl, p, r.jitAllowance(fn), e)
 	if code == nil {
 		return nil
