@@ -696,6 +696,10 @@ func (c *a64Compiler) reference(v, a *ssa.Value, word uint64, guard func(arm64.C
 // property finds the property a property operation names and leaves the
 // address of its value in A, as amd64's does. It uses B, C and D.
 func (c *a64Compiler) property(v *ssa.Value, guard func(arm64.Cond)) {
+	if v.Holders != nil {
+		c.holder(v, guard)
+		return
+	}
 	found, scan := c.a.NewLabel(), c.a.NewLabel()
 	if v.Const.Bits != 0 {
 		p := c.gpr(v.Args[0], a64A)
@@ -739,6 +743,32 @@ func (c *a64Compiler) property(v *ssa.Value, guard func(arm64.Cond)) {
 	}
 	c.a.B(c.stubLabel(v.State, exitKind(v.Aux)))
 	c.a.Bind(found)
+}
+
+// holder is property for a read the receiver's prototypes answered, as
+// amd64's is. It uses B and C.
+func (c *a64Compiler) holder(v *ssa.Value, guard func(arm64.Cond)) {
+	p := c.gpr(v.Args[0], a64A)
+	c.a.Load(a64B, p, c.enc.ObjectShape)
+	c.a.MovImm(a64C, v.Const.Bits)
+	c.a.Cmp(a64B, a64C, true)
+	guard(arm64.NE)
+	c.a.Load(a64B, p, c.enc.ObjectProto)
+	for _, h := range v.Holders {
+		if h.Object == 0 {
+			break
+		}
+		c.a.MovImm(a64A, uint64(h.Object))
+		c.a.Cmp(a64B, a64A, true)
+		guard(arm64.NE)
+		c.a.Load(a64B, a64A, c.enc.ObjectShape)
+		c.a.MovImm(a64C, uint64(h.Shape))
+		c.a.Cmp(a64B, a64C, true)
+		guard(arm64.NE)
+		c.a.Load(a64B, a64A, c.enc.ObjectProto)
+	}
+	c.a.Load(a64A, a64A, c.enc.ObjectProps)
+	c.a.AddImm(a64A, a64A, int64(int32(v.Index)*c.enc.PropertySize+c.enc.PropertyValue), true)
 }
 
 // integer converts the double x to an integer in r, failing unless it is

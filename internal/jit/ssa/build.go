@@ -53,11 +53,24 @@ type GlobalSite struct {
 // site has met objects of one shape, that shape's address, which the VM
 // keeps alive and unchanged, with the index of the property -- a writable
 // data property, for a write -- in their tables. Shape is 0 otherwise.
+//
+// A read may have found the property on a prototype, a method most often:
+// Holders then name the objects from the receiver's prototype on, one or
+// two, each with the shape it had, and Index is the property's in the last
+// one's table. The receiver's shape says it has no such property of its
+// own; each holder's, that the one before it has none, and the last's
+// where it is.
 type PropertySite struct {
-	Key   uint32
-	Shape uintptr
-	Index int32
+	Key     uint32
+	Shape   uintptr
+	Index   int32
+	Holders [2]Holder
 }
+
+// Holder is a prototype a property read was answered by, or passed through,
+// at its address, which the VM keeps alive, with the shape it had: 0 for
+// none.
+type Holder struct{ Object, Shape uintptr }
 
 // BuildWith is Build with what the VM knows of the sites.
 func BuildWith(p *ir.Program, fb Feedback) (*Func, error) { return build(nil, p, fb) }
@@ -804,9 +817,20 @@ func (b *builder) instruction(blk *Block, pc int) {
 			break
 		}
 		object := guard(OpObjectOf, Ptr, ir.HostExit, operand(in.Left))
+		// A read the receiver's prototypes answered checks them too; a
+		// write, which makes a property of the receiver's own, never meets
+		// one.
+		var holders *[2]Holder
+		if site.Holders[0].Object != 0 && site.Shape != 0 && in.Op != ir.PropertyWrite {
+			holders = new([2]Holder)
+			*holders = site.Holders
+		} else if site.Holders[0].Object != 0 {
+			site.Shape = 0
+		}
 		if in.Op == ir.ReferenceRead {
 			cell := guard(OpPropCell, Source, ir.HostExit, object)
 			cell.Const, cell.Index, cell.Key = ir.Value{Bits: uint64(site.Shape)}, int(site.Index), site.Key
+			cell.Holders = holders
 			v := f.newValue(blk, OpLoadCell, Tagged, cell)
 			v.Shadow = cell
 			b.assign(in.Dest, blk, v)
@@ -815,6 +839,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 		if in.Op == ir.PropertyRead {
 			v := guard(OpPropRead, Float64, ir.HostExit, object)
 			v.Const, v.Index, v.Key = ir.Value{Bits: uint64(site.Shape)}, int(site.Index), site.Key
+			v.Holders = holders
 			b.assign(in.Dest, blk, boxF(v))
 			break
 		}

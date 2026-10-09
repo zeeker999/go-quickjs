@@ -221,6 +221,13 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 				// the new one reads the global object, through its context.
 				p.Code[pc].Left = ir.Literal(ir.Value{Kind: ir.Undefined})
 			}
+			if b := fn.Code[pc]; in.Op == ir.Host && b.Op == bytecode.OpGetPropThis && p.Maps[pc].Depth >= 0 {
+				// A method's read, which keeps its receiver below it: the
+				// new pipeline reads it where the site's cache found it,
+				// on a prototype too, and carries it by its cell to the call.
+				sp := p.Locals + p.Maps[pc].Depth
+				p.Code[pc] = ir.Instruction{Op: ir.ReferenceRead, Left: ir.Slot(sp - 1), Dest: sp, Key: b.A}
+			}
 		}
 		return p, nil
 	}

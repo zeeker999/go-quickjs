@@ -46,6 +46,7 @@ var jitEncoding = abi.Encoding{
 	UpvalueSlot:   int32(unsafe.Offsetof(upvalue{}.slot)),
 	ObjectShape:   int32(unsafe.Offsetof(Object{}.shape)),
 	ObjectProps:   int32(unsafe.Offsetof(Object{}.props)),
+	ObjectProto:   int32(unsafe.Offsetof(Object{}.proto)),
 	PropertySize:  int32(unsafe.Sizeof(Property{})),
 	PropertyKey:   int32(unsafe.Offsetof(Property{}.key)),
 	PropertyFlags: int32(unsafe.Offsetof(Property{}.flags)),
@@ -99,6 +100,22 @@ func jitDeoptimized(e *jitEntry, ctx *abi.Context, start int) {
 	}
 }
 
+// jitFed notes an exit to Go at pc. A property site whose cache had met no
+// object when the code was compiled -- code compiled on its first call, or
+// a branch not taken until then -- leaves for Go every time; once its cache
+// has met one the code is compiled again to use it, as V8 deoptimizes for
+// insufficient feedback.
+func jitFed(cl *closure, e *jitEntry, pc uint32) {
+	i := slices.Index(e.unfed, pc)
+	if i < 0 || e.reopts >= jitReoptimizations || int(pc) >= len(cl.fn.Code) {
+		return
+	}
+	if in := cl.fn.Code[pc]; int(in.B) < len(cl.ic) && cl.ic[in.B].shape != noShape {
+		e.unfed = slices.Delete(e.unfed, i, i+1)
+		e.reopt = true
+	}
+}
+
 // jitReoptimize compiles cl's function again for e, its entry, with what
 // failed in its code generic, and replaces its code, which runs nowhere:
 // native code leaves for Go to do anything else. If the function no longer
@@ -111,12 +128,12 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	if err != nil {
 		return
 	}
-	code, shapes := r.compileSSA(fn, cl, p, r.jitAllowance(fn)+e.ssa.Size(), e)
+	code, fb := r.compileSSA(fn, cl, p, r.jitAllowance(fn)+e.ssa.Size(), e)
 	if code == nil {
 		return
 	}
 	old := e.ssa
-	e.ssa, e.ssaShapes, e.ssaStats = code, shapes, jitSSAStats{}
+	e.ssa, e.ssaShapes, e.ssaHolders, e.unfed, e.ssaStats = code, fb.shapes, fb.holders, fb.unfed, jitSSAStats{}
 	old.Close()
 	r.jit.reoptimized++
 }
@@ -126,9 +143,11 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 // bindings, read through their cells, the receiver, which Go puts in the
 // context, and its operands: no global slots yet.
 //
-// The closure's caches say where its sites' properties are (jitFeedback);
-// it returns the shapes the code compares objects with, to be kept alive.
-func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, limit int, e *jitEntry) (*jit.SSACode, []*shape) {
+// The closure's caches say where its sites' properties are (jitFeedback),
+// which it returns: the shapes the code compares objects with, and the
+// prototypes it compares receivers' with, to be kept alive, and the sites
+// whose caches were empty.
+func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, limit int, e *jitEntry) (*jit.SSACode, *jitFeedback) {
 	this := 0
 	if p.This {
 		this = 1
@@ -159,7 +178,7 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, 
 	if err != nil {
 		return nil, nil
 	}
-	return code, fb.shapes
+	return code, fb
 }
 
 // jitFeedback is ssa.Feedback from a closure: its names' atoms, and its
@@ -176,6 +195,12 @@ type jitFeedback struct {
 	fn     *bytecode.Function
 	cl     *closure
 	shapes []*shape
+	// holders are the prototypes the code compares receivers' with
+	// (ssa.Holder), held by address, which the entry keeps alive.
+	holders []*Object
+	// unfed are the property sites, by PC, whose caches had met no object
+	// (jitFed).
+	unfed []uint32
 	// e is the entry being compiled again, whose failed speculations
 	// (jitEntry.failed) are built generic; nil for a first compile.
 	e *jitEntry
@@ -235,17 +260,48 @@ func (fb *jitFeedback) Property(pc int) (ssa.PropertySite, bool) {
 		return ssa.PropertySite{}, false
 	}
 	in := fb.fn.Code[pc]
-	if in.Op != bytecode.OpGetProp && in.Op != bytecode.OpSetProp || int(in.A) >= len(fb.cl.names) {
+	if in.Op != bytecode.OpGetProp && in.Op != bytecode.OpGetPropThis && in.Op != bytecode.OpSetProp || int(in.A) >= len(fb.cl.names) {
 		return ssa.PropertySite{}, false
 	}
 	site := ssa.PropertySite{Key: uint32(fb.cl.names[in.A])}
-	if int(in.B) < len(fb.cl.ic) {
-		c := &fb.cl.ic[in.B]
-		if c.shape != nil && c.shape != noShape && c.p1 == nil && !c.getter && c.next == nil && c.idx >= 0 && c.idx < c.shape.n {
+	if int(in.B) >= len(fb.cl.ic) {
+		return site, true
+	}
+	c := &fb.cl.ic[in.B]
+	if c.shape == noShape && c.fills < maxCacheFills && !slices.Contains(fb.unfed, uint32(pc)) {
+		// An empty cache, which may yet meet an object (jitFed).
+		fb.unfed = append(fb.unfed, uint32(pc))
+	}
+	if c.shape == nil || c.shape == noShape || c.getter || c.next != nil || c.idx < 0 {
+		return site, true
+	}
+	if c.p1 == nil {
+		if c.idx < c.shape.n {
 			fb.shapes = append(fb.shapes, remember(c.shape))
 			site.Shape, site.Index = uintptr(unsafe.Pointer(c.shape)), c.idx
 		}
+		return site, true
 	}
+	// Found on a prototype (propCache.holder): the receiver's shape, then
+	// each prototype's, which the code compares as the cache does, and
+	// the index in the last one's table. A read only: a write makes a
+	// property of the receiver's own.
+	last := c.s1
+	if c.p2 != nil {
+		last = c.s2
+	}
+	if in.Op == bytecode.OpSetProp || c.s1 == nil || c.s1 == noShape || c.p2 != nil && (c.s2 == nil || c.s2 == noShape) || c.idx >= last.n {
+		return site, true
+	}
+	fb.shapes = append(fb.shapes, remember(c.shape), remember(c.s1))
+	fb.holders = append(fb.holders, c.p1)
+	site.Holders[0] = ssa.Holder{Object: uintptr(unsafe.Pointer(c.p1)), Shape: uintptr(unsafe.Pointer(c.s1))}
+	if c.p2 != nil {
+		fb.shapes = append(fb.shapes, remember(c.s2))
+		fb.holders = append(fb.holders, c.p2)
+		site.Holders[1] = ssa.Holder{Object: uintptr(unsafe.Pointer(c.p2)), Shape: uintptr(unsafe.Pointer(c.s2))}
+	}
+	site.Shape, site.Index = uintptr(unsafe.Pointer(c.shape)), c.idx
 	return site, true
 }
 
@@ -480,6 +536,14 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 				return r.jitInterpret(f, sp, err)
 			}
 			pc, depth = int(f.pc), sp-f.base
+			if len(e.unfed) != 0 {
+				jitFed(f.cl, e, uint32(ctx.ExitPC))
+			}
+			if e.reopt {
+				// The code is compiled again now, not at the next call: a
+				// loop in this one may run long.
+				r.jitReoptimize(f.cl, e)
+			}
 			if !e.ssa.HasEntry(pc) || e.entrySlow {
 				// No entry here; or native code does not pay (jitSSAProfit),
 				// and the interpreter runs the rest of this invocation.

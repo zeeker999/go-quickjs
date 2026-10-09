@@ -596,6 +596,10 @@ func (c *compiler) reference(v, a *ssa.Value, word uint64, guard func(amd64.Cond
 // key, unrolled, as the VM's own small objects are; the entry must be plain
 // data, and writable for a write. It uses scratchB and scratchC.
 func (c *compiler) property(v *ssa.Value, guard func(amd64.Cond)) {
+	if v.Holders != nil {
+		c.holder(v, guard)
+		return
+	}
 	found, scan := c.a.NewLabel(), c.a.NewLabel()
 	if v.Const.Bits != 0 {
 		p := c.gpr(v.Args[0], scratchA)
@@ -639,6 +643,36 @@ func (c *compiler) property(v *ssa.Value, guard func(amd64.Cond)) {
 	}
 	c.a.Jmp(c.stubLabel(v.State, exitKind(v.Aux)))
 	c.a.Bind(found)
+}
+
+// holder is property for a read the receiver's prototypes answered
+// (ssa.PropertySite's Holders): the receiver of the shape the site knows,
+// which says it has no such property of its own, each prototype the one
+// the site met, of the shape it had, and the property at the index in the
+// last one's table; anything else exits. The prototypes' addresses are
+// constants, which the VM keeps alive.
+func (c *compiler) holder(v *ssa.Value, guard func(amd64.Cond)) {
+	p := c.gpr(v.Args[0], scratchA)
+	c.a.Load(scratchB, p, c.enc.ObjectShape)
+	c.a.MovImm(scratchC, v.Const.Bits)
+	c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+	guard(amd64.CondNE)
+	c.a.Load(scratchB, p, c.enc.ObjectProto)
+	for _, h := range v.Holders {
+		if h.Object == 0 {
+			break
+		}
+		c.a.MovImm(scratchA, uint64(h.Object))
+		c.a.Op(amd64.Cmp, scratchB, scratchA, true)
+		guard(amd64.CondNE)
+		c.a.Load(scratchB, scratchA, c.enc.ObjectShape)
+		c.a.MovImm(scratchC, uint64(h.Shape))
+		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+		guard(amd64.CondNE)
+		c.a.Load(scratchB, scratchA, c.enc.ObjectProto)
+	}
+	c.a.Load(scratchA, scratchA, c.enc.ObjectProps)
+	c.a.OpImm(amd64.Add, scratchA, int32(v.Index)*c.enc.PropertySize+c.enc.PropertyValue, true)
 }
 
 // remainder is JavaScript's % of two integers, by integer division: both
