@@ -557,6 +557,7 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool, cl *closure) *j
 		// The new pipeline lowers for itself; what it does not compile goes
 		// to the slot IR emitters.
 		if p, err := jitcompile.LowerSSA(fn); err == nil {
+			r.jitSeedCalls(cl, e, p)
 			if code, fb := r.compileSSA(fn, cl, p, limit, e); code != nil {
 				e.setSSA(fn, p, code, fb)
 				s.compiled++
