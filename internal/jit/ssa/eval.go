@@ -241,7 +241,7 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 		if x.Kind != ir.Opaque && x.Kind != ir.String {
 			return true
 		}
-		o := origin[v]
+		o := origin.At(v)
 		if v.Shadow != nil {
 			s := vals[v.Shadow.ID]
 			if s.cell != nil {

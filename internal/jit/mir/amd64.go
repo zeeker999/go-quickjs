@@ -89,7 +89,7 @@ func CompileAMD64(f *ssa.Func, enc abi.Encoding) (code *Code, err error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Code{Bytes: bytes, Entries: entries, Locations: c.describe()}, nil
+	return &Code{Bytes: bytes, Entries: entries, core: c.core}, nil
 }
 
 // slotAddr is the base register and displacement of a frame slot's word.
@@ -116,11 +116,11 @@ func (c *compiler) slotAddr(slot int, ref bool, scratch amd64.Reg) (amd64.Reg, i
 // gpr returns a register holding v's word, loading a spilled or lazy value
 // into scratch.
 func (c *compiler) gpr(v *ssa.Value, scratch amd64.Reg) amd64.Reg {
-	if c.lazy[v] {
+	if c.isLazy(v) {
 		c.materialize(v, scratch)
 		return scratch
 	}
-	l, ok := c.locs[v]
+	l, ok := c.loc(v)
 	if !ok {
 		panic(fmt.Sprintf("no location for %v (%v)", v, v.Op))
 	}
@@ -133,7 +133,7 @@ func (c *compiler) gpr(v *ssa.Value, scratch amd64.Reg) amd64.Reg {
 
 // xmm returns an SSE register holding v.
 func (c *compiler) xmm(v *ssa.Value, scratch amd64.XReg) amd64.XReg {
-	l, ok := c.locs[v]
+	l, ok := c.loc(v)
 	if !ok {
 		panic(fmt.Sprintf("no location for %v (%v)", v, v.Op))
 	}
@@ -146,7 +146,7 @@ func (c *compiler) xmm(v *ssa.Value, scratch amd64.XReg) amd64.XReg {
 
 // setG stores src into v's location.
 func (c *compiler) setG(v *ssa.Value, src amd64.Reg) {
-	l := c.locs[v]
+	l := c.locAt(v)
 	if l.reg >= 0 {
 		if amd64.Reg(l.reg) != src {
 			c.a.MovRR(amd64.Reg(l.reg), src)
@@ -158,7 +158,7 @@ func (c *compiler) setG(v *ssa.Value, src amd64.Reg) {
 
 // setX stores src into v's location.
 func (c *compiler) setX(v *ssa.Value, src amd64.XReg) {
-	l := c.locs[v]
+	l := c.locAt(v)
 	if l.reg >= 0 {
 		if amd64.XReg(l.reg) != src {
 			c.a.SSEOp(amd64.MovAPD, amd64.XReg(l.reg), src)
@@ -257,7 +257,7 @@ func (c *compiler) exitTo(s *ssa.FrameState, kind uint64) {
 			c.appendRecord(uint64(i)|abi.RecordMaybe, c.gprAfter(v.Shadow), 0, false, &w)
 			c.a.Jmp(next)
 			c.a.Bind(scalar)
-		} else if o, ok := c.origin[v]; ok && o >= 0 {
+		} else if o, ok := c.origin.Of(v); ok && o >= 0 {
 			scalar := c.a.NewLabel()
 			c.isReference(v, w, o, scalar)
 			if o != i {
@@ -348,7 +348,7 @@ func (c *compiler) block(b *ssa.Block, next *ssa.Block) {
 		c.a.Load(regStack, regCtx, abi.OffStack)
 	}
 	for _, v := range b.Values {
-		if v.Op == ssa.OpPhi || c.lazy[v] {
+		if v.Op == ssa.OpPhi || c.isLazy(v) {
 			continue
 		}
 		c.value(v, b)
@@ -369,7 +369,7 @@ func (c *compiler) block(b *ssa.Block, next *ssa.Block) {
 			c.a.MovRR(scratchC, c.gpr(s, scratchC))
 			c.a.OpImm(amd64.Add, scratchC, 1, true)
 			c.a.Store(regCtx, abi.OffRetFrom, scratchC)
-		} else if o, ok := c.origin[b.Control]; ok && o >= 0 {
+		} else if o, ok := c.origin.Of(b.Control); ok && o >= 0 {
 			done := c.a.NewLabel()
 			c.isReference(b.Control, r, o, done)
 			c.a.MovImm(scratchC, uint64(o)+1)
@@ -512,7 +512,7 @@ func (c *compiler) objectOf(v *ssa.Value, guard func(amd64.Cond)) bool {
 // scratchC, as objectOf finds an object, exiting to v's state when a is not
 // one. It uses scratchA and scratchB.
 func (c *compiler) reference(v, a *ssa.Value, word uint64, guard func(amd64.Cond)) bool {
-	o := c.origin[a]
+	o := c.origin.At(a)
 	if a.Shadow == nil && o < 0 {
 		// A primitive is never a reference.
 		c.a.Jmp(c.stubLabel(v.State, exitKind(v.Aux)))
@@ -674,7 +674,7 @@ func (c *compiler) remainder(v *ssa.Value, guard func(amd64.Cond)) {
 // as Object.arrayLength has it.
 func (c *compiler) length(v *ssa.Value, guard func(amd64.Cond)) {
 	a := v.Args[0]
-	if a.Shadow == nil && c.origin[a] < 0 {
+	if a.Shadow == nil && c.origin.At(a) < 0 {
 		c.a.Jmp(c.stubLabel(v.State, exitKind(v.Aux)))
 		return
 	}

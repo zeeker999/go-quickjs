@@ -838,7 +838,7 @@ func checkNative(t *testing.T, r *rand.Rand, p *ir.Program, l layout) (ok bool) 
 					mc, _ := compileNative(small, l)
 					detail := ""
 					if mc != nil {
-						detail = mc.f.String() + "\n" + mc.mc.Locations
+						detail = mc.f.String() + "\n" + mc.mc.Locations()
 						mc.code.Close()
 					}
 					t.Fatalf("%s\n\nminimized: %s\n%s\nprogram: %+v", why, smallWhy, detail, small.Code)

@@ -1,5 +1,7 @@
 package ssa
 
+import "math"
+
 // Native code holds a slot's number word and never its pointer word, so a
 // tagged value it moves to another slot, or returns, is either a primitive
 // it can write itself or the reference some slot held when native code was
@@ -36,11 +38,41 @@ const (
 	OriginHeap = -4
 )
 
+// OriginMap is each tagged value's origin (Origins), by value ID.
+type OriginMap struct{ of []int }
+
+// originAbsent marks a value with no origin: one not tagged, or not in the
+// function when its origins were found.
+const originAbsent = math.MinInt
+
+// Of is v's origin, and whether it has one.
+func (m OriginMap) Of(v *Value) (int, bool) {
+	if v.ID >= len(m.of) || m.of[v.ID] == originAbsent {
+		return 0, false
+	}
+	return m.of[v.ID], true
+}
+
+// At is v's origin, or 0 if it has none.
+func (m OriginMap) At(v *Value) int {
+	o, _ := m.Of(v)
+	return o
+}
+
 // Origins returns each tagged value's origin: OriginScalar, or the slot
 // whose value at entry it may be -- when it is not a primitive -- or
 // OriginAmbiguous.
-func Origins(f *Func) map[*Value]int {
-	origin := map[*Value]int{}
+func Origins(f *Func) OriginMap {
+	origin := make([]int, f.nextID)
+	for i := range origin {
+		origin[i] = originAbsent
+	}
+	at := func(v *Value) int {
+		if v.ID >= len(origin) || origin[v.ID] == originAbsent {
+			return 0
+		}
+		return origin[v.ID]
+	}
 	var phis []*Value
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
@@ -49,14 +81,14 @@ func Origins(f *Func) map[*Value]int {
 			}
 			switch v.Op {
 			case OpPhi:
-				origin[v] = originNone
+				origin[v.ID] = originNone
 				phis = append(phis, v)
 			case OpLoadSlot:
-				origin[v] = v.Aux
+				origin[v.ID] = v.Aux
 			case OpLoadCell:
-				origin[v] = OriginHeap
+				origin[v.ID] = OriginHeap
 			default:
-				origin[v] = OriginScalar
+				origin[v.ID] = OriginScalar
 			}
 		}
 	}
@@ -65,20 +97,20 @@ func Origins(f *Func) map[*Value]int {
 		for _, p := range phis {
 			o := originNone
 			for _, a := range p.Args {
-				o = joinOrigin(o, origin[a])
+				o = joinOrigin(o, at(a))
 			}
-			if o != origin[p] {
-				origin[p] = o
+			if o != origin[p.ID] {
+				origin[p.ID] = o
 				changed = true
 			}
 		}
 	}
 	for _, p := range phis {
-		if origin[p] == originNone {
-			origin[p] = OriginScalar
+		if origin[p.ID] == originNone {
+			origin[p.ID] = OriginScalar
 		}
 	}
-	return origin
+	return OriginMap{origin}
 }
 
 func joinOrigin(a, b int) int {
@@ -107,7 +139,7 @@ func shadowMerges(f *Func) {
 	need := map[*Value]bool{}
 	var walk func(v *Value)
 	walk = func(v *Value) {
-		if v.Op != OpPhi || need[v] || origin[v] == OriginScalar {
+		if v.Op != OpPhi || need[v] || origin.At(v) == OriginScalar {
 			return
 		}
 		need[v] = true
@@ -117,7 +149,7 @@ func shadowMerges(f *Func) {
 	}
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
-			if v.Op == OpPhi && origin[v] == OriginAmbiguous {
+			if v.Op == OpPhi && origin.At(v) == OriginAmbiguous {
 				walk(v)
 			}
 		}
@@ -143,8 +175,8 @@ func shadowMerges(f *Func) {
 			switch {
 			case a.Shadow != nil:
 				s = a.Shadow
-			case origin[a] >= 0:
-				s = f.constSource(v.Block.Preds[i], origin[a])
+			case origin.At(a) >= 0:
+				s = f.constSource(v.Block.Preds[i], origin.At(a))
 			default:
 				s = f.constSource(v.Block.Preds[i], -1)
 			}

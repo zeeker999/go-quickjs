@@ -281,6 +281,9 @@ func (f *Func) newValue(b *Block, op Op, t Type, args ...*Value) *Value {
 	return v
 }
 
+// NumValues bounds the function's value IDs, for tables indexed by them.
+func (f *Func) NumValues() int { return f.nextID }
+
 // Written reports whether any instruction writes a slot: a slot no
 // instruction writes holds its value from entry in every frame state.
 func (f *Func) Written(slot int) bool { return f.written[slot] }
