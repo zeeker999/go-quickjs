@@ -34,6 +34,10 @@ type compiler struct {
 	stubFor []stub
 	// cold code, emitted after everything else.
 	cold []func()
+	// tail is where exits that filled records go (recordsTail), if any
+	// does; recorded marks the exit being emitted as one.
+	tail               amd64.Label
+	tailUsed, recorded bool
 }
 
 type stub struct {
@@ -101,6 +105,11 @@ func compileAMD64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err 
 	}
 	for i := 0; i < len(c.cold); i++ {
 		c.cold[i]()
+	}
+	// Last: cold code's exits may come here too.
+	if c.tailUsed {
+		c.a.Bind(c.tail)
+		c.recordsTail()
 	}
 	bytes, err := c.a.Finish()
 	if err != nil {
@@ -247,6 +256,7 @@ func (c *compiler) stubLabel(s *ssa.FrameState, kind uint64) amd64.Label {
 // turns out to be a primitive, stored where no reference is, or the
 // reference the slot itself held.
 func (c *compiler) exitTo(s *ssa.FrameState, kind uint64) {
+	c.recorded = false
 	c.a.MovImm(scratchC, 0)
 	c.a.Store(regCtx, abi.OffRecords, scratchC)
 	for i, v := range s.Slots {
@@ -321,6 +331,7 @@ func (c *compiler) isReference(v *ssa.Value, w amd64.Reg, o int, primitive amd64
 // useImm; and its Word from word, if not nil, which must not be scratchB
 // or scratchC. It uses scratchB and scratchC.
 func (c *compiler) appendRecord(slot uint64, arg func() amd64.Reg, imm uint64, useImm bool, word *amd64.Reg) {
+	c.recorded = true
 	c.a.Load(scratchC, regCtx, abi.OffRecords)
 	c.a.ShiftImm(amd64.Shl, scratchC, 5, true)
 	c.a.Op(amd64.Add, scratchC, regCtx, true)
@@ -357,6 +368,95 @@ func (c *compiler) record(kind, pc, depth, site uint64) {
 	c.a.Store(regCtx, abi.OffExitDepth, scratchA)
 	c.a.MovImm(scratchA, site)
 	c.a.Store(regCtx, abi.OffExitSite, scratchA)
+	if !c.recorded {
+		c.a.Ret()
+		return
+	}
+	if !c.tailUsed {
+		c.tail, c.tailUsed = c.a.NewLabel(), true
+	}
+	c.a.Jmp(c.tail)
+}
+
+// recordsTail applies an exit's records natively while the collector is
+// not marking (abi.Encoding's WriteBarrier), as the VM's jitApplyRecords
+// does in Go, and returns; while it marks, Go applies them. It reads every
+// value the records write before writing any, since one may read a slot
+// another writes: the first pass leaves each record's value in its Word
+// and, for its pointer word, its Arg; the second writes them. The pointers
+// are held there only meanwhile, where the collector, which cannot run,
+// would not see them.
+func (c *compiler) recordsTail() {
+	ret, read, write, maybe, scalar, copyValue, next := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel(),
+		c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+	c.a.MovImm(scratchB, c.enc.WriteBarrier)
+	c.a.LoadU8(scratchB, scratchB, 0)
+	c.a.Op(amd64.Test, scratchB, scratchB, false)
+	c.a.Jcc(amd64.CondNE, ret)
+	c.a.Load(scratchA, regCtx, abi.OffRecords)
+	c.a.Op(amd64.Test, scratchA, scratchA, true)
+	c.a.Jcc(amd64.CondE, ret)
+	c.a.MovQToX(xScratch2, scratchA)
+	// From the last record to the first: scratchA its address, xScratch1
+	// its index.
+	c.a.Bind(read)
+	c.a.OpImm(amd64.Sub, scratchA, 1, true)
+	c.a.MovQToX(xScratch1, scratchA)
+	c.a.ShiftImm(amd64.Shl, scratchA, 5, true)
+	c.a.Op(amd64.Add, scratchA, regCtx, true)
+	c.a.Load(scratchC, scratchA, abi.OffRecord)
+	c.a.MovImm(scratchB, abi.RecordScalar)
+	c.a.Op(amd64.Test, scratchC, scratchB, true)
+	c.a.Jcc(amd64.CondNE, scalar)
+	c.a.MovImm(scratchB, abi.RecordMaybe)
+	c.a.Op(amd64.Test, scratchC, scratchB, true)
+	c.a.Jcc(amd64.CondNE, maybe)
+	// Another slot's value, a reference.
+	c.a.Load(scratchC, scratchA, abi.OffRecord+8)
+	c.sourceAddr()
+	c.a.Bind(copyValue)
+	c.a.Load(scratchB, scratchC, c.enc.NumOffset)
+	c.a.Store(scratchA, abi.OffRecord+16, scratchB)
+	c.a.Load(scratchB, scratchC, c.enc.RefOffset)
+	c.a.Store(scratchA, abi.OffRecord+8, scratchB)
+	c.a.Jmp(next)
+	// Its source's value if that holds a reference, else the primitive.
+	c.a.Bind(maybe)
+	c.a.Load(scratchC, scratchA, abi.OffRecord+8)
+	c.a.Op(amd64.Test, scratchC, scratchC, true)
+	c.a.Jcc(amd64.CondS, scalar)
+	c.sourceAddr()
+	c.a.Load(scratchB, scratchC, c.enc.RefOffset)
+	c.a.Op(amd64.Test, scratchB, scratchB, true)
+	c.a.Jcc(amd64.CondNE, copyValue)
+	// The primitive Word, with no pointer.
+	c.a.Bind(scalar)
+	c.a.MovImm(scratchB, 0)
+	c.a.Store(scratchA, abi.OffRecord+8, scratchB)
+	c.a.Bind(next)
+	c.a.MovQFromX(scratchA, xScratch1)
+	c.a.Op(amd64.Test, scratchA, scratchA, true)
+	c.a.Jcc(amd64.CondNE, read)
+	c.a.MovQFromX(scratchA, xScratch2)
+	c.a.Bind(write)
+	c.a.OpImm(amd64.Sub, scratchA, 1, true)
+	c.a.MovQToX(xScratch1, scratchA)
+	c.a.ShiftImm(amd64.Shl, scratchA, 5, true)
+	c.a.Op(amd64.Add, scratchA, regCtx, true)
+	c.a.Load(scratchC, scratchA, abi.OffRecord)
+	c.a.MovImm(scratchB, ^uint64(abi.RecordScalar|abi.RecordMaybe))
+	c.a.Op(amd64.And, scratchC, scratchB, true)
+	c.sourceAddr()
+	c.a.Load(scratchB, scratchA, abi.OffRecord+16)
+	c.a.Store(scratchC, c.enc.NumOffset, scratchB)
+	c.a.Load(scratchB, scratchA, abi.OffRecord+8)
+	c.a.Store(scratchC, c.enc.RefOffset, scratchB)
+	c.a.MovQFromX(scratchA, xScratch1)
+	c.a.Op(amd64.Test, scratchA, scratchA, true)
+	c.a.Jcc(amd64.CondNE, write)
+	c.a.MovImm(scratchB, 0)
+	c.a.Store(regCtx, abi.OffRecords, scratchB)
+	c.a.Bind(ret)
 	c.a.Ret()
 }
 
@@ -555,46 +655,54 @@ func (c *compiler) sourceRef(a *ssa.Value, guard func(amd64.Cond)) {
 		// The source is known at run time: a local, a captured binding, the
 		// receiver, an operand, or a heap cell (origin.go). scratchC becomes
 		// its value's address.
-		captured, stack, found := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
 		c.a.MovRR(scratchC, c.gpr(s, scratchC))
 		c.a.Op(amd64.Test, scratchC, scratchC, true)
 		guard(amd64.CondS)
-		c.a.OpImm(amd64.Cmp, scratchC, abi.MaxRecords, true)
-		c.a.Jcc(amd64.CondAE, found)
-		c.a.OpImm(amd64.Cmp, scratchC, int32(c.f.FrameLocals), false)
-		c.a.Jcc(amd64.CondGE, captured)
-		c.a.ShiftImm(amd64.Shl, scratchC, 4, true)
-		c.a.Op(amd64.Add, scratchC, regLocals, true)
-		c.a.Jmp(found)
-		c.a.Bind(captured)
-		c.a.OpImm(amd64.Cmp, scratchC, int32(c.f.Locals), false)
-		c.a.Jcc(amd64.CondGE, stack)
-		if t := c.f.ThisSlot; t >= 0 {
-			notThis := c.a.NewLabel()
-			c.a.OpImm(amd64.Cmp, scratchC, int32(t), false)
-			c.a.Jcc(amd64.CondNE, notThis)
-			c.a.MovRR(scratchC, regCtx)
-			c.a.OpImm(amd64.Add, scratchC, abi.OffThis, true)
-			c.a.Jmp(found)
-			c.a.Bind(notThis)
-		}
-		c.a.OpImm(amd64.Sub, scratchC, int32(c.f.FrameLocals), false)
-		c.a.ShiftImm(amd64.Shl, scratchC, 3, true)
-		c.a.Load(scratchB, regCtx, abi.OffUpvalues)
-		c.a.Op(amd64.Add, scratchC, scratchB, true)
-		c.a.Load(scratchC, scratchC, 0)
-		c.a.Load(scratchC, scratchC, c.enc.UpvalueSlot)
-		c.a.Jmp(found)
-		c.a.Bind(stack)
-		c.a.OpImm(amd64.Sub, scratchC, int32(c.f.Locals), false)
-		c.a.ShiftImm(amd64.Shl, scratchC, 4, true)
-		c.a.Op(amd64.Add, scratchC, regStack, true)
-		c.a.Bind(found)
+		c.sourceAddr()
 		c.a.Load(scratchC, scratchC, c.enc.RefOffset)
 	} else {
 		base, disp := c.slotAddr(o, true, scratchC)
 		c.a.Load(scratchC, base, disp)
 	}
+}
+
+// sourceAddr turns the source in scratchC -- a slot, not negative, or a
+// heap cell -- into the address of its value: a local's, a captured
+// binding's, the receiver's in the context, an operand's, or the cell. It
+// uses scratchB.
+func (c *compiler) sourceAddr() {
+	captured, stack, found := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+	c.a.OpImm(amd64.Cmp, scratchC, abi.MaxRecords, true)
+	c.a.Jcc(amd64.CondAE, found)
+	c.a.OpImm(amd64.Cmp, scratchC, int32(c.f.FrameLocals), false)
+	c.a.Jcc(amd64.CondGE, captured)
+	c.a.ShiftImm(amd64.Shl, scratchC, 4, true)
+	c.a.Op(amd64.Add, scratchC, regLocals, true)
+	c.a.Jmp(found)
+	c.a.Bind(captured)
+	c.a.OpImm(amd64.Cmp, scratchC, int32(c.f.Locals), false)
+	c.a.Jcc(amd64.CondGE, stack)
+	if t := c.f.ThisSlot; t >= 0 {
+		notThis := c.a.NewLabel()
+		c.a.OpImm(amd64.Cmp, scratchC, int32(t), false)
+		c.a.Jcc(amd64.CondNE, notThis)
+		c.a.MovRR(scratchC, regCtx)
+		c.a.OpImm(amd64.Add, scratchC, abi.OffThis, true)
+		c.a.Jmp(found)
+		c.a.Bind(notThis)
+	}
+	c.a.OpImm(amd64.Sub, scratchC, int32(c.f.FrameLocals), false)
+	c.a.ShiftImm(amd64.Shl, scratchC, 3, true)
+	c.a.Load(scratchB, regCtx, abi.OffUpvalues)
+	c.a.Op(amd64.Add, scratchC, scratchB, true)
+	c.a.Load(scratchC, scratchC, 0)
+	c.a.Load(scratchC, scratchC, c.enc.UpvalueSlot)
+	c.a.Jmp(found)
+	c.a.Bind(stack)
+	c.a.OpImm(amd64.Sub, scratchC, int32(c.f.Locals), false)
+	c.a.ShiftImm(amd64.Shl, scratchC, 4, true)
+	c.a.Op(amd64.Add, scratchC, regStack, true)
+	c.a.Bind(found)
 }
 
 // propStore stores a value in a property, as the VM's setPropCached does

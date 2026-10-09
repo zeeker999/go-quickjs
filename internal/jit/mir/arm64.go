@@ -37,6 +37,10 @@ type a64Compiler struct {
 	stubs   map[stubKey]arm64.Label
 	stubFor []a64Stub
 	cold    []func()
+	// tail is where exits that filled records go (recordsTail), if any
+	// does; recorded marks the exit being emitted as one.
+	tail               arm64.Label
+	tailUsed, recorded bool
 }
 
 type a64Stub struct {
@@ -108,6 +112,11 @@ func compileARM64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err 
 	}
 	for i := 0; i < len(c.cold); i++ {
 		c.cold[i]()
+	}
+	// Last: cold code's exits may come here too.
+	if c.tailUsed {
+		c.a.Bind(c.tail)
+		c.recordsTail()
 	}
 	bytes, err := c.a.Finish()
 	if err != nil {
@@ -276,6 +285,7 @@ func (c *a64Compiler) stubLabel(s *ssa.FrameState, kind uint64) arm64.Label {
 // exitTo writes a frame state into the frame and returns with an exit
 // record, as amd64's does.
 func (c *a64Compiler) exitTo(s *ssa.FrameState, kind uint64) {
+	c.recorded = false
 	c.a.Store(a64Ctx, abi.OffRecords, arm64.ZR)
 	for i, v := range s.Slots {
 		if v.Op == ssa.OpLoadSlot && v.Aux == i || c.captured(i) {
@@ -341,6 +351,7 @@ func (c *a64Compiler) isReference(v *ssa.Value, w arm64.Reg, o int, primitive ar
 // appendRecord adds an abi.Record for slot, as amd64's does. It uses B
 // and C.
 func (c *a64Compiler) appendRecord(slot uint64, arg func() arm64.Reg, imm uint64, useImm bool, word *arm64.Reg) {
+	c.recorded = true
 	c.a.Load(a64C, a64Ctx, abi.OffRecords)
 	c.a.ShiftImm(arm64.Lsl, a64C, a64C, 5, true)
 	c.a.Op(arm64.Add, a64C, a64C, a64Ctx, true)
@@ -376,6 +387,73 @@ func (c *a64Compiler) record(kind, pc, depth, site uint64) {
 	c.a.Store(a64Ctx, abi.OffExitDepth, a64A)
 	c.a.MovImm(a64A, site)
 	c.a.Store(a64Ctx, abi.OffExitSite, a64A)
+	if !c.recorded {
+		c.a.Ret()
+		return
+	}
+	if !c.tailUsed {
+		c.tail, c.tailUsed = c.a.NewLabel(), true
+	}
+	c.a.B(c.tail)
+}
+
+// recordsTail applies an exit's records natively while the collector is
+// not marking, as amd64's does. D counts the records; F1 keeps how many.
+func (c *a64Compiler) recordsTail() {
+	ret, read, write, maybe, scalar, copyValue, next := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel(),
+		c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+	c.a.MovImm(a64B, c.enc.WriteBarrier)
+	c.a.LoadU8(a64B, a64B, 0)
+	c.a.Cbnz(a64B, ret, false)
+	c.a.Load(a64D, a64Ctx, abi.OffRecords)
+	c.a.Cbz(a64D, ret, true)
+	c.a.FMovToF(a64F1, a64D)
+	c.a.Bind(read)
+	c.a.AddImm(a64D, a64D, -1, true)
+	c.a.ShiftImm(arm64.Lsl, a64A, a64D, 5, true)
+	c.a.Op(arm64.Add, a64A, a64A, a64Ctx, true)
+	c.a.Load(a64C, a64A, abi.OffRecord)
+	c.a.MovImm(a64B, abi.RecordScalar)
+	c.a.Tst(a64C, a64B, true)
+	c.a.BCond(arm64.NE, scalar)
+	c.a.MovImm(a64B, abi.RecordMaybe)
+	c.a.Tst(a64C, a64B, true)
+	c.a.BCond(arm64.NE, maybe)
+	c.a.Load(a64C, a64A, abi.OffRecord+8)
+	c.sourceAddr()
+	c.a.Bind(copyValue)
+	c.a.Load(a64B, a64C, c.enc.NumOffset)
+	c.a.Store(a64A, abi.OffRecord+16, a64B)
+	c.a.Load(a64B, a64C, c.enc.RefOffset)
+	c.a.Store(a64A, abi.OffRecord+8, a64B)
+	c.a.B(next)
+	c.a.Bind(maybe)
+	c.a.Load(a64C, a64A, abi.OffRecord+8)
+	c.a.CmpImm(a64C, 0, true)
+	c.a.BCond(arm64.MI, scalar)
+	c.sourceAddr()
+	c.a.Load(a64B, a64C, c.enc.RefOffset)
+	c.a.Cbnz(a64B, copyValue, true)
+	c.a.Bind(scalar)
+	c.a.Store(a64A, abi.OffRecord+8, arm64.ZR)
+	c.a.Bind(next)
+	c.a.Cbnz(a64D, read, true)
+	c.a.FMovFromF(a64D, a64F1)
+	c.a.Bind(write)
+	c.a.AddImm(a64D, a64D, -1, true)
+	c.a.ShiftImm(arm64.Lsl, a64A, a64D, 5, true)
+	c.a.Op(arm64.Add, a64A, a64A, a64Ctx, true)
+	c.a.Load(a64C, a64A, abi.OffRecord)
+	c.a.MovImm(a64B, ^uint64(abi.RecordScalar|abi.RecordMaybe))
+	c.a.Op(arm64.And, a64C, a64C, a64B, true)
+	c.sourceAddr()
+	c.a.Load(a64B, a64A, abi.OffRecord+16)
+	c.a.Store(a64C, c.enc.NumOffset, a64B)
+	c.a.Load(a64B, a64A, abi.OffRecord+8)
+	c.a.Store(a64C, c.enc.RefOffset, a64B)
+	c.a.Cbnz(a64D, write, true)
+	c.a.Store(a64Ctx, abi.OffRecords, arm64.ZR)
+	c.a.Bind(ret)
 	c.a.Ret()
 }
 
@@ -659,45 +737,51 @@ func (c *a64Compiler) reference(v, a *ssa.Value, word uint64, guard func(arm64.C
 func (c *a64Compiler) sourceRef(a *ssa.Value, guard func(arm64.Cond)) {
 	o := c.origin.At(a)
 	if s := a.Shadow; s != nil {
-		captured, stack, found := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
 		c.a.MovRR(a64C, c.gpr(s, a64C))
 		c.a.CmpImm(a64C, 0, true)
 		guard(arm64.MI)
-		c.a.CmpImm(a64C, abi.MaxRecords, true)
-		c.a.BCond(arm64.HS, found)
-		c.a.CmpImm(a64C, int64(c.f.FrameLocals), true)
-		c.a.BCond(arm64.HS, captured)
-		c.a.ShiftImm(arm64.Lsl, a64C, a64C, 4, true)
-		c.a.Op(arm64.Add, a64C, a64C, a64Locals, true)
-		c.a.B(found)
-		c.a.Bind(captured)
-		c.a.CmpImm(a64C, int64(c.f.Locals), true)
-		c.a.BCond(arm64.HS, stack)
-		if t := c.f.ThisSlot; t >= 0 {
-			notThis := c.a.NewLabel()
-			c.a.CmpImm(a64C, int64(t), true)
-			c.a.BCond(arm64.NE, notThis)
-			c.a.AddImm(a64C, a64Ctx, int64(abi.OffThis), true)
-			c.a.B(found)
-			c.a.Bind(notThis)
-		}
-		c.a.AddImm(a64C, a64C, -int64(c.f.FrameLocals), true)
-		c.a.ShiftImm(arm64.Lsl, a64C, a64C, 3, true)
-		c.a.Load(a64B, a64Ctx, abi.OffUpvalues)
-		c.a.Op(arm64.Add, a64C, a64C, a64B, true)
-		c.a.Load(a64C, a64C, 0)
-		c.a.Load(a64C, a64C, c.enc.UpvalueSlot)
-		c.a.B(found)
-		c.a.Bind(stack)
-		c.a.AddImm(a64C, a64C, -int64(c.f.Locals), true)
-		c.a.ShiftImm(arm64.Lsl, a64C, a64C, 4, true)
-		c.a.Op(arm64.Add, a64C, a64C, a64Stack, true)
-		c.a.Bind(found)
+		c.sourceAddr()
 		c.a.Load(a64C, a64C, c.enc.RefOffset)
 	} else {
 		base, disp := c.slotAddr(o, true, a64C)
 		c.a.Load(a64C, base, disp)
 	}
+}
+
+// sourceAddr turns the source in C into the address of its value, as
+// amd64's does. It uses B.
+func (c *a64Compiler) sourceAddr() {
+	captured, stack, found := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+	c.a.CmpImm(a64C, abi.MaxRecords, true)
+	c.a.BCond(arm64.HS, found)
+	c.a.CmpImm(a64C, int64(c.f.FrameLocals), true)
+	c.a.BCond(arm64.HS, captured)
+	c.a.ShiftImm(arm64.Lsl, a64C, a64C, 4, true)
+	c.a.Op(arm64.Add, a64C, a64C, a64Locals, true)
+	c.a.B(found)
+	c.a.Bind(captured)
+	c.a.CmpImm(a64C, int64(c.f.Locals), true)
+	c.a.BCond(arm64.HS, stack)
+	if t := c.f.ThisSlot; t >= 0 {
+		notThis := c.a.NewLabel()
+		c.a.CmpImm(a64C, int64(t), true)
+		c.a.BCond(arm64.NE, notThis)
+		c.a.AddImm(a64C, a64Ctx, int64(abi.OffThis), true)
+		c.a.B(found)
+		c.a.Bind(notThis)
+	}
+	c.a.AddImm(a64C, a64C, -int64(c.f.FrameLocals), true)
+	c.a.ShiftImm(arm64.Lsl, a64C, a64C, 3, true)
+	c.a.Load(a64B, a64Ctx, abi.OffUpvalues)
+	c.a.Op(arm64.Add, a64C, a64C, a64B, true)
+	c.a.Load(a64C, a64C, 0)
+	c.a.Load(a64C, a64C, c.enc.UpvalueSlot)
+	c.a.B(found)
+	c.a.Bind(stack)
+	c.a.AddImm(a64C, a64C, -int64(c.f.Locals), true)
+	c.a.ShiftImm(arm64.Lsl, a64C, a64C, 4, true)
+	c.a.Op(arm64.Add, a64C, a64C, a64Stack, true)
+	c.a.Bind(found)
 }
 
 // propStore stores a value in a property, as amd64's does. It uses every
