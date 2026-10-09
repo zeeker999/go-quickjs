@@ -162,8 +162,7 @@ func shadowMerges(f *Func) {
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
 			if need[v] && v.Shadow == nil {
-				s := &Value{ID: f.nextID, Op: OpPhi, Type: Source, Args: make([]*Value, len(v.Args)), Block: b}
-				f.nextID++
+				s := f.alloc(Value{Op: OpPhi, Type: Source, Args: f.refsOf(len(v.Args)), Block: b})
 				v.Shadow = s
 				shadows = append(shadows, v)
 			}
@@ -189,8 +188,7 @@ func shadowMerges(f *Func) {
 
 // constSource makes a source constant at the end of a block.
 func (f *Func) constSource(b *Block, k int) *Value {
-	v := &Value{ID: f.nextID, Op: OpConstSource, Type: Source, Aux: k, Block: b}
-	f.nextID++
+	v := f.alloc(Value{Op: OpConstSource, Type: Source, Aux: k, Block: b})
 	b.Values = append(b.Values, v)
 	return v
 }

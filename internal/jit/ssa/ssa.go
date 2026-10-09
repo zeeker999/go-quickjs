@@ -263,6 +263,43 @@ type Func struct {
 	// written marks the slots some instruction writes (Written).
 	written []bool
 	nextID  int
+	// values and refs are slabs values, their arguments and frame states'
+	// slots come from, a chunk at a time: a compile at run time makes
+	// hundreds of each (BenchmarkJITCompile in internal/vm). Chunks double,
+	// up to a limit, so a small function takes little.
+	values     []Value
+	refs       []*Value
+	valueChunk int
+	refChunk   int
+}
+
+// alloc returns a new value like v, numbered next.
+func (f *Func) alloc(v Value) *Value {
+	if len(f.values) == 0 {
+		f.valueChunk = min(max(2*f.valueChunk, 16), 256)
+		f.values = make([]Value, f.valueChunk)
+	}
+	p := &f.values[0]
+	f.values = f.values[1:]
+	*p = v
+	p.ID = f.nextID
+	f.nextID++
+	return p
+}
+
+// refsOf returns a slice of n values, nil for none. Its capacity is its
+// length, so an append copies it rather than write over a neighbour's.
+func (f *Func) refsOf(n int) []*Value {
+	if n == 0 {
+		return nil
+	}
+	if len(f.refs) < n {
+		f.refChunk = min(max(2*f.refChunk, 64), 1024)
+		f.refs = make([]*Value, max(f.refChunk, n))
+	}
+	s := f.refs[:n:n]
+	f.refs = f.refs[n:]
+	return s
 }
 
 func (f *Func) newBlock(pc int) *Block {
@@ -272,8 +309,8 @@ func (f *Func) newBlock(pc int) *Block {
 }
 
 func (f *Func) newValue(b *Block, op Op, t Type, args ...*Value) *Value {
-	v := &Value{ID: f.nextID, Op: op, Type: t, Args: args, Block: b}
-	f.nextID++
+	v := f.alloc(Value{Op: op, Type: t, Args: f.refsOf(len(args)), Block: b})
+	copy(v.Args, args)
 	for _, a := range args {
 		a.Uses++
 	}

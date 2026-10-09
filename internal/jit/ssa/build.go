@@ -389,8 +389,7 @@ func (b *builder) read(slot int, blk *Block) *Value {
 }
 
 func (b *builder) newPhi(blk *Block) *Value {
-	v := &Value{ID: b.f.nextID, Op: OpPhi, Type: Tagged, Block: blk}
-	b.f.nextID++
+	v := b.f.alloc(Value{Op: OpPhi, Type: Tagged, Block: blk})
 	blk.Values = append([]*Value{v}, blk.Values...)
 	return v
 }
@@ -405,8 +404,7 @@ func (b *builder) addPhiOperands(slot int, phi *Value) {
 
 // constIn makes a tagged constant at the start of a block.
 func (b *builder) constIn(blk *Block, c ir.Value) *Value {
-	v := &Value{ID: b.f.nextID, Op: OpConst, Type: Tagged, Const: c, Block: blk}
-	b.f.nextID++
+	v := b.f.alloc(Value{Op: OpConst, Type: Tagged, Const: c, Block: blk})
 	blk.Values = append([]*Value{v}, blk.Values...)
 	return v
 }
@@ -414,7 +412,7 @@ func (b *builder) constIn(blk *Block, c ir.Value) *Value {
 // state captures the frame at a PC: every live slot's current value.
 func (b *builder) state(blk *Block, pc int) *FrameState {
 	depth := b.p.Maps[pc].Depth
-	s := &FrameState{PC: b.p.Maps[pc].PC, Depth: depth, Slots: make([]*Value, b.p.Locals+depth)}
+	s := &FrameState{PC: b.p.Maps[pc].PC, Depth: depth, Slots: b.f.refsOf(b.p.Locals + depth)}
 	for i := range s.Slots {
 		s.Slots[i] = b.read(i, blk)
 		s.Slots[i].Uses++
@@ -426,7 +424,7 @@ func (b *builder) fill(blk *Block) {
 	f := b.f
 	if blk.PC < 0 {
 		e, _ := f.entryForBlock(blk)
-		blk.Header = &FrameState{PC: b.p.Maps[e.PC].PC, Depth: e.Depth, Slots: make([]*Value, b.p.Locals+e.Depth)}
+		blk.Header = &FrameState{PC: b.p.Maps[e.PC].PC, Depth: e.Depth, Slots: f.refsOf(b.p.Locals + e.Depth)}
 		for i := range blk.Header.Slots {
 			v := f.newValue(blk, OpLoadSlot, Tagged)
 			v.Aux = i

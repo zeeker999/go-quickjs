@@ -161,14 +161,23 @@ func unboxPhis(f *Func) bool {
 	// By value ID: n bounds the IDs of the values there are now; the values
 	// this pass makes are numbered from n.
 	n := f.nextID
-	cand, unboxedUse := make([]bool, n), make([]bool, n)
 	var phis []*Value // the candidates, in block order
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
 			if v.Op == OpPhi && v.Type == Tagged {
-				cand[v.ID] = true
 				phis = append(phis, v)
 			}
+		}
+	}
+	if len(phis) == 0 {
+		return false
+	}
+	cand, unboxedUse := make([]bool, n), make([]bool, n)
+	for _, v := range phis {
+		cand[v.ID] = true
+	}
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
 			if v.Op == OpUnboxF64 {
 				unboxedUse[v.Args[0].ID] = true
 			}
@@ -230,8 +239,7 @@ func unboxPhis(f *Func) bool {
 	var ordered []*Value
 	for _, v := range phis {
 		if cand[v.ID] {
-			p := &Value{ID: f.nextID, Op: OpPhi, Type: Float64, Block: v.Block}
-			f.nextID++
+			p := f.alloc(Value{Op: OpPhi, Type: Float64, Block: v.Block})
 			fp[v.ID] = p
 			ordered = append(ordered, v)
 		}
@@ -251,8 +259,7 @@ func unboxPhis(f *Func) bool {
 				// A numeric constant: its number, defined beside it.
 				x = unboxed[a.ID]
 				if x == nil {
-					x = &Value{ID: f.nextID, Op: OpConstF64, Type: Float64, Const: a.Const, Block: a.Block}
-					f.nextID++
+					x = f.alloc(Value{Op: OpConstF64, Type: Float64, Const: a.Const, Block: a.Block})
 					insertAfter(a, x)
 					unboxed[a.ID] = x
 				}
@@ -262,9 +269,9 @@ func unboxPhis(f *Func) bool {
 				x = unboxed[a.ID]
 				if x == nil {
 					e := a.Block
-					x = &Value{ID: f.nextID, Op: OpUnboxF64, Type: Float64, Args: []*Value{a},
-						Aux: int(ir.GuardExit), State: e.Header, Block: e}
-					f.nextID++
+					x = f.alloc(Value{Op: OpUnboxF64, Type: Float64, Args: f.refsOf(1),
+						Aux: int(ir.GuardExit), State: e.Header, Block: e})
+					x.Args[0] = a
 					e.Values = append(e.Values, x)
 					unboxed[a.ID] = x
 				}
@@ -282,8 +289,8 @@ func unboxPhis(f *Func) bool {
 				if v.ID < n && fp[v.ID] != nil {
 					p := fp[v.ID]
 					phis = append(phis, p)
-					box := &Value{ID: f.nextID, Op: OpBoxF64, Type: Tagged, Args: []*Value{p}, Block: b}
-					f.nextID++
+					box := f.alloc(Value{Op: OpBoxF64, Type: Tagged, Args: f.refsOf(1), Block: b})
+					box.Args[0] = p
 					boxes = append(boxes, box)
 					subst[v.ID] = box
 				}
