@@ -114,6 +114,46 @@ type jitFedSite struct {
 	seen uintptr
 }
 
+// jitPolySite is a read that met objects of shapes the code was not
+// compiled for (jitEntry.poly): where each had the property, as a cache
+// filled for it has it (fillPropCache).
+type jitPolySite struct {
+	pc    uint32
+	cases []propCache
+}
+
+// jitPropertyCases is how many shapes a read is compiled for, as V8's
+// polymorphic inline caches keep: one more leaves for Go.
+const jitPropertyCases = 4
+
+// jitPolySeen notes a read native code left to Go at pc, its receiver on top
+// of the frame's operands, up to sp: one found on a prototype, of a shape
+// the read has not met, joins those it has, up to jitPropertyCases, and
+// the code is compiled again for them at once. A read of a receiver's own
+// property needs none: native code scans for it (mir's property).
+func (r *Runtime) jitPolySeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) {
+	recv := r.stack[sp-1]
+	if !recv.IsObject() || int(in.A) >= len(f.cl.names) {
+		return
+	}
+	var c propCache
+	r.fillPropCache(&c, recv.Object(), f.cl.names[in.A], false)
+	if c.shape == nil || c.shape == noShape || c.p1 == nil {
+		return
+	}
+	i := slices.IndexFunc(e.poly, func(p jitPolySite) bool { return int(p.pc) == pc })
+	if i < 0 {
+		e.poly = append(e.poly, jitPolySite{pc: uint32(pc)})
+		i = len(e.poly) - 1
+	}
+	p := &e.poly[i]
+	if len(p.cases) >= jitPropertyCases || slices.ContainsFunc(p.cases, func(k propCache) bool { return k.shape == c.shape }) {
+		return
+	}
+	p.cases = append(p.cases, c)
+	e.polyReopt = true
+}
+
 // jitWrongShapeExits is how often a site compiled for one shape leaves
 // native code in a row, its cache knowing one other, before the code is
 // compiled again: compiling is not free, and a site whose objects are of
@@ -154,12 +194,13 @@ func jitFed(cl *closure, e *jitEntry, pc uint32) {
 // native code leaves for Go to do anything else. If the function no longer
 // compiles, the code it has is kept.
 func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
-	if e.reopt {
+	switch {
+	case e.reopt:
 		e.reopts++
-	} else {
+	case e.inlineReopt:
 		e.inlineReopts++
 	}
-	e.reopt, e.inlineReopt = false, false
+	e.reopt, e.inlineReopt, e.polyReopt = false, false, false
 	fn := cl.fn
 	lower := jitcompile.LowerSSA
 	if e.ssaCallee {
@@ -638,6 +679,9 @@ func (fb *jitFeedback) Global(pc int) (ssa.GlobalSite, bool) {
 
 func (fb *jitFeedback) Property(pc int) (ssa.PropertySite, bool) {
 	site, ok := fb.property(pc)
+	if ok && site.Shape != 0 && fb.e != nil && fb.root == nil {
+		site.Cases = fb.cases(pc, site.Shape)
+	}
 	if ok && fb.root == nil && int(fb.fn.Code[pc].B) < len(fb.cl.ic) && fb.cl.ic[fb.fn.Code[pc].B].fills < maxCacheFills &&
 		!slices.ContainsFunc(fb.fed, func(s jitFedSite) bool { return s.pc == uint32(pc) }) {
 		// A site whose cache may yet learn a shape (jitFed).
@@ -650,6 +694,36 @@ func (fb *jitFeedback) Property(pc int) (ssa.PropertySite, bool) {
 		fb.fed = append(fb.fed, jitFedSite{pc: uint32(pc), shape: known})
 	}
 	return site, ok
+}
+
+// cases are the shapes other than first the read at pc met (jitPolySeen),
+// as ssa.PropertyCase has them: the code keeps them and their holders.
+func (fb *jitFeedback) cases(pc int, first uintptr) []ssa.PropertyCase {
+	var cases []ssa.PropertyCase
+	for _, p := range fb.e.poly {
+		if int(p.pc) != pc {
+			continue
+		}
+		for _, c := range p.cases {
+			if uintptr(unsafe.Pointer(c.shape)) == first {
+				continue
+			}
+			k := ssa.PropertyCase{Shape: uintptr(unsafe.Pointer(c.shape)), Index: c.idx}
+			fb.shapes = append(fb.shapes, c.shape)
+			for i, h := range [2]struct {
+				p *Object
+				s *shape
+			}{{c.p1, c.s1}, {c.p2, c.s2}} {
+				if h.p == nil {
+					break
+				}
+				k.Holders[i] = ssa.Holder{Object: uintptr(unsafe.Pointer(h.p)), Shape: uintptr(unsafe.Pointer(h.s))}
+				fb.shapes, fb.holders = append(fb.shapes, h.s), append(fb.holders, h.p)
+			}
+			cases = append(cases, k)
+		}
+	}
+	return cases
 }
 
 func (fb *jitFeedback) property(pc int) (ssa.PropertySite, bool) {
@@ -933,7 +1007,7 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 				return r.jitInterpret(f, sp, err)
 			}
 			pc, depth = int(f.pc), sp-f.base
-			if e.reopt || e.inlineReopt {
+			if e.reopt || e.inlineReopt || e.polyReopt {
 				r.jitReoptimize(f.cl, e)
 			}
 			if !e.ssa.HasEntry(pc) || e.entrySlow {
@@ -973,8 +1047,11 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 			exitPC := int(ctx.ExitPC)
 			in := f.cl.fn.Code[exitPC]
 			f.pc = uint32(exitPC)
-			if in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod {
+			switch in.Op {
+			case bytecode.OpCall, bytecode.OpCallMethod:
 				r.jitCallSeen(f, e, exitPC, f.base+int(ctx.ExitDepth), in)
+			case bytecode.OpGetProp, bytecode.OpGetPropThis:
+				r.jitPolySeen(f, e, exitPC, f.base+int(ctx.ExitDepth), in)
 			}
 			sp, steps, err := r.jitHost(f, f.base+int(ctx.ExitDepth), 1)
 			if err != nil || r.stopped != nil || steps == 0 {
@@ -985,7 +1062,7 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 			case bytecode.OpGetProp, bytecode.OpGetPropThis, bytecode.OpSetProp:
 				jitFed(f.cl, e, uint32(exitPC))
 			}
-			if e.reopt || e.inlineReopt {
+			if e.reopt || e.inlineReopt || e.polyReopt {
 				// The code is compiled again now, not at the next call: a
 				// loop in this one may run long.
 				r.jitReoptimize(f.cl, e)
@@ -1190,8 +1267,11 @@ func (r *Runtime) jitFinishExit(f *frame, e *jitEntry, l *jitNativeLevel) (Value
 		in := f.cl.fn.Code[pc]
 		if e != nil && e.ssa != nil {
 			e.ssaStats.hosts++
-			if in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod {
+			switch in.Op {
+			case bytecode.OpCall, bytecode.OpCallMethod:
 				r.jitCallSeen(f, e, pc, f.base+depth, in)
+			case bytecode.OpGetProp, bytecode.OpGetPropThis:
+				r.jitPolySeen(f, e, pc, f.base+depth, in)
 			}
 		}
 		sp, steps, err := r.jitHost(f, f.base+depth, 1)
@@ -1207,7 +1287,7 @@ func (r *Runtime) jitFinishExit(f *frame, e *jitEntry, l *jitNativeLevel) (Value
 			if e.inlinePending && e.inlineReopts < jitInlineReoptimizations {
 				e.inlinePending, e.inlineReopt = false, true
 			}
-			if e.reopt || e.inlineReopt {
+			if e.reopt || e.inlineReopt || e.polyReopt {
 				r.jitReoptimize(f.cl, e)
 			}
 		}

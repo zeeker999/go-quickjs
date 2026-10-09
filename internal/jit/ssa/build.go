@@ -142,8 +142,22 @@ type GlobalSite struct {
 // one's table. The receiver's shape says it has no such property of its
 // own; each holder's, that the one before it has none, and the last's
 // where it is.
+//
+// A read may have met objects of other shapes too, as V8's polymorphic
+// inline caches keep up to four: Cases are those, each with its own
+// holders and index, which the read checks after Shape's.
 type PropertySite struct {
 	Key     uint32
+	Shape   uintptr
+	Index   int32
+	Holders [2]Holder
+	Cases   []PropertyCase
+}
+
+// PropertyCase is one more shape a read's site met (PropertySite.Cases):
+// the receiver's shape, the prototypes the property was found on, none if
+// it is the receiver's own, and its index in the last one's table.
+type PropertyCase struct {
 	Shape   uintptr
 	Index   int32
 	Holders [2]Holder
@@ -1191,10 +1205,14 @@ func (b *builder) instruction(blk *Block, pc int) {
 		} else if site.Holders[0].Object != 0 {
 			site.Shape = 0
 		}
+		var cases []PropertyCase
+		if site.Shape != 0 && in.Op != ir.PropertyWrite {
+			cases = site.Cases
+		}
 		if in.Op == ir.ReferenceRead {
 			cell := guard(OpPropCell, Source, ir.HostExit, object)
 			cell.Const, cell.Index, cell.Key = ir.Value{Bits: uint64(site.Shape)}, int(site.Index), site.Key
-			cell.Holders = holders
+			cell.Holders, cell.Cases = holders, cases
 			v := f.newValue(blk, OpLoadCell, Tagged, cell)
 			v.Shadow = cell
 			b.assign(in.Dest, blk, v)
@@ -1203,7 +1221,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 		if in.Op == ir.PropertyRead {
 			v := guard(OpPropRead, Float64, ir.HostExit, object)
 			v.Const, v.Index, v.Key = ir.Value{Bits: uint64(site.Shape)}, int(site.Index), site.Key
-			v.Holders = holders
+			v.Holders, v.Cases = holders, cases
 			b.assign(in.Dest, blk, boxF(v))
 			break
 		}

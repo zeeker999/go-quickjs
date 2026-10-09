@@ -1063,7 +1063,7 @@ func (c *a64Compiler) propStore(v *ssa.Value, guard func(arm64.Cond)) {
 // property finds the property a property operation names and leaves the
 // address of its value in A, as amd64's does. It uses B, C and D.
 func (c *a64Compiler) property(v *ssa.Value, guard func(arm64.Cond)) {
-	if v.Holders != nil {
+	if v.Holders != nil || v.Cases != nil {
 		c.holder(v, guard)
 		return
 	}
@@ -1159,30 +1159,52 @@ func (c *a64Compiler) stringBytes(exit, yes, no arm64.Label) {
 	}
 }
 
-// holder is property for a read the receiver's prototypes answered, as
-// amd64's is. It uses B and C.
+// holder finds the property a read whose receiver's shape it knows names,
+// for whichever of the shapes it met the receiver's is, into A, as amd64's
+// does.
 func (c *a64Compiler) holder(v *ssa.Value, guard func(arm64.Cond)) {
-	p := c.gpr(v.Args[0], a64A)
-	c.a.Load(a64B, p, c.enc.ObjectShape)
-	c.a.MovImm(a64C, v.Const.Bits)
-	c.a.Cmp(a64B, a64C, true)
-	guard(arm64.NE)
-	c.a.Load(a64B, p, c.enc.ObjectProto)
-	for _, h := range v.Holders {
-		if h.Object == 0 {
-			break
-		}
-		c.a.MovImm(a64A, uint64(h.Object))
-		c.a.Cmp(a64B, a64A, true)
-		guard(arm64.NE)
-		c.a.Load(a64B, a64A, c.enc.ObjectShape)
-		c.a.MovImm(a64C, uint64(h.Shape))
-		c.a.Cmp(a64B, a64C, true)
-		guard(arm64.NE)
-		c.a.Load(a64B, a64A, c.enc.ObjectProto)
+	var first [2]ssa.Holder
+	if v.Holders != nil {
+		first = *v.Holders
 	}
-	c.a.Load(a64A, a64A, c.enc.ObjectProps)
-	c.a.AddImm(a64A, a64A, int64(int32(v.Index)*c.enc.PropertySize+c.enc.PropertyValue), true)
+	cases := append([]ssa.PropertyCase{{Shape: uintptr(v.Const.Bits), Index: int32(v.Index), Holders: first}}, v.Cases...)
+	done := c.a.NewLabel()
+	for i, k := range cases {
+		next := c.a.NewLabel()
+		p := c.gpr(v.Args[0], a64A)
+		c.a.Load(a64B, p, c.enc.ObjectShape)
+		c.a.MovImm(a64C, uint64(k.Shape))
+		c.a.Cmp(a64B, a64C, true)
+		if i == len(cases)-1 {
+			guard(arm64.NE)
+		} else {
+			c.a.BCond(arm64.NE, next)
+		}
+		if p != a64A {
+			c.a.MovRR(a64A, p)
+		}
+		c.a.Load(a64B, a64A, c.enc.ObjectProto)
+		for _, h := range k.Holders {
+			if h.Object == 0 {
+				break
+			}
+			c.a.MovImm(a64A, uint64(h.Object))
+			c.a.Cmp(a64B, a64A, true)
+			guard(arm64.NE)
+			c.a.Load(a64B, a64A, c.enc.ObjectShape)
+			c.a.MovImm(a64C, uint64(h.Shape))
+			c.a.Cmp(a64B, a64C, true)
+			guard(arm64.NE)
+			c.a.Load(a64B, a64A, c.enc.ObjectProto)
+		}
+		c.a.Load(a64A, a64A, c.enc.ObjectProps)
+		c.a.AddImm(a64A, a64A, int64(k.Index*c.enc.PropertySize+c.enc.PropertyValue), true)
+		if i < len(cases)-1 {
+			c.a.B(done)
+			c.a.Bind(next)
+		}
+	}
+	c.a.Bind(done)
 }
 
 // integer converts the double x to an integer in r, failing unless it is

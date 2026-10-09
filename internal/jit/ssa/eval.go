@@ -252,23 +252,31 @@ type Object struct {
 // index there, as Holders say, or -1: o itself, as property finds it, for a
 // site without them.
 func (h *Heap) holder(o *Object, v *Value) (*Object, int) {
-	if v.Holders == nil {
+	if v.Holders == nil && v.Cases == nil {
 		return o, o.property(v)
 	}
-	if o.Shape != uintptr(v.Const.Bits) {
-		return nil, -1
+	var first [2]Holder
+	if v.Holders != nil {
+		first = *v.Holders
 	}
-	for _, p := range v.Holders {
-		if p.Object == 0 {
-			break
+	cases := append([]PropertyCase{{Shape: uintptr(v.Const.Bits), Index: int32(v.Index), Holders: first}}, v.Cases...)
+	for _, c := range cases {
+		if o.Shape != c.Shape {
+			continue
 		}
-		next := h.Holders[p.Object]
-		if o.Proto != p.Object || next == nil || next.Shape != p.Shape {
-			return nil, -1
+		for _, p := range c.Holders {
+			if p.Object == 0 {
+				break
+			}
+			next := h.Holders[p.Object]
+			if o.Proto != p.Object || next == nil || next.Shape != p.Shape {
+				return nil, -1
+			}
+			o = next
 		}
-		o = next
+		return o, int(c.Index)
 	}
-	return o, v.Index
+	return nil, -1
 }
 
 // isReference reports a value whose pointer word is not empty: an object or

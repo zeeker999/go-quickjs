@@ -196,6 +196,11 @@ type jitEntry struct {
 	// fed are the property sites, each with the shape the code was
 	// compiled for there, or none (jitFed).
 	fed []jitFedSite
+	// poly are the reads that met objects of shapes the code was not
+	// compiled for, each with up to jitPropertyCases of them, which it is
+	// compiled again for (jitPolySeen); polyReopt marks that it is to be.
+	poly      []jitPolySite
+	polyReopt bool
 	// nativeEntry is the address of the code's entry at its start, which
 	// native callers jump to (mir's native calls), or 0 while there is none
 	// they may: no code, or code that leaves too often (notNative). A
@@ -781,7 +786,7 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 		if e.inlinePending && e.inlineReopts < jitInlineReoptimizations {
 			e.inlinePending, e.inlineReopt = false, true
 		}
-		if e.reopt || e.inlineReopt {
+		if e.reopt || e.inlineReopt || e.polyReopt {
 			r.jitReoptimize(f.cl, e)
 		}
 		if e.entrySlow {

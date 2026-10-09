@@ -1045,7 +1045,7 @@ func (c *compiler) propStore(v *ssa.Value, guard func(amd64.Cond)) {
 // key, unrolled, as the VM's own small objects are; the entry must be plain
 // data, and writable for a write. It uses scratchB and scratchC.
 func (c *compiler) property(v *ssa.Value, guard func(amd64.Cond)) {
-	if v.Holders != nil {
+	if v.Holders != nil || v.Cases != nil {
 		c.holder(v, guard)
 		return
 	}
@@ -1147,34 +1147,54 @@ func (c *compiler) stringBytes(exit, yes, no amd64.Label) {
 	}
 }
 
-// holder is property for a read the receiver's prototypes answered
-// (ssa.PropertySite's Holders): the receiver of the shape the site knows,
-// which says it has no such property of its own, each prototype the one
-// the site met, of the shape it had, and the property at the index in the
-// last one's table; anything else exits. The prototypes' addresses are
-// constants, which the VM keeps alive.
+// holder finds the property a read whose receiver's shape it knows names
+// -- on a prototype, which it checks, or the receiver's own -- into
+// scratchA, the address of its value; and, for a read that met objects of
+// several shapes, as V8's polymorphic inline caches do, for whichever of
+// them the receiver's is (ssa.PropertyCase). Any other shape fails.
 func (c *compiler) holder(v *ssa.Value, guard func(amd64.Cond)) {
-	p := c.gpr(v.Args[0], scratchA)
-	c.a.Load(scratchB, p, c.enc.ObjectShape)
-	c.a.MovImm(scratchC, v.Const.Bits)
-	c.a.Op(amd64.Cmp, scratchB, scratchC, true)
-	guard(amd64.CondNE)
-	c.a.Load(scratchB, p, c.enc.ObjectProto)
-	for _, h := range v.Holders {
-		if h.Object == 0 {
-			break
-		}
-		c.a.MovImm(scratchA, uint64(h.Object))
-		c.a.Op(amd64.Cmp, scratchB, scratchA, true)
-		guard(amd64.CondNE)
-		c.a.Load(scratchB, scratchA, c.enc.ObjectShape)
-		c.a.MovImm(scratchC, uint64(h.Shape))
-		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
-		guard(amd64.CondNE)
-		c.a.Load(scratchB, scratchA, c.enc.ObjectProto)
+	var first [2]ssa.Holder
+	if v.Holders != nil {
+		first = *v.Holders
 	}
-	c.a.Load(scratchA, scratchA, c.enc.ObjectProps)
-	c.a.OpImm(amd64.Add, scratchA, int32(v.Index)*c.enc.PropertySize+c.enc.PropertyValue, true)
+	cases := append([]ssa.PropertyCase{{Shape: uintptr(v.Const.Bits), Index: int32(v.Index), Holders: first}}, v.Cases...)
+	done := c.a.NewLabel()
+	for i, k := range cases {
+		next := c.a.NewLabel()
+		p := c.gpr(v.Args[0], scratchA)
+		c.a.Load(scratchB, p, c.enc.ObjectShape)
+		c.a.MovImm(scratchC, uint64(k.Shape))
+		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+		if i == len(cases)-1 {
+			guard(amd64.CondNE)
+		} else {
+			c.a.Jcc(amd64.CondNE, next)
+		}
+		if p != scratchA {
+			c.a.MovRR(scratchA, p)
+		}
+		c.a.Load(scratchB, scratchA, c.enc.ObjectProto)
+		for _, h := range k.Holders {
+			if h.Object == 0 {
+				break
+			}
+			c.a.MovImm(scratchA, uint64(h.Object))
+			c.a.Op(amd64.Cmp, scratchB, scratchA, true)
+			guard(amd64.CondNE)
+			c.a.Load(scratchB, scratchA, c.enc.ObjectShape)
+			c.a.MovImm(scratchC, uint64(h.Shape))
+			c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+			guard(amd64.CondNE)
+			c.a.Load(scratchB, scratchA, c.enc.ObjectProto)
+		}
+		c.a.Load(scratchA, scratchA, c.enc.ObjectProps)
+		c.a.OpImm(amd64.Add, scratchA, k.Index*c.enc.PropertySize+c.enc.PropertyValue, true)
+		if i < len(cases)-1 {
+			c.a.Jmp(done)
+			c.a.Bind(next)
+		}
+	}
+	c.a.Bind(done)
 }
 
 // remainder is JavaScript's % of two integers, by integer division: both

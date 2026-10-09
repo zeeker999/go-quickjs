@@ -4015,6 +4015,68 @@ func TestJITSSAInlineEffects(t *testing.T) {
 	}
 }
 
+// A read that meets objects of several shapes, its property on their
+// prototypes, is compiled for each, up to jitPropertyCases, as V8's
+// polymorphic inline caches are (jitPolySeen, ssa.PropertyCase): a loop over
+// four kinds of object then never leaves native code for its reads, a
+// method's or a field's. A fifth leaves for Go; a prototype's property
+// changed is read again, and one a nearer prototype comes to have fails
+// that one's shape check. Each answer is the interpreter's.
+func TestJITSSAPolymorphicReads(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function A(){this.a=1}A.prototype.k=1;A.prototype.m=function(){return 10};
+		function B(){this.b=2;this.a=0}B.prototype.k=2;B.prototype.m=function(){return 20};
+		function C(){}C.prototype=Object.create({k:3,m(){return 30}});
+		function D(){this.d=4}D.prototype.k=4;D.prototype.m=function(){return 40};
+		function E(){}E.prototype.k=5;E.prototype.m=function(){return 50};
+		function reads(os,n){let s=0;for(let i=0;i<n;i++){const o=os[i%os.length];s=(s*7+o.k)|0;s^=s>>>5}return s}
+		function calls(os,n){let s=0;for(let i=0;i<n;i++){const o=os[i%os.length];s=(s*3+o.m())|0;s^=s>>>4}return s}
+		var four=[new A,new B,new C,new D],five=[new A,new B,new C,new D,new E];`
+	src := `[reads(four,400),calls(four,400)].join()`
+	rounds := []string{src, src, src, src, `[reads(five,400),calls(five,400)].join()`,
+		`B.prototype.k=7;Object.getPrototypeOf(C.prototype).k=9;[reads(four,400),calls(four,400)].join()`,
+		`C.prototype.k=99;C.prototype.m=function(){return 99};[reads(four,400),calls(four,400)].join()`}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry := func(name string) *jitEntry {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		return r.jit.hint(cl.hint())
+	}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts uint64
+		if i == 3 {
+			runtime.GC()
+			defer debug.SetGCPercent(debug.SetGCPercent(-1))
+			hosts = entry("reads").ssaStats.hosts
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 3 {
+			if e := entry("reads"); len(e.poly) != 1 || len(e.poly[0].cases) < 3 || e.ssaStats.hosts != hosts {
+				t.Fatalf("reads left native code %d times for four shapes; %+v", e.ssaStats.hosts-hosts, e.poly)
+			}
+		}
+	}
+}
+
 // Native code that calls through Go another function's native code shares
 // the context with it (jitState.ssaCtx): an exit's PC must be read before
 // Go runs anything. Here inner's last exit, a call near its end, is past

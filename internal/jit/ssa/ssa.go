@@ -219,8 +219,11 @@ type Value struct {
 	Index int
 	Key   uint32
 	// Holders, for a property read the receiver's prototypes answered, are
-	// those prototypes (PropertySite); nil otherwise.
+	// those prototypes (PropertySite); nil otherwise. Cases, for a read
+	// that met objects of other shapes, are those (PropertyCase), checked
+	// after Const's.
 	Holders *[2]Holder
+	Cases   []PropertyCase
 	// State is the frame to exit to, for guards.
 	State *FrameState
 	// Shadow is a tagged value's origin at run time, where no compiler can
