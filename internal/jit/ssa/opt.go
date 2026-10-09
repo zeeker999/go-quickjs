@@ -23,36 +23,38 @@ import (
 func Optimize(f *Func) {
 	// Shadows are remade at the end, for the phis that are left.
 	clearShadows(f)
+	// Tables are by value ID, not maps: a compile at run time pays for every
+	// pass (BenchmarkJITCompile in internal/vm).
+	var subst []*Value
+	seen := map[[2]int]*Value{}
 	for round := 0; round < 32; round++ {
-		subst := map[*Value]*Value{}
+		subst = idTable(subst, f.nextID)
+		replaced := false
 		find := func(v *Value) *Value {
-			for {
-				w, ok := subst[v]
-				if !ok {
-					return v
-				}
-				v = w
+			for v.ID < len(subst) && subst[v.ID] != nil {
+				v = subst[v.ID]
 			}
+			return v
 		}
 		changed := false
 		for _, b := range f.Blocks {
-			seen := map[[2]int]*Value{}
+			clear(seen)
 			for _, v := range b.Values {
-				if _, gone := subst[v]; gone {
+				if subst[v.ID] != nil {
 					continue
 				}
 				for i, a := range v.Args {
 					v.Args[i] = find(a)
 				}
 				if w := simplify(f, v); w != nil {
-					subst[v] = w
+					subst[v.ID], replaced = w, true
 					changed = true
 					continue
 				}
 				if v.Op.isGuard() && v.Op != OpCheckInit && !v.Op.readsMemory() {
 					key := [2]int{int(v.Op), v.Args[0].ID}
 					if first, ok := seen[key]; ok {
-						subst[v] = first
+						subst[v.ID], replaced = first, true
 						changed = true
 						continue
 					}
@@ -60,7 +62,7 @@ func Optimize(f *Func) {
 				}
 			}
 		}
-		if len(subst) > 0 {
+		if replaced {
 			rewrite(f, find)
 		}
 		if unboxPhis(f) {
@@ -73,6 +75,16 @@ func Optimize(f *Func) {
 	}
 	shadowMerges(f)
 	recount(f)
+}
+
+// idTable returns t cleared and n long, reusing its storage.
+func idTable[T any](t []T, n int) []T {
+	if cap(t) < n {
+		return make([]T, n)
+	}
+	t = t[:n]
+	clear(t)
+	return t
 }
 
 // simplify returns a value v can be replaced by, or nil. It may instead
@@ -146,80 +158,90 @@ func simplify(f *Func, v *Value) *Value {
 // loop. The old phi becomes a box of the new one, which other passes then
 // cancel.
 func unboxPhis(f *Func) bool {
-	cand := map[*Value]bool{}
-	unboxedUse := map[*Value]bool{}
+	// By value ID: n bounds the IDs of the values there are now; the values
+	// this pass makes are numbered from n.
+	n := f.nextID
+	cand, unboxedUse := make([]bool, n), make([]bool, n)
+	var phis []*Value // the candidates, in block order
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
 			if v.Op == OpPhi && v.Type == Tagged {
-				cand[v] = true
+				cand[v.ID] = true
+				phis = append(phis, v)
 			}
 			if v.Op == OpUnboxF64 {
-				unboxedUse[v.Args[0]] = true
+				unboxedUse[v.Args[0].ID] = true
 			}
 		}
 	}
+	isCand := func(a *Value) bool { return a.ID < n && cand[a.ID] }
 	numeric := func(a *Value) bool {
 		return a.Op == OpBoxF64 || a.Op == OpConst && a.Const.Kind == ir.Number
 	}
 	// Filter until stable: a candidate's arguments must be acceptable, and it
 	// needs evidence, directly or through candidates. Removing one candidate
-	// can disqualify another, so both filters repeat.
+	// can disqualify another, so both filters repeat. The result is the same
+	// in any order.
+	boxed := make([]bool, n)
 	for changed := true; changed; {
 		changed = false
-		for v := range cand {
+		for _, v := range phis {
+			if !cand[v.ID] {
+				continue
+			}
 			for _, a := range v.Args {
-				if !numeric(a) && !cand[a] && !(a.Op == OpLoadSlot && a.Block.PC < 0) {
-					delete(cand, v)
+				if !numeric(a) && !isCand(a) && !(a.Op == OpLoadSlot && a.Block.PC < 0) {
+					cand[v.ID] = false
 					changed = true
 					break
 				}
 			}
 		}
-		boxed := map[*Value]bool{}
-		for v := range cand {
-			boxed[v] = unboxedUse[v]
+		clear(boxed)
+		for _, v := range phis {
+			if cand[v.ID] {
+				boxed[v.ID] = unboxedUse[v.ID]
+			}
 		}
 		for grew := true; grew; {
 			grew = false
-			for v := range cand {
-				if !boxed[v] {
+			for _, v := range phis {
+				if !cand[v.ID] || !boxed[v.ID] {
 					continue
 				}
 				for _, a := range v.Args {
-					if cand[a] && !boxed[a] {
-						boxed[a] = true
+					if isCand(a) && !boxed[a.ID] {
+						boxed[a.ID] = true
 						grew = true
 					}
 				}
 			}
 		}
-		for v := range cand {
-			if !boxed[v] {
-				delete(cand, v)
+		for _, v := range phis {
+			if cand[v.ID] && !boxed[v.ID] {
+				cand[v.ID] = false
 				changed = true
 			}
 		}
 	}
-	if len(cand) == 0 {
-		return false
-	}
-	// In block order, never map order: value numbers, and so register
-	// allocation and code, must not vary from one compilation to the next.
-	fp := map[*Value]*Value{}
+	// In block order: value numbers, and so register allocation and code,
+	// must not vary from one compilation to the next.
+	fp := make([]*Value, n)
 	var ordered []*Value
-	for _, b := range f.Blocks {
-		for _, v := range b.Values {
-			if cand[v] {
-				p := &Value{ID: f.nextID, Op: OpPhi, Type: Float64, Block: b}
-				f.nextID++
-				fp[v] = p
-				ordered = append(ordered, v)
-			}
+	for _, v := range phis {
+		if cand[v.ID] {
+			p := &Value{ID: f.nextID, Op: OpPhi, Type: Float64, Block: v.Block}
+			f.nextID++
+			fp[v.ID] = p
+			ordered = append(ordered, v)
 		}
 	}
-	unboxed := map[*Value]*Value{}
+	if len(ordered) == 0 {
+		return false
+	}
+	unboxed := make([]*Value, n)
 	for _, v := range ordered {
-		p := fp[v]
+		p := fp[v.ID]
 		for _, a := range v.Args {
 			var x *Value
 			switch {
@@ -227,42 +249,43 @@ func unboxPhis(f *Func) bool {
 				x = a.Args[0]
 			case a.Op == OpConst:
 				// A numeric constant: its number, defined beside it.
-				x = unboxed[a]
+				x = unboxed[a.ID]
 				if x == nil {
 					x = &Value{ID: f.nextID, Op: OpConstF64, Type: Float64, Const: a.Const, Block: a.Block}
 					f.nextID++
 					insertAfter(a, x)
-					unboxed[a] = x
+					unboxed[a.ID] = x
 				}
-			case cand[a]:
-				x = fp[a]
+			case isCand(a):
+				x = fp[a.ID]
 			default:
-				x = unboxed[a]
+				x = unboxed[a.ID]
 				if x == nil {
 					e := a.Block
 					x = &Value{ID: f.nextID, Op: OpUnboxF64, Type: Float64, Args: []*Value{a},
 						Aux: int(ir.GuardExit), State: e.Header, Block: e}
 					f.nextID++
 					e.Values = append(e.Values, x)
-					unboxed[a] = x
+					unboxed[a.ID] = x
 				}
 			}
 			p.Args = append(p.Args, x)
 		}
 	}
-	subst := map[*Value]*Value{}
+	subst := make([]*Value, n)
 	for _, b := range f.Blocks {
 		var phis, boxes, rest []*Value
 		for _, v := range b.Values {
 			switch {
 			case v.Op == OpPhi:
 				phis = append(phis, v)
-				if p := fp[v]; p != nil {
+				if v.ID < n && fp[v.ID] != nil {
+					p := fp[v.ID]
 					phis = append(phis, p)
 					box := &Value{ID: f.nextID, Op: OpBoxF64, Type: Tagged, Args: []*Value{p}, Block: b}
 					f.nextID++
 					boxes = append(boxes, box)
-					subst[v] = box
+					subst[v.ID] = box
 				}
 			default:
 				rest = append(rest, v)
@@ -271,8 +294,8 @@ func unboxPhis(f *Func) bool {
 		b.Values = append(append(phis, boxes...), rest...)
 	}
 	rewrite(f, func(v *Value) *Value {
-		if w, ok := subst[v]; ok {
-			return w
+		if v.ID < n && subst[v.ID] != nil {
+			return subst[v.ID]
 		}
 		return v
 	})
@@ -317,11 +340,11 @@ func rewrite(f *Func, find func(*Value) *Value) {
 // controls, and the frame states of exits, guards and loop headers are what
 // keeps values live.
 func removeDead(f *Func) bool {
-	live := map[*Value]bool{}
+	live := make([]bool, f.nextID)
 	var work []*Value
 	mark := func(v *Value) {
-		if v != nil && !live[v] {
-			live[v] = true
+		if v != nil && !live[v.ID] {
+			live[v.ID] = true
 			work = append(work, v)
 		}
 	}
@@ -354,7 +377,7 @@ func removeDead(f *Func) bool {
 	for _, b := range f.Blocks {
 		kept := b.Values[:0]
 		for _, v := range b.Values {
-			if live[v] {
+			if live[v.ID] {
 				kept = append(kept, v)
 			} else {
 				removed = true
