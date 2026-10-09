@@ -285,6 +285,10 @@ type jitState struct {
 	callActive      bool
 	globals         []bytecode.Instr
 	cache           map[weak.Pointer[bytecode.Function]]*jitEntry
+	// ssaShared is what the contexts from ssaSharedFrom on hold of what
+	// they share (jitShareContexts).
+	ssaShared     jitShared
+	ssaSharedFrom int
 	// arena holds the code of every entry: a few mappings, however many
 	// functions the runtime compiles.
 	arena *jit.Arena

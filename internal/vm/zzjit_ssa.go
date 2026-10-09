@@ -1135,18 +1135,14 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 	}()
 	ctx := &s.ssaCtxs[idx]
 	for {
-		// The stack can move between entries, after Go has run something.
+		// What Go has run since the last entry may have changed the frame, how
+		// deep calls are, or the scope.
 		s.ssaCtx = ctx
 		ctx.ReturnTo, ctx.Live, ctx.TailReturn = 0, 0, 0
-		ctx.Level = uint64(idx)
-		ctx.LevelLimit = uint64(min(jitContexts, idx+max(0, r.maxFrames-r.frameDepth)))
-		ctx.StackBase, ctx.StackEnd = unsafe.Pointer(unsafe.SliceData(r.stack)), uint64(len(r.stack))
-		ctx.StackTop, ctx.StackHigh = &r.stackTop, &r.stackHigh
+		r.jitShareContexts(idx, f)
 		ctx.Locals = unsafe.Pointer(unsafe.SliceData(f.locals))
 		ctx.Stack = unsafe.Pointer(&r.stack[f.base])
-		ctx.BackEdges = &r.backEdges
 		ctx.Upvalues = unsafe.Pointer(unsafe.SliceData(f.cl.upvalues))
-		ctx.Global, ctx.LexNames = unsafe.Pointer(f.cl.scope()), unsafe.Pointer(&r.lexNames)
 		if e.ssaStrings {
 			*(*Value)(unsafe.Pointer(&ctx.CharCodeAt)) = r.jitStringMethod()
 		}
@@ -1259,6 +1255,41 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 			f.pc = uint32(pc)
 		}
 	}
+}
+
+// jitShared is what every context native code runs in shares with the one
+// it was called from (abi.Context): where the global names are, the
+// VM's stack, how deep calls may go.
+type jitShared struct {
+	global, lexNames, stackBase unsafe.Pointer
+	stackEnd, levelLimit        uint64
+}
+
+// jitShareContexts writes what the contexts share into context idx, which
+// code is entered in, and every one past it, which its native calls run
+// in, with each one's level, when it is not what they hold: a native call
+// then writes none of it. They hold it from the last time it was written
+// (jitSharedContexts), if that was from idx or before, as nothing else
+// writes it.
+func (r *Runtime) jitShareContexts(idx int, f *frame) {
+	s := r.jit
+	sh := jitShared{
+		global: unsafe.Pointer(f.cl.scope()), lexNames: unsafe.Pointer(&r.lexNames),
+		stackBase: unsafe.Pointer(unsafe.SliceData(r.stack)), stackEnd: uint64(len(r.stack)),
+		levelLimit: uint64(min(jitContexts, idx+max(0, r.maxFrames-r.frameDepth))),
+	}
+	if sh == s.ssaShared && s.ssaSharedFrom <= idx {
+		return
+	}
+	for i := idx; i < jitContexts; i++ {
+		c := &s.ssaCtxs[i]
+		c.Level, c.LevelLimit = uint64(i), sh.levelLimit
+		c.StackBase, c.StackEnd = sh.stackBase, sh.stackEnd
+		c.StackTop, c.StackHigh = &r.stackTop, &r.stackHigh
+		c.BackEdges = &r.backEdges
+		c.Global, c.LexNames = sh.global, sh.lexNames
+	}
+	s.ssaShared, s.ssaSharedFrom = sh, idx
 }
 
 // jitContexts is how many contexts native code runs in at once: one for
