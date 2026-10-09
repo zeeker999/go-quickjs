@@ -4016,6 +4016,141 @@ func TestJITSSAInlineEffects(t *testing.T) {
 	}
 }
 
+// A callee's calls are inlined in it, as V8 inlines them, to three levels:
+// run inlines outer, which inlines hold, which inlines mark, each of them
+// reading a global or writing a property; once its code has them all, run
+// never leaves. An exit inside the innermost makes the three frames, which
+// Go finishes, each with what the one it called returned.
+func TestJITSSANestedInline(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `var HELD=4;
+		function T(){this.state=0;this.count=0}
+		T.prototype.mark=function(){this.state=this.state|HELD;return this.state};
+		T.prototype.hold=function(){this.count=this.count+1;return this.mark()+1};
+		T.prototype.outer=function(k){return this.hold()*2+k};
+		function run(o,n){let s=0;for(let i=0;i<n;i++){o.state=i&3;s=(s+o.outer(i))|0}return s}
+		var a=new T;`
+	rounds := []string{
+		`[run(a,300),a.state,a.count].join()`,
+		`[run(a,300),a.state,a.count].join()`,
+		`[run(a,300),a.state,a.count].join()`,
+		`[run(a,300),a.state,a.count].join()`,
+		`HELD='3';[run(a,300),a.state,a.count].join()`,
+		`HELD=8;[run(a,300),a.state,a.count].join()`,
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	method := func(name string) *closure {
+		proto := r.global.getOwn(r.atoms.intern("T")).value.Object().getOwn(r.atoms.intern("prototype")).value.Object()
+		return proto.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+	}
+	cl := r.global.getOwn(r.atoms.intern("run")).value.Object().fn().closure
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts uint64
+		e := r.jit.hint(cl.hint())
+		if e != nil {
+			hosts = e.ssaStats.hosts
+		}
+		unwound := r.jit.unwound
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		switch i {
+		case 3:
+			e = r.jit.hint(cl.hint())
+			for _, name := range []string{"outer", "hold", "mark"} {
+				if e == nil || !slices.Contains(e.ssaInlined, method(name)) {
+					t.Fatalf("run's code does not inline %s", name)
+				}
+			}
+			if e.ssaStats.hosts != hosts {
+				t.Fatalf("run left native code %d times", e.ssaStats.hosts-hosts)
+			}
+		case 4:
+			if r.jit.unwound-unwound < 3 {
+				t.Fatalf("an exit inside mark made %d frames, not three", r.jit.unwound-unwound)
+			}
+		case 5:
+			// Left too often, outer is called natively instead, not by Go.
+			if e := r.jit.hint(cl.hint()); e == nil || !slices.Contains(e.callSites, jitCallNative) || slices.Contains(e.callSites, jitCallDone) {
+				t.Fatalf("run's call to outer: %v", e.callSites)
+			}
+		}
+	}
+}
+
+// A function whose calls are on branches taken one after another learns
+// each at a different time, and is compiled again for each, up to
+// jitInlineReoptimizations; a call met after those that keeps leaving
+// native code is settled all the same (jitCallsHot), not left to Go for
+// good: f7's, which has a loop, is made natively.
+func TestJITSSACallsSettleLate(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function f0(x){return x+1} function f1(x){return x+2} function f2(x){return x+3} function f3(x){return x+4}
+		function f4(x){return x+5} function f5(x){return x+6} function f6(x){return x+7} function f7(x){let s=x;for(let j=0;j<2;j++)s+=4;return s}
+		function g(m,x){if(m===0)return f0(x);if(m===1)return f1(x);if(m===2)return f2(x);if(m===3)return f3(x);
+			if(m===4)return f4(x);if(m===5)return f5(x);if(m===6)return f6(x);return f7(x)}
+		function run(m,n){let s=0;for(let i=0;i<n;i++)s=(s+g(m,i))|0;return s}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	var hosts uint64
+	for m := range 9 {
+		src := fmt.Sprintf("String(run(%d,400))", min(m, 7))
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		g := r.jit.cache[weak.Make(r.global.getOwn(r.atoms.intern("g")).value.Object().fn().closure.fn)]
+		if g != nil {
+			hosts = g.ssaStats.hosts
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("%s: got %s, interpreter %s", src, got, want)
+		}
+		if m == 8 {
+			// f7's call, met last, is settled: g no longer leaves for it.
+			if g == nil {
+				t.Fatal("g has no code")
+			}
+			if g.ssaStats.hosts != hosts {
+				t.Fatalf("g still leaves native code: %d exits; calls %v", g.ssaStats.hosts-hosts, g.callSites)
+			}
+		}
+	}
+}
+
 // A read that meets objects of several shapes, its property on their
 // prototypes, is compiled for each, up to jitPropertyCases, as V8's
 // polymorphic inline caches are (jitPolySeen, ssa.PropertyCase): a loop over

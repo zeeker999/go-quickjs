@@ -82,11 +82,13 @@ type InlineSite struct {
 }
 
 // Inlining's bounds: a callee's instructions, all callees' in a function,
-// and the calls a function inlines.
+// the calls a function inlines, and how deep: a callee's calls are inlined
+// in it, as V8 inlines them, to this many levels.
 const (
 	maxInline      = 48
 	maxInlineTotal = 192
 	maxInlines     = 8
+	maxInlineDepth = 3
 )
 
 // Inlinable reports whether a callee may be inlined: a small program that
@@ -96,23 +98,34 @@ const (
 // inside it makes its frame (InlineState), so that what it did before is
 // not done again.
 func Inlinable(p *ir.Program) bool {
+	calls, ok := InlineCalls(p)
+	return ok && len(calls) == 0
+}
+
+// InlineCalls reports whether a callee may be inlined if the operations it
+// leaves to Go, which it returns by PC, are calls inlined in it too: it is
+// Inlinable but for those.
+func InlineCalls(p *ir.Program) ([]int, bool) {
 	if p == nil || p.Validate() != nil || len(p.Code) > maxInline || len(p.Globals) != 0 {
-		return false
+		return nil, false
 	}
+	var calls []int
 	for pc, in := range p.Code {
 		if !reachable(p, pc) {
 			continue
 		}
 		switch in.Op {
-		case ir.Call, ir.Host:
-			return false
+		case ir.Call:
+			return nil, false
+		case ir.Host:
+			calls = append(calls, pc)
 		case ir.Jump, ir.Branch:
 			if in.Target <= pc {
-				return false
+				return nil, false
 			}
 		}
 	}
-	return true
+	return calls, true
 }
 
 // GlobalSite is a global read's site: its name, the VM's atom, and the
@@ -196,10 +209,12 @@ type builder struct {
 	nslots int
 
 	// root is the function's own frame, cur the one translated now;
-	// inlined are the callees, by the PC of their call; frameOf is each
-	// block's frame, by block ID, nil for the function's own.
+	// inlined are the callees, by the PC of their call, inlines how many
+	// calls are inlined, at every level; frameOf is each block's frame, by
+	// block ID, nil for the function's own.
 	root, cur *frame
 	inlined   map[int]*frame
+	inlines   int
 	// calls are the calls made natively (OpCall), by PC: their blocks go
 	// on to the next instruction's.
 	calls   map[int][]*CallSite
@@ -300,7 +315,21 @@ type frame struct {
 	cont      *Block
 	start     *Block
 	init      []*Value
-	callBlock *Block // the function's own block that ends at the call
+	callBlock *Block // the caller's block that ends at the call
+	// parent is the frame of the call, the function's own or a callee's;
+	// depth how many inlined frames this is inside, itself included; and
+	// inlined the callees inlined in it, by the PC of their call.
+	parent  *frame
+	depth   int
+	inlined map[int]*frame
+}
+
+// inlinedAt is the callee inlined at pc in the frame being translated.
+func (b *builder) inlinedAt(pc int) *frame {
+	if b.cur == b.root {
+		return b.inlined[pc]
+	}
+	return b.cur.inlined[pc]
 }
 
 // enter makes fr the frame being translated.
@@ -316,15 +345,20 @@ func (b *builder) frameAt(blk *Block) *frame {
 	return b.root
 }
 
-// inlineAt is the callee to inline at the function's own pc, if any: a call
-// the VM has seen call one function (Feedback's Inline), whose failures
-// have not made it generic, within inlining's bounds.
+// inlineAt is the callee to inline at pc in the frame being translated, if
+// any: a call the VM has seen call one function (Feedback's Inline), whose
+// failures have not made it generic, within inlining's bounds; with the
+// calls it makes inlined in it, every one, or it is not.
 func (b *builder) inlineAt(pc int, total *int) (*frame, bool) {
-	if b.fb == nil || b.p.Code[pc].Op != ir.Host || len(b.inlined) >= maxInlines || b.fb.Generic(pc) {
+	if b.fb == nil || b.p.Code[pc].Op != ir.Host || b.inlines >= maxInlines || b.cur.depth >= maxInlineDepth || b.fb.Generic(pc) {
 		return nil, false
 	}
 	site, ok := b.fb.Inline(pc)
-	if !ok || !Inlinable(site.Program) || *total+len(site.Program.Code) > maxInlineTotal ||
+	var calls []int
+	if ok {
+		calls, ok = InlineCalls(site.Program)
+	}
+	if !ok || *total+len(site.Program.Code) > maxInlineTotal ||
 		site.Argc < 0 || site.Params < 0 || pc+1 >= len(b.p.Code) || !reachable(b.p, pc+1) {
 		return nil, false
 	}
@@ -342,9 +376,29 @@ func (b *builder) inlineAt(pc int, total *int) (*frame, bool) {
 	if b.nslots+q.Locals+q.StackSize > abi.MaxRecords {
 		return nil, false
 	}
+	nslots, before, inlines := b.nslots, *total, b.inlines
 	*total += len(site.Program.Code)
-	fr := &frame{p: q, fb: site.Feedback, site: site, result: b.p.Locals + after - 1, base: b.nslots}
+	fr := &frame{p: q, fb: site.Feedback, site: site, result: b.cur.base + b.p.Locals + after - 1, base: b.nslots,
+		parent: b.cur, depth: b.cur.depth + 1}
 	b.nslots += q.Locals + q.StackSize
+	b.inlines++
+	if len(calls) != 0 {
+		cur := b.cur
+		b.enter(fr)
+		for _, at := range calls {
+			child, ok := b.inlineAt(at, total)
+			if !ok {
+				b.enter(cur)
+				b.nslots, *total, b.inlines = nslots, before, inlines
+				return nil, false
+			}
+			if fr.inlined == nil {
+				fr.inlined = map[int]*frame{}
+			}
+			fr.inlined[at] = child
+		}
+		b.enter(cur)
+	}
 	return fr, true
 }
 
@@ -425,12 +479,20 @@ func (b *builder) planInline(fr *frame, call, cont *Block) {
 		case last.Op == ir.Return:
 			blk.Kind = BlockPlain
 			b.edge(blk, cont)
+		case fr.inlined[end] != nil:
+			// Into the callee inlined in it, whose returns go to the
+			// block after it.
+			blk.Kind = BlockPlain
+			fr.inlined[end].callBlock = blk
 		case b.host(end):
 			blk.Kind = BlockExit
 		default:
 			blk.Kind = BlockPlain
 			b.edge(blk, fr.blockAt[end+1])
 		}
+	}
+	for _, pc := range sortedKeys(fr.inlined) {
+		b.planInline(fr.inlined[pc], fr.inlined[pc].callBlock, fr.blockAt[pc+1])
 	}
 }
 
@@ -439,7 +501,7 @@ func (b *builder) planInline(fr *frame, call, cont *Block) {
 // its receiver, and undefined in every other.
 func (b *builder) inlineCall(blk *Block, pc int, fr *frame, guard func(Op, Type, ir.ExitKind, ...*Value) *Value, state func() *FrameState) {
 	site := fr.site
-	sp := b.p.Locals + b.p.Maps[pc].Depth
+	sp := b.cur.base + b.p.Locals + b.p.Maps[pc].Depth
 	// Another callee is called by Go, from the call's state, as a call that
 	// is not inlined is, and native code goes on after it.
 	object := guard(OpObjectOf, Ptr, ir.HostExit, b.read(sp-site.Argc-1, blk))
@@ -450,9 +512,11 @@ func (b *builder) inlineCall(blk *Block, pc int, fr *frame, guard func(Op, Type,
 		guard(OpObjectOf, Ptr, ir.HostExit, b.read(sp-site.Argc-2, blk))
 	}
 	// Room past the operands for the callee's frame, which an exit inside
-	// it writes there, and a context for Go to make it from.
+	// it writes there, and a context for Go to make it from, and one for
+	// each inlined caller it is in.
 	room := guard(OpFrameRoom, None, ir.HostExit)
-	room.Index = fr.base - b.p.Locals + fr.p.Locals + fr.p.StackSize
+	room.Index = fr.base - b.root.p.Locals + fr.p.Locals + fr.p.StackSize
+	room.Const = ir.Value{Bits: uint64(fr.depth)}
 	fr.call = state()
 	undefined := b.f.newValue(blk, OpConst, Tagged)
 	undefined.Const = ir.Value{Kind: ir.Undefined}
@@ -905,14 +969,16 @@ func (b *builder) state(blk *Block, pc int) *FrameState {
 		call, depth := fr.call, b.p.Maps[pc].Depth
 		s := b.f.newState(FrameState{PC: call.PC, Depth: call.Depth, Site: call.Site, Slots: b.f.refsOf(fr.base + b.p.Locals + depth)})
 		for i, v := range call.Slots {
-			s.Slots[i] = v
-			v.Uses++
+			if v != nil {
+				s.Slots[i] = v
+				v.Uses++
+			}
 		}
 		for i := fr.base; i < len(s.Slots); i++ {
 			s.Slots[i] = b.read(i, blk)
 			s.Slots[i].Uses++
 		}
-		s.Inline = &InlineState{Closure: fr.site.Closure, Base: fr.base, Locals: b.p.Locals, ThisSlot: fr.site.ThisSlot,
+		s.Inline = &InlineState{Parent: call.Inline, Closure: fr.site.Closure, Base: fr.base, Locals: b.p.Locals, ThisSlot: fr.site.ThisSlot,
 			PC: b.p.Maps[pc].PC, Depth: depth, Site: pc}
 		return s
 	}
@@ -1232,7 +1298,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 		v := guard(OpPropWrite, None, ir.HostExit, object, operand(in.Right))
 		v.Const, v.Index, v.Key = ir.Value{Bits: uint64(site.Shape)}, int(site.Index), site.Key
 	case ir.Host, ir.Call:
-		if fr := b.inlined[pc]; fr != nil && b.cur == b.root {
+		if fr := b.inlinedAt(pc); fr != nil {
 			b.inlineCall(blk, pc, fr, guard, state)
 			break
 		}

@@ -582,6 +582,17 @@ func (c *core) allocate() error {
 	return nil
 }
 
+// inlineLevels are the inlined frames an exit in state s makes, the
+// outermost first (ssa.InlineState).
+func inlineLevels(s *ssa.FrameState) []*ssa.InlineState {
+	var levels []*ssa.InlineState
+	for in := s.Inline; in != nil; in = in.Parent {
+		levels = append(levels, in)
+	}
+	slices.Reverse(levels)
+	return levels
+}
+
 // cellSource reports whether a shadow is a cell's address whatever happens
 // at run time -- a property's, an element's, a global binding's, the
 // context's -- and never a slot or -1, so that the value's pointer word is

@@ -354,23 +354,31 @@ func (c *a64Compiler) exitThen(s *ssa.FrameState, kind uint64, then *arm64.Label
 		c.appendRecord(uint64(i)|abi.RecordScalar, nil, 0, true, &w)
 		c.a.Bind(next)
 	}
-	if in := s.Inline; in != nil {
-		// As amd64's: the callee's frame is said in the next context.
-		c.a.AddImm(a64B, a64Ctx, int64(abi.ContextSize), true)
-		for _, f := range []struct {
-			off int32
-			v   uint64
-		}{{abi.OffInlineClosure, uint64(in.Closure)}, {abi.OffInlineLocals, uint64(in.Locals)}, {abi.OffInlineThis, uint64(in.ThisSlot + 1)},
-			{abi.OffExitKind, kind}, {abi.OffExitPC, uint64(in.PC)}, {abi.OffExitDepth, uint64(in.Depth)}, {abi.OffExitSite, uint64(int64(in.Site))},
-			{abi.OffLive, abi.LiveInline}} {
-			c.a.MovImm(a64A, f.v)
-			c.a.Store(a64B, f.off, a64A)
-		}
+	if s.Inline != nil {
+		// As amd64's: each inlined frame is said in a context of its own,
+		// the outermost's the next.
 		c.a.Load(a64C, a64Ctx, abi.OffStackBase)
-		c.a.Op(arm64.Sub, a64A, a64Stack, a64C, true)
-		c.a.ShiftImm(arm64.Lsr, a64A, a64A, 4, true)
-		c.a.AddImm(a64A, a64A, int64(in.Base-c.f.Locals), true)
-		c.a.Store(a64B, abi.OffBase, a64A)
+		c.a.Op(arm64.Sub, a64C, a64Stack, a64C, true)
+		c.a.ShiftImm(arm64.Lsr, a64C, a64C, 4, true)
+		c.a.MovRR(a64B, a64Ctx)
+		for _, in := range inlineLevels(s) {
+			c.a.AddImm(a64B, a64B, int64(abi.ContextSize), true)
+			k := uint64(abi.ExitHost)
+			if in == s.Inline {
+				k = kind
+			}
+			for _, f := range []struct {
+				off int32
+				v   uint64
+			}{{abi.OffInlineClosure, uint64(in.Closure)}, {abi.OffInlineLocals, uint64(in.Locals)}, {abi.OffInlineThis, uint64(in.ThisSlot + 1)},
+				{abi.OffExitKind, k}, {abi.OffExitPC, uint64(in.PC)}, {abi.OffExitDepth, uint64(in.Depth)}, {abi.OffExitSite, uint64(int64(in.Site))},
+				{abi.OffLive, abi.LiveInline}} {
+				c.a.MovImm(a64A, f.v)
+				c.a.Store(a64B, f.off, a64A)
+			}
+			c.a.AddImm(a64A, a64C, int64(in.Base-c.f.Locals), true)
+			c.a.Store(a64B, abi.OffBase, a64A)
+		}
 		kind = abi.ExitHost
 	}
 	c.record(kind, uint64(s.PC), uint64(s.Depth), uint64(int64(s.Site)), then)
@@ -1577,7 +1585,7 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.Cmp(a64A, a64B, true)
 		guard(arm64.HI)
 		c.a.Load(a64A, a64Ctx, abi.OffLevel)
-		c.a.AddImm(a64A, a64A, 1, true)
+		c.a.AddImm(a64A, a64A, int64(max(v.Const.Bits, 1)), true)
 		c.a.Load(a64B, a64Ctx, abi.OffLevelLimit)
 		c.a.Cmp(a64A, a64B, true)
 		guard(arm64.HS)
