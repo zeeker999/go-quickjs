@@ -188,6 +188,11 @@ type Encoding struct {
 // MaxScan bounds the table native code searches for a key.
 const MaxScan = 8
 
+// MaxEqualUnits bounds the strings, in UTF-16 code units, native code
+// compares by their bytes: it does not poll, and a longer comparison is
+// Go's, which the collector can stop.
+const MaxEqualUnits = 256
+
 // NumberLimit bounds number words: a word below it holds a number, and
 // every tag is at or above it.
 const NumberLimit = 0xFFF8000000000000

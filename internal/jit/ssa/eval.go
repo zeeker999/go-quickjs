@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
@@ -46,10 +47,11 @@ func element(view ir.ArrayView, key float64) (*uint64, bool) {
 // eqTagged is OpEqTagged's comparison, by the words native code sees: two
 // numbers compare as numbers; equal words (objects' are one word, strings'
 // another) are equal values but for objects, the same only if they are one,
-// and strings, the same if one and unequal if of different lengths (a
-// string the heap does not describe is empty), else left to Go; other
-// words differ, strictly unequal and left to Go loosely. It reports false
-// where Go decides.
+// and strings, the same if one, unequal if of different lengths (a string
+// the heap does not describe is empty), and otherwise compared by their
+// code units if neither is a rope nor longer than maxEqualUnits, else left
+// to Go; other words differ, strictly unequal and left to Go loosely. It
+// reports false where Go decides.
 func eqTagged(x, y ir.Value, strict bool, strings map[uint64]String) (bool, bool) {
 	if x.Kind == ir.Number && y.Kind == ir.Number {
 		return math.Float64frombits(x.Bits) == math.Float64frombits(y.Bits), true
@@ -64,8 +66,12 @@ func eqTagged(x, y ir.Value, strict bool, strings map[uint64]String) (bool, bool
 			if x.Bits == y.Bits {
 				return true, true
 			}
-			if len(strings[x.Bits].Units) != len(strings[y.Bits].Units) {
+			a, b := strings[x.Bits], strings[y.Bits]
+			if len(a.Units) != len(b.Units) {
 				return false, true
+			}
+			if !a.Rope && !b.Rope && len(a.Units) <= maxEqualUnits {
+				return slices.Equal(a.Units, b.Units), true
 			}
 		}
 		return false, false
@@ -214,6 +220,9 @@ type Heap struct {
 type String struct {
 	Units []uint16
 	Flat  bool
+	// Rope marks a string whose UTF-8 form is not made yet, which Go
+	// flattens to compare it.
+	Rope bool
 }
 
 // Object is an object as property operations see it: its shape, whether it
@@ -256,8 +265,11 @@ func (h *Heap) holder(o *Object, v *Value) (*Object, int) {
 	return o, v.Index
 }
 
-// maxScan is abi.MaxScan.
-const maxScan = 8
+// maxScan is abi.MaxScan, and maxEqualUnits abi.MaxEqualUnits.
+const (
+	maxScan       = 8
+	maxEqualUnits = 256
+)
 
 // property finds the property a property operation names in o, as the
 // operation's semantics say (OpPropRead), or -1.

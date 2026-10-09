@@ -588,7 +588,7 @@ func (c *a64Compiler) eqTagged(v *ssa.Value, guard func(arm64.Cond)) {
 			c.a.Load(a64B, a64C, c.enc.StringLength)
 			c.a.Cmp(a64A, a64B, true)
 			c.a.BCond(arm64.NE, no)
-			c.a.B(exit)
+			c.stringBytes(exit, yes, no)
 		}
 	}
 	c.a.Bind(number)
@@ -743,6 +743,53 @@ func (c *a64Compiler) property(v *ssa.Value, guard func(arm64.Cond)) {
 	}
 	c.a.B(c.stubLabel(v.State, exitKind(v.Aux)))
 	c.a.Bind(found)
+}
+
+// stringBytes compares two strings of one length by their bytes, as
+// amd64's does: their pointers in F1 and C, the length in A. The loop
+// borrows the frame's operand base, which it reloads from the context
+// before it leaves.
+func (c *a64Compiler) stringBytes(exit, yes, no arm64.Label) {
+	c.a.CmpImm(a64A, abi.MaxEqualUnits, true)
+	c.a.BCond(arm64.HI, exit)
+	c.a.FMovFromF(a64A, a64F1)
+	for _, s := range []arm64.Reg{a64A, a64C} {
+		c.a.Load(a64B, s, c.enc.StringLeft)
+		c.a.Cbnz(a64B, exit, true)
+	}
+	c.a.Load(a64B, a64C, c.enc.StringData+8)
+	c.a.Load(a64D, a64A, c.enc.StringData+8)
+	c.a.Cmp(a64D, a64B, true)
+	c.a.BCond(arm64.NE, no)
+	c.a.Load(a64A, a64A, c.enc.StringData)
+	c.a.Load(a64C, a64C, c.enc.StringData)
+	words, bytes, same, differ := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+	c.a.Bind(words)
+	c.a.CmpImm(a64B, 8, true)
+	c.a.BCond(arm64.LO, bytes)
+	c.a.Load(a64D, a64A, 0)
+	c.a.Load(a64Stack, a64C, 0)
+	c.a.Cmp(a64D, a64Stack, true)
+	c.a.BCond(arm64.NE, differ)
+	c.a.AddImm(a64A, a64A, 8, true)
+	c.a.AddImm(a64C, a64C, 8, true)
+	c.a.AddImm(a64B, a64B, -8, true)
+	c.a.B(words)
+	c.a.Bind(bytes)
+	c.a.Cbz(a64B, same, true)
+	c.a.LoadU8(a64D, a64A, 0)
+	c.a.LoadU8(a64Stack, a64C, 0)
+	c.a.Cmp(a64D, a64Stack, false)
+	c.a.BCond(arm64.NE, differ)
+	c.a.AddImm(a64A, a64A, 1, true)
+	c.a.AddImm(a64C, a64C, 1, true)
+	c.a.AddImm(a64B, a64B, -1, true)
+	c.a.B(bytes)
+	for _, l := range []struct{ at, to arm64.Label }{{same, yes}, {differ, no}} {
+		c.a.Bind(l.at)
+		c.a.Load(a64Stack, a64Ctx, abi.OffStack)
+		c.a.B(l.to)
+	}
 }
 
 // holder is property for a read the receiver's prototypes answered, as
