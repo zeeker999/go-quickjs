@@ -349,8 +349,10 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 	c.a.Load(scratchC, regCtx, abi.OffLevelLimit)
 	c.a.Op(amd64.Cmp, scratchB, scratchC, true)
 	guard(amd64.CondAE)
-	// The callee is one of the functions, which has native code.
-	if callee.Shadow == nil && c.origin.At(callee) < 0 {
+	// The callee is one of the functions, which has native code. A call
+	// through Function.prototype.call is made of its one function, its
+	// operands written where the callee has them (directOperand).
+	if callee.Shadow == nil && c.origin.At(callee) < 0 || site.Via != 0 && (len(sites) != 1 || !c.operandsLive(s, calleeSlot-1)) {
 		c.a.Jmp(c.stubLabel(s, exitKind(v.Aux)))
 		return
 	}
@@ -361,17 +363,37 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 	checked := c.a.NewLabel()
 	for _, t := range sites {
 		next := c.a.NewLabel()
-		c.a.MovImm(scratchB, uint64(t.Callee))
+		want := t.Callee
+		if t.Via != 0 {
+			want = t.Via
+		}
+		c.a.MovImm(scratchB, uint64(want))
 		c.a.Op(amd64.Cmp, scratchC, scratchB, true)
 		c.a.Jcc(amd64.CondNE, next)
+		if t.Via != 0 {
+			c.viaGuards(t, v.Args[0], guard)
+		}
+		if t.Alloc {
+			// A built-in's construction with nothing to run: its object.
+			c.constructGuards(t, guard)
+			c.a.Jmp(checked)
+			c.a.Bind(next)
+			continue
+		}
 		c.a.MovImm(scratchA, uint64(t.Entry))
 		c.a.Load(scratchA, scratchA, 0)
 		c.a.Op(amd64.Test, scratchA, scratchA, true)
 		guard(amd64.CondE)
 		if t.Coerce {
-			// A receiver that is not an object is coerced, which Go does.
+			// A receiver that is not an object is coerced, which Go does:
+			// the method call's, or the first argument of a call through
+			// Function.prototype.call.
+			recv := v.Args[0]
+			if t.Via != 0 {
+				recv = v.Args[2]
+			}
 			c.a.MovImm(scratchB, c.enc.Object)
-			c.a.Op(amd64.Cmp, c.gpr(v.Args[0], scratchA), scratchB, true)
+			c.a.Op(amd64.Cmp, c.gpr(recv, scratchA), scratchB, true)
 			guard(amd64.CondNE)
 		}
 		// Room in the VM's stack.
@@ -389,6 +411,25 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 	}
 	c.a.Jmp(c.stubLabel(s, exitKind(v.Aux)))
 	c.a.Bind(checked)
+	if site.Alloc {
+		// The pool's last object, its cell cleared, is the result, kept
+		// (OpCallCell): nothing runs, so nothing is recorded or saved.
+		c.a.MovImm(scratchA, uint64(site.Pool))
+		c.a.Load(scratchB, scratchA, abi.OffPoolCount)
+		c.a.OpImm(amd64.Sub, scratchB, 1, true)
+		c.a.Store(scratchA, abi.OffPoolCount, scratchB)
+		c.a.ShiftImm(amd64.Shl, scratchB, 3, true)
+		c.a.Op(amd64.Add, scratchB, scratchA, true)
+		c.a.Load(scratchC, scratchB, abi.OffPoolObjects)
+		c.a.MovImm(scratchA, 0)
+		c.a.Store(scratchB, abi.OffPoolObjects, scratchA)
+		at := abi.OffKeep + int32(v.Index)*vs
+		c.a.Store(regCtx, at+c.enc.RefOffset, scratchC)
+		c.a.MovImm(scratchA, c.enc.Object)
+		c.a.Store(regCtx, at+c.enc.NumOffset, scratchA)
+		c.setG(v, scratchA)
+		return
+	}
 	// A call of one function has its operands -- the function, the
 	// receiver, the arguments -- written straight where the callee has
 	// them (directOperand), not recorded: Go never reads them, as a callee
@@ -446,11 +487,17 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 		c.a.Load(scratchB, regCtx, abi.OffStackBase)
 		c.a.Op(amd64.Add, scratchA, scratchB, true)
 		c.a.MovQToX(xScratch2, scratchA)
-		for i := 0; i < site.Params && i < site.Argc && i < site.LocalCount; i++ {
-			c.directOperand(s.Slots[sp-site.Argc+i], true, int32(i)*vs)
+		args, this := sp-site.Argc, calleeSlot-1
+		if site.Via != 0 {
+			// Through Function.prototype.call: the first argument is the
+			// receiver.
+			args, this = args+1, args
+		}
+		for i := 0; i < site.Params && args+i < sp && i < site.LocalCount; i++ {
+			c.directOperand(s.Slots[args+i], true, int32(i)*vs)
 		}
 		if site.ThisSlot >= 0 && site.Pool == 0 {
-			c.directOperand(s.Slots[calleeSlot-1], false, abi.ContextSize+abi.OffThis)
+			c.directOperand(s.Slots[this], false, abi.ContextSize+abi.OffThis)
 		}
 	}
 	// A slot's words: its record's, or the frame's, which holds it still.
@@ -510,11 +557,17 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 		// The arguments, its parameters'; undefined in every other local.
 		for i := 0; i < t.LocalCount; i++ {
 			at := int32(i) * vs
-			if i < t.Params && i < t.Argc && direct {
+			// The arguments, past the receiver of a call through
+			// Function.prototype.call.
+			argc, first := t.Argc, sp-t.Argc
+			if t.Via != 0 {
+				argc, first = argc-1, first+1
+			}
+			if i < t.Params && i < argc && direct {
 				continue
 			}
-			if i < t.Params && i < t.Argc {
-				nb, nd, rb, rd := words(sp - t.Argc + i)
+			if i < t.Params && i < argc {
+				nb, nd, rb, rd := words(first + i)
 				c.a.Load(top, nb, nd)
 				c.a.Store(locals, at+c.enc.NumOffset, top)
 				c.a.Load(top, rb, rd)
@@ -615,6 +668,25 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 	c.setG(v, scratchA)
 }
 
+// viaGuards checks a call through Function.prototype.call, whose callee was
+// found to be it, calls its function: the receiver, recv, is that one. It
+// uses every scratch register.
+func (c *compiler) viaGuards(t *ssa.CallSite, recv *ssa.Value, guard func(amd64.Cond)) {
+	if recv.Shadow == nil && c.origin.At(recv) < 0 {
+		// A primitive, never the function.
+		c.a.Op(amd64.Test, scratchC, scratchC, true)
+		guard(amd64.CondNE)
+		return
+	}
+	c.a.MovImm(scratchB, c.enc.Object)
+	c.a.Op(amd64.Cmp, c.gpr(recv, scratchA), scratchB, true)
+	guard(amd64.CondNE)
+	c.sourceRef(recv, guard)
+	c.a.MovImm(scratchB, uint64(t.Callee))
+	c.a.Op(amd64.Cmp, scratchC, scratchB, true)
+	guard(amd64.CondNE)
+}
+
 // constructGuards checks a construction can take its receiver from its
 // pool (abi.ObjectPool): the pool has one, and the function, whose pointer
 // is in scratchC, has the prototype the pool's were made with still, its
@@ -624,6 +696,10 @@ func (c *compiler) constructGuards(t *ssa.CallSite, guard func(amd64.Cond)) {
 	c.a.Load(scratchB, scratchA, abi.OffPoolCount)
 	c.a.Op(amd64.Test, scratchB, scratchB, true)
 	guard(amd64.CondE)
+	if t.Alloc {
+		// A built-in's, whose prototype the realm fixed.
+		return
+	}
 	c.a.Load(scratchB, scratchC, c.enc.ObjectProps+8)
 	c.a.OpImm(amd64.Cmp, scratchB, int32(t.ProtoIndex), true)
 	guard(amd64.CondBE)
