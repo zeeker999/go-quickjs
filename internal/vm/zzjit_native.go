@@ -193,9 +193,26 @@ type jitEntry struct {
 	failedEntries []uint32
 	reopt         bool
 	reopts        uint8
-	// unfed are the property sites whose caches were empty when the code
-	// was compiled (jitFed).
-	unfed         []uint32
+	// fed are the property sites, each with the shape the code was
+	// compiled for there, or none (jitFed).
+	fed []jitFedSite
+	// inlines are the calls the code inlines, or will when compiled again,
+	// each with the function it was seen to call (jitCallSeen); notInline
+	// are those that stopped being: what the callee does kept leaving
+	// native code.
+	inlines   []jitInline
+	notInline []int32
+	// callSites is what jitCallSeen knows of each call, by PC: how often it has
+	// left native code, up to jitCallsToInline, then jitCallDone or
+	// jitCallInlined; nil until a call does. inlinePending marks calls
+	// found to inline since the code was compiled, which it is compiled
+	// again for once the calls around them have been seen.
+	callSites     []uint8
+	inlinePending bool
+	// inlineReopt marks code to be compiled again for the calls found to
+	// inline, and inlineReopts counts the times it was, apart from reopts.
+	inlineReopt   bool
+	inlineReopts  uint8
 	code          *jit.Code
 	misses        uint8
 	probes        uint8
@@ -239,20 +256,22 @@ type jitState struct {
 	// hints holds each cached entry in a slot, 1 to jitCacheEntries, that a
 	// closure remembers with the slot's tag as of then (jitClosureFields): a
 	// slot reused for another entry has a new tag, so a stale hint misses.
-	hints         [jitCacheEntries + 1]jitHintSlot
-	nextTag       uint32
-	slots         [ir.MaxSlots]ir.Value
-	roots         [ir.MaxSlots]Value
-	arrays        [ir.MaxSlots]ir.ArrayView
-	hosts         uint64
-	fastHosts     uint64
-	rootCount     int
-	entries       uint64
-	guards        uint64
-	budgets       uint64
-	osrs          uint64
-	compiled      uint64
-	reoptimized   uint64
+	hints       [jitCacheEntries + 1]jitHintSlot
+	nextTag     uint32
+	slots       [ir.MaxSlots]ir.Value
+	roots       [ir.MaxSlots]Value
+	arrays      [ir.MaxSlots]ir.ArrayView
+	hosts       uint64
+	fastHosts   uint64
+	rootCount   int
+	entries     uint64
+	guards      uint64
+	budgets     uint64
+	osrs        uint64
+	compiled    uint64
+	reoptimized uint64
+	// inlinable is whether each function may be inlined (jitInlinable).
+	inlinable     map[weak.Pointer[bytecode.Function]]bool
 	interpreted   uint64
 	stressExits   uint64
 	ssaCtx        *abi.Context
@@ -469,7 +488,8 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool, cl *closure) *j
 		// to the slot IR emitters.
 		if p, err := jitcompile.LowerSSA(fn); err == nil {
 			if code, fb := r.compileSSA(fn, cl, p, limit, e); code != nil {
-				e.ssa, e.this, e.ssaShapes, e.ssaHolders, e.unfed = code, p.This, fb.shapes, fb.holders, fb.unfed
+				e.ssa, e.this, e.ssaShapes, e.ssaHolders, e.fed = code, p.This, fb.shapes, fb.holders, fb.fed
+				e.ssaStrings = fb.strings
 				e.ssaLoop = jitLoopLength(fn)
 				for _, in := range p.Code {
 					e.ssaStrings = e.ssaStrings || in.Op == ir.StringMethod || in.Op == ir.StringCode
@@ -726,7 +746,10 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 		f.cl.setHint(hintFor(e))
 	}
 	if e != nil && e.ssa != nil {
-		if e.reopt {
+		if e.inlinePending && e.inlineReopts < jitInlineReoptimizations {
+			e.inlinePending, e.inlineReopt = false, true
+		}
+		if e.reopt || e.inlineReopt {
 			r.jitReoptimize(f.cl, e)
 		}
 		if e.entrySlow {

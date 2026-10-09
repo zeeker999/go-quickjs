@@ -157,6 +157,9 @@ const (
 	OpI32ToF64 // signed
 	OpU32ToF64 // unsigned
 
+	// OpSameObject guards that an object is the one at Const.Bits, an
+	// address the VM keeps alive: an inlined call's function (inline).
+	OpSameObject // ptr -> none
 )
 
 var opNames = [...]string{
@@ -168,6 +171,7 @@ var opNames = [...]string{
 	OpAddF64: "addf", OpSubF64: "subf", OpMulF64: "mulf", OpDivF64: "divf", OpModF64: "modf", OpNegF64: "negf", OpCmpF64: "cmpf",
 	OpNot: "not", OpStrictNullish: "strictnullish", OpLooseNullish: "loosenullish", OpEqTagged: "eqtagged", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
+	OpSameObject: "sameobject",
 }
 
 func (o Op) String() string {
@@ -181,7 +185,8 @@ func (o Op) String() string {
 func (o Op) isGuard() bool {
 	switch o {
 	case OpUnboxF64, OpTruth, OpCheckInit, OpModF64, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite, OpElemCell, OpLength,
-		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell, OpStringMethod, OpStringCode, OpLooseNullish, OpEqTagged:
+		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell, OpStringMethod, OpStringCode, OpLooseNullish, OpEqTagged,
+		OpSameObject:
 		return true
 	}
 	return false

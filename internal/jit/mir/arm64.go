@@ -1154,6 +1154,10 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		if c.objectOf(v, guard) {
 			c.setG(v, a64C)
 		}
+	case ssa.OpSameObject:
+		c.a.MovImm(a64B, v.Const.Bits)
+		c.a.Cmp(c.gpr(arg(0), a64A), a64B, true)
+		guard(arm64.NE)
 	case ssa.OpPropRead:
 		c.property(v, guard)
 		c.numberCell(guard)

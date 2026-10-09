@@ -55,6 +55,13 @@ func LowerSSA(fn *bytecode.Function) (*ir.Program, error) {
 	return lowerRecovered(fn, lowering{ssa: true})
 }
 
+// LowerSSAInline is LowerSSA for a callee the new pipeline inlines into its
+// caller (ssa.InlineSite): it lowers what a function called alone would not
+// be worth compiling for, host operations without a loop.
+func LowerSSAInline(fn *bytecode.Function) (*ir.Program, error) {
+	return lowerRecovered(fn, lowering{ssa: true, callee: true})
+}
+
 // LowerCalls additionally retains guarded numeric fields across call boundaries.
 // Its caller must refresh borrowed views after every potentially effectful call.
 func LowerCalls(fn *bytecode.Function) (*ir.Program, error) {
