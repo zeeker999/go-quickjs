@@ -123,20 +123,30 @@ type jitFeedback struct {
 }
 
 // Global is where the global a site reads was last found in the closure's
-// scope (the site's idx, which the interpreter keeps there). Native code
-// checks, as the interpreter does, that no script-level lexical binding of
-// the name shadows it (lexShadows).
+// scope (the site's idx, which the interpreter keeps there), or, before the
+// interpreter has run the site, where the scope has the name now. Native
+// code checks the key at that index, and, as the interpreter does, that no
+// script-level lexical binding of the name shadows it (lexShadows).
 func (fb *jitFeedback) Global(pc int) (ssa.GlobalSite, bool) {
 	if fb.cl == nil || pc >= len(fb.fn.Code) {
 		return ssa.GlobalSite{}, false
 	}
 	in := fb.fn.Code[pc]
-	if in.Op != bytecode.OpGetGlobal || int(in.A) >= len(fb.cl.names) || int(in.B) >= len(fb.cl.ic) {
+	if in.Op != bytecode.OpGetGlobal || int(in.A) >= len(fb.cl.names) {
 		return ssa.GlobalSite{}, false
 	}
 	name, env := fb.cl.names[in.A], fb.cl.scope()
-	i := fb.cl.ic[in.B].idx
-	if env == nil || i < 0 || int(i) >= len(env.props) || env.props[i].key != name {
+	if env == nil {
+		return ssa.GlobalSite{}, false
+	}
+	i := int32(-1)
+	if int(in.B) < len(fb.cl.ic) {
+		i = fb.cl.ic[in.B].idx
+	}
+	if i < 0 || int(i) >= len(env.props) || env.props[i].key != name {
+		i = env.findOwn(name)
+	}
+	if i < 0 {
 		return ssa.GlobalSite{}, false
 	}
 	return ssa.GlobalSite{Key: uint32(name), Index: i}, true
@@ -215,32 +225,42 @@ func (r *Runtime) jitSource(f *frame, e *jitEntry, word *uint64) *Value {
 // jitApplyRecords writes the slots an exit left to Go (abi.Record): the
 // references it moved, and the primitives it put where a reference was.
 // The slots records read hold their values from entry until the first
-// write, so every one is read first.
+// write, so every one is read first; one record, the usual case, reads its
+// value and writes it.
 func (r *Runtime) jitApplyRecords(f *frame, e *jitEntry, ctx *abi.Context) {
 	n := int(ctx.Records)
 	if n == 0 {
 		return
 	}
 	r.jit.ssaRecords += uint64(n)
+	if n == 1 {
+		rec := &ctx.Record[0]
+		*r.jitSlot(f, e, int(rec.Slot&^(abi.RecordScalar|abi.RecordMaybe))) = r.jitRecordValue(f, e, rec)
+		return
+	}
 	var buf [8]Value
 	src := buf[:0]
 	for i := range ctx.Record[:n] {
-		rec := &ctx.Record[i]
-		v := Value{num: math.Float64frombits(rec.Word)}
-		switch {
-		case rec.Slot&abi.RecordScalar != 0:
-		case rec.Slot&abi.RecordMaybe != 0:
-			if s := r.jitSource(f, e, &rec.Arg); s != nil && s.ref != nil {
-				v = *s
-			}
-		default:
-			v = *r.jitSlot(f, e, int(rec.Arg))
-		}
-		src = append(src, v)
+		src = append(src, r.jitRecordValue(f, e, &ctx.Record[i]))
 	}
 	for i, rec := range ctx.Record[:n] {
 		*r.jitSlot(f, e, int(rec.Slot&^(abi.RecordScalar|abi.RecordMaybe))) = src[i]
 	}
+}
+
+// jitRecordValue is the value a record writes, read from the frame as the
+// exit left it.
+func (r *Runtime) jitRecordValue(f *frame, e *jitEntry, rec *abi.Record) Value {
+	switch {
+	case rec.Slot&abi.RecordScalar != 0:
+	case rec.Slot&abi.RecordMaybe != 0:
+		if s := r.jitSource(f, e, &rec.Arg); s != nil && s.ref != nil {
+			return *s
+		}
+	default:
+		return *r.jitSlot(f, e, int(rec.Arg))
+	}
+	return Value{num: math.Float64frombits(rec.Word)}
 }
 
 // runSSA runs a function compiled by the new pipeline from pc, where the

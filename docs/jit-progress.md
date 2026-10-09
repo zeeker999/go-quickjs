@@ -22,8 +22,8 @@ across sessions. Update it **in the same commit** as the work it records.
     -run TestConformance -count=1 -timeout 60m -v -args -conformance.jit
   ```
 
-- **Next item:** P5's Go calls (the one case behind the tree tier), then
-  arm64 performance. Both architectures are supported (the user's
+- **Next item:** P5's remaining items (helpers contained and reentrant,
+  re-validation, a generation counter), then arm64 performance. Both architectures are supported (the user's
   requirement): test every change on amd64 here and on arm64 through CI's
   macOS jobs. The 24-hour fuzz, Phase 1's last
   gate item, runs at the next milestone.
@@ -123,6 +123,7 @@ Design: [jit-phase2-design.md](jit-phase2-design.md). P2 gates the rest.
 | P4g | Strings: `x.length` of a string as of an array (`OpLength`, rope or not), and charCodeAt (`StringMethod`, `StringCode`): Go puts the intrinsic in a context cell before an entry of code that calls it, while String.prototype still has it as made; a call of it reads a flat string's byte (ASCII) or cached code unit natively, and leaves the rest to Go. `TestSSANativeStrings` covers every form, index and callee; `TestJITSSAStrings` a hash loop, a rope, and a replaced charCodeAt. | done | jit: read strings in place |
 | P5 | Helpers: contained and reentrant, re-validation, generation counter; `%` and Go calls no slower than the tree tier | in progress | |
 | P5a | `%` natively, without a helper: integers below 2**63 by `IDIV` (a zero remainder takes the dividend's sign; a divisor of -1 does not divide), the rest -- fractions, NaN, infinities, a zero divisor -- exits to Go, which computes `math.Mod`. A slot IR `Mod` operator, made only by `LowerSSA`. x87's `FPREM` was tried and dropped: it is exact, but microcoded, absent on arm64, and Go itself computes `math.Mod` in software on every architecture (the user asked). `TestSSANativeRemainder`, including a remainder stored through the operand stack after `IDIV` takes RDX. `BenchmarkJITHostRoundTrip/remainder`: 5.0 ns per iteration, against 48.6 in the tree tier and 53.5 in the old JIT (0 host exits). | done | jit: compute integer remainders natively |
+| P5b | A call of a Go function leaves native code once, as fast as the tree tier. The callee and arguments only Go uses stay native: `LowerSSA` keeps a global read whose value no native operation takes (the old pipeline's numeric-use rule made it an exit) and makes such a property read a reference read, both carried by their cells. A function compiled before the interpreter ran a global read finds the global where the global object has it now; the cell's key check catches a move. An exit's value with a shadow needs no record when it turns out to be a number stored where no reference is, or its own slot's reference: native code checks both (amd64 and arm64); Go applies one record without a buffer. `TestJITSSACallExits` (one exit per call; first-call compilation; a global deleted and defined again), `TestJITSSAReferences/overwrite` rewritten so the slot really holds the reference a number replaces. `BenchmarkJITHostRoundTrip/go-call`: 59.6 ns per iteration, from 77 (2 exits and 2 records per call), against 70.3 in the tree tier and 119 in the old JIT. Stress test262 on the new pipeline: 99,599 passed, 0 failed. | done | jit: leave native code once per call to Go |
 | P6 | Code arena (R8) | todo | |
 | P7 | Parity on both architectures, then delete the old pipeline. Note: the old pipeline's call-chain tests (`zzjit_calls_test.go`) assert its own counters (`transfers`); under the new pipeline their programs answer correctly but those assertions fail, and they go with the old pipeline or move to Phase 5's inlining. | todo | |
 
@@ -132,9 +133,11 @@ Design: [jit-phase2-design.md](jit-phase2-design.md). P2 gates the rest.
   300 ms): every `BenchmarkJIT*` kernel is, from 0.09x the old pipeline's
   time (remainder) through 0.44x (particle), 0.62-0.67x (logistic), 0.65x
   (dot), 0.74-0.81x (vector, stencil) and 0.88x (numeric globals) to 1.02x
-  (numeric fields, level). Against the tree tier one is behind: a Go call,
-  86 us per 1,000 iterations against 71.5 (P5). arm64: the new pipeline
-  has no backend yet (P3); everything there runs on the old one.
+  (numeric fields, level). Against the tree tier one was behind: a Go call,
+  86 us per 1,000 iterations against 71.5; since P5b it is ahead, 59.6
+  against 70.3 (2026-10-08, after P5b every kernel is again at or below
+  the old pipeline's time, numeric fields level at 34.1 against 34.0 us). arm64: the new pipeline
+  runs there since P3 and passes CI; its speed is not yet measured.
 - [ ] No divergence under the Phase 1 tools.
 - [ ] Compile budget met.
 
