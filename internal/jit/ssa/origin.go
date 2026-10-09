@@ -247,14 +247,14 @@ func storeChecks(f *Func) {
 // its value's own (OpKeep). Elements, frame slots and the context's cells
 // are no property's, and a cell read through another key is another
 // property's. Answers are kept, by phi and key.
-type aliases struct{ key map[aliasKey]int }
+type aliases struct{ key, own map[aliasKey]int }
 
 type aliasKey struct {
 	v   *Value
 	key uint32
 }
 
-func newAliases() *aliases { return &aliases{map[aliasKey]int{}} }
+func newAliases() *aliases { return &aliases{map[aliasKey]int{}, map[aliasKey]int{}} }
 
 // anyKey is a call's key: a callee may write any property.
 const anyKey = ^uint32(0)
@@ -288,6 +288,36 @@ func (a *aliases) may(key uint32, s *Value) bool {
 		return false
 	}
 	return true
+}
+
+// mayOwnCell reports whether the cell at s may be the result cell of call,
+// one that makes nothing but a pool's object (allocOnly): the one cell such
+// a call writes, each time it is made, over the last result.
+func (a *aliases) mayOwnCell(call, s *Value) bool {
+	switch s.Op {
+	case OpCallCell:
+		return s.Args[0] == call
+	case OpKeep:
+		if x := s.Args[0]; x.Shadow != nil {
+			return a.mayOwnCell(call, x.Shadow)
+		}
+		return false
+	case OpPhi:
+		k := aliasKey{s, uint32(call.ID)}
+		if r, ok := a.own[k]; ok {
+			return r == 2
+		}
+		a.own[k] = 1
+		for _, x := range s.Args {
+			if a.mayOwnCell(call, x) {
+				a.own[k] = 2
+				return true
+			}
+		}
+		a.own[k] = 0
+		return false
+	}
+	return false
 }
 
 // liveAcross is every property store, and for each the values with a

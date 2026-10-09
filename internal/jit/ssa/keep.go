@@ -47,6 +47,11 @@ func keepAcrossStores(f *Func) bool {
 		}
 		alias := false
 		for _, c := range live[i] {
+			if allocOnly(s) {
+				// A pool's object made: it writes its result's cell alone.
+				alias = alias || c.Op != OpKept && a.mayOwnCell(s, c.Shadow)
+				continue
+			}
 			alias = alias || c.Op != OpKept && a.may(key, c.Shadow)
 		}
 		if !alias {

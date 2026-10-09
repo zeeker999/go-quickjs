@@ -4191,6 +4191,141 @@ func TestJITSSANativeConstruct(t *testing.T) {
 	}
 }
 
+// `new Array()` is made natively from its site's pool: a fresh empty array
+// each time, of the realm's prototype, as the built-in makes one, never the
+// last one made there, which the code holds still (the site's result cell,
+// written again by each, keeps it: mayOwnCell); native code leaves only for
+// the pool to be filled again.
+func TestJITSSANativeArrayConstruct(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	defer func(was bool) { jitcompile.SSAConstruct = was }(jitcompile.SSAConstruct)
+	jitcompile.SSAConstruct = true
+	setup := `function arrays(n){let s=0,prev=null,same=0,a;for(let i=0;i<n;i++){a=new Array();if(a===prev)same++;s+=a.length+(prev===null?0:1);prev=a}
+			return [s,same,Array.isArray(a),Object.getPrototypeOf(a)===Array.prototype,a.length].join()}`
+	src := `arrays(400)`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	cl := r.global.getOwn(r.atoms.intern("arrays")).value.Object().fn().closure
+	checked := false
+	for i := range 6 {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts, entries uint64
+		if e := r.jit.hint(cl.hint()); e != nil {
+			hosts, entries = e.ssaStats.hosts, e.ssaStats.entries
+		}
+		reoptimized := r.jit.reoptimized
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i >= 3 && r.jit.reoptimized == reoptimized {
+			e := r.jit.hint(cl.hint())
+			if e == nil || !slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.pool != nil && x.cl == nil }) {
+				t.Fatal("arrays does not make its arrays natively")
+			}
+			if e.entrySlow || e.ssaStats.entries == entries || e.ssaStats.hosts-hosts > 400/abi.PoolSize+6 {
+				t.Fatalf("round %d: arrays entered %d times, left %d for 400 arrays", i, e.ssaStats.entries-entries, e.ssaStats.hosts-hosts)
+			}
+			checked = true
+		}
+	}
+	if !checked {
+		t.Fatal("code was compiled again in every round")
+	}
+}
+
+// A call through Function.prototype.call, f.call(this, ...), calls f
+// natively, its first argument the receiver, as a parent constructor is
+// called from its child's (Sub's) -- which is itself made natively; one of
+// another function, or with a receiver f must coerce (add's write to the
+// number's wrapper is seen), is Go's.
+func TestJITSSANativeCallThroughCall(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	defer func(was bool) { jitcompile.SSAConstruct = was }(jitcompile.SSAConstruct)
+	jitcompile.SSAConstruct = true
+	setup := `function add(a,b){this.j=a;return (this.k|0)+this.j+b}
+		function other(a,b){return this.k*a-b}
+		function viaRun(o,n,f){let t=0;for(let i=0;i<n;i++)t=(t+f.call(o,i,1))|0;return t}
+		function opt(a,b){return b===undefined?a+this.k:a+b}
+		function viaOne(o,n){let t=0;for(let i=0;i<n;i++)t=(t+opt.call(o,i))|0;return t}
+		function Base(s){this.s=s}
+		function Sub(v,s){Sub.parent.call(this,s);this.v=v}
+		Sub.parent=Base;
+		function subs(n){let t=0;for(let i=0;i<n;i++){const o=new Sub(i,2);t=(t+o.v+o.s)|0}return t}
+		var o={k:3};`
+	src := `[viaRun(o,300,add),subs(300),viaOne(o,300)].join()`
+	rounds := []string{src, src, src, src, src,
+		`[viaRun(o,300,other),viaRun(5,300,add),subs(300)].join()`}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	entry := func(name string) *jitEntry {
+		return r.jit.cache[weak.Make(r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure.fn)]
+	}
+	checked := false
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts, entries uint64
+		if e := entry("viaRun"); e != nil {
+			hosts, entries = e.ssaStats.hosts, e.ssaStats.entries
+		}
+		reoptimized := r.jit.reoptimized
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i >= 3 && i <= 4 && r.jit.reoptimized == reoptimized {
+			e := entry("viaRun")
+			if e == nil || !slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.via }) {
+				t.Fatal("viaRun does not call add natively through call")
+			}
+			if e.ssaStats.entries == entries || e.ssaStats.hosts != hosts {
+				t.Fatalf("round %d: viaRun entered %d times, left %d", i, e.ssaStats.entries-entries, e.ssaStats.hosts-hosts)
+			}
+			if s := entry("Sub"); s == nil || !slices.ContainsFunc(s.nativeCalls, func(x jitInline) bool { return x.via }) {
+				t.Fatal("Sub does not call its parent natively through call")
+			}
+			checked = true
+		}
+	}
+	if !checked {
+		t.Fatal("code was compiled again in every round")
+	}
+}
+
 // A write whose cache adds its property adds it natively, as V8's stores do
 // along a map's transition: fill never leaves for its fresh objects. One
 // that may not -- a prototype's setter intercepts the name, the object is

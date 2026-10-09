@@ -1137,7 +1137,7 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 	c.a.Load(a64C, a64Ctx, abi.OffLevelLimit)
 	c.a.Cmp(a64B, a64C, true)
 	guard(arm64.HS)
-	if callee.Shadow == nil && c.origin.At(callee) < 0 {
+	if callee.Shadow == nil && c.origin.At(callee) < 0 || site.Via != 0 && (len(sites) != 1 || !c.operandsLive(s, calleeSlot-1)) {
 		c.a.B(stub)
 		return
 	}
@@ -1148,15 +1148,32 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 	checked := c.a.NewLabel()
 	for _, t := range sites {
 		next := c.a.NewLabel()
-		c.a.MovImm(a64B, uint64(t.Callee))
+		want := t.Callee
+		if t.Via != 0 {
+			want = t.Via
+		}
+		c.a.MovImm(a64B, uint64(want))
 		c.a.Cmp(a64C, a64B, true)
 		c.a.BCond(arm64.NE, next)
+		if t.Via != 0 {
+			c.viaGuards(t, v.Args[0], guard)
+		}
+		if t.Alloc {
+			c.constructGuards(t, guard)
+			c.a.B(checked)
+			c.a.Bind(next)
+			continue
+		}
 		c.a.MovImm(a64A, uint64(t.Entry))
 		c.a.Load(a64A, a64A, 0)
 		c.a.Cbz(a64A, stub, true)
 		if t.Coerce {
+			recv := v.Args[0]
+			if t.Via != 0 {
+				recv = v.Args[2]
+			}
 			c.a.MovImm(a64B, c.enc.Object)
-			c.a.Cmp(c.gpr(v.Args[0], a64A), a64B, true)
+			c.a.Cmp(c.gpr(recv, a64A), a64B, true)
 			guard(arm64.NE)
 		}
 		c.a.Load(a64B, a64Ctx, abi.OffStackTop)
@@ -1173,6 +1190,23 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 	}
 	c.a.B(stub)
 	c.a.Bind(checked)
+	if site.Alloc {
+		// As amd64's: the pool's last object is the result.
+		c.a.MovImm(a64A, uint64(site.Pool))
+		c.a.Load(a64B, a64A, abi.OffPoolCount)
+		c.a.AddImm(a64B, a64B, -1, true)
+		c.a.Store(a64A, abi.OffPoolCount, a64B)
+		c.a.ShiftImm(arm64.Lsl, a64B, a64B, 3, true)
+		c.a.Op(arm64.Add, a64B, a64B, a64A, true)
+		c.a.Load(a64C, a64B, abi.OffPoolObjects)
+		c.a.Store(a64B, abi.OffPoolObjects, arm64.ZR)
+		at := abi.OffKeep + int32(v.Index)*vs
+		c.a.Store(a64Ctx, at+c.enc.RefOffset, a64C)
+		c.a.MovImm(a64A, c.enc.Object)
+		c.a.Store(a64Ctx, at+c.enc.NumOffset, a64A)
+		c.setG(v, a64A)
+		return
+	}
 	// As amd64's: a call of one function writes its operands where the
 	// callee has them, unrecorded.
 	direct, ops := len(sites) == 1 && (site.ThisSlot < 0 || site.Method || site.Pool != 0), calleeSlot
@@ -1225,11 +1259,15 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		c.a.ShiftImm(arm64.Lsl, a64D, a64D, 4, true)
 		c.a.Load(a64B, a64Ctx, abi.OffStackBase)
 		c.a.Op(arm64.Add, a64D, a64D, a64B, true)
-		for i := 0; i < site.Params && i < site.Argc && i < site.LocalCount; i++ {
-			c.directOperand(s.Slots[sp-site.Argc+i], a64D, int32(i)*vs)
+		args, this := sp-site.Argc, calleeSlot-1
+		if site.Via != 0 {
+			args, this = args+1, args
+		}
+		for i := 0; i < site.Params && args+i < sp && i < site.LocalCount; i++ {
+			c.directOperand(s.Slots[args+i], a64D, int32(i)*vs)
 		}
 		if site.ThisSlot >= 0 && site.Pool == 0 {
-			c.directOperand(s.Slots[calleeSlot-1], a64Ctx, abi.ContextSize+abi.OffThis)
+			c.directOperand(s.Slots[this], a64Ctx, abi.ContextSize+abi.OffThis)
 		}
 	}
 	words := func(slot int) (nb arm64.Reg, nd int32, rb arm64.Reg, rd int32) {
@@ -1279,11 +1317,17 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		c.a.Store(calleeCtx, abi.OffStack, top)
 		for i := 0; i < t.LocalCount; i++ {
 			at := int32(i) * vs
-			if i < t.Params && i < t.Argc && direct {
+			// The arguments, past the receiver of a call through
+			// Function.prototype.call.
+			argc, first := t.Argc, sp-t.Argc
+			if t.Via != 0 {
+				argc, first = argc-1, first+1
+			}
+			if i < t.Params && i < argc && direct {
 				continue
 			}
-			if i < t.Params && i < t.Argc {
-				nb, nd, rb, rd := words(sp - t.Argc + i)
+			if i < t.Params && i < argc {
+				nb, nd, rb, rd := words(first + i)
 				c.a.Load(top, nb, nd)
 				c.a.Store(locals, at+c.enc.NumOffset, top)
 				c.a.Load(top, rb, rd)
@@ -1376,6 +1420,23 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 	c.setG(v, a64A)
 }
 
+// viaGuards checks a call through Function.prototype.call calls its
+// function, as amd64's does. It uses A, B and C.
+func (c *a64Compiler) viaGuards(t *ssa.CallSite, recv *ssa.Value, guard func(arm64.Cond)) {
+	if recv.Shadow == nil && c.origin.At(recv) < 0 {
+		c.a.CmpImm(a64C, 0, true)
+		guard(arm64.NE)
+		return
+	}
+	c.a.MovImm(a64B, c.enc.Object)
+	c.a.Cmp(c.gpr(recv, a64A), a64B, true)
+	guard(arm64.NE)
+	c.sourceRef(recv, guard)
+	c.a.MovImm(a64B, uint64(t.Callee))
+	c.a.Cmp(a64C, a64B, true)
+	guard(arm64.NE)
+}
+
 // constructGuards checks a construction can take its receiver from its
 // pool, as amd64's does; the function's pointer is in C. It uses A, B and
 // C.
@@ -1384,6 +1445,9 @@ func (c *a64Compiler) constructGuards(t *ssa.CallSite, guard func(arm64.Cond)) {
 	c.a.Load(a64B, a64A, abi.OffPoolCount)
 	c.a.CmpImm(a64B, 0, true)
 	guard(arm64.EQ)
+	if t.Alloc {
+		return
+	}
 	c.a.Load(a64B, a64C, c.enc.ObjectProps+8)
 	c.a.CmpImm(a64B, int64(t.ProtoIndex), true)
 	guard(arm64.LS)

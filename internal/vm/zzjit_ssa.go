@@ -382,6 +382,13 @@ func (fb *jitFeedback) NativeCalls(pc int) []ssa.CallSite {
 		if int(in.pc) != pc {
 			continue
 		}
+		if in.cl == nil {
+			// A built-in's construction with nothing to run.
+			fb.holders, fb.pools = append(fb.holders, in.obj), append(fb.pools, in.pool)
+			sites = append(sites, ssa.CallSite{Callee: uintptr(unsafe.Pointer(in.obj)), ThisSlot: -1,
+				Pool: uintptr(unsafe.Pointer(in.pool)), Alloc: true})
+			continue
+		}
 		// Only looked up: a compile here would share the workspaces of the
 		// one asking. jitCallSeen compiled it.
 		ce := fb.r.jit.cache[weak.Make(in.cl.fn)]
@@ -400,6 +407,10 @@ func (fb *jitFeedback) NativeCalls(pc int) []ssa.CallSite {
 			Entry: uintptr(unsafe.Pointer(&ce.nativeEntry)), Count: uintptr(unsafe.Pointer(&ce.nativeIn)),
 			Argc: int(call.A), Method: call.Op == bytecode.OpCallMethod,
 			Params: fn.ParamCount, LocalCount: fn.LocalCount, MaxStack: fn.MaxStack, ThisSlot: this, Coerce: fn.CoerceThis,
+		}
+		if in.via {
+			site.Via = uintptr(unsafe.Pointer(fb.r.callFn))
+			fb.holders = append(fb.holders, fb.r.callFn)
 		}
 		if call.Op == bytecode.OpNew {
 			i := in.obj.findOwn(atomPrototype)
@@ -424,8 +435,10 @@ type jitInline struct {
 	obj   *Object
 	exits uint32
 	// pool, for a construction made natively, is where its objects come
-	// from (abi.ObjectPool).
+	// from (abi.ObjectPool); via marks a call of Function.prototype.call
+	// that calls cl's function (jitCalledVia).
 	pool *abi.ObjectPool
+	via  bool
 }
 
 // jitCallsToInline is how often a call leaves native code before it is
@@ -516,6 +529,24 @@ func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 	e.callSites[pc] = jitCallDone
 	o, cl := r.jitCalled(f, sp, in)
 	if cl == nil {
+		if o, cl := r.jitCalledVia(f, sp, in); cl != nil {
+			// G.call(this, ...): G called natively, never inlined.
+			if ce := r.jitNativeCallee(cl); ce != nil {
+				e.nativeCalls = append(e.nativeCalls, jitInline{pc: int32(pc), cl: cl, obj: o, via: true})
+				e.callSites[pc] = jitCallNative
+				e.inlinePending = true
+			}
+			return
+		}
+		if o := r.jitAllocates(sp, in); o != nil {
+			// A built-in's construction with nothing to run: made from a
+			// pool.
+			pool := new(abi.ObjectPool)
+			r.jitFillPool(pool, o)
+			e.nativeCalls = append(e.nativeCalls, jitInline{pc: int32(pc), obj: o, pool: pool})
+			e.callSites[pc] = jitCallNative
+			e.inlinePending = true
+		}
 		return
 	}
 	if in.Op != bytecode.OpNew && cl.fn != f.cl.fn && (r.jitInlinable(cl.fn) || r.jitInlinesCalls(cl.fn, jitInlineDepth-1)) {
@@ -583,7 +614,7 @@ func (r *Runtime) jitNativeCallsInline(e *jitEntry, inline func(int)) bool {
 		x := e.nativeCalls[i]
 		pc := int(x.pc)
 		one := !slices.ContainsFunc(e.nativeCalls, func(y jitInline) bool { return y.pc == x.pc && y.cl != x.cl })
-		if !one || r.jit.cache[weak.Make(x.cl.fn)] == e || e.callSites == nil || pc >= len(e.callSites) ||
+		if !one || x.cl == nil || r.jit.cache[weak.Make(x.cl.fn)] == e || e.callSites == nil || pc >= len(e.callSites) ||
 			e.callSites[pc] != jitCallNative || slices.Contains(e.notInline, x.pc) || !r.jitInlinesCalls(x.cl.fn, jitInlineDepth-1) {
 			continue
 		}
@@ -674,7 +705,7 @@ func (r *Runtime) jitInlineSite(fn *bytecode.Function, pc, depth int) (jitInline
 			in, n = x, n+1
 		}
 	}
-	if n != 1 || in.cl.fn == fn || !r.jitInlinable(in.cl.fn) && !r.jitInlinesCalls(in.cl.fn, depth-1) {
+	if n != 1 || in.cl == nil || in.cl.fn == fn || !r.jitInlinable(in.cl.fn) && !r.jitInlinesCalls(in.cl.fn, depth-1) {
 		return jitInline{}, false
 	}
 	return in, true
@@ -726,7 +757,9 @@ func (r *Runtime) jitCallTarget(f *frame, e *jitEntry, pc, sp int, in bytecode.I
 	n := 0
 	for _, x := range e.nativeCalls {
 		if int(x.pc) == pc {
-			if x.obj == o {
+			if x.obj == o || x.cl == nil {
+				// One it calls, or a built-in's construction, which a site
+				// makes alone.
 				return
 			}
 			n++
@@ -752,6 +785,40 @@ func (r *Runtime) jitNativeTarget(pc int32, cl *closure, o *Object, in bytecode.
 	return x
 }
 
+// jitCalledVia is the function a method call at the top of the stack
+// calls through Function.prototype.call, the realm's own, G.call(this,
+// ...): G, its receiver, and its closure, if native code may call it, as
+// jitCalled has it; or nil.
+func (r *Runtime) jitCalledVia(f *frame, sp int, in bytecode.Instr) (*Object, *closure) {
+	if in.Op != bytecode.OpCallMethod || in.A == 0 || r.callFn == nil {
+		return nil, nil
+	}
+	callee, recv := r.stack[sp-int(in.A)-1], r.stack[sp-int(in.A)-2]
+	if !callee.IsObject() || callee.Object() != r.callFn || !recv.IsObject() {
+		return nil, nil
+	}
+	o := recv.Object()
+	fd := o.fn()
+	if fd == nil || fd.native != nil || fd.bound || fd.closure == nil || fd.closure.realm != r.Realm ||
+		fd.closure.scope() != f.cl.scope() {
+		return nil, nil
+	}
+	return o, fd.closure
+}
+
+// jitAllocates is the built-in a construction at the top of the stack
+// makes with nothing to run, which native code makes from a pool: `new
+// Array()`, the realm's own; or nil.
+func (r *Runtime) jitAllocates(sp int, in bytecode.Instr) *Object {
+	if in.Op != bytecode.OpNew || in.A != 0 {
+		return nil
+	}
+	if c := r.stack[sp-1]; c.IsObject() && c.Object() == r.proto.arrayCtor {
+		return c.Object()
+	}
+	return nil
+}
+
 // jitConstructs reports whether native code may construct with o, `new
 // o(...)`, as constructWithTarget would: a plain function of this realm,
 // compiled, a base constructor with no fields to give its instances, its
@@ -770,6 +837,14 @@ func (r *Runtime) jitConstructs(o *Object) bool {
 func (r *Runtime) jitFillPool(pool *abi.ObjectPool, o *Object) {
 	clear(pool.Objects[:])
 	pool.Count, pool.Proto = 0, nil
+	if o == r.proto.arrayCtor {
+		// `new Array()`: an empty array, of the realm's prototype.
+		for i := range pool.Objects {
+			pool.Objects[i] = unsafe.Pointer(r.newArrayFrom(nil))
+		}
+		pool.Count, pool.Proto = abi.PoolSize, unsafe.Pointer(r.proto.array)
+		return
+	}
 	p := o.getOwnVisible(atomPrototype)
 	fd := o.fn()
 	if p == nil || p.flags&propAccessor != 0 || !p.value.IsObject() || fd == nil || fd.closure == nil {
@@ -793,16 +868,19 @@ func (r *Runtime) jitFillPool(pool *abi.ObjectPool, o *Object) {
 // the pool of the function it constructs with, if native code constructs
 // with it there and the pool is empty, or was made for another prototype.
 func (r *Runtime) jitRefillPools(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) {
-	o, _ := r.jitCalled(f, sp, in)
-	if o == nil {
+	c := r.stack[sp-int(in.A)-1]
+	if !c.IsObject() {
 		return
 	}
+	o := c.Object()
 	for _, x := range e.nativeCalls {
 		if int(x.pc) != pc || x.obj != o || x.pool == nil {
 			continue
 		}
 		if x.pool.Count == 0 {
 			r.jitFillPool(x.pool, o)
+		} else if x.cl == nil {
+			// A built-in's, whose prototype the realm fixed.
 		} else if p := o.getOwnVisible(atomPrototype); p == nil || !p.value.IsObject() || unsafe.Pointer(p.value.Object()) != x.pool.Proto {
 			r.jitFillPool(x.pool, o)
 		}
