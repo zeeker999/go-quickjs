@@ -1468,6 +1468,50 @@ func TestJITSSANullish(t *testing.T) {
 	}
 }
 
+// The new pipeline reads an element it carries as a reference by the
+// element's cell, whatever it holds -- objects read from an array and used
+// as receivers, as Richards' scheduler does, or returned -- where it took
+// every element for a number and failed a guard at each object. A hole,
+// an index past the end and an object that is not an array go to Go.
+func TestJITSSAElementReferences(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function T(p){this.p=p}
+		function sum(ts,n){let s=0;for(let i=0;i<n;i++){const t=ts[i%3];s+=t.p}return s}
+		function pick(a,i){let r=null;for(let k=0;k<3;k++)r=a[i];return r}
+		var dense=[new T(1),new T(2),new T(3)],holey=[new T(1),,new T(3)],notArray={0:new T(5),1:new T(6),2:new T(7)};`
+	rounds := []string{
+		`''+sum(dense,30)`,
+		`[pick(dense,1)===dense[1],pick(holey,1),pick(dense,7),pick(notArray,0).p,pick([1,'s',null],1)].join()`,
+		`''+sum(holey,3)`,
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, src := range rounds {
+		wv, werr := want.Run(compileForTest(t, src))
+		gv, gerr := r.Run(compileForTest(t, src))
+		if (werr == nil) != (gerr == nil) || werr == nil && gv.String().Go() != wv.String().Go() {
+			t.Fatalf("round %d: got %v, %v; interpreter %v, %v", i, gv, gerr, wv, werr)
+		}
+	}
+	sum := r.global.getOwn(r.atoms.intern("sum")).value.Object().fn().closure
+	e := r.jit.hint(sum.hint())
+	if e == nil || e.ssa == nil || e.ssaStats.entries == 0 || e.ssaStats.guards != 0 {
+		t.Fatalf("sum: %+v", e)
+	}
+	if st := r.JITStats(); st.Guards != 0 {
+		t.Fatalf("element reads failed guards: %+v", st)
+	}
+}
+
 // Old-pipeline code calling an uncompiled function, in a runtime that runs
 // the new pipeline, leaves the callee to be compiled the ordinary way, by
 // the new pipeline: compiled for the old coordinator alone, as a callee

@@ -780,6 +780,24 @@ func (c *compiler) element(array *ssa.Value, fail func(amd64.Cond)) {
 	fail(amd64.CondAE)
 }
 
+// elementCell turns the index in scratchA into the address of an array's
+// element there, in scratchA, failing unless it is within the dense
+// elements and not a hole (whose word is the uninitialized marker's). It
+// uses scratchB and scratchC.
+func (c *compiler) elementCell(array *ssa.Value, fail func(amd64.Cond)) {
+	p := c.gpr(array, scratchC)
+	c.a.Load(scratchB, p, c.enc.ObjectElems+8)
+	c.a.Op(amd64.Cmp, scratchA, scratchB, true)
+	fail(amd64.CondAE)
+	c.a.Load(scratchB, p, c.enc.ObjectElems)
+	c.a.ShiftImm(amd64.Shl, scratchA, 4, true)
+	c.a.Op(amd64.Add, scratchA, scratchB, true)
+	c.a.Load(scratchB, scratchA, c.enc.NumOffset)
+	c.a.MovImm(scratchC, c.enc.Uninitialized)
+	c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+	fail(amd64.CondE)
+}
+
 // value emits one value.
 func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 	arg := func(i int) *ssa.Value { return v.Args[i] }
@@ -897,6 +915,10 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.element(arg(0), guard)
 		c.a.MovQToX(xScratch0, scratchB)
 		c.setX(v, xScratch0)
+	case ssa.OpElemCell:
+		c.index(arg(1), guard)
+		c.elementCell(arg(0), guard)
+		c.setG(v, scratchA)
 	case ssa.OpElemWrite:
 		c.index(arg(1), guard)
 		c.element(arg(0), guard)

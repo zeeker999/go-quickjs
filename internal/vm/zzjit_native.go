@@ -1354,7 +1354,8 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 		}
 		switch in.Op {
 		case bytecode.OpPushThis, bytecode.OpGetProp, bytecode.OpSetProp, bytecode.OpCall,
-			bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpGetPropThis, bytecode.OpSetIndex, bytecode.OpNewArray:
+			bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpGetPropThis, bytecode.OpSetIndex, bytecode.OpNewArray,
+			bytecode.OpGetIndex:
 		default:
 			return sp, steps, nil
 		}
@@ -1410,6 +1411,9 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 			v, err = r.getGlobalAt(&c, in, pc)
 		case bytecode.OpGetPropThis:
 			v, err = r.getValueProp(stack[sp-1], f.cl.names[in.A])
+		case bytecode.OpGetIndex:
+			sp -= 2
+			v, err = r.getIndexed(stack[sp], stack[sp+1])
 		default:
 			panic("invalid JIT host operation")
 		}

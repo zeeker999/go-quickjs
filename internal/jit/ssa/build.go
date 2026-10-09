@@ -128,8 +128,13 @@ func (b *builder) plan() error {
 			continue
 		}
 		switch in.Op {
+		case ir.ArrayRead:
+			if in.Reference {
+				// Go reads what native code does not, and resumes after it.
+				entries[pc+1] = true
+			}
 		case ir.Nop, ir.Copy, ir.CopyPair, ir.StoreLoad, ir.Swap, ir.Insert2, ir.Insert3,
-			ir.Unary, ir.Update, ir.Return, ir.ArrayRead, ir.ArrayUpdate, ir.ArrayLength, ir.ArrayKey:
+			ir.Unary, ir.Update, ir.Return, ir.ArrayUpdate, ir.ArrayLength, ir.ArrayKey:
 		case ir.ArrayWrite, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead,
 			ir.StringMethod, ir.StringCode:
 			// What native code does not do exits to Go, which resumes after
@@ -632,6 +637,15 @@ func (b *builder) instruction(blk *Block, pc int) {
 		blk.Control = v
 		v.Uses++
 	case ir.ArrayRead, ir.ArrayUpdate:
+		if in.Reference {
+			// Whatever the element holds, by its cell; Go reads the rest.
+			array := guard(OpArrayOf, Ptr, ir.HostExit, operand(in.Left))
+			cell := guard(OpElemCell, Source, ir.HostExit, array, number(in.Right, ir.HostExit))
+			v := f.newValue(blk, OpLoadCell, Tagged, cell)
+			v.Shadow = cell
+			b.assign(in.Dest, blk, v)
+			break
+		}
 		// Every check exits to the state before the instruction, so their
 		// order is free; the key's update is written only once the read
 		// has succeeded, before the element, which wins if both name one

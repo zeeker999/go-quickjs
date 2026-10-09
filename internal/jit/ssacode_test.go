@@ -317,7 +317,7 @@ func (h testHeap) native() *nativeHeap {
 // heap is what the SSA evaluator reads: views of the arrays' cells, and the
 // objects' shapes with its own copy of their property words.
 func (n *nativeHeap) heap() ssa.Heap {
-	h := ssa.Heap{Arrays: n.views()}
+	h := ssa.Heap{Arrays: n.views(), Word: testWordValue}
 	for i := range n.objects {
 		o := &n.objects[i]
 		e := ssa.Object{Shape: o.shape, Ordinary: o.class == testClassObject, Props: n.evaluated[i], HTMLDDA: o.flags&testFlagHTMLDDA != 0}
@@ -388,6 +388,24 @@ func (n *nativeHeap) same(m *nativeHeap) bool {
 }
 
 // word encodes a slot IR value as the VM would hold it.
+// testWordValue decodes an element's word: a number, or one of the
+// encoding's primitives. Elements here hold no reference.
+func testWordValue(w uint64) ir.Value {
+	switch w {
+	case testEncoding.Undefined:
+		return ir.Value{Kind: ir.Undefined}
+	case testEncoding.Null:
+		return ir.Value{Kind: ir.Null}
+	case testEncoding.True:
+		return ir.Bool(true)
+	case testEncoding.False:
+		return ir.Bool(false)
+	case testEncoding.Uninitialized:
+		return ir.Value{Kind: ir.Uninitialized}
+	}
+	return ir.Value{Kind: ir.Number, Bits: w}
+}
+
 func (n *nativeHeap) word(v ir.Value) testValue {
 	switch v.Kind {
 	case ir.Number:
@@ -559,6 +577,8 @@ func ssaTestProgram(r *rand.Rand) (*ir.Program, layout) {
 		switch in.Op {
 		case ir.ArrayRead, ir.ArrayWrite, ir.ArrayLength, ir.ArrayKey:
 			in.Left = ir.Slot(r.IntN(locals))
+			// Some reads carry the element by its cell, whatever it holds.
+			in.Reference = in.Op == ir.ArrayRead && r.IntN(3) == 0
 		case ir.StringMethod:
 			in.Left = ir.Slot(r.IntN(locals))
 		case ir.StringCode:
@@ -991,6 +1011,49 @@ func TestSSANativeStrings(t *testing.T) {
 // TestSSANativeRemainder pins %'s fast path: integers divide natively, with
 // a zero remainder carrying the dividend's sign and -2**63 % -1 not
 // faulting; everything else exits to Go, where math.Mod answers.
+// TestSSANativeElementCells reads elements by their cells (ir.Instruction's
+// Reference): a number, true, a hole, past the end, at indexes that are not
+// integers, and from an object that is not an array. A present element is
+// read natively, whatever it holds; the rest exit to Go. Random programs
+// seldom meet a hole this way.
+func TestSSANativeElementCells(t *testing.T) {
+	p := &ir.Program{Locals: 3, Code: []ir.Instruction{
+		{Op: ir.ArrayRead, Reference: true, Dest: 2, Left: ir.Slot(0), Right: ir.Slot(1)},
+		{Op: ir.Return, Left: ir.Slot(2)},
+	}}
+	p.Maps = make([]ir.StateMap, len(p.Code))
+	for pc := range p.Maps {
+		p.Maps[pc].PC = uint32(pc)
+	}
+	c, err := compileNative(p, layout{3, -1, nil, nil})
+	if err != nil || c == nil {
+		t.Fatalf("compile: %v", err)
+	}
+	defer c.code.Close()
+	heap := testHeap{
+		{cells: []uint64{math.Float64bits(1), testEncoding.Uninitialized, testEncoding.True, math.Float64bits(4.5)}, array: true, shape: -1},
+		{cells: []uint64{math.Float64bits(2)}, shape: -1},
+	}
+	for _, tc := range []struct {
+		array  uint64
+		index  float64
+		native bool
+	}{
+		{0, 0, true}, {0, 2, true}, {0, 3, true},
+		{0, 1, false}, {0, 4, false}, {0, -1, false}, {0, 1.5, false}, {0, math.NaN(), false}, {0, 1 << 33, false},
+		{1, 0, false},
+	} {
+		slots := []ir.Value{{Kind: ir.Opaque, Bits: tc.array}, ir.Float(tc.index), ir.Float(0)}
+		if why := nativeMismatch(c, 0, slots, 0, heap); why != "" {
+			t.Fatalf("array %d [%v]: %s", tc.array, tc.index, why)
+		}
+		exit, _ := ssa.EvaluateHeap(c.f, 0, slices.Clone(slots), heap.native().heap(), 0)
+		if native := exit.Kind == ir.Returned; native != tc.native {
+			t.Fatalf("array %d [%v]: native %v, want %v", tc.array, tc.index, native, tc.native)
+		}
+	}
+}
+
 func TestSSANativeRemainder(t *testing.T) {
 	p := &ir.Program{Locals: 3, Code: []ir.Instruction{
 		{Op: ir.Binary, Operator: ir.Mod, Dest: 2, Left: ir.Slot(0), Right: ir.Slot(1)},
