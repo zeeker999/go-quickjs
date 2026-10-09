@@ -139,9 +139,10 @@ const (
 	// are equal values -- a number but NaN, null, undefined, a boolean --
 	// but for objects, whose word all share, and which are the same only if
 	// their pointers, read through their origins, are; two numbers compare
-	// as numbers; any other two words are strictly unequal. Strings, and
-	// loose comparisons of values of different words, which may convert,
-	// exit to Go (Aux).
+	// as numbers; any other two words are strictly unequal. Two strings are
+	// the same if they are one string, and unequal if their lengths differ;
+	// two others of one length, and loose comparisons of values of different
+	// words, which may convert, exit to Go (Aux).
 	OpEqTagged // tagged, tagged -> bool
 
 	// Integer conversions and bitwise operations, as JavaScript defines them.

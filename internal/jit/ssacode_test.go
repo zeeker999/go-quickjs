@@ -1097,8 +1097,8 @@ func TestSSANativeStrings(t *testing.T) {
 // faulting; everything else exits to Go, where math.Mod answers.
 // TestSSANativeEquality compares pairs of values with == and === natively
 // (ssa.OpEqTagged): numbers, +0 and -0 included, and NaN; one object and
-// two; null, undefined and booleans; strings and values of different kinds,
-// which loosely go to Go. Each outcome -- the answer, or an exit -- is the
+// two; null, undefined and booleans; one string; values of different
+// kinds, which loosely go to Go. Each outcome -- the answer, or an exit -- is the
 // evaluator's and is pinned. Random programs seldom meet -0 this way.
 func TestSSANativeEquality(t *testing.T) {
 	negZero := ir.Value{Kind: ir.Number, Bits: math.Float64bits(math.Copysign(0, -1))}
@@ -1129,7 +1129,7 @@ func TestSSANativeEquality(t *testing.T) {
 			{obj0, obj0, true, true}, {obj0, obj1, false, true},
 			{null, null, true, true}, {undef, undef, true, true}, {ir.Bool(true), ir.Bool(true), true, true},
 			{ir.Bool(true), ir.Bool(false), false, true}, {null, undef, false, true}, {ir.Float(1), obj0, false, true},
-			{str, str, false, false}, {ir.Float(1), str, false, true},
+			{str, str, true, true}, {ir.Float(1), str, false, true},
 		} {
 			heap := randomTestHeap(rand.New(rand.NewPCG(1, 2)))
 			slots := []ir.Value{tc.x, tc.y, ir.Float(0)}

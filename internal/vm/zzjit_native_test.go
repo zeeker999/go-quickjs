@@ -1586,7 +1586,7 @@ func TestJITSSAEquality(t *testing.T) {
 		function mixed(a,b,n){let s=0;for(let i=0;i<n;i++){if(a==b)s+=1;if(a===b)s+=10;if(a!=b)s+=100;if(a!==b)s+=1000}return s}`
 	rounds := []string{
 		`''+walk(60)`,
-		`[mixed(1,1,3),mixed(0,-0,3),mixed(NaN,NaN,3),mixed(k1,k1,3),mixed(k1,k2,3),mixed('a','a',3),mixed('a','b',3),
+		`[mixed(1,1,3),mixed(0,-0,3),mixed(NaN,NaN,3),mixed(k1,k1,3),mixed(k1,k2,3),mixed('a','a',3),mixed('a','b',3),mixed('a','bb',3),mixed('a'+String(1),'a1',3),
 			mixed(1,'1',3),mixed(true,1,3),mixed(null,undefined,3),mixed(true,false,3),mixed(k1,1,3)].join()`,
 		`''+(assq(k2,al)===al.cdr.car)+assq({},al)`,
 	}
