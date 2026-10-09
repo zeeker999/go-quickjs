@@ -550,11 +550,15 @@ func (l layout) Property(pc int) (ssa.PropertySite, bool) {
 	return s, ok
 }
 
+// testProgramSize bounds the programs ssaTestProgram makes: frame locals
+// and instructions. A test may raise it, as TestSSANativeHighPressure does.
+var testProgramSize = struct{ locals, code int }{6, 24}
+
 // ssaTestProgram makes a program and says where its locals are.
 func ssaTestProgram(r *rand.Rand) (*ir.Program, layout) {
-	frameLocals := 1 + r.IntN(6)
+	frameLocals := 1 + r.IntN(testProgramSize.locals)
 	locals := frameLocals + r.IntN(3)
-	n := 2 + r.IntN(24)
+	n := 2 + r.IntN(testProgramSize.code)
 	operand := func() ir.Operand {
 		if r.IntN(4) == 0 {
 			v := nativeTestValue(r)
@@ -683,6 +687,11 @@ func compileNative(p *ir.Program, l layout) (*compiled, error) {
 	f.FrameLocals, f.ThisSlot = l.frame, l.this
 	ssa.Optimize(f)
 	mc, err := mir.Compile(f, testEncoding)
+	if errors.Is(err, mir.ErrUnsupported) {
+		// A refusal, such as more values live at once than there are spill
+		// slots: not compiled, as the builder's refusals are not.
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("CompileAMD64: %w\n%s", err, f)
 	}
@@ -957,6 +966,32 @@ func TestWorkspaceCompilesTheSame(t *testing.T) {
 	}
 	if n < 1000 {
 		t.Fatalf("only %d programs compiled", n)
+	}
+}
+
+// TestSSANativeHighPressure is TestSSANativeMatchesEvaluator's comparison
+// for programs with many locals and long bodies, which keep more values
+// live than there are registers: what spills, and the spill slots reused
+// once their values die, which small programs never reach. A slot reused
+// while its value was still live once miscompiled NavierStokes-sized
+// functions.
+func TestSSANativeHighPressure(t *testing.T) {
+	saved := testProgramSize
+	testProgramSize.locals, testProgramSize.code = 64, 120
+	defer func() { testProgramSize = saved }()
+	r := rand.New(rand.NewPCG(41, 42))
+	compiled := 0
+	for attempt := 0; attempt < 20000 && compiled < 120; attempt++ {
+		p, l := ssaTestProgram(r)
+		if p.Validate() != nil {
+			continue
+		}
+		if checkNative(t, r, p, l) {
+			compiled++
+		}
+	}
+	if compiled < 60 {
+		t.Fatalf("only %d programs compiled", compiled)
 	}
 }
 

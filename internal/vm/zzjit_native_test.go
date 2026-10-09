@@ -1468,6 +1468,60 @@ func TestJITSSANullish(t *testing.T) {
 	}
 }
 
+// A function that keeps more values live than there are registers spills
+// some, and reuses a spill slot once its value is dead, as it reuses a
+// register: NavierStokes' project and lin_solve2 spilled more values over
+// their length than the context has slots, though far fewer at once, and
+// were refused.
+func TestJITSSAManySpills(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	var src strings.Builder
+	const n = 64
+	src.WriteString("function f(m){")
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&src, "let a%d=%d;", i, i+1)
+	}
+	src.WriteString("for(let k=0;k<m;k++){")
+	for round := 0; round < 5; round++ {
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(&src, "a%d=(a%d*3+a%d+k)|0;", i, i, (i+round+1)%n)
+		}
+	}
+	src.WriteString("}let s=0;")
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&src, "s=(s^a%d)|0;", i)
+	}
+	src.WriteString("return s}")
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, src.String())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, m := range []string{"''+f(5)", "''+f(200)"} {
+		wv, err := want.Run(compileForTest(t, m))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, m))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("%s: got %s, interpreter %s", m, got, want)
+		}
+	}
+	fn := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
+	if e := r.jit.hint(fn.hint()); e == nil || e.ssa == nil || e.ssaStats.entries == 0 {
+		t.Fatalf("f did not run in the new pipeline: %+v", e)
+	}
+}
+
 // A function whose native stretches mostly end leaving for Go after little
 // work runs in the tree tier once its first stretches show it
 // (jitSSAProfit): a loop calling a method through Go at every iteration
