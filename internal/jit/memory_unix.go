@@ -2,34 +2,20 @@
 
 package jit
 
-import (
-	"errors"
-	"fmt"
-	"os"
+import "golang.org/x/sys/unix"
 
-	"golang.org/x/sys/unix"
-)
-
-func allocateCode(instructions []byte) ([]byte, error) {
-	if len(instructions) == 0 || len(instructions) > MaxCodeBytes {
-		return nil, fmt.Errorf("invalid native kernel size: %d", len(instructions))
-	}
-	if err := executablePolicy(); err != nil {
-		return nil, err
-	}
-	page := os.Getpagesize()
-	size := (len(instructions) + page - 1) / page * page
-	code, err := unix.Mmap(-1, 0, size, unix.PROT_READ|unix.PROT_WRITE,
-		unix.MAP_PRIVATE|unix.MAP_ANON)
-	if err != nil {
-		return nil, fmt.Errorf("allocate code: %w", err)
-	}
-	copy(code, instructions)
-	if err = unix.Mprotect(code, unix.PROT_READ|unix.PROT_EXEC); err != nil {
-		return nil, fmt.Errorf("seal code: %w", errors.Join(err, unix.Munmap(code)))
-	}
-	flushCode(code)
-	return code, nil
+// mapCode maps size bytes, zeroed, readable and writable, for an Arena.
+func mapCode(size int) ([]byte, error) {
+	return unix.Mmap(-1, 0, size, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_PRIVATE|unix.MAP_ANON)
 }
 
-func freeCode(code []byte) error { return unix.Munmap(code) }
+// protectCode makes whole pages executable and not writable, or writable
+// and not executable.
+func protectCode(pages []byte, executable bool) error {
+	if executable {
+		return unix.Mprotect(pages, unix.PROT_READ|unix.PROT_EXEC)
+	}
+	return unix.Mprotect(pages, unix.PROT_READ|unix.PROT_WRITE)
+}
+
+func unmapCode(mem []byte) error { return unix.Munmap(mem) }

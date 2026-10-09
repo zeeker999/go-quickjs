@@ -99,7 +99,7 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, 
 	if err != nil || len(mc.Bytes) > limit {
 		return nil, nil
 	}
-	code, err := jit.NewSSACode(mc)
+	code, err := jit.NewSSACode(r.jit.arena, mc)
 	if err != nil {
 		return nil, nil
 	}

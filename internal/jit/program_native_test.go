@@ -644,7 +644,7 @@ func TestNativeProgramMemoryBudget(t *testing.T) {
 func TestNativeProgramLifecycle(t *testing.T) {
 	p := constantProgram()
 	c := newTestCode(t, p)
-	if c.Size() != os.Getpagesize() || c.MetadataSize() <= 0 {
+	if c.Size() == 0 || c.Size()%codeAlign != 0 || c.MetadataSize() <= 0 {
 		t.Fatalf("owned memory = %d code, %d metadata", c.Size(), c.MetadataSize())
 	}
 	// Code owns exit maps and entry offsets independently of the mutable IR.
@@ -707,7 +707,7 @@ func TestNativeProgramMultiplePages(t *testing.T) {
 	}
 	p.Code[999] = ir.Instruction{Op: ir.Return, Left: ir.Literal(ir.Float(7))}
 	c := newTestCode(t, p)
-	if c.Size() <= os.Getpagesize() || c.Size()%os.Getpagesize() != 0 {
+	if c.Size() <= os.Getpagesize() || c.Size()%codeAlign != 0 {
 		t.Fatalf("multi-page code size = %d", c.Size())
 	}
 	for _, pc := range []int{0, 498, 999} {

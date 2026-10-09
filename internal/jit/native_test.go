@@ -22,11 +22,15 @@ func sameFloat(a, b float64) bool {
 }
 
 func TestNativeInvalidCodeSize(t *testing.T) {
+	a := NewArena()
 	for _, instructions := range [][]byte{nil, make([]byte, MaxCodeBytes+1)} {
-		code, err := allocateCode(instructions)
+		code, err := a.place(instructions)
 		if code != nil || err == nil {
-			t.Fatalf("allocateCode(%d bytes) = %v, %v", len(instructions), code, err)
+			t.Fatalf("place(%d bytes) = %v, %v", len(instructions), code, err)
 		}
+	}
+	if a.Chunks() != 0 {
+		t.Fatalf("refused code left %d mappings", a.Chunks())
 	}
 }
 
