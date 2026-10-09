@@ -208,6 +208,9 @@ type Value struct {
 	// kind, as every guard's is.
 	Index int
 	Key   uint32
+	// Holders, for a property read the receiver's prototypes answered, are
+	// those prototypes (PropertySite); nil otherwise.
+	Holders *[2]Holder
 	// State is the frame to exit to, for guards.
 	State *FrameState
 	// Shadow is a tagged value's origin at run time, where no compiler can

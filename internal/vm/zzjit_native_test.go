@@ -3576,3 +3576,69 @@ func TestJITSSAReoptimize(t *testing.T) {
 		t.Fatalf("many was not compiled again %d times: %+v", jitReoptimizations, e)
 	}
 }
+
+// A method's read is native in the new pipeline where the site's cache
+// found it, on a prototype too, one or two levels up: the receiver's shape,
+// its prototype and each prototype's shape are checked, and the method is
+// read from its cell, so a method reassigned in place, even mid-loop, is
+// the new one, and one shadowed, a prototype replaced or a method added
+// between them fails a check and is read by Go. Each answer is the
+// interpreter's, and only the calls leave native code.
+func TestJITSSAPrototypeMethods(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function A(){this.v=1}A.prototype.m=function(){return this.v+1};
+		function B(){this.v=2}B.prototype=Object.create(A.prototype);
+		function run(o,n){let s=0;for(let i=0;i<n;i++){s+=o.m();for(let j=0;j<12;j++)s=(s*3+j)%1000003}return s}
+		function swap(o,n){let s=0;for(let i=0;i<n;i++){s+=o.m();for(let j=0;j<12;j++)s=(s*3+j)%1000003;if(i==20)change()}return s}
+		function change(){A.prototype.m=function(){return 1000}}
+		var a=new A,b=new B,c=new A,d=new B;`
+	rounds := []string{
+		`''+run(a,40)`,
+		`''+run(a,40)`,
+		`[run(b,40),run(a,40)].join()`,
+		`A.prototype.m=function(){return 100};[run(a,40),run(b,40)].join()`,
+		`a.m=function(){return 5};[run(a,40),run(c,40)].join()`,
+		`Object.setPrototypeOf(c,{m(){return 9}});[run(c,40),run(d,40)].join()`,
+		`B.prototype.m=function(){return 50};[run(d,40),run(new A,40)].join()`,
+		`A.prototype.m=function(){return 7};[swap(new A,40),swap(new B,40),run(new A,40)].join()`,
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		hosts := r.jit.hosts
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 1 {
+			// The second call runs compiled: an exit for each of its
+			// calls, and none for the reads.
+			if n := r.jit.hosts - hosts; n == 0 || n > 41 {
+				t.Fatalf("run left native code %d times for 40 calls", n)
+			}
+		}
+	}
+	// Every round ran natively: none was demoted to the tree tier.
+	for _, name := range []string{"run", "swap"} {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		if e := r.jit.hint(cl.hint()); e == nil || e.ssa == nil || e.entrySlow || e.ssaStats.entries == 0 {
+			t.Fatalf("%s did not stay native: %+v", name, e)
+		}
+	}
+}

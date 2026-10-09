@@ -173,8 +173,10 @@ type Encoding struct {
 	// pointer, which says where each property is and what it is, and
 	// ObjectProps of its property table's slice. Each entry is PropertySize
 	// bytes: its key, a uint32 atom, at PropertyKey, a flags byte at
-	// PropertyFlags, and its value at PropertyValue.
+	// PropertyFlags, and its value at PropertyValue. ObjectProto is the
+	// offset of its prototype's pointer, which the shape does not settle.
 	ObjectShape, ObjectProps, PropertySize, PropertyKey, PropertyFlags, PropertyValue int32
+	ObjectProto                                                                       int32
 	// An ordinary object of class ClassObject, whose table has at most
 	// MaxScan entries, may be searched for a key, as the VM's own small
 	// objects are. A property is plain data when its flags have none of

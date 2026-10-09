@@ -205,6 +205,9 @@ type Heap struct {
 	Strings    map[uint64]String
 	// Word decodes an element's word, for OpElemCell; nil, only numbers'.
 	Word func(uint64) ir.Value
+	// Holders are the prototypes objects may have, by address (Object's
+	// Proto, Holder's Object).
+	Holders map[uintptr]*Object
 }
 
 // String is a string as charCodeAt sees it.
@@ -219,6 +222,7 @@ type String struct {
 // value.
 type Object struct {
 	Shape    uintptr
+	Proto    uintptr // a prototype's address, in Heap.Holders, or 0
 	Ordinary bool
 	// HTMLDDA is Annex B's [[IsHTMLDDA]]: == null and == undefined hold.
 	HTMLDDA  bool
@@ -227,6 +231,29 @@ type Object struct {
 	Writable []bool
 	Uninit   []bool
 	Props    []ir.Value
+}
+
+// holder is the object a property read of o finds its property in, and its
+// index there, as Holders say, or -1: o itself, as property finds it, for a
+// site without them.
+func (h *Heap) holder(o *Object, v *Value) (*Object, int) {
+	if v.Holders == nil {
+		return o, o.property(v)
+	}
+	if o.Shape != uintptr(v.Const.Bits) {
+		return nil, -1
+	}
+	for _, p := range v.Holders {
+		if p.Object == 0 {
+			break
+		}
+		next := h.Holders[p.Object]
+		if o.Proto != p.Object || next == nil || next.Shape != p.Shape {
+			return nil, -1
+		}
+		o = next
+	}
+	return o, v.Index
 }
 
 // maxScan is abi.MaxScan.
@@ -432,8 +459,7 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 				}
 				vals[v.ID] = val{p: int(t.Bits)}
 			case OpPropRead, OpPropWrite:
-				o := &heap.Objects[a.p]
-				i := o.property(v)
+				o, i := heap.holder(&heap.Objects[a.p], v)
 				if i < 0 || i >= len(o.Props) || o.Props[i].Kind != ir.Number {
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
@@ -447,8 +473,7 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 				}
 				o.Props[i] = ir.Value{Kind: ir.Number, Bits: bits}
 			case OpPropCell:
-				o := &heap.Objects[a.p]
-				i := o.property(v)
+				o, i := heap.holder(&heap.Objects[a.p], v)
 				if i < 0 || i >= len(o.Props) {
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}

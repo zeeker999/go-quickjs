@@ -87,6 +87,52 @@ type testObject struct {
 	elems    []testValue
 	shape    uintptr
 	props    []testProperty
+	proto    *testObject
+}
+
+// testHolders are the prototypes test objects may have, which property
+// sites may name (ssa.Holder): the first's prototype is the second. Their
+// addresses do not change, as the VM's are kept alive; native code only
+// reads them, and their properties hold numbers and booleans, the same in
+// every heap.
+var testHolders = func() *[2]testObject {
+	h := new([2]testObject)
+	h[0] = testObject{shape: 0x5000, proto: &h[1], props: []testProperty{
+		{key: 12, flags: testWritable, value: testValue{num: math.Float64bits(7)}},
+		{key: 13, value: testValue{num: testEncoding.True}},
+	}}
+	h[1] = testObject{shape: 0x6000, props: []testProperty{
+		{key: 11, flags: testWritable, value: testValue{num: math.Float64bits(-2)}},
+	}}
+	return h
+}()
+
+// testHolderValues are testHolders' properties' values, as the SSA
+// evaluator has them.
+var testHolderValues = [2][]ir.Value{{ir.Float(7), ir.Bool(true)}, {ir.Float(-2)}}
+
+// testHolderSite is a site found on a prototype: the receiver of one of
+// testShapes, then one or two of testHolders, the last sometimes of a
+// shape it does not have.
+func testHolderSite(r *rand.Rand) site {
+	sh := testShapes[r.IntN(len(testShapes))]
+	s := site{Shape: sh.shape}
+	h0 := ssa.Holder{Object: uintptr(unsafe.Pointer(&testHolders[0])), Shape: testHolders[0].shape}
+	h1 := ssa.Holder{Object: uintptr(unsafe.Pointer(&testHolders[1])), Shape: testHolders[1].shape}
+	if r.IntN(2) == 0 {
+		i := r.IntN(len(testHolders[0].props))
+		s.Key, s.Index, s.Holders = testHolders[0].props[i].key, int32(i), [2]ssa.Holder{h0}
+	} else {
+		s.Key, s.Index, s.Holders = testHolders[1].props[0].key, 0, [2]ssa.Holder{h0, h1}
+	}
+	if r.IntN(5) == 0 {
+		last := 0
+		if s.Holders[1].Object != 0 {
+			last = 1
+		}
+		s.Holders[last].Shape = 0x9000
+	}
+	return s
 }
 
 // testProperty is a property table's entry.
@@ -144,6 +190,7 @@ var testEncoding = abi.Encoding{
 	StringLeft: int32(unsafe.Offsetof(testString{}.left)), StringLength: int32(unsafe.Offsetof(testString{}.length)),
 	StringASCII: int32(unsafe.Offsetof(testString{}.ascii)), StringU16: int32(unsafe.Offsetof(testString{}.u16)),
 	ObjectShape: int32(unsafe.Offsetof(testObject{}.shape)), ObjectProps: int32(unsafe.Offsetof(testObject{}.props)),
+	ObjectProto:  int32(unsafe.Offsetof(testObject{}.proto)),
 	PropertySize: int32(unsafe.Sizeof(testProperty{})), PropertyValue: int32(unsafe.Offsetof(testProperty{}.value)),
 	PropertyKey: int32(unsafe.Offsetof(testProperty{}.key)), PropertyFlags: int32(unsafe.Offsetof(testProperty{}.flags)),
 	ClassObject: testClassObject, PropNotData: testAccessor | testDeleted | testPrivate,
@@ -171,12 +218,14 @@ type testArray struct {
 	props     []ir.Value
 	// htmldda gives the object Annex B's [[IsHTMLDDA]].
 	htmldda bool
+	// proto is the object's prototype, of testHolders, or -1 for none.
+	proto int
 }
 
 func randomTestHeap(r *rand.Rand) testHeap {
 	h := make(testHeap, 4)
 	for i := range h {
-		a := testArray{cells: make([]uint64, r.IntN(6)), array: i != 2, htmldda: r.IntN(4) == 0}
+		a := testArray{cells: make([]uint64, r.IntN(6)), array: i != 2, htmldda: r.IntN(4) == 0, proto: r.IntN(4) - 2}
 		for j := range a.cells {
 			switch k := r.IntN(6); {
 			case i == 1 && k == 0:
@@ -223,7 +272,7 @@ func randomTestHeap(r *rand.Rand) testHeap {
 	// The global object, handle 4: an ordinary object whose bindings may
 	// be in their temporal dead zone; its length's bits are which of the
 	// keys 10 to 13 script-level lexical bindings shadow.
-	g := testArray{shape: -1, length: uint64(r.IntN(16)) & uint64(r.IntN(16)),
+	g := testArray{shape: -1, proto: -1, length: uint64(r.IntN(16)) & uint64(r.IntN(16)),
 		texts: []testText{randomText(r), randomText(r)}, intrinsic: r.IntN(4) != 0}
 	for range 4 {
 		g.keys = append(g.keys, 10+uint32(r.IntN(4)))
@@ -277,6 +326,9 @@ func (h testHeap) native() *nativeHeap {
 		if a.shape >= 0 {
 			o.shape = testShapes[a.shape].shape
 		}
+		if a.proto >= 0 {
+			o.proto = &testHolders[a.proto]
+		}
 		o.props = make([]testProperty, len(a.props))
 		for j, v := range a.props {
 			o.props[j] = testProperty{key: a.keys[j], flags: a.flags[j], value: n.word(v)}
@@ -319,10 +371,15 @@ func (h testHeap) native() *nativeHeap {
 // heap is what the SSA evaluator reads: views of the arrays' cells, and the
 // objects' shapes with its own copy of their property words.
 func (n *nativeHeap) heap() ssa.Heap {
-	h := ssa.Heap{Arrays: n.views(), Word: testWordValue}
+	h := ssa.Heap{Arrays: n.views(), Word: testWordValue, Holders: map[uintptr]*ssa.Object{}}
+	for i := range testHolders {
+		o := &testHolders[i]
+		h.Holders[uintptr(unsafe.Pointer(o))] = &ssa.Object{Shape: o.shape, Proto: uintptr(unsafe.Pointer(o.proto)), Props: slices.Clone(testHolderValues[i])}
+	}
 	for i := range n.objects {
 		o := &n.objects[i]
-		e := ssa.Object{Shape: o.shape, Ordinary: o.class == testClassObject, Props: n.evaluated[i], HTMLDDA: o.flags&testFlagHTMLDDA != 0}
+		e := ssa.Object{Shape: o.shape, Ordinary: o.class == testClassObject, Props: n.evaluated[i], HTMLDDA: o.flags&testFlagHTMLDDA != 0,
+			Proto: uintptr(unsafe.Pointer(o.proto))}
 		for _, p := range o.props {
 			e.Keys = append(e.Keys, p.key)
 			e.Data = append(e.Data, p.flags&testEncoding.PropNotData == 0)
@@ -618,6 +675,10 @@ func ssaTestProgram(r *rand.Rand) (*ir.Program, layout) {
 					}
 				case 1:
 					s.Shape = 0x9000
+				}
+				// A read sometimes found its property on a prototype.
+				if in.Op != ir.PropertyWrite && r.IntN(3) == 0 {
+					s = testHolderSite(r)
 				}
 				sites[pc] = s
 			}

@@ -173,6 +173,9 @@ type jitEntry struct {
 	// by address and this keeps alive.
 	ssa       *jit.SSACode
 	ssaShapes []*shape
+	// ssaHolders are the prototypes it compares receivers' with
+	// (ssa.Holder), held by address, which this keeps alive.
+	ssaHolders []*Object
 	// ssaStrings marks code that calls charCodeAt, for which Go looks up the
 	// intrinsic before every entry.
 	ssaStrings bool
@@ -190,6 +193,9 @@ type jitEntry struct {
 	failedEntries []uint32
 	reopt         bool
 	reopts        uint8
+	// unfed are the property sites whose caches were empty when the code
+	// was compiled (jitFed).
+	unfed         []uint32
 	code          *jit.Code
 	misses        uint8
 	probes        uint8
@@ -462,8 +468,8 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool, cl *closure) *j
 		// The new pipeline lowers for itself; what it does not compile goes
 		// to the slot IR emitters.
 		if p, err := jitcompile.LowerSSA(fn); err == nil {
-			if code, shapes := r.compileSSA(fn, cl, p, limit, nil); code != nil {
-				e.ssa, e.this, e.ssaShapes = code, p.This, shapes
+			if code, fb := r.compileSSA(fn, cl, p, limit, e); code != nil {
+				e.ssa, e.this, e.ssaShapes, e.ssaHolders, e.unfed = code, p.This, fb.shapes, fb.holders, fb.unfed
 				e.ssaLoop = jitLoopLength(fn)
 				for _, in := range p.Code {
 					e.ssaStrings = e.ssaStrings || in.Op == ir.StringMethod || in.Op == ir.StringCode
