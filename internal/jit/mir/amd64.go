@@ -540,6 +540,17 @@ func (c *compiler) reference(v, a *ssa.Value, word uint64, guard func(amd64.Cond
 	c.a.MovImm(scratchB, word)
 	c.a.Op(amd64.Cmp, w, scratchB, true)
 	guard(amd64.CondNE)
+	c.sourceRef(a, guard)
+	c.a.Op(amd64.Test, scratchC, scratchC, true)
+	guard(amd64.CondE)
+	return true
+}
+
+// sourceRef loads the pointer word of a, a value with a source -- an origin
+// that is a slot, or a shadow -- from there into scratchC. A shadow of -1,
+// a primitive's, exits. It uses scratchA and scratchB.
+func (c *compiler) sourceRef(a *ssa.Value, guard func(amd64.Cond)) {
+	o := c.origin.At(a)
 	if s := a.Shadow; s != nil {
 		// The source is known at run time: a local, a captured binding, the
 		// receiver, an operand, or a heap cell (origin.go). scratchC becomes
@@ -584,9 +595,57 @@ func (c *compiler) reference(v, a *ssa.Value, word uint64, guard func(amd64.Cond
 		base, disp := c.slotAddr(o, true, scratchC)
 		c.a.Load(scratchC, base, disp)
 	}
-	c.a.Op(amd64.Test, scratchC, scratchC, true)
-	guard(amd64.CondE)
-	return true
+}
+
+// propStore stores a value in a property, as the VM's setPropCached does
+// in an own writable data property: its number word, and its pointer
+// word, which it finds where the value came from (sourceRef), or none for
+// a primitive. A store that changes a pointer word -- the value's, or the
+// one it replaces -- is left to Go while the collector marks
+// (abi.Encoding's WriteBarrier), as is a store to a cell a live reference
+// was loaded from (the operands after the value: ssa's storeChecks).
+// Everything that exits comes before the first write. It uses every
+// scratch register and xScratch1.
+func (c *compiler) propStore(v *ssa.Value, guard func(amd64.Cond)) {
+	x := v.Args[1]
+	none, have := c.a.NewLabel(), c.a.NewLabel()
+	w := c.gpr(x, scratchA)
+	c.a.MovImm(scratchB, abi.NumberLimit)
+	c.a.Op(amd64.Cmp, w, scratchB, true)
+	c.a.Jcc(amd64.CondB, none)
+	for _, p := range []uint64{c.enc.Undefined, c.enc.Null, c.enc.True, c.enc.False, c.enc.Uninitialized} {
+		c.a.MovImm(scratchB, p)
+		c.a.Op(amd64.Cmp, w, scratchB, true)
+		c.a.Jcc(amd64.CondE, none)
+	}
+	if x.Shadow == nil && c.origin.At(x) < 0 {
+		// A reference's word, which native code never makes.
+		c.a.Jmp(c.stubLabel(v.State, exitKind(v.Aux)))
+	} else {
+		c.sourceRef(x, guard)
+		c.a.Jmp(have)
+	}
+	c.a.Bind(none)
+	c.a.MovImm(scratchC, 0)
+	c.a.Bind(have)
+	c.a.MovQToX(xScratch1, scratchC)
+	c.property(v, guard)
+	for _, s := range v.Args[2:] {
+		c.a.Op(amd64.Cmp, c.gpr(s, scratchB), scratchA, true)
+		guard(amd64.CondE)
+	}
+	scalar := c.a.NewLabel()
+	c.a.MovQFromX(scratchC, xScratch1)
+	c.a.Load(scratchB, scratchA, c.enc.RefOffset)
+	c.a.Op(amd64.Or, scratchB, scratchC, true)
+	c.a.Jcc(amd64.CondE, scalar)
+	c.a.MovImm(scratchB, c.enc.WriteBarrier)
+	c.a.LoadU8(scratchB, scratchB, 0)
+	c.a.Op(amd64.Test, scratchB, scratchB, false)
+	guard(amd64.CondNE)
+	c.a.Bind(scalar)
+	c.a.Store(scratchA, c.enc.NumOffset, c.gpr(x, scratchB))
+	c.a.Store(scratchA, c.enc.RefOffset, scratchC)
 }
 
 // property finds the property a property operation names and leaves the
@@ -1002,13 +1061,7 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.Load(scratchA, c.gpr(arg(0), scratchA), c.enc.NumOffset)
 		c.setG(v, scratchA)
 	case ssa.OpPropWrite:
-		c.property(v, guard)
-		c.a.Load(scratchB, scratchA, c.enc.NumOffset)
-		c.a.MovImm(scratchC, abi.NumberLimit)
-		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
-		guard(amd64.CondAE)
-		c.boxF64(c.xmm(arg(1), xScratch0), scratchB)
-		c.a.Store(scratchA, c.enc.NumOffset, scratchB)
+		c.propStore(v, guard)
 	case ssa.OpLength:
 		c.length(v, guard)
 	case ssa.OpElemKey:
@@ -1268,9 +1321,30 @@ func (c *compiler) truth(v *ssa.Value, guard func(amd64.Cond)) {
 		c.a.Op(amd64.Cmp, r, scratchA, true)
 		c.a.Jcc(amd64.CondE, w.to)
 	}
-	// Anything else -- the uninitialized marker -- is not decided here.
-	c.a.Op(amd64.Cmp, r, r, true)
-	guard(amd64.CondE)
+	// An object is true unless it is Annex B's [[IsHTMLDDA]], and a string
+	// unless it is empty: each through its pointer, where it came from.
+	// Anything else -- the uninitialized marker, a symbol, a BigInt -- is
+	// not decided here.
+	notObject := c.a.NewLabel()
+	c.a.MovImm(scratchA, c.enc.Object)
+	c.a.Op(amd64.Cmp, r, scratchA, true)
+	c.a.Jcc(amd64.CondNE, notObject)
+	if c.reference(v, v.Args[0], c.enc.Object, guard) {
+		c.a.LoadU8(scratchA, scratchC, c.enc.ObjectFlags)
+		c.a.OpImm(amd64.And, scratchA, int32(c.enc.FlagHTMLDDA), false)
+		c.a.Jcc(amd64.CondNE, no)
+		c.a.Jmp(yes)
+	}
+	c.a.Bind(notObject)
+	c.a.MovImm(scratchA, c.enc.String)
+	c.a.Op(amd64.Cmp, r, scratchA, true)
+	guard(amd64.CondNE)
+	if c.reference(v, v.Args[0], c.enc.String, guard) {
+		c.a.Load(scratchA, scratchC, c.enc.StringLength)
+		c.a.Op(amd64.Test, scratchA, scratchA, true)
+		c.a.Jcc(amd64.CondNE, yes)
+		c.a.Jmp(no)
+	}
 	c.a.Bind(number)
 	// A number is true unless zero or NaN: ucomisd sets ZF for zero and for
 	// NaN, and PF only for NaN.

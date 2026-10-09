@@ -183,6 +183,11 @@ var testShapes = []struct {
 	{0x3000, []uint32{12, 10}, []uint8{testWritable, testAccessor}},
 }
 
+// testBarrier is the harness's write-barrier flag (abi.Encoding's
+// WriteBarrier), which a heap sets as its global object's spec says
+// (testArray.barrier) when it is made for a run.
+var testBarrier uint8
+
 // testFlagHTMLDDA is the flags byte's [[IsHTMLDDA]] bit.
 const testFlagHTMLDDA = 0x40
 
@@ -219,6 +224,7 @@ var testEncoding = abi.Encoding{
 	StringASCII: int32(unsafe.Offsetof(testString{}.ascii)), StringU16: int32(unsafe.Offsetof(testString{}.u16)),
 	ObjectShape: int32(unsafe.Offsetof(testObject{}.shape)), ObjectProps: int32(unsafe.Offsetof(testObject{}.props)),
 	ObjectProto:  int32(unsafe.Offsetof(testObject{}.proto)),
+	WriteBarrier: uint64(uintptr(unsafe.Pointer(&testBarrier))),
 	PropertySize: int32(unsafe.Sizeof(testProperty{})), PropertyValue: int32(unsafe.Offsetof(testProperty{}.value)),
 	PropertyKey: int32(unsafe.Offsetof(testProperty{}.key)), PropertyFlags: int32(unsafe.Offsetof(testProperty{}.flags)),
 	ClassObject: testClassObject, PropNotData: testAccessor | testDeleted | testPrivate,
@@ -248,6 +254,8 @@ type testArray struct {
 	htmldda bool
 	// proto is the object's prototype, of testHolders, or -1 for none.
 	proto int
+	// barrier, in the global object's spec, sets the write-barrier flag.
+	barrier bool
 }
 
 func randomTestHeap(r *rand.Rand) testHeap {
@@ -301,7 +309,7 @@ func randomTestHeap(r *rand.Rand) testHeap {
 	// be in their temporal dead zone; its length's bits are which of the
 	// keys 10 to 13 script-level lexical bindings shadow.
 	g := testArray{shape: -1, proto: -1, length: uint64(r.IntN(16)) & uint64(r.IntN(16)),
-		texts: []testText{randomText(r), randomText(r)}, intrinsic: r.IntN(4) != 0}
+		texts: []testText{randomText(r), randomText(r)}, intrinsic: r.IntN(4) != 0, barrier: r.IntN(4) == 0}
 	if t := g.texts; (len(t[0].units)+len(t[1].units))%3 == 0 {
 		// Often two strings of one content, held as two: flat, or one a
 		// rope. Decided by what was drawn, drawing nothing more.
@@ -371,6 +379,10 @@ func (h testHeap) native() *nativeHeap {
 		}
 		n.evaluated = append(n.evaluated, slices.Clone(a.props))
 	}
+	testBarrier = 0
+	if len(h) > 4 && h[4].barrier {
+		testBarrier = 1
+	}
 	if len(h) > 4 {
 		n.lexNames = []uint64{h[4].length << 10}
 		n.specs = h[4].texts
@@ -407,7 +419,7 @@ func (h testHeap) native() *nativeHeap {
 // heap is what the SSA evaluator reads: views of the arrays' cells, and the
 // objects' shapes with its own copy of their property words.
 func (n *nativeHeap) heap() ssa.Heap {
-	h := ssa.Heap{Arrays: n.views(), Word: testWordValue, Holders: map[uintptr]*ssa.Object{}}
+	h := ssa.Heap{Arrays: n.views(), Word: testWordValue, Holders: map[uintptr]*ssa.Object{}, WriteBarrier: testBarrier != 0}
 	for i := range testHolders {
 		o := &testHolders[i]
 		h.Holders[uintptr(unsafe.Pointer(o))] = &ssa.Object{Shape: o.shape, Proto: uintptr(unsafe.Pointer(o.proto)), Props: slices.Clone(testHolderValues[i])}
@@ -1486,3 +1498,82 @@ func BenchmarkSSARoundTrip(b *testing.B) {
 		})
 	}
 }
+
+// TestSSANativeStores stores values of every kind in a property and reads
+// them back, with the collector's write-barrier flag clear and set: a store
+// that changes a pointer word -- a reference stored, or one replaced -- is
+// Go's while it is set. A reference loaded from the cell being stored to
+// and used after the store keeps the store from happening natively
+// (ssa's storeChecks); one loaded from another object's cell does not.
+// Random programs seldom read and then write one property of one object.
+func TestSSANativeStores(t *testing.T) {
+	cached := ssa.PropertySite{Key: 10, Shape: testShapes[0].shape, Index: 0}
+	program := func(code ...ir.Instruction) *ir.Program {
+		p := &ir.Program{Locals: 4, Code: append(code, ir.Instruction{Op: ir.Return, Left: ir.Slot(3)})}
+		p.Maps = make([]ir.StateMap, len(p.Code))
+		for pc := range p.Maps {
+			p.Maps[pc].PC = uint32(pc)
+		}
+		return p
+	}
+	read := func(object int) ir.Instruction {
+		return ir.Instruction{Op: ir.ReferenceRead, Dest: 3, Left: ir.Slot(object), Key: 10}
+	}
+	write := ir.Instruction{Op: ir.PropertyWrite, Left: ir.Slot(0), Right: ir.Slot(1), Key: 10}
+	for _, tc := range []struct {
+		name string
+		p    *ir.Program
+		// alias: the store never happens natively; read: what is returned
+		// is what was stored, else what object 2 held.
+		alias, stored bool
+	}{
+		{"read, store, use", program(read(0), write), true, false},
+		{"store, read", program(write, read(0)), false, true},
+		{"read another, store, use", program(read(2), write), false, false},
+	} {
+		c, err := compileNative(tc.p, layout{4, -1, map[int]site{0: cached, 1: cached}, nil, nil, nil})
+		if err != nil || c == nil {
+			t.Fatalf("%s: compile: %v", tc.name, err)
+		}
+		for _, value := range []ir.Value{ir.Float(5), {Kind: ir.Opaque, Bits: 1}, ir.Bool(true), {Kind: ir.Undefined}} {
+			for _, old := range []ir.Value{ir.Float(3), {Kind: ir.Opaque, Bits: 3}} {
+				for _, barrier := range []bool{false, true} {
+					heap := randomTestHeap(rand.New(rand.NewPCG(3, 4)))
+					for _, i := range []int{0, 2} {
+						sh := testShapes[0]
+						heap[i].shape, heap[i].proto = 0, -1
+						heap[i].keys, heap[i].flags = sh.keys, sh.flags
+						heap[i].props = []ir.Value{old, ir.Float(1), ir.Float(2)}
+					}
+					heap[2].props[0] = ir.Value{Kind: ir.Opaque, Bits: 2}
+					heap[4].barrier = barrier
+					slots := []ir.Value{{Kind: ir.Opaque, Bits: 0}, value, {Kind: ir.Opaque, Bits: 2}, ir.Float(0)}
+					name := fmt.Sprintf("%s: %v over %v, barrier %v", tc.name, value, old, barrier)
+					if why := nativeMismatch(c, 0, slots, 0, heap); why != "" {
+						t.Fatalf("%s: %s", name, why)
+					}
+					exit, err := ssa.EvaluateHeap(c.f, 0, slices.Clone(slots), heap.native().heap(), 0)
+					if err != nil {
+						t.Fatalf("%s: %v", name, err)
+					}
+					pointers := isTestReference(value) || isTestReference(old)
+					native := !tc.alias && !(barrier && pointers)
+					if got := exit.Kind == ir.Returned; got != native {
+						t.Fatalf("%s: native %v, want %v", name, got, native)
+					}
+					want := ir.Value{Kind: ir.Opaque, Bits: 2}
+					if tc.stored {
+						want = value
+					}
+					if native && exit.Value != want {
+						t.Fatalf("%s: returned %v, want %v", name, exit.Value, want)
+					}
+				}
+			}
+		}
+		c.code.Close()
+	}
+}
+
+// isTestReference reports a value with a pointer word.
+func isTestReference(v ir.Value) bool { return v.Kind == ir.Opaque || v.Kind == ir.String }

@@ -1,6 +1,9 @@
 package ssa
 
-import "math"
+import (
+	"math"
+	"slices"
+)
 
 // Native code holds a slot's number word and never its pointer word, so a
 // tagged value it moves to another slot, or returns, is either a primitive
@@ -18,9 +21,11 @@ import "math"
 // came from, or -1 for a primitive. An exit passes the shadow to Go.
 //
 // A reference loaded from an object (OpLoadCell) came from a heap cell, not
-// a slot: its shadow is the cell's address. Native code never stores a
-// pointer, so the cell holds the reference until native code exits, when Go
-// copies it from there. A phi merging such a value has a shadow too, whose
+// a slot: its shadow is the cell's address. The cell holds the reference
+// until native code exits, when Go copies it from there: the one store
+// native code makes to a heap cell, a property's (OpPropWrite), first
+// compares the cell with those of the references live after it
+// (storeChecks), and leaves the write to Go on a match. A phi merging such a value has a shadow too, whose
 // argument for it is the cell. This holds only while Go's heap does not
 // move and nothing changes the object graph while native code runs, which
 // is outside what unsafe.Pointer's rules promise: the user chose it
@@ -201,6 +206,146 @@ func clearShadows(f *Func) {
 		for _, v := range b.Values {
 			if v.Op == OpPhi {
 				v.Shadow = nil
+			}
+		}
+	}
+}
+
+// storeChecks gives every property store the cells it must not write: the
+// shadows of the tagged values live after it that have one -- references
+// loaded from cells, and phis that may hold one. Native code holds such a
+// value's number word and reads its pointer word where its shadow says
+// when Go needs it; a store to that cell would change the pointer word
+// under it. The store compares each with the property's address, and
+// leaves the write to Go on a match. They are its operands after the
+// object and the value.
+func storeChecks(f *Func) {
+	var stores, cands []*Value
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			switch {
+			case v.Op == OpPropWrite:
+				stores = append(stores, v)
+			case v.Type == Tagged && v.Shadow != nil:
+				cands = append(cands, v)
+			}
+		}
+	}
+	if len(stores) == 0 || len(cands) == 0 {
+		return
+	}
+	nb := 0
+	for _, b := range f.Blocks {
+		nb = max(nb, b.ID+1)
+	}
+	pos, cand := f.ints(f.nextID), f.ints(f.nextID)
+	for _, b := range f.Blocks {
+		for i, v := range b.Values {
+			pos[v.ID] = i
+		}
+	}
+	for k, c := range cands {
+		cand[c.ID] = k + 1
+	}
+	// By candidate, then block ID: the last place in the block that uses
+	// the candidate -- a value's index, the block's length for its end, -1
+	// for its header -- or -2 for none; and whether it is live at the end.
+	last, out := f.ints(len(cands)*nb), f.bools(len(cands)*nb)
+	for i := range last {
+		last[i] = -2
+	}
+	use := func(a *Value, b *Block, at int) {
+		if a.ID < len(cand) && cand[a.ID] != 0 {
+			k := (cand[a.ID]-1)*nb + b.ID
+			last[k] = max(last[k], at)
+		}
+	}
+	for _, b := range f.Blocks {
+		if b.Header != nil {
+			for _, s := range b.Header.Slots {
+				use(s, b, -1)
+			}
+		}
+		for i, v := range b.Values {
+			if v.Op == OpPhi {
+				// A phi's argument is used at the end of its predecessor.
+				for j, a := range v.Args {
+					if a.ID < len(cand) && cand[a.ID] != 0 {
+						out[(cand[a.ID]-1)*nb+b.Preds[j].ID] = true
+					}
+				}
+				continue
+			}
+			for _, a := range v.Args {
+				use(a, b, i)
+			}
+			if v.State != nil {
+				for _, s := range v.State.Slots {
+					use(s, b, i)
+				}
+			}
+		}
+		if b.Control != nil {
+			use(b.Control, b, len(b.Values))
+		}
+		if b.State != nil {
+			for _, s := range b.State.Slots {
+				use(s, b, len(b.Values))
+			}
+		}
+	}
+	// A candidate is live at the end of a block if it is live at the start
+	// of a successor: anywhere but where it is defined, if that uses it or
+	// it is live at that one's end.
+	var work []*Block
+	for k, c := range cands {
+		row, uses := out[k*nb:(k+1)*nb], last[k*nb:(k+1)*nb]
+		liveIn := func(b *Block) bool { return b != c.Block && (uses[b.ID] != -2 || row[b.ID]) }
+		work = work[:0]
+		for _, b := range f.Blocks {
+			if liveIn(b) {
+				work = append(work, b)
+			}
+		}
+		for len(work) > 0 {
+			b := work[len(work)-1]
+			work = work[:len(work)-1]
+			for _, p := range b.Preds {
+				if !row[p.ID] {
+					row[p.ID] = true
+					if liveIn(p) {
+						work = append(work, p)
+					}
+				}
+			}
+		}
+	}
+	for _, s := range stores {
+		at := pos[s.ID]
+		for k, c := range cands {
+			if c.Block == s.Block && pos[c.ID] > at {
+				continue // defined after it
+			}
+			if !out[k*nb+s.Block.ID] && last[k*nb+s.Block.ID] <= at {
+				continue // dead after it
+			}
+			if sh := c.Shadow; !slices.Contains(s.Args[2:], sh) {
+				s.Args = f.appendValue(s.Args, sh)
+				sh.Uses++
+			}
+		}
+	}
+}
+
+// clearStoreChecks drops the stores' checks, for storeChecks to remake.
+func clearStoreChecks(f *Func) {
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == OpPropWrite {
+				for _, a := range v.Args[2:] {
+					a.Uses--
+				}
+				v.Args = v.Args[:2]
 			}
 		}
 	}

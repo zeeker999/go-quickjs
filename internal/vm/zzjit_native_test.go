@@ -3692,3 +3692,144 @@ func TestJITSSAStringEquality(t *testing.T) {
 		t.Fatalf("count did not stay native: %+v", e)
 	}
 }
+
+// Native code stores any value in a property, references too, while the
+// collector is not marking (abi.Encoding's WriteBarrier): links copied
+// from an array, which with collection off never leaves native code; and
+// a list reversed in place and two properties swapped, whose reads are
+// from the cells their stores then write while what was read is still
+// needed, so those stores are Go's (ssa's storeChecks). Each answer is the
+// interpreter's.
+func TestJITSSAReferenceStores(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function list(k){let h=null;for(let i=0;i<k;i++)h={v:i,next:h};return h}
+		function walk(h){let s=0,n=h,i=1;while(n){s+=n.v*i;i++;n=n.next}return s}
+		function rev(h){let p=null,n=h;while(n){const x=n.next;n.next=p;p=n;n=x}return p}
+		function relink(a,n,tags){for(let i=0;i<n;i++){const o=a[i];o.next=a[i+1];o.tag=tags[i&3];o.v=i}return a[0]}
+		function swap(o){const t=o.a;o.a=o.b;o.b=t;return t}
+		var arr=[];for(let i=0;i<40;i++)arr.push({v:0,next:null,tag:''});arr.push(null);
+		var pair={a:{n:1},b:'two'},tags=['s0','s1',{s:2},null];`
+	rounds := []string{
+		`[walk(rev(list(30))),walk(relink(arr,40,tags)),swap(pair).n].join()`,
+		`[walk(rev(list(30))),walk(relink(arr,40,tags)),swap(pair),pair.a.n,arr[5].tag].join()`,
+		`[walk(rev(rev(list(30)))),walk(relink(arr,20,tags)),swap(pair).n].join()`,
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+	}
+	entry := func(name string) *jitEntry {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		return r.jit.hint(cl.hint())
+	}
+	if e := entry("relink"); e == nil || e.ssa == nil || e.entrySlow || e.ssaStats.entries == 0 || e.ssaStats.hosts != 0 || e.ssaStats.guards != 0 {
+		t.Fatalf("relink's stores left native code: %+v", e)
+	}
+	if e := entry("rev"); e == nil || e.ssa == nil || e.ssaStats.guards != 0 || e.ssaStats.hosts == 0 {
+		t.Fatalf("rev's store to the cell it read was not Go's: %+v", e)
+	}
+}
+
+// TestJITSSAReferenceStoresUnderGC stresses native reference stores: the
+// collector runs continuously while lists are reversed and relinked in
+// place, natively while it is not marking and through Go while it is.
+// Nothing must be lost or freed early.
+func TestJITSSAReferenceStoresUnderGC(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	defer debug.SetGCPercent(debug.SetGCPercent(1))
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				runtime.GC()
+			}
+		}
+	}()
+	defer func() { close(stop); <-done }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	src := `function list(k){let h=null;for(let i=0;i<k;i++)h={v:i,next:h,pad:[i,i]};return h}
+		function walk(h){let s=0,n=h,i=1;while(n){s+=n.v*i+n.pad[1];i++;n=n.next}return s}
+		function rev(h){let p=null,n=h;while(n){const x=n.next;n.next=p;n.pad=[n.v,n.v];p=n;n=x}return p}
+		let ok=true,stores=0;
+		for(let round=0;round<300;round++){
+			const h=list(50),w=walk(h);
+			const r=rev(h);stores+=50;
+			ok=ok&&walk(rev(r))===w&&walk(r)!==w;
+		}
+		ok`
+	v, err := r.Run(compileForTest(t, src))
+	if err != nil || !v.IsBool() || !v.Truthy() {
+		t.Fatalf("= %v, %v", v, err)
+	}
+	if st := r.JITStats(); st.SSAEntries == 0 {
+		t.Fatalf("the reversals did not run natively: %+v", st)
+	}
+}
+
+// While the collector marks, a store that changes a pointer word is Go's:
+// with the write-barrier flag native code reads (jitEncoding.WriteBarrier)
+// pointed at a byte that is set, every store of relink's leaves native
+// code, and its numbers' stores do not.
+func TestJITSSAReferenceStoresWhileMarking(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	marking := uint8(1)
+	defer func(old uint64) { jitEncoding.WriteBarrier = old }(jitEncoding.WriteBarrier)
+	jitEncoding.WriteBarrier = uint64(uintptr(unsafe.Pointer(&marking)))
+	setup := `function relink(a,n){for(let i=0;i<n;i++){const o=a[i];o.next=a[i+1];o.v=i}return a[0]}
+		function count(a,n){for(let i=0;i<n;i++)a[i].v=i*2;return a[n-1].v}
+		function total(){let s=0;for(let n=relink(arr,40);n;n=n.next)s+=n.v;return s+':'+count(arr,40)}
+		var arr=[];for(let i=0;i<40;i++)arr.push({v:0,next:null});arr.push(null);`
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	if _, err := r.Run(compileForTest(t, setup)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		v, err := r.Run(compileForTest(t, `total()`))
+		if err != nil || v.String().Go() != "780:78" {
+			t.Fatalf("round %d: %v, %v", i, v, err)
+		}
+	}
+	entry := func(name string) *jitEntry {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		return r.jit.hint(cl.hint())
+	}
+	// relink's first store goes to Go, from which native code resumes.
+	if e := entry("relink"); e == nil || e.ssa == nil || e.ssaStats.hosts < 40 {
+		t.Fatalf("relink stored references natively while the collector marked: %+v", e)
+	}
+	if e := entry("count"); e == nil || e.ssa == nil || e.ssaStats.entries == 0 || e.ssaStats.hosts != 0 {
+		t.Fatalf("count's numbers went to Go: %+v", e)
+	}
+}
