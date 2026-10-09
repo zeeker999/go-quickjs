@@ -110,8 +110,15 @@ func compileARM64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err 
 		c.a.Bind(s.label)
 		c.exitTo(s.key.state, s.key.kind)
 	}
+	stubs := len(c.stubFor)
 	for i := 0; i < len(c.cold); i++ {
 		c.cold[i]()
+	}
+	// Cold code's guards' exits.
+	for i := stubs; i < len(c.stubFor); i++ {
+		s := c.stubFor[i]
+		c.a.Bind(s.label)
+		c.exitTo(s.key.state, s.key.kind)
 	}
 	// Last: cold code's exits may come here too.
 	if c.tailUsed {
@@ -801,7 +808,9 @@ func (c *a64Compiler) reference(v, a *ssa.Value, word uint64, guard func(arm64.C
 // amd64's does. It uses A and B.
 func (c *a64Compiler) sourceRef(a *ssa.Value, guard func(arm64.Cond)) {
 	o := c.origin.At(a)
-	if s := a.Shadow; s != nil {
+	if s := a.Shadow; s != nil && cellSource(s) {
+		c.a.Load(a64C, c.gpr(s, a64C), c.enc.RefOffset)
+	} else if s != nil {
 		c.a.MovRR(a64C, c.gpr(s, a64C))
 		c.a.CmpImm(a64C, 0, true)
 		guard(arm64.MI)
@@ -904,8 +913,10 @@ func (c *a64Compiler) property(v *ssa.Value, guard func(arm64.Cond)) {
 		c.holder(v, guard)
 		return
 	}
-	found, scan := c.a.NewLabel(), c.a.NewLabel()
+	found := c.a.NewLabel()
 	if v.Const.Bits != 0 {
+		// As amd64's: the shape the site knows inline, any other out of line.
+		scan := c.a.NewLabel()
 		p := c.gpr(v.Args[0], a64A)
 		c.a.Load(a64B, p, c.enc.ObjectShape)
 		c.a.MovImm(a64C, v.Const.Bits)
@@ -913,9 +924,20 @@ func (c *a64Compiler) property(v *ssa.Value, guard func(arm64.Cond)) {
 		c.a.BCond(arm64.NE, scan)
 		c.a.Load(a64A, p, c.enc.ObjectProps)
 		c.a.AddImm(a64A, a64A, int64(int32(v.Index)*c.enc.PropertySize+c.enc.PropertyValue), true)
-		c.a.B(found)
+		c.cold = append(c.cold, func() {
+			c.a.Bind(scan)
+			c.scan(v, guard, found)
+		})
+		c.a.Bind(found)
+		return
 	}
-	c.a.Bind(scan)
+	c.scan(v, guard, found)
+	c.a.Bind(found)
+}
+
+// scan searches an object's small table for the key a property operation
+// names, as amd64's does, going to found with the value's address in A.
+func (c *a64Compiler) scan(v *ssa.Value, guard func(arm64.Cond), found arm64.Label) {
 	p := c.gpr(v.Args[0], a64A)
 	c.a.LoadU8(a64B, p, c.enc.ObjectClass)
 	c.a.CmpImm(a64B, int64(c.enc.ClassObject), false)
@@ -946,7 +968,6 @@ func (c *a64Compiler) property(v *ssa.Value, guard func(arm64.Cond)) {
 		c.a.Bind(next)
 	}
 	c.a.B(c.stubLabel(v.State, exitKind(v.Aux)))
-	c.a.Bind(found)
 }
 
 // stringBytes compares two strings of one length by their bytes, as
@@ -1215,6 +1236,8 @@ func (c *a64Compiler) pointerWord(x *ssa.Value, w arm64.Reg) {
 	done := c.a.NewLabel()
 	c.a.MovImm(a64B, 0)
 	switch o, static := c.origin.Of(x); {
+	case x.Shadow != nil && cellSource(x.Shadow):
+		c.a.Load(a64B, c.gpr(x.Shadow, a64C), c.enc.RefOffset)
 	case x.Shadow != nil:
 		if r := c.gpr(x.Shadow, a64C); r != a64C {
 			c.a.MovRR(a64C, r)
