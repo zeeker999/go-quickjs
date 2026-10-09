@@ -18,6 +18,8 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
+	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
 const jitCacheEntries = 128
@@ -213,6 +215,10 @@ type jitState struct {
 	// arena holds the code of every entry: a few mappings, however many
 	// functions the runtime compiles.
 	arena *jit.Arena
+	// ssaWork and mirWork are the memory the new pipeline compiles in,
+	// rewound after each compile (ssa.Workspace, mir.Workspace).
+	ssaWork ssa.Workspace
+	mirWork mir.Workspace
 	// generation advances whenever the cache releases code, which is when a
 	// program refused for want of budget may fit.
 	generation uint64

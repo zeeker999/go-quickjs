@@ -87,7 +87,12 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, 
 		return nil, nil
 	}
 	fb := &jitFeedback{r: r, fn: fn, cl: cl}
-	f, err := ssa.BuildWith(p, fb)
+	// The compile's memory comes from the runtime's workspaces, taken back
+	// once its code is placed.
+	s := r.jit
+	defer s.ssaWork.Rewind()
+	defer s.mirWork.Rewind()
+	f, err := ssa.BuildIn(&s.ssaWork, p, fb)
 	if err != nil {
 		return nil, nil
 	}
@@ -96,7 +101,7 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, 
 		f.ThisSlot = fn.LocalCount + len(fn.Upvalues)
 	}
 	ssa.Optimize(f)
-	mc, err := mir.Compile(f, jitEncoding)
+	mc, err := mir.CompileIn(&s.mirWork, f, jitEncoding)
 	if err != nil || len(mc.Bytes) > limit {
 		return nil, nil
 	}

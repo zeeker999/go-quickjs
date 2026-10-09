@@ -32,7 +32,7 @@ const (
 type a64Compiler struct {
 	*core
 	a       arm64.Asm
-	labels  map[*ssa.Block]arm64.Label
+	labels  []arm64.Label // by block ID
 	stubs   map[stubKey]arm64.Label
 	stubFor []a64Stub
 	cold    []func()
@@ -44,7 +44,9 @@ type a64Stub struct {
 }
 
 // CompileARM64 compiles f for arm64, given the VM's value encoding.
-func CompileARM64(f *ssa.Func, enc abi.Encoding) (code *Code, err error) {
+func CompileARM64(f *ssa.Func, enc abi.Encoding) (*Code, error) { return compileARM64(nil, f, enc) }
+
+func compileARM64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err error) {
 	defer func() {
 		if v := recover(); v != nil {
 			code, err = nil, fmt.Errorf("%w: %v", ErrUnsupported, v)
@@ -60,17 +62,17 @@ func CompileARM64(f *ssa.Func, enc abi.Encoding) (code *Code, err error) {
 	for r := 3; r <= 31; r++ {
 		fprs = append(fprs, r)
 	}
-	k, err := prepare(f, enc, gprs, fprs)
+	k, err := prepare(w, f, enc, gprs, fprs)
 	if err != nil {
 		return nil, err
 	}
-	c := &a64Compiler{core: k, labels: map[*ssa.Block]arm64.Label{}, stubs: map[stubKey]arm64.Label{}}
+	c := &a64Compiler{core: k, labels: make([]arm64.Label, numBlocks(f)), stubs: map[stubKey]arm64.Label{}}
 	entries := map[int]int{}
 	for _, b := range c.order {
-		c.labels[b] = c.a.NewLabel()
+		c.labels[b.ID] = c.a.NewLabel()
 	}
 	for i, b := range c.order {
-		c.a.Bind(c.labels[b])
+		c.a.Bind(c.labels[b.ID])
 		if b.PC < 0 {
 			for _, e := range f.Entries {
 				if e.Block == b {
@@ -427,7 +429,7 @@ func (c *a64Compiler) edge(from, to, next *ssa.Block) {
 		})
 	}
 	if to != next {
-		c.a.B(c.labels[to])
+		c.a.B(c.labels[to.ID])
 	}
 }
 
