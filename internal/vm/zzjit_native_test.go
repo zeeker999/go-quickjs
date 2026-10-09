@@ -4960,6 +4960,10 @@ func TestJITSSACallSeenWhileCalleeLeaves(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	// While the collector marks, Go makes native calls, which would count
+	// as calls leaving native code.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	setup := `var mode=0;
 		function leaf(a){if(mode)return (a*3)|0;return String(a).length}
 		function other(n){let t=0;for(let i=0;i<n;i++)t=(t+leaf(i))|0;return t}
@@ -5024,6 +5028,10 @@ func TestJITSSAPolymorphicReadsSettle(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	// While the collector marks, Go makes native calls, which would count
+	// as calls leaving native code.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	setup := `function A(){};A.prototype.v=1;function B(){};B.prototype.v=2;
 		function C(){};C.prototype.v=3;function D(){};D.prototype.v=4;
 		var one=[new A()],four=[new A(),new B(),new C(),new D()];
@@ -5102,6 +5110,10 @@ func TestJITSSASeedsMethodCalls(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	// While the collector marks, Go makes native calls, which would count
+	// as calls leaving native code.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	setup := `function P(x){this.x=x}
 		P.prototype.get=function(){return this.x};
 		P.prototype.big=function(n){let s=0;for(let i=0;i<n;i++)s=(s+i*this.x)|0;return s};
@@ -5168,6 +5180,10 @@ func TestJITSSASeedsConstructions(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	// While the collector marks, Go makes native calls, which would count
+	// as calls leaving native code.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	defer func(was bool) { jitcompile.SSAConstruct = was }(jitcompile.SSAConstruct)
 	jitcompile.SSAConstruct = true
 	setup := `function V(x){this.x=x;this.y=x+1}
@@ -5220,6 +5236,10 @@ func TestJITLoopPromotedPastCalleesLoops(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	// While the collector marks, Go makes native calls, which would count
+	// as calls leaving native code.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	setup := `function P(x){this.x=x}
 		P.prototype.big=function(n){let s=0;for(let i=0;i<n;i++)s=(s+i*this.x)|0;return s};
 		function heavy(n){let s=1;for(let i=0;i<n;i++)s=(s*3+i)|0;return s}
