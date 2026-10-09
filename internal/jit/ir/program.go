@@ -210,6 +210,10 @@ type Instruction struct {
 	Check     bool
 	CheckSlot int
 	Key       uint32
+	// Strict marks an Eq or Ne that is === or !==. On numbers the two
+	// agree; the new pipeline compares with null and undefined natively,
+	// where they do not.
+	Strict bool
 }
 
 // StateMap describes state immediately before a bytecode instruction. PC is

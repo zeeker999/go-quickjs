@@ -94,6 +94,12 @@ func apply(op Op, aux int, a, b val) val {
 		}
 	case OpNot:
 		return val{b: !a.b}
+	case OpStrictNullish:
+		kind := ir.Null
+		if aux == 1 {
+			kind = ir.Undefined
+		}
+		return val{b: a.t.Kind == kind}
 	case OpToInt32:
 		return val{i: ir.ToUint32(a.f)}
 	case OpAndI32:
@@ -182,6 +188,8 @@ type String struct {
 type Object struct {
 	Shape    uintptr
 	Ordinary bool
+	// HTMLDDA is Annex B's [[IsHTMLDDA]]: == null and == undefined hold.
+	HTMLDDA  bool
 	Keys     []uint32
 	Data     []bool
 	Writable []bool
@@ -304,6 +312,13 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
 				vals[v.ID] = val{f: math.Float64frombits(a.t.Bits)}
+			case OpLooseNullish:
+				t := a.t
+				r := t.Kind == ir.Null || t.Kind == ir.Undefined
+				if t.Kind == ir.Opaque && t.Bits < uint64(len(heap.Objects)) {
+					r = heap.Objects[t.Bits].HTMLDDA
+				}
+				vals[v.ID] = val{b: r}
 			case OpTruth:
 				t, ok := truth(a.t)
 				if !ok {

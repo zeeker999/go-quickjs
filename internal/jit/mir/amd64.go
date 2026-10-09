@@ -278,7 +278,7 @@ func (c *compiler) exitTo(s *ssa.FrameState, kind uint64) {
 		c.appendRecord(uint64(i)|abi.RecordScalar, nil, 0, true, &w)
 		c.a.Bind(next)
 	}
-	c.record(kind, uint64(s.PC), uint64(s.Depth))
+	c.record(kind, uint64(s.PC), uint64(s.Depth), uint64(int64(s.Site)))
 }
 
 // isReference falls through when v, whose word is in w, is the reference
@@ -331,13 +331,15 @@ func (c *compiler) gprAfter(v *ssa.Value) func() amd64.Reg {
 }
 
 // record fills the exit record and returns to Go.
-func (c *compiler) record(kind, pc, depth uint64) {
+func (c *compiler) record(kind, pc, depth, site uint64) {
 	c.a.MovImm(scratchA, kind)
 	c.a.Store(regCtx, abi.OffExitKind, scratchA)
 	c.a.MovImm(scratchA, pc)
 	c.a.Store(regCtx, abi.OffExitPC, scratchA)
 	c.a.MovImm(scratchA, depth)
 	c.a.Store(regCtx, abi.OffExitDepth, scratchA)
+	c.a.MovImm(scratchA, site)
+	c.a.Store(regCtx, abi.OffExitSite, scratchA)
 	c.a.Ret()
 }
 
@@ -935,6 +937,19 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 			return // fused into the branch
 		}
 		c.compare(v)
+	case ssa.OpStrictNullish:
+		word := c.enc.Null
+		if v.Aux == 1 {
+			word = c.enc.Undefined
+		}
+		w := c.gpr(arg(0), scratchB)
+		c.a.MovImm(scratchA, word)
+		c.a.Op(amd64.Cmp, w, scratchA, true)
+		c.a.Setcc(amd64.CondE, scratchA)
+		c.a.MovZX8(scratchA, scratchA)
+		c.setG(v, scratchA)
+	case ssa.OpLooseNullish:
+		c.looseNullish(v, guard)
 	case ssa.OpNot:
 		c.a.MovRR32(scratchA, c.gpr(arg(0), scratchA))
 		c.a.OpImm(amd64.Xor, scratchA, 1, false)
@@ -996,6 +1011,34 @@ func (c *compiler) compare(v *ssa.Value) {
 		c.a.Op(amd64.Or, scratchA, scratchC, false)
 	}
 	c.a.MovZX8(scratchA, scratchA)
+	c.setG(v, scratchA)
+}
+
+// looseNullish is x == null: x's word is null's or undefined's, or x is an
+// object with [[IsHTMLDDA]], found through its origin as objectOf finds it.
+func (c *compiler) looseNullish(v *ssa.Value, guard func(amd64.Cond)) {
+	a := v.Args[0]
+	yes, no, done := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+	w := c.gpr(a, scratchB)
+	for _, word := range []uint64{c.enc.Null, c.enc.Undefined} {
+		c.a.MovImm(scratchA, word)
+		c.a.Op(amd64.Cmp, w, scratchA, true)
+		c.a.Jcc(amd64.CondE, yes)
+	}
+	c.a.MovImm(scratchA, c.enc.Object)
+	c.a.Op(amd64.Cmp, w, scratchA, true)
+	c.a.Jcc(amd64.CondNE, no)
+	if c.reference(v, a, c.enc.Object, guard) {
+		c.a.LoadU8(scratchA, scratchC, c.enc.ObjectFlags)
+		c.a.OpImm(amd64.And, scratchA, int32(c.enc.FlagHTMLDDA), false)
+		c.a.Jcc(amd64.CondNE, yes)
+	}
+	c.a.Bind(no)
+	c.a.MovImm(scratchA, 0)
+	c.a.Jmp(done)
+	c.a.Bind(yes)
+	c.a.MovImm(scratchA, 1)
+	c.a.Bind(done)
 	c.setG(v, scratchA)
 }
 

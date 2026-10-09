@@ -120,6 +120,15 @@ const (
 	OpNegF64 // flips the sign bit, as the slot IR does, NaN included
 	OpCmpF64 // Aux: ir.Lt, ir.Le, ir.Gt, ir.Ge, ir.Eq or ir.Ne -> bool
 	OpNot    // bool -> bool
+	// Equality with null or undefined, whatever the other operand is, as
+	// JavaScript defines it. OpStrictNullish is x === null (Aux 0) or
+	// x === undefined (Aux 1): its word is that one. OpLooseNullish is
+	// x == null, as == undefined: the word is either, or an object's with
+	// Annex B's [[IsHTMLDDA]] (abi.Encoding.FlagHTMLDDA), which it reads
+	// through the object's origin, as OpObjectOf finds it, exiting to Go
+	// (Aux) where that cannot name it.
+	OpStrictNullish // tagged -> bool
+	OpLooseNullish  // tagged -> bool
 
 	// Integer conversions and bitwise operations, as JavaScript defines them.
 	OpToInt32  // f64 -> i32: ToUint32's bits
@@ -142,7 +151,7 @@ var opNames = [...]string{
 	OpObjectOf: "objectof", OpPropRead: "propread", OpPropWrite: "propwrite", OpPropCell: "propcell", OpLoadCell: "loadcell", OpGlobalCell: "globalcell",
 	OpStringMethod: "stringmethod", OpStringCode: "stringcode",
 	OpAddF64: "addf", OpSubF64: "subf", OpMulF64: "mulf", OpDivF64: "divf", OpModF64: "modf", OpNegF64: "negf", OpCmpF64: "cmpf",
-	OpNot: "not", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
+	OpNot: "not", OpStrictNullish: "strictnullish", OpLooseNullish: "loosenullish", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
 }
 
@@ -157,7 +166,7 @@ func (o Op) String() string {
 func (o Op) isGuard() bool {
 	switch o {
 	case OpUnboxF64, OpTruth, OpCheckInit, OpModF64, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite, OpLength,
-		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell, OpStringMethod, OpStringCode:
+		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell, OpStringMethod, OpStringCode, OpLooseNullish:
 		return true
 	}
 	return false
@@ -203,6 +212,10 @@ type FrameState struct {
 	PC    uint32
 	Depth int
 	Slots []*Value
+	// Site is the slot IR PC of the operation whose guards and exits use
+	// this state, or -1 for a block's entry or loop header (abi.Context's
+	// ExitSite).
+	Site int
 }
 
 // Kind is how a block ends.

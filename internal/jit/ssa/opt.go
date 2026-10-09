@@ -176,9 +176,14 @@ func unboxPhis(f *Func) bool {
 	for _, v := range phis {
 		cand[v.ID] = true
 	}
+	// Evidence is an unboxing that speculates: a guard, as arithmetic makes.
+	// One that exits to Go (a comparison, a property write, a remainder)
+	// marks a site that takes any value, which says nothing of the phi's:
+	// counting it had the entry speculate a receiver written to a property
+	// is a number, and fail every call.
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
-			if v.Op == OpUnboxF64 {
+			if v.Op == OpUnboxF64 && ir.ExitKind(v.Aux) == ir.GuardExit {
 				unboxedUse[v.Args[0].ID] = true
 			}
 		}

@@ -68,6 +68,7 @@ var jitEncoding = abi.Encoding{
 	ObjectElems:    int32(unsafe.Offsetof(Object{}.elems)),
 	ClassArray:     uint8(ClassArray),
 	FlagSparse:     uint8(objHasSparseElements),
+	FlagHTMLDDA:    uint8(objHTMLDDA),
 }
 
 // compileSSA compiles a lowered function with the new pipeline, or returns
@@ -149,7 +150,16 @@ func (fb *jitFeedback) Global(pc int) (ssa.GlobalSite, bool) {
 	if i < 0 {
 		return ssa.GlobalSite{}, false
 	}
-	return ssa.GlobalSite{Key: uint32(name), Index: i}, true
+	site := ssa.GlobalSite{Key: uint32(name), Index: i}
+	if p := &env.props[i]; !p.isAccessor() && p.flags&(propWritable|propConfigurable) == 0 {
+		switch {
+		case p.value.IsUndefined():
+			site.Fixed, site.Constant = true, ir.Value{Kind: ir.Undefined}
+		case p.value.IsNumber():
+			site.Fixed, site.Constant = true, ir.Float(p.value.Number())
+		}
+	}
+	return site, true
 }
 
 func (fb *jitFeedback) Property(pc int) (ssa.PropertySite, bool) {
@@ -266,9 +276,10 @@ func (r *Runtime) jitRecordValue(f *frame, e *jitEntry, rec *abi.Record) Value {
 // jitSSAStats counts what one function's new-pipeline code does.
 type jitSSAStats struct {
 	entries, hosts, guards, polls, records uint64
-	// guardsAt counts failed guards by the bytecode PC they exit to; nil
-	// until one fails.
-	guardsAt map[uint32]uint64
+	// guardsAt counts failed guards by their site (abi.Context.ExitSite:
+	// the slot IR PC of the operation, or -1 for an entry's speculation);
+	// nil until one fails.
+	guardsAt map[int32]uint64
 }
 
 // runSSA runs a function compiled by the new pipeline from pc, where the
@@ -322,9 +333,9 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 			s.guards++
 			e.ssaStats.guards++
 			if e.ssaStats.guardsAt == nil {
-				e.ssaStats.guardsAt = map[uint32]uint64{}
+				e.ssaStats.guardsAt = map[int32]uint64{}
 			}
-			e.ssaStats.guardsAt[uint32(ctx.ExitPC)]++
+			e.ssaStats.guardsAt[int32(int64(ctx.ExitSite))]++
 			f.pc = uint32(ctx.ExitPC)
 			return r.jitInterpret(f, f.base+int(ctx.ExitDepth), nil)
 		case abi.ExitHost:

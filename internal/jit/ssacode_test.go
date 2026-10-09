@@ -107,6 +107,9 @@ var testShapes = []struct {
 	{0x3000, []uint32{12, 10}, []uint8{testWritable, testAccessor}},
 }
 
+// testFlagHTMLDDA is the flags byte's [[IsHTMLDDA]] bit.
+const testFlagHTMLDDA = 0x40
+
 const (
 	testClassObject = 0
 	testClassArray  = 2
@@ -133,7 +136,7 @@ var testEncoding = abi.Encoding{
 	Object:      testTagBase | 7,
 	ObjectClass: int32(unsafe.Offsetof(testObject{}.class)), ObjectFlags: int32(unsafe.Offsetof(testObject{}.flags)),
 	ObjectArrayLen: int32(unsafe.Offsetof(testObject{}.arrayLen)), ObjectElems: int32(unsafe.Offsetof(testObject{}.elems)),
-	ClassArray: testClassArray, FlagSparse: testFlagSparse,
+	ClassArray: testClassArray, FlagSparse: testFlagSparse, FlagHTMLDDA: testFlagHTMLDDA,
 	UpvalueSlot: int32(unsafe.Offsetof(testUpvalue{}.slot)),
 	String:      testTagBase | 4, StringData: int32(unsafe.Offsetof(testString{}.s)),
 	StringLeft: int32(unsafe.Offsetof(testString{}.left)), StringLength: int32(unsafe.Offsetof(testString{}.length)),
@@ -164,12 +167,14 @@ type testArray struct {
 	keys      []uint32 // the table's keys, flags and values' number words
 	flags     []uint8
 	props     []ir.Value
+	// htmldda gives the object Annex B's [[IsHTMLDDA]].
+	htmldda bool
 }
 
 func randomTestHeap(r *rand.Rand) testHeap {
 	h := make(testHeap, 4)
 	for i := range h {
-		a := testArray{cells: make([]uint64, r.IntN(6)), array: i != 2}
+		a := testArray{cells: make([]uint64, r.IntN(6)), array: i != 2, htmldda: r.IntN(4) == 0}
 		for j := range a.cells {
 			switch k := r.IntN(6); {
 			case i == 1 && k == 0:
@@ -264,6 +269,9 @@ func (h testHeap) native() *nativeHeap {
 		if a.length > uint64(len(a.cells)) {
 			o.flags, o.arrayLen = testFlagSparse, uint32(a.length)
 		}
+		if a.htmldda {
+			o.flags |= testFlagHTMLDDA
+		}
 		if a.shape >= 0 {
 			o.shape = testShapes[a.shape].shape
 		}
@@ -312,7 +320,7 @@ func (n *nativeHeap) heap() ssa.Heap {
 	h := ssa.Heap{Arrays: n.views()}
 	for i := range n.objects {
 		o := &n.objects[i]
-		e := ssa.Object{Shape: o.shape, Ordinary: o.class == testClassObject, Props: n.evaluated[i]}
+		e := ssa.Object{Shape: o.shape, Ordinary: o.class == testClassObject, Props: n.evaluated[i], HTMLDDA: o.flags&testFlagHTMLDDA != 0}
 		for _, p := range o.props {
 			e.Keys = append(e.Keys, p.key)
 			e.Data = append(e.Data, p.flags&testEncoding.PropNotData == 0)
@@ -595,6 +603,19 @@ func ssaTestProgram(r *rand.Rand) (*ir.Program, layout) {
 			}
 		case ir.Branch:
 			in.Operator = []ir.Operator{ir.Truth, ir.Lt, ir.Le, ir.Gt, ir.Ge, ir.Eq, ir.Ne}[r.IntN(7)]
+		}
+		if (in.Op == ir.Binary || in.Op == ir.Branch) && (in.Operator == ir.Eq || in.Operator == ir.Ne) {
+			// Strict or loose, often against null or undefined, which the new
+			// pipeline compares natively whatever the other operand is.
+			in.Strict = r.IntN(2) == 0
+			if r.IntN(2) == 0 {
+				nullish := ir.Literal(ir.Value{Kind: []ir.Kind{ir.Null, ir.Undefined}[r.IntN(2)]})
+				if r.IntN(2) == 0 {
+					in.Left, in.Right = in.Right, nullish
+				} else {
+					in.Right = nullish
+				}
+			}
 		}
 		if r.IntN(8) == 0 {
 			in.Check, in.CheckSlot = true, r.IntN(locals)
