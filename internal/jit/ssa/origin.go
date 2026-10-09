@@ -17,8 +17,11 @@ import (
 // slots' values -- a loop that does x=o, entered at its header with x
 // already holding a reference -- and two references can share a number
 // word, as two objects do, so no test of the word tells them apart. Such a
-// phi has a shadow: a Source phi holding, at run time, the slot its value
-// came from, or -1 for a primitive. An exit passes the shadow to Go.
+// phi has a shadow: a Source phi holding, at run time, where its value came
+// from -- the address of the slot's value, which is in the frame, in the
+// context for the receiver, or in a captured binding's cell -- or 0 for a
+// primitive. An exit passes the shadow to Go, and native code reads the
+// pointer word there, the same way wherever it is.
 //
 // A reference loaded from an object (OpLoadCell) came from a heap cell, not
 // a slot: its shadow is the cell's address. The cell holds the reference
@@ -137,7 +140,8 @@ func joinOrigin(a, b int) int {
 
 // shadowMerges gives every ambiguous phi a shadow, and every phi that
 // flows into one and may hold a reference, so that each shadow's arguments
-// are shadows or constants: a load's slot, or -1 for a primitive. The
+// are shadows or constants: a load's slot, or -1 for a primitive, which
+// native code makes the slot's address, or 0 (OpConstSource). The
 // constants are made in the predecessor the argument comes from.
 func shadowMerges(f *Func) {
 	origin := Origins(f)

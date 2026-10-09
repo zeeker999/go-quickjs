@@ -338,7 +338,7 @@ func (b *builder) inlineAt(pc int, total *int) (*frame, bool) {
 	}
 	q := referenceReads(site.Program, site.Feedback)
 	// Its slots follow the function's and earlier callees': every slot's
-	// number stays below abi.MaxRecords, past which a source is an address.
+	// number stays below abi.MaxRecords, as records name slots by number.
 	if b.nslots+q.Locals+q.StackSize > abi.MaxRecords {
 		return nil, false
 	}

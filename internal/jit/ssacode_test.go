@@ -564,18 +564,21 @@ func (n *nativeHeap) word(v ir.Value) testValue {
 // tell it reaches them.
 var referenceExits struct{ copies, scalars, maybes, cells, returns int }
 
-// source is the value a run-time source names (origin.go): a slot's, or,
-// at or above abi.MaxRecords, the value at a heap cell's address; nil for a
-// primitive's -1. word holds the source, as native code wrote it.
-func source(word *uint64, at func(int) *testValue) *testValue {
-	switch from := int64(*word); {
-	case from < 0:
+// source is the value a run-time source names (origin.go): the value at
+// its address, one of the state's slots or a heap cell, which it counts; nil
+// for a primitive's 0. word holds the source, as native code wrote it.
+func source(word *uint64, at func(int) *testValue, slots int) *testValue {
+	if *word == 0 {
 		return nil
-	case from < abi.MaxRecords:
-		return at(int(from))
+	}
+	v := *(**testValue)(unsafe.Pointer(word))
+	for i := range slots {
+		if at(i) == v {
+			return v
+		}
 	}
 	referenceExits.cells++
-	return *(**testValue)(unsafe.Pointer(word))
+	return v
 }
 
 // applyRecords does what Go does with an exit's records (abi.Record),
@@ -602,10 +605,7 @@ func applyRecords(ctx *abi.Context, at func(int) *testValue, slots int) error {
 			referenceExits.scalars++
 		case r.Slot&abi.RecordMaybe != 0:
 			src[i] = testValue{num: r.Word}
-			if from := int64(r.Arg); from >= int64(slots) && from < abi.MaxRecords {
-				return fmt.Errorf("record %d reads slot %d", i, from)
-			}
-			if v := source(&ctx.Record[i].Arg, at); v != nil && v.ref != nil {
+			if v := source(&ctx.Record[i].Arg, at, slots); v != nil && v.ref != nil {
 				src[i] = *v
 			}
 			referenceExits.maybes++
@@ -922,8 +922,7 @@ func nativeMismatch(c *compiled, pc int, slots []ir.Value, poll int, heap testHe
 	}
 	if got.Kind == ir.Returned {
 		ret := testValue{num: ctx.Ret}
-		from := ctx.RetFrom - 1
-		if v := source(&from, at); v != nil && v.ref != nil {
+		if v := source(&ctx.RetFrom, at, f.Locals); v != nil && v.ref != nil {
 			ret = *v
 			referenceExits.returns++
 		}

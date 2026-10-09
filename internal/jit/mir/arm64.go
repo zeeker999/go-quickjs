@@ -152,6 +152,12 @@ func (c *a64Compiler) slotAddr(slot int, ref bool, scratch arm64.Reg) (arm64.Reg
 	return a64Stack, int32(slot-c.f.Locals)*c.enc.ValueSize + off
 }
 
+// slotSource puts in dst a slot's source, as amd64's does.
+func (c *a64Compiler) slotSource(slot int, dst arm64.Reg) {
+	base, disp := c.slotAddr(slot, false, dst)
+	c.a.AddImm(dst, base, int64(disp-c.enc.NumOffset), true)
+}
+
 // gpr returns a register holding v's word, loading a spilled or lazy value
 // into scratch.
 func (c *a64Compiler) gpr(v *ssa.Value, scratch arm64.Reg) arm64.Reg {
@@ -246,7 +252,11 @@ func (c *a64Compiler) materialize(v *ssa.Value, dst arm64.Reg) {
 	case ssa.OpConst:
 		c.a.MovImm(dst, c.constWord(v.Const))
 	case ssa.OpConstSource:
-		c.a.MovImm(dst, uint64(int64(v.Aux)))
+		if v.Aux < 0 {
+			c.a.MovImm(dst, 0)
+		} else {
+			c.slotSource(v.Aux, dst)
+		}
 	case ssa.OpBoxF64:
 		c.boxF64(c.fpr(v.Args[0], a64F1), dst)
 	case ssa.OpBoxBool:
@@ -317,9 +327,9 @@ func (c *a64Compiler) exitThen(s *ssa.FrameState, kind uint64, then *arm64.Label
 			// slot's reference.
 			scalar := c.a.NewLabel()
 			from := c.gpr(v.Shadow, a64B)
-			c.a.CmpImm(from, -1, true)
-			c.a.BCond(arm64.EQ, scalar)
-			c.a.CmpImm(from, int64(i), true)
+			c.a.Cbz(from, scalar, true)
+			c.slotSource(i, a64C)
+			c.a.Cmp(from, a64C, true)
 			c.a.BCond(arm64.EQ, next)
 			c.appendRecord(uint64(i)|abi.RecordMaybe, c.gprAfter(v.Shadow), 0, false, &w)
 			c.a.B(next)
@@ -469,9 +479,7 @@ func (c *a64Compiler) recordsTail() {
 	c.a.B(next)
 	c.a.Bind(maybe)
 	c.a.Load(a64C, a64A, abi.OffRecord+8)
-	c.a.CmpImm(a64C, 0, true)
-	c.a.BCond(arm64.MI, scalar)
-	c.sourceAddr()
+	c.a.Cbz(a64C, scalar, true)
 	c.a.Load(a64B, a64C, c.enc.RefOffset)
 	c.a.Cbnz(a64B, copyValue, true)
 	c.a.Bind(scalar)
@@ -516,8 +524,6 @@ func (c *a64Compiler) returnNative() {
 	c.a.Store(a64Ctx, abi.OffRetValue+c.enc.RefOffset, arm64.ZR)
 	c.a.Load(a64C, a64Ctx, abi.OffRetFrom)
 	c.a.Cbz(a64C, word, true)
-	c.a.AddImm(a64C, a64C, -1, true)
-	c.sourceAddr()
 	c.a.Load(a64C, a64C, c.enc.RefOffset)
 	c.a.Store(a64Ctx, abi.OffRetValue+c.enc.RefOffset, a64C)
 	c.a.Bind(word)
@@ -548,13 +554,12 @@ func (c *a64Compiler) block(b *ssa.Block, next *ssa.Block) {
 		c.a.Store(a64Ctx, abi.OffRet, r)
 		c.a.Store(a64Ctx, abi.OffRetFrom, arm64.ZR)
 		if s := b.Control.Shadow; s != nil {
-			// RetFrom is the source plus one, and 0 for a primitive's -1.
-			c.a.AddImm(a64C, c.gpr(s, a64C), 1, true)
-			c.a.Store(a64Ctx, abi.OffRetFrom, a64C)
+			// RetFrom is the source, 0 for a primitive's.
+			c.a.Store(a64Ctx, abi.OffRetFrom, c.gpr(s, a64C))
 		} else if o, ok := c.origin.Of(b.Control); ok && o >= 0 {
 			done := c.a.NewLabel()
 			c.isReference(b.Control, r, o, done)
-			c.a.MovImm(a64C, uint64(o)+1)
+			c.slotSource(o, a64C)
 			c.a.Store(a64Ctx, abi.OffRetFrom, a64C)
 			c.a.Bind(done)
 		}
@@ -811,19 +816,18 @@ func (c *a64Compiler) sourceRef(a *ssa.Value, guard func(arm64.Cond)) {
 	if s := a.Shadow; s != nil && cellSource(s) {
 		c.a.Load(a64C, c.gpr(s, a64C), c.enc.RefOffset)
 	} else if s != nil {
-		c.a.MovRR(a64C, c.gpr(s, a64C))
-		c.a.CmpImm(a64C, 0, true)
-		guard(arm64.MI)
-		c.sourceAddr()
-		c.a.Load(a64C, a64C, c.enc.RefOffset)
+		r := c.gpr(s, a64C)
+		c.a.CmpImm(r, 0, true)
+		guard(arm64.EQ)
+		c.a.Load(a64C, r, c.enc.RefOffset)
 	} else {
 		base, disp := c.slotAddr(o, true, a64C)
 		c.a.Load(a64C, base, disp)
 	}
 }
 
-// sourceAddr turns the source in C into the address of its value, as
-// amd64's does. It uses B.
+// sourceAddr turns the slot in C, a record's, into the address of its
+// value, as amd64's does. It uses B.
 func (c *a64Compiler) sourceAddr() {
 	captured, stack, found := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
 	c.a.CmpImm(a64C, abi.MaxRecords, true)
@@ -1239,13 +1243,9 @@ func (c *a64Compiler) pointerWord(x *ssa.Value, w arm64.Reg) {
 	case x.Shadow != nil && cellSource(x.Shadow):
 		c.a.Load(a64B, c.gpr(x.Shadow, a64C), c.enc.RefOffset)
 	case x.Shadow != nil:
-		if r := c.gpr(x.Shadow, a64C); r != a64C {
-			c.a.MovRR(a64C, r)
-		}
-		c.a.CmpImm(a64C, -1, true)
-		c.a.BCond(arm64.EQ, done)
-		c.sourceAddr()
-		c.a.Load(a64B, a64C, c.enc.RefOffset)
+		r := c.gpr(x.Shadow, a64C)
+		c.a.Cbz(r, done, true)
+		c.a.Load(a64B, r, c.enc.RefOffset)
 	case static && o >= 0:
 		c.isReference(x, w, o, done)
 		base, disp := c.slotAddr(o, true, a64C)
@@ -1265,13 +1265,13 @@ func (c *a64Compiler) keepSource(x *ssa.Value) {
 	case static && o >= 0:
 		scalar, done := c.a.NewLabel(), c.a.NewLabel()
 		c.isReference(x, c.gpr(x, a64A), o, scalar)
-		c.a.MovImm(a64C, uint64(o))
+		c.slotSource(o, a64C)
 		c.a.B(done)
 		c.a.Bind(scalar)
-		c.a.MovImm(a64C, ^uint64(0))
+		c.a.MovImm(a64C, 0)
 		c.a.Bind(done)
 	default:
-		c.a.MovImm(a64C, ^uint64(0))
+		c.a.MovImm(a64C, 0)
 	}
 }
 
@@ -1284,9 +1284,7 @@ func (c *a64Compiler) keepRef(v *ssa.Value) {
 	c.a.MovImm(a64B, c.enc.WriteBarrier)
 	c.a.LoadU8(a64B, a64B, 0)
 	c.a.Cbnz(a64B, scalar, false)
-	c.a.CmpImm(a64C, -1, true)
-	c.a.BCond(arm64.EQ, scalar)
-	c.sourceAddr()
+	c.a.Cbz(a64C, scalar, true)
 	c.a.Load(a64A, a64C, c.enc.RefOffset)
 	c.a.Bind(scalar)
 	c.setG(v, a64A)

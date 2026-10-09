@@ -36,9 +36,9 @@ const (
 	// Ptr is an object's address, read from the frame slot that holds it.
 	// It never reaches a slot or crosses an exit.
 	Ptr
-	// Source is where a tagged value came from, at run time: a slot's index,
-	// -1 for a primitive, or the address of the heap cell it was loaded
-	// from, which is at or above abi.MaxRecords (origin.go).
+	// Source is where a tagged value came from, at run time: the address of
+	// a slot's value or of the heap cell it was loaded from, or 0 for a
+	// primitive (origin.go).
 	Source
 )
 
@@ -56,7 +56,7 @@ const (
 	OpLoadSlot    // Aux: the slot, read from the frame at an entry.
 	OpConst       // Const: a tagged constant.
 	OpConstF64    // Const.Bits: the number's bits.
-	OpConstSource // Aux: a slot's index, or -1: a source (origin.go)
+	OpConstSource // Aux: a slot's index, or -1: its source, or 0 (origin.go)
 	OpPhi         // Args: one per predecessor, in Block.Preds order.
 
 	// Guards and checks: each has a frame state and exits to it when it

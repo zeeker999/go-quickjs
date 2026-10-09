@@ -146,6 +146,14 @@ func (c *compiler) slotAddr(slot int, ref bool, scratch amd64.Reg) (amd64.Reg, i
 	return regStack, int32(slot-c.f.Locals)*c.enc.ValueSize + off
 }
 
+// slotSource puts in dst a slot's source (ssa's origin.go): the address
+// of its value -- a local's or an operand's in the frame, the receiver's in
+// the context, a captured binding's in its cell.
+func (c *compiler) slotSource(slot int, dst amd64.Reg) {
+	base, disp := c.slotAddr(slot, false, dst)
+	c.a.Lea(dst, base, disp-c.enc.NumOffset)
+}
+
 // gpr returns a register holding v's word, loading a spilled or lazy value
 // into scratch.
 func (c *compiler) gpr(v *ssa.Value, scratch amd64.Reg) amd64.Reg {
@@ -207,7 +215,11 @@ func (c *compiler) materialize(v *ssa.Value, dst amd64.Reg) {
 	case ssa.OpConst:
 		c.a.MovImm(dst, c.constWord(v.Const))
 	case ssa.OpConstSource:
-		c.a.MovImm(dst, uint64(int64(v.Aux)))
+		if v.Aux < 0 {
+			c.a.MovImm(dst, 0)
+		} else {
+			c.slotSource(v.Aux, dst)
+		}
 	case ssa.OpBoxF64:
 		c.boxF64(c.xmm(v.Args[0], xScratch1), dst)
 	case ssa.OpBoxBool:
@@ -268,8 +280,6 @@ func (c *compiler) returnNative() {
 	c.a.Load(scratchC, regCtx, abi.OffRetFrom)
 	c.a.Op(amd64.Test, scratchC, scratchC, true)
 	c.a.Jcc(amd64.CondE, word)
-	c.a.OpImm(amd64.Sub, scratchC, 1, true)
-	c.sourceAddr()
 	c.a.Load(scratchC, scratchC, c.enc.RefOffset)
 	c.a.Store(regCtx, abi.OffRetValue+c.enc.RefOffset, scratchC)
 	c.a.Bind(word)
@@ -535,13 +545,10 @@ func (c *compiler) pointerWord(x *ssa.Value, w amd64.Reg) {
 	case x.Shadow != nil && cellSource(x.Shadow):
 		c.a.Load(scratchB, c.gpr(x.Shadow, scratchC), c.enc.RefOffset)
 	case x.Shadow != nil:
-		if r := c.gpr(x.Shadow, scratchC); r != scratchC {
-			c.a.MovRR(scratchC, r)
-		}
-		c.a.OpImm(amd64.Cmp, scratchC, -1, true)
+		r := c.gpr(x.Shadow, scratchC)
+		c.a.Op(amd64.Test, r, r, true)
 		c.a.Jcc(amd64.CondE, done)
-		c.sourceAddr()
-		c.a.Load(scratchB, scratchC, c.enc.RefOffset)
+		c.a.Load(scratchB, r, c.enc.RefOffset)
 	case static && o >= 0:
 		c.isReference(x, w, o, done)
 		base, disp := c.slotAddr(o, true, scratchC)
@@ -587,13 +594,14 @@ func (c *compiler) exitThen(s *ssa.FrameState, kind uint64, then *amd64.Label) {
 		}
 		next := c.a.NewLabel()
 		if v.Shadow != nil {
-			// Which slot it came from is known only at run time: Go looks,
-			// unless it is none or this one.
+			// Where it came from is known only at run time: Go looks,
+			// unless it is nowhere or this slot.
 			scalar := c.a.NewLabel()
 			from := c.gpr(v.Shadow, scratchB)
-			c.a.OpImm(amd64.Cmp, from, -1, true)
+			c.a.Op(amd64.Test, from, from, true)
 			c.a.Jcc(amd64.CondE, scalar)
-			c.a.OpImm(amd64.Cmp, from, int32(i), true)
+			c.slotSource(i, scratchC)
+			c.a.Op(amd64.Cmp, from, scratchC, true)
 			c.a.Jcc(amd64.CondE, next)
 			c.appendRecord(uint64(i)|abi.RecordMaybe, c.gprAfter(v.Shadow), 0, false, &w)
 			c.a.Jmp(next)
@@ -769,8 +777,7 @@ func (c *compiler) recordsTail() {
 	c.a.Bind(maybe)
 	c.a.Load(scratchC, scratchA, abi.OffRecord+8)
 	c.a.Op(amd64.Test, scratchC, scratchC, true)
-	c.a.Jcc(amd64.CondS, scalar)
-	c.sourceAddr()
+	c.a.Jcc(amd64.CondE, scalar)
 	c.a.Load(scratchB, scratchC, c.enc.RefOffset)
 	c.a.Op(amd64.Test, scratchB, scratchB, true)
 	c.a.Jcc(amd64.CondNE, copyValue)
@@ -838,15 +845,13 @@ func (c *compiler) block(b *ssa.Block, next *ssa.Block) {
 		c.a.MovImm(scratchC, 0)
 		c.a.Store(regCtx, abi.OffRetFrom, scratchC)
 		if s := b.Control.Shadow; s != nil {
-			// RetFrom is the source plus one, and 0 for a primitive's -1;
-			// Go checks that the slot or cell holds a reference.
-			c.a.MovRR(scratchC, c.gpr(s, scratchC))
-			c.a.OpImm(amd64.Add, scratchC, 1, true)
-			c.a.Store(regCtx, abi.OffRetFrom, scratchC)
+			// RetFrom is the source, 0 for a primitive's; Go checks that
+			// the slot or cell holds a reference.
+			c.a.Store(regCtx, abi.OffRetFrom, c.gpr(s, scratchC))
 		} else if o, ok := c.origin.Of(b.Control); ok && o >= 0 {
 			done := c.a.NewLabel()
 			c.isReference(b.Control, r, o, done)
-			c.a.MovImm(scratchC, uint64(o)+1)
+			c.slotSource(o, scratchC)
 			c.a.Store(regCtx, abi.OffRetFrom, scratchC)
 			c.a.Bind(done)
 		}
@@ -1007,31 +1012,29 @@ func (c *compiler) reference(v, a *ssa.Value, word uint64, guard func(amd64.Cond
 }
 
 // sourceRef loads the pointer word of a, a value with a source -- an origin
-// that is a slot, or a shadow -- from there into scratchC. A shadow of -1,
+// that is a slot, or a shadow -- from there into scratchC. A shadow of 0,
 // a primitive's, exits. It uses scratchA and scratchB.
 func (c *compiler) sourceRef(a *ssa.Value, guard func(amd64.Cond)) {
 	o := c.origin.At(a)
 	if s := a.Shadow; s != nil && cellSource(s) {
 		c.a.Load(scratchC, c.gpr(s, scratchC), c.enc.RefOffset)
 	} else if s != nil {
-		// The source is known at run time: a local, a captured binding, the
-		// receiver, an operand, or a heap cell (origin.go). scratchC becomes
-		// its value's address.
-		c.a.MovRR(scratchC, c.gpr(s, scratchC))
-		c.a.Op(amd64.Test, scratchC, scratchC, true)
-		guard(amd64.CondS)
-		c.sourceAddr()
-		c.a.Load(scratchC, scratchC, c.enc.RefOffset)
+		// The source is known at run time: a local's, a captured
+		// binding's, the receiver's, an operand's or a heap cell's address
+		// (origin.go).
+		r := c.gpr(s, scratchC)
+		c.a.Op(amd64.Test, r, r, true)
+		guard(amd64.CondE)
+		c.a.Load(scratchC, r, c.enc.RefOffset)
 	} else {
 		base, disp := c.slotAddr(o, true, scratchC)
 		c.a.Load(scratchC, base, disp)
 	}
 }
 
-// sourceAddr turns the source in scratchC -- a slot, not negative, or a
-// heap cell -- into the address of its value: a local's, a captured
-// binding's, the receiver's in the context, an operand's, or the cell. It
-// uses scratchB.
+// sourceAddr turns the slot in scratchC, a record's, into the address of
+// its value (slotSource); a heap cell's address, at or above
+// abi.MaxRecords, it leaves as it is. It uses scratchB.
 func (c *compiler) sourceAddr() {
 	captured, stack, found := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
 	c.a.OpImm(amd64.Cmp, scratchC, abi.MaxRecords, true)
@@ -1249,8 +1252,9 @@ func (c *compiler) stringBytes(exit, yes, no amd64.Label) {
 }
 
 // keepSource leaves in scratchC where a tagged value came from, as an
-// exit's record has it: its shadow; the slot its origin is, if the value is
-// that slot's reference at entry; or -1 for a primitive. It uses scratchA.
+// exit's record has it: its shadow; the source of the slot its origin is,
+// if the value is that slot's reference at entry; or 0 for a primitive. It
+// uses scratchA.
 func (c *compiler) keepSource(x *ssa.Value) {
 	switch o, static := c.origin.Of(x); {
 	case x.Shadow != nil:
@@ -1260,13 +1264,13 @@ func (c *compiler) keepSource(x *ssa.Value) {
 	case static && o >= 0:
 		scalar, done := c.a.NewLabel(), c.a.NewLabel()
 		c.isReference(x, c.gpr(x, scratchA), o, scalar)
-		c.a.MovImm(scratchC, uint64(o))
+		c.slotSource(o, scratchC)
 		c.a.Jmp(done)
 		c.a.Bind(scalar)
-		c.a.MovImm(scratchC, ^uint64(0))
+		c.a.MovImm(scratchC, 0)
 		c.a.Bind(done)
 	default:
-		c.a.MovImm(scratchC, ^uint64(0))
+		c.a.MovImm(scratchC, 0)
 	}
 }
 
@@ -1282,9 +1286,8 @@ func (c *compiler) keepRef(v *ssa.Value) {
 	c.a.LoadU8(scratchB, scratchB, 0)
 	c.a.Op(amd64.Test, scratchB, scratchB, false)
 	c.a.Jcc(amd64.CondNE, scalar)
-	c.a.OpImm(amd64.Cmp, scratchC, -1, true)
+	c.a.Op(amd64.Test, scratchC, scratchC, true)
 	c.a.Jcc(amd64.CondE, scalar)
-	c.sourceAddr()
 	c.a.Load(scratchA, scratchC, c.enc.RefOffset)
 	c.a.Bind(scalar)
 	c.setG(v, scratchA)
