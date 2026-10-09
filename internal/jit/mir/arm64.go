@@ -1085,10 +1085,17 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 	}
 	c.a.B(stub)
 	c.a.Bind(checked)
+	// As amd64's: a call of one function writes its operands where the
+	// callee has them, unrecorded.
+	direct, ops := len(sites) == 1 && (site.ThisSlot < 0 || site.Method), calleeSlot
+	if site.Method {
+		ops--
+	}
+	direct = direct && c.operandsLive(s, ops)
 	record := map[int]int32{}
 	k := int32(0)
 	for i, x := range s.Slots {
-		if x == nil || x.Op == ssa.OpLoadSlot && x.Aux == i || c.captured(i) {
+		if x == nil || x.Op == ssa.OpLoadSlot && x.Aux == i || c.captured(i) || direct && i >= ops {
 			continue
 		}
 		var w arm64.Reg
@@ -1122,6 +1129,21 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		c.a.MovImm(a64A, f.v)
 		c.a.Store(a64Ctx, f.off, a64A)
 	}
+	if direct {
+		// The callee's frame's address, in D, which pointerWord does not
+		// use.
+		c.a.Load(a64D, a64Ctx, abi.OffStackTop)
+		c.a.Load(a64D, a64D, 0)
+		c.a.ShiftImm(arm64.Lsl, a64D, a64D, 4, true)
+		c.a.Load(a64B, a64Ctx, abi.OffStackBase)
+		c.a.Op(arm64.Add, a64D, a64D, a64B, true)
+		for i := 0; i < site.Params && i < site.Argc && i < site.LocalCount; i++ {
+			c.directOperand(s.Slots[sp-site.Argc+i], a64D, int32(i)*vs)
+		}
+		if site.ThisSlot >= 0 {
+			c.directOperand(s.Slots[calleeSlot-1], a64Ctx, abi.ContextSize+abi.OffThis)
+		}
+	}
 	words := func(slot int) (nb arm64.Reg, nd int32, rb arm64.Reg, rd int32) {
 		if k, ok := record[slot]; ok {
 			return a64Ctx, abi.OffRecord + k*32 + 16, a64Ctx, abi.OffRecordRef + k*8
@@ -1154,8 +1176,10 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 	back := c.a.NewLabel()
 	c.a.Adr(tmp, back)
 	c.a.Store(calleeCtx, abi.OffReturnTo, tmp)
-	_, _, rb, rd := words(calleeSlot)
-	c.a.Load(tmp, rb, rd)
+	if !direct {
+		_, _, rb, rd := words(calleeSlot)
+		c.a.Load(tmp, rb, rd)
+	}
 	for i, t := range sites {
 		next := c.a.NewLabel()
 		if i < len(sites)-1 {
@@ -1167,6 +1191,9 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		c.a.Store(calleeCtx, abi.OffStack, top)
 		for i := 0; i < t.LocalCount; i++ {
 			at := int32(i) * vs
+			if i < t.Params && i < t.Argc && direct {
+				continue
+			}
 			if i < t.Params && i < t.Argc {
 				nb, nd, rb, rd := words(sp - t.Argc + i)
 				c.a.Load(top, nb, nd)
@@ -1179,7 +1206,7 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 			c.a.Store(locals, at+c.enc.NumOffset, top)
 			c.a.Store(locals, at+c.enc.RefOffset, arm64.ZR)
 		}
-		if t.ThisSlot >= 0 {
+		if t.ThisSlot >= 0 && !direct {
 			nb, nd, rb, rd := words(calleeSlot - 1)
 			c.a.Load(top, nb, nd)
 			c.a.Store(calleeCtx, abi.OffThis+c.enc.NumOffset, top)
@@ -1233,6 +1260,22 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		}
 	}
 	c.setG(v, a64A)
+}
+
+// directOperand writes a call's operand x, both words, at disp from base
+// -- the callee's frame or this context -- as amd64's does. It uses A, B
+// and C.
+func (c *a64Compiler) directOperand(x *ssa.Value, base arm64.Reg, disp int32) {
+	var w arm64.Reg
+	if remat(x) {
+		c.materialize(x, a64A)
+		w = a64A
+	} else {
+		w = c.gpr(x, a64A)
+	}
+	c.a.Store(base, disp+c.enc.NumOffset, w)
+	c.pointerWord(x, w)
+	c.a.Store(base, disp+c.enc.RefOffset, a64B)
 }
 
 // pointerWord leaves in B the pointer word of a value whose number word is

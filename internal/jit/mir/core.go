@@ -582,6 +582,19 @@ func (c *core) allocate() error {
 	return nil
 }
 
+// operandsLive reports whether a call's operands, a state's slots from ops
+// on, all have a location or can be made: none is a load left lazy, which
+// only its own slot holds, and the call writes them where its callee has
+// them (directOperand). A call is never in an entry block, so none is.
+func (c *core) operandsLive(s *ssa.FrameState, ops int) bool {
+	for _, x := range s.Slots[ops:] {
+		if x == nil || x.Op == ssa.OpLoadSlot && c.isLazy(x) {
+			return false
+		}
+	}
+	return true
+}
+
 // inlineLevels are the inlined frames an exit in state s makes, the
 // outermost first (ssa.InlineState).
 func inlineLevels(s *ssa.FrameState) []*ssa.InlineState {

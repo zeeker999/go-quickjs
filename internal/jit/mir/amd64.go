@@ -361,11 +361,21 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 	}
 	c.a.Jmp(c.stubLabel(s, exitKind(v.Aux)))
 	c.a.Bind(checked)
+	// A call of one function has its operands -- the function, the
+	// receiver, the arguments -- written straight where the callee has
+	// them (directOperand), not recorded: Go never reads them, as a callee
+	// that leaves native code is finished from its own frame, and its
+	// result replaces them (the VM's jitCallResult).
+	direct, ops := len(sites) == 1 && (site.ThisSlot < 0 || site.Method), calleeSlot
+	if site.Method {
+		ops--
+	}
+	direct = direct && c.operandsLive(s, ops)
 	// The state, recorded: every slot the frame does not hold as it is.
 	record := map[int]int32{}
 	k := int32(0)
 	for i, x := range s.Slots {
-		if x == nil || x.Op == ssa.OpLoadSlot && x.Aux == i || c.captured(i) {
+		if x == nil || x.Op == ssa.OpLoadSlot && x.Aux == i || c.captured(i) || direct && i >= ops {
 			continue
 		}
 		var w amd64.Reg
@@ -398,6 +408,22 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 	}{{abi.OffExitKind, abi.ExitHost}, {abi.OffExitPC, uint64(s.PC)}, {abi.OffExitDepth, uint64(s.Depth)}, {abi.OffExitSite, uint64(int64(s.Site))}} {
 		c.a.MovImm(scratchA, f.v)
 		c.a.Store(regCtx, f.off, scratchA)
+	}
+	if direct {
+		// The callee's frame, past the VM's stack's top: xScratch2 holds
+		// its address, which pointerWord does not use.
+		c.a.Load(scratchA, regCtx, abi.OffStackTop)
+		c.a.Load(scratchA, scratchA, 0)
+		c.a.ShiftImm(amd64.Shl, scratchA, 4, true)
+		c.a.Load(scratchB, regCtx, abi.OffStackBase)
+		c.a.Op(amd64.Add, scratchA, scratchB, true)
+		c.a.MovQToX(xScratch2, scratchA)
+		for i := 0; i < site.Params && i < site.Argc && i < site.LocalCount; i++ {
+			c.directOperand(s.Slots[sp-site.Argc+i], true, int32(i)*vs)
+		}
+		if site.ThisSlot >= 0 {
+			c.directOperand(s.Slots[calleeSlot-1], false, abi.ContextSize+abi.OffThis)
+		}
 	}
 	// A slot's words: its record's, or the frame's, which holds it still.
 	words := func(slot int) (nb amd64.Reg, nd int32, rb amd64.Reg, rd int32) {
@@ -439,8 +465,10 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 	c.a.LeaLabel(tmp, back)
 	c.a.Store(calleeCtx, abi.OffReturnTo, tmp)
 	// Which one: the callee's pointer, from its record.
-	_, _, rb, rd := words(calleeSlot)
-	c.a.Load(tmp, rb, rd)
+	if !direct {
+		_, _, rb, rd := words(calleeSlot)
+		c.a.Load(tmp, rb, rd)
+	}
 	for i, t := range sites {
 		next := c.a.NewLabel()
 		if i < len(sites)-1 {
@@ -454,6 +482,9 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 		// The arguments, its parameters'; undefined in every other local.
 		for i := 0; i < t.LocalCount; i++ {
 			at := int32(i) * vs
+			if i < t.Params && i < t.Argc && direct {
+				continue
+			}
 			if i < t.Params && i < t.Argc {
 				nb, nd, rb, rd := words(sp - t.Argc + i)
 				c.a.Load(top, nb, nd)
@@ -467,7 +498,7 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 			c.a.MovImm(top, 0)
 			c.a.Store(locals, at+c.enc.RefOffset, top)
 		}
-		if t.ThisSlot >= 0 {
+		if t.ThisSlot >= 0 && !direct {
 			nb, nd, rb, rd := words(calleeSlot - 1)
 			c.a.Load(top, nb, nd)
 			c.a.Store(calleeCtx, abi.OffThis+c.enc.NumOffset, top)
@@ -526,6 +557,34 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 		}
 	}
 	c.setG(v, scratchA)
+}
+
+// directOperand writes a call's operand x, both words, where its callee
+// has it: at disp in the callee's frame, whose address is in xScratch2, if
+// local, and otherwise at disp from the context. It uses every scratch
+// register.
+func (c *compiler) directOperand(x *ssa.Value, local bool, disp int32) {
+	base := regCtx
+	if local {
+		base = scratchC
+	}
+	at := func() {
+		if local {
+			c.a.MovQFromX(scratchC, xScratch2)
+		}
+	}
+	var w amd64.Reg
+	if remat(x) {
+		c.materialize(x, scratchA)
+		w = scratchA
+	} else {
+		w = c.gpr(x, scratchA)
+	}
+	at()
+	c.a.Store(base, disp+c.enc.NumOffset, w)
+	c.pointerWord(x, w)
+	at()
+	c.a.Store(base, disp+c.enc.RefOffset, scratchB)
 }
 
 // pointerWord leaves in scratchB the pointer word of a value whose number
