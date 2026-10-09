@@ -5512,6 +5512,58 @@ func TestJITSSALooseNullishOperands(t *testing.T) {
 	}
 }
 
+// With native construction, an assignment to a global leaves for Go
+// (jitHost), as the interpreter makes it, and the function around it
+// compiles: DeltaBlue's drivers assign planner = new Planner(), then
+// build their constraints in loops. A global var, a script's let, a name
+// never declared (sloppily made a global), strictly the same (an assigned
+// value that runs no code: set_global_strict), and strictly a name no
+// longer declared, which throws: each the interpreter's.
+func TestJITSSAAssignsGlobals(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	defer func(was bool) { jitcompile.SSAConstruct = was }(jitcompile.SSAConstruct)
+	jitcompile.SSAConstruct = true
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var count=0;let lex=0;function P(x){this.x=x}
+		function bump(n){for(let i=0;i<n;i++){count=count+1;lex=lex+2;made=new P(i)}return [count,lex,made.x].join()}
+		function sbump(n){'use strict';let s=0;for(let i=0;i<n;i++){const c=count+3,l=lex-1;count=c;lex=l;s=(s+c)|0}return (s*7+count*3+lex)|0}
+		globalThis.maybe=0;function bad(n){'use strict';let s=0;for(let i=0;i<n;i++){s=(s*3+i)|0;s^=s>>>5;if((i&63)===0)maybe=s}return s}
+		function tryBad(n){try{return String(bad(n))}catch(e){return e.name+":"+(typeof maybe)}}`
+	rounds := []string{`bump(300)`, `bump(300)`, `String(sbump(300))`, `String(sbump(300))`, `[bump(50),sbump(50)].join()`,
+		`tryBad(300)`, `tryBad(300)`, `delete globalThis.maybe;tryBad(300)`}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+	}
+	for _, name := range []string{"bump", "sbump", "bad"} {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil || e.ssaStats.entries == 0 || name == "bad" && e.entrySlow {
+			t.Fatalf("%s did not run natively", name)
+		}
+	}
+}
+
 // Native code that calls through Go another function's native code shares
 // the context with it (jitState.ssaCtx): an exit's PC must be read before
 // Go runs anything. Here inner's last exit, a call near its end, is past
