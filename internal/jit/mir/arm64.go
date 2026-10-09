@@ -545,6 +545,63 @@ func (c *a64Compiler) looseNullish(v *ssa.Value, guard func(arm64.Cond)) {
 	c.setG(v, a64A)
 }
 
+// eqTagged is OpEqTagged, as amd64's.
+func (c *a64Compiler) eqTagged(v *ssa.Value, guard func(arm64.Cond)) {
+	x, y := v.Args[0], v.Args[1]
+	yes, no, done, differ, number := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+	exit := c.stubLabel(v.State, exitKind(v.Aux))
+	wx, wy := c.gpr(x, a64A), c.gpr(y, a64B)
+	c.a.Cmp(wx, wy, true)
+	c.a.BCond(arm64.NE, differ)
+	c.a.MovImm(a64C, abi.NumberLimit)
+	c.a.Cmp(wx, a64C, true)
+	c.a.BCond(arm64.LO, number)
+	for _, w := range []uint64{c.enc.Null, c.enc.Undefined, c.enc.True, c.enc.False} {
+		c.a.MovImm(a64C, w)
+		c.a.Cmp(wx, a64C, true)
+		c.a.BCond(arm64.EQ, yes)
+	}
+	c.a.MovImm(a64C, c.enc.Object)
+	c.a.Cmp(wx, a64C, true)
+	c.a.BCond(arm64.NE, exit)
+	if c.reference(v, x, c.enc.Object, guard) {
+		c.a.FMovToF(a64F1, a64C)
+		if c.reference(v, y, c.enc.Object, guard) {
+			c.a.FMovFromF(a64A, a64F1)
+			c.a.Cmp(a64A, a64C, true)
+			c.a.BCond(arm64.EQ, yes)
+			c.a.B(no)
+		}
+	}
+	c.a.Bind(number)
+	c.a.FMovToF(a64F0, wx)
+	c.a.FCmp(a64F0, a64F0)
+	c.a.BCond(arm64.VS, no)
+	c.a.B(yes)
+	c.a.Bind(differ)
+	other := no
+	if v.Index != 1 {
+		other = exit
+	}
+	c.a.MovImm(a64C, abi.NumberLimit)
+	c.a.Cmp(wx, a64C, true)
+	c.a.BCond(arm64.HS, other)
+	c.a.Cmp(wy, a64C, true)
+	c.a.BCond(arm64.HS, other)
+	c.a.FMovToF(a64F0, wx)
+	c.a.FMovToF(a64F1, wy)
+	c.a.FCmp(a64F0, a64F1)
+	c.a.BCond(arm64.NE, no)
+	c.a.BCond(arm64.VS, no)
+	c.a.Bind(yes)
+	c.a.MovImm(a64A, 1)
+	c.a.B(done)
+	c.a.Bind(no)
+	c.a.MovImm(a64A, 0)
+	c.a.Bind(done)
+	c.setG(v, a64A)
+}
+
 // arrayOf finds the array a value is and checks its class.
 func (c *a64Compiler) arrayOf(v *ssa.Value, guard func(arm64.Cond)) {
 	if !c.objectOf(v, guard) {
@@ -978,6 +1035,8 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.setG(v, d)
 	case ssa.OpLooseNullish:
 		c.looseNullish(v, guard)
+	case ssa.OpEqTagged:
+		c.eqTagged(v, guard)
 	case ssa.OpNot:
 		c.a.CmpImm(c.gpr(arg(0), a64A), 0, false)
 		d := c.gdst(v)

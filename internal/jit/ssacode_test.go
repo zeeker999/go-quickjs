@@ -1095,6 +1095,62 @@ func TestSSANativeStrings(t *testing.T) {
 // TestSSANativeRemainder pins %'s fast path: integers divide natively, with
 // a zero remainder carrying the dividend's sign and -2**63 % -1 not
 // faulting; everything else exits to Go, where math.Mod answers.
+// TestSSANativeEquality compares pairs of values with == and === natively
+// (ssa.OpEqTagged): numbers, +0 and -0 included, and NaN; one object and
+// two; null, undefined and booleans; strings and values of different kinds,
+// which loosely go to Go. Each outcome -- the answer, or an exit -- is the
+// evaluator's and is pinned. Random programs seldom meet -0 this way.
+func TestSSANativeEquality(t *testing.T) {
+	negZero := ir.Value{Kind: ir.Number, Bits: math.Float64bits(math.Copysign(0, -1))}
+	nan := ir.Float(math.NaN())
+	obj0, obj1 := ir.Value{Kind: ir.Opaque, Bits: 0}, ir.Value{Kind: ir.Opaque, Bits: 1}
+	str := ir.Value{Kind: ir.String, Bits: 5}
+	undef, null := ir.Value{Kind: ir.Undefined}, ir.Value{Kind: ir.Null}
+	for _, strict := range []bool{true, false} {
+		p := &ir.Program{Locals: 3, Code: []ir.Instruction{
+			{Op: ir.Binary, Operator: ir.Eq, Strict: strict, Dest: 2, Left: ir.Slot(0), Right: ir.Slot(1)},
+			{Op: ir.Return, Left: ir.Slot(2)},
+		}}
+		p.Maps = make([]ir.StateMap, len(p.Code))
+		for pc := range p.Maps {
+			p.Maps[pc].PC = uint32(pc)
+		}
+		c, err := compileNative(p, layout{3, -1, nil, nil})
+		if err != nil || c == nil {
+			t.Fatalf("compile: %v", err)
+		}
+		for _, tc := range []struct {
+			x, y   ir.Value
+			equal  bool
+			native bool // strictly; loosely, different words go to Go
+		}{
+			{ir.Float(0), negZero, true, true}, {ir.Float(1), ir.Float(1), true, true}, {ir.Float(1), ir.Float(2), false, true},
+			{nan, nan, false, true}, {nan, ir.Float(1), false, true},
+			{obj0, obj0, true, true}, {obj0, obj1, false, true},
+			{null, null, true, true}, {undef, undef, true, true}, {ir.Bool(true), ir.Bool(true), true, true},
+			{ir.Bool(true), ir.Bool(false), false, true}, {null, undef, false, true}, {ir.Float(1), obj0, false, true},
+			{str, str, false, false}, {ir.Float(1), str, false, true},
+		} {
+			heap := randomTestHeap(rand.New(rand.NewPCG(1, 2)))
+			slots := []ir.Value{tc.x, tc.y, ir.Float(0)}
+			if why := nativeMismatch(c, 0, slots, 0, heap); why != "" {
+				t.Fatalf("strict %v, %v == %v: %s", strict, tc.x, tc.y, why)
+			}
+			exit, _ := ssa.EvaluateHeap(c.f, 0, slices.Clone(slots), heap.native().heap(), 0)
+			sameWord := tc.x.Kind == tc.y.Kind && (tc.x.Kind == ir.Opaque || tc.x.Kind == ir.String || tc.x.Bits == tc.y.Bits)
+			bothNumbers := tc.x.Kind == ir.Number && tc.y.Kind == ir.Number
+			native := tc.native && (strict || sameWord || bothNumbers)
+			if got := exit.Kind == ir.Returned; got != native {
+				t.Fatalf("strict %v, %v == %v: native %v, want %v", strict, tc.x, tc.y, got, native)
+			}
+			if native && exit.Value != ir.Bool(tc.equal) {
+				t.Fatalf("strict %v, %v == %v = %v, want %v", strict, tc.x, tc.y, exit.Value, tc.equal)
+			}
+		}
+		c.code.Close()
+	}
+}
+
 // TestSSANativeElementCells reads elements by their cells (ir.Instruction's
 // Reference): a number, true, a hole, past the end, at indexes that are not
 // integers, and from an object that is not an array. A present element is

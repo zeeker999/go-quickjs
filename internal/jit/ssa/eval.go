@@ -43,6 +43,27 @@ func element(view ir.ArrayView, key float64) (*uint64, bool) {
 	return cell, true
 }
 
+// eqTagged is OpEqTagged's comparison, by the words native code sees: two
+// numbers compare as numbers; equal words (objects' are one word, strings'
+// another) are equal values but for objects, the same only if they are one,
+// and strings, left to Go; other words differ, strictly unequal and left to
+// Go loosely. It reports false where Go decides.
+func eqTagged(x, y ir.Value, strict bool) (bool, bool) {
+	if x.Kind == ir.Number && y.Kind == ir.Number {
+		return math.Float64frombits(x.Bits) == math.Float64frombits(y.Bits), true
+	}
+	if x.Kind == y.Kind && (x.Kind == ir.Opaque || x.Kind == ir.String || x.Bits == y.Bits) {
+		switch x.Kind {
+		case ir.Undefined, ir.Null, ir.Boolean:
+			return true, true
+		case ir.Opaque:
+			return x.Bits == y.Bits, true
+		}
+		return false, false
+	}
+	return false, strict
+}
+
 // ErrOrigin reports a reference at an exit that is not where its origin
 // says: a bug in origin.go.
 var ErrOrigin = errors.New("ssa: a reference is not its origin's")
@@ -314,6 +335,12 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
 				vals[v.ID] = val{f: math.Float64frombits(a.t.Bits)}
+			case OpEqTagged:
+				r, ok := eqTagged(a.t, b.t, v.Index == 1)
+				if !ok {
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
+				vals[v.ID] = val{b: r}
 			case OpLooseNullish:
 				t := a.t
 				r := t.Kind == ir.Null || t.Kind == ir.Undefined

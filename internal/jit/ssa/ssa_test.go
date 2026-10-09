@@ -86,25 +86,18 @@ func randomProgram(r *rand.Rand) *ir.Program {
 // compare runs p's slot IR evaluator and f's SSA evaluator from an entry and
 // requires the same exit and live slots. It returns false when the slot IR
 // does not finish within its budget, which the test skips.
-// nullishEquality reports whether the slot IR exited to Go at an Eq or Ne
-// with null or undefined, in the slots it exited with.
-func nullishEquality(p *ir.Program, slots []ir.Value, at ir.StateMap) bool {
+// equalityExit reports whether the slot IR exited to Go at an Eq or Ne,
+// which it leaves to Go for anything but two numbers, and which SSA
+// compares natively where the operands' words tell (OpEqTagged,
+// OpStrictNullish, OpLooseNullish).
+func equalityExit(p *ir.Program, at ir.StateMap) bool {
 	for pc, m := range p.Maps {
 		if m != at {
 			continue
 		}
 		in := p.Code[pc]
-		if (in.Op != ir.Binary && in.Op != ir.Branch) || (in.Operator != ir.Eq && in.Operator != ir.Ne) {
-			continue
-		}
-		for _, o := range []ir.Operand{in.Left, in.Right} {
-			v := o.Literal
-			if o.Slot >= 0 {
-				v = slots[o.Slot]
-			}
-			if v.Kind == ir.Null || v.Kind == ir.Undefined {
-				return true
-			}
+		if (in.Op == ir.Binary || in.Op == ir.Branch) && (in.Operator == ir.Eq || in.Operator == ir.Ne) {
+			return true
 		}
 	}
 	return false
@@ -121,11 +114,11 @@ func compare(t *testing.T, p *ir.Program, f *Func, pc int, slots []ir.Value, pol
 	if want.Kind == ir.BudgetExit {
 		return false
 	}
-	if want.Kind == ir.HostExit && nullishEquality(p, x, want.State) {
-		// SSA compares with null and undefined natively, where the slot IR
-		// leaves it to Go: it goes on, and the slot IR has nothing to say
-		// about what follows. The native harness and the VM's tests check
-		// those comparisons.
+	if want.Kind == ir.HostExit && equalityExit(p, want.State) {
+		// SSA compares values natively where the slot IR leaves it to Go:
+		// it goes on, and the slot IR has nothing to say about what
+		// follows. The native harness and the VM's tests check those
+		// comparisons.
 		return false
 	}
 	y := append([]ir.Value(nil), slots...)

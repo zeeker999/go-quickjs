@@ -134,6 +134,15 @@ const (
 	// (Aux) where that cannot name it.
 	OpStrictNullish // tagged -> bool
 	OpLooseNullish  // tagged -> bool
+	// OpEqTagged is x === y (Index 1) or x == y (Index 0) of any two
+	// values, natively where it can be told from their words: equal words
+	// are equal values -- a number but NaN, null, undefined, a boolean --
+	// but for objects, whose word all share, and which are the same only if
+	// their pointers, read through their origins, are; two numbers compare
+	// as numbers; any other two words are strictly unequal. Strings, and
+	// loose comparisons of values of different words, which may convert,
+	// exit to Go (Aux).
+	OpEqTagged // tagged, tagged -> bool
 
 	// Integer conversions and bitwise operations, as JavaScript defines them.
 	OpToInt32  // f64 -> i32: ToUint32's bits
@@ -156,7 +165,7 @@ var opNames = [...]string{
 	OpObjectOf: "objectof", OpPropRead: "propread", OpPropWrite: "propwrite", OpPropCell: "propcell", OpLoadCell: "loadcell", OpGlobalCell: "globalcell",
 	OpStringMethod: "stringmethod", OpStringCode: "stringcode",
 	OpAddF64: "addf", OpSubF64: "subf", OpMulF64: "mulf", OpDivF64: "divf", OpModF64: "modf", OpNegF64: "negf", OpCmpF64: "cmpf",
-	OpNot: "not", OpStrictNullish: "strictnullish", OpLooseNullish: "loosenullish", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
+	OpNot: "not", OpStrictNullish: "strictnullish", OpLooseNullish: "loosenullish", OpEqTagged: "eqtagged", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
 }
 
@@ -171,7 +180,7 @@ func (o Op) String() string {
 func (o Op) isGuard() bool {
 	switch o {
 	case OpUnboxF64, OpTruth, OpCheckInit, OpModF64, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite, OpElemCell, OpLength,
-		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell, OpStringMethod, OpStringCode, OpLooseNullish:
+		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell, OpStringMethod, OpStringCode, OpLooseNullish, OpEqTagged:
 		return true
 	}
 	return false
