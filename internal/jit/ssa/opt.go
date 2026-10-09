@@ -58,6 +58,30 @@ func Optimize(f *Func) {
 					changed = true
 					continue
 				}
+				// A value a dominating guard found initialized -- or an object, a
+				// number or an array, which an uninitialized binding is not --
+				// is initialized still: its check is none.
+				if len(v.Args) == 1 {
+					switch v.Op {
+					case OpCheckInit, OpObjectOf, OpUnboxF64, OpArrayOf:
+						key := [2]int{int(OpCheckInit), v.Args[0].ID}
+						if v.Op == OpCheckInit {
+							var first *Value
+							for _, w := range seen[key] {
+								if subst[w.ID] == nil && dom.dominates(w.Block, b) {
+									first = w
+									break
+								}
+							}
+							if first != nil {
+								subst[v.ID], replaced = first, true
+								changed = true
+								continue
+							}
+						}
+						seen[key] = append(seen[key], v)
+					}
+				}
 				// A guard of one operand repeats another of the same op and
 				// operand; one of more operands is never merged, since the
 				// key names only the first.
