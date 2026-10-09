@@ -103,8 +103,15 @@ func compileAMD64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err 
 		c.a.Bind(s.label)
 		c.exitTo(s.key.state, s.key.kind)
 	}
+	stubs := len(c.stubFor)
 	for i := 0; i < len(c.cold); i++ {
 		c.cold[i]()
+	}
+	// Cold code's guards' exits.
+	for i := stubs; i < len(c.stubFor); i++ {
+		s := c.stubFor[i]
+		c.a.Bind(s.label)
+		c.exitTo(s.key.state, s.key.kind)
 	}
 	// Last: cold code's exits may come here too.
 	if c.tailUsed {
@@ -525,6 +532,8 @@ func (c *compiler) pointerWord(x *ssa.Value, w amd64.Reg) {
 	done := c.a.NewLabel()
 	c.a.MovImm(scratchB, 0)
 	switch o, static := c.origin.Of(x); {
+	case x.Shadow != nil && cellSource(x.Shadow):
+		c.a.Load(scratchB, c.gpr(x.Shadow, scratchC), c.enc.RefOffset)
 	case x.Shadow != nil:
 		if r := c.gpr(x.Shadow, scratchC); r != scratchC {
 			c.a.MovRR(scratchC, r)
@@ -1002,7 +1011,9 @@ func (c *compiler) reference(v, a *ssa.Value, word uint64, guard func(amd64.Cond
 // a primitive's, exits. It uses scratchA and scratchB.
 func (c *compiler) sourceRef(a *ssa.Value, guard func(amd64.Cond)) {
 	o := c.origin.At(a)
-	if s := a.Shadow; s != nil {
+	if s := a.Shadow; s != nil && cellSource(s) {
+		c.a.Load(scratchC, c.gpr(s, scratchC), c.enc.RefOffset)
+	} else if s != nil {
 		// The source is known at run time: a local, a captured binding, the
 		// receiver, an operand, or a heap cell (origin.go). scratchC becomes
 		// its value's address.
@@ -1125,8 +1136,10 @@ func (c *compiler) property(v *ssa.Value, guard func(amd64.Cond)) {
 		c.holder(v, guard)
 		return
 	}
-	found, scan := c.a.NewLabel(), c.a.NewLabel()
+	found := c.a.NewLabel()
 	if v.Const.Bits != 0 {
+		// The shape the site knows, inline; any other, out of line.
+		scan := c.a.NewLabel()
 		p := c.gpr(v.Args[0], scratchA)
 		c.a.Load(scratchB, p, c.enc.ObjectShape)
 		c.a.MovImm(scratchA, v.Const.Bits)
@@ -1135,9 +1148,22 @@ func (c *compiler) property(v *ssa.Value, guard func(amd64.Cond)) {
 		p = c.gpr(v.Args[0], scratchA)
 		c.a.Load(scratchA, p, c.enc.ObjectProps)
 		c.a.OpImm(amd64.Add, scratchA, int32(v.Index)*c.enc.PropertySize+c.enc.PropertyValue, true)
-		c.a.Jmp(found)
+		c.cold = append(c.cold, func() {
+			c.a.Bind(scan)
+			c.scan(v, guard, found)
+		})
+		c.a.Bind(found)
+		return
 	}
-	c.a.Bind(scan)
+	c.scan(v, guard, found)
+	c.a.Bind(found)
+}
+
+// scan searches an object's small table for the key a property operation
+// names, as the VM's own small objects are searched, unrolled, and goes to
+// found with the address of its value in scratchA; the entry must be plain
+// data, and writable for a write. Anything else fails.
+func (c *compiler) scan(v *ssa.Value, guard func(amd64.Cond), found amd64.Label) {
 	p := c.gpr(v.Args[0], scratchA)
 	c.a.LoadU8(scratchB, p, c.enc.ObjectClass)
 	c.a.OpImm(amd64.Cmp, scratchB, int32(c.enc.ClassObject), false)
@@ -1167,7 +1193,6 @@ func (c *compiler) property(v *ssa.Value, guard func(amd64.Cond)) {
 		c.a.Bind(next)
 	}
 	c.a.Jmp(c.stubLabel(v.State, exitKind(v.Aux)))
-	c.a.Bind(found)
 }
 
 // stringBytes compares two strings of one length, in code units, by their

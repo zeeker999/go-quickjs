@@ -582,6 +582,18 @@ func (c *core) allocate() error {
 	return nil
 }
 
+// cellSource reports whether a shadow is a cell's address whatever happens
+// at run time -- a property's, an element's, a global binding's, the
+// context's -- and never a slot or -1, so that the value's pointer word is
+// read there with no decoding (sourceAddr).
+func cellSource(s *ssa.Value) bool {
+	switch s.Op {
+	case ssa.OpPropCell, ssa.OpElemCell, ssa.OpGlobalCell, ssa.OpStringMethod, ssa.OpCallCell:
+		return true
+	}
+	return false
+}
+
 // numberWord is a number's bits as a word: NaN canonical.
 func (c *core) numberWord(bits uint64) uint64 {
 	if math.IsNaN(math.Float64frombits(bits)) {
