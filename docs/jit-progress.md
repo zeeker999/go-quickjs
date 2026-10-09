@@ -89,7 +89,18 @@ across sessions. Update it **in the same commit** as the work it records.
 
 - **Native construction (P7w), the user's choice, 2026-10-09.** Steps:
   1. done: properties added natively along a cache's transition (abb82ce).
-  2. `new C(...)` of a plain function, monomorphic: Go keeps a pool of
+  2. done, behind compile.SSAConstruct (8001d91), with `new Array()`
+     and calls through Function.prototype.call (9b8de42) and
+     Array.prototype.push (2049350) made natively. Construction stays
+     off: DeltaBlue runs ~50% slower with it on, its native callees
+     leaving native code -- an array grown past its room, `x != null`
+     of a value whose pointer word native code cannot find, calls of
+     functions native callers stopped calling -- each an unwind. Next:
+     the cost of a callee leaving (or calling it from Go before it
+     does), then the rest of DeltaBlue's exits, measured with a count
+     of exits by operation and callee.
+     The plan as first written: `new C(...)` of a plain function,
+     monomorphic: Go keeps a pool of
      objects per site, made as constructWithTarget makes them (the
      prototype, the constructor's root shape, the inline room), and
      refills it when the site leaves for Go; native code takes one,
