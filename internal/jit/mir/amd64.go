@@ -185,6 +185,31 @@ func (c *compiler) xmm(v *ssa.Value, scratch amd64.XReg) amd64.XReg {
 	return scratch
 }
 
+// gdst is the register v's word is made in: its own, or scratchA if it is
+// spilled, which setG then stores.
+func (c *compiler) gdst(v *ssa.Value) amd64.Reg {
+	if l := c.locAt(v); l.reg >= 0 {
+		return amd64.Reg(l.reg)
+	}
+	return scratchA
+}
+
+// gprInto puts v's word in dst: moved, loaded from its spill slot, or
+// made there if it is lazy.
+func (c *compiler) gprInto(v *ssa.Value, dst amd64.Reg) {
+	if c.isLazy(v) {
+		c.materialize(v, dst)
+		return
+	}
+	if l := c.locAt(v); l.reg >= 0 {
+		if amd64.Reg(l.reg) != dst {
+			c.a.MovRR(dst, amd64.Reg(l.reg))
+		}
+		return
+	}
+	c.a.Load(dst, regCtx, c.spillDisp(c.locAt(v).spill))
+}
+
 // setG stores src into v's location.
 func (c *compiler) setG(v *ssa.Value, src amd64.Reg) {
 	l := c.locAt(v)
@@ -987,6 +1012,11 @@ func (c *compiler) moveValue(dst, src *ssa.Value, parked bool) {
 		c.setX(dst, x)
 		return
 	}
+	if l := c.locAt(dst); l.reg >= 0 && !parked {
+		// Straight into its register.
+		c.gprInto(src, amd64.Reg(l.reg))
+		return
+	}
 	r := scratchC
 	if !parked {
 		r = c.gpr(src, scratchA)
@@ -1611,12 +1641,14 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 	}
 	switch v.Op {
 	case ssa.OpLoadSlot:
-		base, disp := c.slotAddr(v.Aux, false, scratchA)
-		c.a.Load(scratchA, base, disp)
-		c.setG(v, scratchA)
+		d := c.gdst(v)
+		base, disp := c.slotAddr(v.Aux, false, d)
+		c.a.Load(d, base, disp)
+		c.setG(v, d)
 	case ssa.OpConst:
-		c.a.MovImm(scratchA, c.constWord(v.Const))
-		c.setG(v, scratchA)
+		d := c.gdst(v)
+		c.a.MovImm(d, c.constWord(v.Const))
+		c.setG(v, d)
 	case ssa.OpConstF64:
 		c.a.MovImm(scratchA, v.Const.Bits)
 		c.a.MovQToX(xScratch0, scratchA)
@@ -1730,8 +1762,9 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 	case ssa.OpStringCode:
 		c.stringCode(v, guard)
 	case ssa.OpLoadCell:
-		c.a.Load(scratchA, c.gpr(arg(0), scratchA), c.enc.NumOffset)
-		c.setG(v, scratchA)
+		d := c.gdst(v)
+		c.a.Load(d, c.gpr(arg(0), scratchA), c.enc.NumOffset)
+		c.setG(v, d)
 	case ssa.OpPropWrite:
 		c.propStore(v, guard)
 	case ssa.OpLength:

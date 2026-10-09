@@ -200,6 +200,21 @@ func (c *a64Compiler) gdst(v *ssa.Value) arm64.Reg {
 	return a64A
 }
 
+// gprInto puts v's word in dst, as amd64's does.
+func (c *a64Compiler) gprInto(v *ssa.Value, dst arm64.Reg) {
+	if c.isLazy(v) {
+		c.materialize(v, dst)
+		return
+	}
+	if l := c.locAt(v); l.reg >= 0 {
+		if arm64.Reg(l.reg) != dst {
+			c.a.MovRR(dst, arm64.Reg(l.reg))
+		}
+		return
+	}
+	c.a.Load(dst, a64Ctx, c.spillDisp(c.locAt(v).spill))
+}
+
 func (c *a64Compiler) fdst(v *ssa.Value) arm64.FReg {
 	if l := c.locAt(v); l.reg >= 0 {
 		return arm64.FReg(l.reg)
@@ -634,6 +649,10 @@ func (c *a64Compiler) moveValue(dst, src *ssa.Value, parked bool) {
 			x = c.fpr(src, a64F1)
 		}
 		c.setF(dst, x)
+		return
+	}
+	if l := c.locAt(dst); l.reg >= 0 && !parked {
+		c.gprInto(src, arm64.Reg(l.reg))
 		return
 	}
 	r := a64C
@@ -1570,12 +1589,14 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 	}
 	switch v.Op {
 	case ssa.OpLoadSlot:
-		base, disp := c.slotAddr(v.Aux, false, a64A)
-		c.a.Load(a64A, base, disp)
-		c.setG(v, a64A)
+		d := c.gdst(v)
+		base, disp := c.slotAddr(v.Aux, false, d)
+		c.a.Load(d, base, disp)
+		c.setG(v, d)
 	case ssa.OpConst:
-		c.a.MovImm(a64A, c.constWord(v.Const))
-		c.setG(v, a64A)
+		d := c.gdst(v)
+		c.a.MovImm(d, c.constWord(v.Const))
+		c.setG(v, d)
 	case ssa.OpConstF64:
 		d := c.fdst(v)
 		c.constF64(d, v.Const.Bits)
@@ -1677,8 +1698,9 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 	case ssa.OpStringCode:
 		c.stringCode(v, guard)
 	case ssa.OpLoadCell:
-		c.a.Load(a64A, c.gpr(arg(0), a64A), c.enc.NumOffset)
-		c.setG(v, a64A)
+		d := c.gdst(v)
+		c.a.Load(d, c.gpr(arg(0), a64A), c.enc.NumOffset)
+		c.setG(v, d)
 	case ssa.OpPropWrite:
 		c.propStore(v, guard)
 	case ssa.OpLength:
