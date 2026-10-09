@@ -5,11 +5,13 @@ package vm
 import (
 	"math"
 	"os"
+	"slices"
 	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
+	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
@@ -71,6 +73,54 @@ var jitEncoding = abi.Encoding{
 	FlagHTMLDDA:    uint8(objHTMLDDA),
 }
 
+// jitReoptimizations is how many times a function's code is compiled again
+// for speculations that failed (jitDeoptimized); after that its guards
+// deoptimize, as any do, and jitSSAProfit decides whether it pays.
+const jitReoptimizations = 4
+
+// jitDeoptimized notes a guard that failed in e's code, at the site
+// ExitSite names, or, for -1, an entry's speculation at the entry the
+// stretch started at: the code is compiled again at its next entry, with
+// the site, or the entry, generic (jitFeedback.Generic). A site the
+// builder has no generic form for is built as before, and its next failure
+// is not new.
+func jitDeoptimized(e *jitEntry, ctx *abi.Context, start int) {
+	if e.reopts >= jitReoptimizations {
+		return
+	}
+	if site := int32(int64(ctx.ExitSite)); site >= 0 {
+		if !slices.Contains(e.failed, site) {
+			e.failed = append(e.failed, site)
+			e.reopt = true
+		}
+	} else if !slices.Contains(e.failedEntries, uint32(start)) {
+		e.failedEntries = append(e.failedEntries, uint32(start))
+		e.reopt = true
+	}
+}
+
+// jitReoptimize compiles cl's function again for e, its entry, with what
+// failed in its code generic, and replaces its code, which runs nowhere:
+// native code leaves for Go to do anything else. If the function no longer
+// compiles, the code it has is kept.
+func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
+	e.reopt = false
+	e.reopts++
+	fn := cl.fn
+	p, err := jitcompile.LowerSSA(fn)
+	if err != nil {
+		return
+	}
+	code, shapes := r.compileSSA(fn, cl, p, r.jitAllowance(fn)+e.ssa.Size(), e)
+	if code == nil {
+		return
+	}
+	old := e.ssa
+	e.ssa, e.ssaShapes, e.ssaStats = code, shapes, jitSSAStats{}
+	old.Close()
+	r.jit.reoptimized++
+}
+
 // compileSSA compiles a lowered function with the new pipeline, or returns
 // nil. It takes functions whose slots are the frame's locals, its captured
 // bindings, read through their cells, the receiver, which Go puts in the
@@ -78,7 +128,7 @@ var jitEncoding = abi.Encoding{
 //
 // The closure's caches say where its sites' properties are (jitFeedback);
 // it returns the shapes the code compares objects with, to be kept alive.
-func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, limit int) (*jit.SSACode, []*shape) {
+func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, limit int, e *jitEntry) (*jit.SSACode, []*shape) {
 	this := 0
 	if p.This {
 		this = 1
@@ -86,7 +136,7 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, 
 	if len(p.Globals) != 0 || p.Locals != fn.LocalCount+len(fn.Upvalues)+this {
 		return nil, nil
 	}
-	fb := &jitFeedback{r: r, fn: fn, cl: cl}
+	fb := &jitFeedback{r: r, fn: fn, cl: cl, e: e}
 	// The compile's memory comes from the runtime's workspaces, taken back
 	// once its code is placed.
 	s := r.jit
@@ -126,6 +176,19 @@ type jitFeedback struct {
 	fn     *bytecode.Function
 	cl     *closure
 	shapes []*shape
+	// e is the entry being compiled again, whose failed speculations
+	// (jitEntry.failed) are built generic; nil for a first compile.
+	e *jitEntry
+}
+
+// Generic and EntryGeneric are ssa.Feedback's: the sites and entries whose
+// guards failed in code compiled before (jitDeoptimized).
+func (fb *jitFeedback) Generic(pc int) bool {
+	return fb.e != nil && slices.Contains(fb.e.failed, int32(pc))
+}
+
+func (fb *jitFeedback) EntryGeneric(pc int) bool {
+	return fb.e != nil && slices.Contains(fb.e.failedEntries, uint32(pc))
 }
 
 // Global is where the global a site reads was last found in the closure's
@@ -403,6 +466,7 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 				e.ssaStats.guardsAt = map[int32]uint64{}
 			}
 			e.ssaStats.guardsAt[int32(int64(ctx.ExitSite))]++
+			jitDeoptimized(e, ctx, start)
 			f.pc = uint32(ctx.ExitPC)
 			return r.jitInterpret(f, f.base+int(ctx.ExitDepth), nil)
 		case abi.ExitHost:

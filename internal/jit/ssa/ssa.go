@@ -263,6 +263,9 @@ type Block struct {
 	// edges into it from inside the loop (by predecessor index).
 	LoopHeader bool
 	Backedge   []bool
+	// Generic marks an entry block whose speculation failed before: the
+	// slots it loads are not unboxed there (Feedback's EntryGeneric).
+	Generic bool
 }
 
 // Entry is a place native code can be entered: an entry block, which loads

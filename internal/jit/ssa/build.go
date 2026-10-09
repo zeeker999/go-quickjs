@@ -25,6 +25,15 @@ type Feedback interface {
 	// Global is where the global a BindingRead at pc names was last found,
 	// or false to leave the site to Go.
 	Global(pc int) (GlobalSite, bool)
+	// Generic reports an operation at pc whose speculation failed before,
+	// which is built so that what it did not expect goes to Go, which
+	// resumes after it, rather than deoptimizing: an element read by its
+	// cell, an arithmetic operation or a comparison of what are not numbers
+	// by Go. EntryGeneric reports an entry whose speculation failed,
+	// by its PC in the function's own code (FrameState.PC): the slots it
+	// loads are not taken for numbers there.
+	Generic(pc int) bool
+	EntryGeneric(pc int) bool
 }
 
 // GlobalSite is a global read's site: its name, the VM's atom, and the
@@ -57,6 +66,7 @@ func build(w *Workspace, p *ir.Program, fb Feedback) (*Func, error) {
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
+	p = referenceReads(p, fb)
 	f := &Func{Locals: p.Locals, StackSize: p.StackSize, FrameLocals: p.Locals, ThisSlot: -1, ws: w}
 	f.written = f.bools(p.Locals + p.StackSize)
 	b := &builder{p: p, fb: fb, f: f, nslots: p.Locals + p.StackSize}
@@ -112,6 +122,42 @@ func (b *builder) host(pc int) bool {
 	return false
 }
 
+// referenceReads is p with the element reads whose speculation failed
+// (Feedback's Generic) carried by their cells, as the reads of elements
+// used as more than numbers are. p itself is not changed.
+func referenceReads(p *ir.Program, fb Feedback) *ir.Program {
+	if fb == nil {
+		return p
+	}
+	var q *ir.Program
+	for pc, in := range p.Code {
+		if in.Op != ir.ArrayRead || in.Reference || !reachable(p, pc) || !fb.Generic(pc) {
+			continue
+		}
+		if q == nil {
+			c := *p
+			c.Code = append([]ir.Instruction(nil), p.Code...)
+			q = &c
+		}
+		q.Code[pc].Reference = true
+	}
+	if q == nil {
+		return p
+	}
+	return q
+}
+
+// generic reports an arithmetic operation or a comparison at pc whose
+// speculation failed (Feedback's Generic): what are not numbers go to Go,
+// which resumes after it, as they do for == and %.
+func (b *builder) generic(pc int) bool {
+	switch in := b.p.Code[pc]; {
+	case in.Op == ir.Binary, in.Op == ir.Branch && in.Operator != ir.Truth:
+		return b.fb != nil && b.fb.Generic(pc)
+	}
+	return false
+}
+
 // global is the feedback for a global read at pc, if any.
 func (b *builder) global(pc int) (GlobalSite, bool) {
 	if b.fb == nil || b.p.Code[pc].Op != ir.BindingRead {
@@ -152,7 +198,7 @@ func (b *builder) plan() error {
 				entries[pc+1] = true
 			}
 		case ir.Binary:
-			if in.Operator == ir.Eq || in.Operator == ir.Ne || in.Operator == ir.Mod {
+			if in.Operator == ir.Eq || in.Operator == ir.Ne || in.Operator == ir.Mod || b.generic(pc) {
 				// A comparison or remainder of non-numbers exits to Go, which
 				// resumes after it.
 				entries[pc+1] = true
@@ -167,7 +213,7 @@ func (b *builder) plan() error {
 			if in.Target <= pc {
 				entries[in.Target] = true
 			}
-			if in.Operator == ir.Eq || in.Operator == ir.Ne {
+			if in.Operator == ir.Eq || in.Operator == ir.Ne || b.generic(pc) {
 				entries[pc+1], entries[in.Target] = true, true
 			}
 		case ir.Host, ir.Call:
@@ -244,6 +290,7 @@ func (b *builder) plan() error {
 	for _, pc := range b.entryPCs {
 		e := b.f.newBlock(-1)
 		e.Kind = BlockPlain
+		e.Generic = b.fb != nil && b.fb.EntryGeneric(int(p.Maps[pc].PC))
 		b.edge(e, b.blockAt[pc])
 		b.f.Entries = append(b.f.Entries, Entry{PC: pc, Depth: p.Maps[pc].Depth, Block: e})
 	}
@@ -610,7 +657,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 			break
 		}
 		kind := ir.GuardExit
-		if in.Operator == ir.Eq || in.Operator == ir.Ne || in.Operator == ir.Mod {
+		if in.Operator == ir.Eq || in.Operator == ir.Ne || in.Operator == ir.Mod || b.generic(pc) {
 			kind = ir.HostExit
 		}
 		x, y := number(in.Left, kind), number(in.Right, kind)
@@ -658,7 +705,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 			c = n
 		} else {
 			kind := ir.GuardExit
-			if in.Operator == ir.Eq || in.Operator == ir.Ne {
+			if in.Operator == ir.Eq || in.Operator == ir.Ne || b.generic(pc) {
 				kind = ir.HostExit
 			}
 			c = f.newValue(blk, OpCmpF64, Bool, number(in.Left, kind), number(in.Right, kind))

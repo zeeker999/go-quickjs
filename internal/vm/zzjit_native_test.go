@@ -3514,3 +3514,65 @@ func BenchmarkJITHostRoundTrip(b *testing.B) {
 		}
 	}
 }
+
+// A guard that fails has the new pipeline compile the function again at
+// its next entry, with the site generic: an arithmetic operation or a
+// comparison of what are not numbers goes to Go, which resumes after it,
+// and an entry whose slots were not numbers loads them as they are. The
+// loop then stays native, and no guard fails again. A function whose
+// speculations keep failing somewhere new is compiled again
+// jitReoptimizations times, and then keeps its code. Each answer, and each
+// valueOf call, is the interpreter's.
+func TestJITSSAReoptimize(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `var calls=0,v={valueOf(){calls++;return 2}};
+		function scale(k,n){let s=0;for(let i=0;i<n;i++){s+=i*2;if(i==n-1)s=s+k}return s}
+		function cmp(a,b,n){let s=0;for(let i=0;i<n;i++){if(a<b)s+=1;s+=a*b}return s}
+		function many(a,b,c,d,e,f,n){let s=0;for(let i=0;i<n;i++){s+=a*3;s+=b*3;s+=c*3;s+=d*3;s+=e*3;s+=f*3}return s}`
+	rounds := []string{
+		`[scale(1,300),scale(2,300),cmp(1,2,300)].join()`,
+		`[scale('x',300),scale(v,300),cmp('1',2,300),cmp(v,3,300),calls].join()`,
+		`[scale('y',300),scale(3,300),cmp(1,v,300),cmp(4,3,300),calls].join()`,
+		`[scale('z',300),scale(v,300),cmp('5',v,300),calls].join()`,
+		`[many(1,1,1,1,1,1,300),many('1',1,1,1,1,1,300),many(1,'1',1,1,1,1,300),many(1,1,'1',1,1,1,300)].join()`,
+		`[many(1,1,1,'1',1,1,300),many(1,1,1,1,'1',1,300),many(1,1,1,1,1,v,300),calls].join()`,
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+	}
+	entry := func(name string) *jitEntry {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		return r.jit.hint(cl.hint())
+	}
+	for _, name := range []string{"scale", "cmp"} {
+		e := entry(name)
+		if e == nil || e.ssa == nil || e.reopts == 0 || e.reopts >= jitReoptimizations || e.entrySlow ||
+			e.ssaStats.entries == 0 || e.ssaStats.guards != 0 {
+			t.Fatalf("%s was not compiled again to run without failing: %+v", name, e)
+		}
+	}
+	if e := entry("many"); e == nil || e.ssa == nil || e.reopts != jitReoptimizations {
+		t.Fatalf("many was not compiled again %d times: %+v", jitReoptimizations, e)
+	}
+}

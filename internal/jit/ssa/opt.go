@@ -213,7 +213,7 @@ func unboxPhis(f *Func) bool {
 				continue
 			}
 			for _, a := range v.Args {
-				if !numeric(a) && !isCand(a) && !(a.Op == OpLoadSlot && a.Block.PC < 0) {
+				if !numeric(a) && !isCand(a) && !(a.Op == OpLoadSlot && a.Block.PC < 0 && !a.Block.Generic) {
 					cand[v.ID] = false
 					changed = true
 					break

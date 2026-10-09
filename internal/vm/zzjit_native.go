@@ -180,8 +180,16 @@ type jitEntry struct {
 	// Go, failed a guard (by bytecode PC) and polled. ssaLoop is the
 	// function's loops' mean length, in instructions, which the work a
 	// native stretch did is estimated with (jitSSAProfit).
-	ssaStats      jitSSAStats
-	ssaLoop       uint32
+	ssaStats jitSSAStats
+	ssaLoop  uint32
+	// failed and failedEntries are the sites, by slot IR PC, and the
+	// entries, by PC, whose speculation failed in the code; reopt marks
+	// code to be compiled again, with them generic, at its next entry, and
+	// reopts counts the times it was (jitDeoptimized).
+	failed        []int32
+	failedEntries []uint32
+	reopt         bool
+	reopts        uint8
 	code          *jit.Code
 	misses        uint8
 	probes        uint8
@@ -238,6 +246,7 @@ type jitState struct {
 	budgets       uint64
 	osrs          uint64
 	compiled      uint64
+	reoptimized   uint64
 	interpreted   uint64
 	stressExits   uint64
 	ssaCtx        *abi.Context
@@ -453,7 +462,7 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool, cl *closure) *j
 		// The new pipeline lowers for itself; what it does not compile goes
 		// to the slot IR emitters.
 		if p, err := jitcompile.LowerSSA(fn); err == nil {
-			if code, shapes := r.compileSSA(fn, cl, p, limit); code != nil {
+			if code, shapes := r.compileSSA(fn, cl, p, limit, nil); code != nil {
 				e.ssa, e.this, e.ssaShapes = code, p.This, shapes
 				e.ssaLoop = jitLoopLength(fn)
 				for _, in := range p.Code {
@@ -711,6 +720,9 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 		f.cl.setHint(hintFor(e))
 	}
 	if e != nil && e.ssa != nil {
+		if e.reopt {
+			r.jitReoptimize(f.cl, e)
+		}
 		if e.entrySlow {
 			// Its native stretches cost more at their exits than they save
 			// (jitSSAProfit): the existing tiers run it.
@@ -1123,6 +1135,46 @@ func jitBinaryBoundary(in bytecode.Instr) bool {
 	return op == bytecode.OpMod || op >= bytecode.OpEq && op <= bytecode.OpStrictNe
 }
 
+// jitBinaryGeneric reports an instruction applying a binary arithmetic,
+// bitwise or comparison operator, plain or fused with a local, an
+// immediate or a branch, which jitBinaryAt describes.
+func jitBinaryGeneric(in bytecode.Instr) bool {
+	op := in.Op
+	switch in.Op {
+	case bytecode.OpBinLocal, bytecode.OpBinImm, bytecode.OpJumpIfCmpFalse:
+		op = bytecode.Op(in.B)
+	case bytecode.OpLocalBinImm:
+		op = bytecode.Op(in.A >> 24)
+	}
+	return jitBinaryOperator(op)
+}
+
+// jitBinaryOperator reports a binary arithmetic, bitwise or comparison
+// operator.
+func jitBinaryOperator(op bytecode.Op) bool {
+	return op >= bytecode.OpAdd && op <= bytecode.OpPow ||
+		op >= bytecode.OpBitAnd && op <= bytecode.OpUShr && op != bytecode.OpBitNot ||
+		op >= bytecode.OpEq && op <= bytecode.OpGe
+}
+
+// jitArith is an arithmetic or bitwise operator's value, as the
+// interpreter computes it.
+func (r *Runtime) jitArith(op bytecode.Op, a, b Value) (Value, error) {
+	switch op {
+	case bytecode.OpAdd:
+		if a.IsNumber() && b.IsNumber() {
+			return Float(a.Number() + b.Number()), nil
+		}
+		return r.add(a, b)
+	case bytecode.OpSub, bytecode.OpMul, bytecode.OpDiv, bytecode.OpMod, bytecode.OpPow:
+		if a.IsNumber() && b.IsNumber() {
+			return Float(numericOp(op, a.Number(), b.Number())), nil
+		}
+		return r.arith(op, a, b)
+	}
+	return r.bitwise(op, a, b)
+}
+
 // Operands use the native layout: locals, upvalues, then the live stack.
 // The original bytecode retains strict/loose comparison semantics. Remainder
 // also uses this layout, including fused local and immediate operands.
@@ -1130,7 +1182,6 @@ func jitBinaryAt(in bytecode.Instr, sp int) (jitBinary, bool) {
 	c := jitBinary{left: sp - 2, right: sp - 1, dest: sp - 2, delta: -1}
 	op := in.Op
 	switch in.Op {
-	case bytecode.OpEq, bytecode.OpNe, bytecode.OpStrictEq, bytecode.OpStrictNe, bytecode.OpMod:
 	case bytecode.OpJumpIfCmpFalse:
 		op = bytecode.Op(in.B)
 		c.branch, c.delta = true, -2
@@ -1146,7 +1197,9 @@ func jitBinaryAt(in bytecode.Instr, sp int) (jitBinary, bool) {
 		c.left, c.right, c.dest, c.delta = int(in.A&0xffffff), -1, sp, 1
 		c.literal = Float(float64(int32(in.B)))
 	default:
-		return c, false
+		if !jitBinaryOperator(op) {
+			return c, false
+		}
 	}
 	c.op = op
 	c.strict = op == bytecode.OpStrictEq || op == bytecode.OpStrictNe
@@ -1324,7 +1377,9 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 		pc := int(f.pc)
 		in := f.cl.fn.Code[pc]
 		n := len(f.locals) + len(f.cl.upvalues)
-		if jitBinaryBoundary(in) {
+		if jitBinaryBoundary(in) || r.jitSSA && jitBinaryGeneric(in) {
+			// The new pipeline's code also leaves an operation whose
+			// speculation failed before to Go (ssa.Feedback's Generic).
 			cmp, _ := jitBinaryAt(in, n+sp-f.base)
 			left := r.jitFrameValue(f, cmp.left)
 			right := cmp.literal
@@ -1334,16 +1389,26 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 			f.pc++
 			sp += cmp.delta
 			steps++
-			if cmp.op == bytecode.OpMod {
-				value, err := r.arith(cmp.op, left, right)
+			if cmp.op < bytecode.OpEq || cmp.op > bytecode.OpGe {
+				value, err := r.jitArith(cmp.op, left, right)
 				if err != nil {
 					return sp, steps, err
 				}
 				r.stack[f.base+cmp.dest-n] = value
 				continue
 			}
-			result := left.StrictEquals(right)
-			if !cmp.strict {
+			var result bool
+			if cmp.op >= bytecode.OpLt {
+				if left.IsNumber() && right.IsNumber() {
+					result = compareFloats(cmp.op, left.Number(), right.Number())
+				} else {
+					c, err := r.compare(left, right)
+					if err != nil {
+						return sp, steps, err
+					}
+					result = relationalResult(cmp.op, c)
+				}
+			} else if result = left.StrictEquals(right); !cmp.strict {
 				var err error
 				result, err = r.looseEquals(left, right)
 				if err != nil {
