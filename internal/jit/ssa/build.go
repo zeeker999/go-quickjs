@@ -37,6 +37,30 @@ type Feedback interface {
 	// Inline is the call at pc to inline, if the VM has seen it call one
 	// function it may be: see InlineSite.
 	Inline(pc int) (InlineSite, bool)
+	// NativeCalls are the functions the call at pc may call natively, if
+	// any: those the VM has seen it call, at most a few (see CallSite).
+	NativeCalls(pc int) []CallSite
+}
+
+// CallSite is a function the VM has seen a call call whose native code a
+// caller's may call (mir's native calls): the function object's address,
+// which the call checks it calls; its closure's, for Go to make its frame
+// from; the address of the cell its code's entry is in, 0 while it has
+// none, and of the count of the calls made to it natively, if any, which
+// the VM keeps alive; the call's argument count and whether it
+// passes a receiver; the callee's parameters, locals and operand slots;
+// its receiver's slot, or -1 if it reads none; and whether a receiver that
+// is not an object needs coercing, which only Go does. The builder sets
+// Result, the caller's slot the result goes to, and Cont, the PC after the
+// call, whose entry the caller goes on at.
+type CallSite struct {
+	Callee, Closure, Entry, Count uintptr
+	Argc                          int
+	Method                        bool
+	Params, LocalCount, MaxStack  int
+	ThisSlot                      int
+	Coerce                        bool
+	Result, Cont                  int
 }
 
 // InlineSite is a call the VM has seen call one function, whose program,
@@ -1161,7 +1185,39 @@ func (b *builder) instruction(blk *Block, pc int) {
 		blk.ExitKind = ir.HostExit
 		blk.State = state()
 		blk.State.addUse()
+		if b.cur == b.root {
+			blk.Calls = b.nativeCalls(pc)
+		}
 	}
+}
+
+// nativeCalls are the functions the call at pc may call natively, if any
+// (CallSite): those the VM has seen it call, if speculation has not given
+// up on it and there is an entry after it to go on at.
+func (b *builder) nativeCalls(pc int) []*CallSite {
+	if b.fb == nil || pc+1 >= len(b.p.Code) || !reachable(b.p, pc+1) || b.fb.Generic(pc) {
+		return nil
+	}
+	var calls []*CallSite
+	for _, site := range b.fb.NativeCalls(pc) {
+		depth, after := b.p.Maps[pc].Depth, b.p.Maps[pc+1].Depth
+		operands := site.Argc + 1
+		if site.Method {
+			operands++
+		}
+		if site.Argc < 0 || depth < operands || after != depth-operands+1 || site.ThisSlot >= 0 && !site.Method {
+			continue
+		}
+		if site.ThisSlot < 0 {
+			// A receiver it never reads needs no coercing.
+			site.Coerce = false
+		}
+		site.Result, site.Cont = b.p.Locals+after-1, pc+1
+		c := new(CallSite)
+		*c = site
+		calls = append(calls, c)
+	}
+	return calls
 }
 
 func (s *FrameState) addUse() {}

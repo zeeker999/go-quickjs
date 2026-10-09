@@ -5,6 +5,7 @@ package jit
 import (
 	"fmt"
 	"runtime"
+	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
@@ -49,6 +50,15 @@ func NewSSACode(a *Arena, c *mir.Code) (*SSACode, error) {
 // HasEntry reports whether the code can be entered at a slot IR PC.
 func (s *SSACode) HasEntry(pc int) bool {
 	return pc >= 0 && pc < len(s.entries) && s.entries[pc] >= 0
+}
+
+// EntryAddress is the address of the code's entry at a slot IR PC, which a
+// caller's native code jumps to (mir's native calls), or 0 for none.
+func (s *SSACode) EntryAddress(pc int) uintptr {
+	if s == nil || len(s.code) == 0 || !s.HasEntry(pc) {
+		return 0
+	}
+	return uintptr(unsafe.Pointer(&s.code[s.entries[pc]]))
 }
 
 // Run enters at a slot IR PC with ctx, which must hold the frame's addresses

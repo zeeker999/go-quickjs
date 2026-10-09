@@ -646,6 +646,9 @@ type layout struct {
 // Inline is ssa.Feedback's: the harness inlines nothing.
 func (l layout) Inline(int) (ssa.InlineSite, bool) { return ssa.InlineSite{}, false }
 
+// NativeCalls is ssa.Feedback's: the harness calls nothing natively.
+func (l layout) NativeCalls(int) []ssa.CallSite { return nil }
+
 // Generic and EntryGeneric are ssa.Feedback's.
 func (l layout) Generic(pc int) bool      { return l.generic[pc] }
 func (l layout) EntryGeneric(pc int) bool { return l.genericEntries[pc] }

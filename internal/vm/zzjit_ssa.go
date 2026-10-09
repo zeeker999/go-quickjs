@@ -161,7 +161,11 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	}
 	e.reopt, e.inlineReopt = false, false
 	fn := cl.fn
-	p, err := jitcompile.LowerSSA(fn)
+	lower := jitcompile.LowerSSA
+	if e.ssaCallee {
+		lower = jitcompile.LowerSSAInline
+	}
+	p, err := lower(fn)
 	if err != nil {
 		return
 	}
@@ -171,7 +175,10 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	}
 	old := e.ssa
 	e.ssa, e.ssaShapes, e.ssaHolders, e.fed, e.ssaStats = code, fb.shapes, fb.holders, fb.fed, jitSSAStats{}
-	e.ssaStrings = e.ssaStrings || fb.strings
+	e.ssaStrings, e.ssaCallees = e.ssaStrings || fb.strings, fb.callees
+	if !e.notNative {
+		e.nativeEntry = code.EntryAddress(0)
+	}
 	old.Close()
 	r.jit.reoptimized++
 }
@@ -241,9 +248,11 @@ type jitFeedback struct {
 	fed []jitFedSite
 	// root is the function's feedback for an inlined callee's, which keeps
 	// what the callee's sites hold for the code; nil for the function's
-	// own. strings marks an inlined callee that calls charCodeAt.
+	// own. strings marks an inlined callee that calls charCodeAt. callees
+	// are the entries of the functions the code calls natively.
 	root    *jitFeedback
 	strings bool
+	callees []*jitEntry
 	// e is the entry being compiled again, whose failed speculations
 	// (jitEntry.failed) are built generic; nil for a first compile.
 	e *jitEntry
@@ -290,6 +299,42 @@ func (fb *jitFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 	return ssa.InlineSite{}, false
 }
 
+// NativeCalls is ssa.Feedback's: the functions jitCallSeen has seen a call
+// call whose native code a caller's may call -- compiled, and not reading
+// what a frame made natively does not have: captured bindings,
+// charCodeAt's intrinsic. The callees' entries are kept by the code.
+func (fb *jitFeedback) NativeCalls(pc int) []ssa.CallSite {
+	if fb.e == nil || fb.root != nil || pc >= len(fb.fn.Code) {
+		return nil
+	}
+	var sites []ssa.CallSite
+	for _, in := range fb.e.nativeCalls {
+		if int(in.pc) != pc {
+			continue
+		}
+		// Only looked up: a compile here would share the workspaces of the
+		// one asking. jitCallSeen compiled it.
+		ce := fb.r.jit.cache[weak.Make(in.cl.fn)]
+		if ce == nil || ce.ssa == nil || ce.ssaStrings || ce.notNative || len(in.cl.fn.Upvalues) != 0 {
+			continue
+		}
+		call, fn := fb.fn.Code[pc], in.cl.fn
+		this := -1
+		if ce.this {
+			this = fn.LocalCount
+		}
+		fb.callees = append(fb.callees, ce)
+		fb.holders = append(fb.holders, in.obj)
+		sites = append(sites, ssa.CallSite{
+			Callee: uintptr(unsafe.Pointer(in.obj)), Closure: uintptr(unsafe.Pointer(in.cl)),
+			Entry: uintptr(unsafe.Pointer(&ce.nativeEntry)), Count: uintptr(unsafe.Pointer(&ce.nativeIn)),
+			Argc: int(call.A), Method: call.Op == bytecode.OpCallMethod,
+			Params: fn.ParamCount, LocalCount: fn.LocalCount, MaxStack: fn.MaxStack, ThisSlot: this, Coerce: fn.CoerceThis,
+		})
+	}
+	return sites
+}
+
 // jitInline is a call jitCallSeen has seen call a function it may inline:
 // the call's PC, the function, and how often native code has left the
 // inlined callee for Go there.
@@ -310,11 +355,17 @@ const (
 )
 
 // What jitCallSeen knows of a call (jitEntry.callSites), past its count: that
-// it is not inlined, or that it is.
+// it is made natively, that it is neither that nor inlined, or that it is
+// inlined.
 const (
+	jitCallNative  = 253
 	jitCallDone    = 254
 	jitCallInlined = 255
 )
+
+// jitCallTargets is how many functions a call may call natively: one it
+// calls that is not among them leaves for Go, which makes the call.
+const jitCallTargets = 4
 
 // jitInlineExits is how often native code may leave an inlined callee for
 // Go before the call stops being inlined: each such exit has Go make the
@@ -330,6 +381,13 @@ const jitInlineExits = 16
 // been seen too -- or at its next entry. A call seen before costs a look
 // at the lists.
 func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) {
+	if e.callSites != nil && e.callSites[pc] == jitCallNative {
+		r.jitCallTarget(f, e, pc, sp, in)
+		if e.inlinePending && e.inlineReopts < jitInlineReoptimizations {
+			e.inlinePending, e.inlineReopt = false, true
+		}
+		return
+	}
 	if e.inlineReopts >= jitInlineReoptimizations {
 		return
 	}
@@ -361,19 +419,112 @@ func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 		return
 	}
 	e.callSites[pc] = jitCallDone
+	o, cl := r.jitCalled(f, sp, in)
+	if cl == nil {
+		return
+	}
+	if cl.fn != f.cl.fn && r.jitInlinable(cl.fn) {
+		e.inlines = append(e.inlines, jitInline{pc: int32(pc), cl: cl, obj: o})
+		e.callSites[pc] = jitCallInlined
+		e.inlinePending = true
+		return
+	}
+	// One that is not inlined is called natively, if its code allows it
+	// (NativeCalls), the call itself for a recursive one.
+	if ce := r.jitNativeCallee(cl); ce != nil {
+		e.nativeCalls = append(e.nativeCalls, jitInline{pc: int32(pc), cl: cl, obj: o})
+		e.callSites[pc] = jitCallNative
+		e.inlinePending = true
+	}
+}
+
+// jitCalled is the function object a call at the top of the frame's
+// operands, up to sp, calls, and its closure, if it is one native code may
+// call or inline: one the script made, in the frame's realm and scope.
+func (r *Runtime) jitCalled(f *frame, sp int, in bytecode.Instr) (*Object, *closure) {
 	callee := r.stack[sp-int(in.A)-1]
 	if !callee.IsObject() {
-		return
+		return nil, nil
 	}
 	o := callee.Object()
 	fd := o.fn()
 	if fd == nil || fd.native != nil || fd.bound || fd.closure == nil || fd.closure.realm != r.Realm ||
-		fd.closure.fn == f.cl.fn || fd.closure.scope() != f.cl.scope() || !r.jitInlinable(fd.closure.fn) {
+		fd.closure.scope() != f.cl.scope() {
+		return nil, nil
+	}
+	return o, fd.closure
+}
+
+// jitCallTarget notes a call made natively that left for Go at pc: a
+// function it calls that it was not compiled to call joins those it calls
+// natively, up to jitCallTargets, and the code is compiled again for it at
+// once -- as V8's call feedback goes polymorphic.
+func (r *Runtime) jitCallTarget(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) {
+	o, cl := r.jitCalled(f, sp, in)
+	if cl == nil {
 		return
 	}
-	e.inlines = append(e.inlines, jitInline{pc: int32(pc), cl: fd.closure, obj: o})
-	e.callSites[pc] = jitCallInlined
-	e.inlinePending = true
+	n := 0
+	for _, x := range e.nativeCalls {
+		if int(x.pc) == pc {
+			if x.obj == o {
+				return
+			}
+			n++
+		}
+	}
+	if n >= jitCallTargets {
+		return
+	}
+	if ce := r.jitNativeCallee(cl); ce != nil {
+		e.nativeCalls = append(e.nativeCalls, jitInline{pc: int32(pc), cl: cl, obj: o})
+		e.inlineReopt = true
+	}
+}
+
+// jitNativeCallee is the entry of cl's function, compiled now if it is not,
+// if a call may make it natively (NativeCalls), or nil: the new pipeline
+// compiles it, with a frame of its own, as a call makes it. One LowerSSA
+// refuses for leaving native code with no loop to pay for Go's entries to
+// it is compiled for native callers alone, who pay none of that, from
+// LowerSSAInline, and Go does not enter it (entrySlow). It is compiled
+// here, not when a caller's code asks for it: that compile would share the
+// caller's workspaces.
+func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
+	fn := cl.fn
+	if fn.TopLevel || fn.IsModule || fn.UsesArguments || fn.HasDirectEval || len(fn.Upvalues) != 0 {
+		return nil
+	}
+	e := r.jitFor(cl)
+	if e == nil || e.ssa != nil || e.code != nil || e.deferred || !r.jitSSA {
+		if e != nil && e.ssa != nil && !e.notNative {
+			return e
+		}
+		return nil
+	}
+	p, err := jitcompile.LowerSSAInline(fn)
+	if err != nil {
+		return nil
+	}
+	code, fb := r.compileSSA(fn, cl, p, r.jitAllowance(fn), e)
+	if code == nil {
+		return nil
+	}
+	e.setSSA(fn, p, code, fb)
+	e.ssaCallee, e.entrySlow = true, true
+	r.jit.compiled++
+	return e
+}
+
+// setSSA gives e the code the new pipeline compiled for fn from p.
+func (e *jitEntry) setSSA(fn *bytecode.Function, p *ir.Program, code *jit.SSACode, fb *jitFeedback) {
+	e.ssa, e.this, e.ssaShapes, e.ssaHolders, e.fed = code, p.This, fb.shapes, fb.holders, fb.fed
+	e.ssaStrings, e.ssaCallees = fb.strings, fb.callees
+	e.nativeEntry = code.EntryAddress(0)
+	e.ssaLoop = jitLoopLength(fn)
+	for _, in := range p.Code {
+		e.ssaStrings = e.ssaStrings || in.Op == ir.StringMethod || in.Op == ir.StringCode
+	}
 }
 
 // jitInlinable reports whether fn may be inlined into a caller: it
@@ -654,6 +805,8 @@ func (r *Runtime) jitSSAProfit(e *jitEntry, ctx *abi.Context, start, edges int) 
 	}
 	st.work += work
 	if st.entries%jitSSAProbe == 0 && st.work < st.entries*jitSSAMinWork {
+		// Go stops entering it; native callers, which pay neither, go on
+		// calling it (NativeCalls).
 		e.entrySlow = true
 	}
 }
@@ -685,12 +838,25 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 		return Undefined, nil, false
 	}
 	s := r.jit
-	if s.ssaCtx == nil {
-		s.ssaCtx = new(abi.Context)
+	if s.ssaCtxs == nil {
+		s.ssaCtxs = new([jitContexts]abi.Context)
 	}
-	ctx := s.ssaCtx
+	idx := s.ctxTop
+	if idx >= jitContexts-1 {
+		// As deep in native code, through Go, as there are contexts.
+		return Undefined, nil, false
+	}
+	s.ctxTop++
+	defer func() { s.ctxTop-- }()
+	ctx := &s.ssaCtxs[idx]
 	for {
 		// The stack can move between entries, after Go has run something.
+		s.ssaCtx = ctx
+		ctx.ReturnTo, ctx.Live, ctx.TailReturn = 0, 0, 0
+		ctx.Level = uint64(idx)
+		ctx.LevelLimit = uint64(min(jitContexts, idx+max(0, r.maxFrames-r.frameDepth)))
+		ctx.StackBase, ctx.StackEnd = unsafe.Pointer(unsafe.SliceData(r.stack)), uint64(len(r.stack))
+		ctx.StackTop, ctx.StackHigh = &r.stackTop, &r.stackHigh
 		ctx.Locals = unsafe.Pointer(unsafe.SliceData(f.locals))
 		ctx.Stack = unsafe.Pointer(&r.stack[f.base])
 		ctx.BackEdges = &r.backEdges
@@ -714,6 +880,24 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 			return r.jitInterpret(f, f.base+depth, nil)
 		}
 		r.jitSSAProfit(e, ctx, start, edges)
+		if s.ssaCtxs[idx+1].Live != 0 {
+			// A native call's callee left native code: Go finishes the
+			// calls (jitUnwindNative), then this one goes on after its
+			// call, as after one Go made.
+			s.hosts++
+			e.ssaStats.hosts++
+			exitPC, depth := int(ctx.ExitPC), int(ctx.ExitDepth)
+			v, err := r.jitUnwindNative(idx)
+			sp, ok := r.jitCallResult(f, exitPC, depth, v, err)
+			if !ok || r.stopped != nil {
+				return r.jitInterpret(f, sp, err)
+			}
+			pc, depth = int(f.pc), sp-f.base
+			if !e.ssa.HasEntry(pc) || e.entrySlow {
+				return r.jitInterpret(f, sp, nil)
+			}
+			continue
+		}
 		if ctx.ExitKind == abi.ExitReturn {
 			from := ctx.RetFrom - 1
 			if s := r.jitSource(f, e, &from); s != nil && s.ref != nil {
@@ -781,4 +965,187 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 			f.pc = uint32(pc)
 		}
 	}
+}
+
+// jitContexts is how many contexts native code runs in at once: one for
+// each runSSA running, each native call another (abi.Context.Level).
+const jitContexts = 24
+
+// jitNativeLevel is a frame a native call made whose callee left native
+// code (abi.Context.Live): what Go makes the VM's frame from, and finishes
+// it with.
+type jitNativeLevel struct {
+	cl                    *closure
+	base                  int
+	this                  Value
+	kind, pc, depth, site uint64
+}
+
+// jitUnwindNative finishes the native calls the code running in context
+// idx made, the innermost of which left native code: it makes the VM's
+// frame of each, as runFD would have, from the outermost; then finishes
+// each from the innermost -- that one from its exit, as runSSA does, the
+// others from after their call, with what the one they called returned or
+// threw -- and returns what the outermost returned or threw.
+func (r *Runtime) jitUnwindNative(idx int) (Value, error) {
+	s := r.jit
+	// Its levels go past those of the unwinds it runs inside, which hold
+	// theirs until they finish: they are reached by index, the slices
+	// growing as the unwinds it runs need.
+	start := len(s.unwinding)
+	for i := idx + 1; i < jitContexts && s.ssaCtxs[i].Live != 0; i++ {
+		c := &s.ssaCtxs[i]
+		s.unwinding = append(s.unwinding, jitNativeLevel{(*closure)(c.Closure), int(c.Base), *(*Value)(unsafe.Pointer(&c.This)),
+			c.ExitKind, c.ExitPC, c.ExitDepth, c.ExitSite})
+		c.Live, c.ReturnTo = 0, 0
+	}
+	n := len(s.unwinding) - start
+	if n != 0 {
+		// The innermost left; the others only return through Go.
+		if e := s.hint(s.unwinding[len(s.unwinding)-1].cl.hint()); e != nil {
+			r.jitUnwound(e)
+		}
+	}
+	defer func() {
+		clear(s.unwinding[start:])
+		clear(s.unwindingFrames[start:])
+		s.unwinding, s.unwindingFrames = s.unwinding[:start], s.unwindingFrames[:start]
+	}()
+	s.unwound += uint64(n)
+	for k := range n {
+		l := &s.unwinding[start+k]
+		fn := l.cl.fn
+		f := r.pushFrame()
+		f.cl = l.cl
+		f.locals = r.stack[l.base : l.base+fn.LocalCount : l.base+fn.LocalCount]
+		f.base = l.base + fn.LocalCount
+		f.pc = uint32(l.pc)
+		f.this, f.newTarget, f.callee, f.args = l.this, Undefined, nil, nil
+		f.openUpvalues, f.handlers = f.openUpvalues[:0], f.handlers[:0]
+		f.thisRef, f.withScopes, f.evalVars, f.native, f.savedSP = nil, nil, nil, "", 0
+		s.unwindingFrames = append(s.unwindingFrames, f)
+	}
+	var v Value
+	var err error
+	for k := n - 1; k >= 0; k-- {
+		f, l := s.unwindingFrames[start+k], s.unwinding[start+k]
+		e := r.jit.hint(f.cl.hint())
+		if e == nil {
+			e = r.jitFor(f.cl)
+		}
+		if k == n-1 {
+			v, err = r.jitFinishExit(f, e, &l)
+		} else {
+			// A frame native code made goes on in native code where it can,
+			// whatever Go's entries to it cost (entrySlow).
+			sp, ok := r.jitCallResult(f, int(l.pc), int(l.depth), v, err)
+			switch {
+			case !ok || r.stopped != nil || e == nil || e.ssa == nil || !e.ssa.HasEntry(int(f.pc)):
+				v, err, _ = r.jitInterpret(f, sp, err)
+			default:
+				var native bool
+				if v, err, native = r.runSSA(f, e, int(f.pc), sp-f.base); !native {
+					v, err, _ = r.jitInterpret(f, sp, nil)
+				}
+			}
+		}
+		r.popFrameOf(f, l.base)
+	}
+	return v, err
+}
+
+// jitUnwindProbe is how many times native code called natively leaves
+// between looks at whether it leaves too often, and jitUnwindShare the
+// share of its calls it may leave from, as one in so many: Go then finishes
+// every native call outside it (jitUnwindNative), which costs more than Go
+// making the call.
+const (
+	jitUnwindProbe = 64
+	jitUnwindShare = 4
+)
+
+// jitUnwound counts a native call that left native code inside e's code
+// (nativeOut), which native callers stop calling if it leaves too often
+// (jitUnwindShare): they leave for Go at the call instead, which makes it.
+func (r *Runtime) jitUnwound(e *jitEntry) {
+	if e.nativeOut++; e.nativeOut%jitUnwindProbe == 0 && e.nativeOut*jitUnwindShare > e.nativeIn {
+		e.notNative, e.nativeEntry = true, 0
+	}
+}
+
+// jitFinishExit finishes a frame whose native code, called natively, left
+// for Go as l says, as runSSA would have had it been entered from Go: Go
+// runs the instruction, or the interpreter the rest, or the interrupt
+// check is made; native code goes on where it can.
+func (r *Runtime) jitFinishExit(f *frame, e *jitEntry, l *jitNativeLevel) (Value, error) {
+	pc, depth := int(l.pc), int(l.depth)
+	f.pc = uint32(pc)
+	switch l.kind {
+	case abi.ExitHost:
+		// What it learns here it learns as runSSA's exits do: a function
+		// only native callers run is entered from Go nowhere else.
+		in := f.cl.fn.Code[pc]
+		if e != nil && e.ssa != nil {
+			e.ssaStats.hosts++
+			if in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod {
+				r.jitCallSeen(f, e, pc, f.base+depth, in)
+			}
+		}
+		sp, steps, err := r.jitHost(f, f.base+depth, 1)
+		if err != nil || r.stopped != nil || steps == 0 {
+			v, err, _ := r.jitInterpret(f, sp, err)
+			return v, err
+		}
+		if e != nil && e.ssa != nil {
+			switch in.Op {
+			case bytecode.OpGetProp, bytecode.OpGetPropThis, bytecode.OpSetProp:
+				jitFed(f.cl, e, uint32(pc))
+			}
+			if e.inlinePending && e.inlineReopts < jitInlineReoptimizations {
+				e.inlinePending, e.inlineReopt = false, true
+			}
+			if e.reopt || e.inlineReopt {
+				r.jitReoptimize(f.cl, e)
+			}
+		}
+		pc, depth = int(f.pc), sp-f.base
+	case abi.ExitPoll:
+		r.backEdges = backEdgeCheckInterval
+		if err := r.checkInterruptNow(); err != nil {
+			return Undefined, err
+		}
+	default:
+		if e != nil {
+			e.ssaStats.guards++
+		}
+		v, err, _ := r.jitInterpret(f, f.base+depth, nil)
+		return v, err
+	}
+	if e != nil && e.ssa != nil && e.ssa.HasEntry(pc) {
+		if v, err, native := r.runSSA(f, e, pc, depth); native {
+			return v, err
+		}
+	}
+	f.pc = uint32(pc)
+	v, err, _ := r.jitInterpret(f, f.base+depth, nil)
+	return v, err
+}
+
+// jitCallResult has a frame whose state at the call at pc, depth operands
+// deep, is in its frame go on after the call, which returned v or threw
+// err: the call's operands go, its result comes, as when Go makes it
+// (jitHost). It returns the operands' top, and false for a throw, which
+// the interpreter takes from there.
+func (r *Runtime) jitCallResult(f *frame, pc, depth int, v Value, err error) (int, bool) {
+	in := f.cl.fn.Code[pc]
+	sp := f.base + depth - int(in.A) - 1
+	if in.Op == bytecode.OpCallMethod {
+		sp--
+	}
+	f.pc = uint32(pc + 1)
+	if err != nil {
+		return sp, false
+	}
+	r.stack[sp] = v
+	return sp + 1, true
 }

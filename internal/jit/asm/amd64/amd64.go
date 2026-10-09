@@ -158,6 +158,25 @@ func (a *Asm) Jmp(l Label) {
 	a.imm32(0)
 }
 
+// JmpReg jumps to the address in r.
+func (a *Asm) JmpReg(r Reg) {
+	if r >= 8 {
+		a.emit(0x41)
+	}
+	a.emit(0xFF, 0xE0|byte(r&7))
+}
+
+// LeaLabel is dst = the address l is bound at, RIP-relative.
+func (a *Asm) LeaLabel(dst Reg, l Label) {
+	rex := byte(0x48)
+	if dst >= 8 {
+		rex |= 0x04
+	}
+	a.emit(rex, 0x8D, byte(dst&7)<<3|5)
+	a.fixups = append(a.fixups, fixup{len(a.buf), l})
+	a.imm32(0)
+}
+
 // Jcc jumps to l if c holds.
 func (a *Asm) Jcc(c Cond, l Label) {
 	a.emit(0x0F, 0x80|byte(c))
