@@ -1404,6 +1404,70 @@ func jitRuntimeForTest(t *testing.T, cfg Config) *Runtime {
 	return r
 }
 
+// The new pipeline compares with null and undefined natively, whatever the
+// other operand is: strictly by the word, loosely by either word or an
+// object's [[IsHTMLDDA]] (Annex B), as values and as branches. It used to
+// take both operands for numbers, and an entry speculation followed from
+// that: Richards' list walks failed a guard on every call. Each answer must
+// be the interpreter's, with no guard failing.
+func TestJITSSANullish(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function P(link){this.link=link}
+		P.prototype.addTo=function(queue){this.link=null;if(queue==null)return this;var peek,next=queue;while((peek=next.link)!=null)next=peek;next.link=this;return queue};
+		function count(x){let n=0;for(let i=0;i<3;i++){
+			if(x==null)n+=1;if(x!=undefined)n+=10;if(x===null)n+=100;if(x!==undefined)n+=1000;
+			n+=(x==null?1:0)*10000+(undefined===x?1:0)*100000}return n}
+		var values=[null,undefined,0,'',false,{},[],'s',NaN,1];
+		function walk(n){var q=null;for(var i=0;i<n;i++){q=new P(null).addTo(q);if(i%7==0)q=null}var k=0;while(q!=null){k++;q=q.link}return k}`
+	rounds := []string{
+		`values.map(count).join()`,
+		`[dda,dda,null].map(count).join()`,
+		`''+walk(50)`,
+		`[count(1),count(null),walk(12)].join()`,
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		dda := rt.NewObject()
+		dda.MarkHTMLDDA()
+		rt.global.setOwnRaw(rt.atoms.intern("dda"), Obj(dda), propDefault)
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+	}
+	if st := r.JITStats(); st.SSAEntries == 0 || st.Guards != 0 {
+		var sites []string
+		for key, e := range r.jit.cache {
+			if fn := key.Value(); fn != nil && e.ssaStats.guards != 0 {
+				sites = append(sites, fmt.Sprintf("%s: %v", fn.Name, e.ssaStats.guardsAt))
+			}
+		}
+		t.Fatalf("native comparisons with null failed guards: %+v %v", st, sites)
+	}
+	// count only compares: it never leaves native code.
+	count := r.global.getOwn(r.atoms.intern("count")).value.Object().fn().closure
+	if e := r.jit.hint(count.hint()); e == nil || e.ssa == nil || e.ssaStats.entries == 0 || e.ssaStats.hosts != 0 {
+		t.Fatalf("count did not compare natively: %+v", e)
+	}
+}
+
 // Old-pipeline code calling an uncompiled function, in a runtime that runs
 // the new pipeline, leaves the callee to be compiled the ordinary way, by
 // the new pipeline: compiled for the old coordinator alone, as a callee

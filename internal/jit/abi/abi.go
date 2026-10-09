@@ -63,10 +63,15 @@ type Context struct {
 	// every entry of a function that reads it; uninitialized in a derived
 	// constructor before super() returns.
 	This Slot
-	// The exit record.
+	// The exit record. ExitSite is the slot IR PC of the operation whose
+	// guard or exit this was, or -1 (all ones) for a block's entry or loop
+	// header state -- an entry's speculation, or a poll: what a policy that
+	// stops speculating where it failed needs, since ExitPC is where the
+	// interpreter resumes, often the start of the statement.
 	ExitKind  uint64
 	ExitPC    uint64
 	ExitDepth uint64
+	ExitSite  uint64
 	// Ret is a return's number word. RetFrom is 0 when that is the result,
 	// or 1 plus the slot whose value, a reference, is.
 	Ret, RetFrom uint64
@@ -98,6 +103,7 @@ var (
 	OffExitKind  = int32(unsafe.Offsetof(Context{}.ExitKind))
 	OffExitPC    = int32(unsafe.Offsetof(Context{}.ExitPC))
 	OffExitDepth = int32(unsafe.Offsetof(Context{}.ExitDepth))
+	OffExitSite  = int32(unsafe.Offsetof(Context{}.ExitSite))
 	OffRet       = int32(unsafe.Offsetof(Context{}.Ret))
 	OffRetFrom   = int32(unsafe.Offsetof(Context{}.RetFrom))
 	OffRecords   = int32(unsafe.Offsetof(Context{}.Records))
@@ -147,6 +153,9 @@ type Encoding struct {
 	// slice: a pointer to the first value, then the count.
 	ObjectClass, ObjectFlags, ObjectArrayLen, ObjectElems int32
 	ClassArray, FlagSparse                                uint8
+	// FlagHTMLDDA is the flags byte's bit for Annex B's [[IsHTMLDDA]],
+	// which makes an object == null and == undefined.
+	FlagHTMLDDA uint8
 
 	// String is every string's number word. A string's UTF-8 form's data
 	// pointer is at StringData, valid only when the pointer at StringLeft is

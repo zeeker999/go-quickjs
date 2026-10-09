@@ -28,10 +28,16 @@ type Feedback interface {
 }
 
 // GlobalSite is a global read's site: its name, the VM's atom, and the
-// index in the global object's table where the binding was found.
+// index in the global object's table where the binding was found. Fixed
+// says the binding can never change -- a data property neither writable
+// nor configurable, as undefined, NaN and Infinity are -- and Constant is
+// its value then: the read checks the binding is still where it was, and
+// uses the constant.
 type GlobalSite struct {
-	Key   uint32
-	Index int32
+	Key      uint32
+	Index    int32
+	Fixed    bool
+	Constant ir.Value
 }
 
 // PropertySite is a property site: its key, the VM's atom; and, if the
@@ -127,8 +133,12 @@ func (b *builder) plan() error {
 		case ir.ArrayWrite, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead,
 			ir.StringMethod, ir.StringCode:
 			// What native code does not do exits to Go, which resumes after
-			// it.
-			entries[pc+1] = true
+			// it. A fixed global's check only deoptimizes: the binding can
+			// never move, so it never fails, and what follows sees its
+			// constant rather than a merge with a slot loaded at an entry.
+			if site, ok := b.global(pc); !ok || !site.Fixed {
+				entries[pc+1] = true
+			}
 		case ir.Binary:
 			if in.Operator == ir.Eq || in.Operator == ir.Ne || in.Operator == ir.Mod {
 				// A comparison or remainder of non-numbers exits to Go, which
@@ -409,10 +419,42 @@ func (b *builder) constIn(blk *Block, c ir.Value) *Value {
 	return v
 }
 
+// nullish is an Eq or Ne with null or undefined, as a bool, whatever the
+// other operand is: compared natively, rather than taken for a number.
+// It returns nil for any other comparison.
+func (b *builder) nullish(blk *Block, in ir.Instruction, operand func(ir.Operand) *Value, guard func(Op, Type, ir.ExitKind, ...*Value) *Value) *Value {
+	if in.Operator != ir.Eq && in.Operator != ir.Ne {
+		return nil
+	}
+	isNullish := func(v *Value) bool {
+		return v.Op == OpConst && (v.Const.Kind == ir.Null || v.Const.Kind == ir.Undefined)
+	}
+	x, y := operand(in.Left), operand(in.Right)
+	if isNullish(x) {
+		x, y = y, x
+	}
+	if !isNullish(y) {
+		return nil
+	}
+	var c *Value
+	if in.Strict {
+		c = b.f.newValue(blk, OpStrictNullish, Bool, x)
+		if y.Const.Kind == ir.Undefined {
+			c.Aux = 1
+		}
+	} else {
+		c = guard(OpLooseNullish, Bool, ir.HostExit, x)
+	}
+	if in.Operator == ir.Ne {
+		c = b.f.newValue(blk, OpNot, Bool, c)
+	}
+	return c
+}
+
 // state captures the frame at a PC: every live slot's current value.
 func (b *builder) state(blk *Block, pc int) *FrameState {
 	depth := b.p.Maps[pc].Depth
-	s := &FrameState{PC: b.p.Maps[pc].PC, Depth: depth, Slots: b.f.refsOf(b.p.Locals + depth)}
+	s := &FrameState{PC: b.p.Maps[pc].PC, Depth: depth, Slots: b.f.refsOf(b.p.Locals + depth), Site: pc}
 	for i := range s.Slots {
 		s.Slots[i] = b.read(i, blk)
 		s.Slots[i].Uses++
@@ -424,7 +466,7 @@ func (b *builder) fill(blk *Block) {
 	f := b.f
 	if blk.PC < 0 {
 		e, _ := f.entryForBlock(blk)
-		blk.Header = &FrameState{PC: b.p.Maps[e.PC].PC, Depth: e.Depth, Slots: f.refsOf(b.p.Locals + e.Depth)}
+		blk.Header = &FrameState{PC: b.p.Maps[e.PC].PC, Depth: e.Depth, Slots: f.refsOf(b.p.Locals + e.Depth), Site: -1}
 		for i := range blk.Header.Slots {
 			v := f.newValue(blk, OpLoadSlot, Tagged)
 			v.Aux = i
@@ -435,6 +477,7 @@ func (b *builder) fill(blk *Block) {
 	}
 	if blk.LoopHeader {
 		blk.Header = b.state(blk, blk.PC)
+		blk.Header.Site = -1
 	}
 	for pc := blk.PC; pc <= b.endOf[blk]; pc++ {
 		b.instruction(blk, pc)
@@ -522,6 +565,10 @@ func (b *builder) instruction(blk *Block, pc int) {
 		b.assign(n+1, blk, x)
 		b.assign(n+2, blk, y)
 	case ir.Binary:
+		if c := b.nullish(blk, in, operand, guard); c != nil {
+			b.assign(in.Dest, blk, boxB(c))
+			break
+		}
 		kind := ir.GuardExit
 		if in.Operator == ir.Eq || in.Operator == ir.Ne || in.Operator == ir.Mod {
 			kind = ir.HostExit
@@ -567,6 +614,8 @@ func (b *builder) instruction(blk *Block, pc int) {
 		var c *Value
 		if in.Operator == ir.Truth {
 			c = guard(OpTruth, Bool, ir.GuardExit, operand(in.Left))
+		} else if n := b.nullish(blk, in, operand, guard); n != nil {
+			c = n
 		} else {
 			kind := ir.GuardExit
 			if in.Operator == ir.Eq || in.Operator == ir.Ne {
@@ -635,8 +684,18 @@ func (b *builder) instruction(blk *Block, pc int) {
 			blk.State.addUse()
 			break
 		}
-		cell := guard(OpGlobalCell, Source, ir.HostExit)
+		kind := ir.HostExit
+		if site.Fixed {
+			kind = ir.GuardExit
+		}
+		cell := guard(OpGlobalCell, Source, kind)
 		cell.Index, cell.Key = int(site.Index), site.Key
+		if site.Fixed {
+			k := f.newValue(blk, OpConst, Tagged)
+			k.Const = site.Constant
+			b.assign(in.Dest, blk, k)
+			break
+		}
 		v := f.newValue(blk, OpLoadCell, Tagged, cell)
 		v.Shadow = cell
 		b.assign(in.Dest, blk, v)

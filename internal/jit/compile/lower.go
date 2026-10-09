@@ -598,6 +598,11 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 	return bad("unsupported opcode " + in.Op.String())
 }
 
+// strictOp reports whether a raw comparison opcode is === or !==.
+func strictOp(raw uint32) bool {
+	return raw == uint32(bytecode.OpStrictEq) || raw == uint32(bytecode.OpStrictNe)
+}
+
 func operator(raw uint32) (ir.Operator, bool) {
 	switch raw {
 	case uint32(bytecode.OpBitAnd):
@@ -753,13 +758,13 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this bool) ir.Instr
 		bytecode.OpLt, bytecode.OpLe, bytecode.OpGt, bytecode.OpGe,
 		bytecode.OpEq, bytecode.OpNe, bytecode.OpStrictEq, bytecode.OpStrictNe:
 		op, _ := operator(uint32(in.Op))
-		return ir.Instruction{Op: ir.Binary, Operator: op, Dest: sp - 2, Left: ir.Slot(sp - 2), Right: top}
+		return ir.Instruction{Op: ir.Binary, Operator: op, Dest: sp - 2, Left: ir.Slot(sp - 2), Right: top, Strict: strictOp(uint32(in.Op))}
 	case bytecode.OpBinLocal:
 		if in.B == uint32(bytecode.OpMod) {
 			return ir.Instruction{Op: ir.Host}
 		}
 		op, _ := operator(in.B)
-		return ir.Instruction{Op: ir.Binary, Operator: op, Dest: sp - 1, Left: top, Right: ir.Slot(int(in.A))}
+		return ir.Instruction{Op: ir.Binary, Operator: op, Dest: sp - 1, Left: top, Right: ir.Slot(int(in.A)), Strict: strictOp(in.B)}
 	case bytecode.OpBinImm:
 		if in.B == uint32(bytecode.OpMod) {
 			return ir.Instruction{Op: ir.Host}
@@ -768,7 +773,7 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this bool) ir.Instr
 			return ir.Instruction{Op: ir.Unary, Operator: ir.Int32, Left: top, Dest: sp - 1}
 		}
 		op, _ := operator(in.B)
-		return ir.Instruction{Op: ir.Binary, Operator: op, Dest: sp - 1, Left: top, Right: number(int32(in.A))}
+		return ir.Instruction{Op: ir.Binary, Operator: op, Dest: sp - 1, Left: top, Right: number(int32(in.A)), Strict: strictOp(in.B)}
 	case bytecode.OpLocalBinImm:
 		if in.A>>24 == uint32(bytecode.OpMod) {
 			return ir.Instruction{Op: ir.Host}
@@ -777,7 +782,7 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this bool) ir.Instr
 			return ir.Instruction{Op: ir.Unary, Operator: ir.Int32, Left: ir.Slot(int(in.A & (1<<24 - 1))), Dest: sp}
 		}
 		op, _ := operator(in.A >> 24)
-		return ir.Instruction{Op: ir.Binary, Operator: op, Dest: sp, Left: ir.Slot(int(in.A & (1<<24 - 1))), Right: number(int32(in.B))}
+		return ir.Instruction{Op: ir.Binary, Operator: op, Dest: sp, Left: ir.Slot(int(in.A & (1<<24 - 1))), Right: number(int32(in.B)), Strict: strictOp(in.A >> 24)}
 	case bytecode.OpNeg, bytecode.OpPos, bytecode.OpToNumber, bytecode.OpToNumeric, bytecode.OpNot, bytecode.OpBitNot:
 		op := ir.Pos
 		if in.Op == bytecode.OpNeg {
@@ -807,7 +812,7 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this bool) ir.Instr
 		return ir.Instruction{Op: ir.Branch, Operator: ir.Truth, Target: int(in.A), Left: top, When: in.Op == bytecode.OpJumpIfTrue || in.Op == bytecode.OpJumpIfTrueKeep}
 	case bytecode.OpJumpIfCmpFalse:
 		op, _ := operator(in.B)
-		return ir.Instruction{Op: ir.Branch, Operator: op, Target: int(in.A), Left: ir.Slot(sp - 2), Right: top}
+		return ir.Instruction{Op: ir.Branch, Operator: op, Target: int(in.A), Left: ir.Slot(sp - 2), Right: top, Strict: strictOp(in.B)}
 	case bytecode.OpReturn:
 		return ir.Instruction{Op: ir.Return, Left: top}
 	case bytecode.OpReturnUndef:

@@ -86,6 +86,30 @@ func randomProgram(r *rand.Rand) *ir.Program {
 // compare runs p's slot IR evaluator and f's SSA evaluator from an entry and
 // requires the same exit and live slots. It returns false when the slot IR
 // does not finish within its budget, which the test skips.
+// nullishEquality reports whether the slot IR exited to Go at an Eq or Ne
+// with null or undefined, in the slots it exited with.
+func nullishEquality(p *ir.Program, slots []ir.Value, at ir.StateMap) bool {
+	for pc, m := range p.Maps {
+		if m != at {
+			continue
+		}
+		in := p.Code[pc]
+		if (in.Op != ir.Binary && in.Op != ir.Branch) || (in.Operator != ir.Eq && in.Operator != ir.Ne) {
+			continue
+		}
+		for _, o := range []ir.Operand{in.Left, in.Right} {
+			v := o.Literal
+			if o.Slot >= 0 {
+				v = slots[o.Slot]
+			}
+			if v.Kind == ir.Null || v.Kind == ir.Undefined {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func compare(t *testing.T, p *ir.Program, f *Func, pc int, slots []ir.Value, poll int, heap testHeap) bool {
 	t.Helper()
 	x := append([]ir.Value(nil), slots...)
@@ -95,6 +119,13 @@ func compare(t *testing.T, p *ir.Program, f *Func, pc int, slots []ir.Value, pol
 		t.Fatalf("slot IR: %v", err)
 	}
 	if want.Kind == ir.BudgetExit {
+		return false
+	}
+	if want.Kind == ir.HostExit && nullishEquality(p, x, want.State) {
+		// SSA compares with null and undefined natively, where the slot IR
+		// leaves it to Go: it goes on, and the slot IR has nothing to say
+		// about what follows. The native harness and the VM's tests check
+		// those comparisons.
 		return false
 	}
 	y := append([]ir.Value(nil), slots...)

@@ -304,7 +304,7 @@ func (c *a64Compiler) exitTo(s *ssa.FrameState, kind uint64) {
 		c.appendRecord(uint64(i)|abi.RecordScalar, nil, 0, true, &w)
 		c.a.Bind(next)
 	}
-	c.record(kind, uint64(s.PC), uint64(s.Depth))
+	c.record(kind, uint64(s.PC), uint64(s.Depth), uint64(int64(s.Site)))
 }
 
 // isReference falls through when v, whose word is in w, is the reference
@@ -350,13 +350,15 @@ func (c *a64Compiler) gprAfter(v *ssa.Value) func() arm64.Reg {
 }
 
 // record fills the exit record and returns to Go.
-func (c *a64Compiler) record(kind, pc, depth uint64) {
+func (c *a64Compiler) record(kind, pc, depth, site uint64) {
 	c.a.MovImm(a64A, kind)
 	c.a.Store(a64Ctx, abi.OffExitKind, a64A)
 	c.a.MovImm(a64A, pc)
 	c.a.Store(a64Ctx, abi.OffExitPC, a64A)
 	c.a.MovImm(a64A, depth)
 	c.a.Store(a64Ctx, abi.OffExitDepth, a64A)
+	c.a.MovImm(a64A, site)
+	c.a.Store(a64Ctx, abi.OffExitSite, a64A)
 	c.a.Ret()
 }
 
@@ -495,6 +497,35 @@ func (c *a64Compiler) branch(b *ssa.Block, next *ssa.Block) {
 	c.edge(b, b.Succs[1], nil)
 	c.a.Bind(yes)
 	c.edge(b, b.Succs[0], next)
+}
+
+// looseNullish is x == null, as amd64's: null's or undefined's word, or an
+// object with [[IsHTMLDDA]].
+func (c *a64Compiler) looseNullish(v *ssa.Value, guard func(arm64.Cond)) {
+	a := v.Args[0]
+	yes, no, done := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+	w := c.gpr(a, a64B)
+	for _, word := range []uint64{c.enc.Null, c.enc.Undefined} {
+		c.a.MovImm(a64A, word)
+		c.a.Cmp(w, a64A, true)
+		c.a.BCond(arm64.EQ, yes)
+	}
+	c.a.MovImm(a64A, c.enc.Object)
+	c.a.Cmp(w, a64A, true)
+	c.a.BCond(arm64.NE, no)
+	if c.reference(v, a, c.enc.Object, guard) {
+		c.a.LoadU8(a64A, a64C, c.enc.ObjectFlags)
+		c.a.MovImm(a64B, uint64(c.enc.FlagHTMLDDA))
+		c.a.Tst(a64A, a64B, false)
+		c.a.BCond(arm64.NE, yes)
+	}
+	c.a.Bind(no)
+	c.a.MovImm(a64A, 0)
+	c.a.B(done)
+	c.a.Bind(yes)
+	c.a.MovImm(a64A, 1)
+	c.a.Bind(done)
+	c.setG(v, a64A)
 }
 
 // arrayOf finds the array a value is and checks its class.
@@ -896,6 +927,19 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		d := c.gdst(v)
 		c.a.Cset(d, a64Compare(ir.Operator(v.Aux)))
 		c.setG(v, d)
+	case ssa.OpStrictNullish:
+		word := c.enc.Null
+		if v.Aux == 1 {
+			word = c.enc.Undefined
+		}
+		w := c.gpr(arg(0), a64B)
+		c.a.MovImm(a64A, word)
+		c.a.Cmp(w, a64A, true)
+		d := c.gdst(v)
+		c.a.Cset(d, arm64.EQ)
+		c.setG(v, d)
+	case ssa.OpLooseNullish:
+		c.looseNullish(v, guard)
 	case ssa.OpNot:
 		c.a.CmpImm(c.gpr(arg(0), a64A), 0, false)
 		d := c.gdst(v)
