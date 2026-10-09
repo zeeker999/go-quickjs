@@ -4082,6 +4082,11 @@ func TestJITSSANativeCalls(t *testing.T) {
 		if e := entry("sum"); e != nil {
 			hosts, entries = e.ssaStats.hosts, e.ssaStats.entries
 		}
+		if i == 2 {
+			// While the collector marks, Go makes the calls: none does.
+			runtime.GC()
+			defer debug.SetGCPercent(debug.SetGCPercent(-1))
+		}
 		gv, err := r.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatal(err)
@@ -4238,6 +4243,9 @@ func TestJITSSANativeCallTargets(t *testing.T) {
 		var polyCalls, leafHosts uint64
 		if i == 3 {
 			polyCalls, leafHosts = calledNatively(), entry("useLeaf").ssaStats.hosts
+			// While the collector marks, Go makes the calls: none does.
+			runtime.GC()
+			defer debug.SetGCPercent(debug.SetGCPercent(-1))
 		}
 		unwound := r.jit.unwound
 		gv, err := r.Run(compileForTest(t, src))
