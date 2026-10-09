@@ -23,8 +23,9 @@ const MaxKeeps = 64
 //   - none: the value of slot Arg, a reference;
 //   - RecordScalar: the primitive whose number word is Word, over a
 //     reference, whose pointer word only Go may clear;
-//   - RecordMaybe: the value of slot int32(Arg) if that holds a reference,
-//     and otherwise -- or if int32(Arg) is negative -- the primitive Word.
+//   - RecordMaybe: the value at address Arg, a source (ssa's origin.go), if
+//     that holds a reference, and otherwise -- or if Arg is 0 -- the
+//     primitive Word.
 //   - RecordDirect: the value whose number word is Word and whose pointer
 //     word is the context's RecordRef at the record's index, as a native
 //     call read them before the callee ran (ssa's OpCall).
@@ -80,7 +81,8 @@ type Context struct {
 	ExitDepth uint64
 	ExitSite  uint64
 	// Ret is a return's number word. RetFrom is 0 when that is the result,
-	// or 1 plus the slot whose value, a reference, is.
+	// or the address of the value, a reference, that is: a source (ssa's
+	// origin.go).
 	Ret, RetFrom uint64
 	// A native call (mir's): a caller's code sets up its callee's frame in
 	// the VM's stack, and its context, the next in the runtime's array of
@@ -194,8 +196,8 @@ const (
 
 // Exit kinds, written to Context.ExitKind.
 const (
-	// ExitReturn: Ret holds the result's number word, or RetFrom names
-	// the slot that holds it.
+	// ExitReturn: Ret holds the result's number word, or RetFrom is where
+	// the result is.
 	ExitReturn uint64 = iota
 	// ExitDeopt: a guard failed. The frame holds the state at ExitPC with
 	// ExitDepth operands; the interpreter runs from there.

@@ -812,19 +812,17 @@ func (r *Runtime) jitStringMethod() Value {
 }
 
 // jitSource is the value a run-time source names (internal/jit/ssa,
-// origin.go), which word holds as native code wrote it: a slot's, or, at or
-// above abi.MaxRecords, the value at a heap cell native code loaded a
-// reference from; nil for a primitive's -1. The cell still holds the
-// reference: native code stores no pointer, and nothing else has run since
-// it read it. Reading the address back as a pointer is outside
-// unsafe.Pointer's documented rules, and sound while Go's heap does not
-// move (docs/jit-progress.md, D8, decided 2026-10-08).
-func (r *Runtime) jitSource(f *frame, e *jitEntry, word *uint64) *Value {
-	switch from := int64(*word); {
-	case from < 0:
+// origin.go), which word holds as native code wrote it: the value's
+// address -- a slot's in the frame, the receiver's in a context, a captured
+// binding's, or a heap cell's native code loaded a reference from -- or nil
+// for a primitive's 0. It still holds the reference: native code stores no
+// pointer, and nothing else has run since it read it. Reading the address
+// back as a pointer is outside unsafe.Pointer's documented rules, and sound
+// while Go's heap does not move (docs/jit-progress.md, D8, decided
+// 2026-10-08).
+func jitSource(word *uint64) *Value {
+	if *word == 0 {
 		return nil
-	case from < abi.MaxRecords:
-		return r.jitSlot(f, e, int(from))
 	}
 	return *(**Value)(unsafe.Pointer(word))
 }
@@ -866,7 +864,7 @@ func (r *Runtime) jitRecordValue(f *frame, e *jitEntry, ctx *abi.Context, i int)
 	case rec.Slot&abi.RecordScalar != 0:
 		return Value{num: math.Float64frombits(rec.Word)}
 	case rec.Slot&abi.RecordMaybe != 0:
-		if s := r.jitSource(f, e, &rec.Arg); s != nil && s.ref != nil {
+		if s := jitSource(&rec.Arg); s != nil && s.ref != nil {
 			return *s
 		}
 		return Value{num: math.Float64frombits(rec.Word)}
@@ -1038,8 +1036,7 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 			continue
 		}
 		if ctx.ExitKind == abi.ExitReturn {
-			from := ctx.RetFrom - 1
-			if s := r.jitSource(f, e, &from); s != nil && s.ref != nil {
+			if s := jitSource(&ctx.RetFrom); s != nil && s.ref != nil {
 				return *s, nil, true
 			}
 			return Value{num: math.Float64frombits(ctx.Ret)}, nil, true

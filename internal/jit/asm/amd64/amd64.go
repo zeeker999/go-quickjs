@@ -225,6 +225,13 @@ func (a *Asm) Load(dst, base Reg, disp int32) {
 	a.modrmMem(byte(dst), base, disp)
 }
 
+// Lea is dst = base + disp.
+func (a *Asm) Lea(dst, base Reg, disp int32) {
+	a.rex(true, byte(dst), byte(base), false)
+	a.emit(0x8D)
+	a.modrmMem(byte(dst), base, disp)
+}
+
 // LoadU32 is dst = [base + disp], 32 bits, zero-extended.
 func (a *Asm) LoadU32(dst, base Reg, disp int32) {
 	a.rex(false, byte(dst), byte(base), false)
