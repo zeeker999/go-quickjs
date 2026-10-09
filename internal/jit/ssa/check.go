@@ -92,12 +92,19 @@ func Check(f *Func) error {
 			return fmt.Errorf("ssa: %s has %d back-edge marks for %d predecessors", where, len(b.Backedge), len(b.Preds))
 		}
 	}
-	for v, o := range Origins(f) {
-		if s := v.Shadow; o == OriginAmbiguous && (s == nil || s.Op != OpPhi || s.Type != Source || s.Block != v.Block) {
-			return fmt.Errorf("ssa: b%d %v merges two slots' values with no shadow", v.Block.ID, v)
-		}
-		if o == OriginHeap && (v.Shadow == nil || v.Shadow != v.Args[0]) {
-			return fmt.Errorf("ssa: b%d %v is loaded from a cell it does not name", v.Block.ID, v)
+	origins := Origins(f)
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			o, ok := origins.Of(v)
+			if !ok {
+				continue
+			}
+			if s := v.Shadow; o == OriginAmbiguous && (s == nil || s.Op != OpPhi || s.Type != Source || s.Block != v.Block) {
+				return fmt.Errorf("ssa: b%d %v merges two slots' values with no shadow", v.Block.ID, v)
+			}
+			if o == OriginHeap && (v.Shadow == nil || v.Shadow != v.Args[0]) {
+				return fmt.Errorf("ssa: b%d %v is loaded from a cell it does not name", v.Block.ID, v)
+			}
 		}
 	}
 	return nil

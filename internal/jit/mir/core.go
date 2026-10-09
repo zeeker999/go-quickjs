@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/bits"
 	"runtime"
+	"slices"
 	"sort"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
@@ -26,12 +28,13 @@ type core struct {
 	order []*ssa.Block
 	// lazy values have no location: constants used only by frame states,
 	// and boxes used only by frame states and returns, which are
-	// rematerialized where needed.
-	lazy map[*ssa.Value]bool
-	locs map[*ssa.Value]loc
+	// rematerialized where needed. lazy, locs and hasLoc are by value ID.
+	lazy   []bool
+	locs   []loc
+	hasLoc []bool
 	// origin is each tagged value's (ssa.Origins): the slot an exit looks
 	// in for the reference the value may be.
-	origin map[*ssa.Value]int
+	origin ssa.OriginMap
 	// gprs and fprs are the architecture's allocatable registers, by number.
 	gprs, fprs []int
 }
@@ -57,9 +60,11 @@ func prepare(f *ssa.Func, enc abi.Encoding, gprs, fprs []int) (*core, error) {
 		return nil, err
 	}
 	c.origin = ssa.Origins(f)
-	for v, o := range c.origin {
-		if (o == ssa.OriginAmbiguous || o == ssa.OriginHeap) && v.Shadow == nil {
-			return nil, fmt.Errorf("%w: %v merges two slots' values with no shadow", ErrUnsupported, v)
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if o, ok := c.origin.Of(v); ok && (o == ssa.OriginAmbiguous || o == ssa.OriginHeap) && v.Shadow == nil {
+				return nil, fmt.Errorf("%w: %v merges two slots' values with no shadow", ErrUnsupported, v)
+			}
 		}
 	}
 	c.layout()
@@ -78,14 +83,54 @@ var ErrUnsupported = errors.New("mir: unsupported")
 type Code struct {
 	Bytes   []byte
 	Entries map[int]int
-	// Locations lists where each value lives, for tests and debugging.
-	Locations string
+	// core is the compiler's state, for Locations.
+	core *core
 }
+
+// Locations lists where each value lives, for tests and debugging: made on
+// demand, since compiling at run time never asks.
+func (c *Code) Locations() string { return c.core.describe() }
 
 // loc is where a value lives: a register of its class, or a spill slot.
 type loc struct {
 	reg   int // register number, or -1
 	spill int // spill slot, or -1
+}
+
+// isLazy reports whether v has no location of its own (core.lazy).
+func (c *core) isLazy(v *ssa.Value) bool { return v.ID < len(c.lazy) && c.lazy[v.ID] }
+
+// loc is v's location, and whether it has one.
+func (c *core) loc(v *ssa.Value) (loc, bool) {
+	if v.ID >= len(c.locs) || !c.hasLoc[v.ID] {
+		return loc{}, false
+	}
+	return c.locs[v.ID], true
+}
+
+// locAt is v's location, or the zero location if it has none.
+func (c *core) locAt(v *ssa.Value) loc {
+	l, _ := c.loc(v)
+	return l
+}
+
+func (c *core) setLoc(v *ssa.Value, l loc) {
+	c.locs[v.ID], c.hasLoc[v.ID] = l, true
+}
+
+// valueSet is a set of value IDs.
+type valueSet []uint64
+
+func newValueSet(n int) valueSet  { return make(valueSet, (n+63)/64) }
+func (s valueSet) add(i int)      { s[i>>6] |= 1 << (i & 63) }
+func (s valueSet) has(i int) bool { return s[i>>6]&(1<<(i&63)) != 0 }
+func (s valueSet) each(f func(int)) {
+	for w, word := range s {
+		for word != 0 {
+			f(w*64 + bits.TrailingZeros64(word))
+			word &= word - 1
+		}
+	}
 }
 
 type stubKey struct {
@@ -109,14 +154,14 @@ func capturedUnchanged(f *ssa.Func) error {
 // layout orders blocks in reverse post-order from the entries, so that a
 // loop's body follows its header.
 func (c *core) layout() {
-	seen := map[*ssa.Block]bool{}
+	seen := make([]bool, numBlocks(c.f))
 	var post []*ssa.Block
 	var visit func(*ssa.Block)
 	visit = func(b *ssa.Block) {
-		if seen[b] {
+		if seen[b.ID] {
 			return
 		}
-		seen[b] = true
+		seen[b.ID] = true
 		for i := len(b.Succs) - 1; i >= 0; i-- {
 			visit(b.Succs[i])
 		}
@@ -132,27 +177,28 @@ func (c *core) layout() {
 
 // findLazy marks values that need no location of their own.
 func (c *core) findLazy() {
-	used := map[*ssa.Value]bool{} // by an argument, a control or a phi
+	n := c.f.NumValues()
+	used := make([]bool, n) // by an argument, a control or a phi
 	for _, b := range c.f.Blocks {
 		for _, v := range b.Values {
 			for _, a := range v.Args {
-				used[a] = true
+				used[a.ID] = true
 			}
 		}
 		if b.Control != nil && b.Kind != ssa.BlockReturn {
-			used[b.Control] = true
+			used[b.Control.ID] = true
 		}
 	}
 	// A slot loaded at an entry and named only by frame states for that same
 	// slot needs no register: an exit leaves that slot as it is.
-	elsewhere := map[*ssa.Value]bool{}
+	elsewhere := make([]bool, n)
 	state := func(s *ssa.FrameState) {
 		if s == nil {
 			return
 		}
 		for i, v := range s.Slots {
 			if !(v.Op == ssa.OpLoadSlot && v.Aux == i) {
-				elsewhere[v] = true
+				elsewhere[v.ID] = true
 			}
 		}
 	}
@@ -160,7 +206,7 @@ func (c *core) findLazy() {
 		for _, v := range b.Values {
 			for _, a := range v.Args {
 				if a.Op == ssa.OpLoadSlot {
-					elsewhere[a] = true
+					elsewhere[a.ID] = true
 				}
 			}
 			state(v.State)
@@ -168,44 +214,59 @@ func (c *core) findLazy() {
 		state(b.State)
 		state(b.Header)
 		if b.Control != nil && b.Control.Op == ssa.OpLoadSlot {
-			elsewhere[b.Control] = true
+			elsewhere[b.Control.ID] = true
 		}
 	}
-	c.lazy = map[*ssa.Value]bool{}
+	c.lazy = make([]bool, n)
 	for _, b := range c.f.Blocks {
 		for _, v := range b.Values {
 			switch v.Op {
 			case ssa.OpConstSource:
-				c.lazy[v] = true
+				c.lazy[v.ID] = true
 			case ssa.OpConst, ssa.OpBoxF64, ssa.OpBoxBool:
-				if !used[v] {
-					c.lazy[v] = true
+				if !used[v.ID] {
+					c.lazy[v.ID] = true
 				}
 			case ssa.OpLoadSlot:
-				if !elsewhere[v] {
-					c.lazy[v] = true
+				if !elsewhere[v.ID] {
+					c.lazy[v.ID] = true
 				}
 			}
 		}
 	}
 }
 
-// allocate computes liveness and assigns locations by linear scan.
-func (c *core) allocate() error {
-	// Number positions: each block has a start, one position per value, and
-	// an end.
-	pos := map[*ssa.Value]int{}
-	start, end := map[*ssa.Block]int{}, map[*ssa.Block]int{}
+// numBlocks bounds f's block IDs.
+func numBlocks(f *ssa.Func) int {
 	n := 0
+	for _, b := range f.Blocks {
+		n = max(n, b.ID+1)
+	}
+	return n
+}
+
+// allocate computes liveness and assigns locations by linear scan. Its
+// tables are indexed by value and block ID: a compile at run time pays for
+// every pass (BenchmarkJITCompile).
+func (c *core) allocate() error {
+	nv, nb := c.f.NumValues(), numBlocks(c.f)
+	// Number positions: each block has a start, one position per value, and
+	// an end. at is the block of each position.
+	pos := make([]int, nv)
+	for i := range pos {
+		pos[i] = -1
+	}
+	start, end := make([]int, nb), make([]int, nb)
+	var at []*ssa.Block
 	for _, b := range c.order {
-		start[b] = n
-		n++
+		start[b.ID] = len(at)
+		at = append(at, b)
 		for _, v := range b.Values {
-			pos[v] = n
-			n++
+			pos[v.ID] = len(at)
+			at = append(at, b)
 		}
-		end[b] = n
-		n++
+		end[b.ID] = len(at)
+		at = append(at, b)
 	}
 	// Uses: each value's uses, by the position of the use.
 	type use struct {
@@ -213,13 +274,13 @@ func (c *core) allocate() error {
 		pos int
 	}
 	var uses []use
-	need := func(v *ssa.Value) bool { return hasResult(v) && !c.lazy[v] }
+	need := func(v *ssa.Value) bool { return hasResult(v) && !c.isLazy(v) }
 	useState := func(s *ssa.FrameState, at int) {
 		if s == nil {
 			return
 		}
 		for _, v := range s.Slots {
-			if c.lazy[v] || remat(v) {
+			if c.isLazy(v) || remat(v) {
 				for _, a := range v.Args {
 					uses = append(uses, use{a, at})
 				}
@@ -237,25 +298,25 @@ func (c *core) allocate() error {
 				continue // phi arguments are used at their predecessors' ends
 			}
 			for _, a := range v.Args {
-				uses = append(uses, use{a, pos[v]})
+				uses = append(uses, use{a, pos[v.ID]})
 			}
-			useState(v.State, pos[v])
+			useState(v.State, pos[v.ID])
 		}
 		if b.Control != nil {
-			if c.lazy[b.Control] {
+			if c.isLazy(b.Control) {
 				for _, a := range b.Control.Args {
-					uses = append(uses, use{a, end[b]})
+					uses = append(uses, use{a, end[b.ID]})
 				}
 			} else {
-				uses = append(uses, use{b.Control, end[b]})
+				uses = append(uses, use{b.Control, end[b.ID]})
 				if b.Control.Shadow != nil {
-					uses = append(uses, use{b.Control.Shadow, end[b]})
+					uses = append(uses, use{b.Control.Shadow, end[b.ID]})
 				}
 			}
 		}
-		useState(b.State, end[b])
+		useState(b.State, end[b.ID])
 		if b.LoopHeader {
-			useState(b.Header, start[b])
+			useState(b.Header, start[b.ID])
 		}
 		for _, s := range b.Succs {
 			for i, p := range s.Preds {
@@ -266,79 +327,71 @@ func (c *core) allocate() error {
 					if phi.Op != ssa.OpPhi {
 						break
 					}
-					uses = append(uses, use{phi.Args[i], end[b]})
+					uses = append(uses, use{phi.Args[i], end[b.ID]})
 				}
 				if s.LoopHeader && s.Backedge[i] {
 					// A poll on this edge exits to the header's state.
-					useState(s.Header, end[b])
+					useState(s.Header, end[b.ID])
 				}
 			}
 		}
 	}
 	// Block-level liveness, so that values live around a loop stay live for
-	// all of it.
-	liveIn := map[*ssa.Block]map[*ssa.Value]bool{}
-	usesIn := map[*ssa.Block][]*ssa.Value{}
-	defsIn := map[*ssa.Block]map[*ssa.Value]bool{}
-	blockAt := func(p int) *ssa.Block {
-		for _, b := range c.order {
-			if p >= start[b] && p <= end[b] {
-				return b
-			}
-		}
-		return nil
-	}
+	// all of it. byID finds a value from its ID.
+	byID := make([]*ssa.Value, nv)
+	defsIn, usesIn, liveIn := make([]valueSet, nb), make([]valueSet, nb), make([]valueSet, nb)
 	for _, b := range c.order {
-		defsIn[b] = map[*ssa.Value]bool{}
+		defsIn[b.ID], usesIn[b.ID], liveIn[b.ID] = newValueSet(nv), newValueSet(nv), newValueSet(nv)
 		for _, v := range b.Values {
-			defsIn[b][v] = true
+			defsIn[b.ID].add(v.ID)
+			byID[v.ID] = v
 		}
 	}
 	for _, u := range uses {
 		if !need(u.v) {
 			continue
 		}
-		b := blockAt(u.pos)
-		if !defsIn[b][u.v] {
-			usesIn[b] = append(usesIn[b], u.v)
+		b := at[u.pos]
+		byID[u.v.ID] = u.v
+		if !defsIn[b.ID].has(u.v.ID) {
+			usesIn[b.ID].add(u.v.ID)
 		}
 	}
+	in := newValueSet(nv)
 	for changed := true; changed; {
 		changed = false
 		for i := len(c.order) - 1; i >= 0; i-- {
 			b := c.order[i]
-			in := map[*ssa.Value]bool{}
-			for _, v := range usesIn[b] {
-				in[v] = true
-			}
+			copy(in, usesIn[b.ID])
+			defs := defsIn[b.ID]
 			for _, s := range b.Succs {
-				for v := range liveIn[s] {
-					if !defsIn[b][v] {
-						in[v] = true
+				if live := liveIn[s.ID]; live != nil {
+					for w := range in {
+						in[w] |= live[w] &^ defs[w]
 					}
 				}
 			}
-			if len(in) != len(liveIn[b]) {
-				liveIn[b] = in
+			if !slices.Equal(in, liveIn[b.ID]) {
+				copy(liveIn[b.ID], in)
 				changed = true
 			}
 		}
 	}
 	// Intervals: from definition to last use, stretched over every block
 	// where the value is live in or out.
-	iv := map[*ssa.Value]*interval{}
+	iv := make([]*interval, nv)
 	get := func(v *ssa.Value) *interval {
-		if iv[v] == nil {
-			p, ok := pos[v]
-			if !ok {
+		if iv[v.ID] == nil {
+			p := pos[v.ID]
+			if p < 0 {
 				panic(fmt.Sprintf("use of %v defined outside the function", v))
 			}
 			if v.Op == ssa.OpPhi {
-				p = start[v.Block]
+				p = start[v.Block.ID]
 			}
-			iv[v] = &interval{v: v, start: p, end: p}
+			iv[v.ID] = &interval{v: v, start: p, end: p}
 		}
-		return iv[v]
+		return iv[v.ID]
 	}
 	for _, b := range c.order {
 		for _, v := range b.Values {
@@ -355,36 +408,40 @@ func (c *core) allocate() error {
 		}
 	}
 	for _, b := range c.order {
-		for v := range liveIn[b] {
-			it := get(v)
-			if start[b] < it.start {
-				it.start = start[b]
+		bs := start[b.ID]
+		liveIn[b.ID].each(func(id int) {
+			it := get(byID[id])
+			if bs < it.start {
+				it.start = bs
 			}
-			if start[b] > it.end {
-				it.end = start[b]
+			if bs > it.end {
+				it.end = bs
 			}
-		}
+		})
 		for _, s := range b.Succs {
-			for v := range liveIn[s] {
-				if !need(v) {
-					continue
-				}
-				if v.Block == s && v.Op == ssa.OpPhi {
-					continue
+			if liveIn[s.ID] == nil {
+				continue
+			}
+			liveIn[s.ID].each(func(id int) {
+				v := byID[id]
+				if !need(v) || v.Block == s && v.Op == ssa.OpPhi {
+					return
 				}
 				it := get(v)
-				if end[b] > it.end {
-					it.end = end[b]
+				if end[b.ID] > it.end {
+					it.end = end[b.ID]
 				}
-				if start[b] < it.start && !defsIn[b][v] {
-					it.start = start[b]
+				if bs < it.start && !defsIn[b.ID].has(id) {
+					it.start = bs
 				}
-			}
+			})
 		}
 	}
 	var all []*interval
 	for _, it := range iv {
-		all = append(all, it)
+		if it != nil {
+			all = append(all, it)
+		}
 	}
 	sort.Slice(all, func(i, j int) bool {
 		if all[i].start != all[j].start {
@@ -392,7 +449,7 @@ func (c *core) allocate() error {
 		}
 		return all[i].v.ID < all[j].v.ID
 	})
-	c.locs = map[*ssa.Value]loc{}
+	c.locs, c.hasLoc = make([]loc, nv), make([]bool, nv)
 	spills := 0
 	for _, float := range []bool{false, true} {
 		var free []int
@@ -409,14 +466,14 @@ func (c *core) allocate() error {
 			kept := active[:0]
 			for _, a := range active {
 				if a.end < it.start {
-					free = append(free, c.locs[a.v].reg)
+					free = append(free, c.locAt(a.v).reg)
 				} else {
 					kept = append(kept, a)
 				}
 			}
 			active = kept
 			if len(free) > 0 {
-				c.locs[it.v] = loc{reg: free[len(free)-1], spill: -1}
+				c.setLoc(it.v, loc{reg: free[len(free)-1], spill: -1})
 				free = free[:len(free)-1]
 				active = append(active, it)
 				continue
@@ -433,10 +490,10 @@ func (c *core) allocate() error {
 				return fmt.Errorf("%w: more than %d spills", ErrUnsupported, abi.SpillSlots)
 			}
 			if victim == it {
-				c.locs[it.v] = loc{reg: -1, spill: spills}
+				c.setLoc(it.v, loc{reg: -1, spill: spills})
 			} else {
-				c.locs[it.v] = loc{reg: c.locs[victim.v].reg, spill: -1}
-				c.locs[victim.v] = loc{reg: -1, spill: spills}
+				c.setLoc(it.v, loc{reg: c.locAt(victim.v).reg, spill: -1})
+				c.setLoc(victim.v, loc{reg: -1, spill: spills})
 				active[vi] = it
 			}
 			spills++
@@ -493,9 +550,9 @@ func (c *core) describe() string {
 	out := ""
 	for _, b := range c.order {
 		for _, v := range b.Values {
-			l, ok := c.locs[v]
+			l, ok := c.loc(v)
 			switch {
-			case c.lazy[v]:
+			case c.isLazy(v):
 				out += fmt.Sprintf("%v:lazy ", v)
 			case !ok:
 			case l.reg >= 0 && isFloat(v):
@@ -545,21 +602,21 @@ func (c *core) phiSchedule(to *ssa.Block, idx int) []phiStep {
 		if phi.Op != ssa.OpPhi {
 			break
 		}
-		if _, ok := c.locs[phi]; !ok {
+		if _, ok := c.loc(phi); !ok {
 			continue // dead
 		}
 		src := phi.Args[idx]
-		if !c.lazy[src] && c.locs[src] == c.locs[phi] {
+		if !c.isLazy(src) && c.locAt(src) == c.locAt(phi) {
 			continue
 		}
 		moves = append(moves, move{phi, src})
 	}
 	// Locations of different classes never coincide: R10 is not X10.
 	same := func(a, b *ssa.Value) bool {
-		if c.lazy[a] || c.lazy[b] || isFloat(a) != isFloat(b) {
+		if c.isLazy(a) || c.isLazy(b) || isFloat(a) != isFloat(b) {
 			return false
 		}
-		return c.locs[a] == c.locs[b]
+		return c.locAt(a) == c.locAt(b)
 	}
 	var steps []phiStep
 	parked := map[*ssa.Value]bool{}
