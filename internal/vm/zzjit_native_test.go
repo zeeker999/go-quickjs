@@ -1404,6 +1404,39 @@ func jitRuntimeForTest(t *testing.T, cfg Config) *Runtime {
 	return r
 }
 
+// Old-pipeline code calling an uncompiled function, in a runtime that runs
+// the new pipeline, leaves the callee to be compiled the ordinary way, by
+// the new pipeline: compiled for the old coordinator alone, as a callee
+// only, it ran in the tree tier whenever new-pipeline code called it, which
+// is how Crypto's am3 lost the JIT.
+func TestJITSSACalleesStayInTheNewPipeline(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = false
+	if _, err := r.Run(compileForTest(t, `function k(n){let s=0;for(let i=0;i<n;i++)s+=i;return s}
+		function caller(n){let s=0;for(let i=0;i<n;i++)s+=k(i&7);return s}
+		var noCalls=0;for(let i=0;i<3;i++)noCalls+=0`)); err != nil {
+		t.Fatal(err)
+	}
+	// The caller compiles in the old pipeline; k is never called before.
+	caller := r.global.getOwn(r.atoms.intern("caller")).value.Object().fn().closure
+	if e := r.jitFor(caller); e == nil || e.code == nil {
+		t.Fatal("the caller did not compile in the old pipeline")
+	}
+	r.jitSSA = true
+	v, err := r.Run(compileForTest(t, `caller(200)`))
+	if err != nil || v.Number() != 200/8*56 {
+		t.Fatalf("caller(200) = %v, %v", v, err)
+	}
+	k := r.global.getOwn(r.atoms.intern("k")).value.Object().fn().closure
+	e := r.jit.hint(k.hint())
+	if e == nil || e.calleeOnly || e.ssa == nil {
+		t.Fatalf("k: entry %+v, want new-pipeline code", e)
+	}
+}
+
 // A runtime's compiled functions share a few mappings, its arena's chunks,
 // rather than taking one each, in both pipelines; closing the runtime
 // releases every one.

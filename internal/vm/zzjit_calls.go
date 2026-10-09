@@ -283,6 +283,13 @@ func (r *Runtime) jitPushCall(s *jitState, q, child *jitCallFrame, in bytecode.I
 		if r.meter != nil {
 			return false
 		}
+		// The new pipeline compiles a callee itself, when it is called
+		// often enough, and runs it from any caller; a callee compiled here,
+		// by the old pipeline for its coordinator alone, would run in the
+		// tree tier whenever new-pipeline code called it.
+		if r.jitSSA {
+			return false
+		}
 		e = r.jitForMode(fn, true, cl)
 		cl.setHint(hintFor(e))
 	}

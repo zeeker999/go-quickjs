@@ -173,7 +173,10 @@ type jitEntry struct {
 	ssaShapes []*shape
 	// ssaStrings marks code that calls charCodeAt, for which Go looks up the
 	// intrinsic before every entry.
-	ssaStrings    bool
+	ssaStrings bool
+	// ssaStats is what the code did: how often it was entered, left for
+	// Go, failed a guard (by bytecode PC) and polled.
+	ssaStats      jitSSAStats
 	code          *jit.Code
 	misses        uint8
 	probes        uint8
