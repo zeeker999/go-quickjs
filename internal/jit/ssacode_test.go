@@ -141,7 +141,8 @@ var testHolderValues = [2][]ir.Value{{ir.Float(7), ir.Bool(true)}, {ir.Float(-2)
 
 // testHolderSite is a site found on a prototype: the receiver of one of
 // testShapes, then one or two of testHolders, the last sometimes of a
-// shape it does not have.
+// shape it does not have. Sometimes it met receivers of other shapes too
+// (ssa.PropertyCase): with the same prototypes, or the property their own.
 func testHolderSite(r *rand.Rand) site {
 	sh := testShapes[r.IntN(len(testShapes))]
 	s := site{Shape: sh.shape}
@@ -159,6 +160,20 @@ func testHolderSite(r *rand.Rand) site {
 			last = 1
 		}
 		s.Holders[last].Shape = 0x9000
+	}
+	if r.IntN(2) == 0 {
+		for _, o := range testShapes {
+			if o.shape == sh.shape || r.IntN(3) == 0 {
+				continue
+			}
+			k := ssa.PropertyCase{Shape: o.shape, Index: s.Index, Holders: s.Holders}
+			for i, key := range o.keys {
+				if key == s.Key && o.flags[i]&testEncoding.PropNotData == 0 {
+					k = ssa.PropertyCase{Shape: o.shape, Index: int32(i)}
+				}
+			}
+			s.Cases = append(s.Cases, k)
+		}
 	}
 	return s
 }
