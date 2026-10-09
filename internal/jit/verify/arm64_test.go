@@ -167,3 +167,21 @@ func TestARM64Control(t *testing.T) {
 		t.Fatalf("got  %q\nwant %q", got, want)
 	}
 }
+
+// Native calls jump through registers to addresses taken from labels.
+func TestARM64IndirectJumps(t *testing.T) {
+	expectA64(t, "br x15", func(a *arm64.Asm) { a.Br(15) })
+	expectA64(t, "br x3", func(a *arm64.Asm) { a.Br(3) })
+	got := a64(t, func(a *arm64.Asm) {
+		back, ahead := a.NewLabel(), a.NewLabel()
+		a.Bind(back)
+		a.Adr(5, ahead)
+		a.Adr(17, back)
+		a.Ret()
+		a.Bind(ahead)
+	})
+	want := []string{"adr x5, .+0xc", "adr x17, .+0xfffffffffffffffc", "ret"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+}
