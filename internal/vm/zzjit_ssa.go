@@ -47,6 +47,7 @@ var jitEncoding = abi.Encoding{
 	ObjectShape:   int32(unsafe.Offsetof(Object{}.shape)),
 	ObjectProps:   int32(unsafe.Offsetof(Object{}.props)),
 	ObjectProto:   int32(unsafe.Offsetof(Object{}.proto)),
+	WriteBarrier:  jit.WriteBarrier(),
 	PropertySize:  int32(unsafe.Sizeof(Property{})),
 	PropertyKey:   int32(unsafe.Offsetof(Property{}.key)),
 	PropertyFlags: int32(unsafe.Offsetof(Property{}.flags)),

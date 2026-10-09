@@ -88,6 +88,7 @@ func build(w *Workspace, p *ir.Program, fb Feedback) (*Func, error) {
 	}
 	b.translate()
 	shadowMerges(b.f)
+	storeChecks(b.f)
 	return b.f, nil
 }
 
@@ -843,7 +844,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 			b.assign(in.Dest, blk, boxF(v))
 			break
 		}
-		v := guard(OpPropWrite, None, ir.HostExit, object, number(in.Right, ir.HostExit))
+		v := guard(OpPropWrite, None, ir.HostExit, object, operand(in.Right))
 		v.Const, v.Index, v.Key = ir.Value{Bits: uint64(site.Shape)}, int(site.Index), site.Key
 	case ir.Host, ir.Call:
 		blk.ExitKind = ir.HostExit

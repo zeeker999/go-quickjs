@@ -84,26 +84,28 @@ func randomProgram(r *rand.Rand) *ir.Program {
 	return p
 }
 
-// compare runs p's slot IR evaluator and f's SSA evaluator from an entry and
-// requires the same exit and live slots. It returns false when the slot IR
-// does not finish within its budget, which the test skips.
-// equalityExit reports whether the slot IR exited to Go at an Eq or Ne,
-// which it leaves to Go for anything but two numbers, and which SSA
-// compares natively where the operands' words tell (OpEqTagged,
-// OpStrictNullish, OpLooseNullish).
-func equalityExit(p *ir.Program, at ir.StateMap) bool {
+// beyondSlotIR reports an exit of the slot IR at an operation SSA does
+// natively where the slot IR leaves it to Go or the interpreter: an
+// equality, which it compares by the values' words; a truth test, of an
+// object or a string too; a property write, of any value.
+func beyondSlotIR(p *ir.Program, at ir.StateMap) bool {
 	for pc, m := range p.Maps {
 		if m != at {
 			continue
 		}
-		in := p.Code[pc]
-		if (in.Op == ir.Binary || in.Op == ir.Branch) && (in.Operator == ir.Eq || in.Operator == ir.Ne) {
+		switch in := p.Code[pc]; {
+		case (in.Op == ir.Binary || in.Op == ir.Branch) && (in.Operator == ir.Eq || in.Operator == ir.Ne),
+			in.Op == ir.Branch && in.Operator == ir.Truth, in.Op == ir.Unary && in.Operator == ir.Not,
+			in.Op == ir.PropertyWrite:
 			return true
 		}
 	}
 	return false
 }
 
+// compare runs p's slot IR evaluator and f's SSA evaluator from an entry and
+// requires the same exit and live slots. It returns false when the slot IR
+// does not finish within its budget, which the test skips.
 func compare(t *testing.T, p *ir.Program, f *Func, pc int, slots []ir.Value, poll int, heap testHeap) bool {
 	t.Helper()
 	x := append([]ir.Value(nil), slots...)
@@ -115,11 +117,10 @@ func compare(t *testing.T, p *ir.Program, f *Func, pc int, slots []ir.Value, pol
 	if want.Kind == ir.BudgetExit {
 		return false
 	}
-	if want.Kind == ir.HostExit && equalityExit(p, want.State) {
-		// SSA compares values natively where the slot IR leaves it to Go:
-		// it goes on, and the slot IR has nothing to say about what
-		// follows. The native harness and the VM's tests check those
-		// comparisons.
+	if (want.Kind == ir.HostExit || want.Kind == ir.GuardExit) && beyondSlotIR(p, want.State) {
+		// SSA goes on where the slot IR leaves the operation to Go, and the
+		// slot IR has nothing to say about what follows. The native
+		// harness and the VM's tests check those operations.
 		return false
 	}
 	y := append([]ir.Value(nil), slots...)

@@ -649,6 +649,15 @@ func (c *a64Compiler) reference(v, a *ssa.Value, word uint64, guard func(arm64.C
 	c.a.MovImm(a64B, word)
 	c.a.Cmp(w, a64B, true)
 	guard(arm64.NE)
+	c.sourceRef(a, guard)
+	c.a.Cbz(a64C, fail, true)
+	return true
+}
+
+// sourceRef loads the pointer word of a, a value with a source, into C, as
+// amd64's does. It uses A and B.
+func (c *a64Compiler) sourceRef(a *ssa.Value, guard func(arm64.Cond)) {
+	o := c.origin.At(a)
 	if s := a.Shadow; s != nil {
 		captured, stack, found := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
 		c.a.MovRR(a64C, c.gpr(s, a64C))
@@ -689,8 +698,49 @@ func (c *a64Compiler) reference(v, a *ssa.Value, word uint64, guard func(arm64.C
 		base, disp := c.slotAddr(o, true, a64C)
 		c.a.Load(a64C, base, disp)
 	}
-	c.a.Cbz(a64C, fail, true)
-	return true
+}
+
+// propStore stores a value in a property, as amd64's does. It uses every
+// scratch register and F1.
+func (c *a64Compiler) propStore(v *ssa.Value, guard func(arm64.Cond)) {
+	x := v.Args[1]
+	none, have := c.a.NewLabel(), c.a.NewLabel()
+	w := c.gpr(x, a64A)
+	c.a.MovImm(a64B, abi.NumberLimit)
+	c.a.Cmp(w, a64B, true)
+	c.a.BCond(arm64.LO, none)
+	for _, p := range []uint64{c.enc.Undefined, c.enc.Null, c.enc.True, c.enc.False, c.enc.Uninitialized} {
+		c.a.MovImm(a64B, p)
+		c.a.Cmp(w, a64B, true)
+		c.a.BCond(arm64.EQ, none)
+	}
+	if x.Shadow == nil && c.origin.At(x) < 0 {
+		c.a.B(c.stubLabel(v.State, exitKind(v.Aux)))
+	} else {
+		c.sourceRef(x, guard)
+		c.a.B(have)
+	}
+	c.a.Bind(none)
+	c.a.MovImm(a64C, 0)
+	c.a.Bind(have)
+	c.a.FMovToF(a64F1, a64C)
+	c.property(v, guard)
+	for _, s := range v.Args[2:] {
+		c.a.Cmp(c.gpr(s, a64B), a64A, true)
+		guard(arm64.EQ)
+	}
+	scalar := c.a.NewLabel()
+	c.a.FMovFromF(a64C, a64F1)
+	c.a.Load(a64B, a64A, c.enc.RefOffset)
+	c.a.Op(arm64.Orr, a64B, a64B, a64C, true)
+	c.a.Cbz(a64B, scalar, true)
+	c.a.MovImm(a64B, c.enc.WriteBarrier)
+	c.a.LoadU8(a64B, a64B, 0)
+	c.a.CmpImm(a64B, 0, false)
+	guard(arm64.NE)
+	c.a.Bind(scalar)
+	c.a.Store(a64A, c.enc.NumOffset, c.gpr(x, a64B))
+	c.a.Store(a64A, c.enc.RefOffset, a64C)
 }
 
 // property finds the property a property operation names and leaves the
@@ -1071,10 +1121,7 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.Load(a64A, c.gpr(arg(0), a64A), c.enc.NumOffset)
 		c.setG(v, a64A)
 	case ssa.OpPropWrite:
-		c.property(v, guard)
-		c.numberCell(guard)
-		c.boxF64(c.fpr(arg(1), a64F0), a64B)
-		c.a.Store(a64A, c.enc.NumOffset, a64B)
+		c.propStore(v, guard)
 	case ssa.OpLength:
 		c.length(v, guard)
 	case ssa.OpElemKey:
@@ -1178,8 +1225,28 @@ func (c *a64Compiler) truth(v *ssa.Value, guard func(arm64.Cond)) {
 		c.a.Cmp(r, a64A, true)
 		c.a.BCond(arm64.EQ, w.to)
 	}
-	// Anything else -- the uninitialized marker -- is not decided here.
-	c.a.B(c.stubLabel(v.State, exitKind(v.Aux)))
+	// An object is true unless it is [[IsHTMLDDA]], a string unless it is
+	// empty, as amd64's are; anything else is not decided here.
+	notObject := c.a.NewLabel()
+	c.a.MovImm(a64A, c.enc.Object)
+	c.a.Cmp(r, a64A, true)
+	c.a.BCond(arm64.NE, notObject)
+	if c.reference(v, v.Args[0], c.enc.Object, guard) {
+		c.a.LoadU8(a64A, a64C, c.enc.ObjectFlags)
+		c.a.MovImm(a64D, uint64(c.enc.FlagHTMLDDA))
+		c.a.Tst(a64A, a64D, false)
+		c.a.BCond(arm64.NE, no)
+		c.a.B(yes)
+	}
+	c.a.Bind(notObject)
+	c.a.MovImm(a64A, c.enc.String)
+	c.a.Cmp(r, a64A, true)
+	guard(arm64.NE)
+	if c.reference(v, v.Args[0], c.enc.String, guard) {
+		c.a.Load(a64A, a64C, c.enc.StringLength)
+		c.a.Cbnz(a64A, yes, true)
+		c.a.B(no)
+	}
 	c.a.Bind(number)
 	// A number is true unless zero or NaN: not equal to zero, and ordered.
 	c.a.FMovToF(a64F0, r)

@@ -21,7 +21,9 @@ import (
 //   - values nothing uses are deleted. A guard that can fail is never
 //     deleted: it is an effect.
 func Optimize(f *Func) {
-	// Shadows are remade at the end, for the phis that are left.
+	// Shadows, and the stores' checks of them, are remade at the end, for
+	// the phis that are left.
+	clearStoreChecks(f)
 	clearShadows(f)
 	// Tables are by value ID, not maps: a compile at run time pays for every
 	// pass (BenchmarkJITCompile in internal/vm).
@@ -77,6 +79,7 @@ func Optimize(f *Func) {
 		}
 	}
 	shadowMerges(f)
+	storeChecks(f)
 	recount(f)
 }
 

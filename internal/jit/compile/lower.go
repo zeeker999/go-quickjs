@@ -426,7 +426,10 @@ func selectNumericProperties(p *ir.Program, cells bool) {
 			}
 		case ir.PropertyWrite:
 			read(in.Left, reference)
-			read(in.Right, number)
+			if !cells {
+				// The new pipeline stores any value.
+				read(in.Right, number)
+			}
 		case ir.Branch:
 			if in.Operator != ir.Truth && !(cells && (in.Operator == ir.Eq || in.Operator == ir.Ne)) {
 				read(in.Left, number)

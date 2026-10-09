@@ -214,6 +214,9 @@ type Heap struct {
 	// Holders are the prototypes objects may have, by address (Object's
 	// Proto, Holder's Object).
 	Holders map[uintptr]*Object
+	// WriteBarrier is the collector's write-barrier flag, which leaves a
+	// store that changes a reference to Go while it is set.
+	WriteBarrier bool
 }
 
 // String is a string as charCodeAt sees it.
@@ -264,6 +267,10 @@ func (h *Heap) holder(o *Object, v *Value) (*Object, int) {
 	}
 	return o, v.Index
 }
+
+// isReference reports a value whose pointer word is not empty: an object or
+// a string.
+func isReference(x ir.Value) bool { return x.Kind == ir.Opaque || x.Kind == ir.String }
 
 // maxScan is abi.MaxScan, and maxEqualUnits abi.MaxEqualUnits.
 const (
@@ -398,6 +405,15 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 				vals[v.ID] = val{b: r}
 			case OpTruth:
 				t, ok := truth(a.t)
+				switch x := a.t; {
+				case ok:
+				case x.Kind == ir.Opaque:
+					// True unless [[IsHTMLDDA]]; a string unless empty (one
+					// the heap does not describe is).
+					t, ok = x.Bits >= uint64(len(heap.Objects)) || !heap.Objects[x.Bits].HTMLDDA, true
+				case x.Kind == ir.String:
+					t, ok = len(heap.Strings[x.Bits].Units) > 0, true
+				}
 				if !ok {
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
@@ -470,20 +486,34 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
 				vals[v.ID] = val{p: int(t.Bits)}
-			case OpPropRead, OpPropWrite:
+			case OpPropRead:
 				o, i := heap.holder(&heap.Objects[a.p], v)
 				if i < 0 || i >= len(o.Props) || o.Props[i].Kind != ir.Number {
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
-				if v.Op == OpPropRead {
-					vals[v.ID] = val{f: math.Float64frombits(o.Props[i].Bits)}
-					break
+				vals[v.ID] = val{f: math.Float64frombits(o.Props[i].Bits)}
+			case OpPropWrite:
+				// Any value, unless it changes a reference while the
+				// collector marks, or the cell is one a live reference was
+				// loaded from (storeChecks).
+				o := &heap.Objects[a.p]
+				i := o.property(v)
+				if i < 0 || i >= len(o.Props) {
+					return exit(v.State, ir.ExitKind(v.Aux))
 				}
-				bits := math.Float64bits(b.f)
-				if math.IsNaN(math.Float64frombits(bits)) {
-					bits = canonicalNaN
+				x := b.t
+				if heap.WriteBarrier && (isReference(x) || isReference(o.Props[i])) {
+					return exit(v.State, ir.ExitKind(v.Aux))
 				}
-				o.Props[i] = ir.Value{Kind: ir.Number, Bits: bits}
+				for _, s := range v.Args[2:] {
+					if vals[s.ID].cell == &o.Props[i] {
+						return exit(v.State, ir.ExitKind(v.Aux))
+					}
+				}
+				if x.Kind == ir.Number && math.IsNaN(math.Float64frombits(x.Bits)) {
+					x.Bits = canonicalNaN
+				}
+				o.Props[i] = x
 			case OpPropCell:
 				o, i := heap.holder(&heap.Objects[a.p], v)
 				if i < 0 || i >= len(o.Props) {

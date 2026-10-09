@@ -177,6 +177,15 @@ type Encoding struct {
 	// offset of its prototype's pointer, which the shape does not settle.
 	ObjectShape, ObjectProps, PropertySize, PropertyKey, PropertyFlags, PropertyValue int32
 	ObjectProto                                                                       int32
+
+	// WriteBarrier is the address of the byte compiled Go tests before it
+	// stores a pointer: the runtime's write-barrier flag, set while the
+	// collector marks. A store that changes a pointer word exits to Go
+	// while it is set, and otherwise stores, as compiled Go does. It
+	// cannot change between the test and the store: Go sets it only with
+	// the world stopped, which native code, never a preemption point, is
+	// not (docs/jit-progress.md, decided 2026-10-09).
+	WriteBarrier uint64
 	// An ordinary object of class ClassObject, whose table has at most
 	// MaxScan entries, may be searched for a key, as the VM's own small
 	// objects are. A property is plain data when its flags have none of
