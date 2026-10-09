@@ -52,6 +52,11 @@ func keepAcrossStores(f *Func) bool {
 				alias = alias || c.Op != OpKept && a.mayOwnCell(s, c.Shadow)
 				continue
 			}
+			if popsElement(s) {
+				// An element popped: its cell, and the result's.
+				alias = alias || c.Op != OpKept && a.mayElemCell(s, c.Shadow)
+				continue
+			}
 			alias = alias || c.Op != OpKept && a.may(key, c.Shadow)
 		}
 		if !alias {

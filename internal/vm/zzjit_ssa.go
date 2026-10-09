@@ -383,6 +383,14 @@ func (fb *jitFeedback) NativeCalls(pc int) []ssa.CallSite {
 		if int(in.pc) != pc {
 			continue
 		}
+		if in.cl == nil && in.pop {
+			// Array.prototype.pop, whose fast path the call's checks keep
+			// to: the array's own last element, of the realm's prototype.
+			fb.holders = append(fb.holders, in.obj)
+			sites = append(sites, ssa.CallSite{Callee: uintptr(unsafe.Pointer(in.obj)), ThisSlot: -1, Method: true, Pop: true,
+				Protos: [2]ssa.Holder{{Object: uintptr(unsafe.Pointer(fb.r.proto.array))}}})
+			continue
+		}
 		if in.cl == nil && in.push {
 			// Array.prototype.push, whose fast path the call's checks
 			// keep to: the prototypes as they are now.
@@ -455,8 +463,9 @@ type jitInline struct {
 	// that calls cl's function (jitCalledVia).
 	pool *abi.ObjectPool
 	via  bool
-	// push marks a call of Array.prototype.push (jitPushes).
-	push bool
+	// push marks a call of Array.prototype.push (jitPushes), pop one of
+	// Array.prototype.pop (jitPops).
+	push, pop bool
 }
 
 // jitCallsToInline is how often a call leaves native code before it is
@@ -554,6 +563,13 @@ func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 				e.callSites[pc] = jitCallNative
 				e.inlinePending = true
 			}
+			return
+		}
+		if o := r.jitPops(sp, in); o != nil {
+			// a.pop(), made natively where its fast path makes it.
+			e.nativeCalls = append(e.nativeCalls, jitInline{pc: int32(pc), obj: o, pop: true})
+			e.callSites[pc] = jitCallNative
+			e.inlinePending = true
 			return
 		}
 		if o := r.jitPushes(sp, in); o != nil {
@@ -829,6 +845,24 @@ func (r *Runtime) jitCalledVia(f *frame, sp int, in bytecode.Instr) (*Object, *c
 		return nil, nil
 	}
 	return o, fd.closure
+}
+
+// jitPops is Array.prototype.pop, the realm's own, if a method call at the
+// top of the stack calls it with no argument on an array its fast path
+// pops -- dense, of the realm's prototype -- or nil.
+func (r *Runtime) jitPops(sp int, in bytecode.Instr) *Object {
+	if in.Op != bytecode.OpCallMethod || in.A != 0 {
+		return nil
+	}
+	callee, recv := r.stack[sp-1], r.stack[sp-2]
+	if !callee.IsObject() {
+		return nil
+	}
+	fd := callee.Object().fn()
+	if fd == nil || fd.elemOp != elemPop || fd.realm != r.Realm || r.plainArray(recv) == nil {
+		return nil
+	}
+	return callee.Object()
 }
 
 // jitPushes is Array.prototype.push, the realm's own, if a method call at
