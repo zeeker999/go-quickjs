@@ -13,7 +13,6 @@ import (
 	"math/bits"
 	"runtime"
 	"slices"
-	"sort"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
@@ -257,7 +256,11 @@ func (c *core) allocate() error {
 		pos[i] = -1
 	}
 	start, end := make([]int, nb), make([]int, nb)
-	var at []*ssa.Block
+	count := 0
+	for _, b := range c.order {
+		count += len(b.Values) + 2
+	}
+	at := make([]*ssa.Block, 0, count)
 	for _, b := range c.order {
 		start[b.ID] = len(at)
 		at = append(at, b)
@@ -273,7 +276,7 @@ func (c *core) allocate() error {
 		v   *ssa.Value
 		pos int
 	}
-	var uses []use
+	uses := make([]use, 0, 4*count)
 	need := func(v *ssa.Value) bool { return hasResult(v) && !c.isLazy(v) }
 	useState := func(s *ssa.FrameState, at int) {
 		if s == nil {
@@ -339,9 +342,13 @@ func (c *core) allocate() error {
 	// Block-level liveness, so that values live around a loop stay live for
 	// all of it. byID finds a value from its ID.
 	byID := make([]*ssa.Value, nv)
+	// The three sets of every block share one array.
+	words := (nv + 63) / 64
+	sets := make(valueSet, 3*nb*words)
 	defsIn, usesIn, liveIn := make([]valueSet, nb), make([]valueSet, nb), make([]valueSet, nb)
 	for _, b := range c.order {
-		defsIn[b.ID], usesIn[b.ID], liveIn[b.ID] = newValueSet(nv), newValueSet(nv), newValueSet(nv)
+		at := 3 * b.ID * words
+		defsIn[b.ID], usesIn[b.ID], liveIn[b.ID] = sets[at:at+words:at+words], sets[at+words:at+2*words:at+2*words], sets[at+2*words:at+3*words:at+3*words]
 		for _, v := range b.Values {
 			defsIn[b.ID].add(v.ID)
 			byID[v.ID] = v
@@ -379,9 +386,10 @@ func (c *core) allocate() error {
 	}
 	// Intervals: from definition to last use, stretched over every block
 	// where the value is live in or out.
-	iv := make([]*interval, nv)
+	iv := make([]interval, nv) // by value ID; v is nil until made
 	get := func(v *ssa.Value) *interval {
-		if iv[v.ID] == nil {
+		it := &iv[v.ID]
+		if it.v == nil {
 			p := pos[v.ID]
 			if p < 0 {
 				panic(fmt.Sprintf("use of %v defined outside the function", v))
@@ -389,9 +397,9 @@ func (c *core) allocate() error {
 			if v.Op == ssa.OpPhi {
 				p = start[v.Block.ID]
 			}
-			iv[v.ID] = &interval{v: v, start: p, end: p}
+			*it = interval{v: v, start: p, end: p}
 		}
-		return iv[v.ID]
+		return it
 	}
 	for _, b := range c.order {
 		for _, v := range b.Values {
@@ -437,17 +445,17 @@ func (c *core) allocate() error {
 			})
 		}
 	}
-	var all []*interval
-	for _, it := range iv {
-		if it != nil {
-			all = append(all, it)
+	all := make([]*interval, 0, nv)
+	for i := range iv {
+		if iv[i].v != nil {
+			all = append(all, &iv[i])
 		}
 	}
-	sort.Slice(all, func(i, j int) bool {
-		if all[i].start != all[j].start {
-			return all[i].start < all[j].start
+	slices.SortFunc(all, func(a, b *interval) int {
+		if a.start != b.start {
+			return a.start - b.start
 		}
-		return all[i].v.ID < all[j].v.ID
+		return a.v.ID - b.v.ID
 	})
 	c.locs, c.hasLoc = make([]loc, nv), make([]bool, nv)
 	spills := 0

@@ -287,8 +287,26 @@ type Func struct {
 	// up to a limit, so a small function takes little.
 	values     []Value
 	refs       []*Value
+	states     []FrameState
 	valueChunk int
 	refChunk   int
+	// scratch is unboxPhis's tables, kept from one round of Optimize to
+	// the next.
+	scratch struct {
+		flags []bool
+		vals  []*Value
+	}
+}
+
+// newState returns a new frame state like s, from a slab.
+func (f *Func) newState(s FrameState) *FrameState {
+	if len(f.states) == 0 {
+		f.states = make([]FrameState, 32)
+	}
+	p := &f.states[0]
+	f.states = f.states[1:]
+	*p = s
+	return p
 }
 
 // alloc returns a new value like v, numbered next.

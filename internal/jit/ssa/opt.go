@@ -172,7 +172,13 @@ func unboxPhis(f *Func) bool {
 	if len(phis) == 0 {
 		return false
 	}
-	cand, unboxedUse := make([]bool, n), make([]bool, n)
+	// Three tables of flags and three of values, by ID, from scratch the
+	// Func keeps.
+	flags := idTable(f.scratch.flags, 3*n)
+	f.scratch.flags = flags
+	cand, unboxedUse, boxed := flags[:n:n], flags[n:2*n:2*n], flags[2*n:]
+	vals := idTable(f.scratch.vals, 3*n)
+	f.scratch.vals = vals
 	for _, v := range phis {
 		cand[v.ID] = true
 	}
@@ -196,7 +202,6 @@ func unboxPhis(f *Func) bool {
 	// needs evidence, directly or through candidates. Removing one candidate
 	// can disqualify another, so both filters repeat. The result is the same
 	// in any order.
-	boxed := make([]bool, n)
 	for changed := true; changed; {
 		changed = false
 		for _, v := range phis {
@@ -240,7 +245,7 @@ func unboxPhis(f *Func) bool {
 	}
 	// In block order: value numbers, and so register allocation and code,
 	// must not vary from one compilation to the next.
-	fp := make([]*Value, n)
+	fp := vals[:n:n]
 	var ordered []*Value
 	for _, v := range phis {
 		if cand[v.ID] {
@@ -252,7 +257,7 @@ func unboxPhis(f *Func) bool {
 	if len(ordered) == 0 {
 		return false
 	}
-	unboxed := make([]*Value, n)
+	unboxed := vals[n : 2*n : 2*n]
 	for _, v := range ordered {
 		p := fp[v.ID]
 		for _, a := range v.Args {
@@ -284,26 +289,36 @@ func unboxPhis(f *Func) bool {
 			p.Args = append(p.Args, x)
 		}
 	}
-	subst := make([]*Value, n)
+	subst := vals[2*n:]
+	// Each block's values become its phis, with the new numeric ones beside
+	// those they replace, the boxes of those, then the rest, in order:
+	// built in buffers the pass reuses.
+	var front, boxes, rest []*Value
 	for _, b := range f.Blocks {
-		var phis, boxes, rest []*Value
+		front, boxes, rest = front[:0], boxes[:0], rest[:0]
 		for _, v := range b.Values {
-			switch {
-			case v.Op == OpPhi:
-				phis = append(phis, v)
-				if v.ID < n && fp[v.ID] != nil {
-					p := fp[v.ID]
-					phis = append(phis, p)
-					box := f.alloc(Value{Op: OpBoxF64, Type: Tagged, Args: f.refsOf(1), Block: b})
-					box.Args[0] = p
-					boxes = append(boxes, box)
-					subst[v.ID] = box
-				}
-			default:
+			if v.Op != OpPhi {
 				rest = append(rest, v)
+				continue
+			}
+			front = append(front, v)
+			if v.ID < n && fp[v.ID] != nil {
+				p := fp[v.ID]
+				front = append(front, p)
+				box := f.alloc(Value{Op: OpBoxF64, Type: Tagged, Args: f.refsOf(1), Block: b})
+				box.Args[0] = p
+				boxes = append(boxes, box)
+				subst[v.ID] = box
 			}
 		}
-		b.Values = append(append(phis, boxes...), rest...)
+		total := len(front) + len(boxes) + len(rest)
+		if cap(b.Values) < total {
+			b.Values = make([]*Value, total)
+		}
+		b.Values = b.Values[:total]
+		copy(b.Values, front)
+		copy(b.Values[len(front):], boxes)
+		copy(b.Values[len(front)+len(boxes):], rest)
 	}
 	rewrite(f, func(v *Value) *Value {
 		if v.ID < n && subst[v.ID] != nil {
