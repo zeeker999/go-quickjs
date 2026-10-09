@@ -5210,6 +5210,62 @@ func TestJITSSASeedsConstructions(t *testing.T) {
 	}
 }
 
+// A loop whose callees run loops of their own natively is promoted all
+// the same. The back-edge budget is shared, and run's iteration takes 8
+// back edges, 1 of its own and 7 in big's and heavy's native loops, which
+// divides 1024: with the same budget every period, it ran out at the same
+// place in each, never at run's back edge, and run was never compiled. It
+// varies now (backEdgeBudget).
+func TestJITLoopPromotedPastCalleesLoops(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function P(x){this.x=x}
+		P.prototype.big=function(n){let s=0;for(let i=0;i<n;i++)s=(s+i*this.x)|0;return s};
+		function heavy(n){let s=1;for(let i=0;i<n;i++)s=(s*3+i)|0;return s}
+		var p=new P(3);
+		for(let i=0;i<2000;i++){p.big(40);heavy(40)}
+		function run(o,n){let t=0;for(let i=0;i<n;i++){t=(t+o.big(4)+heavy(3))|0}return t}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := New(Config{JIT: true})
+	defer func() { r.Close(); r.ReleaseClosed() }()
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src := `String(run(p,20000))`
+	wv, err := want.Run(compileForTest(t, src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gv, err := r.Run(compileForTest(t, src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := gv.String().Go(), wv.String().Go(); got != want {
+		t.Fatalf("got %s, interpreter %s", got, want)
+	}
+	cl := r.global.getOwn(r.atoms.intern("run")).value.Object().fn().closure
+	if e := r.jit.hint(cl.hint()); e == nil || e.ssa == nil {
+		t.Fatal("run's loop was not promoted in 20000 iterations")
+	}
+	// About the interval, and not the same each time.
+	seen := map[int]bool{}
+	for range 64 {
+		b := r.jit.backEdgeBudget()
+		if b < backEdgeCheckInterval/2 || b >= backEdgeCheckInterval*3/2 {
+			t.Fatalf("budget %d", b)
+		}
+		seen[b] = true
+	}
+	if len(seen) < 32 {
+		t.Fatalf("%d budgets in 64", len(seen))
+	}
+}
+
 // Native code that calls through Go another function's native code shares
 // the context with it (jitState.ssaCtx): an exit's PC must be read before
 // Go runs anything. Here inner's last exit, a call near its end, is past
@@ -5366,6 +5422,11 @@ func TestJITSSANativeCalls(t *testing.T) {
 		if e := entry("sum"); e != nil {
 			hosts, entries = e.ssaStats.hosts, e.ssaStats.entries
 		}
+		if i == 2 {
+			// A budget that does not run out: the interrupt check, a loop's,
+			// is not a call leaving.
+			r.backEdges = 1 << 30
+		}
 		gv, err := r.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatal(err)
@@ -5374,6 +5435,7 @@ func TestJITSSANativeCalls(t *testing.T) {
 			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
 		}
 		if i == 2 {
+			r.backEdges = backEdgeCheckInterval
 			// Native, entered, and never leaving native code for its calls.
 			if e := entry("sum"); e == nil || e.ssa == nil || len(e.nativeCalls) == 0 || e.entrySlow ||
 				e.ssaStats.entries == entries || e.ssaStats.hosts != hosts {

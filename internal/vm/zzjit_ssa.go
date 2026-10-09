@@ -1734,7 +1734,7 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 			// code can be entered again at.
 			s.budgets++
 			e.ssaStats.polls++
-			r.backEdges = backEdgeCheckInterval
+			r.backEdges = s.backEdgeBudget()
 			if err := r.checkInterruptNow(); err != nil {
 				return Undefined, err, true
 			}
@@ -2029,7 +2029,7 @@ func (r *Runtime) jitFinishExit(f *frame, e *jitEntry, l *jitNativeLevel) (Value
 		}
 		pc, depth = int(f.pc), sp-f.base
 	case abi.ExitPoll:
-		r.backEdges = backEdgeCheckInterval
+		r.backEdges = r.jit.backEdgeBudget()
 		if err := r.checkInterruptNow(); err != nil {
 			return Undefined, err
 		}

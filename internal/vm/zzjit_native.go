@@ -329,6 +329,8 @@ type jitState struct {
 	// unwound counts the native calls whose callees left native code, which
 	// Go finished (jitUnwindNative).
 	unwound uint64
+	// budgetSeed varies the back-edge budget (backEdgeBudget).
+	budgetSeed uint32
 	// unwinding holds the levels and frames of the native calls Go is
 	// finishing (jitUnwindNative), each unwind's past those of the ones it
 	// runs inside: reused, not allocated each time.
@@ -781,7 +783,7 @@ func (r *Runtime) tryJITFrame(f *frame) (Value, error, bool) {
 // same check, after which a loop that ran a full budget may promote.
 func (r *Runtime) jitBackEdge(f *frame, pc uint32, sp int) (Value, error, bool) {
 	fullBudget := r.backEdges == 0
-	r.backEdges = backEdgeCheckInterval
+	r.backEdges = r.jit.backEdgeBudget()
 	if err := r.checkInterruptNow(); err != nil {
 		// An interrupt is the host stopping the script rather than a
 		// JavaScript exception, so it is not catchable.
@@ -789,6 +791,32 @@ func (r *Runtime) jitBackEdge(f *frame, pc uint32, sp int) (Value, error, bool) 
 	}
 	r.sweepStaleSlots(sp)
 	return r.tryJITLoop(f, pc, sp, fullBudget)
+}
+
+// backEdgeBudget is the back-edge budget after a check: about
+// backEdgeCheckInterval, varied from one check to the next. The budget is
+// the interpreter's, the tree tier's and native code's alike, and runs out
+// in whatever loop runs then. Were it the same every time, a loop whose
+// iteration takes, with its callees' loops, a number of back edges that
+// divides it would run it out at the same place in every period -- in a
+// callee, say, never at the loop's own back edge, which is then never
+// promoted: a fixed sampling period aliasing with a periodic program.
+// Varied, each back edge is as likely as any other to be the one. Before
+// the JIT has any state, nothing native runs, and it is the interval.
+func (s *jitState) backEdgeBudget() int {
+	if s == nil {
+		return backEdgeCheckInterval
+	}
+	// xorshift32, never 0.
+	x := s.budgetSeed
+	if x == 0 {
+		x = 0x9e3779b9
+	}
+	x ^= x << 13
+	x ^= x >> 17
+	x ^= x << 5
+	s.budgetSeed = x
+	return backEdgeCheckInterval/2 + int(x%backEdgeCheckInterval)
 }
 
 // The existing back-edge interrupt budget supplies coarse work feedback.
@@ -1319,6 +1347,8 @@ func (r *Runtime) tryJITTreeLoop(c *tctx, pc, depth int, fullBudget bool) {
 }
 
 func (r *Runtime) tryJITTreeLoopEnabled(c *tctx, pc, depth int, fullBudget bool) {
+	// The tree's check set the interval: the budget varies about it.
+	r.backEdges = r.jit.backEdgeBudget()
 	if v, err, done := r.tryJITLoop(c.f, c.cl.fn.Code[pc].A, c.f.base+depth, fullBudget); done {
 		// Tree branch nodes return block indices. Unwind to runTree only
 		// after native execution or its interpreter fallback has completed.
