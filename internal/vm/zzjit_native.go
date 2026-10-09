@@ -1565,7 +1565,8 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 		}
 		switch in.Op {
 		case bytecode.OpPushThis, bytecode.OpGetProp, bytecode.OpSetProp, bytecode.OpCall,
-			bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpGetPropThis, bytecode.OpSetIndex, bytecode.OpNewArray,
+			bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpSetGlobal, bytecode.OpSetGlobalStrict,
+			bytecode.OpGetPropThis, bytecode.OpSetIndex, bytecode.OpNewArray,
 			bytecode.OpGetIndex, bytecode.OpNew:
 		default:
 			return sp, steps, nil
@@ -1599,6 +1600,19 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 				err = r.setPropCached(&f.cl.ic[in.B], obj.Object(), f.cl.names[in.A], val, f.cl.fn.Strict)
 			} else {
 				err = r.setValueProp(obj, f.cl.names[in.A], val, f.cl.fn.Strict)
+			}
+			if err != nil {
+				return sp, steps, err
+			}
+			continue
+		case bytecode.OpSetGlobal, bytecode.OpSetGlobalStrict:
+			// As the interpreter assigns: a direct eval's variable, a
+			// script's lexical binding, or the global object's property.
+			sp--
+			if in.Op == bytecode.OpSetGlobal {
+				err = r.setGlobalIn(f, f.cl, in, stack[sp])
+			} else {
+				err = r.setGlobalStrict(f, f.cl, in, stack[sp])
 			}
 			if err != nil {
 				return sp, steps, err

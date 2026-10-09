@@ -139,12 +139,14 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 			return nil, err
 		}
 		effects[pc] = e
-		if in.Op == bytecode.OpNew && (!m.ssa || !SSAConstruct) {
-			// The new pipeline constructs natively (mir's native calls);
-			// the old one does not.
+		if (in.Op == bytecode.OpNew || in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict) && (!m.ssa || !SSAConstruct) {
+			// The new pipeline constructs natively (mir's native calls),
+			// and leaves an assignment to a global to Go, as the code that
+			// constructs -- a benchmark's driver, planner = new Planner()
+			// -- does; the old one does neither.
 			return nil, refuse(pc, "unsupported opcode "+in.Op.String())
 		}
-		host = host || in.Op == bytecode.OpNew || in.Op == bytecode.OpNewArray || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
+		host = host || in.Op == bytecode.OpNew || in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict || in.Op == bytecode.OpNewArray || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 		property = property || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 		this = this || in.Op == bytecode.OpPushThis
 		raw := uint32(in.Op)
@@ -533,12 +535,15 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 			n++
 		}
 		return effect{need: n, delta: 1 - n}, nil
-	case bytecode.OpGetGlobal, bytecode.OpGetPropThis, bytecode.OpGetProp, bytecode.OpSetProp:
+	case bytecode.OpGetGlobal, bytecode.OpGetPropThis, bytecode.OpGetProp, bytecode.OpSetProp, bytecode.OpSetGlobal, bytecode.OpSetGlobalStrict:
 		if uint64(in.A) >= uint64(len(fn.Names)) || in.B == 0 || in.B > fn.PropSites {
 			return bad("invalid property site")
 		}
 		if in.Op == bytecode.OpSetProp {
 			return effect{need: 2, delta: -2}, nil
+		}
+		if in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict {
+			return effect{need: 1, delta: -1}, nil
 		}
 		if in.Op == bytecode.OpGetPropThis {
 			return effect{need: 1, delta: 1}, nil
@@ -739,7 +744,7 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this bool) ir.Instr
 			return ir.Instruction{Op: ir.StringMethod, Left: top, Dest: sp}
 		}
 		return ir.Instruction{Op: ir.Host}
-	case bytecode.OpNewArray, bytecode.OpCall, bytecode.OpMod, bytecode.OpNew:
+	case bytecode.OpNewArray, bytecode.OpCall, bytecode.OpMod, bytecode.OpNew, bytecode.OpSetGlobal, bytecode.OpSetGlobalStrict:
 		return ir.Instruction{Op: ir.Host}
 	case bytecode.OpGetGlobal:
 		return ir.Instruction{Op: ir.BindingRead, Left: ir.Literal(ir.Value{Kind: ir.Opaque}), Dest: sp, Key: in.A}
