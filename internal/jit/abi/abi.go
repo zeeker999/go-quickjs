@@ -13,10 +13,10 @@ const SpillSlots = 256
 
 // MaxRecords bounds an exit's records, one per slot at most, and so the
 // slots of a function the JIT compiles.
-// MaxKeeps is how many references a function's code keeps (Context.Keep).
-const MaxKeeps = 8
-
 const MaxRecords = 256
+
+// MaxKeeps is how many references a function's code keeps (Context.Keep).
+const MaxKeeps = 64
 
 // Record is an exit's instruction to Go for one slot, which native code
 // cannot write. Slot is the slot, and its flags say what to write there:
@@ -25,6 +25,9 @@ const MaxRecords = 256
 //     reference, whose pointer word only Go may clear;
 //   - RecordMaybe: the value of slot int32(Arg) if that holds a reference,
 //     and otherwise -- or if int32(Arg) is negative -- the primitive Word.
+//   - RecordDirect: the value whose number word is Word and whose pointer
+//     word is the context's RecordRef at the record's index, as a native
+//     call read them before the callee ran (ssa's OpCall).
 //
 // Every slot a record reads holds its value from entry still, so Go reads
 // them all before it writes any.
@@ -36,6 +39,7 @@ type Record struct {
 const (
 	RecordScalar = 1 << 63
 	RecordMaybe  = 1 << 62
+	RecordDirect = 1 << 61
 )
 
 // Context is the block native code reaches through its context register.
@@ -115,6 +119,11 @@ type Context struct {
 	// its state is in the frame already.
 	Records uint64
 	Record  [MaxRecords]Record
+	// RecordRef are direct records' pointer words (RecordDirect), where
+	// the collector sees them; RecordHigh bounds those written, which Go
+	// clears when native code returns.
+	RecordRef  [MaxRecords]unsafe.Pointer
+	RecordHigh uint64
 	// Spill holds what the allocator could not keep in registers.
 	Spill [SpillSlots]uint64
 	// Keep holds references copied out of cells a store then overwrites
@@ -149,6 +158,8 @@ var (
 	OffRetFrom   = int32(unsafe.Offsetof(Context{}.RetFrom))
 	OffRecords   = int32(unsafe.Offsetof(Context{}.Records))
 	OffRecord    = int32(unsafe.Offsetof(Context{}.Record))
+	OffRecordRef = int32(unsafe.Offsetof(Context{}.RecordRef))
+	OffRecordHi  = int32(unsafe.Offsetof(Context{}.RecordHigh))
 	OffSpill     = int32(unsafe.Offsetof(Context{}.Spill))
 	OffKeep      = int32(unsafe.Offsetof(Context{}.Keep))
 

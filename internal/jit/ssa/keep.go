@@ -38,20 +38,31 @@ func keepAcrossStores(f *Func) bool {
 		// one may be read from a cell another writes -- a value kept at this
 		// store the last time round a loop, which this pass, making the
 		// keeps, cannot yet tell. So a store keeps all of them or none.
+		// A call is a store of any key: what its callee may write. It reads
+		// its operands' pointer words before the callee runs, as a store
+		// reads the value it stores.
+		key, read := anyKey, s.Args
+		if s.Op == OpPropWrite {
+			key, read = s.Key, s.Args[1:2]
+		}
 		alias := false
 		for _, c := range live[i] {
-			alias = alias || c.Op != OpKept && a.may(s.Key, c.Shadow)
+			alias = alias || c.Op != OpKept && a.may(key, c.Shadow)
 		}
 		if !alias {
 			continue
 		}
 		var cands []*Value
-		for _, c := range append(live[i], s.Args[1]) {
+		for _, c := range append(append([]*Value(nil), live[i]...), read...) {
 			if c.Type == Tagged && c.Shadow != nil && c.Op != OpKept && !slices.Contains(cands, c) {
 				cands = append(cands, c)
 			}
 		}
 		if f.Keeps+len(cands) > abi.MaxKeeps {
+			if s.Op == OpCall {
+				// Not kept, the references could be lost: Go makes the call.
+				s.Calls = nil
+			}
 			continue
 		}
 		var refs, keeps, copies []*Value
@@ -76,9 +87,7 @@ func keepAcrossStores(f *Func) bool {
 			b.Values = append(b.Values[:at], append(ins, b.Values[at:]...)...)
 		}
 	}
-	for _, c := range order {
-		reconstruct(f, c, kept[c])
-	}
+	reconstruct(f, order, kept)
 	return len(order) > 0
 }
 
@@ -91,27 +100,56 @@ func indexOf(vs []*Value, v *Value) int {
 	panic("ssa: a value is not in its block")
 }
 
-// reconstruct makes each use of c take the definition that reaches it, c's
-// own or one of its copies (defs, each defined where it is), with phis
-// where they meet, as an SSA builder reads a variable (Braun et al.): a use
-// takes the last definition before it in its block, or else what reaches
-// the block's start -- from its one predecessor's end, or from a phi of
-// every predecessor's, dropped when its arguments are one value.
-func reconstruct(f *Func, c *Value, defs []*Value) {
-	isDef := map[*Value]bool{c: true}
-	for _, d := range defs {
-		isDef[d] = true
+// reconstruct makes each use of each kept value c take the definition that
+// reaches it, c's own or one of its copies (kept[c], each defined where it
+// is), with phis where they meet, as an SSA builder reads a variable
+// (Braun et al.): a use takes the last definition before it in its block,
+// or else what reaches the block's start -- from its one predecessor's
+// end, or from a phi of every predecessor's, dropped when its arguments
+// are one value. One walk of the function serves every value: a compile
+// at run time pays for each.
+func reconstruct(f *Func, order []*Value, kept map[*Value][]*Value) {
+	nb := len(f.Blocks)
+	// pos is each value's index in its block, phis made here coming before
+	// every one; cand, by value ID, is 1 plus the kept value's index.
+	pos, cand := f.ints(f.nextID), f.ints(f.nextID)
+	for _, b := range f.Blocks {
+		for i, v := range b.Values {
+			pos[v.ID] = i
+		}
 	}
-	// The last definition in a block before index at, or nil.
-	before := func(b *Block, at int) *Value {
-		for i := min(at, len(b.Values)) - 1; i >= 0; i-- {
-			if isDef[b.Values[i]] {
-				return b.Values[i]
+	type def struct {
+		block, at int
+		v         *Value
+	}
+	defs := make([][]def, len(order))
+	for k, c := range order {
+		cand[c.ID] = k + 1
+		defs[k] = append(defs[k], def{c.Block.ID, pos[c.ID], c})
+		for _, d := range kept[c] {
+			defs[k] = append(defs[k], def{d.Block.ID, pos[d.ID], d})
+		}
+	}
+	// candOf is 1 plus v's index among the kept values, or 0; phis made here
+	// are past the table.
+	candOf := func(v *Value) int {
+		if v == nil || v.ID >= len(cand) {
+			return 0
+		}
+		return cand[v.ID]
+	}
+	// The last definition of the k'th value in a block before index at.
+	before := func(k int, b *Block, at int) *Value {
+		var last *Value
+		best := -2
+		for _, d := range defs[k] {
+			if d.block == b.ID && d.at < at && d.at > best {
+				last, best = d.v, d.at
 			}
 		}
-		return nil
+		return last
 	}
-	entry := map[*Block]*Value{}
+	entry := make([]*Value, len(order)*nb)
 	alias := map[*Value]*Value{}
 	resolve := func(v *Value) *Value {
 		for alias[v] != nil {
@@ -119,31 +157,32 @@ func reconstruct(f *Func, c *Value, defs []*Value) {
 		}
 		return v
 	}
-	var atStart func(b *Block) *Value
-	atEnd := func(b *Block) *Value {
-		if d := before(b, len(b.Values)); d != nil {
+	var phis [][]*Value
+	var atStart func(k int, b *Block) *Value
+	atEnd := func(k int, b *Block) *Value {
+		if d := before(k, b, len(b.Values)); d != nil {
 			return d
 		}
-		return atStart(b)
+		return atStart(k, b)
 	}
-	atStart = func(b *Block) *Value {
-		if v, ok := entry[b]; ok {
+	atStart = func(k int, b *Block) *Value {
+		if v := entry[k*nb+b.ID]; v != nil {
 			return resolve(v)
 		}
 		switch len(b.Preds) {
 		case 0:
-			panic(fmt.Sprintf("ssa: no definition of %v reaches b%d", c, b.ID))
+			panic(fmt.Sprintf("ssa: no definition of %v reaches b%d", order[k], b.ID))
 		case 1:
-			v := atEnd(b.Preds[0])
-			entry[b] = v
+			v := atEnd(k, b.Preds[0])
+			entry[k*nb+b.ID] = v
 			return v
 		}
 		phi := f.alloc(Value{Op: OpPhi, Type: Tagged, Args: f.refsOf(len(b.Preds)), Block: b})
-		entry[b] = phi
+		entry[k*nb+b.ID] = phi
 		var same *Value
 		trivial := true
 		for i, p := range b.Preds {
-			a := resolve(atEnd(p))
+			a := resolve(atEnd(k, p))
 			phi.Args[i] = a
 			if a == phi {
 				continue
@@ -155,18 +194,21 @@ func reconstruct(f *Func, c *Value, defs []*Value) {
 		}
 		if trivial && same != nil {
 			alias[phi] = same
-			entry[b] = same
+			entry[k*nb+b.ID] = same
 			return same
 		}
-		b.Values = append([]*Value{phi}, b.Values...)
-		isDef[phi] = true
+		if phis == nil {
+			phis = make([][]*Value, nb)
+		}
+		phis[b.ID] = append(phis[b.ID], phi)
+		defs[k] = append(defs[k], def{b.ID, -1, phi})
 		return phi
 	}
-	reach := func(b *Block, at int) *Value {
-		if d := before(b, at); d != nil {
+	reach := func(k int, b *Block, at int) *Value {
+		if d := before(k, b, at); d != nil {
 			return d
 		}
-		return atStart(b)
+		return atStart(k, b)
 	}
 	// A frame state its users share -- the guards of one instruction do,
 	// some before a keep and some after -- is copied before one's slot
@@ -186,72 +228,74 @@ func reconstruct(f *Func, c *Value, defs []*Value) {
 		if s == nil {
 			return nil
 		}
-		var out *FrameState
+		out := s
+		copied := false
 		for i, x := range s.Slots {
-			if x != c {
+			if candOf(x) == 0 {
 				continue
 			}
-			r := reach(b, at)
-			if r == c {
+			r := reach(candOf(x)-1, b, at)
+			if r == x {
 				continue
 			}
-			if out == nil {
-				out = s
-				if users[s] > 1 {
-					users[s]--
-					out = f.newState(*s)
-					out.Slots = f.refsOf(len(s.Slots))
-					copy(out.Slots, s.Slots)
-					users[out] = 1
-				}
+			if !copied && users[s] > 1 {
+				users[s]--
+				out = f.newState(*s)
+				out.Slots = f.refsOf(len(s.Slots))
+				copy(out.Slots, s.Slots)
+				users[out] = 1
 			}
+			copied = true
 			out.Slots[i] = r
-		}
-		if out == nil {
-			return s
 		}
 		return out
 	}
 	for _, b := range f.Blocks {
-		// Values inserted as phis come first; the loop sees the block as it
-		// was, its own phis included.
-		values := append([]*Value(nil), b.Values...)
-		for _, v := range values {
-			at := indexOf(b.Values, v)
+		lead := 0
+		for _, v := range b.Values {
+			if v.Op != OpPhi {
+				break
+			}
+			lead++
+		}
+		for _, v := range b.Values {
+			at := pos[v.ID]
 			if v.Op == OpPhi {
 				for i, a := range v.Args {
-					if a == c && !(isDef[v] && v.Type == Tagged && entry[b] == v) {
-						v.Args[i] = atEnd(b.Preds[i])
+					if k := candOf(a); k != 0 {
+						v.Args[i] = atEnd(k-1, b.Preds[i])
 					}
 				}
 				continue
 			}
-			if v == c {
-				continue
-			}
 			for i, a := range v.Args {
-				if a == c {
-					v.Args[i] = reach(b, at)
+				if k := candOf(a); k != 0 {
+					v.Args[i] = reach(k-1, b, at)
 				}
 			}
 			v.State = state(v.State, b, at)
 		}
-		if b.Control == c {
-			b.Control = reach(b, len(b.Values))
+		if k := candOf(b.Control); k != 0 {
+			b.Control = reach(k-1, b, len(b.Values))
 		}
 		b.State = state(b.State, b, len(b.Values))
 		if b.Header != nil && b.PC >= 0 {
 			// A loop header's state is after its phis.
-			phis := 0
-			for phis < len(b.Values) && b.Values[phis].Op == OpPhi {
-				phis++
-			}
 			for i, x := range b.Header.Slots {
-				if x == c {
-					b.Header.Slots[i] = reach(b, phis)
+				if k := candOf(x); k != 0 {
+					b.Header.Slots[i] = reach(k-1, b, lead)
 				}
 			}
 		}
+	}
+	for id, ps := range phis {
+		if len(ps) != 0 {
+			b := f.Blocks[id]
+			b.Values = append(append([]*Value(nil), ps...), b.Values...)
+		}
+	}
+	if len(alias) == 0 {
+		return
 	}
 	// Phis made, then found to merge one value, are that value.
 	slots := func(s *FrameState) {
