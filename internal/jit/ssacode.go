@@ -77,6 +77,24 @@ func (s *SSACode) Run(pc int, ctx *abi.Context) error {
 	return nil
 }
 
+// Resume goes on in s's code at addr, where a native call returns to after
+// its callee (abi.Context.ReturnTo), with ctx, the callee's context, which
+// holds the call's result (RetValue) and where its frame began (Base): a
+// caller's code goes on after a callee Go finished. It returns as Run does.
+func (s *SSACode) Resume(addr uintptr, ctx *abi.Context) error {
+	if s == nil || len(s.code) == 0 {
+		return ErrClosed
+	}
+	base := uintptr(unsafe.Pointer(&s.code[0]))
+	if addr < base || addr >= base+uintptr(len(s.code)) {
+		return fmt.Errorf("jit: %#x is not in the code", addr)
+	}
+	enterSSA(&s.code[addr-base], ctx)
+	runtime.KeepAlive(s)
+	runtime.KeepAlive(ctx)
+	return nil
+}
+
 // Size is the executable memory s owns.
 func (s *SSACode) Size() int {
 	if s == nil {

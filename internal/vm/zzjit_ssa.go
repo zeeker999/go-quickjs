@@ -1388,6 +1388,9 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 		}
 	}()
 	ctx := &s.ssaCtxs[idx]
+	// resume, when not 0, is where native code goes on after a native
+	// call whose callee Go finished, in place of an entry.
+	var resume uintptr
 	for {
 		// What Go has run since the last entry may have changed the frame, how
 		// deep calls are, or the scope.
@@ -1411,14 +1414,57 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 		s.ssaEntries++
 		e.ssaStats.entries++
 		start, edges := pc, r.backEdges
-		if err := e.ssa.Run(pc, ctx); err != nil {
+		var err error
+		if resume != 0 {
+			err, resume = e.ssa.Resume(resume, &s.ssaCtxs[idx+1]), 0
+		} else {
+			err = e.ssa.Run(pc, ctx)
+		}
+		if err != nil {
 			return r.jitInterpret(f, f.base+depth, nil)
 		}
 		r.jitSSAProfit(e, ctx, start, edges)
+		if c := &s.ssaCtxs[idx+1]; c.Live == abi.LiveCall {
+			// A native call's callee left native code: Go finishes it
+			// (jitUnwindNative), then this code goes on natively where the
+			// callee would have returned to, its state where it left it --
+			// as V8's lazy deoptimization leaves a caller's optimized frame
+			// alone. Not while the collector marks, as native code takes
+			// pointers there; nor into code compiled again meanwhile, nor
+			// after a throw: then as below.
+			s.hosts++
+			e.ssaStats.hosts++
+			back, base, code := uintptr(c.ReturnTo), c.Base, e.ssa
+			exitPC, depth := int(ctx.ExitPC), int(ctx.ExitDepth)
+			f.pc = uint32(exitPC)
+			v, err := r.jitUnwindNative(idx, e, f.cl.fn)
+			if err == nil && r.stopped == nil && back != 0 && e.ssa == code && !jit.Marking() {
+				// Native code run meanwhile may have used the context.
+				c.Base, c.Live, c.ReturnTo = base, 0, 0
+				*(*Value)(unsafe.Pointer(&c.RetValue)) = v
+				s.resumed++
+				resume, pc = back, exitPC
+				continue
+			}
+			e.ssaStats.records += ctx.Records
+			r.jitApplyRecords(f, e, ctx)
+			sp, ok := r.jitCallResult(f, exitPC, depth, v, err)
+			if !ok || r.stopped != nil {
+				return r.jitInterpret(f, sp, err)
+			}
+			pc, depth = int(f.pc), sp-f.base
+			if e.reopt || e.inlineReopt || e.polyReopt || e.upgradeReopt {
+				r.jitReoptimize(f.cl, e)
+			}
+			if !e.ssa.HasEntry(pc) || e.entrySlow {
+				return r.jitInterpret(f, sp, nil)
+			}
+			continue
+		}
 		if s.ssaCtxs[idx+1].Live != 0 {
-			// A native call's callee left native code: Go finishes the
-			// calls (jitUnwindNative), then this one goes on after its
-			// call, as after one Go made.
+			// An inlined callee's exit: Go makes its frame and finishes it
+			// (jitUnwindNative), then this code goes on after the call, as
+			// after one Go made.
 			s.hosts++
 			e.ssaStats.hosts++
 			// An inlined callee's exit while the collector marks leaves its
