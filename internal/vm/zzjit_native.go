@@ -175,8 +175,11 @@ type jitEntry struct {
 	// intrinsic before every entry.
 	ssaStrings bool
 	// ssaStats is what the code did: how often it was entered, left for
-	// Go, failed a guard (by bytecode PC) and polled.
+	// Go, failed a guard (by bytecode PC) and polled. ssaLoop is the
+	// function's loops' mean length, in instructions, which the work a
+	// native stretch did is estimated with (jitSSAProfit).
 	ssaStats      jitSSAStats
+	ssaLoop       uint32
 	code          *jit.Code
 	misses        uint8
 	probes        uint8
@@ -446,6 +449,7 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool, cl *closure) *j
 		if p, err := jitcompile.LowerSSA(fn); err == nil {
 			if code, shapes := r.compileSSA(fn, cl, p, limit); code != nil {
 				e.ssa, e.this, e.ssaShapes = code, p.This, shapes
+				e.ssaLoop = jitLoopLength(fn)
 				for _, in := range p.Code {
 					e.ssaStrings = e.ssaStrings || in.Op == ir.StringMethod || in.Op == ir.StringCode
 				}
@@ -701,6 +705,11 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 		f.cl.setHint(hintFor(e))
 	}
 	if e != nil && e.ssa != nil {
+		if e.entrySlow {
+			// Its native stretches cost more at their exits than they save
+			// (jitSSAProfit): the existing tiers run it.
+			return Undefined, nil, false
+		}
 		return r.runSSA(f, e, pc, depth)
 	}
 	if e == nil {
@@ -1378,11 +1387,18 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 				err = r.throwError(errReference, "\"this\" is not bound until super() has been called")
 			}
 		case bytecode.OpGetProp:
+			// Through the site's cache first, as the interpreter reads it.
 			sp--
-			v, err = r.getValueProp(stack[sp], f.cl.names[in.A])
+			v, err = r.jitGetProp(f.cl, in, stack[sp])
 		case bytecode.OpSetProp:
 			sp -= 2
-			if err := r.setValueProp(stack[sp], f.cl.names[in.A], stack[sp+1], f.cl.fn.Strict); err != nil {
+			obj, val := stack[sp], stack[sp+1]
+			if obj.IsObject() {
+				err = r.setPropCached(&f.cl.ic[in.B], obj.Object(), f.cl.names[in.A], val, f.cl.fn.Strict)
+			} else {
+				err = r.setValueProp(obj, f.cl.names[in.A], val, f.cl.fn.Strict)
+			}
+			if err != nil {
 				return sp, steps, err
 			}
 			continue
@@ -1410,7 +1426,14 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 			c := tctx{r: r, f: f, cl: f.cl, locals: f.locals}
 			v, err = r.getGlobalAt(&c, in, pc)
 		case bytecode.OpGetPropThis:
-			v, err = r.getValueProp(stack[sp-1], f.cl.names[in.A])
+			recv := stack[sp-1]
+			if recv.IsObject() {
+				var ok bool
+				if v, ok = r.cachedProp(&f.cl.ic[in.B], recv.Object(), f.cl.names[in.A]); ok {
+					break
+				}
+			}
+			v, err = r.getValueProp(recv, f.cl.names[in.A])
 		case bytecode.OpGetIndex:
 			sp -= 2
 			v, err = r.getIndexed(stack[sp], stack[sp+1])
@@ -1424,6 +1447,21 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 		sp++
 	}
 	return sp, steps, nil
+}
+
+// jitGetProp is get_prop as the interpreter does it for an object: its own
+// small table, then the site's cache, then the generic read.
+func (r *Runtime) jitGetProp(cl *closure, in bytecode.Instr, obj Value) (Value, error) {
+	if obj.IsObject() {
+		o := obj.Object()
+		if v, ok := plainOwn(o, cl.names[in.A]); ok {
+			return v, nil
+		}
+		if v, ok, err := r.cachedGet(&cl.ic[in.B], o, cl.names[in.A]); ok {
+			return v, err
+		}
+	}
+	return r.getValueProp(obj, cl.names[in.A])
 }
 
 func (r *Runtime) jitFrameValue(f *frame, index int) Value {

@@ -1468,6 +1468,54 @@ func TestJITSSANullish(t *testing.T) {
 	}
 }
 
+// A function whose native stretches mostly end leaving for Go after little
+// work runs in the tree tier once its first stretches show it
+// (jitSSAProfit): a loop calling a method through Go at every iteration
+// costs more at the exits than native code saves. A loop doing real work
+// between its calls to Go stays native.
+func TestJITSSAProfitability(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function O(){this.v=0}O.prototype.m=function(i){this.v+=i;return this.v};
+		function calls(o,n){let s=0;for(let i=0;i<n;i++)s+=o.m(i);return s}
+		function work(n){let s=0;for(let i=0;i<n;i++){s=(s*31+i)|0;s^=s>>>7;s=(s+i*i)|0;if(i%100==0)s+=Math.abs(i)}return s}
+		var o=new O;`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		src := `[calls(o,500),work(2000)].join()`
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+	}
+	entry := func(name string) *jitEntry {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		return r.jit.hint(cl.hint())
+	}
+	if e := entry("calls"); e == nil || e.ssa == nil || !e.entrySlow || e.ssaStats.entries > 2*jitSSAProbe {
+		t.Fatalf("calls kept running natively: %+v", e)
+	}
+	if e := entry("work"); e == nil || e.ssa == nil || e.entrySlow {
+		t.Fatalf("work left native code: %+v", e)
+	}
+}
+
 // A property or element compared with == or != is read as it is, whatever
 // it holds: the new pipeline compares any value, so lowering does not take
 // the operands for numbers, which sent `o.next != null` to Go at every
