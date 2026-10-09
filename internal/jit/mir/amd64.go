@@ -492,8 +492,9 @@ func (c *compiler) exitThen(s *ssa.FrameState, kind uint64, then *amd64.Label) {
 	c.a.MovImm(scratchC, 0)
 	c.a.Store(regCtx, abi.OffRecords, scratchC)
 	for i, v := range s.Slots {
-		if v.Op == ssa.OpLoadSlot && v.Aux == i || c.captured(i) {
-			// Unchanged: a captured binding's own value (capturedUnchanged).
+		if v == nil || v.Op == ssa.OpLoadSlot && v.Aux == i || c.captured(i) {
+			// Unchanged: a captured binding's own value (capturedUnchanged);
+			// or between a caller's slots and an inlined callee's.
 			continue
 		}
 		var w amd64.Reg
@@ -536,6 +537,30 @@ func (c *compiler) exitThen(s *ssa.FrameState, kind uint64, then *amd64.Label) {
 		c.a.Bind(record)
 		c.appendRecord(uint64(i)|abi.RecordScalar, nil, 0, true, &w)
 		c.a.Bind(next)
+	}
+	if in := s.Inline; in != nil {
+		// An inlined callee's frame, written past its caller's operands:
+		// the next context says where, for Go to make it from, and this
+		// one's exit is at the call.
+		const next = scratchB
+		c.a.MovRR(next, regCtx)
+		c.a.OpImm(amd64.Add, next, abi.ContextSize, true)
+		for _, f := range []struct {
+			off int32
+			v   uint64
+		}{{abi.OffInlineClosure, uint64(in.Closure)}, {abi.OffInlineLocals, uint64(in.Locals)}, {abi.OffInlineThis, uint64(in.ThisSlot + 1)},
+			{abi.OffExitKind, kind}, {abi.OffExitPC, uint64(in.PC)}, {abi.OffExitDepth, uint64(in.Depth)}, {abi.OffExitSite, uint64(int64(in.Site))},
+			{abi.OffLive, abi.LiveInline}} {
+			c.a.MovImm(scratchA, f.v)
+			c.a.Store(next, f.off, scratchA)
+		}
+		c.a.MovRR(scratchA, regStack)
+		c.a.Load(scratchC, regCtx, abi.OffStackBase)
+		c.a.Op(amd64.Sub, scratchA, scratchC, true)
+		c.a.ShiftImm(amd64.Shr, scratchA, 4, true)
+		c.a.OpImm(amd64.Add, scratchA, int32(in.Base-c.f.Locals), true)
+		c.a.Store(next, abi.OffBase, scratchA)
+		kind = abi.ExitHost
 	}
 	c.record(kind, uint64(s.PC), uint64(s.Depth), uint64(int64(s.Site)), then)
 }
@@ -1369,6 +1394,20 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.MovImm(scratchB, v.Const.Bits)
 		c.a.Op(amd64.Cmp, c.gpr(arg(0), scratchA), scratchB, true)
 		guard(amd64.CondNE)
+	case ssa.OpFrameRoom:
+		c.a.MovRR(scratchA, regStack)
+		c.a.Load(scratchB, regCtx, abi.OffStackBase)
+		c.a.Op(amd64.Sub, scratchA, scratchB, true)
+		c.a.ShiftImm(amd64.Shr, scratchA, 4, true)
+		c.a.OpImm(amd64.Add, scratchA, int32(v.Index), true)
+		c.a.Load(scratchB, regCtx, abi.OffStackEnd)
+		c.a.Op(amd64.Cmp, scratchA, scratchB, true)
+		guard(amd64.CondA)
+		c.a.Load(scratchA, regCtx, abi.OffLevel)
+		c.a.OpImm(amd64.Add, scratchA, 1, true)
+		c.a.Load(scratchB, regCtx, abi.OffLevelLimit)
+		c.a.Op(amd64.Cmp, scratchA, scratchB, true)
+		guard(amd64.CondAE)
 	case ssa.OpPropRead:
 		c.property(v, guard)
 		c.a.Load(scratchB, scratchA, c.enc.NumOffset)

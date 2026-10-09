@@ -100,6 +100,14 @@ type Context struct {
 	StackTop   *int
 	StackHigh  *int
 	TailReturn uintptr
+	// An inlined callee's frame, which an exit inside it wrote past its
+	// caller's operands (ssa's InlineState), is in the next context, whose
+	// Live is LiveInline: InlineClosure is the callee's closure's address,
+	// which the caller's code keeps alive and Go finds among those it
+	// inlined; InlineLocals its program's locals, past which its operands
+	// are; InlineThis 1 plus its receiver's slot, or 0. Base is where the
+	// frame is; the exit fields say where it left.
+	InlineClosure, InlineLocals, InlineThis uint64
 	// Records counts the Record entries an exit filled. Every other slot of
 	// its state is in the frame already.
 	Records uint64
@@ -148,9 +156,20 @@ var (
 	OffStackHigh  = int32(unsafe.Offsetof(Context{}.StackHigh))
 	OffTailReturn = int32(unsafe.Offsetof(Context{}.TailReturn))
 
+	OffInlineClosure = int32(unsafe.Offsetof(Context{}.InlineClosure))
+	OffInlineLocals  = int32(unsafe.Offsetof(Context{}.InlineLocals))
+	OffInlineThis    = int32(unsafe.Offsetof(Context{}.InlineThis))
+
 	// ContextSize is a Context's size, and so the distance from one to the
 	// next in an array of them.
 	ContextSize = int32(unsafe.Sizeof(Context{}))
+)
+
+// What a context's Live says: a native call's callee runs in it, or an
+// inlined callee's frame is described in it.
+const (
+	LiveCall   = 1
+	LiveInline = 2
 )
 
 // Exit kinds, written to Context.ExitKind.

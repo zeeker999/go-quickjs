@@ -213,7 +213,7 @@ func (c *core) findLazy() {
 			return
 		}
 		for i, v := range s.Slots {
-			if !(v.Op == ssa.OpLoadSlot && v.Aux == i) {
+			if v != nil && !(v.Op == ssa.OpLoadSlot && v.Aux == i) {
 				elsewhere[v.ID] = true
 			}
 		}
@@ -296,6 +296,9 @@ func (c *core) allocate() error {
 			return
 		}
 		for _, v := range s.Slots {
+			if v == nil {
+				continue
+			}
 			if c.isLazy(v) || remat(v) {
 				for _, a := range v.Args {
 					uses = append(uses, use{a, at})

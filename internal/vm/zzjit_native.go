@@ -208,8 +208,11 @@ type jitEntry struct {
 	// call, for leaving on too many (jitUnwindShare).
 	nativeIn, nativeOut uint64
 	notNative           bool
-	// ssaCallees are the entries of the functions the code calls natively.
+	// ssaCallees are the entries of the functions the code calls natively,
+	// and ssaInlined the closures of those it inlines, whose frames Go makes
+	// at an exit inside them (jitUnwindNative).
 	ssaCallees []*jitEntry
+	ssaInlined []*closure
 	// nativeCalls are the calls the code makes natively, or will when
 	// compiled again, each with the function it was seen to call.
 	nativeCalls []jitInline

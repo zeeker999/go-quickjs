@@ -25,6 +25,9 @@ func Check(f *Func) error {
 			return fmt.Errorf("ssa: %s has no frame state", where)
 		}
 		for _, v := range s.Slots {
+			if v == nil {
+				continue
+			}
 			if err := use(where+"'s state", v); err != nil {
 				return err
 			}

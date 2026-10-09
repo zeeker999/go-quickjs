@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
 
@@ -66,17 +67,21 @@ type CallSite struct {
 // InlineSite is a call the VM has seen call one function, whose program,
 // lowered for inlining, Inlinable accepts: that program and its own
 // feedback; the function object's address, which the VM keeps alive and
-// the call checks it still calls; the call's argument count, and whether
-// it passes a receiver, as a method call does; and the callee's parameter
-// count and its receiver's slot, or -1 if it reads none.
+// the call checks it still calls, and its closure's, for Go to make its
+// frame from at an exit inside it (InlineState); the call's argument
+// count, and whether it passes a receiver, as a method call does; and the
+// callee's parameter count, its receiver's slot, or -1 if it reads none,
+// and whether a receiver that is not an object needs coercing, which only
+// Go does.
 type InlineSite struct {
-	Program  *ir.Program
-	Feedback Feedback
-	Callee   uintptr
-	Argc     int
-	Method   bool
-	Params   int
-	ThisSlot int
+	Program         *ir.Program
+	Feedback        Feedback
+	Callee, Closure uintptr
+	Argc            int
+	Method          bool
+	Params          int
+	ThisSlot        int
+	Coerce          bool
 }
 
 // Inlining's bounds: a callee's instructions, all callees' in a function,
@@ -87,12 +92,12 @@ const (
 	maxInlines     = 8
 )
 
-// Inlinable reports whether a callee may be inlined: a small program whose
-// native code has no effect -- it reads properties, elements and globals,
-// computes, branches forward and returns -- so that an exit anywhere in it
-// may go back to the call, which Go, or the interpreter, then makes from
-// the start; and that native code can do all of, with no operation it
-// leaves to Go, which would have Go make the call every time.
+// Inlinable reports whether a callee may be inlined: a small program that
+// reads and writes properties and elements, computes, branches forward
+// and returns, which native code can do all of, with no operation it
+// leaves to Go, which would have Go finish the call every time. An exit
+// inside it makes its frame (InlineState), so that what it did before is
+// not done again.
 func Inlinable(p *ir.Program) bool {
 	if p == nil || p.Validate() != nil || len(p.Code) > maxInline || len(p.Globals) != 0 {
 		return false
@@ -102,7 +107,7 @@ func Inlinable(p *ir.Program) bool {
 			continue
 		}
 		switch in.Op {
-		case ir.PropertyWrite, ir.ArrayWrite, ir.ArrayUpdate, ir.Call, ir.Host:
+		case ir.Call, ir.Host:
 			return false
 		case ir.Jump, ir.Branch:
 			if in.Target <= pc {
@@ -317,9 +322,16 @@ func (b *builder) inlineAt(pc int, total *int) (*frame, bool) {
 	if depth < callee || after != depth-callee+1 || site.ThisSlot >= 0 && !site.Method {
 		return nil, false
 	}
-	*total += len(site.Program.Code)
 	q := referenceReads(site.Program, site.Feedback)
-	return &frame{p: q, fb: site.Feedback, site: site, result: b.p.Locals + after - 1}, true
+	// Its slots follow the function's and earlier callees': every slot's
+	// number stays below abi.MaxRecords, past which a source is an address.
+	if b.nslots+q.Locals+q.StackSize > abi.MaxRecords {
+		return nil, false
+	}
+	*total += len(site.Program.Code)
+	fr := &frame{p: q, fb: site.Feedback, site: site, result: b.p.Locals + after - 1, base: b.nslots}
+	b.nslots += q.Locals + q.StackSize
+	return fr, true
 }
 
 // planInline makes an inlined callee's blocks, between the block that ends
@@ -332,8 +344,7 @@ func (b *builder) planInline(fr *frame, call, cont *Block) {
 	defer b.enter(b.root)
 	b.enter(fr)
 	p := fr.p
-	fr.base, fr.cont = b.nslots, cont
-	b.nslots += p.Locals + p.StackSize
+	fr.cont = cont
 	leaders := b.f.bools(len(p.Code) + 1)
 	leaders[0] = true
 	for pc, in := range p.Code {
@@ -420,6 +431,14 @@ func (b *builder) inlineCall(blk *Block, pc int, fr *frame, guard func(Op, Type,
 	object := guard(OpObjectOf, Ptr, ir.HostExit, b.read(sp-site.Argc-1, blk))
 	same := guard(OpSameObject, None, ir.HostExit, object)
 	same.Const = ir.Value{Bits: uint64(site.Callee)}
+	if site.Coerce && site.ThisSlot >= 0 {
+		// A receiver that is not an object is coerced, which Go does.
+		guard(OpObjectOf, Ptr, ir.HostExit, b.read(sp-site.Argc-2, blk))
+	}
+	// Room past the operands for the callee's frame, which an exit inside
+	// it writes there, and a context for Go to make it from.
+	room := guard(OpFrameRoom, None, ir.HostExit)
+	room.Index = fr.base - b.p.Locals + fr.p.Locals + fr.p.StackSize
 	fr.call = state()
 	undefined := b.f.newValue(blk, OpConst, Tagged)
 	undefined.Const = ir.Value{Kind: ir.Undefined}
@@ -860,10 +879,24 @@ func (b *builder) nullish(blk *Block, in ir.Instruction, operand func(ir.Operand
 	return c
 }
 
-// state captures the frame at a PC: every live slot's current value.
+// state captures the frame at a PC: every live slot's current value. Inside
+// an inlined callee it is the caller's at the call and the callee's
+// (InlineState).
 func (b *builder) state(blk *Block, pc int) *FrameState {
-	if b.cur != b.root {
-		return b.cur.call
+	if fr := b.cur; fr != b.root {
+		call, depth := fr.call, b.p.Maps[pc].Depth
+		s := b.f.newState(FrameState{PC: call.PC, Depth: call.Depth, Site: call.Site, Slots: b.f.refsOf(fr.base + b.p.Locals + depth)})
+		for i, v := range call.Slots {
+			s.Slots[i] = v
+			v.Uses++
+		}
+		for i := fr.base; i < len(s.Slots); i++ {
+			s.Slots[i] = b.read(i, blk)
+			s.Slots[i].Uses++
+		}
+		s.Inline = &InlineState{Closure: fr.site.Closure, Base: fr.base, Locals: b.p.Locals, ThisSlot: fr.site.ThisSlot,
+			PC: b.p.Maps[pc].PC, Depth: depth, Site: pc}
+		return s
 	}
 	depth := b.p.Maps[pc].Depth
 	s := b.f.newState(FrameState{PC: b.p.Maps[pc].PC, Depth: depth, Slots: b.f.refsOf(b.p.Locals + depth), Site: pc})
@@ -933,9 +966,8 @@ func (b *builder) instruction(blk *Block, pc int) {
 	}
 	guard := func(op Op, t Type, kind ir.ExitKind, args ...*Value) *Value {
 		if b.cur != b.root {
-			// Inside an inlined callee every exit goes to the call, which
-			// Go makes, native code going on after it, as at a call it does
-			// not inline: never to the interpreter for the rest.
+			// Inside an inlined callee Go does the operation, in the
+			// callee's frame, and native code goes on where it can.
 			kind = ir.HostExit
 		}
 		v := f.newValue(blk, op, t, args...)

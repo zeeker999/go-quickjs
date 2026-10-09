@@ -175,7 +175,7 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	}
 	old := e.ssa
 	e.ssa, e.ssaShapes, e.ssaHolders, e.fed, e.ssaStats = code, fb.shapes, fb.holders, fb.fed, jitSSAStats{}
-	e.ssaStrings, e.ssaCallees = e.ssaStrings || fb.strings, fb.callees
+	e.ssaStrings, e.ssaCallees, e.ssaInlined = e.ssaStrings || fb.strings, fb.callees, fb.inlined
 	if !e.notNative {
 		e.nativeEntry = code.EntryAddress(0)
 	}
@@ -253,6 +253,8 @@ type jitFeedback struct {
 	root    *jitFeedback
 	strings bool
 	callees []*jitEntry
+	// inlined are the closures of the callees the code inlines.
+	inlined []*closure
 	// e is the entry being compiled again, whose failed speculations
 	// (jitEntry.failed) are built generic; nil for a first compile.
 	e *jitEntry
@@ -290,10 +292,12 @@ func (fb *jitFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 			fb.strings = fb.strings || x.Op == ir.StringMethod || x.Op == ir.StringCode
 		}
 		fb.holders = append(fb.holders, in.obj)
+		fb.inlined = append(fb.inlined, in.cl)
 		return ssa.InlineSite{
 			Program: p, Feedback: &jitFeedback{r: fb.r, fn: in.cl.fn, cl: in.cl, root: fb},
-			Callee: uintptr(unsafe.Pointer(in.obj)), Argc: int(call.A), Method: call.Op == bytecode.OpCallMethod,
-			Params: in.cl.fn.ParamCount, ThisSlot: this,
+			Callee: uintptr(unsafe.Pointer(in.obj)), Closure: uintptr(unsafe.Pointer(in.cl)),
+			Argc: int(call.A), Method: call.Op == bytecode.OpCallMethod,
+			Params: in.cl.fn.ParamCount, ThisSlot: this, Coerce: in.cl.fn.CoerceThis,
 		}, true
 	}
 	return ssa.InlineSite{}, false
@@ -381,6 +385,12 @@ const jitInlineExits = 16
 // been seen too -- or at its next entry. A call seen before costs a look
 // at the lists.
 func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) {
+	if e.callSites != nil && e.callSites[pc] == jitCallInlined {
+		if o, cl := r.jitCalled(f, sp, in); cl != nil && !slices.ContainsFunc(e.inlines, func(x jitInline) bool { return int(x.pc) == pc && x.obj == o }) {
+			r.jitInlinedCalls(e, pc, o, cl)
+			return
+		}
+	}
 	if e.callSites != nil && e.callSites[pc] == jitCallNative {
 		r.jitCallTarget(f, e, pc, sp, in)
 		if e.inlinePending && e.inlineReopts < jitInlineReoptimizations {
@@ -396,15 +406,7 @@ func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 	}
 	switch n := e.callSites[pc]; {
 	case n == jitCallInlined:
-		for i := range e.inlines {
-			if x := &e.inlines[i]; int(x.pc) == pc {
-				if x.exits++; x.exits >= jitInlineExits {
-					e.notInline = append(e.notInline, x.pc)
-					e.callSites[pc] = jitCallDone
-					e.inlineReopt = true
-				}
-			}
-		}
+		jitInlineLeft(e, pc)
 		fallthrough
 	case n == jitCallDone:
 		if e.inlinePending {
@@ -435,6 +437,40 @@ func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 		e.nativeCalls = append(e.nativeCalls, jitInline{pc: int32(pc), cl: cl, obj: o})
 		e.callSites[pc] = jitCallNative
 		e.inlinePending = true
+	}
+}
+
+// jitInlineLeft counts an exit from the callee inlined at pc, or from its
+// call's checks: after jitInlineExits the call is not inlined, and the
+// code is compiled again.
+func jitInlineLeft(e *jitEntry, pc int) {
+	for i := range e.inlines {
+		if x := &e.inlines[i]; int(x.pc) == pc && !slices.Contains(e.notInline, x.pc) {
+			if x.exits++; x.exits >= jitInlineExits {
+				e.notInline = append(e.notInline, x.pc)
+				if e.callSites != nil {
+					e.callSites[pc] = jitCallDone
+				}
+				e.inlineReopt = true
+			}
+		}
+	}
+}
+
+// jitInlinedCalls has a call inlined for one function that calls another,
+// o, cl's, call them natively instead, and others, up to jitCallTargets
+// (jitCallTarget): the code is compiled again for it at once.
+func (r *Runtime) jitInlinedCalls(e *jitEntry, pc int, o *Object, cl *closure) {
+	e.notInline = append(e.notInline, int32(pc))
+	e.callSites[pc] = jitCallNative
+	e.inlineReopt = true
+	for _, x := range e.inlines {
+		if int(x.pc) == pc && r.jitNativeCallee(x.cl) != nil {
+			e.nativeCalls = append(e.nativeCalls, jitInline{pc: x.pc, cl: x.cl, obj: x.obj})
+		}
+	}
+	if r.jitNativeCallee(cl) != nil {
+		e.nativeCalls = append(e.nativeCalls, jitInline{pc: int32(pc), cl: cl, obj: o})
 	}
 }
 
@@ -519,7 +555,7 @@ func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
 // setSSA gives e the code the new pipeline compiled for fn from p.
 func (e *jitEntry) setSSA(fn *bytecode.Function, p *ir.Program, code *jit.SSACode, fb *jitFeedback) {
 	e.ssa, e.this, e.ssaShapes, e.ssaHolders, e.fed = code, p.This, fb.shapes, fb.holders, fb.fed
-	e.ssaStrings, e.ssaCallees = fb.strings, fb.callees
+	e.ssaStrings, e.ssaCallees, e.ssaInlined = fb.strings, fb.callees, fb.inlined
 	e.nativeEntry = code.EntryAddress(0)
 	e.ssaLoop = jitLoopLength(fn)
 	for _, in := range p.Code {
@@ -537,7 +573,7 @@ func (r *Runtime) jitInlinable(fn *bytecode.Function) bool {
 		return ok
 	}
 	ok := false
-	if len(fn.Upvalues) == 0 && !fn.TopLevel && !fn.IsModule {
+	if len(fn.Upvalues) == 0 && !fn.TopLevel && !fn.IsModule && !fn.UsesArguments && !fn.HasDirectEval {
 		p, err := jitcompile.LowerSSAInline(fn)
 		ok = err == nil && ssa.Inlinable(p)
 	}
@@ -886,13 +922,20 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 			// call, as after one Go made.
 			s.hosts++
 			e.ssaStats.hosts++
+			// An inlined callee's exit while the collector marks leaves its
+			// records, its frame's included, to Go.
+			e.ssaStats.records += ctx.Records
+			r.jitApplyRecords(f, e, ctx)
 			exitPC, depth := int(ctx.ExitPC), int(ctx.ExitDepth)
-			v, err := r.jitUnwindNative(idx)
+			v, err := r.jitUnwindNative(idx, e)
 			sp, ok := r.jitCallResult(f, exitPC, depth, v, err)
 			if !ok || r.stopped != nil {
 				return r.jitInterpret(f, sp, err)
 			}
 			pc, depth = int(f.pc), sp-f.base
+			if e.reopt || e.inlineReopt {
+				r.jitReoptimize(f.cl, e)
+			}
 			if !e.ssa.HasEntry(pc) || e.entrySlow {
 				return r.jitInterpret(f, sp, nil)
 			}
@@ -972,22 +1015,29 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 const jitContexts = 24
 
 // jitNativeLevel is a frame a native call made whose callee left native
-// code (abi.Context.Live): what Go makes the VM's frame from, and finishes
-// it with.
+// code, or an inlined callee's an exit inside it wrote (abi.Context.Live):
+// what Go makes the VM's frame from, and finishes it with. An inlined
+// callee's has its program's locals and its receiver's slot plus one
+// (abi.Context's Inline fields), and top, the stack's top before it.
 type jitNativeLevel struct {
 	cl                    *closure
 	base                  int
 	this                  Value
 	kind, pc, depth, site uint64
+	inline                bool
+	locals, thisSlot, top int
+	// ctx is the level's context's index.
+	ctx int
 }
 
 // jitUnwindNative finishes the native calls the code running in context
-// idx made, the innermost of which left native code: it makes the VM's
-// frame of each, as runFD would have, from the outermost; then finishes
-// each from the innermost -- that one from its exit, as runSSA does, the
-// others from after their call, with what the one they called returned or
-// threw -- and returns what the outermost returned or threw.
-func (r *Runtime) jitUnwindNative(idx int) (Value, error) {
+// idx, e's, made, the innermost of which left native code, and the inlined
+// callee an exit inside wrote the frame of: it makes the VM's frame of
+// each, as runFD would have, from the outermost; then finishes each from
+// the innermost -- that one from its exit, as runSSA does, the others from
+// after their call, with what the one they called returned or threw -- and
+// returns what the outermost returned or threw.
+func (r *Runtime) jitUnwindNative(idx int, e *jitEntry) (Value, error) {
 	s := r.jit
 	// Its levels go past those of the unwinds it runs inside, which hold
 	// theirs until they finish: they are reached by index, the slices
@@ -995,15 +1045,38 @@ func (r *Runtime) jitUnwindNative(idx int) (Value, error) {
 	start := len(s.unwinding)
 	for i := idx + 1; i < jitContexts && s.ssaCtxs[i].Live != 0; i++ {
 		c := &s.ssaCtxs[i]
-		s.unwinding = append(s.unwinding, jitNativeLevel{(*closure)(c.Closure), int(c.Base), *(*Value)(unsafe.Pointer(&c.This)),
-			c.ExitKind, c.ExitPC, c.ExitDepth, c.ExitSite})
+		l := jitNativeLevel{base: int(c.Base), kind: c.ExitKind, pc: c.ExitPC, depth: c.ExitDepth, site: c.ExitSite, ctx: i}
+		if c.Live == abi.LiveInline {
+			// The callee its caller -- e's code or a native call's callee's
+			// -- inlined at the call it left at.
+			l.inline, l.locals, l.thisSlot = true, int(c.InlineLocals), int(c.InlineThis)
+			parent, parentPC := e, s.ssaCtxs[idx].ExitPC
+			if len(s.unwinding) > start {
+				caller := &s.unwinding[len(s.unwinding)-1]
+				parent, parentPC = s.cache[weak.Make(caller.cl.fn)], caller.pc
+			}
+			for _, cl := range parent.ssaInlined {
+				if uintptr(unsafe.Pointer(cl)) == uintptr(c.InlineClosure) {
+					l.cl = cl
+				}
+			}
+			if l.cl == nil {
+				panic("jit: an inlined callee's closure is not its caller's")
+			}
+			jitInlineLeft(parent, int(parentPC))
+		} else {
+			l.cl, l.this = (*closure)(c.Closure), *(*Value)(unsafe.Pointer(&c.This))
+		}
+		s.unwinding = append(s.unwinding, l)
 		c.Live, c.ReturnTo = 0, 0
 	}
 	n := len(s.unwinding) - start
 	if n != 0 {
 		// The innermost left; the others only return through Go.
-		if e := s.hint(s.unwinding[len(s.unwinding)-1].cl.hint()); e != nil {
-			r.jitUnwound(e)
+		if l := &s.unwinding[len(s.unwinding)-1]; !l.inline {
+			if e := s.hint(l.cl.hint()); e != nil {
+				r.jitUnwound(e)
+			}
 		}
 	}
 	defer func() {
@@ -1015,7 +1088,37 @@ func (r *Runtime) jitUnwindNative(idx int) (Value, error) {
 	for k := range n {
 		l := &s.unwinding[start+k]
 		fn := l.cl.fn
+		if l.inline {
+			// The exit wrote its slots as its program has them -- locals,
+			// receiver, operands -- past its caller's operands: the
+			// receiver goes to the frame, the operands down to the locals.
+			l.top = r.stackTop
+			l.this = Undefined
+			if l.thisSlot > 0 {
+				l.this = r.stack[l.base+l.thisSlot-1]
+			}
+			from, to := l.base+l.locals, l.base+fn.LocalCount
+			copy(r.stack[to:to+int(l.depth)], r.stack[from:from+int(l.depth)])
+			clear(r.stack[to+int(l.depth) : from+int(l.depth)])
+			r.stackTop = max(r.stackTop, l.base+fn.LocalCount+fn.MaxStack)
+			r.stackHigh = max(r.stackHigh, r.stackTop)
+		} else {
+			l.top = l.base
+		}
 		f := r.pushFrame()
+		if c := &s.ssaCtxs[l.ctx]; !l.inline && c.Records != 0 {
+			// Records its exit left to Go, the collector marking: before
+			// anything else reads its frame, an inlined callee's past it
+			// included.
+			if e := s.cache[weak.Make(fn)]; e != nil {
+				f.cl, f.locals, f.base = l.cl, r.stack[l.base:l.base+fn.LocalCount:l.base+fn.LocalCount], l.base+fn.LocalCount
+				saved := s.ssaCtx
+				s.ssaCtx = c
+				r.jitApplyRecords(f, e, c)
+				s.ssaCtx = saved
+				l.this = *(*Value)(unsafe.Pointer(&c.This))
+			}
+		}
 		f.cl = l.cl
 		f.locals = r.stack[l.base : l.base+fn.LocalCount : l.base+fn.LocalCount]
 		f.base = l.base + fn.LocalCount
@@ -1049,7 +1152,7 @@ func (r *Runtime) jitUnwindNative(idx int) (Value, error) {
 				}
 			}
 		}
-		r.popFrameOf(f, l.base)
+		r.popFrameOf(f, l.top)
 	}
 	return v, err
 }
