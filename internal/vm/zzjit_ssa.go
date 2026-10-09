@@ -131,8 +131,9 @@ const jitPropertyCases = 4
 // jitPolySeen notes a read native code left to Go at pc, its receiver on top
 // of the frame's operands, up to sp: one found on a prototype, of a shape
 // the read has not met, joins those it has, up to jitPropertyCases, and
-// the code is compiled again for them at once. A read of a receiver's own
-// property needs none: native code scans for it (mir's property).
+// the code is compiled again for them once they have settled
+// (jitPolySettled). A read of a receiver's own property needs none: native
+// code scans for it (mir's property).
 func (r *Runtime) jitPolySeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) {
 	recv := r.stack[sp-1]
 	if !recv.IsObject() || int(in.A) >= len(f.cl.names) {
@@ -153,7 +154,25 @@ func (r *Runtime) jitPolySeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 		return
 	}
 	p.cases = append(p.cases, c)
-	e.polyReopt = true
+	e.polyPending, e.polySettled = true, 0
+}
+
+// jitPolySettle is how many exits in a row native code makes, once a read
+// met a shape it was not compiled for, that find no other at any read
+// before the code is compiled again for them: a method whose reads meet a
+// class's subclasses one by one, as DeltaBlue's constraints are met, is
+// compiled again once for them all, not at each -- as V8 optimizes again
+// once a function's feedback has settled rather than at each new map.
+const jitPolySettle = 4
+
+// jitPolySettled counts an exit from e's code toward compiling it again for
+// the shapes its reads have met (jitPolySeen).
+func jitPolySettled(e *jitEntry) {
+	if e.polyPending {
+		if e.polySettled++; e.polySettled >= jitPolySettle {
+			e.polyPending, e.polySettled, e.polyReopt = false, 0, true
+		}
+	}
 }
 
 // jitWrongShapeExits is how often a site compiled for one shape leaves
@@ -205,6 +224,8 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 		e.upgradeReopts++
 	}
 	e.reopt, e.inlineReopt, e.polyReopt, e.upgradeReopt = false, false, false, false
+	// What it compiles for, the reads' shapes met since included.
+	e.polyPending, e.polySettled = false, 0
 	fn := cl.fn
 	r.jitInlineNativeCalls(e)
 	lower := jitcompile.LowerSSA
@@ -1578,6 +1599,7 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 			case bytecode.OpGetProp, bytecode.OpGetPropThis, bytecode.OpSetProp:
 				jitFed(f.cl, e, uint32(exitPC))
 			}
+			jitPolySettled(e)
 			if e.reopt || e.inlineReopt || e.polyReopt || e.upgradeReopt {
 				// The code is compiled again now, not at the next call: a
 				// loop in this one may run long.
@@ -1878,6 +1900,7 @@ func (r *Runtime) jitFinishExit(f *frame, e *jitEntry, l *jitNativeLevel) (Value
 			case bytecode.OpGetProp, bytecode.OpGetPropThis, bytecode.OpSetProp:
 				jitFed(f.cl, e, uint32(pc))
 			}
+			jitPolySettled(e)
 			if e.inlinePending && e.inlineReopts < 2*jitInlineReoptimizations {
 				e.inlinePending, e.inlineReopt = false, true
 			}
