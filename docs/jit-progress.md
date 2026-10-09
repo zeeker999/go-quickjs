@@ -22,13 +22,18 @@ across sessions. Update it **in the same commit** as the work it records.
     -run TestConformance -count=1 -timeout 60m -v -args -conformance.jit
   ```
 
-- **Next item:** P7. In order: measure arm64 (a CI job comparing the
-  pipelines in one run); native calls in the new pipeline, which still
-  sends every callee compilation to the old one (`r.jitSSA && !callee`),
-  until `BenchmarkJITCallPromotion` and `BenchmarkJITKernelPromotion` are at
-  least as fast; make the new pipeline the default and run the 24-hour
-  fuzz; then delete the old pipeline (the user asked when it retires,
-  2026-10-09). Both architectures are supported (the user's
+- **Next item:** P7. Kernels are at least as fast as the old pipeline on
+  both architectures (P7a), and calls between compiled functions too, so
+  native calls are not what retirement waits on. Left, in order: the V8
+  suite through each pipeline; first use, where a function compiled on its
+  first call or two is still slower than the old pipeline's on amd64
+  (compile time, P7b); the callee path (`r.jitSSA && !callee`, which
+  compiles a callee in the old pipeline); make the new pipeline the
+  default and run the 24-hour fuzz; then delete the old pipeline (the user
+  asked when it retires, 2026-10-09). Tried and dropped: register hints
+  between a phi and its arguments, with the back-edge poll moved before
+  the moves -- level on amd64, since a phi is usually live after its loop
+  and linear scan has no lifetime holes; holes would be the way. Both architectures are supported (the user's
   requirement): test every change on amd64 here and on arm64 through CI's
   macOS jobs. The 24-hour fuzz, Phase 1's last
   gate item, runs at the next milestone.
@@ -130,7 +135,9 @@ Design: [jit-phase2-design.md](jit-phase2-design.md). P2 gates the rest.
 | P5a | `%` natively, without a helper: integers below 2**63 by `IDIV` (a zero remainder takes the dividend's sign; a divisor of -1 does not divide), the rest -- fractions, NaN, infinities, a zero divisor -- exits to Go, which computes `math.Mod`. A slot IR `Mod` operator, made only by `LowerSSA`. x87's `FPREM` was tried and dropped: it is exact, but microcoded, absent on arm64, and Go itself computes `math.Mod` in software on every architecture (the user asked). `TestSSANativeRemainder`, including a remainder stored through the operand stack after `IDIV` takes RDX. `BenchmarkJITHostRoundTrip/remainder`: 5.0 ns per iteration, against 48.6 in the tree tier and 53.5 in the old JIT (0 host exits). | done | jit: compute integer remainders natively |
 | P5b | A call of a Go function leaves native code once, as fast as the tree tier. The callee and arguments only Go uses stay native: `LowerSSA` keeps a global read whose value no native operation takes (the old pipeline's numeric-use rule made it an exit) and makes such a property read a reference read, both carried by their cells. A function compiled before the interpreter ran a global read finds the global where the global object has it now; the cell's key check catches a move. An exit's value with a shadow needs no record when it turns out to be a number stored where no reference is, or its own slot's reference: native code checks both (amd64 and arm64); Go applies one record without a buffer. `TestJITSSACallExits` (one exit per call; first-call compilation; a global deleted and defined again), `TestJITSSAReferences/overwrite` rewritten so the slot really holds the reference a number replaces. `BenchmarkJITHostRoundTrip/go-call`: 59.6 ns per iteration, from 77 (2 exits and 2 records per call), against 70.3 in the tree tier and 119 in the old JIT. Stress test262 on the new pipeline: 99,599 passed, 0 failed. | done | jit: leave native code once per call to Go |
 | P6 | Code arena (R8): a runtime's code in its `jit.Arena`, chunks of 64 KiB (a larger function gets its own), functions packed at 64-byte alignment; placing one opens the pages it touches, copies and seals them again (never writable and executable at once; sound because a runtime's native code always returns before Go compiles); a chunk is unmapped with its last function; the arena locks for finalizers. Both pipelines (`CompileIn`, `NewSSACode(arena, ...)`); a nil arena gives a code its own. Darwin's code-signing check is asked once. `TestArenaPacksCode` (200 functions, one spanning pages, run again after half are released and 100 more placed among them), `TestArenaHoldsBothPipelines`, `TestWindowsArenaProtectionAndRelease` and `TestLinuxArenaProtectionAndRelease` (read/execute page by page, committed while any code is owned, freed with the last), `TestJITArenaMappings`: 101 functions in 2 mappings (new pipeline) or 6 (old), where each was one -- on Windows 64 KiB of address space each. The harness places its thousands of programs in one shared arena. First use level (0.96-1.04x, inside the noise of the JIT-off rows). Stress test262: 99,599 passed, 0 failed, on both pipelines. | done | jit: keep a runtime's native code in an arena |
-| P7 | Parity on both architectures, then delete the old pipeline. Note: the old pipeline's call-chain tests (`zzjit_calls_test.go`) assert its own counters (`transfers`); under the new pipeline their programs answer correctly but those assertions fail, and they go with the old pipeline or move to Phase 5's inlining. | todo | |
+| P7 | Parity on both architectures, then delete the old pipeline. Note: the old pipeline's call-chain tests (`zzjit_calls_test.go`) assert its own counters (`transfers`); under the new pipeline their programs answer correctly but those assertions fail, and they go with the old pipeline or move to Phase 5's inlining. | in progress | |
+| P7a | Measured on both architectures: CI's `JIT kernels` job (macos-15 and ubuntu-latest) runs every kernel with a new-pipeline mode, `ScalarCalls`, and the promotion benchmarks once with each pipeline, and tabulates the new pipeline's time over the old one's and the tree tier's in its summary. arm64's first run put logistic at 1.13x the old pipeline: the arm64 generator wrote every result to scratch and copied it, built 1.0 from a general register, and jumped to the next instruction after a branch. Results now go to their registers on both architectures (amd64's SSE arithmetic in two instructions, not three), arm64 encodes FMOV immediates (`FloatImm`, all 256 checked against x/arch) and zero from XZR. CI run 37868061808 (46e6f4b), arm64: every kernel at or below the old pipeline, 0.46x (particle) to 0.92x (ScalarCalls), logistic 0.77x. amd64 (idle Ryzen): particle 0.77x and logistic 0.87x of the new pipeline's own previous time. A compiled function calling a compiled function (`ScalarCalls`, a new ssa mode) is already faster through Go than the old coordinator's transfers: 172 us against 180, 385 in the tree tier; so native calls are not what retiring the old pipeline waits on. | done | ci: time the JIT's kernels on arm64 and amd64; jit: write arithmetic results to their registers |
+| P7b | Compile time (`BenchmarkJITCompile`, the VM's own path, both pipelines): the new pipeline took twice the old one's. Its maps keyed by SSA values are slices by ID (mir's core, liveness as bit sets, `ssa.OriginMap`, the optimizer), mir's location table is formatted on demand, instructions are chosen by switch, values and slices come from slabs; the machine code is byte-identical throughout (an amd64 fingerprint of 3,011 functions). Now (idle Ryzen): sum 45 us (old 40), particle 128 (old 145), a 158-instruction region 205 (old 340), 246 KB. The budget is 50 us and 64 KB for 200 instructions: still about 4x off. What is left is spread: the SSA builder (38%), mir (32%), the optimizer (24%); a Value is 112 bytes; mir's use list takes a use per slot of every guard's state. | in progress | jit: time compiling, in both pipelines; jit: compile with tables indexed by ID, not maps; jit: optimize SSA with tables indexed by ID; jit: choose arithmetic instructions by switch, not a map literal; jit: take SSA values and slices from slabs |
 
 **Gate:**
 - [ ] Every kernel and suite at least as fast as the old pipeline on both
@@ -141,8 +148,12 @@ Design: [jit-phase2-design.md](jit-phase2-design.md). P2 gates the rest.
   (numeric fields, level). Against the tree tier one was behind: a Go call,
   86 us per 1,000 iterations against 71.5; since P5b it is ahead, 59.6
   against 70.3 (2026-10-08, after P5b every kernel is again at or below
-  the old pipeline's time, numeric fields level at 34.1 against 34.0 us). arm64: the new pipeline
-  runs there since P3 and passes CI; its speed is not yet measured.
+  the old pipeline's time, numeric fields level at 34.1 against 34.0 us).
+  arm64, 2026-10-09 (CI run 37868061808, macos-15, medians of 5): every
+  kernel is too, from 0.22x (remainder) and 0.46x (particle) to 0.92x
+  (ScalarCalls); a Go call 0.52x the old pipeline and 0.83x the tree tier.
+  Kernels are met on both; suites (the V8 suite through each pipeline) are
+  not yet measured.
 - [ ] No divergence under the Phase 1 tools.
 - [ ] Compile budget met.
 
