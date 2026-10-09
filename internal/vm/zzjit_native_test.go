@@ -4195,14 +4195,15 @@ func TestJITSSANativeConstruct(t *testing.T) {
 // each time, of the realm's prototype, as the built-in makes one, never the
 // last one made there, which the code holds still (the site's result cell,
 // written again by each, keeps it: mayOwnCell); native code leaves only for
-// the pool to be filled again.
+// the pool to be filled again, not to read a method of an array it made,
+// which has the layout property caches compare arrays' with.
 func TestJITSSANativeArrayConstruct(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
 	defer func(was bool) { jitcompile.SSAConstruct = was }(jitcompile.SSAConstruct)
 	jitcompile.SSAConstruct = true
-	setup := `function arrays(n){let s=0,prev=null,same=0,a;for(let i=0;i<n;i++){a=new Array();if(a===prev)same++;s+=a.length+(prev===null?0:1);prev=a}
+	setup := `function arrays(n){let s=0,prev=null,same=0,a;for(let i=0;i<n;i++){a=new Array();a.push(i);if(a===prev)same++;s+=a.length+a[0]+(prev===null?0:1);prev=a}
 			return [s,same,Array.isArray(a),Object.getPrototypeOf(a)===Array.prototype,a.length].join()}`
 	src := `arrays(400)`
 	want := New(Config{})
