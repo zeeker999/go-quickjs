@@ -471,15 +471,36 @@ func (c *core) allocate() error {
 		return a.v.ID - b.v.ID
 	})
 	c.locs, c.hasLoc = c.locList(nv), c.bools(nv)
+	// Spill slots are reused as registers are: a spilled interval's slot is
+	// free once it ends. Spilling an active interval puts all of it in the
+	// slot, from its start, so a slot is taken only where its last
+	// occupant ended before the interval began. The two classes' passes use
+	// separate slots, since the second does not know when the first's
+	// spilled values die.
+	type freeSlot struct{ slot, end int }
 	spills := 0
 	for _, float := range []bool{false, true} {
 		var free []int
+		var freeSlots []freeSlot
 		if float {
 			free = append(free, c.fprs...)
 		} else {
 			free = append(free, c.gprs...)
 		}
-		var active []*interval
+		var active, spilled []*interval
+		slot := func(from int) (int, error) {
+			for i := len(freeSlots) - 1; i >= 0; i-- {
+				if f := freeSlots[i]; f.end < from {
+					freeSlots = append(freeSlots[:i], freeSlots[i+1:]...)
+					return f.slot, nil
+				}
+			}
+			if spills == abi.SpillSlots {
+				return 0, fmt.Errorf("%w: more than %d spill slots", ErrUnsupported, abi.SpillSlots)
+			}
+			spills++
+			return spills - 1, nil
+		}
 		for _, it := range all {
 			if isFloat(it.v) != float {
 				continue
@@ -493,6 +514,15 @@ func (c *core) allocate() error {
 				}
 			}
 			active = kept
+			kept = spilled[:0]
+			for _, a := range spilled {
+				if a.end < it.start {
+					freeSlots = append(freeSlots, freeSlot{c.locAt(a.v).spill, a.end})
+				} else {
+					kept = append(kept, a)
+				}
+			}
+			spilled = kept
 			if len(free) > 0 {
 				c.setLoc(it.v, loc{reg: free[len(free)-1], spill: -1})
 				free = free[:len(free)-1]
@@ -507,17 +537,18 @@ func (c *core) allocate() error {
 					victim, vi = a, i
 				}
 			}
-			if spills == abi.SpillSlots {
-				return fmt.Errorf("%w: more than %d spills", ErrUnsupported, abi.SpillSlots)
+			s, err := slot(victim.start)
+			if err != nil {
+				return err
 			}
 			if victim == it {
-				c.setLoc(it.v, loc{reg: -1, spill: spills})
+				c.setLoc(it.v, loc{reg: -1, spill: s})
 			} else {
 				c.setLoc(it.v, loc{reg: c.locAt(victim.v).reg, spill: -1})
-				c.setLoc(victim.v, loc{reg: -1, spill: spills})
+				c.setLoc(victim.v, loc{reg: -1, spill: s})
 				active[vi] = it
 			}
-			spills++
+			spilled = append(spilled, victim)
 		}
 	}
 	return nil
