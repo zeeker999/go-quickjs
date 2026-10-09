@@ -696,14 +696,9 @@ func (b *builder) translate() {
 	for i, j := 0, len(order)-1; i < j; i, j = i+1, j-1 {
 		order[i], order[j] = order[j], order[i]
 	}
-	// Blocks no entry reaches are dropped.
-	kept := b.f.Blocks[:0]
-	for _, blk := range b.f.Blocks {
-		if seen[blk.ID] {
-			kept = append(kept, blk)
-		}
-	}
-	b.f.Blocks = kept
+	// Blocks no entry reaches are dropped; the others are kept in this
+	// order, which every later pass walks (Func.Blocks).
+	b.f.Blocks = append(b.f.Blocks[:0], order...)
 	for _, blk := range b.f.Blocks {
 		preds := blk.Preds[:0]
 		backedge := blk.Backedge[:0]

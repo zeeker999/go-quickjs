@@ -166,29 +166,10 @@ func capturedUnchanged(f *ssa.Func) error {
 	return nil
 }
 
-// layout orders blocks in reverse post-order from the entries, so that a
-// loop's body follows its header.
+// layout orders blocks as the function has them, in reverse post-order from
+// the entries (ssa.Func.Blocks), so that a loop's body follows its header.
 func (c *core) layout() {
-	seen := c.bools(numBlocks(c.f))
-	post := c.blockList(len(c.f.Blocks))[:0]
-	var visit func(*ssa.Block)
-	visit = func(b *ssa.Block) {
-		if seen[b.ID] {
-			return
-		}
-		seen[b.ID] = true
-		for i := len(b.Succs) - 1; i >= 0; i-- {
-			visit(b.Succs[i])
-		}
-		post = append(post, b)
-	}
-	for i := len(c.f.Entries) - 1; i >= 0; i-- {
-		visit(c.f.Entries[i].Block)
-	}
-	c.order = c.blockList(len(post))[:0]
-	for i := len(post) - 1; i >= 0; i-- {
-		c.order = append(c.order, post[i])
-	}
+	c.order = append(c.blockList(len(c.f.Blocks))[:0], c.f.Blocks...)
 }
 
 // findLazy marks values that need no location of their own.

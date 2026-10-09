@@ -28,8 +28,13 @@ func Optimize(f *Func) {
 	// Tables are by value ID, not maps: a compile at run time pays for every
 	// pass (BenchmarkJITCompile in internal/vm).
 	var subst []*Value
-	seen := map[[2]int]*Value{}
+	// A guard repeats another that dominates it, as V8's redundancy
+	// elimination has it: the blocks are in reverse post-order, each after
+	// its dominator (Func.Blocks).
+	dom := dominators(f)
+	seen := map[[2]int][]*Value{}
 	for round := 0; round < 32; round++ {
+		clear(seen)
 		subst = idTable(subst, f.nextID)
 		replaced := false
 		find := func(v *Value) *Value {
@@ -40,7 +45,6 @@ func Optimize(f *Func) {
 		}
 		changed := false
 		for _, b := range f.Blocks {
-			clear(seen)
 			for _, v := range b.Values {
 				if subst[v.ID] != nil {
 					continue
@@ -58,12 +62,19 @@ func Optimize(f *Func) {
 				// key names only the first.
 				if v.Op.isGuard() && v.Op != OpCheckInit && !v.Op.readsMemory() && len(v.Args) == 1 {
 					key := [2]int{int(v.Op), v.Args[0].ID}
-					if first, ok := seen[key]; ok {
+					var first *Value
+					for _, w := range seen[key] {
+						if subst[w.ID] == nil && dom.dominates(w.Block, b) {
+							first = w
+							break
+						}
+					}
+					if first != nil {
 						subst[v.ID], replaced = first, true
 						changed = true
 						continue
 					}
-					seen[key] = v
+					seen[key] = append(seen[key], v)
 				}
 			}
 		}
@@ -482,4 +493,65 @@ func insertAfter(f *Func, a, v *Value) {
 		}
 	}
 	panic("ssa: insertAfter: value not in its block")
+}
+
+// domTree is a function's dominator tree: each block's immediate dominator,
+// by block ID, -1 for an entry block, whose dominator is the function's
+// (virtual) start.
+type domTree struct{ idom []int }
+
+// dominators computes the dominator tree, by Cooper, Harvey and Kennedy's
+// iteration over the blocks in reverse post-order, which their IDs are
+// (Func.Blocks).
+func dominators(f *Func) *domTree {
+	d := &domTree{idom: make([]int, len(f.Blocks))}
+	for i := range d.idom {
+		d.idom[i] = -2
+	}
+	for _, e := range f.Entries {
+		d.idom[e.Block.ID] = -1
+	}
+	intersect := func(a, b int) int {
+		for a != b {
+			for a > b {
+				a = d.idom[a]
+			}
+			for b > a {
+				b = d.idom[b]
+			}
+		}
+		return a
+	}
+	for changed := true; changed; {
+		changed = false
+		for _, b := range f.Blocks {
+			if d.idom[b.ID] == -1 {
+				continue
+			}
+			nd := -2
+			for _, p := range b.Preds {
+				switch {
+				case d.idom[p.ID] == -2:
+				case nd == -2:
+					nd = p.ID
+				default:
+					nd = intersect(p.ID, nd)
+				}
+			}
+			if nd != d.idom[b.ID] {
+				d.idom[b.ID], changed = nd, true
+			}
+		}
+	}
+	return d
+}
+
+// dominates reports whether every path from an entry to b passes a.
+func (d *domTree) dominates(a, b *Block) bool {
+	for x := b.ID; x >= 0; x = d.idom[x] {
+		if x == a.ID {
+			return true
+		}
+	}
+	return false
 }
