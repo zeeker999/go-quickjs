@@ -5014,6 +5014,81 @@ func TestJITSSACallSeenWhileCalleeLeaves(t *testing.T) {
 	}
 }
 
+// A read whose receivers turn out to be of several shapes, met one after
+// another, has the code compiled again once for them all, after its exits
+// have found no other for a while (jitPolySettle), not once for each; the
+// code then reads each natively. So too where the code runs called
+// natively, its exits Go's to finish (jitFinishExit): many calls at, which
+// reads one.
+func TestJITSSAPolymorphicReadsSettle(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function A(){};A.prototype.v=1;function B(){};B.prototype.v=2;
+		function C(){};C.prototype.v=3;function D(){};D.prototype.v=4;
+		var one=[new A()],four=[new A(),new B(),new C(),new D()];
+		function sum(objs,n){let t=0;for(let i=0;i<n;i++){t=(t*3+objs[i&3&(objs.length-1)].v)|0}return t}
+		function at(objs,k){let t=0;for(let i=k;i<k+1;i++)t=objs[i&3&(objs.length-1)].v;return t}
+		function many(objs){let t=0;for(let k=0;k<100;k++)t=(t*3+at(objs,k))|0;return t}`
+	for _, c := range []struct{ name, call, fn string }{{"entered", "sum(%s,500)", "sum"}, {"called natively", "many(%s)", "at"}} {
+		t.Run(c.name, func(t *testing.T) {
+			var rounds []string
+			for _, objs := range []string{"one", "one", "four", "four", "four"} {
+				rounds = append(rounds, "String("+fmt.Sprintf(c.call, objs)+")")
+			}
+			want := New(Config{})
+			defer func() { want.Close(); want.ReleaseClosed() }()
+			r := jitRuntimeForTest(t, Config{JIT: true})
+			r.jitSSA = true
+			for _, rt := range []*Runtime{want, r} {
+				if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cl := r.global.getOwn(r.atoms.intern(c.fn)).value.Object().fn().closure
+			var compiles uint64
+			for i, src := range rounds {
+				wv, err := want.Run(compileForTest(t, src))
+				if err != nil {
+					t.Fatal(err)
+				}
+				reoptimized, allHosts := r.jit.reoptimized, r.jit.hosts
+				gv, err := r.Run(compileForTest(t, src))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, want := gv.String().Go(), wv.String().Go(); got != want {
+					t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+				}
+				if r.jit.hint(cl.hint()) == nil {
+					t.Fatalf("round %d: %s has no code", i, c.fn)
+				}
+				if i >= 2 {
+					compiles += r.jit.reoptimized - reoptimized
+				}
+				// The three new shapes' exits, then the settling ones.
+				if i == 2 && r.jit.hosts-allHosts > 3+jitPolySettle+1 {
+					t.Fatalf("%s left native code %d times before it was compiled for its shapes", c.fn, r.jit.hosts-allHosts)
+				}
+				if i == len(rounds)-1 && (r.jit.reoptimized != reoptimized || r.jit.hosts != allHosts) {
+					t.Fatalf("native code left %d times in its last round", r.jit.hosts-allHosts)
+				}
+			}
+			if compiles != 1 {
+				t.Fatalf("%s was compiled again %d times for its read's three new shapes", c.fn, compiles)
+			}
+			// Code compiled again for any reason is compiled for every shape
+			// met: none is left to wait for.
+			e := r.jit.hint(cl.hint())
+			e.polyPending, e.polySettled, e.inlineReopt = true, 2, true
+			r.jitReoptimize(cl, e)
+			if e.polyPending || e.polySettled != 0 {
+				t.Fatal("code compiled again still waits to be compiled for its reads' shapes")
+			}
+		})
+	}
+}
+
 // Native code that calls through Go another function's native code shares
 // the context with it (jitState.ssaCtx): an exit's PC must be read before
 // Go runs anything. Here inner's last exit, a call near its end, is past

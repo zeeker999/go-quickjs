@@ -198,9 +198,13 @@ type jitEntry struct {
 	fed []jitFedSite
 	// poly are the reads that met objects of shapes the code was not
 	// compiled for, each with up to jitPropertyCases of them, which it is
-	// compiled again for (jitPolySeen); polyReopt marks that it is to be.
-	poly      []jitPolySite
-	polyReopt bool
+	// compiled again for (jitPolySeen); polyReopt marks that it is to be,
+	// polyPending that it is to be once polySettled exits in a row have
+	// found no other (jitPolySettle).
+	poly        []jitPolySite
+	polyReopt   bool
+	polyPending bool
+	polySettled uint8
 	// nativeEntry is the address of the code's entry at its start, which
 	// native callers jump to (mir's native calls), or 0 while there is none
 	// they may: no code, or code that leaves too often (notNative). A
