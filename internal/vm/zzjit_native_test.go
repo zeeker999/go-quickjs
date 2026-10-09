@@ -4326,6 +4326,85 @@ func TestJITSSANativeCallThroughCall(t *testing.T) {
 	}
 }
 
+// a.pop() pops natively where Array.prototype.pop's fast path does: the
+// last element, a number or a reference, the length one less. An element
+// read before from the cell pop clears, x, is kept across it (mayElemCell):
+// x === y. A hole last, or a length not writable, is Go's.
+func TestJITSSANativePop(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `var o1={v:1},o2={v:2};
+		function mk(n){const a=[];for(let i=0;i<n;i++)a.push(i%3===0?o1:i%3===1?o2:i);return a}
+		function drain(a){let t=0,last=null;while(a.length>0){const x=a[a.length-1];const y=a.pop();
+			t=(t+(x===y?1:0)+(y===o1?10:y===o2?20:(y|0)))|0;last=x}return [t,last===o1].join()}
+		function tryDrain(a){try{return drain(a)}catch(e){return e.constructor.name+a.length}}`
+	src := `drain(mk(300))`
+	rounds := []string{src, src, src, src, src,
+		`{const a=mk(10);a.length=12;drain(a)}`,
+		`{const a=mk(10);Object.defineProperty(a,'length',{writable:false});tryDrain(a)}`}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	cl := r.global.getOwn(r.atoms.intern("drain")).value.Object().fn().closure
+	checked := false
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts, entries uint64
+		if e := r.jit.hint(cl.hint()); e != nil {
+			hosts, entries = e.ssaStats.hosts, e.ssaStats.entries
+		}
+		reoptimized := r.jit.reoptimized
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i >= 3 && i <= 4 && r.jit.reoptimized == reoptimized {
+			e := r.jit.hint(cl.hint())
+			if e == nil || !slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.pop }) {
+				t.Fatal("drain does not pop natively")
+			}
+			// It leaves after its loop, for the array and join of its
+			// answer: a few times, not once a pop.
+			if e.entrySlow || e.ssaStats.entries == entries || e.ssaStats.hosts-hosts > 4 {
+				t.Fatalf("round %d: drain entered %d times, left %d for 300 pops", i, e.ssaStats.entries-entries, e.ssaStats.hosts-hosts)
+			}
+			checked = true
+		}
+	}
+	if !checked {
+		t.Fatal("code was compiled again in every round")
+	}
+	// The cells it popped hold nothing, as Go's pop leaves them: no object
+	// kept alive past its array's length.
+	if _, err := r.Run(compileForTest(t, `var kept=mk(300);drain(kept)`)); err != nil {
+		t.Fatal(err)
+	}
+	a := r.global.getOwn(r.atoms.intern("kept")).value.Object()
+	if len(a.elems) != 0 || cap(a.elems) < 300 {
+		t.Fatalf("kept: length %d, capacity %d", len(a.elems), cap(a.elems))
+	}
+	for i, v := range a.elems[:300] {
+		if !v.IsUndefined() || v.ref != nil {
+			t.Fatalf("kept[%d] still holds %#x, %p after its pop", i, math.Float64bits(v.num), v.ref)
+		}
+	}
+}
+
 // a.push(v) appends natively where Array.prototype.push's fast path does:
 // numbers and references, the length its result; native code leaves only
 // for the array to grow. One whose array or prototypes it may not -- a

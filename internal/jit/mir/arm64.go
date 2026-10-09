@@ -1158,6 +1158,12 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		if t.Via != 0 {
 			c.viaGuards(t, v.Args[0], guard)
 		}
+		if t.Pop {
+			c.popGuards(t, v.Args[0], guard)
+			c.a.B(checked)
+			c.a.Bind(next)
+			continue
+		}
 		if t.Push {
 			c.pushGuards(t, v.Args[0], guard)
 			c.a.B(checked)
@@ -1198,6 +1204,10 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 	c.a.Bind(checked)
 	if site.Push {
 		c.push(v)
+		return
+	}
+	if site.Pop {
+		c.pop(v)
 		return
 	}
 	if site.Alloc {
@@ -1481,6 +1491,67 @@ func (c *a64Compiler) pushGuards(t *ssa.CallSite, recv *ssa.Value, guard func(ar
 		}
 		guard(arm64.NE)
 	}
+}
+
+// popGuards checks a call of Array.prototype.pop may pop, as amd64's
+// does. It uses A, B and C.
+func (c *a64Compiler) popGuards(t *ssa.CallSite, recv *ssa.Value, guard func(arm64.Cond)) {
+	if recv.Shadow == nil && c.origin.At(recv) < 0 {
+		c.a.CmpImm(a64C, 0, true)
+		guard(arm64.NE)
+		return
+	}
+	c.a.MovImm(a64B, c.enc.Object)
+	c.a.Cmp(c.gpr(recv, a64A), a64B, true)
+	guard(arm64.NE)
+	c.sourceRef(recv, guard)
+	c.a.LoadU8(a64B, a64C, c.enc.ObjectClass)
+	c.a.CmpImm(a64B, int64(c.enc.ClassArray), false)
+	guard(arm64.NE)
+	c.a.LoadU8(a64B, a64C, c.enc.ObjectFlags)
+	c.a.MovImm(a64A, uint64(c.enc.FlagLengthWritable|c.enc.FlagSparse))
+	c.a.Op(arm64.And, a64B, a64B, a64A, false)
+	c.a.CmpImm(a64B, int64(c.enc.FlagLengthWritable), false)
+	guard(arm64.NE)
+	c.a.Load(a64B, a64C, c.enc.ObjectProto)
+	c.a.MovImm(a64A, uint64(t.Protos[0].Object))
+	c.a.Cmp(a64B, a64A, true)
+	guard(arm64.NE)
+	c.a.Load(a64B, a64C, c.enc.ObjectElems+8)
+	c.a.CmpImm(a64B, 0, true)
+	guard(arm64.EQ)
+	c.a.AddImm(a64B, a64B, -1, true)
+	c.a.ShiftImm(arm64.Lsl, a64B, a64B, 4, true)
+	c.a.Load(a64A, a64C, c.enc.ObjectElems)
+	c.a.Op(arm64.Add, a64A, a64A, a64B, true)
+	c.a.Load(a64B, a64A, c.enc.NumOffset)
+	c.a.MovImm(a64C, c.enc.Uninitialized)
+	c.a.Cmp(a64B, a64C, true)
+	guard(arm64.EQ)
+}
+
+// pop pops a call of Array.prototype.pop's receiver's last element, as
+// amd64's does. It uses A, B and C.
+func (c *a64Compiler) pop(v *ssa.Value) {
+	if c.enc.ValueSize != 16 {
+		panic("mir: a value that is not 16 bytes")
+	}
+	c.sourceRef(v.Args[0], func(arm64.Cond) {})
+	c.a.Load(a64B, a64C, c.enc.ObjectElems+8)
+	c.a.AddImm(a64B, a64B, -1, true)
+	c.a.Store(a64C, c.enc.ObjectElems+8, a64B)
+	c.a.ShiftImm(arm64.Lsl, a64B, a64B, 4, true)
+	c.a.Load(a64A, a64C, c.enc.ObjectElems)
+	c.a.Op(arm64.Add, a64A, a64A, a64B, true)
+	at := abi.OffKeep + int32(v.Index)*c.enc.ValueSize
+	c.a.Load(a64B, a64A, c.enc.RefOffset)
+	c.a.Store(a64Ctx, at+c.enc.RefOffset, a64B)
+	c.a.Load(a64B, a64A, c.enc.NumOffset)
+	c.a.Store(a64Ctx, at+c.enc.NumOffset, a64B)
+	c.a.MovImm(a64C, c.enc.Undefined)
+	c.a.Store(a64A, c.enc.NumOffset, a64C)
+	c.a.Store(a64A, c.enc.RefOffset, arm64.ZR)
+	c.setG(v, a64B)
 }
 
 // push appends a call of Array.prototype.push's argument, as amd64's

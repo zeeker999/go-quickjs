@@ -247,14 +247,16 @@ func storeChecks(f *Func) {
 // its value's own (OpKeep). Elements, frame slots and the context's cells
 // are no property's, and a cell read through another key is another
 // property's. Answers are kept, by phi and key.
-type aliases struct{ key, own map[aliasKey]int }
+type aliases struct{ key, own, elem map[aliasKey]int }
 
 type aliasKey struct {
 	v   *Value
 	key uint32
 }
 
-func newAliases() *aliases { return &aliases{map[aliasKey]int{}, map[aliasKey]int{}} }
+func newAliases() *aliases {
+	return &aliases{map[aliasKey]int{}, map[aliasKey]int{}, map[aliasKey]int{}}
+}
 
 // anyKey is a call's key: a callee may write any property.
 const anyKey = ^uint32(0)
@@ -315,6 +317,37 @@ func (a *aliases) mayOwnCell(call, s *Value) bool {
 			}
 		}
 		a.own[k] = 0
+		return false
+	}
+	return false
+}
+
+// mayElemCell reports whether the cell at s may be an element's, or the
+// result cell of call, which pops an element (popsElement).
+func (a *aliases) mayElemCell(call, s *Value) bool {
+	switch s.Op {
+	case OpElemCell:
+		return true
+	case OpCallCell:
+		return s.Args[0] == call
+	case OpKeep:
+		if x := s.Args[0]; x.Shadow != nil {
+			return a.mayElemCell(call, x.Shadow)
+		}
+		return false
+	case OpPhi:
+		k := aliasKey{s, uint32(call.ID)}
+		if r, ok := a.elem[k]; ok {
+			return r == 2
+		}
+		a.elem[k] = 1
+		for _, x := range s.Args {
+			if a.mayElemCell(call, x) {
+				a.elem[k] = 2
+				return true
+			}
+		}
+		a.elem[k] = 0
 		return false
 	}
 	return false

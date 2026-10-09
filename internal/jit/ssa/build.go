@@ -65,7 +65,10 @@ type Feedback interface {
 // extensible, its length writable, with room, whose prototypes are Protos
 // with their shapes and no elements -- none with an indexed property a
 // setter could be asked about -- the argument is its new last element,
-// and the result its length.
+// and the result its length. One with Pop calls Array.prototype.pop, the
+// realm's, at Callee: on a dense array of the realm's prototype, Protos[0],
+// its length writable, whose last element is not a hole, that element is
+// the result, its cell undefined and the length one less.
 type CallSite struct {
 	Callee, Closure, Entry, Count uintptr
 	Argc                          int
@@ -80,6 +83,18 @@ type CallSite struct {
 	Via                           uintptr
 	Push                          bool
 	Protos                        [2]Holder
+	Pop                           bool
+}
+
+// popsElement reports whether a call is Array.prototype.pop's (CallSite's
+// Pop): it writes an element's cell, and its own result's.
+func popsElement(v *Value) bool {
+	for _, c := range v.Calls {
+		if !c.Pop {
+			return false
+		}
+	}
+	return len(v.Calls) != 0
 }
 
 // allocOnly reports whether a call runs nothing that can write the heap

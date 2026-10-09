@@ -373,6 +373,13 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 		if t.Via != 0 {
 			c.viaGuards(t, v.Args[0], guard)
 		}
+		if t.Pop {
+			// Array.prototype.pop, its fast path's.
+			c.popGuards(t, v.Args[0], guard)
+			c.a.Jmp(checked)
+			c.a.Bind(next)
+			continue
+		}
 		if t.Push {
 			// Array.prototype.push, its fast path's.
 			c.pushGuards(t, v.Args[0], guard)
@@ -420,6 +427,10 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 	c.a.Bind(checked)
 	if site.Push {
 		c.push(v)
+		return
+	}
+	if site.Pop {
+		c.pop(v)
 		return
 	}
 	if site.Alloc {
@@ -733,6 +744,73 @@ func (c *compiler) pushGuards(t *ssa.CallSite, recv *ssa.Value, guard func(amd64
 		}
 		guard(amd64.CondNE)
 	}
+}
+
+// popGuards checks a call of Array.prototype.pop may pop as its fast path
+// does (ssa.CallSite's Pop): the receiver, recv, a dense array of the
+// realm's prototype, its length writable, whose last element is not a
+// hole. It uses every scratch register.
+func (c *compiler) popGuards(t *ssa.CallSite, recv *ssa.Value, guard func(amd64.Cond)) {
+	if recv.Shadow == nil && c.origin.At(recv) < 0 {
+		// A primitive, never an array: scratchC, the callee, is not 0.
+		c.a.Op(amd64.Test, scratchC, scratchC, true)
+		guard(amd64.CondNE)
+		return
+	}
+	c.a.MovImm(scratchB, c.enc.Object)
+	c.a.Op(amd64.Cmp, c.gpr(recv, scratchA), scratchB, true)
+	guard(amd64.CondNE)
+	c.sourceRef(recv, guard)
+	c.a.LoadU8(scratchB, scratchC, c.enc.ObjectClass)
+	c.a.OpImm(amd64.Cmp, scratchB, int32(c.enc.ClassArray), false)
+	guard(amd64.CondNE)
+	c.a.LoadU8(scratchB, scratchC, c.enc.ObjectFlags)
+	c.a.OpImm(amd64.And, scratchB, int32(c.enc.FlagLengthWritable|c.enc.FlagSparse), false)
+	c.a.OpImm(amd64.Cmp, scratchB, int32(c.enc.FlagLengthWritable), false)
+	guard(amd64.CondNE)
+	c.a.Load(scratchB, scratchC, c.enc.ObjectProto)
+	c.a.MovImm(scratchA, uint64(t.Protos[0].Object))
+	c.a.Op(amd64.Cmp, scratchB, scratchA, true)
+	guard(amd64.CondNE)
+	// Not empty, and its last element no hole.
+	c.a.Load(scratchB, scratchC, c.enc.ObjectElems+8)
+	c.a.Op(amd64.Test, scratchB, scratchB, true)
+	guard(amd64.CondE)
+	c.a.OpImm(amd64.Sub, scratchB, 1, true)
+	c.a.ShiftImm(amd64.Shl, scratchB, 4, true)
+	c.a.Load(scratchA, scratchC, c.enc.ObjectElems)
+	c.a.Op(amd64.Add, scratchA, scratchB, true)
+	c.a.Load(scratchB, scratchA, c.enc.NumOffset)
+	c.a.MovImm(scratchC, c.enc.Uninitialized)
+	c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+	guard(amd64.CondE)
+}
+
+// pop pops a call of Array.prototype.pop's receiver's last element,
+// checked (popGuards): the length one less, the element's words the
+// call's result, kept (OpCallCell), its cell undefined. It uses every
+// scratch register.
+func (c *compiler) pop(v *ssa.Value) {
+	if c.enc.ValueSize != 16 {
+		panic("mir: a value that is not 16 bytes")
+	}
+	c.sourceRef(v.Args[0], func(amd64.Cond) {})
+	c.a.Load(scratchB, scratchC, c.enc.ObjectElems+8)
+	c.a.OpImm(amd64.Sub, scratchB, 1, true)
+	c.a.Store(scratchC, c.enc.ObjectElems+8, scratchB)
+	c.a.ShiftImm(amd64.Shl, scratchB, 4, true)
+	c.a.Load(scratchA, scratchC, c.enc.ObjectElems)
+	c.a.Op(amd64.Add, scratchA, scratchB, true)
+	at := abi.OffKeep + int32(v.Index)*c.enc.ValueSize
+	c.a.Load(scratchB, scratchA, c.enc.RefOffset)
+	c.a.Store(regCtx, at+c.enc.RefOffset, scratchB)
+	c.a.Load(scratchB, scratchA, c.enc.NumOffset)
+	c.a.Store(regCtx, at+c.enc.NumOffset, scratchB)
+	c.a.MovImm(scratchC, c.enc.Undefined)
+	c.a.Store(scratchA, c.enc.NumOffset, scratchC)
+	c.a.MovImm(scratchC, 0)
+	c.a.Store(scratchA, c.enc.RefOffset, scratchC)
+	c.setG(v, scratchB)
 }
 
 // push appends a call of Array.prototype.push's argument to its receiver,
