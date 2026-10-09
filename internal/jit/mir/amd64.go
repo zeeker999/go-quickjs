@@ -1136,8 +1136,8 @@ func (c *compiler) sourceAddr() {
 
 // propStore stores a value in a property, as the VM's setPropCached does
 // in an own writable data property: its number word, and its pointer
-// word, which it finds where the value came from (sourceRef), or none for
-// a primitive. A store that changes a pointer word -- the value's, or the
+// word, which it finds where the value came from, none for a primitive
+// (pointerWord). A store that changes a pointer word -- the value's, or the
 // one it replaces -- is left to Go while the collector marks
 // (abi.Encoding's WriteBarrier), as is a store to a cell a live reference
 // was loaded from (the operands after the value: ssa's storeChecks).
@@ -1145,27 +1145,27 @@ func (c *compiler) sourceAddr() {
 // scratch register and xScratch1.
 func (c *compiler) propStore(v *ssa.Value, guard func(amd64.Cond)) {
 	x := v.Args[1]
-	none, have := c.a.NewLabel(), c.a.NewLabel()
-	w := c.gpr(x, scratchA)
-	c.a.MovImm(scratchB, abi.NumberLimit)
-	c.a.Op(amd64.Cmp, w, scratchB, true)
-	c.a.Jcc(amd64.CondB, none)
-	for _, p := range []uint64{c.enc.Undefined, c.enc.Null, c.enc.True, c.enc.False, c.enc.Uninitialized} {
-		c.a.MovImm(scratchB, p)
-		c.a.Op(amd64.Cmp, w, scratchB, true)
-		c.a.Jcc(amd64.CondE, none)
-	}
-	if x.Shadow == nil && c.origin.At(x) < 0 {
-		// A reference's word, which native code never makes.
-		c.a.Jmp(c.stubLabel(v.State, exitKind(v.Aux)))
+	var w amd64.Reg
+	if remat(x) {
+		c.materialize(x, scratchA)
+		w = scratchA
 	} else {
-		c.sourceRef(x, guard)
-		c.a.Jmp(have)
+		w = c.gpr(x, scratchA)
 	}
-	c.a.Bind(none)
-	c.a.MovImm(scratchC, 0)
+	// A number, the usual value, has none, which a compare says; anything
+	// else's is read where it came from.
+	number, have := c.a.NewLabel(), c.a.NewLabel()
+	if x.Shadow != nil || c.origin.At(x) >= 0 {
+		c.a.MovImm(scratchB, abi.NumberLimit)
+		c.a.Op(amd64.Cmp, w, scratchB, true)
+		c.a.Jcc(amd64.CondB, number)
+	}
+	c.pointerWord(x, w)
+	c.a.Jmp(have)
+	c.a.Bind(number)
+	c.a.MovImm(scratchB, 0)
 	c.a.Bind(have)
-	c.a.MovQToX(xScratch1, scratchC)
+	c.a.MovQToX(xScratch1, scratchB)
 	c.property(v, guard)
 	for _, s := range v.Args[2:] {
 		// A live value read from this cell keeps its pointer word there:
