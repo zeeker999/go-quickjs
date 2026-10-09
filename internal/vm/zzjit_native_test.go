@@ -4950,6 +4950,69 @@ func TestJITSSAElementsKeptAcrossCalls(t *testing.T) {
 	}
 }
 
+// A call first seen while its callee leaves native code too often for
+// native callers to call it (notNative) is made natively all the same: its
+// calls leave for Go until the callee is called natively again, then do
+// not. Here leaf leaves at every call from other, then outer's call is
+// seen, then leaf stops leaving.
+func TestJITSSACallSeenWhileCalleeLeaves(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `var mode=0;
+		function leaf(a){if(mode)return (a*3)|0;return String(a).length}
+		function other(n){let t=0;for(let i=0;i<n;i++)t=(t+leaf(i))|0;return t}
+		function outer(n){let t=0;for(let i=0;i<n;i++){t=(t+leaf(i))|0;for(let j=0;j<40;j++)t=(t*3+j)|0}return t}`
+	rounds := []string{`String(other(500))`, `String(other(500))`, `String(outer(500))`, `mode=1;String(outer(2000))`}
+	for range 4 {
+		rounds = append(rounds, `String(outer(2000))`)
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	leaf := r.global.getOwn(r.atoms.intern("leaf")).value.Object().fn().closure
+	outer := r.global.getOwn(r.atoms.intern("outer")).value.Object().fn().closure
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		le := r.jit.hint(leaf.hint())
+		if i == 2 && (le == nil || !le.notNative) {
+			t.Fatal("leaf is called natively before outer's call is seen")
+		}
+		var hosts uint64
+		oe := r.jit.hint(outer.hint())
+		if oe != nil {
+			hosts = oe.ssaStats.hosts
+		}
+		reoptimized := r.jit.reoptimized
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == len(rounds)-1 {
+			oe = r.jit.hint(outer.hint())
+			if oe == nil || r.jit.reoptimized != reoptimized || oe.ssaStats.hosts != hosts {
+				var left uint64
+				if oe != nil {
+					left = oe.ssaStats.hosts - hosts
+				}
+				t.Fatalf("outer left native code %d times in its last round", left)
+			}
+		}
+	}
+}
+
 // Native code that calls through Go another function's native code shares
 // the context with it (jitState.ssaCtx): an exit's PC must be read before
 // Go runs anything. Here inner's last exit, a call near its end, is past
