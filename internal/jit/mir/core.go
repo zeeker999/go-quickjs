@@ -42,6 +42,17 @@ type core struct {
 	// workspace's, kept from compile to compile, or the core's own.
 	sched *schedule
 	own   schedule
+	// saves are, for each native call (ssa's OpCall), the values live
+	// across it that are in registers, which it saves to slots of their own
+	// and restores after: the callee uses every register, as V8's code's
+	// callees use the caller-saved ones.
+	saves map[*ssa.Value][]saved
+}
+
+// saved is a register a call saves, and the spill slot it saves it in.
+type saved struct {
+	reg, slot int
+	float     bool
 }
 
 // schedule is phiSchedule's lists.
@@ -537,6 +548,35 @@ func (c *core) allocate() error {
 				active[vi] = it
 			}
 			spilled = append(spilled, victim)
+		}
+	}
+	// What each native call saves: the values live across it in registers,
+	// each in a slot of its own past the spill slots.
+	home := map[int]int{}
+	for _, b := range c.order {
+		for _, v := range b.Values {
+			if v.Op != ssa.OpCall || v.Calls == nil {
+				continue
+			}
+			p := pos[v.ID]
+			for _, it := range all {
+				l := c.locAt(it.v)
+				if it.start >= p || it.end <= p || l.reg < 0 {
+					continue
+				}
+				s, ok := home[it.v.ID]
+				if !ok {
+					if spills == abi.SpillSlots {
+						return fmt.Errorf("%w: more than %d spill slots", ErrUnsupported, abi.SpillSlots)
+					}
+					s, spills = spills, spills+1
+					home[it.v.ID] = s
+				}
+				if c.saves == nil {
+					c.saves = map[*ssa.Value][]saved{}
+				}
+				c.saves[v] = append(c.saves[v], saved{reg: l.reg, slot: s, float: isFloat(it.v)})
+			}
 		}
 	}
 	return nil

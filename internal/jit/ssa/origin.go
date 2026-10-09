@@ -225,6 +225,9 @@ func storeChecks(f *Func) {
 	stores, live := liveAcross(f)
 	a := newAliases()
 	for i, s := range stores {
+		if s.Op != OpPropWrite {
+			continue
+		}
 		for _, c := range live[i] {
 			if sh := c.Shadow; a.may(s.Key, sh) && !slices.Contains(s.Args[2:], sh) {
 				s.Args = f.appendValue(s.Args, sh)
@@ -249,11 +252,14 @@ type aliasKey struct {
 
 func newAliases() *aliases { return &aliases{map[aliasKey]int{}} }
 
+// anyKey is a call's key: a callee may write any property.
+const anyKey = ^uint32(0)
+
 // may reports whether a store through key may write the cell at s.
 func (a *aliases) may(key uint32, s *Value) bool {
 	switch s.Op {
 	case OpPropCell, OpGlobalCell:
-		return s.Key == key
+		return key == anyKey || s.Key == key
 	case OpElemCell, OpStringMethod, OpConstSource:
 		return false
 	case OpKeep:
@@ -287,7 +293,7 @@ func liveAcross(f *Func) ([]*Value, [][]*Value) {
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
 			switch {
-			case v.Op == OpPropWrite:
+			case v.Op == OpPropWrite, v.Op == OpCall && v.Calls != nil:
 				stores = append(stores, v)
 			case v.Type == Tagged && v.Shadow != nil:
 				// A kept value's too: while the collector marks, it is still

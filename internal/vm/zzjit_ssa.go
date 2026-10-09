@@ -840,34 +840,39 @@ func (r *Runtime) jitApplyRecords(f *frame, e *jitEntry, ctx *abi.Context) {
 		return
 	}
 	r.jit.ssaRecords += uint64(n)
+	const flags = abi.RecordScalar | abi.RecordMaybe | abi.RecordDirect
 	if n == 1 {
 		rec := &ctx.Record[0]
-		*r.jitSlot(f, e, int(rec.Slot&^(abi.RecordScalar|abi.RecordMaybe))) = r.jitRecordValue(f, e, rec)
+		*r.jitSlot(f, e, int(rec.Slot&^flags)) = r.jitRecordValue(f, e, ctx, 0)
 		return
 	}
 	var buf [8]Value
 	src := buf[:0]
 	for i := range ctx.Record[:n] {
-		src = append(src, r.jitRecordValue(f, e, &ctx.Record[i]))
+		src = append(src, r.jitRecordValue(f, e, ctx, i))
 	}
 	for i, rec := range ctx.Record[:n] {
-		*r.jitSlot(f, e, int(rec.Slot&^(abi.RecordScalar|abi.RecordMaybe))) = src[i]
+		*r.jitSlot(f, e, int(rec.Slot&^flags)) = src[i]
 	}
 }
 
 // jitRecordValue is the value a record writes, read from the frame as the
 // exit left it.
-func (r *Runtime) jitRecordValue(f *frame, e *jitEntry, rec *abi.Record) Value {
-	switch {
+func (r *Runtime) jitRecordValue(f *frame, e *jitEntry, ctx *abi.Context, i int) Value {
+	switch rec := &ctx.Record[i]; {
+	case rec.Slot&abi.RecordDirect != 0:
+		slot := abi.Slot{Num: rec.Word, Ref: ctx.RecordRef[i]}
+		return *(*Value)(unsafe.Pointer(&slot))
 	case rec.Slot&abi.RecordScalar != 0:
+		return Value{num: math.Float64frombits(rec.Word)}
 	case rec.Slot&abi.RecordMaybe != 0:
 		if s := r.jitSource(f, e, &rec.Arg); s != nil && s.ref != nil {
 			return *s
 		}
+		return Value{num: math.Float64frombits(rec.Word)}
 	default:
 		return *r.jitSlot(f, e, int(rec.Arg))
 	}
-	return Value{num: math.Float64frombits(rec.Word)}
 }
 
 // jitSSAStats counts what one function's new-pipeline code does. Each
@@ -964,8 +969,16 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 	s.ctxTop++
 	defer func() {
 		s.ctxTop--
-		// What native code kept (abi.Context.Keep) is not kept past it.
+		// What native code kept (abi.Context.Keep), and the pointer words
+		// its native calls recorded (RecordRef), its callees' too, are not
+		// kept past it.
 		clear(s.ssaCtxs[idx].Keep[:])
+		for i := idx; i < jitContexts; i++ {
+			if c := &s.ssaCtxs[i]; c.RecordHigh != 0 {
+				clear(c.RecordRef[:c.RecordHigh])
+				c.RecordHigh = 0
+			}
+		}
 	}()
 	ctx := &s.ssaCtxs[idx]
 	for {

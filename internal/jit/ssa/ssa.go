@@ -178,6 +178,21 @@ const (
 	OpKeep // tagged, ptr -> source
 	// OpKept is a tagged value (Args[1]) whose shadow is a keep (Args[0]).
 	OpKept // source, tagged -> tagged
+
+	// OpCall calls natively one of the functions Calls are, as V8's code
+	// calls another's: the call's operands are its arguments -- the
+	// receiver, for a method, the function, then the call's arguments --
+	// and its result is the callee's number word, its pointer word in the
+	// context's keep cell Index (OpCallCell). It fails, its state's exit,
+	// Go making the call, when it is none of them or cannot be made
+	// natively. Code goes on after it: what is used after it is in memory
+	// (mir's allocate), and a reference read from a cell is kept before it
+	// (keep.go), since the callee may write any cell; if the callee leaves
+	// native code, Go makes this frame from the call's state, its records
+	// (abi.RecordDirect).
+	OpCall // tagged... -> tagged
+	// OpCallCell is the keep cell a call's result's pointer word is in.
+	OpCallCell // tagged -> source
 )
 
 var opNames = [...]string{
@@ -190,6 +205,7 @@ var opNames = [...]string{
 	OpNot: "not", OpStrictNullish: "strictnullish", OpLooseNullish: "loosenullish", OpEqTagged: "eqtagged", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
 	OpSameObject: "sameobject", OpFrameRoom: "frameroom", OpKeepRef: "keepref", OpKeep: "keep", OpKept: "kept",
+	OpCall: "call", OpCallCell: "callcell",
 }
 
 func (o Op) String() string {
@@ -204,7 +220,7 @@ func (o Op) isGuard() bool {
 	switch o {
 	case OpUnboxF64, OpTruth, OpCheckInit, OpModF64, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite, OpElemCell, OpLength,
 		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell, OpStringMethod, OpStringCode, OpLooseNullish, OpEqTagged,
-		OpSameObject, OpFrameRoom:
+		OpSameObject, OpFrameRoom, OpCall:
 		return true
 	}
 	return false
@@ -215,7 +231,7 @@ func (o Op) isGuard() bool {
 // (An array's length and an object's shape change only in Go.)
 func (o Op) readsMemory() bool {
 	return o == OpElemRead || o == OpElemWrite || o == OpElemCell || o == OpPropRead || o == OpPropWrite || o == OpPropCell ||
-		o == OpGlobalCell || o == OpKeep
+		o == OpGlobalCell || o == OpKeep || o == OpCall
 }
 
 // Value is one SSA value.
@@ -237,6 +253,8 @@ type Value struct {
 	// after Const's.
 	Holders *[2]Holder
 	Cases   []PropertyCase
+	// Calls, for a call, are the functions it may call natively (OpCall).
+	Calls []*CallSite
 	// State is the frame to exit to, for guards.
 	State *FrameState
 	// Shadow is a tagged value's origin at run time, where no compiler can
@@ -319,10 +337,6 @@ type Block struct {
 	// Generic marks an entry block whose speculation failed before: the
 	// slots it loads are not unboxed there (Feedback's EntryGeneric).
 	Generic bool
-	// Calls, on a BlockExit at a call, are the functions it may call
-	// natively first, if it can (CallSite); its exit is where it goes
-	// otherwise.
-	Calls []*CallSite
 }
 
 // Entry is a place native code can be entered: an entry block, which loads

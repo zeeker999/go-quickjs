@@ -584,6 +584,11 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 			case OpKeepRef:
 				// The evaluator keeps whole values (OpKeep).
 				vals[v.ID] = val{}
+			case OpCall:
+				// The evaluator calls nothing: Go makes the call.
+				return exit(v.State, ir.ExitKind(v.Aux))
+			case OpCallCell:
+				vals[v.ID] = val{}
 			case OpCheckInit:
 				if a.t.Kind == ir.Uninitialized {
 					return exit(v.State, ir.ExitKind(v.Aux))

@@ -51,9 +51,7 @@ type Feedback interface {
 // the VM keeps alive; the call's argument count and whether it
 // passes a receiver; the callee's parameters, locals and operand slots;
 // its receiver's slot, or -1 if it reads none; and whether a receiver that
-// is not an object needs coercing, which only Go does. The builder sets
-// Result, the caller's slot the result goes to, and Cont, the PC after the
-// call, whose entry the caller goes on at.
+// is not an object needs coercing, which only Go does.
 type CallSite struct {
 	Callee, Closure, Entry, Count uintptr
 	Argc                          int
@@ -61,7 +59,6 @@ type CallSite struct {
 	Params, LocalCount, MaxStack  int
 	ThisSlot                      int
 	Coerce                        bool
-	Result, Cont                  int
 }
 
 // InlineSite is a call the VM has seen call one function, whose program,
@@ -203,7 +200,10 @@ type builder struct {
 	// block's frame, by block ID, nil for the function's own.
 	root, cur *frame
 	inlined   map[int]*frame
-	frameOf   []*frame
+	// calls are the calls made natively (OpCall), by PC: their blocks go
+	// on to the next instruction's.
+	calls   map[int][]*CallSite
+	frameOf []*frame
 
 	entryPCs []int
 	blockAt  []*Block // by the PC a block starts at
@@ -622,6 +622,15 @@ func (b *builder) plan() error {
 				break
 			}
 			if !b.host(end) {
+				blk.Kind = BlockPlain
+				b.edge(blk, b.blockAt[end+1])
+				break
+			}
+			if calls := b.nativeCalls(end); len(calls) != 0 && b.f.Keeps < abi.MaxKeeps {
+				if b.calls == nil {
+					b.calls = map[int][]*CallSite{}
+				}
+				b.calls[end] = calls
 				blk.Kind = BlockPlain
 				b.edge(blk, b.blockAt[end+1])
 				break
@@ -1227,12 +1236,32 @@ func (b *builder) instruction(blk *Block, pc int) {
 			b.inlineCall(blk, pc, fr, guard, state)
 			break
 		}
+		if calls := b.calls[pc]; calls != nil && b.cur == b.root {
+			// The call's operands, from the receiver or the function on; its
+			// result is the slot below them, its pointer word kept.
+			n := calls[0].Argc + 1
+			if calls[0].Method {
+				n++
+			}
+			sp := b.p.Locals + b.p.Maps[pc].Depth
+			args := make([]*Value, n)
+			for i := range args {
+				args[i] = b.read(sp-n+i, blk)
+			}
+			call := guard(OpCall, Tagged, ir.HostExit, args...)
+			if b.f.Keeps < abi.MaxKeeps {
+				call.Calls, call.Index = calls, b.f.Keeps
+				b.f.Keeps++
+			}
+			cell := f.newValue(blk, OpCallCell, Source, call)
+			r := f.newValue(blk, OpKept, Tagged, cell, call)
+			r.Shadow = cell
+			b.write(b.p.Locals+b.p.Maps[pc+1].Depth-1, blk, r)
+			break
+		}
 		blk.ExitKind = ir.HostExit
 		blk.State = state()
 		blk.State.addUse()
-		if b.cur == b.root {
-			blk.Calls = b.nativeCalls(pc)
-		}
 	}
 }
 
@@ -1257,7 +1286,6 @@ func (b *builder) nativeCalls(pc int) []*CallSite {
 			// A receiver it never reads needs no coercing.
 			site.Coerce = false
 		}
-		site.Result, site.Cont = b.p.Locals+after-1, pc+1
 		c := new(CallSite)
 		*c = site
 		calls = append(calls, c)

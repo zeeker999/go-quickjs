@@ -4151,6 +4151,53 @@ run([(-1.5),true,(-1),(-2147483649)],{x:0.5},34);
 log.join('|')`)
 }
 
+// A native call goes on after it (ssa's OpCall): what is live across it in
+// registers is saved and restored -- s, a double, and t, an int32, here --
+// and p, read from o.p, which the callee writes, is kept, so that p.v is
+// the first object's still. Every fiftieth call the callee leaves native
+// code, and Go makes f's frame from the call's records (abi.RecordDirect):
+// its double, its int and its reference. zero takes no arguments. Each
+// answer is the interpreter's.
+func TestJITSSANativeCallsGoOn(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `var A={v:3},B={v:5},o={p:A},c={n:0};
+		function tick(){c.n++;o.p=(c.n&1)?B:A;if(c.n%50===0)return String(c.n).length;return c.n&3}
+		function zero(){return tick()}
+		function f(n){let s=0.5,t=0,p=o.p;for(let i=0;i<n;i++){s=s*1.0001+zero();t=(t+p.v)|0;s+=i*0.5}return [s,t,p.v,c.n].join()}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 4; i++ {
+		src := `o.p=A;f(300)`
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("zero")).value.Object().fn().closure
+	if e := r.jit.hint(cl.hint()); e == nil || e.nativeIn == 0 {
+		t.Fatalf("zero was never called natively: %+v", e)
+	}
+	if r.jit.unwound == 0 {
+		t.Fatal("tick never left native code inside a native call")
+	}
+}
+
 // Native code that calls through Go another function's native code shares
 // the context with it (jitState.ssaCtx): an exit's PC must be read before
 // Go runs anything. Here inner's last exit, a call near its end, is past
