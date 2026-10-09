@@ -326,6 +326,9 @@ type jitState struct {
 	osrs        uint64
 	compiled    uint64
 	reoptimized uint64
+	// seeding marks a compile jitSeedCalls started, which does not start
+	// another.
+	seeding bool
 	// unwound counts the native calls whose callees left native code, which
 	// Go finished (jitUnwindNative).
 	unwound uint64
