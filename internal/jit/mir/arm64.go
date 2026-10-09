@@ -781,7 +781,41 @@ func (c *a64Compiler) eqTagged(v *ssa.Value, guard func(arm64.Cond)) {
 	c.a.Bind(differ)
 	other := no
 	if v.Index != 1 {
+		// Loosely, null and undefined equal each other and an object with
+		// [[IsHTMLDDA]] alone, as amd64's.
 		other = exit
+		numbers, xNullish, yNullish := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+		for _, w := range []uint64{c.enc.Null, c.enc.Undefined} {
+			c.a.MovImm(a64C, w)
+			c.a.Cmp(wx, a64C, true)
+			c.a.BCond(arm64.EQ, xNullish)
+			c.a.Cmp(wy, a64C, true)
+			c.a.BCond(arm64.EQ, yNullish)
+		}
+		c.a.B(numbers)
+		for _, k := range []struct {
+			at    arm64.Label
+			other *ssa.Value
+			w     arm64.Reg
+		}{{xNullish, y, wy}, {yNullish, x, wx}} {
+			c.a.Bind(k.at)
+			for _, w := range []uint64{c.enc.Null, c.enc.Undefined} {
+				c.a.MovImm(a64C, w)
+				c.a.Cmp(k.w, a64C, true)
+				c.a.BCond(arm64.EQ, yes)
+			}
+			c.a.MovImm(a64C, c.enc.Object)
+			c.a.Cmp(k.w, a64C, true)
+			c.a.BCond(arm64.NE, no)
+			if c.reference(v, k.other, c.enc.Object, guard) {
+				c.a.LoadU8(a64C, a64C, c.enc.ObjectFlags)
+				c.a.MovImm(a64A, uint64(c.enc.FlagHTMLDDA))
+				c.a.Tst(a64C, a64A, false)
+				c.a.BCond(arm64.NE, yes)
+			}
+			c.a.B(no)
+		}
+		c.a.Bind(numbers)
 	}
 	c.a.MovImm(a64C, abi.NumberLimit)
 	c.a.Cmp(wx, a64C, true)

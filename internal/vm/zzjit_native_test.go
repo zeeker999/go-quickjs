@@ -5453,6 +5453,65 @@ func TestJITSSASeedsMutualRecursion(t *testing.T) {
 	}
 }
 
+// Two values compared loosely, where one is null or undefined, compare
+// natively: the other must be null, undefined or an object with
+// [[IsHTMLDDA]] (Annex B), with nothing converted -- as DeltaBlue's
+// `next != determining`, determining sometimes null, compares; a number,
+// a string or a boolean is unequal to either. Other loose comparisons of
+// different kinds, which convert, are Go's. Each answer is the
+// interpreter's.
+func TestJITSSALooseNullishOperands(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var o={},p={};
+		function eq(a,b){let n=0;for(let i=0;i<3;i++){if(a==b)n+=1;if(a!=b)n+=10;if(b==a)n+=100;if(a===b)n+=1000}return n}
+		function pairs(xs){let r=[];for(const a of xs)for(const b of xs)r.push(eq(a,b));return r.join()}
+		function prims(xs){let r=[];for(const a of [null,undefined])for(const b of xs)r.push(eq(a,b),eq(b,a));return r.join()}
+		var nullish=[null,undefined,o,p,dda],mixed=[null,undefined,0,'',false,'0',o],others=[0,'',false,'0',1.5,true,'s'];`
+	rounds := []string{`pairs(nullish)`, `pairs(nullish)`, `prims(others)`, `pairs(mixed)`, `pairs(nullish)`}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		dda := rt.NewObject()
+		dda.MarkHTMLDDA()
+		rt.global.setOwnRaw(rt.atoms.intern("dda"), Obj(dda), propDefault)
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eq := r.global.getOwn(r.atoms.intern("eq")).value.Object().fn().closure
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts, entries uint64
+		if e := r.jit.hint(eq.hint()); e != nil {
+			hosts, entries = e.ssaStats.hosts, e.ssaStats.entries
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 1 || i == 2 {
+			// null or undefined against null, undefined, an object or a
+			// primitive: native, never Go's (code that left for each was
+			// demoted, and ran no more).
+			if e := r.jit.hint(eq.hint()); e == nil || e.ssa == nil || e.entrySlow || e.ssaStats.entries == entries || e.ssaStats.hosts != hosts {
+				t.Fatalf("eq left native code to compare null, undefined and objects: %+v", e)
+			}
+		}
+	}
+}
+
 // Native code that calls through Go another function's native code shares
 // the context with it (jitState.ssaCtx): an exit's PC must be read before
 // Go runs anything. Here inner's last exit, a call near its end, is past
