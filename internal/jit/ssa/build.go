@@ -34,6 +34,59 @@ type Feedback interface {
 	// loads are not taken for numbers there.
 	Generic(pc int) bool
 	EntryGeneric(pc int) bool
+	// Inline is the call at pc to inline, if the VM has seen it call one
+	// function it may be: see InlineSite.
+	Inline(pc int) (InlineSite, bool)
+}
+
+// InlineSite is a call the VM has seen call one function, whose program,
+// lowered for inlining, Inlinable accepts: that program and its own
+// feedback; the function object's address, which the VM keeps alive and
+// the call checks it still calls; the call's argument count, and whether
+// it passes a receiver, as a method call does; and the callee's parameter
+// count and its receiver's slot, or -1 if it reads none.
+type InlineSite struct {
+	Program  *ir.Program
+	Feedback Feedback
+	Callee   uintptr
+	Argc     int
+	Method   bool
+	Params   int
+	ThisSlot int
+}
+
+// Inlining's bounds: a callee's instructions, all callees' in a function,
+// and the calls a function inlines.
+const (
+	maxInline      = 48
+	maxInlineTotal = 192
+	maxInlines     = 8
+)
+
+// Inlinable reports whether a callee may be inlined: a small program whose
+// native code has no effect -- it reads properties, elements and globals,
+// computes, branches forward and returns -- so that an exit anywhere in it
+// may go back to the call, which Go, or the interpreter, then makes from
+// the start; and that native code can do all of, with no operation it
+// leaves to Go, which would have Go make the call every time.
+func Inlinable(p *ir.Program) bool {
+	if p == nil || p.Validate() != nil || len(p.Code) > maxInline || len(p.Globals) != 0 {
+		return false
+	}
+	for pc, in := range p.Code {
+		if !reachable(p, pc) {
+			continue
+		}
+		switch in.Op {
+		case ir.PropertyWrite, ir.ArrayWrite, ir.ArrayUpdate, ir.Call, ir.Host:
+			return false
+		case ir.Jump, ir.Branch:
+			if in.Target <= pc {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // GlobalSite is a global read's site: its name, the VM's atom, and the
@@ -83,6 +136,8 @@ func build(w *Workspace, p *ir.Program, fb Feedback) (*Func, error) {
 	f := &Func{Locals: p.Locals, StackSize: p.StackSize, FrameLocals: p.Locals, ThisSlot: -1, ws: w}
 	f.written = f.bools(p.Locals + p.StackSize)
 	b := &builder{p: p, fb: fb, f: f, nslots: p.Locals + p.StackSize}
+	b.root = &frame{p: p, fb: fb}
+	b.cur = b.root
 	if err := b.plan(); err != nil {
 		return nil, err
 	}
@@ -93,10 +148,19 @@ func build(w *Workspace, p *ir.Program, fb Feedback) (*Func, error) {
 }
 
 type builder struct {
+	// p and fb are the program the block being translated is in, and its
+	// feedback: the function's own (root), or an inlined callee's.
 	p      *ir.Program
 	fb     Feedback
 	f      *Func
 	nslots int
+
+	// root is the function's own frame, cur the one translated now;
+	// inlined are the callees, by the PC of their call; frameOf is each
+	// block's frame, by block ID, nil for the function's own.
+	root, cur *frame
+	inlined   map[int]*frame
+	frameOf   []*frame
 
 	entryPCs []int
 	blockAt  []*Block // by the PC a block starts at
@@ -172,6 +236,199 @@ func (b *builder) generic(pc int) bool {
 	return false
 }
 
+// frame is a program the builder translates: the function's own, or a
+// callee inlined at one of its calls.
+type frame struct {
+	p  *ir.Program
+	fb Feedback
+	// base is a callee's first slot among the builder's, past the
+	// function's own and earlier callees'; blockAt its blocks, by its PC.
+	base    int
+	blockAt []*Block
+	site    InlineSite
+	// call is the state at the call, where every exit inside the callee
+	// goes: Go makes the call, or the interpreter does, from the start. The
+	// call's result goes to slot result, and code goes on at cont, the
+	// block after the call. start sets the callee's slots: its arguments,
+	// its receiver and undefined (init, by its slot), when the call has
+	// been checked.
+	call      *FrameState
+	result    int
+	cont      *Block
+	start     *Block
+	init      []*Value
+	callBlock *Block // the function's own block that ends at the call
+}
+
+// enter makes fr the frame being translated.
+func (b *builder) enter(fr *frame) {
+	b.cur, b.p, b.fb = fr, fr.p, fr.fb
+}
+
+// frameAt is the frame blk is in.
+func (b *builder) frameAt(blk *Block) *frame {
+	if blk.ID < len(b.frameOf) && b.frameOf[blk.ID] != nil {
+		return b.frameOf[blk.ID]
+	}
+	return b.root
+}
+
+// inlineAt is the callee to inline at the function's own pc, if any: a call
+// the VM has seen call one function (Feedback's Inline), whose failures
+// have not made it generic, within inlining's bounds.
+func (b *builder) inlineAt(pc int, total *int) (*frame, bool) {
+	if b.fb == nil || b.p.Code[pc].Op != ir.Host || len(b.inlined) >= maxInlines || b.fb.Generic(pc) {
+		return nil, false
+	}
+	site, ok := b.fb.Inline(pc)
+	if !ok || !Inlinable(site.Program) || *total+len(site.Program.Code) > maxInlineTotal ||
+		site.Argc < 0 || site.Params < 0 || pc+1 >= len(b.p.Code) || !reachable(b.p, pc+1) {
+		return nil, false
+	}
+	depth, after := b.p.Maps[pc].Depth, b.p.Maps[pc+1].Depth
+	callee := site.Argc + 1
+	if site.Method {
+		callee++
+	}
+	if depth < callee || after != depth-callee+1 || site.ThisSlot >= 0 && !site.Method {
+		return nil, false
+	}
+	*total += len(site.Program.Code)
+	q := referenceReads(site.Program, site.Feedback)
+	return &frame{p: q, fb: site.Feedback, site: site, result: b.p.Locals + after - 1}, true
+}
+
+// planInline makes an inlined callee's blocks, between the block that ends
+// at its call and cont, the block after the call: the start block, then a
+// block at every target of a branch and after every branch, return and
+// exit. A return goes to cont; an exit, wherever it is, goes to the call's
+// state (frame.call), where Go makes the call and native code goes on
+// after it.
+func (b *builder) planInline(fr *frame, call, cont *Block) {
+	defer b.enter(b.root)
+	b.enter(fr)
+	p := fr.p
+	fr.base, fr.cont = b.nslots, cont
+	b.nslots += p.Locals + p.StackSize
+	leaders := b.f.bools(len(p.Code) + 1)
+	leaders[0] = true
+	for pc, in := range p.Code {
+		if !reachable(p, pc) {
+			continue
+		}
+		switch {
+		case in.Op == ir.Jump || in.Op == ir.Branch:
+			leaders[in.Target], leaders[pc+1] = true, true
+		case in.Op == ir.Return || b.host(pc):
+			leaders[pc+1] = true
+		}
+	}
+	newBlock := func(pc, end int) *Block {
+		blk := b.f.newBlock(pc)
+		for len(b.frameOf) <= blk.ID {
+			b.frameOf = append(b.frameOf, nil)
+			b.endOf = append(b.endOf, 0)
+		}
+		b.frameOf[blk.ID], b.endOf[blk.ID] = fr, end
+		return blk
+	}
+	fr.start = newBlock(0, -1)
+	fr.start.Kind = BlockPlain
+	fr.blockAt = make([]*Block, len(p.Code)+1)
+	var starts []int
+	for pc := range p.Code {
+		if leaders[pc] && reachable(p, pc) {
+			starts = append(starts, pc)
+		}
+	}
+	for i, pc := range starts {
+		end := len(p.Code) - 1
+		if i+1 < len(starts) {
+			end = starts[i+1] - 1
+		}
+		for q := pc; q <= end; q++ {
+			if op := p.Code[q].Op; op == ir.Jump || op == ir.Branch || op == ir.Return || b.host(q) {
+				end = q
+				break
+			}
+		}
+		fr.blockAt[pc] = newBlock(pc, end)
+	}
+	b.edge(call, fr.start)
+	b.edge(fr.start, fr.blockAt[0])
+	for _, pc := range starts {
+		blk := fr.blockAt[pc]
+		end := b.endOf[blk.ID]
+		switch last := p.Code[end]; {
+		case last.Op == ir.Jump:
+			blk.Kind = BlockPlain
+			b.edge(blk, fr.blockAt[last.Target])
+		case last.Op == ir.Branch:
+			blk.Kind = BlockIf
+			taken, fall := fr.blockAt[last.Target], fr.blockAt[end+1]
+			if last.When {
+				b.edge(blk, taken)
+				b.edge(blk, fall)
+			} else {
+				b.edge(blk, fall)
+				b.edge(blk, taken)
+			}
+		case last.Op == ir.Return:
+			blk.Kind = BlockPlain
+			b.edge(blk, cont)
+		case b.host(end):
+			blk.Kind = BlockExit
+		default:
+			blk.Kind = BlockPlain
+			b.edge(blk, fr.blockAt[end+1])
+		}
+	}
+}
+
+// inlineCall checks the call at pc calls the function inlined there, and
+// gives the callee's start its slots: its arguments, past which undefined,
+// its receiver, and undefined in every other.
+func (b *builder) inlineCall(blk *Block, pc int, fr *frame, guard func(Op, Type, ir.ExitKind, ...*Value) *Value, state func() *FrameState) {
+	site := fr.site
+	sp := b.p.Locals + b.p.Maps[pc].Depth
+	// Another callee is called by Go, from the call's state, as a call that
+	// is not inlined is, and native code goes on after it.
+	object := guard(OpObjectOf, Ptr, ir.HostExit, b.read(sp-site.Argc-1, blk))
+	same := guard(OpSameObject, None, ir.HostExit, object)
+	same.Const = ir.Value{Bits: uint64(site.Callee)}
+	fr.call = state()
+	undefined := b.f.newValue(blk, OpConst, Tagged)
+	undefined.Const = ir.Value{Kind: ir.Undefined}
+	fr.init = b.f.refsOf(fr.p.Locals + fr.p.StackSize)
+	for s := range fr.init {
+		fr.init[s] = undefined
+	}
+	for i := 0; i < site.Params && i < site.Argc; i++ {
+		fr.init[i] = b.read(sp-site.Argc+i, blk)
+	}
+	if site.ThisSlot >= 0 {
+		fr.init[site.ThisSlot] = b.read(sp-site.Argc-2, blk)
+	}
+}
+
+// shifted is a callee's instruction with its slots made the builder's,
+// base past its own.
+func shifted(in ir.Instruction, base int) ir.Instruction {
+	for _, o := range []*ir.Operand{&in.Left, &in.Right, &in.Third} {
+		if o.Slot >= 0 {
+			o.Slot += base
+		}
+	}
+	in.Dest += base
+	if in.Extra >= 0 {
+		in.Extra += base
+	}
+	if in.Check {
+		in.CheckSlot += base
+	}
+	return in
+}
+
 // global is the feedback for a global read at pc, if any.
 func (b *builder) global(pc int) (GlobalSite, bool) {
 	if b.fb == nil || b.p.Code[pc].Op != ir.BindingRead {
@@ -190,6 +447,18 @@ func (b *builder) plan() error {
 	// By PC, one past the end included.
 	entries, leaders := b.f.bools(len(p.Code)+2), b.f.bools(len(p.Code)+2)
 	entries[0], leaders[0] = true, true
+	total := 0
+	for pc := range p.Code {
+		if !reachable(p, pc) {
+			continue
+		}
+		if fr, ok := b.inlineAt(pc, &total); ok {
+			if b.inlined == nil {
+				b.inlined = map[int]*frame{}
+			}
+			b.inlined[pc] = fr
+		}
+	}
 	for pc, in := range p.Code {
 		if !reachable(p, pc) {
 			continue
@@ -257,7 +526,7 @@ func (b *builder) plan() error {
 	for _, pc := range starts {
 		b.blockAt[pc] = b.f.newBlock(pc)
 	}
-	b.endOf = b.f.ints(len(b.f.Blocks))
+	b.endOf = make([]int, len(b.f.Blocks))
 	for i, pc := range starts {
 		end := len(p.Code) - 1
 		if i+1 < len(starts) {
@@ -289,6 +558,12 @@ func (b *builder) plan() error {
 		case ir.Return:
 			blk.Kind = BlockReturn
 		case ir.Host, ir.Call, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead:
+			if fr := b.inlined[end]; fr != nil {
+				// Into the callee, whose returns go to the block after it.
+				blk.Kind = BlockPlain
+				fr.callBlock = blk
+				break
+			}
 			if !b.host(end) {
 				blk.Kind = BlockPlain
 				b.edge(blk, b.blockAt[end+1])
@@ -300,6 +575,10 @@ func (b *builder) plan() error {
 			b.edge(blk, b.blockAt[end+1])
 		}
 	}
+	b.frameOf = make([]*frame, len(b.f.Blocks))
+	for _, pc := range sortedKeys(b.inlined) {
+		b.planInline(b.inlined[pc], b.inlined[pc].callBlock, b.blockAt[pc+1])
+	}
 	// Entry blocks load the live slots and go to the block for their PC.
 	for _, pc := range b.entryPCs {
 		e := b.f.newBlock(-1)
@@ -308,11 +587,12 @@ func (b *builder) plan() error {
 		b.edge(e, b.blockAt[pc])
 		b.f.Entries = append(b.f.Entries, Entry{PC: pc, Depth: p.Maps[pc].Depth, Block: e})
 	}
-	// A loop header is reached by an edge from a block at or after it.
+	// A loop header is reached by an edge from a block at or after it, in
+	// one frame: a callee's blocks have their own PCs, and no loops.
 	for _, blk := range b.f.Blocks {
 		blk.Backedge = b.f.bools(len(blk.Preds))
 		for i, pred := range blk.Preds {
-			if pred.PC >= 0 && blk.PC >= 0 && pred.PC >= blk.PC {
+			if pred.PC >= 0 && blk.PC >= 0 && pred.PC >= blk.PC && b.frameAt(pred) == b.root && b.frameAt(blk) == b.root {
 				blk.Backedge[i] = true
 				blk.LoopHeader = true
 			}
@@ -381,7 +661,9 @@ func (b *builder) translate() {
 
 	for _, blk := range order {
 		b.trySeal(blk)
+		b.enter(b.frameAt(blk))
 		b.fill(blk)
+		b.enter(b.root)
 		b.filled[blk.ID] = true
 		for _, s := range blk.Succs {
 			b.trySeal(s)
@@ -430,7 +712,9 @@ func (b *builder) seal(blk *Block) {
 // assign is an instruction's write of a slot, which Func.Written records;
 // write is also how reads record the phis they make.
 func (b *builder) assign(slot int, blk *Block, v *Value) {
-	b.f.written[slot] = true
+	if slot < len(b.f.written) {
+		b.f.written[slot] = true
+	}
 	b.write(slot, blk, v)
 }
 
@@ -554,6 +838,9 @@ func (b *builder) nullish(blk *Block, in ir.Instruction, operand func(ir.Operand
 
 // state captures the frame at a PC: every live slot's current value.
 func (b *builder) state(blk *Block, pc int) *FrameState {
+	if b.cur != b.root {
+		return b.cur.call
+	}
 	depth := b.p.Maps[pc].Depth
 	s := b.f.newState(FrameState{PC: b.p.Maps[pc].PC, Depth: depth, Slots: b.f.refsOf(b.p.Locals + depth), Site: pc})
 	for i := range s.Slots {
@@ -565,6 +852,12 @@ func (b *builder) state(blk *Block, pc int) *FrameState {
 
 func (b *builder) fill(blk *Block) {
 	f := b.f
+	if fr := b.cur; fr != b.root && blk == fr.start {
+		for s, v := range fr.init {
+			b.write(fr.base+s, blk, v)
+		}
+		return
+	}
 	if blk.PC < 0 {
 		e, _ := f.entryForBlock(blk)
 		blk.Header = f.newState(FrameState{PC: b.p.Maps[e.PC].PC, Depth: e.Depth, Slots: f.refsOf(b.p.Locals + e.Depth), Site: -1})
@@ -596,6 +889,9 @@ func (f *Func) entryForBlock(blk *Block) (Entry, bool) {
 
 func (b *builder) instruction(blk *Block, pc int) {
 	f, in := b.f, b.p.Code[pc]
+	if b.cur != b.root {
+		in = shifted(in, b.cur.base)
+	}
 	var st *FrameState
 	state := func() *FrameState {
 		if st == nil {
@@ -612,6 +908,12 @@ func (b *builder) instruction(blk *Block, pc int) {
 		return b.read(o.Slot, blk)
 	}
 	guard := func(op Op, t Type, kind ir.ExitKind, args ...*Value) *Value {
+		if b.cur != b.root {
+			// Inside an inlined callee every exit goes to the call, which
+			// Go makes, native code going on after it, as at a call it does
+			// not inline: never to the interpreter for the rest.
+			kind = ir.HostExit
+		}
 		v := f.newValue(blk, op, t, args...)
 		v.Aux = int(kind)
 		v.State = state()
@@ -730,6 +1032,11 @@ func (b *builder) instruction(blk *Block, pc int) {
 	case ir.Return:
 		v := operand(in.Left)
 		guard(OpCheckInit, None, ir.GuardExit, v)
+		if b.cur != b.root {
+			// The call's result, and on after it.
+			b.assign(b.cur.result, blk, v)
+			break
+		}
 		blk.Control = v
 		v.Uses++
 	case ir.ArrayRead, ir.ArrayUpdate:
@@ -847,6 +1154,10 @@ func (b *builder) instruction(blk *Block, pc int) {
 		v := guard(OpPropWrite, None, ir.HostExit, object, operand(in.Right))
 		v.Const, v.Index, v.Key = ir.Value{Bits: uint64(site.Shape)}, int(site.Index), site.Key
 	case ir.Host, ir.Call:
+		if fr := b.inlined[pc]; fr != nil && b.cur == b.root {
+			b.inlineCall(blk, pc, fr, guard, state)
+			break
+		}
 		blk.ExitKind = ir.HostExit
 		blk.State = state()
 		blk.State.addUse()
@@ -892,4 +1203,15 @@ func (b *builder) binary(blk *Block, op ir.Operator, x, y *Value, boxF, boxB fun
 		panic(fmt.Sprintf("ssa: binary operator %d", op))
 	}
 	return boxF(f.newValue(blk, OpI32ToF64, Float64, v))
+}
+
+// sortedKeys is a map's keys in order, so that blocks are made the same
+// every time.
+func sortedKeys(m map[int]*frame) []int {
+	keys := make([]int, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
 }

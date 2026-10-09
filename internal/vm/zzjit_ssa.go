@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"unsafe"
+	"weak"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit"
@@ -101,18 +102,49 @@ func jitDeoptimized(e *jitEntry, ctx *abi.Context, start int) {
 	}
 }
 
-// jitFed notes an exit to Go at pc. A property site whose cache had met no
-// object when the code was compiled -- code compiled on its first call, or
-// a branch not taken until then -- leaves for Go every time; once its cache
-// has met one the code is compiled again to use it, as V8 deoptimizes for
-// insufficient feedback.
+// jitFedSite is a property site, by PC, and the shape its cache knew when
+// the code was compiled, by address, or 0 for none; and how often it has
+// left native code since its cache learned another.
+type jitFedSite struct {
+	pc     uint32
+	shape  uintptr
+	missed uint32
+	// seen is the shape its cache knew at the last of those exits: they are
+	// counted while it stays the one.
+	seen uintptr
+}
+
+// jitWrongShapeExits is how often a site compiled for one shape leaves
+// native code in a row, its cache knowing one other, before the code is
+// compiled again: compiling is not free, and a site whose objects are of
+// more shapes than one would have it compiled for each in turn.
+const jitWrongShapeExits = 32
+
+// jitFed notes an exit to Go at pc. A property site whose cache has met
+// objects of a shape the code was not compiled for -- none, for code
+// compiled on its first call or a branch not taken until then; another,
+// when its receivers' shape changed after -- leaves for Go every time;
+// once its cache knows a shape, the code is compiled again for it, as V8
+// deoptimizes for insufficient feedback, at once, or for a wrong map, after
+// jitWrongShapeExits in a row with one shape.
 func jitFed(cl *closure, e *jitEntry, pc uint32) {
-	i := slices.Index(e.unfed, pc)
+	i := slices.IndexFunc(e.fed, func(s jitFedSite) bool { return s.pc == pc })
 	if i < 0 || e.reopts >= jitReoptimizations || int(pc) >= len(cl.fn.Code) {
 		return
 	}
-	if in := cl.fn.Code[pc]; int(in.B) < len(cl.ic) && cl.ic[in.B].shape != noShape {
-		e.unfed = slices.Delete(e.unfed, i, i+1)
+	in := cl.fn.Code[pc]
+	if int(in.B) >= len(cl.ic) {
+		return
+	}
+	c, site := &cl.ic[in.B], &e.fed[i]
+	if c.shape == noShape || uintptr(unsafe.Pointer(c.shape)) == site.shape {
+		return
+	}
+	if now := uintptr(unsafe.Pointer(c.shape)); now != site.seen {
+		site.seen, site.missed = now, 0
+	}
+	if site.missed++; site.shape == 0 || site.missed >= jitWrongShapeExits {
+		e.fed = slices.Delete(e.fed, i, i+1)
 		e.reopt = true
 	}
 }
@@ -122,8 +154,12 @@ func jitFed(cl *closure, e *jitEntry, pc uint32) {
 // native code leaves for Go to do anything else. If the function no longer
 // compiles, the code it has is kept.
 func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
-	e.reopt = false
-	e.reopts++
+	if e.reopt {
+		e.reopts++
+	} else {
+		e.inlineReopts++
+	}
+	e.reopt, e.inlineReopt = false, false
 	fn := cl.fn
 	p, err := jitcompile.LowerSSA(fn)
 	if err != nil {
@@ -134,7 +170,8 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 		return
 	}
 	old := e.ssa
-	e.ssa, e.ssaShapes, e.ssaHolders, e.unfed, e.ssaStats = code, fb.shapes, fb.holders, fb.unfed, jitSSAStats{}
+	e.ssa, e.ssaShapes, e.ssaHolders, e.fed, e.ssaStats = code, fb.shapes, fb.holders, fb.fed, jitSSAStats{}
+	e.ssaStrings = e.ssaStrings || fb.strings
 	old.Close()
 	r.jit.reoptimized++
 }
@@ -199,12 +236,168 @@ type jitFeedback struct {
 	// holders are the prototypes the code compares receivers' with
 	// (ssa.Holder), held by address, which the entry keeps alive.
 	holders []*Object
-	// unfed are the property sites, by PC, whose caches had met no object
-	// (jitFed).
-	unfed []uint32
+	// fed are the property sites, each with the shape its cache knew, or
+	// none (jitFed).
+	fed []jitFedSite
+	// root is the function's feedback for an inlined callee's, which keeps
+	// what the callee's sites hold for the code; nil for the function's
+	// own. strings marks an inlined callee that calls charCodeAt.
+	root    *jitFeedback
+	strings bool
 	// e is the entry being compiled again, whose failed speculations
 	// (jitEntry.failed) are built generic; nil for a first compile.
 	e *jitEntry
+}
+
+// keep is the feedback that keeps what the code holds by address: the
+// function's own, for an inlined callee's too.
+func (fb *jitFeedback) keep() *jitFeedback {
+	if fb.root != nil {
+		return fb.root
+	}
+	return fb
+}
+
+// Inline is ssa.Feedback's: a call jitCallSeen has seen call one function
+// it may inline, unless that stopped. A callee inlines nothing itself.
+func (fb *jitFeedback) Inline(pc int) (ssa.InlineSite, bool) {
+	if fb.e == nil || fb.root != nil || pc >= len(fb.fn.Code) || slices.Contains(fb.e.notInline, int32(pc)) {
+		return ssa.InlineSite{}, false
+	}
+	for _, in := range fb.e.inlines {
+		if int(in.pc) != pc {
+			continue
+		}
+		p, err := jitcompile.LowerSSAInline(in.cl.fn)
+		if err != nil {
+			return ssa.InlineSite{}, false
+		}
+		call := fb.fn.Code[pc]
+		this := -1
+		if p.This {
+			this = in.cl.fn.LocalCount + len(in.cl.fn.Upvalues)
+		}
+		for _, x := range p.Code {
+			fb.strings = fb.strings || x.Op == ir.StringMethod || x.Op == ir.StringCode
+		}
+		fb.holders = append(fb.holders, in.obj)
+		return ssa.InlineSite{
+			Program: p, Feedback: &jitFeedback{r: fb.r, fn: in.cl.fn, cl: in.cl, root: fb},
+			Callee: uintptr(unsafe.Pointer(in.obj)), Argc: int(call.A), Method: call.Op == bytecode.OpCallMethod,
+			Params: in.cl.fn.ParamCount, ThisSlot: this,
+		}, true
+	}
+	return ssa.InlineSite{}, false
+}
+
+// jitInline is a call jitCallSeen has seen call a function it may inline:
+// the call's PC, the function, and how often native code has left the
+// inlined callee for Go there.
+type jitInline struct {
+	pc    int32
+	cl    *closure
+	obj   *Object
+	exits uint32
+}
+
+// jitCallsToInline is how often a call leaves native code before it is
+// looked at for inlining: a call seldom made is not worth compiling for.
+// jitInlineReoptimizations is how many times a function's code is
+// compiled again for its calls, apart from jitReoptimizations.
+const (
+	jitCallsToInline         = 4
+	jitInlineReoptimizations = 2
+)
+
+// What jitCallSeen knows of a call (jitEntry.callSites), past its count: that
+// it is not inlined, or that it is.
+const (
+	jitCallDone    = 254
+	jitCallInlined = 255
+)
+
+// jitInlineExits is how often native code may leave an inlined callee for
+// Go before the call stops being inlined: each such exit has Go make the
+// call over again.
+const jitInlineExits = 16
+
+// jitCallSeen notes a call native code left to Go at pc, with the frame's
+// operands up to sp: from inside the callee, where it is inlined, which
+// after jitInlineExits stops it being inlined; otherwise, the first time,
+// whether it calls a function that may be inlined (jitInlinable). The code
+// is compiled again for the calls found to inline when a call seen before
+// leaves native code again -- once the calls around them, a loop's, have
+// been seen too -- or at its next entry. A call seen before costs a look
+// at the lists.
+func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) {
+	if e.inlineReopts >= jitInlineReoptimizations {
+		return
+	}
+	if e.callSites == nil {
+		e.callSites = make([]uint8, len(f.cl.fn.Code))
+	}
+	switch n := e.callSites[pc]; {
+	case n == jitCallInlined:
+		for i := range e.inlines {
+			if x := &e.inlines[i]; int(x.pc) == pc {
+				if x.exits++; x.exits >= jitInlineExits {
+					e.notInline = append(e.notInline, x.pc)
+					e.callSites[pc] = jitCallDone
+					e.inlineReopt = true
+				}
+			}
+		}
+		fallthrough
+	case n == jitCallDone:
+		if e.inlinePending {
+			e.inlinePending, e.inlineReopt = false, true
+		}
+		return
+	case n+1 < jitCallsToInline:
+		e.callSites[pc]++
+		if e.inlinePending && n > 0 {
+			e.inlinePending, e.inlineReopt = false, true
+		}
+		return
+	}
+	e.callSites[pc] = jitCallDone
+	callee := r.stack[sp-int(in.A)-1]
+	if !callee.IsObject() {
+		return
+	}
+	o := callee.Object()
+	fd := o.fn()
+	if fd == nil || fd.native != nil || fd.bound || fd.closure == nil || fd.closure.realm != r.Realm ||
+		fd.closure.fn == f.cl.fn || fd.closure.scope() != f.cl.scope() || !r.jitInlinable(fd.closure.fn) {
+		return
+	}
+	e.inlines = append(e.inlines, jitInline{pc: int32(pc), cl: fd.closure, obj: o})
+	e.callSites[pc] = jitCallInlined
+	e.inlinePending = true
+}
+
+// jitInlinable reports whether fn may be inlined into a caller: it
+// captures nothing, and ssa.Inlinable takes its program. Each function is
+// asked once.
+func (r *Runtime) jitInlinable(fn *bytecode.Function) bool {
+	s := r.jit
+	key := weak.Make(fn)
+	if ok, seen := s.inlinable[key]; seen {
+		return ok
+	}
+	ok := false
+	if len(fn.Upvalues) == 0 && !fn.TopLevel && !fn.IsModule {
+		p, err := jitcompile.LowerSSAInline(fn)
+		ok = err == nil && ssa.Inlinable(p)
+	}
+	if s.inlinable == nil {
+		s.inlinable = map[weak.Pointer[bytecode.Function]]bool{}
+	}
+	if len(s.inlinable) >= jitCacheEntries*4 {
+		clear(s.inlinable)
+	}
+	s.inlinable[key] = ok
+	return ok
 }
 
 // Generic and EntryGeneric are ssa.Feedback's: the sites and entries whose
@@ -257,6 +450,22 @@ func (fb *jitFeedback) Global(pc int) (ssa.GlobalSite, bool) {
 }
 
 func (fb *jitFeedback) Property(pc int) (ssa.PropertySite, bool) {
+	site, ok := fb.property(pc)
+	if ok && fb.root == nil && int(fb.fn.Code[pc].B) < len(fb.cl.ic) && fb.cl.ic[fb.fn.Code[pc].B].fills < maxCacheFills &&
+		!slices.ContainsFunc(fb.fed, func(s jitFedSite) bool { return s.pc == uint32(pc) }) {
+		// A site whose cache may yet learn a shape (jitFed).
+		// The cache's shape, though the code may not use it (a getter's,
+		// a write that adds the property): what changing it says.
+		known := uintptr(0)
+		if c := fb.cl.ic[fb.fn.Code[pc].B].shape; c != noShape {
+			known = uintptr(unsafe.Pointer(c))
+		}
+		fb.fed = append(fb.fed, jitFedSite{pc: uint32(pc), shape: known})
+	}
+	return site, ok
+}
+
+func (fb *jitFeedback) property(pc int) (ssa.PropertySite, bool) {
 	if fb.cl == nil || pc >= len(fb.fn.Code) {
 		return ssa.PropertySite{}, false
 	}
@@ -269,16 +478,13 @@ func (fb *jitFeedback) Property(pc int) (ssa.PropertySite, bool) {
 		return site, true
 	}
 	c := &fb.cl.ic[in.B]
-	if c.shape == noShape && c.fills < maxCacheFills && !slices.Contains(fb.unfed, uint32(pc)) {
-		// An empty cache, which may yet meet an object (jitFed).
-		fb.unfed = append(fb.unfed, uint32(pc))
-	}
+	k := fb.keep()
 	if c.shape == nil || c.shape == noShape || c.getter || c.next != nil || c.idx < 0 {
 		return site, true
 	}
 	if c.p1 == nil {
 		if c.idx < c.shape.n {
-			fb.shapes = append(fb.shapes, remember(c.shape))
+			k.shapes = append(k.shapes, remember(c.shape))
 			site.Shape, site.Index = uintptr(unsafe.Pointer(c.shape)), c.idx
 		}
 		return site, true
@@ -294,12 +500,12 @@ func (fb *jitFeedback) Property(pc int) (ssa.PropertySite, bool) {
 	if in.Op == bytecode.OpSetProp || c.s1 == nil || c.s1 == noShape || c.p2 != nil && (c.s2 == nil || c.s2 == noShape) || c.idx >= last.n {
 		return site, true
 	}
-	fb.shapes = append(fb.shapes, remember(c.shape), remember(c.s1))
-	fb.holders = append(fb.holders, c.p1)
+	k.shapes = append(k.shapes, remember(c.shape), remember(c.s1))
+	k.holders = append(k.holders, c.p1)
 	site.Holders[0] = ssa.Holder{Object: uintptr(unsafe.Pointer(c.p1)), Shape: uintptr(unsafe.Pointer(c.s1))}
 	if c.p2 != nil {
-		fb.shapes = append(fb.shapes, remember(c.s2))
-		fb.holders = append(fb.holders, c.p2)
+		k.shapes = append(k.shapes, remember(c.s2))
+		k.holders = append(k.holders, c.p2)
 		site.Holders[1] = ssa.Holder{Object: uintptr(unsafe.Pointer(c.p2)), Shape: uintptr(unsafe.Pointer(c.s2))}
 	}
 	site.Shape, site.Index = uintptr(unsafe.Pointer(c.shape)), c.idx
@@ -531,16 +737,24 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 			// next entry, if there is one.
 			s.hosts++
 			e.ssaStats.hosts++
-			f.pc = uint32(ctx.ExitPC)
+			// The context is every invocation's: Go may run native code of
+			// its own, a call's, which overwrites it.
+			exitPC := int(ctx.ExitPC)
+			in := f.cl.fn.Code[exitPC]
+			f.pc = uint32(exitPC)
+			if in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod {
+				r.jitCallSeen(f, e, exitPC, f.base+int(ctx.ExitDepth), in)
+			}
 			sp, steps, err := r.jitHost(f, f.base+int(ctx.ExitDepth), 1)
 			if err != nil || r.stopped != nil || steps == 0 {
 				return r.jitInterpret(f, sp, err)
 			}
 			pc, depth = int(f.pc), sp-f.base
-			if len(e.unfed) != 0 {
-				jitFed(f.cl, e, uint32(ctx.ExitPC))
+			switch in.Op {
+			case bytecode.OpGetProp, bytecode.OpGetPropThis, bytecode.OpSetProp:
+				jitFed(f.cl, e, uint32(exitPC))
 			}
-			if e.reopt {
+			if e.reopt || e.inlineReopt {
 				// The code is compiled again now, not at the next call: a
 				// loop in this one may run long.
 				r.jitReoptimize(f.cl, e)

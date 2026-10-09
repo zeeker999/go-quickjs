@@ -1108,6 +1108,10 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		if c.objectOf(v, guard) {
 			c.setG(v, scratchC)
 		}
+	case ssa.OpSameObject:
+		c.a.MovImm(scratchB, v.Const.Bits)
+		c.a.Op(amd64.Cmp, c.gpr(arg(0), scratchA), scratchB, true)
+		guard(amd64.CondNE)
 	case ssa.OpPropRead:
 		c.property(v, guard)
 		c.a.Load(scratchB, scratchA, c.enc.NumOffset)

@@ -217,6 +217,9 @@ type Heap struct {
 	// WriteBarrier is the collector's write-barrier flag, which leaves a
 	// store that changes a reference to Go while it is set.
 	WriteBarrier bool
+	// Address is an object's address, which OpSameObject compares; nil if
+	// no object is any particular one.
+	Address func(object int) uintptr
 }
 
 // String is a string as charCodeAt sees it.
@@ -514,6 +517,10 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 					x.Bits = canonicalNaN
 				}
 				o.Props[i] = x
+			case OpSameObject:
+				if heap.Address == nil || heap.Address(a.p) != uintptr(v.Const.Bits) {
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
 			case OpPropCell:
 				o, i := heap.holder(&heap.Objects[a.p], v)
 				if i < 0 || i >= len(o.Props) {

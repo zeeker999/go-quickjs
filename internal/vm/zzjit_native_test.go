@@ -722,7 +722,8 @@ func TestJITSSAGlobals(t *testing.T) {
 
 // A call leaves the new pipeline's code once: the callee, a global, and an
 // argument read from an object stay native, carried by their cells, though
-// only Go uses them. A function compiled at its first call, before the
+// only Go uses them. (h stores, so it is not inlined; TestJITSSAInline
+// inlines.) A function compiled at its first call, before the
 // interpreter has run its global reads, finds the global where the global
 // object has it; deleting and defining it again moves it, which the cell's
 // key check sees.
@@ -730,7 +731,7 @@ func TestJITSSACallExits(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
-	setup := `var O={p:[1,2,3]};function h(a){return a.length}
+	setup := `var O={p:[1,2,3]};function h(a){a.n=1;return a.length}
 		function f(n){let s=0;for(let i=0;i<n;i++)s=(s+g(i))|0;return s}
 		function k(n){let s=0;for(let i=0;i<n;i++)s=(s+h(O.p))|0;return s}`
 	rounds := []struct {
@@ -3590,12 +3591,15 @@ func TestJITSSAReoptimize(t *testing.T) {
 // read from its cell, so a method reassigned in place, even mid-loop, is
 // the new one, and one shadowed, a prototype replaced or a method added
 // between them fails a check and is read by Go. Each answer is the
-// interpreter's, and only the calls leave native code.
+// interpreter's, and only the calls leave native code: m stores, so it is
+// not inlined (TestJITSSAInline inlines). Its store gives the receiver a
+// shape after run was compiled for the one it had, so run is compiled
+// again for the new one (jitFed).
 func TestJITSSAPrototypeMethods(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
-	setup := `function A(){this.v=1}A.prototype.m=function(){return this.v+1};
+	setup := `function A(){this.v=1}A.prototype.m=function(){this.n=1;return this.v+1};
 		function B(){this.v=2}B.prototype=Object.create(A.prototype);
 		function run(o,n){let s=0;for(let i=0;i<n;i++){s+=o.m();for(let j=0;j<12;j++)s=(s*3+j)%1000003}return s}
 		function swap(o,n){let s=0;for(let i=0;i<n;i++){s+=o.m();for(let j=0;j<12;j++)s=(s*3+j)%1000003;if(i==20)change()}return s}
@@ -3852,4 +3856,117 @@ func jitMarkingForTest(t *testing.T) {
 		jitEncoding.WriteBarrier = old
 		runtime.KeepAlive(marking)
 	})
+}
+
+// A small method whose native code has no effect is inlined at a call the
+// new pipeline has seen call it (jitCallSeen, ssa.InlineSite): the loop
+// then never leaves native code, a missing argument is undefined, and the
+// receiver is the call's. A method replaced fails the call's check, and Go
+// makes the call, native code going on after it; after jitInlineExits the
+// code is compiled again without inlining it. Each answer is the
+// interpreter's.
+func TestJITSSAInline(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function T(s){this.state=s;this.link=null}
+		T.prototype.isHeld=function(){return (this.state&4)!=0||this.state==2};
+		T.prototype.plus=function(a,b){return this.state+a+(b===undefined?100:b)};
+		function count(ts,n){let c=0;for(let i=0;i<n;i++){const t=ts[i%ts.length];if(t.isHeld())c+=1;c+=t.plus(i,2)}return c}
+		function missing(t,n){let c=0;for(let i=0;i<n;i++)c+=t.plus(i);return c}
+		var ts=[new T(0),new T(4),new T(2),new T(5)],one=new T(7);`
+	rounds := []string{
+		`[count(ts,300),missing(one,50)].join()`,
+		`[count(ts,300),missing(one,50)].join()`,
+		`[count(ts,300),missing(one,50)].join()`,
+		`T.prototype.isHeld=function(){return this.state>3};[count(ts,300),missing(one,50)].join()`,
+		`[count(ts,300),missing(one,50)].join()`,
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry := func(name string) *jitEntry {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		return r.jit.hint(cl.hint())
+	}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		hosts := r.jit.hosts
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 2 {
+			// Both calls inlined: nothing leaves native code.
+			if n := r.jit.hosts - hosts; n != 0 {
+				t.Fatalf("round %d: %d exits to Go; count %+v", i, n, entry("count"))
+			}
+		}
+	}
+	// isHeld, replaced, failed the check jitInlineExits times, through Go,
+	// and stopped being inlined; plus stays.
+	e := entry("count")
+	if e == nil || e.ssa == nil || len(e.inlines) != 2 || len(e.notInline) != 1 || e.notInline[0] != e.inlines[0].pc ||
+		e.inlines[0].exits < jitInlineExits || e.inlineReopts != 2 || len(e.failed) != 0 {
+		t.Fatalf("count was not inlined, then compiled again without isHeld: %+v", e)
+	}
+}
+
+// Native code that calls through Go another function's native code shares
+// the context with it (jitState.ssaCtx): an exit's PC must be read before
+// Go runs anything. Here inner's last exit, a call near its end, is past
+// the end of outer's code, which reading the context after the call took
+// for outer's PC.
+func TestJITSSANestedExits(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function h(o){o.n=1;return o.v}
+		function inner(o,n){let s=0;for(let i=0;i<n;i++){s=(s+i*3)|0;s^=i;s=(s*7)|0;s=(s+o.v)|0;s=(s-i)|0}s=(s+1)|0;s=(s*3)|0;return s+h(o)}
+		function outer(o,n){let t=0;for(let i=0;i<n;i++)t=(t+inner(o,4))|0;return t}
+		var o={v:5,n:0};`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		wv, err := want.Run(compileForTest(t, `outer(o,50)`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, `outer(o,50)`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !jitSameValueForTest(gv, wv) {
+			t.Fatalf("round %d: got %v, interpreter %v", i, gv, wv)
+		}
+	}
+	for _, name := range []string{"inner", "outer"} {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		e := r.jit.hint(cl.hint())
+		if e == nil || e.ssa == nil || e.ssaStats.entries == 0 {
+			t.Fatalf("%s did not run natively: %+v", name, e)
+		}
+		if name == "outer" && len(cl.fn.Code) > 30 {
+			t.Fatalf("outer has %d instructions: inner's last exit must be past its end", len(cl.fn.Code))
+		}
+	}
 }
