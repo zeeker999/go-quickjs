@@ -225,7 +225,7 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 		r.jitCallersReopt(e, jitInlineDepth)
 	}
 	e.ssa, e.ssaShapes, e.ssaHolders, e.fed, e.ssaStats = code, fb.shapes, fb.holders, fb.fed, jitSSAStats{}
-	e.ssaStrings, e.ssaCallees, e.ssaInlined = e.ssaStrings || fb.strings, fb.callees, fb.inlined
+	e.ssaStrings, e.ssaCallees, e.ssaInlined, e.ssaPools = e.ssaStrings || fb.strings, fb.callees, fb.inlined, fb.pools
 	if !e.notNative {
 		e.nativeEntry = code.EntryAddress(0)
 	}
@@ -306,8 +306,10 @@ type jitFeedback struct {
 	root    *jitFeedback
 	strings bool
 	callees []*jitEntry
-	// inlined are the closures of the callees the code inlines.
+	// inlined are the closures of the callees the code inlines; pools the
+	// object pools its constructions take from.
 	inlined []*closure
+	pools   []*abi.ObjectPool
 	// e is the entry being compiled again, whose failed speculations
 	// (jitEntry.failed) are built generic; nil for a first compile.
 	e *jitEntry
@@ -393,12 +395,22 @@ func (fb *jitFeedback) NativeCalls(pc int) []ssa.CallSite {
 		}
 		fb.callees = append(fb.callees, ce)
 		fb.holders = append(fb.holders, in.obj)
-		sites = append(sites, ssa.CallSite{
+		site := ssa.CallSite{
 			Callee: uintptr(unsafe.Pointer(in.obj)), Closure: uintptr(unsafe.Pointer(in.cl)),
 			Entry: uintptr(unsafe.Pointer(&ce.nativeEntry)), Count: uintptr(unsafe.Pointer(&ce.nativeIn)),
 			Argc: int(call.A), Method: call.Op == bytecode.OpCallMethod,
 			Params: fn.ParamCount, LocalCount: fn.LocalCount, MaxStack: fn.MaxStack, ThisSlot: this, Coerce: fn.CoerceThis,
-		})
+		}
+		if call.Op == bytecode.OpNew {
+			i := in.obj.findOwn(atomPrototype)
+			if in.pool == nil || i < 0 {
+				continue
+			}
+			site.Pool, site.ProtoIndex, site.ProtoKey = uintptr(unsafe.Pointer(in.pool)), int(i), uint32(atomPrototype)
+			site.Coerce = false
+			fb.pools = append(fb.pools, in.pool)
+		}
+		sites = append(sites, site)
 	}
 	return sites
 }
@@ -411,6 +423,9 @@ type jitInline struct {
 	cl    *closure
 	obj   *Object
 	exits uint32
+	// pool, for a construction made natively, is where its objects come
+	// from (abi.ObjectPool).
+	pool *abi.ObjectPool
 }
 
 // jitCallsToInline is how often a call leaves native code before it is
@@ -454,6 +469,9 @@ const jitInlineExits = 16
 // been seen too -- or at its next entry. A call seen before costs a look
 // at the lists.
 func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) {
+	if in.Op == bytecode.OpNew {
+		r.jitRefillPools(f, e, pc, sp, in)
+	}
 	if e.callSites != nil && e.callSites[pc] == jitCallInlined {
 		if o, cl := r.jitCalled(f, sp, in); cl != nil && !slices.ContainsFunc(e.inlines, func(x jitInline) bool { return int(x.pc) == pc && x.obj == o }) {
 			r.jitInlinedCalls(e, pc, o, cl)
@@ -500,7 +518,7 @@ func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 	if cl == nil {
 		return
 	}
-	if cl.fn != f.cl.fn && (r.jitInlinable(cl.fn) || r.jitInlinesCalls(cl.fn, jitInlineDepth-1)) {
+	if in.Op != bytecode.OpNew && cl.fn != f.cl.fn && (r.jitInlinable(cl.fn) || r.jitInlinesCalls(cl.fn, jitInlineDepth-1)) {
 		e.inlines = append(e.inlines, jitInline{pc: int32(pc), cl: cl, obj: o})
 		e.callSites[pc] = jitCallInlined
 		e.inlinePending = true
@@ -508,8 +526,11 @@ func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 	}
 	// One that is not inlined is called natively, if its code allows it
 	// (NativeCalls), the call itself for a recursive one.
+	if in.Op == bytecode.OpNew && !r.jitConstructs(o) {
+		return
+	}
 	if ce := r.jitNativeCallee(cl); ce != nil {
-		e.nativeCalls = append(e.nativeCalls, jitInline{pc: int32(pc), cl: cl, obj: o})
+		e.nativeCalls = append(e.nativeCalls, r.jitNativeTarget(int32(pc), cl, o, in))
 		e.callSites[pc] = jitCallNative
 		e.inlinePending = true
 		if ce != e && len(ce.nativeCallers) < jitNativeCallers && !slices.Contains(ce.nativeCallers, e) {
@@ -711,12 +732,80 @@ func (r *Runtime) jitCallTarget(f *frame, e *jitEntry, pc, sp int, in bytecode.I
 			n++
 		}
 	}
-	if n >= jitCallTargets {
+	if n >= jitCallTargets || in.Op == bytecode.OpNew && !r.jitConstructs(o) {
 		return
 	}
 	if ce := r.jitNativeCallee(cl); ce != nil {
-		e.nativeCalls = append(e.nativeCalls, jitInline{pc: int32(pc), cl: cl, obj: o})
+		e.nativeCalls = append(e.nativeCalls, r.jitNativeTarget(int32(pc), cl, o, in))
 		e.inlineReopt = true
+	}
+}
+
+// jitNativeTarget is a function a call at pc calls natively: for a
+// construction, with the pool its objects come from, filled.
+func (r *Runtime) jitNativeTarget(pc int32, cl *closure, o *Object, in bytecode.Instr) jitInline {
+	x := jitInline{pc: pc, cl: cl, obj: o}
+	if in.Op == bytecode.OpNew {
+		x.pool = new(abi.ObjectPool)
+		r.jitFillPool(x.pool, o)
+	}
+	return x
+}
+
+// jitConstructs reports whether native code may construct with o, `new
+// o(...)`, as constructWithTarget would: a plain function of this realm,
+// compiled, a base constructor with no fields to give its instances, its
+// prototype its own data property.
+func (r *Runtime) jitConstructs(o *Object) bool {
+	fd := o.fn()
+	return fd != nil && fd.closure != nil && fd.native == nil && !fd.bound && fd.ctorKind == ctorBase && fd.fieldInit == nil &&
+		fd.closure.realm == r.Realm && o.class == ClassFunction && o.findOwn(atomPrototype) >= 0
+}
+
+// jitFillPool makes pool's objects for constructions with o, as
+// constructWithTarget makes one -- o's prototype, its constructor's root
+// shape, room for what its body adds -- while o's prototype is its own
+// data property holding an object; the pool is left empty otherwise, and
+// native code leaves every construction to Go.
+func (r *Runtime) jitFillPool(pool *abi.ObjectPool, o *Object) {
+	clear(pool.Objects[:])
+	pool.Count, pool.Proto = 0, nil
+	p := o.getOwnVisible(atomPrototype)
+	fd := o.fn()
+	if p == nil || p.flags&propAccessor != 0 || !p.value.IsObject() || fd == nil || fd.closure == nil {
+		return
+	}
+	proto := p.value.Object()
+	props := int(fd.closure.fn.ThisProps)
+	root := r.shapes.ctorRoot(fd)
+	if root != nil {
+		props = max(props, int(root.slack))
+	}
+	for i := range pool.Objects {
+		obj := newLiteralObject(proto, ClassObject, props)
+		obj.shape = root
+		pool.Objects[i] = unsafe.Pointer(obj)
+	}
+	pool.Count, pool.Proto = abi.PoolSize, unsafe.Pointer(proto)
+}
+
+// jitRefillPools fills, at a construction that left native code at pc,
+// the pool of the function it constructs with, if native code constructs
+// with it there and the pool is empty, or was made for another prototype.
+func (r *Runtime) jitRefillPools(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) {
+	o, _ := r.jitCalled(f, sp, in)
+	if o == nil {
+		return
+	}
+	for _, x := range e.nativeCalls {
+		if int(x.pc) != pc || x.obj != o || x.pool == nil {
+			continue
+		}
+		if x.pool.Count == 0 {
+			r.jitFillPool(x.pool, o)
+		} else if p := o.getOwnVisible(atomPrototype); p == nil || !p.value.IsObject() || unsafe.Pointer(p.value.Object()) != x.pool.Proto {
+			r.jitFillPool(x.pool, o)
+		}
 	}
 }
 
@@ -757,7 +846,7 @@ func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
 // setSSA gives e the code the new pipeline compiled for fn from p.
 func (e *jitEntry) setSSA(fn *bytecode.Function, p *ir.Program, code *jit.SSACode, fb *jitFeedback) {
 	e.ssa, e.this, e.ssaShapes, e.ssaHolders, e.fed = code, p.This, fb.shapes, fb.holders, fb.fed
-	e.ssaStrings, e.ssaCallees, e.ssaInlined = fb.strings, fb.callees, fb.inlined
+	e.ssaStrings, e.ssaCallees, e.ssaInlined, e.ssaPools = fb.strings, fb.callees, fb.inlined, fb.pools
 	e.nativeEntry = code.EntryAddress(0)
 	e.ssaLoop = jitLoopLength(fn)
 	for _, in := range p.Code {
@@ -1212,7 +1301,7 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 			e.ssaStats.records += ctx.Records
 			r.jitApplyRecords(f, e, ctx)
 			exitPC, depth := int(ctx.ExitPC), int(ctx.ExitDepth)
-			v, err := r.jitUnwindNative(idx, e)
+			v, err := r.jitUnwindNative(idx, e, f.cl.fn)
 			sp, ok := r.jitCallResult(f, exitPC, depth, v, err)
 			if !ok || r.stopped != nil {
 				return r.jitInterpret(f, sp, err)
@@ -1258,7 +1347,7 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 			in := f.cl.fn.Code[exitPC]
 			f.pc = uint32(exitPC)
 			switch in.Op {
-			case bytecode.OpCall, bytecode.OpCallMethod:
+			case bytecode.OpCall, bytecode.OpCallMethod, bytecode.OpNew:
 				r.jitCallSeen(f, e, exitPC, f.base+int(ctx.ExitDepth), in)
 			case bytecode.OpGetProp, bytecode.OpGetPropThis:
 				r.jitPolySeen(f, e, exitPC, f.base+int(ctx.ExitDepth), in)
@@ -1348,6 +1437,9 @@ type jitNativeLevel struct {
 	kind, pc, depth, site uint64
 	inline                bool
 	locals, thisSlot, top int
+	// construct marks a callee a construction called, whose result, if not
+	// an object, is its receiver.
+	construct bool
 	// ctx is the level's context's index.
 	ctx int
 }
@@ -1359,8 +1451,11 @@ type jitNativeLevel struct {
 // the innermost -- that one from its exit, as runSSA does, the others from
 // after their call, with what the one they called returned or threw -- and
 // returns what the outermost returned or threw.
-func (r *Runtime) jitUnwindNative(idx int, e *jitEntry) (Value, error) {
+func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function) (Value, error) {
 	s := r.jit
+	// Where the call each level runs for is: e's code's at first, then
+	// that of the level before.
+	caller, callerPC := code, int(s.ssaCtxs[idx].ExitPC)
 	// Its levels go past those of the unwinds it runs inside, which hold
 	// theirs until they finish: they are reached by index, the slices
 	// growing as the unwinds it runs need.
@@ -1397,7 +1492,9 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry) (Value, error) {
 			}
 		} else {
 			l.cl, l.this = (*closure)(c.Closure), *(*Value)(unsafe.Pointer(&c.This))
+			l.construct = callerPC < len(caller.Code) && caller.Code[callerPC].Op == bytecode.OpNew
 		}
+		caller, callerPC = l.cl.fn, int(l.pc)
 		s.unwinding = append(s.unwinding, l)
 		c.Live, c.ReturnTo = 0, 0
 	}
@@ -1483,6 +1580,9 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry) (Value, error) {
 				}
 			}
 		}
+		if l.construct && err == nil && !v.IsObject() {
+			v = l.this
+		}
 		r.popFrameOf(f, l.top)
 	}
 	return v, err
@@ -1543,7 +1643,7 @@ func (r *Runtime) jitFinishExit(f *frame, e *jitEntry, l *jitNativeLevel) (Value
 		if e != nil && e.ssa != nil {
 			e.ssaStats.hosts++
 			switch in.Op {
-			case bytecode.OpCall, bytecode.OpCallMethod:
+			case bytecode.OpCall, bytecode.OpCallMethod, bytecode.OpNew:
 				r.jitCallSeen(f, e, pc, f.base+depth, in)
 			case bytecode.OpGetProp, bytecode.OpGetPropThis:
 				r.jitPolySeen(f, e, pc, f.base+depth, in)

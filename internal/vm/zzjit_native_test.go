@@ -22,6 +22,8 @@ import (
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/compiler"
+	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
+	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/parser"
 )
@@ -4094,6 +4096,98 @@ func TestJITSSANestedInline(t *testing.T) {
 				t.Fatalf("run's call to outer: %v", e.callSites)
 			}
 		}
+	}
+}
+
+// A construction of a plain function, `new V(...)`, is made natively: its
+// receiver comes from the site's pool (abi.ObjectPool), made as the VM
+// makes one, and the constructor is called natively with it; native code
+// leaves only for the pool to be filled again, once in abi.PoolSize. A
+// result that is an object is the construction's, any other its receiver,
+// natively and when the constructor leaves native code (L's String every
+// fiftieth); a construction after the function's prototype changed takes
+// the new one, the pool made again for it.
+func TestJITSSANativeConstruct(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	defer func(was bool) { jitcompile.SSAConstruct = was }(jitcompile.SSAConstruct)
+	jitcompile.SSAConstruct = true
+	setup := `function V(x,y){this.x=x;this.y=y}
+		V.prototype.len=function(){return this.x+this.y};
+		function R(x){this.x=x;return {boxed:x}}
+		function P(x){this.x=x;return 5}
+		function L(x){this.x=x;if(x%50===0)this.s=String(x)}
+		function run(n){let s=0,v;for(let i=0;i<n;i++){v=new V(i,1);s=(s+v.x+v.y)|0}return [s,v.len()].join()}
+		function runR(n){let s=0;for(let i=0;i<n;i++)s=(s+new R(i).boxed)|0;return s}
+		function runP(n){let s=0;for(let i=0;i<n;i++)s=(s+new P(i).x)|0;return s}
+		function runL(n){let s=0;for(let i=0;i<n;i++){const l=new L(i);s=(s+l.x+(l.s===undefined?0:1))|0}return s}
+		function last(n){let v;for(let i=0;i<n;i++)v=new V(i,2);return v}
+		function first(n){let f;for(let i=0;i<n;i++){const v=new V(i,3);if(i===0)f=v}return f}`
+	src := `[run(400),runR(300),runP(300),runL(300),Object.getPrototypeOf(last(100))===V.prototype,
+		Object.getPrototypeOf(first(100))===V.prototype].join()`
+	rounds := []string{src, src, src, src, src,
+		`V.prototype={len(){return 7}};` + src,
+		src, src}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	entry := func(name string) *jitEntry {
+		return r.jit.hint(r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure.hint())
+	}
+	checked := false
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts, entries uint64
+		if e := entry("run"); e != nil {
+			hosts, entries = e.ssaStats.hosts, e.ssaStats.entries
+		}
+		reoptimized := r.jit.reoptimized
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if (i == 3 || i == 4) && r.jit.reoptimized == reoptimized {
+			// A round no code was compiled again in, which counts afresh.
+			e := entry("run")
+			if e == nil || !slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.pool != nil }) {
+				t.Fatal("run does not construct natively")
+			}
+			// Entered again after each construction Go makes, its pool
+			// filled again.
+			if e.entrySlow || e.ssaStats.entries-entries < 400/abi.PoolSize {
+				t.Fatalf("round %d: run's code is entered %d times for 400 constructions", i, e.ssaStats.entries-entries)
+			}
+			if left := e.ssaStats.hosts - hosts; left > 400/abi.PoolSize+2 {
+				t.Fatalf("round %d: run left native code %d times for 400 constructions", i, left)
+			}
+			checked = true
+		}
+		if i == len(rounds)-1 {
+			proto := r.global.getOwn(r.atoms.intern("V")).value.Object().getOwnVisible(atomPrototype).value.Object()
+			for _, x := range entry("run").nativeCalls {
+				if x.pool != nil && x.pool.Proto != unsafe.Pointer(proto) {
+					t.Fatal("run's pool was not made again for V's new prototype")
+				}
+			}
+		}
+	}
+	if !checked {
+		t.Fatal("code was compiled again in every round")
 	}
 }
 

@@ -94,6 +94,14 @@ func lowerRecovered(fn *bytecode.Function, m lowering) (p *ir.Program, err error
 // lowerImpl is lowerFunction, or a test's replacement for it.
 var lowerImpl = lowerFunction
 
+// SSAConstruct has the new pipeline compile functions that construct, `new
+// C(...)`, which its code makes natively where it can and leaves to Go
+// otherwise. It is off until built-in constructors and
+// Function.prototype.call are made natively too: DeltaBlue's constructors,
+// which use both, leave native code at each construction, and run 43%
+// slower than the tree tier runs them (docs/jit-progress.md, P7w).
+var SSAConstruct = false
+
 func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 	if fn == nil {
 		return nil, refuse(-1, "nil function")
@@ -131,7 +139,12 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 			return nil, err
 		}
 		effects[pc] = e
-		host = host || in.Op == bytecode.OpNewArray || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
+		if in.Op == bytecode.OpNew && (!m.ssa || !SSAConstruct) {
+			// The new pipeline constructs natively (mir's native calls);
+			// the old one does not.
+			return nil, refuse(pc, "unsupported opcode "+in.Op.String())
+		}
+		host = host || in.Op == bytecode.OpNew || in.Op == bytecode.OpNewArray || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 		property = property || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 		this = this || in.Op == bytecode.OpPushThis
 		raw := uint32(in.Op)
@@ -511,7 +524,7 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 		return effect{need: 2, delta: 1}, nil
 	case bytecode.OpInsert3:
 		return effect{need: 3, delta: 1}, nil
-	case bytecode.OpCall, bytecode.OpCallMethod:
+	case bytecode.OpCall, bytecode.OpCallMethod, bytecode.OpNew:
 		if in.A > MaxSlots {
 			return bad("argument budget")
 		}
@@ -726,7 +739,7 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this bool) ir.Instr
 			return ir.Instruction{Op: ir.StringMethod, Left: top, Dest: sp}
 		}
 		return ir.Instruction{Op: ir.Host}
-	case bytecode.OpNewArray, bytecode.OpCall, bytecode.OpMod:
+	case bytecode.OpNewArray, bytecode.OpCall, bytecode.OpMod, bytecode.OpNew:
 		return ir.Instruction{Op: ir.Host}
 	case bytecode.OpGetGlobal:
 		return ir.Instruction{Op: ir.BindingRead, Left: ir.Literal(ir.Value{Kind: ir.Opaque}), Dest: sp, Key: in.A}

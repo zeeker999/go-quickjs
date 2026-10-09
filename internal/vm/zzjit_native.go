@@ -222,6 +222,9 @@ type jitEntry struct {
 	// at an exit inside them (jitUnwindNative).
 	ssaCallees []*jitEntry
 	ssaInlined []*closure
+	// ssaPools are the object pools the code's constructions take from,
+	// whose addresses it holds.
+	ssaPools []*abi.ObjectPool
 	// nativeCalls are the calls the code makes natively, or will when
 	// compiled again, each with the function it was seen to call.
 	nativeCalls []jitInline
@@ -1522,7 +1525,7 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 		switch in.Op {
 		case bytecode.OpPushThis, bytecode.OpGetProp, bytecode.OpSetProp, bytecode.OpCall,
 			bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpGetPropThis, bytecode.OpSetIndex, bytecode.OpNewArray,
-			bytecode.OpGetIndex:
+			bytecode.OpGetIndex, bytecode.OpNew:
 		default:
 			return sp, steps, nil
 		}
@@ -1580,6 +1583,14 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 				this = stack[sp]
 			}
 			v, err = r.callDirect(callee, this, args)
+		case bytecode.OpNew:
+			// A construction native code did not make, as the interpreter
+			// makes it.
+			argc := int(in.A)
+			args := stack[sp-argc : sp]
+			callee := stack[sp-argc-1]
+			sp -= argc + 1
+			v, err = r.construct(callee, args)
 		case bytecode.OpGetGlobal:
 			c := tctx{r: r, f: f, cl: f.cl, locals: f.locals}
 			v, err = r.getGlobalAt(&c, in, pc)

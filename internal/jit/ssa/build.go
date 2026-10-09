@@ -51,7 +51,11 @@ type Feedback interface {
 // the VM keeps alive; the call's argument count and whether it
 // passes a receiver; the callee's parameters, locals and operand slots;
 // its receiver's slot, or -1 if it reads none; and whether a receiver that
-// is not an object needs coercing, which only Go does.
+// is not an object needs coercing, which only Go does. A construction,
+// `new`, has Pool, the address of the abi.ObjectPool its receiver comes
+// from, and ProtoIndex and ProtoKey, where in the function's table its
+// own prototype property is and its name, which the call checks holds the
+// pool's prototype; its result, if not an object, is the receiver.
 type CallSite struct {
 	Callee, Closure, Entry, Count uintptr
 	Argc                          int
@@ -59,6 +63,9 @@ type CallSite struct {
 	Params, LocalCount, MaxStack  int
 	ThisSlot                      int
 	Coerce                        bool
+	Pool                          uintptr
+	ProtoIndex                    int
+	ProtoKey                      uint32
 }
 
 // InlineSite is a call the VM has seen call one function, whose program,
@@ -1364,7 +1371,9 @@ func (b *builder) nativeCalls(pc int) []*CallSite {
 		if site.Method {
 			operands++
 		}
-		if site.Argc < 0 || depth < operands || after != depth-operands+1 || site.ThisSlot >= 0 && !site.Method {
+		// A callee that reads its receiver gets the method call's, or a
+		// construction's, from its pool.
+		if site.Argc < 0 || depth < operands || after != depth-operands+1 || site.ThisSlot >= 0 && !site.Method && site.Pool == 0 {
 			continue
 		}
 		if site.ThisSlot < 0 {

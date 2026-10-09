@@ -1162,9 +1162,12 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		c.a.Load(a64B, a64Ctx, abi.OffStackTop)
 		c.a.Load(a64B, a64B, 0)
 		c.a.AddImm(a64B, a64B, int64(t.LocalCount+t.MaxStack), true)
-		c.a.Load(a64C, a64Ctx, abi.OffStackEnd)
-		c.a.Cmp(a64B, a64C, true)
+		c.a.Load(a64A, a64Ctx, abi.OffStackEnd)
+		c.a.Cmp(a64B, a64A, true)
 		guard(arm64.HI)
+		if t.Pool != 0 {
+			c.constructGuards(t, guard)
+		}
 		c.a.B(checked)
 		c.a.Bind(next)
 	}
@@ -1172,7 +1175,7 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 	c.a.Bind(checked)
 	// As amd64's: a call of one function writes its operands where the
 	// callee has them, unrecorded.
-	direct, ops := len(sites) == 1 && (site.ThisSlot < 0 || site.Method), calleeSlot
+	direct, ops := len(sites) == 1 && (site.ThisSlot < 0 || site.Method || site.Pool != 0), calleeSlot
 	if site.Method {
 		ops--
 	}
@@ -1225,7 +1228,7 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		for i := 0; i < site.Params && i < site.Argc && i < site.LocalCount; i++ {
 			c.directOperand(s.Slots[sp-site.Argc+i], a64D, int32(i)*vs)
 		}
-		if site.ThisSlot >= 0 {
+		if site.ThisSlot >= 0 && site.Pool == 0 {
 			c.directOperand(s.Slots[calleeSlot-1], a64Ctx, abi.ContextSize+abi.OffThis)
 		}
 	}
@@ -1291,7 +1294,20 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 			c.a.Store(locals, at+c.enc.NumOffset, top)
 			c.a.Store(locals, at+c.enc.RefOffset, arm64.ZR)
 		}
-		if t.ThisSlot >= 0 && !direct {
+		if t.Pool != 0 {
+			// As amd64's: the pool's last object, its cell cleared.
+			c.a.MovImm(tmp, uint64(t.Pool))
+			c.a.Load(top, tmp, abi.OffPoolCount)
+			c.a.AddImm(top, top, -1, true)
+			c.a.Store(tmp, abi.OffPoolCount, top)
+			c.a.ShiftImm(arm64.Lsl, top, top, 3, true)
+			c.a.Op(arm64.Add, top, top, tmp, true)
+			c.a.Load(high2, top, abi.OffPoolObjects)
+			c.a.Store(top, abi.OffPoolObjects, arm64.ZR)
+			c.a.Store(calleeCtx, abi.OffThis+c.enc.RefOffset, high2)
+			c.a.MovImm(tmp, c.enc.Object)
+			c.a.Store(calleeCtx, abi.OffThis+c.enc.NumOffset, tmp)
+		} else if t.ThisSlot >= 0 && !direct {
 			nb, nd, rb, rd := words(calleeSlot - 1)
 			c.a.Load(top, nb, nd)
 			c.a.Store(calleeCtx, abi.OffThis+c.enc.NumOffset, top)
@@ -1328,6 +1344,19 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 	c.a.Load(a64Locals, a64Ctx, abi.OffLocals)
 	c.a.Load(a64Stack, a64Ctx, abi.OffStack)
 	at := abi.OffKeep + int32(v.Index)*vs
+	if site.Pool != 0 {
+		// As amd64's: a result that is not an object is the receiver.
+		object := c.a.NewLabel()
+		c.a.Load(a64A, calleeCtx, abi.OffRetValue+c.enc.NumOffset)
+		c.a.MovImm(a64B, c.enc.Object)
+		c.a.Cmp(a64A, a64B, true)
+		c.a.BCond(arm64.EQ, object)
+		c.a.Load(tmp, calleeCtx, abi.OffThis+c.enc.RefOffset)
+		c.a.Store(calleeCtx, abi.OffRetValue+c.enc.RefOffset, tmp)
+		c.a.Load(tmp, calleeCtx, abi.OffThis+c.enc.NumOffset)
+		c.a.Store(calleeCtx, abi.OffRetValue+c.enc.NumOffset, tmp)
+		c.a.Bind(object)
+	}
 	c.a.Load(tmp, calleeCtx, abi.OffRetValue+c.enc.RefOffset)
 	c.a.Store(a64Ctx, at+c.enc.RefOffset, tmp)
 	c.a.Load(a64A, calleeCtx, abi.OffRetValue+c.enc.NumOffset)
@@ -1345,6 +1374,30 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		}
 	}
 	c.setG(v, a64A)
+}
+
+// constructGuards checks a construction can take its receiver from its
+// pool, as amd64's does; the function's pointer is in C. It uses A, B and
+// C.
+func (c *a64Compiler) constructGuards(t *ssa.CallSite, guard func(arm64.Cond)) {
+	c.a.MovImm(a64A, uint64(t.Pool))
+	c.a.Load(a64B, a64A, abi.OffPoolCount)
+	c.a.CmpImm(a64B, 0, true)
+	guard(arm64.EQ)
+	c.a.Load(a64B, a64C, c.enc.ObjectProps+8)
+	c.a.CmpImm(a64B, int64(t.ProtoIndex), true)
+	guard(arm64.LS)
+	at := int32(t.ProtoIndex) * c.enc.PropertySize
+	c.a.Load(a64B, a64C, c.enc.ObjectProps)
+	c.a.LoadU32(a64C, a64B, at+c.enc.PropertyKey)
+	c.a.MovImm(a64A, uint64(t.ProtoKey))
+	c.a.Cmp(a64C, a64A, false)
+	guard(arm64.NE)
+	c.a.Load(a64C, a64B, at+c.enc.PropertyValue+c.enc.RefOffset)
+	c.a.MovImm(a64A, uint64(t.Pool))
+	c.a.Load(a64B, a64A, abi.OffPoolProto)
+	c.a.Cmp(a64C, a64B, true)
+	guard(arm64.NE)
 }
 
 // directOperand writes a call's operand x, both words, at disp from base
