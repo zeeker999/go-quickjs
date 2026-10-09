@@ -787,6 +787,23 @@ func (c *a64Compiler) element(array *ssa.Value, guard func(arm64.Cond)) {
 	guard(arm64.HS)
 }
 
+// elementCell turns the index in A into the address of an array's element
+// there, in A, failing unless it is within the dense elements and not a
+// hole, as amd64's does. It uses B and C.
+func (c *a64Compiler) elementCell(array *ssa.Value, guard func(arm64.Cond)) {
+	p := c.gpr(array, a64C)
+	c.a.Load(a64B, p, c.enc.ObjectElems+8)
+	c.a.Cmp(a64A, a64B, true)
+	guard(arm64.HS)
+	c.a.Load(a64B, p, c.enc.ObjectElems)
+	c.a.ShiftImm(arm64.Lsl, a64A, a64A, 4, true)
+	c.a.Op(arm64.Add, a64A, a64A, a64B, true)
+	c.a.Load(a64B, a64A, c.enc.NumOffset)
+	c.a.MovImm(a64C, c.enc.Uninitialized)
+	c.a.Cmp(a64B, a64C, true)
+	guard(arm64.EQ)
+}
+
 // numberCell checks the word at A's cell is a number, into B.
 func (c *a64Compiler) numberCell(guard func(arm64.Cond)) {
 	c.a.Load(a64B, a64A, c.enc.NumOffset)
@@ -898,6 +915,10 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.element(arg(0), guard)
 		c.a.FMovToF(a64F0, a64B)
 		c.setF(v, a64F0)
+	case ssa.OpElemCell:
+		c.index(arg(1), guard)
+		c.elementCell(arg(0), guard)
+		c.setG(v, a64A)
 	case ssa.OpElemWrite:
 		c.index(arg(1), guard)
 		c.element(arg(0), guard)

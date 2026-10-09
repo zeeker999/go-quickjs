@@ -214,6 +214,10 @@ type Instruction struct {
 	// agree; the new pipeline compares with null and undefined natively,
 	// where they do not.
 	Strict bool
+	// Reference marks an ArrayRead whose result no native operation takes
+	// as a number: the new pipeline reads the element's cell, whatever the
+	// element holds, as it reads a property's.
+	Reference bool
 }
 
 // StateMap describes state immediately before a bytecode instruction. PC is

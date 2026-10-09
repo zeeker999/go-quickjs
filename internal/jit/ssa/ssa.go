@@ -73,6 +73,11 @@ const (
 	OpElemKey   // f64 -> none, if an index
 	OpElemRead  // ptr, f64 -> f64: the element, if the index's is a number
 	OpElemWrite // ptr, f64, f64 -> none: stores, if the index's is a number
+	// OpElemCell is an element read as a reference: the element's cell, if
+	// the index is an integer within the dense elements and the element is
+	// not a hole, whatever it holds. OpLoadCell reads it, with the cell as
+	// its shadow (origin.go).
+	OpElemCell // ptr, f64 -> source
 	// OpLength is x.length of an array, as the slot IR's views have it, or
 	// of a string, whose length is always at hand, rope or not.
 	OpLength // tagged -> f64
@@ -147,7 +152,7 @@ const (
 var opNames = [...]string{
 	OpInvalid: "invalid", OpLoadSlot: "load", OpConst: "const", OpConstF64: "constf", OpConstSource: "consts", OpPhi: "phi",
 	OpUnboxF64: "unbox", OpTruth: "truth", OpCheckInit: "checkinit", OpBoxF64: "boxf", OpBoxBool: "boxb",
-	OpArrayOf: "arrayof", OpElemKey: "elemkey", OpElemRead: "elemread", OpElemWrite: "elemwrite", OpLength: "length",
+	OpArrayOf: "arrayof", OpElemKey: "elemkey", OpElemRead: "elemread", OpElemWrite: "elemwrite", OpElemCell: "elemcell", OpLength: "length",
 	OpObjectOf: "objectof", OpPropRead: "propread", OpPropWrite: "propwrite", OpPropCell: "propcell", OpLoadCell: "loadcell", OpGlobalCell: "globalcell",
 	OpStringMethod: "stringmethod", OpStringCode: "stringcode",
 	OpAddF64: "addf", OpSubF64: "subf", OpMulF64: "mulf", OpDivF64: "divf", OpModF64: "modf", OpNegF64: "negf", OpCmpF64: "cmpf",
@@ -165,7 +170,7 @@ func (o Op) String() string {
 // isGuard reports whether an op exits when its operand is not what it needs.
 func (o Op) isGuard() bool {
 	switch o {
-	case OpUnboxF64, OpTruth, OpCheckInit, OpModF64, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite, OpLength,
+	case OpUnboxF64, OpTruth, OpCheckInit, OpModF64, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite, OpElemCell, OpLength,
 		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell, OpStringMethod, OpStringCode, OpLooseNullish:
 		return true
 	}
@@ -176,7 +181,7 @@ func (o Op) isGuard() bool {
 // or properties, which writes change: two of them are not the same guard.
 // (An array's length and an object's shape change only in Go.)
 func (o Op) readsMemory() bool {
-	return o == OpElemRead || o == OpElemWrite || o == OpPropRead || o == OpPropWrite || o == OpPropCell ||
+	return o == OpElemRead || o == OpElemWrite || o == OpElemCell || o == OpPropRead || o == OpPropWrite || o == OpPropCell ||
 		o == OpGlobalCell
 }
 

@@ -396,7 +396,10 @@ func selectNumericProperties(p *ir.Program, cells bool) {
 				read(in.Left, number)
 			}
 		case ir.ArrayRead, ir.ArrayUpdate, ir.ArrayLength:
-			take(in.Dest)
+			if kind := take(in.Dest); cells && in.Op == ir.ArrayRead && kind&number == 0 {
+				in.Reference = true
+				p.Code[pc] = in
+			}
 			if in.Op == ir.ArrayUpdate {
 				take(in.Extra)
 			}

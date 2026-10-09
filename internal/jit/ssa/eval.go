@@ -173,6 +173,8 @@ type Heap struct {
 	// code units, and whether they are flat.
 	CharCodeAt *ir.Value
 	Strings    map[uint64]String
+	// Word decodes an element's word, for OpElemCell; nil, only numbers'.
+	Word func(uint64) ir.Value
 }
 
 // String is a string as charCodeAt sees it.
@@ -349,6 +351,25 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 					bits = canonicalNaN
 				}
 				*cell = bits
+			case OpElemCell:
+				view := arrays[a.p]
+				i, ok := index(b.f)
+				if !ok || i >= view.DenseLength || view.Data == nil {
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
+				word := *(*uint64)(unsafe.Add(view.Data, uintptr(i)*16))
+				t := ir.Value{Kind: ir.Number, Bits: word}
+				switch {
+				case heap.Word != nil:
+					t = heap.Word(word)
+				case word >= view.NumberLimit:
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
+				if t.Kind == ir.Uninitialized {
+					// A hole.
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
+				vals[v.ID] = val{cell: &t}
 			case OpLength:
 				t := a.t
 				switch {
