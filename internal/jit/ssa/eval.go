@@ -271,7 +271,7 @@ type Object struct {
 
 // holder is the object a property read of o finds its property in, and its
 // index there, as Holders say, or -1: o itself, as property finds it, for a
-// site without them.
+// site without them or a shape none of its cases has.
 func (h *Heap) holder(o *Object, v *Value) (*Object, int) {
 	if v.Holders == nil && v.Cases == nil {
 		return o, o.property(v)
@@ -296,6 +296,11 @@ func (h *Heap) holder(o *Object, v *Value) (*Object, int) {
 			o = next
 		}
 		return o, int(c.Index)
+	}
+	// A shape none of the cases has: the receiver's own table, as for a
+	// site without them (mir's scan).
+	if i := o.property(v); i >= 0 {
+		return o, i
 	}
 	return nil, -1
 }

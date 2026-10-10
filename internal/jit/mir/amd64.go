@@ -2040,6 +2040,11 @@ func (c *compiler) holder(v *ssa.Value, guard func(amd64.Cond)) {
 		first = *v.Holders
 	}
 	cases := append([]ssa.PropertyCase{{Shape: uintptr(v.Const.Bits), Index: int32(v.Index), Holders: first}}, v.Cases...)
+	// A receiver of a shape not among the cases has its own table searched
+	// (scan), as V8's megamorphic loads look further rather than
+	// deoptimize, and leaves only if the property is not its own: RayTrace's
+	// IntersectionInfo, given its properties in more orders than the cases
+	// hold, some on its prototype, left its readers at every one.
 	done := c.a.NewLabel()
 	for i, k := range cases {
 		next := c.a.NewLabel()
@@ -2048,7 +2053,12 @@ func (c *compiler) holder(v *ssa.Value, guard func(amd64.Cond)) {
 		c.a.MovImm(scratchC, uint64(k.Shape))
 		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
 		if i == len(cases)-1 {
-			guard(amd64.CondNE)
+			scan := c.a.NewLabel()
+			c.a.Jcc(amd64.CondNE, scan)
+			c.cold = append(c.cold, func() {
+				c.a.Bind(scan)
+				c.scan(v, guard, done)
+			})
 		} else {
 			c.a.Jcc(amd64.CondNE, next)
 		}
