@@ -83,7 +83,7 @@ func Origins(f *Func) OriginMap {
 		}
 		return origin[v.ID]
 	}
-	var phis []*Value
+	phis := f.scr().originPhis[:0]
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
 			if v.Type != Tagged {
@@ -120,6 +120,7 @@ func Origins(f *Func) OriginMap {
 			origin[p.ID] = OriginScalar
 		}
 	}
+	f.scr().originPhis = phis[:0]
 	return OriginMap{origin}
 }
 

@@ -332,6 +332,7 @@ func unboxPhis(f *Func) bool {
 	unboxed := vals[n:]
 	for _, v := range ordered {
 		p := fp[v.ID]
+		p.Args = f.refsOf(len(v.Args))[:0]
 		for _, a := range v.Args {
 			var x *Value
 			switch {

@@ -415,6 +415,8 @@ type scratch struct {
 	liveWords                       []uint64
 	// subst is Optimize's replacements, by value ID.
 	subst []*Value
+	// originPhis is Origins' list of the phis.
+	originPhis []*Value
 }
 
 // guardSeen is a guard Optimize has met, keyed by its op, and the index

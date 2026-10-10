@@ -502,14 +502,14 @@ func (c *core) allocate() error {
 	type freeSlot struct{ slot, end int }
 	spills := 0
 	for _, float := range []bool{false, true} {
-		var free []int
 		var freeSlots []freeSlot
+		regs := c.gprs
 		if float {
-			free = append(free, c.fprs...)
-		} else {
-			free = append(free, c.gprs...)
+			regs = c.fprs
 		}
-		var active, spilled []*interval
+		free := append(c.ints(len(regs))[:0], regs...)
+		// Neither list outgrows the intervals.
+		active, spilled := c.intervalRefs(len(all))[:0], c.intervalRefs(len(all))[:0]
 		slot := func(from int) (int, error) {
 			for i := len(freeSlots) - 1; i >= 0; i-- {
 				if f := freeSlots[i]; f.end < from {

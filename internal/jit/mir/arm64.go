@@ -57,13 +57,9 @@ type a64Stub struct {
 // CompileARM64 compiles f for arm64, given the VM's value encoding.
 func CompileARM64(f *ssa.Func, enc abi.Encoding) (*Code, error) { return compileARM64(nil, f, enc) }
 
-func compileARM64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err error) {
-	defer func() {
-		if v := recover(); v != nil {
-			code, err = nil, fmt.Errorf("%w: %v", ErrUnsupported, v)
-		}
-	}()
-	var gprs, fprs []int
+// arm64GPRs and arm64FPRs are the registers arm64's allocator assigns,
+// never changed.
+var arm64GPRs, arm64FPRs = func() (gprs, fprs []int) {
 	for r := 3; r <= 14; r++ {
 		gprs = append(gprs, r)
 	}
@@ -73,7 +69,16 @@ func compileARM64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err 
 	for r := 3; r <= 31; r++ {
 		fprs = append(fprs, r)
 	}
-	k, err := prepare(w, f, enc, gprs, fprs)
+	return gprs, fprs
+}()
+
+func compileARM64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			code, err = nil, fmt.Errorf("%w: %v", ErrUnsupported, v)
+		}
+	}()
+	k, err := prepare(w, f, enc, arm64GPRs, arm64FPRs)
 	if err != nil {
 		return nil, err
 	}
