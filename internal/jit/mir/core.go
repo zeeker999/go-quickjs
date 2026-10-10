@@ -367,28 +367,39 @@ func (c *core) allocate() error {
 		}
 	}
 	// Block-level liveness, so that values live around a loop stay live for
-	// all of it. byID finds a value from its ID.
-	byID := c.valueList(nv)
+	// all of it. Only a value used outside the block that defines it can be
+	// live into a block: those are numbered, and the sets are over them, a
+	// fraction of the values. byID finds a value from its number.
+	defBlock := c.blockList(nv)
+	for _, b := range c.order {
+		for _, v := range b.Values {
+			defBlock[v.ID] = b
+		}
+	}
+	gid := c.ints(nv) // 1 plus a value's number, or 0
+	byID := c.valueList(nv)[:0]
+	for _, u := range uses {
+		if need(u.v) && gid[u.v.ID] == 0 && defBlock[u.v.ID] != at[u.pos] {
+			byID = append(byID, u.v)
+			gid[u.v.ID] = len(byID)
+		}
+	}
 	// The three sets of every block share one array.
-	words := (nv + 63) / 64
+	words := (len(byID) + 63) / 64
 	sets := c.words(3 * nb * words)
 	defsIn, usesIn, liveIn := c.setList(nb), c.setList(nb), c.setList(nb)
 	for _, b := range c.order {
 		at := 3 * b.ID * words
 		defsIn[b.ID], usesIn[b.ID], liveIn[b.ID] = sets[at:at+words:at+words], sets[at+words:at+2*words:at+2*words], sets[at+2*words:at+3*words:at+3*words]
 		for _, v := range b.Values {
-			defsIn[b.ID].add(v.ID)
-			byID[v.ID] = v
+			if g := gid[v.ID]; g != 0 {
+				defsIn[b.ID].add(g - 1)
+			}
 		}
 	}
 	for _, u := range uses {
-		if !need(u.v) {
-			continue
-		}
-		b := at[u.pos]
-		byID[u.v.ID] = u.v
-		if !defsIn[b.ID].has(u.v.ID) {
-			usesIn[b.ID].add(u.v.ID)
+		if g := gid[u.v.ID]; g != 0 && defBlock[u.v.ID] != at[u.pos] {
+			usesIn[at[u.pos].ID].add(g - 1)
 		}
 	}
 	in := c.words(words)
