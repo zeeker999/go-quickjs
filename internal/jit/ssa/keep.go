@@ -24,8 +24,11 @@ import (
 // keepAcrossStores keeps, before each property store, the values read from
 // cells that are used after it (liveAcross), up to abi.MaxKeeps in a
 // function, and reports whether it kept any; their phis' shadows are then
-// to be made again (shadowMerges).
-func keepAcrossStores(f *Func) bool {
+// to be made again (shadowMerges). If it kept none, it returns what is live
+// across the stores, as storeChecks would find it: the function is as it
+// was, but for calls it left to Go, which are stores no longer and change
+// nothing live across the others.
+func keepAcrossStores(f *Func) (bool, []*Value, [][]*Value) {
 	stores, live := liveAcross(f)
 	a := newAliases()
 	kept := map[*Value][]*Value{}
@@ -97,8 +100,11 @@ func keepAcrossStores(f *Func) bool {
 			b.Values = append(b.Values[:at], append(ins, b.Values[at:]...)...)
 		}
 	}
+	if len(order) == 0 {
+		return false, stores, live
+	}
 	reconstruct(f, order, kept)
-	return len(order) > 0
+	return true, nil, nil
 }
 
 func indexOf(vs []*Value, v *Value) int {
