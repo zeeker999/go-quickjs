@@ -164,8 +164,25 @@ type GoOp uint8
 
 // GoAdd is +, an operand possibly a string (ir.StringAdd): Go makes it of
 // primitives; an object, whose conversion may run anything, or a symbol,
-// which throws, it leaves to an exit, after which Go makes it.
-const GoAdd GoOp = 1
+// which throws, it leaves to an exit, after which Go makes it. GoRefill
+// fills an object pool that ran out again (abi.ObjectPool's Source), its
+// address the first operand's pointer word: a call that takes from one
+// makes it, and is made again from its start.
+const (
+	GoAdd GoOp = 1 + iota
+	GoRefill
+)
+
+// RefillsPools reports whether a call takes an object from a pool, which
+// a call of Go fills again when it runs out (GoRefill).
+func RefillsPools(v *Value) bool {
+	for _, c := range v.Calls {
+		if c.Pool != 0 {
+			return true
+		}
+	}
+	return false
+}
 
 // popsElement reports whether a call is Array.prototype.pop's (CallSite's
 // Pop): it writes an element's cell, and its own result's.

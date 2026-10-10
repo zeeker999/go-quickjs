@@ -6703,6 +6703,83 @@ func TestJITSSAStringAddCallsGo(t *testing.T) {
 	}
 }
 
+// A pool that runs out is filled again by a call of Go from native code
+// (ssa.GoRefill), and the construction or literal is made again from its
+// start, as V8's code calls its runtime when its space runs out: a loop
+// constructing (inlined and called natively) and making object and array
+// literals, far more of each than a pool holds, never leaves native code;
+// it did at every refill. A constructor whose prototype is replaced gets
+// objects of the new one. The collector runs at each call of Go, which
+// churns every register. Each answer is the interpreter's.
+func TestJITSSAPoolsRefilledByGo(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	old := jitcompile.SSAConstruct
+	jitcompile.SSAConstruct = true
+	defer func() { jitcompile.SSAConstruct = old }()
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(100))
+	calls := 0
+	jitGoCallWork = func() {
+		if calls++; churnRegisters(calls) == 0.25 {
+			t.Log("churned to a quarter")
+		}
+		if calls%8 == 0 {
+			runtime.GC()
+		}
+	}
+	defer func() { jitGoCallWork = nil }()
+	setup := `function P(x){this.x=x;this.y=x*2} P.prototype.z=1;
+		function Q(x){for(let k=0;k<1;k++)this.v=x+k}
+		function mk(n){let s=0;for(let i=0;i<n;i++){const p=new P(i),q=new Q(i);const o={a:i,b:p};const a=[i,i+1,q];s=(s+o.b.y+a[1]+a[2].v+(p.z|0))|0}return s}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk := r.global.getOwn(r.atoms.intern("mk")).value.Object().fn().closure
+	rounds := []string{`String(mk(2000))`, `String(mk(2000))`, `String(mk(2000))`, `String(mk(2000))`, `String(mk(2000))`,
+		`P.prototype={z:5};String(mk(2000))`, `String(mk(2000))`, `String(mk(2000))`}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var exits uint64
+		if e := r.jit.cache[weak.Make(mk.fn)]; e != nil {
+			exits = e.ssaStats.hosts + e.ssaStats.guards
+		}
+		before := calls
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 4 || i == 7 {
+			e := r.jit.cache[weak.Make(mk.fn)]
+			if e == nil || e.ssa == nil {
+				t.Fatalf("mk did not run natively: %+v", e)
+			}
+			// 2,000 of each, pools of at most 128: the refills were Go's,
+			// called from native code, which left only where the collector
+			// marked, a few times, not at some 60 refills.
+			if n := e.ssaStats.hosts + e.ssaStats.guards - exits; n > 8 {
+				t.Fatalf("round %d: mk left native code %d times", i, n)
+			}
+			if calls-before < 4*2000/abi.PoolCapacity {
+				t.Fatalf("round %d: %d calls of Go", i, calls-before)
+			}
+		}
+	}
+}
+
 // churnRegisters keeps many integers and floats live at once, so that the
 // registers native code had before a call of Go hold something else after.
 //

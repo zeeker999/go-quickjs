@@ -342,6 +342,10 @@ type ObjectPool struct {
 	// native code does not read: PoolSize at first, twice as many each
 	// time the pool runs out, up to PoolCapacity.
 	Size uint64
+	// Source is what Go fills the pool from, the VM's, which native code
+	// does not read: one that has it is filled by a call of Go when it runs
+	// out (Context's GoOp), native code going on.
+	Source unsafe.Pointer
 }
 
 // PoolSize is how many objects an ObjectPool is filled with at first, and

@@ -36,6 +36,11 @@ type compiler struct {
 	stubFor []stub
 	// cold code, emitted after everything else.
 	cold []func()
+	// callV is the call being emitted, callTop where it starts: a pool it
+	// takes from that ran out is filled by a call of Go, and the call made
+	// again from there (refillOnEmpty).
+	callV   *ssa.Value
+	callTop amd64.Label
 	// tail is where exits that filled records go (recordsTail), if any
 	// does; recorded marks the exit being emitted as one.
 	tail               amd64.Label
@@ -358,6 +363,9 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 		c.a.Jmp(c.stubLabel(s, exitKind(v.Aux)))
 		return
 	}
+	c.callV, c.callTop = v, c.a.NewLabel()
+	c.a.Bind(c.callTop)
+	defer func() { c.callV = nil }()
 	site := sites[0]
 	vs := int32(c.enc.ValueSize)
 	if site.Go != 0 {
@@ -373,8 +381,7 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 		guard(amd64.CondNE)
 		c.a.MovImm(scratchA, uint64(site.Pool))
 		c.a.Load(scratchB, scratchA, abi.OffPoolCount)
-		c.a.Op(amd64.Test, scratchB, scratchB, true)
-		guard(amd64.CondE)
+		c.refillOnEmpty(site.Pool, guard)
 		if site.Argc == 0 {
 			c.poolTake(v, site)
 			return
@@ -752,6 +759,13 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 // store after it tests the collector's flag, as every store does.
 func (c *compiler) goCall(v *ssa.Value, site *ssa.CallSite, guard func(amd64.Cond)) {
 	size := int32(unsafe.Sizeof(abi.GoArg{}))
+	defer func() {
+		c.a.Load(scratchB, regCtx, abi.OffGoStatus)
+		c.a.Op(amd64.Test, scratchB, scratchB, true)
+		guard(amd64.CondNE)
+		c.a.Load(scratchA, regCtx, abi.OffKeep+int32(v.Index)*int32(c.enc.ValueSize)+c.enc.NumOffset)
+		c.setG(v, scratchA)
+	}()
 	for i, x := range v.Args {
 		var w amd64.Reg
 		if remat(x) {
@@ -775,9 +789,17 @@ func (c *compiler) goCall(v *ssa.Value, site *ssa.CallSite, guard func(amd64.Con
 		c.a.Bind(have)
 		c.a.Store(regCtx, at+c.enc.RefOffset, scratchB)
 	}
-	c.a.MovImm(scratchA, uint64(site.Go))
+	c.callGo(v, uint64(site.Go), v.Index)
+}
+
+// callGo is a call of Go, op, its operands in the context's GoArgs: what
+// is live saved, then to callGo (abi.Encoding's CallGo), which comes back
+// here; the frame's registers read again, what was live restored. The
+// caller tests GoStatus.
+func (c *compiler) callGo(v *ssa.Value, op uint64, keep int) {
+	c.a.MovImm(scratchA, op)
 	c.a.Store(regCtx, abi.OffGoOp, scratchA)
-	c.a.MovImm(scratchA, uint64(v.Index))
+	c.a.MovImm(scratchA, uint64(keep))
 	c.a.Store(regCtx, abi.OffGoKeep, scratchA)
 	for _, sv := range c.saves[v] {
 		if sv.float {
@@ -801,11 +823,33 @@ func (c *compiler) goCall(v *ssa.Value, site *ssa.CallSite, guard func(amd64.Con
 			c.a.Load(amd64.Reg(sv.reg), regCtx, c.spillDisp(sv.slot))
 		}
 	}
-	c.a.Load(scratchB, regCtx, abi.OffGoStatus)
+}
+
+// refillOnEmpty, its pool's count in scratchB, goes on if the pool has an
+// object; if not, Go fills it (ssa.GoRefill), called from native code as
+// V8's code calls its runtime when its space runs out, and the call is
+// made again from its start, every check again: the collector may have
+// begun marking meanwhile. Only if Go cannot does the guard fail.
+func (c *compiler) refillOnEmpty(pool uintptr, guard func(amd64.Cond)) {
+	v, top := c.callV, c.callTop
+	if v == nil {
+		c.a.Op(amd64.Test, scratchB, scratchB, true)
+		guard(amd64.CondE)
+		return
+	}
+	refill := c.a.NewLabel()
 	c.a.Op(amd64.Test, scratchB, scratchB, true)
-	guard(amd64.CondNE)
-	c.a.Load(scratchA, regCtx, abi.OffKeep+int32(v.Index)*int32(c.enc.ValueSize)+c.enc.NumOffset)
-	c.setG(v, scratchA)
+	c.a.Jcc(amd64.CondE, refill)
+	c.cold = append(c.cold, func() {
+		c.a.Bind(refill)
+		c.a.MovImm(scratchA, uint64(pool))
+		c.a.Store(regCtx, abi.OffGoArgs+c.enc.RefOffset, scratchA)
+		c.callGo(v, uint64(ssa.GoRefill), 0)
+		c.a.Load(scratchB, regCtx, abi.OffGoStatus)
+		c.a.Op(amd64.Test, scratchB, scratchB, true)
+		c.a.Jcc(amd64.CondNE, c.stubLabel(v.State, exitKind(v.Aux)))
+		c.a.Jmp(top)
+	})
 }
 
 // pushGuards checks a call of Array.prototype.push may append as its fast
@@ -1094,8 +1138,7 @@ func (c *compiler) poolTake(v *ssa.Value, site *ssa.CallSite) {
 func (c *compiler) constructGuards(t *ssa.CallSite, guard func(amd64.Cond)) {
 	c.a.MovImm(scratchA, uint64(t.Pool))
 	c.a.Load(scratchB, scratchA, abi.OffPoolCount)
-	c.a.Op(amd64.Test, scratchB, scratchB, true)
-	guard(amd64.CondE)
+	c.refillOnEmpty(t.Pool, guard)
 	if t.Alloc {
 		// A built-in's, whose prototype the realm fixed.
 		return

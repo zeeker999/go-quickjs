@@ -242,6 +242,7 @@ func (r *Runtime) jitLiteralAt(e *jitEntry, cl *closure, pc int) *jitLiteral {
 	if in.Op == bytecode.OpNewArray && in.A <= ir.MaxArrayLiteral {
 		e.literals = append(e.literals, jitLiteral{pc: int32(pc), pool: new(abi.ObjectPool), array: true, n: int(in.A)})
 		l := &e.literals[len(e.literals)-1]
+		l.pool.Source = unsafe.Pointer(&jitPoolSource{array: true, n: l.n})
 		r.jitFillLiteral(l)
 		return l
 	}
@@ -254,6 +255,7 @@ func (r *Runtime) jitLiteralAt(e *jitEntry, cl *closure, pc int) *jitLiteral {
 	}
 	e.literals = append(e.literals, jitLiteral{pc: int32(pc), root: root, pool: new(abi.ObjectPool), n: int(in.A)})
 	l := &e.literals[len(e.literals)-1]
+	l.pool.Source = unsafe.Pointer(&jitPoolSource{root: root, n: l.n})
 	r.jitFillLiteral(l)
 	return l
 }
@@ -1124,8 +1126,7 @@ func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 		if o := r.jitAllocates(sp, in); o != nil {
 			// A built-in's construction with nothing to run: made from a
 			// pool.
-			pool := new(abi.ObjectPool)
-			r.jitFillPool(pool, o)
+			pool := r.jitNewPool(o)
 			e.nativeCalls = append(e.nativeCalls, jitInline{pc: int32(pc), obj: o, pool: pool})
 			e.callSites[pc] = jitCallNative
 			e.inlinePending = true
@@ -1245,6 +1246,9 @@ func jitHostCall(ctx *abi.Context) bool {
 		}
 		*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
 		return true
+	case ssa.GoRefill:
+		// The pool's address, a constant of the code's, which keeps it.
+		return r.jitRefillPool(*(**abi.ObjectPool)(unsafe.Pointer(&ctx.GoArgs[0].Ref)))
 	}
 	return false
 }
@@ -1830,8 +1834,7 @@ func (fb *jitFeedback) forwardInline(pc int) (ssa.InlineSite, bool) {
 func (r *Runtime) jitInlineTarget(pc int32, cl *closure, o *Object, in bytecode.Instr) jitInline {
 	x := jitInline{pc: pc, cl: cl, obj: o}
 	if in.Op == bytecode.OpNew {
-		x.pool = new(abi.ObjectPool)
-		r.jitFillPool(x.pool, o)
+		x.pool = r.jitNewPool(o)
 		x.fwd = r.jitForwardMethod(cl, o)
 	}
 	return x
@@ -1860,8 +1863,7 @@ func (r *Runtime) jitForwardChanged(e *jitEntry, pc int, o *Object) bool {
 func (r *Runtime) jitNativeTarget(pc int32, cl *closure, o *Object, in bytecode.Instr) jitInline {
 	x := jitInline{pc: pc, cl: cl, obj: o}
 	if in.Op == bytecode.OpNew {
-		x.pool = new(abi.ObjectPool)
-		r.jitFillPool(x.pool, o)
+		x.pool = r.jitNewPool(o)
 	}
 	return x
 }
@@ -1984,6 +1986,41 @@ func (r *Runtime) jitFillPool(pool *abi.ObjectPool, o *Object) {
 		pool.Objects[i] = unsafe.Pointer(r.jitPoolObject(o))
 	}
 	pool.Count, pool.Proto = uint64(n), unsafe.Pointer(first.proto)
+}
+
+// jitNewPool is a pool of objects for constructions with o, filled.
+func (r *Runtime) jitNewPool(o *Object) *abi.ObjectPool {
+	pool := &abi.ObjectPool{Source: unsafe.Pointer(&jitPoolSource{ctor: o})}
+	r.jitFillPool(pool, o)
+	return pool
+}
+
+// jitPoolSource is what an object pool is filled from (abi.ObjectPool's
+// Source): a construction's function, or a literal's root shape and how
+// many fields or elements it has.
+type jitPoolSource struct {
+	ctor  *Object
+	root  *shape
+	n     int
+	array bool
+}
+
+// jitRefillPool fills pool again, run out, with more objects (ssa's
+// GoRefill), as an exit at its site has Go fill it, and reports whether it
+// has one now: a construction's function whose prototype is no longer an
+// object leaves it empty, and the site to Go.
+func (r *Runtime) jitRefillPool(pool *abi.ObjectPool) bool {
+	src := (*jitPoolSource)(pool.Source)
+	if src == nil || pool.Count != 0 {
+		return pool.Count != 0
+	}
+	pool.Size = min(2*max(pool.Size, abi.PoolSize), abi.PoolCapacity)
+	if src.ctor != nil {
+		r.jitFillPool(pool, src.ctor)
+	} else {
+		r.jitFillLiteral(&jitLiteral{root: src.root, pool: pool, n: src.n, array: src.array})
+	}
+	return pool.Count != 0
 }
 
 // jitPoolObject is an object for a construction with o, as jitFillPool
