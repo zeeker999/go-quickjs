@@ -358,7 +358,10 @@ type jitState struct {
 	// ssaCtxs are the contexts native code runs in, one for each runSSA
 	// running and each native call (abi.Context's Level), ctxTop the
 	// first free; ssaCtx is the one Go entered last, whose exit it reads.
-	ssaCtxs    *[jitContexts]abi.Context
+	// They are made jitContexts at a time, linked (abi.Context.Next), and
+	// never move: more are added while native code runs in them
+	// (jitGrowContexts).
+	ssaCtxs    []*abi.Context
 	ctxTop     int
 	ssaCtx     *abi.Context
 	ssaEntries uint64

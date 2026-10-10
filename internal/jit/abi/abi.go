@@ -85,11 +85,14 @@ type Context struct {
 	// origin.go).
 	Ret, RetFrom uint64
 	// A native call (mir's): a caller's code sets up its callee's frame in
-	// the VM's stack, and its context, the next in the runtime's array of
-	// them (ContextSize apart), and jumps to its code. ReturnTo is where a
+	// the VM's stack, and its context, the next (Next), and jumps to its
+	// code. ReturnTo is where a
 	// return goes in its caller's code, or 0 for Run's caller in Go;
-	// RetValue is the value it returns there, both words. Live marks a
-	// context a native call runs in; Closure, Base and Level say whose
+	// RetValue is the value it returns there, both words. Next and Prev
+	// are the contexts a call from this one runs in and this one's caller
+	// ran in, which Go links and never moves, adding more as calls need
+	// them, as V8's frames take a stack that grows. Live marks a context
+	// a native call runs in; Closure, Base and Level say whose
 	// frame it is -- the VM's closure, the frame's index in the VM's stack,
 	// and the context's in the array -- for Go to make the VM's frames from
 	// when a callee leaves native code; Level stays below LevelLimit.
@@ -109,6 +112,7 @@ type Context struct {
 	StackTop   *int
 	StackHigh  *int
 	TailReturn uintptr
+	Next, Prev unsafe.Pointer
 	// An inlined callee's frame, which an exit inside it wrote past its
 	// caller's operands (ssa's InlineState), is in the next context, whose
 	// Live is LiveInline: InlineClosure is the callee's closure's address,
@@ -280,6 +284,8 @@ var (
 	OffStackTop   = int32(unsafe.Offsetof(Context{}.StackTop))
 	OffStackHigh  = int32(unsafe.Offsetof(Context{}.StackHigh))
 	OffTailReturn = int32(unsafe.Offsetof(Context{}.TailReturn))
+	OffNext       = int32(unsafe.Offsetof(Context{}.Next))
+	OffPrev       = int32(unsafe.Offsetof(Context{}.Prev))
 
 	OffExitDesc = int32(unsafe.Offsetof(Context{}.ExitDesc))
 	OffRegs     = int32(unsafe.Offsetof(Context{}.Regs))
@@ -291,10 +297,6 @@ var (
 	OffInlineThis    = int32(unsafe.Offsetof(Context{}.InlineThis))
 	OffInlineCallee  = int32(unsafe.Offsetof(Context{}.InlineCallee))
 	OffNewTarget     = int32(unsafe.Offsetof(Context{}.NewTarget))
-
-	// ContextSize is a Context's size, and so the distance from one to the
-	// next in an array of them.
-	ContextSize = int32(unsafe.Sizeof(Context{}))
 )
 
 // ObjectPool is the objects a construction site native code makes, `new

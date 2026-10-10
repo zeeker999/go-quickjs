@@ -5795,12 +5795,63 @@ func TestJITSSAProfitReturns(t *testing.T) {
 	}
 }
 
+// Native calls that run out of contexts have more of them at once, up to
+// jitContextsMax, those in use left where they are: a recursion 40 deep,
+// which ran out of the 24 at first, Go finishing every level, stays in
+// native code once there are 48. One deeper than the most still goes
+// through Go, and one without end throws the interpreter's RangeError.
+// Each answer is the interpreter's.
+func TestJITSSAContextsGrow(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function depth(n){if(n===0)return 0;return (depth(n-1)+n)|0}
+		function drive(k,n){let s=0;for(let i=0;i<k;i++)s=(s+depth(n))|0;return s}
+		function forever(n){return forever(n+1)+1}
+		function tryForever(){try{return String(forever(0))}catch(e){return e.name}}`
+	rounds := []string{`String(drive(200,40))`, `String(drive(200,40))`, `String(drive(200,40))`, `String(drive(200,40))`,
+		`String(drive(200,40))`, `String(drive(50,150))`, `String(drive(200,40))`, `tryForever()`, `String(drive(200,40))`}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		unwound := r.jit.unwound
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 4 || i == 8 {
+			if n, want := len(r.jit.ssaCtxs), map[int]int{4: 2 * jitContexts, 8: jitContextsMax}[i]; n != want {
+				t.Fatalf("round %d: %d contexts, want %d", i, n, want)
+			}
+			if n := r.jit.unwound - unwound; n != 0 {
+				t.Fatalf("round %d: Go finished %d levels", i, n)
+			}
+		}
+	}
+}
+
 // A call the new pipeline has seen call one compiled function is made in
 // native code (mir's native calls), the callee's frame and context made
 // there, as V8's code calls another's: a loop of such calls never leaves
 // native code. Arguments missing are undefined and extra ones dropped; a
 // method gets its receiver; recursion goes as deep as there are contexts
-// (jitContexts), then through Go. A callee that leaves native code -- for
+// (jitContexts, more once it needs them), then through Go. A callee that leaves native code -- for
 // a builtin, a throw the caller catches, a speculation that fails -- has
 // its frame and its callers' made by Go (jitUnwindNative), which finishes
 // them. Each answer is the interpreter's.
@@ -6261,8 +6312,8 @@ func TestJITSSACalleeContextsKeepNothing(t *testing.T) {
 	if _, err := r.Run(compileForTest(t, `o=undefined`)); err != nil {
 		t.Fatal(err)
 	}
-	for i := range jitContexts {
-		if c := &r.jit.ssaCtxs[i]; c.Closure != nil || c.Upvalues != nil || c.This.Ref != nil || c.RetValue.Ref != nil {
+	for i := range r.jit.ssaCtxs {
+		if c := r.jit.ssaCtxs[i]; c.Closure != nil || c.Upvalues != nil || c.This.Ref != nil || c.RetValue.Ref != nil {
 			t.Fatalf("context %d keeps what code ran with: %+v %+v %v %v", i, c.This, c.RetValue, c.Closure, c.Upvalues)
 		}
 		for k, x := range r.jit.ssaCtxs[i].Keep {

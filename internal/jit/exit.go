@@ -75,7 +75,7 @@ func (s *ExitScratch) Apply(ctx *abi.Context) (refs int) {
 		first := int64((uintptr(f.stack)-uintptr(ctx.StackBase))/uintptr(f.enc.ValueSize)) - int64(d.Locals)
 		next := ctx
 		for _, in := range d.Inline {
-			next = (*abi.Context)(unsafe.Add(unsafe.Pointer(next), abi.ContextSize))
+			next = (*abi.Context)(next.Next)
 			next.InlineClosure, next.InlineLocals, next.InlineThis, next.InlineCallee = in.Closure, in.Locals, in.ThisSlot, in.Callee
 			next.ExitKind, next.ExitPC, next.ExitDepth, next.ExitSite = in.Kind, in.PC, in.Depth, uint64(in.Site)
 			next.Live, next.Base = abi.LiveInline, uint64(first+in.Base)
