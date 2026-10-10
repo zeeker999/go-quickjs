@@ -147,7 +147,19 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 			// -- does; the old one does neither.
 			return nil, refuse(pc, "unsupported opcode "+in.Op.String())
 		}
-		host = host || in.Op == bytecode.OpNew || in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict || in.Op == bytecode.OpNewArray || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
+		str := in.Op == bytecode.OpPushConst && fn.Constants[in.A].Kind == bytecode.ConstString
+		if str && !m.ssa {
+			// The new pipeline has Go push a string constant (a host
+			// exit), which a function's cold paths -- a message it throws
+			// -- often have; the old one refuses it.
+			return nil, refuse(pc, "non-number or invalid constant")
+		}
+		if in.Op == bytecode.OpThrow && !m.ssa {
+			// The new pipeline leaves a throw to the interpreter, which
+			// throws it, as V8's code calls the runtime to throw.
+			return nil, refuse(pc, "unsupported opcode "+in.Op.String())
+		}
+		host = host || str || in.Op == bytecode.OpThrow || in.Op == bytecode.OpNew || in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict || in.Op == bytecode.OpNewArray || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 		property = property || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 		this = this || in.Op == bytecode.OpPushThis
 		raw := uint32(in.Op)
@@ -630,7 +642,7 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 	case bytecode.OpNop, bytecode.OpEndParams, bytecode.OpClearLocal:
 		return effect{}, nil
 	case bytecode.OpPushConst:
-		if uint64(in.A) >= uint64(len(fn.Constants)) || fn.Constants[in.A].Kind != bytecode.ConstNumber {
+		if uint64(in.A) >= uint64(len(fn.Constants)) || fn.Constants[in.A].Kind != bytecode.ConstNumber && fn.Constants[in.A].Kind != bytecode.ConstString {
 			return bad("non-number or invalid constant")
 		}
 		return effect{delta: 1}, nil
@@ -709,6 +721,8 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 		return effect{need: 1, delta: -1, terminal: true}, nil
 	case bytecode.OpReturnUndef:
 		return effect{terminal: true}, nil
+	case bytecode.OpThrow:
+		return effect{need: 1, delta: -1, terminal: true}, nil
 	}
 	return bad("unsupported opcode " + in.Op.String())
 }
@@ -831,7 +845,14 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this bool) ir.Instr
 		return ir.Instruction{Op: ir.PropertyRead, Left: top, Dest: sp - 1, Key: in.A}
 	case bytecode.OpSetProp:
 		return ir.Instruction{Op: ir.PropertyWrite, Left: ir.Slot(sp - 2), Right: top, Key: in.A}
+	case bytecode.OpThrow:
+		// The interpreter throws it (jitHost leaves it).
+		return ir.Instruction{Op: ir.Host}
 	case bytecode.OpPushConst:
+		if fn.Constants[in.A].Kind != bytecode.ConstNumber {
+			// A string, which Go pushes.
+			return ir.Instruction{Op: ir.Host}
+		}
 		return copyTo(sp, ir.Literal(ir.Float(fn.Constants[in.A].Num)))
 	case bytecode.OpPushInt:
 		return copyTo(sp, number(int32(in.A)))

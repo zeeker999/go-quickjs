@@ -1594,7 +1594,7 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 		case bytecode.OpPushThis, bytecode.OpGetProp, bytecode.OpSetProp, bytecode.OpCall,
 			bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpSetGlobal, bytecode.OpSetGlobalStrict,
 			bytecode.OpGetPropThis, bytecode.OpSetIndex, bytecode.OpNewArray,
-			bytecode.OpGetIndex, bytecode.OpNew:
+			bytecode.OpGetIndex, bytecode.OpNew, bytecode.OpPushConst:
 		default:
 			return sp, steps, nil
 		}
@@ -1694,6 +1694,9 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 		case bytecode.OpGetIndex:
 			sp -= 2
 			v, err = r.getIndexed(stack[sp], stack[sp+1])
+		case bytecode.OpPushConst:
+			// A string the new pipeline's code has Go push.
+			v = f.cl.consts[in.A]
 		default:
 			panic("invalid JIT host operation")
 		}

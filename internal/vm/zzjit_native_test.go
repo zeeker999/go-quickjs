@@ -6202,3 +6202,52 @@ func TestJITSSACalleeContextsKeepNothing(t *testing.T) {
 		t.Fatal("the receiver of sum and of its native calls outlived them")
 	}
 }
+
+// A string constant is pushed by Go (jitHost), and a throw left to the
+// interpreter, which throws it, as V8's code calls its runtime to throw: a
+// function with either, a message it throws on a cold path most often,
+// compiles, and its loop after the constant runs natively, not in the
+// interpreter. RayTrace's renderScene, which reads "5,5" before its pixel
+// loops and throws if the scene came out wrong, was refused for both.
+func TestJITSSAStringConstantsAndThrows(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function scale(v,n){if(v===undefined)throw "need a number, n="+n;const sep=",;";let s=0;for(let i=0;i<n;i++)s=(s+v*i)|0;return s*sep.length+n}
+		function guarded(v,n){try{return scale(v,n)}catch(e){return "caught "+e}}`
+	rounds := []string{`String(scale(3,300))`, `String(scale(3,300))`, `String(scale(5,300))`, `guarded(undefined,7)`, `String(guarded(2,300))`, `String(scale(7,300))`}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("scale")).value.Object().fn().closure
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		interpreted := r.jit.interpreted
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 5 {
+			e := r.jit.cache[weak.Make(cl.fn)]
+			if e == nil || e.ssa == nil || e.ssaStats.entries == 0 {
+				t.Fatalf("scale did not run natively: %+v", e)
+			}
+			if n := r.jit.interpreted - interpreted; n != 0 {
+				t.Fatalf("scale went on in the interpreter %d times", n)
+			}
+		}
+	}
+}
