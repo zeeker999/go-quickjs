@@ -1,5 +1,6 @@
 //go:build quickjs_jit && !android && !ios && darwin
 
+#include "funcdata.h"
 #include "textflag.h"
 
 TEXT ·enterProgram(SB), NOSPLIT|NOFRAME, $0-32
@@ -16,6 +17,30 @@ TEXT ·enterSSA(SB), NOSPLIT|NOFRAME, $0-16
 	MOVD code+0(FP), R16
 	MOVD ctx+8(FP), R0
 	JMP (R16)
+
+// callGo is where native code calls Go, as amd64's is: native code jumps
+// here, its context in R0, SP and the link register as the Go function that
+// entered it left them -- native code touches neither -- so that, to the Go
+// runtime, this is a function that one called, its return address saved
+// where a frame's is.
+TEXT ·callGo(SB), NOSPLIT|NOFRAME, $0-0
+	SUB $32, RSP
+	NO_LOCAL_POINTERS
+	MOVD R30, 0(RSP)
+	MOVD R0, 24(RSP)
+	MOVD R0, 8(RSP)
+	BL ·goCall(SB)
+	MOVD 16(RSP), R16
+	MOVD 24(RSP), R0
+	MOVD 0(RSP), R30
+	ADD $32, RSP
+	JMP (R16)
+
+// callGoAddr is callGo's address (abi.Encoding's CallGo).
+TEXT ·callGoAddr(SB), NOSPLIT, $0-8
+	MOVD $·callGo(SB), R0
+	MOVD R0, ret+0(FP)
+	RET
 
 // Darwin's data caches are coherent and its instruction maintenance granule
 // is 64 bytes. Reading CTR_EL0 traps on Apple Silicon. A barrier after each

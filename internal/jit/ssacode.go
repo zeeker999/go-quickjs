@@ -122,3 +122,27 @@ func (s *SSACode) Close() error {
 
 //go:noescape
 func enterSSA(code *byte, ctx *abi.Context)
+
+// callGo is where native code calls Go (entry_*.s), and callGoAddr its
+// address.
+func callGo()
+func callGoAddr() uintptr
+
+// CallGo is where native code jumps to call Go (abi.Encoding's CallGo).
+func CallGo() uint64 { return uint64(callGoAddr()) }
+
+// HostCall is Go's side of a call from native code (abi.Context's GoOp):
+// it does what ctx.GoOp says with ctx.GoArgs, its result to
+// ctx.Keep[ctx.GoKeep], and reports whether it did. It is set once, by the
+// VM, before any code runs.
+var HostCall func(ctx *abi.Context) bool
+
+// goCall is what callGo calls: HostCall, whose answer it puts in
+// ctx.GoStatus; it returns where the code goes on.
+func goCall(ctx *abi.Context) uintptr {
+	ctx.GoStatus = 1
+	if HostCall != nil && HostCall(ctx) {
+		ctx.GoStatus = 0
+	}
+	return ctx.GoResume
+}

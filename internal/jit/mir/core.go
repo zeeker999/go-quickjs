@@ -330,7 +330,14 @@ func (c *core) allocate() error {
 					uses = append(uses, use{a.Shadow, pos[v.ID]})
 				}
 			}
-			useState(v.State, pos[v.ID])
+			at := pos[v.ID]
+			if v.Op == ssa.OpCall && len(v.Calls) != 0 && v.Calls[0].Go != 0 {
+				// A call of Go that Go refuses exits after it, Go having
+				// taken the registers: what its state reads lives across
+				// it, saved and restored (saves).
+				at++
+			}
+			useState(v.State, at)
 		}
 		if b.Control != nil {
 			if c.isLazy(b.Control) {

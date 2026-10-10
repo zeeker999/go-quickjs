@@ -588,11 +588,13 @@ func stringConcats(p *ir.Program) {
 			set(in.Dest, slot(in.Left))
 		case ir.Binary:
 			if in.Operator == ir.Add && (slot(in.Left) || slot(in.Right)) {
-				p.Code[pc] = ir.Instruction{Op: ir.Host}
+				p.Code[pc] = ir.Instruction{Op: ir.StringAdd, Left: in.Left, Right: in.Right, Dest: in.Dest}
 				set(in.Dest, true)
 				continue
 			}
 			set(in.Dest, false)
+		case ir.StringAdd:
+			set(in.Dest, true)
 		case ir.Host, ir.Call:
 			// Its results, past what it leaves below them.
 			if pc+1 < len(p.Maps) && p.Maps[pc+1].Depth > 0 {

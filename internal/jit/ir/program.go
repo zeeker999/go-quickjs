@@ -179,6 +179,11 @@ const (
 	// uninitialized one).
 	UpvalueRead
 	UpvalueWrite
+	// StringAdd is Binary's Add where an operand may be a string (compile's
+	// stringConcats): Left + Right at Dest, which the new pipeline has Go
+	// make, called from native code (ssa.GoAdd), and leaves to Go
+	// otherwise.
+	StringAdd
 )
 
 // MaxArrayLiteral is the most elements an ArrayLiteral has: new_array
