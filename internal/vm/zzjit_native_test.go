@@ -6153,3 +6153,52 @@ func TestJITSSACallerDroppedWhileItsCalleeLeaves(t *testing.T) {
 		})
 	}
 }
+
+// What a native call's callee ran with -- its receiver, its closure, its
+// result, its keep cells, here m's, which keeps what g returns -- is not
+// kept once Go's run of the caller ends, nor the caller's own receiver and
+// captured bindings: the contexts held them, frames gone once they
+// returned, and kept alive whatever they reached for as long as the
+// runtime lived.
+func TestJITSSACalleeContextsKeepNothing(t *testing.T) {
+	// Native calls are Go's while the collector marks.
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function M(k){this.k=k;this.q={k:k}}
+		M.prototype.g=function(){let r=null;for(let j=0;j<2;j++)r=this.q;return r};
+		M.prototype.m=function(x){let t=0;for(let j=0;j<2;j++)t+=x+this.g().k;return t};
+		M.prototype.sum=(function(){let c=1;return function(n){let s=0;for(let i=0;i<n;i++)s=(s+this.m(i)+c)|0;return s}})();
+		var sum=M.prototype.sum,o=new M(3)`
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	if _, err := r.Run(compileForTest(t, setup)); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if _, err := r.Run(compileForTest(t, `o.sum(300)`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("sum")).value.Object().fn().closure
+	if e := r.jit.hint(cl.hint()); e == nil || e.ssa == nil || len(e.nativeCalls) == 0 || e.ssaStats.entries == 0 {
+		t.Fatalf("sum calls nothing natively: %+v", e)
+	}
+	o := weak.Make(r.global.getOwn(r.atoms.intern("o")).value.Object())
+	if _, err := r.Run(compileForTest(t, `o=undefined`)); err != nil {
+		t.Fatal(err)
+	}
+	for i := range jitContexts {
+		if c := &r.jit.ssaCtxs[i]; c.Closure != nil || c.Upvalues != nil || c.This.Ref != nil || c.RetValue.Ref != nil {
+			t.Fatalf("context %d keeps what code ran with: %+v %+v %v %v", i, c.This, c.RetValue, c.Closure, c.Upvalues)
+		}
+		for k, x := range r.jit.ssaCtxs[i].Keep {
+			if x.Ref != nil {
+				t.Fatalf("context %d keeps a value in keep cell %d", i, k)
+			}
+		}
+	}
+	runtime.GC()
+	runtime.GC()
+	if o.Value() != nil {
+		t.Fatal("the receiver of sum and of its native calls outlived them")
+	}
+}
