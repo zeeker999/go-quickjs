@@ -379,6 +379,9 @@ type Func struct {
 	// written marks the slots some instruction writes (Written).
 	written []bool
 	nextID  int
+	// shadowed is whether the phis' shadows and the stores' checks are
+	// made (Finish).
+	shadowed bool
 	// values and refs are slabs values, their arguments and frame states'
 	// slots come from, a chunk at a time: a compile at run time makes
 	// hundreds of each (BenchmarkJITCompile in internal/vm). Chunks double,

@@ -329,6 +329,7 @@ func (o *Object) property(v *Value) int {
 
 // EvaluateHeap is Evaluate with a heap.
 func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (ir.Exit, error) {
+	f.Finish()
 	arrays := heap.Arrays
 	e, ok := f.EntryFor(pc)
 	if !ok || len(slots) != f.Locals+f.StackSize {
