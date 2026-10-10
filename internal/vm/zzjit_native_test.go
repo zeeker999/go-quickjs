@@ -6641,6 +6641,97 @@ func TestJITSSAInlinedNestedForwardingConstructions(t *testing.T) {
 	}
 }
 
+// Looking at a construction's pools when native code leaves there makes
+// nothing: it had concatenated the entry's two lists at every exit, which
+// came to a sixth of RayTrace's allocations with construction on.
+func TestJITPoolLookupsAllocateNothing(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	if _, err := r.Run(compileForTest(t, `function P(){} function f(){return new P()} f()`)); err != nil {
+		t.Fatal(err)
+	}
+	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
+	ctor := r.global.getOwn(r.atoms.intern("P")).value.Object()
+	pc := slices.IndexFunc(cl.fn.Code, func(in bytecode.Instr) bool { return in.Op == bytecode.OpNew })
+	if pc < 0 || r.jit == nil {
+		t.Fatal("no construction")
+	}
+	pool := new(abi.ObjectPool)
+	e := &jitEntry{inlines: []jitInline{{pc: int32(pc), cl: ctor.fn().closure, obj: ctor, pool: pool}},
+		nativeCalls: []jitInline{{pc: int32(pc) + 1}}}
+	r.jit.cache[weak.Make(cl.fn)] = e
+	l := &jitNativeLevel{cl: cl, pc: uint64(pc), kind: abi.ExitHost}
+	if !r.jitPoolEmptied(l) {
+		t.Fatal("the empty pool is not found")
+	}
+	if n := testing.AllocsPerRun(100, func() { r.jitPoolEmptied(l) }); n != 0 {
+		t.Fatalf("%v allocations a look", n)
+	}
+}
+
+// A read of a function's own property -- its prototype, which the VM's
+// caches never learn -- is made natively by searching the function's
+// table, as RayTrace calls methods through Flog.RayTracer.Vector.prototype:
+// the read had left native code at every call, and its functions were
+// demoted; and the method so read is called natively from the first
+// compile, found by the reads that name it. One the VM makes on demand, a
+// prototype not read before, a length or a name, Go reads. Each answer is
+// the interpreter's.
+func TestJITSSAReadsFunctionProperties(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function V(x){this.x=x} V.prototype={add(a,b){return (a+b)|0}};
+		function W(){} var NS={V:V,W:W};
+		function run(n){let s=0;for(let i=0;i<n;i++){s=NS.V.prototype.add(s,i)}return s}
+		function odd(n){let s=0;for(let i=0;i<n;i++){s=(s+NS.W.length+NS.V.name.length+(NS.W.prototype.constructor===W?1:0))|0}return s}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("run")).value.Object().fn().closure
+	rounds := []string{`String(run(300))`, `String(run(300))`, `String(run(300))`, `String(run(300))`, `String(odd(300))`, `String(odd(300))`,
+		`V.prototype={add(a,b){return (a-b)|0}};String(run(300))`, `String(run(300))`}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts uint64
+		if e := r.jit.cache[weak.Make(cl.fn)]; e != nil {
+			hosts = e.ssaStats.hosts
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 3 {
+			e := r.jit.cache[weak.Make(cl.fn)]
+			if e == nil || e.ssa == nil || e.entrySlow {
+				t.Fatalf("run did not run natively: %+v", e)
+			}
+			if n := e.ssaStats.hosts - hosts; n > 1 {
+				t.Fatalf("run left native code %d times", n)
+			}
+			// The method found by the reads naming it as its first code
+			// was compiled (jitCalleeAt), not learned at an exit after.
+			if e.inlineReopts != 0 {
+				t.Fatalf("run was compiled again %d times for its calls", e.inlineReopts)
+			}
+		}
+	}
+}
+
 // A forwarding constructor's read of its method, this.initialize, is
 // compiled for an object as the construction's pool holds them, found on
 // the constructor's prototype -- also when the pool has run out as the
@@ -6704,6 +6795,7 @@ func TestJITSSAInlinedCalleeLearns(t *testing.T) {
 		}
 	}
 	cl := r.global.getOwn(r.atoms.intern("run")).value.Object().fn().closure
+	start := r.jit.reoptimized
 	for i := range 5 {
 		wv, err := want.Run(compileForTest(t, `String(run(300))`))
 		if err != nil {
@@ -6713,6 +6805,7 @@ func TestJITSSAInlinedCalleeLearns(t *testing.T) {
 		if e := r.jit.cache[weak.Make(cl.fn)]; e != nil {
 			hosts = e.ssaStats.hosts
 		}
+		reoptimized := r.jit.reoptimized
 		gv, err := r.Run(compileForTest(t, `String(run(300))`))
 		if err != nil {
 			t.Fatal(err)
@@ -6729,7 +6822,16 @@ func TestJITSSAInlinedCalleeLearns(t *testing.T) {
 			if n := e.ssaStats.hosts - hosts; n > 300/abi.PoolSize+2 {
 				t.Fatalf("round %d: run left native code %d times for 300 constructions", i, n)
 			}
+			if r.jit.reoptimized != reoptimized {
+				t.Fatalf("round %d: run compiled again", i)
+			}
 		}
+	}
+	// Compiled again once, for what it learned: not for a site the code
+	// before noted (jitEntry.fedInlined is the code's), which once made it
+	// six times.
+	if n := r.jit.reoptimized - start; n != 1 {
+		t.Fatalf("run compiled again %d times", n)
 	}
 }
 
