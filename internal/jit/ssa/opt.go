@@ -210,39 +210,39 @@ func unboxPhis(f *Func) bool {
 	// By value ID: n bounds the IDs of the values there are now; the values
 	// this pass makes are numbered from n.
 	n := f.nextID
-	phis := f.scr().phis[:0] // the candidates, in block order
+	// The candidates, in block order, and what guards unbox: evidence is an
+	// unboxing that speculates, as arithmetic makes. One that exits to Go (a
+	// comparison, a property write, a remainder) marks a site that takes any
+	// value, which says nothing of the phi's: counting it had the entry
+	// speculate a receiver written to a property is a number, and fail
+	// every call.
+	phis, guarded := f.scr().phis[:0], f.scr().work[:0]
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
-			if v.Op == OpPhi && v.Type == Tagged {
+			switch {
+			case v.Op == OpPhi && v.Type == Tagged:
 				phis = append(phis, v)
+			case v.Op == OpUnboxF64 && ir.ExitKind(v.Aux) == ir.GuardExit:
+				guarded = append(guarded, v.Args[0])
 			}
 		}
 	}
-	f.scr().phis = phis[:0] // kept for the next round
+	f.scr().phis, f.scr().work = phis[:0], guarded[:0] // kept for the next round
 	if len(phis) == 0 {
 		return false
 	}
-	// Three tables of flags and three of values, by ID, from scratch the
+	// Three tables of flags and two of values, by ID, from scratch the
 	// Func keeps.
 	flags := idTable(f.scr().flags, 3*n)
 	f.scr().flags = flags
 	cand, unboxedUse, boxed := flags[:n:n], flags[n:2*n:2*n], flags[2*n:]
-	vals := idTable(f.scr().vals, 3*n)
+	vals := idTable(f.scr().vals, 2*n)
 	f.scr().vals = vals
 	for _, v := range phis {
 		cand[v.ID] = true
 	}
-	// Evidence is an unboxing that speculates: a guard, as arithmetic makes.
-	// One that exits to Go (a comparison, a property write, a remainder)
-	// marks a site that takes any value, which says nothing of the phi's:
-	// counting it had the entry speculate a receiver written to a property
-	// is a number, and fail every call.
-	for _, b := range f.Blocks {
-		for _, v := range b.Values {
-			if v.Op == OpUnboxF64 && ir.ExitKind(v.Aux) == ir.GuardExit {
-				unboxedUse[v.Args[0].ID] = true
-			}
-		}
+	for _, a := range guarded {
+		unboxedUse[a.ID] = true
 	}
 	isCand := func(a *Value) bool { return a.ID < n && cand[a.ID] }
 	numeric := func(a *Value) bool {
@@ -308,7 +308,7 @@ func unboxPhis(f *Func) bool {
 	if len(ordered) == 0 {
 		return false
 	}
-	unboxed := vals[n : 2*n : 2*n]
+	unboxed := vals[n:]
 	for _, v := range ordered {
 		p := fp[v.ID]
 		for _, a := range v.Args {
@@ -340,10 +340,10 @@ func unboxPhis(f *Func) bool {
 			p.Args = append(p.Args, x)
 		}
 	}
-	subst := vals[2*n:]
-	// Each block's values become its phis, with the new numeric ones beside
+	// Each block's values become its phis, the new numeric ones in place of
 	// those they replace, the boxes of those, then the rest, in order:
-	// built in buffers the pass reuses.
+	// built in buffers the pass reuses. An old phi becomes its box, so
+	// whatever used it -- values, frame states, controls -- uses the box.
 	front, boxes, rest := f.scr().front, f.scr().boxes, f.scr().rest
 	for _, b := range f.Blocks {
 		front, boxes, rest = front[:0], boxes[:0], rest[:0]
@@ -352,15 +352,15 @@ func unboxPhis(f *Func) bool {
 				rest = append(rest, v)
 				continue
 			}
-			front = append(front, v)
-			if v.ID < n && fp[v.ID] != nil {
-				p := fp[v.ID]
-				front = append(front, p)
-				box := f.alloc(Value{Op: OpBoxF64, Type: Tagged, Args: f.refsOf(1), Block: b})
-				box.Args[0] = p
-				boxes = append(boxes, box)
-				subst[v.ID] = box
+			if v.ID >= n || fp[v.ID] == nil {
+				front = append(front, v)
+				continue
 			}
+			p := fp[v.ID]
+			front = append(front, p)
+			*v = Value{ID: v.ID, Op: OpBoxF64, Type: Tagged, Args: v.Args[:1], Block: b, Uses: v.Uses}
+			v.Args[0] = p
+			boxes = append(boxes, v)
 		}
 		total := len(front) + len(boxes) + len(rest)
 		if cap(b.Values) < total {
@@ -372,12 +372,6 @@ func unboxPhis(f *Func) bool {
 		copy(b.Values[len(front)+len(boxes):], rest)
 	}
 	f.scr().front, f.scr().boxes, f.scr().rest = front[:0], boxes[:0], rest[:0]
-	rewrite(f, func(v *Value) *Value {
-		if v.ID < n && subst[v.ID] != nil {
-			return subst[v.ID]
-		}
-		return v
-	})
 	return true
 }
 
