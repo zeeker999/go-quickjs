@@ -46,7 +46,7 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 		next := pc + 1
 		switch in.Op {
 		case Nop:
-		case Host, Call, TypeTest, BindingWrite, BindingCheck, Resolved, ObjectLiteral, FieldDefine:
+		case Host, Call, TypeTest, BindingWrite, BindingCheck, Resolved, ObjectLiteral, FieldDefine, ArrayLiteral:
 			// TypeTest's objects are Go's to classify.
 			exit.Kind = HostExit
 			return exit, nil

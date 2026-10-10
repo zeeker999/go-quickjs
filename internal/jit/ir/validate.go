@@ -62,6 +62,11 @@ func (p *Program) Validate() error {
 			write = true
 		case FieldDefine:
 			left, right = true, true
+		case ArrayLiteral:
+			write = true
+			if in.Extra < 0 || in.Extra > MaxArrayLiteral || in.Dest < 0 || in.Dest+in.Extra != active {
+				return bad("invalid array literal")
+			}
 		case StringCode:
 			left, right, third, write = true, true, true, true
 		case Call:

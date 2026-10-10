@@ -282,6 +282,12 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 					p.Code[pc] = mod
 				}
 			}
+			if b := fn.Code[pc]; in.Op == ir.Host && b.Op == bytecode.OpNewArray && b.A <= ir.MaxArrayLiteral && p.Maps[pc].Depth >= 0 {
+				// An array literal: the new pipeline makes it from its
+				// site's pool where the VM knows the site.
+				n := int(b.A)
+				p.Code[pc] = ir.Instruction{Op: ir.ArrayLiteral, Dest: p.Locals + p.Maps[pc].Depth - n, Extra: n}
+			}
 			if in.Op == ir.BindingRead {
 				// The operand is the binding view's slot in the old pipeline;
 				// the new one reads the global object, through its context.

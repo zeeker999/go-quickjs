@@ -223,6 +223,10 @@ type jitLiteral struct {
 	pc   int32
 	root *shape
 	pool *abi.ObjectPool
+	// array marks an array literal's (new_array), whose arrays have room
+	// for n elements and none yet.
+	array bool
+	n     int
 }
 
 // jitLiteralAt is e's literal at pc, made for cl's site if it has none, or
@@ -234,6 +238,12 @@ func (r *Runtime) jitLiteralAt(e *jitEntry, cl *closure, pc int) *jitLiteral {
 		}
 	}
 	in := cl.fn.Code[pc]
+	if in.Op == bytecode.OpNewArray && in.A <= ir.MaxArrayLiteral {
+		e.literals = append(e.literals, jitLiteral{pc: int32(pc), pool: new(abi.ObjectPool), array: true, n: int(in.A)})
+		l := &e.literals[len(e.literals)-1]
+		r.jitFillLiteral(l)
+		return l
+	}
 	if in.Op != bytecode.OpNewObject || int(in.B) >= len(cl.ic) {
 		return nil
 	}
@@ -241,26 +251,39 @@ func (r *Runtime) jitLiteralAt(e *jitEntry, cl *closure, pc int) *jitLiteral {
 	if root == nil {
 		return nil
 	}
-	e.literals = append(e.literals, jitLiteral{pc: int32(pc), root: root, pool: new(abi.ObjectPool)})
+	e.literals = append(e.literals, jitLiteral{pc: int32(pc), root: root, pool: new(abi.ObjectPool), n: int(in.A)})
 	l := &e.literals[len(e.literals)-1]
-	r.jitFillLiteral(l, int(in.A))
+	r.jitFillLiteral(l)
 	return l
 }
 
 // jitFillLiteral fills l's pool with objects as the literal makes them,
-// room for its n fields: Size of them, as jitFillPool fills a pool.
-func (r *Runtime) jitFillLiteral(l *jitLiteral, n int) {
+// room for its n fields: Size of them, as jitFillPool fills a pool. An
+// array literal's are arrays with room for its elements, none yet, of the
+// layout a property cache gives an array (ensureShape), as jitFillPool's
+// for new Array() are.
+func (r *Runtime) jitFillLiteral(l *jitLiteral) {
 	pool := l.pool
 	if pool.Size == 0 {
 		pool.Size = abi.PoolSize
 	}
 	clear(pool.Objects[:])
 	for i := range int(pool.Size) {
-		o := newLiteralObject(r.proto.object, ClassObject, n)
+		if l.array {
+			a := newArrayObject(r.proto.array, l.n)
+			a.elems = a.elems[:0]
+			r.ensureShape(a)
+			pool.Objects[i] = unsafe.Pointer(a)
+			continue
+		}
+		o := newLiteralObject(r.proto.object, ClassObject, l.n)
 		o.shape = l.root
 		pool.Objects[i] = unsafe.Pointer(o)
 	}
 	pool.Count, pool.Proto = pool.Size, unsafe.Pointer(r.proto.object)
+	if l.array {
+		pool.Proto = unsafe.Pointer(r.proto.array)
+	}
 }
 
 // jitDefineSeen notes an exit at a literal's field, pc, that the code was
@@ -280,7 +303,7 @@ func (r *Runtime) jitRefillLiteral(f *frame, e *jitEntry, pc int) {
 	for i := range e.literals {
 		if l := &e.literals[i]; int(l.pc) == pc && l.pool.Count == 0 {
 			l.pool.Size = min(2*max(l.pool.Size, abi.PoolSize), abi.PoolCapacity)
-			r.jitFillLiteral(l, int(f.cl.fn.Code[pc].A))
+			r.jitFillLiteral(l)
 		}
 	}
 }
@@ -297,7 +320,9 @@ func (fb *jitFeedback) Literal(pc int) (ssa.LiteralSite, bool) {
 	}
 	k := fb.keep()
 	k.pools = append(k.pools, l.pool)
-	k.shapes = append(k.shapes, remember(l.root))
+	if l.root != nil {
+		k.shapes = append(k.shapes, remember(l.root))
+	}
 	return ssa.LiteralSite{Pool: uintptr(unsafe.Pointer(l.pool))}, true
 }
 
@@ -2587,7 +2612,7 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 				r.jitCallSeen(f, e, exitPC, f.base+int(ctx.ExitDepth), in)
 			case bytecode.OpGetProp, bytecode.OpGetPropThis:
 				r.jitPolySeen(f, e, exitPC, f.base+int(ctx.ExitDepth), in)
-			case bytecode.OpNewObject:
+			case bytecode.OpNewObject, bytecode.OpNewArray:
 				r.jitRefillLiteral(f, e, exitPC)
 			case bytecode.OpDefineField:
 				jitDefineSeen(e, exitPC)
@@ -3157,7 +3182,7 @@ func (r *Runtime) jitFinishExit(f *frame, e *jitEntry, l *jitNativeLevel) (Value
 				r.jitCallSeen(f, e, pc, f.base+depth, in)
 			case bytecode.OpGetProp, bytecode.OpGetPropThis:
 				r.jitPolySeen(f, e, pc, f.base+depth, in)
-			case bytecode.OpNewObject:
+			case bytecode.OpNewObject, bytecode.OpNewArray:
 				r.jitRefillLiteral(f, e, pc)
 			case bytecode.OpDefineField:
 				jitDefineSeen(e, pc)

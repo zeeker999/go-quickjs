@@ -164,7 +164,15 @@ const (
 	// a literal makes it, natively along the shapes' transition
 	// (ssa.PropertyAdd's Define), Go's otherwise.
 	FieldDefine
+	// ArrayLiteral is new_array: an array of the Extra operands from Dest
+	// on, at Dest, natively from its site's pool (ssa.LiteralSite), Go's
+	// otherwise. At most MaxArrayLiteral elements.
+	ArrayLiteral
 )
+
+// MaxArrayLiteral is the most elements an ArrayLiteral has: new_array
+// with more is Go's.
+const MaxArrayLiteral = 16
 
 // The types a TypeTest asks about.
 const (
