@@ -6513,3 +6513,42 @@ func TestJITSSAInlinedNestedForwardingConstructions(t *testing.T) {
 		}
 	}
 }
+
+// Code called natively that leaves on too many of its calls is compiled
+// again for what its exits taught, its native callers calling it still, as
+// V8 optimizes again after a deopt; only after jitUnwindReopts such
+// compiles do they stop calling it (notNative). A callee that left while
+// it learned -- RayTrace's Sphere.intersect, before its constructions were
+// decided -- had been made notNative at once, with a backoff that kept it
+// so for the rest of the run.
+func TestJITSSAUnwoundCompilesAgainFirst(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	if _, err := r.Run(compileForTest(t, `function g(n){let s=0;for(let i=0;i<n;i++)s=(s+i)|0;return s}g(300);g(300)`)); err != nil {
+		t.Fatal(err)
+	}
+	g := r.jit.cache[weak.Make(r.global.getOwn(r.atoms.intern("g")).value.Object().fn().closure.fn)]
+	if g == nil || g.ssa == nil {
+		t.Fatal("g has no code")
+	}
+	// An entry of its own, with code, as a callee's.
+	e := &jitEntry{ssa: g.ssa}
+	leave := func() {
+		// One call in two leaves.
+		for range jitUnwindProbe {
+			e.nativeIn += 2
+			r.jitUnwound(e)
+		}
+	}
+	for i := range jitUnwindReopts {
+		leave()
+		if !e.unwindReopt || e.notNative || int(e.unwindReopts) != i+1 {
+			t.Fatalf("leaving too often %d times: compiled again %v, notNative %v", i+1, e.unwindReopt, e.notNative)
+		}
+		e.unwindReopt = false
+	}
+	leave()
+	if !e.notNative || e.nativeBackoff != 1 {
+		t.Fatalf("leaving too often after its compiles: notNative %v, backoff %d", e.notNative, e.nativeBackoff)
+	}
+}
