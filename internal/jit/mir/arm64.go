@@ -47,6 +47,10 @@ type a64Compiler struct {
 	table     arm64.Label
 	tableUsed bool
 	exits     []*abi.ExitDescriptor
+	// enter is where native calls to callees with no native code go
+	// (enterExit), if any does.
+	enter     arm64.Label
+	enterUsed bool
 }
 
 type a64Stub struct {
@@ -139,6 +143,10 @@ func compileARM64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err 
 	if c.tableUsed {
 		c.a.Bind(c.table)
 		c.tableExit()
+	}
+	if c.enterUsed {
+		c.a.Bind(c.enter)
+		c.enterExit()
 	}
 	bytes, err := c.a.Finish()
 	if err != nil {
@@ -428,6 +436,20 @@ func (c *a64Compiler) exitThen(s *ssa.FrameState, kind uint64, then *arm64.Label
 // tableExit is where exits that leave their frames to Go go, as amd64's:
 // with the description's address in A, it saves the registers a
 // description may name and returns to Go with an abi.ExitTable exit.
+// enterExit is where a native call goes whose callee, its function object
+// in A, has no native code native callers may call, as amd64's.
+func (c *a64Compiler) enterExit() {
+	c.a.Store(a64Ctx, abi.OffEnterCallee, a64A)
+	for _, off := range []int32{abi.OffRecords, abi.OffExitPC, abi.OffExitDepth} {
+		c.a.Store(a64Ctx, off, arm64.ZR)
+	}
+	c.a.MovImm(a64A, ^uint64(0))
+	c.a.Store(a64Ctx, abi.OffExitSite, a64A)
+	c.a.MovImm(a64A, abi.ExitEnter)
+	c.a.Store(a64Ctx, abi.OffExitKind, a64A)
+	c.a.Ret()
+}
+
 func (c *a64Compiler) tableExit() {
 	c.a.Store(a64Ctx, abi.OffExitDesc, a64A)
 	for _, r := range append([]int{int(a64Locals), int(a64Stack)}, c.gprs...) {
@@ -1252,9 +1274,8 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 			c.a.Bind(next)
 			continue
 		}
-		c.a.MovImm(a64A, uint64(t.Entry))
-		c.a.Load(a64A, a64A, 0)
-		c.a.Cbz(a64A, stub, true)
+		// No code native callers may call is no reason to leave: Go runs
+		// the callee once its frame is made (enterExit).
 		if t.Coerce {
 			recv := v.Args[0]
 			if t.Via != 0 {
@@ -1475,7 +1496,15 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		c.a.MovImm(a64A, uint64(t.Entry))
 		c.a.Load(a64A, a64A, 0)
 		c.a.MovRR(a64Ctx, calleeCtx)
+		enter := c.a.NewLabel()
+		c.a.Cbz(a64A, enter, true)
 		c.a.Br(a64A)
+		c.a.Bind(enter)
+		c.a.MovImm(a64A, uint64(t.Callee))
+		if !c.enterUsed {
+			c.enter, c.enterUsed = c.a.NewLabel(), true
+		}
+		c.a.B(c.enter)
 		c.a.Bind(next)
 	}
 	c.a.Bind(back)

@@ -117,6 +117,10 @@ type Context struct {
 	// are; InlineThis 1 plus its receiver's slot, or 0. Base is where the
 	// frame is; the exit fields say where it left.
 	InlineClosure, InlineLocals, InlineThis uint64
+	// EnterCallee is the function object a native call called that had no
+	// native code for native callers to call (ExitEnter), which its
+	// caller's code keeps alive.
+	EnterCallee uintptr
 	// Records counts the Record entries an exit filled. Every other slot of
 	// its state is in the frame already.
 	Records uint64
@@ -276,6 +280,7 @@ var (
 	OffXRegs    = int32(unsafe.Offsetof(Context{}.XRegs))
 
 	OffInlineClosure = int32(unsafe.Offsetof(Context{}.InlineClosure))
+	OffEnterCallee   = int32(unsafe.Offsetof(Context{}.EnterCallee))
 	OffInlineLocals  = int32(unsafe.Offsetof(Context{}.InlineLocals))
 	OffInlineThis    = int32(unsafe.Offsetof(Context{}.InlineThis))
 
@@ -332,6 +337,11 @@ const (
 	// ExitDesc and the registers it saved; Go then puts the exit's own
 	// kind here. No one but the code that runs native code sees it.
 	ExitTable
+	// ExitEnter: a native call's callee, EnterCallee, had no native code
+	// its native callers may call: its frame is made, its arguments in it,
+	// and Go runs it from its start, as the call would have; its caller's
+	// code goes on after the call (ReturnTo), as after a callee that left.
+	ExitEnter
 )
 
 // Encoding is how the VM represents a value in memory: a number word (a

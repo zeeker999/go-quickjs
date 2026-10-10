@@ -354,6 +354,9 @@ type jitState struct {
 	ssaRecords uint64
 	// backendPanics counts the compiles a backend refused for panicking.
 	backendPanics uint64
+	// entered counts the native calls Go ran the callee of from its
+	// start, the callee having no native code (abi.ExitEnter).
+	entered uint64
 	// exitScratch is what exits that leave their frames to Go are read
 	// into (jit.ExitScratch).
 	exitScratch   jit.ExitScratch

@@ -5991,3 +5991,79 @@ func TestJITSSANativeCallTargets(t *testing.T) {
 		t.Fatalf("after leaf's code was dropped: got %s, interpreter %s", got, want)
 	}
 }
+
+// A native call whose callee has no code native callers may call -- one
+// they stopped calling natively for leaving too often (notNative), as the
+// test marks them -- has Go run the callee from its start and goes on
+// natively after the call (abi.ExitEnter), its own frame never written: a
+// call, a method call with its receiver, constructions whose callee
+// returns nothing or a primitive, and a callee that throws.
+func TestJITSSAEntersCalleesWithoutCode(t *testing.T) {
+	setup := `function h(x){return String(x).length+x}
+		function M(k){this.k=k}
+		M.prototype.m=function(x){return String(x).length+this.k}
+		function C(x){this.v=String(x)}
+		function P(x){this.v=String(x);return 7}
+		function thrower(x){throw new Error("bad "+x)}
+		function bad(x){if(x===250)thrower(x);return String(x).length}
+		function calls(n){let s=0;for(let i=0;i<n;i++)s=(s+h(i))|0;return s}
+		function methods(o,n){let s=0;for(let i=0;i<n;i++)s=(s+o.m(i))|0;return s}
+		function constructs(n){let s=0;for(let i=0;i<n;i++){s=(s+new C(i).v.length+new P(i).v.length)|0}return s}
+		function throws(n){let s=0;for(let i=0;i<n;i++)s=(s+bad(i))|0;return s}
+		var o=new M(3)`
+	for _, tc := range []struct {
+		name, run string
+		caller    string
+		construct bool
+	}{
+		{"call", `[calls(300),calls(300)]`, "calls", false},
+		{"method", `[methods(o,300),methods(o,300)]`, "methods", false},
+		{"construct", `[constructs(300),constructs(300)]`, "constructs", true},
+		{"throw", `var r=[];for(let k=0;k<3;k++){try{r.push(throws(300))}catch(e){r.push(e.message)}}r`, "throws", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func(c bool) { jitcompile.SSAConstruct = c }(jitcompile.SSAConstruct)
+			jitcompile.SSAConstruct = tc.construct
+			src := setup + ";" + tc.run + ".map(String).join()"
+			want := New(Config{})
+			defer func() { want.Close(); want.ReleaseClosed() }()
+			if _, err := want.Run(compileForTest(t, setup)); err != nil {
+				t.Fatal(err)
+			}
+			wv, err := want.Run(compileForTest(t, tc.run+".map(String).join()"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := jitRuntimeForTest(t, Config{JIT: true})
+			r.jitSSA = true
+			if _, err := r.Run(compileForTest(t, src)); err != nil {
+				t.Fatal(err)
+			}
+			// The callees the caller calls natively: native callers stop.
+			cl := r.global.getOwn(r.atoms.intern(tc.caller)).value.Object().fn().closure
+			e := r.jit.hint(cl.hint())
+			if e == nil || len(e.nativeCalls) == 0 {
+				t.Fatalf("%s calls nothing natively: %+v", tc.caller, e)
+			}
+			// Its callees left native code at every call so far, which may
+			// have made Go stop entering it (jitSSAProfit): it does again.
+			e.entrySlow, e.ssaStats = false, jitSSAStats{}
+			for _, x := range e.nativeCalls {
+				if ce := r.jit.cache[weak.Make(x.cl.fn)]; ce != nil {
+					ce.notNative, ce.nativeEntry, ce.nativeRetry = true, 0, 0
+				}
+			}
+			entered := r.jit.entered
+			gv, err := r.Run(compileForTest(t, tc.run+".map(String).join()"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := gv.String().Go(), wv.String().Go(); got != want {
+				t.Fatalf("got %s, interpreter %s", got, want)
+			}
+			if r.jit.entered == entered {
+				t.Fatalf("no native call ran its callee from its start: %+v", r.JITStats())
+			}
+		})
+	}
+}

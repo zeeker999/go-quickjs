@@ -44,6 +44,10 @@ type compiler struct {
 	table     amd64.Label
 	tableUsed bool
 	exits     []*abi.ExitDescriptor
+	// enter is where native calls to callees with no native code go
+	// (enterExit), if any does.
+	enter     amd64.Label
+	enterUsed bool
 }
 
 type stub struct {
@@ -134,6 +138,10 @@ func compileAMD64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err 
 	if c.tableUsed {
 		c.a.Bind(c.table)
 		c.tableExit()
+	}
+	if c.enterUsed {
+		c.a.Bind(c.enter)
+		c.enterExit()
 	}
 	bytes, err := c.a.Finish()
 	if err != nil {
@@ -411,10 +419,9 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 			c.a.Bind(next)
 			continue
 		}
-		c.a.MovImm(scratchA, uint64(t.Entry))
-		c.a.Load(scratchA, scratchA, 0)
-		c.a.Op(amd64.Test, scratchA, scratchA, true)
-		guard(amd64.CondE)
+		// No code native callers may call (abi.Context's nativeEntry 0) is
+		// no reason to leave: Go runs the callee once its frame is made
+		// (enterExit).
 		if t.Coerce {
 			// A receiver that is not an object is coerced, which Go does:
 			// the method call's, or the first argument of a call through
@@ -662,7 +669,16 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 		c.a.MovImm(scratchA, uint64(t.Entry))
 		c.a.Load(scratchA, scratchA, 0)
 		c.a.MovRR(regCtx, calleeCtx)
+		enter := c.a.NewLabel()
+		c.a.Op(amd64.Test, scratchA, scratchA, true)
+		c.a.Jcc(amd64.CondE, enter)
 		c.a.JmpReg(scratchA)
+		c.a.Bind(enter)
+		c.a.MovImm(scratchA, uint64(t.Callee))
+		if !c.enterUsed {
+			c.enter, c.enterUsed = c.a.NewLabel(), true
+		}
+		c.a.Jmp(c.enter)
 		c.a.Bind(next)
 	}
 	// The callee returned (returnNative), its context in regCtx: its result
@@ -1116,6 +1132,24 @@ func (c *compiler) tableExit() {
 		c.a.StoreSD(regCtx, abi.OffXRegs+int32(x)*8, amd64.XReg(x))
 	}
 	c.a.MovImm(scratchA, abi.ExitTable)
+	c.a.Store(regCtx, abi.OffExitKind, scratchA)
+	c.a.Ret()
+}
+
+// enterExit is where a native call goes whose callee, its function object
+// in scratchA, has no native code native callers may call: in the callee's
+// context, its frame made, it returns to Go with abi.ExitEnter, for Go to
+// run the callee and resume the caller after the call (ReturnTo) -- not a
+// host exit, which writes the caller's frame and has Go make the call.
+func (c *compiler) enterExit() {
+	c.a.Store(regCtx, abi.OffEnterCallee, scratchA)
+	c.a.MovImm(scratchA, 0)
+	for _, off := range []int32{abi.OffRecords, abi.OffExitPC, abi.OffExitDepth} {
+		c.a.Store(regCtx, off, scratchA)
+	}
+	c.a.MovImm(scratchA, ^uint64(0))
+	c.a.Store(regCtx, abi.OffExitSite, scratchA)
+	c.a.MovImm(scratchA, abi.ExitEnter)
 	c.a.Store(regCtx, abi.OffExitKind, scratchA)
 	c.a.Ret()
 }
