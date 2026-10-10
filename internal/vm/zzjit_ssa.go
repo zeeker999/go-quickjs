@@ -922,13 +922,13 @@ func (fb *jitFeedback) NativeCalls(pc int) []ssa.CallSite {
 		// Only looked up: a compile here would share the workspaces of the
 		// one asking. jitCallSeen compiled it.
 		ce := fb.r.jit.cache[weak.Make(in.cl.fn)]
-		if ce == nil || ce.ssa == nil || ce.ssaStrings || len(in.cl.fn.Upvalues) != 0 {
+		if ce == nil || ce.ssa == nil || ce.ssaStrings {
 			continue
 		}
 		call, fn := fb.fn.Code[pc], in.cl.fn
 		this := -1
 		if ce.this {
-			this = fn.LocalCount
+			this = fn.LocalCount + len(fn.Upvalues)
 		}
 		fb.callees = append(fb.callees, ce)
 		fb.holders = append(fb.holders, in.obj)
@@ -937,6 +937,12 @@ func (fb *jitFeedback) NativeCalls(pc int) []ssa.CallSite {
 			Entry: uintptr(unsafe.Pointer(&ce.nativeEntry)), Count: uintptr(unsafe.Pointer(&ce.nativeIn)),
 			Argc: int(call.A), Method: call.Op == bytecode.OpCallMethod,
 			Params: fn.ParamCount, LocalCount: fn.LocalCount, MaxStack: fn.MaxStack, ThisSlot: this, Coerce: fn.CoerceThis,
+		}
+		if len(in.cl.upvalues) != 0 {
+			// Its captured bindings, which its code reads through its
+			// context; the call checks it calls this closure's function
+			// object, which keeps them.
+			site.Upvalues = uintptr(unsafe.Pointer(unsafe.SliceData(in.cl.upvalues)))
 		}
 		if in.via {
 			site.Via = uintptr(unsafe.Pointer(fb.r.callFn))
@@ -1349,7 +1355,7 @@ func (r *Runtime) jitSeedCalls(cl *closure, e *jitEntry, p *ir.Program) {
 			continue
 		}
 		cf := callee.fn
-		if cf == fn || cf.TopLevel || cf.IsModule || cf.UsesArguments || cf.HasDirectEval || len(cf.Upvalues) != 0 {
+		if cf == fn || cf.TopLevel || cf.IsModule || cf.UsesArguments || cf.HasDirectEval {
 			continue
 		}
 		ce := r.jit.cache[weak.Make(cf)]
@@ -1962,7 +1968,7 @@ func (r *Runtime) jitRefillPools(f *frame, e *jitEntry, pc, sp int, in bytecode.
 // nowhere, until the callee is called natively again (jitRetryNative).
 func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
 	fn := cl.fn
-	if fn.TopLevel || fn.IsModule || fn.UsesArguments || fn.HasDirectEval || len(fn.Upvalues) != 0 {
+	if fn.TopLevel || fn.IsModule || fn.UsesArguments || fn.HasDirectEval {
 		return nil
 	}
 	e := r.jitFor(cl)

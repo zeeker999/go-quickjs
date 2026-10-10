@@ -131,6 +131,9 @@ func Optimize(f *Func) {
 			break
 		}
 	}
+	if rematerializeUpvalues(f) {
+		removeDead(f)
+	}
 	shadowMerges(f)
 	if kept, stores, live := keepAcrossStores(f); kept {
 		// The phis' shadows again, for the phis the keeps made; those
@@ -282,6 +285,13 @@ func unboxPhis(f *Func) bool {
 	numeric := func(a *Value) bool {
 		return a.Op == OpBoxF64 || a.Op == OpConst && a.Const.Kind == ir.Number
 	}
+	// loaded is a slot loaded at an entry whose speculation has not
+	// failed, or a captured binding read from its cell there or after a
+	// call, with the state to exit to (builder.reloadUpvalues).
+	loaded := func(a *Value) bool {
+		upvalue := a.Op == OpLoadCell && a.Args[0].Op == OpUpvalueCell
+		return upvalue && a.State != nil || (a.Op == OpLoadSlot || upvalue) && a.Block.PC < 0 && !a.Block.Generic
+	}
 	// Filter until stable: a candidate's arguments must be acceptable, and it
 	// needs evidence, directly or through candidates. Removing one candidate
 	// can disqualify another, so both filters repeat. The result is the same
@@ -293,7 +303,7 @@ func unboxPhis(f *Func) bool {
 				continue
 			}
 			for _, a := range v.Args {
-				if !numeric(a) && !isCand(a) && !(a.Op == OpLoadSlot && a.Block.PC < 0 && !a.Block.Generic) {
+				if !numeric(a) && !isCand(a) && !loaded(a) {
 					cand[v.ID] = false
 					changed = true
 					break
@@ -363,7 +373,14 @@ func unboxPhis(f *Func) bool {
 				x = fp[a.ID]
 			default:
 				x = unboxed[a.ID]
-				if x == nil {
+				if x == nil && a.Block.PC >= 0 {
+					// A captured binding read after a call: unboxed there.
+					x = f.alloc(Value{Op: OpUnboxF64, Type: Float64, Args: f.refsOf(1),
+						Aux: int(ir.GuardExit), State: a.State, Block: a.Block})
+					x.Args[0] = a
+					insertAfter(f, a, x)
+					unboxed[a.ID] = x
+				} else if x == nil {
 					e := a.Block
 					x = f.alloc(Value{Op: OpUnboxF64, Type: Float64, Args: f.refsOf(1),
 						Aux: int(ir.GuardExit), State: e.Header, Block: e})
@@ -407,6 +424,119 @@ func unboxPhis(f *Func) bool {
 		copy(b.Values[len(front)+len(boxes):], rest)
 	}
 	f.scr().front, f.scr().boxes, f.scr().rest = front[:0], boxes[:0], rest[:0]
+	return true
+}
+
+// rematerializeUpvalues replaces each tagged phi that only merges reads of
+// one captured binding's cell -- at entries, after calls, through other
+// such phis -- with a read of the cell where the phi is. Native code's
+// binding is its cell's value throughout: it assigns both, and reads the
+// cell again after a call (builder.reloadUpvalues). Carried through a loop,
+// such a phi held a register and its pointer word another, and its loads
+// at every entry stayed live; read again, it holds nothing until used, as
+// a slot loaded at an entry does in mir. What unboxPhis made a number is no
+// longer a tagged phi, and stays as it is.
+func rematerializeUpvalues(f *Func) bool {
+	// cand, by ID, is a phi's cell -- its captured binding's index plus
+	// one -- or pending, for one whose arguments so far are such phis, or
+	// none or failed.
+	const none, failed, pending = 0, -1, -2
+	var cand []int32
+	phis := f.scr().phis[:0]
+	loads := false
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == OpPhi && v.Type == Tagged {
+				phis = append(phis, v)
+			}
+			loads = loads || v.Op == OpLoadCell && v.Args[0].Op == OpUpvalueCell
+		}
+	}
+	f.scr().phis = phis[:0]
+	if !loads || len(phis) == 0 {
+		return false
+	}
+	cand = make([]int32, f.nextID)
+	for _, v := range phis {
+		cand[v.ID] = pending
+	}
+	// One a loop header's state names, for a local that copied the
+	// binding, is there before the read would be.
+	for _, b := range f.Blocks {
+		if b.Header != nil && b.PC >= 0 {
+			for _, v := range b.Header.Slots {
+				if v != nil && v.Op == OpPhi && v.Block == b {
+					cand[v.ID] = failed
+				}
+			}
+		}
+	}
+	// A phi of loads of another cell, or of anything else, fails, and so
+	// does every phi that merges it: until nothing changes, the phis met
+	// pending taken for the same cell.
+	for changed := true; changed; {
+		changed = false
+		for _, v := range phis {
+			if cand[v.ID] == failed {
+				continue
+			}
+			want := cand[v.ID]
+			for _, a := range v.Args {
+				var k int32
+				switch {
+				case a.Op == OpLoadCell && a.Args[0].Op == OpUpvalueCell:
+					k = int32(a.Args[0].Index) + 1
+				case a.Op == OpPhi && a.ID < len(cand) && cand[a.ID] != none:
+					k = cand[a.ID]
+				default:
+					k = failed
+				}
+				if k == pending {
+					continue
+				}
+				if k == failed || want != pending && want != k {
+					want = failed
+					break
+				}
+				want = k
+			}
+			if want != cand[v.ID] {
+				cand[v.ID], changed = want, true
+			}
+		}
+	}
+	subst := make([]*Value, f.nextID)
+	for _, b := range f.Blocks {
+		var reads []*Value
+		for _, v := range b.Values {
+			if v.Op != OpPhi || cand[v.ID] <= 0 {
+				continue
+			}
+			cell := f.alloc(Value{Op: OpUpvalueCell, Type: Source, Index: int(cand[v.ID] - 1), Block: b})
+			r := f.alloc(Value{Op: OpLoadCell, Type: Tagged, Args: f.refsOf(1), Block: b})
+			r.Args[0], r.Shadow = cell, cell
+			reads = append(reads, cell, r)
+			subst[v.ID] = r
+		}
+		if len(reads) == 0 {
+			continue
+		}
+		// After the block's phis.
+		at := 0
+		for at < len(b.Values) && b.Values[at].Op == OpPhi {
+			at++
+		}
+		values := f.refsOf(len(b.Values) + len(reads))[:0]
+		values = append(values, b.Values[:at]...)
+		values = append(values, reads...)
+		b.Values = append(values, b.Values[at:]...)
+	}
+	rewrite(f, func(v *Value) *Value {
+		if v.ID < len(subst) && subst[v.ID] != nil {
+			return subst[v.ID]
+		}
+		return v
+	})
 	return true
 }
 

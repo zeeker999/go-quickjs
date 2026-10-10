@@ -144,6 +144,9 @@ type CallSite struct {
 	Push                          bool
 	Protos                        [2]Holder
 	Pop                           bool
+	// Upvalues is the address of the callee closure's captured bindings'
+	// cells, its context's (abi.Context.Upvalues), or 0 for none.
+	Upvalues uintptr
 	// Literal marks an object literal's object (ir.ObjectLiteral), the
 	// pool's, with Alloc: no function, no operands; or an array literal's
 	// (ir.ArrayLiteral), whose Argc operands are its elements.
@@ -419,6 +422,10 @@ func (b *builder) host(pc int) bool {
 	case ir.StringConst:
 		_, ok := b.stringCell(pc)
 		return !ok
+	case ir.UpvalueRead, ir.UpvalueWrite:
+		// The function's own captured bindings, which its context has;
+		// an inlined callee's, Go's.
+		return b.cur != b.root
 	case ir.FieldDefine:
 		_, ok := b.define(pc)
 		return !ok
@@ -435,6 +442,23 @@ func (b *builder) literal(pc int) (LiteralSite, bool) {
 	}
 	k, ok := f.Literal(pc)
 	return k, ok && k.Pool != 0
+}
+
+// reloadUpvalues has each of the function's captured bindings be its cell's
+// value now: at an entry, and after a native call, whose callee may assign
+// one. Between, a binding is the value last read or assigned, as a local
+// is; unused, the loads are dead. After a call, the loads carry the state
+// there, st, which a guard that unboxes one exits to (unboxPhis), as an
+// entry's header is for its loads.
+func (b *builder) reloadUpvalues(blk *Block, st *FrameState) {
+	p := b.root.p
+	for i := range p.Upvalues {
+		cell := b.f.newValue(blk, OpUpvalueCell, Source)
+		cell.Index = i
+		v := b.f.newValue(blk, OpLoadCell, Tagged, cell)
+		v.Shadow, v.State = cell, st
+		b.write(p.UpvalueBase+i, blk, v)
+	}
 }
 
 // stringCell is the cell of the string constant at pc (ConstantFeedback).
@@ -976,13 +1000,16 @@ func (b *builder) plan() error {
 			}
 		case ir.Nop, ir.Copy, ir.CopyPair, ir.StoreLoad, ir.Swap, ir.Insert2, ir.Insert3,
 			ir.Unary, ir.Update, ir.Return, ir.ArrayUpdate, ir.ArrayLength, ir.ArrayKey:
+		case ir.UpvalueRead:
+			// The function's own captured binding is read natively, its
+			// check deoptimizing; an inlined callee's leaves at its call.
 		case ir.TypeTest:
 			// An object it cannot tell exits at the typeof, which Go makes;
 			// the interpreter goes on, the boolean not where the typeof's
 			// string was (compile's typeTests): no entry after it.
 		case ir.ArrayWrite, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead,
 			ir.StringMethod, ir.StringCode, ir.BindingWrite, ir.BindingCheck, ir.Resolved, ir.ObjectLiteral, ir.FieldDefine,
-			ir.ArrayLiteral, ir.StringConst:
+			ir.ArrayLiteral, ir.StringConst, ir.UpvalueWrite:
 			// What native code does not do exits to Go, which resumes after
 			// it. A fixed global's check only deoptimizes: the binding can
 			// never move, so it never fails, and what follows sees its
@@ -1068,7 +1095,7 @@ func (b *builder) plan() error {
 		case ir.Return:
 			blk.Kind = BlockReturn
 		case ir.Host, ir.Call, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead, ir.BindingWrite, ir.BindingCheck,
-			ir.ObjectLiteral, ir.FieldDefine, ir.ArrayLiteral, ir.StringConst:
+			ir.ObjectLiteral, ir.FieldDefine, ir.ArrayLiteral, ir.StringConst, ir.UpvalueRead, ir.UpvalueWrite:
 			if fr := b.inlined[end]; fr != nil {
 				// Into the callee, whose returns go to the block after it.
 				blk.Kind = BlockPlain
@@ -1398,10 +1425,11 @@ func (b *builder) frameState(blk *Block, pc int) *FrameState {
 	depth := b.p.Maps[pc].Depth
 	s := b.f.newState(FrameState{PC: b.p.Maps[pc].PC, Depth: depth, Slots: b.f.refsOf(b.p.Locals + depth), Site: pc})
 	for i := range s.Slots {
-		if !b.p.LiveAt(pc, i) {
+		if !b.p.LiveAt(pc, i) || i >= b.p.UpvalueBase && i < b.p.UpvalueBase+b.p.Upvalues {
 			// A local the interpreter writes before it reads from here:
 			// not written, nor kept alive for the exit, as V8 leaves dead
-			// registers out of a frame state.
+			// registers out of a frame state. Nor is a captured binding,
+			// which is in its cell.
 			continue
 		}
 		s.Slots[i] = b.read(i, blk)
@@ -1427,6 +1455,9 @@ func (b *builder) fill(blk *Block) {
 			b.write(i, blk, v)
 			blk.Header.Slots[i] = v
 		}
+		// A captured binding is what its cell holds, which native code
+		// assigns (ir.UpvalueWrite), with its pointer word there.
+		b.reloadUpvalues(blk, nil)
 		return
 	}
 	if blk.LoopHeader {
@@ -1783,6 +1814,31 @@ func (b *builder) instruction(blk *Block, pc int) {
 		r := f.newValue(blk, OpKept, Tagged, cell, call)
 		r.Shadow = cell
 		b.assign(in.Dest, blk, r)
+	case ir.UpvalueRead, ir.UpvalueWrite:
+		if b.cur != b.root {
+			blk.ExitKind = ir.HostExit
+			blk.State = state()
+			blk.State.addUse()
+			break
+		}
+		slot := b.p.UpvalueBase + int(in.Key)
+		if in.Op == ir.UpvalueRead {
+			v := b.read(slot, blk)
+			if in.Check {
+				guard(OpCheckInit, None, ir.GuardExit, v)
+			}
+			b.assign(in.Dest, blk, v)
+			break
+		}
+		if in.Check {
+			guard(OpCheckInit, None, ir.GuardExit, b.read(slot, blk))
+		}
+		cell := f.newValue(blk, OpUpvalueCell, Source)
+		cell.Index = int(in.Key)
+		x := operand(in.Left)
+		w := guard(OpPropWrite, None, ir.HostExit, cell, x)
+		w.Key, w.Upvalue = upvalueKey, true
+		b.write(slot, blk, x)
 	case ir.StringConst:
 		cell, ok := b.stringCell(pc)
 		if !ok {
@@ -1848,6 +1904,16 @@ func (b *builder) instruction(blk *Block, pc int) {
 			r := f.newValue(blk, OpKept, Tagged, cell, call)
 			r.Shadow = cell
 			b.write(b.p.Locals+b.p.Maps[pc+1].Depth-1, blk, r)
+			// The callee may have assigned a captured binding. A guard
+			// after the call exits to the next instruction, as the site
+			// there fails: never again, once it has (Generic).
+			if b.p.Upvalues > 0 {
+				var st *FrameState
+				if b.fb == nil || !b.fb.Generic(pc+1) {
+					st = b.frameState(blk, pc+1)
+				}
+				b.reloadUpvalues(blk, st)
+			}
 			break
 		}
 		blk.ExitKind = ir.HostExit

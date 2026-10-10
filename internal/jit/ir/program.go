@@ -172,6 +172,13 @@ const (
 	// natively from a cell the VM keeps it in (ssa.ConstantFeedback), Go's
 	// otherwise.
 	StringConst
+	// UpvalueRead is get_upvalue: the captured binding Key's value, at
+	// Dest, read from its cell each time (with Check, an uninitialized one
+	// is the interpreter's to throw). UpvalueWrite is set_upvalue: Left
+	// stored into it (with Check, as set_upvalue_check: not into an
+	// uninitialized one).
+	UpvalueRead
+	UpvalueWrite
 )
 
 // MaxArrayLiteral is the most elements an ArrayLiteral has: new_array
@@ -295,6 +302,10 @@ type Program struct {
 	Live       []uint64
 	LiveLocals int
 	LiveWords  int
+	// Upvalues is how many captured bindings the new pipeline reads and
+	// assigns in their cells (UpvalueRead, UpvalueWrite), their slots from
+	// UpvalueBase on.
+	UpvalueBase, Upvalues int
 }
 
 // LiveAt reports whether local i may be read from pc on before it is

@@ -157,7 +157,8 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 		effects[pc] = e
 		if in.Op == bytecode.OpNew && (!m.ssa || !SSAConstruct) || (in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict ||
 			in.Op == bytecode.OpCheckGlobalRef || in.Op == bytecode.OpAssertResolved ||
-			in.Op == bytecode.OpNewObject || in.Op == bytecode.OpDefineField || in.Op == bytecode.OpPushEmptyString) && !m.ssa {
+			in.Op == bytecode.OpNewObject || in.Op == bytecode.OpDefineField || in.Op == bytecode.OpPushEmptyString ||
+			in.Op == bytecode.OpSetUpvalue || in.Op == bytecode.OpSetUpvalueCheck || in.Op == bytecode.OpInitUpvalue) && !m.ssa {
 			// The new pipeline constructs natively (mir's native calls),
 			// and assigns to a global natively where the VM knows it, Go
 			// otherwise; the old one does neither.
@@ -287,6 +288,22 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 				// the VM keeps it in, where the VM gives one.
 				p.Code[pc] = ir.Instruction{Op: ir.StringConst, Dest: p.Locals + p.Maps[pc].Depth, Key: b.A}
 			}
+			if b := fn.Code[pc]; p.Maps[pc].Depth >= 0 {
+				// Captured bindings read and written in their cells: not
+				// slots read once at an entry, which a native callee's
+				// assignment would leave stale.
+				sp := p.Locals + p.Maps[pc].Depth
+				switch b.Op {
+				case bytecode.OpGetUpvalue, bytecode.OpGetUpvalueCheck:
+					p.Code[pc] = ir.Instruction{Op: ir.UpvalueRead, Dest: sp, Key: b.A, Check: b.Op == bytecode.OpGetUpvalueCheck}
+				case bytecode.OpSetUpvalue, bytecode.OpInitUpvalue:
+					p.Code[pc] = ir.Instruction{Op: ir.UpvalueWrite, Left: ir.Slot(sp - 1), Key: b.A}
+				case bytecode.OpSetUpvalueCheck:
+					if fn.Upvalues[b.A].Mutable {
+						p.Code[pc] = ir.Instruction{Op: ir.UpvalueWrite, Left: ir.Slot(sp - 1), Key: b.A, Check: true}
+					}
+				}
+			}
 			if b := fn.Code[pc]; in.Op == ir.Host && b.Op == bytecode.OpNewArray && b.A <= ir.MaxArrayLiteral && p.Maps[pc].Depth >= 0 {
 				// An array literal: the new pipeline makes it from its
 				// site's pool where the VM knows the site.
@@ -307,6 +324,7 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 			}
 		}
 		stringConcats(p)
+		p.UpvalueBase, p.Upvalues = fn.LocalCount, len(fn.Upvalues)
 		return p, nil
 	}
 	selectPropertyLoops(fn, p, m.calls, m.callee)
@@ -461,7 +479,7 @@ func selectNumericProperties(p *ir.Program, cells bool) {
 			read(in.Left, take(in.Dest))
 		case ir.Resolved:
 			read(in.Right, take(in.Dest))
-		case ir.BindingCheck, ir.ObjectLiteral, ir.StringConst:
+		case ir.BindingCheck, ir.ObjectLiteral, ir.StringConst, ir.UpvalueRead:
 			take(in.Dest)
 		case ir.FieldDefine:
 			read(in.Left, reference)
@@ -588,7 +606,7 @@ func stringConcats(p *ir.Program) {
 			for i := in.Dest; i >= 0 && i <= in.Dest+3; i++ {
 				set(i, false)
 			}
-		case ir.Branch, ir.Jump, ir.Return, ir.Nop, ir.ArrayWrite, ir.PropertyWrite, ir.BindingWrite, ir.FieldDefine:
+		case ir.Branch, ir.Jump, ir.Return, ir.Nop, ir.ArrayWrite, ir.PropertyWrite, ir.BindingWrite, ir.FieldDefine, ir.UpvalueWrite:
 		default:
 			set(in.Dest, false)
 		}
@@ -743,8 +761,11 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 	if in.Op == bytecode.OpGetLocalIndexUpdate && (!local(in.A) || !local(in.B>>2)) {
 		return bad("local index out of bounds")
 	}
-	if (in.Op == bytecode.OpGetUpvalue || in.Op == bytecode.OpGetUpvalueCheck) && uint64(in.A) >= uint64(len(fn.Upvalues)) {
-		return bad("upvalue index out of bounds")
+	switch in.Op {
+	case bytecode.OpGetUpvalue, bytecode.OpGetUpvalueCheck, bytecode.OpSetUpvalue, bytecode.OpSetUpvalueCheck, bytecode.OpInitUpvalue:
+		if uint64(in.A) >= uint64(len(fn.Upvalues)) {
+			return bad("upvalue index out of bounds")
+		}
 	}
 	switch in.Op {
 	case bytecode.OpNewArray:
@@ -754,6 +775,8 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 		return effect{need: int(in.A), delta: 1 - int(in.A)}, nil
 	case bytecode.OpGetUpvalue, bytecode.OpGetUpvalueCheck, bytecode.OpGetLocalIndex, bytecode.OpGetLocalIndexUpdate:
 		return effect{delta: 1}, nil
+	case bytecode.OpSetUpvalue, bytecode.OpSetUpvalueCheck, bytecode.OpInitUpvalue:
+		return effect{need: 1, delta: -1}, nil
 	case bytecode.OpGetIndex:
 		return effect{need: 2, delta: -1}, nil
 	case bytecode.OpSetIndex:
@@ -1032,8 +1055,9 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this bool) ir.Instr
 		return ir.Instruction{Op: ir.PropertyRead, Left: top, Dest: sp - 1, Key: in.A}
 	case bytecode.OpSetProp:
 		return ir.Instruction{Op: ir.PropertyWrite, Left: ir.Slot(sp - 2), Right: top, Key: in.A}
-	case bytecode.OpThrow, bytecode.OpPushEmptyString:
-		// The interpreter throws it (jitHost leaves it); Go pushes ''.
+	case bytecode.OpThrow, bytecode.OpPushEmptyString, bytecode.OpSetUpvalue, bytecode.OpSetUpvalueCheck, bytecode.OpInitUpvalue:
+		// The interpreter throws it (jitHost leaves it); Go pushes '' and
+		// assigns a captured binding, which the new pipeline does itself.
 		return ir.Instruction{Op: ir.Host}
 	case bytecode.OpInstanceOf:
 		// Made natively where the VM knows the constructor
