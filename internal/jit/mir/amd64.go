@@ -3,6 +3,7 @@ package mir
 import (
 	"fmt"
 	"slices"
+	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	"github.com/go-quickjs/go-quickjs/internal/jit/asm/amd64"
@@ -38,6 +39,11 @@ type compiler struct {
 	// does; recorded marks the exit being emitted as one.
 	tail               amd64.Label
 	tailUsed, recorded bool
+	// table is where an exit that leaves its frame to Go goes (tableExit),
+	// if any does; exits are those exits' descriptions.
+	table     amd64.Label
+	tableUsed bool
+	exits     []*abi.ExitDescriptor
 }
 
 type stub struct {
@@ -118,11 +124,15 @@ func compileAMD64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err 
 		c.a.Bind(c.tail)
 		c.recordsTail()
 	}
+	if c.tableUsed {
+		c.a.Bind(c.table)
+		c.tableExit()
+	}
 	bytes, err := c.a.Finish()
 	if err != nil {
 		return nil, err
 	}
-	return &Code{Bytes: bytes, Entries: entries, core: c.core}, nil
+	return &Code{Bytes: bytes, Entries: entries, Exits: c.exits, core: c.core}, nil
 }
 
 // slotAddr is the base register and displacement of a frame slot's word.
@@ -984,6 +994,18 @@ func (c *compiler) exitTo(s *ssa.FrameState, kind uint64) {
 // returning to Go: the records are applied first (recordsTail), which a
 // caller of it makes sure they are, the collector not marking.
 func (c *compiler) exitThen(s *ssa.FrameState, kind uint64, then *amd64.Label) {
+	if then == nil && TableExits {
+		// To Go, which writes the frame from the exit's description.
+		if d := c.exitDescriptor(s, kind, uint8(regLocals), uint8(regStack)); d != nil {
+			c.exits = append(c.exits, d)
+			c.a.MovImm(scratchA, uint64(uintptr(unsafe.Pointer(d))))
+			if !c.tableUsed {
+				c.table, c.tableUsed = c.a.NewLabel(), true
+			}
+			c.a.Jmp(c.table)
+			return
+		}
+	}
 	c.recorded = false
 	c.a.MovImm(scratchC, 0)
 	c.a.Store(regCtx, abi.OffRecords, scratchC)
@@ -1072,6 +1094,23 @@ func (c *compiler) exitThen(s *ssa.FrameState, kind uint64, then *amd64.Label) {
 		kind = abi.ExitHost
 	}
 	c.record(kind, uint64(s.PC), uint64(s.Depth), uint64(int64(s.Site)), then)
+}
+
+// tableExit is where every exit that leaves its frame to Go goes, its
+// description's address in scratchA: it saves the registers values may be
+// in, and the frame's, in the context, and returns to Go (abi.ExitTable),
+// which writes the frame (jit.ApplyExit).
+func (c *compiler) tableExit() {
+	c.a.Store(regCtx, abi.OffExitDesc, scratchA)
+	for _, r := range append([]int{int(regLocals), int(regStack)}, c.gprs...) {
+		c.a.Store(regCtx, abi.OffRegs+int32(r)*8, amd64.Reg(r))
+	}
+	for _, x := range c.fprs {
+		c.a.StoreSD(regCtx, abi.OffXRegs+int32(x)*8, amd64.XReg(x))
+	}
+	c.a.MovImm(scratchA, abi.ExitTable)
+	c.a.Store(regCtx, abi.OffExitKind, scratchA)
+	c.a.Ret()
 }
 
 // isReference falls through when v, whose word is in w, is the reference

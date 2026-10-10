@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	"github.com/go-quickjs/go-quickjs/internal/jit/asm/arm64"
@@ -41,6 +42,11 @@ type a64Compiler struct {
 	// does; recorded marks the exit being emitted as one.
 	tail               arm64.Label
 	tailUsed, recorded bool
+	// table is where exits that leave their frames to Go go (tableExit),
+	// if any does, with exits their descriptions.
+	table     arm64.Label
+	tableUsed bool
+	exits     []*abi.ExitDescriptor
 }
 
 type a64Stub struct {
@@ -125,11 +131,15 @@ func compileARM64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err 
 		c.a.Bind(c.tail)
 		c.recordsTail()
 	}
+	if c.tableUsed {
+		c.a.Bind(c.table)
+		c.tableExit()
+	}
 	bytes, err := c.a.Finish()
 	if err != nil {
 		return nil, err
 	}
-	return &Code{Bytes: bytes, Entries: entries, core: c.core}, nil
+	return &Code{Bytes: bytes, Entries: entries, Exits: c.exits, core: c.core}, nil
 }
 
 // slotAddr is the base register and displacement of a frame slot's word.
@@ -323,6 +333,17 @@ func (c *a64Compiler) exitTo(s *ssa.FrameState, kind uint64) {
 // exitThen is exitTo, going on at then, if it is not nil, instead of
 // returning to Go, as amd64's does.
 func (c *a64Compiler) exitThen(s *ssa.FrameState, kind uint64, then *arm64.Label) {
+	if then == nil && TableExits {
+		if d := c.exitDescriptor(s, kind, uint8(a64Locals), uint8(a64Stack)); d != nil {
+			c.exits = append(c.exits, d)
+			c.a.MovImm(a64A, uint64(uintptr(unsafe.Pointer(d))))
+			if !c.tableUsed {
+				c.table, c.tableUsed = c.a.NewLabel(), true
+			}
+			c.a.B(c.table)
+			return
+		}
+	}
 	c.recorded = false
 	c.a.Store(a64Ctx, abi.OffRecords, arm64.ZR)
 	for i, v := range s.Slots {
@@ -397,6 +418,22 @@ func (c *a64Compiler) exitThen(s *ssa.FrameState, kind uint64, then *arm64.Label
 		kind = abi.ExitHost
 	}
 	c.record(kind, uint64(s.PC), uint64(s.Depth), uint64(int64(s.Site)), then)
+}
+
+// tableExit is where exits that leave their frames to Go go, as amd64's:
+// with the description's address in A, it saves the registers a
+// description may name and returns to Go with an abi.ExitTable exit.
+func (c *a64Compiler) tableExit() {
+	c.a.Store(a64Ctx, abi.OffExitDesc, a64A)
+	for _, r := range append([]int{int(a64Locals), int(a64Stack)}, c.gprs...) {
+		c.a.Store(a64Ctx, abi.OffRegs+int32(r)*8, arm64.Reg(r))
+	}
+	for _, x := range c.fprs {
+		c.a.StoreF(a64Ctx, abi.OffXRegs+int32(x)*8, arm64.FReg(x))
+	}
+	c.a.MovImm(a64A, abi.ExitTable)
+	c.a.Store(a64Ctx, abi.OffExitKind, a64A)
+	c.a.Ret()
 }
 
 // isReference falls through when v, whose word is in w, is the reference

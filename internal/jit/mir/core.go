@@ -47,6 +47,12 @@ type core struct {
 	// and restores after: the callee uses every register, as V8's code's
 	// callees use the caller-saved ones.
 	saves map[*ssa.Value][]saved
+	// exitEnc, exitDescs and exitSlots are what exitDescriptor's
+	// descriptions are made from, a compile's encoding shared and the
+	// rest carved from blocks, as the code keeps them all as long.
+	exitEnc   *abi.Encoding
+	exitDescs []abi.ExitDescriptor
+	exitSlots []abi.ExitSlot
 }
 
 // saved is a register a call saves, and the spill slot it saves it in.
@@ -110,6 +116,9 @@ var ErrUnsupported = errors.New("mir: unsupported")
 type Code struct {
 	Bytes   []byte
 	Entries map[int]int
+	// Exits are the descriptions the code's exits name by address
+	// (abi.ExitDescriptor), which whoever holds the code keeps alive.
+	Exits []*abi.ExitDescriptor
 	// core is the compiler's state, for Locations.
 	core *core
 }
@@ -811,4 +820,119 @@ func Compile(f *ssa.Func, enc abi.Encoding) (*Code, error) {
 		return CompileARM64(f, enc)
 	}
 	return CompileAMD64(f, enc)
+}
+
+// TableExits has an exit that returns to Go leave its frame to Go to write
+// from a description (abi.ExitDescriptor), as V8's deoptimizer reads a
+// frame state's translation, rather than write it itself: the exit's code
+// is a jump. It is a switch for tests to compare the two by.
+var TableExits = true
+
+// exitDescriptor describes the exit to state s of the given kind, its
+// frame's locals and operands at the registers localsReg and stackReg, as
+// exitThen's code writes it; or nil where a value is where a description
+// cannot say, and the exit's code writes the frame itself.
+func (c *core) exitDescriptor(s *ssa.FrameState, kind uint64, localsReg, stackReg uint8) *abi.ExitDescriptor {
+	if c.exitEnc == nil {
+		enc := c.enc
+		c.exitEnc = &enc
+	}
+	d := abi.ExitDescriptor{Kind: kind, PC: uint64(s.PC), Depth: uint64(s.Depth), Site: int64(s.Site),
+		FrameLocals: int32(c.f.FrameLocals), ThisSlot: int32(c.f.ThisSlot), Locals: int32(c.f.Locals),
+		LocalsReg: localsReg, StackReg: stackReg, Enc: c.exitEnc}
+	written := func(i int, v *ssa.Value) bool {
+		return v != nil && (v.Op != ssa.OpLoadSlot || v.Aux != i) && !c.captured(i)
+	}
+	n := 0
+	for i, v := range s.Slots {
+		if written(i, v) {
+			n++
+		}
+	}
+	if cap(c.exitSlots)-len(c.exitSlots) < n {
+		c.exitSlots = make([]abi.ExitSlot, 0, max(n, 256))
+	}
+	d.Slots = c.exitSlots[len(c.exitSlots) : len(c.exitSlots) : len(c.exitSlots)+n]
+	for i, v := range s.Slots {
+		if !written(i, v) {
+			continue
+		}
+		e := abi.ExitSlot{Slot: int32(i), Origin: -1}
+		var ok bool
+		if e.Value, ok = c.exitValue(v); !ok {
+			return nil
+		}
+		if v.Shadow != nil {
+			if e.Shadow, ok = c.exitSource(v.Shadow); !ok {
+				return nil
+			}
+		} else if o, has := c.origin.Of(v); has && o >= 0 {
+			e.Origin, e.Load = int32(o), v.Op == ssa.OpLoadSlot
+		}
+		d.Slots = append(d.Slots, e)
+	}
+	if s.Inline != nil {
+		for _, in := range inlineLevels(s) {
+			k := uint64(abi.ExitHost)
+			if in == s.Inline {
+				k = kind
+			}
+			d.Inline = append(d.Inline, abi.ExitInline{Closure: uint64(in.Closure), Locals: uint64(in.Locals),
+				ThisSlot: uint64(in.ThisSlot + 1), Kind: k, PC: uint64(in.PC), Depth: uint64(in.Depth),
+				Site: int64(in.Site), Base: int64(in.Base)})
+		}
+		d.Kind = abi.ExitHost
+	}
+	c.exitSlots = c.exitSlots[:len(c.exitSlots)+n]
+	if len(c.exitDescs) == cap(c.exitDescs) {
+		c.exitDescs = make([]abi.ExitDescriptor, 0, 32)
+	}
+	c.exitDescs = append(c.exitDescs, d)
+	return &c.exitDescs[len(c.exitDescs)-1]
+}
+
+// exitValue is where an exit finds a tagged value's word: its register or
+// spill slot, or what it is made from (materialize).
+func (c *core) exitValue(v *ssa.Value) (abi.ExitLoc, bool) {
+	at := func(x *ssa.Value, reg, spill uint8) (abi.ExitLoc, bool) {
+		l, ok := c.loc(x)
+		switch {
+		case !ok || c.isLazy(x):
+			return abi.ExitLoc{}, false
+		case l.reg >= 0:
+			return abi.ExitLoc{Kind: reg, N: int32(l.reg)}, true
+		}
+		return abi.ExitLoc{Kind: spill, N: int32(l.spill)}, true
+	}
+	switch v.Op {
+	case ssa.OpConst:
+		return abi.ExitLoc{Kind: abi.ExitConst, Word: c.constWord(v.Const)}, true
+	case ssa.OpBoxF64:
+		return at(v.Args[0], abi.ExitF64Reg, abi.ExitF64Spill)
+	case ssa.OpBoxBool:
+		return at(v.Args[0], abi.ExitBoolReg, abi.ExitBoolSpill)
+	}
+	if isFloat(v) {
+		return abi.ExitLoc{}, false
+	}
+	return at(v, abi.ExitReg, abi.ExitSpill)
+}
+
+// exitSource is where an exit finds a source's address: its register or
+// spill slot; a constant source's, a slot's or none.
+func (c *core) exitSource(s *ssa.Value) (abi.ExitLoc, bool) {
+	if s.Op == ssa.OpConstSource {
+		if s.Aux < 0 {
+			return abi.ExitLoc{Kind: abi.ExitConst}, true
+		}
+		return abi.ExitLoc{Kind: abi.ExitSlotAddr, N: int32(s.Aux)}, true
+	}
+	l, ok := c.loc(s)
+	switch {
+	case !ok || c.isLazy(s) || isFloat(s):
+		return abi.ExitLoc{}, false
+	case l.reg >= 0:
+		return abi.ExitLoc{Kind: abi.ExitReg, N: int32(l.reg)}, true
+	}
+	return abi.ExitLoc{Kind: abi.ExitSpill, N: int32(l.spill)}, true
 }

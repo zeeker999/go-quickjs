@@ -133,6 +133,78 @@ type Context struct {
 	// collector sees them, as it does the frame's; they are written only
 	// while it does not mark. Go clears them when the code returns.
 	Keep [MaxKeeps]Slot
+	// ExitDesc is an ExitTable exit's description, an *ExitDescriptor,
+	// which the code holds; Regs and XRegs are the registers the exit
+	// saved, by number, whose words the description says where to find:
+	// Go writes the frame from them (jit.ApplyExit), as V8's deoptimizer
+	// reads a frame state's translation.
+	ExitDesc uintptr
+	Regs     [32]uint64
+	XRegs    [32]uint64
+}
+
+// ExitDescriptor is an exit's frame state as data (an ExitTable exit): the
+// slots to write and where each one's value is, the inlined callees'
+// frames to describe, and the exit's own kind, PC, depth and site, which
+// Go puts in the context once it has written the frame -- the frame as an
+// exit's code would have written it, records and all.
+type ExitDescriptor struct {
+	Kind, PC, Depth uint64
+	Site            int64
+	Slots           []ExitSlot
+	// Inline are the inlined callees' frames, the outermost first, each in
+	// a context of its own past the code's.
+	Inline []ExitInline
+	// The frame's layout: its locals, from LocalsReg's address; the
+	// receiver's slot, in the context; the captured bindings, through
+	// their cells; and the operands, from StackReg's address. Enc is the
+	// values' encoding, one for all the code's descriptions.
+	FrameLocals, ThisSlot, Locals int32
+	LocalsReg, StackReg           uint8
+	Enc                           *Encoding
+}
+
+// ExitSlot is a slot an exit writes: its value's number word, from Value;
+// and its pointer word -- from Shadow, the source the value's reference
+// was read from, if it has one; from slot Origin's as the code was entered,
+// if that held the reference (Load: the value is that slot's load, so its
+// word need not match); none otherwise.
+type ExitSlot struct {
+	Slot   int32
+	Origin int32
+	Load   bool
+	Value  ExitLoc
+	Shadow ExitLoc
+}
+
+// ExitLoc is where an exit finds a word: in a register or a spill slot as
+// it is, or boxed from a float or a boolean there; a constant; a slot's
+// address; or none (ExitNone).
+type ExitLoc struct {
+	Kind uint8
+	N    int32
+	Word uint64
+}
+
+// ExitLoc's kinds.
+const (
+	ExitNone uint8 = iota
+	ExitReg
+	ExitSpill
+	ExitConst
+	ExitF64Reg
+	ExitF64Spill
+	ExitBoolReg
+	ExitBoolSpill
+	ExitSlotAddr
+)
+
+// ExitInline is an inlined callee's frame an exit describes in a context
+// (LiveInline): what an exit's code writes there.
+type ExitInline struct {
+	Closure, Locals, ThisSlot uint64
+	Kind, PC, Depth           uint64
+	Site, Base                int64
 }
 
 // Slot is a VM value's layout -- a number word, then a pointer word -- held
@@ -177,6 +249,10 @@ var (
 	OffStackTop   = int32(unsafe.Offsetof(Context{}.StackTop))
 	OffStackHigh  = int32(unsafe.Offsetof(Context{}.StackHigh))
 	OffTailReturn = int32(unsafe.Offsetof(Context{}.TailReturn))
+
+	OffExitDesc = int32(unsafe.Offsetof(Context{}.ExitDesc))
+	OffRegs     = int32(unsafe.Offsetof(Context{}.Regs))
+	OffXRegs    = int32(unsafe.Offsetof(Context{}.XRegs))
 
 	OffInlineClosure = int32(unsafe.Offsetof(Context{}.InlineClosure))
 	OffInlineLocals  = int32(unsafe.Offsetof(Context{}.InlineLocals))
@@ -231,6 +307,10 @@ const (
 	// ExitPoll: BackEdges ran out at a loop header. The frame holds the
 	// state at ExitPC, the header, where native code can be entered again.
 	ExitPoll
+	// ExitTable: an exit that left its frame to Go to write, from
+	// ExitDesc and the registers it saved; Go then puts the exit's own
+	// kind here. No one but the code that runs native code sees it.
+	ExitTable
 )
 
 // Encoding is how the VM represents a value in memory: a number word (a
