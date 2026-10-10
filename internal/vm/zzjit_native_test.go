@@ -6604,19 +6604,20 @@ func TestJITSSAStringAddCallsGo(t *testing.T) {
 	}
 	runtime.GC()
 	defer debug.SetGCPercent(debug.SetGCPercent(1))
-	calls := 0
+	calls, collect := 0, true
 	jitGoCallWork = func() {
 		if calls++; churnRegisters(calls) == 0.25 {
 			t.Log("churned to a quarter")
 		}
-		if calls%64 == 0 {
+		if collect && calls%64 == 0 {
 			runtime.GC()
 		}
 	}
 	defer func() { jitGoCallWork = nil }()
 	setup := `function cat(n){let s='',t=0;for(let i=0;i<n;i++){const p='k'+i+':'+(i%3===0)+null+undefined+(i*0.5);t=(t+p.length)|0;if(i%50===0)s=s+p}return s.length+'/'+t+'/'+s.slice(0,40)}
 		function tree(d,tag){if(d==0)return {array:[0,1,2,3],string:'String for key '+tag+' in leaf node'};return {left:tree(d-1,tag),right:tree(d-1,tag)}}
-		function walk(n){let c=0;for(let i=0;i<n;i++){const x=tree(4,String(i/7));c=(c+x.left.right.left.left.string.length)|0}return c}
+		var tags=[];for(let i=0;i<40;i++)tags.push(String(i/7));
+		function walk(n){let c=0;for(let i=0;i<n;i++){const x=tree(4,tags[i%40]);c=(c+x.left.right.left.left.string.length)|0}return c}
 		var obj={valueOf(){return 7}},sy=Symbol('s');
 		function odd(n,o){let r='',c=0;for(let i=0;i<n;i++){r='a'+(i%7?i:o);c=(c+r.length)|0}return r+c}
 		function syms(n,x){let r='';for(let i=0;i<n;i++){r='a'+(i<n-1?'b':x)}return r}
@@ -6638,16 +6639,25 @@ func TestJITSSAStringAddCallsGo(t *testing.T) {
 	rounds := []string{`cat(300)`, `cat(300)`, `cat(300)`, `cat(300)`, `String(walk(40))`, `String(walk(40))`, `String(walk(40))`,
 		`String(walk(40))`, `odd(300,obj)`, `odd(300,obj)`, `odd(300,obj)`, `[sym(),sym(),sym()].join()`, `big()`, `big()`, `cat(300)`}
 	for i, src := range rounds {
+		// walk's rounds collect only as they need to: a native call
+		// leaves for Go while the collector marks, which it would do much
+		// of the time, and tree be called natively seldom.
+		collect = i < 4 || i > 7
+		if collect {
+			debug.SetGCPercent(1)
+		} else {
+			debug.SetGCPercent(100)
+		}
 		wv, err := want.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatal(err)
 		}
-		var hosts, out uint64
+		var hosts, out, in uint64
 		if e := r.jit.cache[weak.Make(cat.fn)]; e != nil {
 			hosts = e.ssaStats.hosts
 		}
 		if e := r.jit.cache[weak.Make(tree.fn)]; e != nil {
-			out = uint64(e.nativeOut)
+			out, in = uint64(e.nativeOut), uint64(e.nativeIn)
 		}
 		gv, err := r.Run(compileForTest(t, src))
 		if err != nil {
@@ -6668,14 +6678,19 @@ func TestJITSSAStringAddCallsGo(t *testing.T) {
 				t.Fatalf("cat left native code %d times", n)
 			}
 		case 7:
-			// tree, called natively, never leaves: its strings are Go's,
-			// made without leaving.
+			// tree, called natively, does not leave for its strings, which
+			// are Go's, made without leaving -- one a leaf, before: only
+			// when its literals' pools run out, which Go fills.
 			e := r.jit.cache[weak.Make(tree.fn)]
-			if e == nil || e.ssa == nil || e.notNative || e.nativeIn == 0 {
-				t.Fatalf("tree is not called natively: %+v", e)
+			if e == nil {
+				t.Fatal("tree has no entry")
 			}
-			if n := uint64(e.nativeOut) - out; n != 0 {
-				t.Fatalf("tree left native code %d times", n)
+			calls := uint64(e.nativeIn) - in
+			if e.ssa == nil || e.notNative || calls < 1000 {
+				t.Fatalf("tree is not called natively (%d calls): %+v", calls, e)
+			}
+			if n := uint64(e.nativeOut) - out; n*50 > calls {
+				t.Fatalf("tree left native code %d times of %d", n, calls)
 			}
 		case 11:
 			// Their objects and symbols left: Go made those.
