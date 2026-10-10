@@ -331,10 +331,12 @@ func (c *core) allocate() error {
 				}
 			}
 			at := pos[v.ID]
-			if v.Op == ssa.OpCall && len(v.Calls) != 0 && v.Calls[0].Go != 0 {
+			if v.Op == ssa.OpCall && len(v.Calls) != 0 && (v.Calls[0].Go != 0 || ssa.RefillsPools(v)) {
 				// A call of Go that Go refuses exits after it, Go having
 				// taken the registers: what its state reads lives across
-				// it, saved and restored (saves).
+				// it, saved and restored (saves). So does a call whose
+				// pool Go fills, made again from its start: its operands
+				// are in its state.
 				at++
 			}
 			useState(v.State, at)

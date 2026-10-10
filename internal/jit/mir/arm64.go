@@ -38,6 +38,9 @@ type a64Compiler struct {
 	stubs   map[stubKey]arm64.Label
 	stubFor []a64Stub
 	cold    []func()
+	// callV and callTop are amd64's.
+	callV   *ssa.Value
+	callTop arm64.Label
 	// tail is where exits that filled records go (recordsTail), if any
 	// does; recorded marks the exit being emitted as one.
 	tail               arm64.Label
@@ -1416,6 +1419,9 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		c.a.B(stub)
 		return
 	}
+	c.callV, c.callTop = v, c.a.NewLabel()
+	c.a.Bind(c.callTop)
+	defer func() { c.callV = nil }()
 	site := sites[0]
 	vs := int32(c.enc.ValueSize)
 	if site.Go != 0 {
@@ -1429,7 +1435,7 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		c.a.Cbnz(a64B, stub, false)
 		c.a.MovImm(a64A, uint64(site.Pool))
 		c.a.Load(a64B, a64A, abi.OffPoolCount)
-		c.a.Cbz(a64B, stub, true)
+		c.refillOnEmpty(site.Pool, stub)
 		if site.Argc == 0 {
 			c.poolTake(v, site)
 			return
@@ -1940,8 +1946,12 @@ func (c *a64Compiler) viaGuards(t *ssa.CallSite, recv *ssa.Value, guard func(arm
 func (c *a64Compiler) constructGuards(t *ssa.CallSite, guard func(arm64.Cond)) {
 	c.a.MovImm(a64A, uint64(t.Pool))
 	c.a.Load(a64B, a64A, abi.OffPoolCount)
-	c.a.CmpImm(a64B, 0, true)
-	guard(arm64.EQ)
+	if c.callV != nil {
+		c.refillOnEmpty(t.Pool, c.stubLabel(c.callV.State, exitKind(c.callV.Aux)))
+	} else {
+		c.a.CmpImm(a64B, 0, true)
+		guard(arm64.EQ)
+	}
 	if t.Alloc {
 		return
 	}
@@ -2000,6 +2010,12 @@ func (c *a64Compiler) pointerWord(x *ssa.Value, w arm64.Reg) {
 // goCall calls Go, as amd64's does.
 func (c *a64Compiler) goCall(v *ssa.Value, site *ssa.CallSite, guard func(arm64.Cond)) {
 	size := int32(unsafe.Sizeof(abi.GoArg{}))
+	defer func() {
+		c.a.Load(a64B, a64Ctx, abi.OffGoStatus)
+		c.a.Cbnz(a64B, c.stubLabel(v.State, exitKind(v.Aux)), true)
+		c.a.Load(a64A, a64Ctx, abi.OffKeep+int32(v.Index)*int32(c.enc.ValueSize)+c.enc.NumOffset)
+		c.setG(v, a64A)
+	}()
 	for i, x := range v.Args {
 		var w arm64.Reg
 		if remat(x) {
@@ -2023,9 +2039,14 @@ func (c *a64Compiler) goCall(v *ssa.Value, site *ssa.CallSite, guard func(arm64.
 		c.a.Bind(have)
 		c.a.Store(a64Ctx, at+c.enc.RefOffset, a64B)
 	}
-	c.a.MovImm(a64A, uint64(site.Go))
+	c.callGo(v, uint64(site.Go), v.Index)
+}
+
+// callGo is a call of Go, as amd64's is.
+func (c *a64Compiler) callGo(v *ssa.Value, op uint64, keep int) {
+	c.a.MovImm(a64A, op)
 	c.a.Store(a64Ctx, abi.OffGoOp, a64A)
-	c.a.MovImm(a64A, uint64(v.Index))
+	c.a.MovImm(a64A, uint64(keep))
 	c.a.Store(a64Ctx, abi.OffGoKeep, a64A)
 	for _, sv := range c.saves[v] {
 		if sv.float {
@@ -2049,10 +2070,27 @@ func (c *a64Compiler) goCall(v *ssa.Value, site *ssa.CallSite, guard func(arm64.
 			c.a.Load(arm64.Reg(sv.reg), a64Ctx, c.spillDisp(sv.slot))
 		}
 	}
-	c.a.Load(a64B, a64Ctx, abi.OffGoStatus)
-	c.a.Cbnz(a64B, c.stubLabel(v.State, exitKind(v.Aux)), true)
-	c.a.Load(a64A, a64Ctx, abi.OffKeep+int32(v.Index)*int32(c.enc.ValueSize)+c.enc.NumOffset)
-	c.setG(v, a64A)
+}
+
+// refillOnEmpty, its pool's count in B, is amd64's: stub is the call's
+// exit, for a pool Go cannot fill.
+func (c *a64Compiler) refillOnEmpty(pool uintptr, stub arm64.Label) {
+	v, top := c.callV, c.callTop
+	if v == nil {
+		c.a.Cbz(a64B, stub, true)
+		return
+	}
+	refill := c.a.NewLabel()
+	c.a.Cbz(a64B, refill, true)
+	c.cold = append(c.cold, func() {
+		c.a.Bind(refill)
+		c.a.MovImm(a64A, uint64(pool))
+		c.a.Store(a64Ctx, abi.OffGoArgs+c.enc.RefOffset, a64A)
+		c.callGo(v, uint64(ssa.GoRefill), 0)
+		c.a.Load(a64B, a64Ctx, abi.OffGoStatus)
+		c.a.Cbnz(a64B, stub, true)
+		c.a.B(top)
+	})
 }
 
 // keepSource leaves in C where a tagged value came from, as amd64's does.
