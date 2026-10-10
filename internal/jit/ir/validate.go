@@ -113,7 +113,7 @@ func (p *Program) Validate() error {
 			if in.Dest >= active || in.Extra >= active {
 				return bad("swap reads an inactive slot")
 			}
-		case Binary:
+		case Binary, StringAdd:
 			left, right, write = true, true, true
 			if in.Operator > Ne && (in.Operator < BitAnd || in.Operator > UShr) && in.Operator != Mod {
 				return bad("invalid binary operator")

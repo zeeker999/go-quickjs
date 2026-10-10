@@ -153,7 +153,19 @@ type CallSite struct {
 	// pool's, with Alloc: no function, no operands; or an array literal's
 	// (ir.ArrayLiteral), whose Argc operands are its elements.
 	Literal bool
+	// Go marks a call of Go, not of a function, as V8's code calls a
+	// runtime function: what Go does with the call's operands, which
+	// native code passes as their words (abi.Context's GoOp).
+	Go GoOp
 }
+
+// GoOp is what a call of Go does (CallSite's Go).
+type GoOp uint8
+
+// GoAdd is +, an operand possibly a string (ir.StringAdd): Go makes it of
+// primitives; an object, whose conversion may run anything, or a symbol,
+// which throws, it leaves to an exit, after which Go makes it.
+const GoAdd GoOp = 1
 
 // popsElement reports whether a call is Array.prototype.pop's (CallSite's
 // Pop): it writes an element's cell, and its own result's.
@@ -171,7 +183,8 @@ func popsElement(v *Value) bool {
 // (CallSite.Alloc), or adds an element past an array's last (Push).
 func allocOnly(v *Value) bool {
 	for _, c := range v.Calls {
-		if !c.Alloc && !c.Receiver && !c.Push {
+		// A call of Go makes what it returns, and writes nothing else.
+		if !c.Alloc && !c.Receiver && !c.Push && c.Go == 0 {
 			return false
 		}
 	}
@@ -428,6 +441,9 @@ func (b *builder) host(pc int) bool {
 		// The function's own captured bindings, which its context has;
 		// an inlined callee's, Go's.
 		return b.cur != b.root
+	case ir.StringAdd:
+		// A call of Go (GoAdd), where the VM answers it.
+		return !b.goCalls()
 	case ir.FieldDefine:
 		_, ok := b.define(pc)
 		return !ok
@@ -818,6 +834,33 @@ func (b *builder) inlineCall(blk *Block, pc int, fr *frame, guard func(Op, Type,
 	}
 }
 
+// GoFeedback is Feedback whose VM answers calls of Go from native code
+// (CallSite's Go): a builder given one makes them.
+type GoFeedback interface {
+	GoCalls() bool
+}
+
+// goCalls reports whether the code may call Go (GoFeedback).
+func (b *builder) goCalls() bool {
+	f, ok := b.fb.(GoFeedback)
+	return ok && f.GoCalls()
+}
+
+// goAdd makes in, an addition, by a call of Go from native code (GoAdd),
+// as V8's code calls its StringAdd builtin: what Go refuses leaves for Go to
+// make after an exit.
+func (b *builder) goAdd(blk *Block, in ir.Instruction, operand func(ir.Operand) *Value, guard func(Op, Type, ir.ExitKind, ...*Value) *Value) {
+	call := guard(OpCall, Tagged, ir.HostExit, operand(in.Left), operand(in.Right))
+	if b.f.Keeps < abi.MaxKeeps {
+		call.Calls, call.Index = []*CallSite{{Go: GoAdd, ThisSlot: -1}}, b.f.Keeps
+		b.f.Keeps++
+	}
+	cell := b.f.newValue(blk, OpCallCell, Source, call)
+	r := b.f.newValue(blk, OpKept, Tagged, cell, call)
+	r.Shadow = cell
+	b.assign(in.Dest, blk, r)
+}
+
 // nativeHost reports whether native code makes the host operation at pc
 // itself: an intrinsic call or instanceof the VM knows.
 func (b *builder) nativeHost(pc int) bool {
@@ -1028,7 +1071,7 @@ func (b *builder) plan() error {
 			// string was (compile's typeTests): no entry after it.
 		case ir.ArrayWrite, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead,
 			ir.StringMethod, ir.StringCode, ir.BindingWrite, ir.BindingCheck, ir.Resolved, ir.ObjectLiteral, ir.FieldDefine,
-			ir.ArrayLiteral, ir.StringConst, ir.UpvalueWrite:
+			ir.ArrayLiteral, ir.StringConst, ir.UpvalueWrite, ir.StringAdd:
 			// What native code does not do exits to Go, which resumes after
 			// it. A fixed global's check only deoptimizes: the binding can
 			// never move, so it never fails, and what follows sees its
@@ -1114,7 +1157,7 @@ func (b *builder) plan() error {
 		case ir.Return:
 			blk.Kind = BlockReturn
 		case ir.Host, ir.Call, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead, ir.BindingWrite, ir.BindingCheck,
-			ir.ObjectLiteral, ir.FieldDefine, ir.ArrayLiteral, ir.StringConst, ir.UpvalueRead, ir.UpvalueWrite:
+			ir.ObjectLiteral, ir.FieldDefine, ir.ArrayLiteral, ir.StringConst, ir.UpvalueRead, ir.UpvalueWrite, ir.StringAdd:
 			if fr := b.inlined[end]; fr != nil {
 				// Into the callee, whose returns go to the block after it.
 				blk.Kind = BlockPlain
@@ -1581,6 +1624,12 @@ func (b *builder) instruction(blk *Block, pc int) {
 			b.assign(in.Dest, blk, boxB(c))
 			break
 		}
+		if in.Operator == ir.Add && b.generic(pc) && b.goCalls() {
+			// An addition whose operands were not numbers: Go makes it, as
+			// a string's (ir.StringAdd).
+			b.goAdd(blk, in, operand, guard)
+			break
+		}
 		kind := ir.GuardExit
 		if in.Operator == ir.Eq || in.Operator == ir.Ne || in.Operator == ir.Mod || b.generic(pc) {
 			kind = ir.HostExit
@@ -1833,6 +1882,14 @@ func (b *builder) instruction(blk *Block, pc int) {
 		r := f.newValue(blk, OpKept, Tagged, cell, call)
 		r.Shadow = cell
 		b.assign(in.Dest, blk, r)
+	case ir.StringAdd:
+		if !b.goCalls() {
+			blk.ExitKind = ir.HostExit
+			blk.State = state()
+			blk.State.addUse()
+			break
+		}
+		b.goAdd(blk, in, operand, guard)
 	case ir.UpvalueRead, ir.UpvalueWrite:
 		if b.cur != b.root {
 			blk.ExitKind = ir.HostExit

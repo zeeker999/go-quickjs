@@ -360,6 +360,10 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 	}
 	site := sites[0]
 	vs := int32(c.enc.ValueSize)
+	if site.Go != 0 {
+		c.goCall(v, site, guard)
+		return
+	}
 	if site.Literal {
 		// An object literal's object: its pool's next, the collector not
 		// marking, as a built-in's construction takes it (Alloc).
@@ -734,6 +738,73 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 			c.a.Load(amd64.Reg(sv.reg), regCtx, c.spillDisp(sv.slot))
 		}
 	}
+	c.setG(v, scratchA)
+}
+
+// goCall calls Go (ssa.CallSite's Go), as V8's code calls a runtime
+// function: the operands' words to the context's GoArgs, as integers -- no
+// pointer is stored, so the collector may mark meanwhile; each operand's
+// source still holds it -- and what is live in registers saved, it jumps
+// to callGo (abi.Encoding's CallGo), which comes back to back. Go wrote
+// the result to the call's keep cell (OpCallCell); if it did nothing, the
+// guard fails, and Go makes the operation. Go may have done anything, the
+// collector included: the frame's registers are read again, and every
+// store after it tests the collector's flag, as every store does.
+func (c *compiler) goCall(v *ssa.Value, site *ssa.CallSite, guard func(amd64.Cond)) {
+	size := int32(unsafe.Sizeof(abi.GoArg{}))
+	for i, x := range v.Args {
+		var w amd64.Reg
+		if remat(x) {
+			c.materialize(x, scratchA)
+			w = scratchA
+		} else {
+			w = c.gpr(x, scratchA)
+		}
+		at := abi.OffGoArgs + int32(i)*size
+		c.a.Store(regCtx, at+c.enc.NumOffset, w)
+		number, have := c.a.NewLabel(), c.a.NewLabel()
+		if x.Shadow != nil || c.origin.At(x) >= 0 {
+			c.a.MovImm(scratchB, abi.NumberLimit)
+			c.a.Op(amd64.Cmp, w, scratchB, true)
+			c.a.Jcc(amd64.CondB, number)
+		}
+		c.pointerWord(x, w)
+		c.a.Jmp(have)
+		c.a.Bind(number)
+		c.a.MovImm(scratchB, 0)
+		c.a.Bind(have)
+		c.a.Store(regCtx, at+c.enc.RefOffset, scratchB)
+	}
+	c.a.MovImm(scratchA, uint64(site.Go))
+	c.a.Store(regCtx, abi.OffGoOp, scratchA)
+	c.a.MovImm(scratchA, uint64(v.Index))
+	c.a.Store(regCtx, abi.OffGoKeep, scratchA)
+	for _, sv := range c.saves[v] {
+		if sv.float {
+			c.a.StoreSD(regCtx, c.spillDisp(sv.slot), amd64.XReg(sv.reg))
+		} else {
+			c.a.Store(regCtx, c.spillDisp(sv.slot), amd64.Reg(sv.reg))
+		}
+	}
+	back := c.a.NewLabel()
+	c.a.LeaLabel(scratchA, back)
+	c.a.Store(regCtx, abi.OffGoResume, scratchA)
+	c.a.MovImm(scratchA, c.enc.CallGo)
+	c.a.JmpReg(scratchA)
+	c.a.Bind(back)
+	c.a.Load(regLocals, regCtx, abi.OffLocals)
+	c.a.Load(regStack, regCtx, abi.OffStack)
+	for _, sv := range c.saves[v] {
+		if sv.float {
+			c.a.LoadSD(amd64.XReg(sv.reg), regCtx, c.spillDisp(sv.slot))
+		} else {
+			c.a.Load(amd64.Reg(sv.reg), regCtx, c.spillDisp(sv.slot))
+		}
+	}
+	c.a.Load(scratchB, regCtx, abi.OffGoStatus)
+	c.a.Op(amd64.Test, scratchB, scratchB, true)
+	guard(amd64.CondNE)
+	c.a.Load(scratchA, regCtx, abi.OffKeep+int32(v.Index)*int32(c.enc.ValueSize)+c.enc.NumOffset)
 	c.setG(v, scratchA)
 }
 

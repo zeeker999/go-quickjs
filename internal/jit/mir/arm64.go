@@ -1418,6 +1418,10 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 	}
 	site := sites[0]
 	vs := int32(c.enc.ValueSize)
+	if site.Go != 0 {
+		c.goCall(v, site, c.guardFor(v))
+		return
+	}
 	if site.Literal {
 		// As amd64's: an object literal's object, its pool's next.
 		c.a.MovImm(a64B, c.enc.WriteBarrier)
@@ -1991,6 +1995,64 @@ func (c *a64Compiler) pointerWord(x *ssa.Value, w arm64.Reg) {
 		c.a.Load(a64B, base, disp)
 	}
 	c.a.Bind(done)
+}
+
+// goCall calls Go, as amd64's does.
+func (c *a64Compiler) goCall(v *ssa.Value, site *ssa.CallSite, guard func(arm64.Cond)) {
+	size := int32(unsafe.Sizeof(abi.GoArg{}))
+	for i, x := range v.Args {
+		var w arm64.Reg
+		if remat(x) {
+			c.materialize(x, a64A)
+			w = a64A
+		} else {
+			w = c.gpr(x, a64A)
+		}
+		at := abi.OffGoArgs + int32(i)*size
+		c.a.Store(a64Ctx, at+c.enc.NumOffset, w)
+		number, have := c.a.NewLabel(), c.a.NewLabel()
+		if x.Shadow != nil || c.origin.At(x) >= 0 {
+			c.a.MovImm(a64B, abi.NumberLimit)
+			c.a.Cmp(w, a64B, true)
+			c.a.BCond(arm64.LO, number)
+		}
+		c.pointerWord(x, w)
+		c.a.B(have)
+		c.a.Bind(number)
+		c.a.MovImm(a64B, 0)
+		c.a.Bind(have)
+		c.a.Store(a64Ctx, at+c.enc.RefOffset, a64B)
+	}
+	c.a.MovImm(a64A, uint64(site.Go))
+	c.a.Store(a64Ctx, abi.OffGoOp, a64A)
+	c.a.MovImm(a64A, uint64(v.Index))
+	c.a.Store(a64Ctx, abi.OffGoKeep, a64A)
+	for _, sv := range c.saves[v] {
+		if sv.float {
+			c.a.StoreF(a64Ctx, c.spillDisp(sv.slot), arm64.FReg(sv.reg))
+		} else {
+			c.a.Store(a64Ctx, c.spillDisp(sv.slot), arm64.Reg(sv.reg))
+		}
+	}
+	back := c.a.NewLabel()
+	c.a.Adr(a64A, back)
+	c.a.Store(a64Ctx, abi.OffGoResume, a64A)
+	c.a.MovImm(a64A, c.enc.CallGo)
+	c.a.Br(a64A)
+	c.a.Bind(back)
+	c.a.Load(a64Locals, a64Ctx, abi.OffLocals)
+	c.a.Load(a64Stack, a64Ctx, abi.OffStack)
+	for _, sv := range c.saves[v] {
+		if sv.float {
+			c.a.LoadF(arm64.FReg(sv.reg), a64Ctx, c.spillDisp(sv.slot))
+		} else {
+			c.a.Load(arm64.Reg(sv.reg), a64Ctx, c.spillDisp(sv.slot))
+		}
+	}
+	c.a.Load(a64B, a64Ctx, abi.OffGoStatus)
+	c.a.Cbnz(a64B, c.stubLabel(v.State, exitKind(v.Aux)), true)
+	c.a.Load(a64A, a64Ctx, abi.OffKeep+int32(v.Index)*int32(c.enc.ValueSize)+c.enc.NumOffset)
+	c.setG(v, a64A)
 }
 
 // keepSource leaves in C where a tagged value came from, as amd64's does.

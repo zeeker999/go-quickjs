@@ -6588,6 +6588,120 @@ func TestJITSSAMathIntrinsics(t *testing.T) {
 	}
 }
 
+// + with a string is made by Go, called from native code (ssa.GoAdd,
+// jit's callGo), which stays in it, as V8's code calls its StringAdd: a
+// loop concatenating strings, numbers, booleans, null and undefined, and
+// Splay's GeneratePayloadTree, recursive, its leaves' strings so made, run
+// natively without leaving, under a collector running all the while. An
+// object's conversion runs its valueOf, and a symbol throws, both made by Go
+// after the code leaves -- from the frame as it was at the call, though Go
+// has taken every register (jitGoCallWork churns them, and collects
+// garbage now and then); a string too long throws its RangeError. Each
+// answer is the interpreter's.
+func TestJITSSAStringAddCallsGo(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(1))
+	calls := 0
+	jitGoCallWork = func() {
+		if calls++; churnRegisters(calls) == 0.25 {
+			t.Log("churned to a quarter")
+		}
+		if calls%64 == 0 {
+			runtime.GC()
+		}
+	}
+	defer func() { jitGoCallWork = nil }()
+	setup := `function cat(n){let s='',t=0;for(let i=0;i<n;i++){const p='k'+i+':'+(i%3===0)+null+undefined+(i*0.5);t=(t+p.length)|0;if(i%50===0)s=s+p}return s.length+'/'+t+'/'+s.slice(0,40)}
+		function tree(d,tag){if(d==0)return {array:[0,1,2,3],string:'String for key '+tag+' in leaf node'};return {left:tree(d-1,tag),right:tree(d-1,tag)}}
+		function walk(n){let c=0;for(let i=0;i<n;i++){const x=tree(4,String(i/7));c=(c+x.left.right.left.left.string.length)|0}return c}
+		var obj={valueOf(){return 7}},sy=Symbol('s');
+		function odd(n,o){let r='',c=0;for(let i=0;i<n;i++){r='a'+(i%7?i:o);c=(c+r.length)|0}return r+c}
+		function syms(n,x){let r='';for(let i=0;i<n;i++){r='a'+(i<n-1?'b':x)}return r}
+		function sym(){try{return syms(300,sy)}catch(e){return e.name}}
+		function big(){let s='x';try{for(let i=0;i<40;i++)s=s+s}catch(e){return e.name+s.length}return 'no'}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cat := r.global.getOwn(r.atoms.intern("cat")).value.Object().fn().closure
+	tree := r.global.getOwn(r.atoms.intern("tree")).value.Object().fn().closure
+	odd := r.global.getOwn(r.atoms.intern("odd")).value.Object().fn().closure
+	syms := r.global.getOwn(r.atoms.intern("syms")).value.Object().fn().closure
+	rounds := []string{`cat(300)`, `cat(300)`, `cat(300)`, `cat(300)`, `String(walk(40))`, `String(walk(40))`, `String(walk(40))`,
+		`String(walk(40))`, `odd(300,obj)`, `odd(300,obj)`, `odd(300,obj)`, `[sym(),sym(),sym()].join()`, `big()`, `big()`, `cat(300)`}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts, out uint64
+		if e := r.jit.cache[weak.Make(cat.fn)]; e != nil {
+			hosts = e.ssaStats.hosts
+		}
+		if e := r.jit.cache[weak.Make(tree.fn)]; e != nil {
+			out = uint64(e.nativeOut)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		switch i {
+		case 3:
+			e := r.jit.cache[weak.Make(cat.fn)]
+			if e == nil || e.ssa == nil {
+				t.Fatalf("cat did not run natively: %+v", e)
+			}
+			// After its loop, which leaves none of 300 times: two, for
+			// s.slice, a built-in Go calls, among them.
+			if n := e.ssaStats.hosts - hosts; n > 2 {
+				t.Fatalf("cat left native code %d times", n)
+			}
+		case 7:
+			// tree, called natively, never leaves: its strings are Go's,
+			// made without leaving.
+			e := r.jit.cache[weak.Make(tree.fn)]
+			if e == nil || e.ssa == nil || e.notNative || e.nativeIn == 0 {
+				t.Fatalf("tree is not called natively: %+v", e)
+			}
+			if n := uint64(e.nativeOut) - out; n != 0 {
+				t.Fatalf("tree left native code %d times", n)
+			}
+		case 11:
+			// Their objects and symbols left: Go made those.
+			for name, cl := range map[string]*closure{"odd": odd, "syms": syms} {
+				if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil || e.ssaStats.hosts == 0 {
+					t.Fatalf("%s did not run natively, leaving for Go: %+v", name, e)
+				}
+			}
+		}
+	}
+}
+
+// churnRegisters keeps many integers and floats live at once, so that the
+// registers native code had before a call of Go hold something else after.
+//
+//go:noinline
+func churnRegisters(n int) float64 {
+	a, b, c, d, e, f, g, h := float64(n), 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5
+	i0, i1, i2, i3, i4, i5, i6 := n, n*3, n*5, n*7, n*11, n*13, n*17
+	for k := 0; k < 8; k++ {
+		a, b, c, d, e, f, g, h = b+h, c*a, d-b, e+c, f*0.5, g+e, h-f, a*1.0001
+		i0, i1, i2, i3, i4, i5, i6 = i1^i6, i2+i0, i3*3, i4-i1, i5^i2, i6+i3, i0*5
+	}
+	return a + b + c + d + e + f + g + h + float64(i0+i1+i2+i3+i4+i5+i6)
+}
+
 // Where native code answers Math.pow itself (ssa.ExactPow), its answer is
 // the VM's, bit for bit: bases from -40 to 40 and some fractions, -0, NaN
 // and the infinities, to powers from -3 to 70, halves among them.

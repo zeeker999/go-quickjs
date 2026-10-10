@@ -52,6 +52,7 @@ var jitEncoding = abi.Encoding{
 	ObjectProps:   int32(unsafe.Offsetof(Object{}.props)),
 	ObjectProto:   int32(unsafe.Offsetof(Object{}.proto)),
 	WriteBarrier:  jit.WriteBarrier(),
+	CallGo:        jit.CallGo(),
 	PropertySize:  int32(unsafe.Sizeof(Property{})),
 	PropertyKey:   int32(unsafe.Offsetof(Property{}.key)),
 	PropertyFlags: int32(unsafe.Offsetof(Property{}.flags)),
@@ -1209,6 +1210,63 @@ func (r *Runtime) jitNativeCallsInline(e *jitEntry, inline func(int)) bool {
 		i--
 	}
 	return found
+}
+
+func init() { jit.HostCall = jitHostCall }
+
+// jitHostCall is Go's side of a call of Go from native code (jit.HostCall,
+// ssa.CallSite's Go) by the runtime the context belongs to: it does what
+// the call names, its result to the call's keep cell, and reports whether
+// it did. What it refuses, the code leaves for Go to make; it may not run
+// the script's code, which is the interpreter's then.
+func jitHostCall(ctx *abi.Context) bool {
+	r := (*Runtime)(ctx.Host)
+	if r == nil || ctx.GoKeep >= abi.MaxKeeps {
+		return false
+	}
+	if jitGoCallWork != nil {
+		jitGoCallWork()
+	}
+	switch ssa.GoOp(ctx.GoOp) {
+	case ssa.GoAdd:
+		a, b := jitGoArg(ctx, 0), jitGoArg(ctx, 1)
+		// Primitives, and nothing that throws: an object's conversion may
+		// call anything, and making an error may too (a getter of
+		// Error.stackTraceLimit) -- a symbol's, a BigInt's with a number,
+		// a string too long, a memory limit reached. Go makes those after
+		// the code leaves.
+		if !jitPlainOperand(a) || !jitPlainOperand(b) || r.meter != nil ||
+			a.IsString() && b.IsString() && a.String().length+b.String().length > maxStringLength-64 {
+			return false
+		}
+		v, err := r.add(a, b)
+		if err != nil {
+			return false
+		}
+		*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
+		return true
+	}
+	return false
+}
+
+// jitPlainOperand reports whether v is a primitive + takes without a
+// conversion that may throw or call anything: not an object, a symbol or a
+// BigInt. A string and a number's, at most 25 code units, are below
+// maxStringLength's margin unless the string is near it.
+func jitPlainOperand(v Value) bool {
+	return !v.IsObject() && !v.IsSymbol() && !v.IsBigInt() && (!v.IsString() || v.String().length <= maxStringLength-64)
+}
+
+// jitGoCallWork, which tests set, runs at each call of Go before it is
+// answered: what Go may do there, the collector included.
+var jitGoCallWork func()
+
+// GoCalls is ssa.GoFeedback's: the VM answers calls of Go (jitHostCall).
+func (fb *jitFeedback) GoCalls() bool { return true }
+
+// jitGoArg is a call of Go's operand i (abi.Context's GoArgs).
+func jitGoArg(ctx *abi.Context, i int) Value {
+	return *(*Value)(unsafe.Pointer(&ctx.GoArgs[i]))
 }
 
 // jitMarking reports whether the collector marks (jit.Marking): a
@@ -2819,6 +2877,7 @@ func (r *Runtime) jitGrowContexts() bool {
 	}
 	chunk := new([jitContexts]abi.Context)
 	for i := range chunk {
+		chunk[i].Host = unsafe.Pointer(r)
 		s.ssaCtxs = append(s.ssaCtxs, &chunk[i])
 	}
 	for i := max(old, 1); i < len(s.ssaCtxs); i++ {

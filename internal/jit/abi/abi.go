@@ -155,7 +155,29 @@ type Context struct {
 	ExitDesc uintptr
 	Regs     [32]uint64
 	XRegs    [32]uint64
+	// A call of Go from native code (ssa.CallSite's Go), V8's call of a
+	// runtime function: GoOp says what Go does, of GoArgs, the operands'
+	// words -- integers, so that native code stores no pointer: each
+	// operand is also where its source has it, which the collector sees
+	// (ssa's keeps) -- and GoResume is where the code goes on. Go writes
+	// the result to Keep[GoKeep], with its write barrier, and GoStatus 0,
+	// or 1 when it did nothing: the code then leaves for Go to make the
+	// operation. Host is the runtime the context belongs to.
+	GoOp, GoKeep, GoStatus uint64
+	GoResume               uintptr
+	GoArgs                 [MaxGoArgs]GoArg
+	Host                   unsafe.Pointer
 }
+
+// GoArg is an operand of a call of Go: a slot's two words, its pointer word
+// as an integer (Context.GoArgs).
+type GoArg struct {
+	Num uint64
+	Ref uintptr
+}
+
+// MaxGoArgs is how many operands a call of Go takes.
+const MaxGoArgs = 2
 
 // ExitDescriptor is an exit's frame state as data (an ExitTable exit): the
 // slots to write and where each one's value is, the inlined callees'
@@ -297,6 +319,12 @@ var (
 	OffInlineThis    = int32(unsafe.Offsetof(Context{}.InlineThis))
 	OffInlineCallee  = int32(unsafe.Offsetof(Context{}.InlineCallee))
 	OffNewTarget     = int32(unsafe.Offsetof(Context{}.NewTarget))
+
+	OffGoOp     = int32(unsafe.Offsetof(Context{}.GoOp))
+	OffGoKeep   = int32(unsafe.Offsetof(Context{}.GoKeep))
+	OffGoStatus = int32(unsafe.Offsetof(Context{}.GoStatus))
+	OffGoResume = int32(unsafe.Offsetof(Context{}.GoResume))
+	OffGoArgs   = int32(unsafe.Offsetof(Context{}.GoArgs))
 )
 
 // ObjectPool is the objects a construction site native code makes, `new
@@ -425,8 +453,14 @@ type Encoding struct {
 	// while it is set, and otherwise stores, as compiled Go does. It
 	// cannot change between the test and the store: Go sets it only with
 	// the world stopped, which native code, never a preemption point, is
-	// not (docs/jit-progress.md, decided 2026-10-09).
+	// not (docs/jit-progress.md, decided 2026-10-09). A call of Go
+	// (Context.GoOp) is one, so nothing is taken for the flag across it:
+	// every store tests it again.
 	WriteBarrier uint64
+	// CallGo is where native code jumps to call Go (Context.GoOp): the
+	// address of jit's callGo, an assembly routine that, to the Go
+	// runtime, the Go function that entered the code called.
+	CallGo uint64
 	// An ordinary object of class ClassObject, whose table has at most
 	// MaxScan entries, may be searched for a key, as the VM's own small
 	// objects are. A property is plain data when its flags have none of
