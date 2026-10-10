@@ -71,6 +71,7 @@ type schedule struct {
 // prepare checks that f is one the backends compile, and analyses and
 // allocates it, with the architecture's allocatable registers.
 func prepare(w *Workspace, f *ssa.Func, enc abi.Encoding, gprs, fprs []int) (*core, error) {
+	f.Finish()
 	c := &core{f: f, enc: enc, gprs: gprs, fprs: fprs, ws: w}
 	c.sched = &c.own
 	if w != nil {

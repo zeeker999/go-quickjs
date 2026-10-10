@@ -62,3 +62,39 @@ func TestOptimizeKeepsLoopsUnboxed(t *testing.T) {
 		t.Fatalf("%d tagged and %d float phis, want 0 and at least 2:\n%s", tagged, float, f)
 	}
 }
+
+// Build leaves the phis' shadows and the stores' checks to Optimize, which
+// would make them again for what it keeps; Finish makes them, once, for
+// whatever runs or compiles a Func Optimize has not.
+func TestShadowsMadeOnce(t *testing.T) {
+	const src = `function f(a,b,c){let t=c?a:b;return t}`
+	shadows := func(f *Func) (n int) {
+		for _, b := range f.Blocks {
+			for _, v := range b.Values {
+				if v.Op == OpPhi && v.Type == Source {
+					n++
+				}
+			}
+		}
+		return n
+	}
+	f := lowerJS(t, src)
+	if n := shadows(f); n != 0 {
+		t.Fatalf("Build made %d shadows:\n%s", n, f)
+	}
+	f.Finish()
+	n := shadows(f)
+	if err := Check(f); n == 0 || err != nil {
+		t.Fatalf("Finish made %d shadows (%v):\n%s", n, err, f)
+	}
+	f.Finish()
+	if again := shadows(f); again != n {
+		t.Fatalf("a second Finish made %d shadows, not %d:\n%s", again, n, f)
+	}
+	g := lowerJS(t, src)
+	Optimize(g)
+	Optimize(f)
+	if err := Check(g); shadows(g) == 0 || shadows(f) != shadows(g) || err != nil {
+		t.Fatalf("Optimize made %d shadows alone, %d after Finish (%v):\n%s", shadows(g), shadows(f), err, g)
+	}
+}

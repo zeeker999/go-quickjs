@@ -6,7 +6,8 @@ import "fmt"
 // phis lead their blocks with one argument per predecessor; every guard has a
 // frame state; every value used is defined in f; an exit and a loop header
 // have a frame state, as has an entry block for its guards; a block's
-// successors match its kind; and a phi of two slots' values has a shadow.
+// successors match its kind; and, once shadows are made (Finish), a phi of
+// two slots' values has one.
 func Check(f *Func) error {
 	defined := map[*Value]bool{}
 	for _, b := range f.Blocks {
@@ -102,7 +103,7 @@ func Check(f *Func) error {
 			if !ok {
 				continue
 			}
-			if s := v.Shadow; o == OriginAmbiguous && (s == nil || s.Op != OpPhi || s.Type != Source || s.Block != v.Block) {
+			if s := v.Shadow; o == OriginAmbiguous && f.shadowed && (s == nil || s.Op != OpPhi || s.Type != Source || s.Block != v.Block) {
 				return fmt.Errorf("ssa: b%d %v merges two slots' values with no shadow", v.Block.ID, v)
 			}
 			if o == OriginHeap && (v.Shadow == nil || v.Shadow != v.Args[0]) {

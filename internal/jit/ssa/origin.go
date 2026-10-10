@@ -140,6 +140,18 @@ func joinOrigin(a, b int) int {
 	return OriginAmbiguous
 }
 
+// Finish gives the phis their shadows and the stores their checks
+// (shadowMerges, storeChecks), which running or compiling f needs, unless
+// Optimize has: Build leaves them to Optimize, which would make them again
+// for the phis and stores it keeps.
+func (f *Func) Finish() {
+	if !f.shadowed {
+		shadowMerges(f)
+		storeChecks(f)
+		f.shadowed = true
+	}
+}
+
 // shadowMerges gives every ambiguous phi a shadow, and every phi that
 // flows into one and may hold a reference, so that each shadow's arguments
 // are shadows or constants: a load's slot, or -1 for a primitive, which

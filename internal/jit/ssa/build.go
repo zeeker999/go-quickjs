@@ -259,8 +259,8 @@ func build(w *Workspace, p *ir.Program, fb Feedback) (*Func, error) {
 		return nil, err
 	}
 	b.translate()
-	shadowMerges(b.f)
-	storeChecks(b.f)
+	// The shadows and the stores' checks are Optimize's to make, which
+	// would remake them, or the first to run or compile f's (Finish).
 	return b.f, nil
 }
 
