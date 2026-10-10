@@ -973,11 +973,22 @@ func (r *Runtime) jitNativeCallsInline(e *jitEntry, inline func(int)) bool {
 	return found
 }
 
+// jitMarking reports whether the collector marks (jit.Marking): a
+// variable, which the tests set.
+var jitMarking = jit.Marking
+
 // jitInlineLeft counts an exit from the callee inlined at pc, or from its
 // call's checks: after jitInlineExits the call is not inlined but made
 // natively, if the callee's code allows it, and the code is compiled
-// again.
+// again. An exit while the collector marks is not counted: native code
+// leaves then wherever it would store a pointer without a write barrier --
+// a construction's receiver adding its properties -- and sixteen such
+// exits in one collection had EarleyBoyer's sc_Pair constructions stop
+// being inlined for good, some runs in three.
 func (r *Runtime) jitInlineLeft(e *jitEntry, pc int) {
+	if jitMarking() {
+		return
+	}
 	for i := range e.inlines {
 		if x := &e.inlines[i]; int(x.pc) == pc && !slices.Contains(e.notInline, x.pc) {
 			if x.exits++; x.exits >= jitInlineExits {
@@ -2902,8 +2913,12 @@ const (
 // reason to stop calling it natively. Only once those compiles are spent
 // (jitUnwindReopts), as V8 gives up optimizing a function that deoptimizes
 // too often, do native callers stop calling it and leave for Go at the
-// call instead, which makes it (notNative), until jitRetryNative.
+// call instead, which makes it (notNative), until jitRetryNative. Nor is
+// one counted while the collector marks (jitInlineLeft).
 func (r *Runtime) jitUnwound(e *jitEntry) {
+	if jitMarking() {
+		return
+	}
 	if e.nativeOut++; e.nativeOut%jitUnwindProbe != 0 || e.nativeOut*jitUnwindShare <= e.nativeIn {
 		return
 	}
