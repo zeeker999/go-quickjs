@@ -2091,8 +2091,14 @@ func TestJITBudgetRefusalWaitsForRelease(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true, MemoryLimit: 1 << 20})
 	var refused *bytecode.Function
 	var deferred *jitEntry
+	// The functions are kept: a collection would drop the code of those
+	// already compiled (the cache's keys are weak), and the budget never
+	// fill -- as under checkptr, or GOGC=1.
+	var keep []*bytecode.Function
+	defer runtime.KeepAlive(&keep)
 	for i := 0; i < 64 && deferred == nil; i++ {
 		fn := jitFunctionForTest(t, fmt.Sprintf(`function f(n) { let s=0; for(let i=0;i<n;i++) s+=i*%d; return s }`, i+1))
+		keep = append(keep, fn)
 		if e := r.jitForMode(fn, false, nil); e != nil && e.deferred {
 			refused, deferred = fn, e
 		}
