@@ -1,7 +1,9 @@
 package ssa
 
 import (
+	"fmt"
 	"math"
+	"math/bits"
 	"slices"
 )
 
@@ -359,7 +361,28 @@ func (a *aliases) mayElemCell(call, s *Value) bool {
 
 // liveAcross is every property store, and for each the values with a
 // shadow -- read from cells, and phis that may hold such -- used after it.
+// Liveness is by bitsets over those values: each block's, live at its
+// start and at its end, to a fixed point, then a walk back through each
+// block with a store, from its end, past each value: its own value dies,
+// what it uses lives.
 func liveAcross(f *Func) ([]*Value, [][]*Value) {
+	stores, live := liveAcrossSets(f)
+	if verifyLiveness {
+		refStores, refLive := liveAcrossRef(f)
+		if !slices.Equal(stores, refStores) {
+			panic("ssa: liveAcross's stores differ from the reference's")
+		}
+		for i := range live {
+			if !slices.Equal(live[i], refLive[i]) {
+				panic(fmt.Sprintf("ssa: live across %v: %v, the reference %v", stores[i], live[i], refLive[i]))
+			}
+		}
+	}
+	return stores, live
+}
+
+// liveAcrossSets is liveAcross.
+func liveAcrossSets(f *Func) ([]*Value, [][]*Value) {
 	var stores, cands []*Value
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
@@ -373,112 +396,117 @@ func liveAcross(f *Func) ([]*Value, [][]*Value) {
 			}
 		}
 	}
+	live := make([][]*Value, len(stores))
 	if len(stores) == 0 || len(cands) == 0 {
-		return stores, make([][]*Value, len(stores))
+		return stores, live
 	}
 	nb := 0
 	for _, b := range f.Blocks {
 		nb = max(nb, b.ID+1)
 	}
-	pos, cand := f.ints(f.nextID), f.ints(f.nextID)
-	for _, b := range f.Blocks {
-		for i, v := range b.Values {
-			pos[v.ID] = i
-		}
-	}
+	cand := f.ints(f.nextID)
 	for k, c := range cands {
 		cand[c.ID] = k + 1
 	}
-	// By candidate, then block ID: the last place in the block that uses
-	// the candidate -- a value's index, the block's length for its end, -1
-	// for its header -- or -2 for none; and whether it is live at the end.
-	last, out := f.ints(len(cands)*nb), f.bools(len(cands)*nb)
-	for i := range last {
-		last[i] = -2
-	}
-	use := func(a *Value, b *Block, at int) {
-		if a.ID < len(cand) && cand[a.ID] != 0 {
-			k := (cand[a.ID]-1)*nb + b.ID
-			last[k] = max(last[k], at)
+	w := (len(cands) + 63) / 64
+	// By block ID: what it uses (before defining it, as SSA has it), what
+	// it defines, what its successors' phis take from it, and what is live
+	// at its start and at its end.
+	sets := make([]uint64, 5*nb*w)
+	use, def, phiOut, in, out := sets[:nb*w], sets[nb*w:2*nb*w], sets[2*nb*w:3*nb*w], sets[3*nb*w:4*nb*w], sets[4*nb*w:]
+	row := func(s []uint64, b *Block) []uint64 { return s[b.ID*w : (b.ID+1)*w] }
+	add := func(s []uint64, v *Value) {
+		if v != nil && v.ID < len(cand) && cand[v.ID] != 0 {
+			k := cand[v.ID] - 1
+			s[k/64] |= 1 << (k % 64)
 		}
 	}
-	for _, b := range f.Blocks {
-		if b.Header != nil {
-			for _, s := range b.Header.Slots {
-				if s != nil {
-					use(s, b, -1)
-				}
+	states := func(s []uint64, st *FrameState) {
+		if st != nil {
+			for _, x := range st.Slots {
+				add(s, x)
 			}
 		}
-		for i, v := range b.Values {
+	}
+	// uses adds what v uses, a phi's arguments aside.
+	uses := func(s []uint64, v *Value) {
+		for _, a := range v.Args {
+			add(s, a)
+		}
+		states(s, v.State)
+	}
+	for _, b := range f.Blocks {
+		u, d := row(use, b), row(def, b)
+		if b.Header != nil {
+			states(u, b.Header)
+		}
+		for _, v := range b.Values {
+			add(d, v)
 			if v.Op == OpPhi {
 				// A phi's argument is used at the end of its predecessor.
 				for j, a := range v.Args {
-					if a.ID < len(cand) && cand[a.ID] != 0 {
-						out[(cand[a.ID]-1)*nb+b.Preds[j].ID] = true
-					}
+					add(row(phiOut, b.Preds[j]), a)
 				}
 				continue
 			}
-			for _, a := range v.Args {
-				use(a, b, i)
-			}
-			if v.State != nil {
-				for _, s := range v.State.Slots {
-					if s != nil {
-						use(s, b, i)
-					}
+			uses(u, v)
+		}
+		add(u, b.Control)
+		states(u, b.State)
+	}
+	// The blocks are in reverse post-order: backward, a loop takes a
+	// second round or so.
+	for changed := true; changed; {
+		changed = false
+		for i := len(f.Blocks) - 1; i >= 0; i-- {
+			b := f.Blocks[i]
+			o, n, u, d, p := row(out, b), row(in, b), row(use, b), row(def, b), row(phiOut, b)
+			for j := range o {
+				x := p[j]
+				for _, s := range b.Succs {
+					x |= in[s.ID*w+j]
 				}
-			}
-		}
-		if b.Control != nil {
-			use(b.Control, b, len(b.Values))
-		}
-		if b.State != nil {
-			for _, s := range b.State.Slots {
-				if s != nil {
-					use(s, b, len(b.Values))
+				o[j] = x
+				if y := (u[j] | x) &^ d[j]; y != n[j] {
+					n[j], changed = y, true
 				}
 			}
 		}
 	}
-	// A candidate is live at the end of a block if it is live at the start
-	// of a successor: anywhere but where it is defined, if that uses it or
-	// it is live at that one's end.
-	var work []*Block
-	for k, c := range cands {
-		row, uses := out[k*nb:(k+1)*nb], last[k*nb:(k+1)*nb]
-		liveIn := func(b *Block) bool { return b != c.Block && (uses[b.ID] != -2 || row[b.ID]) }
-		work = work[:0]
-		for _, b := range f.Blocks {
-			if liveIn(b) {
-				work = append(work, b)
-			}
+	// Back through each block with a store: what is live after each value.
+	cur := make([]uint64, w)
+	k := 0
+	for _, b := range f.Blocks {
+		first := k
+		for k < len(stores) && stores[k].Block == b {
+			k++
 		}
-		for len(work) > 0 {
-			b := work[len(work)-1]
-			work = work[:len(work)-1]
-			for _, p := range b.Preds {
-				if !row[p.ID] {
-					row[p.ID] = true
-					if liveIn(p) {
-						work = append(work, p)
+		if first == k {
+			continue
+		}
+		copy(cur, row(out, b))
+		add(cur, b.Control)
+		states(cur, b.State)
+		next := k - 1
+		for i := len(b.Values) - 1; i >= 0 && next >= first; i-- {
+			v := b.Values[i]
+			if v == stores[next] {
+				for j, x := range cur {
+					for x != 0 {
+						bit := bits.TrailingZeros64(x)
+						x &= x - 1
+						live[next] = append(live[next], cands[j*64+bit])
 					}
 				}
+				next--
 			}
-		}
-	}
-	live := make([][]*Value, len(stores))
-	for i, s := range stores {
-		at := pos[s.ID]
-		for k, c := range cands {
-			if c.Block == s.Block && pos[c.ID] > at {
-				continue // defined after it
+			if v.ID < len(cand) && cand[v.ID] != 0 {
+				c := cand[v.ID] - 1
+				cur[c/64] &^= 1 << (c % 64)
 			}
-			if !out[k*nb+s.Block.ID] && last[k*nb+s.Block.ID] <= at {
-				continue // dead after it
+			if v.Op != OpPhi {
+				uses(cur, v)
 			}
-			live[i] = append(live[i], c)
 		}
 	}
 	return stores, live
