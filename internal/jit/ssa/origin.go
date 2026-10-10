@@ -258,6 +258,38 @@ func clearShadows(f *Func) {
 // having left. They are its operands after the object and the value.
 func storeChecks(f *Func) {
 	stores, live := liveAcross(f)
+	storeChecksAt(f, stores, live)
+}
+
+// checkStoreChecks panics unless the stores' checks are those storeChecks
+// makes afresh (quickjs_verify): Optimize makes them from what
+// keepAcrossStores found live, when it kept nothing.
+func checkStoreChecks(f *Func) {
+	var made [][]*Value
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == OpPropWrite {
+				made = append(made, slices.Clone(v.Args))
+			}
+		}
+	}
+	clearStoreChecks(f)
+	storeChecks(f)
+	i := 0
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == OpPropWrite {
+				if !slices.Equal(v.Args, made[i]) {
+					panic(fmt.Sprintf("ssa: %v's checks %v, made afresh %v", v, made[i][2:], v.Args[2:]))
+				}
+				i++
+			}
+		}
+	}
+}
+
+// storeChecksAt is storeChecks with what is live across the stores.
+func storeChecksAt(f *Func, stores []*Value, live [][]*Value) {
 	a := newAliases()
 	for i, s := range stores {
 		if s.Op != OpPropWrite {

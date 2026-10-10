@@ -1626,5 +1626,72 @@ func TestSSANativeStores(t *testing.T) {
 	}
 }
 
+// A store that more references read from cells are live across than keep
+// cells hold (abi.MaxKeeps) keeps none, and leaves itself to Go where it
+// would write a cell one was read from (ssa's storeChecks): here a guard
+// after it names 66 reads of the cell it writes.
+func TestSSANativeStoresPastTheKeeps(t *testing.T) {
+	cached := ssa.PropertySite{Key: 10, Shape: testShapes[0].shape, Index: 0}
+	const reads = abi.MaxKeeps + 2
+	p := &ir.Program{Locals: reads + 4}
+	sites := map[int]site{}
+	for i := range reads {
+		sites[len(p.Code)] = cached
+		p.Code = append(p.Code, ir.Instruction{Op: ir.ReferenceRead, Dest: 3 + i, Left: ir.Slot(0), Key: 10})
+	}
+	sites[len(p.Code)] = cached
+	p.Code = append(p.Code, ir.Instruction{Op: ir.PropertyWrite, Left: ir.Slot(0), Right: ir.Slot(1), Key: 10})
+	// A read of another object's, whose guard's frame state holds every
+	// read before the store.
+	sites[len(p.Code)] = cached
+	p.Code = append(p.Code, ir.Instruction{Op: ir.ReferenceRead, Dest: reads + 3, Left: ir.Slot(2), Key: 10},
+		ir.Instruction{Op: ir.Return, Left: ir.Slot(3)})
+	p.Maps = make([]ir.StateMap, len(p.Code))
+	for pc := range p.Maps {
+		p.Maps[pc].PC = uint32(pc)
+	}
+	c, err := compileNative(p, layout{p.Locals, -1, sites, nil, nil, nil})
+	if err != nil || c == nil {
+		t.Fatalf("compile: %v", err)
+	}
+	defer c.code.Close()
+	if c.f.Keeps != 0 {
+		t.Fatalf("%d keeps, past abi.MaxKeeps's %d", c.f.Keeps, abi.MaxKeeps)
+	}
+	checks := 0
+	for _, b := range c.f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == ssa.OpPropWrite {
+				checks += len(v.Args) - 2
+			}
+		}
+	}
+	if checks == 0 {
+		t.Fatalf("the store checks no cell:\n%s", c.f)
+	}
+	for _, value := range []ir.Value{ir.Float(5), {Kind: ir.Opaque, Bits: 1}} {
+		for _, old := range []ir.Value{ir.Float(3), {Kind: ir.Opaque, Bits: 3}} {
+			heap := randomTestHeap(rand.New(rand.NewPCG(5, 6)))
+			for _, i := range []int{0, 2} {
+				sh := testShapes[0]
+				heap[i].shape, heap[i].proto = 0, -1
+				heap[i].keys, heap[i].flags = sh.keys, sh.flags
+				heap[i].props = []ir.Value{old, ir.Float(1), ir.Float(2)}
+			}
+			// Object 2 is of another shape: its read leaves, with the
+			// frame state the reads are in.
+			heap[2].shape = 1
+			slots := make([]ir.Value, p.Locals)
+			slots[0], slots[1], slots[2] = ir.Value{Kind: ir.Opaque, Bits: 0}, value, ir.Value{Kind: ir.Opaque, Bits: 2}
+			for i := 3; i < len(slots); i++ {
+				slots[i] = ir.Float(0)
+			}
+			if why := nativeMismatch(c, 0, slots, 0, heap); why != "" {
+				t.Fatalf("%v over %v: %s", value, old, why)
+			}
+		}
+	}
+}
+
 // isTestReference reports a value with a pointer word.
 func isTestReference(v ir.Value) bool { return v.Kind == ir.Opaque || v.Kind == ir.String }

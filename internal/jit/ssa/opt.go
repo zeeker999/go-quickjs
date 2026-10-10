@@ -126,16 +126,21 @@ func Optimize(f *Func) {
 		}
 	}
 	shadowMerges(f)
-	if keepAcrossStores(f) {
+	if kept, stores, live := keepAcrossStores(f); kept {
 		// The phis' shadows again, for the phis the keeps made; those
 		// made before, now unused, go.
 		clearShadows(f)
 		removeDead(f)
 		shadowMerges(f)
+		storeChecks(f)
+	} else {
+		storeChecksAt(f, stores, live)
+		if verifyLiveness {
+			checkStoreChecks(f)
+		}
 	}
 	clear(guards)
 	sc.guards = guards[:0]
-	storeChecks(f)
 	f.shadowed = true
 	recount(f)
 }
