@@ -407,6 +407,14 @@ type scratch struct {
 	// indexes past their first and last in guards, 0 for none.
 	first, last []int32
 	guards      []guardSeen
+	// liveStores, liveCands, liveFlat, live, liveFrom and liveWords are
+	// liveAcrossSets's: what it returns lasts until it runs again.
+	liveStores, liveCands, liveFlat []*Value
+	live                            [][]*Value
+	liveFrom                        []int
+	liveWords                       []uint64
+	// subst is Optimize's replacements, by value ID.
+	subst []*Value
 }
 
 // guardSeen is a guard Optimize has met, keyed by its op, and the index

@@ -442,9 +442,12 @@ func liveAcross(f *Func) ([]*Value, [][]*Value) {
 	return stores, live
 }
 
-// liveAcrossSets is liveAcross.
+// liveAcrossSets is liveAcross. What it returns is the Func's scratch's,
+// until it runs again.
 func liveAcrossSets(f *Func) ([]*Value, [][]*Value) {
-	var stores, cands []*Value
+	sc := f.scr()
+	stores, cands := sc.liveStores[:0], sc.liveCands[:0]
+	defer func() { sc.liveStores, sc.liveCands = stores[:0], cands[:0] }()
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
 			switch {
@@ -457,7 +460,11 @@ func liveAcrossSets(f *Func) ([]*Value, [][]*Value) {
 			}
 		}
 	}
-	live := make([][]*Value, len(stores))
+	live := sc.live[:0]
+	for range stores {
+		live = append(live, nil)
+	}
+	sc.live = live
 	if len(stores) == 0 || len(cands) == 0 {
 		return stores, live
 	}
@@ -473,7 +480,9 @@ func liveAcrossSets(f *Func) ([]*Value, [][]*Value) {
 	// By block ID: what it uses (before defining it, as SSA has it), what
 	// it defines, what its successors' phis take from it, and what is live
 	// at its start and at its end.
-	sets := make([]uint64, 5*nb*w)
+	sets := idTable(sc.liveWords, 5*nb*w+w)
+	sc.liveWords = sets
+	sets, cur := sets[:5*nb*w], sets[5*nb*w:]
 	use, def, phiOut, in, out := sets[:nb*w], sets[nb*w:2*nb*w], sets[2*nb*w:3*nb*w], sets[3*nb*w:4*nb*w], sets[4*nb*w:]
 	row := func(s []uint64, b *Block) []uint64 { return s[b.ID*w : (b.ID+1)*w] }
 	add := func(s []uint64, v *Value) {
@@ -534,8 +543,12 @@ func liveAcrossSets(f *Func) ([]*Value, [][]*Value) {
 			}
 		}
 	}
-	// Back through each block with a store: what is live after each value.
-	cur := make([]uint64, w)
+	// Back through each block with a store: what is live after each value,
+	// each store's in one list, from liveFrom[i] on.
+	flat, from := sc.liveFlat[:0], sc.liveFrom[:0]
+	for range stores {
+		from = append(from, 0)
+	}
 	k := 0
 	for _, b := range f.Blocks {
 		first := k
@@ -552,13 +565,15 @@ func liveAcrossSets(f *Func) ([]*Value, [][]*Value) {
 		for i := len(b.Values) - 1; i >= 0 && next >= first; i-- {
 			v := b.Values[i]
 			if v == stores[next] {
+				from[next] = len(flat)
 				for j, x := range cur {
 					for x != 0 {
 						bit := bits.TrailingZeros64(x)
 						x &= x - 1
-						live[next] = append(live[next], cands[j*64+bit])
+						flat = append(flat, cands[j*64+bit])
 					}
 				}
+				live[next] = flat[from[next]:len(flat):len(flat)]
 				next--
 			}
 			if v.ID < len(cand) && cand[v.ID] != 0 {
@@ -570,6 +585,7 @@ func liveAcrossSets(f *Func) ([]*Value, [][]*Value) {
 			}
 		}
 	}
+	sc.liveFlat, sc.liveFrom = flat[:0], from[:0]
 	return stores, live
 }
 
