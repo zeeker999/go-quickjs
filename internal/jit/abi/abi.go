@@ -420,6 +420,10 @@ type Encoding struct {
 	// PropNotData, and a plain writable one when they have PropWritable of
 	// PropNotWritable. PropUninit marks a binding in its temporal dead zone.
 	ClassObject, PropNotData, PropNotWritable, PropWritable, PropUninit uint8
+	// ClassProxy is a proxy's class, whose prototype is its handler's to
+	// say, which native code leaves to Go; ClassFunction a function's, every
+	// object with a function's data.
+	ClassProxy, ClassFunction uint8
 }
 
 // MaxScan bounds the table native code searches for a key.

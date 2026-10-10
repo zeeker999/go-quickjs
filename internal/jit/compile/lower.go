@@ -169,6 +169,14 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 			// -- often have; the old one refuses it.
 			return nil, refuse(pc, "non-number or invalid constant")
 		}
+		if in.Op == bytecode.OpTypeOf && !m.ssa {
+			return nil, refuse(pc, "unsupported opcode "+in.Op.String())
+		}
+		if in.Op == bytecode.OpInstanceOf && !m.ssa {
+			// The new pipeline makes it natively where the VM knows its
+			// constructor (ssa.InstanceOfSite), Go otherwise.
+			return nil, refuse(pc, "unsupported opcode "+in.Op.String())
+		}
 		if in.Op == bytecode.OpApplyArguments && !m.forward {
 			return nil, refuse(pc, "unsupported opcode "+in.Op.String())
 		}
@@ -177,7 +185,7 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 			// throws it, as V8's code calls the runtime to throw.
 			return nil, refuse(pc, "unsupported opcode "+in.Op.String())
 		}
-		host = host || str || in.Op == bytecode.OpThrow || in.Op == bytecode.OpApplyArguments || in.Op == bytecode.OpNew || in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict || in.Op == bytecode.OpNewArray || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
+		host = host || str || in.Op == bytecode.OpThrow || in.Op == bytecode.OpInstanceOf || in.Op == bytecode.OpTypeOf || in.Op == bytecode.OpApplyArguments || in.Op == bytecode.OpNew || in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict || in.Op == bytecode.OpNewArray || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 		property = property || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 		this = this || in.Op == bytecode.OpPushThis
 		raw := uint32(in.Op)
@@ -262,6 +270,7 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 	selectNumericProperties(p, m.ssa)
 	if m.ssa {
 		liveLocals(fn, p, effects)
+		typeTests(fn, p, effects)
 	}
 	if m.ssa {
 		for pc, in := range p.Code {
@@ -507,6 +516,55 @@ func selectNumericProperties(p *ir.Program, cells bool) {
 	}
 }
 
+// typeNames are the strings typeof compared with tells natively.
+var typeNames = map[string]int{"number": ir.TypeNumber, "string": ir.TypeString, "boolean": ir.TypeBoolean,
+	"undefined": ir.TypeUndefined, "function": ir.TypeFunction}
+
+// typeTests has typeof compared with a string constant, typeof x ===
+// "number", tell the type natively, as V8 folds it into a check of the
+// value: the typeof becomes the test (ir.TypeTest), its boolean where the
+// typeof's string was; the constant, a number pushed in its place, unread;
+// the comparison nothing, or a branch on the boolean. Nothing may jump to
+// the constant or the comparison, whose states would hold the boolean.
+func typeTests(fn *bytecode.Function, p *ir.Program, effects []effect) {
+	targets := map[int]bool{}
+	for pc, in := range fn.Code {
+		if effects[pc].branch {
+			targets[int(in.A)] = true
+		}
+	}
+	for pc := 0; pc+2 < len(fn.Code); pc++ {
+		in, k, cmp := fn.Code[pc], fn.Code[pc+1], fn.Code[pc+2]
+		if in.Op != bytecode.OpTypeOf || p.Maps[pc].Depth < 1 || k.Op != bytecode.OpPushConst || targets[pc+1] || targets[pc+2] ||
+			p.Maps[pc+1].Depth < 0 || p.Maps[pc+2].Depth < 0 || uint64(k.A) >= uint64(len(fn.Constants)) || fn.Constants[k.A].Kind != bytecode.ConstString {
+			continue
+		}
+		kind, ok := typeNames[fn.Constants[k.A].Str]
+		if !ok {
+			continue
+		}
+		op := uint32(cmp.Op)
+		if cmp.Op == bytecode.OpJumpIfCmpFalse {
+			op = cmp.B
+		}
+		var equal bool
+		switch op {
+		case uint32(bytecode.OpStrictEq), uint32(bytecode.OpEq):
+			equal = true
+		case uint32(bytecode.OpStrictNe), uint32(bytecode.OpNe):
+		default:
+			continue
+		}
+		slot := p.Locals + p.Maps[pc].Depth - 1
+		p.Code[pc] = ir.Instruction{Op: ir.TypeTest, Left: ir.Slot(slot), Dest: slot, Key: uint32(kind), When: equal}
+		p.Code[pc+1] = ir.Instruction{Op: ir.Copy, Dest: slot + 1, Left: ir.Literal(ir.Float(0))}
+		p.Code[pc+2] = ir.Instruction{Op: ir.Nop}
+		if cmp.Op == bytecode.OpJumpIfCmpFalse {
+			p.Code[pc+2] = ir.Instruction{Op: ir.Branch, Operator: ir.Truth, Target: int(cmp.A), Left: ir.Slot(slot)}
+		}
+	}
+}
+
 // liveLocals fills p's Live: for each reachable instruction, the locals the
 // code from there may read before writing them, as a backward dataflow
 // over the instructions, each a branch to its A, a fall to the next, or
@@ -741,6 +799,10 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 		return effect{terminal: true}, nil
 	case bytecode.OpThrow:
 		return effect{need: 1, delta: -1, terminal: true}, nil
+	case bytecode.OpInstanceOf:
+		return effect{need: 2, delta: -1}, nil
+	case bytecode.OpTypeOf:
+		return effect{need: 1}, nil
 	case bytecode.OpApplyArguments:
 		// f, apply and the receiver, for f's result.
 		if !local(in.A) {
@@ -871,6 +933,13 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this bool) ir.Instr
 		return ir.Instruction{Op: ir.PropertyWrite, Left: ir.Slot(sp - 2), Right: top, Key: in.A}
 	case bytecode.OpThrow:
 		// The interpreter throws it (jitHost leaves it).
+		return ir.Instruction{Op: ir.Host}
+	case bytecode.OpInstanceOf:
+		// Made natively where the VM knows the constructor
+		// (ssa.InstanceOfSite), by Go otherwise.
+		return ir.Instruction{Op: ir.Host}
+	case bytecode.OpTypeOf:
+		// Go's, but compared with a string constant (typeTests).
 		return ir.Instruction{Op: ir.Host}
 	case bytecode.OpApplyArguments:
 		// The inliner makes it a call (LowerSSAForward).

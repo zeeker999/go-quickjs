@@ -142,6 +142,19 @@ const (
 	Call
 	StringMethod
 	StringCode
+	// TypeTest is typeof Left === Key's name (TypeNumber...), negated when
+	// When is false, as a boolean in Dest: only the new pipeline's lowering
+	// makes it, of typeof compared with a string constant.
+	TypeTest
+)
+
+// The types a TypeTest asks about.
+const (
+	TypeNumber = iota + 1
+	TypeString
+	TypeBoolean
+	TypeUndefined
+	TypeFunction
 )
 
 // Operator selects an arithmetic, comparison, or truthiness operation.

@@ -53,6 +53,24 @@ type Intrinsic struct {
 	Op     Op
 }
 
+// InstanceOfSite is an instanceof operator's constructor, as the VM knows
+// it, which native code answers for itself, as V8 lowers the operator to
+// a walk along the prototypes: the function object, which the operator
+// checks it has (the VM keeps it alive); where its Symbol.hasInstance is,
+// on Function.prototype, and the realm's function there, which it checks
+// is still what that read finds; and where its own prototype property is.
+type InstanceOfSite struct {
+	Ctor          uintptr
+	HasInstance   PropertySite
+	HasInstanceFn uintptr
+	Prototype     PropertySite
+}
+
+// InstanceOfFeedback is Feedback that knows instanceof's constructors.
+type InstanceOfFeedback interface {
+	InstanceOf(pc int) (InstanceOfSite, bool)
+}
+
 // IntrinsicFeedback is Feedback that knows the calls at a PC of an
 // intrinsic (Intrinsic): a method call of one argument, Math.sqrt(x).
 type IntrinsicFeedback interface {
@@ -349,8 +367,7 @@ func (b *builder) property(pc int) (PropertySite, bool) {
 func (b *builder) host(pc int) bool {
 	switch b.p.Code[pc].Op {
 	case ir.Host:
-		_, ok := b.intrinsic(pc)
-		return !ok
+		return !b.nativeHost(pc)
 	case ir.Call:
 		return true
 	case ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead:
@@ -523,7 +540,7 @@ func (b *builder) inlineAt(pc int, total *int) (*frame, bool) {
 		cur := b.cur
 		b.enter(fr)
 		for _, at := range calls {
-			if _, ok := b.intrinsic(at); ok {
+			if b.nativeHost(at) {
 				continue
 			}
 			child, ok := b.inlineAt(at, total)
@@ -698,6 +715,65 @@ func (b *builder) inlineCall(blk *Block, pc int, fr *frame, guard func(Op, Type,
 	}
 }
 
+// nativeHost reports whether native code makes the host operation at pc
+// itself: an intrinsic call or instanceof the VM knows.
+func (b *builder) nativeHost(pc int) bool {
+	if _, ok := b.intrinsic(pc); ok {
+		return true
+	}
+	_, ok := b.instanceOf(pc)
+	return ok
+}
+
+// instanceOf is the instanceof at pc in the frame being translated, if the
+// VM knows its constructor (InstanceOfFeedback): its operands the value and
+// the constructor, its result in the value's slot.
+func (b *builder) instanceOf(pc int) (InstanceOfSite, bool) {
+	if b.fb == nil || b.p.Code[pc].Op != ir.Host || pc+1 >= len(b.p.Code) || !reachable(b.p, pc+1) ||
+		b.p.Maps[pc+1].Depth != b.p.Maps[pc].Depth-1 || b.p.Maps[pc].Depth < 2 {
+		return InstanceOfSite{}, false
+	}
+	f, ok := b.fb.(InstanceOfFeedback)
+	if !ok {
+		return InstanceOfSite{}, false
+	}
+	k, ok := f.InstanceOf(pc)
+	if !ok || k.HasInstance.Shape == 0 || k.Prototype.Shape == 0 {
+		return InstanceOfSite{}, false
+	}
+	return k, true
+}
+
+// instanceOfOp makes the instanceof at pc (InstanceOfSite): checked to have
+// its constructor, whose Symbol.hasInstance is still the realm's, read
+// through its shape and Function.prototype's, and whose prototype property,
+// read through its shape, is an object, the answer is found along the
+// value's prototypes -- any check failing, Go makes it.
+func (b *builder) instanceOfOp(blk *Block, pc int, k InstanceOfSite, guard func(Op, Type, ir.ExitKind, ...*Value) *Value, boxB func(*Value) *Value) {
+	f := b.f
+	sp := b.cur.base + b.p.Locals + b.p.Maps[pc].Depth
+	ctor := guard(OpObjectOf, Ptr, ir.HostExit, b.read(sp-1, blk))
+	same := guard(OpSameObject, None, ir.HostExit, ctor)
+	same.Const = ir.Value{Bits: uint64(k.Ctor)}
+	read := func(site PropertySite) *Value {
+		cell := guard(OpPropCell, Source, ir.HostExit, ctor)
+		cell.Const, cell.Index, cell.Key = ir.Value{Bits: uint64(site.Shape)}, int(site.Index), site.Key
+		if site.Holders[0].Object != 0 {
+			cell.Holders = new([2]Holder)
+			*cell.Holders = site.Holders
+		}
+		v := f.newValue(blk, OpLoadCell, Tagged, cell)
+		v.Shadow = cell
+		return v
+	}
+	has := guard(OpObjectOf, Ptr, ir.HostExit, read(k.HasInstance))
+	fn := guard(OpSameObject, None, ir.HostExit, has)
+	fn.Const = ir.Value{Bits: uint64(k.HasInstanceFn)}
+	proto := guard(OpObjectOf, Ptr, ir.HostExit, read(k.Prototype))
+	yes := guard(OpInstanceOf, Bool, ir.HostExit, b.read(sp-2, blk), proto)
+	b.assign(b.cur.base+b.p.Locals+b.p.Maps[pc+1].Depth-1, blk, boxB(yes))
+}
+
 // intrinsic is the intrinsic the call at pc in the frame being translated
 // makes, if any (IntrinsicFeedback): a method call of one argument, whose
 // operands are the receiver, the function and the argument.
@@ -823,6 +899,10 @@ func (b *builder) plan() error {
 			}
 		case ir.Nop, ir.Copy, ir.CopyPair, ir.StoreLoad, ir.Swap, ir.Insert2, ir.Insert3,
 			ir.Unary, ir.Update, ir.Return, ir.ArrayUpdate, ir.ArrayLength, ir.ArrayKey:
+		case ir.TypeTest:
+			// An object it cannot tell exits at the typeof, which Go makes;
+			// the interpreter goes on, the boolean not where the typeof's
+			// string was (compile's typeTests): no entry after it.
 		case ir.ArrayWrite, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead,
 			ir.StringMethod, ir.StringCode:
 			// What native code does not do exits to Go, which resumes after
@@ -1564,9 +1644,20 @@ func (b *builder) instruction(blk *Block, pc int) {
 		// A property the write adds, as V8's stores do along a map's
 		// transition; or, to an object that has it, stores.
 		v.Add = site.Add
+	case ir.TypeTest:
+		v := guard(OpTypeIs, Bool, ir.HostExit, operand(in.Left))
+		v.Index = int(in.Key)
+		if !in.When {
+			v.Const = ir.Value{Bits: 1}
+		}
+		b.assign(in.Dest, blk, boxB(v))
 	case ir.Host, ir.Call:
 		if k, ok := b.intrinsic(pc); ok && in.Op == ir.Host {
 			b.intrinsicCall(blk, pc, k, guard, boxF)
+			break
+		}
+		if k, ok := b.instanceOf(pc); ok && in.Op == ir.Host {
+			b.instanceOfOp(blk, pc, k, guard, boxB)
 			break
 		}
 		if fr := b.inlinedAt(pc); fr != nil {

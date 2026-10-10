@@ -42,10 +42,13 @@ func Optimize(f *Func) {
 	var first, last []int32
 	guards := sc.guards[:0]
 	// repeated is the first guard of op and a's that dominates b and is
-	// not replaced, or nil; meet adds v as one.
-	repeated := func(op Op, a *Value, b *Block) *Value {
+	// not replaced, or nil; meet adds v as one. A guard asks what its
+	// constant and index say too -- which object (OpSameObject), which type
+	// (OpTypeIs) -- so the guard it repeats asks the same, v's.
+	repeated := func(op Op, a *Value, b *Block, v *Value) *Value {
 		for i := first[a.ID]; i != 0; i = guards[i-1].next {
-			if g := &guards[i-1]; g.op == op && subst[g.v.ID] == nil && dom.dominates(g.v.Block, b) {
+			if g := &guards[i-1]; g.op == op && subst[g.v.ID] == nil && dom.dominates(g.v.Block, b) &&
+				(op == OpCheckInit || g.v.Const == v.Const && g.v.Index == v.Index) {
 				return g.v
 			}
 		}
@@ -97,7 +100,7 @@ func Optimize(f *Func) {
 					switch v.Op {
 					case OpCheckInit, OpObjectOf, OpUnboxF64, OpArrayOf:
 						if v.Op == OpCheckInit {
-							if w := repeated(OpCheckInit, v.Args[0], b); w != nil {
+							if w := repeated(OpCheckInit, v.Args[0], b, v); w != nil {
 								subst[v.ID], replaced = w, true
 								changed = true
 								continue
@@ -110,7 +113,7 @@ func Optimize(f *Func) {
 				// operand; one of more operands is never merged, since the
 				// key names only the first.
 				if v.Op.isGuard() && v.Op != OpCheckInit && !v.Op.readsMemory() && len(v.Args) == 1 {
-					if w := repeated(v.Op, v.Args[0], b); w != nil {
+					if w := repeated(v.Op, v.Args[0], b, v); w != nil {
 						subst[v.ID], replaced = w, true
 						changed = true
 						continue

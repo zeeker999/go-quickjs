@@ -203,6 +203,17 @@ const (
 	// for a negative; the sign cleared, NaN included.
 	OpSqrtF64 // f64 -> f64
 	OpAbsF64  // f64 -> f64
+	// OpInstanceOf is the instanceof operator's ordinary answer
+	// (InstanceOfSite): whether a value (Args[0]) has the object Args[1]
+	// among its prototypes -- false for one that is not an object -- found
+	// natively along the chain. It exits, Go making the operation, at a
+	// proxy, whose prototypes are its handler's.
+	OpInstanceOf // tagged, ptr -> bool
+	// OpTypeIs is typeof x === the type Index says (ir.TypeNumber...),
+	// negated when Const.Bits is 1: told by x's word, and an object's
+	// class and [[IsHTMLDDA]]; an object of another class, a proxy, exits,
+	// Go telling it.
+	OpTypeIs // tagged -> bool
 )
 
 var opNames = [...]string{
@@ -215,7 +226,7 @@ var opNames = [...]string{
 	OpNot: "not", OpStrictNullish: "strictnullish", OpLooseNullish: "loosenullish", OpEqTagged: "eqtagged", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
 	OpSameObject: "sameobject", OpFrameRoom: "frameroom", OpKeepRef: "keepref", OpKeep: "keep", OpKept: "kept",
-	OpCall: "call", OpCallCell: "callcell", OpSqrtF64: "sqrtf", OpAbsF64: "absf",
+	OpCall: "call", OpCallCell: "callcell", OpSqrtF64: "sqrtf", OpAbsF64: "absf", OpInstanceOf: "instanceof", OpTypeIs: "typeis",
 }
 
 func (o Op) String() string {
@@ -230,7 +241,7 @@ func (o Op) isGuard() bool {
 	switch o {
 	case OpUnboxF64, OpTruth, OpCheckInit, OpModF64, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite, OpElemCell, OpLength,
 		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell, OpStringMethod, OpStringCode, OpLooseNullish, OpEqTagged,
-		OpSameObject, OpFrameRoom, OpCall:
+		OpSameObject, OpFrameRoom, OpCall, OpInstanceOf, OpTypeIs:
 		return true
 	}
 	return false

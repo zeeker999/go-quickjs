@@ -1494,6 +1494,102 @@ func (c *compiler) arrayOf(v *ssa.Value, guard func(amd64.Cond)) {
 	c.setG(v, scratchC)
 }
 
+// instanceOf answers whether its value has the object its second argument
+// is among its prototypes (OpInstanceOf): false for a value not an object;
+// otherwise along the chain from the object's own prototype, leaving to Go
+// at a proxy. It uses every scratch register.
+func (c *compiler) instanceOf(v *ssa.Value, guard func(amd64.Cond)) {
+	a := v.Args[0]
+	if a.Shadow == nil && c.origin.At(a) < 0 {
+		// A primitive, never an instance.
+		c.a.MovImm(scratchB, 0)
+		c.setG(v, scratchB)
+		return
+	}
+	no, loop, done := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+	w := c.gpr(a, scratchA)
+	c.a.MovImm(scratchB, c.enc.Object)
+	c.a.Op(amd64.Cmp, w, scratchB, true)
+	c.a.Jcc(amd64.CondNE, no)
+	c.sourceRef(a, guard)
+	c.a.Op(amd64.Test, scratchC, scratchC, true)
+	guard(amd64.CondE)
+	p := c.gpr(v.Args[1], scratchA)
+	c.a.Bind(loop)
+	c.a.LoadU8(scratchB, scratchC, c.enc.ObjectClass)
+	c.a.OpImm(amd64.Cmp, scratchB, int32(c.enc.ClassProxy), false)
+	guard(amd64.CondE)
+	c.a.Load(scratchC, scratchC, c.enc.ObjectProto)
+	c.a.Op(amd64.Test, scratchC, scratchC, true)
+	c.a.Jcc(amd64.CondE, no)
+	c.a.Op(amd64.Cmp, scratchC, p, true)
+	c.a.Jcc(amd64.CondNE, loop)
+	c.a.MovImm(scratchB, 1)
+	c.a.Jmp(done)
+	c.a.Bind(no)
+	c.a.MovImm(scratchB, 0)
+	c.a.Bind(done)
+	c.setG(v, scratchB)
+}
+
+// typeIs tells whether typeof its value is the type v.Index says
+// (OpTypeIs): a number's word is below NumberLimit, a string's, a
+// boolean's and undefined's are theirs; an object with [[IsHTMLDDA]] is
+// undefined, one of ClassFunction a function and one of ClassObject or
+// ClassArray neither; another exits. It uses every scratch register.
+func (c *compiler) typeIs(v *ssa.Value, guard func(amd64.Cond)) {
+	a := v.Args[0]
+	yes, no, done := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+	w := c.gpr(a, scratchB)
+	is := func(word uint64) {
+		c.a.MovImm(scratchA, word)
+		c.a.Op(amd64.Cmp, w, scratchA, true)
+		c.a.Jcc(amd64.CondE, yes)
+	}
+	switch v.Index {
+	case ir.TypeNumber:
+		c.a.MovImm(scratchA, abi.NumberLimit)
+		c.a.Op(amd64.Cmp, w, scratchA, true)
+		c.a.Jcc(amd64.CondB, yes)
+	case ir.TypeString:
+		is(c.enc.String)
+	case ir.TypeBoolean:
+		is(c.enc.True)
+		is(c.enc.False)
+	case ir.TypeUndefined, ir.TypeFunction:
+		if v.Index == ir.TypeUndefined {
+			is(c.enc.Undefined)
+		}
+		c.a.MovImm(scratchA, c.enc.Object)
+		c.a.Op(amd64.Cmp, w, scratchA, true)
+		c.a.Jcc(amd64.CondNE, no)
+		if c.reference(v, a, c.enc.Object, guard) {
+			c.a.LoadU8(scratchA, scratchC, c.enc.ObjectFlags)
+			c.a.OpImm(amd64.And, scratchA, int32(c.enc.FlagHTMLDDA), false)
+			if v.Index == ir.TypeUndefined {
+				c.a.Jcc(amd64.CondNE, yes)
+				c.a.Jmp(no)
+			} else {
+				c.a.Jcc(amd64.CondNE, no)
+				c.a.LoadU8(scratchA, scratchC, c.enc.ObjectClass)
+				c.a.OpImm(amd64.Cmp, scratchA, int32(c.enc.ClassFunction), false)
+				c.a.Jcc(amd64.CondE, yes)
+				c.a.OpImm(amd64.Cmp, scratchA, int32(c.enc.ClassObject), false)
+				c.a.Jcc(amd64.CondE, no)
+				c.a.OpImm(amd64.Cmp, scratchA, int32(c.enc.ClassArray), false)
+				guard(amd64.CondNE)
+			}
+		}
+	}
+	c.a.Bind(no)
+	c.a.MovImm(scratchA, v.Const.Bits)
+	c.a.Jmp(done)
+	c.a.Bind(yes)
+	c.a.MovImm(scratchA, v.Const.Bits^1)
+	c.a.Bind(done)
+	c.setG(v, scratchA)
+}
+
 // objectOf finds the object a value is, into scratchC: the pointer word of
 // the slot it came from, which still holds it (origin.go). A value with an
 // object's word is its origin's object, since native code makes no such
@@ -2186,6 +2282,10 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		if c.objectOf(v, c.guardFor(v)) {
 			c.setG(v, scratchC)
 		}
+	case ssa.OpInstanceOf:
+		c.instanceOf(v, c.guardFor(v))
+	case ssa.OpTypeIs:
+		c.typeIs(v, c.guardFor(v))
 	case ssa.OpSameObject:
 		c.a.MovImm(scratchB, v.Const.Bits)
 		c.a.Op(amd64.Cmp, c.gpr(arg(0), scratchA), scratchB, true)

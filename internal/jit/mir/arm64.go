@@ -913,6 +913,95 @@ func (c *a64Compiler) arrayOf(v *ssa.Value, guard func(arm64.Cond)) {
 }
 
 // objectOf finds the object a value is, into C.
+// instanceOf is amd64's: whether its value has the object its second
+// argument is among its prototypes (OpInstanceOf). It uses A, B and C.
+func (c *a64Compiler) instanceOf(v *ssa.Value, guard func(arm64.Cond)) {
+	a := v.Args[0]
+	if a.Shadow == nil && c.origin.At(a) < 0 {
+		c.a.MovImm(a64B, 0)
+		c.setG(v, a64B)
+		return
+	}
+	no, loop, done := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+	w := c.gpr(a, a64A)
+	c.a.MovImm(a64B, c.enc.Object)
+	c.a.Cmp(w, a64B, true)
+	c.a.BCond(arm64.NE, no)
+	c.sourceRef(a, guard)
+	c.a.CmpImm(a64C, 0, true)
+	guard(arm64.EQ)
+	p := c.gpr(v.Args[1], a64A)
+	c.a.Bind(loop)
+	c.a.LoadU8(a64B, a64C, c.enc.ObjectClass)
+	c.a.CmpImm(a64B, int64(c.enc.ClassProxy), false)
+	guard(arm64.EQ)
+	c.a.Load(a64C, a64C, c.enc.ObjectProto)
+	c.a.Cbz(a64C, no, true)
+	c.a.Cmp(a64C, p, true)
+	c.a.BCond(arm64.NE, loop)
+	c.a.MovImm(a64B, 1)
+	c.a.B(done)
+	c.a.Bind(no)
+	c.a.MovImm(a64B, 0)
+	c.a.Bind(done)
+	c.setG(v, a64B)
+}
+
+// typeIs is amd64's (OpTypeIs). It uses A, B and C.
+func (c *a64Compiler) typeIs(v *ssa.Value, guard func(arm64.Cond)) {
+	a := v.Args[0]
+	yes, no, done := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+	w := c.gpr(a, a64B)
+	is := func(word uint64) {
+		c.a.MovImm(a64A, word)
+		c.a.Cmp(w, a64A, true)
+		c.a.BCond(arm64.EQ, yes)
+	}
+	switch v.Index {
+	case ir.TypeNumber:
+		c.a.MovImm(a64A, abi.NumberLimit)
+		c.a.Cmp(w, a64A, true)
+		c.a.BCond(arm64.LO, yes)
+	case ir.TypeString:
+		is(c.enc.String)
+	case ir.TypeBoolean:
+		is(c.enc.True)
+		is(c.enc.False)
+	case ir.TypeUndefined, ir.TypeFunction:
+		if v.Index == ir.TypeUndefined {
+			is(c.enc.Undefined)
+		}
+		c.a.MovImm(a64A, c.enc.Object)
+		c.a.Cmp(w, a64A, true)
+		c.a.BCond(arm64.NE, no)
+		if c.reference(v, a, c.enc.Object, guard) {
+			c.a.LoadU8(a64A, a64C, c.enc.ObjectFlags)
+			c.a.MovImm(a64B, uint64(c.enc.FlagHTMLDDA))
+			c.a.Tst(a64A, a64B, false)
+			if v.Index == ir.TypeUndefined {
+				c.a.BCond(arm64.NE, yes)
+				c.a.B(no)
+			} else {
+				c.a.BCond(arm64.NE, no)
+				c.a.LoadU8(a64A, a64C, c.enc.ObjectClass)
+				c.a.CmpImm(a64A, int64(c.enc.ClassFunction), false)
+				c.a.BCond(arm64.EQ, yes)
+				c.a.CmpImm(a64A, int64(c.enc.ClassObject), false)
+				c.a.BCond(arm64.EQ, no)
+				c.a.CmpImm(a64A, int64(c.enc.ClassArray), false)
+				guard(arm64.NE)
+			}
+		}
+	}
+	c.a.Bind(no)
+	c.a.MovImm(a64A, v.Const.Bits)
+	c.a.B(done)
+	c.a.Bind(yes)
+	c.a.MovImm(a64A, v.Const.Bits^1)
+	c.a.Bind(done)
+	c.setG(v, a64A)
+}
+
 func (c *a64Compiler) objectOf(v *ssa.Value, guard func(arm64.Cond)) bool {
 	return c.reference(v, v.Args[0], c.enc.Object, guard)
 }
@@ -2108,6 +2197,10 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		if c.objectOf(v, c.guardFor(v)) {
 			c.setG(v, a64C)
 		}
+	case ssa.OpInstanceOf:
+		c.instanceOf(v, c.guardFor(v))
+	case ssa.OpTypeIs:
+		c.typeIs(v, c.guardFor(v))
 	case ssa.OpCall:
 		c.call(v, c.guardFor(v))
 	case ssa.OpCallCell:

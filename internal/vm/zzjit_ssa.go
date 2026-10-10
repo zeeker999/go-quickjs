@@ -57,6 +57,8 @@ var jitEncoding = abi.Encoding{
 	PropertyValue: int32(unsafe.Offsetof(Property{}.value)),
 
 	ClassObject:     uint8(ClassObject),
+	ClassProxy:      uint8(ClassProxy),
+	ClassFunction:   uint8(ClassFunction),
 	PropNotData:     uint8(propAccessor | propPrivate | propDeleted),
 	PropNotWritable: uint8(propAccessor | propPrivate | propDeleted | propUninit | propWritable),
 	PropWritable:    uint8(propWritable),
@@ -427,6 +429,65 @@ func (fb *jitFeedback) Intrinsic(pc int) (ssa.Intrinsic, bool) {
 	keep := fb.keep()
 	keep.holders = append(keep.holders, o)
 	return k, true
+}
+
+// InstanceOf is ssa.InstanceOfFeedback's: the constructor of the instanceof
+// at pc, as the read just before it gives it now (jitChainValue), a
+// function the script made, not bound, if Symbol.hasInstance is the realm's
+// on it, found on Function.prototype, and its prototype property its own
+// data property, an object: the sites of both reads, as caches filled for
+// it have them.
+func (fb *jitFeedback) InstanceOf(pc int) (ssa.InstanceOfSite, bool) {
+	fn, r := fb.fn, fb.r
+	if fb.cl == nil || pc < 1 || pc >= len(fn.Code) || fn.Code[pc].Op != bytecode.OpInstanceOf || r.hasInstanceFn == nil {
+		return ssa.InstanceOfSite{}, false
+	}
+	if fb.prog == nil {
+		p, err := jitcompile.LowerSSAInline(fn)
+		if err != nil {
+			return ssa.InstanceOfSite{}, false
+		}
+		fb.prog = p
+	}
+	p := fb.prog
+	if len(p.Maps) != len(fn.Code) || p.Maps[pc-1].Depth < 0 || p.Maps[pc].Depth != p.Maps[pc-1].Depth+1 && fn.Code[pc-1].Op == bytecode.OpGetGlobal {
+		return ssa.InstanceOfSite{}, false
+	}
+	v, ok := r.jitChainValue(fb.cl, p, pc-1, jitChainReads)
+	if !ok || !v.IsObject() {
+		return ssa.InstanceOfSite{}, false
+	}
+	ctor := v.Object()
+	fd := ctor.fn()
+	if fd == nil || fd.bound || proxyOf(ctor) != nil {
+		// A built-in is one too: sc_Vector is Array.
+		return ssa.InstanceOfSite{}, false
+	}
+	// Its prototype property, made now if it is not yet, is in its table
+	// from then on: the site is the constructor's shape and the index there,
+	// which no cache keeps for a function (synthesized) -- the operator
+	// checks it has this very function.
+	r.materializeFunctionProto(ctor)
+	var hc propCache
+	r.fillPropCache(&hc, ctor, r.hasInstanceAtom, false)
+	has, _ := fb.siteOf(r.hasInstanceAtom, false, &hc)
+	i := ctor.findOwn(atomPrototype)
+	if has.Shape == 0 || has.Holders[0].Object == 0 || i < 0 || ctor.shape == nil || uintptr(unsafe.Pointer(ctor.shape)) != has.Shape ||
+		ctor.props[i].flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 {
+		return ssa.InstanceOfSite{}, false
+	}
+	proto := ssa.PropertySite{Key: uint32(atomPrototype), Shape: has.Shape, Index: int32(i)}
+	h := hc.p1
+	if hc.p2 != nil {
+		h = hc.p2
+	}
+	if hv := h.props[hc.idx].value; !hv.IsObject() || hv.Object() != r.hasInstanceFn {
+		return ssa.InstanceOfSite{}, false
+	}
+	k := fb.keep()
+	k.holders = append(k.holders, ctor, r.hasInstanceFn)
+	return ssa.InstanceOfSite{Ctor: uintptr(unsafe.Pointer(ctor)), HasInstance: has,
+		HasInstanceFn: uintptr(unsafe.Pointer(r.hasInstanceFn)), Prototype: proto}, true
 }
 
 // jitForwardFrame is the construction a forwarding constructor
@@ -882,6 +943,9 @@ func (r *Runtime) jitInlinesCalls(cl *closure, depth int) bool {
 	var e *jitEntry
 	for _, pc := range calls {
 		if _, ok := fb.Intrinsic(pc); ok {
+			continue
+		}
+		if _, ok := fb.InstanceOf(pc); ok {
 			continue
 		}
 		if e == nil {
@@ -1729,9 +1793,14 @@ func (fb *jitFeedback) property(pc int) (ssa.PropertySite, bool) {
 
 // siteFrom is the site of a property instruction, in, as cache c knows it.
 func (fb *jitFeedback) siteFrom(in bytecode.Instr, c *propCache) (ssa.PropertySite, bool) {
-	site := ssa.PropertySite{Key: uint32(fb.cl.names[in.A])}
+	return fb.siteOf(fb.cl.names[in.A], in.Op == bytecode.OpSetProp, c)
+}
+
+// siteOf is the site of a read of key, or a write, as cache c knows it.
+func (fb *jitFeedback) siteOf(key Atom, write bool, c *propCache) (ssa.PropertySite, bool) {
+	site := ssa.PropertySite{Key: uint32(key)}
 	k := fb.keep()
-	if in.Op == bytecode.OpSetProp && c.next != nil && c.next != setterNext && !c.getter {
+	if write && c.next != nil && c.next != setterNext && !c.getter {
 		site.Add = fb.add(c)
 		return site, true
 	}
@@ -1753,7 +1822,7 @@ func (fb *jitFeedback) siteFrom(in bytecode.Instr, c *propCache) (ssa.PropertySi
 	if c.p2 != nil {
 		last = c.s2
 	}
-	if in.Op == bytecode.OpSetProp || c.s1 == nil || c.s1 == noShape || c.p2 != nil && (c.s2 == nil || c.s2 == noShape) || c.idx >= last.n {
+	if write || c.s1 == nil || c.s1 == noShape || c.p2 != nil && (c.s2 == nil || c.s2 == noShape) || c.idx >= last.n {
 		return site, true
 	}
 	k.shapes = append(k.shapes, remember(c.shape), remember(c.s1))
