@@ -77,6 +77,21 @@ type IntrinsicFeedback interface {
 	Intrinsic(pc int) (Intrinsic, bool)
 }
 
+// LiteralSite is an object literal's site: the address of the
+// abi.ObjectPool its objects come from, made as the VM makes the literal's,
+// which the VM keeps alive.
+type LiteralSite struct {
+	Pool uintptr
+}
+
+// LiteralFeedback is Feedback that knows object literals' sites (Literal)
+// and what each of their fields adds (Define): the shape the literal's
+// object has before it and the one after, a PropertyAdd with Define.
+type LiteralFeedback interface {
+	Literal(pc int) (LiteralSite, bool)
+	Define(pc int) (*PropertyAdd, bool)
+}
+
 // CallSite is a function the VM has seen a call call whose native code a
 // caller's may call (mir's native calls): the function object's address,
 // which the call checks it calls; its closure's, for Go to make its frame
@@ -122,6 +137,9 @@ type CallSite struct {
 	Push                          bool
 	Protos                        [2]Holder
 	Pop                           bool
+	// Literal marks an object literal's object (ir.ObjectLiteral), the
+	// pool's, with Alloc: no function, no operands.
+	Literal bool
 }
 
 // popsElement reports whether a call is Array.prototype.pop's (CallSite's
@@ -282,6 +300,11 @@ type PropertyAdd struct {
 	Next   uintptr
 	Flags  uint8
 	Protos [2]Holder
+	// Define marks a literal's field (ir.FieldDefine), which its
+	// prototypes do not intercept: none is looked at, and an object it is
+	// not added to exits. Key is then the field's, the VM's atom.
+	Define bool
+	Key    uint32
 }
 
 // PropertyCase is one more shape a read's site met (PropertySite.Cases):
@@ -382,8 +405,35 @@ func (b *builder) host(pc int) bool {
 	case ir.BindingCheck:
 		_, ok := b.global(pc)
 		return !ok
+	case ir.ObjectLiteral:
+		_, ok := b.literal(pc)
+		return !ok
+	case ir.FieldDefine:
+		_, ok := b.define(pc)
+		return !ok
 	}
 	return false
+}
+
+// literal is the site of the object literal at pc (LiteralFeedback), if
+// its code may make it natively: a keep cell left for its object.
+func (b *builder) literal(pc int) (LiteralSite, bool) {
+	f, ok := b.fb.(LiteralFeedback)
+	if !ok || b.f.Keeps >= abi.MaxKeeps || b.cur != b.root {
+		return LiteralSite{}, false
+	}
+	k, ok := f.Literal(pc)
+	return k, ok && k.Pool != 0
+}
+
+// define is what the literal's field at pc adds (LiteralFeedback).
+func (b *builder) define(pc int) (*PropertyAdd, bool) {
+	f, ok := b.fb.(LiteralFeedback)
+	if !ok || b.cur != b.root {
+		return nil, false
+	}
+	add, ok := f.Define(pc)
+	return add, ok && add != nil && add.Define
 }
 
 // referenceReads is p with the element reads whose speculation failed
@@ -910,7 +960,7 @@ func (b *builder) plan() error {
 			// the interpreter goes on, the boolean not where the typeof's
 			// string was (compile's typeTests): no entry after it.
 		case ir.ArrayWrite, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead,
-			ir.StringMethod, ir.StringCode, ir.BindingWrite, ir.BindingCheck, ir.Resolved:
+			ir.StringMethod, ir.StringCode, ir.BindingWrite, ir.BindingCheck, ir.Resolved, ir.ObjectLiteral, ir.FieldDefine:
 			// What native code does not do exits to Go, which resumes after
 			// it. A fixed global's check only deoptimizes: the binding can
 			// never move, so it never fails, and what follows sees its
@@ -995,7 +1045,8 @@ func (b *builder) plan() error {
 			}
 		case ir.Return:
 			blk.Kind = BlockReturn
-		case ir.Host, ir.Call, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead, ir.BindingWrite, ir.BindingCheck:
+		case ir.Host, ir.Call, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead, ir.BindingWrite, ir.BindingCheck,
+			ir.ObjectLiteral, ir.FieldDefine:
 			if fr := b.inlined[end]; fr != nil {
 				// Into the callee, whose returns go to the block after it.
 				blk.Kind = BlockPlain
@@ -1684,6 +1735,35 @@ func (b *builder) instruction(blk *Block, pc int) {
 		// checked here, and Go throws for an unresolved name.
 		guard(OpCheckTrue, None, ir.HostExit, operand(in.Left))
 		b.assign(in.Dest, blk, operand(in.Right))
+	case ir.ObjectLiteral:
+		// The pool's next object, kept in a cell as a construction's
+		// receiver is: nothing runs.
+		site, ok := b.literal(pc)
+		if !ok {
+			blk.ExitKind = ir.HostExit
+			blk.State = state()
+			blk.State.addUse()
+			break
+		}
+		call := guard(OpCall, Tagged, ir.HostExit)
+		call.Calls = []*CallSite{{Pool: site.Pool, Alloc: true, Literal: true, ThisSlot: -1}}
+		call.Index = b.f.Keeps
+		b.f.Keeps++
+		cell := f.newValue(blk, OpCallCell, Source, call)
+		r := f.newValue(blk, OpKept, Tagged, cell, call)
+		r.Shadow = cell
+		b.assign(in.Dest, blk, r)
+	case ir.FieldDefine:
+		add, ok := b.define(pc)
+		if !ok {
+			blk.ExitKind = ir.HostExit
+			blk.State = state()
+			blk.State.addUse()
+			break
+		}
+		object := guard(OpObjectOf, Ptr, ir.HostExit, operand(in.Left))
+		w := guard(OpPropWrite, None, ir.HostExit, object, operand(in.Right))
+		w.Key, w.Add = add.Key, add
 	case ir.TypeTest:
 		v := guard(OpTypeIs, Bool, ir.HostExit, operand(in.Left))
 		v.Index = int(in.Key)

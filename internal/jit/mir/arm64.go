@@ -1107,6 +1107,12 @@ func (c *a64Compiler) propStore(v *ssa.Value, guard func(arm64.Cond)) {
 		c.addAlong(v, has)
 		c.a.B(added)
 		c.a.Bind(has)
+		if v.Add.Define {
+			// As amd64's: a literal's field is added so, or by Go.
+			c.a.B(c.stubLabel(v.State, exitKind(v.Aux)))
+			c.a.Bind(added)
+			return
+		}
 	}
 	if v.Global {
 		// As amd64's: a global binding's cell, writable.
@@ -1167,6 +1173,9 @@ func (c *a64Compiler) addAlong(v *ssa.Value, miss arm64.Label) {
 	c.a.BCond(arm64.EQ, miss)
 	c.a.Load(a64B, o, c.enc.ObjectProto)
 	for _, h := range add.Protos {
+		if add.Define {
+			break
+		}
 		c.a.MovImm(a64C, uint64(h.Object))
 		c.a.Cmp(a64B, a64C, true)
 		c.a.BCond(arm64.NE, miss)
@@ -1179,7 +1188,7 @@ func (c *a64Compiler) addAlong(v *ssa.Value, miss arm64.Label) {
 		c.a.BCond(arm64.NE, miss)
 		c.a.Load(a64B, a64C, c.enc.ObjectProto)
 	}
-	if add.Protos[1].Object != 0 {
+	if add.Protos[1].Object != 0 && !add.Define {
 		c.a.Cbnz(a64B, miss, true)
 	}
 	c.a.Load(a64B, o, c.enc.ObjectProps+8)
@@ -1326,6 +1335,24 @@ func (c *a64Compiler) stringBytes(exit, yes, no arm64.Label) {
 // call calls natively the function a call calls, as amd64's does. Once the
 // state is recorded and what is live across the call saved, the frame is
 // made in registers the allocator gives values, X3 to X8.
+// poolTake is amd64's: the pool's last object is the result.
+func (c *a64Compiler) poolTake(v *ssa.Value, site *ssa.CallSite) {
+	vs := int32(c.enc.ValueSize)
+	c.a.MovImm(a64A, uint64(site.Pool))
+	c.a.Load(a64B, a64A, abi.OffPoolCount)
+	c.a.AddImm(a64B, a64B, -1, true)
+	c.a.Store(a64A, abi.OffPoolCount, a64B)
+	c.a.ShiftImm(arm64.Lsl, a64B, a64B, 3, true)
+	c.a.Op(arm64.Add, a64B, a64B, a64A, true)
+	c.a.Load(a64C, a64B, abi.OffPoolObjects)
+	c.a.Store(a64B, abi.OffPoolObjects, arm64.ZR)
+	at := abi.OffKeep + int32(v.Index)*vs
+	c.a.Store(a64Ctx, at+c.enc.RefOffset, a64C)
+	c.a.MovImm(a64A, c.enc.Object)
+	c.a.Store(a64Ctx, at+c.enc.NumOffset, a64A)
+	c.setG(v, a64A)
+}
+
 func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 	sites, s := v.Calls, v.State
 	stub := c.stubLabel(s, exitKind(v.Aux))
@@ -1335,6 +1362,17 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 	}
 	site := sites[0]
 	vs := int32(c.enc.ValueSize)
+	if site.Literal {
+		// As amd64's: an object literal's object, its pool's next.
+		c.a.MovImm(a64B, c.enc.WriteBarrier)
+		c.a.LoadU8(a64B, a64B, 0)
+		c.a.Cbnz(a64B, stub, false)
+		c.a.MovImm(a64A, uint64(site.Pool))
+		c.a.Load(a64B, a64A, abi.OffPoolCount)
+		c.a.Cbz(a64B, stub, true)
+		c.poolTake(v, site)
+		return
+	}
 	sp := len(s.Slots)
 	calleeSlot := sp - site.Argc - 1
 	callee := v.Args[len(v.Args)-site.Argc-1]
@@ -1419,20 +1457,7 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		return
 	}
 	if site.Alloc || site.Receiver {
-		// As amd64's: the pool's last object is the result.
-		c.a.MovImm(a64A, uint64(site.Pool))
-		c.a.Load(a64B, a64A, abi.OffPoolCount)
-		c.a.AddImm(a64B, a64B, -1, true)
-		c.a.Store(a64A, abi.OffPoolCount, a64B)
-		c.a.ShiftImm(arm64.Lsl, a64B, a64B, 3, true)
-		c.a.Op(arm64.Add, a64B, a64B, a64A, true)
-		c.a.Load(a64C, a64B, abi.OffPoolObjects)
-		c.a.Store(a64B, abi.OffPoolObjects, arm64.ZR)
-		at := abi.OffKeep + int32(v.Index)*vs
-		c.a.Store(a64Ctx, at+c.enc.RefOffset, a64C)
-		c.a.MovImm(a64A, c.enc.Object)
-		c.a.Store(a64Ctx, at+c.enc.NumOffset, a64A)
-		c.setG(v, a64A)
+		c.poolTake(v, site)
 		return
 	}
 	// As amd64's: a call of one function writes its operands where the

@@ -215,6 +215,176 @@ func jitFed(cl *closure, e *jitEntry, pc uint32) {
 	}
 }
 
+// jitLiteral is an object literal's site, at pc, that native code makes
+// the objects of from pool, each of shape root, the literal's as the
+// closure compiled for had it (shapeTree.siteRoot): its fields are
+// compiled for the transitions out of it.
+type jitLiteral struct {
+	pc   int32
+	root *shape
+	pool *abi.ObjectPool
+}
+
+// jitLiteralAt is e's literal at pc, made for cl's site if it has none, or
+// nil if the literal's objects have no shape to start from.
+func (r *Runtime) jitLiteralAt(e *jitEntry, cl *closure, pc int) *jitLiteral {
+	for i := range e.literals {
+		if int(e.literals[i].pc) == pc {
+			return &e.literals[i]
+		}
+	}
+	in := cl.fn.Code[pc]
+	if in.Op != bytecode.OpNewObject || int(in.B) >= len(cl.ic) {
+		return nil
+	}
+	root := r.shapes.siteRoot(&cl.ic[in.B])
+	if root == nil {
+		return nil
+	}
+	e.literals = append(e.literals, jitLiteral{pc: int32(pc), root: root, pool: new(abi.ObjectPool)})
+	l := &e.literals[len(e.literals)-1]
+	r.jitFillLiteral(l, int(in.A))
+	return l
+}
+
+// jitFillLiteral fills l's pool with objects as the literal makes them,
+// room for its n fields: Size of them, as jitFillPool fills a pool.
+func (r *Runtime) jitFillLiteral(l *jitLiteral, n int) {
+	pool := l.pool
+	if pool.Size == 0 {
+		pool.Size = abi.PoolSize
+	}
+	clear(pool.Objects[:])
+	for i := range int(pool.Size) {
+		o := newLiteralObject(r.proto.object, ClassObject, n)
+		o.shape = l.root
+		pool.Objects[i] = unsafe.Pointer(o)
+	}
+	pool.Count, pool.Proto = pool.Size, unsafe.Pointer(r.proto.object)
+}
+
+// jitDefineSeen notes an exit at a literal's field, pc, that the code was
+// compiled for before its transition was made: Go, defining it, made it,
+// and the code is compiled again for it (reoptDue), as for any feedback it
+// lacked.
+func jitDefineSeen(e *jitEntry, pc int) {
+	if i := slices.Index(e.definesUnfed, int32(pc)); i >= 0 {
+		e.definesUnfed = slices.Delete(e.definesUnfed, i, i+1)
+		e.polyReopt = true
+	}
+}
+
+// jitRefillLiteral fills again, with more objects, the pool of the literal
+// at pc that native code left at, its pool run out.
+func (r *Runtime) jitRefillLiteral(f *frame, e *jitEntry, pc int) {
+	for i := range e.literals {
+		if l := &e.literals[i]; int(l.pc) == pc && l.pool.Count == 0 {
+			l.pool.Size = min(2*max(l.pool.Size, abi.PoolSize), abi.PoolCapacity)
+			r.jitFillLiteral(l, int(f.cl.fn.Code[pc].A))
+		}
+	}
+}
+
+// Literal is ssa.LiteralFeedback's: the object literal at pc, made natively
+// from its pool, in the function's own code.
+func (fb *jitFeedback) Literal(pc int) (ssa.LiteralSite, bool) {
+	if fb.e == nil || fb.root != nil || fb.fwd != nil || fb.cl == nil || pc >= len(fb.fn.Code) {
+		return ssa.LiteralSite{}, false
+	}
+	l := fb.r.jitLiteralAt(fb.e, fb.cl, pc)
+	if l == nil {
+		return ssa.LiteralSite{}, false
+	}
+	k := fb.keep()
+	k.pools = append(k.pools, l.pool)
+	k.shapes = append(k.shapes, remember(l.root))
+	return ssa.LiteralSite{Pool: uintptr(unsafe.Pointer(l.pool))}, true
+}
+
+// Define is ssa.LiteralFeedback's: what the literal's field at pc adds, as
+// define_field adds it along the shapes' transitions -- from the shape the
+// literal's object has there, its root's after each field before it,
+// found in the code back to its new_object. A literal with anything else
+// done to its object -- a spread, an accessor, a computed key, a
+// prototype set -- has Go define its fields.
+func (fb *jitFeedback) Define(pc int) (*ssa.PropertyAdd, bool) {
+	fn := fb.fn
+	if fb.e == nil || fb.root != nil || fb.fwd != nil || fb.cl == nil || pc >= len(fn.Code) || fn.Code[pc].Op != bytecode.OpDefineField {
+		return nil, false
+	}
+	if fb.prog == nil {
+		p, err := jitcompile.LowerSSAInline(fn)
+		if err != nil {
+			if p, err = jitcompile.LowerSSA(fn); err != nil {
+				return nil, false
+			}
+		}
+		fb.prog = p
+	}
+	maps := fb.prog.Maps
+	if len(maps) != len(fn.Code) || maps[pc].Depth < 2 {
+		return nil, false
+	}
+	object := maps[pc].Depth - 2
+	var keys []Atom
+	q := -1
+	for k := pc - 1; k >= 0 && q < 0; k-- {
+		d := maps[k].Depth
+		if d < object {
+			return nil, false
+		}
+		switch in := fn.Code[k]; in.Op {
+		case bytecode.OpNewObject:
+			if d == object {
+				q = k
+			}
+		case bytecode.OpDefineField:
+			if d-2 == object {
+				keys = append(keys, fb.cl.names[in.A])
+			}
+		case bytecode.OpCopyDataProps, bytecode.OpSetProtoOf, bytecode.OpDefineGetter, bytecode.OpDefineSetter:
+			if d-2 == object {
+				return nil, false
+			}
+		case bytecode.OpDefineIndex, bytecode.OpDefineGetterIndex, bytecode.OpDefineSetterIndex:
+			if d-3 == object {
+				return nil, false
+			}
+		}
+	}
+	if q < 0 {
+		return nil, false
+	}
+	l := fb.r.jitLiteralAt(fb.e, fb.cl, q)
+	if l == nil {
+		return nil, false
+	}
+	s := l.root
+	slices.Reverse(keys)
+	for _, key := range keys {
+		if s.next == nil || s.nextEdge != (shapeEdge{key, propDefault}) {
+			return nil, false
+		}
+		s = s.next
+	}
+	key := fb.cl.names[fn.Code[pc].A]
+	if s.next == nil || s.nextEdge != (shapeEdge{key, propDefault}) {
+		if s.next == nil {
+			// Not made yet: Go makes it at the code's exit there, and the
+			// code is compiled again for it (jitDefineSeen).
+			fb.definesUnfed = append(fb.definesUnfed, int32(pc))
+		}
+		return nil, false
+	}
+	next := s.next
+	if next.index == nil && int(next.n) > linearScanLimit {
+		return nil, false
+	}
+	k := fb.keep()
+	k.shapes = append(k.shapes, remember(s), remember(next))
+	return &ssa.PropertyAdd{From: uintptr(unsafe.Pointer(s)), Next: uintptr(unsafe.Pointer(next)), Flags: uint8(next.flags), Define: true, Key: uint32(key)}, true
+}
+
 // jitFedInlined is a property site of a callee e's code inlines, cl's
 // at pc, whose cache knew nothing when the code was compiled: the code
 // leaves there, as V8's leaves for feedback it lacked, and Go, running
@@ -323,7 +493,7 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 		r.jitCallersReopt(e, jitInlineDepth)
 	}
 	e.ssa, e.ssaShapes, e.ssaHolders, e.fed, e.fedInlined, e.ssaStats = code, fb.shapes, fb.holders, fb.fed, fb.fedInlined, jitSSAStats{}
-	e.ssaInlinedAt = fb.inlinedAt
+	e.ssaInlinedAt, e.definesUnfed = fb.inlinedAt, fb.definesUnfed
 	e.ssaStrings, e.ssaCallees, e.ssaInlined, e.ssaPools = e.ssaStrings || fb.strings, fb.callees, fb.inlined, fb.pools
 	e.ssaKeeps = max(e.ssaKeeps, fb.keeps)
 	// What it leaves on is counted afresh: it may have left on what it was
@@ -414,6 +584,9 @@ type jitFeedback struct {
 	// whose caches knew nothing.
 	fed        []jitFedSite
 	fedInlined []jitFedInlined
+	// definesUnfed, the root's, are the literals' fields it compiled before
+	// their transitions were made.
+	definesUnfed []int32
 	// inlinedAt, the root's, are the calls of its own it inlines.
 	inlinedAt []int32
 	// root is the function's feedback for an inlined callee's, which keeps
@@ -1768,7 +1941,7 @@ func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
 // setSSA gives e the code the new pipeline compiled for fn from p.
 func (e *jitEntry) setSSA(fn *bytecode.Function, p *ir.Program, code *jit.SSACode, fb *jitFeedback) {
 	e.ssa, e.this, e.ssaShapes, e.ssaHolders, e.fed, e.fedInlined = code, p.This, fb.shapes, fb.holders, fb.fed, fb.fedInlined
-	e.ssaInlinedAt = fb.inlinedAt
+	e.ssaInlinedAt, e.definesUnfed = fb.inlinedAt, fb.definesUnfed
 	e.reoptBudget = uint32(max(jitReoptBudget, len(fn.Code)/jitReoptPer))
 	e.ssaStrings, e.ssaCallees, e.ssaInlined, e.ssaPools = fb.strings, fb.callees, fb.inlined, fb.pools
 	e.ssaKeeps = max(e.ssaKeeps, fb.keeps)
@@ -2414,6 +2587,10 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 				r.jitCallSeen(f, e, exitPC, f.base+int(ctx.ExitDepth), in)
 			case bytecode.OpGetProp, bytecode.OpGetPropThis:
 				r.jitPolySeen(f, e, exitPC, f.base+int(ctx.ExitDepth), in)
+			case bytecode.OpNewObject:
+				r.jitRefillLiteral(f, e, exitPC)
+			case bytecode.OpDefineField:
+				jitDefineSeen(e, exitPC)
 			}
 			sp, steps, err := r.jitHost(f, f.base+int(ctx.ExitDepth), 1)
 			if err != nil || r.stopped != nil || steps == 0 {
@@ -2980,6 +3157,10 @@ func (r *Runtime) jitFinishExit(f *frame, e *jitEntry, l *jitNativeLevel) (Value
 				r.jitCallSeen(f, e, pc, f.base+depth, in)
 			case bytecode.OpGetProp, bytecode.OpGetPropThis:
 				r.jitPolySeen(f, e, pc, f.base+depth, in)
+			case bytecode.OpNewObject:
+				r.jitRefillLiteral(f, e, pc)
+			case bytecode.OpDefineField:
+				jitDefineSeen(e, pc)
 			}
 		}
 		sp, steps, err := r.jitHost(f, f.base+depth, 1)

@@ -6687,6 +6687,86 @@ func TestJITReoptDue(t *testing.T) {
 	}
 }
 
+// An object literal is made natively: its object from the site's pool
+// (jitFeedback.Literal), made as new_object makes it, its fields defined
+// along the shapes' transitions (Define), its prototypes not looked at --
+// a setter on Object.prototype is not called. In a function called
+// natively, in a loop, nested. A literal with anything else done to its
+// object -- a spread, an accessor, a computed key, __proto__, a key twice
+// -- has Go define its fields. Splay's GeneratePayloadTree, which makes a
+// literal at each node, ran in the tree tier (new_object refused the
+// function). Each answer is the interpreter's.
+func TestJITSSAObjectLiterals(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function mk(x,y){return {a:x,b:y,c:x+y}}
+		function run(n){let s=0;for(let i=0;i<n;i++){const o=mk(i,1),p={q:{r:i},t:o.c};s=(s+o.a+o.b+o.c+p.q.r+p.t)|0}return s}
+		function odd(n){let s=[];for(let i=0;i<n;i++){const k='k'+(i&1),src={z:i};
+			const os=[{...src,a:i},{get g(){return i},a:1},{[k]:i},{__proto__:null,a:i},{a:1,a:i}];
+			s.push(os.map(o=>JSON.stringify(Object.getOwnPropertyNames(o))+':'+o.a).join())}return s.join('|')}
+		function shapes(n){let s=[];for(let i=0;i<n;i++){const o={a:i,b:2};
+			s.push(Object.keys(o).join()+(o.a===i)+JSON.stringify(o)+Object.getOwnPropertyDescriptor(o,'b').value+o.hasOwnProperty('a'))}return s.join()}
+		function last(n){let o;for(let i=0;i<n;i++)o={a:i,b:2};return o}
+		function late(n){let s=0,o;for(let i=0;i<n;i++){if(i>=n-50){o={a:i,b:i+1};s=(s+o.a+o.b)|0}else s=(s+i)|0}return s}
+		function look(o){return JSON.stringify(o)+Object.getOwnPropertyNames(o)+o.hasOwnProperty('b')+('a' in o)}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("run")).value.Object().fn().closure
+	late := r.global.getOwn(r.atoms.intern("late")).value.Object().fn().closure
+	rounds := []string{`String(run(300))`, `String(run(300))`, `String(run(300))`, `String(run(300))`, `odd(40)`, `odd(40)`,
+		`shapes(100)`, `shapes(100)`, `look(last(300))`, `look(last(300))`, `look(last(300))`,
+		`String(late(400))`, `String(late(400))`, `String(late(400))`, `String(late(400))`,
+		`Object.defineProperty(Object.prototype,'a',{set(v){throw new Error('set')},configurable:true});[run(300),shapes(5)].join()`}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts, lateHosts uint64
+		if e := r.jit.cache[weak.Make(cl.fn)]; e != nil {
+			hosts = e.ssaStats.hosts
+		}
+		if e := r.jit.cache[weak.Make(late.fn)]; e != nil {
+			lateHosts = e.ssaStats.hosts
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if src == `String(late(400))` && i == 14 {
+			// Its literal first met after the code was compiled: compiled
+			// again once Go made the fields' transitions (jitDefineSeen).
+			e := r.jit.cache[weak.Make(late.fn)]
+			if e == nil || e.ssa == nil || e.entrySlow || e.ssaStats.hosts-lateHosts > 2 {
+				t.Fatalf("late leaves native code at its literal: %+v", e)
+			}
+		}
+		if i == 3 {
+			e := r.jit.cache[weak.Make(cl.fn)]
+			if e == nil || e.ssa == nil || e.entrySlow || len(e.literals) != 2 {
+				t.Fatalf("run does not make its literals natively: %+v", e)
+			}
+			// Only for the pools to be filled again.
+			if n := e.ssaStats.hosts - hosts; n > 2*300/abi.PoolCapacity+4 {
+				t.Fatalf("run left native code %d times", n)
+			}
+		}
+	}
+}
+
 // A read compiled for the shapes it met (up to jitPropertyCases), one on a
 // prototype among them, searches the own table of a receiver of any other
 // shape rather than leave, as V8's megamorphic loads look further: objects

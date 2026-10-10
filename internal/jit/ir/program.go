@@ -157,6 +157,13 @@ const (
 	// Resolved is assert_resolved: Right at Dest if Left, the check's
 	// answer, is true; else Go throws the ReferenceError.
 	Resolved
+	// ObjectLiteral is new_object, an object literal's object, at Dest:
+	// natively from its site's pool (ssa.LiteralSite), Go's otherwise.
+	ObjectLiteral
+	// FieldDefine is define_field: Right made Left's own property Key, as
+	// a literal makes it, natively along the shapes' transition
+	// (ssa.PropertyAdd's Define), Go's otherwise.
+	FieldDefine
 )
 
 // The types a TypeTest asks about.
