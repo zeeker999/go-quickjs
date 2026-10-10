@@ -73,6 +73,22 @@ func (m OriginMap) At(v *Value) int {
 // whose value at entry it may be -- when it is not a primitive -- or
 // OriginAmbiguous.
 func Origins(f *Func) OriginMap {
+	if f.originsKept {
+		if verifyLiveness {
+			// The shadows made since are values with no origin.
+			fresh, kept := origins(f).of, f.origins.of
+			if len(fresh) < len(kept) || !slices.Equal(fresh[:len(kept)], kept) ||
+				slices.ContainsFunc(fresh[len(kept):], func(o int) bool { return o != originAbsent }) {
+				panic("ssa: the origins kept are not the function's")
+			}
+		}
+		return f.origins
+	}
+	return origins(f)
+}
+
+// origins is Origins, computed.
+func origins(f *Func) OriginMap {
 	origin := f.ints(f.nextID)
 	for i := range origin {
 		origin[i] = originAbsent
@@ -149,7 +165,7 @@ func (f *Func) Finish() {
 	if !f.shadowed {
 		shadowMerges(f)
 		storeChecks(f)
-		f.shadowed = true
+		f.shadowed, f.originsKept = true, true
 	}
 }
 
@@ -159,7 +175,8 @@ func (f *Func) Finish() {
 // native code makes the slot's address, or 0 (OpConstSource). The
 // constants are made in the predecessor the argument comes from.
 func shadowMerges(f *Func) {
-	origin := Origins(f)
+	origin := origins(f)
+	f.origins = origin
 	need := f.bools(f.nextID)
 	any := false
 	var walk func(v *Value)

@@ -384,6 +384,11 @@ type Func struct {
 	shadowed bool
 	// rounds is how many rounds Optimize took.
 	rounds int
+	// origins is what Origins returns while originsKept: from the last
+	// shadowMerges, kept once Optimize or Finish is done, as what follows
+	// it changes no tagged value.
+	origins     OriginMap
+	originsKept bool
 	// values and refs are slabs values, their arguments and frame states'
 	// slots come from, a chunk at a time: a compile at run time makes
 	// hundreds of each (BenchmarkJITCompile in internal/vm). Chunks double,
