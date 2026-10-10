@@ -61,6 +61,10 @@ func Optimize(f *Func) {
 		last[a.ID] = n
 	}
 	for round := 0; round < 32; round++ {
+		// Phis are unboxed first, so that the boxes and unboxings it makes
+		// cancel in this round's walk, not the next's: most functions are
+		// then done in two rounds, the second finding nothing.
+		unboxed := unboxPhis(f)
 		first, last, guards = idTable(sc.first, f.nextID), idTable(sc.last, f.nextID), guards[:0]
 		sc.first, sc.last = first, last
 		subst = idTable(subst, f.nextID)
@@ -71,7 +75,7 @@ func Optimize(f *Func) {
 			}
 			return v
 		}
-		changed := false
+		changed := unboxed
 		for _, b := range f.Blocks {
 			for _, v := range b.Values {
 				if subst[v.ID] != nil {
@@ -117,10 +121,8 @@ func Optimize(f *Func) {
 		if replaced {
 			rewrite(f, find)
 		}
-		if unboxPhis(f) {
-			changed = true
-		}
 		removed := removeDead(f)
+		f.rounds = round + 1
 		if !changed && !removed {
 			break
 		}
@@ -241,7 +243,10 @@ func unboxPhis(f *Func) bool {
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
 			switch {
-			case v.Op == OpPhi && v.Type == Tagged:
+			case v.Op == OpPhi && v.Type == Tagged && !trivialPhi(v):
+				// A trivial phi is the value it carries, which this round
+				// makes it: unboxed, it would speculate on an entry's slot
+				// where only one path used it as a number.
 				phis = append(phis, v)
 			case v.Op == OpUnboxF64 && ir.ExitKind(v.Aux) == ir.GuardExit:
 				guarded = append(guarded, v.Args[0])
@@ -394,6 +399,21 @@ func unboxPhis(f *Func) bool {
 		copy(b.Values[len(front)+len(boxes):], rest)
 	}
 	f.scr().front, f.scr().boxes, f.scr().rest = front[:0], boxes[:0], rest[:0]
+	return true
+}
+
+// trivialPhi reports a phi whose arguments are one value, or itself.
+func trivialPhi(phi *Value) bool {
+	var same *Value
+	for _, a := range phi.Args {
+		if a == phi || a == same {
+			continue
+		}
+		if same != nil {
+			return false
+		}
+		same = a
+	}
 	return true
 }
 

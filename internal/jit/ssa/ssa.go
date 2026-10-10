@@ -382,6 +382,8 @@ type Func struct {
 	// shadowed is whether the phis' shadows and the stores' checks are
 	// made (Finish).
 	shadowed bool
+	// rounds is how many rounds Optimize took.
+	rounds int
 	// values and refs are slabs values, their arguments and frame states'
 	// slots come from, a chunk at a time: a compile at run time makes
 	// hundreds of each (BenchmarkJITCompile in internal/vm). Chunks double,
