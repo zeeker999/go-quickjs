@@ -17,6 +17,9 @@ type Arena[T any] struct {
 	chunks [][]T
 	// cur is the chunk being cut from, and off how much of it is cut.
 	cur, off int
+	// used is how much of each chunk before cur was cut: what Rewind
+	// clears, not the rest a request that did not fit left.
+	used []int
 	// keepBig makes a request bigger than a chunk a chunk of its own that
 	// the arena keeps (KeepBig).
 	keepBig bool
@@ -43,6 +46,7 @@ func (a *Arena[T]) Make(n int) []T {
 			a.off += n
 			return c[a.off-n : a.off : a.off]
 		}
+		a.leave()
 		if a.cur+1 == len(a.chunks) {
 			break
 		}
@@ -59,6 +63,14 @@ func (a *Arena[T]) Make(n int) []T {
 	a.chunks = append(a.chunks, make([]T, l))
 	a.cur, a.off = len(a.chunks)-1, n
 	return a.chunks[a.cur][:n:n]
+}
+
+// leave notes how much of the current chunk was cut, as Make moves past it.
+func (a *Arena[T]) leave() {
+	for len(a.used) <= a.cur {
+		a.used = append(a.used, 0)
+	}
+	a.used[a.cur] = a.off
 }
 
 // nextLen is the length of the next chunk the arena would make.
@@ -85,7 +97,7 @@ func (a *Arena[T]) Append(s []T, v T) []T {
 // after.
 func (a *Arena[T]) Rewind() {
 	for i := 0; i < a.cur && i < len(a.chunks); i++ {
-		clear(a.chunks[i])
+		clear(a.chunks[i][:a.used[i]])
 	}
 	if a.cur < len(a.chunks) {
 		clear(a.chunks[a.cur][:a.off])
