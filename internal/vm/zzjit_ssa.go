@@ -1602,7 +1602,9 @@ func (r *Runtime) runSSAIn(f *frame, e *jitEntry, pc, depth, idx int, resume uin
 	s := r.jit
 	top := s.ctxTop
 	s.ctxTop = idx + 1
+	e.ssaRuns++
 	defer func() {
+		e.ssaRuns--
 		s.ctxTop = top
 		// What native code kept (abi.Context.Keep), and the pointer words
 		// its native calls recorded (RecordRef), its callees' too, are not
@@ -1664,15 +1666,16 @@ func (r *Runtime) runSSAIn(f *frame, e *jitEntry, pc, depth, idx int, resume uin
 			// callee would have returned to, its state where it left it --
 			// as V8's lazy deoptimization leaves a caller's optimized frame
 			// alone. Not while the collector marks, as native code takes
-			// pointers there; nor into code compiled again meanwhile, nor
-			// after a throw: then as below.
+			// pointers there; nor into code compiled again or dropped
+			// meanwhile (Size 0, closed), nor after a throw: then as below,
+			// from the frame the call wrote.
 			s.hosts++
 			e.ssaStats.hosts++
 			back, base, code := uintptr(c.ReturnTo), c.Base, e.ssa
-			exitPC, depth := int(ctx.ExitPC), int(ctx.ExitDepth)
+			exitPC, exitDepth := int(ctx.ExitPC), int(ctx.ExitDepth)
 			f.pc = uint32(exitPC)
 			v, err := r.jitUnwindNative(idx, e, f.cl.fn)
-			if err == nil && r.stopped == nil && back != 0 && e.ssa == code && !jit.Marking() {
+			if err == nil && r.stopped == nil && back != 0 && e.ssa == code && code.Size() != 0 && !jit.Marking() {
 				// Native code run meanwhile may have used the context.
 				c.Base, c.Live, c.ReturnTo = base, 0, 0
 				*(*Value)(unsafe.Pointer(&c.RetValue)) = v
@@ -1682,7 +1685,7 @@ func (r *Runtime) runSSAIn(f *frame, e *jitEntry, pc, depth, idx int, resume uin
 			}
 			e.ssaStats.records += ctx.Records
 			r.jitApplyRecords(f, e, ctx)
-			sp, ok := r.jitCallResult(f, exitPC, depth, v, err)
+			sp, ok := r.jitCallResult(f, exitPC, exitDepth, v, err)
 			if !ok || r.stopped != nil {
 				return r.jitInterpret(f, sp, err)
 			}
@@ -1705,9 +1708,9 @@ func (r *Runtime) runSSAIn(f *frame, e *jitEntry, pc, depth, idx int, resume uin
 			// records, its frame's included, to Go.
 			e.ssaStats.records += ctx.Records
 			r.jitApplyRecords(f, e, ctx)
-			exitPC, depth := int(ctx.ExitPC), int(ctx.ExitDepth)
+			exitPC, exitDepth := int(ctx.ExitPC), int(ctx.ExitDepth)
 			v, err := r.jitUnwindNative(idx, e, f.cl.fn)
-			sp, ok := r.jitCallResult(f, exitPC, depth, v, err)
+			sp, ok := r.jitCallResult(f, exitPC, exitDepth, v, err)
 			if !ok || r.stopped != nil {
 				return r.jitInterpret(f, sp, err)
 			}
@@ -2001,7 +2004,7 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 		if k == n-1 {
 			v, err = r.jitFinishExit(f, e, &l)
 		} else if !l.inline && !next.inline && next.returnTo != 0 && err == nil && r.stopped == nil &&
-			e != nil && e.ssa != nil && e.ssa == next.code && !jit.Marking() {
+			e != nil && e.ssa != nil && e.ssa == next.code && next.code.Size() != 0 && !jit.Marking() {
 			// Its native code goes on where the call returns to, as runSSA's
 			// does after a callee leaves: its context, spills and keeps are
 			// as it left them, and its callee's, frame base included.

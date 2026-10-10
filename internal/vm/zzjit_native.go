@@ -232,6 +232,9 @@ type jitEntry struct {
 	// ssaKeeps is how many keep cells (abi.Context.Keep) its code has used,
 	// the most of any it had: what Go clears when the code returns.
 	ssaKeeps int
+	// ssaRuns is how many runs of its code Go is inside (runSSAIn): one may
+	// go on in it after a native call, so the cache keeps it (inUse).
+	ssaRuns int32
 	// nativeCalls are the calls the code makes natively, or will when
 	// compiled again, each with the function it was seen to call.
 	nativeCalls []jitInline
@@ -437,6 +440,15 @@ func (s *jitState) dropEntry(key weak.Pointer[bytecode.Function], e *jitEntry) b
 	return true
 }
 
+// inUse reports whether e's code runs, or may go on, below Go now: a
+// frame of the old pipeline's calls, or a run of the new pipeline's, which
+// goes on in its code after a native call whose callee Go finishes. The
+// cache does not drop it to make room then, as V8 keeps code a frame is
+// in: the run would find its code gone.
+func (s *jitState) inUse(e *jitEntry) bool {
+	return e.ssaRuns != 0 || s.callEntryActive(e)
+}
+
 // forget removes e from the cache and frees its hint slot.
 func (s *jitState) forget(key weak.Pointer[bytecode.Function], e *jitEntry) {
 	delete(s.cache, key)
@@ -528,7 +540,7 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool, cl *closure) *j
 		}
 		if len(r.jit.cache) >= jitCacheEntries {
 			for key, e := range r.jit.cache {
-				if r.jit.callEntryActive(e) {
+				if r.jit.inUse(e) {
 					continue
 				}
 				if !r.jit.dropEntry(key, e) {
