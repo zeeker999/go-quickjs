@@ -6070,3 +6070,86 @@ func TestJITSSAEntersCalleesWithoutCode(t *testing.T) {
 		})
 	}
 }
+
+// A native caller whose code is dropped from the cache while Go finishes a
+// callee that left native code -- one it called natively, or one it inlined
+// -- Go running what dropped it, goes on after the call from the frame the
+// call wrote, with its operands, not in its code, which is gone: resuming
+// there, which the code being the entry's still allowed, ran the call again
+// over that frame, and the frame's operands were taken as those at the last
+// entry. The cache does not drop code to make room while a run of it may go
+// on so (inUse).
+func TestJITSSACallerDroppedWhileItsCalleeLeaves(t *testing.T) {
+	// Native calls are Go's while the collector marks.
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	for _, tc := range []struct{ name, setup, run, last string }{
+		{"call", `function leave(x){if(x===200)host();return x*3+1}
+			function caller(n){let s=0;for(let i=0;i<n;i++)s=(s+leave(i)*2)|0;return s}`,
+			`[caller(300),caller(300)].join()`, `[caller(300),caller(300)].join()`},
+		// The inlined callee leaves at its read of v, which meets a getter
+		// in b, which drops the caller's code.
+		{"inlined", `function O(k){this.k=k}O.prototype.leave=function(x){return x.v*3+this.k};var o=new O(1);
+			function caller(a,n){let s=0;for(let i=0;i<n;i++)s=(s+o.leave(a[i])*2)|0;return s}
+			var a=[];for(let i=0;i<300;i++)a.push({v:i});var b=a.slice();b[200]={get v(){host();return 200}}`,
+			`[caller(a,300),caller(a,300)].join()`, `[caller(b,300),caller(a,300)].join()`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := New(Config{})
+			defer func() { want.Close(); want.ReleaseClosed() }()
+			want.global.setOwnRaw(want.atoms.intern("host"), want.NewFunction("host", 0,
+				func(*Runtime, Value, []Value) (Value, error) { return Undefined, nil }), propDefault)
+			r := jitRuntimeForTest(t, Config{JIT: true})
+			r.jitSSA = true
+			var drop, dropped, inUse bool
+			r.global.setOwnRaw(r.atoms.intern("host"), r.NewFunction("host", 0,
+				func(rt *Runtime, _ Value, _ []Value) (Value, error) {
+					if !drop {
+						return Undefined, nil
+					}
+					drop = false
+					cl := rt.global.getOwn(rt.atoms.intern("caller")).value.Object().fn().closure
+					e := rt.jit.hint(cl.hint())
+					inUse = e != nil && rt.jit.inUse(e)
+					dropped = e != nil && rt.jit.dropEntry(weak.Make(cl.fn), e)
+					return Undefined, nil
+				}), propDefault)
+			for _, rt := range []*Runtime{want, r} {
+				if _, err := rt.Run(compileForTest(t, tc.setup)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			wv, err := want.Run(compileForTest(t, tc.last))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				if _, err := r.Run(compileForTest(t, tc.run)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cl := r.global.getOwn(r.atoms.intern("caller")).value.Object().fn().closure
+			e := r.jit.hint(cl.hint())
+			if e == nil || e.ssa == nil {
+				t.Fatalf("caller was not compiled: %+v", e)
+			}
+			if tc.name == "call" && len(e.nativeCalls) == 0 || tc.name == "inlined" && len(e.ssaInlined) == 0 {
+				t.Fatalf("caller does not make the call as %s: %+v", tc.name, e)
+			}
+			drop = true
+			unwound := r.jit.unwound
+			gv, err := r.Run(compileForTest(t, tc.last))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !dropped || r.jit.unwound == unwound {
+				t.Fatalf("caller's code was not dropped (%v) while Go finished its callee: %+v", dropped, r.JITStats())
+			}
+			if !inUse {
+				t.Fatal("the cache would drop the code of a run Go is inside")
+			}
+			if got, want := gv.String().Go(), wv.String().Go(); got != want {
+				t.Fatalf("got %s, interpreter %s", got, want)
+			}
+		})
+	}
+}
