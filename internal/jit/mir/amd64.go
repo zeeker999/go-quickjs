@@ -1718,7 +1718,19 @@ func (c *compiler) propStore(v *ssa.Value, guard func(amd64.Cond)) {
 		c.a.Jmp(added)
 		c.a.Bind(has)
 	}
-	c.property(v, guard)
+	if v.Global {
+		// A global binding's cell, found as a read finds it, and
+		// writable.
+		if r := c.gpr(v.Args[0], scratchA); r != scratchA {
+			c.a.MovRR(scratchA, r)
+		}
+		c.a.LoadU8(scratchB, scratchA, c.enc.PropertyFlags-c.enc.PropertyValue)
+		c.a.OpImm(amd64.And, scratchB, int32(c.enc.PropNotWritable), false)
+		c.a.OpImm(amd64.Cmp, scratchB, int32(c.enc.PropWritable), false)
+		guard(amd64.CondNE)
+	} else {
+		c.property(v, guard)
+	}
 	for _, s := range v.Args[2:] {
 		// A live value read from this cell keeps its pointer word there:
 		// unless it is none, a primitive's (storeChecks).
@@ -2274,6 +2286,11 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.MovImm(scratchA, c.enc.Uninitialized)
 		c.a.Op(amd64.Cmp, r, scratchA, true)
 		guard(amd64.CondE)
+	case ssa.OpCheckTrue:
+		r := c.gpr(arg(0), scratchB)
+		c.a.MovImm(scratchA, c.enc.True)
+		c.a.Op(amd64.Cmp, r, scratchA, true)
+		guard(amd64.CondNE)
 	case ssa.OpTruth:
 		c.truth(v, c.guardFor(v))
 	case ssa.OpArrayOf:

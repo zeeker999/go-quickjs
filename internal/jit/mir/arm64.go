@@ -1108,7 +1108,19 @@ func (c *a64Compiler) propStore(v *ssa.Value, guard func(arm64.Cond)) {
 		c.a.B(added)
 		c.a.Bind(has)
 	}
-	c.property(v, guard)
+	if v.Global {
+		// As amd64's: a global binding's cell, writable.
+		if r := c.gpr(v.Args[0], a64A); r != a64A {
+			c.a.MovRR(a64A, r)
+		}
+		c.a.LoadU8(a64B, a64A, c.enc.PropertyFlags-c.enc.PropertyValue)
+		c.a.MovImm(a64C, uint64(c.enc.PropNotWritable))
+		c.a.Op(arm64.And, a64B, a64B, a64C, false)
+		c.a.CmpImm(a64B, int64(c.enc.PropWritable), false)
+		guard(arm64.NE)
+	} else {
+		c.property(v, guard)
+	}
 	for _, s := range v.Args[2:] {
 		// As amd64's: only a pointer word there is lost.
 		other := c.a.NewLabel()
@@ -2189,6 +2201,11 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.MovImm(a64A, c.enc.Uninitialized)
 		c.a.Cmp(r, a64A, true)
 		guard(arm64.EQ)
+	case ssa.OpCheckTrue:
+		r := c.gpr(arg(0), a64B)
+		c.a.MovImm(a64A, c.enc.True)
+		c.a.Cmp(r, a64A, true)
+		guard(arm64.NE)
 	case ssa.OpTruth:
 		c.truth(v, c.guardFor(v))
 	case ssa.OpArrayOf:

@@ -52,6 +52,12 @@ func (p *Program) Validate() error {
 		case Nop, Host:
 		case StringMethod, TypeTest:
 			left, write = true, true
+		case BindingWrite:
+			left = true
+		case BindingCheck:
+			write = true
+		case Resolved:
+			left, right, write = true, true, true
 		case StringCode:
 			left, right, third, write = true, true, true, true
 		case Call:

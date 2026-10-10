@@ -1599,7 +1599,8 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 		case bytecode.OpPushThis, bytecode.OpGetProp, bytecode.OpSetProp, bytecode.OpCall,
 			bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpSetGlobal, bytecode.OpSetGlobalStrict,
 			bytecode.OpGetPropThis, bytecode.OpSetIndex, bytecode.OpNewArray,
-			bytecode.OpGetIndex, bytecode.OpNew, bytecode.OpPushConst, bytecode.OpInstanceOf, bytecode.OpTypeOf:
+			bytecode.OpGetIndex, bytecode.OpNew, bytecode.OpPushConst, bytecode.OpInstanceOf, bytecode.OpTypeOf,
+			bytecode.OpCheckGlobalRef, bytecode.OpAssertResolved:
 		default:
 			return sp, steps, nil
 		}
@@ -1636,6 +1637,17 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 			if err != nil {
 				return sp, steps, err
 			}
+			continue
+		case bytecode.OpCheckGlobalRef:
+			var found bool
+			found, err = r.jitGlobalRef(f, in)
+			v = Bool(found)
+		case bytecode.OpAssertResolved:
+			if !stack[sp-2].Truthy() {
+				return sp, steps, r.throwReferenceError("%s is not defined", r.atoms.name(f.cl.names[in.A]))
+			}
+			stack[sp-2] = stack[sp-1]
+			sp--
 			continue
 		case bytecode.OpSetGlobal, bytecode.OpSetGlobalStrict:
 			// As the interpreter assigns: a direct eval's variable, a
@@ -1758,4 +1770,23 @@ func (r *Runtime) jitInterpret(f *frame, sp int, pending error) (Value, error, b
 	defer func() { r.jitDeoptDepth = previous }()
 	v, err := r.executeAt(f, sp, pending)
 	return v, err, true
+}
+
+// jitGlobalRef is strict mode's check_global_ref, as the interpreter makes
+// it: whether the name resolves, to a global variable, a direct eval's
+// variable, a script's or a module's lexical binding, or a property the
+// global object has or inherits.
+func (r *Runtime) jitGlobalRef(f *frame, in bytecode.Instr) (bool, error) {
+	cl := f.cl
+	name, env := cl.names[in.A], cl.scope()
+	switch {
+	case hasOwnGlobal(env, &cl.ic[in.B], name):
+	case f.evalVars != nil && evalVarProp(f.evalVars, name) != nil:
+	case r.globalLexProp(env, name) != nil:
+	case !r.isGlobalScope(env) && r.moduleLexProp(env, name) != nil:
+	case r.nodeQuirks && chainHasProxy(env):
+	default:
+		return r.hasPropErr(env, name)
+	}
+	return true, nil
 }

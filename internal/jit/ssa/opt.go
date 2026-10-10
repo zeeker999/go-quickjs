@@ -197,6 +197,10 @@ func simplify(f *Func, v *Value) *Value {
 		if a.Op == OpBoxF64 || a.Op == OpBoxBool || a.Op == OpConst && a.Const.Kind != ir.Uninitialized {
 			v.Op, v.Args, v.State = OpInvalid, nil, nil
 		}
+	case OpCheckTrue:
+		if a := arg(0); a.Op == OpConst && a.Const == ir.Bool(true) {
+			v.Op, v.Args, v.State = OpInvalid, nil, nil
+		}
 	case OpToInt32:
 		if a := arg(0); a.Op == OpI32ToF64 || a.Op == OpU32ToF64 {
 			return a.Args[0]

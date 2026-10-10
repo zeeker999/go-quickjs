@@ -214,6 +214,9 @@ const (
 	// class and [[IsHTMLDDA]]; an object of another class, a proxy, exits,
 	// Go telling it.
 	OpTypeIs // tagged -> bool
+	// OpCheckTrue exits unless its operand is true: strict mode's
+	// assert_resolved, after a check_global_ref Go made.
+	OpCheckTrue // tagged -> none
 )
 
 var opNames = [...]string{
@@ -227,6 +230,7 @@ var opNames = [...]string{
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
 	OpSameObject: "sameobject", OpFrameRoom: "frameroom", OpKeepRef: "keepref", OpKeep: "keep", OpKept: "kept",
 	OpCall: "call", OpCallCell: "callcell", OpSqrtF64: "sqrtf", OpAbsF64: "absf", OpInstanceOf: "instanceof", OpTypeIs: "typeis",
+	OpCheckTrue: "checktrue",
 }
 
 func (o Op) String() string {
@@ -241,7 +245,7 @@ func (o Op) isGuard() bool {
 	switch o {
 	case OpUnboxF64, OpTruth, OpCheckInit, OpModF64, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite, OpElemCell, OpLength,
 		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell, OpStringMethod, OpStringCode, OpLooseNullish, OpEqTagged,
-		OpSameObject, OpFrameRoom, OpCall, OpInstanceOf, OpTypeIs:
+		OpSameObject, OpFrameRoom, OpCall, OpInstanceOf, OpTypeIs, OpCheckTrue:
 		return true
 	}
 	return false
@@ -276,6 +280,10 @@ type Value struct {
 	Cases   []PropertyCase
 	// Add, for a write whose cache adds its property, is how (OpPropWrite).
 	Add *PropertyAdd
+	// Global marks an OpPropWrite to a global binding (ir.BindingWrite):
+	// its first operand is the binding's cell (OpGlobalCell), not an
+	// object.
+	Global bool
 	// Calls, for a call, are the functions it may call natively (OpCall).
 	Calls []*CallSite
 	// State is the frame to exit to, for guards.

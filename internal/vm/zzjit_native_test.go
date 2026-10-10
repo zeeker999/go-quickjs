@@ -5521,7 +5521,7 @@ func TestJITSSALooseNullishOperands(t *testing.T) {
 	}
 }
 
-// With native construction, an assignment to a global leaves for Go
+// An assignment to a global native code does not write leaves for Go
 // (jitHost), as the interpreter makes it, and the function around it
 // compiles: DeltaBlue's drivers assign planner = new Planner(), then
 // build their constraints in loops. A global var, a script's let, a name
@@ -5569,6 +5569,80 @@ func TestJITSSAAssignsGlobals(t *testing.T) {
 		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
 		if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil || e.ssaStats.entries == 0 || name == "bad" && e.entrySlow {
 			t.Fatalf("%s did not run natively", name)
+		}
+	}
+}
+
+// An assignment to a global variable, a writable data property of the
+// global object, is a store to its cell, as V8 stores to a global's
+// property cell: EarleyBoyer's unifier assigns unify_subst_nboyer in its
+// loop, which kept it out of native code. What the store checks, each
+// answered as the interpreter answers: a property made non-writable (a
+// sloppy assignment does nothing), an accessor, one deleted (sloppily made
+// again, strictly a ReferenceError), a script's let that comes to shadow
+// it, and a value read from the cell before the store and used after it.
+func TestJITSSAWritesGlobals(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var g=0,h=1,o={v:1};globalThis.cur=o;globalThis.late=0;globalThis.gone=0;
+		function w(n){for(let i=0;i<n;i++){g=g+1;h=g*2;cur=o}return [g,h,cur.v].join()}
+		function sw(n){'use strict';let s=0;for(let i=0;i<n;i++){const old=g;g=old+1;s=(s+old*3+g)|0}return s}
+		function lw(n){for(let i=0;i<n;i++){late=late+1}return [late,globalThis.late].join()}
+		function dw(n){'use strict';let s=0;for(let i=0;i<n;i++){gone=i;s=(s+gone)|0}return s}
+		function tdw(n){try{return String(dw(n))}catch(e){return e.name+":"+(typeof gone)}}
+		globalThis.miss=0;function rw(n,make){'use strict';let s=0;for(let i=0;i<n;i++){s=(s*5+i)|0;if((i&63)===0)miss=make?(globalThis.miss=s):s+1}return s}
+		function trw(n,make){try{return String(rw(n,make))}catch(e){return e.name+":"+(typeof miss)}}`
+	rounds := []string{`w(300)`, `w(300)`, `w(300)`, `String(sw(300))`, `String(sw(300))`, `String(sw(300))`, `lw(300)`, `lw(300)`, `tdw(300)`, `tdw(300)`,
+		`Object.defineProperty(globalThis,"h",{writable:false});w(300)`,
+		`Object.defineProperty(globalThis,"cur",{get(){return {v:7}},set(x){globalThis.seen=x.v},configurable:true});[w(300),seen].join()`,
+		`delete globalThis.cur;w(300)`,
+		`let late=1000;lw(300)`, `lw(300)`,
+		`delete globalThis.gone;tdw(300)`,
+		`trw(300)`, `trw(300)`, `trw(300)`, `delete globalThis.miss;trw(300)`, `trw(300,true)`, `delete globalThis.miss;trw(300,true)`}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("w")).value.Object().fn().closure
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts uint64
+		if e := r.jit.cache[weak.Make(cl.fn)]; e != nil {
+			hosts = e.ssaStats.hosts
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 2 {
+			e := r.jit.cache[weak.Make(cl.fn)]
+			if e == nil || e.ssa == nil || e.entrySlow {
+				t.Fatalf("w did not run natively: %+v", e)
+			}
+			// After its loop: the array, join's read and call.
+			if n := e.ssaStats.hosts - hosts; n > 3 {
+				t.Fatalf("w left native code %d times", n)
+			}
+		}
+	}
+	for _, name := range []string{"sw", "lw", "dw", "rw"} {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil || e.ssaStats.entries == 0 {
+			t.Fatalf("%s did not run natively %+v", name, e)
 		}
 	}
 }
