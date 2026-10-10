@@ -1675,20 +1675,23 @@ func TestSSANativeStores(t *testing.T) {
 }
 
 // A store that more references read from cells are live across than keep
-// cells hold (abi.MaxKeeps) keeps none, and leaves itself to Go where it
-// would write a cell one was read from (ssa's storeChecks): here a guard
-// after it names 66 reads of the cell it writes.
+// cells are left for (abi.MaxKeeps) keeps none, and leaves itself to Go
+// where it would write a cell one was read from (ssa's storeChecks): here a
+// guard after them names 50 reads of the cell six stores write, the reads
+// merged after each store into values of their own (300 cells' worth).
 func TestSSANativeStoresPastTheKeeps(t *testing.T) {
 	cached := ssa.PropertySite{Key: 10, Shape: testShapes[0].shape, Index: 0}
-	const reads = abi.MaxKeeps + 2
+	const reads, stores = 50, 6
 	p := &ir.Program{Locals: reads + 4}
 	sites := map[int]site{}
 	for i := range reads {
 		sites[len(p.Code)] = cached
 		p.Code = append(p.Code, ir.Instruction{Op: ir.ReferenceRead, Dest: 3 + i, Left: ir.Slot(0), Key: 10})
 	}
-	sites[len(p.Code)] = cached
-	p.Code = append(p.Code, ir.Instruction{Op: ir.PropertyWrite, Left: ir.Slot(0), Right: ir.Slot(1), Key: 10})
+	for range stores {
+		sites[len(p.Code)] = cached
+		p.Code = append(p.Code, ir.Instruction{Op: ir.PropertyWrite, Left: ir.Slot(0), Right: ir.Slot(1), Key: 10})
+	}
 	// A read of another object's, whose guard's frame state holds every
 	// read before the store.
 	sites[len(p.Code)] = cached
@@ -1703,7 +1706,7 @@ func TestSSANativeStoresPastTheKeeps(t *testing.T) {
 		t.Fatalf("compile: %v", err)
 	}
 	defer c.code.Close()
-	if c.f.Keeps != 0 {
+	if c.f.Keeps > abi.MaxKeeps {
 		t.Fatalf("%d keeps, past abi.MaxKeeps's %d", c.f.Keeps, abi.MaxKeeps)
 	}
 	checks := 0
@@ -1738,6 +1741,61 @@ func TestSSANativeStoresPastTheKeeps(t *testing.T) {
 				t.Fatalf("%v over %v: %s", value, old, why)
 			}
 		}
+	}
+}
+
+// A function keeps up to abi.MaxKeeps values read from cells across the
+// stores that may write them: here 80 reads across one store of the cell
+// are all kept, past the 64 there were. Crypto's bnModPow, whose calls are
+// stores of any cell, left every call to Go for want of them.
+func TestSSAKeepsManyValues(t *testing.T) {
+	cached := ssa.PropertySite{Key: 10, Shape: testShapes[0].shape, Index: 0}
+	for _, tc := range []struct{ reads, stores int }{{80, 1}} {
+		p := &ir.Program{Locals: tc.reads + 4}
+		sites := map[int]site{}
+		for i := range tc.reads {
+			sites[len(p.Code)] = cached
+			p.Code = append(p.Code, ir.Instruction{Op: ir.ReferenceRead, Dest: 3 + i, Left: ir.Slot(0), Key: 10})
+		}
+		for range tc.stores {
+			sites[len(p.Code)] = cached
+			p.Code = append(p.Code, ir.Instruction{Op: ir.PropertyWrite, Left: ir.Slot(0), Right: ir.Slot(1), Key: 10})
+		}
+		// A read of another object's, whose guard's frame state holds every
+		// read before the stores.
+		sites[len(p.Code)] = cached
+		p.Code = append(p.Code, ir.Instruction{Op: ir.ReferenceRead, Dest: tc.reads + 3, Left: ir.Slot(2), Key: 10},
+			ir.Instruction{Op: ir.Return, Left: ir.Slot(3)})
+		p.Maps = make([]ir.StateMap, len(p.Code))
+		for pc := range p.Maps {
+			p.Maps[pc].PC = uint32(pc)
+		}
+		c, err := compileNative(p, layout{p.Locals, -1, sites, nil, nil, nil})
+		if err != nil || c == nil {
+			t.Fatalf("%d reads: compile: %v", tc.reads, err)
+		}
+		if c.f.Keeps != tc.reads {
+			t.Fatalf("%d reads across %d stores: %d keep cells", tc.reads, tc.stores, c.f.Keeps)
+		}
+		for _, value := range []ir.Value{ir.Float(5), {Kind: ir.Opaque, Bits: 1}} {
+			heap := randomTestHeap(rand.New(rand.NewPCG(7, 8)))
+			for _, i := range []int{0, 2} {
+				sh := testShapes[0]
+				heap[i].shape, heap[i].proto = 0, -1
+				heap[i].keys, heap[i].flags = sh.keys, sh.flags
+				heap[i].props = []ir.Value{{Kind: ir.Opaque, Bits: 3}, ir.Float(1), ir.Float(2)}
+			}
+			heap[2].shape = 1
+			slots := make([]ir.Value, p.Locals)
+			slots[0], slots[1], slots[2] = ir.Value{Kind: ir.Opaque, Bits: 0}, value, ir.Value{Kind: ir.Opaque, Bits: 2}
+			for i := 3; i < len(slots); i++ {
+				slots[i] = ir.Float(0)
+			}
+			if why := nativeMismatch(c, 0, slots, 0, heap); why != "" {
+				t.Fatalf("%d reads, %v stored: %s", tc.reads, value, why)
+			}
+		}
+		c.code.Close()
 	}
 }
 

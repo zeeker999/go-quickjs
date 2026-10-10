@@ -16,7 +16,7 @@ const SpillSlots = 256
 const MaxRecords = 256
 
 // MaxKeeps is how many references a function's code keeps (Context.Keep).
-const MaxKeeps = 64
+const MaxKeeps = 256
 
 // Record is an exit's instruction to Go for one slot, which native code
 // cannot write. Slot is the slot, and its flags say what to write there:

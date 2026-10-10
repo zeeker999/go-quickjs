@@ -32,6 +32,11 @@ func keepAcrossStores(f *Func) (bool, []*Value, [][]*Value) {
 	stores, live := liveAcross(f)
 	a := newAliases()
 	kept := map[*Value][]*Value{}
+	// cell is the keep cell each value kept has, one for all the stores
+	// that keep it: its pointer word, like its number word, is the same
+	// wherever it is read -- a value carried round a loop is a phi, a value
+	// of its own -- so a store keeping it again writes what the cell holds.
+	cell := map[*Value]int{}
 	var order []*Value
 	for i, s := range stores {
 		// A store that may write a cell a value used after it was read from
@@ -71,7 +76,13 @@ func keepAcrossStores(f *Func) (bool, []*Value, [][]*Value) {
 				cands = append(cands, c)
 			}
 		}
-		if f.Keeps+len(cands) > abi.MaxKeeps {
+		fresh := 0
+		for _, c := range cands {
+			if _, ok := cell[c]; !ok {
+				fresh++
+			}
+		}
+		if f.Keeps+fresh > abi.MaxKeeps {
 			if s.Op == OpCall {
 				// Not kept, the references could be lost: Go makes the call.
 				s.Calls = nil
@@ -83,11 +94,16 @@ func keepAcrossStores(f *Func) (bool, []*Value, [][]*Value) {
 		for _, c := range cands {
 			r := f.alloc(Value{Op: OpKeepRef, Type: Ptr, Args: f.refsOf(1), Block: b})
 			r.Args[0] = c
-			k := f.alloc(Value{Op: OpKeep, Type: Source, Args: f.refsOf(2), Block: b, Index: f.Keeps})
+			index, ok := cell[c]
+			if !ok {
+				index = f.Keeps
+				cell[c] = index
+				f.Keeps++
+			}
+			k := f.alloc(Value{Op: OpKeep, Type: Source, Args: f.refsOf(2), Block: b, Index: index})
 			k.Args[0], k.Args[1] = c, r
 			v := f.alloc(Value{Op: OpKept, Type: Tagged, Args: f.refsOf(2), Block: b})
 			v.Args[0], v.Args[1], v.Shadow = k, c, k
-			f.Keeps++
 			refs, keeps, copies = append(refs, r), append(keeps, k), append(copies, v)
 			if kept[c] == nil {
 				order = append(order, c)

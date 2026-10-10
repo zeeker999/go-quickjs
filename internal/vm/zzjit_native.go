@@ -229,6 +229,9 @@ type jitEntry struct {
 	// ssaPools are the object pools the code's constructions take from,
 	// whose addresses it holds.
 	ssaPools []*abi.ObjectPool
+	// ssaKeeps is how many keep cells (abi.Context.Keep) its code has used,
+	// the most of any it had: what Go clears when the code returns.
+	ssaKeeps int
 	// nativeCalls are the calls the code makes natively, or will when
 	// compiled again, each with the function it was seen to call.
 	nativeCalls []jitInline

@@ -252,6 +252,7 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	}
 	e.ssa, e.ssaShapes, e.ssaHolders, e.fed, e.ssaStats = code, fb.shapes, fb.holders, fb.fed, jitSSAStats{}
 	e.ssaStrings, e.ssaCallees, e.ssaInlined, e.ssaPools = e.ssaStrings || fb.strings, fb.callees, fb.inlined, fb.pools
+	e.ssaKeeps = max(e.ssaKeeps, fb.keeps)
 	if !e.notNative {
 		e.nativeEntry = code.EntryAddress(0)
 	}
@@ -294,6 +295,7 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, 
 		f.ThisSlot = fn.LocalCount + len(fn.Upvalues)
 	}
 	ssa.Optimize(f)
+	fb.keeps = f.Keeps
 	mc, err := mir.CompileIn(&s.mirWork, f, jitEncoding)
 	if err != nil && strings.Contains(err.Error(), "runtime error") {
 		// A refusal the backend's own panic made: a bug, which the tests
@@ -341,6 +343,8 @@ type jitFeedback struct {
 	// object pools its constructions take from.
 	inlined []*closure
 	pools   []*abi.ObjectPool
+	// keeps is how many keep cells the code uses (ssa.Func.Keeps).
+	keeps int
 	// e is the entry being compiled again, whose failed speculations
 	// (jitEntry.failed) are built generic; nil for a first compile.
 	e *jitEntry
@@ -1185,6 +1189,7 @@ func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
 func (e *jitEntry) setSSA(fn *bytecode.Function, p *ir.Program, code *jit.SSACode, fb *jitFeedback) {
 	e.ssa, e.this, e.ssaShapes, e.ssaHolders, e.fed = code, p.This, fb.shapes, fb.holders, fb.fed
 	e.ssaStrings, e.ssaCallees, e.ssaInlined, e.ssaPools = fb.strings, fb.callees, fb.inlined, fb.pools
+	e.ssaKeeps = max(e.ssaKeeps, fb.keeps)
 	e.nativeEntry = code.EntryAddress(0)
 	e.ssaLoop = jitLoopLength(fn)
 	for _, in := range p.Code {
@@ -1602,7 +1607,7 @@ func (r *Runtime) runSSAIn(f *frame, e *jitEntry, pc, depth, idx int, resume uin
 		// What native code kept (abi.Context.Keep), and the pointer words
 		// its native calls recorded (RecordRef), its callees' too, are not
 		// kept past it.
-		clear(s.ssaCtxs[idx].Keep[:])
+		clear(s.ssaCtxs[idx].Keep[:e.ssaKeeps])
 		for i := idx; i < jitContexts; i++ {
 			if c := &s.ssaCtxs[i]; c.RecordHigh != 0 {
 				clear(c.RecordRef[:c.RecordHigh])
