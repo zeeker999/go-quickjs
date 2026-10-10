@@ -138,14 +138,25 @@ func (a *Asm) rex(w bool, r, b byte, force bool) {
 // modrmRR is ModRM for two registers.
 func (a *Asm) modrmRR(reg, rm byte) { a.emit(0xC0 | (reg&7)<<3 | rm&7) }
 
-// modrmMem is ModRM (and SIB) for [base + disp32]. RSP and R12 as a base need
-// a SIB byte; RBP and R13 are fine with a displacement, which is always given.
+// modrmMem is ModRM (and SIB) for [base + disp]: a byte of displacement
+// where it fits, as most of a frame's slots' do, else four. RSP and R12 as
+// a base need a SIB byte; RBP and R13 are fine with a displacement, which
+// is always given.
 func (a *Asm) modrmMem(reg byte, base Reg, disp int32) {
-	a.emit(0x80 | (reg&7)<<3 | byte(base)&7)
+	short := disp == int32(int8(disp))
+	mod := byte(0x80)
+	if short {
+		mod = 0x40
+	}
+	a.emit(mod | (reg&7)<<3 | byte(base)&7)
 	if base&7 == 4 {
 		a.emit(0x24)
 	}
-	a.imm32(disp)
+	if short {
+		a.emit(byte(disp))
+	} else {
+		a.imm32(disp)
+	}
 }
 
 // Ret returns.
