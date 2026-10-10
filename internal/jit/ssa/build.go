@@ -43,6 +43,22 @@ type Feedback interface {
 	NativeCalls(pc int) []CallSite
 }
 
+// Intrinsic is a call of a built-in the VM knows, which native code makes
+// itself, as V8 reduces Math.sqrt(x) to a square root in its code: the
+// function object, which the call checks it calls (the VM keeps it
+// alive), and what it computes of its one argument, a number -- another
+// leaves the call to Go, which makes it.
+type Intrinsic struct {
+	Callee uintptr
+	Op     Op
+}
+
+// IntrinsicFeedback is Feedback that knows the calls at a PC of an
+// intrinsic (Intrinsic): a method call of one argument, Math.sqrt(x).
+type IntrinsicFeedback interface {
+	Intrinsic(pc int) (Intrinsic, bool)
+}
+
 // CallSite is a function the VM has seen a call call whose native code a
 // caller's may call (mir's native calls): the function object's address,
 // which the call checks it calls; its closure's, for Go to make its frame
@@ -332,7 +348,10 @@ func (b *builder) property(pc int) (PropertySite, bool) {
 // its block, and the next PC is an entry.
 func (b *builder) host(pc int) bool {
 	switch b.p.Code[pc].Op {
-	case ir.Host, ir.Call:
+	case ir.Host:
+		_, ok := b.intrinsic(pc)
+		return !ok
+	case ir.Call:
 		return true
 	case ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead:
 		_, ok := b.property(pc)
@@ -413,6 +432,9 @@ type frame struct {
 	// args are the arguments the call gave it, which a call it forwards
 	// them to is given (InlineSite's Forward).
 	args []*Value
+	// nest is how deep it is inlined, as maxInlineDepth counts: depth, but
+	// for forwarding constructors (InlineSite's Restart).
+	nest int
 }
 
 // inlinedAt is the callee inlined at pc in the frame being translated.
@@ -441,7 +463,7 @@ func (b *builder) frameAt(blk *Block) *frame {
 // failures have not made it generic, within inlining's bounds; with the
 // calls it makes inlined in it, every one, or it is not.
 func (b *builder) inlineAt(pc int, total *int) (*frame, bool) {
-	if b.fb == nil || b.p.Code[pc].Op != ir.Host || b.inlines >= maxInlines || b.cur.depth >= maxInlineDepth || b.fb.Generic(pc) {
+	if b.fb == nil || b.p.Code[pc].Op != ir.Host || b.inlines >= maxInlines || b.cur.nest >= maxInlineDepth || b.fb.Generic(pc) {
 		return nil, false
 	}
 	site, ok := b.fb.Inline(pc)
@@ -489,13 +511,21 @@ func (b *builder) inlineAt(pc int, total *int) (*frame, bool) {
 	nslots, before, inlines := b.nslots, *total, b.inlines
 	*total += len(site.Program.Code)
 	fr := &frame{p: q, fb: site.Feedback, site: site, result: b.cur.base + b.p.Locals + after - 1, base: b.nslots,
-		parent: b.cur, depth: b.cur.depth + 1}
+		parent: b.cur, depth: b.cur.depth + 1, nest: b.cur.nest + 1}
+	if site.Restart {
+		// A forwarding constructor is its call of the method it forwards
+		// to: it does not count toward how deep calls are inlined.
+		fr.nest = b.cur.nest
+	}
 	b.nslots += q.Locals + q.StackSize
 	b.inlines++
 	if len(calls) != 0 {
 		cur := b.cur
 		b.enter(fr)
 		for _, at := range calls {
+			if _, ok := b.intrinsic(at); ok {
+				continue
+			}
 			child, ok := b.inlineAt(at, total)
 			if !ok {
 				b.enter(cur)
@@ -666,6 +696,38 @@ func (b *builder) inlineCall(blk *Block, pc int, fr *frame, guard func(Op, Type,
 	} else if site.ThisSlot >= 0 {
 		fr.init[site.ThisSlot] = b.read(sp-site.Argc-2, blk)
 	}
+}
+
+// intrinsic is the intrinsic the call at pc in the frame being translated
+// makes, if any (IntrinsicFeedback): a method call of one argument, whose
+// operands are the receiver, the function and the argument.
+func (b *builder) intrinsic(pc int) (Intrinsic, bool) {
+	if b.fb == nil || b.p.Code[pc].Op != ir.Host || pc+1 >= len(b.p.Code) || !reachable(b.p, pc+1) ||
+		b.p.Maps[pc+1].Depth != b.p.Maps[pc].Depth-2 || b.p.Maps[pc].Depth < 3 {
+		return Intrinsic{}, false
+	}
+	f, ok := b.fb.(IntrinsicFeedback)
+	if !ok {
+		return Intrinsic{}, false
+	}
+	k, ok := f.Intrinsic(pc)
+	if !ok || k.Op != OpSqrtF64 && k.Op != OpAbsF64 {
+		return Intrinsic{}, false
+	}
+	return k, true
+}
+
+// intrinsicCall makes the intrinsic call at pc (Intrinsic): checked to call
+// the function, its argument a number -- either not, Go makes the call --
+// its result is computed, in the call's result slot.
+func (b *builder) intrinsicCall(blk *Block, pc int, k Intrinsic, guard func(Op, Type, ir.ExitKind, ...*Value) *Value, boxF func(*Value) *Value) {
+	sp := b.cur.base + b.p.Locals + b.p.Maps[pc].Depth
+	object := guard(OpObjectOf, Ptr, ir.HostExit, b.read(sp-2, blk))
+	same := guard(OpSameObject, None, ir.HostExit, object)
+	same.Const = ir.Value{Bits: uint64(k.Callee)}
+	x := guard(OpUnboxF64, Float64, ir.HostExit, b.read(sp-1, blk))
+	r := boxF(b.f.newValue(blk, k.Op, Float64, x))
+	b.assign(b.cur.base+b.p.Locals+b.p.Maps[pc+1].Depth-1, blk, r)
 }
 
 // forwardCall checks a forwarded call (InlineSite's Forward) calls the
@@ -1503,6 +1565,10 @@ func (b *builder) instruction(blk *Block, pc int) {
 		// transition; or, to an object that has it, stores.
 		v.Add = site.Add
 	case ir.Host, ir.Call:
+		if k, ok := b.intrinsic(pc); ok && in.Op == ir.Host {
+			b.intrinsicCall(blk, pc, k, guard, boxF)
+			break
+		}
 		if fr := b.inlinedAt(pc); fr != nil {
 			b.inlineCall(blk, pc, fr, guard, state)
 			break

@@ -253,12 +253,18 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	e.ssa, e.ssaShapes, e.ssaHolders, e.fed, e.ssaStats = code, fb.shapes, fb.holders, fb.fed, jitSSAStats{}
 	e.ssaStrings, e.ssaCallees, e.ssaInlined, e.ssaPools = e.ssaStrings || fb.strings, fb.callees, fb.inlined, fb.pools
 	e.ssaKeeps = max(e.ssaKeeps, fb.keeps)
-	if !e.notNative {
-		e.nativeEntry = code.EntryAddress(0)
-	}
 	// What it leaves on is counted afresh: it may have left on what it was
-	// compiled for now.
+	// compiled for now -- a construction, a call it inlines now. So Go
+	// enters it again, and native callers call it, until the new code is
+	// found to leave too often in turn, as V8 judges code it optimized
+	// again by what it does then; its backoff (nativeBackoff) stays. Code
+	// compiled for native callers alone (ssaCallee) Go does not enter.
 	e.nativeIn, e.nativeOut = 0, 0
+	e.notNative, e.nativeRetry = false, 0
+	if !e.ssaCallee {
+		e.entrySlow = false
+	}
+	e.nativeEntry = code.EntryAddress(0)
 	old.Close()
 	r.jit.reoptimized++
 }
@@ -353,6 +359,68 @@ type jitFeedback struct {
 	// construction it is inlined at, whose receiver the frame's sites are
 	// known from (jitForwardFrame).
 	fwd *jitForwardFrame
+	// prog is the function lowered for inlining, its stack depths what
+	// Intrinsic reads, made on first use.
+	prog *ir.Program
+}
+
+// Intrinsic is ssa.IntrinsicFeedback's: a method call of one argument at
+// pc whose function is the realm's Math.sqrt or Math.abs, as its reads
+// give it now (jitChainValue) -- Math.sqrt(x) -- which the code makes
+// itself, as V8 reduces such a call; the call checks it calls it.
+func (fb *jitFeedback) Intrinsic(pc int) (ssa.Intrinsic, bool) {
+	fn := fb.fn
+	if fb.cl == nil || pc < 2 || pc >= len(fn.Code) || fn.Code[pc].Op != bytecode.OpCallMethod || fn.Code[pc].A != 1 {
+		return ssa.Intrinsic{}, false
+	}
+	if fb.prog == nil {
+		p, err := jitcompile.LowerSSAInline(fn)
+		if err != nil {
+			return ssa.Intrinsic{}, false
+		}
+		fb.prog = p
+	}
+	p := fb.prog
+	if len(p.Maps) != len(fn.Code) {
+		return ssa.Intrinsic{}, false
+	}
+	// The function, read by the get_prop_this at its slot's depth, with
+	// nothing after it but the argument's instructions, above it.
+	slot, q := p.Maps[pc].Depth-2, -1
+	for k := pc - 1; k >= 0; k-- {
+		d := p.Maps[k].Depth
+		if d == slot && fn.Code[k].Op == bytecode.OpGetPropThis {
+			q = k
+			break
+		}
+		if d < slot+1 {
+			return ssa.Intrinsic{}, false
+		}
+	}
+	if q < 0 {
+		return ssa.Intrinsic{}, false
+	}
+	v, ok := fb.r.jitChainValue(fb.cl, p, q, jitChainReads)
+	if !ok || !v.IsObject() {
+		return ssa.Intrinsic{}, false
+	}
+	o := v.Object()
+	fd := o.fn()
+	if fd == nil || fd.native == nil || fd.mathOp == 0 || fd.mathOp >= mathMax || int(fd.mathOp) > len(unaryMathNames) {
+		return ssa.Intrinsic{}, false
+	}
+	k := ssa.Intrinsic{Callee: uintptr(unsafe.Pointer(o))}
+	switch unaryMathNames[fd.mathOp-1] {
+	case "sqrt":
+		k.Op = ssa.OpSqrtF64
+	case "abs":
+		k.Op = ssa.OpAbsF64
+	default:
+		return ssa.Intrinsic{}, false
+	}
+	keep := fb.keep()
+	keep.holders = append(keep.holders, o)
+	return k, true
 }
 
 // jitForwardFrame is the construction a forwarding constructor
@@ -745,7 +813,7 @@ func (r *Runtime) jitNativeCallsInline(e *jitEntry, inline func(int)) bool {
 		pc := int(x.pc)
 		one := !slices.ContainsFunc(e.nativeCalls, func(y jitInline) bool { return y.pc == x.pc && y.cl != x.cl })
 		if !one || x.cl == nil || r.jit.cache[weak.Make(x.cl.fn)] == e || e.callSites == nil || pc >= len(e.callSites) ||
-			e.callSites[pc] != jitCallNative || slices.Contains(e.notInline, x.pc) || !r.jitInlinesCalls(x.cl.fn, jitInlineDepth-1) ||
+			e.callSites[pc] != jitCallNative || slices.Contains(e.notInline, x.pc) || !r.jitInlinesCalls(x.cl, jitInlineDepth-1) ||
 			x.pool != nil && !r.jitInlinesAt(x.cl, x.obj, bytecode.Instr{Op: bytecode.OpNew}) {
 			continue
 		}
@@ -788,14 +856,12 @@ const jitInlineDepth = 3
 
 // jitInlinesCalls reports whether a function that makes calls may be
 // inlined with them, as V8 inlines a callee's callees: it may be but for
-// its calls (ssa.InlineCalls), and its own code inlines every one, each a
-// function that may be inlined, with its calls if depth allows.
-func (r *Runtime) jitInlinesCalls(fn *bytecode.Function, depth int) bool {
+// its calls (ssa.InlineCalls), and every one is an intrinsic, Math.sqrt
+// (jitFeedback.Intrinsic), or its own code inlines it, a function that may
+// be inlined, with its calls if depth allows. cl is one of its closures.
+func (r *Runtime) jitInlinesCalls(cl *closure, depth int) bool {
+	fn := cl.fn
 	if depth <= 0 || len(fn.Upvalues) != 0 || fn.TopLevel || fn.IsModule || fn.UsesArguments || fn.HasDirectEval {
-		return false
-	}
-	e := r.jit.cache[weak.Make(fn)]
-	if e == nil || e.callSites == nil {
 		return false
 	}
 	p, err := jitcompile.LowerSSAInline(fn)
@@ -806,7 +872,17 @@ func (r *Runtime) jitInlinesCalls(fn *bytecode.Function, depth int) bool {
 	if !ok || len(calls) == 0 {
 		return false
 	}
+	fb := &jitFeedback{r: r, fn: fn, cl: cl, prog: p}
+	var e *jitEntry
 	for _, pc := range calls {
+		if _, ok := fb.Intrinsic(pc); ok {
+			continue
+		}
+		if e == nil {
+			if e = r.jit.cache[weak.Make(fn)]; e == nil || e.callSites == nil {
+				return false
+			}
+		}
 		if _, ok := r.jitInlineSite(fn, pc, depth); !ok {
 			return false
 		}
@@ -837,7 +913,18 @@ func (r *Runtime) jitInlineSite(fn *bytecode.Function, pc, depth int) (jitInline
 			in, n = x, n+1
 		}
 	}
-	if n != 1 || in.cl == nil || in.cl.fn == fn || !r.jitInlinable(in.cl.fn) && !r.jitInlinesCalls(in.cl.fn, depth-1) {
+	if n != 1 || in.cl == nil || in.cl.fn == fn {
+		return jitInline{}, false
+	}
+	if in.pool != nil && in.cl.fn.Leaf == bytecode.LeafForward {
+		// A forwarding constructor's construction, inlined with the
+		// method it forwards to.
+		if r.jitForwardTarget(in.cl, in.obj, depth) == nil {
+			return jitInline{}, false
+		}
+		return in, true
+	}
+	if !r.jitInlinable(in.cl.fn) && !r.jitInlinesCalls(in.cl, depth-1) {
 		return jitInline{}, false
 	}
 	return in, true
@@ -1013,19 +1100,19 @@ func (r *Runtime) jitChainValue(cl *closure, p *ir.Program, q, n int) (Value, bo
 	}
 	switch in.Op {
 	case bytecode.OpGetGlobal:
-		if int(in.B) >= len(cl.ic) || len(r.globalLex.props) != 0 && r.lexShadows(cl.names[in.A]) {
+		// The global object's data property of the name -- not one a
+		// script's lexical binding shadows -- looked up, not through the
+		// read's cache, which native code that reads it never fills.
+		h := cl.scope()
+		if h == nil || len(r.globalLex.props) != 0 && r.lexShadows(cl.names[in.A]) {
 			return Undefined, false
 		}
-		c, h := &cl.ic[in.B], cl.scope()
-		if h == nil || c.idx < 0 || int(c.idx) >= len(h.props) {
-			return Undefined, false
-		}
-		prop := &h.props[c.idx]
-		if prop.key != cl.names[in.A] || prop.flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 {
+		prop := h.getOwnVisible(cl.names[in.A])
+		if prop == nil || prop.flags&propAccessor != 0 {
 			return Undefined, false
 		}
 		return prop.value, true
-	case bytecode.OpGetProp:
+	case bytecode.OpGetProp, bytecode.OpGetPropThis:
 		// Its receiver, the value the read before it left on top.
 		if q == 0 || p.Maps[q-1].Depth < 0 {
 			return Undefined, false
@@ -1127,9 +1214,9 @@ func (r *Runtime) jitCallTarget(f *frame, e *jitEntry, pc, sp int, in bytecode.I
 func (r *Runtime) jitInlinesAt(cl *closure, o *Object, in bytecode.Instr) bool {
 	if in.Op == bytecode.OpNew && cl.fn.Leaf == bytecode.LeafForward {
 		// this.k.apply(this, arguments): k, inlined in it.
-		return r.jitConstructs(o) && r.jitForwardTarget(cl, o) != nil
+		return r.jitConstructs(o) && r.jitForwardTarget(cl, o, jitInlineDepth) != nil
 	}
-	if !r.jitInlinable(cl.fn) && !r.jitInlinesCalls(cl.fn, jitInlineDepth-1) {
+	if !r.jitInlinable(cl.fn) && !r.jitInlinesCalls(cl, jitInlineDepth-1) {
 		return false
 	}
 	return in.Op != bytecode.OpNew || r.jitConstructs(o) &&
@@ -1140,15 +1227,30 @@ func (r *Runtime) jitInlinesAt(cl *closure, o *Object, in bytecode.Instr) bool {
 // o, cl's function (bytecode.LeafForward), forwards its arguments to, if
 // it may be inlined in the constructor: k of this.k.apply(this, arguments),
 // a data property of o's prototype, a function the script made, of cl's
-// realm and scope, as jitCalled has a callee; or nil.
-func (r *Runtime) jitForwardTarget(cl *closure, o *Object) *closure {
+// realm and scope, as jitCalled has a callee; or nil. The constructor
+// does not count toward how deep calls are inlined, depth from it on: the
+// method's calls are inlined depth-1 levels on. A method whose calls no
+// code has decided yet -- one it constructs with, IntersectionInfo's
+// initialize making a Color -- is compiled for native callers now, which
+// decides them (jitSeedCalls), once: not by a compile seeding started.
+func (r *Runtime) jitForwardTarget(cl *closure, o *Object, depth int) *closure {
 	t := r.jitForwardMethod(cl, o)
 	if t == nil {
 		return nil
 	}
-	fd := t.fn()
-	tc := fd.closure
-	if tc.fn == cl.fn || !r.jitInlinable(tc.fn) && !r.jitInlinesCalls(tc.fn, jitInlineDepth-2) {
+	tc := t.fn().closure
+	if tc.fn == cl.fn {
+		return nil
+	}
+	if r.jitInlinable(tc.fn) {
+		return tc
+	}
+	if e := r.jit.cache[weak.Make(tc.fn)]; (e == nil || e.callSites == nil) && !r.jit.seeding {
+		r.jit.seeding = true
+		r.jitNativeCallee(tc)
+		r.jit.seeding = false
+	}
+	if !r.jitInlinesCalls(tc, depth-1) {
 		return nil
 	}
 	return tc
@@ -2191,6 +2293,8 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 	// theirs until they finish: they are reached by index, the slices
 	// growing as the unwinds it runs need.
 	start := len(s.unwinding)
+	var left *jitEntry
+	leftPC := 0
 	for i := idx + 1; i < jitContexts && s.ssaCtxs[i].Live != 0; i++ {
 		c := &s.ssaCtxs[i]
 		l := jitNativeLevel{base: int(c.Base), kind: c.ExitKind, pc: c.ExitPC, depth: c.ExitDepth, site: c.ExitSite, ctx: i}
@@ -2223,8 +2327,9 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 				panic("jit: an inlined callee's closure is not its caller's")
 			}
 			if outer {
-				// Counted once, for the call the outermost is inlined at.
-				r.jitInlineLeft(parent, int(parentPC))
+				// Counted once, for the call the outermost is inlined at,
+				// below.
+				left, leftPC = parent, int(parentPC)
 			}
 		} else {
 			l.cl, l.this = (*closure)(c.Closure), *(*Value)(unsafe.Pointer(&c.This))
@@ -2245,6 +2350,12 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 		c.Live, c.ReturnTo = 0, 0
 	}
 	n := len(s.unwinding) - start
+	if left != nil && (n == 0 || !r.jitPoolEmptied(&s.unwinding[len(s.unwinding)-1])) {
+		// An exit inside an inlined callee -- but one at a construction
+		// inlined in it whose pool ran out, which Go fills again, as
+		// jitCallSeen does not count at the call itself.
+		r.jitInlineLeft(left, leftPC)
+	}
 	if n != 0 {
 		// The innermost left -- but for one that never entered native code
 		// (ExitEnter), a call Go makes; the others only return through Go.
@@ -2446,6 +2557,23 @@ func (r *Runtime) jitEnterOne(c *abi.Context, i int, code *bytecode.Function, ca
 	}
 	r.popFrameOf(f, base)
 	return v, err
+}
+
+// jitPoolEmptied reports whether level l left native code at a construction
+// its code makes from a pool, now empty: it left for the pool to be filled
+// again (jitRefillPools).
+func (r *Runtime) jitPoolEmptied(l *jitNativeLevel) bool {
+	fn := l.cl.fn
+	if l.kind != abi.ExitHost || int(l.pc) >= len(fn.Code) || fn.Code[l.pc].Op != bytecode.OpNew {
+		return false
+	}
+	e := r.jit.cache[weak.Make(fn)]
+	if e == nil {
+		return false
+	}
+	return slices.ContainsFunc(slices.Concat(e.inlines, e.nativeCalls), func(x jitInline) bool {
+		return int(x.pc) == int(l.pc) && x.pool != nil && x.pool.Count == 0
+	})
 }
 
 // jitUnwindProbe is how many times native code called natively leaves

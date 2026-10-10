@@ -2328,6 +2328,18 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.MovQToX(xScratch1, scratchA)
 		c.a.SSEOp(amd64.XorPD, xScratch0, xScratch1)
 		c.setX(v, xScratch0)
+	case ssa.OpSqrtF64:
+		c.a.SSEOp(amd64.SqrtSD, xScratch0, c.xmm(arg(0), xScratch0))
+		c.setX(v, xScratch0)
+	case ssa.OpAbsF64:
+		x := c.xmm(arg(0), xScratch0)
+		if x != xScratch0 {
+			c.a.SSEOp(amd64.MovAPD, xScratch0, x)
+		}
+		c.a.MovImm(scratchA, 1<<63-1)
+		c.a.MovQToX(xScratch1, scratchA)
+		c.a.SSEOp(amd64.AndPD, xScratch0, xScratch1)
+		c.setX(v, xScratch0)
 	case ssa.OpCmpF64:
 		if v.Uses == 1 && b.Control == v && b.Kind == ssa.BlockIf {
 			return // fused into the branch

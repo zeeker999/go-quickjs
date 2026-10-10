@@ -6397,3 +6397,119 @@ func TestJITSSAInlinedForwardingConstructions(t *testing.T) {
 		}
 	}
 }
+
+// Math.sqrt(x) and Math.abs(x) are computed by native code, as V8 reduces
+// them: the call checks it calls the realm's function and that x is a
+// number, and computes it; mag, which calls one, is inlined in its caller
+// with it. A string argument has Go make the call, and Math.sqrt replaced
+// is called; -0, a negative's root and NaN are as the interpreter's.
+func TestJITSSAMathIntrinsics(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function mag(v){return Math.sqrt(v.x*v.x+v.y*v.y)}
+		function sum(n,vs){let s=0,z=0;for(let i=0;i<n;i++){const v=vs[i%vs.length];s+=mag(v)+Math.abs(v.x-3);z=Math.abs(-0*v.y)}return [s,1/z,Math.sqrt(-1)].join()}
+		var vs=[{x:3,y:4},{x:-1,y:2},{x:0,y:0},{x:-0,y:-0}],odd=[{x:3,y:4},{x:"9",y:0},{x:-4,y:3}]`
+	src := `sum(300,vs)`
+	rounds := []string{src, src, src, src, src, `sum(300,odd)`, src, `Math.sqrt=function(x){return 7};` + src}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("sum")).value.Object().fn().closure
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts, entries uint64
+		if e := r.jit.cache[weak.Make(cl.fn)]; e != nil {
+			hosts, entries = e.ssaStats.hosts, e.ssaStats.entries
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 4 {
+			e := r.jit.cache[weak.Make(cl.fn)]
+			if e == nil || e.ssa == nil || e.ssaStats.entries == entries || len(e.ssaInlined) == 0 {
+				t.Fatalf("sum did not run natively with mag inlined: %+v", e)
+			}
+			// After its loop, Go makes the array and calls join: none
+			// in the loop's 300 iterations.
+			if n := e.ssaStats.hosts - hosts; n > 3 {
+				t.Fatalf("sum left native code %d times", n)
+			}
+		}
+	}
+}
+
+// A forwarding constructor's initialize that constructs another class,
+// RayTrace's IntersectionInfo making a Color, is inlined with that
+// construction inlined in it: the constructors do not count toward how
+// deep calls are inlined, and the method's construction is decided for it
+// when it has no code of its own. The inner pool running out leaves at the
+// inner construction, inside the inlined frames, for Go to fill it again:
+// that does not count against inlining the outer, which stays inlined.
+// Each answer is the interpreter's.
+func TestJITSSAInlinedNestedForwardingConstructions(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	defer func(was bool) { jitcompile.SSAConstruct = was }(jitcompile.SSAConstruct)
+	jitcompile.SSAConstruct = true
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var Class={create:function(){return function(){this.initialize.apply(this,arguments)}}};
+		var NS={};NS.B=Class.create();NS.B.prototype={initialize:function(x,y){this.x=x;this.y=y}};
+		NS.A=Class.create();NS.A.prototype={hit:false,initialize:function(){this.c=new NS.B(1,2)}};
+		function f(n){let s=0;for(let i=0;i<n;i++){const a=new NS.A();a.hit=true;s=(s+a.c.x+a.c.y)|0}return s}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
+	for i := range 6 {
+		wv, err := want.Run(compileForTest(t, `String(f(300))`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts uint64
+		if e := r.jit.cache[weak.Make(cl.fn)]; e != nil {
+			hosts = e.ssaStats.hosts
+		}
+		gv, err := r.Run(compileForTest(t, `String(f(300))`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i >= 3 {
+			e := r.jit.cache[weak.Make(cl.fn)]
+			// Both constructors and both initialize methods.
+			if e == nil || e.ssa == nil || e.entrySlow || len(e.notInline) != 0 || len(e.ssaInlined) < 4 {
+				t.Fatalf("round %d: f does not inline its nested constructions: %+v", i, e)
+			}
+			// Only to fill the two pools again.
+			if n := e.ssaStats.hosts - hosts; n > 2*300/abi.PoolSize+4 {
+				t.Fatalf("round %d: f left native code %d times for 600 constructions", i, n)
+			}
+		}
+	}
+}

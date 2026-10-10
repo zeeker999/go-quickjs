@@ -427,6 +427,12 @@ func (a *Asm) FCmp(n, m FReg) { a.emit(0x1E602000 | uint32(m)<<16 | uint32(n)<<5
 // FNeg is dst = -n, the sign flipped, NaN included.
 func (a *Asm) FNeg(dst, n FReg) { a.emit(0x1E614000 | uint32(n)<<5 | uint32(dst)) }
 
+// FSqrt is dst = the square root of n.
+func (a *Asm) FSqrt(dst, n FReg) { a.emit(0x1E61C000 | uint32(n)<<5 | uint32(dst)) }
+
+// FAbs is dst = n, its sign cleared, NaN included.
+func (a *Asm) FAbs(dst, n FReg) { a.emit(0x1E60C000 | uint32(n)<<5 | uint32(dst)) }
+
 // Fcvtzs is dst = n truncated to a signed 64-bit integer, saturating; NaN
 // gives 0.
 func (a *Asm) Fcvtzs(dst Reg, n FReg) { a.emit(0x9E780000 | uint32(n)<<5 | uint32(dst)) }

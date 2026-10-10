@@ -121,6 +121,8 @@ func TestARM64Float(t *testing.T) {
 	}
 	expectA64(t, "fcmp d4, d5", func(a *arm64.Asm) { a.FCmp(4, 5) })
 	expectA64(t, "fneg d3, d4", func(a *arm64.Asm) { a.FNeg(3, 4) })
+	expectA64(t, "fsqrt d3, d4", func(a *arm64.Asm) { a.FSqrt(3, 4) })
+	expectA64(t, "fabs d3, d4", func(a *arm64.Asm) { a.FAbs(3, 4) })
 	expectA64(t, "fcvtzs x3, d4", func(a *arm64.Asm) { a.Fcvtzs(3, 4) })
 	expectA64(t, "scvtf d3, x4", func(a *arm64.Asm) { a.Scvtf(3, 4, true) })
 	expectA64(t, "scvtf d3, w4", func(a *arm64.Asm) { a.Scvtf(3, 4, false) })

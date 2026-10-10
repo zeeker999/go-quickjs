@@ -436,12 +436,14 @@ const (
 	UcomiSD SSE = 0x2E // sets ZF, PF and CF; PF on an unordered (NaN) pair
 	XorPD   SSE = 0x57
 	MovAPD  SSE = 0x28 // a register copy
+	SqrtSD  SSE = 0x51
+	AndPD   SSE = 0x54
 )
 
 // SSEOp is dst op= src (for UcomiSD, compares dst with src).
 func (a *Asm) SSEOp(op SSE, dst, src XReg) {
 	switch op {
-	case AddSD, MulSD, SubSD, DivSD:
+	case AddSD, MulSD, SubSD, DivSD, SqrtSD:
 		a.emit(0xF2)
 	default:
 		a.emit(0x66)

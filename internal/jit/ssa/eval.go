@@ -129,6 +129,10 @@ func apply(op Op, aux int, a, b val) val {
 		return val{f: a.f / b.f}
 	case OpNegF64:
 		return val{f: math.Float64frombits(math.Float64bits(a.f) ^ 1<<63)}
+	case OpSqrtF64:
+		return val{f: math.Sqrt(a.f)}
+	case OpAbsF64:
+		return val{f: math.Float64frombits(math.Float64bits(a.f) &^ (1 << 63))}
 	case OpCmpF64:
 		x, y := a.f, b.f
 		switch ir.Operator(aux) {

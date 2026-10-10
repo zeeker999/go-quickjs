@@ -198,7 +198,8 @@ func TestAMD64Integer(t *testing.T) {
 
 func TestAMD64SSE(t *testing.T) {
 	ops := map[amd64.SSE]x86asm.Op{amd64.AddSD: x86asm.ADDSD, amd64.MulSD: x86asm.MULSD, amd64.SubSD: x86asm.SUBSD,
-		amd64.DivSD: x86asm.DIVSD, amd64.UcomiSD: x86asm.UCOMISD, amd64.XorPD: x86asm.XORPD, amd64.MovAPD: x86asm.MOVAPD}
+		amd64.DivSD: x86asm.DIVSD, amd64.UcomiSD: x86asm.UCOMISD, amd64.XorPD: x86asm.XORPD, amd64.MovAPD: x86asm.MOVAPD,
+		amd64.SqrtSD: x86asm.SQRTSD, amd64.AndPD: x86asm.ANDPD}
 	for op, xop := range ops {
 		for _, d := range xregs {
 			for _, s := range xregs {
