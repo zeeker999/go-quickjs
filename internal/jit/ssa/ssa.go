@@ -197,6 +197,12 @@ const (
 	OpCall // tagged... -> tagged
 	// OpCallCell is the keep cell a call's result's pointer word is in.
 	OpCallCell // tagged -> source
+
+	// OpSqrtF64 and OpAbsF64 are Math.sqrt's and Math.abs's of a number
+	// (Intrinsic), as V8 computes them in its code: the square root, NaN
+	// for a negative; the sign cleared, NaN included.
+	OpSqrtF64 // f64 -> f64
+	OpAbsF64  // f64 -> f64
 )
 
 var opNames = [...]string{
@@ -209,7 +215,7 @@ var opNames = [...]string{
 	OpNot: "not", OpStrictNullish: "strictnullish", OpLooseNullish: "loosenullish", OpEqTagged: "eqtagged", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
 	OpSameObject: "sameobject", OpFrameRoom: "frameroom", OpKeepRef: "keepref", OpKeep: "keep", OpKept: "kept",
-	OpCall: "call", OpCallCell: "callcell",
+	OpCall: "call", OpCallCell: "callcell", OpSqrtF64: "sqrtf", OpAbsF64: "absf",
 }
 
 func (o Op) String() string {

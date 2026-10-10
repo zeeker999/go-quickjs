@@ -2223,6 +2223,14 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		d := c.fdst(v)
 		c.a.FNeg(d, c.fpr(arg(0), a64F0))
 		c.setF(v, d)
+	case ssa.OpSqrtF64:
+		d := c.fdst(v)
+		c.a.FSqrt(d, c.fpr(arg(0), a64F0))
+		c.setF(v, d)
+	case ssa.OpAbsF64:
+		d := c.fdst(v)
+		c.a.FAbs(d, c.fpr(arg(0), a64F0))
+		c.setF(v, d)
 	case ssa.OpCmpF64:
 		if v.Uses == 1 && b.Control == v && b.Kind == ssa.BlockIf {
 			return // fused into the branch

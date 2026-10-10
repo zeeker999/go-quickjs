@@ -202,7 +202,7 @@ func simplify(f *Func, v *Value) *Value {
 		if a := arg(0); a.Op == OpNot {
 			return a.Args[0]
 		}
-	case OpAddF64, OpSubF64, OpMulF64, OpDivF64, OpNegF64:
+	case OpAddF64, OpSubF64, OpMulF64, OpDivF64, OpNegF64, OpSqrtF64, OpAbsF64:
 		for _, a := range v.Args {
 			if a.Op != OpConstF64 {
 				return nil
