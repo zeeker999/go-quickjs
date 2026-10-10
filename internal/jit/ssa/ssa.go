@@ -403,6 +403,18 @@ type Func struct {
 type scratch struct {
 	flags                                         []bool
 	vals, phis, ordered, front, boxes, rest, work []*Value
+	// first and last are, by operand ID, Optimize's guards of it: the
+	// indexes past their first and last in guards, 0 for none.
+	first, last []int32
+	guards      []guardSeen
+}
+
+// guardSeen is a guard Optimize has met, keyed by its op, and the index
+// past the next one of the same operand, 0 for none.
+type guardSeen struct {
+	v    *Value
+	op   Op
+	next int32
 }
 
 // scr is the scratch the Func's passes use.
