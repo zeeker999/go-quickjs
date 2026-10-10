@@ -6641,6 +6641,52 @@ func TestJITSSAInlinedNestedForwardingConstructions(t *testing.T) {
 	}
 }
 
+// What code learns to make natively -- calls, shapes, a callee that
+// inlines more -- it is compiled again for once it has run its budget
+// (reoptDue), as V8 optimizes again once a function spends its budget, so
+// that what it learns meanwhile is compiled for together: native
+// stretches, more for a larger function, or the instructions a long loop
+// runs. A speculation that failed, or code that leaves too often, is
+// compiled again at once.
+func TestJITReoptDue(t *testing.T) {
+	e := &jitEntry{reoptBudget: 25}
+	if e.reoptDue() {
+		t.Fatal("due with nothing to compile again for")
+	}
+	e.inlineReopt = true
+	e.ssaStats.entries, e.ssaStats.hosts, e.nativeIn = 10, 10, 4
+	if e.reoptDue() {
+		t.Fatal("due after 24 stretches of 25")
+	}
+	e.nativeIn++
+	if !e.reoptDue() {
+		t.Fatal("not due after 25 stretches")
+	}
+	e.ssaStats.entries, e.ssaStats.hosts, e.nativeIn = 1, 0, 0
+	e.ssaStats.work = 25*jitReoptPer*jitReoptWork - 1
+	if e.reoptDue() {
+		t.Fatal("due before its work")
+	}
+	e.ssaStats.work++
+	if !e.reoptDue() {
+		t.Fatal("not due after its work")
+	}
+	for _, f := range []func(*jitEntry){func(e *jitEntry) { e.reopt = true }, func(e *jitEntry) { e.unwindReopt = true }} {
+		e := &jitEntry{reoptBudget: 25}
+		f(e)
+		if !e.reoptDue() {
+			t.Fatalf("not due at once: %+v", e)
+		}
+	}
+	for _, f := range []func(*jitEntry){func(e *jitEntry) { e.polyReopt = true }, func(e *jitEntry) { e.upgradeReopt = true }} {
+		e := &jitEntry{reoptBudget: 25}
+		f(e)
+		if e.reoptDue() {
+			t.Fatalf("due at once: %+v", e)
+		}
+	}
+}
+
 // Looking at a construction's pools when native code leaves there makes
 // nothing: it had concatenated the entry's two lists at every exit, which
 // came to a sixth of RayTrace's allocations with construction on.

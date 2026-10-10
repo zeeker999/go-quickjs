@@ -257,6 +257,37 @@ func (e *jitEntry) reoptPending() bool {
 	return e.reopt || e.inlineReopt || e.polyReopt || e.upgradeReopt || e.unwindReopt
 }
 
+// reoptDue reports whether e's code is to be compiled again now: for a
+// speculation that failed, or one that leaves too often, at once; for
+// what it has learned to make natively -- calls to inline or call, shapes
+// met, a callee that inlines more -- once the code has run
+// jitReoptBudget stretches since it was compiled, as V8 optimizes again
+// once a function has spent its budget again: what is learned meanwhile
+// is compiled for together, not each in a compile of its own. RayTrace
+// with construction on compiled its functions some 100 times in three
+// runs, a quarter of its time.
+func (e *jitEntry) reoptDue() bool {
+	if e.reopt || e.unwindReopt {
+		return true
+	}
+	return e.reoptPending() && (e.ssaStats.entries+e.ssaStats.hosts+e.nativeIn >= uint64(e.reoptBudget) ||
+		e.ssaStats.work >= uint64(e.reoptBudget)*jitReoptPer*jitReoptWork)
+}
+
+// jitReoptBudget is how many native stretches -- entries from Go, exits to
+// it, native calls in -- code runs before it is compiled again for what it
+// has learned (reoptDue), for each jitReoptPer instructions of its
+// function, as V8's budget grows with a function's bytecode: a small
+// function learns its callees' calls soon, a large one, which costs more
+// to compile, waits for more.
+// Or the work the code has done, in instructions (jitSSAProfit), reaches
+// jitReoptWork times its function's: a loop that runs long, entered once.
+const (
+	jitReoptBudget = 8
+	jitReoptPer    = 4
+	jitReoptWork   = 16
+)
+
 func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	switch {
 	case e.reopt:
@@ -292,6 +323,7 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 		r.jitCallersReopt(e, jitInlineDepth)
 	}
 	e.ssa, e.ssaShapes, e.ssaHolders, e.fed, e.fedInlined, e.ssaStats = code, fb.shapes, fb.holders, fb.fed, fb.fedInlined, jitSSAStats{}
+	e.ssaInlinedAt = fb.inlinedAt
 	e.ssaStrings, e.ssaCallees, e.ssaInlined, e.ssaPools = e.ssaStrings || fb.strings, fb.callees, fb.inlined, fb.pools
 	e.ssaKeeps = max(e.ssaKeeps, fb.keeps)
 	// What it leaves on is counted afresh: it may have left on what it was
@@ -382,6 +414,8 @@ type jitFeedback struct {
 	// whose caches knew nothing.
 	fed        []jitFedSite
 	fedInlined []jitFedInlined
+	// inlinedAt, the root's, are the calls of its own it inlines.
+	inlinedAt []int32
 	// root is the function's feedback for an inlined callee's, which keeps
 	// what the callee's sites hold for the code; nil for the function's
 	// own. strings marks an inlined callee that calls charCodeAt. callees
@@ -612,6 +646,9 @@ func (fb *jitFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 		}
 		k.holders = append(k.holders, in.obj)
 		k.inlined = append(k.inlined, in.cl)
+		if fb.root == nil {
+			k.inlinedAt = append(k.inlinedAt, int32(pc))
+		}
 		return site, true
 	}
 	return ssa.InlineSite{}, false
@@ -799,7 +836,11 @@ func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 		if r.jitInlineFed(e) {
 			return
 		}
-		if !refilled {
+		if !refilled && !e.reoptPending() && slices.Contains(e.ssaInlinedAt, int32(pc)) {
+			// Not the code compiled before it was decided, which leaves
+			// there until it is compiled again; nor code to be compiled
+			// again for what it has learned (reoptDue), which may be what
+			// it leaves for.
 			r.jitInlineLeft(e, pc)
 		}
 		fallthrough
@@ -1716,6 +1757,8 @@ func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
 // setSSA gives e the code the new pipeline compiled for fn from p.
 func (e *jitEntry) setSSA(fn *bytecode.Function, p *ir.Program, code *jit.SSACode, fb *jitFeedback) {
 	e.ssa, e.this, e.ssaShapes, e.ssaHolders, e.fed, e.fedInlined = code, p.This, fb.shapes, fb.holders, fb.fed, fb.fedInlined
+	e.ssaInlinedAt = fb.inlinedAt
+	e.reoptBudget = uint32(max(jitReoptBudget, len(fn.Code)/jitReoptPer))
 	e.ssaStrings, e.ssaCallees, e.ssaInlined, e.ssaPools = fb.strings, fb.callees, fb.inlined, fb.pools
 	e.ssaKeeps = max(e.ssaKeeps, fb.keeps)
 	e.nativeEntry = code.EntryAddress(0)
@@ -2289,7 +2332,7 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 				return r.jitInterpret(f, sp, err)
 			}
 			pc, depth = int(f.pc), sp-f.base
-			if e.reoptPending() {
+			if e.reoptDue() {
 				r.jitReoptimize(f.cl, e)
 			}
 			if !e.ssa.HasEntry(pc) || e.entrySlow {
@@ -2316,7 +2359,7 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 				return r.jitInterpret(f, sp, err)
 			}
 			pc, depth = int(f.pc), sp-f.base
-			if e.reoptPending() {
+			if e.reoptDue() {
 				r.jitReoptimize(f.cl, e)
 			}
 			if !e.ssa.HasEntry(pc) || e.entrySlow {
@@ -2371,7 +2414,7 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 				jitFed(f.cl, e, uint32(exitPC))
 			}
 			jitPolySettled(e)
-			if e.reoptPending() {
+			if e.reoptDue() {
 				// The code is compiled again now, not at the next call: a
 				// loop in this one may run long.
 				r.jitReoptimize(f.cl, e)
@@ -2584,7 +2627,7 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 		c.Live, c.ReturnTo = 0, 0
 	}
 	n := len(s.unwinding) - start
-	if left != nil && (n == 0 || !r.jitPoolEmptied(&s.unwinding[len(s.unwinding)-1])) && !r.jitInlineFed(left) {
+	if left != nil && (n == 0 || !r.jitPoolEmptied(&s.unwinding[len(s.unwinding)-1])) && !r.jitInlineFed(left) && !left.reoptPending() {
 		// An exit inside an inlined callee -- but one at a construction
 		// inlined in it whose pool ran out, which Go fills again, as
 		// jitCallSeen does not count at the call itself.
@@ -2938,7 +2981,7 @@ func (r *Runtime) jitFinishExit(f *frame, e *jitEntry, l *jitNativeLevel) (Value
 			if e.inlinePending && e.inlineReopts < 2*jitInlineReoptimizations {
 				e.inlinePending, e.inlineReopt = false, true
 			}
-			if e.reoptPending() {
+			if e.reoptDue() {
 				r.jitReoptimize(f.cl, e)
 			}
 		}

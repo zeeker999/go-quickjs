@@ -198,6 +198,13 @@ type jitEntry struct {
 	// callees it inlines whose caches knew nothing (jitInlineFed).
 	fed        []jitFedSite
 	fedInlined []jitFedInlined
+	// ssaInlinedAt are the calls the code inlines, by pc: a call decided
+	// for inlining since leaves from code compiled before, which is not
+	// the callee's leaving (jitCallSeen).
+	ssaInlinedAt []int32
+	// reoptBudget is how many native stretches the code runs before it is
+	// compiled again for what it has learned (reoptDue).
+	reoptBudget uint32
 	// poly are the reads that met objects of shapes the code was not
 	// compiled for, each with up to jitPropertyCases of them, which it is
 	// compiled again for (jitPolySeen); polyReopt marks that it is to be,
@@ -886,7 +893,7 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 		if e.inlinePending && e.inlineReopts < jitInlineReoptimizations {
 			e.inlinePending, e.inlineReopt = false, true
 		}
-		if e.reoptPending() {
+		if e.reoptDue() {
 			r.jitReoptimize(f.cl, e)
 		}
 		if e.entrySlow {
