@@ -535,6 +535,10 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 				}
 				vals[v.ID] = val{f: math.Float64frombits(o.Props[i].Bits)}
 			case OpPropWrite:
+				if v.Global {
+					// The heap model has no global object: Go assigns.
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
 				if v.Add != nil {
 					// The heap model's objects have no shapes to add along.
 					return ir.Exit{}, fmt.Errorf("%w: a property added", ErrUnsupported)
@@ -621,6 +625,10 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 				vals[v.ID] = val{}
 			case OpCheckInit:
 				if a.t.Kind == ir.Uninitialized {
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
+			case OpCheckTrue:
+				if a.t != ir.Bool(true) {
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
 			default:

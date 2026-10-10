@@ -376,6 +376,12 @@ func (b *builder) host(pc int) bool {
 	case ir.BindingRead:
 		_, ok := b.global(pc)
 		return !ok
+	case ir.BindingWrite:
+		site, ok := b.global(pc)
+		return !ok || site.Fixed
+	case ir.BindingCheck:
+		_, ok := b.global(pc)
+		return !ok
 	}
 	return false
 }
@@ -859,7 +865,7 @@ func shifted(in ir.Instruction, base int) ir.Instruction {
 
 // global is the feedback for a global read at pc, if any.
 func (b *builder) global(pc int) (GlobalSite, bool) {
-	if b.fb == nil || b.p.Code[pc].Op != ir.BindingRead {
+	if op := b.p.Code[pc].Op; b.fb == nil || op != ir.BindingRead && op != ir.BindingWrite && op != ir.BindingCheck {
 		return GlobalSite{}, false
 	}
 	return b.fb.Global(pc)
@@ -904,7 +910,7 @@ func (b *builder) plan() error {
 			// the interpreter goes on, the boolean not where the typeof's
 			// string was (compile's typeTests): no entry after it.
 		case ir.ArrayWrite, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead,
-			ir.StringMethod, ir.StringCode:
+			ir.StringMethod, ir.StringCode, ir.BindingWrite, ir.BindingCheck, ir.Resolved:
 			// What native code does not do exits to Go, which resumes after
 			// it. A fixed global's check only deoptimizes: the binding can
 			// never move, so it never fails, and what follows sees its
@@ -989,7 +995,7 @@ func (b *builder) plan() error {
 			}
 		case ir.Return:
 			blk.Kind = BlockReturn
-		case ir.Host, ir.Call, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead:
+		case ir.Host, ir.Call, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead, ir.BindingWrite, ir.BindingCheck:
 			if fr := b.inlined[end]; fr != nil {
 				// Into the callee, whose returns go to the block after it.
 				blk.Kind = BlockPlain
@@ -1644,6 +1650,40 @@ func (b *builder) instruction(blk *Block, pc int) {
 		// A property the write adds, as V8's stores do along a map's
 		// transition; or, to an object that has it, stores.
 		v.Add = site.Add
+	case ir.BindingWrite:
+		// The binding's cell, as a read finds it, written as a property
+		// store writes one: the stores' checks and keeps take it for a
+		// store of the name (aliases), which it is.
+		site, ok := b.global(pc)
+		if !ok || site.Fixed {
+			blk.ExitKind = ir.HostExit
+			blk.State = state()
+			blk.State.addUse()
+			break
+		}
+		cell := guard(OpGlobalCell, Source, ir.HostExit)
+		cell.Index, cell.Key = int(site.Index), site.Key
+		w := guard(OpPropWrite, None, ir.HostExit, cell, operand(in.Left))
+		w.Key, w.Global = site.Key, true
+	case ir.BindingCheck:
+		// The name resolves: its binding's cell is there.
+		site, ok := b.global(pc)
+		if !ok {
+			blk.ExitKind = ir.HostExit
+			blk.State = state()
+			blk.State.addUse()
+			break
+		}
+		cell := guard(OpGlobalCell, Source, ir.HostExit)
+		cell.Index, cell.Key = int(site.Index), site.Key
+		k := f.newValue(blk, OpConst, Tagged)
+		k.Const = ir.Bool(true)
+		b.assign(in.Dest, blk, k)
+	case ir.Resolved:
+		// True where native code checked; Go's answer, after an exit,
+		// checked here, and Go throws for an unresolved name.
+		guard(OpCheckTrue, None, ir.HostExit, operand(in.Left))
+		b.assign(in.Dest, blk, operand(in.Right))
 	case ir.TypeTest:
 		v := guard(OpTypeIs, Bool, ir.HostExit, operand(in.Left))
 		v.Index = int(in.Key)

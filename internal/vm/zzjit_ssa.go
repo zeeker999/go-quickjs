@@ -1696,7 +1696,9 @@ func (fb *jitFeedback) Global(pc int) (ssa.GlobalSite, bool) {
 		return ssa.GlobalSite{}, false
 	}
 	in := fb.fn.Code[pc]
-	if in.Op != bytecode.OpGetGlobal || int(in.A) >= len(fb.cl.names) {
+	write := in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict
+	check := in.Op == bytecode.OpCheckGlobalRef
+	if in.Op != bytecode.OpGetGlobal && !write && !check || int(in.A) >= len(fb.cl.names) {
 		return ssa.GlobalSite{}, false
 	}
 	name, env := fb.cl.names[in.A], fb.cl.scope()
@@ -1714,6 +1716,22 @@ func (fb *jitFeedback) Global(pc int) (ssa.GlobalSite, bool) {
 		return ssa.GlobalSite{}, false
 	}
 	site := ssa.GlobalSite{Key: uint32(name), Index: i}
+	if check {
+		// A strict assignment's check: data, which the cell's guard
+		// finds is there.
+		if env.props[i].isAccessor() {
+			return ssa.GlobalSite{}, false
+		}
+		return site, true
+	}
+	if write {
+		// An assignment: a writable data property, which the code
+		// checks it still is.
+		if p := &env.props[i]; p.isAccessor() || p.flags&propWritable == 0 {
+			return ssa.GlobalSite{}, false
+		}
+		return site, true
+	}
 	if p := &env.props[i]; !p.isAccessor() && p.flags&(propWritable|propConfigurable) == 0 {
 		switch {
 		case p.value.IsUndefined():

@@ -146,6 +146,17 @@ const (
 	// When is false, as a boolean in Dest: only the new pipeline's lowering
 	// makes it, of typeof compared with a string constant.
 	TypeTest
+	// BindingWrite assigns Left to the global binding of the name Key, as
+	// set_global does: the new pipeline's, made natively where the VM knows
+	// the binding, a writable data property of the global object.
+	BindingWrite
+	// BindingCheck is strict mode's check_global_ref: true at Dest if the
+	// name Key resolves, natively where the VM knows its binding (the global
+	// object's data property), Go's otherwise.
+	BindingCheck
+	// Resolved is assert_resolved: Right at Dest if Left, the check's
+	// answer, is true; else Go throws the ReferenceError.
+	Resolved
 )
 
 // The types a TypeTest asks about.
