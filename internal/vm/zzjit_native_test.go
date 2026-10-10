@@ -5564,6 +5564,56 @@ func TestJITSSAAssignsGlobals(t *testing.T) {
 	}
 }
 
+// Every level of native calls Go finishes after the innermost left native
+// code goes on natively where its call returns to, not only the outermost
+// (jitUnwindNative, runSSAIn): top calls mid natively, which calls leaf,
+// whose loop runs the back-edge budget out; Go checks for interrupts and
+// finishes leaf, then mid goes on in its native code, in its own context,
+// then top. A throw from leaf, and a frame of a construction, are made as
+// before. Each answer is the interpreter's.
+func TestJITSSAResumesEveryLevel(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	defer func(was bool) { jitcompile.SSAConstruct = was }(jitcompile.SSAConstruct)
+	jitcompile.SSAConstruct = true
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function leaf(n){let s=0;for(let i=0;i<n;i++)s=(s*3+i)|0;if(n===13)throw new Error("x"+s);return s}
+		function mid(n){let t=n,a=n*3,b=n^5,c=n+7,d=n*11,g=n-2;
+			for(let j=0;j<2;j++){t=(t*5+leaf(n+j+(t&3)))|0;t=(t+a+b+c+d+g)|0;a=(a+1)|0;b^=t;c=(c*3)|0;d=(d+b)|0;g=(g^c)|0}
+			return (t+a+b+c+d+g)|0}
+		function P(n){let t=0;for(let j=0;j<2;j++)t=(t*7+mid(n+j))|0;this.v=t}
+		function top(n,m){let t=0;for(let k=0;k<n;k++){t=(t+mid(m))|0;t=(t+new P(m).v)|0}return t}
+		function tryTop(n,m){try{return String(top(n,m))}catch(e){return e.message}}`
+	rounds := []string{`tryTop(200,300)`, `tryTop(200,300)`, `tryTop(200,300)`, `tryTop(3,13)`, `tryTop(200,300)`}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+	}
+	if r.jit.resumedLevels == 0 {
+		t.Fatalf("no level but the outermost went on natively: resumed %d, unwound %d", r.jit.resumed, r.jit.unwound)
+	}
+}
+
 // Native code that calls through Go another function's native code shares
 // the context with it (jitState.ssaCtx): an exit's PC must be read before
 // Go runs anything. Here inner's last exit, a call near its end, is past

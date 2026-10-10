@@ -1579,9 +1579,19 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 		// As deep in native code, through Go, as there are contexts.
 		return Undefined, nil, false
 	}
-	s.ctxTop++
+	return r.runSSAIn(f, e, pc, depth, idx, 0)
+}
+
+// runSSAIn is runSSA in context idx, from the entry at pc, or, if resume is
+// not 0, where the code goes on after the native call it made in that
+// context, whose callee Go finished, its result and frame in the context
+// past (jitUnwindNative).
+func (r *Runtime) runSSAIn(f *frame, e *jitEntry, pc, depth, idx int, resume uintptr) (Value, error, bool) {
+	s := r.jit
+	top := s.ctxTop
+	s.ctxTop = idx + 1
 	defer func() {
-		s.ctxTop--
+		s.ctxTop = top
 		// What native code kept (abi.Context.Keep), and the pointer words
 		// its native calls recorded (RecordRef), its callees' too, are not
 		// kept past it.
@@ -1596,7 +1606,6 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 	ctx := &s.ssaCtxs[idx]
 	// resume, when not 0, is where native code goes on after a native
 	// call whose callee Go finished, in place of an entry.
-	var resume uintptr
 	for {
 		// What Go has run since the last entry may have changed the frame, how
 		// deep calls are, or the scope.
@@ -1820,6 +1829,11 @@ type jitNativeLevel struct {
 	construct bool
 	// ctx is the level's context's index.
 	ctx int
+	// returnTo is where its native caller goes on after the call
+	// (abi.Context.ReturnTo), and code the caller's code then: the caller
+	// is resumed there once Go has finished this level (jitUnwindNative).
+	returnTo uintptr
+	code     *jit.SSACode
 }
 
 // jitUnwindNative finishes the native calls the code running in context
@@ -1871,6 +1885,13 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 		} else {
 			l.cl, l.this = (*closure)(c.Closure), *(*Value)(unsafe.Pointer(&c.This))
 			l.construct = callerPC < len(caller.Code) && caller.Code[callerPC].Op == bytecode.OpNew
+			l.returnTo = c.ReturnTo
+			if k := len(s.unwinding) - 1; k >= start && !s.unwinding[k].inline {
+				// The caller, a level of its own: its code now.
+				if ce := s.cache[weak.Make(s.unwinding[k].cl.fn)]; ce != nil {
+					l.code = ce.ssa
+				}
+			}
 		}
 		caller, callerPC = l.cl.fn, int(l.pc)
 		s.unwinding = append(s.unwinding, l)
@@ -1891,6 +1912,14 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 		s.unwinding, s.unwindingFrames = s.unwinding[:start], s.unwindingFrames[:start]
 	}()
 	s.unwound += uint64(n)
+	if n > 1 {
+		// What Go runs to finish a level runs in contexts past every
+		// level's: a level's native code, resumed after its call, finds
+		// its spills and keeps where it left them.
+		top := s.ctxTop
+		s.ctxTop = max(top, s.unwinding[start+n-1].ctx+1)
+		defer func() { s.ctxTop = top }()
+	}
 	for k := range n {
 		l := &s.unwinding[start+k]
 		fn := l.cl.fn
@@ -1942,8 +1971,26 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 		if e == nil {
 			e = r.jitFor(f.cl)
 		}
+		var next *jitNativeLevel
+		if k < n-1 {
+			next = &s.unwinding[start+k+1]
+		}
 		if k == n-1 {
 			v, err = r.jitFinishExit(f, e, &l)
+		} else if !l.inline && !next.inline && next.returnTo != 0 && err == nil && r.stopped == nil &&
+			e != nil && e.ssa != nil && e.ssa == next.code && !jit.Marking() {
+			// Its native code goes on where the call returns to, as runSSA's
+			// does after a callee leaves: its context, spills and keeps are
+			// as it left them, and its callee's, frame base included.
+			c := &s.ssaCtxs[next.ctx]
+			c.Live, c.ReturnTo = 0, 0
+			*(*Value)(unsafe.Pointer(&c.RetValue)) = v
+			s.resumed++
+			s.resumedLevels++
+			var native bool
+			if v, err, native = r.runSSAIn(f, e, int(l.pc), int(l.depth), l.ctx, next.returnTo); !native {
+				v, err, _ = r.jitInterpret(f, f.base+int(l.depth), nil)
+			}
 		} else {
 			// A frame native code made goes on in native code where it can,
 			// whatever Go's entries to it cost (entrySlow).
