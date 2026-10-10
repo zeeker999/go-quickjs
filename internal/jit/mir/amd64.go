@@ -412,8 +412,9 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 			c.a.Bind(next)
 			continue
 		}
-		if t.Alloc {
-			// A built-in's construction with nothing to run: its object.
+		if t.Alloc || t.Receiver {
+			// A built-in's construction with nothing to run: its object;
+			// or an inlined construction's receiver.
 			c.constructGuards(t, guard)
 			c.a.Jmp(checked)
 			c.a.Bind(next)
@@ -457,7 +458,7 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 		c.pop(v)
 		return
 	}
-	if site.Alloc {
+	if site.Alloc || site.Receiver {
 		// The pool's last object, its cell cleared, is the result, kept
 		// (OpCallCell): nothing runs, so nothing is recorded or saved.
 		c.a.MovImm(scratchA, uint64(site.Pool))

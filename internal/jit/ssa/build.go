@@ -57,7 +57,10 @@ type Feedback interface {
 // own prototype property is and its name, which the call checks holds the
 // pool's prototype; its result, if not an object, is the receiver. One with
 // Alloc is a built-in's with nothing to run, `new Array()`: its result is
-// the pool's object, whose prototype the realm fixed. One with Via calls
+// the pool's object, whose prototype the realm fixed. One with Receiver is a
+// construction's receiver alone, taken from the pool once its function's
+// prototype is checked as for a construction, the constructor then inlined
+// (InlineSite's Construct). One with Via calls
 // Function.prototype.call, at Via, of the function at Callee, its receiver:
 // that function is called, with the first argument as its receiver and
 // the others as its arguments. One with Push calls Array.prototype.push,
@@ -80,6 +83,7 @@ type CallSite struct {
 	ProtoIndex                    int
 	ProtoKey                      uint32
 	Alloc                         bool
+	Receiver                      bool
 	Via                           uintptr
 	Push                          bool
 	Protos                        [2]Holder
@@ -102,7 +106,7 @@ func popsElement(v *Value) bool {
 // (CallSite.Alloc), or adds an element past an array's last (Push).
 func allocOnly(v *Value) bool {
 	for _, c := range v.Calls {
-		if !c.Alloc && !c.Push {
+		if !c.Alloc && !c.Receiver && !c.Push {
 			return false
 		}
 	}
@@ -117,7 +121,10 @@ func allocOnly(v *Value) bool {
 // count, and whether it passes a receiver, as a method call does; and the
 // callee's parameter count, its receiver's slot, or -1 if it reads none,
 // and whether a receiver that is not an object needs coercing, which only
-// Go does.
+// Go does. A construction, `new`, has Construct, and its receiver comes
+// from Pool, as a native construction's does (CallSite's Pool, ProtoIndex
+// and ProtoKey); the callee returns nothing, so the receiver is the
+// result, as V8 inlines a constructor.
 type InlineSite struct {
 	Program         *ir.Program
 	Feedback        Feedback
@@ -127,6 +134,10 @@ type InlineSite struct {
 	Params          int
 	ThisSlot        int
 	Coerce          bool
+	Construct       bool
+	Pool            uintptr
+	ProtoIndex      int
+	ProtoKey        uint32
 }
 
 // Inlining's bounds: a callee's instructions, all callees' in a function,
@@ -386,6 +397,8 @@ type frame struct {
 	parent  *frame
 	depth   int
 	inlined map[int]*frame
+	// receiver is an inlined construction's object, its result.
+	receiver *Value
 }
 
 // inlinedAt is the callee inlined at pc in the frame being translated.
@@ -431,8 +444,20 @@ func (b *builder) inlineAt(pc int, total *int) (*frame, bool) {
 	if site.Method {
 		callee++
 	}
-	if depth < callee || after != depth-callee+1 || site.ThisSlot >= 0 && !site.Method {
+	if depth < callee || after != depth-callee+1 || site.ThisSlot >= 0 && !site.Method && !site.Construct {
 		return nil, false
+	}
+	if site.Construct {
+		// Its receiver is kept in a cell, as a call's result is; and it
+		// returns nothing, so that the receiver is the result.
+		if site.Pool == 0 || site.Method || b.f.Keeps >= abi.MaxKeeps {
+			return nil, false
+		}
+		for pc, in := range site.Program.Code {
+			if reachable(site.Program, pc) && in.Op == ir.Return && in.Left != ir.Literal(ir.Value{Kind: ir.Undefined}) {
+				return nil, false
+			}
+		}
 	}
 	q := referenceReads(site.Program, site.Feedback)
 	// Its slots follow the function's and earlier callees': every slot's
@@ -582,6 +607,22 @@ func (b *builder) inlineCall(blk *Block, pc int, fr *frame, guard func(Op, Type,
 	room.Index = fr.base - b.root.p.Locals + fr.p.Locals + fr.p.StackSize
 	room.Const = ir.Value{Bits: uint64(fr.depth)}
 	fr.call = state()
+	if site.Construct {
+		// The receiver, from the pool, as a construction's, kept in a cell:
+		// the call's operands from the function on, nothing run.
+		args := make([]*Value, site.Argc+1)
+		for i := range args {
+			args[i] = b.read(sp-site.Argc-1+i, blk)
+		}
+		call := guard(OpCall, Tagged, ir.HostExit, args...)
+		call.Calls = []*CallSite{{Callee: site.Callee, Argc: site.Argc, ThisSlot: -1, Pool: site.Pool,
+			ProtoIndex: site.ProtoIndex, ProtoKey: site.ProtoKey, Receiver: true}}
+		call.Index = b.f.Keeps
+		b.f.Keeps++
+		cell := b.f.newValue(blk, OpCallCell, Source, call)
+		fr.receiver = b.f.newValue(blk, OpKept, Tagged, cell, call)
+		fr.receiver.Shadow = cell
+	}
 	undefined := b.f.newValue(blk, OpConst, Tagged)
 	undefined.Const = ir.Value{Kind: ir.Undefined}
 	fr.init = b.f.refsOf(fr.p.Locals + fr.p.StackSize)
@@ -591,7 +632,9 @@ func (b *builder) inlineCall(blk *Block, pc int, fr *frame, guard func(Op, Type,
 	for i := 0; i < site.Params && i < site.Argc; i++ {
 		fr.init[i] = b.read(sp-site.Argc+i, blk)
 	}
-	if site.ThisSlot >= 0 {
+	if site.ThisSlot >= 0 && site.Construct {
+		fr.init[site.ThisSlot] = fr.receiver
+	} else if site.ThisSlot >= 0 {
 		fr.init[site.ThisSlot] = b.read(sp-site.Argc-2, blk)
 	}
 }
@@ -1247,7 +1290,11 @@ func (b *builder) instruction(blk *Block, pc int) {
 		v := operand(in.Left)
 		guard(OpCheckInit, None, ir.GuardExit, v)
 		if b.cur != b.root {
-			// The call's result, and on after it.
+			// The call's result, and on after it: a construction's, its
+			// receiver.
+			if b.cur.receiver != nil {
+				v = b.cur.receiver
+			}
 			b.assign(b.cur.result, blk, v)
 			break
 		}

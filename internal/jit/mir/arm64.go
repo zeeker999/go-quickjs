@@ -1268,7 +1268,7 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 			c.a.Bind(next)
 			continue
 		}
-		if t.Alloc {
+		if t.Alloc || t.Receiver {
 			c.constructGuards(t, guard)
 			c.a.B(checked)
 			c.a.Bind(next)
@@ -1307,7 +1307,7 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		c.pop(v)
 		return
 	}
-	if site.Alloc {
+	if site.Alloc || site.Receiver {
 		// As amd64's: the pool's last object is the result.
 		c.a.MovImm(a64A, uint64(site.Pool))
 		c.a.Load(a64B, a64A, abi.OffPoolCount)
