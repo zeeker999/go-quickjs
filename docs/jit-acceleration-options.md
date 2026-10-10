@@ -170,6 +170,71 @@ feedback, so it would need snapshots. Low priority.
   without any of that.
 - **GC tuning by GOGC:** measured above, no net gain.
 
+## Progress
+
+**Option 1, first step (3ee0a14, d6455b0).** Native code calls Go
+through `callGo` and goes on after it.
+
+What it does:
+- Arguments pass as words; no pointer is stored natively, so the call
+  works while the collector marks.
+- The result goes to the call's keep cell, written by Go.
+- A refusal exits as before.
+- `+` with a string, or a `+` whose speculation failed, is the first user
+  (GoAdd). The helper never throws or runs script code.
+
+How it was checked:
+- Stack growth, GC and tracebacks across the call are tested on both
+  architectures; CI is green, arm64 included.
+- One bug was found and fixed on the way. A refused call exits with the
+  state at the call, so the state's values must be saved across the call.
+
+What it changed:
+- A string-building loop is 12% faster. The V8 suite is level: string
+  work itself dominates those loops.
+- DeltaBlue with construction on lost 5 ms. Constraint functions now
+  stay native and meet the next gap: `Constraint` has no native code (a
+  store meeting several shapes), so each call to it from native code
+  leaves for Go.
+
+**Host exits that remain** (construction on, 10 iterations, by the
+operation Go then runs):
+
+| Suite | Exits |
+|---|---|
+| RayTrace | ~180,000 at `call_method` |
+| Crypto | 26,800 at `set_index` |
+| EarleyBoyer | 20,700 at `new`, 5,000 at `call` |
+| DeltaBlue | 1,400 at `set_prop` |
+| Splay | 50,700, almost all a literal pool running out |
+
+RayTrace's calls are inlined callees that construct (`new Color(...)`
+inside `Color.prototype.multiply`): inside an inlined callee a
+construction exits, and Go makes the whole call again (Restart).
+
+**What this suggests next.**
+- *Re-entrant Go calls.* A call of Go that may run script code (a
+  constructor, a callee without native code, a setter), with the native
+  levels suspended, as V8's runtime calls may call JS. It would turn most
+  remaining exits into calls. It needs three things:
+  - `ctxTop` raised past the calling level for the call, since today
+    `runSSA` takes `ctxTop` while native callee levels use the contexts
+    past it without moving it;
+  - the run's current-context state saved and restored;
+  - a status for "threw", which exits to rethrow instead of making the
+    operation again.
+
+  Assumptions across the call are already re-checked, since native
+  callees may run anything.
+- *Pool refills by a Go call.* No script code runs, so it is small and
+  safe. Literal pools running out are counted as leaving (unlike
+  constructions'), which demotes functions such as Splay's
+  GeneratePayloadTree.
+- *Calls of Go built-ins by a Go call*: `String(x)` still leaves at
+  every call, and that alone demoted a test's loop.
+- *Polymorphic stores* (DeltaBlue's `Constraint`, RayTrace's
+  `best.hitCount`), from option 2.
+
 ## Suggested order
 
 1. Option 1, as a prototype first.
