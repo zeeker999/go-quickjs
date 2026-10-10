@@ -156,7 +156,8 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 		}
 		effects[pc] = e
 		if in.Op == bytecode.OpNew && (!m.ssa || !SSAConstruct) || (in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict ||
-			in.Op == bytecode.OpCheckGlobalRef || in.Op == bytecode.OpAssertResolved) && !m.ssa {
+			in.Op == bytecode.OpCheckGlobalRef || in.Op == bytecode.OpAssertResolved ||
+			in.Op == bytecode.OpNewObject || in.Op == bytecode.OpDefineField) && !m.ssa {
 			// The new pipeline constructs natively (mir's native calls),
 			// and assigns to a global natively where the VM knows it, Go
 			// otherwise; the old one does neither.
@@ -185,7 +186,7 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 			// throws it, as V8's code calls the runtime to throw.
 			return nil, refuse(pc, "unsupported opcode "+in.Op.String())
 		}
-		host = host || str || in.Op == bytecode.OpThrow || in.Op == bytecode.OpInstanceOf || in.Op == bytecode.OpTypeOf || in.Op == bytecode.OpApplyArguments || in.Op == bytecode.OpNew || in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict || in.Op == bytecode.OpCheckGlobalRef || in.Op == bytecode.OpNewArray || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
+		host = host || str || in.Op == bytecode.OpThrow || in.Op == bytecode.OpInstanceOf || in.Op == bytecode.OpTypeOf || in.Op == bytecode.OpApplyArguments || in.Op == bytecode.OpNew || in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict || in.Op == bytecode.OpCheckGlobalRef || in.Op == bytecode.OpNewObject || in.Op == bytecode.OpDefineField || in.Op == bytecode.OpNewArray || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 		property = property || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 		this = this || in.Op == bytecode.OpPushThis
 		raw := uint32(in.Op)
@@ -448,8 +449,10 @@ func selectNumericProperties(p *ir.Program, cells bool) {
 			read(in.Left, take(in.Dest))
 		case ir.Resolved:
 			read(in.Right, take(in.Dest))
-		case ir.BindingCheck:
+		case ir.BindingCheck, ir.ObjectLiteral:
 			take(in.Dest)
+		case ir.FieldDefine:
+			read(in.Left, reference)
 		case ir.CopyPair:
 			left, right := take(in.Dest), take(in.Extra)
 			read(in.Left, left)
@@ -720,11 +723,16 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 		return effect{delta: 1}, nil
 	case bytecode.OpPushThis:
 		return effect{delta: 1}, nil
-	case bytecode.OpAssertResolved:
+	case bytecode.OpAssertResolved, bytecode.OpDefineField:
 		if uint64(in.A) >= uint64(len(fn.Names)) {
 			return bad("invalid name")
 		}
 		return effect{need: 2, delta: -1}, nil
+	case bytecode.OpNewObject:
+		if in.B == 0 || in.B > fn.PropSites {
+			return bad("invalid literal site")
+		}
+		return effect{delta: 1}, nil
 	case bytecode.OpNop, bytecode.OpEndParams, bytecode.OpClearLocal:
 		return effect{}, nil
 	case bytecode.OpPushConst:
@@ -936,6 +944,10 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this bool) ir.Instr
 		return ir.Instruction{Op: ir.BindingCheck, Dest: sp, Key: in.A}
 	case bytecode.OpAssertResolved:
 		return ir.Instruction{Op: ir.Resolved, Left: ir.Slot(sp - 2), Right: top, Dest: sp - 2, Key: in.A}
+	case bytecode.OpNewObject:
+		return ir.Instruction{Op: ir.ObjectLiteral, Dest: sp}
+	case bytecode.OpDefineField:
+		return ir.Instruction{Op: ir.FieldDefine, Left: ir.Slot(sp - 2), Right: top, Key: in.A}
 	case bytecode.OpGetGlobal:
 		return ir.Instruction{Op: ir.BindingRead, Left: ir.Literal(ir.Value{Kind: ir.Opaque}), Dest: sp, Key: in.A}
 	case bytecode.OpPushThis:

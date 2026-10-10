@@ -359,6 +359,20 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 	}
 	site := sites[0]
 	vs := int32(c.enc.ValueSize)
+	if site.Literal {
+		// An object literal's object: its pool's next, the collector not
+		// marking, as a built-in's construction takes it (Alloc).
+		c.a.MovImm(scratchB, c.enc.WriteBarrier)
+		c.a.LoadU8(scratchB, scratchB, 0)
+		c.a.Op(amd64.Test, scratchB, scratchB, false)
+		guard(amd64.CondNE)
+		c.a.MovImm(scratchA, uint64(site.Pool))
+		c.a.Load(scratchB, scratchA, abi.OffPoolCount)
+		c.a.Op(amd64.Test, scratchB, scratchB, true)
+		guard(amd64.CondE)
+		c.poolTake(v, site)
+		return
+	}
 	sp := len(s.Slots)
 	calleeSlot := sp - site.Argc - 1
 	callee := v.Args[len(v.Args)-site.Argc-1]
@@ -459,22 +473,7 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 		return
 	}
 	if site.Alloc || site.Receiver {
-		// The pool's last object, its cell cleared, is the result, kept
-		// (OpCallCell): nothing runs, so nothing is recorded or saved.
-		c.a.MovImm(scratchA, uint64(site.Pool))
-		c.a.Load(scratchB, scratchA, abi.OffPoolCount)
-		c.a.OpImm(amd64.Sub, scratchB, 1, true)
-		c.a.Store(scratchA, abi.OffPoolCount, scratchB)
-		c.a.ShiftImm(amd64.Shl, scratchB, 3, true)
-		c.a.Op(amd64.Add, scratchB, scratchA, true)
-		c.a.Load(scratchC, scratchB, abi.OffPoolObjects)
-		c.a.MovImm(scratchA, 0)
-		c.a.Store(scratchB, abi.OffPoolObjects, scratchA)
-		at := abi.OffKeep + int32(v.Index)*vs
-		c.a.Store(regCtx, at+c.enc.RefOffset, scratchC)
-		c.a.MovImm(scratchA, c.enc.Object)
-		c.a.Store(regCtx, at+c.enc.NumOffset, scratchA)
-		c.setG(v, scratchA)
+		c.poolTake(v, site)
 		return
 	}
 	// A call of one function has its operands -- the function, the
@@ -924,6 +923,27 @@ func (c *compiler) viaGuards(t *ssa.CallSite, recv *ssa.Value, guard func(amd64.
 	c.a.MovImm(scratchB, uint64(t.Callee))
 	c.a.Op(amd64.Cmp, scratchC, scratchB, true)
 	guard(amd64.CondNE)
+}
+
+// poolTake has a call's result be its pool's last object, its cell
+// cleared, kept (OpCallCell): nothing runs, so nothing is recorded or
+// saved. The pool has one, and the collector is not marking.
+func (c *compiler) poolTake(v *ssa.Value, site *ssa.CallSite) {
+	vs := int32(c.enc.ValueSize)
+	c.a.MovImm(scratchA, uint64(site.Pool))
+	c.a.Load(scratchB, scratchA, abi.OffPoolCount)
+	c.a.OpImm(amd64.Sub, scratchB, 1, true)
+	c.a.Store(scratchA, abi.OffPoolCount, scratchB)
+	c.a.ShiftImm(amd64.Shl, scratchB, 3, true)
+	c.a.Op(amd64.Add, scratchB, scratchA, true)
+	c.a.Load(scratchC, scratchB, abi.OffPoolObjects)
+	c.a.MovImm(scratchA, 0)
+	c.a.Store(scratchB, abi.OffPoolObjects, scratchA)
+	at := abi.OffKeep + int32(v.Index)*vs
+	c.a.Store(regCtx, at+c.enc.RefOffset, scratchC)
+	c.a.MovImm(scratchA, c.enc.Object)
+	c.a.Store(regCtx, at+c.enc.NumOffset, scratchA)
+	c.setG(v, scratchA)
 }
 
 // constructGuards checks a construction can take its receiver from its
@@ -1715,6 +1735,12 @@ func (c *compiler) propStore(v *ssa.Value, guard func(amd64.Cond)) {
 		c.addAlong(v, has)
 		c.a.Jmp(added)
 		c.a.Bind(has)
+		if v.Add.Define {
+			// A literal's field: added so, or by Go.
+			c.a.Jmp(c.stubLabel(v.State, exitKind(v.Aux)))
+			c.a.Bind(added)
+			return
+		}
 	}
 	if v.Global {
 		// A global binding's cell, found as a read finds it, and
@@ -1782,9 +1808,13 @@ func (c *compiler) addAlong(v *ssa.Value, miss amd64.Label) {
 	c.a.LoadU8(scratchB, o, c.enc.ObjectFlags)
 	c.a.OpImm(amd64.And, scratchB, int32(c.enc.FlagExtensible), false)
 	c.a.Jcc(amd64.CondE, miss)
-	// The prototype chain the cache found, object by object, then none.
+	// The prototype chain the cache found, object by object, then none;
+	// none for a literal's field, which its prototypes do not intercept.
 	c.a.Load(scratchB, o, c.enc.ObjectProto)
 	for _, h := range add.Protos {
+		if add.Define {
+			break
+		}
 		c.a.MovImm(scratchC, uint64(h.Object))
 		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
 		c.a.Jcc(amd64.CondNE, miss)
@@ -1798,7 +1828,7 @@ func (c *compiler) addAlong(v *ssa.Value, miss amd64.Label) {
 		c.a.MovImm(scratchC, uint64(h.Object))
 		c.a.Load(scratchB, scratchC, c.enc.ObjectProto)
 	}
-	if add.Protos[1].Object != 0 {
+	if add.Protos[1].Object != 0 && !add.Define {
 		c.a.Op(amd64.Test, scratchB, scratchB, true)
 		c.a.Jcc(amd64.CondNE, miss)
 	}

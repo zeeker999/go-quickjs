@@ -205,6 +205,12 @@ type jitEntry struct {
 	// reoptBudget is how many native stretches the code runs before it is
 	// compiled again for what it has learned (reoptDue).
 	reoptBudget uint32
+	// literals are the object literals the code makes natively, each with
+	// its pool, kept across compiles (jitFeedback.Literal); definesUnfed
+	// the literals' fields compiled before their transitions were made,
+	// which the code leaves at (jitDefineSeen).
+	literals     []jitLiteral
+	definesUnfed []int32
 	// poly are the reads that met objects of shapes the code was not
 	// compiled for, each with up to jitPropertyCases of them, which it is
 	// compiled again for (jitPolySeen); polyReopt marks that it is to be,
@@ -1612,7 +1618,7 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 			bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpSetGlobal, bytecode.OpSetGlobalStrict,
 			bytecode.OpGetPropThis, bytecode.OpSetIndex, bytecode.OpNewArray,
 			bytecode.OpGetIndex, bytecode.OpNew, bytecode.OpPushConst, bytecode.OpInstanceOf, bytecode.OpTypeOf,
-			bytecode.OpCheckGlobalRef, bytecode.OpAssertResolved:
+			bytecode.OpCheckGlobalRef, bytecode.OpAssertResolved, bytecode.OpNewObject, bytecode.OpDefineField:
 		default:
 			return sp, steps, nil
 		}
@@ -1660,6 +1666,26 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 			}
 			stack[sp-2] = stack[sp-1]
 			sp--
+			continue
+		case bytecode.OpNewObject:
+			// As the interpreter makes a literal's object.
+			o := newLiteralObject(r.proto.object, ClassObject, int(in.A))
+			o.shape = r.shapes.siteRoot(&f.cl.ic[in.B])
+			v = Obj(o)
+		case bytecode.OpDefineField:
+			sp--
+			val, obj := stack[sp], stack[sp-1]
+			if obj.IsObject() {
+				if o := obj.Object(); o.class == ClassObject && o.flags&objExtensible != 0 {
+					if next := o.transition(f.cl.names[in.A], propDefault); next != nil {
+						o.appendTransition(Property{key: f.cl.names[in.A], flags: propDefault, value: val}, next)
+						continue
+					}
+				}
+				if err := r.defineOwnProp(obj.Object(), f.cl.names[in.A], val, propDefault); err != nil {
+					return sp, steps, err
+				}
+			}
 			continue
 		case bytecode.OpSetGlobal, bytecode.OpSetGlobalStrict:
 			// As the interpreter assigns: a direct eval's variable, a
