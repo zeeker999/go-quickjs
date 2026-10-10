@@ -369,13 +369,17 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 		if s.Inline != nil {
 			return ir.Exit{}, fmt.Errorf("%w: an inlined callee's frame", ErrUnsupported)
 		}
+		// A slot with no value is a local dead there (ir.Program.Live): the
+		// exit leaves it as it was.
 		for i, v := range s.Slots {
-			if !traced(v) {
+			if v != nil && !traced(v) {
 				return ir.Exit{}, fmt.Errorf("%w: slot %d's %v at pc %d", ErrOrigin, i, v, s.PC)
 			}
 		}
 		for i, v := range s.Slots {
-			slots[i] = slot(v)
+			if v != nil {
+				slots[i] = slot(v)
+			}
 		}
 		return ir.Exit{Kind: kind, State: ir.StateMap{PC: s.PC, Depth: s.Depth}}, nil
 	}

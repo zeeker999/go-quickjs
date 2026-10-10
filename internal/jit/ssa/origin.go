@@ -405,7 +405,9 @@ func liveAcross(f *Func) ([]*Value, [][]*Value) {
 	for _, b := range f.Blocks {
 		if b.Header != nil {
 			for _, s := range b.Header.Slots {
-				use(s, b, -1)
+				if s != nil {
+					use(s, b, -1)
+				}
 			}
 		}
 		for i, v := range b.Values {

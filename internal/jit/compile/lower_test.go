@@ -376,6 +376,61 @@ func TestCompilerBudgets(t *testing.T) {
 	}
 }
 
+// TestLiveLocals pins the locals the new pipeline's frame states keep
+// (ir.Program.Live): one is live where the code may read it before writing
+// it -- round a loop's back edge too, and down either arm of a branch --
+// and dead before its first write and after its last read.
+func TestLiveLocals(t *testing.T) {
+	fn := compiledFunction(t, `function f(n){let a=n*2;let s=0;for(let i=0;i<n;i++){s=(s+i)|0;if(i===7)s=(s+a)|0}let b=s+1;return b}`)
+	p, err := LowerSSA(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := func(name string) int {
+		for i, l := range fn.Locals {
+			if l.Name == name {
+				return i
+			}
+		}
+		t.Fatalf("no local %s", name)
+		return -1
+	}
+	n, a, s, i, b := local("n"), local("a"), local("s"), local("i"), local("b")
+	// The loop: the first instruction past its header's comparison.
+	var loop, after int = -1, -1
+	for pc, in := range fn.Code {
+		if in.Op == bytecode.OpJumpIfCmpFalse && loop < 0 {
+			loop, after = pc+1, int(in.A)
+		}
+	}
+	if loop < 0 {
+		t.Fatal("no loop")
+	}
+	for _, c := range []struct {
+		pc    int
+		local int
+		live  bool
+		what  string
+	}{
+		{loop, n, true, "n in the loop, read at its back edge's test"},
+		{loop, a, true, "a in the loop, read on one arm"},
+		{loop, s, true, "s in the loop"},
+		{loop, i, true, "i in the loop"},
+		{loop, b, false, "b before its first write"},
+		{after, i, false, "i after the loop"},
+		{after, a, false, "a after the loop"},
+		{after, n, false, "n after the loop"},
+		{after, s, true, "s after the loop, read once more"},
+	} {
+		if got := p.LiveAt(c.pc, c.local); got != c.live {
+			t.Errorf("%s: live %v, want %v", c.what, got, c.live)
+		}
+	}
+	if !p.LiveAt(0, len(fn.Locals)+5) {
+		t.Error("a slot past the locals is not known dead")
+	}
+}
+
 func TestLoopStateMaps(t *testing.T) {
 	fn := compiledFunction(t, `function sum(n) { let s=0; for(let i=0; i<n; i++) s+=i; return s }`)
 	p, err := Lower(fn)

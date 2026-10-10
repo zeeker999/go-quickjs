@@ -4,6 +4,7 @@ package compile
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
@@ -229,6 +230,9 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 		}
 	}
 	selectNumericProperties(p, m.ssa)
+	if m.ssa {
+		liveLocals(fn, p, effects)
+	}
 	if m.ssa {
 		for pc, in := range p.Code {
 			if in.Op == ir.Host && p.Maps[pc].Depth >= 0 {
@@ -471,6 +475,75 @@ func selectNumericProperties(p *ir.Program, cells bool) {
 			needed[n+last], needed[n+last+1] = kind, 0
 		}
 	}
+}
+
+// liveLocals fills p's Live: for each reachable instruction, the locals the
+// code from there may read before writing them, as a backward dataflow
+// over the instructions, each a branch to its A, a fall to the next, or
+// both. Only the instructions describe takes reach here; of those, the
+// ones below name locals, in A and B, and no other reads or writes one by
+// index -- a host operation runs the instruction itself, so a local it
+// names is read as the instruction reads it. describe takes no exception
+// handler: one that it comes to take must be a successor here of every
+// instruction it guards, or a catch would find its locals unwritten.
+func liveLocals(fn *bytecode.Function, p *ir.Program, effects []effect) {
+	n := fn.LocalCount
+	if n == 0 {
+		return
+	}
+	words := (n + 63) / 64
+	live := make([]uint64, len(fn.Code)*words)
+	at := func(pc int) []uint64 { return live[pc*words : (pc+1)*words] }
+	read := func(s []uint64, i uint32) { s[i/64] |= 1 << (i % 64) }
+	kill := func(s []uint64, i uint32) { s[i/64] &^= 1 << (i % 64) }
+	in := make([]uint64, words)
+	for changed := true; changed; {
+		changed = false
+		for pc := len(fn.Code) - 1; pc >= 0; pc-- {
+			if p.Maps[pc].Depth < 0 {
+				continue
+			}
+			clear(in)
+			e, ins := effects[pc], fn.Code[pc]
+			if !e.terminal && pc+1 < len(fn.Code) {
+				for w, x := range at(pc + 1) {
+					in[w] |= x
+				}
+			}
+			if e.branch {
+				for w, x := range at(int(ins.A)) {
+					in[w] |= x
+				}
+			}
+			switch ins.Op {
+			case bytecode.OpSetLocal, bytecode.OpInitLocal, bytecode.OpPutLocal, bytecode.OpClearLocal:
+				kill(in, ins.A)
+			case bytecode.OpSetLocalGet:
+				// The write, then the read, which sees it if they are one.
+				kill(in, ins.A)
+				if ins.B != ins.A {
+					read(in, ins.B)
+				}
+			case bytecode.OpGetLocal, bytecode.OpGetLocalCheck, bytecode.OpSetLocalCheck, bytecode.OpIncLocal,
+				bytecode.OpDecLocal, bytecode.OpUpdateLocal, bytecode.OpBinLocal:
+				// set_local_check reads the binding first: its dead zone.
+				read(in, ins.A)
+			case bytecode.OpGetLocal2, bytecode.OpGetLocalIndex:
+				read(in, ins.A)
+				read(in, ins.B)
+			case bytecode.OpGetLocalIndexUpdate:
+				read(in, ins.A)
+				read(in, ins.B>>2)
+			case bytecode.OpLocalBinImm:
+				read(in, ins.A&(1<<24-1))
+			}
+			if s := at(pc); !slices.Equal(s, in) {
+				copy(s, in)
+				changed = true
+			}
+		}
+	}
+	p.Live, p.LiveLocals, p.LiveWords = live, n, words
 }
 
 type effect struct {
