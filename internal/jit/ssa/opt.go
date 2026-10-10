@@ -28,6 +28,7 @@ func Optimize(f *Func) {
 		clearStoreChecks(f)
 		clearShadows(f)
 	}
+	f.originsKept = false
 	// Tables are by value ID, not maps: a compile at run time pays for every
 	// pass (BenchmarkJITCompile in internal/vm).
 	subst := f.scr().subst
@@ -145,7 +146,7 @@ func Optimize(f *Func) {
 	sc.guards = guards[:0]
 	clear(subst)
 	sc.subst = subst[:0]
-	f.shadowed = true
+	f.shadowed, f.originsKept = true, true
 	recount(f)
 }
 
