@@ -363,6 +363,9 @@ type jitState struct {
 	// entered counts the native calls Go ran the callee of from its
 	// start, the callee having no native code (abi.ExitEnter).
 	entered uint64
+	// ssaKeeps is the most keep cells (abi.Context.Keep) any code compiled
+	// uses: what Go clears in a native callee's context.
+	ssaKeeps int
 	// exitScratch is what exits that leave their frames to Go are read
 	// into (jit.ExitScratch).
 	exitScratch   jit.ExitScratch

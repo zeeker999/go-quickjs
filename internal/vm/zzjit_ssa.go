@@ -296,6 +296,7 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, 
 	}
 	ssa.Optimize(f)
 	fb.keeps = f.Keeps
+	s.ssaKeeps = max(s.ssaKeeps, f.Keeps)
 	mc, err := mir.CompileIn(&s.mirWork, f, jitEncoding)
 	if err != nil && strings.Contains(err.Error(), "runtime error") {
 		// A refusal the backend's own panic made: a bug, which the tests
@@ -1608,12 +1609,30 @@ func (r *Runtime) runSSAIn(f *frame, e *jitEntry, pc, depth, idx int, resume uin
 		s.ctxTop = top
 		// What native code kept (abi.Context.Keep), and the pointer words
 		// its native calls recorded (RecordRef), its callees' too, are not
-		// kept past it.
-		clear(s.ssaCtxs[idx].Keep[:e.ssaKeeps])
+		// kept past it; nor its receiver and captured bindings, nor what
+		// its native calls' callees ran with -- closure, receiver, result,
+		// keep cells -- in the contexts past it, each a frame gone once it
+		// returned, as V8's are: one receiver left there kept a benchmark's
+		// whole object graph alive after it ended. The contexts the calls
+		// ran in go from the one past it, each given a closure by the call,
+		// up to the first without, which no call ran in since Go last
+		// cleared it here (a run of Go's there gives it none).
+		c := &s.ssaCtxs[idx]
+		clear(c.Keep[:e.ssaKeeps])
+		c.This, c.Upvalues = abi.Slot{}, nil
+		callees := true
 		for i := idx; i < jitContexts; i++ {
-			if c := &s.ssaCtxs[i]; c.RecordHigh != 0 {
+			c := &s.ssaCtxs[i]
+			if c.RecordHigh != 0 {
 				clear(c.RecordRef[:c.RecordHigh])
 				c.RecordHigh = 0
+			}
+			if i > idx && callees {
+				if callees = c.Closure != nil; callees {
+					clear(c.Keep[:s.ssaKeeps])
+					c.Closure, c.Upvalues = nil, nil
+					c.This, c.RetValue = abi.Slot{}, abi.Slot{}
+				}
 			}
 		}
 	}()
