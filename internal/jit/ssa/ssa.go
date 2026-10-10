@@ -305,6 +305,7 @@ type FrameState struct {
 type InlineState struct {
 	Parent   *InlineState
 	Closure  uintptr
+	Callee   uintptr
 	Base     int
 	Locals   int
 	ThisSlot int

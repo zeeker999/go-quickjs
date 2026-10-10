@@ -6313,3 +6313,87 @@ func TestJITSSAInlinedConstructions(t *testing.T) {
 		}
 	}
 }
+
+// A construction of a forwarding constructor, Prototype's Class.create's
+// function(){this.initialize.apply(this,arguments)}, which RayTrace's
+// classes all are, is inlined as V8 inlines it: what the constructor reads
+// is known from its receiver, a pool's object -- initialize on the class's
+// prototype, apply the realm's -- and its call is initialize's, inlined
+// with the construction's own arguments, no arguments object made. One
+// wrapper's code serves both classes here, each inlined with its own
+// initialize. An exit inside initialize (a string multiplied), after it
+// counted the construction, makes both frames, and the construction's
+// result is the receiver, counted once; initialize replaced is inlined in
+// its place; one inside the constructor, its apply not the realm's once
+// Function.prototype.apply is replaced, has Go make the construction over
+// again, which calls the new apply with an arguments object; fewer arguments than initialize's parameters leave the rest
+// undefined; an error thrown from inside initialize has the interpreter's
+// stack, the constructor's frame in it. Each answer is the interpreter's.
+func TestJITSSAInlinedForwardingConstructions(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	defer func(was bool) { jitcompile.SSAConstruct = was }(jitcompile.SSAConstruct)
+	jitcompile.SSAConstruct = true
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var Class={create:function(){return function(){this.initialize.apply(this,arguments)}}};
+		var V=Class.create();V.prototype={initialize:function(x,y){this.x=x;this.y=y},len:function(){return this.x+this.y}};
+		var C=Class.create(),stats={n:0};C.prototype={initialize:function(r){stats.n=stats.n+1;this.r=r*2}};
+		function build(xs,n){let s=0,v,c;for(let i=0;i<n;i++){v=new V(i,1);c=new C(xs[i%xs.length]);s=(s+v.x+v.y+c.r)|0}
+			return [s,v.len(),Object.getPrototypeOf(c)===C.prototype,new V(7).y,stats.n].join()}
+		var nums=[1,2,3,4],mixed=[1,"2",3,4],throws=[1,2,{valueOf(){throw new Error("bad")}},4]
+		function stack(){try{return build(throws,300)}catch(e){return e.stack}}`
+	src := `build(nums,300)`
+	rounds := []string{src, src, src, src, src, src, `stack()`, src,
+		`V.prototype.initialize=function(x){this.x=-x;this.y=0};` + src, src,
+		`var apply=Function.prototype.apply;Function.prototype.apply=function(t,a){stats.n+=100;return apply.call(this,t,a)};` + src,
+		`build(mixed,300)`, src}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("build")).value.Object().fn().closure
+	v := r.global.getOwn(r.atoms.intern("V")).value.Object()
+	c := r.global.getOwn(r.atoms.intern("C")).value.Object()
+	var hosts uint64
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := r.jit.cache[weak.Make(cl.fn)]
+		if e != nil {
+			hosts = e.ssaStats.hosts
+		}
+		if strings.Contains(src, "Function.prototype.apply=") && (e == nil || e.entrySlow || len(e.notInline) != 0) {
+			// The round whose exits in the constructor make it over again
+			// runs natively, its constructions inlined.
+			t.Fatalf("round %d: build no longer inlines its constructions natively: %+v", i, e)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 5 {
+			e = r.jit.cache[weak.Make(cl.fn)]
+			for _, o := range []*Object{v, c} {
+				if e == nil || e.ssa == nil || !slices.ContainsFunc(e.inlines, func(x jitInline) bool { return x.obj == o && x.pool != nil }) {
+					t.Fatalf("build does not inline its constructions: %+v", e)
+				}
+			}
+			// Only to fill the pools again, and the last construction's.
+			if n := e.ssaStats.hosts - hosts; n > 2*300/abi.PoolSize+4 {
+				t.Fatalf("build left native code %d times for 600 constructions", n)
+			}
+		}
+	}
+}

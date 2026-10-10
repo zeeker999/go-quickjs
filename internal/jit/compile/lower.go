@@ -63,6 +63,21 @@ func LowerSSAInline(fn *bytecode.Function) (*ir.Program, error) {
 	return lowerRecovered(fn, lowering{ssa: true, callee: true})
 }
 
+// LowerSSAForward is LowerSSAInline for a constructor that forwards its
+// arguments to a method of its object, `this.k.apply(this, arguments)`
+// (bytecode.LeafForward), inlined where its caller knows what it forwards
+// to: apply_arguments is left to Go in its program, and the inliner makes
+// it the call of the method with the construction's own arguments, as V8
+// eliminates the arguments object. Its frame, made by Go at an exit, has
+// no arguments to forward: only an inliner that restarts the construction
+// at an exit before the call may take it.
+func LowerSSAForward(fn *bytecode.Function) (*ir.Program, error) {
+	if fn == nil || fn.Leaf != bytecode.LeafForward {
+		return nil, refuse(-1, "not a forwarding constructor")
+	}
+	return lowerRecovered(fn, lowering{ssa: true, callee: true, forward: true})
+}
+
 // LowerCalls additionally retains guarded numeric fields across call boundaries.
 // Its caller must refresh borrowed views after every potentially effectful call.
 func LowerCalls(fn *bytecode.Function) (*ir.Program, error) {
@@ -78,7 +93,7 @@ func LowerCallee(fn *bytecode.Function) (*ir.Program, error) {
 
 // lowering is how a function is lowered: for which entry points, and for
 // which pipeline.
-type lowering struct{ calls, callee, ssa bool }
+type lowering struct{ calls, callee, ssa, forward bool }
 
 // lowerRecovered turns a panic in analysis into a refusal: an optional tier
 // must never take down its host, and the function then runs in the existing
@@ -116,7 +131,7 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 		return nil, refuse(-1, "special function kind")
 	case fn.HasDirectEval || len(fn.EvalScopes) != 0:
 		return nil, refuse(-1, "direct eval")
-	case fn.UsesArguments || fn.MappedArguments:
+	case (fn.UsesArguments || fn.MappedArguments) && !m.forward:
 		return nil, refuse(-1, "arguments object")
 	case !fn.HasSimpleParams || fn.HasRest || fn.ParamsAreLexical:
 		return nil, refuse(-1, "non-simple parameters")
@@ -154,12 +169,15 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 			// -- often have; the old one refuses it.
 			return nil, refuse(pc, "non-number or invalid constant")
 		}
+		if in.Op == bytecode.OpApplyArguments && !m.forward {
+			return nil, refuse(pc, "unsupported opcode "+in.Op.String())
+		}
 		if in.Op == bytecode.OpThrow && !m.ssa {
 			// The new pipeline leaves a throw to the interpreter, which
 			// throws it, as V8's code calls the runtime to throw.
 			return nil, refuse(pc, "unsupported opcode "+in.Op.String())
 		}
-		host = host || str || in.Op == bytecode.OpThrow || in.Op == bytecode.OpNew || in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict || in.Op == bytecode.OpNewArray || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
+		host = host || str || in.Op == bytecode.OpThrow || in.Op == bytecode.OpApplyArguments || in.Op == bytecode.OpNew || in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict || in.Op == bytecode.OpNewArray || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 		property = property || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 		this = this || in.Op == bytecode.OpPushThis
 		raw := uint32(in.Op)
@@ -723,6 +741,12 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 		return effect{terminal: true}, nil
 	case bytecode.OpThrow:
 		return effect{need: 1, delta: -1, terminal: true}, nil
+	case bytecode.OpApplyArguments:
+		// f, apply and the receiver, for f's result.
+		if !local(in.A) {
+			return bad("invalid arguments slot")
+		}
+		return effect{need: 3, delta: -2}, nil
 	}
 	return bad("unsupported opcode " + in.Op.String())
 }
@@ -847,6 +871,9 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this bool) ir.Instr
 		return ir.Instruction{Op: ir.PropertyWrite, Left: ir.Slot(sp - 2), Right: top, Key: in.A}
 	case bytecode.OpThrow:
 		// The interpreter throws it (jitHost leaves it).
+		return ir.Instruction{Op: ir.Host}
+	case bytecode.OpApplyArguments:
+		// The inliner makes it a call (LowerSSAForward).
 		return ir.Instruction{Op: ir.Host}
 	case bytecode.OpPushConst:
 		if fn.Constants[in.A].Kind != bytecode.ConstNumber {
