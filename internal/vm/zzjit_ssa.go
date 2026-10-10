@@ -349,6 +349,23 @@ type jitFeedback struct {
 	// e is the entry being compiled again, whose failed speculations
 	// (jitEntry.failed) are built generic; nil for a first compile.
 	e *jitEntry
+	// fwd, for a forwarding constructor's inlined frame, is the
+	// construction it is inlined at, whose receiver the frame's sites are
+	// known from (jitForwardFrame).
+	fwd *jitForwardFrame
+}
+
+// jitForwardFrame is the construction a forwarding constructor
+// (bytecode.LeafForward) is inlined at: the constructor's function object,
+// the pool its receivers come from, and the construction's argument count.
+// What its code reads and calls is known from the receiver, as V8 knows a
+// property of an object of a known map: this.k, found on the prototype; k's
+// apply, the realm's; and the call, of k, inlined with the construction's
+// arguments.
+type jitForwardFrame struct {
+	ctor *Object
+	pool *abi.ObjectPool
+	argc int
 }
 
 // keep is the feedback that keeps what the code holds by address: the
@@ -376,12 +393,19 @@ func (fb *jitFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 	} else if fb.e != nil && !slices.Contains(fb.e.notInline, int32(pc)) {
 		targets = fb.e.inlines
 	}
+	if fb.fwd != nil {
+		return fb.forwardInline(pc)
+	}
 	k := fb.keep()
 	for _, in := range targets {
 		if int(in.pc) != pc {
 			continue
 		}
-		p, err := jitcompile.LowerSSAInline(in.cl.fn)
+		lower := jitcompile.LowerSSAInline
+		if in.cl.fn.Leaf == bytecode.LeafForward && fb.fn.Code[pc].Op == bytecode.OpNew {
+			lower = jitcompile.LowerSSAForward
+		}
+		p, err := lower(in.cl.fn)
 		if err != nil {
 			return ssa.InlineSite{}, false
 		}
@@ -393,8 +417,9 @@ func (fb *jitFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 		for _, x := range p.Code {
 			k.strings = k.strings || x.Op == ir.StringMethod || x.Op == ir.StringCode
 		}
+		callee := &jitFeedback{r: fb.r, fn: in.cl.fn, cl: in.cl, root: k}
 		site := ssa.InlineSite{
-			Program: p, Feedback: &jitFeedback{r: fb.r, fn: in.cl.fn, cl: in.cl, root: k},
+			Program: p, Feedback: callee,
 			Callee: uintptr(unsafe.Pointer(in.obj)), Closure: uintptr(unsafe.Pointer(in.cl)),
 			Argc: int(call.A), Method: call.Op == bytecode.OpCallMethod,
 			Params: in.cl.fn.ParamCount, ThisSlot: this, Coerce: in.cl.fn.CoerceThis,
@@ -408,6 +433,12 @@ func (fb *jitFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 			site.Construct, site.Coerce = true, false
 			site.Pool, site.ProtoIndex, site.ProtoKey = uintptr(unsafe.Pointer(in.pool)), int(i), uint32(atomPrototype)
 			k.pools = append(k.pools, in.pool)
+			if in.cl.fn.Leaf == bytecode.LeafForward {
+				// Its frame Go cannot make: an exit in it makes the
+				// construction over again.
+				site.Restart = true
+				callee.fwd = &jitForwardFrame{ctor: in.obj, pool: in.pool, argc: int(call.A)}
+			}
 		}
 		k.holders = append(k.holders, in.obj)
 		k.inlined = append(k.inlined, in.cl)
@@ -512,6 +543,10 @@ type jitInline struct {
 	// push marks a call of Array.prototype.push (jitPushes), pop one of
 	// Array.prototype.pop (jitPops).
 	push, pop bool
+	// fwd, for an inlined forwarding constructor's construction
+	// (bytecode.LeafForward), is the method it forwards to, as the code was
+	// last compiled for (jitForwardMethod).
+	fwd *Object
 }
 
 // jitCallsToInline is how often a call leaves native code before it is
@@ -585,6 +620,12 @@ func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 	}
 	switch n := e.callSites[pc]; {
 	case n == jitCallInlined:
+		if in.Op == bytecode.OpNew && e.inlineReopts < 2*jitInlineReoptimizations {
+			if o, cl := r.jitCalled(f, sp, in); cl != nil && r.jitForwardChanged(e, pc, o) {
+				e.inlineReopt = true
+				return
+			}
+		}
 		if !refilled {
 			r.jitInlineLeft(e, pc)
 		}
@@ -872,8 +913,10 @@ func (r *Runtime) jitSeedCalls(cl *closure, e *jitEntry, p *ir.Program) {
 // the nearest before it at the callee's depth, with nothing between but
 // the arguments, above it: a method call's get_prop_this, whose cache
 // found one plain data property on a prototype, or another's get_global,
-// whose cache found the global's -- a function jitCalled would take. Or
-// nil.
+// whose cache found the global's, or get_prop of an object so read, a
+// namespace's constructor, new Flog.RayTracer.Vector(...), whose value now
+// is taken as V8 folds a constant's loads (jitChainValue) -- a function
+// jitCalled would take. Or nil. The call checks the function it calls.
 func (r *Runtime) jitCalleeAt(cl *closure, p *ir.Program, pc int) (*Object, *closure) {
 	fn := cl.fn
 	depth := p.Maps[pc].Depth
@@ -891,6 +934,14 @@ func (r *Runtime) jitCalleeAt(cl *closure, p *ir.Program, pc int) (*Object, *clo
 		if d == slot && fn.Code[q].Op == op {
 			read = q
 			break
+		}
+		if d == slot+1 && op == bytecode.OpGetGlobal && fn.Code[q].Op == bytecode.OpGetProp {
+			// A property of an object read so, its value now.
+			v, ok := r.jitChainValue(cl, p, q, jitChainReads)
+			if !ok || !v.IsObject() {
+				return nil, nil
+			}
+			return r.jitCallableClosure(cl, v.Object())
 		}
 		// Only the arguments' instructions, which leave the callee be: the
 		// first pushes on it, and the rest work above.
@@ -929,13 +980,73 @@ func (r *Runtime) jitCalleeAt(cl *closure, p *ir.Program, pc int) (*Object, *clo
 	if prop.key != cl.names[in.A] || prop.flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 || !prop.value.IsObject() {
 		return nil, nil
 	}
-	o := prop.value.Object()
+	return r.jitCallableClosure(cl, prop.value.Object())
+}
+
+// jitCallableClosure is o and its closure, if a call in cl's code may make
+// it natively or inline it, as jitCalled has a callee; or nil.
+func (r *Runtime) jitCallableClosure(cl *closure, o *Object) (*Object, *closure) {
 	fd := o.fn()
 	if fd == nil || fd.native != nil || fd.bound || fd.closure == nil || fd.closure.realm != r.Realm ||
 		fd.closure.scope() != cl.scope() {
 		return nil, nil
 	}
 	return o, fd.closure
+}
+
+// jitChainReads is how many reads jitChainValue follows: a global and the
+// properties after it, Flog.RayTracer.Vector's three.
+const jitChainReads = 4
+
+// jitChainValue is the value the read at q of cl's code gives now, if it
+// is a global's read, by its cache, or a data property's of an object a
+// read just before it gives so, at most n reads in all: a guess, which
+// whatever takes it checks.
+func (r *Runtime) jitChainValue(cl *closure, p *ir.Program, q, n int) (Value, bool) {
+	fn := cl.fn
+	if n <= 0 || q < 0 || q >= len(fn.Code) || p.Maps[q].Depth < 0 {
+		return Undefined, false
+	}
+	in := fn.Code[q]
+	if int(in.A) >= len(cl.names) {
+		return Undefined, false
+	}
+	switch in.Op {
+	case bytecode.OpGetGlobal:
+		if int(in.B) >= len(cl.ic) || len(r.globalLex.props) != 0 && r.lexShadows(cl.names[in.A]) {
+			return Undefined, false
+		}
+		c, h := &cl.ic[in.B], cl.scope()
+		if h == nil || c.idx < 0 || int(c.idx) >= len(h.props) {
+			return Undefined, false
+		}
+		prop := &h.props[c.idx]
+		if prop.key != cl.names[in.A] || prop.flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 {
+			return Undefined, false
+		}
+		return prop.value, true
+	case bytecode.OpGetProp:
+		// Its receiver, the value the read before it left on top.
+		if q == 0 || p.Maps[q-1].Depth < 0 {
+			return Undefined, false
+		}
+		switch prev := fn.Code[q-1].Op; {
+		case prev == bytecode.OpGetGlobal && p.Maps[q-1].Depth == p.Maps[q].Depth-1,
+			prev == bytecode.OpGetProp && p.Maps[q-1].Depth == p.Maps[q].Depth:
+		default:
+			return Undefined, false
+		}
+		recv, ok := r.jitChainValue(cl, p, q-1, n-1)
+		if !ok || !recv.IsObject() {
+			return Undefined, false
+		}
+		prop := recv.Object().getOwnVisible(cl.names[in.A])
+		if prop == nil || prop.flags&propAccessor != 0 {
+			return Undefined, false
+		}
+		return prop.value, true
+	}
+	return Undefined, false
 }
 
 // jitInlinedCalls has a call inlined for one function that calls another,
@@ -1014,11 +1125,118 @@ func (r *Runtime) jitCallTarget(f *frame, e *jitEntry, pc, sp int, in bytecode.I
 // returns nothing, so that its receiver is the result, as V8 inlines a
 // constructor.
 func (r *Runtime) jitInlinesAt(cl *closure, o *Object, in bytecode.Instr) bool {
+	if in.Op == bytecode.OpNew && cl.fn.Leaf == bytecode.LeafForward {
+		// this.k.apply(this, arguments): k, inlined in it.
+		return r.jitConstructs(o) && r.jitForwardTarget(cl, o) != nil
+	}
 	if !r.jitInlinable(cl.fn) && !r.jitInlinesCalls(cl.fn, jitInlineDepth-1) {
 		return false
 	}
 	return in.Op != bytecode.OpNew || r.jitConstructs(o) &&
 		!slices.ContainsFunc(cl.fn.Code, func(x bytecode.Instr) bool { return x.Op == bytecode.OpReturn })
+}
+
+// jitForwardTarget is the closure of the method a forwarding constructor,
+// o, cl's function (bytecode.LeafForward), forwards its arguments to, if
+// it may be inlined in the constructor: k of this.k.apply(this, arguments),
+// a data property of o's prototype, a function the script made, of cl's
+// realm and scope, as jitCalled has a callee; or nil.
+func (r *Runtime) jitForwardTarget(cl *closure, o *Object) *closure {
+	t := r.jitForwardMethod(cl, o)
+	if t == nil {
+		return nil
+	}
+	fd := t.fn()
+	tc := fd.closure
+	if tc.fn == cl.fn || !r.jitInlinable(tc.fn) && !r.jitInlinesCalls(tc.fn, jitInlineDepth-2) {
+		return nil
+	}
+	return tc
+}
+
+// jitForwardMethod is the function object jitForwardTarget's closure is
+// of, or nil.
+func (r *Runtime) jitForwardMethod(cl *closure, o *Object) *Object {
+	fn := cl.fn
+	if fn.Leaf != bytecode.LeafForward || len(fn.Code) < 2 || fn.Code[1].Op != bytecode.OpGetProp || int(fn.Code[1].A) >= len(cl.names) {
+		return nil
+	}
+	p := o.getOwnVisible(atomPrototype)
+	if p == nil || p.flags&propAccessor != 0 || !p.value.IsObject() {
+		return nil
+	}
+	m := p.value.Object().getOwnVisible(cl.names[fn.Code[1].A])
+	if m == nil || m.flags&propAccessor != 0 || !m.value.IsObject() {
+		return nil
+	}
+	t := m.value.Object()
+	fd := t.fn()
+	if fd == nil || fd.native != nil || fd.bound || fd.closure == nil || fd.closure.realm != r.Realm || fd.closure.scope() != cl.scope() {
+		return nil
+	}
+	return t
+}
+
+// forwardProperty is a forwarding constructor's inlined frame's property
+// site (jitForwardFrame), known from its receiver: this.k, at its first
+// read, as a pool's object finds it; k's apply, at its second, as k does.
+func (fb *jitFeedback) forwardProperty(pc int) (ssa.PropertySite, bool) {
+	in := fb.fn.Code[pc]
+	var recv *Object
+	switch {
+	case pc == 1 && in.Op == bytecode.OpGetProp:
+		pool := fb.fwd.pool
+		for i := range pool.Count {
+			if o := (*Object)(pool.Objects[i]); o != nil && o.shape != nil {
+				recv = o
+				break
+			}
+		}
+	case pc == 2 && in.Op == bytecode.OpGetPropThis:
+		recv = fb.r.jitForwardMethod(fb.cl, fb.fwd.ctor)
+	}
+	site := ssa.PropertySite{Key: uint32(fb.cl.names[in.A])}
+	if recv == nil {
+		return site, true
+	}
+	var c propCache
+	fb.r.fillPropCache(&c, recv, fb.cl.names[in.A], false)
+	return fb.siteFrom(in, &c)
+}
+
+// forwardInline is a forwarding constructor's inlined frame's call,
+// apply_arguments, made the call of the method it forwards to, inlined
+// with the construction's arguments (ssa.InlineSite's Forward).
+func (fb *jitFeedback) forwardInline(pc int) (ssa.InlineSite, bool) {
+	r := fb.r
+	if pc >= len(fb.fn.Code) || fb.fn.Code[pc].Op != bytecode.OpApplyArguments || r.applyFn == nil {
+		return ssa.InlineSite{}, false
+	}
+	t := r.jitForwardMethod(fb.cl, fb.fwd.ctor)
+	if t == nil {
+		return ssa.InlineSite{}, false
+	}
+	tc := t.fn().closure
+	p, err := jitcompile.LowerSSAInline(tc.fn)
+	if err != nil {
+		return ssa.InlineSite{}, false
+	}
+	this := -1
+	if p.This {
+		this = tc.fn.LocalCount + len(tc.fn.Upvalues)
+	}
+	k := fb.keep()
+	for _, x := range p.Code {
+		k.strings = k.strings || x.Op == ir.StringMethod || x.Op == ir.StringCode
+	}
+	k.holders = append(k.holders, t, r.applyFn)
+	k.inlined = append(k.inlined, tc)
+	return ssa.InlineSite{
+		Program: p, Feedback: &jitFeedback{r: r, fn: tc.fn, cl: tc, root: k},
+		Callee: uintptr(unsafe.Pointer(t)), Closure: uintptr(unsafe.Pointer(tc)),
+		Argc: fb.fwd.argc, Method: true, Params: tc.fn.ParamCount, ThisSlot: this,
+		Forward: true, Apply: uintptr(unsafe.Pointer(r.applyFn)),
+	}, true
 }
 
 // jitInlineTarget is the call by in at pc of o, cl's function, to inline:
@@ -1028,8 +1246,29 @@ func (r *Runtime) jitInlineTarget(pc int32, cl *closure, o *Object, in bytecode.
 	if in.Op == bytecode.OpNew {
 		x.pool = new(abi.ObjectPool)
 		r.jitFillPool(x.pool, o)
+		x.fwd = r.jitForwardMethod(cl, o)
 	}
 	return x
+}
+
+// jitForwardChanged reports whether the forwarding constructor inlined at
+// pc in e's code, a construction of o, now forwards to a method other than
+// the one the code was compiled for -- its prototype's was replaced -- and
+// notes the new one: the code is compiled again for it, as V8 optimizes
+// again for a call's new target, rather than the exits counted against
+// inlining it (jitInlineLeft).
+func (r *Runtime) jitForwardChanged(e *jitEntry, pc int, o *Object) bool {
+	for i := range e.inlines {
+		x := &e.inlines[i]
+		if int(x.pc) != pc || x.obj != o || x.fwd == nil {
+			continue
+		}
+		if t := r.jitForwardMethod(x.cl, o); t != nil && t != x.fwd {
+			x.fwd = t
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Runtime) jitNativeTarget(pc int32, cl *closure, o *Object, in bytecode.Instr) jitInline {
@@ -1371,11 +1610,18 @@ func (fb *jitFeedback) property(pc int) (ssa.PropertySite, bool) {
 	if in.Op != bytecode.OpGetProp && in.Op != bytecode.OpGetPropThis && in.Op != bytecode.OpSetProp || int(in.A) >= len(fb.cl.names) {
 		return ssa.PropertySite{}, false
 	}
-	site := ssa.PropertySite{Key: uint32(fb.cl.names[in.A])}
-	if int(in.B) >= len(fb.cl.ic) {
-		return site, true
+	if fb.fwd != nil {
+		return fb.forwardProperty(pc)
 	}
-	c := &fb.cl.ic[in.B]
+	if int(in.B) >= len(fb.cl.ic) {
+		return ssa.PropertySite{Key: uint32(fb.cl.names[in.A])}, true
+	}
+	return fb.siteFrom(in, &fb.cl.ic[in.B])
+}
+
+// siteFrom is the site of a property instruction, in, as cache c knows it.
+func (fb *jitFeedback) siteFrom(in bytecode.Instr, c *propCache) (ssa.PropertySite, bool) {
+	site := ssa.PropertySite{Key: uint32(fb.cl.names[in.A])}
 	k := fb.keep()
 	if in.Op == bytecode.OpSetProp && c.next != nil && c.next != setterNext && !c.getter {
 		site.Add = fb.add(c)
@@ -1735,7 +1981,9 @@ func (r *Runtime) runSSAIn(f *frame, e *jitEntry, pc, depth, idx int, resume uin
 			e.ssaStats.hosts++
 			back, base, code := uintptr(c.ReturnTo), c.Base, e.ssa
 			exitPC, exitDepth := int(ctx.ExitPC), int(ctx.ExitDepth)
-			f.pc = uint32(exitPC)
+			// Past its call meanwhile, as the interpreter's frame is during
+			// one, which a stack trace shows (stackFrame).
+			f.pc = uint32(exitPC) + 1
 			v, err := r.jitUnwindNative(idx, e, f.cl.fn)
 			if err == nil && r.stopped == nil && back != 0 && e.ssa == code && code.Size() != 0 && !jit.Marking() {
 				// Native code run meanwhile may have used the context.
@@ -1771,6 +2019,8 @@ func (r *Runtime) runSSAIn(f *frame, e *jitEntry, pc, depth, idx int, resume uin
 			e.ssaStats.records += ctx.Records
 			r.jitApplyRecords(f, e, ctx)
 			exitPC, exitDepth := int(ctx.ExitPC), int(ctx.ExitDepth)
+			// Past its call meanwhile, as a stack trace shows it.
+			f.pc = uint32(exitPC) + 1
 			v, err := r.jitUnwindNative(idx, e, f.cl.fn)
 			sp, ok := r.jitCallResult(f, exitPC, exitDepth, v, err)
 			if !ok || r.stopped != nil {
@@ -1909,8 +2159,10 @@ type jitNativeLevel struct {
 	inline                bool
 	locals, thisSlot, top int
 	// construct marks a callee a construction called, whose result, if not
-	// an object, is its receiver.
+	// an object, is its receiver, and newTarget is then the function the
+	// construction called, the frame's new.target.
 	construct bool
+	newTarget Value
 	// ctx is the level's context's index.
 	ctx int
 	// returnTo is where its native caller goes on after the call
@@ -1947,6 +2199,10 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 			// -- inlined at the call it left at.
 			l.inline, l.locals, l.thisSlot = true, int(c.InlineLocals), int(c.InlineThis)
 			l.construct = callerPC < len(caller.Code) && caller.Code[callerPC].Op == bytecode.OpNew
+			if l.construct && c.InlineCallee != 0 {
+				// The object, which the caller's code keeps alive.
+				l.newTarget = Obj(*(**Object)(unsafe.Pointer(&c.InlineCallee)))
+			}
 			// Its code is that of the nearest level below it not inlined,
 			// or e's, which inlined it, and the callees it is inlined in.
 			parent, parentPC := e, s.ssaCtxs[idx].ExitPC
@@ -1973,6 +2229,9 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 		} else {
 			l.cl, l.this = (*closure)(c.Closure), *(*Value)(unsafe.Pointer(&c.This))
 			l.construct = callerPC < len(caller.Code) && caller.Code[callerPC].Op == bytecode.OpNew
+			if l.construct && c.NewTarget != 0 {
+				l.newTarget = Obj(*(**Object)(unsafe.Pointer(&c.NewTarget)))
+			}
 			l.returnTo = c.ReturnTo
 			if k := len(s.unwinding) - 1; k >= start && !s.unwinding[k].inline {
 				// The caller, a level of its own: its code now.
@@ -2047,7 +2306,15 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 		f.locals = r.stack[l.base : l.base+fn.LocalCount : l.base+fn.LocalCount]
 		f.base = l.base + fn.LocalCount
 		f.pc = uint32(l.pc)
+		if k < n-1 {
+			// Past the call it makes, as the interpreter's frame is during
+			// one, which a stack trace shows.
+			f.pc++
+		}
 		f.this, f.newTarget, f.callee, f.args = l.this, Undefined, nil, nil
+		if l.construct && l.newTarget.IsObject() {
+			f.newTarget = l.newTarget
+		}
 		f.openUpvalues, f.handlers = f.openUpvalues[:0], f.handlers[:0]
 		f.thisRef, f.withScopes, f.evalVars, f.native, f.savedSP = nil, nil, nil, "", 0
 		s.unwindingFrames = append(s.unwindingFrames, f)
@@ -2159,6 +2426,10 @@ func (r *Runtime) jitEnterOne(c *abi.Context, i int, code *bytecode.Function, ca
 	fn := cl.fn
 	base, this := int(c.Base), *(*Value)(unsafe.Pointer(&c.This))
 	construct := callerPC < len(code.Code) && code.Code[callerPC].Op == bytecode.OpNew
+	newTarget := Undefined
+	if construct && c.NewTarget != 0 {
+		newTarget = Obj(*(**Object)(unsafe.Pointer(&c.NewTarget)))
+	}
 	c.Live, c.ReturnTo = 0, 0
 	s.unwound++
 	f := r.pushFrame()
@@ -2166,7 +2437,7 @@ func (r *Runtime) jitEnterOne(c *abi.Context, i int, code *bytecode.Function, ca
 	f.locals = r.stack[base : base+fn.LocalCount : base+fn.LocalCount]
 	f.base = base + fn.LocalCount
 	f.pc = 0
-	f.this, f.newTarget, f.callee, f.args = this, Undefined, nil, nil
+	f.this, f.newTarget, f.callee, f.args = this, newTarget, nil, nil
 	f.openUpvalues, f.handlers = f.openUpvalues[:0], f.handlers[:0]
 	f.thisRef, f.withScopes, f.evalVars, f.native, f.savedSP = nil, nil, nil, "", 0
 	v, err := r.jitEnterCallee(f, s.hint(cl.hint()), i)
@@ -2291,8 +2562,13 @@ func (r *Runtime) jitFinishExit(f *frame, e *jitEntry, l *jitNativeLevel) (Value
 func (r *Runtime) jitCallResult(f *frame, pc, depth int, v Value, err error) (int, bool) {
 	in := f.cl.fn.Code[pc]
 	sp := f.base + depth - int(in.A) - 1
-	if in.Op == bytecode.OpCallMethod {
+	switch in.Op {
+	case bytecode.OpCallMethod:
 		sp--
+	case bytecode.OpApplyArguments:
+		// f, apply and the receiver (a forwarding constructor's inlined
+		// frame, ssa.InlineSite's Forward).
+		sp = f.base + depth - 3
 	}
 	f.pc = uint32(pc + 1)
 	if err != nil {

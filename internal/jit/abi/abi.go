@@ -114,9 +114,15 @@ type Context struct {
 	// Live is LiveInline: InlineClosure is the callee's closure's address,
 	// which the caller's code keeps alive and Go finds among those it
 	// inlined; InlineLocals its program's locals, past which its operands
-	// are; InlineThis 1 plus its receiver's slot, or 0. Base is where the
-	// frame is; the exit fields say where it left.
-	InlineClosure, InlineLocals, InlineThis uint64
+	// are; InlineThis 1 plus its receiver's slot, or 0; InlineCallee the
+	// function object called, which a construction's frame has as its
+	// new.target. Base is where the frame is; the exit fields say where it
+	// left.
+	InlineClosure, InlineLocals, InlineThis, InlineCallee uint64
+	// NewTarget is the function object a native construction called, its
+	// callee's new.target, which the caller's code keeps alive: written for
+	// a construction only.
+	NewTarget uint64
 	// EnterCallee is the function object a native call called that had no
 	// native code for native callers to call (ExitEnter), which its
 	// caller's code keeps alive.
@@ -227,9 +233,9 @@ const (
 // ExitInline is an inlined callee's frame an exit describes in a context
 // (LiveInline): what an exit's code writes there.
 type ExitInline struct {
-	Closure, Locals, ThisSlot uint64
-	Kind, PC, Depth           uint64
-	Site, Base                int64
+	Closure, Locals, ThisSlot, Callee uint64
+	Kind, PC, Depth                   uint64
+	Site, Base                        int64
 }
 
 // Slot is a VM value's layout -- a number word, then a pointer word -- held
@@ -283,6 +289,8 @@ var (
 	OffEnterCallee   = int32(unsafe.Offsetof(Context{}.EnterCallee))
 	OffInlineLocals  = int32(unsafe.Offsetof(Context{}.InlineLocals))
 	OffInlineThis    = int32(unsafe.Offsetof(Context{}.InlineThis))
+	OffInlineCallee  = int32(unsafe.Offsetof(Context{}.InlineCallee))
+	OffNewTarget     = int32(unsafe.Offsetof(Context{}.NewTarget))
 
 	// ContextSize is a Context's size, and so the distance from one to the
 	// next in an array of them.

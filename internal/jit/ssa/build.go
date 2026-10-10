@@ -124,7 +124,15 @@ func allocOnly(v *Value) bool {
 // Go does. A construction, `new`, has Construct, and its receiver comes
 // from Pool, as a native construction's does (CallSite's Pool, ProtoIndex
 // and ProtoKey); the callee returns nothing, so the receiver is the
-// result, as V8 inlines a constructor.
+// result, as V8 inlines a constructor. Restart marks a callee whose frame
+// Go cannot make: an exit in its own code has Go make the call over again,
+// from the caller's state at it, as one before it changed nothing (a
+// forwarding constructor's, bytecode.LeafForward, whose frame would have no
+// arguments). Forward is the call of f.apply(this, arguments) in such a
+// callee, apply_arguments: f, the function at Callee, is called with the
+// callee's receiver, after the check that apply is the realm's own, at
+// Apply, with the arguments the callee was given, as V8 eliminates the
+// arguments object.
 type InlineSite struct {
 	Program         *ir.Program
 	Feedback        Feedback
@@ -138,6 +146,9 @@ type InlineSite struct {
 	Pool            uintptr
 	ProtoIndex      int
 	ProtoKey        uint32
+	Restart         bool
+	Forward         bool
+	Apply           uintptr
 }
 
 // Inlining's bounds: a callee's instructions, all callees' in a function,
@@ -399,6 +410,9 @@ type frame struct {
 	inlined map[int]*frame
 	// receiver is an inlined construction's object, its result.
 	receiver *Value
+	// args are the arguments the call gave it, which a call it forwards
+	// them to is given (InlineSite's Forward).
+	args []*Value
 }
 
 // inlinedAt is the callee inlined at pc in the frame being translated.
@@ -444,7 +458,14 @@ func (b *builder) inlineAt(pc int, total *int) (*frame, bool) {
 	if site.Method {
 		callee++
 	}
-	if depth < callee || after != depth-callee+1 || site.ThisSlot >= 0 && !site.Method && !site.Construct {
+	if site.Forward {
+		// f, apply and the receiver; the arguments are the frame's own.
+		callee = 3
+		if b.cur == b.root || !b.cur.site.Restart || site.Argc != b.cur.site.Argc {
+			return nil, false
+		}
+	}
+	if depth < callee || after != depth-callee+1 || site.ThisSlot >= 0 && !site.Method && !site.Construct && !site.Forward {
 		return nil, false
 	}
 	if site.Construct {
@@ -591,6 +612,10 @@ func (b *builder) planInline(fr *frame, call, cont *Block) {
 func (b *builder) inlineCall(blk *Block, pc int, fr *frame, guard func(Op, Type, ir.ExitKind, ...*Value) *Value, state func() *FrameState) {
 	site := fr.site
 	sp := b.cur.base + b.p.Locals + b.p.Maps[pc].Depth
+	if site.Forward {
+		b.forwardCall(blk, pc, sp, fr, guard)
+		return
+	}
 	// Another callee is called by Go, from the call's state, as a call that
 	// is not inlined is, and native code goes on after it.
 	object := guard(OpObjectOf, Ptr, ir.HostExit, b.read(sp-site.Argc-1, blk))
@@ -629,13 +654,50 @@ func (b *builder) inlineCall(blk *Block, pc int, fr *frame, guard func(Op, Type,
 	for s := range fr.init {
 		fr.init[s] = undefined
 	}
+	fr.args = make([]*Value, site.Argc)
+	for i := range fr.args {
+		fr.args[i] = b.read(sp-site.Argc+i, blk)
+	}
 	for i := 0; i < site.Params && i < site.Argc; i++ {
-		fr.init[i] = b.read(sp-site.Argc+i, blk)
+		fr.init[i] = fr.args[i]
 	}
 	if site.ThisSlot >= 0 && site.Construct {
 		fr.init[site.ThisSlot] = fr.receiver
 	} else if site.ThisSlot >= 0 {
 		fr.init[site.ThisSlot] = b.read(sp-site.Argc-2, blk)
+	}
+}
+
+// forwardCall checks a forwarded call (InlineSite's Forward) calls the
+// function inlined there through the realm's apply, and gives the callee's
+// start its slots: the arguments the frame it is in was given, past which
+// undefined, its receiver, and undefined in every other. The call's state,
+// where the frames of an exit inside the callee go on, is the frame's at
+// the call, not its call's: the frame is made there.
+func (b *builder) forwardCall(blk *Block, pc, sp int, fr *frame, guard func(Op, Type, ir.ExitKind, ...*Value) *Value) {
+	site := fr.site
+	target := guard(OpObjectOf, Ptr, ir.HostExit, b.read(sp-3, blk))
+	same := guard(OpSameObject, None, ir.HostExit, target)
+	same.Const = ir.Value{Bits: uint64(site.Callee)}
+	apply := guard(OpObjectOf, Ptr, ir.HostExit, b.read(sp-2, blk))
+	same = guard(OpSameObject, None, ir.HostExit, apply)
+	same.Const = ir.Value{Bits: uint64(site.Apply)}
+	room := guard(OpFrameRoom, None, ir.HostExit)
+	room.Index = fr.base - b.root.p.Locals + fr.p.Locals + fr.p.StackSize
+	room.Const = ir.Value{Bits: uint64(fr.depth)}
+	fr.call = b.frameState(blk, pc)
+	undefined := b.f.newValue(blk, OpConst, Tagged)
+	undefined.Const = ir.Value{Kind: ir.Undefined}
+	fr.init = b.f.refsOf(fr.p.Locals + fr.p.StackSize)
+	for s := range fr.init {
+		fr.init[s] = undefined
+	}
+	fr.args = b.cur.args
+	for i := 0; i < site.Params && i < len(fr.args); i++ {
+		fr.init[i] = fr.args[i]
+	}
+	if site.ThisSlot >= 0 {
+		fr.init[site.ThisSlot] = b.read(sp-1, blk)
 	}
 }
 
@@ -1072,6 +1134,25 @@ func (b *builder) nullish(blk *Block, in ir.Instruction, operand func(ir.Operand
 // an inlined callee it is the caller's at the call and the callee's
 // (InlineState).
 func (b *builder) state(blk *Block, pc int) *FrameState {
+	if fr := b.cur; fr != b.root && fr.site.Restart {
+		// Go makes the call over again (InlineSite's Restart): the
+		// caller's state at it, a copy, as states are not shared.
+		call := fr.call
+		s := b.f.newState(FrameState{PC: call.PC, Depth: call.Depth, Site: call.Site, Slots: b.f.refsOf(len(call.Slots)), Inline: call.Inline})
+		for i, v := range call.Slots {
+			if v != nil {
+				s.Slots[i] = v
+				v.Uses++
+			}
+		}
+		return s
+	}
+	return b.frameState(blk, pc)
+}
+
+// frameState is the state at pc in the frame being translated, its
+// callers' at their calls below it.
+func (b *builder) frameState(blk *Block, pc int) *FrameState {
 	if fr := b.cur; fr != b.root {
 		call, depth := fr.call, b.p.Maps[pc].Depth
 		s := b.f.newState(FrameState{PC: call.PC, Depth: call.Depth, Site: call.Site, Slots: b.f.refsOf(fr.base + b.p.Locals + depth)})
@@ -1089,7 +1170,7 @@ func (b *builder) state(blk *Block, pc int) *FrameState {
 			s.Slots[i] = b.read(i, blk)
 			s.Slots[i].Uses++
 		}
-		s.Inline = &InlineState{Parent: call.Inline, Closure: fr.site.Closure, Base: fr.base, Locals: b.p.Locals, ThisSlot: fr.site.ThisSlot,
+		s.Inline = &InlineState{Parent: call.Inline, Closure: fr.site.Closure, Callee: fr.site.Callee, Base: fr.base, Locals: b.p.Locals, ThisSlot: fr.site.ThisSlot,
 			PC: b.p.Maps[pc].PC, Depth: depth, Site: pc}
 		return s
 	}

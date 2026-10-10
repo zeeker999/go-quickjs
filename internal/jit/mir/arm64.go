@@ -420,6 +420,7 @@ func (c *a64Compiler) exitThen(s *ssa.FrameState, kind uint64, then *arm64.Label
 				off int32
 				v   uint64
 			}{{abi.OffInlineClosure, uint64(in.Closure)}, {abi.OffInlineLocals, uint64(in.Locals)}, {abi.OffInlineThis, uint64(in.ThisSlot + 1)},
+				{abi.OffInlineCallee, uint64(in.Callee)},
 				{abi.OffExitKind, k}, {abi.OffExitPC, uint64(in.PC)}, {abi.OffExitDepth, uint64(in.Depth)}, {abi.OffExitSite, uint64(int64(in.Site))},
 				{abi.OffLive, abi.LiveInline}} {
 				c.a.MovImm(a64A, f.v)
@@ -1477,6 +1478,11 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		}
 		c.a.MovImm(top, uint64(t.Closure))
 		c.a.Store(calleeCtx, abi.OffClosure, top)
+		if t.Pool != 0 {
+			// A construction's new.target, for Go to make its frame with.
+			c.a.MovImm(top, uint64(t.Callee))
+			c.a.Store(calleeCtx, abi.OffNewTarget, top)
+		}
 		if t.Count != 0 {
 			c.a.MovImm(top, uint64(t.Count))
 			c.a.Load(high2, top, 0)
