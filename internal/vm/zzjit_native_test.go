@@ -7176,6 +7176,8 @@ func TestJITSSAReadsFunctionProperties(t *testing.T) {
 	setup := `function V(x){this.x=x} V.prototype={add(a,b){return (a+b)|0}};
 		function W(){} var NS={V:V,W:W};
 		function run(n){let s=0;for(let i=0;i<n;i++){s=NS.V.prototype.add(s,i)}return s}
+		var NS2={R:{V:V}};
+		function run2(n){let s=0;for(let i=0;i<n;i++){s=NS2.R.V.prototype.add(s,i)}return s}
 		function odd(n){let s=0;for(let i=0;i<n;i++){s=(s+NS.W.length+NS.V.name.length+(NS.W.prototype.constructor===W?1:0))|0}return s}`
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
@@ -7187,8 +7189,9 @@ func TestJITSSAReadsFunctionProperties(t *testing.T) {
 		}
 	}
 	cl := r.global.getOwn(r.atoms.intern("run")).value.Object().fn().closure
-	rounds := []string{`String(run(300))`, `String(run(300))`, `String(run(300))`, `String(run(300))`, `String(odd(300))`, `String(odd(300))`,
-		`V.prototype={add(a,b){return (a-b)|0}};String(run(300))`, `String(run(300))`}
+	cl2 := r.global.getOwn(r.atoms.intern("run2")).value.Object().fn().closure
+	rounds := []string{`String(run(300))+run2(300)`, `String(run(300))+run2(300)`, `String(run(300))+run2(300)`, `String(run(300))+run2(300)`,
+		`String(odd(300))`, `String(odd(300))`, `V.prototype={add(a,b){return (a-b)|0}};String(run(300))+run2(300)`, `String(run(300))+run2(300)`}
 	for i, src := range rounds {
 		wv, err := want.Run(compileForTest(t, src))
 		if err != nil {
@@ -7214,9 +7217,13 @@ func TestJITSSAReadsFunctionProperties(t *testing.T) {
 				t.Fatalf("run left native code %d times", n)
 			}
 			// The method found by the reads naming it as its first code
-			// was compiled (jitCalleeAt), not learned at an exit after.
-			if e.inlineReopts != 0 {
-				t.Fatalf("run was compiled again %d times for its calls", e.inlineReopts)
+			// was compiled (jitCalleeAt), not learned at an exit after:
+			// five reads for run2, RayTrace's
+			// Flog.RayTracer.Vector.prototype.subtract's.
+			for name, c := range map[string]*closure{"run": cl, "run2": cl2} {
+				if e := r.jit.cache[weak.Make(c.fn)]; e == nil || e.ssa == nil || e.inlineReopts != 0 {
+					t.Fatalf("%s was compiled again for its calls: %+v", name, e)
+				}
 			}
 		}
 	}

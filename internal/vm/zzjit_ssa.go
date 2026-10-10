@@ -1480,8 +1480,9 @@ func (r *Runtime) jitCallableClosure(cl *closure, o *Object) (*Object, *closure)
 }
 
 // jitChainReads is how many reads jitChainValue follows: a global and the
-// properties after it, Flog.RayTracer.Vector's three.
-const jitChainReads = 4
+// properties after it, Flog.RayTracer.Vector's three, and the five of
+// Flog.RayTracer.Vector.prototype.subtract, a method's, with one to spare.
+const jitChainReads = 6
 
 // jitChainValue is the value the read at q of cl's code gives now, if it
 // is a global's read, by its cache, or a data property's of an object a
