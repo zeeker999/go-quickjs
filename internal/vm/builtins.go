@@ -2478,7 +2478,7 @@ func (r *Runtime) initMathBuiltins() {
 		fo.fn().mathOp = uint8(i + 1)
 	}
 
-	r.defMethod(m, "pow", 2, func(rt *Runtime, this Value, args []Value) (Value, error) {
+	r.powFn = r.defMethod(m, "pow", 2, func(rt *Runtime, this Value, args []Value) (Value, error) {
 		a, err := rt.toNumber(arg(args, 0))
 		if err != nil {
 			return Undefined, err

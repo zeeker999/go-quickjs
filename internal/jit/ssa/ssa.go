@@ -225,6 +225,10 @@ const (
 	// its frame's slot while the frame runs, its own once closed -- found
 	// again each time, as closing moves it (ir.UpvalueRead).
 	OpUpvalueCell // -> source
+	// OpPowF64 is Math.pow of two numbers (Intrinsic) where its answer is
+	// exact, and so the VM's (ExactPow); a guard, which leaves the call
+	// to Go otherwise.
+	OpPowF64 // f64, f64 -> f64
 )
 
 var opNames = [...]string{
@@ -238,7 +242,7 @@ var opNames = [...]string{
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
 	OpSameObject: "sameobject", OpFrameRoom: "frameroom", OpKeepRef: "keepref", OpKeep: "keep", OpKept: "kept",
 	OpCall: "call", OpCallCell: "callcell", OpSqrtF64: "sqrtf", OpAbsF64: "absf", OpInstanceOf: "instanceof", OpTypeIs: "typeis",
-	OpCheckTrue: "checktrue", OpConstCell: "constcell", OpUpvalueCell: "upvaluecell",
+	OpCheckTrue: "checktrue", OpConstCell: "constcell", OpUpvalueCell: "upvaluecell", OpPowF64: "powf",
 }
 
 func (o Op) String() string {
@@ -253,7 +257,7 @@ func (o Op) isGuard() bool {
 	switch o {
 	case OpUnboxF64, OpTruth, OpCheckInit, OpModF64, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite, OpElemCell, OpLength,
 		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell, OpStringMethod, OpStringCode, OpLooseNullish, OpEqTagged,
-		OpSameObject, OpFrameRoom, OpCall, OpInstanceOf, OpTypeIs, OpCheckTrue:
+		OpSameObject, OpFrameRoom, OpCall, OpInstanceOf, OpTypeIs, OpCheckTrue, OpPowF64:
 		return true
 	}
 	return false

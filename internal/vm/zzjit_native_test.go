@@ -25,6 +25,7 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 	"github.com/go-quickjs/go-quickjs/internal/parser"
 )
 
@@ -6582,6 +6583,104 @@ func TestJITSSAMathIntrinsics(t *testing.T) {
 			// in the loop's 300 iterations.
 			if n := e.ssaStats.hosts - hosts; n > 3 {
 				t.Fatalf("sum left native code %d times", n)
+			}
+		}
+	}
+}
+
+// Where native code answers Math.pow itself (ssa.ExactPow), its answer is
+// the VM's, bit for bit: bases from -40 to 40 and some fractions, -0, NaN
+// and the infinities, to powers from -3 to 70, halves among them.
+func TestJITExactPowIsVMs(t *testing.T) {
+	xs := []float64{math.Copysign(0, -1), 0.5, 0.3, 2.5, -1.5, math.NaN(), math.Inf(1), math.Inf(-1), 1 << 52, -(1 << 53)}
+	for x := -40; x <= 40; x++ {
+		xs = append(xs, float64(x))
+	}
+	answered := 0
+	for _, x := range xs {
+		for y2 := -6; y2 <= 140; y2++ {
+			y := float64(y2) / 2
+			got, ok := ssa.ExactPow(x, y)
+			if !ok {
+				continue
+			}
+			answered++
+			if want := jsPow(x, y); math.Float64bits(got) != math.Float64bits(want) {
+				t.Fatalf("Math.pow(%v, %v): native %v, VM %v", x, y, got, want)
+			}
+		}
+	}
+	if answered < 1000 {
+		t.Fatalf("native code answers only %d", answered)
+	}
+}
+
+// Math.pow(x, y) is computed by native code where its answer is exact
+// (ssa.ExactPow): y 2, and an integer to a power from 0 to 64 up to 2**53,
+// RayTrace's Math.pow(10, gloss+1), which had its rayTrace leave native
+// code at every call and be demoted. Past 2**53, for a fraction, a negative
+// or fractional power, NaN or a string, Go makes the call; Math.max, of two
+// arguments too, is not taken for it, nor a function replacing it. Each
+// answer is the interpreter's.
+func TestJITSSAMathPow(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function pw(n){let s=0;for(let i=0;i<n;i++){const k=i%9;s+=Math.pow(10,k)+Math.pow(-3,k)+Math.pow(i%7-3.5,2)+Math.pow(k,0)+Math.pow(2,53+k%2-1)/1e15+Math.abs(k-4)}return s}
+		function odd(n){let r;for(let i=0;i<n;i++){r=[Math.pow(10,23),Math.pow(17,13),Math.pow(0.3,3),Math.pow(2,-1),Math.pow(NaN,0),Math.pow(1,Infinity),1/Math.pow(-0,3),Math.pow(-2,2.5),Math.pow('3',2),Math.max(2,3),Math.pow(i%3,0),Math.pow(-2,63)]}return r.join()}
+		function one(x,y,n){let r=0;for(let i=0;i<n;i++)r=Math.pow(x,y);return r}
+		function all(){return [one(10,23,50),one(17,13,50),one(0.3,3,50),one(2,-1,50),one(NaN,0,50),one(1,Infinity,50),1/one(-0,3,50),
+			one(-2,2.5,50),one('3',2,50),one(-2,63,50),one(2.5,2,50),one(-7,0,50),one(-3,33,50),one(0,-1,50),one(-1,-3,50)].join()}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("pw")).value.Object().fn().closure
+	odd := r.global.getOwn(r.atoms.intern("odd")).value.Object().fn().closure
+	one := r.global.getOwn(r.atoms.intern("one")).value.Object().fn().closure
+	rounds := []string{`String(pw(300))`, `String(pw(300))`, `String(pw(300))`, `String(pw(300))`, `String(pw(300))`,
+		`odd(300)`, `odd(300)`, `odd(300)`, `String(one(10,3,300))`, `String(one(10,3,300))`, `String(one(10,3,300))`, `all()`, `all()`,
+		`Math.pow=function(x,y){return x+y};String(pw(300))+all()`}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts uint64
+		if e := r.jit.cache[weak.Make(cl.fn)]; e != nil {
+			hosts = e.ssaStats.hosts
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 4 {
+			e := r.jit.cache[weak.Make(cl.fn)]
+			if e == nil || e.ssa == nil {
+				t.Fatalf("pw did not run natively: %+v", e)
+			}
+			if n := e.ssaStats.hosts - hosts; n != 0 {
+				t.Fatalf("pw left native code %d times", n)
+			}
+		}
+		if i == 7 {
+			if e := r.jit.cache[weak.Make(odd.fn)]; e == nil || e.ssa == nil {
+				t.Fatalf("odd did not run natively: %+v", e)
+			}
+		}
+		if i == 10 {
+			if e := r.jit.cache[weak.Make(one.fn)]; e == nil || e.ssa == nil || e.ssaStats.hosts != 0 {
+				t.Fatalf("one did not run natively: %+v", e)
 			}
 		}
 	}

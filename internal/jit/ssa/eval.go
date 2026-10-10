@@ -23,6 +23,35 @@ func integer64(x float64) bool {
 	return x >= -1<<63 && x < 1<<63 && math.Trunc(x) == x
 }
 
+// ExactPow is Math.pow(x, y) where native code computes it (OpPowF64), and
+// false where it leaves the call to Go: x*x for y 2, as the VM's pow has
+// it, and an integer x to an integer power from 0 to 64 whose result is at
+// most 2**53, by repeated squaring, every product exact. The VM's pow errs
+// by less than an ulp, so it gives such a result exactly too; past 2**53
+// the two differ (10**23 is 1e23 squared so, 1.0000000000000001e23 by the
+// VM's), and for a fraction (0.3**3).
+func ExactPow(x, y float64) (float64, bool) {
+	if y == 2 {
+		return x * x, true
+	}
+	if !integer64(y) || y < 0 || y > 64 || !integer64(x) {
+		return 0, false
+	}
+	r, b := 1.0, x
+	for e := int(y); e != 0; {
+		if e&1 != 0 {
+			r *= b
+		}
+		if e >>= 1; e != 0 {
+			b *= b
+		}
+	}
+	if math.Abs(r) > 1<<53 {
+		return 0, false
+	}
+	return r, true
+}
+
 // index converts an element's key, as the slot IR does: an integer in
 // [0, 2**32), negative zero included.
 func index(x float64) (uint64, bool) {
@@ -522,6 +551,12 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 				default:
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
+			case OpPowF64:
+				r, ok := ExactPow(a.f, b.f)
+				if !ok {
+					return exit(v.State, ir.ExitKind(v.Aux))
+				}
+				vals[v.ID] = val{f: r}
 			case OpModF64:
 				if !integer64(a.f) || !integer64(b.f) || b.f == 0 {
 					return exit(v.State, ir.ExitKind(v.Aux))
