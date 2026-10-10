@@ -6687,6 +6687,38 @@ func TestJITReoptDue(t *testing.T) {
 	}
 }
 
+// Exits while the collector marks -- native code then leaves wherever it
+// would store a pointer without a write barrier -- count neither against
+// inlining a call nor against calling a function natively: one collection
+// had stopped EarleyBoyer's sc_Pair constructions being inlined for good,
+// some runs in three, and the suite then took half as long again.
+func TestJITExitsWhileMarkingCountNothing(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	defer func(was func() bool) { jitMarking = was }(jitMarking)
+	marking := true
+	jitMarking = func() bool { return marking }
+	e := &jitEntry{inlines: []jitInline{{pc: 3}}, nativeIn: 1}
+	for range 4 * jitInlineExits {
+		r.jitInlineLeft(e, 3)
+	}
+	for range 4 * jitUnwindProbe {
+		r.jitUnwound(e)
+	}
+	if len(e.notInline) != 0 || e.inlines[0].exits != 0 || e.nativeOut != 0 || e.notNative || e.unwindReopt {
+		t.Fatalf("exits while marking were counted: %+v", e)
+	}
+	marking = false
+	for range jitInlineExits {
+		r.jitInlineLeft(e, 3)
+	}
+	for range jitUnwindProbe {
+		r.jitUnwound(e)
+	}
+	if len(e.notInline) != 1 || e.nativeOut == 0 {
+		t.Fatalf("exits were not counted: %+v", e)
+	}
+}
+
 // Looking at a construction's pools when native code leaves there makes
 // nothing: it had concatenated the entry's two lists at every exit, which
 // came to a sixth of RayTrace's allocations with construction on.
