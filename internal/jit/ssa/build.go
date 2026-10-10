@@ -1039,6 +1039,10 @@ func (b *builder) state(blk *Block, pc int) *FrameState {
 			}
 		}
 		for i := fr.base; i < len(s.Slots); i++ {
+			if !b.p.LiveAt(pc, i-fr.base) {
+				// The callee's local, dead there, as the caller's below.
+				continue
+			}
 			s.Slots[i] = b.read(i, blk)
 			s.Slots[i].Uses++
 		}
@@ -1049,6 +1053,12 @@ func (b *builder) state(blk *Block, pc int) *FrameState {
 	depth := b.p.Maps[pc].Depth
 	s := b.f.newState(FrameState{PC: b.p.Maps[pc].PC, Depth: depth, Slots: b.f.refsOf(b.p.Locals + depth), Site: pc})
 	for i := range s.Slots {
+		if !b.p.LiveAt(pc, i) {
+			// A local the interpreter writes before it reads from here:
+			// not written, nor kept alive for the exit, as V8 leaves dead
+			// registers out of a frame state.
+			continue
+		}
 		s.Slots[i] = b.read(i, blk)
 		s.Slots[i].Uses++
 	}

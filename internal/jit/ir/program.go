@@ -243,6 +243,24 @@ type Program struct {
 	Globals []uint32
 	Code    []Instruction
 	Maps    []StateMap
+	// Live says, for each instruction, which of the first LiveLocals
+	// slots -- the function's locals -- the code from there on may read
+	// before it writes them: LiveWords words of bits a PC, from Live[pc *
+	// LiveWords]. A local not live there need not be written for the
+	// interpreter to resume at it, as V8's frame states leave out dead
+	// registers. Nil where it is not known.
+	Live       []uint64
+	LiveLocals int
+	LiveWords  int
+}
+
+// LiveAt reports whether local i may be read from pc on before it is
+// written (Live); true where that is not known.
+func (p *Program) LiveAt(pc, i int) bool {
+	if p.Live == nil || i >= p.LiveLocals {
+		return true
+	}
+	return p.Live[pc*p.LiveWords+i/64]&(1<<(i%64)) != 0
 }
 
 // ExitKind identifies a completed return or a resumable exit.
