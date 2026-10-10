@@ -194,8 +194,10 @@ type jitEntry struct {
 	reopt         bool
 	reopts        uint8
 	// fed are the property sites, each with the shape the code was
-	// compiled for there, or none (jitFed).
-	fed []jitFedSite
+	// compiled for there, or none (jitFed); fedInlined those of the
+	// callees it inlines whose caches knew nothing (jitInlineFed).
+	fed        []jitFedSite
+	fedInlined []jitFedInlined
 	// poly are the reads that met objects of shapes the code was not
 	// compiled for, each with up to jitPropertyCases of them, which it is
 	// compiled again for (jitPolySeen); polyReopt marks that it is to be,
