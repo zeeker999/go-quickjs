@@ -147,13 +147,14 @@ func joinOrigin(a, b int) int {
 // constants are made in the predecessor the argument comes from.
 func shadowMerges(f *Func) {
 	origin := Origins(f)
-	need := map[*Value]bool{}
+	need := f.bools(f.nextID)
+	any := false
 	var walk func(v *Value)
 	walk = func(v *Value) {
-		if v.Op != OpPhi || need[v] || origin.At(v) == OriginScalar {
+		if v.Op != OpPhi || need[v.ID] || origin.At(v) == OriginScalar {
 			return
 		}
-		need[v] = true
+		need[v.ID], any = true, true
 		for _, a := range v.Args {
 			walk(a)
 		}
@@ -165,16 +166,17 @@ func shadowMerges(f *Func) {
 			}
 		}
 	}
-	if len(need) == 0 {
+	if !any {
 		return
 	}
 	// In block order, so that values are numbered the same every time.
 	var shadows []*Value
+	fresh := f.bools(f.nextID)
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
-			if need[v] && v.Shadow == nil {
+			if v.ID < len(need) && need[v.ID] && v.Shadow == nil {
 				s := f.alloc(Value{Op: OpPhi, Type: Source, Args: f.refsOf(len(v.Args)), Block: b})
-				v.Shadow = s
+				v.Shadow, fresh[v.ID] = s, true
 				shadows = append(shadows, v)
 			}
 		}
@@ -193,7 +195,22 @@ func shadowMerges(f *Func) {
 			v.Shadow.Args[i] = s
 			s.Uses++
 		}
-		insertAfter(f, v, v.Shadow)
+	}
+	// Each shadow right after its phi: a block's, all at once.
+	for i := 0; i < len(shadows); {
+		b, j := shadows[i].Block, i
+		for j < len(shadows) && shadows[j].Block == b {
+			j++
+		}
+		vs := f.refsOf(len(b.Values) + j - i)[:0]
+		for _, v := range b.Values {
+			vs = append(vs, v)
+			if v.ID < len(fresh) && fresh[v.ID] {
+				vs = append(vs, v.Shadow)
+			}
+		}
+		b.Values = vs
+		i = j
 	}
 }
 

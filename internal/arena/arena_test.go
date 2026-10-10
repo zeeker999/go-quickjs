@@ -110,3 +110,27 @@ func TestKeepBig(t *testing.T) {
 		t.Fatal("an arena that does not keep big requests kept one")
 	}
 }
+
+// TestRewindSkippedTail pins that a rewind clears what was cut from a chunk
+// a later request did not fit in, and that slots past it, never handed out,
+// come out zeroed in the next job too: Rewind clears only what was cut.
+func TestRewindSkippedTail(t *testing.T) {
+	var a Arena[int]
+	fill := func(s []int) {
+		for i := range s {
+			s[i] = 7
+		}
+	}
+	for job := range 4 {
+		for _, n := range []int{40 + job*8, 30, 64, 10} {
+			s := a.Make(n)
+			for i, v := range s {
+				if v != 0 {
+					t.Fatalf("job %d: Make(%d)[%d] = %d", job, n, i, v)
+				}
+			}
+			fill(s)
+		}
+		a.Rewind()
+	}
+}
