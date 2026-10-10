@@ -307,13 +307,24 @@ var (
 // C's own with first. Go fills it when the site leaves native code for
 // want of one.
 type ObjectPool struct {
-	Objects [PoolSize]unsafe.Pointer
+	Objects [PoolCapacity]unsafe.Pointer
 	Count   uint64
 	Proto   unsafe.Pointer
+	// Size is how many objects Go makes when it fills the pool, which
+	// native code does not read: PoolSize at first, twice as many each
+	// time the pool runs out, up to PoolCapacity.
+	Size uint64
 }
 
-// PoolSize is how many objects an ObjectPool holds.
-const PoolSize = 16
+// PoolSize is how many objects an ObjectPool is filled with at first, and
+// PoolCapacity how many it may hold. A pool that runs out has native code
+// leave, and every native caller's level with it (V8 allocates inline,
+// from a space the collector refills): a site that constructs much is
+// given more at a time.
+const (
+	PoolSize     = 16
+	PoolCapacity = 128
+)
 
 // ObjectPool's offsets.
 const (

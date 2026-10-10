@@ -4111,7 +4111,9 @@ func TestJITSSANestedInline(t *testing.T) {
 // receiver comes from the site's pool (abi.ObjectPool), made as the VM
 // makes one, and the constructor is called natively with it, or inlined
 // with it, V's here, as V8 inlines a constructor that returns nothing; native code
-// leaves only for the pool to be filled again, once in abi.PoolSize. A
+// leaves only for the pool to be filled again, once in abi.PoolSize at
+// first, then, the pool given more each time it runs out, once in
+// abi.PoolCapacity. A
 // result that is an object is the construction's, any other its receiver,
 // natively and when the constructor leaves native code (L's String every
 // fiftieth); a construction after the function's prototype changed takes
@@ -4177,11 +4179,11 @@ func TestJITSSANativeConstruct(t *testing.T) {
 				t.Fatal("run does not construct natively")
 			}
 			// Entered again after each construction Go makes, its pool
-			// filled again.
-			if e.entrySlow || e.ssaStats.entries-entries < 400/abi.PoolSize {
+			// filled again, as full as it may be.
+			if e.entrySlow || e.ssaStats.entries == entries {
 				t.Fatalf("round %d: run's code is entered %d times for 400 constructions", i, e.ssaStats.entries-entries)
 			}
-			if left := e.ssaStats.hosts - hosts; left > 400/abi.PoolSize+2 {
+			if left := e.ssaStats.hosts - hosts; left > 400/abi.PoolCapacity+3 {
 				t.Fatalf("round %d: run left native code %d times for 400 constructions", i, left)
 			}
 			checked = true

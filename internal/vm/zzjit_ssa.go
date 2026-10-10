@@ -1544,17 +1544,21 @@ func (r *Runtime) jitConstructs(o *Object) bool {
 func (r *Runtime) jitFillPool(pool *abi.ObjectPool, o *Object) {
 	clear(pool.Objects[:])
 	pool.Count, pool.Proto = 0, nil
+	if pool.Size == 0 {
+		pool.Size = abi.PoolSize
+	}
+	n := int(pool.Size)
 	if o == r.proto.arrayCtor {
 		// `new Array()`: an empty array, of the realm's prototype, with the
 		// layout a property cache gives an array it meets (ensureShape),
 		// which native code compares receivers' with: a method read on one
 		// it made, a.push, would leave for Go to give it.
-		for i := range pool.Objects {
+		for i := range n {
 			a := r.newArrayFrom(nil)
 			r.ensureShape(a)
 			pool.Objects[i] = unsafe.Pointer(a)
 		}
-		pool.Count, pool.Proto = abi.PoolSize, unsafe.Pointer(r.proto.array)
+		pool.Count, pool.Proto = uint64(n), unsafe.Pointer(r.proto.array)
 		return
 	}
 	p := o.getOwnVisible(atomPrototype)
@@ -1568,12 +1572,12 @@ func (r *Runtime) jitFillPool(pool *abi.ObjectPool, o *Object) {
 	if root != nil {
 		props = max(props, int(root.slack))
 	}
-	for i := range pool.Objects {
+	for i := range n {
 		obj := newLiteralObject(proto, ClassObject, props)
 		obj.shape = root
 		pool.Objects[i] = unsafe.Pointer(obj)
 	}
-	pool.Count, pool.Proto = abi.PoolSize, unsafe.Pointer(proto)
+	pool.Count, pool.Proto = uint64(n), unsafe.Pointer(proto)
 }
 
 // jitRefillPools fills, at a construction that left native code at pc,
@@ -1591,6 +1595,8 @@ func (r *Runtime) jitRefillPools(f *frame, e *jitEntry, pc, sp int, in bytecode.
 			continue
 		}
 		if x.pool.Count == 0 {
+			// Run out: more next time.
+			x.pool.Size = min(2*max(x.pool.Size, abi.PoolSize), abi.PoolCapacity)
 			r.jitFillPool(x.pool, o)
 			refilled = true
 		} else if x.cl == nil {
