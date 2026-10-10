@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"unsafe"
 	"weak"
 
@@ -1858,6 +1859,9 @@ type jitNativeLevel struct {
 // returns what the outermost returned or threw.
 func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function) (Value, error) {
 	s := r.jit
+	if c := &s.ssaCtxs[idx+1]; c.Live == abi.LiveCall && c.ExitKind == abi.ExitEnter && (idx+2 == jitContexts || s.ssaCtxs[idx+2].Live == 0) {
+		return r.jitEnterOne(c, idx+1, code, int(s.ssaCtxs[idx].ExitPC))
+	}
 	// Where the call each level runs for is: e's code's at first, then
 	// that of the level before.
 	caller, callerPC := code, int(s.ssaCtxs[idx].ExitPC)
@@ -1912,8 +1916,9 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 	}
 	n := len(s.unwinding) - start
 	if n != 0 {
-		// The innermost left; the others only return through Go.
-		if l := &s.unwinding[len(s.unwinding)-1]; !l.inline {
+		// The innermost left -- but for one that never entered native code
+		// (ExitEnter), a call Go makes; the others only return through Go.
+		if l := &s.unwinding[len(s.unwinding)-1]; !l.inline && l.kind != abi.ExitEnter {
 			if e := s.hint(l.cl.hint()); e != nil {
 				r.jitUnwound(e)
 			}
@@ -2026,6 +2031,81 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 	return v, err
 }
 
+// jitEnterCallee runs a callee a native call made, whose frame f is, from
+// its start, as runFD would once it had made the frame: the callee had no
+// code its native callers may call (abi.ExitEnter). Its native caller goes
+// on after the call with what it returns (jitUnwindNative), its own frame
+// never written: the call costs Go's running the callee, not a host exit's
+// writing the caller's frame and making the call.
+func (r *Runtime) jitEnterCallee(f *frame, e *jitEntry, ctx int) (Value, error) {
+	r.jit.entered++
+	if c := &r.jit.ssaCtxs[ctx]; c.EnterCallee != 0 {
+		// A word native code wrote, the object's address, which the
+		// caller's code keeps alive.
+		f.callee = *(**Object)(unsafe.Pointer(&c.EnterCallee))
+		c.EnterCallee = 0
+	}
+	// A call Go makes to code native callers no longer call counts toward
+	// their calling it again (jitRetryNative), as the call's exit would
+	// have (jitCallTarget); tryJITAt counts it for a callee Go enters.
+	if e != nil && e.ssa != nil && e.notNative && e.entrySlow {
+		jitRetryNative(e)
+	}
+	// As runFD runs a frame it made: its native code first, entered from
+	// Go -- which no native caller may jump to for now (notNative), not
+	// none at all -- or its tree.
+	v, err, native := r.tryJITFrame(f)
+	if !native {
+		fn := f.cl.fn
+		t := (*tree)(atomic.LoadPointer(&fn.VMCode))
+		if t == nil {
+			t = firstTree(fn)
+		}
+		if t != noTree {
+			v, err = r.runTree(f, t)
+		} else {
+			v, err = r.execute(f)
+		}
+	}
+	if err == errTailCall {
+		// It ended in a tail call, its frame given up as run would: the
+		// call is made here, the ordinary way. (No callee native code
+		// calls has one now: the lowering takes none.)
+		tc := r.pendingTail
+		r.pendingTail = tailCall{}
+		v, err = r.call(tc.callee, tc.this, tc.args)
+	}
+	return v, err
+}
+
+// jitEnterOne is jitUnwindNative for the usual case of the calls Go
+// finishes for an ExitEnter: one level, context i, c, a callee that never
+// entered native code, called by code's call at callerPC. Its frame is made
+// as jitUnwindNative makes it, without the levels' bookkeeping.
+func (r *Runtime) jitEnterOne(c *abi.Context, i int, code *bytecode.Function, callerPC int) (Value, error) {
+	s := r.jit
+	cl := (*closure)(c.Closure)
+	fn := cl.fn
+	base, this := int(c.Base), *(*Value)(unsafe.Pointer(&c.This))
+	construct := callerPC < len(code.Code) && code.Code[callerPC].Op == bytecode.OpNew
+	c.Live, c.ReturnTo = 0, 0
+	s.unwound++
+	f := r.pushFrame()
+	f.cl = cl
+	f.locals = r.stack[base : base+fn.LocalCount : base+fn.LocalCount]
+	f.base = base + fn.LocalCount
+	f.pc = 0
+	f.this, f.newTarget, f.callee, f.args = this, Undefined, nil, nil
+	f.openUpvalues, f.handlers = f.openUpvalues[:0], f.handlers[:0]
+	f.thisRef, f.withScopes, f.evalVars, f.native, f.savedSP = nil, nil, nil, "", 0
+	v, err := r.jitEnterCallee(f, s.hint(cl.hint()), i)
+	if construct && err == nil && !v.IsObject() {
+		v = this
+	}
+	r.popFrameOf(f, base)
+	return v, err
+}
+
 // jitUnwindProbe is how many times native code called natively leaves
 // between looks at whether it leaves too often, and jitUnwindShare the
 // share of its calls it may leave from, as one in so many: Go then finishes
@@ -2076,6 +2156,8 @@ func (r *Runtime) jitFinishExit(f *frame, e *jitEntry, l *jitNativeLevel) (Value
 	pc, depth := int(l.pc), int(l.depth)
 	f.pc = uint32(pc)
 	switch l.kind {
+	case abi.ExitEnter:
+		return r.jitEnterCallee(f, e, l.ctx)
 	case abi.ExitHost:
 		// What it learns here it learns as runSSA's exits do: a function
 		// only native callers run is entered from Go nowhere else.
