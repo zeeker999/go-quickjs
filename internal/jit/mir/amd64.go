@@ -370,7 +370,11 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 		c.a.Load(scratchB, scratchA, abi.OffPoolCount)
 		c.a.Op(amd64.Test, scratchB, scratchB, true)
 		guard(amd64.CondE)
-		c.poolTake(v, site)
+		if site.Argc == 0 {
+			c.poolTake(v, site)
+			return
+		}
+		c.arrayLiteral(v, site)
 		return
 	}
 	sp := len(s.Slots)
@@ -923,6 +927,66 @@ func (c *compiler) viaGuards(t *ssa.CallSite, recv *ssa.Value, guard func(amd64.
 	c.a.MovImm(scratchB, uint64(t.Callee))
 	c.a.Op(amd64.Cmp, scratchC, scratchB, true)
 	guard(amd64.CondNE)
+}
+
+// arrayLiteral makes an array literal's array: the pool's next, whose room
+// holds the elements, the call's operands, written in, both words of
+// each, and its length set. The array is fresh, so nothing else sees it
+// meanwhile, and the collector is not marking. The result is set last: its
+// register may be an operand's.
+func (c *compiler) arrayLiteral(v *ssa.Value, site *ssa.CallSite) {
+	vs := int32(c.enc.ValueSize)
+	if vs != 16 {
+		panic("mir: a value that is not 16 bytes")
+	}
+	at := abi.OffKeep + int32(v.Index)*vs
+	c.a.MovImm(scratchA, uint64(site.Pool))
+	c.a.Load(scratchB, scratchA, abi.OffPoolCount)
+	c.a.OpImm(amd64.Sub, scratchB, 1, true)
+	c.a.Store(scratchA, abi.OffPoolCount, scratchB)
+	c.a.ShiftImm(amd64.Shl, scratchB, 3, true)
+	c.a.Op(amd64.Add, scratchB, scratchA, true)
+	c.a.Load(scratchC, scratchB, abi.OffPoolObjects)
+	c.a.MovImm(scratchA, 0)
+	c.a.Store(scratchB, abi.OffPoolObjects, scratchA)
+	c.a.Store(regCtx, at+c.enc.RefOffset, scratchC)
+	c.a.MovImm(scratchA, c.enc.Object)
+	c.a.Store(regCtx, at+c.enc.NumOffset, scratchA)
+	for i, x := range v.Args {
+		// The element's words: its number word in xScratch0, its pointer
+		// word in xScratch1, as push has them.
+		var w amd64.Reg
+		if remat(x) {
+			c.materialize(x, scratchA)
+			w = scratchA
+		} else {
+			w = c.gpr(x, scratchA)
+		}
+		c.a.MovQToX(xScratch0, w)
+		number, have := c.a.NewLabel(), c.a.NewLabel()
+		if x.Shadow != nil || c.origin.At(x) >= 0 {
+			c.a.MovImm(scratchB, abi.NumberLimit)
+			c.a.Op(amd64.Cmp, w, scratchB, true)
+			c.a.Jcc(amd64.CondB, number)
+		}
+		c.pointerWord(x, w)
+		c.a.Jmp(have)
+		c.a.Bind(number)
+		c.a.MovImm(scratchB, 0)
+		c.a.Bind(have)
+		c.a.MovQToX(xScratch1, scratchB)
+		c.a.Load(scratchC, regCtx, at+c.enc.RefOffset)
+		c.a.Load(scratchA, scratchC, c.enc.ObjectElems)
+		c.a.MovQFromX(scratchB, xScratch0)
+		c.a.Store(scratchA, int32(i)*vs+c.enc.NumOffset, scratchB)
+		c.a.MovQFromX(scratchB, xScratch1)
+		c.a.Store(scratchA, int32(i)*vs+c.enc.RefOffset, scratchB)
+	}
+	c.a.Load(scratchC, regCtx, at+c.enc.RefOffset)
+	c.a.MovImm(scratchB, uint64(len(v.Args)))
+	c.a.Store(scratchC, c.enc.ObjectElems+8, scratchB)
+	c.a.MovImm(scratchA, c.enc.Object)
+	c.setG(v, scratchA)
 }
 
 // poolTake has a call's result be its pool's last object, its cell

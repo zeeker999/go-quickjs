@@ -1335,6 +1335,57 @@ func (c *a64Compiler) stringBytes(exit, yes, no arm64.Label) {
 // call calls natively the function a call calls, as amd64's does. Once the
 // state is recorded and what is live across the call saved, the frame is
 // made in registers the allocator gives values, X3 to X8.
+// arrayLiteral is amd64's: the pool's next array, the operands written in
+// as its elements, its length set, the result set last.
+func (c *a64Compiler) arrayLiteral(v *ssa.Value, site *ssa.CallSite) {
+	vs := int32(c.enc.ValueSize)
+	if vs != 16 {
+		panic("mir: a value that is not 16 bytes")
+	}
+	at := abi.OffKeep + int32(v.Index)*vs
+	c.a.MovImm(a64A, uint64(site.Pool))
+	c.a.Load(a64B, a64A, abi.OffPoolCount)
+	c.a.AddImm(a64B, a64B, -1, true)
+	c.a.Store(a64A, abi.OffPoolCount, a64B)
+	c.a.ShiftImm(arm64.Lsl, a64B, a64B, 3, true)
+	c.a.Op(arm64.Add, a64B, a64B, a64A, true)
+	c.a.Load(a64C, a64B, abi.OffPoolObjects)
+	c.a.Store(a64B, abi.OffPoolObjects, arm64.ZR)
+	c.a.Store(a64Ctx, at+c.enc.RefOffset, a64C)
+	c.a.MovImm(a64A, c.enc.Object)
+	c.a.Store(a64Ctx, at+c.enc.NumOffset, a64A)
+	for i, x := range v.Args {
+		var w arm64.Reg
+		if remat(x) {
+			c.materialize(x, a64A)
+			w = a64A
+		} else {
+			w = c.gpr(x, a64A)
+		}
+		c.a.MovRR(a64D, w)
+		number, have := c.a.NewLabel(), c.a.NewLabel()
+		if x.Shadow != nil || c.origin.At(x) >= 0 {
+			c.a.MovImm(a64B, abi.NumberLimit)
+			c.a.Cmp(w, a64B, true)
+			c.a.BCond(arm64.LO, number)
+		}
+		c.pointerWord(x, w)
+		c.a.B(have)
+		c.a.Bind(number)
+		c.a.MovImm(a64B, 0)
+		c.a.Bind(have)
+		c.a.Load(a64C, a64Ctx, at+c.enc.RefOffset)
+		c.a.Load(a64A, a64C, c.enc.ObjectElems)
+		c.a.Store(a64A, int32(i)*vs+c.enc.NumOffset, a64D)
+		c.a.Store(a64A, int32(i)*vs+c.enc.RefOffset, a64B)
+	}
+	c.a.Load(a64C, a64Ctx, at+c.enc.RefOffset)
+	c.a.MovImm(a64B, uint64(len(v.Args)))
+	c.a.Store(a64C, c.enc.ObjectElems+8, a64B)
+	c.a.MovImm(a64A, c.enc.Object)
+	c.setG(v, a64A)
+}
+
 // poolTake is amd64's: the pool's last object is the result.
 func (c *a64Compiler) poolTake(v *ssa.Value, site *ssa.CallSite) {
 	vs := int32(c.enc.ValueSize)
@@ -1370,7 +1421,11 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		c.a.MovImm(a64A, uint64(site.Pool))
 		c.a.Load(a64B, a64A, abi.OffPoolCount)
 		c.a.Cbz(a64B, stub, true)
-		c.poolTake(v, site)
+		if site.Argc == 0 {
+			c.poolTake(v, site)
+			return
+		}
+		c.arrayLiteral(v, site)
 		return
 	}
 	sp := len(s.Slots)

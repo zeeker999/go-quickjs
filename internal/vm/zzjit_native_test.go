@@ -6767,6 +6767,66 @@ func TestJITSSAObjectLiterals(t *testing.T) {
 	}
 }
 
+// An array literal of up to ir.MaxArrayLiteral elements is made natively:
+// its array from the site's pool, with room for the elements and none yet,
+// the operands written in, numbers and references alike, and its length
+// set -- no setter on Array.prototype is asked. In a natively called
+// function, in a loop, nested, empty; one of more elements, Go's. Splay's
+// GeneratePayloadTree leaves its leaves at one. Each answer is the
+// interpreter's.
+func TestJITSSAArrayLiterals(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var o={k:1},str='s';
+		function mk(x){return [x,x+1,str,o,[x],[],null,undefined,true,1.5]}
+		function run(n){let s=0;for(let i=0;i<n;i++){const a=mk(i),b=[i,2];s=(s+a[0]+a[1]+a.length+a[4][0]+a[5].length+b[1]+(a[3]===o?1:0))|0}return s}
+		function last(n){let a;for(let i=0;i<n;i++)a=[i,'x'+i,{v:i},[i,i]];return a}
+		function big(n){let s=0;for(let i=0;i<n;i++){const a=[i,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16];s=(s+a[16]+a.length)|0}return s}
+		function look(a){a.push(7);return JSON.stringify(a)+a.length+Array.isArray(a)+(Object.getPrototypeOf(a)===Array.prototype)}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("run")).value.Object().fn().closure
+	rounds := []string{`String(run(300))`, `String(run(300))`, `String(run(300))`, `String(run(300))`,
+		`look(last(300))`, `look(last(300))`, `look(last(300))`, `String(big(100))`, `String(big(100))`,
+		`Object.defineProperty(Array.prototype,'1',{set(v){throw new Error('set')},configurable:true});[run(300),look(last(10))].join()`}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts uint64
+		if e := r.jit.cache[weak.Make(cl.fn)]; e != nil {
+			hosts = e.ssaStats.hosts
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 3 {
+			e := r.jit.cache[weak.Make(cl.fn)]
+			if e == nil || e.ssa == nil || e.entrySlow || len(e.literals) != 1 {
+				t.Fatalf("run does not make its array literal natively: %+v", e)
+			}
+			if n := e.ssaStats.hosts - hosts; n > 2*300/abi.PoolCapacity+4 {
+				t.Fatalf("run left native code %d times", n)
+			}
+		}
+	}
+}
+
 // A read compiled for the shapes it met (up to jitPropertyCases), one on a
 // prototype among them, searches the own table of a receiver of any other
 // shape rather than leave, as V8's megamorphic loads look further: objects

@@ -138,7 +138,8 @@ type CallSite struct {
 	Protos                        [2]Holder
 	Pop                           bool
 	// Literal marks an object literal's object (ir.ObjectLiteral), the
-	// pool's, with Alloc: no function, no operands.
+	// pool's, with Alloc: no function, no operands; or an array literal's
+	// (ir.ArrayLiteral), whose Argc operands are its elements.
 	Literal bool
 }
 
@@ -405,7 +406,7 @@ func (b *builder) host(pc int) bool {
 	case ir.BindingCheck:
 		_, ok := b.global(pc)
 		return !ok
-	case ir.ObjectLiteral:
+	case ir.ObjectLiteral, ir.ArrayLiteral:
 		_, ok := b.literal(pc)
 		return !ok
 	case ir.FieldDefine:
@@ -960,7 +961,8 @@ func (b *builder) plan() error {
 			// the interpreter goes on, the boolean not where the typeof's
 			// string was (compile's typeTests): no entry after it.
 		case ir.ArrayWrite, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead,
-			ir.StringMethod, ir.StringCode, ir.BindingWrite, ir.BindingCheck, ir.Resolved, ir.ObjectLiteral, ir.FieldDefine:
+			ir.StringMethod, ir.StringCode, ir.BindingWrite, ir.BindingCheck, ir.Resolved, ir.ObjectLiteral, ir.FieldDefine,
+			ir.ArrayLiteral:
 			// What native code does not do exits to Go, which resumes after
 			// it. A fixed global's check only deoptimizes: the binding can
 			// never move, so it never fails, and what follows sees its
@@ -1046,7 +1048,7 @@ func (b *builder) plan() error {
 		case ir.Return:
 			blk.Kind = BlockReturn
 		case ir.Host, ir.Call, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead, ir.BindingWrite, ir.BindingCheck,
-			ir.ObjectLiteral, ir.FieldDefine:
+			ir.ObjectLiteral, ir.FieldDefine, ir.ArrayLiteral:
 			if fr := b.inlined[end]; fr != nil {
 				// Into the callee, whose returns go to the block after it.
 				blk.Kind = BlockPlain
@@ -1735,9 +1737,10 @@ func (b *builder) instruction(blk *Block, pc int) {
 		// checked here, and Go throws for an unresolved name.
 		guard(OpCheckTrue, None, ir.HostExit, operand(in.Left))
 		b.assign(in.Dest, blk, operand(in.Right))
-	case ir.ObjectLiteral:
+	case ir.ObjectLiteral, ir.ArrayLiteral:
 		// The pool's next object, kept in a cell as a construction's
-		// receiver is: nothing runs.
+		// receiver is: nothing runs. An array's elements are the operands
+		// (CallSite's Argc of them), written into it.
 		site, ok := b.literal(pc)
 		if !ok {
 			blk.ExitKind = ir.HostExit
@@ -1745,8 +1748,15 @@ func (b *builder) instruction(blk *Block, pc int) {
 			blk.State.addUse()
 			break
 		}
-		call := guard(OpCall, Tagged, ir.HostExit)
-		call.Calls = []*CallSite{{Pool: site.Pool, Alloc: true, Literal: true, ThisSlot: -1}}
+		var elems []*Value
+		if in.Op == ir.ArrayLiteral {
+			elems = make([]*Value, in.Extra)
+			for i := range elems {
+				elems[i] = operand(ir.Slot(in.Dest + i))
+			}
+		}
+		call := guard(OpCall, Tagged, ir.HostExit, elems...)
+		call.Calls = []*CallSite{{Pool: site.Pool, Alloc: true, Literal: true, Argc: len(elems), ThisSlot: -1}}
 		call.Index = b.f.Keeps
 		b.f.Keeps++
 		cell := f.newValue(blk, OpCallCell, Source, call)
