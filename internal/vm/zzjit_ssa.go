@@ -2068,11 +2068,8 @@ func (r *Runtime) runSSA(f *frame, e *jitEntry, pc, depth int) (Value, error, bo
 		return Undefined, nil, false
 	}
 	s := r.jit
-	if s.ssaCtxs == nil {
-		s.ssaCtxs = new([jitContexts]abi.Context)
-	}
 	idx := s.ctxTop
-	if idx >= jitContexts-1 {
+	if idx >= len(s.ssaCtxs)-1 && !r.jitGrowContexts() {
 		// As deep in native code, through Go, as there are contexts.
 		return Undefined, nil, false
 	}
@@ -2109,15 +2106,15 @@ func (r *Runtime) jitRunDone(e *jitEntry, idx, top int) {
 	s := r.jit
 	e.ssaRuns--
 	s.ctxTop = top
-	c := &s.ssaCtxs[idx]
+	c := s.ssaCtxs[idx]
 	clear(c.Keep[:e.ssaKeeps])
 	c.This, c.Upvalues = abi.Slot{}, nil
 	if c.RecordHigh != 0 {
 		clear(c.RecordRef[:c.RecordHigh])
 		c.RecordHigh = 0
 	}
-	for i := idx + 1; i < jitContexts; i++ {
-		c := &s.ssaCtxs[i]
+	for i := idx + 1; i < len(s.ssaCtxs); i++ {
+		c := s.ssaCtxs[i]
 		if c.Closure == nil {
 			break
 		}
@@ -2134,7 +2131,7 @@ func (r *Runtime) jitRunDone(e *jitEntry, idx, top int) {
 // runSSALoop is runSSAIn's work, between its run's start and end.
 func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume uintptr) (Value, error, bool) {
 	s := r.jit
-	ctx := &s.ssaCtxs[idx]
+	ctx := s.ssaCtxs[idx]
 	// resume, when not 0, is where native code goes on after a native
 	// call whose callee Go finished, in place of an entry.
 	for {
@@ -2162,7 +2159,7 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 		start, edges := pc, r.backEdges
 		var err error
 		if resume != 0 {
-			err, resume = e.ssa.Resume(resume, &s.ssaCtxs[idx+1]), 0
+			err, resume = e.ssa.Resume(resume, s.ssaCtxs[idx+1]), 0
 		} else {
 			err = e.ssa.Run(pc, ctx)
 		}
@@ -2172,16 +2169,16 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 		// The frame of the code that left, if it left that to Go: this
 		// code's, after a resume, or its deepest native callee's.
 		k := idx
-		for k+1 < jitContexts && s.ssaCtxs[k+1].Live == abi.LiveCall {
+		for k+1 < len(s.ssaCtxs) && s.ssaCtxs[k+1].Live == abi.LiveCall {
 			k++
 		}
-		if c := &s.ssaCtxs[k]; c.ExitKind == abi.ExitTable {
+		if c := s.ssaCtxs[k]; c.ExitKind == abi.ExitTable {
 			// Asked here, not in Apply: a return, the most common way
 			// out, costs no call.
 			s.ssaRecords += uint64(s.exitScratch.Apply(c))
 		}
 		r.jitSSAProfit(e, ctx, start, edges)
-		if c := &s.ssaCtxs[idx+1]; c.Live == abi.LiveCall {
+		if c := s.ssaCtxs[idx+1]; c.Live == abi.LiveCall {
 			// A native call's callee left native code: Go finishes it
 			// (jitUnwindNative), then this code goes on natively where the
 			// callee would have returned to, its state where it left it --
@@ -2339,13 +2336,13 @@ func (r *Runtime) jitShareContexts(idx int, f *frame) {
 	sh := jitShared{
 		global: unsafe.Pointer(f.cl.scope()), lexNames: unsafe.Pointer(&r.lexNames),
 		stackBase: unsafe.Pointer(unsafe.SliceData(r.stack)), stackEnd: uint64(len(r.stack)),
-		levelLimit: uint64(min(jitContexts, idx+max(0, r.maxFrames-r.frameDepth))),
+		levelLimit: uint64(min(len(s.ssaCtxs), idx+max(0, r.maxFrames-r.frameDepth))),
 	}
 	if sh == s.ssaShared && s.ssaSharedFrom <= idx {
 		return
 	}
-	for i := idx; i < jitContexts; i++ {
-		c := &s.ssaCtxs[i]
+	for i := idx; i < len(s.ssaCtxs); i++ {
+		c := s.ssaCtxs[i]
 		c.Level, c.LevelLimit = uint64(i), sh.levelLimit
 		c.StackBase, c.StackEnd = sh.stackBase, sh.stackEnd
 		c.StackTop, c.StackHigh = &r.stackTop, &r.stackHigh
@@ -2355,9 +2352,56 @@ func (r *Runtime) jitShareContexts(idx int, f *frame) {
 	s.ssaShared, s.ssaSharedFrom = sh, idx
 }
 
-// jitContexts is how many contexts native code runs in at once: one for
-// each runSSA running, each native call another (abi.Context.Level).
-const jitContexts = 24
+// jitContexts is how many contexts are made at a time: one for each
+// runSSA running, each native call another (abi.Context.Level); and
+// jitContextsMax how many there come to be. A native call past the last
+// exits, and Go finishes every level (jitUnwindNative): with no more than
+// 24, EarleyBoyer's unifier, a recursion deeper than that, finished most
+// of its calls in Go. A context is some 17 KB.
+const (
+	jitContexts    = 24
+	jitContextsMax = 96
+)
+
+// jitGrowContexts adds jitContexts contexts, linked to the last, if there
+// are fewer than jitContextsMax, and reports whether it did. The others
+// stay where they are, and native code may be running in them: each one
+// whose calls the contexts limited may go as deep as the new ones allow,
+// and each new one holds what they share (jitShareContexts).
+func (r *Runtime) jitGrowContexts() bool {
+	s := r.jit
+	old := len(s.ssaCtxs)
+	if old+jitContexts > jitContextsMax {
+		return false
+	}
+	chunk := new([jitContexts]abi.Context)
+	for i := range chunk {
+		s.ssaCtxs = append(s.ssaCtxs, &chunk[i])
+	}
+	for i := max(old, 1); i < len(s.ssaCtxs); i++ {
+		c, prev := s.ssaCtxs[i], s.ssaCtxs[i-1]
+		prev.Next, c.Prev = unsafe.Pointer(c), unsafe.Pointer(prev)
+	}
+	if old == 0 {
+		return true
+	}
+	n := uint64(len(s.ssaCtxs))
+	last := s.ssaCtxs[old-1]
+	for i, c := range s.ssaCtxs {
+		switch {
+		case i >= old:
+			c.Level, c.LevelLimit = uint64(i), n
+			c.StackBase, c.StackEnd, c.StackTop, c.StackHigh = last.StackBase, last.StackEnd, last.StackTop, last.StackHigh
+			c.BackEdges, c.Global, c.LexNames = last.BackEdges, last.Global, last.LexNames
+		case c.LevelLimit == uint64(old):
+			c.LevelLimit = n
+		}
+	}
+	if s.ssaShared.levelLimit == uint64(old) {
+		s.ssaShared.levelLimit = n
+	}
+	return true
+}
 
 // jitNativeLevel is a frame a native call made whose callee left native
 // code, or an inlined callee's an exit inside it wrote (abi.Context.Live):
@@ -2394,7 +2438,7 @@ type jitNativeLevel struct {
 // returns what the outermost returned or threw.
 func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function) (Value, error) {
 	s := r.jit
-	if c := &s.ssaCtxs[idx+1]; c.Live == abi.LiveCall && c.ExitKind == abi.ExitEnter && (idx+2 == jitContexts || s.ssaCtxs[idx+2].Live == 0) {
+	if c := s.ssaCtxs[idx+1]; c.Live == abi.LiveCall && c.ExitKind == abi.ExitEnter && (idx+2 == len(s.ssaCtxs) || s.ssaCtxs[idx+2].Live == 0) {
 		return r.jitEnterOne(c, idx+1, code, int(s.ssaCtxs[idx].ExitPC))
 	}
 	// Where the call each level runs for is: e's code's at first, then
@@ -2406,8 +2450,8 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 	start := len(s.unwinding)
 	var left *jitEntry
 	leftPC := 0
-	for i := idx + 1; i < jitContexts && s.ssaCtxs[i].Live != 0; i++ {
-		c := &s.ssaCtxs[i]
+	for i := idx + 1; i < len(s.ssaCtxs) && s.ssaCtxs[i].Live != 0; i++ {
+		c := s.ssaCtxs[i]
 		l := jitNativeLevel{base: int(c.Base), kind: c.ExitKind, pc: c.ExitPC, depth: c.ExitDepth, site: c.ExitSite, ctx: i}
 		if c.Live == abi.LiveInline {
 			// The callee its caller -- e's code or a native call's callee's
@@ -2485,6 +2529,14 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 		s.unwinding, s.unwindingFrames = s.unwinding[:start], s.unwindingFrames[:start]
 	}()
 	s.unwound += uint64(n)
+	if n != 0 {
+		// A call from the last context, which the contexts, not the
+		// frames the VM allows, limited: more of them.
+		l := &s.unwinding[start+n-1]
+		if c := s.ssaCtxs[l.ctx]; l.ctx == len(s.ssaCtxs)-1 && c.LevelLimit == uint64(len(s.ssaCtxs)) && l.kind == abi.ExitHost {
+			r.jitGrowContexts()
+		}
+	}
 	if n > 1 {
 		// What Go runs to finish a level runs in contexts past every
 		// level's: a level's native code, resumed after its call, finds
@@ -2514,7 +2566,7 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 			l.top = l.base
 		}
 		f := r.pushFrame()
-		if c := &s.ssaCtxs[l.ctx]; !l.inline && c.Records != 0 {
+		if c := s.ssaCtxs[l.ctx]; !l.inline && c.Records != 0 {
 			// Records its exit left to Go, the collector marking: before
 			// anything else reads its frame, an inlined callee's past it
 			// included.
@@ -2563,7 +2615,7 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 			// Its native code goes on where the call returns to, as runSSA's
 			// does after a callee leaves: its context, spills and keeps are
 			// as it left them, and its callee's, frame base included.
-			c := &s.ssaCtxs[next.ctx]
+			c := s.ssaCtxs[next.ctx]
 			c.Live, c.ReturnTo = 0, 0
 			*(*Value)(unsafe.Pointer(&c.RetValue)) = v
 			s.resumed++
@@ -2602,7 +2654,7 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 // writing the caller's frame and making the call.
 func (r *Runtime) jitEnterCallee(f *frame, e *jitEntry, ctx int) (Value, error) {
 	r.jit.entered++
-	if c := &r.jit.ssaCtxs[ctx]; c.EnterCallee != 0 {
+	if c := r.jit.ssaCtxs[ctx]; c.EnterCallee != 0 {
 		// A word native code wrote, the object's address, which the
 		// caller's code keeps alive.
 		f.callee = *(**Object)(unsafe.Pointer(&c.EnterCallee))

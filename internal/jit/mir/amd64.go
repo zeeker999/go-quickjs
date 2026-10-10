@@ -544,7 +544,7 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 			c.directOperand(s.Slots[args+i], true, int32(i)*vs)
 		}
 		if site.ThisSlot >= 0 && site.Pool == 0 {
-			c.directOperand(s.Slots[this], false, abi.ContextSize+abi.OffThis)
+			c.directOperand(s.Slots[this], false, abi.OffThis)
 		}
 	}
 	// A slot's words: its record's, or the frame's, which holds it still.
@@ -566,8 +566,7 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 		}
 	}
 	const calleeCtx, base, locals, tmp, top, high2 = amd64.R8, amd64.R9, amd64.R10, amd64.RBX, amd64.R12, amd64.R13
-	c.a.MovRR(calleeCtx, regCtx)
-	c.a.OpImm(amd64.Add, calleeCtx, abi.ContextSize, true)
+	c.a.Load(calleeCtx, regCtx, abi.OffNext)
 	c.a.Load(base, regCtx, abi.OffStackTop)
 	c.a.Load(base, base, 0)
 	c.a.Load(locals, regCtx, abi.OffStackBase)
@@ -691,7 +690,7 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 	// is v, its pointer word kept (OpCallCell).
 	c.a.Bind(back)
 	c.a.MovRR(calleeCtx, regCtx)
-	c.a.OpImm(amd64.Sub, regCtx, abi.ContextSize, true)
+	c.a.Load(regCtx, regCtx, abi.OffPrev)
 	c.a.Load(regLocals, regCtx, abi.OffLocals)
 	c.a.Load(regStack, regCtx, abi.OffStack)
 	at := abi.OffKeep + int32(v.Index)*vs
@@ -959,13 +958,12 @@ func (c *compiler) constructGuards(t *ssa.CallSite, guard func(amd64.Cond)) {
 // local, and otherwise at disp from the context. It uses every scratch
 // register.
 func (c *compiler) directOperand(x *ssa.Value, local bool, disp int32) {
-	base := regCtx
-	if local {
-		base = scratchC
-	}
+	const base = scratchC
 	at := func() {
 		if local {
 			c.a.MovQFromX(scratchC, xScratch2)
+		} else {
+			c.a.Load(scratchC, regCtx, abi.OffNext)
 		}
 	}
 	var w amd64.Reg
@@ -1094,7 +1092,7 @@ func (c *compiler) exitThen(s *ssa.FrameState, kind uint64, then *amd64.Label) {
 		const next = scratchB
 		c.a.MovRR(next, regCtx)
 		for i, in := range inlineLevels(s) {
-			c.a.OpImm(amd64.Add, next, abi.ContextSize, true)
+			c.a.Load(next, next, abi.OffNext)
 			k := uint64(abi.ExitHost)
 			if in == s.Inline {
 				k = kind

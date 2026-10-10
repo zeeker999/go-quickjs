@@ -411,7 +411,7 @@ func (c *a64Compiler) exitThen(s *ssa.FrameState, kind uint64, then *arm64.Label
 		c.a.ShiftImm(arm64.Lsr, a64C, a64C, 4, true)
 		c.a.MovRR(a64B, a64Ctx)
 		for _, in := range inlineLevels(s) {
-			c.a.AddImm(a64B, a64B, int64(abi.ContextSize), true)
+			c.a.Load(a64B, a64B, abi.OffNext)
 			k := uint64(abi.ExitHost)
 			if in == s.Inline {
 				k = kind
@@ -1486,7 +1486,9 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 			c.directOperand(s.Slots[args+i], a64D, int32(i)*vs)
 		}
 		if site.ThisSlot >= 0 && site.Pool == 0 {
-			c.directOperand(s.Slots[this], a64Ctx, abi.ContextSize+abi.OffThis)
+			// The callee's context's, the next.
+			c.a.Load(a64D, a64Ctx, abi.OffNext)
+			c.directOperand(s.Slots[this], a64D, abi.OffThis)
 		}
 	}
 	words := func(slot int) (nb arm64.Reg, nd int32, rb arm64.Reg, rd int32) {
@@ -1505,7 +1507,7 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		}
 	}
 	const calleeCtx, base, locals, tmp, top, high2 = arm64.Reg(3), arm64.Reg(4), arm64.Reg(5), arm64.Reg(6), arm64.Reg(7), arm64.Reg(8)
-	c.a.AddImm(calleeCtx, a64Ctx, int64(abi.ContextSize), true)
+	c.a.Load(calleeCtx, a64Ctx, abi.OffNext)
 	c.a.Load(base, a64Ctx, abi.OffStackTop)
 	c.a.Load(base, base, 0)
 	c.a.Load(locals, a64Ctx, abi.OffStackBase)
@@ -1616,7 +1618,7 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 	}
 	c.a.Bind(back)
 	c.a.MovRR(calleeCtx, a64Ctx)
-	c.a.AddImm(a64Ctx, a64Ctx, -int64(abi.ContextSize), true)
+	c.a.Load(a64Ctx, a64Ctx, abi.OffPrev)
 	c.a.Load(a64Locals, a64Ctx, abi.OffLocals)
 	c.a.Load(a64Stack, a64Ctx, abi.OffStack)
 	at := abi.OffKeep + int32(v.Index)*vs
