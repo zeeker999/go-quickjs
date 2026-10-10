@@ -5999,6 +5999,9 @@ func TestJITSSANativeCallTargets(t *testing.T) {
 // call, a method call with its receiver, constructions whose callee
 // returns nothing or a primitive, and a callee that throws.
 func TestJITSSAEntersCalleesWithoutCode(t *testing.T) {
+	// Native calls are Go's while the collector marks: it does not, so that
+	// what the test counts is the calls'.
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	setup := `function h(x){return String(x).length+x}
 		function M(k){this.k=k}
 		M.prototype.m=function(x){return String(x).length+this.k}
