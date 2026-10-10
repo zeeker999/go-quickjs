@@ -3,6 +3,7 @@
 package vm
 
 import (
+	"iter"
 	"math"
 	"os"
 	"slices"
@@ -290,7 +291,7 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 		// theirs, with it.
 		r.jitCallersReopt(e, jitInlineDepth)
 	}
-	e.ssa, e.ssaShapes, e.ssaHolders, e.fed, e.ssaStats = code, fb.shapes, fb.holders, fb.fed, jitSSAStats{}
+	e.ssa, e.ssaShapes, e.ssaHolders, e.fed, e.fedInlined, e.ssaStats = code, fb.shapes, fb.holders, fb.fed, fb.fedInlined, jitSSAStats{}
 	e.ssaStrings, e.ssaCallees, e.ssaInlined, e.ssaPools = e.ssaStrings || fb.strings, fb.callees, fb.inlined, fb.pools
 	e.ssaKeeps = max(e.ssaKeeps, fb.keeps)
 	// What it leaves on is counted afresh: it may have left on what it was
@@ -1151,6 +1152,16 @@ func (r *Runtime) jitCalleeAt(cl *closure, p *ir.Program, pc int) (*Object, *clo
 		return nil, nil
 	}
 	c := &cl.ic[in.B]
+	if op == bytecode.OpGetPropThis && c.p1 == nil {
+		// Not found on a prototype: a method read off an object the reads
+		// before it name, RayTrace's Flog.RayTracer.Vector.prototype.add(...),
+		// its value now (jitChainValue). Calls there had been learned one
+		// exit at a time, and its functions ran out of compiles first.
+		if v, ok := r.jitChainValue(cl, p, read, jitChainReads); ok && v.IsObject() {
+			return r.jitCallableClosure(cl, v.Object())
+		}
+		return nil, nil
+	}
 	h := c.p1
 	if op == bytecode.OpGetGlobal {
 		// The global environment, where the read found the name at the
@@ -1644,7 +1655,9 @@ func (r *Runtime) jitRefillPools(f *frame, e *jitEntry, pc, sp int, in bytecode.
 		return false
 	}
 	o := c.Object()
-	for _, x := range slices.Concat(e.nativeCalls, e.inlines) {
+	// Both lists, without making one of them: this runs at every exit at
+	// a construction.
+	for _, x := range jitTargets(e) {
 		if int(x.pc) != pc || x.obj != o || x.pool == nil {
 			continue
 		}
@@ -2803,9 +2816,28 @@ func (r *Runtime) jitPoolEmptied(l *jitNativeLevel) bool {
 	if e == nil {
 		return false
 	}
-	return slices.ContainsFunc(slices.Concat(e.inlines, e.nativeCalls), func(x jitInline) bool {
-		return int(x.pc) == int(l.pc) && x.pool != nil && x.pool.Count == 0
-	})
+	for _, x := range jitTargets(e) {
+		if int(x.pc) == int(l.pc) && x.pool != nil && x.pool.Count == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// jitTargets iterates over the calls e's code makes natively and those it
+// inlines, each list in turn.
+func jitTargets(e *jitEntry) iter.Seq2[int, *jitInline] {
+	return func(yield func(int, *jitInline) bool) {
+		i := 0
+		for _, list := range [2][]jitInline{e.nativeCalls, e.inlines} {
+			for k := range list {
+				if !yield(i, &list[k]) {
+					return
+				}
+				i++
+			}
+		}
+	}
 }
 
 // jitUnwindProbe is how many times native code called natively leaves

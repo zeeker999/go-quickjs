@@ -1238,7 +1238,16 @@ func (c *a64Compiler) scan(v *ssa.Value, guard func(arm64.Cond), found arm64.Lab
 	p := c.gpr(v.Args[0], a64A)
 	c.a.LoadU8(a64B, p, c.enc.ObjectClass)
 	c.a.CmpImm(a64B, int64(c.enc.ClassObject), false)
-	guard(arm64.NE)
+	if v.Op == ssa.OpPropWrite {
+		guard(arm64.NE)
+	} else {
+		// As amd64's: a read searches a function's table too.
+		object := c.a.NewLabel()
+		c.a.BCond(arm64.EQ, object)
+		c.a.CmpImm(a64B, int64(c.enc.ClassFunction), false)
+		guard(arm64.NE)
+		c.a.Bind(object)
+	}
 	c.a.Load(a64B, p, c.enc.ObjectProps+8)
 	c.a.CmpImm(a64B, abi.MaxScan, true)
 	guard(arm64.HI)

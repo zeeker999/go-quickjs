@@ -1866,12 +1866,25 @@ func (c *compiler) property(v *ssa.Value, guard func(amd64.Cond)) {
 // scan searches an object's small table for the key a property operation
 // names, as the VM's own small objects are searched, unrolled, and goes to
 // found with the address of its value in scratchA; the entry must be plain
-// data, and writable for a write. Anything else fails.
+// data, and writable for a write. A read searches a function's too, whose
+// prototype the VM's caches never learn (synthesized): RayTrace calls
+// methods as Flog.RayTracer.Vector.prototype.subtract(...), and the read
+// left native code at every call. A property the VM makes on demand, which
+// the table may not hold yet, is not found, and Go reads it. Anything else
+// fails.
 func (c *compiler) scan(v *ssa.Value, guard func(amd64.Cond), found amd64.Label) {
 	p := c.gpr(v.Args[0], scratchA)
 	c.a.LoadU8(scratchB, p, c.enc.ObjectClass)
 	c.a.OpImm(amd64.Cmp, scratchB, int32(c.enc.ClassObject), false)
-	guard(amd64.CondNE)
+	if v.Op == ssa.OpPropWrite {
+		guard(amd64.CondNE)
+	} else {
+		object := c.a.NewLabel()
+		c.a.Jcc(amd64.CondE, object)
+		c.a.OpImm(amd64.Cmp, scratchB, int32(c.enc.ClassFunction), false)
+		guard(amd64.CondNE)
+		c.a.Bind(object)
+	}
 	c.a.Load(scratchB, p, c.enc.ObjectProps+8)
 	c.a.OpImm(amd64.Cmp, scratchB, abi.MaxScan, true)
 	guard(amd64.CondA)
