@@ -77,6 +77,13 @@ type IntrinsicFeedback interface {
 	Intrinsic(pc int) (Intrinsic, bool)
 }
 
+// ConstantFeedback is Feedback that keeps string constants in cells: the
+// address of the cell the constant pushed at pc is in, which the VM keeps
+// alive and unchanged (ir.StringConst).
+type ConstantFeedback interface {
+	StringCell(pc int) (uintptr, bool)
+}
+
 // LiteralSite is an object literal's site: the address of the
 // abi.ObjectPool its objects come from, made as the VM makes the literal's,
 // which the VM keeps alive.
@@ -409,6 +416,9 @@ func (b *builder) host(pc int) bool {
 	case ir.ObjectLiteral, ir.ArrayLiteral:
 		_, ok := b.literal(pc)
 		return !ok
+	case ir.StringConst:
+		_, ok := b.stringCell(pc)
+		return !ok
 	case ir.FieldDefine:
 		_, ok := b.define(pc)
 		return !ok
@@ -425,6 +435,16 @@ func (b *builder) literal(pc int) (LiteralSite, bool) {
 	}
 	k, ok := f.Literal(pc)
 	return k, ok && k.Pool != 0
+}
+
+// stringCell is the cell of the string constant at pc (ConstantFeedback).
+func (b *builder) stringCell(pc int) (uintptr, bool) {
+	f, ok := b.fb.(ConstantFeedback)
+	if !ok {
+		return 0, false
+	}
+	cell, ok := f.StringCell(pc)
+	return cell, ok && cell != 0
 }
 
 // define is what the literal's field at pc adds (LiteralFeedback).
@@ -962,7 +982,7 @@ func (b *builder) plan() error {
 			// string was (compile's typeTests): no entry after it.
 		case ir.ArrayWrite, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead,
 			ir.StringMethod, ir.StringCode, ir.BindingWrite, ir.BindingCheck, ir.Resolved, ir.ObjectLiteral, ir.FieldDefine,
-			ir.ArrayLiteral:
+			ir.ArrayLiteral, ir.StringConst:
 			// What native code does not do exits to Go, which resumes after
 			// it. A fixed global's check only deoptimizes: the binding can
 			// never move, so it never fails, and what follows sees its
@@ -1048,7 +1068,7 @@ func (b *builder) plan() error {
 		case ir.Return:
 			blk.Kind = BlockReturn
 		case ir.Host, ir.Call, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead, ir.BindingWrite, ir.BindingCheck,
-			ir.ObjectLiteral, ir.FieldDefine, ir.ArrayLiteral:
+			ir.ObjectLiteral, ir.FieldDefine, ir.ArrayLiteral, ir.StringConst:
 			if fr := b.inlined[end]; fr != nil {
 				// Into the callee, whose returns go to the block after it.
 				blk.Kind = BlockPlain
@@ -1763,6 +1783,19 @@ func (b *builder) instruction(blk *Block, pc int) {
 		r := f.newValue(blk, OpKept, Tagged, cell, call)
 		r.Shadow = cell
 		b.assign(in.Dest, blk, r)
+	case ir.StringConst:
+		cell, ok := b.stringCell(pc)
+		if !ok {
+			blk.ExitKind = ir.HostExit
+			blk.State = state()
+			blk.State.addUse()
+			break
+		}
+		c := f.newValue(blk, OpConstCell, Source)
+		c.Const = ir.Value{Bits: uint64(cell)}
+		v := f.newValue(blk, OpLoadCell, Tagged, c)
+		v.Shadow = c
+		b.assign(in.Dest, blk, v)
 	case ir.FieldDefine:
 		add, ok := b.define(pc)
 		if !ok {

@@ -351,7 +351,7 @@ func (a *aliases) may(key uint32, s *Value) bool {
 		// No property store writes an element; a call's callee may, or
 		// pop it.
 		return key == anyKey
-	case OpStringMethod, OpConstSource:
+	case OpStringMethod, OpConstSource, OpConstCell:
 		return false
 	case OpKeep:
 		if x := s.Args[0]; x.Shadow != nil {

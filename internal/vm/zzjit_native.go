@@ -211,6 +211,9 @@ type jitEntry struct {
 	// which the code leaves at (jitDefineSeen).
 	literals     []jitLiteral
 	definesUnfed []int32
+	// ssaCells are the cells the code reads string constants from
+	// (jitFeedback.StringCell).
+	ssaCells []*Value
 	// poly are the reads that met objects of shapes the code was not
 	// compiled for, each with up to jitPropertyCases of them, which it is
 	// compiled again for (jitPolySeen); polyReopt marks that it is to be,
@@ -1618,7 +1621,8 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 			bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpSetGlobal, bytecode.OpSetGlobalStrict,
 			bytecode.OpGetPropThis, bytecode.OpSetIndex, bytecode.OpNewArray,
 			bytecode.OpGetIndex, bytecode.OpNew, bytecode.OpPushConst, bytecode.OpInstanceOf, bytecode.OpTypeOf,
-			bytecode.OpCheckGlobalRef, bytecode.OpAssertResolved, bytecode.OpNewObject, bytecode.OpDefineField:
+			bytecode.OpCheckGlobalRef, bytecode.OpAssertResolved, bytecode.OpNewObject, bytecode.OpDefineField,
+			bytecode.OpPushEmptyString:
 		default:
 			return sp, steps, nil
 		}
@@ -1667,6 +1671,8 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 			stack[sp-2] = stack[sp-1]
 			sp--
 			continue
+		case bytecode.OpPushEmptyString:
+			v = Str(emptyString)
 		case bytecode.OpNewObject:
 			// As the interpreter makes a literal's object.
 			o := newLiteralObject(r.proto.object, ClassObject, int(in.A))

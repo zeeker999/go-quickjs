@@ -157,7 +157,7 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 		effects[pc] = e
 		if in.Op == bytecode.OpNew && (!m.ssa || !SSAConstruct) || (in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict ||
 			in.Op == bytecode.OpCheckGlobalRef || in.Op == bytecode.OpAssertResolved ||
-			in.Op == bytecode.OpNewObject || in.Op == bytecode.OpDefineField) && !m.ssa {
+			in.Op == bytecode.OpNewObject || in.Op == bytecode.OpDefineField || in.Op == bytecode.OpPushEmptyString) && !m.ssa {
 			// The new pipeline constructs natively (mir's native calls),
 			// and assigns to a global natively where the VM knows it, Go
 			// otherwise; the old one does neither.
@@ -186,7 +186,7 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 			// throws it, as V8's code calls the runtime to throw.
 			return nil, refuse(pc, "unsupported opcode "+in.Op.String())
 		}
-		host = host || str || in.Op == bytecode.OpThrow || in.Op == bytecode.OpInstanceOf || in.Op == bytecode.OpTypeOf || in.Op == bytecode.OpApplyArguments || in.Op == bytecode.OpNew || in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict || in.Op == bytecode.OpCheckGlobalRef || in.Op == bytecode.OpNewObject || in.Op == bytecode.OpDefineField || in.Op == bytecode.OpNewArray || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
+		host = host || str || in.Op == bytecode.OpThrow || in.Op == bytecode.OpInstanceOf || in.Op == bytecode.OpTypeOf || in.Op == bytecode.OpApplyArguments || in.Op == bytecode.OpNew || in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict || in.Op == bytecode.OpCheckGlobalRef || in.Op == bytecode.OpNewObject || in.Op == bytecode.OpDefineField || in.Op == bytecode.OpPushEmptyString || in.Op == bytecode.OpNewArray || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 		property = property || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 		this = this || in.Op == bytecode.OpPushThis
 		raw := uint32(in.Op)
@@ -282,6 +282,11 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 					p.Code[pc] = mod
 				}
 			}
+			if b := fn.Code[pc]; in.Op == ir.Host && (b.Op == bytecode.OpPushConst && fn.Constants[b.A].Kind == bytecode.ConstString || b.Op == bytecode.OpPushEmptyString) && p.Maps[pc].Depth >= 0 {
+				// A string constant: the new pipeline reads it from a cell
+				// the VM keeps it in, where the VM gives one.
+				p.Code[pc] = ir.Instruction{Op: ir.StringConst, Dest: p.Locals + p.Maps[pc].Depth, Key: b.A}
+			}
 			if b := fn.Code[pc]; in.Op == ir.Host && b.Op == bytecode.OpNewArray && b.A <= ir.MaxArrayLiteral && p.Maps[pc].Depth >= 0 {
 				// An array literal: the new pipeline makes it from its
 				// site's pool where the VM knows the site.
@@ -301,6 +306,7 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 				p.Code[pc] = ir.Instruction{Op: ir.ReferenceRead, Left: ir.Slot(sp - 1), Dest: sp, Key: b.A}
 			}
 		}
+		stringConcats(p)
 		return p, nil
 	}
 	selectPropertyLoops(fn, p, m.calls, m.callee)
@@ -455,7 +461,7 @@ func selectNumericProperties(p *ir.Program, cells bool) {
 			read(in.Left, take(in.Dest))
 		case ir.Resolved:
 			read(in.Right, take(in.Dest))
-		case ir.BindingCheck, ir.ObjectLiteral:
+		case ir.BindingCheck, ir.ObjectLiteral, ir.StringConst:
 			take(in.Dest)
 		case ir.FieldDefine:
 			read(in.Left, reference)
@@ -525,6 +531,66 @@ func selectNumericProperties(p *ir.Program, cells bool) {
 				needed[n+i] = needed[n+i+1]
 			}
 			needed[n+last], needed[n+last+1] = kind, 0
+		}
+	}
+}
+
+// stringConcats has Go make an addition an operand of which is a string
+// constant, or such an addition's result -- 'key ' + tag + ' in leaf' --
+// rather than speculate it adds numbers: a string constant read natively
+// (ir.StringConst) made the code take every such operand for a number, at
+// the entry too, and leave there at every call. What a slot holds is
+// followed forward through straight code: a jump's target, a host
+// operation's results and anything else written forget it.
+func stringConcats(p *ir.Program) {
+	str := make([]bool, p.Locals+p.StackSize)
+	targets := make([]bool, len(p.Code)+1)
+	for _, in := range p.Code {
+		if in.Op == ir.Jump || in.Op == ir.Branch {
+			targets[in.Target] = true
+		}
+	}
+	slot := func(o ir.Operand) bool { return o.Slot >= 0 && o.Slot < len(str) && str[o.Slot] }
+	set := func(i int, v bool) {
+		if i >= 0 && i < len(str) {
+			str[i] = v
+		}
+	}
+	for pc, in := range p.Code {
+		if targets[pc] {
+			clear(str)
+		}
+		if p.Maps[pc].Depth < 0 {
+			continue
+		}
+		switch in.Op {
+		case ir.StringConst:
+			set(in.Dest, true)
+		case ir.Copy:
+			set(in.Dest, slot(in.Left))
+		case ir.Binary:
+			if in.Operator == ir.Add && (slot(in.Left) || slot(in.Right)) {
+				p.Code[pc] = ir.Instruction{Op: ir.Host}
+				set(in.Dest, true)
+				continue
+			}
+			set(in.Dest, false)
+		case ir.Host, ir.Call:
+			// Its results, past what it leaves below them.
+			if pc+1 < len(p.Maps) && p.Maps[pc+1].Depth > 0 {
+				clear(str[min(len(str), p.Locals+p.Maps[pc+1].Depth-1):])
+			} else {
+				clear(str[p.Locals:])
+			}
+		case ir.Swap, ir.CopyPair, ir.StoreLoad, ir.Insert2, ir.Insert3, ir.Update, ir.ArrayUpdate:
+			set(in.Dest, false)
+			set(in.Extra, false)
+			for i := in.Dest; i >= 0 && i <= in.Dest+3; i++ {
+				set(i, false)
+			}
+		case ir.Branch, ir.Jump, ir.Return, ir.Nop, ir.ArrayWrite, ir.PropertyWrite, ir.BindingWrite, ir.FieldDefine:
+		default:
+			set(in.Dest, false)
 		}
 	}
 }
@@ -727,7 +793,7 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 			return effect{need: 1}, nil
 		}
 		return effect{delta: 1}, nil
-	case bytecode.OpPushThis:
+	case bytecode.OpPushThis, bytecode.OpPushEmptyString:
 		return effect{delta: 1}, nil
 	case bytecode.OpAssertResolved, bytecode.OpDefineField:
 		if uint64(in.A) >= uint64(len(fn.Names)) {
@@ -966,8 +1032,8 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this bool) ir.Instr
 		return ir.Instruction{Op: ir.PropertyRead, Left: top, Dest: sp - 1, Key: in.A}
 	case bytecode.OpSetProp:
 		return ir.Instruction{Op: ir.PropertyWrite, Left: ir.Slot(sp - 2), Right: top, Key: in.A}
-	case bytecode.OpThrow:
-		// The interpreter throws it (jitHost leaves it).
+	case bytecode.OpThrow, bytecode.OpPushEmptyString:
+		// The interpreter throws it (jitHost leaves it); Go pushes ''.
 		return ir.Instruction{Op: ir.Host}
 	case bytecode.OpInstanceOf:
 		// Made natively where the VM knows the constructor

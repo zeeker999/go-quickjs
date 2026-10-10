@@ -586,6 +586,9 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
 				vals[v.ID] = val{cell: &g.Props[i]}
+			case OpConstCell:
+				// The heap model has no constants' cells.
+				return ir.Exit{}, fmt.Errorf("%w: a constant's cell", ErrUnsupported)
 			case OpStringMethod:
 				if a.t.Kind != ir.String || heap.CharCodeAt == nil {
 					return exit(v.State, ir.ExitKind(v.Aux))
