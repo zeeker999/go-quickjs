@@ -98,3 +98,19 @@ func TestShadowsMadeOnce(t *testing.T) {
 		t.Fatalf("Optimize made %d shadows alone, %d after Finish (%v):\n%s", shadows(g), shadows(f), err, g)
 	}
 }
+
+// Optimize unboxes phis at the start of a round, so that the boxes it
+// makes cancel in the same round's walk: a function is mostly done in two
+// rounds, the second finding nothing, not three. The corpus takes 25
+// rounds, 34 the other way.
+func TestOptimizeRounds(t *testing.T) {
+	rounds := 0
+	for _, src := range jsCorpus {
+		f := lowerJS(t, src)
+		Optimize(f)
+		rounds += f.rounds
+	}
+	if rounds > 2*len(jsCorpus)+2 {
+		t.Errorf("%d rounds for %d functions", rounds, len(jsCorpus))
+	}
+}
