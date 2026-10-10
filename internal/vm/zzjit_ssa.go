@@ -393,14 +393,25 @@ func (fb *jitFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 		for _, x := range p.Code {
 			k.strings = k.strings || x.Op == ir.StringMethod || x.Op == ir.StringCode
 		}
-		k.holders = append(k.holders, in.obj)
-		k.inlined = append(k.inlined, in.cl)
-		return ssa.InlineSite{
+		site := ssa.InlineSite{
 			Program: p, Feedback: &jitFeedback{r: fb.r, fn: in.cl.fn, cl: in.cl, root: k},
 			Callee: uintptr(unsafe.Pointer(in.obj)), Closure: uintptr(unsafe.Pointer(in.cl)),
 			Argc: int(call.A), Method: call.Op == bytecode.OpCallMethod,
 			Params: in.cl.fn.ParamCount, ThisSlot: this, Coerce: in.cl.fn.CoerceThis,
-		}, true
+		}
+		if call.Op == bytecode.OpNew {
+			// Its receiver from its pool, as a native construction's.
+			i := in.obj.findOwn(atomPrototype)
+			if in.pool == nil || i < 0 {
+				return ssa.InlineSite{}, false
+			}
+			site.Construct, site.Coerce = true, false
+			site.Pool, site.ProtoIndex, site.ProtoKey = uintptr(unsafe.Pointer(in.pool)), int(i), uint32(atomPrototype)
+			k.pools = append(k.pools, in.pool)
+		}
+		k.holders = append(k.holders, in.obj)
+		k.inlined = append(k.inlined, in.cl)
+		return site, true
 	}
 	return ssa.InlineSite{}, false
 }
@@ -544,12 +555,12 @@ const jitInlineExits = 16
 // been seen too -- or at its next entry. A call seen before costs a look
 // at the lists.
 func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) {
-	if in.Op == bytecode.OpNew {
-		r.jitRefillPools(f, e, pc, sp, in)
-	}
+	// A construction that left for its pool to be filled again: an inlined
+	// one's exit is not its constructor's.
+	refilled := in.Op == bytecode.OpNew && r.jitRefillPools(f, e, pc, sp, in)
 	if e.callSites != nil && e.callSites[pc] == jitCallInlined {
 		if o, cl := r.jitCalled(f, sp, in); cl != nil && !slices.ContainsFunc(e.inlines, func(x jitInline) bool { return int(x.pc) == pc && x.obj == o }) {
-			r.jitInlinedCalls(e, pc, o, cl)
+			r.jitInlinedCalls(e, pc, o, cl, in)
 			return
 		}
 	}
@@ -574,7 +585,9 @@ func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 	}
 	switch n := e.callSites[pc]; {
 	case n == jitCallInlined:
-		r.jitInlineLeft(e, pc)
+		if !refilled {
+			r.jitInlineLeft(e, pc)
+		}
 		fallthrough
 	case n == jitCallDone:
 		if e.inlinePending {
@@ -625,8 +638,8 @@ func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 		}
 		return
 	}
-	if in.Op != bytecode.OpNew && cl.fn != f.cl.fn && (r.jitInlinable(cl.fn) || r.jitInlinesCalls(cl.fn, jitInlineDepth-1)) {
-		e.inlines = append(e.inlines, jitInline{pc: int32(pc), cl: cl, obj: o})
+	if cl.fn != f.cl.fn && r.jitInlinesAt(cl, o, in) {
+		e.inlines = append(e.inlines, r.jitInlineTarget(int32(pc), cl, o, in))
 		e.callSites[pc] = jitCallInlined
 		e.inlinePending = true
 		return
@@ -675,7 +688,7 @@ func (r *Runtime) jitInlineNativeCalls(e *jitEntry) {
 	r.jitNativeCallsInline(e, func(i int) {
 		x := e.nativeCalls[i]
 		e.nativeCalls = slices.Delete(e.nativeCalls, i, i+1)
-		e.inlines = append(e.inlines, jitInline{pc: x.pc, cl: x.cl, obj: x.obj})
+		e.inlines = append(e.inlines, jitInline{pc: x.pc, cl: x.cl, obj: x.obj, pool: x.pool})
 		e.callSites[x.pc] = jitCallInlined
 	})
 }
@@ -691,7 +704,8 @@ func (r *Runtime) jitNativeCallsInline(e *jitEntry, inline func(int)) bool {
 		pc := int(x.pc)
 		one := !slices.ContainsFunc(e.nativeCalls, func(y jitInline) bool { return y.pc == x.pc && y.cl != x.cl })
 		if !one || x.cl == nil || r.jit.cache[weak.Make(x.cl.fn)] == e || e.callSites == nil || pc >= len(e.callSites) ||
-			e.callSites[pc] != jitCallNative || slices.Contains(e.notInline, x.pc) || !r.jitInlinesCalls(x.cl.fn, jitInlineDepth-1) {
+			e.callSites[pc] != jitCallNative || slices.Contains(e.notInline, x.pc) || !r.jitInlinesCalls(x.cl.fn, jitInlineDepth-1) ||
+			x.pool != nil && !r.jitInlinesAt(x.cl, x.obj, bytecode.Instr{Op: bytecode.OpNew}) {
 			continue
 		}
 		found = true
@@ -716,7 +730,8 @@ func (r *Runtime) jitInlineLeft(e *jitEntry, pc int) {
 				if e.callSites != nil {
 					e.callSites[pc] = jitCallDone
 					if r.jitNativeCallee(x.cl) != nil {
-						e.nativeCalls = append(e.nativeCalls, jitInline{pc: x.pc, cl: x.cl, obj: x.obj})
+						// A construction's with its pool.
+						e.nativeCalls = append(e.nativeCalls, jitInline{pc: x.pc, cl: x.cl, obj: x.obj, pool: x.pool})
 						e.callSites[pc] = jitCallNative
 					}
 				}
@@ -818,8 +833,8 @@ func (r *Runtime) jitSeedCalls(cl *closure, e *jitEntry, p *ir.Program) {
 		if e.callSites == nil {
 			e.callSites = make([]uint8, len(fn.Code))
 		}
-		if in.Op != bytecode.OpNew && callee.fn != fn && (r.jitInlinable(callee.fn) || r.jitInlinesCalls(callee.fn, jitInlineDepth-1)) {
-			e.inlines = append(e.inlines, jitInline{pc: int32(pc), cl: callee, obj: o})
+		if callee.fn != fn && r.jitInlinesAt(callee, o, in) {
+			e.inlines = append(e.inlines, r.jitInlineTarget(int32(pc), callee, o, in))
 			e.callSites[pc] = jitCallInlined
 			continue
 		}
@@ -926,17 +941,18 @@ func (r *Runtime) jitCalleeAt(cl *closure, p *ir.Program, pc int) (*Object, *clo
 // jitInlinedCalls has a call inlined for one function that calls another,
 // o, cl's, call them natively instead, and others, up to jitCallTargets
 // (jitCallTarget): the code is compiled again for it at once.
-func (r *Runtime) jitInlinedCalls(e *jitEntry, pc int, o *Object, cl *closure) {
+func (r *Runtime) jitInlinedCalls(e *jitEntry, pc int, o *Object, cl *closure, in bytecode.Instr) {
 	e.notInline = append(e.notInline, int32(pc))
 	e.callSites[pc] = jitCallNative
 	e.inlineReopt = true
 	for _, x := range e.inlines {
 		if int(x.pc) == pc && r.jitNativeCallee(x.cl) != nil {
-			e.nativeCalls = append(e.nativeCalls, jitInline{pc: x.pc, cl: x.cl, obj: x.obj})
+			// A construction's with its pool.
+			e.nativeCalls = append(e.nativeCalls, jitInline{pc: x.pc, cl: x.cl, obj: x.obj, pool: x.pool})
 		}
 	}
-	if r.jitNativeCallee(cl) != nil {
-		e.nativeCalls = append(e.nativeCalls, jitInline{pc: int32(pc), cl: cl, obj: o})
+	if (in.Op != bytecode.OpNew || r.jitConstructs(o)) && r.jitNativeCallee(cl) != nil {
+		e.nativeCalls = append(e.nativeCalls, r.jitNativeTarget(int32(pc), cl, o, in))
 	}
 }
 
@@ -992,6 +1008,30 @@ func (r *Runtime) jitCallTarget(f *frame, e *jitEntry, pc, sp int, in bytecode.I
 
 // jitNativeTarget is a function a call at pc calls natively: for a
 // construction, with the pool its objects come from, filled.
+// jitInlinesAt reports whether a call of o, cl's function, by in may be
+// inlined: cl's function may be, with its calls, and a construction's
+// constructor is one native code constructs with (jitConstructs) that
+// returns nothing, so that its receiver is the result, as V8 inlines a
+// constructor.
+func (r *Runtime) jitInlinesAt(cl *closure, o *Object, in bytecode.Instr) bool {
+	if !r.jitInlinable(cl.fn) && !r.jitInlinesCalls(cl.fn, jitInlineDepth-1) {
+		return false
+	}
+	return in.Op != bytecode.OpNew || r.jitConstructs(o) &&
+		!slices.ContainsFunc(cl.fn.Code, func(x bytecode.Instr) bool { return x.Op == bytecode.OpReturn })
+}
+
+// jitInlineTarget is the call by in at pc of o, cl's function, to inline:
+// a construction's with its pool.
+func (r *Runtime) jitInlineTarget(pc int32, cl *closure, o *Object, in bytecode.Instr) jitInline {
+	x := jitInline{pc: pc, cl: cl, obj: o}
+	if in.Op == bytecode.OpNew {
+		x.pool = new(abi.ObjectPool)
+		r.jitFillPool(x.pool, o)
+	}
+	return x
+}
+
 func (r *Runtime) jitNativeTarget(pc int32, cl *closure, o *Object, in bytecode.Instr) jitInline {
 	x := jitInline{pc: pc, cl: cl, obj: o}
 	if in.Op == bytecode.OpNew {
@@ -1127,25 +1167,28 @@ func (r *Runtime) jitFillPool(pool *abi.ObjectPool, o *Object) {
 
 // jitRefillPools fills, at a construction that left native code at pc,
 // the pool of the function it constructs with, if native code constructs
-// with it there and the pool is empty, or was made for another prototype.
-func (r *Runtime) jitRefillPools(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) {
+// with it there and the pool is empty, or was made for another prototype;
+// it reports whether it filled an empty one.
+func (r *Runtime) jitRefillPools(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) (refilled bool) {
 	c := r.stack[sp-int(in.A)-1]
 	if !c.IsObject() {
-		return
+		return false
 	}
 	o := c.Object()
-	for _, x := range e.nativeCalls {
+	for _, x := range slices.Concat(e.nativeCalls, e.inlines) {
 		if int(x.pc) != pc || x.obj != o || x.pool == nil {
 			continue
 		}
 		if x.pool.Count == 0 {
 			r.jitFillPool(x.pool, o)
+			refilled = true
 		} else if x.cl == nil {
 			// A built-in's, whose prototype the realm fixed.
 		} else if p := o.getOwnVisible(atomPrototype); p == nil || !p.value.IsObject() || unsafe.Pointer(p.value.Object()) != x.pool.Proto {
 			r.jitFillPool(x.pool, o)
 		}
 	}
+	return refilled
 }
 
 // jitNativeCallee is the entry of cl's function, compiled now if it is not,
@@ -1903,6 +1946,7 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 			// The callee its caller -- e's code or a native call's callee's
 			// -- inlined at the call it left at.
 			l.inline, l.locals, l.thisSlot = true, int(c.InlineLocals), int(c.InlineThis)
+			l.construct = callerPC < len(caller.Code) && caller.Code[callerPC].Op == bytecode.OpNew
 			// Its code is that of the nearest level below it not inlined,
 			// or e's, which inlined it, and the callees it is inlined in.
 			parent, parentPC := e, s.ssaCtxs[idx].ExitPC

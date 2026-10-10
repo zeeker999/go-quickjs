@@ -4109,7 +4109,8 @@ func TestJITSSANestedInline(t *testing.T) {
 
 // A construction of a plain function, `new V(...)`, is made natively: its
 // receiver comes from the site's pool (abi.ObjectPool), made as the VM
-// makes one, and the constructor is called natively with it; native code
+// makes one, and the constructor is called natively with it, or inlined
+// with it, V's here, as V8 inlines a constructor that returns nothing; native code
 // leaves only for the pool to be filled again, once in abi.PoolSize. A
 // result that is an object is the construction's, any other its receiver,
 // natively and when the constructor leaves native code (L's String every
@@ -4172,7 +4173,7 @@ func TestJITSSANativeConstruct(t *testing.T) {
 		if (i == 3 || i == 4) && r.jit.reoptimized == reoptimized {
 			// A round no code was compiled again in, which counts afresh.
 			e := entry("run")
-			if e == nil || !slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.pool != nil }) {
+			if e == nil || !slices.ContainsFunc(slices.Concat(e.nativeCalls, e.inlines), func(x jitInline) bool { return x.pool != nil }) {
 				t.Fatal("run does not construct natively")
 			}
 			// Entered again after each construction Go makes, its pool
@@ -4187,7 +4188,7 @@ func TestJITSSANativeConstruct(t *testing.T) {
 		}
 		if i == len(rounds)-1 {
 			proto := r.global.getOwn(r.atoms.intern("V")).value.Object().getOwnVisible(atomPrototype).value.Object()
-			for _, x := range entry("run").nativeCalls {
+			for _, x := range slices.Concat(entry("run").nativeCalls, entry("run").inlines) {
 				if x.pool != nil && x.pool.Proto != unsafe.Pointer(proto) {
 					t.Fatal("run's pool was not made again for V's new prototype")
 				}
@@ -5184,7 +5185,7 @@ func TestJITSSASeedsMethodCalls(t *testing.T) {
 // code is first compiled, as a call is (jitSeedCalls), once its
 // constructor has code: mk1 learns new V from its exits, which compiles V
 // for native callers; mk2's first code then makes it natively, from a
-// pool, without being compiled again for it.
+// pool, V inlined, without being compiled again for it.
 func TestJITSSASeedsConstructions(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -5227,7 +5228,7 @@ func TestJITSSASeedsConstructions(t *testing.T) {
 	if e == nil || e.ssa == nil {
 		t.Fatal("mk2 has no code")
 	}
-	if !slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.obj == v && x.pool != nil }) {
+	if !slices.ContainsFunc(slices.Concat(e.nativeCalls, e.inlines), func(x jitInline) bool { return x.obj == v && x.pool != nil }) {
 		t.Fatal("mk2 does not construct V natively")
 	}
 	if n := int(e.reopts) + int(e.inlineReopts) + int(e.upgradeReopts); n != 0 {
@@ -6247,6 +6248,67 @@ func TestJITSSAStringConstantsAndThrows(t *testing.T) {
 			}
 			if n := r.jit.interpreted - interpreted; n != 0 {
 				t.Fatalf("scale went on in the interpreter %d times", n)
+			}
+		}
+	}
+}
+
+// A construction of a constructor that returns nothing is inlined, as V8
+// inlines one: the receiver comes from the site's pool, the body runs
+// inlined with it, and it is the result. An exit inside the body -- W's
+// multiplication meets a string, after W wrote a -- makes W's frame, and
+// the construction's result is the receiver, as the interpreter's; a pool
+// that runs out is filled again at the call without counting against the
+// inlining, so that steady rounds compile nothing again; and the pool is
+// made again for a new prototype.
+func TestJITSSAInlinedConstructions(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	defer func(was bool) { jitcompile.SSAConstruct = was }(jitcompile.SSAConstruct)
+	jitcompile.SSAConstruct = true
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function W(x){this.a=x;this.b=x*2}
+		W.prototype.sum=function(){return this.a+this.b};
+		function build(xs,n){let s=0,w;for(let i=0;i<n;i++){w=new W(xs[i%xs.length]);s=(s+w.b)|0}return [s,w.sum(),Object.getPrototypeOf(w)===W.prototype].join()}
+		var nums=[1,2,3,4],mixed=[1,2,"3",{valueOf(){return 9}}]`
+	src := `build(nums,300)`
+	rounds := []string{src, src, src, src, src, src, `build(mixed,300)`, src, `W.prototype={sum(){return -1}};` + src, src}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("build")).value.Object().fn().closure
+	w := r.global.getOwn(r.atoms.intern("W")).value.Object()
+	var compiles uint64
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 4 {
+			compiles = r.jit.reoptimized + r.jit.compiled
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 5 {
+			e := r.jit.cache[weak.Make(cl.fn)]
+			if e == nil || e.ssa == nil || !slices.ContainsFunc(e.inlines, func(x jitInline) bool { return x.obj == w && x.pool != nil }) {
+				t.Fatalf("build does not inline new W: %+v", e)
+			}
+			if n := r.jit.reoptimized + r.jit.compiled - compiles; n != 0 {
+				t.Fatalf("steady rounds compiled %d times", n)
 			}
 		}
 	}
