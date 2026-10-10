@@ -19,6 +19,8 @@ type SSACode struct {
 	// entries is each slot IR PC's code offset, or -1: a slice, since every
 	// exit to Go looks one up.
 	entries []int32
+	// exits are the descriptions the code's exits name by address.
+	exits []*abi.ExitDescriptor
 }
 
 // NewSSACode publishes compiled code in a, a runtime's arena (nil gives it
@@ -42,7 +44,7 @@ func NewSSACode(a *Arena, c *mir.Code) (*SSACode, error) {
 	for pc, off := range c.Entries {
 		entries[pc] = int32(off)
 	}
-	s := &SSACode{code: code, arena: a, entries: entries}
+	s := &SSACode{code: code, arena: a, entries: entries, exits: c.Exits}
 	runtime.SetFinalizer(s, func(s *SSACode) { _ = s.Close() })
 	return s, nil
 }
@@ -63,7 +65,9 @@ func (s *SSACode) EntryAddress(pc int) uintptr {
 
 // Run enters at a slot IR PC with ctx, which must hold the frame's addresses
 // and the back-edge counter; it returns when native code exits, with the
-// exit record in ctx.
+// exit record in ctx -- or, for an exit that left its frame to Go
+// (abi.ExitTable), in the context that left, the caller's to apply
+// (ApplyExit): ctx, or a native callee's, which only the caller knows.
 func (s *SSACode) Run(pc int, ctx *abi.Context) error {
 	if s == nil || len(s.code) == 0 {
 		return ErrClosed

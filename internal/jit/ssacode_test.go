@@ -9,6 +9,7 @@ import (
 	"maps"
 	"math"
 	"math/rand/v2"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -560,9 +561,9 @@ func (n *nativeHeap) word(v ir.Value) testValue {
 
 // referenceExits counts the harness's exit records -- references copied,
 // primitives stored over references, sources known only at run time, and
-// among them heap cells -- and returned references, so that the test can
-// tell it reaches them.
-var referenceExits struct{ copies, scalars, maybes, cells, returns int }
+// among them heap cells -- returned references, and exits that left their
+// frames to Go (abi.ExitTable), so that the test can tell it reaches them.
+var referenceExits struct{ copies, scalars, maybes, cells, returns, tables int }
 
 // source is the value a run-time source names (origin.go): the value at
 // its address, one of the state's slots or a heap cell, which it counts; nil
@@ -912,6 +913,10 @@ func nativeMismatch(c *compiled, pc int, slots []ir.Value, poll int, heap testHe
 	if err := c.code.Run(pc, ctx); err != nil {
 		return err.Error()
 	}
+	if ctx.ExitKind == abi.ExitTable {
+		referenceExits.tables++
+	}
+	ApplyExit(ctx)
 	got := ir.Exit{Kind: exitNames[ctx.ExitKind], State: ir.StateMap{PC: uint32(ctx.ExitPC), Depth: int(ctx.ExitDepth)}}
 	report := func(why string) string {
 		return fmt.Sprintf("%s: from pc %d, poll %d, slots %v, heap %v, %d frame locals, receiver %d\nssa    %+v slots %v\nnative %+v ret %#x frame %v captured %v receiver %v",
@@ -1054,11 +1059,16 @@ func checkNative(t *testing.T, r *rand.Rand, p *ir.Program, l layout) (ok bool) 
 func TestSSANativeMatchesEvaluator(t *testing.T) {
 	r := rand.New(rand.NewPCG(11, 12))
 	compiled := 0
+	defer func(table bool) { mir.TableExits = table }(mir.TableExits)
 	for attempt := 0; attempt < 100000 && compiled < 2000; attempt++ {
 		p, l := ssaTestProgram(r)
 		if p.Validate() != nil {
 			continue
 		}
+		// Every other program leaves its frames to Go to write (ApplyExit),
+		// the rest write them themselves, records and all, which the
+		// counters count.
+		mir.TableExits = compiled%2 == 1
 		if checkNative(t, r, p, l) {
 			compiled++
 		}
@@ -1067,7 +1077,7 @@ func TestSSANativeMatchesEvaluator(t *testing.T) {
 		t.Fatalf("only %d programs compiled", compiled)
 	}
 	t.Logf("%d programs; exits with references: %+v", compiled, referenceExits)
-	if referenceExits.copies == 0 || referenceExits.scalars == 0 || referenceExits.maybes == 0 || referenceExits.cells == 0 || referenceExits.returns == 0 {
+	if referenceExits.copies == 0 || referenceExits.scalars == 0 || referenceExits.maybes == 0 || referenceExits.cells == 0 || referenceExits.returns == 0 || referenceExits.tables == 0 {
 		t.Fatalf("some kind of record or reference return never happened: %+v", referenceExits)
 	}
 }
@@ -1082,11 +1092,13 @@ func TestWorkspaceCompilesTheSame(t *testing.T) {
 	var ws ssa.Workspace
 	var mws mir.Workspace
 	n := 0
+	defer func(table bool) { mir.TableExits = table }(mir.TableExits)
 	for attempt := 0; attempt < 20000 && n < 1500; attempt++ {
 		p, l := ssaTestProgram(r)
 		if p.Validate() != nil {
 			continue
 		}
+		mir.TableExits = n%2 == 1
 		alone, err := ssa.BuildWith(p, l)
 		if err != nil {
 			continue
@@ -1107,7 +1119,10 @@ func TestWorkspaceCompilesTheSame(t *testing.T) {
 		if err != nil {
 			t.Fatalf("compiled alone, not in a workspace: %v", err)
 		}
-		if !bytes.Equal(got.Bytes, want.Bytes) || !maps.Equal(got.Entries, want.Entries) {
+		// An exit's code holds its description's address, which differs
+		// between the two; the descriptions themselves must not.
+		if len(got.Bytes) != len(want.Bytes) || !reflect.DeepEqual(got.Exits, want.Exits) ||
+			len(got.Exits) == 0 && !bytes.Equal(got.Bytes, want.Bytes) || !maps.Equal(got.Entries, want.Entries) {
 			t.Fatalf("program %d compiles differently in a workspace:\n%s", attempt, alone)
 		}
 		ws.Rewind()
@@ -1525,7 +1540,9 @@ func BenchmarkSSARoundTrip(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if err := c.code.Run(0, ctx); err != nil || ctx.ExitKind != abi.ExitHost {
+				err := c.code.Run(0, ctx)
+				ApplyExit(ctx)
+				if err != nil || ctx.ExitKind != abi.ExitHost {
 					b.Fatal(err, ctx.ExitKind)
 				}
 			}

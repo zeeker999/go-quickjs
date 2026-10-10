@@ -1638,6 +1638,13 @@ func (r *Runtime) runSSAIn(f *frame, e *jitEntry, pc, depth, idx int, resume uin
 		if err != nil {
 			return r.jitInterpret(f, f.base+depth, nil)
 		}
+		// The frame of the code that left, if it left that to Go: this
+		// code's, after a resume, or its deepest native callee's.
+		k := idx
+		for k+1 < jitContexts && s.ssaCtxs[k+1].Live == abi.LiveCall {
+			k++
+		}
+		s.ssaRecords += uint64(jit.ApplyExit(&s.ssaCtxs[k]))
 		r.jitSSAProfit(e, ctx, start, edges)
 		if c := &s.ssaCtxs[idx+1]; c.Live == abi.LiveCall {
 			// A native call's callee left native code: Go finishes it
