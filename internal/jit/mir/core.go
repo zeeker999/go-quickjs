@@ -519,8 +519,49 @@ func (c *core) allocate() error {
 			regs = c.fprs
 		}
 		free := append(c.ints(len(regs))[:0], regs...)
-		// Neither list outgrows the intervals.
+		// Neither list outgrows the intervals. The spilled intervals, in
+		// the order spilled, are found by when they end through a heap of
+		// their indexes (soonest, then first spilled, first); those that
+		// end before an interval starts free their slots in the order
+		// spilled.
 		active, spilled := c.intervalRefs(len(all))[:0], c.intervalRefs(len(all))[:0]
+		ends, done := c.ints(len(all))[:0], c.ints(len(all))[:0]
+		before := func(i, j int) bool {
+			a, b := spilled[ends[i]], spilled[ends[j]]
+			return a.end < b.end || a.end == b.end && ends[i] < ends[j]
+		}
+		push := func(k int) {
+			ends = append(ends, k)
+			for i := len(ends) - 1; i > 0; {
+				up := (i - 1) / 2
+				if !before(i, up) {
+					break
+				}
+				ends[i], ends[up] = ends[up], ends[i]
+				i = up
+			}
+		}
+		pop := func() int {
+			k := ends[0]
+			last := len(ends) - 1
+			ends[0] = ends[last]
+			ends = ends[:last]
+			for i := 0; ; {
+				m, l, r := i, 2*i+1, 2*i+2
+				if l < len(ends) && before(l, m) {
+					m = l
+				}
+				if r < len(ends) && before(r, m) {
+					m = r
+				}
+				if m == i {
+					break
+				}
+				ends[i], ends[m] = ends[m], ends[i]
+				i = m
+			}
+			return k
+		}
 		slot := func(from int) (int, error) {
 			for i := len(freeSlots) - 1; i >= 0; i-- {
 				if f := freeSlots[i]; f.end < from {
@@ -547,15 +588,19 @@ func (c *core) allocate() error {
 				}
 			}
 			active = kept
-			kept = spilled[:0]
-			for _, a := range spilled {
-				if a.end < it.start {
-					freeSlots = append(freeSlots, freeSlot{c.locAt(a.v).spill, a.end})
-				} else {
-					kept = append(kept, a)
+			done = done[:0]
+			for len(ends) > 0 && spilled[ends[0]].end < it.start {
+				k := pop()
+				// In the order spilled: insertion, as few end at once.
+				done = append(done, k)
+				for i := len(done) - 1; i > 0 && done[i-1] > done[i]; i-- {
+					done[i-1], done[i] = done[i], done[i-1]
 				}
 			}
-			spilled = kept
+			for _, k := range done {
+				a := spilled[k]
+				freeSlots = append(freeSlots, freeSlot{c.locAt(a.v).spill, a.end})
+			}
 			if len(free) > 0 {
 				c.setLoc(it.v, loc{reg: free[len(free)-1], spill: -1})
 				free = free[:len(free)-1]
@@ -582,20 +627,34 @@ func (c *core) allocate() error {
 				active[vi] = it
 			}
 			spilled = append(spilled, victim)
+			push(len(spilled) - 1)
 		}
 	}
 	// What each native call saves: the values live across it in registers,
-	// each in a slot of its own past the spill slots.
+	// each in a slot of its own past the spill slots. The calls come in
+	// order, so the intervals begun before one are kept as they are met, in
+	// their order, and dropped once they end.
 	home := map[int]int{}
+	open, next := c.intervalRefs(len(all))[:0], 0
 	for _, b := range c.order {
 		for _, v := range b.Values {
 			if v.Op != ssa.OpCall || v.Calls == nil {
 				continue
 			}
 			p := pos[v.ID]
-			for _, it := range all {
+			for ; next < len(all) && all[next].start < p; next++ {
+				open = append(open, all[next])
+			}
+			kept := open[:0]
+			for _, it := range open {
+				if it.end > p {
+					kept = append(kept, it)
+				}
+			}
+			open = kept
+			for _, it := range open {
 				l := c.locAt(it.v)
-				if it.start >= p || it.end <= p || l.reg < 0 {
+				if l.reg < 0 {
 					continue
 				}
 				s, ok := home[it.v.ID]
