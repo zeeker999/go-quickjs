@@ -214,6 +214,38 @@ func jitFed(cl *closure, e *jitEntry, pc uint32) {
 	}
 }
 
+// jitFedInlined is a property site of a callee e's code inlines, cl's
+// at pc, whose cache knew nothing when the code was compiled: the code
+// leaves there, as V8's leaves for feedback it lacked, and Go, running
+// the call, fills the cache (jitInlineFed).
+type jitFedInlined struct {
+	cl *closure
+	pc uint32
+}
+
+// jitInlineFed reports whether a site of a callee e's code inlines, whose
+// cache knew nothing when the code was compiled, has learned a shape
+// since, and has the code compiled again for it, as V8 optimizes again
+// once it has the feedback it lacked: an exit there is not the callee's
+// leaving native code, which would stop it being inlined (jitInlineLeft).
+func (r *Runtime) jitInlineFed(e *jitEntry) bool {
+	if e.inlineReopts >= 2*jitInlineReoptimizations {
+		return false
+	}
+	for i, s := range e.fedInlined {
+		in := s.cl.fn.Code[s.pc]
+		if int(in.B) >= len(s.cl.ic) {
+			continue
+		}
+		if c := &s.cl.ic[in.B]; c.shape != nil && c.shape != noShape {
+			e.fedInlined = slices.Delete(e.fedInlined, i, i+1)
+			e.inlineReopt = true
+			return true
+		}
+	}
+	return false
+}
+
 // jitReoptimize compiles cl's function again for e, its entry, with what
 // failed in its code generic, and replaces its code, which runs nowhere:
 // native code leaves for Go to do anything else. If the function no longer
@@ -345,8 +377,10 @@ type jitFeedback struct {
 	// (ssa.Holder), held by address, which the entry keeps alive.
 	holders []*Object
 	// fed are the property sites, each with the shape its cache knew, or
-	// none (jitFed).
-	fed []jitFedSite
+	// none (jitFed); fedInlined, the root's, the inlined callees' sites
+	// whose caches knew nothing.
+	fed        []jitFedSite
+	fedInlined []jitFedInlined
 	// root is the function's feedback for an inlined callee's, which keeps
 	// what the callee's sites hold for the code; nil for the function's
 	// own. strings marks an inlined callee that calls charCodeAt. callees
@@ -760,6 +794,9 @@ func (r *Runtime) jitCallSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 				e.inlineReopt = true
 				return
 			}
+		}
+		if r.jitInlineFed(e) {
+			return
 		}
 		if !refilled {
 			r.jitInlineLeft(e, pc)
@@ -1364,6 +1401,12 @@ func (fb *jitFeedback) forwardProperty(pc int) (ssa.PropertySite, bool) {
 				break
 			}
 		}
+		if recv == nil {
+			// The pool ran out: an object as the next fill makes, whose
+			// read the code is compiled for -- else the read would be
+			// compiled knowing nothing, and leave every time.
+			recv = fb.r.jitPoolObject(fb.fwd.ctor)
+		}
 	case pc == 2 && in.Op == bytecode.OpGetPropThis:
 		recv = fb.r.jitForwardMethod(fb.cl, fb.fwd.ctor)
 	}
@@ -1561,23 +1604,34 @@ func (r *Runtime) jitFillPool(pool *abi.ObjectPool, o *Object) {
 		pool.Count, pool.Proto = uint64(n), unsafe.Pointer(r.proto.array)
 		return
 	}
+	first := r.jitPoolObject(o)
+	if first == nil {
+		return
+	}
+	pool.Objects[0] = unsafe.Pointer(first)
+	for i := 1; i < n; i++ {
+		pool.Objects[i] = unsafe.Pointer(r.jitPoolObject(o))
+	}
+	pool.Count, pool.Proto = uint64(n), unsafe.Pointer(first.proto)
+}
+
+// jitPoolObject is an object for a construction with o, as jitFillPool
+// makes them, or nil if o's prototype is not its own data property holding
+// an object.
+func (r *Runtime) jitPoolObject(o *Object) *Object {
 	p := o.getOwnVisible(atomPrototype)
 	fd := o.fn()
 	if p == nil || p.flags&propAccessor != 0 || !p.value.IsObject() || fd == nil || fd.closure == nil {
-		return
+		return nil
 	}
-	proto := p.value.Object()
 	props := int(fd.closure.fn.ThisProps)
 	root := r.shapes.ctorRoot(fd)
 	if root != nil {
 		props = max(props, int(root.slack))
 	}
-	for i := range n {
-		obj := newLiteralObject(proto, ClassObject, props)
-		obj.shape = root
-		pool.Objects[i] = unsafe.Pointer(obj)
-	}
-	pool.Count, pool.Proto = uint64(n), unsafe.Pointer(proto)
+	obj := newLiteralObject(p.value.Object(), ClassObject, props)
+	obj.shape = root
+	return obj
 }
 
 // jitRefillPools fills, at a construction that left native code at pc,
@@ -1648,7 +1702,7 @@ func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
 
 // setSSA gives e the code the new pipeline compiled for fn from p.
 func (e *jitEntry) setSSA(fn *bytecode.Function, p *ir.Program, code *jit.SSACode, fb *jitFeedback) {
-	e.ssa, e.this, e.ssaShapes, e.ssaHolders, e.fed = code, p.This, fb.shapes, fb.holders, fb.fed
+	e.ssa, e.this, e.ssaShapes, e.ssaHolders, e.fed, e.fedInlined = code, p.This, fb.shapes, fb.holders, fb.fed, fb.fedInlined
 	e.ssaStrings, e.ssaCallees, e.ssaInlined, e.ssaPools = fb.strings, fb.callees, fb.inlined, fb.pools
 	e.ssaKeeps = max(e.ssaKeeps, fb.keeps)
 	e.nativeEntry = code.EntryAddress(0)
@@ -1751,6 +1805,12 @@ func (fb *jitFeedback) Global(pc int) (ssa.GlobalSite, bool) {
 
 func (fb *jitFeedback) Property(pc int) (ssa.PropertySite, bool) {
 	site, ok := fb.property(pc)
+	if ok && fb.root != nil && fb.fwd == nil && site.Shape == 0 && site.Add == nil && site.Holders[0].Object == 0 &&
+		int(fb.fn.Code[pc].B) < len(fb.cl.ic) && fb.cl.ic[fb.fn.Code[pc].B].fills < maxCacheFills {
+		// An inlined callee's site its cache knew nothing of (jitInlineFed).
+		k := fb.keep()
+		k.fedInlined = append(k.fedInlined, jitFedInlined{cl: fb.cl, pc: uint32(pc)})
+	}
 	if ok && site.Shape != 0 && fb.e != nil && fb.root == nil {
 		site.Cases = fb.cases(pc, site.Shape)
 	}
@@ -2511,7 +2571,7 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 		c.Live, c.ReturnTo = 0, 0
 	}
 	n := len(s.unwinding) - start
-	if left != nil && (n == 0 || !r.jitPoolEmptied(&s.unwinding[len(s.unwinding)-1])) {
+	if left != nil && (n == 0 || !r.jitPoolEmptied(&s.unwinding[len(s.unwinding)-1])) && !r.jitInlineFed(left) {
 		// An exit inside an inlined callee -- but one at a construction
 		// inlined in it whose pool ran out, which Go fills again, as
 		// jitCallSeen does not count at the call itself.

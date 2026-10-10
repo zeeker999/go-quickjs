@@ -6641,6 +6641,98 @@ func TestJITSSAInlinedNestedForwardingConstructions(t *testing.T) {
 	}
 }
 
+// A forwarding constructor's read of its method, this.initialize, is
+// compiled for an object as the construction's pool holds them, found on
+// the constructor's prototype -- also when the pool has run out as the
+// caller is compiled, as RayTrace's are: compiled knowing nothing, the
+// read left native code at every construction.
+func TestJITForwardPropertyEmptyPool(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	setup := `var Class={create:function(){return function(){this.initialize.apply(this,arguments)}}};
+		var Ray=Class.create();Ray.prototype={initialize:function(pos,dir){this.position=pos;this.direction=dir}}`
+	if _, err := r.Run(compileForTest(t, setup)); err != nil {
+		t.Fatal(err)
+	}
+	ctor := r.global.getOwn(r.atoms.intern("Ray")).value.Object()
+	proto := ctor.getOwnVisible(atomPrototype).value.Object()
+	cl := ctor.fn().closure
+	if cl.fn.Code[1].Op != bytecode.OpGetProp {
+		t.Fatalf("the forwarding constructor reads its method with %v", cl.fn.Code[1].Op)
+	}
+	for _, full := range []bool{true, false} {
+		pool := new(abi.ObjectPool)
+		if full {
+			r.jitFillPool(pool, ctor)
+		}
+		fb := &jitFeedback{r: r, fn: cl.fn, cl: cl, root: &jitFeedback{r: r}, fwd: &jitForwardFrame{ctor: ctor, pool: pool, argc: 2}}
+		site, ok := fb.Property(1)
+		if !ok || site.Shape == 0 || site.Holders[0].Object != uintptr(unsafe.Pointer(proto)) {
+			t.Fatalf("pool filled %v: the read is compiled for %+v", full, site)
+		}
+	}
+}
+
+// A callee inlined before its property sites' caches knew anything --
+// RayTrace's Ray, a forwarding constructor read as NS.Ray, compiled into
+// its caller before initialize's stores had run in Go -- leaves at each
+// such site, and Go, making the construction, fills the cache. As V8
+// optimizes again once it has the feedback it lacked, the caller is
+// compiled again for it (jitInlineFed), and does not count those exits
+// against inlining the callee: before, sixteen of them stopped it, and
+// every construction then left native code. Each answer is the
+// interpreter's.
+func TestJITSSAInlinedCalleeLearns(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	defer func(was bool) { jitcompile.SSAConstruct = was }(jitcompile.SSAConstruct)
+	jitcompile.SSAConstruct = true
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var Class={create:function(){return function(){this.initialize.apply(this,arguments)}}};
+		var Ray=Class.create();Ray.prototype={position:null,direction:null,initialize:function(pos,dir){this.position=pos;this.direction=dir}};
+		var NS={Ray:Ray},d={x:2};
+		function run(n){let s=0;for(let i=0;i<n;i++){const r=new NS.Ray(i,d);s=(s+r.position+r.direction.x)|0}return s}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("run")).value.Object().fn().closure
+	for i := range 5 {
+		wv, err := want.Run(compileForTest(t, `String(run(300))`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts uint64
+		if e := r.jit.cache[weak.Make(cl.fn)]; e != nil {
+			hosts = e.ssaStats.hosts
+		}
+		gv, err := r.Run(compileForTest(t, `String(run(300))`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i >= 2 {
+			e := r.jit.cache[weak.Make(cl.fn)]
+			if e == nil || e.ssa == nil || e.entrySlow || len(e.notInline) != 0 {
+				t.Fatalf("round %d: run does not inline the construction: %+v", i, e)
+			}
+			// Only to fill the pool again.
+			if n := e.ssaStats.hosts - hosts; n > 300/abi.PoolSize+2 {
+				t.Fatalf("round %d: run left native code %d times for 300 constructions", i, n)
+			}
+		}
+	}
+}
+
 // Code called natively that leaves on too many of its calls is compiled
 // again for what its exits taught, its native callers calling it still, as
 // V8 optimizes again after a deopt; only after jitUnwindReopts such
