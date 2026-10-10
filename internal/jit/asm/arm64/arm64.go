@@ -187,6 +187,16 @@ func (a *Asm) MovImm(dst Reg, v uint64) {
 	}
 }
 
+// MovAddr sets dst to a 64-bit constant in four instructions, whatever its
+// value: an address, so that the code's length does not depend on where
+// memory is.
+func (a *Asm) MovAddr(dst Reg, v uint64) {
+	a.emit(0xD2800000 | uint32(uint16(v))<<5 | uint32(dst)) // MOVZ
+	for i := 1; i < 4; i++ {
+		a.emit(0xF2800000 | uint32(i)<<21 | uint32(uint16(v>>(16*i)))<<5 | uint32(dst)) // MOVK
+	}
+}
+
 // ---------------------------------------------------------------- memory
 
 // size is a load's or store's access width.

@@ -1005,7 +1005,7 @@ func (c *compiler) exitThen(s *ssa.FrameState, kind uint64, then *amd64.Label) {
 		// To Go, which writes the frame from the exit's description.
 		if d := c.exitDescriptor(s, kind, uint8(regLocals), uint8(regStack)); d != nil {
 			c.exits = append(c.exits, d)
-			c.a.MovImm(scratchA, uint64(uintptr(unsafe.Pointer(d))))
+			c.a.MovAddr(scratchA, uint64(uintptr(unsafe.Pointer(d))))
 			if !c.tableUsed {
 				c.table, c.tableUsed = c.a.NewLabel(), true
 			}

@@ -341,7 +341,7 @@ func (c *a64Compiler) exitThen(s *ssa.FrameState, kind uint64, then *arm64.Label
 	if then == nil && TableExits {
 		if d := c.exitDescriptor(s, kind, uint8(a64Locals), uint8(a64Stack)); d != nil {
 			c.exits = append(c.exits, d)
-			c.a.MovImm(a64A, uint64(uintptr(unsafe.Pointer(d))))
+			c.a.MovAddr(a64A, uint64(uintptr(unsafe.Pointer(d))))
 			if !c.tableUsed {
 				c.table, c.tableUsed = c.a.NewLabel(), true
 			}
