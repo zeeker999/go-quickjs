@@ -30,7 +30,7 @@ func Optimize(f *Func) {
 	}
 	// Tables are by value ID, not maps: a compile at run time pays for every
 	// pass (BenchmarkJITCompile in internal/vm).
-	var subst []*Value
+	subst := f.scr().subst
 	// A guard repeats another that dominates it, as V8's redundancy
 	// elimination has it: the blocks are in reverse post-order, each after
 	// its dominator (Func.Blocks).
@@ -141,6 +141,8 @@ func Optimize(f *Func) {
 	}
 	clear(guards)
 	sc.guards = guards[:0]
+	clear(subst)
+	sc.subst = subst[:0]
 	f.shadowed = true
 	recount(f)
 }

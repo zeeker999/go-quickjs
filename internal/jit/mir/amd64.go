@@ -2086,9 +2086,20 @@ func (c *compiler) elementCell(array *ssa.Value, fail func(amd64.Cond)) {
 	fail(amd64.CondE)
 }
 
+// guardFor is a guard of v's for code that may keep it: a jump to the stub
+// that exits to v's state.
+func (c *compiler) guardFor(v *ssa.Value) func(amd64.Cond) {
+	return func(cond amd64.Cond) {
+		c.a.Jcc(cond, c.stubLabel(v.State, exitKind(v.Aux)))
+	}
+}
+
 // value emits one value.
 func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 	arg := func(i int) *ssa.Value { return v.Args[i] }
+	// guard is for the guards emitted here; one passed on, which may be
+	// kept for cold code, is made only for the values that pass one
+	// (guardFor), not for every value.
 	guard := func(cond amd64.Cond) {
 		c.a.Jcc(cond, c.stubLabel(v.State, exitKind(v.Aux)))
 	}
@@ -2120,11 +2131,11 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.Op(amd64.Cmp, r, scratchA, true)
 		guard(amd64.CondE)
 	case ssa.OpTruth:
-		c.truth(v, guard)
+		c.truth(v, c.guardFor(v))
 	case ssa.OpArrayOf:
-		c.arrayOf(v, guard)
+		c.arrayOf(v, c.guardFor(v))
 	case ssa.OpObjectOf:
-		if c.objectOf(v, guard) {
+		if c.objectOf(v, c.guardFor(v)) {
 			c.setG(v, scratchC)
 		}
 	case ssa.OpSameObject:
@@ -2132,7 +2143,7 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.Op(amd64.Cmp, c.gpr(arg(0), scratchA), scratchB, true)
 		guard(amd64.CondNE)
 	case ssa.OpCall:
-		c.call(v, guard)
+		c.call(v, c.guardFor(v))
 	case ssa.OpCallCell:
 		c.a.MovRR(scratchA, regCtx)
 		c.a.OpImm(amd64.Add, scratchA, abi.OffKeep+int32(v.Args[0].Index)*int32(c.enc.ValueSize), true)
@@ -2158,7 +2169,7 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.Op(amd64.Cmp, scratchA, scratchB, true)
 		guard(amd64.CondAE)
 	case ssa.OpPropRead:
-		c.property(v, guard)
+		c.property(v, c.guardFor(v))
 		c.a.Load(scratchB, scratchA, c.enc.NumOffset)
 		c.a.MovImm(scratchC, abi.NumberLimit)
 		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
@@ -2166,7 +2177,7 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.MovQToX(xScratch0, scratchB)
 		c.setX(v, xScratch0)
 	case ssa.OpPropCell:
-		c.property(v, guard)
+		c.property(v, c.guardFor(v))
 		c.setG(v, scratchA)
 	case ssa.OpGlobalCell:
 		// No script-level lexical binding of the name, which would shadow
@@ -2213,30 +2224,30 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.OpImm(amd64.Add, scratchA, abi.OffCharCode, true)
 		c.setG(v, scratchA)
 	case ssa.OpStringCode:
-		c.stringCode(v, guard)
+		c.stringCode(v, c.guardFor(v))
 	case ssa.OpLoadCell:
 		d := c.gdst(v)
 		c.a.Load(d, c.gpr(arg(0), scratchA), c.enc.NumOffset)
 		c.setG(v, d)
 	case ssa.OpPropWrite:
-		c.propStore(v, guard)
+		c.propStore(v, c.guardFor(v))
 	case ssa.OpLength:
-		c.length(v, guard)
+		c.length(v, c.guardFor(v))
 	case ssa.OpElemKey:
 
-		c.index(arg(0), guard)
+		c.index(arg(0), c.guardFor(v))
 	case ssa.OpElemRead:
-		c.index(arg(1), guard)
-		c.element(arg(0), guard)
+		c.index(arg(1), c.guardFor(v))
+		c.element(arg(0), c.guardFor(v))
 		c.a.MovQToX(xScratch0, scratchB)
 		c.setX(v, xScratch0)
 	case ssa.OpElemCell:
-		c.index(arg(1), guard)
-		c.elementCell(arg(0), guard)
+		c.index(arg(1), c.guardFor(v))
+		c.elementCell(arg(0), c.guardFor(v))
 		c.setG(v, scratchA)
 	case ssa.OpElemWrite:
-		c.index(arg(1), guard)
-		c.element(arg(0), guard)
+		c.index(arg(1), c.guardFor(v))
+		c.element(arg(0), c.guardFor(v))
 		c.boxF64(c.xmm(arg(2), xScratch0), scratchB)
 		c.a.Store(scratchA, c.enc.NumOffset, scratchB)
 	case ssa.OpBoxF64:
@@ -2259,7 +2270,7 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.SSEOp(sseOp(v.Op), d, y)
 		c.setX(v, d)
 	case ssa.OpModF64:
-		c.remainder(v, guard)
+		c.remainder(v, c.guardFor(v))
 	case ssa.OpNegF64:
 		x := c.xmm(arg(0), xScratch0)
 		if x != xScratch0 {
@@ -2286,9 +2297,9 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.MovZX8(scratchA, scratchA)
 		c.setG(v, scratchA)
 	case ssa.OpLooseNullish:
-		c.looseNullish(v, guard)
+		c.looseNullish(v, c.guardFor(v))
 	case ssa.OpEqTagged:
-		c.eqTagged(v, guard)
+		c.eqTagged(v, c.guardFor(v))
 	case ssa.OpNot:
 		c.a.MovRR32(scratchA, c.gpr(arg(0), scratchA))
 		c.a.OpImm(amd64.Xor, scratchA, 1, false)

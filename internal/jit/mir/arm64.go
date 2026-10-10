@@ -2016,9 +2016,20 @@ func (c *a64Compiler) numberCell(guard func(arm64.Cond)) {
 	guard(arm64.HS)
 }
 
+// guardFor is a guard of v's for code that may keep it: a jump to the stub
+// that exits to v's state.
+func (c *a64Compiler) guardFor(v *ssa.Value) func(arm64.Cond) {
+	return func(cond arm64.Cond) {
+		c.a.BCond(cond, c.stubLabel(v.State, exitKind(v.Aux)))
+	}
+}
+
 // value emits one value.
 func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 	arg := func(i int) *ssa.Value { return v.Args[i] }
+	// guard is for the guards emitted here; one passed on, which may be
+	// kept for cold code, is made only for the values that pass one
+	// (guardFor), not for every value.
 	guard := func(cond arm64.Cond) {
 		c.a.BCond(cond, c.stubLabel(v.State, exitKind(v.Aux)))
 	}
@@ -2050,15 +2061,15 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.Cmp(r, a64A, true)
 		guard(arm64.EQ)
 	case ssa.OpTruth:
-		c.truth(v, guard)
+		c.truth(v, c.guardFor(v))
 	case ssa.OpArrayOf:
-		c.arrayOf(v, guard)
+		c.arrayOf(v, c.guardFor(v))
 	case ssa.OpObjectOf:
-		if c.objectOf(v, guard) {
+		if c.objectOf(v, c.guardFor(v)) {
 			c.setG(v, a64C)
 		}
 	case ssa.OpCall:
-		c.call(v, guard)
+		c.call(v, c.guardFor(v))
 	case ssa.OpCallCell:
 		c.a.AddImm(a64A, a64Ctx, int64(abi.OffKeep+int32(v.Args[0].Index)*int32(c.enc.ValueSize)), true)
 		c.setG(v, a64A)
@@ -2086,12 +2097,12 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.Cmp(c.gpr(arg(0), a64A), a64B, true)
 		guard(arm64.NE)
 	case ssa.OpPropRead:
-		c.property(v, guard)
+		c.property(v, c.guardFor(v))
 		c.numberCell(guard)
 		c.a.FMovToF(a64F0, a64B)
 		c.setF(v, a64F0)
 	case ssa.OpPropCell:
-		c.property(v, guard)
+		c.property(v, c.guardFor(v))
 		c.setG(v, a64A)
 	case ssa.OpGlobalCell:
 		unshadowed := c.a.NewLabel()
@@ -2131,29 +2142,29 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.AddImm(a64A, a64Ctx, int64(abi.OffCharCode), true)
 		c.setG(v, a64A)
 	case ssa.OpStringCode:
-		c.stringCode(v, guard)
+		c.stringCode(v, c.guardFor(v))
 	case ssa.OpLoadCell:
 		d := c.gdst(v)
 		c.a.Load(d, c.gpr(arg(0), a64A), c.enc.NumOffset)
 		c.setG(v, d)
 	case ssa.OpPropWrite:
-		c.propStore(v, guard)
+		c.propStore(v, c.guardFor(v))
 	case ssa.OpLength:
-		c.length(v, guard)
+		c.length(v, c.guardFor(v))
 	case ssa.OpElemKey:
-		c.index(arg(0), guard)
+		c.index(arg(0), c.guardFor(v))
 	case ssa.OpElemRead:
-		c.index(arg(1), guard)
-		c.element(arg(0), guard)
+		c.index(arg(1), c.guardFor(v))
+		c.element(arg(0), c.guardFor(v))
 		c.a.FMovToF(a64F0, a64B)
 		c.setF(v, a64F0)
 	case ssa.OpElemCell:
-		c.index(arg(1), guard)
-		c.elementCell(arg(0), guard)
+		c.index(arg(1), c.guardFor(v))
+		c.elementCell(arg(0), c.guardFor(v))
 		c.setG(v, a64A)
 	case ssa.OpElemWrite:
-		c.index(arg(1), guard)
-		c.element(arg(0), guard)
+		c.index(arg(1), c.guardFor(v))
+		c.element(arg(0), c.guardFor(v))
 		c.boxF64(c.fpr(arg(2), a64F0), a64B)
 		c.a.Store(a64A, c.enc.NumOffset, a64B)
 	case ssa.OpBoxF64:
@@ -2167,7 +2178,7 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.FArith(a64FOp(v.Op), d, c.fpr(arg(0), a64F0), c.fpr(arg(1), a64F1))
 		c.setF(v, d)
 	case ssa.OpModF64:
-		c.remainder(v, guard)
+		c.remainder(v, c.guardFor(v))
 	case ssa.OpNegF64:
 		d := c.fdst(v)
 		c.a.FNeg(d, c.fpr(arg(0), a64F0))
@@ -2192,9 +2203,9 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.Cset(d, arm64.EQ)
 		c.setG(v, d)
 	case ssa.OpLooseNullish:
-		c.looseNullish(v, guard)
+		c.looseNullish(v, c.guardFor(v))
 	case ssa.OpEqTagged:
-		c.eqTagged(v, guard)
+		c.eqTagged(v, c.guardFor(v))
 	case ssa.OpNot:
 		c.a.CmpImm(c.gpr(arg(0), a64A), 0, false)
 		d := c.gdst(v)

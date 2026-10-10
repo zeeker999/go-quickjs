@@ -49,7 +49,9 @@ type core struct {
 	saves map[*ssa.Value][]saved
 	// exitEnc, exitDescs and exitSlots are what exitDescriptor's
 	// descriptions are made from, a compile's encoding shared and the
-	// rest carved from blocks, as the code keeps them all as long.
+	// rest carved from blocks, as the code keeps them all as long: each
+	// block twice the last, up to a limit, so a small function takes
+	// little.
 	exitEnc   *abi.Encoding
 	exitDescs []abi.ExitDescriptor
 	exitSlots []abi.ExitSlot
@@ -887,7 +889,7 @@ func (c *core) exitDescriptor(s *ssa.FrameState, kind uint64, localsReg, stackRe
 		}
 	}
 	if cap(c.exitSlots)-len(c.exitSlots) < n {
-		c.exitSlots = make([]abi.ExitSlot, 0, max(n, 256))
+		c.exitSlots = make([]abi.ExitSlot, 0, max(n, min(2*cap(c.exitSlots), 256), 16))
 	}
 	d.Slots = c.exitSlots[len(c.exitSlots) : len(c.exitSlots) : len(c.exitSlots)+n]
 	for i, v := range s.Slots {
@@ -922,7 +924,7 @@ func (c *core) exitDescriptor(s *ssa.FrameState, kind uint64, localsReg, stackRe
 	}
 	c.exitSlots = c.exitSlots[:len(c.exitSlots)+n]
 	if len(c.exitDescs) == cap(c.exitDescs) {
-		c.exitDescs = make([]abi.ExitDescriptor, 0, 32)
+		c.exitDescs = make([]abi.ExitDescriptor, 0, max(min(2*cap(c.exitDescs), 32), 4))
 	}
 	c.exitDescs = append(c.exitDescs, d)
 	return &c.exitDescs[len(c.exitDescs)-1]

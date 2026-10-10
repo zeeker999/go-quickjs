@@ -1082,6 +1082,52 @@ func TestSSANativeMatchesEvaluator(t *testing.T) {
 	}
 }
 
+// A compile in warm workspaces allocates little beyond what the code keeps
+// (its exits' descriptions): a runtime compiles at run time, and what a
+// compile leaves the collector is paid by the program. The budget is a
+// little over what random programs take now, so that a pass allocating per
+// value again shows here.
+func TestWorkspaceCompileAllocations(t *testing.T) {
+	r := rand.New(rand.NewPCG(41, 42))
+	var ws ssa.Workspace
+	var mws mir.Workspace
+	type job struct {
+		p *ir.Program
+		l layout
+	}
+	compile := func(j job) bool {
+		defer ws.Rewind()
+		defer mws.Rewind()
+		f, err := ssa.BuildIn(&ws, j.p, j.l)
+		if err != nil {
+			return false
+		}
+		f.FrameLocals, f.ThisSlot = j.l.frame, j.l.this
+		ssa.Optimize(f)
+		_, err = mir.CompileIn(&mws, f, testEncoding)
+		return err == nil
+	}
+	var jobs []job
+	for attempt := 0; attempt < 20000 && len(jobs) < 200; attempt++ {
+		p, l := ssaTestProgram(r)
+		if p.Validate() == nil && compile(job{p, l}) {
+			jobs = append(jobs, job{p, l})
+		}
+	}
+	if len(jobs) < 200 {
+		t.Fatalf("only %d programs compiled", len(jobs))
+	}
+	allocs := testing.AllocsPerRun(3, func() {
+		for _, j := range jobs {
+			compile(j)
+		}
+	}) / float64(len(jobs))
+	t.Logf("%.1f allocations a compile", allocs)
+	if allocs > 80 {
+		t.Fatalf("%.1f allocations a compile", allocs)
+	}
+}
+
 // A workspace changes where a compile's memory comes from, never what it
 // makes: random programs built in one workspace, rewound between them as a
 // runtime rewinds it, compile to the same code as programs built on their
