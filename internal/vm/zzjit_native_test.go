@@ -7057,6 +7057,11 @@ func TestJITSSAInlinedCalleeLearns(t *testing.T) {
 // decided -- had been made notNative at once, with a backoff that kept it
 // so for the rest of the run.
 func TestJITSSAUnwoundCompilesAgainFirst(t *testing.T) {
+	// The exits counted here are not made while the collector marks,
+	// which counts none (jitMarking): a collection meanwhile, frequent
+	// under checkptr, would leave them uncounted.
+	defer func(was func() bool) { jitMarking = was }(jitMarking)
+	jitMarking = func() bool { return false }
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	r.jitSSA = true
 	if _, err := r.Run(compileForTest(t, `function g(n){let s=0;for(let i=0;i<n;i++)s=(s+i)|0;return s}g(300);g(300)`)); err != nil {
