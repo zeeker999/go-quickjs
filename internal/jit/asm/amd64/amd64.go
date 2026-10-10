@@ -218,6 +218,15 @@ func (a *Asm) MovImm(dst Reg, v uint64) {
 	}
 }
 
+// MovAddr sets dst to a 64-bit constant in ten bytes, whatever its value:
+// an address, so that the code's length does not depend on where memory
+// is.
+func (a *Asm) MovAddr(dst Reg, v uint64) {
+	a.rex(true, 0, byte(dst), false)
+	a.emit(0xB8 + byte(dst)&7)
+	a.buf = binary.LittleEndian.AppendUint64(a.buf, v)
+}
+
 // Load is dst = [base + disp], 64 bits.
 func (a *Asm) Load(dst, base Reg, disp int32) {
 	a.rex(true, byte(dst), byte(base), false)
