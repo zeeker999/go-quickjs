@@ -6827,6 +6827,90 @@ func TestJITSSAStringConstants(t *testing.T) {
 	}
 }
 
+// A captured binding is read and assigned natively, in its cell each time
+// (ir.UpvalueRead, ir.UpvalueWrite), and a closure that has some is called
+// natively, its context given its cells: the V8 suite's Math.random,
+// seed = ... in a closure, which every suite calls, refused for
+// set_upvalue. A read after a native call that assigned the binding sees
+// the assignment; a binding read before its initialization, or a constant
+// assigned, is the interpreter's error. Each answer is the interpreter's.
+func TestJITSSACapturedBindings(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var rnd=(function(){var seed=49734321;return function(){
+			seed=((seed+0x7ed55d16)+(seed<<12))&0xffffffff;seed=((seed^0xc761c23c)^(seed>>>19))&0xffffffff;
+			return (seed&0xfffffff)/0x10000000}})();
+		function run(n){let s=0;for(let i=0;i<n;i++)s=(s+(rnd()*1000|0))|0;return s}
+		var pair=(function(){let c=0;return {inc(){c=c+1},get(){return c}}})();
+		function both(n){let s=0;for(let i=0;i<n;i++){pair.inc();s=(s+pair.get()*3)|0}return s}
+		function tdz(){try{const f=()=>x;f();let x=1;return 'no'}catch(e){return e.name}}
+		function cst(){const k=1;const g=()=>{k=2};try{g();return 'no'}catch(e){return e.name}}
+		var step=(function(){let v=0;function bump(){v=v+2}return function(n){let s=0;for(let i=0;i<n;i++){v=v+1;bump();s=(s+v)|0}return s}})();
+		var grow=(function(){let v=1,w=3;function bump(){v=v<250?v+1:'x'+v}return function(n){v=1;let s=0;for(let i=0;i<n;i++){s=(s*3+v+w)%65521;bump()}return s+'|'+v}})();
+		var keep=(function(){let o={k:1};function swap(){o=o.k===1?{k:2}:{k:1}}return function(n){let s=0;for(let i=0;i<n;i++){const w=o;swap();s=(s*3+w.k*10+o.k)|0}return s}})();`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("run")).value.Object().fn().closure
+	rnd := r.global.getOwn(r.atoms.intern("rnd")).value.Object().fn().closure
+	step := r.global.getOwn(r.atoms.intern("step")).value.Object().fn().closure
+	grow := r.global.getOwn(r.atoms.intern("grow")).value.Object().fn().closure
+	keep := r.global.getOwn(r.atoms.intern("keep")).value.Object().fn().closure
+	rounds := []string{`String(run(300))`, `String(run(300))`, `String(run(300))`, `String(run(300))`,
+		`String(both(300))`, `String(both(300))`, `String(both(300))`, `[tdz(),tdz(),cst(),cst()].join()`,
+		`String(step(300))`, `String(step(300))`, `String(step(300))`, `String(step(300))`,
+		`grow(200)`, `grow(200)`, `grow(300)`, `grow(300)`, `grow(300)`, `grow(200)`,
+		`String(keep(301))`, `String(keep(301))`, `String(keep(301))`, `String(keep(301))`}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts uint64
+		if e := r.jit.cache[weak.Make(cl.fn)]; e != nil {
+			hosts = e.ssaStats.hosts
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 3 {
+			e := r.jit.cache[weak.Make(cl.fn)]
+			if e == nil || e.ssa == nil || e.entrySlow || len(e.nativeCalls) == 0 {
+				t.Fatalf("run does not call rnd natively: %+v", e)
+			}
+			if n := e.ssaStats.hosts - hosts; n > 1 {
+				t.Fatalf("run left native code %d times", n)
+			}
+			if re := r.jit.cache[weak.Make(rnd.fn)]; re == nil || re.ssa == nil || re.notNative {
+				t.Fatalf("rnd has no native code: %+v", re)
+			}
+		}
+		if i == len(rounds)-1 {
+			// step reads v again after bump, called natively, assigned it;
+			// grow, after bump made v a string, which its code took for a
+			// number; keep, o's old object, w, after swap replaced it.
+			for name, cl := range map[string]*closure{"step": step, "grow": grow, "keep": keep} {
+				if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil || len(e.nativeCalls) == 0 {
+					t.Fatalf("%s makes no native calls: %+v", name, e)
+				}
+			}
+		}
+	}
+}
+
 // An addition one operand of which is a string constant, or such an
 // addition's result, is Go's (compile's stringConcats), not a speculation on
 // numbers: RayTrace's Vector.prototype.subtract, if(!w||!v) throw

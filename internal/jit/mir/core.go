@@ -705,7 +705,7 @@ func inlineLevels(s *ssa.FrameState) []*ssa.InlineState {
 // read there with no decoding (sourceAddr).
 func cellSource(s *ssa.Value) bool {
 	switch s.Op {
-	case ssa.OpPropCell, ssa.OpElemCell, ssa.OpGlobalCell, ssa.OpStringMethod, ssa.OpCallCell, ssa.OpConstCell:
+	case ssa.OpPropCell, ssa.OpElemCell, ssa.OpGlobalCell, ssa.OpStringMethod, ssa.OpCallCell, ssa.OpConstCell, ssa.OpUpvalueCell:
 		return true
 	}
 	return false

@@ -342,6 +342,10 @@ func newAliases() *aliases {
 // anyKey is a call's key: a callee may write any property.
 const anyKey = ^uint32(0)
 
+// upvalueKey is the key of a store to a captured binding (OpPropWrite's
+// Upvalue).
+const upvalueKey = ^uint32(1)
+
 // may reports whether a store through key may write the cell at s.
 func (a *aliases) may(key uint32, s *Value) bool {
 	switch s.Op {
@@ -353,6 +357,10 @@ func (a *aliases) may(key uint32, s *Value) bool {
 		return key == anyKey
 	case OpStringMethod, OpConstSource, OpConstCell:
 		return false
+	case OpUpvalueCell:
+		// A call may assign it, or an assignment to a captured binding,
+		// any: two closures may capture one binding.
+		return key == anyKey || key == upvalueKey
 	case OpKeep:
 		if x := s.Args[0]; x.Shadow != nil {
 			return a.may(key, x.Shadow)

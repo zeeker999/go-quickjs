@@ -1114,7 +1114,12 @@ func (c *a64Compiler) propStore(v *ssa.Value, guard func(arm64.Cond)) {
 			return
 		}
 	}
-	if v.Global {
+	if v.Upvalue {
+		// As amd64's: a captured binding's cell.
+		if r := c.gpr(v.Args[0], a64A); r != a64A {
+			c.a.MovRR(a64A, r)
+		}
+	} else if v.Global {
 		// As amd64's: a global binding's cell, writable.
 		if r := c.gpr(v.Args[0], a64A); r != a64A {
 			c.a.MovRR(a64A, r)
@@ -1670,6 +1675,10 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		}
 		c.a.MovImm(top, uint64(t.Closure))
 		c.a.Store(calleeCtx, abi.OffClosure, top)
+		if t.Upvalues != 0 {
+			c.a.MovImm(top, uint64(t.Upvalues))
+			c.a.Store(calleeCtx, abi.OffUpvalues, top)
+		}
 		if t.Pool != 0 {
 			// A construction's new.target, for Go to make its frame with.
 			c.a.MovImm(top, uint64(t.Callee))
@@ -2285,6 +2294,13 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 	case ssa.OpConstCell:
 		d := c.gdst(v)
 		c.a.MovImm(d, v.Const.Bits)
+		c.setG(v, d)
+	case ssa.OpUpvalueCell:
+		// As amd64's: the binding's cell, then where its value is now.
+		d := c.gdst(v)
+		c.a.Load(d, a64Ctx, abi.OffUpvalues)
+		c.a.Load(d, d, int32(v.Index)*8)
+		c.a.Load(d, d, c.enc.UpvalueSlot)
 		c.setG(v, d)
 	case ssa.OpConstF64:
 		d := c.fdst(v)

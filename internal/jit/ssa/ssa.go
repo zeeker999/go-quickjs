@@ -221,6 +221,10 @@ const (
 	// string's, at Const.Bits: what OpLoadCell reads it from, its pointer
 	// word there (ir.StringConst).
 	OpConstCell // -> source
+	// OpUpvalueCell is the cell captured binding Index's value is in now:
+	// its frame's slot while the frame runs, its own once closed -- found
+	// again each time, as closing moves it (ir.UpvalueRead).
+	OpUpvalueCell // -> source
 )
 
 var opNames = [...]string{
@@ -234,7 +238,7 @@ var opNames = [...]string{
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
 	OpSameObject: "sameobject", OpFrameRoom: "frameroom", OpKeepRef: "keepref", OpKeep: "keep", OpKept: "kept",
 	OpCall: "call", OpCallCell: "callcell", OpSqrtF64: "sqrtf", OpAbsF64: "absf", OpInstanceOf: "instanceof", OpTypeIs: "typeis",
-	OpCheckTrue: "checktrue", OpConstCell: "constcell",
+	OpCheckTrue: "checktrue", OpConstCell: "constcell", OpUpvalueCell: "upvaluecell",
 }
 
 func (o Op) String() string {
@@ -284,6 +288,9 @@ type Value struct {
 	Cases   []PropertyCase
 	// Add, for a write whose cache adds its property, is how (OpPropWrite).
 	Add *PropertyAdd
+	// Upvalue marks an OpPropWrite to a captured binding (ir.UpvalueWrite):
+	// its first operand is the binding's cell (OpUpvalueCell).
+	Upvalue bool
 	// Global marks an OpPropWrite to a global binding (ir.BindingWrite):
 	// its first operand is the binding's cell (OpGlobalCell), not an
 	// object.

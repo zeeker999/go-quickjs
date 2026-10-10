@@ -60,6 +60,11 @@ func (p *Program) Validate() error {
 			left, right, write = true, true, true
 		case ObjectLiteral, StringConst:
 			write = true
+		case UpvalueRead, UpvalueWrite:
+			left, write = in.Op == UpvalueWrite, in.Op == UpvalueRead
+			if int(in.Key) >= p.Upvalues || p.UpvalueBase+p.Upvalues > p.Locals {
+				return bad("invalid captured binding")
+			}
 		case FieldDefine:
 			left, right = true, true
 		case ArrayLiteral:

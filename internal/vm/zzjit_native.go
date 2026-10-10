@@ -1622,7 +1622,8 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 			bytecode.OpGetPropThis, bytecode.OpSetIndex, bytecode.OpNewArray,
 			bytecode.OpGetIndex, bytecode.OpNew, bytecode.OpPushConst, bytecode.OpInstanceOf, bytecode.OpTypeOf,
 			bytecode.OpCheckGlobalRef, bytecode.OpAssertResolved, bytecode.OpNewObject, bytecode.OpDefineField,
-			bytecode.OpPushEmptyString:
+			bytecode.OpPushEmptyString, bytecode.OpGetUpvalue, bytecode.OpGetUpvalueCheck, bytecode.OpSetUpvalue,
+			bytecode.OpInitUpvalue, bytecode.OpSetUpvalueCheck:
 		default:
 			return sp, steps, nil
 		}
@@ -1673,6 +1674,25 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 			continue
 		case bytecode.OpPushEmptyString:
 			v = Str(emptyString)
+		case bytecode.OpGetUpvalue, bytecode.OpGetUpvalueCheck:
+			// As the interpreter reads a captured binding.
+			v = f.cl.upvalues[in.A].get()
+			if in.Op == bytecode.OpGetUpvalueCheck && v.IsUninitialized() {
+				return sp, steps, r.throwReferenceError("cannot access %q before initialization", f.cl.fn.Upvalues[in.A].Name)
+			}
+		case bytecode.OpSetUpvalue, bytecode.OpInitUpvalue, bytecode.OpSetUpvalueCheck:
+			// As the interpreter assigns one.
+			if in.Op == bytecode.OpSetUpvalueCheck {
+				if f.cl.upvalues[in.A].get().IsUninitialized() {
+					return sp, steps, r.throwReferenceError("cannot access %q before initialization", f.cl.fn.Upvalues[in.A].Name)
+				}
+				if !f.cl.fn.Upvalues[in.A].Mutable {
+					return sp, steps, r.throwTypeError("assignment to constant variable %q", f.cl.fn.Upvalues[in.A].Name)
+				}
+			}
+			sp--
+			f.cl.upvalues[in.A].set(stack[sp])
+			continue
 		case bytecode.OpNewObject:
 			// As the interpreter makes a literal's object.
 			o := newLiteralObject(r.proto.object, ClassObject, int(in.A))
