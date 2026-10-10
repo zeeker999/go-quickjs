@@ -457,18 +457,26 @@ func (c *core) allocate() error {
 			})
 		}
 	}
-	all := c.intervalRefs(nv)[:0]
+	// By start, then value ID: a counting sort over the positions, the
+	// intervals taken in ID order.
+	first := c.ints(count + 1)
+	n := 0
 	for i := range iv {
 		if iv[i].v != nil {
-			all = append(all, &iv[i])
+			first[iv[i].start+1]++
+			n++
 		}
 	}
-	slices.SortFunc(all, func(a, b *interval) int {
-		if a.start != b.start {
-			return a.start - b.start
+	for p := 1; p <= count; p++ {
+		first[p] += first[p-1]
+	}
+	all := c.intervalRefs(nv)[:n]
+	for i := range iv {
+		if it := &iv[i]; it.v != nil {
+			all[first[it.start]] = it
+			first[it.start]++
 		}
-		return a.v.ID - b.v.ID
-	})
+	}
 	c.locs, c.hasLoc = c.locList(nv), c.bools(nv)
 	// Spill slots are reused as registers are: a spilled interval's slot is
 	// free once it ends. Spilling an active interval puts all of it in the
