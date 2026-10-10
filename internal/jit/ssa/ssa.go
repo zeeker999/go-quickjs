@@ -217,6 +217,10 @@ const (
 	// OpCheckTrue exits unless its operand is true: strict mode's
 	// assert_resolved, after a check_global_ref Go made.
 	OpCheckTrue // tagged -> none
+	// OpConstCell is the address of a cell the VM keeps a constant in, a
+	// string's, at Const.Bits: what OpLoadCell reads it from, its pointer
+	// word there (ir.StringConst).
+	OpConstCell // -> source
 )
 
 var opNames = [...]string{
@@ -230,7 +234,7 @@ var opNames = [...]string{
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
 	OpSameObject: "sameobject", OpFrameRoom: "frameroom", OpKeepRef: "keepref", OpKeep: "keep", OpKept: "kept",
 	OpCall: "call", OpCallCell: "callcell", OpSqrtF64: "sqrtf", OpAbsF64: "absf", OpInstanceOf: "instanceof", OpTypeIs: "typeis",
-	OpCheckTrue: "checktrue",
+	OpCheckTrue: "checktrue", OpConstCell: "constcell",
 }
 
 func (o Op) String() string {

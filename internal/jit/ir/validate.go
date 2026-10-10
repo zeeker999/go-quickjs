@@ -58,7 +58,7 @@ func (p *Program) Validate() error {
 			write = true
 		case Resolved:
 			left, right, write = true, true, true
-		case ObjectLiteral:
+		case ObjectLiteral, StringConst:
 			write = true
 		case FieldDefine:
 			left, right = true, true

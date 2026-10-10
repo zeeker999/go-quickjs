@@ -6767,6 +6767,132 @@ func TestJITSSAObjectLiterals(t *testing.T) {
 	}
 }
 
+// A string constant is read natively, from a cell the code keeps it in
+// (jitFeedback.StringCell), its pointer word there: compared, stored in a
+// property and an array literal, passed to a native call, returned. Go had
+// pushed each one (jitHost), leaving native code at every push. Each
+// answer is the interpreter's.
+func TestJITSSAStringConstants(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var o={k:''};function same(a,b){return a===b?1:0}
+		function run(xs,n){let s=0,last;for(let i=0;i<n;i++){const x=xs[i%xs.length];
+			s=(s+(x==='abc'?1:0)+same(x,'xyz')*10)|0;o.k='set';last=['p','q',x]}return [s,o.k,last.join(''),'end'].join()}
+		var xs=['abc','xyz','abc','',1]`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("run")).value.Object().fn().closure
+	for i := range 5 {
+		wv, err := want.Run(compileForTest(t, `run(xs,300)`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts uint64
+		if e := r.jit.cache[weak.Make(cl.fn)]; e != nil {
+			hosts = e.ssaStats.hosts
+		}
+		gv, err := r.Run(compileForTest(t, `run(xs,300)`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 4 {
+			e := r.jit.cache[weak.Make(cl.fn)]
+			if e == nil || e.ssa == nil || e.entrySlow || len(e.ssaCells) == 0 {
+				t.Fatalf("run does not read its string constants natively: %+v", e)
+			}
+			// The loop's array literal's pool refilled, and the join after it.
+			if n := e.ssaStats.hosts - hosts; n > 300/abi.PoolCapacity+4 {
+				t.Fatalf("run left native code %d times", n)
+			}
+		}
+	}
+}
+
+// An addition one operand of which is a string constant, or such an
+// addition's result, is Go's (compile's stringConcats), not a speculation on
+// numbers: RayTrace's Vector.prototype.subtract, if(!w||!v) throw
+// 'Vectors must be defined [' + v + ',' + w + ']', had its code take v and w
+// for numbers, at its entry too, once its constants were read natively,
+// and leave at every call. And a function only native callers call learns
+// a speculation that failed in it, as one Go enters does: it was never
+// compiled again. Each answer is the interpreter's.
+func TestJITSSAStringConcatsAndCalleeDeopts(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function sub(v,w){if(!w||!v)throw 'Vectors ['+v+','+w+']';return v.x-w.x}
+		function run(n){let s=0;const a={x:5},b={x:2};for(let i=0;i<n;i++)s=(s+sub(a,b)+i)|0;return s}
+		function bad(){try{return sub({x:1},undefined)}catch(e){return e}}
+		function dbl(x){let r=0;for(let k=0;k<2;k++)r=r+x*1;return r}
+		function mix(xs,n){let s=0;for(let i=0;i<n;i++){const r=dbl(xs[i%xs.length]);s=(s+(typeof r==='number'?r:1))|0}return s}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fnOf := func(name string) *bytecode.Function {
+		return r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure.fn
+	}
+	rounds := []string{`String(run(300))`, `String(run(300))`, `String(run(300))`, `String(run(300))`, `bad()`,
+		`String(mix([1,2,3],300))`, `String(mix([1,2,3],300))`, `String(mix([1,'a',3],300))`, `String(mix([1,'a',3],300))`,
+		`String(mix([1,'a',3],300))`, `String(mix([1,'a',3],300))`}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var guards uint64
+		if e := r.jit.cache[weak.Make(fnOf("sub"))]; e != nil {
+			guards = e.ssaStats.guards
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 3 {
+			e := r.jit.cache[weak.Make(fnOf("run"))]
+			if e == nil || e.ssa == nil || e.entrySlow {
+				t.Fatalf("run did not run natively: %+v", e)
+			}
+			if s := r.jit.cache[weak.Make(fnOf("sub"))]; s == nil || s.ssa == nil || s.notNative || s.ssaStats.guards != guards ||
+				len(s.failed) != 0 || len(s.failedEntries) != 0 {
+				t.Fatalf("sub's speculation failed: %+v", s)
+			}
+		}
+		if i == 7 {
+			// At its first failure, not once Go enters it for leaving too
+			// often (notNative), which a callee native code calls never is
+			// until then.
+			e := r.jit.cache[weak.Make(fnOf("dbl"))]
+			if e == nil || e.ssa == nil || e.reopts == 0 || len(e.failed) == 0 {
+				t.Fatalf("dbl was not compiled again for what failed in it: %+v", e)
+			}
+		}
+	}
+}
+
 // An array literal of up to ir.MaxArrayLiteral elements is made natively:
 // its array from the site's pool, with room for the elements and none yet,
 // the operands written in, numbers and references alike, and its length

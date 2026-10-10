@@ -2384,6 +2384,10 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		d := c.gdst(v)
 		c.a.MovImm(d, c.constWord(v.Const))
 		c.setG(v, d)
+	case ssa.OpConstCell:
+		d := c.gdst(v)
+		c.a.MovImm(d, v.Const.Bits)
+		c.setG(v, d)
 	case ssa.OpConstF64:
 		c.a.MovImm(scratchA, v.Const.Bits)
 		c.a.MovQToX(xScratch0, scratchA)

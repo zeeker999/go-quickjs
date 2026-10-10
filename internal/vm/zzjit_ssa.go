@@ -308,6 +308,29 @@ func (r *Runtime) jitRefillLiteral(f *frame, e *jitEntry, pc int) {
 	}
 }
 
+// StringCell is ssa.ConstantFeedback's: a cell holding the string constant
+// pushed at pc, as the closure has it, which the code keeps
+// (jitEntry.ssaCells): natively read, the constant had left native code at
+// each push for Go to make it (jitHost).
+func (fb *jitFeedback) StringCell(pc int) (uintptr, bool) {
+	if fb.cl == nil || pc >= len(fb.fn.Code) {
+		return 0, false
+	}
+	in := fb.fn.Code[pc]
+	cell := new(Value)
+	switch {
+	case in.Op == bytecode.OpPushEmptyString:
+		*cell = Str(emptyString)
+	case in.Op != bytecode.OpPushConst || int(in.A) >= len(fb.cl.consts) || !fb.cl.consts[in.A].IsString():
+		return 0, false
+	default:
+		*cell = fb.cl.consts[in.A]
+	}
+	k := fb.keep()
+	k.cells = append(k.cells, cell)
+	return uintptr(unsafe.Pointer(cell)), true
+}
+
 // Literal is ssa.LiteralFeedback's: the object literal at pc, made natively
 // from its pool, in the function's own code.
 func (fb *jitFeedback) Literal(pc int) (ssa.LiteralSite, bool) {
@@ -518,7 +541,7 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 		r.jitCallersReopt(e, jitInlineDepth)
 	}
 	e.ssa, e.ssaShapes, e.ssaHolders, e.fed, e.fedInlined, e.ssaStats = code, fb.shapes, fb.holders, fb.fed, fb.fedInlined, jitSSAStats{}
-	e.ssaInlinedAt, e.definesUnfed = fb.inlinedAt, fb.definesUnfed
+	e.ssaInlinedAt, e.definesUnfed, e.ssaCells = fb.inlinedAt, fb.definesUnfed, fb.cells
 	e.ssaStrings, e.ssaCallees, e.ssaInlined, e.ssaPools = e.ssaStrings || fb.strings, fb.callees, fb.inlined, fb.pools
 	e.ssaKeeps = max(e.ssaKeeps, fb.keeps)
 	// What it leaves on is counted afresh: it may have left on what it was
@@ -610,8 +633,9 @@ type jitFeedback struct {
 	fed        []jitFedSite
 	fedInlined []jitFedInlined
 	// definesUnfed, the root's, are the literals' fields it compiled before
-	// their transitions were made.
+	// their transitions were made; cells the string constants' it reads.
 	definesUnfed []int32
+	cells        []*Value
 	// inlinedAt, the root's, are the calls of its own it inlines.
 	inlinedAt []int32
 	// root is the function's feedback for an inlined callee's, which keeps
@@ -1966,7 +1990,7 @@ func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
 // setSSA gives e the code the new pipeline compiled for fn from p.
 func (e *jitEntry) setSSA(fn *bytecode.Function, p *ir.Program, code *jit.SSACode, fb *jitFeedback) {
 	e.ssa, e.this, e.ssaShapes, e.ssaHolders, e.fed, e.fedInlined = code, p.This, fb.shapes, fb.holders, fb.fed, fb.fedInlined
-	e.ssaInlinedAt, e.definesUnfed = fb.inlinedAt, fb.definesUnfed
+	e.ssaInlinedAt, e.definesUnfed, e.ssaCells = fb.inlinedAt, fb.definesUnfed, fb.cells
 	e.reoptBudget = uint32(max(jitReoptBudget, len(fn.Code)/jitReoptPer))
 	e.ssaStrings, e.ssaCallees, e.ssaInlined, e.ssaPools = fb.strings, fb.callees, fb.inlined, fb.pools
 	e.ssaKeeps = max(e.ssaKeeps, fb.keeps)
@@ -3215,6 +3239,15 @@ func (r *Runtime) jitFinishExit(f *frame, e *jitEntry, l *jitNativeLevel) (Value
 	default:
 		if e != nil {
 			e.ssaStats.guards++
+		}
+		if e != nil && e.ssa != nil && l.kind == abi.ExitDeopt {
+			// A speculation that failed, learned as runSSA learns one: a
+			// function only native callers run had kept failing it, at its
+			// entry at every call, never compiled again generic.
+			jitDeoptimized(e, &abi.Context{ExitSite: l.site}, 0)
+			if e.reoptDue() {
+				r.jitReoptimize(f.cl, e)
+			}
 		}
 		v, err, _ := r.jitInterpret(f, f.base+depth, nil)
 		return v, err

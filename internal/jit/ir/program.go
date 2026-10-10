@@ -168,6 +168,10 @@ const (
 	// on, at Dest, natively from its site's pool (ssa.LiteralSite), Go's
 	// otherwise. At most MaxArrayLiteral elements.
 	ArrayLiteral
+	// StringConst is push_const of a string, constant Key, at Dest: read
+	// natively from a cell the VM keeps it in (ssa.ConstantFeedback), Go's
+	// otherwise.
+	StringConst
 )
 
 // MaxArrayLiteral is the most elements an ArrayLiteral has: new_array
