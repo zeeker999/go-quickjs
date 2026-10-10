@@ -50,7 +50,7 @@ func (p *Program) Validate() error {
 		left, right, third, write, extra := false, false, false, false, false
 		switch in.Op {
 		case Nop, Host:
-		case StringMethod:
+		case StringMethod, TypeTest:
 			left, write = true, true
 		case StringCode:
 			left, right, third, write = true, true, true, true

@@ -6552,3 +6552,131 @@ func TestJITSSAUnwoundCompilesAgainFirst(t *testing.T) {
 		t.Fatalf("leaving too often after its compiles: notNative %v, backoff %d", e.notNative, e.nativeBackoff)
 	}
 }
+
+// instanceof is answered by native code where its constructor is known, as
+// V8 lowers it: a walk along the value's prototypes, after checks that the
+// constructor is the one compiled for, that its Symbol.hasInstance is still
+// the realm's, and its prototype property an object -- EarleyBoyer's
+// sc_isPair, p instanceof sc_Pair, kept every function that asked in the
+// tree tier. isP, which asks, is inlined in count. Primitives, null, an
+// object made with Object.create, another class's; P.prototype replaced;
+// Symbol.hasInstance defined on Q; a proxy, whose getPrototypeOf trap Go
+// runs: each answer the interpreter's, and no exit in the loop while
+// nothing changes.
+func TestJITSSAInstanceOf(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function P(a){this.a=a}function Q(){}
+		function isP(x){return x instanceof P}
+		function count(xs,n){let c=0;for(let i=0;i<n;i++){const x=xs[i%xs.length];if(isP(x))c++;if(x instanceof Q)c+=10}return c}
+		var xs=[new P(1),null,3,"s",{},Object.create(P.prototype),new Q(),[1],undefined,P.prototype]`
+	src := `String(count(xs,300))`
+	rounds := []string{src, src, src, src, src, src,
+		`P.prototype={};xs.push(new P(2));` + src,
+		`Object.defineProperty(Q,Symbol.hasInstance,{value:function(v){return typeof v==="number"}});` + src,
+		`xs.push(new Proxy({},{getPrototypeOf(){return P.prototype}}));` + src}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("count")).value.Object().fn().closure
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts uint64
+		if e := r.jit.cache[weak.Make(cl.fn)]; e != nil {
+			hosts = e.ssaStats.hosts
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 5 {
+			e := r.jit.cache[weak.Make(cl.fn)]
+			if e == nil || e.ssa == nil || e.entrySlow || len(e.ssaInlined) == 0 {
+				t.Fatalf("count did not run natively with isP inlined: %+v", e)
+			}
+			if n := e.ssaStats.hosts - hosts; n > 1 {
+				t.Fatalf("count left native code %d times", n)
+			}
+		}
+	}
+}
+
+// typeof compared with a string constant is told natively, as V8 folds it
+// into a check of the value: number, string, boolean, undefined (an
+// [[IsHTMLDDA]] object's too) and function, as a value and as a branch,
+// equal and not; isNum, which asks, is inlined in kinds; an [[IsHTMLDDA]]
+// object natively too. A proxy, whose
+// callability its target says, has Go tell it, at the typeof, and the
+// invocation goes on in the interpreter; typeof alone is Go's. EarleyBoyer's
+// sc_isNumber, typeof n === "number", kept every function that called it out
+// of native code. Each answer is the interpreter's.
+func TestJITSSATypeOf(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function isNum(x){return typeof x==="number"}
+		function kinds(xs,n){let c=0;for(let i=0;i<n;i++){const x=xs[i%xs.length];if(isNum(x))c+=1;if(typeof x==="string")c+=10;
+			if(typeof x!=="boolean")c+=100;if(typeof x=="undefined")c+=1000;c+=(typeof x==="function")?10000:0}return [c,typeof xs[2]].join()}
+		var plain=[1,NaN,-0,"s","",true,false,undefined,null,{},[],function(){},Object,class C{},Symbol("q"),10n],
+			withDDA=plain.concat([dda]),odd=plain.concat([new Proxy({},{}),new Proxy(function(){},{})])`
+	rounds := []string{`kinds(plain,300)`, `kinds(plain,300)`, `kinds(plain,300)`, `kinds(plain,300)`, `kinds(plain,300)`,
+		`kinds(withDDA,300)`, `kinds(odd,300)`, `kinds(plain,300)`}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		dda := newObject(rt.proto.object, ClassObject)
+		dda.flags |= objHTMLDDA
+		rt.global.setOwnRaw(rt.atoms.intern("dda"), Obj(dda), propDefault)
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("kinds")).value.Object().fn().closure
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts uint64
+		if e := r.jit.cache[weak.Make(cl.fn)]; e != nil {
+			hosts = e.ssaStats.hosts
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 4 {
+			e := r.jit.cache[weak.Make(cl.fn)]
+			if e == nil || e.ssa == nil || e.entrySlow || len(e.ssaInlined) == 0 {
+				t.Fatalf("kinds did not run natively with isNum inlined: %+v", e)
+			}
+			// Only after its loop, a few: typeof alone, the array, join;
+			// none in its 300 iterations.
+			if n := e.ssaStats.hosts - hosts; n > 5 {
+				t.Fatalf("kinds left native code %d times", n)
+			}
+		}
+	}
+}

@@ -613,8 +613,9 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 			case OpKeepRef:
 				// The evaluator keeps whole values (OpKeep).
 				vals[v.ID] = val{}
-			case OpCall:
-				// The evaluator calls nothing: Go makes the call.
+			case OpCall, OpInstanceOf, OpTypeIs:
+				// The evaluator calls nothing, nor walks prototypes: Go
+				// makes the operation.
 				return exit(v.State, ir.ExitKind(v.Aux))
 			case OpCallCell:
 				vals[v.ID] = val{}
