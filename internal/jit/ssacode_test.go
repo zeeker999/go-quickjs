@@ -839,9 +839,11 @@ func compileNative(p *ir.Program, l layout) (*compiled, error) {
 	f.FrameLocals, f.ThisSlot = l.frame, l.this
 	ssa.Optimize(f)
 	mc, err := mir.Compile(f, testEncoding)
-	if errors.Is(err, mir.ErrUnsupported) {
+	if errors.Is(err, mir.ErrUnsupported) && !strings.Contains(err.Error(), "runtime error") {
 		// A refusal, such as more values live at once than there are spill
-		// slots: not compiled, as the builder's refusals are not.
+		// slots: not compiled, as the builder's refusals are not. A
+		// backend's own panic -- an index out of range -- is a bug, which a
+		// refusal would hide.
 		return nil, nil
 	}
 	if err != nil {

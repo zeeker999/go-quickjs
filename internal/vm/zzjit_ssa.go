@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"slices"
+	"strings"
 	"unsafe"
 	"weak"
 
@@ -293,6 +294,11 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, 
 	}
 	ssa.Optimize(f)
 	mc, err := mir.CompileIn(&s.mirWork, f, jitEncoding)
+	if err != nil && strings.Contains(err.Error(), "runtime error") {
+		// A refusal the backend's own panic made: a bug, which the tests
+		// look for (backendPanics).
+		s.backendPanics++
+	}
 	if err != nil || len(mc.Bytes) > limit {
 		return nil, nil
 	}
@@ -1644,7 +1650,7 @@ func (r *Runtime) runSSAIn(f *frame, e *jitEntry, pc, depth, idx int, resume uin
 		for k+1 < jitContexts && s.ssaCtxs[k+1].Live == abi.LiveCall {
 			k++
 		}
-		s.ssaRecords += uint64(jit.ApplyExit(&s.ssaCtxs[k]))
+		s.ssaRecords += uint64(s.exitScratch.Apply(&s.ssaCtxs[k]))
 		r.jitSSAProfit(e, ctx, start, edges)
 		if c := &s.ssaCtxs[idx+1]; c.Live == abi.LiveCall {
 			// A native call's callee left native code: Go finishes it
