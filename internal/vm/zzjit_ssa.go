@@ -2001,38 +2001,52 @@ func (r *Runtime) runSSAIn(f *frame, e *jitEntry, pc, depth, idx int, resume uin
 	top := s.ctxTop
 	s.ctxTop = idx + 1
 	e.ssaRuns++
-	defer func() {
-		e.ssaRuns--
-		s.ctxTop = top
-		// What native code kept (abi.Context.Keep), and the pointer words
-		// its native calls recorded (RecordRef), its callees' too, are not
-		// kept past it; nor its receiver and captured bindings, nor what
-		// its native calls' callees ran with -- closure, receiver, result,
-		// keep cells -- in the contexts past it, each a frame gone once it
-		// returned, as V8's are: one receiver left there kept a benchmark's
-		// whole object graph alive after it ended. The contexts the calls
-		// ran in go from the one past it, each given a closure by the call,
-		// up to the first without, which no call ran in since Go last
-		// cleared it here (a run of Go's there gives it none).
-		c := &s.ssaCtxs[idx]
-		clear(c.Keep[:e.ssaKeeps])
-		c.This, c.Upvalues = abi.Slot{}, nil
-		callees := true
-		for i := idx; i < jitContexts; i++ {
-			c := &s.ssaCtxs[i]
-			if c.RecordHigh != 0 {
-				clear(c.RecordRef[:c.RecordHigh])
-				c.RecordHigh = 0
-			}
-			if i > idx && callees {
-				if callees = c.Closure != nil; callees {
-					clear(c.Keep[:s.ssaKeeps])
-					c.Closure, c.Upvalues = nil, nil
-					c.This, c.RetValue = abi.Slot{}, abi.Slot{}
-				}
-			}
+	// One return, so that the defer is open-coded: a deferred call's record
+	// cost every entry more than the rest of entering.
+	defer r.jitRunDone(e, idx, top)
+	return r.runSSALoop(f, e, pc, depth, idx, resume)
+}
+
+// jitRunDone ends a run runSSAIn began in context idx, ctxTop top before
+// it. What native code kept (abi.Context.Keep), and the pointer words its
+// native calls recorded (RecordRef), its callees' too, are not kept past
+// it; nor its receiver and captured bindings, nor what its native calls'
+// callees ran with -- closure, receiver, result, keep cells -- in the
+// contexts past it, each a frame gone once it returned, as V8's are: one
+// receiver left there kept a benchmark's whole object graph alive after it
+// ended. The contexts the calls ran in go from the one past it, each given
+// a closure by the call, up to the first without, which no call ran in
+// since Go last cleared it here (a run of Go's there gives it none, and
+// clears those past it itself): none past that is looked at.
+func (r *Runtime) jitRunDone(e *jitEntry, idx, top int) {
+	s := r.jit
+	e.ssaRuns--
+	s.ctxTop = top
+	c := &s.ssaCtxs[idx]
+	clear(c.Keep[:e.ssaKeeps])
+	c.This, c.Upvalues = abi.Slot{}, nil
+	if c.RecordHigh != 0 {
+		clear(c.RecordRef[:c.RecordHigh])
+		c.RecordHigh = 0
+	}
+	for i := idx + 1; i < jitContexts; i++ {
+		c := &s.ssaCtxs[i]
+		if c.Closure == nil {
+			break
 		}
-	}()
+		if c.RecordHigh != 0 {
+			clear(c.RecordRef[:c.RecordHigh])
+			c.RecordHigh = 0
+		}
+		clear(c.Keep[:s.ssaKeeps])
+		c.Closure, c.Upvalues = nil, nil
+		c.This, c.RetValue = abi.Slot{}, abi.Slot{}
+	}
+}
+
+// runSSALoop is runSSAIn's work, between its run's start and end.
+func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume uintptr) (Value, error, bool) {
+	s := r.jit
 	ctx := &s.ssaCtxs[idx]
 	// resume, when not 0, is where native code goes on after a native
 	// call whose callee Go finished, in place of an entry.
@@ -2074,7 +2088,11 @@ func (r *Runtime) runSSAIn(f *frame, e *jitEntry, pc, depth, idx int, resume uin
 		for k+1 < jitContexts && s.ssaCtxs[k+1].Live == abi.LiveCall {
 			k++
 		}
-		s.ssaRecords += uint64(s.exitScratch.Apply(&s.ssaCtxs[k]))
+		if c := &s.ssaCtxs[k]; c.ExitKind == abi.ExitTable {
+			// Asked here, not in Apply: a return, the most common way
+			// out, costs no call.
+			s.ssaRecords += uint64(s.exitScratch.Apply(c))
+		}
 		r.jitSSAProfit(e, ctx, start, edges)
 		if c := &s.ssaCtxs[idx+1]; c.Live == abi.LiveCall {
 			// A native call's callee left native code: Go finishes it
