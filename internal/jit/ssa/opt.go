@@ -35,9 +35,34 @@ func Optimize(f *Func) {
 	// elimination has it: the blocks are in reverse post-order, each after
 	// its dominator (Func.Blocks).
 	dom := dominators(f)
-	seen := map[[2]int][]*Value{}
+	// The guards met, of each operand in the order met, by op: chains
+	// through a list the Func's scratch keeps, from tables by operand ID.
+	sc := f.scr()
+	var first, last []int32
+	guards := sc.guards[:0]
+	// repeated is the first guard of op and a's that dominates b and is
+	// not replaced, or nil; meet adds v as one.
+	repeated := func(op Op, a *Value, b *Block) *Value {
+		for i := first[a.ID]; i != 0; i = guards[i-1].next {
+			if g := &guards[i-1]; g.op == op && subst[g.v.ID] == nil && dom.dominates(g.v.Block, b) {
+				return g.v
+			}
+		}
+		return nil
+	}
+	meet := func(op Op, a, v *Value) {
+		guards = append(guards, guardSeen{v: v, op: op})
+		n := int32(len(guards))
+		if last[a.ID] != 0 {
+			guards[last[a.ID]-1].next = n
+		} else {
+			first[a.ID] = n
+		}
+		last[a.ID] = n
+	}
 	for round := 0; round < 32; round++ {
-		clear(seen)
+		first, last, guards = idTable(sc.first, f.nextID), idTable(sc.last, f.nextID), guards[:0]
+		sc.first, sc.last = first, last
 		subst = idTable(subst, f.nextID)
 		replaced := false
 		find := func(v *Value) *Value {
@@ -66,42 +91,26 @@ func Optimize(f *Func) {
 				if len(v.Args) == 1 {
 					switch v.Op {
 					case OpCheckInit, OpObjectOf, OpUnboxF64, OpArrayOf:
-						key := [2]int{int(OpCheckInit), v.Args[0].ID}
 						if v.Op == OpCheckInit {
-							var first *Value
-							for _, w := range seen[key] {
-								if subst[w.ID] == nil && dom.dominates(w.Block, b) {
-									first = w
-									break
-								}
-							}
-							if first != nil {
-								subst[v.ID], replaced = first, true
+							if w := repeated(OpCheckInit, v.Args[0], b); w != nil {
+								subst[v.ID], replaced = w, true
 								changed = true
 								continue
 							}
 						}
-						seen[key] = append(seen[key], v)
+						meet(OpCheckInit, v.Args[0], v)
 					}
 				}
 				// A guard of one operand repeats another of the same op and
 				// operand; one of more operands is never merged, since the
 				// key names only the first.
 				if v.Op.isGuard() && v.Op != OpCheckInit && !v.Op.readsMemory() && len(v.Args) == 1 {
-					key := [2]int{int(v.Op), v.Args[0].ID}
-					var first *Value
-					for _, w := range seen[key] {
-						if subst[w.ID] == nil && dom.dominates(w.Block, b) {
-							first = w
-							break
-						}
-					}
-					if first != nil {
-						subst[v.ID], replaced = first, true
+					if w := repeated(v.Op, v.Args[0], b); w != nil {
+						subst[v.ID], replaced = w, true
 						changed = true
 						continue
 					}
-					seen[key] = append(seen[key], v)
+					meet(v.Op, v.Args[0], v)
 				}
 			}
 		}
@@ -124,6 +133,8 @@ func Optimize(f *Func) {
 		removeDead(f)
 		shadowMerges(f)
 	}
+	clear(guards)
+	sc.guards = guards[:0]
 	storeChecks(f)
 	f.shadowed = true
 	recount(f)
