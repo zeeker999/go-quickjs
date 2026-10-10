@@ -2138,6 +2138,51 @@ func (c *a64Compiler) remainder(v *ssa.Value, guard func(arm64.Cond)) {
 	c.setF(v, a64F0)
 }
 
+// power is Math.pow(x, y) where its answer is exact, as amd64's is.
+func (c *a64Compiler) power(v *ssa.Value, guard func(arm64.Cond)) {
+	if x := c.fpr(v.Args[0], a64F0); x != a64F0 {
+		c.a.FMov(a64F0, x)
+	}
+	if y := c.fpr(v.Args[1], a64F1); y != a64F1 {
+		c.a.FMov(a64F1, y)
+	}
+	general, loop, skip, last, done := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+	c.constF64(a64F2, math.Float64bits(2))
+	c.a.FCmp(a64F1, a64F2)
+	c.a.BCond(arm64.NE, general)
+	c.a.FArith(arm64.FMul, a64F0, a64F0, a64F0)
+	c.a.B(done)
+	c.a.Bind(general)
+	// y an integer from 0 to 64 (unsigned, so none below), x an integer.
+	c.integer(a64C, a64F1, guard)
+	c.a.CmpImm(a64C, 64, true)
+	guard(arm64.HI)
+	c.integer(a64A, a64F0, guard)
+	// The result in F2, x's powers in F0.
+	c.constF64(a64F2, math.Float64bits(1))
+	c.a.Cbz(a64C, last, true)
+	c.a.MovImm(a64D, 1)
+	c.a.Bind(loop)
+	c.a.Tst(a64C, a64D, true)
+	c.a.BCond(arm64.EQ, skip)
+	c.a.FArith(arm64.FMul, a64F2, a64F2, a64F0)
+	c.a.Bind(skip)
+	c.a.ShiftImm(arm64.Lsr, a64C, a64C, 1, true)
+	c.a.Cbz(a64C, last, true)
+	c.a.FArith(arm64.FMul, a64F0, a64F0, a64F0)
+	c.a.B(loop)
+	c.a.Bind(last)
+	// At most 2**53, its bits compared as an integer's, the sign cleared.
+	c.a.FAbs(a64F1, a64F2)
+	c.a.FMovFromF(a64A, a64F1)
+	c.a.MovImm(a64B, math.Float64bits(1<<53))
+	c.a.Cmp(a64A, a64B, true)
+	guard(arm64.HI)
+	c.a.FMov(a64F0, a64F2)
+	c.a.Bind(done)
+	c.setF(v, a64F0)
+}
+
 // length is x.length, as amd64's is.
 func (c *a64Compiler) length(v *ssa.Value, guard func(arm64.Cond)) {
 	a := v.Args[0]
@@ -2447,6 +2492,8 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.setF(v, d)
 	case ssa.OpModF64:
 		c.remainder(v, c.guardFor(v))
+	case ssa.OpPowF64:
+		c.power(v, c.guardFor(v))
 	case ssa.OpNegF64:
 		d := c.fdst(v)
 		c.a.FNeg(d, c.fpr(arg(0), a64F0))

@@ -669,7 +669,7 @@ type jitFeedback struct {
 // itself, as V8 reduces such a call; the call checks it calls it.
 func (fb *jitFeedback) Intrinsic(pc int) (ssa.Intrinsic, bool) {
 	fn := fb.fn
-	if fb.cl == nil || pc < 2 || pc >= len(fn.Code) || fn.Code[pc].Op != bytecode.OpCallMethod || fn.Code[pc].A != 1 {
+	if fb.cl == nil || pc < 2 || pc >= len(fn.Code) || fn.Code[pc].Op != bytecode.OpCallMethod || fn.Code[pc].A != 1 && fn.Code[pc].A != 2 {
 		return ssa.Intrinsic{}, false
 	}
 	if fb.prog == nil {
@@ -684,8 +684,8 @@ func (fb *jitFeedback) Intrinsic(pc int) (ssa.Intrinsic, bool) {
 		return ssa.Intrinsic{}, false
 	}
 	// The function, read by the get_prop_this at its slot's depth, with
-	// nothing after it but the argument's instructions, above it.
-	slot, q := p.Maps[pc].Depth-2, -1
+	// nothing after it but the arguments' instructions, above it.
+	slot, q := p.Maps[pc].Depth-int(fn.Code[pc].A)-1, -1
 	for k := pc - 1; k >= 0; k-- {
 		d := p.Maps[k].Depth
 		if d == slot && fn.Code[k].Op == bytecode.OpGetPropThis {
@@ -704,11 +704,21 @@ func (fb *jitFeedback) Intrinsic(pc int) (ssa.Intrinsic, bool) {
 		return ssa.Intrinsic{}, false
 	}
 	o := v.Object()
+	k := ssa.Intrinsic{Callee: uintptr(unsafe.Pointer(o))}
+	if fn.Code[pc].A == 2 {
+		// Math.pow, the realm's: computed natively where exact.
+		if o != fb.r.powFn {
+			return ssa.Intrinsic{}, false
+		}
+		k.Op = ssa.OpPowF64
+		keep := fb.keep()
+		keep.holders = append(keep.holders, o)
+		return k, true
+	}
 	fd := o.fn()
 	if fd == nil || fd.native == nil || fd.mathOp == 0 || fd.mathOp >= mathMax || int(fd.mathOp) > len(unaryMathNames) {
 		return ssa.Intrinsic{}, false
 	}
-	k := ssa.Intrinsic{Callee: uintptr(unsafe.Pointer(o))}
 	switch unaryMathNames[fd.mathOp-1] {
 	case "sqrt":
 		k.Op = ssa.OpSqrtF64
@@ -1512,27 +1522,38 @@ func (r *Runtime) jitChainValue(cl *closure, p *ir.Program, q, n int) (Value, bo
 		}
 		return prop.value, true
 	case bytecode.OpGetProp, bytecode.OpGetPropThis:
-		// Its receiver, the value the read before it left on top.
-		if q == 0 || p.Maps[q-1].Depth < 0 {
+		recv, ok := r.jitChainReceiver(cl, p, q, n)
+		if !ok {
 			return Undefined, false
 		}
-		switch prev := fn.Code[q-1].Op; {
-		case prev == bytecode.OpGetGlobal && p.Maps[q-1].Depth == p.Maps[q].Depth-1,
-			prev == bytecode.OpGetProp && p.Maps[q-1].Depth == p.Maps[q].Depth:
-		default:
-			return Undefined, false
-		}
-		recv, ok := r.jitChainValue(cl, p, q-1, n-1)
-		if !ok || !recv.IsObject() {
-			return Undefined, false
-		}
-		prop := recv.Object().getOwnVisible(cl.names[in.A])
+		prop := recv.getOwnVisible(cl.names[in.A])
 		if prop == nil || prop.flags&propAccessor != 0 {
 			return Undefined, false
 		}
 		return prop.value, true
 	}
 	return Undefined, false
+}
+
+// jitChainReceiver is the object the property read at q of cl's code reads
+// from, if the read just before it gives it so (jitChainValue), at most n
+// reads in all: the value that read left on top.
+func (r *Runtime) jitChainReceiver(cl *closure, p *ir.Program, q, n int) (*Object, bool) {
+	fn := cl.fn
+	if n <= 0 || q <= 0 || q >= len(fn.Code) || p.Maps[q].Depth < 0 || p.Maps[q-1].Depth < 0 {
+		return nil, false
+	}
+	switch prev := fn.Code[q-1].Op; {
+	case prev == bytecode.OpGetGlobal && p.Maps[q-1].Depth == p.Maps[q].Depth-1,
+		prev == bytecode.OpGetProp && p.Maps[q-1].Depth == p.Maps[q].Depth:
+	default:
+		return nil, false
+	}
+	recv, ok := r.jitChainValue(cl, p, q-1, n-1)
+	if !ok || !recv.IsObject() {
+		return nil, false
+	}
+	return recv.Object(), true
 }
 
 // jitInlinedCalls has a call inlined for one function that calls another,
@@ -2114,10 +2135,15 @@ func (fb *jitFeedback) Property(pc int) (ssa.PropertySite, bool) {
 		!slices.ContainsFunc(fb.fed, func(s jitFedSite) bool { return s.pc == uint32(pc) }) {
 		// A site whose cache may yet learn a shape (jitFed).
 		// The cache's shape, though the code may not use it (a getter's,
-		// a write that adds the property): what changing it says.
+		// a write that adds the property): what changing it says; or,
+		// for one it knew nothing of, the shape the code was compiled
+		// for (chainSite), which its filling with says nothing new.
 		known := uintptr(0)
 		if c := fb.cl.ic[fb.fn.Code[pc].B].shape; c != noShape {
 			known = uintptr(unsafe.Pointer(c))
+		}
+		if known == 0 {
+			known = site.Shape
 		}
 		fb.fed = append(fb.fed, jitFedSite{pc: uint32(pc), shape: known})
 	}
@@ -2168,7 +2194,58 @@ func (fb *jitFeedback) property(pc int) (ssa.PropertySite, bool) {
 	if int(in.B) >= len(fb.cl.ic) {
 		return ssa.PropertySite{Key: uint32(fb.cl.names[in.A])}, true
 	}
-	return fb.siteFrom(in, &fb.cl.ic[in.B])
+	site, ok := fb.siteFrom(in, &fb.cl.ic[in.B])
+	if c := &fb.cl.ic[in.B]; ok && (c.shape == nil || c.shape == noShape) && c.fills == 0 && in.Op != bytecode.OpSetProp {
+		site = fb.chainSite(pc, site)
+	}
+	return site, ok
+}
+
+// chainSite is the site of the read at pc, whose cache knows nothing yet,
+// for the object the reads before it name (jitChainReceiver) -- Math, for
+// Math.pow -- if the property is its own data property: compiled for the
+// object's shape and the property's index now, as a cache filled by a read
+// of it would have it, and checked as such a site is. V8 folds a load from
+// an object it knows so. Compiled knowing nothing, the read searched the
+// object's table, which gives up past abi.MaxScan properties: Math's
+// methods left native code at every read, and each compile learned one
+// more site, until the compiles ran out.
+func (fb *jitFeedback) chainSite(pc int, site ssa.PropertySite) ssa.PropertySite {
+	p := fb.program()
+	if p == nil || len(p.Maps) != len(fb.fn.Code) {
+		return site
+	}
+	recv, ok := fb.r.jitChainReceiver(fb.cl, p, pc, jitChainReads)
+	if !ok {
+		return site
+	}
+	sh, in := recv.shape, fb.fn.Code[pc]
+	if sh == nil || sh == noShape {
+		return site
+	}
+	i := recv.findOwn(fb.cl.names[in.A])
+	if i < 0 || i >= sh.n || int(i) >= len(recv.props) || recv.props[i].flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 {
+		return site
+	}
+	k := fb.keep()
+	k.shapes = append(k.shapes, remember(sh))
+	site.Shape, site.Index = uintptr(unsafe.Pointer(sh)), i
+	return site
+}
+
+// program is the slot IR program of fb's function, for what its
+// instructions' depths say: lowered once, as the inlining's is.
+func (fb *jitFeedback) program() *ir.Program {
+	if fb.prog == nil {
+		p, err := jitcompile.LowerSSAInline(fb.fn)
+		if err != nil {
+			if p, err = jitcompile.LowerSSA(fb.fn); err != nil {
+				return nil
+			}
+		}
+		fb.prog = p
+	}
+	return fb.prog
 }
 
 // siteFrom is the site of a property instruction, in, as cache c knows it.

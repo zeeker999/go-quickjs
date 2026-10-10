@@ -2,6 +2,7 @@ package mir
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"unsafe"
 
@@ -2239,6 +2240,67 @@ func (c *compiler) remainder(v *ssa.Value, guard func(amd64.Cond)) {
 	c.setX(v, xScratch0)
 }
 
+// power is Math.pow(x, y) where its answer is exact (ssa.ExactPow): x*x
+// for y 2; an integer x to an integer power from 0 to 64 by repeated
+// squaring, its result at most 2**53. Anything else fails the guard: Go
+// makes the call.
+func (c *compiler) power(v *ssa.Value, guard func(amd64.Cond)) {
+	if x := c.xmm(v.Args[0], xScratch0); x != xScratch0 {
+		c.a.SSEOp(amd64.MovAPD, xScratch0, x)
+	}
+	if y := c.xmm(v.Args[1], xScratch1); y != xScratch1 {
+		c.a.SSEOp(amd64.MovAPD, xScratch1, y)
+	}
+	general, loop, skip, last, done := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+	c.a.MovImm(scratchA, math.Float64bits(2))
+	c.a.MovQToX(xScratch2, scratchA)
+	c.a.SSEOp(amd64.UcomiSD, xScratch1, xScratch2)
+	c.a.Jcc(amd64.CondP, general)
+	c.a.Jcc(amd64.CondNE, general)
+	c.a.SSEOp(amd64.MulSD, xScratch0, xScratch0)
+	c.a.Jmp(done)
+	c.a.Bind(general)
+	// y an integer from 0 to 64 (unsigned, so none below), x an integer.
+	for _, p := range []struct {
+		r amd64.Reg
+		x amd64.XReg
+	}{{scratchC, xScratch1}, {scratchA, xScratch0}} {
+		c.a.Cvttsd2si(p.r, p.x)
+		c.a.Cvtsi2sd(xScratch2, p.r, true)
+		c.a.SSEOp(amd64.UcomiSD, xScratch2, p.x)
+		guard(amd64.CondNE)
+		guard(amd64.CondP)
+	}
+	c.a.OpImm(amd64.Cmp, scratchC, 64, true)
+	guard(amd64.CondA)
+	// The result in xScratch2, x's powers in xScratch0.
+	c.a.MovImm(scratchA, math.Float64bits(1))
+	c.a.MovQToX(xScratch2, scratchA)
+	c.a.Op(amd64.Test, scratchC, scratchC, true)
+	c.a.Jcc(amd64.CondE, last)
+	c.a.Bind(loop)
+	c.a.MovRR(scratchB, scratchC)
+	c.a.OpImm(amd64.And, scratchB, 1, true)
+	c.a.Jcc(amd64.CondE, skip)
+	c.a.SSEOp(amd64.MulSD, xScratch2, xScratch0)
+	c.a.Bind(skip)
+	c.a.ShiftImm(amd64.Shr, scratchC, 1, true)
+	c.a.Jcc(amd64.CondE, last)
+	c.a.SSEOp(amd64.MulSD, xScratch0, xScratch0)
+	c.a.Jmp(loop)
+	c.a.Bind(last)
+	// At most 2**53, its bits compared as an integer's, the sign cleared.
+	c.a.MovQFromX(scratchA, xScratch2)
+	c.a.MovImm(scratchB, 1<<63-1)
+	c.a.Op(amd64.And, scratchA, scratchB, true)
+	c.a.MovImm(scratchB, math.Float64bits(1<<53))
+	c.a.Op(amd64.Cmp, scratchA, scratchB, true)
+	guard(amd64.CondA)
+	c.a.SSEOp(amd64.MovAPD, xScratch0, xScratch2)
+	c.a.Bind(done)
+	c.setX(v, xScratch0)
+}
+
 // length is x.length: a string's, which it keeps rope or not, or an
 // array's, the dense count or a sparse array's length when that is larger,
 // as Object.arrayLength has it.
@@ -2572,6 +2634,8 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.setX(v, d)
 	case ssa.OpModF64:
 		c.remainder(v, c.guardFor(v))
+	case ssa.OpPowF64:
+		c.power(v, c.guardFor(v))
 	case ssa.OpNegF64:
 		x := c.xmm(arg(0), xScratch0)
 		if x != xScratch0 {

@@ -272,6 +272,9 @@ type Runtime struct {
 	// debug is the debugger of a runtime made for one, and nil for any
 	// other; see zdebug.go.
 	debug *debugState
+	// powFn is Math.pow, which the native tier computes itself where its
+	// answer is exact (jitFeedback.Intrinsic).
+	powFn *Object
 	// jitFields is the optional native tier's state, empty in builds
 	// without it. It comes after everything the interpreter reads, so that
 	// a build with the tier moves none of their offsets, and before the last

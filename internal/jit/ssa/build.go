@@ -46,8 +46,9 @@ type Feedback interface {
 // Intrinsic is a call of a built-in the VM knows, which native code makes
 // itself, as V8 reduces Math.sqrt(x) to a square root in its code: the
 // function object, which the call checks it calls (the VM keeps it
-// alive), and what it computes of its one argument, a number -- another
-// leaves the call to Go, which makes it.
+// alive), and what it computes of its argument, a number, or of its two
+// for Math.pow (OpPowF64) -- another leaves the call to Go, which makes
+// it.
 type Intrinsic struct {
 	Callee uintptr
 	Op     Op
@@ -72,7 +73,8 @@ type InstanceOfFeedback interface {
 }
 
 // IntrinsicFeedback is Feedback that knows the calls at a PC of an
-// intrinsic (Intrinsic): a method call of one argument, Math.sqrt(x).
+// intrinsic (Intrinsic): a method call of one argument, Math.sqrt(x), or
+// two, Math.pow(x, y).
 type IntrinsicFeedback interface {
 	Intrinsic(pc int) (Intrinsic, bool)
 }
@@ -876,11 +878,10 @@ func (b *builder) instanceOfOp(blk *Block, pc int, k InstanceOfSite, guard func(
 }
 
 // intrinsic is the intrinsic the call at pc in the frame being translated
-// makes, if any (IntrinsicFeedback): a method call of one argument, whose
-// operands are the receiver, the function and the argument.
+// makes, if any (IntrinsicFeedback): a method call whose operands are the
+// receiver, the function and the arguments, one, or two for Math.pow.
 func (b *builder) intrinsic(pc int) (Intrinsic, bool) {
-	if b.fb == nil || b.p.Code[pc].Op != ir.Host || pc+1 >= len(b.p.Code) || !reachable(b.p, pc+1) ||
-		b.p.Maps[pc+1].Depth != b.p.Maps[pc].Depth-2 || b.p.Maps[pc].Depth < 3 {
+	if b.fb == nil || b.p.Code[pc].Op != ir.Host || pc+1 >= len(b.p.Code) || !reachable(b.p, pc+1) {
 		return Intrinsic{}, false
 	}
 	f, ok := b.fb.(IntrinsicFeedback)
@@ -888,10 +889,21 @@ func (b *builder) intrinsic(pc int) (Intrinsic, bool) {
 		return Intrinsic{}, false
 	}
 	k, ok := f.Intrinsic(pc)
-	if !ok || k.Op != OpSqrtF64 && k.Op != OpAbsF64 {
+	if !ok || k.Op != OpSqrtF64 && k.Op != OpAbsF64 && k.Op != OpPowF64 {
+		return Intrinsic{}, false
+	}
+	if n := k.args(); b.p.Maps[pc+1].Depth != b.p.Maps[pc].Depth-n-1 || b.p.Maps[pc].Depth < n+2 {
 		return Intrinsic{}, false
 	}
 	return k, true
+}
+
+// args is how many arguments the intrinsic takes.
+func (k Intrinsic) args() int {
+	if k.Op == OpPowF64 {
+		return 2
+	}
+	return 1
 }
 
 // intrinsicCall makes the intrinsic call at pc (Intrinsic): checked to call
@@ -899,11 +911,18 @@ func (b *builder) intrinsic(pc int) (Intrinsic, bool) {
 // its result is computed, in the call's result slot.
 func (b *builder) intrinsicCall(blk *Block, pc int, k Intrinsic, guard func(Op, Type, ir.ExitKind, ...*Value) *Value, boxF func(*Value) *Value) {
 	sp := b.cur.base + b.p.Locals + b.p.Maps[pc].Depth
-	object := guard(OpObjectOf, Ptr, ir.HostExit, b.read(sp-2, blk))
+	n := k.args()
+	object := guard(OpObjectOf, Ptr, ir.HostExit, b.read(sp-n-1, blk))
 	same := guard(OpSameObject, None, ir.HostExit, object)
 	same.Const = ir.Value{Bits: uint64(k.Callee)}
-	x := guard(OpUnboxF64, Float64, ir.HostExit, b.read(sp-1, blk))
-	r := boxF(b.f.newValue(blk, k.Op, Float64, x))
+	x := guard(OpUnboxF64, Float64, ir.HostExit, b.read(sp-n, blk))
+	var r *Value
+	if k.Op == OpPowF64 {
+		y := guard(OpUnboxF64, Float64, ir.HostExit, b.read(sp-1, blk))
+		r = boxF(guard(OpPowF64, Float64, ir.HostExit, x, y))
+	} else {
+		r = boxF(b.f.newValue(blk, k.Op, Float64, x))
+	}
 	b.assign(b.cur.base+b.p.Locals+b.p.Maps[pc+1].Depth-1, blk, r)
 }
 
