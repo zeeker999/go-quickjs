@@ -1123,7 +1123,7 @@ func TestWorkspaceCompileAllocations(t *testing.T) {
 		}
 	}) / float64(len(jobs))
 	t.Logf("%.1f allocations a compile", allocs)
-	if allocs > 80 {
+	if allocs > 55 {
 		t.Fatalf("%.1f allocations a compile", allocs)
 	}
 }

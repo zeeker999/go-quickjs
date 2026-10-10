@@ -54,19 +54,26 @@ type stub struct {
 // CompileAMD64 compiles f for amd64, given the VM's value encoding.
 func CompileAMD64(f *ssa.Func, enc abi.Encoding) (*Code, error) { return compileAMD64(nil, f, enc) }
 
+// amd64GPRs and amd64XMMs are the registers amd64's allocator assigns,
+// never changed.
+var (
+	amd64GPRs = []int{int(amd64.RBX), int(amd64.R8), int(amd64.R9), int(amd64.R10),
+		int(amd64.R12), int(amd64.R13), int(amd64.R15)}
+	amd64XMMs = func() (xmms []int) {
+		for r := amd64.XReg(2); r < xScratch2; r++ {
+			xmms = append(xmms, int(r))
+		}
+		return xmms
+	}()
+)
+
 func compileAMD64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err error) {
 	defer func() {
 		if v := recover(); v != nil {
 			code, err = nil, fmt.Errorf("%w: %v", ErrUnsupported, v)
 		}
 	}()
-	pools := func(regs ...int) []int { return regs }
-	var xmms []int
-	for r := amd64.XReg(2); r < xScratch2; r++ {
-		xmms = append(xmms, int(r))
-	}
-	k, err := prepare(w, f, enc, pools(int(amd64.RBX), int(amd64.R8), int(amd64.R9), int(amd64.R10),
-		int(amd64.R12), int(amd64.R13), int(amd64.R15)), xmms)
+	k, err := prepare(w, f, enc, amd64GPRs, amd64XMMs)
 	if err != nil {
 		return nil, err
 	}
