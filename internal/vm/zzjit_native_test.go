@@ -6687,6 +6687,62 @@ func TestJITReoptDue(t *testing.T) {
 	}
 }
 
+// A read compiled for the shapes it met (up to jitPropertyCases), one on a
+// prototype among them, searches the own table of a receiver of any other
+// shape rather than leave, as V8's megamorphic loads look further: objects
+// given their properties in more orders than the cases hold, some on their
+// prototype -- RayTrace's IntersectionInfo -- had their readers leave at
+// every one, and demoted. A property found on another prototype, or
+// missing, still leaves. Each answer is the interpreter's.
+func TestJITSSAMegamorphicOwnReads(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var P={x:50},objs=[Object.create(P),{x:1},{y:2,x:3},{z:4,x:5},{w:6,x:7},{v:8,x:9},{u:10,x:11},{t:12,s:13,x:14}];
+		function sum(a,n){let s=0;for(let i=0;i<n;i++){s=(s+a[i%a.length].x)|0}return s}
+		var odd=objs.concat([Object.create({x:100}),{q:1}])`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("sum")).value.Object().fn().closure
+	rounds := []string{`String(sum(objs,700))`, `String(sum(objs,700))`, `String(sum(objs,700))`, `String(sum(objs,700))`,
+		`String(sum(odd,900))`}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts uint64
+		if e := r.jit.cache[weak.Make(cl.fn)]; e != nil {
+			hosts = e.ssaStats.hosts
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 3 {
+			e := r.jit.cache[weak.Make(cl.fn)]
+			if e == nil || e.ssa == nil || e.entrySlow {
+				t.Fatalf("sum did not run natively: %+v", e)
+			}
+			if n := e.ssaStats.hosts - hosts; n > 1 {
+				t.Fatalf("sum left native code %d times for eight shapes", n)
+			}
+		}
+	}
+}
+
 // Exits while the collector marks -- native code then leaves wherever it
 // would store a pointer without a write barrier -- count neither against
 // inlining a call nor against calling a function natively: one collection

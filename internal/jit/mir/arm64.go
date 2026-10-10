@@ -1966,6 +1966,8 @@ func (c *a64Compiler) holder(v *ssa.Value, guard func(arm64.Cond)) {
 		first = *v.Holders
 	}
 	cases := append([]ssa.PropertyCase{{Shape: uintptr(v.Const.Bits), Index: int32(v.Index), Holders: first}}, v.Cases...)
+	// As amd64's: a receiver of a shape not among the cases has its own
+	// table searched.
 	done := c.a.NewLabel()
 	for i, k := range cases {
 		next := c.a.NewLabel()
@@ -1974,7 +1976,12 @@ func (c *a64Compiler) holder(v *ssa.Value, guard func(arm64.Cond)) {
 		c.a.MovImm(a64C, uint64(k.Shape))
 		c.a.Cmp(a64B, a64C, true)
 		if i == len(cases)-1 {
-			guard(arm64.NE)
+			scan := c.a.NewLabel()
+			c.a.BCond(arm64.NE, scan)
+			c.cold = append(c.cold, func() {
+				c.a.Bind(scan)
+				c.scan(v, guard, done)
+			})
 		} else {
 			c.a.BCond(arm64.NE, next)
 		}
