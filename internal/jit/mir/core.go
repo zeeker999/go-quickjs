@@ -66,6 +66,9 @@ type schedule struct {
 	moves  []phiMove
 	steps  []phiStep
 	parked []*ssa.Value
+	// readers counts, by location (locKey), the pending moves that read
+	// it: all 0 between edges.
+	readers []int32
 }
 
 // prepare checks that f is one the backends compile, and analyses and
@@ -738,6 +741,25 @@ type phiStep struct {
 // phiMove is a move phiSchedule orders.
 type phiMove struct{ dst, src *ssa.Value }
 
+// locKey is v's location as an index, its class's apart: phiSchedule's
+// readers'. It is -1 for a value with no location of its own, which no
+// move waits for.
+func (c *core) locKey(v *ssa.Value) int {
+	l, ok := c.loc(v)
+	if !ok || c.isLazy(v) {
+		return -1
+	}
+	k := l.reg
+	if k < 0 {
+		k = 64 + l.spill
+	}
+	k *= 2
+	if isFloat(v) {
+		k++
+	}
+	return k
+}
+
 func (c *core) phiSchedule(to *ssa.Block, idx int) []phiStep {
 	moves := c.sched.moves[:0]
 	for _, phi := range to.Values {
@@ -763,21 +785,29 @@ func (c *core) phiSchedule(to *ssa.Block, idx int) []phiStep {
 	steps := c.sched.steps[:0]
 	c.sched.parked = c.sched.parked[:0]
 	isParked := func(v *ssa.Value) bool { return slices.Contains(c.sched.parked, v) }
+	// A move waits while a pending move, its source not parked, reads its
+	// destination: counted by location, so that telling takes no search.
+	if n := 2 * (64 + abi.SpillSlots); len(c.sched.readers) < n {
+		c.sched.readers = make([]int32, n)
+	}
+	readers := c.sched.readers
+	for _, m := range moves {
+		if k := c.locKey(m.src); k >= 0 {
+			readers[k]++
+		}
+	}
 	for len(moves) > 0 {
 		progress := false
 		for i := 0; i < len(moves); i++ {
 			m := moves[i]
-			blocked := false
-			for j, o := range moves {
-				if j != i && same(o.src, m.dst) && !isParked(o.src) {
-					blocked = true
-					break
-				}
-			}
-			if blocked {
+			if k := c.locKey(m.dst); k >= 0 && readers[k] > 0 {
 				continue
 			}
-			steps = append(steps, phiStep{dst: m.dst, src: m.src, parked: isParked(m.src)})
+			parked := isParked(m.src)
+			if k := c.locKey(m.src); k >= 0 && !parked {
+				readers[k]--
+			}
+			steps = append(steps, phiStep{dst: m.dst, src: m.src, parked: parked})
 			moves = append(moves[:i], moves[i+1:]...)
 			i--
 			progress = true
@@ -808,6 +838,12 @@ func (c *core) phiSchedule(to *ssa.Block, idx int) []phiStep {
 			}
 			steps = append(steps, phiStep{park: blocker})
 			c.sched.parked = append(c.sched.parked, blocker)
+			// A parked source is read from scratch, not its location.
+			for _, o := range moves {
+				if o.src == blocker {
+					readers[c.locKey(blocker)]--
+				}
+			}
 		}
 	}
 	c.sched.moves, c.sched.steps = moves[:0], steps
