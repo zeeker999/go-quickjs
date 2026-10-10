@@ -265,6 +265,11 @@ type jitEntry struct {
 	// from the others, which its own calls need.
 	upgradeReopt  bool
 	upgradeReopts uint8
+	// unwindReopt marks code to be compiled again for leaving native code
+	// on too many of its native callers' calls (jitUnwound), and
+	// unwindReopts counts the times it was.
+	unwindReopt  bool
+	unwindReopts uint8
 	// ssaCallee marks code compiled for native callers alone, from
 	// LowerSSAInline (jitNativeCallee).
 	ssaCallee     bool
@@ -876,7 +881,7 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 		if e.inlinePending && e.inlineReopts < jitInlineReoptimizations {
 			e.inlinePending, e.inlineReopt = false, true
 		}
-		if e.reopt || e.inlineReopt || e.polyReopt || e.upgradeReopt {
+		if e.reoptPending() {
 			r.jitReoptimize(f.cl, e)
 		}
 		if e.entrySlow {

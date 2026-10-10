@@ -216,6 +216,12 @@ func jitFed(cl *closure, e *jitEntry, pc uint32) {
 // failed in its code generic, and replaces its code, which runs nowhere:
 // native code leaves for Go to do anything else. If the function no longer
 // compiles, the code it has is kept.
+// reoptPending reports whether e's code is to be compiled again, for any
+// of the reasons jitReoptimize takes.
+func (e *jitEntry) reoptPending() bool {
+	return e.reopt || e.inlineReopt || e.polyReopt || e.upgradeReopt || e.unwindReopt
+}
+
 func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	switch {
 	case e.reopt:
@@ -225,7 +231,7 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	case e.upgradeReopt:
 		e.upgradeReopts++
 	}
-	e.reopt, e.inlineReopt, e.polyReopt, e.upgradeReopt = false, false, false, false
+	e.reopt, e.inlineReopt, e.polyReopt, e.upgradeReopt, e.unwindReopt = false, false, false, false, false
 	// What it compiles for, the reads' shapes met since included.
 	e.polyPending, e.polySettled = false, 0
 	fn := cl.fn
@@ -2102,7 +2108,7 @@ func (r *Runtime) runSSAIn(f *frame, e *jitEntry, pc, depth, idx int, resume uin
 				return r.jitInterpret(f, sp, err)
 			}
 			pc, depth = int(f.pc), sp-f.base
-			if e.reopt || e.inlineReopt || e.polyReopt || e.upgradeReopt {
+			if e.reoptPending() {
 				r.jitReoptimize(f.cl, e)
 			}
 			if !e.ssa.HasEntry(pc) || e.entrySlow {
@@ -2129,7 +2135,7 @@ func (r *Runtime) runSSAIn(f *frame, e *jitEntry, pc, depth, idx int, resume uin
 				return r.jitInterpret(f, sp, err)
 			}
 			pc, depth = int(f.pc), sp-f.base
-			if e.reopt || e.inlineReopt || e.polyReopt || e.upgradeReopt {
+			if e.reoptPending() {
 				r.jitReoptimize(f.cl, e)
 			}
 			if !e.ssa.HasEntry(pc) || e.entrySlow {
@@ -2184,7 +2190,7 @@ func (r *Runtime) runSSAIn(f *frame, e *jitEntry, pc, depth, idx int, resume uin
 				jitFed(f.cl, e, uint32(exitPC))
 			}
 			jitPolySettled(e)
-			if e.reopt || e.inlineReopt || e.polyReopt || e.upgradeReopt {
+			if e.reoptPending() {
 				// The code is compiled again now, not at the next call: a
 				// loop in this one may run long.
 				r.jitReoptimize(f.cl, e)
@@ -2359,8 +2365,11 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 	if n != 0 {
 		// The innermost left -- but for one that never entered native code
 		// (ExitEnter), a call Go makes; the others only return through Go.
-		if l := &s.unwinding[len(s.unwinding)-1]; !l.inline && l.kind != abi.ExitEnter {
-			if e := s.hint(l.cl.hint()); e != nil {
+		if l := &s.unwinding[len(s.unwinding)-1]; !l.inline && l.kind != abi.ExitEnter && !r.jitPoolEmptied(l) {
+			// Its entry by its function: a callee only native callers
+			// call has no hint. Not one that left for its pool to be
+			// filled again.
+			if e := s.cache[weak.Make(l.cl.fn)]; e != nil {
 				r.jitUnwound(e)
 			}
 		}
@@ -2587,14 +2596,33 @@ const (
 )
 
 // jitUnwound counts a native call that left native code inside e's code
-// (nativeOut), which native callers stop calling if it leaves too often
-// (jitUnwindShare): they leave for Go at the call instead, which makes it.
+// (nativeOut). Code that leaves on more than one in jitUnwindShare of its
+// calls is compiled again with what its exits taught since (jitCallSeen,
+// jitPolySeen), its native callers calling it still, as V8 deoptimizes
+// code and optimizes it again with the feedback gathered since: leaving
+// while it learned, its calls and constructions not yet decided, is no
+// reason to stop calling it natively. Only once those compiles are spent
+// (jitUnwindReopts), as V8 gives up optimizing a function that deoptimizes
+// too often, do native callers stop calling it and leave for Go at the
+// call instead, which makes it (notNative), until jitRetryNative.
 func (r *Runtime) jitUnwound(e *jitEntry) {
-	if e.nativeOut++; e.nativeOut%jitUnwindProbe == 0 && e.nativeOut*jitUnwindShare > e.nativeIn {
-		e.notNative, e.nativeEntry, e.nativeRetry = true, 0, 0
-		e.nativeBackoff = min(e.nativeBackoff+1, jitNativeBackoffs)
+	if e.nativeOut++; e.nativeOut%jitUnwindProbe != 0 || e.nativeOut*jitUnwindShare <= e.nativeIn {
+		return
 	}
+	if e.ssa != nil && e.unwindReopts < jitUnwindReopts {
+		e.unwindReopts++
+		e.unwindReopt = true
+		e.nativeIn, e.nativeOut = 0, 0
+		return
+	}
+	e.notNative, e.nativeEntry, e.nativeRetry = true, 0, 0
+	e.nativeBackoff = min(e.nativeBackoff+1, jitNativeBackoffs)
 }
+
+// jitUnwindReopts is how many times code that leaves too often when called
+// natively is compiled again for it before native callers stop calling it
+// (jitUnwound).
+const jitUnwindReopts = 3
 
 // jitNativeRetry is how many calls Go makes to code native callers no
 // longer call before they call it again, doubled for each time it was
@@ -2655,7 +2683,7 @@ func (r *Runtime) jitFinishExit(f *frame, e *jitEntry, l *jitNativeLevel) (Value
 			if e.inlinePending && e.inlineReopts < 2*jitInlineReoptimizations {
 				e.inlinePending, e.inlineReopt = false, true
 			}
-			if e.reopt || e.inlineReopt || e.polyReopt || e.upgradeReopt {
+			if e.reoptPending() {
 				r.jitReoptimize(f.cl, e)
 			}
 		}
