@@ -6,7 +6,7 @@ across sessions. Update it **in the same commit** as the work it records.
 ## Resume here
 
 - **Worktree:** `D:\Data\go-quickjs-jit`, branch `jit-wip`, based on main
-  6c3dd16. Pushed to `zk/jit-wip` when CI is wanted on Linux or macOS (the
+  dc000a0 (rebased 2026-10-10; before: `jit-wip-pre-rebase-2026-10-10`). Pushed to `zk/jit-wip` when CI is wanted on Linux or macOS (the
   user allows that); `zk/codex/jit-wip` keeps the old history, never
   force-pushed.
 - **Original history:** branch `jit-wip-backup` (82aa960). Everything up to
