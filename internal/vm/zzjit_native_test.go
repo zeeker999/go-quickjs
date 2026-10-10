@@ -1413,7 +1413,15 @@ func jitRuntimeForTest(t *testing.T, cfg Config) *Runtime {
 	// Boundary tests force promotion so guard and budget assertions cannot
 	// pass by running only the existing tiers.
 	r.jitCallThreshold = 1
-	t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
+	t.Cleanup(func() {
+		// A compile the backend refused for its own panic is a bug, which a
+		// refusal hides.
+		if r.jit != nil && r.jit.backendPanics != 0 {
+			t.Errorf("%d compiles refused for a backend panic", r.jit.backendPanics)
+		}
+		r.Close()
+		r.ReleaseClosed()
+	})
 	return r
 }
 

@@ -347,11 +347,16 @@ type jitState struct {
 	// ssaCtxs are the contexts native code runs in, one for each runSSA
 	// running and each native call (abi.Context's Level), ctxTop the
 	// first free; ssaCtx is the one Go entered last, whose exit it reads.
-	ssaCtxs       *[jitContexts]abi.Context
-	ctxTop        int
-	ssaCtx        *abi.Context
-	ssaEntries    uint64
-	ssaRecords    uint64
+	ssaCtxs    *[jitContexts]abi.Context
+	ctxTop     int
+	ssaCtx     *abi.Context
+	ssaEntries uint64
+	ssaRecords uint64
+	// backendPanics counts the compiles a backend refused for panicking.
+	backendPanics uint64
+	// exitScratch is what exits that leave their frames to Go are read
+	// into (jit.ExitScratch).
+	exitScratch   jit.ExitScratch
 	referenceKeys []uint32
 	references    *jitReferences
 	callFrames    *jitCallFrames

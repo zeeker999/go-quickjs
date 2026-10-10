@@ -162,6 +162,10 @@ type ExitDescriptor struct {
 	FrameLocals, ThisSlot, Locals int32
 	LocalsReg, StackReg           uint8
 	Enc                           *Encoding
+	// Direct marks a description whose slots may be written one by one:
+	// none takes a reference from another it writes, by its origin or a
+	// source that may be one's address.
+	Direct bool
 }
 
 // ExitSlot is a slot an exit writes: its value's number word, from Value;
@@ -173,9 +177,26 @@ type ExitSlot struct {
 	Slot   int32
 	Origin int32
 	Load   bool
-	Value  ExitLoc
-	Shadow ExitLoc
+	// At and OriginAt are where slots Slot and Origin are.
+	At, OriginAt ExitAddr
+	Value        ExitLoc
+	Shadow       ExitLoc
 }
+
+// ExitAddr is where a slot is: Off bytes into the locals or the operands,
+// the receiver in the context, or the cell of captured binding Off.
+type ExitAddr struct {
+	Base uint8
+	Off  int32
+}
+
+// ExitAddr's bases.
+const (
+	ExitInLocals uint8 = iota
+	ExitInStack
+	ExitInThis
+	ExitInCell
+)
 
 // ExitLoc is where an exit finds a word: in a register or a spill slot as
 // it is, or boxed from a float or a boolean there; a constant; a slot's

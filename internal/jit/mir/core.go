@@ -966,7 +966,7 @@ func (c *core) exitDescriptor(s *ssa.FrameState, kind uint64, localsReg, stackRe
 		if !written(i, v) {
 			continue
 		}
-		e := abi.ExitSlot{Slot: int32(i), Origin: -1}
+		e := abi.ExitSlot{Slot: int32(i), Origin: -1, At: c.exitAddr(i)}
 		var ok bool
 		if e.Value, ok = c.exitValue(v); !ok {
 			return nil
@@ -976,9 +976,22 @@ func (c *core) exitDescriptor(s *ssa.FrameState, kind uint64, localsReg, stackRe
 				return nil
 			}
 		} else if o, has := c.origin.Of(v); has && o >= 0 {
-			e.Origin, e.Load = int32(o), v.Op == ssa.OpLoadSlot
+			e.Origin, e.Load, e.OriginAt = int32(o), v.Op == ssa.OpLoadSlot, c.exitAddr(o)
 		}
 		d.Slots = append(d.Slots, e)
+	}
+	// Written one by one if no slot's reference may come from another
+	// slot written here: by its origin, or a source that is one's address
+	// -- a slot's, or one known only at run time.
+	writes := func(i int32) bool { return int(i) < len(s.Slots) && written(int(i), s.Slots[i]) }
+	d.Direct = true
+	for _, e := range d.Slots {
+		switch {
+		case e.Shadow.Kind == abi.ExitReg || e.Shadow.Kind == abi.ExitSpill,
+			e.Shadow.Kind == abi.ExitSlotAddr && e.Shadow.N != e.Slot && writes(e.Shadow.N),
+			e.Origin >= 0 && e.Origin != e.Slot && writes(e.Origin):
+			d.Direct = false
+		}
 	}
 	if s.Inline != nil {
 		for _, in := range inlineLevels(s) {
@@ -998,6 +1011,20 @@ func (c *core) exitDescriptor(s *ssa.FrameState, kind uint64, localsReg, stackRe
 	}
 	c.exitDescs = append(c.exitDescs, d)
 	return &c.exitDescs[len(c.exitDescs)-1]
+}
+
+// exitAddr is where slot i is, as slotSource finds it.
+func (c *core) exitAddr(i int) abi.ExitAddr {
+	size := c.enc.ValueSize
+	switch {
+	case i < c.f.FrameLocals:
+		return abi.ExitAddr{Base: abi.ExitInLocals, Off: int32(i) * size}
+	case i == c.f.ThisSlot:
+		return abi.ExitAddr{Base: abi.ExitInThis}
+	case i < c.f.Locals:
+		return abi.ExitAddr{Base: abi.ExitInCell, Off: int32(i - c.f.FrameLocals)}
+	}
+	return abi.ExitAddr{Base: abi.ExitInStack, Off: int32(i-c.f.Locals) * size}
 }
 
 // exitValue is where an exit finds a tagged value's word: its register or
