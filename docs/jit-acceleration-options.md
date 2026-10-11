@@ -212,6 +212,23 @@ What it changed:
 - *Measured.* Construction on: EarleyBoyer -8%, Splay -4%. Construction
   off: Splay +3.5%, within the noise. A Go store saves every register.
 
+**Coverage: stores, calls and Math (2581bee, 630b08e, 974b8d5).**
+- *Polymorphic stores.* A write learns the other shapes it meets, own
+  properties and transitions, and is compiled again for them, as reads
+  were. Adds down prototype chains deeper than a cache holds (up to 6)
+  are recorded with the cache's own rules.
+- *Calls past the inline budget* (8 per function) are made natively
+  instead of exiting; callees with no code are compiled for them.
+  RayTrace with construction on: -32%.
+- *Every Math function of numbers.* A rounding, sign, fround, max and
+  min (any count) are instructions of their own; every other function,
+  atan2, hypot, and inexact pow are Go called from native code
+  (OpMathCall), the VM's own function, so each answer is the VM's. In
+  general loops: 2.3x (sin, exp, log) to 21x (floor, round) faster.
+- This targets general code, not one suite: a family is covered whole,
+  tested from the VM's own tables against the interpreter, and timed on
+  general loops as well as the V8 suite.
+
 **Host exits that remain** (construction on, 10 iterations, by the
 operation Go then runs):
 
