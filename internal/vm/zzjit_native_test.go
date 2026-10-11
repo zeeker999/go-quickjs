@@ -7187,6 +7187,43 @@ func TestJITSSAGoCallsLeaveFrameSlots(t *testing.T) {
 	}
 }
 
+// A cache full of entries drops one that holds no code -- a refusal
+// remembered for a script a host runs once -- before code, which costs a
+// compile to make again: a hot function's code stays through 400 scripts
+// that call it, each alive, each an entry, compiled once.
+func TestJITCacheKeepsCodeOverRefusals(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	if _, err := r.Run(compileForTest(t, `function hot(n){let s=0;for(let i=0;i<n;i++)s=(s*31+i)|0;return s}`)); err != nil {
+		t.Fatal(err)
+	}
+	for range 4 {
+		if _, err := r.Run(compileForTest(t, `hot(5000)`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fn := r.global.getOwn(r.atoms.intern("hot")).value.Object().fn().closure.fn
+	if e := r.jit.cache[weak.Make(fn)]; e == nil || !e.holdsCode() {
+		t.Fatalf("hot has no code: %+v", e)
+	}
+	var scripts []*bytecode.Function
+	compiled := r.jit.compiled
+	for i := range 400 {
+		p := compileForTest(t, fmt.Sprintf(`hot(%d)`, i))
+		scripts = append(scripts, p)
+		if _, err := r.Run(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := r.jit.compiled - compiled; n != 0 {
+		t.Fatalf("hot's code was dropped for scripts' entries, and compiled again %d times", n)
+	}
+	runtime.KeepAlive(scripts)
+}
+
 // churnRegisters keeps many integers and floats live at once, so that the
 // registers native code had before a call of Go hold something else after.
 //

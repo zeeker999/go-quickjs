@@ -495,6 +495,12 @@ func (s *jitState) inUse(e *jitEntry) bool {
 	return e.ssaRuns != 0 || s.callEntryActive(e)
 }
 
+// holdsCode reports whether e has native code, which a cache full of
+// entries drops last.
+func (e *jitEntry) holdsCode() bool {
+	return e.code.Size() != 0 || e.ssa.Size() != 0
+}
+
 // forget removes e from the cache and frees its hint slot.
 func (s *jitState) forget(key weak.Pointer[bytecode.Function], e *jitEntry) {
 	delete(s.cache, key)
@@ -585,14 +591,24 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool, cl *closure) *j
 			}
 		}
 		if len(r.jit.cache) >= jitCacheEntries {
+			// One that holds no code first -- a refusal remembered, as
+			// for each script a host runs once -- rather than code,
+			// which costs a compile to make again.
+			var victim weak.Pointer[bytecode.Function]
+			var ve *jitEntry
 			for key, e := range r.jit.cache {
 				if r.jit.inUse(e) {
 					continue
 				}
-				if !r.jit.dropEntry(key, e) {
-					return nil
+				if ve == nil || ve.holdsCode() && !e.holdsCode() {
+					victim, ve = key, e
 				}
-				break
+				if !e.holdsCode() {
+					break
+				}
+			}
+			if ve != nil && !r.jit.dropEntry(victim, ve) {
+				return nil
 			}
 			if len(r.jit.cache) >= jitCacheEntries {
 				return nil
