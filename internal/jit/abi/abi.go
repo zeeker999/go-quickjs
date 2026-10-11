@@ -168,6 +168,10 @@ type Context struct {
 	GoResume               uintptr
 	GoArgs                 [MaxGoArgs]GoArg
 	Host                   unsafe.Pointer
+	// ExitMarking is 1 when the exit was the collector's marking's: a
+	// literal or a native call, which take no pointer while it marks. Go
+	// clears it before each entry.
+	ExitMarking uint64
 }
 
 // GoArg is an operand of a call of Go: a slot's two words, its pointer word
@@ -326,6 +330,8 @@ var (
 	OffGoStatus = int32(unsafe.Offsetof(Context{}.GoStatus))
 	OffGoResume = int32(unsafe.Offsetof(Context{}.GoResume))
 	OffGoArgs   = int32(unsafe.Offsetof(Context{}.GoArgs))
+
+	OffExitMarking = int32(unsafe.Offsetof(Context{}.ExitMarking))
 )
 
 // ObjectPool is the objects a construction site native code makes, `new
