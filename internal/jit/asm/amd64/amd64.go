@@ -111,7 +111,14 @@ func (a *Asm) Finish() ([]byte, error) {
 	return a.buf, nil
 }
 
-func (a *Asm) emit(b ...byte) { a.buf = append(a.buf, b...) }
+// emit, emit2 and emit3 append one, two and three bytes: appends of a
+// fixed number, which the compiler makes a capacity check and stores, not
+// a variadic append's copy of a slice made for it.
+func (a *Asm) emit(b byte) { a.buf = append(a.buf, b) }
+
+func (a *Asm) emit2(b0, b1 byte) { a.buf = append(a.buf, b0, b1) }
+
+func (a *Asm) emit3(b0, b1, b2 byte) { a.buf = append(a.buf, b0, b1, b2) }
 
 func (a *Asm) imm32(v int32) { a.buf = binary.LittleEndian.AppendUint32(a.buf, uint32(v)) }
 
@@ -174,7 +181,7 @@ func (a *Asm) JmpReg(r Reg) {
 	if r >= 8 {
 		a.emit(0x41)
 	}
-	a.emit(0xFF, 0xE0|byte(r&7))
+	a.emit2(0xFF, 0xE0|byte(r&7))
 }
 
 // LeaLabel is dst = the address l is bound at, RIP-relative.
@@ -183,14 +190,14 @@ func (a *Asm) LeaLabel(dst Reg, l Label) {
 	if dst >= 8 {
 		rex |= 0x04
 	}
-	a.emit(rex, 0x8D, byte(dst&7)<<3|5)
+	a.emit3(rex, 0x8D, byte(dst&7)<<3|5)
 	a.fixups = append(a.fixups, fixup{len(a.buf), l})
 	a.imm32(0)
 }
 
 // Jcc jumps to l if c holds.
 func (a *Asm) Jcc(c Cond, l Label) {
-	a.emit(0x0F, 0x80|byte(c))
+	a.emit2(0x0F, 0x80|byte(c))
 	a.fixups = append(a.fixups, fixup{len(a.buf), l})
 	a.imm32(0)
 }
@@ -260,7 +267,7 @@ func (a *Asm) LoadU32(dst, base Reg, disp int32) {
 }
 
 // Cqo sign-extends RAX into RDX.
-func (a *Asm) Cqo() { a.emit(0x48, 0x99) }
+func (a *Asm) Cqo() { a.emit2(0x48, 0x99) }
 
 // Idiv divides RDX:RAX by src, signed, 64 bits: RAX is the quotient and RDX
 // the remainder. It faults on a zero divisor, or a quotient past 64 bits.
@@ -273,14 +280,14 @@ func (a *Asm) Idiv(src Reg) {
 // LoadU16 is dst = [base + disp], 16 bits, zero-extended.
 func (a *Asm) LoadU16(dst, base Reg, disp int32) {
 	a.rex(false, byte(dst), byte(base), false)
-	a.emit(0x0F, 0xB7)
+	a.emit2(0x0F, 0xB7)
 	a.modrmMem(byte(dst), base, disp)
 }
 
 // LoadU8 is dst = [base + disp], a byte, zero-extended.
 func (a *Asm) LoadU8(dst, base Reg, disp int32) {
 	a.rex(false, byte(dst), byte(base), false)
-	a.emit(0x0F, 0xB6)
+	a.emit2(0x0F, 0xB6)
 	a.modrmMem(byte(dst), base, disp)
 }
 
@@ -382,14 +389,14 @@ func (a *Asm) Not32(dst Reg) {
 // Setcc sets dst's low byte to 1 if c holds, else 0; MovZX8 widens it.
 func (a *Asm) Setcc(c Cond, dst Reg) {
 	a.rex(false, 0, byte(dst), dst >= 4)
-	a.emit(0x0F, 0x90|byte(c))
+	a.emit2(0x0F, 0x90|byte(c))
 	a.modrmRR(0, byte(dst))
 }
 
 // MovZX8 is dst = src's low byte, zero-extended.
 func (a *Asm) MovZX8(dst, src Reg) {
 	a.rex(false, byte(dst), byte(src), src >= 4)
-	a.emit(0x0F, 0xB6)
+	a.emit2(0x0F, 0xB6)
 	a.modrmRR(byte(dst), byte(src))
 }
 
@@ -397,7 +404,7 @@ func (a *Asm) MovZX8(dst, src Reg) {
 func (a *Asm) MovQToX(dst XReg, src Reg) {
 	a.emit(0x66)
 	a.rex(true, byte(dst), byte(src), false)
-	a.emit(0x0F, 0x6E)
+	a.emit2(0x0F, 0x6E)
 	a.modrmRR(byte(dst), byte(src))
 }
 
@@ -405,7 +412,7 @@ func (a *Asm) MovQToX(dst XReg, src Reg) {
 func (a *Asm) MovQFromX(dst Reg, src XReg) {
 	a.emit(0x66)
 	a.rex(true, byte(src), byte(dst), false)
-	a.emit(0x0F, 0x7E)
+	a.emit2(0x0F, 0x7E)
 	a.modrmRR(byte(src), byte(dst))
 }
 
@@ -413,7 +420,7 @@ func (a *Asm) MovQFromX(dst Reg, src XReg) {
 func (a *Asm) LoadSD(dst XReg, base Reg, disp int32) {
 	a.emit(0xF2)
 	a.rex(false, byte(dst), byte(base), false)
-	a.emit(0x0F, 0x10)
+	a.emit2(0x0F, 0x10)
 	a.modrmMem(byte(dst), base, disp)
 }
 
@@ -421,7 +428,7 @@ func (a *Asm) LoadSD(dst XReg, base Reg, disp int32) {
 func (a *Asm) StoreSD(base Reg, disp int32, src XReg) {
 	a.emit(0xF2)
 	a.rex(false, byte(src), byte(base), false)
-	a.emit(0x0F, 0x11)
+	a.emit2(0x0F, 0x11)
 	a.modrmMem(byte(src), base, disp)
 }
 
@@ -450,7 +457,7 @@ func (a *Asm) SSEOp(op SSE, dst, src XReg) {
 		a.emit(0x66)
 	}
 	a.rex(false, byte(dst), byte(src), false)
-	a.emit(0x0F, byte(op))
+	a.emit2(0x0F, byte(op))
 	a.modrmRR(byte(dst), byte(src))
 }
 
@@ -466,7 +473,7 @@ const (
 func (a *Asm) RoundSD(dst, src XReg, mode uint8) {
 	a.emit(0x66)
 	a.rex(false, byte(dst), byte(src), false)
-	a.emit(0x0F, 0x3A, 0x0B)
+	a.emit3(0x0F, 0x3A, 0x0B)
 	a.modrmRR(byte(dst), byte(src))
 	a.emit(mode | 8)
 }
@@ -475,7 +482,7 @@ func (a *Asm) RoundSD(dst, src XReg, mode uint8) {
 func (a *Asm) Cvtsd2ss(dst, src XReg) {
 	a.emit(0xF2)
 	a.rex(false, byte(dst), byte(src), false)
-	a.emit(0x0F, 0x5A)
+	a.emit2(0x0F, 0x5A)
 	a.modrmRR(byte(dst), byte(src))
 }
 
@@ -483,7 +490,7 @@ func (a *Asm) Cvtsd2ss(dst, src XReg) {
 func (a *Asm) Cvtss2sd(dst, src XReg) {
 	a.emit(0xF3)
 	a.rex(false, byte(dst), byte(src), false)
-	a.emit(0x0F, 0x5A)
+	a.emit2(0x0F, 0x5A)
 	a.modrmRR(byte(dst), byte(src))
 }
 
@@ -492,7 +499,7 @@ func (a *Asm) Cvtss2sd(dst, src XReg) {
 func (a *Asm) Cvttsd2si(dst Reg, src XReg) {
 	a.emit(0xF2)
 	a.rex(true, byte(dst), byte(src), false)
-	a.emit(0x0F, 0x2C)
+	a.emit2(0x0F, 0x2C)
 	a.modrmRR(byte(dst), byte(src))
 }
 
@@ -500,6 +507,6 @@ func (a *Asm) Cvttsd2si(dst Reg, src XReg) {
 func (a *Asm) Cvtsi2sd(dst XReg, src Reg, wide bool) {
 	a.emit(0xF2)
 	a.rex(wide, byte(dst), byte(src), false)
-	a.emit(0x0F, 0x2A)
+	a.emit2(0x0F, 0x2A)
 	a.modrmRR(byte(dst), byte(src))
 }
