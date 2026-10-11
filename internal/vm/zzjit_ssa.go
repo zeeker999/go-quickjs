@@ -128,6 +128,96 @@ type jitFedSite struct {
 type jitPolySite struct {
 	pc    uint32
 	cases []propCache
+	// adds, for a write, are additions along chains deeper than a cache
+	// holds (jitDeepAdd).
+	adds []jitDeepAdd
+}
+
+// jitDeepAdd is an addition of a property along a shared transition, from
+// from to next, to an object whose prototype chain is up, each with the
+// shape in shapes, none intercepting it: what fillStoreCache finds, but
+// for a chain of up to jitAddDepth, which a cache, holding two, cannot.
+type jitDeepAdd struct {
+	from, next *shape
+	up         []*Object
+	shapes     []*shape
+}
+
+// jitAddDepth is how deep a prototype chain an addition is compiled for.
+const jitAddDepth = 6
+
+// jitDeepAddOf is the addition of key a write just made to o, of shape
+// before then, if it took a shared transition along a chain of plain
+// prototypes up to jitAddDepth that none intercepts, as fillStoreCache
+// requires of a cache's -- or false.
+func (r *Runtime) jitDeepAddOf(o *Object, before *shape, key Atom) (jitDeepAdd, bool) {
+	const plain = propAccessor | propPrivate | propDeleted | propUninit
+	next := o.shape
+	if before == nil || before == noShape || before.unique || next == nil || next.unique || next.parent != before || next.key != key ||
+		next.flags&(plain|propWritable) != propWritable {
+		return jitDeepAdd{}, false
+	}
+	a := jitDeepAdd{from: before, next: next}
+	for p := o.proto; p != nil; p = p.proto {
+		if len(a.up) == jitAddDepth || r.ensureProtoShape(p) == nil || !shapeClass(p.class) || synthesized(p.class, key) || !passesWrite(p, key) {
+			return jitDeepAdd{}, false
+		}
+		a.up, a.shapes = append(a.up, p), append(a.shapes, p.shape)
+	}
+	return a, true
+}
+
+// jitPolyWriteSeen notes, after Go made the write at pc that left native
+// code, what its cache knows of the object it wrote -- an own property, or
+// the transition it was added along -- for the code to be compiled again
+// for it with the shapes the site met before (writeCases), up to
+// jitPropertyCases, as for reads (jitPolySeen). DeltaBlue's Constraint
+// adds strength to the receivers of four constructors, each of a shape of
+// its own; RayTrace writes hitCount to infos of two.
+func (r *Runtime) jitPolyWriteSeen(f *frame, e *jitEntry, pc int, in bytecode.Instr, o *Object, before *shape) {
+	if int(in.B) >= len(f.cl.ic) {
+		return
+	}
+	i := slices.IndexFunc(e.poly, func(p jitPolySite) bool { return int(p.pc) == pc })
+	if i < 0 {
+		e.poly = append(e.poly, jitPolySite{pc: uint32(pc)})
+		i = len(e.poly) - 1
+	}
+	p := &e.poly[i]
+	if len(p.cases)+len(p.adds) >= jitPropertyCases {
+		return
+	}
+	c := f.cl.ic[in.B]
+	if c.shape == nil || c.shape == noShape || c.getter || c.next == setterNext || c.idx < 0 || c.next == nil && c.p1 != nil {
+		// No cache: an addition along a chain deeper than one holds, as
+		// the object took it.
+		if o == nil || int(in.A) >= len(f.cl.names) {
+			return
+		}
+		a, ok := r.jitDeepAddOf(o, before, f.cl.names[in.A])
+		if !ok || slices.ContainsFunc(p.adds, func(k jitDeepAdd) bool { return k.from == a.from }) {
+			return
+		}
+		p.adds = append(p.adds, a)
+		e.polyPending, e.polySettled = true, 0
+		return
+	}
+	if slices.ContainsFunc(p.cases, func(k propCache) bool { return k.shape == c.shape }) {
+		return
+	}
+	p.cases = append(p.cases, c)
+	e.polyPending, e.polySettled = true, 0
+}
+
+// jitWriteTarget is the object a set_prop about to be made writes, its
+// operands the two values below sp, and its shape now; nil for another
+// instruction or a primitive.
+func jitWriteTarget(stack []Value, sp int, in bytecode.Instr) (*Object, *shape) {
+	if in.Op != bytecode.OpSetProp || sp < 2 || sp > len(stack) || !stack[sp-2].IsObject() {
+		return nil, nil
+	}
+	o := stack[sp-2].Object()
+	return o, o.shape
 }
 
 // jitPropertyCases is how many shapes a read is compiled for, as V8's
@@ -135,11 +225,12 @@ type jitPolySite struct {
 const jitPropertyCases = 4
 
 // jitPolySeen notes a read native code left to Go at pc, its receiver on top
-// of the frame's operands, up to sp: one found on a prototype, of a shape
-// the read has not met, joins those it has, up to jitPropertyCases, and
-// the code is compiled again for them once they have settled
-// (jitPolySettled). A read of a receiver's own property needs none: native
-// code scans for it (mir's property).
+// of the frame's operands, up to sp: one of a shape the read has not met --
+// found on a prototype, or the receiver's own -- joins those it has, up to
+// jitPropertyCases, and the code is compiled again for them once they have
+// settled (jitPolySettled). An own property native code also scans for
+// (mir's property), but only in a table of up to abi.MaxScan: RayTrace's
+// IntersectionInfo has more.
 func (r *Runtime) jitPolySeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) {
 	recv := r.stack[sp-1]
 	if !recv.IsObject() || int(in.A) >= len(f.cl.names) {
@@ -147,7 +238,7 @@ func (r *Runtime) jitPolySeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 	}
 	var c propCache
 	r.fillPropCache(&c, recv.Object(), f.cl.names[in.A], false)
-	if c.shape == nil || c.shape == noShape || c.p1 == nil {
+	if c.shape == nil || c.shape == noShape || c.getter || c.idx < 0 {
 		return
 	}
 	i := slices.IndexFunc(e.poly, func(p jitPolySite) bool { return int(p.pc) == pc })
@@ -279,7 +370,14 @@ func (r *Runtime) jitFillLiteral(l *jitLiteral) {
 			pool.Objects[i] = unsafe.Pointer(a)
 			continue
 		}
-		o := newLiteralObject(r.proto.object, ClassObject, l.n)
+		// Room for what its objects came to take after it, as a
+		// constructor's are made (jitPoolObject): a property added to
+		// one natively needs the room (addAlong).
+		n := l.n
+		if l.root != nil {
+			n = max(n, int(l.root.slack))
+		}
+		o := newLiteralObject(r.proto.object, ClassObject, n)
 		o.shape = l.root
 		pool.Objects[i] = unsafe.Pointer(o)
 	}
@@ -537,6 +635,7 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	if code == nil {
 		return
 	}
+	defer r.jitWantedCallees(e, fb)
 	old := e.ssa
 	if len(fb.inlined) > len(e.ssaInlined) {
 		// It inlines more: its native callers may inline it now, and
@@ -652,6 +751,10 @@ type jitFeedback struct {
 	// object pools its constructions take from.
 	inlined []*closure
 	pools   []*abi.ObjectPool
+	// wanted are callees of calls to inline that the compile made calls
+	// instead -- past its budget (ssa's maxInlines) -- which had no code
+	// for native callers: compiled after it (jitWantedCallees).
+	wanted []*closure
 	// keeps is how many keep cells the code uses (ssa.Func.Keeps).
 	keeps int
 	// e is the entry being compiled again, whose failed speculations
@@ -898,8 +1001,12 @@ func (fb *jitFeedback) NativeCalls(pc int) []ssa.CallSite {
 		return nil
 	}
 	var sites []ssa.CallSite
-	for _, in := range fb.e.nativeCalls {
-		if int(in.pc) != pc {
+	for _, x := range jitTargets(fb.e) {
+		// The calls it makes natively, and those it inlines, which a
+		// compile past its budget for inlining (ssa's maxInlines) calls
+		// instead, as V8's does: they had been made by Go.
+		in := *x
+		if int(in.pc) != pc || slices.ContainsFunc(sites, func(s ssa.CallSite) bool { return s.Callee == uintptr(unsafe.Pointer(in.obj)) }) {
 			continue
 		}
 		if in.cl == nil && in.pop {
@@ -936,6 +1043,10 @@ func (fb *jitFeedback) NativeCalls(pc int) []ssa.CallSite {
 		// one asking. jitCallSeen compiled it.
 		ce := fb.r.jit.cache[weak.Make(in.cl.fn)]
 		if ce == nil || ce.ssa == nil || ce.ssaStrings {
+			if (ce == nil || ce.ssa == nil) && !slices.Contains(fb.wanted, in.cl) {
+				k := fb.keep()
+				k.wanted = append(k.wanted, in.cl)
+			}
 			continue
 		}
 		call, fn := fb.fn.Code[pc], in.cl.fn
@@ -2115,7 +2226,26 @@ func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
 	e.setSSA(fn, p, code, fb)
 	e.ssaCallee, e.entrySlow = true, true
 	r.jit.compiled++
+	r.jitWantedCallees(e, fb)
 	return e
+}
+
+// jitWantedCallees compiles for native callers the callees the compile fb
+// made calls to, in place of inlining them, that had no code (wanted), and
+// has e's code compiled again to call them, once, from what remains of the
+// budget for upgrades (jitInlineReoptimizations). Not inside another
+// compile, whose workspaces a compile would share, nor a compile of these.
+func (r *Runtime) jitWantedCallees(e *jitEntry, fb *jitFeedback) {
+	if len(fb.wanted) == 0 || r.jit.seeding || e.upgradeReopts >= jitInlineReoptimizations {
+		return
+	}
+	r.jit.seeding = true
+	defer func() { r.jit.seeding = false }()
+	for _, cl := range fb.wanted {
+		if r.jitNativeCallee(cl) != nil {
+			e.upgradeReopt = true
+		}
+	}
 }
 
 // setSSA gives e the code the new pipeline compiled for fn from p.
@@ -2231,8 +2361,12 @@ func (fb *jitFeedback) Property(pc int) (ssa.PropertySite, bool) {
 		k := fb.keep()
 		k.fedInlined = append(k.fedInlined, jitFedInlined{cl: fb.cl, pc: uint32(pc)})
 	}
-	if ok && site.Shape != 0 && fb.e != nil && fb.root == nil {
-		site.Cases = fb.cases(pc, site.Shape)
+	if ok && fb.e != nil && fb.root == nil {
+		if fb.fn.Code[pc].Op == bytecode.OpSetProp {
+			site.Cases, site.Adds = fb.writeCases(pc, site)
+		} else if site.Shape != 0 {
+			site.Cases = fb.cases(pc, site.Shape)
+		}
 	}
 	if ok && fb.root == nil && int(fb.fn.Code[pc].B) < len(fb.cl.ic) && fb.cl.ic[fb.fn.Code[pc].B].fills < maxCacheFills &&
 		!slices.ContainsFunc(fb.fed, func(s jitFedSite) bool { return s.pc == uint32(pc) }) {
@@ -2251,6 +2385,61 @@ func (fb *jitFeedback) Property(pc int) (ssa.PropertySite, bool) {
 		fb.fed = append(fb.fed, jitFedSite{pc: uint32(pc), shape: known})
 	}
 	return site, ok
+}
+
+// writeCases are what the write at pc met at objects of shapes other than
+// site's (jitPolyWriteSeen): an own property it wrote, or a transition it
+// added the property along (fb.add), which the code tries in turn.
+func (fb *jitFeedback) writeCases(pc int, site ssa.PropertySite) ([]ssa.PropertyCase, []*ssa.PropertyAdd) {
+	var cases []ssa.PropertyCase
+	var adds []*ssa.PropertyAdd
+	for _, p := range fb.e.poly {
+		if int(p.pc) != pc {
+			continue
+		}
+		for i := range p.cases {
+			c := &p.cases[i]
+			from := uintptr(unsafe.Pointer(c.shape))
+			if from == site.Shape || site.Add != nil && from == site.Add.From {
+				continue
+			}
+			if c.next != nil {
+				if a := fb.add(c); a != nil {
+					adds = append(adds, a)
+				}
+				continue
+			}
+			if c.p1 == nil && c.idx >= 0 && c.idx < c.shape.n {
+				k := fb.keep()
+				k.shapes = append(k.shapes, remember(c.shape))
+				cases = append(cases, ssa.PropertyCase{Shape: from, Index: c.idx})
+			}
+		}
+		for _, d := range p.adds {
+			if from := uintptr(unsafe.Pointer(d.from)); from == site.Shape || site.Add != nil && from == site.Add.From {
+				continue
+			}
+			if d.next.index == nil && int(d.next.n) > linearScanLimit {
+				// Its next shape wants its table's index built, as fb.add
+				// leaves to Go.
+				continue
+			}
+			k := fb.keep()
+			k.shapes = append(k.shapes, remember(d.from), remember(d.next))
+			a := &ssa.PropertyAdd{From: uintptr(unsafe.Pointer(d.from)), Next: uintptr(unsafe.Pointer(d.next)), Flags: uint8(d.next.flags)}
+			for j, up := range d.up {
+				h := ssa.Holder{Object: uintptr(unsafe.Pointer(up)), Shape: uintptr(unsafe.Pointer(d.shapes[j]))}
+				k.shapes, k.holders = append(k.shapes, remember(d.shapes[j])), append(k.holders, up)
+				if j < len(a.Protos) {
+					a.Protos[j] = h
+				} else {
+					a.More = append(a.More, h)
+				}
+			}
+			adds = append(adds, a)
+		}
+	}
+	return cases, adds
 }
 
 // cases are the shapes other than first the read at pc met (jitPolySeen),
@@ -2840,7 +3029,11 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 			case bytecode.OpDefineField:
 				jitDefineSeen(e, exitPC)
 			}
+			o, before := jitWriteTarget(r.stack, f.base+int(ctx.ExitDepth), in)
 			sp, steps, err := r.jitHost(f, f.base+int(ctx.ExitDepth), 1)
+			if err == nil && in.Op == bytecode.OpSetProp {
+				r.jitPolyWriteSeen(f, e, exitPC, in, o, before)
+			}
 			if err != nil || r.stopped != nil || steps == 0 {
 				return r.jitInterpret(f, sp, err)
 			}
@@ -3412,7 +3605,11 @@ func (r *Runtime) jitFinishExit(f *frame, e *jitEntry, l *jitNativeLevel) (Value
 				jitDefineSeen(e, pc)
 			}
 		}
+		o, before := jitWriteTarget(r.stack, f.base+depth, in)
 		sp, steps, err := r.jitHost(f, f.base+depth, 1)
+		if err == nil && in.Op == bytecode.OpSetProp && e != nil && e.ssa != nil {
+			r.jitPolyWriteSeen(f, e, pc, in, o, before)
+		}
 		if err != nil || r.stopped != nil || steps == 0 {
 			v, err, _ := r.jitInterpret(f, sp, err)
 			return v, err

@@ -284,13 +284,15 @@ type Value struct {
 	Index int
 	Key   uint32
 	// Holders, for a property read the receiver's prototypes answered, are
-	// those prototypes (PropertySite); nil otherwise. Cases, for a read
-	// that met objects of other shapes, are those (PropertyCase), checked
-	// after Const's.
+	// those prototypes (PropertySite); nil otherwise. Cases, for a read or
+	// a write that met objects of other shapes, are those (PropertyCase),
+	// checked after Const's: a write's are own properties.
 	Holders *[2]Holder
 	Cases   []PropertyCase
-	// Add, for a write whose cache adds its property, is how (OpPropWrite).
-	Add *PropertyAdd
+	// Add, for a write whose cache adds its property, is how (OpPropWrite);
+	// Adds are more, from objects of other shapes, tried after it.
+	Add  *PropertyAdd
+	Adds []*PropertyAdd
 	// Upvalue marks an OpPropWrite to a captured binding (ir.UpvalueWrite):
 	// its first operand is the binding's cell (OpUpvalueCell).
 	Upvalue bool

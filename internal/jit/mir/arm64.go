@@ -1105,12 +1105,19 @@ func (c *a64Compiler) propStore(v *ssa.Value, guard func(arm64.Cond)) {
 	c.a.Bind(have)
 	c.a.FMovToF(a64F1, a64B)
 	added := c.a.NewLabel()
-	if v.Add != nil {
-		has := c.a.NewLabel()
-		c.addAlong(v, has)
-		c.a.B(added)
-		c.a.Bind(has)
-		if v.Add.Define {
+	if v.Add != nil || len(v.Adds) != 0 {
+		// As amd64's: along each transition the site met.
+		adds := v.Adds
+		if v.Add != nil {
+			adds = append([]*ssa.PropertyAdd{v.Add}, adds...)
+		}
+		for _, add := range adds {
+			next := c.a.NewLabel()
+			c.addAlong(v, add, next)
+			c.a.B(added)
+			c.a.Bind(next)
+		}
+		if v.Add != nil && v.Add.Define {
 			// As amd64's: a literal's field is added so, or by Go.
 			c.a.B(c.stubLabel(v.State, exitKind(v.Aux)))
 			c.a.Bind(added)
@@ -1214,8 +1221,8 @@ func (c *a64Compiler) goStore(stub *arm64.Label) {
 
 // addAlong adds the property a write's cache adds, as amd64's does, or
 // goes to miss. It uses A, B, C and D.
-func (c *a64Compiler) addAlong(v *ssa.Value, miss arm64.Label) {
-	add, x := v.Add, v.Args[1]
+func (c *a64Compiler) addAlong(v *ssa.Value, add *ssa.PropertyAdd, miss arm64.Label) {
+	x := v.Args[1]
 	if c.enc.PropertyFlags != c.enc.PropertyKey+4 || c.enc.PropertySize != 24 {
 		c.a.B(miss)
 		return
@@ -1241,23 +1248,17 @@ func (c *a64Compiler) addAlong(v *ssa.Value, miss arm64.Label) {
 	c.a.Tst(a64B, a64C, false)
 	c.a.BCond(arm64.EQ, miss)
 	c.a.Load(a64B, o, c.enc.ObjectProto)
-	for _, h := range add.Protos {
-		if add.Define {
-			break
+	if !add.Define {
+		for _, h := range add.Chain() {
+			c.a.MovImm(a64C, uint64(h.Object))
+			c.a.Cmp(a64B, a64C, true)
+			c.a.BCond(arm64.NE, miss)
+			c.a.Load(a64B, a64C, c.enc.ObjectShape)
+			c.a.MovImm(a64D, uint64(h.Shape))
+			c.a.Cmp(a64B, a64D, true)
+			c.a.BCond(arm64.NE, miss)
+			c.a.Load(a64B, a64C, c.enc.ObjectProto)
 		}
-		c.a.MovImm(a64C, uint64(h.Object))
-		c.a.Cmp(a64B, a64C, true)
-		c.a.BCond(arm64.NE, miss)
-		if h.Object == 0 {
-			break
-		}
-		c.a.Load(a64B, a64C, c.enc.ObjectShape)
-		c.a.MovImm(a64A, uint64(h.Shape))
-		c.a.Cmp(a64B, a64A, true)
-		c.a.BCond(arm64.NE, miss)
-		c.a.Load(a64B, a64C, c.enc.ObjectProto)
-	}
-	if add.Protos[1].Object != 0 && !add.Define {
 		c.a.Cbnz(a64B, miss, true)
 	}
 	c.a.Load(a64B, o, c.enc.ObjectProps+8)

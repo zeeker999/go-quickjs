@@ -1928,13 +1928,20 @@ func (c *compiler) propStore(v *ssa.Value, guard func(amd64.Cond)) {
 	c.a.Bind(have)
 	c.a.MovQToX(xScratch1, scratchB)
 	added := c.a.NewLabel()
-	if v.Add != nil {
-		// A property the cache adds, or else one the object has.
-		has := c.a.NewLabel()
-		c.addAlong(v, has)
-		c.a.Jmp(added)
-		c.a.Bind(has)
-		if v.Add.Define {
+	if v.Add != nil || len(v.Adds) != 0 {
+		// A property the cache adds, along the transition of the object's
+		// shape among those the site met, or else one the object has.
+		adds := v.Adds
+		if v.Add != nil {
+			adds = append([]*ssa.PropertyAdd{v.Add}, adds...)
+		}
+		for _, add := range adds {
+			next := c.a.NewLabel()
+			c.addAlong(v, add, next)
+			c.a.Jmp(added)
+			c.a.Bind(next)
+		}
+		if v.Add != nil && v.Add.Define {
 			// A literal's field: added so, or by Go.
 			c.a.Jmp(c.stubLabel(v.State, exitKind(v.Aux)))
 			c.a.Bind(added)
@@ -2054,8 +2061,8 @@ func (c *compiler) goStore(stub *amd64.Label) {
 // next shape, a pointer, so the collector must not be marking, and the
 // entry past the last, the value's pointer word from xScratch1. It uses
 // every scratch register.
-func (c *compiler) addAlong(v *ssa.Value, miss amd64.Label) {
-	add, x := v.Add, v.Args[1]
+func (c *compiler) addAlong(v *ssa.Value, add *ssa.PropertyAdd, miss amd64.Label) {
+	x := v.Args[1]
 	if c.enc.PropertyFlags != c.enc.PropertyKey+4 || c.enc.PropertySize != 24 {
 		// The key and flags are written as one word, the offset as a sum.
 		c.a.Jmp(miss)
@@ -2085,24 +2092,18 @@ func (c *compiler) addAlong(v *ssa.Value, miss amd64.Label) {
 	// The prototype chain the cache found, object by object, then none;
 	// none for a literal's field, which its prototypes do not intercept.
 	c.a.Load(scratchB, o, c.enc.ObjectProto)
-	for _, h := range add.Protos {
-		if add.Define {
-			break
+	if !add.Define {
+		for _, h := range add.Chain() {
+			c.a.MovImm(scratchC, uint64(h.Object))
+			c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+			c.a.Jcc(amd64.CondNE, miss)
+			c.a.Load(scratchB, scratchC, c.enc.ObjectShape)
+			c.a.MovImm(scratchC, uint64(h.Shape))
+			c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+			c.a.Jcc(amd64.CondNE, miss)
+			c.a.MovImm(scratchC, uint64(h.Object))
+			c.a.Load(scratchB, scratchC, c.enc.ObjectProto)
 		}
-		c.a.MovImm(scratchC, uint64(h.Object))
-		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
-		c.a.Jcc(amd64.CondNE, miss)
-		if h.Object == 0 {
-			break
-		}
-		c.a.Load(scratchB, scratchC, c.enc.ObjectShape)
-		c.a.MovImm(scratchC, uint64(h.Shape))
-		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
-		c.a.Jcc(amd64.CondNE, miss)
-		c.a.MovImm(scratchC, uint64(h.Object))
-		c.a.Load(scratchB, scratchC, c.enc.ObjectProto)
-	}
-	if add.Protos[1].Object != 0 && !add.Define {
 		c.a.Op(amd64.Test, scratchB, scratchB, true)
 		c.a.Jcc(amd64.CondNE, miss)
 	}

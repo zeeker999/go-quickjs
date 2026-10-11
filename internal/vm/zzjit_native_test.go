@@ -6873,6 +6873,158 @@ func TestJITSSAPoolsRefilledByGo(t *testing.T) {
 	}
 }
 
+// A store that meets objects of several shapes is compiled for each, as
+// V8's polymorphic stores keep a map and a transition for each: it notes,
+// after Go made it at an exit, what the site's cache found (an own
+// property, or the transition the property was added along), and the code
+// is compiled again with them (jitPolyWriteSeen). adds puts s on objects
+// of four shapes, as DeltaBlue's Constraint puts strength on its
+// subclasses' receivers; writes stores p5 into objects of two shapes, past
+// the eight properties native code searches a table for, as RayTrace's
+// testIntersection writes hitCount; deep adds strength to objects of four
+// constructors whose prototype chains are two to five deep, past the two a
+// cache holds, as DeltaBlue's constraints are (jitDeepAddOf). Each had
+// left native code at every object of a shape the site was not compiled
+// for. Each answer is the interpreter's.
+func TestJITSSAPolymorphicStores(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	old := jitcompile.SSAConstruct
+	jitcompile.SSAConstruct = true
+	defer func() { jitcompile.SSAConstruct = old }()
+	setup := `function mk(k,i){if(k==0)return {a:i};if(k==1)return {b:i,a:i};if(k==2)return {c:i};return {d:i,e:i}}
+		function adds(n){let t=0;for(let i=0;i<n;i++){const o=mk(i&3,i);o.s=i;t=(t+o.s)|0}return t}
+		function big(k){const o={p0:0,p1:1,p2:2,p3:3,p4:4,p5:5,p6:6,p7:7,p8:8};if(k)o.q=1;return o}
+		var bigs=[big(0),big(1),big(0),big(1)];
+		function writes(n){let t=0;for(let i=0;i<n;i++){const o=bigs[i&3];o.p5=i;t=(t+o.p5+o.p8)|0}return t+':'+bigs[1].p5}
+		function K0(){} function K1(){} K1.prototype=Object.create(K0.prototype);
+		function K2(){} K2.prototype=Object.create(K1.prototype); function K3(){} K3.prototype=Object.create(K2.prototype);
+		var ks=[K1,K2,K3,K0];
+		function deep(n){let t=0;for(let i=0;i<n;i++){const o=new ks[i&3]();o.strength=i;t=(t+o.strength)|0}return t}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exits := func(name string) uint64 {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		if e := r.jit.cache[weak.Make(cl.fn)]; e != nil {
+			return e.ssaStats.hosts + e.ssaStats.guards
+		}
+		return 0
+	}
+	src := `adds(400)+'/'+writes(400)+'/'+deep(400)`
+	for i := 0; i < 8; i++ {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, w, d := exits("adds"), exits("writes"), exits("deep")
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 7 {
+			// 400 iterations each, three of four objects of shapes the
+			// first compile did not know of, or two of four.
+			if n := exits("adds") - a; n > 2 {
+				t.Fatalf("adds left native code %d times", n)
+			}
+			if n := exits("writes") - w; n > 2 {
+				t.Fatalf("writes left native code %d times", n)
+			}
+			if n := exits("deep") - d; n > 2 {
+				t.Fatalf("deep left native code %d times", n)
+			}
+			for _, name := range []string{"adds", "writes", "deep"} {
+				cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+				if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil || e.entrySlow {
+					t.Fatalf("%s did not run natively: %+v", name, e)
+				}
+			}
+		}
+	}
+	// A setter up K3's and K2's chains, on K1's prototype: their adds are
+	// the setter's calls now, which native code, finding the prototype's
+	// shape changed, leaves to Go.
+	for i, src := range []string{`Object.defineProperty(K1.prototype,'strength',{set(v){this.s2=v*2},get(){return this.s2|0}});deep(400)`, `deep(400)`} {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.Number(), wv.Number(); got != want {
+			t.Fatalf("setter round %d: got %v, interpreter %v", i, got, want)
+		}
+	}
+}
+
+// TestJITSSAInlineBudgetCallsNatively: a function with more small callees
+// than a compile inlines (ssa's maxInlines) calls the rest natively, as
+// V8's does, instead of leaving each such call to Go at every iteration --
+// RayTrace's rayTrace had some 20 such calls.
+func TestJITSSAInlineBudgetCallsNatively(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function f0(x){return x+1} function f1(x){return x*2} function f2(x){return x-3} function f3(x){return x^5}
+		function f4(x){return x+7} function f5(x){return x*3} function f6(x){return x-11} function f7(x){return x^13}
+		function f8(x){return x+17} function f9(x){return x*5} function f10(x){return x-19} function f11(x){return x^23}
+		function wide(n){let t=0;for(let i=0;i<n;i++){t=(f0(t)+f1(i)+f2(t)+f3(i)+f4(t)+f5(i)+f6(t)+f7(i)+f8(t)+f9(i)+f10(t)+f11(i))|0}return t}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e := func() *jitEntry {
+		cl := r.global.getOwn(r.atoms.intern("wide")).value.Object().fn().closure
+		return r.jit.cache[weak.Make(cl.fn)]
+	}
+	exits := func() uint64 {
+		if e := e(); e != nil {
+			return e.ssaStats.hosts + e.ssaStats.guards
+		}
+		return 0
+	}
+	for i := 0; i < 8; i++ {
+		wv, err := want.Run(compileForTest(t, `wide(400)`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := exits()
+		gv, err := r.Run(compileForTest(t, `wide(400)`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.Number(), wv.Number(); got != want {
+			t.Fatalf("round %d: got %v, interpreter %v", i, got, want)
+		}
+		if i == 7 {
+			if n := exits() - before; n > 2 {
+				t.Fatalf("wide left native code %d times in 400 iterations", n)
+			}
+			if e := e(); e == nil || e.ssa == nil || e.entrySlow {
+				t.Fatalf("wide did not run natively: %+v", e)
+			}
+		}
+	}
+}
+
 // churnRegisters keeps many integers and floats live at once, so that the
 // registers native code had before a call of Go hold something else after.
 //

@@ -333,8 +333,11 @@ type PropertySite struct {
 	Holders [2]Holder
 	Cases   []PropertyCase
 	// Add, for a write whose cache adds the property, says how; Shape is
-	// then 0.
-	Add *PropertyAdd
+	// then 0. Adds are the adds a write met objects of other shapes take,
+	// as V8's polymorphic stores keep a transition for each map; a write's
+	// Cases are the own properties others have.
+	Add  *PropertyAdd
+	Adds []*PropertyAdd
 }
 
 // PropertyAdd is a write that adds its property, as the VM's cache has it
@@ -353,6 +356,24 @@ type PropertyAdd struct {
 	// not added to exits. Key is then the field's, the VM's atom.
 	Define bool
 	Key    uint32
+	// More are the prototypes past Protos', for a chain deeper than the
+	// VM's caches hold, as the VM found it at an exit (DeltaBlue's
+	// constraints: their class's prototype, its superclass's,
+	// Constraint's, Object's).
+	More []Holder
+}
+
+// Chain is the add's prototype chain, object by object, its end after the
+// last: Protos' up to the first of none, then More.
+func (a *PropertyAdd) Chain() []Holder {
+	var chain []Holder
+	for _, h := range a.Protos {
+		if h.Object == 0 {
+			return chain
+		}
+		chain = append(chain, h)
+	}
+	return append(chain, a.More...)
 }
 
 // PropertyCase is one more shape a read's site met (PropertySite.Cases):
@@ -1820,7 +1841,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 			site.Shape = 0
 		}
 		var cases []PropertyCase
-		if site.Shape != 0 && in.Op != ir.PropertyWrite {
+		if site.Shape != 0 || in.Op == ir.PropertyWrite {
 			cases = site.Cases
 		}
 		if in.Op == ir.ReferenceRead {
@@ -1842,8 +1863,9 @@ func (b *builder) instruction(blk *Block, pc int) {
 		v := guard(OpPropWrite, None, ir.HostExit, object, operand(in.Right))
 		v.Const, v.Index, v.Key = ir.Value{Bits: uint64(site.Shape)}, int(site.Index), site.Key
 		// A property the write adds, as V8's stores do along a map's
-		// transition; or, to an object that has it, stores.
-		v.Add = site.Add
+		// transition; or, to an object that has it, stores: of any of the
+		// shapes the site met.
+		v.Add, v.Adds, v.Cases = site.Add, site.Adds, cases
 	case ir.BindingWrite:
 		// The binding's cell, as a read finds it, written as a property
 		// store writes one: the stores' checks and keeps take it for a
