@@ -378,7 +378,7 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 		c.a.MovImm(scratchB, c.enc.WriteBarrier)
 		c.a.LoadU8(scratchB, scratchB, 0)
 		c.a.Op(amd64.Test, scratchB, scratchB, false)
-		guard(amd64.CondNE)
+		c.markingExit(v)
 		c.a.MovImm(scratchA, uint64(site.Pool))
 		c.a.Load(scratchB, scratchA, abi.OffPoolCount)
 		c.refillOnEmpty(site.Pool, guard)
@@ -397,7 +397,7 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 	c.a.MovImm(scratchB, c.enc.WriteBarrier)
 	c.a.LoadU8(scratchB, scratchB, 0)
 	c.a.Op(amd64.Test, scratchB, scratchB, false)
-	guard(amd64.CondNE)
+	c.markingExit(v)
 	// A context.
 	c.a.Load(scratchB, regCtx, abi.OffLevel)
 	c.a.OpImm(amd64.Add, scratchB, 1, true)
@@ -823,6 +823,21 @@ func (c *compiler) callGo(v *ssa.Value, op uint64, keep int) {
 			c.a.Load(amd64.Reg(sv.reg), regCtx, c.spillDisp(sv.slot))
 		}
 	}
+}
+
+// markingExit, the collector's flag just tested, fails call v's guard if it
+// is set, as its guard does, noting first that the collector's marking made
+// it (abi.Context.ExitMarking): the code's profit is not judged by it.
+func (c *compiler) markingExit(v *ssa.Value) {
+	marked := c.a.NewLabel()
+	c.a.Jcc(amd64.CondNE, marked)
+	stub := c.stubLabel(v.State, exitKind(v.Aux))
+	c.cold = append(c.cold, func() {
+		c.a.Bind(marked)
+		c.a.MovImm(scratchB, 1)
+		c.a.Store(regCtx, abi.OffExitMarking, scratchB)
+		c.a.Jmp(stub)
+	})
 }
 
 // refillOnEmpty, its pool's count in scratchB, goes on if the pool has an
@@ -2049,7 +2064,16 @@ func (c *compiler) addAlong(v *ssa.Value, miss amd64.Label) {
 	c.a.MovImm(scratchB, c.enc.WriteBarrier)
 	c.a.LoadU8(scratchB, scratchB, 0)
 	c.a.Op(amd64.Test, scratchB, scratchB, false)
-	c.a.Jcc(amd64.CondNE, miss)
+	marked := c.a.NewLabel()
+	c.a.Jcc(amd64.CondNE, marked)
+	c.cold = append(c.cold, func() {
+		// The collector's marking's (abi.Context.ExitMarking), if it
+		// leaves.
+		c.a.Bind(marked)
+		c.a.MovImm(scratchB, 1)
+		c.a.Store(regCtx, abi.OffExitMarking, scratchB)
+		c.a.Jmp(miss)
+	})
 	o := c.gpr(v.Args[0], scratchA)
 	c.a.Load(scratchB, o, c.enc.ObjectShape)
 	c.a.MovImm(scratchC, uint64(add.From))

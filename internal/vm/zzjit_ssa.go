@@ -2563,13 +2563,15 @@ const (
 // a loop's mean length for each back-edge taken natively.
 func (r *Runtime) jitSSAProfit(e *jitEntry, ctx *abi.Context, start, edges int) {
 	st := &e.ssaStats
-	if ctx.ExitKind != abi.ExitReturn && jitMarking() {
-		// A stretch the collector's marking may have ended -- at a
-		// literal or a native call, which leave for Go while it marks --
-		// says nothing of the code, as its exits do not elsewhere
-		// (jitInlineLeft, jitUnwound): through a long marking every
-		// iteration left, and Go stopped entering the code for good,
-		// nothing learned to compile it again for.
+	if ctx.ExitMarking != 0 {
+		// A stretch the collector's marking ended -- at a literal or a
+		// native call, which leave for Go while it marks -- says nothing
+		// of the code, as its exits do not elsewhere (jitInlineLeft,
+		// jitUnwound): through a long marking every iteration left, and
+		// Go stopped entering the code for good, nothing learned to
+		// compile it again for. Any other exit then counts: one that left
+		// for Go anyway, while the collector happened to mark, is the
+		// code's.
 		st.entries--
 		return
 	}
@@ -2690,7 +2692,7 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 		// What Go has run since the last entry may have changed the frame, how
 		// deep calls are, or the scope.
 		s.ssaCtx = ctx
-		ctx.ReturnTo, ctx.Live, ctx.TailReturn = 0, 0, 0
+		ctx.ReturnTo, ctx.Live, ctx.TailReturn, ctx.ExitMarking = 0, 0, 0, 0
 		r.jitShareContexts(idx, f)
 		ctx.Locals = unsafe.Pointer(unsafe.SliceData(f.locals))
 		ctx.Stack = unsafe.Pointer(&r.stack[f.base])

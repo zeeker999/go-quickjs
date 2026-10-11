@@ -1222,7 +1222,15 @@ func (c *a64Compiler) addAlong(v *ssa.Value, miss arm64.Label) {
 	}
 	c.a.MovImm(a64B, c.enc.WriteBarrier)
 	c.a.LoadU8(a64B, a64B, 0)
-	c.a.Cbnz(a64B, miss, false)
+	marked := c.a.NewLabel()
+	c.a.Cbnz(a64B, marked, false)
+	c.cold = append(c.cold, func() {
+		// As amd64's: the collector's marking's, if it leaves.
+		c.a.Bind(marked)
+		c.a.MovImm(a64B, 1)
+		c.a.Store(a64Ctx, abi.OffExitMarking, a64B)
+		c.a.B(miss)
+	})
 	o := c.gpr(v.Args[0], a64D)
 	c.a.Load(a64B, o, c.enc.ObjectShape)
 	c.a.MovImm(a64C, uint64(add.From))
@@ -1485,7 +1493,7 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		// As amd64's: an object literal's object, its pool's next.
 		c.a.MovImm(a64B, c.enc.WriteBarrier)
 		c.a.LoadU8(a64B, a64B, 0)
-		c.a.Cbnz(a64B, stub, false)
+		c.markingExit(stub)
 		c.a.MovImm(a64A, uint64(site.Pool))
 		c.a.Load(a64B, a64A, abi.OffPoolCount)
 		c.refillOnEmpty(site.Pool, stub)
@@ -1501,7 +1509,7 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 	callee := v.Args[len(v.Args)-site.Argc-1]
 	c.a.MovImm(a64B, c.enc.WriteBarrier)
 	c.a.LoadU8(a64B, a64B, 0)
-	c.a.Cbnz(a64B, stub, false)
+	c.markingExit(stub)
 	c.a.Load(a64B, a64Ctx, abi.OffLevel)
 	c.a.AddImm(a64B, a64B, 1, true)
 	c.a.Load(a64C, a64Ctx, abi.OffLevelLimit)
@@ -2123,6 +2131,18 @@ func (c *a64Compiler) callGo(v *ssa.Value, op uint64, keep int) {
 			c.a.Load(arm64.Reg(sv.reg), a64Ctx, c.spillDisp(sv.slot))
 		}
 	}
+}
+
+// markingExit is amd64's, the collector's flag in B, stub the call's exit.
+func (c *a64Compiler) markingExit(stub arm64.Label) {
+	marked := c.a.NewLabel()
+	c.a.Cbnz(a64B, marked, false)
+	c.cold = append(c.cold, func() {
+		c.a.Bind(marked)
+		c.a.MovImm(a64B, 1)
+		c.a.Store(a64Ctx, abi.OffExitMarking, a64B)
+		c.a.B(stub)
+	})
 }
 
 // refillOnEmpty, its pool's count in B, is amd64's: stub is the call's
