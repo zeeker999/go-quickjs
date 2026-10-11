@@ -6,8 +6,29 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/compiler"
 	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/parser"
 )
+
+// compiledFunctionForTest is the first function src declares, compiled.
+func compiledFunctionForTest(t *testing.T, src string) *bytecode.Function {
+	t.Helper()
+	prog, err := parser.Parse(src, parser.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	top, err := compiler.Compile(prog, compiler.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range top.Constants {
+		if c.Kind == bytecode.ConstFunction {
+			return c.Fn
+		}
+	}
+	t.Fatal("no function")
+	return nil
+}
 
 func lowerJS(t *testing.T, src string) *Func {
 	t.Helper()
@@ -68,20 +89,7 @@ func TestOptimizeKeepsLoopsUnboxed(t *testing.T) {
 // header, loads n, s and i, not b, which is written after the loop first.
 // What runs from each entry is still the slot IR's (TestBuildMatchesSlotIR).
 func TestEntriesLoadLiveLocals(t *testing.T) {
-	prog, err := parser.Parse(`function f(n){let s=0;for(let i=0;i<n;i++)s=(s+i)|0;let b=s+1;return b}`, parser.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	top, err := compiler.Compile(prog, compiler.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var fn *bytecode.Function
-	for _, c := range top.Constants {
-		if c.Kind == bytecode.ConstFunction {
-			fn = c.Fn
-		}
-	}
+	fn := compiledFunctionForTest(t, `function f(n){let s=0;for(let i=0;i<n;i++)s=(s+i)|0;let b=s+1;return b}`)
 	p, err := jitcompile.LowerSSA(fn)
 	if err != nil {
 		t.Fatal(err)
@@ -115,6 +123,69 @@ func TestEntriesLoadLiveLocals(t *testing.T) {
 	}
 	if loops == 0 {
 		t.Fatalf("no entry but the function's:\n%s", f)
+	}
+}
+
+// sitesFeedback knows every property site, by key alone, and asks for an
+// entry after every exit Go resumes after if all is set (EntryFeedback).
+type sitesFeedback struct{ all bool }
+
+func (sitesFeedback) Property(int) (PropertySite, bool) { return PropertySite{Key: 1}, true }
+func (sitesFeedback) Global(int) (GlobalSite, bool)     { return GlobalSite{}, false }
+func (sitesFeedback) Generic(int) bool                  { return false }
+func (sitesFeedback) EntryGeneric(int) bool             { return false }
+func (sitesFeedback) Inline(int) (InlineSite, bool)     { return InlineSite{}, false }
+func (sitesFeedback) NativeCalls(int) []CallSite        { return nil }
+func (s sitesFeedback) WantsEntry(int) bool             { return s.all }
+
+// Code has an entry at its start, at each loop's header and after what
+// Go is sure to run -- a call, an instruction left to it whole -- but not
+// after a property read it makes natively, whose guard's exit the
+// interpreter goes on from, unless the VM asks for an entry after every
+// exit (EntryFeedback): then after the reads too. A read left to Go whole
+// has one either way.
+func TestEntriesAfterGuards(t *testing.T) {
+	fn := compiledFunctionForTest(t, `function f(o,n){let s=0;for(let i=0;i<n;i++){s=(s+o.x)|0;g()}return s}`)
+	p, err := jitcompile.LowerSSA(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := func(fb Feedback) map[int]bool {
+		f, err := BuildWith(p, fb)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Check(f); err != nil {
+			t.Fatal(err)
+		}
+		at := map[int]bool{}
+		for _, e := range f.Entries {
+			at[e.PC] = true
+		}
+		return at
+	}
+	var read, call, header int = -1, -1, -1
+	for pc, in := range p.Code {
+		switch {
+		case in.Op == ir.PropertyRead:
+			read = pc
+		case in.Op == ir.Host:
+			call = pc
+		case (in.Op == ir.Jump || in.Op == ir.Branch) && in.Target <= pc:
+			header = in.Target
+		}
+	}
+	if read < 0 || call < 0 || header < 0 {
+		t.Fatalf("read %d, call %d, header %d", read, call, header)
+	}
+	for _, c := range []struct {
+		fb   Feedback
+		read bool
+	}{{sitesFeedback{}, false}, {sitesFeedback{all: true}, true}, {nil, true}} {
+		at := entries(c.fb)
+		if !at[0] || !at[header] || !at[call+1] || at[read+1] != c.read {
+			t.Errorf("feedback %#v: entries %v; want 0, %d, %d and, %v, %d", c.fb, at, header, call+1, c.read, read+1)
+		}
 	}
 }
 

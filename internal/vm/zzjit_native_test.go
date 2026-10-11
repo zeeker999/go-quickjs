@@ -8589,3 +8589,77 @@ func TestJITSSATypeOf(t *testing.T) {
 		}
 	}
 }
+
+// A guard's exit Go has no entry to go on natively after leaves the rest
+// of its loop's iteration to the interpreter, which goes on natively at the
+// header, in the same run (jitGoOn): one read of a primitive in a
+// thousand iterations leaves once, and the loop's stretches go on. Code
+// that leaves so too often is compiled with an entry after every guard
+// (allEntries), and Go goes on natively after each exit then.
+func TestJITSSAGoesOnNatively(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `var obj={x:2};
+		function once(n){let t=0;for(let i=0;i<n;i++){const o=i===n>>1?1:obj;t=(t+(o.x|0))|0}return t}
+		function every(n){let t=0;for(let i=0;i<n;i++){const o=i&1?1:obj;t=(t+(o.x|0))|0}return t}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry := func(name string) *jitEntry {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		return r.jit.hint(cl.hint())
+	}
+	checked := 0
+	for i := 0; i < 4; i++ {
+		for _, src := range []string{`once(1000)`, `every(1000)`} {
+			wv, err := want.Run(compileForTest(t, src))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var before jitSSAStats
+			if e := entry("once"); e != nil {
+				before = e.ssaStats
+			}
+			interpreted, wentOn := r.jit.interpreted, r.jit.wentOn
+			gv, err := r.Run(compileForTest(t, src))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := gv.Number(), wv.Number(); got != want {
+				t.Fatalf("round %d, %s: got %v, interpreter %v", i, src, got, want)
+			}
+			e := entry("once")
+			if src != `once(1000)` || e == nil || e.ssa == nil || e.allEntries {
+				continue
+			}
+			checked++
+			// The read of 1 left once, the iteration went on in the
+			// interpreter, and the loop natively: a stretch of its own.
+			if n := e.ssaStats.hosts - before.hosts; n != 1 {
+				t.Errorf("round %d: once left native code %d times", i, n)
+			}
+			if n := e.ssaStats.entries - before.entries; n < 2 {
+				t.Errorf("round %d: once ran %d stretches; the loop did not go on natively", i, n)
+			}
+			if n, on := r.jit.interpreted-interpreted, r.jit.wentOn-wentOn; n != 1 || on != 1 {
+				t.Errorf("round %d: %d runs of the interpreter, %d gone on from natively in the same run", i, n, on)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("once was never compiled without every entry")
+	}
+	if e := entry("every"); e == nil || e.ssa == nil || !e.allEntries || e.entrySlow {
+		t.Fatalf("every is not compiled with every entry: %+v", e)
+	}
+	if e := entry("once"); e == nil || e.ssa == nil || e.entrySlow {
+		t.Fatalf("once did not stay native: %+v", e)
+	}
+}

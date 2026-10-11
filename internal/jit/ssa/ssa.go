@@ -4,9 +4,11 @@
 //
 // A function has several entries: the function's start, each loop header
 // (where a poll returns and on-stack replacement enters), and the instruction
-// after each host exit (where Go resumes it after running that instruction).
-// Every exit names the exact interpreter state to resume, so deoptimization
-// stays exact by construction, as it is in the slot IR.
+// after each instruction left to Go whole and each call (where Go resumes it
+// after running that instruction). After a guard's exit to Go the
+// interpreter goes on, unless the VM asks for an entry after every one
+// (EntryFeedback). Every exit names the exact interpreter state to resume,
+// so deoptimization stays exact by construction, as it is in the slot IR.
 //
 // Values are typed. A slot holds a Tagged value -- an ir.Value, a kind and
 // its bits -- and arithmetic works on unboxed Float64, Int32 and Bool values,

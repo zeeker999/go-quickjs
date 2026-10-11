@@ -231,6 +231,11 @@ type jitEntry struct {
 	polyReopt   bool
 	polyPending bool
 	polySettled uint8
+	// entryMisses counts the times Go went on in the interpreter, having
+	// found no entry, since the code was compiled; allEntries marks code
+	// to be compiled with every one (jitGoOn).
+	entryMisses uint8
+	allEntries  bool
 	// nativeEntry is the address of the code's entry at its start, which
 	// native callers jump to (mir's native calls), or 0 while there is none
 	// they may: no code, or code that leaves too often (notNative). A
@@ -385,7 +390,13 @@ type jitState struct {
 	// inlinable is whether each function may be inlined (jitInlinable).
 	inlinable   map[weak.Pointer[bytecode.Function]]bool
 	interpreted uint64
-	stressExits uint64
+	// goOn is the frame the interpreter runs for jitGoOn, until a loop's
+	// header Go goes on natively at, goOnPC with goOnDepth operands;
+	// wentOn counts the times it did.
+	goOn              *frame
+	goOnPC, goOnDepth int
+	wentOn            uint64
+	stressExits       uint64
 	// ssaCtxs are the contexts native code runs in, one for each runSSA
 	// running and each native call (abi.Context's Level), ctxTop the
 	// first free; ssaCtx is the one Go entered last, whose exit it reads.
@@ -931,6 +942,14 @@ func (r *Runtime) tryJITLoop(f *frame, pc uint32, sp int, fullBudget bool) (Valu
 		return Undefined, nil, false
 	}
 	f.cl.jitCalls = r.jitCallThreshold
+	if s := r.jit; s != nil && s.goOn == f {
+		// The frame whose native code Go goes on in, at an entry it has:
+		// in that run, not a run of its own (jitGoOn).
+		if e := s.hint(f.cl.hint()); e != nil && e.ssa != nil && !e.entrySlow && e.ssa.HasEntry(int(pc)) {
+			s.goOnPC, s.goOnDepth = int(pc), sp-f.base
+			return Undefined, errGoOnNatively, true
+		}
+	}
 	return r.tryJITAt(f, int(pc), sp-f.base, true)
 }
 

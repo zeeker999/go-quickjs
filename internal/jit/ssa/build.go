@@ -599,6 +599,20 @@ func referenceReads(p *ir.Program, fb Feedback) *ir.Program {
 	return q
 }
 
+// EntryFeedback is Feedback that may ask for an entry at a PC after an
+// exit Go resumes after -- a guard's, which code is otherwise compiled
+// with no entry after (plan): the VM asks once Go has had to go on in the
+// interpreter too often, having found none.
+type EntryFeedback interface {
+	WantsEntry(pc int) bool
+}
+
+// wantsEntry reports whether the VM asks for an entry at pc (EntryFeedback).
+func (b *builder) wantsEntry(pc int) bool {
+	f, ok := b.fb.(EntryFeedback)
+	return ok && pc < len(b.p.Code) && f.WantsEntry(pc)
+}
+
 // generic reports an arithmetic operation or a comparison at pc whose
 // speculation failed (Feedback's Generic): what are not numbers go to Go,
 // which resumes after it, as they do for == and %.
@@ -1149,13 +1163,30 @@ func (b *builder) plan() error {
 			b.inlined[pc] = fr
 		}
 	}
+	// Go goes on natively after what it ran where it is sure to run it:
+	// an instruction left to Go whole; a call, which leaves while the
+	// collector marks; and an element's write, which leaves past the
+	// elements, as an array that grows is written. Anywhere else an exit
+	// is a guard's, which seldom fails, and the interpreter runs on from
+	// there, as from V8's deoptimizations: an entry is a block whose loads
+	// merge with what native code computed, in phis, and in shadows, at
+	// every merge after it, and entries had been most of what a compile
+	// made -- a guard's after nearly every instruction. Code Go has had to
+	// go on without one too often is compiled with them (EntryFeedback).
+	resumes := func(pc int) bool {
+		switch op := p.Code[pc].Op; {
+		case b.host(pc), op == ir.ObjectLiteral, op == ir.ArrayLiteral, op == ir.StringAdd, op == ir.ArrayWrite:
+			return true
+		}
+		return b.wantsEntry(pc + 1)
+	}
 	for pc, in := range p.Code {
 		if !reachable(p, pc) {
 			continue
 		}
 		switch in.Op {
 		case ir.ArrayRead:
-			if in.Reference {
+			if in.Reference && resumes(pc) {
 				// Go reads what native code does not, and resumes after it.
 				entries[pc+1] = true
 			}
@@ -1175,11 +1206,11 @@ func (b *builder) plan() error {
 			// it. A fixed global's check only deoptimizes: the binding can
 			// never move, so it never fails, and what follows sees its
 			// constant rather than a merge with a slot loaded at an entry.
-			if site, ok := b.global(pc); !ok || !site.Fixed {
+			if site, ok := b.global(pc); (!ok || !site.Fixed) && resumes(pc) {
 				entries[pc+1] = true
 			}
 		case ir.Binary:
-			if in.Operator == ir.Eq || in.Operator == ir.Ne || in.Operator == ir.Mod || b.generic(pc) {
+			if (in.Operator == ir.Eq || in.Operator == ir.Ne || in.Operator == ir.Mod || b.generic(pc)) && resumes(pc) {
 				// A comparison or remainder of non-numbers exits to Go, which
 				// resumes after it.
 				entries[pc+1] = true
@@ -1195,10 +1226,13 @@ func (b *builder) plan() error {
 				entries[in.Target] = true
 			}
 			if in.Operator == ir.Eq || in.Operator == ir.Ne || b.generic(pc) {
-				entries[pc+1], entries[in.Target] = true, true
+				entries[pc+1] = entries[pc+1] || b.wantsEntry(pc+1)
+				entries[in.Target] = entries[in.Target] || b.wantsEntry(in.Target)
 			}
 		case ir.Host, ir.Call:
-			entries[pc+1] = true
+			if resumes(pc) {
+				entries[pc+1] = true
+			}
 		default:
 			return fmt.Errorf("%w: %d at pc %d", ErrUnsupported, in.Op, pc)
 		}

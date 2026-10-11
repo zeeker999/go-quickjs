@@ -657,7 +657,14 @@ type layout struct {
 	// generic and genericEntries are the sites and entries whose
 	// speculation failed before, by PC (ssa.Feedback's Generic).
 	generic, genericEntries map[int]bool
+	// entries has every exit Go resumes after come back at an entry
+	// (ssa.EntryFeedback), as code that met too many without is
+	// compiled; otherwise only calls and what is left to Go whole do.
+	entries bool
 }
+
+// WantsEntry is ssa.EntryFeedback's.
+func (l layout) WantsEntry(int) bool { return l.entries }
 
 // Inline is ssa.Feedback's: the harness inlines nothing.
 func (l layout) Inline(int) (ssa.InlineSite, bool) { return ssa.InlineSite{}, false }
@@ -809,7 +816,7 @@ func ssaTestProgram(r *rand.Rand) (*ir.Program, layout) {
 			genericEntries[pc] = true
 		}
 	}
-	return p, layout{frameLocals, this, sites, globals, generic, genericEntries}
+	return p, layout{frameLocals, this, sites, globals, generic, genericEntries, g.IntN(2) == 0}
 }
 
 var exitNames = map[uint64]ir.ExitKind{abi.ExitReturn: ir.Returned, abi.ExitDeopt: ir.GuardExit,
@@ -1224,7 +1231,7 @@ func TestSSANativeCapturedShadow(t *testing.T) {
 	for pc := range p.Maps {
 		p.Maps[pc].PC = uint32(pc)
 	}
-	c, err := compileNative(p, layout{3, -1, nil, nil, nil, nil})
+	c, err := compileNative(p, layout{3, -1, nil, nil, nil, nil, true})
 	if err != nil || c == nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -1267,7 +1274,7 @@ func TestSSANativeStrings(t *testing.T) {
 	for pc := range p.Maps {
 		p.Maps[pc].PC = uint32(pc)
 	}
-	c, err := compileNative(p, layout{4, -1, nil, nil, nil, nil})
+	c, err := compileNative(p, layout{4, -1, nil, nil, nil, nil, true})
 	if err != nil || c == nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -1330,7 +1337,7 @@ func TestSSANativeEquality(t *testing.T) {
 		for pc := range p.Maps {
 			p.Maps[pc].PC = uint32(pc)
 		}
-		c, err := compileNative(p, layout{3, -1, nil, nil, nil, nil})
+		c, err := compileNative(p, layout{3, -1, nil, nil, nil, nil, true})
 		if err != nil || c == nil {
 			t.Fatalf("compile: %v", err)
 		}
@@ -1435,7 +1442,7 @@ func TestSSANativeElementCells(t *testing.T) {
 	for pc := range p.Maps {
 		p.Maps[pc].PC = uint32(pc)
 	}
-	c, err := compileNative(p, layout{3, -1, nil, nil, nil, nil})
+	c, err := compileNative(p, layout{3, -1, nil, nil, nil, nil, true})
 	if err != nil || c == nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -1473,7 +1480,7 @@ func TestSSANativeRemainder(t *testing.T) {
 	for pc := range p.Maps {
 		p.Maps[pc].PC = uint32(pc)
 	}
-	c, err := compileNative(p, layout{3, -1, nil, nil, nil, nil})
+	c, err := compileNative(p, layout{3, -1, nil, nil, nil, nil, true})
 	if err != nil || c == nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -1512,7 +1519,7 @@ func TestSSANativeRemainder(t *testing.T) {
 		{Op: ir.Host},
 		{Op: ir.Return, Left: ir.Slot(2)},
 	}, Maps: []ir.StateMap{{PC: 0}, {PC: 1, Depth: 1}, {PC: 2, Depth: 1}}}
-	d, err := compileNative(q, layout{2, -1, nil, nil, nil, nil})
+	d, err := compileNative(q, layout{2, -1, nil, nil, nil, nil, true})
 	if err != nil || d == nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -1559,7 +1566,7 @@ func TestSSANativeFromJavaScript(t *testing.T) {
 			if err != nil {
 				continue
 			}
-			if checkNative(t, r, p, layout{c.Fn.LocalCount, -1, nil, nil, nil, nil}) {
+			if checkNative(t, r, p, layout{c.Fn.LocalCount, -1, nil, nil, nil, nil, true}) {
 				compiled++
 			}
 		}
@@ -1577,7 +1584,7 @@ func BenchmarkSSARoundTrip(b *testing.B) {
 		b.Run(fmt.Sprintf("%d-locals", locals), func(b *testing.B) {
 			p := &ir.Program{Locals: locals, Code: []ir.Instruction{{Op: ir.Host}, {Op: ir.Return, Left: ir.Slot(0)}},
 				Maps: []ir.StateMap{{PC: 0}, {PC: 1}}}
-			c, err := compileNative(p, layout{locals, -1, nil, nil, nil, nil})
+			c, err := compileNative(p, layout{locals, -1, nil, nil, nil, nil, true})
 			if err != nil || c == nil {
 				b.Fatal(err)
 			}
@@ -1630,7 +1637,7 @@ func TestSSANativeStores(t *testing.T) {
 		{"store, read", program(write, read(0)), "stored"},
 		{"read another, store, use", program(read(2), write), "other"},
 	} {
-		c, err := compileNative(tc.p, layout{4, -1, map[int]site{0: cached, 1: cached}, nil, nil, nil})
+		c, err := compileNative(tc.p, layout{4, -1, map[int]site{0: cached, 1: cached}, nil, nil, nil, true})
 		if err != nil || c == nil {
 			t.Fatalf("%s: compile: %v", tc.name, err)
 		}
@@ -1701,7 +1708,7 @@ func TestSSANativeStoresPastTheKeeps(t *testing.T) {
 	for pc := range p.Maps {
 		p.Maps[pc].PC = uint32(pc)
 	}
-	c, err := compileNative(p, layout{p.Locals, -1, sites, nil, nil, nil})
+	c, err := compileNative(p, layout{p.Locals, -1, sites, nil, nil, nil, true})
 	if err != nil || c == nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -1770,7 +1777,7 @@ func TestSSAKeepsManyValues(t *testing.T) {
 		for pc := range p.Maps {
 			p.Maps[pc].PC = uint32(pc)
 		}
-		c, err := compileNative(p, layout{p.Locals, -1, sites, nil, nil, nil})
+		c, err := compileNative(p, layout{p.Locals, -1, sites, nil, nil, nil, true})
 		if err != nil || c == nil {
 			t.Fatalf("%d reads: compile: %v", tc.reads, err)
 		}
