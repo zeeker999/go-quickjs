@@ -361,16 +361,16 @@ func (h *Heap) holder(o *Object, v *Value) (*Object, int) {
 	if v.Holders == nil && v.Cases == nil {
 		return o, o.property(v)
 	}
-	var first [2]Holder
+	var first HolderChain
 	if v.Holders != nil {
 		first = *v.Holders
 	}
-	cases := append([]PropertyCase{{Shape: uintptr(v.Const.Bits), Index: int32(v.Index), Holders: first}}, v.Cases...)
+	cases := append([]PropertyCase{{Shape: uintptr(v.Const.Bits), Index: int32(v.Index), Holders: first.Holders, More: first.More}}, v.Cases...)
 	for _, c := range cases {
 		if o.Shape != c.Shape {
 			continue
 		}
-		for _, p := range c.Holders {
+		for _, p := range append(c.Holders[:], c.More...) {
 			if p.Object == 0 {
 				break
 			}

@@ -363,7 +363,11 @@ type PropertySite struct {
 	Shape   uintptr
 	Index   int32
 	Holders [2]Holder
-	Cases   []PropertyCase
+	// More are the holders past Holders', for a chain deeper than the
+	// VM's caches hold: a method a class two levels below the one that
+	// has it inherits, as DeltaBlue's constraints' addConstraint.
+	More  []Holder
+	Cases []PropertyCase
 	// Add, for a write whose cache adds the property, says how; Shape is
 	// then 0. Adds are the adds a write met objects of other shapes take,
 	// as V8's polymorphic stores keep a transition for each map; a write's
@@ -415,6 +419,15 @@ type PropertyCase struct {
 	Shape   uintptr
 	Index   int32
 	Holders [2]Holder
+	// More are the holders past Holders' (PropertySite's More).
+	More []Holder
+}
+
+// HolderChain is the prototypes a read's site found its property on
+// (PropertySite's Holders and More), which the read checks.
+type HolderChain struct {
+	Holders [2]Holder
+	More    []Holder
 }
 
 // Holder is a prototype a property read was answered by, or passed through,
@@ -1016,8 +1029,7 @@ func (b *builder) instanceOfOp(blk *Block, pc int, k InstanceOfSite, guard func(
 		cell := guard(OpPropCell, Source, ir.HostExit, ctor)
 		cell.Const, cell.Index, cell.Key = ir.Value{Bits: uint64(site.Shape)}, int(site.Index), site.Key
 		if site.Holders[0].Object != 0 {
-			cell.Holders = new([2]Holder)
-			*cell.Holders = site.Holders
+			cell.Holders = &HolderChain{Holders: site.Holders, More: site.More}
 		}
 		v := f.newValue(blk, OpLoadCell, Tagged, cell)
 		v.Shadow = cell
@@ -1958,10 +1970,9 @@ func (b *builder) instruction(blk *Block, pc int) {
 		// A read the receiver's prototypes answered checks them too; a
 		// write, which makes a property of the receiver's own, never meets
 		// one.
-		var holders *[2]Holder
+		var holders *HolderChain
 		if site.Holders[0].Object != 0 && site.Shape != 0 && in.Op != ir.PropertyWrite {
-			holders = new([2]Holder)
-			*holders = site.Holders
+			holders = &HolderChain{Holders: site.Holders, More: site.More}
 		} else if site.Holders[0].Object != 0 {
 			site.Shape = 0
 		}

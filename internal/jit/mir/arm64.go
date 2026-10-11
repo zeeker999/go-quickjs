@@ -2306,11 +2306,11 @@ func (c *a64Compiler) keep(v *ssa.Value) {
 // for whichever of the shapes it met the receiver's is, into A, as amd64's
 // does.
 func (c *a64Compiler) holder(v *ssa.Value, guard func(arm64.Cond)) {
-	var first [2]ssa.Holder
+	var first ssa.HolderChain
 	if v.Holders != nil {
 		first = *v.Holders
 	}
-	cases := append([]ssa.PropertyCase{{Shape: uintptr(v.Const.Bits), Index: int32(v.Index), Holders: first}}, v.Cases...)
+	cases := append([]ssa.PropertyCase{{Shape: uintptr(v.Const.Bits), Index: int32(v.Index), Holders: first.Holders, More: first.More}}, v.Cases...)
 	// As amd64's: a receiver of a shape not among the cases has its own
 	// table searched.
 	done := c.a.NewLabel()
@@ -2334,7 +2334,13 @@ func (c *a64Compiler) holder(v *ssa.Value, guard func(arm64.Cond)) {
 			c.a.MovRR(a64A, p)
 		}
 		c.a.Load(a64B, a64A, c.enc.ObjectProto)
-		for _, h := range k.Holders {
+		for j := 0; j < len(k.Holders)+len(k.More); j++ {
+			var h ssa.Holder
+			if j < len(k.Holders) {
+				h = k.Holders[j]
+			} else {
+				h = k.More[j-len(k.Holders)]
+			}
 			if h.Object == 0 {
 				break
 			}

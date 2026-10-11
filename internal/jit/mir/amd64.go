@@ -2437,11 +2437,11 @@ func (c *compiler) keep(v *ssa.Value) {
 // several shapes, as V8's polymorphic inline caches do, for whichever of
 // them the receiver's is (ssa.PropertyCase). Any other shape fails.
 func (c *compiler) holder(v *ssa.Value, guard func(amd64.Cond)) {
-	var first [2]ssa.Holder
+	var first ssa.HolderChain
 	if v.Holders != nil {
 		first = *v.Holders
 	}
-	cases := append([]ssa.PropertyCase{{Shape: uintptr(v.Const.Bits), Index: int32(v.Index), Holders: first}}, v.Cases...)
+	cases := append([]ssa.PropertyCase{{Shape: uintptr(v.Const.Bits), Index: int32(v.Index), Holders: first.Holders, More: first.More}}, v.Cases...)
 	// A receiver of a shape not among the cases has its own table searched
 	// (scan), as V8's megamorphic loads look further rather than
 	// deoptimize, and leaves only if the property is not its own: RayTrace's
@@ -2468,7 +2468,15 @@ func (c *compiler) holder(v *ssa.Value, guard func(amd64.Cond)) {
 			c.a.MovRR(scratchA, p)
 		}
 		c.a.Load(scratchB, scratchA, c.enc.ObjectProto)
-		for _, h := range k.Holders {
+		// The holders, the prototypes from the receiver's on: those a cache
+		// holds, then those past them (More).
+		for j := 0; j < len(k.Holders)+len(k.More); j++ {
+			var h ssa.Holder
+			if j < len(k.Holders) {
+				h = k.Holders[j]
+			} else {
+				h = k.More[j-len(k.Holders)]
+			}
 			if h.Object == 0 {
 				break
 			}

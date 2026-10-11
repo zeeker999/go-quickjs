@@ -651,6 +651,10 @@ func (r *Runtime) fillPropCache(c *propCache, o *Object, key Atom, accessors boo
 			return
 		}
 		if depth == 2 || h.proto == nil {
+			if depth == 2 && h.proto != nil && jitBuilt && r.jitOn() {
+				// Deeper than the cache holds: noted for the JIT's code.
+				r.jitNoteDeepRead(c, o, key)
+			}
 			return
 		}
 		h = h.proto
@@ -805,7 +809,14 @@ func (r *Runtime) fillStoreCache(c *propCache, o *Object, before *shape, key Ato
 	var up [2]*Object
 	p := o.proto
 	for depth := 0; p != nil; depth++ {
-		if depth == 2 || r.ensureProtoShape(p) == nil || !shapeClass(p.class) || synthesized(p.class, key) || !passesWrite(p, key) {
+		if depth == 2 {
+			if jitBuilt && r.jitOn() {
+				// Deeper than the cache holds: noted for the JIT's code.
+				jitNoteDeepAdd(c, before, next, o.proto)
+			}
+			return
+		}
+		if r.ensureProtoShape(p) == nil || !shapeClass(p.class) || synthesized(p.class, key) || !passesWrite(p, key) {
 			return
 		}
 		up[depth] = p

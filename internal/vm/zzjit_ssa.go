@@ -133,6 +133,8 @@ type jitFedSite struct {
 type jitPolySite struct {
 	pc    uint32
 	cases []propCache
+	// reads are the reads' cases past what a cache holds (jitDeepRead).
+	reads []jitDeepRead
 	// adds, for a write, are additions along chains deeper than a cache
 	// holds (jitDeepAdd).
 	adds []jitDeepAdd
@@ -156,14 +158,19 @@ const jitAddDepth = 6
 // prototypes up to jitAddDepth that none intercepts, as fillStoreCache
 // requires of a cache's -- or false.
 func (r *Runtime) jitDeepAddOf(o *Object, before *shape, key Atom) (jitDeepAdd, bool) {
+	return r.jitDeepAddFrom(before, o.shape, o.proto, key)
+}
+
+// jitDeepAddFrom is jitDeepAddOf's addition of key, from shape before to
+// next, to an object whose prototype is proto, with the chain as it is now.
+func (r *Runtime) jitDeepAddFrom(before, next *shape, proto *Object, key Atom) (jitDeepAdd, bool) {
 	const plain = propAccessor | propPrivate | propDeleted | propUninit
-	next := o.shape
 	if before == nil || before == noShape || before.unique || next == nil || next.unique || next.parent != before || next.key != key ||
 		next.flags&(plain|propWritable) != propWritable {
 		return jitDeepAdd{}, false
 	}
 	a := jitDeepAdd{from: before, next: next}
-	for p := o.proto; p != nil; p = p.proto {
+	for p := proto; p != nil; p = p.proto {
 		if len(a.up) == jitAddDepth || r.ensureProtoShape(p) == nil || !shapeClass(p.class) || synthesized(p.class, key) || !passesWrite(p, key) {
 			return jitDeepAdd{}, false
 		}
@@ -243,18 +250,30 @@ func (r *Runtime) jitPolySeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 	}
 	var c propCache
 	r.fillPropCache(&c, recv.Object(), f.cl.names[in.A], false)
-	if c.shape == nil || c.shape == noShape || c.getter || c.idx < 0 {
+	if c.shape == nil {
+		// One a cache cannot hold, found past its two prototypes.
+		if d, ok := r.jitDeepReadOf(recv.Object(), f.cl.names[in.A]); ok && jitAddDeepRead(jitPolySiteAt(e, pc), d) {
+			e.polyPending, e.polySettled = true, 0
+		}
 		return
 	}
+	if c.shape == noShape || c.getter || c.idx < 0 {
+		return
+	}
+	if !jitAddReadCase(jitPolySiteAt(e, pc), c) {
+		return
+	}
+	e.polyPending, e.polySettled = true, 0
+}
+
+// jitPolySiteAt is e's site at pc (jitEntry.poly), made if it has none.
+func jitPolySiteAt(e *jitEntry, pc int) *jitPolySite {
 	i := slices.IndexFunc(e.poly, func(p jitPolySite) bool { return int(p.pc) == pc })
 	if i < 0 {
 		e.poly = append(e.poly, jitPolySite{pc: uint32(pc)})
 		i = len(e.poly) - 1
 	}
-	if !jitAddReadCase(&e.poly[i], c) {
-		return
-	}
-	e.polyPending, e.polySettled = true, 0
+	return &e.poly[i]
 }
 
 // jitAddReadCase adds c to a read's cases (jitPolySite), up to
@@ -298,6 +317,128 @@ type jitCacheSeen = *propSeen
 type propSeen struct {
 	n       uint8
 	entries [3]propCache
+	// deep are the additions the write made along prototype chains deeper
+	// than a cache holds (jitNoteDeepAdd), up to jitPropertyCases; reads,
+	// the properties a read found so (jitNoteDeepRead).
+	deep  []jitDeepSeen
+	reads []jitDeepRead
+}
+
+// jitDeepRead is a read of a plain data property an object of shape found
+// on a prototype further up than a cache holds (jitDeepReadOf): at idx in
+// the table of the last of up, the prototypes from the object's on, each
+// of the shape in shapes when it was found, which the code checks.
+type jitDeepRead struct {
+	shape  *shape
+	idx    int32
+	up     []*Object
+	shapes []*shape
+}
+
+// jitDeepReadOf is the read of key from o, if o's prototype chain answers
+// it past the two prototypes a cache holds, up to jitAddDepth, with a
+// plain data property, each object on the way of a class with shapes that
+// does not answer the key itself, as fillPropCache requires of a cache's
+// -- or false.
+func (r *Runtime) jitDeepReadOf(o *Object, key Atom) (jitDeepRead, bool) {
+	if key.IsIndex() || o.shape == nil || o.shape == noShape || !shapeClass(o.class) || synthesized(o.class, key) || o.findOwn(key) >= 0 {
+		return jitDeepRead{}, false
+	}
+	d := jitDeepRead{shape: o.shape}
+	for p := o.proto; p != nil; p = p.proto {
+		if len(d.up) == jitAddDepth || r.ensureProtoShape(p) == nil || !shapeClass(p.class) || synthesized(p.class, key) {
+			return jitDeepRead{}, false
+		}
+		d.up, d.shapes = append(d.up, p), append(d.shapes, p.shape)
+		if i := p.findOwn(key); i >= 0 {
+			if p.props[i].flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 || len(d.up) <= 2 {
+				return jitDeepRead{}, false
+			}
+			d.idx = int32(i)
+			remember(d.shape)
+			for _, s := range d.shapes {
+				remember(s)
+			}
+			return d, true
+		}
+	}
+	return jitDeepRead{}, false
+}
+
+// jitNoteDeepRead notes, in c's entries seen, the read of key from o a
+// cache could not remember, its prototype chain deeper than one holds, if
+// a prototype answers it (jitDeepReadOf): a method a class two levels
+// below the one that has it inherits, as DeltaBlue's StayConstraint does
+// isInput and addConstraint. Code compiled for the site reads it natively
+// from the first (jitFeedback.Property); before, it left native code at
+// every such read, learning nothing, until its callers stopped calling it
+// natively.
+func (r *Runtime) jitNoteDeepRead(c *propCache, o *Object, key Atom) {
+	s := c.seen
+	if s != nil {
+		for i := range s.reads {
+			if s.reads[i].shape == o.shape {
+				return
+			}
+		}
+		if len(s.reads) >= jitPropertyCases {
+			return
+		}
+	}
+	d, ok := r.jitDeepReadOf(o, key)
+	if !ok {
+		return
+	}
+	if s == nil {
+		s = &propSeen{}
+		c.seen = s
+	}
+	s.reads = append(s.reads, d)
+}
+
+// jitAddDeepRead adds d to a read's deep cases (jitPolySite.reads), up to
+// jitPropertyCases with its others, and reports whether it did.
+func jitAddDeepRead(p *jitPolySite, d jitDeepRead) bool {
+	if len(p.cases)+len(p.reads) >= jitPropertyCases || slices.ContainsFunc(p.reads, func(k jitDeepRead) bool { return k.shape == d.shape }) ||
+		slices.ContainsFunc(p.cases, func(k propCache) bool { return k.shape == d.shape }) {
+		return false
+	}
+	p.reads = append(p.reads, d)
+	return true
+}
+
+// jitDeepSeen is an addition a write made, from shape from to next, to an
+// object whose prototype was proto: what jitDeepAddOf finds of it, the
+// chain as it is when the code is compiled (jitDeepAddFrom).
+type jitDeepSeen struct {
+	from, next *shape
+	proto      *Object
+}
+
+// jitNoteDeepAdd notes, in c's entries seen, an addition a write made to an
+// object whose prototype chain is deeper than a cache holds, which the
+// cache cannot remember -- a constructor's this.x = v in a class two levels
+// below another, as DeltaBlue's constraints' are -- for code compiled for
+// the site to make it natively from the first (jitSeenFeedback). Before,
+// native code learned such additions one exit and one compile at a time:
+// a constructor's at each of its sites in turn, for each of its receivers'
+// shapes.
+func jitNoteDeepAdd(c *propCache, from, next *shape, proto *Object) {
+	s := c.seen
+	if s != nil {
+		for _, d := range s.deep {
+			if d.from == from {
+				return
+			}
+		}
+		if len(s.deep) >= jitPropertyCases {
+			return
+		}
+	} else {
+		s = &propSeen{}
+		c.seen = s
+	}
+	s.deep = append(s.deep, jitDeepSeen{from: remember(from), next: remember(next), proto: proto})
 }
 
 // jitNoteSeen keeps old, what a cache remembered before it remembers n,
@@ -363,6 +504,32 @@ func (r *Runtime) jitSeenFeedback(cl *closure, e *jitEntry) {
 				continue
 			}
 			p.cases = append(p.cases, c)
+		}
+		if !write {
+			// The reads a cache could not hold, past its two prototypes.
+			for _, d := range seen.reads {
+				jitAddDeepRead(jitPolySiteAt(e, pc), d)
+			}
+			continue
+		}
+		if len(seen.deep) == 0 || int(in.A) >= len(cl.names) {
+			continue
+		}
+		// The additions along chains deeper than a cache holds, as the chain
+		// is now; one that changed since is left to Go.
+		i := slices.IndexFunc(e.poly, func(p jitPolySite) bool { return int(p.pc) == pc })
+		if i < 0 {
+			e.poly = append(e.poly, jitPolySite{pc: uint32(pc)})
+			i = len(e.poly) - 1
+		}
+		p := &e.poly[i]
+		for _, d := range seen.deep {
+			if len(p.cases)+len(p.adds) >= jitPropertyCases || slices.ContainsFunc(p.adds, func(k jitDeepAdd) bool { return k.from == d.from }) {
+				continue
+			}
+			if a, ok := r.jitDeepAddFrom(d.from, d.next, d.proto, cl.names[in.A]); ok {
+				p.adds = append(p.adds, a)
+			}
 		}
 	}
 }
@@ -2904,6 +3071,19 @@ func (fb *jitFeedback) Global(pc int) (ssa.GlobalSite, bool) {
 
 func (fb *jitFeedback) Property(pc int) (ssa.PropertySite, bool) {
 	site, ok := fb.property(pc)
+	deep := false
+	if ok && fb.fwd == nil && site.Shape == 0 && site.Holders[0].Object == 0 {
+		// A read its cache could not hold, the property past the two
+		// prototypes it holds: compiled for the first of the shapes it met,
+		// the others its cases.
+		if in := fb.fn.Code[pc]; in.Op != bytecode.OpSetProp && int(in.B) < len(fb.cl.ic) && (fb.cl.ic[in.B].shape == nil || fb.cl.ic[in.B].shape == noShape) {
+			if cases := fb.deepCases(pc); len(cases) != 0 {
+				k := cases[0]
+				site.Shape, site.Index, site.Holders, site.More, site.Cases = k.Shape, k.Index, k.Holders, k.More, cases[1:]
+				deep = true
+			}
+		}
+	}
 	if ok && fb.root != nil && fb.fwd == nil && site.Shape == 0 && site.Add == nil && site.Holders[0].Object == 0 &&
 		int(fb.fn.Code[pc].B) < len(fb.cl.ic) && fb.cl.ic[fb.fn.Code[pc].B].fills < maxCacheFills {
 		// An inlined callee's site its cache knew nothing of (jitInlineFed).
@@ -2913,7 +3093,7 @@ func (fb *jitFeedback) Property(pc int) (ssa.PropertySite, bool) {
 	if ok && fb.e != nil && fb.root == nil {
 		if fb.fn.Code[pc].Op == bytecode.OpSetProp {
 			site.Cases, site.Adds = fb.writeCases(pc, site)
-		} else if site.Shape != 0 {
+		} else if site.Shape != 0 && !deep {
 			site.Cases = fb.cases(pc, site.Shape)
 		}
 	}
@@ -2928,7 +3108,7 @@ func (fb *jitFeedback) Property(pc int) (ssa.PropertySite, bool) {
 		if c := fb.cl.ic[fb.fn.Code[pc].B].shape; c != noShape {
 			known = uintptr(unsafe.Pointer(c))
 		}
-		if known == 0 {
+		if known == 0 && !deep {
 			known = site.Shape
 		}
 		fb.fed = append(fb.fed, jitFedSite{pc: uint32(pc), shape: known})
@@ -3016,6 +3196,51 @@ func (fb *jitFeedback) cases(pc int, first uintptr) []ssa.PropertyCase {
 				fb.shapes, fb.holders = append(fb.shapes, h.s), append(fb.holders, h.p)
 			}
 			cases = append(cases, k)
+		}
+		for i := range p.reads {
+			if d := &p.reads[i]; uintptr(unsafe.Pointer(d.shape)) != first {
+				cases = append(cases, fb.deepCase(d))
+			}
+		}
+	}
+	return cases
+}
+
+// deepCase is a read's case past what a cache holds (jitDeepRead), whose
+// shapes and prototypes the code keeps.
+func (fb *jitFeedback) deepCase(d *jitDeepRead) ssa.PropertyCase {
+	k := ssa.PropertyCase{Shape: uintptr(unsafe.Pointer(d.shape)), Index: d.idx}
+	keep := fb.keep()
+	keep.shapes = append(keep.shapes, d.shape)
+	for i, up := range d.up {
+		h := ssa.Holder{Object: uintptr(unsafe.Pointer(up)), Shape: uintptr(unsafe.Pointer(d.shapes[i]))}
+		keep.shapes, keep.holders = append(keep.shapes, d.shapes[i]), append(keep.holders, up)
+		if i < len(k.Holders) {
+			k.Holders[i] = h
+		} else {
+			k.More = append(k.More, h)
+		}
+	}
+	return k
+}
+
+// deepCases are the cases of the read at pc, whose cache knew nothing --
+// none it could hold, the property found past its two prototypes -- as
+// e's exits learned them (cases), and as the cache noted them
+// (jitNoteDeepRead), for an inlined callee's site too: up to
+// jitPropertyCases.
+func (fb *jitFeedback) deepCases(pc int) []ssa.PropertyCase {
+	var cases []ssa.PropertyCase
+	if fb.e != nil && fb.root == nil {
+		cases = fb.cases(pc, 0)
+	}
+	if in := fb.fn.Code[pc]; int(in.B) < len(fb.cl.ic) && fb.cl.ic[in.B].seen != nil {
+		reads := fb.cl.ic[in.B].seen.reads
+		for i := range reads {
+			d := &reads[i]
+			if len(cases) < jitPropertyCases && !slices.ContainsFunc(cases, func(k ssa.PropertyCase) bool { return k.Shape == uintptr(unsafe.Pointer(d.shape)) }) {
+				cases = append(cases, fb.deepCase(d))
+			}
 		}
 	}
 	return cases

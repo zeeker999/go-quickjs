@@ -314,7 +314,7 @@ type Value struct {
 	// those prototypes (PropertySite); nil otherwise. Cases, for a read or
 	// a write that met objects of other shapes, are those (PropertyCase),
 	// checked after Const's: a write's are own properties.
-	Holders *[2]Holder
+	Holders *HolderChain
 	Cases   []PropertyCase
 	// Add, for a write whose cache adds its property, is how (OpPropWrite);
 	// Adds are more, from objects of other shapes, tried after it.
