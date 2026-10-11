@@ -345,7 +345,60 @@ func storeChecksAt(f *Func, stores []*Value, live [][]*Value) {
 // are no property's, and a cell read through another key is another
 // property's. Answers are kept, by phi and key, in maps the Func's scratch
 // keeps from compile to compile.
-type aliases struct{ key, own, elem map[aliasKey]int }
+//
+// A phi round a loop is searched while it is being searched, and is taken
+// for no there; a no found so for another phi of the loop is kept only
+// once the search that started at the outermost has ended in no, when it
+// is one for every phi that search met (provisional). A yes then may be
+// one for them too, through the phi taken for no: theirs are dropped, and
+// asked again. They had been kept: asked first of a loop's body's phi, a
+// store's key was found to write its header's phi's, and asked of that
+// next, not -- a value read through it went unchecked at the store.
+type aliases struct {
+	key, own, elem map[aliasKey]int
+	// depth is how many phis the search is in; provisional are the
+	// answers of no it kept meanwhile, by map.
+	depth       int
+	provisional []aliasNo
+}
+
+// aliasNo is an answer of no kept in m, provisionally.
+type aliasNo struct {
+	m map[aliasKey]int
+	k aliasKey
+}
+
+// phi answers a query of a phi, s, for key, as its arguments do (arg),
+// keeping its answer in m: 1 while it is searched, round a loop; then 0
+// or 2, or none for a provisional no the search ended in yes for.
+func (a *aliases) phi(m map[aliasKey]int, s *Value, key uint32, arg func(*Value) bool) bool {
+	k := aliasKey{s, key}
+	if r, ok := m[k]; ok {
+		return r == 2
+	}
+	m[k] = 1
+	a.depth++
+	yes := slices.ContainsFunc(s.Args, arg)
+	a.depth--
+	if yes {
+		m[k] = 2
+	} else {
+		m[k] = 0
+		if a.depth != 0 {
+			a.provisional = append(a.provisional, aliasNo{m, k})
+		}
+	}
+	if a.depth == 0 {
+		if yes {
+			for _, n := range a.provisional {
+				delete(n.m, n.k)
+			}
+		}
+		clear(a.provisional)
+		a.provisional = a.provisional[:0]
+	}
+	return yes
+}
 
 type aliasKey struct {
 	v   *Value
@@ -360,6 +413,7 @@ func newAliases(f *Func) *aliases {
 	clear(a.key)
 	clear(a.own)
 	clear(a.elem)
+	a.depth, a.provisional = 0, a.provisional[:0]
 	return a
 }
 
@@ -391,20 +445,7 @@ func (a *aliases) may(key uint32, s *Value) bool {
 		}
 		return false
 	case OpPhi:
-		// 1 while it is looked at, round a loop; then 0 or 2.
-		k := aliasKey{s, key}
-		if r, ok := a.key[k]; ok {
-			return r == 2
-		}
-		a.key[k] = 1
-		for _, x := range s.Args {
-			if a.may(key, x) {
-				a.key[k] = 2
-				return true
-			}
-		}
-		a.key[k] = 0
-		return false
+		return a.phi(a.key, s, key, func(x *Value) bool { return a.may(key, x) })
 	}
 	return true
 }
@@ -422,19 +463,7 @@ func (a *aliases) mayOwnCell(call, s *Value) bool {
 		}
 		return false
 	case OpPhi:
-		k := aliasKey{s, uint32(call.ID)}
-		if r, ok := a.own[k]; ok {
-			return r == 2
-		}
-		a.own[k] = 1
-		for _, x := range s.Args {
-			if a.mayOwnCell(call, x) {
-				a.own[k] = 2
-				return true
-			}
-		}
-		a.own[k] = 0
-		return false
+		return a.phi(a.own, s, uint32(call.ID), func(x *Value) bool { return a.mayOwnCell(call, x) })
 	}
 	return false
 }
@@ -453,19 +482,7 @@ func (a *aliases) mayElemCell(call, s *Value) bool {
 		}
 		return false
 	case OpPhi:
-		k := aliasKey{s, uint32(call.ID)}
-		if r, ok := a.elem[k]; ok {
-			return r == 2
-		}
-		a.elem[k] = 1
-		for _, x := range s.Args {
-			if a.mayElemCell(call, x) {
-				a.elem[k] = 2
-				return true
-			}
-		}
-		a.elem[k] = 0
-		return false
+		return a.phi(a.elem, s, uint32(call.ID), func(x *Value) bool { return a.mayElemCell(call, x) })
 	}
 	return false
 }
