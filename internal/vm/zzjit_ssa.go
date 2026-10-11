@@ -491,7 +491,7 @@ func (e *jitEntry) reoptDue() bool {
 	if e.reopt || e.unwindReopt {
 		return true
 	}
-	return e.reoptPending() && (e.ssaStats.entries+e.ssaStats.hosts+e.nativeIn >= uint64(e.reoptBudget) ||
+	return e.reoptPending() && (e.ssaStats.entries+e.ssaStats.hosts+e.nativeIn+uint64(e.slowTries) >= uint64(e.reoptBudget) ||
 		e.ssaStats.work >= uint64(e.reoptBudget)*jitReoptPer*jitReoptWork)
 }
 
@@ -553,7 +553,7 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	// found to leave too often in turn, as V8 judges code it optimized
 	// again by what it does then; its backoff (nativeBackoff) stays. Code
 	// compiled for native callers alone (ssaCallee) Go does not enter.
-	e.nativeIn, e.nativeOut = 0, 0
+	e.nativeIn, e.nativeOut, e.slowTries = 0, 0, 0
 	e.notNative, e.nativeRetry = false, 0
 	if !e.ssaCallee {
 		e.entrySlow = false
@@ -1249,6 +1249,14 @@ func jitHostCall(ctx *abi.Context) bool {
 	case ssa.GoRefill:
 		// The pool's address, a constant of the code's, which keeps it.
 		return r.jitRefillPool(*(**abi.ObjectPool)(unsafe.Pointer(&ctx.GoArgs[0].Ref)))
+	case ssa.GoStore:
+		// A cell holding a value -- a property's, a global binding's, a
+		// captured binding's -- which what native code read keeps alive,
+		// and the value, which its source keeps: stored as Go stores,
+		// with its write barrier.
+		cell := *(**Value)(unsafe.Pointer(&ctx.GoArgs[1].Ref))
+		*cell = jitGoArg(ctx, 0)
+		return true
 	}
 	return false
 }
@@ -2555,6 +2563,16 @@ const (
 // a loop's mean length for each back-edge taken natively.
 func (r *Runtime) jitSSAProfit(e *jitEntry, ctx *abi.Context, start, edges int) {
 	st := &e.ssaStats
+	if ctx.ExitKind != abi.ExitReturn && jitMarking() {
+		// A stretch the collector's marking may have ended -- at a
+		// literal or a native call, which leave for Go while it marks --
+		// says nothing of the code, as its exits do not elsewhere
+		// (jitInlineLeft, jitUnwound): through a long marking every
+		// iteration left, and Go stopped entering the code for good,
+		// nothing learned to compile it again for.
+		st.entries--
+		return
+	}
 	work := uint64(0)
 	if back := edges - r.backEdges; back > 0 {
 		work = uint64(back) * uint64(e.ssaLoop)

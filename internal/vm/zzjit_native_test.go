@@ -3831,15 +3831,24 @@ func TestJITSSAReferenceStoresUnderGC(t *testing.T) {
 	}
 }
 
-// While the collector marks, a store that changes a pointer word is Go's:
-// with the write-barrier flag native code reads (jitEncoding.WriteBarrier)
-// pointed at a byte that is set, every store of relink's leaves native
-// code, and its numbers' stores do not.
+// While the collector marks, a store that changes a pointer word is Go's,
+// with its write barrier, called from native code (ssa.GoStore), which goes
+// on, as V8's code calls its write barrier: with the write-barrier flag
+// native code reads (jitEncoding.WriteBarrier) pointed at a byte that is
+// set, every reference store of relink's is a call of Go, none leaves
+// native code, and its numbers' stores are native. They had each left.
 func TestJITSSAReferenceStoresWhileMarking(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
 	jitMarkingForTest(t)
+	calls := 0
+	jitGoCallWork = func() {
+		if calls++; churnRegisters(calls) == 0.25 {
+			t.Log("churned to a quarter")
+		}
+	}
+	defer func() { jitGoCallWork = nil }()
 	setup := `function relink(a,n){for(let i=0;i<n;i++){const o=a[i];o.next=a[i+1];o.v=i}return a[0]}
 		function count(a,n){for(let i=0;i<n;i++)a[i].v=i*2;return a[n-1].v}
 		function total(){let s=0;for(let n=relink(arr,40);n;n=n.next)s+=n.v;return s+':'+count(arr,40)}
@@ -3849,7 +3858,9 @@ func TestJITSSAReferenceStoresWhileMarking(t *testing.T) {
 	if _, err := r.Run(compileForTest(t, setup)); err != nil {
 		t.Fatal(err)
 	}
+	before := 0
 	for i := 0; i < 3; i++ {
+		before = calls
 		v, err := r.Run(compileForTest(t, `total()`))
 		if err != nil || v.String().Go() != "780:78" {
 			t.Fatalf("round %d: %v, %v", i, v, err)
@@ -3859,12 +3870,91 @@ func TestJITSSAReferenceStoresWhileMarking(t *testing.T) {
 		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
 		return r.jit.hint(cl.hint())
 	}
-	// relink's first store goes to Go, from which native code resumes.
-	if e := entry("relink"); e == nil || e.ssa == nil || e.ssaStats.hosts < 40 {
-		t.Fatalf("relink stored references natively while the collector marked: %+v", e)
+	// relink's reference stores are Go's, called; it never leaves.
+	if e := entry("relink"); e == nil || e.ssa == nil || e.ssaStats.entries == 0 || e.ssaStats.hosts != 0 || calls-before < 40 {
+		t.Fatalf("relink's stores while the collector marked: %d calls of Go in the last round, %+v", calls-before, e)
 	}
 	if e := entry("count"); e == nil || e.ssa == nil || e.ssaStats.entries == 0 || e.ssaStats.hosts != 0 {
 		t.Fatalf("count's numbers went to Go: %+v", e)
+	}
+}
+
+// While the collector marks, a keep (ssa's OpKeep) is written by Go, called
+// from native code, as the stores are: rev keeps n.next's old value, x,
+// across n.next=p. A keep that wrote nothing then left x read from n.next
+// itself, safe while every pointer store left native code as the collector
+// marked; with Go making the store meanwhile (ssa.GoStore), the array
+// literal's exit after it read x's pointer word from the cell overwritten,
+// and rev made a cycle (a test that ran forever). With the write-barrier
+// flag set throughout, every reversal is the interpreter's.
+func TestJITSSAKeepsWhileMarking(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	jitMarkingForTest(t)
+	calls := 0
+	jitGoCallWork = func() { calls++ }
+	defer func() { jitGoCallWork = nil }()
+	setup := `function list(k){let h=null;for(let i=0;i<k;i++)h={v:i,next:h,pad:[i,i]};return h}
+		function walk(h){let s=0,n=h,i=1,c=0;while(n){if(++c>1000)return -1;s+=n.v*i+n.pad[1];i++;n=n.next}return s}
+		function rev(h){let p=null,n=h,c=0;while(n){if(++c>1000)return null;const x=n.next;n.next=p;n.pad=[n.v,n.v];p=n;n=x}return p}
+		function round(){const h=list(30),w=walk(h),r=rev(h);return r===null?'cycle':walk(r)+'/'+walk(rev(r))+'/'+w}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 40; i++ {
+		wv, err := want.Run(compileForTest(t, `round()`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, `round()`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("rev")).value.Object().fn().closure
+	if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil || calls == 0 {
+		t.Fatalf("rev did not run natively, calling Go (%d calls): %+v", calls, e)
+	}
+}
+
+// A native stretch the collector's marking may have ended -- here at a
+// literal, which native code leaves to Go while it marks -- is not judged
+// by the profit check (jitSSAProfit): code that left at every iteration of
+// a long marking had Go stop entering it for good (entrySlow), nothing
+// learned from those exits to compile it again for. CI met it at two CPUs.
+func TestJITSSAMarkingExitsNotJudged(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	jitMarkingForTest(t)
+	old := jitMarking
+	jitMarking = func() bool { return true }
+	defer func() { jitMarking = old }()
+	setup := `function lit(n){let s=0;for(let i=0;i<n;i++){const o={a:i};s=(s+o.a)|0}return s}`
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	if _, err := r.Run(compileForTest(t, setup)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 200; i++ {
+		v, err := r.Run(compileForTest(t, `lit(50)`))
+		if err != nil || v.Number() != 1225 {
+			t.Fatalf("round %d: %v, %v", i, v, err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("lit")).value.Object().fn().closure
+	if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil || e.entrySlow || e.ssaStats.hosts <= jitSSAProbe {
+		t.Fatalf("lit, leaving at its literal while the collector marked, was judged: %+v", e)
 	}
 }
 
@@ -6719,7 +6809,10 @@ func TestJITSSAPoolsRefilledByGo(t *testing.T) {
 	jitcompile.SSAConstruct = true
 	defer func() { jitcompile.SSAConstruct = old }()
 	runtime.GC()
-	defer debug.SetGCPercent(debug.SetGCPercent(100))
+	// The collector runs only when the calls of Go run it, and has done
+	// marking when they return: one that marked through a round, as it
+	// may with two CPUs, had its constructions and literals leave.
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	calls := 0
 	jitGoCallWork = func() {
 		if calls++; churnRegisters(calls) == 0.25 {

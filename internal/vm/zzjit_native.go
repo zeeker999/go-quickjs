@@ -290,7 +290,12 @@ type jitEntry struct {
 	unwindReopts uint8
 	// ssaCallee marks code compiled for native callers alone, from
 	// LowerSSAInline (jitNativeCallee).
-	ssaCallee     bool
+	ssaCallee bool
+	// slowTries counts the existing tiers' tries to enter code Go no
+	// longer enters (entrySlow) that has learned what to be compiled again
+	// for (reoptPending): its budget (reoptDue), which nothing native
+	// spends any more, as V8's interpreter spends a function's.
+	slowTries     uint32
 	code          *jit.Code
 	misses        uint8
 	probes        uint8
@@ -821,7 +826,10 @@ func (r *Runtime) jitOn() bool { return r.jitEnabled }
 
 // tryJITFrame is the call path's hook, for a runtime that runs the JIT.
 func (r *Runtime) tryJITFrame(f *frame) (Value, error, bool) {
-	if f.cl.jitRefused || r.jit.hint(f.cl.hint()) != nil && r.jit.hint(f.cl.hint()).entrySlow {
+	if f.cl.jitRefused {
+		return Undefined, nil, false
+	}
+	if e := r.jit.hint(f.cl.hint()); e != nil && e.entrySlow && !e.reoptPending() {
 		return Undefined, nil, false
 	}
 	// Cold calls stay in the existing tiers without allocating native state.
@@ -902,12 +910,17 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 		if e.inlinePending && e.inlineReopts < jitInlineReoptimizations {
 			e.inlinePending, e.inlineReopt = false, true
 		}
+		if e.entrySlow && e.reoptPending() {
+			e.slowTries++
+		}
 		if e.reoptDue() {
 			r.jitReoptimize(f.cl, e)
 		}
 		if e.entrySlow {
 			// Its native stretches cost more at their exits than they save
-			// (jitSSAProfit): the existing tiers run it.
+			// (jitSSAProfit): the existing tiers run it -- until it is
+			// compiled again for what it learned, its budget spent by their
+			// tries to enter it (slowTries).
 			return Undefined, nil, false
 		}
 		return r.runSSA(f, e, pc, depth)
