@@ -144,8 +144,9 @@ type Context struct {
 	Spill [SpillSlots]uint64
 	// Keep holds references copied out of cells a store then overwrites
 	// while slots still hold them (ssa's OpKeep), read from here since: the
-	// collector sees them, as it does the frame's; they are written only
-	// while it does not mark. Go clears them when the code returns.
+	// collector sees them, as it does the frame's; native code writes them
+	// while it does not mark, and has Go write them while it does (a call
+	// of Go). Go clears them when the code returns.
 	Keep [MaxKeeps]Slot
 	// ExitDesc is an ExitTable exit's description, an *ExitDescriptor,
 	// which the code holds; Regs and XRegs are the registers the exit

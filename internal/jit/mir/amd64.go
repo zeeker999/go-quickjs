@@ -1955,19 +1955,80 @@ func (c *compiler) propStore(v *ssa.Value, guard func(amd64.Cond)) {
 		guard(amd64.CondNE)
 		c.a.Bind(other)
 	}
-	scalar := c.a.NewLabel()
+	scalar, viaGo, done := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
 	c.a.MovQFromX(scratchC, xScratch1)
 	c.a.Load(scratchB, scratchA, c.enc.RefOffset)
 	c.a.Op(amd64.Or, scratchB, scratchC, true)
 	c.a.Jcc(amd64.CondE, scalar)
+	// A pointer word written or overwritten: while the collector marks,
+	// Go stores it, with its write barrier (goStore).
+	c.a.MovQToX(xScratch0, c.gpr(x, scratchB))
 	c.a.MovImm(scratchB, c.enc.WriteBarrier)
 	c.a.LoadU8(scratchB, scratchB, 0)
 	c.a.Op(amd64.Test, scratchB, scratchB, false)
-	guard(amd64.CondNE)
+	if c.enc.CallGo == 0 {
+		// No calls of Go: the store leaves for Go.
+		guard(amd64.CondNE)
+	} else {
+		c.a.Jcc(amd64.CondNE, viaGo)
+	}
 	c.a.Bind(scalar)
 	c.a.Store(scratchA, c.enc.NumOffset, c.gpr(x, scratchB))
 	c.a.Store(scratchA, c.enc.RefOffset, scratchC)
+	c.a.Bind(done)
 	c.a.Bind(added)
+	if c.enc.CallGo == 0 {
+		return
+	}
+	stub := c.stubLabel(v.State, exitKind(v.Aux))
+	c.cold = append(c.cold, func() {
+		c.a.Bind(viaGo)
+		c.goStore(&stub)
+		c.a.Jmp(done)
+	})
+}
+
+// goStore has Go store a value into a cell while the collector marks
+// (ssa.GoStore), as V8's code calls its write barrier: the cell's address
+// in scratchA, the value's words in xScratch0 and scratchC. Every
+// allocatable register is saved across it, in the context's register area,
+// which only an exit uses; if Go refuses, stub, the store's exit -- a keep
+// has none, nor does Go refuse it.
+func (c *compiler) goStore(stub *amd64.Label) {
+	size := int32(unsafe.Sizeof(abi.GoArg{}))
+	c.a.MovQFromX(scratchB, xScratch0)
+	c.a.Store(regCtx, abi.OffGoArgs+c.enc.NumOffset, scratchB)
+	c.a.Store(regCtx, abi.OffGoArgs+c.enc.RefOffset, scratchC)
+	c.a.Store(regCtx, abi.OffGoArgs+size+c.enc.RefOffset, scratchA)
+	c.a.MovImm(scratchA, uint64(ssa.GoStore))
+	c.a.Store(regCtx, abi.OffGoOp, scratchA)
+	c.a.MovImm(scratchA, 0)
+	c.a.Store(regCtx, abi.OffGoKeep, scratchA)
+	for _, r := range c.gprs {
+		c.a.Store(regCtx, abi.OffRegs+int32(r)*8, amd64.Reg(r))
+	}
+	for _, r := range c.fprs {
+		c.a.StoreSD(regCtx, abi.OffXRegs+int32(r)*8, amd64.XReg(r))
+	}
+	back := c.a.NewLabel()
+	c.a.LeaLabel(scratchA, back)
+	c.a.Store(regCtx, abi.OffGoResume, scratchA)
+	c.a.MovImm(scratchA, c.enc.CallGo)
+	c.a.JmpReg(scratchA)
+	c.a.Bind(back)
+	c.a.Load(regLocals, regCtx, abi.OffLocals)
+	c.a.Load(regStack, regCtx, abi.OffStack)
+	for _, r := range c.gprs {
+		c.a.Load(amd64.Reg(r), regCtx, abi.OffRegs+int32(r)*8)
+	}
+	for _, r := range c.fprs {
+		c.a.LoadSD(amd64.XReg(r), regCtx, abi.OffXRegs+int32(r)*8)
+	}
+	if stub != nil {
+		c.a.Load(scratchB, regCtx, abi.OffGoStatus)
+		c.a.Op(amd64.Test, scratchB, scratchB, true)
+		c.a.Jcc(amd64.CondNE, *stub)
+	}
 }
 
 // addAlong adds the property a write's cache adds (ssa.PropertyAdd), as
@@ -2208,17 +2269,13 @@ func (c *compiler) keepSource(x *ssa.Value) {
 }
 
 // keepRef is a tagged value's pointer word, read where it came from
-// (keepSource), or 0 for a primitive's or while the collector marks (ssa's
-// OpKeepRef).
+// (keepSource), or 0 for a primitive's (ssa's OpKeepRef); read while the
+// collector marks too, which only writes would need a barrier for.
 func (c *compiler) keepRef(v *ssa.Value) {
 	x := v.Args[0]
 	scalar := c.a.NewLabel()
 	c.keepSource(x)
 	c.a.MovImm(scratchA, 0)
-	c.a.MovImm(scratchB, c.enc.WriteBarrier)
-	c.a.LoadU8(scratchB, scratchB, 0)
-	c.a.Op(amd64.Test, scratchB, scratchB, false)
-	c.a.Jcc(amd64.CondNE, scalar)
 	c.a.Op(amd64.Test, scratchC, scratchC, true)
 	c.a.Jcc(amd64.CondE, scalar)
 	c.a.Load(scratchA, scratchC, c.enc.RefOffset)
@@ -2228,24 +2285,54 @@ func (c *compiler) keepRef(v *ssa.Value) {
 
 // keep copies a value, its pointer word read before (keepRef), into the
 // context's keep cell v.Index, and leaves the cell's address as v (ssa's
-// OpKeep); while the collector marks, it writes nothing and v is where the
-// value came from (keepSource).
+// OpKeep); while the collector marks, Go writes it, with its write barrier
+// (goStore). It had written nothing then, the value its own source still,
+// which held while every store of a pointer left native code as the
+// collector marked; a store Go makes then (goStore) would have changed
+// that source under the value.
 func (c *compiler) keep(v *ssa.Value) {
 	x := v.Args[0]
-	done := c.a.NewLabel()
-	c.keepSource(x)
-	c.a.MovRR(scratchA, scratchC)
+	viaGo, done := c.a.NewLabel(), c.a.NewLabel()
+	at := abi.OffKeep + int32(v.Index)*int32(c.enc.ValueSize)
+	if c.enc.CallGo == 0 {
+		// No calls of Go, so no store while the collector marks: the
+		// keep writes nothing then, the value its own source.
+		c.keepSource(x)
+		c.a.MovRR(scratchA, scratchC)
+		c.a.MovImm(scratchB, c.enc.WriteBarrier)
+		c.a.LoadU8(scratchB, scratchB, 0)
+		c.a.Op(amd64.Test, scratchB, scratchB, false)
+		c.a.Jcc(amd64.CondNE, done)
+		c.a.Store(regCtx, at+c.enc.RefOffset, c.gpr(v.Args[1], scratchB))
+		c.a.Store(regCtx, at+c.enc.NumOffset, c.gpr(x, scratchB))
+		c.a.MovRR(scratchA, regCtx)
+		c.a.OpImm(amd64.Add, scratchA, at, true)
+		c.a.Bind(done)
+		c.setG(v, scratchA)
+		return
+	}
+	c.a.MovQToX(xScratch0, c.gpr(x, scratchB))
+	if r := c.gpr(v.Args[1], scratchC); r != scratchC {
+		c.a.MovRR(scratchC, r)
+	}
 	c.a.MovImm(scratchB, c.enc.WriteBarrier)
 	c.a.LoadU8(scratchB, scratchB, 0)
 	c.a.Op(amd64.Test, scratchB, scratchB, false)
-	c.a.Jcc(amd64.CondNE, done)
-	at := abi.OffKeep + int32(v.Index)*int32(c.enc.ValueSize)
-	c.a.Store(regCtx, at+c.enc.RefOffset, c.gpr(v.Args[1], scratchB))
-	c.a.Store(regCtx, at+c.enc.NumOffset, c.gpr(x, scratchB))
+	c.a.Jcc(amd64.CondNE, viaGo)
+	c.a.Store(regCtx, at+c.enc.RefOffset, scratchC)
+	c.a.MovQFromX(scratchB, xScratch0)
+	c.a.Store(regCtx, at+c.enc.NumOffset, scratchB)
+	c.a.Bind(done)
 	c.a.MovRR(scratchA, regCtx)
 	c.a.OpImm(amd64.Add, scratchA, at, true)
-	c.a.Bind(done)
 	c.setG(v, scratchA)
+	c.cold = append(c.cold, func() {
+		c.a.Bind(viaGo)
+		c.a.MovRR(scratchA, regCtx)
+		c.a.OpImm(amd64.Add, scratchA, at, true)
+		c.goStore(nil)
+		c.a.Jmp(done)
+	})
 }
 
 // holder finds the property a read whose receiver's shape it knows names

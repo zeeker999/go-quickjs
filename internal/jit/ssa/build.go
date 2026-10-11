@@ -168,9 +168,14 @@ type GoOp uint8
 // fills an object pool that ran out again (abi.ObjectPool's Source), its
 // address the first operand's pointer word: a call that takes from one
 // makes it, and is made again from its start.
+//
+// GoStore stores a pointer while the collector marks, which native code,
+// with no write barrier, does not: the first operand is the value, the
+// second's pointer word the cell's address (mir's property stores).
 const (
 	GoAdd GoOp = 1 + iota
 	GoRefill
+	GoStore
 )
 
 // RefillsPools reports whether a call takes an object from a pool, which

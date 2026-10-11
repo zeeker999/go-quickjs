@@ -1144,19 +1144,72 @@ func (c *a64Compiler) propStore(v *ssa.Value, guard func(arm64.Cond)) {
 		c.a.Cbnz(a64B, c.stubLabel(v.State, exitKind(v.Aux)), true)
 		c.a.Bind(other)
 	}
-	scalar := c.a.NewLabel()
+	scalar, viaGo, done := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
 	c.a.FMovFromF(a64C, a64F1)
 	c.a.Load(a64B, a64A, c.enc.RefOffset)
 	c.a.Op(arm64.Orr, a64B, a64B, a64C, true)
 	c.a.Cbz(a64B, scalar, true)
+	// As amd64's: while the collector marks, Go stores it.
+	c.a.FMovToF(a64F0, c.gpr(x, a64B))
 	c.a.MovImm(a64B, c.enc.WriteBarrier)
 	c.a.LoadU8(a64B, a64B, 0)
-	c.a.CmpImm(a64B, 0, false)
-	guard(arm64.NE)
+	if c.enc.CallGo == 0 {
+		c.a.CmpImm(a64B, 0, false)
+		guard(arm64.NE)
+	} else {
+		c.a.Cbnz(a64B, viaGo, false)
+	}
 	c.a.Bind(scalar)
 	c.a.Store(a64A, c.enc.NumOffset, c.gpr(x, a64B))
 	c.a.Store(a64A, c.enc.RefOffset, a64C)
+	c.a.Bind(done)
 	c.a.Bind(added)
+	if c.enc.CallGo == 0 {
+		return
+	}
+	stub := c.stubLabel(v.State, exitKind(v.Aux))
+	c.cold = append(c.cold, func() {
+		c.a.Bind(viaGo)
+		c.goStore(&stub)
+		c.a.B(done)
+	})
+}
+
+// goStore is amd64's: the cell's address in A, the value's words in F0
+// and C.
+func (c *a64Compiler) goStore(stub *arm64.Label) {
+	size := int32(unsafe.Sizeof(abi.GoArg{}))
+	c.a.FMovFromF(a64B, a64F0)
+	c.a.Store(a64Ctx, abi.OffGoArgs+c.enc.NumOffset, a64B)
+	c.a.Store(a64Ctx, abi.OffGoArgs+c.enc.RefOffset, a64C)
+	c.a.Store(a64Ctx, abi.OffGoArgs+size+c.enc.RefOffset, a64A)
+	c.a.MovImm(a64A, uint64(ssa.GoStore))
+	c.a.Store(a64Ctx, abi.OffGoOp, a64A)
+	c.a.Store(a64Ctx, abi.OffGoKeep, arm64.ZR)
+	for _, r := range c.gprs {
+		c.a.Store(a64Ctx, abi.OffRegs+int32(r)*8, arm64.Reg(r))
+	}
+	for _, r := range c.fprs {
+		c.a.StoreF(a64Ctx, abi.OffXRegs+int32(r)*8, arm64.FReg(r))
+	}
+	back := c.a.NewLabel()
+	c.a.Adr(a64A, back)
+	c.a.Store(a64Ctx, abi.OffGoResume, a64A)
+	c.a.MovImm(a64A, c.enc.CallGo)
+	c.a.Br(a64A)
+	c.a.Bind(back)
+	c.a.Load(a64Locals, a64Ctx, abi.OffLocals)
+	c.a.Load(a64Stack, a64Ctx, abi.OffStack)
+	for _, r := range c.gprs {
+		c.a.Load(arm64.Reg(r), a64Ctx, abi.OffRegs+int32(r)*8)
+	}
+	for _, r := range c.fprs {
+		c.a.LoadF(arm64.FReg(r), a64Ctx, abi.OffXRegs+int32(r)*8)
+	}
+	if stub != nil {
+		c.a.Load(a64B, a64Ctx, abi.OffGoStatus)
+		c.a.Cbnz(a64B, *stub, true)
+	}
 }
 
 // addAlong adds the property a write's cache adds, as amd64's does, or
@@ -2120,9 +2173,6 @@ func (c *a64Compiler) keepRef(v *ssa.Value) {
 	scalar := c.a.NewLabel()
 	c.keepSource(x)
 	c.a.MovImm(a64A, 0)
-	c.a.MovImm(a64B, c.enc.WriteBarrier)
-	c.a.LoadU8(a64B, a64B, 0)
-	c.a.Cbnz(a64B, scalar, false)
 	c.a.Cbz(a64C, scalar, true)
 	c.a.Load(a64A, a64C, c.enc.RefOffset)
 	c.a.Bind(scalar)
@@ -2132,18 +2182,41 @@ func (c *a64Compiler) keepRef(v *ssa.Value) {
 // keep copies a value into a keep cell, as amd64's.
 func (c *a64Compiler) keep(v *ssa.Value) {
 	x := v.Args[0]
-	done := c.a.NewLabel()
-	c.keepSource(x)
-	c.a.MovRR(a64A, a64C)
+	viaGo, done := c.a.NewLabel(), c.a.NewLabel()
+	at := abi.OffKeep + int32(v.Index)*int32(c.enc.ValueSize)
+	if c.enc.CallGo == 0 {
+		// As amd64's: no calls of Go, the keep writes nothing then.
+		c.keepSource(x)
+		c.a.MovRR(a64A, a64C)
+		c.a.MovImm(a64B, c.enc.WriteBarrier)
+		c.a.LoadU8(a64B, a64B, 0)
+		c.a.Cbnz(a64B, done, false)
+		c.a.Store(a64Ctx, at+c.enc.RefOffset, c.gpr(v.Args[1], a64B))
+		c.a.Store(a64Ctx, at+c.enc.NumOffset, c.gpr(x, a64B))
+		c.a.AddImm(a64A, a64Ctx, int64(at), true)
+		c.a.Bind(done)
+		c.setG(v, a64A)
+		return
+	}
+	c.a.FMovToF(a64F0, c.gpr(x, a64B))
+	if r := c.gpr(v.Args[1], a64C); r != a64C {
+		c.a.MovRR(a64C, r)
+	}
 	c.a.MovImm(a64B, c.enc.WriteBarrier)
 	c.a.LoadU8(a64B, a64B, 0)
-	c.a.Cbnz(a64B, done, false)
-	at := abi.OffKeep + int32(v.Index)*int32(c.enc.ValueSize)
-	c.a.Store(a64Ctx, at+c.enc.RefOffset, c.gpr(v.Args[1], a64B))
-	c.a.Store(a64Ctx, at+c.enc.NumOffset, c.gpr(x, a64B))
-	c.a.AddImm(a64A, a64Ctx, int64(at), true)
+	c.a.Cbnz(a64B, viaGo, false)
+	c.a.Store(a64Ctx, at+c.enc.RefOffset, a64C)
+	c.a.FMovFromF(a64B, a64F0)
+	c.a.Store(a64Ctx, at+c.enc.NumOffset, a64B)
 	c.a.Bind(done)
+	c.a.AddImm(a64A, a64Ctx, int64(at), true)
 	c.setG(v, a64A)
+	c.cold = append(c.cold, func() {
+		c.a.Bind(viaGo)
+		c.a.AddImm(a64A, a64Ctx, int64(at), true)
+		c.goStore(nil)
+		c.a.B(done)
+	})
 }
 
 // holder finds the property a read whose receiver's shape it knows names,
