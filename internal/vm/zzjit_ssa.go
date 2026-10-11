@@ -589,9 +589,9 @@ func (fb *jitFeedback) Define(pc int) (*ssa.PropertyAdd, bool) {
 		return nil, false
 	}
 	if fb.prog == nil {
-		p, err := jitcompile.LowerSSAInline(fn)
+		p, err := fb.r.jitLower(fn, jitLowerInline)
 		if err != nil {
-			if p, err = jitcompile.LowerSSA(fn); err != nil {
+			if p, err = fb.r.jitLower(fn, jitLowerSSA); err != nil {
 				return nil, false
 			}
 		}
@@ -753,11 +753,11 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	e.polyPending, e.polySettled = false, 0
 	fn := cl.fn
 	r.jitInlineNativeCalls(e)
-	lower := jitcompile.LowerSSA
+	kind := jitLowerSSA
 	if e.ssaCallee {
-		lower = jitcompile.LowerSSAInline
+		kind = jitLowerInline
 	}
-	p, err := lower(fn)
+	p, err := r.jitLower(fn, kind)
 	if err != nil {
 		return
 	}
@@ -916,7 +916,7 @@ func (fb *jitFeedback) Intrinsic(pc int) (ssa.Intrinsic, bool) {
 		return ssa.Intrinsic{}, false
 	}
 	if fb.prog == nil {
-		p, err := jitcompile.LowerSSAInline(fn)
+		p, err := fb.r.jitLower(fn, jitLowerInline)
 		if err != nil {
 			return ssa.Intrinsic{}, false
 		}
@@ -1026,7 +1026,7 @@ func (fb *jitFeedback) InstanceOf(pc int) (ssa.InstanceOfSite, bool) {
 		return ssa.InstanceOfSite{}, false
 	}
 	if fb.prog == nil {
-		p, err := jitcompile.LowerSSAInline(fn)
+		p, err := fb.r.jitLower(fn, jitLowerInline)
 		if err != nil {
 			return ssa.InstanceOfSite{}, false
 		}
@@ -1119,11 +1119,11 @@ func (fb *jitFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 		if int(in.pc) != pc {
 			continue
 		}
-		lower := jitcompile.LowerSSAInline
+		kind := jitLowerInline
 		if in.cl.fn.Leaf == bytecode.LeafForward && fb.fn.Code[pc].Op == bytecode.OpNew {
-			lower = jitcompile.LowerSSAForward
+			kind = jitLowerForward
 		}
-		p, err := lower(in.cl.fn)
+		p, err := fb.r.jitLower(in.cl.fn, kind)
 		if err != nil {
 			return ssa.InlineSite{}, false
 		}
@@ -1793,7 +1793,7 @@ func (r *Runtime) jitInlinesCalls(cl *closure, depth int) bool {
 	if depth <= 0 || len(fn.Upvalues) != 0 || fn.TopLevel || fn.IsModule || fn.UsesArguments || fn.HasDirectEval {
 		return false
 	}
-	p, err := jitcompile.LowerSSAInline(fn)
+	p, err := r.jitLower(fn, jitLowerInline)
 	if err != nil {
 		return false
 	}
@@ -2398,7 +2398,7 @@ func (fb *jitFeedback) forwardInline(pc int) (ssa.InlineSite, bool) {
 		return ssa.InlineSite{}, false
 	}
 	tc := t.fn().closure
-	p, err := jitcompile.LowerSSAInline(tc.fn)
+	p, err := fb.r.jitLower(tc.fn, jitLowerInline)
 	if err != nil {
 		return ssa.InlineSite{}, false
 	}
@@ -2686,7 +2686,7 @@ func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
 		}
 		return nil
 	}
-	p, err := jitcompile.LowerSSAInline(fn)
+	p, err := r.jitLower(fn, jitLowerInline)
 	if err != nil {
 		return nil
 	}
@@ -2734,6 +2734,77 @@ func (e *jitEntry) setSSA(fn *bytecode.Function, p *ir.Program, code *jit.SSACod
 	}
 }
 
+// jitLowering is a function's programs for the new pipeline, each lowered
+// once, as its kind says (jitLowerKind), and kept by the runtime: a
+// compile asks for its function's and for each callee's it inlines, and a
+// function is compiled again as it learns, and inlined into each of its
+// callers -- lowering them again had been some 8% of a compile. A program
+// is never changed once lowered. construct is jitcompile.SSAConstruct when
+// they were.
+type jitLowering struct {
+	construct bool
+	done      [jitLowerKinds]bool
+	progs     [jitLowerKinds]*ir.Program
+	errs      [jitLowerKinds]error
+}
+
+// jitLowerKind is how a program is lowered: for a function's own code
+// (jitcompile.LowerSSA), for a callee inlined (LowerSSAInline), for a
+// forwarding constructor inlined (LowerSSAForward).
+type jitLowerKind uint8
+
+const (
+	jitLowerSSA jitLowerKind = iota
+	jitLowerInline
+	jitLowerForward
+	jitLowerKinds
+)
+
+// jitLoweredMax is how many functions' programs a runtime keeps: past it,
+// those of functions collected since go, then all.
+const jitLoweredMax = 256
+
+// jitLower is fn's program, lowered as kind says, from the runtime's
+// programs (jitLowering).
+func (r *Runtime) jitLower(fn *bytecode.Function, kind jitLowerKind) (*ir.Program, error) {
+	s := r.jit
+	if s == nil {
+		// Before the runtime has any state, which no compile is.
+		s = &jitState{}
+	}
+	key := weak.Make(fn)
+	l := s.lowered[key]
+	if l == nil || l.construct != jitcompile.SSAConstruct {
+		if s.lowered == nil {
+			s.lowered = map[weak.Pointer[bytecode.Function]]*jitLowering{}
+		}
+		if len(s.lowered) >= jitLoweredMax {
+			for k := range s.lowered {
+				if k.Value() == nil {
+					delete(s.lowered, k)
+				}
+			}
+			if len(s.lowered) >= jitLoweredMax {
+				clear(s.lowered)
+			}
+		}
+		l = &jitLowering{construct: jitcompile.SSAConstruct}
+		s.lowered[key] = l
+	}
+	if !l.done[kind] {
+		switch kind {
+		case jitLowerSSA:
+			l.progs[kind], l.errs[kind] = jitcompile.LowerSSA(fn)
+		case jitLowerInline:
+			l.progs[kind], l.errs[kind] = jitcompile.LowerSSAInline(fn)
+		case jitLowerForward:
+			l.progs[kind], l.errs[kind] = jitcompile.LowerSSAForward(fn)
+		}
+		l.done[kind] = true
+	}
+	return l.progs[kind], l.errs[kind]
+}
+
 // jitInlinable reports whether fn may be inlined into a caller: it
 // captures nothing, and ssa.Inlinable takes its program. Each function is
 // asked once.
@@ -2745,7 +2816,7 @@ func (r *Runtime) jitInlinable(fn *bytecode.Function) bool {
 	}
 	ok := false
 	if len(fn.Upvalues) == 0 && !fn.TopLevel && !fn.IsModule && !fn.UsesArguments && !fn.HasDirectEval {
-		p, err := jitcompile.LowerSSAInline(fn)
+		p, err := r.jitLower(fn, jitLowerInline)
 		ok = err == nil && ssa.Inlinable(p)
 	}
 	if s.inlinable == nil {
@@ -3007,9 +3078,9 @@ func (fb *jitFeedback) chainSite(pc int, site ssa.PropertySite) ssa.PropertySite
 // instructions' depths say: lowered once, as the inlining's is.
 func (fb *jitFeedback) program() *ir.Program {
 	if fb.prog == nil {
-		p, err := jitcompile.LowerSSAInline(fb.fn)
+		p, err := fb.r.jitLower(fb.fn, jitLowerInline)
 		if err != nil {
-			if p, err = jitcompile.LowerSSA(fb.fn); err != nil {
+			if p, err = fb.r.jitLower(fb.fn, jitLowerSSA); err != nil {
 				return nil
 			}
 		}

@@ -387,8 +387,10 @@ type jitState struct {
 	// runs inside: reused, not allocated each time.
 	unwinding       []jitNativeLevel
 	unwindingFrames []*frame
-	// inlinable is whether each function may be inlined (jitInlinable).
+	// inlinable is whether each function may be inlined (jitInlinable);
+	// lowered its programs (jitLower).
 	inlinable   map[weak.Pointer[bytecode.Function]]bool
+	lowered     map[weak.Pointer[bytecode.Function]]*jitLowering
 	interpreted uint64
 	// goOn is the frame the interpreter runs for jitGoOn, until a loop's
 	// header Go goes on natively at, goOnPC with goOnDepth operands;
@@ -666,7 +668,7 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool, cl *closure) *j
 	if r.jitSSA && !callee {
 		// The new pipeline lowers for itself; what it does not compile goes
 		// to the slot IR emitters.
-		if p, err := jitcompile.LowerSSA(fn); err == nil {
+		if p, err := r.jitLower(fn, jitLowerSSA); err == nil {
 			r.jitSeedCalls(cl, e, p)
 			if code, fb := r.compileSSA(fn, cl, p, limit, e); code != nil {
 				e.setSSA(fn, p, code, fb)

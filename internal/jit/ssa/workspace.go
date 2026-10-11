@@ -19,6 +19,7 @@ type Workspace struct {
 	blocks    arena.Arena[Block]
 	blockRefs arena.Arena[*Block]
 	bools     arena.Arena[bool]
+	bytes     arena.Arena[uint8]
 	ints      arena.Arena[int]
 	scratch   scratch
 	ready     bool
@@ -36,6 +37,7 @@ func (w *Workspace) init() {
 	w.blocks.KeepBig()
 	w.blockRefs.KeepBig()
 	w.bools.KeepBig()
+	w.bytes.KeepBig()
 	w.ints.KeepBig()
 }
 
@@ -47,6 +49,7 @@ func (w *Workspace) Rewind() {
 	w.blocks.Rewind()
 	w.blockRefs.Rewind()
 	w.bools.Rewind()
+	w.bytes.Rewind()
 	w.ints.Rewind()
 }
 
@@ -62,6 +65,14 @@ func (f *Func) bools(n int) []bool {
 		return f.ws.bools.Make(n)
 	}
 	return make([]bool, n)
+}
+
+// bytes is n zero bytes: from the workspace, if the Func has one.
+func (f *Func) bytes(n int) []uint8 {
+	if f.ws != nil {
+		return f.ws.bytes.Make(n)
+	}
+	return make([]uint8, n)
 }
 
 // ints is n zeros: from the workspace, if the Func has one.

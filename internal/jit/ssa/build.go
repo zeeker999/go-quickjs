@@ -487,8 +487,28 @@ func (b *builder) property(pc int) (PropertySite, bool) {
 }
 
 // host reports whether the instruction at pc is left to Go whole: it ends
-// its block, and the next PC is an entry.
+// its block, and the next PC is an entry. The plan asks it of each
+// instruction at each leader, block's end and entry, and each answer is
+// a search of the VM's caches, so the frame keeps its answers (hosts),
+// which nothing the plan does changes.
 func (b *builder) host(pc int) bool {
+	fr := b.cur
+	if fr.hosts == nil {
+		fr.hosts = b.f.bytes(len(b.p.Code))
+	}
+	if k := fr.hosts[pc]; k != 0 {
+		return k == 2
+	}
+	h := b.hostOf(pc)
+	fr.hosts[pc] = 1
+	if h {
+		fr.hosts[pc] = 2
+	}
+	return h
+}
+
+// hostOf is host's answer, found.
+func (b *builder) hostOf(pc int) bool {
 	switch b.p.Code[pc].Op {
 	case ir.Host:
 		return !b.nativeHost(pc)
@@ -660,6 +680,8 @@ type frame struct {
 	// nest is how deep it is inlined, as maxInlineDepth counts: depth, but
 	// for forwarding constructors (InlineSite's Restart).
 	nest int
+	// hosts are host's answers, by PC: 0 for none yet, 1 for no, 2 for yes.
+	hosts []uint8
 }
 
 // inlinedAt is the callee inlined at pc in the frame being translated.
