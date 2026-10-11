@@ -4499,8 +4499,13 @@ const (
 // reason to stop calling it natively. Only once those compiles are spent
 // (jitUnwindReopts), as V8 gives up optimizing a function that deoptimizes
 // too often, do native callers stop calling it and leave for Go at the
-// call instead, which makes it (notNative), until jitRetryNative. Nor is
-// one counted while the collector marks (jitInlineLeft).
+// call instead, which makes it (notNative), until jitRetryNative -- or at
+// once, if its exits taught nothing since it was compiled (jitLearning),
+// for code compiled again would be the same: RayTrace's getReflectionRay,
+// constructing with a forwarding constructor its code leaves to Go, and
+// wrapUp, whose remainder of fractions Go computes, were compiled three
+// times more each for nothing. Nor is one counted while the collector
+// marks (jitInlineLeft).
 func (r *Runtime) jitUnwound(e *jitEntry) {
 	if jitMarking() {
 		return
@@ -4508,7 +4513,7 @@ func (r *Runtime) jitUnwound(e *jitEntry) {
 	if e.nativeOut++; e.nativeOut%jitUnwindProbe != 0 || e.nativeOut*jitUnwindShare <= e.nativeIn {
 		return
 	}
-	if e.ssa != nil && e.unwindReopts < jitUnwindReopts {
+	if e.ssa != nil && e.unwindReopts < jitUnwindReopts && jitLearning(e) {
 		e.unwindReopts++
 		e.unwindReopt = true
 		e.nativeIn, e.nativeOut = 0, 0
@@ -4516,6 +4521,24 @@ func (r *Runtime) jitUnwound(e *jitEntry) {
 	}
 	e.notNative, e.nativeEntry, e.nativeRetry = true, 0, 0
 	e.nativeBackoff = min(e.nativeBackoff+1, jitNativeBackoffs)
+}
+
+// jitLearning reports whether e's code has met, since it was compiled,
+// what a compile would take that it was not compiled for: what is to be
+// compiled again for (reoptPending), shapes and calls its exits learned
+// (feedReopt, polyPending, inlinePending), or a call it has left native
+// code at but not yet decided, which the compile would decide if the
+// existing tiers have met its target (jitSeedCalls).
+func jitLearning(e *jitEntry) bool {
+	if e.reoptPending() || e.feedReopt || e.polyPending || e.inlinePending {
+		return true
+	}
+	for _, n := range e.callSites {
+		if n != 0 && n < jitCallNative {
+			return true
+		}
+	}
+	return false
 }
 
 // jitUnwindReopts is how many times code that leaves too often when called

@@ -145,3 +145,54 @@ func TestJITSSASeedsBuiltinsAndCalleesCalls(t *testing.T) {
 		t.Fatalf("compiled %d times more", r.jit.reoptimized)
 	}
 }
+
+// Code called natively that leaves too often is compiled again only if its
+// exits taught it something (jitLearning): w's remainder of fractions is
+// Go's at every call, which no compile changes, and native callers stop
+// calling it at once, not after three compiles of the same code. Each
+// answer is the interpreter's.
+func TestJITSSAUnwoundCompiledAgainOnlyForWhatItLearned(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	// While the collector marks, Go makes native calls, which would count
+	// as calls leaving native code.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function w(x){let s=0;for(let i=0;i<2;i++)s+=x%1.5;return s}
+		function run(n){let t=0;for(let i=0;i<n;i++)t+=w(i+0.25);return t}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := New(Config{JIT: true})
+	defer func() { r.Close(); r.ReleaseClosed() }()
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, src := range []string{`String(run(3000))`, `String(run(3000))`} {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+	}
+	w := r.global.getOwn(r.atoms.intern("w")).value.Object().fn().closure
+	e := r.jit.cache[weak.Make(w.fn)]
+	if e == nil || e.ssa == nil {
+		t.Fatal("w has no code")
+	}
+	if e.nativeBackoff == 0 {
+		t.Fatal("w's native callers still call it")
+	}
+	if e.unwindReopts != 0 {
+		t.Fatalf("w was compiled %d times more for leaving", e.unwindReopts)
+	}
+}

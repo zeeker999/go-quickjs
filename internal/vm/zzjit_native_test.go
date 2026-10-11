@@ -8465,7 +8465,10 @@ func TestJITSSAUnwoundCompilesAgainFirst(t *testing.T) {
 	// An entry of its own, with code, as a callee's.
 	e := &jitEntry{ssa: g.ssa}
 	leave := func() {
-		// One call in two leaves.
+		// One call in two leaves, its exits having learned a shape
+		// (jitLearning; TestJITSSAUnwoundCompiledAgainOnlyForWhatItLearned
+		// has one that learns nothing).
+		e.polyPending = true
 		for range jitUnwindProbe {
 			e.nativeIn += 2
 			r.jitUnwound(e)
