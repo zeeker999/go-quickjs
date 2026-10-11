@@ -570,6 +570,8 @@ func rewrite(f *Func, find func(*Value) *Value) {
 	}
 	for _, b := range f.Blocks {
 		kept := b.Values[:0]
+		// The guards of an instruction share its state, rewritten once.
+		var last *FrameState
 		for _, v := range b.Values {
 			if find(v) != v {
 				continue
@@ -580,7 +582,10 @@ func rewrite(f *Func, find func(*Value) *Value) {
 			if v.Op == OpLoadCell || v.Op == OpKept {
 				v.Shadow = v.Args[0]
 			}
-			state(v.State)
+			if v.State != last {
+				state(v.State)
+				last = v.State
+			}
 			kept = append(kept, v)
 		}
 		b.Values = kept
@@ -604,8 +609,13 @@ func removeDead(f *Func) bool {
 			work = append(work, v)
 		}
 	}
+	// A state is marked once: the guards of an instruction share theirs.
+	marked := f.bools(f.nextState)
 	markState := func(s *FrameState) {
-		if s != nil {
+		if s != nil && (s.id >= len(marked) || !marked[s.id]) {
+			if s.id < len(marked) {
+				marked[s.id] = true
+			}
 			for _, v := range s.Slots {
 				if v != nil {
 					mark(v)

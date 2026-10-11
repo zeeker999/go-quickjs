@@ -577,6 +577,7 @@ func liveAcrossSets(f *Func) ([]*Value, [][]*Value) {
 		if b.Header != nil {
 			states(u, b.Header)
 		}
+		var last *FrameState
 		for _, v := range b.Values {
 			add(d, v)
 			if v.Op == OpPhi {
@@ -586,7 +587,14 @@ func liveAcrossSets(f *Func) ([]*Value, [][]*Value) {
 				}
 				continue
 			}
-			uses(u, v)
+			for _, a := range v.Args {
+				add(u, a)
+			}
+			// The guards of an instruction share its state, added once.
+			if v.State != last {
+				states(u, v.State)
+				last = v.State
+			}
 		}
 		add(u, b.Control)
 		states(u, b.State)
