@@ -7598,6 +7598,75 @@ func TestJITSSAMathPow(t *testing.T) {
 	}
 }
 
+// % of numbers that are not integers native code divides -- fractions, a
+// zero divisor, the infinities, NaN, magnitudes past 2**63 -- is Go's,
+// called from native code (ssa.GoMod), as V8's code calls its fmod: wrap,
+// RayTrace's Chessboard wrapUp, left native code at every call, was no
+// longer called natively by its callers (notNative), and each of their
+// calls left native code in turn. Each answer is the interpreter's, -0's
+// sign included.
+func TestJITSSARemainder(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function wrap(t){t=t%2.0;if(t<-1)t+=2.0;if(t>=1)t-=2.0;return t}
+		function col(n){let s=0;for(let i=0;i<n;i++){s+=wrap(i*0.37-40)*wrap(i*0.11)}return s}
+		function sh(x){return Object.is(x,-0)?'-0':String(x)}
+		function md(x,y,n){let r=0;for(let i=0;i<n;i++)r=x%y;return r}
+		function odd(){return [md(5.5,-2,50),md(-0.5,1,50),md(-4,2,50),md(-0,5,50),md(3,0,50),md(-3,0,50),md(7,Infinity,50),md(-7,-Infinity,50),
+			md(Infinity,2,50),md(NaN,1,50),md(1,NaN,50),md(1e300,3,50),md(-(2**63),7,50),md(2**64+4096,2**63,50),md(5e-324,1e-323,50),md(-1e-300,1,50),
+			md(7,-1,50),md(-(2**53),-1,50),md(13,5,50)].map(sh).join()}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	col := r.global.getOwn(r.atoms.intern("col")).value.Object().fn().closure
+	wrap := r.global.getOwn(r.atoms.intern("wrap")).value.Object().fn().closure
+	md := r.global.getOwn(r.atoms.intern("md")).value.Object().fn().closure
+	rounds := []string{`sh(col(400))`, `sh(col(400))`, `sh(col(400))`, `sh(col(400))`, `sh(col(400))`, `odd()`, `odd()`, `odd()`}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hosts uint64
+		if e := r.jit.cache[weak.Make(col.fn)]; e != nil {
+			hosts = e.ssaStats.hosts
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 4 {
+			e := r.jit.cache[weak.Make(col.fn)]
+			if e == nil || e.ssa == nil {
+				t.Fatalf("col did not run natively: %+v", e)
+			}
+			if n := e.ssaStats.hosts - hosts; n != 0 {
+				t.Fatalf("col left native code %d times", n)
+			}
+			if w := r.jit.cache[weak.Make(wrap.fn)]; w != nil && (w.notNative || w.nativeOut != 0) {
+				t.Fatalf("wrap left native code when called natively: %+v", w)
+			}
+		}
+		if i == 7 {
+			if e := r.jit.cache[weak.Make(md.fn)]; e == nil || e.ssa == nil || e.ssaStats.hosts != 0 {
+				t.Fatalf("md did not run natively: %+v", e)
+			}
+		}
+	}
+}
+
 // TestJITSSAMathFunctions: every Math function of numbers runs natively,
 // as V8's code makes them -- an instruction of its own (a rounding, sign,
 // fround, max, min) or Go called from native code, the VM's very function

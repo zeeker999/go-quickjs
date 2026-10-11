@@ -1725,7 +1725,7 @@ func jitHostCall(ctx *abi.Context) bool {
 		return true
 	case ssa.GoCall:
 		return r.jitGoCall(ctx)
-	case ssa.GoPow, ssa.GoMath, ssa.GoAtan2, ssa.GoHypot:
+	case ssa.GoPow, ssa.GoMath, ssa.GoAtan2, ssa.GoHypot, ssa.GoMod:
 		// Two numbers' bits -- or one, and which function of it -- the
 		// result's in the first's place.
 		x, y := math.Float64frombits(ctx.GoArgs[0].Num), math.Float64frombits(ctx.GoArgs[1].Num)
@@ -1743,6 +1743,8 @@ func jitHostCall(ctx *abi.Context) bool {
 			z = fdlibm.Atan2(x, y)
 		case ssa.GoHypot:
 			z = jsHypot([]float64{x, y})
+		case ssa.GoMod:
+			z = jsMod(x, y)
 		}
 		ctx.GoArgs[0].Num = math.Float64bits(z)
 		return true

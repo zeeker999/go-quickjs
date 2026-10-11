@@ -198,6 +198,10 @@ type GoOp uint8
 // to the first's number word. GoMath, GoAtan2 and GoHypot are a Math
 // function too (OpMathCall): GoMath's of one number, which of the VM's
 // the second operand's number word says.
+//
+// GoMod is JavaScript's % of the two operands' number words where they are
+// not integers native code divides (OpModF64), as V8's code calls its
+// fmod: Go writes it to the first's number word.
 const (
 	GoAdd GoOp = 1 + iota
 	GoRefill
@@ -207,6 +211,7 @@ const (
 	GoAtan2
 	GoHypot
 	GoCall
+	GoMod
 )
 
 // RefillsPools reports whether a call takes an object from a pool, which

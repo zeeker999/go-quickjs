@@ -2412,10 +2412,29 @@ func (c *a64Compiler) integer(r arm64.Reg, x arm64.FReg, guard func(arm64.Cond))
 // divisor needs a case of its own.
 func (c *a64Compiler) remainder(v *ssa.Value, guard func(arm64.Cond)) {
 	x, y := c.fpr(v.Args[0], a64F0), c.fpr(v.Args[1], a64F1)
+	zero, done := c.a.NewLabel(), c.a.NewLabel()
+	divisor := c.stubLabel(v.State, exitKind(v.Aux))
+	if c.enc.CallGo != 0 {
+		// What is not integers Go computes (ssa.GoMod), the operands' bits
+		// in the context's GoArgs, from registers the checks below leave as
+		// they are.
+		size := int32(unsafe.Sizeof(abi.GoArg{}))
+		slow, stub := c.a.NewLabel(), divisor
+		guard, divisor = func(cond arm64.Cond) { c.a.BCond(cond, slow) }, slow
+		c.cold = append(c.cold, func() {
+			c.a.Bind(slow)
+			c.a.FMovFromF(a64A, x)
+			c.a.Store(a64Ctx, abi.OffGoArgs+c.enc.NumOffset, a64A)
+			c.a.FMovFromF(a64A, y)
+			c.a.Store(a64Ctx, abi.OffGoArgs+size+c.enc.NumOffset, a64A)
+			c.goSaving(uint64(ssa.GoMod), &stub)
+			c.a.LoadF(a64F0, a64Ctx, abi.OffGoArgs+c.enc.NumOffset)
+			c.a.B(done)
+		})
+	}
 	c.integer(a64A, x, guard)
 	c.integer(a64C, y, guard)
-	c.a.Cbz(a64C, c.stubLabel(v.State, exitKind(v.Aux)), true)
-	zero, done := c.a.NewLabel(), c.a.NewLabel()
+	c.a.Cbz(a64C, divisor, true)
 	c.a.Sdiv(a64B, a64A, a64C)
 	c.a.Msub(a64B, a64B, a64C, a64A)
 	c.a.Cbz(a64B, zero, true)

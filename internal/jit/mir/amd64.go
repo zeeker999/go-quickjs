@@ -2542,14 +2542,33 @@ func (c *compiler) holder(v *ssa.Value, guard func(amd64.Cond)) {
 // exact integers below 2**63 in magnitude, the divisor not zero. A zero
 // remainder takes the dividend's sign, -0 included, as fmod's does; a
 // divisor of -1 leaves exactly that without dividing, which could fault.
-// Anything else exits to Go, which computes it as math.Mod does: SSE has
-// no remainder, and Go computes one in software.
+// Anything else Go computes as math.Mod does -- SSE has no remainder, and
+// Go computes one in software -- called from here (ssa.GoMod), as V8's
+// code calls its fmod, or, from code that cannot call Go, after an exit.
 func (c *compiler) remainder(v *ssa.Value, guard func(amd64.Cond)) {
 	if x := c.xmm(v.Args[0], xScratch0); x != xScratch0 {
 		c.a.SSEOp(amd64.MovAPD, xScratch0, x)
 	}
 	if y := c.xmm(v.Args[1], xScratch1); y != xScratch1 {
 		c.a.SSEOp(amd64.MovAPD, xScratch1, y)
+	}
+	zero, done := c.a.NewLabel(), c.a.NewLabel()
+	if c.enc.CallGo != 0 {
+		// The operands' bits in the context's GoArgs, from the scratch
+		// registers the guards below leave as they are.
+		size := int32(unsafe.Sizeof(abi.GoArg{}))
+		slow, stub := c.a.NewLabel(), c.stubLabel(v.State, exitKind(v.Aux))
+		guard = func(cond amd64.Cond) { c.a.Jcc(cond, slow) }
+		c.cold = append(c.cold, func() {
+			c.a.Bind(slow)
+			c.a.MovQFromX(scratchA, xScratch0)
+			c.a.Store(regCtx, abi.OffGoArgs+c.enc.NumOffset, scratchA)
+			c.a.MovQFromX(scratchA, xScratch1)
+			c.a.Store(regCtx, abi.OffGoArgs+size+c.enc.NumOffset, scratchA)
+			c.goSaving(uint64(ssa.GoMod), &stub)
+			c.a.LoadSD(xScratch0, regCtx, abi.OffGoArgs+c.enc.NumOffset)
+			c.a.Jmp(done)
+		})
 	}
 	for _, p := range []struct {
 		r amd64.Reg
@@ -2563,7 +2582,6 @@ func (c *compiler) remainder(v *ssa.Value, guard func(amd64.Cond)) {
 	}
 	c.a.Op(amd64.Test, scratchC, scratchC, true)
 	guard(amd64.CondE)
-	zero, done := c.a.NewLabel(), c.a.NewLabel()
 	c.a.OpImm(amd64.Cmp, scratchC, -1, true)
 	c.a.Jcc(amd64.CondE, zero)
 	// IDIV takes RDX, the operands' base, which is reloaded after it.

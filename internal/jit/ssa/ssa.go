@@ -122,9 +122,11 @@ const (
 	OpSubF64
 	OpMulF64
 	OpDivF64
-	// OpModF64 is JavaScript's % of two numbers that are integers below
-	// 2**63 in magnitude, the divisor not zero; for anything else it exits
-	// to Go (Aux), which computes it as math.Mod.
+	// OpModF64 is JavaScript's % of two numbers, which native code divides
+	// where they are integers below 2**63 in magnitude, the divisor not
+	// zero; anything else Go computes, as math.Mod does -- a call of Go from
+	// native code that can make one (GoMod), an exit (Aux) from code that
+	// cannot.
 	OpModF64
 	OpNegF64 // flips the sign bit, as the slot IR does, NaN included
 	OpCmpF64 // Aux: ir.Lt, ir.Le, ir.Gt, ir.Ge, ir.Eq or ir.Ne -> bool
