@@ -6990,6 +6990,11 @@ func TestJITSSAInlineBudgetCallsNatively(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	// While the collector marks, native calls leave for Go (they take no
+	// pointer then): a marking that spans the counted round, as at
+	// GOMAXPROCS=1, would count as the calls' exits.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	setup := `function f0(x){return x+1} function f1(x){return x*2} function f2(x){return x-3} function f3(x){return x^5}
 		function f4(x){return x+7} function f5(x){return x*3} function f6(x){return x-11} function f7(x){return x^13}
 		function f8(x){return x+17} function f9(x){return x*5} function f10(x){return x-19} function f11(x){return x^23}
