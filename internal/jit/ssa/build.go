@@ -184,6 +184,15 @@ type GoOp uint8
 // with no write barrier, does not: the first operand is the value, the
 // second's pointer word the cell's address (mir's property stores).
 //
+// GoCall is a call, a method call or a construction -- the call at the
+// state's PC -- that Go makes with the operands, from the function or the
+// receiver on, as V8's code calls a function it has no code of its own
+// for: Go runs it, the callee's own native code or the interpreter, and
+// native code goes on with its result. Go refuses one native code does
+// not make at its function's own level (a native call's callee); one that
+// threw, or after which the code is to be compiled again, it makes and
+// leaves for Go to finish at the call's exit.
+//
 // GoPow is Math.pow of the two operands' number words where its answer is
 // not exact (OpPowF64), as V8's code calls its ieee754 pow: Go writes it
 // to the first's number word. GoMath, GoAtan2 and GoHypot are a Math
@@ -197,6 +206,7 @@ const (
 	GoMath
 	GoAtan2
 	GoHypot
+	GoCall
 )
 
 // RefillsPools reports whether a call takes an object from a pool, which
@@ -226,8 +236,9 @@ func popsElement(v *Value) bool {
 // (CallSite.Alloc), or adds an element past an array's last (Push).
 func allocOnly(v *Value) bool {
 	for _, c := range v.Calls {
-		// A call of Go makes what it returns, and writes nothing else.
-		if !c.Alloc && !c.Receiver && !c.Push && c.Go == 0 {
+		// A call of Go makes what it returns, and writes nothing else --
+		// but a call it makes (GoCall), which runs anything.
+		if !c.Alloc && !c.Receiver && !c.Push && (c.Go == 0 || c.Go == GoCall) {
 			return false
 		}
 	}
@@ -2089,13 +2100,18 @@ func (b *builder) instruction(blk *Block, pc int) {
 
 // nativeCalls are the functions the call at pc may call natively, if any
 // (CallSite): those the VM has seen it call, if speculation has not given
-// up on it and there is an entry after it to go on at.
+// up on it and there is an entry after it to go on at; or the call of Go
+// that makes it (GoCall), which speculates nothing.
 func (b *builder) nativeCalls(pc int) []*CallSite {
-	if b.fb == nil || pc+1 >= len(b.p.Code) || !reachable(b.p, pc+1) || b.fb.Generic(pc) {
+	if b.fb == nil || pc+1 >= len(b.p.Code) || !reachable(b.p, pc+1) {
 		return nil
 	}
+	generic := b.fb.Generic(pc)
 	var calls []*CallSite
 	for _, site := range b.fb.NativeCalls(pc) {
+		if site.Go == GoCall && (!b.goCalls() || len(calls) != 0) || site.Go != GoCall && generic {
+			continue
+		}
 		depth, after := b.p.Maps[pc].Depth, b.p.Maps[pc+1].Depth
 		operands := site.Argc + 1
 		if site.Method {

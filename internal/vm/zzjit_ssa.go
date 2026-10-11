@@ -593,7 +593,7 @@ func (e *jitEntry) reoptDue() bool {
 	if e.reopt || e.unwindReopt {
 		return true
 	}
-	return e.reoptPending() && (e.ssaStats.entries+e.ssaStats.hosts+e.nativeIn+uint64(e.slowTries) >= uint64(e.reoptBudget) ||
+	return e.reoptPending() && (e.ssaStats.entries+e.ssaStats.hosts+e.ssaStats.goCalls+e.nativeIn+uint64(e.slowTries) >= uint64(e.reoptBudget) ||
 		e.ssaStats.work >= uint64(e.reoptBudget)*jitReoptPer*jitReoptWork)
 }
 
@@ -641,6 +641,8 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	}
 	defer r.jitWantedCallees(e, fb)
 	old := e.ssa
+	// What the old code holds, which a call of Go suspended in it needs.
+	oldKeep := []any{e.ssaShapes, e.ssaHolders, e.ssaInlined, e.ssaPools, e.ssaCallees, e.ssaCells}
 	if len(fb.inlined) > len(e.ssaInlined) {
 		// It inlines more: its native callers may inline it now, and
 		// theirs, with it.
@@ -662,7 +664,7 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 		e.entrySlow = false
 	}
 	e.nativeEntry = code.EntryAddress(0)
-	old.Close()
+	r.jit.closeSSA(old, oldKeep)
 	r.jit.reoptimized++
 }
 
@@ -1126,6 +1128,18 @@ func (fb *jitFeedback) NativeCalls(pc int) []ssa.CallSite {
 		}
 		sites = append(sites, site)
 	}
+	if len(sites) == 0 {
+		// None it calls natively: Go makes it, called from native code
+		// (jitGoCall), as V8's code calls a function it has no code for.
+		call := fb.fn.Code[pc]
+		n := int(call.A) + 1
+		if call.Op == bytecode.OpCallMethod {
+			n++
+		}
+		if (call.Op == bytecode.OpCall || call.Op == bytecode.OpCallMethod || call.Op == bytecode.OpNew) && n <= abi.MaxGoArgs {
+			sites = append(sites, ssa.CallSite{Go: ssa.GoCall, Argc: int(call.A), Method: call.Op == bytecode.OpCallMethod, ThisSlot: -1})
+		}
+	}
 	return sites
 }
 
@@ -1411,6 +1425,8 @@ func jitHostCall(ctx *abi.Context) bool {
 		cell := *(**Value)(unsafe.Pointer(&ctx.GoArgs[1].Ref))
 		*cell = jitGoArg(ctx, 0)
 		return true
+	case ssa.GoCall:
+		return r.jitGoCall(ctx)
 	case ssa.GoPow, ssa.GoMath, ssa.GoAtan2, ssa.GoHypot:
 		// Two numbers' bits -- or one, and which function of it -- the
 		// result's in the first's place.
@@ -1434,6 +1450,142 @@ func jitHostCall(ctx *abi.Context) bool {
 		return true
 	}
 	return false
+}
+
+// jitGoRun is what a run of native code in a context runs: its frame,
+// entry and code (jitState's goRuns).
+type jitGoRun struct {
+	f      *frame
+	e      *jitEntry
+	code   *jit.SSACode
+	pinned bool
+}
+
+// jitGoUnpin ends what calls of Go the run in context idx made: its code,
+// which native code has left, may be closed now, and the code retired
+// meanwhile that no other call is suspended in is.
+func (r *Runtime) jitGoUnpin(idx int) {
+	s := r.jit
+	s.goRuns[idx].pinned = false
+	s.goPinned = s.goPinned[:len(s.goPinned)-1]
+	if len(s.retired) != 0 {
+		r.jitCloseRetired()
+	}
+}
+
+// jitGoRunAt notes that context idx runs e's code for f.
+func (r *Runtime) jitGoRunAt(idx int, f *frame, e *jitEntry) {
+	s := r.jit
+	if idx >= len(s.goRuns) {
+		s.goRuns = append(s.goRuns, make([]jitGoRun, idx+1-len(s.goRuns))...)
+	}
+	s.goRuns[idx] = jitGoRun{f: f, e: e, code: e.ssa}
+}
+
+// jitGoPending is a call Go made from native code and left native code
+// after (jitGoCall): at its exit, Go puts its result, or throws.
+type jitGoPending struct {
+	set bool
+	pc  int
+	v   Value
+	err error
+}
+
+// jitRetired is code compiled again or dropped while a call of Go was
+// suspended in it, with what it holds (closeSSA).
+type jitRetired struct {
+	code *jit.SSACode
+	keep any
+}
+
+// closeSSA closes code, unless a call of Go is suspended in it, which
+// returns there: then code and keep, what it holds -- the shapes it
+// compares, the objects and pools it reads -- stay until none is.
+func (s *jitState) closeSSA(code *jit.SSACode, keep any) error {
+	if code != nil && slices.Contains(s.goPinned, code) {
+		s.retired = append(s.retired, jitRetired{code, keep})
+		return nil
+	}
+	return code.Close()
+}
+
+// jitGoCall makes, for native code, the call at its exit PC, from the
+// operands it passed (ssa.GoCall), as an exit there would have Go make it
+// (jitHost): with the call's operands where the interpreter has them, its
+// result in the call's keep cell. Native code goes on, as V8's goes on
+// after a call of a function it has no code for, rather than leaving. Only
+// at a run's own level: a native call's callee has no frame of the VM's
+// for a stack trace to show. A call that threw, or after which the code
+// is due to be compiled again, or the runtime stopped, is left for Go to
+// finish at its exit (goPending).
+func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
+	s := r.jit
+	idx := int(ctx.Level)
+	if ctx.Live != 0 || idx >= len(s.goRuns) || s.goRuns[idx].f == nil || s.ssaCtxs[idx] != ctx {
+		return false
+	}
+	run := s.goRuns[idx]
+	f, e := run.f, run.e
+	pc, depth := int(ctx.ExitPC), int(ctx.ExitDepth)
+	if pc >= len(f.cl.fn.Code) {
+		return false
+	}
+	in := f.cl.fn.Code[pc]
+	n := int(in.A) + 1
+	switch in.Op {
+	case bytecode.OpCallMethod:
+		n++
+	case bytecode.OpCall, bytecode.OpNew:
+	default:
+		return false
+	}
+	sp := f.base + depth
+	if n > abi.MaxGoArgs || depth < n {
+		return false
+	}
+	for i := range n {
+		r.stack[sp-n+i] = jitGoArg(ctx, i)
+	}
+	e.ssaStats.goCalls++
+	s.goCalls++
+	r.jitCallSeen(f, e, pc, sp, in)
+	// Past its call meanwhile, as the interpreter's frame is during one,
+	// which a stack trace shows.
+	f.pc = uint32(pc + 1)
+	last, shared, from := s.ssaCtx, s.ssaShared, s.ssaSharedFrom
+	if !run.pinned {
+		// Until its native code leaves (jitGoUnpin).
+		s.goPinned = append(s.goPinned, run.code)
+		s.goRuns[idx].pinned = true
+	}
+	v, _, err := r.jitCallAt(in, sp)
+	s.ssaCtx = last
+	if s.ssaShared != shared || s.ssaSharedFrom != from {
+		// What the call ran shared other values with the contexts past
+		// this one, which this code's calls run in.
+		r.jitShareContexts(idx, f)
+	}
+	if err != nil || r.stopped != nil || e.reoptDue() || e.ssa != run.code {
+		s.goPending = jitGoPending{set: true, pc: pc, v: v, err: err}
+		return false
+	}
+	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
+	return true
+}
+
+// jitCloseRetired closes the retired code no call of Go is suspended in.
+func (r *Runtime) jitCloseRetired() {
+	s := r.jit
+	kept := s.retired[:0]
+	for _, x := range s.retired {
+		if slices.Contains(s.goPinned, x.code) {
+			kept = append(kept, x)
+			continue
+		}
+		x.code.Close()
+	}
+	clear(s.retired[len(kept):])
+	s.retired = kept
 }
 
 // jitPlainOperand reports whether v is a primitive + takes without a
@@ -2787,6 +2939,8 @@ func (r *Runtime) jitRecordValue(f *frame, e *jitEntry, ctx *abi.Context, i int)
 type jitSSAStats struct {
 	entries, hosts, guards, polls, records uint64
 	ended, work                            uint64
+	// goCalls counts the calls native code had Go make (jitGoCall).
+	goCalls uint64
 	// guardsAt counts failed guards by their site (abi.Context.ExitSite:
 	// the slot IR PC of the operation, or -1 for an entry's speculation);
 	// nil until one fails.
@@ -2913,6 +3067,9 @@ func (r *Runtime) jitRunDone(e *jitEntry, idx, top int) {
 	s := r.jit
 	e.ssaRuns--
 	s.ctxTop = top
+	if idx < len(s.goRuns) {
+		s.goRuns[idx] = jitGoRun{}
+	}
 	c := s.ssaCtxs[idx]
 	clear(c.Keep[:e.ssaKeeps])
 	c.This, c.Upvalues = abi.Slot{}, nil
@@ -2964,11 +3121,15 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 		s.ssaEntries++
 		e.ssaStats.entries++
 		start, edges := pc, r.backEdges
+		r.jitGoRunAt(idx, f, e)
 		var err error
 		if resume != 0 {
 			err, resume = e.ssa.Resume(resume, s.ssaCtxs[idx+1]), 0
 		} else {
 			err = e.ssa.Run(pc, ctx)
+		}
+		if s.goRuns[idx].pinned {
+			r.jitGoUnpin(idx)
 		}
 		if err != nil {
 			return r.jitInterpret(f, f.base+depth, nil)
@@ -3083,6 +3244,25 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 			exitPC := int(ctx.ExitPC)
 			in := f.cl.fn.Code[exitPC]
 			f.pc = uint32(exitPC)
+			if p := s.goPending; p.set {
+				// A call Go made from native code (jitGoCall), its result or
+				// its throw here.
+				s.goPending = jitGoPending{}
+				if p.pc == exitPC {
+					sp, ok := r.jitCallResult(f, exitPC, int(ctx.ExitDepth), p.v, p.err)
+					if !ok || r.stopped != nil {
+						return r.jitInterpret(f, sp, p.err)
+					}
+					pc, depth = int(f.pc), sp-f.base
+					if e.reoptDue() {
+						r.jitReoptimize(f.cl, e)
+					}
+					if !e.ssa.HasEntry(pc) || e.entrySlow {
+						return r.jitInterpret(f, sp, nil)
+					}
+					continue
+				}
+			}
 			switch in.Op {
 			case bytecode.OpCall, bytecode.OpCallMethod, bytecode.OpNew:
 				r.jitCallSeen(f, e, exitPC, f.base+int(ctx.ExitDepth), in)

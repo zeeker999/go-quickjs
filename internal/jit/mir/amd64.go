@@ -789,6 +789,13 @@ func (c *compiler) goCall(v *ssa.Value, site *ssa.CallSite, guard func(amd64.Con
 		c.a.Bind(have)
 		c.a.Store(regCtx, at+c.enc.RefOffset, scratchB)
 	}
+	if site.Go == ssa.GoCall {
+		// Which call, as an exit at it says.
+		c.a.MovImm(scratchA, uint64(v.State.PC))
+		c.a.Store(regCtx, abi.OffExitPC, scratchA)
+		c.a.MovImm(scratchA, uint64(v.State.Depth))
+		c.a.Store(regCtx, abi.OffExitDepth, scratchA)
+	}
 	c.callGo(v, uint64(site.Go), v.Index)
 }
 
