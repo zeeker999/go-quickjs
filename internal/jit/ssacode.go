@@ -99,6 +99,17 @@ func (s *SSACode) Resume(addr uintptr, ctx *abi.Context) error {
 	return nil
 }
 
+// Contains reports whether addr is in s's code, which is open: where a
+// native call in it returns to (abi.Context.ReturnTo) is, and in no other
+// code, though the function was compiled again since.
+func (s *SSACode) Contains(addr uintptr) bool {
+	if s == nil || len(s.code) == 0 {
+		return false
+	}
+	base := uintptr(unsafe.Pointer(&s.code[0]))
+	return addr >= base && addr < base+uintptr(len(s.code))
+}
+
 // Size is the executable memory s owns.
 func (s *SSACode) Size() int {
 	if s == nil {

@@ -4924,9 +4924,9 @@ func TestJITSSANativeCallsGoOn(t *testing.T) {
 	// of whose calls Go then makes is rightly demoted: not here.
 	runtime.GC()
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
-	setup := `var A={v:3},B={v:5},o={p:A},c={n:0};
-		function tick(){c.n++;o.p=(c.n&1)?B:A;if(c.n%50===0)return String(c.n).length;return c.n&3}
-		function zero(){return tick()}
+	setup := `var A={v:3},B={v:5},o={p:A},c={n:0},L={get n(){return String(c.n).length}};
+		function tick(){c.n++;o.p=(c.n&1)?B:A;if(c.n%50===0)return L.n;return c.n&3}
+		function zero(){let z=0;for(let j=0;j<1;j++)z=tick();return z}
 		function f(n){let s=0.5,t=0,p=o.p;for(let i=0;i<n;i++){s=s*1.0001+zero();t=(t+p.v)|0;s+=i*0.5}return [s,t,p.v,c.n].join()}`
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
@@ -4973,8 +4973,8 @@ func TestJITSSANativeCallResumes(t *testing.T) {
 	}
 	runtime.GC()
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
-	setup := `var A={v:3},B={v:5},o={p:A},c={n:0};
-		function tick(){c.n++;o.p=(c.n&1)?B:A;if(c.n%50===0)return String(c.n).length;return c.n&3}
+	setup := `var A={v:3},B={v:5},o={p:A},c={n:0},L={get n(){return String(c.n).length}};
+		function tick(){c.n++;o.p=(c.n&1)?B:A;if(c.n%50===0)return L.n;return c.n&3}
 		function f(n){let s=0.5,t=0,p=o.p;for(let i=0;i<n;i++){s=s*1.0001+tick();t=(t+p.v)|0;s+=i*0.5}return [s,t,p.v,c.n].join()}
 		function raise(s){throw new Error("e"+s)}
 		function boom(i){let s=i;for(let j=0;j<2;j++)s=s*2;if(c.n++%97===0)raise(s);return s}
@@ -5085,8 +5085,8 @@ func TestJITSSACallSeenWhileCalleeLeaves(t *testing.T) {
 	// as calls leaving native code.
 	runtime.GC()
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
-	setup := `var mode=0;
-		function leaf(a){if(mode)return (a*3)|0;return String(a).length}
+	setup := `var mode=0,L={a:0,get n(){return String(this.a).length}};
+		function leaf(a){if(mode)return (a*3)|0;L.a=a;return L.n}
 		function other(n){let t=0;for(let i=0;i<n;i++)t=(t+leaf(i))|0;return t}
 		function outer(n){let t=0;for(let i=0;i<n;i++){t=(t+leaf(i))|0;for(let j=0;j<40;j++)t=(t*3+j)|0}return t}`
 	rounds := []string{`String(other(500))`, `String(other(500))`, `String(outer(500))`, `mode=1;String(outer(2000))`}
@@ -6154,9 +6154,10 @@ func TestJITSSANativeCallTargets(t *testing.T) {
 		function inc(x){x.c=(x.c|0)+1;return x.c}
 		function leaf(x){return inc(x)+inc(x)}
 		function useLeaf(o,n){let t=0;for(let i=0;i<n;i++)t=(t+leaf(o))|0;return t}
-		function leave(i){return String(i).length}
+		var L={a:0,get n(){return String(this.a).length}};
+		function leave(i){L.a=i;return L.n}
 		function useLeave(n){let t=0;for(let i=0;i<n;i++)t=(t+leave(i))|0;return t}
-		function two(n,k){if(n===0)return k%16===0?String(k).length:1;let a=two(n-1,k);let b=two(n-1,k);return a+b}
+		function two(n,k){if(n===0){if(k%16!==0)return 1;L.a=k;return L.n}let a=two(n-1,k);let b=two(n-1,k);return a+b}
 		function drive(n){let t=0;for(let i=0;i<n;i++)t=(t+two(4,i))|0;return t}
 		var four=[new A(1),new B(2),new C(3),new D],five=[new A(4),new B(5),new C(6),new D,new E],lo={c:0};`
 	src := `[poly(four,400),useLeaf(lo,300),useLeave(300),drive(64)].join()`
@@ -6327,7 +6328,9 @@ func TestJITSSACallerDroppedWhileItsCalleeLeaves(t *testing.T) {
 	// Native calls are Go's while the collector marks.
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	for _, tc := range []struct{ name, setup, run, last string }{
-		{"call", `function leave(x){if(x===200)host();return x*3+1}
+		// The callee leaves at its read of a getter, which drops the
+		// caller's code.
+		{"call", `var H={get g(){host();return 0}};function leave(x){let y=x;for(let j=0;j<1;j++)y=y*3+1;if(x===200)H.g;return y}
 			function caller(n){let s=0;for(let i=0;i<n;i++)s=(s+leave(i)*2)|0;return s}`,
 			`[caller(300),caller(300)].join()`, `[caller(300),caller(300)].join()`},
 		// The inlined callee leaves at its read of v, which meets a getter
@@ -7722,6 +7725,113 @@ func TestJITSSAReadsWhatIsNotANumber(t *testing.T) {
 			}
 			if e.notNative || e.nativeOut != out {
 				t.Fatalf("sp left native code %d times when called natively (notNative %v, failed %v)", e.nativeOut-out, e.notNative, e.failed)
+			}
+		}
+	}
+}
+
+// Code a native call runs has Go make the calls it has no native code for
+// (jitGoCallNested), as code at a run's own level does, and goes on: inner,
+// called natively by mid, called natively by top, calls probe, a Go
+// function, and String; it had left native code at every such call, and
+// Go had finished each level. While a call runs, each level has a frame,
+// as the interpreter's has: a stack trace shows every one, at its call.
+// A throw goes through the levels to outer's catch; a call that compiles
+// a level's function again, or drops outer's code, has the levels go on
+// where they can. Each answer, and each stack, is the interpreter's.
+func TestJITSSAGoCallsFromNativeCallees(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	// While the collector marks, Go makes native calls, which would count
+	// as calls leaving native code.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var c={n:0,mode:0};
+		function inner(x){let s=x;for(let j=0;j<1;j++)s=s*2+1;if(c.n++%50===0)s+=probe(x);return s+String(x).length}
+		function mid(x){let s=0;for(let j=0;j<1;j++)s=inner(x)+1;return s}
+		function top(x){let s=0;for(let j=0;j<40;j++)s=(s*3+j)|0;return (s+mid(x)*2)|0}
+		function outer(n){let t=0;for(let i=0;i<n;i++){try{t=(t+top(i))|0}catch(e){t=(t+e.message.length)|0}t^=t>>>3}return t}
+		function sum(n){let t=0;for(let i=0;i<n;i++)t=(t+top(i&7))|0;return t}
+		function fib(n){if(n<2)return n;let a=fib(n-1);let b=fib(n-2);for(let i=0;i<1;i++)a=a|0;return a+b}`
+	var stacks [2][]string
+	var dropCaller bool
+	install := func(rt *Runtime, k int) {
+		rt.global.setOwnRaw(rt.atoms.intern("probe"), rt.NewFunction("probe", 1,
+			func(rt *Runtime, _ Value, args []Value) (Value, error) {
+				var names []string
+				for _, e := range rt.captureStack() {
+					names = append(names, fmt.Sprintf("%s:%d:%d", e.Function, e.Line, e.Column))
+				}
+				stacks[k] = names
+				switch rt.global.getOwn(rt.atoms.intern("c")).value.Object().getOwn(rt.atoms.intern("mode")).value.num {
+				case 1:
+					return Undefined, rt.throwTypeError("probe %d", len(names))
+				case 2:
+					if k == 1 && dropCaller && rt.jit != nil {
+						cl := rt.global.getOwn(rt.atoms.intern("outer")).value.Object().fn().closure
+						if e := rt.jit.hint(cl.hint()); e != nil {
+							rt.jit.dropEntry(weak.Make(cl.fn), e)
+						}
+					}
+				}
+				return Int(len(names)), nil
+			}), propDefault)
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	install(want, 0)
+	install(r, 1)
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry := func(name string) *jitEntry {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		return r.jit.cache[weak.Make(cl.fn)]
+	}
+	rounds := []string{`String(outer(400))`, `String(outer(400))`, `String(outer(400))`, `String(outer(400))`,
+		`c.mode=1;String(outer(400))`, `c.mode=2;String(outer(400))`, `String([sum(200),fib(12)])`}
+	for i, src := range rounds {
+		dropCaller = i == 5
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 3 {
+			// A budget that does not run out: the interrupt check, a loop's,
+			// is not a call leaving.
+			r.backEdges = 1 << 30
+		}
+		hosts, goCalls := r.jit.hosts, r.jit.goCalls
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if got, want := strings.Join(stacks[1], " "), strings.Join(stacks[0], " "); got != want {
+			t.Fatalf("round %d: stack in probe %s, interpreter's %s", i, got, want)
+		}
+		if i == 3 {
+			e := entry("inner")
+			if e == nil || e.ssa == nil || e.notNative || e.ssaStats.goCalls == 0 {
+				t.Fatalf("inner did not call Go natively: %+v", e)
+			}
+			for _, name := range []string{"mid", "top"} {
+				if m := entry(name); m == nil || m.ssa == nil || len(m.nativeCalls) == 0 {
+					t.Fatalf("%s does not call natively: %+v", name, m)
+				}
+			}
+			if n := r.jit.hosts - hosts; n != 0 {
+				t.Fatalf("native code left for Go %d times", n)
+			}
+			if n := r.jit.goCalls - goCalls; n < 400 {
+				t.Fatalf("Go made %d calls for native code, of 400 or more", n)
 			}
 		}
 	}

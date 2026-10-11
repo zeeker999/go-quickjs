@@ -1789,6 +1789,10 @@ type jitGoRun struct {
 	e      *jitEntry
 	code   *jit.SSACode
 	pinned bool
+	// pinnedAt is where its pins start in goPinned: its own code, then
+	// that of the native callees whose calls of Go it is suspended in
+	// (jitGoCallNested), all released when its native code leaves.
+	pinnedAt int
 }
 
 // jitGoUnpin ends what calls of Go the run in context idx made: its code,
@@ -1797,7 +1801,8 @@ type jitGoRun struct {
 func (r *Runtime) jitGoUnpin(idx int) {
 	s := r.jit
 	s.goRuns[idx].pinned = false
-	s.goPinned = s.goPinned[:len(s.goPinned)-1]
+	clear(s.goPinned[s.goRuns[idx].pinnedAt:])
+	s.goPinned = s.goPinned[:s.goRuns[idx].pinnedAt]
 	if len(s.retired) != 0 {
 		r.jitCloseRetired()
 	}
@@ -1813,10 +1818,13 @@ func (r *Runtime) jitGoRunAt(idx int, f *frame, e *jitEntry) {
 }
 
 // jitGoPending is a call Go made from native code and left native code
-// after (jitGoCall): at its exit, Go puts its result, or throws.
+// after (jitGoCall): at its exit, Go puts its result, or throws. ctx is the
+// level of the code that made it: a run's own, or a native callee's
+// (jitGoCallNested), which Go finishes at its exit (jitFinishExit).
 type jitGoPending struct {
 	set bool
 	pc  int
+	ctx int
 	v   Value
 	err error
 }
@@ -1853,6 +1861,9 @@ func (s *jitState) closeSSA(code *jit.SSACode, keep any) error {
 func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	s := r.jit
 	idx := int(ctx.Level)
+	if ctx.Live == abi.LiveCall {
+		return r.jitGoCallNested(ctx, idx)
+	}
 	if ctx.Live != 0 || idx >= len(s.goRuns) || s.goRuns[idx].f == nil || s.ssaCtxs[idx] != ctx {
 		return false
 	}
@@ -1887,11 +1898,7 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	// which a stack trace shows.
 	f.pc = uint32(pc + 1)
 	last, shared, from := s.ssaCtx, s.ssaShared, s.ssaSharedFrom
-	if !run.pinned {
-		// Until its native code leaves (jitGoUnpin).
-		s.goPinned = append(s.goPinned, run.code)
-		s.goRuns[idx].pinned = true
-	}
+	r.jitGoPin(idx)
 	v, _, err := r.jitCallAt(in, sp)
 	clear(r.stack[top:sp])
 	r.stackTop = top
@@ -1902,7 +1909,128 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 		r.jitShareContexts(idx, f)
 	}
 	if err != nil || r.stopped != nil || e.reoptDue() || e.ssa != run.code {
-		s.goPending = jitGoPending{set: true, pc: pc, v: v, err: err}
+		s.goPending = jitGoPending{set: true, pc: pc, ctx: idx, v: v, err: err}
+		return false
+	}
+	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
+	return true
+}
+
+// jitGoPin pins the code the run in context idx runs, until its native code
+// leaves (jitGoUnpin), if it has not been yet.
+func (r *Runtime) jitGoPin(idx int) {
+	s := r.jit
+	if run := &s.goRuns[idx]; !run.pinned {
+		run.pinned, run.pinnedAt = true, len(s.goPinned)
+		s.goPinned = append(s.goPinned, run.code)
+	}
+}
+
+// jitGoCallNested is jitGoCall for code a native call runs (abi.LiveCall),
+// as V8's code calls a function it has no code of its own for wherever it
+// is inlined or called: RayTrace's rayTrace, called natively, constructs
+// what it could not inline by a call of Go, and had left native code at
+// every such call, its callers' too, Go finishing each level. The
+// levels from the run's own up to this one have no frames of the VM's;
+// each is given one while the call runs, as the interpreter's frame is
+// during a call -- its function, its receiver, past the call it makes --
+// for a stack trace, and the depth of calls, to show, made as jitUnwindNative
+// makes them and popped after. The code of each level is pinned until the
+// run's native code leaves: what the call runs may compile any of them
+// again. A call that threw, or after which this code is due to be compiled
+// again, is left for Go to finish at its exit (goPending), as at a run's
+// own level.
+func (r *Runtime) jitGoCallNested(ctx *abi.Context, idx int) bool {
+	s := r.jit
+	if idx >= len(s.ssaCtxs) || s.ssaCtxs[idx] != ctx {
+		return false
+	}
+	root := idx - 1
+	for root >= 0 && s.ssaCtxs[root].Live == abi.LiveCall {
+		root--
+	}
+	if root < 0 || s.ssaCtxs[root].Live != 0 || root >= len(s.goRuns) || s.goRuns[root].f == nil {
+		return false
+	}
+	run := s.goRuns[root]
+	var e *jitEntry
+	for i := root + 1; i <= idx; i++ {
+		c := s.ssaCtxs[i]
+		cl := (*closure)(c.Closure)
+		if cl == nil {
+			return false
+		}
+		if e = s.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil || int(c.ExitPC) >= len(cl.fn.Code) {
+			return false
+		}
+	}
+	cl := (*closure)(ctx.Closure)
+	pc, depth := int(ctx.ExitPC), int(ctx.ExitDepth)
+	in := cl.fn.Code[pc]
+	n := int(in.A) + 1
+	switch in.Op {
+	case bytecode.OpCallMethod:
+		n++
+	case bytecode.OpCall, bytecode.OpNew:
+	default:
+		return false
+	}
+	top := r.stackTop
+	if n > abi.MaxGoArgs || depth < n || top+n > len(r.stack) {
+		return false
+	}
+	// The run's code, and each level's, pinned.
+	r.jitGoPin(root)
+	for i := root + 1; i <= idx; i++ {
+		code := s.cache[weak.Make((*closure)(s.ssaCtxs[i].Closure).fn)].ssa
+		if !slices.Contains(s.goPinned[s.goRuns[root].pinnedAt:], code) {
+			s.goPinned = append(s.goPinned, code)
+		}
+	}
+	code := e.ssa
+	// The run's frame past the call it makes, and a frame for each level.
+	run.f.pc = uint32(s.ssaCtxs[root].ExitPC) + 1
+	depthBefore := r.frameDepth
+	var f *frame
+	for i := root + 1; i <= idx; i++ {
+		c := s.ssaCtxs[i]
+		lcl := (*closure)(c.Closure)
+		base := int(c.Base)
+		f = r.pushFrame()
+		f.cl = lcl
+		f.locals = r.stack[base : base+lcl.fn.LocalCount : base+lcl.fn.LocalCount]
+		f.base = base + lcl.fn.LocalCount
+		f.pc = uint32(c.ExitPC) + 1
+		f.this, f.newTarget, f.callee, f.args = *(*Value)(unsafe.Pointer(&c.This)), Undefined, nil, nil
+		f.openUpvalues, f.handlers = f.openUpvalues[:0], f.handlers[:0]
+		f.thisRef, f.withScopes, f.evalVars, f.native, f.savedSP = nil, nil, nil, "", 0
+	}
+	for i := range n {
+		r.stack[top+i] = jitGoArg(ctx, i)
+	}
+	sp := top + n
+	r.stackTop, r.stackHigh = sp, max(r.stackHigh, sp)
+	e.ssaStats.goCalls++
+	s.goCalls++
+	r.jitCallSeen(f, e, pc, sp, in)
+	last, shared, from := s.ssaCtx, s.ssaShared, s.ssaSharedFrom
+	// What the call runs natively runs in contexts past the levels', which
+	// hold their state until they go on.
+	ctxTop := s.ctxTop
+	s.ctxTop = max(ctxTop, idx+1)
+	v, _, err := r.jitCallAt(in, sp)
+	s.ctxTop = ctxTop
+	clear(r.stack[top:sp])
+	r.stackTop = top
+	r.frameDepth = depthBefore
+	s.ssaCtx = last
+	if s.ssaShared != shared || s.ssaSharedFrom != from {
+		// What the call ran shared other values with the contexts past
+		// the run's, which its levels' calls run in.
+		r.jitShareContexts(root, run.f)
+	}
+	if err != nil || r.stopped != nil || e.reoptDue() || e.ssa != code {
+		s.goPending = jitGoPending{set: true, pc: pc, ctx: idx, v: v, err: err}
 		return false
 	}
 	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
@@ -3903,7 +4031,7 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 			// one, which a stack trace shows (stackFrame).
 			f.pc = uint32(exitPC) + 1
 			v, err := r.jitUnwindNative(idx, e, f.cl.fn)
-			if err == nil && r.stopped == nil && back != 0 && e.ssa == code && code.Size() != 0 && !jit.Marking() {
+			if err == nil && r.stopped == nil && back != 0 && e.ssa == code && code.Contains(back) && !jit.Marking() {
 				// Native code run meanwhile may have used the context.
 				c.Base, c.Live, c.ReturnTo = base, 0, 0
 				*(*Value)(unsafe.Pointer(&c.RetValue)) = v
@@ -3996,7 +4124,7 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 				// A call Go made from native code (jitGoCall), its result or
 				// its throw here.
 				s.goPending = jitGoPending{}
-				if p.pc == exitPC {
+				if p.pc == exitPC && p.ctx == idx {
 					sp, ok := r.jitCallResult(f, exitPC, int(ctx.ExitDepth), p.v, p.err)
 					if !ok || r.stopped != nil {
 						return r.jitInterpret(f, sp, p.err)
@@ -4363,7 +4491,7 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 		if k == n-1 {
 			v, err = r.jitFinishExit(f, e, &l)
 		} else if !l.inline && !next.inline && next.returnTo != 0 && err == nil && r.stopped == nil &&
-			e != nil && e.ssa != nil && e.ssa == next.code && next.code.Size() != 0 && !jit.Marking() {
+			e != nil && e.ssa != nil && e.ssa.Contains(next.returnTo) && !jit.Marking() {
 			// Its native code goes on where the call returns to, as runSSA's
 			// does after a callee leaves: its context, spills and keeps are
 			// as it left them, and its callee's, frame base included.
@@ -4612,6 +4740,23 @@ func (r *Runtime) jitFinishExit(f *frame, e *jitEntry, l *jitNativeLevel) (Value
 	case abi.ExitEnter:
 		return r.jitEnterCallee(f, e, l.ctx)
 	case abi.ExitHost:
+		if p := r.jit.goPending; p.set {
+			// A call Go made from this native code (jitGoCallNested), its
+			// result or its throw here.
+			r.jit.goPending = jitGoPending{}
+			if p.pc == pc && p.ctx == l.ctx {
+				sp, ok := r.jitCallResult(f, pc, depth, p.v, p.err)
+				if !ok || r.stopped != nil {
+					v, err, _ := r.jitInterpret(f, sp, p.err)
+					return v, err
+				}
+				if e != nil && e.ssa != nil && e.reoptDue() {
+					r.jitReoptimize(f.cl, e)
+				}
+				pc, depth = int(f.pc), sp-f.base
+				break
+			}
+		}
 		// What it learns here it learns as runSSA's exits do: a function
 		// only native callers run is entered from Go nowhere else.
 		in := f.cl.fn.Code[pc]
