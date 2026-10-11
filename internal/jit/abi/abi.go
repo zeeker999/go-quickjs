@@ -181,8 +181,9 @@ type GoArg struct {
 	Ref uintptr
 }
 
-// MaxGoArgs is how many operands a call of Go takes.
-const MaxGoArgs = 2
+// MaxGoArgs is how many operands a call of Go takes: a call's (ssa.GoCall)
+// function, receiver and up to six arguments.
+const MaxGoArgs = 8
 
 // ExitDescriptor is an exit's frame state as data (an ExitTable exit): the
 // slots to write and where each one's value is, the inlined callees'

@@ -726,9 +726,9 @@ func TestJITSSAGlobals(t *testing.T) {
 	}
 }
 
-// A call leaves the new pipeline's code once: the callee, a global, and an
-// argument read from an object stay native, carried by their cells, though
-// only Go uses them. (h stores, so it is not inlined; TestJITSSAInline
+// A call goes to Go once: the callee, a global, and an argument read from
+// an object stay native, carried by their cells, though only Go uses them;
+// Go makes the call from native code (ssa.GoCall), or after an exit. (h stores, so it is not inlined; TestJITSSAInline
 // inlines.) The loops do enough besides to be worth running natively
 // (jitSSAProfit). A function compiled at its first call, before the
 // interpreter has run its global reads, finds the global where the global
@@ -768,7 +768,7 @@ func TestJITSSACallExits(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		before := r.JITStats()
+		before, goCalls := r.JITStats(), r.jit.goCalls
 		gv, err := r.Run(compileForTest(t, round.src))
 		if err != nil {
 			t.Fatal(err)
@@ -780,8 +780,8 @@ func TestJITSSACallExits(t *testing.T) {
 		if st.SSAEntries == before.SSAEntries {
 			t.Fatalf("round %d never entered the new pipeline: %+v", i, st)
 		}
-		if hosts := st.Hosts - before.Hosts; round.hosts != 0 && hosts != round.hosts {
-			t.Fatalf("round %d: %d exits to Go, want one per call (%d)", i, hosts, round.hosts)
+		if hosts := st.Hosts - before.Hosts + r.jit.goCalls - goCalls; round.hosts != 0 && hosts != round.hosts {
+			t.Fatalf("round %d: %d exits to Go and calls of Go, want one per call (%d)", i, hosts, round.hosts)
 		}
 	}
 }
@@ -1548,16 +1548,19 @@ func TestJITSSAManySpills(t *testing.T) {
 
 // A function whose native stretches mostly end leaving for Go after little
 // work runs in the tree tier once its first stretches show it
-// (jitSSAProfit): a loop calling a method through Go at every iteration
-// costs more at the exits than native code saves. A loop doing real work
-// between its calls to Go stays native.
+// (jitSSAProfit): a loop leaving at every iteration for a call of more
+// arguments than Go is called with from native code (abi.MaxGoArgs) costs
+// more at the exits than native code saves. A loop doing real work stays
+// native, and so does one whose calls Go makes from native code, which
+// leaves nothing (ssa.GoCall).
 func TestJITSSAProfitability(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
 	// m reads arguments: Go calls it, never native code (jitNativeCallee).
 	setup := `function O(){this.v=0}O.prototype.m=function(i){this.v+=arguments[0];return this.v};
-		function calls(o,n){let s=0;for(let i=0;i<n;i++)s+=o.m(i);return s}
+		function calls(o,n){let s=0;for(let i=0;i<n;i++)s+=o.m(i,1,2,3,4,5,6);return s}
+		function gocalls(o,n){let s=0;for(let i=0;i<n;i++)s+=o.m(i);return s}
 		function work(n){let s=0;for(let i=0;i<n;i++){s=(s*31+i)|0;s^=s>>>7;s=(s+i*i)|0;if(i%100==0)s+=Math.abs(i)}return s}
 		var o=new O;`
 	want := New(Config{})
@@ -1570,7 +1573,7 @@ func TestJITSSAProfitability(t *testing.T) {
 		}
 	}
 	for i := 0; i < 3; i++ {
-		src := `[calls(o,500),work(2000)].join()`
+		src := `[calls(o,500),work(2000),gocalls(o,500)].join()`
 		wv, err := want.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatal(err)
@@ -1592,6 +1595,9 @@ func TestJITSSAProfitability(t *testing.T) {
 	}
 	if e := entry("work"); e == nil || e.ssa == nil || e.entrySlow {
 		t.Fatalf("work left native code: %+v", e)
+	}
+	if e := entry("gocalls"); e == nil || e.ssa == nil || e.entrySlow || e.ssaStats.goCalls == 0 || e.ssaStats.hosts != 0 {
+		t.Fatalf("gocalls did not stay native, its calls Go's: %+v", e)
 	}
 }
 
@@ -3616,8 +3622,8 @@ func TestJITSSAReoptimize(t *testing.T) {
 // read from its cell, so a method reassigned in place, even mid-loop, is
 // the new one, and one shadowed, a prototype replaced or a method added
 // between them fails a check and is read by Go. Each answer is the
-// interpreter's, and only the calls leave native code: m stores, so it is
-// not inlined (TestJITSSAInline inlines). Its store gives the receiver a
+// interpreter's, and only the calls go to Go, called from native code
+// (ssa.GoCall): m stores, so it is not inlined (TestJITSSAInline inlines). Its store gives the receiver a
 // shape after run was compiled for the one it had, so run is compiled
 // again for the new one (jitFed).
 func TestJITSSAPrototypeMethods(t *testing.T) {
@@ -3655,7 +3661,7 @@ func TestJITSSAPrototypeMethods(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		hosts := r.jit.hosts
+		hosts, goCalls := r.jit.hosts, r.jit.goCalls
 		gv, err := r.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatal(err)
@@ -3664,10 +3670,10 @@ func TestJITSSAPrototypeMethods(t *testing.T) {
 			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
 		}
 		if i == 1 {
-			// The second call runs compiled: an exit for each of its
-			// calls, and none for the reads.
-			if n := r.jit.hosts - hosts; n == 0 || n > 41 {
-				t.Fatalf("run left native code %d times for 40 calls", n)
+			// The second call runs compiled: a call of Go for each of its
+			// calls, and no exit, for them or the reads.
+			if n := r.jit.goCalls - goCalls; n != 40 || r.jit.hosts-hosts > 1 {
+				t.Fatalf("run called Go %d times for 40 calls, and left native code %d times", n, r.jit.hosts-hosts)
 			}
 		}
 	}
@@ -7024,6 +7030,125 @@ func TestJITSSAInlineBudgetCallsNatively(t *testing.T) {
 				t.Fatalf("wide did not run natively: %+v", e)
 			}
 		}
+	}
+}
+
+// TestJITSSAGoCalls: a call native code makes nothing of its own for --
+// a function that reads arguments, a forwarding constructor no compile
+// inlined, a bound function, a built-in -- Go makes from native code
+// (ssa.GoCall), which goes on with its result, as V8's code calls a
+// function it has no code for, rather than leaving. Each answer is the
+// interpreter's: a callee assigning the caller's captured binding; one
+// that throws, its message and stack the interpreter's, the call made
+// once; one that runs the caller again, for objects of shapes that have it
+// compiled again while the outer call is suspended in its old code, which
+// stays until that returns (closeSSA); and the collector running at each
+// call.
+func TestJITSSAGoCalls(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	old := jitcompile.SSAConstruct
+	jitcompile.SSAConstruct = true
+	defer func() { jitcompile.SSAConstruct = old }()
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	calls := 0
+	jitGoCallWork = func() {
+		if calls++; calls%16 == 0 {
+			runtime.GC()
+		}
+	}
+	defer func() { jitGoCallWork = nil }()
+	setup := `function h(a){a.n=arguments.length;return a.length}
+		var Class={create:function(){return function(){this.initialize.apply(this,arguments)}}};
+		function Q(x){this.y=arguments.length+x}
+		var P=Class.create();P.prototype={initialize:function(x){this.x=x;this.c=new Q(x)}};
+		var bound=function(a,b){return a*10+b}.bind(null,7);
+		var made=0;
+		function thrower(i){made++;if(i===777)throw new TypeError('boom '+arguments.length);return i&7}
+		function mk(){let c=0;const inc=function(){c+=2;return arguments.length};
+			return function loop(n){let s=0;const o={length:3};
+				for(let i=0;i<n;i++){s=(s+h(o)+new P(i).c.y+bound(i&3)+[i,1].indexOf(1)+inc()+c+thrower(i))|0}return s+':'+o.n}}
+		var loop=mk();
+		function run(n){try{return loop(n)}catch(e){return e.message+'|'+e.stack+'|'+made}}
+		function rec(o,d){let s=0;for(let i=0;i<30;i++){s=(s+o.v)|0;if(d>0&&i==15)s=(s+deeper(d))|0}return s}
+		function deeper(d){var k=arguments.length,o={};o['w'+d]=d;o.v=d+k;return rec(o,d-1)}
+		function held(o,n){let s=0;for(let i=0;i<40;i++){s=(s+o.v*i)|0;if(i==20)s=(s+away(n))|0}return s}
+		function away(n){if(arguments.length&&n)drop(n);return n}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	entry := func(name string) *jitEntry {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		return r.jit.cache[weak.Make(cl.fn)]
+	}
+	// drop(1) drops held's code, as the cache does to make room; drop(2)
+	// has it compiled again: while a call of Go is suspended in it.
+	dropped, closed := 0, 0
+	for _, rt := range []*Runtime{want, r} {
+		rt.global.setOwnRaw(rt.atoms.intern("drop"), rt.NewFunction("drop", 1, func(rt *Runtime, _ Value, args []Value) (Value, error) {
+			if rt != r {
+				return Undefined, nil
+			}
+			cl := r.global.getOwn(r.atoms.intern("held")).value.Object().fn().closure
+			e := r.jit.cache[weak.Make(cl.fn)]
+			if e == nil || e.ssa == nil || len(r.jit.goPinned) == 0 {
+				return Undefined, nil
+			}
+			dropped++
+			code := e.ssa
+			if args[0].Number() == 1 {
+				r.jit.dropEntry(weak.Make(cl.fn), e)
+			} else {
+				e.reopt = true
+				r.jitReoptimize(cl, e)
+			}
+			if code.Size() == 0 {
+				// Native code returns there.
+				closed++
+			}
+			return Undefined, nil
+		}), propDefault)
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, src := range []string{`run(300)`, `run(300)`, `run(300)`, `run(300)`, `run(1000)`, `made`,
+		`rec({v:1},0)`, `rec({v:1},0)`, `rec({v:1},0)`, `[rec({v:1},6),rec({a:1,v:2},6)].join()`, `rec({v:1},12)`,
+		`held({v:3},0)`, `held({v:3},0)`, `held({v:3},0)`, `held({v:3},2)`, `held({v:3},0)`, `held({v:3},0)`, `held({v:3},1)`,
+		`held({v:3},0)`, `held({v:3},0)`, `held({v:3},0)`, `held({v:3},2)`} {
+		wv, err := want.Run(compileForTest(t, `String(`+src+`)`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		goCalls, hosts := r.jit.goCalls, r.jit.hosts
+		gv, err := r.Run(compileForTest(t, `String(`+src+`)`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d, %s: got\n%s\ninterpreter\n%s", i, src, got, want)
+		}
+		if i == 3 {
+			// 300 iterations, each with six calls Go makes.
+			if e := entry("loop"); e == nil || e.ssa == nil || e.entrySlow {
+				t.Fatalf("loop did not run natively: %+v", e)
+			}
+			if n := r.jit.goCalls - goCalls; n < 6*300 {
+				t.Fatalf("Go made %d calls from native code, want %d", n, 6*300)
+			}
+			if n := r.jit.hosts - hosts; n > 2 {
+				t.Fatalf("loop left native code %d times", n)
+			}
+		}
+	}
+	if dropped < 2 || closed != 0 {
+		t.Fatalf("held's code was dropped or compiled again under a call of Go %d times, closed under it %d times", dropped, closed)
+	}
+	if len(r.jit.goPinned) != 0 || len(r.jit.retired) != 0 || r.jit.goPending.set {
+		t.Fatalf("calls of Go left %d pinned, %d retired, pending %v", len(r.jit.goPinned), len(r.jit.retired), r.jit.goPending.set)
 	}
 }
 

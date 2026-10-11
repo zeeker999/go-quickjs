@@ -384,9 +384,21 @@ type jitState struct {
 	// They are made jitContexts at a time, linked (abi.Context.Next), and
 	// never move: more are added while native code runs in them
 	// (jitGrowContexts).
-	ssaCtxs    []*abi.Context
-	ctxTop     int
-	ssaCtx     *abi.Context
+	ssaCtxs []*abi.Context
+	ctxTop  int
+	ssaCtx  *abi.Context
+	// goRuns are, by context, the frame, entry and code a run of native
+	// code began there runs (runSSALoop), which a call of Go it makes is
+	// made for (jitGoCall); goPinned the code calls of Go are suspended
+	// in, innermost last, and retired the code compiled again or dropped
+	// meanwhile, closed once none is (closeSSA). goPending is a call of
+	// Go that made the call and left the rest to Go, at its exit; goCalls
+	// counts the calls Go made so.
+	goCalls    uint64
+	goRuns     []jitGoRun
+	goPinned   []*jit.SSACode
+	retired    []jitRetired
+	goPending  jitGoPending
 	ssaEntries uint64
 	ssaRecords uint64
 	// backendPanics counts the compiles a backend refused for panicking.
@@ -464,7 +476,7 @@ func (r *Runtime) jitCodeBytes() int64 {
 func (s *jitState) dropEntry(key weak.Pointer[bytecode.Function], e *jitEntry) bool {
 	held := e.code.Size() != 0 || e.ssa.Size() != 0
 	e.nativeEntry = 0
-	if e.code.Close() != nil || e.ssa.Close() != nil {
+	if e.code.Close() != nil || s.closeSSA(e.ssa, e) != nil {
 		return false
 	}
 	s.forget(key, e)
@@ -1565,6 +1577,36 @@ func (s *jitState) prepareReferences() {
 	}
 }
 
+// jitCallAt makes the call, method call or construction in, its operands
+// on the VM's stack up to sp, as the interpreter makes it: its result,
+// and where on the stack the result goes.
+func (r *Runtime) jitCallAt(in bytecode.Instr, sp int) (Value, int, error) {
+	stack := r.stack
+	argc := int(in.A)
+	args := stack[sp-argc : sp]
+	callee := stack[sp-argc-1]
+	sp -= argc + 1
+	if in.Op == bytecode.OpNew {
+		// A construction native code did not make, as the interpreter
+		// makes it.
+		v, err := r.construct(callee, args)
+		if err == nil && v.IsObject() && callee.IsObject() && callee.Object() == r.proto.arrayCtor {
+			// With the layout the arrays native code makes have
+			// (jitFillPool): one made at an exit for its pool is used
+			// as they are.
+			r.ensureShape(v.Object())
+		}
+		return v, sp, err
+	}
+	this := Undefined
+	if in.Op == bytecode.OpCallMethod {
+		sp--
+		this = stack[sp]
+	}
+	v, err := r.callDirect(callee, this, args)
+	return v, sp, err
+}
+
 // jitHost runs an explicitly lowered host operation with normal VM ordering.
 // No borrowed view or native scalar root survives a callback. Consecutive host
 // operations and intervening fused local copies share one frame publication;
@@ -1749,31 +1791,8 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 				}
 			}
 			continue
-		case bytecode.OpCall, bytecode.OpCallMethod:
-			argc := int(in.A)
-			args := stack[sp-argc : sp]
-			callee := stack[sp-argc-1]
-			this := Undefined
-			sp -= argc + 1
-			if in.Op == bytecode.OpCallMethod {
-				sp--
-				this = stack[sp]
-			}
-			v, err = r.callDirect(callee, this, args)
-		case bytecode.OpNew:
-			// A construction native code did not make, as the interpreter
-			// makes it.
-			argc := int(in.A)
-			args := stack[sp-argc : sp]
-			callee := stack[sp-argc-1]
-			sp -= argc + 1
-			v, err = r.construct(callee, args)
-			if err == nil && v.IsObject() && callee.IsObject() && callee.Object() == r.proto.arrayCtor {
-				// With the layout the arrays native code makes have
-				// (jitFillPool): one made at an exit for its pool is used
-				// as they are.
-				r.ensureShape(v.Object())
-			}
+		case bytecode.OpCall, bytecode.OpCallMethod, bytecode.OpNew:
+			v, sp, err = r.jitCallAt(in, sp)
 		case bytecode.OpGetGlobal:
 			c := tctx{r: r, f: f, cl: f.cl, locals: f.locals}
 			v, err = r.getGlobalAt(&c, in, pc)
