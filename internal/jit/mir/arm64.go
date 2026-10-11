@@ -1190,7 +1190,13 @@ func (c *a64Compiler) goStore(stub *arm64.Label) {
 	c.a.Store(a64Ctx, abi.OffGoArgs+c.enc.NumOffset, a64B)
 	c.a.Store(a64Ctx, abi.OffGoArgs+c.enc.RefOffset, a64C)
 	c.a.Store(a64Ctx, abi.OffGoArgs+size+c.enc.RefOffset, a64A)
-	c.a.MovImm(a64A, uint64(ssa.GoStore))
+	c.goSaving(uint64(ssa.GoStore), stub)
+}
+
+// goSaving calls Go, op, every allocatable register saved, as amd64's
+// does.
+func (c *a64Compiler) goSaving(op uint64, stub *arm64.Label) {
+	c.a.MovImm(a64A, op)
 	c.a.Store(a64Ctx, abi.OffGoOp, a64A)
 	c.a.Store(a64Ctx, abi.OffGoKeep, arm64.ZR)
 	for _, r := range c.gprs {
@@ -2333,6 +2339,60 @@ func (c *a64Compiler) remainder(v *ssa.Value, guard func(arm64.Cond)) {
 	c.setF(v, a64F0)
 }
 
+// round is Math.round(x), as amd64's is.
+func (c *a64Compiler) round(v *ssa.Value) {
+	if x := c.fpr(v.Args[0], a64F1); x != a64F1 {
+		c.a.FMov(a64F1, x)
+	}
+	down, done := c.a.NewLabel(), c.a.NewLabel()
+	c.a.FRint(arm64.FRintP, a64F0, a64F1)
+	c.constF64(a64F2, math.Float64bits(0.5))
+	c.a.FArith(arm64.FSub, a64F0, a64F0, a64F2)
+	c.a.FCmp(a64F0, a64F1)
+	c.a.BCond(arm64.GT, down)
+	c.a.FRint(arm64.FRintP, a64F0, a64F1)
+	c.a.B(done)
+	c.a.Bind(down)
+	c.a.FArith(arm64.FSub, a64F0, a64F0, a64F2)
+	c.a.Bind(done)
+	c.setF(v, a64F0)
+}
+
+// sign is Math.sign(x), as amd64's is.
+func (c *a64Compiler) sign(v *ssa.Value) {
+	if x := c.fpr(v.Args[0], a64F0); x != a64F0 {
+		c.a.FMov(a64F0, x)
+	}
+	above, done := c.a.NewLabel(), c.a.NewLabel()
+	c.constF64(a64F1, 0)
+	c.a.FCmp(a64F0, a64F1)
+	c.a.BCond(arm64.VS, done)
+	c.a.BCond(arm64.EQ, done)
+	c.a.BCond(arm64.GT, above)
+	c.constF64(a64F0, math.Float64bits(-1))
+	c.a.B(done)
+	c.a.Bind(above)
+	c.constF64(a64F0, math.Float64bits(1))
+	c.a.Bind(done)
+	c.setF(v, a64F0)
+}
+
+// mathCall has Go compute a Math function of numbers, as amd64's does.
+func (c *a64Compiler) mathCall(v *ssa.Value) {
+	size := int32(unsafe.Sizeof(abi.GoArg{}))
+	for i, x := range v.Args {
+		c.a.FMovFromF(a64A, c.fpr(x, a64F0))
+		c.a.Store(a64Ctx, abi.OffGoArgs+int32(i)*size+c.enc.NumOffset, a64A)
+	}
+	if ssa.GoOp(v.Index) == ssa.GoMath {
+		c.a.MovImm(a64A, uint64(v.Aux))
+		c.a.Store(a64Ctx, abi.OffGoArgs+size+c.enc.NumOffset, a64A)
+	}
+	c.goSaving(uint64(v.Index), nil)
+	c.a.LoadF(a64F0, a64Ctx, abi.OffGoArgs+c.enc.NumOffset)
+	c.setF(v, a64F0)
+}
+
 // power is Math.pow(x, y) where its answer is exact, as amd64's is.
 func (c *a64Compiler) power(v *ssa.Value, guard func(arm64.Cond)) {
 	if x := c.fpr(v.Args[0], a64F0); x != a64F0 {
@@ -2348,6 +2408,22 @@ func (c *a64Compiler) power(v *ssa.Value, guard func(arm64.Cond)) {
 	c.a.FArith(arm64.FMul, a64F0, a64F0, a64F0)
 	c.a.B(done)
 	c.a.Bind(general)
+	if c.enc.CallGo != 0 {
+		// What is not exact Go computes (ssa.GoPow).
+		size := int32(unsafe.Sizeof(abi.GoArg{}))
+		c.a.FMovFromF(a64A, a64F0)
+		c.a.Store(a64Ctx, abi.OffGoArgs+c.enc.NumOffset, a64A)
+		c.a.FMovFromF(a64A, a64F1)
+		c.a.Store(a64Ctx, abi.OffGoArgs+size+c.enc.NumOffset, a64A)
+		slow, stub := c.a.NewLabel(), c.stubLabel(v.State, exitKind(v.Aux))
+		guard = func(cond arm64.Cond) { c.a.BCond(cond, slow) }
+		c.cold = append(c.cold, func() {
+			c.a.Bind(slow)
+			c.goSaving(uint64(ssa.GoPow), &stub)
+			c.a.LoadF(a64F0, a64Ctx, abi.OffGoArgs+c.enc.NumOffset)
+			c.a.B(done)
+		})
+	}
 	// y an integer from 0 to 64 (unsigned, so none below), x an integer.
 	c.integer(a64C, a64F1, guard)
 	c.a.CmpImm(a64C, 64, true)
@@ -2700,6 +2776,36 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 	case ssa.OpAbsF64:
 		d := c.fdst(v)
 		c.a.FAbs(d, c.fpr(arg(0), a64F0))
+		c.setF(v, d)
+	case ssa.OpFloorF64, ssa.OpCeilF64, ssa.OpTruncF64:
+		op := arm64.FRintM
+		if v.Op == ssa.OpCeilF64 {
+			op = arm64.FRintP
+		} else if v.Op == ssa.OpTruncF64 {
+			op = arm64.FRintZ
+		}
+		d := c.fdst(v)
+		c.a.FRint(op, d, c.fpr(arg(0), a64F0))
+		c.setF(v, d)
+	case ssa.OpRoundF64:
+		c.round(v)
+	case ssa.OpSignF64:
+		c.sign(v)
+	case ssa.OpFroundF64:
+		c.a.FCvtToSingle(a64F0, c.fpr(arg(0), a64F0))
+		d := c.fdst(v)
+		c.a.FCvtFromSingle(d, a64F0)
+		c.setF(v, d)
+	case ssa.OpMathCall:
+		c.mathCall(v)
+	case ssa.OpMaxF64, ssa.OpMinF64:
+		// FMAX and FMIN are Math.max's and Math.min's, NaN and zeros alike.
+		op := arm64.FMax
+		if v.Op == ssa.OpMinF64 {
+			op = arm64.FMin
+		}
+		d := c.fdst(v)
+		c.a.FArith(op, d, c.fpr(arg(0), a64F0), c.fpr(arg(1), a64F1))
 		c.setF(v, d)
 	case ssa.OpCmpF64:
 		if v.Uses == 1 && b.Control == v && b.Kind == ssa.BlockIf {

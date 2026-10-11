@@ -47,12 +47,23 @@ type Feedback interface {
 // itself, as V8 reduces Math.sqrt(x) to a square root in its code: the
 // function object, which the call checks it calls (the VM keeps it
 // alive), and what it computes of its argument, a number, or of its two
-// for Math.pow (OpPowF64) -- another leaves the call to Go, which makes
-// it.
+// for Math.pow (OpPowF64) and Math.atan2 and Math.hypot, or of any number
+// from one for Math.max and Math.min -- another leaves the call to Go,
+// which makes it.
 type Intrinsic struct {
 	Callee uintptr
 	Op     Op
+	// Args is how many arguments the call passes, Math.max's or
+	// Math.min's (OpMaxF64, OpMinF64); 0 for the op's own count.
+	Args int
+	// Go and Fn, for OpMathCall, are the call of Go that computes it and,
+	// for GoMath, which of the VM's functions of one number.
+	Go GoOp
+	Fn int
 }
+
+// maxIntrinsicArgs is the most arguments an intrinsic call is made with.
+const maxIntrinsicArgs = 8
 
 // InstanceOfSite is an instanceof operator's constructor, as the VM knows
 // it, which native code answers for itself, as V8 lowers the operator to
@@ -172,10 +183,20 @@ type GoOp uint8
 // GoStore stores a pointer while the collector marks, which native code,
 // with no write barrier, does not: the first operand is the value, the
 // second's pointer word the cell's address (mir's property stores).
+//
+// GoPow is Math.pow of the two operands' number words where its answer is
+// not exact (OpPowF64), as V8's code calls its ieee754 pow: Go writes it
+// to the first's number word. GoMath, GoAtan2 and GoHypot are a Math
+// function too (OpMathCall): GoMath's of one number, which of the VM's
+// the second operand's number word says.
 const (
 	GoAdd GoOp = 1 + iota
 	GoRefill
 	GoStore
+	GoPow
+	GoMath
+	GoAtan2
+	GoHypot
 )
 
 // RefillsPools reports whether a call takes an object from a pool, which
@@ -975,10 +996,19 @@ func (b *builder) intrinsic(pc int) (Intrinsic, bool) {
 		return Intrinsic{}, false
 	}
 	k, ok := f.Intrinsic(pc)
-	if !ok || k.Op != OpSqrtF64 && k.Op != OpAbsF64 && k.Op != OpPowF64 {
+	if !ok {
 		return Intrinsic{}, false
 	}
-	if n := k.args(); b.p.Maps[pc+1].Depth != b.p.Maps[pc].Depth-n-1 || b.p.Maps[pc].Depth < n+2 {
+	switch k.Op {
+	case OpSqrtF64, OpAbsF64, OpPowF64, OpMaxF64, OpMinF64, OpFloorF64, OpCeilF64, OpTruncF64, OpRoundF64, OpSignF64, OpFroundF64:
+	case OpMathCall:
+		if k.Go != GoMath && k.Go != GoAtan2 && k.Go != GoHypot || !b.goCalls() {
+			return Intrinsic{}, false
+		}
+	default:
+		return Intrinsic{}, false
+	}
+	if n := k.args(); n < 1 || n > maxIntrinsicArgs || b.p.Maps[pc+1].Depth != b.p.Maps[pc].Depth-n-1 || b.p.Maps[pc].Depth < n+2 {
 		return Intrinsic{}, false
 	}
 	return k, true
@@ -986,7 +1016,10 @@ func (b *builder) intrinsic(pc int) (Intrinsic, bool) {
 
 // args is how many arguments the intrinsic takes.
 func (k Intrinsic) args() int {
-	if k.Op == OpPowF64 {
+	switch {
+	case k.Args != 0:
+		return k.Args
+	case k.Op == OpPowF64 || k.Op == OpMaxF64 || k.Op == OpMinF64 || k.Op == OpMathCall && k.Go != GoMath:
 		return 2
 	}
 	return 1
@@ -1001,15 +1034,27 @@ func (b *builder) intrinsicCall(blk *Block, pc int, k Intrinsic, guard func(Op, 
 	object := guard(OpObjectOf, Ptr, ir.HostExit, b.read(sp-n-1, blk))
 	same := guard(OpSameObject, None, ir.HostExit, object)
 	same.Const = ir.Value{Bits: uint64(k.Callee)}
-	x := guard(OpUnboxF64, Float64, ir.HostExit, b.read(sp-n, blk))
-	var r *Value
-	if k.Op == OpPowF64 {
-		y := guard(OpUnboxF64, Float64, ir.HostExit, b.read(sp-1, blk))
-		r = boxF(guard(OpPowF64, Float64, ir.HostExit, x, y))
-	} else {
-		r = boxF(b.f.newValue(blk, k.Op, Float64, x))
+	var xs [maxIntrinsicArgs]*Value
+	for i := range n {
+		xs[i] = guard(OpUnboxF64, Float64, ir.HostExit, b.read(sp-n+i, blk))
 	}
-	b.assign(b.cur.base+b.p.Locals+b.p.Maps[pc+1].Depth-1, blk, r)
+	var r *Value
+	switch k.Op {
+	case OpPowF64:
+		r = guard(OpPowF64, Float64, ir.HostExit, xs[0], xs[1])
+	case OpMaxF64, OpMinF64:
+		// Of each in turn, which NaN and the zeros' order allow.
+		r = xs[0]
+		for _, y := range xs[1:n] {
+			r = b.f.newValue(blk, k.Op, Float64, r, y)
+		}
+	case OpMathCall:
+		r = b.f.newValue(blk, OpMathCall, Float64, xs[:n]...)
+		r.Index, r.Aux = int(k.Go), k.Fn
+	default:
+		r = b.f.newValue(blk, k.Op, Float64, xs[0])
+	}
+	b.assign(b.cur.base+b.p.Locals+b.p.Maps[pc+1].Depth-1, blk, boxF(r))
 }
 
 // forwardCall checks a forwarded call (InlineSite's Forward) calls the

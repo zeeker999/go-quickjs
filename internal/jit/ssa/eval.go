@@ -52,6 +52,48 @@ func ExactPow(x, y float64) (float64, bool) {
 	return r, true
 }
 
+// Extremum is Math.max of two numbers, or Math.min (OpMaxF64, OpMinF64):
+// NaN if either is, and -0 below +0.
+func Extremum(x, y float64, max bool) float64 {
+	switch {
+	case x != x || y != y:
+		return math.NaN()
+	case x == y:
+		// Only the zeros' signs can differ.
+		if max == math.Signbit(x) {
+			return y
+		}
+		return x
+	case (x > y) == max:
+		return x
+	}
+	return y
+}
+
+// Round is Math.round(x) as native code computes it (OpRoundF64), as V8's
+// does: the ceiling, less one if that is more than a half above x. The
+// ceiling less a half is exact for every ceiling below 2**53, and past it
+// never above x; NaN, the infinities and the zeros are their own ceilings,
+// -0 kept for x in (-0.5, -0].
+func Round(x float64) float64 {
+	r := math.Ceil(x)
+	if r-0.5 > x {
+		return r - 1
+	}
+	return r
+}
+
+// Sign is Math.sign(x) (OpSignF64): 1 or -1, or x itself, a zero or NaN.
+func Sign(x float64) float64 {
+	switch {
+	case x > 0:
+		return 1
+	case x < 0:
+		return -1
+	}
+	return x
+}
+
 // index converts an element's key, as the slot IR does: an integer in
 // [0, 2**32), negative zero included.
 func index(x float64) (uint64, bool) {
@@ -162,6 +204,20 @@ func apply(op Op, aux int, a, b val) val {
 		return val{f: math.Sqrt(a.f)}
 	case OpAbsF64:
 		return val{f: math.Float64frombits(math.Float64bits(a.f) &^ (1 << 63))}
+	case OpMaxF64, OpMinF64:
+		return val{f: Extremum(a.f, b.f, op == OpMaxF64)}
+	case OpFloorF64:
+		return val{f: math.Floor(a.f)}
+	case OpCeilF64:
+		return val{f: math.Ceil(a.f)}
+	case OpTruncF64:
+		return val{f: math.Trunc(a.f)}
+	case OpRoundF64:
+		return val{f: Round(a.f)}
+	case OpSignF64:
+		return val{f: Sign(a.f)}
+	case OpFroundF64:
+		return val{f: float64(float32(a.f))}
 	case OpCmpF64:
 		x, y := a.f, b.f
 		switch ir.Operator(aux) {
@@ -551,6 +607,9 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 				default:
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
+			case OpMathCall:
+				// The VM's functions are not the model's.
+				return ir.Exit{}, fmt.Errorf("%w: a Math function", ErrUnsupported)
 			case OpPowF64:
 				r, ok := ExactPow(a.f, b.f)
 				if !ok {

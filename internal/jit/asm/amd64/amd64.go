@@ -438,6 +438,7 @@ const (
 	MovAPD  SSE = 0x28 // a register copy
 	SqrtSD  SSE = 0x51
 	AndPD   SSE = 0x54
+	OrPD    SSE = 0x56
 )
 
 // SSEOp is dst op= src (for UcomiSD, compares dst with src).
@@ -450,6 +451,39 @@ func (a *Asm) SSEOp(op SSE, dst, src XReg) {
 	}
 	a.rex(false, byte(dst), byte(src), false)
 	a.emit(0x0F, byte(op))
+	a.modrmRR(byte(dst), byte(src))
+}
+
+// Rounding modes of RoundSD.
+const (
+	RoundFloor = 1
+	RoundCeil  = 2
+	RoundTrunc = 3
+)
+
+// RoundSD rounds src to an integer in dst, as mode says (RoundFloor...),
+// an inexact result unreported: SSE4.1's ROUNDSD.
+func (a *Asm) RoundSD(dst, src XReg, mode uint8) {
+	a.emit(0x66)
+	a.rex(false, byte(dst), byte(src), false)
+	a.emit(0x0F, 0x3A, 0x0B)
+	a.modrmRR(byte(dst), byte(src))
+	a.emit(mode | 8)
+}
+
+// Cvtsd2ss converts a double to the nearest float, in dst's low 32 bits.
+func (a *Asm) Cvtsd2ss(dst, src XReg) {
+	a.emit(0xF2)
+	a.rex(false, byte(dst), byte(src), false)
+	a.emit(0x0F, 0x5A)
+	a.modrmRR(byte(dst), byte(src))
+}
+
+// Cvtss2sd converts a float, src's low 32 bits, to a double.
+func (a *Asm) Cvtss2sd(dst, src XReg) {
+	a.emit(0xF3)
+	a.rex(false, byte(dst), byte(src), false)
+	a.emit(0x0F, 0x5A)
 	a.modrmRR(byte(dst), byte(src))
 }
 

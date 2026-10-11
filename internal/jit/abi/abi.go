@@ -472,6 +472,11 @@ type Encoding struct {
 	// address of jit's callGo, an assembly routine that, to the Go
 	// runtime, the Go function that entered the code called.
 	CallGo uint64
+	// Round says native code may round a double to an integer, as
+	// Math.floor, Math.ceil, Math.trunc and Math.round do: always on arm64,
+	// with SSE4.1's ROUNDSD on amd64. The VM asks for those only where it
+	// is set (ssa's OpFloorF64...).
+	Round bool
 	// An ordinary object of class ClassObject, whose table has at most
 	// MaxScan entries, may be searched for a key, as the VM's own small
 	// objects are. A property is plain data when its flags have none of

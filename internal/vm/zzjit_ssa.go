@@ -6,6 +6,7 @@ import (
 	"iter"
 	"math"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -13,12 +14,14 @@ import (
 	"weak"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+	"github.com/go-quickjs/go-quickjs/internal/fdlibm"
 	"github.com/go-quickjs/go-quickjs/internal/jit"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
+	"golang.org/x/sys/cpu"
 )
 
 // The new pipeline (docs/jit-phase2-design.md): slot IR, then typed SSA
@@ -53,6 +56,7 @@ var jitEncoding = abi.Encoding{
 	ObjectProto:   int32(unsafe.Offsetof(Object{}.proto)),
 	WriteBarrier:  jit.WriteBarrier(),
 	CallGo:        jit.CallGo(),
+	Round:         runtime.GOARCH == "arm64" || cpu.X86.HasSSE41,
 	PropertySize:  int32(unsafe.Sizeof(Property{})),
 	PropertyKey:   int32(unsafe.Offsetof(Property{}.key)),
 	PropertyFlags: int32(unsafe.Offsetof(Property{}.flags)),
@@ -775,7 +779,7 @@ type jitFeedback struct {
 // itself, as V8 reduces such a call; the call checks it calls it.
 func (fb *jitFeedback) Intrinsic(pc int) (ssa.Intrinsic, bool) {
 	fn := fb.fn
-	if fb.cl == nil || pc < 2 || pc >= len(fn.Code) || fn.Code[pc].Op != bytecode.OpCallMethod || fn.Code[pc].A != 1 && fn.Code[pc].A != 2 {
+	if fb.cl == nil || pc < 2 || pc >= len(fn.Code) || fn.Code[pc].Op != bytecode.OpCallMethod || fn.Code[pc].A < 1 || fn.Code[pc].A > jitMathArgs {
 		return ssa.Intrinsic{}, false
 	}
 	if fb.prog == nil {
@@ -811,31 +815,70 @@ func (fb *jitFeedback) Intrinsic(pc int) (ssa.Intrinsic, bool) {
 	}
 	o := v.Object()
 	k := ssa.Intrinsic{Callee: uintptr(unsafe.Pointer(o))}
-	if fn.Code[pc].A == 2 {
-		// Math.pow, the realm's: computed natively where exact.
-		if o != fb.r.powFn {
-			return ssa.Intrinsic{}, false
-		}
+	// The realm's Math functions of numbers, each made natively, as V8's
+	// code makes them: Math.pow where exact, and by Go called from there
+	// otherwise; Math.max and Math.min of any number of them; a rounding,
+	// the sign, fround, sqrt and abs by instructions of their own; every
+	// other by Go called from there, the VM's very function.
+	fd, n := o.fn(), int(fn.Code[pc].A)
+	switch {
+	case o == fb.r.powFn && n == 2:
 		k.Op = ssa.OpPowF64
-		keep := fb.keep()
-		keep.holders = append(keep.holders, o)
-		return k, true
-	}
-	fd := o.fn()
-	if fd == nil || fd.native == nil || fd.mathOp == 0 || fd.mathOp >= mathMax || int(fd.mathOp) > len(unaryMathNames) {
+	case o == fb.r.atan2Fn && n == 2:
+		k.Op, k.Go = ssa.OpMathCall, ssa.GoAtan2
+	case o == fb.r.hypotFn && n == 2:
+		k.Op, k.Go = ssa.OpMathCall, ssa.GoHypot
+	case fd == nil || fd.native == nil:
 		return ssa.Intrinsic{}, false
-	}
-	switch unaryMathNames[fd.mathOp-1] {
-	case "sqrt":
-		k.Op = ssa.OpSqrtF64
-	case "abs":
-		k.Op = ssa.OpAbsF64
+	case fd.mathOp == mathMax:
+		k.Op, k.Args = ssa.OpMaxF64, n
+	case fd.mathOp == mathMin:
+		k.Op, k.Args = ssa.OpMinF64, n
+	case fd.mathOp != 0 && int(fd.mathOp) <= len(unaryMathNames) && n == 1:
+		k.Op = jitUnaryMath(unaryMathNames[fd.mathOp-1])
+		if k.Op == ssa.OpMathCall {
+			k.Go, k.Fn = ssa.GoMath, int(fd.mathOp)
+		}
 	default:
 		return ssa.Intrinsic{}, false
 	}
 	keep := fb.keep()
 	keep.holders = append(keep.holders, o)
 	return k, true
+}
+
+// jitMathArgs is the most arguments a call of Math.max or Math.min is made
+// natively with, as ssa takes them.
+const jitMathArgs = 8
+
+// jitUnaryMath is the op native code makes a Math function of one number
+// with, named name: an instruction of its own, or a call of Go
+// (ssa.OpMathCall), which roundings are without SSE4.1 (abi.Encoding's
+// Round).
+func jitUnaryMath(name string) ssa.Op {
+	switch name {
+	case "sqrt":
+		return ssa.OpSqrtF64
+	case "abs":
+		return ssa.OpAbsF64
+	case "sign":
+		return ssa.OpSignF64
+	case "fround":
+		return ssa.OpFroundF64
+	}
+	if jitEncoding.Round {
+		switch name {
+		case "floor":
+			return ssa.OpFloorF64
+		case "ceil":
+			return ssa.OpCeilF64
+		case "trunc":
+			return ssa.OpTruncF64
+		case "round":
+			return ssa.OpRoundF64
+		}
+	}
+	return ssa.OpMathCall
 }
 
 // InstanceOf is ssa.InstanceOfFeedback's: the constructor of the instanceof
@@ -1367,6 +1410,27 @@ func jitHostCall(ctx *abi.Context) bool {
 		// with its write barrier.
 		cell := *(**Value)(unsafe.Pointer(&ctx.GoArgs[1].Ref))
 		*cell = jitGoArg(ctx, 0)
+		return true
+	case ssa.GoPow, ssa.GoMath, ssa.GoAtan2, ssa.GoHypot:
+		// Two numbers' bits -- or one, and which function of it -- the
+		// result's in the first's place.
+		x, y := math.Float64frombits(ctx.GoArgs[0].Num), math.Float64frombits(ctx.GoArgs[1].Num)
+		var z float64
+		switch ssa.GoOp(ctx.GoOp) {
+		case ssa.GoPow:
+			z = jsPow(x, y)
+		case ssa.GoMath:
+			fn := ctx.GoArgs[1].Num
+			if fn == 0 || fn >= uint64(len(unaryMath)) {
+				return false
+			}
+			z = unaryMath[fn](x)
+		case ssa.GoAtan2:
+			z = fdlibm.Atan2(x, y)
+		case ssa.GoHypot:
+			z = jsHypot([]float64{x, y})
+		}
+		ctx.GoArgs[0].Num = math.Float64bits(z)
 		return true
 	}
 	return false

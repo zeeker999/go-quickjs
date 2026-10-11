@@ -275,6 +275,9 @@ type Runtime struct {
 	// powFn is Math.pow, which the native tier computes itself where its
 	// answer is exact (jitFeedback.Intrinsic).
 	powFn *Object
+	// atan2Fn and hypotFn are Math.atan2 and Math.hypot, which native code
+	// has Go compute.
+	atan2Fn, hypotFn *Object
 	// jitFields is the optional native tier's state, empty in builds
 	// without it. It comes after everything the interpreter reads, so that
 	// a build with the tier moves none of their offsets, and before the last

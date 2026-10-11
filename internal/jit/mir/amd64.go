@@ -2022,7 +2022,14 @@ func (c *compiler) goStore(stub *amd64.Label) {
 	c.a.Store(regCtx, abi.OffGoArgs+c.enc.NumOffset, scratchB)
 	c.a.Store(regCtx, abi.OffGoArgs+c.enc.RefOffset, scratchC)
 	c.a.Store(regCtx, abi.OffGoArgs+size+c.enc.RefOffset, scratchA)
-	c.a.MovImm(scratchA, uint64(ssa.GoStore))
+	c.goSaving(uint64(ssa.GoStore), stub)
+}
+
+// goSaving calls Go, op, its operands in the context's GoArgs, every
+// allocatable register saved across it in the context's register area,
+// which only an exit uses; if Go refuses, stub, if any.
+func (c *compiler) goSaving(op uint64, stub *amd64.Label) {
+	c.a.MovImm(scratchA, op)
 	c.a.Store(regCtx, abi.OffGoOp, scratchA)
 	c.a.MovImm(scratchA, 0)
 	c.a.Store(regCtx, abi.OffGoKeep, scratchA)
@@ -2468,8 +2475,115 @@ func (c *compiler) remainder(v *ssa.Value, guard func(amd64.Cond)) {
 
 // power is Math.pow(x, y) where its answer is exact (ssa.ExactPow): x*x
 // for y 2; an integer x to an integer power from 0 to 64 by repeated
-// squaring, its result at most 2**53. Anything else fails the guard: Go
-// makes the call.
+// squaring, its result at most 2**53. Anything else Go computes, called
+// from here, or, from code that cannot call Go, fails the guard: Go makes
+// the call.
+//
+// extremum is Math.max(x, y) or Math.min(x, y) (ssa.OpMaxF64,
+// ssa.OpMinF64): NaN if either is -- the sum -- the larger or the smaller,
+// and of equal operands, which are zeros of either sign or the same
+// number, their bits and'ed for max (+0 if either is), or'ed for min.
+func (c *compiler) extremum(v *ssa.Value) {
+	if x := c.xmm(v.Args[0], xScratch0); x != xScratch0 {
+		c.a.SSEOp(amd64.MovAPD, xScratch0, x)
+	}
+	y := c.xmm(v.Args[1], xScratch1)
+	nan, differ, done := c.a.NewLabel(), c.a.NewLabel(), c.a.NewLabel()
+	c.a.SSEOp(amd64.UcomiSD, xScratch0, y)
+	c.a.Jcc(amd64.CondP, nan)
+	c.a.Jcc(amd64.CondNE, differ)
+	if v.Op == ssa.OpMaxF64 {
+		c.a.SSEOp(amd64.AndPD, xScratch0, y)
+	} else {
+		c.a.SSEOp(amd64.OrPD, xScratch0, y)
+	}
+	c.a.Jmp(done)
+	c.a.Bind(nan)
+	c.a.SSEOp(amd64.AddSD, xScratch0, y)
+	c.a.Jmp(done)
+	c.a.Bind(differ)
+	// x above y (CF and ZF clear) keeps x for max; below (CF), for min.
+	if v.Op == ssa.OpMaxF64 {
+		c.a.Jcc(amd64.CondA, done)
+	} else {
+		c.a.Jcc(amd64.CondB, done)
+	}
+	c.a.SSEOp(amd64.MovAPD, xScratch0, y)
+	c.a.Bind(done)
+	c.setX(v, xScratch0)
+}
+
+// round is Math.round(x) (ssa.OpRoundF64), as ssa.Round has it: the
+// ceiling, less one if the ceiling less a half is above x -- computed
+// again otherwise, which keeps its -0.
+func (c *compiler) round(v *ssa.Value) {
+	if !c.enc.Round {
+		panic("rounding without SSE4.1")
+	}
+	if x := c.xmm(v.Args[0], xScratch1); x != xScratch1 {
+		c.a.SSEOp(amd64.MovAPD, xScratch1, x)
+	}
+	down, done := c.a.NewLabel(), c.a.NewLabel()
+	c.a.RoundSD(xScratch0, xScratch1, amd64.RoundCeil)
+	c.a.MovImm(scratchA, math.Float64bits(0.5))
+	c.a.MovQToX(xScratch2, scratchA)
+	c.a.SSEOp(amd64.SubSD, xScratch0, xScratch2)
+	c.a.SSEOp(amd64.UcomiSD, xScratch0, xScratch1)
+	c.a.Jcc(amd64.CondA, down)
+	c.a.RoundSD(xScratch0, xScratch1, amd64.RoundCeil)
+	c.a.Jmp(done)
+	c.a.Bind(down)
+	c.a.SSEOp(amd64.SubSD, xScratch0, xScratch2)
+	c.a.Bind(done)
+	c.setX(v, xScratch0)
+}
+
+// sign is Math.sign(x) (ssa.OpSignF64): 1 above zero, -1 below, x itself
+// for a zero or NaN.
+func (c *compiler) sign(v *ssa.Value) {
+	if x := c.xmm(v.Args[0], xScratch0); x != xScratch0 {
+		c.a.SSEOp(amd64.MovAPD, xScratch0, x)
+	}
+	above, done := c.a.NewLabel(), c.a.NewLabel()
+	c.a.SSEOp(amd64.XorPD, xScratch2, xScratch2)
+	c.a.SSEOp(amd64.UcomiSD, xScratch0, xScratch2)
+	c.a.Jcc(amd64.CondP, done)
+	c.a.Jcc(amd64.CondE, done)
+	c.a.Jcc(amd64.CondA, above)
+	c.a.MovImm(scratchA, math.Float64bits(-1))
+	c.a.MovQToX(xScratch0, scratchA)
+	c.a.Jmp(done)
+	c.a.Bind(above)
+	c.a.MovImm(scratchA, math.Float64bits(1))
+	c.a.MovQToX(xScratch0, scratchA)
+	c.a.Bind(done)
+	c.setX(v, xScratch0)
+}
+
+// mathCall has Go compute a Math function of numbers (ssa.OpMathCall), as
+// V8's code calls its ieee754 functions: the operands' bits in the
+// context's GoArgs and, for ssa.GoMath, which function in the second's
+// number word; the result in the first's. Go refuses none.
+func (c *compiler) mathCall(v *ssa.Value) {
+	size := int32(unsafe.Sizeof(abi.GoArg{}))
+	for i, x := range v.Args {
+		c.a.MovQFromX(scratchA, c.xmm(x, xScratch0))
+		c.a.Store(regCtx, abi.OffGoArgs+int32(i)*size+c.enc.NumOffset, scratchA)
+	}
+	if ssa.GoOp(v.Index) == ssa.GoMath {
+		c.a.MovImm(scratchA, uint64(v.Aux))
+		c.a.Store(regCtx, abi.OffGoArgs+size+c.enc.NumOffset, scratchA)
+	}
+	c.goSaving(uint64(v.Index), nil)
+	c.a.LoadSD(xScratch0, regCtx, abi.OffGoArgs+c.enc.NumOffset)
+	c.setX(v, xScratch0)
+}
+
+// power is Math.pow(x, y) where its answer is exact (ssa.ExactPow): x*x
+// for y 2; an integer x to an integer power from 0 to 64 by repeated
+// squaring, its result at most 2**53. Anything else Go computes, called
+// from here (ssa.GoPow), or, from code that cannot call Go, fails the
+// guard: Go makes the call.
 func (c *compiler) power(v *ssa.Value, guard func(amd64.Cond)) {
 	if x := c.xmm(v.Args[0], xScratch0); x != xScratch0 {
 		c.a.SSEOp(amd64.MovAPD, xScratch0, x)
@@ -2486,6 +2600,23 @@ func (c *compiler) power(v *ssa.Value, guard func(amd64.Cond)) {
 	c.a.SSEOp(amd64.MulSD, xScratch0, xScratch0)
 	c.a.Jmp(done)
 	c.a.Bind(general)
+	if c.enc.CallGo != 0 {
+		// What is not exact Go computes (ssa.GoPow), as V8's code calls
+		// its ieee754 pow: the operands' bits in the context's GoArgs.
+		size := int32(unsafe.Sizeof(abi.GoArg{}))
+		c.a.MovQFromX(scratchA, xScratch0)
+		c.a.Store(regCtx, abi.OffGoArgs+c.enc.NumOffset, scratchA)
+		c.a.MovQFromX(scratchA, xScratch1)
+		c.a.Store(regCtx, abi.OffGoArgs+size+c.enc.NumOffset, scratchA)
+		slow, stub := c.a.NewLabel(), c.stubLabel(v.State, exitKind(v.Aux))
+		guard = func(cond amd64.Cond) { c.a.Jcc(cond, slow) }
+		c.cold = append(c.cold, func() {
+			c.a.Bind(slow)
+			c.goSaving(uint64(ssa.GoPow), &stub)
+			c.a.LoadSD(xScratch0, regCtx, abi.OffGoArgs+c.enc.NumOffset)
+			c.a.Jmp(done)
+		})
+	}
 	// y an integer from 0 to 64 (unsigned, so none below), x an integer.
 	for _, p := range []struct {
 		r amd64.Reg
@@ -2862,6 +2993,30 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.remainder(v, c.guardFor(v))
 	case ssa.OpPowF64:
 		c.power(v, c.guardFor(v))
+	case ssa.OpMaxF64, ssa.OpMinF64:
+		c.extremum(v)
+	case ssa.OpFloorF64, ssa.OpCeilF64, ssa.OpTruncF64:
+		if !c.enc.Round {
+			panic("rounding without SSE4.1")
+		}
+		mode := uint8(amd64.RoundFloor)
+		if v.Op == ssa.OpCeilF64 {
+			mode = amd64.RoundCeil
+		} else if v.Op == ssa.OpTruncF64 {
+			mode = amd64.RoundTrunc
+		}
+		c.a.RoundSD(xScratch0, c.xmm(arg(0), xScratch0), mode)
+		c.setX(v, xScratch0)
+	case ssa.OpRoundF64:
+		c.round(v)
+	case ssa.OpSignF64:
+		c.sign(v)
+	case ssa.OpFroundF64:
+		c.a.Cvtsd2ss(xScratch0, c.xmm(arg(0), xScratch0))
+		c.a.Cvtss2sd(xScratch0, xScratch0)
+		c.setX(v, xScratch0)
+	case ssa.OpMathCall:
+		c.mathCall(v)
 	case ssa.OpNegF64:
 		x := c.xmm(arg(0), xScratch0)
 		if x != xScratch0 {

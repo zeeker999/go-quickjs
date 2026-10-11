@@ -226,8 +226,31 @@ const (
 	OpUpvalueCell // -> source
 	// OpPowF64 is Math.pow of two numbers (Intrinsic) where its answer is
 	// exact, and so the VM's (ExactPow); a guard, which leaves the call
-	// to Go otherwise.
+	// to Go otherwise -- a call of Go from native code that can make one
+	// (GoPow), an exit from code that cannot.
 	OpPowF64 // f64, f64 -> f64
+	// OpMaxF64 and OpMinF64 are Math.max's and Math.min's of two numbers
+	// (Intrinsic), as V8's Float64Max and Float64Min: NaN if either is,
+	// and -0 below +0.
+	OpMaxF64 // f64, f64 -> f64
+	OpMinF64 // f64, f64 -> f64
+	// OpFloorF64, OpCeilF64, OpTruncF64 and OpRoundF64 are Math.floor's,
+	// Math.ceil's, Math.trunc's and Math.round's of a number (Intrinsic),
+	// as V8's Float64RoundDown, Float64RoundUp, Float64RoundTruncate and
+	// its rounding of the ceiling (Round); OpSignF64 is Math.sign's, and
+	// OpFroundF64 Math.fround's, to the nearest float32 and back.
+	OpFloorF64  // f64 -> f64
+	OpCeilF64   // f64 -> f64
+	OpTruncF64  // f64 -> f64
+	OpRoundF64  // f64 -> f64
+	OpSignF64   // f64 -> f64
+	OpFroundF64 // f64 -> f64
+	// OpMathCall is a Math function of numbers Go computes, called from
+	// native code, as V8's code calls its ieee754 functions: the very
+	// function the VM's Math has, and so its answer. Index is the call of
+	// Go (GoMath, GoAtan2, GoHypot); Aux, for GoMath, which of the VM's
+	// functions of one number (Intrinsic's Fn).
+	OpMathCall // f64[, f64] -> f64
 )
 
 var opNames = [...]string{
@@ -242,6 +265,8 @@ var opNames = [...]string{
 	OpSameObject: "sameobject", OpFrameRoom: "frameroom", OpKeepRef: "keepref", OpKeep: "keep", OpKept: "kept",
 	OpCall: "call", OpCallCell: "callcell", OpSqrtF64: "sqrtf", OpAbsF64: "absf", OpInstanceOf: "instanceof", OpTypeIs: "typeis",
 	OpCheckTrue: "checktrue", OpConstCell: "constcell", OpUpvalueCell: "upvaluecell", OpPowF64: "powf",
+	OpMaxF64: "maxf", OpMinF64: "minf", OpFloorF64: "floorf", OpCeilF64: "ceilf", OpTruncF64: "truncf", OpRoundF64: "roundf",
+	OpSignF64: "signf", OpFroundF64: "froundf", OpMathCall: "mathcall",
 }
 
 func (o Op) String() string {
