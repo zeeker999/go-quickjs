@@ -199,12 +199,21 @@ func TestAMD64Integer(t *testing.T) {
 func TestAMD64SSE(t *testing.T) {
 	ops := map[amd64.SSE]x86asm.Op{amd64.AddSD: x86asm.ADDSD, amd64.MulSD: x86asm.MULSD, amd64.SubSD: x86asm.SUBSD,
 		amd64.DivSD: x86asm.DIVSD, amd64.UcomiSD: x86asm.UCOMISD, amd64.XorPD: x86asm.XORPD, amd64.MovAPD: x86asm.MOVAPD,
-		amd64.SqrtSD: x86asm.SQRTSD, amd64.AndPD: x86asm.ANDPD}
+		amd64.SqrtSD: x86asm.SQRTSD, amd64.AndPD: x86asm.ANDPD, amd64.OrPD: x86asm.ORPD}
 	for op, xop := range ops {
 		for _, d := range xregs {
 			for _, s := range xregs {
 				expect(t, fmt.Sprintf("%v x%d,x%d", xop, d, s), encode(func(a *amd64.Asm) { a.SSEOp(op, d, s) }), xop, xr(d), xr(s))
 			}
+		}
+	}
+	for _, d := range xregs {
+		for _, s := range xregs {
+			for mode := uint8(1); mode <= 3; mode++ {
+				expect(t, "RoundSD", encode(func(a *amd64.Asm) { a.RoundSD(d, s, mode) }), x86asm.ROUNDSD, xr(d), xr(s), int64(mode|8))
+			}
+			expect(t, "Cvtsd2ss", encode(func(a *amd64.Asm) { a.Cvtsd2ss(d, s) }), x86asm.CVTSD2SS, xr(d), xr(s))
+			expect(t, "Cvtss2sd", encode(func(a *amd64.Asm) { a.Cvtss2sd(d, s) }), x86asm.CVTSS2SD, xr(d), xr(s))
 		}
 	}
 	for _, x := range xregs {

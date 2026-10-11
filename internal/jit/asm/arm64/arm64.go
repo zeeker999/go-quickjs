@@ -414,6 +414,9 @@ const (
 	FSub FOp = 0x1E603800
 	FMul FOp = 0x1E600800
 	FDiv FOp = 0x1E601800
+	// FMax and FMin are NaN if either operand is, and order -0 below +0.
+	FMax FOp = 0x1E604800
+	FMin FOp = 0x1E605800
 )
 
 // FArith is dst = n op m.
@@ -432,6 +435,24 @@ func (a *Asm) FSqrt(dst, n FReg) { a.emit(0x1E61C000 | uint32(n)<<5 | uint32(dst
 
 // FAbs is dst = n, its sign cleared, NaN included.
 func (a *Asm) FAbs(dst, n FReg) { a.emit(0x1E60C000 | uint32(n)<<5 | uint32(dst)) }
+
+// FRound is a rounding of a double to an integer (FRint).
+type FRound uint32
+
+const (
+	FRintM FRound = 0x1E654000 // toward -Inf
+	FRintP FRound = 0x1E64C000 // toward +Inf
+	FRintZ FRound = 0x1E65C000 // toward zero
+)
+
+// FRint is dst = n rounded to an integer, as op says.
+func (a *Asm) FRint(op FRound, dst, n FReg) { a.emit(uint32(op) | uint32(n)<<5 | uint32(dst)) }
+
+// FCvtToSingle is dst = n, a double, rounded to a float (dst's S view).
+func (a *Asm) FCvtToSingle(dst, n FReg) { a.emit(0x1E624000 | uint32(n)<<5 | uint32(dst)) }
+
+// FCvtFromSingle is dst = n, a float (n's S view), as a double.
+func (a *Asm) FCvtFromSingle(dst, n FReg) { a.emit(0x1E22C000 | uint32(n)<<5 | uint32(dst)) }
 
 // Fcvtzs is dst = n truncated to a signed 64-bit integer, saturating; NaN
 // gives 0.

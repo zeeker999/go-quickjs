@@ -6,12 +6,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -7066,6 +7068,38 @@ func TestJITExactPowIsVMs(t *testing.T) {
 	}
 }
 
+// Math.round, Math.sign, Math.max and Math.min as native code computes
+// them, and ssa folds them (ssa.Round, ssa.Sign, ssa.Extremum), are the
+// VM's, to the bit.
+func TestJITMathFoldsAreVMs(t *testing.T) {
+	xs := []float64{0, math.Copysign(0, -1), 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 0.49999999999999994, -0.49999999999999994,
+		1<<52 - 0.5, -(1<<52 - 0.5), 1 << 52, 1<<53 + 2, 5e-324, -5e-324, math.MaxFloat64, -math.MaxFloat64,
+		math.Inf(1), math.Inf(-1), math.NaN(), 0.7, -0.7, 0.99999999999999989, -0.99999999999999989}
+	for i := -1000; i <= 1000; i++ {
+		xs = append(xs, float64(i)/8, float64(i)*1e13+0.5)
+	}
+	same := func(a, b float64) bool {
+		return math.Float64bits(a) == math.Float64bits(b) || a != a && b != b
+	}
+	for _, x := range xs {
+		if got, want := ssa.Round(x), jsRound(x); !same(got, want) {
+			t.Fatalf("Math.round(%v): native %v, VM %v", x, got, want)
+		}
+		if got, want := ssa.Sign(x), jsSign(x); !same(got, want) {
+			t.Fatalf("Math.sign(%v): native %v, VM %v", x, got, want)
+		}
+	}
+	for _, x := range xs[:40] {
+		for _, y := range xs[:40] {
+			for _, max := range []bool{true, false} {
+				if got, want := ssa.Extremum(x, y, max), extremum2(x, y, max); !same(got, want) {
+					t.Fatalf("extremum(%v, %v, %v): native %v, VM %v", x, y, max, got, want)
+				}
+			}
+		}
+	}
+}
+
 // Math.pow(x, y) is computed by native code where its answer is exact
 // (ssa.ExactPow): y 2, and an integer to a power from 0 to 64 up to 2**53,
 // RayTrace's Math.pow(10, gloss+1), which had its rayTrace leave native
@@ -7132,6 +7166,103 @@ func TestJITSSAMathPow(t *testing.T) {
 		if i == 10 {
 			if e := r.jit.cache[weak.Make(one.fn)]; e == nil || e.ssa == nil || e.ssaStats.hosts != 0 {
 				t.Fatalf("one did not run natively: %+v", e)
+			}
+		}
+	}
+}
+
+// TestJITSSAMathFunctions: every Math function of numbers runs natively,
+// as V8's code makes them -- an instruction of its own (a rounding, sign,
+// fround, max, min) or Go called from native code, the VM's very function
+// -- with every answer the interpreter's, to the bit: zeros' signs, the
+// ties Math.round breaks upward, numbers past 2**52, subnormals, the
+// infinities and NaN, of each function the VM's Math has. Without SSE4.1
+// (abi.Encoding's Round), Go rounds. A Math function a script replaced is
+// what is called.
+func TestJITSSAMathFunctions(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	t.Run("native", testJITSSAMathFunctions)
+	if jitEncoding.Round {
+		t.Run("noround", func(t *testing.T) {
+			jitEncoding.Round = false
+			defer func() { jitEncoding.Round = true }()
+			testJITSSAMathFunctions(t)
+		})
+	}
+}
+
+func testJITSSAMathFunctions(t *testing.T) {
+	var src strings.Builder
+	src.WriteString(`var xs=[0,-0,0.5,-0.5,1.5,-1.5,2.5,-2.5,0.49999999999999994,-0.49999999999999994,0.7,-0.7,3.7,-3.7,
+		4503599627370495.5,-4503599627370495.5,4503599627370497,2**53,2**52-0.5,1e300,-1e300,5e-324,-5e-324,1/3,Math.PI,-Math.E,
+		Infinity,-Infinity,NaN,123456789.987,1e-7,0.99999999999999989,-0.99999999999999989,0.25,-1,1,3.4028235677973366e38,1e39];
+		var fa=new Float64Array(1),ua=new Uint32Array(fa.buffer);
+		function bits(o){return o.map(function(v){fa[0]=v;return ua[1].toString(16)+':'+ua[0].toString(16)}).join()}
+		var L=xs.length;`)
+	calls := map[string]string{}
+	for _, name := range unaryMathNames {
+		calls["u_"+name] = "Math." + name + "(x)"
+	}
+	for name, call := range map[string]string{"atan2": "Math.atan2(x,y)", "hypot": "Math.hypot(x,y)", "pow": "Math.pow(x,y)",
+		"max2": "Math.max(x,y)", "min2": "Math.min(x,y)", "max1": "Math.max(x)", "min3": "Math.min(x,y,z)", "max4": "Math.max(x,y,z,y)",
+		"minneg": "Math.min(x,-x)", "maxneg": "Math.max(-x,x)"} {
+		calls["b_"+name] = call
+	}
+	names := slices.Sorted(maps.Keys(calls))
+	for _, name := range names {
+		fmt.Fprintf(&src, "var o_%[1]s=xs.slice();function %[1]s(n){const o=o_%[1]s;for(let i=0;i<n;i++){const x=xs[i%%L],y=xs[(i*7+3)%%L],z=xs[(i*5+1)%%L];o[i%%L]=%[2]s}return o}\n", name, calls[name])
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, src.String())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exits := func(name string) (uint64, *jitEntry) {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		e := r.jit.cache[weak.Make(cl.fn)]
+		if e == nil {
+			return 0, nil
+		}
+		return e.ssaStats.hosts + e.ssaStats.guards, e
+	}
+	for round := 0; round < 7; round++ {
+		if round == 6 {
+			// Replaced: each call is the script's function's.
+			for _, rt := range []*Runtime{want, r} {
+				if _, err := rt.Run(compileForTest(t, `Math.floor=function(x){return x+1};Math.max=function(){return arguments.length};
+					Math.sin=Math.cos;Math.pow=Math.atan2;Math.round=Math.trunc`)); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		for _, name := range names {
+			call := "bits(" + name + "(" + strconv.Itoa(97*3) + "))"
+			wv, err := want.Run(compileForTest(t, call))
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, _ := exits(name)
+			gv, err := r.Run(compileForTest(t, call))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := gv.String().Go(), wv.String().Go(); got != want {
+				t.Fatalf("round %d, %s: got\n%s\ninterpreter\n%s", round, calls[name], got, want)
+			}
+			if round == 5 {
+				after, e := exits(name)
+				if e == nil || e.ssa == nil || e.entrySlow {
+					t.Fatalf("%s did not run natively: %+v", calls[name], e)
+				}
+				if after != before {
+					t.Fatalf("%s left native code %d times", calls[name], after-before)
+				}
 			}
 		}
 	}
