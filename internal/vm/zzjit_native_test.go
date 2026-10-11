@@ -2372,9 +2372,20 @@ func TestJITPromotionKeepsFramelessCalls(t *testing.T) {
 	}
 }
 
+// A long first call promotes its loop, from the tree tier, which runs
+// functions with var and let bindings alike, or from the interpreter, with
+// the tier off.
 func TestJITLoopPromotionFirstCall(t *testing.T) {
-	for _, keyword := range []string{"var", "let"} {
-		t.Run(keyword, func(t *testing.T) {
+	for _, tc := range []struct {
+		name, keyword string
+		tree          bool
+	}{{"var", "var", true}, {"let", "let", true}, {"interpreter", "let", false}} {
+		keyword := tc.keyword
+		t.Run(tc.name, func(t *testing.T) {
+			if !tc.tree {
+				SetTreeTier(false)
+				defer SetTreeTier(true)
+			}
 			r := New(Config{JIT: true})
 			t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
 			source := "function sum(n) { " + keyword + " s=0; for(" + keyword + " i=0;i<n;i++) s+=i; return s } sum(10000)"
@@ -2387,7 +2398,7 @@ func TestJITLoopPromotionFirstCall(t *testing.T) {
 			}
 			cl := r.global.getOwn(r.atoms.intern("sum")).value.Object().fn().closure
 			tree := (*tree)(atomic.LoadPointer(&cl.fn.VMCode))
-			if keyword == "var" && (tree == nil || tree == noTree) || keyword == "let" && tree != noTree {
+			if tc.tree && (tree == nil || tree == noTree) || !tc.tree && tree != nil && tree != noTree {
 				t.Fatal("test did not exercise its expected existing tier")
 			}
 			if r.jitDeoptDepth != 0 {

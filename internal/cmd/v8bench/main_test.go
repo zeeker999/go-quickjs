@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit"
+	"github.com/go-quickjs/go-quickjs/internal/v8bench"
 )
 
 func TestJITBenchmarkRequiresNativeBuild(t *testing.T) {
@@ -14,7 +15,7 @@ func TestJITBenchmarkRequiresNativeBuild(t *testing.T) {
 	previous := *jitFlag
 	*jitFlag = true
 	defer func() { *jitFlag = previous }()
-	_, err := (engine{}).NewRuntime(nil, nil)
+	_, err := (engine{}).NewRuntime(v8bench.Host{})
 	if err == nil || !strings.Contains(err.Error(), "-tags quickjs_jit") {
 		t.Fatalf("native benchmark silently selected fallback: %v", err)
 	}
