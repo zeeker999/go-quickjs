@@ -7152,6 +7152,41 @@ func TestJITSSAGoCalls(t *testing.T) {
 	}
 }
 
+// A call Go makes from native code (ssa.GoCall) leaves the frame's operand
+// slots alone: code entered after an exit -- at its first call, under the
+// threshold stress, Infinity's read leaves -- reads t, a value it never
+// loaded, from the slot it was entered with, which an exit's way of making
+// the call writes the call's operands over (the fuzzer's eb178ef9ec054b76
+// and 0ea58c8f6fea0c66). Each answer is the interpreter's.
+func TestJITSSAGoCallsLeaveFrameSlots(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	src := `function h(s,i){if(i===6)throw new RangeError('h'+s);return (s+i)|0}
+		function f(n){let s=1,t='3';for(let i=0;i<n;i++){t=(i % Infinity);s=h(s,i);}return s+':'+t}
+		function g(n){try{return f(n)}catch(e){return e.message}}
+		[g(1),g(3),g(7)].join()`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	wv, err := want.Run(compileForTest(t, src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	r.jitStress = jitStressConfig{threshold: true}
+	gv, err := r.Run(compileForTest(t, src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := gv.String().Go(), wv.String().Go(); got != want {
+		t.Fatalf("got %s, interpreter %s", got, want)
+	}
+	if r.jit.goCalls == 0 {
+		t.Fatal("Go made no call from native code")
+	}
+}
+
 // churnRegisters keeps many integers and floats live at once, so that the
 // registers native code had before a call of Go hold something else after.
 //
