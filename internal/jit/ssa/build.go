@@ -1441,6 +1441,11 @@ func (b *builder) read(slot int, blk *Block) *Value {
 		b.incomplete[blk.ID] = append(b.incomplete[blk.ID], slotPhi{slot, v})
 	case len(blk.Preds) == 1:
 		v = b.read(slot, blk.Preds[0])
+	case len(blk.Preds) == 0 && blk.PC < 0 && slot < len(blk.Header.Slots):
+		// A local an entry did not load, as the interpreter's liveness has
+		// it dead there (fill): the frame's, as an entry loads it.
+		v = b.f.newValue(blk, OpLoadSlot, Tagged)
+		v.Aux = slot
 	case len(blk.Preds) == 0:
 		// A slot read where nothing defined it: an operand slot past an
 		// entry's depth. The slot IR never reads one; this keeps the form
@@ -1611,6 +1616,14 @@ func (b *builder) fill(blk *Block) {
 		e, _ := f.entryForBlock(blk)
 		blk.Header = f.newState(FrameState{PC: b.p.Maps[e.PC].PC, Depth: e.Depth, Slots: f.refsOf(b.p.Locals + e.Depth), Site: -1})
 		for i := range blk.Header.Slots {
+			if !b.p.LiveAt(e.PC, i) {
+				// A local the interpreter writes before it reads from
+				// here is not loaded, as frame states leave it out: an
+				// entry's state names a slot's own load, which an exit
+				// leaves as it is, and the load had been dead but for
+				// that. Read anyway, it is loaded then (read).
+				continue
+			}
 			v := f.newValue(blk, OpLoadSlot, Tagged)
 			v.Aux = i
 			b.write(i, blk, v)

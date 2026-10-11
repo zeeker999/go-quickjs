@@ -63,6 +63,61 @@ func TestOptimizeKeepsLoopsUnboxed(t *testing.T) {
 	}
 }
 
+// An entry loads only the locals the interpreter may read from there before
+// it writes them, as frame states name only those: the loop's entry, at its
+// header, loads n, s and i, not b, which is written after the loop first.
+// What runs from each entry is still the slot IR's (TestBuildMatchesSlotIR).
+func TestEntriesLoadLiveLocals(t *testing.T) {
+	prog, err := parser.Parse(`function f(n){let s=0;for(let i=0;i<n;i++)s=(s+i)|0;let b=s+1;return b}`, parser.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	top, err := compiler.Compile(prog, compiler.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fn *bytecode.Function
+	for _, c := range top.Constants {
+		if c.Kind == bytecode.ConstFunction {
+			fn = c.Fn
+		}
+	}
+	p, err := jitcompile.LowerSSA(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := Build(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Check(f); err != nil {
+		t.Fatal(err)
+	}
+	b := -1
+	for i, l := range fn.Locals {
+		if l.Name == "b" {
+			b = i
+		}
+	}
+	loops := 0
+	for _, e := range f.Entries {
+		if e.PC != 0 {
+			loops++
+		}
+		for _, v := range e.Block.Values {
+			if v.Op == OpLoadSlot && v.Aux < p.LiveLocals && !p.LiveAt(e.PC, v.Aux) {
+				t.Errorf("the entry at pc %d loads local %d, dead there:\n%s", e.PC, v.Aux, f)
+			}
+			if v.Op == OpLoadSlot && e.PC != 0 && v.Aux == b {
+				t.Errorf("the loop's entry at pc %d loads b:\n%s", e.PC, f)
+			}
+		}
+	}
+	if loops == 0 {
+		t.Fatalf("no entry but the function's:\n%s", f)
+	}
+}
+
 // Build leaves the phis' shadows and the stores' checks to Optimize, which
 // would make them again for what it keeps; Finish makes them, once, for
 // whatever runs or compiles a Func Optimize has not.
