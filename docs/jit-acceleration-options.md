@@ -197,6 +197,21 @@ What it changed:
   store meeting several shapes), so each call to it from native code
   leaves for Go.
 
+**Go calls, later steps (a1d4ca0, 124b7fc, 2a80874).**
+- *Object pools* are filled again by a Go call (GoRefill), and the call
+  is made again from its start. With construction on, RayTrace improved
+  19% and EarleyBoyer 9%.
+- *Pointer stores while the collector marks* are made by Go (GoStore),
+  with its write barrier, instead of exiting. Keeps are written the same
+  way. Their old "write nothing while marking" relied on every store
+  exiting then; once Go made stores, it built cyclic lists
+  (TestJITSSAKeepsWhileMarking).
+- *The profit check* skips exits that marking caused. Native code flags
+  them in `ExitMarking`. A function Go stopped entering now spends its
+  recompile budget through the existing tiers' tries.
+- *Measured.* Construction on: EarleyBoyer -8%, Splay -4%. Construction
+  off: Splay +3.5%, within the noise. A Go store saves every register.
+
 **Host exits that remain** (construction on, 10 iterations, by the
 operation Go then runs):
 
