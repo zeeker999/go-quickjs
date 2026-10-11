@@ -2067,7 +2067,10 @@ func TestJITMemoryRefusal(t *testing.T) {
 
 // Compiling must not measure the heap: before, every attempt walked it, and
 // a refusal retried every warmup, so a memory-limited runtime walked its whole
-// heap every few calls of each hot function.
+// heap every few calls of each hot function. The meter walks once a megabyte
+// has been allocated in the process, by any goroutine -- another test's,
+// still running, had it walk in one of CI's runs -- so each call starts its
+// count afresh: only what the call does may make it walk.
 func TestJITNoHeapWalks(t *testing.T) {
 	walks := func(jit bool, limit int64) uint16 {
 		r := jitRuntimeForTest(t, Config{JIT: jit, MemoryLimit: limit})
@@ -2077,6 +2080,7 @@ func TestJITNoHeapWalks(t *testing.T) {
 		}
 		before := r.meter.epoch
 		for i := 0; i < 200; i++ {
+			r.meter.allocsAt = r.meter.allocated()
 			if got, err := r.Call(v, Undefined, []Value{Int32(10)}); err != nil || got.Number() != 45 {
 				t.Fatalf("sum = %v, %v", got, err)
 			}
