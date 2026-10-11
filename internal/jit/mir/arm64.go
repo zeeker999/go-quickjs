@@ -1253,9 +1253,10 @@ func (c *a64Compiler) addAlong(v *ssa.Value, add *ssa.PropertyAdd, miss arm64.La
 			c.a.MovImm(a64C, uint64(h.Object))
 			c.a.Cmp(a64B, a64C, true)
 			c.a.BCond(arm64.NE, miss)
+			// Not D, which may be the object's (o).
 			c.a.Load(a64B, a64C, c.enc.ObjectShape)
-			c.a.MovImm(a64D, uint64(h.Shape))
-			c.a.Cmp(a64B, a64D, true)
+			c.a.MovImm(a64A, uint64(h.Shape))
+			c.a.Cmp(a64B, a64A, true)
 			c.a.BCond(arm64.NE, miss)
 			c.a.Load(a64B, a64C, c.enc.ObjectProto)
 		}
