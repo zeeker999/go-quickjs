@@ -7224,6 +7224,50 @@ func TestJITCacheKeepsCodeOverRefusals(t *testing.T) {
 	runtime.KeepAlive(scripts)
 }
 
+// The values a function keeps in registers across its calls take spill
+// slots only while they live: a slot one has done with is another's, as
+// the spill slots are reused, so a long function with many calls, each a
+// value or two live across it -- Crypto's bnpDivRemTo, which went to the
+// old pipeline for "more than 256 spill slots" -- compiles. Each answer is
+// the interpreter's.
+func TestJITSSACallSavesReuseSlots(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	var body strings.Builder
+	for k := range 130 {
+		fmt.Fprintf(&body, "a=(i*%[1]d+s)|0;b=(s^%[1]d)|0;s=(s+h(i))|0;s=(s*3+a-b)|0;", k)
+	}
+	src := `function h(i){return arguments.length+i}
+		function many(n){let s=0,a=0,b=0;for(let i=0;i<n;i++){` + body.String() + `}return s}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, src)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range 4 {
+		wv, err := want.Run(compileForTest(t, `many(20)`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, `many(20)`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.Number(), wv.Number(); got != want {
+			t.Fatalf("round %d: got %v, interpreter %v", i, got, want)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("many")).value.Object().fn().closure
+	if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil || e.code != nil {
+		t.Fatalf("many was not compiled by the new pipeline: %+v", e)
+	}
+}
+
 // churnRegisters keeps many integers and floats live at once, so that the
 // registers native code had before a call of Go hold something else after.
 //
