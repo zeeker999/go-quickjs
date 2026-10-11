@@ -640,10 +640,12 @@ func (c *core) allocate() error {
 		}
 	}
 	// What each native call saves: the values live across it in registers,
-	// each in a slot of its own past the spill slots. The calls come in
-	// order, so the intervals begun before one are kept as they are met, in
-	// their order, and dropped once they end.
+	// each in a slot of its own past the spill slots while it lives, which
+	// a value saved later takes once it has ended, as the spill slots are
+	// reused. The calls come in order, so the intervals begun before one
+	// are kept as they are met, in their order, and dropped once they end.
 	home := map[int]int{}
+	var free []int
 	open, next := c.intervalRefs(len(all))[:0], 0
 	for _, b := range c.order {
 		for _, v := range b.Values {
@@ -658,6 +660,9 @@ func (c *core) allocate() error {
 			for _, it := range open {
 				if it.end > p {
 					kept = append(kept, it)
+				} else if s, ok := home[it.v.ID]; ok {
+					free = append(free, s)
+					delete(home, it.v.ID)
 				}
 			}
 			open = kept
@@ -668,10 +673,14 @@ func (c *core) allocate() error {
 				}
 				s, ok := home[it.v.ID]
 				if !ok {
-					if spills == abi.SpillSlots {
+					switch {
+					case len(free) != 0:
+						s, free = free[len(free)-1], free[:len(free)-1]
+					case spills == abi.SpillSlots:
 						return fmt.Errorf("%w: more than %d spill slots", ErrUnsupported, abi.SpillSlots)
+					default:
+						s, spills = spills, spills+1
 					}
-					s, spills = spills, spills+1
 					home[it.v.ID] = s
 				}
 				if c.saves == nil {
