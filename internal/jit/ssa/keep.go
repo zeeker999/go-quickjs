@@ -2,7 +2,6 @@ package ssa
 
 import (
 	"fmt"
-	"slices"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 )
@@ -31,14 +30,20 @@ import (
 // nothing live across the others.
 func keepAcrossStores(f *Func) (bool, []*Value, [][]*Value) {
 	stores, live := liveAcross(f)
-	a := newAliases()
-	kept := map[*Value][]*Value{}
-	// cell is the keep cell each value kept has, one for all the stores
-	// that keep it: its pointer word, like its number word, is the same
-	// wherever it is read -- a value carried round a loop is a phi, a value
-	// of its own -- so a store keeping it again writes what the cell holds.
-	cell := map[*Value]int{}
+	a := newAliases(f)
+	// kept are, for each value kept (order, at, by value ID, 1 plus its
+	// index there), its copies.
+	n := f.nextID
+	at := f.ints(n)
 	var order []*Value
+	var kept [][]*Value
+	// cell is, by value ID, 1 plus the keep cell each value kept has, one
+	// for all the stores that keep it: its pointer word, like its number
+	// word, is the same wherever it is read -- a value carried round a loop
+	// is a phi, a value of its own -- so a store keeping it again writes
+	// what the cell holds. added marks, by value ID, the values a store
+	// keeps, as 1 plus its index.
+	cell, added := f.ints(n), f.ints(n)
 	for i, s := range stores {
 		// A store that may write a cell a value used after it was read from
 		// (aliases) keeps that value, and every other used after it that has
@@ -71,15 +76,19 @@ func keepAcrossStores(f *Func) (bool, []*Value, [][]*Value) {
 		if !alias {
 			continue
 		}
-		var cands []*Value
-		for _, c := range append(append([]*Value(nil), live[i]...), read...) {
-			if c.Type == Tagged && c.Shadow != nil && c.Op != OpKept && !slices.Contains(cands, c) {
-				cands = append(cands, c)
+		cands := f.scr().vals[:0]
+		for _, list := range [2][]*Value{live[i], read} {
+			for _, c := range list {
+				if c.Type == Tagged && c.Shadow != nil && c.Op != OpKept && added[c.ID] != i+1 {
+					added[c.ID] = i + 1
+					cands = append(cands, c)
+				}
 			}
 		}
+		f.scr().vals = cands[:0]
 		fresh := 0
 		for _, c := range cands {
-			if _, ok := cell[c]; !ok {
+			if cell[c.ID] == 0 {
 				fresh++
 			}
 		}
@@ -90,32 +99,39 @@ func keepAcrossStores(f *Func) (bool, []*Value, [][]*Value) {
 			}
 			continue
 		}
-		var refs, keeps, copies []*Value
+		if len(cands) == 0 {
+			continue
+		}
+		// The refs, then the keeps, then the copies, before the store.
 		b := s.Block
-		for _, c := range cands {
+		where := indexOf(b.Values, s)
+		m := len(cands)
+		values := f.refsOf(len(b.Values) + 3*m)
+		copy(values, b.Values[:where])
+		copy(values[where+3*m:], b.Values[where:])
+		ins := values[where : where+3*m]
+		for j, c := range cands {
 			r := f.alloc(Value{Op: OpKeepRef, Type: Ptr, Args: f.refsOf(1), Block: b})
 			r.Args[0] = c
-			index, ok := cell[c]
-			if !ok {
+			index := cell[c.ID] - 1
+			if index < 0 {
 				index = f.Keeps
-				cell[c] = index
+				cell[c.ID] = index + 1
 				f.Keeps++
 			}
 			k := f.alloc(Value{Op: OpKeep, Type: Source, Args: f.refsOf(2), Block: b, Index: index})
 			k.Args[0], k.Args[1] = c, r
 			v := f.alloc(Value{Op: OpKept, Type: Tagged, Args: f.refsOf(2), Block: b})
 			v.Args[0], v.Args[1], v.Shadow = k, c, k
-			refs, keeps, copies = append(refs, r), append(keeps, k), append(copies, v)
-			if kept[c] == nil {
+			ins[j], ins[m+j], ins[2*m+j] = r, k, v
+			if at[c.ID] == 0 {
 				order = append(order, c)
+				kept = append(kept, nil)
+				at[c.ID] = len(order)
 			}
-			kept[c] = append(kept[c], v)
+			kept[at[c.ID]-1] = f.appendValue(kept[at[c.ID]-1], v)
 		}
-		if len(refs) != 0 {
-			at := indexOf(b.Values, s)
-			ins := append(append(append([]*Value(nil), refs...), keeps...), copies...)
-			b.Values = append(b.Values[:at], append(ins, b.Values[at:]...)...)
-		}
+		b.Values = values
 	}
 	if len(order) == 0 {
 		return false, stores, live
@@ -141,7 +157,7 @@ func indexOf(vs []*Value, v *Value) int {
 // end, or from a phi of every predecessor's, dropped when its arguments
 // are one value. One walk of the function serves every value: a compile
 // at run time pays for each.
-func reconstruct(f *Func, order []*Value, kept map[*Value][]*Value) {
+func reconstruct(f *Func, order []*Value, kept [][]*Value) {
 	nb := len(f.Blocks)
 	// pos is each value's index in its block, phis made here coming before
 	// every one; cand, by value ID, is 1 plus the kept value's index.
@@ -158,8 +174,9 @@ func reconstruct(f *Func, order []*Value, kept map[*Value][]*Value) {
 	defs := make([][]def, len(order))
 	for k, c := range order {
 		cand[c.ID] = k + 1
+		defs[k] = make([]def, 0, 1+len(kept[k]))
 		defs[k] = append(defs[k], def{c.Block.ID, pos[c.ID], c})
-		for _, d := range kept[c] {
+		for _, d := range kept[k] {
 			defs[k] = append(defs[k], def{d.Block.ID, pos[d.ID], d})
 		}
 	}
@@ -182,11 +199,14 @@ func reconstruct(f *Func, order []*Value, kept map[*Value][]*Value) {
 		}
 		return last
 	}
-	entry := make([]*Value, len(order)*nb)
-	alias := map[*Value]*Value{}
+	entry := f.refsOf(len(order) * nb)
+	// alias is the value each phi made here and found to merge one is, by
+	// its ID past the function's (base): nil until one is.
+	base := f.nextID
+	var alias []*Value
 	resolve := func(v *Value) *Value {
-		for alias[v] != nil {
-			v = alias[v]
+		for v.ID >= base && v.ID-base < len(alias) && alias[v.ID-base] != nil {
+			v = alias[v.ID-base]
 		}
 		return v
 	}
@@ -226,7 +246,10 @@ func reconstruct(f *Func, order []*Value, kept map[*Value][]*Value) {
 			same = a
 		}
 		if trivial && same != nil {
-			alias[phi] = same
+			for len(alias) <= phi.ID-base {
+				alias = append(alias, nil)
+			}
+			alias[phi.ID-base] = same
 			entry[k*nb+b.ID] = same
 			return same
 		}
@@ -246,15 +269,16 @@ func reconstruct(f *Func, order []*Value, kept map[*Value][]*Value) {
 	// A frame state its users share -- the guards of one instruction do,
 	// some before a keep and some after -- is copied before one's slot
 	// changes.
-	users := map[*FrameState]int{}
+	// users counts, by state ID, the values and blocks that use each.
+	users := f.ints(f.nextState)
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
 			if v.State != nil {
-				users[v.State]++
+				users[v.State.id]++
 			}
 		}
 		if b.State != nil {
-			users[b.State]++
+			users[b.State.id]++
 		}
 	}
 	state := func(s *FrameState, b *Block, at int) *FrameState {
@@ -271,12 +295,11 @@ func reconstruct(f *Func, order []*Value, kept map[*Value][]*Value) {
 			if r == x {
 				continue
 			}
-			if !copied && users[s] > 1 {
-				users[s]--
+			if !copied && s.id < len(users) && users[s.id] > 1 {
+				users[s.id]--
 				out = f.newState(*s)
 				out.Slots = f.refsOf(len(s.Slots))
 				copy(out.Slots, s.Slots)
-				users[out] = 1
 			}
 			copied = true
 			out.Slots[i] = r
@@ -324,7 +347,10 @@ func reconstruct(f *Func, order []*Value, kept map[*Value][]*Value) {
 	for id, ps := range phis {
 		if len(ps) != 0 {
 			b := f.Blocks[id]
-			b.Values = append(append([]*Value(nil), ps...), b.Values...)
+			values := f.refsOf(len(ps) + len(b.Values))
+			copy(values, ps)
+			copy(values[len(ps):], b.Values)
+			b.Values = values
 		}
 	}
 	if len(alias) == 0 {

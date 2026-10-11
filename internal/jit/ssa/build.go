@@ -1270,8 +1270,8 @@ func (b *builder) plan() error {
 		}
 	}
 
-	b.blockAt = make([]*Block, len(p.Code)+2)
-	var starts []int
+	b.blockAt = b.f.blockList(len(p.Code) + 2)
+	starts := b.f.ints(len(p.Code) + 2)[:0]
 	for pc, leader := range leaders {
 		if leader && reachable(b.p, pc) {
 			starts = append(starts, pc)
@@ -1378,13 +1378,13 @@ func (b *builder) edge(from, to *Block) {
 // Assignment Form").
 func (b *builder) translate() {
 	n := len(b.f.Blocks)
-	b.defs = make([][]*Value, n)
+	b.defs = b.f.refLists(n)
 	b.sealed, b.filled = b.f.bools(n), b.f.bools(n)
 	b.incomplete = make([][]slotPhi, n)
 
 	// Reverse post-order from the entries, so that a block's forward
 	// predecessors are filled before it.
-	order := make([]*Block, 0, n)
+	order := b.f.blockList(n)[:0]
 	seen := b.f.bools(n)
 	var visit func(*Block)
 	visit = func(blk *Block) {

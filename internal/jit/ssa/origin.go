@@ -308,15 +308,31 @@ func checkStoreChecks(f *Func) {
 
 // storeChecksAt is storeChecks with what is live across the stores.
 func storeChecksAt(f *Func, stores []*Value, live [][]*Value) {
-	a := newAliases()
+	a := newAliases(f)
+	// added marks, by value ID, the checks the store being made has, as 1
+	// plus its index: each is made once.
+	var added []int
 	for i, s := range stores {
-		if s.Op != OpPropWrite {
+		if s.Op != OpPropWrite || len(live[i]) == 0 {
 			continue
 		}
+		if added == nil {
+			added = f.ints(f.nextID)
+		}
+		for _, c := range s.Args[2:] {
+			if c.ID < len(added) {
+				added[c.ID] = i + 1
+			}
+		}
 		for _, c := range live[i] {
-			if sh := c.Shadow; a.may(s.Key, sh) && !slices.Contains(s.Args[2:], sh) {
-				s.Args = f.appendValue(s.Args, sh)
-				sh.Uses++
+			sh := c.Shadow
+			if !a.may(s.Key, sh) || sh.ID < len(added) && added[sh.ID] == i+1 || sh.ID >= len(added) && slices.Contains(s.Args[2:], sh) {
+				continue
+			}
+			s.Args = f.appendValue(s.Args, sh)
+			sh.Uses++
+			if sh.ID < len(added) {
+				added[sh.ID] = i + 1
 			}
 		}
 	}
@@ -327,7 +343,8 @@ func storeChecksAt(f *Func, stores []*Value, live [][]*Value) {
 // phi, any of its arguments' -- and a keep's, while the collector marks,
 // its value's own (OpKeep). Elements, frame slots and the context's cells
 // are no property's, and a cell read through another key is another
-// property's. Answers are kept, by phi and key.
+// property's. Answers are kept, by phi and key, in maps the Func's scratch
+// keeps from compile to compile.
 type aliases struct{ key, own, elem map[aliasKey]int }
 
 type aliasKey struct {
@@ -335,8 +352,15 @@ type aliasKey struct {
 	key uint32
 }
 
-func newAliases() *aliases {
-	return &aliases{map[aliasKey]int{}, map[aliasKey]int{}, map[aliasKey]int{}}
+func newAliases(f *Func) *aliases {
+	a := &f.scr().aliases
+	if a.key == nil {
+		a.key, a.own, a.elem = map[aliasKey]int{}, map[aliasKey]int{}, map[aliasKey]int{}
+	}
+	clear(a.key)
+	clear(a.own)
+	clear(a.elem)
+	return a
 }
 
 // anyKey is a call's key: a callee may write any property.

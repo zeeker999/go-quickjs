@@ -357,6 +357,8 @@ type FrameState struct {
 	// caller's at the call, which PC, Depth and Site are, and those between
 	// are nil.
 	Inline *InlineState
+	// id numbers the function's states, for tables by state (newState).
+	id int
 }
 
 // InlineState is an inlined callee's frame at an exit inside it, which,
@@ -448,6 +450,8 @@ type Func struct {
 	// written marks the slots some instruction writes (Written).
 	written []bool
 	nextID  int
+	// nextState numbers the frame states (FrameState.id).
+	nextState int
 	// shadowed is whether the phis' shadows and the stores' checks are
 	// made (Finish).
 	shadowed bool
@@ -467,9 +471,9 @@ type Func struct {
 	states     []FrameState
 	valueChunk int
 	refChunk   int
-	// scratch is unboxPhis's tables, kept from one round of Optimize to
-	// the next.
-	own scratch
+	// own is the passes' scratch for a Func built without a workspace,
+	// made when first wanted (scr).
+	own *scratch
 	// ws is the workspace the Func was built in, or nil (Workspace).
 	ws *Workspace
 }
@@ -493,6 +497,8 @@ type scratch struct {
 	subst []*Value
 	// originPhis is Origins' list of the phis.
 	originPhis []*Value
+	// aliases is the store passes' answers (newAliases).
+	aliases aliases
 }
 
 // guardSeen is a guard Optimize has met, keyed by its op, and the index
@@ -508,11 +514,16 @@ func (f *Func) scr() *scratch {
 	if f.ws != nil {
 		return &f.ws.scratch
 	}
-	return &f.own
+	if f.own == nil {
+		f.own = new(scratch)
+	}
+	return f.own
 }
 
 // newState returns a new frame state like s, from a slab.
 func (f *Func) newState(s FrameState) *FrameState {
+	s.id = f.nextState
+	f.nextState++
 	if f.ws != nil {
 		p := &f.ws.states.Make(1)[0]
 		*p = s

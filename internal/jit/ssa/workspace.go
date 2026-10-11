@@ -18,6 +18,7 @@ type Workspace struct {
 	states    arena.Arena[FrameState]
 	blocks    arena.Arena[Block]
 	blockRefs arena.Arena[*Block]
+	refLists  arena.Arena[[]*Value]
 	bools     arena.Arena[bool]
 	bytes     arena.Arena[uint8]
 	ints      arena.Arena[int]
@@ -36,6 +37,7 @@ func (w *Workspace) init() {
 	w.states.KeepBig()
 	w.blocks.KeepBig()
 	w.blockRefs.KeepBig()
+	w.refLists.KeepBig()
 	w.bools.KeepBig()
 	w.bytes.KeepBig()
 	w.ints.KeepBig()
@@ -48,6 +50,7 @@ func (w *Workspace) Rewind() {
 	w.states.Rewind()
 	w.blocks.Rewind()
 	w.blockRefs.Rewind()
+	w.refLists.Rewind()
 	w.bools.Rewind()
 	w.bytes.Rewind()
 	w.ints.Rewind()
@@ -89,6 +92,23 @@ func (f *Func) appendValue(s []*Value, v *Value) []*Value {
 		return f.ws.refs.Append(s, v)
 	}
 	return append(s, v)
+}
+
+// blockList is n nil blocks: from the workspace, if the Func has one.
+func (f *Func) blockList(n int) []*Block {
+	if f.ws != nil {
+		return f.ws.blockRefs.Make(n)
+	}
+	return make([]*Block, n)
+}
+
+// refLists is n nil lists of values: from the workspace, if the Func has
+// one.
+func (f *Func) refLists(n int) [][]*Value {
+	if f.ws != nil {
+		return f.ws.refLists.Make(n)
+	}
+	return make([][]*Value, n)
 }
 
 // appendBlock is append(s, b), growing s in the workspace if there is one.
