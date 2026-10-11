@@ -14,6 +14,12 @@ type jitRealmFields struct{}
 type jitState struct{}
 type jitEntry struct{}
 
+// jitCacheSeen is nothing: a cache keeps no shapes for a JIT there is not
+// (propCache.seen).
+type jitCacheSeen struct{}
+
+func jitNoteSeen(seen jitCacheSeen, _, _ propCache) jitCacheSeen { return seen }
+
 func (*Runtime) recordJITStringIntrinsic() {}
 
 func (*Runtime) jitOn() bool { return false }

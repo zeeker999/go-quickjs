@@ -205,6 +205,14 @@ type jitEntry struct {
 	// reoptBudget is how many native stretches the code runs before it is
 	// compiled again for what it has learned (reoptDue).
 	reoptBudget uint32
+	// feedReopt marks code compiled before a site it has run since had any
+	// feedback: compiled again at its next invocation (calls, by Go or
+	// native callers), or once the invocation it ran in has done
+	// feedWork's worth of work more (reoptDue). starts counts Go's entries
+	// at a function's start, not into a loop.
+	feedReopt            bool
+	starts               uint64
+	feedStarts, feedWork uint64
 	// literals are the object literals the code makes natively, each with
 	// its pool, kept across compiles (jitFeedback.Literal); definesUnfed
 	// the literals' fields compiled before their transitions were made,
@@ -941,6 +949,9 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 		}
 		if e.entrySlow && e.reoptPending() {
 			e.slowTries++
+		}
+		if !osr {
+			e.starts++
 		}
 		if e.reoptDue() {
 			r.jitReoptimize(f.cl, e)

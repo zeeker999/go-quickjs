@@ -4952,7 +4952,7 @@ func TestJITSSANativeCallsGoOn(t *testing.T) {
 		}
 	}
 	cl := r.global.getOwn(r.atoms.intern("zero")).value.Object().fn().closure
-	if e := r.jit.hint(cl.hint()); e == nil || e.nativeIn == 0 {
+	if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.nativeIn == 0 {
 		t.Fatalf("zero was never called natively: %+v", e)
 	}
 	if r.jit.unwound == 0 {
@@ -5189,7 +5189,7 @@ func TestJITSSAPolymorphicReadsSettle(t *testing.T) {
 				if got, want := gv.String().Go(), wv.String().Go(); got != want {
 					t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
 				}
-				if r.jit.hint(cl.hint()) == nil {
+				if r.jit.cache[weak.Make(cl.fn)] == nil {
 					t.Fatalf("round %d: %s has no code", i, c.fn)
 				}
 				if i >= 2 {
@@ -5208,7 +5208,7 @@ func TestJITSSAPolymorphicReadsSettle(t *testing.T) {
 			}
 			// Code compiled again for any reason is compiled for every shape
 			// met: none is left to wait for.
-			e := r.jit.hint(cl.hint())
+			e := r.jit.cache[weak.Make(cl.fn)]
 			e.polyPending, e.polySettled, e.inlineReopt = true, 2, true
 			r.jitReoptimize(cl, e)
 			if e.polyPending || e.polySettled != 0 {
@@ -5845,7 +5845,7 @@ func TestJITSSANestedExits(t *testing.T) {
 	}
 	for _, name := range []string{"inner", "outer"} {
 		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
-		e := r.jit.hint(cl.hint())
+		e := r.jit.cache[weak.Make(cl.fn)]
 		if e == nil || e.ssa == nil || e.ssaStats.entries == 0 {
 			t.Fatalf("%s did not run natively: %+v", name, e)
 		}
@@ -5901,7 +5901,7 @@ func TestJITSSAProfitReturns(t *testing.T) {
 		t.Fatalf("step kept running natively: %+v", e)
 	}
 	heavy := r.global.getOwn(r.atoms.intern("heavy")).value.Object().fn().closure
-	if e := r.jit.hint(heavy.hint()); e == nil || e.ssa == nil || e.entrySlow {
+	if e := r.jit.cache[weak.Make(heavy.fn)]; e == nil || e.ssa == nil || e.entrySlow {
 		t.Fatalf("heavy left native code: %+v", e)
 	}
 }
@@ -6165,7 +6165,7 @@ func TestJITSSANativeCallTargets(t *testing.T) {
 	}
 	entry := func(name string) *jitEntry {
 		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
-		return r.jit.hint(cl.hint())
+		return r.jit.cache[weak.Make(cl.fn)]
 	}
 	for i, src := range rounds {
 		wv, err := want.Run(compileForTest(t, src))
@@ -7269,6 +7269,166 @@ func TestJITSSACallSavesReuseSlots(t *testing.T) {
 	cl := r.global.getOwn(r.atoms.intern("many")).value.Object().fn().closure
 	if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil || e.code != nil {
 		t.Fatalf("many was not compiled by the new pipeline: %+v", e)
+	}
+}
+
+// A construction of a global function is decided whenever the code is
+// compiled -- the function found where the global object has it, as
+// native code's read of the global finds it -- though the read's cache is
+// empty: native code reads globals without it, so a read only native code
+// ran, or none ran, never fills it. f is compiled before its branch has
+// run, and its construction there decided then: once the branch runs, f
+// is not compiled again for it -- the construction learned at its call,
+// a compile of its own (jitCalleeAt; every construction of DeltaBlue's had
+// cost one). Each answer is the interpreter's.
+func TestJITSSASeedsGlobalsNativeCodeRead(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	old := jitcompile.SSAConstruct
+	jitcompile.SSAConstruct = true
+	defer func() { jitcompile.SSAConstruct = old }()
+	src := `function V(a){this.a=a;this.b=a*2}
+		var o={w:3};
+		function f(n,k){let s=0;for(let i=0;i<n;i++){s=(s*3+i)|0;if(i>=k){const v=new V(i);s=(s+v.a+v.b+o.w)|0}}return s}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, src)); err != nil {
+			t.Fatal(err)
+		}
+		// V's code, which the construction inlines, warm.
+		if _, err := rt.Run(compileForTest(t, `for(var j=0;j<20;j++)new V(j)`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
+	var compiles uint64
+	for i, call := range []string{`f(300,1e9)`, `f(300,1e9)`, `f(300,1e9)`, `f(300,0)`, `f(300,0)`, `f(300,0)`, `f(300,0)`} {
+		wv, err := want.Run(compileForTest(t, call))
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := r.jit.reoptimized
+		gv, err := r.Run(compileForTest(t, call))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.Number(), wv.Number(); got != want {
+			t.Fatalf("round %d: got %v, interpreter %v", i, got, want)
+		}
+		if i >= 3 {
+			compiles += r.jit.reoptimized - before
+		}
+	}
+	if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil {
+		t.Fatalf("f did not run natively: %+v", e)
+	}
+	if compiles != 0 {
+		t.Fatalf("f was compiled again %d times once its branch ran", compiles)
+	}
+}
+
+// Code compiled before some of its sites had run -- a branch closed when
+// its loop was compiled -- is compiled again for them once: at its next
+// call, or once the call it runs in has done its budget's work, by when
+// they have all run -- not at each such site's first exit in turn, before
+// the others have (feedReopt). Each answer is the interpreter's.
+func TestJITSSAUnfedSitesCompiledAtNextCall(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	src := `function P(){}P.prototype={a:1,b:2,c:3,d:4,e:5};var o=new P;
+		function f(n,open){let s=0;for(let i=0;i<n;i++){s=(s*3+i)|0;if(open){s=(s+o.a+o.b+o.c+o.d+o.e)|0}}return s}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, src)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
+	calls := []string{`f(300,false)`, `f(300,false)`, `f(300,false)`, `f(300,true)`, `f(300,true)`, `f(300,true)`, `f(300,true)`}
+	var compiles []uint64
+	for i, call := range calls {
+		wv, err := want.Run(compileForTest(t, call))
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := r.jit.reoptimized
+		gv, err := r.Run(compileForTest(t, call))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.Number(), wv.Number(); got != want {
+			t.Fatalf("round %d: got %v, interpreter %v", i, got, want)
+		}
+		compiles = append(compiles, r.jit.reoptimized-before)
+	}
+	if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil || e.entrySlow {
+		t.Fatalf("f did not run natively: %+v", e)
+	}
+	// Opened in the fourth call, its five reads without feedback.
+	var n uint64
+	for _, c := range compiles[3:] {
+		n += c
+	}
+	if n != 1 {
+		t.Fatalf("compiled again %v times in the calls after its branch opened", compiles[3:])
+	}
+}
+
+// A method call whose receivers are of three classes, whose methods give
+// them a field, is compiled for the three shapes they have since -- not
+// for the shapes they had before, which took the read's cases, so that the
+// code left native code at every read of the live ones and was compiled
+// again for the same stale ones until its compiles ran out (jitAddReadCase).
+// Its method read first runs after the code is compiled, which is compiled
+// again once for it (feedReopt). Each answer is the interpreter's.
+func TestJITSSAReadsDropSupersededShapes(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	src := `function A(){this.v=1}A.prototype.m=function(i){this.n=i;return this.v+i};
+		function B(){this.v=2;this.w=0}B.prototype.m=function(i){this.n=i;return this.v*i};
+		function C(){this.u=0;this.v=3}C.prototype.m=function(i){this.n=i;return this.v^i};
+		var os=[new A,new B,new C];
+		function g(n){let t=0;for(let i=0;i<n;i++){t=(t+os[i%3].m(i))|0;t^=t>>>3}return t}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, src)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := r.global.getOwn(r.atoms.intern("g")).value.Object().fn().closure
+	var hosts uint64
+	for i := range 6 {
+		wv, err := want.Run(compileForTest(t, `g(3000)`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		hosts = r.jit.hosts
+		gv, err := r.Run(compileForTest(t, `g(3000)`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.Number(), wv.Number(); got != want {
+			t.Fatalf("round %d: got %v, interpreter %v", i, got, want)
+		}
+	}
+	e := r.jit.cache[weak.Make(cl.fn)]
+	if e == nil || e.ssa == nil || e.entrySlow {
+		t.Fatalf("g did not run natively: %+v", e)
+	}
+	if e.reopts > 1 || r.jit.hosts != hosts {
+		t.Fatalf("g was compiled again %d times for what its reads met, and left native code %d times in its last round", e.reopts, r.jit.hosts-hosts)
 	}
 }
 

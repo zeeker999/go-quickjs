@@ -250,12 +250,120 @@ func (r *Runtime) jitPolySeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 		e.poly = append(e.poly, jitPolySite{pc: uint32(pc)})
 		i = len(e.poly) - 1
 	}
-	p := &e.poly[i]
-	if len(p.cases) >= jitPropertyCases || slices.ContainsFunc(p.cases, func(k propCache) bool { return k.shape == c.shape }) {
+	if !jitAddReadCase(&e.poly[i], c) {
 		return
 	}
-	p.cases = append(p.cases, c)
 	e.polyPending, e.polySettled = true, 0
+}
+
+// jitAddReadCase adds c to a read's cases (jitPolySite), up to
+// jitPropertyCases, and reports whether it did. A case it supersedes goes
+// -- one of a shape its own came from by adding properties, as an object
+// whose methods give it fields after its construction moves on from its
+// constructor's shape, which no object of the site may have any more --
+// and one superseded by a case there is not added: the stale shapes took
+// the cases, and the code left native code at every read of the live
+// ones, compiled again and again for the same stale ones until its
+// compiles ran out. V8 drops deprecated maps from its inline caches so.
+func jitAddReadCase(p *jitPolySite, c propCache) bool {
+	if slices.ContainsFunc(p.cases, func(k propCache) bool { return k.shape == c.shape || jitSuperseded(c.shape, k.shape) }) {
+		return false
+	}
+	p.cases = slices.DeleteFunc(p.cases, func(k propCache) bool { return jitSuperseded(k.shape, c.shape) })
+	if len(p.cases) >= jitPropertyCases {
+		return false
+	}
+	p.cases = append(p.cases, c)
+	return true
+}
+
+// jitSuperseded reports whether t came from s by adding properties: s is
+// one of t's ancestors along the shapes' transitions.
+func jitSuperseded(s, t *shape) bool {
+	for a := t.parent; a != nil; a = a.parent {
+		if a == s {
+			return true
+		}
+	}
+	return false
+}
+
+// jitCacheSeen is a cache's earlier entries (propCache.seen), nil until
+// the site has met objects of a second shape.
+type jitCacheSeen = *propSeen
+
+// propSeen is a site's earlier cache entries, each of its own shape, the
+// latest last.
+type propSeen struct {
+	n       uint8
+	entries [3]propCache
+}
+
+// jitNoteSeen keeps old, what a cache remembered before it remembers n,
+// among the entries it has seen, if it was of another shape: replacing
+// the one of its shape, or the oldest when they are full.
+func jitNoteSeen(s *propSeen, old, n propCache) *propSeen {
+	if old.shape == nil || old.shape == noShape || old.shape == n.shape {
+		return s
+	}
+	old.seen = nil
+	if s == nil {
+		s = &propSeen{}
+	}
+	for i := range s.n {
+		if s.entries[i].shape == old.shape {
+			s.entries[i] = old
+			return s
+		}
+	}
+	if int(s.n) < len(s.entries) {
+		s.entries[s.n] = old
+		s.n++
+		return s
+	}
+	copy(s.entries[:], s.entries[1:])
+	s.entries[len(s.entries)-1] = old
+	return s
+}
+
+// jitSeenFeedback adds to e's sites what cl's caches have seen besides
+// what they remember now (propCache.seen): the shapes the interpreter and
+// the tree tier met at each property read and write, which the code is
+// compiled for from the first, as V8's optimizing compiler takes the maps
+// its inline caches met, not learned one exit and one compile at a time.
+// Each is taken as an exit's would be (jitPolySeen, jitPolyWriteSeen).
+func (r *Runtime) jitSeenFeedback(cl *closure, e *jitEntry) {
+	for pc, in := range cl.fn.Code {
+		write := in.Op == bytecode.OpSetProp
+		if !write && in.Op != bytecode.OpGetProp && in.Op != bytecode.OpGetPropThis || int(in.B) >= len(cl.ic) || cl.ic[in.B].seen == nil {
+			continue
+		}
+		seen, now := cl.ic[in.B].seen, cl.ic[in.B].shape
+		for _, c := range seen.entries[:seen.n] {
+			if c.shape == nil || c.shape == noShape || c.getter || c.idx < 0 || write && (c.next == setterNext || c.next == nil && c.p1 != nil) {
+				continue
+			}
+			if !write && now != nil && jitSuperseded(c.shape, now) {
+				// What the site's objects were before they took the shape
+				// its cache remembers now.
+				continue
+			}
+			i := slices.IndexFunc(e.poly, func(p jitPolySite) bool { return int(p.pc) == pc })
+			if i < 0 {
+				e.poly = append(e.poly, jitPolySite{pc: uint32(pc)})
+				i = len(e.poly) - 1
+			}
+			p := &e.poly[i]
+			if !write {
+				jitAddReadCase(p, c)
+				continue
+			}
+			if len(p.cases)+len(p.adds) >= jitPropertyCases || slices.ContainsFunc(p.cases, func(k propCache) bool { return k.shape == c.shape }) {
+				continue
+			}
+			p.cases = append(p.cases, c)
+		}
+	}
 }
 
 // jitPolySettle is how many exits in a row native code makes, once a read
@@ -287,8 +395,17 @@ const jitWrongShapeExits = 32
 // compiled on its first call or a branch not taken until then; another,
 // when its receivers' shape changed after -- leaves for Go every time;
 // once its cache knows a shape, the code is compiled again for it, as V8
-// deoptimizes for insufficient feedback, at once, or for a wrong map, after
-// jitWrongShapeExits in a row with one shape.
+// deoptimizes for insufficient feedback, or for a wrong map, after
+// jitWrongShapeExits in a row with one shape. Code compiled before a site
+// had run -- a function with a loop is compiled in its first call, before
+// its later branches have -- is compiled again at the function's next
+// invocation, not at once (feedReopt): its other sites without feedback
+// learn theirs meanwhile, at their exits, and one compile takes them all,
+// as V8's code deoptimized for insufficient feedback leaves the rest of
+// the invocation to the interpreter, which gathers it, and optimizes once
+// more. Compiled again at once, at each such site in turn, DeltaBlue's
+// Planner methods were compiled four times each in their first runs, and
+// then left native code at the sites the fourth compile had not seen.
 func jitFed(cl *closure, e *jitEntry, pc uint32) {
 	i := slices.IndexFunc(e.fed, func(s jitFedSite) bool { return s.pc == pc })
 	if i < 0 || e.reopts >= jitReoptimizations || int(pc) >= len(cl.fn.Code) {
@@ -305,7 +422,12 @@ func jitFed(cl *closure, e *jitEntry, pc uint32) {
 	if now := uintptr(unsafe.Pointer(c.shape)); now != site.seen {
 		site.seen, site.missed = now, 0
 	}
-	if site.missed++; site.shape == 0 || site.missed >= jitWrongShapeExits {
+	if site.missed++; site.shape == 0 {
+		e.fed = slices.Delete(e.fed, i, i+1)
+		if !e.feedReopt {
+			e.feedReopt, e.feedStarts, e.feedWork = true, e.starts+e.nativeIn, e.ssaStats.work
+		}
+	} else if site.missed >= jitWrongShapeExits {
 		e.fed = slices.Delete(e.fed, i, i+1)
 		e.reopt = true
 	}
@@ -593,6 +715,9 @@ func (e *jitEntry) reoptDue() bool {
 	if e.reopt || e.unwindReopt {
 		return true
 	}
+	if e.feedReopt && (e.starts+e.nativeIn > e.feedStarts || e.ssaStats.work-e.feedWork >= uint64(e.reoptBudget)*jitReoptPer*jitReoptWork) {
+		return true
+	}
 	return e.reoptPending() && (e.ssaStats.entries+e.ssaStats.hosts+e.ssaStats.goCalls+e.nativeIn+uint64(e.slowTries) >= uint64(e.reoptBudget) ||
 		e.ssaStats.work >= uint64(e.reoptBudget)*jitReoptPer*jitReoptWork)
 }
@@ -613,14 +738,14 @@ const (
 
 func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	switch {
-	case e.reopt:
+	case e.reopt || e.feedReopt:
 		e.reopts++
 	case e.inlineReopt:
 		e.inlineReopts++
 	case e.upgradeReopt:
 		e.upgradeReopts++
 	}
-	e.reopt, e.inlineReopt, e.polyReopt, e.upgradeReopt, e.unwindReopt = false, false, false, false, false
+	e.reopt, e.inlineReopt, e.polyReopt, e.upgradeReopt, e.unwindReopt, e.feedReopt = false, false, false, false, false, false
 	// What it compiles for, the reads' shapes met since included.
 	e.polyPending, e.polySettled = false, 0
 	fn := cl.fn
@@ -684,6 +809,9 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, 
 	}
 	if len(p.Globals) != 0 || p.Locals != fn.LocalCount+len(fn.Upvalues)+this {
 		return nil, nil
+	}
+	if e != nil && cl != nil {
+		r.jitSeenFeedback(cl, e)
 	}
 	fb := &jitFeedback{r: r, fn: fn, cl: cl, e: e}
 	// The compile's memory comes from the runtime's workspaces, taken back
@@ -1762,6 +1890,14 @@ func (r *Runtime) jitSeedCalls(cl *closure, e *jitEntry, p *ir.Program) {
 		if e.callSites == nil {
 			e.callSites = make([]uint8, len(fn.Code))
 		}
+		if more := r.jitSeenCallees(cl, p, pc, o); len(more) != 0 {
+			// A method read that has met objects of other classes, whose
+			// methods there the call has called too: each called natively,
+			// as the call would be once it had left native code for each,
+			// as V8's code calls a polymorphic call's targets.
+			r.jitSeedNativeCalls(e, fn, pc, in, append([]jitCallee{{o, callee}}, more...))
+			continue
+		}
 		if callee.fn != fn && r.jitInlinesAt(callee, o, in) {
 			e.inlines = append(e.inlines, r.jitInlineTarget(int32(pc), callee, o, in))
 			e.callSites[pc] = jitCallInlined
@@ -1794,6 +1930,109 @@ func (r *Runtime) jitSeedCalls(cl *closure, e *jitEntry, p *ir.Program) {
 			ce.nativeCallers = append(ce.nativeCallers, e)
 		}
 	}
+}
+
+// jitCallee is a function object a call calls, and its closure.
+type jitCallee struct {
+	o  *Object
+	cl *closure
+}
+
+// jitSeedNativeCalls decides the call at pc to call each of targets
+// natively, up to jitCallTargets, those with no code compiled for native
+// callers now, as jitSeedCalls does one.
+func (r *Runtime) jitSeedNativeCalls(e *jitEntry, fn *bytecode.Function, pc int, in bytecode.Instr, targets []jitCallee) {
+	for _, t := range targets {
+		cf := t.cl.fn
+		if len(e.nativeCalls) != 0 && slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return int(x.pc) == pc && x.obj == t.o }) ||
+			cf == fn || cf.TopLevel || cf.IsModule || cf.UsesArguments || cf.HasDirectEval ||
+			jitCountAt(e.nativeCalls, pc) >= jitCallTargets {
+			continue
+		}
+		ce := r.jit.cache[weak.Make(cf)]
+		if ce == nil || ce.ssa == nil {
+			if r.jit.seeding {
+				continue
+			}
+			r.jit.seeding = true
+			ce = r.jitNativeCallee(t.cl)
+			r.jit.seeding = false
+			if ce == nil {
+				continue
+			}
+		}
+		e.nativeCalls = append(e.nativeCalls, r.jitNativeTarget(int32(pc), t.cl, t.o, in))
+		e.callSites[pc] = jitCallNative
+		if ce != e && len(ce.nativeCallers) < jitNativeCallers && !slices.Contains(ce.nativeCallers, e) {
+			ce.nativeCallers = append(ce.nativeCallers, e)
+		}
+	}
+}
+
+// jitCountAt is how many of calls are at pc.
+func jitCountAt(calls []jitInline, pc int) int {
+	n := 0
+	for _, x := range calls {
+		if int(x.pc) == pc {
+			n++
+		}
+	}
+	return n
+}
+
+// jitSeenCallees are the other functions a method call at pc has called,
+// besides o, as its method read's cache saw them (propCache.seen): of each
+// shape it met, the method a prototype held, as it holds it now -- the
+// call checks its callee -- each a function jitCalled would take. Or none.
+func (r *Runtime) jitSeenCallees(cl *closure, p *ir.Program, pc int, o *Object) []jitCallee {
+	fn := cl.fn
+	if fn.Code[pc].Op != bytecode.OpCallMethod {
+		return nil
+	}
+	depth := p.Maps[pc].Depth
+	slot := depth - int(fn.Code[pc].A) - 1
+	if slot < 1 {
+		return nil
+	}
+	read := -1
+	for q := pc - 1; q >= 0; q-- {
+		d := p.Maps[q].Depth
+		if d == slot && fn.Code[q].Op == bytecode.OpGetPropThis {
+			read = q
+			break
+		}
+		if d < slot+1 || d == slot+1 && p.Maps[q+1].Depth < slot+2 {
+			return nil
+		}
+	}
+	if read < 0 {
+		return nil
+	}
+	in := fn.Code[read]
+	if int(in.B) >= len(cl.ic) || int(in.A) >= len(cl.names) || cl.ic[in.B].seen == nil {
+		return nil
+	}
+	var out []jitCallee
+	seen := cl.ic[in.B].seen
+	for _, c := range seen.entries[:seen.n] {
+		h := c.p1
+		if c.p2 != nil {
+			h = c.p2
+		}
+		if c.shape == nil || c.shape == noShape || c.getter || h == nil || c.idx < 0 || int(c.idx) >= len(h.props) {
+			continue
+		}
+		prop := &h.props[c.idx]
+		if prop.key != cl.names[in.A] || prop.flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 || !prop.value.IsObject() {
+			continue
+		}
+		mo, mc := r.jitCallableClosure(cl, prop.value.Object())
+		if mc == nil || mo == o || slices.ContainsFunc(out, func(x jitCallee) bool { return x.o == mo }) {
+			continue
+		}
+		out = append(out, jitCallee{mo, mc})
+	}
+	return out
 }
 
 // jitCalleeAt is the function the call or construction at pc calls as the
@@ -1855,13 +2094,21 @@ func (r *Runtime) jitCalleeAt(cl *closure, p *ir.Program, pc int) (*Object, *clo
 		}
 		return nil, nil
 	}
-	h := c.p1
+	h, idx := c.p1, c.idx
 	if op == bytecode.OpGetGlobal {
 		// The global environment, where the read found the name at the
 		// cache's index, as pureGlobalSlow looks: not a name a script's
-		// lexical binding shadows.
+		// lexical binding shadows. Or, where the cache has not found it
+		// -- native code reads a global without it, from where the global
+		// object had it when compiled (jitFeedback.Global) -- where the
+		// environment has it now, as that read finds it: a constructor
+		// only native code had read was learned one exit, and one compile,
+		// at a time, every construction of DeltaBlue's.
 		if h = cl.scope(); len(r.globalLex.props) != 0 && r.lexShadows(cl.names[in.A]) {
 			return nil, nil
+		}
+		if h != nil && (idx < 0 || int(idx) >= len(h.props) || h.props[idx].key != cl.names[in.A]) {
+			idx = h.findOwn(cl.names[in.A])
 		}
 	} else {
 		if c.shape == nil || c.shape == noShape || c.getter {
@@ -1871,10 +2118,10 @@ func (r *Runtime) jitCalleeAt(cl *closure, p *ir.Program, pc int) (*Object, *clo
 			h = c.p2
 		}
 	}
-	if h == nil || c.idx < 0 || int(c.idx) >= len(h.props) {
+	if h == nil || idx < 0 || int(idx) >= len(h.props) {
 		return nil, nil
 	}
-	prop := &h.props[c.idx]
+	prop := &h.props[idx]
 	if prop.key != cl.names[in.A] || prop.flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 || !prop.value.IsObject() {
 		return nil, nil
 	}
