@@ -2012,7 +2012,10 @@ func (r *Runtime) jitInlineSite(fn *bytecode.Function, pc, depth int) (jitInline
 			in, n = x, n+1
 		}
 	}
-	if n != 1 || in.cl == nil || in.cl.fn == fn {
+	if n != 1 || in.cl == nil || in.cl.fn == fn || in.via {
+		// Not one call of a function inlined there: a call through
+		// Function.prototype.call, which an inlined frame's call does not
+		// make natively, would leave native code there at every call.
 		return jitInline{}, false
 	}
 	if in.pool != nil && in.cl.fn.Leaf == bytecode.LeafForward {
@@ -2043,6 +2046,11 @@ func (r *Runtime) jitSeedCalls(cl *closure, e *jitEntry, p *ir.Program) {
 	if len(p.Maps) != len(fn.Code) {
 		return
 	}
+	// The functions whose calls are being decided, up the compiles seeding
+	// started: a target among them is not compiled again (jitSeedCallee).
+	s := r.jit
+	s.seedingFns = append(s.seedingFns, fn)
+	defer func() { s.seedingFns = s.seedingFns[:len(s.seedingFns)-1] }()
 	for pc, in := range fn.Code {
 		switch in.Op {
 		case bytecode.OpCall, bytecode.OpCallMethod, bytecode.OpNew:
@@ -2053,8 +2061,16 @@ func (r *Runtime) jitSeedCalls(cl *closure, e *jitEntry, p *ir.Program) {
 			// Decided; one still counted toward its decision is not.
 			continue
 		}
-		o, callee := r.jitCalleeAt(cl, p, pc)
-		if callee == nil || in.Op == bytecode.OpNew && !r.jitConstructs(o) {
+		obj, read := r.jitCalleeObjectAt(cl, p, pc)
+		if obj == nil {
+			continue
+		}
+		o, callee := r.jitCallableClosure(cl, obj)
+		if callee == nil {
+			r.jitSeedBuiltin(cl, e, p, pc, in, obj, read)
+			continue
+		}
+		if in.Op == bytecode.OpNew && !r.jitConstructs(o) {
 			continue
 		}
 		if e.callSites == nil {
@@ -2081,16 +2097,17 @@ func (r *Runtime) jitSeedCalls(cl *closure, e *jitEntry, p *ir.Program) {
 		if ce == nil || ce.ssa == nil {
 			// A target the existing tiers have met is compiled for native
 			// callers now, as the call would have it compiled once learned
-			// -- but not by a compile seeding started: one level, and no
-			// cycle. How often it was called is not known: the tree tier
-			// may run a call without one (closure.jitCalls).
-			if r.jit.seeding {
+			// (jitSeedCallee). How often it was called is not known: the
+			// tree tier may run a call without one (closure.jitCalls).
+			if ce = r.jitSeedCallee(callee); ce == nil {
 				continue
 			}
-			r.jit.seeding = true
-			ce = r.jitNativeCallee(callee)
-			r.jit.seeding = false
-			if ce == nil {
+			if callee.fn != fn && r.jitInlinesAt(callee, o, in) {
+				// Its calls decided now, it may be inlined with them, as
+				// V8 inlines a callee's callees: it would have been once
+				// its callers were compiled again for them.
+				e.inlines = append(e.inlines, r.jitInlineTarget(int32(pc), callee, o, in))
+				e.callSites[pc] = jitCallInlined
 				continue
 			}
 		}
@@ -2100,6 +2117,74 @@ func (r *Runtime) jitSeedCalls(cl *closure, e *jitEntry, p *ir.Program) {
 			ce.nativeCallers = append(ce.nativeCallers, e)
 		}
 	}
+}
+
+// jitSeedBuiltin decides, as jitSeedCalls does a script's function, a
+// call of a built-in native code makes itself whose target the existing
+// tiers have met: a.push(v) and a.pop(), the realm's own; new Array(); and
+// G.call(this, ...), G read before it -- each as jitCallSeen decides it
+// once the call has left native code, which, for calls the code had made
+// in the existing tiers every time, cost each function a compile after its
+// first: DeltaBlue's collections' and constraints' constructors. The call
+// checks what jitCallSeen finds out at its exit -- the receiver an array
+// the fast path takes, the function G -- and leaves for Go otherwise.
+func (r *Runtime) jitSeedBuiltin(cl *closure, e *jitEntry, p *ir.Program, pc int, in bytecode.Instr, o *Object, read int) {
+	fd := o.fn()
+	var x jitInline
+	switch {
+	case in.Op == bytecode.OpNew && in.A == 0 && o == r.proto.arrayCtor:
+		x = jitInline{pc: int32(pc), obj: o, pool: r.jitNewPool(o)}
+	case in.Op != bytecode.OpCallMethod || fd == nil:
+		return
+	case in.A == 0 && fd.elemOp == elemPop && fd.realm == r.Realm:
+		x = jitInline{pc: int32(pc), obj: o, pop: true}
+	case in.A == 1 && fd.elemOp == elemPush && fd.realm == r.Realm:
+		x = jitInline{pc: int32(pc), obj: o, push: true}
+	case in.A >= 1 && o == r.callFn && read > 0 && (cl.fn.Code[read-1].Op == bytecode.OpGetProp || cl.fn.Code[read-1].Op == bytecode.OpGetGlobal):
+		v, ok := r.jitChainValue(cl, p, read-1, jitChainReads)
+		if !ok || !v.IsObject() {
+			return
+		}
+		g, gcl := r.jitCallableClosure(cl, v.Object())
+		if gcl == nil {
+			return
+		}
+		if ce := r.jit.cache[weak.Make(gcl.fn)]; (ce == nil || ce.ssa == nil) && r.jitSeedCallee(gcl) == nil {
+			return
+		}
+		x = jitInline{pc: int32(pc), cl: gcl, obj: g, via: true}
+	default:
+		return
+	}
+	if e.callSites == nil {
+		e.callSites = make([]uint8, len(cl.fn.Code))
+	}
+	e.nativeCalls = append(e.nativeCalls, x)
+	e.callSites[pc] = jitCallNative
+}
+
+// jitSeedDepth is how many compiles deep seeding a call's target may
+// start compiles (jitSeedCallee): a callee's calls' targets, theirs, as
+// deep as calls are inlined.
+const jitSeedDepth = jitInlineDepth
+
+// jitSeedCallee compiles cl's function for native callers, a target a call
+// seeding decided (jitSeedCalls) had no code for, and returns its entry, or
+// nil: as deep as jitSeedDepth -- the target's own calls decided so in turn,
+// as the calls they would be once learned at the exits of code calling them
+// natively, in a callee, which leave for Go and are made by it -- and not
+// for a function whose calls are being decided further up, a cycle. Before,
+// a compile seeding started started none: the calls of DeltaBlue's
+// constraints' constructors and methods, compiled for their callers, were
+// learned one exit, and one compile, at a time.
+func (r *Runtime) jitSeedCallee(cl *closure) *jitEntry {
+	s := r.jit
+	if s.seeding >= jitSeedDepth || slices.Contains(s.seedingFns, cl.fn) {
+		return nil
+	}
+	s.seeding++
+	defer func() { s.seeding-- }()
+	return r.jitNativeCallee(cl)
 }
 
 // jitCallee is a function object a call calls, and its closure.
@@ -2121,13 +2206,7 @@ func (r *Runtime) jitSeedNativeCalls(e *jitEntry, fn *bytecode.Function, pc int,
 		}
 		ce := r.jit.cache[weak.Make(cf)]
 		if ce == nil || ce.ssa == nil {
-			if r.jit.seeding {
-				continue
-			}
-			r.jit.seeding = true
-			ce = r.jitNativeCallee(t.cl)
-			r.jit.seeding = false
-			if ce == nil {
+			if ce = r.jitSeedCallee(t.cl); ce == nil {
 				continue
 			}
 		}
@@ -2215,6 +2294,16 @@ func (r *Runtime) jitSeenCallees(cl *closure, p *ir.Program, pc int, o *Object) 
 // is taken as V8 folds a constant's loads (jitChainValue) -- a function
 // jitCalled would take. Or nil. The call checks the function it calls.
 func (r *Runtime) jitCalleeAt(cl *closure, p *ir.Program, pc int) (*Object, *closure) {
+	o, _ := r.jitCalleeObjectAt(cl, p, pc)
+	if o == nil {
+		return nil, nil
+	}
+	return r.jitCallableClosure(cl, o)
+}
+
+// jitCalleeObjectAt is the function object jitCalleeAt finds, built-ins'
+// too, and the PC of the method read it was found by, or -1.
+func (r *Runtime) jitCalleeObjectAt(cl *closure, p *ir.Program, pc int) (*Object, int) {
 	fn := cl.fn
 	depth := p.Maps[pc].Depth
 	slot := depth - int(fn.Code[pc].A) - 1
@@ -2223,7 +2312,7 @@ func (r *Runtime) jitCalleeAt(cl *closure, p *ir.Program, pc int) (*Object, *clo
 		op = bytecode.OpGetPropThis
 	}
 	if depth < 0 || slot < 0 || op == bytecode.OpGetPropThis && slot < 1 {
-		return nil, nil
+		return nil, -1
 	}
 	read := -1
 	for q := pc - 1; q >= 0; q-- {
@@ -2236,22 +2325,22 @@ func (r *Runtime) jitCalleeAt(cl *closure, p *ir.Program, pc int) (*Object, *clo
 			// A property of an object read so, its value now.
 			v, ok := r.jitChainValue(cl, p, q, jitChainReads)
 			if !ok || !v.IsObject() {
-				return nil, nil
+				return nil, -1
 			}
-			return r.jitCallableClosure(cl, v.Object())
+			return v.Object(), -1
 		}
 		// Only the arguments' instructions, which leave the callee be: the
 		// first pushes on it, and the rest work above.
 		if d < slot+1 || d == slot+1 && p.Maps[q+1].Depth < slot+2 {
-			return nil, nil
+			return nil, -1
 		}
 	}
 	if read < 0 {
-		return nil, nil
+		return nil, -1
 	}
 	in := fn.Code[read]
 	if int(in.B) >= len(cl.ic) || int(in.A) >= len(cl.names) {
-		return nil, nil
+		return nil, -1
 	}
 	c := &cl.ic[in.B]
 	if op == bytecode.OpGetPropThis && c.p1 == nil {
@@ -2260,9 +2349,9 @@ func (r *Runtime) jitCalleeAt(cl *closure, p *ir.Program, pc int) (*Object, *clo
 		// its value now (jitChainValue). Calls there had been learned one
 		// exit at a time, and its functions ran out of compiles first.
 		if v, ok := r.jitChainValue(cl, p, read, jitChainReads); ok && v.IsObject() {
-			return r.jitCallableClosure(cl, v.Object())
+			return v.Object(), read
 		}
-		return nil, nil
+		return nil, -1
 	}
 	h, idx := c.p1, c.idx
 	if op == bytecode.OpGetGlobal {
@@ -2275,27 +2364,27 @@ func (r *Runtime) jitCalleeAt(cl *closure, p *ir.Program, pc int) (*Object, *clo
 		// only native code had read was learned one exit, and one compile,
 		// at a time, every construction of DeltaBlue's.
 		if h = cl.scope(); len(r.globalLex.props) != 0 && r.lexShadows(cl.names[in.A]) {
-			return nil, nil
+			return nil, -1
 		}
 		if h != nil && (idx < 0 || int(idx) >= len(h.props) || h.props[idx].key != cl.names[in.A]) {
 			idx = h.findOwn(cl.names[in.A])
 		}
 	} else {
 		if c.shape == nil || c.shape == noShape || c.getter {
-			return nil, nil
+			return nil, -1
 		}
 		if c.p2 != nil {
 			h = c.p2
 		}
 	}
 	if h == nil || idx < 0 || int(idx) >= len(h.props) {
-		return nil, nil
+		return nil, -1
 	}
 	prop := &h.props[idx]
 	if prop.key != cl.names[in.A] || prop.flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 || !prop.value.IsObject() {
-		return nil, nil
+		return nil, -1
 	}
-	return r.jitCallableClosure(cl, prop.value.Object())
+	return prop.value.Object(), read
 }
 
 // jitCallableClosure is o and its closure, if a call in cl's code may make
@@ -2485,10 +2574,10 @@ func (r *Runtime) jitForwardTarget(cl *closure, o *Object, depth int) *closure {
 	if r.jitInlinable(tc.fn) {
 		return tc
 	}
-	if e := r.jit.cache[weak.Make(tc.fn)]; (e == nil || e.callSites == nil) && !r.jit.seeding {
-		r.jit.seeding = true
+	if e := r.jit.cache[weak.Make(tc.fn)]; (e == nil || e.callSites == nil) && r.jit.seeding == 0 {
+		r.jit.seeding = jitSeedDepth
 		r.jitNativeCallee(tc)
-		r.jit.seeding = false
+		r.jit.seeding = 0
 	}
 	if !r.jitInlinesCalls(tc, depth-1) {
 		return nil
@@ -2875,11 +2964,11 @@ func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
 // budget for upgrades (jitInlineReoptimizations). Not inside another
 // compile, whose workspaces a compile would share, nor a compile of these.
 func (r *Runtime) jitWantedCallees(e *jitEntry, fb *jitFeedback) {
-	if len(fb.wanted) == 0 || r.jit.seeding || e.upgradeReopts >= jitInlineReoptimizations {
+	if len(fb.wanted) == 0 || r.jit.seeding != 0 || e.upgradeReopts >= jitInlineReoptimizations {
 		return
 	}
-	r.jit.seeding = true
-	defer func() { r.jit.seeding = false }()
+	r.jit.seeding = jitSeedDepth
+	defer func() { r.jit.seeding = 0 }()
 	for _, cl := range fb.wanted {
 		if r.jitNativeCallee(cl) != nil {
 			e.upgradeReopt = true

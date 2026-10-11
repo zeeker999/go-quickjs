@@ -374,9 +374,12 @@ type jitState struct {
 	osrs        uint64
 	compiled    uint64
 	reoptimized uint64
-	// seeding marks a compile jitSeedCalls started, which does not start
-	// another.
-	seeding bool
+	// seeding is how many compiles deep jitSeedCalls has started compiles
+	// (jitSeedCallee); jitWantedCallees' and jitForwardTarget's are past
+	// jitSeedDepth, starting none. seedingFns are the functions whose calls
+	// are being decided, from the outermost.
+	seeding    int
+	seedingFns []*bytecode.Function
 	// unwound counts the native calls whose callees left native code, which
 	// Go finished (jitUnwindNative).
 	unwound uint64

@@ -5409,8 +5409,9 @@ func TestJITLoopPromotedPastCalleesLoops(t *testing.T) {
 
 // A call whose target has no code is decided at the caller's first
 // compile all the same, its target compiled for native callers then
-// (jitSeedCalls): put makes a call, so it is not inlined, and Go does not
-// compile it for its own entries.
+// (jitSeedCalls), which decides its own calls (jitSeedCallee): put, which
+// makes a call, is then inlined with it, at once, not called natively
+// until a compile of run's again for what put came to inline.
 func TestJITSSASeedsCalleesWithoutCode(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -5436,6 +5437,7 @@ func TestJITSSASeedsCalleesWithoutCode(t *testing.T) {
 	}
 	proto := r.global.getOwn(r.atoms.intern("P")).value.Object().getOwn(atomPrototype).value.Object()
 	put := proto.getOwn(r.atoms.intern("put")).value.Object()
+	f := proto.getOwn(r.atoms.intern("f")).value.Object().fn().closure
 	cl := r.global.getOwn(r.atoms.intern("run")).value.Object().fn().closure
 	for i, src := range []string{`String(run(p,20000))`, `String(run(p,20000))`} {
 		wv, err := want.Run(compileForTest(t, src))
@@ -5454,8 +5456,8 @@ func TestJITSSASeedsCalleesWithoutCode(t *testing.T) {
 	if e == nil || e.ssa == nil {
 		t.Fatal("run has no code")
 	}
-	if !slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.obj == put }) {
-		t.Fatal("run does not call put natively")
+	if !slices.ContainsFunc(e.inlines, func(x jitInline) bool { return x.obj == put }) || !slices.Contains(e.ssaInlined, f) {
+		t.Fatal("run does not inline put with f")
 	}
 	if n := int(e.reopts) + int(e.inlineReopts) + int(e.upgradeReopts); n != 0 {
 		t.Fatalf("run was compiled again %d times", n)
