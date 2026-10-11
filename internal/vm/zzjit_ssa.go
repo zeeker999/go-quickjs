@@ -1511,8 +1511,10 @@ func (s *jitState) closeSSA(code *jit.SSACode, keep any) error {
 
 // jitGoCall makes, for native code, the call at its exit PC, from the
 // operands it passed (ssa.GoCall), as an exit there would have Go make it
-// (jitHost): with the call's operands where the interpreter has them, its
-// result in the call's keep cell. Native code goes on, as V8's goes on
+// (jitCallAt): the operands past the VM's stack's top, which the call
+// leaves above them -- not in the frame's own operand slots, where native
+// code may read a value it never loaded -- its result in the call's keep
+// cell. Native code goes on, as V8's goes on
 // after a call of a function it has no code for, rather than leaving. Only
 // at a run's own level: a native call's callee has no frame of the VM's
 // for a stack trace to show. A call that threw, or after which the code
@@ -1539,13 +1541,15 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	default:
 		return false
 	}
-	sp := f.base + depth
-	if n > abi.MaxGoArgs || depth < n {
+	top := r.stackTop
+	if n > abi.MaxGoArgs || depth < n || top+n > len(r.stack) {
 		return false
 	}
 	for i := range n {
-		r.stack[sp-n+i] = jitGoArg(ctx, i)
+		r.stack[top+i] = jitGoArg(ctx, i)
 	}
+	sp := top + n
+	r.stackTop, r.stackHigh = sp, max(r.stackHigh, sp)
 	e.ssaStats.goCalls++
 	s.goCalls++
 	r.jitCallSeen(f, e, pc, sp, in)
@@ -1559,6 +1563,8 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 		s.goRuns[idx].pinned = true
 	}
 	v, _, err := r.jitCallAt(in, sp)
+	clear(r.stack[top:sp])
+	r.stackTop = top
 	s.ssaCtx = last
 	if s.ssaShared != shared || s.ssaSharedFrom != from {
 		// What the call ran shared other values with the contexts past
