@@ -57,9 +57,12 @@ type compiler struct {
 	enter     amd64.Label
 	enterUsed bool
 	// saving is the routine every call of Go that saves every register
-	// shares (goSaving), if any makes one.
-	saving     amd64.Label
-	savingUsed bool
+	// shares (goSaving), if any makes one; storing, the routine the stores
+	// Go makes share (goStore), which goes on to saving.
+	saving      amd64.Label
+	savingUsed  bool
+	storing     amd64.Label
+	storingUsed bool
 }
 
 type stub struct {
@@ -155,6 +158,10 @@ func compileAMD64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err 
 	if c.enterUsed {
 		c.a.Bind(c.enter)
 		c.enterExit()
+	}
+	if c.storingUsed {
+		c.a.Bind(c.storing)
+		c.storingCall()
 	}
 	if c.savingUsed {
 		c.a.Bind(c.saving)
@@ -2055,13 +2062,45 @@ func (c *compiler) propStore(v *ssa.Value, guard func(amd64.Cond)) {
 // allocatable register is saved across it, in the context's register area,
 // which only an exit uses; if Go refuses, stub, the store's exit -- a keep
 // has none, nor does Go refuse it.
+//
+// The stores share a routine (storingCall), which writes the operands from
+// where they are and calls Go as goSaving's sites do: a site is where Go
+// comes back to and the test of its answer -- a store of a pointer is, in
+// most code, the most frequent call of Go there is, each a site.
 func (c *compiler) goStore(stub *amd64.Label) {
+	if !c.storingUsed {
+		c.storing, c.storingUsed = c.a.NewLabel(), true
+	}
+	back := c.a.NewLabel()
+	c.a.LeaLabel(scratchB, back)
+	c.a.Store(regCtx, abi.OffGoSite, scratchB)
+	c.a.Jmp(c.storing)
+	c.a.Bind(back)
+	if stub != nil {
+		c.a.Load(scratchB, regCtx, abi.OffGoStatus)
+		c.a.Op(amd64.Test, scratchB, scratchB, true)
+		c.a.Jcc(amd64.CondNE, *stub)
+	}
+}
+
+// storingCall is the routine goStore's sites share: the cell's address,
+// in scratchA, and the value's words, in xScratch0 and scratchC, written
+// to the context's GoArgs, the call's op and keep to its own; then Go
+// called through savingCall, which goes back to the site, at GoSite.
+func (c *compiler) storingCall() {
 	size := int32(unsafe.Sizeof(abi.GoArg{}))
 	c.a.MovQFromX(scratchB, xScratch0)
 	c.a.Store(regCtx, abi.OffGoArgs+c.enc.NumOffset, scratchB)
 	c.a.Store(regCtx, abi.OffGoArgs+c.enc.RefOffset, scratchC)
 	c.a.Store(regCtx, abi.OffGoArgs+size+c.enc.RefOffset, scratchA)
-	c.goSaving(uint64(ssa.GoStore), stub)
+	c.a.MovImm(scratchA, uint64(ssa.GoStore))
+	c.a.Store(regCtx, abi.OffGoOp, scratchA)
+	c.a.MovImm(scratchA, 0)
+	c.a.Store(regCtx, abi.OffGoKeep, scratchA)
+	if !c.savingUsed {
+		c.saving, c.savingUsed = c.a.NewLabel(), true
+	}
+	c.a.Jmp(c.saving)
 }
 
 // goSaving calls Go, op, its operands in the context's GoArgs, every

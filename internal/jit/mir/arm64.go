@@ -59,6 +59,10 @@ type a64Compiler struct {
 	// shares (goSaving), if any makes one.
 	saving     arm64.Label
 	savingUsed bool
+	// storing is the routine the stores Go makes share (goStore), as
+	// amd64's.
+	storing     arm64.Label
+	storingUsed bool
 }
 
 type a64Stub struct {
@@ -156,6 +160,10 @@ func compileARM64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err 
 	if c.enterUsed {
 		c.a.Bind(c.enter)
 		c.enterExit()
+	}
+	if c.storingUsed {
+		c.a.Bind(c.storing)
+		c.storingCall()
 	}
 	if c.savingUsed {
 		c.a.Bind(c.saving)
@@ -1214,14 +1222,36 @@ func (c *a64Compiler) propStore(v *ssa.Value, guard func(arm64.Cond)) {
 }
 
 // goStore is amd64's: the cell's address in A, the value's words in F0
-// and C.
+// and C, which the routine the stores share writes (storingCall).
 func (c *a64Compiler) goStore(stub *arm64.Label) {
+	if !c.storingUsed {
+		c.storing, c.storingUsed = c.a.NewLabel(), true
+	}
+	back := c.a.NewLabel()
+	c.a.Adr(a64B, back)
+	c.a.Store(a64Ctx, abi.OffGoSite, a64B)
+	c.a.B(c.storing)
+	c.a.Bind(back)
+	if stub != nil {
+		c.a.Load(a64B, a64Ctx, abi.OffGoStatus)
+		c.a.Cbnz(a64B, *stub, true)
+	}
+}
+
+// storingCall is the routine goStore's sites share, as amd64's.
+func (c *a64Compiler) storingCall() {
 	size := int32(unsafe.Sizeof(abi.GoArg{}))
 	c.a.FMovFromF(a64B, a64F0)
 	c.a.Store(a64Ctx, abi.OffGoArgs+c.enc.NumOffset, a64B)
 	c.a.Store(a64Ctx, abi.OffGoArgs+c.enc.RefOffset, a64C)
 	c.a.Store(a64Ctx, abi.OffGoArgs+size+c.enc.RefOffset, a64A)
-	c.goSaving(uint64(ssa.GoStore), stub)
+	c.a.MovImm(a64A, uint64(ssa.GoStore))
+	c.a.Store(a64Ctx, abi.OffGoOp, a64A)
+	c.a.Store(a64Ctx, abi.OffGoKeep, arm64.ZR)
+	if !c.savingUsed {
+		c.saving, c.savingUsed = c.a.NewLabel(), true
+	}
+	c.a.B(c.saving)
 }
 
 // goSaving calls Go, op, every allocatable register saved, as amd64's
