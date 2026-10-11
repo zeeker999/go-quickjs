@@ -5865,6 +5865,11 @@ func TestJITSSAProfitReturns(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	// The collector off after one collection: stretches the collector's marking ended are not judged (ExitMarking):
+	// a marking that spans the calls, as under checkptr at GOMAXPROCS=1,
+	// would leave step unjudged.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	// Go calls bump, which reads arguments, and step, through call: native
 	// code calls neither (jitNativeCallee).
 	setup := `function T(){this.n=0;this.v=1}T.prototype.bump=function(){this.n+=arguments.length+1};
@@ -6902,6 +6907,11 @@ func TestJITSSAPolymorphicStores(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	// The collector off after one collection: native code adds no property while the collector marks, leaving the
+	// add to Go: a marking that spans the counted round, as under checkptr at
+	// GOMAXPROCS=1, would count as the adds' exits.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	old := jitcompile.SSAConstruct
 	jitcompile.SSAConstruct = true
 	defer func() { jitcompile.SSAConstruct = old }()
@@ -7398,6 +7408,11 @@ func TestJITSSAReadsDropSupersededShapes(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	// While the collector marks, native calls leave for Go: a marking that
+	// spans the last round, as under checkptr at GOMAXPROCS=1, would count
+	// as its reads' exits.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	src := `function A(){this.v=1}A.prototype.m=function(i){this.n=i;return this.v+i};
 		function B(){this.v=2;this.w=0}B.prototype.m=function(i){this.n=i;return this.v*i};
 		function C(){this.u=0;this.v=3}C.prototype.m=function(i){this.n=i;return this.v^i};
