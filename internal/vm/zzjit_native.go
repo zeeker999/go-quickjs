@@ -173,6 +173,10 @@ type jitEntry struct {
 	// by address and this keeps alive.
 	ssa       *jit.SSACode
 	ssaShapes []*shape
+	// ssaProg is the program the code was compiled from: the function's
+	// own lowering, or, for a callee with no loop of its own, its lowering
+	// for inlining (jitLower), which the runtime keeps anyway.
+	ssaProg *ir.Program
 	// ssaHolders are the prototypes it compares receivers' with
 	// (ssa.Holder), held by address, which this keeps alive.
 	ssaHolders []*Object

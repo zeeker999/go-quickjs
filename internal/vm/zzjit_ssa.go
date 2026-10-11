@@ -260,10 +260,40 @@ func (r *Runtime) jitPolySeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 	if c.shape == noShape || c.getter || c.idx < 0 {
 		return
 	}
+	holder := recv.Object()
+	if c.p2 != nil {
+		holder = c.p2
+	} else if c.p1 != nil {
+		holder = c.p1
+	}
+	if c.idx < int32(len(holder.props)) && !holder.props[c.idx].value.IsNumber() {
+		jitNumberMissed(e, pc)
+	}
 	if !jitAddReadCase(jitPolySiteAt(e, pc), c) {
 		return
 	}
 	e.polyPending, e.polySettled = true, 0
+}
+
+// jitNumberMissed notes that the read at pc met a value that is not a
+// number. Lowering makes a read a number's where any use of its value
+// wants one (ir.PropertyRead) -- a use on a branch never taken, too:
+// RayTrace's setPixel multiplies options.pixelWidth, the string "5", only
+// when it draws to a canvas -- and its code leaves for Go wherever the
+// value is not, which no cache's shape changes. So the read is generic
+// once it has (jitEntry.failed), as a failed guard's site is, and the code
+// compiled again reads it as a value, as V8's code deoptimized for a
+// value not a number reads it tagged once optimized again; its uses that
+// want a number unbox it, each with its own guard.
+func jitNumberMissed(e *jitEntry, pc int) {
+	if e.reopts >= jitReoptimizations || slices.Contains(e.failed, int32(pc)) {
+		return
+	}
+	if p := e.ssaProg; e.ssa == nil || p == nil || pc >= len(p.Code) || p.Code[pc].Op != ir.PropertyRead {
+		return
+	}
+	e.failed = append(e.failed, int32(pc))
+	e.reopt = true
 }
 
 // jitPolySiteAt is e's site at pc (jitEntry.poly), made if it has none.
@@ -2981,6 +3011,7 @@ func (r *Runtime) jitWantedCallees(e *jitEntry, fb *jitFeedback) {
 // setSSA gives e the code the new pipeline compiled for fn from p.
 func (e *jitEntry) setSSA(fn *bytecode.Function, p *ir.Program, code *jit.SSACode, fb *jitFeedback) {
 	e.ssa, e.this, e.ssaShapes, e.ssaHolders, e.fed, e.fedInlined = code, p.This, fb.shapes, fb.holders, fb.fed, fb.fedInlined
+	e.ssaProg = p
 	e.ssaInlinedAt, e.definesUnfed, e.ssaCells = fb.inlinedAt, fb.definesUnfed, fb.cells
 	e.reoptBudget = uint32(max(jitReoptBudget, len(fn.Code)/jitReoptPer))
 	e.ssaStrings, e.ssaCallees, e.ssaInlined, e.ssaPools = fb.strings, fb.callees, fb.inlined, fb.pools

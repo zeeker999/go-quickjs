@@ -7667,6 +7667,66 @@ func TestJITSSARemainder(t *testing.T) {
 	}
 }
 
+// A property read that lowering made a number's, for a use on a branch
+// not taken, and that meets a value that is not one -- RayTrace's setPixel
+// reads options.pixelWidth, the string "5", and multiplies it only when it
+// draws to a canvas -- is read as a value once it has (jitNumberMissed):
+// sp, called natively, left native code at every call, nothing a cache
+// learned changing that, and its callers stopped calling it natively.
+// Taken, the branch's multiplication unboxes what the read gave. Each
+// answer is the interpreter's.
+func TestJITSSAReadsWhatIsNotANumber(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	// While the collector marks, Go makes native calls, which would count
+	// as calls leaving native code.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function Eng(){this.options={w:"5",h:3};this.canvas=null}
+		Eng.prototype.sp=function(x,y){var pxW=this.options.w;var pxH=this.options.h;if(this.canvas){return x*pxW+y*pxH}return x+y+pxH};
+		var eng=new Eng();
+		function run(n){var t=0;for(var i=0;i<n;i++)t+=eng.sp(i,1);return t}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sp := r.global.getOwn(r.atoms.intern("eng")).value.Object().proto.getOwn(r.atoms.intern("sp")).value.Object().fn().closure
+	rounds := []string{`String(run(500))`, `String(run(500))`, `String(run(500))`, `String(run(500))`, `String(run(500))`,
+		`eng.canvas={};String(run(500))`, `String(run(500))`}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out uint64
+		if e := r.jit.cache[weak.Make(sp.fn)]; e != nil {
+			out = e.nativeOut
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 4 {
+			e := r.jit.cache[weak.Make(sp.fn)]
+			if e == nil || e.ssa == nil {
+				t.Fatalf("sp has no code: %+v", e)
+			}
+			if e.notNative || e.nativeOut != out {
+				t.Fatalf("sp left native code %d times when called natively (notNative %v, failed %v)", e.nativeOut-out, e.notNative, e.failed)
+			}
+		}
+	}
+}
+
 // TestJITSSAMathFunctions: every Math function of numbers runs natively,
 // as V8's code makes them -- an instruction of its own (a rounding, sign,
 // fround, max, min) or Go called from native code, the VM's very function

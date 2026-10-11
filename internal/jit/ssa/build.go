@@ -30,7 +30,8 @@ type Feedback interface {
 	// which is built so that what it did not expect goes to Go, which
 	// resumes after it, rather than deoptimizing: an element read by its
 	// cell, an arithmetic operation or a comparison of what are not numbers
-	// by Go. EntryGeneric reports an entry whose speculation failed,
+	// by Go, a property read for a number (ir.PropertyRead) that met
+	// another value by its cell. EntryGeneric reports an entry whose speculation failed,
 	// by its PC in the function's own code (FrameState.PC): the slots it
 	// loads are not taken for numbers there.
 	Generic(pc int) bool
@@ -1985,7 +1986,10 @@ func (b *builder) instruction(blk *Block, pc int) {
 		if site.Shape != 0 || in.Op == ir.PropertyWrite {
 			cases = site.Cases
 		}
-		if in.Op == ir.ReferenceRead {
+		if in.Op == ir.ReferenceRead || in.Op == ir.PropertyRead && b.fb != nil && b.fb.Generic(pc) {
+			// A reference's read; or a number's that met a value that was
+			// not one, read as a value now, whose uses that want a number
+			// unbox it (Feedback's Generic).
 			cell := guard(OpPropCell, Source, ir.HostExit, object)
 			cell.Const, cell.Index, cell.Key = ir.Value{Bits: uint64(site.Shape)}, int(site.Index), site.Key
 			cell.Holders, cell.Cases = holders, cases
