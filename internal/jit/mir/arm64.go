@@ -54,6 +54,10 @@ type a64Compiler struct {
 	// (enterExit), if any does.
 	enter     arm64.Label
 	enterUsed bool
+	// saving is the routine every call of Go that saves every register
+	// shares (goSaving), if any makes one.
+	saving     arm64.Label
+	savingUsed bool
 }
 
 type a64Stub struct {
@@ -150,6 +154,10 @@ func compileARM64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err 
 	if c.enterUsed {
 		c.a.Bind(c.enter)
 		c.enterExit()
+	}
+	if c.savingUsed {
+		c.a.Bind(c.saving)
+		c.savingCall()
 	}
 	bytes, err := c.a.Finish()
 	if err != nil {
@@ -1199,6 +1207,24 @@ func (c *a64Compiler) goSaving(op uint64, stub *arm64.Label) {
 	c.a.MovImm(a64A, op)
 	c.a.Store(a64Ctx, abi.OffGoOp, a64A)
 	c.a.Store(a64Ctx, abi.OffGoKeep, arm64.ZR)
+	// The routine the code's calls of Go share (savingCall), as amd64's.
+	if !c.savingUsed {
+		c.saving, c.savingUsed = c.a.NewLabel(), true
+	}
+	back := c.a.NewLabel()
+	c.a.Adr(a64A, back)
+	c.a.Store(a64Ctx, abi.OffGoSite, a64A)
+	c.a.B(c.saving)
+	c.a.Bind(back)
+	if stub != nil {
+		c.a.Load(a64B, a64Ctx, abi.OffGoStatus)
+		c.a.Cbnz(a64B, *stub, true)
+	}
+}
+
+// savingCall is the routine the code's calls of Go that save every register
+// share, as amd64's.
+func (c *a64Compiler) savingCall() {
 	for _, r := range c.gprs {
 		c.a.Store(a64Ctx, abi.OffRegs+int32(r)*8, arm64.Reg(r))
 	}
@@ -1219,10 +1245,8 @@ func (c *a64Compiler) goSaving(op uint64, stub *arm64.Label) {
 	for _, r := range c.fprs {
 		c.a.LoadF(arm64.FReg(r), a64Ctx, abi.OffXRegs+int32(r)*8)
 	}
-	if stub != nil {
-		c.a.Load(a64B, a64Ctx, abi.OffGoStatus)
-		c.a.Cbnz(a64B, *stub, true)
-	}
+	c.a.Load(a64A, a64Ctx, abi.OffGoSite)
+	c.a.Br(a64A)
 }
 
 // addAlong adds the property a write's cache adds, as amd64's does, or

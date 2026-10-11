@@ -54,6 +54,10 @@ type compiler struct {
 	// (enterExit), if any does.
 	enter     amd64.Label
 	enterUsed bool
+	// saving is the routine every call of Go that saves every register
+	// shares (goSaving), if any makes one.
+	saving     amd64.Label
+	savingUsed bool
 }
 
 type stub struct {
@@ -148,6 +152,10 @@ func compileAMD64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err 
 	if c.enterUsed {
 		c.a.Bind(c.enter)
 		c.enterExit()
+	}
+	if c.savingUsed {
+		c.a.Bind(c.saving)
+		c.savingCall()
 	}
 	bytes, err := c.a.Finish()
 	if err != nil {
@@ -2040,6 +2048,31 @@ func (c *compiler) goSaving(op uint64, stub *amd64.Label) {
 	c.a.Store(regCtx, abi.OffGoOp, scratchA)
 	c.a.MovImm(scratchA, 0)
 	c.a.Store(regCtx, abi.OffGoKeep, scratchA)
+	// The routine the code's calls of Go share (savingCall), which comes
+	// back here: a site is its operands, not every register's save and
+	// restore, as V8's code calls its RecordWrite and CallRuntime
+	// builtins -- 360 bytes a site had been, the most of all the code made.
+	if !c.savingUsed {
+		c.saving, c.savingUsed = c.a.NewLabel(), true
+	}
+	back := c.a.NewLabel()
+	c.a.LeaLabel(scratchA, back)
+	c.a.Store(regCtx, abi.OffGoSite, scratchA)
+	c.a.Jmp(c.saving)
+	c.a.Bind(back)
+	if stub != nil {
+		c.a.Load(scratchB, regCtx, abi.OffGoStatus)
+		c.a.Op(amd64.Test, scratchB, scratchB, true)
+		c.a.Jcc(amd64.CondNE, *stub)
+	}
+}
+
+// savingCall is the routine the code's calls of Go that save every register
+// share (goSaving): every allocatable register saved in the context's
+// register area, which only an exit uses; Go called (callGo), which comes
+// back to it; the frame's registers read again, and every allocatable one
+// restored; then back to the call, at GoSite.
+func (c *compiler) savingCall() {
 	for _, r := range c.gprs {
 		c.a.Store(regCtx, abi.OffRegs+int32(r)*8, amd64.Reg(r))
 	}
@@ -2060,11 +2093,8 @@ func (c *compiler) goSaving(op uint64, stub *amd64.Label) {
 	for _, r := range c.fprs {
 		c.a.LoadSD(amd64.XReg(r), regCtx, abi.OffXRegs+int32(r)*8)
 	}
-	if stub != nil {
-		c.a.Load(scratchB, regCtx, abi.OffGoStatus)
-		c.a.Op(amd64.Test, scratchB, scratchB, true)
-		c.a.Jcc(amd64.CondNE, *stub)
-	}
+	c.a.Load(scratchA, regCtx, abi.OffGoSite)
+	c.a.JmpReg(scratchA)
 }
 
 // addAlong adds the property a write's cache adds (ssa.PropertyAdd), as

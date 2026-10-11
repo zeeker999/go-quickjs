@@ -166,8 +166,12 @@ type Context struct {
 	// operation. Host is the runtime the context belongs to.
 	GoOp, GoKeep, GoStatus uint64
 	GoResume               uintptr
-	GoArgs                 [MaxGoArgs]GoArg
-	Host                   unsafe.Pointer
+	// GoSite is where a call of Go that saves every register goes on, in
+	// the code that made it: the routine its code shares for such calls
+	// (mir's goSaving) returns there.
+	GoSite uintptr
+	GoArgs [MaxGoArgs]GoArg
+	Host   unsafe.Pointer
 	// ExitMarking is 1 when the exit was the collector's marking's: a
 	// literal or a native call, which take no pointer while it marks. Go
 	// clears it before each entry.
@@ -330,6 +334,7 @@ var (
 	OffGoKeep   = int32(unsafe.Offsetof(Context{}.GoKeep))
 	OffGoStatus = int32(unsafe.Offsetof(Context{}.GoStatus))
 	OffGoResume = int32(unsafe.Offsetof(Context{}.GoResume))
+	OffGoSite   = int32(unsafe.Offsetof(Context{}.GoSite))
 	OffGoArgs   = int32(unsafe.Offsetof(Context{}.GoArgs))
 
 	OffExitMarking = int32(unsafe.Offsetof(Context{}.ExitMarking))
