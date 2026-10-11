@@ -1551,8 +1551,8 @@ func TestJITSSAManySpills(t *testing.T) {
 // (jitSSAProfit): a loop leaving at every iteration for a call of more
 // arguments than Go is called with from native code (abi.MaxGoArgs) costs
 // more at the exits than native code saves. A loop doing real work stays
-// native, and so does one whose calls Go makes from native code, which
-// leaves nothing (ssa.GoCall).
+// native, and so does one doing real work around calls Go makes from
+// native code (ssa.GoCall), each of which costs what an exit would.
 func TestJITSSAProfitability(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -1560,7 +1560,7 @@ func TestJITSSAProfitability(t *testing.T) {
 	// m reads arguments: Go calls it, never native code (jitNativeCallee).
 	setup := `function O(){this.v=0}O.prototype.m=function(i){this.v+=arguments[0];return this.v};
 		function calls(o,n){let s=0;for(let i=0;i<n;i++)s+=o.m(i,1,2,3,4,5,6);return s}
-		function gocalls(o,n){let s=0;for(let i=0;i<n;i++)s+=o.m(i);return s}
+		function gocalls(o,n){let s=0;for(let i=0;i<n;i++){s=(s*31+i)|0;s^=s>>>7;s=(s+i*i)|0;s^=s<<3;s=(s*7+(i>>1))|0;s^=s>>>5;s=(s+o.m(i))|0}return s}
 		function work(n){let s=0;for(let i=0;i<n;i++){s=(s*31+i)|0;s^=s>>>7;s=(s+i*i)|0;if(i%100==0)s+=Math.abs(i)}return s}
 		var o=new O;`
 	want := New(Config{})

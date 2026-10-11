@@ -3001,7 +3001,10 @@ func (r *Runtime) jitSSAProfit(e *jitEntry, ctx *abi.Context, start, edges int) 
 		}
 	}
 	st.work += work
-	if st.entries%jitSSAProbe == 0 && st.work < st.entries*jitSSAMinWork {
+	// A call of Go a stretch makes costs it what an exit and an entry
+	// would, which it saves (ssa.GoCall): each counts as a stretch, so a
+	// method whose call Go now makes is judged as it was when it left.
+	if st.entries%jitSSAProbe == 0 && st.work < (st.entries+st.goCalls)*jitSSAMinWork {
 		// Go stops entering it; native callers, which pay neither, go on
 		// calling it (NativeCalls).
 		e.entrySlow = true
