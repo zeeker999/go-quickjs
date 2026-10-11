@@ -45,8 +45,10 @@ type core struct {
 	// saves are, for each native call (ssa's OpCall), the values live
 	// across it that are in registers, which it saves to slots of their own
 	// and restores after: the callee uses every register, as V8's code's
-	// callees use the caller-saved ones.
-	saves map[*ssa.Value][]saved
+	// callees use the caller-saved ones. A call's are
+	// saves[saveAt[2*ID]:saveAt[2*ID+1]] (savesOf), nil saveAt for none.
+	saves  []saved
+	saveAt []int
 	// exitEnc, exitDescs and exitSlots are what exitDescriptor's
 	// descriptions are made from, a compile's encoding shared and the
 	// rest carved from blocks, as the code keeps them all as long: each
@@ -644,7 +646,9 @@ func (c *core) allocate() error {
 	// a value saved later takes once it has ended, as the spill slots are
 	// reused. The calls come in order, so the intervals begun before one
 	// are kept as they are met, in their order, and dropped once they end.
-	home := map[int]int{}
+	// home is, by value ID, 1 plus the slot a value saved across a call
+	// is saved in, or 0.
+	var home []int
 	var free []int
 	open, next := c.intervalRefs(len(all))[:0], 0
 	for _, b := range c.order {
@@ -652,6 +656,10 @@ func (c *core) allocate() error {
 			if v.Op != ssa.OpCall || v.Calls == nil {
 				continue
 			}
+			if home == nil {
+				home, c.saveAt = c.ints(nv), c.ints(2*nv)
+			}
+			c.saveAt[2*v.ID] = len(c.saves)
 			p := pos[v.ID]
 			for ; next < len(all) && all[next].start < p; next++ {
 				open = append(open, all[next])
@@ -660,9 +668,9 @@ func (c *core) allocate() error {
 			for _, it := range open {
 				if it.end > p {
 					kept = append(kept, it)
-				} else if s, ok := home[it.v.ID]; ok {
-					free = append(free, s)
-					delete(home, it.v.ID)
+				} else if s := home[it.v.ID]; s != 0 {
+					free = append(free, s-1)
+					home[it.v.ID] = 0
 				}
 			}
 			open = kept
@@ -671,8 +679,8 @@ func (c *core) allocate() error {
 				if l.reg < 0 {
 					continue
 				}
-				s, ok := home[it.v.ID]
-				if !ok {
+				s := home[it.v.ID] - 1
+				if s < 0 {
 					switch {
 					case len(free) != 0:
 						s, free = free[len(free)-1], free[:len(free)-1]
@@ -681,16 +689,22 @@ func (c *core) allocate() error {
 					default:
 						s, spills = spills, spills+1
 					}
-					home[it.v.ID] = s
+					home[it.v.ID] = s + 1
 				}
-				if c.saves == nil {
-					c.saves = map[*ssa.Value][]saved{}
-				}
-				c.saves[v] = append(c.saves[v], saved{reg: l.reg, slot: s, float: isFloat(it.v)})
+				c.saves = c.appendSaved(c.saves, saved{reg: l.reg, slot: s, float: isFloat(it.v)})
 			}
+			c.saveAt[2*v.ID+1] = len(c.saves)
 		}
 	}
 	return nil
+}
+
+// savesOf is what native call v saves (saves).
+func (c *core) savesOf(v *ssa.Value) []saved {
+	if c.saveAt == nil || 2*v.ID+1 >= len(c.saveAt) {
+		return nil
+	}
+	return c.saves[c.saveAt[2*v.ID]:c.saveAt[2*v.ID+1]]
 }
 
 // operandsLive reports whether a call's operands, a state's slots from ops

@@ -1367,23 +1367,24 @@ func (c *a64Compiler) scan(v *ssa.Value, guard func(arm64.Cond), found arm64.Lab
 		mask, want = int64(c.enc.PropNotWritable), int64(c.enc.PropWritable)
 	}
 	c.a.MovImm(a64D, uint64(mask))
-	for k := int32(0); k < abi.MaxScan; k++ {
-		next := c.a.NewLabel()
-		entry := k * c.enc.PropertySize
-		c.a.CmpImm(a64B, int64(k), true)
-		guard(arm64.LS)
-		c.a.LoadU32(a64C, a64A, entry+c.enc.PropertyKey)
-		c.a.CmpImm(a64C, int64(v.Key), false)
-		c.a.BCond(arm64.NE, next)
-		c.a.LoadU8(a64C, a64A, entry+c.enc.PropertyFlags)
-		c.a.Op(arm64.And, a64C, a64C, a64D, false)
-		c.a.CmpImm(a64C, want, false)
-		guard(arm64.NE)
-		c.a.AddImm(a64A, a64A, int64(entry+c.enc.PropertyValue), true)
-		c.a.B(found)
-		c.a.Bind(next)
-	}
-	c.a.B(c.stubLabel(v.State, exitKind(v.Aux)))
+	// A loop over the table, as amd64's.
+	loop, hit := c.a.NewLabel(), c.a.NewLabel()
+	c.a.Bind(loop)
+	c.a.CmpImm(a64B, 0, true)
+	guard(arm64.EQ)
+	c.a.LoadU32(a64C, a64A, c.enc.PropertyKey)
+	c.a.CmpImm(a64C, int64(v.Key), false)
+	c.a.BCond(arm64.EQ, hit)
+	c.a.AddImm(a64A, a64A, int64(c.enc.PropertySize), true)
+	c.a.AddImm(a64B, a64B, -1, true)
+	c.a.B(loop)
+	c.a.Bind(hit)
+	c.a.LoadU8(a64C, a64A, c.enc.PropertyFlags)
+	c.a.Op(arm64.And, a64C, a64C, a64D, false)
+	c.a.CmpImm(a64C, want, false)
+	guard(arm64.NE)
+	c.a.AddImm(a64A, a64A, int64(c.enc.PropertyValue), true)
+	c.a.B(found)
 }
 
 // stringBytes compares two strings of one length by their bytes, as
@@ -1696,7 +1697,7 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		rb, rd = c.slotAddr(slot, true, a64C)
 		return nb, nd, rb, rd
 	}
-	for _, sv := range c.saves[v] {
+	for _, sv := range c.savesOf(v) {
 		if sv.float {
 			c.a.StoreF(a64Ctx, c.spillDisp(sv.slot), arm64.FReg(sv.reg))
 		} else {
@@ -1845,7 +1846,7 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 	c.a.Store(tmp, 0, top)
 	c.a.Store(calleeCtx, abi.OffLive, arm64.ZR)
 	c.a.Store(calleeCtx, abi.OffReturnTo, arm64.ZR)
-	for _, sv := range c.saves[v] {
+	for _, sv := range c.savesOf(v) {
 		if sv.float {
 			c.a.LoadF(arm64.FReg(sv.reg), a64Ctx, c.spillDisp(sv.slot))
 		} else {
@@ -2148,7 +2149,7 @@ func (c *a64Compiler) callGo(v *ssa.Value, op uint64, keep int) {
 	c.a.Store(a64Ctx, abi.OffGoOp, a64A)
 	c.a.MovImm(a64A, uint64(keep))
 	c.a.Store(a64Ctx, abi.OffGoKeep, a64A)
-	for _, sv := range c.saves[v] {
+	for _, sv := range c.savesOf(v) {
 		if sv.float {
 			c.a.StoreF(a64Ctx, c.spillDisp(sv.slot), arm64.FReg(sv.reg))
 		} else {
@@ -2163,7 +2164,7 @@ func (c *a64Compiler) callGo(v *ssa.Value, op uint64, keep int) {
 	c.a.Bind(back)
 	c.a.Load(a64Locals, a64Ctx, abi.OffLocals)
 	c.a.Load(a64Stack, a64Ctx, abi.OffStack)
-	for _, sv := range c.saves[v] {
+	for _, sv := range c.savesOf(v) {
 		if sv.float {
 			c.a.LoadF(arm64.FReg(sv.reg), a64Ctx, c.spillDisp(sv.slot))
 		} else {

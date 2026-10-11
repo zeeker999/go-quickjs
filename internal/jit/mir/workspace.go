@@ -26,6 +26,7 @@ type Workspace struct {
 	intervals arena.Arena[interval]
 	ivRefs    arena.Arena[*interval]
 	locs      arena.Arena[loc]
+	saved     arena.Arena[saved]
 	sched     schedule
 	ready     bool
 	// Each code generator's assembler and tables. A Code's Bytes from
@@ -69,6 +70,7 @@ func (w *Workspace) init() {
 	w.intervals.KeepBig()
 	w.ivRefs.KeepBig()
 	w.locs.KeepBig()
+	w.saved.KeepBig()
 }
 
 // Rewind takes back everything a compile in the workspace used.
@@ -83,6 +85,7 @@ func (w *Workspace) Rewind() {
 	w.intervals.Rewind()
 	w.ivRefs.Rewind()
 	w.locs.Rewind()
+	w.saved.Rewind()
 }
 
 // CompileIn is Compile, in w.
@@ -157,6 +160,14 @@ func (c *core) intervalRefs(n int) []*interval {
 		return c.ws.ivRefs.Make(n)
 	}
 	return make([]*interval, n)
+}
+
+// appendSaved is append(s, v), growing s in the workspace if there is one.
+func (c *core) appendSaved(s []saved, v saved) []saved {
+	if c.ws != nil {
+		return c.ws.saved.Append(s, v)
+	}
+	return append(s, v)
 }
 
 func (c *core) locList(n int) []loc {

@@ -581,7 +581,7 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 	}
 	// What is live across the call, in registers, is saved; nothing else
 	// is in a register from here on but what the call makes.
-	for _, sv := range c.saves[v] {
+	for _, sv := range c.savesOf(v) {
 		if sv.float {
 			c.a.StoreSD(regCtx, c.spillDisp(sv.slot), amd64.XReg(sv.reg))
 		} else {
@@ -746,7 +746,7 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 	c.a.MovImm(tmp, 0)
 	c.a.Store(calleeCtx, abi.OffLive, tmp)
 	c.a.Store(calleeCtx, abi.OffReturnTo, tmp)
-	for _, sv := range c.saves[v] {
+	for _, sv := range c.savesOf(v) {
 		if sv.float {
 			c.a.LoadSD(amd64.XReg(sv.reg), regCtx, c.spillDisp(sv.slot))
 		} else {
@@ -816,7 +816,7 @@ func (c *compiler) callGo(v *ssa.Value, op uint64, keep int) {
 	c.a.Store(regCtx, abi.OffGoOp, scratchA)
 	c.a.MovImm(scratchA, uint64(keep))
 	c.a.Store(regCtx, abi.OffGoKeep, scratchA)
-	for _, sv := range c.saves[v] {
+	for _, sv := range c.savesOf(v) {
 		if sv.float {
 			c.a.StoreSD(regCtx, c.spillDisp(sv.slot), amd64.XReg(sv.reg))
 		} else {
@@ -831,7 +831,7 @@ func (c *compiler) callGo(v *ssa.Value, op uint64, keep int) {
 	c.a.Bind(back)
 	c.a.Load(regLocals, regCtx, abi.OffLocals)
 	c.a.Load(regStack, regCtx, abi.OffStack)
-	for _, sv := range c.saves[v] {
+	for _, sv := range c.savesOf(v) {
 		if sv.float {
 			c.a.LoadSD(amd64.XReg(sv.reg), regCtx, c.spillDisp(sv.slot))
 		} else {
@@ -2242,23 +2242,26 @@ func (c *compiler) scan(v *ssa.Value, guard func(amd64.Cond), found amd64.Label)
 	if v.Op == ssa.OpPropWrite {
 		mask, want = int32(c.enc.PropNotWritable), int32(c.enc.PropWritable)
 	}
-	for k := int32(0); k < abi.MaxScan; k++ {
-		next := c.a.NewLabel()
-		entry := k * c.enc.PropertySize
-		c.a.OpImm(amd64.Cmp, scratchB, k, true)
-		guard(amd64.CondBE)
-		c.a.LoadU32(scratchC, scratchA, entry+c.enc.PropertyKey)
-		c.a.OpImm(amd64.Cmp, scratchC, int32(v.Key), false)
-		c.a.Jcc(amd64.CondNE, next)
-		c.a.LoadU8(scratchC, scratchA, entry+c.enc.PropertyFlags)
-		c.a.OpImm(amd64.And, scratchC, mask, false)
-		c.a.OpImm(amd64.Cmp, scratchC, want, false)
-		guard(amd64.CondNE)
-		c.a.OpImm(amd64.Add, scratchA, entry+c.enc.PropertyValue, true)
-		c.a.Jmp(found)
-		c.a.Bind(next)
-	}
-	c.a.Jmp(c.stubLabel(v.State, exitKind(v.Aux)))
+	// A loop over the table, its entries left in scratchB: the slow path's
+	// few dozen bytes, where it had been unrolled into hundreds, at every
+	// site -- a third of all the code made.
+	loop, hit := c.a.NewLabel(), c.a.NewLabel()
+	c.a.Bind(loop)
+	c.a.Op(amd64.Test, scratchB, scratchB, true)
+	guard(amd64.CondE)
+	c.a.LoadU32(scratchC, scratchA, c.enc.PropertyKey)
+	c.a.OpImm(amd64.Cmp, scratchC, int32(v.Key), false)
+	c.a.Jcc(amd64.CondE, hit)
+	c.a.OpImm(amd64.Add, scratchA, c.enc.PropertySize, true)
+	c.a.OpImm(amd64.Sub, scratchB, 1, true)
+	c.a.Jmp(loop)
+	c.a.Bind(hit)
+	c.a.LoadU8(scratchC, scratchA, c.enc.PropertyFlags)
+	c.a.OpImm(amd64.And, scratchC, mask, false)
+	c.a.OpImm(amd64.Cmp, scratchC, want, false)
+	guard(amd64.CondNE)
+	c.a.OpImm(amd64.Add, scratchA, c.enc.PropertyValue, true)
+	c.a.Jmp(found)
 }
 
 // stringBytes compares two strings of one length, in code units, by their
