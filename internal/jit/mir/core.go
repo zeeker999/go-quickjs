@@ -321,7 +321,7 @@ func (c *core) allocate() error {
 		}
 	}
 	for _, b := range c.order {
-		for _, v := range b.Values {
+		for i, v := range b.Values {
 			if v.Op == ssa.OpPhi {
 				continue // phi arguments are used at their predecessors' ends
 			}
@@ -340,6 +340,12 @@ func (c *core) allocate() error {
 				// pool Go fills, made again from its start: its operands
 				// are in its state.
 				at++
+			}
+			if i+1 < len(b.Values) && b.Values[i+1].State == v.State {
+				// The guards of one instruction share its state: what it
+				// reads is used at the last of them, which subsumes the
+				// others, as they are in one block.
+				continue
 			}
 			useState(v.State, at)
 		}
@@ -523,7 +529,19 @@ func (c *core) allocate() error {
 	// spilled values die.
 	type freeSlot struct{ slot, end int }
 	spills := 0
-	for _, float := range []bool{false, true} {
+	// The intervals of each class, in order, for its pass.
+	var classes [2][]*interval
+	for k := range classes {
+		classes[k] = c.intervalRefs(len(all))[:0]
+	}
+	for _, it := range all {
+		if isFloat(it.v) {
+			classes[1] = append(classes[1], it)
+		} else {
+			classes[0] = append(classes[0], it)
+		}
+	}
+	for class, float := range [2]bool{false, true} {
 		var freeSlots []freeSlot
 		regs := c.gprs
 		if float {
@@ -586,10 +604,7 @@ func (c *core) allocate() error {
 			spills++
 			return spills - 1, nil
 		}
-		for _, it := range all {
-			if isFloat(it.v) != float {
-				continue
-			}
+		for _, it := range classes[class] {
 			kept := active[:0]
 			for _, a := range active {
 				if a.end < it.start {

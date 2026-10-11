@@ -708,7 +708,7 @@ type domTree struct {
 // iteration over the blocks in reverse post-order, which their IDs are
 // (Func.Blocks).
 func dominators(f *Func) *domTree {
-	d := &domTree{idom: make([]int, len(f.Blocks))}
+	d := &domTree{idom: f.ints(len(f.Blocks))}
 	for i := range d.idom {
 		d.idom[i] = -2
 	}

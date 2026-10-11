@@ -602,6 +602,12 @@ func (f *Func) newValue(b *Block, op Op, t Type, args ...*Value) *Value {
 // NumValues bounds the function's value IDs, for tables indexed by them.
 func (f *Func) NumValues() int { return f.nextID }
 
+// NumStates bounds its frame states' IDs (FrameState.ID).
+func (f *Func) NumStates() int { return f.nextState }
+
+// ID numbers s among its function's frame states, for tables by state.
+func (s *FrameState) ID() int { return s.id }
+
 // Written reports whether any instruction writes a slot: a slot no
 // instruction writes holds its value from entry in every frame state.
 func (f *Func) Written(slot int) bool { return f.written[slot] }

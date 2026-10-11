@@ -36,6 +36,7 @@ type a64Compiler struct {
 	a       *arm64.Asm
 	labels  []arm64.Label // by block ID
 	stubs   map[stubKey]arm64.Label
+	stubAt  []int
 	stubFor []a64Stub
 	cold    []func()
 	// callV and callTop are amd64's.
@@ -94,6 +95,7 @@ func compileARM64(w *Workspace, f *ssa.Func, enc abi.Encoding) (code *Code, err 
 		return nil, err
 	}
 	c := &a64Compiler{core: k}
+	c.stubAt = k.ints(2 * f.NumStates())
 	if w != nil {
 		g := &w.arm64
 		if g.stubs == nil {
@@ -336,14 +338,35 @@ func (c *a64Compiler) boxBool(b, dst arm64.Reg) {
 	c.a.Bind(done)
 }
 
-// stubLabel returns the exit stub for a state and kind.
+// stubLabel returns the exit stub for a state and kind: found by the
+// state's ID (stubAt), an exit to Go or a deoptimization, or else in a
+// map, which a guard asked for the one it shares with others of its
+// instruction had cost.
 func (c *a64Compiler) stubLabel(s *ssa.FrameState, kind uint64) arm64.Label {
+	i := -1
+	switch kind {
+	case abi.ExitHost:
+		i = 2 * s.ID()
+	case abi.ExitDeopt:
+		i = 2*s.ID() + 1
+	}
+	if i >= 0 && i < len(c.stubAt) {
+		if l := c.stubAt[i]; l != 0 {
+			return arm64.Label(l - 1)
+		}
+	}
 	k := stubKey{s, kind}
-	if l, ok := c.stubs[k]; ok {
-		return l
+	if i < 0 || i >= len(c.stubAt) {
+		if l, ok := c.stubs[k]; ok {
+			return l
+		}
 	}
 	l := c.a.NewLabel()
-	c.stubs[k] = l
+	if i >= 0 && i < len(c.stubAt) {
+		c.stubAt[i] = int(l) + 1
+	} else {
+		c.stubs[k] = l
+	}
 	c.stubFor = append(c.stubFor, a64Stub{k, l})
 	return l
 }
