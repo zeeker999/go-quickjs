@@ -579,8 +579,9 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 					// The heap model has no global object: Go assigns.
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
-				if v.Add != nil {
-					// The heap model's objects have no shapes to add along.
+				if v.Add != nil || len(v.Adds) != 0 || len(v.Cases) != 0 {
+					// The heap model's objects have no shapes to add along,
+					// nor to tell a write's cases by.
 					return ir.Exit{}, fmt.Errorf("%w: a property added", ErrUnsupported)
 				}
 				// Any value, unless it changes a reference while the

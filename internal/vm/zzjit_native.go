@@ -625,6 +625,7 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool, cl *closure) *j
 				e.setSSA(fn, p, code, fb)
 				s.compiled++
 				s.remember(weak.Make(fn), e)
+				r.jitWantedCallees(e, fb)
 				return e
 			}
 		}
