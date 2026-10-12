@@ -230,26 +230,23 @@ type jitEntry struct {
 	// to be compiled with every one (jitGoOn).
 	entryMisses uint8
 	allEntries  bool
-	// nativeEntry is the address of the code's entry at its start, which
-	// native callers jump to (mir's native calls), or 0 while there is none
-	// they may: no code, or code that leaves too often (notNative). A
-	// caller's code holds its address, which keeps the entry alive
-	// (ssaCallees).
-	nativeEntry uintptr
-	// nativeIn counts the calls native code made to it since it was last
-	// compiled, which that code counts, and nativeOut those that left
-	// native code from inside it (jitUnwindNative); notNative marks code
-	// native callers no longer call, for leaving on too many
-	// (jitUnwindShare), until Go has made nativeRetry calls to it, more
-	// for each time it was found to (nativeBackoff, jitNativeRetry).
-	nativeIn, nativeOut uint64
-	notNative           bool
-	nativeRetry         uint32
-	nativeBackoff       uint8
-	// ssaCallees are the entries of the functions the code calls natively,
-	// and ssaInlined the closures of those it inlines, whose frames Go makes
-	// at an exit inside them (jitUnwindNative).
-	ssaCallees []*jitEntry
+	// link is where native callers call the function's code (jitLink):
+	// its entry, and the count of their calls since the code was last
+	// compiled (in). nativeOut counts those that left native code
+	// from inside it (jitUnwindNative); notNative marks code native
+	// callers no longer call, for leaving on too many (jitUnwindShare),
+	// until Go has made nativeRetry calls to it, more for each time it was
+	// found to (nativeBackoff, jitNativeRetry).
+	link          *jitLink
+	nativeOut     uint64
+	notNative     bool
+	nativeRetry   uint32
+	nativeBackoff uint8
+	// ssaLinks are the links of the functions the code calls natively,
+	// whose addresses it holds, and ssaInlined the closures of those it
+	// inlines, whose frames Go makes at an exit inside them
+	// (jitUnwindNative).
+	ssaLinks   []*jitLink
 	ssaInlined []*closure
 	// ssaPools are the object pools the code's constructions take from,
 	// whose addresses it holds.
@@ -314,8 +311,38 @@ type jitEntry struct {
 	this      bool
 	// deferred marks a refusal for want of code budget, made at the cache
 	// generation in generation: it is retried once that has moved on.
-	deferred   bool
-	generation uint64
+	// calleeRefused marks a function that does not compile for native
+	// callers alone (jitNativeCallee).
+	deferred      bool
+	generation    uint64
+	calleeRefused bool
+}
+
+// jitLink is where native callers call a function's code, as V8's code
+// calls a function through the code it holds, whatever code that is now:
+// the address of the code's entry at its start, which they jump to (mir's
+// native calls, ssa.CallSite's Entry), or 0 while there is none they may
+// -- no code, code that leaves too often (notNative), code the cache
+// dropped -- when Go runs the function (abi.ExitEnter); and the calls they
+// made to it since its code was last compiled, which they count
+// (CallSite's Count). It outlives the function's entries: the cache may
+// drop an entry, its code with it, and compile the function again, and
+// the callers' code, which holds the link's address, calls the new code
+// through it, never code that is gone, nor leaves for Go at every call
+// for want of a target compiled since. Callers' code is compiled to call
+// any code of the function: what it writes for the callee -- its
+// arguments, its receiver if its body reads one (UsesThis), the receiver
+// coerced -- is the function's, not one compile's.
+//
+// The function's link is found by its key (jitState.links) while an entry
+// the cache holds owns it (owner) or callers' code calls through it
+// (refs); then it is dropped.
+type jitLink struct {
+	entry uintptr
+	in    uint64
+	owner *jitEntry
+	refs  int
+	key   weak.Pointer[bytecode.Function]
 }
 
 // Weak keys prevent a refusal or cached program from retaining a source graph.
@@ -324,6 +351,8 @@ type jitState struct {
 	// unavailable marks a runtime the OS will not give executable memory.
 	unavailable bool
 	cache       map[weak.Pointer[bytecode.Function]]*jitEntry
+	// links are the functions' links (jitLink), by the same keys.
+	links map[weak.Pointer[bytecode.Function]]*jitLink
 	// resumed counts native calls whose callee Go finished, after which
 	// their callers' code went on natively (runSSA); resumedLevels those
 	// whose caller was itself a level Go was finishing (jitUnwindNative).
@@ -485,10 +514,11 @@ func (r *Runtime) jitCodeBytes() int64 {
 // the OS would not release the code, which leaves e owned for a retry.
 func (s *jitState) dropEntry(key weak.Pointer[bytecode.Function], e *jitEntry) bool {
 	held := e.ssa.Size() != 0
-	e.nativeEntry = 0
+	e.link.entry = 0
 	if s.closeSSA(e.ssa, e) != nil {
 		return false
 	}
+	s.setLinks(e, nil)
 	s.forget(key, e)
 	if held {
 		s.generation++
@@ -510,12 +540,55 @@ func (e *jitEntry) holdsCode() bool {
 	return e.ssa.Size() != 0
 }
 
-// forget removes e from the cache and frees its hint slot.
+// forget removes e from the cache and frees its hint slot; its link is
+// no longer its.
 func (s *jitState) forget(key weak.Pointer[bytecode.Function], e *jitEntry) {
 	delete(s.cache, key)
 	if e.hint != 0 {
 		s.hints[e.hint&(1<<jitHintBits-1)] = jitHintSlot{}
 		e.hint = 0
+	}
+	if l := e.link; l.owner == e {
+		l.owner, l.entry = nil, 0
+		s.unlink(l)
+	}
+}
+
+// linkFor gives e, the entry made for fn, fn's link, the one its callers'
+// code calls through if any does: e's code, once compiled, is what they
+// call (setSSA).
+func (s *jitState) linkFor(fn *bytecode.Function, e *jitEntry) {
+	key := weak.Make(fn)
+	l := s.links[key]
+	if l == nil {
+		if s.links == nil {
+			s.links = map[weak.Pointer[bytecode.Function]]*jitLink{}
+		}
+		l = &jitLink{key: key}
+		s.links[key] = l
+	}
+	l.owner, l.entry, l.in = e, 0, 0
+	e.link = l
+}
+
+// setLinks has e's code call through links, those of the functions it
+// calls natively, in place of what it called through before.
+func (s *jitState) setLinks(e *jitEntry, links []*jitLink) {
+	for _, l := range links {
+		l.refs++
+	}
+	old := e.ssaLinks
+	e.ssaLinks = links
+	for _, l := range old {
+		l.refs--
+		s.unlink(l)
+	}
+}
+
+// unlink forgets l once no entry owns it and no code calls through it.
+func (s *jitState) unlink(l *jitLink) {
+	if l.owner == nil && l.refs == 0 && s.links[l.key] == l {
+		delete(s.links, l.key)
 	}
 }
 
@@ -638,6 +711,7 @@ func (r *Runtime) jitForFunction(fn *bytecode.Function, cl *closure) *jitEntry {
 	}
 	s := r.jit
 	e := &jitEntry{}
+	s.linkFor(fn, e)
 	if p, err := r.jitLower(fn, jitLowerSSA); err == nil {
 		if cl != nil {
 			// The calls its caches have met.
@@ -646,7 +720,7 @@ func (r *Runtime) jitForFunction(fn *bytecode.Function, cl *closure) *jitEntry {
 		code, fb, err := r.compileSSA(fn, cl, p, limit, e)
 		switch {
 		case code != nil:
-			e.setSSA(fn, p, code, fb)
+			e.setSSA(s, fn, p, code, fb)
 			s.compiled++
 			s.remember(weak.Make(fn), e)
 			r.jitWantedCallees(e, fb)

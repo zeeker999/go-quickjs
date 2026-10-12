@@ -623,7 +623,7 @@ func jitFed(cl *closure, e *jitEntry, pc uint32) {
 	if site.missed++; site.shape == 0 {
 		e.fed = slices.Delete(e.fed, i, i+1)
 		if !e.feedReopt {
-			e.feedReopt, e.feedStarts, e.feedWork = true, e.starts+e.nativeIn, e.ssaStats.work
+			e.feedReopt, e.feedStarts, e.feedWork = true, e.starts+e.link.in, e.ssaStats.work
 		}
 	} else if site.missed >= jitWrongShapeExits {
 		e.fed = slices.Delete(e.fed, i, i+1)
@@ -953,10 +953,10 @@ func (e *jitEntry) reoptDueNow() bool {
 	if e.reopt || e.unwindReopt {
 		return true
 	}
-	if e.feedReopt && (e.starts+e.nativeIn > e.feedStarts || e.ssaStats.work-e.feedWork >= uint64(e.reoptBudget)*jitReoptPer*jitReoptWork) {
+	if e.feedReopt && (e.starts+e.link.in > e.feedStarts || e.ssaStats.work-e.feedWork >= uint64(e.reoptBudget)*jitReoptPer*jitReoptWork) {
 		return true
 	}
-	return e.reoptPending() && (e.ssaStats.entries+e.ssaStats.hosts+e.ssaStats.goCalls+e.nativeIn+uint64(e.slowTries) >= uint64(e.reoptBudget) ||
+	return e.reoptPending() && (e.ssaStats.entries+e.ssaStats.hosts+e.ssaStats.goCalls+e.link.in+uint64(e.slowTries) >= uint64(e.reoptBudget) ||
 		e.ssaStats.work >= uint64(e.reoptBudget)*jitReoptPer*jitReoptWork)
 }
 
@@ -1007,7 +1007,7 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	defer r.jitWantedCallees(e, fb)
 	old := e.ssa
 	// What the old code holds, which a call of Go suspended in it needs.
-	oldKeep := []any{e.ssaShapes, e.ssaHolders, e.ssaInlined, e.ssaPools, e.ssaCallees, e.ssaCells}
+	oldKeep := []any{e.ssaShapes, e.ssaHolders, e.ssaInlined, e.ssaPools, e.ssaLinks, e.ssaCells}
 	if len(fb.inlined) > len(e.ssaInlined) {
 		// It inlines more: its native callers may inline it now, and
 		// theirs, with it.
@@ -1015,7 +1015,8 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	}
 	e.ssa, e.ssaShapes, e.ssaHolders, e.fed, e.fedInlined, e.ssaStats = code, fb.shapes, fb.holders, fb.fed, fb.fedInlined, jitSSAStats{}
 	e.ssaInlinedAt, e.definesUnfed, e.ssaCells = fb.inlinedAt, fb.definesUnfed, fb.cells
-	e.ssaStrings, e.ssaCallees, e.ssaInlined, e.ssaPools = e.ssaStrings || fb.strings, fb.callees, fb.inlined, fb.pools
+	e.ssaStrings, e.ssaInlined, e.ssaPools = e.ssaStrings || fb.strings, fb.inlined, fb.pools
+	r.jit.setLinks(e, fb.links)
 	e.ssaKeeps = max(e.ssaKeeps, fb.keeps)
 	// What it leaves on is counted afresh: it may have left on what it was
 	// compiled for now -- a construction, a call it inlines now. So Go
@@ -1023,12 +1024,12 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	// found to leave too often in turn, as V8 judges code it optimized
 	// again by what it does then; its backoff (nativeBackoff) stays. Code
 	// compiled for native callers alone (ssaCallee) Go does not enter.
-	e.nativeIn, e.nativeOut, e.slowTries = 0, 0, 0
+	e.link.in, e.nativeOut, e.slowTries = 0, 0, 0
 	e.notNative, e.nativeRetry = false, 0
 	if !e.ssaCallee {
 		e.entrySlow = false
 	}
-	e.nativeEntry = code.EntryAddress(0)
+	e.link.entry = code.EntryAddress(0)
 	r.jit.closeSSA(old, oldKeep)
 	r.jit.reoptimized++
 }
@@ -1141,11 +1142,11 @@ type jitFeedback struct {
 	inlinedAt []int32
 	// root is the function's feedback for an inlined callee's, which keeps
 	// what the callee's sites hold for the code; nil for the function's
-	// own. strings marks an inlined callee that calls charCodeAt. callees
-	// are the entries of the functions the code calls natively.
+	// own. strings marks an inlined callee that calls charCodeAt. links
+	// are those of the functions the code calls natively (jitLink).
 	root    *jitFeedback
 	strings bool
-	callees []*jitEntry
+	links   []*jitLink
 	// inlined are the closures of the callees the code inlines; pools the
 	// object pools its constructions take from.
 	inlined []*closure
@@ -1489,15 +1490,19 @@ func (fb *jitFeedback) NativeCalls(pc int) []ssa.CallSite {
 			continue
 		}
 		call, fn := fb.fn.Code[pc], in.cl.fn
+		// The call is made through the function's link (jitLink), to
+		// whatever code it has then: what it writes for the callee is the
+		// function's -- its receiver if its body reads one -- not this
+		// code's, which a compile of it later may not be.
 		this := -1
-		if ce.this {
+		if fn.UsesThis {
 			this = fn.LocalCount + len(fn.Upvalues)
 		}
-		fb.callees = append(fb.callees, ce)
+		fb.links = append(fb.links, ce.link)
 		fb.holders = append(fb.holders, in.obj)
 		site := ssa.CallSite{
 			Callee: uintptr(unsafe.Pointer(in.obj)), Closure: uintptr(unsafe.Pointer(in.cl)),
-			Entry: uintptr(unsafe.Pointer(&ce.nativeEntry)), Count: uintptr(unsafe.Pointer(&ce.nativeIn)),
+			Entry: uintptr(unsafe.Pointer(&ce.link.entry)), Count: uintptr(unsafe.Pointer(&ce.link.in)),
 			Argc: int(call.A), Method: call.Op == bytecode.OpCallMethod,
 			Params: fn.ParamCount, LocalCount: fn.LocalCount, MaxStack: fn.MaxStack, ThisSlot: this, Coerce: fn.CoerceThis,
 		}
@@ -2254,7 +2259,7 @@ type jitGoMark struct {
 // its calls cost it the same as entered from Go, but its native callers
 // pay no entry: called through Go instead (ExitEnter), each call of it
 // would cost one. So it pays while its work makes up for its calls of Go
-// beyond its calls in (nativeIn); if not -- a function of loops that only
+// beyond its calls in (its link's in); if not -- a function of loops that only
 // call built-ins, RegExp's run blocks, a call of Go at every few
 // instructions -- Go stops entering it and native callers stop calling it
 // (notNative), and the existing tiers run it, its calls of built-ins the
@@ -2273,12 +2278,12 @@ func (r *Runtime) jitCalleeProfit(e *jitEntry, serial uint64, pc int) {
 		st.calleeWork += uint64(pc - m.pc)
 	}
 	st.calleeGoCalls++
-	if st.calleeGoCalls%jitSSAProbe != 0 || st.calleeGoCalls <= e.nativeIn || jitMarking() {
+	if st.calleeGoCalls%jitSSAProbe != 0 || st.calleeGoCalls <= e.link.in || jitMarking() {
 		return
 	}
-	if st.calleeWork < (st.calleeGoCalls-e.nativeIn)*jitSSAMinWork {
+	if st.calleeWork < (st.calleeGoCalls-e.link.in)*jitSSAMinWork {
 		e.entrySlow = true
-		e.notNative, e.nativeEntry, e.nativeRetry = true, 0, 0
+		e.notNative, e.link.entry, e.nativeRetry = true, 0, 0
 		e.nativeBackoff = min(e.nativeBackoff+1, jitNativeBackoffs)
 	}
 }
@@ -3486,13 +3491,15 @@ func (r *Runtime) jitRefillPools(f *frame, e *jitEntry, pc, sp int, in bytecode.
 // leaving too often (notNative), is the entry all the same: a call's code
 // reads where to call at each call, and leaves for Go while there is
 // nowhere, until the callee is called natively again (jitRetryNative).
+// One that does not compile is not tried again (calleeRefused), unless for
+// want of code budget, which may change.
 func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
 	fn := cl.fn
 	if fn.TopLevel || fn.IsModule || fn.UsesArguments || fn.HasDirectEval {
 		return nil
 	}
 	e := r.jitFor(cl)
-	if e == nil || e.ssa != nil || e.deferred {
+	if e == nil || e.ssa != nil || e.deferred || e.calleeRefused {
 		if e != nil && e.ssa != nil {
 			return e
 		}
@@ -3500,14 +3507,16 @@ func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
 	}
 	p, err := r.jitLower(fn, jitLowerInline)
 	if err != nil {
+		e.calleeRefused = true
 		return nil
 	}
 	r.jitSeedCalls(cl, e, p)
-	code, fb, _ := r.compileSSA(fn, cl, p, r.jitAllowance(fn), e)
+	code, fb, err := r.compileSSA(fn, cl, p, r.jitAllowance(fn), e)
 	if code == nil {
+		e.calleeRefused = !errors.Is(err, jit.ErrCodeBudget)
 		return nil
 	}
-	e.setSSA(fn, p, code, fb)
+	e.setSSA(r.jit, fn, p, code, fb)
 	e.ssaCallee, e.entrySlow = true, true
 	r.jit.compiled++
 	r.jitWantedCallees(e, fb)
@@ -3532,15 +3541,17 @@ func (r *Runtime) jitWantedCallees(e *jitEntry, fb *jitFeedback) {
 	}
 }
 
-// setSSA gives e the code the new pipeline compiled for fn from p.
-func (e *jitEntry) setSSA(fn *bytecode.Function, p *ir.Program, code *jit.SSACode, fb *jitFeedback) {
+// setSSA gives e the code the new pipeline compiled for fn from p, which
+// native callers call through its link.
+func (e *jitEntry) setSSA(s *jitState, fn *bytecode.Function, p *ir.Program, code *jit.SSACode, fb *jitFeedback) {
 	e.ssa, e.this, e.ssaShapes, e.ssaHolders, e.fed, e.fedInlined = code, p.This, fb.shapes, fb.holders, fb.fed, fb.fedInlined
 	e.ssaProg = p
 	e.ssaInlinedAt, e.definesUnfed, e.ssaCells = fb.inlinedAt, fb.definesUnfed, fb.cells
 	e.reoptBudget = uint32(max(jitReoptBudget, len(fn.Code)/jitReoptPer))
-	e.ssaStrings, e.ssaCallees, e.ssaInlined, e.ssaPools = fb.strings, fb.callees, fb.inlined, fb.pools
+	e.ssaStrings, e.ssaInlined, e.ssaPools = fb.strings, fb.inlined, fb.pools
+	s.setLinks(e, fb.links)
 	e.ssaKeeps = max(e.ssaKeeps, fb.keeps)
-	e.nativeEntry = code.EntryAddress(0)
+	e.link.entry = code.EntryAddress(0)
 	e.ssaLoop = jitLoopLength(fn)
 	for _, in := range p.Code {
 		e.ssaStrings = e.ssaStrings || in.Op == ir.StringMethod || in.Op == ir.StringCode
@@ -4280,7 +4291,7 @@ type jitSSAStats struct {
 	// calleeGoCalls counts those it made as a native callee
 	// (jitGoCallNested), and calleeWork the work it did natively before
 	// each, as jitSSAProfit estimates a stretch's (jitCalleeProfit), since
-	// its calls in (jitEntry.nativeIn) were last counted from 0.
+	// its calls in (jitLink's in) were last counted from 0.
 	calleeGoCalls, calleeWork uint64
 	// judged is how many stretches, calls of Go included, there had been
 	// when jitSSAProfit last judged the code.
@@ -4409,7 +4420,7 @@ func (r *Runtime) jitGoOn(f *frame, e *jitEntry, pc, sp int) (v Value, err error
 			stats := e.ssaStats
 			r.jitReoptimize(f.cl, e)
 			e.ssaStats = stats
-			// Calls in are counted afresh (nativeIn), and the calls of Go
+			// Calls in are counted afresh (jitLink's in), and the calls of Go
 			// they are weighed against with them (jitCalleeProfit).
 			e.ssaStats.calleeGoCalls, e.ssaStats.calleeWork = 0, 0
 			if e.ssa.HasEntry(pc) && !e.entrySlow {
@@ -5146,6 +5157,17 @@ func (r *Runtime) jitEnterCallee(f *frame, e *jitEntry, ctx int) (Value, error) 
 	if e != nil && e.ssa != nil && e.notNative && e.entrySlow {
 		jitRetryNative(e)
 	}
+	// One with no code at all -- the cache dropped it, which native
+	// callers' code was compiled to call (jitLink) -- is compiled for them
+	// again, as it was when their code was compiled (NativeCalls), and
+	// they call it through its link from the next call on: Go would not
+	// compile one with no loop (LowerSSA), which only native callers call
+	// natively.
+	if (e == nil || e.ssa == nil && !e.deferred && !e.calleeRefused) && r.jit.seeding == 0 {
+		if ce := r.jitNativeCallee(f.cl); ce != nil {
+			e = ce
+		}
+	}
 	// As runFD runs a frame it made: its native code first, entered from
 	// Go -- which no native caller may jump to for now (notNative), not
 	// none at all -- or its tree.
@@ -5271,17 +5293,17 @@ func (r *Runtime) jitUnwound(e *jitEntry) {
 	if jitMarking() {
 		return
 	}
-	if e.nativeOut++; e.nativeOut%jitUnwindProbe != 0 || e.nativeOut*jitUnwindShare <= e.nativeIn {
+	if e.nativeOut++; e.nativeOut%jitUnwindProbe != 0 || e.nativeOut*jitUnwindShare <= e.link.in {
 		return
 	}
 	if e.ssa != nil && e.unwindReopts < jitUnwindReopts && jitLearning(e) {
 		e.unwindReopts++
 		e.unwindReopt = true
-		e.nativeIn, e.nativeOut = 0, 0
+		e.link.in, e.nativeOut = 0, 0
 		e.ssaStats.calleeGoCalls, e.ssaStats.calleeWork = 0, 0
 		return
 	}
-	e.notNative, e.nativeEntry, e.nativeRetry = true, 0, 0
+	e.notNative, e.link.entry, e.nativeRetry = true, 0, 0
 	e.nativeBackoff = min(e.nativeBackoff+1, jitNativeBackoffs)
 }
 
@@ -5325,9 +5347,9 @@ const (
 // after jitNativeRetry, counting its leaving afresh.
 func jitRetryNative(e *jitEntry) {
 	if e.nativeRetry++; e.nativeRetry >= jitNativeRetry<<(e.nativeBackoff-1) {
-		e.notNative, e.nativeIn, e.nativeOut = false, 0, 0
+		e.notNative, e.link.in, e.nativeOut = false, 0, 0
 		e.ssaStats.calleeGoCalls, e.ssaStats.calleeWork = 0, 0
-		e.nativeEntry = e.ssa.EntryAddress(0)
+		e.link.entry = e.ssa.EntryAddress(0)
 	}
 }
 

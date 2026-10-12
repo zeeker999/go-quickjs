@@ -3401,7 +3401,7 @@ func TestJITTreeRecoveryNarrow(t *testing.T) {
 		{"compiled", func(cl *closure) { cl.setHint(compiled.hint) }, true},
 		{"refused", func(cl *closure) { cl.jitRefused = true }, false},
 		{"refusal cached", func(cl *closure) {
-			e := &jitEntry{}
+			e := &jitEntry{link: &jitLink{}}
 			r.jit.remember(weak.Make(jitFunctionForTest(t, `function g() {}`)), e)
 			cl.setHint(e.hint)
 		}, false},
@@ -5051,7 +5051,7 @@ func TestJITSSANativeCallsGoOn(t *testing.T) {
 		}
 	}
 	cl := r.global.getOwn(r.atoms.intern("zero")).value.Object().fn().closure
-	if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.nativeIn == 0 {
+	if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.link.in == 0 {
 		t.Fatalf("zero was never called natively: %+v", e)
 	}
 	if r.jit.unwound == 0 {
@@ -5933,7 +5933,7 @@ func TestJITSSANestedExits(t *testing.T) {
 	for _, name := range []string{"inner", "outer"} {
 		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
 		e := r.jit.cache[weak.Make(cl.fn)]
-		if e == nil || e.ssa == nil || e.ssaStats.entries == 0 && e.nativeIn == 0 {
+		if e == nil || e.ssa == nil || e.ssaStats.entries == 0 && e.link.in == 0 {
 			t.Fatalf("%s did not run natively: %+v", name, e)
 		}
 		if name == "outer" && len(cl.fn.Code) > 30 {
@@ -6529,7 +6529,7 @@ func TestJITSSANativeCallTargets(t *testing.T) {
 		// reads of get, which one shape answers natively.
 		calledNatively := func() (n uint64) {
 			for _, x := range entry("poly").nativeCalls {
-				n += r.jit.cache[weak.Make(x.cl.fn)].nativeIn
+				n += r.jit.cache[weak.Make(x.cl.fn)].link.in
 			}
 			return n
 		}
@@ -6579,6 +6579,187 @@ func TestJITSSANativeCallTargets(t *testing.T) {
 	}
 	if got, want := gv.String().Go(), wv.String().Go(); got != want {
 		t.Fatalf("after leaf's code was dropped: got %s, interpreter %s", got, want)
+	}
+}
+
+// A native callee the cache drops -- to make room, its code closed -- and
+// compiles again is called natively again by its callers' code, compiled
+// before, through the function's link (jitLink), as V8's code calls a
+// function through the code it holds now: no caller is compiled again for
+// it, nor leaves for Go at every call (abi.ExitEnter) for want of the
+// target its code was compiled with, which had made EarleyBoyer's slow
+// runs. While the function has no code, a call has Go run it. A link
+// outlives its entries only while code calls through it.
+func TestJITSSANativeCallsSurviveEviction(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	// Native calls are Go's while the collector marks.
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function leaf(x,o){let s=x;for(let i=0;i<2;i++)s=(s*3+o.k)|0;return s}
+		function M(k){this.k=k}
+		M.prototype.m=function(x){let s=x;for(let i=0;i<2;i++)s=(s+this.k)|0;return s};
+		function caller(n){let t=0;const o=new M(5);for(let i=0;i<n;i++){t=(t+leaf(i,o)+o.m(i))|0;t^=t>>>3}return t}`
+	want := New(Config{})
+	defer want.Close()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wv, err := want.Run(compileForTest(t, `caller(300)`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(round string) {
+		t.Helper()
+		v, err := r.Run(compileForTest(t, `caller(300)`))
+		if err != nil || v.Number() != wv.Number() {
+			t.Fatalf("%s: caller(300) = %v, %v; interpreter %v", round, v, err, wv)
+		}
+	}
+	for i := 0; i < 4; i++ {
+		run("warm-up")
+	}
+	fnOf := func(name string) *bytecode.Function {
+		return r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure.fn
+	}
+	method := r.global.getOwn(r.atoms.intern("M")).value.Object().getOwn(r.atoms.intern("prototype")).value.Object().getOwn(r.atoms.intern("m")).value.Object().fn().closure.fn
+	caller := r.jit.cache[weak.Make(fnOf("caller"))]
+	if caller == nil || caller.ssa == nil || len(caller.ssaLinks) != 2 {
+		t.Fatalf("caller does not call leaf and m natively: %+v", caller)
+	}
+	code, reopts := caller.ssa, r.jit.reoptimized
+	for _, fn := range []*bytecode.Function{fnOf("leaf"), method} {
+		key := weak.Make(fn)
+		e := r.jit.cache[key]
+		if e == nil || e.ssa == nil || !slices.Contains(caller.ssaLinks, e.link) {
+			t.Fatalf("%s's link is not the one caller calls through: %+v", fn.Name, e)
+		}
+		l := e.link
+		if !r.jit.dropEntry(key, e) {
+			t.Fatalf("%s's code was not dropped", fn.Name)
+		}
+		if l.entry != 0 || r.jit.links[key] != l {
+			t.Fatalf("%s's link after its entry was dropped: %+v", fn.Name, l)
+		}
+	}
+	// The first run after has Go run each callee, which compiles it again.
+	run("after the drop")
+	for _, fn := range []*bytecode.Function{fnOf("leaf"), method} {
+		e := r.jit.cache[weak.Make(fn)]
+		if e == nil || e.ssa == nil || e.link.entry == 0 || !slices.Contains(caller.ssaLinks, e.link) {
+			t.Fatalf("%s was not compiled again under its link: %+v", fn.Name, e)
+		}
+	}
+	hosts := caller.ssaStats.hosts
+	leafIn, mIn := r.jit.cache[weak.Make(fnOf("leaf"))].link.in, r.jit.cache[weak.Make(method)].link.in
+	run("relinked")
+	if caller.ssa != code || r.jit.reoptimized != reopts {
+		t.Fatal("caller was compiled again for its callees' new code")
+	}
+	if n := caller.ssaStats.hosts - hosts; n != 0 {
+		t.Fatalf("caller left native code %d times calling its callees' new code", n)
+	}
+	if l, m := r.jit.cache[weak.Make(fnOf("leaf"))].link.in-leafIn, r.jit.cache[weak.Make(method)].link.in-mIn; l != 300 || m != 300 {
+		t.Fatalf("callees' new code called natively %d and %d times of 300", l, m)
+	}
+	// Once no code calls through a link and no entry owns it, it is gone.
+	callerKey, leafKey := weak.Make(fnOf("caller")), weak.Make(fnOf("leaf"))
+	if !r.jit.dropEntry(callerKey, caller) || !r.jit.dropEntry(leafKey, r.jit.cache[leafKey]) {
+		t.Fatal("code was not dropped")
+	}
+	if _, ok := r.jit.links[leafKey]; ok {
+		t.Fatal("leaf's link outlived its entry and its callers' code")
+	}
+	if l := r.jit.links[weak.Make(method)]; l == nil || l.refs != 0 || l.owner == nil {
+		t.Fatalf("m's link, owned by its entry, called through by no code: %+v", l)
+	}
+}
+
+// A native callee with no loop, which Go does not compile (LowerSSA) and
+// only native callers call natively (LowerSSAInline), dropped by the cache,
+// is compiled for them again at the first call Go then makes for them
+// (abi.ExitEnter, jitEnterCallee): its callers' code would otherwise leave
+// for Go at each call from then on, which had been most of EarleyBoyer's
+// slow runs (sc_assq, one_way_unify1_nboyer).
+func TestJITSSALooplessCalleeRecompiledAfterEviction(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	// leaf's captured binding keeps it from being inlined (jitInlinable).
+	setup := `var leaf=(function(){let k=3;return function leaf(x){x.c=(x.c+k)|0;return x.c}})();
+		function useLeaf(o,n){let t=0;for(let i=0;i<n;i++)t=(t+leaf(o))|0;return t}
+		var lo={c:0};`
+	want := New(Config{})
+	defer want.Close()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(round string) {
+		t.Helper()
+		wv, err := want.Run(compileForTest(t, `useLeaf(lo,300)`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		v, err := r.Run(compileForTest(t, `useLeaf(lo,300)`))
+		if err != nil || v.Number() != wv.Number() {
+			t.Fatalf("%s: useLeaf(lo,300) = %v, %v; interpreter %v", round, v, err, wv)
+		}
+	}
+	for i := 0; i < 4; i++ {
+		run("warm-up")
+	}
+	fnOf := func(name string) *bytecode.Function {
+		return r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure.fn
+	}
+	key := weak.Make(fnOf("leaf"))
+	e, caller := r.jit.cache[key], r.jit.cache[weak.Make(fnOf("useLeaf"))]
+	if e == nil || e.ssa == nil || !e.ssaCallee || caller == nil || !slices.Contains(caller.ssaLinks, e.link) {
+		t.Fatalf("leaf, with no loop, is not called natively: %+v; caller %+v", e, caller)
+	}
+	if !r.jit.dropEntry(key, e) {
+		t.Fatal("leaf's code was not dropped")
+	}
+	run("after the drop")
+	e = r.jit.cache[key]
+	if e == nil || e.ssa == nil || !e.ssaCallee || e.link.entry == 0 || !slices.Contains(caller.ssaLinks, e.link) {
+		t.Fatalf("leaf was not compiled again for its native callers: %+v", e)
+	}
+	hosts, in := caller.ssaStats.hosts, e.link.in
+	run("relinked")
+	if caller.ssaStats.hosts != hosts || e.link.in-in != 300 {
+		t.Fatalf("useLeaf left native code %d times, called leaf natively %d times of 300", caller.ssaStats.hosts-hosts, e.link.in-in)
+	}
+}
+
+// A function that does not compile for native callers alone is not
+// compiled again at every call Go makes for them (jitEnterCallee,
+// jitNativeCallee): the refusal is kept (calleeRefused), as LowerSSA's is
+// by its entry.
+func TestJITSSANativeCalleeRefusalKept(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	if _, err := r.Run(compileForTest(t, `function g(x){try{return x.a}catch(e){return 0}}g({a:1})`)); err != nil {
+		t.Fatal(err)
+	}
+	cl := r.global.getOwn(r.atoms.intern("g")).value.Object().fn().closure
+	if _, err := r.jitLower(cl.fn, jitLowerInline); err == nil {
+		t.Skip("g compiles for native callers now: the test needs one that does not")
+	}
+	if e := r.jitNativeCallee(cl); e != nil {
+		t.Fatalf("g compiled for native callers: %+v", e)
+	}
+	e := r.jit.cache[weak.Make(cl.fn)]
+	if e == nil || e.ssa != nil || !e.calleeRefused {
+		t.Fatalf("g's refusal for native callers was not kept: %+v", e)
 	}
 }
 
@@ -6642,7 +6823,7 @@ func TestJITSSAEntersCalleesWithoutCode(t *testing.T) {
 			e.entrySlow, e.ssaStats = false, jitSSAStats{}
 			for _, x := range e.nativeCalls {
 				if ce := r.jit.cache[weak.Make(x.cl.fn)]; ce != nil {
-					ce.notNative, ce.nativeEntry, ce.nativeRetry = true, 0, 0
+					ce.notNative, ce.link.entry, ce.nativeRetry = true, 0, 0
 				}
 			}
 			entered := r.jit.entered
@@ -7106,7 +7287,7 @@ func TestJITSSAStringAddCallsGo(t *testing.T) {
 			hosts = e.ssaStats.hosts
 		}
 		if e := r.jit.cache[weak.Make(tree.fn)]; e != nil {
-			out, in = uint64(e.nativeOut), uint64(e.nativeIn)
+			out, in = uint64(e.nativeOut), uint64(e.link.in)
 		}
 		gv, err := r.Run(compileForTest(t, src))
 		if err != nil {
@@ -7134,7 +7315,7 @@ func TestJITSSAStringAddCallsGo(t *testing.T) {
 			if e == nil {
 				t.Fatal("tree has no entry")
 			}
-			calls := uint64(e.nativeIn) - in
+			calls := uint64(e.link.in) - in
 			if e.ssa == nil || e.notNative || calls < 1000 {
 				t.Fatalf("tree is not called natively (%d calls): %+v", calls, e)
 			}
@@ -8778,7 +8959,7 @@ func TestJITSSAPollsAsCallsOfGo(t *testing.T) {
 			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
 		}
 		if i == 3 {
-			if e := entry("leaf"); e == nil || e.ssa == nil || e.nativeIn == 0 {
+			if e := entry("leaf"); e == nil || e.ssa == nil || e.link.in == 0 {
 				t.Fatalf("leaf was not called natively: %+v", e)
 			}
 			if r.jit.budgets == budgets {
@@ -8916,9 +9097,9 @@ func TestJITSSACharCodeAtInNativeCallees(t *testing.T) {
 			}
 			// codes, with a loop, is called natively, in a context of its own.
 			cc := r.global.getOwn(r.atoms.intern("codes")).value.Object().fn().closure
-			if e := r.jit.cache[weak.Make(cc.fn)]; e == nil || e.ssa == nil || e.notNative || e.nativeIn == 0 {
+			if e := r.jit.cache[weak.Make(cc.fn)]; e == nil || e.ssa == nil || e.notNative || e.link.in == 0 {
 				pe := r.jit.cache[weak.Make(r.global.getOwn(r.atoms.intern("pairs")).value.Object().fn().closure.fn)]
-				t.Fatalf("codes was not called natively: notNative %v nativeIn %d entries %d; pairs %v", e.notNative, e.nativeIn, e.ssaStats.entries, func() string {
+				t.Fatalf("codes was not called natively: notNative %v nativeIn %d entries %d; pairs %v", e.notNative, e.link.in, e.ssaStats.entries, func() string {
 					if pe == nil {
 						return "no entry"
 					}
@@ -9222,20 +9403,20 @@ func TestJITSSAInlinedNestedForwardingConstructions(t *testing.T) {
 // runs. A speculation that failed, or code that leaves too often, is
 // compiled again at once.
 func TestJITReoptDue(t *testing.T) {
-	e := &jitEntry{reoptBudget: 25}
+	e := &jitEntry{reoptBudget: 25, link: &jitLink{}}
 	if e.reoptDue() {
 		t.Fatal("due with nothing to compile again for")
 	}
 	e.inlineReopt = true
-	e.ssaStats.entries, e.ssaStats.hosts, e.nativeIn = 10, 10, 4
+	e.ssaStats.entries, e.ssaStats.hosts, e.link.in = 10, 10, 4
 	if e.reoptDue() {
 		t.Fatal("due after 24 stretches of 25")
 	}
-	e.nativeIn++
+	e.link.in++
 	if !e.reoptDue() {
 		t.Fatal("not due after 25 stretches")
 	}
-	e.ssaStats.entries, e.ssaStats.hosts, e.nativeIn = 1, 0, 0
+	e.ssaStats.entries, e.ssaStats.hosts, e.link.in = 1, 0, 0
 	e.ssaStats.work = 25*jitReoptPer*jitReoptWork - 1
 	if e.reoptDue() {
 		t.Fatal("due before its work")
@@ -9245,14 +9426,14 @@ func TestJITReoptDue(t *testing.T) {
 		t.Fatal("not due after its work")
 	}
 	for _, f := range []func(*jitEntry){func(e *jitEntry) { e.reopt = true }, func(e *jitEntry) { e.unwindReopt = true }} {
-		e := &jitEntry{reoptBudget: 25}
+		e := &jitEntry{reoptBudget: 25, link: &jitLink{}}
 		f(e)
 		if !e.reoptDue() {
 			t.Fatalf("not due at once: %+v", e)
 		}
 	}
 	for _, f := range []func(*jitEntry){func(e *jitEntry) { e.polyReopt = true }, func(e *jitEntry) { e.upgradeReopt = true }} {
-		e := &jitEntry{reoptBudget: 25}
+		e := &jitEntry{reoptBudget: 25, link: &jitLink{}}
 		f(e)
 		if e.reoptDue() {
 			t.Fatalf("due at once: %+v", e)
@@ -9670,7 +9851,7 @@ func TestJITExitsWhileMarkingCountNothing(t *testing.T) {
 	defer func(was func() bool) { jitMarking = was }(jitMarking)
 	marking := true
 	jitMarking = func() bool { return marking }
-	e := &jitEntry{inlines: []jitInline{{pc: 3}}, nativeIn: 1}
+	e := &jitEntry{inlines: []jitInline{{pc: 3}}, link: &jitLink{in: 1}}
 	for range 4 * jitInlineExits {
 		r.jitInlineLeft(e, 3)
 	}
@@ -9708,7 +9889,7 @@ func TestJITPoolLookupsAllocateNothing(t *testing.T) {
 	}
 	pool := new(abi.ObjectPool)
 	e := &jitEntry{inlines: []jitInline{{pc: int32(pc), cl: ctor.fn().closure, obj: ctor, pool: pool}},
-		nativeCalls: []jitInline{{pc: int32(pc) + 1}}}
+		nativeCalls: []jitInline{{pc: int32(pc) + 1}}, link: &jitLink{}}
 	r.jit.cache[weak.Make(cl.fn)] = e
 	l := &jitNativeLevel{cl: cl, pc: uint64(pc), kind: abi.ExitHost}
 	if !r.jitPoolEmptied(l) {
@@ -9911,14 +10092,14 @@ func TestJITSSAUnwoundCompilesAgainFirst(t *testing.T) {
 		t.Fatal("g has no code")
 	}
 	// An entry of its own, with code, as a callee's.
-	e := &jitEntry{ssa: g.ssa}
+	e := &jitEntry{ssa: g.ssa, link: &jitLink{}}
 	leave := func() {
 		// One call in two leaves, its exits having learned a shape
 		// (jitLearning; TestJITSSAUnwoundCompiledAgainOnlyForWhatItLearned
 		// has one that learns nothing).
 		e.polyPending = true
 		for range jitUnwindProbe {
-			e.nativeIn += 2
+			e.link.in += 2
 			r.jitUnwound(e)
 		}
 	}
