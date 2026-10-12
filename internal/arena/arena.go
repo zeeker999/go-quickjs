@@ -23,12 +23,23 @@ type Arena[T any] struct {
 	// keepBig makes a request bigger than a chunk a chunk of its own that
 	// the arena keeps (KeepBig).
 	keepBig bool
+	// recent are how many slots each of the last jobs used, the latest at
+	// next, and jobs how many there have been, up to recentJobs: what an
+	// arena that keeps big requests keeps chunks for (trim).
+	recent [recentJobs]int
+	next   int
+	jobs   int
 }
+
+// recentJobs is how many jobs an arena that keeps big requests keeps
+// chunks for.
+const recentJobs = 16
 
 // KeepBig has the arena keep a request bigger than its next chunk as a
 // chunk of its own, for the next job to cut from, rather than hand it out
 // and forget it: for jobs that make a few big tables each time, as a
-// compile does, at the cost of keeping memory as big as the biggest job's.
+// compile does, at the cost of keeping memory as big as the biggest of
+// the recent jobs' (Rewind).
 func (a *Arena[T]) KeepBig() { a.keepBig = true }
 
 // firstChunk is the length of an arena's first chunk.
@@ -94,15 +105,55 @@ func (a *Arena[T]) Append(s []T, v T) []T {
 
 // Rewind takes back everything the arena handed out, clearing it, and
 // keeps the chunks for what is made next. Nothing made before may be used
-// after.
+// after. An arena that keeps big requests (KeepBig) keeps chunks for as
+// much as the recent jobs before this one used, and lets the rest go
+// (trim).
 func (a *Arena[T]) Rewind() {
+	used := 0
 	for i := 0; i < a.cur && i < len(a.chunks); i++ {
 		clear(a.chunks[i][:a.used[i]])
+		used += a.used[i]
 	}
 	if a.cur < len(a.chunks) {
 		clear(a.chunks[a.cur][:a.off])
+		used += a.off
 	}
 	a.cur, a.off = 0, 0
+	if a.keepBig {
+		a.trim(used)
+	}
+}
+
+// trim notes a job that used n slots, and, if it used more than any of the
+// recent jobs before it, drops the chunks past those they needed: a
+// compile of one big function gives its tables back as it ends, where
+// they had been kept as long as the runtime -- RegExp's run blocks, of
+// hundreds of captured bindings, left a hundred megabytes live, which the
+// collector then marked at every cycle. Jobs as big that come often keep
+// their chunks: one among the recent ones needed as much.
+func (a *Arena[T]) trim(n int) {
+	keep, known := 0, a.jobs > 0
+	for _, m := range a.recent[:min(a.jobs, recentJobs)] {
+		keep = max(keep, m)
+	}
+	a.recent[a.next] = n
+	a.next = (a.next + 1) % recentJobs
+	a.jobs = min(a.jobs+1, recentJobs)
+	if !known || n <= keep {
+		return
+	}
+	total := 0
+	for i, c := range a.chunks {
+		if total >= keep {
+			clear(a.chunks[i:])
+			a.chunks = a.chunks[:i]
+			break
+		}
+		total += len(c)
+	}
+	if len(a.used) > len(a.chunks) {
+		a.used = a.used[:len(a.chunks)]
+	}
 }
 
 // Forget takes back everything the arena handed out, as Rewind does, but
