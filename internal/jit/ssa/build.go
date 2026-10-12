@@ -165,18 +165,20 @@ type CallSite struct {
 	Callee, Closure, Entry, Count uintptr
 	Argc                          int
 	Method                        bool
-	Params, LocalCount, MaxStack  int
-	ThisSlot                      int
-	Coerce                        bool
-	Pool                          uintptr
-	ProtoIndex                    int
-	ProtoKey                      uint32
-	Alloc                         bool
-	Receiver                      bool
-	Via                           uintptr
-	Push                          bool
-	Protos                        [2]Holder
-	Pop                           bool
+	// New marks a construction Go makes (GoCall at a new).
+	New                          bool
+	Params, LocalCount, MaxStack int
+	ThisSlot                     int
+	Coerce                       bool
+	Pool                         uintptr
+	ProtoIndex                   int
+	ProtoKey                     uint32
+	Alloc                        bool
+	Receiver                     bool
+	Via                          uintptr
+	Push                         bool
+	Protos                       [2]Holder
+	Pop                          bool
 	// Upvalues is the address of the callee closure's captured bindings'
 	// cells, its context's (abi.Context.Upvalues), or 0 for none.
 	Upvalues uintptr
@@ -732,6 +734,14 @@ func referenceReads(p *ir.Program, fb Feedback) *ir.Program {
 		return p
 	}
 	return q
+}
+
+// goesOn reports whether the instruction at pc is a call Go makes from
+// native code, and nothing else (GoCall): native code goes on after it as
+// after any other value, in the same block, with no entry after it.
+func (b *builder) goesOn(pc int) bool {
+	calls := b.calls[pc]
+	return len(calls) == 1 && calls[0].Go == GoCall
 }
 
 // KeepFeedback is Feedback that bounds the keep cells a build takes
@@ -1401,7 +1411,7 @@ func (b *builder) plan() error {
 				entries[in.Target] = entries[in.Target] || b.wantsEntry(in.Target)
 			}
 		case ir.Host, ir.Call:
-			if calls := b.calls[pc]; len(calls) == 1 && calls[0].Go == GoCall {
+			if b.goesOn(pc) {
 				// A call Go makes goes on natively: Go leaves it only for
 				// a throw, the runtime stopping, or the code to be compiled
 				// again -- then the interpreter runs on to the next loop
@@ -1414,7 +1424,7 @@ func (b *builder) plan() error {
 			return fmt.Errorf("%w: %d at pc %d", ErrUnsupported, in.Op, pc)
 		}
 		switch {
-		case in.Op == ir.Jump || in.Op == ir.Branch || in.Op == ir.Return || b.host(pc):
+		case in.Op == ir.Jump || in.Op == ir.Branch || in.Op == ir.Return || b.host(pc) && !b.goesOn(pc):
 			leaders[pc+1] = true
 		}
 	}
@@ -1442,7 +1452,7 @@ func (b *builder) plan() error {
 			end = starts[i+1] - 1
 		}
 		for q := pc; q <= end; q++ {
-			if op := p.Code[q].Op; op == ir.Jump || op == ir.Branch || op == ir.Return || b.host(q) {
+			if op := p.Code[q].Op; op == ir.Jump || op == ir.Branch || op == ir.Return || b.host(q) && !b.goesOn(q) {
 				end = q
 				break
 			}

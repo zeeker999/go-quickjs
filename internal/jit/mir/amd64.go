@@ -847,7 +847,7 @@ func (c *compiler) goCall(v *ssa.Value, site *ssa.CallSite, guard func(amd64.Con
 		c.a.MovImm(scratchA, uint64(v.State.Depth))
 		c.a.Store(regCtx, abi.OffExitDepth, scratchA)
 	}
-	c.callGo(v, uint64(site.Go), v.Index)
+	c.callGo(v, goOpWord(site), v.Index)
 }
 
 // callGo is a call of Go, op, its operands in the context's GoArgs: what

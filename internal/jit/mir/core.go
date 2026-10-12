@@ -1277,3 +1277,20 @@ func (c *core) exitSource(s *ssa.Value) (abi.ExitLoc, bool) {
 	}
 	return abi.ExitLoc{Kind: abi.ExitSpill, N: int32(l.spill)}, true
 }
+
+// goOpWord is what a call of Go stores as its operation (abi.Context's
+// GoOp): a call's with its arguments' count and kind, which Go would
+// otherwise read from the bytecode.
+func goOpWord(site *ssa.CallSite) uint64 {
+	op := uint64(site.Go)
+	if site.Go == ssa.GoCall {
+		op |= uint64(site.Argc) << abi.GoOpArgcShift
+		switch {
+		case site.Method:
+			op |= abi.GoCallMethod << abi.GoOpKindShift
+		case site.New:
+			op |= abi.GoCallNew << abi.GoOpKindShift
+		}
+	}
+	return op
+}

@@ -1531,7 +1531,7 @@ func (fb *jitFeedback) NativeCalls(pc int) []ssa.CallSite {
 			n++
 		}
 		if (call.Op == bytecode.OpCall || call.Op == bytecode.OpCallMethod || call.Op == bytecode.OpNew) && n <= abi.MaxGoArgs {
-			sites = append(sites, ssa.CallSite{Go: ssa.GoCall, Argc: int(call.A), Method: call.Op == bytecode.OpCallMethod, ThisSlot: -1})
+			sites = append(sites, ssa.CallSite{Go: ssa.GoCall, Argc: int(call.A), Method: call.Op == bytecode.OpCallMethod, New: call.Op == bytecode.OpNew, ThisSlot: -1})
 		}
 	}
 	return sites
@@ -1787,14 +1787,14 @@ func jitHostCall(ctx *abi.Context) bool {
 	if r == nil || ctx.GoKeep >= abi.MaxKeeps {
 		return false
 	}
-	if ssa.GoOp(ctx.GoOp) == ssa.GoCall && jitGoCallWork == nil {
+	if ssa.GoOp(ctx.GoOp&0xff) == ssa.GoCall && jitGoCallWork == nil {
 		// The most frequent, asked first.
 		return r.jitGoCall(ctx)
 	}
 	if jitGoCallWork != nil {
 		jitGoCallWork()
 	}
-	switch ssa.GoOp(ctx.GoOp) {
+	switch ssa.GoOp(ctx.GoOp & 0xff) {
 	case ssa.GoAdd:
 		a, b := jitGoArg(ctx, 0), jitGoArg(ctx, 1)
 		// Primitives, and nothing that throws: an object's conversion may
@@ -1849,7 +1849,7 @@ func jitHostCall(ctx *abi.Context) bool {
 		// result's in the first's place.
 		x, y := math.Float64frombits(ctx.GoArgs[0].Num), math.Float64frombits(ctx.GoArgs[1].Num)
 		var z float64
-		switch ssa.GoOp(ctx.GoOp) {
+		switch ssa.GoOp(ctx.GoOp & 0xff) {
 		case ssa.GoPow:
 			z = jsPow(x, y)
 		case ssa.GoMath:
@@ -1966,18 +1966,7 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	// The built-in's frame goes where native callees' were made.
 	s.levels.serial = 0
 	pc, depth := int(ctx.ExitPC), int(ctx.ExitDepth)
-	if pc >= len(f.cl.fn.Code) {
-		return false
-	}
-	in := f.cl.fn.Code[pc]
-	n := int(in.A) + 1
-	switch in.Op {
-	case bytecode.OpCallMethod:
-		n++
-	case bytecode.OpCall, bytecode.OpNew:
-	default:
-		return false
-	}
+	in, n := jitGoCallInstr(ctx.GoOp)
 	top := r.stackTop
 	if n > abi.MaxGoArgs || depth < n || top+n > len(r.stack) {
 		return false
@@ -2071,20 +2060,8 @@ func (r *Runtime) jitGoCallNested(ctx *abi.Context, idx int) bool {
 	if root < 0 || ctxs[root].Live != 0 || root >= len(s.goRuns) || s.goRuns[root].f == nil {
 		return false
 	}
-	cl := (*closure)(ctx.Closure)
 	pc, depth := int(ctx.ExitPC), int(ctx.ExitDepth)
-	if cl == nil || pc >= len(cl.fn.Code) {
-		return false
-	}
-	in := cl.fn.Code[pc]
-	n := int(in.A) + 1
-	switch in.Op {
-	case bytecode.OpCallMethod:
-		n++
-	case bytecode.OpCall, bytecode.OpNew:
-	default:
-		return false
-	}
+	in, n := jitGoCallInstr(ctx.GoOp)
 	top := r.stackTop
 	if n > abi.MaxGoArgs || depth < n || top+n > len(r.stack) {
 		return false
@@ -2359,6 +2336,24 @@ func (fb *jitFeedback) KeepLimit() int { return fb.keepLimit }
 
 // GoCalls is ssa.GoFeedback's: the VM answers calls of Go (jitHostCall).
 func (fb *jitFeedback) GoCalls() bool { return true }
+
+// jitGoCallInstr is the call a call of Go makes (abi.Context's GoOp, which
+// native code writes): its instruction, as the bytecode has it at the
+// call, and how many operands it takes from the stack. Read from the
+// bytecode, it was three loads, one after another, at every call.
+func jitGoCallInstr(op uint64) (bytecode.Instr, int) {
+	argc := uint32(op>>abi.GoOpArgcShift) & 0xff
+	in := bytecode.Instr{Op: bytecode.OpCall, A: argc}
+	n := int(argc) + 1
+	switch op >> abi.GoOpKindShift & 0xff {
+	case abi.GoCallMethod:
+		in.Op = bytecode.OpCallMethod
+		n++
+	case abi.GoCallNew:
+		in.Op = bytecode.OpNew
+	}
+	return in, n
+}
 
 // jitCallUnsettled reports whether jitCallSeen has anything to note of a
 // call of Go at pc: not, once the call is settled as one Go makes

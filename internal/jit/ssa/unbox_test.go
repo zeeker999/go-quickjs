@@ -435,8 +435,9 @@ func TestOptimizeUnboxesLongPhiChains(t *testing.T) {
 // the next loop header, where there is one, as from V8's deoptimizations.
 // An entry after each had been a join of every live value, a block, and a
 // header's loads: a third of the compile of RegExp's run blocks, which
-// call built-ins and little else. Code that asks for entries everywhere
-// (EntryFeedback) still has one after each.
+// call built-ins and little else. Nor does it end its block: it is a value
+// as any other is. Code that asks for entries everywhere (EntryFeedback)
+// still has one after each.
 func TestBuildNoEntriesAfterCallsOfGo(t *testing.T) {
 	src := "function f(g,n){let s=0;for(let i=0;i<n;i++){g();g();g();g();s=s+i}return s}"
 	p, err := jitcompile.LowerSSA(compiledFunctionForTest(t, src))
@@ -447,17 +448,23 @@ func TestBuildNoEntriesAfterCallsOfGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	calls := 0
+	calls, blocks := 0, 0
 	for _, b := range f.Blocks {
+		in := false
 		for _, v := range b.Values {
 			if v.Op == OpCall && len(v.Calls) == 1 && v.Calls[0].Go == GoCall {
 				calls++
+				in = true
 			}
 		}
+		if in {
+			blocks++
+		}
 	}
-	// The function's start and the loop's header.
-	if calls != 4 || len(f.Entries) != 2 {
-		t.Fatalf("%d calls of Go, %d entries, want 4 and 2", calls, len(f.Entries))
+	// The function's start and the loop's header; the four calls in one
+	// block, as any other values are.
+	if calls != 4 || len(f.Entries) != 2 || blocks != 1 {
+		t.Fatalf("%d calls of Go in %d blocks, %d entries, want 4 in 1 and 2", calls, blocks, len(f.Entries))
 	}
 	Optimize(f)
 	if err := Check(f); err != nil {

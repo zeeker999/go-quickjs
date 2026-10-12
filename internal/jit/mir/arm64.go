@@ -2211,7 +2211,7 @@ func (c *a64Compiler) goCall(v *ssa.Value, site *ssa.CallSite, guard func(arm64.
 		c.a.MovImm(a64A, uint64(v.State.Depth))
 		c.a.Store(a64Ctx, abi.OffExitDepth, a64A)
 	}
-	c.callGo(v, uint64(site.Go), v.Index)
+	c.callGo(v, goOpWord(site), v.Index)
 }
 
 // callGo is a call of Go, as amd64's is.

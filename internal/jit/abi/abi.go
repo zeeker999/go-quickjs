@@ -176,7 +176,10 @@ type Context struct {
 	// (ssa's keeps) -- and GoResume is where the code goes on. Go writes
 	// the result to Keep[GoKeep], with its write barrier, and GoStatus 0,
 	// or 1 when it did nothing: the code then leaves for Go to make the
-	// operation. Host is the runtime the context belongs to.
+	// operation. Host is the runtime the context belongs to. For a call
+	// (GoOpCall), GoOp's low byte is the operation, the next its
+	// arguments' count, and the next its kind (GoCallMethod, GoCallNew):
+	// what Go would otherwise read from the bytecode at the call.
 	GoOp, GoKeep, GoStatus uint64
 	GoResume               uintptr
 	// GoSite is where a call of Go that saves every register goes on, in
@@ -534,3 +537,13 @@ const NumberLimit = 0xFFF8000000000000
 
 // IsNumber reports whether a number word holds a number.
 func IsNumber(word uint64) bool { return word < NumberLimit }
+
+// A call's GoOp (Context.GoOp): the operation in its low byte, the
+// arguments' count in the next, the kind in the next -- a method call's,
+// with its receiver below its function, or a construction's.
+const (
+	GoOpArgcShift = 8
+	GoOpKindShift = 16
+	GoCallMethod  = 1
+	GoCallNew     = 2
+)
