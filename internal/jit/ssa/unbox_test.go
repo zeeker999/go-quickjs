@@ -379,3 +379,45 @@ func TestBuildEntriesLeaveCapturedBindingsInCells(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A chain of phis that only merge -- a loop's numbers at the entry after
+// each of hundreds of calls of Go -- is unboxed when the last of them has
+// an unboxed use: the evidence flows back through every one (unboxPhis's
+// worklist), where a pass over the phis until none grew took a pass a
+// phi.
+func TestOptimizeUnboxesLongPhiChains(t *testing.T) {
+	var src strings.Builder
+	src.WriteString("function f(g,n){let s=0;for(let i=0;i<n;i++){")
+	for range 300 {
+		src.WriteString("g();")
+	}
+	src.WriteString("s=s+i}return s}")
+	p, err := jitcompile.LowerSSA(compiledFunctionForTest(t, src.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := BuildWith(p, goCallsFeedback{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	Optimize(f)
+	if err := Check(f); err != nil {
+		t.Fatal(err)
+	}
+	tagged, float := 0, 0
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			switch {
+			case v.Op == OpPhi && v.Type == Tagged:
+				tagged++
+			case v.Op == OpPhi && v.Type == Float64:
+				float++
+			}
+		}
+	}
+	// n's, s's and i's at each of the 301 joins unboxed; g's, a function,
+	// tagged.
+	if tagged > 301 || float < 900 {
+		t.Fatalf("%d tagged and %d float phis, want g's 301 tagged and the numbers' 900 or more float", tagged, float)
+	}
+}

@@ -311,26 +311,31 @@ func unboxPhis(f *Func) bool {
 				}
 			}
 		}
+		// Evidence flows from a candidate with it to the candidates it
+		// merges, by a worklist: a pass over the phis until none grew took
+		// a pass for each phi of a chain, and a function of hundreds of
+		// calls, a phi of its loop's counter at the entry after each, took
+		// hundreds of passes -- RegExp's runBlock11 a fifth of its compile.
 		clear(boxed)
+		stack := guarded[:0]
 		for _, v := range phis {
-			if cand[v.ID] {
-				boxed[v.ID] = unboxedUse[v.ID]
+			if cand[v.ID] && unboxedUse[v.ID] {
+				boxed[v.ID] = true
+				stack = append(stack, v)
 			}
 		}
-		for grew := true; grew; {
-			grew = false
-			for _, v := range phis {
-				if !cand[v.ID] || !boxed[v.ID] {
-					continue
-				}
-				for _, a := range v.Args {
-					if isCand(a) && !boxed[a.ID] {
-						boxed[a.ID] = true
-						grew = true
-					}
+		for len(stack) != 0 {
+			v := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			for _, a := range v.Args {
+				if isCand(a) && !boxed[a.ID] {
+					boxed[a.ID] = true
+					stack = append(stack, a)
 				}
 			}
 		}
+		guarded = stack[:0]
+		f.scr().work = guarded
 		for _, v := range phis {
 			if cand[v.ID] && !boxed[v.ID] {
 				cand[v.ID] = false
