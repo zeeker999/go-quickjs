@@ -1012,7 +1012,7 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 			bytecode.OpCallMethod, bytecode.OpGetGlobal, bytecode.OpSetGlobal, bytecode.OpSetGlobalStrict,
 			bytecode.OpGetPropThis, bytecode.OpSetIndex, bytecode.OpNewArray,
 			bytecode.OpGetIndex, bytecode.OpNew, bytecode.OpPushConst, bytecode.OpInstanceOf, bytecode.OpTypeOf,
-			bytecode.OpCheckGlobalRef, bytecode.OpAssertResolved, bytecode.OpNewObject, bytecode.OpDefineField,
+			bytecode.OpCheckGlobalRef, bytecode.OpAssertResolved, bytecode.OpNewObject, bytecode.OpNewRegExp, bytecode.OpDefineField,
 			bytecode.OpPushEmptyString, bytecode.OpGetUpvalue, bytecode.OpGetUpvalueCheck, bytecode.OpSetUpvalue,
 			bytecode.OpInitUpvalue, bytecode.OpSetUpvalueCheck:
 		default:
@@ -1084,6 +1084,8 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 			sp--
 			f.cl.upvalues[in.A].set(stack[sp])
 			continue
+		case bytecode.OpNewRegExp:
+			v, err = r.newRegExpLiteral(&f.cl.fn.Constants[in.A])
 		case bytecode.OpNewObject:
 			// As the interpreter makes a literal's object.
 			o := newLiteralObject(r.proto.object, ClassObject, int(in.A))

@@ -273,6 +273,35 @@ func TestJITLexicalGlobals(t *testing.T) {
 	}
 }
 
+// A regular expression literal's object is taken natively from a pool of
+// RegExps of its pattern the VM fills (jitLiteralAt): each evaluation a
+// fresh one, its lastIndex its own and 0, its prototype RegExp.prototype,
+// past many refills of the pool. Every answer is the interpreter's.
+func TestJITSSARegExpLiterals(t *testing.T) {
+	for _, source := range []string{
+		`function f(n){let a=[];for(let i=0;i<n;i++)a.push(/x/g);let d=0;for(let i=1;i<n;i++)if(a[i]!==a[i-1])d++;return d}f(1000)`,
+		`function f(n){let c=0;for(let i=0;i<n;i++){let r=/b/g;r.test('abb');c+=r.lastIndex}return c}f(1000)`,
+		`function f(n){let c=0;for(let i=0;i<n;i++){let r=/b/g;if(i%2)r.lastIndex=2;c+=r.test('abb')?r.lastIndex:-1}return c}f(1000)`,
+		`function f(n){let c=0;for(let i=0;i<n;i++){let r=/(\d+)-(\d+)/;let m=r.exec('x'+i+'-'+(i*2));c+=m[1]*1+m[2]*1+(Object.getPrototypeOf(r)===RegExp.prototype?1:0)}return c}f(1000)`,
+		`function f(s,n){let c=0;for(let i=0;i<n;i++)c+=s.replace(/b+/g,'x').length+(/^a/.test(s)?1:0);return c}f('abbc',1000)`,
+	} {
+		want := New(Config{})
+		wv, err := want.Run(compileForTest(t, source))
+		want.Close()
+		if err != nil {
+			t.Fatalf("interpreter: %v; %s", err, source)
+		}
+		r := jitRuntimeForTest(t, Config{JIT: true})
+		v, err := r.Run(compileForTest(t, source))
+		if err != nil || v.Number() != wv.Number() {
+			t.Fatalf("JIT %v, %v; interpreter %v; %s", v, err, wv, source)
+		}
+		if r.jit == nil || r.jit.ssaEntries == 0 || r.jit.hosts >= 100 {
+			t.Fatalf("not native: %+v; %s", r.JITStats(), source)
+		}
+	}
+}
+
 func TestJITGlobalCacheOwner(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	if _, err := r.Run(compileForTest(t, `globalThis.g=3;function f(a){return g+a[0]}f([1])`)); err != nil {

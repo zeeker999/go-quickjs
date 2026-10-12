@@ -142,7 +142,7 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 		effects[pc] = e
 		if in.Op == bytecode.OpNew && (!m.ssa || !SSAConstruct) || (in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict ||
 			in.Op == bytecode.OpCheckGlobalRef || in.Op == bytecode.OpAssertResolved ||
-			in.Op == bytecode.OpNewObject || in.Op == bytecode.OpDefineField || in.Op == bytecode.OpPushEmptyString ||
+			in.Op == bytecode.OpNewObject || in.Op == bytecode.OpNewRegExp || in.Op == bytecode.OpDefineField || in.Op == bytecode.OpPushEmptyString ||
 			in.Op == bytecode.OpSetUpvalue || in.Op == bytecode.OpSetUpvalueCheck || in.Op == bytecode.OpInitUpvalue) && !m.ssa {
 			// The new pipeline constructs natively (mir's native calls),
 			// and assigns to a global natively where the VM knows it, Go
@@ -172,7 +172,7 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 			// throws it, as V8's code calls the runtime to throw.
 			return nil, refuse(pc, "unsupported opcode "+in.Op.String())
 		}
-		host = host || str || in.Op == bytecode.OpThrow || in.Op == bytecode.OpInstanceOf || in.Op == bytecode.OpTypeOf || in.Op == bytecode.OpApplyArguments || in.Op == bytecode.OpNew || in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict || in.Op == bytecode.OpCheckGlobalRef || in.Op == bytecode.OpNewObject || in.Op == bytecode.OpDefineField || in.Op == bytecode.OpPushEmptyString || in.Op == bytecode.OpNewArray || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
+		host = host || str || in.Op == bytecode.OpThrow || in.Op == bytecode.OpInstanceOf || in.Op == bytecode.OpTypeOf || in.Op == bytecode.OpApplyArguments || in.Op == bytecode.OpNew || in.Op == bytecode.OpSetGlobal || in.Op == bytecode.OpSetGlobalStrict || in.Op == bytecode.OpCheckGlobalRef || in.Op == bytecode.OpNewObject || in.Op == bytecode.OpNewRegExp || in.Op == bytecode.OpDefineField || in.Op == bytecode.OpPushEmptyString || in.Op == bytecode.OpNewArray || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod || in.Op == bytecode.OpGetGlobal || in.Op == bytecode.OpGetPropThis || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 		property = property || in.Op == bytecode.OpPushThis || in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 		this = this || in.Op == bytecode.OpPushThis
 		raw := uint32(in.Op)
@@ -835,6 +835,11 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 			return bad("invalid literal site")
 		}
 		return effect{delta: 1}, nil
+	case bytecode.OpNewRegExp:
+		if uint64(in.A) >= uint64(len(fn.Constants)) || fn.Constants[in.A].Kind != bytecode.ConstRegExp {
+			return bad("invalid regular expression literal")
+		}
+		return effect{delta: 1}, nil
 	case bytecode.OpNop, bytecode.OpEndParams, bytecode.OpClearLocal:
 		return effect{}, nil
 	case bytecode.OpPushConst:
@@ -1046,7 +1051,9 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this bool) ir.Instr
 		return ir.Instruction{Op: ir.BindingCheck, Dest: sp, Key: in.A}
 	case bytecode.OpAssertResolved:
 		return ir.Instruction{Op: ir.Resolved, Left: ir.Slot(sp - 2), Right: top, Dest: sp - 2, Key: in.A}
-	case bytecode.OpNewObject:
+	case bytecode.OpNewObject, bytecode.OpNewRegExp:
+		// A regular expression literal's object is made as an object
+		// literal's is, from a pool the VM fills with its pattern's.
 		return ir.Instruction{Op: ir.ObjectLiteral, Dest: sp}
 	case bytecode.OpDefineField:
 		return ir.Instruction{Op: ir.FieldDefine, Left: ir.Slot(sp - 2), Right: top, Key: in.A}

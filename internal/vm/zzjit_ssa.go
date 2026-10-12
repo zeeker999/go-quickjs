@@ -643,6 +643,9 @@ type jitLiteral struct {
 	// for n elements and none yet.
 	array bool
 	n     int
+	// lit is a regular expression literal's pattern (new_regexp), whose
+	// objects are its RegExps.
+	lit *bytecode.Constant
 }
 
 // jitLiteralAt is e's literal at pc, made for cl's site if it has none, or
@@ -658,6 +661,21 @@ func (r *Runtime) jitLiteralAt(e *jitEntry, cl *closure, pc int) *jitLiteral {
 		e.literals = append(e.literals, jitLiteral{pc: int32(pc), pool: new(abi.ObjectPool), array: true, n: int(in.A)})
 		l := &e.literals[len(e.literals)-1]
 		l.pool.Source = unsafe.Pointer(&jitPoolSource{array: true, n: l.n})
+		r.jitFillLiteral(l)
+		return l
+	}
+	if in.Op == bytecode.OpNewRegExp && int(in.A) < len(cl.fn.Constants) {
+		// Fresh RegExps of the pattern, each with its lastIndex 0, which
+		// nothing sees before the code takes one: what the literal makes
+		// at each evaluation. A pattern that does not compile has Go
+		// throw.
+		lit := &cl.fn.Constants[in.A]
+		if _, err := r.newRegExpLiteral(lit); err != nil {
+			return nil
+		}
+		e.literals = append(e.literals, jitLiteral{pc: int32(pc), pool: new(abi.ObjectPool), lit: lit})
+		l := &e.literals[len(e.literals)-1]
+		l.pool.Source = unsafe.Pointer(&jitPoolSource{lit: lit})
 		r.jitFillLiteral(l)
 		return l
 	}
@@ -686,6 +704,18 @@ func (r *Runtime) jitFillLiteral(l *jitLiteral) {
 		pool.Size = abi.PoolSize
 	}
 	clear(pool.Objects[:])
+	if l.lit != nil {
+		for i := range int(pool.Size) {
+			v, err := r.newRegExpLiteral(l.lit)
+			if err != nil {
+				pool.Count = 0
+				return
+			}
+			pool.Objects[i] = unsafe.Pointer(v.Object())
+		}
+		pool.Count, pool.Proto = pool.Size, unsafe.Pointer(r.proto.regexp)
+		return
+	}
 	for i := range int(pool.Size) {
 		if l.array {
 			a := newArrayObject(r.proto.array, l.n)
@@ -3126,6 +3156,7 @@ type jitPoolSource struct {
 	root  *shape
 	n     int
 	array bool
+	lit   *bytecode.Constant
 }
 
 // jitRefillPool fills pool again, run out, with more objects (ssa's
@@ -3141,7 +3172,7 @@ func (r *Runtime) jitRefillPool(pool *abi.ObjectPool) bool {
 	if src.ctor != nil {
 		r.jitFillPool(pool, src.ctor)
 	} else {
-		r.jitFillLiteral(&jitLiteral{root: src.root, pool: pool, n: src.n, array: src.array})
+		r.jitFillLiteral(&jitLiteral{root: src.root, pool: pool, n: src.n, array: src.array, lit: src.lit})
 	}
 	return pool.Count != 0
 }
@@ -4338,7 +4369,7 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 				r.jitCallSeen(f, e, exitPC, f.base+int(ctx.ExitDepth), in)
 			case bytecode.OpGetProp, bytecode.OpGetPropThis:
 				r.jitPolySeen(f, e, exitPC, f.base+int(ctx.ExitDepth), in)
-			case bytecode.OpNewObject, bytecode.OpNewArray:
+			case bytecode.OpNewObject, bytecode.OpNewArray, bytecode.OpNewRegExp:
 				r.jitRefillLiteral(f, e, exitPC)
 			case bytecode.OpDefineField:
 				jitDefineSeen(e, exitPC)
@@ -5002,7 +5033,7 @@ func (r *Runtime) jitFinishExit(f *frame, e *jitEntry, l *jitNativeLevel) (Value
 				r.jitCallSeen(f, e, pc, f.base+depth, in)
 			case bytecode.OpGetProp, bytecode.OpGetPropThis:
 				r.jitPolySeen(f, e, pc, f.base+depth, in)
-			case bytecode.OpNewObject, bytecode.OpNewArray:
+			case bytecode.OpNewObject, bytecode.OpNewArray, bytecode.OpNewRegExp:
 				r.jitRefillLiteral(f, e, pc)
 			case bytecode.OpDefineField:
 				jitDefineSeen(e, pc)
