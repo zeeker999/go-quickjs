@@ -1946,6 +1946,23 @@ func (r *Runtime) jitGoPin(idx int) {
 	}
 }
 
+// jitEntryOf is the entry of cl's function: the one cl's hint names, or,
+// missing that, the cache's, which cl's hint then names, as an entry from
+// Go would have it (tryJITAt). A call of Go from a native callee finds
+// each level's so, at every call: by the cache's weak key, a tenth of
+// RegExp's time went to finding them.
+func (r *Runtime) jitEntryOf(cl *closure) *jitEntry {
+	s := r.jit
+	if e := s.hint(cl.hint()); e != nil {
+		return e
+	}
+	e := s.cache[weak.Make(cl.fn)]
+	if e != nil && e.ssa != nil {
+		cl.setHint(hintFor(e))
+	}
+	return e
+}
+
 // jitGoCallNested is jitGoCall for code a native call runs (abi.LiveCall),
 // as V8's code calls a function it has no code of its own for wherever it
 // is inlined or called: RayTrace's rayTrace, called natively, constructs
@@ -1980,7 +1997,7 @@ func (r *Runtime) jitGoCallNested(ctx *abi.Context, idx int) bool {
 		if cl == nil {
 			return false
 		}
-		if e = s.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil || int(c.ExitPC) >= len(cl.fn.Code) {
+		if e = r.jitEntryOf(cl); e == nil || e.ssa == nil || int(c.ExitPC) >= len(cl.fn.Code) {
 			return false
 		}
 	}
@@ -2002,7 +2019,7 @@ func (r *Runtime) jitGoCallNested(ctx *abi.Context, idx int) bool {
 	// The run's code, and each level's, pinned.
 	r.jitGoPin(root)
 	for i := root + 1; i <= idx; i++ {
-		code := s.cache[weak.Make((*closure)(s.ssaCtxs[i].Closure).fn)].ssa
+		code := r.jitEntryOf((*closure)(s.ssaCtxs[i].Closure)).ssa
 		if !slices.Contains(s.goPinned[s.goRuns[root].pinnedAt:], code) {
 			s.goPinned = append(s.goPinned, code)
 		}
