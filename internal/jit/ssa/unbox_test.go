@@ -257,6 +257,13 @@ func (goCallsFeedback) NativeCalls(int) []CallSite {
 }
 func (goCallsFeedback) GoCalls() bool { return true }
 
+// entriesFeedback is goCallsFeedback that asks for an entry everywhere
+// (EntryFeedback), as code Go has had to go on without one is compiled:
+// an entry after each call of Go too.
+type entriesFeedback struct{ goCallsFeedback }
+
+func (entriesFeedback) WantsEntry(int) bool { return true }
+
 // A captured binding is loaded from its cell where it is read, not after
 // every call that may have assigned it: a function reading each of a
 // hundred bindings between a hundred calls loads each once, where loading
@@ -351,7 +358,7 @@ func TestBuildEntriesLeaveCapturedBindingsInCells(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, err := BuildWith(p, goCallsFeedback{})
+	f, err := BuildWith(p, entriesFeedback{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +403,7 @@ func TestOptimizeUnboxesLongPhiChains(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, err := BuildWith(p, goCallsFeedback{})
+	f, err := BuildWith(p, entriesFeedback{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,5 +426,48 @@ func TestOptimizeUnboxesLongPhiChains(t *testing.T) {
 	// tagged.
 	if tagged > 301 || float < 900 {
 		t.Fatalf("%d tagged and %d float phis, want g's 301 tagged and the numbers' 900 or more float", tagged, float)
+	}
+}
+
+// A call Go makes from native code (GoCall) has no entry after it: Go goes
+// on natively after it unless it leaves -- a throw, the runtime stopping,
+// the code due to be compiled again -- and then the interpreter runs on to
+// the next loop header, where there is one, as from V8's deoptimizations.
+// An entry after each had been a join of every live value, a block, and a
+// header's loads: a third of the compile of RegExp's run blocks, which
+// call built-ins and little else. Code that asks for entries everywhere
+// (EntryFeedback) still has one after each.
+func TestBuildNoEntriesAfterCallsOfGo(t *testing.T) {
+	src := "function f(g,n){let s=0;for(let i=0;i<n;i++){g();g();g();g();s=s+i}return s}"
+	p, err := jitcompile.LowerSSA(compiledFunctionForTest(t, src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := BuildWith(p, goCallsFeedback{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			if v.Op == OpCall && len(v.Calls) == 1 && v.Calls[0].Go == GoCall {
+				calls++
+			}
+		}
+	}
+	// The function's start and the loop's header.
+	if calls != 4 || len(f.Entries) != 2 {
+		t.Fatalf("%d calls of Go, %d entries, want 4 and 2", calls, len(f.Entries))
+	}
+	Optimize(f)
+	if err := Check(f); err != nil {
+		t.Fatal(err)
+	}
+	all, err := BuildWith(p, entriesFeedback{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all.Entries) < 6 {
+		t.Fatalf("asked for entries everywhere, %d entries", len(all.Entries))
 	}
 }

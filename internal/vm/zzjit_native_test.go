@@ -8047,6 +8047,82 @@ func TestJITSSAGoCallsFromNativeCalleesCallBack(t *testing.T) {
 	}
 }
 
+// A call Go makes from native code has no entry after it (ssa's plan): when
+// it leaves -- loop's call of again has loop compiled again, or throws --
+// the interpreter runs the rest of that iteration and native code goes on
+// at the loop's header, in the new code; a throw goes to the caller's
+// catch. Each answer is the interpreter's, and native code runs the
+// iterations after a leave. (loop does work around its calls, so that it
+// pays: jitSSAProfit.)
+func TestJITSSAGoCallLeavesWithoutEntry(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var k={mode:0};
+		function loop(n){let s=0;for(let i=0;i<n;i++){let w=i;for(let j=0;j<30;j++)w=(w*31+j)^(w>>>3);s=(s+w+'abc'.indexOf('c')+again(i,k.mode))|0;s=(s*3+i)|0}return s}
+		function run(n){try{return loop(n)}catch(e){return e.message}}`
+	recompiled := 0
+	install := func(rt *Runtime) {
+		rt.global.setOwnRaw(rt.atoms.intern("again"), rt.NewFunction("again", 2,
+			func(rt *Runtime, _ Value, args []Value) (Value, error) {
+				i, mode := args[0].Number(), args[1].Number()
+				if mode == 2 && i == 150 {
+					return Undefined, rt.throwTypeError("again %d", int(i))
+				}
+				if mode != 1 || i != 100 || rt.jit == nil {
+					return Int(1), nil
+				}
+				cl := rt.global.getOwn(rt.atoms.intern("loop")).value.Object().fn().closure
+				if e := rt.jit.cache[weak.Make(cl.fn)]; e != nil && e.ssa != nil {
+					code := e.ssa
+					e.reopt = true
+					rt.jitReoptimize(cl, e)
+					if e.ssa != code {
+						recompiled++
+					}
+				}
+				return Int(1), nil
+			}), propDefault)
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	install(want)
+	install(r)
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, src := range []string{`String(run(400))`, `String(run(400))`, `String(run(400))`,
+		`k.mode=1;String(run(400))`, `k.mode=2;String(run(400))`, `k.mode=0;String(run(400))`} {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		goCalls, interpreted := r.jit.goCalls, r.jit.interpreted
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 3 {
+			// Compiled again under the call at 100: the interpreter ran the
+			// rest of that iteration once, native code the other 299.
+			if n := r.jit.interpreted - interpreted; recompiled != 1 || n != 1 {
+				t.Fatalf("loop compiled again %d times, the interpreter went on %d times", recompiled, n)
+			}
+			if n := r.jit.goCalls - goCalls; n < 2*390 {
+				t.Fatalf("Go made %d calls for native code after the leave", n)
+			}
+		}
+	}
+}
+
 // A level's code is pinned by the code it runs, not by its entry alone: in
 // one native stretch of root's, leaf, called natively, calls Go (its code
 // pinned), root's own call of Go has leaf compiled again, and root calls

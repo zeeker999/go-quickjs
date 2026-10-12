@@ -1330,6 +1330,16 @@ func (b *builder) plan() error {
 		if !reachable(p, pc) {
 			continue
 		}
+		// The calls an instruction left to Go makes natively, decided once,
+		// here, which the entries, the blocks and the translation take.
+		if b.host(pc) && b.inlined[pc] == nil && b.f.Keeps < abi.MaxKeeps {
+			if calls := b.nativeCalls(pc); len(calls) != 0 {
+				if b.calls == nil {
+					b.calls = map[int][]*CallSite{}
+				}
+				b.calls[pc] = calls
+			}
+		}
 		switch in.Op {
 		case ir.ArrayRead:
 			if in.Reference && resumes(pc) {
@@ -1376,7 +1386,13 @@ func (b *builder) plan() error {
 				entries[in.Target] = entries[in.Target] || b.wantsEntry(in.Target)
 			}
 		case ir.Host, ir.Call:
-			if resumes(pc) {
+			if calls := b.calls[pc]; len(calls) == 1 && calls[0].Go == GoCall {
+				// A call Go makes goes on natively: Go leaves it only for
+				// a throw, the runtime stopping, or the code to be compiled
+				// again -- then the interpreter runs on to the next loop
+				// header, as from V8's deoptimizations.
+				entries[pc+1] = entries[pc+1] || b.wantsEntry(pc+1)
+			} else if resumes(pc) {
 				entries[pc+1] = true
 			}
 		default:
@@ -1448,11 +1464,7 @@ func (b *builder) plan() error {
 				b.edge(blk, b.blockAt[end+1])
 				break
 			}
-			if calls := b.nativeCalls(end); len(calls) != 0 && b.f.Keeps < abi.MaxKeeps {
-				if b.calls == nil {
-					b.calls = map[int][]*CallSite{}
-				}
-				b.calls[end] = calls
+			if len(b.calls[end]) != 0 {
 				blk.Kind = BlockPlain
 				b.edge(blk, b.blockAt[end+1])
 				break
