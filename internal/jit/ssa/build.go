@@ -492,6 +492,9 @@ func build(w *Workspace, p *ir.Program, fb Feedback) (*Func, error) {
 	}
 	p = referenceReads(p, fb)
 	f := &Func{Locals: p.Locals, StackSize: p.StackSize, FrameLocals: p.Locals, ThisSlot: -1, ws: w}
+	if kf, ok := fb.(KeepFeedback); ok {
+		f.KeepLimit = kf.KeepLimit()
+	}
 	f.written = f.bools(p.Locals + p.StackSize)
 	b := &builder{p: p, fb: fb, f: f, nslots: p.Locals + p.StackSize}
 	b.root = &frame{p: p, fb: fb}
@@ -522,8 +525,10 @@ type builder struct {
 	inlines   int
 	// calls are the calls made natively (OpCall), by PC: their blocks go
 	// on to the next instruction's.
-	calls   map[int][]*CallSite
-	frameOf []*frame
+	calls map[int][]*CallSite
+	// callKeeps are, by PC, the keep cells of the calls' results (calls).
+	callKeeps map[int]int
+	frameOf   []*frame
 	// literals are the literals made natively, by PC, each with the keep
 	// cell planning gave it (literal).
 	literals map[int]literalKeep
@@ -641,7 +646,7 @@ func (b *builder) literal(pc int) (LiteralSite, int, bool) {
 		return k.site, k.keep, k.keep >= 0
 	}
 	k := literalKeep{keep: -1}
-	if f, ok := b.fb.(LiteralFeedback); ok && b.f.Keeps < abi.MaxKeeps {
+	if f, ok := b.fb.(LiteralFeedback); ok && b.f.Keeps < b.f.keepLimit() {
 		if site, ok := f.Literal(pc); ok && site.Pool != 0 {
 			k = literalKeep{site: site, keep: b.f.Keeps}
 			b.f.Keeps++
@@ -727,6 +732,13 @@ func referenceReads(p *ir.Program, fb Feedback) *ir.Program {
 		return p
 	}
 	return q
+}
+
+// KeepFeedback is Feedback that bounds the keep cells a build takes
+// (Func.KeepLimit): abi.MaxKeeps when the backend could not fit the cells
+// a build with none took into the context's (mir's ErrKeeps).
+type KeepFeedback interface {
+	KeepLimit() int
 }
 
 // EntryFeedback is Feedback that may ask for an entry at a PC after an
@@ -852,7 +864,7 @@ func (b *builder) inlineAt(pc int, total *int) (*frame, bool) {
 	if site.Construct {
 		// Its receiver is kept in a cell, as a call's result is; and it
 		// returns nothing, so that the receiver is the result.
-		if site.Pool == 0 || site.Method || b.f.Keeps >= abi.MaxKeeps {
+		if site.Pool == 0 || site.Method || b.f.Keeps >= b.f.keepLimit() {
 			return nil, false
 		}
 		for pc, in := range site.Program.Code {
@@ -1079,7 +1091,7 @@ func (b *builder) goCalls() bool {
 // make after an exit.
 func (b *builder) goAdd(blk *Block, in ir.Instruction, operand func(ir.Operand) *Value, guard func(Op, Type, ir.ExitKind, ...*Value) *Value) {
 	call := guard(OpCall, Tagged, ir.HostExit, operand(in.Left), operand(in.Right))
-	if b.f.Keeps < abi.MaxKeeps {
+	if b.f.Keeps < b.f.keepLimit() {
 		call.Calls, call.Index = []*CallSite{{Go: GoAdd, ThisSlot: -1}}, b.f.Keeps
 		b.f.Keeps++
 	}
@@ -1331,13 +1343,16 @@ func (b *builder) plan() error {
 			continue
 		}
 		// The calls an instruction left to Go makes natively, decided once,
-		// here, which the entries, the blocks and the translation take.
-		if b.host(pc) && b.inlined[pc] == nil && b.f.Keeps < abi.MaxKeeps {
+		// here, which the entries, the blocks and the translation take, and
+		// the keep cell each one's result is kept in, taken now, as a
+		// literal's is: planning and building must agree.
+		if b.host(pc) && b.inlined[pc] == nil && b.f.Keeps < b.f.keepLimit() {
 			if calls := b.nativeCalls(pc); len(calls) != 0 {
 				if b.calls == nil {
-					b.calls = map[int][]*CallSite{}
+					b.calls, b.callKeeps = map[int][]*CallSite{}, map[int]int{}
 				}
-				b.calls[pc] = calls
+				b.calls[pc], b.callKeeps[pc] = calls, b.f.Keeps
+				b.f.Keeps++
 			}
 		}
 		switch in.Op {
@@ -2324,10 +2339,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 				args[i] = b.read(sp-n+i, blk)
 			}
 			call := guard(OpCall, Tagged, ir.HostExit, args...)
-			if b.f.Keeps < abi.MaxKeeps {
-				call.Calls, call.Index = calls, b.f.Keeps
-				b.f.Keeps++
-			}
+			call.Calls, call.Index = calls, b.callKeeps[pc]
 			cell := f.newValue(blk, OpCallCell, Source, call)
 			r := f.newValue(blk, OpKept, Tagged, cell, call)
 			r.Shadow = cell

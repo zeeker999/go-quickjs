@@ -8107,6 +8107,79 @@ func TestJITSSABuiltinCallsAsCallDirect(t *testing.T) {
 	}
 }
 
+// Keep cells are given by when each is live (mir's colorKeeps): many,
+// a loop of 300 calls of Go whose results it drops, every 25th added to a
+// sum, calls Go natively at each -- past the 256th, a call had been an exit
+// to Go, for want of a cell -- in a handful of cells. live's 60 results,
+// strings of 60 lengths, are all live until their lengths are summed, each
+// in a cell of its own. Each answer is the interpreter's.
+func TestJITSSAKeepCellsReused(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	var many, live strings.Builder
+	many.WriteString("var str='abcdefgh';function many(n){let t=0;for(let i=0;i<n;i++){let w=i;for(let j=0;j<40;j++)w=(w*31+j)^(w>>>3);t=(t+w)|0;")
+	live.WriteString("function live(n){let t=0;for(let i=0;i<n;i++){")
+	for k := range 300 {
+		if k%25 == 0 {
+			fmt.Fprintf(&many, "t=(t+str.indexOf('%c'))|0;", 'a'+k%8)
+		} else {
+			fmt.Fprintf(&many, "str.indexOf('%c');", 'a'+k%8)
+		}
+	}
+	for k := range 60 {
+		fmt.Fprintf(&live, "let a%d='x'.repeat(%d+i);", k, k)
+	}
+	many.WriteString("}return t}")
+	live.WriteString("t=(t")
+	for k := range 60 {
+		fmt.Fprintf(&live, "+a%d.length", k)
+	}
+	live.WriteString(")|0;for(let j=0;j<4000;j++)t=(t*31+j)^(t>>>3)}return t}")
+	setup := many.String() + live.String()
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry := func(name string) *jitEntry {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		return r.jit.cache[weak.Make(cl.fn)]
+	}
+	for i := range 4 {
+		src := `String([many(20),live(3)])`
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i < 2 {
+			continue
+		}
+		e := entry("many")
+		if e == nil || e.ssa == nil || e.entrySlow {
+			t.Fatalf("many did not run natively: %+v", e)
+		}
+		if e.ssaStats.hosts != 0 || e.ssaKeeps > 8 || e.ssaStats.goCalls < 300 {
+			t.Fatalf("many: %d exits, %d keep cells, %d calls of Go", e.ssaStats.hosts, e.ssaKeeps, e.ssaStats.goCalls)
+		}
+		if l := entry("live"); l == nil || l.ssa == nil || l.ssaKeeps < 60 || l.ssaKeeps > abi.MaxKeeps || l.ssaStats.goCalls == 0 {
+			t.Fatalf("live: %d keep cells, %+v", l.ssaKeeps, l)
+		}
+	}
+}
+
 // A call Go makes from native code has no entry after it (ssa's plan): when
 // it leaves -- loop's call of again has loop compiled again, or throws --
 // the interpreter runs the rest of that iteration and native code goes on

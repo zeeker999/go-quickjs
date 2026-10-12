@@ -1053,7 +1053,20 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, 
 	if e != nil && cl != nil {
 		r.jitSeenFeedback(cl, e)
 	}
-	fb := &jitFeedback{r: r, fn: fn, cl: cl, e: e}
+	code, fb, err := r.compileSSAKeeping(fn, cl, p, limit, e, 0)
+	if errors.Is(err, mir.ErrKeeps) {
+		// More keep cells live at once than the context has, which the
+		// build could not know: built again with no more than that, the
+		// calls past them left to Go.
+		code, fb, err = r.compileSSAKeeping(fn, cl, p, limit, e, abi.MaxKeeps)
+	}
+	return code, fb, err
+}
+
+// compileSSAKeeping is compileSSA's build and compile, the build's keep
+// cells limited to keepLimit (ssa.KeepFeedback), or not, if 0.
+func (r *Runtime) compileSSAKeeping(fn *bytecode.Function, cl *closure, p *ir.Program, limit int, e *jitEntry, keepLimit int) (*jit.SSACode, *jitFeedback, error) {
+	fb := &jitFeedback{r: r, fn: fn, cl: cl, e: e, keepLimit: keepLimit}
 	// The compile's memory comes from the runtime's workspaces, taken back
 	// once its code is placed.
 	s := r.jit
@@ -1068,17 +1081,21 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, 
 		f.ThisSlot = fn.LocalCount + len(fn.Upvalues)
 	}
 	ssa.Optimize(f)
-	fb.keeps = f.Keeps
-	s.ssaKeeps = max(s.ssaKeeps, f.Keeps)
 	mc, err := mir.CompileIn(&s.mirWork, f, jitEncoding)
 	if err != nil && strings.Contains(err.Error(), "runtime error") {
 		// A refusal the backend's own panic made: a bug, which the tests
 		// look for (backendPanics).
 		s.backendPanics++
 	}
+	if errors.Is(err, mir.ErrKeeps) && keepLimit == 0 {
+		return nil, nil, err
+	}
 	if err != nil {
 		return nil, nil, jitRefused
 	}
+	// The cells the backend gave the kept values (mir's keep cells).
+	fb.keeps = f.Keeps
+	s.ssaKeeps = max(s.ssaKeeps, f.Keeps)
 	if len(mc.Bytes) > limit {
 		return nil, nil, jit.ErrCodeBudget
 	}
@@ -1137,8 +1154,9 @@ type jitFeedback struct {
 	// instead -- past its budget (ssa's maxInlines) -- which had no code
 	// for native callers: compiled after it (jitWantedCallees).
 	wanted []*closure
-	// keeps is how many keep cells the code uses (ssa.Func.Keeps).
-	keeps int
+	// keeps is how many keep cells the code uses (ssa.Func.Keeps), and
+	// keepLimit how many the build may number (ssa.KeepFeedback), or 0.
+	keeps, keepLimit int
 	// e is the entry being compiled again, whose failed speculations
 	// (jitEntry.failed) are built generic; nil for a first compile.
 	e *jitEntry
@@ -2282,6 +2300,10 @@ func jitPlainOperand(v Value) bool {
 // jitGoCallWork, which tests set, runs at each call of Go before it is
 // answered: what Go may do there, the collector included.
 var jitGoCallWork func()
+
+// KeepLimit is ssa.KeepFeedback's: the build's keep cells' limit, 0 for
+// the default (ssa.VirtualKeeps).
+func (fb *jitFeedback) KeepLimit() int { return fb.keepLimit }
 
 // GoCalls is ssa.GoFeedback's: the VM answers calls of Go (jitHostCall).
 func (fb *jitFeedback) GoCalls() bool { return true }

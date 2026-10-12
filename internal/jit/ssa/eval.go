@@ -7,7 +7,6 @@ import (
 	"slices"
 	"unsafe"
 
-	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
 
@@ -479,7 +478,7 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 		return ir.Exit{Kind: kind, State: ir.StateMap{PC: s.PC, Depth: s.Depth}}, nil
 	}
 	// keep is the context's keep cells (OpKeep).
-	var keep [abi.MaxKeeps]ir.Value
+	keep := make([]ir.Value, max(f.Keeps, 1))
 	polls := 0
 	blk, from := e.Block, -1
 	for {

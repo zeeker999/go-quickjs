@@ -2,8 +2,6 @@ package ssa
 
 import (
 	"fmt"
-
-	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 )
 
 // Native code holds a reference's number word, and reads its pointer word
@@ -22,8 +20,8 @@ import (
 // themselves.
 
 // keepAcrossStores keeps, before each property store, the values read from
-// cells that are used after it (liveAcross), up to abi.MaxKeeps in a
-// function, and reports whether it kept any; their phis' shadows are then
+// cells that are used after it (liveAcross), up to the build's limit
+// (keepLimit) in a function, and reports whether it kept any; their phis' shadows are then
 // to be made again (shadowMerges). If it kept none, it returns what is live
 // across the stores, as storeChecks would find it: the function is as it
 // was, but for calls it left to Go, which are stores no longer and change
@@ -92,7 +90,7 @@ func keepAcrossStores(f *Func) (bool, []*Value, [][]*Value) {
 				fresh++
 			}
 		}
-		if f.Keeps+fresh > abi.MaxKeeps {
+		if f.Keeps+fresh > f.keepLimit() {
 			if s.Op == OpCall {
 				// Not kept, the references could be lost: Go makes the call.
 				s.Calls = nil

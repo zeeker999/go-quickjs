@@ -462,8 +462,14 @@ type Func struct {
 	// FrameLocals, which native code finds in the context
 	// (abi.Context.This); -1 if none.
 	ThisSlot int
-	// Keeps counts the keep cells the code uses (OpKeep).
+	// Keeps counts the keep cells the code uses (OpKeep): before the
+	// backend, each kept value's, or call's result's, a cell of its own,
+	// numbered up to KeepLimit; the backend gives cells whose values are
+	// dead to others (mir's keep cells), and Keeps is then how many the
+	// context's (abi.MaxKeeps) the code uses.
 	Keeps int
+	// KeepLimit bounds Keeps before the backend: VirtualKeeps if 0.
+	KeepLimit int
 	// written marks the slots some instruction writes (Written).
 	written []bool
 	nextID  int
@@ -688,4 +694,19 @@ func (f *Func) String() string {
 		}
 	}
 	return b.String()
+}
+
+// VirtualKeeps bounds the keep cells a build numbers (Func.Keeps), which the
+// backend fits into the context's abi.MaxKeeps by when each is live: a
+// function of hundreds of calls -- RegExp's runBlock11 -- had its calls past
+// the 256th made by Go at an exit each, though nearly every result was
+// dead at once.
+const VirtualKeeps = 1 << 16
+
+// keepLimit is how many keep cells a build may number (KeepLimit).
+func (f *Func) keepLimit() int {
+	if f.KeepLimit > 0 {
+		return f.KeepLimit
+	}
+	return VirtualKeeps
 }

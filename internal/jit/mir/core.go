@@ -711,6 +711,164 @@ func (c *core) allocate() error {
 			c.saveAt[2*v.ID+1] = len(c.saves)
 		}
 	}
+	return c.colorKeeps(iv, pos)
+}
+
+// ErrKeeps reports a function whose keep cells, given back once dead, are
+// still more than the context has (abi.MaxKeeps) at once: the VM builds it
+// again with no more than that (ssa.KeepFeedback).
+var ErrKeeps = errors.New("mir: more keep cells live at once than the context has")
+
+// colorKeeps gives the keep cells the build numbered, one for each call's
+// result and each kept value (ssa.Func.Keeps), cells of the context's by
+// when each is live, as registers are given: a cell is written where its
+// call or keep is, and read wherever a value whose pointer word is there
+// -- the cell's address (OpCallCell, OpKeep), a value it is the shadow of,
+// a phi of such addresses, or a value whose shadow that phi is -- is live,
+// in a register, a slot or a frame state an exit reads. A cell no value
+// reads after its write, a call's result no one uses, is live at the write
+// alone, and calls one after another share one. Cells whose intervals do
+// not meet share a cell, the first free, in the order they begin.
+func (c *core) colorKeeps(iv []interval, pos []int) error {
+	f := c.f
+	nk := f.Keeps
+	if nk == 0 {
+		return nil
+	}
+	lo, hi := c.ints(nk), c.ints(nk)
+	for k := range lo {
+		lo[k], hi[k] = -1, -1
+	}
+	extend := func(k, a, b int) {
+		if lo[k] < 0 || a < lo[k] {
+			lo[k] = a
+		}
+		if b > hi[k] {
+			hi[k] = b
+		}
+	}
+	writes := func(v *ssa.Value) bool {
+		return v.Op == ssa.OpCall && len(v.Calls) != 0 || v.Op == ssa.OpKeep
+	}
+	// cell is, by value ID, 1 plus the cell an address is of.
+	cell := c.ints(f.NumValues())
+	var phis []*ssa.Value
+	for _, b := range c.order {
+		for _, v := range b.Values {
+			switch {
+			case writes(v):
+				if v.Index < 0 || v.Index >= nk {
+					return fmt.Errorf("%w: keep cell %d of %d", ErrUnsupported, v.Index, nk)
+				}
+				extend(v.Index, pos[v.ID], pos[v.ID])
+				if v.Op == ssa.OpKeep {
+					cell[v.ID] = v.Index + 1
+				}
+			case v.Op == ssa.OpCallCell:
+				if w := v.Args[0]; writes(w) {
+					cell[v.ID] = w.Index + 1
+				}
+			case v.Op == ssa.OpPhi && v.Type == ssa.Source:
+				phis = append(phis, v)
+			}
+		}
+	}
+	// The cells each phi of addresses may be the address of: its
+	// arguments', through phis of phis, until none grows.
+	var merged map[int][]int
+	if len(phis) != 0 {
+		merged = map[int][]int{}
+		for grew := true; grew; {
+			grew = false
+			for _, p := range phis {
+				for _, a := range p.Args {
+					add := func(k int) {
+						if !slices.Contains(merged[p.ID], k) {
+							merged[p.ID] = append(merged[p.ID], k)
+							grew = true
+						}
+					}
+					if k := cell[a.ID]; k != 0 {
+						add(k - 1)
+					}
+					if a.Op == ssa.OpPhi && a.Type == ssa.Source {
+						for _, k := range merged[a.ID] {
+							add(k)
+						}
+					}
+				}
+			}
+		}
+	}
+	cellsOf := func(x *ssa.Value, each func(int)) {
+		if x == nil {
+			return
+		}
+		if k := cell[x.ID]; k != 0 {
+			each(k - 1)
+		}
+		for _, k := range merged[x.ID] {
+			each(k)
+		}
+	}
+	for i := range iv {
+		it := &iv[i]
+		if it.v == nil {
+			continue
+		}
+		span := func(k int) { extend(k, it.start, it.end) }
+		cellsOf(it.v, span)
+		cellsOf(it.v.Shadow, span)
+	}
+	// In the order they begin, then by number.
+	order := c.ints(nk)[:0]
+	for k := range nk {
+		if lo[k] >= 0 {
+			order = append(order, k)
+		}
+	}
+	slices.SortFunc(order, func(a, b int) int {
+		if lo[a] != lo[b] {
+			return lo[a] - lo[b]
+		}
+		return a - b
+	})
+	phys := c.ints(nk)
+	type active struct{ end, cell int }
+	var live []active
+	var free []int
+	n := 0
+	for _, k := range order {
+		kept := live[:0]
+		for _, a := range live {
+			if a.end < lo[k] {
+				free = append(free, a.cell)
+			} else {
+				kept = append(kept, a)
+			}
+		}
+		live = kept
+		var at int
+		if len(free) != 0 {
+			slices.Sort(free)
+			at, free = free[0], free[1:]
+		} else {
+			if n == abi.MaxKeeps {
+				return ErrKeeps
+			}
+			at, n = n, n+1
+		}
+		phys[k] = at
+		live = append(live, active{hi[k], at})
+	}
+	for _, b := range c.order {
+		for _, v := range b.Values {
+			if writes(v) {
+				v.Index = phys[v.Index]
+			}
+		}
+	}
+	f.Keeps = n
 	return nil
 }
 
