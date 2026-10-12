@@ -50,6 +50,7 @@ var jitEncoding = abi.Encoding{
 	False:         math.Float64bits(False.num),
 	Uninitialized: math.Float64bits(uninitialized.num),
 	CanonicalNaN:  canonicalNaN,
+	UndefinedCell: uint64(uintptr(unsafe.Pointer(&jitUndefinedCell))),
 	Object:        objectBits,
 	UpvalueSlot:   int32(unsafe.Offsetof(upvalue{}.slot)),
 	ObjectShape:   int32(unsafe.Offsetof(Object{}.shape)),
@@ -1755,6 +1756,9 @@ func jitHostCall(ctx *abi.Context) bool {
 		return true
 	case ssa.GoCall:
 		return r.jitGoCall(ctx)
+	case ssa.GoElemCell:
+		o := *(**Object)(unsafe.Pointer(&ctx.GoArgs[0].Ref))
+		return o != nil && jitElemAbsent(o, math.Float64frombits(ctx.GoArgs[1].Num))
 	case ssa.GoElemWrite:
 		o := *(**Object)(unsafe.Pointer(&ctx.GoArgs[0].Ref))
 		k, v := math.Float64frombits(ctx.GoArgs[1].Num), Float(math.Float64frombits(ctx.GoArgs[2].Num))
@@ -2082,6 +2086,35 @@ func jitStoreElem(o *Object, n float64, v Value) bool {
 	// What setValueProp would do: setElem, unless the store is so far past
 	// the end that the element is to be a property of its own.
 	return o.setElem(i, v)
+}
+
+// jitUndefinedCell is the cell native code reads an absent element from
+// (abi.Encoding's UndefinedCell): undefined, and nothing writes it.
+var jitUndefinedCell = Undefined
+
+// jitElemAbsent reports whether o[n] is undefined with nothing to ask
+// (ssa.GoElemCell): n an index o has no element at -- past its length, a
+// hole -- and neither o nor anything up its chain, each an ordinary object
+// or array, has an element or an index of its own, which could hold a
+// value or a getter. A lookup table read past what it holds,
+// BI_RC[s.charCodeAt(i)], had left native code at each such read.
+func jitElemAbsent(o *Object, n float64) bool {
+	i := uint32(n)
+	if float64(i) != n || i == math.MaxUint32 {
+		return false
+	}
+	if uint(i) < uint(len(o.elems)) && !isHole(o.elems[i]) {
+		return false
+	}
+	for p := o; p != nil; p = p.proto {
+		if p.class != ClassObject && p.class != ClassArray || p.flags&(objHasSparseElements|objMappedArguments) != 0 || !p.noIndexKeys() {
+			return false
+		}
+		if p != o && len(p.elems) != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // jitCloseRetired closes the retired code no call of Go is suspended in.

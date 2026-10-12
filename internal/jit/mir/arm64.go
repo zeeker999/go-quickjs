@@ -2860,8 +2860,26 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.FMovToF(a64F0, a64B)
 		c.setF(v, a64F0)
 	case ssa.OpElemCell:
-		c.index(arg(1), c.guardFor(v))
-		c.elementCell(arg(0), c.guardFor(v))
+		fail, done := c.guardFor(v), c.a.NewLabel()
+		if c.enc.CallGo != 0 && c.enc.UndefinedCell != 0 {
+			// An element it does not find Go says is undefined, where it
+			// can (ssa.GoElemCell).
+			slow, stub := c.a.NewLabel(), c.stubLabel(v.State, exitKind(v.Aux))
+			fail = func(cond arm64.Cond) { c.a.BCond(cond, slow) }
+			c.cold = append(c.cold, func() {
+				c.a.Bind(slow)
+				size := int32(unsafe.Sizeof(abi.GoArg{}))
+				c.a.Store(a64Ctx, abi.OffGoArgs+c.enc.RefOffset, c.gpr(v.Args[0], a64C))
+				c.a.FMovFromF(a64A, c.fpr(v.Args[1], a64F0))
+				c.a.Store(a64Ctx, abi.OffGoArgs+size+c.enc.NumOffset, a64A)
+				c.goSaving(uint64(ssa.GoElemCell), &stub)
+				c.a.MovImm(a64A, c.enc.UndefinedCell)
+				c.a.B(done)
+			})
+		}
+		c.index(arg(1), fail)
+		c.elementCell(arg(0), fail)
+		c.a.Bind(done)
 		c.setG(v, a64A)
 	case ssa.OpElemWrite:
 		fail, done := c.guardFor(v), c.a.NewLabel()

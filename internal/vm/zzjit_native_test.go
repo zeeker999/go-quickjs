@@ -8062,6 +8062,67 @@ func TestJITSSACharCodeAtInNativeCallees(t *testing.T) {
 	}
 }
 
+// An element read as a reference that native code does not find -- past
+// the array's length, a hole -- is undefined, Go says, where nothing up
+// the chain has an element or an index (ssa.GoElemCell): the read is then
+// of a cell that is undefined, and native code goes on. A table read past
+// what it holds, T[s.charCodeAt(i)], had left native code at each such
+// read. Where something could answer -- an element of Array.prototype, a
+// getter for an index on Object.prototype -- Go refuses, and the code
+// leaves for Go as before. Each answer is the interpreter's.
+func TestJITSSAAbsentElementsAreUndefined(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var T=[];for(var k=48;k<58;k++)T[k]=k-48;
+		function look(s,i){let c=0;for(let j=0;j<1;j++)c=T[s.charCodeAt(i)];return (c==null)?-1:c}
+		function scan(s){let t=0;for(let i=0;i<s.length;i++){t=(t*7+look(s,i))|0;t=(t+(T[i+70]===undefined?1:2))|0}return t}
+		var str='3141 59x26/53';`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src := `(function(){let u=0;for(let j=0;j<40;j++)u=(u+scan(str))|0;return String(u)})()`
+	rounds := []string{src, src, src, src,
+		`Array.prototype[32]=5;` + src,
+		`delete Array.prototype[32];Object.defineProperty(Object.prototype,'75',{get(){return 9},configurable:true});` + src}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		hosts, unwound := uint64(0), uint64(0)
+		if r.jit != nil {
+			hosts, unwound = r.jit.hosts, r.jit.unwound
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 3 {
+			for _, name := range []string{"look", "scan"} {
+				cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+				if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil || e.notNative {
+					t.Fatalf("%s does not run natively: %+v", name, e)
+				}
+			}
+			if r.jit.hosts != hosts || r.jit.unwound != unwound {
+				t.Fatalf("native code left for Go: %d exits, %d unwound", r.jit.hosts-hosts, r.jit.unwound-unwound)
+			}
+		}
+	}
+}
+
 // TestJITSSAMathFunctions: every Math function of numbers runs natively,
 // as V8's code makes them -- an instruction of its own (a rounding, sign,
 // fround, max, min) or Go called from native code, the VM's very function

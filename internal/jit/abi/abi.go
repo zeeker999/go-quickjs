@@ -421,6 +421,10 @@ type Encoding struct {
 	Undefined, Null, True, False, Uninitialized uint64
 	// CanonicalNaN is the one NaN a number word may hold.
 	CanonicalNaN uint64
+	// UndefinedCell is the address of a value that is undefined, which
+	// nothing writes: the cell of an element a read finds absent, where
+	// nothing up the chain has it (ssa.GoElemCell).
+	UndefinedCell uint64
 	// Object is every object's number word: its pointer word tells objects
 	// apart.
 	Object uint64

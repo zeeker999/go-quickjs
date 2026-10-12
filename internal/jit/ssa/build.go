@@ -214,6 +214,12 @@ type GoOp uint8
 // as V8's code calls its grow stub. The operands are the array's pointer
 // word, the key's and the value's number words; Go refuses a store that
 // could run a script or throw.
+//
+// GoElemCell is an element read as a reference that native code does not
+// find -- past the array's length, or a hole: Go says whether it is
+// undefined with nothing to ask, the array's chain holding no element and
+// no index, the first operand its pointer word, the key its number word;
+// the read is then from Encoding's UndefinedCell.
 const (
 	GoAdd GoOp = 1 + iota
 	GoRefill
@@ -226,6 +232,7 @@ const (
 	GoMod
 	GoPoll
 	GoElemWrite
+	GoElemCell
 )
 
 // RefillsPools reports whether a call takes an object from a pool, which
