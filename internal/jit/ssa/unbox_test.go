@@ -318,3 +318,64 @@ func TestBuildLoadsCapturedBindingsWhereRead(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// An entry -- one after each call of Go here -- loads the frame's live
+// slots, not the captured bindings' slots: a binding is in its cell, read
+// there where it is read (stale at the entry), and the VM's frame has no
+// slot for it. Loaded at every entry, each binding's slot made a value no
+// one used, which the entry's state kept: a hundred bindings over a
+// hundred calls made ten thousand loads, and RegExp's runBlock11, 77
+// bindings over 438 calls, 34,767 of them, half its compile.
+func TestBuildEntriesLeaveCapturedBindingsInCells(t *testing.T) {
+	var src strings.Builder
+	src.WriteString("function outer(){var ")
+	for i := range 100 {
+		if i > 0 {
+			src.WriteString(",")
+		}
+		fmt.Fprintf(&src, "a%d=%d", i, i)
+	}
+	src.WriteString(";return function f(g){var s=0;")
+	for i := range 100 {
+		fmt.Fprintf(&src, "g();s+=a%d;", i)
+	}
+	src.WriteString("return s}}")
+	outer := compiledFunctionForTest(t, src.String())
+	var fn *bytecode.Function
+	for _, c := range outer.Constants {
+		if c.Kind == bytecode.ConstFunction {
+			fn = c.Fn
+		}
+	}
+	p, err := jitcompile.LowerSSAInline(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := BuildWith(p, goCallsFeedback{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, captured, locals := 0, 0, 0
+	for _, b := range f.Blocks {
+		if b.PC >= 0 {
+			continue
+		}
+		entries++
+		for _, v := range b.Values {
+			switch {
+			case v.Op != OpLoadSlot:
+			case v.Aux >= p.UpvalueBase && v.Aux < p.UpvalueBase+p.Upvalues:
+				captured++
+			case v.Aux < p.UpvalueBase:
+				locals++
+			}
+		}
+	}
+	if entries < 100 || captured != 0 || locals == 0 {
+		t.Fatalf("%d entries load %d captured bindings' slots and %d locals", entries, captured, locals)
+	}
+	Optimize(f)
+	if err := Check(f); err != nil {
+		t.Fatal(err)
+	}
+}

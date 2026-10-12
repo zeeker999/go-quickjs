@@ -1825,12 +1825,18 @@ func (b *builder) fill(blk *Block) {
 		e, _ := f.entryForBlock(blk)
 		blk.Header = f.newState(FrameState{PC: b.p.Maps[e.PC].PC, Depth: e.Depth, Slots: f.refsOf(b.p.Locals + e.Depth), Site: -1})
 		for i := range blk.Header.Slots {
-			if !b.p.LiveAt(e.PC, i) {
+			if !b.p.LiveAt(e.PC, i) || i >= b.p.UpvalueBase && i < b.p.UpvalueBase+b.p.Upvalues {
 				// A local the interpreter writes before it reads from
 				// here is not loaded, as frame states leave it out: an
 				// entry's state names a slot's own load, which an exit
 				// leaves as it is, and the load had been dead but for
-				// that. Read anyway, it is loaded then (read).
+				// that. Read anyway, it is loaded then (read). Nor is a
+				// captured binding's slot, as frame states leave it out: the
+				// binding is in its cell, read there where it is read
+				// (reloadUpvalues), and the VM's frame has no slot for it.
+				// Loaded at every entry, a function of many bindings and
+				// many calls made a load of each at each, that the entry's
+				// state alone kept: RegExp's runBlock11, 34,767 of them.
 				continue
 			}
 			v := f.newValue(blk, OpLoadSlot, Tagged)
