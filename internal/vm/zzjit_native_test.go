@@ -7811,6 +7811,105 @@ func TestJITSSAGoCallsFromNativeCallees(t *testing.T) {
 	}
 }
 
+// A built-in a native callee calls through Go may call the script back:
+// String.prototype.replace, called by one and two, called natively by
+// box.mid, called natively by outer, calls cb, whose Error's stack shows
+// every level at its call, as the interpreter's does, cb and replace above
+// them: each with its receiver, which none of them reads -- undefined for
+// one and two, box for mid ("Box.mid") -- where the frame Go made for a
+// level had shown whatever its context held last ("Number.one"). Native
+// code writes a callee's receiver into its context whether or not the
+// callee reads it. hook, a Go function one and two call, has the caller's
+// code compiled again while the call is suspended in it, two levels down,
+// and the old code stays open until the run's native code leaves -- one
+// and two alternate, so each is pinned anew, and again after it is
+// compiled again. Each answer, and each stack, is the interpreter's.
+func TestJITSSAGoCallsFromNativeCalleesCallBack(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var c={n:0,last:''};
+		function cb(m){c.last=new Error('cb '+m).stack;return m.toUpperCase()}
+		function one(s){let r='';for(let j=0;j<1;j++)r=s.replace('b',cb);if(c.n++%25===0)r+=hook('one');return r.length}
+		function two(s){let r='';for(let j=0;j<1;j++)r=s.replace(/c/,cb);if(c.n++%25===0)r+=hook('two');return r.length+1}
+		function Box(){}
+		Box.prototype.mid=function mid(s,i){let t=0;for(let j=0;j<1;j++)t=(i&1?one(s):two(s))+1;return t};
+		var box=new Box();
+		function outer(n){let t=0;for(let i=0;i<n;i++)t=(t*3+box.mid('abc'+(i&3),i))|0;return t+':'+c.last}`
+	recompiled, open := 0, 0
+	install := func(rt *Runtime) {
+		rt.global.setOwnRaw(rt.atoms.intern("hook"), rt.NewFunction("hook", 1,
+			func(rt *Runtime, _ Value, args []Value) (Value, error) {
+				if rt.jit == nil {
+					return Str(NewString("")), nil
+				}
+				cl := rt.global.getOwn(rt.atoms.intern(args[0].String().Go())).value.Object().fn().closure
+				e := rt.jit.cache[weak.Make(cl.fn)]
+				if e == nil || e.ssa == nil || len(rt.jit.goPinned) == 0 {
+					return Str(NewString("")), nil
+				}
+				// The level's code, which its call of Go returns to.
+				code := e.ssa
+				e.reopt = true
+				rt.jitReoptimize(cl, e)
+				if e.ssa != code {
+					recompiled++
+					if code.Size() != 0 {
+						open++
+					}
+				}
+				return Str(NewString("")), nil
+			}), propDefault)
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	install(want)
+	install(r)
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry := func(name string) *jitEntry {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		return r.jit.cache[weak.Make(cl.fn)]
+	}
+	for i := range 6 {
+		src := `outer(300)`
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		goCalls := r.jit.goCalls
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got\n%s\ninterpreter's\n%s", i, got, want)
+		}
+		if i == 5 {
+			for _, name := range []string{"one", "two"} {
+				if e := entry(name); e == nil || e.ssa == nil || e.ssaStats.goCalls == 0 {
+					t.Fatalf("%s did not call Go natively: %+v", name, e)
+				}
+			}
+			if n := r.jit.goCalls - goCalls; n < 300 {
+				t.Fatalf("Go made %d calls for native code, of 300 or more", n)
+			}
+		}
+	}
+	if recompiled == 0 || open != recompiled {
+		t.Fatalf("a level's code compiled again under its call of Go %d times, left open %d", recompiled, open)
+	}
+	if len(r.jit.goPinned) != 0 || len(r.jit.retired) != 0 {
+		t.Fatalf("calls of Go left %d pinned, %d retired", len(r.jit.goPinned), len(r.jit.retired))
+	}
+}
+
 // A level's code is pinned by the code it runs, not by its entry alone: in
 // one native stretch of root's, leaf, called natively, calls Go (its code
 // pinned), root's own call of Go has leaf compiled again, and root calls

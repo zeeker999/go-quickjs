@@ -579,6 +579,17 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 		c.a.MovImm(scratchA, f.v)
 		c.a.Store(regCtx, f.off, scratchA)
 	}
+	args, this := sp-site.Argc, calleeSlot-1
+	if site.Via != 0 {
+		// Through Function.prototype.call: the first argument is the
+		// receiver.
+		args, this = args+1, args
+	}
+	// A receiver written straight into the callee's context: one it reads,
+	// or a method call's, which a callee that does not read it has too --
+	// a frame Go makes for it (jitGoCallNested, jitUnwindNative) shows it
+	// in a stack trace, as the interpreter's does.
+	receiver := direct && site.Pool == 0 && (site.ThisSlot >= 0 || site.Method && this < sp)
 	if direct {
 		// The callee's frame, past the VM's stack's top: xScratch2 holds
 		// its address, which pointerWord does not use.
@@ -588,16 +599,10 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 		c.a.Load(scratchB, regCtx, abi.OffStackBase)
 		c.a.Op(amd64.Add, scratchA, scratchB, true)
 		c.a.MovQToX(xScratch2, scratchA)
-		args, this := sp-site.Argc, calleeSlot-1
-		if site.Via != 0 {
-			// Through Function.prototype.call: the first argument is the
-			// receiver.
-			args, this = args+1, args
-		}
 		for i := 0; i < site.Params && args+i < sp && i < site.LocalCount; i++ {
 			c.directOperand(s.Slots[args+i], true, int32(i)*vs)
 		}
-		if site.ThisSlot >= 0 && site.Pool == 0 {
+		if receiver {
 			c.directOperand(s.Slots[this], false, abi.OffThis)
 		}
 	}
@@ -693,11 +698,18 @@ func (c *compiler) call(v *ssa.Value, guard func(amd64.Cond)) {
 			c.a.Store(calleeCtx, abi.OffThis+c.enc.RefOffset, high2)
 			c.a.MovImm(tmp, c.enc.Object)
 			c.a.Store(calleeCtx, abi.OffThis+c.enc.NumOffset, tmp)
-		} else if t.ThisSlot >= 0 && !direct {
+		} else if (t.ThisSlot >= 0 || site.Method && site.Via == 0) && !direct {
 			nb, nd, rb, rd := words(calleeSlot - 1)
 			c.a.Load(top, nb, nd)
 			c.a.Store(calleeCtx, abi.OffThis+c.enc.NumOffset, top)
 			c.a.Load(top, rb, rd)
+			c.a.Store(calleeCtx, abi.OffThis+c.enc.RefOffset, top)
+		} else if !receiver {
+			// A plain call's receiver, undefined, as the interpreter's frame
+			// has it.
+			c.a.MovImm(top, c.enc.Undefined)
+			c.a.Store(calleeCtx, abi.OffThis+c.enc.NumOffset, top)
+			c.a.MovImm(top, 0)
 			c.a.Store(calleeCtx, abi.OffThis+c.enc.RefOffset, top)
 		}
 		c.a.MovImm(top, uint64(t.Closure))

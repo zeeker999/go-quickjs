@@ -1728,6 +1728,15 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		c.a.MovImm(a64A, f.v)
 		c.a.Store(a64Ctx, f.off, a64A)
 	}
+	args, this := sp-site.Argc, calleeSlot-1
+	if site.Via != 0 {
+		args, this = args+1, args
+	}
+	// A receiver written straight into the callee's context: one it reads,
+	// or a method call's, which a callee that does not read it has too --
+	// a frame Go makes for it (jitGoCallNested, jitUnwindNative) shows it
+	// in a stack trace, as the interpreter's does.
+	receiver := direct && site.Pool == 0 && (site.ThisSlot >= 0 || site.Method && this < sp)
 	if direct {
 		// The callee's frame's address, in D, which pointerWord does not
 		// use.
@@ -1736,14 +1745,10 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		c.a.ShiftImm(arm64.Lsl, a64D, a64D, 4, true)
 		c.a.Load(a64B, a64Ctx, abi.OffStackBase)
 		c.a.Op(arm64.Add, a64D, a64D, a64B, true)
-		args, this := sp-site.Argc, calleeSlot-1
-		if site.Via != 0 {
-			args, this = args+1, args
-		}
 		for i := 0; i < site.Params && args+i < sp && i < site.LocalCount; i++ {
 			c.directOperand(s.Slots[args+i], a64D, int32(i)*vs)
 		}
-		if site.ThisSlot >= 0 && site.Pool == 0 {
+		if receiver {
 			// The callee's context's, the next.
 			c.a.Load(a64D, a64Ctx, abi.OffNext)
 			c.directOperand(s.Slots[this], a64D, abi.OffThis)
@@ -1830,12 +1835,18 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 			c.a.Store(calleeCtx, abi.OffThis+c.enc.RefOffset, high2)
 			c.a.MovImm(tmp, c.enc.Object)
 			c.a.Store(calleeCtx, abi.OffThis+c.enc.NumOffset, tmp)
-		} else if t.ThisSlot >= 0 && !direct {
+		} else if (t.ThisSlot >= 0 || site.Method && site.Via == 0) && !direct {
 			nb, nd, rb, rd := words(calleeSlot - 1)
 			c.a.Load(top, nb, nd)
 			c.a.Store(calleeCtx, abi.OffThis+c.enc.NumOffset, top)
 			c.a.Load(top, rb, rd)
 			c.a.Store(calleeCtx, abi.OffThis+c.enc.RefOffset, top)
+		} else if !receiver {
+			// A plain call's receiver, undefined, as the interpreter's frame
+			// has it.
+			c.a.MovImm(top, c.enc.Undefined)
+			c.a.Store(calleeCtx, abi.OffThis+c.enc.NumOffset, top)
+			c.a.Store(calleeCtx, abi.OffThis+c.enc.RefOffset, arm64.ZR)
 		}
 		c.a.MovImm(top, uint64(t.Closure))
 		c.a.Store(calleeCtx, abi.OffClosure, top)
