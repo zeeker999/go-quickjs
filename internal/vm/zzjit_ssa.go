@@ -1415,7 +1415,7 @@ func (fb *jitFeedback) NativeCalls(pc int) []ssa.CallSite {
 		// Only looked up: a compile here would share the workspaces of the
 		// one asking. jitCallSeen compiled it.
 		ce := fb.r.jit.cache[weak.Make(in.cl.fn)]
-		if ce == nil || ce.ssa == nil || ce.ssaStrings {
+		if ce == nil || ce.ssa == nil {
 			if (ce == nil || ce.ssa == nil) && !slices.Contains(fb.wanted, in.cl) {
 				k := fb.keep()
 				k.wanted = append(k.wanted, in.cl)
@@ -3718,7 +3718,11 @@ func (r *Runtime) jitStringMethod() Value {
 	if r.jitCharCodeAt.ref == nil {
 		return Value{}
 	}
-	m := r.proto.str.getOwn(r.atoms.intern("charCodeAt"))
+	s := r.jit
+	if !s.charCodeAtKnown {
+		s.charCodeAtKey, s.charCodeAtKnown = r.atoms.intern("charCodeAt"), true
+	}
+	m := r.proto.str.getOwn(s.charCodeAtKey)
 	if m == nil || m.flags&^propDefault != 0 || !m.value.StrictEquals(r.jitCharCodeAt) {
 		return Value{}
 	}
@@ -4022,9 +4026,6 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 		ctx.Locals = unsafe.Pointer(unsafe.SliceData(f.locals))
 		ctx.Stack = unsafe.Pointer(&r.stack[f.base])
 		ctx.Upvalues = unsafe.Pointer(unsafe.SliceData(f.cl.upvalues))
-		if e.ssaStrings {
-			*(*Value)(unsafe.Pointer(&ctx.CharCodeAt)) = r.jitStringMethod()
-		}
 		if e.this {
 			this, bound := f.thisValue()
 			if !bound {
@@ -4249,6 +4250,14 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 type jitShared struct {
 	global, lexNames, stackBase unsafe.Pointer
 	stackEnd, levelLimit        uint64
+	// charCodeAt is String.prototype.charCodeAt as native code calls it
+	// (jitStringMethod), which every level's code reads in its own
+	// context: written only into a run's own, a native callee's charCodeAt
+	// left native code at every call -- Crypto's intAt, until its callers
+	// stopped calling it natively, and then Go ran each of its calls.
+	// The function's object, or nil, so that the struct compares: a
+	// Value's word is a NaN, unequal to itself.
+	charCodeAt *Object
 }
 
 // jitShareContexts writes what the contexts share into context idx, which
@@ -4264,6 +4273,9 @@ func (r *Runtime) jitShareContexts(idx int, f *frame) {
 		stackBase: unsafe.Pointer(unsafe.SliceData(r.stack)), stackEnd: uint64(len(r.stack)),
 		levelLimit: uint64(min(len(s.ssaCtxs), idx+max(0, r.maxFrames-r.frameDepth))),
 	}
+	if m := r.jitStringMethod(); m.IsObject() {
+		sh.charCodeAt = m.Object()
+	}
 	if sh == s.ssaShared && s.ssaSharedFrom <= idx {
 		return
 	}
@@ -4274,6 +4286,10 @@ func (r *Runtime) jitShareContexts(idx int, f *frame) {
 		c.StackTop, c.StackHigh = &r.stackTop, &r.stackHigh
 		c.BackEdges = &r.backEdges
 		c.Global, c.LexNames = sh.global, sh.lexNames
+		*(*Value)(unsafe.Pointer(&c.CharCodeAt)) = Value{}
+		if sh.charCodeAt != nil {
+			*(*Value)(unsafe.Pointer(&c.CharCodeAt)) = Obj(sh.charCodeAt)
+		}
 	}
 	s.ssaShared, s.ssaSharedFrom = sh, idx
 }
@@ -4320,6 +4336,7 @@ func (r *Runtime) jitGrowContexts() bool {
 			c.Level, c.LevelLimit = uint64(i), n
 			c.StackBase, c.StackEnd, c.StackTop, c.StackHigh = last.StackBase, last.StackEnd, last.StackTop, last.StackHigh
 			c.BackEdges, c.Global, c.LexNames = last.BackEdges, last.Global, last.LexNames
+			c.CharCodeAt = last.CharCodeAt
 		case c.LevelLimit == uint64(old):
 			c.LevelLimit = n
 		}

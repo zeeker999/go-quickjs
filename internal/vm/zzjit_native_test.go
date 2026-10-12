@@ -7986,6 +7986,82 @@ func TestJITSSAElementStoresGrow(t *testing.T) {
 	}
 }
 
+// s.charCodeAt(i) is String.prototype.charCodeAt's intrinsic in any
+// function the new pipeline compiles, a helper with no loop too, and the
+// intrinsic is in every context a run's native calls run in (jitShared):
+// it was only in functions with a loop, and only in the run's own context,
+// so Crypto's intAt left native code at every call, until bnpFromString
+// stopped calling it natively and Go ran each of its 3,000 calls a run.
+// Replaced, the function a script gave is what is called. Each answer is
+// the interpreter's.
+func TestJITSSACharCodeAtInNativeCallees(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var T=[];for(var k=48;k<58;k++)T[k]=k-48;
+		function intAt(s,i){var c=T[s.charCodeAt(i)];return (c==null)?-1:c}
+		function parse(s){let t=0;for(let i=0;i<s.length;i++){t=(t*7+intAt(s,i))|0}return t}
+		function codes(s,i){let t=0;for(let k=0;k<2;k++)t+=s.charCodeAt(i+k);return t}
+		function pairs(s){let t=0;for(let i=0;i+1<s.length;i++)t=(t*3+codes(s,i))|0;return t}
+		var str='31415926535897932384626433832795';`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src := `(function(){let u=0;for(let j=0;j<40;j++)u=(u+parse(str)+pairs(str))|0;return String(u)})()`
+	rounds := []string{src, src, src, src, `String.prototype.charCodeAt=function(i){return 50};` + src}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		hosts, unwound := uint64(0), uint64(0)
+		if r.jit != nil {
+			hosts, unwound = r.jit.hosts, r.jit.unwound
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 3 {
+			// Called natively, or inlined, as a helper with no operation
+			// left to Go may be.
+			cl := r.global.getOwn(r.atoms.intern("intAt")).value.Object().fn().closure
+			if e := r.jit.cache[weak.Make(cl.fn)]; e != nil && e.notNative {
+				t.Fatalf("intAt is not called natively: %+v", e)
+			}
+			pl := r.global.getOwn(r.atoms.intern("parse")).value.Object().fn().closure
+			if e := r.jit.cache[weak.Make(pl.fn)]; e == nil || e.ssa == nil {
+				t.Fatalf("parse has no code: %+v", e)
+			}
+			// codes, with a loop, is called natively, in a context of its own.
+			cc := r.global.getOwn(r.atoms.intern("codes")).value.Object().fn().closure
+			if e := r.jit.cache[weak.Make(cc.fn)]; e == nil || e.ssa == nil || e.notNative || e.nativeIn == 0 {
+				pe := r.jit.cache[weak.Make(r.global.getOwn(r.atoms.intern("pairs")).value.Object().fn().closure.fn)]
+				t.Fatalf("codes was not called natively: notNative %v nativeIn %d entries %d; pairs %v", e.notNative, e.nativeIn, e.ssaStats.entries, func() string {
+					if pe == nil {
+						return "no entry"
+					}
+					return fmt.Sprintf("code %v nativeCalls %d inlines %d callSites %v goCalls %d hosts %d entries %d", pe.ssa != nil, len(pe.nativeCalls), len(pe.inlines), pe.callSites, pe.ssaStats.goCalls, pe.ssaStats.hosts, pe.ssaStats.entries)
+				}())
+			}
+			if r.jit.hosts != hosts || r.jit.unwound != unwound {
+				t.Fatalf("native code left for Go: %d exits, %d unwound", r.jit.hosts-hosts, r.jit.unwound-unwound)
+			}
+		}
+	}
+}
+
 // TestJITSSAMathFunctions: every Math function of numbers runs natively,
 // as V8's code makes them -- an instruction of its own (a rounding, sign,
 // fround, max, min) or Go called from native code, the VM's very function

@@ -276,6 +276,25 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 	}
 	if m.ssa {
 		for pc, in := range p.Code {
+			if in.Op != ir.Host || p.Maps[pc].Depth < 0 {
+				continue
+			}
+			// s.charCodeAt(i), in any function: the new pipeline finds the
+			// intrinsic in every context (the VM's jitShared), not at each
+			// entry, so a helper with no loop -- Crypto's intAt -- is worth
+			// it too (stringKernel). The call is the one whose method that
+			// read named, its argument pushed between them.
+			sp := p.Locals + p.Maps[pc].Depth
+			switch b := fn.Code[pc]; {
+			case b.Op == bytecode.OpGetPropThis && fn.Names[b.A] == "charCodeAt":
+				p.Code[pc] = ir.Instruction{Op: ir.StringMethod, Left: ir.Slot(sp - 1), Dest: sp}
+			case b.Op == bytecode.OpCallMethod && b.A == 1 && pc >= 2 && p.Maps[pc-2].Depth >= 0 && p.Maps[pc].Depth == p.Maps[pc-2].Depth+2:
+				if r := fn.Code[pc-2]; r.Op == bytecode.OpGetPropThis && fn.Names[r.A] == "charCodeAt" {
+					p.Code[pc] = ir.Instruction{Op: ir.StringCode, Left: ir.Slot(sp - 2), Right: ir.Slot(sp - 3), Third: ir.Slot(sp - 1), Dest: sp - 3}
+				}
+			}
+		}
+		for pc, in := range p.Code {
 			if in.Op == ir.Host && p.Maps[pc].Depth >= 0 {
 				// The new pipeline computes a remainder; the old one leaves
 				// it to Go.
