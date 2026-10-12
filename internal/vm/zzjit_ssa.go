@@ -940,6 +940,16 @@ func (e *jitEntry) reoptPending() bool {
 // with construction on compiled its functions some 100 times in three
 // runs, a quarter of its time.
 func (e *jitEntry) reoptDue() bool {
+	// Nothing pending, the usual answer, asked in line: a call of Go asks
+	// at every call.
+	if e.reopt || e.inlineReopt || e.polyReopt || e.upgradeReopt || e.unwindReopt || e.feedReopt {
+		return e.reoptDueNow()
+	}
+	return false
+}
+
+// reoptDueNow is reoptDue's answer for code with something pending.
+func (e *jitEntry) reoptDueNow() bool {
 	if e.reopt || e.unwindReopt {
 		return true
 	}
@@ -1848,8 +1858,11 @@ type jitGoRun struct {
 	pinned bool
 	// pinnedAt is where its pins start in goPinned: its own code, then
 	// that of the native callees whose calls of Go it is suspended in
-	// (jitGoCallNested), all released when its native code leaves.
+	// (jitGoCallNested), all released when its native code leaves. serial
+	// names those pins: no other run's, nor this run's after they are
+	// released, have it (jitState's pinSerial).
 	pinnedAt int
+	serial   uint64
 }
 
 // jitGoUnpin ends what calls of Go the run in context idx made: its code,
@@ -1924,8 +1937,10 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	if ctx.Live != 0 || idx >= len(s.goRuns) || s.goRuns[idx].f == nil || s.ssaCtxs[idx] != ctx {
 		return false
 	}
-	run := s.goRuns[idx]
-	f, e := run.f, run.e
+	run := &s.goRuns[idx]
+	// The run's, not a pointer into goRuns, which a run the call begins
+	// may grow.
+	f, e, code := run.f, run.e, run.code
 	pc, depth := int(ctx.ExitPC), int(ctx.ExitDepth)
 	if pc >= len(f.cl.fn.Code) {
 		return false
@@ -1950,22 +1965,26 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	r.stackTop, r.stackHigh = sp, max(r.stackHigh, sp)
 	e.ssaStats.goCalls++
 	s.goCalls++
-	r.jitCallSeen(f, e, pc, sp, in)
+	if jitCallUnsettled(e, pc, in) {
+		r.jitCallSeen(f, e, pc, sp, in)
+	}
 	// Past its call meanwhile, as the interpreter's frame is during one,
 	// which a stack trace shows.
 	f.pc = uint32(pc + 1)
-	last, shared, from := s.ssaCtx, s.ssaShared, s.ssaSharedFrom
-	r.jitGoPin(idx)
+	last, shared := s.ssaCtx, s.ssaSharedGen
+	if !run.pinned {
+		r.jitGoPin(idx)
+	}
 	v, _, err := r.jitCallAt(in, sp)
-	clear(r.stack[top:sp])
+	jitClearArgs(r.stack, top, sp)
 	r.stackTop = top
 	s.ssaCtx = last
-	if s.ssaShared != shared || s.ssaSharedFrom != from {
+	if s.ssaSharedGen != shared {
 		// What the call ran shared other values with the contexts past
 		// this one, which this code's calls run in.
 		r.jitShareContexts(idx, f)
 	}
-	if err != nil || r.stopped != nil || e.reoptDue() || e.ssa != run.code {
+	if err != nil || r.stopped != nil || e.reoptDue() || e.ssa != code {
 		s.goPending = jitGoPending{set: true, pc: pc, ctx: idx, v: v, err: err}
 		return false
 	}
@@ -1978,7 +1997,8 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 func (r *Runtime) jitGoPin(idx int) {
 	s := r.jit
 	if run := &s.goRuns[idx]; !run.pinned {
-		run.pinned, run.pinnedAt = true, len(s.goPinned)
+		s.pinSerial++
+		run.pinned, run.pinnedAt, run.serial = true, len(s.goPinned), s.pinSerial
 		s.goPinned = append(s.goPinned, run.code)
 	}
 }
@@ -2016,30 +2036,22 @@ func (r *Runtime) jitEntryOf(cl *closure) *jitEntry {
 // own level.
 func (r *Runtime) jitGoCallNested(ctx *abi.Context, idx int) bool {
 	s := r.jit
-	if idx >= len(s.ssaCtxs) || s.ssaCtxs[idx] != ctx {
+	ctxs := s.ssaCtxs
+	if idx >= len(ctxs) || ctxs[idx] != ctx {
 		return false
 	}
 	root := idx - 1
-	for root >= 0 && s.ssaCtxs[root].Live == abi.LiveCall {
+	for root >= 0 && ctxs[root].Live == abi.LiveCall {
 		root--
 	}
-	if root < 0 || s.ssaCtxs[root].Live != 0 || root >= len(s.goRuns) || s.goRuns[root].f == nil {
+	if root < 0 || ctxs[root].Live != 0 || root >= len(s.goRuns) || s.goRuns[root].f == nil {
 		return false
-	}
-	run := s.goRuns[root]
-	var e *jitEntry
-	for i := root + 1; i <= idx; i++ {
-		c := s.ssaCtxs[i]
-		cl := (*closure)(c.Closure)
-		if cl == nil {
-			return false
-		}
-		if e = r.jitEntryOf(cl); e == nil || e.ssa == nil || int(c.ExitPC) >= len(cl.fn.Code) {
-			return false
-		}
 	}
 	cl := (*closure)(ctx.Closure)
 	pc, depth := int(ctx.ExitPC), int(ctx.ExitDepth)
+	if cl == nil || pc >= len(cl.fn.Code) {
+		return false
+	}
 	in := cl.fn.Code[pc]
 	n := int(in.A) + 1
 	switch in.Op {
@@ -2053,22 +2065,34 @@ func (r *Runtime) jitGoCallNested(ctx *abi.Context, idx int) bool {
 	if n > abi.MaxGoArgs || depth < n || top+n > len(r.stack) {
 		return false
 	}
-	// The run's code, and each level's, pinned.
-	r.jitGoPin(root)
-	for i := root + 1; i <= idx; i++ {
-		code := r.jitEntryOf((*closure)(s.ssaCtxs[i].Closure)).ssa
-		if !slices.Contains(s.goPinned[s.goRuns[root].pinnedAt:], code) {
-			s.goPinned = append(s.goPinned, code)
-		}
+	// The run's code pinned, and each level's, which is given a frame:
+	// one walk, the levels' entries found once. A level's code pinned for
+	// this run before is known by its entry (pinSerial), not searched for.
+	run := &s.goRuns[root]
+	if !run.pinned {
+		r.jitGoPin(root)
 	}
-	code := e.ssa
-	// The run's frame past the call it makes, and a frame for each level.
-	run.f.pc = uint32(s.ssaCtxs[root].ExitPC) + 1
+	runF, serial := run.f, run.serial
 	depthBefore := r.frameDepth
 	var f *frame
+	var e *jitEntry
 	for i := root + 1; i <= idx; i++ {
-		c := s.ssaCtxs[i]
+		c := ctxs[i]
 		lcl := (*closure)(c.Closure)
+		if lcl == nil {
+			r.frameDepth = depthBefore
+			return false
+		}
+		if e = r.jitEntryOf(lcl); e == nil || e.ssa == nil || int(c.ExitPC) >= len(lcl.fn.Code) {
+			r.frameDepth = depthBefore
+			return false
+		}
+		if e.pinSerial != serial || e.pinCode != e.ssa {
+			if !slices.Contains(s.goPinned[run.pinnedAt:], e.ssa) {
+				s.goPinned = append(s.goPinned, e.ssa)
+			}
+			e.pinSerial, e.pinCode = serial, e.ssa
+		}
 		base := int(c.Base)
 		f = r.pushFrame()
 		f.cl = lcl
@@ -2079,6 +2103,9 @@ func (r *Runtime) jitGoCallNested(ctx *abi.Context, idx int) bool {
 		f.openUpvalues, f.handlers = f.openUpvalues[:0], f.handlers[:0]
 		f.thisRef, f.withScopes, f.evalVars, f.native, f.savedSP = nil, nil, nil, "", 0
 	}
+	code := e.ssa
+	// The run's frame past the call it makes.
+	runF.pc = uint32(ctxs[root].ExitPC) + 1
 	for i := range n {
 		r.stack[top+i] = jitGoArg(ctx, i)
 	}
@@ -2086,22 +2113,24 @@ func (r *Runtime) jitGoCallNested(ctx *abi.Context, idx int) bool {
 	r.stackTop, r.stackHigh = sp, max(r.stackHigh, sp)
 	e.ssaStats.goCalls++
 	s.goCalls++
-	r.jitCallSeen(f, e, pc, sp, in)
-	last, shared, from := s.ssaCtx, s.ssaShared, s.ssaSharedFrom
+	if jitCallUnsettled(e, pc, in) {
+		r.jitCallSeen(f, e, pc, sp, in)
+	}
+	last, shared := s.ssaCtx, s.ssaSharedGen
 	// What the call runs natively runs in contexts past the levels', which
 	// hold their state until they go on.
 	ctxTop := s.ctxTop
 	s.ctxTop = max(ctxTop, idx+1)
 	v, _, err := r.jitCallAt(in, sp)
 	s.ctxTop = ctxTop
-	clear(r.stack[top:sp])
+	jitClearArgs(r.stack, top, sp)
 	r.stackTop = top
 	r.frameDepth = depthBefore
 	s.ssaCtx = last
-	if s.ssaShared != shared || s.ssaSharedFrom != from {
+	if s.ssaSharedGen != shared {
 		// What the call ran shared other values with the contexts past
 		// the run's, which its levels' calls run in.
-		r.jitShareContexts(root, run.f)
+		r.jitShareContexts(root, runF)
 	}
 	if err != nil || r.stopped != nil || e.reoptDue() || e.ssa != code {
 		s.goPending = jitGoPending{set: true, pc: pc, ctx: idx, v: v, err: err}
@@ -2200,6 +2229,25 @@ var jitGoCallWork func()
 
 // GoCalls is ssa.GoFeedback's: the VM answers calls of Go (jitHostCall).
 func (fb *jitFeedback) GoCalls() bool { return true }
+
+// jitCallUnsettled reports whether jitCallSeen has anything to note of a
+// call of Go at pc: not, once the call is settled as one Go makes
+// (jitCallDone) and the code has no inlining pending, unless it constructs
+// (a pool to fill). Most calls of Go are such, a built-in's: asked here,
+// they cost no call.
+func jitCallUnsettled(e *jitEntry, pc int, in bytecode.Instr) bool {
+	return in.Op == bytecode.OpNew || e.inlinePending || uint(pc) >= uint(len(e.callSites)) || e.callSites[pc] != jitCallDone
+}
+
+// jitClearArgs clears the operands a call of Go put past the VM stack's
+// top, from top to sp, so that they keep nothing: a few, each store's
+// write barrier tested in line, which clear's call of the runtime costs
+// more than.
+func jitClearArgs(stack []Value, top, sp int) {
+	for i := top; i < sp; i++ {
+		stack[i] = Value{}
+	}
+}
 
 // jitGoArg is a call of Go's operand i (abi.Context's GoArgs).
 func jitGoArg(ctx *abi.Context, i int) Value {
@@ -4492,6 +4540,7 @@ func (r *Runtime) jitShareContexts(idx int, f *frame) {
 		c.StringProto, c.StringShape, c.CharCodeAtOffset = unsafe.Pointer(sh.strProto), uint64(uintptr(unsafe.Pointer(sh.strShape))), sh.ccOffset
 	}
 	s.ssaShared, s.ssaSharedFrom = sh, idx
+	s.ssaSharedGen++
 }
 
 // jitContexts is how many contexts are made at a time: one for each
@@ -4545,6 +4594,7 @@ func (r *Runtime) jitGrowContexts() bool {
 	}
 	if s.ssaShared.levelLimit == uint64(old) {
 		s.ssaShared.levelLimit = n
+		s.ssaSharedGen++
 	}
 	return true
 }

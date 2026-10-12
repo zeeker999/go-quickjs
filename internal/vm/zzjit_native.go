@@ -260,6 +260,11 @@ type jitEntry struct {
 	// ssaRuns is how many runs of its code Go is inside (runSSAIn): one may
 	// go on in it after a native call, so the cache keeps it (inUse).
 	ssaRuns int32
+	// pinCode is the code a call of Go from a native callee last pinned for
+	// the run whose pins pinSerial names (jitGoRun's serial): a later call
+	// from that callee in that run finds it pinned without a search.
+	pinCode   *jit.SSACode
+	pinSerial uint64
 	// nativeCalls are the calls the code makes natively, or will when
 	// compiled again, each with the function it was seen to call.
 	nativeCalls []jitInline
@@ -324,9 +329,11 @@ type jitState struct {
 	// whose caller was itself a level Go was finishing (jitUnwindNative).
 	resumed, resumedLevels uint64
 	// ssaShared is what the contexts from ssaSharedFrom on hold of what
-	// they share (jitShareContexts).
+	// they share (jitShareContexts); ssaSharedGen counts the times either
+	// changed, which a call of Go compares, not the struct.
 	ssaShared     jitShared
 	ssaSharedFrom int
+	ssaSharedGen  uint64
 	// arena holds the code of every entry: a few mappings, however many
 	// functions the runtime compiles.
 	arena *jit.Arena
@@ -404,6 +411,7 @@ type jitState struct {
 	// Go that made the call and left the rest to Go, at its exit; goCalls
 	// counts the calls Go made so.
 	goCalls    uint64
+	pinSerial  uint64
 	goRuns     []jitGoRun
 	goPinned   []*jit.SSACode
 	retired    []jitRetired
