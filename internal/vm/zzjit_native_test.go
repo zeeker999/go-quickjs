@@ -4799,6 +4799,42 @@ func TestJITSSAStoreOverLiveCell(t *testing.T) {
 	}
 }
 
+// A function of more literals than a context has keep cells
+// (abi.MaxKeeps): each takes its cell when the code is planned, and one
+// past the last is Go's from the plan on. Taken only when it was built, a
+// literal past the last was dropped -- planning had made no exit for it --
+// and what followed took the value its slot held before: a wrong sum, or
+// a method of the wrong object.
+func TestJITSSAKeepCellsRunOut(t *testing.T) {
+	for _, body := range []string{
+		"c+=[N][0];\n",
+		"c+=[N][0];c+=String(c).length;\n",
+	} {
+		var b strings.Builder
+		b.WriteString("function f(){var c=0;\n")
+		for i := 0; i < 300; i++ {
+			b.WriteString(strings.ReplaceAll(body, "N", strconv.Itoa(i)))
+		}
+		b.WriteString("return c}\nvar t=0;for(var k=0;k<12;k++)t+=f();t")
+		src := b.String()
+		want := New(Config{})
+		wv, err := want.Run(compileForTest(t, src))
+		want.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := jitRuntimeForTest(t, Config{JIT: true})
+		r.jitCallThreshold = jitHotCalls
+		v, err := r.Run(compileForTest(t, src))
+		if err != nil || v.Number() != wv.Number() {
+			t.Fatalf("%q: %v, %v; interpreter %v", body, v, err, wv)
+		}
+		if r.jit == nil || r.jit.ssaEntries == 0 {
+			t.Fatalf("%q: no native code ran", body)
+		}
+	}
+}
+
 // A value kept before a store (ssa's keep.go) that goes round a loop is
 // kept again at the store from its own keep cell, whose pointer word is
 // read before the cell is written: here o, the object stored to, once its

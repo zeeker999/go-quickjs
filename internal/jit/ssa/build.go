@@ -505,6 +505,9 @@ type builder struct {
 	// on to the next instruction's.
 	calls   map[int][]*CallSite
 	frameOf []*frame
+	// literals are the literals made natively, by PC, each with the keep
+	// cell planning gave it (literal).
+	literals map[int]literalKeep
 
 	entryPCs []int
 	blockAt  []*Block // by the PC a block starts at
@@ -569,7 +572,7 @@ func (b *builder) hostOf(pc int) bool {
 		_, ok := b.global(pc)
 		return !ok
 	case ir.ObjectLiteral, ir.ArrayLiteral:
-		_, ok := b.literal(pc)
+		_, _, ok := b.literal(pc)
 		return !ok
 	case ir.StringConst:
 		_, ok := b.stringCell(pc)
@@ -588,15 +591,39 @@ func (b *builder) hostOf(pc int) bool {
 	return false
 }
 
+// literalKeep is a literal's site and the keep cell its object is kept in,
+// or -1 for a literal Go makes.
+type literalKeep struct {
+	site LiteralSite
+	keep int
+}
+
 // literal is the site of the object literal at pc (LiteralFeedback), if
-// its code may make it natively: a keep cell left for its object.
-func (b *builder) literal(pc int) (LiteralSite, bool) {
-	f, ok := b.fb.(LiteralFeedback)
-	if !ok || b.f.Keeps >= abi.MaxKeeps || b.cur != b.root {
-		return LiteralSite{}, false
+// its code may make it natively, and the keep cell its object is kept in.
+// The cell is taken the first time planning asks (host), and the answer
+// kept: planning and building must agree, and a cell taken only when the
+// literal was built -- after the calls before it had taken theirs -- could
+// be one too many, the literal then left to Go where planning had made no
+// exit for it, and the literal not made at all.
+func (b *builder) literal(pc int) (LiteralSite, int, bool) {
+	if b.cur != b.root {
+		return LiteralSite{}, -1, false
 	}
-	k, ok := f.Literal(pc)
-	return k, ok && k.Pool != 0
+	if k, ok := b.literals[pc]; ok {
+		return k.site, k.keep, k.keep >= 0
+	}
+	k := literalKeep{keep: -1}
+	if f, ok := b.fb.(LiteralFeedback); ok && b.f.Keeps < abi.MaxKeeps {
+		if site, ok := f.Literal(pc); ok && site.Pool != 0 {
+			k = literalKeep{site: site, keep: b.f.Keeps}
+			b.f.Keeps++
+		}
+	}
+	if b.literals == nil {
+		b.literals = map[int]literalKeep{}
+	}
+	b.literals[pc] = k
+	return k.site, k.keep, k.keep >= 0
 }
 
 // reloadUpvalues has each of the function's captured bindings be its cell's
@@ -714,8 +741,10 @@ type frame struct {
 	parent  *frame
 	depth   int
 	inlined map[int]*frame
-	// receiver is an inlined construction's object, its result.
+	// receiver is an inlined construction's object, its result, and keep
+	// the cell it is kept in, taken when the inlining was decided.
 	receiver *Value
+	keep     int
 	// args are the arguments the call gave it, which a call it forwards
 	// them to is given (InlineSite's Forward).
 	args []*Value
@@ -797,10 +826,16 @@ func (b *builder) inlineAt(pc int, total *int) (*frame, bool) {
 	if b.nslots+q.Locals+q.StackSize > abi.MaxRecords {
 		return nil, false
 	}
-	nslots, before, inlines := b.nslots, *total, b.inlines
+	nslots, before, inlines, keeps := b.nslots, *total, b.inlines, b.f.Keeps
 	*total += len(site.Program.Code)
 	fr := &frame{p: q, fb: site.Feedback, site: site, result: b.cur.base + b.p.Locals + after - 1, base: b.nslots,
-		parent: b.cur, depth: b.cur.depth + 1, nest: b.cur.nest + 1}
+		parent: b.cur, depth: b.cur.depth + 1, nest: b.cur.nest + 1, keep: -1}
+	if site.Construct {
+		// Its receiver's keep cell, taken now, as a literal's is
+		// (literal): the inlining is decided now.
+		fr.keep = b.f.Keeps
+		b.f.Keeps++
+	}
 	if site.Restart {
 		// A forwarding constructor is its call of the method it forwards
 		// to: it does not count toward how deep calls are inlined.
@@ -818,7 +853,7 @@ func (b *builder) inlineAt(pc int, total *int) (*frame, bool) {
 			child, ok := b.inlineAt(at, total)
 			if !ok {
 				b.enter(cur)
-				b.nslots, *total, b.inlines = nslots, before, inlines
+				b.nslots, *total, b.inlines, b.f.Keeps = nslots, before, inlines, keeps
 				return nil, false
 			}
 			if fr.inlined == nil {
@@ -961,8 +996,7 @@ func (b *builder) inlineCall(blk *Block, pc int, fr *frame, guard func(Op, Type,
 		call := guard(OpCall, Tagged, ir.HostExit, args...)
 		call.Calls = []*CallSite{{Callee: site.Callee, Argc: site.Argc, ThisSlot: -1, Pool: site.Pool,
 			ProtoIndex: site.ProtoIndex, ProtoKey: site.ProtoKey, Receiver: true}}
-		call.Index = b.f.Keeps
-		b.f.Keeps++
+		call.Index = fr.keep
 		cell := b.f.newValue(blk, OpCallCell, Source, call)
 		fr.receiver = b.f.newValue(blk, OpKept, Tagged, cell, call)
 		fr.receiver.Shadow = cell
@@ -2080,7 +2114,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 		// The pool's next object, kept in a cell as a construction's
 		// receiver is: nothing runs. An array's elements are the operands
 		// (CallSite's Argc of them), written into it.
-		site, ok := b.literal(pc)
+		site, keep, ok := b.literal(pc)
 		if !ok {
 			blk.ExitKind = ir.HostExit
 			blk.State = state()
@@ -2096,8 +2130,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 		}
 		call := guard(OpCall, Tagged, ir.HostExit, elems...)
 		call.Calls = []*CallSite{{Pool: site.Pool, Alloc: true, Literal: true, Argc: len(elems), ThisSlot: -1}}
-		call.Index = b.f.Keeps
-		b.f.Keeps++
+		call.Index = keep
 		cell := f.newValue(blk, OpCallCell, Source, call)
 		r := f.newValue(blk, OpKept, Tagged, cell, call)
 		r.Shadow = cell
