@@ -238,6 +238,13 @@ const jitPropertyCases = 4
 // IntersectionInfo has more.
 func (r *Runtime) jitPolySeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) {
 	recv := r.stack[sp-1]
+	if recv.IsString() && in.Op == bytecode.OpGetPropThis && !slices.Contains(e.strSites, uint32(pc)) {
+		// A string's method: read off String.prototype by the code
+		// compiled again, as for a shape the read had not met.
+		e.strSites = append(e.strSites, uint32(pc))
+		e.polyPending, e.polySettled = true, 0
+		return
+	}
 	if !recv.IsObject() || int(in.A) >= len(f.cl.names) {
 		return
 	}
@@ -3457,6 +3464,50 @@ func (fb *jitFeedback) lexGlobal(name Atom, env *Object, write bool) (ssa.Global
 	return site, true
 }
 
+// StringProperty is ssa.StringFeedback's: where String.prototype has the
+// method a read at pc names, for a read whose receivers have been strings
+// (jitEntry.strSites) and objects never -- one that has met objects reads
+// them as their cache says. A read whose cache knows nothing is taken for
+// a string's, as V8 takes what its feedback says, if String.prototype has
+// the method and Object.prototype does not: the interpreter's cache holds
+// no string, so a string's method read would otherwise be learned at an
+// exit, and the function compiled again, at each such read in turn --
+// RegExp's run blocks, of hundreds of instructions, had dozens. An object
+// that meets it leaves native code once, and the read is compiled again
+// for its shape (jitPolySeen), as for a cache that knew nothing. The code
+// checks the receiver is a string, and String.prototype's shape and the
+// key at the index.
+func (fb *jitFeedback) StringProperty(pc int) (ssa.PropertySite, bool) {
+	e := fb.e
+	if e == nil || fb.cl == nil || pc >= len(fb.fn.Code) {
+		return ssa.PropertySite{}, false
+	}
+	in := fb.fn.Code[pc]
+	if in.Op != bytecode.OpGetPropThis || int(in.A) >= len(fb.cl.names) || int(in.B) >= len(fb.cl.ic) {
+		return ssa.PropertySite{}, false
+	}
+	c := &fb.cl.ic[in.B]
+	if c.shape != nil && c.shape != noShape || slices.ContainsFunc(e.poly, func(p jitPolySite) bool { return int(p.pc) == pc }) {
+		return ssa.PropertySite{}, false
+	}
+	key, proto := fb.cl.names[in.A], fb.r.proto.str
+	if key.IsIndex() || key == atomLength || proto == nil {
+		return ssa.PropertySite{}, false
+	}
+	if !slices.Contains(e.strSites, uint32(pc)) &&
+		(c.fills != 0 || fb.r.proto.object == nil || fb.r.proto.object.findOwn(key) >= 0) {
+		return ssa.PropertySite{}, false
+	}
+	sh := fb.r.ensureProtoShape(proto)
+	i := proto.findOwn(key)
+	if sh == nil || sh == noShape || i < 0 || proto.props[i].flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 {
+		return ssa.PropertySite{}, false
+	}
+	k := fb.keep()
+	k.shapes = append(k.shapes, remember(sh))
+	return ssa.PropertySite{Key: uint32(key), Shape: uintptr(unsafe.Pointer(sh)), Index: i}, true
+}
+
 func (fb *jitFeedback) Property(pc int) (ssa.PropertySite, bool) {
 	site, ok := fb.property(pc)
 	deep := false
@@ -4344,8 +4395,8 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 // it was called from (abi.Context): where the global names are, the
 // VM's stack, how deep calls may go.
 type jitShared struct {
-	global, lexNames, globalLex, stackBase unsafe.Pointer
-	stackEnd, levelLimit                   uint64
+	global, lexNames, globalLex, strMethods, stackBase unsafe.Pointer
+	stackEnd, levelLimit                               uint64
 	// charCodeAt is String.prototype.charCodeAt as native code calls it
 	// (jitStringMethod), which every level's code reads in its own
 	// context: written only into a run's own, a native callee's charCodeAt
@@ -4379,6 +4430,9 @@ func (r *Runtime) jitShareContexts(idx int, f *frame) {
 		// scope is the realm's (globalLexProp).
 		sh.globalLex = unsafe.Pointer(r.globalLex)
 	}
+	if p := r.proto.str; p != nil {
+		sh.strMethods = unsafe.Pointer(p)
+	}
 	if m := r.jitStringMethod(); m.IsObject() {
 		sh.charCodeAt = m.Object()
 		if p := r.proto.str; p.shape != nil {
@@ -4399,7 +4453,7 @@ func (r *Runtime) jitShareContexts(idx int, f *frame) {
 		c.StackBase, c.StackEnd = sh.stackBase, sh.stackEnd
 		c.StackTop, c.StackHigh = &r.stackTop, &r.stackHigh
 		c.BackEdges = &r.backEdges
-		c.Global, c.LexNames, c.GlobalLex = sh.global, sh.lexNames, sh.globalLex
+		c.Global, c.LexNames, c.GlobalLex, c.StringMethods = sh.global, sh.lexNames, sh.globalLex, sh.strMethods
 		*(*Value)(unsafe.Pointer(&c.CharCodeAt)) = Value{}
 		if sh.charCodeAt != nil {
 			*(*Value)(unsafe.Pointer(&c.CharCodeAt)) = Obj(sh.charCodeAt)
@@ -4451,6 +4505,7 @@ func (r *Runtime) jitGrowContexts() bool {
 			c.Level, c.LevelLimit = uint64(i), n
 			c.StackBase, c.StackEnd, c.StackTop, c.StackHigh = last.StackBase, last.StackEnd, last.StackTop, last.StackHigh
 			c.BackEdges, c.Global, c.LexNames, c.GlobalLex = last.BackEdges, last.Global, last.LexNames, last.GlobalLex
+			c.StringMethods = last.StringMethods
 			c.CharCodeAt = last.CharCodeAt
 			c.StringProto, c.StringShape, c.CharCodeAtOffset = last.StringProto, last.StringShape, last.CharCodeAtOffset
 		case c.LevelLimit == uint64(old):

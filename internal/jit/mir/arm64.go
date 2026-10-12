@@ -2868,6 +2868,25 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.Load(a64B, a64Ctx, abi.OffCharCodeAtOffset)
 		c.a.Op(arm64.Add, a64A, a64A, a64B, true)
 		c.setG(v, a64A)
+	case ssa.OpStringProp:
+		// As amd64's: a string's method where String.prototype has it, its
+		// shape the one the code was compiled for.
+		c.a.MovImm(a64B, c.enc.String)
+		c.a.Cmp(c.gpr(arg(0), a64A), a64B, true)
+		guard(arm64.NE)
+		c.a.Load(a64A, a64Ctx, abi.OffStringMethods)
+		c.a.Cbz(a64A, c.stubLabel(v.State, exitKind(v.Aux)), true)
+		c.a.Load(a64B, a64A, c.enc.ObjectShape)
+		c.a.MovImm(a64C, v.Const.Bits)
+		c.a.Cmp(a64B, a64C, true)
+		guard(arm64.NE)
+		c.a.Load(a64A, a64A, c.enc.ObjectProps)
+		c.a.AddImm(a64A, a64A, int64(int32(v.Index)*c.enc.PropertySize), true)
+		c.a.LoadU32(a64B, a64A, c.enc.PropertyKey)
+		c.a.CmpImm(a64B, int64(v.Key), false)
+		guard(arm64.NE)
+		c.a.AddImm(a64A, a64A, int64(c.enc.PropertyValue), true)
+		c.setG(v, a64A)
 	case ssa.OpStringCode:
 		c.stringCode(v, c.guardFor(v))
 	case ssa.OpLoadCell:

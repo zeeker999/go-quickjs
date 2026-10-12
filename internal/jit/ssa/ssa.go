@@ -116,7 +116,12 @@ const (
 	// OpStringCode is a call of it: the code unit at an index of a flat
 	// string, if the callee is the intrinsic.
 	OpStringMethod // tagged -> source
-	OpStringCode   // tagged callee, tagged string, f64 index -> f64
+	// A string's property, a method, where String.prototype has it
+	// (abi.Context.StringMethods): its cell at Index, if the operand is a
+	// string, String.prototype's shape is Const's, the one the code was
+	// compiled for, and the entry at Index is Key's.
+	OpStringProp // tagged -> source
+	OpStringCode // tagged callee, tagged string, f64 index -> f64
 
 	// Boxing: a typed value as a slot value.
 	OpBoxF64
@@ -272,13 +277,13 @@ var opNames = [...]string{
 	OpUnboxF64: "unbox", OpTruth: "truth", OpCheckInit: "checkinit", OpBoxF64: "boxf", OpBoxBool: "boxb",
 	OpArrayOf: "arrayof", OpElemKey: "elemkey", OpElemRead: "elemread", OpElemWrite: "elemwrite", OpElemCell: "elemcell", OpLength: "length",
 	OpObjectOf: "objectof", OpPropRead: "propread", OpPropWrite: "propwrite", OpPropCell: "propcell", OpLoadCell: "loadcell", OpGlobalCell: "globalcell", OpLexCell: "lexcell",
-	OpStringMethod: "stringmethod", OpStringCode: "stringcode",
+	OpStringMethod: "stringmethod", OpStringProp: "stringprop", OpStringCode: "stringcode",
 	OpAddF64: "addf", OpSubF64: "subf", OpMulF64: "mulf", OpDivF64: "divf", OpModF64: "modf", OpNegF64: "negf", OpCmpF64: "cmpf",
 	OpNot: "not", OpStrictNullish: "strictnullish", OpLooseNullish: "loosenullish", OpEqTagged: "eqtagged", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
 	OpSameObject: "sameobject", OpFrameRoom: "frameroom", OpKeepRef: "keepref", OpKeep: "keep", OpKept: "kept",
 	OpCall: "call", OpCallCell: "callcell", OpSqrtF64: "sqrtf", OpAbsF64: "absf", OpInstanceOf: "instanceof", OpTypeIs: "typeis",
-	OpCheckTrue: "checktrue", OpConstCell: "constcell", OpUpvalueCell: "upvaluecell", OpPowF64: "powf",
+	OpCheckTrue: "checktrue", OpConstCell: "constcell", OpUpvalueCell: "upvaluecell", OpUpvalueStale: "upvaluestale", OpPowF64: "powf",
 	OpMaxF64: "maxf", OpMinF64: "minf", OpFloorF64: "floorf", OpCeilF64: "ceilf", OpTruncF64: "truncf", OpRoundF64: "roundf",
 	OpSignF64: "signf", OpFroundF64: "froundf", OpMathCall: "mathcall",
 }
@@ -294,7 +299,7 @@ func (o Op) String() string {
 func (o Op) isGuard() bool {
 	switch o {
 	case OpUnboxF64, OpTruth, OpCheckInit, OpModF64, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite, OpElemCell, OpLength,
-		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell, OpLexCell, OpStringMethod, OpStringCode, OpLooseNullish, OpEqTagged,
+		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell, OpLexCell, OpStringMethod, OpStringProp, OpStringCode, OpLooseNullish, OpEqTagged,
 		OpSameObject, OpFrameRoom, OpCall, OpInstanceOf, OpTypeIs, OpCheckTrue, OpPowF64:
 		return true
 	}
@@ -306,7 +311,7 @@ func (o Op) isGuard() bool {
 // (An array's length and an object's shape change only in Go.)
 func (o Op) readsMemory() bool {
 	return o == OpElemRead || o == OpElemWrite || o == OpElemCell || o == OpPropRead || o == OpPropWrite || o == OpPropCell ||
-		o == OpGlobalCell || o == OpLexCell || o == OpKeep || o == OpCall
+		o == OpGlobalCell || o == OpLexCell || o == OpStringProp || o == OpKeep || o == OpCall
 }
 
 // Value is one SSA value.

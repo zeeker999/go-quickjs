@@ -3109,6 +3109,26 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.Load(scratchB, regCtx, abi.OffCharCodeAtOffset)
 		c.a.Op(amd64.Add, scratchA, scratchB, true)
 		c.setG(v, scratchA)
+	case ssa.OpStringProp:
+		// A string's method where String.prototype has it, its shape the
+		// one the code was compiled for, which says where.
+		c.a.MovImm(scratchB, c.enc.String)
+		c.a.Op(amd64.Cmp, c.gpr(arg(0), scratchA), scratchB, true)
+		guard(amd64.CondNE)
+		c.a.Load(scratchA, regCtx, abi.OffStringMethods)
+		c.a.Op(amd64.Test, scratchA, scratchA, true)
+		guard(amd64.CondE)
+		c.a.Load(scratchB, scratchA, c.enc.ObjectShape)
+		c.a.MovImm(scratchC, v.Const.Bits)
+		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+		guard(amd64.CondNE)
+		c.a.Load(scratchA, scratchA, c.enc.ObjectProps)
+		c.a.OpImm(amd64.Add, scratchA, int32(v.Index)*c.enc.PropertySize, true)
+		c.a.LoadU32(scratchB, scratchA, c.enc.PropertyKey)
+		c.a.OpImm(amd64.Cmp, scratchB, int32(v.Key), false)
+		guard(amd64.CondNE)
+		c.a.OpImm(amd64.Add, scratchA, c.enc.PropertyValue, true)
+		c.setG(v, scratchA)
 	case ssa.OpStringCode:
 		c.stringCode(v, c.guardFor(v))
 	case ssa.OpLoadCell:

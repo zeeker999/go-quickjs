@@ -824,6 +824,49 @@ func TestJITSSACallExits(t *testing.T) {
 // charCodeAt is still the intrinsic: ASCII strings, strings with code units
 // past ASCII, a rope, an empty string, and, after a script replaces
 // String.prototype.charCodeAt, the replacement, which Go calls.
+// A string's methods are read natively where String.prototype has them
+// (ssa.OpStringProp), and called by a call of Go: a loop calling replace,
+// split or indexOf on a string leaves native code at none of its reads --
+// it had at every one, and was no longer entered after 64 -- whether the
+// read's cache knew nothing (taken for a string's, jitFeedback's
+// StringProperty) or the read learned it at an exit. A method replaced
+// meanwhile is the one called; a method String.prototype's shape no
+// longer says is where it was, and a read that meets an array, leave for
+// Go, which reads it. Every answer is the interpreter's.
+func TestJITSSAStringMethods(t *testing.T) {
+	for _, tc := range []struct {
+		source string
+		native bool
+	}{
+		{`function f(re,s,n){let c=0;for(let i=0;i<n;i++)c+=s.replace(re,'x').length;return c}f(/b+/g,'abbc',1000)`, true},
+		{`function f(s,n){let c=0;for(let i=0;i<n;i++)c+=s.split(',').length+s.indexOf('c');return c}f('a,b,c',1000)`, true},
+		{`function f(s,n){let c=0;for(let i=0;i<n;i++)c+=s.slice(i%3).length+s.toUpperCase().charCodeAt(0);return c}f('abc',1000)`, false},
+		{`function f(s,n){let c=0;for(let i=0;i<n;i++)c+=s.slice(i%3).length+s.toUpperCase().length;return c}f('abc',1000)`, true},
+		{`function seven(){return 7}function swap(){String.prototype.indexOf=seven}
+			function f(s,n){let c=0;for(let i=0;i<n;i++){if(i===500)swap();c+=s.indexOf('b')}return c}
+			let saved=String.prototype.indexOf;let r=f('abc',1000);String.prototype.indexOf=saved;r`, false},
+		{`function grow(){String.prototype.extra=1}
+			function f(s,n){let c=0;for(let i=0;i<n;i++){if(i===500)grow();c+=s.indexOf('b')}return c}f('abc',1000)`, false},
+		{`function f(xs,n){let c=0;for(let i=0;i<n;i++)c+=xs[i%2].indexOf('b');return c}f(['abc',['a','b']],1000)`, false},
+		{`function f(s,n){let c=0;for(let i=0;i<n;i++)c+=s.toString().length;return c}f('abc',1000)`, false},
+	} {
+		want := New(Config{})
+		wv, err := want.Run(compileForTest(t, tc.source))
+		want.Close()
+		if err != nil {
+			t.Fatalf("interpreter: %v; %s", err, tc.source)
+		}
+		r := jitRuntimeForTest(t, Config{JIT: true})
+		v, err := r.Run(compileForTest(t, tc.source))
+		if err != nil || v.Number() != wv.Number() {
+			t.Fatalf("JIT %v, %v; interpreter %v; %s", v, err, wv, tc.source)
+		}
+		if r.jit == nil || r.jit.ssaEntries == 0 || tc.native && (r.jit.hosts != 0 || r.jit.guards != 0 || r.jit.interpreted != 0) {
+			t.Fatalf("not native: %+v; %s", r.JITStats(), tc.source)
+		}
+	}
+}
+
 func TestJITSSAStrings(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")

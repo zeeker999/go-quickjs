@@ -427,7 +427,7 @@ const upvalueKey = ^uint32(1)
 // may reports whether a store through key may write the cell at s.
 func (a *aliases) may(key uint32, s *Value) bool {
 	switch s.Op {
-	case OpPropCell, OpGlobalCell, OpLexCell:
+	case OpPropCell, OpGlobalCell, OpLexCell, OpStringProp:
 		return key == anyKey || s.Key == key
 	case OpElemCell:
 		// No property store writes an element; a call's callee may, or

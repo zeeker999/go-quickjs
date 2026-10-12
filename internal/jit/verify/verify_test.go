@@ -174,7 +174,8 @@ func randomProgram(r *rand.Rand) *ir.Program {
 }
 
 // globals is feedback that has found every global binding, a script's
-// lexical binding at odd PCs, so that the code of both cells is checked.
+// lexical binding at odd PCs, and every method read's receivers strings,
+// so that the code of those cells is checked.
 type globals struct{}
 
 func (globals) Property(int) (ssa.PropertySite, bool) { return ssa.PropertySite{}, false }
@@ -185,6 +186,11 @@ func (globals) Generic(int) bool                  { return false }
 func (globals) EntryGeneric(int) bool             { return false }
 func (globals) Inline(int) (ssa.InlineSite, bool) { return ssa.InlineSite{}, false }
 func (globals) NativeCalls(int) []ssa.CallSite    { return nil }
+
+// StringProperty has every method read take its receivers for strings.
+func (globals) StringProperty(pc int) (ssa.PropertySite, bool) {
+	return ssa.PropertySite{Key: 9, Shape: 0x10000 + uintptr(pc), Index: int32(pc % 7)}, true
+}
 
 // The backend's code (internal/jit/mir) keeps the rules, for every function
 // its random and JavaScript corpora compile.
@@ -241,7 +247,7 @@ func TestMirEmitted(t *testing.T) {
 		t.Fatalf("only %d functions compiled", n)
 	}
 	t.Logf("%d functions; checked %v bytes, %v instructions", n, checkedBytes, checkedInsts)
-	if cells[ssa.OpGlobalCell] == 0 || cells[ssa.OpLexCell] == 0 {
-		t.Fatalf("global cells %d, lexical cells %d", cells[ssa.OpGlobalCell], cells[ssa.OpLexCell])
+	if cells[ssa.OpGlobalCell] == 0 || cells[ssa.OpLexCell] == 0 || cells[ssa.OpStringProp] == 0 {
+		t.Fatalf("global cells %d, lexical cells %d, string methods %d", cells[ssa.OpGlobalCell], cells[ssa.OpLexCell], cells[ssa.OpStringProp])
 	}
 }

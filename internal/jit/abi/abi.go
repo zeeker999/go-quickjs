@@ -65,6 +65,9 @@ type Context struct {
 	// realm's global scope, and nil otherwise. Go sets all three before
 	// every entry; native code only reads them.
 	Global, LexNames, GlobalLex unsafe.Pointer
+	// StringMethods is the realm's String.prototype, where a string's
+	// methods are read (ssa.OpStringProp). Go sets it before every entry.
+	StringMethods unsafe.Pointer
 	// CharCodeAt is String.prototype.charCodeAt, the intrinsic, when Go has
 	// found it still there before an entry of a function that reads it, and
 	// otherwise nothing (a nil pointer word).
@@ -301,7 +304,9 @@ var (
 	OffGlobal    = int32(unsafe.Offsetof(Context{}.Global))
 	OffLexNames  = int32(unsafe.Offsetof(Context{}.LexNames))
 	OffGlobalLex = int32(unsafe.Offsetof(Context{}.GlobalLex))
-	OffCharCode  = int32(unsafe.Offsetof(Context{}.CharCodeAt))
+	// OffStringMethods locates Context's StringMethods.
+	OffStringMethods = int32(unsafe.Offsetof(Context{}.StringMethods))
+	OffCharCode      = int32(unsafe.Offsetof(Context{}.CharCodeAt))
 	// OffStringProto, OffStringShape and OffCharCodeAtOffset locate what a
 	// string's charCodeAt is read with (Context's StringProto).
 	OffStringProto      = int32(unsafe.Offsetof(Context{}.StringProto))

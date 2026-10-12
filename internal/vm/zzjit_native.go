@@ -221,6 +221,10 @@ type jitEntry struct {
 	polyReopt   bool
 	polyPending bool
 	polySettled uint8
+	// strSites are the method reads that met a string receiver, which the
+	// code reads off String.prototype once compiled again
+	// (jitFeedback.StringProperty).
+	strSites []uint32
 	// entryMisses counts the times Go went on in the interpreter, having
 	// found no entry, since the code was compiled; allEntries marks code
 	// to be compiled with every one (jitGoOn).

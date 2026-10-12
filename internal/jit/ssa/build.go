@@ -105,6 +105,25 @@ type LiteralSite struct {
 	Pool uintptr
 }
 
+// StringFeedback is Feedback that knows the property reads whose receivers
+// have been strings (StringProperty): a method's, which String.prototype
+// has as its own data property, by the shape it has (PropertySite's Shape)
+// and the property's index in its table.
+type StringFeedback interface {
+	StringProperty(pc int) (PropertySite, bool)
+}
+
+// stringProperty is the feedback for a method read at pc whose receivers
+// have been strings, if any.
+func (b *builder) stringProperty(pc int) (PropertySite, bool) {
+	f, ok := b.fb.(StringFeedback)
+	if !ok || b.p.Code[pc].Op != ir.ReferenceRead {
+		return PropertySite{}, false
+	}
+	s, ok := f.StringProperty(pc)
+	return s, ok && s.Shape != 0
+}
+
 // LiteralFeedback is Feedback that knows object literals' sites (Literal)
 // and what each of their fields adds (Define): the shape the literal's
 // object has before it and the one after, a PropertyAdd with Define.
@@ -566,6 +585,9 @@ func (b *builder) hostOf(pc int) bool {
 	case ir.Call:
 		return true
 	case ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead:
+		if _, ok := b.stringProperty(pc); ok {
+			return false
+		}
 		_, ok := b.property(pc)
 		return !ok
 	case ir.BindingRead:
@@ -2079,6 +2101,16 @@ func (b *builder) instruction(blk *Block, pc int) {
 		v.Shadow = cell
 		b.assign(in.Dest, blk, v)
 	case ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead:
+		if s, ok := b.stringProperty(pc); ok {
+			// A string's method, read where String.prototype has it, as
+			// V8 reads one off the String map's prototype.
+			cell := guard(OpStringProp, Source, ir.HostExit, operand(in.Left))
+			cell.Const, cell.Index, cell.Key = ir.Value{Bits: uint64(s.Shape)}, int(s.Index), s.Key
+			v := f.newValue(blk, OpLoadCell, Tagged, cell)
+			v.Shadow = cell
+			b.assign(in.Dest, blk, v)
+			break
+		}
 		site, ok := b.property(pc)
 		if !ok {
 			blk.ExitKind = ir.HostExit
