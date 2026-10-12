@@ -2257,6 +2257,10 @@ func TestJITWeakCache(t *testing.T) {
 
 func TestJITCacheBounds(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
+	// Each function's code old by the next's (makeRoom).
+	epoch := uint64(0)
+	defer func(was func() uint64) { jitEpochNow = was }(jitEpochNow)
+	jitEpochNow = func() uint64 { return epoch }
 	template := jitFunctionForTest(t, `function f(n) { var s=0; for(var i=0;i<n;i++) s+=i; return s }`)
 	var functions []*bytecode.Function
 	for i := 0; i < 2*jitCacheEntries; i++ {
@@ -2269,9 +2273,215 @@ func TestJITCacheBounds(t *testing.T) {
 		if len(r.jit.cache) > jitCacheEntries || r.jitCodeBytes() > jitCacheBytes {
 			t.Fatal("cache exceeded limits")
 		}
+		epoch += jitCodeAge
 	}
 	if len(r.jit.cache) != jitCacheEntries {
 		t.Fatal("test did not reach eviction")
+	}
+	runtime.KeepAlive(functions)
+}
+
+// The cache's epochs follow the collector's cycles (jitGCEpoch), as V8 ages
+// code by them, once a runtime has run the JIT, and pass every
+// jitEpochTime besides, for a program that allocates little.
+func TestJITEpochFollowsCollector(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	if _, err := r.Run(compileForTest(t, `function f(n){let s=0;for(let i=0;i<n;i++)s+=i;return s}f(100)`)); err != nil {
+		t.Fatal(err)
+	}
+	if r.jit == nil {
+		t.Fatal("the JIT did not run")
+	}
+	before := jitGCEpoch.Load()
+	for i := 0; i < 100 && jitGCEpoch.Load() < before+2; i++ {
+		runtime.GC()
+		time.Sleep(time.Millisecond)
+	}
+	if jitGCEpoch.Load() < before+2 {
+		t.Fatalf("epoch %d after collections, from %d", jitGCEpoch.Load(), before)
+	}
+	e, gc := r.jit.epoch(), jitGCEpoch.Load()
+	time.Sleep(jitEpochTime + 10*time.Millisecond)
+	if r.jit.epoch()-(jitGCEpoch.Load()-gc) < e+1 {
+		t.Fatal("time does not make an epoch pass")
+	}
+}
+
+// jitChurnSource is a program with more functions run hot enough to be
+// compiled than the JIT's cache holds: a hot core of chains native calls
+// make -- top_c's loop calls mid_c, which calls leaf_c twice, each kept
+// from being inlined by a captured binding -- and a stream of cold
+// functions, each run a few times, then left. round(phases, window) runs
+// every chain in each phase, then the next window of cold functions.
+func jitChurnSource(chains, cold int) string {
+	var b strings.Builder
+	for c := 0; c < chains; c++ {
+		fmt.Fprintf(&b, "var leaf_%d=(function(){let k=%d;return function(x){return (x*3+k)|0}})();\n", c, c)
+		fmt.Fprintf(&b, "var mid_%d=(function(){let k=%d;return function(x){return (leaf_%d(x)+leaf_%d(x+k))|0}})();\n", c, c, c, c)
+		fmt.Fprintf(&b, "function top_%d(n){let t=0;for(let i=0;i<n;i++)t=(t+mid_%d(i))|0;return t}\n", c, c)
+	}
+	for j := 0; j < cold; j++ {
+		fmt.Fprintf(&b, "function cold_%d(n){let t=%d;for(let i=0;i<n;i++)t=(t*31+i+%d)|0;return t}\n", j, j, j)
+	}
+	b.WriteString("var tops=[")
+	for c := 0; c < chains; c++ {
+		fmt.Fprintf(&b, "top_%d,", c)
+	}
+	b.WriteString("],colds=[")
+	for j := 0; j < cold; j++ {
+		fmt.Fprintf(&b, "cold_%d,", j)
+	}
+	b.WriteString(`],next=0;
+function phase(window){let t=0;for(const f of tops)t=(t+f(200))|0;for(let w=0;w<window;w++){const f=colds[next];next=(next+1)%colds.length;for(let k=0;k<10;k++)t=(t+f(20))|0}return t}
+function round(phases,window){let t=0;for(let p=0;p<phases;p++)t=(t+phase(window))|0;return t}
+`)
+	return b.String()
+}
+
+// A hot core of native call chains stays native while a stream of cold
+// functions, more than the cache holds, comes and goes (makeRoom, jitLink):
+// each chain's functions are cached with code at the end of every round,
+// and no call of them leaves for Go (abi.ExitEnter). The cache had dropped
+// a random entry, hot or not, and native callers had called dropped ones
+// through Go at every call.
+func TestJITCacheKeepsHotCode(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	epoch := uint64(0)
+	defer func(was func() uint64) { jitEpochNow = was }(jitEpochNow)
+	jitEpochNow = func() uint64 { return epoch }
+	const chains = 30
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	if _, err := r.Run(compileForTest(t, jitChurnSource(chains, 400))); err != nil {
+		t.Fatal(err)
+	}
+	call := compileForTest(t, `round(10,20)`)
+	for round := 0; round < 6; round++ {
+		entered := uint64(0)
+		if r.jit != nil {
+			entered = r.jit.entered
+		}
+		if _, err := r.Run(call); err != nil {
+			t.Fatal(err)
+		}
+		epoch++
+		if round < 2 {
+			continue
+		}
+		if n := r.jit.entered - entered; n != 0 {
+			t.Fatalf("round %d: %d native calls left for Go", round, n)
+		}
+		for c := 0; c < chains; c++ {
+			for _, name := range []string{"top_%d", "mid_%d", "leaf_%d"} {
+				name = fmt.Sprintf(name, c)
+				fn := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure.fn
+				if e := r.jit.cache[weak.Make(fn)]; e == nil || e.ssa == nil {
+					t.Fatalf("round %d: %s was dropped: %+v", round, name, e)
+				}
+			}
+		}
+	}
+	if r.jit.evicted == 0 && r.jit.refusedRoom == 0 {
+		t.Fatal("the cold functions never filled the cache")
+	}
+}
+
+// BenchmarkJITCacheChurn runs a hot core of native call chains among a
+// stream of cold functions, more than the JIT's cache holds
+// (jitChurnSource): the cost of keeping the hot code native, and of the
+// cold code's compiles.
+func BenchmarkJITCacheChurn(b *testing.B) {
+	if !jitSSABackend {
+		b.Skip("no SSA backend on this architecture")
+	}
+	r := New(Config{JIT: true})
+	defer r.Close()
+	if _, err := r.Run(compileForTest(b, jitChurnSource(30, 600))); err != nil {
+		b.Fatal(err)
+	}
+	call := compileForTest(b, `round(30,20)`)
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := r.Run(call); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// The cache drops the least recently used code to make room, as V8
+// flushes code by its age (makeRoom): code used since -- entered, called
+// natively, or called by the existing tiers that no longer enter it --
+// stays, and the oldest of the rest goes. Code used within jitCodeAge
+// epochs is not dropped for another function's: that one is refused, the
+// cache unchanged, until some is old. A refusal remembered, which holds
+// no code, goes first, young or not.
+func TestJITCacheDropsLeastRecentlyUsed(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	epoch := uint64(0)
+	defer func(was func() uint64) { jitEpochNow = was }(jitEpochNow)
+	jitEpochNow = func() uint64 { return epoch }
+	template := jitFunctionForTest(t, `function f(n) { var s=0; for(var i=0;i<n;i++) s+=i; return s }`)
+	var functions []*bytecode.Function
+	make1 := func() *jitEntry {
+		fn := new(bytecode.Function)
+		*fn = *template
+		functions = append(functions, fn)
+		return r.jitForFunction(fn, nil)
+	}
+	var entries []*jitEntry
+	for range jitCacheEntries {
+		e := make1()
+		if e == nil || e.ssa == nil {
+			t.Fatal("an entry was refused before the cache was full")
+		}
+		entries = append(entries, e)
+	}
+	cached := func(e *jitEntry) bool {
+		for _, c := range r.jit.cache {
+			if c == e {
+				return true
+			}
+		}
+		return false
+	}
+	// All young: no room.
+	if e := make1(); e != nil || len(r.jit.cache) != jitCacheEntries || r.jit.refusedRoom == 0 {
+		t.Fatalf("a function was given room among young code: %+v", e)
+	}
+	// Old now; the even ones used since, each a way.
+	epoch += jitCodeAge
+	for i := 0; i < len(entries); i += 2 {
+		switch i % 6 {
+		case 0:
+			entries[i].starts++
+		case 2:
+			entries[i].link.in++
+		case 4:
+			entries[i].slowCalls++
+		}
+	}
+	for range jitCacheEntries / 2 {
+		if e := make1(); e == nil || e.ssa == nil {
+			t.Fatal("no room made among old code")
+		}
+	}
+	for i, e := range entries {
+		if cached(e) != (i%2 == 0) {
+			t.Fatalf("entry %d (used since: %v) cached: %v", i, i%2 == 0, cached(e))
+		}
+	}
+	// A refusal remembered, young, goes before old code.
+	epoch += jitCodeAge
+	refusal := &jitEntry{link: &jitLink{}, used: epoch, serial: 1 << 40}
+	fn := new(bytecode.Function)
+	*fn = *template
+	functions = append(functions, fn)
+	r.jit.makeRoom(true)
+	r.jit.remember(weak.Make(fn), refusal)
+	if e := make1(); e == nil || cached(refusal) {
+		t.Fatal("a young refusal was kept, or no room made")
 	}
 	runtime.KeepAlive(functions)
 }

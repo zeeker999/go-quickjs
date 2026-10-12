@@ -6,8 +6,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 	"weak"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -316,6 +320,36 @@ type jitEntry struct {
 	deferred      bool
 	generation    uint64
 	calleeRefused bool
+	// used is the cache's epoch (jitState.epoch) at which the entry was
+	// last found used -- its uses (uses) other than at the look before,
+	// seen -- or made; serial orders entries by when they were made. The
+	// cache drops the least recently used to make room (makeRoom).
+	// slowCalls counts the calls the existing tiers made, that did not
+	// enter its code (entrySlow): it is used all the same.
+	used, seen, serial uint64
+	slowCalls          uint64
+}
+
+// uses is how often e's code, or what e knows, was used: Go's entries,
+// into its start or its loops, native callers' calls, the existing
+// tiers' calls that do not enter it. Compiling it again counts some of it
+// afresh: it changes all the same.
+func (e *jitEntry) uses() uint64 {
+	return e.starts + e.ssaStats.entries + e.link.in + e.slowCalls
+}
+
+// staler reports whether the cache drops e before o to make room: one that
+// holds no code -- a refusal remembered, as for each script a host runs
+// once -- before code, which costs a compile to make again; then the one
+// used least recently, as V8 flushes code by its age; then the older.
+func (e *jitEntry) staler(o *jitEntry) bool {
+	if e.holdsCode() != o.holdsCode() {
+		return !e.holdsCode()
+	}
+	if e.used != o.used {
+		return e.used < o.used
+	}
+	return e.serial < o.serial
 }
 
 // jitLink is where native callers call a function's code, as V8's code
@@ -463,6 +497,11 @@ type jitState struct {
 	// markingExits counts the exits the collector's marking made
 	// (abi.Context.ExitMarking), a native callee's included.
 	markingExits uint64
+	// scans counts the cache's looks for an entry to drop (makeRoom),
+	// serial the entries made, evicted those dropped to make room, and
+	// refusedRoom the looks that found every entry young; young is 1 plus
+	// the epoch in which one did, or 0.
+	scans, serial, evicted, refusedRoom, young uint64
 }
 
 // Only selected own reference fields are prepared. The receiver bound keeps
@@ -532,6 +571,97 @@ func (s *jitState) dropEntry(key weak.Pointer[bytecode.Function], e *jitEntry) b
 // a frame is in: the run would find its code gone.
 func (s *jitState) inUse(e *jitEntry) bool {
 	return e.ssaRuns != 0
+}
+
+// makeRoom drops entries the cache holds, the least recently used first
+// (staler), until it has room for one more, and reports whether it has.
+// Each entry is found used in this epoch if its uses changed since the
+// last look, so that a hot function's code, called natively or entered,
+// stays, as a stream of functions each run a while comes and goes -- not
+// a random entry, which had dropped hot native callees. As V8 flushes only
+// code old enough, code used in this epoch or the one before (young,
+// jitCodeAge) is not dropped for another's: the cache has no room for it
+// until some is old, and it runs in the existing tiers -- a program with
+// more hot functions than the cache holds had compiled each at every
+// pass, each dropping the next one it ran. Unless force: then the least
+// recently used goes, whatever its age. Never an entry whose code runs
+// (inUse).
+func (s *jitState) makeRoom(force bool) bool {
+	for len(s.cache) >= jitCacheEntries {
+		s.scans++
+		now := s.epoch()
+		if !force && s.young == now+1 {
+			// Every entry was young at a look in this epoch: still.
+			s.refusedRoom++
+			return false
+		}
+		var victim weak.Pointer[bytecode.Function]
+		var ve *jitEntry
+		for key, e := range s.cache {
+			if s.inUse(e) {
+				continue
+			}
+			if u := e.uses(); u != e.seen {
+				e.seen, e.used = u, now
+			}
+			if ve == nil || e.staler(ve) {
+				victim, ve = key, e
+			}
+		}
+		if ve == nil {
+			return false
+		}
+		if !force && ve.holdsCode() && ve.used+jitCodeAge > now {
+			s.young = now + 1
+			s.refusedRoom++
+			return false
+		}
+		if !s.dropEntry(victim, ve) {
+			return false
+		}
+		s.evicted++
+	}
+	return true
+}
+
+// jitCodeAge is how many epochs code goes unused before the cache may
+// drop it for another function's (makeRoom), and jitEpochTime how long an
+// epoch lasts at most.
+const (
+	jitCodeAge   = 2
+	jitEpochTime = 50 * time.Millisecond
+)
+
+// epoch is the cache's clock (jitEpochNow).
+func (s *jitState) epoch() uint64 { return jitEpochNow() }
+
+// jitGCEpoch counts the collector's cycles, process-wide: a finalizer the
+// collector runs once a cycle counts it and sets itself again
+// (jitArmEpoch), from the first runtime that runs the JIT on.
+var (
+	jitGCEpoch   atomic.Uint64
+	jitEpochOnce sync.Once
+	jitEpochBase = time.Now()
+)
+
+// jitEpochNow is the cache's clock: the collector's cycles (jitGCEpoch), as
+// V8 ages code by them, and, for a program that allocates little -- a
+// numeric kernel, one phase of a program's after another -- each
+// jitEpochTime besides. A variable, which the tests set.
+var jitEpochNow = func() uint64 {
+	return jitGCEpoch.Load() + uint64(time.Since(jitEpochBase)/jitEpochTime)
+}
+
+// jitEpochMark is what the epoch's finalizer is set on: an object with a
+// pointer, so that it is not a tiny allocation, whose finalizer could wait
+// for the objects sharing its block.
+type jitEpochMark struct{ _ *byte }
+
+func jitArmEpoch() {
+	runtime.SetFinalizer(&jitEpochMark{}, func(*jitEpochMark) {
+		jitGCEpoch.Add(1)
+		jitArmEpoch()
+	})
 }
 
 // holdsCode reports whether e has native code, which a cache full of
@@ -677,29 +807,8 @@ func (r *Runtime) jitForFunction(fn *bytecode.Function, cl *closure) *jitEntry {
 				r.jit.dropEntry(key, e)
 			}
 		}
-		if len(r.jit.cache) >= jitCacheEntries {
-			// One that holds no code first -- a refusal remembered, as
-			// for each script a host runs once -- rather than code,
-			// which costs a compile to make again.
-			var victim weak.Pointer[bytecode.Function]
-			var ve *jitEntry
-			for key, e := range r.jit.cache {
-				if r.jit.inUse(e) {
-					continue
-				}
-				if ve == nil || ve.holdsCode() && !e.holdsCode() {
-					victim, ve = key, e
-				}
-				if !e.holdsCode() {
-					break
-				}
-			}
-			if ve != nil && !r.jit.dropEntry(victim, ve) {
-				return nil
-			}
-			if len(r.jit.cache) >= jitCacheEntries {
-				return nil
-			}
+		if !r.jit.makeRoom(false) {
+			return nil
 		}
 	}
 	limit := r.jitAllowance(fn)
@@ -708,9 +817,11 @@ func (r *Runtime) jitForFunction(fn *bytecode.Function, cl *closure) *jitEntry {
 	}
 	if r.jit == nil {
 		r.jit = &jitState{cache: make(map[weak.Pointer[bytecode.Function]]*jitEntry), arena: jit.NewArena(), stressBudget: int(r.jitStress.budget)}
+		jitEpochOnce.Do(jitArmEpoch)
 	}
 	s := r.jit
-	e := &jitEntry{}
+	s.serial++
+	e := &jitEntry{used: s.epoch(), serial: s.serial}
 	s.linkFor(fn, e)
 	if p, err := r.jitLower(fn, jitLowerSSA); err == nil {
 		if cl != nil {
@@ -722,6 +833,10 @@ func (r *Runtime) jitForFunction(fn *bytecode.Function, cl *closure) *jitEntry {
 		case code != nil:
 			e.setSSA(s, fn, p, code, fb)
 			s.compiled++
+			// The compiles of the callees it seeded may have filled the
+			// cache meanwhile: the code compiled, the least recently used
+			// goes.
+			s.makeRoom(true)
 			s.remember(weak.Make(fn), e)
 			r.jitWantedCallees(e, fb)
 			return e
@@ -734,6 +849,7 @@ func (r *Runtime) jitForFunction(fn *bytecode.Function, cl *closure) *jitEntry {
 			e.deferred, e.generation = true, s.generation
 		}
 	}
+	s.makeRoom(true)
 	s.remember(weak.Make(fn), e)
 	return e
 }
@@ -749,6 +865,7 @@ func (r *Runtime) tryJITFrame(f *frame) (Value, error, bool) {
 		return Undefined, nil, false
 	}
 	if e := r.jit.hint(f.cl.hint()); e != nil && e.entrySlow && !e.reoptPending() {
+		e.slowCalls++
 		return Undefined, nil, false
 	}
 	// Cold calls stay in the existing tiers without allocating native state.
