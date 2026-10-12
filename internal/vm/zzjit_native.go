@@ -389,6 +389,10 @@ type jitState struct {
 	unwound uint64
 	// budgetSeed varies the back-edge budget (backEdgeBudget).
 	budgetSeed uint32
+	// pollCredit is how much the budgets calls of Go gave loops (ssa.GoPoll)
+	// added to the back-edge counter: a native stretch's work, estimated
+	// from how far the counter fell (jitSSAProfit), adds it back.
+	pollCredit int
 	// unwinding holds the levels and frames of the native calls Go is
 	// finishing (jitUnwindNative), each unwind's past those of the ones it
 	// runs inside: reused, not allocated each time.

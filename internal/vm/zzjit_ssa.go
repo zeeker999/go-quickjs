@@ -1755,6 +1755,18 @@ func jitHostCall(ctx *abi.Context) bool {
 		return true
 	case ssa.GoCall:
 		return r.jitGoCall(ctx)
+	case ssa.GoPoll:
+		// A debugger's interrupt may stop and show the frames, which the
+		// exit makes; stress (QJS_JIT_STRESS's budget) wants the exits.
+		s := r.jit
+		if r.debug != nil || r.jitStress.budget != 0 {
+			return false
+		}
+		old := r.backEdges
+		r.backEdges = s.backEdgeBudget()
+		s.pollCredit += r.backEdges - old
+		s.budgets++
+		return r.checkInterruptNow() == nil
 	case ssa.GoPow, ssa.GoMath, ssa.GoAtan2, ssa.GoHypot, ssa.GoMod:
 		// Two numbers' bits -- or one, and which function of it -- the
 		// result's in the first's place.
@@ -3791,7 +3803,7 @@ func (r *Runtime) jitSSAProfit(e *jitEntry, ctx *abi.Context, start, edges int) 
 		return
 	}
 	work := uint64(0)
-	if back := edges - r.backEdges; back > 0 {
+	if back := edges - (r.backEdges - r.jit.pollCredit); back > 0 {
 		work = uint64(back) * uint64(e.ssaLoop)
 	}
 	if ctx.ExitKind == abi.ExitHost || ctx.ExitKind == abi.ExitDeopt || ctx.ExitKind == abi.ExitReturn {
@@ -3988,7 +4000,7 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 		s.entries++
 		s.ssaEntries++
 		e.ssaStats.entries++
-		start, edges := pc, r.backEdges
+		start, edges := pc, r.backEdges-s.pollCredit
 		r.jitGoRunAt(idx, f, e)
 		var err error
 		if resume != 0 {

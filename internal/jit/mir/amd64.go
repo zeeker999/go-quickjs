@@ -1656,6 +1656,15 @@ func (c *compiler) edge(from, to, next *ssa.Block) {
 		header := to.Header
 		c.cold = append(c.cold, func() {
 			c.a.Bind(poll)
+			if c.enc.CallGo != 0 {
+				// Go gives the loop another budget (ssa.GoPoll): a native
+				// callee's poll had left native code, and Go finished every
+				// level of its callers.
+				stub := c.stubLabel(header, abi.ExitPoll)
+				c.goSaving(uint64(ssa.GoPoll), &stub)
+				c.a.Jmp(c.labels[to.ID])
+				return
+			}
 			// The phis hold the header's values now; the state names them,
 			// or values live across the loop.
 			c.exitTo(header, abi.ExitPoll)

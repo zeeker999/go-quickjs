@@ -203,6 +203,11 @@ type GoOp uint8
 // GoMod is JavaScript's % of the two operands' number words where they are
 // not integers native code divides (OpModF64), as V8's code calls its
 // fmod: Go writes it to the first's number word.
+//
+// GoPoll is a loop's back edge whose budget ran out: Go gives it another
+// and checks for an interrupt, as V8's code calls its StackGuard, and native
+// code goes on at the loop's header; Go refuses it, for the code to leave
+// there, if one is due.
 const (
 	GoAdd GoOp = 1 + iota
 	GoRefill
@@ -213,6 +218,7 @@ const (
 	GoHypot
 	GoCall
 	GoMod
+	GoPoll
 )
 
 // RefillsPools reports whether a call takes an object from a pool, which

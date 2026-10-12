@@ -5774,8 +5774,8 @@ func TestJITSSAWritesGlobals(t *testing.T) {
 // Every level of native calls Go finishes after the innermost left native
 // code goes on natively where its call returns to, not only the outermost
 // (jitUnwindNative, runSSAIn): top calls mid natively, which calls leaf,
-// whose loop runs the back-edge budget out; Go checks for interrupts and
-// finishes leaf, then mid goes on in its native code, in its own context,
+// whose loop reads a getter, which Go calls; Go finishes leaf, then mid
+// goes on in its native code, in its own context,
 // then top. A throw from leaf, and a frame of a construction, are made as
 // before. Each answer is the interpreter's.
 func TestJITSSAResumesEveryLevel(t *testing.T) {
@@ -5786,7 +5786,8 @@ func TestJITSSAResumesEveryLevel(t *testing.T) {
 	jitcompile.SSAConstruct = true
 	runtime.GC()
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
-	setup := `function leaf(n){let s=0;for(let i=0;i<n;i++)s=(s*3+i)|0;if(n===13)throw new Error("x"+s);return s}
+	setup := `var G={get g(){return 1}};
+		function leaf(n){let s=0;for(let i=0;i<n;i++){s=(s*3+i)|0;if((i&63)===63)s=(s+G.g)|0}if(n===13)throw new Error("x"+s);return s}
 		function mid(n){let t=n,a=n*3,b=n^5,c=n+7,d=n*11,g=n-2;
 			for(let j=0;j<2;j++){t=(t*5+leaf(n+j+(t&3)))|0;t=(t+a+b+c+d+g)|0;a=(a+1)|0;b^=t;c=(c*3)|0;d=(d+b)|0;g=(g^c)|0}
 			return (t+a+b+c+d+g)|0}
@@ -5859,7 +5860,7 @@ func TestJITSSANestedExits(t *testing.T) {
 	for _, name := range []string{"inner", "outer"} {
 		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
 		e := r.jit.cache[weak.Make(cl.fn)]
-		if e == nil || e.ssa == nil || e.ssaStats.entries == 0 {
+		if e == nil || e.ssa == nil || e.ssaStats.entries == 0 && e.nativeIn == 0 {
 			t.Fatalf("%s did not run natively: %+v", name, e)
 		}
 		if name == "outer" && len(cl.fn.Code) > 30 {
@@ -7845,6 +7846,85 @@ func TestJITSSAGoCallsFromNativeCallees(t *testing.T) {
 				t.Fatalf("Go made %d calls for native code, of 400 or more", n)
 			}
 		}
+	}
+}
+
+// A loop whose back-edge budget runs out has Go give it another and check
+// for an interrupt (ssa.GoPoll), as V8's code calls its StackGuard, and
+// goes on natively: leaf, called natively by mid, ran its budget out at
+// every 1,024 or so iterations, and Go finished it and resumed mid, every
+// level unwound -- Crypto's am3 some 700 times a run. An interrupt due --
+// the context cancelled by a Go function mid calls -- still stops the
+// script there, within a budget. Each answer is the interpreter's.
+func TestJITSSAPollsAsCallsOfGo(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	// While the collector marks, Go makes native calls, which would count
+	// as calls leaving native code.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var c={n:0};
+		function leaf(n){let s=0;for(let i=0;i<n;i++){s=(s*3+i)|0;c.n++}return s}
+		function mid(n){let t=0;for(let j=0;j<8;j++){if(j===5&&n<0)cancel();t=(t+leaf(n<0?-n:n))|0}return t}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var at float64
+	for _, rt := range []*Runtime{want, r} {
+		rt.global.setOwnRaw(rt.atoms.intern("cancel"), rt.NewFunction("cancel", 0,
+			func(rt *Runtime, _ Value, _ []Value) (Value, error) {
+				at = rt.global.getOwn(rt.atoms.intern("c")).value.Object().getOwn(rt.atoms.intern("n")).value.num
+				cancel()
+				return Undefined, nil
+			}), propDefault)
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry := func(name string) *jitEntry {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		return r.jit.cache[weak.Make(cl.fn)]
+	}
+	for i := range 4 {
+		wv, err := want.Run(compileForTest(t, `String(mid(5000))`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		unwound, budgets, hosts := uint64(0), uint64(0), uint64(0)
+		if r.jit != nil {
+			unwound, budgets, hosts = r.jit.unwound, r.jit.budgets, r.jit.hosts
+		}
+		gv, err := r.Run(compileForTest(t, `String(mid(5000))`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 3 {
+			if e := entry("leaf"); e == nil || e.ssa == nil || e.nativeIn == 0 {
+				t.Fatalf("leaf was not called natively: %+v", e)
+			}
+			if r.jit.budgets == budgets {
+				t.Fatal("no loop ran its budget out")
+			}
+			if r.jit.unwound != unwound || r.jit.hosts != hosts {
+				t.Fatalf("native code left for Go: %d unwound, %d exits", r.jit.unwound-unwound, r.jit.hosts-hosts)
+			}
+		}
+	}
+	r.SetContext(ctx)
+	_, err := r.Run(compileForTest(t, `String(mid(-5000))`))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled script ended with %v", err)
+	}
+	n := r.global.getOwn(r.atoms.intern("c")).value.Object().getOwn(r.atoms.intern("n")).value.num
+	if n-at > 2*backEdgeCheckInterval {
+		t.Fatalf("leaf ran %v iterations past its interrupt", n-at)
 	}
 }
 
