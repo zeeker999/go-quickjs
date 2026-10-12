@@ -7578,6 +7578,77 @@ func TestJITSSAMathPow(t *testing.T) {
 	}
 }
 
+// A method read whose cache has not filled -- its loop not reached when
+// the function was compiled -- is compiled for the object the instruction
+// before it gives, where that is known: a captured binding's object now,
+// or a RegExp like those a regular expression literal makes, its method
+// found on the prototype as a filled cache would have it. RegExp's
+// runBlock0, compiled in the first of its two dozen loops, had each later
+// loop's re.exec leave native code until it had feedback, and the function
+// compiled again for it, once a loop: fourteen compiles a first run. Here
+// blocks compiles once, and leaves native code at none of its reads -- exec
+// and a prototype's k; a binding later given an object of another shape,
+// or one with k of its own, misses the guess, which the read's checks
+// catch. Each answer is the interpreter's.
+func TestJITSSAKnownReceivers(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function P(){} P.prototype.k=7;
+		function Q(){this.z=1} Q.prototype.k=11;
+		function mk(){var re=/b+/,obj=new P();
+			return {set:function(o,r){obj=o;if(r)re=r},blocks:function(n){let s=0;
+				for(let i=0;i<n;i++)s=(s*3+i)|0;
+				for(let i=0;i<n;i++)s=(s+re.exec('abbc'+i)[0].length)|0;
+				for(let i=0;i<n;i++)s=(s+/c+/.exec('acc'+i)[0].length)|0;
+				for(let i=0;i<n;i++)s=(s+obj.k)|0;
+				return s}}}
+		var m=mk();`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry := func() *jitEntry {
+		o := r.global.getOwn(r.atoms.intern("m")).value.Object()
+		cl := o.getOwn(r.atoms.intern("blocks")).value.Object().fn().closure
+		return r.jit.cache[weak.Make(cl.fn)]
+	}
+	rounds := []string{`m.blocks(400)`, `m.blocks(400)`, `m.blocks(400)`,
+		`(m.set(new Q(),/(b)/),m.blocks(400))`, `m.blocks(400)`, `(m.set({k:5}),m.blocks(400))`, `m.blocks(400)`}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, `String(`+src+`)`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		reopts, hosts := r.jit.reoptimized, r.jit.hosts
+		gv, err := r.Run(compileForTest(t, `String(`+src+`)`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d, %s: got %s, interpreter %s", i, src, got, want)
+		}
+		if i < 3 {
+			e := entry()
+			if e == nil || e.ssa == nil {
+				t.Fatalf("round %d: blocks did not run natively: %+v", i, e)
+			}
+			if n := r.jit.reoptimized - reopts; n != 0 || len(e.poly) != 0 {
+				t.Fatalf("round %d: blocks compiled again %d times, reads learned from exits %v", i, n, e.poly)
+			}
+			if n := r.jit.hosts - hosts; i > 0 && n != 0 {
+				t.Fatalf("round %d: blocks left native code %d times", i, n)
+			}
+		}
+	}
+}
+
 // % of numbers that are not integers native code divides -- fractions, a
 // zero divisor, the infinities, NaN, magnitudes past 2**63 -- is Go's,
 // called from native code (ssa.GoMod), as V8's code calls its fmod: wrap,

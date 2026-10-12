@@ -3794,16 +3794,38 @@ func (fb *jitFeedback) property(pc int) (ssa.PropertySite, bool) {
 // object's table, which gives up past abi.MaxScan properties: Math's
 // methods left native code at every read, and each compile learned one
 // more site, until the compiles ran out.
+//
+// Or the object a captured binding read just before it holds now, or one
+// like a regular expression literal's (jitKnownReceiver), and the property
+// found on it or on its prototypes,
+// as a cache filled by a read of it would have it: re0.exec, in the second
+// of RegExp's runBlock0's two dozen loops, had no feedback when the first
+// loop compiled the function, left native code until it had, and had the
+// function compiled again -- once for each loop, fourteen compiles.
 func (fb *jitFeedback) chainSite(pc int, site ssa.PropertySite) ssa.PropertySite {
 	p := fb.program()
 	if p == nil || len(p.Maps) != len(fb.fn.Code) {
+		return site
+	}
+	in := fb.fn.Code[pc]
+	if recv, ok := fb.r.jitKnownReceiver(fb.cl, p, pc); ok {
+		// Its cache as a read of the object fills it, not the site's own,
+		// which the interpreter fills.
+		var c propCache
+		fb.r.fillPropCache(&c, recv, fb.cl.names[in.A], false)
+		if c.shape == nil || c.shape == noShape || c.getter || c.idx < 0 {
+			return site
+		}
+		if s, ok := fb.siteFrom(in, &c); ok {
+			return s
+		}
 		return site
 	}
 	recv, ok := fb.r.jitChainReceiver(fb.cl, p, pc, jitChainReads)
 	if !ok {
 		return site
 	}
-	sh, in := recv.shape, fb.fn.Code[pc]
+	sh := recv.shape
 	if sh == nil || sh == noShape {
 		return site
 	}
@@ -3815,6 +3837,39 @@ func (fb *jitFeedback) chainSite(pc int, site ssa.PropertySite) ssa.PropertySite
 	k.shapes = append(k.shapes, remember(sh))
 	site.Shape, site.Index = uintptr(unsafe.Pointer(sh)), i
 	return site
+}
+
+// jitKnownReceiver is the object the property read at q of cl's code
+// reads from, as the instruction just before it gives it: the object a
+// captured binding holds now, or a RegExp a regular expression literal
+// makes, one like those it makes -- a guess, which the read's checks test.
+func (r *Runtime) jitKnownReceiver(cl *closure, p *ir.Program, q int) (*Object, bool) {
+	fn := cl.fn
+	if q <= 0 || q >= len(fn.Code) || p.Maps[q].Depth < 0 || p.Maps[q-1].Depth != p.Maps[q].Depth-1 {
+		return nil, false
+	}
+	var v Value
+	switch prev := fn.Code[q-1]; prev.Op {
+	case bytecode.OpGetUpvalue, bytecode.OpGetUpvalueCheck:
+		if int(prev.A) >= len(cl.upvalues) || cl.upvalues[prev.A] == nil {
+			return nil, false
+		}
+		v = cl.upvalues[prev.A].get()
+	case bytecode.OpNewRegExp:
+		if int(prev.A) >= len(fn.Constants) || fn.Constants[prev.A].Kind != bytecode.ConstRegExp {
+			return nil, false
+		}
+		var err error
+		if v, err = r.newRegExpLiteral(&fn.Constants[prev.A]); err != nil {
+			return nil, false
+		}
+	default:
+		return nil, false
+	}
+	if !v.IsObject() {
+		return nil, false
+	}
+	return v.Object(), true
 }
 
 // program is the slot IR program of fb's function, for what its
