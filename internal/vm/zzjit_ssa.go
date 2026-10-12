@@ -1832,6 +1832,33 @@ func jitHostCall(ctx *abi.Context) bool {
 		o := *(**Object)(unsafe.Pointer(&ctx.GoArgs[0].Ref))
 		k, v := math.Float64frombits(ctx.GoArgs[1].Num), Float(math.Float64frombits(ctx.GoArgs[2].Num))
 		return o != nil && jitStoreElem(o, k, v)
+	case ssa.GoTake:
+		// The pool's address, a constant of the code's, which keeps it;
+		// the call's checks found an object in it, made for the
+		// prototype they checked. Native code takes it so while the
+		// collector does not mark (mir's poolTake).
+		pool := *(**abi.ObjectPool)(unsafe.Pointer(&ctx.GoArgs[0].Ref))
+		if pool.Count == 0 {
+			return false
+		}
+		pool.Count--
+		o := (*Object)(pool.Objects[pool.Count])
+		pool.Objects[pool.Count] = nil
+		*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = Obj(o)
+		return true
+	case ssa.GoAddAlong:
+		// The object, whose shape, extensibility, prototypes and room the
+		// code checked, and the shape its transition leads to, which the
+		// code keeps: the entry appended in the room, as native code
+		// appends it while the collector does not mark (mir's addAlong).
+		o := *(**Object)(unsafe.Pointer(&ctx.GoArgs[0].Ref))
+		next := *(**shape)(unsafe.Pointer(&ctx.GoArgs[1].Ref))
+		if len(o.props) == cap(o.props) {
+			return false
+		}
+		o.props = append(o.props, Property{key: Atom(uint32(ctx.GoArgs[0].Num)), flags: propFlags(ctx.GoArgs[0].Num >> 32), value: jitGoArg(ctx, 2)})
+		o.shape = next
+		return true
 	case ssa.GoPoll:
 		// A debugger's interrupt may stop and show the frames, which the
 		// exit makes; stress (QJS_JIT_STRESS's budget) wants the exits.
@@ -1976,7 +2003,11 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	}
 	sp := top + n
 	r.stackTop, r.stackHigh = sp, max(r.stackHigh, sp)
-	e.ssaStats.goCalls++
+	if ctx.GoOp&abi.GoOpMarking == 0 {
+		// A call made through Go only because the collector marks costs
+		// the code nothing it chose (abi.GoOpMarking).
+		e.ssaStats.goCalls++
+	}
 	s.goCalls++
 	if jitCallUnsettled(e, pc, in) {
 		r.jitCallSeen(f, e, pc, sp, in)
@@ -2138,12 +2169,19 @@ framed:
 	}
 	sp := top + n
 	r.stackTop, r.stackHigh = sp, max(r.stackHigh, sp)
-	e.ssaStats.goCalls++
+	marking := ctx.GoOp&abi.GoOpMarking != 0
+	if !marking {
+		e.ssaStats.goCalls++
+	}
 	s.goCalls++
 	if jitCallUnsettled(e, pc, in) {
 		r.jitCallSeen(f, e, pc, sp, in)
 	}
-	r.jitCalleeProfit(e, serial, pc)
+	if !marking {
+		// As at a run's own level, a call made through Go only because the
+		// collector marks is not the code's.
+		r.jitCalleeProfit(e, serial, pc)
+	}
 	last, shared := s.ssaCtx, s.ssaSharedGen
 	// What the call runs natively runs in contexts past the levels', which
 	// hold their state until they go on.
@@ -2155,7 +2193,9 @@ framed:
 	r.stackTop = top
 	r.frameDepth = depthBefore
 	s.ssaCtx = last
-	s.goMark = jitGoMark{serial: serial, edges: r.backEdges - s.pollCredit, hint: e.hint, pc: pc}
+	if !marking {
+		s.goMark = jitGoMark{serial: serial, edges: r.backEdges - s.pollCredit, hint: e.hint, pc: pc}
+	}
 	if s.ssaSharedGen != shared {
 		// What the call ran shared other values with the contexts past
 		// the run's, which its levels' calls run in.
@@ -2422,11 +2462,11 @@ var jitMarking = jit.Marking
 // jitInlineLeft counts an exit from the callee inlined at pc, or from its
 // call's checks: after jitInlineExits the call is not inlined but made
 // natively, if the callee's code allows it, and the code is compiled
-// again. An exit while the collector marks is not counted: native code
-// leaves then wherever it would store a pointer without a write barrier --
-// a construction's receiver adding its properties -- and sixteen such
-// exits in one collection had EarleyBoyer's sc_Pair constructions stop
-// being inlined for good, some runs in three.
+// again. An exit while the collector marks is not counted: native code had
+// left then wherever it would store a pointer without a write barrier --
+// a construction's receiver adding its properties, which Go now does for
+// it -- and sixteen such exits in one collection had EarleyBoyer's sc_Pair
+// constructions stop being inlined for good, some runs in three.
 func (r *Runtime) jitInlineLeft(e *jitEntry, pc int) {
 	if jitMarking() {
 		return
@@ -4275,8 +4315,8 @@ const (
 func (r *Runtime) jitSSAProfit(e *jitEntry, ctx *abi.Context, start, edges int) {
 	st := &e.ssaStats
 	if ctx.ExitMarking != 0 {
-		// A stretch the collector's marking ended -- at a literal or a
-		// native call, which leave for Go while it marks -- says nothing
+		// A stretch the collector's marking ended -- at a native call Go
+		// cannot make for it (mir's markingCall) -- says nothing
 		// of the code, as its exits do not elsewhere (jitInlineLeft,
 		// jitUnwound): through a long marking every iteration left, and
 		// Go stopped entering the code for good, nothing learned to
@@ -4284,6 +4324,7 @@ func (r *Runtime) jitSSAProfit(e *jitEntry, ctx *abi.Context, start, edges int) 
 		// for Go anyway, while the collector happened to mark, is the
 		// code's.
 		st.entries--
+		r.jit.markingExits++
 		return
 	}
 	work := uint64(0)
@@ -4512,6 +4553,13 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 		k := idx
 		for k+1 < len(s.ssaCtxs) && s.ssaCtxs[k+1].Live == abi.LiveCall {
 			k++
+		}
+		if c := s.ssaCtxs[k]; k != idx && c.ExitMarking != 0 {
+			// A native callee's exit the collector's marking made ends
+			// this run's stretch for it, as this code's own would
+			// (jitSSAProfit); its context, which Go does not enter, is
+			// cleared of it here.
+			c.ExitMarking, ctx.ExitMarking = 0, 1
 		}
 		if c := s.ssaCtxs[k]; c.ExitKind == abi.ExitTable {
 			// Asked here, not in Apply: a return, the most common way

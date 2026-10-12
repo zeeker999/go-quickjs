@@ -431,6 +431,9 @@ type jitState struct {
 	// exitScratch is what exits that leave their frames to Go are read
 	// into (jit.ExitScratch).
 	exitScratch jit.ExitScratch
+	// markingExits counts the exits the collector's marking made
+	// (abi.Context.ExitMarking), a native callee's included.
+	markingExits uint64
 }
 
 // Only selected own reference fields are prepared. The receiver bound keeps

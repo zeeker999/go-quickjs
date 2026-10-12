@@ -241,6 +241,19 @@ type GoOp uint8
 // undefined with nothing to ask, the array's chain holding no element and
 // no index, the first operand its pointer word, the key its number word;
 // the read is then from Encoding's UndefinedCell.
+//
+// GoTake takes a pool's next object while the collector marks, as V8's
+// code calls its runtime to allocate: Go clears the pool's cell and keeps
+// the object in the call's keep cell, with its write barrier, where native
+// code, with none, does not. The pool's address is the first operand's
+// pointer word, and the call's checks found an object there.
+//
+// GoAddAlong adds a property along a transition while the collector marks
+// (mir's addAlong), as V8's code calls its write barrier: Go appends the
+// entry to the object's table, which has room, and sets its next shape,
+// with its write barrier. The first operand's pointer word is the object,
+// its number word the entry's key and its flags, past bit 32; the
+// second's pointer word the next shape; the third the value.
 const (
 	GoAdd GoOp = 1 + iota
 	GoRefill
@@ -254,6 +267,8 @@ const (
 	GoPoll
 	GoElemWrite
 	GoElemCell
+	GoTake
+	GoAddAlong
 )
 
 // RefillsPools reports whether a call takes an object from a pool, which

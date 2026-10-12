@@ -189,8 +189,10 @@ type Context struct {
 	GoArgs [MaxGoArgs]GoArg
 	Host   unsafe.Pointer
 	// ExitMarking is 1 when the exit was the collector's marking's: a
-	// literal or a native call, which take no pointer while it marks. Go
-	// clears it before each entry.
+	// native call or a pool's object, which take no pointer while it
+	// marks, in code that calls no Go, or a native call with more operands
+	// than GoArgs holds; Go makes the others while it marks (GoOpMarking).
+	// Go clears it before each entry.
 	ExitMarking uint64
 }
 
@@ -540,10 +542,15 @@ func IsNumber(word uint64) bool { return word < NumberLimit }
 
 // A call's GoOp (Context.GoOp): the operation in its low byte, the
 // arguments' count in the next, the kind in the next -- a method call's,
-// with its receiver below its function, or a construction's.
+// with its receiver below its function, or a construction's. GoOpMarking
+// marks a call native code makes through Go only because the collector
+// marks -- a native call's, whose setup would store pointers without a
+// write barrier: Go makes it, and does not count it against the code's
+// profit, as it does not count an exit the marking made (ExitMarking).
 const (
 	GoOpArgcShift = 8
 	GoOpKindShift = 16
 	GoCallMethod  = 1
 	GoCallNew     = 2
+	GoOpMarking   = 1 << 24
 )

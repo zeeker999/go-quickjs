@@ -1264,9 +1264,19 @@ func (c *a64Compiler) storingCall() {
 // goSaving calls Go, op, every allocatable register saved, as amd64's
 // does.
 func (c *a64Compiler) goSaving(op uint64, stub *arm64.Label) {
+	c.goSavingKeep(op, 0, stub)
+}
+
+// goSavingKeep is goSaving whose result Go writes to keep cell keep.
+func (c *a64Compiler) goSavingKeep(op uint64, keep int, stub *arm64.Label) {
 	c.a.MovImm(a64A, op)
 	c.a.Store(a64Ctx, abi.OffGoOp, a64A)
-	c.a.Store(a64Ctx, abi.OffGoKeep, arm64.ZR)
+	if keep == 0 {
+		c.a.Store(a64Ctx, abi.OffGoKeep, arm64.ZR)
+	} else {
+		c.a.MovImm(a64A, uint64(keep))
+		c.a.Store(a64Ctx, abi.OffGoKeep, a64A)
+	}
 	// The routine the code's calls of Go share (savingCall), as amd64's.
 	if !c.savingUsed {
 		c.saving, c.savingUsed = c.a.NewLabel(), true
@@ -1317,17 +1327,6 @@ func (c *a64Compiler) addAlong(v *ssa.Value, add *ssa.PropertyAdd, miss arm64.La
 		c.a.B(miss)
 		return
 	}
-	c.a.MovImm(a64B, c.enc.WriteBarrier)
-	c.a.LoadU8(a64B, a64B, 0)
-	marked := c.a.NewLabel()
-	c.a.Cbnz(a64B, marked, false)
-	c.cold = append(c.cold, func() {
-		// As amd64's: the collector's marking's, if it leaves.
-		c.a.Bind(marked)
-		c.a.MovImm(a64B, 1)
-		c.a.Store(a64Ctx, abi.OffExitMarking, a64B)
-		c.a.B(miss)
-	})
 	o := c.gpr(v.Args[0], a64D)
 	c.a.Load(a64B, o, c.enc.ObjectShape)
 	c.a.MovImm(a64C, uint64(add.From))
@@ -1356,6 +1355,32 @@ func (c *a64Compiler) addAlong(v *ssa.Value, add *ssa.PropertyAdd, miss arm64.La
 	c.a.Load(a64C, o, c.enc.ObjectProps+16)
 	c.a.Cmp(a64B, a64C, true)
 	c.a.BCond(arm64.HS, miss)
+	// As amd64's: while the collector marks, Go adds it. Not D, which may
+	// be the object's (o).
+	c.a.MovImm(a64A, c.enc.WriteBarrier)
+	c.a.LoadU8(a64A, a64A, 0)
+	marked, done := c.a.NewLabel(), c.a.NewLabel()
+	c.a.Cbnz(a64A, marked, false)
+	c.cold = append(c.cold, func() {
+		c.a.Bind(marked)
+		if c.enc.CallGo == 0 {
+			c.a.MovImm(a64B, 1)
+			c.a.Store(a64Ctx, abi.OffExitMarking, a64B)
+			c.a.B(miss)
+			return
+		}
+		size := int32(unsafe.Sizeof(abi.GoArg{}))
+		c.a.FMovFromF(a64B, a64F1)
+		c.a.Store(a64Ctx, abi.OffGoArgs+2*size+c.enc.RefOffset, a64B)
+		c.a.Store(a64Ctx, abi.OffGoArgs+2*size+c.enc.NumOffset, c.gpr(x, a64A))
+		c.a.Store(a64Ctx, abi.OffGoArgs+c.enc.RefOffset, c.gpr(v.Args[0], a64A))
+		c.a.MovImm(a64B, uint64(v.Key)|uint64(add.Flags)<<32)
+		c.a.Store(a64Ctx, abi.OffGoArgs+c.enc.NumOffset, a64B)
+		c.a.MovImm(a64B, uint64(add.Next))
+		c.a.Store(a64Ctx, abi.OffGoArgs+size+c.enc.RefOffset, a64B)
+		c.goSaving(uint64(ssa.GoAddAlong), &miss)
+		c.a.B(done)
+	})
 	c.a.AddImm(a64C, a64B, 1, true)
 	c.a.Store(o, c.enc.ObjectProps+8, a64C)
 	c.a.MovImm(a64C, uint64(add.Next))
@@ -1371,6 +1396,7 @@ func (c *a64Compiler) addAlong(v *ssa.Value, add *ssa.PropertyAdd, miss arm64.La
 	c.a.FMovFromF(a64B, a64F1)
 	c.a.Store(a64C, c.enc.PropertyValue+c.enc.RefOffset, a64B)
 	c.a.Store(a64C, c.enc.PropertyValue+c.enc.NumOffset, c.gpr(x, a64A))
+	c.a.Bind(done)
 }
 
 // property finds the property a property operation names and leaves the
@@ -1516,6 +1542,14 @@ func (c *a64Compiler) arrayLiteral(v *ssa.Value, site *ssa.CallSite) {
 	c.a.Store(a64Ctx, at+c.enc.RefOffset, a64C)
 	c.a.MovImm(a64A, c.enc.Object)
 	c.a.Store(a64Ctx, at+c.enc.NumOffset, a64A)
+	c.arrayElements(v, false)
+}
+
+// arrayElements is amd64's: the elements written, by Go while the
+// collector marks (viaGo), the length set, the result set last.
+func (c *a64Compiler) arrayElements(v *ssa.Value, viaGo bool) {
+	vs := int32(c.enc.ValueSize)
+	at := abi.OffKeep + int32(v.Index)*vs
 	for i, x := range v.Args {
 		var w arm64.Reg
 		if remat(x) {
@@ -1536,6 +1570,16 @@ func (c *a64Compiler) arrayLiteral(v *ssa.Value, site *ssa.CallSite) {
 		c.a.Bind(number)
 		c.a.MovImm(a64B, 0)
 		c.a.Bind(have)
+		if viaGo {
+			// goStore's: the cell's address in A, the words in F0 and C.
+			c.a.FMovToF(a64F0, a64D)
+			c.a.MovRR(a64C, a64B)
+			c.a.Load(a64A, a64Ctx, at+c.enc.RefOffset)
+			c.a.Load(a64A, a64A, c.enc.ObjectElems)
+			c.a.AddImm(a64A, a64A, int64(int32(i)*vs), true)
+			c.goStore(nil)
+			continue
+		}
 		c.a.Load(a64C, a64Ctx, at+c.enc.RefOffset)
 		c.a.Load(a64A, a64C, c.enc.ObjectElems)
 		c.a.Store(a64A, int32(i)*vs+c.enc.NumOffset, a64D)
@@ -1583,13 +1627,14 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		return
 	}
 	if site.Literal {
-		// As amd64's: an object literal's object, its pool's next.
-		c.a.MovImm(a64B, c.enc.WriteBarrier)
-		c.a.LoadU8(a64B, a64B, 0)
-		c.markingExit(stub)
+		// As amd64's: an object literal's object, its pool's next, by Go
+		// while the collector marks.
 		c.a.MovImm(a64A, uint64(site.Pool))
 		c.a.Load(a64B, a64A, abi.OffPoolCount)
 		c.refillOnEmpty(site.Pool, stub)
+		if join, ok := c.markingTake(v, site, stub); ok {
+			defer c.a.Bind(join)
+		}
 		if site.Argc == 0 {
 			c.poolTake(v, site)
 			return
@@ -1600,9 +1645,12 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 	sp := len(s.Slots)
 	calleeSlot := sp - site.Argc - 1
 	callee := v.Args[len(v.Args)-site.Argc-1]
-	c.a.MovImm(a64B, c.enc.WriteBarrier)
-	c.a.LoadU8(a64B, a64B, 0)
-	c.markingExit(stub)
+	if !site.Alloc && !site.Receiver {
+		// As amd64's: while the collector marks, Go makes the call.
+		if join, ok := c.markingCall(v, site, stub); ok {
+			defer c.a.Bind(join)
+		}
+	}
 	c.a.Load(a64B, a64Ctx, abi.OffLevel)
 	c.a.AddImm(a64B, a64B, 1, true)
 	c.a.Load(a64C, a64Ctx, abi.OffLevelLimit)
@@ -1681,6 +1729,9 @@ func (c *a64Compiler) call(v *ssa.Value, guard func(arm64.Cond)) {
 		return
 	}
 	if site.Alloc || site.Receiver {
+		if join, ok := c.markingTake(v, site, stub); ok {
+			defer c.a.Bind(join)
+		}
 		c.poolTake(v, site)
 		return
 	}
@@ -2174,10 +2225,18 @@ func (c *a64Compiler) pointerWord(x *ssa.Value, w arm64.Reg) {
 
 // goCall calls Go, as amd64's does.
 func (c *a64Compiler) goCall(v *ssa.Value, site *ssa.CallSite, guard func(arm64.Cond)) {
+	c.goCallOp(v, goOpWord(site), false)
+}
+
+// goCallOp is goCall's, of the call of Go op, as amd64's, every
+// allocatable register saved across it if saving.
+func (c *a64Compiler) goCallOp(v *ssa.Value, op uint64, saving bool) {
 	size := int32(unsafe.Sizeof(abi.GoArg{}))
 	defer func() {
-		c.a.Load(a64B, a64Ctx, abi.OffGoStatus)
-		c.a.Cbnz(a64B, c.stubLabel(v.State, exitKind(v.Aux)), true)
+		if !saving {
+			c.a.Load(a64B, a64Ctx, abi.OffGoStatus)
+			c.a.Cbnz(a64B, c.stubLabel(v.State, exitKind(v.Aux)), true)
+		}
 		c.a.Load(a64A, a64Ctx, abi.OffKeep+int32(v.Index)*int32(c.enc.ValueSize)+c.enc.NumOffset)
 		c.setG(v, a64A)
 	}()
@@ -2204,14 +2263,19 @@ func (c *a64Compiler) goCall(v *ssa.Value, site *ssa.CallSite, guard func(arm64.
 		c.a.Bind(have)
 		c.a.Store(a64Ctx, at+c.enc.RefOffset, a64B)
 	}
-	if site.Go == ssa.GoCall {
+	if ssa.GoOp(op&0xff) == ssa.GoCall {
 		// Which call, as an exit at it says.
 		c.a.MovImm(a64A, uint64(v.State.PC))
 		c.a.Store(a64Ctx, abi.OffExitPC, a64A)
 		c.a.MovImm(a64A, uint64(v.State.Depth))
 		c.a.Store(a64Ctx, abi.OffExitDepth, a64A)
 	}
-	c.callGo(v, goOpWord(site), v.Index)
+	if saving {
+		stub := c.stubLabel(v.State, exitKind(v.Aux))
+		c.goSavingKeep(op, v.Index, &stub)
+		return
+	}
+	c.callGo(v, op, v.Index)
 }
 
 // callGo is a call of Go, as amd64's is.
@@ -2254,6 +2318,56 @@ func (c *a64Compiler) markingExit(stub arm64.Label) {
 		c.a.Store(a64Ctx, abi.OffExitMarking, a64B)
 		c.a.B(stub)
 	})
+}
+
+// markingCall is amd64's, stub the call's exit: while the collector
+// marks, Go makes native call v (ssa.GoCall, abi.GoOpMarking), and native
+// code goes on at the label returned.
+func (c *a64Compiler) markingCall(v *ssa.Value, site *ssa.CallSite, stub arm64.Label) (arm64.Label, bool) {
+	c.a.MovImm(a64B, c.enc.WriteBarrier)
+	c.a.LoadU8(a64B, a64B, 0)
+	if c.enc.CallGo == 0 || len(v.Args) > abi.MaxGoArgs {
+		c.markingExit(stub)
+		return 0, false
+	}
+	marked, join := c.a.NewLabel(), c.a.NewLabel()
+	c.a.Cbnz(a64B, marked, false)
+	op := goOpWord(&ssa.CallSite{Go: ssa.GoCall, Argc: site.Argc, Method: site.Method, New: site.Pool != 0}) | abi.GoOpMarking
+	c.cold = append(c.cold, func() {
+		c.a.Bind(marked)
+		c.goCallOp(v, op, true)
+		c.a.B(join)
+	})
+	return join, true
+}
+
+// markingTake is amd64's, stub the call's exit: while the collector
+// marks, Go takes call v's pool's object (ssa.GoTake) and stores an array
+// literal's elements (goStore), and native code goes on at the label
+// returned.
+func (c *a64Compiler) markingTake(v *ssa.Value, site *ssa.CallSite, stub arm64.Label) (arm64.Label, bool) {
+	c.a.MovImm(a64B, c.enc.WriteBarrier)
+	c.a.LoadU8(a64B, a64B, 0)
+	if c.enc.CallGo == 0 {
+		c.markingExit(stub)
+		return 0, false
+	}
+	marked, join := c.a.NewLabel(), c.a.NewLabel()
+	c.a.Cbnz(a64B, marked, false)
+	c.cold = append(c.cold, func() {
+		c.a.Bind(marked)
+		c.a.MovImm(a64A, uint64(site.Pool))
+		c.a.Store(a64Ctx, abi.OffGoArgs+c.enc.RefOffset, a64A)
+		c.goSavingKeep(uint64(ssa.GoTake), v.Index, &stub)
+		if site.Literal && site.Argc != 0 {
+			c.arrayElements(v, true)
+		} else {
+			c.a.MovImm(a64A, c.enc.Object)
+			c.setG(v, a64A)
+		}
+		c.a.B(join)
+	})
+	return join, true
 }
 
 // refillOnEmpty, its pool's count in B, is amd64's: stub is the call's
