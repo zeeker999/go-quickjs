@@ -1,6 +1,8 @@
 package ssa
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -238,5 +240,81 @@ func TestOptimizeRounds(t *testing.T) {
 	}
 	if rounds > 2*len(jsCorpus)+2 {
 		t.Errorf("%d rounds for %d functions", rounds, len(jsCorpus))
+	}
+}
+
+// goCallsFeedback has every call made by a call of Go (GoCall), which
+// native code goes on after.
+type goCallsFeedback struct{}
+
+func (goCallsFeedback) Property(int) (PropertySite, bool) { return PropertySite{}, false }
+func (goCallsFeedback) Global(int) (GlobalSite, bool)     { return GlobalSite{}, false }
+func (goCallsFeedback) Generic(int) bool                  { return false }
+func (goCallsFeedback) EntryGeneric(int) bool             { return false }
+func (goCallsFeedback) Inline(int) (InlineSite, bool)     { return InlineSite{}, false }
+func (goCallsFeedback) NativeCalls(int) []CallSite {
+	return []CallSite{{Go: GoCall, ThisSlot: -1}}
+}
+func (goCallsFeedback) GoCalls() bool { return true }
+
+// A captured binding is loaded from its cell where it is read, not after
+// every call that may have assigned it: a function reading each of a
+// hundred bindings between a hundred calls loads each once, where loading
+// them all after each call made ten thousand loads -- RegExp's run blocks,
+// of hundreds of bindings and a thousand calls each, took a hundred
+// megabytes to compile.
+func TestBuildLoadsCapturedBindingsWhereRead(t *testing.T) {
+	var src strings.Builder
+	src.WriteString("function outer(){var ")
+	for i := range 100 {
+		if i > 0 {
+			src.WriteString(",")
+		}
+		fmt.Fprintf(&src, "a%d=%d", i, i)
+	}
+	src.WriteString(";return function f(g){var s=0;")
+	for i := range 100 {
+		fmt.Fprintf(&src, "g();s+=a%d;", i)
+	}
+	src.WriteString("return s}}")
+	outer := compiledFunctionForTest(t, src.String())
+	var fn *bytecode.Function
+	for _, c := range outer.Constants {
+		if c.Kind == bytecode.ConstFunction {
+			fn = c.Fn
+		}
+	}
+	p, err := jitcompile.LowerSSAInline(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := BuildWith(p, goCallsFeedback{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loads, calls := 0, 0
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			switch {
+			case v.Op == OpLoadCell && v.Args[0].Op == OpUpvalueCell:
+				loads++
+			case v.Op == OpCall && len(v.Calls) != 0:
+				calls++
+			case v.Op == OpUpvalueStale:
+				t.Fatalf("a stale marker in block b%d", b.ID)
+			}
+			for _, a := range v.Args {
+				if a.Op == OpUpvalueStale {
+					t.Fatalf("%v reads a stale marker", v)
+				}
+			}
+		}
+	}
+	if calls != 100 || loads > 200 {
+		t.Fatalf("%d calls of Go, %d loads of captured bindings", calls, loads)
+	}
+	Optimize(f)
+	if err := Check(f); err != nil {
+		t.Fatal(err)
 	}
 }

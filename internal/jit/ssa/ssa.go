@@ -233,6 +233,11 @@ const (
 	// its frame's slot while the frame runs, its own once closed -- found
 	// again each time, as closing moves it (ir.UpvalueRead).
 	OpUpvalueCell // -> source
+	// OpUpvalueStale marks, while the builder runs, a captured binding's
+	// variable where it may no longer be what its cell holds -- at an
+	// entry, after a native call -- for a read to load it from its cell
+	// there (builder.read). It is never in a block.
+	OpUpvalueStale
 	// OpPowF64 is Math.pow of two numbers (Intrinsic) where its answer is
 	// exact, and so the VM's (ExactPow); a guard, which leaves the call
 	// to Go otherwise -- a call of Go from native code that can make one

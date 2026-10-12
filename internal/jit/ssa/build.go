@@ -508,6 +508,12 @@ type builder struct {
 	// literals are the literals made natively, by PC, each with the keep
 	// cell planning gave it (literal).
 	literals map[int]literalKeep
+	// stale are the captured bindings' markers (OpUpvalueStale), by index;
+	// here is the block of the instruction being built, at herePC, whose
+	// state a read there loads a binding from its cell with (read).
+	stale  []*Value
+	here   *Block
+	herePC int
 
 	entryPCs []int
 	blockAt  []*Block // by the PC a block starts at
@@ -632,15 +638,28 @@ func (b *builder) literal(pc int) (LiteralSite, int, bool) {
 // is; unused, the loads are dead. After a call, the loads carry the state
 // there, st, which a guard that unboxes one exits to (unboxPhis), as an
 // entry's header is for its loads.
-func (b *builder) reloadUpvalues(blk *Block, st *FrameState) {
+func (b *builder) reloadUpvalues(blk *Block) {
 	p := b.root.p
-	for i := range p.Upvalues {
-		cell := b.f.newValue(blk, OpUpvalueCell, Source)
-		cell.Index = i
-		v := b.f.newValue(blk, OpLoadCell, Tagged, cell)
-		v.Shadow, v.State = cell, st
-		b.write(p.UpvalueBase+i, blk, v)
+	if b.stale == nil {
+		b.stale = make([]*Value, p.Upvalues)
 	}
+	for i := range p.Upvalues {
+		if b.stale[i] == nil {
+			b.stale[i] = b.f.alloc(Value{Op: OpUpvalueStale, Type: Tagged, Index: i})
+		}
+		b.write(p.UpvalueBase+i, blk, b.stale[i])
+	}
+}
+
+// loadUpvalue is captured binding i, loaded from its cell at the end of
+// blk, with st the state a guard that unboxes it exits to (unboxPhis), if
+// any: a read's, which the binding's variable met marked stale.
+func (b *builder) loadUpvalue(blk *Block, i int, st *FrameState) *Value {
+	cell := b.f.newValue(blk, OpUpvalueCell, Source)
+	cell.Index = i
+	v := b.f.newValue(blk, OpLoadCell, Tagged, cell)
+	v.Shadow, v.State = cell, st
+	return v
 }
 
 // stringCell is the cell of the string constant at pc (ConstantFeedback).
@@ -1569,7 +1588,31 @@ func (b *builder) write(slot int, blk *Block, v *Value) {
 	d[slot] = v
 }
 
+// read is slot's value in blk: a captured binding marked stale there
+// (reloadUpvalues) is loaded from its cell, where the instruction being
+// built reads it, and exits, if a guard unboxes it, to that instruction's
+// state -- not to the one after the call that made it stale, which the
+// instructions between would be done again from. Loaded as each call left
+// it, every binding at every call, a function of hundreds of bindings and
+// a thousand calls -- RegExp's run blocks -- made hundreds of thousands
+// of loads, most dead, and its compile a hundred megabytes.
 func (b *builder) read(slot int, blk *Block) *Value {
+	v := b.readVar(slot, blk)
+	if v.Op != OpUpvalueStale {
+		return v
+	}
+	var st *FrameState
+	if blk == b.here && (b.fb == nil || !b.fb.Generic(b.herePC)) {
+		st = b.state(blk, b.herePC)
+	}
+	v = b.loadUpvalue(blk, v.Index, st)
+	b.write(slot, blk, v)
+	return v
+}
+
+// readVar is slot's value in blk, as SSA construction finds it (Braun et
+// al.): a captured binding's stale marker as it is.
+func (b *builder) readVar(slot int, blk *Block) *Value {
 	if d := b.defs[blk.ID]; d != nil && d[slot] != nil {
 		return d[slot]
 	}
@@ -1579,7 +1622,7 @@ func (b *builder) read(slot int, blk *Block) *Value {
 		v = b.newPhi(blk)
 		b.incomplete[blk.ID] = append(b.incomplete[blk.ID], slotPhi{slot, v})
 	case len(blk.Preds) == 1:
-		v = b.read(slot, blk.Preds[0])
+		v = b.readVar(slot, blk.Preds[0])
 	case len(blk.Preds) == 0 && blk.PC < 0 && slot < len(blk.Header.Slots):
 		// A local an entry did not load, as the interpreter's liveness has
 		// it dead there (fill): the frame's, as an entry loads it.
@@ -1618,7 +1661,12 @@ func (b *builder) addPhiOperands(slot int, phi *Value) {
 		phi.Args = b.f.refsOf(len(preds))[:0]
 	}
 	for _, p := range preds {
-		a := b.read(slot, p)
+		a := b.readVar(slot, p)
+		if a.Op == OpUpvalueStale {
+			// The binding as the predecessor leaves it, from its cell.
+			a = b.loadUpvalue(p, a.Index, nil)
+			b.write(slot, p, a)
+		}
 		a.Uses++
 		phi.Args = append(phi.Args, a)
 	}
@@ -1770,7 +1818,7 @@ func (b *builder) fill(blk *Block) {
 		}
 		// A captured binding is what its cell holds, which native code
 		// assigns (ir.UpvalueWrite), with its pointer word there.
-		b.reloadUpvalues(blk, nil)
+		b.reloadUpvalues(blk)
 		return
 	}
 	if blk.LoopHeader {
@@ -1803,6 +1851,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 		}
 		return st
 	}
+	b.here, b.herePC = blk, pc
 	operand := func(o ir.Operand) *Value {
 		if o.Slot < 0 {
 			v := f.newValue(blk, OpConst, Tagged)
@@ -2237,11 +2286,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 			// after the call exits to the next instruction, as the site
 			// there fails: never again, once it has (Generic).
 			if b.p.Upvalues > 0 {
-				var st *FrameState
-				if b.fb == nil || !b.fb.Generic(pc+1) {
-					st = b.frameState(blk, pc+1)
-				}
-				b.reloadUpvalues(blk, st)
+				b.reloadUpvalues(blk)
 			}
 			break
 		}
