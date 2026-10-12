@@ -6,7 +6,6 @@ import (
 	"errors"
 	"iter"
 	"math"
-	"os"
 	"runtime"
 	"slices"
 	"strings"
@@ -24,13 +23,6 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 	"golang.org/x/sys/cpu"
 )
-
-// The new pipeline (docs/jit-phase2-design.md): slot IR, then typed SSA
-// (internal/jit/ssa), then machine code (internal/jit/mir). Runtimes choose
-// it with QJS_JIT_PIPELINE=ssa until it reaches parity with the slot IR
-// emitters; a function it does not compile goes to those.
-
-var jitSSADefault = os.Getenv("QJS_JIT_PIPELINE") == "ssa"
 
 // jitSSABackend reports whether this architecture has the new pipeline.
 const jitSSABackend = true
@@ -961,7 +953,7 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	}
 	// The calls whose targets the existing tiers have met since.
 	r.jitSeedCalls(cl, e, p)
-	code, fb := r.compileSSA(fn, cl, p, r.jitAllowance(fn)+e.ssa.Size(), e)
+	code, fb, _ := r.compileSSA(fn, cl, p, r.jitAllowance(fn)+e.ssa.Size(), e)
 	if code == nil {
 		return
 	}
@@ -1003,13 +995,13 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 // which it returns: the shapes the code compares objects with, and the
 // prototypes it compares receivers' with, to be kept alive, and the sites
 // whose caches were empty.
-func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, limit int, e *jitEntry) (*jit.SSACode, *jitFeedback) {
+func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, limit int, e *jitEntry) (*jit.SSACode, *jitFeedback, error) {
 	this := 0
 	if p.This {
 		this = 1
 	}
 	if len(p.Globals) != 0 || p.Locals != fn.LocalCount+len(fn.Upvalues)+this {
-		return nil, nil
+		return nil, nil, jitRefused
 	}
 	if e != nil && cl != nil {
 		r.jitSeenFeedback(cl, e)
@@ -1022,7 +1014,7 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, 
 	defer s.mirWork.Rewind()
 	f, err := ssa.BuildIn(&s.ssaWork, p, fb)
 	if err != nil {
-		return nil, nil
+		return nil, nil, jitRefused
 	}
 	f.FrameLocals = fn.LocalCount
 	if p.This {
@@ -1037,15 +1029,23 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, 
 		// look for (backendPanics).
 		s.backendPanics++
 	}
-	if err != nil || len(mc.Bytes) > limit {
-		return nil, nil
+	if err != nil {
+		return nil, nil, jitRefused
+	}
+	if len(mc.Bytes) > limit {
+		return nil, nil, jit.ErrCodeBudget
 	}
 	code, err := jit.NewSSACode(r.jit.arena, mc)
 	if err != nil {
-		return nil, nil
+		return nil, nil, err
 	}
-	return code, fb
+	return code, fb, nil
 }
+
+// jitRefused is compileSSA's refusal of a program it does not compile:
+// for good, unlike jit.ErrCodeBudget's, which the cache's releasing code
+// may lift, or jit.ErrUnavailable's, which no compile will.
+var jitRefused = errors.New("jit: the program is refused")
 
 // jitFeedback is ssa.Feedback from a closure: its names' atoms, and its
 // property caches. A site that has met objects of one shape, the property
@@ -2602,9 +2602,14 @@ func (r *Runtime) jitCalleeObjectAt(cl *closure, p *ir.Program, pc int) (*Object
 		// object had it when compiled (jitFeedback.Global) -- where the
 		// environment has it now, as that read finds it: a constructor
 		// only native code had read was learned one exit, and one compile,
-		// at a time, every construction of DeltaBlue's.
+		// at a time, every construction of DeltaBlue's. A script's
+		// lexical binding of the name, a class's say, is where the
+		// realm's global scope has it.
 		if h = cl.scope(); len(r.globalLex.props) != 0 && r.lexShadows(cl.names[in.A]) {
-			return nil, -1
+			if !r.isGlobalScope(h) {
+				return nil, -1
+			}
+			h, idx = r.globalLex, -1
 		}
 		if h != nil && (idx < 0 || int(idx) >= len(h.props) || h.props[idx].key != cl.names[in.A]) {
 			idx = h.findOwn(cl.names[in.A])
@@ -2658,15 +2663,22 @@ func (r *Runtime) jitChainValue(cl *closure, p *ir.Program, q, n int) (Value, bo
 	}
 	switch in.Op {
 	case bytecode.OpGetGlobal:
-		// The global object's data property of the name -- not one a
-		// script's lexical binding shadows -- looked up, not through the
-		// read's cache, which native code that reads it never fills.
+		// The global object's data property of the name -- or the
+		// script's lexical binding that shadows it, in the realm's global
+		// scope -- looked up, not through the read's cache, which native
+		// code that reads it never fills.
 		h := cl.scope()
-		if h == nil || len(r.globalLex.props) != 0 && r.lexShadows(cl.names[in.A]) {
+		if h != nil && len(r.globalLex.props) != 0 && r.lexShadows(cl.names[in.A]) {
+			if !r.isGlobalScope(h) {
+				return Undefined, false
+			}
+			h = r.globalLex
+		}
+		if h == nil {
 			return Undefined, false
 		}
 		prop := h.getOwnVisible(cl.names[in.A])
-		if prop == nil || prop.flags&propAccessor != 0 {
+		if prop == nil || prop.flags&propAccessor != 0 || prop.value.IsUninitialized() {
 			return Undefined, false
 		}
 		return prop.value, true
@@ -3176,7 +3188,7 @@ func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
 		return nil
 	}
 	e := r.jitFor(cl)
-	if e == nil || e.ssa != nil || e.code != nil || e.deferred || !r.jitSSA {
+	if e == nil || e.ssa != nil || e.deferred {
 		if e != nil && e.ssa != nil {
 			return e
 		}
@@ -3187,7 +3199,7 @@ func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
 		return nil
 	}
 	r.jitSeedCalls(cl, e, p)
-	code, fb := r.compileSSA(fn, cl, p, r.jitAllowance(fn), e)
+	code, fb, _ := r.compileSSA(fn, cl, p, r.jitAllowance(fn), e)
 	if code == nil {
 		return nil
 	}
@@ -3346,7 +3358,8 @@ func (fb *jitFeedback) EntryGeneric(pc int) bool {
 // scope (the site's idx, which the interpreter keeps there), or, before the
 // interpreter has run the site, where the scope has the name now. Native
 // code checks the key at that index, and, as the interpreter does, that no
-// script-level lexical binding of the name shadows it (lexShadows).
+// script-level lexical binding of the name shadows it (lexShadows). A name
+// that one has, in the realm's global scope, is that binding's (lexGlobal).
 func (fb *jitFeedback) Global(pc int) (ssa.GlobalSite, bool) {
 	if fb.cl == nil || pc >= len(fb.fn.Code) {
 		return ssa.GlobalSite{}, false
@@ -3360,6 +3373,9 @@ func (fb *jitFeedback) Global(pc int) (ssa.GlobalSite, bool) {
 	name, env := fb.cl.names[in.A], fb.cl.scope()
 	if env == nil {
 		return ssa.GlobalSite{}, false
+	}
+	if fb.r.lexShadows(name) {
+		return fb.lexGlobal(name, env, write)
 	}
 	i := int32(-1)
 	if int(in.B) < len(fb.cl.ic) {
@@ -3395,6 +3411,31 @@ func (fb *jitFeedback) Global(pc int) (ssa.GlobalSite, bool) {
 		case p.value.IsNumber():
 			site.Fixed, site.Constant = true, ir.Float(p.value.Number())
 		}
+	}
+	return site, true
+}
+
+// lexGlobal is Global's site for a script-level lexical binding of name,
+// which a let, a const or a class declared: in the realm's global scope,
+// env, where the interpreter reads it (globalLexProp). The binding stays
+// where it is, and a const's value, once it has one, is fixed. A write
+// to a const is Go's, which throws.
+func (fb *jitFeedback) lexGlobal(name Atom, env *Object, write bool) (ssa.GlobalSite, bool) {
+	lex := fb.r.globalLex
+	if !fb.r.isGlobalScope(env) {
+		return ssa.GlobalSite{}, false
+	}
+	i := lex.findOwn(name)
+	if i < 0 {
+		return ssa.GlobalSite{}, false
+	}
+	p := &lex.props[i]
+	if write && p.flags&propWritable == 0 {
+		return ssa.GlobalSite{}, false
+	}
+	site := ssa.GlobalSite{Key: uint32(name), Index: i, Lexical: true}
+	if !write && p.flags&propWritable == 0 && p.value.IsNumber() {
+		site.Fixed, site.Constant = true, ir.Float(p.value.Number())
 	}
 	return site, true
 }
@@ -3745,8 +3786,8 @@ func (r *Runtime) jitSlot(f *frame, e *jitEntry, i int) *Value {
 }
 
 // jitStringMethod is String.prototype.charCodeAt for native code: the
-// intrinsic, while the prototype still has it as it was made, which is
-// what the old pipeline's string views asked too; and otherwise nothing.
+// intrinsic, while the prototype still has it as it was made; and
+// otherwise nothing.
 func (r *Runtime) jitStringMethod() Value {
 	if r.jitCharCodeAt.ref == nil {
 		return Value{}
@@ -4273,6 +4314,11 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 			}
 			pc, depth = int(ctx.ExitPC), int(ctx.ExitDepth)
 			f.pc = uint32(pc)
+			if r.jitStressDeopt(s) {
+				// Under stress, the interpreter finishes the invocation
+				// from where native code got to.
+				return r.jitInterpret(f, f.base+depth, nil)
+			}
 		}
 	}
 }
@@ -4281,8 +4327,8 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 // it was called from (abi.Context): where the global names are, the
 // VM's stack, how deep calls may go.
 type jitShared struct {
-	global, lexNames, stackBase unsafe.Pointer
-	stackEnd, levelLimit        uint64
+	global, lexNames, globalLex, stackBase unsafe.Pointer
+	stackEnd, levelLimit                   uint64
 	// charCodeAt is String.prototype.charCodeAt as native code calls it
 	// (jitStringMethod), which every level's code reads in its own
 	// context: written only into a run's own, a native callee's charCodeAt
@@ -4311,6 +4357,11 @@ func (r *Runtime) jitShareContexts(idx int, f *frame) {
 		stackBase: unsafe.Pointer(unsafe.SliceData(r.stack)), stackEnd: uint64(len(r.stack)),
 		levelLimit: uint64(min(len(s.ssaCtxs), idx+max(0, r.maxFrames-r.frameDepth))),
 	}
+	if r.isGlobalScope(f.cl.scope()) {
+		// The interpreter reads a script's lexical bindings where the
+		// scope is the realm's (globalLexProp).
+		sh.globalLex = unsafe.Pointer(r.globalLex)
+	}
 	if m := r.jitStringMethod(); m.IsObject() {
 		sh.charCodeAt = m.Object()
 		if p := r.proto.str; p.shape != nil {
@@ -4331,7 +4382,7 @@ func (r *Runtime) jitShareContexts(idx int, f *frame) {
 		c.StackBase, c.StackEnd = sh.stackBase, sh.stackEnd
 		c.StackTop, c.StackHigh = &r.stackTop, &r.stackHigh
 		c.BackEdges = &r.backEdges
-		c.Global, c.LexNames = sh.global, sh.lexNames
+		c.Global, c.LexNames, c.GlobalLex = sh.global, sh.lexNames, sh.globalLex
 		*(*Value)(unsafe.Pointer(&c.CharCodeAt)) = Value{}
 		if sh.charCodeAt != nil {
 			*(*Value)(unsafe.Pointer(&c.CharCodeAt)) = Obj(sh.charCodeAt)
@@ -4382,7 +4433,7 @@ func (r *Runtime) jitGrowContexts() bool {
 		case i >= old:
 			c.Level, c.LevelLimit = uint64(i), n
 			c.StackBase, c.StackEnd, c.StackTop, c.StackHigh = last.StackBase, last.StackEnd, last.StackTop, last.StackHigh
-			c.BackEdges, c.Global, c.LexNames = last.BackEdges, last.Global, last.LexNames
+			c.BackEdges, c.Global, c.LexNames, c.GlobalLex = last.BackEdges, last.Global, last.LexNames, last.GlobalLex
 			c.CharCodeAt = last.CharCodeAt
 			c.StringProto, c.StringShape, c.CharCodeAtOffset = last.StringProto, last.StringShape, last.CharCodeAtOffset
 		case c.LevelLimit == uint64(old):

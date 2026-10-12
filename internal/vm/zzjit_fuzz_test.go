@@ -169,7 +169,7 @@ func (g *jitProgram) source() string {
 // JIT's counters summed over the stress runs.
 func jitDifferential(t *testing.T, src string) JITStats {
 	t.Helper()
-	run := func(tree, jit bool, c jitStressConfig, pipeline bool) (string, JITStats) {
+	run := func(tree, jit bool, c jitStressConfig) (string, JITStats) {
 		previous := treeTier.Swap(tree)
 		defer treeTier.Store(previous)
 		// A generated program can grow a string without bound -- o.x=s;
@@ -184,7 +184,6 @@ func jitDifferential(t *testing.T, src string) JITStats {
 		defer func() { r.Close(); r.ReleaseClosed() }()
 		r.jitCallThreshold = 1
 		r.jitStress = c
-		r.jitSSA = pipeline
 		// Each tier compiles its own bytecode: a function's tree decision is
 		// cached in it.
 		v, err := r.Run(compileForTest(t, src))
@@ -197,11 +196,11 @@ func jitDifferential(t *testing.T, src string) JITStats {
 		}
 		return s.Go(), r.JITStats()
 	}
-	want, _ := run(false, false, jitStressConfig{}, false)
+	want, _ := run(false, false, jitStressConfig{})
 	if outOfMemory(want) {
 		return JITStats{}
 	}
-	if got, _ := run(true, false, jitStressConfig{}, false); got != want && !outOfMemory(got) {
+	if got, _ := run(true, false, jitStressConfig{}); got != want && !outOfMemory(got) {
 		t.Fatalf("tree tier: %q\ninterpreter: %q\n%s", got, want, src)
 	}
 	var total JITStats
@@ -210,19 +209,14 @@ func jitDifferential(t *testing.T, src string) JITStats {
 		{threshold: true, budget: 1},
 		{threshold: true, budget: 5, deopt: 2},
 	} {
-		got, st := run(true, true, c, false)
+		got, st := run(true, true, c)
 		if got != want && !outOfMemory(got) {
 			t.Fatalf("JIT %+v: %q\ninterpreter: %q\n%s", c, got, want, src)
 		}
 		total.Entries += st.Entries
 		total.Guards += st.Guards
 		total.Interpreted += st.Interpreted
-		// The new pipeline, where it compiles the function.
-		got, st = run(true, true, c, true)
 		total.SSAEntries += st.SSAEntries
-		if got != want && !outOfMemory(got) {
-			t.Fatalf("SSA pipeline %+v: %q\ninterpreter: %q\n%s", c, got, want, src)
-		}
 		total.Entries += st.Entries
 		total.Guards += st.Guards
 		total.Interpreted += st.Interpreted

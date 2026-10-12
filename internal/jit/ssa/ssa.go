@@ -105,6 +105,11 @@ const (
 	// the global object's table, if it is Key's and plain, initialized
 	// data, and no script-level lexical binding of the name shadows it.
 	OpGlobalCell // -> source
+	// A script-level lexical binding's cell (abi.Context.GlobalLex): the
+	// binding at Index of their object's table, if it is Key's and
+	// initialized. The bindings are never removed, nor their attributes
+	// changed.
+	OpLexCell // -> source
 	// charCodeAt, as the slot IR's string kernels call it. OpStringMethod is
 	// a string's charCodeAt: the context's cell (abi.Context.CharCodeAt),
 	// if the receiver is a string and the cell holds the intrinsic.
@@ -261,7 +266,7 @@ var opNames = [...]string{
 	OpInvalid: "invalid", OpLoadSlot: "load", OpConst: "const", OpConstF64: "constf", OpConstSource: "consts", OpPhi: "phi",
 	OpUnboxF64: "unbox", OpTruth: "truth", OpCheckInit: "checkinit", OpBoxF64: "boxf", OpBoxBool: "boxb",
 	OpArrayOf: "arrayof", OpElemKey: "elemkey", OpElemRead: "elemread", OpElemWrite: "elemwrite", OpElemCell: "elemcell", OpLength: "length",
-	OpObjectOf: "objectof", OpPropRead: "propread", OpPropWrite: "propwrite", OpPropCell: "propcell", OpLoadCell: "loadcell", OpGlobalCell: "globalcell",
+	OpObjectOf: "objectof", OpPropRead: "propread", OpPropWrite: "propwrite", OpPropCell: "propcell", OpLoadCell: "loadcell", OpGlobalCell: "globalcell", OpLexCell: "lexcell",
 	OpStringMethod: "stringmethod", OpStringCode: "stringcode",
 	OpAddF64: "addf", OpSubF64: "subf", OpMulF64: "mulf", OpDivF64: "divf", OpModF64: "modf", OpNegF64: "negf", OpCmpF64: "cmpf",
 	OpNot: "not", OpStrictNullish: "strictnullish", OpLooseNullish: "loosenullish", OpEqTagged: "eqtagged", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
@@ -284,7 +289,7 @@ func (o Op) String() string {
 func (o Op) isGuard() bool {
 	switch o {
 	case OpUnboxF64, OpTruth, OpCheckInit, OpModF64, OpArrayOf, OpElemKey, OpElemRead, OpElemWrite, OpElemCell, OpLength,
-		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell, OpStringMethod, OpStringCode, OpLooseNullish, OpEqTagged,
+		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell, OpLexCell, OpStringMethod, OpStringCode, OpLooseNullish, OpEqTagged,
 		OpSameObject, OpFrameRoom, OpCall, OpInstanceOf, OpTypeIs, OpCheckTrue, OpPowF64:
 		return true
 	}
@@ -296,7 +301,7 @@ func (o Op) isGuard() bool {
 // (An array's length and an object's shape change only in Go.)
 func (o Op) readsMemory() bool {
 	return o == OpElemRead || o == OpElemWrite || o == OpElemCell || o == OpPropRead || o == OpPropWrite || o == OpPropCell ||
-		o == OpGlobalCell || o == OpKeep || o == OpCall
+		o == OpGlobalCell || o == OpLexCell || o == OpKeep || o == OpCall
 }
 
 // Value is one SSA value.
@@ -326,8 +331,8 @@ type Value struct {
 	// its first operand is the binding's cell (OpUpvalueCell).
 	Upvalue bool
 	// Global marks an OpPropWrite to a global binding (ir.BindingWrite):
-	// its first operand is the binding's cell (OpGlobalCell), not an
-	// object.
+	// its first operand is the binding's cell (OpGlobalCell, OpLexCell),
+	// not an object.
 	Global bool
 	// Calls, for a call, are the functions it may call natively (OpCall).
 	Calls []*CallSite

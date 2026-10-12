@@ -5,12 +5,9 @@ package vm
 import (
 	"encoding/binary"
 	"errors"
-	"math"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
-	"unsafe"
 	"weak"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -24,7 +21,6 @@ import (
 
 const jitCacheEntries = 128
 const jitCacheBytes = 8 << 20
-const jitMetadataBytes = 512 << 10
 const jitHotCalls = 8
 
 // jitBuilt guards the JIT's hooks in the interpreter; see zzjit_disabled.go.
@@ -38,9 +34,6 @@ type jitFields struct {
 	// jitStress is QJS_JIT_STRESS's budget and deoptimization period, or
 	// zero; see jitStressConfig.
 	jitStress jitStressConfig
-	// jitSSA selects the new pipeline (internal/jit/ssa and mir) where it
-	// compiles a function: QJS_JIT_PIPELINE=ssa, an internal setting.
-	jitSSA bool
 }
 
 // jitStressConfig drives the JIT harder than ordinary use, so that tests and
@@ -48,10 +41,12 @@ type jitFields struct {
 // a comma-separated list:
 //
 //	threshold  compile on a function's first framed call
-//	budget=N   return to Go after at most N native instructions, so that
-//	           every exit, publication and re-entry is taken
+//	budget=N   give loops a budget of N back edges, at the end of which
+//	           native code leaves for Go -- not calling Go for another, as it
+//	           otherwise does (ssa.GoPoll) -- so that every exit, record and
+//	           re-entry is taken
 //	deopt=N    finish the invocation in the interpreter at every Nth such
-//	           return, from wherever native code had got to
+//	           exit, from wherever native code had got to
 //
 // It is read once, as QJS_NOTREE is, and each runtime takes a copy.
 type jitStressConfig struct {
@@ -71,7 +66,7 @@ func parseJITStress(spec string) jitStressConfig {
 		case "threshold", "1":
 			c.threshold = true
 		case "budget":
-			c.budget = uint16(min(n, jit.MaxIterations))
+			c.budget = uint16(n)
 		case "deopt":
 			c.deopt = uint16(n)
 		}
@@ -87,15 +82,6 @@ func (r *Runtime) JITStats() JITStats {
 	}
 	return JITStats{Compiled: s.compiled, Entries: s.entries, Guards: s.guards,
 		Hosts: s.hosts, Budgets: s.budgets, Interpreted: s.interpreted, SSAEntries: s.ssaEntries, SSARecords: s.ssaRecords}
-}
-
-// jitEntryBudget is the native instructions one entry may run: MaxIterations, or
-// fewer under stress.
-func (r *Runtime) jitEntryBudget() uint64 {
-	if r.jitStress.budget != 0 {
-		return uint64(r.jitStress.budget)
-	}
-	return jit.MaxIterations
 }
 
 // jitStressDeopt reports whether this budget exit should finish the
@@ -312,20 +298,11 @@ type jitEntry struct {
 	// longer enters (entrySlow) that has learned what to be compiled again
 	// for (reoptPending): its budget (reoptDue), which nothing native
 	// spends any more, as V8's interpreter spends a function's.
-	slowTries     uint32
-	code          *jit.Code
-	misses        uint8
-	probes        uint8
-	entrySlow     bool
-	probeSteps    uint64
-	probeHosts    uint64
-	properties    bool
-	this          bool
-	globals       []bytecode.Instr
-	referenceKeys []uint32
-	calls         bool
-	calleeOnly    bool
-	strings       bool
+	slowTries uint32
+	// entrySlow marks code Go no longer enters (jitSSAProfit), and this
+	// code that reads its receiver.
+	entrySlow bool
+	this      bool
 	// deferred marks a refusal for want of code budget, made at the cache
 	// generation in generation: it is retried once that has moved on.
 	deferred   bool
@@ -335,14 +312,9 @@ type jitEntry struct {
 // Weak keys prevent a refusal or cached program from retaining a source graph.
 // Native entry cannot call Go, so buffers are shared only until a guard exit.
 type jitState struct {
-	unavailable     bool
-	properties      bool
-	this            bool
-	strings         bool
-	referenceActive bool
-	callActive      bool
-	globals         []bytecode.Instr
-	cache           map[weak.Pointer[bytecode.Function]]*jitEntry
+	// unavailable marks a runtime the OS will not give executable memory.
+	unavailable bool
+	cache       map[weak.Pointer[bytecode.Function]]*jitEntry
 	// resumed counts native calls whose callee Go finished, after which
 	// their callers' code went on natively (runSSA); resumedLevels those
 	// whose caller was itself a level Go was finishing (jitUnwindNative).
@@ -366,12 +338,7 @@ type jitState struct {
 	// slot reused for another entry has a new tag, so a stale hint misses.
 	hints       [jitCacheEntries + 1]jitHintSlot
 	nextTag     uint32
-	slots       [ir.MaxSlots]ir.Value
-	roots       [ir.MaxSlots]Value
-	arrays      [ir.MaxSlots]ir.ArrayView
 	hosts       uint64
-	fastHosts   uint64
-	rootCount   int
 	entries     uint64
 	guards      uint64
 	budgets     uint64
@@ -387,8 +354,10 @@ type jitState struct {
 	// unwound counts the native calls whose callees left native code, which
 	// Go finished (jitUnwindNative).
 	unwound uint64
-	// budgetSeed varies the back-edge budget (backEdgeBudget).
-	budgetSeed uint32
+	// budgetSeed varies the back-edge budget (backEdgeBudget), which is
+	// stressBudget under QJS_JIT_STRESS's budget.
+	budgetSeed   uint32
+	stressBudget int
 	// charCodeAtKey is the atom jitStringMethod looks charCodeAt up by,
 	// once charCodeAtKnown.
 	charCodeAtKey   Atom
@@ -447,12 +416,7 @@ type jitState struct {
 	ssaKeeps int
 	// exitScratch is what exits that leave their frames to Go are read
 	// into (jit.ExitScratch).
-	exitScratch   jit.ExitScratch
-	referenceKeys []uint32
-	references    *jitReferences
-	callFrames    *jitCallFrames
-	transfers     uint64
-	charCodeAt    Value
+	exitScratch jit.ExitScratch
 }
 
 // Only selected own reference fields are prepared. The receiver bound keeps
@@ -469,7 +433,6 @@ func (r *Runtime) initJIT(enabled bool) {
 	r.jitEnabled = enabled && r.debug == nil
 	r.jitCallThreshold = jitHotCalls
 	r.jitStress = jitStressDefault
-	r.jitSSA = jitSSADefault
 	if r.jitStress.threshold {
 		r.jitCallThreshold = 1
 	}
@@ -486,7 +449,7 @@ func (r *Runtime) jitTreeRecovery(f *frame) bool {
 		return false
 	}
 	e := r.jit.hint(f.cl.hint())
-	return e == nil || e.deferred || e.ssa != nil || e.code != nil && !e.calleeOnly && e.misses < 8
+	return e == nil || e.deferred || e.ssa != nil
 }
 
 // jitCodeBytes is what the JIT holds: executable pages, their metadata, and
@@ -495,13 +458,7 @@ func (r *Runtime) jitCodeBytes() int64 {
 	var n int64
 	if r.jit != nil {
 		for _, e := range r.jit.cache {
-			n += int64(e.ssa.Size() + e.code.Size() + e.code.MetadataSize() + cap(e.globals)*int(unsafe.Sizeof(bytecode.Instr{})) + cap(e.referenceKeys)*4)
-		}
-		if r.jit.references != nil {
-			n += int64(unsafe.Sizeof(jitReferences{}))
-		}
-		if r.jit.callFrames != nil {
-			n += int64(unsafe.Sizeof(jitCallFrames{}))
+			n += int64(e.ssa.Size())
 		}
 	}
 	return n
@@ -510,9 +467,9 @@ func (r *Runtime) jitCodeBytes() int64 {
 // dropEntry closes e's code and removes it from the cache, reporting false if
 // the OS would not release the code, which leaves e owned for a retry.
 func (s *jitState) dropEntry(key weak.Pointer[bytecode.Function], e *jitEntry) bool {
-	held := e.code.Size() != 0 || e.ssa.Size() != 0
+	held := e.ssa.Size() != 0
 	e.nativeEntry = 0
-	if e.code.Close() != nil || s.closeSSA(e.ssa, e) != nil {
+	if s.closeSSA(e.ssa, e) != nil {
 		return false
 	}
 	s.forget(key, e)
@@ -522,19 +479,18 @@ func (s *jitState) dropEntry(key weak.Pointer[bytecode.Function], e *jitEntry) b
 	return true
 }
 
-// inUse reports whether e's code runs, or may go on, below Go now: a
-// frame of the old pipeline's calls, or a run of the new pipeline's, which
-// goes on in its code after a native call whose callee Go finishes. The
-// cache does not drop it to make room then, as V8 keeps code a frame is
-// in: the run would find its code gone.
+// inUse reports whether e's code runs, or may go on, below Go now: a run
+// of it, which goes on in its code after a native call whose callee Go
+// finishes. The cache does not drop it to make room then, as V8 keeps code
+// a frame is in: the run would find its code gone.
 func (s *jitState) inUse(e *jitEntry) bool {
-	return e.ssaRuns != 0 || s.callEntryActive(e)
+	return e.ssaRuns != 0
 }
 
 // holdsCode reports whether e has native code, which a cache full of
 // entries drops last.
 func (e *jitEntry) holdsCode() bool {
-	return e.code.Size() != 0 || e.ssa.Size() != 0
+	return e.ssa.Size() != 0
 }
 
 // forget removes e from the cache and frees its hint slot.
@@ -570,7 +526,6 @@ func (r *Runtime) releaseJIT() {
 	for key, e := range r.jit.cache {
 		r.jit.dropEntry(key, e)
 	}
-	r.jit.clearRoots()
 	// Not while a native run is under way, suspended in a call of Go that
 	// released it: it goes on with the state its contexts and pins are in.
 	if len(r.jit.cache) == 0 && r.jit.ctxTop == 0 {
@@ -603,12 +558,16 @@ func (r *Runtime) jitAllowance(fn *bytecode.Function) int {
 }
 
 // jitFor is the entry for a closure's function, compiling it if need be with
-// what the closure's caches know of its sites.
+// what the closure's caches know of its sites; nil when resources or the
+// OS refuse one for now, which may change.
 func (r *Runtime) jitFor(cl *closure) *jitEntry {
-	return r.jitForMode(cl.fn, false, cl)
+	return r.jitForFunction(cl.fn, cl)
 }
 
-func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool, cl *closure) *jitEntry {
+// jitForFunction is jitFor for fn, with cl's caches, if cl is not nil. A
+// program the new pipeline does not compile is a refusal the cache keeps,
+// for good; one past the code budget, until the cache releases code.
+func (r *Runtime) jitForFunction(fn *bytecode.Function, cl *closure) *jitEntry {
 	if r.jit != nil && r.jit.unavailable {
 		return nil
 	}
@@ -617,7 +576,7 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool, cl *closure) *j
 	}
 	if r.jit != nil {
 		key := weak.Make(fn)
-		if e := r.jit.cache[key]; e != nil && (!callee || e.calleeOnly || e.code != nil) {
+		if e := r.jit.cache[key]; e != nil {
 			if !e.deferred || e.generation == r.jit.generation {
 				return e
 			}
@@ -658,232 +617,34 @@ func (r *Runtime) jitForMode(fn *bytecode.Function, callee bool, cl *closure) *j
 		return nil
 	}
 	if r.jit == nil {
-		r.jit = &jitState{cache: make(map[weak.Pointer[bytecode.Function]]*jitEntry), charCodeAt: r.jitCharCodeAt, arena: jit.NewArena()}
+		r.jit = &jitState{cache: make(map[weak.Pointer[bytecode.Function]]*jitEntry), arena: jit.NewArena(), stressBudget: int(r.jitStress.budget)}
 	}
 	s := r.jit
-	var meta int
-	for _, e := range s.cache {
-		meta += e.code.MetadataSize() + cap(e.globals)*int(unsafe.Sizeof(bytecode.Instr{})) + cap(e.referenceKeys)*4
-	}
-	// Entry maps and offsets are bounded before emission as well as afterwards.
-	if meta+len(fn.Code)*32+1024 > jitMetadataBytes {
-		return nil
-	}
 	e := &jitEntry{}
-	for _, in := range fn.Code {
-		e.calls = e.calls || in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod
-	}
-	lower := jitcompile.Lower
-	if e.calls {
-		lower = jitcompile.LowerCalls
-	}
-	if callee {
-		lower = jitcompile.LowerCallee
-		e.calleeOnly = true
-		e.entrySlow = true
-	}
-	if r.jitSSA && !callee {
-		// The new pipeline lowers for itself; what it does not compile goes
-		// to the slot IR emitters.
-		if p, err := r.jitLower(fn, jitLowerSSA); err == nil {
+	if p, err := r.jitLower(fn, jitLowerSSA); err == nil {
+		if cl != nil {
+			// The calls its caches have met.
 			r.jitSeedCalls(cl, e, p)
-			if code, fb := r.compileSSA(fn, cl, p, limit, e); code != nil {
-				e.setSSA(fn, p, code, fb)
-				s.compiled++
-				s.remember(weak.Make(fn), e)
-				r.jitWantedCallees(e, fb)
-				return e
-			}
 		}
-	}
-	p, err := lower(fn)
-	if err == nil {
-		e.this = p.This
-		for _, key := range p.Globals {
-			for _, in := range fn.Code {
-				if in.Op == bytecode.OpGetGlobal && in.A == key {
-					e.globals = append(e.globals, in)
-					break
-				}
-			}
-		}
-		// Lowering uses immutable source-name indices. Each runtime resolves
-		// these to its own pointer-free atoms before emitting native searches.
-		hasReferences := false
-		for _, in := range p.Code {
-			hasReferences = hasReferences || in.Op == ir.ReferenceRead
-		}
-		for i := range p.Code {
-			in := &p.Code[i]
-			e.strings = e.strings || in.Op == ir.StringMethod || in.Op == ir.StringCode
-			if in.Op == ir.PropertyRead || in.Op == ir.PropertyWrite || in.Op == ir.BindingRead || in.Op == ir.ReferenceRead {
-				e.properties = e.properties || in.Op != ir.BindingRead
-				in.Key = uint32(r.atoms.intern(fn.Names[in.Key]))
-				if hasReferences && in.Op != ir.BindingRead {
-					found := false
-					for _, key := range e.referenceKeys {
-						found = found || key == in.Key
-					}
-					if !found && len(e.referenceKeys) < ir.MaxProperties {
-						e.referenceKeys = append(e.referenceKeys, in.Key)
-					}
-				}
-			}
-		}
-		bindingBytes := cap(e.globals)*int(unsafe.Sizeof(bytecode.Instr{})) + cap(e.referenceKeys)*4
-		if len(e.referenceKeys) != 0 && s.references == nil {
-			limit -= int(unsafe.Sizeof(jitReferences{}))
-			if limit <= bindingBytes {
-				return nil
-			}
-		}
-		if meta+len(fn.Code)*32+1024+bindingBytes > jitMetadataBytes {
-			return nil
-		}
-		e.code, err = jit.CompileIn(s.arena, p, limit-bindingBytes)
-		if err != nil {
-			if errors.Is(err, jit.ErrUnavailable) {
-				s.unavailable = true
-			}
-			e.code = nil
-			switch {
-			case errors.Is(err, jit.ErrCodeBudget):
-				// It may fit once the cache has released code. Until then the
-				// cached refusal spares a recompilation at every warmup.
-				e.deferred, e.generation = true, s.generation
-			case !errors.Is(err, jit.ErrProgram):
-				return nil
-			}
-			// A program the emitter rejects -- or panicked on -- is rejected
-			// every time: cache the refusal.
-		} else {
+		code, fb, err := r.compileSSA(fn, cl, p, limit, e)
+		switch {
+		case code != nil:
+			e.setSSA(fn, p, code, fb)
 			s.compiled++
-			if len(e.referenceKeys) != 0 && s.references == nil {
-				s.references = new(jitReferences)
-			}
+			s.remember(weak.Make(fn), e)
+			r.jitWantedCallees(e, fb)
+			return e
+		case errors.Is(err, jit.ErrUnavailable):
+			s.unavailable = true
+			return nil
+		case errors.Is(err, jit.ErrCodeBudget):
+			// It may fit once the cache has released code. Until then the
+			// cached refusal spares a compile at every warm-up.
+			e.deferred, e.generation = true, s.generation
 		}
 	}
 	s.remember(weak.Make(fn), e)
 	return e
-}
-
-func (s *jitState) encode(v Value) ir.Value {
-	switch v.Kind() {
-	case KindNumber:
-		return ir.Float(v.Number())
-	case KindBool:
-		return ir.Bool(v.Truthy())
-	case KindUndefined:
-		return ir.Value{Kind: ir.Undefined}
-	case KindNull:
-		return ir.Value{Kind: ir.Null}
-	case KindUninitialized:
-		return ir.Value{Kind: ir.Uninitialized}
-	}
-	handleSlot := -1
-	if s.callActive {
-		handleSlot = int((uintptr(v.ref) >> 4) & 511)
-		for {
-			handle := s.callFrames.handles[handleSlot]
-			if handle == 0 {
-				break
-			}
-			i := int(handle&511) - 1
-			root := s.roots[i]
-			if root.ref == v.ref && math.Float64bits(root.num) == math.Float64bits(v.num) {
-				kind := ir.Opaque + ir.Kind(handle>>15)
-				return ir.Value{Kind: kind, Bits: uint64(i)}
-			}
-			handleSlot = (handleSlot + 1) & 511
-		}
-	}
-	i := s.rootCount
-	s.roots[i], s.rootCount = v, i+1
-	if handleSlot >= 0 {
-		handle := uint16(i + 1)
-		if v.IsString() {
-			handle |= 1 << 15
-		}
-		s.callFrames.handles[handleSlot] = handle
-	}
-	if v.IsObject() {
-		o := v.Object()
-		if o.class == ClassArray {
-			s.arrays[i] = jitArrayView(o)
-		} else if s.properties && o.class == ClassObject && o.shapeIndex() == nil && len(o.props) <= ir.MaxProperties {
-			s.arrays[i] = ir.ArrayView{Data: unsafe.Pointer(unsafe.SliceData(o.props)), DenseLength: uint64(len(o.props)), WritableHole: tagBase}
-		} else if s.strings && v.ref == s.charCodeAt.ref {
-			s.arrays[i] = ir.ArrayView{DenseLength: ir.CharCodeAtBuiltin}
-		}
-	}
-	if v.IsString() {
-		return s.encodeString(i, v.String())
-	}
-	return ir.Value{Kind: ir.Opaque, Bits: uint64(i)}
-}
-
-// Keep string borrowing out of the common numeric reference encoder.
-//
-//go:noinline
-func (s *jitState) encodeString(i int, str *String) ir.Value {
-	view := ir.ArrayView{DenseLength: uint64(str.length)}
-	if str.left == nil {
-		if str.ascii {
-			view.Data, view.Length = unsafe.Pointer(unsafe.StringData(str.s)), 1
-		} else if str.u16 != nil {
-			view.Data, view.Length = unsafe.Pointer(str.u16), 2
-		}
-	}
-	s.arrays[i] = view
-	return ir.Value{Kind: ir.String, Bits: uint64(i)}
-}
-
-func (s *jitState) decode(v ir.Value) Value {
-	switch v.Kind {
-	case ir.Number:
-		return Float(math.Float64frombits(v.Bits))
-	case ir.Boolean:
-		return Bool(v.Bits != 0)
-	case ir.Undefined:
-		return Undefined
-	case ir.Null:
-		return Null
-	case ir.Uninitialized:
-		return uninitialized
-	case ir.Opaque, ir.String:
-		return s.roots[v.Bits]
-	}
-	panic("invalid native scalar")
-}
-
-func (s *jitState) publish(f *frame, stack []Value, depth int) {
-	for i := range f.locals {
-		f.locals[i] = s.decode(s.slots[i])
-	}
-	base := len(f.locals) + len(f.cl.upvalues)
-	base += len(s.globals)
-	if s.this {
-		base++
-	}
-	for i := 0; i < depth; i++ {
-		stack[f.base+i] = s.decode(s.slots[base+i])
-	}
-}
-
-func (s *jitState) clearRoots() {
-	clear(s.roots[:s.rootCount])
-	clear(s.arrays[:s.rootCount])
-	if s.referenceActive {
-		s.clearReferences()
-	}
-	s.rootCount = 0
-}
-
-// Keep optional reference cleanup outside the frequent numeric return path.
-//
-//go:noinline
-func (s *jitState) clearReferences() {
-	clear(s.references.cells[:min(s.rootCount, jitReferenceReceivers)])
 }
 
 // jitOn reports whether this runtime runs the JIT. The call path tests it
@@ -938,6 +699,9 @@ func (s *jitState) backEdgeBudget() int {
 	if s == nil {
 		return backEdgeCheckInterval
 	}
+	if s.stressBudget != 0 {
+		return s.stressBudget
+	}
 	// xorshift32, never 0.
 	x := s.budgetSeed
 	if x == 0 {
@@ -974,7 +738,7 @@ func (r *Runtime) tryJITLoop(f *frame, pc uint32, sp int, fullBudget bool) (Valu
 
 func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, bool) {
 	e := r.jit.hint(f.cl.hint())
-	if e == nil || e.code != nil && e.code.Size() == 0 || e.ssa != nil && e.ssa.Size() == 0 {
+	if e == nil || e.ssa != nil && e.ssa.Size() == 0 {
 		e = r.jitFor(f.cl)
 		f.cl.setHint(hintFor(e))
 	}
@@ -990,6 +754,8 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 		}
 		if !osr {
 			e.starts++
+		} else {
+			r.jit.osrs++
 		}
 		if e.reoptDue() {
 			r.jitReoptimize(f.cl, e)
@@ -1010,384 +776,16 @@ func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, boo
 		f.cl.jitLoopDelay = jitHotCalls
 		return Undefined, nil, false
 	}
-	if e.code == nil {
-		if e.deferred {
-			// Out of code budget: warm up again and look again then, which
-			// costs a cache lookup until the cache releases code.
-			f.cl.setHint(0)
-			f.cl.jitCalls = 0
-			f.cl.jitLoopDelay = jitHotCalls
-			return Undefined, nil, false
-		}
-		f.cl.jitRefused = true
+	if e.deferred {
+		// Out of code budget: warm up again and look again then, which
+		// costs a cache lookup until the cache releases code.
+		f.cl.setHint(0)
+		f.cl.jitCalls = 0
+		f.cl.jitLoopDelay = jitHotCalls
 		return Undefined, nil, false
 	}
-	if e.calleeOnly {
-		return Undefined, nil, false
-	}
-	if e.misses >= 8 {
-		f.cl.jitRefused = true
-		return Undefined, nil, false
-	}
-	wantDepth, ok := e.code.EntryDepth(pc)
-	if !ok || depth != wantDepth {
-		return Undefined, nil, false
-	}
-	f.cl.jitLoopDelay = 0
-	s := r.jit
-	n := len(f.locals) + len(f.cl.upvalues) + f.cl.fn.MaxStack
-	n += len(e.globals)
-	if e.this {
-		n++
-	}
-	s.properties = e.properties
-	s.this = e.this
-	s.globals = e.globals
-	s.strings = e.strings
-	s.referenceActive = len(e.referenceKeys) != 0
-	if s.referenceActive {
-		s.referenceKeys = e.referenceKeys
-	}
-	s.encodeFrame(r, f, r.stack, depth)
-	if osr {
-		s.osrs++
-	}
-	if e.calls && !s.referenceActive && (s.callFrames == nil || !s.callFrames.active) {
-		if v, err, done := r.jitRunCalls(f, e, pc, depth, n); done {
-			return v, err, true
-		}
-	}
-	budget := r.jitEntryBudget()
-	var nativeSteps, hosts uint64
-	for {
-		s.entries++
-		// Encoding and the immutable native program preserve scalar validity.
-		exit, err := e.code.RunEncodedArrays(s.slots[:n], s.arrays[:], pc, budget)
-		runtime.KeepAlive(s)
-		if err != nil {
-			s.clearRoots()
-			return Undefined, err, true
-		}
-		budget -= exit.Steps
-		nativeSteps += exit.Steps
-		if exit.Kind == ir.HostExit {
-			hosts++
-			s.hosts++
-			next, _, steps := r.jitHostFast(f, s, int(exit.State.PC), exit.State.Depth, int(min(budget, 16)))
-			if steps != 0 {
-				s.fastHosts++
-				budget -= uint64(steps)
-				pc = next
-				f.pc = uint32(pc)
-				continue
-			}
-		}
-		f.pc = exit.State.PC
-		// Decode a scalar or rooted handle before clearing its owner. Eligible
-		// locals cannot be observed after this frame leaves: captures, mapped
-		// arguments, eval, handlers, and debugger runtimes are excluded.
-		if exit.Kind == ir.Returned {
-			// Sample several calls so a short tail call cannot hide profitable
-			// longer calls to the same kernel. Boundary-heavy entries stay in Go;
-			// long invocations can still promote through the back-edge path.
-			if e.probes < jitHotCalls {
-				e.probes++
-				e.probeSteps += nativeSteps
-				e.probeHosts += hosts
-				if e.probes == jitHotCalls && e.probeHosts >= 16 && e.probeSteps/e.probeHosts < 64 {
-					e.entrySlow = true
-				}
-			}
-			v := s.decode(exit.Value)
-			s.clearRoots()
-			return v, nil, true
-		}
-		s.publish(f, r.stack, exit.State.Depth)
-		switch exit.Kind {
-		case ir.GuardExit:
-			s.guards++
-			e.misses++
-			s.clearRoots()
-			// A guard has already selected interpretation for this invocation.
-			// Suppress loop reentry even if coercion evicts the cached code.
-			previous := r.jitDeoptDepth
-			// Frame depth is bounded by maxGoRecursion and fits uint32.
-			r.jitDeoptDepth = uint32(r.frameDepth)
-			defer func() { r.jitDeoptDepth = previous }()
-			v, err := r.executeAt(f, f.base+exit.State.Depth, nil)
-			return v, err, true
-		case ir.HostExit:
-			s.clearRoots()
-			sp, steps, hostErr := r.jitHost(f, f.base+exit.State.Depth, int(min(budget, 16)))
-			// A callback that stopped the runtime -- Halt, Close -- leaves the
-			// rest of the frame to the interpreter, which stops at its next call
-			// or backward jump, where the native budget would not.
-			if hostErr != nil || r.stopped != nil {
-				return r.jitInterpret(f, sp, hostErr)
-			}
-			pc = int(f.pc)
-			budget -= uint64(steps)
-			// Most callbacks preserve this cache and executable owner. EntryDepth
-			// rejects an owner closed by eviction; a released cache changes s.
-			_, live := e.code.EntryDepth(pc)
-			if r.jit != s || !live {
-				e = r.jitFor(f.cl)
-				f.cl.setHint(hintFor(e))
-				if e == nil || e.code == nil {
-					return r.jitInterpret(f, sp, nil)
-				}
-			}
-			s = r.jit
-			s.properties = e.properties
-			s.this = e.this
-			s.globals = e.globals
-			s.strings = e.strings
-			s.referenceActive = len(e.referenceKeys) != 0
-			if s.referenceActive {
-				s.referenceKeys = e.referenceKeys
-			}
-			s.encodeFrame(r, f, r.stack, sp-f.base)
-		case ir.BudgetExit:
-			s.budgets++
-			if err := r.checkInterruptNow(); err != nil {
-				s.clearRoots()
-				return Undefined, err, true
-			}
-			if hosts >= 256 && nativeSteps/hosts < 64 {
-				e.entrySlow = true
-				s.clearRoots()
-				return r.jitInterpret(f, f.base+exit.State.Depth, nil)
-			}
-			if r.jitStressDeopt(s) {
-				s.clearRoots()
-				return r.jitInterpret(f, f.base+exit.State.Depth, nil)
-			}
-			pc = int(exit.State.PC)
-			budget = r.jitEntryBudget()
-		}
-	}
-}
-
-// jitHostFast handles comparisons and ordinary own data properties without
-// JavaScript callbacks. Array growth refreshes every alias's borrowed view;
-// scalar slots stay valid without publishing/reencoding the whole frame.
-// Any accessor, proxy, exotic object, new property, or full root table takes
-// the normal callback boundary at its original instruction and stack depth.
-func (r *Runtime) jitHostFast(f *frame, s *jitState, pc, depth, limit int) (int, int, int) {
-	// A reference write can invalidate frozen permissions. Reference programs
-	// use the full publication and refresh boundary for every host operation.
-	if s.referenceActive {
-		return pc, depth, 0
-	}
-	n := len(f.locals) + len(f.cl.upvalues)
-	n += len(s.globals)
-	if s.this {
-		n++
-	}
-	steps := 0
-	for range limit {
-		in := f.cl.fn.Code[pc]
-		sp := n + depth
-		if jitBinaryBoundary(in) {
-			cmp, _ := jitBinaryAt(in, sp)
-			left := s.decode(s.slots[cmp.left])
-			right := cmp.literal
-			if cmp.right >= 0 {
-				right = s.decode(s.slots[cmp.right])
-			}
-			if cmp.op == bytecode.OpMod {
-				if !left.IsNumber() || !right.IsNumber() {
-					return pc, depth, steps
-				}
-				s.slots[cmp.dest] = ir.Float(jsMod(left.Number(), right.Number()))
-				depth += cmp.delta
-				pc++
-				steps++
-				continue
-			}
-			if !cmp.strict && !left.IsNullish() && !right.IsNullish() && left.Kind() != right.Kind() {
-				return pc, depth, steps
-			}
-			result := left.StrictEquals(right)
-			if !cmp.strict {
-				// Same-kind and nullish comparisons never invoke coercion hooks,
-				// including Annex B's special HTMLDDA/nullish comparison.
-				result, _ = r.looseEquals(left, right)
-			}
-			result = result != cmp.negate
-			depth += cmp.delta
-			pc++
-			if cmp.branch {
-				if !result {
-					pc = int(in.A)
-				}
-			} else {
-				s.slots[cmp.dest] = ir.Bool(result)
-			}
-			steps++
-			continue
-		}
-		var value Value
-		dest, delta := sp, 1
-		switch in.Op {
-		case bytecode.OpSetLocalGet:
-			s.slots[in.A] = s.slots[sp-1]
-			s.slots[sp-1] = s.slots[in.B]
-			pc++
-			steps++
-			continue
-		case bytecode.OpPushThis:
-			var bound bool
-			value, bound = f.thisValue()
-			if !bound {
-				return pc, depth, steps
-			}
-		case bytecode.OpGetGlobal:
-			name, env := f.cl.names[in.A], f.cl.scope()
-			if f.evalVars != nil {
-				return pc, depth, steps
-			}
-			if p := r.globalLexProp(env, name); p != nil {
-				if p.value.IsUninitialized() {
-					return pc, depth, steps
-				}
-				value = p.value
-			} else {
-				if env.class != ClassObject {
-					return pc, depth, steps
-				}
-				site := &f.cl.ic[in.B]
-				i := globalSlot(env, site, name)
-				if i < 0 || env.props[i].flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 {
-					return pc, depth, steps
-				}
-				if site.p1 != env {
-					site.p1 = env
-				}
-				value = env.props[i].value
-			}
-		case bytecode.OpGetProp, bytecode.OpGetPropThis:
-			obj := s.decode(s.slots[sp-1])
-			var ok bool
-			if obj.IsString() && f.cl.names[in.A] == r.atoms.intern("charCodeAt") {
-				if p := r.proto.str.getOwn(f.cl.names[in.A]); p != nil && p.flags&^propDefault == 0 {
-					value, ok = p.value, true
-				}
-			} else if obj.IsObject() {
-				value, ok = plainOwn(obj.Object(), f.cl.names[in.A])
-			}
-			if !ok {
-				return pc, depth, steps
-			}
-			if in.Op == bytecode.OpGetProp {
-				dest, delta = sp-1, 0
-			}
-		case bytecode.OpCallMethod:
-			if in.A != 1 || !s.decode(s.slots[sp-2]).StrictEquals(r.jitCharCodeAt) {
-				return pc, depth, steps
-			}
-			receiver, index := s.decode(s.slots[sp-3]), s.decode(s.slots[sp-1])
-			if !receiver.IsString() || !index.IsNumber() {
-				return pc, depth, steps
-			}
-			str := receiver.String()
-			// Flattening or building UTF-16 storage stays at a published boundary.
-			if str.left != nil || !str.ascii && str.u16 == nil {
-				return pc, depth, steps
-			}
-			i := math.Trunc(index.Number())
-			if math.IsNaN(i) {
-				i = 0
-			}
-			value = Float(nan())
-			if i >= 0 && i < float64(str.Len()) {
-				value = Int(str.CharCodeAt(int(i)))
-			}
-			dest, delta = sp-3, -2
-		case bytecode.OpSetProp:
-			obj := s.decode(s.slots[sp-2])
-			if !obj.IsObject() {
-				return pc, depth, steps
-			}
-			o := obj.Object()
-			_, index, ok := plainOwnAt(o, f.cl.names[in.A])
-			if !ok || o.props[index].flags&propWritable == 0 {
-				return pc, depth, steps
-			}
-			o.props[index].value = s.decode(s.slots[sp-1])
-			depth -= 2
-			pc++
-			steps++
-			continue
-		case bytecode.OpSetIndex:
-			obj, key, value := s.decode(s.slots[sp-3]), s.decode(s.slots[sp-2]), s.decode(s.slots[sp-1])
-			if !obj.IsObject() || !key.IsNumber() {
-				return pc, depth, steps
-			}
-			if !setElem(obj, key, value) {
-				o := obj.Object()
-				if !jitGrowElem(o, key.Number(), value) {
-					return pc, depth, steps
-				}
-				// Encoding may hold multiple handles for the same receiver. A
-				// reallocation invalidates all of their previous storage pointers.
-				for i, root := range s.roots[:s.rootCount] {
-					if root.IsObject() && root.Object() == o {
-						s.arrays[i] = jitArrayView(o)
-					}
-				}
-			}
-			depth -= 3
-			pc++
-			steps++
-			continue
-		default:
-			return pc, depth, steps
-		}
-		if s.rootCount == ir.MaxSlots {
-			return pc, depth, steps
-		}
-		s.slots[dest] = s.encode(value)
-		depth += delta
-		pc++
-		steps++
-	}
-	return pc, depth, steps
-}
-
-// A borrowed hole can be written natively only when an indexed assignment
-// cannot consult a setter, a non-writable property, or an exotic prototype.
-func jitArrayView(o *Object) ir.ArrayView {
-	view := ir.ArrayView{Data: unsafe.Pointer(unsafe.SliceData(o.elems)), DenseLength: uint64(len(o.elems)), Length: uint64(o.arrayLength()), NumberLimit: tagBase}
-	if jitDenseWritable(o) {
-		view.WritableHole = holeBits
-	}
-	return view
-}
-
-func jitDenseWritable(o *Object) bool {
-	const want = objExtensible | objArrayLengthWritable
-	if o.class != ClassArray || o.flags&(want|objHasSparseElements|objMappedArguments) != want || !o.noIndexKeys() {
-		return false
-	}
-	for p := o.proto; p != nil; p = p.proto {
-		if p.class != ClassObject && p.class != ClassArray || len(p.elems) != 0 || !p.noIndexKeys() {
-			return false
-		}
-	}
-	return true
-}
-
-// The ordinary helper bounds the allocation caused by a single gap write.
-func jitGrowElem(o *Object, n float64, value Value) bool {
-	if n < 0 || n >= math.MaxUint32 || !jitDenseWritable(o) {
-		return false
-	}
-	i := uint32(n)
-	if float64(i) != n {
-		return false
-	}
-	return o.setElem(i, value)
+	f.cl.jitRefused = true
+	return Undefined, nil, false
 }
 
 type jitBinary struct {
@@ -1510,138 +908,6 @@ func jitTreeResult(p any) (Value, error, bool) {
 	return Undefined, nil, false
 }
 
-func (s *jitState) encodeFrame(r *Runtime, f *frame, stack []Value, depth int) {
-	base := len(f.locals) + len(f.cl.upvalues)
-	if s.this {
-		value, bound := f.thisValue()
-		if !bound {
-			value = uninitialized
-		}
-		s.slots[base] = s.encode(value)
-		base++
-	}
-	for _, in := range s.globals {
-		name, env := f.cl.names[in.A], f.cl.scope()
-		owner := env
-		var p *Property
-		if f.evalVars == nil && env.class == ClassObject {
-			if p = r.globalLexProp(env, name); p != nil {
-				owner = r.globalLex
-			} else {
-				site := &f.cl.ic[in.B]
-				if i := globalSlot(env, site, name); i >= 0 {
-					p = &env.props[i]
-					if site.p1 != env {
-						site.p1 = env
-					}
-				}
-			}
-		}
-		// A failed resolution is inert until the original read executes. No
-		// getter, proxy trap, coercion or TDZ error runs during preparation.
-		s.slots[base] = ir.Value{Kind: ir.Undefined}
-		if p != nil && p.flags&^propDefault == 0 && p.value.IsNumber() {
-			i := s.rootCount
-			s.rootCount++
-			s.roots[i] = Obj(owner)
-			s.arrays[i] = ir.ArrayView{Data: unsafe.Pointer(p), DenseLength: 1, Length: 1, WritableHole: tagBase}
-			s.slots[base] = ir.Value{Kind: ir.Opaque, Bits: uint64(i)}
-		}
-		base++
-	}
-	// Live slots are overwritten below; only inactive operands need clearing.
-	clear(s.slots[base+depth : base+f.cl.fn.MaxStack])
-	for i, v := range f.locals {
-		s.slots[i] = s.encode(v)
-	}
-	for i, v := range f.cl.upvalues {
-		s.slots[len(f.locals)+i] = s.encode(v.get())
-	}
-	for i, v := range stack[f.base : f.base+depth] {
-		s.slots[base+i] = s.encode(v)
-	}
-	if s.referenceActive {
-		s.prepareReferences()
-	}
-	if s.strings {
-		s.prepareStringMethods(r)
-	}
-}
-
-func (s *jitState) prepareStringMethods(r *Runtime) {
-	s.charCodeAt = r.jitCharCodeAt
-	method := r.proto.str.getOwn(r.atoms.intern("charCodeAt"))
-	if method == nil || method.flags&^propDefault != 0 || !method.value.StrictEquals(s.charCodeAt) {
-		return
-	}
-	handle := -1
-	for i, root := range s.roots[:s.rootCount] {
-		if root.StrictEquals(s.charCodeAt) {
-			handle = i
-			break
-		}
-	}
-	if handle < 0 {
-		if s.rootCount == ir.MaxSlots {
-			return
-		}
-		handle = int(s.encode(s.charCodeAt).Bits)
-	}
-	// A numeric caller may already have rooted the intrinsic without granting
-	// string permissions. Upgrade that inert view before transferring a callee.
-	s.arrays[handle] = ir.ArrayView{DenseLength: ir.CharCodeAtBuiltin}
-	for i, root := range s.roots[:s.rootCount] {
-		if root.IsString() {
-			s.arrays[i].WritableHole = uint64(handle + 1)
-		}
-	}
-}
-
-func (s *jitState) prepareReferences() {
-	for i := 0; i < min(s.rootCount, jitReferenceReceivers); i++ {
-		// Binding handles grant access to one numeric cell, not to their owner.
-		view := s.arrays[i]
-		if view.NumberLimit == 0 && view.WritableHole != 0 && view.Length == 1 {
-			continue
-		}
-		root := s.roots[i]
-		if !root.IsObject() || root.Object().class != ClassObject {
-			continue
-		}
-		o := root.Object()
-		var count int
-		for _, key := range s.referenceKeys {
-			value, index, ok := plainOwnAt(o, Atom(key))
-			if !ok || o.props[index].flags&^propDefault != 0 {
-				continue
-			}
-			handle := ir.MaxSlots
-			if value.IsObject() {
-				handle = 0
-				for handle < s.rootCount {
-					v := s.roots[handle]
-					if v.IsObject() && v.Object() == value.Object() {
-						break
-					}
-					handle++
-				}
-				if handle == s.rootCount {
-					if handle == ir.MaxSlots {
-						continue
-					}
-					s.encode(value)
-				}
-			}
-			cell := &o.props[index]
-			s.references.cells[i][count] = ir.ReferenceCell{Key: key, Bits: math.Float64bits(value.num), Reference: value.ref, Cell: (*ir.PropertyCell)(unsafe.Pointer(cell)), Handle: uint64(handle)}
-			count++
-		}
-		if count != 0 {
-			s.arrays[i] = ir.ArrayView{Data: unsafe.Pointer(&s.references.cells[i][0]), DenseLength: uint64(count), Length: tagBase}
-		}
-	}
-}
-
 // jitCallAt makes the call, method call or construction in, its operands
 // on the VM's stack up to sp, as the interpreter makes it: its result,
 // and where on the stack the result goes.
@@ -1682,7 +948,7 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 		pc := int(f.pc)
 		in := f.cl.fn.Code[pc]
 		n := len(f.locals) + len(f.cl.upvalues)
-		if jitBinaryBoundary(in) || r.jitSSA && jitBinaryGeneric(in) {
+		if jitBinaryBoundary(in) || jitBinaryGeneric(in) {
 			// The new pipeline's code also leaves an operation whose
 			// speculation failed before to Go (ssa.Feedback's Generic).
 			cmp, _ := jitBinaryAt(in, n+sp-f.base)

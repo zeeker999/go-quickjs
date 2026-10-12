@@ -2834,6 +2834,25 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		guard(arm64.NE)
 		c.a.AddImm(a64A, a64A, int64(c.enc.PropertyValue), true)
 		c.setG(v, a64A)
+	case ssa.OpLexCell:
+		// As amd64's: the bindings' object, the binding's key, and out of
+		// its temporal dead zone.
+		c.a.Load(a64A, a64Ctx, abi.OffGlobalLex)
+		c.a.Cbz(a64A, c.stubLabel(v.State, exitKind(v.Aux)), true)
+		c.a.Load(a64B, a64A, c.enc.ObjectProps+8)
+		c.a.CmpImm(a64B, int64(v.Index), true)
+		guard(arm64.LS)
+		c.a.Load(a64A, a64A, c.enc.ObjectProps)
+		c.a.AddImm(a64A, a64A, int64(int32(v.Index)*c.enc.PropertySize), true)
+		c.a.LoadU32(a64B, a64A, c.enc.PropertyKey)
+		c.a.CmpImm(a64B, int64(v.Key), false)
+		guard(arm64.NE)
+		c.a.AddImm(a64A, a64A, int64(c.enc.PropertyValue), true)
+		c.a.Load(a64B, a64A, c.enc.NumOffset)
+		c.a.MovImm(a64C, c.enc.Uninitialized)
+		c.a.Cmp(a64B, a64C, true)
+		guard(arm64.EQ)
+		c.setG(v, a64A)
 	case ssa.OpStringMethod:
 		// As amd64's: where String.prototype has it now, its shape checked.
 		c.a.MovImm(a64B, c.enc.String)

@@ -7,8 +7,8 @@
 //	cd internal/jit/verify && go test -tags quickjs_jit ./...
 //
 // Generated code runs on a goroutine's stack between Go frames, with no
-// metadata of its own, and Go cannot recover a fault in it. So every program
-// both emitters make, on every target, must decode in full, and must keep
+// metadata of its own, and Go cannot recover a fault in it. So every function
+// the backend compiles, for every target, must decode in full, and must keep
 // the registers and the stack Go relies on: no calls, pushes or pops, no
 // system calls or traps, and no use of SP, BP and R14 (g) on amd64, or SP,
 // R18 (platform), R28 (g), R29 (FP) and R30 (LR) on arm64 beyond the RET
@@ -21,7 +21,6 @@ import (
 	"math"
 	"math/rand/v2"
 	"regexp"
-	"strings"
 	"testing"
 
 	"golang.org/x/arch/arm64/arm64asm"
@@ -29,7 +28,6 @@ import (
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/compiler"
-	"github.com/go-quickjs/go-quickjs/internal/jit"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
@@ -39,14 +37,13 @@ import (
 )
 
 var (
-	x86Reserved   = regexp.MustCompile(`\b(RSP|ESP|SP|SPL|RBP|EBP|BP|BPL|R14|R14L|R14W|R14B|R14D)\b`)
-	x86Forbidden  = map[string]bool{"CALL": true, "PUSH": true, "POP": true, "PUSHF": true, "POPF": true, "SYSCALL": true, "INT": true, "ENTER": true, "LEAVE": true, "HLT": true, "UD2": true}
-	a64Reserved   = regexp.MustCompile(`\b(SP|WSP|X18|W18|X28|W28|X29|W29|X30|W30)\b`)
-	a64Forbidden  = map[string]bool{"BL": true, "BLR": true, "SVC": true, "HVC": true, "SMC": true, "BRK": true, "HLT": true, "UDF": true}
-	arches        = []string{"amd64", "arm64"}
-	checkedBytes  = map[string]int{}
-	checkedInsts  = map[string]int{}
-	firstProblems = 0
+	x86Reserved  = regexp.MustCompile(`\b(RSP|ESP|SP|SPL|RBP|EBP|BP|BPL|R14|R14L|R14W|R14B|R14D)\b`)
+	x86Forbidden = map[string]bool{"CALL": true, "PUSH": true, "POP": true, "PUSHF": true, "POPF": true, "SYSCALL": true, "INT": true, "ENTER": true, "LEAVE": true, "HLT": true, "UD2": true}
+	a64Reserved  = regexp.MustCompile(`\b(SP|WSP|X18|W18|X28|W28|X29|W29|X30|W30)\b`)
+	a64Forbidden = map[string]bool{"BL": true, "BLR": true, "SVC": true, "HVC": true, "SMC": true, "BRK": true, "HLT": true, "UDF": true}
+	arches       = []string{"amd64", "arm64"}
+	checkedBytes = map[string]int{}
+	checkedInsts = map[string]int{}
 )
 
 // check disassembles code and reports the first problem in it.
@@ -89,22 +86,6 @@ func check(arch string, code []byte) error {
 	return nil
 }
 
-func verify(t *testing.T, name string, p *ir.Program) {
-	t.Helper()
-	for _, arch := range arches {
-		code, err := jit.Emit(arch, p)
-		if err != nil {
-			continue // a refusal is not an encoding
-		}
-		if err := check(arch, code); err != nil {
-			firstProblems++
-			if firstProblems <= 10 {
-				t.Errorf("%s, %s: %v", arch, name, err)
-			}
-		}
-	}
-}
-
 // jsCorpus covers what lowering accepts: arithmetic, comparisons and every
 // bitwise operator in their fused and immediate forms, arrays, properties,
 // globals, captured bindings, calls, strings and the stack shuffles of
@@ -145,7 +126,7 @@ func lowered(t *testing.T, src string) []*ir.Program {
 			if c.Kind != bytecode.ConstFunction {
 				continue
 			}
-			for _, lower := range []func(*bytecode.Function) (*ir.Program, error){jitcompile.Lower, jitcompile.LowerCalls, jitcompile.LowerCallee} {
+			for _, lower := range []func(*bytecode.Function) (*ir.Program, error){jitcompile.Lower, jitcompile.LowerSSA, jitcompile.LowerSSAInline} {
 				if p, err := lower(c.Fn); err == nil {
 					out = append(out, p)
 				}
@@ -155,20 +136,6 @@ func lowered(t *testing.T, src string) []*ir.Program {
 	}
 	walk(top)
 	return out
-}
-
-func TestEmittedFromJavaScript(t *testing.T) {
-	n := 0
-	for _, src := range jsCorpus {
-		for i, p := range lowered(t, src) {
-			verify(t, fmt.Sprintf("%s (program %d)", src, i), p)
-			n++
-		}
-	}
-	if n < len(jsCorpus) {
-		t.Fatalf("only %d programs lowered from %d functions", n, len(jsCorpus))
-	}
-	t.Logf("%d programs; checked %v bytes, %v instructions", n, checkedBytes, checkedInsts)
 }
 
 var literals = []ir.Value{ir.Float(0), ir.Float(math.Copysign(0, -1)), ir.Float(1), ir.Float(-1), ir.Float(0.5),
@@ -206,43 +173,37 @@ func randomProgram(r *rand.Rand) *ir.Program {
 	return p
 }
 
-func TestEmittedFromRandomPrograms(t *testing.T) {
-	r := rand.New(rand.NewPCG(1, 2))
-	valid := 0
-	ops := map[ir.Op]bool{}
-	for attempt := 0; attempt < 200000 && valid < 3000; attempt++ {
-		p := randomProgram(r)
-		if p.Validate() != nil {
-			continue
-		}
-		valid++
-		for _, in := range p.Code {
-			ops[in.Op] = true
-		}
-		verify(t, fmt.Sprintf("random program %d", attempt), p)
-	}
-	var names []string
-	for op := range ops {
-		names = append(names, fmt.Sprint(op))
-	}
-	t.Logf("%d valid programs over operations %s; checked %v bytes", valid, strings.Join(names, " "), checkedBytes)
-	if valid < 1000 {
-		t.Fatalf("only %d valid random programs", valid)
-	}
-}
+// globals is feedback that has found every global binding, a script's
+// lexical binding at odd PCs, so that the code of both cells is checked.
+type globals struct{}
 
-// The new pipeline's code (internal/jit/mir) keeps the same rules, for every
-// function its random and JavaScript corpora compile.
+func (globals) Property(int) (ssa.PropertySite, bool) { return ssa.PropertySite{}, false }
+func (globals) Global(pc int) (ssa.GlobalSite, bool) {
+	return ssa.GlobalSite{Key: 7, Index: int32(pc % 5), Lexical: pc%2 == 1}, true
+}
+func (globals) Generic(int) bool                  { return false }
+func (globals) EntryGeneric(int) bool             { return false }
+func (globals) Inline(int) (ssa.InlineSite, bool) { return ssa.InlineSite{}, false }
+func (globals) NativeCalls(int) []ssa.CallSite    { return nil }
+
+// The backend's code (internal/jit/mir) keeps the rules, for every function
+// its random and JavaScript corpora compile.
 func TestMirEmitted(t *testing.T) {
 	enc := abi.Encoding{ValueSize: 16, NumOffset: 0, RefOffset: 8,
 		Undefined: 0xFFF8000000000001, Null: 0xFFF8000000000002, True: 0xFFF8000000000103,
 		False: 0xFFF8000000000003, Uninitialized: 0xFFF8000000000008, CanonicalNaN: 0x7FF8000000000000}
-	compile := func(name string, p *ir.Program) bool {
-		f, err := ssa.Build(p)
+	cells := map[ssa.Op]int{}
+	compile := func(name string, p *ir.Program, fb ssa.Feedback) bool {
+		f, err := ssa.BuildWith(p, fb)
 		if err != nil {
 			return false
 		}
 		ssa.Optimize(f)
+		for _, b := range f.Blocks {
+			for _, v := range b.Values {
+				cells[v.Op]++
+			}
+		}
 		for _, arch := range arches {
 			compile := mir.CompileAMD64
 			if arch == "arm64" {
@@ -261,7 +222,10 @@ func TestMirEmitted(t *testing.T) {
 	n := 0
 	for _, src := range jsCorpus {
 		for i, p := range lowered(t, src) {
-			if compile(fmt.Sprintf("%s (%d)", src, i), p) {
+			if compile(fmt.Sprintf("%s (%d)", src, i), p, nil) {
+				n++
+			}
+			if compile(fmt.Sprintf("%s (%d, globals)", src, i), p, globals{}) {
 				n++
 			}
 		}
@@ -269,12 +233,15 @@ func TestMirEmitted(t *testing.T) {
 	r := rand.New(rand.NewPCG(5, 6))
 	for attempt := 0; attempt < 50000 && n < 2000; attempt++ {
 		p := randomProgram(r)
-		if p.Validate() == nil && compile(fmt.Sprintf("random %d", attempt), p) {
+		if p.Validate() == nil && compile(fmt.Sprintf("random %d", attempt), p, nil) {
 			n++
 		}
 	}
 	if n < 500 {
 		t.Fatalf("only %d functions compiled", n)
 	}
-	t.Logf("%d functions", n)
+	t.Logf("%d functions; checked %v bytes, %v instructions", n, checkedBytes, checkedInsts)
+	if cells[ssa.OpGlobalCell] == 0 || cells[ssa.OpLexCell] == 0 {
+		t.Fatalf("global cells %d, lexical cells %d", cells[ssa.OpGlobalCell], cells[ssa.OpLexCell])
+	}
 }

@@ -11,8 +11,11 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
 )
 
+// The backend for this target is compiled in.
+const supported = true
+
 // SSACode owns a function the new pipeline compiled (internal/jit/mir) and
-// its executable memory. Like Code, it belongs to one runtime.
+// its executable memory. It belongs to one runtime.
 type SSACode struct {
 	code  []byte
 	arena *Arena

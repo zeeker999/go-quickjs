@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
-	"fmt"
 	"io"
 	"math"
 	"os"
@@ -14,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
+	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 )
 
 func sameFloat(a, b float64) bool {
@@ -34,10 +33,22 @@ func TestNativeInvalidCodeSize(t *testing.T) {
 	}
 }
 
+// runValue runs code that returns a number, and reports it.
+func runValue(c *SSACode) (float64, error) {
+	var ctx abi.Context
+	if err := c.Run(0, &ctx); err != nil {
+		return 0, err
+	}
+	if ctx.ExitKind != abi.ExitReturn {
+		return 0, errors.New("the code did not return")
+	}
+	return math.Float64frombits(ctx.Ret), nil
+}
+
 // This can run alone in a hardened executable. Allocation denial must be an
 // ordinary, identifiable refusal, before any attempt to enter native code.
 func TestExecutableMemoryPolicy(t *testing.T) {
-	c, err := Compile(constantProgram())
+	c, err := NewSSACode(nil, valueCode(t, 42, 0))
 	if err != nil {
 		if c != nil || !errors.Is(err, ErrUnavailable) {
 			t.Fatalf("unavailable executable memory: %v, %v", c, err)
@@ -53,46 +64,46 @@ func TestExecutableMemoryPolicy(t *testing.T) {
 	if os.Getenv("QUICKJS_EXPECT_JIT_DENIED") != "" {
 		t.Fatal("executable-memory policy unexpectedly allowed native code")
 	}
-	exit, err := c.Run(nil, 0, 1)
-	if err != nil || exit.Kind != ir.Returned || exit.Value != ir.Float(42) {
-		t.Fatalf("allowed native code: %+v, %v", exit, err)
+	if v, err := runValue(c); err != nil || v != 42 {
+		t.Fatalf("allowed native code: %v, %v", v, err)
 	}
 }
 
-// Programs differing only in an immediate, compiled and released in turn,
-// exercise instruction-cache publication when the OS reuses freed addresses.
+// Functions differing only in a constant, placed and released in turn, each
+// in an arena of its own, exercise instruction-cache publication when the OS
+// reuses freed addresses.
 func TestNativeReusedAllocations(t *testing.T) {
 	for i := 0; i < 128; i++ {
-		p := &ir.Program{Code: []ir.Instruction{{Op: ir.Return, Left: ir.Literal(ir.Float(float64(i)))}}, Maps: []ir.StateMap{{PC: 0}}}
-		c, err := Compile(p)
+		c, err := NewSSACode(nil, valueCode(t, float64(i), 0))
 		if err != nil {
 			t.Fatal(err)
 		}
-		exit, runErr := c.Run(nil, 0, 1)
+		v, runErr := runValue(c)
 		closeErr := c.Close()
-		if runErr != nil || closeErr != nil || exit.Value != ir.Float(float64(i)) {
-			t.Fatalf("allocation %d: %+v, %v, %v", i, exit, runErr, closeErr)
+		if runErr != nil || closeErr != nil || v != float64(i) {
+			t.Fatalf("allocation %d: %v, %v, %v", i, v, runErr, closeErr)
 		}
 	}
 }
 
+// A CPU profile taken while native code runs is one the profiler can write:
+// its signals land in code with no Go frame information.
 func TestNativeCPUProfile(t *testing.T) {
-	p := &ir.Program{Locals: 1, Code: []ir.Instruction{
-		{Op: ir.Binary, Operator: ir.Add, Left: ir.Slot(0), Right: ir.Literal(ir.Float(1)), Dest: 0},
-		{Op: ir.Jump, Target: 0},
-	}, Maps: []ir.StateMap{{PC: 0}, {PC: 1}}}
-	c := newTestCode(t, p)
+	c, err := NewSSACode(nil, valueCode(t, 7, 3*chunkBytes/4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
 	var profile bytes.Buffer
 	if err := pprof.StartCPUProfile(&profile); err != nil {
 		t.Fatal(err)
 	}
 	func() {
 		defer pprof.StopCPUProfile()
-		slots := []ir.Value{ir.Float(0)}
 		deadline := time.Now().Add(250 * time.Millisecond)
 		for time.Now().Before(deadline) {
-			if exit, err := c.Run(slots, 0, MaxIterations); err != nil || exit.Kind != ir.BudgetExit {
-				t.Fatalf("profiled loop: %+v, %v", exit, err)
+			if v, err := runValue(c); err != nil || v != 7 {
+				t.Fatalf("profiled code: %v, %v", v, err)
 			}
 		}
 	}()
@@ -104,60 +115,5 @@ func TestNativeCPUProfile(t *testing.T) {
 	data, err := io.ReadAll(zr)
 	if err != nil || len(data) == 0 {
 		t.Fatalf("CPU profile: %d bytes, %v", len(data), err)
-	}
-}
-
-// A panic while emitting is a refused program, not a crashed host.
-func TestNativeEmitPanicRefuses(t *testing.T) {
-	previous := emitInstructions
-	defer func() { emitInstructions = previous }()
-	emitInstructions = func(*ir.Program) ([]byte, []int, error) { panic("emitter bug") }
-	c, err := Compile(constantProgram())
-	if c != nil || !errors.Is(err, ErrProgram) {
-		t.Fatalf("Compile after an emitter panic = %v, %v; want nil, ErrProgram", c, err)
-	}
-}
-
-// memory cannot encode RSP or R12 as a base without a SIB byte, so it refuses
-// them instead of emitting a different instruction.
-func TestAMD64MemoryBaseNeedsNoSIB(t *testing.T) {
-	for _, base := range []byte{4, 12} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Errorf("base %d encoded without a SIB byte", base)
-				}
-			}()
-			(&amd64Program{}).memory(0x8b, 0, base, 8)
-		}()
-	}
-	(&amd64Program{}).memory(0x8b, 0, 13, 8) // R13 needs none with a displacement
-}
-
-// BenchmarkNativeRoundTrip measures one entry into native code and one exit
-// back to Go: the Go-side Run, the bridge, the entry's register loads, one
-// jump, a host exit and its spills. It is the floor under every helper call
-// and every return to Go, which the plan's cost model (D10) prices.
-func BenchmarkNativeRoundTrip(b *testing.B) {
-	for _, locals := range []int{1, 8, 24} {
-		b.Run(fmt.Sprintf("%d-locals", locals), func(b *testing.B) {
-			p := &ir.Program{Locals: locals, Code: []ir.Instruction{
-				{Op: ir.Host},
-				{Op: ir.Jump, Target: 0},
-			}, Maps: []ir.StateMap{{PC: 0}, {PC: 1}}}
-			c := newTestCode(b, p)
-			slots := make([]ir.Value, locals)
-			for i := range slots {
-				slots[i] = ir.Float(float64(i))
-			}
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				exit, err := c.RunEncodedArrays(slots, nil, 1, MaxIterations)
-				if err != nil || exit.Kind != ir.HostExit {
-					b.Fatalf("%+v %v", exit, err)
-				}
-			}
-		})
 	}
 }

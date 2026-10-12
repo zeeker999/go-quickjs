@@ -36,12 +36,11 @@ func (e *Refusal) Error() string {
 func refuse(pc int, why string) error { return &Refusal{PC: pc, Reason: why} }
 
 // Lower checks eligibility, validates control-flow stack depths, and produces
-// one atomic IR instruction and pre-instruction map per bytecode instruction.
-// No executable memory is allocated. Unsupported code, even when unreachable,
-// is refused. Captured own locals are excluded; read-only upvalues are snapshots
-// refreshed by the VM after host operations.
-// Property keys are source-name indices; the VM resolves them to its runtime's
-// scalar property identifiers before emission or evaluation with borrowed views.
+// one atomic IR instruction and pre-instruction map per bytecode instruction:
+// the slot IR without the new pipeline's additions (LowerSSA), which the SSA
+// package's tests run both ways, compiled and through the slot IR's own
+// evaluator (ir.Evaluate). No executable memory is allocated. Unsupported
+// code, even when unreachable, is refused.
 func Lower(fn *bytecode.Function) (*ir.Program, error) {
 	return lowerRecovered(fn, lowering{})
 }
@@ -78,19 +77,6 @@ func LowerSSAForward(fn *bytecode.Function) (*ir.Program, error) {
 	return lowerRecovered(fn, lowering{ssa: true, callee: true, forward: true})
 }
 
-// LowerCalls additionally retains guarded numeric fields across call boundaries.
-// Its caller must refresh borrowed views after every potentially effectful call.
-func LowerCalls(fn *bytecode.Function) (*ir.Program, error) {
-	return lowerRecovered(fn, lowering{calls: true})
-}
-
-// LowerCallee permits small guarded functions whose entry costs are amortized
-// by an encoded caller. It keeps reference fields on the coordinator's host
-// path and does not change the standalone profitability policy.
-func LowerCallee(fn *bytecode.Function) (*ir.Program, error) {
-	return lowerRecovered(fn, lowering{calls: true, callee: true})
-}
-
 // lowering is how a function is lowered: for which entry points, and for
 // which pipeline.
 type lowering struct{ calls, callee, ssa, forward bool }
@@ -112,11 +98,10 @@ var lowerImpl = lowerFunction
 
 // SSAConstruct has the new pipeline compile functions that construct, `new
 // C(...)`, which its code makes natively where it can and leaves to Go
-// otherwise. It is off until built-in constructors and
-// Function.prototype.call are made natively too: DeltaBlue's constructors,
-// which use both, leave native code at each construction, and run 43%
-// slower than the tree tier runs them (docs/jit-progress.md, P7w).
-var SSAConstruct = false
+// otherwise. Tests turn it off to compare; with it the V8 suite runs some
+// 18% faster at -n 5, RayTrace 43% and EarleyBoyer 36%, DeltaBlue's warm-up
+// paying 12% more for its larger compiles (docs/jit-progress.md).
+var SSAConstruct = true
 
 func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 	if fn == nil {
@@ -330,8 +315,9 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 				p.Code[pc] = ir.Instruction{Op: ir.ArrayLiteral, Dest: p.Locals + p.Maps[pc].Depth - n, Extra: n}
 			}
 			if in.Op == ir.BindingRead {
-				// The operand is the binding view's slot in the old pipeline;
-				// the new one reads the global object, through its context.
+				// No operand: native code reads the binding where the
+				// global object, or a script's lexical bindings, have it,
+				// through its context.
 				p.Code[pc].Left = ir.Literal(ir.Value{Kind: ir.Undefined})
 			}
 			if b := fn.Code[pc]; in.Op == ir.Host && b.Op == bytecode.OpGetPropThis && p.Maps[pc].Depth >= 0 {

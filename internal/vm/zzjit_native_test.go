@@ -47,7 +47,7 @@ func TestJITPropertyABI(t *testing.T) {
 func TestJITNumericProperties(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	v, err := r.Run(compileForTest(t, `function f(o,n){let s=0;for(let i=0;i<n;i++){s=(s+o.x)|0;o.x=o.x+1}return s}let o={a:7,x:3};f(o,1000)===502500&&o.x===1003&&o.a===7`))
-	if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 || r.jit.guards != 0 || r.jit.rootCount != 0 {
+	if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 || r.jit.guards != 0 {
 		t.Fatalf("numeric fields did not stay native: %v, %v", v, err)
 	}
 }
@@ -65,7 +65,7 @@ func TestJITThisSnapshot(t *testing.T) {
 		for _, enabled := range []bool{false, true} {
 			r := jitRuntimeForTest(t, Config{JIT: enabled})
 			v, err := r.Run(compileForTest(t, source))
-			if err != nil || !v.IsBool() || !v.Truthy() || enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.rootCount != 0) {
+			if err != nil || !v.IsBool() || !v.Truthy() || enabled && (r.jit == nil || r.jit.entries == 0) {
 				t.Fatalf("receiver JIT %v: %v, %v; %s", enabled, v, err, source)
 			}
 		}
@@ -92,7 +92,7 @@ func TestJITPropertyFallbacks(t *testing.T) {
 			for _, enabled := range []bool{false, true} {
 				r := jitRuntimeForTest(t, Config{JIT: enabled})
 				v, err := r.Run(compileForTest(t, tc.source))
-				if err != nil || !v.IsBool() || !v.Truthy() || enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.guards != 0 || r.jit.rootCount != 0) {
+				if err != nil || !v.IsBool() || !v.Truthy() || enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.guards != 0) {
 					t.Fatalf("property JIT %v: %v, %v", enabled, v, err)
 				}
 			}
@@ -103,7 +103,7 @@ func TestJITPropertyFallbacks(t *testing.T) {
 func TestJITPropertyViewNotArray(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	v, err := r.Run(compileForTest(t, `function f(o,a){return o.length+a[0]}f({length:7},[3])===10`))
-	if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.guards != 1 || r.jit.rootCount != 0 {
+	if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.guards != 1 {
 		t.Fatalf("ordinary property view granted array length access: %v, %v", v, err)
 	}
 }
@@ -112,7 +112,7 @@ func TestJITPropertyCallbackRelease(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	r.global.setOwnRaw(r.atoms.intern("host"), r.NewFunction("host", 0,
 		func(rt *Runtime, _ Value, _ []Value) (Value, error) {
-			if rt.jit == nil || rt.jit.rootCount != 0 {
+			if rt.jit == nil {
 				t.Fatal("callback retained native property views")
 			}
 			rt.releaseJIT()
@@ -120,7 +120,7 @@ func TestJITPropertyCallbackRelease(t *testing.T) {
 			return Undefined, nil
 		}), propDefault)
 	v, err := r.Run(compileForTest(t, `function f(o,a,cb){o.x=7;cb();a[0]+=1;return o.x+a[0]}let o={x:3};f(o,[0],()=>{host();delete o.x;o.y=9;o.x=11})===12&&o.y===9`))
-	if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.rootCount != 0 || r.jit.guards != 0 {
+	if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.guards != 0 {
 		t.Fatalf("property view release: %v, %v", v, err)
 	}
 }
@@ -139,7 +139,7 @@ func TestJITRemainderBoundaries(t *testing.T) {
 		}
 		fn := compileForTest(t, `let v=f([1],`+tc.left+`,`+tc.right+`);`+tc.check)
 		v, err := r.Run(fn)
-		if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.guards != 0 || r.jit.rootCount != 0 {
+		if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.guards != 0 {
 			t.Fatalf("%s %% %s: %v, %v", tc.left, tc.right, v, err)
 		}
 	}
@@ -151,7 +151,7 @@ func TestJITRemainderBoundaries(t *testing.T) {
 	} {
 		r := jitRuntimeForTest(t, Config{JIT: true})
 		v, err := r.Run(compileForTest(t, source))
-		if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.entries == 0 || r.jit.guards != 0 || r.jit.rootCount != 0 {
+		if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.entries == 0 || r.jit.guards != 0 {
 			t.Fatalf("remainder fused/error result: %v, %v", v, err)
 		}
 	}
@@ -161,7 +161,7 @@ func TestJITRemainderCoercionRelease(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	r.global.setOwnRaw(r.atoms.intern("host"), r.NewFunction("host", 0,
 		func(rt *Runtime, _ Value, _ []Value) (Value, error) {
-			if rt.jit == nil || rt.jit.rootCount != 0 {
+			if rt.jit == nil {
 				t.Fatal("remainder coercion retained native roots")
 			}
 			rt.releaseJIT()
@@ -169,7 +169,7 @@ func TestJITRemainderCoercionRelease(t *testing.T) {
 			return Undefined, nil
 		}), propDefault)
 	v, err := r.Run(compileForTest(t, `let order='';let a=[1];function f(a,x,y){a[0]+=1;let rem=x%y;return rem+a[0]+a.length}f(a,{valueOf(){order+='x';host();a.push(7);return 13}},{valueOf(){order+='y';return 5}})===7&&order==='xy'`))
-	if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.rootCount != 0 || r.jit.guards != 0 {
+	if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.guards != 0 {
 		t.Fatalf("remainder callback order/release: %v, %v", v, err)
 	}
 }
@@ -181,9 +181,6 @@ func TestJITGlobalReads(t *testing.T) {
 		r.global.setOwnRaw(r.atoms.intern("host"), r.NewFunction("host", 0,
 			func(rt *Runtime, _ Value, _ []Value) (Value, error) {
 				calls++
-				if enabled && rt.jit.rootCount != 0 {
-					t.Fatal("global accessor retained native roots")
-				}
 				return Undefined, nil
 			}), propDefault)
 		for _, source := range []string{
@@ -198,7 +195,7 @@ func TestJITGlobalReads(t *testing.T) {
 				t.Fatalf("global read JIT %v: %v, %v", enabled, v, err)
 			}
 		}
-		if calls != 1 || enabled && (r.jit == nil || r.jit.guards != 0 || r.jit.rootCount != 0) {
+		if calls != 1 || enabled && (r.jit == nil || r.jit.guards != 0) {
 			t.Fatal("global resolution did not preserve accessors or lexical shadowing")
 		}
 	}
@@ -208,7 +205,7 @@ func TestJITNumericGlobalLoop(t *testing.T) {
 	for _, keyword := range []string{"var", "let", "const"} {
 		r := jitRuntimeForTest(t, Config{JIT: true})
 		v, err := r.Run(compileForTest(t, keyword+` scale=3,offset=7;function f(a,n){for(let i=0;i<n;i++)a[i]=i*scale+offset;return a[n-1]}let a=[];for(let i=0;i<512;i++)a[i]=0;f(a,512)===1540&&a[0]===7`))
-		if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 || r.jit.guards != 0 || r.jit.rootCount != 0 {
+		if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 || r.jit.guards != 0 {
 			t.Fatalf("%s numeric bindings did not stay native: %v, %v", keyword, v, err)
 		}
 	}
@@ -227,9 +224,51 @@ func TestJITNumericGlobalMutation(t *testing.T) {
 		for _, enabled := range []bool{false, true} {
 			r := jitRuntimeForTest(t, Config{JIT: enabled})
 			v, err := r.Run(compileForTest(t, source))
-			if err != nil || !v.IsBool() || !v.Truthy() || enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.rootCount != 0) {
+			if err != nil || !v.IsBool() || !v.Truthy() || enabled && (r.jit == nil || r.jit.entries == 0) {
 				t.Fatalf("binding mutation JIT %v: %v, %v; %s", enabled, v, err, source)
 			}
+		}
+	}
+}
+
+// A script's let, const and class bindings, read and written by native
+// code where they are (ssa.OpLexCell): each answer the interpreter's, and
+// those that need no Go read natively. A binding in its temporal dead zone
+// leaves to Go, which throws, as does a write to a const.
+func TestJITLexicalGlobals(t *testing.T) {
+	for _, tc := range []struct {
+		source string
+		native bool
+	}{
+		{`let k=3;function f(n){let s=0;for(let i=0;i<n;i++)s+=k;return s}f(100)`, true},
+		{`const k=2.5;function f(n){let s=0;for(let i=0;i<n;i++)s+=k;return s}f(100)`, true},
+		{`let c=0;function f(n){for(let i=0;i<n;i++)c+=i;return c}f(100)+c`, true},
+		{`'use strict';let c=0;function f(n){for(let i=0;i<n;i++)c=c*3+i|0;return c}f(100)+c`, true},
+		{`class P{constructor(x){this.x=x}}function f(n){let s=0;for(let i=0;i<n;i++)s+=new P(i).x;return s}f(100)`, true},
+		{`const g=x=>x*2;function f(n){let s=0;for(let i=0;i<n;i++)s+=g(i);return s}f(100)`, true},
+		{`function f(n){let s=0;for(let i=0;i<n;i++)s+=i;return s+late}let r=0;try{f(10)}catch(e){r=e instanceof ReferenceError?1:2}let late=5;r*1000+f(10)`, false},
+		{`function f(n){for(let i=0;i<n;i++)late=i;return late}let r=0;try{f(10)}catch(e){r=e instanceof ReferenceError?1:2}let late=5;r*1000+f(10)`, false},
+		{`const K=1;function f(n){let s=0;for(let i=0;i<n;i++){s+=i;if(i===n-1)K=s}return s}let r=0;try{f(10)}catch(e){r=e instanceof TypeError?1:2}r*1000+K+f.length`, false},
+		{`let k=1;function f(n){let s=0;for(let i=0;i<n;i++){s+=k;if(i===50)k='x'}return s}f(100)`, false},
+	} {
+		want := New(Config{})
+		wv, err := want.Run(compileForTest(t, tc.source))
+		want.Close()
+		if err != nil {
+			t.Fatalf("interpreter: %v; %s", err, tc.source)
+		}
+		r := jitRuntimeForTest(t, Config{JIT: true})
+		v, err := r.Run(compileForTest(t, tc.source))
+		if err != nil {
+			t.Fatalf("JIT: %v; %s", err, tc.source)
+		}
+		ws, _ := want.ToString(wv)
+		gs, _ := r.ToString(v)
+		if gs.Go() != ws.Go() {
+			t.Fatalf("JIT %s, interpreter %s; %s", gs.Go(), ws.Go(), tc.source)
+		}
+		if r.jit == nil || r.jit.ssaEntries == 0 || tc.native && (r.jit.hosts != 0 || r.jit.guards != 0 || r.jit.interpreted != 0) {
+			t.Fatalf("not native: %+v; %s", r.JITStats(), tc.source)
 		}
 	}
 }
@@ -244,10 +283,13 @@ func TestJITGlobalCacheOwner(t *testing.T) {
 		if in.Op != bytecode.OpGetGlobal {
 			continue
 		}
+		// Native code reads the global where the closure's scope has it,
+		// whatever the site's cache holds.
 		site := &cl.ic[in.B]
 		site.p1 = r.NewObject()
+		entries := r.jit.ssaEntries
 		v, err := r.Run(compileForTest(t, `f([1])`))
-		if err != nil || v.Number() != 4 || site.p1 != cl.scope() || r.jit.rootCount != 0 {
+		if err != nil || v.Number() != 4 || r.jit.ssaEntries == entries || r.jit.hosts != 0 {
 			t.Fatalf("global cache retained a stale environment: %v, %v", v, err)
 		}
 		return
@@ -265,14 +307,15 @@ func TestJITCallbackTierSelection(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Its calls are native code's: Go enters it and it runs to the end.
 	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
-	if r.entryOf(cl) == nil || !r.entryOf(cl).entrySlow || cl.jitRefused {
-		t.Fatal("callback-heavy entry did not stay eligible for loop promotion")
+	if e := r.entryOf(cl); e == nil || e.ssa == nil || e.entrySlow || cl.jitRefused {
+		t.Fatal("callback-heavy entry did not stay native")
 	}
-	before := r.jit.osrs
+	hosts, interpreted := r.jit.hosts, r.jit.interpreted
 	v, err := r.Run(compileForTest(t, `f([0],10000,cb)`))
-	if err != nil || v.Number() != 10000 || r.jit.osrs == before || r.jit.guards != 0 || r.jit.rootCount != 0 {
-		t.Fatalf("later long call did not promote its hot loop: %v, %v", v, err)
+	if err != nil || v.Number() != 10000 || r.jit.guards != 0 || r.jit.hosts != hosts || r.jit.interpreted != interpreted {
+		t.Fatalf("later long call left native code: %v, %v", v, err)
 	}
 }
 
@@ -280,8 +323,10 @@ func TestJITBoundaryDensityBudget(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	v, err := r.Run(compileForTest(t, `function f(a,n){let s=0;for(let i=0;i<n;i++){s+=a[0]%3;a[0]+=3}return s}let a=[2];f(a,20000)===40000&&a[0]===60002`))
 	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
-	if err != nil || !v.IsBool() || !v.Truthy() || r.entryOf(cl) == nil || !r.entryOf(cl).entrySlow || r.jit.budgets == 0 || r.jit.rootCount != 0 || r.jit.guards != 0 {
-		t.Fatalf("boundary density changed effects or failed to select Go: %v, %v", v, err)
+	// The loop's budget runs out, and native code polls and goes on.
+	if e := r.entryOf(cl); err != nil || !v.IsBool() || !v.Truthy() || e == nil || e.ssa == nil || e.entrySlow ||
+		r.jit.budgets == 0 || r.jit.guards != 0 || r.jit.hosts != 0 || r.jit.interpreted != 0 {
+		t.Fatalf("boundary density changed effects or left native code: %v, %v", v, err)
 	}
 }
 
@@ -294,12 +339,12 @@ func TestJITClosureCacheRelease(t *testing.T) {
 	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
 	for range 3 {
 		v, err := r.Run(call)
-		if err != nil || v.Number() != 3 || r.entryOf(cl) == nil || r.entryOf(cl).code.Size() == 0 || r.jit.rootCount != 0 {
+		if err != nil || v.Number() != 3 || r.entryOf(cl) == nil || r.entryOf(cl).ssa.Size() == 0 {
 			t.Fatalf("closure cache entry: %v, %v", v, err)
 		}
 		e := r.entryOf(cl)
 		r.releaseJIT()
-		if r.jit != nil || e.code.Size() != 0 || e.code.MetadataSize() != 0 {
+		if r.jit != nil || e.ssa.Size() != 0 {
 			t.Fatal("cached closure kept released executable storage")
 		}
 	}
@@ -328,7 +373,7 @@ func TestJITArrayGrowth(t *testing.T) {
 				if err != nil || !v.IsBool() || !v.Truthy() {
 					t.Fatalf("JIT %v: %v, %v", enabled, v, err)
 				}
-				if enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.rootCount != 0) {
+				if enabled && (r.jit == nil || r.jit.entries == 0) {
 					t.Fatal("array write did not enter native code or retained roots")
 				}
 				if enabled && (tc.name == "descending" || tc.name == "aliases" || tc.name == "holes") && r.jit.guards != 0 {
@@ -347,13 +392,13 @@ func TestJITArrayHolePermissionCallbacks(t *testing.T) {
 	} {
 		r := jitRuntimeForTest(t, Config{JIT: true})
 		v, err := r.Run(compileForTest(t, source))
-		if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.guards != 0 || r.jit.rootCount != 0 {
+		if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.guards != 0 {
 			t.Fatalf("hole permission after callback: %v, %v", v, err)
 		}
 	}
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	v, err := r.Run(compileForTest(t, `function f(a){for(let i=31;i>=0;i--)a[i]=i;return a[31]+a.length}f([])`))
-	if err != nil || v.Number() != 63 || r.jit == nil || r.jit.hosts != 1 || r.jit.fastHosts != 1 || r.jit.guards != 0 {
+	if err != nil || v.Number() != 63 || r.jit == nil || r.jit.hosts != 0 || r.jit.guards != 0 {
 		t.Fatalf("descending initialization did not fill holes natively: %v, %v", v, err)
 	}
 }
@@ -364,20 +409,15 @@ func TestJITArrayWriteCoercionRelease(t *testing.T) {
 	r.global.setOwnRaw(r.atoms.intern("host"), r.NewFunction("host", 0,
 		func(rt *Runtime, _ Value, _ []Value) (Value, error) {
 			calls++
-			if rt.jit == nil || rt.jit.rootCount != 0 {
-				t.Fatal("array coercion retained native roots")
-			}
-			for _, view := range rt.jit.arrays {
-				if view.Data != nil {
-					t.Fatal("array coercion retained borrowed storage")
-				}
+			if rt.jit == nil {
+				t.Fatal("array coercion released the JIT")
 			}
 			rt.releaseJIT()
 			runtime.GC()
 			return Undefined, nil
 		}), propDefault)
 	v, err := r.Run(compileForTest(t, `let a=[1];function f(a,k){a[k]=9;return a[0]+a[1]+a.length}f(a,{toString(){host();a.push(3);a[0]=5;return '1'}})`))
-	if err != nil || v.Number() != 16 || calls != 1 || r.jit.rootCount != 0 {
+	if err != nil || v.Number() != 16 || calls != 1 {
 		t.Fatalf("array coercion: %v, %v, calls %d", v, err, calls)
 	}
 }
@@ -401,7 +441,7 @@ func TestJITArrayGrowthLimits(t *testing.T) {
 		if memory {
 			want = ErrMemoryLimit
 		}
-		if !errors.Is(err, want) || r.jit == nil || r.jit.fastHosts == 0 || r.jit.budgets == 0 || r.jit.rootCount != 0 {
+		if !errors.Is(err, want) || r.jit == nil || r.jit.budgets == 0 {
 			t.Fatalf("array growth memory %v: %v", memory, err)
 		}
 	}
@@ -433,7 +473,7 @@ func TestJITReferenceReturns(t *testing.T) {
 				t.Fatalf("returned %s did not survive root clearing: %v, %v", tc.expression, check, err)
 			}
 		}
-		if r.jit == nil || r.jit.guards != 0 || r.jit.rootCount != 0 {
+		if r.jit == nil || r.jit.guards != 0 {
 			t.Fatal("reference return guarded or retained scratch roots")
 		}
 	}
@@ -484,7 +524,6 @@ func TestJITSSAReferences(t *testing.T) {
 					t.Fatal(err)
 				}
 				r := jitRuntimeForTest(t, Config{JIT: true})
-				r.jitSSA = true
 				r.jitStress = jitStressConfig{threshold: true, budget: 1}
 				gv, err := r.Run(compileForTest(t, src))
 				if err != nil {
@@ -536,7 +575,6 @@ func TestJITSSAArrays(t *testing.T) {
 				t.Fatal(err)
 			}
 			r := jitRuntimeForTest(t, Config{JIT: true})
-			r.jitSSA = true
 			r.jitStress = jitStressConfig{threshold: true, budget: 1}
 			gv, err := r.Run(compileForTest(t, src))
 			if err != nil {
@@ -581,7 +619,6 @@ func TestJITSSACaptured(t *testing.T) {
 				t.Fatal(err)
 			}
 			r := jitRuntimeForTest(t, Config{JIT: true})
-			r.jitSSA = true
 			r.jitStress = jitStressConfig{threshold: true, budget: 1}
 			gv, err := r.Run(compileForTest(t, src))
 			if err != nil {
@@ -648,7 +685,6 @@ func TestJITSSAProperties(t *testing.T) {
 				t.Fatal(err)
 			}
 			r := jitRuntimeForTest(t, Config{JIT: true})
-			r.jitSSA = true
 			r.jitEnabled = false
 			if _, err := r.Run(compileForTest(t, src)); err != nil {
 				t.Fatal(err)
@@ -697,7 +733,6 @@ func TestJITSSAGlobals(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	r.jitEnabled = false
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
@@ -754,7 +789,6 @@ func TestJITSSACallExits(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	r.jitCallThreshold = 1
 	for _, rt := range []*Runtime{want, r} {
 		rt.global.setOwnRaw(rt.atoms.intern("g"), rt.NewFunction("g", 1,
@@ -803,7 +837,6 @@ func TestJITSSAStrings(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	r.jitEnabled = false
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
@@ -857,7 +890,6 @@ func TestJITSSACellsUnderGC(t *testing.T) {
 	}()
 	defer func() { close(stop); <-done }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	src := `function walk(h){let s=0,n=h;while(n){s+=n.v;n=n.next}return s}
 		function last(h){let n=h;while(n.next)n=n.next;return n}
 		function list(k){let h=null;for(let i=0;i<k;i++)h={v:i,next:h,pad:[i,i]};return h}
@@ -919,7 +951,7 @@ func TestJITEqualityBoundaries(t *testing.T) {
 					t.Fatalf("%s %s %s branch %v: %v, %v; want %v", tc.left, tc.op, tc.right, branch, v, err, tc.want)
 				}
 			}
-			if r.jit == nil || r.jit.entries == 0 || r.jit.guards != 0 || r.jit.rootCount != 0 {
+			if r.jit == nil || r.jit.entries == 0 || r.jit.guards != 0 {
 				t.Fatal("equality did not resume native execution or retained roots")
 			}
 		}
@@ -947,13 +979,8 @@ func TestJITEqualityCoercionRelease(t *testing.T) {
 		r.global.setOwnRaw(r.atoms.intern("host"), r.NewFunction("host", 0,
 			func(rt *Runtime, _ Value, _ []Value) (Value, error) {
 				calls++
-				if rt.jit == nil || rt.jit.rootCount != 0 {
-					t.Fatal("equality coercion retained native roots")
-				}
-				for _, view := range rt.jit.arrays {
-					if view.Data != nil {
-						t.Fatal("equality coercion retained borrowed storage")
-					}
+				if rt.jit == nil {
+					t.Fatal("equality coercion released the JIT")
 				}
 				rt.releaseJIT()
 				runtime.GC()
@@ -964,7 +991,7 @@ func TestJITEqualityCoercionRelease(t *testing.T) {
 			body = `if(o!=7)return 0;return a[0]+a.length`
 		}
 		v, err := r.Run(compileForTest(t, `let a=[1];let o={valueOf(){host();a.push(9);a[0]=5;return 7}};function f(a,o){a[0]+=1;`+body+`}f(a,o)`))
-		if err != nil || v.Number() != 7 || calls != 1 || r.jit == nil || r.jit.rootCount != 0 {
+		if err != nil || v.Number() != 7 || calls != 1 || r.jit == nil {
 			t.Fatalf("equality callback branch %v: %v, %v, calls %d", branch, v, err, calls)
 		}
 	}
@@ -1014,8 +1041,8 @@ func TestJITBitwiseAndReceiver(t *testing.T) {
 			if err != nil || s.Go() != tc.want {
 				t.Fatalf("%s %s %s: %v, %v; want %s", tc.left, tc.op, tc.right, v, err, tc.want)
 			}
-			if r.jit == nil || r.jit.entries == 0 || r.jit.guards != 0 || r.jit.hosts != 1 || r.jit.rootCount != 0 {
-				t.Fatalf("did not exercise receiver/property and native bitwise execution")
+			if r.jit == nil || r.jit.entries == 0 || r.jit.guards != 0 || r.jit.hosts != 0 {
+				t.Fatalf("did not exercise receiver/property and native bitwise execution: %+v", r.JITStats())
 			}
 		}
 	}
@@ -1040,7 +1067,7 @@ func TestJITReceiverCallbacks(t *testing.T) {
 		if err != nil || s.Go() != tc.want {
 			t.Fatalf("result %v error %v, want %s", v, err, tc.want)
 		}
-		if r.jit == nil || r.jit.entries == 0 || (r.jit.guards > 0) != tc.guard || r.jit.rootCount != 0 {
+		if r.jit == nil || r.jit.entries == 0 || (r.jit.guards > 0) != tc.guard {
 			t.Fatal("did not exercise native callbacks or expected guard")
 		}
 	}
@@ -1058,7 +1085,7 @@ func TestJITReceiverCallbacks(t *testing.T) {
 			}
 			if !enabled {
 				want = err.Error()
-			} else if err.Error() != want || r.jit == nil || r.jit.entries == 0 || r.jit.rootCount != 0 {
+			} else if err.Error() != want || r.jit == nil || r.jit.entries == 0 {
 				t.Fatalf("native exception %v, want %s", err, want)
 			}
 		}
@@ -1085,7 +1112,7 @@ func TestJITDataProperties(t *testing.T) {
 			if err != nil || !v.IsNumber() || v.Number() != tc.want {
 				t.Fatalf("data properties: %v, %v; want %v", v, err, tc.want)
 			}
-			if r.jit == nil || r.jit.entries == 0 || r.jit.rootCount != 0 {
+			if r.jit == nil || r.jit.entries == 0 {
 				t.Fatal("data property test never entered native code or retained roots")
 			}
 		}
@@ -1103,7 +1130,7 @@ func TestJITDataProperties(t *testing.T) {
 			}
 			if !enabled {
 				want = err.Error()
-			} else if err.Error() != want || r.jit == nil || r.jit.entries == 0 || r.jit.rootCount != 0 {
+			} else if err.Error() != want || r.jit == nil || r.jit.entries == 0 {
 				t.Fatalf("property write error %v, want %s", err, want)
 			}
 		}
@@ -1117,7 +1144,7 @@ func TestJITDataPropertyRootLimit(t *testing.T) {
 	if err != nil || v.Number() != 32000 {
 		t.Fatalf("root limit: %v, %v", v, err)
 	}
-	if r.jit == nil || r.jit.hosts != 0 || r.jit.budgets == 0 || r.jit.rootCount != 0 {
+	if r.jit == nil || r.jit.hosts != 0 || r.jit.budgets == 0 {
 		t.Fatal("property loop did not reuse its bounded root table")
 	}
 }
@@ -1138,17 +1165,8 @@ func TestJITReferenceFields(t *testing.T) {
 			if err != nil || !v.IsBool() || !v.Truthy() {
 				t.Fatalf("JIT %v: %v, %v; %s", enabled, v, err, source)
 			}
-			if enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 || r.jit.guards != 0 || r.jit.rootCount != 0) {
+			if enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 || r.jit.guards != 0) {
 				t.Fatalf("reference field left native execution: %s", source)
-			}
-			if enabled {
-				for _, row := range r.jit.references.cells {
-					for _, ref := range row {
-						if ref.Cell != nil || ref.Reference != nil {
-							t.Fatal("borrowed reference retained after return")
-						}
-					}
-				}
 			}
 		}
 	}
@@ -1171,7 +1189,7 @@ func TestJITReferenceFieldFallbacks(t *testing.T) {
 			if err != nil || !v.IsBool() || !v.Truthy() {
 				t.Fatalf("fallback JIT %v: %v, %v; %s", enabled, v, err, source)
 			}
-			if enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.rootCount != 0) {
+			if enabled && (r.jit == nil || r.jit.entries == 0) {
 				t.Fatalf("missing native fallback: %s", source)
 			}
 		}
@@ -1183,24 +1201,12 @@ func TestJITReferenceCallbackRelease(t *testing.T) {
 	calls := 0
 	r.global.setOwnRaw(r.atoms.intern("host"), r.NewFunction("host", 0, func(rt *Runtime, _ Value, _ []Value) (Value, error) {
 		calls++
-		if rt.jit != nil {
-			if rt.jit.rootCount != 0 {
-				t.Fatal("callback retained native roots")
-			}
-			if rt.jit.references != nil {
-				for _, view := range rt.jit.arrays {
-					if view.Data != nil {
-						t.Fatal("callback retained reference permissions")
-					}
-				}
-			}
-		}
 		rt.releaseJIT()
 		runtime.GC()
 		return Undefined, nil
 	}), propDefault)
 	v, err := r.Run(compileForTest(t, `function f(o,n,cb){let s=0;for(let i=0;i<n;i++)s+=o.array[0];cb();for(let i=0;i<n;i++)s+=o.array[0];return s}let o={array:[3]};f(o,100,()=>{host();o.array=[7]})===1000`))
-	if err != nil || !v.IsBool() || !v.Truthy() || calls != 1 || r.jit == nil || r.jit.rootCount != 0 {
+	if err != nil || !v.IsBool() || !v.Truthy() || calls != 1 || r.jit == nil {
 		t.Fatalf("reference callback: %v, %v, calls %d", v, err, calls)
 	}
 }
@@ -1212,13 +1218,8 @@ func TestJITReferenceCancellation(t *testing.T) {
 	defer cancel()
 	r.SetContext(ctx)
 	_, err := r.Run(p)
-	if !errors.Is(err, context.DeadlineExceeded) || r.jit == nil || r.jit.entries == 0 || r.jit.budgets == 0 || r.jit.hosts != 0 || r.jit.rootCount != 0 {
+	if !errors.Is(err, context.DeadlineExceeded) || r.jit == nil || r.jit.entries == 0 || r.jit.budgets == 0 || r.jit.hosts != 0 {
 		t.Fatalf("reference loop cancellation: %v", err)
-	}
-	for _, view := range r.jit.arrays {
-		if view.Data != nil {
-			t.Fatal("cancel retained reference permissions")
-		}
 	}
 }
 
@@ -1230,16 +1231,11 @@ func TestJITReferenceMemoryRefusal(t *testing.T) {
 			t.Fatalf("reference memory refusal: %v, %v", v, err)
 		}
 		if limit == 256<<10 {
-			if r.jitCodeBytes() != 0 || r.jit != nil && r.jit.references != nil {
-				t.Fatal("prepared native references beyond optional allowance")
+			if r.jitCodeBytes() != 0 {
+				t.Fatal("compiled native code beyond optional allowance")
 			}
-		} else {
-			if r.jit == nil || r.jit.references == nil || r.jit.entries == 0 || r.jit.hosts != 0 {
-				t.Fatal("reference loop did not enter native code")
-			}
-			if r.jitCodeBytes() < int64(unsafe.Sizeof(jitReferences{})) {
-				t.Fatal("reference arena not charged to the JIT's budget")
-			}
+		} else if r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 {
+			t.Fatal("reference loop did not enter native code")
 		}
 	}
 }
@@ -1271,16 +1267,11 @@ func TestJITCryptoCorpus(t *testing.T) {
 	}
 	fn := prop.value.Object().fn().closure.fn
 	entry := r.jit.cache[weak.Make(fn)]
-	if entry == nil || entry.code == nil || entry.misses != 0 || r.jit.entries == 0 || r.jit.fastHosts == 0 || r.jit.rootCount != 0 {
-		t.Fatal("am3 did not execute native code without guards")
+	if entry == nil || entry.ssa == nil || entry.notNative || r.JITStats().SSAEntries == 0 {
+		t.Fatal("am3 did not run natively")
 	}
-	t.Logf("native entries=%d fast hosts=%d callback hosts=%d guards=%d budgets=%d transfers=%d am3 code=%d metadata=%d",
-		r.jit.entries, r.jit.fastHosts, r.jit.hosts-r.jit.fastHosts, r.jit.guards, r.jit.budgets, r.jit.transfers, entry.code.Size(), entry.code.MetadataSize())
-	for key, e := range r.jit.cache {
-		if fn := key.Value(); fn != nil && e.calls && e.probeHosts != 0 {
-			t.Logf("caller %s steps/host=%d slow=%v", fn.Name, e.probeSteps/e.probeHosts, e.entrySlow)
-		}
-	}
+	t.Logf("native entries=%d hosts=%d guards=%d budgets=%d am3 code=%d bytes",
+		r.jit.entries, r.jit.hosts, r.jit.guards, r.jit.budgets, entry.ssa.Size())
 }
 
 func TestJITDenseArraysAndCallbacks(t *testing.T) {
@@ -1291,13 +1282,13 @@ func TestJITDenseArraysAndCallbacks(t *testing.T) {
 	for _, tc := range []struct {
 		name, source string
 		want         float64
-		guard        bool
+		leaves       bool
 	}{
 		{"captured dimensions", `let n=3; function f(a,b){for(let i=0;i<n;i++)a[i]+=2*b[i];return a[0]+a[1]+a[2]} f([1,2,3],[4,5,6])`, 36, false},
 		{"alias", `function f(a,b){for(let i=0;i<a.length;i++)a[i]+=b[i];return a[0]+a[1]} let a=[2,3];f(a,a)`, 10, false},
 		{"prefix and postfix", `function f(a){let i=0,s=a[i++]+a[++i]+a[i--]+a[--i];return s*10+i}f([2,3,5])`, 140, false},
 		{"assignment result", `function f(a){let x=a[1]=7;return x+a[1]}f([2,3])`, 14, false},
-		{"callback snapshots", `let n=4;function step(a){n=2;a.push(9);a[0]=8}function f(a,cb){let s=0;for(let i=0;i<n;i++){s+=a[i];cb(a)}return s*10+a.length}f([1,2,3,4],step)`, 36, false},
+		{"callback snapshots", `let n=4;function step(a){n=2;a.push(9);a[0]=8}function f(a,cb){let s=0;for(let i=0;i<n;i++){s+=a[i];cb(a)}return s*10+a.length}f([1,2,3,4],step)`, 36, true},
 		{"method receiver", `function f(a){return Math.sqrt(a[0])+a.length}f([9,2])`, 5, false},
 		{"negative zero key", `function f(a){return a[-0]}f([7])`, 7, false},
 		{"NaN write", `function f(a){a[0]=0/0;return a[0]}f([1])`, math.NaN(), false},
@@ -1308,7 +1299,7 @@ func TestJITDenseArraysAndCallbacks(t *testing.T) {
 		{"negative key", `function f(a){return a[-1]}let a=[1];a[-1]=9;f(a)`, 9, true},
 		{"fractional key", `function f(a){return a[.5]}let a=[1];a[.5]=8;f(a)`, 8, true},
 		{"proxy", `function f(a){return a[0]}f(new Proxy([1],{get(){return 8}}))`, 8, true},
-		{"inherited setter", `let hits=0;Object.defineProperty(Array.prototype,'0',{set(v){hits+=v}});function f(a){a[0]=3;return hits}f([,])`, 3, false},
+		{"inherited setter", `let hits=0;Object.defineProperty(Array.prototype,'0',{set(v){hits+=v}});function f(a){a[0]=3;return hits}f([,])`, 3, true},
 		{"frozen", `function f(a){a[0]=3;return a[0]}f(Object.freeze([7]))`, 7, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1320,13 +1311,9 @@ func TestJITDenseArraysAndCallbacks(t *testing.T) {
 				if err != nil || !v.IsNumber() || v.Number() != tc.want && !(math.IsNaN(v.Number()) && math.IsNaN(tc.want)) {
 					t.Fatalf("result %v error %v, want %v", v, err, tc.want)
 				}
-				if r.jit == nil || r.jit.entries == 0 || (r.jit.guards > 0) != tc.guard || r.jit.rootCount != 0 {
-					t.Fatalf("native state %+v", r.jit)
-				}
-				for _, view := range r.jit.arrays {
-					if view.Data != nil {
-						t.Fatal("retained borrowed array")
-					}
+				// What native code leaves to Go: an exit, or a call of Go.
+				if r.jit == nil || r.jit.entries == 0 || (r.jit.guards+r.jit.hosts+r.jit.goCalls > 0) != tc.leaves {
+					t.Fatalf("native state: entries %d guards %d hosts %d Go calls %d", r.jit.entries, r.jit.guards, r.jit.hosts, r.jit.goCalls)
 				}
 			}
 		})
@@ -1339,20 +1326,15 @@ func TestJITHostReleaseAndGC(t *testing.T) {
 	r.global.setOwnRaw(r.atoms.intern("host"), r.NewFunction("host", 1,
 		func(rt *Runtime, _ Value, args []Value) (Value, error) {
 			calls++
-			if rt.jit == nil || rt.jit.rootCount != 0 {
+			if rt.jit == nil {
 				t.Fatal("callback retained native roots")
-			}
-			for _, view := range rt.jit.arrays {
-				if view.Data != nil {
-					t.Fatal("callback retained borrowed storage")
-				}
 			}
 			rt.releaseJIT()
 			runtime.GC()
 			return args[0], nil
 		}), propDefault)
 	v, err := r.Run(compileForTest(t, `function f(a){let s=0;for(let i=0;i<a.length;i++){s+=host(a[i]);a[i]=s}return s}f([1,2,3])`))
-	if err != nil || v.Number() != 6 || calls != 3 || r.jit == nil || r.jit.rootCount != 0 {
+	if err != nil || v.Number() != 6 || calls != 3 || r.jit == nil {
 		t.Fatalf("result %v err %v calls %d", v, err, calls)
 	}
 }
@@ -1363,13 +1345,8 @@ func TestJITPropertyReleaseAndGC(t *testing.T) {
 	r.global.setOwnRaw(r.atoms.intern("host"), r.NewFunction("host", 0,
 		func(rt *Runtime, _ Value, _ []Value) (Value, error) {
 			calls++
-			if rt.jit == nil || rt.jit.rootCount != 0 {
+			if rt.jit == nil {
 				t.Fatal("property callback retained native roots")
-			}
-			for _, view := range rt.jit.arrays {
-				if view.Data != nil {
-					t.Fatal("property callback retained borrowed storage")
-				}
 			}
 			rt.releaseJIT()
 			runtime.GC()
@@ -1379,7 +1356,7 @@ func TestJITPropertyReleaseAndGC(t *testing.T) {
 		function f(a,o){let s=0;for(let i=0;i<3;i++){s+=o.plain+a[0];o.x=s;s+=o.x}return s+a.length}
 		let a=[1],o={plain:0,get x(){host();a.push(8);return a[0]},set x(v){host();a[0]=v+1}};
 		f(a,o)`))
-	if err != nil || !v.IsNumber() || v.Number() != 39 || calls != 6 || r.jit == nil || r.jit.rootCount != 0 {
+	if err != nil || !v.IsNumber() || v.Number() != 39 || calls != 6 || r.jit == nil {
 		t.Fatalf("result %v err %v property callbacks %d", v, err, calls)
 	}
 }
@@ -1403,7 +1380,7 @@ func TestJITHostErrors(t *testing.T) {
 			} else if err.Error() != want {
 				t.Fatalf("native error %q; want %q", err, want)
 			}
-			if enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.rootCount != 0) {
+			if enabled && (r.jit == nil || r.jit.entries == 0) {
 				t.Fatal("did not exercise native host exit")
 			}
 		}
@@ -1454,7 +1431,6 @@ func TestJITSSANullish(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		dda := rt.NewObject()
 		dda.MarkHTMLDDA()
@@ -1521,7 +1497,6 @@ func TestJITSSAManySpills(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, src.String())); err != nil {
 			t.Fatal(err)
@@ -1566,7 +1541,6 @@ func TestJITSSAProfitability(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -1624,7 +1598,6 @@ func TestJITSSAEquality(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -1662,7 +1635,6 @@ func TestJITSSACompareReferences(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -1710,7 +1682,6 @@ func TestJITSSAElementReferences(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -1733,50 +1704,12 @@ func TestJITSSAElementReferences(t *testing.T) {
 	}
 }
 
-// Old-pipeline code calling an uncompiled function, in a runtime that runs
-// the new pipeline, leaves the callee to be compiled the ordinary way, by
-// the new pipeline: compiled for the old coordinator alone, as a callee
-// only, it ran in the tree tier whenever new-pipeline code called it, which
-// is how Crypto's am3 lost the JIT.
-func TestJITSSACalleesStayInTheNewPipeline(t *testing.T) {
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = false
-	if _, err := r.Run(compileForTest(t, `function k(n){let s=0;for(let i=0;i<n;i++)s+=i;return s}
-		function caller(n){let s=0;for(let i=0;i<n;i++)s+=k(i&7);return s}
-		var noCalls=0;for(let i=0;i<3;i++)noCalls+=0`)); err != nil {
-		t.Fatal(err)
-	}
-	// The caller compiles in the old pipeline; k is never called before.
-	caller := r.global.getOwn(r.atoms.intern("caller")).value.Object().fn().closure
-	if e := r.jitFor(caller); e == nil || e.code == nil {
-		t.Fatal("the caller did not compile in the old pipeline")
-	}
-	r.jitSSA = true
-	v, err := r.Run(compileForTest(t, `caller(200)`))
-	if err != nil || v.Number() != 200/8*56 {
-		t.Fatalf("caller(200) = %v, %v", v, err)
-	}
-	k := r.global.getOwn(r.atoms.intern("k")).value.Object().fn().closure
-	e := r.jit.hint(k.hint())
-	if e == nil || e.calleeOnly || e.ssa == nil {
-		t.Fatalf("k: entry %+v, want new-pipeline code", e)
-	}
-}
-
 // A runtime's compiled functions share a few mappings, its arena's chunks,
-// rather than taking one each, in both pipelines; closing the runtime
-// releases every one.
+// rather than taking one each; closing the runtime releases every one.
 func TestJITArenaMappings(t *testing.T) {
-	for _, ssa := range []bool{false, true} {
-		if ssa && !jitSSABackend {
-			continue
-		}
+	for _, ssa := range []bool{true} {
 		r := New(Config{JIT: true})
 		r.jitCallThreshold = 1
-		r.jitSSA = ssa
 		var src strings.Builder
 		for i := 0; i < 100; i++ {
 			fmt.Fprintf(&src, "function f%d(n){let s=%d;for(let i=0;i<n;i++)s+=i;return s}\nf%d(3);\n", i, i, i)
@@ -1789,7 +1722,7 @@ func TestJITArenaMappings(t *testing.T) {
 		}
 		arena, bytes := r.jit.arena, 0
 		for _, e := range r.jit.cache {
-			bytes += e.code.Size() + e.ssa.Size()
+			bytes += e.ssa.Size()
 		}
 		if chunks := arena.Chunks(); chunks == 0 || chunks > bytes/(64<<10)+1 {
 			t.Fatalf("ssa %v: %d functions, %d bytes of code, in %d mappings", ssa, len(r.jit.cache), bytes, chunks)
@@ -1926,7 +1859,7 @@ func TestJITRuntimeGuardReentry(t *testing.T) {
 	if err != nil || v.Number() != 123 {
 		t.Fatalf("guard reentry = %v, %v", v, err)
 	}
-	if r.jit == nil || r.jit.guards != 1 || r.jit.entries < 4 || r.jit.rootCount != 0 {
+	if r.jit == nil || r.jit.guards != 1 || r.jit.entries < 4 {
 		t.Fatal("guard or nested native call did not execute, or roots survived")
 	}
 }
@@ -1956,7 +1889,7 @@ func TestJITPropertyLoopCancellation(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("property loop cancellation: %v", err)
 	}
-	if r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 || r.jit.budgets == 0 || r.jit.rootCount != 0 {
+	if r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 || r.jit.budgets == 0 {
 		t.Fatal("native property loop did not check its budget")
 	}
 }
@@ -2109,28 +2042,36 @@ func TestJITBudgetRefusalWaitsForRelease(t *testing.T) {
 	// fill -- as under checkptr, or GOGC=1.
 	var keep []*bytecode.Function
 	defer runtime.KeepAlive(&keep)
-	for i := 0; i < 64 && deferred == nil; i++ {
-		fn := jitFunctionForTest(t, fmt.Sprintf(`function f(n) { let s=0; for(let i=0;i<n;i++) s+=i*%d; return s }`, i+1))
+	for i := 0; i < 128 && deferred == nil; i++ {
+		// Each some kilobytes of code, so that the budget fills before the
+		// cache does, and of two sizes, so that the last to fit leaves room
+		// short of the next: an allowance of nothing refuses without a
+		// compile, and caches nothing.
+		more := ""
+		if i%2 == 1 {
+			more = "s=(s+t*7)|0; t=(t^s)>>1;"
+		}
+		fn := jitFunctionForTest(t, fmt.Sprintf(`function f(n) { let s=0,t=1; for(let i=0;i<n;i++){ s+=i*%d; t=(t*3+s)|0; s=(s^t)+1; t=t-s; %s } return s+t }`, i+1, more))
 		keep = append(keep, fn)
-		if e := r.jitForMode(fn, false, nil); e != nil && e.deferred {
+		if e := r.jitForFunction(fn, nil); e != nil && e.deferred {
 			refused, deferred = fn, e
 		}
 	}
-	if deferred == nil || deferred.code != nil {
+	if deferred == nil || deferred.ssa != nil {
 		t.Fatalf("no refusal for want of budget within %d bytes", r.jitBudget())
 	}
-	if e := r.jitForMode(refused, false, nil); e != deferred {
+	if e := r.jitForFunction(refused, nil); e != deferred {
 		t.Fatal("a budget refusal was retried before any code was released")
 	}
 	for key, e := range r.jit.cache {
-		if e.code != nil && key.Value() != refused {
+		if e.ssa != nil && key.Value() != refused {
 			if !r.jit.dropEntry(key, e) {
 				t.Fatal("could not release code")
 			}
 			break
 		}
 	}
-	if e := r.jitForMode(refused, false, nil); e == nil || e == deferred || e.code == nil {
+	if e := r.jitForFunction(refused, nil); e == nil || e == deferred || e.ssa == nil {
 		t.Fatal("a budget refusal was not retried once code was released")
 	}
 }
@@ -2138,7 +2079,7 @@ func TestJITBudgetRefusalWaitsForRelease(t *testing.T) {
 //go:noinline
 func jitWeakOwnerForTest(t *testing.T, r *Runtime) weak.Pointer[bytecode.Function] {
 	fn := jitFunctionForTest(t, `function f(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s }`)
-	if e := r.jitForMode(fn, false, nil); e == nil || e.code == nil {
+	if e := r.jitForFunction(fn, nil); e == nil || e.ssa == nil {
 		t.Fatal("native compilation refused")
 	}
 	return weak.Make(fn)
@@ -2156,7 +2097,7 @@ func TestJITWeakCache(t *testing.T) {
 		t.Fatal("native cache retained function graph")
 	}
 	fn := jitFunctionForTest(t, `function g(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s }`)
-	if e := r.jitForMode(fn, false, nil); e == nil || e.code == nil {
+	if e := r.jitForFunction(fn, nil); e == nil || e.ssa == nil {
 		t.Fatal("compilation refused")
 	}
 	if len(r.jit.cache) != 1 {
@@ -2173,7 +2114,7 @@ func TestJITCacheBounds(t *testing.T) {
 		fn := new(bytecode.Function)
 		*fn = *template
 		functions = append(functions, fn)
-		if e := r.jitForMode(fn, false, nil); e == nil || e.code == nil {
+		if e := r.jitForFunction(fn, nil); e == nil || e.ssa == nil {
 			t.Fatalf("entry %d refused", i)
 		}
 		if len(r.jit.cache) > jitCacheEntries || r.jitCodeBytes() > jitCacheBytes {
@@ -2182,13 +2123,6 @@ func TestJITCacheBounds(t *testing.T) {
 	}
 	if len(r.jit.cache) != jitCacheEntries {
 		t.Fatal("test did not reach eviction")
-	}
-	var metadata int
-	for _, e := range r.jit.cache {
-		metadata += e.code.MetadataSize()
-	}
-	if metadata > jitMetadataBytes {
-		t.Fatal("metadata exceeded limits")
 	}
 	runtime.KeepAlive(functions)
 }
@@ -2245,7 +2179,7 @@ func TestJITBudgetAllocations(t *testing.T) {
 
 func TestJITClosureRemembersRefusal(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	v, err := r.Run(compileForTest(t, `function f(n) { var s=0; for(var i=0;i<n;i++) s+=new Number(i).valueOf(); return s } f(3); f`))
+	v, err := r.Run(compileForTest(t, `function f(n) { var s=0; for(var i=0;i<n;i++) with({}) s+=i; return s } f(3); f`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2393,7 +2327,7 @@ func TestJITLoopPromotionFirstCall(t *testing.T) {
 			if err != nil || v.Number() != 49995000 {
 				t.Fatalf("first call = %v, %v", v, err)
 			}
-			if r.jit == nil || r.jit.osrs != 1 || r.jit.budgets == 0 || r.jit.rootCount != 0 {
+			if r.jit == nil || r.jit.osrs != 1 || r.jit.budgets == 0 {
 				t.Fatal("first long call did not complete bounded OSR")
 			}
 			cl := r.global.getOwn(r.atoms.intern("sum")).value.Object().fn().closure
@@ -2451,13 +2385,8 @@ func TestJITLoopPromotionLiveOperands(t *testing.T) {
 			if err != nil || !v.IsObject() || v.Object() != o {
 				t.Fatalf("live operand = %v, %v", v, err)
 			}
-			if r.jit == nil || r.jit.osrs != 1 || r.jit.guards != 0 || r.jit.rootCount != 0 {
+			if r.jit == nil || r.jit.osrs != 1 || r.jit.guards != 0 {
 				t.Fatal("live operand was lost, guarded, or retained")
-			}
-			for _, root := range r.jit.roots {
-				if root.IsObject() {
-					t.Fatal("OSR retained an opaque root")
-				}
 			}
 		})
 	}
@@ -2469,16 +2398,19 @@ func TestJITLoopGuardSuppressesReentry(t *testing.T) {
 			r := New(Config{JIT: true})
 			t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
 			count := 0
-			var state *jitState
+			released := false
 			o := r.NewObject()
+			// The first coercion releases the code that called it, which
+			// goes on, pinned, to the loop's end; the invocation compiles
+			// nothing again.
 			o.setOwnRaw(r.atoms.intern("valueOf"), r.NewFunction("valueOf", 0,
 				func(rt *Runtime, _ Value, _ []Value) (Value, error) {
 					count++
-					if rt.jit != nil {
-						if state != nil {
-							t.Fatal("deoptimized invocation recompiled after eviction")
+					if rt.jit != nil && len(rt.jit.cache) != 0 {
+						if released {
+							t.Fatal("invocation recompiled after eviction")
 						}
-						state = rt.jit
+						released = true
 						rt.releaseJIT()
 					}
 					return Int32(1), nil
@@ -2489,8 +2421,8 @@ func TestJITLoopGuardSuppressesReentry(t *testing.T) {
 			if err != nil || v.Number() != 10000 || count != 10000 {
 				t.Fatalf("guard = %v, %v; coercions %d", v, err, count)
 			}
-			if state == nil || state.osrs != 1 || state.guards != 1 || state.rootCount != 0 || r.jitDeoptDepth != 0 {
-				t.Fatal("guard did not exit once or restore ownership")
+			if !released || r.jitDeoptDepth != 0 || r.jit != nil && r.jit.ctxTop != 0 {
+				t.Fatal("native code was not released, or did not restore ownership")
 			}
 		})
 	}
@@ -2537,7 +2469,7 @@ func TestJITLoopGuardErrors(t *testing.T) {
 					baseline = thrown
 					continue
 				}
-				if r.jit == nil || r.jit.osrs != 1 || r.jit.guards != 1 || r.jit.rootCount != 0 || r.jitDeoptDepth != 0 {
+				if r.jit == nil || r.jit.osrs != 1 || r.jit.guards != 1 || r.jitDeoptDepth != 0 {
 					t.Fatal("error did not follow OSR and guard fallback")
 				}
 				if len(thrown.trace.frames) != len(baseline.trace.frames) {
@@ -2666,7 +2598,7 @@ func jitDenseKernelCases() []struct{ name, body string } {
 
 func BenchmarkJITDenseKernels(b *testing.B) {
 	for _, tc := range jitDenseKernelCases() {
-		for _, mode := range []string{"interpreter", "existing", "native", "ssa"} {
+		for _, mode := range []string{"interpreter", "existing", "ssa"} {
 			if mode == "ssa" && !jitSSABackend {
 				continue
 			}
@@ -2686,9 +2618,8 @@ func BenchmarkJITDenseKernels(b *testing.B) {
 				}
 				setup := compile(`function make(n){function boundary(a){a[0]=a[1];a[n-1]=a[n-2]}return function kernel(a,b){` + tc.body + `}}var kernel=make(8192);var a=new Array(8192),b=new Array(8192);for(var i=0;i<8192;i++){a[i]=1;b[i]=1}`)
 				call := compile(`kernel(a,b)`)
-				r := New(Config{JIT: mode == "native" || mode == "ssa"})
+				r := New(Config{JIT: mode == "ssa"})
 				defer func() { r.Close(); r.ReleaseClosed() }()
-				r.jitSSA = mode == "ssa"
 				if _, err := r.Run(setup); err != nil {
 					b.Fatal(err)
 				}
@@ -2700,7 +2631,7 @@ func BenchmarkJITDenseKernels(b *testing.B) {
 					}
 					want = v
 				}
-				if mode == "native" && (r.jit == nil || r.jit.entries == 0 || r.jit.guards != 0) {
+				if mode == "ssa" && (r.jit == nil || r.jit.entries == 0 || r.jit.guards != 0) {
 					b.Fatal("did not stay native")
 				}
 				if mode == "ssa" && (r.jit.ssaEntries == 0 || r.jit.guards != 0) {
@@ -2732,14 +2663,13 @@ func BenchmarkJITArrayKernels(b *testing.B) {
 		{"stencil", `for(var i=1;i<n-1;i++)a[i]=(b[i-1]+b[i]+b[i+1])/3;return a[n-2]`},
 		{"dot", `var s=0;for(var i=0;i<n;i++)s+=a[i]*b[i];return s`},
 	} {
-		for _, mode := range []string{"existing", "native", "ssa"} {
+		for _, mode := range []string{"existing", "ssa"} {
 			if mode == "ssa" && !jitSSABackend {
 				continue
 			}
 			b.Run(tc.name+"/"+mode, func(b *testing.B) {
 				r := New(Config{JIT: mode != "existing"})
 				defer func() { r.Close(); r.ReleaseClosed() }()
-				r.jitSSA = mode == "ssa"
 				setup := compileForTest(b, `function kernel(a,b,n){`+tc.body+`}var a=new Array(8192),b=new Array(8192);for(var i=0;i<8192;i++){a[i]=1;b[i]=i%7}`)
 				call := compileForTest(b, `kernel(a,b,8192)`)
 				if _, err := r.Run(setup); err != nil {
@@ -2828,7 +2758,7 @@ func BenchmarkJITCryptoWorkload(b *testing.B) {
 			if mode == "native" {
 				cl := r.global.getOwn(r.atoms.intern("am3")).value.Object().fn().closure
 				e := r.jit.cache[weak.Make(cl.fn)]
-				if e == nil || e.code == nil || e.misses != 0 || r.jit.rootCount != 0 {
+				if e == nil || e.ssa == nil || e.notNative {
 					b.Fatal("Crypto limb method did not stay native")
 				}
 				b.ReportMetric(float64(r.jitCodeBytes()), "code+metadata-B")
@@ -2923,7 +2853,7 @@ func BenchmarkJITCryptoLimb(b *testing.B) {
 					}
 				}
 				if mode == "native" {
-					if r.jit == nil || n > 1 && r.jit.entries == 0 || r.jit.guards != 0 || r.jit.rootCount != 0 {
+					if r.jit == nil || n > 1 && r.jit.entries == 0 || r.jit.guards != 0 {
 						b.Fatal("limb loop did not stay native")
 					}
 					b.ReportMetric(float64(r.jitCodeBytes()), "code+metadata-B")
@@ -2934,7 +2864,7 @@ func BenchmarkJITCryptoLimb(b *testing.B) {
 }
 
 func BenchmarkJITNumericFields(b *testing.B) {
-	for _, mode := range []string{"interpreter", "existing", "native", "ssa"} {
+	for _, mode := range []string{"interpreter", "existing", "ssa"} {
 		if mode == "ssa" && !jitSSABackend {
 			continue
 		}
@@ -2954,9 +2884,8 @@ func BenchmarkJITNumericFields(b *testing.B) {
 			}
 			setup := compile(`function fields(o,n){let s=0;for(let i=0;i<n;i++){s=(s+o.x)|0;o.x=o.x+1}return s}var fieldObject={x:3}`)
 			call := compile(`fields(fieldObject,4096)`)
-			r := New(Config{JIT: mode == "native" || mode == "ssa"})
+			r := New(Config{JIT: mode == "ssa"})
 			defer func() { r.Close(); r.ReleaseClosed() }()
-			r.jitSSA = mode == "ssa"
 			if _, err := r.Run(setup); err != nil {
 				b.Fatal(err)
 			}
@@ -2978,8 +2907,8 @@ func BenchmarkJITNumericFields(b *testing.B) {
 				run()
 			}
 			b.StopTimer()
-			if mode == "native" {
-				if r.jit == nil || r.jit.hosts != 0 || r.jit.guards != 0 || r.jit.rootCount != 0 {
+			if mode == "ssa" {
+				if r.jit == nil || r.jit.hosts != 0 || r.jit.guards != 0 {
 					b.Fatal("numeric fields left native execution")
 				}
 				b.ReportMetric(float64(r.jitCodeBytes()), "code+metadata-B")
@@ -3031,7 +2960,7 @@ func BenchmarkJITNumericGlobals(b *testing.B) {
 			}
 			b.StopTimer()
 			if mode == "native" {
-				if r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 || r.jit.guards != 0 || r.jit.rootCount != 0 {
+				if r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 || r.jit.guards != 0 {
 					b.Fatal("numeric globals left native execution")
 				}
 				b.ReportMetric(float64(r.jitCodeBytes()), "code+metadata-B")
@@ -3080,7 +3009,7 @@ func BenchmarkJITReferenceFields(b *testing.B) {
 			}
 			b.StopTimer()
 			if mode == "native" {
-				if r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 || r.jit.guards != 0 || r.jit.rootCount != 0 {
+				if r.jit == nil || r.jit.entries == 0 || r.jit.hosts != 0 || r.jit.guards != 0 {
 					b.Fatal("reference fields left native execution")
 				}
 				b.ReportMetric(float64(r.jitCodeBytes()), "code+metadata-B")
@@ -3205,7 +3134,7 @@ func BenchmarkJITNumericKernels(b *testing.B) {
 			if err != nil || !want.IsNumber() {
 				b.Fatalf("baseline = %v, %v", want, err)
 			}
-			for _, mode := range []string{"existing", "native", "ssa"} {
+			for _, mode := range []string{"existing", "ssa"} {
 				if mode == "ssa" && !jitSSABackend {
 					continue
 				}
@@ -3213,7 +3142,6 @@ func BenchmarkJITNumericKernels(b *testing.B) {
 				b.Run(tc.name+"/"+keyword+"/"+mode, func(b *testing.B) {
 					r := New(Config{JIT: enabled})
 					defer func() { r.Close(); r.ReleaseClosed() }()
-					r.jitSSA = mode == "ssa"
 					if _, err := r.Run(definition); err != nil {
 						b.Fatal(err)
 					}
@@ -3239,13 +3167,11 @@ func BenchmarkJITNumericKernels(b *testing.B) {
 					}
 					b.StopTimer()
 					if enabled {
-						var codeBytes, metadataBytes int
+						var codeBytes int
 						for _, entry := range r.jit.cache {
-							codeBytes += entry.code.Size()
-							metadataBytes += entry.code.MetadataSize()
+							codeBytes += entry.ssa.Size()
 						}
 						b.ReportMetric(float64(codeBytes), "native-B")
-						b.ReportMetric(float64(metadataBytes), "metadata-B")
 					}
 				})
 			}
@@ -3308,8 +3234,8 @@ func BenchmarkJITKernelPromotion(b *testing.B) {
 func TestJITTreeRecoveryNarrow(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	fn := jitFunctionForTest(t, `function f(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s }`)
-	compiled := r.jitForMode(fn, false, nil)
-	if compiled == nil || compiled.code == nil {
+	compiled := r.jitForFunction(fn, nil)
+	if compiled == nil || compiled.ssa == nil {
 		t.Fatal("no program")
 	}
 	frameWith := func(set func(cl *closure)) *frame {
@@ -3325,14 +3251,9 @@ func TestJITTreeRecoveryNarrow(t *testing.T) {
 		{"not yet compiled", func(cl *closure) {}, true},
 		{"compiled", func(cl *closure) { cl.setHint(compiled.hint) }, true},
 		{"refused", func(cl *closure) { cl.jitRefused = true }, false},
-		{"callers only", func(cl *closure) {
-			e := &jitEntry{calleeOnly: true, code: compiled.code}
+		{"refusal cached", func(cl *closure) {
+			e := &jitEntry{}
 			r.jit.remember(weak.Make(jitFunctionForTest(t, `function g() {}`)), e)
-			cl.setHint(e.hint)
-		}, false},
-		{"guards given up", func(cl *closure) {
-			e := &jitEntry{misses: 8, code: compiled.code}
-			r.jit.remember(weak.Make(jitFunctionForTest(t, `function h() {}`)), e)
 			cl.setHint(e.hint)
 		}, false},
 	} {
@@ -3351,7 +3272,7 @@ func TestJITTreeRecoveryNarrow(t *testing.T) {
 func TestJITHintReuse(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	first := jitFunctionForTest(t, `function f(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s }`)
-	e := r.jitForMode(first, false, nil)
+	e := r.jitForFunction(first, nil)
 	if e == nil || r.jit.hint(e.hint) != e {
 		t.Fatal("fresh hint misses")
 	}
@@ -3364,7 +3285,7 @@ func TestJITHintReuse(t *testing.T) {
 	if r.jit.hint(old) != nil {
 		t.Fatal("hint survived its entry")
 	}
-	other := r.jitForMode(jitFunctionForTest(t, `function g(n) { let s=0; for(let i=0;i<n;i++) s-=i; return s }`), false, nil)
+	other := r.jitForFunction(jitFunctionForTest(t, `function g(n) { let s=0; for(let i=0;i<n;i++) s-=i; return s }`), nil)
 	if other == nil || other.hint&(1<<jitHintBits-1) != old&(1<<jitHintBits-1) {
 		t.Fatal("the freed slot was not reused")
 	}
@@ -3381,7 +3302,7 @@ func TestJITStressParse(t *testing.T) {
 		{"", jitStressConfig{}},
 		{"1", jitStressConfig{threshold: true}},
 		{"threshold, budget=3 ,deopt=5", jitStressConfig{threshold: true, budget: 3, deopt: 5}},
-		{"budget=99999", jitStressConfig{budget: 4096}},
+		{"budget=99999", jitStressConfig{budget: 65535}},
 		{"budget=x,unknown,deopt=", jitStressConfig{}},
 	} {
 		if got := parseJITStress(tc.spec); got != tc.want {
@@ -3482,14 +3403,13 @@ func BenchmarkJITCompile(b *testing.B) {
 		{"particle", "function f(n){" + strings.ReplaceAll(particle, "VAR", "let") + "}"},
 		{"region", region.String()},
 	} {
-		for _, mode := range []string{"native", "ssa"} {
+		for _, mode := range []string{"ssa"} {
 			if mode == "ssa" && !jitSSABackend {
 				continue
 			}
 			b.Run(tc.name+"/"+mode, func(b *testing.B) {
 				r := New(Config{JIT: true})
 				defer func() { r.Close(); r.ReleaseClosed() }()
-				r.jitSSA = mode == "ssa"
 				if _, err := r.Run(compileForTest(b, tc.src+";f(2)")); err != nil {
 					b.Fatal(err)
 				}
@@ -3502,7 +3422,7 @@ func BenchmarkJITCompile(b *testing.B) {
 					}
 					return r.jitFor(cl)
 				}
-				if e := compile(); e == nil || mode == "ssa" && e.ssa == nil || mode == "native" && e.code == nil {
+				if e := compile(); e == nil || mode == "ssa" && e.ssa == nil {
 					b.Fatalf("%s did not compile in the %s pipeline", tc.name, mode)
 				}
 				b.ReportAllocs()
@@ -3522,7 +3442,7 @@ func BenchmarkJITHostRoundTrip(b *testing.B) {
 		{"remainder", `s=(s+i%3)|0`},
 		{"go-call", `s=(s+g(i))|0`},
 	} {
-		for _, mode := range []string{"existing", "native", "ssa"} {
+		for _, mode := range []string{"existing", "ssa"} {
 			if mode == "ssa" && !jitSSABackend {
 				continue
 			}
@@ -3531,7 +3451,6 @@ func BenchmarkJITHostRoundTrip(b *testing.B) {
 				r := New(Config{JIT: enabled})
 				defer func() { r.Close(); r.ReleaseClosed() }()
 				r.jitCallThreshold = 1
-				r.jitSSA = mode == "ssa"
 				r.global.setOwnRaw(r.atoms.intern("g"), r.NewFunction("g", 1,
 					func(_ *Runtime, _ Value, args []Value) (Value, error) { return args[0], nil }), propDefault)
 				if _, err := r.Run(compileForTest(b, `function f(n){let s=0;for(let i=0;i<n;i++)`+tc.body+`;return s}`)); err != nil {
@@ -3594,7 +3513,6 @@ func TestJITSSAReoptimize(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -3665,7 +3583,6 @@ func TestJITSSAPrototypeMethods(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -3722,7 +3639,6 @@ func TestJITSSAStringEquality(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -3779,7 +3695,6 @@ func TestJITSSAReferenceStores(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -3834,7 +3749,6 @@ func TestJITSSAReferenceStoresUnderGC(t *testing.T) {
 	}()
 	defer func() { close(stop); <-done }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	src := `function list(k){let h=null;for(let i=0;i<k;i++)h={v:i,next:h,pad:[i,i]};return h}
 		function walk(h){let s=0,n=h,i=1;while(n){s+=n.v*i+n.pad[1];i++;n=n.next}return s}
 		function rev(h){let p=null,n=h;while(n){const x=n.next;n.next=p;n.pad=[n.v,n.v];p=n;n=x}return p}
@@ -3877,7 +3791,6 @@ func TestJITSSAReferenceStoresWhileMarking(t *testing.T) {
 		function total(){let s=0;for(let n=relink(arr,40);n;n=n.next)s+=n.v;return s+':'+count(arr,40)}
 		var arr=[];for(let i=0;i<40;i++)arr.push({v:0,next:null});arr.push(null);`
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	if _, err := r.Run(compileForTest(t, setup)); err != nil {
 		t.Fatal(err)
 	}
@@ -3925,7 +3838,6 @@ func TestJITSSAKeepsWhileMarking(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -3965,7 +3877,6 @@ func TestJITSSAMarkingExitsNotJudged(t *testing.T) {
 	defer func() { jitMarking = old }()
 	setup := `function lit(n){let s=0;for(let i=0;i<n;i++){const o={a:i};s=(s+o.a)|0}return s}`
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	if _, err := r.Run(compileForTest(t, setup)); err != nil {
 		t.Fatal(err)
 	}
@@ -4022,7 +3933,6 @@ func TestJITSSAInline(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -4094,7 +4004,6 @@ func TestJITSSAInlineEffects(t *testing.T) {
 			want := New(Config{})
 			defer func() { want.Close(); want.ReleaseClosed() }()
 			r := jitRuntimeForTest(t, Config{JIT: true})
-			r.jitSSA = true
 			for _, rt := range []*Runtime{want, r} {
 				if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 					t.Fatal(err)
@@ -4173,7 +4082,6 @@ func TestJITSSANestedInline(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -4263,7 +4171,6 @@ func TestJITSSANativeConstruct(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -4340,7 +4247,6 @@ func TestJITSSANativeArrayConstruct(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -4410,7 +4316,6 @@ func TestJITSSANativeCallThroughCall(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -4478,7 +4383,6 @@ func TestJITSSANativePop(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -4565,7 +4469,6 @@ func TestJITSSANativePush(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -4640,7 +4543,6 @@ func TestJITSSAPropertyAdds(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -4697,7 +4599,6 @@ func TestJITSSASharedContextsFollowDepth(t *testing.T) {
 	want := New(Config{MaxCallDepth: 200})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true, MaxCallDepth: 200})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -4743,7 +4644,6 @@ func TestJITSSACallsSettleLate(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -4810,7 +4710,6 @@ func TestJITSSAPolymorphicReads(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -4868,7 +4767,6 @@ func TestJITSSAStoreOverLiveCell(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -4942,7 +4840,6 @@ func TestJITSSANativeCallsGoOn(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -4995,7 +4892,6 @@ func TestJITSSANativeCallResumes(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -5051,7 +4947,6 @@ func TestJITSSAElementsKeptAcrossCalls(t *testing.T) {
 			want := New(Config{})
 			defer func() { want.Close(); want.ReleaseClosed() }()
 			r := jitRuntimeForTest(t, Config{JIT: true})
-			r.jitSSA = true
 			for _, rt := range []*Runtime{want, r} {
 				if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 					t.Fatal(err)
@@ -5107,7 +5002,6 @@ func TestJITSSACallSeenWhileCalleeLeaves(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -5179,7 +5073,6 @@ func TestJITSSAPolymorphicReadsSettle(t *testing.T) {
 			want := New(Config{})
 			defer func() { want.Close(); want.ReleaseClosed() }()
 			r := jitRuntimeForTest(t, Config{JIT: true})
-			r.jitSSA = true
 			for _, rt := range []*Runtime{want, r} {
 				if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 					t.Fatal(err)
@@ -5259,7 +5152,6 @@ func TestJITSSASeedsMethodCalls(t *testing.T) {
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := New(Config{JIT: true})
 	defer func() { r.Close(); r.ReleaseClosed() }()
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -5325,7 +5217,6 @@ func TestJITSSASeedsConstructions(t *testing.T) {
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := New(Config{JIT: true})
 	defer func() { r.Close(); r.ReleaseClosed() }()
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -5382,7 +5273,6 @@ func TestJITLoopPromotedPastCalleesLoops(t *testing.T) {
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := New(Config{JIT: true})
 	defer func() { r.Close(); r.ReleaseClosed() }()
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -5440,7 +5330,6 @@ func TestJITSSASeedsCalleesWithoutCode(t *testing.T) {
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := New(Config{JIT: true})
 	defer func() { r.Close(); r.ReleaseClosed() }()
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -5497,7 +5386,6 @@ func TestJITSSASeedsWhenCompiledAgain(t *testing.T) {
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := New(Config{JIT: true})
 	defer func() { r.Close(); r.ReleaseClosed() }()
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -5562,7 +5450,6 @@ func TestJITSSASeedsMutualRecursion(t *testing.T) {
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := New(Config{JIT: true})
 	defer func() { r.Close(); r.ReleaseClosed() }()
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -5608,7 +5495,6 @@ func TestJITSSALooseNullishOperands(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		dda := rt.NewObject()
 		dda.MarkHTMLDDA()
@@ -5670,7 +5556,6 @@ func TestJITSSAAssignsGlobals(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -5729,7 +5614,6 @@ func TestJITSSAWritesGlobals(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -5798,7 +5682,6 @@ func TestJITSSAResumesEveryLevel(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -5838,7 +5721,6 @@ func TestJITSSANestedExits(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -5894,7 +5776,6 @@ func TestJITSSAProfitReturns(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -5946,7 +5827,6 @@ func TestJITSSAContextsGrow(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -6015,7 +5895,6 @@ func TestJITSSANativeCalls(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -6086,7 +5965,6 @@ func TestJITSSANativeCallsUnderGC(t *testing.T) {
 	}()
 	defer func() { close(stop); <-done }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	src := `function link(a,b){let n=a;for(let i=0;i<1;i++)n.next=b;return a}
 		function pick(o,k){let x=o;for(let i=0;i<k;i++)x=x.next;return x}
 		function build(n){let h={v:-1,next:null};for(let i=0;i<n;i++){h=link({v:i,pad:[i,i]},h)}return h}
@@ -6117,7 +5995,6 @@ func TestJITSSANativeCallsWhileMarking(t *testing.T) {
 	setup := `function add(a,b){let s=a;for(let i=0;i<3;i++)s=(s*3+b)|0;return s}
 		function sum(n){let t=0;for(let i=0;i<n;i++){t=(t+add(i,t&7))|0;t^=t>>>3;t=(t*5+i)|0;t^=t>>>7}return t}`
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	if _, err := r.Run(compileForTest(t, setup)); err != nil {
 		t.Fatal(err)
 	}
@@ -6177,7 +6054,6 @@ func TestJITSSANativeCallTargets(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -6295,7 +6171,6 @@ func TestJITSSAEntersCalleesWithoutCode(t *testing.T) {
 				t.Fatal(err)
 			}
 			r := jitRuntimeForTest(t, Config{JIT: true})
-			r.jitSSA = true
 			if _, err := r.Run(compileForTest(t, src)); err != nil {
 				t.Fatal(err)
 			}
@@ -6358,7 +6233,6 @@ func TestJITSSACallerDroppedWhileItsCalleeLeaves(t *testing.T) {
 			want.global.setOwnRaw(want.atoms.intern("host"), want.NewFunction("host", 0,
 				func(*Runtime, Value, []Value) (Value, error) { return Undefined, nil }), propDefault)
 			r := jitRuntimeForTest(t, Config{JIT: true})
-			r.jitSSA = true
 			var drop, dropped, inUse bool
 			r.global.setOwnRaw(r.atoms.intern("host"), r.NewFunction("host", 0,
 				func(rt *Runtime, _ Value, _ []Value) (Value, error) {
@@ -6428,7 +6302,6 @@ func TestJITSSACalleeContextsKeepNothing(t *testing.T) {
 		M.prototype.sum=(function(){let c=1;return function(n){let s=0;for(let i=0;i<n;i++)s=(s+this.m(i)+c)|0;return s}})();
 		var sum=M.prototype.sum,o=new M(3)`
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	if _, err := r.Run(compileForTest(t, setup)); err != nil {
 		t.Fatal(err)
 	}
@@ -6479,7 +6352,6 @@ func TestJITSSAStringConstantsAndThrows(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -6536,7 +6408,6 @@ func TestJITSSAInlinedConstructions(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -6610,7 +6481,6 @@ func TestJITSSAInlinedForwardingConstructions(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -6675,7 +6545,6 @@ func TestJITSSAMathIntrinsics(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -6750,7 +6619,6 @@ func TestJITSSAStringAddCallsGo(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -6863,7 +6731,6 @@ func TestJITSSAPoolsRefilledByGo(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -6944,7 +6811,6 @@ func TestJITSSAPolymorphicStores(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -7029,7 +6895,6 @@ func TestJITSSAInlineBudgetCallsNatively(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -7115,7 +6980,6 @@ func TestJITSSAGoCalls(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	entry := func(name string) *jitEntry {
 		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
 		return r.jit.cache[weak.Make(cl.fn)]
@@ -7209,7 +7073,6 @@ func TestJITSSAGoCallsLeaveFrameSlots(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	r.jitStress = jitStressConfig{threshold: true}
 	gv, err := r.Run(compileForTest(t, src))
 	if err != nil {
@@ -7232,7 +7095,6 @@ func TestJITCacheKeepsCodeOverRefusals(t *testing.T) {
 		t.Skip("no SSA backend on this architecture")
 	}
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	if _, err := r.Run(compileForTest(t, `function hot(n){let s=0;for(let i=0;i<n;i++)s=(s*31+i)|0;return s}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -7279,7 +7141,6 @@ func TestJITSSACallSavesReuseSlots(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, src)); err != nil {
 			t.Fatal(err)
@@ -7299,7 +7160,7 @@ func TestJITSSACallSavesReuseSlots(t *testing.T) {
 		}
 	}
 	cl := r.global.getOwn(r.atoms.intern("many")).value.Object().fn().closure
-	if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil || e.code != nil {
+	if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil {
 		t.Fatalf("many was not compiled by the new pipeline: %+v", e)
 	}
 }
@@ -7326,7 +7187,6 @@ func TestJITSSASeedsGlobalsNativeCodeRead(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, src)); err != nil {
 			t.Fatal(err)
@@ -7377,7 +7237,6 @@ func TestJITSSAUnfedSitesCompiledAtNextCall(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, src)); err != nil {
 			t.Fatal(err)
@@ -7438,7 +7297,6 @@ func TestJITSSAReadsDropSupersededShapes(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, src)); err != nil {
 			t.Fatal(err)
@@ -7563,7 +7421,6 @@ func TestJITSSAMathPow(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -7636,7 +7493,6 @@ func TestJITSSARemainder(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -7705,7 +7561,6 @@ func TestJITSSAReadsWhatIsNotANumber(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -7793,7 +7648,6 @@ func TestJITSSAGoCallsFromNativeCallees(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	install(want, 0)
 	install(r, 1)
 	for _, rt := range []*Runtime{want, r} {
@@ -7870,7 +7724,6 @@ func TestJITSSAPollsAsCallsOfGo(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var at float64
@@ -7950,7 +7803,6 @@ func TestJITSSAElementStoresGrow(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -8009,7 +7861,6 @@ func TestJITSSACharCodeAtInNativeCallees(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -8083,7 +7934,6 @@ func TestJITSSAAbsentElementsAreUndefined(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -8141,7 +7991,6 @@ func TestJITSSACharCodeAtReplacedWhileNative(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := jitRuntimeForTest(t, Config{JIT: true})
-			r.jitSSA = true
 			source := tc.setup + `let s='',a=new Array(64).fill(0);for(let i=0;i<64;i++)s+=String.fromCharCode(65+i);function pack(s,a){for(let i=0;i<64;i++){` + tc.body + `}return a}pack(s,a);` + tc.check
 			v, err := r.Run(compileForTest(t, source))
 			if err != nil || !v.IsBool() || !v.Truthy() {
@@ -8164,7 +8013,6 @@ func TestJITSSAReleasedWhileNative(t *testing.T) {
 		t.Skip("no SSA backend on this architecture")
 	}
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	released := 0
 	r.global.setOwnRaw(r.atoms.intern("host"), r.NewFunction("host", 0,
 		func(rt *Runtime, _ Value, _ []Value) (Value, error) {
@@ -8238,7 +8086,6 @@ func testJITSSAMathFunctions(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, src.String())); err != nil {
 			t.Fatal(err)
@@ -8312,7 +8159,6 @@ func TestJITSSAInlinedNestedForwardingConstructions(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -8423,7 +8269,6 @@ func TestJITSSAObjectLiterals(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -8493,7 +8338,6 @@ func TestJITSSAStringConstants(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -8556,7 +8400,6 @@ func TestJITSSACapturedBindings(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -8635,7 +8478,6 @@ func TestJITSSAStringConcatsAndCalleeDeopts(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -8707,7 +8549,6 @@ func TestJITSSAArrayLiterals(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -8764,7 +8605,6 @@ func TestJITSSAMegamorphicOwnReads(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -8838,7 +8678,6 @@ func TestJITExitsWhileMarkingCountNothing(t *testing.T) {
 // came to a sixth of RayTrace's allocations with construction on.
 func TestJITPoolLookupsAllocateNothing(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	if _, err := r.Run(compileForTest(t, `function P(){} function f(){return new P()} f()`)); err != nil {
 		t.Fatal(err)
 	}
@@ -8884,7 +8723,6 @@ func TestJITSSAReadsFunctionProperties(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -8938,7 +8776,6 @@ func TestJITSSAReadsFunctionProperties(t *testing.T) {
 // read left native code at every construction.
 func TestJITForwardPropertyEmptyPool(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	setup := `var Class={create:function(){return function(){this.initialize.apply(this,arguments)}}};
 		var Ray=Class.create();Ray.prototype={initialize:function(pos,dir){this.position=pos;this.direction=dir}}`
 	if _, err := r.Run(compileForTest(t, setup)); err != nil {
@@ -8987,7 +8824,6 @@ func TestJITSSAInlinedCalleeLearns(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -9048,7 +8884,6 @@ func TestJITSSAUnwoundCompilesAgainFirst(t *testing.T) {
 	defer func(was func() bool) { jitMarking = was }(jitMarking)
 	jitMarking = func() bool { return false }
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	if _, err := r.Run(compileForTest(t, `function g(n){let s=0;for(let i=0;i<n;i++)s=(s+i)|0;return s}g(300);g(300)`)); err != nil {
 		t.Fatal(err)
 	}
@@ -9109,7 +8944,6 @@ func TestJITSSAInstanceOf(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
@@ -9169,7 +9003,6 @@ func TestJITSSATypeOf(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		dda := newObject(rt.proto.object, ClassObject)
 		dda.flags |= objHTMLDDA
@@ -9225,7 +9058,6 @@ func TestJITSSAGoesOnNatively(t *testing.T) {
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	r.jitSSA = true
 	for _, rt := range []*Runtime{want, r} {
 		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)

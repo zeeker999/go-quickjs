@@ -3,15 +3,16 @@
 package jit
 
 import (
+	"math"
 	"testing"
 	"unsafe"
 
-	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
+	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	"golang.org/x/sys/windows"
 )
 
 func TestWindowsExecutableProtectionAndRelease(t *testing.T) {
-	loop, err := Compile(constantProgram())
+	loop, err := NewSSACode(nil, valueCode(t, 42, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,15 +41,15 @@ func TestWindowsExecutableProtectionAndRelease(t *testing.T) {
 // with the last.
 func TestWindowsArenaProtectionAndRelease(t *testing.T) {
 	a := NewArena()
-	var codes []*Code
+	var codes []*SSACode
 	for i := 0; i < 3; i++ {
-		c, err := CompileIn(a, valueProgram(float64(i), 40), MaxCodeBytes)
+		c, err := NewSSACode(a, valueCode(t, float64(i), 0))
 		if err != nil {
 			t.Fatal(err)
 		}
 		codes = append(codes, c)
 	}
-	query := func(c *Code) windows.MemoryBasicInformation {
+	query := func(c *SSACode) windows.MemoryBasicInformation {
 		var info windows.MemoryBasicInformation
 		if err := windows.VirtualQuery(uintptr(unsafe.Pointer(&c.code[0])), &info, unsafe.Sizeof(info)); err != nil {
 			t.Fatal(err)
@@ -70,8 +71,9 @@ func TestWindowsArenaProtectionAndRelease(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if exit, err := last.Run(nil, 0, MaxIterations); err != nil || exit.Value != ir.Float(2) {
-		t.Fatalf("code beside released code: %+v, %v", exit, err)
+	var ctx abi.Context
+	if err := last.Run(0, &ctx); err != nil || ctx.Ret != math.Float64bits(2) {
+		t.Fatalf("code beside released code: %v, %v", ctx.Ret, err)
 	}
 	if err := last.Close(); err != nil {
 		t.Fatal(err)

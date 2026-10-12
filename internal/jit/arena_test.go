@@ -3,8 +3,8 @@
 package jit
 
 import (
-	"errors"
 	"math"
+	"runtime"
 	"testing"
 	"unsafe"
 
@@ -14,15 +14,38 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
-// valueProgram returns v; a long one runs through n instructions first, so
-// that its code spans pages.
-func valueProgram(v float64, n int) *ir.Program {
-	p := &ir.Program{Code: make([]ir.Instruction, n), Maps: make([]ir.StateMap, n)}
-	for pc := range p.Maps {
-		p.Maps[pc].PC = uint32(pc)
+// valueCode is the code of a function that returns v; a long one runs
+// through n bytes of no-ops first, so that it spans pages.
+func valueCode(t *testing.T, v float64, n int) *mir.Code {
+	t.Helper()
+	p := &ir.Program{Code: []ir.Instruction{{Op: ir.Return, Left: ir.Literal(ir.Float(v))}}, Maps: make([]ir.StateMap, 1)}
+	f, err := ssa.Build(p)
+	if err != nil {
+		t.Fatal(err)
 	}
-	p.Code[n-1] = ir.Instruction{Op: ir.Return, Left: ir.Literal(ir.Float(v))}
-	return p
+	mc, err := mir.Compile(f, testEncoding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		return mc
+	}
+	nop := []byte{0x90}
+	if runtime.GOARCH == "arm64" {
+		nop = []byte{0x1f, 0x20, 0x03, 0xd5}
+	}
+	var sled []byte
+	for len(sled) < n {
+		sled = append(sled, nop...)
+	}
+	// Entries before the sled run through it.
+	mc.Bytes = append(sled, mc.Bytes...)
+	for pc, off := range mc.Entries {
+		if off != 0 {
+			mc.Entries[pc] = off + len(sled)
+		}
+	}
+	return mc
 }
 
 // An arena packs a runtime's functions into a few mappings: each placed
@@ -31,13 +54,13 @@ func valueProgram(v float64, n int) *ir.Program {
 // and seals the pages they share. Releasing the last unmaps everything.
 func TestArenaPacksCode(t *testing.T) {
 	a := NewArena()
-	var codes []*Code
+	var codes []*SSACode
 	place := func(i int) {
-		n := 1
+		n := 0
 		if i%50 == 25 {
-			n = 1000
+			n = 3 * chunkBytes / 4
 		}
-		c, err := CompileIn(a, valueProgram(float64(i), n), MaxCodeBytes)
+		c, err := NewSSACode(a, valueCode(t, float64(i), n))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -49,9 +72,9 @@ func TestArenaPacksCode(t *testing.T) {
 			if c.Size() == 0 {
 				continue
 			}
-			exit, err := c.Run(nil, 0, MaxIterations)
-			if err != nil || exit.Kind != ir.Returned || exit.Value != ir.Float(float64(i)) {
-				t.Fatalf("%s: code %d returned %+v, %v", when, i, exit, err)
+			var ctx abi.Context
+			if err := c.Run(0, &ctx); err != nil || ctx.ExitKind != abi.ExitReturn || ctx.Ret != math.Float64bits(float64(i)) {
+				t.Fatalf("%s: code %d returned %+v, %v", when, i, ctx.Ret, err)
 			}
 		}
 	}
@@ -67,7 +90,7 @@ func TestArenaPacksCode(t *testing.T) {
 	if want := (bytes()+chunkBytes-1)/chunkBytes + 1; a.Chunks() > want {
 		t.Fatalf("%d bytes of code in %d mappings, want at most %d", bytes(), a.Chunks(), want)
 	}
-	if next := uintptr(unsafe.Pointer(&codes[1].code[0])) - uintptr(unsafe.Pointer(&codes[0].code[0])); next != uintptr(codes[0].Size()) {
+	if next := uintptr(unsafe.Pointer(&codes[1].code[0])) - uintptr(unsafe.Pointer(&codes[0].code[0])); next < uintptr(codes[0].Size()) || next >= uintptr(codes[0].Size())+codeAlign {
 		t.Fatalf("the second function is %d bytes after the first, which takes %d", next, codes[0].Size())
 	}
 	runAll("placed")
@@ -94,40 +117,6 @@ func TestArenaPacksCode(t *testing.T) {
 	place(0)
 	runAll("placed again")
 	if err := codes[0].Close(); err != nil || a.Chunks() != 0 {
-		t.Fatalf("released: %v, %d mappings", err, a.Chunks())
-	}
-}
-
-// The new pipeline's code shares an arena with the old one's.
-func TestArenaHoldsBothPipelines(t *testing.T) {
-	a := NewArena()
-	old, err := CompileIn(a, constantProgram(), MaxCodeBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f, err := ssa.Build(constantProgram())
-	if err != nil {
-		t.Fatal(err)
-	}
-	mc, err := mir.Compile(f, testEncoding)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c, err := NewSSACode(a, mc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if a.Chunks() != 1 {
-		t.Fatalf("two functions in %d mappings", a.Chunks())
-	}
-	var ctx abi.Context
-	if err := c.Run(0, &ctx); err != nil || ctx.ExitKind != abi.ExitReturn || ctx.Ret != math.Float64bits(42) {
-		t.Fatalf("new pipeline: %v, %+v", err, ctx)
-	}
-	if exit, err := old.Run(nil, 0, 1); err != nil || exit.Value != ir.Float(42) {
-		t.Fatalf("old pipeline: %+v, %v", exit, err)
-	}
-	if err := errors.Join(old.Close(), c.Close()); err != nil || a.Chunks() != 0 {
 		t.Fatalf("released: %v, %d mappings", err, a.Chunks())
 	}
 }

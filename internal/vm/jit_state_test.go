@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/jit"
 	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
@@ -91,43 +90,12 @@ func jitSameValueForTest(a, b Value) bool {
 	return a.StrictEquals(b)
 }
 
-// Tagged supported builds execute actual native code and compare every exit
-// and scratch slot with the Go oracle. A native compilation refusal fails the
-// test, so successful numeric coverage cannot be hidden by interpreter fallback.
+// jitEvaluatorForTest runs a lowered program through the slot IR's own
+// evaluator, the oracle the new pipeline is compared with: the tests here
+// check that every state it stops in is one the interpreter goes on from.
 func jitEvaluatorForTest(t *testing.T, p *ir.Program) func([]ir.Value, int, uint64) (ir.Exit, error) {
 	t.Helper()
-	if !jit.Supported() {
-		return p.Evaluate
-	}
-	code, err := jit.Compile(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := code.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	same := func(a, b ir.Value) bool {
-		return a == b || a.Kind == ir.Number && b.Kind == ir.Number &&
-			math.IsNaN(math.Float64frombits(a.Bits)) && math.IsNaN(math.Float64frombits(b.Bits))
-	}
-	return func(slots []ir.Value, pc int, budget uint64) (ir.Exit, error) {
-		budget = min(budget, jit.MaxIterations)
-		oracle := append([]ir.Value(nil), slots...)
-		want, oracleErr := p.Evaluate(oracle, pc, budget)
-		got, nativeErr := code.Run(slots, pc, budget)
-		if oracleErr != nil || nativeErr != nil || got.Kind != want.Kind || got.State != want.State ||
-			got.Steps != want.Steps || !same(got.Value, want.Value) {
-			t.Fatalf("native exit %+v, %v; oracle %+v, %v", got, nativeErr, want, oracleErr)
-		}
-		for i := range slots {
-			if !same(slots[i], oracle[i]) {
-				t.Fatalf("native slot %d = %+v, oracle %+v; pc %d budget %d", i, slots[i], oracle[i], pc, budget)
-			}
-		}
-		return got, nativeErr
-	}
+	return p.Evaluate
 }
 
 // Every budget up to the completed execution stops at an instruction boundary

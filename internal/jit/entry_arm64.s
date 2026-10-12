@@ -3,13 +3,6 @@
 #include "funcdata.h"
 #include "textflag.h"
 
-TEXT ·enterProgram(SB), NOSPLIT|NOFRAME, $0-32
-	MOVD code+0(FP), R16
-	MOVD state+8(FP), R0
-	MOVD slots+16(FP), R2
-	MOVD arrays+24(FP), R1
-	JMP (R16)
-
 // enterSSA tail-jumps to a function compiled by the new pipeline, with the
 // context block in R0. The code returns through the link register directly
 // to enterSSA's Go caller.

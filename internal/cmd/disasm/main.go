@@ -199,14 +199,7 @@ func (p *printer) header(fn *bytecode.Function, indent string) {
 		}
 	}
 	if p.jit {
-		lower := jitcompile.Lower
-		for _, in := range fn.Code {
-			if in.Op == bytecode.OpCall || in.Op == bytecode.OpCallMethod {
-				lower = jitcompile.LowerCalls
-				break
-			}
-		}
-		if ir, err := lower(fn); err == nil {
+		if ir, err := jitcompile.LowerSSA(fn); err == nil {
 			fmt.Fprintf(p.w, "%s  jit IR: eligible (this tool does not compile or execute native code)\n", indent)
 			fmt.Fprintf(p.w, "%s  jit slots: %d locals + %d operands\n", indent, ir.Locals, ir.StackSize)
 			for _, state := range ir.Maps {
@@ -216,8 +209,8 @@ func (p *printer) header(fn *bytecode.Function, indent string) {
 			}
 		} else {
 			fmt.Fprintf(p.w, "%s  jit IR: refused: %s\n", indent, err)
-			if _, err := jitcompile.LowerCallee(fn); err == nil {
-				fmt.Fprintf(p.w, "%s  jit callee IR: eligible with encoded caller (standalone remains in Go)\n", indent)
+			if _, err := jitcompile.LowerSSAInline(fn); err == nil {
+				fmt.Fprintf(p.w, "%s  jit callee IR: eligible for native callers and inlining\n", indent)
 			}
 		}
 	}

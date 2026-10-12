@@ -357,14 +357,17 @@ func InlineCalls(p *ir.Program) ([]int, bool) {
 }
 
 // GlobalSite is a global read's site: its name, the VM's atom, and the
-// index in the global object's table where the binding was found. Fixed
-// says the binding can never change -- a data property neither writable
-// nor configurable, as undefined, NaN and Infinity are -- and Constant is
-// its value then: the read checks the binding is still where it was, and
-// uses the constant.
+// index in the global object's table where the binding was found -- or,
+// Lexical, in the table of the script-level lexical bindings', a let's,
+// a const's or a class's. Fixed says the binding can never change -- a
+// data property neither writable nor configurable, as undefined, NaN and
+// Infinity are, or a const that holds its value -- and Constant is its
+// value then: the read checks the binding is still where it was, and uses
+// the constant.
 type GlobalSite struct {
 	Key      uint32
 	Index    int32
+	Lexical  bool
 	Fixed    bool
 	Constant ir.Value
 }
@@ -1193,6 +1196,14 @@ func shifted(in ir.Instruction, base int) ir.Instruction {
 	return in
 }
 
+// cell is the op that finds the site's binding.
+func (s GlobalSite) cell() Op {
+	if s.Lexical {
+		return OpLexCell
+	}
+	return OpGlobalCell
+}
+
 // global is the feedback for a global read at pc, if any.
 func (b *builder) global(pc int) (GlobalSite, bool) {
 	if op := b.p.Code[pc].Op; b.fb == nil || op != ir.BindingRead && op != ir.BindingWrite && op != ir.BindingCheck {
@@ -1973,7 +1984,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 		if site.Fixed {
 			kind = ir.GuardExit
 		}
-		cell := guard(OpGlobalCell, Source, kind)
+		cell := guard(site.cell(), Source, kind)
 		cell.Index, cell.Key = int(site.Index), site.Key
 		if site.Fixed {
 			k := f.newValue(blk, OpConst, Tagged)
@@ -2042,7 +2053,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 			blk.State.addUse()
 			break
 		}
-		cell := guard(OpGlobalCell, Source, ir.HostExit)
+		cell := guard(site.cell(), Source, ir.HostExit)
 		cell.Index, cell.Key = int(site.Index), site.Key
 		w := guard(OpPropWrite, None, ir.HostExit, cell, operand(in.Left))
 		w.Key, w.Global = site.Key, true
@@ -2055,7 +2066,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 			blk.State.addUse()
 			break
 		}
-		cell := guard(OpGlobalCell, Source, ir.HostExit)
+		cell := guard(site.cell(), Source, ir.HostExit)
 		cell.Index, cell.Key = int(site.Index), site.Key
 		k := f.newValue(blk, OpConst, Tagged)
 		k.Const = ir.Bool(true)

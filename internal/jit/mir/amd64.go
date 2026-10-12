@@ -3069,6 +3069,27 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		guard(amd64.CondNE)
 		c.a.OpImm(amd64.Add, scratchA, c.enc.PropertyValue, true)
 		c.setG(v, scratchA)
+	case ssa.OpLexCell:
+		// The script-level lexical bindings' object, where the global
+		// scope is the realm's; then the binding where it was, the
+		// name's, and out of its temporal dead zone.
+		c.a.Load(scratchA, regCtx, abi.OffGlobalLex)
+		c.a.Op(amd64.Test, scratchA, scratchA, true)
+		guard(amd64.CondE)
+		c.a.Load(scratchB, scratchA, c.enc.ObjectProps+8)
+		c.a.OpImm(amd64.Cmp, scratchB, int32(v.Index), true)
+		guard(amd64.CondBE)
+		c.a.Load(scratchA, scratchA, c.enc.ObjectProps)
+		c.a.OpImm(amd64.Add, scratchA, int32(v.Index)*c.enc.PropertySize, true)
+		c.a.LoadU32(scratchB, scratchA, c.enc.PropertyKey)
+		c.a.OpImm(amd64.Cmp, scratchB, int32(v.Key), false)
+		guard(amd64.CondNE)
+		c.a.OpImm(amd64.Add, scratchA, c.enc.PropertyValue, true)
+		c.a.Load(scratchB, scratchA, c.enc.NumOffset)
+		c.a.MovImm(scratchC, c.enc.Uninitialized)
+		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+		guard(amd64.CondE)
+		c.setG(v, scratchA)
 	case ssa.OpStringMethod:
 		// A string's charCodeAt where String.prototype has it now, its shape
 		// the one Go found the intrinsic in: the call compares what it

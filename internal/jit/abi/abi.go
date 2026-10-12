@@ -60,9 +60,11 @@ type Context struct {
 	Upvalues unsafe.Pointer
 	// Global is the object a function's global names are read from, its
 	// closure's scope, and LexNames the names script-level lexical bindings
-	// have, which shadow them: a slice of uint64, a bit for each atom. Go
-	// sets both before every entry; native code only reads them.
-	Global, LexNames unsafe.Pointer
+	// have, which shadow them: a slice of uint64, a bit for each atom.
+	// GlobalLex is the object those bindings are, when Global is the
+	// realm's global scope, and nil otherwise. Go sets all three before
+	// every entry; native code only reads them.
+	Global, LexNames, GlobalLex unsafe.Pointer
 	// CharCodeAt is String.prototype.charCodeAt, the intrinsic, when Go has
 	// found it still there before an entry of a function that reads it, and
 	// otherwise nothing (a nil pointer word).
@@ -298,6 +300,7 @@ var (
 	OffThis      = int32(unsafe.Offsetof(Context{}.This))
 	OffGlobal    = int32(unsafe.Offsetof(Context{}.Global))
 	OffLexNames  = int32(unsafe.Offsetof(Context{}.LexNames))
+	OffGlobalLex = int32(unsafe.Offsetof(Context{}.GlobalLex))
 	OffCharCode  = int32(unsafe.Offsetof(Context{}.CharCodeAt))
 	// OffStringProto, OffStringShape and OffCharCodeAtOffset locate what a
 	// string's charCodeAt is read with (Context's StringProto).

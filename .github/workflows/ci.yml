@@ -137,9 +137,9 @@ jobs:
         working-directory: internal/jit/verify
         run: go test -tags quickjs_jit -count=1 ./...
 
-  # test262 with the JIT made to compile on the first call, return to Go
-  # every few instructions and fall back to the interpreter from wherever it
-  # got to (QJS_JIT_STRESS, internal/vm). The runner fails a run in which no
+  # test262 with the JIT made to compile on the first call, poll Go every
+  # few back edges and finish in the interpreter from wherever it got to
+  # (QJS_JIT_STRESS, internal/vm). The runner fails a run in which no
   # test ran native code.
   jit-conformance:
     name: JIT test262 under stress (${{ matrix.os }})
@@ -175,23 +175,15 @@ jobs:
           go-version: "1.27"
           cache: true
 
+      # amd64 on Linux and Windows, arm64 on macOS.
       - name: Run test262
         shell: bash
-        run: TEST262_DIR="$GITHUB_WORKSPACE/test262" go test -tags quickjs_jit ./conformance -run TestConformance -count=1 -timeout 35m -args -conformance.jit
+        run: TEST262_DIR="$GITHUB_WORKSPACE/test262" go test -tags quickjs_jit ./conformance -run TestConformance -count=1 -timeout 35m -v -args -conformance.jit 2>&1 | tee test262.log | grep -E "test262:|native code ran|FAIL|^ok"; test "${PIPESTATUS[0]}" -eq 0
 
-      # The new pipeline (docs/jit-phase2-design.md), wherever it compiles a
-      # function: amd64 on Linux and Windows, arm64 on macOS.
-      - name: Run test262 on the new pipeline
-        shell: bash
-        env:
-          QJS_JIT_PIPELINE: ssa
-        run: TEST262_DIR="$GITHUB_WORKSPACE/test262" go test -tags quickjs_jit ./conformance -run TestConformance -count=1 -timeout 35m -v -args -conformance.jit 2>&1 | tee test262-ssa.log | grep -E "test262:|native code ran|of those entries|FAIL|^ok"; test "${PIPESTATUS[0]}" -eq 0
-
-  # The JIT's kernels in each pipeline and the tree tier, on arm64 (macOS)
-  # and amd64 (Linux), for the JIT branch's parity work
-  # (docs/jit-progress.md, P7). A shared runner's times are noisy, so the
-  # summary compares the pipelines within one run: medians, and the new
-  # pipeline's time over the old's and the tree tier's.
+  # The JIT's kernels and the tree tier's, on arm64 (macOS) and amd64
+  # (Linux), for the JIT branch's work (docs/jit-progress.md). A shared
+  # runner's times are noisy, so the summary compares the tiers within one
+  # run: medians, and the JIT's time over the tree tier's.
   jit-bench:
     name: JIT kernels (${{ matrix.os }})
     if: github.event_name == 'push' && github.ref == 'refs/heads/jit-wip'
@@ -217,12 +209,9 @@ jobs:
       - name: Run the kernels
         run: go test -tags quickjs_jit -run '^$' -bench '^BenchmarkJIT(NumericKernels|ArrayKernels|DenseKernels|NumericFields|HostRoundTrip|ScalarCalls)$' -benchtime 300ms -count 5 ./internal/vm | tee bench.txt
 
-      # These choose the pipeline as a host would, by QJS_JIT_PIPELINE: once
-      # each way. Each includes compiling, so it shows first use too.
+      # Each includes compiling, so it shows first use too.
       - name: Run the promotion benchmarks
-        run: |
-          go test -tags quickjs_jit -run '^$' -bench '^BenchmarkJIT(CallPromotion|KernelPromotion)$' -benchtime 200ms -count 3 ./internal/vm | tee promotion-old.txt
-          QJS_JIT_PIPELINE=ssa go test -tags quickjs_jit -run '^$' -bench '^BenchmarkJIT(CallPromotion|KernelPromotion)$' -benchtime 200ms -count 3 ./internal/vm | tee promotion-new.txt
+        run: go test -tags quickjs_jit -run '^$' -bench '^BenchmarkJIT(CallPromotion|KernelPromotion)$' -benchtime 200ms -count 3 ./internal/vm | tee promotion.txt
 
       - name: Summarize
         shell: python
@@ -241,20 +230,19 @@ jobs:
                   kernels[kernel][mode] = statistics.median(times)
               return kernels
 
-          rows = []  # name, tree, old, new
+          rows = []  # name, tree, JIT
           for kernel, modes in sorted(medians("bench.txt").items()):
               if "ssa" in modes:
-                  rows.append((kernel, modes.get("existing"), modes.get("native"), modes["ssa"]))
-          old, new = medians("promotion-old.txt"), medians("promotion-new.txt")
-          for kernel, modes in sorted(old.items()):
+                  rows.append((kernel, modes.get("existing"), modes["ssa"]))
+          for kernel, modes in sorted(medians("promotion.txt").items()):
               for mode in ("eager", "automatic"):
-                  if mode in modes and mode in new.get(kernel, {}):
-                      rows.append((f"{kernel}/{mode}", modes.get("existing"), modes[mode], new[kernel][mode]))
-          out = ["| Kernel | tree tier (us) | old JIT (us) | new JIT (us) | new / old | new / tree |", "|---|---:|---:|---:|---:|---:|"]
+                  if mode in modes:
+                      rows.append((f"{kernel}/{mode}", modes.get("existing"), modes[mode]))
+          out = ["| Kernel | tree tier (us) | JIT (us) | JIT / tree |", "|---|---:|---:|---:|"]
           us = lambda t: f"{t / 1000:.1f}" if t else "-"
-          for name, tree, old_t, new_t in rows:
-              ratio = lambda base: f"{new_t / base:.2f}x" if base else "-"
-              out.append(f"| {name.removeprefix('BenchmarkJIT')} | {us(tree)} | {us(old_t)} | {us(new_t)} | {ratio(old_t)} | {ratio(tree)} |")
+          for name, tree, jit in rows:
+              ratio = f"{jit / tree:.2f}x" if tree else "-"
+              out.append(f"| {name.removeprefix('BenchmarkJIT')} | {us(tree)} | {us(jit)} | {ratio} |")
           table = "\n".join(out)
           print(table)
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:

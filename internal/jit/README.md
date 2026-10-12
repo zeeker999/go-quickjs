@@ -22,14 +22,18 @@ This file states the contracts the code keeps. Where the work is going is in
 
 | Package or file | Role |
 |---|---|
-| `ir` | The slot IR, one instruction per bytecode PC, with a state map at each. `Validate` checks a program, and `Evaluate`, a Go interpreter of the IR, is the oracle native code is tested against. |
-| `compile` | Lowers bytecode into the IR, or refuses it (`Refusal`). It never imports the VM. |
-| `program_*.go`, `emit_*.go` | Analysis (`program_assembler.go`, `program_ranges.go`) and the two emitters, `emit_x86.go` and `emit_a64.go`. Both build on every supported target; `emit_amd64.go` or `emit_arm64.go` picks this target's. |
-| `verify` | A module of its own that checks every emitted program against `golang.org/x/arch`'s disassemblers. |
-| `entry_*.s` | The bridges from Go into a program. |
+| `ir` | The slot IR, one instruction per bytecode PC, with a state map at each. `Validate` checks a program, and `Evaluate`, a Go interpreter of the IR, is the oracle the SSA tests compare with. |
+| `compile` | Lowers bytecode into the IR (`LowerSSA`, and `LowerSSAInline` for a callee to inline), or refuses it (`Refusal`). It never imports the VM. |
+| `ssa` | Builds SSA from a program and the VM's feedback (`Feedback`), and optimizes it. `eval.go` runs SSA over a heap model, for tests. |
+| `mir` | Selects instructions, allocates registers and encodes amd64 and arm64 machine code (`CompileAMD64`, `CompileARM64`), both on every target. |
+| `abi` | The contract between the code and the VM: the context block (`Context`), the exits, and the value encoding (`Encoding`), given as data. |
+| `asm` | The two assemblers. |
+| `ssacode.go`, `arena.go`, `exit.go` | Placing code (`SSACode`, `Arena`), entering it, and reading its exits. |
+| `verify` | A module of its own that checks the code `mir` makes for both targets against `golang.org/x/arch`'s disassemblers. |
+| `entry_*.s` | Entry from Go (`enterSSA`), and the calls of Go native code makes (`callGo`). |
 | `memory_*.go`, `policy_darwin.go` | Executable memory. |
-| `internal/vm/zzjit_native.go` | The VM's side: selection, the code cache, frame encoding and publication, host exits. |
-| `internal/vm/zzjit_calls.go` | The call coordinator. |
+| `internal/vm/zzjit_native.go` | The VM's side: selection, the code cache, budgets, host exits. |
+| `internal/vm/zzjit_ssa.go` | Feedback for the builder, entering and resuming code, the calls of Go, native calls and their frames. |
 | `internal/vm/zzjit_disabled.go` | The stubs for builds without the tier. |
 
 The VM files are named `zzjit_` so that they sort after `ztree_*.go`.
@@ -38,12 +42,19 @@ nothing the interpreter or the tree tier runs.
 
 ## The execution boundary
 
-**Entry.** `enterProgram` is `NOSPLIT|NOFRAME`. It tail-jumps into the
-program, which returns with a plain `RET` to `enterProgram`'s Go caller. Native
-code:
-- never calls anything;
-- never touches SP or the frame pointer;
+**Entry.** `enterSSA` is `NOSPLIT|NOFRAME`. It tail-jumps into the code with
+the context block in a register, and the code returns with a plain `RET` to
+`enterSSA`'s Go caller. Native code:
+- never moves SP or touches the frame pointer;
+- never executes a call instruction: it calls another function's native
+  code by jumping there, with that level's context, and Go by jumping to
+  `callGo` (`abi.Context.GoOp`);
 - uses Go's ABI0, not the platform C convention, on every OS.
+
+**Calls of Go.** To the Go runtime, `callGo` is a function the Go function
+that entered the code called: its frame and return address are all a
+traceback, a stack scan or the stack's growth meets. Go may do anything
+there, run JavaScript included, and the code goes on where Go says.
 
 **Registers.**
 
@@ -53,20 +64,21 @@ code:
 | Clobbered | the rest, X15 included | the rest, R19-R25 included |
 
 ABI0 callers expect clobbering: on amd64, Go restores X15 and R14 after any
-ABI0 call. The emitter headers list each register's use.
+ABI0 call. `verify` checks these rules for every function its corpora
+compile.
 
-**Budget.** Every entry runs at most `MaxIterations` (4096) committed IR
-instructions, then returns to Go. Host operations handled in Go share that
-budget. Go checks for cancellation, `Halt`, the memory limit and stale stack
-slots before it re-enters.
+**Polls.** Every back edge decrements the interpreter's back-edge counter
+(`Context.BackEdges`). When it runs out, the code calls Go (or, under a
+stress budget, exits to it), which checks for cancellation, `Halt` and the
+memory limit, gives the loop a new budget, and lets the code go on.
 
 **Not a safe point.** Generated code is never a safe point. SIGURG, Windows'
 `SuspendThread` and SIGPROF see a PC outside Go's text:
 - preemption retries until Go code runs again;
 - a profile sample counts as external code.
 
-The budget is what bounds how long the goroutine can delay a stop-the-world
-pause.
+The back-edge budget, and the calls of Go, bound how long the goroutine can
+delay a stop-the-world pause.
 
 **Faults kill the process.** Go cannot recover a fault at a PC outside its
 text:
@@ -74,106 +86,81 @@ text:
 - on Unix it is fatal, except a nil-page access, which `Runtime`'s recover
   turns into an error.
 
-So an emitter bug can take down the host. The defence is verification: the
-IR oracle, differential tests at every entry and budget, and `verify`, which
-disassembles what both emitters make.
+So a backend bug can take down the host. The defences are verification and
+differential testing: the SSA evaluator and the IR oracle, the VM's tests
+under every stress setting (`QJS_JIT_STRESS`), the differential fuzzer, and
+`verify`.
 
-**Compiler panics are refusals.** `compile.Lower` and `Compile` recover a
-panic in analysis or emission into a refusal (`Refusal`, `ErrProgram`), and
-the function runs in the existing tiers.
+**Compiler panics are refusals.** Lowering and the backend recover a panic
+into a refusal, and the function runs in the existing tiers.
 
-## Values, roots and the garbage collector
+## Values and the garbage collector
 
-**Native code stores no pointers.**
-- A scalar slot (`ir.Value`) is 16 pointer-free bytes: bits and a kind.
-- A reference is an `Opaque` or `String` handle: an index into Go-owned root
-  tables that the VM fills.
-- A handle never appears as a literal; `Validate` rejects one.
-
-**Borrowed views.** A `ir.ArrayView` (40 bytes) grants native access to an
-array's dense elements or to an object's property cells. It holds:
-- a typed pointer that roots the storage;
-- the storage's dense length;
-- its JavaScript length;
-- the tag boundary below which a cell holds a number;
-- a permission to fill a pointer-free hole.
-
-**What native code writes.** Only the number word of a cell that already holds
-a number or a hole, whose pointer word is nil. It canonicalizes NaN first. It
-never writes a Go pointer or a slice header, and never grows storage. So the
-GC's write barrier is never needed.
-
-**When Go invalidates views.** Before any operation that can run JavaScript or
-the host (a call, a getter, a coercion, a proxy trap), Go:
-1. publishes the frame;
-2. clears every root and view;
-3. runs the operation as the interpreter would;
-4. re-encodes and rebuilds the views before re-entering.
-
-**Lifetimes.** Owners (code, roots, views and their backing storage) stay
-reachable from Go across every entry. Native code keeps no address between
-entries.
-
-**The new pipeline** (`ssa`, `mir`, `abi`) uses the VM's frame and objects
-in place, under the same rule (docs/jit-phase2-design.md):
+The code uses the VM's frame and objects in place (docs/jit-phase2-design.md):
 - It holds a slot's number word, never its pointer word. A reference stays
   in the slot that held it at entry, which native code does not write before
   it exits; an exit has Go copy it where it goes, and store a primitive over
   a reference (`abi.Record`). An ambiguous phi's shadow tells Go, at run
   time, which slot a value came from.
 - It reads an object through the pointer word of the slot that holds it
-  (D8): an array's class, flags, length and elements, through the offsets
-  `abi.Encoding` gives. Go changes none of them while native code runs.
-- It writes only number words: into a slot whose pointer word is nil, and
-  into an element that holds a number.
+  (D8), at the offsets `abi.Encoding` gives: an array's class, flags, length
+  and elements; a property table, by its shape; a script's global and
+  lexical bindings (`Context.Global`, `Context.GlobalLex`).
+- A store of a pointer tests the runtime's write-barrier flag first, as
+  compiled Go does, and leaves the store to Go while the collector marks.
+- References it must keep across calls of Go are kept in the context
+  (`Context.Keep`), where the collector sees them.
 - It keeps no address between entries.
 
-## Deoptimization
+## Exits and deoptimization
 
 **State maps.** Each reachable PC has a state map: the bytecode PC and the
-live operand depth.
+live operand depth. An exit names one, and its records say what Go writes
+into the frame.
 
-**Guards.** A guard fails before its instruction commits anything. The VM then:
-1. publishes locals and operands at that PC;
-2. resumes `executeAt` there, so the interpreter performs the operation itself.
-
-Work already committed, earlier loop iterations included, is never replayed.
-
-**Exits.** Every exit (guard, budget, host, return) reports the exact state
-and the committed step count.
-
-**Rest of the invocation.** A failed guard sends the invocation to the
-interpreter for its remainder (`jitDeoptDepth`). Nested calls may still enter
-native code.
+**Exits.**
+- A guard (`ExitDeopt`) fails before its instruction commits anything. Go
+  writes the frame at that PC and the interpreter runs on from there. The
+  failure is noted, and the function is compiled again with the site
+  generic, at most four times (`jitReoptimizations`).
+- A host exit (`ExitHost`) leaves one instruction to Go, which runs it, and
+  the code goes on at the next entry.
+- A native callee that cannot go on leaves its frame to Go (`ExitTable`),
+  which finishes the call in the interpreter, and its caller's code goes on
+  after the call.
+- Work already committed, earlier loop iterations included, is never
+  replayed.
 
 ## Selection and the code cache
 
 **Function entry.** A closure counts framed calls. The eighth may compile its
 function (`jitHotCalls`).
 
-**Loops.** A loop may also promote at the back-edge check after a full budget
-of 1024 backward jumps: on-stack replacement at the completed branch's target,
-from the interpreter or the tree tier.
+**Loops.** A loop may also promote at a back-edge check: on-stack
+replacement at the loop's header, from the interpreter or the tree tier.
 
-**The cache.** Each runtime keeps its own cache: at most 128 programs, weakly
-keyed by the shared bytecode function. Shared bytecode carries no JIT state.
+**Native calls.** A call the VM has seen call a function it may compile is
+made natively, or inlined. A callee whose code Go never enters on its own is
+compiled for native callers only.
 
-**Closure hints.** A closure remembers its program by a hint, a slot and tag
+**The cache.** Each runtime keeps its own cache: at most 128 functions'
+code, weakly keyed by the shared bytecode function. Shared bytecode carries
+no JIT state.
+
+**Closure hints.** A closure remembers its code by a hint, a slot and tag
 in the cache's hint table (not a pointer). The closure stays 128 bytes, and a
 stale hint misses.
 
 **Refusals.**
-- Permanent: lowering refused it, or the emitter rejected it. These are
-  cached, and the closure is marked refused.
+- Permanent: lowering or the backend refused it. These are cached, and the
+  closure is marked refused.
 - Deferred: the code budget was full. These are cached until the cache
   releases code.
-- Temporary (no budget at all, executable memory unavailable): retried after
-  another warmup. When the OS denies executable memory, the runtime marks the
-  JIT unavailable for good.
+- Temporary (no budget at all): retried after another warm-up. When the OS
+  denies executable memory, the runtime marks the JIT unavailable for good.
 
-**Giving up.** Eight guard misses refuse a program. A program whose
-native-work-per-host-exit ratio stays low is kept for long invocations only
-(`entrySlow`).
+**Giving up.** Code whose native work per exit stays low is entered by Go no
+more (`entrySlow`, `jitSSAProfit`), and runs only for its native callers.
 
 **Debugger.** Runtimes made `WithDebugger` never run native code.
 
@@ -183,9 +170,8 @@ native-work-per-host-exit ratio stays low is kept for long invocations only
 - A runtime's code lives in its `Arena`: chunks of 64 KiB (a larger
   function gets a chunk of its own), each function placed after the last
   at 64-byte alignment. A runtime compiling 101 functions holds them in 2
-  mappings with the new pipeline, 6 with the old (`TestJITArenaMappings`),
-  where each used to be a mapping of its own -- and, on Windows, 64 KiB of
-  address space.
+  mappings (`TestJITArenaMappings`), where each used to be a mapping of its
+  own -- and, on Windows, 64 KiB of address space.
 - Placing a function makes the pages it touches writable, copies it, and
   seals them read/execute again. Pages are never writable and executable at
   once, and published code is never patched. Other code in those pages does
@@ -202,14 +188,14 @@ path yet.
 
 **Not the script's memory.** The memory meter never counts the JIT, so a
 script's measure, and whether it fails with `ErrMemoryLimit`, is the same with
-the JIT on and off. The JIT has a budget of its own (`jitBudget`):
-- 8 MB, or an eighth of the memory limit;
-- it covers code pages, metadata, and the reference and call arenas.
+the JIT on and off. The JIT has a budget of its own (`jitBudget`): 8 MB of
+code, or an eighth of the memory limit.
 
 **Release.**
-- `ReleaseClosed` releases code once native frames have unwound.
+- `ReleaseClosed` releases code once native frames have unwound; code a
+  suspended run still uses stays until the run leaves it.
 - A failed release keeps ownership for a retry.
-- A finalizer on `Code` and `SSACode` reclaims what a host abandoned.
+- A finalizer on `SSACode` reclaims what a host abandoned.
 
 Runtime construction allocates nothing for the JIT.
 
@@ -251,8 +237,9 @@ TEST262_DIR=/path/to/test262 go test -tags quickjs_jit ./conformance \
 - The VM's JIT tests force promotion and assert native entry, so they can't
   pass in the existing tiers.
 - `-conformance.jit` keeps the normal thresholds, under which few test262
-  tests reach native code. A stress mode that reports native coverage is
-  Phase 1 of the plan.
+  tests reach native code. `QJS_JIT_STRESS=threshold,budget=3,deopt=7`
+  compiles every function at its first call, polls every three back edges,
+  and finishes every seventh poll's invocation in the interpreter.
 
 `disasm -jit` reports a function's eligibility and IR without native support:
 

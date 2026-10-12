@@ -11,7 +11,6 @@ import (
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/compiler"
-	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/parser"
 )
 
@@ -20,7 +19,7 @@ func TestJITStringPacking(t *testing.T) {
 	v, err := r.Run(compileForTest(t, `function pack(s,a){for(let i=0;i<64;i+=4)a[i>>2]=s.charCodeAt(i)+(s.charCodeAt(i+1)<<8)+(s.charCodeAt(i+2)<<16)+(s.charCodeAt(i+3)<<24);return a[0]}let a=new Array(16).fill(0);pack('a'.repeat(64),a)`))
 	if err != nil || !v.IsNumber() || v.Number() != 1633771873 || r.jit == nil || r.jit.hosts != 0 {
 		if r.jit != nil {
-			t.Logf("hosts=%d guards=%d fast=%d", r.jit.hosts, r.jit.guards, r.jit.fastHosts)
+			t.Logf("hosts=%d guards=%d", r.jit.hosts, r.jit.guards)
 		}
 		t.Fatalf("packing: %v, %v", v, err)
 	}
@@ -31,7 +30,7 @@ func TestJITStringPacking(t *testing.T) {
 func TestJITStringArrayGrowth(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	v, err := r.Run(compileForTest(t, `function pack(s){let a=[];for(let i=0;i<64;i++)a[i]=s.charCodeAt(i);return a}let a=pack('A'.repeat(64));a.length===64&&a.every(n=>n===65)`))
-	if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.entries == 0 || r.jit.rootCount != 0 {
+	if err != nil || !v.IsBool() || !v.Truthy() || r.JITStats().SSAEntries == 0 {
 		t.Fatalf("growth: %v, %v", v, err)
 	}
 	for _, tc := range []struct{ name, setup, body, check string }{
@@ -48,7 +47,7 @@ func TestJITStringArrayGrowth(t *testing.T) {
 				r := jitRuntimeForTest(t, Config{JIT: enabled})
 				source := `'use strict';` + tc.setup + `let a,good=false;function save(v){a=v}function pack(s){let a=[];save(a);for(let i=0;i<64;i++){` + tc.body + `}return a}let s='';for(let i=0;i<64;i++)s+=String.fromCharCode(65+i);try{pack(s)}catch(e){good=e instanceof TypeError};` + tc.check
 				v, err := r.Run(compileForTest(t, source))
-				if err != nil || !v.IsBool() || !v.Truthy() || enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.rootCount != 0) {
+				if err != nil || !v.IsBool() || !v.Truthy() || enabled && r.JITStats().SSAEntries == 0 {
 					t.Fatalf("growth JIT %v: %v, %v", enabled, v, err)
 				}
 			}
@@ -68,7 +67,7 @@ func TestJITArrayGrowthCancellation(t *testing.T) {
 	defer cancel()
 	r.SetContext(ctx)
 	_, err := r.Run(compileForTest(t, `function pack(s){let a=[];for(let i=0;;i=(i+1)&15)a[i]=s.charCodeAt(i);return a}pack('A'.repeat(16))`))
-	if !errors.Is(err, context.DeadlineExceeded) || r.jit == nil || r.jit.budgets == 0 || r.jit.rootCount != 0 {
+	if !errors.Is(err, context.DeadlineExceeded) || r.jit == nil || r.jit.budgets == 0 {
 		t.Fatalf("bounded growth cancellation: %v", err)
 	}
 }
@@ -92,7 +91,7 @@ func TestJITStringBoundaries(t *testing.T) {
 				r := jitRuntimeForTest(t, Config{JIT: enabled})
 				source := tc.setup + `let a=new Array(6).fill(0),good=false;function f(s,a){for(let i=0;i<6;i++){` + tc.body + `}return a[0]}try{f(s,a)}catch(e){good=e instanceof TypeError&&e.message==='stop'};` + tc.check
 				v, err := r.Run(compileForTest(t, source))
-				if err != nil || !v.IsBool() || !v.Truthy() || enabled && (r.jit == nil || r.jit.entries == 0 || r.jit.rootCount != 0) {
+				if err != nil || !v.IsBool() || !v.Truthy() || enabled && r.JITStats().SSAEntries == 0 {
 					t.Fatalf("JIT %v: %v, %v", enabled, v, err)
 				}
 			}
@@ -104,44 +103,16 @@ func TestJITArrayLiteralBoundary(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		r := jitRuntimeForTest(t, Config{JIT: enabled})
 		v, err := r.Run(compileForTest(t, `let original={x:7};function f(o){let a=[o,1,2];for(let i=1;i<3;i++)a[i]+=1;return a}let a=f(original);a[0]===original&&a[1]===2&&a[2]===3&&a.length===3`))
-		if err != nil || !v.IsBool() || !v.Truthy() || enabled && (r.jit == nil || r.jit.hosts == 0 || r.jit.rootCount != 0) {
+		if err != nil || !v.IsBool() || !v.Truthy() || enabled && r.JITStats().SSAEntries == 0 {
 			t.Fatalf("array literal JIT %v: %v, %v", enabled, v, err)
 		}
-	}
-}
-
-func TestJITStringFullRootTable(t *testing.T) {
-	r := jitRuntimeForTest(t, Config{JIT: true})
-	s := &jitState{charCodeAt: r.jitCharCodeAt}
-	for range ir.MaxSlots {
-		v := s.encode(Str(NewString("abc")))
-		if v.Kind != ir.String {
-			t.Fatal(v)
-		}
-	}
-	s.prepareStringMethods(r)
-	if s.rootCount != ir.MaxSlots {
-		t.Fatal("intrinsic preparation exceeded the root bound")
-	}
-	for _, view := range s.arrays {
-		if view.WritableHole != 0 {
-			t.Fatal("granted a method without a rooted intrinsic")
-		}
-	}
-	s.clearRoots()
-	if s.rootCount != 0 || s.roots[0].ref != nil || s.arrays[0].Data != nil {
-		t.Fatal("string roots or borrowed data survived release")
 	}
 }
 
 func TestJITStringCalleePermissions(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	v, err := r.Run(compileForTest(t, `function pack(s,a,method){for(let i=0;i<64;i++)a[i]=s.charCodeAt(i);return a[0]}function outer(s,a,method){let sum=0;for(let j=0;j<4;j++)sum+=pack(s,a,method);return sum}let a=new Array(64).fill(0);outer('a'.repeat(64),a,String.prototype.charCodeAt)===388`))
-	// Only the four global reads and four call transfers leave machine code.
-	if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.transfers != 4 || r.jit.hosts != 8 || r.jit.rootCount != 0 {
-		if r.jit != nil {
-			t.Logf("transfers=%d hosts=%d guards=%d", r.jit.transfers, r.jit.hosts, r.jit.guards)
-		}
+	if err != nil || !v.IsBool() || !v.Truthy() || r.JITStats().SSAEntries == 0 {
 		t.Fatalf("string callee permissions: %v, %v", v, err)
 	}
 }
@@ -156,7 +127,7 @@ func TestJITStringRealms(t *testing.T) {
 			t.Fatal(err)
 		}
 		v, err := r.RunIn(realm, call)
-		if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.hosts != 0 || r.jit.rootCount != 0 {
+		if err != nil || !v.IsBool() || !v.Truthy() || r.jit == nil || r.jit.hosts != 0 {
 			t.Fatalf("realm character read: %v, %v", v, err)
 		}
 	}
@@ -264,7 +235,7 @@ func BenchmarkJITMD5(b *testing.B) {
 				if r.jit != nil {
 					for key, entry := range r.jit.cache {
 						if fn := key.Value(); fn != nil && fn.Name == "md5blk" {
-							packed = entry.code != nil && !entry.entrySlow && entry.misses == 0
+							packed = entry.ssa != nil && !entry.entrySlow
 						}
 					}
 				}
@@ -273,13 +244,13 @@ func BenchmarkJITMD5(b *testing.B) {
 				}
 			}
 			if r.jit != nil {
-				b.ReportMetric(float64(r.jitCodeBytes()), "code+metadata-B")
+				b.ReportMetric(float64(r.jitCodeBytes()), "code-B")
 				b.ReportMetric(float64(r.jit.hosts)/float64(b.N+100), "hosts/hash")
 				b.ReportMetric(float64(r.jit.guards)/float64(b.N+100), "guards/hash")
 				for key, entry := range r.jit.cache {
 					fn := key.Value()
 					if fn != nil {
-						b.Logf("%s: code=%v slow=%v misses=%d probes=%d hosts=%d steps=%d", fn.Name, entry.code != nil, entry.entrySlow, entry.misses, entry.probes, entry.probeHosts, entry.probeSteps)
+						b.Logf("%s: code=%v slow=%v hosts=%d guards=%d", fn.Name, entry.ssa != nil, entry.entrySlow, entry.ssaStats.hosts, entry.ssaStats.guards)
 					}
 				}
 			}
