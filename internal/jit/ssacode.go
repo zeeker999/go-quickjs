@@ -24,6 +24,9 @@ type SSACode struct {
 	entries []int32
 	// exits are the descriptions the code's exits name by address.
 	exits []*abi.ExitDescriptor
+	// footprint is what the code holds (Footprint), which never changes
+	// while it is open.
+	footprint int
 }
 
 // NewSSACode publishes compiled code in a, a runtime's arena (nil gives it
@@ -48,6 +51,7 @@ func NewSSACode(a *Arena, c *mir.Code) (*SSACode, error) {
 		entries[pc] = int32(off)
 	}
 	s := &SSACode{code: code, arena: a, entries: entries, exits: c.Exits}
+	s.footprint = footprint(len(code), cap(entries), c.Exits)
 	runtime.SetFinalizer(s, func(s *SSACode) { _ = s.Close() })
 	return s, nil
 }
@@ -111,6 +115,36 @@ func (s *SSACode) Contains(addr uintptr) bool {
 	}
 	base := uintptr(unsafe.Pointer(&s.code[0]))
 	return addr >= base && addr < base+uintptr(len(s.code))
+}
+
+// Footprint is the memory s holds, which its owner counts against its
+// budget: the executable memory it owns, as placed (CodeFootprint), and
+// what describes it -- its entries and its exits' descriptions.
+func (s *SSACode) Footprint() int {
+	if s == nil || len(s.code) == 0 {
+		return 0
+	}
+	return s.footprint
+}
+
+// CodeFootprint is what c's code will hold once placed (SSACode's
+// Footprint): what a runtime asks before it places the code, to make room
+// for it or refuse it.
+func CodeFootprint(c *mir.Code) int {
+	n := 0
+	for pc := range c.Entries {
+		n = max(n, pc+1)
+	}
+	return footprint(alignUp(len(c.Bytes), codeAlign), n, c.Exits)
+}
+
+func footprint(code, entries int, exits []*abi.ExitDescriptor) int {
+	n := code + int(unsafe.Sizeof(SSACode{})) + entries*4 + cap(exits)*8
+	for _, x := range exits {
+		n += int(unsafe.Sizeof(*x)) + cap(x.Slots)*int(unsafe.Sizeof(abi.ExitSlot{})) +
+			cap(x.Inline)*int(unsafe.Sizeof(abi.ExitInline{}))
+	}
+	return n
 }
 
 // Size is the executable memory s owns.

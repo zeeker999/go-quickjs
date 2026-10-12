@@ -3,15 +3,18 @@
 package vm
 
 import (
+	"cmp"
 	"encoding/binary"
 	"errors"
 	"os"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 	"weak"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -23,7 +26,8 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
-const jitCacheEntries = 128
+// jitCacheBytes is the JIT's budget (jitBudget) in a runtime without a
+// memory limit.
 const jitCacheBytes = 8 << 20
 const jitHotCalls = 8
 
@@ -109,8 +113,8 @@ func (r *Runtime) recordJITStringIntrinsic() {
 // A closure belongs to one runtime. Hotness and permanent selection refusals
 // live here without registering a weak key on cold or refused calls. The
 // fields fit the closure's padding beside pureMiss, so it keeps its 128-byte
-// size class: jitHint is not a pointer but a slot and tag in the runtime's
-// hint table (jitState.hint), and bytes, so that nothing is aligned past it.
+// size class: jitHint is not a pointer but a slot in the runtime's hint
+// table (jitState.hint), and bytes, so that nothing is aligned past it.
 type jitClosureFields struct {
 	jitRefused   bool
 	jitCalls     uint8
@@ -122,30 +126,39 @@ func (c *jitClosureFields) hint() uint32 { return binary.LittleEndian.Uint32(c.j
 
 func (c *jitClosureFields) setHint(h uint32) { binary.LittleEndian.PutUint32(c.jitHint[:], h) }
 
+// jitHintSlot is a slot of the hint table (jitState.hints): the entry it
+// holds, and its function's address, which is not a reference -- the
+// cache's keys are weak -- but what a closure's function must be for the
+// closure's hint to name the entry (hint).
 type jitHintSlot struct {
-	e   *jitEntry
-	tag uint32
+	e  *jitEntry
+	fn uintptr
 }
 
-// jitHintBits is the slot part of a hint; the tag is the rest.
-const jitHintBits = 8
-
-// hint returns the entry a closure's hint names, or nil if the hint is empty
-// or stale. The state is discarded only when a closed runtime releases it, so
-// a hint never outlives the table it indexes.
-func (s *jitState) hint(h uint32) *jitEntry {
-	if h == 0 || s == nil {
+// hint returns the entry cl's hint names, or nil if the hint is empty or
+// stale: its slot freed, or holding another function's entry since. A slot
+// that holds an entry of cl's function holds the one the cache has for it,
+// whichever entry the hint was given for. An address names one function
+// while cl lives, which keeps cl's function: a function collected since
+// had another address while it lived, and none is made at cl's function's
+// until cl is collected. So a slot reused, however often, never hands cl
+// another function's code, where a tag had wrapped. The state is discarded
+// only when a closed runtime releases it, so a hint never outlives the
+// table it indexes.
+func (s *jitState) hint(cl *closure) *jitEntry {
+	h := cl.hint()
+	if h == 0 || s == nil || int(h) >= len(s.hints) {
 		return nil
 	}
-	slot := &s.hints[h&(1<<jitHintBits-1)]
-	if slot.tag != h>>jitHintBits {
+	slot := &s.hints[h]
+	if slot.fn != uintptr(unsafe.Pointer(cl.fn)) {
 		return nil
 	}
 	return slot.e
 }
 
 // entryOf is the program cached for cl's function, as cl's hint names it.
-func (r *Runtime) entryOf(cl *closure) *jitEntry { return r.jit.hint(cl.hint()) }
+func (r *Runtime) entryOf(cl *closure) *jitEntry { return r.jit.hint(cl) }
 
 // hintFor is the hint naming e, or 0 for none.
 func hintFor(e *jitEntry) uint32 {
@@ -156,8 +169,15 @@ func hintFor(e *jitEntry) uint32 {
 }
 
 type jitEntry struct {
-	// hint is the slot and tag a closure remembers this entry by.
+	// hint is the slot a closure remembers this entry by (jitState.hints),
+	// which only an entry the cache holds has.
 	hint uint32
+	// bytes is what the entry holds, as last measured (measure), which the
+	// cache counts against the JIT's budget while it holds the entry; busy
+	// marks an entry being compiled, whose code the cache does not drop
+	// meanwhile to make room (makeRoom).
+	bytes int
+	busy  uint8
 	// ssa is the new pipeline's code, when it compiled the function, and
 	// ssaShapes the shapes its guards compare objects with, which it holds
 	// by address and this keeps alive.
@@ -313,8 +333,9 @@ type jitEntry struct {
 	// code that reads its receiver.
 	entrySlow bool
 	this      bool
-	// deferred marks a refusal for want of code budget, made at the cache
-	// generation in generation: it is retried once that has moved on.
+	// deferred marks a refusal for want of room in the JIT's budget, made at
+	// the cache generation in generation: it is retried once that has moved
+	// on.
 	// calleeRefused marks a function that does not compile for native
 	// callers alone (jitNativeCallee).
 	deferred      bool
@@ -336,20 +357,6 @@ type jitEntry struct {
 // afresh: it changes all the same.
 func (e *jitEntry) uses() uint64 {
 	return e.starts + e.ssaStats.entries + e.link.in + e.slowCalls
-}
-
-// staler reports whether the cache drops e before o to make room: one that
-// holds no code -- a refusal remembered, as for each script a host runs
-// once -- before code, which costs a compile to make again; then the one
-// used least recently, as V8 flushes code by its age; then the older.
-func (e *jitEntry) staler(o *jitEntry) bool {
-	if e.holdsCode() != o.holdsCode() {
-		return !e.holdsCode()
-	}
-	if e.used != o.used {
-		return e.used < o.used
-	}
-	return e.serial < o.serial
 }
 
 // jitLink is where native callers call a function's code, as V8's code
@@ -407,11 +414,27 @@ type jitState struct {
 	// generation advances whenever the cache releases code, which is when a
 	// program refused for want of budget may fit.
 	generation uint64
-	// hints holds each cached entry in a slot, 1 to jitCacheEntries, that a
-	// closure remembers with the slot's tag as of then (jitClosureFields): a
-	// slot reused for another entry has a new tag, so a stale hint misses.
-	hints       [jitCacheEntries + 1]jitHintSlot
-	nextTag     uint32
+	// hints holds each cached entry in a slot, from 1, that a closure
+	// remembers (jitClosureFields, hint); hintFree are the slots free. The
+	// table grows to as many entries as the cache has held at once, which
+	// the budget bounds: each entry holds at least jitEntryFixed bytes of it.
+	hints    []jitHintSlot
+	hintFree []uint32
+	// budget is what the JIT may hold (jitBudget), as of the last compile;
+	// entryBytes and lowerBytes what its entries and its lowerings hold
+	// (jitEntry.measure, jitLowering.bytes), which, with what the runtime's
+	// JIT holds besides (sharedBytes), it holds (held).
+	budget                 int
+	entryBytes, lowerBytes int
+	// perInstr is about how many bytes of the budget an entry holds for
+	// each instruction of its function's bytecode, from the last compiles:
+	// how much room a compile is likely to need (makeRoom).
+	perInstr int
+	// compiling marks a compile under way, in the workspaces, which the
+	// cache does not release meanwhile.
+	compiling bool
+	// victims is makeRoom's list of what it may reclaim, kept for the next.
+	victims     []jitVictim
 	hosts       uint64
 	entries     uint64
 	guards      uint64
@@ -445,9 +468,8 @@ type jitState struct {
 	// runs inside: reused, not allocated each time.
 	unwinding       []jitNativeLevel
 	unwindingFrames []*frame
-	// inlinable is whether each function may be inlined (jitInlinable);
-	// lowered its programs (jitLower).
-	inlinable   map[weak.Pointer[bytecode.Function]]bool
+	// lowered are the functions' programs (jitLower), and whether each may
+	// be inlined (jitInlinable).
 	lowered     map[weak.Pointer[bytecode.Function]]*jitLowering
 	interpreted uint64
 	// goOn is the frame the interpreter runs for jitGoOn, until a loop's
@@ -497,11 +519,18 @@ type jitState struct {
 	// markingExits counts the exits the collector's marking made
 	// (abi.Context.ExitMarking), a native callee's included.
 	markingExits uint64
-	// scans counts the cache's looks for an entry to drop (makeRoom),
-	// serial the entries made, evicted those dropped to make room, and
-	// refusedRoom the looks that found every entry young; young is 1 plus
-	// the epoch in which one did, or 0.
-	scans, serial, evicted, refusedRoom, young uint64
+	// scans counts the cache's looks for what to reclaim (makeRoom), serial
+	// the entries made, evicted those dropped to make room, and
+	// refusedRoom the times there was none to be made. floor is what the
+	// JIT held at the last look that it could not reclaim -- young code,
+	// code that runs, what the runtime's JIT needs -- and floorAt 1 plus the
+	// epoch of that look, or 0 once something it held has gone since: until
+	// then, the floor only rises, and a need past the budget above it is
+	// refused without another look. agedAt is 1 plus the epoch the cache
+	// last found its entries' uses in (age).
+	scans, serial, evicted, refusedRoom uint64
+	floor                               int
+	floorAt, agedAt                     uint64
 }
 
 // Only selected own reference fields are prepared. The receiver bound keeps
@@ -533,12 +562,13 @@ func (r *Runtime) jitTreeRecovery(f *frame) bool {
 	if f.cl.jitRefused {
 		return false
 	}
-	e := r.jit.hint(f.cl.hint())
+	e := r.jit.hint(f.cl)
 	return e == nil || e.deferred || e.ssa != nil
 }
 
-// jitCodeBytes is what the JIT holds: executable pages, their metadata, and
-// its arenas. None of it is the script's memory (see jitBudget).
+// jitCodeBytes is the machine code the JIT's entries hold. What the JIT
+// holds in all, which its budget bounds, is jitHeldBytes. None of it is the
+// script's memory (see jitBudget).
 func (r *Runtime) jitCodeBytes() int64 {
 	var n int64
 	if r.jit != nil {
@@ -547,6 +577,141 @@ func (r *Runtime) jitCodeBytes() int64 {
 		}
 	}
 	return n
+}
+
+// jitHeldBytes is what the JIT holds for the runtime (jitState.held).
+func (r *Runtime) jitHeldBytes() int64 {
+	if r.jit == nil {
+		return 0
+	}
+	return int64(r.jit.held())
+}
+
+// jitMapSlot is what the JIT counts for an entry of a map it keeps by a
+// function's weak key, besides the entry's value: the key, the value's
+// word, a share of the map's table, and the weak pointer's record on the
+// function.
+const jitMapSlot = 64
+
+// What the JIT counts for each thing it keeps, apart from the slices it
+// holds: an entry with its hint slot (jitEntryFixed), a link, a lowering,
+// an object pool, a context.
+var (
+	jitEntryFixed    = int(unsafe.Sizeof(jitEntry{})) + int(unsafe.Sizeof(jitHintSlot{})) + jitMapSlot
+	jitLinkFixed     = int(unsafe.Sizeof(jitLink{})) + jitMapSlot
+	jitLoweringFixed = int(unsafe.Sizeof(jitLowering{})) + jitMapSlot
+	jitPoolFixed     = int(unsafe.Sizeof(abi.ObjectPool{})) + int(unsafe.Sizeof(jitPoolSource{}))
+	jitContextBytes  = int(unsafe.Sizeof(abi.Context{}))
+)
+
+// jitCapBytes is the memory s's backing array holds.
+func jitCapBytes[T any](s []T) int {
+	var t T
+	return cap(s) * int(unsafe.Sizeof(t))
+}
+
+// measure is what e holds now: itself and its hint slot; its code, with
+// what describes the code's entries and exits (jit.SSACode's Footprint);
+// what the code was compiled with (compiledBytes); and what the entry has
+// learned since, its object pools' objects among it (learnedBytes). Not
+// its function's lowering, which the runtime's lowerings hold (jitLower),
+// nor its link (sharedBytes).
+func (e *jitEntry) measure() int {
+	return jitEntryFixed + e.ssa.Footprint() + e.compiledBytes() + e.learnedBytes()
+}
+
+// compiledBytes is what e holds that its code was compiled with: the
+// slices a compile gives it (setSSA), which jitCompiledBytes measures.
+func (e *jitEntry) compiledBytes() int {
+	return jitCompiledBytes(e.ssaShapes, e.ssaHolders, e.fed, e.fedInlined, e.ssaInlinedAt, e.definesUnfed, e.ssaCells, e.ssaInlined, e.ssaPools, e.ssaLinks)
+}
+
+// compiledBytes is what fb's code would have its entry hold, in place of
+// what the entry's code was compiled with (jitEntry.compiledBytes).
+func (fb *jitFeedback) compiledBytes() int {
+	return jitCompiledBytes(fb.shapes, fb.holders, fb.fed, fb.fedInlined, fb.inlinedAt, fb.definesUnfed, fb.cells, fb.inlined, fb.pools, fb.links)
+}
+
+func jitCompiledBytes(shapes []*shape, holders []*Object, fed []jitFedSite, fedInlined []jitFedInlined, inlinedAt, definesUnfed []int32,
+	cells []*Value, inlined []*closure, pools []*abi.ObjectPool, links []*jitLink) int {
+	return jitCapBytes(shapes) + jitCapBytes(holders) + jitCapBytes(fed) + jitCapBytes(fedInlined) + jitCapBytes(inlinedAt) +
+		jitCapBytes(definesUnfed) + jitCapBytes(cells) + len(cells)*int(valueSize) + jitCapBytes(inlined) + jitCapBytes(pools) + jitCapBytes(links)
+}
+
+// learnedBytes is what e holds of what it has learned, which outlives its
+// compiles: the sites that failed, its calls, literals and reads met with
+// more shapes, and the object pools of its literals and constructions,
+// with the objects made for them.
+func (e *jitEntry) learnedBytes() int {
+	n := jitCapBytes(e.failed) + jitCapBytes(e.failedEntries) + jitCapBytes(e.literals) + jitCapBytes(e.poly) +
+		jitCapBytes(e.strSites) + jitCapBytes(e.nativeCalls) + jitCapBytes(e.inlines) + jitCapBytes(e.notInline) +
+		jitCapBytes(e.nativeCallers) + jitCapBytes(e.callSites)
+	for i := range e.poly {
+		p := &e.poly[i]
+		n += jitCapBytes(p.cases) + jitCapBytes(p.reads) + jitCapBytes(p.adds)
+	}
+	for i := range e.literals {
+		n += jitPoolBytes(e.literals[i].pool)
+	}
+	for _, calls := range [2][]jitInline{e.inlines, e.nativeCalls} {
+		for i := range calls {
+			n += jitPoolBytes(calls[i].pool)
+		}
+	}
+	return n
+}
+
+// jitPoolBytes is what pool holds: itself, and as many objects as it is
+// filled with (Size), each as big as the last it holds.
+func jitPoolBytes(pool *abi.ObjectPool) int {
+	if pool == nil {
+		return 0
+	}
+	n := jitPoolFixed
+	if c := pool.Count; c > 0 && c <= abi.PoolCapacity {
+		o := (*Object)(pool.Objects[c-1])
+		n += int(pool.Size) * (int(objectSize) + jitCapBytes(o.props) + jitCapBytes(o.elems))
+	}
+	return n
+}
+
+// held is what the JIT holds for the runtime: its entries (measure), the
+// programs it has lowered (jitLower), and what it holds besides
+// (sharedBytes).
+func (s *jitState) held() int {
+	return s.entryBytes + s.lowerBytes + s.sharedBytes()
+}
+
+// sharedBytes is what the JIT holds for the runtime apart from its entries
+// and lowerings: its state; the contexts native code runs in; its hint
+// table and links; the workspaces its compiles keep (workBytes); and code
+// compiled again or dropped that a call of Go is still suspended in
+// (retired).
+func (s *jitState) sharedBytes() int {
+	n := int(unsafe.Sizeof(*s)) + len(s.ssaCtxs)*jitContextBytes + jitCapBytes(s.ssaCtxs) + jitCapBytes(s.hints) +
+		jitCapBytes(s.hintFree) + len(s.links)*jitLinkFixed + jitCapBytes(s.victims) + jitCapBytes(s.goRuns) +
+		jitCapBytes(s.goPinned) + jitCapBytes(s.retired) + jitCapBytes(s.unwinding) + jitCapBytes(s.unwindingFrames) +
+		jitCapBytes(s.seedingFns) + s.workBytes()
+	for _, x := range s.retired {
+		n += x.code.Footprint()
+	}
+	return n
+}
+
+// workBytes is what the compiles' workspaces keep between compiles.
+func (s *jitState) workBytes() int { return s.ssaWork.Bytes() + s.mirWork.Bytes() }
+
+// account counts what e holds now, if the cache holds it.
+func (s *jitState) account(e *jitEntry) {
+	if e.hint == 0 {
+		return
+	}
+	n := e.measure()
+	if n < e.bytes {
+		s.floorAt = 0
+	}
+	s.entryBytes += n - e.bytes
+	e.bytes = n
 }
 
 // dropEntry closes e's code and removes it from the cache, reporting false if
@@ -573,55 +738,214 @@ func (s *jitState) inUse(e *jitEntry) bool {
 	return e.ssaRuns != 0
 }
 
-// makeRoom drops entries the cache holds, the least recently used first
-// (staler), until it has room for one more, and reports whether it has.
-// Each entry is found used in this epoch if its uses changed since the
-// last look, so that a hot function's code, called natively or entered,
-// stays, as a stream of functions each run a while comes and goes -- not
-// a random entry, which had dropped hot native callees. As V8 flushes only
-// code old enough, code used in this epoch or the one before (young,
-// jitCodeAge) is not dropped for another's: the cache has no room for it
-// until some is old, and it runs in the existing tiers -- a program with
-// more hot functions than the cache holds had compiled each at every
-// pass, each dropping the next one it ran. Unless force: then the least
-// recently used goes, whatever its age. Never an entry whose code runs
-// (inUse).
-func (s *jitState) makeRoom(force bool) bool {
-	for len(s.cache) >= jitCacheEntries {
-		s.scans++
-		now := s.epoch()
-		if !force && s.young == now+1 {
-			// Every entry was young at a look in this epoch: still.
-			s.refusedRoom++
-			return false
+// jitVictim is what the cache may reclaim to make room (makeRoom): a
+// lowering, an entry, or the compiles' workspaces, by its class.
+type jitVictim struct {
+	key          weak.Pointer[bytecode.Function]
+	e            *jitEntry
+	l            *jitLowering
+	class        uint8
+	used, serial uint64
+	bytes        int
+}
+
+// The classes of what the cache reclaims, in the order it does: a
+// function's programs, lowered again at a compile's cost of a few percent;
+// a refusal remembered, which spares a compile only; code, which costs a
+// compile to make again; then the workspaces, which every compile uses.
+const (
+	jitVictimLowering = iota
+	jitVictimRefusal
+	jitVictimCode
+	jitVictimWork
+)
+
+// makeRoom reclaims what the JIT holds, until it holds need bytes less
+// than its budget, and reports whether it does: as V8 bounds its code, and
+// all that describes it, by memory, reclaiming code by its age, not by how
+// many functions have it. It reclaims, in their order (jitVictim's
+// classes), the least recently used first: programs lowered for functions
+// the cache has no entry for; refusals remembered; code not used in this
+// epoch or the one before (jitCodeAge), as V8 flushes only code old
+// enough; and the compiles' workspaces, unless a compile is under way. A
+// function's code is never dropped for another's while it is young: a
+// program with more hot functions than the budget holds had compiled each
+// at every pass, each dropping the next one run. Nor an entry whose code
+// runs (inUse), or that is being compiled (busy). If even all it may
+// reclaim would not make the room, it reclaims nothing, and the newcomer
+// runs in the existing tiers until some code is old.
+func (s *jitState) makeRoom(need int) bool {
+	held := s.roomHeld()
+	if held+need <= s.budget {
+		return true
+	}
+	now := s.epoch()
+	if s.floorAt == now+1 && s.floor+need > s.budget {
+		// No more could be reclaimed at a look in this epoch, and nothing
+		// held then has gone since.
+		s.refusedRoom++
+		return false
+	}
+	s.age(now)
+	if held = s.roomHeld(); held+need <= s.budget {
+		return true
+	}
+	s.scans++
+	v, reclaimable := s.victims[:0], 0
+	for key, l := range s.lowered {
+		if k := s.links[key]; k == nil || k.owner == nil {
+			v = append(v, jitVictim{key: key, l: l, class: jitVictimLowering, used: l.used, bytes: l.bytes})
 		}
-		var victim weak.Pointer[bytecode.Function]
-		var ve *jitEntry
-		for key, e := range s.cache {
-			if s.inUse(e) {
+	}
+	for key, e := range s.cache {
+		if s.inUse(e) || e.busy != 0 {
+			continue
+		}
+		class := uint8(jitVictimRefusal)
+		if e.holdsCode() {
+			if e.used+jitCodeAge > now {
 				continue
 			}
-			if u := e.uses(); u != e.seen {
-				e.seen, e.used = u, now
-			}
-			if ve == nil || e.staler(ve) {
-				victim, ve = key, e
-			}
+			class = jitVictimCode
 		}
-		if ve == nil {
-			return false
-		}
-		if !force && ve.holdsCode() && ve.used+jitCodeAge > now {
-			s.young = now + 1
-			s.refusedRoom++
-			return false
-		}
-		if !s.dropEntry(victim, ve) {
-			return false
-		}
-		s.evicted++
+		v = append(v, jitVictim{key: key, e: e, class: class, used: e.used, serial: e.serial, bytes: e.bytes})
 	}
-	return true
+	if !s.compiling {
+		v = append(v, jitVictim{class: jitVictimWork, bytes: s.workBytes()})
+	}
+	for i := range v {
+		reclaimable += v[i].bytes
+	}
+	// The list is the JIT's too, kept for the next look.
+	s.victims = v
+	defer clear(v)
+	held = s.roomHeld()
+	if floor := held - reclaimable; floor+need > s.budget {
+		s.floor, s.floorAt = floor, now+1
+		s.refusedRoom++
+		return false
+	}
+	slices.SortFunc(v, func(a, b jitVictim) int {
+		if a.class != b.class {
+			return int(a.class) - int(b.class)
+		}
+		if a.used != b.used {
+			return cmp.Compare(a.used, b.used)
+		}
+		return cmp.Compare(a.serial, b.serial)
+	})
+	for i := range v {
+		if held+need <= s.budget {
+			break
+		}
+		switch x := &v[i]; x.class {
+		case jitVictimLowering:
+			s.dropLowering(x.key, x.l)
+		case jitVictimWork:
+			s.ssaWork, s.mirWork = ssa.Workspace{}, mir.Workspace{}
+		default:
+			if !s.dropEntry(x.key, x.e) {
+				return false
+			}
+			s.evicted++
+		}
+		held -= v[i].bytes
+	}
+	return s.roomHeld()+need <= s.budget
+}
+
+// roomHeld is what the JIT holds, as makeRoom counts it: the workspaces of
+// a compile under way are its own until it ends, when the JIT has the
+// room for them it needs (settle).
+func (s *jitState) roomHeld() int {
+	n := s.held()
+	if s.compiling {
+		n -= s.workBytes()
+	}
+	return n
+}
+
+// settle has the JIT hold no more than its budget once a compile has
+// ended, its workspaces kept for the next, if there is the room.
+func (s *jitState) settle() {
+	if s.held() > s.budget {
+		s.makeRoom(0)
+	}
+}
+
+// roomFor makes room for e's code, of which e is to hold need bytes in all
+// in place of what it holds now (jitEntry.bytes), and reports whether there
+// is the room. The code is compiled: what it calls through -- links, which
+// go with the last code calling through them and the entry that owns them
+// -- and e itself are kept meanwhile.
+func (s *jitState) roomFor(e *jitEntry, links []*jitLink, need int) bool {
+	for _, l := range links {
+		l.refs++
+	}
+	if e != nil {
+		need -= e.bytes
+		e.busy++
+	}
+	ok := s.makeRoom(need)
+	if e != nil {
+		e.busy--
+	}
+	for _, l := range links {
+		// A link whose owner went keeps its key for the compile's code,
+		// which calls through it from now on (setLinks), or until the
+		// cache finds it with neither (age).
+		l.refs--
+	}
+	return ok
+}
+
+// learn has perInstr follow what an entry of a function of instructions
+// instructions came to hold, bytes.
+func (s *jitState) learn(instructions, bytes int) {
+	x := bytes / max(instructions, 1)
+	if s.perInstr == 0 {
+		s.perInstr = x
+	} else {
+		s.perInstr += (x - s.perInstr) / 8
+	}
+}
+
+// age has the cache find, once an epoch, which of its entries were used
+// since it last looked, by their uses, and measure each again, as what an
+// entry learns grows its slices and pools; and drop the entries, lowerings
+// and links of the functions collected since, whose weak keys are empty,
+// and the links neither an entry nor code has (unlink).
+func (s *jitState) age(now uint64) {
+	if s.agedAt == now+1 {
+		return
+	}
+	s.agedAt = now + 1
+	for key, e := range s.cache {
+		if key.Value() == nil {
+			s.dropEntry(key, e)
+			continue
+		}
+		if u := e.uses(); u != e.seen {
+			e.seen, e.used = u, now
+		}
+		s.account(e)
+	}
+	for key, l := range s.lowered {
+		if key.Value() == nil {
+			s.dropLowering(key, l)
+		}
+	}
+	for key, l := range s.links {
+		if l.owner == nil && (l.refs == 0 || key.Value() == nil) {
+			delete(s.links, key)
+		}
+	}
+}
+
+// dropLowering forgets fn's lowering, l.
+func (s *jitState) dropLowering(key weak.Pointer[bytecode.Function], l *jitLowering) {
+	delete(s.lowered, key)
+	s.lowerBytes -= l.bytes
 }
 
 // jitCodeAge is how many epochs code goes unused before the cache may
@@ -664,8 +988,8 @@ func jitArmEpoch() {
 	})
 }
 
-// holdsCode reports whether e has native code, which a cache full of
-// entries drops last.
+// holdsCode reports whether e has native code, which the cache keeps
+// while it is young.
 func (e *jitEntry) holdsCode() bool {
 	return e.ssa.Size() != 0
 }
@@ -675,10 +999,19 @@ func (e *jitEntry) holdsCode() bool {
 func (s *jitState) forget(key weak.Pointer[bytecode.Function], e *jitEntry) {
 	delete(s.cache, key)
 	if e.hint != 0 {
-		s.hints[e.hint&(1<<jitHintBits-1)] = jitHintSlot{}
+		s.hints[e.hint] = jitHintSlot{}
+		s.hintFree = append(s.hintFree, e.hint)
 		e.hint = 0
 	}
-	if l := e.link; l.owner == e {
+	s.entryBytes -= e.bytes
+	e.bytes = 0
+	s.floorAt = 0
+	s.disown(e)
+}
+
+// disown has e's link no longer e's: an entry the cache does not hold.
+func (s *jitState) disown(e *jitEntry) {
+	if l := e.link; l != nil && l.owner == e {
 		l.owner, l.entry = nil, 0
 		s.unlink(l)
 	}
@@ -722,21 +1055,24 @@ func (s *jitState) unlink(l *jitLink) {
 	}
 }
 
-// remember caches e for key, in a free hint slot. The cache never holds more
-// than jitCacheEntries entries, so there always is one.
+// remember caches e for key, in a free hint slot, or a new one, and counts
+// what it holds.
 func (s *jitState) remember(key weak.Pointer[bytecode.Function], e *jitEntry) {
 	s.cache[key] = e
-	for i := 1; i < len(s.hints); i++ {
-		if s.hints[i].e == nil {
-			s.nextTag = (s.nextTag + 1) & (1<<(32-jitHintBits) - 1)
-			if s.nextTag == 0 {
-				s.nextTag = 1
-			}
-			s.hints[i] = jitHintSlot{e: e, tag: s.nextTag}
-			e.hint = uint32(i) | s.nextTag<<jitHintBits
-			return
+	var i uint32
+	if n := len(s.hintFree); n != 0 {
+		i, s.hintFree = s.hintFree[n-1], s.hintFree[:n-1]
+	} else {
+		if len(s.hints) == 0 {
+			// Slot 0 is no hint.
+			s.hints = append(s.hints, jitHintSlot{})
 		}
+		i = uint32(len(s.hints))
+		s.hints = append(s.hints, jitHintSlot{})
 	}
+	s.hints[i] = jitHintSlot{e: e, fn: uintptr(unsafe.Pointer(key.Value()))}
+	e.hint = i
+	s.account(e)
 }
 
 func (r *Runtime) releaseJIT() {
@@ -753,10 +1089,13 @@ func (r *Runtime) releaseJIT() {
 	}
 }
 
-// jitBudget bounds what the JIT holds. The memory meter never counts it: a
-// script's memory, and so whether it fails with ErrMemoryLimit, is the same
-// with the JIT on and off. A runtime with a memory limit gives the JIT at
-// most an eighth of it, which keeps the process bounded.
+// jitBudget bounds what the JIT holds (jitState.held): its code and all
+// that describes it, what it has learned, the programs it lowered, the
+// contexts its code runs in, its compiles' workspaces. The memory meter
+// never counts it: a script's memory, and so whether it fails with
+// ErrMemoryLimit, is the same with the JIT on and off. A runtime with a
+// memory limit gives the JIT at most an eighth of it, which keeps the
+// process bounded.
 func (r *Runtime) jitBudget() int {
 	if r.meter != nil {
 		return int(min(int64(jitCacheBytes), r.meter.limit/8))
@@ -764,17 +1103,12 @@ func (r *Runtime) jitBudget() int {
 	return jitCacheBytes
 }
 
-// jitAllowance is what a new program for fn may take, or at most 0 to
-// refuse. It costs a few comparisons and never measures the heap, so a
-// refusal can be cheaply repeated.
-func (r *Runtime) jitAllowance(fn *bytecode.Function) int {
-	budget := r.jitBudget()
-	// The compiler's transient work: analysis tables over every slot for
-	// each instruction, and the code it emits.
-	if transient := len(fn.Code)*ir.MaxSlots*8 + 32<<10; transient > budget {
-		return 0
-	}
-	return budget - int(r.jitCodeBytes())
+// jitCompiles reports whether a compile of fn could fit the budget at all:
+// the compiler's transient work -- analysis tables over every slot for each
+// instruction, and the code it emits -- must. It costs a few comparisons
+// and never measures the heap, so a refusal can be cheaply repeated.
+func jitCompiles(fn *bytecode.Function, budget int) bool {
+	return len(fn.Code)*ir.MaxSlots*8+32<<10 <= budget
 }
 
 // jitFor is the entry for a closure's function, compiling it if need be with
@@ -786,7 +1120,7 @@ func (r *Runtime) jitFor(cl *closure) *jitEntry {
 
 // jitForFunction is jitFor for fn, with cl's caches, if cl is not nil. A
 // program the new pipeline does not compile is a refusal the cache keeps,
-// for good; one past the code budget, until the cache releases code.
+// for good; one past the budget, until the cache releases code.
 func (r *Runtime) jitForFunction(fn *bytecode.Function, cl *closure) *jitEntry {
 	if r.jit != nil && r.jit.unavailable {
 		return nil
@@ -794,25 +1128,17 @@ func (r *Runtime) jitForFunction(fn *bytecode.Function, cl *closure) *jitEntry {
 	if len(fn.Code) > jitcompile.MaxInstructions {
 		return nil
 	}
+	key := weak.Make(fn)
 	if r.jit != nil {
-		key := weak.Make(fn)
 		if e := r.jit.cache[key]; e != nil {
 			if !e.deferred || e.generation == r.jit.generation {
 				return e
 			}
 			r.jit.forget(key, e)
 		}
-		for key, e := range r.jit.cache {
-			if key.Value() == nil {
-				r.jit.dropEntry(key, e)
-			}
-		}
-		if !r.jit.makeRoom(false) {
-			return nil
-		}
 	}
-	limit := r.jitAllowance(fn)
-	if limit <= 0 {
+	budget := r.jitBudget()
+	if !jitCompiles(fn, budget) {
 		return nil
 	}
 	if r.jit == nil {
@@ -820,6 +1146,13 @@ func (r *Runtime) jitForFunction(fn *bytecode.Function, cl *closure) *jitEntry {
 		jitEpochOnce.Do(jitArmEpoch)
 	}
 	s := r.jit
+	s.budget = budget
+	// Room for as much as its entry is likely to hold (perInstr), made from
+	// what is old -- or none, and it runs in the existing tiers for now.
+	s.age(s.epoch())
+	if !s.makeRoom(len(fn.Code) * s.perInstr) {
+		return nil
+	}
 	s.serial++
 	e := &jitEntry{used: s.epoch(), serial: s.serial}
 	s.linkFor(fn, e)
@@ -828,20 +1161,18 @@ func (r *Runtime) jitForFunction(fn *bytecode.Function, cl *closure) *jitEntry {
 			// The calls its caches have met.
 			r.jitSeedCalls(cl, e, p)
 		}
-		code, fb, err := r.compileSSA(fn, cl, p, limit, e)
+		code, fb, err := r.compileSSA(fn, cl, p, e)
 		switch {
 		case code != nil:
 			e.setSSA(s, fn, p, code, fb)
 			s.compiled++
-			// The compiles of the callees it seeded may have filled the
-			// cache meanwhile: the code compiled, the least recently used
-			// goes.
-			s.makeRoom(true)
-			s.remember(weak.Make(fn), e)
+			s.remember(key, e)
+			s.settle()
 			r.jitWantedCallees(e, fb)
 			return e
 		case errors.Is(err, jit.ErrUnavailable):
 			s.unavailable = true
+			s.disown(e)
 			return nil
 		case errors.Is(err, jit.ErrCodeBudget):
 			// It may fit once the cache has released code. Until then the
@@ -849,8 +1180,12 @@ func (r *Runtime) jitForFunction(fn *bytecode.Function, cl *closure) *jitEntry {
 			e.deferred, e.generation = true, s.generation
 		}
 	}
-	s.makeRoom(true)
-	s.remember(weak.Make(fn), e)
+	if !s.makeRoom(jitEntryFixed) {
+		// No room to remember the refusal in, for now.
+		s.disown(e)
+		return nil
+	}
+	s.remember(key, e)
 	return e
 }
 
@@ -864,7 +1199,7 @@ func (r *Runtime) tryJITFrame(f *frame) (Value, error, bool) {
 	if f.cl.jitRefused {
 		return Undefined, nil, false
 	}
-	if e := r.jit.hint(f.cl.hint()); e != nil && e.entrySlow && !e.reoptPending() {
+	if e := r.jit.hint(f.cl); e != nil && e.entrySlow && !e.reoptPending() {
 		e.slowCalls++
 		return Undefined, nil, false
 	}
@@ -936,7 +1271,7 @@ func (r *Runtime) tryJITLoop(f *frame, pc uint32, sp int, fullBudget bool) (Valu
 	if s := r.jit; s != nil && s.goOn == f {
 		// The frame whose native code Go goes on in, at an entry it has:
 		// in that run, not a run of its own (jitGoOn).
-		if e := s.hint(f.cl.hint()); e != nil && e.ssa != nil && !e.entrySlow && e.ssa.HasEntry(int(pc)) {
+		if e := s.hint(f.cl); e != nil && e.ssa != nil && !e.entrySlow && e.ssa.HasEntry(int(pc)) {
 			s.goOnPC, s.goOnDepth = int(pc), sp-f.base
 			return Undefined, errGoOnNatively, true
 		}
@@ -945,7 +1280,7 @@ func (r *Runtime) tryJITLoop(f *frame, pc uint32, sp int, fullBudget bool) (Valu
 }
 
 func (r *Runtime) tryJITAt(f *frame, pc, depth int, osr bool) (Value, error, bool) {
-	e := r.jit.hint(f.cl.hint())
+	e := r.jit.hint(f.cl)
 	if e == nil || e.ssa != nil && e.ssa.Size() == 0 {
 		e = r.jitFor(f.cl)
 		f.cl.setHint(hintFor(e))

@@ -143,19 +143,23 @@ replacement at the loop's header, from the interpreter or the tree tier.
 made natively, or inlined. A callee whose code Go never enters on its own is
 compiled for native callers only.
 
-**The cache.** Each runtime keeps its own cache: at most 128 functions'
-code, weakly keyed by the shared bytecode function. Shared bytecode carries
-no JIT state.
+**The cache.** Each runtime keeps its own cache, weakly keyed by the shared
+bytecode function. Shared bytecode carries no JIT state. It holds as many
+functions' code as the JIT's budget has room for (see [Memory](#memory)):
+no count of entries bounds it.
 
-**Closure hints.** A closure remembers its code by a hint, a slot and tag
-in the cache's hint table (not a pointer). The closure stays 128 bytes, and a
-stale hint misses.
+**Closure hints.** A closure remembers its code by a hint, a slot in the
+cache's hint table (not a pointer), which holds the entry and its
+function's address. The hint finds the entry only for a closure of that
+function, so a stale hint misses however often its slot was reused. The
+closure stays 128 bytes; the table grows to the most entries the cache has
+held at once, its free slots reused.
 
 **Refusals.**
 - Permanent: lowering or the backend refused it. These are cached, and the
   closure is marked refused.
-- Deferred: the code budget was full. These are cached until the cache
-  releases code.
+- Deferred: the budget had no room for the code. These are cached until
+  the cache releases code.
 - Temporary (no budget at all): retried after another warm-up. When the OS
   denies executable memory, the runtime marks the JIT unavailable for good.
 
@@ -188,8 +192,36 @@ path yet.
 
 **Not the script's memory.** The memory meter never counts the JIT, so a
 script's measure, and whether it fails with `ErrMemoryLimit`, is the same with
-the JIT on and off. The JIT has a budget of its own (`jitBudget`): 8 MB of
-code, or an eighth of the memory limit.
+the JIT on and off. The JIT has a budget of its own (`jitBudget`): 8 MB,
+or an eighth of the memory limit.
+
+**The budget bounds all the JIT holds** (`jitState.held`), as V8 bounds its
+code and what describes it by memory, not by a count of functions:
+
+- each entry: its machine code as placed, its entries' offsets and its
+  exits' descriptions (`SSACode.Footprint`), what it was compiled with and
+  what it has learned, and its object pools with the objects made for them;
+- the programs it lowered, one lowering a function (`ir.Program.Footprint`);
+- the contexts native code runs in (4 at first, as many more each time they
+  run out, up to 96: some 17 KB each), the hint table, the links, the
+  compiles' workspaces between compiles, and code a suspended call of Go
+  still holds.
+
+Entries are measured at each compile and once an epoch; the rest as it
+changes. Not counted: the arena's free space between live functions, which
+it does not reuse until a chunk empties.
+
+**Making room** (`makeRoom`). A compile asks for room for what its entry is
+likely to hold (bytes per bytecode instruction, from the last compiles),
+then, compiled, for exactly what its entry will hold before its code is
+placed. The cache reclaims, in this order, each least recently used first:
+lowerings of functions it has no entry for; refusals remembered; code not
+used in the last two epochs (old, as V8 flushes code by age); the
+workspaces. Code used within two epochs, code that runs, and an entry being
+compiled are never reclaimed. If all it may reclaim would not make the room,
+it reclaims nothing and the compile is refused: the function runs in the
+existing tiers until some code is old. An epoch is a collector cycle, or
+50 ms.
 
 **Release.**
 - `ReleaseClosed` releases code once native frames have unwound; code a

@@ -48,6 +48,22 @@ const (
 // NewArena returns an empty arena; it maps nothing until code is placed.
 func NewArena() *Arena { return &Arena{} }
 
+// Mapped reports how many bytes of code the arena has mapped, and how many
+// of them functions own: the rest is space their release left in chunks
+// that others still hold.
+func (a *Arena) Mapped() (mapped, live int) {
+	if a == nil {
+		return 0, 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, c := range a.chunks {
+		mapped += len(c.mem)
+		live += c.live
+	}
+	return mapped, live
+}
+
 // Chunks reports how many mappings the arena holds.
 func (a *Arena) Chunks() int {
 	if a == nil {

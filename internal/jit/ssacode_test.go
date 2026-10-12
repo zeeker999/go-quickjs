@@ -1149,6 +1149,68 @@ func TestWorkspaceCompileAllocations(t *testing.T) {
 	}
 }
 
+// What code will hold once placed (CodeFootprint) is what it holds then
+// (SSACode's Footprint): its instructions, as placed, and what describes
+// its entries and every exit, each exit's slots and inlined frames. A
+// workspace counts what it keeps for the next compile (Bytes), and the
+// arena what it has mapped.
+func TestCodeFootprint(t *testing.T) {
+	r := rand.New(rand.NewPCG(51, 52))
+	var ws ssa.Workspace
+	var mws mir.Workspace
+	arena := NewArena()
+	placed := 0
+	for attempt := 0; attempt < 2000 && placed < 50; attempt++ {
+		p, l := ssaTestProgram(r)
+		if p.Validate() != nil {
+			continue
+		}
+		f, err := ssa.BuildIn(&ws, p, l)
+		if err != nil {
+			ws.Rewind()
+			continue
+		}
+		f.FrameLocals, f.ThisSlot = l.frame, l.this
+		ssa.Optimize(f)
+		mc, err := mir.CompileIn(&mws, f, testEncoding)
+		if err != nil {
+			ws.Rewind()
+			mws.Rewind()
+			continue
+		}
+		if ws.Bytes() == 0 || mws.Bytes() == 0 {
+			t.Fatal("a workspace in use counts nothing")
+		}
+		want := len(mc.Bytes)
+		for _, x := range mc.Exits {
+			want += int(unsafe.Sizeof(*x)) + len(x.Slots)*int(unsafe.Sizeof(abi.ExitSlot{})) + len(x.Inline)*int(unsafe.Sizeof(abi.ExitInline{}))
+		}
+		before := CodeFootprint(mc)
+		code, err := NewSSACode(arena, mc)
+		ws.Rewind()
+		mws.Rewind()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := code.Footprint(); got != before || got < want+len(mc.Entries)*4 {
+			t.Fatalf("footprint %d placed, %d before, want at least %d", got, before, want+len(mc.Entries)*4)
+		}
+		if mapped, live := arena.Mapped(); live < code.Size() || mapped < live {
+			t.Fatalf("arena: %d mapped, %d live, code %d", mapped, live, code.Size())
+		}
+		if err := code.Close(); err != nil || code.Footprint() != 0 {
+			t.Fatalf("closed code holds %d: %v", code.Footprint(), err)
+		}
+		placed++
+	}
+	if placed < 50 {
+		t.Fatalf("only %d programs placed", placed)
+	}
+	if mapped, live := arena.Mapped(); mapped != 0 || live != 0 {
+		t.Fatalf("empty arena maps %d, %d live", mapped, live)
+	}
+}
+
 // A workspace changes where a compile's memory comes from, never what it
 // makes: random programs built in one workspace, rewound between them as a
 // runtime rewinds it, compile to the same code as programs built on their

@@ -998,9 +998,13 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	if err != nil {
 		return
 	}
+	// Not dropped to make room for the compiles this makes, its callees',
+	// nor for its own code.
+	e.busy++
+	defer func() { e.busy-- }()
 	// The calls whose targets the existing tiers have met since.
 	r.jitSeedCalls(cl, e, p)
-	code, fb, _ := r.compileSSA(fn, cl, p, r.jitAllowance(fn)+e.ssa.Size(), e)
+	code, fb, _ := r.compileSSA(fn, cl, p, e)
 	if code == nil {
 		return
 	}
@@ -1032,6 +1036,10 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	e.link.entry = code.EntryAddress(0)
 	r.jit.closeSSA(old, oldKeep)
 	r.jit.reoptimized++
+	// Compiled for what it does now: young again.
+	e.used = r.jit.epoch()
+	r.jit.account(e)
+	r.jit.settle()
 }
 
 // compileSSA compiles a lowered function with the new pipeline, or returns
@@ -1043,7 +1051,7 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 // which it returns: the shapes the code compares objects with, and the
 // prototypes it compares receivers' with, to be kept alive, and the sites
 // whose caches were empty.
-func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, limit int, e *jitEntry) (*jit.SSACode, *jitFeedback, error) {
+func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, e *jitEntry) (*jit.SSACode, *jitFeedback, error) {
 	this := 0
 	if p.This {
 		this = 1
@@ -1054,23 +1062,28 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, 
 	if e != nil && cl != nil {
 		r.jitSeenFeedback(cl, e)
 	}
-	code, fb, err := r.compileSSAKeeping(fn, cl, p, limit, e, 0)
+	code, fb, err := r.compileSSAKeeping(fn, cl, p, e, 0)
 	if errors.Is(err, mir.ErrKeeps) {
 		// More keep cells live at once than the context has, which the
 		// build could not know: built again with no more than that, the
 		// calls past them left to Go.
-		code, fb, err = r.compileSSAKeeping(fn, cl, p, limit, e, abi.MaxKeeps)
+		code, fb, err = r.compileSSAKeeping(fn, cl, p, e, abi.MaxKeeps)
 	}
 	return code, fb, err
 }
 
 // compileSSAKeeping is compileSSA's build and compile, the build's keep
-// cells limited to keepLimit (ssa.KeepFeedback), or not, if 0.
-func (r *Runtime) compileSSAKeeping(fn *bytecode.Function, cl *closure, p *ir.Program, limit int, e *jitEntry, keepLimit int) (*jit.SSACode, *jitFeedback, error) {
+// cells limited to keepLimit (ssa.KeepFeedback), or not, if 0. The code is
+// placed only if the JIT has the room for all its entry is to hold then
+// (roomFor), its code and what describes it included: jit.ErrCodeBudget
+// otherwise.
+func (r *Runtime) compileSSAKeeping(fn *bytecode.Function, cl *closure, p *ir.Program, e *jitEntry, keepLimit int) (*jit.SSACode, *jitFeedback, error) {
 	fb := &jitFeedback{r: r, fn: fn, cl: cl, e: e, keepLimit: keepLimit, prog: p}
 	// The compile's memory comes from the runtime's workspaces, taken back
 	// once its code is placed.
 	s := r.jit
+	s.compiling = true
+	defer func() { s.compiling = false }()
 	defer s.ssaWork.Rewind()
 	defer s.mirWork.Rewind()
 	f, err := ssa.BuildIn(&s.ssaWork, p, fb)
@@ -1097,13 +1110,19 @@ func (r *Runtime) compileSSAKeeping(fn *bytecode.Function, cl *closure, p *ir.Pr
 	// The cells the backend gave the kept values (mir's keep cells).
 	fb.keeps = f.Keeps
 	s.ssaKeeps = max(s.ssaKeeps, f.Keeps)
-	if len(mc.Bytes) > limit {
+	need := jitEntryFixed + jit.CodeFootprint(mc) + fb.compiledBytes()
+	if e != nil {
+		need += e.learnedBytes()
+	}
+	if !s.roomFor(e, fb.links, need) {
 		return nil, nil, jit.ErrCodeBudget
 	}
 	code, err := jit.NewSSACode(r.jit.arena, mc)
 	if err != nil {
 		return nil, nil, err
 	}
+	// What the entry holds, and its function's program.
+	s.learn(len(fn.Code), need+p.Footprint())
 	return code, fb, nil
 }
 
@@ -2059,7 +2078,7 @@ func (r *Runtime) jitGoPin(idx int) {
 // RegExp's time went to finding them.
 func (r *Runtime) jitEntryOf(cl *closure) *jitEntry {
 	s := r.jit
-	if e := s.hint(cl.hint()); e != nil {
+	if e := s.hint(cl); e != nil {
 		return e
 	}
 	e := s.cache[weak.Make(cl.fn)]
@@ -3510,15 +3529,29 @@ func (r *Runtime) jitNativeCallee(cl *closure) *jitEntry {
 		e.calleeRefused = true
 		return nil
 	}
-	r.jitSeedCalls(cl, e, p)
-	code, fb, err := r.compileSSA(fn, cl, p, r.jitAllowance(fn), e)
-	if code == nil {
-		e.calleeRefused = !errors.Is(err, jit.ErrCodeBudget)
+	s := r.jit
+	s.budget = r.jitBudget()
+	if !s.makeRoom(len(fn.Code) * s.perInstr) {
 		return nil
 	}
-	e.setSSA(r.jit, fn, p, code, fb)
+	e.busy++
+	defer func() { e.busy-- }()
+	r.jitSeedCalls(cl, e, p)
+	code, fb, err := r.compileSSA(fn, cl, p, e)
+	if code == nil {
+		if errors.Is(err, jit.ErrCodeBudget) {
+			// It may fit once the cache has released code (jitForFunction).
+			e.deferred, e.generation = true, s.generation
+		} else {
+			e.calleeRefused = true
+		}
+		return nil
+	}
+	e.setSSA(s, fn, p, code, fb)
 	e.ssaCallee, e.entrySlow = true, true
-	r.jit.compiled++
+	s.compiled++
+	s.account(e)
+	s.settle()
 	r.jitWantedCallees(e, fb)
 	return e
 }
@@ -3556,6 +3589,7 @@ func (e *jitEntry) setSSA(s *jitState, fn *bytecode.Function, p *ir.Program, cod
 	for _, in := range p.Code {
 		e.ssaStrings = e.ssaStrings || in.Op == ir.StringMethod || in.Op == ir.StringCode
 	}
+	s.account(e)
 }
 
 // jitLowering is a function's programs for the new pipeline, each lowered
@@ -3564,12 +3598,22 @@ func (e *jitEntry) setSSA(s *jitState, fn *bytecode.Function, p *ir.Program, cod
 // function is compiled again as it learns, and inlined into each of its
 // callers -- lowering them again had been some 8% of a compile. A program
 // is never changed once lowered. construct is jitcompile.SSAConstruct when
-// they were.
+// they were. inlinable is jitInlinable's answer, once asked: 1 if the
+// function may be inlined, 2 if not.
+//
+// bytes is what the lowering holds, its programs' (ir.Program's
+// Footprint), which the JIT counts (jitState.lowerBytes); used the epoch
+// it was last asked for in, as of the cache's last look (age). The cache
+// drops the lowerings of functions it has no entry for to make room
+// (makeRoom), the least recently used first, before any code.
 type jitLowering struct {
 	construct bool
+	inlinable uint8
 	done      [jitLowerKinds]bool
 	progs     [jitLowerKinds]*ir.Program
 	errs      [jitLowerKinds]error
+	bytes     int
+	used      uint64
 }
 
 // jitLowerKind is how a program is lowered: for a function's own code
@@ -3584,9 +3628,25 @@ const (
 	jitLowerKinds
 )
 
-// jitLoweredMax is how many functions' programs a runtime keeps: past it,
-// those of functions collected since go, then all.
-const jitLoweredMax = 256
+// lowering is fn's lowering, made if the runtime has none, and found used
+// now.
+func (s *jitState) lowering(fn *bytecode.Function) *jitLowering {
+	key := weak.Make(fn)
+	l := s.lowered[key]
+	if l == nil || l.construct != jitcompile.SSAConstruct {
+		if s.lowered == nil {
+			s.lowered = map[weak.Pointer[bytecode.Function]]*jitLowering{}
+		}
+		if l != nil {
+			s.dropLowering(key, l)
+		}
+		l = &jitLowering{construct: jitcompile.SSAConstruct, bytes: jitLoweringFixed}
+		s.lowered[key] = l
+		s.lowerBytes += l.bytes
+	}
+	l.used = s.agedAt
+	return l
+}
 
 // jitLower is fn's program, lowered as kind says, from the runtime's
 // programs (jitLowering).
@@ -3596,25 +3656,7 @@ func (r *Runtime) jitLower(fn *bytecode.Function, kind jitLowerKind) (*ir.Progra
 		// Before the runtime has any state, which no compile is.
 		s = &jitState{}
 	}
-	key := weak.Make(fn)
-	l := s.lowered[key]
-	if l == nil || l.construct != jitcompile.SSAConstruct {
-		if s.lowered == nil {
-			s.lowered = map[weak.Pointer[bytecode.Function]]*jitLowering{}
-		}
-		if len(s.lowered) >= jitLoweredMax {
-			for k := range s.lowered {
-				if k.Value() == nil {
-					delete(s.lowered, k)
-				}
-			}
-			if len(s.lowered) >= jitLoweredMax {
-				clear(s.lowered)
-			}
-		}
-		l = &jitLowering{construct: jitcompile.SSAConstruct}
-		s.lowered[key] = l
-	}
+	l := s.lowering(fn)
 	if !l.done[kind] {
 		switch kind {
 		case jitLowerSSA:
@@ -3625,32 +3667,30 @@ func (r *Runtime) jitLower(fn *bytecode.Function, kind jitLowerKind) (*ir.Progra
 			l.progs[kind], l.errs[kind] = jitcompile.LowerSSAForward(fn)
 		}
 		l.done[kind] = true
+		n := l.progs[kind].Footprint()
+		l.bytes += n
+		s.lowerBytes += n
 	}
 	return l.progs[kind], l.errs[kind]
 }
 
 // jitInlinable reports whether fn may be inlined into a caller: it
 // captures nothing, and ssa.Inlinable takes its program. Each function is
-// asked once.
+// asked once, while the runtime keeps its lowering.
 func (r *Runtime) jitInlinable(fn *bytecode.Function) bool {
-	s := r.jit
-	key := weak.Make(fn)
-	if ok, seen := s.inlinable[key]; seen {
-		return ok
+	l := r.jit.lowering(fn)
+	if l.inlinable == 0 {
+		ok := false
+		if len(fn.Upvalues) == 0 && !fn.TopLevel && !fn.IsModule && !fn.UsesArguments && !fn.HasDirectEval {
+			p, err := r.jitLower(fn, jitLowerInline)
+			ok = err == nil && ssa.Inlinable(p)
+		}
+		l.inlinable = 2
+		if ok {
+			l.inlinable = 1
+		}
 	}
-	ok := false
-	if len(fn.Upvalues) == 0 && !fn.TopLevel && !fn.IsModule && !fn.UsesArguments && !fn.HasDirectEval {
-		p, err := r.jitLower(fn, jitLowerInline)
-		ok = err == nil && ssa.Inlinable(p)
-	}
-	if s.inlinable == nil {
-		s.inlinable = map[weak.Pointer[bytecode.Function]]bool{}
-	}
-	if len(s.inlinable) >= jitCacheEntries*4 {
-		clear(s.inlinable)
-	}
-	s.inlinable[key] = ok
-	return ok
+	return l.inlinable == 1
 }
 
 // Generic and EntryGeneric are ssa.Feedback's: the sites and entries whose
@@ -4838,29 +4878,39 @@ func (r *Runtime) jitShareContexts(idx int, f *frame) {
 	s.ssaSharedGen++
 }
 
-// jitContexts is how many contexts are made at a time: one for each
-// runSSA running, each native call another (abi.Context.Level); and
-// jitContextsMax how many there come to be. A native call past the last
-// exits, and Go finishes every level (jitUnwindNative): with no more than
-// 24, EarleyBoyer's unifier, a recursion deeper than that, finished most
-// of its calls in Go. A context is some 17 KB.
+// jitContexts is how many contexts are made first: one for each runSSA
+// running, each native call another (abi.Context.Level); as many more
+// each time they run out, as a stack grows; and jitContextsMax how many
+// there come to be. A native call past the last exits, and Go finishes
+// every level (jitUnwindNative): with no more than 24, EarleyBoyer's
+// unifier, a recursion deeper than that, finished most of its calls in
+// Go. A context is some 17 KB, of the JIT's budget (jitBudget): 24 made
+// at once had been 400 KB of every runtime that ran native code, however
+// deep its calls, and more than the JIT's eighth of a runtime limited to
+// 3 MB.
 const (
-	jitContexts    = 24
+	jitContexts    = 4
 	jitContextsMax = 96
 )
 
-// jitGrowContexts adds jitContexts contexts, linked to the last, if there
-// are fewer than jitContextsMax, and reports whether it did. The others
-// stay where they are, and native code may be running in them: each one
-// whose calls the contexts limited may go as deep as the new ones allow,
-// and each new one holds what they share (jitShareContexts).
+// jitGrowContexts adds contexts, linked to the last -- jitContexts, or as
+// many as there are -- if there are fewer than jitContextsMax and the
+// JIT's budget has the room, and reports whether it did. The others stay
+// where they are, and native code may be running in them: each one whose
+// calls the contexts limited may go as deep as the new ones allow, and
+// each new one holds what they share (jitShareContexts).
 func (r *Runtime) jitGrowContexts() bool {
 	s := r.jit
 	old := len(s.ssaCtxs)
-	if old+jitContexts > jitContextsMax {
+	add := min(max(old, jitContexts), jitContextsMax-old)
+	if add <= 0 {
 		return false
 	}
-	chunk := new([jitContexts]abi.Context)
+	s.budget = r.jitBudget()
+	if !s.makeRoom(add * jitContextBytes) {
+		return false
+	}
+	chunk := make([]abi.Context, add)
 	for i := range chunk {
 		chunk[i].Host = unsafe.Pointer(r)
 		s.ssaCtxs = append(s.ssaCtxs, &chunk[i])
@@ -5091,7 +5141,7 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 	var err error
 	for k := n - 1; k >= 0; k-- {
 		f, l := s.unwindingFrames[start+k], s.unwinding[start+k]
-		e := r.jit.hint(f.cl.hint())
+		e := r.jit.hint(f.cl)
 		if e == nil {
 			e = r.jitFor(f.cl)
 		}
@@ -5219,7 +5269,7 @@ func (r *Runtime) jitEnterOne(c *abi.Context, i int, code *bytecode.Function, ca
 	f.this, f.newTarget, f.callee, f.args = this, newTarget, nil, nil
 	f.openUpvalues, f.handlers = f.openUpvalues[:0], f.handlers[:0]
 	f.thisRef, f.withScopes, f.evalVars, f.native, f.savedSP = nil, nil, nil, "", 0
-	v, err := r.jitEnterCallee(f, s.hint(cl.hint()), i)
+	v, err := r.jitEnterCallee(f, s.hint(cl), i)
 	if construct && err == nil && !v.IsObject() {
 		v = this
 	}

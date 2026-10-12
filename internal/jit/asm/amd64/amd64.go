@@ -7,6 +7,7 @@ package amd64
 import (
 	"encoding/binary"
 	"fmt"
+	"unsafe"
 )
 
 // Reg is a general-purpose register, in the hardware's numbering.
@@ -80,6 +81,11 @@ func (a *Asm) Len() int { return len(a.buf) }
 // Reset empties the assembler for the next function, keeping its memory.
 func (a *Asm) Reset() {
 	a.buf, a.labels, a.fixups = a.buf[:0], a.labels[:0], a.fixups[:0]
+}
+
+// Bytes is the memory the assembler keeps for the next function.
+func (a *Asm) Bytes() int {
+	return cap(a.buf)*int(unsafe.Sizeof(a.buf[:1][0])) + cap(a.labels)*int(unsafe.Sizeof(0)) + cap(a.fixups)*int(unsafe.Sizeof(fixup{}))
 }
 
 // NewLabel makes an unbound label.

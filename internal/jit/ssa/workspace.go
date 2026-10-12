@@ -1,6 +1,8 @@
 package ssa
 
 import (
+	"unsafe"
+
 	"github.com/go-quickjs/go-quickjs/internal/arena"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
@@ -41,6 +43,28 @@ func (w *Workspace) init() {
 	w.bools.KeepBig()
 	w.bytes.KeepBig()
 	w.ints.KeepBig()
+}
+
+// Bytes is the memory the workspace keeps between compiles: its arenas'
+// chunks and its passes' scratch tables.
+func (w *Workspace) Bytes() int {
+	n := w.values.Bytes() + w.refs.Bytes() + w.states.Bytes() + w.blocks.Bytes() + w.blockRefs.Bytes() +
+		w.refLists.Bytes() + w.bools.Bytes() + w.bytes.Bytes() + w.ints.Bytes()
+	s := &w.scratch
+	n += capBytes(s.flags) + capBytes(s.vals) + capBytes(s.phis) + capBytes(s.ordered) + capBytes(s.front) +
+		capBytes(s.boxes) + capBytes(s.rest) + capBytes(s.work) + capBytes(s.first) + capBytes(s.last) +
+		capBytes(s.guards) + capBytes(s.liveStores) + capBytes(s.liveCands) + capBytes(s.liveFlat) +
+		capBytes(s.live) + capBytes(s.liveFrom) + capBytes(s.liveWords) + capBytes(s.subst) + capBytes(s.originPhis)
+	for _, l := range s.live {
+		n += capBytes(l)
+	}
+	return n
+}
+
+// capBytes is the memory s's backing array holds.
+func capBytes[T any](s []T) int {
+	var t T
+	return cap(s) * int(unsafe.Sizeof(t))
 }
 
 // Rewind takes back everything built in the workspace.

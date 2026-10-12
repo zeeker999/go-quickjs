@@ -1546,7 +1546,7 @@ func TestJITSSANullish(t *testing.T) {
 	}
 	// count only compares: it never leaves native code.
 	count := r.global.getOwn(r.atoms.intern("count")).value.Object().fn().closure
-	if e := r.jit.hint(count.hint()); e == nil || e.ssa == nil || e.ssaStats.entries == 0 || e.ssaStats.hosts != 0 {
+	if e := r.jit.hint(count); e == nil || e.ssa == nil || e.ssaStats.entries == 0 || e.ssaStats.hosts != 0 {
 		t.Fatalf("count did not compare natively: %+v", e)
 	}
 }
@@ -1599,7 +1599,7 @@ func TestJITSSAManySpills(t *testing.T) {
 		}
 	}
 	fn := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
-	if e := r.jit.hint(fn.hint()); e == nil || e.ssa == nil || e.ssaStats.entries == 0 {
+	if e := r.jit.hint(fn); e == nil || e.ssa == nil || e.ssaStats.entries == 0 {
 		t.Fatalf("f did not run in the new pipeline: %+v", e)
 	}
 }
@@ -1645,7 +1645,7 @@ func TestJITSSAProfitability(t *testing.T) {
 	}
 	entry := func(name string) *jitEntry {
 		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
-		return r.jit.hint(cl.hint())
+		return r.jit.hint(cl)
 	}
 	if e := entry("calls"); e == nil || e.ssa == nil || !e.entrySlow || e.ssaStats.entries > 2*jitSSAProbe {
 		t.Fatalf("calls kept running natively: %+v", e)
@@ -1766,7 +1766,7 @@ func TestJITSSAEquality(t *testing.T) {
 		}
 	}
 	assq := r.global.getOwn(r.atoms.intern("assq")).value.Object().fn().closure
-	if e := r.jit.hint(assq.hint()); e == nil || e.ssa == nil || e.ssaStats.entries == 0 || e.ssaStats.hosts != 0 || e.ssaStats.guards != 0 {
+	if e := r.jit.hint(assq); e == nil || e.ssa == nil || e.ssaStats.entries == 0 || e.ssaStats.hosts != 0 || e.ssaStats.guards != 0 {
 		t.Fatalf("assq left native code: %+v", e)
 	}
 }
@@ -1803,7 +1803,7 @@ func TestJITSSACompareReferences(t *testing.T) {
 		}
 		if src == `''+f(o,a,40)` {
 			fn := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
-			if e := r.jit.hint(fn.hint()); e == nil || e.ssa == nil || e.ssaStats.hosts != 0 || e.ssaStats.guards != 0 {
+			if e := r.jit.hint(fn); e == nil || e.ssa == nil || e.ssaStats.hosts != 0 || e.ssaStats.guards != 0 {
 				t.Fatalf("comparisons of references left native code: %+v", e)
 			}
 		}
@@ -1844,7 +1844,7 @@ func TestJITSSAElementReferences(t *testing.T) {
 		}
 	}
 	sum := r.global.getOwn(r.atoms.intern("sum")).value.Object().fn().closure
-	e := r.jit.hint(sum.hint())
+	e := r.jit.hint(sum)
 	if e == nil || e.ssa == nil || e.ssaStats.entries == 0 || e.ssaStats.guards != 0 {
 		t.Fatalf("sum: %+v", e)
 	}
@@ -2202,6 +2202,12 @@ func TestJITBudgetRefusalWaitsForRelease(t *testing.T) {
 		}
 		fn := jitFunctionForTest(t, fmt.Sprintf(`function f(n) { let s=0,t=1; for(let i=0;i<n;i++){ s+=i*%d; t=(t*3+s)|0; s=(s^t)+1; t=t-s; %s } return s+t }`, i+1, more))
 		keep = append(keep, fn)
+		// The room a compile is likely to need short of its code's, as for
+		// a function unlike those compiled before: the compile is made,
+		// and refused room for its code.
+		if r.jit != nil {
+			r.jit.perInstr = 0
+		}
 		if e := r.jitForFunction(fn, nil); e != nil && e.deferred {
 			refused, deferred = fn, e
 		}
@@ -2209,17 +2215,22 @@ func TestJITBudgetRefusalWaitsForRelease(t *testing.T) {
 	if deferred == nil || deferred.ssa != nil {
 		t.Fatalf("no refusal for want of budget within %d bytes", r.jitBudget())
 	}
-	if e := r.jitForFunction(refused, nil); e != deferred {
+	compiled := r.jit.compiled
+	r.jit.perInstr = 0
+	if e := r.jitForFunction(refused, nil); e != deferred || r.jit.compiled != compiled {
 		t.Fatal("a budget refusal was retried before any code was released")
 	}
-	for key, e := range r.jit.cache {
-		if e.ssa != nil && key.Value() != refused {
-			if !r.jit.dropEntry(key, e) {
-				t.Fatal("could not release code")
-			}
-			break
+	var biggest *jitEntry
+	var key weak.Pointer[bytecode.Function]
+	for k, e := range r.jit.cache {
+		if e.ssa != nil && (biggest == nil || e.bytes > biggest.bytes) {
+			key, biggest = k, e
 		}
 	}
+	if !r.jit.dropEntry(key, biggest) {
+		t.Fatal("could not release code")
+	}
+	r.jit.perInstr = 0
 	if e := r.jitForFunction(refused, nil); e == nil || e == deferred || e.ssa == nil {
 		t.Fatal("a budget refusal was not retried once code was released")
 	}
@@ -2255,30 +2266,61 @@ func TestJITWeakCache(t *testing.T) {
 	runtime.KeepAlive(fn)
 }
 
+// jitCopiesForTest makes copies of template, each a function of its own to
+// the cache, kept alive in keep: a collection would drop the code of those
+// already compiled (the cache's keys are weak).
+func jitCopiesForTest(template *bytecode.Function, keep *[]*bytecode.Function) func() *bytecode.Function {
+	return func() *bytecode.Function {
+		fn := new(bytecode.Function)
+		*fn = *template
+		*keep = append(*keep, fn)
+		return fn
+	}
+}
+
+// The cache counts no entries: it holds as many functions' code as the
+// JIT's budget has room for -- 400 here, where it had held 128 -- and,
+// with a memory limit, never more than its eighth of it, the least
+// recently used old code dropped to make room.
 func TestJITCacheBounds(t *testing.T) {
-	r := jitRuntimeForTest(t, Config{JIT: true})
-	// Each function's code old by the next's (makeRoom).
 	epoch := uint64(0)
 	defer func(was func() uint64) { jitEpochNow = was }(jitEpochNow)
 	jitEpochNow = func() uint64 { return epoch }
-	template := jitFunctionForTest(t, `function f(n) { var s=0; for(var i=0;i<n;i++) s+=i; return s }`)
-	var functions []*bytecode.Function
-	for i := 0; i < 2*jitCacheEntries; i++ {
-		fn := new(bytecode.Function)
-		*fn = *template
-		functions = append(functions, fn)
-		if e := r.jitForFunction(fn, nil); e == nil || e.ssa == nil {
+	var keep []*bytecode.Function
+	defer runtime.KeepAlive(&keep)
+	copyOf := jitCopiesForTest(jitFunctionForTest(t, `function f(n) { var s=0; for(var i=0;i<n;i++) s+=i; return s }`), &keep)
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	for i := 0; i < 400; i++ {
+		if e := r.jitForFunction(copyOf(), nil); e == nil || e.ssa == nil {
 			t.Fatalf("entry %d refused", i)
 		}
-		if len(r.jit.cache) > jitCacheEntries || r.jitCodeBytes() > jitCacheBytes {
-			t.Fatal("cache exceeded limits")
+	}
+	if len(r.jit.cache) != 400 || r.jit.evicted != 0 || r.jitHeldBytes() > int64(r.jitBudget()) {
+		t.Fatalf("%d entries, %d evicted, %d bytes held", len(r.jit.cache), r.jit.evicted, r.jitHeldBytes())
+	}
+	limited := jitRuntimeForTest(t, Config{JIT: true, MemoryLimit: 8 << 20})
+	budget := int64(limited.jitBudget())
+	var last []*jitEntry
+	for i := 0; i < 600; i++ {
+		e := limited.jitForFunction(copyOf(), nil)
+		if e == nil || e.ssa == nil {
+			t.Fatalf("entry %d refused", i)
 		}
+		if held := limited.jitHeldBytes(); held > budget {
+			t.Fatalf("entry %d: %d bytes held, past the budget's %d", i, held, budget)
+		}
+		last = append(last, e)
+		// Each function's code old by the next's.
 		epoch += jitCodeAge
 	}
-	if len(r.jit.cache) != jitCacheEntries {
+	if limited.jit.evicted == 0 {
 		t.Fatal("test did not reach eviction")
 	}
-	runtime.KeepAlive(functions)
+	// The newest stayed, the oldest went.
+	if n := len(limited.jit.cache); limited.jit.cache[weak.Make(keep[len(keep)-1])] != last[len(last)-1] ||
+		limited.jit.cache[weak.Make(keep[len(keep)-600])] != nil || n < 16 {
+		t.Fatalf("cache of %d entries kept the wrong ones", n)
+	}
 }
 
 // The cache's epochs follow the collector's cycles (jitGCEpoch), as V8 ages
@@ -2334,6 +2376,7 @@ func jitChurnSource(chains, cold int) string {
 	b.WriteString(`],next=0;
 function phase(window){let t=0;for(const f of tops)t=(t+f(200))|0;for(let w=0;w<window;w++){const f=colds[next];next=(next+1)%colds.length;for(let k=0;k<10;k++)t=(t+f(20))|0}return t}
 function round(phases,window){let t=0;for(let p=0;p<phases;p++)t=(t+phase(window))|0;return t}
+function half(h,phases){const n=tops.length>>1;let t=0;for(let p=0;p<phases;p++)for(let c=h*n;c<(h+1)*n;c++)t=(t+tops[c](200))|0;return t}
 `)
 	return b.String()
 }
@@ -2353,7 +2396,8 @@ func TestJITCacheKeepsHotCode(t *testing.T) {
 	defer func(was func() uint64) { jitEpochNow = was }(jitEpochNow)
 	jitEpochNow = func() uint64 { return epoch }
 	const chains = 30
-	r := jitRuntimeForTest(t, Config{JIT: true})
+	// A budget of 1 MB, which the cold functions fill.
+	r := jitRuntimeForTest(t, Config{JIT: true, MemoryLimit: 8 << 20})
 	if _, err := r.Run(compileForTest(t, jitChurnSource(chains, 400))); err != nil {
 		t.Fatal(err)
 	}
@@ -2393,21 +2437,89 @@ func TestJITCacheKeepsHotCode(t *testing.T) {
 // (jitChurnSource): the cost of keeping the hot code native, and of the
 // cold code's compiles.
 func BenchmarkJITCacheChurn(b *testing.B) {
+	benchJITCache(b, jitChurnSource(30, 600), `round(30,20)`)
+}
+
+// BenchmarkJITCacheHotSet runs programs with more hot functions than the
+// JIT's cache had held (128): 180 and 600 hot functions in native call
+// chains, every one run each round, and two halves of 135 taking turns,
+// each run a few hundred milliseconds -- a program's phases.
+func BenchmarkJITCacheHotSet(b *testing.B) {
+	b.Run("hot180", func(b *testing.B) { benchJITCache(b, jitChurnSource(60, 0), `round(30,0)`) })
+	b.Run("hot600", func(b *testing.B) { benchJITCache(b, jitChurnSource(200, 0), `round(10,0)`) })
+	b.Run("halves", func(b *testing.B) { benchJITCache(b, jitChurnSource(90, 0), `half(0,200)+half(1,200)`) })
+}
+
+// benchJITCache runs call in a runtime that ran source, reporting what
+// the JIT did an op -- its compiles, the entries its cache dropped to make
+// room, the compiles refused room -- and, at the end, what it holds and
+// the process's live heap.
+func benchJITCache(b *testing.B, source, call string) {
+	benchJITCacheIn(b, Config{JIT: true}, source, call)
+}
+
+// benchJITCacheIn is benchJITCache in a runtime made with cfg.
+func benchJITCacheIn(b *testing.B, cfg Config, source, call string) {
 	if !jitSSABackend {
 		b.Skip("no SSA backend on this architecture")
 	}
-	r := New(Config{JIT: true})
+	r := New(cfg)
 	defer r.Close()
-	if _, err := r.Run(compileForTest(b, jitChurnSource(30, 600))); err != nil {
+	if _, err := r.Run(compileForTest(b, source)); err != nil {
 		b.Fatal(err)
 	}
-	call := compileForTest(b, `round(30,20)`)
+	p := compileForTest(b, call)
+	var compiled, evicted, refused uint64
+	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		if _, err := r.Run(call); err != nil {
+		if r.jit != nil {
+			compiled, evicted, refused = r.jit.compiled, r.jit.evicted, r.jit.refusedRoom
+		}
+		if _, err := r.Run(p); err != nil {
 			b.Fatal(err)
 		}
 	}
+	b.StopTimer()
+	if s := r.jit; s != nil {
+		// The last op's: the steady state, not the warm-up's.
+		b.ReportMetric(float64(s.compiled-compiled), "compiles/op")
+		b.ReportMetric(float64(s.evicted-evicted), "evicted/op")
+		b.ReportMetric(float64(s.refusedRoom-refused), "refused/op")
+		b.ReportMetric(float64(len(s.cache)), "entries")
+		b.ReportMetric(float64(r.jitCodeBytes()), "code-B")
+		b.ReportMetric(float64(r.jitHeldBytes()), "held-B")
+		mapped, _ := s.arena.Mapped()
+		b.ReportMetric(float64(mapped), "mapped-B")
+	}
+	runtime.GC()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	b.ReportMetric(float64(ms.HeapAlloc), "live-B")
+}
+
+// jitFillForTest compiles copies of a function in r until the JIT's budget
+// has no room for another, every entry young, and returns the entries.
+func jitFillForTest(t *testing.T, r *Runtime, copyOf func() *bytecode.Function) []*jitEntry {
+	t.Helper()
+	var entries []*jitEntry
+	for {
+		e := r.jitForFunction(copyOf(), nil)
+		if e == nil {
+			break
+		}
+		if e.ssa == nil {
+			t.Fatal("a compile was refused")
+		}
+		entries = append(entries, e)
+		if len(entries) > 1<<14 {
+			t.Fatalf("%d entries in a budget of %d bytes", len(entries), r.jitBudget())
+		}
+	}
+	if r.jit.refusedRoom == 0 || r.jit.evicted != 0 || len(r.jit.cache) != len(entries) {
+		t.Fatalf("filling: %d refused, %d evicted, %d cached of %d", r.jit.refusedRoom, r.jit.evicted, len(r.jit.cache), len(entries))
+	}
+	return entries
 }
 
 // The cache drops the least recently used code to make room, as V8
@@ -2415,29 +2527,18 @@ func BenchmarkJITCacheChurn(b *testing.B) {
 // natively, or called by the existing tiers that no longer enter it --
 // stays, and the oldest of the rest goes. Code used within jitCodeAge
 // epochs is not dropped for another function's: that one is refused, the
-// cache unchanged, until some is old. A refusal remembered, which holds
-// no code, goes first, young or not.
+// cache unchanged, until some is old. What holds no code goes first,
+// young or not: a function's lowering the cache has no entry for, then a
+// refusal remembered.
 func TestJITCacheDropsLeastRecentlyUsed(t *testing.T) {
-	r := jitRuntimeForTest(t, Config{JIT: true})
+	r := jitRuntimeForTest(t, Config{JIT: true, MemoryLimit: 8 << 20})
 	epoch := uint64(0)
 	defer func(was func() uint64) { jitEpochNow = was }(jitEpochNow)
 	jitEpochNow = func() uint64 { return epoch }
-	template := jitFunctionForTest(t, `function f(n) { var s=0; for(var i=0;i<n;i++) s+=i; return s }`)
-	var functions []*bytecode.Function
-	make1 := func() *jitEntry {
-		fn := new(bytecode.Function)
-		*fn = *template
-		functions = append(functions, fn)
-		return r.jitForFunction(fn, nil)
-	}
-	var entries []*jitEntry
-	for range jitCacheEntries {
-		e := make1()
-		if e == nil || e.ssa == nil {
-			t.Fatal("an entry was refused before the cache was full")
-		}
-		entries = append(entries, e)
-	}
+	var keep []*bytecode.Function
+	defer runtime.KeepAlive(&keep)
+	copyOf := jitCopiesForTest(jitFunctionForTest(t, `function f(n) { var s=0; for(var i=0;i<n;i++) s+=i; return s }`), &keep)
+	entries := jitFillForTest(t, r, copyOf)
 	cached := func(e *jitEntry) bool {
 		for _, c := range r.jit.cache {
 			if c == e {
@@ -2446,8 +2547,8 @@ func TestJITCacheDropsLeastRecentlyUsed(t *testing.T) {
 		}
 		return false
 	}
-	// All young: no room.
-	if e := make1(); e != nil || len(r.jit.cache) != jitCacheEntries || r.jit.refusedRoom == 0 {
+	// All young: no room, again.
+	if e := r.jitForFunction(copyOf(), nil); e != nil || len(r.jit.cache) != len(entries) || r.jit.evicted != 0 {
 		t.Fatalf("a function was given room among young code: %+v", e)
 	}
 	// Old now; the even ones used since, each a way.
@@ -2462,28 +2563,268 @@ func TestJITCacheDropsLeastRecentlyUsed(t *testing.T) {
 			entries[i].slowCalls++
 		}
 	}
-	for range jitCacheEntries / 2 {
-		if e := make1(); e == nil || e.ssa == nil {
+	// A third as many new ones: each takes the room of the least recently
+	// used, the odd ones -- with the workspaces' room, now and then.
+	for range len(entries) / 3 {
+		if e := r.jitForFunction(copyOf(), nil); e == nil || e.ssa == nil {
 			t.Fatal("no room made among old code")
 		}
 	}
+	dropped := 0
 	for i, e := range entries {
-		if cached(e) != (i%2 == 0) {
-			t.Fatalf("entry %d (used since: %v) cached: %v", i, i%2 == 0, cached(e))
+		if !cached(e) {
+			if i%2 == 0 {
+				t.Fatalf("entry %d, used since, was dropped", i)
+			}
+			dropped++
 		}
 	}
-	// A refusal remembered, young, goes before old code.
+	if dropped < len(entries)/4 {
+		t.Fatalf("%d of %d unused entries dropped for %d new ones", dropped, len(entries)/2, len(entries)/3)
+	}
+	// What holds no code goes before old code: a lowering without an
+	// entry -- those of the entries dropped -- then a refusal, young.
 	epoch += jitCodeAge
 	refusal := &jitEntry{link: &jitLink{}, used: epoch, serial: 1 << 40}
-	fn := new(bytecode.Function)
-	*fn = *template
-	functions = append(functions, fn)
-	r.jit.makeRoom(true)
-	r.jit.remember(weak.Make(fn), refusal)
-	if e := make1(); e == nil || cached(refusal) {
-		t.Fatal("a young refusal was kept, or no room made")
+	r.jit.remember(weak.Make(copyOf()), refusal)
+	var code []*jitEntry
+	for _, e := range r.jit.cache {
+		if e.ssa != nil {
+			code = append(code, e)
+		}
 	}
-	runtime.KeepAlive(functions)
+	ownerless := func() []weak.Pointer[bytecode.Function] {
+		var keys []weak.Pointer[bytecode.Function]
+		for key := range r.jit.lowered {
+			if l := r.jit.links[key]; l == nil || l.owner == nil {
+				keys = append(keys, key)
+			}
+		}
+		return keys
+	}
+	if len(ownerless()) == 0 {
+		t.Fatal("no lowering without an entry")
+	}
+	for range len(entries) {
+		before := ownerless()
+		if e := r.jitForFunction(copyOf(), nil); e == nil || e.ssa == nil {
+			t.Fatal("no room made among old code")
+		}
+		codeGone := false
+		for _, e := range code {
+			codeGone = codeGone || !cached(e)
+		}
+		if !codeGone {
+			continue
+		}
+		if cached(refusal) {
+			t.Fatal("code was dropped before a refusal")
+		}
+		for _, key := range before {
+			if r.jit.lowered[key] != nil {
+				t.Fatal("code was dropped before a lowering without an entry")
+			}
+		}
+		return
+	}
+	t.Fatal("no code was dropped")
+}
+
+// What the JIT holds is counted, each kind of it, against its budget
+// (jitState.held): each entry's code with what describes its entries and
+// exits, what it was compiled with and what it learned, its literals' and
+// constructions' pools with their objects; the programs it lowered; the
+// contexts native code ran in, the compiles' workspaces, the hint table and
+// the links. The sums the cache keeps are what measuring each afresh finds.
+func TestJITHeldCountsEachKind(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	if _, err := r.Run(compileForTest(t, `function P(x){this.x=x}
+		function mk(n){let s=0;for(let i=0;i<n;i++){const o={a:i,b:i+1};s=(s+new P(o.a).x+o.b)|0}return s}
+		var h=(function(){let k=1;return function(x){return (x+k)|0}})();
+		function caller(n){let t=0;for(let i=0;i<n;i++)t=(t+h(i))|0;return t}
+		for(let r=0;r<4;r++){mk(500);caller(500)}`)); err != nil {
+		t.Fatal(err)
+	}
+	s := r.jit
+	s.agedAt = 0
+	s.age(s.epoch())
+	entries, pools := 0, 0
+	for _, e := range s.cache {
+		entries += e.measure()
+		if e.bytes != e.measure() {
+			t.Fatalf("an entry counted at %d holds %d", e.bytes, e.measure())
+		}
+		if e.ssa == nil {
+			continue
+		}
+		if e.ssa.Footprint() <= e.ssa.Size() || e.bytes < jitEntryFixed+e.ssa.Footprint()+e.compiledBytes() {
+			t.Fatalf("an entry's code: %d bytes of %d held, %d counted", e.ssa.Size(), e.ssa.Footprint(), e.bytes)
+		}
+		// Each pool, with its objects: the literals' and the
+		// constructions'.
+		held := 0
+		for _, l := range e.literals {
+			if l.pool.Count > 0 {
+				pools++
+				held += int(unsafe.Sizeof(*l.pool)) + int(l.pool.Size)*int(objectSize)
+			}
+		}
+		for _, x := range append(slices.Clone(e.inlines), e.nativeCalls...) {
+			if x.pool != nil && x.pool.Count > 0 {
+				pools++
+				held += int(unsafe.Sizeof(*x.pool)) + int(x.pool.Size)*int(objectSize)
+			}
+		}
+		if e.learnedBytes() < held {
+			t.Fatalf("pools of %d bytes counted at %d", held, e.learnedBytes())
+		}
+	}
+	if entries != s.entryBytes || pools == 0 {
+		t.Fatalf("entries hold %d, counted %d; %d pools", entries, s.entryBytes, pools)
+	}
+	lowered := 0
+	for _, l := range s.lowered {
+		n := jitLoweringFixed
+		for _, p := range l.progs {
+			if p != nil {
+				n += p.Footprint()
+				if p.Footprint() < len(p.Code)*int(unsafe.Sizeof(ir.Instruction{})) {
+					t.Fatal("a program's instructions uncounted")
+				}
+			}
+		}
+		if l.bytes != n {
+			t.Fatalf("a lowering holds %d, counted %d", n, l.bytes)
+		}
+		lowered += n
+	}
+	if lowered != s.lowerBytes || lowered == 0 {
+		t.Fatalf("lowerings hold %d, counted %d", lowered, s.lowerBytes)
+	}
+	if len(s.ssaCtxs) == 0 || s.workBytes() == 0 || len(s.links) == 0 || len(s.hints) == 0 {
+		t.Fatalf("%d contexts, %d bytes of workspaces, %d links, %d hints", len(s.ssaCtxs), s.workBytes(), len(s.links), len(s.hints))
+	}
+	shared := len(s.ssaCtxs)*jitContextBytes + s.workBytes() + len(s.links)*jitLinkFixed + jitCapBytes(s.hints)
+	if s.sharedBytes() < shared || s.held() != s.entryBytes+s.lowerBytes+s.sharedBytes() {
+		t.Fatalf("shared %d counted, at least %d held", s.sharedBytes(), shared)
+	}
+	if r.jitHeldBytes() > int64(r.jitBudget()) {
+		t.Fatalf("%d bytes held, past the budget's %d", r.jitHeldBytes(), r.jitBudget())
+	}
+}
+
+// A runtime with a memory limit keeps its JIT within an eighth of it,
+// running a program with far more hot functions than fit -- a hot core of
+// native call chains among a stream of cold functions -- the least recently
+// used old code dropped as the stream goes on, the hot core kept. Nothing
+// it keeps by function grows past what its entries need: hint slots in use
+// are the entries', links are the entries' and their code's, the rest free.
+func TestJITMemoryLimitKeepsEighth(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	epoch := uint64(0)
+	defer func(was func() uint64) { jitEpochNow = was }(jitEpochNow)
+	jitEpochNow = func() uint64 { return epoch }
+	r := jitRuntimeForTest(t, Config{JIT: true, MemoryLimit: 16 << 20})
+	budget := int64(r.jitBudget())
+	if budget != 2<<20 {
+		t.Fatalf("budget %d", budget)
+	}
+	if _, err := r.Run(compileForTest(t, jitChurnSource(30, 1500))); err != nil {
+		t.Fatal(err)
+	}
+	call := compileForTest(t, `round(10,40)`)
+	for round := 0; round < 8; round++ {
+		if _, err := r.Run(call); err != nil {
+			t.Fatal(err)
+		}
+		epoch++
+		s := r.jit
+		if held := r.jitHeldBytes(); held > budget {
+			t.Fatalf("round %d: %d bytes held, past %d", round, held, budget)
+		}
+		if used := len(s.hints) - 1 - len(s.hintFree); used != len(s.cache) {
+			t.Fatalf("round %d: %d hint slots in use, %d entries", round, used, len(s.cache))
+		}
+		calls := 0
+		for _, e := range s.cache {
+			calls += len(e.ssaLinks)
+		}
+		if len(s.links) > len(s.cache)+calls {
+			t.Fatalf("round %d: %d links for %d entries calling through %d", round, len(s.links), len(s.cache), calls)
+		}
+	}
+	if r.jit.evicted == 0 {
+		t.Fatal("the stream never filled the budget")
+	}
+	for c := 0; c < 30; c++ {
+		fn := r.global.getOwn(r.atoms.intern(fmt.Sprintf("top_%d", c))).value.Object().fn().closure.fn
+		if e := r.jit.cache[weak.Make(fn)]; e == nil || e.ssa == nil {
+			t.Fatalf("hot top_%d was dropped", c)
+		}
+	}
+}
+
+// The JIT refuses a compile room only when nothing it may reclaim would
+// make it: then it reclaims nothing -- not the old code there is, not the
+// lowerings -- and the newcomer runs in the existing tiers. Once code is
+// old, it goes for the newcomer, and only as much as the room needs.
+func TestJITRefusesRoomOnlyWhenNothingIsOld(t *testing.T) {
+	r := jitRuntimeForTest(t, Config{JIT: true, MemoryLimit: 8 << 20})
+	epoch := uint64(0)
+	defer func(was func() uint64) { jitEpochNow = was }(jitEpochNow)
+	jitEpochNow = func() uint64 { return epoch }
+	var keep []*bytecode.Function
+	defer runtime.KeepAlive(&keep)
+	copyOf := jitCopiesForTest(jitFunctionForTest(t, `function f(n) { var s=0; for(var i=0;i<n;i++) s+=i; return s }`), &keep)
+	entries := jitFillForTest(t, r, copyOf)
+	// Two entries old, the others used since: only they may go.
+	epoch += jitCodeAge
+	for _, e := range entries[2:] {
+		e.starts++
+	}
+	young := func() {
+		t.Helper()
+		for _, e := range entries[2:] {
+			if e.hint == 0 {
+				t.Fatal("young code was dropped")
+			}
+		}
+	}
+	if e := r.jitForFunction(copyOf(), nil); e == nil || e.ssa == nil {
+		t.Fatal("no room made from old code")
+	}
+	if r.jit.evicted == 0 || entries[0].hint != 0 && entries[1].hint != 0 {
+		t.Fatalf("no old entry went: %d evicted", r.jit.evicted)
+	}
+	young()
+	// Compiles until one is refused: then nothing is old, and the refusal
+	// reclaims nothing -- not the lowerings without entries, not the
+	// workspaces.
+	for i := 0; ; i++ {
+		evicted, refused, lowered, held := r.jit.evicted, r.jit.refusedRoom, len(r.jit.lowered), r.jitHeldBytes()
+		e := r.jitForFunction(copyOf(), nil)
+		young()
+		if e != nil {
+			if e.ssa == nil || i > 2 {
+				t.Fatalf("compile %d: %+v", i, e)
+			}
+			continue
+		}
+		if r.jit.refusedRoom == refused || r.jit.evicted != evicted || len(r.jit.lowered) != lowered || r.jitHeldBytes() != held {
+			t.Fatalf("a refusal reclaimed: %d evicted of %d, %d lowerings of %d, %d bytes held of %d",
+				r.jit.evicted, evicted, len(r.jit.lowered), lowered, r.jitHeldBytes(), held)
+		}
+		break
+	}
+	if entries[0].hint != 0 || entries[1].hint != 0 {
+		t.Fatal("old code stayed while a compile was refused")
+	}
 }
 
 func TestJITSharedTemplateRuntimes(t *testing.T) {
@@ -3612,7 +3953,8 @@ func TestJITTreeRecoveryNarrow(t *testing.T) {
 		{"refused", func(cl *closure) { cl.jitRefused = true }, false},
 		{"refusal cached", func(cl *closure) {
 			e := &jitEntry{link: &jitLink{}}
-			r.jit.remember(weak.Make(jitFunctionForTest(t, `function g() {}`)), e)
+			cl.fn = jitFunctionForTest(t, `function g() {}`)
+			r.jit.remember(weak.Make(cl.fn), e)
 			cl.setHint(e.hint)
 		}, false},
 	} {
@@ -3627,30 +3969,56 @@ func TestJITTreeRecoveryNarrow(t *testing.T) {
 }
 
 // A hint names its entry until the entry leaves the cache; a slot reused for
-// another entry has a new tag, so the old hint misses rather than aliasing.
+// another function's entry is not the hint's, however often it is reused,
+// so the old hint misses rather than aliasing -- a tag had wrapped. A slot
+// holding the function's own entry is the hint's.
 func TestJITHintReuse(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
-	first := jitFunctionForTest(t, `function f(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s }`)
+	source := `function f(n) { let s=0; for(let i=0;i<n;i++) s+=i; return s }`
+	first := jitFunctionForTest(t, source)
 	e := r.jitForFunction(first, nil)
-	if e == nil || r.jit.hint(e.hint) != e {
+	cl := &closure{fn: first}
+	cl.setHint(hintFor(e))
+	if e == nil || r.jit.hint(cl) != e {
 		t.Fatal("fresh hint misses")
 	}
-	old := e.hint
-	for key, cached := range r.jit.cache {
-		if cached == e && !r.jit.dropEntry(key, e) {
-			t.Fatal("could not release")
+	drop := func(e *jitEntry) {
+		t.Helper()
+		for key, cached := range r.jit.cache {
+			if cached == e && !r.jit.dropEntry(key, e) {
+				t.Fatal("could not release")
+			}
 		}
 	}
-	if r.jit.hint(old) != nil {
+	old := e.hint
+	drop(e)
+	if r.jit.hint(cl) != nil {
 		t.Fatal("hint survived its entry")
 	}
-	other := r.jitForFunction(jitFunctionForTest(t, `function g(n) { let s=0; for(let i=0;i<n;i++) s-=i; return s }`), nil)
-	if other == nil || other.hint&(1<<jitHintBits-1) != old&(1<<jitHintBits-1) {
-		t.Fatal("the freed slot was not reused")
+	// The slot is reused for other functions' entries, again and again:
+	// more times than a tag of the bits a slot leaves had.
+	var keep []*bytecode.Function
+	for i := range 1 << 10 {
+		fn := jitFunctionForTest(t, `function g(n) { let s=0; for(let i=0;i<n;i++) s-=i; return s }`)
+		keep = append(keep, fn)
+		other := r.jitForFunction(fn, nil)
+		if other == nil || other.hint != old {
+			t.Fatalf("reuse %d: the freed slot was not reused", i)
+		}
+		if r.jit.hint(cl) != nil {
+			t.Fatalf("reuse %d: a stale hint aliased the slot's new entry", i)
+		}
+		if r.jit.hint(&closure{fn: fn, jitClosureFields: jitClosureFields{jitHint: cl.jitHint}}) != other {
+			t.Fatalf("reuse %d: the slot's own function's hint misses", i)
+		}
+		drop(other)
 	}
-	if r.jit.hint(old) != nil {
-		t.Fatal("a stale hint aliased the slot's new entry")
+	// The function's own entry, made again, in the slot: the hint finds it.
+	again := r.jitForFunction(first, nil)
+	if again == nil || again.hint != old || r.jit.hint(cl) != again {
+		t.Fatal("a hint missed its function's entry in its slot")
 	}
+	runtime.KeepAlive(keep)
 }
 
 func TestJITStressParse(t *testing.T) {
@@ -3892,7 +4260,7 @@ func TestJITSSAReoptimize(t *testing.T) {
 	}
 	entry := func(name string) *jitEntry {
 		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
-		return r.jit.hint(cl.hint())
+		return r.jit.hint(cl)
 	}
 	// cmp's comparisons of objects go to Go at every iteration, which makes
 	// the tree tier run it (jitSSAProfit); scale's addition goes once a call.
@@ -3971,7 +4339,7 @@ func TestJITSSAPrototypeMethods(t *testing.T) {
 	// Every round ran natively: none was demoted to the tree tier.
 	for _, name := range []string{"run", "swap"} {
 		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
-		if e := r.jit.hint(cl.hint()); e == nil || e.ssa == nil || e.entrySlow || e.ssaStats.entries == 0 {
+		if e := r.jit.hint(cl); e == nil || e.ssa == nil || e.entrySlow || e.ssaStats.entries == 0 {
 			t.Fatalf("%s did not stay native: %+v", name, e)
 		}
 	}
@@ -4021,7 +4389,7 @@ func TestJITSSAStringEquality(t *testing.T) {
 		}
 	}
 	cl := r.global.getOwn(r.atoms.intern("count")).value.Object().fn().closure
-	if e := r.jit.hint(cl.hint()); e == nil || e.ssa == nil || e.entrySlow || e.ssaStats.entries == 0 {
+	if e := r.jit.hint(cl); e == nil || e.ssa == nil || e.entrySlow || e.ssaStats.entries == 0 {
 		t.Fatalf("count did not stay native: %+v", e)
 	}
 }
@@ -4074,7 +4442,7 @@ func TestJITSSAReferenceStores(t *testing.T) {
 	}
 	entry := func(name string) *jitEntry {
 		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
-		return r.jit.hint(cl.hint())
+		return r.jit.hint(cl)
 	}
 	if e := entry("relink"); e == nil || e.ssa == nil || e.entrySlow || e.ssaStats.entries == 0 || e.ssaStats.hosts != 0 || e.ssaStats.guards != 0 {
 		t.Fatalf("relink's stores left native code: %+v", e)
@@ -4163,7 +4531,7 @@ func TestJITSSAReferenceStoresWhileMarking(t *testing.T) {
 	}
 	entry := func(name string) *jitEntry {
 		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
-		return r.jit.hint(cl.hint())
+		return r.jit.hint(cl)
 	}
 	// relink's reference stores are Go's, called; it never leaves.
 	if e := entry("relink"); e == nil || e.ssa == nil || e.ssaStats.entries == 0 || e.ssaStats.hosts != 0 || calls-before < 40 {
@@ -4305,7 +4673,7 @@ func TestJITSSAInline(t *testing.T) {
 	}
 	entry := func(name string) *jitEntry {
 		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
-		return r.jit.hint(cl.hint())
+		return r.jit.hint(cl)
 	}
 	for i, src := range rounds {
 		wv, err := want.Run(compileForTest(t, src))
@@ -4376,7 +4744,7 @@ func TestJITSSAInlineEffects(t *testing.T) {
 			}
 			entry := func(name string) *jitEntry {
 				cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
-				return r.jit.hint(cl.hint())
+				return r.jit.hint(cl)
 			}
 			if marking == 0 {
 				jitMarkingForTest(t)
@@ -4464,7 +4832,7 @@ func TestJITSSANestedInline(t *testing.T) {
 			t.Fatal(err)
 		}
 		var hosts uint64
-		e := r.jit.hint(cl.hint())
+		e := r.jit.hint(cl)
 		if e != nil {
 			hosts = e.ssaStats.hosts
 		}
@@ -4478,7 +4846,7 @@ func TestJITSSANestedInline(t *testing.T) {
 		}
 		switch i {
 		case 3:
-			e = r.jit.hint(cl.hint())
+			e = r.jit.hint(cl)
 			for _, name := range []string{"outer", "hold", "mark"} {
 				if e == nil || !slices.Contains(e.ssaInlined, method(name)) {
 					t.Fatalf("run's code does not inline %s", name)
@@ -4493,7 +4861,7 @@ func TestJITSSANestedInline(t *testing.T) {
 			}
 		case 5:
 			// Left too often, outer is called natively instead, not by Go.
-			if e := r.jit.hint(cl.hint()); e == nil || !slices.Contains(e.callSites, jitCallNative) || slices.Contains(e.callSites, jitCallDone) {
+			if e := r.jit.hint(cl); e == nil || !slices.Contains(e.callSites, jitCallNative) || slices.Contains(e.callSites, jitCallDone) {
 				t.Fatalf("run's call to outer: %v", e.callSites)
 			}
 		}
@@ -4544,7 +4912,7 @@ func TestJITSSANativeConstruct(t *testing.T) {
 	runtime.GC()
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	entry := func(name string) *jitEntry {
-		return r.jit.hint(r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure.hint())
+		return r.jit.hint(r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure)
 	}
 	checked := false
 	for i, src := range rounds {
@@ -4627,7 +4995,7 @@ func TestJITSSANativeArrayConstruct(t *testing.T) {
 			t.Fatal(err)
 		}
 		var hosts, entries uint64
-		if e := r.jit.hint(cl.hint()); e != nil {
+		if e := r.jit.hint(cl); e != nil {
 			hosts, entries = e.ssaStats.hosts, e.ssaStats.entries
 		}
 		reoptimized := r.jit.reoptimized
@@ -4639,7 +5007,7 @@ func TestJITSSANativeArrayConstruct(t *testing.T) {
 			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
 		}
 		if i >= 3 && r.jit.reoptimized == reoptimized {
-			e := r.jit.hint(cl.hint())
+			e := r.jit.hint(cl)
 			if e == nil || !slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.pool != nil && x.cl == nil }) {
 				t.Fatal("arrays does not make its arrays natively")
 			}
@@ -4763,7 +5131,7 @@ func TestJITSSANativePop(t *testing.T) {
 			t.Fatal(err)
 		}
 		var hosts, entries uint64
-		if e := r.jit.hint(cl.hint()); e != nil {
+		if e := r.jit.hint(cl); e != nil {
 			hosts, entries = e.ssaStats.hosts, e.ssaStats.entries
 		}
 		reoptimized := r.jit.reoptimized
@@ -4775,7 +5143,7 @@ func TestJITSSANativePop(t *testing.T) {
 			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
 		}
 		if i >= 3 && i <= 4 && r.jit.reoptimized == reoptimized {
-			e := r.jit.hint(cl.hint())
+			e := r.jit.hint(cl)
 			if e == nil || !slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.pop }) {
 				t.Fatal("drain does not pop natively")
 			}
@@ -4860,7 +5228,7 @@ func TestJITSSANativePush(t *testing.T) {
 		for range 4 {
 			run(c.name, warm)
 		}
-		e := r.jit.hint(r.global.getOwn(r.atoms.intern(c.fn)).value.Object().fn().closure.hint())
+		e := r.jit.hint(r.global.getOwn(r.atoms.intern(c.fn)).value.Object().fn().closure)
 		if e == nil || !slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return x.push }) {
 			t.Fatalf("%s: %s does not push natively", c.name, c.fn)
 		}
@@ -4933,7 +5301,7 @@ func TestJITSSAPropertyAdds(t *testing.T) {
 		for range 4 {
 			run(c.name, c.warm)
 		}
-		e := r.jit.hint(r.global.getOwn(r.atoms.intern(c.fn)).value.Object().fn().closure.hint())
+		e := r.jit.hint(r.global.getOwn(r.atoms.intern(c.fn)).value.Object().fn().closure)
 		if e == nil || e.ssa == nil {
 			t.Fatalf("%s: %s has no code", c.name, c.fn)
 		}
@@ -5082,7 +5450,7 @@ func TestJITSSAPolymorphicReads(t *testing.T) {
 	}
 	entry := func(name string) *jitEntry {
 		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
-		return r.jit.hint(cl.hint())
+		return r.jit.hint(cl)
 	}
 	for i, src := range rounds {
 		wv, err := want.Run(compileForTest(t, src))
@@ -5368,7 +5736,7 @@ func TestJITSSAElementsKeptAcrossCalls(t *testing.T) {
 				if got, want := gv.String().Go(), wv.String().Go(); got != want {
 					t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
 				}
-				if e := r.jit.hint(cl.hint()); e != nil && len(e.nativeCalls) != 0 && (!c.resumes || r.jit.resumed > resumed) {
+				if e := r.jit.hint(cl); e != nil && len(e.nativeCalls) != 0 && (!c.resumes || r.jit.resumed > resumed) {
 					native = true
 				}
 			}
@@ -5415,12 +5783,12 @@ func TestJITSSACallSeenWhileCalleeLeaves(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		le := r.jit.hint(leaf.hint())
+		le := r.jit.hint(leaf)
 		if i == 2 && (le == nil || !le.notNative) {
 			t.Fatal("leaf is called natively before outer's call is seen")
 		}
 		var hosts uint64
-		oe := r.jit.hint(outer.hint())
+		oe := r.jit.hint(outer)
 		if oe != nil {
 			hosts = oe.ssaStats.hosts
 		}
@@ -5433,7 +5801,7 @@ func TestJITSSACallSeenWhileCalleeLeaves(t *testing.T) {
 			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
 		}
 		if i == len(rounds)-1 {
-			oe = r.jit.hint(outer.hint())
+			oe = r.jit.hint(outer)
 			if oe == nil || r.jit.reoptimized != reoptimized || oe.ssaStats.hosts != hosts {
 				var left uint64
 				if oe != nil {
@@ -5581,7 +5949,7 @@ func TestJITSSASeedsMethodCalls(t *testing.T) {
 		if got, want := gv.String().Go(), wv.String().Go(); got != want {
 			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
 		}
-		e := r.jit.hint(cl.hint())
+		e := r.jit.hint(cl)
 		if e == nil || e.ssa == nil {
 			t.Fatalf("round %d: run has no code", i)
 		}
@@ -5638,7 +6006,7 @@ func TestJITSSASeedsConstructions(t *testing.T) {
 			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
 		}
 	}
-	e := r.jit.hint(cl.hint())
+	e := r.jit.hint(cl)
 	if e == nil || e.ssa == nil {
 		t.Fatal("mk2 has no code")
 	}
@@ -5692,7 +6060,7 @@ func TestJITLoopPromotedPastCalleesLoops(t *testing.T) {
 		t.Fatalf("got %s, interpreter %s", got, want)
 	}
 	cl := r.global.getOwn(r.atoms.intern("run")).value.Object().fn().closure
-	if e := r.jit.hint(cl.hint()); e == nil || e.ssa == nil {
+	if e := r.jit.hint(cl); e == nil || e.ssa == nil {
 		t.Fatal("run's loop was not promoted in 20000 iterations")
 	}
 	// About the interval, and not the same each time.
@@ -5753,7 +6121,7 @@ func TestJITSSASeedsCalleesWithoutCode(t *testing.T) {
 			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
 		}
 	}
-	e := r.jit.hint(cl.hint())
+	e := r.jit.hint(cl)
 	if e == nil || e.ssa == nil {
 		t.Fatal("run has no code")
 	}
@@ -5807,12 +6175,12 @@ func TestJITSSASeedsWhenCompiledAgain(t *testing.T) {
 			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
 		}
 		if i == 1 {
-			if e := r.jit.hint(cl.hint()); e == nil || e.ssa == nil {
+			if e := r.jit.hint(cl); e == nil || e.ssa == nil {
 				t.Fatal("f has no code before the branch is taken")
 			}
 		}
 	}
-	e := r.jit.hint(cl.hint())
+	e := r.jit.hint(cl)
 	if !slices.ContainsFunc(e.inlines, func(x jitInline) bool { return x.obj == m }) {
 		t.Fatal("f does not inline m")
 	}
@@ -5911,7 +6279,7 @@ func TestJITSSALooseNullishOperands(t *testing.T) {
 			t.Fatal(err)
 		}
 		var hosts, entries uint64
-		if e := r.jit.hint(eq.hint()); e != nil {
+		if e := r.jit.hint(eq); e != nil {
 			hosts, entries = e.ssaStats.hosts, e.ssaStats.entries
 		}
 		gv, err := r.Run(compileForTest(t, src))
@@ -5925,7 +6293,7 @@ func TestJITSSALooseNullishOperands(t *testing.T) {
 			// null or undefined against null, undefined, an object or a
 			// primitive: native, never Go's (code that left for each was
 			// demoted, and ran no more).
-			if e := r.jit.hint(eq.hint()); e == nil || e.ssa == nil || e.entrySlow || e.ssaStats.entries == entries || e.ssaStats.hosts != hosts {
+			if e := r.jit.hint(eq); e == nil || e.ssa == nil || e.entrySlow || e.ssaStats.entries == entries || e.ssaStats.hosts != hosts {
 				t.Fatalf("eq left native code to compare null, undefined and objects: %+v", e)
 			}
 		}
@@ -6198,7 +6566,7 @@ func TestJITSSAProfitReturns(t *testing.T) {
 	}
 	proto := r.global.getOwn(r.atoms.intern("T")).value.Object().getOwn(r.atoms.intern("prototype")).value.Object()
 	step := proto.getOwn(r.atoms.intern("step")).value.Object().fn().closure
-	if e := r.jit.hint(step.hint()); e == nil || e.ssa == nil || !e.entrySlow || e.ssaStats.entries > 2*jitSSAProbe {
+	if e := r.jit.hint(step); e == nil || e.ssa == nil || !e.entrySlow || e.ssaStats.entries > 2*jitSSAProbe {
 		t.Fatalf("step kept running natively: %+v", e)
 	}
 	heavy := r.global.getOwn(r.atoms.intern("heavy")).value.Object().fn().closure
@@ -6207,10 +6575,11 @@ func TestJITSSAProfitReturns(t *testing.T) {
 	}
 }
 
-// Native calls that run out of contexts have more of them at once, up to
-// jitContextsMax, those in use left where they are: a recursion 40 deep,
-// which ran out of the 24 at first, Go finishing every level, stays in
-// native code once there are 48. One deeper than the most still goes
+// Native calls that run out of contexts have more of them at once -- as
+// many as there are -- up to jitContextsMax, those in use left where they
+// are: a recursion 40 deep, which ran out of the 4 at first, then 8, 16 and
+// 32, Go finishing every level, stays in native code once there are 64.
+// One deeper than the most still goes
 // through Go, and one without end throws the interpreter's RangeError.
 // Each answer is the interpreter's.
 func TestJITSSAContextsGrow(t *testing.T) {
@@ -6247,7 +6616,7 @@ func TestJITSSAContextsGrow(t *testing.T) {
 			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
 		}
 		if i == 4 || i == 8 {
-			if n, want := len(r.jit.ssaCtxs), map[int]int{4: 2 * jitContexts, 8: jitContextsMax}[i]; n != want {
+			if n, want := len(r.jit.ssaCtxs), map[int]int{4: 16 * jitContexts, 8: jitContextsMax}[i]; n != want {
 				t.Fatalf("round %d: %d contexts, want %d", i, n, want)
 			}
 			if n := r.jit.unwound - unwound; n != 0 {
@@ -6303,7 +6672,7 @@ func TestJITSSANativeCalls(t *testing.T) {
 	}
 	entry := func(name string) *jitEntry {
 		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
-		return r.jit.hint(cl.hint())
+		return r.jit.hint(cl)
 	}
 	for i, src := range rounds {
 		wv, err := want.Run(compileForTest(t, src))
@@ -6381,7 +6750,7 @@ func TestJITSSANativeCallsUnderGC(t *testing.T) {
 		t.Fatalf("= %v, %v", v, err)
 	}
 	cl := r.global.getOwn(r.atoms.intern("walk")).value.Object().fn().closure
-	if e := r.jit.hint(cl.hint()); e == nil || e.ssa == nil || len(e.nativeCalls) == 0 {
+	if e := r.jit.hint(cl); e == nil || e.ssa == nil || len(e.nativeCalls) == 0 {
 		t.Fatalf("walk made no native calls: %+v", e)
 	}
 }
@@ -6417,7 +6786,7 @@ func TestJITSSANativeCallsWhileMarking(t *testing.T) {
 		}
 	}
 	cl := r.global.getOwn(r.atoms.intern("sum")).value.Object().fn().closure
-	e := r.jit.hint(cl.hint())
+	e := r.jit.hint(cl)
 	if e == nil || e.ssa == nil || len(e.nativeCalls) == 0 {
 		t.Fatalf("sum was not compiled to call natively: %+v", e)
 	}
@@ -6461,7 +6830,7 @@ func TestJITSSAMarkingCallThrows(t *testing.T) {
 		}
 	}
 	cl := r.global.getOwn(r.atoms.intern("f")).value.Object().fn().closure
-	if e := r.jit.hint(cl.hint()); e == nil || e.ssa == nil || len(e.nativeCalls) == 0 {
+	if e := r.jit.hint(cl); e == nil || e.ssa == nil || len(e.nativeCalls) == 0 {
 		t.Fatalf("f was not compiled to call natively: %+v", e)
 	}
 	for _, src := range []string{`String(h(300))`, `String(f(300))`, `String(h(301))`} {
@@ -6512,7 +6881,7 @@ func TestJITSSAMarkingBeginsInNativeCallee(t *testing.T) {
 	}
 	entry := func(name string) *jitEntry {
 		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
-		e := r.jit.hint(cl.hint())
+		e := r.jit.hint(cl)
 		if e == nil || e.ssa == nil || len(e.nativeCalls) == 0 {
 			t.Fatalf("%s was not compiled to call natively: %+v", name, e)
 		}
@@ -7024,7 +7393,7 @@ func TestJITSSAEntersCalleesWithoutCode(t *testing.T) {
 			}
 			// The callees the caller calls natively: native callers stop.
 			cl := r.global.getOwn(r.atoms.intern(tc.caller)).value.Object().fn().closure
-			e := r.jit.hint(cl.hint())
+			e := r.jit.hint(cl)
 			if e == nil || len(e.nativeCalls) == 0 {
 				t.Fatalf("%s calls nothing natively: %+v", tc.caller, e)
 			}
@@ -7089,7 +7458,7 @@ func TestJITSSACallerDroppedWhileItsCalleeLeaves(t *testing.T) {
 					}
 					drop = false
 					cl := rt.global.getOwn(rt.atoms.intern("caller")).value.Object().fn().closure
-					e := rt.jit.hint(cl.hint())
+					e := rt.jit.hint(cl)
 					inUse = e != nil && rt.jit.inUse(e)
 					dropped = e != nil && rt.jit.dropEntry(weak.Make(cl.fn), e)
 					return Undefined, nil
@@ -7109,7 +7478,7 @@ func TestJITSSACallerDroppedWhileItsCalleeLeaves(t *testing.T) {
 				}
 			}
 			cl := r.global.getOwn(r.atoms.intern("caller")).value.Object().fn().closure
-			e := r.jit.hint(cl.hint())
+			e := r.jit.hint(cl)
 			if e == nil || e.ssa == nil {
 				t.Fatalf("caller was not compiled: %+v", e)
 			}
@@ -7159,7 +7528,7 @@ func TestJITSSACalleeContextsKeepNothing(t *testing.T) {
 		}
 	}
 	cl := r.global.getOwn(r.atoms.intern("sum")).value.Object().fn().closure
-	if e := r.jit.hint(cl.hint()); e == nil || e.ssa == nil || len(e.nativeCalls) == 0 || e.ssaStats.entries == 0 {
+	if e := r.jit.hint(cl); e == nil || e.ssa == nil || len(e.nativeCalls) == 0 || e.ssaStats.entries == 0 {
 		t.Fatalf("sum calls nothing natively: %+v", e)
 	}
 	o := weak.Make(r.global.getOwn(r.atoms.intern("o")).value.Object())
@@ -8589,7 +8958,7 @@ func TestJITSSAGoCallsFromNativeCallees(t *testing.T) {
 				case 2:
 					if k == 1 && dropCaller && rt.jit != nil {
 						cl := rt.global.getOwn(rt.atoms.intern("outer")).value.Object().fn().closure
-						if e := rt.jit.hint(cl.hint()); e != nil {
+						if e := rt.jit.hint(cl); e != nil {
 							rt.jit.dropEntry(weak.Make(cl.fn), e)
 						}
 					}
@@ -10475,7 +10844,7 @@ func TestJITSSAGoesOnNatively(t *testing.T) {
 	}
 	entry := func(name string) *jitEntry {
 		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
-		return r.jit.hint(cl.hint())
+		return r.jit.hint(cl)
 	}
 	checked := 0
 	for i := 0; i < 4; i++ {

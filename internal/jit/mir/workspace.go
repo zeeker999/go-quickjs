@@ -2,6 +2,7 @@ package mir
 
 import (
 	"runtime"
+	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/arena"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
@@ -71,6 +72,26 @@ func (w *Workspace) init() {
 	w.ivRefs.KeepBig()
 	w.locs.KeepBig()
 	w.saved.KeepBig()
+}
+
+// Bytes is the memory the workspace keeps between compiles: its arenas'
+// chunks, its move schedule's tables and its code generators' assemblers
+// and tables.
+func (w *Workspace) Bytes() int {
+	n := w.bools.Bytes() + w.ints.Bytes() + w.words.Bytes() + w.sets.Bytes() + w.values.Bytes() + w.blocks.Bytes() +
+		w.uses.Bytes() + w.intervals.Bytes() + w.ivRefs.Bytes() + w.locs.Bytes() + w.saved.Bytes()
+	n += capBytes(w.sched.moves) + capBytes(w.sched.steps) + capBytes(w.sched.parked) + capBytes(w.sched.readers)
+	n += w.amd64.a.Bytes() + capBytes(w.amd64.labels) + capBytes(w.amd64.stubFor) + capBytes(w.amd64.cold)
+	n += w.arm64.a.Bytes() + capBytes(w.arm64.labels) + capBytes(w.arm64.stubFor) + capBytes(w.arm64.cold)
+	// A map's entries, as their keys and values, at least.
+	n += (len(w.amd64.stubs) + len(w.arm64.stubs)) * int(unsafe.Sizeof(stubKey{})+unsafe.Sizeof(amd64.Label(0)))
+	return n
+}
+
+// capBytes is the memory s's backing array holds.
+func capBytes[T any](s []T) int {
+	var t T
+	return cap(s) * int(unsafe.Sizeof(t))
 }
 
 // Rewind takes back everything a compile in the workspace used.

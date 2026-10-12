@@ -313,6 +313,16 @@ type Program struct {
 	UpvalueBase, Upvalues int
 }
 
+// Footprint is the memory p holds: its instructions, state maps and
+// liveness, which a runtime that keeps p counts (the VM's JIT budget).
+func (p *Program) Footprint() int {
+	if p == nil {
+		return 0
+	}
+	return int(unsafe.Sizeof(*p)) + cap(p.Globals)*4 + cap(p.Code)*int(unsafe.Sizeof(Instruction{})) +
+		cap(p.Maps)*int(unsafe.Sizeof(StateMap{})) + cap(p.Live)*8
+}
+
 // LiveAt reports whether local i may be read from pc on before it is
 // written (Live); true where that is not known.
 func (p *Program) LiveAt(pc, i int) bool {

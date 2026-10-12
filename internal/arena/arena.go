@@ -12,6 +12,8 @@
 // An Arena is not safe for concurrent use.
 package arena
 
+import "unsafe"
+
 // Arena is a bump allocator of T. Its zero value is ready to use.
 type Arena[T any] struct {
 	chunks [][]T
@@ -169,4 +171,10 @@ func (a *Arena[T]) Cap() int {
 		n += len(c)
 	}
 	return n
+}
+
+// Bytes is the memory the arena's chunks hold.
+func (a *Arena[T]) Bytes() int {
+	var t T
+	return a.Cap()*int(unsafe.Sizeof(t)) + cap(a.chunks)*int(unsafe.Sizeof(a.chunks)) + cap(a.used)*int(unsafe.Sizeof(0))
 }
