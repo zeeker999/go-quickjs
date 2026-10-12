@@ -412,6 +412,7 @@ type jitState struct {
 	// counts the calls Go made so.
 	goCalls    uint64
 	pinSerial  uint64
+	goMark     jitGoMark
 	goRuns     []jitGoRun
 	goPinned   []*jit.SSACode
 	retired    []jitRetired

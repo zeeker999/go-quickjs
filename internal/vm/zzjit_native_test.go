@@ -1647,6 +1647,72 @@ func TestJITSSAProfitability(t *testing.T) {
 	}
 }
 
+// Calls of Go count toward judging code as stretches do (jitSSAProfit):
+// builtins, entered three times, each a loop of 40,000 calls of
+// String.prototype.indexOf and little else, was judged every jitSSAProbe
+// entries, so never, and ran natively, slower than the tree tier, as
+// RegExp's run blocks did; now it is judged after its first calls and
+// the tree tier runs it. mixed, as many calls with real work around each,
+// stays native. And a native callee is judged by its own calls of Go
+// (jitCalleeProfit): heavy, called natively by outer, ten calls of Go and
+// nothing else each time, had its native callers call it natively
+// whatever it cost; now Go runs it, in the tree tier, and outer's code
+// calls it through Go (notNative). light, called so too, does real work
+// around its calls and is called natively still. Each answer is the
+// interpreter's.
+func TestJITSSAProfitabilityOfCallsOfGo(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var str='abcdefgh';
+		function builtins(n){let s=0;for(let i=0;i<n;i++)s=(s+str.indexOf('q')+str.indexOf('c'))|0;return s}
+		function mixed(n){let s=0;for(let i=0;i<n;i++){s=(s*31+i)|0;s^=s>>>7;s=(s+i*i)|0;s^=s<<3;s=(s*7+(i>>1))|0;s^=s>>>5;s=(s+str.indexOf('c'))|0}return s}
+		function heavy(k){return str.indexOf('q')+str.indexOf('c')+str.indexOf('d')+str.indexOf('e')+str.indexOf('f')+
+			str.indexOf('g')+str.indexOf('h')+str.indexOf('a')+str.indexOf('b')+str.indexOf('x')+k}
+		function light(k){let x=k;for(let j=0;j<20;j++){x=(x*31+j)|0;x^=x>>>7;x=(x+j*j)|0;x^=x<<3}return (x+str.indexOf('c'))|0}
+		function outer(n){let s=0;for(let i=0;i<n;i++)s=(s+heavy(i)+light(i))|0;return s}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range 3 {
+		src := `[builtins(20000),mixed(20000),outer(3000)].join()`
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+	}
+	entry := func(name string) *jitEntry {
+		cl := r.global.getOwn(r.atoms.intern(name)).value.Object().fn().closure
+		return r.jit.cache[weak.Make(cl.fn)]
+	}
+	if e := entry("builtins"); e == nil || e.ssa == nil || !e.entrySlow || e.ssaStats.entries >= jitSSAProbe {
+		t.Fatalf("builtins kept running natively: %+v", e)
+	}
+	if e := entry("mixed"); e == nil || e.ssa == nil || e.entrySlow || e.ssaStats.goCalls == 0 {
+		t.Fatalf("mixed did not stay native: %+v", e)
+	}
+	if e := entry("heavy"); e == nil || e.ssa == nil || e.ssaStats.calleeGoCalls == 0 || !e.notNative || !e.entrySlow {
+		t.Fatalf("heavy kept being called natively: %+v", e)
+	}
+	if e := entry("light"); e == nil || e.ssa == nil || e.ssaStats.calleeGoCalls == 0 || e.notNative {
+		t.Fatalf("light was not called natively: %+v", e)
+	}
+}
+
 // The new pipeline compares any two values natively where their words tell
 // (ssa.OpEqTagged): objects by identity, as EarleyBoyer's association lists
 // do with ===, numbers as numbers, primitives by their words. Strings, and
@@ -7078,7 +7144,7 @@ func TestJITSSAGoCalls(t *testing.T) {
 		function thrower(i){made++;if(i===777)throw new TypeError('boom '+arguments.length);return i&7}
 		function mk(){let c=0;const inc=function(){c+=2;return arguments.length};
 			return function loop(n){let s=0;const o={length:3};
-				for(let i=0;i<n;i++){s=(s+h(o)+new P(i).c.y+bound(i&3)+[i,1].indexOf(1)+inc()+c+thrower(i))|0}return s+':'+o.n}}
+				for(let i=0;i<n;i++){let w=i;for(let k=0;k<30;k++)w=(w*31+k)^(w>>>3);s=(s+w+h(o)+new P(i).c.y+bound(i&3)+[i,1].indexOf(1)+inc()+c+thrower(i))|0}return s+':'+o.n}}
 		var loop=mk();
 		function run(n){try{return loop(n)}catch(e){return e.message+'|'+e.stack+'|'+made}}
 		function rec(o,d){let s=0;for(let i=0;i<30;i++){s=(s+o.v)|0;if(d>0&&i==15)s=(s+deeper(d))|0}return s}

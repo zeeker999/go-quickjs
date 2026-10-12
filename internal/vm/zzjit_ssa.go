@@ -2116,6 +2116,7 @@ func (r *Runtime) jitGoCallNested(ctx *abi.Context, idx int) bool {
 	if jitCallUnsettled(e, pc, in) {
 		r.jitCallSeen(f, e, pc, sp, in)
 	}
+	r.jitCalleeProfit(e, serial, pc)
 	last, shared := s.ssaCtx, s.ssaSharedGen
 	// What the call runs natively runs in contexts past the levels', which
 	// hold their state until they go on.
@@ -2127,6 +2128,7 @@ func (r *Runtime) jitGoCallNested(ctx *abi.Context, idx int) bool {
 	r.stackTop = top
 	r.frameDepth = depthBefore
 	s.ssaCtx = last
+	s.goMark = jitGoMark{serial: serial, edges: r.backEdges - s.pollCredit, hint: e.hint, pc: pc}
 	if s.ssaSharedGen != shared {
 		// What the call ran shared other values with the contexts past
 		// the run's, which its levels' calls run in.
@@ -2138,6 +2140,56 @@ func (r *Runtime) jitGoCallNested(ctx *abi.Context, idx int) bool {
 	}
 	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
 	return true
+}
+
+// jitGoMark is where the last call of Go a native callee made returned
+// (jitGoCallNested): in which run's pins (serial), the back-edge counter
+// then, net of the polls' budgets, and its entry's hint -- which names it
+// without keeping it -- and PC. hint 0 is none yet.
+type jitGoMark struct {
+	serial uint64
+	edges  int
+	hint   uint32
+	pc     int
+}
+
+// jitCalleeProfit accounts for a call of Go that e's code makes at pc as a
+// native callee, in the run whose pins serial names, and every jitSSAProbe
+// such calls decides whether its native code pays, as jitSSAProfit decides
+// for code Go enters: each call of Go costs what an exit and an entry
+// would (jitSSAMinWork), against the work the code did natively since the
+// last -- the back edges taken, at its loops' mean length, and the
+// distance from the last call it made, at a later PC in the same run. Called natively,
+// its calls cost it the same as entered from Go, but its native callers
+// pay no entry: called through Go instead (ExitEnter), each call of it
+// would cost one. So it pays while its work makes up for its calls of Go
+// beyond its calls in (nativeIn); if not -- a function of loops that only
+// call built-ins, RegExp's run blocks, a call of Go at every few
+// instructions -- Go stops entering it and native callers stop calling it
+// (notNative), and the existing tiers run it, its calls of built-ins the
+// tree tier's own, cheaper than calls of Go from native code.
+func (r *Runtime) jitCalleeProfit(e *jitEntry, serial uint64, pc int) {
+	s := r.jit
+	st := &e.ssaStats
+	// The back edges since the last such call, whatever ran them -- the
+	// tiers share the counter, so the guess errs toward the native code --
+	// and, in the same run, the distance from the call before it.
+	m := &s.goMark
+	if back := m.edges - (r.backEdges - s.pollCredit); m.hint != 0 && back > 0 {
+		st.calleeWork += uint64(back) * uint64(e.ssaLoop)
+	}
+	if m.serial == serial && m.hint == e.hint && pc > m.pc {
+		st.calleeWork += uint64(pc - m.pc)
+	}
+	st.calleeGoCalls++
+	if st.calleeGoCalls%jitSSAProbe != 0 || st.calleeGoCalls <= e.nativeIn || jitMarking() {
+		return
+	}
+	if st.calleeWork < (st.calleeGoCalls-e.nativeIn)*jitSSAMinWork {
+		e.entrySlow = true
+		e.notNative, e.nativeEntry, e.nativeRetry = true, 0, 0
+		e.nativeBackoff = min(e.nativeBackoff+1, jitNativeBackoffs)
+	}
 }
 
 // jitStoreElem stores v at index n of o as an assignment would, where that
@@ -4076,6 +4128,14 @@ type jitSSAStats struct {
 	ended, work                            uint64
 	// goCalls counts the calls native code had Go make (jitGoCall).
 	goCalls uint64
+	// calleeGoCalls counts those it made as a native callee
+	// (jitGoCallNested), and calleeWork the work it did natively before
+	// each, as jitSSAProfit estimates a stretch's (jitCalleeProfit), since
+	// its calls in (jitEntry.nativeIn) were last counted from 0.
+	calleeGoCalls, calleeWork uint64
+	// judged is how many stretches, calls of Go included, there had been
+	// when jitSSAProfit last judged the code.
+	judged uint64
 	// guardsAt counts failed guards by their site (abi.Context.ExitSite:
 	// the slot IR PC of the operation, or -1 for an entry's speculation);
 	// nil until one fails.
@@ -4132,8 +4192,17 @@ func (r *Runtime) jitSSAProfit(e *jitEntry, ctx *abi.Context, start, edges int) 
 	st.work += work
 	// A call of Go a stretch makes costs it what an exit and an entry
 	// would, which it saves (ssa.GoCall): each counts as a stretch, so a
-	// method whose call Go now makes is judged as it was when it left.
-	if st.entries%jitSSAProbe == 0 && st.work < (st.entries+st.goCalls)*jitSSAMinWork {
+	// method whose call Go now makes is judged as it was when it left --
+	// and as often: every jitSSAProbe stretches, its calls of Go among
+	// them. Judged every jitSSAProbe entries, a function entered a few
+	// times, each a loop of a hundred thousand calls of built-ins --
+	// RegExp's run blocks -- was never judged.
+	stretches := st.entries + st.goCalls
+	if stretches-st.judged < jitSSAProbe {
+		return
+	}
+	st.judged = stretches
+	if st.work < stretches*jitSSAMinWork {
 		// Go stops entering it; native callers, which pay neither, go on
 		// calling it (NativeCalls).
 		e.entrySlow = true
@@ -4190,6 +4259,9 @@ func (r *Runtime) jitGoOn(f *frame, e *jitEntry, pc, sp int) (v Value, err error
 			stats := e.ssaStats
 			r.jitReoptimize(f.cl, e)
 			e.ssaStats = stats
+			// Calls in are counted afresh (nativeIn), and the calls of Go
+			// they are weighed against with them (jitCalleeProfit).
+			e.ssaStats.calleeGoCalls, e.ssaStats.calleeWork = 0, 0
 			if e.ssa.HasEntry(pc) && !e.entrySlow {
 				s.goOnPC, s.goOnDepth = pc, sp-f.base
 				return Undefined, nil, false, true
@@ -5049,6 +5121,7 @@ func (r *Runtime) jitUnwound(e *jitEntry) {
 		e.unwindReopts++
 		e.unwindReopt = true
 		e.nativeIn, e.nativeOut = 0, 0
+		e.ssaStats.calleeGoCalls, e.ssaStats.calleeWork = 0, 0
 		return
 	}
 	e.notNative, e.nativeEntry, e.nativeRetry = true, 0, 0
@@ -5096,6 +5169,7 @@ const (
 func jitRetryNative(e *jitEntry) {
 	if e.nativeRetry++; e.nativeRetry >= jitNativeRetry<<(e.nativeBackoff-1) {
 		e.notNative, e.nativeIn, e.nativeOut = false, 0, 0
+		e.ssaStats.calleeGoCalls, e.ssaStats.calleeWork = 0, 0
 		e.nativeEntry = e.ssa.EntryAddress(0)
 	}
 }
