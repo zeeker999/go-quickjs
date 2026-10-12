@@ -1769,6 +1769,10 @@ func jitHostCall(ctx *abi.Context) bool {
 	if r == nil || ctx.GoKeep >= abi.MaxKeeps {
 		return false
 	}
+	if ssa.GoOp(ctx.GoOp) == ssa.GoCall && jitGoCallWork == nil {
+		// The most frequent, asked first.
+		return r.jitGoCall(ctx)
+	}
 	if jitGoCallWork != nil {
 		jitGoCallWork()
 	}
@@ -1975,7 +1979,7 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	if !run.pinned {
 		r.jitGoPin(idx)
 	}
-	v, _, err := r.jitCallAt(in, sp)
+	v, err := r.jitCallMade(in, sp)
 	jitClearArgs(r.stack, top, sp)
 	r.stackTop = top
 	s.ssaCtx = last
@@ -2122,7 +2126,7 @@ func (r *Runtime) jitGoCallNested(ctx *abi.Context, idx int) bool {
 	// hold their state until they go on.
 	ctxTop := s.ctxTop
 	s.ctxTop = max(ctxTop, idx+1)
-	v, _, err := r.jitCallAt(in, sp)
+	v, err := r.jitCallMade(in, sp)
 	s.ctxTop = ctxTop
 	jitClearArgs(r.stack, top, sp)
 	r.stackTop = top
@@ -2289,6 +2293,42 @@ func (fb *jitFeedback) GoCalls() bool { return true }
 // they cost no call.
 func jitCallUnsettled(e *jitEntry, pc int, in bytecode.Instr) bool {
 	return in.Op == bytecode.OpNew || e.inlinePending || uint(pc) >= uint(len(e.callSites)) || e.callSites[pc] != jitCallDone
+}
+
+// jitCallMade makes a call of Go, in, its operands on the VM's stack up to
+// sp, as jitCallAt does; a built-in of this realm -- what most calls native
+// code leaves to Go call -- as callDirect calls one, without first asking
+// whether it is a closure with a tree, Math's, or Function.prototype.call:
+// as V8's code calls a builtin it knows through its own stub, not the
+// generic Call.
+func (r *Runtime) jitCallMade(in bytecode.Instr, sp int) (Value, error) {
+	if in.Op != bytecode.OpNew {
+		argc := int(in.A)
+		if callee := r.stack[sp-argc-1]; callee.IsObject() {
+			o := callee.Object()
+			if fd := o.fn(); fd != nil && fd.native != nil && fd.mathOp == 0 && !fd.bound && o != r.callFn && (fd.realm == nil || fd.realm == r.Realm) {
+				this := Undefined
+				if in.Op == bytecode.OpCallMethod {
+					this = r.stack[sp-argc-2]
+				}
+				args := r.stack[sp-argc : sp]
+				if err := r.tick(); err != nil {
+					return Undefined, err
+				}
+				if err := r.nativeFrame(o, fd, this, args, Undefined); err != nil {
+					return Undefined, err
+				}
+				v, err := fd.native(r, this, args)
+				r.frameDepth--
+				if r.meter != nil && err == nil {
+					err = r.chargeResult(v)
+				}
+				return v, err
+			}
+		}
+	}
+	v, _, err := r.jitCallAt(in, sp)
+	return v, err
 }
 
 // jitClearArgs clears the operands a call of Go put past the VM stack's

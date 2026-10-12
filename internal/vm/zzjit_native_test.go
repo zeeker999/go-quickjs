@@ -8047,6 +8047,66 @@ func TestJITSSAGoCallsFromNativeCalleesCallBack(t *testing.T) {
 	}
 }
 
+// A built-in a call of Go calls is called as callDirect calls one
+// (jitCallMade), without its other cases first: its frame for a stack
+// trace -- a RangeError's from String.prototype.repeat, through a native
+// callee -- the memory meter charged for its result as callDirect charges
+// it, and a bound function, Math.max and Function.prototype.call still
+// made the ordinary way. Each answer, each stack and the meter's count are
+// the interpreter's.
+func TestJITSSABuiltinCallsAsCallDirect(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `var bi=String.prototype.indexOf.bind('zzc');
+		function body(i,k){let w=i;for(let j=0;j<30;j++)w=(w*31+j)^(w>>>3);
+			return (w+'x'.repeat(70000).length+Math.max(i,3)+String.prototype.indexOf.call('abc','c')+bi('c')+'a'.repeat(k).length)|0}
+		function loop(n,bad){let s=0;for(let i=0;i<n;i++)s=(s+body(i,i===bad?-1:2))|0;return s}
+		function run(n,bad){try{return loop(n,bad)}catch(e){return e.name+':'+e.message+'|'+e.stack}}`
+	runs := func(jit bool) ([]string, int64) {
+		r := New(Config{JIT: jit, MemoryLimit: 1 << 40})
+		if jit {
+			r = jitRuntimeForTest(t, Config{JIT: true, MemoryLimit: 1 << 40})
+		}
+		defer func() { r.Close(); r.ReleaseClosed() }()
+		if _, err := r.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		var charged int64
+		for i, src := range []string{`run(300,-1)`, `run(300,-1)`, `run(300,-1)`, `run(300,-1)`, `run(300,250)`} {
+			live := r.meter.live
+			v, err := r.Run(compileForTest(t, `String(`+src+`)`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if i == 3 {
+				charged = r.meter.live - live
+				if jit {
+					cl := r.global.getOwn(r.atoms.intern("body")).value.Object().fn().closure
+					if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil || e.ssaStats.goCalls == 0 {
+						t.Fatalf("body did not call Go natively: %+v", e)
+					}
+				}
+			}
+			out = append(out, v.String().Go())
+		}
+		return out, charged
+	}
+	want, wantCharged := runs(false)
+	got, gotCharged := runs(true)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("round %d: got\n%s\ninterpreter\n%s", i, got[i], want[i])
+		}
+	}
+	if gotCharged != wantCharged || wantCharged == 0 {
+		t.Fatalf("results charged %d bytes, the interpreter %d", gotCharged, wantCharged)
+	}
+}
+
 // A call Go makes from native code has no entry after it (ssa's plan): when
 // it leaves -- loop's call of again has loop compiled again, or throws --
 // the interpreter runs the rest of that iteration and native code goes on
