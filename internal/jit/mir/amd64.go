@@ -3070,16 +3070,23 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.OpImm(amd64.Add, scratchA, c.enc.PropertyValue, true)
 		c.setG(v, scratchA)
 	case ssa.OpStringMethod:
-		// A string's charCodeAt is the context's cell, if it holds the
-		// intrinsic.
+		// A string's charCodeAt where String.prototype has it now, its shape
+		// the one Go found the intrinsic in: the call compares what it
+		// holds with the intrinsic (stringCode), which a call made
+		// meanwhile may have replaced.
 		c.a.MovImm(scratchB, c.enc.String)
 		c.a.Op(amd64.Cmp, c.gpr(arg(0), scratchA), scratchB, true)
 		guard(amd64.CondNE)
-		c.a.Load(scratchB, regCtx, abi.OffCharCode+c.enc.RefOffset)
-		c.a.Op(amd64.Test, scratchB, scratchB, true)
+		c.a.Load(scratchA, regCtx, abi.OffStringProto)
+		c.a.Op(amd64.Test, scratchA, scratchA, true)
 		guard(amd64.CondE)
-		c.a.MovRR(scratchA, regCtx)
-		c.a.OpImm(amd64.Add, scratchA, abi.OffCharCode, true)
+		c.a.Load(scratchB, scratchA, c.enc.ObjectShape)
+		c.a.Load(scratchC, regCtx, abi.OffStringShape)
+		c.a.Op(amd64.Cmp, scratchB, scratchC, true)
+		guard(amd64.CondNE)
+		c.a.Load(scratchA, scratchA, c.enc.ObjectProps)
+		c.a.Load(scratchB, regCtx, abi.OffCharCodeAtOffset)
+		c.a.Op(amd64.Add, scratchA, scratchB, true)
 		c.setG(v, scratchA)
 	case ssa.OpStringCode:
 		c.stringCode(v, c.guardFor(v))

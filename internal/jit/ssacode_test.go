@@ -105,8 +105,12 @@ func testWTF8(units []uint16) string {
 }
 
 // testCharCodeAt is the handle of the object that is charCodeAt, the
-// intrinsic, in a heap whose context has it.
-const testCharCodeAt = 6
+// intrinsic, in a heap whose context has it; testStringShape the shape of
+// the String.prototype that holds it.
+const (
+	testCharCodeAt  = 6
+	testStringShape = 0x7000
+)
 
 // testObject is an object's layout as far as native code reads it.
 type testObject struct {
@@ -355,8 +359,11 @@ type nativeHeap struct {
 	others  [8]testObject
 	texts   [8]testString
 	specs   []testText // handles 5 and 6's
-	// intrinsic is the context's charCodeAt cell.
+	// intrinsic is the context's charCodeAt cell, and strProto the
+	// String.prototype native code reads the method in (abi.Context's
+	// StringProto): its one property holds the intrinsic.
 	intrinsic testValue
+	strProto  testObject
 	// evaluated is the objects' property values for the SSA evaluator.
 	evaluated [][]ir.Value
 	// lexNames is the names script-level lexical bindings have, a bit for
@@ -427,6 +434,7 @@ func (h testHeap) native() *nativeHeap {
 		}
 		if h[4].intrinsic {
 			n.intrinsic = n.word(ir.Value{Kind: ir.Opaque, Bits: testCharCodeAt})
+			n.strProto = testObject{shape: testStringShape, props: []testProperty{{key: 15, value: n.intrinsic}}}
 		}
 	}
 	return n
@@ -918,6 +926,10 @@ func nativeMismatch(c *compiled, pc int, slots []ir.Value, poll int, heap testHe
 	if len(nh.objects) > 4 {
 		ctx.Global, ctx.LexNames = unsafe.Pointer(&nh.objects[4]), unsafe.Pointer(&nh.lexNames)
 		*(*testValue)(unsafe.Pointer(&ctx.CharCodeAt)) = nh.intrinsic
+		if nh.intrinsic.ref != nil {
+			ctx.StringProto, ctx.StringShape = unsafe.Pointer(&nh.strProto), testStringShape
+			ctx.CharCodeAtOffset = uint64(testEncoding.PropertyValue)
+		}
 	}
 	if err := c.code.Run(pc, ctx); err != nil {
 		return err.Error()

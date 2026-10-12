@@ -4289,8 +4289,13 @@ type jitShared struct {
 	// left native code at every call -- Crypto's intAt, until its callers
 	// stopped calling it natively, and then Go ran each of its calls.
 	// The function's object, or nil, so that the struct compares: a
-	// Value's word is a NaN, unequal to itself.
+	// Value's word is a NaN, unequal to itself. strProto, strShape and
+	// ccOffset are where it is in String.prototype (abi.Context's
+	// StringProto), when it is there.
 	charCodeAt *Object
+	strProto   *Object
+	strShape   *shape
+	ccOffset   uint64
 }
 
 // jitShareContexts writes what the contexts share into context idx, which
@@ -4308,6 +4313,14 @@ func (r *Runtime) jitShareContexts(idx int, f *frame) {
 	}
 	if m := r.jitStringMethod(); m.IsObject() {
 		sh.charCodeAt = m.Object()
+		if p := r.proto.str; p.shape != nil {
+			if i := p.findOwn(s.charCodeAtKey); i >= 0 {
+				// Its shape remembered: a change of its layout gives it
+				// another, which native code's check then misses.
+				sh.strProto, sh.strShape = p, remember(p.shape)
+				sh.ccOffset = uint64(i)*uint64(jitEncoding.PropertySize) + uint64(jitEncoding.PropertyValue)
+			}
+		}
 	}
 	if sh == s.ssaShared && s.ssaSharedFrom <= idx {
 		return
@@ -4323,6 +4336,7 @@ func (r *Runtime) jitShareContexts(idx int, f *frame) {
 		if sh.charCodeAt != nil {
 			*(*Value)(unsafe.Pointer(&c.CharCodeAt)) = Obj(sh.charCodeAt)
 		}
+		c.StringProto, c.StringShape, c.CharCodeAtOffset = unsafe.Pointer(sh.strProto), uint64(uintptr(unsafe.Pointer(sh.strShape))), sh.ccOffset
 	}
 	s.ssaShared, s.ssaSharedFrom = sh, idx
 }
@@ -4370,6 +4384,7 @@ func (r *Runtime) jitGrowContexts() bool {
 			c.StackBase, c.StackEnd, c.StackTop, c.StackHigh = last.StackBase, last.StackEnd, last.StackTop, last.StackHigh
 			c.BackEdges, c.Global, c.LexNames = last.BackEdges, last.Global, last.LexNames
 			c.CharCodeAt = last.CharCodeAt
+			c.StringProto, c.StringShape, c.CharCodeAtOffset = last.StringProto, last.StringShape, last.CharCodeAtOffset
 		case c.LevelLimit == uint64(old):
 			c.LevelLimit = n
 		}

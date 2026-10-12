@@ -8123,6 +8123,37 @@ func TestJITSSAAbsentElementsAreUndefined(t *testing.T) {
 	}
 }
 
+// A string's charCodeAt is read where String.prototype has it now, its
+// shape checked, and the call compares it with the intrinsic: a call native
+// code makes may replace it, in the middle of a loop, and the next call is
+// then the script's function's. The method had been the context's snapshot,
+// taken by Go when it entered the code, and compared with itself: the
+// intrinsic went on being called after a callback replaced it. Each answer
+// is the interpreter's.
+func TestJITSSACharCodeAtReplacedWhileNative(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, tc := range []struct{ name, setup, body, check string }{
+		{"callback", `function cb(i){if(i===20)String.prototype.charCodeAt=function(){return 88}}`, `a[i]=s.charCodeAt(i);cb(i);`, `a[19]===84&&a[20]===85&&a[21]===88`},
+		{"getter", `function cb(i){if(i===20)Object.defineProperty(String.prototype,'charCodeAt',{get(){return function(){return 7}},configurable:true})}`, `a[i]=s.charCodeAt(i);cb(i);`, `a[20]===85&&a[21]===7`},
+		{"callee", `function code(s,i){let t=0;for(let k=0;k<1;k++)t=s.charCodeAt(i);return t}function cb(i){if(i===20)String.prototype.charCodeAt=function(){return 99}}`, `a[i]=code(s,i);cb(i);`, `a[20]===85&&a[21]===99`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := jitRuntimeForTest(t, Config{JIT: true})
+			r.jitSSA = true
+			source := tc.setup + `let s='',a=new Array(64).fill(0);for(let i=0;i<64;i++)s+=String.fromCharCode(65+i);function pack(s,a){for(let i=0;i<64;i++){` + tc.body + `}return a}pack(s,a);` + tc.check
+			v, err := r.Run(compileForTest(t, source))
+			if err != nil || !v.IsBool() || !v.Truthy() {
+				t.Fatalf("%s: %v, %v", tc.name, v.IsBool() && v.Truthy(), err)
+			}
+			if r.JITStats().SSAEntries == 0 {
+				t.Fatal("pack never ran natively")
+			}
+		})
+	}
+}
+
 // TestJITSSAMathFunctions: every Math function of numbers runs natively,
 // as V8's code makes them -- an instruction of its own (a rounding, sign,
 // fround, max, min) or Go called from native code, the VM's very function

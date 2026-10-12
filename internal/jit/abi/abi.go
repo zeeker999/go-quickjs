@@ -67,6 +67,14 @@ type Context struct {
 	// found it still there before an entry of a function that reads it, and
 	// otherwise nothing (a nil pointer word).
 	CharCodeAt Slot
+	// StringProto is String.prototype, StringShape the address of the
+	// shape it had, which Go keeps alive, and CharCodeAtOffset where its
+	// charCodeAt's value is in its table, in bytes, when Go found the
+	// intrinsic there: native code reads the method where it is now, its
+	// shape checked, and compares it with CharCodeAt, so that a method
+	// replaced meanwhile -- by a call native code made -- is found.
+	StringProto                   unsafe.Pointer
+	StringShape, CharCodeAtOffset uint64
 	// This is the receiver, laid out as a VM value, which Go sets before
 	// every entry of a function that reads it; uninitialized in a derived
 	// constructor before super() returns.
@@ -291,18 +299,23 @@ var (
 	OffGlobal    = int32(unsafe.Offsetof(Context{}.Global))
 	OffLexNames  = int32(unsafe.Offsetof(Context{}.LexNames))
 	OffCharCode  = int32(unsafe.Offsetof(Context{}.CharCodeAt))
-	OffExitKind  = int32(unsafe.Offsetof(Context{}.ExitKind))
-	OffExitPC    = int32(unsafe.Offsetof(Context{}.ExitPC))
-	OffExitDepth = int32(unsafe.Offsetof(Context{}.ExitDepth))
-	OffExitSite  = int32(unsafe.Offsetof(Context{}.ExitSite))
-	OffRet       = int32(unsafe.Offsetof(Context{}.Ret))
-	OffRetFrom   = int32(unsafe.Offsetof(Context{}.RetFrom))
-	OffRecords   = int32(unsafe.Offsetof(Context{}.Records))
-	OffRecord    = int32(unsafe.Offsetof(Context{}.Record))
-	OffRecordRef = int32(unsafe.Offsetof(Context{}.RecordRef))
-	OffRecordHi  = int32(unsafe.Offsetof(Context{}.RecordHigh))
-	OffSpill     = int32(unsafe.Offsetof(Context{}.Spill))
-	OffKeep      = int32(unsafe.Offsetof(Context{}.Keep))
+	// OffStringProto, OffStringShape and OffCharCodeAtOffset locate what a
+	// string's charCodeAt is read with (Context's StringProto).
+	OffStringProto      = int32(unsafe.Offsetof(Context{}.StringProto))
+	OffStringShape      = int32(unsafe.Offsetof(Context{}.StringShape))
+	OffCharCodeAtOffset = int32(unsafe.Offsetof(Context{}.CharCodeAtOffset))
+	OffExitKind         = int32(unsafe.Offsetof(Context{}.ExitKind))
+	OffExitPC           = int32(unsafe.Offsetof(Context{}.ExitPC))
+	OffExitDepth        = int32(unsafe.Offsetof(Context{}.ExitDepth))
+	OffExitSite         = int32(unsafe.Offsetof(Context{}.ExitSite))
+	OffRet              = int32(unsafe.Offsetof(Context{}.Ret))
+	OffRetFrom          = int32(unsafe.Offsetof(Context{}.RetFrom))
+	OffRecords          = int32(unsafe.Offsetof(Context{}.Records))
+	OffRecord           = int32(unsafe.Offsetof(Context{}.Record))
+	OffRecordRef        = int32(unsafe.Offsetof(Context{}.RecordRef))
+	OffRecordHi         = int32(unsafe.Offsetof(Context{}.RecordHigh))
+	OffSpill            = int32(unsafe.Offsetof(Context{}.Spill))
+	OffKeep             = int32(unsafe.Offsetof(Context{}.Keep))
 
 	OffReturnTo   = int32(unsafe.Offsetof(Context{}.ReturnTo))
 	OffRetValue   = int32(unsafe.Offsetof(Context{}.RetValue))
