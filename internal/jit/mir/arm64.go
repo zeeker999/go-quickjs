@@ -2864,10 +2864,28 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.elementCell(arg(0), c.guardFor(v))
 		c.setG(v, a64A)
 	case ssa.OpElemWrite:
-		c.index(arg(1), c.guardFor(v))
-		c.element(arg(0), c.guardFor(v))
+		fail, done := c.guardFor(v), c.a.NewLabel()
+		if c.enc.CallGo != 0 {
+			// Any other store Go makes if it can (ssa.GoElemWrite).
+			slow, stub := c.a.NewLabel(), c.stubLabel(v.State, exitKind(v.Aux))
+			fail = func(cond arm64.Cond) { c.a.BCond(cond, slow) }
+			c.cold = append(c.cold, func() {
+				c.a.Bind(slow)
+				size := int32(unsafe.Sizeof(abi.GoArg{}))
+				c.a.Store(a64Ctx, abi.OffGoArgs+c.enc.RefOffset, c.gpr(v.Args[0], a64C))
+				c.a.FMovFromF(a64A, c.fpr(v.Args[1], a64F0))
+				c.a.Store(a64Ctx, abi.OffGoArgs+size+c.enc.NumOffset, a64A)
+				c.a.FMovFromF(a64A, c.fpr(v.Args[2], a64F0))
+				c.a.Store(a64Ctx, abi.OffGoArgs+2*size+c.enc.NumOffset, a64A)
+				c.goSaving(uint64(ssa.GoElemWrite), &stub)
+				c.a.B(done)
+			})
+		}
+		c.index(arg(1), fail)
+		c.element(arg(0), fail)
 		c.boxF64(c.fpr(arg(2), a64F0), a64B)
 		c.a.Store(a64A, c.enc.NumOffset, a64B)
+		c.a.Bind(done)
 	case ssa.OpBoxF64:
 		c.boxF64(c.fpr(arg(0), a64F0), a64A)
 		c.setG(v, a64A)

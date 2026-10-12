@@ -1755,6 +1755,10 @@ func jitHostCall(ctx *abi.Context) bool {
 		return true
 	case ssa.GoCall:
 		return r.jitGoCall(ctx)
+	case ssa.GoElemWrite:
+		o := *(**Object)(unsafe.Pointer(&ctx.GoArgs[0].Ref))
+		k, v := math.Float64frombits(ctx.GoArgs[1].Num), Float(math.Float64frombits(ctx.GoArgs[2].Num))
+		return o != nil && jitStoreElem(o, k, v)
 	case ssa.GoPoll:
 		// A debugger's interrupt may stop and show the frames, which the
 		// exit makes; stress (QJS_JIT_STRESS's budget) wants the exits.
@@ -2047,6 +2051,37 @@ func (r *Runtime) jitGoCallNested(ctx *abi.Context, idx int) bool {
 	}
 	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
 	return true
+}
+
+// jitStoreElem stores v at index n of o as an assignment would, where that
+// runs no script and cannot throw (ssa.GoElemWrite): over an element in
+// its dense storage, as the interpreter's own fast path does; into a hole
+// there, at the array's length or past it, as setElem grows it, when it
+// may grow and nothing up its chain could take the store -- a setter, a
+// read-only element. Crypto's BigInteger fills its arrays from their ends
+// down, and extends them at their lengths: native code had left for Go at
+// each such store.
+func jitStoreElem(o *Object, n float64, v Value) bool {
+	i := uint32(n)
+	if float64(i) != n || o.flags&objMappedArguments != 0 {
+		return false
+	}
+	if uint(i) < uint(len(o.elems)) && !isHole(o.elems[i]) {
+		o.elems[i] = v
+		return true
+	}
+	const want = objExtensible | objArrayLengthWritable
+	if o.class != ClassArray || o.flags&(want|objHasSparseElements) != want || !o.noIndexKeys() {
+		return false
+	}
+	for p := o.proto; p != nil; p = p.proto {
+		if p.class != ClassObject && p.class != ClassArray || len(p.elems) != 0 || !p.noIndexKeys() {
+			return false
+		}
+	}
+	// What setValueProp would do: setElem, unless the store is so far past
+	// the end that the element is to be a property of its own.
+	return o.setElem(i, v)
 }
 
 // jitCloseRetired closes the retired code no call of Go is suspended in.

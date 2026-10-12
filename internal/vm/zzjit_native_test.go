@@ -7928,6 +7928,64 @@ func TestJITSSAPollsAsCallsOfGo(t *testing.T) {
 	}
 }
 
+// A store of a number to an element native code does not make -- into a
+// hole, or at the array's length -- is Go's, called from native code
+// (ssa.GoElemWrite), as V8's code calls its grow stub, where it runs no
+// script and cannot throw (jitStoreElem): Crypto's BigInteger fills its
+// arrays from their ends down and extends them at their lengths, and its
+// code had left for Go at each such store. Where something could take the
+// store -- an array that may not grow, an element setter up the chain --
+// Go refuses it, and the code leaves for Go as before. Each answer is the
+// interpreter's.
+func TestJITSSAElementStoresGrow(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function fill(a,n){let i=n;while(--i>=0)a[i]=i*2;for(i=0;i<n;i++)a[n+i]=i+0.5;return a}
+		function sum(a){let s=0;for(let i=0;i<a.length;i++)s+=a[i];return s}
+		function run(k){let t=0;for(let j=0;j<k;j++)t+=sum(fill([],20+(j&3)));return t}
+		function sealed(k){let a=Object.preventExtensions([1,2,3]),t=0;for(let j=0;j<k;j++){try{fill(a,2)}catch(e){t++}}return t+':'+a.join()}`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rounds := []string{`String(run(200))`, `String(run(200))`, `String(run(200))`, `String(run(200))`,
+		`sealed(50)`, `var seen=0;Object.defineProperty(Array.prototype,'21',{set(v){seen++},configurable:true});String(run(40))+':'+seen`}
+	for i, src := range rounds {
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		hosts, unwound := uint64(0), uint64(0)
+		if r.jit != nil {
+			hosts, unwound = r.jit.hosts, r.jit.unwound
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		if i == 3 {
+			cl := r.global.getOwn(r.atoms.intern("fill")).value.Object().fn().closure
+			if e := r.jit.cache[weak.Make(cl.fn)]; e == nil || e.ssa == nil {
+				t.Fatalf("fill has no code: %+v", e)
+			}
+			if r.jit.hosts != hosts || r.jit.unwound != unwound {
+				t.Fatalf("native code left for Go: %d exits, %d unwound", r.jit.hosts-hosts, r.jit.unwound-unwound)
+			}
+		}
+	}
+}
+
 // TestJITSSAMathFunctions: every Math function of numbers runs natively,
 // as V8's code makes them -- an instruction of its own (a rounding, sign,
 // fround, max, min) or Go called from native code, the VM's very function

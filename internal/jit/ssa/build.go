@@ -208,6 +208,12 @@ type GoOp uint8
 // and checks for an interrupt, as V8's code calls its StackGuard, and native
 // code goes on at the loop's header; Go refuses it, for the code to leave
 // there, if one is due.
+//
+// GoElemWrite is a store of a number to an element native code does not
+// make (OpElemWrite): to a hole, or at the array's length, which grows it,
+// as V8's code calls its grow stub. The operands are the array's pointer
+// word, the key's and the value's number words; Go refuses a store that
+// could run a script or throw.
 const (
 	GoAdd GoOp = 1 + iota
 	GoRefill
@@ -219,6 +225,7 @@ const (
 	GoCall
 	GoMod
 	GoPoll
+	GoElemWrite
 )
 
 // RefillsPools reports whether a call takes an object from a pool, which
