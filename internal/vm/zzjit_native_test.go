@@ -8154,6 +8154,44 @@ func TestJITSSACharCodeAtReplacedWhileNative(t *testing.T) {
 	}
 }
 
+// A call native code makes may release the runtime's JIT (releaseJIT),
+// dropping every entry: the run it is suspended in goes on with the state
+// its contexts and pins are in, which is released only once no native run
+// is under way. It had been dropped at once, and the run's return to Go
+// read a nil state.
+func TestJITSSAReleasedWhileNative(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	r.jitSSA = true
+	released := 0
+	r.global.setOwnRaw(r.atoms.intern("host"), r.NewFunction("host", 0,
+		func(rt *Runtime, _ Value, _ []Value) (Value, error) {
+			rt.releaseJIT()
+			released++
+			runtime.GC()
+			return Undefined, nil
+		}), propDefault)
+	src := `function f(o,a,n){let s=0;for(let i=0;i<n;i++){o.x=7;if(i===n-3)host();a[0]+=1;s+=o.x+a[0]}return s}
+		let o={x:3},a=[0];f(o,a,200);f(o,a,200);let t=f(o,a,200);t+':'+a[0]`
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	want.global.setOwnRaw(want.atoms.intern("host"), want.NewFunction("host", 0,
+		func(*Runtime, Value, []Value) (Value, error) { return Undefined, nil }), propDefault)
+	wv, err := want.Run(compileForTest(t, src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := r.Run(compileForTest(t, src))
+	if err != nil || v.String().Go() != wv.String().Go() || released != 3 {
+		t.Fatalf("released while native: %v, %v, %d releases; interpreter %s", v, err, released, wv.String().Go())
+	}
+	if r.JITStats().SSAEntries == 0 {
+		t.Fatal("f never ran natively")
+	}
+}
+
 // TestJITSSAMathFunctions: every Math function of numbers runs natively,
 // as V8's code makes them -- an instruction of its own (a rounding, sign,
 // fround, max, min) or Go called from native code, the VM's very function

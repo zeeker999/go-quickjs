@@ -571,7 +571,9 @@ func (r *Runtime) releaseJIT() {
 		r.jit.dropEntry(key, e)
 	}
 	r.jit.clearRoots()
-	if len(r.jit.cache) == 0 {
+	// Not while a native run is under way, suspended in a call of Go that
+	// released it: it goes on with the state its contexts and pins are in.
+	if len(r.jit.cache) == 0 && r.jit.ctxTop == 0 {
 		r.jit = nil
 	}
 }
