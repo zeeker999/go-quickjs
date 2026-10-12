@@ -1066,7 +1066,7 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, 
 // compileSSAKeeping is compileSSA's build and compile, the build's keep
 // cells limited to keepLimit (ssa.KeepFeedback), or not, if 0.
 func (r *Runtime) compileSSAKeeping(fn *bytecode.Function, cl *closure, p *ir.Program, limit int, e *jitEntry, keepLimit int) (*jit.SSACode, *jitFeedback, error) {
-	fb := &jitFeedback{r: r, fn: fn, cl: cl, e: e, keepLimit: keepLimit}
+	fb := &jitFeedback{r: r, fn: fn, cl: cl, e: e, keepLimit: keepLimit, prog: p}
 	// The compile's memory comes from the runtime's workspaces, taken back
 	// once its code is placed.
 	s := r.jit

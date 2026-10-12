@@ -7715,6 +7715,39 @@ func TestJITSSAKnownReceivers(t *testing.T) {
 	}
 }
 
+// A compile reads its sites' stack depths (jitKnownReceiver, chainSite,
+// Intrinsic) from the program it compiles, not from the function lowered
+// again for inlining: blocks, whose method reads have no feedback yet, is
+// lowered once, as a function on its own. Lowered for inlining too, a
+// function kept both programs as long as its code lived: RegExp's run
+// blocks, 1.4 MB of them, and the lowering at each compile.
+func TestJITSSACompileLowersOnce(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `function mk(){var re=/b+/;return function blocks(n){let s=0;
+			for(let i=0;i<n;i++)s=(s*3+i)|0;
+			for(let i=0;i<n;i++)s=(s+re.exec('abbc'+i)[0].length)|0;
+			return s}}
+		var blocks=mk();`
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	if _, err := r.Run(compileForTest(t, setup)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Run(compileForTest(t, `blocks(400)`)); err != nil {
+		t.Fatal(err)
+	}
+	cl := r.global.getOwn(r.atoms.intern("blocks")).value.Object().fn().closure
+	e := r.jit.cache[weak.Make(cl.fn)]
+	if e == nil || e.ssa == nil {
+		t.Fatalf("blocks did not compile: %+v", e)
+	}
+	l := r.jit.lowered[weak.Make(cl.fn)]
+	if l == nil || !l.done[jitLowerSSA] || l.done[jitLowerInline] {
+		t.Fatalf("blocks lowered: %+v", l)
+	}
+}
+
 // % of numbers that are not integers native code divides -- fractions, a
 // zero divisor, the infinities, NaN, magnitudes past 2**63 -- is Go's,
 // called from native code (ssa.GoMod), as V8's code calls its fmod: wrap,
