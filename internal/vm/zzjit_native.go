@@ -413,6 +413,7 @@ type jitState struct {
 	goCalls    uint64
 	pinSerial  uint64
 	goMark     jitGoMark
+	levels     jitLevels
 	goRuns     []jitGoRun
 	goPinned   []*jit.SSACode
 	retired    []jitRetired

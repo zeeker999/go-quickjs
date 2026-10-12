@@ -8047,6 +8047,80 @@ func TestJITSSAGoCallsFromNativeCalleesCallBack(t *testing.T) {
 	}
 }
 
+// A call of Go from a native callee takes the frames the last such call
+// made for the same levels, as they are, but for their PCs (jitLevels): in
+// one native stretch of outer's, fa is called again after a call of Go at
+// outer's own level made the built-in's frame where fa's was; fb follows fa
+// at the same level, with the same receiver; the one method is called with
+// receivers of two classes, P's and Q's, one after the other. Every stack
+// probe takes there -- probe, a Go function, at each of those calls and
+// between them -- and every Error's stack a callback of map's takes from
+// m ("at P.m", "at Q.m") is the interpreter's. (Each callee works around its
+// calls, so that it pays: jitCalleeProfit.)
+func TestJITSSAGoCallsReuseLevelFrames(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	setup := `function work(i){let w=i;for(let j=0;j<40;j++)w=(w*31+j)^(w>>>3);return w}
+		function fa(i){let s=work(i);for(let j=0;j<1;j++)s=(s+probe(i)+probe(i+1))|0;return s}
+		function fb(i){let s=work(i);for(let j=0;j<1;j++)s=(s+probe(i)*2)|0;return s}
+		var log=[];function capture(x){if(log.length<3000)log.push(new Error('c').stack);return x}
+		function m(i){let s=work(i);for(let j=0;j<1;j++)s=(s+probe(i)+[1].map(capture)[0])|0;return s}
+		function P(){} P.prototype.m=m; function Q(){} Q.prototype.m=m;
+		var p=new P(), q=new Q();
+		function outer(n){let t=0;for(let i=0;i<n;i++){t=(t+fa(i))|0;t=(t+fb(i))|0;t=(t+p.m(i))|0;t=(t+q.m(i))|0;
+			t=(t+fa(i))|0;t=(t+probe(-i))|0;t=(t+fa(i))|0}return t}`
+	var stacks [2][]string
+	install := func(rt *Runtime, k int) {
+		rt.global.setOwnRaw(rt.atoms.intern("probe"), rt.NewFunction("probe", 1,
+			func(rt *Runtime, _ Value, args []Value) (Value, error) {
+				var names []string
+				for _, e := range rt.captureStack() {
+					names = append(names, fmt.Sprintf("%s:%d:%d", e.Function, e.Line, e.Column))
+				}
+				if len(stacks[k]) < 4000 {
+					stacks[k] = append(stacks[k], strings.Join(names, " "))
+				}
+				return Int(len(names)), nil
+			}), propDefault)
+	}
+	want := New(Config{})
+	defer func() { want.Close(); want.ReleaseClosed() }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	install(want, 0)
+	install(r, 1)
+	for _, rt := range []*Runtime{want, r} {
+		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range 4 {
+		stacks = [2][]string{}
+		src := `log=[];String(outer(300))+log.join('|')`
+		wv, err := want.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gv, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := gv.String().Go(), wv.String().Go(); got != want {
+			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
+		}
+		for j := range stacks[0] {
+			if j >= len(stacks[1]) || stacks[1][j] != stacks[0][j] {
+				t.Fatalf("round %d, probe %d: stack %q, interpreter's %q", i, j, stacks[1][j], stacks[0][j])
+			}
+		}
+	}
+	if r.jit.levels.n == 0 {
+		t.Fatal("no call of Go from a native callee made frames for its levels")
+	}
+}
+
 // A built-in a call of Go calls is called as callDirect calls one
 // (jitCallMade), without its other cases first: its frame for a stack
 // trace -- a RangeError's from String.prototype.repeat, through a native
