@@ -1922,7 +1922,7 @@ func TestJITCachedTreeCall(t *testing.T) {
 		t.Fatal("test did not establish cached tree call")
 	}
 	// Enable on the same runtime after repeated calls have cached their tree.
-	r.initJIT(true)
+	r.initJIT(true, 0)
 	v, err := r.Run(compileForTest(t, `for (var j=0;j<8;j++) sum(10000); sum(10000)`))
 	if err != nil || v.Number() != 49995000 {
 		t.Fatalf("cached call = %v, %v", v, err)
@@ -2450,6 +2450,36 @@ func BenchmarkJITCacheHotSet(b *testing.B) {
 	b.Run("halves", func(b *testing.B) { benchJITCache(b, jitChurnSource(90, 0), `half(0,200)+half(1,200)`) })
 }
 
+// BenchmarkJITMemoryLimit runs the 600 hot functions of
+// BenchmarkJITCacheHotSet under JIT memory limits (Config.JITMemoryLimit)
+// below what they hold at the default, and without the JIT: what a lower
+// limit costs.
+func BenchmarkJITMemoryLimit(b *testing.B) {
+	source := jitChurnSource(200, 0)
+	for _, limit := range []int64{0, 4 << 20, 2 << 20, 1 << 20, 512 << 10} {
+		b.Run(fmt.Sprintf("limit=%dK", limit>>10), func(b *testing.B) {
+			benchJITCacheIn(b, Config{JIT: true, JITMemoryLimit: limit}, source, `round(10,0)`)
+		})
+	}
+	b.Run("nojit", func(b *testing.B) { benchJITCacheIn(b, Config{}, source, `round(10,0)`) })
+	// BenchmarkJITCacheChurn's stream of cold functions, which keeps
+	// coming.
+	churn := jitChurnSource(30, 600)
+	for _, limit := range []int64{0, 2 << 20, 1 << 20} {
+		b.Run(fmt.Sprintf("churn/limit=%dK", limit>>10), func(b *testing.B) {
+			benchJITCacheIn(b, Config{JIT: true, JITMemoryLimit: limit}, churn, `round(30,20)`)
+		})
+	}
+	// Two halves of 135 hot functions taking turns, each for longer than
+	// code takes to grow old: what one half holds goes for the other's.
+	halves := jitChurnSource(90, 0)
+	for _, limit := range []int64{0, 1 << 20} {
+		b.Run(fmt.Sprintf("halves/limit=%dK", limit>>10), func(b *testing.B) {
+			benchJITCacheIn(b, Config{JIT: true, JITMemoryLimit: limit}, halves, `half(0,200)+half(1,200)`)
+		})
+	}
+}
+
 // benchJITCache runs call in a runtime that ran source, reporting what
 // the JIT did an op -- its compiles, the entries its cache dropped to make
 // room, the compiles refused room -- and, at the end, what it holds and
@@ -2716,7 +2746,8 @@ func TestJITHeldCountsEachKind(t *testing.T) {
 	}
 }
 
-// A runtime with a memory limit keeps its JIT within an eighth of it,
+// A runtime with a memory limit keeps its JIT within an eighth of it, and
+// one with a JIT memory limit (Config.JITMemoryLimit) within that,
 // running a program with far more hot functions than fit -- a hot core of
 // native call chains among a stream of cold functions -- the least recently
 // used old code dropped as the stream goes on, the hot core kept. Nothing
@@ -2727,45 +2758,47 @@ func TestJITMemoryLimitKeepsEighth(t *testing.T) {
 		t.Skip("no SSA backend on this architecture")
 	}
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
-	epoch := uint64(0)
 	defer func(was func() uint64) { jitEpochNow = was }(jitEpochNow)
-	jitEpochNow = func() uint64 { return epoch }
-	r := jitRuntimeForTest(t, Config{JIT: true, MemoryLimit: 16 << 20})
-	budget := int64(r.jitBudget())
-	if budget != 2<<20 {
-		t.Fatalf("budget %d", budget)
-	}
-	if _, err := r.Run(compileForTest(t, jitChurnSource(30, 1500))); err != nil {
-		t.Fatal(err)
-	}
-	call := compileForTest(t, `round(10,40)`)
-	for round := 0; round < 8; round++ {
-		if _, err := r.Run(call); err != nil {
+	for _, cfg := range []Config{{JIT: true, MemoryLimit: 16 << 20}, {JIT: true, JITMemoryLimit: 2 << 20}, {JIT: true, MemoryLimit: 1 << 30, JITMemoryLimit: 2 << 20}} {
+		epoch := uint64(0)
+		jitEpochNow = func() uint64 { return epoch }
+		r := jitRuntimeForTest(t, cfg)
+		budget := int64(r.jitBudget())
+		if budget != 2<<20 {
+			t.Fatalf("%+v: budget %d", cfg, budget)
+		}
+		if _, err := r.Run(compileForTest(t, jitChurnSource(30, 1500))); err != nil {
 			t.Fatal(err)
 		}
-		epoch++
-		s := r.jit
-		if held := r.jitHeldBytes(); held > budget {
-			t.Fatalf("round %d: %d bytes held, past %d", round, held, budget)
+		call := compileForTest(t, `round(10,40)`)
+		for round := 0; round < 8; round++ {
+			if _, err := r.Run(call); err != nil {
+				t.Fatal(err)
+			}
+			epoch++
+			s := r.jit
+			if held := r.jitHeldBytes(); held > budget {
+				t.Fatalf("%+v round %d: %d bytes held, past %d", cfg, round, held, budget)
+			}
+			if used := len(s.hints) - 1 - len(s.hintFree); used != len(s.cache) {
+				t.Fatalf("%+v round %d: %d hint slots in use, %d entries", cfg, round, used, len(s.cache))
+			}
+			calls := 0
+			for _, e := range s.cache {
+				calls += len(e.ssaLinks)
+			}
+			if len(s.links) > len(s.cache)+calls {
+				t.Fatalf("%+v round %d: %d links for %d entries calling through %d", cfg, round, len(s.links), len(s.cache), calls)
+			}
 		}
-		if used := len(s.hints) - 1 - len(s.hintFree); used != len(s.cache) {
-			t.Fatalf("round %d: %d hint slots in use, %d entries", round, used, len(s.cache))
+		if r.jit.evicted == 0 {
+			t.Fatalf("%+v: the stream never filled the budget", cfg)
 		}
-		calls := 0
-		for _, e := range s.cache {
-			calls += len(e.ssaLinks)
-		}
-		if len(s.links) > len(s.cache)+calls {
-			t.Fatalf("round %d: %d links for %d entries calling through %d", round, len(s.links), len(s.cache), calls)
-		}
-	}
-	if r.jit.evicted == 0 {
-		t.Fatal("the stream never filled the budget")
-	}
-	for c := 0; c < 30; c++ {
-		fn := r.global.getOwn(r.atoms.intern(fmt.Sprintf("top_%d", c))).value.Object().fn().closure.fn
-		if e := r.jit.cache[weak.Make(fn)]; e == nil || e.ssa == nil {
-			t.Fatalf("hot top_%d was dropped", c)
+		for c := 0; c < 30; c++ {
+			fn := r.global.getOwn(r.atoms.intern(fmt.Sprintf("top_%d", c))).value.Object().fn().closure.fn
+			if e := r.jit.cache[weak.Make(fn)]; e == nil || e.ssa == nil {
+				t.Fatalf("%+v: hot top_%d was dropped", cfg, c)
+			}
 		}
 	}
 }

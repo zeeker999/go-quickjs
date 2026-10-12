@@ -27,8 +27,12 @@ import (
 )
 
 // jitCacheBytes is the JIT's budget (jitBudget) in a runtime without a
-// memory limit.
-const jitCacheBytes = 8 << 20
+// memory limit, and maxJITBudget the most a JIT memory limit gives it,
+// which no sum of what it holds overflows.
+const (
+	jitCacheBytes = 8 << 20
+	maxJITBudget  = 1 << 50
+)
 const jitHotCalls = 8
 
 // jitBuilt guards the JIT's hooks in the interpreter; see zzjit_disabled.go.
@@ -39,6 +43,9 @@ type jitFields struct {
 	jitCallThreshold uint8
 	jitDeoptDepth    uint32
 	jit              *jitState
+	// jitMemoryLimit is Config's JITMemoryLimit: the JIT's budget, if more
+	// than 0 (jitBudget).
+	jitMemoryLimit int64
 	// jitStress is QJS_JIT_STRESS's budget and deoptimization period, or
 	// zero; see jitStressConfig.
 	jitStress jitStressConfig
@@ -86,10 +93,14 @@ func parseJITStress(spec string) jitStressConfig {
 func (r *Runtime) JITStats() JITStats {
 	s := r.jit
 	if s == nil {
+		if r.jitEnabled {
+			return JITStats{Budget: int64(r.jitBudget())}
+		}
 		return JITStats{}
 	}
 	return JITStats{Compiled: s.compiled, Entries: s.entries, Guards: s.guards,
-		Hosts: s.hosts, Budgets: s.budgets, Interpreted: s.interpreted, SSAEntries: s.ssaEntries, SSARecords: s.ssaRecords}
+		Hosts: s.hosts, Budgets: s.budgets, Interpreted: s.interpreted, SSAEntries: s.ssaEntries, SSARecords: s.ssaRecords,
+		Held: int64(s.held()), Budget: int64(r.jitBudget()), Evicted: s.evicted, Refused: s.refusedRoom}
 }
 
 // jitStressDeopt reports whether this budget exit should finish the
@@ -541,7 +552,8 @@ type jitReferences struct {
 	cells [jitReferenceReceivers][ir.MaxProperties]ir.ReferenceCell
 }
 
-func (r *Runtime) initJIT(enabled bool) {
+func (r *Runtime) initJIT(enabled bool, memoryLimit int64) {
+	r.jitMemoryLimit = memoryLimit
 	// Debugger interrupt callbacks may evaluate code and mutate frames or arrays.
 	// Native budget exits retain borrowed views, so debugger runtimes stay in Go.
 	r.jitEnabled = enabled && r.debug == nil
@@ -1093,10 +1105,14 @@ func (r *Runtime) releaseJIT() {
 // that describes it, what it has learned, the programs it lowered, the
 // contexts its code runs in, its compiles' workspaces. The memory meter
 // never counts it: a script's memory, and so whether it fails with
-// ErrMemoryLimit, is the same with the JIT on and off. A runtime with a
-// memory limit gives the JIT at most an eighth of it, which keeps the
-// process bounded.
+// ErrMemoryLimit, is the same with the JIT on and off. It is the runtime's
+// JIT memory limit (Config.JITMemoryLimit) if it has one; else a runtime
+// with a memory limit gives the JIT at most an eighth of it, which keeps
+// the process bounded.
 func (r *Runtime) jitBudget() int {
+	if r.jitMemoryLimit > 0 {
+		return int(min(r.jitMemoryLimit, int64(maxJITBudget)))
+	}
 	if r.meter != nil {
 		return int(min(int64(jitCacheBytes), r.meter.limit/8))
 	}

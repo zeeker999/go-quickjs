@@ -12,6 +12,12 @@ import (
 type Config struct {
 	// JIT enables the optional native numeric tier when built with quickjs_jit.
 	JIT bool
+	// JITMemoryLimit bounds what the JIT holds for the runtime -- its code
+	// and all that describes it, what it has learned, the programs it
+	// lowered, the contexts its code runs in -- apart from MemoryLimit, which
+	// never counts it. Zero or less selects the default: 8 MB, or an eighth
+	// of MemoryLimit when that is set.
+	JITMemoryLimit int64
 	// MemoryLimit caps the bytes the runtime may account for, or 0 for no
 	// limit.
 	MemoryLimit int64
@@ -68,7 +74,7 @@ func New(cfg Config) *Runtime {
 	r.initWellKnownSymbols()
 	r.initRealm()
 	r.setMemoryLimit(cfg.MemoryLimit)
-	r.initJIT(cfg.JIT)
+	r.initJIT(cfg.JIT, cfg.JITMemoryLimit)
 	return r
 }
 

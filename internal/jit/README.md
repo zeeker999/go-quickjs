@@ -192,8 +192,8 @@ path yet.
 
 **Not the script's memory.** The memory meter never counts the JIT, so a
 script's measure, and whether it fails with `ErrMemoryLimit`, is the same with
-the JIT on and off. The JIT has a budget of its own (`jitBudget`): 8 MB,
-or an eighth of the memory limit.
+the JIT on and off. The JIT has a budget of its own (`jitBudget`):
+`WithJITMemoryLimit`'s, or 8 MB, or an eighth of the memory limit.
 
 **The budget bounds all the JIT holds** (`jitState.held`), as V8 bounds its
 code and what describes it by memory, not by a count of functions:

@@ -8,7 +8,12 @@ package vm
 // Interpreted invocations finished in the interpreter after native code;
 // SSAEntries counts the entries into code the new pipeline compiled, and
 // SSARecords the slots its exits left to Go: references moved, and
-// primitives stored over references.
+// primitives stored over references. Held is the memory the JIT holds, and
+// Budget the most it may (Config.JITMemoryLimit); Evicted counts the
+// functions whose code or refusal it dropped to make room, and Refused the
+// compiles it found no room for.
 type JITStats struct {
 	Compiled, Entries, Guards, Hosts, Budgets, Interpreted, SSAEntries, SSARecords uint64
+	Held, Budget                                                                   int64
+	Evicted, Refused                                                               uint64
 }

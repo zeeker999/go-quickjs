@@ -31,7 +31,7 @@ func (*Runtime) jitOn() bool { return false }
 // JITStats is zero: a build without the JIT runs none of it.
 func (*Runtime) JITStats() JITStats { return JITStats{} }
 
-func (*Runtime) initJIT(bool)                                         {}
+func (*Runtime) initJIT(bool, int64)                                  {}
 func (*Runtime) tryJITFrame(*frame) (Value, error, bool)              { return Value{}, nil, false }
 func (*Runtime) jitBackEdge(*frame, uint32, int) (Value, error, bool) { return Value{}, nil, false }
 func (*Runtime) tryJITTreeLoop(*tctx, int, int, bool)                 {}
