@@ -46,6 +46,7 @@ func (r *Runtime) YoungGenerationStats() YoungGenerationStats {
 type youngHeap struct {
 	slots  []youngSlot
 	free   []int
+	active []int
 	owners map[uintptr]int
 	work   []int
 	stats  YoungGenerationStats
@@ -55,6 +56,7 @@ type youngSlot struct {
 	object       *literalObject2
 	used, marked bool
 	age          uint8
+	position     int
 }
 
 func newYoungHeap(capacity int) *youngHeap {
@@ -90,6 +92,8 @@ func (h *youngHeap) allocate(proto *Object, root *shape) *Object {
 	o.class, o.flags = ClassObject, objExtensible|objInlineProps
 	o.props = s.object.inline[:0]
 	s.used, s.marked, s.age = true, false, 0
+	s.position = len(h.active)
+	h.active = append(h.active, i)
 	h.stats.Young++
 	return o
 }
@@ -137,6 +141,10 @@ func (h *youngHeap) forget(i int, promote bool) {
 		h.stats.Reclaimed++
 	}
 	s.used, s.marked, s.age = false, false, 0
+	last := h.active[len(h.active)-1]
+	h.active[s.position] = last
+	h.slots[last].position = s.position
+	h.active = h.active[:len(h.active)-1]
 	h.free = append(h.free, i)
 	h.stats.Young--
 }
@@ -146,29 +154,31 @@ func (h *youngHeap) forget(i int, promote bool) {
 func (h *youngHeap) collect() {
 	h.trace()
 	h.stats.Collections++
-	for i := range h.slots {
+	for p := 0; p < len(h.active); {
+		i := h.active[p]
 		s := &h.slots[i]
-		if !s.used {
-			continue
-		}
 		if !s.marked {
 			h.forget(i, false)
 		} else {
 			s.age++
+			p++
 		}
 	}
-	for i := range h.slots {
+	for _, i := range h.active {
 		h.slots[i].marked = false
 	}
-	for i := range h.slots {
-		if s := &h.slots[i]; s.used && s.age >= 2 {
+	for _, i := range h.active {
+		if s := &h.slots[i]; s.age >= 2 {
 			h.markWord(uintptr(unsafe.Pointer(&s.object.Object)))
 		}
 	}
 	h.trace()
-	for i := range h.slots {
-		if s := &h.slots[i]; s.used && s.marked {
+	for p := 0; p < len(h.active); {
+		i := h.active[p]
+		if h.slots[i].marked {
 			h.forget(i, true)
+		} else {
+			p++
 		}
 	}
 }
@@ -179,10 +189,8 @@ func (h *youngHeap) promoteAll() {
 	if h.stats.Young == 0 {
 		return
 	}
-	for i := range h.slots {
-		if h.slots[i].used {
-			h.forget(i, true)
-		}
+	for len(h.active) != 0 {
+		h.forget(h.active[len(h.active)-1], true)
 	}
 	h.work = h.work[:0]
 }

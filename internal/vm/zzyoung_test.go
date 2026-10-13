@@ -72,6 +72,45 @@ func TestYoungGenerationDeadCycle(t *testing.T) {
 	}
 }
 
+func TestYoungGenerationMixedSurvivors(t *testing.T) {
+	h := newYoungHeap(8)
+	var objects [8]*Object
+	for i := range objects {
+		objects[i] = h.allocate(nil, nil)
+		objects[i].props = append(objects[i].props, Property{value: Int(i)})
+	}
+	for _, i := range []int{1, 3, 7} {
+		h.markWord(objectWord(objects[i]))
+	}
+	h.collect()
+	child, survivor := h.allocate(nil, nil), h.allocate(nil, nil)
+	objects[3].props = append(objects[3].props, Property{value: Obj(child)})
+	for _, i := range []int{1, 3, 7} {
+		h.markWord(objectWord(objects[i]))
+	}
+	h.markWord(objectWord(survivor))
+	h.collect()
+	if h.stats.Reclaimed != 5 || h.stats.Promoted != 4 || h.stats.Young != 1 {
+		t.Fatalf("mixed survivor graph: %+v", h.stats)
+	}
+	h.markWord(objectWord(survivor))
+	h.collect()
+	if h.stats.Promoted != 5 || h.stats.Young != 0 {
+		t.Fatalf("younger survivor: %+v", h.stats)
+	}
+	for range 8 {
+		h.allocate(nil, nil)
+	}
+	for _, i := range []int{1, 3, 7} {
+		if objects[i].props[0].value != Int(i) {
+			t.Fatal("promoted survivor was reused")
+		}
+	}
+	if objects[3].props[1].value.Object() != child {
+		t.Fatal("promotion lost younger descendant")
+	}
+}
+
 func TestYoungGenerationPromotionReleasesOwnership(t *testing.T) {
 	h := newYoungHeap(2)
 	a, b := h.allocate(nil, nil), h.allocate(nil, nil)
