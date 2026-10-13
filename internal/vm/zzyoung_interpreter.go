@@ -2,7 +2,19 @@
 
 package vm
 
-import "github.com/go-quickjs/go-quickjs/internal/bytecode"
+import (
+	"context"
+
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+)
+
+func (r *Runtime) youngPoll() {
+	// Background and TODO cannot execute host code. Other Context methods
+	// are opaque callbacks, and native entry needs its own root protocol.
+	if r.jitOn() || r.ctx != nil && r.ctx != context.Background() && r.ctx != context.TODO() {
+		r.promoteYoung()
+	}
+}
 
 // youngBefore is a conservative escape barrier. Only operations whose
 // references stay in the flat interpreter stack or ordinary young properties

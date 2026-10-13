@@ -12,6 +12,7 @@ func (*Runtime) initYoung(int) {}
 
 func (*Runtime) releaseYoung()                                    {}
 func (*Runtime) promoteYoung()                                    {}
+func (*Runtime) youngPoll()                                       {}
 func (*Runtime) youngBefore(*frame, bytecode.Instr, []Value, int) {}
 func (*Runtime) youngLiteral(*frame, int, int, *shape) *Object    { return nil }
 

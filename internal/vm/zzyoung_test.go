@@ -3,6 +3,7 @@
 package vm
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 	"testing"
@@ -145,6 +146,49 @@ func TestYoungGenerationInterpreter(t *testing.T) {
 		if err != nil || !v.Truthy() || st.Reused == 0 || st.Collections == 0 || st.Young != 0 || st.Allocated > uint64(capacity+10) {
 			t.Fatalf("capacity %d: %v, %v, %+v", capacity, v, err, st)
 		}
+	}
+}
+
+type youngCallbackContext struct {
+	context.Context
+	check func()
+}
+
+func (c youngCallbackContext) Done() <-chan struct{} {
+	c.check()
+	return nil
+}
+
+func TestYoungGenerationCancellationPoll(t *testing.T) {
+	for _, name := range []string{"background", "todo", "callback"} {
+		t.Run(name, func(t *testing.T) {
+			r := youngInterpreterForTest(t, 4096)
+			ctx := context.Background()
+			checks := 0
+			if name == "todo" {
+				ctx = context.TODO()
+			} else if name == "callback" {
+				ctx = youngCallbackContext{Context: ctx, check: func() {
+					checks++
+					if r.YoungGenerationStats().Young != 0 {
+						t.Fatal("context callback reached unpromoted objects")
+					}
+				}}
+			}
+			r.SetContext(ctx)
+			v, err := r.Run(compileForTest(t, `function f(n){let s=0;for(let i=0;i<n;i++){let o={a:i,b:i+1};s+=o.a+o.b}return s}f(20000)`))
+			st := r.YoungGenerationStats()
+			if err != nil || v.Number() != 400000000 || st.Young != 0 {
+				t.Fatalf("poll: %v, %v, %+v", v, err, st)
+			}
+			if name == "callback" {
+				if checks == 0 || st.Promoted == 0 {
+					t.Fatal("context callback or promotion was not exercised")
+				}
+			} else if st.Reused == 0 || st.Collections == 0 {
+				t.Fatalf("ordinary cancellation poll prevented reuse: %+v", st)
+			}
+		})
 	}
 }
 

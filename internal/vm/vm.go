@@ -2955,8 +2955,8 @@ func (r *Runtime) executeAt(f *frame, startSP int, pending error) (Value, error)
 		continue
 
 	interrupted:
-		if youngBuilt && (r.ctx != nil || r.jitOn()) {
-			r.promoteYoung()
+		if youngBuilt {
+			r.youngPoll()
 		}
 		// A build with the JIT checks the same and may then promote the loop
 		// (jitBackEdge); without it, this block is compiled out.
