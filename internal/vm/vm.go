@@ -64,6 +64,9 @@ func (r *Runtime) execute(f *frame) (Value, error) {
 // stack, so execution starts part-way up, and generator.throw() injects an
 // exception at the suspension point so that a try inside the body can catch it.
 func (r *Runtime) executeAt(f *frame, startSP int, pending error) (Value, error) {
+	if youngBuilt {
+		defer r.promoteYoung()
+	}
 	// A script that has been stopped runs nothing more, even where the
 	// interrupt was turned into a value -- a rejection, an error an iterator
 	// being closed dropped -- that let the caller carry on and call again.
@@ -133,6 +136,9 @@ func (r *Runtime) executeAt(f *frame, startSP int, pending error) (Value, error)
 		in = code[pc]
 		pc++
 		f.pc = pc
+		if youngBuilt {
+			r.youngBefore(f, in, stack, sp)
+		}
 
 		switch in.Op {
 		case bytecode.OpNop:
@@ -1751,8 +1757,18 @@ func (r *Runtime) executeAt(f *frame, startSP int, pending error) (Value, error)
 			// the object's own allocation.
 			// Its objects start from a shape of the literal's own, so that the
 			// properties it writes take the one transition out of each.
-			o := newLiteralObject(r.proto.object, ClassObject, int(in.A))
-			o.shape = r.shapes.siteRoot(&cl.ic[in.B])
+			var o *Object
+			if youngBuilt {
+				root := r.shapes.siteRoot(&cl.ic[in.B])
+				o = r.youngLiteral(f, sp, int(in.A), root)
+				if o == nil {
+					o = newLiteralObject(r.proto.object, ClassObject, int(in.A))
+				}
+				o.shape = root
+			} else {
+				o = newLiteralObject(r.proto.object, ClassObject, int(in.A))
+				o.shape = r.shapes.siteRoot(&cl.ic[in.B])
+			}
 			sp = pushAt(stack, sp, Obj(o))
 		case bytecode.OpNewArray:
 			n := int(in.A)
@@ -2939,6 +2955,9 @@ func (r *Runtime) executeAt(f *frame, startSP int, pending error) (Value, error)
 		continue
 
 	interrupted:
+		if youngBuilt && (r.ctx != nil || r.jitOn()) {
+			r.promoteYoung()
+		}
 		// A build with the JIT checks the same and may then promote the loop
 		// (jitBackEdge); without it, this block is compiled out.
 		if jitBuilt {

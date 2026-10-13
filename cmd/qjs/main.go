@@ -52,6 +52,7 @@ import (
 	quickjs "github.com/go-quickjs/go-quickjs"
 	"github.com/go-quickjs/go-quickjs/inspector"
 	"github.com/go-quickjs/go-quickjs/internal/jit"
+	"github.com/go-quickjs/go-quickjs/internal/vm"
 	"github.com/go-quickjs/go-quickjs/stdlib"
 )
 
@@ -96,8 +97,9 @@ type options struct {
 	inspectBrk  bool
 
 	// sourceMaps is --enable-source-maps.
-	sourceMaps bool
-	jit        bool
+	sourceMaps    bool
+	jit           bool
+	youngCapacity int
 }
 
 func run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -117,6 +119,9 @@ func run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if opts.jit && !jit.Supported() {
 		// The script still runs, in the interpreter and the tree tier.
 		fmt.Fprintln(stderr, "qjs: --jit has no effect: this build has no native tier (build with -tags quickjs_jit on linux/amd64, windows/amd64 or darwin/arm64)")
+	}
+	if opts.youngCapacity > 0 && !vm.YoungGenerationSupported {
+		fmt.Fprintln(stderr, "qjs: --young-generation has no effect: build with -tags quickjs_young")
 	}
 
 	rt, err := newRuntime(opts)
@@ -224,6 +229,9 @@ func newRuntime(opts *options) (*quickjs.Runtime, error) {
 	rtOpts := []quickjs.Option{}
 	if opts.jit {
 		rtOpts = append(rtOpts, quickjs.WithJIT())
+	}
+	if opts.youngCapacity > 0 {
+		rtOpts = append(rtOpts, quickjs.WithYoungGeneration(opts.youngCapacity))
 	}
 	if opts.memoryLimit > 0 {
 		rtOpts = append(rtOpts, quickjs.WithMemoryLimit(opts.memoryLimit))
@@ -1262,6 +1270,15 @@ func parseArgs(argv []string, stdout io.Writer) (*options, error) {
 			opts.noCodegen = true
 		case "--jit":
 			opts.jit = true
+		case "--young-generation":
+			opts.youngCapacity = 4096
+			if hasValue {
+				n, err := strconv.Atoi(value)
+				if err != nil || n <= 0 {
+					return nil, fmt.Errorf("--young-generation wants a positive slot count, not %q", value)
+				}
+				opts.youngCapacity = n
+			}
 		case "--node-quirks":
 			opts.nodeQuirks = true
 		case "--enable-source-maps":
@@ -1372,6 +1389,7 @@ bounds:
       --stack-size N      value slots for all call frames
       --timeout D         stop after a duration such as 5s
       --jit               enable the optional native numeric tier (quickjs_jit build)
+      --young-generation[=N]  experimental nursery, N slots (quickjs_young build)
       --no-code-generation   remove eval and the Function constructor
 
 compatibility:

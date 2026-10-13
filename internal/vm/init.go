@@ -10,6 +10,9 @@ import (
 
 // Config configures a new Runtime.
 type Config struct {
+	// YoungGeneration is the experimental nursery's maximum object-slot count.
+	// Zero disables it. It requires quickjs_young, independently of JIT.
+	YoungGeneration int
 	// JIT enables the optional native numeric tier when built with quickjs_jit.
 	JIT bool
 	// JITMemoryLimit bounds what the JIT holds for the runtime -- its code
@@ -75,6 +78,7 @@ func New(cfg Config) *Runtime {
 	r.initRealm()
 	r.setMemoryLimit(cfg.MemoryLimit)
 	r.initJIT(cfg.JIT, cfg.JITMemoryLimit)
+	r.initYoung(cfg.YoungGeneration)
 	return r
 }
 

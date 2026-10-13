@@ -289,6 +289,8 @@ type Runtime struct {
 	// can suspend again, so one serves them all, and a suspension allocates
 	// nothing.
 	treeSig suspendSignal
+	// youngFields is the optional nursery's state, empty without quickjs_young.
+	youngFields
 	// jitFields is the optional native tier's state, empty in builds
 	// without it. It comes after everything the interpreter reads, so that
 	// a build with the tier moves none of their offsets, and before the last
@@ -1019,6 +1021,7 @@ func (r *Runtime) ReleaseClosed() {
 	}
 	r.releaseAllWeakMaps()
 	r.releaseJIT()
+	r.releaseYoung()
 	if r.stack == nil {
 		return
 	}

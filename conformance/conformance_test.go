@@ -38,6 +38,7 @@ import (
 
 var (
 	jitFlag    = flag.Bool("conformance.jit", false, "enable the optional native numeric tier")
+	youngFlag  = flag.Int("conformance.young-generation", 0, "enable the experimental nursery with this many slots (quickjs_young build)")
 	reportPath = flag.String("conformance.report", "",
 		"write the list of failing tests to this file")
 	subdirFlag = flag.String("conformance.dir", "",
@@ -125,6 +126,7 @@ func TestConformance(t *testing.T) {
 		res    result
 		reason string
 		jit    vm.JITStats
+		young  vm.YoungGenerationStats
 	}
 	outcomes := make([]outcome, len(tests))
 	next := int64(-1)
@@ -151,17 +153,19 @@ func TestConformance(t *testing.T) {
 					var before, after runtime.MemStats
 					runtime.ReadMemStats(&before)
 					var jitStats vm.JITStats
-					res, reason := runOne(suite, tests[i], forcedFeatures, &jitStats)
+					var youngStats vm.YoungGenerationStats
+					res, reason := runOne(suite, tests[i], forcedFeatures, &jitStats, &youngStats)
 					runtime.ReadMemStats(&after)
 					if d := after.TotalAlloc - before.TotalAlloc; d > uint64(*allocReport) {
 						t.Logf("ALLOC %s: %d MB", tests[i].Name(), d/(1<<20))
 					}
-					outcomes[i] = outcome{res, reason, jitStats}
+					outcomes[i] = outcome{res, reason, jitStats, youngStats}
 					continue
 				}
 				var jitStats vm.JITStats
-				res, reason := runOne(suite, tests[i], forcedFeatures, &jitStats)
-				outcomes[i] = outcome{res, reason, jitStats}
+				var youngStats vm.YoungGenerationStats
+				res, reason := runOne(suite, tests[i], forcedFeatures, &jitStats, &youngStats)
+				outcomes[i] = outcome{res, reason, jitStats, youngStats}
 			}
 		}()
 	}
@@ -248,6 +252,20 @@ func TestConformance(t *testing.T) {
 	if *jitFlag {
 		reportJIT(t, byArea)
 	}
+	if *youngFlag > 0 {
+		var total vm.YoungGenerationStats
+		for _, o := range outcomes {
+			total.Allocated += o.young.Allocated
+			total.Reused += o.young.Reused
+			total.Reclaimed += o.young.Reclaimed
+			total.Promoted += o.young.Promoted
+			total.Collections += o.young.Collections
+		}
+		t.Logf("young generation: %+v", total)
+		if !*debugger && total.Allocated == 0 {
+			t.Error("nursery requested but no test used it")
+		}
+	}
 
 	if *reportPath != "" {
 		sort.Strings(failures)
@@ -309,7 +327,7 @@ func areaOf(path string) string {
 // runOne executes a single test and classifies the outcome. It sets
 // *jitStats to what the JIT did in the test.
 func runOne(suite *conformance.Suite, tc *conformance.Test,
-	forcedFeatures map[string]bool, jitStats *vm.JITStats) (result, string) {
+	forcedFeatures map[string]bool, jitStats *vm.JITStats, youngStats *vm.YoungGenerationStats) (result, string) {
 	for _, f := range tc.Meta.Features {
 		if reason, unsupported := unsupportedFeatures[f]; unsupported &&
 			reason != "" && !forcedFeatures[f] {
@@ -349,11 +367,15 @@ func runOne(suite *conformance.Suite, tc *conformance.Test,
 		if *jitFlag {
 			opts = append(opts, quickjs.WithJIT())
 		}
+		if *youngFlag > 0 {
+			opts = append(opts, quickjs.WithYoungGeneration(*youngFlag))
+		}
 		return quickjs.New(opts...)
 	}
 	rt := newRuntime()
 	defer rt.Close()
 	defer func() { *jitStats = hostaccess.VM(rt).JITStats() }()
+	defer func() { *youngStats = rt.YoungGenerationStats() }()
 	// Agents are runtimes of their own, stopped when the test is over.
 	agents := newAgentPool(newRuntime)
 	defer agents.stop()

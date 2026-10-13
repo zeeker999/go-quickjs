@@ -21,6 +21,7 @@ import (
 	quickjs "github.com/go-quickjs/go-quickjs"
 	"github.com/go-quickjs/go-quickjs/internal/jit"
 	"github.com/go-quickjs/go-quickjs/internal/v8bench"
+	"github.com/go-quickjs/go-quickjs/internal/vm"
 )
 
 func main() { v8bench.Main("go-quickjs", engine{}) }
@@ -28,6 +29,8 @@ func main() { v8bench.Main("go-quickjs", engine{}) }
 type engine struct{}
 
 var jitFlag = flag.Bool("jit", false, "enable the optional native numeric tier")
+
+var youngFlag = flag.Int("young-generation", 0, "enable the experimental nursery with this many slots (quickjs_young build)")
 
 func (engine) Compile(name, src string) error {
 	_, err := quickjs.Compile(name, src)
@@ -39,6 +42,12 @@ func (engine) NewRuntime(host v8bench.Host) (v8bench.Runtime, error) {
 		return nil, errors.New("JIT benchmarking requires a supported build with -tags quickjs_jit")
 	}
 	var opts []quickjs.Option
+	if *youngFlag > 0 {
+		if !vm.YoungGenerationSupported {
+			return nil, errors.New("nursery benchmarking requires -tags quickjs_young")
+		}
+		opts = append(opts, quickjs.WithYoungGeneration(*youngFlag))
+	}
 	if *jitFlag {
 		opts = append(opts, quickjs.WithJIT())
 	}

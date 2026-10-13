@@ -773,3 +773,18 @@ func TestJITFlag(t *testing.T) {
 		t.Fatalf("supported %v, warned %v: %q", jit.Supported(), warned, errOut)
 	}
 }
+
+func TestYoungGenerationFlag(t *testing.T) {
+	for _, flag := range []string{"--young-generation", "--young-generation=2"} {
+		code, out, errOut := exec(t, "", flag, "-e", `let o;for(let i=0;i<100;i++)o={a:i,b:i+1};console.log(o.a+o.b)`)
+		if code != 0 || strings.TrimSpace(out) != "199" {
+			t.Fatalf("%s: %d, %q, %q", flag, code, out, errOut)
+		}
+	}
+	for _, flag := range []string{"--young-generation=0", "--young-generation=-1", "--young-generation=oops"} {
+		code, _, _ := exec(t, "", flag, "-e", "1")
+		if code != 2 {
+			t.Fatalf("%s: expected argument error, got %d", flag, code)
+		}
+	}
+}

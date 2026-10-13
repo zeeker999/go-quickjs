@@ -1,8 +1,44 @@
-//go:build quickjs_jit && !android && !ios && ((linux && amd64) || (windows && amd64) || (darwin && arm64))
+//go:build quickjs_young
 
 package vm
 
 import "unsafe"
+
+func objectWord(o *Object) uintptr { return uintptr(unsafe.Pointer(o)) }
+func valueWord(v Value) uintptr    { return uintptr(v.ref) }
+
+const youngBuilt = true
+
+type youngFields struct {
+	youngCapacity int
+	young         *youngHeap
+}
+
+func (r *Runtime) initYoung(capacity int) {
+	// Memory accounting and debugger callbacks need their own root protocol.
+	if r.meter == nil && r.debug == nil {
+		r.youngCapacity = capacity
+	}
+}
+
+func (r *Runtime) promoteYoung() {
+	if r.young != nil {
+		r.young.promoteAll()
+	}
+}
+
+func (r *Runtime) releaseYoung() {
+	r.promoteYoung()
+	r.young, r.youngCapacity = nil, 0
+}
+
+// YoungGenerationStats reports nursery activity in this runtime.
+func (r *Runtime) YoungGenerationStats() YoungGenerationStats {
+	if r.young == nil {
+		return YoungGenerationStats{}
+	}
+	return r.young.stats
+}
 
 // youngHeap owns independent Go allocations until they die or are tenured.
 // Its roots must be supplied at a boundary that accounts for every live

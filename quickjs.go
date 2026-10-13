@@ -113,6 +113,7 @@ type Runtime struct {
 type Option func(*config)
 
 type config struct {
+	youngGeneration  int
 	jit              bool
 	jitMemoryLimit   int64
 	moduleFetchLimit int
@@ -307,14 +308,15 @@ func New(opts ...Option) *Runtime {
 		o(&c)
 	}
 	r := &Runtime{rt: vm.New(vm.Config{
-		JIT:            c.jit,
-		JITMemoryLimit: c.jitMemoryLimit,
-		MemoryLimit:    c.memoryLimit,
-		StackSize:      c.stackSize,
-		MaxCallDepth:   c.maxCallDepth,
-		Locale:         c.locale,
-		NodeQuirks:     c.nodeQuirks,
-		Debug:          c.debug,
+		YoungGeneration: c.youngGeneration,
+		JIT:             c.jit,
+		JITMemoryLimit:  c.jitMemoryLimit,
+		MemoryLimit:     c.memoryLimit,
+		StackSize:       c.stackSize,
+		MaxCallDepth:    c.maxCallDepth,
+		Locale:          c.locale,
+		NodeQuirks:      c.nodeQuirks,
+		Debug:           c.debug,
 	}), nodeQuirks: c.nodeQuirks, noCodeGeneration: c.noCodeGeneration,
 		moduleFetchLimit: c.moduleFetchLimit, debug: c.debug}
 	if c.moduleFetchLimit == 0 {
