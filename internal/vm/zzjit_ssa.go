@@ -727,29 +727,21 @@ func (r *Runtime) jitFillLiteral(l *jitLiteral) {
 		pool.Count, pool.Proto = pool.Size, unsafe.Pointer(r.proto.regexp)
 		return
 	}
-	for i := range int(pool.Size) {
-		if l.array {
-			a := newArrayObject(r.proto.array, l.n)
-			a.elems = a.elems[:0]
-			r.ensureShape(a)
-			pool.Objects[i] = unsafe.Pointer(a)
-			continue
-		}
-		// Room for what its objects came to take after it, as a
-		// constructor's are made (jitPoolObject): a property added to
-		// one natively needs the room (addAlong).
+	if !l.array {
 		n := l.n
 		if l.root != nil {
 			n = max(n, int(l.root.slack))
 		}
-		o := newLiteralObject(r.proto.object, ClassObject, n)
-		o.shape = l.root
-		pool.Objects[i] = unsafe.Pointer(o)
+		jitFillObjectPool(pool, r.proto.object, l.root, n)
+		return
 	}
-	pool.Count, pool.Proto = pool.Size, unsafe.Pointer(r.proto.object)
-	if l.array {
-		pool.Proto = unsafe.Pointer(r.proto.array)
+	for i := range int(pool.Size) {
+		a := newArrayObject(r.proto.array, l.n)
+		a.elems = a.elems[:0]
+		r.ensureShape(a)
+		pool.Objects[i] = unsafe.Pointer(a)
 	}
+	pool.Count, pool.Proto = pool.Size, unsafe.Pointer(r.proto.array)
 }
 
 // jitDefineSeen notes an exit at a literal's field, pc, that the code was
@@ -3624,15 +3616,63 @@ func (r *Runtime) jitFillPool(pool *abi.ObjectPool, o *Object) {
 		pool.Count, pool.Proto = uint64(n), unsafe.Pointer(r.proto.array)
 		return
 	}
-	first := r.jitPoolObject(o)
-	if first == nil {
+	p := o.getOwnVisible(atomPrototype)
+	fd := o.fn()
+	if p == nil || p.flags&propAccessor != 0 || !p.value.IsObject() || fd == nil || fd.closure == nil {
 		return
 	}
-	pool.Objects[0] = unsafe.Pointer(first)
-	for i := 1; i < n; i++ {
-		pool.Objects[i] = unsafe.Pointer(r.jitPoolObject(o))
+	props := int(fd.closure.fn.ThisProps)
+	root := r.shapes.ctorRoot(fd)
+	if root != nil {
+		props = max(props, int(root.slack))
 	}
-	pool.Count, pool.Proto = uint64(n), unsafe.Pointer(first.proto)
+	jitFillObjectPool(pool, p.value.Object(), root, props)
+}
+
+// jitFillObjectPool selects the allocation layout once per refill. Each
+// object still owns its allocation, so keeping one cannot retain its peers.
+func jitFillObjectPool(pool *abi.ObjectPool, proto *Object, root *shape, n int) {
+	switch n {
+	case 1:
+		jitFillSmallObjects[literalObject1](pool, proto, root)
+	case 2:
+		jitFillSmallObjects[literalObject2](pool, proto, root)
+	case 0, 3:
+		jitFillSmallObjects[literalObject](pool, proto, root)
+	case 4:
+		jitFillSmallObjects[largeLiteralObject[[4]Property]](pool, proto, root)
+	case 5:
+		jitFillSmallObjects[largeLiteralObject[[5]Property]](pool, proto, root)
+	case 6:
+		jitFillSmallObjects[largeLiteralObject[[6]Property]](pool, proto, root)
+	case 7, 8:
+		jitFillSmallObjects[largeLiteralObject[[8]Property]](pool, proto, root)
+	default:
+		for i := range int(pool.Size) {
+			o := newLiteralObject(proto, ClassObject, n)
+			o.shape = root
+			pool.Objects[i] = unsafe.Pointer(o)
+		}
+	}
+	pool.Count, pool.Proto = pool.Size, unsafe.Pointer(proto)
+}
+
+type jitSmallObject interface {
+	literalObject1 | literalObject2 | literalObject |
+		largeLiteralObject[[4]Property] | largeLiteralObject[[5]Property] |
+		largeLiteralObject[[6]Property] | largeLiteralObject[[8]Property]
+}
+
+// All eligible layouts embed Object first, followed by their property array.
+func jitFillSmallObjects[A jitSmallObject](pool *abi.ObjectPool, proto *Object, root *shape) {
+	n := int((unsafe.Sizeof(*new(A)) - unsafe.Sizeof(Object{})) / unsafe.Sizeof(Property{}))
+	for i := range int(pool.Size) {
+		o := (*Object)(unsafe.Pointer(new(A)))
+		o.proto, o.shape = proto, root
+		o.class, o.flags = ClassObject, objExtensible|objInlineProps
+		o.props = unsafe.Slice((*Property)(unsafe.Add(unsafe.Pointer(o), unsafe.Sizeof(Object{}))), n)[:0]
+		pool.Objects[i] = unsafe.Pointer(o)
+	}
 }
 
 // jitNewPool is a pool of objects for constructions with o, filled.
