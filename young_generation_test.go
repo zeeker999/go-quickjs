@@ -16,5 +16,8 @@ func TestYoungGenerationOption(t *testing.T) {
 			t.Fatal(got)
 		}
 		r.Close()
+		if st := r.YoungGenerationStats(); st != (quickjs.YoungGenerationStats{}) {
+			t.Fatalf("closed nursery: %+v", st)
+		}
 	}
 }

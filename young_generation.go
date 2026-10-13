@@ -24,5 +24,10 @@ func WithYoungGeneration(capacity int) Option {
 type YoungGenerationStats = vm.YoungGenerationStats
 
 // YoungGenerationStats reports the activity of this runtime's optional nursery.
-// A disabled or unused nursery returns zero counters.
-func (r *Runtime) YoungGenerationStats() YoungGenerationStats { return r.rt.YoungGenerationStats() }
+// A disabled, unused, or closed nursery returns zero counters.
+func (r *Runtime) YoungGenerationStats() YoungGenerationStats {
+	if r.rt == nil {
+		return YoungGenerationStats{}
+	}
+	return r.rt.YoungGenerationStats()
+}
