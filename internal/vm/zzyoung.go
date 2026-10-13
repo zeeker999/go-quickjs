@@ -75,6 +75,13 @@ func (h *youngHeap) allocate(proto *Object, root *shape) *Object {
 	if s.object == nil {
 		s.object = new(literalObject2)
 		h.stats.Allocated++
+		h.owners[uintptr(unsafe.Pointer(&s.object.Object))] = i
+		// Register storage once, including derived property pointers. Dead
+		// slots keep their address until reuse; markWord ignores free slots.
+		for j := range s.object.inline {
+			h.owners[uintptr(unsafe.Pointer(&s.object.inline[j]))] = i
+			h.owners[uintptr(unsafe.Pointer(&s.object.inline[j].value))] = i
+		}
 	} else {
 		h.stats.Reused++
 	}
@@ -83,19 +90,12 @@ func (h *youngHeap) allocate(proto *Object, root *shape) *Object {
 	o.class, o.flags = ClassObject, objExtensible|objInlineProps
 	o.props = s.object.inline[:0]
 	s.used, s.marked, s.age = true, false, 0
-	h.owners[uintptr(unsafe.Pointer(o))] = i
-	// Native references can be shadows of property cells or addresses of
-	// their inline storage. Keep the owner alive for both kinds of pointer.
-	for j := range s.object.inline {
-		h.owners[uintptr(unsafe.Pointer(&s.object.inline[j]))] = i
-		h.owners[uintptr(unsafe.Pointer(&s.object.inline[j].value))] = i
-	}
 	h.stats.Young++
 	return o
 }
 
 func (h *youngHeap) markWord(word uintptr) {
-	if i, ok := h.owners[word]; ok && !h.slots[i].marked {
+	if i, ok := h.owners[word]; ok && h.slots[i].used && !h.slots[i].marked {
 		h.slots[i].marked = true
 		h.work = append(h.work, i)
 	}
@@ -121,12 +121,12 @@ func (h *youngHeap) trace() {
 
 func (h *youngHeap) forget(i int, promote bool) {
 	s := &h.slots[i]
-	delete(h.owners, uintptr(unsafe.Pointer(&s.object.Object)))
-	for j := range s.object.inline {
-		delete(h.owners, uintptr(unsafe.Pointer(&s.object.inline[j])))
-		delete(h.owners, uintptr(unsafe.Pointer(&s.object.inline[j].value)))
-	}
 	if promote {
+		delete(h.owners, uintptr(unsafe.Pointer(&s.object.Object)))
+		for j := range s.object.inline {
+			delete(h.owners, uintptr(unsafe.Pointer(&s.object.inline[j])))
+			delete(h.owners, uintptr(unsafe.Pointer(&s.object.inline[j].value)))
+		}
 		// Release ownership without changing the address or contents. Go
 		// reclaims this allocation once its ordinary references disappear.
 		s.object = nil
@@ -176,6 +176,9 @@ func (h *youngHeap) collect() {
 // promoteAll is the conservative escape barrier used before untracked Go
 // code or a native exit can expose a value to the interpreter or host.
 func (h *youngHeap) promoteAll() {
+	if h.stats.Young == 0 {
+		return
+	}
 	for i := range h.slots {
 		if h.slots[i].used {
 			h.forget(i, true)

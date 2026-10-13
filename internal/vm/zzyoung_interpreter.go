@@ -9,26 +9,33 @@ import "github.com/go-quickjs/go-quickjs/internal/bytecode"
 // cross it without tenure. Calls, captures, exotic storage and coercions that
 // may run user code release nursery ownership before entering that code.
 func (r *Runtime) youngBefore(f *frame, in bytecode.Instr, stack []Value, sp int) {
-	h := r.young
-	if h == nil || h.stats.Young == 0 {
-		return
+	if h := r.young; h != nil && h.stats.Young != 0 && !youngFlatOp[in.Op] {
+		r.youngEscape(f, in, stack, sp)
 	}
+}
+
+// These operations cannot run user code or expose references outside the flat
+// frame. Keep their barrier inline rather than calling a helper per dispatch.
+var youngFlatOp = [256]bool{
+	bytecode.OpNop: true, bytecode.OpPushConst: true, bytecode.OpPushUndef: true,
+	bytecode.OpPushNull: true, bytecode.OpPushTrue: true, bytecode.OpPushFalse: true,
+	bytecode.OpPushInt: true, bytecode.OpPushEmptyString: true, bytecode.OpPushUninitialized: true,
+	bytecode.OpDup: true, bytecode.OpDup2: true, bytecode.OpDrop: true, bytecode.OpSwap: true,
+	bytecode.OpRot3: true, bytecode.OpRot4: true, bytecode.OpInsert2: true, bytecode.OpInsert3: true,
+	bytecode.OpInsert4: true, bytecode.OpNipUnder: true,
+	bytecode.OpGetLocal: true, bytecode.OpGetLocal2: true, bytecode.OpSetLocal: true,
+	bytecode.OpPutLocal: true, bytecode.OpInitLocal: true, bytecode.OpSetLocalGet: true,
+	bytecode.OpClearLocal: true, bytecode.OpGetUpvalue: true,
+	bytecode.OpJump: true, bytecode.OpJumpIfTrue: true, bytecode.OpJumpIfFalse: true,
+	bytecode.OpJumpIfTrueKeep: true, bytecode.OpJumpIfFalseKeep: true,
+	bytecode.OpJumpIfNullish: true, bytecode.OpJumpIfNotNullish: true,
+	bytecode.OpStrictEq: true, bytecode.OpStrictNe: true, bytecode.OpNot: true,
+	bytecode.OpTypeOf: true, bytecode.OpIsNullish: true, bytecode.OpNewObject: true,
+}
+
+func (r *Runtime) youngEscape(f *frame, in bytecode.Instr, stack []Value, sp int) {
+	h := r.young
 	switch in.Op {
-	case bytecode.OpNop, bytecode.OpPushConst, bytecode.OpPushUndef,
-		bytecode.OpPushNull, bytecode.OpPushTrue, bytecode.OpPushFalse,
-		bytecode.OpPushInt, bytecode.OpPushEmptyString, bytecode.OpPushUninitialized,
-		bytecode.OpDup, bytecode.OpDup2, bytecode.OpDrop, bytecode.OpSwap,
-		bytecode.OpRot3, bytecode.OpRot4, bytecode.OpInsert2, bytecode.OpInsert3,
-		bytecode.OpInsert4, bytecode.OpNipUnder,
-		bytecode.OpGetLocal, bytecode.OpGetLocal2, bytecode.OpSetLocal,
-		bytecode.OpPutLocal, bytecode.OpInitLocal, bytecode.OpSetLocalGet,
-		bytecode.OpClearLocal, bytecode.OpGetUpvalue,
-		bytecode.OpJump, bytecode.OpJumpIfTrue, bytecode.OpJumpIfFalse,
-		bytecode.OpJumpIfTrueKeep, bytecode.OpJumpIfFalseKeep,
-		bytecode.OpJumpIfNullish, bytecode.OpJumpIfNotNullish,
-		bytecode.OpStrictEq, bytecode.OpStrictNe, bytecode.OpNot,
-		bytecode.OpTypeOf, bytecode.OpIsNullish, bytecode.OpNewObject:
-		return
 	case bytecode.OpGetLocalCheck:
 		if !f.locals[in.A].IsUninitialized() {
 			return

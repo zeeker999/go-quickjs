@@ -18,6 +18,11 @@ func TestYoungGenerationReuse(t *testing.T) {
 	a.props = append(a.props, Property{value: Obj(child)})
 	h.markWord(uintptr(unsafe.Pointer(b)))
 	h.collect()
+	// Free storage remains indexed for reuse, but must not become a root.
+	h.markWord(uintptr(unsafe.Pointer(a)))
+	if len(h.work) != 0 {
+		t.Fatal("marked a free slot")
+	}
 	c := h.allocate(nil, nil)
 	if c != a || len(c.props) != 0 || c.elems != nil || c.data != nil || c.weakMapRefs != nil {
 		t.Fatal("dead object was not cleared and reused")
