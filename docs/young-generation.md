@@ -131,6 +131,14 @@ Those short conformance tests exercise allocation and escape promotion but
 do not collect; the focused VM tests exercise reclamation, reuse, cycles,
 mixed-age promotion, host retention, and concurrent Go collections.
 
+The selected conformance run's parallel peak RSS is variable: three alternating
+fresh processes have medians of 173.1 MiB with the nursery off and 206.6 MiB
+with two slots, with one enabled run reaching 335.3 MiB. Repeating with one
+worker gives 52.2 versus 51.7 MiB. Sampled heap profiles after collection do not
+show retained nursery storage. These measurements do not establish a leak,
+but the higher parallel peak remains a limitation to investigate as coverage
+expands; reduced object allocations do not guarantee lower process memory.
+
 The next step for broader workloads is an exact root protocol for the tree
 and native tiers, followed by barriers for old-to-young references. Adding
 allocation paths before that protocol would make reuse unsafe.
