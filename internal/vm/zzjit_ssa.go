@@ -1207,8 +1207,11 @@ func (r *Runtime) jitReoptimize(cl *closure, e *jitEntry) {
 	fn := cl.fn
 	r.jitInlineNativeCalls(e)
 	kind := jitLowerSSA
-	if e.ssaCallee {
+	switch {
+	case e.ssaCallee:
 		kind = jitLowerInline
+	case e.hot:
+		kind = jitLowerHot
 	}
 	p, err := r.jitLower(fn, kind)
 	if err != nil {
@@ -2397,7 +2400,10 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	if !run.pinned {
 		r.jitGoPin(idx)
 	}
+	goCallDepth := s.goCallDepth
+	s.goCallDepth = r.frameDepth + 1
 	v, err := r.jitCallMade(in, sp)
+	s.goCallDepth = goCallDepth
 	jitClearArgs(r.stack, top, sp)
 	r.stackTop = top
 	s.ssaCtx = last
@@ -2634,7 +2640,10 @@ framed:
 	// hold their state until they go on.
 	ctxTop := s.ctxTop
 	s.ctxTop = max(ctxTop, idx+1)
+	goCallDepth := s.goCallDepth
+	s.goCallDepth = r.frameDepth + 1
 	v, err := r.jitCallMade(in, sp)
+	s.goCallDepth = goCallDepth
 	s.ctxTop = ctxTop
 	jitClearArgs(r.stack, top, sp)
 	r.stackTop = top
@@ -3238,6 +3247,45 @@ func (r *Runtime) jitSeedCallee(cl *closure) *jitEntry {
 	return r.jitNativeCallee(cl)
 }
 
+// jitCallsNatively reports whether a call cl's function makes, as its
+// caches know its callees now, would be made natively once it is
+// compiled: one of itself, a recursion; or of a function native callers
+// call -- with code they call (not notNative), or none yet, which a call
+// seeded for it compiles for them (jitSeedCallee). A function compiled
+// once hot for its calls (LowerSSAHot) whose every call is of one native
+// callers do not call -- AWFY's Json's readChar, of read, which leaves
+// for Go at each substring -- had made each through Go, from native code
+// Go entered, where the tree tier made them itself: Json took 5% longer.
+func (r *Runtime) jitCallsNatively(cl *closure) bool {
+	p, err := r.jitLower(cl.fn, jitLowerHot)
+	if err != nil || len(p.Maps) != len(cl.fn.Code) {
+		return false
+	}
+	for pc, in := range cl.fn.Code {
+		in = jitCallInstr(in)
+		switch in.Op {
+		case bytecode.OpCall, bytecode.OpCallMethod, bytecode.OpNew:
+		default:
+			continue
+		}
+		obj, _ := r.jitCalleeObjectAt(cl, p, pc)
+		if obj == nil {
+			continue
+		}
+		_, callee := r.jitClosureFor(cl, obj, in.Op == bytecode.OpNew)
+		if callee == nil {
+			continue
+		}
+		if callee.fn == cl.fn {
+			return true
+		}
+		if ce := r.jit.entryFor(callee.fn); ce == nil || ce.ssa != nil && !ce.notNative {
+			return true
+		}
+	}
+	return false
+}
+
 // jitCallee is a function object a call calls, and its closure.
 type jitCallee struct {
 	o  *Object
@@ -3607,6 +3655,15 @@ func (r *Runtime) jitCallTarget(f *frame, e *jitEntry, pc, sp int, in bytecode.I
 				// call for now is called again after so many such calls.
 				if ce := r.jit.entryFor(cl.fn); (x.obj == o || x.byCode) && ce != nil && ce.notNative {
 					jitRetryNative(ce)
+				} else if x.cl != nil && (ce == nil || ce.ssa == nil) {
+					// One it calls with no code: refused for Go to enter -- a
+					// function of calls and no loop, which a caller's call
+					// pays for -- and compiled for native callers, which
+					// call it then, as a callee its caller seeded is. Left so,
+					// a benchmark harness's call, decided for the first
+					// benchmark's and taking the next, had every call of
+					// AWFY's Towers made by Go, its recursion in the tree tier.
+					r.jitNativeCallee(cl)
 				}
 				return
 			}
@@ -4262,13 +4319,15 @@ type jitLowering struct {
 
 // jitLowerKind is how a program is lowered: for a function's own code
 // (jitcompile.LowerSSA), for a callee inlined (LowerSSAInline), for a
-// forwarding constructor inlined (LowerSSAForward).
+// forwarding constructor inlined (LowerSSAForward), for a function with no
+// loop shown to be hot (LowerSSAHot).
 type jitLowerKind uint8
 
 const (
 	jitLowerSSA jitLowerKind = iota
 	jitLowerInline
 	jitLowerForward
+	jitLowerHot
 	jitLowerKinds
 )
 
@@ -4309,6 +4368,8 @@ func (r *Runtime) jitLower(fn *bytecode.Function, kind jitLowerKind) (*ir.Progra
 			l.progs[kind], l.errs[kind] = jitcompile.LowerSSAInline(fn)
 		case jitLowerForward:
 			l.progs[kind], l.errs[kind] = jitcompile.LowerSSAForward(fn)
+		case jitLowerHot:
+			l.progs[kind], l.errs[kind] = jitcompile.LowerSSAHot(fn)
 		}
 		l.done[kind] = true
 		n := l.progs[kind].Footprint()
