@@ -5198,8 +5198,10 @@ type jitSSAStats struct {
 	// its calls in (jitLink's in) were last counted from 0.
 	calleeGoCalls, calleeWork uint64
 	// judged is how many stretches, calls of Go included, there had been
-	// when jitSSAProfit last judged the code.
-	judged uint64
+	// when jitSSAProfit last judged the code, and marked the entries for
+	// native calls Go made while the collector marked, which it does not
+	// judge it by: runs of the code, counted among its entries all the same.
+	judged, marked uint64
 	// guardsAt counts failed guards by their site (abi.Context.ExitSite:
 	// the slot IR PC of the operation, or -1 for an entry's speculation);
 	// nil until one fails.
@@ -5237,8 +5239,7 @@ func (r *Runtime) jitSSAProfit(e *jitEntry, f *frame, ctx *abi.Context, start, e
 		// Each call of a recursion so made, the marking long, judged its
 		// callee slow on its leaves -- AWFY's Towers' moveDisks, Go
 		// entering it no more, its recursion in the tree tier from then on.
-		st.entries--
-		s.markingEntries++
+		st.marked++
 		return
 	}
 	if ctx.ExitMarking != 0 {
@@ -5274,7 +5275,7 @@ func (r *Runtime) jitSSAProfit(e *jitEntry, f *frame, ctx *abi.Context, start, e
 	// them. Judged every jitSSAProbe entries, a function entered a few
 	// times, each a loop of a hundred thousand calls of built-ins --
 	// RegExp's run blocks -- was never judged.
-	stretches := st.entries + st.goCalls
+	stretches := st.entries - st.marked + st.goCalls
 	if stretches-st.judged < jitSSAProbe {
 		return
 	}
