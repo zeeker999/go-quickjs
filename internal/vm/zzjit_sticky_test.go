@@ -190,3 +190,109 @@ func TestJITCallsOfNotNativeCalleesAreGos(t *testing.T) {
 		t.Errorf("leaf's calls unwound %d native levels, Go made %d", n, r.jit.goCalls-goCalls)
 	}
 }
+
+// An inlined callee's concat (ir.StringConcat) joins its own parts: its
+// Extra counts them, which the inliner does not move as it moves the
+// callee's slots past the caller's (ssa's shifted). Moved, the concat read
+// its parts that far past them -- the caller's slots, or past every slot,
+// which panicked: test262's decodeURI tests, decimalToPercentHexString
+// inlined into their loops, here as test262 has them. The runtime has no
+// memory limit: under jitDifferential's, the JIT's budget refuses the
+// script's top level (jitCompiles), and nothing is inlined into its loops.
+func TestJITInlinedConcat(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	const src = `
+		function Test262Error(m) { this.message = m }
+		function decimalToHexString(n) {
+		  var hex = "0123456789ABCDEF";
+		  n >>>= 0;
+		  var s = "";
+		  while (n) {
+		    s = hex[n & 0xf] + s;
+		    n >>>= 4;
+		  }
+		  while (s.length < 4) {
+		    s = "0" + s;
+		  }
+		  return s;
+		}
+
+		function decimalToPercentHexString(n) {
+		  var hex = "0123456789ABCDEF";
+		  return "%" + hex[(n >> 4) & 0xf] + hex[n & 0xf];
+		}
+		var errorCount = 0;
+		var count = 0;
+		var indexP;
+		var indexO = 0;
+
+		for (var indexB = 0xE0; indexB <= 0xEF; indexB++) {
+		  count++;
+		  var hexB = decimalToPercentHexString(indexB);
+		  var result = true;
+		  for (var indexC = 0xC0; indexC <= 0xFF; indexC++) {
+		    var hexC = decimalToPercentHexString(indexC);
+		    try {
+		      decodeURI(hexB + "%A0" + hexC);
+		    } catch (e) {
+		      if ((e instanceof URIError) === true) continue;
+		    }
+		    result = false;
+		  }
+		  if (result !== true) {
+		    if (indexO === 0) {
+		      indexO = indexB;
+		    } else {
+		      if ((indexB - indexP) !== 1) {
+		        if ((indexP - indexO) !== 0) {
+		          var hexP = decimalToHexString(indexP);
+		          var hexO = decimalToHexString(indexO);
+		          throw new Test262Error('#' + hexO + '-' + hexP + ' ');
+		        }
+		        else {
+		          var hexP = decimalToHexString(indexP);
+		          throw new Test262Error('#' + hexP + ' ');
+		        }
+		        indexO = indexB;
+		      }
+		    }
+		    indexP = indexB;
+		    errorCount++;
+		  }
+		}
+
+		if (errorCount > 0) {
+		  if ((indexP - indexO) !== 0) {
+		    var hexP = decimalToHexString(indexP);
+		    var hexO = decimalToHexString(indexO);
+		    throw new Test262Error('#' + hexO + '-' + hexP + ' ');
+		  } else {
+		    var hexP = decimalToHexString(indexP);
+		    throw new Test262Error('#' + hexP + ' ');
+		  }
+		  throw new Test262Error('Total error: ' + errorCount + ' bad Unicode character in ' + count + ' ');
+		}
+		errorCount + ':' + count`
+	for _, c := range []jitStressConfig{
+		{threshold: true},
+		{threshold: true, budget: 1},
+		{threshold: true, budget: 3, deopt: 7},
+	} {
+		r := New(Config{JIT: true})
+		r.jitCallThreshold = 1
+		r.jitStress = c
+		v, err := r.Run(compileForTest(t, src))
+		if err != nil {
+			t.Fatalf("%+v: %v", c, err)
+		}
+		if s, err := r.ToString(v); err != nil || s.Go() != "0:16" {
+			t.Errorf("%+v: %v %v, want 0:16", c, s, err)
+		}
+		if r.JITStats().SSAEntries == 0 {
+			t.Errorf("%+v: the script did not run natively", c)
+		}
+		r.Close()
+	}
+}
