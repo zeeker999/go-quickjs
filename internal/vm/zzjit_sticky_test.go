@@ -95,3 +95,53 @@ func TestJITCallLeftToGoDecidedAgain(t *testing.T) {
 		t.Errorf("h's call, left to Go, not decided again for add: reopts %d inline %d callSites %v nativeCalls %d inlines %d failed %v", e.reopts, e.inlineReopts, e.callSites, len(e.nativeCalls), len(e.inlines), e.failed)
 	}
 }
+
+// A throw, which Go makes (ir.Host), ends the code's flow: what follows it
+// that nothing reaches -- a switch's after its default throws -- is no
+// fallthrough, and the function is compiled. Its lowering had been refused
+// ("invalid fallthrough"): AWFY's Json's readValue never ran natively. Each
+// answer is the interpreter's, in every tier and under every stress setting.
+func TestJITThrowEndsTheFlow(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	const src = `
+		const P = {
+			current: 'n',
+			readValue() {
+				switch (this.current) {
+				case 'n': return 1
+				case 't': return 2
+				case '0': case '1': return this.current.charCodeAt(0)
+				default: throw new Error('value ' + this.current)
+				}
+			},
+		}
+		function run(cs, n) {
+			let s = 0
+			for (let i = 0; i < n; i++) {
+				P.current = cs[i % cs.length]
+				try { s = (s + P.readValue()) | 0 } catch (e) { s = (s + e.message.length) | 0 }
+			}
+			return s
+		}
+		const log = []
+		for (let r = 0; r < 20; r++) log.push(run(['n', 't', '0', '1'], 200), run(['n', 'x', '1'], 30))
+		log.join()`
+	jitDifferential(t, src)
+	r := New(Config{JIT: true})
+	t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
+	if _, err := r.Run(compileForTest(t, `function f(c) { switch (c) { case 1: return 'a'; default: throw new Error('no') } }`)); err != nil {
+		t.Fatal(err)
+	}
+	cl := r.global.getOwn(r.atoms.intern("f")).value().Object().fn().closure
+	for _, kind := range []jitLowerKind{jitLowerInline, jitLowerHot} {
+		p, err := r.jitLower(cl.fn, kind)
+		if err == nil {
+			err = p.Validate()
+		}
+		if err != nil {
+			t.Errorf("a function whose switch's default throws was refused (kind %d): %v", kind, err)
+		}
+	}
+}
