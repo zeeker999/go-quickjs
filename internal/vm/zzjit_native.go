@@ -493,7 +493,10 @@ type jitState struct {
 	// goCallDepth is the depth of the frame of the callee of a call Go
 	// makes for native code (jitGoCall, jitGoCallNested), while it makes
 	// it: native code's call, not the existing tiers' (jitHotWork).
-	goCallDepth int
+	// goCallMarking is whether Go makes it only because the collector
+	// marks (abi.GoOpMarking).
+	goCallDepth   int
+	goCallMarking bool
 	// arena holds the code of every entry: a few mappings, however many
 	// functions the runtime compiles.
 	arena *jit.Arena
@@ -622,8 +625,10 @@ type jitState struct {
 	// into (jit.ExitScratch).
 	exitScratch jit.ExitScratch
 	// markingExits counts the exits the collector's marking made
-	// (abi.Context.ExitMarking), a native callee's included.
-	markingExits uint64
+	// (abi.Context.ExitMarking), a native callee's included, and
+	// markingEntries Go's entries for the native calls it made while the
+	// collector marked (abi.GoOpMarking): neither judges the code.
+	markingExits, markingEntries uint64
 	// scans counts the cache's looks for what to reclaim (makeRoom), serial
 	// the entries made, evicted those dropped to make room, and
 	// refusedRoom the times there was none to be made. floor is what the

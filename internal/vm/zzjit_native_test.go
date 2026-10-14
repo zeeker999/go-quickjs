@@ -4803,11 +4803,13 @@ func TestJITSSAReferenceStoresWhileMarking(t *testing.T) {
 		cl := r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure
 		return r.jit.hint(cl)
 	}
-	// relink's reference stores are Go's, called; it never leaves.
-	if e := entry("relink"); e == nil || e.ssa == nil || e.ssaStats.entries == 0 || e.ssaStats.hosts != 0 || calls-before < 40 {
+	// relink's reference stores are Go's, called; it never leaves. Go
+	// enters it for total's native call, which Go makes while the
+	// collector marks, an entry not counted as the code's (markingEntries).
+	if e := entry("relink"); e == nil || e.ssa == nil || e.ssaStats.entries == 0 && r.jit.markingEntries == 0 || e.ssaStats.hosts != 0 || calls-before < 40 {
 		t.Fatalf("relink's stores while the collector marked: %d calls of Go in the last round, %+v", calls-before, e)
 	}
-	if e := entry("count"); e == nil || e.ssa == nil || e.ssaStats.entries == 0 || e.ssaStats.hosts != 0 {
+	if e := entry("count"); e == nil || e.ssa == nil || e.ssaStats.entries == 0 && r.jit.markingEntries == 0 || e.ssaStats.hosts != 0 {
 		t.Fatalf("count's numbers went to Go: %+v", e)
 	}
 }

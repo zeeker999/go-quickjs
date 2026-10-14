@@ -63,19 +63,77 @@ func TestJITHotCallsAnyOrder(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for range 3 {
+	// Until moves is compiled once hot: within a few runs, later where the
+	// collector runs often, its code for native callers made again
+	// meanwhile.
+	cl := r.global.getOwn(r.atoms.intern("moves")).value().Object().fn().closure
+	var e *jitEntry
+	for i := 0; i < 20 && (e == nil || !e.hot); i++ {
 		if _, err := r.Run(compileForTest(t, `run(second)`)); err != nil {
 			t.Fatal(err)
 		}
+		e = r.jit.hint(cl)
 	}
-	e := jitNativeOrCalleeForTest(t, r, "moves")
+	if e == nil || !e.hot || e.ssa == nil {
+		t.Fatalf("moves not compiled once hot in 20 runs: %+v", e)
+	}
 	entries, in := e.ssaStats.entries, e.link.in
 	if _, err := r.Run(compileForTest(t, `run(second)`)); err != nil {
 		t.Fatal(err)
 	}
 	// 4 * (2**13 - 1) calls of moves in all.
 	if n := e.ssaStats.entries - entries + e.link.in - in; n < 4*8000 {
-		t.Errorf("moves ran natively %d times of %d", n, 4*(1<<13-1))
+		t.Errorf("moves ran natively %d times of %d: slow %v notNative %v stats %+v", n, 4*(1<<13-1), e.entrySlow, e.notNative, e.ssaStats)
+	}
+}
+
+// While the collector marks, Go makes native code's calls (abi.GoOpMarking)
+// and enters each callee's code, whose own calls it makes too: a stretch
+// the marking cut short, which jitSSAProfit does not judge the callee by,
+// as it does not a stretch the marking ended. A recursion's had been
+// judged slow on its leaves -- under a collector that marked often, in
+// TestJITHotCallsAnyOrder on Windows -- and the tree tier ran it.
+func TestJITHotCallsWhileMarking(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	marking := jitMarkingForTest(t)
+	*marking = 0
+	r := New(Config{JIT: true})
+	t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
+	if r.jitCallThreshold <= 1 {
+		t.Skip("the runtime compiles eagerly (QJS_JIT_STRESS)")
+	}
+	const setup = `
+		var moved = 0
+		function moveOne() { moved++ }
+		function moves(n) { if (n === 0) return; moves(n - 1); moveOne(); moves(n - 1) }
+		function run() { let s = 0; for (let k = 0; k < 4; k++) { moved = 0; moves(10); s += moved } return s }`
+	if _, err := r.Run(compileForTest(t, setup)); err != nil {
+		t.Fatal(err)
+	}
+	cl := r.global.getOwn(r.atoms.intern("moves")).value().Object().fn().closure
+	var e *jitEntry
+	for i := 0; i < 20 && (e == nil || !e.hot || e.reoptPending() || len(e.nativeCalls) == 0); i++ {
+		if _, err := r.Run(compileForTest(t, `run()`)); err != nil {
+			t.Fatal(err)
+		}
+		e = r.jit.hint(cl)
+	}
+	if e == nil || !e.hot || e.ssa == nil || e.entrySlow || len(e.nativeCalls) == 0 {
+		t.Fatalf("moves not compiled once hot to call itself natively: %+v", e)
+	}
+	*marking = 1
+	made := r.jit.goCalls
+	for range 4 {
+		v, err := r.Run(compileForTest(t, `run()`))
+		if err != nil || v.Number() != 4*(1<<10-1) {
+			t.Fatalf("run() = %v, %v", v, err)
+		}
+	}
+	if r.jit.goCalls-made < 4*4*1000 || e.entrySlow || r.jit.hint(cl) != e {
+		t.Errorf("moves, its calls made by Go while the collector marked (%d), judged slow %v (current %v): %+v",
+			r.jit.goCalls-made, e.entrySlow, r.jit.hint(cl) == e, e.ssaStats)
 	}
 }
 

@@ -2381,7 +2381,8 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	sp := top + n
 	r.stackTop, r.stackHigh = sp, max(r.stackHigh, sp)
 	step := in.Op == bytecode.OpIterNextOrJump || in.Op == bytecode.OpIterStep || in.Op == bytecode.OpForOfStart
-	if ctx.GoOp&abi.GoOpMarking == 0 {
+	marking := ctx.GoOp&abi.GoOpMarking != 0
+	if !marking {
 		// A call made through Go only because the collector marks costs
 		// the code nothing it chose (abi.GoOpMarking). A loop's step Go
 		// makes costs what any call of Go does: a loop of them, over a Map
@@ -2400,10 +2401,10 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	if !run.pinned {
 		r.jitGoPin(idx)
 	}
-	goCallDepth := s.goCallDepth
-	s.goCallDepth = r.frameDepth + 1
+	goCallDepth, goCallMarking := s.goCallDepth, s.goCallMarking
+	s.goCallDepth, s.goCallMarking = r.frameDepth+1, marking
 	v, err := r.jitCallMade(in, sp)
-	s.goCallDepth = goCallDepth
+	s.goCallDepth, s.goCallMarking = goCallDepth, goCallMarking
 	jitClearArgs(r.stack, top, sp)
 	r.stackTop = top
 	s.ssaCtx = last
@@ -2640,10 +2641,10 @@ framed:
 	// hold their state until they go on.
 	ctxTop := s.ctxTop
 	s.ctxTop = max(ctxTop, idx+1)
-	goCallDepth := s.goCallDepth
-	s.goCallDepth = r.frameDepth + 1
+	goCallDepth, goCallMarking := s.goCallDepth, s.goCallMarking
+	s.goCallDepth, s.goCallMarking = r.frameDepth+1, marking
 	v, err := r.jitCallMade(in, sp)
-	s.goCallDepth = goCallDepth
+	s.goCallDepth, s.goCallMarking = goCallDepth, goCallMarking
 	s.ctxTop = ctxTop
 	jitClearArgs(r.stack, top, sp)
 	r.stackTop = top
@@ -5226,8 +5227,20 @@ const (
 // runs it from then on. The work is estimated: the distance from the entry
 // to the exit or return (the return's block), in slot IR instructions, and
 // a loop's mean length for each back-edge taken natively.
-func (r *Runtime) jitSSAProfit(e *jitEntry, ctx *abi.Context, start, edges int) {
+func (r *Runtime) jitSSAProfit(e *jitEntry, f *frame, ctx *abi.Context, start, edges int) {
 	st := &e.ssaStats
+	if s := r.jit; s.goCallMarking && r.frameDepth == s.goCallDepth && r.frameAt(r.frameDepth-1) == f {
+		// Entered for a native call Go made only because the collector
+		// marks (abi.GoOpMarking), which native code would have made
+		// itself: a stretch whose calls Go makes as well, for the same
+		// reason, says nothing of the code, as its exits do not (below).
+		// Each call of a recursion so made, the marking long, judged its
+		// callee slow on its leaves -- AWFY's Towers' moveDisks, Go
+		// entering it no more, its recursion in the tree tier from then on.
+		st.entries--
+		s.markingEntries++
+		return
+	}
 	if ctx.ExitMarking != 0 {
 		// A stretch the collector's marking ended -- at a native call Go
 		// cannot make for it (mir's markingCall) -- says nothing
@@ -5507,7 +5520,7 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 			// the code, as the collector's marking's exits do not.
 			e.ssaStats.entries--
 		} else {
-			r.jitSSAProfit(e, ctx, start, edges)
+			r.jitSSAProfit(e, f, ctx, start, edges)
 		}
 		if c := s.ssaCtxs[idx+1]; c.Live == abi.LiveCall {
 			// A native call's callee left native code: Go finishes it
