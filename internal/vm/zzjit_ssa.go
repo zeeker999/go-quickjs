@@ -1754,12 +1754,8 @@ func (fb *jitFeedback) NativeCalls(pc int) []ssa.CallSite {
 		ce := fb.r.jit.entryFor(in.cl.fn)
 		var link *jitLink
 		switch {
-		case ce != nil && ce.ssa != nil && !ce.notNative:
-			link = ce.link
 		case ce != nil && ce.ssa != nil:
-			// Code native callers do not call for now (notNative): Go makes
-			// the call, the caller's code going on after it.
-			continue
+			link = ce.link
 		case ce != nil && (ce.calleeRefused || ce.ssaCallee):
 			// Refused for good: Go makes its calls.
 			if !slices.Contains(fb.wanted, in.cl) {
@@ -2760,7 +2756,6 @@ func (r *Runtime) jitCalleeProfit(e *jitEntry, serial uint64, pc int) {
 	if st.calleeWork < (st.calleeGoCalls-e.link.in)*jitSSAMinWork {
 		e.entrySlow = true
 		e.notNative, e.link.entry, e.nativeRetry = true, 0, 0
-		jitCallersCallByGo(e)
 		e.nativeBackoff = min(e.nativeBackoff+1, jitNativeBackoffs)
 	}
 }
@@ -3688,11 +3683,6 @@ func (r *Runtime) jitCallTarget(f *frame, e *jitEntry, pc, sp int, in bytecode.I
 				// call for now is called again after so many such calls.
 				if ce := r.jit.entryFor(cl.fn); (x.obj == o || x.byCode) && ce != nil && ce.notNative {
 					jitRetryNative(ce)
-				} else if x.cl != nil && ce != nil && ce.ssa != nil && !slices.Contains(e.ssaLinks, ce.link) && e.inlineReopts < jitInlineReoptimizations {
-					// Made by Go while native callers did not call it
-					// (jitCallersCallByGo), which they do again now: the code
-					// is compiled again to call it natively.
-					e.inlineReopt = true
 				} else if x.cl != nil && (ce == nil || ce.ssa == nil) {
 					// One it calls with no code: refused for Go to enter -- a
 					// function of calls and no loop, which a caller's call
@@ -6571,22 +6561,6 @@ func (r *Runtime) jitUnwound(e *jitEntry) {
 	}
 	e.notNative, e.link.entry, e.nativeRetry = true, 0, 0
 	e.nativeBackoff = min(e.nativeBackoff+1, jitNativeBackoffs)
-	jitCallersCallByGo(e)
-}
-
-// jitCallersCallByGo has the code of e's native callers compiled again, as
-// their upgrades' budget allows, now that native callers no longer call e
-// (notNative): Go makes their calls of it from then on (ssa.GoCall), and
-// their code goes on after each, where a call through e's link, with no
-// entry, had Go make its frame and finish every native level below it
-// (ExitEnter, jitUnwindNative). AWFY's Json, its readValue compiled, called
-// readNull so at each null, through eight levels.
-func jitCallersCallByGo(e *jitEntry) {
-	for _, c := range e.nativeCallers {
-		if c.ssa != nil && c.upgradeReopts < jitInlineReoptimizations {
-			c.upgradeReopt = true
-		}
-	}
 }
 
 // jitLearning reports whether e's code has met, since it was compiled,
