@@ -2,10 +2,7 @@
 
 package vm
 
-import (
-	"runtime"
-	"testing"
-)
+import "testing"
 
 // builderDifferential runs src in the interpreter and natively, the JIT
 // compiling each function at its first call and at its tenth, and wants
@@ -231,8 +228,9 @@ func TestJITStringBuilderAnswers(t *testing.T) {
 }
 
 // A string built a character at a time is made once, not once for each
-// character: what it allocates is its buffer, doubled as it grows.
-func TestJITStringBuilderAllocates(t *testing.T) {
+// character: each character after the first is appended in place, to a
+// buffer that doubles as it grows.
+func TestJITStringBuilderAppendsInPlace(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
@@ -253,16 +251,14 @@ func TestJITStringBuilderAllocates(t *testing.T) {
 	}
 	jitNativeForTest(t, r, "build")
 	code := compileForTest(t, `(() => { let t = 0; for (let k = 0; k < 20; k++) t += build(10000).length; return t })()`)
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
+	appended := r.jit.appended
 	v, err := r.Run(code)
-	runtime.ReadMemStats(&after)
 	if err != nil || v.Number() != 20*10000 {
 		t.Fatalf("= %v, %v", v, err)
 	}
-	// A string an addition was 48 bytes a character, 9.6 MB in all; the
-	// buffers doubling to 16 KB are 32 KB a string, 640 KB.
-	if n := after.TotalAlloc - before.TotalAlloc; n > 2<<20 {
-		t.Errorf("20 strings of 10,000 characters allocated %d bytes", n)
+	// The count, not the bytes allocated: under checkptr every call of Go
+	// native code makes allocates, its pointers' conversions escaping.
+	if n := r.jit.appended - appended; n < 20*(10000-1) {
+		t.Errorf("20 strings of 10,000 characters had %d appends in place", n)
 	}
 }

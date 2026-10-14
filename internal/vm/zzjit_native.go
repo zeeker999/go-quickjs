@@ -512,8 +512,10 @@ type jitState struct {
 	// unitString hands out.
 	charStrings *[256]Value
 	// builders are the strings loops' appends build (jitAppend), until
-	// native code leaves for Go (jitFreezeBuilders).
+	// native code leaves for Go (jitFreezeBuilders); appended counts the
+	// appends made in place.
 	builders []jitBuilder
+	appended uint64
 	// goCallDepth is the depth of the frame of the callee of a call Go
 	// makes for native code (jitGoCall, jitGoCallNested), while it makes
 	// it: native code's call, not the existing tiers' (jitHotWork).

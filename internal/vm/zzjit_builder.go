@@ -53,6 +53,7 @@ func (r *Runtime) jitAppend(s, x *String) (*String, bool) {
 					s.ascii = s.ascii && x.ascii
 					s.endsHigh = x.endsHigh
 				}
+				j.appended++
 				return s, true
 			}
 		}
