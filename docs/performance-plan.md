@@ -579,12 +579,37 @@ The rounds that followed, each measured as above. The commit says more.
   - Compiling costs too much for what it saves in large programs. With the
     JIT, Octane's Typescript takes twice the interpreter's time, a third of
     it compiling, most of that compiles again for what a function learned,
-    1.5 to 4.6 ms each as they inline more. Compiled code whose exits cost
-    more than it saves is not always given up: a stretch is judged by 20
-    instructions of work against an exit (`jitSSAMinWork`), far less than
-    an exit costs. More room for code (`WithJITMemoryLimit`) must never be
-    slower, and was: with 16 MB Typescript took 18% longer than with 8.
-    The default stays 8 MB until compiles cost less.
+    1.5 to 4.6 ms each as they inline more. More room for code
+    (`WithJITMemoryLimit`) must never be slower, and was: with 16 MB
+    Typescript took 18% longer than with 8. The default stays 8 MB until
+    compiles cost less. Box2D at `ec23d70`, which with the JIT lost to the
+    tree tier in the suite (581 ms against 449), spends about half its
+    time compiling in Octane's three runs; judging its exits by their cost
+    took it to 558 ms, 543 at 64 MB, still behind.
+  - The profit check weighs a stretch's work against what its end and its
+    calls of Go cost, by kind, constants `TestJITCalibration` measures
+    (`jitCostHost` and the others; see AGENTS.md). Open in it:
+    - The work estimate (back edges at the mean length of a function's
+      loops, and the distance to the exit) counts a native callee's back
+      edges at its caller's loops' length, a nested loop's at the mean of
+      all, and leaves out what native callees and inlined callees do
+      between back edges: over AWFY and the V8 suite native code saved from
+      0.15 ns (NBody) to 74 (Permute) an estimated instruction, against
+      the calibration's 1.96. Native calls are credited (32 each, by call
+      sites' share of a link's count); counting back edges by loop would
+      need native code to count them so.
+    - A cost is an average: built-ins' calls of Go cost from 5 to 33
+      instructions of work (Set's has), and code near the break-even is
+      judged by the average -- AWFY's Json's small reader methods stay
+      native at a loss of about 6%.
+    - SplayTree's splay_ is compiled before its node writes' caches have
+      met their fourth shape, an addition of a property its prototype
+      has, which a write's cache does not hold; the write's exit learns
+      the cache's other shape instead (`jitPolyWriteSeen`), and the
+      write leaves at every call. At `e2a4f0c` the compile came when the
+      caches knew all four: Splay is 8 to 10% slower.
+    - A number's method (`(x).toFixed(1)`) leaves native code at each
+      call, 130 instructions of work, where a call of Go would do.
   - Box2D's exits left: comparisons of two objects, which need `valueOf`;
     `instanceof` against a constructor passed as a parameter; additions of
     properties across many shapes.

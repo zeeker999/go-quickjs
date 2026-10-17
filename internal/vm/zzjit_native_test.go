@@ -869,7 +869,9 @@ func TestJITSSACallExits(t *testing.T) {
 	// h reads arguments: Go calls it, never native code (jitNativeCallee).
 	setup := `var O={p:[1,2,3]};function h(a){a.n=arguments.length;return a.length}
 		function f(n){let s=0;for(let i=0;i<n;i++){s=(s+g(i))|0;s=(s*31+i)|0;s^=s>>>3;s=(s+i*7)|0;s^=s<<2}return s}
-		function k(n){let s=0;for(let i=0;i<n;i++){s=(s+h(O.p))|0;s=(s*31+i)|0;s^=s>>>3;s=(s+i*7)|0;s^=s<<2}return s}`
+		function k(n){let s=0;for(let i=0;i<n;i++){s=(s+h(O.p))|0;s=(s*31+i)|0;s^=s>>>3;s=(s+i*7)|0;s^=s<<2;
+			s=(s*17+i)|0;s^=s>>>5;s=(s+i*3)|0;s^=s<<1;s=(s*13+i)|0;s^=s>>>4;s=(s+i*5)|0;s^=s<<3;
+			s=(s*11+i)|0;s^=s>>>6;s=(s+i*9)|0;s^=s<<2;s=(s*7+i)|0;s^=s>>>3;s=(s+i*11)|0;s^=s<<4}return s}`
 	rounds := []struct {
 		src   string
 		hosts uint64 // the exits it makes, if it must make that many
@@ -1671,11 +1673,11 @@ func TestJITSSAManySpills(t *testing.T) {
 
 // A function whose native stretches mostly end leaving for Go after little
 // work runs in the tree tier once its first stretches show it
-// (jitSSAProfit): a loop leaving at every iteration for a call of more
-// arguments than Go is called with from native code (abi.MaxGoArgs) costs
-// more at the exits than native code saves. A loop doing real work stays
-// native, and so does one doing real work around calls Go makes from
-// native code (ssa.GoCall), each of which costs what an exit would.
+// (jitSSAProfit): a loop calling, at every iteration, a function Go calls
+// for native code (ssa.GoCall), which makes its frame and runs it in the
+// tree tier, costs more there than native code saves. A loop doing real
+// work stays native, and so does one doing enough real work around each
+// such call to pay for it (jitCostGoScript).
 func TestJITSSAProfitability(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -1683,7 +1685,8 @@ func TestJITSSAProfitability(t *testing.T) {
 	// m reads arguments: Go calls it, never native code (jitNativeCallee).
 	setup := `function O(){this.v=0}O.prototype.m=function(i){this.v+=arguments[0];return this.v};
 		function calls(o,n){let s=0;for(let i=0;i<n;i++)s+=o.m(i,1,2,3,4,5,6);return s}
-		function gocalls(o,n){let s=0;for(let i=0;i<n;i++){s=(s*31+i)|0;s^=s>>>7;s=(s+i*i)|0;s^=s<<3;s=(s*7+(i>>1))|0;s^=s>>>5;s=(s+o.m(i))|0}return s}
+		function gocalls(o,n){let s=0;for(let i=0;i<n;i++){s=(s*31+i)|0;s^=s>>>7;s=(s+i*i)|0;s^=s<<3;s=(s*7+(i>>1))|0;s^=s>>>5;
+			s=(s*17+i)|0;s^=s>>>3;s=(s+i*5)|0;s^=s<<1;s=(s*13+(i>>2))|0;s^=s>>>4;s=(s*11+i)|0;s^=s>>>6;s=(s+i*3)|0;s^=s<<2;s=(s+o.m(i))|0}return s}
 		function work(n){let s=0;for(let i=0;i<n;i++){s=(s*31+i)|0;s^=s>>>7;s=(s+i*i)|0;if(i%100==0)s+=Math.abs(i)}return s}
 		var o=new O;`
 	want := New(Config{})
@@ -1723,19 +1726,19 @@ func TestJITSSAProfitability(t *testing.T) {
 	}
 }
 
-// Calls of Go count toward judging code as stretches do (jitSSAProfit):
+// Calls of Go count toward judging code as stretches do (jitSSAProfit), but
+// a call of a built-in costs a seventh of an exit (jitCostGoBuiltin):
 // builtins, entered three times, each a loop of 40,000 calls of
-// String.prototype.indexOf and little else, was judged every jitSSAProbe
-// entries, so never, and ran natively, slower than the tree tier, as
-// RegExp's run blocks did; now it is judged after its first calls and
-// the tree tier runs it. mixed, as many calls with real work around each,
-// stays native. And a native callee is judged by its own calls of Go
-// (jitCalleeProfit): heavy, called natively by outer, ten calls of Go and
-// nothing else each time, had its native callers call it natively
-// whatever it cost; now Go runs it, in the tree tier, and outer's code
-// calls it through Go (notNative). light, called so too, does real work
-// around its calls and is called natively still. Each answer is the
-// interpreter's.
+// String.prototype.indexOf with a little work around them, stays native,
+// as string building does; so does mixed, as many calls with more work
+// around each. A native callee is judged by its own calls
+// of Go (jitCalleeJudge), each of which costs it more than at its own
+// level, Go making the frames of the levels between: heavy, called
+// natively by outer, ten calls of Go and nothing else each time, had its
+// native callers call it natively whatever it cost; now Go runs it, in the
+// tree tier, and outer's code calls it through Go (notNative). light,
+// called so too, does real work around its calls and is called natively
+// still. Each answer is the interpreter's.
 func TestJITSSAProfitabilityOfCallsOfGo(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -1743,7 +1746,7 @@ func TestJITSSAProfitabilityOfCallsOfGo(t *testing.T) {
 	runtime.GC()
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	setup := `var str='abcdefgh';
-		function builtins(n){let s=0;for(let i=0;i<n;i++)s=(s+str.indexOf('q')+str.indexOf('c'))|0;return s}
+		function builtins(n){let s=0;for(let i=0;i<n;i++){s=(s+str.indexOf('q')+str.indexOf('c'))|0;s=(s*31+i)|0;s^=s>>>7;s=(s+i*i)|0;s^=s<<3}return s}
 		function mixed(n){let s=0;for(let i=0;i<n;i++){s=(s*31+i)|0;s^=s>>>7;s=(s+i*i)|0;s^=s<<3;s=(s*7+(i>>1))|0;s^=s>>>5;s=(s+str.indexOf('c'))|0}return s}
 		function heavy(k){return str.indexOf('q')+str.indexOf('c')+str.indexOf('d')+str.indexOf('e')+str.indexOf('f')+
 			str.indexOf('g')+str.indexOf('h')+str.indexOf('a')+str.indexOf('b')+str.indexOf('x')+k}
@@ -1775,8 +1778,8 @@ func TestJITSSAProfitabilityOfCallsOfGo(t *testing.T) {
 		cl := r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure
 		return r.jit.cache[weak.Make(cl.fn)]
 	}
-	if e := entry("builtins"); e == nil || e.ssa == nil || !e.entrySlow || e.ssaStats.entries >= jitSSAProbe {
-		t.Fatalf("builtins kept running natively: %+v", e)
+	if e := entry("builtins"); e == nil || e.ssa == nil || e.entrySlow || e.ssaStats.goCalls < 3*40000 {
+		t.Fatalf("builtins did not stay native: %+v", e)
 	}
 	if e := entry("mixed"); e == nil || e.ssa == nil || e.entrySlow || e.ssaStats.goCalls == 0 {
 		t.Fatalf("mixed did not stay native: %+v", e)
@@ -7041,8 +7044,9 @@ func TestJITSSANestedExits(t *testing.T) {
 // costs more native than in the tree tier: each call is an entry, an exit
 // for its call, an entry after it and a return, around a few instructions.
 // Its stretches, returns counted (their exit site, the return's block), do
-// less than jitSSAMinWork, and the tree tier runs it from then on; a loop
-// that does enough work stays native.
+// less work than their ends cost (jitCostReturn, jitCostGoScript), and the
+// tree tier runs it from then on; a loop that does enough work stays
+// native.
 func TestJITSSAProfitReturns(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -7575,8 +7579,8 @@ func TestJITSSANoExitsWhileMarking(t *testing.T) {
 // for Go. A callee with no loop, which Go would not enter (LowerSSA), is
 // compiled for its native callers alone (LowerSSAInline); leaf's calls keep
 // it from being inlined. One that leaves
-// native code on too many of its calls (jitUnwindShare) is called by Go
-// again. And Go finishes native calls that left native code inside native
+// native code on too many of its calls, at a cost to its callers its work
+// does not make up for (jitCalleeJudge), is called by Go again. And Go finishes native calls that left native code inside native
 // calls of frames it is finishing, its unwinds nested. Each answer is the
 // interpreter's.
 func TestJITSSANativeCallTargets(t *testing.T) {
@@ -11073,8 +11077,8 @@ func TestJITExitsWhileMarkingCountNothing(t *testing.T) {
 	for range 4 * jitInlineExits {
 		r.jitInlineLeft(e, 3)
 	}
-	for range 4 * jitUnwindProbe {
-		r.jitUnwound(e)
+	for range 4 * jitSSAProbe {
+		r.jitUnwound(e, 0, 1)
 	}
 	if len(e.notInline) != 0 || e.inlines[0].exits != 0 || e.nativeOut != 0 || e.notNative || e.unwindReopt {
 		t.Fatalf("exits while marking were counted: %+v", e)
@@ -11083,8 +11087,8 @@ func TestJITExitsWhileMarkingCountNothing(t *testing.T) {
 	for range jitInlineExits {
 		r.jitInlineLeft(e, 3)
 	}
-	for range jitUnwindProbe {
-		r.jitUnwound(e)
+	for range jitSSAProbe {
+		r.jitUnwound(e, 0, 1)
 	}
 	if len(e.notInline) != 1 || e.nativeOut == 0 {
 		t.Fatalf("exits were not counted: %+v", e)
@@ -11315,13 +11319,13 @@ func TestJITSSAUnwoundCompilesAgainFirst(t *testing.T) {
 	// An entry of its own, with code, as a callee's.
 	e := &jitEntry{ssa: g.ssa, link: &jitLink{}}
 	leave := func() {
-		// One call in two leaves, its exits having learned a shape
-		// (jitLearning; TestJITSSAUnwoundCompiledAgainOnlyForWhatItLearned
+		// Every call leaves, doing no work, its exits having learned a
+		// shape (jitLearning; TestJITSSAUnwoundCompiledAgainOnlyForWhatItLearned
 		// has one that learns nothing).
 		e.polyPending = true
-		for range jitUnwindProbe {
-			e.link.in += 2
-			r.jitUnwound(e)
+		for range jitSSAProbe {
+			e.link.in++
+			r.jitUnwound(e, 0, 1)
 		}
 	}
 	for i := range jitUnwindReopts {
@@ -11467,15 +11471,17 @@ func TestJITSSATypeOf(t *testing.T) {
 // of its loop's iteration to the interpreter, which goes on natively at the
 // header, in the same run (jitGoOn): one read of a primitive in a
 // thousand iterations leaves once, and the loop's stretches go on. Code
-// that leaves so too often is compiled with an entry where Go went on
-// (missedEntries), and Go goes on natively after each such exit then.
+// that leaves so too often -- every eighth iteration, the work between
+// paying for each exit (jitSSAProfit) -- is compiled with an entry where
+// Go went on (missedEntries), and Go goes on natively after each such exit
+// then.
 func TestJITSSAGoesOnNatively(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
 	setup := `var obj={x:2};
 		function once(n){let t=0;for(let i=0;i<n;i++){const o=i===n>>1?1:obj;t=(t+(o.x|0))|0}return t}
-		function every(n){let t=0;for(let i=0;i<n;i++){const o=i&1?1:obj;t=(t+(o.x|0))|0}return t}`
+		function every(n){let t=0;for(let i=0;i<n;i++){const o=(i&7)==7?1:obj;t=(t+(o.x|0))|0}return t}`
 	want := New(Config{})
 	defer func() { want.Close(); want.ReleaseClosed() }()
 	r := jitRuntimeForTest(t, Config{JIT: true})
