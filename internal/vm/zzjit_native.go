@@ -318,10 +318,15 @@ type jitEntry struct {
 	// (jitFeedback.StringProperty).
 	strSites []uint32
 	// entryMisses counts the times Go went on in the interpreter, having
-	// found no entry, since the code was compiled; allEntries marks code
-	// to be compiled with every one (jitGoOn).
-	entryMisses uint8
-	allEntries  bool
+	// found no entry, since the code was compiled; missedEntries are the
+	// PCs it went on at, which the code is compiled again with entries at
+	// (jitGoOn, jitFeedback.WantsEntry), entriesAsked how many of them it
+	// was last compiled for, and entryReopts how often it was compiled
+	// again for them.
+	entryMisses   uint8
+	entryReopts   uint8
+	missedEntries []uint32
+	entriesAsked  int
 	// link is where native callers call the function's code (jitLink):
 	// its entry, and the count of their calls since the code was last
 	// compiled (in). nativeOut counts those that left native code
@@ -803,7 +808,7 @@ func jitCompiledBytes(shapes []*shape, holders []*Object, fed []jitFedSite, fedI
 // more shapes, and the object pools of its literals and constructions,
 // with the objects made for them.
 func (e *jitEntry) learnedBytes() int {
-	n := jitCapBytes(e.failed) + jitCapBytes(e.failedEntries) + jitCapBytes(e.literals) + jitCapBytes(e.poly) + jitCapBytes(e.typedReads) +
+	n := jitCapBytes(e.failed) + jitCapBytes(e.failedEntries) + jitCapBytes(e.missedEntries) + jitCapBytes(e.literals) + jitCapBytes(e.poly) + jitCapBytes(e.typedReads) +
 		jitCapBytes(e.stringReads) + jitCapBytes(e.keyedReads) + jitCapBytes(e.strSites) + jitCapBytes(e.nativeCalls) + jitCapBytes(e.inlines) + jitCapBytes(e.notInline) +
 		jitCapBytes(e.nativeCallers) + jitCapBytes(e.callSites)
 	for i := range e.poly {
