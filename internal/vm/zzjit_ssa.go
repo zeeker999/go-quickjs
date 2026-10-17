@@ -60,6 +60,10 @@ var jitEncoding = abi.Encoding{
 	PropertyKey:   int32(unsafe.Offsetof(propKey{}.key)),
 	PropertyFlags: int32(unsafe.Offsetof(propKey{}.flags)),
 
+	Accessor:       accessorBits,
+	AccessorGetter: int32(unsafe.Offsetof(accessor{}.getter)),
+	AccessorSetter: int32(unsafe.Offsetof(accessor{}.setter)),
+
 	ClassObject:     uint8(ClassObject),
 	ClassProxy:      uint8(ClassProxy),
 	ClassFunction:   uint8(ClassFunction),
@@ -174,6 +178,13 @@ type jitPolySite struct {
 	// adds, for a write, are additions along chains deeper than a cache
 	// holds (jitDeepAdd).
 	adds []jitDeepAdd
+	// accessors are the getters a read, or the setters a write, found on
+	// the prototypes of receivers of shapes the code was not compiled for
+	// (jitAccessorCase), which it is compiled again for.
+	accessors []jitAccessorCase
+	// mega marks a read that met what no case holds, which the
+	// megamorphic cache has (ssa.PropertySite's Megamorphic).
+	mega bool
 }
 
 // jitDeepAdd is an addition of a property along a shared transition, from
@@ -232,6 +243,16 @@ func (r *Runtime) jitPolyWriteSeen(f *frame, e *jitEntry, pc int, in bytecode.In
 		i = len(e.poly) - 1
 	}
 	p := &e.poly[i]
+	if o != nil && int(in.A) < len(f.cl.names) {
+		// A setter on the object's prototypes, as for a read's getter: of
+		// the shape the object had, which the setter may have changed.
+		if a, ok := r.jitAccessorCaseOf(o, before, f.cl.names[in.A], true); ok {
+			if jitAddAccessorCase(p, a) {
+				e.polyPending, e.polySettled = true, 0
+			}
+			return
+		}
+	}
 	if len(p.cases)+len(p.adds) >= jitPropertyCases {
 		return
 	}
@@ -291,12 +312,31 @@ func (r *Runtime) jitPolySeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 	if !recv.IsObject() || int(in.A) >= len(f.cl.names) {
 		return
 	}
+	if in.Op == bytecode.OpGetProp {
+		// A getter on the receiver's prototypes, which the code calls once
+		// compiled again for the receiver's shape too (jitFeedback's
+		// Accessor).
+		if a, ok := r.jitAccessorCaseOf(recv.Object(), recv.Object().shape, f.cl.names[in.A], false); ok {
+			if jitAddAccessorCase(jitPolySiteAt(e, pc), a) {
+				e.polyPending, e.polySettled = true, 0
+			}
+			return
+		}
+	}
 	r.jit.megaFill(recv.Object(), f.cl.names[in.A])
+	absent := r.jitMegaFillProto(recv.Object(), f.cl.names[in.A])
 	var c propCache
 	r.fillPropCache(&c, recv.Object(), f.cl.names[in.A], false)
 	if c.shape == nil {
 		// One a cache cannot hold, found past its two prototypes.
 		if d, ok := r.jitDeepReadOf(recv.Object(), f.cl.names[in.A]); ok && jitAddDeepRead(jitPolySiteAt(e, pc), d) {
+			e.polyPending, e.polySettled = true, 0
+		} else if p := jitPolySiteAt(e, pc); absent && !p.mega {
+			// None its cases could hold -- a property nothing has, a leaf's
+			// child -- which the megamorphic cache now says: the code is
+			// compiled again to look there (ssa.PropertySite's
+			// Megamorphic), rather than leave at every such read.
+			p.mega = true
 			e.polyPending, e.polySettled = true, 0
 		}
 		return
@@ -344,18 +384,74 @@ func (s *jitState) megaFill(o *Object, key Atom) {
 	}
 	// Remembered, so that it never changes, as any cache's shape.
 	remember(sh)
-	// Into its set, first, the others moved down: an entry of the shape
-	// and key replaced, or, with none, the set's last let go.
-	set := s.mega[abi.MegaSet(uintptr(unsafe.Pointer(sh)), uint32(key)):][:abi.MegaWays]
+	s.megaPut(abi.MegaEntry{Shape: unsafe.Pointer(sh), Key: uint32(key), Index: idx})
+}
+
+// megaPut puts n into its set of the megamorphic cache, first, the others
+// moved down: an entry of its shape and key replaced, or, with none, the
+// set's last let go.
+func (s *jitState) megaPut(n abi.MegaEntry) {
+	set := s.mega[abi.MegaSet(uintptr(n.Shape), n.Key):][:abi.MegaWays]
 	at := len(set) - 1
 	for w := range set {
-		if set[w].Shape == unsafe.Pointer(sh) && set[w].Key == uint32(key) {
+		if set[w].Shape == n.Shape && set[w].Key == n.Key {
 			at = w
 			break
 		}
 	}
 	copy(set[1:at+1], set[:at])
-	set[0] = abi.MegaEntry{Shape: unsafe.Pointer(sh), Key: uint32(key), Index: idx}
+	set[0] = n
+}
+
+// jitMegaFillProto has the megamorphic cache name the data property key a
+// prototype of o has, or that none has, o having none of its own, for
+// objects of o's shape:
+// found along the chain from o's prototype on, up to abi.MegaDepth of
+// them, each of a class with shapes that does not answer the key before
+// it, as a cache's walk (fillPropCache, jitDeepReadOf) requires; each with
+// its shape, remembered, which native code compares (mir's mega). A read
+// whose site met more shapes than it was compiled for -- a method of a
+// base class, read of objects of many subclasses -- then finds it
+// natively, as V8's megamorphic loads do, where it had left native code.
+func (r *Runtime) jitMegaFillProto(o *Object, key Atom) (absent bool) {
+	s := r.jit
+	sh := o.shape
+	if s.mega == nil || sh == nil || sh == noShape || sh.loose || o.class != ClassObject && o.class != ClassFunction ||
+		key.IsIndex() || synthesized(o.class, key) || o.findOwn(key) >= 0 {
+		return false
+	}
+	chain := new(abi.MegaChain)
+	n := 0
+	for p := o.proto; p != nil; p = p.proto {
+		if n == abi.MegaDepth || r.ensureProtoShape(p) == nil || p.cacheShape() == nil || !shapeClass(p.class) || synthesized(p.class, key) {
+			return false
+		}
+		chain[n] = abi.MegaLink{Object: unsafe.Pointer(p), Shape: unsafe.Pointer(p.shape)}
+		n++
+		i := p.findOwn(key)
+		if i < 0 {
+			continue
+		}
+		if i >= p.shape.n || int(i) >= len(p.vals) || p.shape.keys[i].flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 {
+			return false
+		}
+		remember(sh)
+		for _, l := range chain[:n] {
+			remember((*shape)(l.Shape))
+		}
+		s.megaPut(abi.MegaEntry{Shape: unsafe.Pointer(sh), Chain: chain, Key: uint32(key), Index: uint32(i)})
+		return false
+	}
+	// On none of them: the read's value is undefined, the chain all of
+	// them (abi.MegaAbsent), as V8's loads of a nonexistent property find
+	// it. Box2D's tree nodes, given a child only once they have one, read
+	// a leaf's child1 so at every IsLeaf, which had left native code.
+	remember(sh)
+	for _, l := range chain[:n] {
+		remember((*shape)(l.Shape))
+	}
+	s.megaPut(abi.MegaEntry{Shape: unsafe.Pointer(sh), Chain: chain, Key: uint32(key), Index: abi.MegaAbsent})
+	return true
 }
 
 // jitPrivateSeen notes a private member's read or write, or #x in o,
@@ -2657,6 +2753,7 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	sp := top + n
 	r.stackTop, r.stackHigh = sp, max(r.stackHigh, sp)
 	step := in.Op == bytecode.OpIterNextOrJump || in.Op == bytecode.OpIterStep || in.Op == bytecode.OpForOfStart
+	prop := in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
 	marking := ctx.GoOp&abi.GoOpMarking != 0
 	if !marking {
 		// A call made through Go only because the collector marks costs
@@ -2667,7 +2764,7 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 		e.ssaStats.goCalls++
 	}
 	s.goCalls++
-	if !step && jitCallUnsettled(e, pc, in) {
+	if !step && !prop && jitCallUnsettled(e, pc, in) {
 		r.jitCallSeen(f, e, pc, sp, in)
 	}
 	// Past its call meanwhile, as the interpreter's frame is during one,
@@ -2679,7 +2776,13 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	}
 	goCallDepth, goCallMarking := s.goCallDepth, s.goCallMarking
 	s.goCallDepth, s.goCallMarking = r.frameDepth+1, marking
-	v, err := r.jitCallMade(in, sp)
+	var v Value
+	var err error
+	if prop {
+		v, err = r.jitPropertyMade(f.cl, pc, sp)
+	} else {
+		v, err = r.jitCallMade(in, sp)
+	}
 	s.goCallDepth, s.goCallMarking = goCallDepth, goCallMarking
 	jitClearArgs(r.stack, top, sp)
 	r.stackTop = top
@@ -2898,6 +3001,13 @@ func (r *Runtime) jitGoCallNested(ctx *abi.Context, idx int) bool {
 		f.base = base + lcl.fn.LocalCount
 		f.pc = uint32(callPC) + 1
 		f.this, f.newTarget, f.callee, f.args = *(*Value)(unsafe.Pointer(&c.This)), Undefined, nil, nil
+		// Its function object, where the call it runs for says (an
+		// accessor's): the level's caller's, at its call.
+		callerFn := runF.cl.fn
+		if i > root+1 {
+			callerFn = (*closure)(ctxs[i-1].Closure).fn
+		}
+		f.callee = r.jitLevelCallee(callerFn, int(levelPC(i-1)), f.this)
 		f.openUpvalues, f.handlers = f.openUpvalues[:0], f.handlers[:0]
 		f.thisRef, f.withScopes, f.evalVars, f.native, f.savedSP = nil, nil, nil, "", 0
 		at := jitLevelFrame{f: f, e: e, cl: c.Closure, base: c.Base, this: c.This}
@@ -2925,7 +3035,8 @@ framed:
 		e.ssaStats.goCalls++
 	}
 	s.goCalls++
-	if in.Op != bytecode.OpIterNextOrJump && in.Op != bytecode.OpIterStep && in.Op != bytecode.OpForOfStart && jitCallUnsettled(e, pc, in) {
+	prop := in.Op == bytecode.OpGetProp || in.Op == bytecode.OpSetProp
+	if in.Op != bytecode.OpIterNextOrJump && in.Op != bytecode.OpIterStep && in.Op != bytecode.OpForOfStart && !prop && jitCallUnsettled(e, pc, in) {
 		r.jitCallSeen(f, e, pc, sp, in)
 	}
 	if !marking {
@@ -2940,7 +3051,13 @@ framed:
 	s.ctxTop = max(ctxTop, idx+1)
 	goCallDepth, goCallMarking := s.goCallDepth, s.goCallMarking
 	s.goCallDepth, s.goCallMarking = r.frameDepth+1, marking
-	v, err := r.jitCallMade(in, sp)
+	var v Value
+	var err error
+	if prop {
+		v, err = r.jitPropertyMade(f.cl, pc, sp)
+	} else {
+		v, err = r.jitCallMade(in, sp)
+	}
 	s.goCallDepth, s.goCallMarking = goCallDepth, goCallMarking
 	s.ctxTop = ctxTop
 	jitClearArgs(r.stack, top, sp)
@@ -3200,6 +3317,13 @@ func jitGoCallInstr(op uint64) (bytecode.Instr, int) {
 	case abi.GoCallForOf:
 		// A cursor made, of the iterable, the one operand.
 		return bytecode.Instr{Op: bytecode.OpForOfStart}, 1
+	case abi.GoCallGet:
+		// A property's read, of the object, which the instruction at the
+		// call's PC says (jitPropertyMade).
+		return bytecode.Instr{Op: bytecode.OpGetProp, A: uint32(op >> abi.GoOpIndexShift)}, 1
+	case abi.GoCallSet:
+		// A property's write, of the object and the value.
+		return bytecode.Instr{Op: bytecode.OpSetProp, A: uint32(op >> abi.GoOpIndexShift)}, 2
 	}
 	return in, n
 }
@@ -3879,6 +4003,18 @@ func (r *Runtime) jitChainValue(cl *closure, p *ir.Program, q, n int) (Value, bo
 		return Undefined, false
 	}
 	in := fn.Code[q]
+	if in.Op == bytecode.OpGetUpvalue || in.Op == bytecode.OpGetUpvalueCheck {
+		// A captured binding's value now, as jitKnownReceiver has it: a
+		// constructor a module's closures capture, Box2D's a instanceof S,
+		// which had left native code at every test.
+		if int(in.A) >= len(cl.upvalues) || cl.upvalues[in.A] == nil {
+			return Undefined, false
+		}
+		if v := cl.upvalues[in.A].get(); !v.IsUninitialized() {
+			return v, true
+		}
+		return Undefined, false
+	}
 	if int(in.A) >= len(cl.names) {
 		return Undefined, false
 	}
@@ -5478,6 +5614,9 @@ func (fb *jitFeedback) Property(pc int) (ssa.PropertySite, bool) {
 			site.Cases = fb.cases(pc, site.Shape)
 		}
 	}
+	if ok && fb.fn.Code[pc].Op != bytecode.OpSetProp {
+		site.Megamorphic = fb.megamorphic(pc, site)
+	}
 	if ok && fb.root == nil && int(fb.fn.Code[pc].B) < len(fb.cl.ic) && fb.cl.ic[fb.fn.Code[pc].B].fills < maxCacheFills &&
 		!slices.ContainsFunc(fb.fed, func(s jitFedSite) bool { return s.pc == uint32(pc) }) {
 		// A site whose cache may yet learn a shape (jitFed).
@@ -6745,6 +6884,10 @@ type jitNativeLevel struct {
 	// construction called, the frame's new.target.
 	construct bool
 	newTarget Value
+	// callee, for an inlined callee's, is its function object
+	// (abi.Context's InlineCallee), the frame's, as a stack trace names it
+	// by; nil for a native call's.
+	callee *Object
 	// ctx is the level's context's index.
 	ctx int
 	// returnTo is where its native caller goes on after the call
@@ -6782,6 +6925,10 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 			// The callee its caller -- e's code or a native call's callee's
 			// -- inlined at the call it left at.
 			l.inline, l.locals, l.thisSlot = true, int(c.InlineLocals), int(c.InlineThis)
+			if c.InlineCallee != 0 {
+				// The object, which the caller's code keeps alive.
+				l.callee = *(**Object)(unsafe.Pointer(&c.InlineCallee))
+			}
 			l.construct = callerPC < len(caller.Code) && caller.Code[callerPC].Op == bytecode.OpNew
 			if l.construct && c.InlineCallee != 0 {
 				// The object, which the caller's code keeps alive.
@@ -6813,6 +6960,8 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 			}
 		} else {
 			l.cl, l.this = (*closure)(c.Closure), *(*Value)(unsafe.Pointer(&c.This))
+			// Its function object, where its call says (an accessor's).
+			l.callee = r.jitLevelCallee(caller, callerPC, l.this)
 			l.construct = callerPC < len(caller.Code) && caller.Code[callerPC].Op == bytecode.OpNew
 			if l.construct && c.NewTarget != 0 {
 				l.newTarget = Obj(*(**Object)(unsafe.Pointer(&c.NewTarget)))
@@ -6925,7 +7074,7 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 			// one, which a stack trace shows.
 			f.pc++
 		}
-		f.this, f.newTarget, f.callee, f.args = l.this, Undefined, nil, nil
+		f.this, f.newTarget, f.callee, f.args = l.this, Undefined, l.callee, nil
 		if l.construct && l.newTarget.IsObject() {
 			f.newTarget = l.newTarget
 		}
@@ -7408,6 +7557,29 @@ func (r *Runtime) jitCallResult(f *frame, pc, depth int, v Value, err error) (in
 			return sp, false
 		case v.IsUninitialized():
 			f.pc = in.A
+			return sp, true
+		}
+		r.stack[sp] = v
+		return sp + 1, true
+	}
+	switch in.Op {
+	case bytecode.OpGetProp, bytecode.OpGetPropThis, bytecode.OpSetProp:
+		// An accessor's read or write, its getter or setter called
+		// (ssa.AccessorSite), or one Go made (abi.GoCallGet): the object
+		// goes but for get_prop_this, which keeps it below the value; a
+		// write's value goes too, and leaves nothing.
+		sp := f.base + depth
+		f.pc = uint32(pc + 1)
+		switch in.Op {
+		case bytecode.OpGetProp:
+			sp--
+		case bytecode.OpSetProp:
+			sp -= 2
+		}
+		if err != nil {
+			return sp, false
+		}
+		if in.Op == bytecode.OpSetProp {
 			return sp, true
 		}
 		r.stack[sp] = v
