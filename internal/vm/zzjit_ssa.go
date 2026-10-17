@@ -6247,8 +6247,8 @@ func jitLoopLength(fn *bytecode.Function) uint32 {
 // goOnPC with goOnDepth operands; tryJITLoop): an iteration that left as
 // V8's code deoptimizes leaves the rest of that iteration to the
 // interpreter, not the rest of the loop. Code Go has gone on without an
-// entry in jitEntryMisses times is compiled again at once with an entry at
-// each PC Go went on at (missedEntries), and Go goes on in it at pc --
+// entry in at one PC jitEntryMisses times is compiled again at once with an
+// entry at each such PC (missedEntries), and Go goes on in it at pc --
 // again only for a PC it had not been compiled for: an entry where Go does
 // not go on is no use. It had been compiled with an entry after every
 // guard that may leave for Go: Typescript's 3,148-instruction function had
@@ -6308,7 +6308,7 @@ func (r *Runtime) jitGoOn(f *frame, e *jitEntry, pc, sp int) (v Value, err error
 // every PC so far.
 func (e *jitEntry) entriesDue(pc int) bool {
 	if !slices.Contains(e.missedEntries, uint32(pc)) && len(e.missedEntries) < jitMissedEntries {
-		e.missedEntries = append(e.missedEntries, uint32(pc))
+		e.wentOn(uint32(pc))
 	}
 	if len(e.missedEntries) <= e.entriesAsked || e.reoptPending() || e.feedReopt || e.polyPending || e.inlinePending {
 		return false
@@ -6322,10 +6322,45 @@ func (e *jitEntry) entriesDue(pc int) bool {
 	return true
 }
 
-// jitEntryMisses is how often Go goes on in the interpreter, having found
-// no entry, before a function's code is compiled with entries where it
-// did (jitGoOn), doubled at each such compile; jitMissedEntries is the
-// most PCs a function remembers.
+// jitGoneOn is a PC Go went on in the interpreter at, having found no
+// entry, and how many times (jitEntry's goneOn).
+type jitGoneOn struct {
+	pc uint32
+	n  uint8
+}
+
+// wentOn counts a time Go went on at pc, which the code is to be compiled
+// with an entry at once it has gone on there jitEntryMisses times
+// (missedEntries): a PC Go goes on at again is a path the code takes,
+// which an entry has it take natively; one it went on at once is a
+// speculation that failed once, which V8's code too leaves to the
+// interpreter until the loop's next iteration. An entry is not free: its
+// live slots are loaded and merged with phis at its PC, where what the
+// code had proved before -- a read hoisted, a shape checked, a callee's
+// target -- holds no longer, on every iteration after. Given an entry at
+// each PC Go went on at once, Gameboy's instruction dispatch had 46,
+// some 30 of them for one miss each, and ran natively 40% longer.
+func (e *jitEntry) wentOn(pc uint32) {
+	i := slices.IndexFunc(e.goneOn, func(g jitGoneOn) bool { return g.pc == pc })
+	if i < 0 {
+		if len(e.goneOn) >= jitMissedEntries {
+			return
+		}
+		e.goneOn = append(e.goneOn, jitGoneOn{pc: pc})
+		i = len(e.goneOn) - 1
+	}
+	if e.goneOn[i].n++; e.goneOn[i].n < jitEntryMisses {
+		return
+	}
+	e.goneOn = slices.Delete(e.goneOn, i, i+1)
+	e.missedEntries = append(e.missedEntries, pc)
+}
+
+// jitEntryMisses is how often Go goes on in the interpreter at a PC,
+// having found no entry, before the code is to have an entry there, and
+// how often anywhere before a function's code is compiled with entries
+// where it did (jitGoOn), doubled at each such compile; jitMissedEntries
+// is the most PCs a function remembers of each.
 const (
 	jitEntryMisses   = 2
 	jitMissedEntries = 256
