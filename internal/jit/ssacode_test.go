@@ -1365,9 +1365,13 @@ func TestSSANativeMatchesEvaluator(t *testing.T) {
 // (its exits' descriptions): a runtime compiles at run time, and what a
 // compile leaves the collector is paid by the program. The budget is a
 // little over what random programs take now, so that a pass allocating per
-// value again shows here: 54 a compile without accessor sites, 58 since a
-// quarter of their property sites inline a getter or a setter, each callee
-// a frame of its own.
+// value again shows here: 49 a compile (51.5 with Go 1.24) without accessor
+// sites; 56.2 (59.0) since a quarter of their property sites are
+// accessors' and megamorphic -- each inlined getter or setter a frame of
+// its own, each site's out-of-line paths a closure (mir's cold), which
+// are per site, not per value. Their sites' feedback and their guards'
+// operands come from the workspace (accessorSite, guardOf): 58.6 (61.3)
+// before.
 func TestWorkspaceCompileAllocations(t *testing.T) {
 	r := rand.New(rand.NewPCG(41, 42))
 	var ws ssa.Workspace
@@ -1404,7 +1408,7 @@ func TestWorkspaceCompileAllocations(t *testing.T) {
 		}
 	}) / float64(len(jobs))
 	t.Logf("%.1f allocations a compile", allocs)
-	if allocs > 60 {
+	if allocs > 62 {
 		t.Fatalf("%.1f allocations a compile", allocs)
 	}
 }

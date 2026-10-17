@@ -2935,7 +2935,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 		b.assign(in.Dest, blk, v)
 	case ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead:
 		if a, ok := b.accessor(pc); ok {
-			b.accessorOp(blk, pc, in, a, operand, guard, state)
+			b.accessorOp(blk, pc, in, a, operand, state)
 			break
 		}
 		if s, ok := b.stringProperty(pc); ok {

@@ -35,7 +35,7 @@ func (b *builder) accessor(pc int) (*AccessorSite, bool) {
 	} else if af, ok := b.fb.(AccessorFeedback); ok {
 		if s, ok := af.Accessor(pc); ok && s.Function != 0 && s.Property.Shape != 0 && s.Property.Holders[0].Object != 0 &&
 			s.Setter == (in.Op == ir.PropertyWrite) {
-			a = &s
+			a = b.f.accessorSite(s)
 		}
 	}
 	if a == nil {
@@ -76,7 +76,7 @@ func (b *builder) accessorCalls(a *AccessorSite) []*CallSite {
 // where Go makes the read or write, nothing checked. A call's result is a
 // read's; a setter's is dropped.
 func (b *builder) accessorOp(blk *Block, pc int, in ir.Instruction, a *AccessorSite, operand func(ir.Operand) *Value,
-	guard func(Op, Type, ir.ExitKind, ...*Value) *Value, state func() *FrameState) {
+	state func() *FrameState) {
 	f := b.f
 	var calls []*CallSite
 	if b.cur == b.root {
@@ -101,13 +101,15 @@ func (b *builder) accessorOp(blk *Block, pc int, in ir.Instruction, a *AccessorS
 			b.reloadAfterCall(blk)
 		}
 	}
-	args := []*Value{recv}
+	// On the stack: guardOf copies its operands, as newValue does.
+	var argv [2]*Value
+	args := append(argv[:0], recv)
 	if value != nil {
 		args = append(args, value)
 	}
 	if fr == nil && len(calls) == 1 && calls[0].Go == GoCall {
 		// Go reads or writes it as the interpreter would.
-		call := guard(OpCall, Tagged, ir.HostExit, args...)
+		call := b.guardOf(blk, state, OpCall, Tagged, ir.HostExit, args...)
 		f.cache(call).Calls, call.Index = calls, b.callKeeps[pc]
 		result(call)
 		return
@@ -118,22 +120,22 @@ func (b *builder) accessorOp(blk *Block, pc int, in ir.Instruction, a *AccessorS
 		blk.State.addUse()
 		return
 	}
-	object := guard(OpObjectOf, Ptr, ir.HostExit, recv)
+	object := b.guardOf(blk, state, OpObjectOf, Ptr, ir.HostExit, recv)
 	site := a.Property
 	var holders *HolderChain
 	if site.Holders[0].Object != 0 {
 		holders = &HolderChain{Holders: site.Holders, More: site.More}
 	}
-	cell := guard(OpPropCell, Source, ir.HostExit, object)
+	cell := b.guardOf(blk, state, OpPropCell, Source, ir.HostExit, object)
 	cell.Const, cell.Index, cell.Key = ir.Value{Bits: uint64(site.Shape)}, int(site.Index), site.Key
 	f.setProperty(cell, holders, site.Cases, nil, nil)
-	is := guard(OpAccessorIs, None, ir.HostExit, cell)
+	is := b.guardOf(blk, state, OpAccessorIs, None, ir.HostExit, cell)
 	is.Const, is.Index = ir.Value{Bits: uint64(a.Function)}, b2i(a.Setter)
 	if fr != nil {
-		b.accessorInline(blk, fr, recv, value, guard, state)
+		b.accessorInline(blk, fr, recv, value, state)
 		return
 	}
-	call := guard(OpCall, Tagged, ir.HostExit, args...)
+	call := b.guardOf(blk, state, OpCall, Tagged, ir.HostExit, args...)
 	f.cache(call).Calls, call.Index = calls, b.callKeeps[pc]
 	result(call)
 }
@@ -141,11 +143,11 @@ func (b *builder) accessorOp(blk *Block, pc int, in ir.Instruction, a *AccessorS
 // accessorInline gives an inlined getter's or setter's start its slots,
 // once its accessor is checked: the value, a setter's argument, past
 // which undefined, the receiver, and undefined in every other.
-func (b *builder) accessorInline(blk *Block, fr *frame, recv, value *Value, guard func(Op, Type, ir.ExitKind, ...*Value) *Value, state func() *FrameState) {
+func (b *builder) accessorInline(blk *Block, fr *frame, recv, value *Value, state func() *FrameState) {
 	site := fr.site
 	// Room past the operands for the callee's frame, as for a call's
 	// (inlineCall).
-	room := guard(OpFrameRoom, None, ir.HostExit)
+	room := b.guardOf(blk, state, OpFrameRoom, None, ir.HostExit)
 	room.Index = fr.base - b.root.p.Locals + fr.p.Locals + fr.p.StackSize
 	room.Const = ir.Value{Bits: uint64(fr.depth)}
 	fr.call = state()
@@ -157,7 +159,8 @@ func (b *builder) accessorInline(blk *Block, fr *frame, recv, value *Value, guar
 	}
 	fr.args = nil
 	if value != nil {
-		fr.args = []*Value{value}
+		fr.args = b.f.refsOf(1)
+		fr.args[0] = value
 	}
 	for i := 0; i < site.Params && i < len(fr.args); i++ {
 		fr.init[i] = fr.args[i]
@@ -196,4 +199,31 @@ func b2i(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// guardOf is the guard of op on args a translation makes (translate's
+// guard), as a method: called through a function value its operands were
+// a slice made on the heap at every guard.
+func (b *builder) guardOf(blk *Block, state func() *FrameState, op Op, t Type, kind ir.ExitKind, args ...*Value) *Value {
+	if b.cur != b.root {
+		// Inside an inlined callee Go does the operation, in the callee's
+		// frame, and native code goes on where it can.
+		kind = ir.HostExit
+	}
+	v := b.f.newValue(blk, op, t, args...)
+	v.Aux = int(kind)
+	v.State = state()
+	v.State.addUse()
+	return v
+}
+
+// accessorSite is s where the build keeps its sites: in the workspace,
+// if the Func has one.
+func (f *Func) accessorSite(s AccessorSite) *AccessorSite {
+	if f.ws != nil {
+		p := &f.ws.accessors.Make(1)[0]
+		*p = s
+		return p
+	}
+	return &s
 }
