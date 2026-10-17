@@ -105,7 +105,7 @@ func (r *Runtime) JITStats() JITStats {
 	return JITStats{Compiled: s.compiled, Entries: s.entries, Guards: s.guards,
 		Hosts: s.hosts, Budgets: s.budgets, Interpreted: s.interpreted, SSAEntries: s.ssaEntries, SSARecords: s.ssaRecords,
 		Held: int64(s.held()), Budget: int64(r.jitBudget()), Evicted: s.evicted, Refused: s.refusedRoom,
-		Discarded: s.discarded}
+		Discarded: s.discarded, Work: s.work, CalleeWork: s.calleeWork, Cost: s.cost}
 }
 
 // jitStressDeopt reports whether this budget exit should finish the
@@ -326,9 +326,9 @@ type jitEntry struct {
 	// its entry, and the count of their calls since the code was last
 	// compiled (in). nativeOut counts those that left native code
 	// from inside it (jitUnwindNative); notNative marks code native
-	// callers no longer call, for leaving on too many (jitUnwindShare),
-	// until Go has made nativeRetry calls to it, more for each time it was
-	// found to (nativeBackoff, jitNativeRetry).
+	// callers no longer call, for costing them more than it saves
+	// (jitCalleeJudge), until Go has made nativeRetry calls to it, more for
+	// each time it was found to (nativeBackoff, jitNativeRetry).
 	link          *jitLink
 	nativeOut     uint64
 	notNative     bool
@@ -340,6 +340,12 @@ type jitEntry struct {
 	// (jitUnwindNative).
 	ssaLinks   []*jitLink
 	ssaInlined []*closure
+	// callLinks are ssaLinks, each once, linkIn each one's count of native
+	// calls (jitLink's in) when the code was last judged, and linkSites
+	// how many of the code's call sites call it (jitNativeCallsMade).
+	callLinks []*jitLink
+	linkIn    []uint64
+	linkSites []int
 	// ssaPools are the object pools the code's constructions take from,
 	// whose addresses it holds.
 	ssaPools []*abi.ObjectPool
@@ -600,6 +606,12 @@ type jitState struct {
 	// unwound counts the native calls whose callees left native code, which
 	// Go finished (jitUnwindNative).
 	unwound uint64
+	// work, calleeWork and cost total, by the profit check's estimates,
+	// the work native code did -- as native callees, calleeWork, so far as
+	// their calls of Go and exits tell -- and what its stretches' ends and
+	// calls of Go cost against the tree tier (jitSSAProfit, jitCostHost
+	// and the others), for JITStats.
+	work, calleeWork, cost uint64
 	// budgetSeed varies the back-edge budget (backEdgeBudget), which is
 	// stressBudget under QJS_JIT_STRESS's budget.
 	budgetSeed   uint32
@@ -649,9 +661,13 @@ type jitState struct {
 	// counts the calls Go made so.
 	goCalls   uint64
 	pinSerial uint64
-	goMark    jitGoMark
-	levels    jitLevels
-	goRuns    []jitGoRun
+	// goScript marks a call of Go that ran other than a built-in's call --
+	// a function of script's, a getter -- which costs more
+	// (jitCostGoScript): jitCallMade sets it after it calls one.
+	goScript bool
+	goMark   jitGoMark
+	levels   jitLevels
+	goRuns   []jitGoRun
 	// calleeOpen is, by context, what closures a native callee made
 	// captured of its locals, not closed yet (abi.Context's Open), and
 	// calleeFrame the frame a callee's context stands for while Go makes
@@ -1417,6 +1433,16 @@ func (s *jitState) setLinks(e *jitEntry, links []*jitLink) {
 	}
 	old := e.ssaLinks
 	e.ssaLinks = links
+	// Each link once, with its sites in this code, its calls counted from
+	// now (jitNativeCallsMade).
+	e.callLinks, e.linkIn, e.linkSites = e.callLinks[:0], e.linkIn[:0], e.linkSites[:0]
+	for _, l := range links {
+		if i := slices.Index(e.callLinks, l); i >= 0 {
+			e.linkSites[i]++
+		} else {
+			e.callLinks, e.linkIn, e.linkSites = append(e.callLinks, l), append(e.linkIn, l.in), append(e.linkSites, 1)
+		}
+	}
 	for _, l := range old {
 		l.refs--
 		s.unlink(l)

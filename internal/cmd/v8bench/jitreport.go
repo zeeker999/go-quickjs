@@ -47,6 +47,8 @@ func (r runtimeOf) Report(name string) {
 		st.Compiled-was.Compiled, st.Entries-was.Entries, st.Guards-was.Guards, st.Hosts-was.Hosts, st.Interpreted-was.Interpreted)
 	fmt.Printf("  jit: %d dropped to make room, %d compiles refused it, %d of them once compiled; holds %.1f of %.1f MiB\n",
 		st.Evicted-was.Evicted, st.Refused-was.Refused, st.Discarded-was.Discarded, float64(st.Held)/(1<<20), float64(st.Budget)/(1<<20))
+	fmt.Printf("  jit: %d instructions of work natively, %d of them by native callees, as estimated; exits and calls of Go cost %d\n",
+		st.Work+st.CalleeWork-was.Work-was.CalleeWork, st.CalleeWork-was.CalleeWork, st.Cost-was.Cost)
 	jitReport.stats = st
 	var used, other []vm.JITFunction
 	now := map[string]vm.JITFunction{}

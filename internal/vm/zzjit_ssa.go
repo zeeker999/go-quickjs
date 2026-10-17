@@ -2761,9 +2761,9 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	if !marking {
 		// A call made through Go only because the collector marks costs
 		// the code nothing it chose (abi.GoOpMarking). A loop's step Go
-		// makes costs what any call of Go does: a loop of them, over a Map
-		// or a generator, whose body does little, the tree tier runs (one
-		// over an array native code steps itself, and calls nothing).
+		// makes costs what a call of a built-in does; one of a function of
+		// script's, which Go makes a frame for and runs, far more
+		// (jitCostGoScript).
 		e.ssaStats.goCalls++
 	}
 	s.goCalls++
@@ -2781,10 +2781,22 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	s.goCallDepth, s.goCallMarking = r.frameDepth+1, marking
 	var v Value
 	var err error
+	s.goScript = prop
 	if prop {
 		v, err = r.jitPropertyMade(f.cl, pc, sp)
 	} else {
 		v, err = r.jitCallMade(in, sp)
+	}
+	if !marking {
+		// What it cost: a built-in's call, or one that ran a function of
+		// script's (goScript).
+		cost := uint64(jitCostGoBuiltin)
+		if s.goScript {
+			e.ssaStats.goScripts++
+			cost = jitCostGoScript
+		}
+		e.ssaStats.cost += cost
+		s.cost += cost
 	}
 	s.goCallDepth, s.goCallMarking = goCallDepth, goCallMarking
 	jitClearArgs(r.stack, top, sp)
@@ -3071,10 +3083,15 @@ framed:
 	s.goCallDepth, s.goCallMarking = r.frameDepth+1, marking
 	var v Value
 	var err error
+	s.goScript = prop
 	if prop {
 		v, err = r.jitPropertyMade(f.cl, pc, sp)
 	} else {
 		v, err = r.jitCallMade(in, sp)
+	}
+	if s.goScript && !marking {
+		// One that ran a function of script's (jitCalleeJudge).
+		e.ssaStats.calleeScripts++
 	}
 	s.goCallDepth, s.goCallMarking = goCallDepth, goCallMarking
 	s.ctxTop = ctxTop
@@ -3136,20 +3153,12 @@ type jitGoMark struct {
 }
 
 // jitCalleeProfit accounts for a call of Go that e's code makes at pc as a
-// native callee, in the run whose pins serial names, and every jitSSAProbe
-// such calls decides whether its native code pays, as jitSSAProfit decides
-// for code Go enters: each call of Go costs what an exit and an entry
-// would (jitSSAMinWork), against the work the code did natively since the
-// last -- the back edges taken, at its loops' mean length, and the
-// distance from the last call it made, at a later PC in the same run. Called natively,
-// its calls cost it the same as entered from Go, but its native callers
-// pay no entry: called through Go instead (ExitEnter), each call of it
-// would cost one. So it pays while its work makes up for its calls of Go
-// beyond its calls in (its link's in); if not -- a function of loops that only
-// call built-ins, RegExp's run blocks, a call of Go at every few
-// instructions -- Go stops entering it and native callers stop calling it
-// (notNative), and the existing tiers run it, its calls of built-ins the
-// tree tier's own, cheaper than calls of Go from native code.
+// native callee, in the run whose pins serial names, and the work the code
+// did natively since the last: the back edges taken, at its loops' mean
+// length, and the distance from the last call it made, at a later PC in
+// the same run. Its native callers' judgement of it weighs them
+// (jitCalleeJudge); a call of script's is counted once it is made
+// (calleeScripts).
 func (r *Runtime) jitCalleeProfit(e *jitEntry, serial uint64, pc int) {
 	s := r.jit
 	st := &e.ssaStats
@@ -3157,21 +3166,80 @@ func (r *Runtime) jitCalleeProfit(e *jitEntry, serial uint64, pc int) {
 	// tiers share the counter, so the guess errs toward the native code --
 	// and, in the same run, the distance from the call before it.
 	m := &s.goMark
+	work := uint64(0)
 	if back := m.edges - (r.backEdges - s.pollCredit); m.hint != 0 && back > 0 {
-		st.calleeWork += uint64(back) * uint64(e.ssaLoop)
+		work = uint64(back) * uint64(e.ssaLoop)
 	}
 	if m.serial == serial && m.hint == e.hint && pc > m.pc {
-		st.calleeWork += uint64(pc - m.pc)
+		work += uint64(pc - m.pc)
 	}
+	st.calleeWork += work
+	s.calleeWork += work
 	st.calleeGoCalls++
-	if st.calleeGoCalls%jitSSAProbe != 0 || st.calleeGoCalls <= e.link.in || jitMarking() {
+	if (st.calleeGoCalls+e.nativeOut)%jitSSAProbe == 0 && !jitMarking() {
+		r.jitCalleeJudge(e)
+	}
+}
+
+// jitCalleeJudge decides, every jitSSAProbe calls of Go and exits e's code
+// has made as a native callee, whether its native callers' calling it
+// natively pays -- what its calls of Go and its exits cost as a native
+// callee's (jitCostNestedBuiltin, jitCostNestedScript, jitCostCalleeLeft,
+// jitCostCalleeLevel), less what the native calls save (jitCostNativeCall)
+// -- against the two ways it may run if they call it through Go instead
+// (notNative), as V8's
+// optimized code calls a function it stopped inlining: its native code
+// entered by Go, its calls of Go and exits at its own level, cheaper, each
+// call in made by Go (jitCostGoEntered); or, should that not pay, the tree
+// tier, which forgoes its native work (calleeWork), each call in made by Go
+// (jitCostGoScript). A callee that costs more than the cheaper of them is
+// called through Go, and judged as Go's own entries are (jitSSAProfit),
+// which gives it up to the tree tier if it does not pay there either: that
+// judgement sees all its work, which this one, at its exits, does not --
+// AWFY's Bounce's benchmark, called natively, leaves early in each call,
+// its loops after the exit native, Go going on with them, and was given up
+// for the little work it did before. Code compiled for native callers alone
+// (ssaCallee) Go does not enter: the tree tier runs it. A function of
+// loops that only call built-ins, RegExp's run blocks, a call of Go at
+// every few instructions, its exits, each a frame Go makes, and little
+// work, has native callers call it through Go; a callee whose work makes up
+// for its exits stays native, as does one that leaves seldom.
+//
+// Code whose exits do not pay is compiled again first, with what its exits
+// taught since (jitCallSeen, jitPolySeen), its native callers calling it
+// still, as V8 deoptimizes code and optimizes it again with the feedback
+// gathered since: leaving while it learned, its calls and constructions not
+// yet decided, is no reason to stop calling it natively. Only once those
+// compiles are spent (jitUnwindReopts), as V8 gives up optimizing a
+// function that deoptimizes too often, do native callers stop calling it
+// -- or at once, if its exits taught nothing since it was compiled
+// (jitLearning), for code compiled again would be the same: RayTrace's
+// getReflectionRay, constructing with a forwarding constructor its code
+// leaves to Go, and wrapUp, whose remainder of fractions Go computes, were
+// compiled three times more each for nothing.
+func (r *Runtime) jitCalleeJudge(e *jitEntry) {
+	st := &e.ssaStats
+	if jitJudgeOff {
 		return
 	}
-	if st.calleeWork < (st.calleeGoCalls-e.link.in)*jitSSAMinWork {
-		e.entrySlow = true
-		e.notNative, e.link.entry, e.link.body, e.nativeRetry = true, 0, 0, 0
-		e.nativeBackoff = min(e.nativeBackoff+1, jitNativeBackoffs)
+	in, out := e.link.in, e.nativeOut
+	scripts := st.calleeScripts
+	builtins := st.calleeGoCalls - scripts
+	native := builtins*jitCostNestedBuiltin + scripts*jitCostNestedScript + st.calleeLeft
+	saved := in * jitCostNativeCall
+	tree := in*jitCostGoScript + st.calleeWork
+	entered := in*jitCostGoEntered + builtins*jitCostGoBuiltin + scripts*jitCostGoScript + out*jitCostHost
+	if e.ssaCallee {
+		entered = tree
 	}
+	if native <= entered+saved && native <= tree+saved {
+		return
+	}
+	if out != 0 && r.jitUnwindLearn(e) {
+		return
+	}
+	e.notNative, e.link.entry, e.link.body, e.nativeRetry = true, 0, 0, 0
+	e.nativeBackoff = min(e.nativeBackoff+1, jitNativeBackoffs)
 }
 
 // jitStoreElem stores v at index n of o as an assignment would, where that
@@ -3415,6 +3483,9 @@ func (r *Runtime) jitCallMade(in bytecode.Instr, sp int) (Value, error) {
 		}
 	}
 	v, _, err := r.jitCallAt(in, sp)
+	// Not a built-in's call, which costs more (jitCostGoScript): set after
+	// it, for the calls of Go the call made meanwhile reset it.
+	r.jit.goScript = true
 	return v, err
 }
 
@@ -6094,50 +6165,156 @@ func (r *Runtime) jitRecordValue(f *frame, e *jitEntry, ctx *abi.Context, i int)
 type jitSSAStats struct {
 	entries, hosts, guards, polls, records uint64
 	ended, work                            uint64
-	// goCalls counts the calls native code had Go make (jitGoCall).
-	goCalls uint64
+	// returns counts the stretches that ended in a return or a suspension,
+	// unwound those a native callee's exit ended, which Go finished
+	// (jitUnwindNative), and inlineLeft those an exit inside a callee the
+	// code inlined ended: hosts counts both of those too.
+	returns, unwound, inlineLeft uint64
+	// goCalls counts the calls native code had Go make (jitGoCall), and
+	// goScripts those of them that ran a function of script's (goScript).
+	goCalls, goScripts uint64
+	// cost is what the stretches' ends and the calls of Go cost the code
+	// against the tree tier, in instructions of work (jitCostReturn and
+	// the others), which jitSSAProfit weighs work against.
+	cost uint64
 	// calleeGoCalls counts those it made as a native callee
-	// (jitGoCallNested), and calleeWork the work it did natively before
-	// each, as jitSSAProfit estimates a stretch's (jitCalleeProfit), since
-	// its calls in (jitLink's in) were last counted from 0.
-	calleeGoCalls, calleeWork uint64
+	// (jitGoCallNested), calleeScripts those of them that ran a function of
+	// script's, and calleeWork the work it did natively before each, and
+	// before each of its exits as one (jitUnwound), as jitSSAProfit
+	// estimates a stretch's (jitCalleeProfit), and calleeLeft what those
+	// exits cost (jitCostCalleeLeft, jitCostCalleeLevel), since its calls
+	// in (jitLink's in) were last counted from 0 (calleeAfresh).
+	calleeGoCalls, calleeScripts, calleeWork, calleeLeft uint64
 	// judged is how many stretches, calls of Go included, there had been
 	// when jitSSAProfit last judged the code, and marked the entries for
 	// native calls Go made while the collector marked, which it does not
 	// judge it by: runs of the code, counted among its entries all the same.
 	judged, marked uint64
-	// workBase and stretchBase are work and the stretches when Go last
-	// began entering the code again (jitRetrySlow): it is judged by what
-	// it has done since.
-	workBase, stretchBase uint64
+	// workBase and costBase are work and cost when Go last began entering
+	// the code again (jitRetrySlow): it is judged by what it has done since.
+	workBase, costBase uint64
 	// guardsAt counts failed guards by their site (abi.Context.ExitSite:
 	// the slot IR PC of the operation, or -1 for an entry's speculation);
 	// nil until one fails.
 	guardsAt map[int32]uint64
 }
 
-// jitSSAProbe is how many native stretches a function runs between looks
-// at whether its native code pays (jitSSAProfit), and jitSSAMinWork the
-// work a stretch must do, on average, for it to: an entry, and the exit or
-// return that ends the stretch, cost what the tree tier takes for about
-// that many instructions (the V8 suite's medians of five: 10 left Richards'
-// task methods, called from the tree tier and calling out again, native at
-// a loss; 20 is best overall, 1,374.8 ms against 1,413.6).
+// calleeAfresh counts what code does as a native callee from 0, as its calls
+// in are (jitLink's in).
+func (st *jitSSAStats) calleeAfresh() {
+	st.calleeGoCalls, st.calleeScripts, st.calleeWork, st.calleeLeft = 0, 0, 0, 0
+}
+
+// jitSSAProbe is how many native stretches a function runs, calls of Go
+// among them, between looks at whether its native code pays (jitSSAProfit),
+// and how many calls of Go and exits a native callee makes between looks
+// at whether it pays its native callers (jitCalleeJudge).
+const jitSSAProbe = 64
+
+// What each way a native stretch ends, and each call native code has Go
+// make, costs against the tree tier doing the same, in the instructions of
+// work native code would have to save over the tree tier to make up for it:
+// the break-even ratios TestJITCalibration measures, by the difference of
+// a loop with the ending and one without, natively, less the same
+// difference in the tree tier. Measured on an AMD Ryzen 5 3600 (Zen 2,
+// 3.6 GHz), Go 1.27.1, windows/amd64, the medians over eight placements of
+// the JIT's code (their spread in brackets): native code saved 1.96 ns an
+// instruction [1.94, 2.03] (tree tier 2.71, native 0.54), a ratio's ns over
+// that. Ratios carry across machines far better than times do, both sides
+// moving with the CPU. A stretch's work is estimated as jitSSAProfit says.
 const (
-	jitSSAProbe   = 64
-	jitSSAMinWork = 20
+	// jitCostReturn is an entry from the tree tier's call, and the return:
+	// 48 ns, 25 [20, 31].
+	jitCostReturn = 25
+	// jitCostHost is an exit for Go to run one operation, and the entry
+	// after it: 168 ns, 86 [78, 92]; at each of sixteen sites of a loop, 69.
+	// A poll, an exit for Go to make a native call to code with none
+	// (abi.ExitEnter), and any other exit are costed so too.
+	jitCostHost = 86
+	// jitCostDeopt is an entry from the tree tier's call that fails a
+	// guard, the interpreter finishing the call: 189 ns, 95 [83, 105].
+	jitCostDeopt = 95
+	// jitCostInlineLeft is an exit inside a callee the code inlined, Go
+	// making its frame and finishing it (jitUnwindNative): 342 ns, 174
+	// [160, 182].
+	jitCostInlineLeft = 174
+	// jitCostGoBuiltin is a call of Go of a built-in: the median of twelve
+	// built-ins common in scripts -- indexOf, substring, split, replace,
+	// test, Map's get, Set's has, Object.keys, parseInt, String, slice,
+	// join -- each at sixteen sites of a loop, making what they make, 24
+	// ns, 12 [11, 15]; the built-ins' own medians from 5 (join) to 33 (has).
+	// One site alone, its calls of indexOf, cost 4: the processor's
+	// predictors and caches favour it. RegExp's run blocks, loops of about
+	// seven instructions around a call of exec or replace, do not pay.
+	jitCostGoBuiltin = 12
+	// jitCostGoScript is a call of Go of a function of script's, which Go
+	// runs in the tree tier, its frame made -- and so a native caller's
+	// call of a callee native callers no longer call (notNative): 124 ns,
+	// 62 [50, 68]. A getter's or a setter's call (abi.GoCallGet), and a
+	// construction (60), are costed so too.
+	jitCostGoScript = 62
+	// jitCostGoEntered is such a call that enters the callee's native
+	// code: 179 ns, 91 [79, 96].
+	jitCostGoEntered = 91
+	// jitCostNativeCall is what a native call of a native callee saves
+	// against the tree tier's call: 62 ns, 32 [31, 32].
+	jitCostNativeCall = 32
+	// jitCostNestedBuiltin and jitCostNestedScript are a native callee's
+	// call of Go of a built-in, 40 ns, 21 [10, 26], and of a function of
+	// script's, 151 ns, 77 [70, 83] (jitGoCallNested): Go makes the frames
+	// of the levels between.
+	jitCostNestedBuiltin = 21
+	jitCostNestedScript  = 77
+	// jitCostCalleeLeft is a native callee's exit, Go finishing the call
+	// and resuming its caller's native code (jitUnwindNative): 324 ns, 162
+	// [155, 171]. jitCostCalleeLevel is each level more between the exit
+	// and the code Go entered, which Go makes a frame for and resumes too:
+	// a callee's callee's exit costs 562 ns, 286 [273, 299], 124 more.
+	// SplayTree's splay_ left three levels below the code Go entered.
+	jitCostCalleeLeft  = 162
+	jitCostCalleeLevel = 124
 )
 
+// jitEnding is what ended a native stretch, beyond what its context says,
+// for what it costs (jitSSAProfit).
+type jitEnding uint8
+
+const (
+	// jitEndOwn is the code's own return, exit, failed guard or poll.
+	jitEndOwn jitEnding = iota
+	// jitEndCallee is a native callee's exit, which the callee answers for
+	// (jitCalleeJudge).
+	jitEndCallee
+	// jitEndEnter is a native call of a function with no code native
+	// callers may enter (abi.ExitEnter), which Go makes.
+	jitEndEnter
+	// jitEndInline is an exit inside a callee the code inlined.
+	jitEndInline
+)
+
+// jitJudgeOff, which only the calibration sets (TestJITCalibration), keeps
+// code native however little it pays, and code it set apart where it is:
+// nothing judges it (jitSSAProfit, jitCalleeJudge, jitUnwound) or tries it
+// again (jitRetrySlow, jitRetryNative), so that what each way of leaving
+// native code costs can be measured.
+var jitJudgeOff bool
+
 // jitSSAProfit accounts for a native stretch that started at pc, with the
-// back-edge counter at edges, and ended as ctx says; every jitSSAProbe
-// stretches it decides whether the function's native code pays. Code whose
-// stretches do little work before they end -- leaving for Go, a method
-// call at every iteration, or returning, a small method the tree tier calls
+// back-edge counter at edges, and ended as ctx and end say; every
+// jitSSAProbe stretches it decides whether the function's native code
+// pays: whether the work its stretches did natively since Go last began
+// entering it makes up for what their ends, and its calls of Go, cost
+// against the tree tier (cost, by jitCostReturn and the others). Code whose
+// stretches do little work before they end -- leaving for Go, a method call
+// at every iteration, or returning, a small method the tree tier calls
 // that calls out again -- costs more there than it saves, and the tree tier
-// runs it from then on. The work is estimated: the distance from the entry
-// to the exit or return (the return's block), in slot IR instructions, and
-// a loop's mean length for each back-edge taken natively.
-func (r *Runtime) jitSSAProfit(e *jitEntry, f *frame, ctx *abi.Context, start, edges int) {
+// runs it from then on. A call of Go of a built-in costs a seventh of an
+// exit: a loop of them with some work around each -- string building --
+// stays native; one doing little else, RegExp's run blocks, does not. The
+// work is estimated: the distance from the
+// entry to the exit or return (the return's block), in slot IR
+// instructions, and a loop's mean length for each back-edge taken natively.
+func (r *Runtime) jitSSAProfit(e *jitEntry, f *frame, ctx *abi.Context, start, edges int, end jitEnding) {
 	st := &e.ssaStats
 	if s := r.jit; s.goCallMarking && r.frameDepth == s.goCallDepth && r.frameAt(r.frameDepth-1) == f {
 		// Entered for a native call Go made only because the collector
@@ -6175,24 +6352,91 @@ func (r *Runtime) jitSSAProfit(e *jitEntry, f *frame, ctx *abi.Context, start, e
 			work += uint64(site - int64(start))
 		}
 	}
-	st.work += work
-	// A call of Go a stretch makes costs it what an exit and an entry
-	// would, which it saves (ssa.GoCall): each counts as a stretch, so a
-	// method whose call Go now makes is judged as it was when it left --
-	// and as often: every jitSSAProbe stretches, its calls of Go among
-	// them. Judged every jitSSAProbe entries, a function entered a few
-	// times, each a loop of a hundred thousand calls of built-ins --
-	// RegExp's run blocks -- was never judged.
+	cost := uint64(0)
+	switch {
+	case end == jitEndCallee:
+		// The callee's, which its own native callers' judgement weighs
+		// (jitCalleeJudge): a callee whose exits do not pay stops being
+		// called natively, which is the remedy, not this code given up.
+		st.unwound++
+	case end == jitEndEnter:
+		cost = jitCostHost
+	case end == jitEndInline:
+		st.inlineLeft++
+		cost = jitCostInlineLeft
+	case ctx.ExitKind == abi.ExitReturn || ctx.ExitKind == abi.ExitHost && jitSuspends(f.cl.fn, int(ctx.ExitPC)):
+		// A suspension, which a resumption enters again, costs what a
+		// return and a call's entry do.
+		st.returns++
+		cost = jitCostReturn
+	case ctx.ExitKind == abi.ExitDeopt:
+		cost = jitCostDeopt
+	default:
+		cost = jitCostHost
+	}
+	st.work, st.cost = st.work+work, st.cost+cost
+	r.jit.work, r.jit.cost = r.jit.work+work, r.jit.cost+cost
+	// Calls of Go count toward when the code is judged as stretches do,
+	// so that a function entered a few times, each a loop of a hundred
+	// thousand calls of Go, is judged as often as one entered as often: every
+	// jitSSAProbe stretches, its calls of Go among them.
 	stretches := st.entries - st.marked + st.goCalls
 	if stretches-st.judged < jitSSAProbe {
 		return
 	}
 	st.judged = stretches
-	if st.work-st.workBase < (stretches-st.stretchBase)*jitSSAMinWork {
-		// Go stops entering it; native callers, which pay neither, go on
-		// calling it (NativeCalls).
+	// What its native calls saved, each the tree tier's call less a native
+	// one (jitCostNativeCall), is work it did: a method of calls, which
+	// its estimate leaves out -- DeltaBlue's addToGraph and incrementalAdd,
+	// the calls of Go of their constraints' methods judged against little
+	// else, had been given up, and so the native calls they made, and their
+	// callees' entries made by Go.
+	if calls := jitNativeCallsMade(e); calls != 0 {
+		st.work += calls * jitCostNativeCall
+		r.jit.work += calls * jitCostNativeCall
+	}
+	if st.work-st.workBase < st.cost-st.costBase && !jitJudgeOff {
+		// Go stops entering it. Native callers go on calling it
+		// (NativeCalls): what it costs them is judged apart
+		// (jitCalleeJudge).
 		e.entrySlow = true
 	}
+}
+
+// jitNativeCallsMade is about how many calls e's code has made natively
+// since it was last asked, or since its links were set (jitState's
+// setLinks): each link's count (jitLink's in), which counts every native
+// caller's calls, its share by call sites, its sites in this code of all
+// the code that calls it (jitLink's refs) -- a callee many functions call,
+// Json's read, had credited each of them with all its calls. A link's
+// count, made 0 when its function is compiled again, counts from there.
+func jitNativeCallsMade(e *jitEntry) uint64 {
+	n := uint64(0)
+	for i, l := range e.callLinks {
+		d := l.in
+		if d >= e.linkIn[i] {
+			d -= e.linkIn[i]
+		}
+		if l.refs > e.linkSites[i] {
+			d = d * uint64(e.linkSites[i]) / uint64(l.refs)
+		}
+		n += d
+		e.linkIn[i] = l.in
+	}
+	return n
+}
+
+// jitSuspends reports whether the instruction at pc of fn suspends its
+// frame: a yield or an await.
+func jitSuspends(fn *bytecode.Function, pc int) bool {
+	if pc < 0 || pc >= len(fn.Code) {
+		return false
+	}
+	switch fn.Code[pc].Op {
+	case bytecode.OpYield, bytecode.OpAwait, bytecode.OpYieldStar:
+		return true
+	}
+	return false
 }
 
 // jitRetrySlow counts a call the existing tiers made of code Go does not
@@ -6205,14 +6449,17 @@ func (r *Runtime) jitSSAProfit(e *jitEntry, f *frame, ctx *abi.Context, start, e
 // every call made by Go after its one call's target was learned. Code
 // compiled for native callers alone (ssaCallee) Go does not enter.
 func jitRetrySlow(e *jitEntry) {
-	if e.ssaCallee || e.ssa == nil || e.slowCalls-e.slowSince < jitNativeRetry<<e.slowBackoff {
+	if e.ssaCallee || e.ssa == nil || e.slowCalls-e.slowSince < jitNativeRetry<<e.slowBackoff || jitJudgeOff {
 		return
 	}
 	st := &e.ssaStats
 	e.entrySlow = false
 	e.slowSince, e.slowBackoff = e.slowCalls, min(e.slowBackoff+1, jitNativeBackoffs)
+	// The native calls its callees' other callers made meanwhile are not
+	// its own.
+	jitNativeCallsMade(e)
 	st.judged = st.entries - st.marked + st.goCalls
-	st.workBase, st.stretchBase = st.work, st.judged
+	st.workBase, st.costBase = st.work, st.cost
 }
 
 // jitLoopLength is the mean length of fn's loops, in instructions: the
@@ -6268,7 +6515,7 @@ func (r *Runtime) jitGoOn(f *frame, e *jitEntry, pc, sp int) (v Value, err error
 			e.ssaStats = stats
 			// Calls in are counted afresh (jitLink's in), and the calls of Go
 			// they are weighed against with them (jitCalleeProfit).
-			e.ssaStats.calleeGoCalls, e.ssaStats.calleeWork = 0, 0
+			e.ssaStats.calleeAfresh()
 			if e.ssa.HasEntry(pc) && !e.entrySlow {
 				s.goOnPC, s.goOnDepth = pc, sp-f.base
 				return Undefined, nil, false, true
@@ -6466,7 +6713,15 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 			// the code, as the collector's marking's exits do not.
 			e.ssaStats.entries--
 		} else {
-			r.jitSSAProfit(e, f, ctx, start, edges)
+			end := jitEndOwn
+			if c := s.ssaCtxs[idx+1]; c.Live == abi.LiveCall && s.ssaCtxs[k].ExitKind == abi.ExitEnter {
+				end = jitEndEnter
+			} else if c.Live == abi.LiveCall {
+				end = jitEndCallee
+			} else if c.Live != 0 {
+				end = jitEndInline
+			}
+			r.jitSSAProfit(e, f, ctx, start, edges, end)
 		}
 		if c := s.ssaCtxs[idx+1]; c.Live == abi.LiveCall {
 			// A native call's callee left native code: Go finishes it
@@ -6484,7 +6739,7 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 			// Past its call meanwhile, as the interpreter's frame is during
 			// one, which a stack trace shows (stackFrame).
 			f.pc = uint32(exitPC) + 1
-			v, err := r.jitUnwindNative(idx, e, f.cl.fn)
+			v, err := r.jitUnwindNative(idx, e, f.cl.fn, edges)
 			if err == nil && r.stopped == nil && back != 0 && e.ssa == code && code.Contains(back) && !jit.Marking() {
 				// Native code run meanwhile may have used the context.
 				c.Base, c.Live, c.ReturnTo = base, 0, 0
@@ -6532,7 +6787,7 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 			jitHandlers(f, e.ssaProg, exitPC)
 			// Past its call meanwhile, as a stack trace shows it.
 			f.pc = uint32(exitPC) + 1
-			v, err := r.jitUnwindNative(idx, e, f.cl.fn)
+			v, err := r.jitUnwindNative(idx, e, f.cl.fn, edges)
 			sp, ok := r.jitCallResult(f, exitPC, exitDepth, v, err)
 			if !ok || r.stopped != nil {
 				sp, err, native := r.jitCatch(f, e, sp, err)
@@ -6922,7 +7177,7 @@ type jitNativeLevel struct {
 // the innermost -- that one from its exit, as runSSA does, the others from
 // after their call, with what the one they called returned or threw -- and
 // returns what the outermost returned or threw.
-func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function) (Value, error) {
+func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function, edges int) (Value, error) {
 	s := r.jit
 	if c := s.ssaCtxs[idx+1]; c.Live == abi.LiveCall && c.ExitKind == abi.ExitEnter && (idx+2 == len(s.ssaCtxs) || s.ssaCtxs[idx+2].Live == 0) {
 		return r.jitEnterOne(c, idx+1, code, int(s.ssaCtxs[idx].ExitPC))
@@ -7010,7 +7265,12 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 		// the inlined callee's code alone, a native callee inlining pop()
 		// compiled before pop's property reads had run left native code at
 		// them at every call, never compiled again for what they learned.
+		// An exit of the callee's, which its native callers' judgement of it
+		// weighs (jitUnwound).
 		left.ssaStats.hosts++
+		if n != 0 && s.unwinding[len(s.unwinding)-1].inline {
+			r.jitUnwound(left, r.jitCalleeWork(left, 0, edges), n)
+		}
 	}
 	if n != 0 {
 		// The innermost left -- but for one that never entered native code
@@ -7020,7 +7280,7 @@ func (r *Runtime) jitUnwindNative(idx int, e *jitEntry, code *bytecode.Function)
 			// call has no hint. Not one that left for its pool to be
 			// filled again.
 			if e := r.jitEntryOf(l.cl); e != nil {
-				r.jitUnwound(e)
+				r.jitUnwound(e, r.jitCalleeWork(e, l.site, edges), n)
 			}
 		}
 	}
@@ -7315,48 +7575,69 @@ func jitTargets(e *jitEntry) iter.Seq2[int, *jitInline] {
 	}
 }
 
-// jitUnwindProbe is how many times native code called natively leaves
-// between looks at whether it leaves too often, and jitUnwindShare the
-// share of its calls it may leave from, as one in so many: Go then finishes
-// every native call outside it (jitUnwindNative), which costs more than Go
-// making the call.
-const (
-	jitUnwindProbe = 64
-	jitUnwindShare = 4
-)
-
 // jitUnwound counts a native call that left native code inside e's code
-// (nativeOut). Code that leaves on more than one in jitUnwindShare of its
-// calls is compiled again with what its exits taught since (jitCallSeen,
-// jitPolySeen), its native callers calling it still, as V8 deoptimizes
-// code and optimizes it again with the feedback gathered since: leaving
-// while it learned, its calls and constructions not yet decided, is no
-// reason to stop calling it natively. Only once those compiles are spent
-// (jitUnwindReopts), as V8 gives up optimizing a function that deoptimizes
-// too often, do native callers stop calling it and leave for Go at the
-// call instead, which makes it (notNative), until jitRetryNative -- or at
-// once, if its exits taught nothing since it was compiled (jitLearning),
-// for code compiled again would be the same: RayTrace's getReflectionRay,
-// constructing with a forwarding constructor its code leaves to Go, and
-// wrapUp, whose remainder of fractions Go computes, were compiled three
-// times more each for nothing. Nor is one counted while the collector
-// marks (jitInlineLeft).
-func (r *Runtime) jitUnwound(e *jitEntry) {
-	if jitMarking() {
+// (nativeOut), levels below the code Go entered, which had done work, by
+// jitSSAProfit's estimate, in it (at its exit, and the back edges since its
+// caller's stretch began, at its loops' mean length: the guess errs toward
+// the native code), for its native callers' judgement of it
+// (jitCalleeJudge). Code that leaves on more than
+// one in jitUnwindShare of its calls while it learns is compiled again
+// first, whether or not it pays (jitUnwindLearn): its exits may be what it
+// is still to learn. Not one while the collector marks (jitInlineLeft).
+func (r *Runtime) jitUnwound(e *jitEntry, work uint64, levels int) {
+	if jitMarking() || jitJudgeOff {
 		return
 	}
-	if e.nativeOut++; e.nativeOut%jitUnwindProbe != 0 || e.nativeOut*jitUnwindShare <= e.link.in {
+	e.nativeOut++
+	e.ssaStats.calleeWork += work
+	e.ssaStats.calleeLeft += jitCostCalleeLeft + uint64(max(levels-1, 0))*jitCostCalleeLevel
+	if s := r.jit; s != nil {
+		s.calleeWork += work
+	}
+	if e.nativeOut%jitSSAProbe == 0 && e.nativeOut*jitUnwindShare > e.link.in && r.jitUnwindLearn(e) {
 		return
 	}
-	if e.ssa != nil && e.unwindReopts < jitUnwindReopts && jitLearning(e) {
-		e.unwindReopts++
-		e.unwindReopt = true
-		e.link.in, e.nativeOut = 0, 0
-		e.ssaStats.calleeGoCalls, e.ssaStats.calleeWork = 0, 0
-		return
+	if (e.ssaStats.calleeGoCalls+e.nativeOut)%jitSSAProbe == 0 {
+		r.jitCalleeJudge(e)
 	}
-	e.notNative, e.link.entry, e.link.body, e.nativeRetry = true, 0, 0, 0
-	e.nativeBackoff = min(e.nativeBackoff+1, jitNativeBackoffs)
+}
+
+// jitUnwindShare is the share of its calls a native callee may leave from,
+// as one in so many, before it is compiled again for what its exits taught,
+// if it learns (jitUnwindLearn): V8's code deoptimized often is optimized
+// again with the feedback its deoptimizations gathered. A learning trigger,
+// not a judgement of cost: SplayTree's splay_, called natively, met a
+// fourth shape at its node writes and, compiled again only once it no longer
+// paid, which it did not until much later, left at those writes at every
+// call; V8's Splay took 13% longer.
+const jitUnwindShare = 4
+
+// jitUnwindLearn compiles e's code again, called natively, for what its
+// exits taught since it was compiled (jitLearning), up to jitUnwindReopts
+// times, its native callers calling it still, and reports whether it does.
+func (r *Runtime) jitUnwindLearn(e *jitEntry) bool {
+	if e.ssa == nil || e.unwindReopts >= jitUnwindReopts || !jitLearning(e) {
+		return false
+	}
+	e.unwindReopts++
+	e.unwindReopt = true
+	e.link.in, e.nativeOut = 0, 0
+	e.ssaStats.calleeAfresh()
+	return true
+}
+
+// jitCalleeWork is the work, by jitSSAProfit's estimate, that the code of
+// e, called natively, did before an exit at site (abi.Context.ExitSite),
+// its caller's stretch begun with the back-edge counter at edges.
+func (r *Runtime) jitCalleeWork(e *jitEntry, site uint64, edges int) uint64 {
+	work := uint64(0)
+	if back := edges - (r.backEdges - r.jit.pollCredit); back > 0 {
+		work = uint64(back) * uint64(e.ssaLoop)
+	}
+	if int64(site) > 0 {
+		work += site
+	}
+	return work
 }
 
 // jitLearning reports whether e's code has met, since it was compiled,
@@ -7398,13 +7679,13 @@ const (
 // enter, or calls without a frame, has only -- and has them call it again
 // after jitNativeRetry, counting its leaving afresh.
 func jitRetryNative(e *jitEntry) {
-	if !e.owned() {
+	if !e.owned() || jitJudgeOff {
 		// Dropped by the cache: its code is not its function's link's.
 		return
 	}
 	if e.nativeRetry++; e.nativeRetry >= jitNativeRetry<<(e.nativeBackoff-1) {
 		e.notNative, e.link.in, e.nativeOut = false, 0, 0
-		e.ssaStats.calleeGoCalls, e.ssaStats.calleeWork = 0, 0
+		e.ssaStats.calleeAfresh()
 		e.link.setCode(e.ssa)
 	}
 }

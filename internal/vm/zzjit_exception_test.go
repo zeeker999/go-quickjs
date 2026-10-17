@@ -127,7 +127,7 @@ func TestJITExceptionHandlers(t *testing.T) {
 		function throwsOwn(n) {
 			let s = 0
 			for (let i = 0; i < n; i++) {
-				try { if (i % 3 === 0) throw { code: i }; s += 1 } catch (e) { s += e.code }
+				try { if (i % 10 === 0) throw { code: i }; s = (s * 31 + i) | 0; s ^= s >>> 7; s = (s + i * i) | 0 } catch (e) { s += e.code }
 			}
 			return s
 		}
@@ -148,8 +148,10 @@ func TestJITExceptionHandlers(t *testing.T) {
 		jitNativeForTest(t, r, name)
 	}
 	// A throw caught in the function goes on natively at its handler: a
-	// run in which every turn's property read throws, or every third's
-	// throw statement, never finishes in the interpreter.
+	// run in which every turn's property read throws, or every tenth's
+	// throw statement, never finishes in the interpreter. (A throw
+	// statement is an exit; the work between them pays for it,
+	// jitSSAProfit.)
 	// (The first run's reads, speculated for an object that has p, are
 	// compiled again for one that has not.)
 	if _, err := r.Run(compileForTest(t, `operation({}, 100)`)); err != nil {

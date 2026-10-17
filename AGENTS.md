@@ -324,6 +324,22 @@ spare the time does not show what collecting costs, which an embedder
 running a runtime on each core pays. A change that moves what is
 allocated is compared by both.
 
+The JIT gives up native code whose work does not make up for what its
+exits and calls of Go cost against the tree tier (`jitSSAProfit`,
+`jitCalleeJudge`), costs that are constants, in instructions of work. They
+come from `TestJITCalibration`, which times a loop with each way of leaving
+native code and one without, natively and in the tree tier, at eight
+placements of the JIT's code, and prints each kind's cost and its
+break-even ratio -- how many instructions of work native code must save to
+make up for it -- with their spread. Run it on an idle machine; on another
+CPU, an arm64 one too, it says whether the constants carry, and their
+comments say where they were measured:
+
+```sh
+QUICKJS_JIT_CALIBRATE=1 go test -tags quickjs_jit -run '^TestJITCalibration$' \
+  -count=1 -v -timeout 60m ./internal/vm
+```
+
 `internal/cmd/disasm` prints the bytecode a script or module compiles to,
 each function's instructions under the source lines they come from; `-tree`
 says whether the tree tier builds each function and, where it does not,

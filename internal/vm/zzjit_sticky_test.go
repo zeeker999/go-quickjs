@@ -72,7 +72,8 @@ func TestJITCallLeftToGoDecidedAgain(t *testing.T) {
 		function add(a, b) { let s = a; for (let i = 0; i < 2; i++) s = (s + b) | 0; return s }
 		var fn = add.bind(null)
 		var o = { k: 1 }
-		function h(n, j) { let s = 0; for (let i = 0; i < n; i++) { s = fn(s, i) | 0; if (j) s = (s + o.k) | 0 } return s }`
+		function h(n, j) { let s = 0; for (let i = 0; i < n; i++) { s = fn(s, i) | 0; if (j) s = (s + o.k) | 0;
+			s = (s * 31 + i) | 0; s ^= s >>> 7; s = (s + i * i) | 0; s ^= s << 3; s = (s * 17 + i) | 0; s ^= s >>> 5 } return s }`
 	if _, err := r.Run(compileForTest(t, setup)); err != nil {
 		t.Fatal(err)
 	}

@@ -209,9 +209,20 @@ an array's -- and by Go where a return method must be called
 (`ssa.OpIterClosed`); a for...of's break closes it so too. What is left,
 for a rest element, is Go's.
 
-**Profitability.** Each native stretch's work is estimated, exits and
-calls of Go counted against it; code whose stretches do too little between
-them is left to the tree tier (`jitSSAProfit`).
+**Profitability.** Each native stretch's work is estimated, and what its
+end and its calls of Go cost against the tree tier is counted against it,
+by kind, in instructions of work: a return 25, an exit for Go to run an
+operation 86, a failed guard 95, an exit inside an inlined callee 174, a
+call of Go of a built-in 12, of a function of script's 62. Code whose work
+does not make up for them is left to the tree tier (`jitSSAProfit`). A
+native callee is judged for its native callers: its exits, each 162 and
+124 more for each native level below the code Go entered, and its calls of
+Go, against its work and what its native calls save; one that does not
+pay is called through Go (`jitCalleeJudge`), and judged then as any code
+Go enters is.
+The costs are break-even ratios measured on Zen 2 by `TestJITCalibration`
+(see the constants' comments in `zzjit_ssa.go`); they are constants,
+never measured at run time.
 
 ### Reading the heap in place
 
@@ -363,8 +374,12 @@ held at once, its free slots reused.
 - Temporary (no budget at all): retried after another warm-up. When the OS
   denies executable memory, the runtime marks the JIT unavailable for good.
 
-**Giving up.** Code whose native work per exit stays low is entered by Go no
-more (`entrySlow`, `jitSSAProfit`), and runs only for its native callers.
+**Giving up.** Code whose native work does not make up for what its exits
+cost is entered by Go no more (`entrySlow`, `jitSSAProfit`), and runs only
+for its native callers; a callee that costs its native callers more than
+it saves is called by them through Go (`notNative`, `jitCalleeJudge`). Go
+tries each again after a while, longer each time, in case it has learned
+(`jitRetrySlow`, `jitRetryNative`).
 
 **Debugger.** Runtimes made `WithDebugger` never run native code.
 
