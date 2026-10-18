@@ -485,3 +485,53 @@ func TestJITSlowCodeEnteredByOSR(t *testing.T) {
 		t.Fatalf("sum's long loop was not entered by on-stack replacement: %d tries at loops, %d native entries", r.jit.osrs-osrs, e.ssaStats.entries-entries)
 	}
 }
+
+// test262's buildString, under V8's budgets: codePoints.length = 0, at a
+// megamorphic site, between the chunks it appends to result. A write
+// there that Go made on the store's miss path, which native code's
+// analyses took for no call, gave a wrong string, and crashed. Each answer
+// is the interpreter's.
+func TestJITMegamorphicWriteKeeps(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	const src = `
+		function buildString(args) {
+			const loneCodePoints = args.loneCodePoints
+			const ranges = args.ranges
+			const CHUNK_SIZE = 10000
+			let result = String.fromCodePoint.apply(null, loneCodePoints)
+			for (let i = 0; i < ranges.length; i++) {
+				let range = ranges[i]
+				let start = range[0]
+				let end = range[1]
+				let codePoints = []
+				for (let length = 0, codePoint = start; codePoint <= end; codePoint++) {
+					codePoints[length++] = codePoint
+					if (length === CHUNK_SIZE) {
+						result += String.fromCodePoint.apply(null, codePoints)
+						codePoints.length = length = 0
+					}
+				}
+				result += String.fromCodePoint.apply(null, codePoints)
+			}
+			return result
+		}
+		const s = buildString({ loneCodePoints: [], ranges: [[0xDC00, 0xDFFF], [0x80, 0xDBFF], [0xE000, 0x10FFFF]] })
+		s.length + ':' + s.charCodeAt(s.length >> 1) + ':' + s.charCodeAt(s.length - 1)`
+	want := New(Config{})
+	t.Cleanup(func() { want.Close(); want.ReleaseClosed() })
+	wv, err := want.Run(compileForTest(t, src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := New(Config{JIT: true})
+	t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
+	gv, err := r.Run(compileForTest(t, src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, w := gv.String().Go(), wv.String().Go(); got != w {
+		t.Fatalf("got %s, interpreter %s", got, w)
+	}
+}
