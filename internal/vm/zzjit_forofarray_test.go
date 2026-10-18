@@ -381,7 +381,8 @@ func TestJITDerivedConstructor(t *testing.T) {
 		class B extends A { constructor(x, y) { super(x); let h = 0; for (let k = 0; k < 8; k++) h = (h * 31 + k) | 0; this.y = y + this.x + (h & 1) } }
 		class C extends B { constructor(x) { super(x, 2); let h = 0; for (let k = 0; k < 8; k++) h = (h + this.y) | 0; this.z = this.x * this.y + h } }
 		class F { a = 1 } class G extends F { b = 2; constructor(c) { super(); let h = 0; for (let k = 0; k < 8; k++) h ^= k; this.c = c + this.a + this.b + h } }
-		function make(n) { let s = 0; for (let i = 0; i < n; i++) { const b = new B(i, 1), c = new C(i), g = new G(i); s = (s + b.y + c.z + g.c) | 0 } return s }
+		class Imp extends A {}
+		function make(n) { let s = 0; for (let i = 0; i < n; i++) { const b = new B(i, 1), c = new C(i), g = new G(i), m = new Imp(i); s = (s + b.y + c.z + g.c + m.x) | 0 } return s }
 		class Early extends A { constructor() { this.q = 1; super(1) } }
 		class Twice extends A { constructor() { super(1); super(2) } }
 		class RetObj extends A { constructor() { super(1); return { other: true } } }
@@ -410,6 +411,14 @@ func TestJITDerivedConstructor(t *testing.T) {
 		}
 		if e.ssaStats.hosts+e.ssaStats.guards != 0 {
 			t.Errorf("%s left native code %d times for Go and failed %d guards", name, e.ssaStats.hosts, e.ssaStats.guards)
+		}
+	}
+	// An implicit constructor, super(...arguments) alone, which native
+	// code would only leave for at its super(), is left to the tree tier
+	// as any function of host operations alone is (jitcompile's hostOnly).
+	for k, x := range r.jit.cache {
+		if fn := k.Value(); fn != nil && fn.Name == "Imp" && x.ssa != nil {
+			t.Errorf("Imp, an implicit constructor, was compiled: it left native code %d times", x.ssaStats.hosts)
 		}
 	}
 }
