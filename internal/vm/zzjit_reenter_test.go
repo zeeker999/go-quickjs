@@ -3,6 +3,8 @@
 package vm
 
 import (
+	"runtime"
+	"runtime/debug"
 	"sync"
 	"testing"
 )
@@ -363,6 +365,12 @@ func TestJITNativeCalleeGoesOnAtLoops(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	// Native calls are Go's while the collector marks (mir's markingCall):
+	// it does not, so that what the test counts is the calls'. A
+	// collection during a round had made one of its calls Go's, and the
+	// round not counted -- three of four on a CI runner.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	setup := `var obj={x:2};
 		function callee(n,k){let t=0;for(let i=0;i<n;i++){const o=i===k?1:obj;t=(t+(o.x|0))|0}return t}
 		function caller(m){let s=0;for(let j=0;j<m;j++){s=(s+callee(100,j%5===0?j:-1))|0}return s}`
