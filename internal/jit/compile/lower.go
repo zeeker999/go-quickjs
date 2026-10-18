@@ -226,13 +226,16 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 		// its body would run it as a call does.
 		return nil, refuse(-1, "async or generator function")
 	case fn.Kind != bytecode.KindNormal && fn.Kind != bytecode.KindArrow && fn.Kind != bytecode.KindMethod && fn.Kind != bytecode.KindConstructor &&
-		fn.Kind != bytecode.KindGetter && fn.Kind != bytecode.KindSetter:
+		fn.Kind != bytecode.KindGetter && fn.Kind != bytecode.KindSetter && (fn.Kind != bytecode.KindDerivedConstructor || !m.ssa || m.callee):
 		// A base class's constructor is a function's body, constructed as
 		// one is (the VM's jitConstructs), and called by no native call:
 		// a call without new throws. A getter's and a setter's are a
 		// method's, called with the receiver as their this by a read or a
-		// write (ssa.AccessorSite). A derived class's, whose this super()
-		// binds, and a class's field initializers are not.
+		// write (ssa.AccessorSite). A derived class's is the new
+		// pipeline's, in its own code, entered from Go as its construction
+		// runs it: its super() binds its this, which Go makes (OpSuperCall),
+		// and no native call constructs it. A class's field initializers
+		// are not.
 		return nil, refuse(-1, "special function kind")
 	case fn.HasDirectEval || len(fn.EvalScopes) != 0:
 		return nil, refuse(-1, "direct eval")
@@ -1384,6 +1387,22 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 	case bytecode.OpForOfStart, bytecode.OpForInStart:
 		// The iterable popped, its loop's cursor pushed.
 		return effect{need: 1}, nil
+	case bytecode.OpSuperCall:
+		// A derived constructor's super(...): its arguments popped -- the A
+		// on the stack, or an array of them -- and the this it binds
+		// pushed.
+		if fn.Kind != bytecode.KindDerivedConstructor {
+			return bad("super() outside a derived constructor")
+		}
+		switch in.B {
+		case bytecode.SuperArgs:
+			return effect{need: int(in.A), delta: 1 - int(in.A)}, nil
+		case bytecode.SuperSpread:
+			return effect{need: 1}, nil
+		case bytecode.SuperForward:
+			return effect{delta: 1}, nil
+		}
+		return bad("invalid super call")
 	case bytecode.OpIterNextOrJump:
 		// The cursor kept; its next value pushed, or, done, a jump to A,
 		// which Go takes (jitHost).
@@ -1728,6 +1747,10 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this, charCode bool
 		return ir.Instruction{Op: ir.Host}
 	case bytecode.OpTypeOf:
 		// Go's, but compared with a string constant (typeTests).
+		return ir.Instruction{Op: ir.Host}
+	case bytecode.OpSuperCall:
+		// Go's, which binds the frame's this: from native code where it
+		// can be (ssa.CallSite's Super), which the this slot takes.
 		return ir.Instruction{Op: ir.Host}
 	case bytecode.OpApplyArguments:
 		// The inliner makes it a call (LowerSSAForward).
