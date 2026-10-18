@@ -271,3 +271,55 @@ func TestJITEntriesBackOff(t *testing.T) {
 		}
 	}
 }
+
+// A refusal reclaims nothing and lets nothing go at any budget
+// (TestJITRefusesRoomOnlyWhenNothingIsOld at one): the list of what may be
+// reclaimed (jitState's victims), kept from the epoch's last look, had
+// been let go when a look found too little, after the floor it noted had
+// counted it -- a refusal at a budget within the list's size of the room
+// refused a compile there was room for, and held less after it, at 12
+// budgets in 129 here and at 8 MiB on arm64.
+func TestJITRefusalsAtEveryBudget(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	var keep []*bytecode.Function
+	defer runtime.KeepAlive(&keep)
+	copyOf := jitCopiesForTest(jitFunctionForTest(t, `function f(n) { var s=0; for(var i=0;i<n;i++) s+=i; return s }`), &keep)
+	refusals := 0
+	for limit := int64(7 << 20); limit <= 9<<20; limit += 16 << 10 {
+		func() {
+			epoch := uint64(0)
+			defer func(was func() uint64) { jitEpochNow = was }(jitEpochNow)
+			jitEpochNow = func() uint64 { return epoch }
+			r := jitRuntimeForTest(t, Config{JIT: true, MemoryLimit: limit})
+			entries := jitFillForTest(t, r, copyOf)
+			// Two entries old, the others used since: only they may go.
+			epoch += jitCodeAge
+			for _, e := range entries[2:] {
+				e.starts++
+			}
+			if e := r.jitForFunction(copyOf(), nil); e == nil || e.ssa == nil {
+				t.Fatalf("limit %d: no room made from old code", limit)
+			}
+			for i := 0; ; i++ {
+				if i > 8 {
+					t.Fatalf("limit %d: no compile refused", limit)
+				}
+				evicted, refused, lowered, held := r.jit.evicted, r.jit.refusedRoom, len(r.jit.lowered), r.jitHeldBytes()
+				if e := r.jitForFunction(copyOf(), nil); e != nil {
+					continue
+				}
+				if r.jit.refusedRoom == refused || r.jit.evicted != evicted || len(r.jit.lowered) != lowered || r.jitHeldBytes() != held {
+					t.Fatalf("limit %d: a refusal reclaimed: %d evicted of %d, %d lowerings of %d, %d bytes held of %d",
+						limit, r.jit.evicted, evicted, len(r.jit.lowered), lowered, r.jitHeldBytes(), held)
+				}
+				refusals++
+				break
+			}
+		}()
+	}
+	if refusals == 0 {
+		t.Fatal("no budget refused a compile")
+	}
+}
