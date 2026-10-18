@@ -535,3 +535,51 @@ func TestJITMegamorphicWriteKeeps(t *testing.T) {
 		t.Fatalf("got %s, interpreter %s", got, w)
 	}
 }
+
+// A megamorphic site's write that neither the receiver's own table nor the
+// megamorphic cache has -- a property it adds, a shape it never met -- Go
+// makes, called from native code (ssa.GoCall) on a branch of its own, which
+// goes on after it, as V8's megamorphic stores call the runtime: mark, of objects of eight
+// shapes, adding hit to some and writing it in others, never leaves its
+// code, entered from Go and called natively alike; each answer, and each
+// object, is the interpreter's. Each such write had left native code, the
+// rest of the invocation in the interpreter: RayTrace's testIntersection,
+// of best.hitCount, at a call in eleven.
+func TestJITMegamorphicWritesByGo(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	r, run := jitTierRuntimeForTest(t, 1, `var shapes=[];
+		for(let k=0;k<8;k++){const o={};for(let j=0;j<=k;j++)o['p'+j]=j;if(k&1)o.hit=0;shapes.push(o)}
+		function mark(o,v){let s=0;for(let i=0;i<2;i++)s+=i;o.hit=v+s;return o}
+		function each(n){let t=0;for(let i=0;i<n;i++){const o=Object.assign({},shapes[i&7]);t+=mark(o,i).hit}return t}`)
+	for range 4 {
+		run(`each(64)`)
+	}
+	e := jitNativeForTest(t, r, "mark")
+	if p := r.global.getOwn(r.atoms.intern("mark")).value().Object().fn().closure; !r.jitSiteMegamorphic(p, e, jitSetPropPC(t, p.fn)) {
+		t.Fatal("mark's write is not megamorphic: no test of its misses")
+	}
+	ee := jitNativeForTest(t, r, "each")
+	hosts, ehosts, interpreted := e.ssaStats.hosts, ee.ssaStats.hosts, r.jit.interpreted
+	run(`each(400)`)
+	run(`JSON.stringify(shapes.map(o=>mark(Object.assign({},o),1)))`)
+	if n := e.ssaStats.hosts - hosts + ee.ssaStats.hosts - ehosts; n != 0 {
+		t.Errorf("mark, or each calling it, left native code %d times", n)
+	}
+	if n := r.jit.interpreted - interpreted; n != 0 {
+		t.Errorf("the interpreter finished %d invocations", n)
+	}
+}
+
+// jitSetPropPC is the PC of fn's one set_prop.
+func jitSetPropPC(t *testing.T, fn *bytecode.Function) int {
+	t.Helper()
+	for pc, in := range fn.Code {
+		if in.Op == bytecode.OpSetProp {
+			return pc
+		}
+	}
+	t.Fatal("no set_prop")
+	return -1
+}
