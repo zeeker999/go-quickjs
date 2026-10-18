@@ -272,13 +272,14 @@ func TestJITEntriesBackOff(t *testing.T) {
 	}
 }
 
-// A refusal reclaims nothing and lets nothing go at any budget
-// (TestJITRefusesRoomOnlyWhenNothingIsOld at one): the list of what may be
-// reclaimed (jitState's victims), kept from the epoch's last look, had
-// been let go when a look found too little, after the floor it noted had
-// counted it -- a refusal at a budget within the list's size of the room
-// refused a compile there was room for, and held less after it, at 12
-// budgets in 129 here and at 8 MiB on arm64.
+// A refusal reclaims nothing, at any budget, and old code stays through
+// it only where reclaiming that too would not make the room
+// (TestJITRefusesRoomOnlyWhenNothingIsOld at one budget). The floor a
+// refusal notes had counted the list of what may be reclaimed (jitState's
+// victims) kept from the epoch's last look, which goes once reclaimed
+// from: its size too high, a compile at a budget within that of the room
+// was refused with room for it -- at 7,421,952 here, and at 8 MiB on
+// arm64 -- the old code it could have reclaimed kept.
 func TestJITRefusalsAtEveryBudget(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -306,20 +307,49 @@ func TestJITRefusalsAtEveryBudget(t *testing.T) {
 				if i > 8 {
 					t.Fatalf("limit %d: no compile refused", limit)
 				}
-				evicted, refused, lowered, held := r.jit.evicted, r.jit.refusedRoom, len(r.jit.lowered), r.jitHeldBytes()
+				evicted, refused, lowered, held := r.jit.evicted, r.jit.refusedRoom, len(r.jit.lowered), jitHeldButScratch(r)
 				if e := r.jitForFunction(copyOf(), nil); e != nil {
 					continue
 				}
-				if r.jit.refusedRoom == refused || r.jit.evicted != evicted || len(r.jit.lowered) != lowered || r.jitHeldBytes() != held {
+				if r.jit.refusedRoom == refused || r.jit.evicted != evicted || len(r.jit.lowered) != lowered || jitHeldButScratch(r) != held {
 					t.Fatalf("limit %d: a refusal reclaimed: %d evicted of %d, %d lowerings of %d, %d bytes held of %d",
-						limit, r.jit.evicted, evicted, len(r.jit.lowered), lowered, r.jitHeldBytes(), held)
+						limit, r.jit.evicted, evicted, len(r.jit.lowered), lowered, jitHeldButScratch(r), held)
 				}
 				refusals++
 				break
+			}
+			if e := jitOldStaysUncounted(r, entries[:2]); e != nil {
+				t.Fatalf("limit %d: old code of %d bytes stayed, not counted reclaimable: floor %d, %d held", limit, e.bytes, r.jit.floor, jitHeldButScratch(r))
 			}
 		}()
 	}
 	if refusals == 0 {
 		t.Fatal("no budget refused a compile")
 	}
+}
+
+// jitOldStaysUncounted is the entry of old, if any, that stayed held
+// through a refusal without the refusal's floor counting it reclaimable,
+// with its lowering, as listVictims counts it: old code stays only where
+// reclaiming it too would not make the room.
+func jitOldStaysUncounted(r *Runtime, old []*jitEntry) *jitEntry {
+	for _, e := range old {
+		if e.hint == 0 {
+			continue
+		}
+		n := e.bytes
+		if l := r.jit.lowered[e.link.key]; l != nil {
+			n += l.bytes
+		}
+		if int64(r.jit.floor) > jitHeldButScratch(r)-int64(n) {
+			return e
+		}
+	}
+	return nil
+}
+
+// jitHeldButScratch is what r's JIT holds but makeRoom's list of what it
+// may reclaim, which a look for room lets go of, reclaiming nothing.
+func jitHeldButScratch(r *Runtime) int64 {
+	return r.jitHeldBytes() - int64(jitCapBytes(r.jit.victims))
 }

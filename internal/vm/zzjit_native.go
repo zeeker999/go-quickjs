@@ -1070,15 +1070,14 @@ func (s *jitState) listVictims(now uint64, need int) bool {
 	for i := range v {
 		reclaimable += v[i].bytes
 	}
-	if floor := s.held() - jitCapBytes(s.victims) + jitCapBytes(v) - reclaimable; floor+need > s.budget {
-		// Kept, emptied, for the next look: the floor is what stays held,
-		// the list's array with it. Let go here, as it had been, the list
-		// made the floor its size too high -- a refusal at a budget within
-		// it of the room refused a compile it had room for, and let the
-		// array go, which the refusal had counted.
-		clear(v)
+	// The floor is what would stay held were it all reclaimed: not the
+	// list kept from the epoch's last look either, which goes, as this one
+	// would once its last is taken (makeRoom). Counted, it made the floor
+	// its size too high: a compile at a budget within that of the room was
+	// refused with room for it.
+	if floor := s.held() - jitCapBytes(s.victims) - reclaimable; floor+need > s.budget {
 		s.floor, s.floorAt = floor, now+1
-		s.victims, s.victimsAt, s.victimPos, s.victimLeft = v[:0], 0, 0, 0
+		s.victims, s.victimsAt, s.victimPos, s.victimLeft = nil, 0, 0, 0
 		return false
 	}
 	slices.SortFunc(v, func(a, b jitVictim) int {
