@@ -814,6 +814,7 @@ The rounds that followed, each measured as above. The commit says more.
 | 2026-10-16 | `6193edc`..`cb7f7b8` | JIT: the callee makes its own frame; a native call's state and calls of Go described statically, as V8's deopt data; constants compared in one instruction; smaller equality and truthiness | with the JIT AWFY -3.2%, Octane -1.3%, V8 -1.0%; hot code -16% |
 | 2026-10-17 | `7668123`..`d27ce77` | `Math.random()` from a per-runtime cache of 64 xorshift128+ numbers, as V8's: a load in native code, a frameless call in the interpreter | with the JIT 49 to 3.7 ns (Node 6.3), without -13.6% |
 | 2026-10-17 | `897895c`..`d4e1855` | JIT: getters and setters called natively, prototype reads at megamorphic sites, loose `==` of booleans, recompiles that wait for room | Octane with the JIT -2.0% (Box2D -33%, PdfJS -7%, Typescript -5%) |
+| 2026-10-19 | `7269a8c7` | A tail call's callee settled where the frame can, not asked again by `tailTarget` | `tail_mutual` -10%, V8 suite level over eight placements |
 
 ### What is open
 
@@ -862,3 +863,10 @@ at twice its capacity instead of letting `append` choose the factor was level,
 13.8 to 13.9 ns, and kept more memory. What is left is the allocation and
 copying of the element storage itself, which a protector does not touch, so no
 protector was added.
+
+### `prop_create` (2026-10-19)
+
+The tree tier read 5% slower than the interpreter on `prop_create` in one
+sample of five runs (33.6 against 30.9 ns). At fifty runs the two are level,
+31.4 against 31.0 ns, and a micro-benchmark's spread over placements is larger
+than that difference. Nothing was changed.
