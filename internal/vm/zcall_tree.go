@@ -304,6 +304,21 @@ func (r *Runtime) callRest(o *Object, fd *funcData, this Value, args []Value) (V
 // runFD's, whose loop makes the rest.
 func (r *Runtime) tailFromTree() (Value, error) {
 	for {
+		// The frame that ended in the call settled its callee where it could:
+		// a plain function with a tree, which is what a chain of tail calls
+		// between functions of the tier is. Making the call on that is
+		// tailTarget's answer without its questions (see tailArgsOf).
+		if tc := r.pendingTail; tc.fd != nil && tc.tree != nil {
+			r.pendingTail = tailCall{}
+			if err := r.tick(); err != nil {
+				return Undefined, err
+			}
+			v, err := r.callTreeWith(tc.callee.Object(), tc.fd, tc.tree, tc.this, tc.args, Undefined, true)
+			if err == errTailCall {
+				continue
+			}
+			return v, err
+		}
 		cl, this, args, callee, ok, err := r.takeTailCall()
 		if !ok {
 			// Made the ordinary way: this is its result.

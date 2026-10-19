@@ -44,3 +44,29 @@ func TestTailCalls(t *testing.T) {
 		rt.Close()
 	}
 }
+
+// TestTailCallRefusedCallees pins that a call in tail position to a callee
+// the tier's fast path will not settle is still made the ordinary way, 100
+// frames down, where the frame is given up: a proxy is called through, and a
+// class constructor is refused.
+func TestTailCallRefusedCallees(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{`"use strict"; function g() { return "proxied" } const p = new Proxy(g, {});
+		  function f(n) { return n === 0 ? p() : f(n - 1) } f(100)`, "proxied"},
+		{`"use strict"; class C {}; function f(n) { return n === 0 ? C() : f(n - 1) } f(100)`, "TypeError"},
+	}
+	for _, tc := range cases {
+		rt := quickjs.New(quickjs.WithMaxCallDepth(400))
+		v, err := rt.Eval(tc.src)
+		if tc.want == "TypeError" {
+			if err == nil || !strings.Contains(err.Error(), "TypeError") {
+				t.Errorf("%s: got %v, want a TypeError", tc.src, err)
+			}
+		} else if err != nil {
+			t.Errorf("%s: %v", tc.src, err)
+		} else if v.String() != tc.want {
+			t.Errorf("%s = %q, want %q", tc.src, v.String(), tc.want)
+		}
+		rt.Close()
+	}
+}

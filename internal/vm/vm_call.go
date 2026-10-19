@@ -626,11 +626,16 @@ func (r *Runtime) takeTailCall() (*closure, Value, []Value, *Object, bool, error
 	return cl, this, args, callee, true, nil
 }
 
-// tailCall is a call a frame ended in, waiting for run to make it.
+// tailCall is a call a frame ended in, waiting for run to make it. Where the
+// frame that ended in it could settle the callee -- a plain function the tree
+// tier runs as a tree -- fd and tree hold what tailTarget would find again, so
+// that a chain of such calls does not ask twice (see tailArgsOf).
 type tailCall struct {
 	callee Value
 	this   Value
 	args   []Value
+	fd     *funcData
+	tree   *tree
 }
 
 // tailCallDepth is how deep the call stack is before a tail call gives up its

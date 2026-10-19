@@ -1,6 +1,10 @@
 package vm
 
-import "github.com/go-quickjs/go-quickjs/internal/bytecode"
+import (
+	"sync/atomic"
+
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+)
 
 // The tree tier's calls in tail position are built here, in the file the
 // package's code ends with -- the z puts it after with.go -- rather than
@@ -58,8 +62,11 @@ func tailCallNode(p, n, this, pc int) tval {
 		args := c.stack[p+1 : p+1+n]
 		if r.frameDepth >= tailCallDepth && f.newTarget.IsUndefined() && f.thisRef == nil {
 			// The arguments are copied: they are in this frame's window,
-			// which the callee's frame is about to reuse.
-			r.pendingTail = tailCall{callee: c.stack[p], this: recv, args: r.tailArgsOf(c.stack[p], args)}
+			// which the callee's frame is about to reuse. The copy settles
+			// what tailTarget would ask again, where the callee is a plain
+			// function with a tree.
+			r.pendingTail = tailCall{callee: c.stack[p], this: recv}
+			r.pendingTail.args = r.tailArgsOf(&r.pendingTail, args)
 			r.treeTail = true
 			return Undefined
 		}
@@ -101,10 +108,31 @@ func (r *Runtime) tailCallShallow(callee, this Value, args []Value) (Value, erro
 // has its parameters by then, and its args nobody reads. Anything else
 // has a copy of its own. Each call of a recursion through tail calls past
 // tailCallDepth had allocated one.
-func (r *Runtime) tailArgsOf(callee Value, args []Value) []Value {
+//
+// Where the callee is a plain function the tier runs as a tree, it also
+// records its funcData and tree in tc, which tailFromTree uses to make the
+// call without asking tailTarget what it would decide again: a chain of
+// tail calls between tier functions then settles each callee once, where
+// the frame that ends in the call already had it (see tailCallNode).
+func (r *Runtime) tailArgsOf(tc *tailCall, args []Value) []Value {
+	callee := tc.callee
 	if callee.IsObject() {
 		if fd := callee.object().fn(); fd != nil && fd.closure != nil && !fd.bound {
-			if fn := fd.closure.fn; fn.Strict && !fn.UsesArguments && !fn.HasRest {
+			fn := fd.closure.fn
+			if fd.native == nil && !fd.arrow && fd.extra == nil && fd.closure.realm == r.Realm &&
+				!isGeneratorTemplate(fn) && !isClassConstructorKind(fn.Kind) &&
+				(!fn.CoerceThis || tc.this.IsObject()) {
+				var t *tree
+				if fd.treeCall != nil {
+					t = fd.treeCall
+				} else if fd.treeRest {
+					t = (*tree)(atomic.LoadPointer(&fn.VMCode))
+				}
+				if t != nil {
+					tc.fd, tc.tree = fd, t
+				}
+			}
+			if fn.Strict && !fn.UsesArguments && !fn.HasRest {
 				r.tailArgs = append(r.tailArgs[:0], args...)
 				return r.tailArgs[:len(args):len(args)]
 			}
