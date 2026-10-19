@@ -7,6 +7,7 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -391,6 +392,11 @@ func TestJITDerivedConstructor(t *testing.T) {
 		class RetPrim extends A { constructor() { super(1); return 5 } }
 		function err(K) { try { const o = new K(); return JSON.stringify(o) } catch (e) { return e.constructor.name } }
 	`
+	// No collection meanwhile: a shape the collector reclaimed and that is
+	// made again is one the code was not compiled for, and A, its native
+	// callee by B's super(), deoptimizing for it is counted as B's leaving.
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	rounds := []string{}
 	for range 10 {
 		rounds = append(rounds, `make(500)`)
