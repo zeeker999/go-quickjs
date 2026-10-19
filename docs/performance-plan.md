@@ -850,3 +850,15 @@ The rounds that followed, each measured as above. The commit says more.
     and the context's level could shed.
   - `placements -jit` to vary the offsets of later code chunks and the
     JIT's Go-side code (see "How an item is measured").
+
+### Array appends (2026-10-19)
+
+The plan proposed a protector to skip the prototype-chain walk that
+`appendElem` and `fillHole` make for every element appended. Measured on an
+Apple M5 Max with Go 1.27.0, the walk is not the cost: with it removed,
+`array_prop_create` went from 13.8 to 13.0 ns (-6%) and `array_push` did not
+move (`v8bench -mode micro -n 5`, best of five). Growing the element storage
+at twice its capacity instead of letting `append` choose the factor was level,
+13.8 to 13.9 ns, and kept more memory. What is left is the allocation and
+copying of the element storage itself, which a protector does not touch, so no
+protector was added.
