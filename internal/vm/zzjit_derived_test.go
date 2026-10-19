@@ -425,6 +425,10 @@ func TestJITDerivedNativeSuperTwice(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	// Counted with the collector off: while it marks, Go makes native
+	// calls (mir's markingCall).
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	setup := `
 		class Abs { constructor(s) { this.strength = s; this.k = s.length } }
 		class Twice extends Abs { constructor(n) { let err = ''; for (let i = 0; i < n; i++) { try { super('a' + i) } catch (e) { err = e.name + ': ' + e.message } } this.err = err } }
