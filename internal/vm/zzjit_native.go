@@ -1799,7 +1799,10 @@ func (r *Runtime) jitOn() bool { return r.jitEnabled }
 // tryJITFrame is the call path's hook, for a runtime that runs the JIT.
 func (r *Runtime) tryJITFrame(f *frame) (Value, error, bool) {
 	if r.jitMarkingCallee() {
-		if e := r.jit.hint(f.cl); e != nil && e.ssa != nil && !e.invalid {
+		// By its function, not only its closure's hint: code compiled for
+		// native callers alone, a function Go's own lowering refused, has
+		// none until something asks.
+		if e := r.jitEntryOf(f.cl); e != nil && e.ssa != nil && !e.invalid {
 			return r.runSSA(f, e, 0, 0)
 		}
 	}
