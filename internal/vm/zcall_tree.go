@@ -304,6 +304,9 @@ func (r *Runtime) callRest(o *Object, fd *funcData, this Value, args []Value) (V
 // runFD's, whose loop makes the rest.
 func (r *Runtime) tailFromTree() (Value, error) {
 	for {
+		if v, err, done := tailFast(r); done {
+			return v, err
+		}
 		cl, this, args, callee, ok, err := r.takeTailCall()
 		if !ok {
 			// Made the ordinary way: this is its result.
