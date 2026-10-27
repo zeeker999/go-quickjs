@@ -260,6 +260,11 @@ type Function struct {
 	ParamEnd uint32
 
 	Name string
+	// TraceName is what a stack trace calls a function the language leaves
+	// anonymous, as V8's name inferrer calls it: a.b for
+	// `a.b = function () {}` (see the compiler's traceJoin). Only traces read
+	// it; the function's name property is Name's.
+	TraceName string
 	// ParamCount is how many arguments the interpreter copies positionally into
 	// the frame's slots. It excludes a rest parameter, which is filled from the
 	// argument list instead.

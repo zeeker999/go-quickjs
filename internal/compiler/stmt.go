@@ -479,6 +479,7 @@ func (c *compiler) compileVarDecl(n *ast.VarDecl) {
 			// object the name named. The value the store leaves is the
 			// declaration's, which nothing reads.
 			c.resolveWithRef(id)
+			c.traceName = c.traceJoin("", id.Name)
 			c.compileExprNamed(d.Init, id.Name)
 			c.endWithRef(id)
 			c.emit(bytecode.OpDrop, 0, 0)
@@ -490,11 +491,13 @@ func (c *compiler) compileVarDecl(n *ast.VarDecl) {
 			// left after that (reusedClosures).
 			c.compileIdentRead(d.Target.(*ast.Ident))
 			skip := c.emitJump(bytecode.OpJumpIfTrue)
+			c.traceName = c.traceJoin("", nameOf(d.Target))
 			c.compileExprNamed(d.Init, nameOf(d.Target))
 			c.initBinding(d.Target, n.Kind)
 			c.patchJump(skip)
 			continue
 		}
+		c.traceName = c.traceJoin("", nameOf(d.Target))
 		c.compileExprNamed(d.Init, nameOf(d.Target))
 		if n.Kind.IsUsing() {
 			// The value is added to the scope's resources first, and a value
