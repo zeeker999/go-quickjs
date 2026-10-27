@@ -2,6 +2,7 @@ package ssa
 
 import (
 	"math"
+	"slices"
 	"strconv"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
@@ -157,6 +158,7 @@ rounds:
 			goto rounds
 		}
 	}
+	sinkLoopBoxes(f)
 	if rematerializeUpvalues(f) {
 		removeDead(f)
 	}
@@ -325,6 +327,19 @@ func simplify(f *Func, v *Value) *Value {
 // loaded from holds anything else, such as the reference x held before the
 // loop. The old phi becomes a box of the new one, which other passes then
 // cancel.
+//
+// What reason a candidate needs depends on whether unboxing it speculates.
+// One that merges an entry's slot, or merges one that does, has its entry
+// guard: only an unboxing that speculates (GuardExit) is its reason. One
+// that merges nothing but numbers -- boxes, numeric constants and such
+// candidates -- is a number on every path, and unboxing it guards nothing:
+// any use that unboxes it is its reason, one that leaves a value not a
+// number to Go (HostExit) as well, as V8's representation selection takes
+// a phi of Float64 inputs for a Float64 whatever its uses would do with
+// another. A loop of a built-in's call (forEachCall) unboxes its index at
+// its header, and an inlined callback its accumulator, each leaving to Go
+// at the loop's state; both were boxed at every turn, a fifth of the array
+// methods' native samples.
 func unboxPhis(f *Func) bool {
 	// By value ID: n bounds the IDs of the values there are now; the values
 	// this pass makes are numbered from n.
@@ -335,7 +350,7 @@ func unboxPhis(f *Func) bool {
 	// value, which says nothing of the phi's: counting it had the entry
 	// speculate a receiver written to a property is a number, and fail
 	// every call.
-	phis, guarded := f.scr().phis[:0], f.scr().work[:0]
+	phis, guarded, unboxes := f.scr().phis[:0], f.scr().work[:0], f.scr().boxes[:0]
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
 			switch {
@@ -346,18 +361,25 @@ func unboxPhis(f *Func) bool {
 				phis = append(phis, v)
 			case v.Op == OpUnboxF64 && ir.ExitKind(v.Aux) == ir.GuardExit:
 				guarded = append(guarded, v.Args[0])
+			case v.Op == OpUnboxF64:
+				unboxes = append(unboxes, v.Args[0])
 			}
 		}
 	}
-	f.scr().phis, f.scr().work = phis[:0], guarded[:0] // kept for the next round
+	// Kept for the next round.
+	f.scr().phis, f.scr().work, f.scr().boxes = phis[:0], guarded[:0], unboxes[:0]
 	if len(phis) == 0 {
 		return false
 	}
-	// Three tables of flags and two of values, by ID, from scratch the
-	// Func keeps.
-	flags := idTable(f.scr().flags, 3*n)
+	// Six tables of flags and two of values, by ID, from scratch the
+	// Func keeps: the candidates, their uses that unbox them speculating
+	// and not, the candidates that speculate (an entry's slot among their
+	// arguments, or a candidate that does), and those with a reason of
+	// either kind.
+	flags := idTable(f.scr().flags, 6*n)
 	f.scr().flags = flags
-	cand, unboxedUse, boxed := flags[:n:n], flags[n:2*n:2*n], flags[2*n:]
+	cand, unboxedUse, boxed := flags[:n:n], flags[n:2*n:2*n], flags[2*n:3*n:3*n]
+	anyUse, spec, anyBoxed := flags[3*n:4*n:4*n], flags[4*n:5*n:5*n], flags[5*n:]
 	vals := idTable(f.scr().vals, 2*n)
 	f.scr().vals = vals
 	for _, v := range phis {
@@ -365,6 +387,9 @@ func unboxPhis(f *Func) bool {
 	}
 	for _, a := range guarded {
 		unboxedUse[a.ID] = true
+	}
+	for _, a := range unboxes {
+		anyUse[a.ID] = true
 	}
 	isCand := func(a *Value) bool { return a.ID < n && cand[a.ID] }
 	numeric := func(a *Value) bool {
@@ -418,10 +443,71 @@ func unboxPhis(f *Func) bool {
 				}
 			}
 		}
+		// A reason that does not speculate -- any use that unboxes -- is
+		// asked for only where a candidate without the other has one.
+		clear(anyBoxed)
+		weak := false
+		for _, v := range phis {
+			weak = weak || cand[v.ID] && !boxed[v.ID] && anyUse[v.ID]
+		}
+		// The candidates that speculate: an entry's slot among their
+		// arguments, or a candidate that speculates, whose guard unboxing
+		// them would need too -- found from each such slot's phi along the
+		// candidates' uses of candidates, each candidate's users listed once
+		// (candUsers), as a pass over the phis until none grew took a pass
+		// for each phi of a chain.
+		clear(spec)
+		seeds := false
+		for _, v := range phis {
+			if !weak || !cand[v.ID] {
+				continue
+			}
+			for _, a := range v.Args {
+				if !numeric(a) && !isCand(a) {
+					spec[v.ID] = true
+					stack = append(stack, v)
+					seeds = true
+					break
+				}
+			}
+		}
+		if seeds {
+			idx, list := candUsers(f, phis, cand, n)
+			for len(stack) != 0 {
+				v := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				for _, u := range list[idx[v.ID]:idx[v.ID+1]] {
+					if !spec[u.ID] {
+						spec[u.ID] = true
+						stack = append(stack, u)
+					}
+				}
+			}
+		}
+		// It flows to the candidates that do not speculate either.
+		for _, v := range phis {
+			if !weak {
+				break
+			}
+			if cand[v.ID] && !spec[v.ID] && (anyUse[v.ID] || unboxedUse[v.ID]) {
+				anyBoxed[v.ID] = true
+				stack = append(stack, v)
+			}
+		}
+		for len(stack) != 0 {
+			v := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			for _, a := range v.Args {
+				if isCand(a) && !spec[a.ID] && !anyBoxed[a.ID] {
+					anyBoxed[a.ID] = true
+					stack = append(stack, a)
+				}
+			}
+		}
 		guarded = stack[:0]
 		f.scr().work = guarded
 		for _, v := range phis {
-			if cand[v.ID] && !boxed[v.ID] {
+			if cand[v.ID] && !boxed[v.ID] && !anyBoxed[v.ID] {
 				cand[v.ID] = false
 				changed = true
 			}
@@ -523,6 +609,169 @@ func unboxPhis(f *Func) bool {
 	}
 	f.scr().front, f.scr().boxes, f.scr().rest = front[:0], boxes[:0], rest[:0]
 	return true
+}
+
+// sinkLoopBoxes makes the box of a loop's number, an unboxed phi of its
+// header (unboxPhis), where it is used, where nothing in the loop uses it:
+// unboxPhis leaves it in the header, where the old phi was, which made it
+// at every turn for a use after the loop -- forEach's sum written to its
+// global once the loop is done. A box only frame states name is made at an
+// exit alone (mir's lazy), which the one in the header becomes; one inside
+// the loop, or a phi's, stays where it is.
+func sinkLoopBoxes(f *Func) {
+	// Its tables are the workspace's, by value and block ID: every compile
+	// runs this, and most such boxes only frame states use.
+	ids := 0
+	for _, b := range f.Blocks {
+		ids = max(ids, b.ID+1)
+	}
+	var in []bool
+	var work []*Block
+	for _, h := range f.Blocks {
+		if !h.LoopHeader {
+			continue
+		}
+		for _, v := range h.Values {
+			if a := v.Args; v.Op != OpBoxF64 || len(a) != 1 || a[0].Op != OpPhi || a[0].Block != h || a[0].Type != Float64 {
+				continue
+			}
+			// Its uses: none a phi's or inside the loop, which is the blocks
+			// that reach a back edge to the header without passing it.
+			used := false
+			for _, b := range f.Blocks {
+				used = used || b.Control == v
+				for _, u := range b.Values {
+					used = used || slices.Contains(u.Args, v)
+				}
+			}
+			if !used {
+				continue
+			}
+			if in == nil {
+				in, work = f.bools(ids), f.blockList(ids)[:0]
+			}
+			clear(in)
+			in[h.ID] = true
+			for i, p := range h.Preds {
+				if h.Backedge[i] {
+					work = append(work, p)
+				}
+			}
+			for len(work) != 0 {
+				x := work[len(work)-1]
+				work = work[:len(work)-1]
+				if !in[x.ID] {
+					in[x.ID] = true
+					work = append(work, x.Preds...)
+				}
+			}
+			out := true
+			for _, b := range f.Blocks {
+				if b.Control == v && in[b.ID] {
+					out = false
+				}
+				for _, u := range b.Values {
+					if slices.Contains(u.Args, v) && (u.Op == OpPhi || in[b.ID]) {
+						out = false
+					}
+				}
+			}
+			if !out {
+				continue
+			}
+			// One box in each block that uses it, before its first use there,
+			// or last, where the block ends at it -- a return of it.
+			for _, b := range f.Blocks {
+				var w *Value
+				for k := 0; k < len(b.Values); k++ {
+					u := b.Values[k]
+					if !slices.Contains(u.Args, v) {
+						continue
+					}
+					if w == nil {
+						w = f.alloc(Value{Op: OpBoxF64, Type: Tagged, Args: f.refsOf(1), Block: b})
+						w.Args[0] = v.Args[0]
+						v.Args[0].Uses++
+						insertBefore(f, u, w)
+						k++
+					}
+					for i, a := range u.Args {
+						if a == v {
+							u.Args[i] = w
+							v.Uses--
+							w.Uses++
+						}
+					}
+				}
+				if b.Control == v {
+					if w == nil {
+						w = f.alloc(Value{Op: OpBoxF64, Type: Tagged, Args: f.refsOf(1), Block: b})
+						w.Args[0] = v.Args[0]
+						v.Args[0].Uses++
+						b.Values = f.appendValue(b.Values, w)
+					}
+					b.Control = w
+					v.Uses--
+					w.Uses++
+				}
+			}
+		}
+	}
+}
+
+// insertBefore puts v just before a in a's block.
+func insertBefore(f *Func, a, v *Value) {
+	b := a.Block
+	for i, w := range b.Values {
+		if w == a {
+			b.Values = f.appendValue(b.Values, nil)
+			copy(b.Values[i+1:], b.Values[i:])
+			b.Values[i] = v
+			return
+		}
+	}
+	panic("ssa: insertBefore: value not in its block")
+}
+
+// candUsers lists, of each candidate among phis (cand, by ID below n), the
+// candidates that have it among their arguments, each once: those of the
+// value of ID i are list[idx[i]:idx[i+1]], in tables the Func's scratch
+// keeps.
+func candUsers(f *Func, phis []*Value, cand []bool, n int) (idx []int32, list []*Value) {
+	sc := f.scr()
+	idx = idTable(sc.phiIdx, n+1)
+	listed := func(u *Value, i int) bool {
+		a := u.Args[i]
+		return a.ID < n && cand[a.ID] && !slices.Contains(u.Args[:i], a)
+	}
+	for _, u := range phis {
+		if !cand[u.ID] {
+			continue
+		}
+		for i, a := range u.Args {
+			if listed(u, i) {
+				idx[a.ID+1]++
+			}
+		}
+	}
+	for i := range n {
+		idx[i+1] += idx[i]
+	}
+	list = idTable(sc.phiUsers, int(idx[n]))
+	fill := idTable(sc.phiFill, n)
+	for _, u := range phis {
+		if !cand[u.ID] {
+			continue
+		}
+		for i, a := range u.Args {
+			if listed(u, i) {
+				list[idx[a.ID]+fill[a.ID]] = u
+				fill[a.ID]++
+			}
+		}
+	}
+	sc.phiIdx, sc.phiUsers, sc.phiFill = idx, list, fill
+	return idx, list
 }
 
 // rematerializeUpvalues replaces each tagged phi that only merges reads of
