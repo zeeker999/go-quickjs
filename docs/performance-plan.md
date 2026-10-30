@@ -2073,9 +2073,10 @@ to remove:
   blanket call-count threshold in [Rejected](#rejected): the point is to
   compare a compile's cost with its return, not to raise a count.
 
-  The profit model is **parked**, not dropped. Judged against F5 it is the
-  indirect route: its published benefit would come from compiling less,
-  which F5 measures directly. And its calibration has to be rebuilt first.
+  The profit model as a whole is **parked**, not dropped -- the two
+  mechanisms above are the part of it F5's data pays for, and they need
+  none of its machinery. The rest is the indirect route to the same
+  complaint, and its calibration has to be rebuilt before any of it.
   `a21df702`'s harness was ported onto main and most of its kernels no
   longer measure the ending they were written for, by its own checks:
   `gocall` makes no Go call, `host` makes one instead of exiting, `cgo`,
