@@ -1,4 +1,4 @@
-name: winflake8
+name: winflake9
 
 on:
   push:
@@ -8,13 +8,13 @@ permissions:
 
 jobs:
   flake:
-    name: 8573C bisect (${{ matrix.copy }})
+    name: 8573C variables (${{ matrix.copy }})
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
-        copy: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        copy: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
     env:
       CGO_ENABLED: "0"
     steps:
@@ -23,7 +23,7 @@ jobs:
         shell: pwsh
         run: |
           $p = Get-CimInstance Win32_Processor
-          "CPU: " + $p.Name + " | " + $p.Caption
+          "CPU: " + $p.Name + " | " + $p.Caption + " | cores " + $p.NumberOfLogicalProcessors
           if ($p.Name -like "*8573C*") { "hit=1" >> $env:GITHUB_OUTPUT } else { "hit=0" >> $env:GITHUB_OUTPUT }
       - uses: actions/checkout@v4
         if: steps.m.outputs.hit == '1'
@@ -32,30 +32,22 @@ jobs:
         with:
           go-version: "1.24"
           cache: true
-      - name: Per test
+      - name: Variables
         if: steps.m.outputs.hit == '1'
         working-directory: internal/jit/verify
         shell: bash
         run: |
           set +e
           go test -tags quickjs_jit -c -o v.exe .
-          ./v.exe -test.count=1 > all.txt 2>&1; echo "whole package exit $?"
-          for t in $(./v.exe -test.list . | grep '^Test'); do
-            f=0; g=0
-            for i in 1 2 3; do ./v.exe -test.run "^$t\$" -test.count=1 > o.txt 2>&1 || f=$((f+1)); done
-            for i in 1 2 3; do GOGC=off ./v.exe -test.run "^$t\$" -test.count=1 > o.txt 2>&1 || g=$((g+1)); done
-            if [ $f -ne 0 ] || [ $g -ne 0 ]; then echo "TEST $t fails=$f/3 gogcoff=$g/3"; grep -aE "fatal|unsupported|fault|\.go:[0-9]+ \+" o.txt | head -4; fi
-          done
-          echo "PERTEST DONE"
-      - name: Race
-        if: steps.m.outputs.hit == '1'
-        working-directory: internal/jit/verify
-        shell: bash
-        env:
-          CGO_ENABLED: "1"
-        run: |
-          set +e
-          gcc --version | head -1
-          go test -race -tags quickjs_jit -count=1 . > race.txt 2>&1; echo "race exit $?"
-          grep -aE "DATA RACE|fatal|FAIL|unsupported" race.txt | head -10
-          grep -aA20 "DATA RACE" race.txt | head -40
+          go test -tags quickjs_jit -gcflags=all="-N -l" -c -o vn.exe .
+          loop() { local name=$1; shift; local f=0; for i in 1 2 3 4 5; do "$@" > o.txt 2>&1 || { f=$((f+1)); cp o.txt "fail-$name.txt"; }; done; echo "$name fails=$f/5"; [ -f "fail-$name.txt" ] && grep -aE "fatal|unsupported|fault|FAIL:" "fail-$name.txt" | head -3; }
+          loop plain ./v.exe -test.count=1
+          loop gogcoff env GOGC=off ./v.exe -test.count=1
+          loop procs1 env GOMAXPROCS=1 ./v.exe -test.count=1
+          loop noopt ./vn.exe -test.count=1
+          loop gcstw env GODEBUG=gcstoptheworld=1 ./v.exe -test.count=1
+          loop annotate ./v.exe -test.count=1 -test.run '^TestMirAnnotated$'
+          loop budget ./v.exe -test.count=1 -test.run '^TestMirBudget'
+          loop amd64 ./v.exe -test.count=1 -test.run '^TestAMD64'
+          cd "$GITHUB_WORKSPACE"
+          s=0; for i in 1 2; do go test -count=1 strings regexp encoding/json math/big sort go/parser go/types fmt strconv > std.txt 2>&1 || { s=$((s+1)); grep -aE "fatal|FAIL" std.txt | head -3; }; done; echo "std fails=$s/2"
