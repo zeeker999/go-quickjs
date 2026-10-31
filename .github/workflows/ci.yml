@@ -1,4 +1,4 @@
-name: winflake6
+name: winflake7
 
 on:
   push:
@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   flake:
-    name: two commits on one machine (${{ matrix.copy }})
+    name: Go's own tests (${{ matrix.copy }})
     runs-on: windows-latest
     timeout-minutes: 30
     strategy:
@@ -23,28 +23,17 @@ jobs:
         run: |
           $p = Get-CimInstance Win32_Processor
           "CPU: " + $p.Name + " | " + $p.Caption
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
-          cache: true
-      - name: Build both
+          cache: false
+      - name: Std
         shell: bash
-        run: |
-          git worktree add -q ../old 48ad202a540ed1ea588a13e50582379fedb1f004
-          (cd internal/jit/verify && go test -tags quickjs_jit -c -o "$RUNNER_TEMP/new.exe" .)
-          (cd ../old/internal/jit/verify && go test -tags quickjs_jit -c -o "$RUNNER_TEMP/old.exe" .)
-          sha256sum "$RUNNER_TEMP/new.exe" "$RUNNER_TEMP/old.exe"
-      - name: Run both
-        shell: bash
-        working-directory: internal/jit/verify
         run: |
           set +e
-          o=0; n=0
-          for i in 1 2 3 4 5 6; do
-            "$RUNNER_TEMP/old.exe" -test.count=1 > a.txt 2>&1; [ $? -ne 0 ] && o=$((o+1))
-            "$RUNNER_TEMP/new.exe" -test.count=1 > b.txt 2>&1; [ $? -ne 0 ] && n=$((n+1))
+          s=0
+          for i in 1 2 3; do
+            go test -count=1 strings bytes regexp encoding/json math/big sort go/parser go/types fmt strconv > std.txt 2>&1
+            if [ $? -ne 0 ]; then s=$((s+1)); grep -aE "fatal|FAIL|panic" std.txt | head -4; fi
           done
-          echo "OLD=$o/6 NEW=$n/6"
+          echo "STD=$s/3"
