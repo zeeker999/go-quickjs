@@ -1,4 +1,4 @@
-name: winflake7
+name: winflake8
 
 on:
   push:
@@ -8,9 +8,9 @@ permissions:
 
 jobs:
   flake:
-    name: Go's own tests (${{ matrix.copy }})
+    name: 8573C bisect (${{ matrix.copy }})
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -19,21 +19,43 @@ jobs:
       CGO_ENABLED: "0"
     steps:
       - name: Machine
+        id: m
         shell: pwsh
         run: |
           $p = Get-CimInstance Win32_Processor
           "CPU: " + $p.Name + " | " + $p.Caption
+          if ($p.Name -like "*8573C*") { "hit=1" >> $env:GITHUB_OUTPUT } else { "hit=0" >> $env:GITHUB_OUTPUT }
+      - uses: actions/checkout@v4
+        if: steps.m.outputs.hit == '1'
       - uses: actions/setup-go@v5
+        if: steps.m.outputs.hit == '1'
         with:
           go-version: "1.24"
-          cache: false
-      - name: Std
+          cache: true
+      - name: Per test
+        if: steps.m.outputs.hit == '1'
+        working-directory: internal/jit/verify
         shell: bash
         run: |
           set +e
-          s=0
-          for i in 1 2 3; do
-            go test -count=1 strings bytes regexp encoding/json math/big sort go/parser go/types fmt strconv > std.txt 2>&1
-            if [ $? -ne 0 ]; then s=$((s+1)); grep -aE "fatal|FAIL|panic" std.txt | head -4; fi
+          go test -tags quickjs_jit -c -o v.exe .
+          ./v.exe -test.count=1 > all.txt 2>&1; echo "whole package exit $?"
+          for t in $(./v.exe -test.list . | grep '^Test'); do
+            f=0; g=0
+            for i in 1 2 3; do ./v.exe -test.run "^$t\$" -test.count=1 > o.txt 2>&1 || f=$((f+1)); done
+            for i in 1 2 3; do GOGC=off ./v.exe -test.run "^$t\$" -test.count=1 > o.txt 2>&1 || g=$((g+1)); done
+            if [ $f -ne 0 ] || [ $g -ne 0 ]; then echo "TEST $t fails=$f/3 gogcoff=$g/3"; grep -aE "fatal|unsupported|fault|\.go:[0-9]+ \+" o.txt | head -4; fi
           done
-          echo "STD=$s/3"
+          echo "PERTEST DONE"
+      - name: Race
+        if: steps.m.outputs.hit == '1'
+        working-directory: internal/jit/verify
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          set +e
+          gcc --version | head -1
+          go test -race -tags quickjs_jit -count=1 . > race.txt 2>&1; echo "race exit $?"
+          grep -aE "DATA RACE|fatal|FAIL|unsupported" race.txt | head -10
+          grep -aA20 "DATA RACE" race.txt | head -40
