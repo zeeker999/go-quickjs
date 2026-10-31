@@ -1,4 +1,4 @@
-name: winflake5
+name: winflake6
 
 on:
   push:
@@ -8,16 +8,15 @@ permissions:
 
 jobs:
   flake:
-    name: verify flags and std (${{ matrix.copy }})
+    name: two commits on one machine (${{ matrix.copy }})
     runs-on: windows-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        copy: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        copy: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     env:
       CGO_ENABLED: "0"
-      QUICKJS_REQUIRE_JIT: "1"
     steps:
       - name: Machine
         shell: pwsh
@@ -25,27 +24,27 @@ jobs:
           $p = Get-CimInstance Win32_Processor
           "CPU: " + $p.Name + " | " + $p.Caption
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
           cache: true
-      - name: Loops
+      - name: Build both
+        shell: bash
+        run: |
+          git worktree add -q ../old 48ad202a540ed1ea588a13e50582379fedb1f004
+          (cd internal/jit/verify && go test -tags quickjs_jit -c -o "$RUNNER_TEMP/new.exe" .)
+          (cd ../old/internal/jit/verify && go test -tags quickjs_jit -c -o "$RUNNER_TEMP/old.exe" .)
+          sha256sum "$RUNNER_TEMP/new.exe" "$RUNNER_TEMP/old.exe"
+      - name: Run both
+        shell: bash
         working-directory: internal/jit/verify
-        shell: bash
         run: |
-          go test -tags quickjs_jit -c -o verify.test.exe .
-          a=0; b=0; c=0
-          for i in $(seq 1 10); do
-            ./verify.test.exe -test.count=1 > o1.txt 2>&1 || { a=$((a+1)); grep -aE "fatal|unsupported|FAIL:" o1.txt | head -2; }
-            ./verify.test.exe -test.count=1 -test.timeout=10m0s -test.paniconexit0 > o2.txt 2>&1 || { b=$((b+1)); grep -aE "fatal|unsupported|FAIL:" o2.txt | head -2; }
+          set +e
+          o=0; n=0
+          for i in 1 2 3 4 5 6; do
+            "$RUNNER_TEMP/old.exe" -test.count=1 > a.txt 2>&1; [ $? -ne 0 ] && o=$((o+1))
+            "$RUNNER_TEMP/new.exe" -test.count=1 > b.txt 2>&1; [ $? -ne 0 ] && n=$((n+1))
           done
-          for i in $(seq 1 5); do
-            go test -tags quickjs_jit -count=1 ./... > o3.txt 2>&1 || { c=$((c+1)); grep -aE "fatal|unsupported|FAIL:" o3.txt | head -2; }
-          done
-          echo "PLAIN=$a/10 FLAGS=$b/10 GOTEST=$c/5"
-      - name: Go's own tests
-        shell: bash
-        run: |
-          s=0
-          for i in 1 2 3; do go test -count=1 strings regexp encoding/json math/big sort > std.txt 2>&1 || { s=$((s+1)); grep -aE "fatal|FAIL" std.txt | head -3; }; done
-          echo "STD=$s/3"
+          echo "OLD=$o/6 NEW=$n/6"
