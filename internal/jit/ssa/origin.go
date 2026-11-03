@@ -281,9 +281,11 @@ func storeChecks(f *Func) {
 }
 
 // checkStoreChecks panics unless the stores' checks are those storeChecks
-// makes afresh (quickjs_verify): Optimize makes them from what
-// keepAcrossStores found live, when it kept nothing.
-func checkStoreChecks(f *Func) {
+// makes afresh (quickjs_verify), in any order if anyOrder: Optimize makes
+// them from what keepAcrossStores found live, when it kept nothing or
+// mended the shadows -- where a kept phi's copy, after its block's phis,
+// is a check's later than the phi was.
+func checkStoreChecks(f *Func, anyOrder bool) {
 	var made [][]*Value
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
@@ -294,11 +296,18 @@ func checkStoreChecks(f *Func) {
 	}
 	clearStoreChecks(f)
 	storeChecks(f)
+	byID := func(a, b *Value) int { return a.ID - b.ID }
 	i := 0
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
 			if n := storeChecked(v); n != 0 {
-				if !slices.Equal(v.Args, made[i]) {
+				args := v.Args
+				if anyOrder {
+					args = slices.Clone(args)
+					slices.SortFunc(made[i][n:], byID)
+					slices.SortFunc(args[n:], byID)
+				}
+				if !slices.Equal(args, made[i]) {
 					panic(fmt.Sprintf("ssa: %v's checks %v, made afresh %v", v, made[i][n:], v.Args[n:]))
 				}
 				i++
