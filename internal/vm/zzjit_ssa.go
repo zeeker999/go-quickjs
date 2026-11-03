@@ -2281,7 +2281,39 @@ func (r *Runtime) compileSSAFinish(j *jitJob) (*jit.SSACode, *jitFeedback, error
 	if errors.Is(err, mir.ErrKeeps) {
 		code, fb, err = r.compileSSAKeeping(j.fn, j.cl, j.p, j.e, abi.MaxKeeps)
 	}
+	if code != nil && r.jit.staleLinks(fb) {
+		// Its native calls are of links their functions have no more: a
+		// callee's entry dropped meanwhile -- compiled again once hot for
+		// Go to enter (jitHotEntry) -- whose link went with it, no code
+		// holding it, the callee's next entry given another. The code
+		// would call through the old one, which never has code again:
+		// built here, as a missed one is, from the feedback as it is now.
+		// Installed, Richards' Scheduler.schedule called
+		// TaskControlBlock.run through Go 392,195 times a run, in some
+		// runs and not others: four times as slow.
+		_ = code.Close()
+		r.jit.bgStale++
+		return r.compileSSAKeeping(j.fn, j.cl, j.p, j.e, j.keepLimit)
+	}
 	return code, fb, err
+}
+
+// staleLinks reports whether a link fb's code calls through (its links,
+// and its keep's) is not its function's any more: one the runtime let go
+// (unlink) while the code was compiled in the background.
+func (s *jitState) staleLinks(fb *jitFeedback) bool {
+	stale := func(links []*jitLink) bool {
+		for _, l := range links {
+			if s.links[l.key] != l {
+				return true
+			}
+		}
+		return false
+	}
+	if fb == nil {
+		return false
+	}
+	return stale(fb.links) || fb.keep() != fb && stale(fb.keep().links)
 }
 
 // jitFeedbackHook, where a test sets it, is the feedback a build asks in
