@@ -149,6 +149,9 @@ func Main(name string, e Engine) {
 	var rt Runtime
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
+	// The CPU clock's first reading calibrates it (cycleRate, on Windows),
+	// which the total's time is not to count.
+	processCPU()
 	start, cpu0 := clock(), processCPU()
 	switch *mode {
 	case "compile":
