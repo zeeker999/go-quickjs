@@ -119,6 +119,7 @@ type Option func(*config)
 
 type config struct {
 	jit              bool
+	jitBackground    bool
 	jitMemoryLimit   int64
 	moduleFetchLimit int
 	memoryLimit      int64
@@ -143,6 +144,19 @@ type config struct {
 // Runtimes made with WithDebugger use the existing execution tiers.
 // This is independent of WithoutCodeGeneration.
 func WithJIT() Option { return func(c *config) { c.jit = true } }
+
+// WithJITBackground has the JIT (WithJIT) compile on goroutines of the
+// process's, at most a quarter of GOMAXPROCS, which the process's runtimes
+// share, while the Runtime goes on running: a function due to be compiled
+// runs in the existing tiers until its code is done, and code compiled
+// again runs on until its replacement is, as V8 compiles concurrently.
+// Without it, the Runtime waits for each compile, the time the JIT spends
+// compiling spent on its goroutine. The results a script computes are the
+// same either way; with it, when code is installed depends on how fast the
+// compiles finish, so which code runs, and how fast, may differ from one
+// run to the next. It does nothing in a build without the JIT, or a
+// runtime without WithJIT.
+func WithJITBackground() Option { return func(c *config) { c.jitBackground = true } }
 
 // WithJITMemoryLimit bounds the memory the JIT (WithJIT) holds for the
 // Runtime: its machine code and all that describes it, what it has learned
@@ -342,6 +356,7 @@ func New(opts ...Option) *Runtime {
 	r := &Runtime{rt: vm.New(vm.Config{
 		JIT:            c.jit,
 		JITMemoryLimit: c.jitMemoryLimit,
+		JITBackground:  c.jitBackground,
 		MemoryLimit:    c.memoryLimit,
 		StackSize:      c.stackSize,
 		MaxCallDepth:   c.maxCallDepth,

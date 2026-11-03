@@ -208,6 +208,10 @@ func jitDifferential(t *testing.T, src string) JITStats {
 		// CI's test262 setting under stress (QJS_JIT_STRESS's
 		// threshold,budget=3,deopt=7).
 		{threshold: true, budget: 3, deopt: 7},
+		// Compiled in the background, each compile installed a check or
+		// four after it was handed over (QJS_JIT_STRESS's background).
+		{threshold: true, background: true, checks: 1},
+		{threshold: true, background: true, checks: 4, budget: 3, deopt: 7},
 	}
 	// The tree tier's run and the JIT's.
 	interp, within := jitFuzzWindows(1 + len(stress))

@@ -19,6 +19,10 @@ type Config struct {
 	// selects the default: 8 MB, or an eighth of MemoryLimit when that is
 	// set.
 	JITMemoryLimit int64
+	// JITBackground has the JIT compile on the process's workers, the
+	// runtime's goroutine running on meanwhile, and install the code once
+	// it is done; otherwise the runtime waits for each compile.
+	JITBackground bool
 	// MemoryLimit caps the bytes the runtime may account for, or 0 for no
 	// limit.
 	MemoryLimit int64
@@ -75,7 +79,7 @@ func New(cfg Config) *Runtime {
 	r.initWellKnownSymbols()
 	r.initRealm()
 	r.setMemoryLimit(cfg.MemoryLimit)
-	r.initJIT(cfg.JIT, cfg.JITMemoryLimit)
+	r.initJIT(cfg.JIT, cfg.JITMemoryLimit, cfg.JITBackground)
 	return r
 }
 
