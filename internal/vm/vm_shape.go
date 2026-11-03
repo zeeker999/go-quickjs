@@ -597,7 +597,7 @@ func (t *shapeTree) siteRoot(c *propCache, proto *Object) *shape {
 // different properties. A constructor given a new prototype object gets a
 // new root, which learns its objects' room anew.
 func (t *shapeTree) ctorRoot(fd *funcData, proto *Object) *shape {
-	if s := fd.ctorShape; s != nil && s.proto == proto {
+	if s := fd.ctorShape(); s != nil && s.proto == proto {
 		return s
 	}
 	if t.building || t.count >= maxShapes {
@@ -605,7 +605,7 @@ func (t *shapeTree) ctorRoot(fd *funcData, proto *Object) *shape {
 	}
 	s := &shape{tree: t, proto: proto}
 	t.count++
-	fd.ctorShape = s
+	fd.setCtorShape(s)
 	return s
 }
 
