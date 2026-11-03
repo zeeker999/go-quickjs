@@ -2022,6 +2022,10 @@ func TestJITArenaMappings(t *testing.T) {
 	for _, ssa := range []bool{true} {
 		r := New(Config{JIT: true})
 		r.jitCallThreshold, r.jitICThreshold = 1, 1
+		// Compiled on the spot, as the counts below are written for, not in
+		// the background (QJS_JIT_STRESS's background), whose code comes
+		// checks later.
+		r.jitStress.background = false
 		var src strings.Builder
 		for i := 0; i < 100; i++ {
 			fmt.Fprintf(&src, "function f%d(n){let s=%d;for(let i=0;i<n;i++)s+=i;return s}\nf%d(3);\n", i, i, i)
@@ -2085,7 +2089,7 @@ func TestJITCachedTreeCall(t *testing.T) {
 		t.Fatal("test did not establish cached tree call")
 	}
 	// Enable on the same runtime after repeated calls have cached their tree.
-	r.initJIT(true, 0)
+	r.initJIT(true, 0, false)
 	v, err := r.Run(compileForTest(t, `for (var j=0;j<8;j++) sum(10000); sum(10000)`))
 	if err != nil || v.Number() != 49995000 {
 		t.Fatalf("cached call = %v, %v", v, err)
@@ -3503,6 +3507,11 @@ func TestJITLoopGuardSuppressesReentry(t *testing.T) {
 	for _, keyword := range []string{"var", "let"} {
 		t.Run(keyword, func(t *testing.T) {
 			r := New(Config{JIT: true})
+			// Compiled on the spot, so that native code makes the first
+			// coercion: in the background (QJS_JIT_STRESS's background),
+			// the existing tiers make it, and the code made after the
+			// release is the invocation's first.
+			r.jitStress.background = false
 			t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
 			count := 0
 			released := false
