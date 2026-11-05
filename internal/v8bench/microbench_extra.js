@@ -449,6 +449,35 @@ function upvalue_string_append(n)
     return j;
 }
 
+/* for-in loops that the last loop's cursor cannot serve: left at their
+   first key, so none finishes */
+function for_in_break(n)
+{
+    var j, k, c = 0, o = { a: 1, b: 2, c: 3, d: 4 };
+    for (j = 0; j < n; j++) {
+        for (k in o) {
+            c++;
+            break;
+        }
+    }
+    global_res = c;
+    return n;
+}
+
+/* a loop in each key of a loop: the outer's cursor is never the last */
+function for_in_nested(n)
+{
+    var j, k, l, c = 0, o = { a: 1, b: 2, c: 3, d: 4 };
+    for (j = 0; j < n; j++) {
+        for (k in o) {
+            for (l in o)
+                c++;
+        }
+    }
+    global_res = c;
+    return n * 16;
+}
+
 /* a for-in loop over a dictionary: an object a key was deleted from,
    not the last added */
 function dict_for_in(n)
