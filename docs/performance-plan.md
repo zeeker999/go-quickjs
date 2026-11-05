@@ -2060,9 +2060,9 @@ to remove:
 
 | ID | Item | Targets | Risk | Status |
 |---|---|---|---|---|
-| F1 | A string builder in the tree tier | 21% of a render's allocation, string building 1.13x C | High | Open |
-| F2 | A `for...in` cursor from a free list | 8.5% of a render's allocation | Medium | Open |
-| F3 | An array's old elements reused when it grows | up to 14% of a render's allocation | High | Open |
+| F1 | A string builder in the tree tier | 21% of a render's allocation, string building 1.13x C | High | Done for a closure's appends, in every tier: half a render's objects |
+| F2 | A `for...in` cursor from a free list | 8.5% of a render's allocation | Medium | Done, by one cursor kept: 14% of its bytes |
+| F3 | An array's old elements reused when it grows | up to 14% of a render's allocation | High | Open; growth by half from 16,384 elements is done, and is not this |
 | F4 | The JIT slower than the interpreter here | 1.20x the interpreter | Medium | Done |
 | F5 | A fresh runtime's first render and its memory, with the JIT | first render 66 ms against 22, live heap 26.2 MiB against 7.3 | Medium | Memory done; first render 48.5 to 38.2 ms compiling in the background ([D8](#d8-compiling-in-the-background), phases 1 to 4; 35.5 with phase 5), the interpreter's 21.9 |
 
@@ -2076,6 +2076,43 @@ to remove:
   It is the largest single item here and the one that can go wrong
   silently, since a string that is mutated after something else has seen
   it is a wrong answer, not a crash.
+
+  **Done for what a render does** (`compiler/strappend.go`,
+  `vm/zzz_strappend.go`): React's `destination.push(chunk) { result += chunk }`
+  appends to a binding a closure captures, 35,663 chunks of three characters a
+  render, which no loop's analysis sees. What proves the string the binding's
+  alone is the compiler, which sees every read of a binding, if not at once:
+  it notes on the binding that a read has been compiled, an addition may own
+  the string only if none has, and every read compiled after it is followed by
+  `str_freeze`. So each read comes before the append, and there is no owned
+  append, or after it, and freezes what it read, in whatever order they run.
+  The string is an ordinary rope at every moment, so a tier that knows nothing
+  of this makes a rope over it and is right. An append makes a rope and marks
+  it; the fourth in a row gives it a right side with room, as a tail costs
+  about three ropes, and bought at the second it made `x += a; x += b; read x`
+  half as long again.
+
+  What took finding: a right side that reads a local still runs code, in the
+  conversion of an object (`add` freezes its left operand first); `Concat`
+  hands back an empty side's operand, which must not be marked; a loop head's
+  `let` is copied for each iteration, the string held twice; and
+  `jitDifferential`'s runtimes have a memory limit, under which nothing is
+  owned, so that the JIT's differential test passed with native code's freeze
+  taken out. Nine of the first mutations survived, each a test that could not
+  see its hazard, and that is what found the last of those.
+
+  Not taken: a local's `s += x`, which leaves numbers' reads and their fused
+  instructions alone; a right side that runs code, as `out += esc(x)`, the
+  shape of a compiled template, since the old value is read first. A local no
+  closure captures could evaluate the right side first; that is the next step
+  if a template engine's profile asks. A reader compiled before the appender,
+  a declaration above it, stays on ropes.
+
+  One thread, a render, 2026-11-05: JIT 682 to 603 ms, interpreter 840 to 768,
+  -11.5% and -8.6%; on 32 cores -3.9% and -4.5%, for 3.29 to 1.51 million
+  objects and 322 to 265 MB, 50 renders. `upvalue_string_append` is 30 to 36%
+  faster. Placements of the three items against `915400cd`: V8 suite +0.0%,
+  AWFY -0.6%, Octane +0.5%; with the JIT +0.4%, +0.1%, +0.1%.
 - **F2.** A cursor is one allocation of the object, the cursor and the
   snapshot together (`newForInObject`), and nothing outside the VM can
   reach one: a cursor the step reports done could go on a free list of
@@ -2083,6 +2120,16 @@ to remove:
   is that the step reporting done is the last read of it -- a loop left by
   `break`, an exception or a suspended generator must not return a cursor
   to the list.
+
+  **Done**, with one cursor rather than a list (`vm/zzz_forincursor.go`): the
+  runtime keeps the last made, and the next loop takes it if its `done` is
+  set, by iterNext or native code's step, which needs no release in any tier.
+  After `done` there is only `iter_close`, which leaves a for...in's cursor
+  alone, and a drop. A cursor made done, of null, is never kept: done before
+  its loop's first step, a debugger's pause could see it taken. It holds what
+  it walked, so `clearReturnedFrames` lets it go, once a collection and at each
+  turn's end. `object_for_in` -22 to -57%, `for_in_nested` -26 to -44%, a render
+  -2 to -5%; `for_in_break`, which never reuses one, within 6% either way.
 - **F3.** Go's `append` allocates a new block and copies, so about half
   the bytes a growing array allocates are the blocks it has outgrown,
   dead the moment they are copied. A free list of element blocks by size
@@ -2093,6 +2140,14 @@ to remove:
   tried first and is not the answer: the growth here is in large arrays,
   and floors of 4, 8 and 16 elements left the render's allocation count
   unchanged to the object (2026-10-30).
+
+  Still open. What is done is a large array's growth (`vm/zzz_growelems.go`),
+  half again and 16 from 16,384 elements, as V8 grows at any length: a million
+  pushes -21 to -39%. It is not this, and it is worth little to a render: 3%
+  of its bytes, as the array of chunks has 35,663 elements. From 1,024 it
+  made `array_push_large` and `array_push_args3` 3 to 22% slower, since Go's
+  capacities are lumpy and 8,192 elements fit one closely; over every length
+  from 16,384 half again allocates a median of 27% less and at worst 12% more.
 - **F4.** The JIT is 1.20 times the interpreter's wall time on this
   workload, which is mostly short polymorphic calls and string building
   rather than loops, and a JIT runtime holds 18.7 MiB against the
@@ -3294,7 +3349,7 @@ first, as the rest of the plan is.
   `runtime.AddCleanup`, `Validate` accepting Opaque, String and
   Uninitialized literals, layout asserts at compile time (*unchecked*).
   `qjs --jit` in a build without the tag says it has no effect.
-- `push`: growing the array (`growslice`) is half the time, and the
+- `push`: growing the array (`growslice`) is half the time, F3's, and the
   native push re-checks the prototypes on every iteration (each a
   compare of its layout since `657b50f2`). V8 hoists
   those checks out of the loop, and our JIT doesn't do that kind of

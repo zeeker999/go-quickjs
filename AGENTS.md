@@ -344,8 +344,10 @@ object and array spread, object rest, computed keys and spread calls,
 Array.prototype.forEach, reduce, map, filter and some, and their callbacks
 varied -- made once or anew, a function expression or an arrow, reading
 this, writing what they captured, called by a loop of the script's own --
-a typed array's callback methods and its element reads and writes over
-every element type, a DataView's getters and setters, Map's and Set's
+a closure's appends to a string it captures and what growing one in place
+does worst -- reads between them, a few to a new binding -- for-in loops the
+last cursor cannot serve, arrays past 16,384 elements, a typed array's
+callback methods and its element reads and writes over every element type, a DataView's getters and setters, Map's and Set's
 forEach,
 String.prototype.indexOf and Array.prototype.indexOf, String's methods that
 run no script -- at, codePointAt, toUpperCase, trim, startsWith, padStart,
@@ -452,7 +454,12 @@ process spent on it (`cpu`), the collector's on other threads included,
 and the external runner its engine's whole: on a machine with cores to
 spare the time does not show what collecting costs, which an embedder
 running a runtime on each core pays. A change that moves what is
-allocated is compared by both.
+allocated is compared by both, and at `GOMAXPROCS=1` too: there the
+collector shares the thread, a cycle marks eight times as long, and the
+script runs under the write barrier for much of it. An item worth 3.7% of a render on 32
+cores was worth 10.5% at one thread, and a literal the JIT made in 39 ns took
+95, slower than the interpreter's 69, which no run with cores to spare showed.
+QuickJS has no helper threads, so one thread is the fair comparison with it.
 
 `internal/cmd/disasm` prints the bytecode a script or module compiles to,
 each function's instructions under the source lines they come from; `-tree`
