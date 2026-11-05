@@ -555,6 +555,40 @@ function append_pair_read(n)
     return j;
 }
 
+/* the same with a read that keeps the string, as x.length does not */
+function append_keep_each(n)
+{
+    var i, j, s, c = 0;
+    var sink = { push: function (x) { s += x; },
+                 get: function () { return s; } };
+    for (j = 0; j < n; j += 1024) {
+        s = "";
+        for (i = 0; i < 1024; i++) {
+            sink.push("<x>");
+            c += sink.get().length;
+        }
+    }
+    global_res = c;
+    return j;
+}
+
+function append_keep_pair(n)
+{
+    var i, j, s, c = 0;
+    var sink = { push: function (x) { s += x; },
+                 get: function () { return s; } };
+    for (j = 0; j < n; j += 2048) {
+        s = "";
+        for (i = 0; i < 1024; i++) {
+            sink.push("<x>");
+            sink.push("<y>");
+            c += sink.get().length;
+        }
+    }
+    global_res = c;
+    return j;
+}
+
 function extra_append_once(a, x)
 {
     var s = a;
@@ -703,6 +737,21 @@ function local_append_read(n)
         for (i = 0; i < 1024; i++) {
             out += "<x>";
             c += out.length;
+        }
+    }
+    global_res = c;
+    return j;
+}
+
+function local_append_keep(n)
+{
+    var i, j, out, held, c = 0;
+    for (j = 0; j < n; j += 1024) {
+        out = "";
+        for (i = 0; i < 1024; i++) {
+            out += "<x>";
+            held = out;
+            c += held.length;
         }
     }
     global_res = c;

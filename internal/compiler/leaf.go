@@ -103,7 +103,7 @@ func pureBody(fn *bytecode.Function) bool {
 			bytecode.OpLt, bytecode.OpLe, bytecode.OpGt, bytecode.OpGe,
 			bytecode.OpEq, bytecode.OpNe, bytecode.OpStrictEq, bytecode.OpStrictNe,
 			bytecode.OpDup, bytecode.OpDrop, bytecode.OpReturn, bytecode.OpReturnUndef,
-			bytecode.OpGetPropThis,
+			bytecode.OpGetPropThis, bytecode.OpStrFreeze,
 			bytecode.OpGetUpvalue, bytecode.OpToNumeric, bytecode.OpInc, bytecode.OpDec:
 		case bytecode.OpSetProp, bytecode.OpSetUpvalue:
 			// The store is the last thing the body can give up at: a

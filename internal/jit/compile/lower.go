@@ -2373,6 +2373,11 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this, charCode bool
 		bytecode.OpAdd, bytecode.OpSub, bytecode.OpMul, bytecode.OpDiv,
 		bytecode.OpLt, bytecode.OpLe, bytecode.OpGt, bytecode.OpGe,
 		bytecode.OpEq, bytecode.OpNe, bytecode.OpStrictEq, bytecode.OpStrictNe:
+		if in.Op == bytecode.OpAdd && in.B != 0 {
+			// An append the compiler gave back (plainReadAppends): a string's
+			// from the start, with no recompile to learn that it is.
+			return ir.Instruction{Op: ir.StringAdd, Left: ir.Slot(sp - 2), Right: top, Dest: sp - 2}
+		}
 		op, _ := operator(uint32(in.Op))
 		return ir.Instruction{Op: ir.Binary, Operator: op, Dest: sp - 2, Left: ir.Slot(sp - 2), Right: top, Strict: strictOp(uint32(in.Op))}
 	case bytecode.OpBinLocal:

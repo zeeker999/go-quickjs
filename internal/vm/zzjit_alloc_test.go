@@ -109,4 +109,23 @@ func TestJITStrAppendAllocations(t *testing.T) {
 	if n := b.Mallocs - a.Mallocs; n > 1000 && allocsOrdinary() {
 		t.Errorf("10,000 appends made %d allocations", n)
 	}
+	// A number is made a string where it is added, with no exit to Go.
+	if _, err := r.Run(compileForTest(t, `
+		function numbers(n) {
+			var s = ""
+			var sink = { push: function (x) { s += x } }
+			for (var i = 0; i < n; i++) sink.push(i & 7)
+			return s.length
+		}
+		for (var k = 0; k < 40; k++) numbers(5000)`)); err != nil {
+		t.Fatal(err)
+	}
+	before := r.JITStats()
+	if v, err := r.Run(compileForTest(t, `numbers(10000)`)); err != nil || v.Number() != 10000 {
+		t.Fatalf("= %v, %v", v, err)
+	}
+	after := r.JITStats()
+	if hosts, entries := after.Hosts-before.Hosts, after.SSAEntries-before.SSAEntries; hosts > 16 || entries == 0 || entries > 16 {
+		t.Errorf("10,000 numbers appended: %d exits to Go, %d native entries", hosts, entries)
+	}
 }

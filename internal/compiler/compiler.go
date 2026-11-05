@@ -277,6 +277,8 @@ type compiler struct {
 	// 0 not yet, 1 no, 2 yes.
 	lit          *ast.FuncLit
 	mentionsEval uint8
+	// lengthRead says the name being compiled is x of x.length (compiledRead).
+	lengthRead bool
 	// mentioned is, of the names asked about, whether a function or a
 	// class inside this one mentions them.
 	mentioned map[string]bool

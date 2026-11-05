@@ -108,6 +108,13 @@ func TestOwnedAppends(t *testing.T) {
 		{`function f() { var s = ""; const add = x => { s += x }; const g = () => () => eval("s") }`, 0, 0},
 		// with.
 		{`function f(o) { var s = ""; with (o) { const add = x => { s += x } } }`, 0, 0},
+		// A read next: an addition, its reader frozen as ever.
+		{`function f() { var s = ""; const add = x => { s += x; return s } }`, 0, 1},
+		{`function f() { var s = ""; const add = x => { s += x; if (x) return s } }`, 1, 1},
+		{`function f() { var s = ""; const add = (x, y) => { s += x; s += y; return s } }`, 1, 1},
+		// x.length is no read.
+		{`function f() { var s = ""; const n = () => s.length; const add = x => { s += x } }`, 1, 0},
+		{`function f() { var s = ""; const add = x => { s += x; return s.length } }`, 1, 0},
 		// Counters are left alone: a local's reads have no str_freeze.
 		{`function f(n) { var t = 0; for (var i = 0; i < n; i += 2) t += i; return t + i }`, 0, 0},
 		{`function f() { var t = 0; const add = () => { t += 1 }; return t }`, 0, 0},
@@ -123,20 +130,34 @@ func TestOwnedAppends(t *testing.T) {
 		src              string
 		appends, freezes int
 	}{
-		{`function f(g) { var out = ""; out += g(1); out += "x"; return out }`, 2, 1},
-		{`function f(g) { let out = "a" + g; out += g(1); return out + out }`, 1, 2},
+		{`function f(g) { var out = ""; out += g(1); out += "x"; if (g) return out }`, 2, 1},
+		{`function f(g) { let out = "a" + g; out += g(1); if (g) return out + out }`, 1, 2},
 		{`function f(g) { var out = "<ul>"; for (var i = 0; i < 9; i++) { out += g(i) } return out }`, 1, 1},
-		{`function f(g) { var out; out = ""; g && (out += g()); return out }`, 1, 1},
-		{`function f(g, x) { var out = ""; x || (out += g()); return out }`, 1, 1},
-		{"function f(g) { var out = `a${g}`; out += g(); return out }", 1, 1},
-		{`function* f(g) { var out = ""; out += yield 1; return out }`, 1, 1},
+		{`function f(g) { var out; out = ""; g && (out += g()); if (g) return out }`, 1, 1},
+		{`function f(g, x) { var out = ""; x || (out += g()); if (g) return out }`, 1, 1},
+		{"function f(g) { var out = `a${g}`; out += g(); if (g) return out }", 1, 1},
+		{`function* f(g) { var out = ""; out += yield 1; if (g) return out }`, 1, 1},
+		// A read next, with no branch before it: an addition.
+		{`function f(g) { var out = ""; out += g(1); return out }`, 0, 1},
+		{`function f(g) { var out = ""; out += g(1); out += "x"; return out }`, 1, 1},
+		{`function f(g) { var out = ""; out += g(1); var r = out; if (g) out += r }`, 1, 1},
+		{`function f(g) { var out = ""; out += g(1); g(out); if (g) out += "a" }`, 1, 1},
+		{`function f(g) { var a = "", b = ""; a += g(1); b += g(2); return a + b }`, 0, 2},
+		// x.length is no read, the object of nothing but the length.
+		{`function f(g) { var out = ""; while (out.length < 9) { out += g(1) } return out }`, 1, 1},
+		{`function f(g) { var out = ""; out += g(1); var n = out.length; out += "x"; return n }`, 2, 0},
+		// What only looks like one.
+		{`function f(g) { var out = ""; g(out).length; out += g(1); return out }`, 0, 0},
+		{`function f(g) { var out = ""; out?.length; out += g(1); return out }`, 0, 0},
+		{`function f(g) { var out = ""; out.length(); out += g(1); return out }`, 0, 0},
+		{`function f(g) { var out = ""; out["length"]; out += g(1); return out }`, 0, 0},
+		{`function f(g) { var out = ""; out[out.length]; out += g(1); return out }`, 0, 0},
 		// No string to be seen.
 		{`function f(g) { var out; out += g(1); return out }`, 0, 0},
 		{`function f(g) { var out = g(); out += g(1); return out }`, 0, 0},
 		{`function f(out, g) { out += g(1); return out }`, 0, 0},
 		// A read compiled first.
 		{`function f(g) { var out = ""; var r = out; out += g(1); return out }`, 0, 0},
-		{`function f(g) { var out = ""; while (out.length < 9) { out += g(1) } return out }`, 0, 0},
 		// The value used.
 		{`function f(g) { var out = ""; return out += g(1) }`, 0, 0},
 		// Mentioned by a function or a class, before or after, or on the right.
@@ -166,5 +187,51 @@ func TestOwnedAppends(t *testing.T) {
 	// Code for a debugger, which reads any binding, has none.
 	if s, n := marked(compileStrict(t, `function f() { var s = ""; const add = x => { s += x }; return s }`, Options{Debug: true})); s != 0 || n != 0 {
 		t.Errorf("code for a debugger: %d marked stores, %d str_freezes", s, n)
+	}
+}
+
+// walkFunctions calls see on fn and every function in it.
+func walkFunctions(fn *bytecode.Function, see func(*bytecode.Function)) {
+	see(fn)
+	for _, k := range fn.Constants {
+		if k.Kind == bytecode.ConstFunction && k.Fn != nil {
+			walkFunctions(k.Fn, see)
+		}
+	}
+}
+
+// An append given back is an add native code can tell from any other, and a
+// closure that only reads a binding appended to stays frameless.
+func TestPlainReadAppends(t *testing.T) {
+	hinted := 0
+	walkFunctions(compileStrict(t, `function f(g) { var out = ""; out += g(1); return out }`, Options{}), func(fn *bytecode.Function) {
+		for _, in := range fn.Code {
+			if in.Op == bytecode.OpAdd && in.B != 0 {
+				hinted++
+			}
+		}
+	})
+	if hinted != 1 {
+		t.Errorf("%d additions marked as appends given back, want 1", hinted)
+	}
+	hinted = 0
+	walkFunctions(compileStrict(t, `function f(a, b) { var s = a + b; var t = 0; t += a; return s + t }`, Options{}), func(fn *bytecode.Function) {
+		for _, in := range fn.Code {
+			if in.Op == bytecode.OpAdd && in.B != 0 {
+				hinted++
+			}
+		}
+	})
+	if hinted != 0 {
+		t.Errorf("%d other additions marked", hinted)
+	}
+	pure := 0
+	walkFunctions(compileStrict(t, `function f() { var s = ""; const add = x => { s += x }; const get = () => s; return [add, get] }`, Options{}), func(fn *bytecode.Function) {
+		if fn.Leaf == bytecode.LeafPure {
+			pure++
+		}
+	})
+	if pure != 2 {
+		t.Errorf("%d pure closures, want the appender and the reader", pure)
 	}
 }

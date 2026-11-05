@@ -73,6 +73,11 @@ import (
 // str_freeze, which would stand between its read and what fuses with it, and
 // sum += f(x) is as common as anything in JavaScript. So a local must have
 // been given a string the source can see (stringly), as var out = "" does.
+//
+// What a read after each append must not pay for: the function it is in shows
+// that the next thing done with what an append made may be to read it, and
+// owning it gains nothing then. So x += y; f(x) is the addition it always was
+// (plainReadAppends). An x.length is no read at all (compiledRead).
 
 // enclosingBinding is the binding a name reaches in a function around c, and
 // the function: the one resolveUpvalue finds.
@@ -86,12 +91,72 @@ func (c *compiler) enclosingBinding(name string) (*localVar, *compiler) {
 }
 
 // compiledRead notes a read of l, just compiled, and freezes what it read if l
-// is appended to.
+// is appended to. x.length is no read of a string: it keeps nothing, and a
+// string runs no code to answer it, so the object of one (lengthRead) is
+// neither noted nor frozen. while (s.length < n) s += x stays an append.
 func (c *compiler) compiledRead(l *localVar) {
+	if c.lengthRead {
+		return
+	}
 	l.read = true
 	if l.appended {
 		c.emit(bytecode.OpStrFreeze, 0, 0)
 	}
+}
+
+// appendReadReach is how many instructions past an append plainReadAppends
+// looks for a read: what it finds further on is no longer what the append is
+// next used for, and a long run of appends should not cost a long search each.
+const appendReadReach = 32
+
+// plainReadAppends makes each append in code that a read of its binding
+// follows, in the instructions run after it with no branch between, the
+// addition it was: a local's str_append an add, its B telling native code that
+// it is a string's, a closure's store unmarked.
+// The read's str_freeze stays, as x + "" gives back x, which an earlier append
+// may own. Any addition is right, so this decides what is worth doing, not
+// what is correct: a jump landing between the two takes nothing from it.
+func plainReadAppends(code []bytecode.Instr) {
+	for pc, in := range code {
+		switch {
+		case in.Op == bytecode.OpStrAppend && pc+1 < len(code):
+			if st := code[pc+1]; (st.Op == bytecode.OpSetLocal || st.Op == bytecode.OpSetLocalGet) && readAfter(code, pc+1, st.A, false) {
+				code[pc].Op, code[pc].B = bytecode.OpAdd, 1
+			}
+		case in.Op == bytecode.OpSetUpvalue && in.B != 0:
+			if readAfter(code, pc, in.A, true) {
+				code[pc].B = 0
+			}
+		}
+	}
+}
+
+// readAfter reports whether the next use of the binding code[pc] stores to,
+// a local's slot or an upvalue's index, is a read that keeps it, with a
+// str_freeze, before any branch.
+func readAfter(code []bytecode.Instr, pc int, slot uint32, upvalue bool) bool {
+	for i := pc; i < min(len(code)-1, pc+appendReadReach); i++ {
+		in := code[i]
+		var reads bool
+		switch in.Op {
+		case bytecode.OpGetLocal, bytecode.OpGetLocalCheck:
+			reads = !upvalue && in.A == slot
+		case bytecode.OpGetLocal2:
+			reads = !upvalue && (in.A == slot || in.B == slot)
+		case bytecode.OpSetLocalGet:
+			reads = !upvalue && in.B == slot
+		case bytecode.OpGetUpvalue, bytecode.OpGetUpvalueCheck:
+			reads = upvalue && in.A == slot
+		case bytecode.OpJump, bytecode.OpJumpIfFalse, bytecode.OpJumpIfTrue, bytecode.OpJumpIfFalseKeep, bytecode.OpJumpIfTrueKeep,
+			bytecode.OpJumpIfNullish, bytecode.OpJumpIfNotNullish, bytecode.OpJumpIfCmpFalse,
+			bytecode.OpReturn, bytecode.OpReturnUndef, bytecode.OpThrow:
+			return false
+		}
+		if reads {
+			return code[i+1].Op == bytecode.OpStrFreeze
+		}
+	}
+	return false
 }
 
 // evalInside reports whether c's function, or one in it, mentions eval.

@@ -629,7 +629,11 @@ func init() {
 			v := b.pop().tree()
 			b.push(func(c *tctx) Value {
 				x := v(c)
-				strFreeze[struct{}](x)
+				if x.IsString() {
+					if s := x.String(); s.building {
+						s.building = false
+					}
+				}
 				return x
 			})
 		case bytecode.OpStrAppend:

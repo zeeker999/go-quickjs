@@ -46,15 +46,19 @@ func strAppend[_ any](r *Runtime, a, b *String) (*String, error) {
 		return r.concat(a, b)
 	}
 	if !a.tailed && (!a.building || a.left == nil || a.ropes < strAppendRopes-1) {
-		s := a.Concat(b)
-		// Neither operand, both not being empty: a new rope, or a short
-		// string copied, which has nothing to grow.
-		if s.left != nil {
-			s.building = true
-			if a.building {
-				s.ropes = a.ropes + 1
-			}
+		// A short string is copied, and has nothing to grow.
+		if a.byteLenShallow()+b.byteLenShallow() < ropeThreshold {
+			return a.Concat(b), nil
 		}
+		// Concat's rope, made here for what the checks above have said of
+		// the operands: a read after each append spends its time on this
+		// path, and a call of Concat asks it all again.
+		s := &String{length: a.length + b.length, ascii: a.ascii && b.ascii,
+			endsHigh: b.endsHigh, startsLow: a.startsLow, building: true}
+		if a.building {
+			s.ropes = a.ropes + 1
+		}
+		s.left, s.aux = a, unsafe.Pointer(b)
 		return s, nil
 	}
 	if !a.building || a.left == nil {
