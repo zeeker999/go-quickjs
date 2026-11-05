@@ -28,6 +28,26 @@ func marked(fn *bytecode.Function) (stores, freezes int) {
 	return stores, freezes
 }
 
+// appended counts, over fn and what it nests, the str_appends and the
+// str_freezes.
+func appended(fn *bytecode.Function) (appends, freezes int) {
+	for _, in := range fn.Code {
+		switch in.Op {
+		case bytecode.OpStrAppend:
+			appends++
+		case bytecode.OpStrFreeze:
+			freezes++
+		}
+	}
+	for _, k := range fn.Constants {
+		if k.Kind == bytecode.ConstFunction && k.Fn != nil {
+			s, n := appended(k.Fn)
+			appends, freezes = appends+s, freezes+n
+		}
+	}
+	return appends, freezes
+}
+
 func compileStrict(t *testing.T, src string, opts Options) *bytecode.Function {
 	t.Helper()
 	var prog *ast.Program
@@ -64,8 +84,7 @@ func TestOwnedAppends(t *testing.T) {
 		{`function f() { var s = ""; const add = x => s += x }`, 0, 0},
 		{`function f() { var s = ""; const add = x => { return s += x } }`, 0, 0},
 		{`function f() { var s = ""; const add = x => { return x && (s += x) } }`, 0, 0},
-		// The binding is not a closure's upvalue.
-		{`function f(x) { var s = ""; s += x; return s }`, 0, 0},
+		// The top level's, a module's to export.
 		{`var s = ""; function f(x) { s += x }`, 0, 0},
 		{`let s = ""; { const add = x => { s += x } }`, 0, 0},
 		// What it is.
@@ -92,10 +111,56 @@ func TestOwnedAppends(t *testing.T) {
 		// Counters are left alone: a local's reads have no str_freeze.
 		{`function f(n) { var t = 0; for (var i = 0; i < n; i += 2) t += i; return t + i }`, 0, 0},
 		{`function f() { var t = 0; const add = () => { t += 1 }; return t }`, 0, 0},
+		{`function f(g) { var t = 0; for (var i = 0; i < 9; i++) t += g(i); return t }`, 0, 0},
+		{`function f(g) { var t; t += g(1); return t }`, 0, 0},
 	} {
 		fn := compileStrict(t, tc.src, Options{})
 		if s, n := marked(fn); s != tc.stores || n != tc.freezes {
 			t.Errorf("%s:\n  %d marked stores, %d str_freezes; want %d, %d", tc.src, s, n, tc.stores, tc.freezes)
+		}
+	}
+	for _, tc := range []struct {
+		src              string
+		appends, freezes int
+	}{
+		{`function f(g) { var out = ""; out += g(1); out += "x"; return out }`, 2, 1},
+		{`function f(g) { let out = "a" + g; out += g(1); return out + out }`, 1, 2},
+		{`function f(g) { var out = "<ul>"; for (var i = 0; i < 9; i++) { out += g(i) } return out }`, 1, 1},
+		{`function f(g) { var out; out = ""; g && (out += g()); return out }`, 1, 1},
+		{`function f(g, x) { var out = ""; x || (out += g()); return out }`, 1, 1},
+		{"function f(g) { var out = `a${g}`; out += g(); return out }", 1, 1},
+		{`function* f(g) { var out = ""; out += yield 1; return out }`, 1, 1},
+		// No string to be seen.
+		{`function f(g) { var out; out += g(1); return out }`, 0, 0},
+		{`function f(g) { var out = g(); out += g(1); return out }`, 0, 0},
+		{`function f(out, g) { out += g(1); return out }`, 0, 0},
+		// A read compiled first.
+		{`function f(g) { var out = ""; var r = out; out += g(1); return out }`, 0, 0},
+		{`function f(g) { var out = ""; while (out.length < 9) { out += g(1) } return out }`, 0, 0},
+		// The value used.
+		{`function f(g) { var out = ""; return out += g(1) }`, 0, 0},
+		// Mentioned by a function or a class, before or after, or on the right.
+		{`function f(g) { var out = ""; out += g(1); return () => out }`, 0, 0},
+		{`function f(g) { var out = ""; const h = () => out; out += g(h); return out }`, 0, 0},
+		{`function f(g) { var out = ""; out += g(1); class C { x = out } }`, 0, 0},
+		{`function f(g) { var out = ""; out += g(1); var C = class { x = out } }`, 0, 0},
+		{`function f(g) { var out = ""; out += g(1); class C { static { out = "a" } } }`, 0, 0},
+		{`function f(g) { var out = ""; out += g(1); class C { m() { out = "a" } } }`, 0, 0},
+		{`function f(g) { var out = ""; out += g(1); class C extends (out = "a", Object) {} }`, 0, 0},
+		{`function f(g) { var out = ""; out += g(1); class C { [out] = 1 } }`, 0, 0},
+		{`function f(g) { var out = ""; out += (class { static { out = "a" } }, "b") }`, 0, 0},
+		{`function f(g) { var out = ""; out += g(out) }`, 0, 0},
+		{`function f(g) { var out = ""; out += (out = "a", "b") }`, 0, 0},
+		// eval, with, a loop's copies.
+		{`function f(g) { var out = ""; out += g(1); return eval("out") }`, 0, 0},
+		{`function f(g) { var out = ""; with (g) { out += g(1) } return out }`, 0, 0},
+		{`function f(g) { for (let out = ""; ; ) { out += g(() => 1) } }`, 0, 0},
+		// The top level, with no function to ask.
+		{`var out = ""; out += x`, 0, 0},
+	} {
+		fn := compileStrict(t, tc.src, Options{})
+		if s, n := appended(fn); s != tc.appends || n != tc.freezes {
+			t.Errorf("%s:\n  %d str_appends, %d str_freezes; want %d, %d", tc.src, s, n, tc.appends, tc.freezes)
 		}
 	}
 	// Code for a debugger, which reads any binding, has none.

@@ -459,6 +459,11 @@ func (c *compiler) compileStatement(s ast.Stmt) {
 // compileVarDecl compiles a var, let or const declaration.
 func (c *compiler) compileVarDecl(n *ast.VarDecl) {
 	for _, d := range n.Decls {
+		if id, ok := d.Target.(*ast.Ident); ok && stringly(d.Init) {
+			if l, ok := c.resolveLocal(id.Name); ok {
+				l.stringy = true
+			}
+		}
 		if d.Init == nil {
 			// `var x;` leaves an existing binding alone; a lexical binding
 			// without an initializer becomes undefined.

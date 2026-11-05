@@ -600,6 +600,115 @@ function upvalue_sum(n)
     return n;
 }
 
+/* a template's render, as a compiled template is written: a local a string
+   is built in, its pieces and what an escape function returned, with no loop
+   and in one; numbers among the pieces; and what it does worst, one append
+   to a local and a read after each */
+function extra_esc(s)
+{
+    return s.indexOf("<") < 0 ? s : s.replace(/</g, "&lt;");
+}
+
+function extra_row(a, b, c)
+{
+    var out = "<tr><td>";
+    out += extra_esc(a);
+    out += "</td><td>";
+    out += extra_esc(b);
+    out += "</td><td>";
+    out += extra_esc(c);
+    out += "</td></tr>";
+    return out;
+}
+
+function template_row(n)
+{
+    var j, c = 0;
+    for (j = 0; j < n; j++)
+        c += extra_row("alpha", "beta<gamma", "delta").length;
+    global_res = c;
+    return n;
+}
+
+function extra_list(xs)
+{
+    var i, out = "<ul>";
+    for (i = 0; i < xs.length; i++) {
+        out += "<li class=\"item\">";
+        out += extra_esc(xs[i]);
+        out += "</li>";
+    }
+    out += "</ul>";
+    return out;
+}
+
+function template_list(n)
+{
+    var j, c = 0, xs = [];
+    for (j = 0; j < 64; j++)
+        xs.push("item number " + j);
+    for (j = 0; j < n; j += 64)
+        c += extra_list(xs).length;
+    global_res = c;
+    return j;
+}
+
+function template_escaped(n)
+{
+    var j, c = 0, xs = [];
+    for (j = 0; j < 64; j++)
+        xs.push("item <b>" + j + "</b>");
+    for (j = 0; j < n; j += 64)
+        c += extra_list(xs).length;
+    global_res = c;
+    return j;
+}
+
+function template_numbers(n)
+{
+    var i, j, out, c = 0;
+    for (j = 0; j < n; j += 64) {
+        out = "";
+        for (i = 0; i < 64; i++) {
+            out += i;
+            out += ",";
+        }
+        c += out.length;
+    }
+    global_res = c;
+    return j;
+}
+
+function extra_once(a, x)
+{
+    var out = "<" + a;
+    out += x;
+    return out;
+}
+
+function local_append_once(n)
+{
+    var j, c = 0, a = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnop";
+    for (j = 0; j < n; j++)
+        c += extra_once(a, "<x>").length;
+    global_res = c;
+    return n;
+}
+
+function local_append_read(n)
+{
+    var i, j, out, c = 0;
+    for (j = 0; j < n; j += 1024) {
+        out = "";
+        for (i = 0; i < 1024; i++) {
+            out += "<x>";
+            c += out.length;
+        }
+    }
+    global_res = c;
+    return j;
+}
+
 /* a for-in loop over a dictionary: an object a key was deleted from,
    not the last added */
 function dict_for_in(n)

@@ -70,10 +70,26 @@ func (c *compiler) compileExprForEffect(e ast.Expr) {
 			c.patchJump(skip)
 			return
 		}
+		if n.Op != "??" && c.localAppend(n.Right) {
+			c.compileExpr(n.Left)
+			op := bytecode.OpJumpIfFalse
+			if n.Op == "||" {
+				op = bytecode.OpJumpIfTrue
+			}
+			skip := c.emitJump(op)
+			c.compileLocalAppend(n.Right.(*ast.Assign))
+			c.patchJump(skip)
+			return
+		}
 
 	case *ast.Assign:
+		c.noteString(n)
 		if c.ownedAppend(n) {
 			c.compileOwnedAppend(n)
+			return
+		}
+		if c.localAppend(n) {
+			c.compileLocalAppend(n)
 			return
 		}
 		// A store to a property carries its value out the same way, by copying

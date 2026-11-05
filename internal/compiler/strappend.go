@@ -51,6 +51,28 @@ import (
 // read with no str_freeze and the store marked (B of set_upvalue). A tier that
 // ignores the mark makes a rope, which is always right: the string in the
 // binding is an ordinary one at every moment.
+//
+// A local is simpler, and its right side may be anything:
+//
+//	function row(x) {
+//		var out = "<td>"
+//		out += esc(x)
+//		out += "</td>"
+//		return out
+//	}
+//
+// esc runs between out's read and the addition, and what it does to out is
+// what would make growing it wrong: the old value is on the stack, and must
+// not change. But esc cannot reach a local no function mentions. So a local
+// append (localAppend) asks that of the name, and that the right side's own
+// text does not mention it, and it is safe whatever the right side runs. It
+// is a str_append, an instruction of its own, for any right side to come
+// before: the tree tier's updates and fused additions know nothing of one.
+//
+// What a sum must not pay for: every read of a binding appended to has a
+// str_freeze, which would stand between its read and what fuses with it, and
+// sum += f(x) is as common as anything in JavaScript. So a local must have
+// been given a string the source can see (stringly), as var out = "" does.
 
 // enclosingBinding is the binding a name reaches in a function around c, and
 // the function: the one resolveUpvalue finds.
@@ -132,6 +154,83 @@ func (c *compiler) ownedAppend(e ast.Expr) bool {
 	}
 	l.appended = true
 	return true
+}
+
+// stringly reports whether e is a string by what the source shows: a string
+// literal, a template, or an addition with one of those on a side.
+func stringly(e ast.Expr) bool {
+	switch v := e.(type) {
+	case *ast.StringLit:
+		return true
+	case *ast.TemplateLit:
+		return true
+	case *ast.Binary:
+		return v.Op == "+" && (stringly(v.Left) || stringly(v.Right))
+	}
+	return false
+}
+
+// noteString notes on the local an assignment gives a string that it has.
+func (c *compiler) noteString(n *ast.Assign) {
+	if n.Op != "=" || !stringly(n.Value) {
+		return
+	}
+	if id, ok := n.Target.(*ast.Ident); ok {
+		if l, ok := c.resolveLocal(id.Name); ok {
+			l.stringy = true
+		}
+	}
+}
+
+// mentionedInside reports whether a function or a class inside c's function
+// mentions name, or an eval could.
+func (c *compiler) mentionedInside(name string) bool {
+	if seen, ok := c.mentioned[name]; ok {
+		return seen
+	}
+	w := &argumentsScanner{seekName: name, nestedOnly: true}
+	for _, p := range c.lit.Params {
+		w.expr(p)
+	}
+	w.stmts(c.lit.Body)
+	if c.mentioned == nil {
+		c.mentioned = map[string]bool{}
+	}
+	c.mentioned[name] = w.found
+	return w.found
+}
+
+// localAppend reports whether e is an addition to a local that may grow what
+// the local holds in place, and notes that it does.
+func (c *compiler) localAppend(e ast.Expr) bool {
+	a, ok := e.(*ast.Assign)
+	if !ok || a.Op != "+=" || c.opts.Debug || c.lit == nil {
+		return false
+	}
+	id, ok := a.Target.(*ast.Ident)
+	if !ok || c.withLimit(id.Name) > 0 {
+		return false
+	}
+	l, ok := c.resolveLocal(id.Name)
+	if !ok || !l.stringy || !l.initialized || l.kind != bindVar && l.kind != bindLet || l.copied || l.paramScoped ||
+		l.read && !l.appended || c.evalInside() || c.mentionedInside(id.Name) {
+		return false
+	}
+	w := &argumentsScanner{seekName: id.Name}
+	if w.expr(a.Value); w.found {
+		return false
+	}
+	l.appended = true
+	return true
+}
+
+// compileLocalAppend compiles an addition localAppend took.
+func (c *compiler) compileLocalAppend(n *ast.Assign) {
+	l, _ := c.resolveLocal(n.Target.(*ast.Ident).Name)
+	c.emit(bytecode.OpGetLocal, l.slot, 0)
+	c.compileExpr(n.Value)
+	c.emitAt(n.Start, bytecode.OpStrAppend, 0, 0)
+	c.emit(bytecode.OpSetLocal, l.slot, 0)
 }
 
 // compileOwnedAppend compiles an addition ownedAppend took.
