@@ -449,6 +449,46 @@ function upvalue_string_append(n)
     return j;
 }
 
+/* growth by half: the length it does worst at against growth by a
+   quarter, and a long array */
+function array_push_28k(n)
+{
+    var i, j, a;
+    for (j = 0; j < n; j++) {
+        a = [];
+        for (i = 0; i < 27668; i++)
+            a.push(i);
+    }
+    global_res = a.length;
+    return n * 27668;
+}
+
+function array_push_1m(n)
+{
+    var i, j, a;
+    for (j = 0; j < n; j++) {
+        a = [];
+        for (i = 0; i < 1000000; i++)
+            a.push(i);
+    }
+    global_res = a.length;
+    return n * 1000000;
+}
+
+/* repeated growth by an assignment at the array's length */
+function array_index_append(n)
+{
+    var i, j, a, s = 0;
+    for (j = 0; j < n; j++) {
+        a = [];
+        for (i = 0; i < 8192; i++)
+            a[a.length] = i;
+        s += a.length;
+    }
+    global_res = s;
+    return n * 8192;
+}
+
 /* for-in loops that the last loop's cursor cannot serve: left at their
    first key, so none finishes */
 function for_in_break(n)
