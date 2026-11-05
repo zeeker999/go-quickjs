@@ -450,29 +450,30 @@ function upvalue_string_append(n)
 }
 
 /* growth by half: the length it does worst at against growth by a
-   quarter, and a long array */
+   quarter, and a long array. n is pushes, so that a small n is a small
+   test, as TestJITSameWorkWhileMarking runs each with the collector off */
 function array_push_28k(n)
 {
-    var i, j, a;
-    for (j = 0; j < n; j++) {
+    var i, j, a, len = n < 27668 ? n : 27668;
+    for (j = 0; j < n; j += len) {
         a = [];
-        for (i = 0; i < 27668; i++)
+        for (i = 0; i < len; i++)
             a.push(i);
     }
     global_res = a.length;
-    return n * 27668;
+    return j;
 }
 
 function array_push_1m(n)
 {
-    var i, j, a;
-    for (j = 0; j < n; j++) {
+    var i, j, a, len = n < 1000000 ? n : 1000000;
+    for (j = 0; j < n; j += len) {
         a = [];
-        for (i = 0; i < 1000000; i++)
+        for (i = 0; i < len; i++)
             a.push(i);
     }
     global_res = a.length;
-    return n * 1000000;
+    return j;
 }
 
 /* repeated growth by an assignment at the array's length */
