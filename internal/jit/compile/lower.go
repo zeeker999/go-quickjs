@@ -1665,6 +1665,8 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 		return effect{delta: 1}, nil
 	case bytecode.OpStrFreeze:
 		return effect{need: 1}, nil
+	case bytecode.OpStrAppend:
+		return effect{need: 2, delta: -1}, nil
 	case bytecode.OpGetGlobalOpt:
 		// typeof's read of a name, which has no site of its own.
 		if uint64(in.A) >= uint64(len(fn.Names)) {
@@ -2466,6 +2468,8 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this, charCode bool
 		return ir.Instruction{Op: ir.IterStep, Left: ir.Slot(sp - 1 - int(in.A)), Dest: sp, When: true, Rest: true}
 	case bytecode.OpStrFreeze:
 		return ir.Instruction{Op: ir.StringFreeze, Left: top}
+	case bytecode.OpStrAppend:
+		return ir.Instruction{Op: ir.StringAdd, Left: ir.Slot(sp - 2), Right: top, Dest: sp - 2, Owned: true}
 	case bytecode.OpIterCloseNormal, bytecode.OpIterClose:
 		// Native where there is nothing to close, Go's otherwise: a loop's
 		// cursor done, or an array's walked in place, as its loop ends --

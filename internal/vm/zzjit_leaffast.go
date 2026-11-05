@@ -137,8 +137,8 @@ func (r *Runtime) jitGoAppend(ctx *abi.Context) bool {
 // otherwise.
 func (r *Runtime) jitGoAdd(ctx *abi.Context) bool {
 	a, b := jitGoArg(ctx, 0), jitGoArg(ctx, 1)
-	if ctx.GoOp&abi.GoOpOwned != 0 && a.IsString() && b.IsString() {
-		return jitStrAppend[struct{}](r, ctx, a.String(), b.String())
+	if ctx.GoOp&abi.GoOpOwned != 0 && a.IsString() && (b.IsString() || b.IsNumber()) {
+		return jitStrAppend[struct{}](r, ctx, a, b)
 	}
 	if r.meter == nil {
 		if v, ok := r.jitConcatAdd(a, b); ok {
@@ -305,17 +305,17 @@ func (r *Runtime) jitLeafOf(ctx *abi.Context, op uint64, fn *Object) (Value, boo
 	return r.jitLeafApply(fd, this, unsafe.Slice((*Value)(unsafe.Pointer(&ctx.GoArgs[first])), argc))
 }
 
-// jitStrAppend is an addition the compiler marked, of two strings
-// (strAppend), its result to the call's keep cell: what would throw it
-// leaves for Go to make after an exit.
-func jitStrAppend[_ any](r *Runtime, ctx *abi.Context, a, b *String) bool {
-	if a.length+b.length > maxStringLength-64 {
+// jitStrAppend is an addition the compiler marked, of a string and a string
+// or a number (strAppendOp), its result to the call's keep cell: what would
+// throw it leaves for Go to make after an exit, having changed nothing.
+func jitStrAppend[_ any](r *Runtime, ctx *abi.Context, a, b Value) bool {
+	if a.String().length > maxStringLength-64-24 || b.IsString() && b.String().length > maxStringLength-64-a.String().length {
 		return false
 	}
-	s, err := strAppend[struct{}](r, a, b)
+	v, err := strAppendOp[struct{}](r, a, b)
 	if err != nil {
 		return false
 	}
-	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = Str(s)
+	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
 	return true
 }

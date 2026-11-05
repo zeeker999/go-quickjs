@@ -371,6 +371,10 @@ const (
 	// alone, so if it is a string, appends stop growing it. It leaves the
 	// value where it is.
 	OpStrFreeze
+	// OpStrAppend is + of the top two values, to a string a local alone
+	// holds, which may grow in place (compiler's localAppend): what any
+	// addition makes of them otherwise.
+	OpStrAppend
 	// OpIterToArray replaces an array-destructuring source with a dense array of
 	// the values its iterator produces. A is how many to pull, or IterAll when
 	// the pattern has a rest element and needs every one.
@@ -755,6 +759,7 @@ var opNames = [opCount]string{
 	OpGetPropUnder:     "get_prop_under",
 	OpGetIndexUnder:    "get_index_under",
 	OpStrFreeze:        "str_freeze",
+	OpStrAppend:        "str_append",
 }
 
 func (op Op) String() string {

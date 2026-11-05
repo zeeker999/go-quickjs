@@ -142,6 +142,10 @@ type localVar struct {
 	// (ownedAppend). copied says each iteration of a loop has a copy of the
 	// binding, which holds the same string.
 	read, appended, copied bool
+	// stringy says the binding has been given a string by what the source
+	// shows (stringly): what a local must have been to be appended to in
+	// place, which spares a sum its str_freezes.
+	stringy bool
 	// paramScoped marks a binding that belongs to the parameter scope rather
 	// than to the body. A function with parameter expressions has two, and its
 	// body may declare a name the parameter scope already binds: the arguments
@@ -273,6 +277,9 @@ type compiler struct {
 	// 0 not yet, 1 no, 2 yes.
 	lit          *ast.FuncLit
 	mentionsEval uint8
+	// mentioned is, of the names asked about, whether a function or a
+	// class inside this one mentions them.
+	mentioned map[string]bool
 
 	// traceName is the name V8's inferrer would hand the next function or
 	// class literal compiled (tracename.go), and traceIn the one the
@@ -1685,6 +1692,8 @@ func stackEffect(op bytecode.Op, a, b uint32) int {
 		return 1
 	case bytecode.OpArgumentsIndex, bytecode.OpStrFreeze:
 		return 0
+	case bytecode.OpStrAppend:
+		return -1
 	case bytecode.OpClearLocal:
 		return 0
 	case bytecode.OpUpdateLocal, bytecode.OpGetLocalIndexUpdate:

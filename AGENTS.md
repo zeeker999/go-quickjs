@@ -340,7 +340,8 @@ Array.prototype.forEach, reduce, map, filter and some, and their callbacks
 varied -- made once or anew, a function expression or an arrow, reading
 this, writing what they captured, called by a loop of the script's own --
 a closure's appends to a string it captures and what growing one in place
-does worst -- reads between them, a few to a new binding -- for-in loops the
+does worst -- reads between them, a few to a new binding -- a template's render
+into a local, with escaping and numbers, for-in loops the
 last cursor cannot serve, arrays past 16,384 elements, a typed array's
 callback methods and its element reads and writes over every element type, a DataView's getters and setters, Map's and Set's
 forEach,

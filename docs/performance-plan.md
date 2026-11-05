@@ -2101,11 +2101,22 @@ to remove:
   taken out. Nine of the first mutations survived, each a test that could not
   see its hazard, and that is what found the last of those.
 
-  Not taken: a local's `s += x`, which leaves numbers' reads and their fused
-  instructions alone; a right side that runs code, as `out += esc(x)`, the
-  shape of a compiled template, since the old value is read first. A local no
-  closure captures could evaluate the right side first; that is the next step
-  if a template engine's profile asks. A reader compiled before the appender,
+  A local has the rest, whatever its right side runs, as `out += esc(x)` in a
+  compiled template: `esc` cannot reach a local no function or class mentions,
+  so that and the right side's own text are all there is to ask
+  (`localAppend`), and it is a `str_append`, an instruction of its own. So that
+  `sum += f(x)` pays for none of it, the local must have been given a string
+  the source can see, as `var out = ""` does. In the interpreter that is
+  `template_list` -17 to -19%, `template_escaped` -13%, `template_numbers` -25
+  to -29%, with its worst cases level; PdfJS -3.8%. In native code loops gain
+  nothing: `stringBuilders` has them already, and is better, numbers 45 to 63%
+  and lists level, measured with it turned off for these appends. A read after
+  each append costs native code 14% at worst.
+
+  Not taken: a closure's append with a right side that runs code, which could
+  append to the binding between the read and the addition; a short string, as
+  `template_row`'s, which never becomes a rope; `out = out + x`, as Pug writes
+  it; a template's `with`, as lodash's. A reader compiled before the appender,
   a declaration above it, stays on ropes.
 
   One thread, a render, 2026-11-05: JIT 682 to 603 ms, interpreter 840 to 768,

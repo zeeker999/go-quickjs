@@ -80,6 +80,35 @@ func strAppend[_ any](r *Runtime, a, b *String) (*String, error) {
 	return a, nil
 }
 
+// strAppendOp is str_append: a + b, a a local's value. A number is made a
+// string here, so that it costs a run of appends nothing; an object's
+// conversion, which runs code, is add's, with what add does for it.
+//
+//go:noinline
+func strAppendOp[_ any](r *Runtime, a, b Value) (Value, error) {
+	if a.IsString() {
+		s := b
+		if b.IsNumber() {
+			t, err := r.toString(b)
+			if err != nil {
+				return Undefined, err
+			}
+			s = Str(t)
+		}
+		if s.IsString() {
+			t, err := strAppend[struct{}](r, a.String(), s.String())
+			if err != nil {
+				return Undefined, err
+			}
+			return Str(t), nil
+		}
+	}
+	if a.IsNumber() && b.IsNumber() {
+		return Float(a.num + b.num), nil
+	}
+	return r.add(a, b)
+}
+
 // strTailed gives a, a rope, a right side with room, holding what it had.
 //
 //go:noinline

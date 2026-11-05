@@ -3533,7 +3533,7 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 			bytecode.OpObjectRest, bytecode.OpCallSpread, bytecode.OpNewSpread, bytecode.OpTemplateObject, bytecode.OpPushCallee,
 			bytecode.OpRestParam, bytecode.OpGetArguments, bytecode.OpLazyArguments, bytecode.OpArgumentsIndex, bytecode.OpArgumentsLength,
 			bytecode.OpApplyArguments, bytecode.OpGetLength, bytecode.OpGetLocalIndex, bytecode.OpGetSuperProp, bytecode.OpGetSuperIndex, bytecode.OpSetSuperProp, bytecode.OpSetSuperIndex,
-			bytecode.OpSuperBase:
+			bytecode.OpSuperBase, bytecode.OpStrAppend:
 		case bytecode.OpDispose:
 		default:
 			return sp, steps, nil
@@ -3650,6 +3650,9 @@ func (r *Runtime) jitHost(f *frame, sp, limit int) (int, int, error) {
 			sp--
 			r.jitInitLex(f.cl, in, stack[sp])
 			continue
+		case bytecode.OpStrAppend:
+			sp -= 2
+			v, err = strAppendOp[struct{}](r, stack[sp], stack[sp+1])
 		case bytecode.OpIterStep:
 			// A destructuring's step, its cursor A below the top.
 			v, err = r.iterStep(stack[sp-1-int(in.A)])

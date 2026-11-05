@@ -2930,6 +2930,14 @@ func (r *Runtime) executeAt(f *frame, startSP int, pending error) (Value, error)
 			sp = pushAt(stack, sp, Obj(f.callee))
 		case bytecode.OpStrFreeze:
 			strFreeze[struct{}](stack[sp-1])
+		case bytecode.OpStrAppend:
+			sp--
+			v, err := strAppendOp[struct{}](r, stack[sp-1], stack[sp])
+			if err != nil {
+				vmErr = err
+				goto onError
+			}
+			stack[sp-1] = v
 		case bytecode.OpDebugStmt:
 			// Only code compiled for a debugger has one, and it does nothing
 			// until the debugger has asked to stop somewhere.
