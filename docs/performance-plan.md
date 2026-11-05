@@ -2130,6 +2130,74 @@ to remove:
   objects and 322 to 265 MB, 50 renders. `upvalue_string_append` is 30 to 36%
   faster. Placements of the three items against `915400cd`: V8 suite +0.0%,
   AWFY -0.6%, Octane +0.5%; with the JIT +0.4%, +0.1%, +0.1%.
+
+  A tail with room now extends its slice, copies the text and updates the
+  string using its own pointer. Neither pointer changes, so Go emits no
+  write barrier on this path. Growth is out of line; from 16,384 bytes it
+  doubles the room, and below that keeps Go's growth. A flat right side is
+  read directly, without calling the rope flattener.
+
+  Doubling from 1,024 bytes was tried first and not taken. On darwin/arm64,
+  Go 1.27.3, one thread, eight placements and the best of three fresh
+  processes at each (2026-11-05), SSR gained 1.9% in the interpreter and 0.9%
+  with the JIT, but small outputs kept unused room: the interpreter's
+  `upvalue_string_append`, `append_read_each` and `template_list` lost 12.8%,
+  16.6% and 6.1%, slower at every placement. The higher threshold leaves
+  their allocations alone; avoiding the repeated pointer stores pays for
+  the capacity check too.
+
+  The final version, on the same machine and over eight placements with
+  three rounds each, makes the 14 append and template micro-benchmarks
+  0.949 of the baseline by their geometric mean, without and with the JIT.
+  None is 3% slower at every placement. In the interpreter, `template_list`
+  gains 10.3%, `template_escaped` 5.7%, `template_numbers` 9.0%; with the JIT,
+  `upvalue_string_append` gains 17.7%. Minimums are not the whole result:
+  the five-test fresh-process screen's total CPU is about 1,157 to 1,058 ms
+  in the interpreter and 832 to 790 ms with the JIT, for three rounds.
+
+  SSR, one thread, each time the mean of the eight placements' best of
+  three fresh processes, milliseconds (`Render` is ten pages):
+
+  | | Interpreter before | After | JIT before | After |
+  |---|---:|---:|---:|---:|
+  | FirstRender | 16.9 | 16.5 | 36.4 | 36.3 |
+  | Render | 141.1 | 137.8 | 98.1 | 95.3 |
+
+  That is -2.3% and -2.9% for steady rendering. The seven hot functions keep
+  their sizes and addresses. The tagged benchmark binary grows 192 bytes,
+  44,839,058 to 44,839,250; React's two bundles stay 45,879 bytes. There is
+  no new package initialization or work moved to first use.
+
+  Placement zero, median of three fresh processes, `Render` alone over
+  200 pages, wall / CPU milliseconds: interpreter 2,789.3 / 2,785.9 to
+  2,763.1 / 2,759.4, JIT 1,921.5 / 1,919.6 to 1,878.6 / 1,876.1. Allocated
+  bytes are 967.8 to 925.4 MB and 995.9 to 953.4 MB, 4.4% and 4.3% less,
+  and a page makes four fewer allocations. Peak RSS is 47.6 to 47.5 MB and
+  69.3 to 70.9 MB: there is no stable RSS reduction. With four threads,
+  running FirstRender before Render, the latter's CPU over 200 pages is
+  2,046.0 to 2,009.3 ms and 1,454.7 to 1,438.0; wall time is 1,859.0 to
+  1,832.9 and 1,304.0 to 1,294.4. Paired CPU profile runs of 1,200 renders
+  with the JIT also gain 3.0%, with fewer samples in the write barrier.
+
+  V8's full suite, eight placements and one round, is -0.5% without the JIT
+  and +0.0% with it. Nine more string micro-benchmarks, including the long
+  builders and a kept value, are 0.911 and 1.000 by their geometric means,
+  none 3% slower at every placement; `string_build_large1` gains 32.0% in
+  the interpreter. `string_build4` with the JIT averaged +4.9% in that
+  group, but alone over eight placements and five rounds is -0.4% (17.20
+  to 17.14 ns). Its read before the append keeps it off the new path.
+
+  Verified with the full Go suite, plain and with the JIT, the compiler's
+  reference checks (`quickjs_verify`), and CI's checkptr command. The tail
+  growth tests compare exact ASCII and Unicode text and UTF-16 lengths,
+  collect between growths, and run the native caller under stress with the
+  collector idle and marking. test262 `d1154377`, plain, under JIT stress
+  and with a debugger, has the same 99,905 passes and 20 failures as the
+  committed baseline: the sorted reports match byte for byte. Those
+  failures are in DataView, Iterator and Temporal. The plain conformance
+  processes' peak RSS is 1.48 to 1.39 GB, one run each.
+  The focused append tests pass on Go 1.24.13 too, with cgo disabled.
+  Windows amd64 with the JIT, Windows arm64 and Linux 386 cross-build.
 - **F2.** A cursor is one allocation of the object, the cursor and the
   snapshot together (`newForInObject`), and nothing outside the VM can
   reach one: a cursor the step reports done could go on a free list of
@@ -2165,6 +2233,15 @@ to remove:
   made `array_push_large` and `array_push_args3` 3 to 22% slower, since Go's
   capacities are lumpy and 8,192 elements fit one closely; over every length
   from 16,384 half again allocates a median of 27% less and at worst 12% more.
+
+  Doubling from the same threshold was tried on darwin/arm64, Go 1.27.3
+  (2026-11-05), and not taken. At one thread, over eight placements, a million
+  pushes gained 6.6% in the interpreter and 17.2% with the JIT, but
+  `array_push_28k` lost 1.7% and 4.5%, the latter slower at every placement.
+  Its 27,668 elements fit the old capacity exactly: doubling gave it unused
+  room, 7.4% more allocated bytes and 1,210 collections against 1,120 over
+  60 rounds. The SSR screen saved about 13% of its bytes and 2 to 4% of its
+  time, which did not pay for that regression. The policy remains half again.
 - **F4.** The JIT is 1.20 times the interpreter's wall time on this
   workload, which is mostly short polymorphic calls and string building
   rather than loops, and a JIT runtime holds 18.7 MiB against the

@@ -105,6 +105,39 @@ func TestJITStrAppendDeclaration(t *testing.T) {
 
 // Native code's appends make no node each: a run of them is one string and its
 // right side.
+func TestJITStrAppendTailGrowth(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	const src = `function growTail() {
+		var s = "a".repeat(70)
+		const add = x => { s += x }
+		for (let i = 0; i < 10000; i++) add("\u00e9x")
+		return s
+	}
+	growTail()`
+	want := strings.Repeat("a", 70) + strings.Repeat("\u00e9x", 10000)
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking %v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			r := jitRuntimeForTest(t, Config{JIT: true})
+			r.jitStress = jitStressConfig{threshold: true, budget: 3, deopt: 7}
+			v, err := r.Run(compileForTest(t, src))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !v.IsString() || v.String().Go() != want {
+				t.Fatal("growing the tail changed its text")
+			}
+			if r.JITStats().SSAEntries == 0 {
+				t.Fatal("no native entry")
+			}
+		})
+	}
+}
+
 func TestJITStrAppendAllocations(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")

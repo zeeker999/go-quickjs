@@ -784,6 +784,44 @@ func TestStrAppendAllocations(t *testing.T) {
 	}
 }
 
+func TestStrAppendTailGrowth(t *testing.T) {
+	for _, chunk := range []string{"x", strings.Repeat("\u00e9", 100), strings.Repeat("z", 10000)} {
+		r := New(Config{})
+		s := NewString(strings.Repeat("a", 70))
+		piece := NewString(chunk)
+		n := max(200, 32768/len(chunk))
+		grew := false
+		for range n {
+			var room int
+			if s.tailed {
+				room = cap((*strTail)(s.aux).buf)
+			}
+			var err error
+			s, err = strAppend[struct{}](r, s, piece)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s.tailed {
+				if next := cap((*strTail)(s.aux).buf); room >= 16384 && next > room {
+					grew = true
+					if next < 2*room {
+						t.Errorf("tail grew from %d to %d bytes, want at least double", room, next)
+					}
+					runtime.GC()
+				}
+			}
+		}
+		want := strings.Repeat("a", 70) + strings.Repeat(chunk, n)
+		if s.Go() != want || s.Len() != NewString(want).Len() {
+			t.Fatal("growing the tail changed its text or length")
+		}
+		if !grew {
+			t.Fatal("no large tail grew")
+		}
+		r.Close()
+	}
+}
+
 // A marked string's fields say what an append has made of it, and a read's
 // str_freeze ends it. The string is an ordinary one all the while.
 func TestStrAppendStates(t *testing.T) {

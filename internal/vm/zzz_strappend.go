@@ -71,8 +71,21 @@ func strAppend[_ any](r *Runtime, a, b *String) (*String, error) {
 		strTailed(a)
 	}
 	t := (*strTail)(a.aux)
-	t.buf = append(t.buf, b.Go()...)
-	t.s = unsafe.String(unsafe.SliceData(t.buf), len(t.buf))
+	text := b.s
+	if b.left != nil {
+		text = b.Go()
+	}
+	end := len(t.buf) + len(text)
+	if end <= cap(t.buf) {
+		start := len(t.buf)
+		t.buf = t.buf[:end]
+		copy(t.buf[start:], text)
+		// Its pointer stays the same: only the two lengths change. Reading
+		// the string's own pointer lets Go omit the redundant write barrier.
+		t.s = unsafe.String(unsafe.StringData(t.s), end)
+	} else {
+		strTailGrow[struct{}](t, text)
+	}
 	t.length += b.length
 	// Only a surrogate's join reads a right side's flags, and its pair is no
 	// ASCII: ascii here is for what reads a piece by itself.
@@ -82,6 +95,21 @@ func strAppend[_ any](r *Runtime, a, b *String) (*String, error) {
 	a.ascii = a.ascii && b.ascii
 	a.endsHigh = b.endsHigh
 	return a, nil
+}
+
+// strTailGrow appends text to a tail that needs room. Large tails double
+// rather than grow by a quarter; short tails keep Go's growth, where the
+// spare room would often go unused.
+//
+//go:noinline
+func strTailGrow[_ any](t *strTail, text string) {
+	if cap(t.buf) >= 16384 {
+		b := make([]byte, len(t.buf), max(2*cap(t.buf), len(t.buf)+len(text)))
+		copy(b, t.buf)
+		t.buf = b
+	}
+	t.buf = append(t.buf, text...)
+	t.s = unsafe.String(unsafe.SliceData(t.buf), len(t.buf))
 }
 
 // strAppendOp is str_append: a + b, a a local's value. A number is made a
