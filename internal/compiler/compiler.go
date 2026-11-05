@@ -136,6 +136,12 @@ type localVar struct {
 	withDepth int
 	// captured marks a local that an inner function closes over.
 	captured bool
+	// read says a read of the binding has been compiled, and appended that a
+	// closure's addition to it may grow what it holds in place, so that every
+	// read compiled from then on is followed by a str_freeze
+	// (ownedAppend). copied says each iteration of a loop has a copy of the
+	// binding, which holds the same string.
+	read, appended, copied bool
 	// paramScoped marks a binding that belongs to the parameter scope rather
 	// than to the body. A function with parameter expressions has two, and its
 	// body may declare a name the parameter scope already binds: the arguments
@@ -262,6 +268,11 @@ type compiler struct {
 	fn     *bytecode.Function
 	parent *compiler
 	opts   Options
+	// lit is the function being compiled, where it has one, and
+	// mentionsEval whether it or anything in it mentions eval, once asked:
+	// 0 not yet, 1 no, 2 yes.
+	lit          *ast.FuncLit
+	mentionsEval uint8
 
 	// traceName is the name V8's inferrer would hand the next function or
 	// class literal compiled (tracename.go), and traceIn the one the
@@ -1672,7 +1683,7 @@ func stackEffect(op bytecode.Op, a, b uint32) int {
 		return -2
 	case bytecode.OpLazyArguments, bytecode.OpArgumentsLength:
 		return 1
-	case bytecode.OpArgumentsIndex:
+	case bytecode.OpArgumentsIndex, bytecode.OpStrFreeze:
 		return 0
 	case bytecode.OpClearLocal:
 		return 0

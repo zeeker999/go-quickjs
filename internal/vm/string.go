@@ -60,6 +60,11 @@ type String struct {
 	building bool
 	// mark is the memory meter's, which it sets on a string it has counted.
 	mark uint16
+	// tailed says a building string's right side is a strTail, which
+	// appends grow, and ropes how many appends in a row have made a rope
+	// (strAppend).
+	tailed bool
+	ropes  uint8
 }
 
 // rightSide is a rope's right side.

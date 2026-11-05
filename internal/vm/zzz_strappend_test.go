@@ -1,0 +1,551 @@
+package vm
+
+import (
+	"fmt"
+	"runtime"
+	"strings"
+	"testing"
+)
+
+// strAppendTestSrc appends to captured bindings every way that could show a
+// string being grown in place, each long enough to be a rope: reads between
+// appends, whose strings must stay as they were, by a closure, by the maker,
+// and compiled before the appender; two appenders to one binding; an empty
+// left side, which hands back the operand itself; a rope on the right, a
+// string appended to itself and bindings appended to one another; a right
+// side whose conversion appends to the binding, which the old value must not
+// show; numbers, undefined, BigInts and symbols; surrogates' halves meeting
+// at the join; every way of reading a binding; an append whose value is used,
+// and short circuits; parameters, which arguments aliases; a loop's bindings,
+// copied for each iteration; a generator, a throw and a
+// finally; classes; a closure outliving its maker; and a string past the
+// longest. Four rounds, so that the tree tier and native code meet them.
+const strAppendTestSrc = `
+const out = []
+const long = 'x'.repeat(70)
+function hash(s) { let h = 7; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return s.length + ':' + h }
+
+// Reads between appends: what was read stays as it was.
+function snapshots() {
+  var s = long
+  const add = x => { s += x }
+  const read = () => s
+  const got = []
+  for (let i = 0; i < 40; i++) {
+    add('<a>'); add('<b>')
+    if (i % 3 === 0) got.push(read())
+    add('<c>')
+  }
+  return got.map(hash).join() + hash(read())
+}
+
+// Read by its maker, as React's renderToString reads it, between appends.
+function maker() {
+  var s = ''
+  var sink = { push: function (x) { return x !== null && (s += x), true } }
+  for (let i = 0; i < 50; i++) sink.push(i % 7 ? '<x>' : null)
+  const first = s
+  for (let i = 0; i < 50; i++) sink.push('<y>')
+  const second = s
+  sink.push('<z>')
+  return hash(first) + ' ' + hash(second) + ' ' + hash(s)
+}
+
+// A reader compiled before the appender: no append is owned.
+function hoisted() {
+  var s = long
+  function get() { return s }
+  const add = x => { s += x }
+  const a = (add('1'), add('2'), get())
+  add('3'); add('4')
+  return hash(a) + hash(get())
+}
+
+// Two closures appending to one binding, each with reads between.
+function two() {
+  let s = long
+  const a = x => { s += x }, b = x => { s += x }
+  const seen = []
+  for (let i = 0; i < 30; i++) { a('a'); b('b'); a('A'); if (i % 5 === 0) seen.push(s) }
+  return seen.map(hash).join() + hash(s)
+}
+
+// Each call of the maker a binding of its own.
+function many() {
+  const sinks = []
+  for (let k = 0; k < 4; k++) {
+    let s = long + k
+    sinks.push({ add(x) { s += x }, get() { return s } })
+  }
+  for (let i = 0; i < 100; i++) sinks[i & 3].add('chunk' + (i & 1))
+  return sinks.map(k => hash(k.get())).join()
+}
+
+// What an empty left side hands back is the operand itself, which others hold.
+function emptyLeft() {
+  var s = ''
+  const add = x => { s += x }
+  const shared = long + 'shared'
+  add(shared); add('a'); add('b'); add('c')
+  const t = 'y'.repeat(100) + long
+  var u = ''
+  const addU = x => { u += x }
+  addU(t); addU('1'); addU('2'); addU('3')
+  add('')
+  return hash(shared) + hash(s) + hash(t) + hash(u)
+}
+
+// A right side that is a rope, that others hold, and a string to itself.
+function operands() {
+  var s = long
+  const add = x => { s += x }
+  const dbl = () => { s += s }
+  let rope = long
+  for (let i = 0; i < 5; i++) rope += 'r' + i
+  add(rope); add(rope); add('q')
+  const before = rope
+  rope += 'more'
+  add(rope)
+  const a = s
+  dbl(); add('tail'); dbl()
+  return hash(before) + hash(a) + hash(s)
+}
+
+// One binding's string appended to another, each way.
+function crossing() {
+  var a = long, b = long + '2'
+  const toA = () => { a += b }, toB = () => { b += a }
+  for (let i = 0; i < 4; i++) { toA(); toB() }
+  return hash(a) + hash(b)
+}
+
+// The right side's conversion runs code, which appends to the binding: the old
+// value was read first, and shows none of it.
+function converting() {
+  var s = long
+  const o = { toString() { s += 'X'; return 'Y' } }
+  const v = { valueOf() { s += 'V'; return 7 } }
+  const add = x => { s += x }
+  const res = []
+  for (let i = 0; i < 10; i++) { add('a'); add('b'); add(o); res.push(hash(s)); add('c'); add('d'); add(v); res.push(hash(s)) }
+  return res.join()
+}
+
+// Numbers and anything else, as additions are.
+function others() {
+  var n = 1, u, m = 'a', b = 1n, z = null
+  const addN = x => { n += x }, addU = x => { u += x }, addM = x => { m += x }, addB = x => { b += x }, addZ = x => { z += x }
+  addN(2); addN(0.5); addN('s'); addN(long); addN('t'); addN(1); addN('u'); addN(2)
+  addU('a'); addU(1); addU(true); addU(long); addU(null)
+  addM(1); addM(long); addM(undefined); addM(2n); addM(long)
+  addB(2n)
+  addZ(long); addZ(long)
+  try { addM(Symbol('q')) } catch (e) { addM(e.constructor.name) }
+  try { addB(1) } catch (e) { addM(e.constructor.name) }
+  return [hash(n), hash(String(u)), hash(m), b, hash(z)].join()
+}
+
+// Surrogates' halves meeting at the join, and a string of more than ASCII,
+// which reads its code units by index.
+function surrogates() {
+  var s = long
+  const add = x => { s += x }
+  add('\ud83d'); add('\ude00'); add('a'); add('b')
+  add('é'); add('日本語'); add('\ud83d'); add('\ude00'); add('\ud83d')
+  const a = s
+  add('c'); add('\ude00'); add('d')
+  const parts = []
+  for (let i = 68; i < s.length; i++) parts.push(s.charCodeAt(i))
+  return hash(a) + hash(s) + parts.join() + s.indexOf('日') + s.lastIndexOf('c') + a.length
+}
+
+// Every way of reading the binding.
+function reading() {
+  var s = long
+  const add = x => { s += x }
+  const seen = []
+  const rd = {
+    typ() { return typeof s }, len() { return s.length }, tpl() { return ` + "`" + `[${s}]` + "`" + `.length }, idx() { return s[70] },
+    arr() { return [s][0].length }, obj() { return ({ s }).s.length }, call() { return String(s).length },
+    eq() { const t = s; return t === s }, cmp() { return s < long }, sw() { switch (s) { case long: return 1; default: return 2 } },
+    it() { let n = 0; for (const c of s) n++; return n }, spr() { return [...s].length }, keys() { let n = 0; for (const k in s) n++; return n },
+    meth() { return s.charCodeAt(s.length - 1) }, slc() { return s.slice(68, 74) }, dst() { const { length } = s; return length },
+    chain() { let a, b; a = b = s; return (a + b).length }, cond() { return (s ? s : '').length }, or() { return (s || '').length },
+    plus() { return (s + 'z').length }, left() { return ('z' + s).length }, json() { return JSON.stringify(s).length },
+  }
+  for (let i = 0; i < 12; i++) {
+    add('<' + (i % 10) + '>'); add('abc')
+    for (const k in rd) seen.push(rd[k]())
+    add('de')
+  }
+  return hash(seen.join())
+}
+
+// An append whose value is used, and the forms of a short circuit.
+function values() {
+  var s = long
+  const a = x => (s += x)
+  const b = x => { const r = x && (s += x); return r }
+  const c = x => { x && (s += x); return 0 }
+  const d = x => { x || (s += 'or'); return 1 }
+  const e = x => { x ?? (s += 'nn'); return 2 }
+  const f = x => { return x ? (s += x) : 0 }
+  const g = x => { (s += x, s += 'y'); return s }
+  const r = [a('1'), a('2'), a('3')]
+  const held = r[1]
+  a('4'); a('5')
+  r.push(b('6'), b('7'), b(''), c('8'), c(''), c('9'), d(0), d(1), d(0), e(null), e(1), f('10'), f(''), g('11'))
+  return hash(held) + r.map(x => hash(String(x))).join() + hash(s)
+}
+
+// Bindings that are not the closure's to grow.
+function params(s) {
+  const add = x => { s += x }
+  add('a'); add('b'); add('c')
+  return hash(arguments[0]) + hash(s)
+}
+function paramsStrict(s) {
+  'use strict'
+  const add = x => { s += x }
+  add('a'); add('b'); add('c')
+  return hash(arguments[0]) + hash(s)
+}
+function perIteration() {
+  const fs = []
+  for (let s = long; s.length < 90; s += 'i') {
+    fs.push(() => s, x => { s += x })
+    fs[fs.length - 1]('a'); fs[fs.length - 1]('b')
+  }
+  return fs.filter((f, i) => i % 2 === 0).map(f => hash(f())).join()
+}
+function forOf() {
+  const fs = []
+  for (let s of [long, long + 'a', long + 'b']) {
+    fs.push(() => s)
+    const add = x => { s += x }
+    add('1'); add('2'); add('3')
+  }
+  return fs.map(f => hash(f())).join()
+}
+function blockLet() {
+  const fs = []
+  for (let i = 0; i < 4; i++) {
+    let s = long
+    const add = x => { s += x }
+    add('a'); add('b'); add('c')
+    fs.push(() => s)
+    add('d'); add('e')
+  }
+  return fs.map(f => hash(f())).join()
+}
+
+// Across a yield, an await, a throw and a finally.
+function generators() {
+  let s = long
+  function* g() { for (let i = 0; i < 6; i++) { add('a'); add('b'); const t = s; yield t; add('c') } }
+  const add = x => { s += x }
+  const r = []
+  for (const t of g()) { add('z'); r.push(hash(t)) }
+  return r.join() + hash(s)
+}
+function throwing() {
+  let s = long
+  const add = x => { s += x }
+  const boom = () => { add('a'); add('b'); throw new Error('e') }
+  let t
+  try { boom() } catch (e) { t = s; add('c') } finally { add('d'); add('e') }
+  return hash(t) + hash(s)
+}
+
+// A class's fields and methods, and a closure that outlives its maker.
+class Sink {
+  #s = long
+  push(x) { this.#s += x; return this }
+  get value() { return this.#s }
+}
+function classes() {
+  const k = new Sink()
+  for (let i = 0; i < 40; i++) k.push('a').push('b')
+  let s = long
+  class C { add(x) { s += x } static read() { return s } }
+  const c = new C()
+  c.add('1'); c.add('2')
+  const a = C.read()
+  c.add('3')
+  return hash(k.value) + hash(a) + hash(C.read())
+}
+function outlives() {
+  const mk = () => { let s = long; return { add: x => { s += x }, get: () => s } }
+  const a = mk(), b = mk()
+  for (let i = 0; i < 20; i++) { a.add('a'); a.add('A'); b.add('b') }
+  const held = a.get()
+  a.add('more')
+  return hash(held) + hash(a.get()) + hash(b.get())
+}
+
+// One past the longest string: the binding keeps what it had.
+function tooLong() {
+  let s = 'x'.repeat(1 << 28)
+  const add = x => { s += x }
+  add('a'); add('b')
+  const big = 'y'.repeat((1 << 29) - 30)
+  try { add(big); return 'no' } catch (e) { return e.constructor.name + s.length }
+}
+
+// Held across an append, by what aliases the binding.
+function heldArguments(s) {
+  const add = x => { s += x }
+  add('a'); add('b'); add('c')
+  const held = arguments[0]
+  add('d'); add('e')
+  return hash(held) + hash(s) + hash(arguments[0])
+}
+
+// A loop's head copied for each iteration: a closure of one iteration keeps
+// what its copy held, whatever the next appends.
+function loopCopies() {
+  const reads = []
+  for (let s = long, i = 0; i < 5; i++) {
+    const add = x => { s += x }
+    const read = () => s
+    add('a'); add('b'); add('c')
+    reads.push(read)
+  }
+  return reads.map(r => hash(r())).join()
+}
+
+// A right side that runs code, which appends: the old value was read first.
+function rightRuns() {
+  var s = long
+  const add = x => { s += x }
+  const f = () => { s += 'X'; s += 'Z'; return 'Y' }
+  const byCall = () => { s += f() }
+  const bySequence = () => { s += (s += 'p', 'q') }
+  const o = { get v() { s += 'G'; return 'H' } }
+  const byGetter = () => { s += o.v }
+  const r = []
+  for (let i = 0; i < 6; i++) {
+    add('a'); add('b'); byCall(); r.push(hash(s))
+    add('c'); add('d'); bySequence(); r.push(hash(s))
+    add('e'); add('f'); byGetter(); r.push(hash(s))
+  }
+  return r.join()
+}
+
+// What only comparison and a rope's own reads show: halves joined as one code
+// point, and ASCII that stops being so past a right side grown in place.
+function joined() {
+  var s = long
+  const add = x => { s += x }
+  add('a'); add('b'); add('\ud83d')
+  const one = s === long + 'ab\ud83d'
+  add('\ude00'); add('c')
+  const two = s === long + 'ab😀c'
+  var t = long
+  const addT = x => { t += x }
+  addT('a'); addT('b'); addT('c'); addT('é'); addT('d'); addT('e')
+  const held = t
+  const code = held.charCodeAt(74)
+  const code2 = held.charCodeAt(73)
+  addT('f')
+  const unit = held[73]
+  var u = long
+  const addU = x => { u += x }
+  addU('a'); addU('b'); addU('\ud83d')
+  const v = u
+  addU('\ude00'); addU('z')
+  return [one, two, code, code2, unit, hash(held), hash(t), t === long + 'abcédef', t.indexOf('é'),
+    v === long + 'ab\ud83d', u === long + 'ab😀z', u.codePointAt(72), hash(u)].join()
+}
+
+// A reader only the interpreter runs: the tree tier builds no with.
+function interpreted() {
+  var s = long
+  const add = x => { s += x }
+  const read = o => { with (o) { return s } }
+  add('a'); add('b')
+  const held = read({})
+  add('c'); add('d')
+  const held2 = read({})
+  add('e')
+  return hash(held) + hash(held2) + hash(s)
+}
+
+// Halves that meet in appends with no read between them, and a right side
+// taken apart again: a low surrogate's string, a high one put before it, is
+// rebuilt from its pieces, which each say what they are.
+function halves() {
+  var w = long
+  const addW = x => { w += x }
+  addW('a'); addW('b'); addW('\ud83d'); addW('\ude00'); addW('c')
+  var z = long
+  const addZ = x => { z += x }
+  addZ('a'); addZ('b'); addZ('\ud83d'); addZ('\ude00')
+  var low = '\ude00' + long
+  const addL = x => { low += x }
+  addL('a'); addL('b'); addL('c'); addL('é'); addL('d')
+  const held = low
+  const joined = '\ud83d' + held
+  return [w === long + 'ab😀c', z === long + 'ab😀', w.length, w.codePointAt(72),
+    joined.length, joined.charCodeAt(0), joined.charCodeAt(1), joined.charCodeAt(72), joined.charCodeAt(75),
+    joined.charCodeAt(76), joined.indexOf('é'), hash(joined)].join()
+}
+
+// Reads hot enough for native code, each held across more appends: a closure
+// called often first, inlined or not, and the maker's own, in its loop.
+function nativeReads() {
+  var s = long
+  const add = x => { s += x }
+  const read = () => s
+  let warm = 0
+  for (let i = 0; i < 3000; i++) warm += read().length
+  const held = []
+  for (let i = 0; i < 800; i++) {
+    add('a'); add('b')
+    held.push(read())
+    add('c'); add('d')
+    if ((i & 15) === 0) held.push(s)
+    add('e')
+  }
+  return warm + ':' + hash(held.map(hash).join()) + hash(s)
+}
+
+const tests = [snapshots, maker, hoisted, two, many, emptyLeft, operands, crossing, converting, others, surrogates, reading, values,
+  () => params(long), () => paramsStrict(long), perIteration, forOf, blockLet, generators, throwing, classes, outlives,
+  () => heldArguments(long), loopCopies, rightRuns, joined, halves, interpreted, nativeReads]
+for (let r = 0; r < 4; r++) for (const t of tests) out.push(t())
+out.push(tooLong())
+out.join('|')
+`
+
+// strAppendTestWant is Node's answer.
+const strAppendTestWant = "76:-1591915514,103:239840560,130:-1972117050,157:1162182512,184:1814603654,211:1786978736,238:1672977734,265:-754412560,292:429703942,319:1759106608,346:-2125195066,373:-352655248,400:-1722179962,427:762301104430:-2074811193|126:1897913735 276:1251682215 279:-41135303|72:-192080175274:945455241|73:584735513,88:2104768519,103:-1912397479,118:-1822545465,133:1212118937,148:-22901881160:56928519|221:1217630772,221:528173710,221:-1630755658,221:1974754576|76:-975285279:1510658550170:802463879173:413498443|80:251795335315:-6709108811268:1565499303|2401:7020268913884:-1762580281|73:584735537,76:-530871515,79:-1123623149,82:1117971459,85:-1983549067,88:-1750098335,91:-571395497,94:-1487758785,97:-2054340167,100:-1858816099,103:-976961637,106:-1965631877,109:-555037699,112:496096985,115:242910943,118:-459892553,121:286724161,124:-890373099,127:613124131,130:-914824973|78:121345370,89:1658004910,170:-1944680487,3,144:1543159566|81:-32975027184:-998260378120,120,55357,56832,97,98,233,26085,26412,35486,55357,56832,55357,99,56832,100758181|1061:2127171585|72:-192080175271:-1724529334,72:-1920801752,73:584687883,76:-1950578454,77:-338389875,0:7,1:265,1:265,1:265,1:266,1:266,1:266,1:267,1:267,87:1014783539,1:265,90:-85833746690:-858337466|73:58473554773:584735547|70:-102546130573:584735547|72:-1920800216,75:-709846238,78:1389793256,81:-153739934,84:-1631132248,87:199290786,90:1427106664|73:584687883,74:946884216,74:946914007|75:-709851908,75:-709851908,75:-709851908,75:-709851908|72:-1920800216,76:-529888462,80:1160156988,84:-1786147258,88:2116415568,92:50844399494:-1011589629|72:-192080021675:-709851908|150:144893540772:-192080175273:584687883|110:-640020281114:123270364490:1197716679|73:58473554775:-70985190875:-709851908|73:584735547,76:-530575545,79:-896315461,82:-322123065,85:-1411193797|73:584735537,76:-530871457,79:-1121891320,82:1171279696,85:1279209184,88:-323916569,91:993103377,94:1808067711,97:960419560,100:-1212917648,103:-469691968,106:410131975,109:-940193551,112:-1824242273,115:-1780258360,118:-1420535408,121:-857473888,124:1460979495|true,true,100,233,é,76:-530444785,77:736080951,true,73,true,true,128512,75:-654990257|true,true,75,128512,77,55357,56832,97,233,100,75,77:996209043|72:-192080021674:94693287375:-709851908|210000:13362:-7216164124070:-200329785|76:-1591915514,103:239840560,130:-1972117050,157:1162182512,184:1814603654,211:1786978736,238:1672977734,265:-754412560,292:429703942,319:1759106608,346:-2125195066,373:-352655248,400:-1722179962,427:762301104430:-2074811193|126:1897913735 276:1251682215 279:-41135303|72:-192080175274:945455241|73:584735513,88:2104768519,103:-1912397479,118:-1822545465,133:1212118937,148:-22901881160:56928519|221:1217630772,221:528173710,221:-1630755658,221:1974754576|76:-975285279:1510658550170:802463879173:413498443|80:251795335315:-6709108811268:1565499303|2401:7020268913884:-1762580281|73:584735537,76:-530871515,79:-1123623149,82:1117971459,85:-1983549067,88:-1750098335,91:-571395497,94:-1487758785,97:-2054340167,100:-1858816099,103:-976961637,106:-1965631877,109:-555037699,112:496096985,115:242910943,118:-459892553,121:286724161,124:-890373099,127:613124131,130:-914824973|78:121345370,89:1658004910,170:-1944680487,3,144:1543159566|81:-32975027184:-998260378120,120,55357,56832,97,98,233,26085,26412,35486,55357,56832,55357,99,56832,100758181|1061:2127171585|72:-192080175271:-1724529334,72:-1920801752,73:584687883,76:-1950578454,77:-338389875,0:7,1:265,1:265,1:265,1:266,1:266,1:266,1:267,1:267,87:1014783539,1:265,90:-85833746690:-858337466|73:58473554773:584735547|70:-102546130573:584735547|72:-1920800216,75:-709846238,78:1389793256,81:-153739934,84:-1631132248,87:199290786,90:1427106664|73:584687883,74:946884216,74:946914007|75:-709851908,75:-709851908,75:-709851908,75:-709851908|72:-1920800216,76:-529888462,80:1160156988,84:-1786147258,88:2116415568,92:50844399494:-1011589629|72:-192080021675:-709851908|150:144893540772:-192080175273:584687883|110:-640020281114:123270364490:1197716679|73:58473554775:-70985190875:-709851908|73:584735547,76:-530575545,79:-896315461,82:-322123065,85:-1411193797|73:584735537,76:-530871457,79:-1121891320,82:1171279696,85:1279209184,88:-323916569,91:993103377,94:1808067711,97:960419560,100:-1212917648,103:-469691968,106:410131975,109:-940193551,112:-1824242273,115:-1780258360,118:-1420535408,121:-857473888,124:1460979495|true,true,100,233,é,76:-530444785,77:736080951,true,73,true,true,128512,75:-654990257|true,true,75,128512,77,55357,56832,97,233,100,75,77:996209043|72:-192080021674:94693287375:-709851908|210000:13362:-7216164124070:-200329785|76:-1591915514,103:239840560,130:-1972117050,157:1162182512,184:1814603654,211:1786978736,238:1672977734,265:-754412560,292:429703942,319:1759106608,346:-2125195066,373:-352655248,400:-1722179962,427:762301104430:-2074811193|126:1897913735 276:1251682215 279:-41135303|72:-192080175274:945455241|73:584735513,88:2104768519,103:-1912397479,118:-1822545465,133:1212118937,148:-22901881160:56928519|221:1217630772,221:528173710,221:-1630755658,221:1974754576|76:-975285279:1510658550170:802463879173:413498443|80:251795335315:-6709108811268:1565499303|2401:7020268913884:-1762580281|73:584735537,76:-530871515,79:-1123623149,82:1117971459,85:-1983549067,88:-1750098335,91:-571395497,94:-1487758785,97:-2054340167,100:-1858816099,103:-976961637,106:-1965631877,109:-555037699,112:496096985,115:242910943,118:-459892553,121:286724161,124:-890373099,127:613124131,130:-914824973|78:121345370,89:1658004910,170:-1944680487,3,144:1543159566|81:-32975027184:-998260378120,120,55357,56832,97,98,233,26085,26412,35486,55357,56832,55357,99,56832,100758181|1061:2127171585|72:-192080175271:-1724529334,72:-1920801752,73:584687883,76:-1950578454,77:-338389875,0:7,1:265,1:265,1:265,1:266,1:266,1:266,1:267,1:267,87:1014783539,1:265,90:-85833746690:-858337466|73:58473554773:584735547|70:-102546130573:584735547|72:-1920800216,75:-709846238,78:1389793256,81:-153739934,84:-1631132248,87:199290786,90:1427106664|73:584687883,74:946884216,74:946914007|75:-709851908,75:-709851908,75:-709851908,75:-709851908|72:-1920800216,76:-529888462,80:1160156988,84:-1786147258,88:2116415568,92:50844399494:-1011589629|72:-192080021675:-709851908|150:144893540772:-192080175273:584687883|110:-640020281114:123270364490:1197716679|73:58473554775:-70985190875:-709851908|73:584735547,76:-530575545,79:-896315461,82:-322123065,85:-1411193797|73:584735537,76:-530871457,79:-1121891320,82:1171279696,85:1279209184,88:-323916569,91:993103377,94:1808067711,97:960419560,100:-1212917648,103:-469691968,106:410131975,109:-940193551,112:-1824242273,115:-1780258360,118:-1420535408,121:-857473888,124:1460979495|true,true,100,233,é,76:-530444785,77:736080951,true,73,true,true,128512,75:-654990257|true,true,75,128512,77,55357,56832,97,233,100,75,77:996209043|72:-192080021674:94693287375:-709851908|210000:13362:-7216164124070:-200329785|76:-1591915514,103:239840560,130:-1972117050,157:1162182512,184:1814603654,211:1786978736,238:1672977734,265:-754412560,292:429703942,319:1759106608,346:-2125195066,373:-352655248,400:-1722179962,427:762301104430:-2074811193|126:1897913735 276:1251682215 279:-41135303|72:-192080175274:945455241|73:584735513,88:2104768519,103:-1912397479,118:-1822545465,133:1212118937,148:-22901881160:56928519|221:1217630772,221:528173710,221:-1630755658,221:1974754576|76:-975285279:1510658550170:802463879173:413498443|80:251795335315:-6709108811268:1565499303|2401:7020268913884:-1762580281|73:584735537,76:-530871515,79:-1123623149,82:1117971459,85:-1983549067,88:-1750098335,91:-571395497,94:-1487758785,97:-2054340167,100:-1858816099,103:-976961637,106:-1965631877,109:-555037699,112:496096985,115:242910943,118:-459892553,121:286724161,124:-890373099,127:613124131,130:-914824973|78:121345370,89:1658004910,170:-1944680487,3,144:1543159566|81:-32975027184:-998260378120,120,55357,56832,97,98,233,26085,26412,35486,55357,56832,55357,99,56832,100758181|1061:2127171585|72:-192080175271:-1724529334,72:-1920801752,73:584687883,76:-1950578454,77:-338389875,0:7,1:265,1:265,1:265,1:266,1:266,1:266,1:267,1:267,87:1014783539,1:265,90:-85833746690:-858337466|73:58473554773:584735547|70:-102546130573:584735547|72:-1920800216,75:-709846238,78:1389793256,81:-153739934,84:-1631132248,87:199290786,90:1427106664|73:584687883,74:946884216,74:946914007|75:-709851908,75:-709851908,75:-709851908,75:-709851908|72:-1920800216,76:-529888462,80:1160156988,84:-1786147258,88:2116415568,92:50844399494:-1011589629|72:-192080021675:-709851908|150:144893540772:-192080175273:584687883|110:-640020281114:123270364490:1197716679|73:58473554775:-70985190875:-709851908|73:584735547,76:-530575545,79:-896315461,82:-322123065,85:-1411193797|73:584735537,76:-530871457,79:-1121891320,82:1171279696,85:1279209184,88:-323916569,91:993103377,94:1808067711,97:960419560,100:-1212917648,103:-469691968,106:410131975,109:-940193551,112:-1824242273,115:-1780258360,118:-1420535408,121:-857473888,124:1460979495|true,true,100,233,é,76:-530444785,77:736080951,true,73,true,true,128512,75:-654990257|true,true,75,128512,77,55357,56832,97,233,100,75,77:996209043|72:-192080021674:94693287375:-709851908|210000:13362:-7216164124070:-200329785|RangeError268435458"
+
+// Appends answer as Node does, in the tree tier as in the interpreter.
+func TestStrAppend(t *testing.T) {
+	for _, tree := range []bool{true, false} {
+		SetTreeTier(tree)
+		r := New(Config{})
+		v, err := r.Run(compileForTest(t, strAppendTestSrc))
+		r.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := v.String().Go(); got != strAppendTestWant {
+			t.Errorf("tree tier %v:\n%s", tree, firstDifference(got, strAppendTestWant))
+		}
+	}
+	SetTreeTier(true)
+}
+
+// firstDifference is where got and want part, by the |-separated answer.
+func firstDifference(got, want string) string {
+	g, w := strings.Split(got, "|"), strings.Split(want, "|")
+	for i := range min(len(g), len(w)) {
+		if g[i] != w[i] {
+			return fmt.Sprintf("answer %d: got %s want %s", i, g[i], w[i])
+		}
+	}
+	return fmt.Sprintf("%d answers, want %d", len(g), len(w))
+}
+
+// A run of appends makes one string and its right side, not a node each.
+func TestStrAppendAllocations(t *testing.T) {
+	r := New(Config{})
+	defer r.Close()
+	if _, err := r.Run(compileForTest(t, `
+		function appends(n) {
+			var s = ""
+			var sink = { push(x) { let _k = 0; s += x } }
+			for (var i = 0; i < n; i++) sink.push("<x>")
+			return s.length
+		}
+		appends(100)`)); err != nil {
+		t.Fatal(err)
+	}
+	var a, b runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&a)
+	v, err := r.Run(compileForTest(t, `appends(10000)`))
+	runtime.ReadMemStats(&b)
+	if err != nil || v.Number() != 30000 {
+		t.Fatalf("= %v, %v", v, err)
+	}
+	if n := b.Mallocs - a.Mallocs; n > 1000 && allocsOrdinary() {
+		t.Errorf("10,000 appends made %d allocations", n)
+	}
+}
+
+// A marked string's fields say what an append has made of it, and a read's
+// str_freeze ends it. The string is an ordinary one all the while.
+func TestStrAppendStates(t *testing.T) {
+	r := New(Config{})
+	defer r.Close()
+	long := NewString(strings.Repeat("x", 100))
+	s, err := strAppend[struct{}](r, long, NewString("a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s == long || !s.building || s.tailed || s.left == nil || long.building {
+		t.Fatalf("the first append: new %v, marked %v, tailed %v, rope %v, its left marked %v", s != long, s.building, s.tailed, s.left != nil, long.building)
+	}
+	for i := 1; i < strAppendRopes; i++ {
+		g, err := strAppend[struct{}](r, s, NewString("b"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if g == s || !g.building || g.tailed || s.tailed {
+			t.Fatalf("append %d: new %v, marked %v, tailed %v", i+1, g != s, g.building, g.tailed)
+		}
+		s = g
+	}
+	g, err := strAppend[struct{}](r, s, NewString("c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g != s || !s.tailed {
+		t.Fatalf("the run's tail: the same %v, tailed %v", g == s, s.tailed)
+	}
+	if g, _ = strAppend[struct{}](r, s, NewString("d")); g != s {
+		t.Fatal("the append after it made a string")
+	}
+	strFreeze[struct{}](Str(s))
+	if s.building {
+		t.Fatal("str_freeze left the mark")
+	}
+	want := strings.Repeat("x", 100) + "a" + strings.Repeat("b", strAppendRopes-1) + "cd"
+	n, err := strAppend[struct{}](r, s, NewString("e"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n == s || !n.building || n.ropes != 0 {
+		t.Fatalf("after a read: new %v, marked %v, %d ropes", n != s, n.building, n.ropes)
+	}
+	if s.Go() != want || n.Go() != want+"e" {
+		t.Fatalf("after a read: %q and %q", s.Go(), n.Go())
+	}
+	// What an empty operand, or a short result, hands back is never marked.
+	for _, tc := range [][2]*String{{NewString(""), long}, {long, NewString("")}, {NewString("a"), NewString("b")}} {
+		if g, err := strAppend[struct{}](r, tc[0], tc[1]); err != nil || g.building {
+			t.Fatalf("%q + %q marked: %v", tc[0].Go(), tc[1].Go(), err)
+		}
+	}
+	if long.building {
+		t.Fatal("an operand handed back was marked")
+	}
+}
+
+// A meter counts what a concatenation takes, so a metered runtime's strings
+// are made as ever.
+func TestStrAppendMetered(t *testing.T) {
+	r := New(Config{MemoryLimit: 1 << 30})
+	defer r.Close()
+	long := NewString(strings.Repeat("x", 100))
+	s, err := strAppend[struct{}](r, long, NewString("a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.building {
+		t.Fatal("a metered runtime's append was marked")
+	}
+}

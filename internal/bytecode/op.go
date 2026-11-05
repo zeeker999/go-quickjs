@@ -366,6 +366,11 @@ const (
 	// below it. Neither consumes anything.
 	OpGetPropUnder
 	OpGetIndexUnder
+	// OpStrFreeze follows a read of a binding a closure appends to in place
+	// (compiler's ownedAppend): what is read is no longer the binding's
+	// alone, so if it is a string, appends stop growing it. It leaves the
+	// value where it is.
+	OpStrFreeze
 	// OpIterToArray replaces an array-destructuring source with a dense array of
 	// the values its iterator produces. A is how many to pull, or IterAll when
 	// the pattern has a rest element and needs every one.
@@ -749,6 +754,7 @@ var opNames = [opCount]string{
 	OpIterCloseNormal:  "iter_close_normal",
 	OpGetPropUnder:     "get_prop_under",
 	OpGetIndexUnder:    "get_index_under",
+	OpStrFreeze:        "str_freeze",
 }
 
 func (op Op) String() string {

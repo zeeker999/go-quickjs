@@ -109,7 +109,7 @@ func init() {
 			bytecode.OpSuperCall, bytecode.OpGetSuperProp, bytecode.OpSetSuperProp,
 			bytecode.OpSuperBase, bytecode.OpGetSuperIndex, bytecode.OpSetSuperIndex,
 			bytecode.OpIn, bytecode.OpDeleteProp, bytecode.OpDeleteVar, bytecode.OpGetGlobalOpt,
-			bytecode.OpApplyArguments, bytecode.OpLazyArguments, bytecode.OpPushCallee, bytecode.OpPos, bytecode.OpPow,
+			bytecode.OpApplyArguments, bytecode.OpLazyArguments, bytecode.OpPushCallee, bytecode.OpStrFreeze, bytecode.OpPos, bytecode.OpPow,
 			bytecode.OpNewClass, bytecode.OpSetProtoOf, bytecode.OpSetFieldInit, bytecode.OpSetName,
 			bytecode.OpDefineMethod, bytecode.OpDefineGetter, bytecode.OpDefineSetter,
 			bytecode.OpDefineGetterIndex, bytecode.OpDefineSetterIndex, bytecode.OpTemplateObject,
@@ -624,6 +624,13 @@ func init() {
 					return Undefined
 				}
 				return Obj(c.f.callee)
+			})
+		case bytecode.OpStrFreeze:
+			v := b.pop().tree()
+			b.push(func(c *tctx) Value {
+				x := v(c)
+				strFreeze[struct{}](x)
+				return x
 			})
 		case bytecode.OpTemplateObject:
 			idx := int(a)

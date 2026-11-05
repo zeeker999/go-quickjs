@@ -751,6 +751,13 @@ func (c *compiler) compileFor(n *ast.ForStmt) {
 				// Only a closure could tell one iteration's binding from
 				// the next's.
 				perIteration = containsClosure(init, n.Test, n.Update, n.Body)
+				if perIteration {
+					for i := range c.locals {
+						if c.locals[i].slot >= firstSlot {
+							c.locals[i].copied = true
+						}
+					}
+				}
 			}
 			c.compileVarDecl(init)
 		case *ast.ExprStmt:

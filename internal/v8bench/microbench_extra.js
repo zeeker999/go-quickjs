@@ -518,6 +518,87 @@ function for_in_nested(n)
     return n * 16;
 }
 
+/* what growing a captured string in place does worst: a read after each
+   append, a read after each two, an append or two to each new binding, and
+   a captured number added to the same way */
+function append_read_each(n)
+{
+    var i, j, s, c = 0;
+    var sink = { push: function (x) { s += x; },
+                 len: function () { return s.length; } };
+    for (j = 0; j < n; j += 1024) {
+        s = "";
+        for (i = 0; i < 1024; i++) {
+            sink.push("<x>");
+            c += sink.len();
+        }
+    }
+    global_res = c;
+    return j;
+}
+
+function append_pair_read(n)
+{
+    var i, j, s, c = 0;
+    var sink = { push: function (x) { s += x; },
+                 len: function () { return s.length; } };
+    for (j = 0; j < n; j += 2048) {
+        s = "";
+        for (i = 0; i < 1024; i++) {
+            sink.push("<x>");
+            sink.push("<y>");
+            c += sink.len();
+        }
+    }
+    global_res = c;
+    return j;
+}
+
+function extra_append_once(a, x)
+{
+    var s = a;
+    var add = function (y) { s += y; };
+    add(x);
+    return s;
+}
+
+function extra_append_twice(a, x)
+{
+    var s = a;
+    var add = function (y) { s += y; };
+    add(x);
+    add(x);
+    return s;
+}
+
+function upvalue_short_append(n)
+{
+    var j, c = 0, a = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnop";
+    for (j = 0; j < n; j++)
+        c += extra_append_once(a, "<x>").length;
+    global_res = c;
+    return n;
+}
+
+function upvalue_two_appends(n)
+{
+    var j, c = 0, a = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnop";
+    for (j = 0; j < n; j++)
+        c += extra_append_twice(a, "<x>").length;
+    global_res = c;
+    return n;
+}
+
+function upvalue_sum(n)
+{
+    var j, t = 0;
+    var add = function (x) { t += x; };
+    for (j = 0; j < n; j++)
+        add(j & 7);
+    global_res = t;
+    return n;
+}
+
 /* a for-in loop over a dictionary: an object a key was deleted from,
    not the last added */
 function dict_for_in(n)

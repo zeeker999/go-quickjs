@@ -2928,6 +2928,8 @@ func (r *Runtime) executeAt(f *frame, startSP int, pending error) (Value, error)
 				break
 			}
 			sp = pushAt(stack, sp, Obj(f.callee))
+		case bytecode.OpStrFreeze:
+			strFreeze[struct{}](stack[sp-1])
 		case bytecode.OpDebugStmt:
 			// Only code compiled for a debugger has one, and it does nothing
 			// until the debugger has asked to stop somewhere.
@@ -4160,6 +4162,8 @@ func (r *Runtime) add(a, b Value) (Value, error) {
 		}
 		return Str(s), nil
 	}
+	// What converts b may append to the binding a was read from.
+	strFreeze[struct{}](a)
 	pa, err := r.toPrimitive(a, hintDefault)
 	if err != nil {
 		return Undefined, err
