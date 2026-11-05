@@ -476,6 +476,36 @@ function array_push_1m(n)
     return j;
 }
 
+/* An allocation site whose arrays are mostly short, with an occasional
+   larger result. A capacity hint must give the spare room back. */
+function extra_array_fill(n)
+{
+    var a = [];
+    for (var i = 0; i < n; i++)
+        a.push(i);
+    return a;
+}
+
+function array_push_varying(n)
+{
+    var j, a, count = 0;
+    for (j = 0; j < n; j++) {
+        a = extra_array_fill((j & 31) === 0 ? Math.min(n, 32768) : 4);
+        count += a.length;
+    }
+    global_res = a.length + a[0];
+    return count;
+}
+
+function array_literal_empty(n)
+{
+    var j, a;
+    for (j = 0; j < n; j++)
+        a = [];
+    global_res = a.length;
+    return n;
+}
+
 /* repeated growth by an assignment at the array's length */
 function array_index_append(n)
 {

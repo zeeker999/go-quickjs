@@ -56,6 +56,8 @@ func TestAllocationMicrobenchmarks(t *testing.T) {
 		{`array_index_append(2) + ':' + global_res`, "16384:16384"},
 		{`array_push_28k(27668) + ':' + global_res`, "27668:27668"},
 		{`array_push_1m(1000000) + ':' + global_res`, "1000000:1000000"},
+		{`array_push_varying(33) + ':' + global_res`, "190:33"},
+		{`array_literal_empty(9) + ':' + global_res`, "9:0"},
 		{`append_read_each(1024) + ':' + global_res`, "1024:1574400"},
 		{`append_pair_read(2048) + ':' + global_res`, "2048:3148800"},
 		{`upvalue_short_append(2) + ':' + global_res`, "2:142"},
