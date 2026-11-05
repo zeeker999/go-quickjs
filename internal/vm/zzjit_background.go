@@ -155,10 +155,14 @@ func (s *jitState) jitCompileWaits(fn, target *bytecode.Function) bool {
 
 // jitHold holds e's compile of fn's program p, for its closure cl, until the
 // compiles in e.awaited are done: busy and pending as a compile handed over
-// is (jitSubmit), installed by install once it is.
+// is (jitSubmit), installed by install once it is. A frame waiting at a loop
+// for it is told of as it would have been (jitFrameAt).
 func (r *Runtime) jitHold(e *jitEntry, fn *bytecode.Function, cl *closure, p *ir.Program, install func(*Runtime, *jitJob) bool) {
 	s := r.jit
 	h := &jitJob{fn: fn, cl: cl, p: p, e: e, realm: r.Realm, install: install, held: true, holdRound: 1}
+	if r.jitFrameFn == fn {
+		h.frameAt = r.jitFramePC
+	}
 	e.pending = h
 	e.busy++
 	s.heldJobs = append(s.heldJobs, h)
@@ -202,7 +206,9 @@ func (r *Runtime) jitReleaseHeld(h *jitJob) {
 		s.heldJobs = append(s.heldJobs, h)
 		return
 	}
+	r.jitFrameFn, r.jitFramePC = h.fn, h.frameAt
 	j, err := r.compileSSAPrepare(h.fn, h.cl, h.p, e)
+	r.jitFrameFn = nil
 	if err != nil {
 		if h.nativeCallee {
 			e.calleeRefused = true
