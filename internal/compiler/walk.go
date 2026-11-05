@@ -239,10 +239,7 @@ func (w *argumentsScanner) stmt(s ast.Stmt) {
 		// A nested function declaration has its own arguments object, but a
 		// name search still descends into it.
 		if w.seekName != "" {
-			for _, p := range n.Fn.Params {
-				w.expr(p)
-			}
-			w.stmts(n.Fn.Body)
+			w.expr(n.Fn)
 		}
 	case *ast.ClassDecl:
 		if w.seekClosure {

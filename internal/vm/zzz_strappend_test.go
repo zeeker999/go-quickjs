@@ -715,6 +715,37 @@ func TestStrAppend(t *testing.T) {
 	SetTreeTier(true)
 }
 
+// A declaration captures the binding just as a function expression does.
+// Its append on the right must not change the left value already read.
+const strAppendDeclarationSrc = `
+function render() {
+  var out = '' + 'x'.repeat(70)
+  function emit() { out += 'X'; return 'Y' }
+  out += 'a'; out += 'b'; out += 'c'; out += 'd'
+  out += emit()
+  return out.slice(70)
+}
+var result = ''
+for (var round = 0; round < 2000; round++) result = render()
+result
+`
+
+func TestStrAppendDeclaration(t *testing.T) {
+	t.Cleanup(func() { SetTreeTier(true) })
+	for _, tree := range []bool{true, false} {
+		SetTreeTier(tree)
+		r := New(Config{})
+		v, err := r.Run(compileForTest(t, strAppendDeclarationSrc))
+		r.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := v.String().Go(); got != "abcdY" {
+			t.Errorf("tree tier %v: got %q, want abcdY", tree, got)
+		}
+	}
+}
+
 // firstDifference is where got and want part, by the |-separated answer.
 func firstDifference(got, want string) string {
 	g, w := strings.Split(got, "|"), strings.Split(want, "|")

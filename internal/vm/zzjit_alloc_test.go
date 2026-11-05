@@ -78,6 +78,31 @@ func TestJITStrAppend(t *testing.T) {
 	}
 }
 
+func TestJITStrAppendDeclaration(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprint(marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			r := jitRuntimeForTest(t, Config{JIT: true})
+			r.SetJITWarmUp(1, 1)
+			v, err := r.Run(compileForTest(t, strAppendDeclarationSrc))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := v.String().Go(); got != "abcdY" {
+				t.Errorf("got %q, want abcdY", got)
+			}
+			if r.JITStats().SSAEntries == 0 {
+				t.Fatal("no native entry")
+			}
+		})
+	}
+}
+
 // Native code's appends make no node each: a run of them is one string and its
 // right side.
 func TestJITStrAppendAllocations(t *testing.T) {

@@ -190,6 +190,20 @@ func TestOwnedAppends(t *testing.T) {
 	}
 }
 
+// A function declaration's body and parameters can capture a local too.
+func TestLocalAppendFunctionDeclarations(t *testing.T) {
+	for _, src := range []string{
+		`function f() { var out = ""; function emit() { out += "X"; return "Y" } out += emit(); if (1) return out }`,
+		`function f() { var out = ""; out += "a"; { function emit() { out += "X"; return "Y" } out += emit() } }`,
+		`function f() { var out = ""; function emit(x = (out += "X")) { return x } out += emit(); if (1) return out }`,
+		`function f() { var out = ""; function* emit() { out += "X"; yield "Y" } out += emit().next().value; if (1) return out }`,
+	} {
+		if n, _ := appended(compileStrict(t, src, Options{})); n != 0 {
+			t.Errorf("%s: %d local appends to a captured binding", src, n)
+		}
+	}
+}
+
 // walkFunctions calls see on fn and every function in it.
 func walkFunctions(fn *bytecode.Function, see func(*bytecode.Function)) {
 	see(fn)
