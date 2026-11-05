@@ -306,16 +306,27 @@ func (r *Runtime) jitLeafOf(ctx *abi.Context, op uint64, fn *Object) (Value, boo
 }
 
 // jitStrAppend is an addition the compiler marked, of a string and a string
-// or a number (strAppendOp), its result to the call's keep cell: what would
-// throw it leaves for Go to make after an exit, having changed nothing.
+// or a number, its result to the call's keep cell: what would throw it leaves
+// for Go to make after an exit, having changed nothing. It is strAppendOp's
+// answer with one call fewer between native code and strAppend: a read after
+// each append makes this a rope each time, for what jitConcatAdd costs.
 func jitStrAppend[_ any](r *Runtime, ctx *abi.Context, a, b Value) bool {
-	if a.String().length > maxStringLength-64-24 || b.IsString() && b.String().length > maxStringLength-64-a.String().length {
+	s := a.String()
+	if s.length > maxStringLength-64-24 {
 		return false
 	}
-	v, err := strAppendOp[struct{}](r, a, b)
+	var t *String
+	if b.IsString() {
+		if t = b.String(); t.length > maxStringLength-64-s.length {
+			return false
+		}
+	} else {
+		t = r.numberString(b.num)
+	}
+	v, err := strAppend[struct{}](r, s, t)
 	if err != nil {
 		return false
 	}
-	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
+	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = Str(v)
 	return true
 }

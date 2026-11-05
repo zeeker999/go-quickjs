@@ -1452,7 +1452,10 @@ func (c *compiler) compileMemberRead(n *ast.Member) {
 			return
 		}
 	}
+	_, named := n.Object.(*ast.Ident)
+	c.lengthRead = named && !n.Computed && propKeyName(n.Property) == "length"
 	c.compileExpr(n.Object)
+	c.lengthRead = false
 	// A failed read is reported where the property is named, as V8 reports
 	// it: `a.b.c` on a line of its own says which link broke.
 	if n.Computed {

@@ -67,6 +67,8 @@ func TestAllocationMicrobenchmarks(t *testing.T) {
 		{`template_numbers(64) + ':' + global_res`, "64:182"},
 		{`local_append_once(2) + ':' + global_res`, "2:144"},
 		{`local_append_read(1024) + ':' + global_res`, "1024:1574400"},
+		{`local_append_keep(1024) + ':' + global_res`, "1024:1574400"},
+		{`append_keep_each(1024) + ':' + global_res`, "1024:1574400"},
 		{`for_in_break(9) + ':' + global_res`, "9:9"},
 		{`for_in_nested(9) + ':' + global_res`, "144:144"},
 		{`escape_accumulate(3) + ':' + global_res`, "300:15876"},

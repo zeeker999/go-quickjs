@@ -2110,8 +2110,14 @@ to remove:
   `template_list` -17 to -19%, `template_escaped` -13%, `template_numbers` -25
   to -29%, with its worst cases level; PdfJS -3.8%. In native code loops gain
   nothing: `stringBuilders` has them already, and is better, numbers 45 to 63%
-  and lists level, measured with it turned off for these appends. A read after
-  each append costs native code 14% at worst.
+  and lists level, measured with it turned off for these appends.
+
+  What a read after each append would cost is mostly given back. `x.length` is
+  no read: it keeps nothing, so `local_append_read` is -39% in the interpreter
+  and -36% in native code against the code before owned appends. An append read
+  next, with no branch between, is an ordinary addition in every tier
+  (`plainReadAppends`), which a read that keeps the string makes level. What is
+  left is a closure's owned append read by another function, within 3%.
 
   Not taken: a closure's append with a right side that runs code, which could
   append to the binding between the read and the addition; a short string, as

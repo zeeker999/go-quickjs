@@ -836,3 +836,33 @@ func TestGoOperationLowering(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// An append native code is told owns its string, and one the compiler gave
+// back, are both a string's addition from the start, with no recompile to
+// learn that they meet strings; only the first may grow what it adds to.
+func TestStringAppendLowering(t *testing.T) {
+	for _, tc := range []struct {
+		src   string
+		owned bool
+	}{
+		{`function f(g, h) { var out = ""; for (var i = 0; i < 3; i++) { out += h; if (g) i++ } return out }`, true},
+		{`function f(g, h) { var out = ""; for (var i = 0; i < 3; i++) { out += h; g = out } return out }`, false},
+	} {
+		p, err := LowerSSA(compiledFunction(t, tc.src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		adds := 0
+		for _, in := range p.Code {
+			if in.Op == ir.StringAdd {
+				adds++
+				if in.Owned != tc.owned {
+					t.Errorf("%s: Owned %v", tc.src, in.Owned)
+				}
+			}
+		}
+		if adds != 1 {
+			t.Errorf("%s: %d string additions, want 1", tc.src, adds)
+		}
+	}
+}
