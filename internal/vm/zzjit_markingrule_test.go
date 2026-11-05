@@ -137,9 +137,8 @@ func jitMarkingRun(t *testing.T, src string, names []string, marking bool) map[s
 		work[name] = w
 	}
 	// Nothing is collected here, so what the tests allocate is what the
-	// process takes, twice over: a test whose n is not a count of
-	// operations, each of which takes little, had this at 24 GB, and a
-	// runner of CI's has 16.
+	// process takes: a test whose n is not a count of operations, each of
+	// which takes little, had this at 24 GB, and a runner of CI's has 16.
 	runtime.ReadMemStats(&after)
 	if n := after.TotalAlloc - before.TotalAlloc; n > jitMarkingAllocLimit {
 		t.Errorf("the micro-benchmarks allocated %d MB with the collector off: a test's n should be small work", n>>20)
@@ -147,5 +146,7 @@ func jitMarkingRun(t *testing.T, src string, names []string, marking bool) map[s
 	return work
 }
 
-// jitMarkingAllocLimit is how much jitMarkingRun's tests may allocate.
-const jitMarkingAllocLimit = 3 << 30
+// jitMarkingAllocLimit is how much jitMarkingRun's tests may allocate: about
+// 1 GB is usual, and 5.7 GB under checkptr, which CI runs them with and which
+// keeps far less on the stack.
+const jitMarkingAllocLimit = 8 << 30
