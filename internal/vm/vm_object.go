@@ -1377,11 +1377,11 @@ func (o *Object) prependProps(ps []Property) {
 // leaveInlineProps moves the properties out of the room the object carries
 // for them, with room past them for more of them, and clears the room.
 func (o *Object) leaveInlineProps(more int) {
-	// Its constructor's next objects are given the room this one needed.
-	o.shape.noteGrowth(int(o.valn) + more)
 	old := o.vals()[:int(o.valc)]
 	vals := make([]Value, int(o.valn), 2*int(o.valc)+more)
 	copy(vals, o.vals())
+	// Its constructor's next objects are given the room this one needed.
+	o.shape.noteGrowth(int(o.valn) + more)
 	o.setVals(vals)
 	clear(old)
 	o.flags &^= objInlineProps
@@ -1468,7 +1468,7 @@ func (o *Object) outgrowProps() {
 		n = int(c.n)
 	}
 	if n > int(root.slack) {
-		root.slack = uint8(min(n, maxRoom))
+		noteRoom[struct{}](s, n)
 	}
 }
 

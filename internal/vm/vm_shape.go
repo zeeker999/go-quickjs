@@ -339,8 +339,9 @@ type shapeTree struct {
 	// them beyond its layout's room, the object is a dictionary
 	// (shapeAdded).
 	keyed *Object
-	// The room of the realm's has, which was the tree's.
-	_ uintptr
+	// room is the room of the object child is adding a key to (shapeAdded),
+	// in the room of the realm's has, which was the tree's.
+	room uint32
 	// freed is how many shapes the cleanups of collected prototypes have
 	// given back since count last took them (reclaimShapes), made with the
 	// first prototype's budget; chunk is the budget prototypes are given
@@ -734,14 +735,12 @@ func (s *shape) root() *shape {
 // noteGrowth records, on the root of a shared layout, that an object of it
 // came to need n properties' room.
 func (s *shape) noteGrowth(n int) {
-	if s == nil || s.unique || s.loose {
+	if s == nil || s.unique || s.loose || n <= int(s.slack) {
 		return
 	}
-	if root := s.root(); n > int(root.slack) {
-		// Past maxSlack the room is a table of the object's own, made at
-		// that size: none is carried and outgrown.
-		root.slack = uint8(min(n, maxRoom))
-	}
+	// Past maxSlack the room is a table of the object's own, made at that
+	// size: none is carried and outgrown.
+	noteRoom[struct{}](s, n)
 }
 
 // roomFor is the room an object of constructor root is made with, its body
@@ -850,13 +849,13 @@ func (s *shape) child(e shapeEdge) *shape {
 			return c
 		}
 	}
-	if s.parent == nil && s.rootClass == ctorRootClass {
+	if s.parent == nil && !s.generic {
 		if c, ok := ctorChild[struct{}](s, e); ok {
 			return c
 		}
 	}
 	t := s.tree
-	if s.n >= maxShapeDepth || t.count >= maxShapes && !reclaimShapes[struct{}](t) || len(s.more) >= maxShapeFanout {
+	if s.n >= maxShapeDepth || t.count >= maxShapes && !reclaimShapes[struct{}](t) || len(s.more)>>(s.used&7) >= maxShapeFanout {
 		return nil
 	}
 	// A constructor's root may have a first transition that is no child of
@@ -982,6 +981,7 @@ func (o *Object) shapeAdded(k propKey) {
 		o.buildIndex()
 		return
 	}
+	s.tree.room = o.valc
 	if c := s.child(shapeEdge(k)); c != nil {
 		o.shape = c
 		if n > linearScanLimit && c.index == nil {

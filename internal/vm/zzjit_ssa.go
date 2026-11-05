@@ -1409,7 +1409,7 @@ func (r *Runtime) jitFillLiteral(l *jitLiteral) {
 	if !l.array {
 		n := l.n
 		if l.root != nil {
-			n = max(n, int(l.root.slack))
+			n = max(n, siteRoom[struct{}](l.root, nil))
 		}
 		jitFillObjectPool(pool, r.proto.object, l.root, n)
 		return
@@ -1686,21 +1686,18 @@ func (fb *jitFeedback) Define(pc int) (*ssa.PropertyAdd, bool) {
 	s := l.root
 	slices.Reverse(keys)
 	for _, key := range keys {
-		if s.next == nil || s.nextEdge() != (shapeEdge{key, propDefault}) {
+		if s = shapeAlong[struct{}](s, shapeEdge{key, propDefault}); s == nil {
 			return nil, false
 		}
-		s = s.next
 	}
 	key := fb.cl.names[fn.Code[pc].A]
-	if s.next == nil || s.nextEdge() != (shapeEdge{key, propDefault}) {
-		if s.next == nil {
-			// Not made yet: Go makes it at the code's exit there, and the
-			// code is compiled again for it (jitDefineSeen).
-			fb.definesUnfed = append(fb.definesUnfed, int32(pc))
-		}
+	next := shapeAlong[struct{}](s, shapeEdge{key, propDefault})
+	if next == nil {
+		// Not made yet: Go makes it at the code's exit there, and the
+		// code is compiled again for it (jitDefineSeen).
+		fb.definesUnfed = append(fb.definesUnfed, int32(pc))
 		return nil, false
 	}
-	next := s.next
 	if next.index == nil && int(next.n) > linearScanLimit {
 		return nil, false
 	}

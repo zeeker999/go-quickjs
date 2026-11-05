@@ -150,7 +150,7 @@ func chargeChild[_ any](s, c *shape) {
 		s.budget = b
 	}
 	if b != nil {
-		c.budget = b
+		c.budget, c.rootClass, c.used = b, s.chainClass(), s.chainFan()
 		b.b.n.Add(1)
 		chargeShape[struct{}](s.tree, nil)
 		return
@@ -296,6 +296,13 @@ func keptCtorRoot[_ any](s *shape) *shape {
 //
 //go:noinline
 func ctorChild[_ any](s *shape, e shapeEdge) (*shape, bool) {
+	if s.rootClass != ctorRootClass {
+		if s.next != nil {
+			return nil, false
+		}
+		c := literalChild[struct{}](s, e)
+		return c, c != nil
+	}
 	k := keptCtorRoot[struct{}](s)
 	if k == s {
 		return nil, false

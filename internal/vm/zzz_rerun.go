@@ -51,6 +51,8 @@ const programShapes = maxShapes / 4
 type programTable struct {
 	byCode map[weak.Pointer[bytecode.Function]]*programSites
 	at     int
+	// literals is the roots of the realm's literals, by room.
+	literals *literalTable
 }
 
 // programSites is what a realm keeps of a program it has run: the roots of
@@ -95,8 +97,12 @@ func seedLiterals[_ any](r *Runtime, cl *closure) {
 	side := sideOf[struct{}](r.proto.object.ownLayout())
 	ps := side.programs
 	if ps == nil {
-		ps = &programTable{byCode: map[weak.Pointer[bytecode.Function]]*programSites{}, at: 32}
+		ps = &programTable{at: 32}
 		side.programs = ps
+	}
+	if ps.byCode == nil {
+		ps.byCode = map[weak.Pointer[bytecode.Function]]*programSites{}
+		ps.at = 32
 	}
 	key := weak.Make(cl.fn)
 	p := ps.byCode[key]

@@ -138,8 +138,8 @@ func (l *litNodeOf[_]) make(c *tctx) Value {
 	ic := &c.ic[lit.site]
 	root := c.r.shapes.siteRoot(ic, c.r.proto.object)
 	m := lit.n
-	if root != nil && int(root.slack) > m {
-		m = int(root.slack)
+	if root != nil {
+		m = max(m, siteRoom[struct{}](root, ic))
 	}
 	o := newShapedLiteral(root.orRoot(ClassObject, c.r.proto.object), ClassObject, m)
 	fs := lit.fields
