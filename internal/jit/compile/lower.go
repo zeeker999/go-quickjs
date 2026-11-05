@@ -639,7 +639,7 @@ func lowerFunction(fn *bytecode.Function, m lowering) (*ir.Program, error) {
 		}
 	}
 	if m.ssa {
-		hintedStringAdds(p, m.hints.StringAdds)
+		hintedStringAdds(p, fn, m.hints.StringAdds)
 	}
 	selectNumericProperties(p, m.ssa)
 	if m.ssa {
@@ -1036,7 +1036,7 @@ func selectNumericProperties(p *ir.Program, cells bool) {
 			read(in.Right, take(in.Dest))
 		case ir.BindingCheck, ir.ObjectLiteral, ir.StringConst, ir.BigIntConst, ir.UpvalueRead, ir.Closure:
 			take(in.Dest)
-		case ir.FieldDefine, ir.Coercible:
+		case ir.FieldDefine, ir.Coercible, ir.StringFreeze:
 			read(in.Left, reference)
 		case ir.ArgumentRead:
 			// Go takes the key as it is.
@@ -1120,14 +1120,16 @@ func selectNumericProperties(p *ir.Program, cells bool) {
 // hintedStringAdds makes the additions at pcs, which have met a string,
 // Go's (Hints.StringAdds), before the reads they take are decided
 // (selectNumericProperties): an operand is then read as it is, a string's
-// element included (ir's Reference), not as a number.
-func hintedStringAdds(p *ir.Program, pcs []int32) {
+// element included (ir's Reference), not as a number. One the compiler
+// marked, by the store after it, may grow what its binding holds (Owned).
+func hintedStringAdds(p *ir.Program, fn *bytecode.Function, pcs []int32) {
 	for _, pc := range pcs {
 		if pc < 0 || int(pc) >= len(p.Code) || p.Maps[pc].Depth < 0 {
 			continue
 		}
 		if in := p.Code[pc]; in.Op == ir.Binary && in.Operator == ir.Add {
-			p.Code[pc] = ir.Instruction{Op: ir.StringAdd, Left: in.Left, Right: in.Right, Dest: in.Dest}
+			p.Code[pc] = ir.Instruction{Op: ir.StringAdd, Left: in.Left, Right: in.Right, Dest: in.Dest,
+				Owned: int(pc)+1 < len(fn.Code) && fn.Code[pc+1].Op == bytecode.OpSetUpvalue && fn.Code[pc+1].B != 0}
 		}
 	}
 }
@@ -1661,6 +1663,8 @@ func describe(fn *bytecode.Function, pc int, in bytecode.Instr) (effect, error) 
 		return effect{delta: 1}, nil
 	case bytecode.OpPushCallee:
 		return effect{delta: 1}, nil
+	case bytecode.OpStrFreeze:
+		return effect{need: 1}, nil
 	case bytecode.OpGetGlobalOpt:
 		// typeof's read of a name, which has no site of its own.
 		if uint64(in.A) >= uint64(len(fn.Names)) {
@@ -2460,6 +2464,8 @@ func lower(fn *bytecode.Function, in bytecode.Instr, sp int, this, charCode bool
 		// A destructuring's rest element, as its step, but an array of
 		// what is left (Rest).
 		return ir.Instruction{Op: ir.IterStep, Left: ir.Slot(sp - 1 - int(in.A)), Dest: sp, When: true, Rest: true}
+	case bytecode.OpStrFreeze:
+		return ir.Instruction{Op: ir.StringFreeze, Left: top}
 	case bytecode.OpIterCloseNormal, bytecode.OpIterClose:
 		// Native where there is nothing to close, Go's otherwise: a loop's
 		// cursor done, or an array's walked in place, as its loop ends --

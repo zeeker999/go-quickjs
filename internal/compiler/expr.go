@@ -56,7 +56,26 @@ func (c *compiler) compileExprForEffect(e ast.Expr) {
 			}
 		}
 
+	case *ast.Logical:
+		// A short circuit around an append whose value nothing uses: the
+		// append stores, and leaves nothing for a drop.
+		if n.Op != "??" && c.ownedAppend(n.Right) {
+			c.compileExpr(n.Left)
+			op := bytecode.OpJumpIfFalse
+			if n.Op == "||" {
+				op = bytecode.OpJumpIfTrue
+			}
+			skip := c.emitJump(op)
+			c.compileOwnedAppend(n.Right.(*ast.Assign))
+			c.patchJump(skip)
+			return
+		}
+
 	case *ast.Assign:
+		if c.ownedAppend(n) {
+			c.compileOwnedAppend(n)
+			return
+		}
 		// A store to a property carries its value out the same way, by copying
 		// it below what the store consumes.
 		if m, ok := n.Target.(*ast.Member); ok {
@@ -436,6 +455,7 @@ func (c *compiler) compileIdentReadStatic(n *ast.Ident) {
 		} else {
 			c.emit(bytecode.OpGetLocalCheck, l.slot, 0)
 		}
+		c.compiledRead(l)
 		return
 	}
 	if idx, ok := c.resolveUpvalue(n.Name); ok {
@@ -443,6 +463,9 @@ func (c *compiler) compileIdentReadStatic(n *ast.Ident) {
 			c.emit(bytecode.OpGetUpvalueCheck, idx, 0)
 		} else {
 			c.emit(bytecode.OpGetUpvalue, idx, 0)
+		}
+		if l, _ := c.enclosingBinding(n.Name); l != nil {
+			c.compiledRead(l)
 		}
 		return
 	}

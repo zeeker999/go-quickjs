@@ -91,6 +91,8 @@ var microWork = []struct {
 	{"object_literal_fixed", 524288}, {"array_push_large", 512}, {"upvalue_string_append", 1048576},
 	{"for_in_break", 2097152}, {"for_in_nested", 524288}, {"array_index_append", 512},
 	{"array_push_28k", 128}, {"array_push_1m", 4},
+	{"append_read_each", 524288}, {"append_pair_read", 524288}, {"upvalue_short_append", 1048576},
+	{"upvalue_two_appends", 524288}, {"upvalue_sum", 4194304},
 	{"has_own_call_hit", 2097152}, {"has_own_call_miss", 2097152},
 	{"has_own_call_for_in", 262144}, {"has_own_method_hit", 2097152},
 	{"array_push_args3", 1024}, {"array_push_args3_single", 1024},
