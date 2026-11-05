@@ -190,7 +190,13 @@ func literalDefine[_ any](c *tctx, o *Object, root *shape, ic *propCache, fs []l
 		}
 		key := c.names[f.name]
 		if o.class == ClassObject && o.flags&objExtensible != 0 {
-			if next := o.transition(key, propDefault); next != nil {
+			next := o.transition(key, propDefault)
+			if s := o.shape; next == nil && s != nil && root != nil {
+				// A layout of a realm's roots, which others' keys may have
+				// taken the first transition out of (literalChild).
+				next = shapeAlong[struct{}](s, shapeEdge{key, propDefault})
+			}
+			if next != nil {
 				o.appendTransition(v, next)
 				continue
 			}
