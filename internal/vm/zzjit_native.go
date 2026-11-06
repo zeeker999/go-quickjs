@@ -658,6 +658,10 @@ type jitEntry struct {
 	ssaUnresumed []int32
 	resumed      []uint32
 	resumeReopt  bool
+	// holds says a compile seeding its calls may be held for its callees'
+	// (jitAwaits), and awaited are those it waits for, or held for now.
+	holds   bool
+	awaited []*bytecode.Function
 	// invalid marks code an eager deoptimization invalidated: Go enters it no
 	// more, nor do native callers call it (its link), and the existing
 	// tiers run the function until they have spent a fresh budget,
@@ -1180,6 +1184,10 @@ type jitState struct {
 	// be inlined (jitInlinable).
 	lowered     map[weak.Pointer[bytecode.Function]]*jitLowering
 	interpreted uint64
+	// heldJobs are the compiles held for their callees' (jitHold), and
+	// bgHeld counts the holds.
+	heldJobs []*jitJob
+	bgHeld   uint64
 	// goOn is the frame the interpreter runs for jitGoOn, until a loop's
 	// header Go goes on natively at, goOnPC with goOnDepth operands;
 	// wentOn counts the times it did. forcedCheck marks the back-edge
@@ -2550,9 +2558,17 @@ func (r *Runtime) jitCompileForIn(fn *bytecode.Function, cl *closure, kind jitLo
 	}
 	if cl != nil {
 		// The calls its caches have met.
+		e.holds = background
 		r.jitSeedCalls(cl, e, p)
+		e.holds = false
 	}
 	if background {
+		if len(e.awaited) != 0 {
+			// Its callees' code first.
+			s.remember(key, e)
+			r.jitHold(e, fn, cl, p, (*Runtime).jitCompiled)
+			return e
+		}
 		j, err := r.compileSSAPrepare(fn, cl, p, e)
 		if err != nil {
 			return r.jitFirstCode(key, fn, cl, p, e, nil, nil, err, false)
