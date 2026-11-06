@@ -197,6 +197,43 @@ func TestJSONStringsAtEveryOffset(t *testing.T) {
 	checkEval(t, reference, "0")
 }
 
+// A string with an escape says what it is as it is built: what its bytes
+// are decides how it is indexed, and an escape may be what makes it wide.
+func TestJSONEscapedStrings(t *testing.T) {
+	jsonRepeated(t, []struct{ src, want string }{
+		{`var u = String.fromCharCode(92) + "u", q = String.fromCharCode(34);
+		  function p(t) { return JSON.parse(q + t + q); }
+		  var r = [];
+		  for (var t of [u + "0041", "x" + u + "0041y", u + "00e9", "x" + u + "00e9yz", u + "4e2d" + "ab", "ab" + u + "4e2d",
+		                 u + "d83d" + u + "de00", "x" + u + "d83d" + u + "de00y", u + "d83d", u + "de00" + "x", u + "0000"]) {
+		    var s = p(t), c = [];
+		    for (var i = 0; i < s.length; i++) c.push(s.charCodeAt(i).toString(16));
+		    r.push(s.length + ":" + c.join(" ") + ":" + s.at(-1).length + ":" + s.slice(1).length + ":" + (s + "z").length);
+		  }
+		  r.join("|")`,
+			"1:41:1:0:2|3:78 41 79:1:2:4|1:e9:1:0:2|4:78 e9 79 7a:1:3:5|3:4e2d 61 62:1:2:4|3:61 62 4e2d:1:2:4|2:d83d de00:1:1:3|4:78 d83d de00 79:1:3:5|1:d83d:1:0:2|2:de00 78:1:1:3|1:0:1:0:2"},
+		// Wide text, raw, around an escape.
+		{`var e = String.fromCharCode(0xE9), n = String.fromCharCode(92) + "n", q = String.fromCharCode(34);
+		  var s = JSON.parse(q + e + n + e + "a" + n + "bcdefghijklmnop" + e + q); [s.length, s.charCodeAt(0), s.charCodeAt(1), s.charCodeAt(s.length - 1)].join()`,
+			"21,233,10,233"},
+		// Text after an escape of every length around a run read by bytes.
+		{`var n = String.fromCharCode(92) + "n", q = String.fromCharCode(34), nl = String.fromCharCode(10), ok = true;
+		  for (var i = 0; i < 40; i++) { var run = "r".repeat(i), s = JSON.parse(q + n + run + n + run + q);
+		    ok = ok && s === nl + run + nl + run; }
+		  ok`, "true"},
+		// Strings of a batch stay as they are as it fills, and past it.
+		{`var nl = String.fromCharCode(10), a = []; for (var i = 0; i < 3000; i++) a.push("line" + nl + i);
+		  var b = JSON.parse(JSON.stringify(a)), ok = true;
+		  for (var i = 0; i < a.length; i++) ok = ok && a[i] === b[i];
+		  var big = "x".repeat(5000) + nl, c = JSON.parse(JSON.stringify([big, "a" + nl, big]));
+		  [ok, c[0] === big, c[1].length, c[2].length].join()`, "true,true,2,5001"},
+		// A key with an escape is the key.
+		{`var n = String.fromCharCode(92) + "n", q = String.fromCharCode(34);
+		  var o = JSON.parse("{" + q + "a" + n + "b" + q + ":1," + q + "a" + n + "c" + q + ":2}");
+		  Object.keys(o).map(k => k.length + ":" + k.charCodeAt(1)).join()`, "3:10,3:10"},
+	})
+}
+
 // A string long enough to be read by the fastest way there is, ending at each
 // place in a read and among the last bytes of the document.
 func TestJSONLongStrings(t *testing.T) {

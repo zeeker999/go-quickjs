@@ -1327,8 +1327,10 @@ type jsonParser struct {
 	ctx uint32
 	// strs is strings made and not yet used (jsonParser.newString).
 	strs []String
-	// esc is the buffer a string with an escape is built in.
-	esc []byte
+	// esc is the buffer a string with an escape is built in, and text the
+	// batch it goes on to (keepText).
+	esc  []byte
+	text []byte
 
 	// records asks for a jsonRecord of each value, which a reviver needs;
 	// last is the record of the value parsed most recently, and recScratch
@@ -1922,28 +1924,28 @@ func (p *jsonParser) parseStringASCII() (string, bool, error) {
 		return "", false, p.rt.throwSyntaxError(
 			"a control character is not allowed in a JSON string at position %d", i)
 	}
-	s, err := p.parseEscaped(start, i)
-	return s, false, err
+	return p.parseEscaped(start, i, ascii)
 }
 
-// parseEscaped builds the string from start, whose first escape is at i.
-func (p *jsonParser) parseEscaped(start, i int) (string, error) {
+// parseEscaped builds the string from start, whose first escape is at i, and
+// says if it is all ASCII, as the text before i is if ascii says so.
+func (p *jsonParser) parseEscaped(start, i int, ascii bool) (string, bool, error) {
 	buf := append(p.esc[:0], p.src[start:i]...)
 	p.pos = i
 	for {
 		if p.pos >= len(p.src) {
-			return "", p.rt.throwSyntaxError("unterminated string in JSON")
+			return "", false, p.rt.throwSyntaxError("unterminated string in JSON")
 		}
 		c := p.src[p.pos]
 		switch {
 		case c == '"':
 			p.pos++
 			p.esc = buf
-			return string(buf), nil
+			return p.keepText(buf), ascii, nil
 		case c == '\\':
 			p.pos++
 			if p.pos >= len(p.src) {
-				return "", p.rt.throwSyntaxError("unterminated escape in JSON")
+				return "", false, p.rt.throwSyntaxError("unterminated escape in JSON")
 			}
 			var b byte
 			switch p.src[p.pos] {
@@ -1966,26 +1968,66 @@ func (p *jsonParser) parseEscaped(start, i int) (string, error) {
 			case 'u':
 				r, err := p.parseUnicodeEscape()
 				if err != nil {
-					return "", err
+					return "", false, err
+				}
+				if r >= utf8.RuneSelf {
+					ascii = false
 				}
 				// A lone surrogate is preserved rather than replaced.
 				buf = wtf8.AppendRune(buf, r)
 				continue
 			default:
-				return "", p.rt.throwSyntaxError(
+				return "", false, p.rt.throwSyntaxError(
 					"invalid escape %q in JSON at position %d", p.src[p.pos], p.pos)
 			}
 			buf = append(buf, b)
 			p.pos++
 		case c < 0x20:
-			return "", p.rt.throwSyntaxError(
+			return "", false, p.rt.throwSyntaxError(
 				"a control character is not allowed in a JSON string at position %d", p.pos)
 		default:
-			j, _ := jsonPlainEnd(p.src, p.pos)
+			// Escapes come close together where there are any, and the text
+			// between them is taken a byte at a time for as long as it is
+			// short.
+			j, end := p.pos, min(p.pos+jsonShortRun, len(p.src))
+			for j < end {
+				if c := p.src[j]; c < 0x20 || c == '"' || c == '\\' || c >= utf8.RuneSelf {
+					break
+				}
+				j++
+			}
+			if j == end || j < len(p.src) && p.src[j] >= utf8.RuneSelf {
+				var plain bool
+				if j, plain = jsonPlainEnd(p.src, j); !plain {
+					ascii = false
+				}
+			}
 			buf = append(buf, p.src[p.pos:j]...)
 			p.pos = j
 		}
 	}
+}
+
+// jsonShortRun is how many bytes of text between escapes are read one by one.
+const jsonShortRun = 8
+
+// jsonTextBatch is the most text made room for at once.
+const jsonTextBatch = 1 << 12
+
+// keepText is a string of the text an escaped string came to. A document's
+// are written one after another into a batch, one allocation for many, which
+// a string that outlives the rest holds: no more than jsonTextBatch, and no
+// more than is left of the document it would otherwise be a slice of.
+func (p *jsonParser) keepText(b []byte) string {
+	if len(b) > jsonTextBatch/8 {
+		return string(b)
+	}
+	if cap(p.text)-len(p.text) < len(b) {
+		p.text = make([]byte, 0, max(min(len(p.src)-p.pos, jsonTextBatch), len(b)))
+	}
+	at := len(p.text)
+	p.text = append(p.text, b...)
+	return unsafe.String(unsafe.SliceData(p.text[at:]), len(b))
 }
 
 // parseStringValue parses a string that is a value.
@@ -1998,8 +2040,8 @@ func (p *jsonParser) parseStringValue() (Value, error) {
 		return Str(emptyString), nil
 	}
 	if !ascii {
-		// Escaped, or wider than ASCII. WTF-8 joined from an escape's pairs
-		// is what NewString reads, as it reads any other.
+		// WTF-8 joined from an escape's pairs is what NewString reads, as it
+		// reads any other.
 		ascii, length := scanString(s)
 		out := p.newString()
 		out.s, out.length, out.ascii = s, length, ascii
