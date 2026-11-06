@@ -2062,7 +2062,7 @@ to remove:
 |---|---|---|---|---|
 | F1 | A string builder in the tree tier | 21% of a render's allocation, string building 1.13x C | High | Done for a closure's appends, in every tier: half a render's objects |
 | F2 | A `for...in` cursor from a free list | 8.5% of a render's allocation | Medium | Done, by one cursor kept: 14% of its bytes |
-| F3 | An array's old elements reused when it grows | up to 14% of a render's allocation | High | Open; growth by half from 16,384 elements is done, and is not this |
+| F3 | An array's old elements reused when it grows | up to 14% of a render's allocation | High | Literal capacity hints avoid repeated growth; block reuse remains open |
 | F4 | The JIT slower than the interpreter here | 1.20x the interpreter | Medium | Done |
 | F5 | A fresh runtime's first render and its memory, with the JIT | first render 66 ms against 22, live heap 26.2 MiB against 7.3 | Medium | Memory done; first render 48.5 to 38.2 ms compiling in the background ([D8](#d8-compiling-in-the-background), phases 1 to 4; 35.5 with phase 5), the interpreter's 21.9 |
 
@@ -2196,6 +2196,9 @@ to remove:
   committed baseline: the sorted reports match byte for byte. Those
   failures are in DataView, Iterator and Temporal. The plain conformance
   processes' peak RSS is 1.48 to 1.39 GB, one run each.
+  That November snapshot is newer than the documented test262 revision;
+  the later rerun at the documented `2e0a5676` pin passes all 99,637 tests,
+  plain and under JIT stress. CI now uses that same pin (see F3 below).
   The focused append tests pass on Go 1.24.13 too, with cgo disabled.
   Windows amd64 with the JIT, Windows arm64 and Linux 386 cross-build.
 - **F2.** A cursor is one allocation of the object, the cursor and the
@@ -2242,6 +2245,138 @@ to remove:
   room, 7.4% more allocated bytes and 1,210 collections against 1,120 over
   60 rounds. The SSR screen saved about 13% of its bytes and 2 to 4% of its
   time, which did not pay for that regression. The policy remains half again.
+
+  An empty literal in the tree tier now learns the dense length its arrays
+  grow to. Its template's closures share a hint in their own realm. The
+  smaller of two observations sizes the next array, from 256 through 65,536
+  elements; a short result drops the hint. Larger results keep ordinary
+  growth: starting a million-element array at a clamped 65,536 changed its
+  later capacities and cost about 3% in the first screen. Ignoring those
+  lengths makes `array_push_1m` level. Memory-limited runtimes bypass hints.
+
+  The sample is strong only until the next literal or a GC sweep. At a
+  sweep it becomes weak, so an array still growing through a long render
+  can teach its final length without keeping its result alive. At turn end
+  all samples go and only counts remain. Clearing samples outright at a
+  sweep lost much of the feedback: a first screen allocated 738 MiB over
+  200 pages, against 573 MiB with weak samples and 925 MiB before either.
+  Raising the native literal pool's 64-element limit, with a bounded pool,
+  saved only about 0.1% of the render's bytes in the initial 200-page
+  screen. Longer runs below show that this does not settle what happens
+  after more functions have reached native code.
+
+  Sampling every empty array initially cost `array_literal_empty` about 8%.
+  A short result now pauses sampling for 31 executions, without retaining
+  a sample during that pause. The next probe that grows resumes consecutive
+  samples; two large probes separated by the pause cannot establish a hint.
+  Tests pin the recovery after short results and a long result every 32
+  calls. The final empty-literal benchmark is +3.4% in the full comparison,
+  but not slower at every placement; repeated alone with `array_forEach_this`
+  over eight placements, it is -5.8% without the JIT and +0.5% with it.
+  The callback case is -2.8% and -3.9% in that repeat. Neither repeat is
+  3% slower at every placement. The varying-length case is level too.
+
+  Sampling starts on a literal's second execution. Sampling its first was
+  16% slower on Octane's CodeLoad at every placement: an array made by code
+  loaded only once could keep that load's object graph until a sweep.
+  CPU-only profiles over 2,000 runs show 12.19 to 15.23 seconds and reserved
+  Go heaps of 1,143.7 to 5,551.7 MiB, most of the extra CPU in memory
+  management. Skipping the first sample returns the heap to 1,135.7 MiB
+  and the time to 12.37 seconds. The final eight-placement comparison is
+  -0.1% without the JIT and +1.0% with it. A regression test checks that
+  once-loaded literals leave no pending sample and that a repeated one
+  starts sampling.
+
+  Apple M5 Max, darwin/arm64, Go 1.27.3 (2026-11-05), against `86c0dad4`,
+  both sides tagged `quickjs_jit`, built in this checkout. One thread, eight
+  placements, best of three fresh processes at each, milliseconds for ten
+  pages:
+
+  | | Before | After | Change |
+  |---|---:|---:|---:|
+  | Render, tree tier | 130.4 | 110.4 | -15.4% |
+  | Render, JIT enabled | 92.0 | 81.6 | -11.3% |
+
+  The 22 array micro-benchmarks' geometric mean is 0.882 of the baseline
+  without the JIT and 0.994 with it. None is 3% slower at every placement.
+  Totals over three rounds, median of three fresh processes per side in
+  ABBAAB order: CPU 5,201.8 to 4,529.0 ms and 2,391.8 to 2,352.6; wall
+  5,233.1 to 4,563.0 and 2,427.0 to 2,374.6. There is no total-time loss
+  hidden by the minimums.
+  Without the JIT, `array_push_large` gains 27%, `array_index_append` 30%,
+  and `array_push_args3` 43%; their native loops keep their existing
+  allocation paths. The runtime's size and field offsets stay put: the
+  pending sites occupy an unused slice-sized slot. The placement tool finds
+  the same distances and phases of the hot groups on both sides at all
+  eight placements.
+
+  A separate ABBAAB comparison, placement zero, median of three fresh
+  processes per side, runs 20 fresh-runtime first renders followed by 200
+  steady pages. One thread, wall / CPU milliseconds per steady page:
+  13.449 / 13.432 to 11.140 / 11.128 without the JIT, and 9.844 / 9.789 to
+  9.727 / 9.708 with it. Bytes over 200 pages are 925.1 to 574.7 MiB and
+  951.4 to 601.0 MiB, down 37.9% and 36.8%; 18 to 19 fewer allocations a
+  page. FirstRender is 17.58 to 16.42 ms and 38.47 to 39.44; it allocates
+  about 41 more objects for the initial feedback. Peak RSS is 47.7 to
+  45.0 MB and 77.8 to 70.3 MB. The JIT's CPU gain in this run after 20
+  fresh runtimes is 0.8%, against 11.3% in the short Render-only processes;
+  the histories differ and no layout cause is assigned. At four threads,
+  steady wall / CPU per page is 9.414 / 10.326 to 9.381 / 10.038 and
+  6.505 / 7.257 to 6.301 / 6.793.
+  A separate four-placement, three-round FirstRender comparison at four
+  threads is 11.9 to 11.9 ms without the JIT (-0.1%) and 28.4 to 28.4
+  with it (-0.0%): the placement-zero first-use variation is not a
+  consistent regression.
+
+  React's two bundles remain 45,879 bytes. The tagged placement-zero binary
+  grows 896 bytes, 44,839,250 to 44,840,146; there is no new package
+  initialization. Feedback is allocated on the first execution of a literal,
+  included in FirstRender above.
+
+  Longer ABBA runs, `Render` alone, 1,200 pages each, one thread and
+  `GODEBUG=gctrace=1`, give 16,329.9 to 14,410.7 ms CPU without the JIT
+  (-11.8%) and 10,956.8 to 11,263.4 with it (+2.8%). This one-placement
+  long JIT result does not establish a regression at every placement, but
+  the short benchmark's JIT gain is not sustained reliably. Collections
+  fall from 656/683 to 493/491 and from 452/450 to 313/321; summed marking
+  intervals fall from 7.384/7.419 to 4.410/4.690 seconds without the JIT,
+  but rise from 4.412/4.372 to 5.123/4.790 with it.
+  Live heaps after collection stay 6.0 and 11.0 MiB at this longer length.
+  The JIT's byte saving is smaller here, 5,617.1 to 4,183.4 MiB, 25.5%,
+  against 5,546.4 to 3,417.6 MiB, 38.4%, without it: native literal pools
+  retain their existing capacity policy.
+
+  Profiles before the cold-site fix show the intended allocation change:
+  over 1,200 pages, `growElems` allocates 2.73 GiB less, replaced by 0.64 GiB in
+  `newArrayObject`, without the JIT. Their timing is not the unprofiled
+  result: with both CPU profiling and 64-KiB allocation sampling the pair
+  takes 15.38 to 16.60 seconds and 11.02 to 11.20 with the JIT. The CPU
+  diff has more write-barrier work on the change; that profiling difference
+  is not attributed to placement. Allocation sampling changes the result.
+  The final cold-site version's CPU-only profile over 1,800 JIT pages is
+  15.985 to 15.648 seconds, with 8,410.5 to 6,977.0 MiB allocated: a 2.1%
+  CPU gain and a smaller byte saving, consistent with the limitation above.
+
+  The final V8 suite's eight-placement, one-round screen is -1.4% without
+  the JIT and -0.3% with it. Octane is +0.3% and -0.9%, AWFY -0.1% and
+  -0.2%. None has a large loss at every placement. Octane's outliers are
+  repeated separately. The final eight-placement, three-round JIT repeat
+  puts RayTrace at +0.8%, below 3% at every placement, and Splay at -9.4%.
+
+  Validation: `go test ./...`, plain and tagged, the intended-inlining
+  checks included; the native pointer-lifetime checks with `checkptr=2`;
+  `hoistcheck` (10 known moved sums, no unknown ones); the focused tests
+  with Go 1.24.13 and cgo disabled; Windows amd64 with the JIT, Windows
+  arm64 and Linux 386 builds. All of documented test262 `2e0a5676`, plain
+  and with JIT stress (`threshold,budget=3,deopt=7`), gives 99,637 passed,
+  zero failed and 342 skipped. Native code runs in 73,492 tests under
+  stress. Conformance peak RSS is 1.45 GB and 1.87 GB. CI now uses this
+  documented pin too. The newer snapshot's changed expectations are a
+  separate compatibility issue; no skips or expectations are changed here.
+  Tests pin capacity, contents and length, bounded and varying hints, GC
+  release, realm isolation, the memory-limit bypass, the first-use skip,
+  callbacks mutating their array across growth, and a native caller using
+  a tree callee with the collector idle and marking.
 - **F4.** The JIT is 1.20 times the interpreter's wall time on this
   workload, which is mostly short polymorphic calls and string building
   rather than loops, and a JIT runtime holds 18.7 MiB against the

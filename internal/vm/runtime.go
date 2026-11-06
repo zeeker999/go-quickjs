@@ -303,8 +303,10 @@ type Runtime struct {
 	// bigFree is the BigInts the tree tier has given back, for bigInPlace
 	// to make results in (bigRelease); nil until one is.
 	bigFree *bigFreeList
-	// The room of the realm's leafFns, which was the runtime's.
-	_ [3]uintptr
+	// arraySamples are literal sites holding a sample until a GC sweep or
+	// the turn's end (zzz_arrayroom.go). They occupy the room of the realm's
+	// leafFns, which was the runtime's, so no later field moves.
+	arraySamples []*arrayRoom
 	// thisCells hold the this bindings of derived constructors' frames
 	// that no closure or eval can capture, by the frame's depth
 	// (constructTree): each construction of such a class had allocated
@@ -722,6 +724,9 @@ type closureCode struct {
 	// constructed a second object on such a prototype: its classes are
 	// kept, and freshProtos is not set again.
 	freshProtos, sharedProtos bool
+	// arrays are empty array literals' capacity hints, local to this
+	// template's closures in this realm.
+	arrays []*arrayRoom
 }
 
 // closure is a function template paired with the upvalues it captured.

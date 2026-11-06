@@ -168,8 +168,9 @@ type tbuilder struct {
 	protected, iters bool
 	// noUpdate is set while an update's operand is built, whose reads are
 	// not looked at as updates of their own (see tbuilder.update).
-	noUpdate bool
-	soleDone bool
+	noUpdate   bool
+	soleDone   bool
+	arraySites int
 }
 
 // target records a way from the block being built to the one at pc, whose
