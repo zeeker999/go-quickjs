@@ -401,3 +401,16 @@ func TestJSONRawAndSource(t *testing.T) {
 		{`[JSON.rawJSON.length, JSON.isRawJSON.length].join()`, "1,1"},
 	})
 }
+
+// A runtime's objects stop sharing layouts only past what V8 lets them: a
+// program whose documents began with sixty-five different keys had a layout
+// for each object of every kind it met after that.
+func TestJSONManyFirstKeys(t *testing.T) {
+	checkEval(t, `var o;
+		for (var i = 0; i < 1000; i++) o = JSON.parse('{"first' + i + '":1}');
+		var a = JSON.parse('{"late":1,"more":2}'), b = JSON.parse('{"late":3,"more":4}');
+		function rd(p) { return p.late + p.more; }
+		var s = 0;
+		for (var i = 0; i < 3000; i++) s += rd(i & 1 ? a : b);
+		s`, "15000")
+}
