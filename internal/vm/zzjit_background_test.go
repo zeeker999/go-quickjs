@@ -530,3 +530,83 @@ func TestJITBackgroundHotCodeIsEntered(t *testing.T) {
 		t.Fatalf("no call of hanoi entered its code: %+v", e)
 	}
 }
+
+// A first compile that meets a small callee being compiled waits for its
+// code, as a compile on the spot finds it there, and inlines it: called
+// natively in its place, nothing would ever teach the code to, no call of
+// such a callee leaving native code. carried_short gains nothing without it.
+func TestJITBackgroundCompileWaitsForItsCallee(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := osrSetup + `
+		function caller(n) {
+			let x = 0
+			for (let i = 0; i < n; i++) x += once(100)
+			return x
+		}
+	`
+	r := jitAgreesForTestWith(t, jitStressConfig{background: true, checks: 2}, setup, `caller(20000)`, `caller(20000)`)
+	if r.jit.bgHeld == 0 {
+		t.Fatal("no compile waited for a callee's")
+	}
+	if len(r.jit.heldJobs) != 0 {
+		t.Fatalf("%d compiles still held", len(r.jit.heldJobs))
+	}
+	e := jitCallbackEntry(r, "once")
+	if e == nil || e.ssa == nil || e.ssaVirtuals == 0 {
+		t.Fatalf("once does not inline add, whose objects it would leave unmade: %+v", e)
+	}
+}
+
+// Two functions calling each other are not held for each other, and a
+// runtime's compiles held when it lets go of its JIT leave their entries as
+// it found them.
+func TestJITBackgroundHoldsEnd(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `
+		function even(n) { return n === 0 ? 1 : odd(n - 1) }
+		function odd(n) { return n === 0 ? 0 : even(n - 1) }
+		function caller(n) {
+			let x = 0
+			for (let i = 0; i < n; i++) x += even(i & 15)
+			return x
+		}
+	`
+	r := jitAgreesForTestWith(t, jitStressConfig{background: true, checks: 2}, setup, `caller(40000)`, `caller(40000)`)
+	if len(r.jit.heldJobs) != 0 {
+		t.Fatalf("%d compiles held for each other", len(r.jit.heldJobs))
+	}
+	for _, name := range []string{"even", "odd", "caller"} {
+		if e := jitCallbackEntry(r, name); e == nil || e.pending != nil {
+			t.Fatalf("%s is still waiting for its compile: %+v", name, e)
+		}
+	}
+	e, odd := jitCallbackEntry(r, "even"), jitCallbackEntry(r, "odd")
+	v, err := r.Run(compileForTest(t, `even`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	even := v.Object().fn().closure
+	oddFn := odd.link.key.Value()
+	h := &jitJob{e: e, held: true}
+	e.pending, e.awaited = h, []*bytecode.Function{oddFn}
+	e.busy++
+	// even's compile waits for odd's: odd's does not wait for it in turn.
+	odd.holds = true
+	if r.jitAwaits(odd, oddFn, even) {
+		t.Fatal("two compiles held for each other")
+	}
+	e.awaited = nil
+	if !r.jitAwaits(odd, oddFn, even) {
+		t.Fatal("a compile not held for a callee being compiled")
+	}
+	odd.holds, odd.awaited, e.awaited = false, nil, []*bytecode.Function{oddFn}
+	r.jit.heldJobs = append(r.jit.heldJobs, h)
+	r.jit.abandonJobs()
+	if len(r.jit.heldJobs) != 0 || e.pending != nil || e.busy != 0 || len(e.awaited) != 0 {
+		t.Fatalf("held compile not let go: %d held, pending %v, busy %d, waiting for %d", len(r.jit.heldJobs), e.pending != nil, e.busy, len(e.awaited))
+	}
+}
