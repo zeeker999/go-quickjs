@@ -1735,6 +1735,39 @@ func (r *Runtime) jitRecompileLearned(cl *closure, e *jitEntry) {
 	}
 }
 
+// jitRecompileInRun is jitRecompileLearned for a run of e's code, f's, that
+// has left it, about to go on at pc. A function hardly called yet may be one
+// called for a long loop, which this frame is in: its compile keeps the
+// entry of the loop around pc, as one asked for at the loop's check does
+// (jitFrameAt). Dropped, the frame waited out two checks in the interpreter
+// and asked for code of its own, a compile more for what this one could
+// have been, upvalue_string_append's loops 4% slower for it.
+func (r *Runtime) jitRecompileInRun(f *frame, e *jitEntry, pc int) {
+	if !r.jitLearnedDue(f.cl, e) {
+		return
+	}
+	if e.starts < jitKeptStarts {
+		r.jitFrameFn, r.jitFramePC = f.cl.fn, jitLoopAround(f.cl.fn, pc)
+	}
+	r.jitReoptimize(f.cl, e)
+	r.jitFrameFn = nil
+}
+
+// jitLoopAround is the header of the innermost of fn's loops pc is in: where
+// the first backward jump from pc on to pc or before it goes. 0 if there is
+// none, which no compile takes for a header.
+func jitLoopAround(fn *bytecode.Function, pc int) int {
+	for q := pc; q < len(fn.Code); q++ {
+		switch in := fn.Code[q]; in.Op {
+		case bytecode.OpJump, bytecode.OpJumpIfFalse, bytecode.OpJumpIfTrue, bytecode.OpJumpIfCmpFalse:
+			if int(in.A) <= pc {
+				return int(in.A)
+			}
+		}
+	}
+	return 0
+}
+
 // jitLearnedDue reports whether e's code, cl's function's, valid, is due
 // to be compiled again for what it learned at its exits (reoptPending):
 // once it has spent a budget (jitTierBudget) since it began to learn, with
@@ -2199,7 +2232,8 @@ func (r *Runtime) jitReplaceCode(cl *closure, e *jitEntry, code *jit.SSACode, fb
 	e.ssaTargets = fb.targets
 	e.ssaStrings, e.ssaInlined, e.ssaPools, e.ssaMade = e.ssaStrings || fb.strings, fb.inlined, fb.pools, fb.made
 	e.ssaInlinedLearned = r.jit.jitInlinedLearned(fb.inlined, e.ssaInlinedLearned[:0])
-	e.ssaHomes, e.ssaVirtuals, e.ssaCalled = max(e.ssaHomes, fb.homes), fb.virtuals, fb.called
+	e.ssaVirtuals, e.ssaCalled = fb.virtuals, fb.called
+	e.setHomes(r.jit, fb.homes)
 	e.ssaCallbacks, e.ssaUnmade = fb.callbacks, fb.unmade
 	r.jit.setLinks(e, fb.links)
 	e.ssaKeeps = max(e.ssaKeeps, fb.keeps)
@@ -10046,7 +10080,8 @@ func (e *jitEntry) setSSA(s *jitState, fn *bytecode.Function, p *ir.Program, cod
 	e.ssaStrings, e.ssaInlined, e.ssaPools, e.ssaMade = fb.strings, fb.inlined, fb.pools, fb.made
 	e.ssaInlinedLearned = s.jitInlinedLearned(fb.inlined, e.ssaInlinedLearned[:0])
 	e.ssaInlinedN = fb.inlinedN
-	e.ssaHomes, e.ssaVirtuals, e.ssaCalled = max(e.ssaHomes, fb.homes), fb.virtuals, fb.called
+	e.ssaVirtuals, e.ssaCalled = fb.virtuals, fb.called
+	e.setHomes(s, fb.homes)
 	e.ssaCallbacks, e.ssaUnmade = fb.callbacks, fb.unmade
 	s.setLinks(e, fb.links)
 	e.ssaKeeps = max(e.ssaKeeps, fb.keeps)
@@ -11870,6 +11905,9 @@ func (r *Runtime) jitRunDone(e *jitEntry, idx, top int) {
 	if idx < len(s.goRuns) {
 		s.goRuns[idx] = jitGoRun{}
 	}
+	if e.ssaHomes != e.ssaHomesNow {
+		e.setHomes(s, e.ssaHomesNow)
+	}
 	c := s.ssaCtxs[idx]
 	clear(c.Keep[:e.ssaKeeps])
 	if e.osrOf != nil {
@@ -12089,7 +12127,7 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 				continue
 			}
 			pc, depth = int(f.pc), sp-f.base
-			r.jitRecompileLearned(f.cl, e)
+			r.jitRecompileInRun(f, e, pc)
 			if !e.ssa.HasEntry(pc) || !e.native() {
 				v, err, done, again := r.jitGoOn(f, e, pc, sp, true)
 				if !again {
@@ -12135,7 +12173,7 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 				continue
 			}
 			pc, depth = int(f.pc), sp-f.base
-			r.jitRecompileLearned(f.cl, e)
+			r.jitRecompileInRun(f, e, pc)
 			if !e.ssa.HasEntry(pc) || !e.native() {
 				v, err, done, again := r.jitGoOn(f, e, pc, sp, true)
 				if !again {
@@ -12188,7 +12226,7 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 				continue
 			}
 			pc, depth = int(f.pc), sp-f.base
-			r.jitRecompileLearned(f.cl, e)
+			r.jitRecompileInRun(f, e, pc)
 			if !e.ssa.HasEntry(pc) || !e.native() {
 				v, err, done, again := r.jitGoOn(f, e, pc, sp, true)
 				if !again {
@@ -12283,7 +12321,7 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 						continue
 					}
 					pc, depth = int(f.pc), sp-f.base
-					r.jitRecompileLearned(f.cl, e)
+					r.jitRecompileInRun(f, e, pc)
 					if !e.ssa.HasEntry(pc) || !e.native() {
 						v, err, done, again := r.jitGoOn(f, e, pc, sp, true)
 						if !again {
@@ -12352,7 +12390,7 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 				continue
 			}
 			pc, depth = int(f.pc), sp-f.base
-			r.jitRecompileLearned(f.cl, e)
+			r.jitRecompileInRun(f, e, pc)
 			if !e.ssa.HasEntry(pc) || !e.native() {
 				// No entry here; or native code does not pay (jitSSAProfit),
 				// and the interpreter runs the rest of this invocation.
@@ -12381,7 +12419,7 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 			// Compiled again, its budget spent, for what it learned (the
 			// poll left for it, ssa.GoPoll): entered again at the loop's
 			// header, in the new code.
-			r.jitRecompileLearned(f.cl, e)
+			r.jitRecompileInRun(f, e, pc)
 			if !e.ssa.HasEntry(pc) || !e.native() {
 				v, err, done, again := r.jitGoOn(f, e, pc, f.base+depth, true)
 				if !again {
