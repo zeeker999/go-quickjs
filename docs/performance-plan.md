@@ -2448,6 +2448,60 @@ to remove:
   plain and 1.93 GB with the JIT. Windows amd64 with the JIT, Windows arm64
   and Linux 386 cross-build. Tests also require an inlined callee's literal
   to inherit its own capacity hint and release its completed sample.
+
+  After rebasing onto `origin/main` at `2d36a04b` (2026-11-05), the full
+  SSR branch at `b9107fc5` is compared with that main, on the same M5 Max
+  and Go 1.27.3. Both sides use tagged binaries, built in the same checkout
+  with identical benchmark sources. One thread, eight placements, the
+  mean of each placement's best of three fresh processes, milliseconds:
+
+  | | Main interpreter | Branch interpreter | Main JIT | Branch JIT |
+  |---|---:|---:|---:|---:|
+  | FirstRender | 19.5 | 18.0 | 38.9 | 38.4 |
+  | Render, ten pages | 157.7 | 116.4 | 112.7 | 91.0 |
+
+  Steady rendering gains 26.2% without the JIT and 19.3% with it; first
+  render gains 7.7% and 1.5%. All eight placements improve steady rendering.
+  The 45 affected array and string micro-benchmarks, also eight placements
+  and three rounds, have geometric means 0.844 and 0.930, with none 3%
+  slower at every placement. These are the full branch's gains; the native
+  capacity hint's smaller incremental gain remains as recorded above.
+
+  A four-placement V8 screen is +0.7% plain and -3.3% with the JIT, with
+  no test 3% slower at every placement. Placement-zero fresh processes in
+  ABBA order run 20 fresh runtimes followed by 200 pages on a kept one.
+  Their medians at one thread, per page, are:
+
+  | | Main interpreter | Branch interpreter | Main JIT | Branch JIT |
+  |---|---:|---:|---:|---:|
+  | Steady wall, ms | 15.874 | 12.087 | 11.198 | 9.625 |
+  | Steady CPU, ms | 15.843 | 12.058 | 11.183 | 9.615 |
+  | Allocated, MiB | 7.274 | 2.874 | 7.406 | 3.005 |
+  | Allocations | 67,512 | 24,642 | 72,249 | 29,378 |
+  | Process peak RSS, MB | 54.1 | 46.2 | 85.6 | 69.5 |
+
+  Allocated bytes fall 60.5% and 59.4%; CPU 23.9% and 14.0%. The JIT's
+  first-use median in these processes is level, 38.52 to 38.61 ms, so the
+  placements' small first-render gain is not a consistent latency saving.
+  At four threads steady wall / CPU per page is 10.545 / 12.398 to
+  9.280 / 9.933 ms plain, and 7.749 / 9.526 to 6.541 / 7.088 with the
+  JIT. Peak RSS is 47.9 to 41.5 MB and 73.8 to 62.0 MB.
+
+  Totals support the micro-benchmarks' minimums: ABBA processes running
+  all 45 tests for three rounds have median total CPU of 12.075 to
+  10.450 seconds plain and 6.775 to 6.485 with the JIT. With the runtime's
+  default 8 MiB JIT budget, ABBA processes of 600 pages have median wall /
+  CPU of 6.803 / 6.787 to 5.587 / 5.563 seconds, an 18.0% CPU gain.
+  Allocated bytes fall from 4,410.8 to 1,814.9 MiB there, 58.9%.
+
+  After the rebase, the full Go suites pass plain and tagged, as do native
+  checkptr, focused Go 1.24.13 tests without cgo, and Windows amd64 with
+  the JIT, Windows arm64 and Linux 386 builds. Documented test262 gives
+  99,637 passed, zero failed and 342 skipped in each of plain, JIT stress
+  and debugger modes; native code runs in 73,492 tests. Conformance peak
+  RSS is 1.42 GB plain and 1.90 GB under JIT stress. The tagged
+  placement-zero binary grows 71,824 bytes, 44,858,882 to 44,930,706;
+  React remains 45,879 bytes.
 - **F4.** The JIT is 1.20 times the interpreter's wall time on this
   workload, which is mostly short polymorphic calls and string building
   rather than loops, and a JIT runtime holds 18.7 MiB against the
