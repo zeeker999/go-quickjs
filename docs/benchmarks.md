@@ -96,6 +96,60 @@ for parse and 30.36 / 30.45 MiB for round trips. The `qjs` binaries are both
 42,055,698 bytes. Four balanced V8 code placements, two comparison rounds,
 give 194.4 / 195.6 ms for fixed work, essentially level.
 
+The JSON micro-benchmarks and what they came to, on a Ryzen 9 9950X3D2,
+Windows, Go 1.27.3, against `7f8f311d`. `BenchmarkJSON*` are as above: one
+thread, the best of three fresh processes, one second each.
+
+| Operation | Before | After | Allocations before / after |
+|---|---:|---:|---:|
+| Parse | 730 us | 434 us | 12,015 / 4,173 |
+| Stringify | 848 us | 302 us | 25 / 21 |
+| 500 round trips | 716 us | 298 us | 6,500 / 3,000 |
+
+`json_*` in the micro mode, 49 tests of records, numbers, strings,
+dictionaries, layouts that vary, a reviver, a replacer and toJSON, over eight
+placements: 0.40 times the time before and 1.06 times Node 26's, where it was
+2.64. At one thread, the fair comparison with QuickJS, it is 0.32 times
+QuickJS's and 1.33 times Node's; five tests are slower than QuickJS there,
+json_stringify_built by 22% the most, and json_parse_escapes by 18%. 21 are as
+fast as Node or faster:
+a long string parsed takes 0.06 of its time, which reads 86 GB/s with AVX2
+and shares its bytes with the document, and a reviver and a replacer 0.8 and
+0.6. The widest gaps are what Go's allocator does and V8's does not:
+`json_stringify_long` is one 65 KB string a call, which V8 bumps a pointer
+for, 2.3 times Node's in a full run and 1.8 alone, 47 microseconds before,
+8.9 now;
+and `json_stringify_small`, 2.7 times, is mostly the call (a built-in costs 13
+ns to reach). Numbers of 17 digits written, 2 times Node's, are strconv's.
+
+`json_parse_new_layout`, a key no document had in each object, is level with
+the code before, over a run and but for 2% at one thread the first time its
+keys are met. No test of the 369 is 3% slower at every placement, plain or with
+the JIT, whose geometric mean is 0.88 of its time. The V8 suite is +0.2% and
++0.8% with the JIT, Octane +0.7% and -0.1%, Are We Fast Yet -0.2% and +0.3%.
+The `qjs` binary is 77 KB larger, 0.18%.
+What is retained is what it was: 7.9 MB at the end of a run of ordinary
+documents, and 29.9 at the end of `json_parse_new_layout`, which invents a key
+for each object. A root has V8's 1536 transitions, where a shape had 64,
+and shapes further along still have 64.
+
+On arm64 the scan of long strings is NEON's, 64 bytes at a time. On an Apple
+M5 Max, macOS/arm64, Go 1.27.3, `jsonscanbench` with and without `-tags
+purego`: it reads 39 GB/s to the word loop's 15, the same at 1 KB and at 256
+MB, so that the loop is the limit and not memory, and 24 to 11 at 64 bytes.
+
+| Operation | Word loop | NEON |
+|---|---:|---:|
+| Parse a 65 KB string | 5.5 us | 1.7 us |
+| Stringify a 65 KB string | 10.4 us | 7.9 us |
+| Parse 100 strings of 1 KB | 10.2 us | 4.9 us |
+| Stringify 100 strings of 1 KB | 25.4 us | 21.9 us |
+| Stringify 100 strings of 200 B | 3.3 us | 2.5 us |
+
+Parsing strings of 200 bytes, short strings and records are level, within 4%.
+On a Ryzen 9 9950X3D2 the AVX2 scan reads 90 GB/s to 16 MB and 57 at 256 MB,
+where memory is what stops it.
+
 ## Loading large bundles
 
 The optional open-source corpus uses two unmodified MIT-licensed upstream
