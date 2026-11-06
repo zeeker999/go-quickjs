@@ -48,7 +48,7 @@ func opHook[_ any](b *tbuilder, pc int, code []bytecode.Instr, more bool) (int, 
 	switch in.Op {
 	case bytecode.OpNewArray:
 		if in.A == 0 {
-			return 0, arrayEmptyOp[struct{}](b)
+			return 0, arrayEmptyOp[struct{}](b, pc)
 		}
 	case bytecode.OpGetPropThis:
 		// exec's read, which a call whose result nothing reads may take

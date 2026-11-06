@@ -22,6 +22,8 @@ type arrayRoom struct {
 	room, previous int
 	listed         bool
 	wait           uint8
+	acrossTurns    bool
+	pc             int32
 }
 
 func arrayObserve[_ any](s *arrayRoom, a *Object) {
@@ -31,6 +33,7 @@ func arrayObserve[_ any](s *arrayRoom, a *Object) {
 	}
 	if n < 256 {
 		s.room, s.previous, s.wait = 0, 0, 31
+		s.acrossTurns = false
 		return
 	}
 	s.room = min(n, s.previous)
@@ -69,31 +72,36 @@ func arraySamplesLetGo[_ any](r *Runtime) {
 			}
 			if a != nil {
 				arrayObserve[struct{}](s, a)
+				s.acrossTurns = s.room >= 256
 			}
 		}
 		s.sample, s.weak, s.listed = nil, weak.Pointer[Object]{}, false
 	}
 	clear(r.arraySamples[len(keep):])
 	r.arraySamples = keep
+	jitLiteralArraysLetGo[struct{}](r)
 }
 
-func arrayEmptyOp[_ any](b *tbuilder) bool {
+func arrayEmptyOp[_ any](b *tbuilder, pc int) bool {
 	if !b.spill() {
 		return false
 	}
-	n := &arrayEmptyNode[struct{}]{site: b.arraySites}
+	n := &arrayEmptyNode[struct{}]{site: b.arraySites, pc: int32(pc)}
 	b.arraySites++
 	b.push(n.make)
 	return true
 }
 
-type arrayEmptyNode[_ any] struct{ site int }
+type arrayEmptyNode[_ any] struct {
+	site int
+	pc   int32
+}
 
-func arraySiteNew[_ any](cl *closureCode, site int) *arrayRoom {
+func arraySiteNew[_ any](cl *closureCode, site int, pc int32) *arrayRoom {
 	for len(cl.arrays) <= site {
 		cl.arrays = append(cl.arrays, nil)
 	}
-	s := &arrayRoom{wait: 1}
+	s := &arrayRoom{wait: 1, pc: pc}
 	cl.arrays[site] = s
 	return s
 }
@@ -107,7 +115,7 @@ func (n *arrayEmptyNode[_]) make(c *tctx) Value {
 		s = c.arrays[n.site]
 	}
 	if s == nil {
-		s = arraySiteNew[struct{}](c.closureCode, n.site)
+		s = arraySiteNew[struct{}](c.closureCode, n.site, n.pc)
 	}
 	track := s.wait == 0
 	if track {

@@ -2377,6 +2377,77 @@ to remove:
   release, realm isolation, the memory-limit bypass, the first-use skip,
   callbacks mutating their array across growth, and a native caller using
   a tree callee with the collector idle and marking.
+
+  The native tier now inherits a large hint from a tree site whose results
+  have been confirmed at a turn's end. The bytecode PC joins the two tiers'
+  sites, including inlined callees; it and the turn marker fit the tree
+  feedback's padding, keeping it 40 bytes. Its node grows from 8 to 16
+  bytes. The native source needs no new fields. A large pool holds one
+  array, observes its completed length at the next refill, and shrinks a
+  hint when the result shrinks. A result beyond 65,536 drops the hint.
+  Its old sample is cleared before allocating the new element buffer,
+  so that allocation cannot retain the previous result's object graph
+  through a collection.
+  At turn end a completed native sample is observed and released too;
+  an unused pool's empty array is not observed as a short result. Only
+  pools with large hints are tracked, by weak pointers, so the list keeps
+  neither discarded code nor its pools alive. Its storage counts against
+  the JIT budget, and no earlier JIT-state field moves.
+
+  Learning large lengths independently in native pools was tried first:
+  a 1,200-page screen saved 7.2% CPU and 14.6% of allocated bytes against
+  the tree-only change. It was not taken: in the full array micro group,
+  `array_filter` was 7.8% slower and `array_reduce_upvalue` 47.6% slower
+  at every placement. Both were level alone over eight placements and
+  in long warmed profiles. Restoring the old capacity policy with the new
+  Go call structure restored the full group too. Native listings have
+  matching function sizes, but the callback's calls before inlining rose
+  from 316,525 to 613,661 in the captured full runs. The policy changes
+  the earlier loops' exits and later warm-up history; no layout cause is
+  assigned. Inheriting any tree hint within the same turn still left
+  several callbacks 7 to 18% slower at all four screened placements.
+  Restricting inheritance to sites confirmed at a turn's end removes
+  those losses while retaining the feedback across repeated SSR requests.
+
+  Against the tree-only change, a long JIT comparison before turn-end
+  sample release ran 1,200
+  pages per process, alternating the two labels in opposite orders at
+  successive placements, one thread, all eight placements, with GC tracing.
+  Mean wall / CPU milliseconds are 9,683.2 / 9,663.1 to 9,234.0 / 9,215.8,
+  a 4.6% CPU gain; every placement improves, by 1.5 to 5.7%. Allocated
+  bytes fall 15.3%, 4,183.4 to 3,542.7 MiB, with 5,992 fewer allocations
+  over the whole run. Mean GC counts fall 325 to 288 and summed marking
+  intervals 3.664 to 3.042 seconds. Peak RSS is level, 73.3 MB on both
+  sides. Releasing completed samples is required even if retaining a page
+  between requests could favor a timing.
+
+  With turn-end release, the final eight-placement comparison has mean
+  wall / CPU milliseconds of 10,978.5 / 10,924.4 to 10,911.2 / 10,868.3:
+  the CPU gain is only 0.5%, with mixed placements. Allocated bytes still
+  fall 15.3%, 4,183.4 to 3,542.6 MiB. Mean process GC counts fall 317 to
+  251, while summed marking intervals rise 4.814 to 4.919 seconds. Peak
+  RSS is 70.1 to 69.4 MB. This is a byte saving with a small, variable CPU
+  gain, not evidence of the earlier 4.6% CPU gain after the lifetime fix.
+  The seven hot functions keep their addresses and sizes. The tagged
+  placement-zero binary grows 17,984 bytes; React's bundles remain 45,879
+  bytes. There is no new package initialization.
+
+  The combined changes against the reviewed `dbfa15a3` baseline, one
+  thread, all eight placements and three fresh-process rounds, take ten
+  pages from 137.4 to 112.7 ms without the JIT (-18.0%) and 93.9 to 81.3
+  with it (-13.5%). The final 22 array micros against the tree-only change
+  have no test 3% slower at every placement, plain or with the JIT.
+  Their geometric means are 0.999 and 0.997. Eight-placement V8 totals
+  are +0.1% and -0.3%; Octane -1.0% and +0.9%, with none of their tests
+  3% slower at every placement.
+
+  The full Go suites pass, plain and tagged, as do focused native tests
+  with checkptr and Go 1.24.13 without cgo. Documented test262 `2e0a5676`
+  gives 99,637 passed, zero failed and 342 skipped, plain, under JIT stress
+  and with a debugger. Turn-end release's conformance peak RSS is 1.51 GB
+  plain and 1.93 GB with the JIT. Windows amd64 with the JIT, Windows arm64
+  and Linux 386 cross-build. Tests also require an inlined callee's literal
+  to inherit its own capacity hint and release its completed sample.
 - **F4.** The JIT is 1.20 times the interpreter's wall time on this
   workload, which is mostly short polymorphic calls and string building
   rather than loops, and a JIT runtime holds 18.7 MiB against the
