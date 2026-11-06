@@ -35,13 +35,18 @@ func AppendFloat(dst []byte, v float64) []byte {
 	const maxExactInt = 1 << 53
 	if v > -maxExactInt && v < maxExactInt {
 		if i := int64(v); float64(i) == v {
-			return strconv.AppendInt(dst, i, 10)
+			return appendInt(dst, i)
 		}
 	}
 	if math.IsNaN(v) || math.IsInf(v, 0) {
 		return append(dst, FormatFloat(v)...)
 	}
 	if a := math.Abs(v); a >= 1e-6 && a < 1e21 {
+		if a < maxPlacesValue {
+			if r := math.Round(a * placesScale); r/placesScale == a && r >= 1 {
+				return appendPlaces(dst, uint64(r), v < 0)
+			}
+		}
 		return strconv.AppendFloat(dst, v, 'f', -1, 64)
 	}
 	// strconv writes the same shortest digits, but pads an exponent below
@@ -58,6 +63,78 @@ func AppendFloat(dst []byte, v float64) []byte {
 		}
 	}
 	return dst
+}
+
+// digitPairs is 00 to 99.
+const digitPairs = "0001020304050607080910111213141516171819" +
+	"2021222324252627282930313233343536373839" +
+	"4041424344454647484950515253545556575859" +
+	"6061626364656667686970717273747576777879" +
+	"8081828384858687888990919293949596979899"
+
+// appendInt writes i in place from its end, two digits at a time.
+func appendInt(dst []byte, i int64) []byte {
+	if i < 0 {
+		dst = append(dst, '-')
+		i = -i
+	}
+	u := uint64(i)
+	n := 1
+	for x := u; x >= 10; x /= 10 {
+		n++
+	}
+	at := len(dst) + n
+	if at > cap(dst) {
+		dst = append(dst, make([]byte, n)...)
+	}
+	dst = dst[:at]
+	for u >= 100 {
+		q := u / 100
+		r := u - q*100
+		at -= 2
+		dst[at], dst[at+1] = digitPairs[2*r], digitPairs[2*r+1]
+		u = q
+	}
+	if u >= 10 {
+		dst[at-2], dst[at-1] = digitPairs[2*u], digitPairs[2*u+1]
+	} else {
+		dst[at-1] = byte('0' + u)
+	}
+	return dst
+}
+
+// A number with few decimal places -- a price, a coordinate, a measure -- is
+// tried as an integer of so many millionths. If that integer over a million is
+// the number again, a decimal of at most fifteen digits rounds to it, and no
+// other of as few digits does, so that the digits are the shortest that
+// identify it: those of the integer, with its zeros off the end. A number
+// that needs more of them is tried once, for one multiplication and one
+// division, and goes on to find its digits as it would have.
+const (
+	placesScale    = 1e6
+	places         = 6
+	maxPlacesValue = 1e9
+)
+
+// appendPlaces writes the decimal r millionths, which is no whole number.
+func appendPlaces(dst []byte, r uint64, neg bool) []byte {
+	if neg {
+		dst = append(dst, '-')
+	}
+	whole, frac := r/placesScale, r%placesScale
+	dst = strconv.AppendUint(dst, whole, 10)
+	dst = append(dst, '.')
+	n := places
+	for frac%10 == 0 {
+		frac /= 10
+		n--
+	}
+	var digits [places]byte
+	for i := n - 1; i >= 0; i-- {
+		digits[i] = byte('0' + frac%10)
+		frac /= 10
+	}
+	return append(dst, digits[:n]...)
 }
 
 // FormatFloat renders v using the ECMAScript Number::toString algorithm in
