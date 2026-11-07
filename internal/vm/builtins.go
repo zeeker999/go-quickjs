@@ -779,7 +779,7 @@ func (r *Runtime) initFunctionBuiltins() {
 			return Str(NewString("function () { [native code] }")), nil
 		}
 		if fd.closure != nil && fd.closure.fn.Text != "" {
-			return Str(NewString(fd.closure.fn.Text)), nil
+			return Str(NewString(rt.ownText(fd.closure.fn.Text))), nil
 		}
 		return Str(NewString("function " + nativeFunctionName(fd.nameOr("")) + "() { [native code] }")), nil
 	})
@@ -2318,7 +2318,7 @@ func (r *Runtime) initSymbolBuiltins() {
 		if err != nil {
 			return Undefined, err
 		}
-		return Sym(NewSymbol(s.Go(), true)), nil
+		return Sym(NewSymbol(rt.ownText(s.Go()), true)), nil
 	})
 	r.defMethod(ctor, "for", 1, func(rt *Runtime, this Value, args []Value) (Value, error) {
 		s, err := rt.toString(arg(args, 0))
@@ -2329,6 +2329,7 @@ func (r *Runtime) initSymbolBuiltins() {
 		if sym, ok := rt.symbolRegistry[key]; ok {
 			return Sym(sym), nil
 		}
+		key = rt.ownText(key)
 		sym := &Symbol{Description: key, HasDescription: true, Registered: true}
 		rt.symbolRegistry[key] = sym
 		return Sym(sym), nil
@@ -2530,7 +2531,7 @@ func (r *Runtime) initErrorBuiltins() {
 		if err != nil {
 			return Undefined, err
 		}
-		return Str(NewString(s)), nil
+		return Str(NewString(rt.ownText(s))), nil
 	})
 }
 

@@ -126,10 +126,10 @@ func matchResultOf[_ any](r *Runtime, re *regexp.Regexp, caps []int, input *Stri
 			// is distinct from having matched the empty string.
 			elems[i] = Undefined
 		case hi > lo && (lo > 0 || hi < input.length):
-			elems[i] = Str(input.substringInto(&strs[0], lo, hi))
+			elems[i] = Str(r.kept(input, input.substringInto(&strs[0], lo, hi)))
 			strs = strs[1:]
 		default:
-			elems[i] = Str(input.Substring(lo, hi))
+			elems[i] = Str(r.kept(input, input.Substring(lo, hi)))
 		}
 	}
 	groups := r.groupsObject(r.groupsLayoutOf(re), elems)
