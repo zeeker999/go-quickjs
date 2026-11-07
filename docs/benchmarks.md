@@ -96,6 +96,71 @@ for parse and 30.36 / 30.45 MiB for round trips. The `qjs` binaries are both
 42,055,698 bytes. Four balanced V8 code placements, two comparison rounds,
 give 194.4 / 195.6 ms for fixed work, essentially level.
 
+The JSON micro-benchmarks and what they came to, on a Ryzen 5 3600, Windows,
+Go 1.27.3, against `7f8f311d`. `BenchmarkJSON*` are as above: one thread, the
+best of three runs in one process, one second each.
+
+| Operation | Before | After | Allocations before / after |
+|---|---:|---:|---:|
+| Parse | 2,080 us | 1,145 us | 12,015 / 4,752 |
+| Stringify | 2,360 us | 841 us | 25 / 21 |
+| 500 round trips | 1,811 us | 727 us | 6,500 / 3,000 |
+
+`json_*` in the micro mode, 49 tests of records, numbers, strings,
+dictionaries, layouts that vary, a reviver, a replacer and toJSON, over eight
+placements: 0.41 times the time before, at one thread too, and 1.10 times Node
+26's, by the geometric mean, where it was 2.7. At one thread it is 0.40 times
+QuickJS's; six tests are slower than QuickJS there, json_stringify_built by 71%
+the most and json_parse_escapes by 63%. 21 are as fast as Node or faster: a
+long string parsed takes 0.08 of its time, which reads it by AVX2 and shares its
+bytes with the document, and a reviver and a replacer 0.77 and 0.72. The widest
+gaps are what Go's allocator does and V8's does not: `json_stringify_built`,
+3.9 times, and `json_stringify_small`, 3.0, are mostly the call and the result.
+Numbers of 17 digits written, 2.1 times Node's, are strconv's.
+
+The other 320 micro-benchmarks are 0.995 of their time by their geometric
+mean, 1.006 with the JIT over four placements, and no test of the 369 is 3%
+slower at every placement of eight, plain, or, of those that were at four, with
+the JIT. All 369 are 0.885, and 0.893 with the JIT. Over four placements, the V8
+suite is -0.7% and -0.2% with the JIT, Octane level and +0.7%, Are We Fast Yet
++0.8%, most of it List at one placement of four, and +0.2%, the fresh runs -0.3% and
+-0.2%; the page render, over eight, -0.6%, and -0.1% with the JIT over four;
+at one thread +1.1%, within the 8% its placements span. The `qjs` binary is 75
+KB larger, 0.17%, `NewRuntime` is what it was, 2,143 allocations and 312 KB, and
+a new runtime's first parse and stringify cost 3.7 us and 3 KB more.
+
+The micro mode's run of `json_*` takes half the time, 13.5 s for 27.3, half the
+CPU time, 19.2 s for 39.1, and allocates 8.1 GB for 17.1 and 72 million objects
+for 169; its peak heap is the same, 107.8 MB, and so is what is live at its end,
+47 MB. What a document's values keep is bounded. A string with no escape is a
+slice of the document, as it was, and holds all of it (KI-77). Strings are made
+a batch at a time, which takes a quarter off parsing a document of strings,
+and a string that outlives its batch holds it, so that the
+batches of a document take no more than its size in all and the strings past
+that are made one at a time: keeping one string of each ten-string record of a
+25 MB document leaves 69 MB of heap, where the code before left 43 and unbounded
+batches 145. A layout's record of its keys holds their text, whole for each layout of
+a chain, so that a layout of more than 128 keys or 4 KB of them has none and
+is written as before: a thousand keys of a kilobyte, each layout written twice,
+had kept 500 MB.
+
+On arm64 the scan of long strings is NEON's, 64 bytes at a time. On an Apple
+M5 Max, macOS/arm64, Go 1.27.3, `jsonscanbench` with and without `-tags
+purego`: it reads 39 GB/s to the word loop's 15, the same at 1 KB and at 256
+MB, so that the loop is the limit and not memory, and 24 to 11 at 64 bytes.
+
+| Operation | Word loop | NEON |
+|---|---:|---:|
+| Parse a 65 KB string | 5.5 us | 1.7 us |
+| Stringify a 65 KB string | 10.4 us | 7.9 us |
+| Parse 100 strings of 1 KB | 10.2 us | 4.9 us |
+| Stringify 100 strings of 1 KB | 25.4 us | 21.9 us |
+| Stringify 100 strings of 200 B | 3.3 us | 2.5 us |
+
+Parsing strings of 200 bytes, short strings and records are level, within 4%.
+On a Ryzen 9 9950X3D2 the AVX2 scan reads 90 GB/s to 16 MB and 57 at 256 MB,
+where memory is what stops it.
+
 ## Loading large bundles
 
 The optional open-source corpus uses two unmodified MIT-licensed upstream
