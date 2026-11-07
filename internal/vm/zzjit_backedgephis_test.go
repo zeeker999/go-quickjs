@@ -64,6 +64,7 @@ func jitListWant(rounds int) string {
 // at the back edge -- every back edge, under a budget of one, each an exit
 // -- are the loop's next ones, collector running or not.
 func TestJITBackEdgePhisNotSpilled(t *testing.T) {
+	jitNoLoopInlineForTest(t)
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}

@@ -2332,9 +2332,20 @@ func Inlinable(p *ir.Program) bool {
 	return ok && len(calls) == 0
 }
 
+// maxInlineLoop is the most instructions a callee with a loop may have to
+// be inlined (InlineCalls): a search of a short list, EarleyBoyer's
+// sc_assq, made at each of millions of calls, costs about what its call
+// does, and inlined adds a few instructions to its caller. A larger loop
+// is made once for many turns, and inlining it saves only the one call
+// against the code it adds: Crypto's am3, of a few dozen turns a call,
+// made its callers' code 60% larger and Crypto 25% slower.
+const maxInlineLoop = 24
+
 // InlineCalls reports whether a callee may be inlined if the operations it
 // leaves to Go, which it returns by PC, are calls inlined in it too: it is
-// Inlinable but for those.
+// Inlinable but for those. A callee with a loop is taken only if it is
+// small (maxInlineLoop) and leaves nothing to Go: no call to inline at
+// each of its loop's turns.
 func InlineCalls(p *ir.Program) ([]int, bool) {
 	if p == nil || p.Validate() != nil || len(p.Code) > maxInline || len(p.Globals) != 0 || p.Captured != nil || p.DerivedConstructor || len(p.Handlers) != 0 {
 		// A callee whose locals closures capture: an inlined frame's
@@ -2345,6 +2356,7 @@ func InlineCalls(p *ir.Program) ([]int, bool) {
 		return nil, false
 	}
 	var calls []int
+	loops := false
 	for pc, in := range p.Code {
 		if !reachable(p, pc) {
 			continue
@@ -2358,9 +2370,12 @@ func InlineCalls(p *ir.Program) ([]int, bool) {
 			calls = append(calls, pc)
 		case ir.Jump, ir.Branch:
 			if in.Target <= pc {
-				return nil, false
+				loops = true
 			}
 		}
+	}
+	if loops && (len(calls) != 0 || len(p.Code) > maxInlineLoop) {
+		return nil, false
 	}
 	return calls, true
 }

@@ -1875,11 +1875,17 @@ Open from it:
   Typescript and the V8 suite's short runs slower, an inlined copy
   having no feedback of its own and a call from it that leaves native
   code sending its caller to the interpreter.
-- Callees with loops are not inlined: inlining Crypto's `am3` made its
-  callers' code 60% larger and Crypto 25% slower. A rule that inlines a
-  loop only where the call's cost is not spread over the loop's turns is
-  wanted first. (Where the loop calls a closure the caller gives, the
-  round of 2026-10-28, above.)
+- Callees with loops are not inlined but for small ones: inlining
+  Crypto's `am3` made its callers' code 60% larger and Crypto 25%
+  slower. A callee of at most 24 instructions whose loop calls nothing
+  is (`maxInlineLoop`): a search of a short list, EarleyBoyer's
+  `sc_assq`, costs about what its call does, made two million times a
+  run of forty. Over four JIT placements AWFY's List -16%, EarleyBoyer
+  -2% at three of them, the rest level, but for the change's one slow
+  placement, slow on every benchmark. A wider rule, inlining a loop only
+  where the call's cost is not spread over its turns, is still wanted.
+  (Where the loop calls a closure the caller gives, the round of
+  2026-10-28, above.)
 - A call is still an indirect jump each way: native code runs on the
   goroutine's stack and never moves SP, so that Go's unwinder, stack scan
   and growth meet no return address of its, and a return is not
