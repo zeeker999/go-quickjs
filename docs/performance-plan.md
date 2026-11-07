@@ -3504,7 +3504,28 @@ first, as the rest of the plan is.
   compile time (2026-10-26). Its four scans of a function (this,
   arguments, direct eval, this's properties) are one walk since
   `3205082f` (CodeLoad -5.1%), and a token is scanned into the parser's
-  (`48ad202a`).
+  (`48ad202a`). The round of 2026-11-06 went by the allocation profile of
+  `-mode compile`, as the collector was a third of its CPU: identifiers'
+  lookaheads no longer lex the next token, a script's line table is made
+  when asked for, a function's tables are sized from its own source, and
+  the hot nodes are smaller (`5551622a`..`a98a1fd2`): Octane's compile at
+  one thread -21%, half its allocations and two thirds of its bytes,
+  CodeLoad -18%. The bytecode of all the suites' files is unchanged. Left:
+  `Token.IsPunct` chains and the name maps are each about 3% of a compile,
+  the final tables are allocated one by one, and a string `Op` in a binary
+  node is 16 bytes a kind would do in one, at most sites of the compiler.
+- The JIT's compile, the same round (`d0125db3`..`5ddf3594`): bytes -31%
+  and objects -43% on Typescript, -33% and -35% on a first render, its time
+  -5%; with the front end's, PdfJS -8.4%, Box2D -11.5%, Gameboy -9.4%,
+  Typescript -3.6%, a fresh process's whole run at one thread, and CPU
+  -7.6 to -19.3% with cores to spare. What is left is diffuse, as it was
+  on 2026-11-03: `allocate` 14% of a compile, `plan` 15% of which most is
+  the feedback's answers, `Asm.Finish` 9%, already narrowed to its
+  candidates. The closures of `compiler.call` and the 65 kinds of cold code
+  are a sixth of the objects left: a change of the code generator's shape.
+  Tried and dropped: leaving `rematerializeUpvalues` early where it
+  replaces nothing, no gain on Typescript, whose phis are mostly of cells,
+  and a change to two of AWFY's listings.
 - NewRuntime: about 600 built-in functions made eagerly, its largest cost;
   made lazily they would change what scripts see of the global's
   descriptors, a decision for the API; a lazy property index for large
