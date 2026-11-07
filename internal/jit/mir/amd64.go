@@ -4173,7 +4173,7 @@ func (c *compiler) lengthWrite(v *ssa.Value, slow amd64.Label) {
 	c.a.OpImm(amd64.Cmp, scratchC, int32(c.enc.ClassArray), false)
 	fail(amd64.CondNE)
 	c.a.LoadU8(scratchC, scratchB, c.enc.ObjectFlags)
-	c.a.OpImm(amd64.And, scratchC, int32(c.enc.FlagLengthWritable|c.enc.FlagSparse), false)
+	c.a.OpImm(amd64.And, scratchC, int32(c.enc.FlagLengthWritable|c.enc.FlagSparse|c.enc.FlagShared), false)
 	c.a.OpImm(amd64.Cmp, scratchC, int32(c.enc.FlagLengthWritable), false)
 	fail(amd64.CondNE)
 	c.a.LoadU32(scratchC, scratchB, c.enc.ObjectPropsLen)
@@ -4300,6 +4300,9 @@ func (c *compiler) keyedStore(v *ssa.Value, slow amd64.Label) {
 	fail(amd64.CondE)
 	c.a.LoadU8(scratchC, scratchB, c.enc.ObjectClass)
 	c.a.OpImm(amd64.Cmp, scratchC, int32(c.enc.ClassArray), false)
+	fail(amd64.CondNE)
+	// Elements an array literal's arrays share are Go's to copy first.
+	c.a.TestMem8(scratchB, c.enc.ObjectFlags, c.enc.FlagShared)
 	fail(amd64.CondNE)
 	c.movImm(scratchC, c.enc.WriteBarrier)
 	c.a.LoadU8(scratchC, scratchC, 0)
@@ -5134,7 +5137,7 @@ func (c *compiler) pushGuards(t *ssa.CallSite, recv *ssa.Value, guard func(amd64
 	guard(amd64.CondNE)
 	c.a.LoadU8(scratchB, scratchC, c.enc.ObjectFlags)
 	want := c.enc.FlagExtensible | c.enc.FlagLengthWritable
-	c.a.OpImm(amd64.And, scratchB, int32(want|c.enc.FlagSparse), false)
+	c.a.OpImm(amd64.And, scratchB, int32(want|c.enc.FlagSparse|c.enc.FlagShared), false)
 	c.a.OpImm(amd64.Cmp, scratchB, int32(want), false)
 	guard(amd64.CondNE)
 	c.a.Load(scratchB, scratchC, c.enc.ObjectElems+8)
@@ -5194,7 +5197,7 @@ func (c *compiler) popGuards(t *ssa.CallSite, recv *ssa.Value, guard func(amd64.
 	c.a.OpImm(amd64.Cmp, scratchB, int32(c.enc.ClassArray), false)
 	guard(amd64.CondNE)
 	c.a.LoadU8(scratchB, scratchC, c.enc.ObjectFlags)
-	c.a.OpImm(amd64.And, scratchB, int32(c.enc.FlagLengthWritable|c.enc.FlagSparse), false)
+	c.a.OpImm(amd64.And, scratchB, int32(c.enc.FlagLengthWritable|c.enc.FlagSparse|c.enc.FlagShared), false)
 	c.a.OpImm(amd64.Cmp, scratchB, int32(c.enc.FlagLengthWritable), false)
 	guard(amd64.CondNE)
 	c.loadProtoPlain(scratchB, scratchC)
@@ -7151,7 +7154,7 @@ func (c *compiler) arrayGuards(p amd64.Reg, protos [2]ssa.Holder, fail func(amd6
 	fail(amd64.CondNE)
 	c.a.LoadU8(scratchB, p, c.enc.ObjectFlags)
 	want := c.enc.FlagExtensible | c.enc.FlagLengthWritable
-	c.a.OpImm(amd64.And, scratchB, int32(want|c.enc.FlagSparse), false)
+	c.a.OpImm(amd64.And, scratchB, int32(want|c.enc.FlagSparse|c.enc.FlagShared), false)
 	c.a.OpImm(amd64.Cmp, scratchB, int32(want), false)
 	fail(amd64.CondNE)
 	c.loadProtoPlain(scratchB, p)
@@ -9392,6 +9395,10 @@ func (c *compiler) storageFree(array *ssa.Value, checks []*ssa.Value, stub amd64
 // result[result.length] = parameterSymbol, a parameter it read from
 // args.members live past the store, at each parameter.
 func (c *compiler) storeCell(array *ssa.Value, checks []*ssa.Value, stub amd64.Label, fail func(amd64.Cond), found amd64.Label) {
+	// Elements an array literal's arrays share (FlagShared) are written
+	// by none of them: Go gives the array a copy of its own first.
+	c.a.TestMem8(c.gpr(array, scratchC), c.enc.ObjectFlags, c.enc.FlagShared)
+	fail(amd64.CondNE)
 	protos := c.f.ArrayProtos
 	if protos[0].Object == 0 || c.enc.ValueSize != 16 {
 		c.elementCell(array, fail)
@@ -10010,6 +10017,9 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		})
 		c.typedArray(arg(0), typed)
 		c.index(arg(1), fail)
+		// Shared elements (FlagShared) are Go's to copy before the store.
+		c.a.TestMem8(c.gpr(arg(0), scratchC), c.enc.ObjectFlags, c.enc.FlagShared)
+		fail(amd64.CondNE)
 		c.element(arg(0), fail)
 		c.boxF64(c.xmm(arg(2), xScratch0), scratchB)
 		c.a.Store(scratchA, c.enc.NumOffset, scratchB)

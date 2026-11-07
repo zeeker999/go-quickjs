@@ -456,7 +456,11 @@ func (m *memoryMeter) object(o *Object) {
 			m.value(v)
 		}
 	}
-	m.valueSlice(o.elemsOf(), true)
+	// An array literal's shared constants (objSharedElems) are counted
+	// once, however many of its arrays hold them.
+	if e := o.elemsOf(); o.flags&objSharedElems == 0 || !m.has(unsafe.Pointer(unsafe.SliceData(e))) {
+		m.valueSlice(e, true)
+	}
 	if refs := o.weakMapRefsOf(); refs != nil {
 		m.weakMapRefs(refs)
 	}

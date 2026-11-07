@@ -1556,6 +1556,7 @@ func (r *Runtime) spliceDense(this Value, args []Value) (Value, bool) {
 		!r.noInheritedIndices(o) || !r.plainSpecies(o) {
 		return Undefined, false
 	}
+	o.ownElems()
 	elems := o.elemsOf()
 	n := int64(len(elems))
 	start, err := r.relativeIndex64(args[0], n, 0)
