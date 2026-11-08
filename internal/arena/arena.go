@@ -25,9 +25,10 @@ type Arena[T any] struct {
 	// keepBig makes a request bigger than a chunk a chunk of its own that
 	// the arena keeps (KeepBig).
 	keepBig bool
-	// recent are how many slots each of the last jobs used, the latest at
-	// next, and jobs how many there have been, up to recentJobs: what an
-	// arena that keeps big requests keeps chunks for (trim).
+	// recent are how many slots the chunks each of the last jobs cut from
+	// hold (Rewind's reach), the latest at next, and jobs how many there
+	// have been, up to recentJobs: what an arena that keeps big requests
+	// keeps chunks for (trim).
 	recent [recentJobs]int
 	next   int
 	jobs   int
@@ -111,22 +112,25 @@ func (a *Arena[T]) Append(s []T, v T) []T {
 // much as the recent jobs before this one used, and lets the rest go
 // (trim).
 func (a *Arena[T]) Rewind() {
-	used := 0
+	// reach is how many slots the chunks the job cut from hold, the rest
+	// that requests that did not fit left behind included: what the same
+	// job needs again.
+	reach := 0
 	for i := 0; i < a.cur && i < len(a.chunks); i++ {
 		clear(a.chunks[i][:a.used[i]])
-		used += a.used[i]
+		reach += len(a.chunks[i])
 	}
-	if a.cur < len(a.chunks) {
+	if a.cur < len(a.chunks) && (a.off != 0 || a.cur != 0) {
 		clear(a.chunks[a.cur][:a.off])
-		used += a.off
+		reach += len(a.chunks[a.cur])
 	}
 	a.cur, a.off = 0, 0
 	if a.keepBig {
-		a.trim(used)
+		a.trim(reach)
 	}
 }
 
-// trim notes a job that used n slots, and, if it used more than any of the
+// trim notes a job that reached n slots, and, if it reached past all of the
 // recent jobs before it, drops the chunks past those they needed: a
 // compile of one big function gives its tables back as it ends, where
 // they had been kept as long as the runtime -- RegExp's run blocks, of
