@@ -32,6 +32,7 @@ func Optimize(f *Func) {
 		clearShadows(f)
 	}
 	f.originsKept = false
+	f.scr().intNo = f.scr().intNo[:0]
 	// Tables are by value ID, not maps: a compile at run time pays for every
 	// pass (BenchmarkJITCompile in internal/vm).
 	subst := f.scr().subst
@@ -81,8 +82,9 @@ rounds:
 		if unboxBigPhis(f) {
 			unboxed = true
 		}
-		// Then the truncated arithmetic of exact integers (ints.go).
-		if truncInts(f) {
+		// Then the phis of doubles that only carry int32s (ints.go), so
+		// that the walk folds their conversions' ToInt32s this round.
+		if intPhis(f) {
 			unboxed = true
 		}
 		first, last, guards = idTable(sc.first, f.nextID), idTable(sc.last, f.nextID), guards[:0]
@@ -145,6 +147,13 @@ rounds:
 		if replaced {
 			rewriteChain(f, subst)
 		}
+		// The truncated arithmetic and the comparisons of exact integers
+		// (ints.go), after the walk, which has folded their operands -- a
+		// constant unboxed, a conversion of an int32 phi -- so that they
+		// are this round's, not the next's.
+		if truncInts(f) {
+			changed = true
+		}
 		// Another round is for what this one's replacements may simplify
 		// further: a phi its back edge's operand, replaced after the phi
 		// was met, may now make trivial. Taking dead values away, and a
@@ -173,7 +182,8 @@ rounds:
 		}
 	}
 	numberEqualities(f)
-	sinkLoopBoxes(f)
+	sinkLoopBoxes(f, false)
+	sinkLoopBoxes(f, true)
 	if rematerializeUpvalues(f) {
 		removeDead(f)
 	}
@@ -676,7 +686,13 @@ func unboxPhis(f *Func) bool {
 // global once the loop is done. A box only frame states name is made at an
 // exit alone (mir's lazy), which the one in the header becomes; one inside
 // the loop, or a phi's, stays where it is.
-func sinkLoopBoxes(f *Func) {
+//
+// With ints, it sinks the conversions of a loop's int32s (intPhis) so: one
+// made in the header for a use after the loop -- a sum returned -- had
+// been made at every turn, and held a register there. Their boxes, which
+// exits make of the int32 (mir's exitValue), are not uses: the header's
+// conversion is then only theirs, which mir makes nowhere.
+func sinkLoopBoxes(f *Func, ints bool) {
 	// Linear in the function, from the workspace's tables: every compile
 	// runs this, and a function of hundreds of loop numbers -- Octane's
 	// Game Boy emulator's -- had each looked through all its values, the
@@ -688,7 +704,8 @@ func sinkLoopBoxes(f *Func) {
 			continue
 		}
 		for _, v := range h.Values {
-			if a := v.Args; v.Op == OpBoxF64 && len(a) == 1 && a[0].Op == OpPhi && a[0].Block == h && a[0].Type == Float64 {
+			if a := v.Args; !ints && v.Op == OpBoxF64 && len(a) == 1 && a[0].Op == OpPhi && a[0].Block == h && a[0].Type == Float64 ||
+				ints && v.Op == OpI32ToF64 && a[0].Op == OpPhi && a[0].Block == h && a[0].Type == Int32 {
 				boxes = append(boxes, v)
 			}
 		}
@@ -712,8 +729,13 @@ func sinkLoopBoxes(f *Func) {
 		return at[a.ID] - 1
 	}
 	use := f.bytes(len(boxes))
+	// skip is a use that does not count: a conversion's box.
+	skip := func(u *Value) bool { return ints && u.Op == OpBoxF64 }
 	for _, b := range f.Blocks {
 		for _, u := range b.Values {
+			if skip(u) {
+				continue
+			}
 			for _, a := range u.Args {
 				if k := box(a); k >= 0 && (u.Op == OpPhi || use[k] == 0) {
 					use[k] = 1 + b2u8(u.Op == OpPhi)
@@ -763,6 +785,9 @@ func sinkLoopBoxes(f *Func) {
 					continue
 				}
 				for _, u := range b.Values {
+					if skip(u) {
+						continue
+					}
 					for _, a := range u.Args {
 						if j := box(a); j >= k && j < end {
 							use[j] = 2
@@ -795,7 +820,7 @@ func sinkLoopBoxes(f *Func) {
 				return w
 			}
 			v := boxes[k]
-			w := f.alloc(Value{Op: OpBoxF64, Type: Tagged, Args: f.refsOf(1), Block: b})
+			w := f.alloc(Value{Op: v.Op, Type: v.Type, Args: f.refsOf(1), Block: b})
 			w.Args[0] = v.Args[0]
 			v.Args[0].Uses++
 			if before != nil {
@@ -809,6 +834,9 @@ func sinkLoopBoxes(f *Func) {
 		}
 		for i := 0; i < len(b.Values); i++ {
 			u := b.Values[i]
+			if skip(u) {
+				continue
+			}
 			for x, a := range u.Args {
 				if k := box(a); k >= 0 && use[k] == 1 {
 					w := made[k]
