@@ -389,7 +389,12 @@ leaves to Go. The element,
 the view, its copy's three words: two loads before the element's, none of
 the buffer's. A site that has met
 none, or several, tells them apart as it runs, a case for each type, out
-of line. The existing tiers keep nothing of a site's types, so native
+of line. One compiled for a single type has no other's case: an array of
+another type it meets, Go reads or writes, until the code is compiled
+again for what the site learned (below) -- the cases at each such site,
+which code compiled for one type seldom runs, had been an eighth of
+zlib's code emitted and encoded, and made such a site's code larger than
+one compiled for any type. The existing tiers keep nothing of a site's types, so native
 code learns them, as V8's baseline code fills a feedback vector: each
 site has a cell, its function's lowering's (the VM's `typedCells`), with a
 bit for each type it met, which code reads when it reads or writes an

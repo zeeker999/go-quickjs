@@ -9483,12 +9483,24 @@ func (c *compiler) typedRead(v *ssa.Value, done amd64.Label, hot bool) {
 	}
 	generic := func() {
 		c.typedSeen(v, again)
-		c.typedCases(slow, func(kind int32) {
-			read(kind)
-			c.a.Jmp(done)
-		})
-		if c.enc.CallGo == 0 {
-			return
+		if ssa.TypedKindOf(v) >= 0 {
+			// A site compiled for one type, which met another: Go reads
+			// the element (slow) until the code is compiled again for what
+			// the site learned (typedSeen). The cases of every type at
+			// each such site, which code compiled for one seldom runs, had
+			// been an eighth of zlib's code emitted and encoded.
+			if c.enc.CallGo == 0 {
+				c.a.Jmp(slow)
+				return
+			}
+		} else {
+			c.typedCases(slow, func(kind int32) {
+				read(kind)
+				c.a.Jmp(done)
+			})
+			if c.enc.CallGo == 0 {
+				return
+			}
 		}
 		c.a.Bind(slow)
 		size := int32(unsafe.Sizeof(abi.GoArg{}))
@@ -9586,6 +9598,12 @@ func (c *compiler) typedWrite(v *ssa.Value, done, slow, again amd64.Label, value
 	}
 	generic := func() {
 		c.typedSeen(v, again)
+		if ssa.TypedKindOf(v) >= 0 {
+			// Compiled for one type, which it did not meet: Go stores
+			// (slow), as typedRead's generic reads.
+			c.a.Jmp(slow)
+			return
+		}
 		c.typedCases(slow, func(kind int32) {
 			write(kind)
 			c.a.Jmp(done)

@@ -266,3 +266,57 @@ func TestJITTypedUpvalues(t *testing.T) {
 		t.Errorf("branches' %d sites learned element types %#x, compiled for their bindings' types", sites, kinds)
 	}
 }
+
+// A site compiled for one element type has no case of any other in its
+// code: an array of another type it meets, Go reads or writes, and the
+// site learns the type for the next compile (typedSeen). Every type's case
+// at each such site, which code compiled for one seldom runs, had made it
+// larger than a site compiled for any type, and an eighth of zlib's code
+// emitted and encoded. Each answer is the interpreter's, through the other types too.
+func TestJITTypedSitesOneType(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	// sites<name> reads and writes 40 sites of its own each turn, of the
+	// globals heap<name> and out<name>.
+	sites := func(name string) string {
+		var b strings.Builder
+		fmt.Fprintf(&b, "function sites%s(m) { let s = 0; for (let i = 0; i < m; i++) {", name)
+		for k := range 40 {
+			fmt.Fprintf(&b, " out%[1]s[(i + %[2]d) & 63] = heap%[1]s[(i * %[3]d) & 63] + %[2]d;", name, k, k+1)
+		}
+		fmt.Fprintf(&b, " s += out%s[i & 63] } return s }\n", name)
+		return b.String()
+	}
+	setup := "var heapOne = new Int32Array(64), outOne = new Int32Array(64), heapAny = heapOne, outAny = outOne\n" +
+		sites("One") + sites("Any") + "for (let i = 0; i < 64; i++) heapOne[i] = i * 7 - 100"
+	// sitesAny's sites meet Int32Arrays and Float64Arrays, by turns.
+	swap := "(heapAny = heapAny === heapOne ? new Float64Array(64).fill(2.5) : heapOne, outAny = outAny === outOne ? new Float64Array(64) : outOne, sitesAny(500))"
+	rounds := []string{}
+	for range 8 {
+		rounds = append(rounds, "sitesOne(500)", swap)
+	}
+	jitAgreesForTest(t, setup, append(rounds, "(heapOne = new Uint8Array(64), sitesOne(500))", "sitesOne(500)")...)
+
+	r := New(Config{JIT: true})
+	r.jitStress.background = false
+	t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
+	if _, err := r.Run(compileForTest(t, setup)); err != nil {
+		t.Fatal(err)
+	}
+	for _, src := range rounds {
+		if _, err := r.Run(compileForTest(t, src)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	one, all := jitNativeForTest(t, r, "sitesOne"), jitNativeForTest(t, r, "sitesAny")
+	if kinds, _ := typedKindCells(t, r, "sitesAny"); kinds != 1<<abi.ElemInt32|1<<abi.ElemFloat64 || all.reopts == 0 {
+		t.Fatalf("sitesAny learned element types %#x, compiled again %d times: want Int32's and Float64's", kinds, all.reopts)
+	}
+	if one.reopts != 0 {
+		t.Fatalf("sitesOne compiled again %d times, its sites a global's Int32Arrays'", one.reopts)
+	}
+	if n, m := len(one.ssa.Text()), len(all.ssa.Text()); n >= m {
+		t.Errorf("sites compiled for one type take %d bytes of code, for any %d: other types' cases left in", n, m)
+	}
+}
