@@ -3269,39 +3269,52 @@ func (r *Runtime) newClosureIn(f *frame, c Value, cells []*upvalue) *Object {
 	// captures are one allocation: a closure made in a loop is as common as
 	// any object literal, and each of the four was a separate one.
 	arrow := tmpl.fn.Kind == bytecode.KindArrow
-	o, fd, child, upvalues, extra := newScriptFuncObject(
-		r.funcProtoFor(tmpl.fn), ClassFunction, len(tmpl.fn.Upvalues), arrow)
+	var o *Object
+	var fd *funcData
+	var child *closure
+	var extra *funcExtra
+	if n := tmpl.fn.ByValueCaptures; n != 0 && cells == nil {
+		// What it takes by value it copies, into cells of its own, which no
+		// frame keeps open (newClosureByValue). Native code's locals in cells
+		// of their own are shared all the same: what never changes is the
+		// same either way.
+		o, fd, child, extra = newClosureByValue[struct{}](r, f, tmpl, arrow, int(n))
+	} else {
+		var upvalues []*upvalue
+		o, fd, child, upvalues, extra = newScriptFuncObject(
+			r.funcProtoFor(tmpl.fn), ClassFunction, len(tmpl.fn.Upvalues), arrow)
 
-	// The environment is inherited, so a function declared in a module sees
-	// the module's bindings rather than only the globals.
-	*child = closure{
-		fn: tmpl.fn, closureCode: tmpl.closureCode,
-		realm: r.Realm, env: f.cl.env, upvalues: upvalues,
-	}
-	// The bindings it is the first to capture share one allocation: a
-	// closure made in a loop often captures several of its maker's, each of
-	// which was one. Like a scope's context in other engines, the room lives
-	// as long as any binding in it does.
-	var room []upvalue
-	for i, desc := range tmpl.fn.Upvalues {
-		if !desc.FromParent {
-			upvalues[i] = f.cl.upvalues[desc.Index]
-			continue
+		// The environment is inherited, so a function declared in a module sees
+		// the module's bindings rather than only the globals.
+		*child = closure{
+			fn: tmpl.fn, closureCode: tmpl.closureCode,
+			realm: r.Realm, env: f.cl.env, upvalues: upvalues,
 		}
-		if cells != nil {
-			upvalues[i] = cells[cellOfLocal(f.cl.fn, int(desc.Index))]
-			continue
-		}
-		u := openUpvalue(f, int(desc.Index))
-		if u == nil {
-			if len(room) == 0 {
-				room = make([]upvalue, uncaptured(f, tmpl.fn.Upvalues[i:]))
+		// The bindings it is the first to capture share one allocation: a
+		// closure made in a loop often captures several of its maker's, each of
+		// which was one. Like a scope's context in other engines, the room lives
+		// as long as any binding in it does.
+		var room []upvalue
+		for i, desc := range tmpl.fn.Upvalues {
+			if !desc.FromParent {
+				upvalues[i] = f.cl.upvalues[desc.Index]
+				continue
 			}
-			u, room = &room[0], room[1:]
-			u.slot = &f.locals[desc.Index]
-			f.openUpvalues = append(f.openUpvalues, u)
+			if cells != nil {
+				upvalues[i] = cells[cellOfLocal(f.cl.fn, int(desc.Index))]
+				continue
+			}
+			u := openUpvalue(f, int(desc.Index))
+			if u == nil {
+				if len(room) == 0 {
+					room = make([]upvalue, uncaptured(f, tmpl.fn.Upvalues[i:]))
+				}
+				u, room = &room[0], room[1:]
+				u.slot = &f.locals[desc.Index]
+				f.openUpvalues = append(f.openUpvalues, u)
+			}
+			upvalues[i] = u
 		}
-		upvalues[i] = u
 	}
 
 	kind := ctorKindOf(tmpl.fn)

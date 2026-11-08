@@ -171,37 +171,12 @@ func LowerSSAForward(fn *bytecode.Function) (*ir.Program, error) {
 // none does. A nested function with a direct eval may assign any.
 func closureAssigned(fn *bytecode.Function) []bool {
 	var out []bool
-	var assigns func(t *bytecode.Function, up int) bool
-	assigns = func(t *bytecode.Function, up int) bool {
-		if t.HasDirectEval {
-			return true
-		}
-		for _, in := range t.Code {
-			switch in.Op {
-			case bytecode.OpSetUpvalue, bytecode.OpSetUpvalueCheck, bytecode.OpInitUpvalue:
-				if int(in.A) == up {
-					return true
-				}
-			}
-		}
-		for _, c := range t.Constants {
-			if c.Kind != bytecode.ConstFunction || c.Fn == nil {
-				continue
-			}
-			for j, d := range c.Fn.Upvalues {
-				if !d.FromParent && int(d.Index) == up && assigns(c.Fn, j) {
-					return true
-				}
-			}
-		}
-		return false
-	}
 	for _, c := range fn.Constants {
 		if c.Kind != bytecode.ConstFunction || c.Fn == nil {
 			continue
 		}
 		for j, d := range c.Fn.Upvalues {
-			if d.FromParent && int(d.Index) < fn.LocalCount && assigns(c.Fn, j) {
+			if d.FromParent && int(d.Index) < fn.LocalCount && bytecode.UpvalueAssigned(c.Fn, j) {
 				if out == nil {
 					out = make([]bool, fn.LocalCount)
 				}

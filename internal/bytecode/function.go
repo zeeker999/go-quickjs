@@ -69,6 +69,15 @@ type UpvalueDesc struct {
 	// immutable but whose assignment outside strict mode is discarded rather
 	// than refused.
 	FuncSelf bool
+	// ByValue marks a local of the enclosing function that holds its final
+	// value when the closure is made and is never assigned after: a const
+	// initialized by then, or a strict function's simple parameter that
+	// nothing stores to (WritesLocal, UpvalueAssigned). The closure may
+	// then take a copy of the value rather than share the binding with
+	// the frame, as Java's lambdas and Go's closures copy what is
+	// effectively final. Only with FromParent; never in code compiled for
+	// a debugger, which may set a binding.
+	ByValue bool
 }
 
 // EvalScope is what a direct `eval` call site can see.
@@ -448,6 +457,10 @@ type Function struct {
 	// arrow's this in place, as a method's. After TraceName, so that the
 	// fields a call reads stay where they were.
 	ArrowThisValue bool
+	// ByValueCaptures is how many of Upvalues are ByValue, which a closure
+	// made of the function needs to know before it is allocated. Last, so
+	// that the fields a call reads stay where they were.
+	ByValueCaptures int32
 }
 
 // LineAt returns the source line of the instruction at pc, or 0 if unknown.
