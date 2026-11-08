@@ -326,12 +326,12 @@ func ExpandGoCall(ctx *abi.Context) int32 {
 		case abi.GoArgF64:
 			n = *(*uint64)(unsafe.Add(base, a.At))
 			if f := math.Float64frombits(n); f != f {
-				n = st.NaN
+				n = st.Enc.CanonicalNaN
 			}
 		case abi.GoArgBool:
-			n = st.False
+			n = st.Enc.False
 			if *(*uint32)(unsafe.Add(base, a.At)) != 0 {
-				n = st.True
+				n = st.Enc.True
 			}
 		}
 		var r unsafe.Pointer
@@ -339,13 +339,13 @@ func ExpandGoCall(ctx *abi.Context) int32 {
 			switch a.Ref {
 			case abi.GoRefSource:
 				if from := *(*unsafe.Pointer)(unsafe.Add(base, a.From)); from != nil {
-					r = *(*unsafe.Pointer)(unsafe.Add(from, st.RefOffset))
+					r = *(*unsafe.Pointer)(unsafe.Add(from, st.Enc.RefOffset))
 				}
 			case abi.GoRefSlotSource:
-				r = *(*unsafe.Pointer)(unsafe.Add(goSlot(ctx, st, a), st.RefOffset))
+				r = *(*unsafe.Pointer)(unsafe.Add(goSlot(ctx, st, a), st.Enc.RefOffset))
 			case abi.GoRefOrigin:
 				o := goSlot(ctx, st, a)
-				if p := *(*unsafe.Pointer)(unsafe.Add(o, st.RefOffset)); p != nil && (a.Load || n == *(*uint64)(unsafe.Add(o, st.NumOffset))) {
+				if p := *(*unsafe.Pointer)(unsafe.Add(o, st.Enc.RefOffset)); p != nil && (a.Load || n == *(*uint64)(unsafe.Add(o, st.Enc.NumOffset))) {
 					r = p
 				}
 			}
@@ -364,8 +364,8 @@ func goSlot(ctx *abi.Context, st *abi.GoCallState, a *abi.GoCallArg) unsafe.Poin
 	case abi.ExitInStack:
 		return unsafe.Add(ctx.Stack, int(a.From))
 	case abi.ExitInThis:
-		return unsafe.Add(unsafe.Pointer(&ctx.This), -int(st.NumOffset))
+		return unsafe.Add(unsafe.Pointer(&ctx.This), -int(st.Enc.NumOffset))
 	}
 	cell := *(*unsafe.Pointer)(unsafe.Add(ctx.Upvalues, int(a.From)*8))
-	return *(*unsafe.Pointer)(unsafe.Add(cell, int(st.UpvalueSlot)))
+	return *(*unsafe.Pointer)(unsafe.Add(cell, int(st.Enc.UpvalueSlot)))
 }
