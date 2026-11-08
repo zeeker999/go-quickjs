@@ -8440,21 +8440,12 @@ func (c *a64Compiler) typedRead(v *ssa.Value, done arm64.Label, hot bool) {
 	}
 	generic := func() {
 		c.typedSeen(v, again)
-		if ssa.TypedKindOf(v) >= 0 {
-			// Compiled for one type, which it did not meet: Go reads the
-			// element (slow), as amd64's typedRead has it.
-			if c.enc.CallGo == 0 {
-				c.a.B(slow)
-				return
-			}
-		} else {
-			c.typedCases(slow, func(kind int32) {
-				read(kind)
-				c.a.B(done)
-			})
-			if c.enc.CallGo == 0 {
-				return
-			}
+		c.typedCases(slow, func(kind int32) {
+			read(kind)
+			c.a.B(done)
+		})
+		if c.enc.CallGo == 0 {
+			return
 		}
 		c.a.Bind(slow)
 		size := int32(unsafe.Sizeof(abi.GoArg{}))
@@ -8544,12 +8535,6 @@ func (c *a64Compiler) typedWrite(v *ssa.Value, done, slow, again arm64.Label, va
 	}
 	generic := func() {
 		c.typedSeen(v, again)
-		if ssa.TypedKindOf(v) >= 0 {
-			// Compiled for one type, which it did not meet: Go stores
-			// (slow), as amd64's typedWrite has it.
-			c.a.B(slow)
-			return
-		}
 		c.typedCases(slow, func(kind int32) {
 			write(kind)
 			c.a.B(done)
