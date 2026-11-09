@@ -64,6 +64,8 @@ type regCode struct {
 	// ncap is how many of the function's stack slots a closure captures,
 	// the cells a closure it makes is given (regClosure).
 	ncap int32
+	// newTarget says the function reads new.target, which its frame keeps.
+	newTarget bool
 	// args says a frame keeps its arguments as passed, for RArguments.
 	args bool
 	// leaf is what a call may answer without a frame: a pure body that
@@ -162,7 +164,7 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 	c := &regCode{
 		code: unsafe.Pointer(unsafe.SliceData(rc.Code)), src: rc.SrcPC, siteName: rc.SiteName,
 		numRegs: int32(rc.NumRegs), params: int32(rc.Params), inits: int32(rc.Inits),
-		coerceThis: fn.CoerceThis, rc: rc, fn: fn, wide: true, ncap: int32(ncap), args: rc.UsesArguments || rc.ForwardsArguments,
+		coerceThis: fn.CoerceThis, rc: rc, fn: fn, wide: true, ncap: int32(ncap), newTarget: fn.UsesNewTarget, args: rc.UsesArguments || rc.ForwardsArguments,
 	}
 	switch {
 	case fn.Leaf == bytecode.LeafPure && !fn.PureCalls:
@@ -614,14 +616,11 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			}
 			goto slow
 		case bytecode.RCallW:
-			f.pc = c.src[pc-1] + 1
 			kept.pc = pc
-			v, err := r.regCallW(f, c, &kept, wb)
-			if err != nil {
+			if err := r.regCallW(f, c, &kept, wb); err != nil {
 				return Undefined, err
 			}
 			pc = kept.pc
-			regs[regAt(code, pc-1).B()] = v
 		case bytecode.RAddI:
 			if a := regs[w.B()]; a.IsNumber() {
 				regs[w.A()] = regNum(a.Number() + float64(w.SC()))
@@ -864,12 +863,10 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			goto slow
 		case bytecode.RCallMW:
 			kept.pc = pc
-			v, err := r.regCallW(f, c, &kept, wb)
-			if err != nil {
+			if err := r.regCallW(f, c, &kept, wb); err != nil {
 				return Undefined, err
 			}
 			pc = kept.pc
-			regs[regAt(code, pc-1).B()] = v
 		case bytecode.RPostInc:
 			if a := regs[w.B()]; a.IsNumber() {
 				regs[w.A()] = a

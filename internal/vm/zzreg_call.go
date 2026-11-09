@@ -2,6 +2,7 @@ package vm
 
 import (
 	"sync/atomic"
+	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
@@ -131,176 +132,253 @@ func (r *Runtime) regCallOp(f *frame, c *regCode, k *regKept, wb int) (Value, er
 
 // regCallW is call_w and call_method_w: a call whose callee's frame
 // starts at the caller's window, R[A], its parameters the arguments where
-// they lie. A callee whose register code has the form's own layout, of this
-// realm, with nothing of its surroundings to establish but an arrow's this,
-// is entered here: its frame is the window, the frame record the few fields
-// a stack trace and a closure read, and runReg is the only call between the
-// two loops. Any other callee is called as regCall calls it.
-func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) (Value, error) {
+// they lie. It writes the call's value to R[B] itself, so that the loop
+// keeps nothing of the instruction across the call.
+//
+// A callee the site called last, of the form's own layout and with nothing
+// of its surroundings to establish but a this its cache holds, is entered
+// here: its frame is the window, the frame record the few fields a stack
+// trace and a closure read, and runReg is the only call between the two
+// loops. What the frame needs is read from the callee's register code,
+// whose facts are the function's, precomputed. Anything else is
+// regCallMiss's.
+func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 	pc := k.pc - 1
-	f.pc = c.src[pc] + 1
+	f.pc = regSrc(c, pc) + 1
 	w := regAt(c.code, pc)
 	base := wb + int(w.A())
-	argc := int(w.X())
-	callee := r.stack[base]
-	method := w.Op() == bytecode.RCallMW
-	var (
-		o  *Object
-		cl *closure
-		rc *regCode
-	)
-	if !callee.IsObject() {
-		goto general
-	}
-	o = callee.Object()
-	// The function the site called last, and what calling it took.
+	win := regWindow(r.stack, base)
 	if calls := f.cl.regCalls; uint(w.C()) < uint(len(calls)) {
-		if e := &calls[w.C()]; e.callee == o {
-			cl, rc = e.cl, e.rc
-			switch {
-			case e.kind == regCallPlain && !method:
-				r.stack[base+1] = e.this
-				goto enter
-			case e.kind == regCallArrow:
-				r.stack[base+1] = e.this
-				goto enter
-			case e.kind == regCallPlain && !rc.coerceThis:
-				goto enter
+		e := &calls[w.C()]
+		// The callee's tag and pointer read as words: read as a Value, the
+		// tag goes through a float register to be compared.
+		if regIsObject(&win[0]) && (*Object)(win[0].ref) == e.callee {
+			ok := e.kind == regCallEnter
+			if e.kind == regCallThis {
+				win[1] = e.this
+				ok = true
+			} else if e.kind == regCallObjThis {
+				ok = win[1].IsObject()
 			}
-		}
-	} else if f.cl.regCalls == nil && c.rc.CallSites > 0 {
-		f.cl.regCalls = make([]regCallCache, c.rc.CallSites)
-	}
-	if fd := o.fn(); fd != nil && fd.closure != nil && !fd.bound {
-		cl = fd.closure
-		if rc = cl.reg; rc == nil {
-			rc = r.regOf(cl)
-		}
-		if rc != nil && rc.wide && cl.realm == r.Realm {
-			if x := fd.extra; x == nil {
-				if !method {
-					this := Undefined
-					if rc.coerceThis {
-						this = r.globalThis
-					}
-					r.stack[base+1] = this
-				} else if rc.coerceThis && !r.stack[base+1].IsObject() {
-					goto general
+			if ok {
+				o, cl, rc := e.callee, e.cl, e.rc
+				argc := int(w.X())
+				top := base + int(rc.numRegs)
+				if top > len(r.stack) || r.frameDepth >= r.maxFrames {
+					return r.throwRangeError("maximum call stack size exceeded")
 				}
-				r.regNoteCall(f, w.C(), o, cl, rc, regCallPlain)
-				goto enter
-			} else if fd.arrow && x.lexThisRef == nil && x.rare == nil {
-				r.stack[base+1] = x.lexThis
-				r.regNoteCall(f, w.C(), o, cl, rc, regCallArrow)
-				goto enter
+				if r.interruptCounter--; r.interruptCounter <= 0 {
+					if err := r.checkInterruptNow(); err != nil {
+						return err
+					}
+				}
+				saved := r.stackTop
+				if top > saved {
+					r.stackTop = top
+					if top > r.stackHigh {
+						r.stackHigh = top
+					}
+				}
+				// Parameters no argument was given for, and the bindings
+				// past them.
+				for i := min(argc, int(rc.params)); i < int(rc.params+rc.inits); i++ {
+					win[2+i] = Undefined
+				}
+				off := r.frameDepth - r.frameBase
+				if uint(off) >= uint(len(r.cur)) {
+					r.seekFrameBlock()
+					off = r.frameDepth - r.frameBase
+				}
+				r.frameDepth++
+				if r.frameDepth > r.frameHigh {
+					r.frameHigh = r.frameDepth
+				}
+				nf := &r.cur[off]
+				nf.cl = cl
+				nf.callee = o
+				nf.base = base
+				nf.pc = 0
+				if len(nf.openUpvalues) != 0 {
+					nf.openUpvalues = nf.openUpvalues[:0]
+				}
+				if nf.thisRef != nil || nf.withScopes != nil || nf.evalVars != nil || nf.native != "" || nf.args != nil {
+					regClearFrame(nf)
+				}
+				if rc.newTarget {
+					nf.newTarget = Undefined
+				}
+				v, err := r.runReg(nf, rc)
+				if rc.ncap != 0 && len(nf.openUpvalues) != 0 {
+					regCloseUpvalues(nf)
+				}
+				r.frameDepth--
+				r.stackTop = saved
+				if err != nil {
+					return err
+				}
+				regWindow(r.stack, wb)[w.B()] = v
+				return nil
+			}
+			if e.kind&regCallLeaf != 0 {
+				if v, ok := r.regLeafHit(e, win, int(w.X())); ok {
+					regWindow(r.stack, wb)[w.B()] = v
+					return nil
+				}
 			}
 		}
 	}
-general:
+	return r.regCallMiss(f, c, w, wb)
+}
+
+// regLeafHit answers a call of the leaf its site's cache e holds, whose
+// window is win, without a frame, if it can (leafCall, pureCall).
+//
+//go:noinline
+func (r *Runtime) regLeafHit(e *regCallCache, win *[1 << 16]Value, argc int) (Value, bool) {
+	switch e.kind &^ (regCallOut | regCallLeaf) {
+	case regCallThis:
+		win[1] = e.this
+	case regCallObjThis:
+		if !win[1].IsObject() {
+			return Undefined, false
+		}
+	}
+	if e.rc.leaf == regLeafPure {
+		if e.cl.pureMiss < pureMissLimit {
+			return r.pureCall(e.callee.fn(), win[1], win[2:2+argc])
+		}
+	} else if this := win[1]; this.IsObject() {
+		return r.leafCall(e.cl, this.Object(), win[2:2+argc])
+	}
+	return Undefined, false
+}
+
+// regSrc is the stack form's instruction of register instruction pc, which
+// the verifier proves is in the code.
+func regSrc(c *regCode, pc int) uint32 {
+	return *(*uint32)(unsafe.Add(unsafe.Pointer(unsafe.SliceData(c.src)), uintptr(pc)*4))
+}
+
+// regCloseUpvalues closes the upvalues a frame's closures left open on its
+// registers.
+//
+//go:noinline
+func regCloseUpvalues(f *frame) {
+	for _, u := range f.openUpvalues {
+		u.close()
+	}
+}
+
+// regCallMiss is a call regCallW's cache does not answer: a site's first
+// call or a new callee, a body answered without a frame, a frame that keeps
+// its arguments, a this to coerce, or a callee of no register code.
+//
+//go:noinline
+func (r *Runtime) regCallMiss(f *frame, c *regCode, w bytecode.RInstr, wb int) error {
+	v, err := r.regCallSlow(f, c, w, wb+int(w.A()))
+	if err != nil {
+		return err
+	}
+	r.stack[wb+int(w.B())] = v
+	return nil
+}
+
+func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base int) (Value, error) {
+	argc := int(w.X())
+	method := w.Op() == bytecode.RCallMW
+	callee := r.stack[base]
+	if callee.IsObject() {
+		o := callee.Object()
+		if f.cl.regCalls == nil && c.rc.CallSites > 0 {
+			f.cl.regCalls = make([]regCallCache, c.rc.CallSites)
+		}
+		var e *regCallCache
+		if calls := f.cl.regCalls; uint(w.C()) < uint(len(calls)) {
+			e = &calls[w.C()]
+		}
+		var (
+			cl   *closure
+			rc   *regCode
+			kind uint8
+			this Value
+		)
+		if e != nil && e.callee == o && e.kind != 0 {
+			// A callee the site knows, whose call is not regCallW's alone.
+			cl, rc, kind, this = e.cl, e.rc, e.kind&^(regCallOut|regCallLeaf), e.this
+		} else if fd := o.fn(); fd != nil && fd.closure != nil && !fd.bound {
+			cl = fd.closure
+			if rc = cl.reg; rc == nil {
+				rc = r.regOf(cl)
+			}
+			if rc != nil && rc.wide && cl.realm == r.Realm {
+				if x := fd.extra; x == nil {
+					switch {
+					case !method:
+						kind, this = regCallThis, Undefined
+						if rc.coerceThis {
+							this = r.globalThis
+						}
+					case rc.coerceThis:
+						kind = regCallObjThis
+					default:
+						kind = regCallEnter
+					}
+				} else if fd.arrow && x.lexThisRef == nil && x.rare == nil {
+					kind, this = regCallThis, x.lexThis
+				}
+			}
+			if kind != 0 && e != nil {
+				e.callee, e.cl, e.rc, e.this, e.kind = o, cl, rc, this, kind
+				if rc.leaf != regLeafNone {
+					e.kind |= regCallOut | regCallLeaf
+				} else if rc.args {
+					e.kind |= regCallOut
+				}
+			}
+		}
+		switch kind {
+		case regCallThis:
+			r.stack[base+1] = this
+		case regCallObjThis:
+			if !r.stack[base+1].IsObject() {
+				// A this to coerce: the generic call's.
+				kind = 0
+			}
+		}
+		if kind != 0 {
+			// A body that only reads or writes a property of its this, or
+			// computes a value calling nothing, is answered without a frame,
+			// as callDirect answers it (leafCall, pureCall): its frame would
+			// cost more than its body. A pure body that calls is run as
+			// register code, faster than the frameless evaluator's calls.
+			if leaf := rc.leaf; leaf != regLeafNone {
+				if leaf == regLeafPure {
+					if cl.pureMiss < pureMissLimit {
+						if v, ok := r.pureCall(o.fn(), r.stack[base+1], r.stack[base+2:base+2+argc]); ok {
+							return v, nil
+						}
+					}
+				} else if this := r.stack[base+1]; this.IsObject() {
+					if v, ok := r.leafCall(cl, this.Object(), r.stack[base+2:base+2+argc]); ok {
+						return v, nil
+					}
+				}
+			}
+			return r.regEnterW(o, cl, rc, base, argc, r.stack[base+2:base+2+argc], Undefined)
+		}
+	}
 	if regReportOn {
 		regCrossOf(regCrossOut, callee)
 	}
-	{
-		this := Undefined
-		if method {
-			this = r.stack[base+1]
-		}
-		return r.regCall(callee, this, r.stack[base+2:base+2+argc])
+	this := Undefined
+	if method {
+		this = r.stack[base+1]
 	}
-enter:
-	// A body that only reads or writes a property of its this, or computes
-	// a value calling nothing, is answered without a frame, as callDirect
-	// answers it (leafCall, pureCall): its frame would cost more than its
-	// body. A pure body that calls is run as register code, faster than
-	// the frameless evaluator's calls.
-	if leaf := rc.leaf; leaf != regLeafNone {
-		if leaf == regLeafPure {
-			if cl.pureMiss < pureMissLimit {
-				if v, ok := r.pureCall(o.fn(), r.stack[base+1], r.stack[base+2:base+2+argc]); ok {
-					return v, nil
-				}
-			}
-		} else if this := r.stack[base+1]; this.IsObject() {
-			if v, ok := r.leafCall(cl, this.Object(), r.stack[base+2:base+2+argc]); ok {
-				return v, nil
-			}
-		}
-	}
-	// regEnterW, written out: called, it is one more call a JavaScript call
-	// makes.
-	top := base + int(rc.numRegs)
-	if top > len(r.stack) || r.frameDepth >= r.maxFrames {
-		return Undefined, r.throwRangeError("maximum call stack size exceeded")
-	}
-	if r.interruptCounter--; r.interruptCounter <= 0 {
-		if err := r.checkInterruptNow(); err != nil {
-			return Undefined, err
-		}
-	}
-	saved := r.stackTop
-	if top > saved {
-		r.stackTop = top
-		if top > r.stackHigh {
-			r.stackHigh = top
-		}
-	}
-	var kept []Value
-	if rc.args {
-		ka := len(r.argStack)
-		// The arguments as passed, past the parameters too, which the
-		// bindings' registers are about to take: kept on the runtime's
-		// argument stack, as applyCall keeps apply's, until the call returns.
-		r.argStack = append(r.argStack, r.stack[base+2:base+2+argc]...)
-		kept = r.argStack[ka:len(r.argStack):len(r.argStack)]
-	}
-	for i := base + 2 + min(argc, int(rc.params)); i < base+2+int(rc.params)+int(rc.inits); i++ {
-		r.stack[i] = Undefined
-	}
-	off := r.frameDepth - r.frameBase
-	if uint(off) >= uint(len(r.cur)) {
-		r.seekFrameBlock()
-		off = r.frameDepth - r.frameBase
-	}
-	r.frameDepth++
-	if r.frameDepth > r.frameHigh {
-		r.frameHigh = r.frameDepth
-	}
-	nf := &r.cur[off]
-	nf.cl = cl
-	nf.callee = o
-	nf.base = base
-	nf.pc = 0
-	if len(nf.openUpvalues) != 0 {
-		nf.openUpvalues = nf.openUpvalues[:0]
-	}
-	if nf.thisRef != nil || nf.withScopes != nil || nf.evalVars != nil || nf.native != "" || nf.args != nil {
-		regClearFrame(nf)
-	}
-	if cl.fn.UsesNewTarget {
-		nf.newTarget = Undefined
-	}
-	if rc.args {
-		nf.args = kept
-		p := int(rc.params)
-		nf.locals = r.stack[base+2 : base+2+p : base+2+p]
-	}
-	v, err := r.runReg(nf, rc)
-	if len(nf.openUpvalues) != 0 {
-		for _, u := range nf.openUpvalues {
-			u.close()
-		}
-	}
-	r.frameDepth--
-	r.stackTop = saved
-	if a := nf.args; a != nil {
-		// The arguments kept for it, the last on the argument stack.
-		r.argStack = r.argStack[:len(r.argStack)-len(a)]
-	}
-	return v, err
+	return r.regCall(callee, this, r.stack[base+2:base+2+argc])
 }
 
 // regCallCache is a call site's cache: the function it called last, its
-// closure and register code, how it was called, and the this a call that
+// closure and register code, how it is entered, and the this a call that
 // is not a method's gives it.
 type regCallCache struct {
 	callee *Object
@@ -310,28 +388,28 @@ type regCallCache struct {
 	kind   uint8
 }
 
+// The kinds of regCallCache: what entering the callee takes of its this.
+// regCallOut marks one regCallW leaves to regCallMiss: a body answered
+// without a frame, or a frame that keeps its arguments.
 const (
-	regCallPlain = 1 + iota
-	regCallArrow
+	// regCallEnter is a method's call of a function whose this is the
+	// method's receiver as it is.
+	regCallEnter = 1 + iota
+	// regCallThis writes the cache's this: a plain call's undefined or
+	// global object, or an arrow's this.
+	regCallThis
+	// regCallObjThis is a method's call of a function that coerces its
+	// this, entered as it is for an object receiver.
+	regCallObjThis
+
+	regCallOut = 8
+	// regCallLeaf marks a callee whose body regLeafHit may answer.
+	regCallLeaf = 16
 )
 
-// regNoteCall remembers at call site s of f's code that it called o.
-func (r *Runtime) regNoteCall(f *frame, s uint16, o *Object, cl *closure, rc *regCode, kind uint8) {
-	calls := f.cl.regCalls
-	if int(s) >= len(calls) {
-		return
-	}
-	e := &calls[s]
-	e.callee, e.cl, e.rc, e.kind = o, cl, rc, kind
-	switch kind {
-	case regCallArrow:
-		e.this = o.fn().extra.lexThis
-	default:
-		e.this = Undefined
-		if rc.coerceThis {
-			e.this = r.globalThis
-		}
-	}
+// regIsObject reports whether *v is an object, its tag read as a word.
+func regIsObject(v *Value) bool {
+	return *(*uint64)(unsafe.Pointer(v)) == objectBits
 }
 
 // regEnterW runs a register function of the form's own layout in the
@@ -393,7 +471,7 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int,
 	if f.thisRef != nil || f.withScopes != nil || f.evalVars != nil || f.native != "" || f.args != nil {
 		regClearFrame(f)
 	}
-	if cl.fn.UsesNewTarget {
+	if rc.newTarget {
 		// What an arrow made here captures of new.target.
 		f.newTarget = newTarget
 	}
@@ -404,9 +482,7 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int,
 	}
 	v, err := r.runReg(f, rc)
 	if len(f.openUpvalues) != 0 {
-		for _, u := range f.openUpvalues {
-			u.close()
-		}
+		regCloseUpvalues(f)
 	}
 	r.frameDepth--
 	r.stackTop = saved
