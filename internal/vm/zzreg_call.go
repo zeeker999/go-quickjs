@@ -197,6 +197,9 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) (Value, err
 		}
 	}
 general:
+	if regReportOn {
+		regCrossOf(regCrossOut, callee)
+	}
 	{
 		this := Undefined
 		if method {
@@ -433,6 +436,9 @@ func (r *Runtime) regClosure(f *frame, c *regCode, w bytecode.RInstr, wb int) *O
 // and run there, without callTree's frame, runTree's recover and the copy
 // regEnterFrame makes. callDirect has counted the call.
 func (r *Runtime) regDirect(o *Object, fd *funcData, c *regCode, this Value, args []Value) (Value, error) {
+	if regReportOn {
+		regNoteCross(regCrossDirect, c.fn, "")
+	}
 	if fd.arrow {
 		this = fd.extra.lexThis
 	} else if c.coerceThis && !this.IsObject() {
@@ -570,6 +576,9 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 	case bytecode.RSetIndexI:
 		return Undefined, r.setIndexed(regs[w.A()], Int32(int32(w.B())), regs[w.C()], cl.fn.Strict)
 	case bytecode.RNewW:
+		if regReportOn {
+			regCrossOf(regCrossNew, regs[w.A()])
+		}
 		b := wb + int(w.A())
 		if v, err = r.construct(regs[w.A()], r.stack[b+2:b+2+int(w.X())]); err == nil {
 			regs[w.B()] = v

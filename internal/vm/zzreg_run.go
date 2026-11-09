@@ -227,6 +227,9 @@ func regNext(*tctx) int { return -1 }
 // form, as register code of the form's own layout: its window is made at the
 // top of the stack, the function, this and the arguments copied in.
 func (r *Runtime) regEnterFrame(f *frame, c *regCode) (Value, error) {
+	if regReportOn {
+		regNoteCross(regCrossEnter, c.fn, "")
+	}
 	base := r.stackTop
 	top := base + int(c.numRegs)
 	if top > len(r.stack) {

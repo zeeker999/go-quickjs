@@ -25,25 +25,18 @@ const limit16 = 1 << 16
 // is rec, into register code. It returns nil where the function has anything
 // the backend does not compile yet; the function then runs as before.
 func Compile(lit *ast.FuncLit, fn *bytecode.Function, rec *Record) *bytecode.RegCode {
-	switch {
-	case fn.Generator || fn.Async || fn.HasDirectEval || fn.Debug != nil, fn.TopLevel,
-		fn.UsesArguments || fn.MakesArguments || fn.HasRest || !fn.HasSimpleParams || fn.ParamsAreLexical,
-		fn.Kind != bytecode.KindNormal && fn.Kind != bytecode.KindArrow && fn.Kind != bytecode.KindMethod,
-		fn.PrivateSites != 0, fn.HasTailCall:
+	if w := why(fn); w != "" {
+		Refuse(fn, w)
 		return nil
 	}
 	g := &gen{lit: lit, fn: fn, rec: rec}
 	if !g.layout() {
-		if trace {
-			println("regcomp: not", fn.Name, "its bindings' layout")
-		}
+		Refuse(fn, "its bindings' layout")
 		return nil
 	}
 	g.body()
 	if g.err != "" {
-		if trace {
-			println("regcomp: not", fn.Name, g.err)
-		}
+		Refuse(fn, g.err)
 		return nil
 	}
 	return g.finish()
@@ -1729,9 +1722,7 @@ func (g *gen) finish() *bytecode.RegCode {
 		Wide: true, Params: g.fn.ParamCount, Inits: g.inits, Caps: g.caps, CallSites: g.calls,
 	}
 	if why := Verify(rc, g.fn); why != "" {
-		if trace {
-			println("regcomp: not", g.fn.Name, why)
-		}
+		Refuse(g.fn, why)
 		return nil
 	}
 	return rc
