@@ -56,16 +56,16 @@ const (
 	layoutPadNR  = 322
 	layoutPadNGR = -1
 	layoutPadNMR = -1
-	layoutPadNS  = 425
+	layoutPadNS  = 230
 	layoutPadNGS = -1
 	layoutPadNMS = -1
 	layoutPadNZ  = -1
 	layoutPadNGZ = -1
 	layoutPadNMZ = -1
 	layoutPadNCZ = -1
-	layoutPadNH  = 61
-	layoutPadNDH = 1
-	layoutPadNDW = 4
+	layoutPadNH  = 91
+	layoutPadNDH = 0
+	layoutPadNDW = 2
 	layoutPadNDG = 2
 )
 
