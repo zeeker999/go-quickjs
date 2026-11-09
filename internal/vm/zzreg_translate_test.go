@@ -32,11 +32,18 @@ func TestRegBackendRuns(t *testing.T) {
 		function sw(v) { var out = ""; switch (v) { case 1: out += "a"; case 2: out += "b"; break; case "s": out += "s"; break; default: out += "d" } return out }
 		function args(a, b) { arguments[0] = 9; return [a, arguments.length, arguments[2], b].join() }
 		function fwd() { return args.apply(null, arguments) }
+		function C(a) { var t = a * 2; this.a = a; this.b = t }
+		C.prototype.m = function () { return this.a + this.b };
+		function L(x, y) { this.x = x; this.y = y }
+		function O() { this.x = 1; return { y: 2 } }
+		function A() { this.n = arguments.length }
+		function build() { var c = new C(3), l = new L(1, 2), o = new O(), a = new A(1, 2, 3);
+			return [c.m(), c instanceof C, Object.getPrototypeOf(c) === C.prototype, l.x + l.y, o.y, o.x, a.n].join() }
 		[fib(15), locals(7), props(9), elems(5), globals(10), method(4), reduce(5), cmp(1, "1"), cmp(null, undefined), post(3), dead(),
 		 extra(1, 2), ops(new P(1)), (function () { try { thrower(5) } catch (e) { return e.message } })(), thrower(1),
-		 sw(1) + sw(2) + sw("s") + sw(7), args(1, 2, 3), fwd(4, 5)].join(" ")`
+		 sw(1) + sw(2) + sw("s") + sw(7), args(1, 2, 3), fwd(4, 5), build()].join(" ")`
 	const want = "610 2432 19 4,8,2,3,4,5,6,7,8,9 45 24 30015 true,true,false,false,true,false true,false,false,false,false,true 0,1,23 true " +
-		"1, true,true,true,false,true k 5 1 abbsd 9,3,3,2 9,2,,5"
+		"1, true,true,true,false,true k 5 1 abbsd 9,3,3,2 9,2,,5 9,true,true,3,2,,3"
 	for _, reg := range []bool{false, true} {
 		// Each run its own compile: a function keeps the form its first
 		// run gave it.

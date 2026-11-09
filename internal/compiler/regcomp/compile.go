@@ -357,6 +357,11 @@ func (g *gen) body() {
 // backend compiles: an object made as the function starts, in the binding
 // the stack form gives it, of a function with simple parameters.
 func simpleArguments(fn *bytecode.Function) bool {
+	if fn.ForwardsArguments {
+		// Only handed on to apply, which the stack form does without the
+		// object: making it would cost every call an allocation.
+		return false
+	}
 	if fn.HasRest || !fn.HasSimpleParams || fn.ParamsAreLexical || fn.Generator || fn.Async ||
 		fn.HasDirectEval || fn.Debug != nil || fn.TopLevel || fn.PrivateSites != 0 || fn.HasTailCall {
 		return false

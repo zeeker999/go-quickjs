@@ -350,6 +350,12 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int,
 			r.stackHigh = top
 		}
 	}
+	var kept []Value
+	if rc.args {
+		// Before the bindings take the window past the parameters, which
+		// args may be.
+		kept = append([]Value(nil), args...)
+	}
 	// Parameters no argument was given for, and the bindings past them.
 	for i := base + 2 + min(argc, int(rc.params)); i < base+2+int(rc.params)+int(rc.inits); i++ {
 		r.stack[i] = Undefined
@@ -375,7 +381,7 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int,
 		regClearFrame(f)
 	}
 	if rc.args {
-		f.args = append([]Value(nil), args...)
+		f.args = kept
 		p := int(rc.params)
 		f.locals = r.stack[base+2 : base+2+p : base+2+p]
 	}
@@ -596,7 +602,7 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 			regCrossOf(regCrossNew, regs[w.A()])
 		}
 		b := wb + int(w.A())
-		if v, err = r.construct(regs[w.A()], r.stack[b+2:b+2+int(w.X())]); err == nil {
+		if v, err = r.regConstruct(regs[w.A()], b, int(w.X())); err == nil {
 			regs[w.B()] = v
 		}
 		return v, err
@@ -698,6 +704,75 @@ var regJumpCmp = [128]struct {
 	bytecode.RJEq: {bytecode.OpEq, false, true}, bytecode.RJNe: {bytecode.OpEq, true, true},
 	bytecode.RJEqI: {bytecode.OpEq, false, false}, bytecode.RJNeI: {bytecode.OpEq, true, false},
 	bytecode.RJNull: {bytecode.OpEq, false, false}, bytecode.RJNotNull: {bytecode.OpEq, true, false},
+}
+
+// regConstruct is new_w: new callee with the argc arguments of the window
+// at base. A constructor of this realm with register code of the form's own
+// layout, a base function's, runs in the window as a register frame, its
+// object made as constructWithTarget makes it -- its prototype, its room,
+// the root its objects start from -- and the room it came to need noted.
+// Anything else is constructed as construct constructs it.
+func (r *Runtime) regConstruct(callee Value, base, argc int) (Value, error) {
+	args := r.stack[base+2 : base+2+argc : base+2+argc]
+	if !callee.IsObject() {
+		return r.construct(callee, args)
+	}
+	o := callee.Object()
+	fd := o.fn()
+	if fd == nil || fd.closure == nil || fd.bound || fd.extra != nil || fd.ctorKind != ctorBase ||
+		fd.closure.realm != r.Realm || proxyOf(o) != nil {
+		return r.construct(callee, args)
+	}
+	cl := fd.closure
+	if cl.fn.Leaf == bytecode.LeafForward {
+		// What hands its arguments on, the construction answers without a
+		// frame.
+		return r.construct(callee, args)
+	}
+	rc := cl.reg
+	if rc == nil {
+		rc = r.regOf(cl)
+	}
+	if rc == nil || !rc.wide {
+		return r.construct(callee, args)
+	}
+	var protoVal Value
+	var err error
+	if p := o.getOwnVisible(atomPrototype); p.ok() && p.flags()&propAccessor == 0 {
+		protoVal = p.value()
+	} else if protoVal, err = r.getProp(o, atomPrototype, Obj(o)); err != nil {
+		return Undefined, err
+	}
+	var proto *Object
+	if protoVal.IsObject() {
+		proto = protoVal.Object()
+	} else if proto, err = r.protoForNewTarget(o, r.proto.object); err != nil {
+		return Undefined, err
+	}
+	root := r.shapes.ctorRoot(fd, proto)
+	obj := newOrdinary[struct{}](fd, root, proto, root.roomFor(int(cl.fn.ThisProps)))
+	this := Obj(obj)
+	if err := r.initInstanceElements(o, this); err != nil {
+		return Undefined, err
+	}
+	if cl.fn.Leaf != bytecode.LeafNone && cl.fn.Leaf != bytecode.LeafPure {
+		// A body that only stores its parameters in this, without a frame
+		// where leafCall can.
+		if _, done := r.leafCall(cl, obj, args); done {
+			root.noteBuilt(int(obj.valn))
+			return this, nil
+		}
+	}
+	r.stack[base+1] = this
+	res, err := r.regEnterW(o, cl, rc, base, argc, args)
+	if err != nil {
+		return Undefined, err
+	}
+	root.noteBuilt(int(obj.valn))
+	if res.IsObject() {
+		return res, nil
+	}
+	return this, nil
 }
 
 // regThrow is throw: the value thrown, from the instruction at pc.
