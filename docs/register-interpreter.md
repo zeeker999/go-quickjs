@@ -589,7 +589,7 @@ What the measurements found, against the design:
   6.4 ns; the backend needs the update of a place as one operation, as the
   tree has it. (Done since: `add_prop`, 5.8 ns.)
 
-#### Raw int32 registers (step 5, designed, not built)
+#### Raw int32 registers (step 5, designed, deferred)
 
 Index-heavy code pays a float conversion at every element access: a key
 held as a float64 is converted to an index, and an int32 result back to a
@@ -635,6 +635,37 @@ tried (2026-10-02).
   files, the V8 suite's programs and generated int32 arithmetic -- overflow
   past int32, -0, NaN, shifts by 32 or more, `>>> 0`, mixes with doubles --
   with the register tier on and off, and compares every result.
+  (Built: `internal/v8bench/regdiff_test.go`, run after every step.)
+
+Deferred, 2026-11-09, on these measurements:
+
+- **NavierStokes' keys are not provable.** In `lin_solve` and
+  `lin_solve2`, which are its time, every element key is `j * rowSize`,
+  and `rowSize` is an upvalue made from `setResolution`'s argument: no
+  static proof reaches it. What the backend could prove are the loop
+  counters, compared with the upvalues `width` and `height`. The tree tier
+  keeps those locals as Values and converts the same keys, and is still
+  21% faster: its lead is fused nodes such as `x[++currentRow]`, not
+  int32s, and the register form closes it by fusion and instruction count.
+- **am3's operands are Values.** Its parameters `i`, `j`, `c` and `n` and
+  every element read are Values; what is provable -- the masks, shifts and
+  their products -- is about 13 of the loop's 26 instructions, 10 to 15% at
+  best, for a verifier of kinds and a doubled set of operations.
+- **Speculation is not taken.** Unboxing a parameter or an element read
+  behind a check that exits to the generic code would type both loops, but
+  brings exits, mapped generic code, twice the operations and a threat to
+  `runReg`'s size into the interpreter, to remove a cost the faster tier
+  pays too.
+
+If this is ever built, the rule for calls out is the narrower one: no raw
+register may be live where a callee or the unwinder reads the frame
+generically -- a register a closure captures, a parameter an arguments
+object maps, a call's window and the callee frame above it, a handler's
+entry. An interrupt check, a stack check, a throw with no handler in the
+frame and a ToPrimitive read nothing of the frame's registers, so a raw
+loop counter may be live across a back edge; the literal rule, no raw
+register live across anything that can call out, would forbid every raw
+counter.
 
 ### Stage 2: frames
 
