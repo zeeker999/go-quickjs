@@ -56,8 +56,13 @@ type regCode struct {
 	// the function's counts.
 	numRegs, locals, params int32
 	coerceThis              bool
-	rc                      *bytecode.RegCode
-	fn                      *bytecode.Function
+	// wide marks code of the register form's own frame layout: register 0
+	// the function, 1 its this, the parameters from 2, and inits bindings
+	// after them that a call makes undefined. Only call_w enters it.
+	wide  bool
+	inits int32
+	rc    *bytecode.RegCode
+	fn    *bytecode.Function
 }
 
 // regWindow is the frame's registers from base. The register form's
@@ -90,6 +95,11 @@ func firstForm(fn *bytecode.Function) *tree {
 // regTreeOf translates fn into register code and returns the tree that runs
 // it, or nil.
 func regTreeOf(fn *bytecode.Function) *tree {
+	if regHandOn {
+		if t := regHandTree(fn); t != nil {
+			return t
+		}
+	}
 	rc, why := regform.RegisterCode(fn)
 	if rc == nil {
 		if regTrace {
@@ -126,7 +136,7 @@ var regDump = os.Getenv("QJS_REGDUMP") != ""
 func regStmt(c *regCode) tstmt {
 	return func(t *tctx) {
 		r, f := t.r, t.f
-		if f.thisRef != nil || f.withScopes != nil || f.evalVars != nil {
+		if c.wide || f.thisRef != nil || f.withScopes != nil || f.evalVars != nil {
 			v, err := r.execute(f)
 			if err != nil {
 				t.throw(err)
@@ -185,7 +195,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 	for {
 		w := regAt(code, pc)
 		pc++
-		switch w.Op() & 63 {
+		switch w.Op() & 127 {
 		case bytecode.RNop:
 		case bytecode.RMove:
 			regs[w.A()] = regs[w.B()]
@@ -317,7 +327,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RAdd:
 			a, b := regs[w.B()], regs[w.C()]
 			if a.IsNumber() && b.IsNumber() {
-				regs[w.A()] = Float(a.Number() + b.Number())
+				regs[w.A()] = regNum(a.Number() + b.Number())
 				continue
 			}
 			kept.pc = pc
@@ -328,7 +338,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RSub:
 			a, b := regs[w.B()], regs[w.C()]
 			if a.IsNumber() && b.IsNumber() {
-				regs[w.A()] = Float(a.Number() - b.Number())
+				regs[w.A()] = regNum(a.Number() - b.Number())
 				continue
 			}
 			kept.pc = pc
@@ -339,7 +349,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RMul:
 			a, b := regs[w.B()], regs[w.C()]
 			if a.IsNumber() && b.IsNumber() {
-				regs[w.A()] = Float(a.Number() * b.Number())
+				regs[w.A()] = regNum(a.Number() * b.Number())
 				continue
 			}
 			kept.pc = pc
@@ -352,10 +362,10 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				x, y := a.Number(), w.SC()
 				switch bytecode.Op(w.X()) {
 				case bytecode.OpAdd:
-					regs[w.A()] = Float(x + float64(y))
+					regs[w.A()] = regNum(x + float64(y))
 					continue
 				case bytecode.OpSub:
-					regs[w.A()] = Float(x - float64(y))
+					regs[w.A()] = regNum(x - float64(y))
 					continue
 				case bytecode.OpBitOr:
 					if xi := int32(x); float64(xi) == x {
@@ -376,7 +386,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			pc = kept.pc
 		case bytecode.RInc:
 			if a := regs[w.B()]; a.IsNumber() {
-				regs[w.A()] = Float(a.Number() + 1)
+				regs[w.A()] = regNum(a.Number() + 1)
 				continue
 			}
 			kept.pc = pc
@@ -386,7 +396,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			pc = kept.pc
 		case bytecode.RDec:
 			if a := regs[w.B()]; a.IsNumber() {
-				regs[w.A()] = Float(a.Number() - 1)
+				regs[w.A()] = regNum(a.Number() - 1)
 				continue
 			}
 			kept.pc = pc
@@ -500,56 +510,949 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			}
 			pc = kept.pc
 			regs[regAt(code, pc-1).B()] = v
+		case bytecode.RAndI:
+			if x, ok := regInt32(regs[w.B()]); ok {
+				regs[w.A()] = Int32(x & w.SC())
+				continue
+			}
+			kept.pc = pc
+			if _, err := r.regSlow(f, c, pc-1, regs); err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+		case bytecode.ROrI:
+			if x, ok := regInt32(regs[w.B()]); ok {
+				regs[w.A()] = Int32(x | w.SC())
+				continue
+			}
+			kept.pc = pc
+			if _, err := r.regSlow(f, c, pc-1, regs); err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+		case bytecode.RXorI:
+			if x, ok := regInt32(regs[w.B()]); ok {
+				regs[w.A()] = Int32(x ^ w.SC())
+				continue
+			}
+			kept.pc = pc
+			if _, err := r.regSlow(f, c, pc-1, regs); err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+		case bytecode.RShlI:
+			if x, ok := regInt32(regs[w.B()]); ok {
+				regs[w.A()] = Int32(x << (uint32(w.SC()) & 31))
+				continue
+			}
+			kept.pc = pc
+			if _, err := r.regSlow(f, c, pc-1, regs); err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+		case bytecode.RShrI:
+			if x, ok := regInt32(regs[w.B()]); ok {
+				regs[w.A()] = Int32(x >> (uint32(w.SC()) & 31))
+				continue
+			}
+			kept.pc = pc
+			if _, err := r.regSlow(f, c, pc-1, regs); err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+		case bytecode.RUShrI:
+			if x, ok := regInt32(regs[w.B()]); ok {
+				regs[w.A()] = Uint32(uint32(x) >> (uint32(w.SC()) & 31))
+				continue
+			}
+			kept.pc = pc
+			if _, err := r.regSlow(f, c, pc-1, regs); err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+		case bytecode.RBitAnd:
+			if x, ok := regInt32(regs[w.B()]); ok {
+				if y, ok := regInt32(regs[w.C()]); ok {
+					regs[w.A()] = Int32(x & y)
+					continue
+				}
+			}
+			kept.pc = pc
+			if _, err := r.regSlow(f, c, pc-1, regs); err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+		case bytecode.RBitOr:
+			if x, ok := regInt32(regs[w.B()]); ok {
+				if y, ok := regInt32(regs[w.C()]); ok {
+					regs[w.A()] = Int32(x | y)
+					continue
+				}
+			}
+			kept.pc = pc
+			if _, err := r.regSlow(f, c, pc-1, regs); err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+		case bytecode.RBitXor:
+			if x, ok := regInt32(regs[w.B()]); ok {
+				if y, ok := regInt32(regs[w.C()]); ok {
+					regs[w.A()] = Int32(x ^ y)
+					continue
+				}
+			}
+			kept.pc = pc
+			if _, err := r.regSlow(f, c, pc-1, regs); err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+		case bytecode.RShl:
+			if x, ok := regInt32(regs[w.B()]); ok {
+				if y, ok := regInt32(regs[w.C()]); ok {
+					regs[w.A()] = Int32(x << (uint32(y) & 31))
+					continue
+				}
+			}
+			kept.pc = pc
+			if _, err := r.regSlow(f, c, pc-1, regs); err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+		case bytecode.RShr:
+			if x, ok := regInt32(regs[w.B()]); ok {
+				if y, ok := regInt32(regs[w.C()]); ok {
+					regs[w.A()] = Int32(x >> (uint32(y) & 31))
+					continue
+				}
+			}
+			kept.pc = pc
+			if _, err := r.regSlow(f, c, pc-1, regs); err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+		case bytecode.RUShr:
+			if x, ok := regInt32(regs[w.B()]); ok {
+				if y, ok := regInt32(regs[w.C()]); ok {
+					regs[w.A()] = Uint32(uint32(x) >> (uint32(y) & 31))
+					continue
+				}
+			}
+			kept.pc = pc
+			if _, err := r.regSlow(f, c, pc-1, regs); err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+		case bytecode.RCallW:
+			f.pc = c.src[pc-1] + 1
+			kept.pc = pc
+			v, err := r.regCallW(f, c, pc-1, wb)
+			if err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+			regs[regAt(code, pc-1).B()] = v
+		case bytecode.RAddI:
+			if a := regs[w.B()]; a.IsNumber() {
+				regs[w.A()] = regNum(a.Number() + float64(w.SC()))
+				continue
+			}
+			kept.pc = pc
+			if _, err := r.regSlow(f, c, pc-1, regs); err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+		case bytecode.RSubI:
+			if a := regs[w.B()]; a.IsNumber() {
+				regs[w.A()] = regNum(a.Number() - float64(w.SC()))
+				continue
+			}
+			kept.pc = pc
+			if _, err := r.regSlow(f, c, pc-1, regs); err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+		case bytecode.RJLt:
+			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
+				if u, v := a.Number(), b.Number(); u < v {
+					if off := w.SC(); off >= 0 {
+						pc += int(off)
+					} else if r.backEdges--; r.backEdges > 0 {
+						pc += int(off)
+					} else {
+						kept.pc = pc
+						if err := r.regBackEdge(f, c, pc-1); err != nil {
+							return Undefined, err
+						}
+						pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+					}
+				}
+				continue
+			}
+			kept.pc = pc
+			t, err := r.regSlow(f, c, pc-1, regs)
+			if err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+			if t.sameBits(True) {
+				w = regAt(code, pc-1)
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
+		case bytecode.RJLtI:
+			if a := regs[w.A()]; a.IsNumber() {
+				if u, v := a.Number(), float64(w.SB()); u < v {
+					if off := w.SC(); off >= 0 {
+						pc += int(off)
+					} else if r.backEdges--; r.backEdges > 0 {
+						pc += int(off)
+					} else {
+						kept.pc = pc
+						if err := r.regBackEdge(f, c, pc-1); err != nil {
+							return Undefined, err
+						}
+						pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+					}
+				}
+				continue
+			}
+			kept.pc = pc
+			t, err := r.regSlow(f, c, pc-1, regs)
+			if err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+			if t.sameBits(True) {
+				w = regAt(code, pc-1)
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
+		case bytecode.RJNLt:
+			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
+				if u, v := a.Number(), b.Number(); !(u < v) {
+					if off := w.SC(); off >= 0 {
+						pc += int(off)
+					} else if r.backEdges--; r.backEdges > 0 {
+						pc += int(off)
+					} else {
+						kept.pc = pc
+						if err := r.regBackEdge(f, c, pc-1); err != nil {
+							return Undefined, err
+						}
+						pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+					}
+				}
+				continue
+			}
+			kept.pc = pc
+			t, err := r.regSlow(f, c, pc-1, regs)
+			if err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+			if t.sameBits(True) {
+				w = regAt(code, pc-1)
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
+		case bytecode.RJNLtI:
+			if a := regs[w.A()]; a.IsNumber() {
+				if u, v := a.Number(), float64(w.SB()); !(u < v) {
+					if off := w.SC(); off >= 0 {
+						pc += int(off)
+					} else if r.backEdges--; r.backEdges > 0 {
+						pc += int(off)
+					} else {
+						kept.pc = pc
+						if err := r.regBackEdge(f, c, pc-1); err != nil {
+							return Undefined, err
+						}
+						pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+					}
+				}
+				continue
+			}
+			kept.pc = pc
+			t, err := r.regSlow(f, c, pc-1, regs)
+			if err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+			if t.sameBits(True) {
+				w = regAt(code, pc-1)
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
+		case bytecode.RJLe:
+			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
+				if u, v := a.Number(), b.Number(); u <= v {
+					if off := w.SC(); off >= 0 {
+						pc += int(off)
+					} else if r.backEdges--; r.backEdges > 0 {
+						pc += int(off)
+					} else {
+						kept.pc = pc
+						if err := r.regBackEdge(f, c, pc-1); err != nil {
+							return Undefined, err
+						}
+						pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+					}
+				}
+				continue
+			}
+			kept.pc = pc
+			t, err := r.regSlow(f, c, pc-1, regs)
+			if err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+			if t.sameBits(True) {
+				w = regAt(code, pc-1)
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
+		case bytecode.RJLeI:
+			if a := regs[w.A()]; a.IsNumber() {
+				if u, v := a.Number(), float64(w.SB()); u <= v {
+					if off := w.SC(); off >= 0 {
+						pc += int(off)
+					} else if r.backEdges--; r.backEdges > 0 {
+						pc += int(off)
+					} else {
+						kept.pc = pc
+						if err := r.regBackEdge(f, c, pc-1); err != nil {
+							return Undefined, err
+						}
+						pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+					}
+				}
+				continue
+			}
+			kept.pc = pc
+			t, err := r.regSlow(f, c, pc-1, regs)
+			if err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+			if t.sameBits(True) {
+				w = regAt(code, pc-1)
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
+		case bytecode.RJNLe:
+			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
+				if u, v := a.Number(), b.Number(); !(u <= v) {
+					if off := w.SC(); off >= 0 {
+						pc += int(off)
+					} else if r.backEdges--; r.backEdges > 0 {
+						pc += int(off)
+					} else {
+						kept.pc = pc
+						if err := r.regBackEdge(f, c, pc-1); err != nil {
+							return Undefined, err
+						}
+						pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+					}
+				}
+				continue
+			}
+			kept.pc = pc
+			t, err := r.regSlow(f, c, pc-1, regs)
+			if err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+			if t.sameBits(True) {
+				w = regAt(code, pc-1)
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
+		case bytecode.RJNLeI:
+			if a := regs[w.A()]; a.IsNumber() {
+				if u, v := a.Number(), float64(w.SB()); !(u <= v) {
+					if off := w.SC(); off >= 0 {
+						pc += int(off)
+					} else if r.backEdges--; r.backEdges > 0 {
+						pc += int(off)
+					} else {
+						kept.pc = pc
+						if err := r.regBackEdge(f, c, pc-1); err != nil {
+							return Undefined, err
+						}
+						pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+					}
+				}
+				continue
+			}
+			kept.pc = pc
+			t, err := r.regSlow(f, c, pc-1, regs)
+			if err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+			if t.sameBits(True) {
+				w = regAt(code, pc-1)
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
+		case bytecode.RJGt:
+			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
+				if u, v := a.Number(), b.Number(); u > v {
+					if off := w.SC(); off >= 0 {
+						pc += int(off)
+					} else if r.backEdges--; r.backEdges > 0 {
+						pc += int(off)
+					} else {
+						kept.pc = pc
+						if err := r.regBackEdge(f, c, pc-1); err != nil {
+							return Undefined, err
+						}
+						pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+					}
+				}
+				continue
+			}
+			kept.pc = pc
+			t, err := r.regSlow(f, c, pc-1, regs)
+			if err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+			if t.sameBits(True) {
+				w = regAt(code, pc-1)
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
+		case bytecode.RJGtI:
+			if a := regs[w.A()]; a.IsNumber() {
+				if u, v := a.Number(), float64(w.SB()); u > v {
+					if off := w.SC(); off >= 0 {
+						pc += int(off)
+					} else if r.backEdges--; r.backEdges > 0 {
+						pc += int(off)
+					} else {
+						kept.pc = pc
+						if err := r.regBackEdge(f, c, pc-1); err != nil {
+							return Undefined, err
+						}
+						pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+					}
+				}
+				continue
+			}
+			kept.pc = pc
+			t, err := r.regSlow(f, c, pc-1, regs)
+			if err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+			if t.sameBits(True) {
+				w = regAt(code, pc-1)
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
+		case bytecode.RJNGt:
+			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
+				if u, v := a.Number(), b.Number(); !(u > v) {
+					if off := w.SC(); off >= 0 {
+						pc += int(off)
+					} else if r.backEdges--; r.backEdges > 0 {
+						pc += int(off)
+					} else {
+						kept.pc = pc
+						if err := r.regBackEdge(f, c, pc-1); err != nil {
+							return Undefined, err
+						}
+						pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+					}
+				}
+				continue
+			}
+			kept.pc = pc
+			t, err := r.regSlow(f, c, pc-1, regs)
+			if err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+			if t.sameBits(True) {
+				w = regAt(code, pc-1)
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
+		case bytecode.RJNGtI:
+			if a := regs[w.A()]; a.IsNumber() {
+				if u, v := a.Number(), float64(w.SB()); !(u > v) {
+					if off := w.SC(); off >= 0 {
+						pc += int(off)
+					} else if r.backEdges--; r.backEdges > 0 {
+						pc += int(off)
+					} else {
+						kept.pc = pc
+						if err := r.regBackEdge(f, c, pc-1); err != nil {
+							return Undefined, err
+						}
+						pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+					}
+				}
+				continue
+			}
+			kept.pc = pc
+			t, err := r.regSlow(f, c, pc-1, regs)
+			if err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+			if t.sameBits(True) {
+				w = regAt(code, pc-1)
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
+		case bytecode.RJGe:
+			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
+				if u, v := a.Number(), b.Number(); u >= v {
+					if off := w.SC(); off >= 0 {
+						pc += int(off)
+					} else if r.backEdges--; r.backEdges > 0 {
+						pc += int(off)
+					} else {
+						kept.pc = pc
+						if err := r.regBackEdge(f, c, pc-1); err != nil {
+							return Undefined, err
+						}
+						pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+					}
+				}
+				continue
+			}
+			kept.pc = pc
+			t, err := r.regSlow(f, c, pc-1, regs)
+			if err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+			if t.sameBits(True) {
+				w = regAt(code, pc-1)
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
+		case bytecode.RJGeI:
+			if a := regs[w.A()]; a.IsNumber() {
+				if u, v := a.Number(), float64(w.SB()); u >= v {
+					if off := w.SC(); off >= 0 {
+						pc += int(off)
+					} else if r.backEdges--; r.backEdges > 0 {
+						pc += int(off)
+					} else {
+						kept.pc = pc
+						if err := r.regBackEdge(f, c, pc-1); err != nil {
+							return Undefined, err
+						}
+						pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+					}
+				}
+				continue
+			}
+			kept.pc = pc
+			t, err := r.regSlow(f, c, pc-1, regs)
+			if err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+			if t.sameBits(True) {
+				w = regAt(code, pc-1)
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
+		case bytecode.RJNGe:
+			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
+				if u, v := a.Number(), b.Number(); !(u >= v) {
+					if off := w.SC(); off >= 0 {
+						pc += int(off)
+					} else if r.backEdges--; r.backEdges > 0 {
+						pc += int(off)
+					} else {
+						kept.pc = pc
+						if err := r.regBackEdge(f, c, pc-1); err != nil {
+							return Undefined, err
+						}
+						pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+					}
+				}
+				continue
+			}
+			kept.pc = pc
+			t, err := r.regSlow(f, c, pc-1, regs)
+			if err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+			if t.sameBits(True) {
+				w = regAt(code, pc-1)
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
+		case bytecode.RJNGeI:
+			if a := regs[w.A()]; a.IsNumber() {
+				if u, v := a.Number(), float64(w.SB()); !(u >= v) {
+					if off := w.SC(); off >= 0 {
+						pc += int(off)
+					} else if r.backEdges--; r.backEdges > 0 {
+						pc += int(off)
+					} else {
+						kept.pc = pc
+						if err := r.regBackEdge(f, c, pc-1); err != nil {
+							return Undefined, err
+						}
+						pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+					}
+				}
+				continue
+			}
+			kept.pc = pc
+			t, err := r.regSlow(f, c, pc-1, regs)
+			if err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+			if t.sameBits(True) {
+				w = regAt(code, pc-1)
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
+		case bytecode.RJSEq:
+			if regs[w.A()].StrictEquals(regs[w.B()]) {
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
+		case bytecode.RJSNe:
+			if !regs[w.A()].StrictEquals(regs[w.B()]) {
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
+		case bytecode.RJSEqI:
+			if regs[w.A()].StrictEquals(Int32(w.SB())) {
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
+		case bytecode.RJSNeI:
+			if !regs[w.A()].StrictEquals(Int32(w.SB())) {
+				if off := w.SC(); off >= 0 {
+					pc += int(off)
+				} else if r.backEdges--; r.backEdges > 0 {
+					pc += int(off)
+				} else {
+					kept.pc = pc
+					if err := r.regBackEdge(f, c, pc-1); err != nil {
+						return Undefined, err
+					}
+					pc = kept.pc + int(regAt(code, kept.pc-1).SC())
+				}
+			}
 		// Every value of the switch is a case, so that it is a jump table
 		// that needs no range check: Go makes one only of a switch whose
-		// cases are dense, and the mask tells it the value is below 64. A
+		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile.
-		case 44:
+		case 79:
 			goto invalid
-		case 45:
+		case 80:
 			goto invalid
-		case 46:
+		case 81:
 			goto invalid
-		case 47:
+		case 82:
 			goto invalid
-		case 48:
+		case 83:
 			goto invalid
-		case 49:
+		case 84:
 			goto invalid
-		case 50:
+		case 85:
 			goto invalid
-		case 51:
+		case 86:
 			goto invalid
-		case 52:
+		case 87:
 			goto invalid
-		case 53:
+		case 88:
 			goto invalid
-		case 54:
+		case 89:
 			goto invalid
-		case 55:
+		case 90:
 			goto invalid
-		case 56:
+		case 91:
 			goto invalid
-		case 57:
+		case 92:
 			goto invalid
-		case 58:
+		case 93:
 			goto invalid
-		case 59:
+		case 94:
 			goto invalid
-		case 60:
+		case 95:
 			goto invalid
-		case 61:
+		case 96:
 			goto invalid
-		case 62:
+		case 97:
 			goto invalid
-		case 63:
+		case 98:
+			goto invalid
+		case 99:
+			goto invalid
+		case 100:
+			goto invalid
+		case 101:
+			goto invalid
+		case 102:
+			goto invalid
+		case 103:
+			goto invalid
+		case 104:
+			goto invalid
+		case 105:
+			goto invalid
+		case 106:
+			goto invalid
+		case 107:
+			goto invalid
+		case 108:
+			goto invalid
+		case 109:
+			goto invalid
+		case 110:
+			goto invalid
+		case 111:
+			goto invalid
+		case 112:
+			goto invalid
+		case 113:
+			goto invalid
+		case 114:
+			goto invalid
+		case 115:
+			goto invalid
+		case 116:
+			goto invalid
+		case 117:
+			goto invalid
+		case 118:
+			goto invalid
+		case 119:
+			goto invalid
+		case 120:
+			goto invalid
+		case 121:
+			goto invalid
+		case 122:
+			goto invalid
+		case 123:
+			goto invalid
+		case 124:
+			goto invalid
+		case 125:
+			goto invalid
+		case 126:
+			goto invalid
+		case 127:
 			goto invalid
 		}
 		continue
 	invalid:
 		panic("register code: invalid instruction")
 	}
+}
+
+// regNaN is the canonical NaN as a Value, in a variable rather than a
+// constant: Go's loop-invariant pass takes a constant out of the loop into a
+// register of its own, one for each use, which the loop then saves and
+// restores around every case that calls anything.
+var regNaN = Value{num: math.Float64frombits(canonicalNaN)}
+
+// regNum is Float, its NaN read from regNaN.
+func regNum(f float64) Value {
+	if f != f {
+		return regNaN
+	}
+	return Value{num: f}
+}
+
+// regInt32 is v as an int32, where it is a number that is one exactly:
+// what a bitwise operator's fast path takes without converting.
+func regInt32(v Value) (int32, bool) {
+	if v.IsNumber() {
+		f := v.Number()
+		if x := int32(f); float64(x) == f {
+			return x, true
+		}
+	}
+	return 0, false
 }
 
 // regKept is what the loop keeps in memory across a call: a struct Go does

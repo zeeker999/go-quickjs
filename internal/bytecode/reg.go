@@ -179,6 +179,54 @@ const (
 	// close_upvalues does when a block that captured bindings ends.
 	RCloseUpvals
 
+	// The bitwise operators and shifts, each an operation of its own so
+	// that no instruction decides at run time which operator it is: R[A] =
+	// R[B] op R[C], or R[B] op SC for the immediate forms.
+	RBitAnd
+	RBitOr
+	RBitXor
+	RShl
+	RShr
+	RUShr
+	RAndI
+	ROrI
+	RXorI
+	RShlI
+	RShrI
+	RUShrI
+	// RCallW: R[B] = R[A](R[A+2] ... R[A+1+X]) with this R[A+1], the callee's
+	// frame starting at R[A]: its register 0 is the function, 1 its this,
+	// and its parameters are the arguments where they lie (the register
+	// form's own frame layout; docs/register-interpreter.md).
+	RCallW
+	// RAddI and RSubI: R[A] = R[B] + SC or - SC.
+	RAddI
+	RSubI
+	// The compare-and-branch operations, one for each comparison and each
+	// way it can decide: RJLt jumps by SC if R[A] < R[B], RJNLt if not --
+	// which a NaN makes different things. The I forms compare with the
+	// immediate SB. RJSEq and RJSNe are === and !==.
+	RJLt
+	RJNLt
+	RJLe
+	RJNLe
+	RJGt
+	RJNGt
+	RJGe
+	RJNGe
+	RJLtI
+	RJNLtI
+	RJLeI
+	RJNLeI
+	RJGtI
+	RJNGtI
+	RJGeI
+	RJNGeI
+	RJSEq
+	RJSNe
+	RJSEqI
+	RJSNeI
+
 	// RInvalid is the last operation there can be, which no code holds:
 	// the interpreter's switch has a case for it so that its jump table
 	// spans every value of an ROp and needs no range check.
@@ -224,6 +272,12 @@ var rOpNames = [...]string{
 	RJmpCmpI: "jmp_cmp_imm", RRet: "ret", RRetUndef: "ret_undef",
 	RCall: "call", RCallMethod: "call_method", RNew: "new",
 	RCloseUpvals: "close_upvals",
+	RBitAnd:      "bit_and", RBitOr: "bit_or", RBitXor: "bit_xor", RShl: "shl", RShr: "shr", RUShr: "ushr",
+	RAndI: "and_imm", ROrI: "or_imm", RXorI: "xor_imm", RShlI: "shl_imm", RShrI: "shr_imm", RUShrI: "ushr_imm",
+	RCallW: "call_w", RAddI: "add_imm", RSubI: "sub_imm",
+	RJLt: "jlt", RJNLt: "jnlt", RJLe: "jle", RJNLe: "jnle", RJGt: "jgt", RJNGt: "jngt", RJGe: "jge", RJNGe: "jnge",
+	RJLtI: "jlt_imm", RJNLtI: "jnlt_imm", RJLeI: "jle_imm", RJNLeI: "jnle_imm", RJGtI: "jgt_imm", RJNGtI: "jngt_imm",
+	RJGeI: "jge_imm", RJNGeI: "jnge_imm", RJSEq: "jseq", RJSNe: "jsne", RJSEqI: "jseq_imm", RJSNeI: "jsne_imm",
 }
 
 func (op ROp) String() string {
@@ -270,7 +324,7 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s @%d, %s", op, r(w.A()), w.C(), r(w.B()))
 	case RDefineField:
 		return fmt.Sprintf("%s %s name%d, %s", op, r(w.A()), w.C(), r(w.B()))
-	case RGetIndex, RAdd, RSub, RMul:
+	case RGetIndex, RAdd, RSub, RMul, RBitAnd, RBitOr, RBitXor, RShl, RShr, RUShr:
 		return fmt.Sprintf("%s %s, %s, %s", op, r(w.A()), r(w.B()), r(w.C()))
 	case RSetIndex:
 		return fmt.Sprintf("%s %s[%s], %s", op, r(w.A()), r(w.B()), r(w.C()))
@@ -282,6 +336,8 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s.%s %s, %s, %s", op, Op(w.X()), r(w.A()), r(w.B()), r(w.C()))
 	case RBinI:
 		return fmt.Sprintf("%s.%s %s, %s, %d", op, Op(w.X()), r(w.A()), r(w.B()), w.SC())
+	case RAndI, ROrI, RXorI, RShlI, RShrI, RUShrI, RAddI, RSubI:
+		return fmt.Sprintf("%s %s, %s, %d", op, r(w.A()), r(w.B()), w.SC())
 	case RUnary:
 		return fmt.Sprintf("%s.%s %s, %s", op, Op(w.X()), r(w.A()), r(w.B()))
 	case RJmp:
@@ -290,9 +346,13 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s %s", op, r(w.A()), target(int32(w.BC())))
 	case RJmpCmp:
 		return fmt.Sprintf("%s %s %s, %s %s", op, cmp(), r(w.A()), r(w.B()), target(w.SC()))
+	case RJLt, RJNLt, RJLe, RJNLe, RJGt, RJNGt, RJGe, RJNGe, RJSEq, RJSNe:
+		return fmt.Sprintf("%s %s, %s %s", op, r(w.A()), r(w.B()), target(w.SC()))
+	case RJLtI, RJNLtI, RJLeI, RJNLeI, RJGtI, RJNGtI, RJGeI, RJNGeI, RJSEqI, RJSNeI:
+		return fmt.Sprintf("%s %s, %d %s", op, r(w.A()), w.SB(), target(w.SC()))
 	case RJmpCmpI:
 		return fmt.Sprintf("%s %s %s, %d %s", op, cmp(), r(w.A()), w.SB(), target(w.SC()))
-	case RCall, RNew:
+	case RCall, RNew, RCallW:
 		return fmt.Sprintf("%s %s = %s(%d)", op, r(w.B()), r(w.A()), w.X())
 	case RCallMethod:
 		return fmt.Sprintf("%s %s = %s.%s(%d)", op, r(w.B()), r(w.A()), r(w.A()+1), w.X())

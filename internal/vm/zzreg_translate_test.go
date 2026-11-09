@@ -69,3 +69,52 @@ func TestRegTranslatedErrors(t *testing.T) {
 	}
 	r.Close()
 }
+
+// TestRegHandKernels pins the hand-written register code of the kernel
+// experiment (zzreg_hand.go): am3, call_fib_rec through call_w and
+// loop_locals give the stack interpreter's answers.
+func TestRegHandKernels(t *testing.T) {
+	const src = `
+		var global_res;
+		function am3(i,x,w,j,c,n) {
+			var this_array = this.array; var w_array = w.array;
+			var xl = x&0x3fff, xh = x>>14;
+			while(--n >= 0) {
+				var l = this_array[i]&0x3fff; var h = this_array[i++]>>14;
+				var m = xh*l+h*xl;
+				l = xl*l+((m&0x3fff)<<14)+w_array[j]+c;
+				c = (l>>28)+(m>>14)+xh*h;
+				w_array[j++] = l&0xfffffff;
+			}
+			return c;
+		}
+		function call_fib_rec(k) { return k < 2 ? k : call_fib_rec(k - 1) + call_fib_rec(k - 2) }
+		function call_fib(n) { var j, s = 0; for (j = 0; j < n; j += 177) s = (s + call_fib_rec(10)) | 0; global_res = s; return n }
+		function loop_locals(n) { var j, a = 1, b = 2, c = 3, d = 4; for (j = 0; j < n; j++) { a = b; b = c; c = d; d = a } global_res = a + b + c + d; return n }
+		var a = { array: [] }, w = { array: [] }, out = [];
+		for (var i = 0; i < 64; i++) { a.array[i] = (i * 0x1234567) & 0xfffffff; w.array[i] = (i * 0x7654321) & 0xfffffff }
+		a.am3 = am3;
+		out.push(a.am3(0, 0x2345678, w, 0, 5, 40), w.array.slice(0, 4).join("/"));
+		call_fib(1000); out.push(global_res);
+		loop_locals(7); out.push(global_res);
+		out.join(" ")`
+	var want string
+	for _, hand := range []bool{false, true} {
+		SetRegTier(hand)
+		regHandOn = hand
+		r := New(Config{})
+		v, err := r.Run(compileForTest(t, src))
+		SetRegTier(false)
+		regHandOn = false
+		if err != nil {
+			t.Fatalf("hand=%v: %v", hand, err)
+		}
+		got := v.String().Go()
+		if !hand {
+			want = got
+		} else if got != want {
+			t.Errorf("hand: got %s, want %s", got, want)
+		}
+		r.Close()
+	}
+}

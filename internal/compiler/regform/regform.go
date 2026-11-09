@@ -889,9 +889,10 @@ func VerifyRegisterCode(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			ok = reg(a) && reg(b) && int(c) < len(rc.SiteName)
 		case bytecode.RDefineField:
 			ok = reg(a) && reg(b) && int(c) < len(fn.Names)
-		case bytecode.RGetIndex, bytecode.RSetIndex, bytecode.RAdd, bytecode.RSub, bytecode.RMul, bytecode.RBin:
+		case bytecode.RGetIndex, bytecode.RSetIndex, bytecode.RAdd, bytecode.RSub, bytecode.RMul, bytecode.RBin,
+			bytecode.RBitAnd, bytecode.RBitOr, bytecode.RBitXor, bytecode.RShl, bytecode.RShr, bytecode.RUShr:
 			ok = reg(a) && reg(b) && reg(c)
-		case bytecode.RBinI:
+		case bytecode.RAddI, bytecode.RSubI, bytecode.RBinI, bytecode.RAndI, bytecode.ROrI, bytecode.RXorI, bytecode.RShlI, bytecode.RShrI, bytecode.RUShrI:
 			ok = reg(a) && reg(b)
 		case bytecode.RNewObject:
 			ok = reg(a)
@@ -899,6 +900,8 @@ func VerifyRegisterCode(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			ok = reg(a) && int(b)+int(c) <= n
 		case bytecode.RCall, bytecode.RNew:
 			ok = reg(b) && int(a)+int(w.X())+1 <= n
+		case bytecode.RCallW:
+			ok = reg(b) && int(a)+int(w.X())+2 <= n
 		case bytecode.RCallMethod:
 			ok = reg(b) && int(a)+int(w.X())+2 <= n
 		case bytecode.RJmp:
@@ -907,8 +910,12 @@ func VerifyRegisterCode(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			ok = reg(a) && inCode(pc, int64(int32(w.BC())))
 		case bytecode.RJmpCmp:
 			ok = reg(a) && reg(b) && inCode(pc, int64(w.SC()))
-		case bytecode.RJmpCmpI:
+		case bytecode.RJmpCmpI, bytecode.RJLtI, bytecode.RJNLtI, bytecode.RJLeI, bytecode.RJNLeI,
+			bytecode.RJGtI, bytecode.RJNGtI, bytecode.RJGeI, bytecode.RJNGeI, bytecode.RJSEqI, bytecode.RJSNeI:
 			ok = reg(a) && inCode(pc, int64(w.SC()))
+		case bytecode.RJLt, bytecode.RJNLt, bytecode.RJLe, bytecode.RJNLe, bytecode.RJGt, bytecode.RJNGt,
+			bytecode.RJGe, bytecode.RJNGe, bytecode.RJSEq, bytecode.RJSNe:
+			ok = reg(a) && reg(b) && inCode(pc, int64(w.SC()))
 		case bytecode.RRetUndef:
 		default:
 			ok = false

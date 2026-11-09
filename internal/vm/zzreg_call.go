@@ -30,7 +30,7 @@ func (r *Runtime) regCall(callee, this Value, args []Value) (Value, error) {
 	if c == nil {
 		c = r.regOf(cl)
 	}
-	if c == nil || cl.realm != r.Realm {
+	if c == nil || c.wide || cl.realm != r.Realm {
 		return r.callDirect(callee, this, args)
 	}
 	if fd.extra != nil {
@@ -117,6 +117,96 @@ func (r *Runtime) regCall(callee, this Value, args []Value) (Value, error) {
 	return v, err
 }
 
+// regCallW is call_w: a call whose callee's frame starts at the caller's
+// window, R[A], its parameters the arguments where they lie. A callee whose
+// register code has the register form's own layout is run here with nothing
+// copied; any other is called as regCall calls it.
+func (r *Runtime) regCallW(f *frame, c *regCode, pc, wb int) (Value, error) {
+	w := regAt(c.code, pc)
+	base := wb + int(w.A())
+	argc := int(w.X())
+	callee := r.stack[base]
+	if callee.IsObject() {
+		o := callee.Object()
+		if fd := o.fn(); fd != nil && fd.closure != nil && !fd.bound && fd.extra == nil {
+			cl := fd.closure
+			rc := cl.reg
+			if rc == nil {
+				rc = r.regOf(cl)
+			}
+			if rc != nil && rc.wide && cl.realm == r.Realm {
+				return r.regEnterW(o, cl, rc, base, argc)
+			}
+		}
+	}
+	return r.regCall(callee, Undefined, r.stack[base+2:base+2+argc])
+}
+
+// regEnterW runs a register function of the form's own layout in the
+// window at base, which holds the function, its this and its arguments.
+func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int) (Value, error) {
+	this := Undefined
+	if rc.coerceThis {
+		this = r.globalThis
+	}
+	r.stack[base+1] = this
+	top := base + int(rc.numRegs)
+	if top > len(r.stack) || r.frameDepth >= r.maxFrames {
+		return Undefined, r.throwRangeError("maximum call stack size exceeded")
+	}
+	if err := r.tick(); err != nil {
+		return Undefined, err
+	}
+	saved := r.stackTop
+	if top > saved {
+		r.stackTop = top
+		if top > r.stackHigh {
+			r.stackHigh = top
+		}
+	}
+	// Parameters no argument was given for, and the bindings past them.
+	for i := base + 2 + argc; i < base+2+int(rc.params)+int(rc.inits); i++ {
+		r.stack[i] = Undefined
+	}
+	off := r.frameDepth - r.frameBase
+	if uint(off) >= uint(len(r.cur)) {
+		r.seekFrameBlock()
+		off = r.frameDepth - r.frameBase
+	}
+	r.frameDepth++
+	if r.frameDepth > r.frameHigh {
+		r.frameHigh = r.frameDepth
+	}
+	f := &r.cur[off]
+	f.cl = cl
+	f.base = base
+	f.pc = 0
+	f.this = this
+	f.callee = o
+	if len(f.openUpvalues) != 0 {
+		f.openUpvalues = f.openUpvalues[:0]
+	}
+	if f.thisRef != nil {
+		f.thisRef = nil
+	}
+	if f.withScopes != nil {
+		f.withScopes = nil
+	}
+	if f.evalVars != nil {
+		f.evalVars = nil
+	}
+	if f.native != "" {
+		f.native = ""
+	}
+	v, err := r.runReg(f, rc)
+	for _, u := range f.openUpvalues {
+		u.close()
+	}
+	r.frameDepth--
+	r.stackTop = saved
+	return v, err
+}
+
 // regOf is the register code of cl's function, built if the function has
 // not been run yet, and kept in its template for regCall's next call of it;
 // or nil.
@@ -181,6 +271,10 @@ func (r *Runtime) regSlow(f *frame, c *regCode, pc int, regs *[1 << 16]Value) (V
 		v, err = r.regBinary(bytecode.Op(w.X()), regs[w.B()], regs[w.C()])
 	case bytecode.RBinI:
 		v, err = r.regBinImm(bytecode.Op(w.X()), regs[w.B()], w.SC())
+	case bytecode.RAndI, bytecode.ROrI, bytecode.RXorI, bytecode.RShlI, bytecode.RShrI, bytecode.RUShrI:
+		v, err = r.regBinImm(regStackOp[w.Op()], regs[w.B()], w.SC())
+	case bytecode.RBitAnd, bytecode.RBitOr, bytecode.RBitXor, bytecode.RShl, bytecode.RShr, bytecode.RUShr:
+		v, err = r.regBinary(regStackOp[w.Op()], regs[w.B()], regs[w.C()])
 	case bytecode.RInc:
 		v, err = r.regStep(regs[w.B()], 1)
 	case bytecode.RDec:
@@ -207,6 +301,19 @@ func (r *Runtime) regSlow(f *frame, c *regCode, pc int, regs *[1 << 16]Value) (V
 			r.closeUpvaluesFrom(f, int(w.A()))
 		}
 		return Undefined, nil
+	case bytecode.RAddI:
+		v, err = r.regBinImm(bytecode.OpAdd, regs[w.B()], w.SC())
+	case bytecode.RSubI:
+		v, err = r.regBinImm(bytecode.OpSub, regs[w.B()], w.SC())
+	case bytecode.RJLt, bytecode.RJNLt, bytecode.RJLe, bytecode.RJNLe, bytecode.RJGt, bytecode.RJNGt, bytecode.RJGe, bytecode.RJNGe,
+		bytecode.RJLtI, bytecode.RJNLtI, bytecode.RJLeI, bytecode.RJNLeI, bytecode.RJGtI, bytecode.RJNGtI, bytecode.RJGeI, bytecode.RJNGeI:
+		k := regJumpCmp[w.Op()]
+		b := Int32(w.SB())
+		if k.reg {
+			b = regs[w.B()]
+		}
+		res, err := r.regCompare(k.op, regs[w.A()], b)
+		return Bool(res != k.not), err
 	case bytecode.RJmpCmp, bytecode.RJmpCmpI:
 		b := Int32(w.SB())
 		if w.Op() == bytecode.RJmpCmp {
@@ -221,6 +328,32 @@ func (r *Runtime) regSlow(f *frame, c *regCode, pc int, regs *[1 << 16]Value) (V
 		regs[w.A()] = v
 	}
 	return v, err
+}
+
+// regStackOp is the stack form's operator of each specialised operation,
+// whose slow path is the stack form's.
+var regStackOp = [128]bytecode.Op{
+	bytecode.RAndI: bytecode.OpBitAnd, bytecode.ROrI: bytecode.OpBitOr, bytecode.RXorI: bytecode.OpBitXor,
+	bytecode.RShlI: bytecode.OpShl, bytecode.RShrI: bytecode.OpShr, bytecode.RUShrI: bytecode.OpUShr,
+	bytecode.RBitAnd: bytecode.OpBitAnd, bytecode.RBitOr: bytecode.OpBitOr, bytecode.RBitXor: bytecode.OpBitXor,
+	bytecode.RShl: bytecode.OpShl, bytecode.RShr: bytecode.OpShr, bytecode.RUShr: bytecode.OpUShr,
+}
+
+// regJumpCmp is each compare-and-branch operation's comparison: its stack
+// form operator, whether it jumps when the comparison does not hold, and
+// whether its right operand is a register.
+var regJumpCmp = [128]struct {
+	op       bytecode.Op
+	not, reg bool
+}{
+	bytecode.RJLt: {bytecode.OpLt, false, true}, bytecode.RJNLt: {bytecode.OpLt, true, true},
+	bytecode.RJLe: {bytecode.OpLe, false, true}, bytecode.RJNLe: {bytecode.OpLe, true, true},
+	bytecode.RJGt: {bytecode.OpGt, false, true}, bytecode.RJNGt: {bytecode.OpGt, true, true},
+	bytecode.RJGe: {bytecode.OpGe, false, true}, bytecode.RJNGe: {bytecode.OpGe, true, true},
+	bytecode.RJLtI: {bytecode.OpLt, false, false}, bytecode.RJNLtI: {bytecode.OpLt, true, false},
+	bytecode.RJLeI: {bytecode.OpLe, false, false}, bytecode.RJNLeI: {bytecode.OpLe, true, false},
+	bytecode.RJGtI: {bytecode.OpGt, false, false}, bytecode.RJNGtI: {bytecode.OpGt, true, false},
+	bytecode.RJGeI: {bytecode.OpGe, false, false}, bytecode.RJNGeI: {bytecode.OpGe, true, false},
 }
 
 // regThrowDeadZone is the ReferenceError of a read of a binding in its dead
