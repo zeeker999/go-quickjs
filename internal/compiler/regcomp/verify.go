@@ -58,6 +58,10 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 		case bytecode.RGetIndex, bytecode.RSetIndex, bytecode.RAdd, bytecode.RSub, bytecode.RMul, bytecode.RBin,
 			bytecode.RBitAnd, bytecode.RBitOr, bytecode.RBitXor, bytecode.RShl, bytecode.RShr, bytecode.RUShr:
 			ok = reg(a) && reg(b) && reg(c)
+		case bytecode.RGetIndexPre:
+			ok = reg(a) && reg(b) && reg(c)
+		case bytecode.RJLtU, bytecode.RJNLtU, bytecode.RJLeU, bytecode.RJNLeU:
+			ok = reg(a) && int(b) < len(fn.Upvalues) && in(pc, int64(w.SC()))
 		case bytecode.RGetIndexI:
 			ok = reg(a) && reg(b)
 		case bytecode.RSetIndexI:

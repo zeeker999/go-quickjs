@@ -704,6 +704,14 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 			regs[w.B()] = v
 		}
 		return v, err
+	case bytecode.RGetIndexPre:
+		// x[++i]: the step, then the read, each as the stack form makes it.
+		n, err := r.regStep(regs[w.C()], float64(int8(w.X())))
+		if err != nil {
+			return Undefined, err
+		}
+		regs[w.C()] = n
+		v, err = r.getIndexed(regs[w.B()], n)
 	case bytecode.RGetIndexI:
 		v, err = r.getIndexed(regs[w.B()], Int32(int32(w.C())))
 	case bytecode.RSetIndexI:
@@ -798,13 +806,16 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		v, err = r.regBinImm(bytecode.OpSub, regs[w.B()], w.SC())
 	case bytecode.RJLt, bytecode.RJNLt, bytecode.RJLe, bytecode.RJNLe, bytecode.RJGt, bytecode.RJNGt, bytecode.RJGe, bytecode.RJNGe,
 		bytecode.RJLtI, bytecode.RJNLtI, bytecode.RJLeI, bytecode.RJNLeI, bytecode.RJGtI, bytecode.RJNGtI, bytecode.RJGeI, bytecode.RJNGeI,
-		bytecode.RJEq, bytecode.RJNe, bytecode.RJEqI, bytecode.RJNeI, bytecode.RJNull, bytecode.RJNotNull:
+		bytecode.RJEq, bytecode.RJNe, bytecode.RJEqI, bytecode.RJNeI, bytecode.RJNull, bytecode.RJNotNull,
+		bytecode.RJLtU, bytecode.RJNLtU, bytecode.RJLeU, bytecode.RJNLeU:
 		k := regJumpCmp[w.Op()]
 		b := Int32(w.SB())
 		if k.reg {
 			b = regs[w.B()]
 		} else if w.Op() == bytecode.RJNull || w.Op() == bytecode.RJNotNull {
 			b = Null
+		} else if k.upval {
+			b = cl.upvalues[w.B()].get()
 		}
 		res, err := r.regCompare(k.op, regs[w.A()], b)
 		return Bool(res != k.not), err
@@ -837,20 +848,22 @@ var regStackOp = [128]bytecode.Op{
 // form operator, whether it jumps when the comparison does not hold, and
 // whether its right operand is a register.
 var regJumpCmp = [128]struct {
-	op       bytecode.Op
-	not, reg bool
+	op              bytecode.Op
+	not, reg, upval bool
 }{
-	bytecode.RJLt: {bytecode.OpLt, false, true}, bytecode.RJNLt: {bytecode.OpLt, true, true},
-	bytecode.RJLe: {bytecode.OpLe, false, true}, bytecode.RJNLe: {bytecode.OpLe, true, true},
-	bytecode.RJGt: {bytecode.OpGt, false, true}, bytecode.RJNGt: {bytecode.OpGt, true, true},
-	bytecode.RJGe: {bytecode.OpGe, false, true}, bytecode.RJNGe: {bytecode.OpGe, true, true},
-	bytecode.RJLtI: {bytecode.OpLt, false, false}, bytecode.RJNLtI: {bytecode.OpLt, true, false},
-	bytecode.RJLeI: {bytecode.OpLe, false, false}, bytecode.RJNLeI: {bytecode.OpLe, true, false},
-	bytecode.RJGtI: {bytecode.OpGt, false, false}, bytecode.RJNGtI: {bytecode.OpGt, true, false},
-	bytecode.RJGeI: {bytecode.OpGe, false, false}, bytecode.RJNGeI: {bytecode.OpGe, true, false},
-	bytecode.RJEq: {bytecode.OpEq, false, true}, bytecode.RJNe: {bytecode.OpEq, true, true},
-	bytecode.RJEqI: {bytecode.OpEq, false, false}, bytecode.RJNeI: {bytecode.OpEq, true, false},
-	bytecode.RJNull: {bytecode.OpEq, false, false}, bytecode.RJNotNull: {bytecode.OpEq, true, false},
+	bytecode.RJLtU: {bytecode.OpLt, false, false, true}, bytecode.RJNLtU: {bytecode.OpLt, true, false, true},
+	bytecode.RJLeU: {bytecode.OpLe, false, false, true}, bytecode.RJNLeU: {bytecode.OpLe, true, false, true},
+	bytecode.RJLt: {bytecode.OpLt, false, true, false}, bytecode.RJNLt: {bytecode.OpLt, true, true, false},
+	bytecode.RJLe: {bytecode.OpLe, false, true, false}, bytecode.RJNLe: {bytecode.OpLe, true, true, false},
+	bytecode.RJGt: {bytecode.OpGt, false, true, false}, bytecode.RJNGt: {bytecode.OpGt, true, true, false},
+	bytecode.RJGe: {bytecode.OpGe, false, true, false}, bytecode.RJNGe: {bytecode.OpGe, true, true, false},
+	bytecode.RJLtI: {bytecode.OpLt, false, false, false}, bytecode.RJNLtI: {bytecode.OpLt, true, false, false},
+	bytecode.RJLeI: {bytecode.OpLe, false, false, false}, bytecode.RJNLeI: {bytecode.OpLe, true, false, false},
+	bytecode.RJGtI: {bytecode.OpGt, false, false, false}, bytecode.RJNGtI: {bytecode.OpGt, true, false, false},
+	bytecode.RJGeI: {bytecode.OpGe, false, false, false}, bytecode.RJNGeI: {bytecode.OpGe, true, false, false},
+	bytecode.RJEq: {bytecode.OpEq, false, true, false}, bytecode.RJNe: {bytecode.OpEq, true, true, false},
+	bytecode.RJEqI: {bytecode.OpEq, false, false, false}, bytecode.RJNeI: {bytecode.OpEq, true, false, false},
+	bytecode.RJNull: {bytecode.OpEq, false, false, false}, bytecode.RJNotNull: {bytecode.OpEq, true, false, false},
 }
 
 // regConstruct is new_w: new callee with the argc arguments of the window

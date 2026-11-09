@@ -415,6 +415,23 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				}
 			}
 			goto slow
+		case bytecode.RGetIndexPre:
+			// x[++i]: the key stepped, then the element read; neither is
+			// written until both are known, so that the slow path does both.
+			obj, key := regs[w.B()], regs[w.C()]
+			if obj.IsObject() && key.IsNumber() {
+				k := key.Number() + float64(int8(w.X()))
+				o := obj.Object()
+				if i := uint32(k); float64(i) == k &&
+					uint(i) < uint(len(o.elemsOf())) && o.flags&objMappedArguments == 0 {
+					if v := o.elemsOf()[i]; !isHole(v) {
+						regs[w.C()] = Value{num: k}
+						regs[w.A()] = v
+						continue
+					}
+				}
+			}
+			goto slow
 		case bytecode.RSetIndex:
 			obj, key := regs[w.A()], regs[w.B()]
 			if obj.IsObject() && key.IsNumber() {
@@ -629,6 +646,42 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJLt:
 			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
 				if a.Number() < b.Number() {
+					off = w.SC()
+					goto jump
+				}
+				continue
+			}
+			goto cmpSlow
+		case bytecode.RJLtU:
+			if a, b := regs[w.A()], cl.upvalues[w.B()].get(); a.IsNumber() && b.IsNumber() {
+				if a.Number() < b.Number() {
+					off = w.SC()
+					goto jump
+				}
+				continue
+			}
+			goto cmpSlow
+		case bytecode.RJNLtU:
+			if a, b := regs[w.A()], cl.upvalues[w.B()].get(); a.IsNumber() && b.IsNumber() {
+				if !(a.Number() < b.Number()) {
+					off = w.SC()
+					goto jump
+				}
+				continue
+			}
+			goto cmpSlow
+		case bytecode.RJLeU:
+			if a, b := regs[w.A()], cl.upvalues[w.B()].get(); a.IsNumber() && b.IsNumber() {
+				if a.Number() <= b.Number() {
+					off = w.SC()
+					goto jump
+				}
+				continue
+			}
+			goto cmpSlow
+		case bytecode.RJNLeU:
+			if a, b := regs[w.A()], cl.upvalues[w.B()].get(); a.IsNumber() && b.IsNumber() {
+				if !(a.Number() <= b.Number()) {
 					off = w.SC()
 					goto jump
 				}
@@ -908,16 +961,6 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile.
-		case 102:
-			goto invalid
-		case 103:
-			goto invalid
-		case 104:
-			goto invalid
-		case 105:
-			goto invalid
-		case 106:
-			goto invalid
 		case 107:
 			goto invalid
 		case 108:

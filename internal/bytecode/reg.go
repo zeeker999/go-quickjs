@@ -278,6 +278,15 @@ const (
 	// is never made (Function.ForwardsArguments), the arguments as passed
 	// handed on without it; R[B] is f and R[B+1] what f.apply read.
 	RApplyArgs
+	// RGetIndexPre: R[C] += SX, then R[A] = R[B][R[C]] -- x[++i] and
+	// x[--i] of a local i, its step X a signed 8-bit immediate.
+	RGetIndexPre
+	// RJLtU, RJNLtU, RJLeU, RJNLeU: the compare-and-branches of R[A] with
+	// upvalue B, by SC -- a loop's bound that a closure captures.
+	RJLtU
+	RJNLtU
+	RJLeU
+	RJNLeU
 
 	// RInvalid is the last operation there can be, which no code holds:
 	// the interpreter's switch has a case for it so that its jump table
@@ -375,6 +384,7 @@ var rOpNames = [...]string{
 	RPostInc: "post_inc", RPostDec: "post_dec", RGetLength: "get_length",
 	RJEq: "jeq", RJNe: "jne", RJEqI: "jeq_imm", RJNeI: "jne_imm", RJNull: "jnull", RJNotNull: "jnotnull",
 	RThrow: "throw", RInstanceOf: "instanceof", RIn: "in", RDelete: "delete", RArguments: "arguments", RNewArrayK: "new_array_k", RAddProp: "add_prop", RAddPropI: "add_prop_imm", RApplyArgs: "apply_args",
+	RGetIndexPre: "get_index_pre", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
 }
 
 func (op ROp) String() string {
@@ -465,6 +475,10 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s %s, %d %s", op, cmp(), r(w.A()), w.SB(), target(w.SC()))
 	case RGetIndexI:
 		return fmt.Sprintf("%s %s, %s[%d]", op, r(w.A()), r(w.B()), w.C())
+	case RGetIndexPre:
+		return fmt.Sprintf("%s %s, %s[%s += %d]", op, r(w.A()), r(w.B()), r(w.C()), int8(w.X()))
+	case RJLtU, RJNLtU, RJLeU, RJNLeU:
+		return fmt.Sprintf("%s %s, u%d %s", op, r(w.A()), w.B(), target(w.SC()))
 	case RSetIndexI:
 		return fmt.Sprintf("%s %s[%d], %s", op, r(w.A()), w.B(), r(w.C()))
 	case RClosureW:

@@ -929,8 +929,13 @@ func (g *gen) writes(e ast.Expr, slot int) bool {
 // itself: an operation that reads all its operands before it writes its
 // result, rather than one that builds its result in the register first.
 func direct(e ast.Expr) bool {
-	switch e.(type) {
-	case *ast.ObjectLit, *ast.ArrayLit, *ast.Logical, *ast.Conditional, *ast.Assign, *ast.Sequence, *ast.Update:
+	switch n := e.(type) {
+	case *ast.Assign:
+		// An element's store whose value is made in the register last
+		// (assign), after the store's object and key are read.
+		t, ok := n.Target.(*ast.Member)
+		return n.Op == "=" && ok && t.Computed && !t.Optional && direct(n.Value)
+	case *ast.ObjectLit, *ast.ArrayLit, *ast.Logical, *ast.Conditional, *ast.Sequence, *ast.Update:
 		return false
 	}
 	return true
@@ -1363,6 +1368,12 @@ func (g *gen) cond(e ast.Expr, when bool, target *mark) {
 				g.jump(bytecode.MakeR(op+immOffset(op), 0, r16(a), uint16(int16(imm)), 0), target, true)
 				return
 			}
+			if u, ok := g.upvalOperand(n.Right); ok {
+				if uop, ok := upvalJump[op]; ok {
+					g.jump(bytecode.MakeR(uop, 0, r16(a), uint16(u), 0), target, true)
+					return
+				}
+			}
 			b := g.expr(n.Right, -1)
 			g.at(n.Start)
 			g.jump(bytecode.MakeR(op, 0, r16(a), r16(b), 0), target, true)
@@ -1375,6 +1386,28 @@ func (g *gen) cond(e ast.Expr, when bool, target *mark) {
 		op = bytecode.RJmpT
 	}
 	g.jump(bytecode.MakeR(op, 0, r16(r), 0, 0), target, false)
+}
+
+// upvalJump is the compare-and-branch of a register with an upvalue for
+// each one of two registers that has one: a loop's bound a closure
+// captures, read in the comparison rather than into a register first.
+var upvalJump = map[bytecode.ROp]bytecode.ROp{
+	bytecode.RJLt: bytecode.RJLtU, bytecode.RJNLt: bytecode.RJNLtU,
+	bytecode.RJLe: bytecode.RJLeU, bytecode.RJNLe: bytecode.RJNLeU,
+}
+
+// upvalOperand is the upvalue e reads, where e is a name whose read is an
+// upvalue's, which needs no check of its dead zone.
+func (g *gen) upvalOperand(e ast.Expr) (uint32, bool) {
+	id, ok := e.(*ast.Ident)
+	if !ok {
+		return 0, false
+	}
+	res, ok := g.rec.Read[id]
+	if !ok || res.Kind != ResUpval || res.Index >= limit16 {
+		return 0, false
+	}
+	return res.Index, true
 }
 
 // compareJump is the register form of the compare-and-branch that jumps
@@ -1462,7 +1495,14 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 					return g.place(v, dst)
 				}
 				k := g.guard(g.expr(t.Property, -1), n.Value)
-				v := g.expr(n.Value, -1)
+				// The value made in the place the assignment's own value
+				// goes, where the store reads nothing there: lastX = x[i] =
+				// e, with no move after the store.
+				into := -1
+				if dst >= 0 && dst != o && dst != k && direct(n.Value) {
+					into = dst
+				}
+				v := g.expr(n.Value, into)
 				g.at(int(n.Start))
 				g.emit(bytecode.MakeR(bytecode.RSetIndex, 0, r16(o), r16(k), r16(v)))
 				return g.place(v, dst)
@@ -1712,6 +1752,27 @@ func propName(m *ast.Member) (string, bool) {
 	return id.Name, true
 }
 
+// preStepped is the register and step of e where e is ++i or --i of a
+// local i, which an element's read steps in place (RGetIndexPre).
+func (g *gen) preStepped(e ast.Expr) (int, int8, bool) {
+	u, ok := e.(*ast.Update)
+	if !ok || !u.Prefix {
+		return 0, 0, false
+	}
+	id, ok := u.Operand.(*ast.Ident)
+	if !ok {
+		return 0, 0, false
+	}
+	res := g.rec.Write[id]
+	if res.Kind != ResLocal {
+		return 0, 0, false
+	}
+	if u.Op == "--" {
+		return int(g.slotReg[res.Index]), -1, true
+	}
+	return int(g.slotReg[res.Index]), 1, true
+}
+
 func (g *gen) member(n *ast.Member, dst int) int {
 	if n.Optional {
 		g.fail("an optional chain")
@@ -1726,6 +1787,13 @@ func (g *gen) member(n *ast.Member, dst int) int {
 			return d
 		}
 		o = g.guard(o, n.Property)
+		if k, step, ok := g.preStepped(n.Property); ok {
+			// x[++i] of a local i: the step and the read as one operation.
+			d := g.dest(dst)
+			g.at(n.Property.Pos())
+			g.emit(bytecode.MakeR(bytecode.RGetIndexPre, uint8(step), r16(d), r16(o), r16(k)))
+			return d
+		}
 		k := g.expr(n.Property, -1)
 		d := g.dest(dst)
 		g.at(n.Property.Pos())
