@@ -609,11 +609,14 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 	case bytecode.RSubI:
 		v, err = r.regBinImm(bytecode.OpSub, regs[w.B()], w.SC())
 	case bytecode.RJLt, bytecode.RJNLt, bytecode.RJLe, bytecode.RJNLe, bytecode.RJGt, bytecode.RJNGt, bytecode.RJGe, bytecode.RJNGe,
-		bytecode.RJLtI, bytecode.RJNLtI, bytecode.RJLeI, bytecode.RJNLeI, bytecode.RJGtI, bytecode.RJNGtI, bytecode.RJGeI, bytecode.RJNGeI:
+		bytecode.RJLtI, bytecode.RJNLtI, bytecode.RJLeI, bytecode.RJNLeI, bytecode.RJGtI, bytecode.RJNGtI, bytecode.RJGeI, bytecode.RJNGeI,
+		bytecode.RJEq, bytecode.RJNe, bytecode.RJEqI, bytecode.RJNeI, bytecode.RJNull, bytecode.RJNotNull:
 		k := regJumpCmp[w.Op()]
 		b := Int32(w.SB())
 		if k.reg {
 			b = regs[w.B()]
+		} else if w.Op() == bytecode.RJNull || w.Op() == bytecode.RJNotNull {
+			b = Null
 		}
 		res, err := r.regCompare(k.op, regs[w.A()], b)
 		return Bool(res != k.not), err
@@ -657,6 +660,9 @@ var regJumpCmp = [128]struct {
 	bytecode.RJLeI: {bytecode.OpLe, false, false}, bytecode.RJNLeI: {bytecode.OpLe, true, false},
 	bytecode.RJGtI: {bytecode.OpGt, false, false}, bytecode.RJNGtI: {bytecode.OpGt, true, false},
 	bytecode.RJGeI: {bytecode.OpGe, false, false}, bytecode.RJNGeI: {bytecode.OpGe, true, false},
+	bytecode.RJEq: {bytecode.OpEq, false, true}, bytecode.RJNe: {bytecode.OpEq, true, true},
+	bytecode.RJEqI: {bytecode.OpEq, false, false}, bytecode.RJNeI: {bytecode.OpEq, true, false},
+	bytecode.RJNull: {bytecode.OpEq, false, false}, bytecode.RJNotNull: {bytecode.OpEq, true, false},
 }
 
 // regThrowDeadZone is the ReferenceError of a read of a binding in its dead

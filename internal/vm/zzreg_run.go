@@ -753,6 +753,50 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				continue
 			}
 			goto cmpSlow
+		case bytecode.RJEq, bytecode.RJEqI:
+			if a, b := regs[w.A()], regs[w.B()]; w.Op() == bytecode.RJEqI {
+				if a.IsNumber() {
+					if a.Number() == float64(w.SB()) {
+						off = w.SC()
+						goto jump
+					}
+					continue
+				}
+			} else if a.IsNumber() && b.IsNumber() {
+				if a.Number() == b.Number() {
+					off = w.SC()
+					goto jump
+				}
+				continue
+			}
+			goto cmpSlow
+		case bytecode.RJNe, bytecode.RJNeI:
+			if a, b := regs[w.A()], regs[w.B()]; w.Op() == bytecode.RJNeI {
+				if a.IsNumber() {
+					if a.Number() != float64(w.SB()) {
+						off = w.SC()
+						goto jump
+					}
+					continue
+				}
+			} else if a.IsNumber() && b.IsNumber() {
+				if a.Number() != b.Number() {
+					off = w.SC()
+					goto jump
+				}
+				continue
+			}
+			goto cmpSlow
+		case bytecode.RJNull, bytecode.RJNotNull:
+			// An object other than document.all's stand-in is not == null.
+			if a := regs[w.A()]; !a.IsObject() || a.object().flags&objHTMLDDA == 0 {
+				if a.IsNullish() == (w.Op() == bytecode.RJNull) {
+					off = w.SC()
+					goto jump
+				}
+				continue
+			}
+			goto cmpSlow
 		case bytecode.RJSEq:
 			if regs[w.A()].StrictEquals(regs[w.B()]) {
 				off = w.SC()
@@ -828,18 +872,6 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile.
-		case 87:
-			goto invalid
-		case 88:
-			goto invalid
-		case 89:
-			goto invalid
-		case 90:
-			goto invalid
-		case 91:
-			goto invalid
-		case 92:
-			goto invalid
 		case 93:
 			goto invalid
 		case 94:

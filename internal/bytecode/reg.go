@@ -245,6 +245,14 @@ const (
 	// RGetLength: R[A] = R[B].length, an array's and a string's answered
 	// in the case.
 	RGetLength
+	// RJEq, RJNe and their immediate forms are == and != that branch;
+	// RJNull and RJNotNull jump by SC if R[A] == null, or != null.
+	RJEq
+	RJNe
+	RJEqI
+	RJNeI
+	RJNull
+	RJNotNull
 
 	// RInvalid is the last operation there can be, which no code holds:
 	// the interpreter's switch has a case for it so that its jump table
@@ -311,6 +319,7 @@ var rOpNames = [...]string{
 	RJGeI: "jge_imm", RJNGeI: "jnge_imm", RJSEq: "jseq", RJSNe: "jsne", RJSEqI: "jseq_imm", RJSNeI: "jsne_imm",
 	RGetIndexI: "get_index_imm", RSetIndexI: "set_index_imm", RCallMW: "call_method_w", RNewW: "new_w", RClosureW: "closure_w",
 	RPostInc: "post_inc", RPostDec: "post_dec", RGetLength: "get_length",
+	RJEq: "jeq", RJNe: "jne", RJEqI: "jeq_imm", RJNeI: "jne_imm", RJNull: "jnull", RJNotNull: "jnotnull",
 }
 
 func (op ROp) String() string {
@@ -379,9 +388,11 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s %s", op, r(w.A()), target(int32(w.BC())))
 	case RJmpCmp:
 		return fmt.Sprintf("%s %s %s, %s %s", op, cmp(), r(w.A()), r(w.B()), target(w.SC()))
-	case RJLt, RJNLt, RJLe, RJNLe, RJGt, RJNGt, RJGe, RJNGe, RJSEq, RJSNe:
+	case RJNull, RJNotNull:
+		return fmt.Sprintf("%s %s %s", op, r(w.A()), target(w.SC()))
+	case RJLt, RJNLt, RJLe, RJNLe, RJGt, RJNGt, RJGe, RJNGe, RJSEq, RJSNe, RJEq, RJNe:
 		return fmt.Sprintf("%s %s, %s %s", op, r(w.A()), r(w.B()), target(w.SC()))
-	case RJLtI, RJNLtI, RJLeI, RJNLeI, RJGtI, RJNGtI, RJGeI, RJNGeI, RJSEqI, RJSNeI:
+	case RJLtI, RJNLtI, RJLeI, RJNLeI, RJGtI, RJNGtI, RJGeI, RJNGeI, RJSEqI, RJSNeI, RJEqI, RJNeI:
 		return fmt.Sprintf("%s %s, %d %s", op, r(w.A()), w.SB(), target(w.SC()))
 	case RJmpCmpI:
 		return fmt.Sprintf("%s %s %s, %d %s", op, cmp(), r(w.A()), w.SB(), target(w.SC()))

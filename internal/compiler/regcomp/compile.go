@@ -909,6 +909,12 @@ func (g *gen) place(r, dst int) int {
 	return dst
 }
 
+// isNullish reports whether e is the literal null.
+func isNullish(e ast.Expr) bool {
+	_, ok := e.(*ast.NullLit)
+	return ok
+}
+
 func smallInt(v float64) (int32, bool) {
 	i := int32(v)
 	return i, float64(i) == v && !(v == 0 && math.Signbit(v))
@@ -1002,6 +1008,24 @@ func (g *gen) binary(n *ast.Binary, dst int) int {
 	if !ok {
 		g.fail("an operator the backend does not compile")
 		return g.dest(dst)
+	}
+	if _, isCmp := g.compareJump(n.Op, true); isCmp {
+		// A comparison's value, through its compare-and-branch, whose fast
+		// path the generic operator has not: load true, branch over the
+		// load of false.
+		d := g.dest(dst)
+		if g.isBinding(d) {
+			d = g.alloc()
+		}
+		done := g.newMark()
+		yes := g.newMark()
+		g.cond(n, true, yes)
+		g.emit(bytecode.MakeR(bytecode.RLoadFalse, 0, r16(d), 0, 0))
+		g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), done, false)
+		g.bind(yes)
+		g.emit(bytecode.MakeR(bytecode.RLoadTrue, 0, r16(d), 0, 0))
+		g.bind(done)
+		return g.place(d, dst)
 	}
 	return g.operate(n.Op, op, n.Left, n.Right, -1, dst, n.Start)
 }
@@ -1129,6 +1153,23 @@ func (g *gen) cond(e ast.Expr, when bool, target *mark) {
 			return
 		}
 	case *ast.Binary:
+		if n.Op == "==" || n.Op == "!=" {
+			// == null and != null: whether the value is null or undefined.
+			other, isNull := n.Left, isNullish(n.Right)
+			if !isNull {
+				other, isNull = n.Right, isNullish(n.Left)
+			}
+			if isNull {
+				a := g.expr(other, -1)
+				op := bytecode.RJNull
+				if (n.Op == "==") != when {
+					op = bytecode.RJNotNull
+				}
+				g.at(n.Start)
+				g.jump(bytecode.MakeR(op, 0, r16(a), 0, 0), target, true)
+				return
+			}
+		}
 		if op, ok := g.compareJump(n.Op, when); ok {
 			a := g.guard(g.expr(n.Left, -1), n.Right)
 			g.at(n.Start)
@@ -1158,6 +1199,7 @@ func (g *gen) compareJump(text string, when bool) (bytecode.ROp, bool) {
 		"<": {bytecode.RJLt, bytecode.RJNLt}, "<=": {bytecode.RJLe, bytecode.RJNLe},
 		">": {bytecode.RJGt, bytecode.RJNGt}, ">=": {bytecode.RJGe, bytecode.RJNGe},
 		"===": {bytecode.RJSEq, bytecode.RJSNe}, "!==": {bytecode.RJSNe, bytecode.RJSEq},
+		"==": {bytecode.RJEq, bytecode.RJNe}, "!=": {bytecode.RJNe, bytecode.RJEq},
 	}
 	p, ok := ops[text]
 	if !ok {
@@ -1172,8 +1214,11 @@ func (g *gen) compareJump(text string, when bool) (bytecode.ROp, bool) {
 // immOffset is how far a compare-and-branch's immediate form is from its
 // register form.
 func immOffset(op bytecode.ROp) bytecode.ROp {
-	if op == bytecode.RJSEq || op == bytecode.RJSNe {
+	switch op {
+	case bytecode.RJSEq, bytecode.RJSNe:
 		return bytecode.RJSEqI - bytecode.RJSEq
+	case bytecode.RJEq, bytecode.RJNe:
+		return bytecode.RJEqI - bytecode.RJEq
 	}
 	return bytecode.RJLtI - bytecode.RJLt
 }

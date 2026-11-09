@@ -78,10 +78,11 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 		case bytecode.RJmpF, bytecode.RJmpT:
 			ok = reg(a) && in(pc, int64(int32(w.BC())))
 		case bytecode.RJLt, bytecode.RJNLt, bytecode.RJLe, bytecode.RJNLe, bytecode.RJGt, bytecode.RJNGt,
-			bytecode.RJGe, bytecode.RJNGe, bytecode.RJSEq, bytecode.RJSNe:
+			bytecode.RJGe, bytecode.RJNGe, bytecode.RJSEq, bytecode.RJSNe, bytecode.RJEq, bytecode.RJNe:
 			ok = reg(a) && reg(b) && in(pc, int64(w.SC()))
 		case bytecode.RJLtI, bytecode.RJNLtI, bytecode.RJLeI, bytecode.RJNLeI, bytecode.RJGtI, bytecode.RJNGtI,
-			bytecode.RJGeI, bytecode.RJNGeI, bytecode.RJSEqI, bytecode.RJSNeI:
+			bytecode.RJGeI, bytecode.RJNGeI, bytecode.RJSEqI, bytecode.RJSNeI, bytecode.RJEqI, bytecode.RJNeI,
+			bytecode.RJNull, bytecode.RJNotNull:
 			ok = reg(a) && in(pc, int64(w.SC()))
 		case bytecode.RRetUndef:
 		default:
