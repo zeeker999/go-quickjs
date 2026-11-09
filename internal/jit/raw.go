@@ -1,4 +1,4 @@
-//go:build quickjs_jit && !android && !ios && (((linux || windows) && amd64) || (darwin && arm64))
+//go:build quickjs_jit && !android && !ios && ((linux && amd64) || (windows && amd64) || (darwin && arm64) || (linux && arm64))
 
 package jit
 
@@ -7,6 +7,9 @@ import (
 	"runtime"
 	"unsafe"
 )
+
+// rawSupported says this build places and runs RawCode (RawSupported).
+const rawSupported = true
 
 // RawCode is machine code another compiler made -- a regular expression's
 // (internal/regexp) -- placed in a runtime's arena: entered at its start with

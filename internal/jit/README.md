@@ -13,6 +13,11 @@ The tier is **experimental and opt-in**, and it needs two things:
 Without either, every function runs in the interpreter and the tree tier,
 exactly as before (see [Zero cost when off](#zero-cost-when-off)).
 
+On `linux/arm64` the tag builds only the lowest layer -- the arena,
+`RawCode` and its entry -- for the WebAssembly JIT (`wasm/internal/jit`):
+`RawSupported` reports it, while `Supported`, the JavaScript tier's, is
+false there and the VM uses its stubs.
+
 This file states the design and the contracts the code keeps.
 
 ## Layout
@@ -28,8 +33,8 @@ This file states the design and the contracts the code keeps.
 | `ssacode.go`, `arena.go`, `exit.go` | Placing code (`SSACode`, `Arena`), entering it, and reading its exits. |
 | `barrier.go` | The runtime's write-barrier flag, which native code tests, and the Go side of its stores through the barrier (`storeRef`). |
 | `verify` | A module of its own that checks the code `mir` makes for both targets against `golang.org/x/arch`'s disassemblers. |
-| `entry_*.s` | Entry from Go (`enterSSA`), and the calls of Go native code makes (`callGo`). |
-| `memory_*.go`, `cache_*.go`, `policy_darwin.go`, `jit_disabled.go` | Executable memory, the instruction cache, and the stubs for targets without the tier. |
+| `entry_*.s`, `raw_arm64.s` | Entry from Go (`enterSSA`, and `enterRaw` for `RawCode`), and the calls of Go native code makes (`callGo`). |
+| `memory_*.go`, `cache_*.go`, `cache_*.s`, `policy_*.go`, `jit_disabled.go`, `ssa_disabled.go`, `raw_disabled.go` | Executable memory, the instruction cache, and the stubs for targets without the tier or without `RawCode`. |
 | `internal/vm/zzjit_native.go` | The VM's side: selection, the code cache, budgets, host exits. |
 | `internal/vm/zzjit_ssa.go` | Feedback for the builder, entering and resuming code, the calls of Go, native calls and their frames. |
 | `internal/vm/zzjit_disabled.go` | The stubs for builds without the tier. |
@@ -1339,6 +1344,9 @@ protectors do, and every way of changing a watched property clears.
   locks, since a finalizer can release code on another goroutine.
 - Windows flushes the instruction cache with `FlushInstructionCache`.
 - Darwin uses `ic ivau` with barriers.
+- Linux on arm64 cleans each data cache line (`dc cvau`), then invalidates
+  each instruction cache line (`ic ivau`), with the lines' sizes from
+  `CTR_EL0`, a `dsb ish` after each sweep and an `isb`.
 
 **Darwin policy.** Darwin refuses executable memory to hardened or
 code-signing-enforced processes (`ErrUnavailable`). There is no `MAP_JIT`

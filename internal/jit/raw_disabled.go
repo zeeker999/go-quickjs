@@ -1,8 +1,10 @@
-//go:build !quickjs_jit || android || ios || !((linux && amd64) || (windows && amd64) || (darwin && arm64))
+//go:build !quickjs_jit || android || ios || !((linux && amd64) || (windows && amd64) || (darwin && arm64) || (linux && arm64))
 
 package jit
 
 import "unsafe"
+
+const rawSupported = false
 
 // RawCode is machine code another compiler made; a build without a backend
 // places none (see raw.go).

@@ -24,3 +24,8 @@ const MaxCodeBytes = 1 << 20
 // Supported reports whether this build includes a backend. It does not probe
 // executable-memory permissions or allocate memory.
 func Supported() bool { return supported }
+
+// RawSupported reports whether this build places and runs RawCode: where
+// Supported does, and on linux/arm64, where only RawCode runs -- the
+// WebAssembly JIT's -- and the JavaScript tier is not built.
+func RawSupported() bool { return rawSupported }

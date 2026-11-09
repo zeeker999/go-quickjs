@@ -1,8 +1,6 @@
-//go:build !quickjs_jit || android || ios || !((linux && amd64) || (windows && amd64) || (darwin && arm64))
+//go:build !quickjs_jit || android || ios || !((linux && amd64) || (windows && amd64) || (darwin && arm64) || (linux && arm64))
 
 package jit
-
-const supported = false
 
 func executablePolicy() error { return ErrUnavailable }
 
