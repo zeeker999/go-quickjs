@@ -289,6 +289,30 @@ func (r *Runtime) regEnterFrame(f *frame, c *regCode) (Value, error) {
 	return v, err
 }
 
+// regTruth is ToBoolean of what needs no call -- a boolean, an object, a
+// number -- and ok false for anything else.
+func regTruth(v Value) (t, ok bool) {
+	switch b := math.Float64bits(v.num); {
+	case b == trueBits:
+		return true, true
+	case b == falseBits:
+		return false, true
+	case b == objectBits:
+		return (*Object)(v.ref).flags&objHTMLDDA == 0, true
+	case v.IsNumber():
+		return v.num != 0 && v.num == v.num, true
+	}
+	return false, false
+}
+
+// regWordKind reports whether a value of tag bits is one that is === only
+// to a value of the same words: undefined, null, a boolean, a symbol or an
+// object.
+func regWordKind(bits uint64) bool {
+	return bits-tagBase < heapBigBits-tagBase &&
+		1<<(bits&0xFF)&(1<<KindUndefined|1<<KindNull|1<<KindBool|1<<KindSymbol|1<<KindObject) != 0
+}
+
 // regTruthy is ToBoolean, a boolean's without the call.
 func regTruthy(v Value) bool {
 	return math.Float64bits(v.num) == trueBits || math.Float64bits(v.num) != falseBits && v.Truthy()
@@ -343,7 +367,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			regs[w.A()] = f.this
 		case bytecode.RCheckRef:
 			if regs[w.A()].IsUninitialized() {
-				return Undefined, r.regThrowDeadZone(f, c, pc-1)
+				return Undefined, r.regThrowDeadZone(f, c, pc)
 			}
 		case bytecode.RGetUpval:
 			regs[w.A()] = cl.upvalues[w.BC()].get()
@@ -389,6 +413,22 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				// A prototype's data property the site remembers: a method.
 				if h := s.holder(obj); h != nil && !s.getter {
 					regs[w.A()] = h.valAt(int(s.idx))
+					continue
+				}
+			}
+			goto slow
+		case bytecode.RGetMethodW:
+			// The receiver put in the call's window beside its method.
+			if o := regs[w.B()]; o.IsObject() {
+				obj := o.Object()
+				s := &cl.ic[w.C()]
+				p := (*[2]Value)(unsafe.Pointer(&regs[w.A()]))
+				if obj.shape == s.ownShape {
+					p[0], p[1] = obj.valAt(int(s.idx)), o
+					continue
+				}
+				if h := s.holder(obj); h != nil && !s.getter {
+					p[0], p[1] = h.valAt(int(s.idx)), o
 					continue
 				}
 			}
@@ -517,12 +557,18 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			off = int32(w.BC())
 			goto jump
 		case bytecode.RJmpF:
-			if !regTruthy(regs[w.A()]) {
+			// What needs a call is the compare's slow path's, so that
+			// nothing of the instruction is live across one.
+			if t, ok := regTruth(regs[w.A()]); !ok {
+				goto cmpSlow
+			} else if !t {
 				off = int32(w.BC())
 				goto jump
 			}
 		case bytecode.RJmpT:
-			if regTruthy(regs[w.A()]) {
+			if t, ok := regTruth(regs[w.A()]); !ok {
+				goto cmpSlow
+			} else if t {
 				off = int32(w.BC())
 				goto jump
 			}
@@ -867,23 +913,31 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				continue
 			}
 			goto cmpSlow
-		case bytecode.RJSEq:
-			if regs[w.A()].StrictEquals(regs[w.B()]) {
-				off = w.SC()
-				goto jump
+		case bytecode.RJSEq, bytecode.RJSNe:
+			// Two numbers, or two values one of which is undefined, null, a
+			// boolean, a symbol or an object, equal only if their words
+			// are; two strings or BigInts are the compare's slow path's.
+			a, b := regs[w.A()], regs[w.B()]
+			var eq bool
+			if a.IsNumber() && b.IsNumber() {
+				eq = a.num == b.num
+			} else if x, y := math.Float64bits(a.num), math.Float64bits(b.num); regWordKind(x) || regWordKind(y) {
+				eq = x == y && a.ref == b.ref
+			} else {
+				goto cmpSlow
 			}
-		case bytecode.RJSNe:
-			if !regs[w.A()].StrictEquals(regs[w.B()]) {
+			if eq == (w.Op() == bytecode.RJSEq) {
 				off = w.SC()
 				goto jump
 			}
 		case bytecode.RJSEqI:
-			if regs[w.A()].StrictEquals(Int32(w.SB())) {
+			// Only a number is === a number.
+			if a := regs[w.A()]; a.IsNumber() && a.Number() == float64(w.SB()) {
 				off = w.SC()
 				goto jump
 			}
 		case bytecode.RJSNeI:
-			if !regs[w.A()].StrictEquals(Int32(w.SB())) {
+			if a := regs[w.A()]; !a.IsNumber() || a.Number() != float64(w.SB()) {
 				off = w.SC()
 				goto jump
 			}
@@ -952,7 +1006,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			}
 			goto slow
 		case bytecode.RThrow:
-			return Undefined, r.regThrow(f, c, pc-1, regs)
+			return Undefined, r.regThrow(f, c, pc, regs)
 		case bytecode.RNewW, bytecode.RClosureW, bytecode.RInstanceOf, bytecode.RIn, bytecode.RDelete, bytecode.RArguments, bytecode.RNewArrayK,
 			bytecode.RApplyArgs:
 			goto slow
@@ -961,8 +1015,6 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile.
-		case 107:
-			goto invalid
 		case 108:
 			goto invalid
 		case 109:

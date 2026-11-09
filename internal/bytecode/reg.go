@@ -287,6 +287,10 @@ const (
 	RJNLtU
 	RJLeU
 	RJNLeU
+	// RGetMethodW: R[A] = R[B].name, site C, as get_prop_this, and
+	// R[A+1] = R[B]: a method's read that puts its receiver in the call's
+	// window, so that a receiver in a binding needs no move.
+	RGetMethodW
 
 	// RInvalid is the last operation there can be, which no code holds:
 	// the interpreter's switch has a case for it so that its jump table
@@ -365,7 +369,7 @@ var rOpNames = [...]string{
 	RLoadThis: "load_this", RCheckRef: "check_ref",
 	RGetUpval: "get_upval", RSetUpval: "set_upval",
 	RGetGlobal: "get_global", RSetGlobal: "set_global",
-	RGetProp: "get_prop", RGetMethod: "get_method", RSetProp: "set_prop",
+	RGetProp: "get_prop", RGetMethod: "get_method", RGetMethodW: "get_method_w", RSetProp: "set_prop",
 	RGetIndex: "get_index", RSetIndex: "set_index", RDefineField: "define_field",
 	RNewObject: "new_object", RNewArray: "new_array", RClosure: "closure",
 	RAdd: "add", RSub: "sub", RMul: "mul", RBin: "bin", RBinI: "bin_imm",
@@ -425,7 +429,7 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s, name%d @%d", op, r(w.A()), w.B(), w.C())
 	case RSetGlobal:
 		return fmt.Sprintf("%s name%d @%d, %s", op, w.B(), w.C(), r(w.A()))
-	case RGetProp, RGetMethod:
+	case RGetProp, RGetMethod, RGetMethodW:
 		return fmt.Sprintf("%s %s, %s @%d", op, r(w.A()), r(w.B()), w.C())
 	case RSetProp:
 		return fmt.Sprintf("%s %s @%d, %s", op, r(w.A()), w.C(), r(w.B()))

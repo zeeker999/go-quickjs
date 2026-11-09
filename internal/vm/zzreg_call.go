@@ -144,7 +144,6 @@ func (r *Runtime) regCallOp(f *frame, c *regCode, k *regKept, wb int) (Value, er
 // regCallMiss's.
 func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 	pc := k.pc - 1
-	f.pc = regSrc(c, pc) + 1
 	w := regAt(c.code, pc)
 	base := wb + int(w.A())
 	win := regWindow(r.stack, base)
@@ -153,6 +152,17 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 		// The callee's tag and pointer read as words: read as a Value, the
 		// tag goes through a float register to be compared.
 		if regIsObject(&win[0]) && (*Object)(win[0].ref) == e.callee {
+			// A leaf is answered first, before the frame's pc is written:
+			// its body reads nothing of the frame and throws nothing.
+			if e.kind&regCallLeaf != 0 {
+				if v, ok := r.regLeafHit(e, win, int(w.X())); ok {
+					regWindow(r.stack, wb)[w.B()] = v
+					return nil
+				}
+				f.pc = regSrc(c, pc) + 1
+				return r.regCallMiss(f, c, w, wb)
+			}
+			f.pc = regSrc(c, pc) + 1
 			ok := e.kind == regCallEnter
 			if e.kind == regCallThis {
 				win[1] = e.this
@@ -219,14 +229,9 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 				regWindow(r.stack, wb)[w.B()] = v
 				return nil
 			}
-			if e.kind&regCallLeaf != 0 {
-				if v, ok := r.regLeafHit(e, win, int(w.X())); ok {
-					regWindow(r.stack, wb)[w.B()] = v
-					return nil
-				}
-			}
 		}
 	}
+	f.pc = regSrc(c, pc) + 1
 	return r.regCallMiss(f, c, w, wb)
 }
 
@@ -235,19 +240,22 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 //
 //go:noinline
 func (r *Runtime) regLeafHit(e *regCallCache, win *[1 << 16]Value, argc int) (Value, bool) {
+	// The this is given to the body, not written to the window: a miss
+	// writes it (regCallSlow).
+	this := win[1]
 	switch e.kind &^ (regCallOut | regCallLeaf) {
 	case regCallThis:
-		win[1] = e.this
+		this = e.this
 	case regCallObjThis:
-		if !win[1].IsObject() {
+		if !this.IsObject() {
 			return Undefined, false
 		}
 	}
 	if e.rc.leaf == regLeafPure {
-		if e.cl.pureMiss < pureMissLimit {
-			return r.pureCall(e.callee.fn(), win[1], win[2:2+argc])
-		}
-	} else if this := win[1]; this.IsObject() {
+		// pureCallAt checks the closure's misses.
+		r.pureRefused = false
+		return r.pureCallAt(e.callee.fn(), this, win[2:2+argc], 0, true)
+	} else if this.IsObject() {
 		return r.leafCall(e.cl, this.Object(), win[2:2+argc])
 	}
 	return Undefined, false
@@ -357,6 +365,11 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base int)
 						if v, ok := r.pureCall(o.fn(), r.stack[base+1], r.stack[base+2:base+2+argc]); ok {
 							return v, nil
 						}
+					}
+					if cl.pureMiss >= pureMissLimit && e != nil && e.callee == o && !rc.args {
+						// A body the frameless evaluator has given up on,
+						// for good: its calls are entered as frames.
+						e.kind &^= regCallOut | regCallLeaf
 					}
 				} else if this := r.stack[base+1]; this.IsObject() {
 					if v, ok := r.leafCall(cl, this.Object(), r.stack[base+2:base+2+argc]); ok {
@@ -663,6 +676,10 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		v, err = r.regGetProp(cl, c, w, regs[w.B()])
 	case bytecode.RGetMethod:
 		v, err = r.regGetMethod(cl, c, w, regs[w.B()])
+	case bytecode.RGetMethodW:
+		o := regs[w.B()]
+		v, err = r.regGetMethod(cl, c, w, o)
+		(*[2]Value)(unsafe.Pointer(&regs[w.A()]))[1] = o
 	case bytecode.RSetProp:
 		return Undefined, r.regSetProp(cl, c, w, regs[w.A()], regs[w.B()])
 	case bytecode.RGetIndex:
@@ -819,6 +836,12 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		}
 		res, err := r.regCompare(k.op, regs[w.A()], b)
 		return Bool(res != k.not), err
+	case bytecode.RJmpF, bytecode.RJmpT:
+		// A truthiness the loop's regTruth does not answer.
+		return Bool(regs[w.A()].Truthy() == (w.Op() == bytecode.RJmpT)), nil
+	case bytecode.RJSEq, bytecode.RJSNe:
+		// A === the loop's regStrictEq does not answer: strings, BigInts.
+		return Bool(regs[w.A()].StrictEquals(regs[w.B()]) == (w.Op() == bytecode.RJSEq)), nil
 	case bytecode.RJmpCmp, bytecode.RJmpCmpI:
 		b := Int32(w.SB())
 		if w.Op() == bytecode.RJmpCmp {
@@ -960,7 +983,12 @@ func (r *Runtime) regAddProp(cl *closure, c *regCode, w bytecode.RInstr, obj, b 
 }
 
 // regThrow is throw: the value thrown, from the instruction at pc.
-func (r *Runtime) regThrow(f *frame, c *regCode, pc int, regs *[1 << 16]Value) error {
+//
+// next is the pc after the throw's, which the loop holds: the throw's own,
+// next-1 there, is the value before the loop's increment, which Go would keep
+// for it at every dispatch.
+func (r *Runtime) regThrow(f *frame, c *regCode, next int, regs *[1 << 16]Value) error {
+	pc := next - 1
 	f.pc = c.src[pc] + 1
 	return r.throw(regs[regAt(c.code, pc).A()])
 }
@@ -1006,7 +1034,9 @@ func (r *Runtime) regDelete(cl *closure, obj, key Value) (Value, error) {
 
 // regThrowDeadZone is the ReferenceError of a read of a binding in its dead
 // zone, at the check at pc.
-func (r *Runtime) regThrowDeadZone(f *frame, c *regCode, pc int) error {
+// next is the pc after the read's, as regThrow's is.
+func (r *Runtime) regThrowDeadZone(f *frame, c *regCode, next int) error {
+	pc := next - 1
 	f.pc = c.src[pc] + 1
 	return r.throwReferenceError("cannot access %q before initialization", f.cl.fn.Locals[regAt(c.code, pc).B()].Name)
 }

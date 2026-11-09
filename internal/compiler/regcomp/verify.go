@@ -51,6 +51,8 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			}
 		case bytecode.RGetProp, bytecode.RGetMethod:
 			ok = reg(a) && reg(b) && site(c)
+		case bytecode.RGetMethodW:
+			ok = int(a)+1 < n && reg(b) && site(c)
 		case bytecode.RSetProp:
 			ok = reg(a) && reg(b) && site(c)
 		case bytecode.RDefineField:

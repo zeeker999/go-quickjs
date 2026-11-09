@@ -954,6 +954,20 @@ func (g *gen) into(e ast.Expr, dst int) {
 	}
 }
 
+// inPlace reports whether e is read where it is, in a binding's register
+// or the this's, with no instruction but a check of its initialisation.
+func (g *gen) inPlace(e ast.Expr) bool {
+	switch n := e.(type) {
+	case *ast.This:
+		return true
+	case *ast.Ident:
+		res, ok := g.rec.Read[n]
+		return ok && (res.Kind == ResLocal || res.Kind == ResLocalCheck) &&
+			!(g.fn.ForwardsArguments && g.isArguments(n))
+	}
+	return false
+}
+
 // expr compiles e and returns the register holding its value: dst, or,
 // for -1, wherever it is -- a binding's own register, read in place.
 func (g *gen) expr(e ast.Expr, dst int) int {
@@ -1848,8 +1862,17 @@ func (g *gen) call(n *ast.Call, dst int) int {
 			g.fail("super")
 			return w
 		}
-		g.into(c.Object, w+1)
-		if c.Computed {
+		if !c.Computed && g.inPlace(c.Object) {
+			// A receiver in a binding: get_method_w puts it in the window.
+			name, ok := propName(c)
+			if !ok {
+				g.fail("a method name the backend does not compile")
+				return w
+			}
+			o := g.expr(c.Object, -1)
+			g.at(c.Property.Pos())
+			g.emit(bytecode.MakeR(bytecode.RGetMethodW, 0, r16(w), r16(o), g.site(g.nameIdx(name))))
+		} else if g.into(c.Object, w+1); c.Computed {
 			k := g.expr(c.Property, -1)
 			g.at(c.Property.Pos())
 			g.emit(bytecode.MakeR(bytecode.RGetIndex, 0, r16(w), r16(w+1), r16(k)))
