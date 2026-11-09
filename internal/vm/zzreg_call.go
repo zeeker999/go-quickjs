@@ -718,8 +718,9 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		return v, err
 	case bytecode.RGetIndexPre:
 		// x[++i]: the step, then the read, each as the stack form makes it.
-		n, err := r.regStep(regs[w.C()], float64(int8(w.X())))
-		if err != nil {
+		// Assigned, not declared: the switch's err is what the call returns.
+		var n Value
+		if n, err = r.regStep(regs[w.C()], float64(int8(w.X()))); err != nil {
 			return Undefined, err
 		}
 		regs[w.C()] = n

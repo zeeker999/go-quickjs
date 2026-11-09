@@ -107,3 +107,27 @@ func TestRegLazyArguments(t *testing.T) {
 	const want = "none x abc ||2|2 Aq2 s1"
 	regRunBoth(t, src, want, 4)
 }
+
+// TestRegSteppedReads pins x[++i], x[i++] and their decrements: the key
+// stepped as the stack form steps it -- a string key made a number, an
+// object's valueOf called once -- the read of the key before or after the
+// step, a hole or a getter answered on the slow path, and a read of null
+// that throws after the step, out of a function with no handler.
+func TestRegSteppedReads(t *testing.T) {
+	const src = `
+		function post(a) { var i = 0, s = ""; while (i < 4) s += a[i++] + "|"; return s + "@" + i }
+		function down(a) { var i = a.length - 1, s = ""; while (i >= 0) s += a[i--]; return s + "@" + i }
+		function strKey(a) { var i = "1"; return [a[i++], typeof i, i].join() }
+		function objKey(a) { var n = 0, i = { valueOf() { n++; return 0 } }; return [a[i++], i, n].join() }
+		function self(a) { var i = 0; i = a[i++]; return i }
+		function nul(o) { var i = 5; return o[i++] }
+		function pre(o) { var i = 5; return o[++i] }
+		function tryIt(f, o) { try { return f(o) } catch (e) { return e.name } }
+		var holes = [1, , 3]; Object.defineProperty(Array.prototype, 3, { get() { return "g" }, configurable: true });
+		var out = [post([1, 2, 3]), post(holes), down([1, 2, 3]), strKey(["a", "b", "c"]), objKey(["a"]), self([7]),
+			tryIt(nul, null), tryIt(pre, undefined), post("abcd")];
+		delete Array.prototype[3];
+		out.join(" ")`
+	const want = "1|2|3|g|@4 1|undefined|3|g|@4 321@-1 b,number,2 a,1,1 7 TypeError TypeError a|b|c|d|@4"
+	regRunBoth(t, src, want, 8)
+}
