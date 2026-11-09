@@ -244,7 +244,13 @@ enter:
 			r.stackHigh = top
 		}
 	}
-	for i := base + 2 + argc; i < base+2+int(rc.params)+int(rc.inits); i++ {
+	var kept []Value
+	if rc.args {
+		// The arguments as passed, past the parameters too, which the
+		// bindings' registers are about to take.
+		kept = append([]Value(nil), r.stack[base+2:base+2+argc]...)
+	}
+	for i := base + 2 + min(argc, int(rc.params)); i < base+2+int(rc.params)+int(rc.inits); i++ {
 		r.stack[i] = Undefined
 	}
 	off := r.frameDepth - r.frameBase
@@ -266,6 +272,11 @@ enter:
 	}
 	if nf.thisRef != nil || nf.withScopes != nil || nf.evalVars != nil || nf.native != "" || nf.args != nil {
 		regClearFrame(nf)
+	}
+	if rc.args {
+		nf.args = kept
+		p := int(rc.params)
+		nf.locals = r.stack[base+2 : base+2+p : base+2+p]
 	}
 	v, err := r.runReg(nf, rc)
 	if len(nf.openUpvalues) != 0 {
@@ -322,7 +333,7 @@ func (r *Runtime) regNoteCall(f *frame, s uint16, o *Object, cl *closure, rc *re
 // frame's last user may have left set, cleared where they are. Its this is
 // the window's register 1, which regClosure gives the frame when it makes
 // an arrow that captures it.
-func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int) (Value, error) {
+func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int, args []Value) (Value, error) {
 	top := base + int(rc.numRegs)
 	if top > len(r.stack) || r.frameDepth >= r.maxFrames {
 		return Undefined, r.throwRangeError("maximum call stack size exceeded")
@@ -340,7 +351,7 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int)
 		}
 	}
 	// Parameters no argument was given for, and the bindings past them.
-	for i := base + 2 + argc; i < base+2+int(rc.params)+int(rc.inits); i++ {
+	for i := base + 2 + min(argc, int(rc.params)); i < base+2+int(rc.params)+int(rc.inits); i++ {
 		r.stack[i] = Undefined
 	}
 	off := r.frameDepth - r.frameBase
@@ -362,6 +373,11 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int)
 	}
 	if f.thisRef != nil || f.withScopes != nil || f.evalVars != nil || f.native != "" || f.args != nil {
 		regClearFrame(f)
+	}
+	if rc.args {
+		f.args = append([]Value(nil), args...)
+		p := int(rc.params)
+		f.locals = r.stack[base+2 : base+2+p : base+2+p]
 	}
 	v, err := r.runReg(f, rc)
 	if len(f.openUpvalues) != 0 {
@@ -458,7 +474,7 @@ func (r *Runtime) regDirect(o *Object, fd *funcData, c *regCode, this Value, arg
 	for i, a := range args[:m] {
 		w[2+i] = a
 	}
-	return r.regEnterW(o, fd.closure, c, base, m)
+	return r.regEnterW(o, fd.closure, c, base, m, args)
 }
 
 // regPlan gives a closure of a template with register code of the form's
@@ -608,6 +624,16 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		} else {
 			v, err = r.getValueProp(o, atomLength)
 		}
+	case bytecode.RInstanceOf:
+		var ok bool
+		ok, err = r.instanceOfAt(&cl.ic[c.rc.Aux[pc]], regs[w.B()], regs[w.C()])
+		v = Bool(ok)
+	case bytecode.RIn:
+		v, err = r.regIn(regs[w.B()], regs[w.C()])
+	case bytecode.RDelete:
+		v, err = r.regDelete(cl, regs[w.B()], regs[w.C()])
+	case bytecode.RArguments:
+		v = Obj(r.newArgumentsObject(f))
 	case bytecode.RCloseUpvals:
 		if len(f.openUpvalues) != 0 {
 			r.closeUpvaluesFrom(f, int(w.A()))
@@ -672,6 +698,51 @@ var regJumpCmp = [128]struct {
 	bytecode.RJEq: {bytecode.OpEq, false, true}, bytecode.RJNe: {bytecode.OpEq, true, true},
 	bytecode.RJEqI: {bytecode.OpEq, false, false}, bytecode.RJNeI: {bytecode.OpEq, true, false},
 	bytecode.RJNull: {bytecode.OpEq, false, false}, bytecode.RJNotNull: {bytecode.OpEq, true, false},
+}
+
+// regThrow is throw: the value thrown, from the instruction at pc.
+func (r *Runtime) regThrow(f *frame, c *regCode, pc int, regs *[1 << 16]Value) error {
+	f.pc = c.src[pc] + 1
+	return r.throw(regs[regAt(c.code, pc).A()])
+}
+
+// regIn is key in obj, as the stack interpreter's in.
+func (r *Runtime) regIn(key, obj Value) (Value, error) {
+	if !obj.IsObject() {
+		return Undefined, r.throwTypeError("the right operand of \"in\" must be an object")
+	}
+	n, err := r.toPropertyName(key)
+	if err != nil {
+		return Undefined, err
+	}
+	k, known := r.keyFor(obj.Object(), n)
+	if !known {
+		return False, nil
+	}
+	has, err := r.hasPropErr(obj.Object(), k)
+	return Bool(has), err
+}
+
+// regDelete is delete obj[key], as the stack interpreter's delete_prop.
+func (r *Runtime) regDelete(cl *closure, obj, key Value) (Value, error) {
+	if obj.IsNullish() {
+		return Undefined, r.throwTypeError("cannot delete a property of %s", r.describe(obj))
+	}
+	n, err := r.toPropertyName(key)
+	if err != nil {
+		return Undefined, err
+	}
+	if !obj.IsObject() {
+		if obj, err = toObjectValue(r, obj); err != nil {
+			return Undefined, err
+		}
+	}
+	k, has := r.keyFor(obj.Object(), n)
+	if !has {
+		return True, nil
+	}
+	ok, err := r.deleteProp(obj.Object(), k, cl.fn.Strict)
+	return Bool(ok), err
 }
 
 // regThrowDeadZone is the ReferenceError of a read of a binding in its dead

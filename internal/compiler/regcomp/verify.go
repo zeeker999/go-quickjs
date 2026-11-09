@@ -84,6 +84,12 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			bytecode.RJGeI, bytecode.RJNGeI, bytecode.RJSEqI, bytecode.RJSNeI, bytecode.RJEqI, bytecode.RJNeI,
 			bytecode.RJNull, bytecode.RJNotNull:
 			ok = reg(a) && in(pc, int64(w.SC()))
+		case bytecode.RThrow, bytecode.RArguments:
+			ok = reg(a)
+		case bytecode.RIn, bytecode.RDelete:
+			ok = reg(a) && reg(b) && reg(c)
+		case bytecode.RInstanceOf:
+			ok = reg(a) && reg(b) && reg(c) && pc < len(rc.Aux) && rc.Aux[pc] != 0 && int(rc.Aux[pc]) <= int(fn.PropSites)
 		case bytecode.RRetUndef:
 		default:
 			ok = false
@@ -96,7 +102,7 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 		}
 	}
 	switch code[len(code)-1].Op() {
-	case bytecode.RJmp, bytecode.RRet, bytecode.RRetUndef:
+	case bytecode.RJmp, bytecode.RRet, bytecode.RRetUndef, bytecode.RThrow:
 	default:
 		return "the code runs past its end"
 	}

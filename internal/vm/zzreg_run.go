@@ -64,6 +64,8 @@ type regCode struct {
 	// ncap is how many of the function's stack slots a closure captures,
 	// the cells a closure it makes is given (regClosure).
 	ncap int32
+	// args says a frame keeps its arguments as passed, for RArguments.
+	args bool
 	rc   *bytecode.RegCode
 	fn   *bytecode.Function
 }
@@ -156,7 +158,7 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 	c := &regCode{
 		code: unsafe.Pointer(unsafe.SliceData(rc.Code)), src: rc.SrcPC, siteName: rc.SiteName,
 		numRegs: int32(rc.NumRegs), params: int32(rc.Params), inits: int32(rc.Inits),
-		coerceThis: fn.CoerceThis, rc: rc, fn: fn, wide: true, ncap: int32(ncap),
+		coerceThis: fn.CoerceThis, rc: rc, fn: fn, wide: true, ncap: int32(ncap), args: rc.UsesArguments,
 	}
 	t := &tree{reg: c}
 	t.blocks = []tblock{{body: []tstmt{regStmt(c)}, next: regNext}}
@@ -258,10 +260,13 @@ func (r *Runtime) regEnterFrame(f *frame, c *regCode) (Value, error) {
 	for i := 2 + m; i < 2+p+int(c.inits); i++ {
 		w[i] = Undefined
 	}
-	saved := f.base
+	saved, savedLocals := f.base, f.locals
 	f.base = base
+	if c.args {
+		f.locals = w[2 : 2+p : 2+p]
+	}
 	v, err := r.runReg(f, c)
-	f.base = saved
+	f.base, f.locals = saved, savedLocals
 	return v, err
 }
 
@@ -868,23 +873,15 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				continue
 			}
 			goto slow
-		case bytecode.RNewW, bytecode.RClosureW:
+		case bytecode.RThrow:
+			return Undefined, r.regThrow(f, c, pc-1, regs)
+		case bytecode.RNewW, bytecode.RClosureW, bytecode.RInstanceOf, bytecode.RIn, bytecode.RDelete, bytecode.RArguments:
 			goto slow
 		// Every value of the switch is a case, so that it is a jump table
 		// that needs no range check: Go makes one only of a switch whose
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile.
-		case 93:
-			goto invalid
-		case 94:
-			goto invalid
-		case 95:
-			goto invalid
-		case 96:
-			goto invalid
-		case 97:
-			goto invalid
 		case 98:
 			goto invalid
 		case 99:

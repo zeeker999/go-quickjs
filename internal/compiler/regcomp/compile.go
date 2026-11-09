@@ -1,6 +1,7 @@
 package regcomp
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"sort"
@@ -25,7 +26,7 @@ const limit16 = 1 << 16
 // is rec, into register code. It returns nil where the function has anything
 // the backend does not compile yet; the function then runs as before.
 func Compile(lit *ast.FuncLit, fn *bytecode.Function, rec *Record) *bytecode.RegCode {
-	if w := why(fn); w != "" {
+	if w := why(fn); w != "" && !(w == "arguments" && simpleArguments(fn)) {
 		Refuse(fn, w)
 		return nil
 	}
@@ -70,6 +71,7 @@ type gen struct {
 	names    map[string]uint32
 	caps     [][]uint16
 	siteName []uint32
+	auxes    map[int]uint32
 	calls    int
 	err      string
 }
@@ -321,6 +323,20 @@ func (g *gen) body() {
 			}
 		}
 	}
+	// The arguments object, made as the function starts, in its binding.
+	if g.fn.UsesArguments || g.fn.MakesArguments {
+		made := false
+		for slot, l := range g.fn.Locals {
+			if l.Name == "arguments" && slot < len(g.slotReg) && g.slotReg[slot] >= 0 {
+				g.emit(bytecode.MakeR(bytecode.RArguments, 0, r16(int(g.slotReg[slot])), 0, 0))
+				made = true
+			}
+		}
+		if !made {
+			g.fail("an arguments binding the record does not name")
+			return
+		}
+	}
 	// Hoisted function declarations of the body; one in a block is left to
 	// the stack form.
 	for _, s := range lit.Body {
@@ -335,6 +351,91 @@ func (g *gen) body() {
 	}
 	g.stmts(lit.Body)
 	g.emit(bytecode.MakeR(bytecode.RRetUndef, 0, 0, 0, 0))
+}
+
+// simpleArguments reports whether fn's use of arguments is the one the
+// backend compiles: an object made as the function starts, in the binding
+// the stack form gives it, of a function with simple parameters.
+func simpleArguments(fn *bytecode.Function) bool {
+	if fn.HasRest || !fn.HasSimpleParams || fn.ParamsAreLexical || fn.Generator || fn.Async ||
+		fn.HasDirectEval || fn.Debug != nil || fn.TopLevel || fn.PrivateSites != 0 || fn.HasTailCall {
+		return false
+	}
+	switch fn.Kind {
+	case bytecode.KindNormal, bytecode.KindMethod:
+	default:
+		return false
+	}
+	for _, l := range fn.Locals {
+		if l.Name == "arguments" {
+			return true
+		}
+	}
+	return false
+}
+
+// switchStmt compiles a switch: the discriminant once, each case's test
+// with ===, in order, jumping to its body, and default's body where no test
+// matched; the bodies in order, each falling into the next.
+func (g *gen) switchStmt(n *ast.SwitchStmt, label string) {
+	for _, c := range n.Cases {
+		for _, s := range c.Body {
+			switch d := s.(type) {
+			case *ast.VarDecl:
+				if d.Kind != ast.DeclVar {
+					g.fail("a lexical declaration in a switch")
+					return
+				}
+			case *ast.FuncDecl, *ast.ClassDecl:
+				g.fail("a declaration in a switch")
+				return
+			}
+		}
+	}
+	d := g.expr(n.Disc, -1)
+	if g.isBinding(d) {
+		t := g.alloc()
+		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(t), r16(d), 0))
+		d = t
+	}
+	l := &loop{label: label, brk: g.newMark()}
+	if label != "" {
+		l.cont = nil
+	}
+	g.loops = append(g.loops, l)
+	bodies := make([]*mark, len(n.Cases))
+	def := -1
+	for i, c := range n.Cases {
+		bodies[i] = g.newMark()
+		if c.Test == nil {
+			def = i
+			continue
+		}
+		mark := g.top
+		if imm, ok := imm16(c.Test); ok {
+			g.jump(bytecode.MakeR(bytecode.RJSEqI, 0, r16(d), uint16(int16(imm)), 0), bodies[i], true)
+		} else {
+			v := g.expr(c.Test, -1)
+			g.jump(bytecode.MakeR(bytecode.RJSEq, 0, r16(d), r16(v), 0), bodies[i], true)
+		}
+		g.top = mark
+	}
+	if def >= 0 {
+		g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), bodies[def], false)
+	} else {
+		g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), l.brk, false)
+	}
+	for i, c := range n.Cases {
+		g.bind(bodies[i])
+		for _, s := range c.Body {
+			if g.err != "" {
+				return
+			}
+			g.stmt(s)
+		}
+	}
+	g.bind(l.brk)
+	g.loops = g.loops[:len(g.loops)-1]
 }
 
 // declares reports whether the statements declare name, with var, let,
@@ -526,6 +627,12 @@ func (g *gen) stmt(s ast.Stmt) {
 			return
 		}
 		g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), l.cont, false)
+	case *ast.ThrowStmt:
+		r := g.expr(n.Arg, -1)
+		g.at(n.Start)
+		g.emit(bytecode.MakeR(bytecode.RThrow, 0, r16(r), 0, 0))
+	case *ast.SwitchStmt:
+		g.switchStmt(n, label)
 	case *ast.LabeledStmt:
 		switch n.Body.(type) {
 		case *ast.ForStmt, *ast.WhileStmt, *ast.DoWhileStmt:
@@ -535,7 +642,7 @@ func (g *gen) stmt(s ast.Stmt) {
 			g.fail("a labelled statement that is not a loop")
 		}
 	default:
-		g.fail("a statement the backend does not compile")
+		g.fail(fmt.Sprintf("a statement the backend does not compile (%T)", s))
 	}
 }
 
@@ -576,6 +683,13 @@ func (g *gen) popLoop() { g.loops = g.loops[:len(g.loops)-1] }
 func (g *gen) findLoop(label string, cont bool) *loop {
 	for i := len(g.loops) - 1; i >= 0; i-- {
 		l := g.loops[i]
+		if cont && !l.isLoop {
+			// A switch is no continue's target.
+			if label != "" && l.label == label {
+				return nil
+			}
+			continue
+		}
 		if label == "" || l.label == label {
 			return l
 		}
@@ -889,7 +1003,7 @@ func (g *gen) expr(e ast.Expr, dst int) int {
 		g.closure(n, d)
 		return d
 	}
-	g.fail("an expression the backend does not compile")
+	g.fail(fmt.Sprintf("an expression the backend does not compile (%T)", e))
 	return g.dest(dst)
 }
 
@@ -997,9 +1111,23 @@ var immOps = map[string]bytecode.ROp{
 }
 
 func (g *gen) binary(n *ast.Binary, dst int) int {
+	switch n.Op {
+	case "instanceof", "in":
+		a := g.guard(g.expr(n.Left, -1), n.Right)
+		b := g.expr(n.Right, -1)
+		d := g.dest(dst)
+		g.at(n.Start)
+		if n.Op == "in" {
+			g.emit(bytecode.MakeR(bytecode.RIn, 0, r16(d), r16(a), r16(b)))
+			return d
+		}
+		at := g.emit(bytecode.MakeR(bytecode.RInstanceOf, 0, r16(d), r16(a), r16(b)))
+		g.aux(at, uint32(g.site(0)))
+		return d
+	}
 	op, ok := binOps[n.Op]
 	if !ok {
-		g.fail("an operator the backend does not compile")
+		g.fail("the operator " + n.Op)
 		return g.dest(dst)
 	}
 	if _, isCmp := g.compareJump(n.Op, true); isCmp {
@@ -1088,13 +1216,51 @@ func (g *gen) unary(n *ast.Unary, dst int) int {
 			}
 		}
 		return g.unaryOp(bytecode.OpTypeOf, n.Operand, dst, n.Start)
+	case "delete":
+		m, ok := n.Operand.(*ast.Member)
+		if !ok || m.Optional {
+			if !ok {
+				// delete of anything but a property is true, its operand
+				// evaluated: a name is the stack form's.
+				if _, isName := n.Operand.(*ast.Ident); !isName {
+					g.discard(n.Operand)
+					d := g.dest(dst)
+					g.emit(bytecode.MakeR(bytecode.RLoadTrue, 0, r16(d), 0, 0))
+					return d
+				}
+			}
+			g.fail("delete of a name or an optional chain")
+			return g.dest(dst)
+		}
+		if _, isSuper := m.Object.(*ast.Super); isSuper {
+			g.fail("delete of a super property")
+			return g.dest(dst)
+		}
+		o := g.expr(m.Object, -1)
+		var k int
+		if m.Computed {
+			o = g.guard(o, m.Property)
+			k = g.expr(m.Property, -1)
+		} else {
+			name, ok := propName(m)
+			if !ok {
+				g.fail("a property name the backend does not compile")
+				return g.dest(dst)
+			}
+			k = g.alloc()
+			g.emit(bytecode.MakeRBC(bytecode.RLoadConst, 0, r16(k), g.constIdx(bytecode.Constant{Kind: bytecode.ConstString, Str: name})))
+		}
+		d := g.dest(dst)
+		g.at(n.Start)
+		g.emit(bytecode.MakeR(bytecode.RDelete, 0, r16(d), r16(o), r16(k)))
+		return d
 	case "void":
 		g.discard(n.Operand)
 		d := g.dest(dst)
 		g.emit(bytecode.MakeR(bytecode.RLoadUndef, 0, r16(d), 0, 0))
 		return d
 	}
-	g.fail("a unary operator the backend does not compile")
+	g.fail("the unary operator " + n.Op)
 	return g.dest(dst)
 }
 
@@ -1572,6 +1738,14 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	return d
 }
 
+// aux gives the instruction at pc its extra operand (RegCode.Aux).
+func (g *gen) aux(pc int, v uint32) {
+	if g.auxes == nil {
+		g.auxes = map[int]uint32{}
+	}
+	g.auxes[pc] = v
+}
+
 // callSite is a call's cache: the function it called last, and how.
 func (g *gen) callSite() uint16 {
 	s := g.calls
@@ -1717,7 +1891,15 @@ func (g *gen) finish() *bytecode.RegCode {
 	for len(g.siteName) <= int(g.fn.PropSites) {
 		g.siteName = append(g.siteName, 0)
 	}
+	var aux []uint32
+	if len(g.auxes) > 0 {
+		aux = make([]uint32, len(g.code))
+		for pc, v := range g.auxes {
+			aux[pc] = v
+		}
+	}
 	rc := &bytecode.RegCode{
+		Aux: aux, UsesArguments: g.fn.UsesArguments || g.fn.MakesArguments,
 		Code: g.code, NumRegs: g.max + 1, SrcPC: src, SiteName: g.siteName, This: -1,
 		Wide: true, Params: g.fn.ParamCount, Inits: g.inits, Caps: g.caps, CallSites: g.calls,
 	}

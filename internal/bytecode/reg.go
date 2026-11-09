@@ -253,6 +253,16 @@ const (
 	RJNeI
 	RJNull
 	RJNotNull
+	// RThrow throws R[A].
+	RThrow
+	// RInstanceOf: R[A] = R[B] instanceof R[C], its cache site Aux[pc].
+	RInstanceOf
+	// RIn: R[A] = R[B] in R[C].
+	RIn
+	// RDelete: R[A] = delete R[B][R[C]].
+	RDelete
+	// RArguments: R[A] = the frame's arguments object, made anew.
+	RArguments
 
 	// RInvalid is the last operation there can be, which no code holds:
 	// the interpreter's switch has a case for it so that its jump table
@@ -293,6 +303,13 @@ type RegCode struct {
 	// CallSites is how many call_w and call_method_w the code has, each
 	// numbered by its C: its cache of the function it called last.
 	CallSites int
+	// Aux is, for an instruction that needs one more operand than its word
+	// holds, that operand, by its pc: instanceof's cache site. Nil where no
+	// instruction needs one.
+	Aux []uint32
+	// UsesArguments says the code makes the arguments object, whose frame
+	// keeps the arguments as passed (RArguments).
+	UsesArguments bool
 }
 
 var rOpNames = [...]string{
@@ -320,6 +337,7 @@ var rOpNames = [...]string{
 	RGetIndexI: "get_index_imm", RSetIndexI: "set_index_imm", RCallMW: "call_method_w", RNewW: "new_w", RClosureW: "closure_w",
 	RPostInc: "post_inc", RPostDec: "post_dec", RGetLength: "get_length",
 	RJEq: "jeq", RJNe: "jne", RJEqI: "jeq_imm", RJNeI: "jne_imm", RJNull: "jnull", RJNotNull: "jnotnull",
+	RThrow: "throw", RInstanceOf: "instanceof", RIn: "in", RDelete: "delete", RArguments: "arguments",
 }
 
 func (op ROp) String() string {
@@ -366,6 +384,10 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s @%d, %s", op, r(w.A()), w.C(), r(w.B()))
 	case RDefineField:
 		return fmt.Sprintf("%s %s name%d, %s", op, r(w.A()), w.C(), r(w.B()))
+	case RInstanceOf, RIn, RDelete:
+		return fmt.Sprintf("%s %s, %s, %s", op, r(w.A()), r(w.B()), r(w.C()))
+	case RThrow, RArguments:
+		return fmt.Sprintf("%s %s", op, r(w.A()))
 	case RGetIndex, RAdd, RSub, RMul, RBitAnd, RBitOr, RBitXor, RShl, RShr, RUShr:
 		return fmt.Sprintf("%s %s, %s, %s", op, r(w.A()), r(w.B()), r(w.C()))
 	case RSetIndex:

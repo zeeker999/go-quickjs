@@ -26,8 +26,17 @@ func TestRegBackendRuns(t *testing.T) {
 		function cmp(a, b) { return [a == b, a != null, a === b, a < b, b >= a, a == null].join() }
 		function post(n) { var i = 0, a = []; while (i < n) a[i] = i++; return a.join() + i }
 		function dead() { let f = () => v; try { f() } catch (e) { return e instanceof ReferenceError } }
-		[fib(15), locals(7), props(9), elems(5), globals(10), method(4), reduce(5), cmp(1, "1"), cmp(null, undefined), post(3), dead()].join(" ")`
-	const want = "610 2432 19 4,8,2,3,4,5,6,7,8,9 45 24 30015 true,true,false,false,true,false true,false,false,false,false,true 0,1,23 true"
+		function extra(a) { var x; return [a, x].join() }
+		function ops(o) { var r = [o instanceof P, "x" in o, delete o.x, "x" in o, delete o["y"]]; return r.join() }
+		function thrower(k) { if (k > 1) throw new RangeError("k " + k); return k }
+		function sw(v) { var out = ""; switch (v) { case 1: out += "a"; case 2: out += "b"; break; case "s": out += "s"; break; default: out += "d" } return out }
+		function args(a, b) { arguments[0] = 9; return [a, arguments.length, arguments[2], b].join() }
+		function fwd() { return args.apply(null, arguments) }
+		[fib(15), locals(7), props(9), elems(5), globals(10), method(4), reduce(5), cmp(1, "1"), cmp(null, undefined), post(3), dead(),
+		 extra(1, 2), ops(new P(1)), (function () { try { thrower(5) } catch (e) { return e.message } })(), thrower(1),
+		 sw(1) + sw(2) + sw("s") + sw(7), args(1, 2, 3), fwd(4, 5)].join(" ")`
+	const want = "610 2432 19 4,8,2,3,4,5,6,7,8,9 45 24 30015 true,true,false,false,true,false true,false,false,false,false,true 0,1,23 true " +
+		"1, true,true,true,false,true k 5 1 abbsd 9,3,3,2 9,2,,5"
 	for _, reg := range []bool{false, true} {
 		// Each run its own compile: a function keeps the form its first
 		// run gave it.
@@ -45,7 +54,7 @@ func TestRegBackendRuns(t *testing.T) {
 		if got := v.String().Go(); got != want {
 			t.Errorf("reg=%v: got %s, want %s", reg, got, want)
 		}
-		if built := RegsBuilt() - before; reg && built < 9 {
+		if built := RegsBuilt() - before; reg && built < 15 {
 			t.Errorf("only %d functions ran as register code", built)
 		}
 		r.Close()
