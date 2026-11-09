@@ -88,6 +88,10 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			ok = reg(a)
 		case bytecode.RIn, bytecode.RDelete:
 			ok = reg(a) && reg(b) && reg(c)
+		case bytecode.RAddProp:
+			ok = reg(a) && reg(b) && site(c)
+		case bytecode.RAddPropI:
+			ok = reg(a) && site(c)
 		case bytecode.RNewArrayK:
 			ok = reg(a) && site(c) && pc < len(rc.Aux) && int(rc.Aux[pc]) < len(rc.Literals) && len(rc.Literals[rc.Aux[pc]]) == int(b) && b > 0
 			if ok {

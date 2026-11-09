@@ -661,6 +661,12 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		v, err = r.regDelete(cl, regs[w.B()], regs[w.C()])
 	case bytecode.RArguments:
 		v = Obj(r.newArgumentsObject(f))
+	case bytecode.RAddProp, bytecode.RAddPropI:
+		b := Int32(w.SB())
+		if w.Op() == bytecode.RAddProp {
+			b = regs[w.B()]
+		}
+		return Undefined, r.regAddProp(cl, c, w, regs[w.A()], b)
 	case bytecode.RNewArrayK:
 		// The tree's shared literal (ztree_a0shared.go): the site keeps the
 		// array of the constants, and each array shares its elements until
@@ -821,6 +827,30 @@ func (r *Runtime) regConstruct(callee Value, base, argc int) (Value, error) {
 		return res, nil
 	}
 	return this, nil
+}
+
+// regAddProp is add_prop's slow path: the property read as get_prop
+// reads it, b added, and the sum stored as set_prop stores it, through the
+// site's entry, which the store fills.
+func (r *Runtime) regAddProp(cl *closure, c *regCode, w bytecode.RInstr, obj, b Value) error {
+	name := cl.names[c.siteName[w.C()]]
+	cur, err := r.getValueProp(obj, name)
+	if err != nil {
+		return err
+	}
+	var sum Value
+	if w.X() != 0 {
+		sum, err = r.regStep(cur, b.Number())
+	} else {
+		sum, err = r.add(cur, b)
+	}
+	if err != nil {
+		return err
+	}
+	if obj.IsObject() {
+		return r.setPropCached(&cl.ic[w.C()], obj.Object(), name, sum, cl.fn.Strict)
+	}
+	return r.setValueProp(obj, name, sum, cl.fn.Strict)
 }
 
 // regThrow is throw: the value thrown, from the instruction at pc.

@@ -873,6 +873,24 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				continue
 			}
 			goto slow
+		case bytecode.RAddProp, bytecode.RAddPropI:
+			if o := regs[w.A()]; o.IsObject() {
+				obj := o.Object()
+				if s := &cl.ic[w.C()]; obj.shape == s.ownShape {
+					p := &obj.vals()[s.idx]
+					var b Value
+					if w.Op() == bytecode.RAddProp {
+						b = regs[w.B()]
+					} else {
+						b = Int32(w.SB())
+					}
+					if p.IsNumber() && b.IsNumber() {
+						*p = regNum(p.Number() + b.Number())
+						continue
+					}
+				}
+			}
+			goto slow
 		case bytecode.RThrow:
 			return Undefined, r.regThrow(f, c, pc-1, regs)
 		case bytecode.RNewW, bytecode.RClosureW, bytecode.RInstanceOf, bytecode.RIn, bytecode.RDelete, bytecode.RArguments, bytecode.RNewArrayK:
@@ -882,10 +900,6 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile.
-		case 99:
-			goto invalid
-		case 100:
-			goto invalid
 		case 101:
 			goto invalid
 		case 102:

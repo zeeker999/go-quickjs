@@ -267,6 +267,12 @@ const (
 	// Literals[Aux[pc]], whose arrays share them until one is written, its
 	// cache site C keeping them (the VM's shared literals).
 	RNewArrayK
+	// RAddProp: R[A].name += R[B], and RAddPropI: R[A].name += SB, site C
+	// -- an update of a place as one operation, its value unused: o.a += j,
+	// o.n++. The site is the store's, whose entry for an own writable data
+	// property says where the value to add to is too.
+	RAddProp
+	RAddPropI
 
 	// RInvalid is the last operation there can be, which no code holds:
 	// the interpreter's switch has a case for it so that its jump table
@@ -360,7 +366,7 @@ var rOpNames = [...]string{
 	RGetIndexI: "get_index_imm", RSetIndexI: "set_index_imm", RCallMW: "call_method_w", RNewW: "new_w", RClosureW: "closure_w",
 	RPostInc: "post_inc", RPostDec: "post_dec", RGetLength: "get_length",
 	RJEq: "jeq", RJNe: "jne", RJEqI: "jeq_imm", RJNeI: "jne_imm", RJNull: "jnull", RJNotNull: "jnotnull",
-	RThrow: "throw", RInstanceOf: "instanceof", RIn: "in", RDelete: "delete", RArguments: "arguments", RNewArrayK: "new_array_k",
+	RThrow: "throw", RInstanceOf: "instanceof", RIn: "in", RDelete: "delete", RArguments: "arguments", RNewArrayK: "new_array_k", RAddProp: "add_prop", RAddPropI: "add_prop_imm",
 }
 
 func (op ROp) String() string {
@@ -417,6 +423,10 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s[%s], %s", op, r(w.A()), r(w.B()), r(w.C()))
 	case RNewObject:
 		return fmt.Sprintf("%s %s, %d @%d", op, r(w.A()), w.B(), w.C())
+	case RAddProp:
+		return fmt.Sprintf("%s %s @%d, %s", op, r(w.A()), w.C(), r(w.B()))
+	case RAddPropI:
+		return fmt.Sprintf("%s %s @%d, %d", op, r(w.A()), w.C(), w.SB())
 	case RNewArrayK:
 		return fmt.Sprintf("%s %s, x%d @%d", op, r(w.A()), w.B(), w.C())
 	case RNewArray:

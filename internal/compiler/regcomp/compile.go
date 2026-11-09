@@ -779,9 +779,15 @@ func (g *gen) varDecl(n *ast.VarDecl) {
 func (g *gen) discard(e ast.Expr) {
 	switch n := e.(type) {
 	case *ast.Update:
+		if m, ok := n.Operand.(*ast.Member); ok && g.addProp(m, nil, map[string]int32{"++": 1, "--": -1}[n.Op], n.Start) {
+			return
+		}
 		g.update(n, false, -1)
 		return
 	case *ast.Assign:
+		if m, ok := n.Target.(*ast.Member); ok && n.Op == "+=" && g.addProp(m, n.Value, 0, int(n.Start)) {
+			return
+		}
 		g.assign(n, -1, false)
 		return
 	case *ast.Sequence:
@@ -1514,6 +1520,55 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 	}
 	g.fail("a compound assignment target")
 	return 0
+}
+
+// addProp compiles o.name += value, or, with value nil, o.name += imm, whose
+// value is unused, as one add_prop: where value is a constant or a binding
+// no one else writes, which reading the property first would not see
+// change, so that reading it in the operation is the same.
+func (g *gen) addProp(m *ast.Member, value ast.Expr, imm int32, pos int) bool {
+	name, ok := propName(m)
+	if !ok {
+		return false
+	}
+	if _, isSuper := m.Object.(*ast.Super); isSuper {
+		return false
+	}
+	var v int
+	op := bytecode.RAddPropI
+	if value != nil {
+		if i, ok := imm16(value); ok {
+			imm = i
+		} else {
+			id, isIdent := value.(*ast.Ident)
+			if !isIdent {
+				return false
+			}
+			res, ok := g.rec.Read[id]
+			if !ok || res.Kind != ResLocal || g.fn.Locals[res.Index].Captured {
+				return false
+			}
+			op = bytecode.RAddProp
+		}
+	}
+	o := g.expr(m.Object, -1)
+	if op == bytecode.RAddProp {
+		v = g.expr(value, -1)
+	}
+	g.at(pos)
+	site := g.site(g.nameIdx(name))
+	if op == bytecode.RAddProp {
+		g.emit(bytecode.MakeR(op, 0, r16(o), r16(v), site))
+	} else {
+		// X says an update, ++ or --, which converts by ToNumeric where +=
+		// adds as + does.
+		x := uint8(0)
+		if value == nil {
+			x = 1
+		}
+		g.emit(bytecode.MakeR(op, x, r16(o), uint16(int16(imm)), site))
+	}
+	return true
 }
 
 // readForWrite reads the binding a compound assignment or an update of
