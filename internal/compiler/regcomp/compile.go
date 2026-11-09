@@ -1458,6 +1458,21 @@ func immOffset(op bytecode.ROp) bytecode.ROp {
 
 // --- stores ---------------------------------------------------------------
 
+// runsNoCode reports whether e's value is made without throwing or running
+// a script's code: a literal, a function expression, or a read of a binding
+// that needs no check of its initialisation.
+func (g *gen) runsNoCode(e ast.Expr) bool {
+	switch n := e.(type) {
+	case *ast.NumberLit, *ast.StringLit, *ast.BoolLit, *ast.NullLit, *ast.FuncLit:
+		return true
+	case *ast.Ident:
+		res, ok := g.rec.Read[n]
+		return ok && (res.Kind == ResLocal || res.Kind == ResUpval || res.Kind == ResLiteral && res.Lit == nil) &&
+			!(g.fn.ForwardsArguments && g.isArguments(n))
+	}
+	return false
+}
+
 // storeIdent stores value into the binding id names; init says it is the
 // binding's declaration.
 func (g *gen) storeIdent(id *ast.Ident, value ast.Expr, init bool) int {
@@ -1476,15 +1491,21 @@ func (g *gen) storeIdent(id *ast.Ident, value ast.Expr, init bool) int {
 		g.emit(bytecode.MakeRBC(bytecode.RSetUpval, 0, r16(v), res.Index))
 		return v
 	case ResGlobal:
+		var strict uint8
 		if g.fn.Strict {
 			// Whether the name resolves is settled before the value is
-			// evaluated, which the stack form's checks do.
-			g.fail("a strict global store")
-			return 0
+			// evaluated, which the stack form's checks do: a value that
+			// runs no code cannot change the answer, and the store asks it
+			// (set_global_strict's folding, foldGlobalCheck).
+			if !g.runsNoCode(value) {
+				g.fail("a strict global store of a value that runs code")
+				return 0
+			}
+			strict = 1
 		}
 		v := g.expr(value, -1)
 		g.at(int(id.Start))
-		g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite()))
+		g.emit(bytecode.MakeR(bytecode.RSetGlobal, strict, r16(v), g.name16(id.Name), g.globalSite()))
 		return v
 	case ResIgnore:
 		return g.expr(value, -1)
@@ -1670,12 +1691,15 @@ func (g *gen) storeValue(id *ast.Ident, v int) {
 	case ResUpval:
 		g.emit(bytecode.MakeRBC(bytecode.RSetUpval, 0, r16(v), res.Index))
 	case ResGlobal:
+		// An update's or a compound assignment's store, after its read has
+		// resolved the name: in strict code the store asks again, and a
+		// binding the value's code deleted is a ReferenceError.
+		var strict uint8
 		if g.fn.Strict {
-			g.fail("a strict global store")
-			return
+			strict = 1
 		}
 		g.at(int(id.Start))
-		g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite()))
+		g.emit(bytecode.MakeR(bytecode.RSetGlobal, strict, r16(v), g.name16(id.Name), g.globalSite()))
 	default:
 		g.fail("a store the backend does not compile")
 	}

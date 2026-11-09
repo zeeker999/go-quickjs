@@ -62,3 +62,31 @@ func TestRegLeafGivenUp(t *testing.T) {
 	const want = "1990091,1990091"
 	regRunBoth(t, src, want, 2)
 }
+
+// TestRegStrictGlobalStores pins strict code's global stores in register
+// code: a store of a value that runs no code asks whether the name resolves
+// at the store, a ReferenceError for a name that does not and a TypeError
+// for a binding that is not writable, on the site's first store and after
+// its fast path was filled; an update asks again after its read; a value
+// that runs code leaves the function to the stack form, where the
+// reference is resolved first.
+func TestRegStrictGlobalStores(t *testing.T) {
+	const src = `
+		var sg = 0;
+		function put(v) { "use strict"; for (var j = 0; j < 3; j++) sg = v; return sg }
+		function putMissing() { "use strict"; nope = 1; return "stored" }
+		function putFixed() { "use strict"; fixed = 2; return "stored" }
+		function bump() { "use strict"; sg++; sg += 2; return sg }
+		function bumpGone() { "use strict"; gone += 1; return "stored" }
+		function makes() { "use strict"; made = (globalThis.made = 1, 2); return "stored" }
+		function tryIt(f) { try { return f() } catch (e) { return e.name } }
+		Object.defineProperty(globalThis, "fixed", { value: 1, writable: false });
+		globalThis.gone = 1;
+		var out = [put(4), put(5), tryIt(putMissing), typeof nope, tryIt(putFixed), bump(), tryIt(bumpGone), gone];
+		delete globalThis.gone;
+		out.push(tryIt(bumpGone), tryIt(makes), made);
+		try { putMissing() } catch (e) { out.push(e.stack.split(String.fromCharCode(10))[1].trim()) }
+		out.join()`
+	const want = "4,5,ReferenceError,undefined,TypeError,8,stored,2,ReferenceError,ReferenceError,1,at putMissing (test:4:41)"
+	regRunBoth(t, src, want, 4)
+}

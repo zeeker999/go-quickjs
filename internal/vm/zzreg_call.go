@@ -155,9 +155,29 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 			// A leaf is answered first, before the frame's pc is written:
 			// its body reads nothing of the frame and throws nothing.
 			if e.kind&regCallLeaf != 0 {
-				if v, ok := r.regLeafHit(e, win, int(w.X())); ok {
-					regWindow(r.stack, wb)[w.B()] = v
-					return nil
+				// The this is given to the body, not written to the
+				// window: a miss writes it (regCallSlow).
+				this, ok := win[1], true
+				switch e.kind &^ (regCallOut | regCallLeaf) {
+				case regCallThis:
+					this = e.this
+				case regCallObjThis:
+					ok = this.IsObject()
+				}
+				if ok {
+					var v Value
+					argc := int(w.X())
+					if e.rc.leaf == regLeafPure {
+						// pureCallAt checks the closure's misses.
+						r.pureRefused = false
+						v, ok = r.pureCallAt(e.callee.fn(), this, win[2:2+argc], 0, true)
+					} else if ok = this.IsObject(); ok {
+						v, ok = r.leafCall(e.cl, this.Object(), win[2:2+argc])
+					}
+					if ok {
+						regWindow(r.stack, wb)[w.B()] = v
+						return nil
+					}
 				}
 				f.pc = regSrc(c, pc) + 1
 				return r.regCallMiss(f, c, w, wb)
@@ -233,32 +253,6 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 	}
 	f.pc = regSrc(c, pc) + 1
 	return r.regCallMiss(f, c, w, wb)
-}
-
-// regLeafHit answers a call of the leaf its site's cache e holds, whose
-// window is win, without a frame, if it can (leafCall, pureCall).
-//
-//go:noinline
-func (r *Runtime) regLeafHit(e *regCallCache, win *[1 << 16]Value, argc int) (Value, bool) {
-	// The this is given to the body, not written to the window: a miss
-	// writes it (regCallSlow).
-	this := win[1]
-	switch e.kind &^ (regCallOut | regCallLeaf) {
-	case regCallThis:
-		this = e.this
-	case regCallObjThis:
-		if !this.IsObject() {
-			return Undefined, false
-		}
-	}
-	if e.rc.leaf == regLeafPure {
-		// pureCallAt checks the closure's misses.
-		r.pureRefused = false
-		return r.pureCallAt(e.callee.fn(), this, win[2:2+argc], 0, true)
-	} else if this.IsObject() {
-		return r.leafCall(e.cl, this.Object(), win[2:2+argc])
-	}
-	return Undefined, false
 }
 
 // regSrc is the stack form's instruction of register instruction pc, which
@@ -416,7 +410,8 @@ const (
 	regCallObjThis
 
 	regCallOut = 8
-	// regCallLeaf marks a callee whose body regLeafHit may answer.
+	// regCallLeaf marks a callee whose body regCallW may answer without a
+	// frame (leafCall, pureCall).
 	regCallLeaf = 16
 )
 

@@ -114,7 +114,7 @@ func TestRegisterBackendFallsBack(t *testing.T) {
 		function tried() { try { return 1 } catch (e) { return 2 } }
 		function args() { return arguments.length }
 		function* gen() { yield 1 }
-		function strictStore() { 'use strict'; g = 1 }
+		function strictStore() { 'use strict'; g = plain(1) }
 		function plain(x) { return x + 1 }`)
 	for _, name := range []string{"tried", "args", "gen", "strictStore"} {
 		if f := fns[name]; f == nil || f.Reg != nil {

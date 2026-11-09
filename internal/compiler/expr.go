@@ -2087,6 +2087,9 @@ func (c *compiler) compileAssign(n *ast.Assign) {
 			check := len(c.fn.Code) - 1
 			value(nameOf(n.Target))
 			if c.foldGlobalCheck(check, id) {
+				if c.reg != nil {
+					c.reg.NoteWrite(id, regcomp.Res{Kind: regcomp.ResGlobal})
+				}
 				return
 			}
 			c.emitAt(int(id.Start), bytecode.OpAssertResolved, c.nameIdx(id.Name), 0)
