@@ -117,45 +117,144 @@ func (r *Runtime) regCall(callee, this Value, args []Value) (Value, error) {
 	return v, err
 }
 
-// regCallW is call_w: a call whose callee's frame starts at the caller's
-// window, R[A], its parameters the arguments where they lie. A callee whose
-// register code has the register form's own layout is run here with nothing
-// copied; any other is called as regCall calls it.
-func (r *Runtime) regCallW(f *frame, c *regCode, pc, wb int) (Value, error) {
+// regCallOp is call and call_method, the instruction before k's pc.
+func (r *Runtime) regCallOp(f *frame, c *regCode, k *regKept, wb int) (Value, error) {
+	pc := k.pc - 1
+	f.pc = c.src[pc] + 1
+	w := regAt(c.code, pc)
+	b := wb + int(w.A())
+	if w.Op() == bytecode.RCall {
+		return r.regCall(r.stack[b], Undefined, r.stack[b+1:b+1+int(w.X())])
+	}
+	return r.regCall(r.stack[b+1], r.stack[b], r.stack[b+2:b+2+int(w.X())])
+}
+
+// regCallW is call_w and call_method_w: a call whose callee's frame
+// starts at the caller's window, R[A], its parameters the arguments where
+// they lie. A callee whose register code has the form's own layout, of this
+// realm, with nothing of its surroundings to establish but an arrow's this,
+// is entered here: its frame is the window, the frame record the few fields
+// a stack trace and a closure read, and runReg is the only call between the
+// two loops. Any other callee is called as regCall calls it.
+func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) (Value, error) {
+	pc := k.pc - 1
+	f.pc = c.src[pc] + 1
 	w := regAt(c.code, pc)
 	base := wb + int(w.A())
 	argc := int(w.X())
 	callee := r.stack[base]
-	if callee.IsObject() {
-		o := callee.Object()
-		if fd := o.fn(); fd != nil && fd.closure != nil && !fd.bound && fd.extra == nil {
-			cl := fd.closure
-			rc := cl.reg
-			if rc == nil {
-				rc = r.regOf(cl)
-			}
-			if rc != nil && rc.wide && cl.realm == r.Realm {
-				return r.regEnterW(o, cl, rc, base, argc)
+	method := w.Op() == bytecode.RCallMW
+	var (
+		o  *Object
+		cl *closure
+		rc *regCode
+	)
+	if !callee.IsObject() {
+		goto general
+	}
+	o = callee.Object()
+	if fd := o.fn(); fd != nil && fd.closure != nil && !fd.bound {
+		cl = fd.closure
+		if rc = cl.reg; rc == nil {
+			rc = r.regOf(cl)
+		}
+		if rc != nil && rc.wide && cl.realm == r.Realm {
+			if x := fd.extra; x == nil {
+				if !method {
+					this := Undefined
+					if rc.coerceThis {
+						this = r.globalThis
+					}
+					r.stack[base+1] = this
+				} else if rc.coerceThis && !r.stack[base+1].IsObject() {
+					goto general
+				}
+				goto enter
+			} else if fd.arrow && x.lexThisRef == nil && x.rare == nil {
+				r.stack[base+1] = x.lexThis
+				goto enter
 			}
 		}
 	}
-	return r.regCall(callee, Undefined, r.stack[base+2:base+2+argc])
-}
-
-// regEnterW runs a register function of the form's own layout in the
-// window at base, which holds the function, its this and its arguments.
-func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int) (Value, error) {
-	this := Undefined
-	if rc.coerceThis {
-		this = r.globalThis
+general:
+	{
+		this := Undefined
+		if method {
+			this = r.stack[base+1]
+		}
+		return r.regCall(callee, this, r.stack[base+2:base+2+argc])
 	}
-	r.stack[base+1] = this
+enter:
+	// regEnterW, written out: called, it is one more call a JavaScript call
+	// makes.
 	top := base + int(rc.numRegs)
 	if top > len(r.stack) || r.frameDepth >= r.maxFrames {
 		return Undefined, r.throwRangeError("maximum call stack size exceeded")
 	}
-	if err := r.tick(); err != nil {
-		return Undefined, err
+	if r.interruptCounter--; r.interruptCounter <= 0 {
+		if err := r.checkInterruptNow(); err != nil {
+			return Undefined, err
+		}
+	}
+	saved := r.stackTop
+	if top > saved {
+		r.stackTop = top
+		if top > r.stackHigh {
+			r.stackHigh = top
+		}
+	}
+	for i := base + 2 + argc; i < base+2+int(rc.params)+int(rc.inits); i++ {
+		r.stack[i] = Undefined
+	}
+	off := r.frameDepth - r.frameBase
+	if uint(off) >= uint(len(r.cur)) {
+		r.seekFrameBlock()
+		off = r.frameDepth - r.frameBase
+	}
+	r.frameDepth++
+	if r.frameDepth > r.frameHigh {
+		r.frameHigh = r.frameDepth
+	}
+	nf := &r.cur[off]
+	nf.cl = cl
+	nf.callee = o
+	nf.base = base
+	nf.pc = 0
+	if len(nf.openUpvalues) != 0 {
+		nf.openUpvalues = nf.openUpvalues[:0]
+	}
+	if nf.thisRef != nil || nf.withScopes != nil || nf.evalVars != nil || nf.native != "" || nf.args != nil {
+		regClearFrame(nf)
+	}
+	v, err := r.runReg(nf, rc)
+	if len(nf.openUpvalues) != 0 {
+		for _, u := range nf.openUpvalues {
+			u.close()
+		}
+	}
+	r.frameDepth--
+	r.stackTop = saved
+	return v, err
+}
+
+// regEnterW runs a register function of the form's own layout in the
+// window at base, which holds the function, its this and its argc
+// arguments.
+//
+// The frame record is written only where a reader needs it: the function,
+// the window's base and the pc, which stack traces read, and the fields a
+// frame's last user may have left set, cleared where they are. Its this is
+// the window's register 1, which regClosure gives the frame when it makes
+// an arrow that captures it.
+func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int) (Value, error) {
+	top := base + int(rc.numRegs)
+	if top > len(r.stack) || r.frameDepth >= r.maxFrames {
+		return Undefined, r.throwRangeError("maximum call stack size exceeded")
+	}
+	if r.interruptCounter--; r.interruptCounter <= 0 {
+		if err := r.checkInterruptNow(); err != nil {
+			return Undefined, err
+		}
 	}
 	saved := r.stackTop
 	if top > saved {
@@ -179,32 +278,128 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int)
 	}
 	f := &r.cur[off]
 	f.cl = cl
+	f.callee = o
 	f.base = base
 	f.pc = 0
-	f.this = this
-	f.callee = o
 	if len(f.openUpvalues) != 0 {
 		f.openUpvalues = f.openUpvalues[:0]
 	}
-	if f.thisRef != nil {
-		f.thisRef = nil
-	}
-	if f.withScopes != nil {
-		f.withScopes = nil
-	}
-	if f.evalVars != nil {
-		f.evalVars = nil
-	}
-	if f.native != "" {
-		f.native = ""
+	if f.thisRef != nil || f.withScopes != nil || f.evalVars != nil || f.native != "" || f.args != nil {
+		regClearFrame(f)
 	}
 	v, err := r.runReg(f, rc)
-	for _, u := range f.openUpvalues {
-		u.close()
+	if len(f.openUpvalues) != 0 {
+		for _, u := range f.openUpvalues {
+			u.close()
+		}
 	}
 	r.frameDepth--
 	r.stackTop = saved
 	return v, err
+}
+
+// regClearFrame clears what a frame's last user left that a register
+// frame has none of.
+//
+//go:noinline
+func regClearFrame(f *frame) {
+	f.thisRef = nil
+	f.withScopes = nil
+	f.evalVars = nil
+	f.native = ""
+	f.args = nil
+}
+
+// regClosure is closure_w: a closure of the nested function constant BC,
+// each upvalue it takes from this frame open on the register the code's
+// capture table names for it.
+func (r *Runtime) regClosure(f *frame, c *regCode, w bytecode.RInstr, wb int) *Object {
+	k := w.BC()
+	tmpl := f.cl.consts[k]
+	fn := f.cl.fn
+	caps := c.rc.Caps[k]
+	cells := make([]*upvalue, c.ncap)
+	for i, u := range tmpl.template().fn.Upvalues {
+		if !u.FromParent {
+			continue
+		}
+		slot := &r.stack[wb+int(caps[i])]
+		var up *upvalue
+		for _, o := range f.openUpvalues {
+			if o.slot == slot {
+				up = o
+				break
+			}
+		}
+		if up == nil {
+			up = &upvalue{slot: slot}
+			f.openUpvalues = append(f.openUpvalues, up)
+		}
+		cells[cellOfLocal(fn, int(u.Index))] = up
+	}
+	if c.wide {
+		// What an arrow captures of this is the frame's register 1, which
+		// the frame record does not keep (regEnterW).
+		f.this = r.stack[wb+1]
+	}
+	o := r.newClosureIn(f, tmpl, cells)
+	if fd := o.fn(); fd != nil {
+		if atomic.LoadPointer(&fd.closure.fn.VMCode) == nil && fd.closure.fn.Reg != nil && regTier.Load() {
+			firstTree(fd.closure.fn)
+		}
+		if atomic.LoadPointer(&fd.closure.fn.VMCode) != nil {
+			planTreeCall(fd)
+			regPlan(fd)
+		}
+	}
+	return o
+}
+
+// regDirect is callDirect's call of a function whose tree runs register
+// code of the form's own layout: its window is made at the top of the stack
+// and run there, without callTree's frame, runTree's recover and the copy
+// regEnterFrame makes. callDirect has counted the call.
+func (r *Runtime) regDirect(o *Object, fd *funcData, c *regCode, this Value, args []Value) (Value, error) {
+	if fd.arrow {
+		this = fd.extra.lexThis
+	} else if c.coerceThis && !this.IsObject() {
+		if !this.IsNullish() {
+			return r.callTree(o, fd, this, args, false)
+		}
+		this = r.globalThis
+	}
+	base := r.stackTop
+	if base+int(c.numRegs) > len(r.stack) {
+		return Undefined, r.throwRangeError("maximum call stack size exceeded")
+	}
+	m := min(int(c.params), len(args))
+	w := r.stack[base : base+2+m : base+2+m]
+	w[0] = Obj(o)
+	w[1] = this
+	for i, a := range args[:m] {
+		w[2+i] = a
+	}
+	return r.regEnterW(o, fd.closure, c, base, m)
+}
+
+// regPlan gives a closure of a template with register code of the form's
+// own layout the tree that runs it as its tree's call, where nothing of its
+// surroundings but an arrow's this is to establish, so that callDirect --
+// a built-in's callback, a tree's call -- enters the register code at once.
+// An arrow's this is the one it captured, which regEnterFrame and
+// regDirect give it.
+func regPlan(fd *funcData) {
+	if fd.treeCall != nil || fd.bound || fd.native != nil || fd.closure == nil {
+		return
+	}
+	t := (*tree)(atomic.LoadPointer(&fd.closure.fn.VMCode))
+	if t == nil || t.reg == nil || !t.reg.wide {
+		return
+	}
+	if x := fd.extra; x != nil && (!fd.arrow || x.lexThisRef != nil || x.rare != nil) {
+		return
+	}
+	fd.treeCall = t
 }
 
 // regOf is the register code of cl's function, built if the function has
@@ -239,7 +434,8 @@ func regTctx(r *Runtime, f *frame, cl *closure) *tctx {
 //
 // It reads the instruction from the code rather than being given it, so that
 // the loop keeps nothing of the instruction across the call (see runReg).
-func (r *Runtime) regSlow(f *frame, c *regCode, pc int, regs *[1 << 16]Value) (Value, error) {
+func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value) (Value, error) {
+	pc := k.pc - 1
 	w := regAt(c.code, pc)
 	f.pc = c.src[pc] + 1
 	cl := f.cl
@@ -296,6 +492,40 @@ func (r *Runtime) regSlow(f *frame, c *regCode, pc int, regs *[1 << 16]Value) (V
 			regs[w.B()] = v
 		}
 		return v, err
+	case bytecode.RGetIndexI:
+		v, err = r.getIndexed(regs[w.B()], Int32(int32(w.C())))
+	case bytecode.RSetIndexI:
+		return Undefined, r.setIndexed(regs[w.A()], Int32(int32(w.B())), regs[w.C()], cl.fn.Strict)
+	case bytecode.RNewW:
+		b := wb + int(w.A())
+		if v, err = r.construct(regs[w.A()], r.stack[b+2:b+2+int(w.X())]); err == nil {
+			regs[w.B()] = v
+		}
+		return v, err
+	case bytecode.RClosureW:
+		v = Obj(r.regClosure(f, c, w, wb))
+	case bytecode.RPostInc, bytecode.RPostDec:
+		old, err := r.toNumeric(regs[w.B()])
+		if err != nil {
+			return Undefined, err
+		}
+		delta := 1.0
+		if w.Op() == bytecode.RPostDec {
+			delta = -1
+		}
+		next, err := r.regStep(old, delta)
+		if err != nil {
+			return Undefined, err
+		}
+		regs[w.A()] = old
+		regs[w.B()] = next
+		return old, nil
+	case bytecode.RGetLength:
+		if o := regs[w.B()]; o.IsString() {
+			v = Int(o.String().Len())
+		} else {
+			v, err = r.getValueProp(o, atomLength)
+		}
 	case bytecode.RCloseUpvals:
 		if len(f.openUpvalues) != 0 {
 			r.closeUpvaluesFrom(f, int(w.A()))
@@ -320,7 +550,7 @@ func (r *Runtime) regSlow(f *frame, c *regCode, pc int, regs *[1 << 16]Value) (V
 			b = regs[w.B()]
 		}
 		res, err := r.regCompare(bytecode.Op(w.X()&^bytecode.RCmpTrue), regs[w.A()], b)
-		return Bool(res), err
+		return Bool(res == (w.X()&bytecode.RCmpTrue != 0)), err
 	default:
 		panic("register code: no slow path for " + w.Op().String())
 	}

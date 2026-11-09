@@ -187,6 +187,9 @@ func (r *Runtime) callDirect(callee, this Value, args []Value) (Value, error) {
 			if err := r.tick(); err != nil {
 				return Undefined, err
 			}
+			if c := fd.treeCall.reg; c != nil && c.wide {
+				return r.regDirect(o, fd, c, this, args)
+			}
 			return r.callTree(o, fd, this, args, false)
 		}
 		if fd != nil && fd.mathOp != 0 {

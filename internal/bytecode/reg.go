@@ -226,6 +226,25 @@ const (
 	RJSNe
 	RJSEqI
 	RJSNeI
+	// RGetIndexI: R[A] = R[B][C], and RSetIndexI: R[A][B] = R[C], with the
+	// index the immediate C or B -- tab[3] = j with no load of the 3.
+	RGetIndexI
+	RSetIndexI
+	// RCallMW is RCallW with this R[A+1]: a method call, its window
+	// R[A] the method and R[A+1] the receiver get_method wrote.
+	RCallMW
+	// RNewW: R[B] = new R[A](R[A+2] ... R[A+1+X]).
+	RNewW
+	// RClosureW: R[A] = a closure of Constants[BC], each upvalue it takes
+	// from its maker the register RegCode.Caps[BC] names.
+	RClosureW
+	// RPostInc and RPostDec: R[A] = ToNumeric(R[B]), then R[B] = R[A] + 1
+	// or - 1 -- a postfix update whose value is used, as in a[i++].
+	RPostInc
+	RPostDec
+	// RGetLength: R[A] = R[B].length, an array's and a string's answered
+	// in the case.
+	RGetLength
 
 	// RInvalid is the last operation there can be, which no code holds:
 	// the interpreter's switch has a case for it so that its jump table
@@ -254,6 +273,15 @@ type RegCode struct {
 	// This is the register the function's this is loaded into as it
 	// starts, or -1 if the code reads no this.
 	This int
+	// Wide marks code of the register form's own frame layout, which the
+	// register backend compiles from the AST: register 0 the function, 1
+	// its this, the Params parameters from 2, and then Inits bindings, which
+	// a call makes undefined, before the temporaries.
+	Wide          bool
+	Params, Inits int
+	// Caps is, for each constant that is a nested function, the register
+	// of each of its upvalues taken from this function's bindings.
+	Caps [][]uint16
 }
 
 var rOpNames = [...]string{
@@ -278,6 +306,8 @@ var rOpNames = [...]string{
 	RJLt: "jlt", RJNLt: "jnlt", RJLe: "jle", RJNLe: "jnle", RJGt: "jgt", RJNGt: "jngt", RJGe: "jge", RJNGe: "jnge",
 	RJLtI: "jlt_imm", RJNLtI: "jnlt_imm", RJLeI: "jle_imm", RJNLeI: "jnle_imm", RJGtI: "jgt_imm", RJNGtI: "jngt_imm",
 	RJGeI: "jge_imm", RJNGeI: "jnge_imm", RJSEq: "jseq", RJSNe: "jsne", RJSEqI: "jseq_imm", RJSNeI: "jsne_imm",
+	RGetIndexI: "get_index_imm", RSetIndexI: "set_index_imm", RCallMW: "call_method_w", RNewW: "new_w", RClosureW: "closure_w",
+	RPostInc: "post_inc", RPostDec: "post_dec", RGetLength: "get_length",
 }
 
 func (op ROp) String() string {
@@ -300,7 +330,7 @@ func (rc *RegCode) Format(pc int) string {
 		return s
 	}
 	switch op := w.Op(); op {
-	case RMove, RInc, RDec:
+	case RMove, RInc, RDec, RPostInc, RPostDec, RGetLength:
 		return fmt.Sprintf("%s %s, %s", op, r(w.A()), r(w.B()))
 	case RLoadInt:
 		return fmt.Sprintf("%s %s, %d", op, r(w.A()), int32(w.BC()))
@@ -352,7 +382,13 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s, %d %s", op, r(w.A()), w.SB(), target(w.SC()))
 	case RJmpCmpI:
 		return fmt.Sprintf("%s %s %s, %d %s", op, cmp(), r(w.A()), w.SB(), target(w.SC()))
-	case RCall, RNew, RCallW:
+	case RGetIndexI:
+		return fmt.Sprintf("%s %s, %s[%d]", op, r(w.A()), r(w.B()), w.C())
+	case RSetIndexI:
+		return fmt.Sprintf("%s %s[%d], %s", op, r(w.A()), w.B(), r(w.C()))
+	case RClosureW:
+		return fmt.Sprintf("%s %s, k%d", op, r(w.A()), w.BC())
+	case RCall, RNew, RCallW, RCallMW, RNewW:
 		return fmt.Sprintf("%s %s = %s(%d)", op, r(w.B()), r(w.A()), w.X())
 	case RCallMethod:
 		return fmt.Sprintf("%s %s = %s.%s(%d)", op, r(w.B()), r(w.A()), r(w.A()+1), w.X())
