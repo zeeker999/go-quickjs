@@ -273,6 +273,9 @@ enter:
 	if nf.thisRef != nil || nf.withScopes != nil || nf.evalVars != nil || nf.native != "" || nf.args != nil {
 		regClearFrame(nf)
 	}
+	if cl.fn.UsesNewTarget {
+		nf.newTarget = Undefined
+	}
 	if rc.args {
 		nf.args = kept
 		p := int(rc.params)
@@ -333,7 +336,7 @@ func (r *Runtime) regNoteCall(f *frame, s uint16, o *Object, cl *closure, rc *re
 // frame's last user may have left set, cleared where they are. Its this is
 // the window's register 1, which regClosure gives the frame when it makes
 // an arrow that captures it.
-func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int, args []Value) (Value, error) {
+func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int, args []Value, newTarget Value) (Value, error) {
 	top := base + int(rc.numRegs)
 	if top > len(r.stack) || r.frameDepth >= r.maxFrames {
 		return Undefined, r.throwRangeError("maximum call stack size exceeded")
@@ -380,6 +383,10 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int,
 	if f.thisRef != nil || f.withScopes != nil || f.evalVars != nil || f.native != "" || f.args != nil {
 		regClearFrame(f)
 	}
+	if cl.fn.UsesNewTarget {
+		// What an arrow made here captures of new.target.
+		f.newTarget = newTarget
+	}
 	if rc.args {
 		f.args = kept
 		p := int(rc.params)
@@ -416,8 +423,17 @@ func (r *Runtime) regClosure(f *frame, c *regCode, w bytecode.RInstr, wb int) *O
 	tmpl := f.cl.consts[k]
 	fn := f.cl.fn
 	caps := c.rc.Caps[k]
-	cells := make([]*upvalue, c.ncap)
-	for i, u := range tmpl.template().fn.Upvalues {
+	// The cells newClosureIn reads, kept in the template's code for the next
+	// closure; the upvalues this closure is the first to open, one
+	// allocation, as newClosureIn's room.
+	cells := f.cl.regCells
+	if len(cells) < int(c.ncap) {
+		cells = make([]*upvalue, c.ncap)
+		f.cl.regCells = cells
+	}
+	var room []upvalue
+	ups := tmpl.template().fn.Upvalues
+	for i, u := range ups {
 		if !u.FromParent {
 			continue
 		}
@@ -430,7 +446,11 @@ func (r *Runtime) regClosure(f *frame, c *regCode, w bytecode.RInstr, wb int) *O
 			}
 		}
 		if up == nil {
-			up = &upvalue{slot: slot}
+			if len(room) == 0 {
+				room = make([]upvalue, len(ups)-i)
+			}
+			up, room = &room[0], room[1:]
+			up.slot = slot
 			f.openUpvalues = append(f.openUpvalues, up)
 		}
 		cells[cellOfLocal(fn, int(u.Index))] = up
@@ -441,6 +461,7 @@ func (r *Runtime) regClosure(f *frame, c *regCode, w bytecode.RInstr, wb int) *O
 		f.this = r.stack[wb+1]
 	}
 	o := r.newClosureIn(f, tmpl, cells)
+	clear(cells)
 	if fd := o.fn(); fd != nil {
 		if atomic.LoadPointer(&fd.closure.fn.VMCode) == nil && fd.closure.fn.Reg != nil && regTier.Load() {
 			firstTree(fd.closure.fn)
@@ -480,7 +501,7 @@ func (r *Runtime) regDirect(o *Object, fd *funcData, c *regCode, this Value, arg
 	for i, a := range args[:m] {
 		w[2+i] = a
 	}
-	return r.regEnterW(o, fd.closure, c, base, m, args)
+	return r.regEnterW(o, fd.closure, c, base, m, args, Undefined)
 }
 
 // regPlan gives a closure of a template with register code of the form's
@@ -640,6 +661,33 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		v, err = r.regDelete(cl, regs[w.B()], regs[w.C()])
 	case bytecode.RArguments:
 		v = Obj(r.newArgumentsObject(f))
+	case bytecode.RNewArrayK:
+		// The tree's shared literal (ztree_a0shared.go): the site keeps the
+		// array of the constants, and each array shares its elements until
+		// one is written.
+		s := &cl.ic[w.C()]
+		t := s.p1
+		if t == nil {
+			lit := c.rc.Literals[c.rc.Aux[pc]]
+			vals := make([]Value, len(lit))
+			for i, e := range lit {
+				switch e.Kind {
+				case bytecode.LitConst:
+					vals[i] = cl.consts[e.K]
+				case bytecode.LitTrue:
+					vals[i] = True
+				case bytecode.LitFalse:
+					vals[i] = False
+				case bytecode.LitNull:
+					vals[i] = Null
+				default:
+					vals[i] = Undefined
+				}
+			}
+			t = sharedMade(r, vals)
+			s.p1 = t
+		}
+		v = Obj(sharedShare(r, s, t))
 	case bytecode.RCloseUpvals:
 		if len(f.openUpvalues) != 0 {
 			r.closeUpvaluesFrom(f, int(w.A()))
@@ -764,7 +812,7 @@ func (r *Runtime) regConstruct(callee Value, base, argc int) (Value, error) {
 		}
 	}
 	r.stack[base+1] = this
-	res, err := r.regEnterW(o, cl, rc, base, argc, args)
+	res, err := r.regEnterW(o, cl, rc, base, argc, args, Obj(o))
 	if err != nil {
 		return Undefined, err
 	}
@@ -934,6 +982,12 @@ func (r *Runtime) regDefineField(cl *closure, w bytecode.RInstr, obj, v Value) e
 
 // regNewObject is new_object.
 func (r *Runtime) regNewObject(cl *closure, w bytecode.RInstr) *Object {
+	// With the room the site's objects came to need, as the tree tier makes
+	// them (outgrowProps learns it), where the literal says less.
 	root := r.shapes.siteRoot(&cl.ic[w.C()], r.proto.object)
-	return newShapedLiteral(root.orRoot(ClassObject, r.proto.object), ClassObject, int(w.B()))
+	m := int(w.B())
+	if root != nil && int(root.slack) > m {
+		m = int(root.slack)
+	}
+	return newShapedLiteral(root.orRoot(ClassObject, r.proto.object), ClassObject, m)
 }

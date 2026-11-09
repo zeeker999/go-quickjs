@@ -72,6 +72,7 @@ type gen struct {
 	caps     [][]uint16
 	siteName []uint32
 	auxes    map[int]uint32
+	literals [][]bytecode.LitElem
 	calls    int
 	err      string
 }
@@ -1819,6 +1820,15 @@ func (g *gen) array(n *ast.ArrayLit, dst int) int {
 		g.fail("too many elements")
 		return g.dest(dst)
 	}
+	if elems, ok := g.constantElements(n.Elements); ok {
+		// A literal of constants: its arrays share them until one is
+		// written, as the stack form's do.
+		g.literals = append(g.literals, elems)
+		d := g.dest(dst)
+		at := g.emit(bytecode.MakeR(bytecode.RNewArrayK, 0, r16(d), uint16(len(elems)), g.site(0)))
+		g.aux(at, uint32(len(g.literals)-1))
+		return d
+	}
 	base := g.allocN(len(n.Elements))
 	for i, e := range n.Elements {
 		if e == nil {
@@ -1834,6 +1844,44 @@ func (g *gen) array(n *ast.ArrayLit, dst int) int {
 	d := g.dest(dst)
 	g.emit(bytecode.MakeR(bytecode.RNewArray, 0, r16(d), r16(base), uint16(len(n.Elements))))
 	return d
+}
+
+// constantElements is a literal's elements as constants, where each is a
+// number, a negated number, a string, a boolean, null or undefined.
+func (g *gen) constantElements(els []ast.Expr) ([]bytecode.LitElem, bool) {
+	if len(els) == 0 {
+		return nil, false
+	}
+	out := make([]bytecode.LitElem, len(els))
+	for i, e := range els {
+		switch v := e.(type) {
+		case *ast.NumberLit:
+			out[i] = bytecode.LitElem{K: g.constIdx(bytecode.Constant{Kind: bytecode.ConstNumber, Num: v.Value})}
+		case *ast.Unary:
+			n, ok := v.Operand.(*ast.NumberLit)
+			if !ok || v.Op != "-" {
+				return nil, false
+			}
+			out[i] = bytecode.LitElem{K: g.constIdx(bytecode.Constant{Kind: bytecode.ConstNumber, Num: -n.Value})}
+		case *ast.StringLit:
+			out[i] = bytecode.LitElem{K: g.constIdx(bytecode.Constant{Kind: bytecode.ConstString, Str: v.Value})}
+		case *ast.BoolLit:
+			out[i] = bytecode.LitElem{Kind: bytecode.LitFalse}
+			if v.Value {
+				out[i].Kind = bytecode.LitTrue
+			}
+		case *ast.NullLit:
+			out[i] = bytecode.LitElem{Kind: bytecode.LitNull}
+		case *ast.Ident:
+			if res, ok := g.rec.Read[v]; !ok || res.Kind != ResLiteral || res.Lit != nil {
+				return nil, false
+			}
+			out[i] = bytecode.LitElem{Kind: bytecode.LitUndefined}
+		default:
+			return nil, false
+		}
+	}
+	return out, true
 }
 
 // closure makes a closure of the nested function lit into register d.
@@ -1904,7 +1952,7 @@ func (g *gen) finish() *bytecode.RegCode {
 		}
 	}
 	rc := &bytecode.RegCode{
-		Aux: aux, UsesArguments: g.fn.UsesArguments || g.fn.MakesArguments,
+		Aux: aux, Literals: g.literals, UsesArguments: g.fn.UsesArguments || g.fn.MakesArguments,
 		Code: g.code, NumRegs: g.max + 1, SrcPC: src, SiteName: g.siteName, This: -1,
 		Wide: true, Params: g.fn.ParamCount, Inits: g.inits, Caps: g.caps, CallSites: g.calls,
 	}

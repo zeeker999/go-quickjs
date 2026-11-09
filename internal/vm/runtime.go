@@ -748,6 +748,9 @@ type closureCode struct {
 	// regCalls are the register code's call caches (regCallW), made at its
 	// first call.
 	regCalls []regCallCache
+	// regCells is the cells regClosure hands newClosureIn, kept for the
+	// next closure the template's register code makes.
+	regCells []*upvalue
 }
 
 // closure is a function template paired with the upvalues it captured.

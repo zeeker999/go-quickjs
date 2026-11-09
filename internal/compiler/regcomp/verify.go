@@ -88,6 +88,15 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			ok = reg(a)
 		case bytecode.RIn, bytecode.RDelete:
 			ok = reg(a) && reg(b) && reg(c)
+		case bytecode.RNewArrayK:
+			ok = reg(a) && site(c) && pc < len(rc.Aux) && int(rc.Aux[pc]) < len(rc.Literals) && len(rc.Literals[rc.Aux[pc]]) == int(b) && b > 0
+			if ok {
+				for _, e := range rc.Literals[rc.Aux[pc]] {
+					if e.Kind > bytecode.LitUndefined || e.Kind == bytecode.LitConst && int(e.K) >= len(fn.Constants) {
+						ok = false
+					}
+				}
+			}
 		case bytecode.RInstanceOf:
 			ok = reg(a) && reg(b) && reg(c) && pc < len(rc.Aux) && rc.Aux[pc] != 0 && int(rc.Aux[pc]) <= int(fn.PropSites)
 		case bytecode.RRetUndef:
