@@ -220,8 +220,9 @@ func codeStates(c *mir.Code) string {
 var addressLike = regexp.MustCompile(`[0-9]{10,15}`)
 
 // startCodeDump has the JIT write every function's code to path as it is
-// compiled, a JSON line each, until the process exits.
-func startCodeDump(path string) {
+// compiled, a JSON line each, until the process exits. It returns the file,
+// which a test closes so that its directory can be removed.
+func startCodeDump(path string) *os.File {
 	f, err := os.Create(path)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "v8bench:", err)
@@ -270,6 +271,7 @@ func startCodeDump(path string) {
 			w.Flush()
 		}
 	}
+	return f
 }
 
 // Report prints what the JIT did while the benchmark ran: its counters,

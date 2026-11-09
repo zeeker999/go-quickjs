@@ -25,7 +25,8 @@ func TestNativeCodeDump(t *testing.T) {
 		vm.JITCodeHook, vm.JITCrossHook, mir.Annotate = hook, cross, annotate
 	})
 	path := filepath.Join(t.TempDir(), "code.jsonl")
-	startCodeDump(path)
+	f0 := startCodeDump(path)
+	t.Cleanup(func() { f0.Close() })
 	f, err := ssa.Build(&ir.Program{
 		Code: []ir.Instruction{{Op: ir.Return, Left: ir.Literal(ir.Float(1))}},
 		Maps: []ir.StateMap{{}},
