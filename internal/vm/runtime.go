@@ -742,6 +742,9 @@ type closureCode struct {
 	// realm, by the tree builder's count of them (arrayEmptyNode); nil
 	// where one has not run.
 	arrays []*arrayRoom
+	// reg is the template's register code, once a call has found it has
+	// some, for the register interpreter's calls (see zzreg_call.go).
+	reg *regCode
 }
 
 // closure is a function template paired with the upvalues it captured.
