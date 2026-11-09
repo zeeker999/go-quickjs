@@ -268,6 +268,18 @@ func (g *gen) site(name uint32) uint16 {
 	return uint16(s)
 }
 
+// stackSite is the cache site of the stack form's property read in, a
+// get_prop whose A is its name and B its site, for a read of the register
+// form that shares it.
+func (g *gen) stackSite(in bytecode.Instr) uint16 {
+	if in.B == 0 || in.B >= uint32(len(g.siteName)) || in.A >= uint32(len(g.fn.Names)) {
+		g.fail("a stack site out of range")
+		return 0
+	}
+	g.siteName[in.B] = in.A
+	return uint16(in.B)
+}
+
 func (g *gen) nameIdx(name string) uint32 {
 	if i, ok := g.names[name]; ok {
 		return i
@@ -325,7 +337,7 @@ func (g *gen) body() {
 		}
 	}
 	// The arguments object, made as the function starts, in its binding.
-	if g.fn.UsesArguments || g.fn.MakesArguments {
+	if (g.fn.UsesArguments || g.fn.MakesArguments) && !g.fn.ForwardsArguments {
 		made := false
 		for slot, l := range g.fn.Locals {
 			if l.Name == "arguments" && slot < len(g.slotReg) && g.slotReg[slot] >= 0 {
@@ -358,11 +370,9 @@ func (g *gen) body() {
 // backend compiles: an object made as the function starts, in the binding
 // the stack form gives it, of a function with simple parameters.
 func simpleArguments(fn *bytecode.Function) bool {
-	if fn.ForwardsArguments {
-		// Only handed on to apply, which the stack form does without the
-		// object: making it would cost every call an allocation.
-		return false
-	}
+	// A function whose arguments object is only handed on to apply
+	// (ForwardsArguments) has no object made: each such call is an
+	// apply_args, which hands on the frame's arguments as passed.
 	if fn.HasRest || !fn.HasSimpleParams || fn.ParamsAreLexical || fn.Generator || fn.Async ||
 		fn.HasDirectEval || fn.Debug != nil || fn.TopLevel || fn.PrivateSites != 0 || fn.HasTailCall {
 		return false
@@ -1066,6 +1076,11 @@ func (g *gen) ident(n *ast.Ident, dst int) int {
 	}
 	switch res.Kind {
 	case ResLocal, ResLocalCheck:
+		if g.fn.ForwardsArguments && g.isArguments(n) {
+			// Never made: only apply_args hands the arguments on.
+			g.fail("the arguments object of a function that forwards it")
+			return g.dest(dst)
+		}
 		r := int(g.slotReg[res.Index])
 		if res.Kind == ResLocalCheck {
 			g.at(int(n.Start))
@@ -1747,6 +1762,11 @@ func (g *gen) call(n *ast.Call, dst int) int {
 		g.fail("an optional call or too many arguments")
 		return g.dest(dst)
 	}
+	if m, ok := n.Callee.(*ast.Member); ok && g.fn.ForwardsArguments && len(n.Args) == 2 && g.isArguments(n.Args[1]) {
+		if name, ok := propName(m); ok && name == "apply" && !m.Computed && !m.Optional {
+			return g.applyArgs(n, m, dst)
+		}
+	}
 	argc := len(n.Args)
 	w := g.allocN(2 + argc)
 	op := bytecode.RCallW
@@ -1796,6 +1816,51 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	}
 	g.at(int(n.Start))
 	g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), g.callSite()))
+	return d
+}
+
+// isArguments reports whether e is the function's own arguments binding.
+func (g *gen) isArguments(e ast.Expr) bool {
+	id, ok := e.(*ast.Ident)
+	if !ok || id.Name != "arguments" {
+		return false
+	}
+	res, ok := g.rec.Read[id]
+	return ok && (res.Kind == ResLocal || res.Kind == ResLocalCheck) && int(res.Index) < len(g.fn.Locals) &&
+		g.fn.Locals[res.Index].Name == "arguments"
+}
+
+// applyArgs compiles f.apply(x, arguments) of a function whose arguments
+// object is never made: f, what f.apply reads and x in three registers,
+// and apply_args, which hands on the frame's arguments as passed.
+func (g *gen) applyArgs(n *ast.Call, m *ast.Member, dst int) int {
+	if _, ok := m.Object.(*ast.Super); ok {
+		g.fail("super")
+		return g.dest(dst)
+	}
+	w := g.allocN(3)
+	if code := g.fn.Code; g.fn.Leaf == bytecode.LeafForward {
+		// this.k.apply(this, arguments), the whole body: a construction
+		// answers it without a frame (leafForward), from the caches of the
+		// stack form's two reads, which the reads here share so that a run
+		// of the body fills them.
+		g.at(m.Object.Pos())
+		g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(w), regThis, g.stackSite(code[1])))
+		g.at(m.Property.Pos())
+		g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(w+1), r16(w), g.stackSite(code[2])))
+		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(w+2), regThis, 0))
+	} else {
+		g.into(m.Object, w)
+		g.at(m.Property.Pos())
+		g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(w+1), r16(w), g.site(g.nameIdx("apply"))))
+		g.into(n.Args[0], w+2)
+	}
+	d := dst
+	if d < 0 {
+		d = w
+	}
+	g.at(int(n.Start))
+	g.emit(bytecode.MakeR(bytecode.RApplyArgs, 0, r16(d), r16(w), 0))
 	return d
 }
 
@@ -2007,8 +2072,9 @@ func (g *gen) finish() *bytecode.RegCode {
 		}
 	}
 	rc := &bytecode.RegCode{
-		Aux: aux, Literals: g.literals, UsesArguments: g.fn.UsesArguments || g.fn.MakesArguments,
-		Code: g.code, NumRegs: g.max + 1, SrcPC: src, SiteName: g.siteName, This: -1,
+		Aux: aux, Literals: g.literals, UsesArguments: (g.fn.UsesArguments || g.fn.MakesArguments) && !g.fn.ForwardsArguments,
+		ForwardsArguments: g.fn.ForwardsArguments,
+		Code:              g.code, NumRegs: g.max + 1, SrcPC: src, SiteName: g.siteName, This: -1,
 		Wide: true, Params: g.fn.ParamCount, Inits: g.inits, Caps: g.caps, CallSites: g.calls,
 	}
 	if why := Verify(rc, g.fn); why != "" {

@@ -162,7 +162,7 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 	c := &regCode{
 		code: unsafe.Pointer(unsafe.SliceData(rc.Code)), src: rc.SrcPC, siteName: rc.SiteName,
 		numRegs: int32(rc.NumRegs), params: int32(rc.Params), inits: int32(rc.Inits),
-		coerceThis: fn.CoerceThis, rc: rc, fn: fn, wide: true, ncap: int32(ncap), args: rc.UsesArguments,
+		coerceThis: fn.CoerceThis, rc: rc, fn: fn, wide: true, ncap: int32(ncap), args: rc.UsesArguments || rc.ForwardsArguments,
 	}
 	switch {
 	case fn.Leaf == bytecode.LeafPure && !fn.PureCalls:
@@ -910,15 +910,14 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			goto slow
 		case bytecode.RThrow:
 			return Undefined, r.regThrow(f, c, pc-1, regs)
-		case bytecode.RNewW, bytecode.RClosureW, bytecode.RInstanceOf, bytecode.RIn, bytecode.RDelete, bytecode.RArguments, bytecode.RNewArrayK:
+		case bytecode.RNewW, bytecode.RClosureW, bytecode.RInstanceOf, bytecode.RIn, bytecode.RDelete, bytecode.RArguments, bytecode.RNewArrayK,
+			bytecode.RApplyArgs:
 			goto slow
 		// Every value of the switch is a case, so that it is a jump table
 		// that needs no range check: Go makes one only of a switch whose
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile.
-		case 101:
-			goto invalid
 		case 102:
 			goto invalid
 		case 103:

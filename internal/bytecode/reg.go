@@ -273,6 +273,11 @@ const (
 	// property says where the value to add to is too.
 	RAddProp
 	RAddPropI
+	// RApplyArgs: R[A] = R[B+1].call(R[B], R[B+2], ...the frame's
+	// arguments): f.apply(x, arguments) of a function whose arguments object
+	// is never made (Function.ForwardsArguments), the arguments as passed
+	// handed on without it; R[B] is f and R[B+1] what f.apply read.
+	RApplyArgs
 
 	// RInvalid is the last operation there can be, which no code holds:
 	// the interpreter's switch has a case for it so that its jump table
@@ -339,6 +344,9 @@ type RegCode struct {
 	// UsesArguments says the code makes the arguments object, whose frame
 	// keeps the arguments as passed (RArguments).
 	UsesArguments bool
+	// ForwardsArguments says a frame keeps its arguments as passed for
+	// RApplyArgs, with no arguments object made.
+	ForwardsArguments bool
 }
 
 var rOpNames = [...]string{
@@ -366,7 +374,7 @@ var rOpNames = [...]string{
 	RGetIndexI: "get_index_imm", RSetIndexI: "set_index_imm", RCallMW: "call_method_w", RNewW: "new_w", RClosureW: "closure_w",
 	RPostInc: "post_inc", RPostDec: "post_dec", RGetLength: "get_length",
 	RJEq: "jeq", RJNe: "jne", RJEqI: "jeq_imm", RJNeI: "jne_imm", RJNull: "jnull", RJNotNull: "jnotnull",
-	RThrow: "throw", RInstanceOf: "instanceof", RIn: "in", RDelete: "delete", RArguments: "arguments", RNewArrayK: "new_array_k", RAddProp: "add_prop", RAddPropI: "add_prop_imm",
+	RThrow: "throw", RInstanceOf: "instanceof", RIn: "in", RDelete: "delete", RArguments: "arguments", RNewArrayK: "new_array_k", RAddProp: "add_prop", RAddPropI: "add_prop_imm", RApplyArgs: "apply_args",
 }
 
 func (op ROp) String() string {
@@ -415,6 +423,8 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s name%d, %s", op, r(w.A()), w.C(), r(w.B()))
 	case RInstanceOf, RIn, RDelete:
 		return fmt.Sprintf("%s %s, %s, %s", op, r(w.A()), r(w.B()), r(w.C()))
+	case RApplyArgs:
+		return fmt.Sprintf("%s %s = %s.apply(%s, %s, arguments)", op, r(w.A()), r(w.B()+1), r(w.B()), r(w.B()+2))
 	case RThrow, RArguments:
 		return fmt.Sprintf("%s %s", op, r(w.A()))
 	case RGetIndex, RAdd, RSub, RMul, RBitAnd, RBitOr, RBitXor, RShl, RShr, RUShr:

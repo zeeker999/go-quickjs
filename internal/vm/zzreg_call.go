@@ -246,9 +246,12 @@ enter:
 	}
 	var kept []Value
 	if rc.args {
+		ka := len(r.argStack)
 		// The arguments as passed, past the parameters too, which the
-		// bindings' registers are about to take.
-		kept = append([]Value(nil), r.stack[base+2:base+2+argc]...)
+		// bindings' registers are about to take: kept on the runtime's
+		// argument stack, as applyCall keeps apply's, until the call returns.
+		r.argStack = append(r.argStack, r.stack[base+2:base+2+argc]...)
+		kept = r.argStack[ka:len(r.argStack):len(r.argStack)]
 	}
 	for i := base + 2 + min(argc, int(rc.params)); i < base+2+int(rc.params)+int(rc.inits); i++ {
 		r.stack[i] = Undefined
@@ -289,6 +292,10 @@ enter:
 	}
 	r.frameDepth--
 	r.stackTop = saved
+	if a := nf.args; a != nil {
+		// The arguments kept for it, the last on the argument stack.
+		r.argStack = r.argStack[:len(r.argStack)-len(a)]
+	}
 	return v, err
 }
 
@@ -355,9 +362,12 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int,
 	}
 	var kept []Value
 	if rc.args {
+		ka := len(r.argStack)
 		// Before the bindings take the window past the parameters, which
-		// args may be.
-		kept = append([]Value(nil), args...)
+		// args may be; kept on the runtime's argument stack until the call
+		// returns.
+		r.argStack = append(r.argStack, args...)
+		kept = r.argStack[ka:len(r.argStack):len(r.argStack)]
 	}
 	// Parameters no argument was given for, and the bindings past them.
 	for i := base + 2 + min(argc, int(rc.params)); i < base+2+int(rc.params)+int(rc.inits); i++ {
@@ -400,6 +410,10 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int,
 	}
 	r.frameDepth--
 	r.stackTop = saved
+	if a := f.args; a != nil {
+		// The arguments kept for it, the last on the argument stack.
+		r.argStack = r.argStack[:len(r.argStack)-len(a)]
+	}
 	return v, err
 }
 
@@ -661,6 +675,9 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		v, err = r.regDelete(cl, regs[w.B()], regs[w.C()])
 	case bytecode.RArguments:
 		v = Obj(r.newArgumentsObject(f))
+	case bytecode.RApplyArgs:
+		b := int(w.B())
+		v, err = r.regApplyArgs(f, regs[b], regs[b+1], regs[b+2])
 	case bytecode.RAddProp, bytecode.RAddPropI:
 		b := Int32(w.SB())
 		if w.Op() == bytecode.RAddProp {
@@ -1020,4 +1037,27 @@ func (r *Runtime) regNewObject(cl *closure, w bytecode.RInstr) *Object {
 		m = int(root.slack)
 	}
 	return newShapedLiteral(root.orRoot(ClassObject, r.proto.object), ClassObject, m)
+}
+
+// regApplyArgs is apply_args: target.apply(this, the frame's arguments),
+// which the built-in apply makes with the arguments as passed, no object
+// made; any other apply is given one.
+func (r *Runtime) regApplyArgs(f *frame, target, apply, this Value) (Value, error) {
+	if !apply.IsObject() || apply.Object() != r.applyFn {
+		return r.call(apply, target, []Value{this, Obj(r.newArgumentsObject(f))})
+	}
+	args := f.args
+	if f.cl.fn.MappedArguments {
+		n := min(f.cl.fn.ParamCount, len(args), len(f.locals))
+		for i := 0; i < n; i++ {
+			if !f.locals[i].sameBits(args[i]) {
+				// A parameter has been assigned, which a mapped object
+				// would show.
+				args = append([]Value(nil), args...)
+				copy(args, f.locals[:n])
+				break
+			}
+		}
+	}
+	return r.applyCall(target, this, args)
 }
