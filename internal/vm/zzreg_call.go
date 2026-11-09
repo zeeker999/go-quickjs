@@ -153,6 +153,24 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) (Value, err
 		goto general
 	}
 	o = callee.Object()
+	// The function the site called last, and what calling it took.
+	if calls := f.cl.regCalls; uint(w.C()) < uint(len(calls)) {
+		if e := &calls[w.C()]; e.callee == o {
+			cl, rc = e.cl, e.rc
+			switch {
+			case e.kind == regCallPlain && !method:
+				r.stack[base+1] = e.this
+				goto enter
+			case e.kind == regCallArrow:
+				r.stack[base+1] = e.this
+				goto enter
+			case e.kind == regCallPlain && !rc.coerceThis:
+				goto enter
+			}
+		}
+	} else if f.cl.regCalls == nil && c.rc.CallSites > 0 {
+		f.cl.regCalls = make([]regCallCache, c.rc.CallSites)
+	}
 	if fd := o.fn(); fd != nil && fd.closure != nil && !fd.bound {
 		cl = fd.closure
 		if rc = cl.reg; rc == nil {
@@ -169,9 +187,11 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) (Value, err
 				} else if rc.coerceThis && !r.stack[base+1].IsObject() {
 					goto general
 				}
+				r.regNoteCall(f, w.C(), o, cl, rc, regCallPlain)
 				goto enter
 			} else if fd.arrow && x.lexThisRef == nil && x.rare == nil {
 				r.stack[base+1] = x.lexThis
+				r.regNoteCall(f, w.C(), o, cl, rc, regCallArrow)
 				goto enter
 			}
 		}
@@ -185,6 +205,24 @@ general:
 		return r.regCall(callee, this, r.stack[base+2:base+2+argc])
 	}
 enter:
+	// A body that only reads or writes a property of its this, or computes
+	// a value calling nothing, is answered without a frame, as callDirect
+	// answers it (leafCall, pureCall): its frame would cost more than its
+	// body. A pure body that calls is run as register code, faster than
+	// the frameless evaluator's calls.
+	if leaf := cl.fn.Leaf; leaf != bytecode.LeafNone {
+		if leaf == bytecode.LeafPure {
+			if !cl.fn.PureCalls && cl.pureMiss < pureMissLimit {
+				if v, ok := r.pureCall(o.fn(), r.stack[base+1], r.stack[base+2:base+2+argc]); ok {
+					return v, nil
+				}
+			}
+		} else if this := r.stack[base+1]; this.IsObject() {
+			if v, ok := r.leafCall(cl, this.Object(), r.stack[base+2:base+2+argc]); ok {
+				return v, nil
+			}
+		}
+	}
 	// regEnterW, written out: called, it is one more call a JavaScript call
 	// makes.
 	top := base + int(rc.numRegs)
@@ -235,6 +273,41 @@ enter:
 	r.frameDepth--
 	r.stackTop = saved
 	return v, err
+}
+
+// regCallCache is a call site's cache: the function it called last, its
+// closure and register code, how it was called, and the this a call that
+// is not a method's gives it.
+type regCallCache struct {
+	callee *Object
+	cl     *closure
+	rc     *regCode
+	this   Value
+	kind   uint8
+}
+
+const (
+	regCallPlain = 1 + iota
+	regCallArrow
+)
+
+// regNoteCall remembers at call site s of f's code that it called o.
+func (r *Runtime) regNoteCall(f *frame, s uint16, o *Object, cl *closure, rc *regCode, kind uint8) {
+	calls := f.cl.regCalls
+	if int(s) >= len(calls) {
+		return
+	}
+	e := &calls[s]
+	e.callee, e.cl, e.rc, e.kind = o, cl, rc, kind
+	switch kind {
+	case regCallArrow:
+		e.this = o.fn().extra.lexThis
+	default:
+		e.this = Undefined
+		if rc.coerceThis {
+			e.this = r.globalThis
+		}
+	}
 }
 
 // regEnterW runs a register function of the form's own layout in the
@@ -646,7 +719,9 @@ func (r *Runtime) regGetProp(cl *closure, c *regCode, w bytecode.RInstr, obj Val
 	name := cl.names[c.siteName[site]]
 	if obj.IsObject() {
 		o := obj.Object()
-		if v, ok := plainOwn(o, name); ok {
+		// A plain own property of a small table, remembered for the loop's
+		// check of the next object of its layout (ownScan).
+		if v, ok := ownScan(&cl.ic[site], o, name); ok {
 			return v, nil
 		}
 		if v, ok, err := r.cachedGet(&cl.ic[site], o, name); ok {
@@ -661,6 +736,9 @@ func (r *Runtime) regGetMethod(cl *closure, c *regCode, w bytecode.RInstr, obj V
 	site := w.C()
 	name := cl.names[c.siteName[site]]
 	if obj.IsObject() {
+		if v, ok := ownScan(&cl.ic[site], obj.Object(), name); ok {
+			return v, nil
+		}
 		if v, ok := r.cachedProp(&cl.ic[site], obj.Object(), name); ok {
 			return v, nil
 		}

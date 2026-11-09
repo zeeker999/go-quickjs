@@ -77,6 +77,7 @@ type gen struct {
 	names    map[string]uint32
 	caps     [][]uint16
 	siteName []uint32
+	calls    int
 	err      string
 }
 
@@ -1529,8 +1530,18 @@ func (g *gen) call(n *ast.Call, dst int) int {
 		d = w
 	}
 	g.at(int(n.Start))
-	g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), 0))
+	g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), g.callSite()))
 	return d
+}
+
+// callSite is a call's cache: the function it called last, and how.
+func (g *gen) callSite() uint16 {
+	s := g.calls
+	g.calls++
+	if s >= limit16 {
+		g.fail("a call site past 16 bits")
+	}
+	return uint16(s)
 }
 
 func (g *gen) newExpr(n *ast.New, dst int) int {
@@ -1670,7 +1681,7 @@ func (g *gen) finish() *bytecode.RegCode {
 	}
 	rc := &bytecode.RegCode{
 		Code: g.code, NumRegs: g.max + 1, SrcPC: src, SiteName: g.siteName, This: -1,
-		Wide: true, Params: g.fn.ParamCount, Inits: g.inits, Caps: g.caps,
+		Wide: true, Params: g.fn.ParamCount, Inits: g.inits, Caps: g.caps, CallSites: g.calls,
 	}
 	if why := Verify(rc, g.fn); why != "" {
 		if trace {

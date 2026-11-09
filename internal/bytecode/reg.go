@@ -282,6 +282,9 @@ type RegCode struct {
 	// Caps is, for each constant that is a nested function, the register
 	// of each of its upvalues taken from this function's bindings.
 	Caps [][]uint16
+	// CallSites is how many call_w and call_method_w the code has, each
+	// numbered by its C: its cache of the function it called last.
+	CallSites int
 }
 
 var rOpNames = [...]string{

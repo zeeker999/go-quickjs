@@ -69,7 +69,9 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			ok = reg(a) && site(c)
 		case bytecode.RNewArray:
 			ok = reg(a) && int(b)+int(c) <= n
-		case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW:
+		case bytecode.RCallW, bytecode.RCallMW:
+			ok = reg(b) && int(a)+int(w.X())+2 <= n && int(c) < rc.CallSites
+		case bytecode.RNewW:
 			ok = reg(b) && int(a)+int(w.X())+2 <= n
 		case bytecode.RJmp:
 			ok = in(pc, int64(int32(w.BC())))

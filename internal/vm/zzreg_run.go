@@ -361,8 +361,14 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RGetProp, bytecode.RGetMethod:
 			if o := regs[w.B()]; o.IsObject() {
 				obj := o.Object()
-				if s := &cl.ic[w.C()]; obj.shape == s.ownShape {
+				s := &cl.ic[w.C()]
+				if obj.shape == s.ownShape {
 					regs[w.A()] = obj.valAt(int(s.idx))
+					continue
+				}
+				// A prototype's data property the site remembers: a method.
+				if h := s.holder(obj); h != nil && !s.getter {
+					regs[w.A()] = h.valAt(int(s.idx))
 					continue
 				}
 			}
