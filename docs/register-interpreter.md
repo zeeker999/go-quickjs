@@ -587,7 +587,54 @@ What the measurements found, against the design:
 - **Fusions the stack form has are owed.** `prop_update` (`o.a += j`) is
   three instructions a statement here against one tree node, 16.6 against
   6.4 ns; the backend needs the update of a place as one operation, as the
-  tree has it.
+  tree has it. (Done since: `add_prop`, 5.8 ns.)
+
+#### Raw int32 registers (step 5, designed, not built)
+
+Index-heavy code pays a float conversion at every element access: a key
+held as a float64 is converted to an index, and an int32 result back to a
+float. The tree tier avoids it by keeping an int32 it has proven in a Go
+variable. The register form does the same by static typing in the backend,
+not by a new tag in `Value` -- an int32 tag cost floats 58% when it was
+tried (2026-10-02).
+
+- **What a register slot holds.** A register is a `Value`: a float64 word
+  and a pointer word. A register the backend has proven to hold an int32
+  for the whole of its live range -- a loop counter, an index, a bitwise
+  result -- may hold it raw: the int32 in the number word, the pointer word
+  nil. Which registers are raw is a fact of the code, not of the value: no
+  instruction asks.
+- **Why the collector is safe.** The collector scans only the pointer
+  word, which in a raw register is nil, as in a number's. The number word
+  is never read as a pointer.
+- **Who may read one.** Only operations specialised for raw operands --
+  `add_i32`, `inc_i32`, compare-and-branch on raw int32s, `get_index` and
+  `set_index` with a raw key -- read a raw register. Every generic reader
+  needs the conversion to a `Value` first (`box_i32`): a call's window, a
+  return, a store to a property or an element, a move into a `Value`
+  register, any slow path's operand. A binding a closure captures, a
+  generator's window, a debugger's scope, a direct eval's binding and a
+  stack trace's frame are never raw: only registers private to the frame's
+  straight code qualify.
+- **The verifier enforces it.** It tracks each register's kind, `Value` or
+  raw int32, along every path: kinds propagate over jumps, both sides of a
+  join at a label or a handler's entry must agree (a mixed join is
+  rejected), and code where a generic reader can see a raw register is
+  rejected. An instruction on raw registers that can call out -- a back
+  edge's interrupt check, a stack overflow, a throw -- may have no raw
+  register live where the callee or the unwinder reads the frame
+  generically. The interpreter's correctness rests on the verifier, not on
+  the backend's care.
+- **Overflow.** An int32 operation whose result does not fit -- past 2^31,
+  or -0 from a multiplication -- leaves the raw form through a boxed
+  `Value` register the backend reserves for it, and continues on the
+  generic path. Until that path exists the backend proves int32-ness only
+  for what cannot overflow: masks, shifts, `| 0`, counters bounded by an
+  int32 limit.
+- **Tested by difference.** A differential test runs the micro-benchmark
+  files, the V8 suite's programs and generated int32 arithmetic -- overflow
+  past int32, -0, NaN, shifts by 32 or more, `>>> 0`, mixes with doubles --
+  with the register tier on and off, and compares every result.
 
 ### Stage 2: frames
 
