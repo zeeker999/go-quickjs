@@ -22,7 +22,10 @@ const (
 	layoutPadNB  = 584
 	layoutPadNGB = -1
 	layoutPadNMB = -1
-	layoutPadNS  = 575
+	layoutPadNF  = 580
+	layoutPadNGF = -1
+	layoutPadNMF = -1
+	layoutPadNS  = 580
 	layoutPadNGS = -1
 	layoutPadNMS = 274
 	layoutPadNT  = 584
