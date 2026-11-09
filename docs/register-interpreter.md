@@ -373,11 +373,14 @@ the ones Go allows:
   out of the loop is read from a variable (above).
 
 What remains is Go's: a register store of a `Value` is a write-barrier
-check, the loop's pc and instruction are still saved at the dispatch where
-a case's register pressure needs them, and every case ends in a jump back to
-the one indirect branch. The kernels put the loop at 4.1 ns an instruction
-against the comparison engine's 3.3 on `am3`; stage 1 closes that before it
-adds coverage.
+check, the loop's instruction word is still saved at the dispatch where a
+case's register pressure needs it, and every case ends in a jump back to
+the one indirect branch. A case that would call with the pc live -- a
+jump's truthiness or `===` of strings, a throw's `pc-1` -- answers what
+needs no call inline and leaves the rest to the compare's slow path, or
+passes the loop's pc rather than `pc-1`, which Go would keep from before
+the increment: with none left, the dispatch stores no pc. `am3` runs at
+3.6 ns an instruction against the comparison engine's 3.3.
 
 ## Frames and calls
 
@@ -609,6 +612,31 @@ What the measurements found, against the design:
   loop's bound a closure captures) and an element's store made in the
   binding its value goes on to take `lin_solve`'s inner loop from 19
   instructions a turn to 13; NavierStokes -10% over the placements.
+- **The pc saved at every dispatch came from three cases.** jfalse and
+  jtrue called `Truthy`, `===` called `StrictEquals`, and the dead-zone
+  check passed `pc-1`. With those answered inline or on the slow path
+  (`regTruth`; `===` of two numbers or of a value compared by its words),
+  Go stores only the instruction word at the dispatch: `crypto_am3` 100 to
+  91 ns, NavierStokes -5%, Crypto -6%, the V8 total -3.9% over two
+  placements.
+- **A call's window is filled by the read of its method.** `get_method_w`
+  reads `o.m` of a receiver in a binding and puts the receiver in the
+  window beside it, the move gone (`method_call` 49 to 45 ns). A leaf
+  callee is answered in `regCallW` before anything of the frame is
+  written, and a pure body the frameless evaluator has given up on leaves
+  the site's leaf kind. `method_call_leaf` stays near 38 ns against the
+  tree's 31: the tree's one node is six register instructions here.
+- **Strict global stores and lazy arguments.** A strict store of a value
+  that runs no code asks at the store whether the name resolves
+  (`set_global` with X=1), as the stack form's folded `set_global_strict`
+  does; `arguments.length` and `arguments[i]` of a function whose object
+  is made on demand are `args_len` and `args_index`. The V8 suite has no
+  refusal left that costs a crossing.
+- **x[i++] as one operation measured slower** (`crypto_am3` 91 to 101 ns at
+  two placements, 4 ns of it the fusion itself) and was dropped. The
+  loop's own alignment moves the small loops: `loop_locals` is 10.4 to 11.3
+  ns with `runReg` at 32 mod 64 and 13.1 at 0, which the placements do not
+  vary.
 
 #### Raw int32 registers (step 5, designed, deferred)
 
