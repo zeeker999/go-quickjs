@@ -4,9 +4,9 @@ A JavaScript engine for Go, reimplementing [QuickJS-NG] in pure Go, with an
 optional, experimental JIT that compiles hot functions to native code, as
 V8's optimizing compilers do.
 
-No cgo, no WebAssembly, no C toolchain, the JIT included. It cross-compiles
-anywhere Go does; the JIT runs on `linux/amd64`, `windows/amd64` and
-`darwin/arm64`, and elsewhere the engine runs without it.
+No cgo, no C toolchain, and no C engine compiled to WebAssembly, the JIT
+included. It cross-compiles anywhere Go does; the JIT runs on `linux/amd64`,
+`windows/amd64` and `darwin/arm64`, and elsewhere the engine runs without it.
 
 ```go
 rt := quickjs.New()
@@ -16,12 +16,13 @@ v, err := rt.Eval(`[1, 2, 3].map(x => x * 2).join("-")`)
 fmt.Println(v) // 2-4-6
 ```
 
-Three things live here:
+Four things live here:
 
 | | |
 |---|---|
 | `quickjs` | the engine, to embed in a Go program |
 | `qjs` | a command that runs JavaScript, with the capabilities you allow |
+| `wasm` | a WebAssembly engine for Go, with WASI, which scripts reach through the `WebAssembly` namespace |
 | `jsregexp` | ECMAScript regular expressions for Go, which RE2 cannot express |
 
 ```
@@ -96,6 +97,34 @@ times as long on average, and 0.30 times with the JIT, though a few take
 about twice as long, the weak collections and an
 array grown by assigning past its end among them. See [Compared with C QuickJS](docs/benchmarks.md#compared-with-c-quickjs).
 
+## WebAssembly
+
+The `wasm` package runs WebAssembly from Go, with an API shaped like
+wazero's, and `wasm/wasi` gives modules WASI preview 1, sandboxed: nothing
+of the process reaches a module unless the host configures it. Scripts reach
+the same engine through the `WebAssembly` namespace, which a host installs
+with `wasm/wasmjs` and `qjs` installs as Node has it. Both are opt-in: the
+JavaScript engine does not import the wasm engine.
+
+```go
+r := wasm.NewRuntime(ctx)
+defer r.Close(ctx)
+
+mod, err := r.Instantiate(ctx, binary)
+results, err := mod.ExportedFunction("add").Call(ctx, api.EncodeI32(40), api.EncodeI32(2))
+```
+
+It implements WebAssembly 3.0 -- GC, exceptions, typed function references,
+tail calls, memory64, multiple memories, SIMD and relaxed SIMD -- and the
+threads proposal, and passes all 65,824 assertions of the spec's tests and
+the threads proposal's, at pinned commits. Invalid modules, failed links and
+traps are reported with V8's messages: validation matches Node 26 over
+345,311 modules with no difference. Functions run in a closure-tree
+interpreter; a baseline JIT compiles hot ones on amd64 (Linux and Windows)
+and arm64 (macOS and Linux), with `-tags quickjs_jit` and
+`wasm.NewRuntimeConfigCompiler()` or a runtime made `WithJIT`. See
+[WebAssembly](docs/wasm.md).
+
 ## Documentation
 
 | | |
@@ -106,7 +135,7 @@ array grown by assigning past its end among them. See [Compared with C QuickJS](
 | [Embedding the engine](docs/embedding.md) | calling Go from JavaScript and JavaScript from Go, compiled programs, realms, modules |
 | [Building a host](docs/hosting.md) | work that finishes on other goroutines, async context, closing a runtime, moving values between runtimes |
 | [The standard library](docs/stdlib.md) | the console, timers, fetch, the filesystem, workers and the node modules, each a capability of its own |
-| [WebAssembly](docs/wasm.md) | the WebAssembly namespace, opt-in, over the module's own wasm engine |
+| [WebAssembly](docs/wasm.md) | the wasm engine, from Go and from JavaScript: WASI, limits, error texts, the JIT, conformance |
 | [Sandboxing](docs/sandboxing.md) | what a script can reach, and how its time and memory are bounded |
 | [Debugging](docs/debugging.md) | Chrome's DevTools and VS Code attached to a runtime, from qjs --inspect or a host |
 | [Design notes](docs/design.md) | how the engine is built, for reading the source |
