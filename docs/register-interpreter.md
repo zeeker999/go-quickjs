@@ -593,6 +593,22 @@ What the measurements found, against the design:
   three instructions a statement here against one tree node, 16.6 against
   6.4 ns; the backend needs the update of a place as one operation, as the
   tree has it. (Done since: `add_prop`, 5.8 ns.)
+- **A call's cost was its general path's.** `regCallW` was 30% of
+  `call_fib`, most of it spills of the paths a cache hit never takes. The
+  hit is now the whole of `regCallW`: the callee's tag and pointer read as
+  words (read as a `Value`, the tag went through a float register and the
+  stack to be compared), the cache's kind saying what to write or check of
+  the this, the frame's facts read from the register code (new.target
+  read, registers captured), and the call's value written to `R[B]` by the
+  call, so the loop keeps nothing of the instruction across it. A first
+  call, a leaf, a frame keeping its arguments and a this to coerce are out
+  of line. `call_fib` 39.2 to 32.3 ns, `method_call` 64.2 to 48.7,
+  Richards -11%, DeltaBlue -20% over the placements.
+- **Index-heavy loops need the tree's fusions.** `x[++i]`
+  (`get_index_pre`), a compare-and-branch with an upvalue (`jle_upval`, a
+  loop's bound a closure captures) and an element's store made in the
+  binding its value goes on to take `lin_solve`'s inner loop from 19
+  instructions a turn to 13; NavierStokes -10% over the placements.
 
 #### Raw int32 registers (step 5, designed, deferred)
 
