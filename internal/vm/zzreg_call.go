@@ -213,9 +213,9 @@ enter:
 	// answers it (leafCall, pureCall): its frame would cost more than its
 	// body. A pure body that calls is run as register code, faster than
 	// the frameless evaluator's calls.
-	if leaf := cl.fn.Leaf; leaf != bytecode.LeafNone {
-		if leaf == bytecode.LeafPure {
-			if !cl.fn.PureCalls && cl.pureMiss < pureMissLimit {
+	if leaf := rc.leaf; leaf != regLeafNone {
+		if leaf == regLeafPure {
+			if cl.pureMiss < pureMissLimit {
 				if v, ok := r.pureCall(o.fn(), r.stack[base+1], r.stack[base+2:base+2+argc]); ok {
 					return v, nil
 				}

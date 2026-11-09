@@ -66,6 +66,10 @@ type regCode struct {
 	ncap int32
 	// args says a frame keeps its arguments as passed, for RArguments.
 	args bool
+	// leaf is what a call may answer without a frame: a pure body that
+	// calls nothing, or one that only reads or writes its this's
+	// properties; read here rather than in the function, a line away.
+	leaf uint8
 	rc   *bytecode.RegCode
 	fn   *bytecode.Function
 }
@@ -160,10 +164,23 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 		numRegs: int32(rc.NumRegs), params: int32(rc.Params), inits: int32(rc.Inits),
 		coerceThis: fn.CoerceThis, rc: rc, fn: fn, wide: true, ncap: int32(ncap), args: rc.UsesArguments,
 	}
+	switch {
+	case fn.Leaf == bytecode.LeafPure && !fn.PureCalls:
+		c.leaf = regLeafPure
+	case fn.Leaf != bytecode.LeafNone && fn.Leaf != bytecode.LeafPure:
+		c.leaf = regLeafThis
+	}
 	t := &tree{reg: c}
 	t.blocks = []tblock{{body: []tstmt{regStmt(c)}, next: regNext}}
 	return t
 }
+
+// The kinds of regCode's leaf.
+const (
+	regLeafNone = iota
+	regLeafPure
+	regLeafThis
+)
 
 // regTrace prints why a function has no register code.
 var regTrace = os.Getenv("QJS_REGTRACE") != ""
