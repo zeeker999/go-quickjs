@@ -547,6 +547,48 @@ made without the generic path, a site filled once), the micro-benchmarks
 and the V8 suite over the placements, and the hot functions unchanged by
 `hotdiff`.
 
+#### Where stage 1 stands
+
+The backend (`internal/compiler/regcomp`) compiles from the AST and the
+record of the stack compiler's resolution (`regrecord.go`), and covers
+nearly every function of Richards, DeltaBlue, NavierStokes, Splay and
+RayTrace; `disasm -reg` lists its code beside the stack form's, 20 to 35%
+fewer instructions in their methods. The stack form is unchanged:
+compilediff against `ce98c3cf` writes the same output. test262 in register
+mode passes what the default build passes on this checkout.
+
+What the measurements found, against the design:
+
+- **The loop's size is a cliff, not a slope.** With the specialised
+  compare-and-branches each carrying its own slow path, `runReg` passed
+  Go's big-function size, and every helper of cost above 20 became a call:
+  `regInt32`, `lexShadows`, `regTruthy`. `crypto_am3` went from 102 to 137
+  ns. The cases now share three tails after the switch -- the slow path, the
+  compare's slow path, the taken jump -- reached by `goto`, and a case is a
+  fast path and a jump.
+- **Store forwarding hides the loads Go keeps.** A `struct` the loop stores
+  its pc to before a call is forwarded to the load after it unless the
+  callee is given the struct's address; given it, the pc is no longer live
+  across the call. The dispatch still saves the pc and the instruction
+  where a case's fast path needs more registers than there are; the
+  comparison engine's dispatch saves three values too, so this is not the
+  difference between the two.
+- **Numbers as float64 cost index-heavy code.** NavierStokes runs as
+  register code throughout and is 27% slower than the tree tier, which
+  keeps an int32 it has proven in a Go variable; every `get_index` here
+  converts its key from a float. The tree tier's int32 paths stay where
+  they win: a function the tree builds with int32 nodes keeps its tree.
+- **A per-function fallback multiplies the boundaries.** EarleyBoyer and
+  Splay are 39% and 30% slower: a tree-tier function calling a register
+  function goes through `callTree`, `runTreeNested` and a copy of the
+  window, and the reverse through `callDirect`; the gate's "fast boundary"
+  needs the tree's call nodes to enter register code as `regDirect` does,
+  and constructors (`new`) to run as register frames.
+- **Fusions the stack form has are owed.** `prop_update` (`o.a += j`) is
+  three instructions a statement here against one tree node, 16.6 against
+  6.4 ns; the backend needs the update of a place as one operation, as the
+  tree has it.
+
 ### Stage 2: frames
 
 The lean frame record everywhere a frame is read: stack traces, the
