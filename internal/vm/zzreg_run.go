@@ -1008,17 +1008,13 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RThrow:
 			return Undefined, r.regThrow(f, c, pc, regs)
 		case bytecode.RNewW, bytecode.RClosureW, bytecode.RInstanceOf, bytecode.RIn, bytecode.RDelete, bytecode.RArguments, bytecode.RNewArrayK,
-			bytecode.RApplyArgs:
+			bytecode.RApplyArgs, bytecode.RArgsLen, bytecode.RArgsIndex:
 			goto slow
 		// Every value of the switch is a case, so that it is a jump table
 		// that needs no range check: Go makes one only of a switch whose
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile.
-		case 108:
-			goto invalid
-		case 109:
-			goto invalid
 		case 110:
 			goto invalid
 		case 111:

@@ -771,6 +771,23 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		v, err = r.regDelete(cl, regs[w.B()], regs[w.C()])
 	case bytecode.RArguments:
 		v = Obj(r.newArgumentsObject(f))
+	case bytecode.RArgsLen:
+		if a := regs[w.B()]; a.IsObject() {
+			v, err = r.getValueProp(a, atomLength)
+		} else {
+			v = Int(len(f.args))
+		}
+	case bytecode.RArgsIndex:
+		key := regs[w.C()]
+		if !regs[w.B()].IsObject() {
+			if i := uint32(key.num); key.IsNumber() && float64(i) == key.num && uint(i) < uint(len(f.args)) &&
+				!(f.cl.fn.MappedArguments && uint(i) < uint(f.cl.fn.ParamCount)) {
+				v = f.args[i]
+				break
+			}
+			regs[w.B()] = Obj(r.newArgumentsObject(f))
+		}
+		v, err = r.getIndexed(regs[w.B()], key)
 	case bytecode.RApplyArgs:
 		b := int(w.B())
 		v, err = r.regApplyArgs(f, regs[b], regs[b+1], regs[b+2])

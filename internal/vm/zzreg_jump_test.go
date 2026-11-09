@@ -90,3 +90,20 @@ func TestRegStrictGlobalStores(t *testing.T) {
 	const want = "4,5,ReferenceError,undefined,TypeError,8,stored,2,ReferenceError,ReferenceError,1,at putMissing (test:4:41)"
 	regRunBoth(t, src, want, 4)
 }
+
+// TestRegLazyArguments pins args_len and args_index, arguments.length and
+// arguments[i] in a function whose arguments object is made only on
+// demand: the arguments read where they lie, an index past them, a key
+// that is no index, and a sloppy function's parameter that the object maps,
+// which makes the object.
+func TestRegLazyArguments(t *testing.T) {
+	const src = `
+		function append() { if (arguments.length === 0) return "none"; var s = arguments[arguments.length - 1];
+			for (var i = arguments.length - 2; i >= 0; i--) s = arguments[i] + s; return s }
+		function past() { return [arguments[3], arguments[-1], arguments["length"], arguments.length].join("|") }
+		function mapped(a, b) { a = "A"; return arguments[0] + arguments[1] + arguments.length }
+		function strict(a) { "use strict"; a = "A"; return arguments[0] + arguments.length }
+		[append(), append("x"), append("a", "b", "c"), past(1, 2), mapped("p", "q"), strict("s")].join(" ")`
+	const want = "none x abc ||2|2 Aq2 s1"
+	regRunBoth(t, src, want, 4)
+}

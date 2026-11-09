@@ -291,6 +291,12 @@ const (
 	// R[A+1] = R[B]: a method's read that puts its receiver in the call's
 	// window, so that a receiver in a binding needs no move.
 	RGetMethodW
+	// RArgsLen: R[A] = arguments.length, and RArgsIndex: R[A] =
+	// arguments[R[C]], in a function whose arguments object R[B] is made
+	// only on demand: until it is, the frame's arguments are read where
+	// they lie (arguments_length, arguments_index).
+	RArgsLen
+	RArgsIndex
 
 	// RInvalid is the last operation there can be, which no code holds:
 	// the interpreter's switch has a case for it so that its jump table
@@ -369,7 +375,7 @@ var rOpNames = [...]string{
 	RLoadThis: "load_this", RCheckRef: "check_ref",
 	RGetUpval: "get_upval", RSetUpval: "set_upval",
 	RGetGlobal: "get_global", RSetGlobal: "set_global",
-	RGetProp: "get_prop", RGetMethod: "get_method", RGetMethodW: "get_method_w", RSetProp: "set_prop",
+	RGetProp: "get_prop", RGetMethod: "get_method", RGetMethodW: "get_method_w", RArgsLen: "args_len", RArgsIndex: "args_index", RSetProp: "set_prop",
 	RGetIndex: "get_index", RSetIndex: "set_index", RDefineField: "define_field",
 	RNewObject: "new_object", RNewArray: "new_array", RClosure: "closure",
 	RAdd: "add", RSub: "sub", RMul: "mul", RBin: "bin", RBinI: "bin_imm",
@@ -429,6 +435,10 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s, name%d @%d", op, r(w.A()), w.B(), w.C())
 	case RSetGlobal:
 		return fmt.Sprintf("%s name%d @%d, %s", op, w.B(), w.C(), r(w.A()))
+	case RArgsLen:
+		return fmt.Sprintf("%s %s, %s", op, r(w.A()), r(w.B()))
+	case RArgsIndex:
+		return fmt.Sprintf("%s %s, %s[%s]", op, r(w.A()), r(w.B()), r(w.C()))
 	case RGetProp, RGetMethod, RGetMethodW:
 		return fmt.Sprintf("%s %s, %s @%d", op, r(w.A()), r(w.B()), w.C())
 	case RSetProp:

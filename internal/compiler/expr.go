@@ -1544,6 +1544,9 @@ func (c *compiler) compileMemberRead(n *ast.Member) {
 	if c.lazyArguments && !n.Optional && c.isLazyArguments(n.Object) {
 		// arguments[i] and arguments.length in a function whose arguments
 		// object is made only on demand read the arguments themselves.
+		if id, ok := n.Object.(*ast.Ident); ok && c.reg != nil && (n.Computed || propKeyName(n.Property) == "length") {
+			c.reg.NoteRead(id, regcomp.Res{Kind: regcomp.ResLazyArgs, Index: c.lazyArgumentsSlot})
+		}
 		if n.Computed {
 			c.compileExpr(n.Property)
 			c.emitAt(n.Property.Pos(), bytecode.OpArgumentsIndex, c.lazyArgumentsSlot, 0)

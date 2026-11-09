@@ -37,6 +37,10 @@ const (
 	// ResIgnore is a sloppy write to a function expression's own name,
 	// which does nothing.
 	ResIgnore
+	// ResLazyArgs is arguments read as arguments.length or arguments[i] in
+	// a function whose arguments object is made only on demand, into local
+	// Index (the stack form's arguments_length and arguments_index).
+	ResLazyArgs
 )
 
 // Res is an identifier's resolution.

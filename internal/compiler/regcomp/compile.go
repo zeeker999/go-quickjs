@@ -61,11 +61,14 @@ type gen struct {
 	inits   int
 	// lexical marks the slots of let and const bindings; tdz those whose
 	// dead zone some read checks or a closure may see.
-	tdz   []bool
-	top   int
-	max   int
-	loops []*loop
-	label string
+	tdz []bool
+	// lazyArgs says the arguments object is made only on demand: its
+	// local's register is undefined until args_index makes it.
+	lazyArgs bool
+	top      int
+	max      int
+	loops    []*loop
+	label    string
 
 	consts   map[any]uint32
 	names    map[string]uint32
@@ -110,13 +113,23 @@ func (g *gen) layout() bool {
 	g.slotReg = make([]int32, n)
 	g.tdz = make([]bool, n)
 	used := make([]bool, n)
+	// The arguments object's local, if it is made only on demand, and
+	// whether anything reads or writes it as a binding -- which the stack
+	// form makes it for first (lazy_arguments); then it is made as the
+	// function starts.
+	lazySlot, plain := -1, make([]bool, n)
 	note := func(res Res) bool {
 		switch res.Kind {
-		case ResLocal, ResLocalCheck, ResLocalInit:
+		case ResLocal, ResLocalCheck, ResLocalInit, ResLazyArgs:
 			if int(res.Index) >= n {
 				return false
 			}
 			used[res.Index] = true
+			if res.Kind == ResLazyArgs {
+				lazySlot = int(res.Index)
+			} else {
+				plain[res.Index] = true
+			}
 			if res.Kind == ResLocalCheck {
 				g.tdz[res.Index] = true
 			}
@@ -133,6 +146,7 @@ func (g *gen) layout() bool {
 			return false
 		}
 	}
+	g.lazyArgs = lazySlot >= 0 && !plain[lazySlot]
 	for _, slot := range g.rec.Funcs {
 		if int(slot) >= n {
 			return false
@@ -337,7 +351,7 @@ func (g *gen) body() {
 		}
 	}
 	// The arguments object, made as the function starts, in its binding.
-	if (g.fn.UsesArguments || g.fn.MakesArguments) && !g.fn.ForwardsArguments {
+	if (g.fn.UsesArguments || g.fn.MakesArguments) && !g.fn.ForwardsArguments && !g.lazyArgs {
 		made := false
 		for slot, l := range g.fn.Locals {
 			if l.Name == "arguments" && slot < len(g.slotReg) && g.slotReg[slot] >= 0 {
@@ -1815,6 +1829,24 @@ func (g *gen) member(n *ast.Member, dst int) int {
 	if n.Optional {
 		g.fail("an optional chain")
 		return g.dest(dst)
+	}
+	if id, ok := n.Object.(*ast.Ident); ok {
+		if res := g.rec.Read[id]; res.Kind == ResLazyArgs {
+			// The arguments read where they lie, the object's local
+			// undefined until something makes it (arguments_index).
+			a := int(g.slotReg[res.Index])
+			if !n.Computed {
+				d := g.dest(dst)
+				g.at(n.Property.Pos())
+				g.emit(bytecode.MakeR(bytecode.RArgsLen, 0, r16(d), r16(a), 0))
+				return d
+			}
+			k := g.expr(n.Property, -1)
+			d := g.dest(dst)
+			g.at(n.Property.Pos())
+			g.emit(bytecode.MakeR(bytecode.RArgsIndex, 0, r16(d), r16(a), r16(k)))
+			return d
+		}
 	}
 	o := g.expr(n.Object, -1)
 	if n.Computed {

@@ -107,16 +107,16 @@ func TestRegisterBackendCode(t *testing.T) {
 }
 
 // TestRegisterBackendFallsBack pins what the backend leaves to the stack
-// form, each function as a whole: a try statement, a with, arguments, a
-// generator, a strict global store.
+// form, each function as a whole: a try statement, an optional chain, a
+// generator, a strict global store of a value that runs code.
 func TestRegisterBackendFallsBack(t *testing.T) {
 	fns := regFunctions(t, `
 		function tried() { try { return 1 } catch (e) { return 2 } }
-		function args() { return arguments.length }
+		function opt(o) { return o?.x }
 		function* gen() { yield 1 }
 		function strictStore() { 'use strict'; g = plain(1) }
 		function plain(x) { return x + 1 }`)
-	for _, name := range []string{"tried", "args", "gen", "strictStore"} {
+	for _, name := range []string{"tried", "opt", "gen", "strictStore"} {
 		if f := fns[name]; f == nil || f.Reg != nil {
 			t.Errorf("%s: register code %v, want none", name, f != nil && f.Reg != nil)
 		}
