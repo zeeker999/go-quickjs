@@ -459,11 +459,16 @@ for a hit, and calls out for anything else:
   own shape and reads or writes the slot; a prototype's property, an
   accessor, a polymorphic or megamorphic site is out of line. This is the
   existing `propCache` and its `ownShape`, which both forms share.
-- **A global** reads the slot its site remembers once the global object's
-  layout matches the one the site saw. The script's lexical bindings, which
-  may shadow a global, are covered by an epoch: declaring one advances a
-  counter of the realm's, and a site remembers the epoch it was filled at,
-  so the read needs no lookup of the name in the lexical table.
+- **A global** reads or writes the slot its site remembers while the global
+  epoch is the one the site was filled at: the shape tree's `globalEpoch`,
+  which the JIT's global reads trust too, advances when a binding of the
+  global object moves, goes or changes its attributes and when a
+  script-level lexical binding is declared, which may shadow a global. A
+  site is filled at the epoch only for a plain data property -- a writable
+  one for a write -- of a global object of a layout of its own, which no
+  lexical binding shadows (`regNoteGlobal`); the epoch, kept per closure
+  template beside its sites (`regEpochs`), is one compare where the read
+  compared the layout and looked the name up in the lexical table.
 - **An element** of a dense array is read or written inline for an index
   that is an int32 in range; holes, typed arrays and the rest are out of
   line.

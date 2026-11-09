@@ -1005,7 +1005,7 @@ func (r *Runtime) regGetGlobal(f *frame, cl *closure, w bytecode.RInstr) (Value,
 	in := bytecode.Instr{Op: bytecode.OpGetGlobal, A: uint32(w.B()), B: uint32(w.C())}
 	v, err := r.getGlobalAt(regTctx(r, f, cl), in, int(f.pc-1))
 	if err == nil {
-		r.regNoteGlobal(&cl.ic[w.C()], false)
+		r.regNoteGlobal(cl, w.C(), cl.names[w.B()], false)
 	}
 	return v, err
 }
@@ -1021,17 +1021,35 @@ func (r *Runtime) regSetGlobal(f *frame, cl *closure, w bytecode.RInstr, v Value
 		err = r.setGlobalIn(f, cl, in, v)
 	}
 	if err == nil {
-		r.regNoteGlobal(&cl.ic[w.C()], true)
+		r.regNoteGlobal(cl, w.C(), cl.names[w.B()], true)
 	}
 	return err
 }
 
-// regNoteGlobal remembers the layout of the global object a site found a
-// plain data property in -- a writable one for a write -- which the loop
-// compares the object's with.
-func (r *Runtime) regNoteGlobal(s *propCache, write bool) {
+// regNoteGlobal remembers, at global site site of cl's code, the global
+// epoch it found name's binding it may read or write in place at: a plain data
+// property of the global object -- a writable one for a write -- of a
+// layout of its own, which no script-level lexical binding shadows. While
+// the epoch is what it was, nothing of that has changed (shapeTree's
+// globalEpoch): the global object's table has only been appended to and no
+// lexical binding declared. The epoch is kept as one more than it is, so
+// that a site never filled is never current.
+func (r *Runtime) regNoteGlobal(cl *closure, site uint16, name Atom, write bool) {
+	if cl.regEpochs == nil {
+		cl.regEpochs = make([]uint64, len(cl.ic))
+	}
+	cl.regEpochs[site] = 0
+	s := &cl.ic[site]
 	env := s.p1
 	if env == nil || s.idx < 0 || int(s.idx) >= int(env.valn) || env.shape == nil {
+		return
+	}
+	sh := env.shape
+	if env.flags&objGlobalBindings == 0 || !sh.unique || sh.loose || sh.tree != r.shapes {
+		return
+	}
+	p := sh.keys[s.idx]
+	if p.key != name || r.lexShadows(name) {
 		return
 	}
 	mask := propAccessor | propPrivate | propDeleted | propUninit
@@ -1040,8 +1058,8 @@ func (r *Runtime) regNoteGlobal(s *propCache, write bool) {
 		mask |= propWritable
 		want = propWritable
 	}
-	if p := env.shape.keys[s.idx]; p.flags&mask == want {
-		noteGlobalShape(s, env.shape)
+	if p.flags&mask == want {
+		cl.regEpochs[site] = r.shapes.globalEpoch + 1
 	}
 }
 

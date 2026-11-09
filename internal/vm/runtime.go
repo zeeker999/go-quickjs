@@ -748,6 +748,9 @@ type closureCode struct {
 	// regCalls are the register code's call caches (regCallW), made at its
 	// first call.
 	regCalls []regCallCache
+	// regEpochs is the global epoch each global site of the register code
+	// was filled at, plus one (regNoteGlobal), made at its first fill.
+	regEpochs []uint64
 	// regCells is the cells regClosure hands newClosureIn, kept for the
 	// next closure the template's register code makes.
 	regCells []*upvalue

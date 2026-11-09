@@ -351,32 +351,25 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			cl.upvalues[w.BC()].set(regs[w.A()])
 
 		case bytecode.RGetGlobal:
-			// The global object's slot the site remembers, in the layout it
-			// read it in: nothing can shadow it where no script has a
-			// lexical binding and no eval a variable, which a frame of the
-			// register form never has.
-			s := &cl.ic[w.C()]
-			if env := s.p1; env != nil && (r.globalLex.valn == 0 || !r.lexShadows(cl.names[w.B()])) {
-				if i := uint(s.idx); i < uint(env.valn) {
-					// The layout the site read the slot in, or, for one that
-					// changes in place, the slot's own attributes.
-					if sh := env.shape; sh == s.shape ||
-						sh.keys[i].flags&(propAccessor|propPrivate|propDeleted|propUninit) == 0 {
-						regs[w.A()] = env.valAt(int(i))
-						continue
-					}
+			// The global object's slot the site remembers, while the global
+			// epoch is the one it was filled at (regNoteGlobal): no binding
+			// of the global object has moved, gone or changed its attributes
+			// since, and no script-level lexical binding shadows it, nor an
+			// eval's variable, which a frame of the register form never has.
+			if ep := cl.regEpochs; uint(w.C()) < uint(len(ep)) && ep[w.C()] == r.shapes.globalEpoch+1 {
+				s := &cl.ic[w.C()]
+				if env, i := s.p1, uint(s.idx); i < uint(env.valn) {
+					regs[w.A()] = env.valAt(int(i))
+					continue
 				}
 			}
 			goto slow
 		case bytecode.RSetGlobal:
-			s := &cl.ic[w.C()]
-			if env := s.p1; env != nil && (r.globalLex.valn == 0 || !r.lexShadows(cl.names[w.B()])) {
-				if i := uint(s.idx); i < uint(env.valn) {
-					if sh := env.shape; sh == s.shape ||
-						sh.keys[i].flags&(propAccessor|propPrivate|propDeleted|propUninit|propWritable) == propWritable {
-						env.vals()[i] = regs[w.A()]
-						continue
-					}
+			if ep := cl.regEpochs; uint(w.C()) < uint(len(ep)) && ep[w.C()] == r.shapes.globalEpoch+1 {
+				s := &cl.ic[w.C()]
+				if env, i := s.p1, uint(s.idx); i < uint(env.valn) {
+					env.vals()[i] = regs[w.A()]
+					continue
 				}
 			}
 			kept.pc = pc
