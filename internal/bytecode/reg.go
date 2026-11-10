@@ -315,6 +315,10 @@ const (
 	// RGetIndexPost: R[A] = R[B][R[C]], then R[C] += SX -- x[i++] and
 	// x[i--] of a local i, the read's key the step's old value.
 	RGetIndexPost
+	// RNewArrayE: R[A] = [], an empty literal made with the room its arrays
+	// came to need: B is its site, which learns it (the tree's
+	// arrayEmptyNode's).
+	RNewArrayE
 
 	// RInvalid is the last operation there can be, which no code holds:
 	// the interpreter's switch has a case for it so that its jump table
@@ -412,7 +416,7 @@ var rOpNames = [...]string{
 	RPostInc: "post_inc", RPostDec: "post_dec", RGetLength: "get_length",
 	RJEq: "jeq", RJNe: "jne", RJEqI: "jeq_imm", RJNeI: "jne_imm", RJNull: "jnull", RJNotNull: "jnotnull",
 	RThrow: "throw", RInstanceOf: "instanceof", RIn: "in", RDelete: "delete", RArguments: "arguments", RNewArrayK: "new_array_k", RAddProp: "add_prop", RAddPropI: "add_prop_imm", RApplyArgs: "apply_args",
-	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
+	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
 }
 
 func (op ROp) String() string {
@@ -487,6 +491,8 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s @%d, %d", op, r(w.A()), w.C(), w.SB())
 	case RNewArrayK:
 		return fmt.Sprintf("%s %s, x%d @%d", op, r(w.A()), w.B(), w.C())
+	case RNewArrayE:
+		return fmt.Sprintf("%s %s @%d", op, r(w.A()), w.B())
 	case RNewArray:
 		return fmt.Sprintf("%s %s, %s x%d", op, r(w.A()), r(w.B()), w.C())
 	case RBin:

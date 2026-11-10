@@ -319,3 +319,29 @@ function caught(f, a) { try { f(a) } catch (x) { return x.message + " " + x.stac
 	}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffSites compares the register operations given a site or a fast
+// path of their own after the stage's first measurements, each with its
+// slow paths.
+func TestRegDiffSites(t *testing.T) {
+	src := `
+function grow(n, m) { var out = []; for (var j = 0; j < m; j++) { var a = []; for (var i = 0; i < n; i++) a.push(i, " "); out.push(a.length, a[0], a[a.length - 1]); if (j == 2) a.x = 1; } return out.join() }
+function fresh() { var a = [], b = []; a.push(1); return [a === b, a.length, b.length, Array.isArray(b), Object.getPrototypeOf(b) === Array.prototype].join() }
+function negs(x) { var r = []; r.push(x === -0, x !== -1, x + -1, x > -2, x < -2, x <= -32768, x >= -32769, x - -1, x & -1, x | -2, x ^ -3, x << -31, x >> -1, x >>> -1, -2147483648, x === -2147483648, Object.is(x * -0, -0), 1 / -0, [-1, -0, x].map(function (v) { return 1 / v }).join("/"), "" + -1 + x + -0); var o = { a: x }; o.a += -1; r.push(o.a); switch (x) { case -1: r.push("m1"); break; case -0: r.push("z"); break; case -32768: r.push("big"); break; case -2147483648: r.push("min"); break; default: r.push("d") } return r.join() }
+function konst() { return -1 }
+function konstF() { return 1.5 }
+function konstT() { return true }
+function konstN() { return null }
+function konsts(n) { var s = 0, t = []; for (var i = 0; i < n; i++) { s += konst() + konstF(i) + konst(1, 2); t.push(konstT(), konstN(), konst.call("x"), new konst() instanceof konst) } return s + t.join() }
+function kept(n) { var all = []; for (var j = 0; j < n; j++) { var a = []; for (var i = 0; i < 300; i++) a.push(j); all.push(a) } return all.map(function (a) { return a.length + ":" + a[299] }).join() }
+`
+	calls := []string{
+		`negs(-1)`, `negs(0)`, `negs(-0)`, `negs(-2)`, `negs(-32768)`, `negs(-2147483648)`, `negs("-1")`, `negs(undefined)`, `negs(5)`, `negs(-1.5)`, `negs({ valueOf: function () { return -1 } })`,
+		`konsts(5)`,
+		`grow(300, 6)`, `grow(3, 4)`, `grow(0, 3)`, `grow(700, 3)`, `fresh()`, `kept(4)`,
+	}
+	for i := range calls {
+		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])
+	}
+	regDiff(t, src, calls)
+}

@@ -81,7 +81,10 @@ type gen struct {
 	auxes    map[int]uint32
 	literals [][]bytecode.LitElem
 	calls    int
-	err      string
+	// arrays is how many empty array literals the code has, each a site
+	// that learns its arrays' room.
+	arrays int
+	err    string
 }
 
 type loop struct {
@@ -930,7 +933,8 @@ func pure(e ast.Expr) bool {
 	case *ast.Ident, *ast.NumberLit, *ast.StringLit, *ast.BoolLit, *ast.NullLit, *ast.This:
 		return true
 	}
-	return false
+	_, ok := numberLit(e)
+	return ok
 }
 
 // writes reports whether e assigns or updates the binding in slot.
@@ -1148,12 +1152,27 @@ func smallInt(v float64) (int32, bool) {
 	return i, float64(i) == v && !(v == 0 && math.Signbit(v))
 }
 
+// numberLit is the value of e where it is a number literal, or the
+// negation of one: -1 is a unary minus of 1 in the AST, and an operand as
+// much a constant as 1.
+func numberLit(e ast.Expr) (float64, bool) {
+	switch n := e.(type) {
+	case *ast.NumberLit:
+		return n.Value, true
+	case *ast.Unary:
+		if lit, ok := n.Operand.(*ast.NumberLit); ok && n.Op == "-" {
+			return -lit.Value, true
+		}
+	}
+	return 0, false
+}
+
 func imm16(e ast.Expr) (int32, bool) {
-	n, ok := e.(*ast.NumberLit)
+	n, ok := numberLit(e)
 	if !ok {
 		return 0, false
 	}
-	i, ok := smallInt(n.Value)
+	i, ok := smallInt(n)
 	return i, ok && i >= -1<<15 && i < 1<<15
 }
 
@@ -1328,8 +1347,8 @@ func (g *gen) logical(n *ast.Logical, dst int) int {
 func (g *gen) unary(n *ast.Unary, dst int) int {
 	switch n.Op {
 	case "-":
-		if lit, ok := n.Operand.(*ast.NumberLit); ok {
-			return g.number(-lit.Value, dst)
+		if v, ok := numberLit(n); ok {
+			return g.number(v, dst)
 		}
 		return g.unaryOp(bytecode.OpNeg, n.Operand, dst, n.Start)
 	case "+":
@@ -1555,7 +1574,8 @@ func (g *gen) runsNoCode(e ast.Expr) bool {
 		return ok && (res.Kind == ResLocal || res.Kind == ResUpval || res.Kind == ResLiteral && res.Lit == nil) &&
 			!(g.fn.ForwardsArguments && g.isArguments(n))
 	}
-	return false
+	_, ok := numberLit(e)
+	return ok
 }
 
 // storeIdent stores value into the binding id names; init says it is the
@@ -2178,7 +2198,9 @@ func (g *gen) stringChain(n *ast.Binary, dst int) (int, bool) {
 			g.into(e, next())
 		default:
 			g.into(e, next())
-			convert(adds[i-1].Start)
+			if _, ok := numberLit(e); !ok {
+				convert(adds[i-1].Start)
+			}
 		}
 		part()
 	}
@@ -2333,6 +2355,16 @@ func (g *gen) array(n *ast.ArrayLit, dst int) int {
 		g.aux(at, uint32(len(g.literals)-1))
 		return d
 	}
+	if len(n.Elements) == 0 {
+		if g.arrays >= limit16 {
+			g.fail("an array site past 16 bits")
+			return g.dest(dst)
+		}
+		d := g.dest(dst)
+		g.emit(bytecode.MakeR(bytecode.RNewArrayE, 0, r16(d), uint16(g.arrays), 0))
+		g.arrays++
+		return d
+	}
 	base := g.allocN(len(n.Elements))
 	for i, e := range n.Elements {
 		if e == nil {
@@ -2359,14 +2391,12 @@ func (g *gen) constantElements(els []ast.Expr) ([]bytecode.LitElem, bool) {
 	out := make([]bytecode.LitElem, len(els))
 	for i, e := range els {
 		switch v := e.(type) {
-		case *ast.NumberLit:
-			out[i] = bytecode.LitElem{K: g.constIdx(bytecode.Constant{Kind: bytecode.ConstNumber, Num: v.Value})}
-		case *ast.Unary:
-			n, ok := v.Operand.(*ast.NumberLit)
-			if !ok || v.Op != "-" {
+		case *ast.NumberLit, *ast.Unary:
+			n, ok := numberLit(v)
+			if !ok {
 				return nil, false
 			}
-			out[i] = bytecode.LitElem{K: g.constIdx(bytecode.Constant{Kind: bytecode.ConstNumber, Num: -n.Value})}
+			out[i] = bytecode.LitElem{K: g.constIdx(bytecode.Constant{Kind: bytecode.ConstNumber, Num: n})}
 		case *ast.StringLit:
 			out[i] = bytecode.LitElem{K: g.constIdx(bytecode.Constant{Kind: bytecode.ConstString, Str: v.Value})}
 		case *ast.BoolLit:

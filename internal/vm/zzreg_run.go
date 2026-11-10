@@ -72,8 +72,10 @@ type regCode struct {
 	// calls nothing, or one that only reads or writes its this's
 	// properties; read here rather than in the function, a line away.
 	leaf uint8
-	// leafArg is the parameter a regLeafArg body returns.
+	// leafArg is the parameter a regLeafArg body returns, and leafVal the
+	// value a regLeafConst body does.
 	leafArg int32
+	leafVal Value
 	rc      *bytecode.RegCode
 	fn      *bytecode.Function
 }
@@ -177,17 +179,23 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 		c.leaf = regLeafThis
 	}
 	if len(rc.Code) > 0 {
-		// A body that returns a parameter, or nothing, first thing -- what
-		// follows is unreachable: a call's answer is read from its window,
-		// with no frame and no evaluator, whatever its this, which the
-		// body never reads.
+		// A body that returns a parameter, a constant or nothing first
+		// thing -- what follows is unreachable: a call's answer is read
+		// from its window or the code, with no frame and no evaluator,
+		// whatever its this, which the body never reads.
 		switch w := rc.Code[0]; w.Op() {
 		case bytecode.RRet:
 			if a := int(w.A()); a >= 2 && a < 2+int(rc.Params) {
 				c.leaf, c.leafArg = regLeafArg, int32(a-2)
 			}
 		case bytecode.RRetUndef:
-			c.leaf = regLeafUndef
+			c.leaf, c.leafVal = regLeafConst, Undefined
+		default:
+			if v, ok := regConstOf(fn, w); ok && len(rc.Code) > 1 {
+				if ret := rc.Code[1]; ret.Op() == bytecode.RRet && ret.A() == w.A() {
+					c.leaf, c.leafVal = regLeafConst, v
+				}
+			}
 		}
 	}
 	t := &tree{reg: c}
@@ -200,11 +208,35 @@ const (
 	regLeafNone = iota
 	regLeafPure
 	regLeafThis
-	// regLeafArg returns its parameter leafArg, and regLeafUndef nothing:
-	// regCallW answers them from the window.
+	// regLeafArg returns its parameter leafArg, and regLeafConst the
+	// constant leafVal, undefined for nothing: regCallW answers them from
+	// the window and the code.
 	regLeafArg
-	regLeafUndef
+	regLeafConst
 )
+
+// regConstOf is the value instruction w loads, where it loads a constant
+// that is the same in every realm and runtime: a number, a boolean, null or
+// undefined.
+func regConstOf(fn *bytecode.Function, w bytecode.RInstr) (Value, bool) {
+	switch w.Op() {
+	case bytecode.RLoadInt:
+		return Int32(int32(w.BC())), true
+	case bytecode.RLoadUndef:
+		return Undefined, true
+	case bytecode.RLoadNull:
+		return Null, true
+	case bytecode.RLoadTrue:
+		return True, true
+	case bytecode.RLoadFalse:
+		return False, true
+	case bytecode.RLoadConst:
+		if k := int(w.BC()); k < len(fn.Constants) && fn.Constants[k].Kind == bytecode.ConstNumber {
+			return Float(fn.Constants[k].Num), true
+		}
+	}
+	return Undefined, false
+}
 
 // regTrace prints why a function has no register code.
 var regTrace = os.Getenv("QJS_REGTRACE") != ""
@@ -1046,7 +1078,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RThrow:
 			return Undefined, r.regThrow(f, c, pc, regs)
 		case bytecode.RNewW, bytecode.RClosureW, bytecode.RInstanceOf, bytecode.RIn, bytecode.RDelete, bytecode.RArguments, bytecode.RNewArrayK,
-			bytecode.RApplyArgs, bytecode.RArgsLen, bytecode.RArgsIndex, bytecode.RConcat:
+			bytecode.RApplyArgs, bytecode.RArgsLen, bytecode.RArgsIndex, bytecode.RConcat, bytecode.RNewArrayE:
 			goto slow
 		case bytecode.RKeyOfBase:
 			// A key whose conversion runs nothing is left as it is, and a
@@ -1067,8 +1099,6 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile.
-		case 114:
-			goto invalid
 		case 115:
 			goto invalid
 		case 116:

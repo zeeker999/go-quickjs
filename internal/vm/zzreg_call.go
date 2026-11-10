@@ -156,9 +156,12 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 			// its body reads nothing of the frame and throws nothing.
 			if e.kind&regCallLeaf != 0 {
 				if leaf := e.rc.leaf; leaf >= regLeafArg {
-					v := Undefined
-					if p := int(e.rc.leafArg); leaf == regLeafArg && p < int(w.X()) {
-						v = win[2+p]
+					v := e.rc.leafVal
+					if p := int(e.rc.leafArg); leaf == regLeafArg {
+						v = Undefined
+						if p < int(w.X()) {
+							v = win[2+p]
+						}
 					}
 					regWindow(r.stack, wb)[w.B()] = v
 					return nil
@@ -615,6 +618,30 @@ func (r *Runtime) regDirect(o *Object, fd *funcData, c *regCode, this Value, arg
 	if regReportOn {
 		regNoteCross(regCrossDirect, c.fn, "")
 	}
+	// A body answered without a frame is answered here, as callDirect
+	// answers one without register code and regCallW one a register call
+	// makes: a built-in's callback is most often such a body.
+	switch c.leaf {
+	case regLeafArg:
+		if p := int(c.leafArg); p < len(args) {
+			return args[p], nil
+		}
+		return Undefined, nil
+	case regLeafConst:
+		return c.leafVal, nil
+	case regLeafPure:
+		if fd.closure.pureMiss < pureMissLimit {
+			if v, ok := r.pureCall(fd, this, args); ok {
+				return v, nil
+			}
+		}
+	case regLeafThis:
+		if this.IsObject() {
+			if v, ok := r.leafCall(fd.closure, this.Object(), args); ok {
+				return v, nil
+			}
+		}
+	}
 	if fd.arrow {
 		this = fd.extra.lexThis
 	} else if c.coerceThis && !this.IsObject() {
@@ -740,6 +767,11 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		return Undefined, r.regDefineField(cl, w, regs[w.A()], regs[w.B()])
 	case bytecode.RNewObject:
 		v = Obj(r.regNewObject(cl, w))
+	case bytecode.RNewArrayE:
+		// The tree's node for the literal, made here: its site in the
+		// closure's arrays, named to native code by the stack form's pc.
+		n := arrayEmptyNode[struct{}]{site: int(w.B()), pc: int32(c.src[pc])}
+		v = n.make(regTctx(r, f, cl))
 	case bytecode.RNewArray:
 		b := wb + int(w.B())
 		v = Obj(r.newArrayFrom(r.stack[b : b+int(w.C())]))
