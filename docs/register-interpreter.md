@@ -550,7 +550,19 @@ are.
   `iterNextTree` does, and steps a generator's cursor as the tree does
   (`stepGenTree`, resumed in place) under a recover of its own
   (`regIterNextTree`), since a generator's body throws as the tree
-  throws, with a panic. A key string a for-in handed out is read by
+  throws, with a panic. Any other iterator's `next`, where it is a
+  function of script, is called as register code calls (`regStepNext`,
+  through `regCall`): through `iterNext`'s `stepIter` it was called from
+  Go, `callObject`, `runFD` and `runTree` making the frame and the
+  register function's one tree node entering it, and `iterator_for_of`
+  was 257 ns against the tree's 196 (208 so). A Map's or a Set's
+  iterator is stepped as the tree's `iterNextTree` steps it
+  (`mapIterStep`). A call of a generator function from register code is
+  made at its site (`regCallGen`, `regGenCall`: `newGenerator`, the
+  receiver coerced as `callClosure` coerces it), not through `regCall`
+  and `callDirect`: `generator_create` 480 to 404 ns, the tree 430. The
+  step's recover goes when a generator's body is register code (stage
+  3): without it `generator_create` was 383. A key string a for-in handed out is read by
   `get_index`'s slow path as the tree reads it (`stringKeyRead`), and
   `f.call(t, ...)` goes to `callThrough` without the generic call's
   search (`has_own_call_for_in`). A for-of loop's body is in the

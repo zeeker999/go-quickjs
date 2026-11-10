@@ -889,3 +889,65 @@ function headClosure() { var f; try { for (const x of (f = function () { return 
 	}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffSteps covers iter_next's steps of an iterator whose next is a
+// function of script (regStepNext: a result not an object, getters of done
+// and value, a next throwing, an object of its own as the result), of a Map's
+// and a Set's iterators, and calls of generator functions from register code
+// (regGenCall: a method's this, a sloppy body's this coerced, a parameter
+// default that throws, a generator method of a class or a literal).
+func TestRegDiffSteps(t *testing.T) {
+	src := `
+function Range(n, mode) { this.i = 0; this.n = n; this.mode = mode }
+Range.prototype.next = function () {
+	if (this.mode === "prim" && this.i === 2) return 5;
+	if (this.mode === "throw" && this.i === 2) throw new RangeError("step");
+	if (this.mode === "getters" && this.i < this.n) { var self = this; return { get done() { return self.i >= self.n }, get value() { return self.i++ * 10 } } }
+	if (this.mode === "badValue" && this.i === 1) return { done: false, get value() { throw "val" } };
+	if (this.i < this.n) return { value: this.i++, done: 0 };
+	return { value: "end", done: "yes" };
+};
+Range.prototype[Symbol.iterator] = function () { return this };
+function walk(n, mode) {
+	var out = [];
+	try { for (var v of new Range(n, mode)) out.push(v) } catch (e) { out.push(typeof e === "object" ? e.name + ":" + e.message : e) }
+	return out.join();
+}
+function maps() {
+	var m = new Map([[1, "a"], [2, "b"], [3, "c"]]), s = new Set(["x", "y"]), out = [];
+	for (var v of m.values()) { out.push(v); if (v === "a") m.delete(2), m.set(4, "d") }
+	for (var k of m.keys()) out.push(k);
+	for (var e of s) { out.push(e); if (e === "x") s.add("z") }
+	for (var p of s.entries()) out.push(p.join(":"));
+	return out.join();
+}
+function* g1(a, b) { yield a; yield b }
+function* gThis() { yield typeof this; yield this === globalThis }
+function* gStrict() { "use strict"; yield typeof this }
+function* gDef(a = (() => { throw new TypeError("def") })()) { yield a }
+var holder = { *m(x) { yield this.tag + x }, tag: "h", g: gThis };
+class K { constructor() { this.v = 7 } *each() { yield this.v; yield this.v + 1 } }
+function gens() {
+	var out = [];
+	for (var v of g1(1, 2)) out.push(v);
+	for (v of gThis()) out.push(v);
+	for (v of holder.g()) out.push(v);
+	for (v of gThis.call(5)) out.push(v);
+	for (v of gStrict.call(5)) out.push(v);
+	for (v of holder.m("!")) out.push(v);
+	for (v of new K().each()) out.push(v);
+	try { gDef() } catch (e) { out.push(e.name + ":" + e.message) }
+	for (v of gDef(3)) out.push(v);
+	var it = g1(8, 9); out.push(it.next().value, [...it].join("+"));
+	return out.join();
+}
+`
+	calls := []string{`maps()`, `gens()`}
+	for _, m := range []string{"plain", "prim", "throw", "getters", "badValue"} {
+		calls = append(calls, fmt.Sprintf("walk(4, %q)", m))
+	}
+	for i := range calls {
+		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])
+	}
+	regDiff(t, src, calls)
+}

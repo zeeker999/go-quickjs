@@ -303,6 +303,36 @@ func (r *Runtime) regCallMiss(f *frame, c *regCode, w bytecode.RInstr, wb int) e
 	return nil
 }
 
+// regGenCall is a call of o, a generator function of this realm with
+// closure cl, whose window is at base: its object made as callClosure makes
+// it, the receiver coerced as there, with no frame, since the body does not
+// run until the object is stepped.
+func (r *Runtime) regGenCall(o *Object, cl *closure, method bool, base, argc int) (Value, error) {
+	if err := r.tick(); err != nil {
+		return Undefined, err
+	}
+	this := Undefined
+	if method {
+		this = r.stack[base+1]
+	}
+	if fn := cl.fn; fn.UsesThis && !fn.Strict && !this.IsObject() {
+		if !this.IsNullish() {
+			w, err := r.toObject(this)
+			if err != nil {
+				return Undefined, err
+			}
+			this = Obj(w)
+		} else {
+			this = r.globalThis
+		}
+	}
+	gen, err := r.newGenerator(cl, this, r.stack[base+2:base+2+argc], o, false, Undefined)
+	if err != nil {
+		return Undefined, err
+	}
+	return Obj(gen), nil
+}
+
 func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base int) (Value, error) {
 	argc := int(w.X())
 	method := w.Op() == bytecode.RCallMW
@@ -322,6 +352,9 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base int)
 			kind uint8
 			this Value
 		)
+		if e != nil && e.callee == o && e.kind == regCallGen {
+			return r.regGenCall(o, e.cl, method, base, argc)
+		}
 		if e != nil && e.callee == o && e.kind != 0 && e.kind != regCallNative {
 			// A callee the site knows, whose call is not regCallW's alone.
 			cl, rc, kind, this = e.cl, e.rc, e.kind&^(regCallOut|regCallLeaf), e.this
@@ -346,6 +379,12 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base int)
 				} else if fd.arrow && x.lexThisRef == nil && x.rare == nil {
 					kind, this = regCallThis, x.lexThis
 				}
+			} else if fn := cl.fn; e != nil && fn.Generator && !fn.Async && fd.extra == nil && cl.realm == r.Realm {
+				// A generator of this realm: the site makes its object as
+				// callClosure makes one (regCallGen), without the generic
+				// call's search.
+				e.callee, e.cl, e.rc, e.this, e.kind = o, cl, nil, Undefined, regCallGen
+				return r.regGenCall(o, cl, method, base, argc)
 			}
 			if kind != 0 && e != nil {
 				e.callee, e.cl, e.rc, e.this, e.kind = o, cl, rc, this, kind
@@ -443,6 +482,9 @@ const (
 
 	// regCallNative is a built-in of this realm, which regNative calls.
 	regCallNative = 4
+	// regCallGen is a generator function of this realm, whose object
+	// regGenCall makes.
+	regCallGen = 5
 
 	regCallOut = 8
 	// regCallLeaf marks a callee whose body regCallW may answer without a

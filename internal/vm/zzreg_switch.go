@@ -586,6 +586,63 @@ func (r *Runtime) regIterNextTree(f *frame, cur Value) (v Value, more bool, err 
 	return iterNextTree(tc, cur)
 }
 
+// regStepNext is iter_next of a cursor neither of an array, a for-in nor
+// a generator, as iterNext steps it (stepIter): a next of script called as
+// register code calls (regCall), its register code entered directly rather
+// than through the frames a call from Go makes, and its result's done and
+// value read; a Map's or a Set's iterator of this realm stepped as the
+// tree's iterNextTree steps it; anything else by stepIter. The cursor is
+// done once it is, or once a step fails.
+func (r *Runtime) regStepNext(st *iterState) (Value, bool, error) {
+	var fd *funcData
+	if st.next.IsObject() {
+		fd = st.next.Object().fn()
+	}
+	if fd == nil || fd.closure == nil || fd.native != nil {
+		if fd != nil && fd.iterNext == iterNextMap && (fd.realm == nil || fd.realm == r.Realm) && st.iter.IsObject() {
+			if d, ok := st.iter.Object().dataOf().(*mapIterData); ok {
+				if err := r.tick(); err != nil {
+					st.done = true
+					return Undefined, false, err
+				}
+				v, ok := r.mapIterStep(d)
+				if !ok {
+					st.done = true
+				}
+				return v, ok, nil
+			}
+		}
+		v, ok, err := r.stepIter(st.iter, st.next)
+		if !ok {
+			st.done = true
+		}
+		return v, ok, err
+	}
+	res, err := r.regCall(st.next, st.iter, nil)
+	if err == nil && !res.IsObject() {
+		err = r.throwTypeError("an iterator result must be an object")
+	}
+	if err != nil {
+		st.done = true
+		return Undefined, false, err
+	}
+	done, err := r.getValueProp(res, atomDone)
+	if err != nil {
+		st.done = true
+		return Undefined, false, err
+	}
+	if done.Truthy() {
+		st.done = true
+		return Undefined, false, nil
+	}
+	v, err := r.getValueProp(res, atomValue)
+	if err != nil {
+		st.done = true
+		return Undefined, false, err
+	}
+	return v, true, nil
+}
+
 // regIterNext is iter_next: R[A] = the next value of cursor R[B], or a
 // jump by SC where it has none, the step at the head of each turn of a
 // for-of or a for-in loop. An array's element in its dense storage is
@@ -613,6 +670,10 @@ func (r *Runtime) regIterNext(f *frame, c *regCode, k *regKept, regs *[1 << 16]V
 		} else if !st.forIn && r.genNextFn != nil && st.next.ref == unsafe.Pointer(r.genNextFn) {
 			f.pc = c.src[pc] + 1
 			v, more, err = r.regIterNextTree(f, cur)
+			goto stepped
+		} else if !st.forIn {
+			f.pc = c.src[pc] + 1
+			v, more, err = r.regStepNext(st)
 			goto stepped
 		}
 	}
