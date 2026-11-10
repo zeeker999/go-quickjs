@@ -72,7 +72,8 @@ func TestMethodCallNodesByCount(t *testing.T) {
 			t.Errorf("tree %v: got %s\nwant %s", tree, got, want)
 		}
 	}
-	if built < 20 {
+	// Register code builds no trees for what it covers.
+	if built < 20 && !regTier.Load() {
 		t.Errorf("%d nodes built by count, want the run's and viaThis's", built)
 	}
 }

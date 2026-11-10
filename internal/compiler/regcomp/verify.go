@@ -168,6 +168,16 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 	default:
 		return "the code runs past its end"
 	}
+	for _, h := range rc.Handlers {
+		if int(h.To) >= len(code) || !reg(h.Reg) || len(h.Ranges)%2 != 0 {
+			return "a handler out of range"
+		}
+		for j := 0; j < len(h.Ranges); j += 2 {
+			if h.Ranges[j] > h.Ranges[j+1] || int(h.Ranges[j+1]) > len(code) {
+				return "a handler's range out of the code"
+			}
+		}
+	}
 	return ""
 }
 

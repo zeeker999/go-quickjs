@@ -366,9 +366,9 @@ func regTruthy(v Value) bool {
 //
 // A case that finishes its instruction continues the loop; one that can
 // fail sets the frame's pc to the stack form's instruction first, which is
-// what a stack trace or an error's position reads, and returns the error.
-// A frame has no handler yet: the backend compiles no function with a try
-// statement.
+// what a stack trace or an error's position reads, keeps the pc, and goes
+// to the fail tail with the error, where a handler of the frame's may
+// catch it (regCatch).
 func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 	if r.stopped != nil {
 		return Undefined, r.stopped
@@ -382,6 +382,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 	// reads its instruction back from the code, so that neither is live
 	// across the call and Go does not store them at every dispatch.
 	var kept regKept
+	var failed error
 	pc := 0
 	for {
 		var off int32
@@ -411,7 +412,9 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			regs[w.A()] = f.this
 		case bytecode.RCheckRef:
 			if regs[w.A()].IsUninitialized() {
-				return Undefined, r.regThrowDeadZone(f, c, pc)
+				kept.pc = pc
+				failed = r.regThrowDeadZone(f, c, pc)
+				goto fail
 			}
 		case bytecode.RGetUpval:
 			regs[w.A()] = cl.upvalues[w.BC()].get()
@@ -442,7 +445,8 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			}
 			kept.pc = pc
 			if _, err := r.regSlow(f, c, &kept, regs); err != nil {
-				return Undefined, err
+				failed = err
+				goto fail
 			}
 			pc = kept.pc
 
@@ -548,7 +552,8 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				continue
 			}
 			if _, err := r.regSlow(f, c, &kept, regs); err != nil {
-				return Undefined, err
+				failed = err
+				goto fail
 			}
 			pc = kept.pc
 
@@ -591,7 +596,8 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			// operations, which may throw (regColdSub).
 			kept.pc = pc
 			if _, err := r.regSlow(f, c, &kept, regs); err != nil {
-				return Undefined, err
+				failed = err
+				goto fail
 			}
 			pc = kept.pc
 
@@ -705,7 +711,8 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RCallW:
 			kept.pc = pc
 			if err := r.regCallW(f, c, &kept, wb); err != nil {
-				return Undefined, err
+				failed = err
+				goto fail
 			}
 			pc = kept.pc
 		case bytecode.RAddI:
@@ -967,7 +974,8 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RCallMW:
 			kept.pc = pc
 			if err := r.regCallW(f, c, &kept, wb); err != nil {
-				return Undefined, err
+				failed = err
+				goto fail
 			}
 			pc = kept.pc
 		case bytecode.RPostInc:
@@ -1075,7 +1083,9 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				goto taken
 			}
 		case bytecode.RThrow:
-			return Undefined, r.regThrow(f, c, pc, regs)
+			kept.pc = pc
+			failed = r.regThrow(f, c, pc, regs)
+			goto fail
 		case bytecode.RNewW, bytecode.RClosureW, bytecode.RInstanceOf, bytecode.RIn, bytecode.RDelete, bytecode.RArguments, bytecode.RNewArrayK,
 			bytecode.RApplyArgs, bytecode.RArgsLen, bytecode.RArgsIndex, bytecode.RConcat:
 			// What the loop has no fast path of its own for.
@@ -1097,7 +1107,8 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RAppend:
 			kept.pc = pc
 			if err := r.regAppend(f, c, &kept, regs); err != nil {
-				return Undefined, err
+				failed = err
+				goto fail
 			}
 			pc = kept.pc
 		case bytecode.RStrFreeze:
@@ -1111,7 +1122,8 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RCharCodeAt:
 			kept.pc = pc
 			if err := r.regCharCodeAt(f, c, &kept, regs); err != nil {
-				return Undefined, err
+				failed = err
+				goto fail
 			}
 			pc = kept.pc
 		// Every value of the switch is a case, so that it is a jump table
@@ -1135,7 +1147,8 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			if r.backEdges--; r.backEdges <= 0 {
 				kept.pc = pc
 				if err := r.regBackEdge(f, c, &kept); err != nil {
-					return Undefined, err
+					failed = err
+					goto fail
 				}
 				pc = kept.pc
 				off = regJumpOff(regAt(code, pc-1))
@@ -1147,7 +1160,8 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		// A comparison of anything but two numbers, and its jump.
 		kept.pc = pc
 		if t, err := r.regSlow(f, c, &kept, regs); err != nil {
-			return Undefined, err
+			failed = err
+			goto fail
 		} else if pc = kept.pc; t.sameBits(True) {
 			w = regAt(code, pc-1)
 			off = regJumpOff(w)
@@ -1167,12 +1181,19 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		// What a case's fast path did not answer.
 		kept.pc = pc
 		if _, err := r.regSlow(f, c, &kept, regs); err != nil {
-			return Undefined, err
+			failed = err
+			goto fail
 		}
 		pc = kept.pc
 		continue
 	invalid:
 		panic("register code: invalid instruction")
+	fail:
+		// An exception: the instruction at kept.pc-1 threw failed, which
+		// a handler of the frame's may catch (regCatch).
+		if pc = r.regCatch(f, c, &kept, regs, failed); pc < 0 {
+			return Undefined, failed
+		}
 	}
 }
 

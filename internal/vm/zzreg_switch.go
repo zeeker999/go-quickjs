@@ -512,3 +512,28 @@ func (r *Runtime) regCharCodeAtSlow(f *frame, c *regCode, pc int, regs *[1 << 16
 	regs[w.A()] = v
 	return nil
 }
+
+// regCatch is where a register frame goes on after the instruction at
+// k.pc-1 threw err: the pc of its handler, the innermost whose ranges hold
+// the instruction, with the exception's value in the handler's register;
+// or -1 where none does, or err is no JavaScript exception -- an interrupt,
+// a memory limit -- which no handler catches, as in the interpreter
+// (unwindToHandler). A call that threw has left the stack and the frames
+// as they were before it.
+//
+//go:noinline
+func (r *Runtime) regCatch(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value, err error) int {
+	if len(c.rc.Handlers) == 0 {
+		return -1
+	}
+	th, ok := err.(*Thrown)
+	if !ok {
+		return -1
+	}
+	h := c.rc.HandlerAt(k.pc - 1)
+	if h == nil {
+		return -1
+	}
+	regs[h.Reg] = th.Value
+	return int(h.To)
+}

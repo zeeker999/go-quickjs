@@ -483,14 +483,50 @@ those read. Moving every reader to the lean record is stage 2.
 
 An exception is an error value returned, never a panic: a Go `panic` and
 `recover` cost microseconds where a returned error costs a compare. A
-function with handlers has a table of them, each a range of pcs, the
-handler's pc and the register its completion goes to. When a case returns an
-error, the loop looks the pc up in the table: a handler in this frame
-resumes there; none returns the error to the caller's case, which does the
-same. `finally` is a handler that runs with the completion -- normal,
-return, break, throw -- in two registers and dispatches on it at its end,
-as the stack form's does. Iterators a loop holds open are closed by the
-unwinding as now.
+function with handlers has a table of them (`RegCode.Handlers`, innermost
+first), each a list of ranges of pcs, the handler's pc and the register
+the exception's value goes to. Nothing runs as a try block is entered or
+left: no push and no pop, as the stack form's `push_catch` and `pop_catch`
+are.
+
+- **Every way out of the loop with an error goes through one tail,**
+  `fail`, after the switch. A case that can throw stores `kept.pc` before
+  it calls out, as every case with a call already did, and on an error
+  sets `failed` and jumps to the tail; the tail calls `regCatch`, which
+  looks the instruction at `kept.pc-1` up in the table and returns the
+  handler's pc, its value written to the handler's register, or -1, and
+  the loop returns the error to the caller's case, which does the same.
+  `TestRegThrowsKeepPC` reads `runReg`'s source and fails where a `goto
+  fail` has no `kept.pc = pc` before it in its case or tail, or where the
+  loop returns an error anywhere but from the tail. The tail and the
+  stores cost the loop 44 nodes (4,726 to 4,770); the pc is still never
+  live across a call.
+- **What a handler catches is what the interpreter's catches**
+  (`unwindToHandler`): a JavaScript exception (`*Thrown`), whatever threw
+  it -- a throw statement, an operator, a getter or a setter, a built-in,
+  a call of either tier, a stack overflow's RangeError. An interrupt or a
+  memory limit goes on past every handler. A call that threw has left
+  the stack and the frame records as they were before it (`popFrameOf`),
+  so the handler needs no unwinding of its own.
+- **A finally clause is compiled once for each way out of what it
+  protects** (regcomp's `try.go`): in place after the block's normal
+  completion; before each break, continue or return that leaves it, the
+  return's value taken first into a register of its own; and as the
+  handler for a throw, which throws the value again at its end. There is
+  no completion record and no dispatch on one: each copy goes on as its
+  exit does. A copy before an exit is outside the ranges of the handlers
+  the exit leaves and inside those of the handlers around them, so that a
+  throw from a finally clause run by a break is caught by the try around
+  the loop and not by its own catch. Copies nest at most four deep (a
+  clause inside a clause is compiled for each copy of the outer); deeper,
+  the function stays the stack form's.
+- **The catch binding** is its slot's register, which the stack compiler
+  records for the clause (`Record.Catches`), or a temporary where nothing
+  reads it. A catch clause's pattern, a binding a closure captures in a
+  loop (each turn's is a new one) and a using declaration's scope stay
+  the stack form's.
+- Iterators a loop holds open are closed by the unwinding (stage 2's
+  for-of).
 
 ## Generators and async functions
 

@@ -635,3 +635,128 @@ func regExpLiterals(t *testing.T) {
 	regcomp.RegExpLiterals = true
 	t.Cleanup(func() { regcomp.RegExpLiterals = saved })
 }
+
+// TestRegDiffTry compares try statements in register code: exceptions of
+// throw statements, operators, getters, setters, built-ins and calls of
+// both tiers caught; catch bindings read, written, captured and shadowing;
+// finally clauses run for a normal completion, break, continue, return and
+// throw, nested, overriding the completion or not; rethrows from catch and
+// finally; and a stack overflow.
+func TestRegDiffTry(t *testing.T) {
+	src := `
+var log = [];
+function thrower(k) { if (k === 1) throw new TypeError("t" + k); if (k === 2) return null.x; if (k === 3) throw k; return k }
+function accessors() { return { get g() { throw new RangeError("g") }, set s(v) { throw new SyntaxError("s" + v) } } }
+function kinds() {
+	var out = [], o = accessors();
+	try { throw new Error("a") } catch (e) { out.push(e.message) }
+	try { null.x } catch (e) { out.push(e.name) }
+	try { undefined() } catch (e) { out.push(e.name) }
+	try { o.g } catch (e) { out.push(e.name + e.message) }
+	try { o.s = 4 } catch (e) { out.push(e.name + e.message) }
+	try { JSON.parse("{") } catch (e) { out.push(e.name) }
+	try { thrower(1) } catch (e) { out.push(e.message) }
+	try { thrower(2) } catch (e) { out.push(e.name) }
+	try { thrower(3) } catch (e) { out.push(e) }
+	try { [1, 2].map(function (x) { if (x === 2) throw "m" + x; return x }) } catch (e) { out.push(e) }
+	try { x1 } catch (e) { out.push(e.name) }
+	try { let q = q + 1 } catch (e) { out.push(e.name) }
+	try { new (function () { this.a = 1; throw "ctor" })() } catch (e) { out.push(e) }
+	try { ({}).toString.call(null).x.y } catch (e) { out.push(e.name) }
+	try { thrower(4) } catch { out.push("none") }
+	out.push(thrower(4));
+	return out.join()
+}
+function bindings(v) {
+	var e = "outer", fs = [], r;
+	try { throw v } catch (e) { e = e + "!"; r = e; fs.push(function () { return e }) }
+	try { throw v } catch (x) { var y = x }
+	return [e, r, fs[0](), y].join()
+}
+function fin(k) {
+	var log = [];
+	function f(k) {
+		var x = "x";
+		try {
+			log.push("try");
+			if (k === 0) return x;
+			if (k === 1) throw "t";
+			if (k === 2) return log.length;
+		} catch (e) {
+			log.push("catch " + e);
+			if (k === 1) return "c";
+		} finally {
+			log.push("finally");
+			x = "changed";
+			if (k === 3) return "f";
+		}
+		return "end " + x;
+	}
+	var r;
+	try { r = f(k) } catch (e) { r = "threw " + e }
+	return r + ":" + log.join("|");
+}
+function loops() {
+	var log = [];
+	outer: for (var i = 0; i < 4; i++) {
+		for (var j = 0; j < 4; j++) {
+			try {
+				try {
+					if (j === 1) continue;
+					if (j === 2 && i === 1) continue outer;
+					if (j === 2) break;
+					if (i === 3) break outer;
+					log.push(i + "" + j);
+				} finally {
+					log.push("in" + j);
+				}
+			} finally {
+				log.push("out" + j);
+			}
+		}
+		log.push("end" + i);
+	}
+	var w = 0;
+	while (true) { try { if (++w > 3) break } finally { log.push("w" + w) } }
+	do { try { continue } finally { log.push("dw") } } while (false);
+	switch (w) { case 4: try { break } finally { log.push("sw") } default: log.push("no") }
+	return log.join();
+}
+function nested() {
+	var log = [];
+	function f() {
+		try {
+			try { return "inner" } finally { log.push("f1") }
+		} finally { log.push("f2") }
+	}
+	function g() {
+		try {
+			try { throw "a" } finally { log.push("g1"); throw "b" }
+		} catch (e) { log.push("caught " + e); try { throw "c" } catch (e) { log.push("again " + e) } finally { log.push("g2") } }
+		finally { log.push("g3") }
+		return "g";
+	}
+	function h() {
+		try { try { throw "x" } catch (e) { throw e + "y" } } catch (e) { return e }
+	}
+	function k() {
+		for (var i = 0; i < 3; i++) { try { try { break } finally { throw "fromfinally" + i } } catch (e) { log.push(e) } }
+		try { return "r" } finally { try { throw "q" } catch (e) { log.push("q") } }
+	}
+	function m() { try { throw "m" } finally { log.push("m") } }
+	var r = [f(), g(), h(), k()];
+	try { m() } catch (e) { r.push(e) }
+	return r.join() + ":" + log.join();
+}
+function deep(n) { return n === 0 ? 0 : deep(n - 1) + 1 }
+function overflow() { var c = 0; for (var i = 0; i < 3; i++) { try { deep(1e7) } catch (e) { c++; log.push(e.name) } } return c + ":" + deep(100) }
+function hot(n) { var s = 0; for (var i = 0; i < n; i++) { try { if (i % 7 === 3) throw i; s += i } catch (e) { s -= e } finally { s++ } } return s }
+function stackOfCaught() { function a() { throw new Error("here") } try { a() } catch (e) { return e.stack.split("\n").length + " " + e.message } }
+`
+	calls := []string{`kinds()`, `bindings(1)`, `bindings("v")`, `fin(0)`, `fin(1)`, `fin(2)`, `fin(3)`, `fin(4)`,
+		`loops()`, `nested()`, `overflow()`, `hot(1000)`, `stackOfCaught()`, `log.join()`}
+	for i := range calls {
+		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])
+	}
+	regDiff(t, src, calls)
+}

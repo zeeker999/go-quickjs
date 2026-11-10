@@ -97,6 +97,12 @@ type gen struct {
 	// switches is each switch instruction's table, its cases' bodies by
 	// their marks, bound by the end.
 	switches [][]switchEntry
+	// prots are the handlers in force where code is compiled, outermost
+	// first; handlers the finished ones, innermost first; copies how deep
+	// the finally clauses' copies being compiled nest (try.go).
+	prots    []*prot
+	handlers []*prot
+	copies   int
 	err      string
 }
 
@@ -788,6 +794,23 @@ func (g *gen) stmt(s ast.Stmt) {
 			g.fail("a function declaration in a block")
 		}
 	case *ast.ReturnStmt:
+		if g.finallyAround() {
+			// The value is taken before the finally clauses run, which
+			// may assign what it was read from.
+			v := -1
+			if n.Arg != nil {
+				v = g.alloc()
+				g.into(n.Arg, v)
+			}
+			g.leave(0, func() {
+				if v < 0 {
+					g.emit(bytecode.MakeR(bytecode.RRetUndef, 0, 0, 0, 0))
+				} else {
+					g.emit(bytecode.MakeR(bytecode.RRet, 0, r16(v), 0, 0))
+				}
+			})
+			return
+		}
 		if n.Arg == nil {
 			g.emit(bytecode.MakeR(bytecode.RRetUndef, 0, 0, 0, 0))
 			return
@@ -835,20 +858,22 @@ func (g *gen) stmt(s ast.Stmt) {
 			g.fail("a break without its target")
 			return
 		}
-		g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), l.brk, false)
+		g.leave(g.protsOutside(l), func() { g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), l.brk, false) })
 	case *ast.ContinueStmt:
 		l := g.findLoop(n.Label, true)
 		if l == nil {
 			g.fail("a continue without its loop")
 			return
 		}
-		g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), l.cont, false)
+		g.leave(g.protsOutside(l), func() { g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), l.cont, false) })
 	case *ast.ThrowStmt:
 		r := g.expr(n.Arg, -1)
 		g.at(n.Start)
 		g.emit(bytecode.MakeR(bytecode.RThrow, 0, r16(r), 0, 0))
 	case *ast.SwitchStmt:
 		g.switchStmt(n, label)
+	case *ast.TryStmt:
+		g.tryStmt(n)
 	case *ast.LabeledStmt:
 		switch n.Body.(type) {
 		case *ast.ForStmt, *ast.WhileStmt, *ast.DoWhileStmt:
@@ -2367,12 +2392,12 @@ func (g *gen) call(n *ast.Call, dst int) int {
 		g.aux(at, g.regexpConst(n.Args[0].(*ast.RegexpLit))|deadBit(dead))
 		return d
 	}
-	if dead {
+	if dead && (regexpCalls || RegExpLiterals) {
 		at := g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdCallDead), r16(w), r16(d), uint16(argc)))
 		g.aux(at, deadBit(true))
 		return d
 	}
-	if mname == "exec" && dst >= 0 {
+	if mname == "exec" && dst >= 0 && (regexpCalls || RegExpLiterals) {
 		if spc, ok := g.reuseCall(n, dst); ok {
 			at := g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdCallReuse), r16(w), r16(d), uint16(argc)))
 			g.aux(at, spc)
@@ -3011,6 +3036,7 @@ func (g *gen) finish() *bytecode.RegCode {
 		Code:              g.code, NumRegs: g.max + 1, SrcPC: src, SiteName: g.siteName, This: -1,
 		LocalReg: g.localReg(),
 		Wide:     true, Params: g.fn.ParamCount, Inits: g.inits, Caps: g.caps, CallSites: g.calls,
+		Handlers: g.handlerTable(),
 	}
 	if why := Verify(rc, g.fn); why != "" {
 		Refuse(g.fn, why)
@@ -3032,3 +3058,9 @@ func (g *gen) localReg() []int32 {
 // literal (new_regexp, lit_exec, lit_test, call_lit, call_arg_lit), which
 // QJS_REGEXPLIT sets: off, such a function is the tree's.
 var RegExpLiterals = os.Getenv("QJS_REGEXPLIT") != ""
+
+// regexpCalls turns on call_dead and call_reuse where RegExp literals
+// are not (QJS_REGCALLS). Timed in one build with and without them, they
+// won nothing and made html_escape_plain 8.3%, html_escape_mixed 3.3%
+// and html_escape_entities 2.5% slower: two cold operations a call.
+var regexpCalls = os.Getenv("QJS_REGCALLS") != ""

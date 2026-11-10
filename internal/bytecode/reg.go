@@ -506,6 +506,36 @@ type RegCode struct {
 	// ForwardsArguments says a frame keeps its arguments as passed for
 	// RApplyArgs, with no arguments object made.
 	ForwardsArguments bool
+	// Handlers are the code's exception handlers, innermost first.
+	Handlers []RHandler
+}
+
+// RHandler is an exception handler of register code: an exception the
+// instruction at a pc in one of its ranges throws goes on at To, its value
+// in register Reg (docs/register-interpreter.md, "Exceptions"). A handler
+// is a catch clause, or a finally clause's copy that runs for a throw and
+// throws the value again at its end; the copies a normal completion, a
+// break, a continue or a return run are compiled in their place, outside
+// the ranges.
+type RHandler struct {
+	// Ranges are the [start, end) pairs of pcs the handler covers.
+	Ranges []uint32
+	To     uint32
+	Reg    uint16
+}
+
+// HandlerAt is the handler of the instruction at pc, the innermost whose
+// ranges hold it, or nil.
+func (rc *RegCode) HandlerAt(pc int) *RHandler {
+	for i := range rc.Handlers {
+		h := &rc.Handlers[i]
+		for j := 0; j+1 < len(h.Ranges); j += 2 {
+			if uint32(pc) >= h.Ranges[j] && uint32(pc) < h.Ranges[j+1] {
+				return h
+			}
+		}
+	}
+	return nil
 }
 
 var rOpNames = [...]string{
@@ -671,6 +701,9 @@ func (rc *RegCode) String() string {
 	var sb strings.Builder
 	for pc := range rc.Code {
 		fmt.Fprintf(&sb, "%4d  %s\n", pc, rc.Format(pc))
+	}
+	for _, h := range rc.Handlers {
+		fmt.Fprintf(&sb, "      handler %v -> %d, r%d\n", h.Ranges, h.To, h.Reg)
 	}
 	return sb.String()
 }
