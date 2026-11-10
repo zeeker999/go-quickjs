@@ -63,14 +63,15 @@ func NewArena() *Arena { return &Arena{} }
 
 // NewReusingArena returns an empty arena that places code in the space
 // that code released before it left in a chunk, the first such space
-// large enough, before placing it past what the chunk has handed out: for
-// an owner that drops some of its code while the rest runs on, whose
-// chunks would otherwise stay mapped, and grow in number, while any code
-// in them lives. Placing there makes pages that hold other code writable,
-// as placing past a chunk's code can, under the same rule: none of the
-// owner's code runs then. It places each code at the start of its cache
-// line and next to the code before it, whatever FirstOffset, LayoutSeed
-// and LineOffset say, which are benchmarks' knobs for the other arenas.
+// large enough, or past the code of any chunk with room, before it maps a
+// new chunk: for an owner that drops some of its code while the rest runs
+// on, whose chunks would otherwise stay mapped, and grow in number, while
+// any code in them lives. Placing there makes pages that hold other code
+// writable, as placing past a chunk's code can, under the same rule: none
+// of the owner's code runs then. It places each code at the start of its
+// cache line and next to the code before it, whatever FirstOffset,
+// LayoutSeed and LineOffset say, which are benchmarks' knobs for the other
+// arenas.
 func NewReusingArena() *Arena { return &Arena{reuse: true} }
 
 // FirstOffset is where in its first chunk an arena places its first code,
@@ -356,8 +357,9 @@ func (a *Arena) chunkOf(code []byte) *chunk {
 }
 
 // placeReusing is place for a reusing arena (NewReusingArena): in the
-// first space released code left that is large enough, else past the last
-// chunk's code, else in a new chunk. a.mu is held.
+// first space released code left that is large enough, else past the code
+// of the first chunk with room for it there, else in a new chunk. a.mu is
+// held.
 func (a *Arena) placeReusing(instructions []byte) ([]byte, error) {
 	n := alignUp(len(instructions), codeAlign)
 	var c *chunk
@@ -380,9 +382,13 @@ func (a *Arena) placeReusing(instructions []byte) ([]byte, error) {
 		}
 	}
 	if c == nil {
-		if k := len(a.chunks); k > 0 && a.chunks[k-1].used+n <= len(a.chunks[k-1].mem) {
-			c = a.chunks[k-1]
-		} else {
+		for _, ch := range a.chunks {
+			if ch.used+n <= len(ch.mem) {
+				c = ch
+				break
+			}
+		}
+		if c == nil {
 			mem, err := mapCode(alignUp(n, chunkBytes))
 			if err != nil {
 				return nil, fmt.Errorf("allocate code: %w", err)
