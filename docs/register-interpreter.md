@@ -434,8 +434,9 @@ the ones Go allows:
   level (the loop's blocks laid out otherwise, every instruction of those
   loops the same). A value freed goes to the end of the free
   list, and no hot operation is renumbered: its case's code would move.
-  At the removal of the translation reference the free values are 24,
-  29, 36, 37, 40, 41, 42 and 43, and 127 is `invalid`'s.
+  At the removal of the translation reference the free values were 24,
+  29, 36, 37, 40, 41, 42 and 43, and 127 is `invalid`'s; `iter_next`
+  took 24.
 
 What remains is Go's: a register store of a `Value` is a write-barrier
 check, the loop's instruction word is still saved at the dispatch where a
@@ -500,7 +501,14 @@ are.
   fail` has no `kept.pc = pc` before it in its case or tail, or where the
   loop returns an error anywhere but from the tail. The tail and the
   stores cost the loop 44 nodes (4,726 to 4,770); the pc is still never
-  live across a call.
+  live across a call. Each case calling `regCatch` itself instead, with
+  no tail, cost 177 nodes more (53 below the limit) and was level over
+  the placements: nothing 3% or more slower at every placement either
+  way, the geometric mean 0.8% faster, `crypto_am3` -4.3% and
+  `empty_loop` -5.7% (each slower at one placement of four),
+  `global_write` -1.2%. The shared tail stays, for the budget. Against
+  s2, before the tail, `global_write` and `global_write_strict` are 4.4%
+  slower at every placement with either form: not the tail's.
 - **What a handler catches is what the interpreter's catches**
   (`unwindToHandler`): a JavaScript exception (`*Thrown`), whatever threw
   it -- a throw statement, an operator, a getter or a setter, a built-in,
@@ -533,7 +541,19 @@ are.
   own: `for_of_start` or `for_in_start` makes it (`startForOf`,
   `startForIn`, with their fast paths for an array and a generator) and
   `iter_next` steps it at the head of each turn, jumping out where it has
-  no value; all three are cold operations. A for-of loop's body is in the
+  no value. The two starts are cold operations; `iter_next` is the one
+  direct value stage 2 has taken (24): through `cold`, `regSlow` and
+  `regColdSub` were 16% of `generator_for_of`, and as a case (a call
+  with the pc kept, 30 nodes) `array_for_of` went from 17.3 to 13.2 ns
+  and `generator_for_of` from 93 to 83 in one build. `regIterNext`
+  reads an array's element in its dense storage as the tree's
+  `iterNextTree` does, and steps a generator's cursor as the tree does
+  (`stepGenTree`, resumed in place) under a recover of its own
+  (`regIterNextTree`), since a generator's body throws as the tree
+  throws, with a panic. A key string a for-in handed out is read by
+  `get_index`'s slow path as the tree reads it (`stringKeyRead`), and
+  `f.call(t, ...)` goes to `callThrough` without the generic call's
+  search (`has_own_call_for_in`). A for-of loop's body is in the
   ranges of a handler of its own, the cursor's, which closes the iterator
   as a throw does (`iter_close_throw`, its return method's error dropped)
   and throws again; a break, a continue of an outer loop or a return that

@@ -751,10 +751,19 @@ function nested() {
 function deep(n) { return n === 0 ? 0 : deep(n - 1) + 1 }
 function overflow() { var c = 0; for (var i = 0; i < 3; i++) { try { deep(1e7) } catch (e) { c++; log.push(e.name) } } return c + ":" + deep(100) }
 function hot(n) { var s = 0; for (var i = 0; i < n; i++) { try { if (i % 7 === 3) throw i; s += i } catch (e) { s -= e } finally { s++ } } return s }
+function heldFinally() {
+	var log = [];
+	function f() { try { return log.length + 10 } finally { for (var i = 0; i < 3; i++) log.push(i); var z = "z"; log.push(z) } }
+	function g() { try { throw "e" } finally { for (var i = 0; i < 2; i++) log.push("g" + i); var y = 1 } }
+	var r = f();
+	try { g() } catch (e) { r += e }
+	try { throw "c" } catch (e) { for (var k = 0; k < 2; k++) log.push(k); log.push(e) }
+	return r + ":" + log.join();
+}
 function stackOfCaught() { function a() { throw new Error("here") } try { a() } catch (e) { return e.stack.split("\n").length + " " + e.message } }
 `
 	calls := []string{`kinds()`, `bindings(1)`, `bindings("v")`, `fin(0)`, `fin(1)`, `fin(2)`, `fin(3)`, `fin(4)`,
-		`loops()`, `nested()`, `overflow()`, `hot(1000)`, `stackOfCaught()`, `log.join()`}
+		`loops()`, `nested()`, `overflow()`, `hot(1000)`, `heldFinally()`, `stackOfCaught()`, `log.join()`}
 	for i := range calls {
 		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])
 	}
@@ -784,6 +793,7 @@ function iter(n, log, opts) {
 	return o;
 }
 function holey(a, b) { return [a, , b] }
+function* bad(log) { try { yield 1; null.x } finally { log.push("badFinally") } }
 function* gen(log) { try { yield 1; yield 2; yield 3 } finally { log.push("genFinally") } }
 function sums() {
 	var s = 0, t = "", m = new Map([[1, "a"], [2, "b"]]), out = [];
@@ -826,6 +836,10 @@ function gens() {
 	for (var v of gen(log)) { s += v; if (v === 2) break }
 	for (var w of gen(log)) s += w;
 	try { for (var u of gen(log)) throw "x" } catch (e) { log.push(e) }
+	try { for (var b of bad(log)) log.push("b" + b) } catch (e) { log.push("caught " + e) }
+	var g = gen(log);
+	for (var x of g) { s += x; if (x === 1) break }
+	for (var y of g) s += 100;
 	return s + ":" + log.join("|");
 }
 function inFinally() {
@@ -858,8 +872,15 @@ function nestedLoops() {
 function dead() { try { for (let x of [x]) {} } catch (e) { return e.name } }
 function notIterable() { var out = []; try { for (var x of 5) {} } catch (e) { out.push(e.name) } try { for (var y of {}) {} } catch (e) { out.push(e.name) } return out.join() }
 function hot(n) { var a = []; for (var i = 0; i < n; i++) a.push(i); var s = 0; for (var k = 0; k < 10; k++) for (var v of a) s += v; return s }
+function held() {
+	var a = [1, 2, 3], s = [];
+	for (var k in a) { if (k === "0") for (var i = 0; i < 3; i++) a.push(i); var t = k + "!"; s.push(t) }
+	for (var v of a) { for (var j = 0; j < 2; j++) s.push(j); var u = v * 2; s.push(u) }
+	return s.join();
+}
+function headClosure() { var f; try { for (const x of (f = function () { return x }, [1])) {} return String(f()) } catch (e) { return e.name } }
 `
-	calls := []string{`sums()`, `gens()`, `inFinally()`, `keys()`, `nestedLoops()`, `dead()`, `notIterable()`, `hot(500)`}
+	calls := []string{`held()`, `headClosure()`, `sums()`, `gens()`, `inFinally()`, `keys()`, `nestedLoops()`, `dead()`, `notIterable()`, `hot(500)`}
 	for k := 0; k <= 7; k++ {
 		calls = append(calls, fmt.Sprintf("closes(%d)", k))
 	}

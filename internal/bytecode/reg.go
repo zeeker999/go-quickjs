@@ -137,7 +137,10 @@ const (
 	RNewObject
 	// RNewArray: R[A] = an array of the C values from R[B].
 	RNewArray
-	_ // free: 24, the translation reference's closure, removed
+	// RIterNext: R[A] = the next value of cursor R[B], or a jump by SC
+	// where it has none: a for-of or for-in loop's step, at the head of
+	// each turn (value 24, out of the free list).
+	RIterNext
 	// RAdd, RSub, RMul: R[A] = R[B] op R[C].
 	RAdd
 	RSub
@@ -402,9 +405,6 @@ const (
 	// for-of loop's or a for-in loop's (startForOf, startForIn).
 	RColdForOfStart
 	RColdForInStart
-	// RColdIterNext: R[A] = the next value of cursor R[B], or a jump by
-	// SC where it has none.
-	RColdIterNext
 	// RColdIterClose closes cursor R[B] as a break, a continue or a
 	// return that leaves its loop does: an error of its return method's is
 	// thrown. RColdIterCloseThrow closes it as a throw that leaves the loop
@@ -422,7 +422,7 @@ var rColdNames = [...]string{
 	RColdNewRegExp: "new_regexp", RColdLitExec: "lit_exec", RColdLitTest: "lit_test",
 	RColdCallLit: "call_lit", RColdCallArgLit: "call_arg_lit", RColdCallDead: "call_dead",
 	RColdCallReuse: "call_reuse", RColdForOfStart: "for_of_start", RColdForInStart: "for_in_start",
-	RColdIterNext: "iter_next", RColdIterClose: "iter_close", RColdIterCloseThrow: "iter_close_throw",
+	RColdIterClose: "iter_close", RColdIterCloseThrow: "iter_close_throw",
 }
 
 func (op RColdOp) String() string {
@@ -575,7 +575,7 @@ var rOpNames = [...]string{
 	RPostInc: "post_inc", RPostDec: "post_dec", RGetLength: "get_length",
 	RJEq: "jeq", RJNe: "jne", RJEqI: "jeq_imm", RJNeI: "jne_imm", RJNull: "jnull", RJNotNull: "jnotnull",
 	RThrow: "throw", RInstanceOf: "instanceof", RIn: "in", RDelete: "delete", RArguments: "arguments", RNewArrayK: "new_array_k", RAddProp: "add_prop", RAddPropI: "add_prop_imm", RApplyArgs: "apply_args",
-	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RSwitch: "switch", RJTypeof: "jtypeof", RTypeof: "typeof", RSwitchTypeof: "switch_typeof", RNewObjectLit: "new_object_lit", RAppend: "append", RStrFreeze: "str_freeze", RCharCodeAt: "char_code_at", RCold: "cold", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
+	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RSwitch: "switch", RJTypeof: "jtypeof", RTypeof: "typeof", RSwitchTypeof: "switch_typeof", RNewObjectLit: "new_object_lit", RAppend: "append", RStrFreeze: "str_freeze", RCharCodeAt: "char_code_at", RIterNext: "iter_next", RCold: "cold", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
 }
 
 func (op ROp) String() string {
@@ -633,6 +633,8 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s", op, r(w.A()))
 	case RAppend:
 		return fmt.Sprintf("%s %s, %s", op, r(w.A()), r(w.B()))
+	case RIterNext:
+		return fmt.Sprintf("%s %s, %s, done -> %d", op, r(w.A()), r(w.B()), pc+1+int(w.SC()))
 	case RCharCodeAt:
 		return fmt.Sprintf("%s %s = %s.charCodeAt(%s) @%d", op, r(w.A()), r(w.B()), r(uint16(w.X())), w.C())
 	case RGetIndex, RAdd, RSub, RMul, RBitAnd, RBitOr, RBitXor, RShl, RShr, RUShr:
@@ -703,8 +705,6 @@ func (rc *RegCode) Format(pc int) string {
 			return fmt.Sprintf("%s.%s %s, k%d @%d", op, sub, r(w.A()), w.B(), w.C())
 		case RColdCallLit, RColdCallArgLit, RColdCallDead, RColdCallReuse:
 			return fmt.Sprintf("%s.%s %s = %s(%d)", op, sub, r(w.B()), r(w.A()), w.C())
-		case RColdIterNext:
-			return fmt.Sprintf("%s.%s %s, %s, done %+d", op, sub, r(w.A()), r(w.B()), w.SC())
 		case RColdIterClose, RColdIterCloseThrow:
 			return fmt.Sprintf("%s.%s %s", op, sub, r(w.B()))
 		}

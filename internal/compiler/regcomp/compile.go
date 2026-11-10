@@ -103,6 +103,7 @@ type gen struct {
 	prots    []*prot
 	handlers []*prot
 	copies   int
+	held     int
 	err      string
 }
 
@@ -802,6 +803,7 @@ func (g *gen) stmt(s ast.Stmt) {
 				v = g.alloc()
 				g.into(n.Arg, v)
 			}
+			defer g.hold()()
 			g.leave(0, func() {
 				if v < 0 {
 					g.emit(bytecode.MakeR(bytecode.RRetUndef, 0, 0, 0, 0))
@@ -966,7 +968,7 @@ func (g *gen) forStmt(n *ast.ForStmt, label string) {
 			g.fail("a for loop's head")
 		}
 	}
-	g.top = g.topAfterBindings()
+	g.top = g.stmtTop()
 	test := g.newMark()
 	body := g.newMark()
 	g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), test, false)
@@ -992,6 +994,21 @@ func (g *gen) forStmt(n *ast.ForStmt, label string) {
 
 // topAfterBindings is the first temporary register.
 func (g *gen) topAfterBindings() int { return regParams + g.fn.ParamCount + g.inits }
+
+// stmtTop is the first register a statement's temporaries may take: the
+// first after the bindings and after the registers a statement around it
+// holds for as long as it runs (hold) -- a for-of loop's cursor, a
+// finally clause's exception, a return's value on its way through
+// finally clauses.
+func (g *gen) stmtTop() int { return max(g.topAfterBindings(), g.held) }
+
+// hold keeps the registers below g.top from the temporaries of the
+// statements compiled until the release it returns is called.
+func (g *gen) hold() func() {
+	saved := g.held
+	g.held = g.top
+	return func() { g.held = saved }
+}
 
 func (g *gen) varDecl(n *ast.VarDecl) {
 	if n.Kind != ast.DeclVar && n.Kind != ast.DeclLet && n.Kind != ast.DeclConst {
@@ -1025,13 +1042,13 @@ func (g *gen) varDecl(n *ast.VarDecl) {
 				skip := g.newMark()
 				g.jump(bytecode.MakeR(bytecode.RJmpT, 0, r16(int(g.slotReg[res.Index])), 0, 0), skip, false)
 				g.storeIdent(id, d.Init, true)
-				g.top = g.topAfterBindings()
+				g.top = g.stmtTop()
 				g.bind(skip)
 				continue
 			}
 		}
 		g.storeIdent(id, d.Init, true)
-		g.top = g.topAfterBindings()
+		g.top = g.stmtTop()
 	}
 }
 

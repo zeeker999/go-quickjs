@@ -1126,13 +1126,20 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				goto fail
 			}
 			pc = kept.pc
+		case bytecode.RIterNext:
+			kept.pc = pc
+			if err := r.regIterNext(f, c, &kept, regs); err != nil {
+				failed = err
+				goto fail
+			}
+			pc = kept.pc
 		// Every value of the switch is a case, so that it is a jump table
 		// that needs no range check: Go makes one only of a switch whose
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile: the values the translation reference's operations
 		// had, and 127, invalid's.
-		case 24, 29, 36, 37, 40, 41, 42, 43:
+		case 29, 36, 37, 40, 41, 42, 43:
 			goto invalid
 		case 127:
 			goto invalid

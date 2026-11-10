@@ -120,6 +120,8 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			ok = reg(b) && int(a)+int(w.X())+2 <= n
 		case bytecode.RJmp:
 			ok = in(pc, int64(int32(w.BC())))
+		case bytecode.RIterNext:
+			ok = reg(a) && reg(b) && in(pc, int64(w.SC()))
 		case bytecode.RJmpF, bytecode.RJmpT:
 			ok = reg(a) && in(pc, int64(int32(w.BC())))
 		case bytecode.RJLt, bytecode.RJNLt, bytecode.RJLe, bytecode.RJNLe, bytecode.RJGt, bytecode.RJNGt,
@@ -197,9 +199,6 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 		return reg(b) && int(a)+2+int(c) <= rc.NumRegs && pc < len(rc.Aux) && rc.Aux[pc] == bytecode.RColdDead
 	case bytecode.RColdForOfStart, bytecode.RColdForInStart:
 		return reg(a) && reg(b)
-	case bytecode.RColdIterNext:
-		t := pc + 1 + int(w.SC())
-		return reg(a) && reg(b) && t >= 0 && t < len(rc.Code)
 	case bytecode.RColdIterClose, bytecode.RColdIterCloseThrow:
 		return reg(b)
 	case bytecode.RColdCallReuse:

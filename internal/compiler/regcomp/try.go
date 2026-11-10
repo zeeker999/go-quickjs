@@ -153,6 +153,7 @@ func (g *gen) tryStmt(n *ast.TryStmt) {
 	var fin, cat *prot
 	if n.Finally != nil {
 		fin = &prot{to: g.newMark(), reg: g.alloc(), finally: n.Finally, cursor: -1}
+		defer g.hold()()
 		g.protect(fin)
 	}
 	after := g.newMark()
@@ -164,6 +165,7 @@ func (g *gen) tryStmt(n *ast.TryStmt) {
 			return
 		}
 		cat = &prot{to: g.newMark(), reg: reg, cursor: -1}
+		defer g.hold()()
 		g.protect(cat)
 		g.stmts(n.Block)
 		g.unprotect(cat)
@@ -229,8 +231,8 @@ func (g *gen) finallyAround() bool {
 }
 
 // forOfStmt compiles a for-of loop, or with in a for-in loop: a cursor in
-// a register of its own, made by for_of_start or for_in_start and stepped
-// by iter_next at the head of each turn, which jumps out of the loop where
+// a register of its own, made by for_of_start or for_in_start (cold) and
+// stepped by iter_next, a direct operation, at the head of each turn, which jumps out of the loop where
 // it has no value. A for-of loop's body is in the ranges of a handler of
 // its own, which closes the iterator for a throw and throws again; a
 // break, continue or return that leaves the loop closes it on its way out
@@ -272,6 +274,17 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 			return
 		}
 		dst = int(g.slotReg[slot])
+		if lexical {
+			// The head's expression has a binding of the name of its own,
+			// in its dead zone for good: a closure there that captures it
+			// keeps the stack form's.
+			for i, l := range g.fn.Locals {
+				if i != slot && l.Name == id.Name && l.Captured {
+					g.fail("a closure of a for-of or for-in head's binding")
+					return
+				}
+			}
+		}
 		if lexical && g.tdz[slot] {
 			// The head's expression sees the binding in its dead zone.
 			g.emit(bytecode.MakeR(bytecode.RLoadUninit, 0, r16(dst), 0, 0))
@@ -296,12 +309,13 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 		val = g.alloc()
 	}
 	g.at(pos)
-	g.jump(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdIterNext), r16(val), r16(cursor), 0), l.brk, true)
+	g.jump(bytecode.MakeR(bytecode.RIterNext, 0, r16(val), r16(cursor), 0), l.brk, true)
 	var p *prot
 	if !in {
 		p = &prot{to: g.newMark(), reg: g.alloc(), cursor: cursor, iterOf: l}
 		g.protect(p)
 	}
+	defer g.hold()()
 	if dst < 0 {
 		g.storeValue(id, val)
 	}

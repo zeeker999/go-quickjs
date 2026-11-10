@@ -234,17 +234,6 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		}
 		regs[w.A()] = v
 		return nil
-	case bytecode.RColdIterNext:
-		v, more, err := r.iterNext(regs[w.B()])
-		if err != nil {
-			return err
-		}
-		if !more {
-			k.pc += int(w.SC())
-			return nil
-		}
-		regs[w.A()] = v
-		return nil
 	case bytecode.RColdIterClose:
 		return r.iterCloseNormal(regs[w.B()])
 	case bytecode.RColdIterCloseThrow:
@@ -570,4 +559,73 @@ func (r *Runtime) regCatch(f *frame, c *regCode, k *regKept, regs *[1 << 16]Valu
 	}
 	regs[h.Reg] = th.Value
 	return int(h.To)
+}
+
+// regIterNextTree is iter_next of a generator's cursor, stepped as the
+// tree steps one (iterNextTree): a generator of tree code resumed in
+// place (stepGenTree), not through its next's call. Its body throws as the
+// tree throws, with a panic, which a function of the tree with a for-of
+// loop catches under its own recover; register code has none, so the
+// step has one, and leaves the frames and the stack as runTreeHandlers
+// does. The frame's tctx is the step's: the tree reads only its runtime.
+func (r *Runtime) regIterNextTree(f *frame, cur Value) (v Value, more bool, err error) {
+	depth, top := r.frameDepth, r.stackTop
+	defer func() {
+		if p := recover(); p != nil {
+			th, ok := p.(treeThrow)
+			if !ok {
+				panic(p)
+			}
+			r.unwindTreeFrames(depth)
+			r.stackTop = top
+			v, more, err = Undefined, false, th.err
+		}
+	}()
+	tc := &f.tc
+	tc.r, tc.f = r, f
+	return iterNextTree(tc, cur)
+}
+
+// regIterNext is iter_next: R[A] = the next value of cursor R[B], or a
+// jump by SC where it has none, the step at the head of each turn of a
+// for-of or a for-in loop. An array's element in its dense storage is
+// read here, as the tree's iterNextTree reads it; a generator's cursor is
+// stepped as the tree steps it (regIterNextTree); anything else as
+// iterNext steps it.
+//
+//go:noinline
+func (r *Runtime) regIterNext(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value) error {
+	pc := k.pc - 1
+	w := regAt(c.code, pc)
+	cur := regs[w.B()]
+	var v Value
+	var more bool
+	var err error
+	if st := cursorOf(cur); st != nil && !st.done {
+		if a := st.arr; a != nil {
+			if i := st.idx; i < int(a.arrayLength()) && i < len(a.elemsOf()) {
+				if x := a.elemsOf()[i]; !isHole(x) {
+					st.idx++
+					regs[w.A()] = x
+					return nil
+				}
+			}
+		} else if !st.forIn && r.genNextFn != nil && st.next.ref == unsafe.Pointer(r.genNextFn) {
+			f.pc = c.src[pc] + 1
+			v, more, err = r.regIterNextTree(f, cur)
+			goto stepped
+		}
+	}
+	f.pc = c.src[pc] + 1
+	v, more, err = r.iterNext(cur)
+stepped:
+	if err != nil {
+		return err
+	}
+	if !more {
+		k.pc += int(w.SC())
+		return nil
+	}
+	regs[w.A()] = v
+	return nil
 }

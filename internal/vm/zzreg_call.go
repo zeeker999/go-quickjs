@@ -392,6 +392,12 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base int)
 			return r.regEnterW(o, cl, rc, base, argc, r.stack[base+2:base+2+argc], Undefined)
 		}
 	}
+	if method && callee.IsObject() && callee.Object() == r.callFn {
+		// f.call(t, ...): f called with this t in call's frame, as the
+		// tree's call of it does (callThroughTree), without the generic
+		// call's search for call and then for f.
+		return r.callThrough(r.callFn, r.stack[base+1], r.stack[base+2:base+2+argc])
+	}
 	if calls := f.cl.regCalls; callee.IsObject() && uint(w.C()) < uint(len(calls)) {
 		// A built-in of this realm: the site calls it as callDirect does,
 		// without the generic call's search (regNative).
@@ -981,6 +987,15 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 	case bytecode.RSetProp:
 		return Undefined, r.regSetProp(cl, c, w, regs[w.A()], regs[w.B()])
 	case bytecode.RGetIndex:
+		// A key string the runtime handed out -- a for-in's -- read as
+		// the tree's element read reads it (stringKeyRead): a[k] in for
+		// (k in a) an element by the key's index.
+		if o, key := regs[w.B()], regs[w.C()]; o.IsObject() && key.IsString() {
+			if x, ok := r.stringKeyRead(o.Object(), key.String()); ok {
+				v = x
+				break
+			}
+		}
 		v, err = r.getIndexed(regs[w.B()], regs[w.C()])
 	case bytecode.RSetIndex:
 		return Undefined, r.setIndexed(regs[w.A()], regs[w.B()], regs[w.C()], cl.fn.Strict)
