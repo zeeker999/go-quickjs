@@ -290,6 +290,8 @@ function bad(b) { var k = o(2); b[k] += 1 }
 function bad2(b) { var k = o(2); b[k]++ }
 function upd(t) { t.x++ }
 function updLoop(t) { for (var i = 0; i < 2; i++) t[0] += 1 }
+function made(t, i) { t[i - 1] += 1; t[i + ""] |= 2; t[` + "`k${i}`" + `] += "s"; t[-i]++; t[i++] += 1; t[!i] = 1; return JSON.stringify(t) + i }
+function madeObj(t) { var k = o(5); t[k + ""] += 1; t["" + e(6)] += 1; return JSON.stringify(t) }
 function caught(f, a) { try { f(a) } catch (x) { return x.message + " " + x.stack.split(String.fromCharCode(10))[1] } }
 `
 	calls := []string{
@@ -300,6 +302,8 @@ function caught(f, a) { try { f(a) } catch (x) { return x.message + " " + x.stac
 		`run(function () { var f = byValue(1, 2, 3); return f() + f() })`, `run(function () { return mixed(1, 2, 3) })`,
 		`run(keys)`, `run(function () { return caught(bad, null) })`, `run(function () { return caught(bad2, undefined) })`,
 		`caught(upd, null)`, `caught(upd, undefined)`, `caught(updLoop, null)`,
+		`made({}, 3)`, `run(function () { return madeObj({}) })`, `run(function () { return caught(madeObj, null) })`,
+		`caught(made, null)`, `caught(made, undefined)`,
 	}
 	for i := range calls {
 		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])

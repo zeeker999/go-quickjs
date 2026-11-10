@@ -2042,10 +2042,13 @@ func (g *gen) call(n *ast.Call, dst int) int {
 // first (key_of_base), as the stack form's to_property_key_of_base: the
 // read and the write would otherwise each convert an object's key, and
 // run its toString twice. A literal key needs nothing; a binding's value
-// is converted into a temporary, the binding left as it is.
+// is converted into a temporary, the binding left as it is. A key that an
+// operator made is a primitive, whose conversion runs nothing and which a
+// null or undefined object fails on in the read as in key_of_base, so it
+// needs nothing either: this.t-1 is converted once whichever way.
 func (g *gen) key(t *ast.Member, k, o int) int {
 	switch t.Property.(type) {
-	case *ast.StringLit, *ast.NumberLit:
+	case *ast.StringLit, *ast.NumberLit, *ast.Binary, *ast.Unary, *ast.Update, *ast.TemplateLit:
 		return k
 	}
 	d := k

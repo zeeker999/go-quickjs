@@ -134,8 +134,18 @@ func usage() {
   placements build -label NAME [-k 8|4] [-out DIR]
   placements compare -dir SUITE [-bench NAME] [-k 8|4] [-rounds 3] [-suite NAMES] [-jit]
   placements compare -micro [-k 8|4] [-rounds 3] [-suite TESTS] [-jit]
-                     [-parallel] [-cpus auto|halves|LIST;LIST] [-v] [-out DIR] A B`)
+                     [-parallel] [-cpus auto|halves|LIST;LIST] [-v] [-out DIR] A B
+  (a label NAME@VAR=VALUE runs NAME's build with VAR=VALUE in its environment)`)
 	os.Exit(2)
+}
+
+// labelExe is placement n of a compared label's build and what its runs add
+// to their environment: a label NAME@VAR=VALUE[@VAR=VALUE] runs NAME's
+// build with those variables, so that one build can be compared with
+// itself under another setting, as QJS_REG=1 runs the register tier.
+func labelExe(out, label string, n int) (string, []string) {
+	parts := strings.Split(label, "@")
+	return exePath(out, parts[0], n), parts[1:]
 }
 
 // defaultOut is where the builds go unless -out says otherwise.
@@ -458,7 +468,8 @@ func compareCmd(args []string) error {
 		res[l] = make([]map[string][]float64, len(ns))
 		for i, n := range ns {
 			res[l][i] = map[string][]float64{}
-			if _, err := os.Stat(exePath(*out, labels[l], n)); err != nil {
+			exe, _ := labelExe(*out, labels[l], n)
+			if _, err := os.Stat(exe); err != nil {
 				return fmt.Errorf("no placement %d of %s: build it first", n, labels[l])
 			}
 		}
@@ -477,7 +488,7 @@ func compareCmd(args []string) error {
 		for i, n := range ns {
 			if !*parallel {
 				for l := range labels {
-					got, err := runPlacement(exePath(*out, labels[l], n), *dir, *bench, *suite, n, *jitEnabled, *jitBackground, *micro, nil, &reps)
+					got, err := runPlacement(labels[l], *out, *dir, *bench, *suite, n, *jitEnabled, *jitBackground, *micro, nil, &reps)
 					if err != nil {
 						return err
 					}
@@ -493,7 +504,7 @@ func compareCmd(args []string) error {
 			for l := range labels {
 				g := groups[(l+i+round)%2]
 				go func() {
-					got[l], errs[l] = runPlacement(exePath(*out, labels[l], n), *dir, *bench, *suite, n, *jitEnabled, *jitBackground, *micro, g, &reps)
+					got[l], errs[l] = runPlacement(labels[l], *out, *dir, *bench, *suite, n, *jitEnabled, *jitBackground, *micro, g, &reps)
 					done <- struct{}{}
 				}()
 			}
@@ -597,7 +608,8 @@ func (t *repsTable) of(name string, ms float64) int {
 // whose tests each do the same work every run, and reads each test's time
 // of one operation, in nanoseconds, with no total. On cpus, if any, with
 // GOMAXPROCS as many.
-func runPlacement(exe, dir, bench, suite string, n int, jitEnabled, jitBackground, micro bool, cpus cpuset.Set, reps *repsTable) ([]named, error) {
+func runPlacement(label, out, dir, bench, suite string, n int, jitEnabled, jitBackground, micro bool, cpus cpuset.Set, reps *repsTable) ([]named, error) {
+	exe, env := labelExe(out, label, n)
 	run := func(reps int, only string) ([]named, error) {
 		args := []string{"-dir", dir, "-n", strconv.Itoa(reps)}
 		if micro {
@@ -617,6 +629,7 @@ func runPlacement(exe, dir, bench, suite string, n int, jitEnabled, jitBackgroun
 		}
 		cmd := exec.Command(exe, args...)
 		cmd.Env = append(os.Environ(), "V8BENCH_STACKPAD="+strconv.Itoa(5*n), "V8BENCH_JITPAD="+strconv.Itoa(jitPads[n%len(jitPads)]), "V8BENCH_JITSEED="+strconv.Itoa(n+1), "V8BENCH_JITLINE="+strconv.Itoa(jitLines[n%len(jitLines)]))
+		cmd.Env = append(cmd.Env, env...)
 		var outb bytes.Buffer
 		cmd.Stdout = &outb
 		if cpus != nil {
