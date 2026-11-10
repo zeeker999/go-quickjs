@@ -547,3 +547,45 @@ function wide() { var src = "return {"; for (var i = 0; i < 300; i++) src += "p"
 	}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffCharCodeAt compares s.charCodeAt(i) (char_code_at) with the
+// tree's: positions inside, at and past the ends, fractions, NaN, -0 and
+// infinities; surrogate halves; arguments that are no number, whose
+// conversion runs code; receivers that are no string -- a String object,
+// a number, null, an object with a method of its own that throws; the
+// built-in replaced by a function and by a getter, and put back; and the
+// stacks and messages of what throws, placed at the read or the call.
+func TestRegDiffCharCodeAt(t *testing.T) {
+	src := `
+function codes(s) { var r = [], i; for (i = -2; i < s.length + 2; i++) r.push(s.charCodeAt(i)); var xs = [0.5, -0.5, -0, NaN, Infinity, -Infinity, 1.99, 2147483648]; for (var k = 0; k < xs.length; k++) { i = xs[k]; r.push(s.charCodeAt(i)) } return r.join() }
+function args(s) { var r = [], xs = [undefined, "1", null, true, { valueOf: function () { r.push("v"); return 2 } }, [1]], i; for (var k = 0; k < xs.length; k++) { i = xs[k]; r.push(s.charCodeAt(i)) } return r.join() }
+function recv(xs) { var r = [], i = 1; for (var k = 0; k < xs.length; k++) { var s = xs[k]; try { r.push(s.charCodeAt(i)) } catch (e) { r.push(e.name + ": " + e.message + " @" + String(e.stack).split("\n").slice(1, 3).join(";")) } } return r.join("|") }
+function own() { var o = { charCodeAt: function (i) { return "own" + i } }, t = { charCodeAt: function (i) { throw new Error("t" + i) } }, n = { charCodeAt: 7 }; return recv([o, t, n, new String("ab"), 5, null, undefined, "xy"]) }
+function patched() { var r = [], s = "abc", i = 1, f = String.prototype.charCodeAt; String.prototype.charCodeAt = function (k) { return "p" + k + this }; r.push(s.charCodeAt(i)); String.prototype.charCodeAt = f; r.push(s.charCodeAt(i)); Object.defineProperty(String.prototype, "charCodeAt", { get: function () { r.push("g"); return f }, configurable: true }); r.push(s.charCodeAt(i)); Object.defineProperty(String.prototype, "charCodeAt", { value: f, writable: true, configurable: true }); r.push(s.charCodeAt(i)); String.prototype.charCodeAt = f.bind("zz"); r.push(s.charCodeAt(i)); String.prototype.charCodeAt = f; return r.join() }
+function viaThis() { String.prototype.cc = function (i) { return this.charCodeAt(i) }; var r = "hey".cc(1); delete String.prototype.cc; return r }
+function scan(s) { var h = 0, i; for (i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return h }
+`
+	calls := []string{`codes("ab\ud83d\ude00c")`, `codes("")`, `args("hello")`, `own()`, `patched()`, `viaThis()`,
+		`scan("the quick brown fox \u00e9\u4e2d")`}
+	for i := range calls {
+		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])
+	}
+	regDiff(t, src, calls)
+}
+
+// TestRegDiffRegExpLiterals compares RegExp literals (new_regexp) with the
+// tree's: a new object at each evaluation, with its own lastIndex; a
+// literal given to replace, split, match and test, whose RegExp the tree
+// may have back; flags; and a literal's object kept and compared.
+func TestRegDiffRegExpLiterals(t *testing.T) {
+	src := `
+function esc(s) { return s.indexOf("<") < 0 ? s : s.replace(/</g, "&lt;") }
+function lits() { var r = [], k = [], i; for (i = 0; i < 4; i++) { var x = /a(b)?/g; k.push(x); r.push(x.lastIndex, x.exec("xabab") + "", x.lastIndex) } r.push(k[0] === k[1], k[0].source, k[0].flags, /x/imsu.flags, /\u{1F600}/u.test("\ud83d\ude00")); return r.join() }
+function uses(s) { return [esc(s), s.split(/,\s*/).length, (s.match(/\d+/g) || []).join("+"), /^\w/.test(s), s.replace(/(\d)/g, function (m, d) { return d * 2 })].join("|") }
+`
+	calls := []string{`lits()`, `uses("a <b>, 12, c3 <")`, `uses("plain 7")`, `uses("")`}
+	for i := range calls {
+		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])
+	}
+	regDiff(t, src, calls)
+}

@@ -1211,6 +1211,11 @@ func (g *gen) expr(e ast.Expr, dst int) int {
 			g.emit(bytecode.MakeRBC(bytecode.RLoadConst, 0, r16(d), g.constIdx(bytecode.Constant{Kind: bytecode.ConstString, Str: n.Value})))
 		}
 		return d
+	case *ast.RegexpLit:
+		d := g.dest(dst)
+		g.at(n.Start)
+		g.emit(bytecode.MakeRBC(bytecode.RNewRegExp, 0, r16(d), g.constIdx(bytecode.Constant{Kind: bytecode.ConstRegExp, Str: n.Pattern, Flags: n.Flags})))
+		return d
 	case *ast.BoolLit:
 		d := g.dest(dst)
 		op := bytecode.RLoadFalse
@@ -2264,6 +2269,9 @@ func (g *gen) call(n *ast.Call, dst int) int {
 			return g.applyArgs(n, m, dst)
 		}
 	}
+	if d, ok := g.charCodeAt(n, dst); ok {
+		return d
+	}
 	argc := len(n.Args)
 	w := g.allocN(2 + argc)
 	op := bytecode.RCallW
@@ -2323,6 +2331,47 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	g.at(n.TracePos())
 	g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), g.callSite()))
 	return d
+}
+
+// charCodeAt compiles recv.charCodeAt(i), a receiver in a binding and its
+// argument a local no one else writes in one of the first 256 registers, as
+// char_code_at, and reports false for any other call. The argument is read
+// after the method, as the call reads it, and nothing the read runs can
+// write it.
+func (g *gen) charCodeAt(n *ast.Call, dst int) (int, bool) {
+	m, ok := n.Callee.(*ast.Member)
+	if !ok || m.Computed || m.Optional || len(n.Args) != 1 || !g.inPlace(m.Object) {
+		return 0, false
+	}
+	if _, ok := m.Object.(*ast.Super); ok {
+		return 0, false
+	}
+	if name, ok := propName(m); !ok || name != "charCodeAt" {
+		return 0, false
+	}
+	id, ok := n.Args[0].(*ast.Ident)
+	if !ok {
+		return 0, false
+	}
+	res, ok := g.rec.Read[id]
+	if !ok || res.Kind != ResLocal || g.fn.Locals[res.Index].Captured || g.slotReg[res.Index] >= 256 {
+		return 0, false
+	}
+	o := g.expr(m.Object, -1)
+	a := g.expr(id, -1)
+	if a >= 256 {
+		g.fail("char_code_at's argument past register 255")
+		return g.dest(dst), true
+	}
+	d := g.dest(dst)
+	site := g.propSite(bytecode.OpGetPropThis, g.nameIdx("charCodeAt"))
+	g.at(n.TracePos())
+	at := g.emit(bytecode.MakeR(bytecode.RCharCodeAt, uint8(a), r16(d), r16(o), site))
+	if g.stores == nil {
+		g.stores = map[int]int32{}
+	}
+	g.stores[at] = int32(m.Property.Pos())
+	return d, true
 }
 
 // key is the register of the key k of t, a computed member read and then

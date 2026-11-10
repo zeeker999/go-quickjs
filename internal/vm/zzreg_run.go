@@ -636,7 +636,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			}
 			goto slow
 		case bytecode.RBin, bytecode.RUnary, bytecode.RDefineField, bytecode.RNewObject,
-			bytecode.RNewArray, bytecode.RClosure, bytecode.RNew, bytecode.RCloseUpvals:
+			bytecode.RNewArray, bytecode.RClosure, bytecode.RNew, bytecode.RCloseUpvals, bytecode.RNewRegExp:
 			// What the loop has no fast path of its own for.
 			kept.pc = pc
 			if _, err := r.regSlow(f, c, &kept, regs); err != nil {
@@ -1168,15 +1168,17 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 					s.building = false
 				}
 			}
+		case bytecode.RCharCodeAt:
+			kept.pc = pc
+			if err := r.regCharCodeAt(f, c, &kept, regs); err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
 		// Every value of the switch is a case, so that it is a jump table
 		// that needs no range check: Go makes one only of a switch whose
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile.
-		case 125:
-			goto invalid
-		case 126:
-			goto invalid
 		case 127:
 			goto invalid
 		}

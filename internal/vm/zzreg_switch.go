@@ -304,3 +304,63 @@ func (r *Runtime) regAppend(f *frame, c *regCode, k *regKept, regs *[1 << 16]Val
 	}
 	return err
 }
+
+// regCharCodeAt is char_code_at, a case of runReg's: s.charCodeAt(i) of a
+// string, its method the built-in read from the cache primProp fills and
+// its argument a number, read here as the tree's charCodeAtCall reads it,
+// without the method's read on the slow path, the call's site and the
+// built-in's conversions; anything else is regCharCodeAtSlow's. The case
+// keeps nothing of the instruction across the call; this reads it back.
+//
+//go:noinline
+func (r *Runtime) regCharCodeAt(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value) error {
+	pc := k.pc - 1
+	w := regAt(c.code, pc)
+	if o := regs[w.B()]; o.IsString() {
+		key := f.cl.names[c.siteName[w.C()]]
+		p := r.proto.str
+		if e := &r.primProps[key&63]; e.key == key && e.proto == p && e.shape == p.shape {
+			if m := p.vals()[e.idx]; m.IsObject() {
+				if fd := m.Object().fn(); fd != nil && fd.elemOp == elemStrCharCodeAt && !fd.bound {
+					if a := regs[w.X()]; a.IsNumber() {
+						x := a.Number()
+						if x != x {
+							x = 0
+						}
+						// ToIntegerOrInfinity truncates toward zero, so any
+						// position above -1 and below the length is a code
+						// unit's.
+						v := Float(math.NaN())
+						if s := o.String(); x > -1 && x < float64(s.Len()) {
+							v = Int(s.CharCodeAt(int(x)))
+						}
+						regs[w.A()] = v
+						return nil
+					}
+				}
+			}
+		}
+	}
+	return r.regCharCodeAtSlow(f, c, pc, regs)
+}
+
+// regCharCodeAtSlow is char_code_at as get_method_w and call_method_w make
+// it: the method read, with the read's position (Aux), then the argument
+// read, and the call, with the call's.
+func (r *Runtime) regCharCodeAtSlow(f *frame, c *regCode, pc int, regs *[1 << 16]Value) error {
+	w := regAt(c.code, pc)
+	o := regs[w.B()]
+	f.pc = c.rc.Aux[pc] + 1
+	m, err := r.regGetMethod(f.cl, c, w, o)
+	if err != nil {
+		return err
+	}
+	a := regs[w.X()]
+	f.pc = c.src[pc] + 1
+	v, err := r.regCall(m, o, []Value{a})
+	if err != nil {
+		return err
+	}
+	regs[w.A()] = v
+	return nil
+}

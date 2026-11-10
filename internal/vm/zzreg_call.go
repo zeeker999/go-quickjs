@@ -1029,6 +1029,8 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		v = Obj(r.newArrayFrom(r.stack[b : b+int(w.C())]))
 	case bytecode.RClosure:
 		v = Obj(r.makeClosure(f, cl.consts[w.BC()]))
+	case bytecode.RNewRegExp:
+		v, err = r.newRegExpLiteral(&cl.fn.Constants[w.BC()])
 	case bytecode.RNew:
 		b := wb + int(w.A())
 		if v, err = r.construct(regs[w.A()], r.stack[b+1:b+1+int(w.X())]); err == nil {
@@ -1543,6 +1545,22 @@ func (r *Runtime) regGetMethod(cl *closure, c *regCode, w bytecode.RInstr, obj V
 		}
 		if v, ok := r.cachedProp(&cl.ic[site], obj.Object(), name); ok {
 			return v, nil
+		}
+	} else {
+		// A string's or a number's method, from the cache of its
+		// prototype's data properties that primProp fills, as the tree's
+		// primMethod reads it: s.indexOf, n.toString.
+		var p *Object
+		if obj.IsString() {
+			p = r.proto.str
+		} else if obj.IsNumber() {
+			p = r.proto.number
+		}
+		if e := &r.primProps[name&63]; p != nil && e.key == name && e.proto == p && e.shape == p.shape {
+			if verifyShapes {
+				checkShape(p)
+			}
+			return p.vals()[e.idx], nil
 		}
 	}
 	return r.getValueProp(obj, name)
