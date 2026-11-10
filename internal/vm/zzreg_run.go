@@ -72,8 +72,10 @@ type regCode struct {
 	// calls nothing, or one that only reads or writes its this's
 	// properties; read here rather than in the function, a line away.
 	leaf uint8
-	rc   *bytecode.RegCode
-	fn   *bytecode.Function
+	// leafArg is the parameter a regLeafArg body returns.
+	leafArg int32
+	rc      *bytecode.RegCode
+	fn      *bytecode.Function
 }
 
 // regWindow is the frame's registers from base. The register form's
@@ -174,6 +176,20 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 	case fn.Leaf != bytecode.LeafNone && fn.Leaf != bytecode.LeafPure:
 		c.leaf = regLeafThis
 	}
+	if len(rc.Code) > 0 {
+		// A body that returns a parameter, or nothing, first thing -- what
+		// follows is unreachable: a call's answer is read from its window,
+		// with no frame and no evaluator, whatever its this, which the
+		// body never reads.
+		switch w := rc.Code[0]; w.Op() {
+		case bytecode.RRet:
+			if a := int(w.A()); a >= 2 && a < 2+int(rc.Params) {
+				c.leaf, c.leafArg = regLeafArg, int32(a-2)
+			}
+		case bytecode.RRetUndef:
+			c.leaf = regLeafUndef
+		}
+	}
 	t := &tree{reg: c}
 	t.blocks = []tblock{{body: []tstmt{regStmt(c)}, next: regNext}}
 	return t
@@ -184,6 +200,10 @@ const (
 	regLeafNone = iota
 	regLeafPure
 	regLeafThis
+	// regLeafArg returns its parameter leafArg, and regLeafUndef nothing:
+	// regCallW answers them from the window.
+	regLeafArg
+	regLeafUndef
 )
 
 // regTrace prints why a function has no register code.

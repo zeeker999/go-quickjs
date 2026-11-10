@@ -292,6 +292,12 @@ function upd(t) { t.x++ }
 function updLoop(t) { for (var i = 0; i < 2; i++) t[0] += 1 }
 function made(t, i) { t[i - 1] += 1; t[i + ""] |= 2; t[` + "`k${i}`" + `] += "s"; t[-i]++; t[i++] += 1; t[!i] = 1; return JSON.stringify(t) + i }
 function post(t, i) { var s = []; for (var n = 0; n < 4; n++) s.push(t[i++], t[i--]); return s.join() + " " + typeof i + " " + i }
+function id(a, b) { return b }
+function none() {}
+var ido = { id: function (k) { return k }, none: none, arrow: (k) => k };
+class Ret { constructor(k) { return k } }
+function ctors(n) { var r = []; for (var i = 0; i < n; i++) { try { r.push(Ret(i)) } catch (e) { r.push(e.name) } r.push(typeof new id(i, i), typeof new Ret({}), typeof new Ret(i)) } return r.join() }
+function trivial(n) { var s = []; for (var i = 0; i < n; i++) s.push(id(i, i * 2), id(i), none(i), ido.id(i), ido.id(), ido.none(), ido.arrow(i), id.call(3, 1, i), ido.id.apply("s", [i])); return s.join() }
 function madeObj(t) { var k = o(5); t[k + ""] += 1; t["" + e(6)] += 1; return JSON.stringify(t) }
 function caught(f, a) { try { f(a) } catch (x) { return x.message + " " + x.stack.split(String.fromCharCode(10))[1] } }
 `
@@ -305,7 +311,7 @@ function caught(f, a) { try { f(a) } catch (x) { return x.message + " " + x.stac
 		`caught(upd, null)`, `caught(upd, undefined)`, `caught(updLoop, null)`,
 		`made({}, 3)`, `run(function () { return madeObj({}) })`, `run(function () { return caught(madeObj, null) })`,
 		`caught(made, null)`, `caught(made, undefined)`,
-		`post([1, 2, , 4, 5], 0)`, `post([1, 2, 3], "1")`, `post("abcdef", 1)`, `post({ 1: "a", 2: "b" }, 1)`,
+		`trivial(5)`, `ctors(4)`, `post([1, 2, , 4, 5], 0)`, `post([1, 2, 3], "1")`, `post("abcdef", 1)`, `post({ 1: "a", 2: "b" }, 1)`,
 		`run(function () { return post([7, 8, 9], o(1)) })`, `caught(post, null)`, `post([1, 2], 1.5)`, `post([1, 2], -1)`,
 	}
 	for i := range calls {

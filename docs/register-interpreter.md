@@ -626,6 +626,15 @@ What the measurements found, against the design:
   written, and a pure body the frameless evaluator has given up on leaves
   the site's leaf kind. `method_call_leaf` stays near 38 ns against the
   tree's 31: the tree's one node is six register instructions here.
+- **Trivial bodies and built-ins at the call site.** A body whose first
+  instruction returns a parameter, or nothing, is answered by `regCallW`
+  from the window (`regLeafArg`, `regLeafUndef`), not by the frameless
+  evaluator: `method_call_leaf` 40 to 25 ns against the tree's 31. A
+  built-in of this realm is a kind of the site's cache (`regCallNative`),
+  called by `regNative` as `callDirect` calls one -- Math's functions,
+  push and pop and the native leaves without a frame -- rather than
+  through `regCallSlow`, `regCall` and `callDirect`'s search:
+  `array_push` 70 to 52 ns, `array_pop` 64 to 45.
 - **Strict global stores and lazy arguments.** A strict store of a value
   that runs no code asks at the store whether the name resolves
   (`set_global` with X=1), as the stack form's folded `set_global_strict`
@@ -638,7 +647,11 @@ What the measurements found, against the design:
   placements, `crypto_am3` is 2% faster and Crypto 1 to 4% at every one.
   NavierStokes, which has no `x[i++]`, is 23% slower at one placement and
   level at the others: the case moves the loop's code, which that
-  placement puts on a bad alignment. `get_method_w`, re-measured the same
+  placement puts on a bad alignment (the second of `-k 4`'s placements,
+  placement 3: 54.7 to 67.5 ms, reproduced in two runs). The cliff is in
+  the layout of the cases inside `runReg`, which the lock does not hold;
+  it is left to the step that lays out the loop, the call routine and the
+  entry as one block the lock anchors. `get_method_w`, re-measured the same
   way, stays: without it `method_call` is 7% slower at every placement and
   the V8 total slower at every one. The
   loop's own alignment moves the small loops: `loop_locals` is 10.4 to 11.3

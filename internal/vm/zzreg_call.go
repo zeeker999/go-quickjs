@@ -155,6 +155,14 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 			// A leaf is answered first, before the frame's pc is written:
 			// its body reads nothing of the frame and throws nothing.
 			if e.kind&regCallLeaf != 0 {
+				if leaf := e.rc.leaf; leaf >= regLeafArg {
+					v := Undefined
+					if p := int(e.rc.leafArg); leaf == regLeafArg && p < int(w.X()) {
+						v = win[2+p]
+					}
+					regWindow(r.stack, wb)[w.B()] = v
+					return nil
+				}
 				// The this is given to the body, not written to the
 				// window: a miss writes it (regCallSlow).
 				this, ok := win[1], true
@@ -183,6 +191,9 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 				return r.regCallMiss(f, c, w, wb)
 			}
 			f.pc = regSrc(c, pc) + 1
+			if e.kind == regCallNative {
+				return r.regNative(e.callee, w, wb)
+			}
 			ok := e.kind == regCallEnter
 			if e.kind == regCallThis {
 				win[1] = e.this
@@ -306,7 +317,7 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base int)
 			kind uint8
 			this Value
 		)
-		if e != nil && e.callee == o && e.kind != 0 {
+		if e != nil && e.callee == o && e.kind != 0 && e.kind != regCallNative {
 			// A callee the site knows, whose call is not regCallW's alone.
 			cl, rc, kind, this = e.cl, e.rc, e.kind&^(regCallOut|regCallLeaf), e.this
 		} else if fd := o.fn(); fd != nil && fd.closure != nil && !fd.bound {
@@ -376,6 +387,14 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base int)
 			return r.regEnterW(o, cl, rc, base, argc, r.stack[base+2:base+2+argc], Undefined)
 		}
 	}
+	if calls := f.cl.regCalls; callee.IsObject() && uint(w.C()) < uint(len(calls)) {
+		// A built-in of this realm: the site calls it as callDirect does,
+		// without the generic call's search (regNative).
+		o := callee.Object()
+		if fd := o.fn(); fd != nil && fd.native != nil && !fd.bound && (fd.realm == nil || fd.realm == r.Realm) && o != r.callFn {
+			calls[w.C()] = regCallCache{callee: o, kind: regCallNative}
+		}
+	}
 	if regReportOn {
 		regCrossOf(regCrossOut, callee)
 	}
@@ -410,6 +429,9 @@ const (
 	// regCallObjThis is a method's call of a function that coerces its
 	// this, entered as it is for an object receiver.
 	regCallObjThis
+
+	// regCallNative is a built-in of this realm, which regNative calls.
+	regCallNative = 4
 
 	regCallOut = 8
 	// regCallLeaf marks a callee whose body regCallW may answer without a
@@ -1293,4 +1315,49 @@ func (r *Runtime) regFrameThis(f *frame) (this, newTarget Value) {
 		newTarget = f.newTarget
 	}
 	return this, newTarget
+}
+
+// regNative is call_w's call of the built-in o a site has cached, made as
+// callDirect makes one: Math's functions, push and pop and the native
+// leaves answered without a frame where their checks pass, anything else
+// with the built-in's frame. Its value goes to R[B].
+func (r *Runtime) regNative(o *Object, w bytecode.RInstr, wb int) error {
+	base := wb + int(w.A())
+	args := r.stack[base+2 : base+2+int(w.X())]
+	this := Undefined
+	if w.Op() == bytecode.RCallMW {
+		this = r.stack[base+1]
+	}
+	fd := o.fn()
+	v, ok := Undefined, false
+	if fd.mathOp != 0 {
+		v, ok = mathCall(fd.mathOp, args)
+	} else if op := fd.elemOp; op >= elemNativeFirst {
+		if r.meter == nil && leafChecks[op](r, this, args) {
+			var err error
+			v, err = fd.native(r, this, args)
+			ok = err == nil
+		}
+	} else if op != 0 {
+		v, ok = r.pureElemOp(op, this, args, true)
+	}
+	if !ok {
+		if err := r.tick(); err != nil {
+			return err
+		}
+		if err := r.nativeFrame(o, fd, this, args, Undefined); err != nil {
+			return err
+		}
+		var err error
+		v, err = fd.native(r, this, args)
+		r.frameDepth--
+		if r.meter != nil && err == nil {
+			err = r.chargeResult(v)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	r.stack[wb+int(w.B())] = v
+	return nil
 }
