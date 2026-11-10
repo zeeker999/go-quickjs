@@ -178,7 +178,29 @@ const (
 	// inner is how many never-taken tests each placement adds to nop's
 	// case, times its number.
 	inner = 3
+	// regGo and regNop are the register interpreter's loop and its first
+	// case, which regInner fills.
+	regGo  = "internal/vm/zzreg_run.go"
+	regNop = "\t\tcase bytecode.RNop:\n"
+	// regInnerMax is one more than the most calls regInner gives a
+	// placement, and padKeysLen the keys the tests of both fillers read:
+	// as many in every placement, so that the zeroed data after them is
+	// where it is whatever the placement.
+	regInnerMax = 8
+	padKeysLen  = 3 * regInnerMax
 )
+
+// regInner is how many calls of padRegInner placement n puts in runReg's
+// first case, nop's, which runs no hot code: each is inlined to three
+// never-taken tests, which move every case laid out after it within the
+// loop, as inner's tests move executeAt's. The pads move runReg as a
+// whole; this moves its cases against each other and against the
+// dispatch, which no pad does. A permutation of 0 to 7 over the eight, so
+// that it follows neither inner's count (3n) nor a bit of the design: -k
+// 4's placements 0, 3, 5 and 6 get 2, 1, 3 and 0. A call is a few of the
+// loop's IR nodes before inlining, which is what Go's big-function size
+// counts; the tests' bytes come after it.
+func regInner(n int) int { return (5*n + 2) % regInnerMax }
 
 // placementsOf is the placements -k takes: placements 0, 3, 5 and 6 for
 // four, over which every target but the closures is at each phase twice;
@@ -272,6 +294,13 @@ func buildCmd(args []string) error {
 	if bytes.Count(src, []byte(nop)) != 1 {
 		return fmt.Errorf("%s has no case for nop to put the tests in", vmGo)
 	}
+	regSrc, err := os.ReadFile(regGo)
+	if err != nil {
+		return err
+	}
+	if bytes.Count(regSrc, []byte(regNop)) != 1 {
+		return fmt.Errorf("%s has no case for register nop to put the tests in", regGo)
+	}
 	for _, p := range pads {
 		if _, err := os.Stat(p); err == nil {
 			return fmt.Errorf("%s exists: a build was interrupted? remove it", p)
@@ -285,6 +314,7 @@ func buildCmd(args []string) error {
 	// does the same before it ends the program.
 	restore := func() {
 		os.WriteFile(vmGo, src, 0o644)
+		os.WriteFile(regGo, regSrc, 0o644)
 		for _, p := range pads {
 			os.Remove(p)
 		}
@@ -300,20 +330,20 @@ func buildCmd(args []string) error {
 
 	for _, n := range placementsOf(*k) {
 		exe := exePath(*out, *label, n)
-		ref, err := buildAt(src, [nPads]int{}, inner*n, dataPhase(n), exe)
+		ref, err := buildAt(src, regSrc, [nPads]int{}, inner*n, regInner(n), dataPhase(n), exe)
 		if err != nil {
 			return err
 		}
 		counts := padCounts(ref, n)
-		got, err := buildAt(src, counts, inner*n, dataPhase(n), exe)
+		got, err := buildAt(src, regSrc, counts, inner*n, regInner(n), dataPhase(n), exe)
 		if err != nil {
 			return err
 		}
 		if p, want := phases(got), design(n); p != want {
 			return fmt.Errorf("placement %d: phases %v, want %v (pads %v)", n, p, want, counts)
 		}
-		fmt.Printf("%s-%d: pads %v, phases %v, distances %d %d %d %d\n", *label, n, counts, phases(got),
-			got[1]-got[0], got[2]-got[1], got[3]-got[2], got[4]-got[3])
+		fmt.Printf("%s-%d: pads %v, phases %v, runReg's inner calls %d, distances %d %d %d %d\n", *label, n, counts,
+			phases(got), regInner(n), got[1]-got[0], got[2]-got[1], got[3]-got[2], got[4]-got[3])
 	}
 	fmt.Printf("built %d placements of %s in %s\n", *k, *label, *out)
 	return nil
@@ -321,7 +351,7 @@ func buildCmd(args []string) error {
 
 // buildAt writes the pads and the tests, builds v8bench to exe, and says
 // where the targets are in it.
-func buildAt(src []byte, counts [nPads]int, tests, data int, exe string) ([nPads]uint64, error) {
+func buildAt(src, regSrc []byte, counts [nPads]int, tests, regCalls, data int, exe string) ([nPads]uint64, error) {
 	var addrs [nPads]uint64
 	var body strings.Builder
 	for i := range tests {
@@ -329,6 +359,9 @@ func buildAt(src []byte, counts [nPads]int, tests, data int, exe string) ([nPads
 	}
 	patched := strings.Replace(string(src), nop, nop+body.String(), 1)
 	if err := os.WriteFile(vmGo, []byte(patched), 0o644); err != nil {
+		return addrs, err
+	}
+	if err := os.WriteFile(regGo, []byte(regFill(regSrc, regCalls)), 0o644); err != nil {
 		return addrs, err
 	}
 	for p, m := range counts {
@@ -375,6 +408,16 @@ func buildAt(src []byte, counts [nPads]int, tests, data int, exe string) ([nPads
 	return addrs, nil
 }
 
+// regFill is the loop's source with calls calls of padRegInner in its
+// nop case, each on keys of its own.
+func regFill(regSrc []byte, calls int) string {
+	var body strings.Builder
+	for j := range calls {
+		fmt.Fprintf(&body, "\t\t\tpadRegInner(uint32(w.A()), %d)\n", 3*j)
+	}
+	return strings.Replace(string(regSrc), regNop, regNop+body.String(), 1)
+}
+
 // padFile is pad p with m functions. The first holds the one init, which
 // keeps every pad's functions reachable, and the tests' keys: it is before
 // the first target, where its size is the same in every placement.
@@ -382,7 +425,13 @@ func padFile(p, m, tests, data int) []byte {
 	var b strings.Builder
 	b.WriteString("package vm\n\n")
 	if p == 0 {
-		fmt.Fprintf(&b, "var padSink int\n\nvar padKeys = [%d]uint32{}\n\n", max(tests, 1))
+		fmt.Fprintf(&b, "var padSink int\n\nvar padKeys = [%d]uint32{}\n\n", max(tests, padKeysLen))
+		// runReg's filler (regInner): three tests, inlined at each call
+		// with i a constant, so that no bound is checked.
+		b.WriteString("func padRegInner(a uint32, i int) {\n" +
+			"\tif a == padKeys[i] {\n\t\tpadSink++\n\t}\n" +
+			"\tif a == padKeys[i+1] {\n\t\tpadSink += 2\n\t}\n" +
+			"\tif a == padKeys[i+2] {\n\t\tpadSink += 3\n\t}\n}\n\n")
 		// The data's phase: the initialized data, which the zeroed data
 		// follows, data bytes more (dataPhase).
 		fmt.Fprintf(&b, "var padData = [%d]byte{1}\n\n", padDataBase+data)
