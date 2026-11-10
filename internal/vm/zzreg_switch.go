@@ -196,11 +196,6 @@ func (r *Runtime) regCold(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		r.regTypeof(c, k, regs)
 	case bytecode.RNewObjectLit:
 		r.regNewObjectLit(f, c, k, regs)
-	case bytecode.RStrFreeze:
-		// A read of a binding an append grows, which what read it may
-		// keep: a keep costs more than this call, and runReg had no room
-		// for a case of its own below Go's big-function size.
-		strFreeze[struct{}](regs[w.A()])
 	}
 }
 
@@ -291,4 +286,21 @@ func (r *Runtime) regNewArrayE(f *frame, c *regCode, k *regKept, regs *[1 << 16]
 	w := regAt(c.code, pc)
 	n := arrayEmptyNode[struct{}]{site: int(w.B()), pc: int32(regSrc(c, pc))}
 	regs[w.A()] = n.make(regTctx(r, f, f.cl))
+}
+
+// regAppend is append, a case of runReg's: an append to a local, its
+// string grown in place where it alone holds it, as the tree's
+// strAppendNode grows it. The case keeps nothing of the instruction across
+// the call; this reads it back.
+//
+//go:noinline
+func (r *Runtime) regAppend(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value) error {
+	pc := k.pc - 1
+	w := regAt(c.code, pc)
+	f.pc = c.src[pc] + 1
+	v, err := strAppendOp[struct{}](r, regs[w.A()], regs[w.B()])
+	if err == nil {
+		regs[w.A()] = v
+	}
+	return err
 }

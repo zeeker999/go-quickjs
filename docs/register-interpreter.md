@@ -367,8 +367,40 @@ the ones Go allows:
   Slow paths are out of line and re-read their instruction from the code.
 - **The loop stays below Go's big-function size.** Go's inliner calls a
   function of 5,000 or more IR nodes big and inlines only callees of cost
-  20 or less into it; past that, `IsNumber` and its kind become calls in
-  every case. A test pins it, as `TestIntendedInlining` pins the helpers.
+  20 or less into it; past that, `regInt32` (cost 41, 18 calls),
+  `regTruth`, `Value.IsString`, `propCache.holder` and a dozen more become
+  calls in every case. The count is of the loop's own source, before
+  anything is inlined into it: a helper inlined costs the loop the few
+  nodes of its call, not its body. `TestRegLoopIsNotBig` pins it, as
+  `TestIntendedInlining` pins the helpers, and `internal/cmd/bigfunc`
+  measures it: `go run ./internal/cmd/bigfunc -func runReg` prints the
+  count against 5,000, `-cases 40` each case clause of 40 nodes or more,
+  and the callees above cost 20 the loop would call if it were big. The
+  budget is spent with care, a hot case at a time:
+  - **The tails are shared.** A case is a fast path and a `goto`: to
+    `slow` (the slow path, `regSlow`), `cmpSlow`, `typed`, `jump`, or
+    `taken`, a compare-and-branch taken, whose offset `SC` the tail reads.
+    The shared `taken` took 167 nodes out of the 29 compare-and-branches'
+    `off = w.SC()` and 49 instructions out of the loop. A case with no
+    fast path is a value of the one case that jumps to `slow`. A tail that
+    stores the pc (`slow`'s `kept.pc = pc`) is reached after a call only
+    with the pc read back from `kept`: set_index's `goto slow` after
+    `regSetMiss` without it made the pc live across the call, Go saved it
+    at every dispatch, and `crypto_am3` and a dozen loops were 8 to 11%
+    slower at every placement. `TestRegDispatchKeepsNoPC` disassembles the
+    loop and fails if its dispatch stores to the stack.
+  - **A case costs what its source says.** The compare-and-branches are
+    about 53 nodes each, the bitwise operators 73 to 77, a fused element
+    read or update 100 to 128, `append` (a call of `regAppend` with the pc
+    kept) about 20.
+  - **A helper that returns a bool with values does not fold.** A
+    `regNums(a, b) (x, y float64, ok bool)` in the compares saved 96 nodes
+    and added 40 instructions: its `ok` is materialised and tested where
+    the written-out `&&` branches. A saving is checked with `hotdiff
+    -funcs '(*Runtime).runReg'` against the build before it.
+  - At d931057d the loop was at 4,981, 19 below the limit; with the shared
+    tails and `append` and `str_freeze` as cases of their own it is at
+    4,790, 210 below.
 - **No constants in registers.** What Go's loop-invariant pass would take
   out of the loop is read from a variable (above).
 - **The loop holds only the hot operations.** Every case added moves the
@@ -778,17 +810,20 @@ primitive, does without. The tree's
   compare's operand or a step, keeps nothing and is not frozen, and
   `x.length` is no read for either form. A short circuit around an append
   whose value nothing uses (`r !== l && (t += x)`) is an append too.
-  Neither is a case of its own: with `append` as one -- a call of
-  `strAppendOp` out of line, nothing more -- `runReg` passed Go's
-  big-function size, and so it did with a smaller case that left only a
-  miss to the slow path. `append` is the slow path's (`regSlow`, one
-  dispatch more than a case of its own, which the call it makes anyway
-  outweighs), `str_freeze` `regCold`'s. With `append` a case of its own,
-  `string_build1` was 52.6 to 32 ns and `string_build_large1` 54 to 30 in
-  one build; through the slow path, 35.4 and 33.7 against the tree's 33.3
-  and 31.8, `template_numbers` 131 to 103 (the tree 105),
-  `local_append_read` 61 to 42 (the tree 47), against the comparison
-  engine's 50, 52, 131 and 58.
+  Both are cases of their own since the loop's budget was measured and
+  its tails shared ("The loop"): `append` a call of `regAppend` with the
+  pc kept, `str_freeze` its test inline, writing only a string an append
+  owns. Before that, with `append` the slow path's and `str_freeze`
+  `regCold`'s (d931057d), the loop had 19 nodes to spare, and over the
+  placements `string_build1` was 52.6 to 34.7 ns, `template_numbers` 130
+  to 101, `local_append_read` 60 to 43, `template_list` 356 to 312, but
+  `local_append_keep`, `local_append_once`, `append_keep_each` and
+  `append_keep_pair` 5 to 9% slower than before, a read's freeze and an
+  append each a second dispatch and a call. As cases: `string_build1`
+  30.5 (the tree 32.4, the comparison engine 49.2), `string_build_large1`
+  29.8, `local_append_keep` 62.8 (the tree 65.6, the comparison engine
+  62.4), `local_append_read` 41.0 (43.6, 58.0), `append_keep_each` 130
+  (135, 120), `local_append_once` 144 (167, 100).
 - **An object literal of plain keys is made at once**
   (`new_object_lit`): its values go into registers in order and one
   operation, behind `regCold`, makes the object with its site's room and

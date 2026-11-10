@@ -467,11 +467,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 					continue
 				}
 			}
-			kept.pc = pc
-			if _, err := r.regSlow(f, c, &kept, regs); err != nil {
-				return Undefined, err
-			}
-			pc = kept.pc
+			goto slow
 
 		case bytecode.RGetProp, bytecode.RGetMethod:
 			if o := regs[w.B()]; o.IsObject() {
@@ -574,10 +570,9 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				pc = kept.pc
 				continue
 			}
-			if _, err := r.regSlow(f, c, &kept, regs); err != nil {
-				return Undefined, err
-			}
+			// Read back, so that the pc is not live across the call.
 			pc = kept.pc
+			goto slow
 
 		case bytecode.RAdd:
 			a, b := regs[w.B()], regs[w.C()]
@@ -635,15 +630,6 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				continue
 			}
 			goto slow
-		case bytecode.RBin, bytecode.RUnary, bytecode.RDefineField, bytecode.RNewObject,
-			bytecode.RNewArray, bytecode.RClosure, bytecode.RNew, bytecode.RCloseUpvals:
-			// What the loop has no fast path of its own for.
-			kept.pc = pc
-			if _, err := r.regSlow(f, c, &kept, regs); err != nil {
-				return Undefined, err
-			}
-			pc = kept.pc
-
 		case bytecode.RJmp:
 			off = int32(w.BC())
 			goto jump
@@ -783,8 +769,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJLt:
 			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
 				if a.Number() < b.Number() {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -792,8 +777,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJLtU:
 			if a, b := regs[w.A()], cl.upvalues[w.B()].get(); a.IsNumber() && b.IsNumber() {
 				if a.Number() < b.Number() {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -801,8 +785,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJNLtU:
 			if a, b := regs[w.A()], cl.upvalues[w.B()].get(); a.IsNumber() && b.IsNumber() {
 				if !(a.Number() < b.Number()) {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -810,8 +793,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJLeU:
 			if a, b := regs[w.A()], cl.upvalues[w.B()].get(); a.IsNumber() && b.IsNumber() {
 				if a.Number() <= b.Number() {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -819,8 +801,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJNLeU:
 			if a, b := regs[w.A()], cl.upvalues[w.B()].get(); a.IsNumber() && b.IsNumber() {
 				if !(a.Number() <= b.Number()) {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -828,8 +809,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJLtI:
 			if a := regs[w.A()]; a.IsNumber() {
 				if a.Number() < float64(w.SB()) {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -837,8 +817,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJNLt:
 			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
 				if !(a.Number() < b.Number()) {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -846,8 +825,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJNLtI:
 			if a := regs[w.A()]; a.IsNumber() {
 				if !(a.Number() < float64(w.SB())) {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -855,8 +833,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJLe:
 			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
 				if a.Number() <= b.Number() {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -864,8 +841,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJLeI:
 			if a := regs[w.A()]; a.IsNumber() {
 				if a.Number() <= float64(w.SB()) {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -873,8 +849,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJNLe:
 			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
 				if !(a.Number() <= b.Number()) {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -882,8 +857,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJNLeI:
 			if a := regs[w.A()]; a.IsNumber() {
 				if !(a.Number() <= float64(w.SB())) {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -891,8 +865,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJGt:
 			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
 				if a.Number() > b.Number() {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -900,8 +873,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJGtI:
 			if a := regs[w.A()]; a.IsNumber() {
 				if a.Number() > float64(w.SB()) {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -909,8 +881,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJNGt:
 			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
 				if !(a.Number() > b.Number()) {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -918,8 +889,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJNGtI:
 			if a := regs[w.A()]; a.IsNumber() {
 				if !(a.Number() > float64(w.SB())) {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -927,8 +897,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJGe:
 			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
 				if a.Number() >= b.Number() {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -936,8 +905,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJGeI:
 			if a := regs[w.A()]; a.IsNumber() {
 				if a.Number() >= float64(w.SB()) {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -945,8 +913,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJNGe:
 			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
 				if !(a.Number() >= b.Number()) {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -954,8 +921,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RJNGeI:
 			if a := regs[w.A()]; a.IsNumber() {
 				if !(a.Number() >= float64(w.SB())) {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -964,15 +930,13 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			if a, b := regs[w.A()], regs[w.B()]; w.Op() == bytecode.RJEqI {
 				if a.IsNumber() {
 					if a.Number() == float64(w.SB()) {
-						off = w.SC()
-						goto jump
+						goto taken
 					}
 					continue
 				}
 			} else if a.IsNumber() && b.IsNumber() {
 				if a.Number() == b.Number() {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -981,15 +945,13 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			if a, b := regs[w.A()], regs[w.B()]; w.Op() == bytecode.RJNeI {
 				if a.IsNumber() {
 					if a.Number() != float64(w.SB()) {
-						off = w.SC()
-						goto jump
+						goto taken
 					}
 					continue
 				}
 			} else if a.IsNumber() && b.IsNumber() {
 				if a.Number() != b.Number() {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -998,8 +960,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			// An object other than document.all's stand-in is not == null.
 			if a := regs[w.A()]; !a.IsObject() || a.object().flags&objHTMLDDA == 0 {
 				if a.IsNullish() == (w.Op() == bytecode.RJNull) {
-					off = w.SC()
-					goto jump
+					goto taken
 				}
 				continue
 			}
@@ -1018,19 +979,16 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				goto cmpSlow
 			}
 			if eq == (w.Op() == bytecode.RJSEq) {
-				off = w.SC()
-				goto jump
+				goto taken
 			}
 		case bytecode.RJSEqI:
 			// Only a number is === a number.
 			if a := regs[w.A()]; a.IsNumber() && a.Number() == float64(w.SB()) {
-				off = w.SC()
-				goto jump
+				goto taken
 			}
 		case bytecode.RJSNeI:
 			if a := regs[w.A()]; !a.IsNumber() || a.Number() != float64(w.SB()) {
-				off = w.SC()
-				goto jump
+				goto taken
 			}
 		case bytecode.RGetIndexI:
 			if obj := regs[w.B()]; obj.IsObject() {
@@ -1137,7 +1095,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				}
 			}
 			goto slow
-		case bytecode.RNewArrayE, bytecode.RSwitch, bytecode.RSwitchTypeof, bytecode.RTypeof, bytecode.RNewObjectLit, bytecode.RStrFreeze:
+		case bytecode.RNewArrayE, bytecode.RSwitch, bytecode.RSwitchTypeof, bytecode.RTypeof, bytecode.RNewObjectLit:
 			// Operations not run per turn of a hot loop: one case, which
 			// moves none of the others' code, and a second dispatch.
 			kept.pc = pc
@@ -1160,13 +1118,15 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				}
 			}
 			if (t == w.X()&^bytecode.RCmpTrue) == (w.X()&bytecode.RCmpTrue != 0) {
-				off = w.SC()
-				goto jump
+				goto taken
 			}
 		case bytecode.RThrow:
 			return Undefined, r.regThrow(f, c, pc, regs)
-		case bytecode.RNewW, bytecode.RClosureW, bytecode.RInstanceOf, bytecode.RIn, bytecode.RDelete, bytecode.RArguments, bytecode.RNewArrayK,
-			bytecode.RApplyArgs, bytecode.RArgsLen, bytecode.RArgsIndex, bytecode.RConcat, bytecode.RAppend:
+		case bytecode.RBin, bytecode.RUnary, bytecode.RDefineField, bytecode.RNewObject,
+			bytecode.RNewArray, bytecode.RClosure, bytecode.RNew, bytecode.RCloseUpvals,
+			bytecode.RNewW, bytecode.RClosureW, bytecode.RInstanceOf, bytecode.RIn, bytecode.RDelete, bytecode.RArguments, bytecode.RNewArrayK,
+			bytecode.RApplyArgs, bytecode.RArgsLen, bytecode.RArgsIndex, bytecode.RConcat:
+			// What the loop has no fast path of its own for.
 			goto slow
 		case bytecode.RKeyOfBase:
 			// A key whose conversion runs nothing is left as it is, and a
@@ -1182,6 +1142,20 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				continue
 			}
 			goto slow
+		case bytecode.RAppend:
+			kept.pc = pc
+			if err := r.regAppend(f, c, &kept, regs); err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+		case bytecode.RStrFreeze:
+			// A read of a binding an append grows, which what read it may
+			// keep: only a string an append owns is written.
+			if v := regs[w.A()]; v.IsString() {
+				if s := v.String(); s.building {
+					s.building = false
+				}
+			}
 		// Every value of the switch is a case, so that it is a jump table
 		// that needs no range check: Go makes one only of a switch whose
 		// cases are dense, and the mask tells it the value is below 128. A
@@ -1195,6 +1169,9 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			goto invalid
 		}
 		continue
+	taken:
+		// A compare-and-branch taken: its offset is SC.
+		off = w.SC()
 	jump:
 		// A jump taken, by off: one back counts the interrupt budget.
 		if off < 0 {

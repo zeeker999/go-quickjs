@@ -996,12 +996,6 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		return Undefined, r.setIndexed(regs[w.A()], regs[w.B()], regs[w.C()], cl.fn.Strict)
 	case bytecode.RAdd:
 		v, err = r.add(regs[w.B()], regs[w.C()])
-	case bytecode.RAppend:
-		// An append to a local: its string grown in place where it alone
-		// holds it, as the tree's strAppendNode grows it. runReg has no
-		// room for a case of its own below Go's big-function size, and an
-		// append costs more than this dispatch.
-		v, err = strAppendOp[struct{}](r, regs[w.A()], regs[w.B()])
 	case bytecode.RSub:
 		v, err = r.arith(bytecode.OpSub, regs[w.B()], regs[w.C()])
 	case bytecode.RMul:
