@@ -420,6 +420,22 @@ the ones Go allows:
   made `prop_update` 8.9%, `call_fib` 8.7% and six other tests 5 to 7%
   slower at every placement; behind `regCold`, all are level and the
   switches keep their gain.
+- **Opcode values are for per-iteration hot steps.** The 7-bit space holds
+  128 values, each a case. An operation that runs per turn of a hot loop
+  takes a direct value of its own, out of the free list (`runReg`'s
+  `goto invalid` case, which lists them; a value taken out of it and left
+  there does not compile). Every other operation -- stage 2's handlers
+  and iterator steps but the hot ones, a literal's set-up, a rare
+  conversion -- is `cold`, one value, its sub-operation (`RColdOp`) in X,
+  dispatched a second time (`regColdSub`). `cold` is a value of the slow
+  path's case, whose call of `regSlow` already returns an error: with an
+  error check added to `regCold`'s case instead, `empty_loop` was 7.5%
+  and `string_build1` 6.4% slower at every placement, and without it
+  level (the loop's blocks laid out otherwise, every instruction of those
+  loops the same). A value freed goes to the end of the free
+  list, and no hot operation is renumbered: its case's code would move.
+  At the removal of the translation reference the free values are 24,
+  29, 36, 37, 40, 41, 42 and 43, and 127 is `invalid`'s.
 
 What remains is Go's: a register store of a `Value` is a write-barrier
 check, the loop's instruction word is still saved at the dispatch where a
@@ -581,6 +597,13 @@ The translation reference (`6ae14dca`) and the hand-written kernels
 (`cff0c8ab`) above: the operations are specialised, the loop is its own,
 the register window and the code are unchecked, the switch has no range
 check, and nothing a case keeps is live across a call.
+
+Both were removed once the backend (regcomp) covered what they measured:
+the translation (`internal/compiler/regform`, `QJS_REGFORM`), the kernels
+(`QJS_REGHAND`) and the eight operations only the translation emitted --
+`closure`, `bin_imm`, `jmp_cmp`, `jmp_cmp_imm`, `call`, `call_method`,
+`new` and `close_upvals` -- with their cases, slow paths and tests. Their
+figures stay recorded above; the commits named there keep the code.
 
 ### Stage 1: plain functions
 
@@ -871,16 +894,14 @@ primitive, does without. The tree's
   regexp tests 6 to 48% slower at every placement. Those mechanisms are
   owed to register code before the literal is: they are what the tree
   wins by.
-- **The opcode space is full but for two values.** The dispatch masks the
+- **The opcode space was full but for two values.** The dispatch masks the
   operation to 7 bits so that its jump table needs no range check, and
-  with `char_code_at` 126 of the 128 values are taken (126 and 127 are
-  `invalid`'s). Widening the mask costs a case value for each of the 128
-  new values, more than the loop's budget. The operations only the
-  translation reference (`regform`) emits -- `bin_imm`, `jmp_cmp`,
-  `jmp_cmp_imm`, `call`, `call_method`, `new`, `close_upvals`, `closure`
-  -- keep cases and fast paths in the loop that register code never runs;
-  sent to the slow path they would give back nodes, not values. Cold
-  operations to come share one value, their own in X, behind `regCold`.
+  with `char_code_at` 126 of the 128 values were taken. Widening the mask
+  costs a case value for each of the 128 new values, more than the loop's
+  budget. The translation reference's operations, which the backend never
+  emits, were removed with it (see stage 0): their eight values are free,
+  and `cold`, the one value every cold operation shares, took 126 (the
+  opcode allocation rule, under "The loop").
 
 #### Raw int32 registers (step 5, designed, deferred)
 
@@ -985,5 +1006,5 @@ suite by suite and retired where it no longer wins.
 ### Stage 5: one pipeline
 
 The stack compiler stops emitting code; scope resolution stays as the
-front end both backends shared. `executeAt`, the translation reference and
-the stack form's instruction set go.
+front end both backends shared. `executeAt` and the stack form's
+instruction set go.

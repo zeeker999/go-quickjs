@@ -182,7 +182,7 @@ func (t *regSwitchTable) lookup(v Value, consts []Value) int32 {
 // regCold is the operations runReg leaves to a case of one call: each
 // case added to the loop moves the code of every other, which no placement
 // varies, so only what runs per turn of a hot loop is a case of its own.
-// It switches on the operation again.
+// It switches on the operation again. None of them throws.
 func (r *Runtime) regCold(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value) {
 	w := regAt(c.code, k.pc-1)
 	switch w.Op() {
@@ -197,6 +197,152 @@ func (r *Runtime) regCold(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 	case bytecode.RNewObjectLit:
 		r.regNewObjectLit(f, c, k, regs)
 	}
+}
+
+// regColdSub is cold's operations, by the sub-operation in X: one opcode
+// value for every operation that does not run per turn of a hot loop, and
+// may throw. The loop runs cold through the slow path's case, regSlow,
+// whose error it returns: an error check in regCold's case of its own made
+// empty_loop 7.5% and string_build1 6.4% slower at every placement, the
+// loop's blocks laid out otherwise.
+// Every one of them may throw: the frame's pc is the instruction's first.
+func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value, w bytecode.RInstr) error {
+	pc := k.pc - 1
+	f.pc = c.src[pc] + 1
+	switch bytecode.RColdOp(w.X()) {
+	case bytecode.RColdNewRegExp:
+		v, err := r.newRegExpLiteral(&f.cl.fn.Constants[w.BC()])
+		if err != nil {
+			return err
+		}
+		regs[w.A()] = v
+		return nil
+	case bytecode.RColdLitExec, bytecode.RColdLitTest:
+		return r.regLitMethod(f, c, w, regs)
+	case bytecode.RColdCallLit, bytecode.RColdCallArgLit, bytecode.RColdCallDead, bytecode.RColdCallReuse:
+		return r.regRegExpCall(f, c, w, pc, regs)
+	}
+	panic("register code: no cold operation " + bytecode.RColdOp(w.X()).String())
+}
+
+// regLitMethod is lit_exec and lit_test: the literal's RegExp, made or
+// given back (newRegExpLiteral), in the window's receiver, and its method
+// in the callee's register -- the built-in, unread, where reading it would
+// find it running nothing (regexpLitMethod), as the tree's literal call
+// does, and read as get_method reads it otherwise.
+func (r *Runtime) regLitMethod(f *frame, c *regCode, w bytecode.RInstr, regs *[1 << 16]Value) error {
+	a := w.A()
+	lit, err := r.newRegExpLiteral(&f.cl.fn.Constants[w.B()])
+	if err != nil {
+		return err
+	}
+	regs[a+1] = lit
+	if m := r.regexpLitMethod(bytecode.RColdOp(w.X()) == bytecode.RColdLitTest); m != nil {
+		regs[a] = Obj(m)
+		return nil
+	}
+	v, err := r.regGetMethod(f.cl, c, bytecode.MakeR(bytecode.RGetMethod, 0, a, a+1, w.C()), lit)
+	if err != nil {
+		return err
+	}
+	regs[a] = v
+	return nil
+}
+
+// regRegExpCall is call_lit, call_arg_lit, call_dead and call_reuse: the
+// call of the window's callee, as call_method_w makes it, and what the
+// tree's nodes of those calls do around it. A literal's RegExp is given
+// back where the call keeps nothing of it and runs nothing of the
+// script's (regexpLiteralDone): exec or test, the realm's own, given a
+// primitive, of the literal's RegExp; replace, split or match searching
+// with it directly (regexpArgCall). A call of the realm's exec or replace
+// whose value nothing reads but its truth tells the function so, as
+// deadExec's node does (deadCallRest); one of exec whose value goes to a
+// local that keeps it only as execReuseOf says, the site's
+// (reuseCallRest).
+func (r *Runtime) regRegExpCall(f *frame, c *regCode, w bytecode.RInstr, pc int, regs *[1 << 16]Value) error {
+	wb := f.base - int(c.locals)
+	b := wb + int(w.A())
+	n := int(w.C())
+	fv, recv := r.stack[b], r.stack[b+1]
+	args := r.stack[b+2 : b+2+n]
+	if !fv.IsObject() {
+		v, err := r.regCall(fv, recv, args)
+		if err == nil {
+			regs[w.B()] = v
+		}
+		return err
+	}
+	o := fv.Object()
+	aux := c.rc.Aux[pc]
+	sub := bytecode.RColdOp(w.X())
+	var rx *Object
+	switch sub {
+	case bytecode.RColdCallArgLit:
+		if args[0].IsObject() && r.regexpArgCall(o, recv, args) {
+			rx = args[0].Object()
+		}
+	case bytecode.RColdCallLit:
+		if recv.IsObject() && (n == 0 || !args[0].IsObject()) {
+			if exec := r.regexpLitMethod(false); exec != nil && (o == exec || o == r.regexpLitMethod(true)) {
+				rx = recv.Object()
+			}
+		}
+	}
+	var v Value
+	var err error
+	switch {
+	case aux&bytecode.RColdDead != 0 && sub != bytecode.RColdCallReuse && o == r.regexpExecFn:
+		var mark *Object
+		if recv.IsObject() {
+			mark = recv.Object()
+		}
+		v, err = deadCallRest[struct{}](r, r.regexpExecDead, mark, o, o.fn(), recv, args)
+	case aux&bytecode.RColdDead != 0 && sub != bytecode.RColdCallReuse && o == r.strReplaceFn:
+		var mark *Object
+		if n > 0 && args[0].IsObject() {
+			mark = args[0].Object()
+		}
+		v, err = deadCallRest[struct{}](r, r.strReplaceDead, mark, o, o.fn(), recv, args)
+	case sub == bytecode.RColdCallReuse && o == r.regexpExecFn && c.reuse[int32(pc)] != nil:
+		v, err = reuseCallRest[struct{}](r, c.reuse[int32(pc)], r.stack[wb:wb+int(c.numRegs)], o, o.fn(), recv, args)
+	default:
+		v, err = r.regCall(fv, recv, args)
+	}
+	if err != nil {
+		return err
+	}
+	if rx != nil {
+		r.regexpLiteralDone(&f.cl.fn.Constants[aux&^bytecode.RColdDead], rx)
+	}
+	regs[w.B()] = v
+	return nil
+}
+
+// regReuseSites is the sites of rc's call_reuse instructions, by pc, whose
+// arrays execReuseOf says may be made again: its answer, of the stack
+// form's call and locals, put in the frame's registers.
+func regReuseSites(fn *bytecode.Function, rc *bytecode.RegCode) map[int32]*execReuseSite {
+	var out map[int32]*execReuseSite
+	for pc, w := range rc.Code {
+		if w.Op() != bytecode.RCold || bytecode.RColdOp(w.X()) != bytecode.RColdCallReuse {
+			continue
+		}
+		spc := int(rc.Aux[pc])
+		site := execReuseOf[struct{}](fn, spc+1, int(fn.Code[spc+1].A))
+		if site == nil || rc.LocalReg[site.l] < 0 || site.s >= 0 && rc.LocalReg[site.s] < 0 {
+			continue
+		}
+		rs := &execReuseSite{l: int(rc.LocalReg[site.l]), s: -1, strs: site.strs}
+		if site.s >= 0 {
+			rs.s = int(rc.LocalReg[site.s])
+		}
+		if out == nil {
+			out = map[int32]*execReuseSite{}
+		}
+		out[int32(pc)] = rs
+	}
+	return out
 }
 
 // regNewObjectLit is new_object_lit: the literal made with the room its

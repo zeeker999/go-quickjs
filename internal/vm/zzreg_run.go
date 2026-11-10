@@ -8,7 +8,6 @@ import (
 	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/compiler/regform"
 	"github.com/go-quickjs/go-quickjs/internal/jsnum"
 )
 
@@ -21,7 +20,7 @@ import (
 // closure captures a local, a stack trace reads a pc and the frame is pushed
 // and popped as ever. The loop indexes the window with 16-bit register
 // numbers through a pointer to an array of 65,536 values, which needs no
-// bounds check: the register form's verifier (regform.VerifyRegisterCode)
+// bounds check: the register backend's verifier (regcomp.Verify)
 // proves every register an instruction names is below the frame's count,
 // and a frame is given that many slots before it runs. The code is read the
 // same way, every jump proven to land in it.
@@ -83,6 +82,9 @@ type regCode struct {
 	switches []*regSwitchTable
 	rc       *bytecode.RegCode
 	fn       *bytecode.Function
+	// reuse is the sites of the code's call_reuse instructions whose
+	// arrays may be made again, by pc (regReuseSites).
+	reuse map[int32]*execReuseSite
 }
 
 // regWindow is the frame's registers from base. The register form's
@@ -117,46 +119,14 @@ func firstForm(fn *bytecode.Function) *tree {
 // regTreeOf translates fn into register code and returns the tree that runs
 // it, or nil.
 func regTreeOf(fn *bytecode.Function) *tree {
-	if regHandOn {
-		if t := regHandTree(fn); t != nil {
-			return t
-		}
-	}
 	if rc := fn.Reg; rc != nil && rc.Wide {
 		return regTreeWide(fn, rc)
 	}
-	if !regFormOn {
-		if regTrace {
-			println("reg: not", fn.Name, "(no register code)")
-		}
-		return nil
+	if regTrace {
+		println("reg: not", fn.Name, "(no register code)")
 	}
-	rc, why := regform.RegisterCode(fn)
-	if rc == nil {
-		if regTrace {
-			println("reg: not", fn.Name, why)
-		}
-		return nil
-	}
-	regsBuilt.Add(1)
-	if regDump {
-		println("reg:", fn.Name)
-		println(rc.String())
-	}
-	c := &regCode{
-		code: unsafe.Pointer(unsafe.SliceData(rc.Code)), src: rc.SrcPC, siteName: rc.SiteName,
-		numRegs: int32(rc.NumRegs), locals: int32(fn.LocalCount), params: int32(fn.ParamCount),
-		coerceThis: fn.CoerceThis, rc: rc, fn: fn,
-	}
-	t := &tree{reg: c}
-	t.blocks = []tblock{{body: []tstmt{regStmt(c)}, next: regNext}}
-	return t
+	return nil
 }
-
-// regFormOn runs, where QJS_REGFORM is set too, the frozen translation of
-// the stack form (regform) for a function the register backend did not
-// compile: the reference the backend is measured against.
-var regFormOn = os.Getenv("QJS_REGFORM") != ""
 
 // regTreeWide is the tree that runs fn's register code rc, which the
 // register backend compiled from its AST.
@@ -176,6 +146,9 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 		code: unsafe.Pointer(unsafe.SliceData(rc.Code)), src: rc.SrcPC, siteName: rc.SiteName,
 		numRegs: int32(rc.NumRegs), params: int32(rc.Params), inits: int32(rc.Inits),
 		coerceThis: fn.CoerceThis, rc: rc, fn: fn, wide: true, ncap: int32(ncap), newTarget: fn.UsesNewTarget, args: rc.UsesArguments || rc.ForwardsArguments,
+	}
+	if rc.LocalReg != nil {
+		c.reuse = regReuseSites(fn, rc)
 	}
 	switch {
 	case fn.Leaf == bytecode.LeafPure && !fn.PureCalls && regLeafRunnable(rc) && regLeafOps(fn, rc) != nil:
@@ -394,8 +367,8 @@ func regTruthy(v Value) bool {
 // A case that finishes its instruction continues the loop; one that can
 // fail sets the frame's pc to the stack form's instruction first, which is
 // what a stack trace or an error's position reads, and returns the error.
-// A frame of the register form has no handler: a function with a try
-// statement is not translated.
+// A frame has no handler yet: the backend compiles no function with a try
+// statement.
 func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 	if r.stopped != nil {
 		return Undefined, r.stopped
@@ -600,29 +573,6 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				continue
 			}
 			goto slow
-		case bytecode.RBinI:
-			if a := regs[w.B()]; a.IsNumber() {
-				x, y := a.Number(), w.SC()
-				switch bytecode.Op(w.X()) {
-				case bytecode.OpAdd:
-					regs[w.A()] = regNum(x + float64(y))
-					continue
-				case bytecode.OpSub:
-					regs[w.A()] = regNum(x - float64(y))
-					continue
-				case bytecode.OpBitOr:
-					if xi := int32(x); float64(xi) == x {
-						regs[w.A()] = Int32(xi | y)
-						continue
-					}
-				case bytecode.OpBitAnd:
-					if xi := int32(x); float64(xi) == x {
-						regs[w.A()] = Int32(xi & y)
-						continue
-					}
-				}
-			}
-			goto slow
 		case bytecode.RInc:
 			if a := regs[w.B()]; a.IsNumber() {
 				regs[w.A()] = regNum(a.Number() + 1)
@@ -636,8 +586,9 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			}
 			goto slow
 		case bytecode.RBin, bytecode.RUnary, bytecode.RDefineField, bytecode.RNewObject,
-			bytecode.RNewArray, bytecode.RClosure, bytecode.RNew, bytecode.RCloseUpvals:
-			// What the loop has no fast path of its own for.
+			bytecode.RNewArray, bytecode.RCold:
+			// What the loop has no fast path of its own for, and cold's
+			// operations, which may throw (regColdSub).
 			kept.pc = pc
 			if _, err := r.regSlow(f, c, &kept, regs); err != nil {
 				return Undefined, err
@@ -663,21 +614,10 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				off = int32(w.BC())
 				goto jump
 			}
-		case bytecode.RJmpCmp, bytecode.RJmpCmpI:
-			// The translation's generic compare-and-branch (regform).
-			goto cmpSlow
 		case bytecode.RRet:
 			return regs[w.A()], nil
 		case bytecode.RRetUndef:
 			return Undefined, nil
-		case bytecode.RCall, bytecode.RCallMethod:
-			kept.pc = pc
-			v, err := r.regCallOp(f, c, &kept, wb)
-			if err != nil {
-				return Undefined, err
-			}
-			pc = kept.pc
-			regs[regAt(code, pc-1).B()] = v
 		case bytecode.RAndI:
 			if x, ok := regInt32(regs[w.B()]); ok {
 				regs[w.A()] = Int32(x & w.SC())
@@ -1178,8 +1118,9 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		// that needs no range check: Go makes one only of a switch whose
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
-		// not compile.
-		case 126:
+		// not compile: the values the translation reference's operations
+		// had, and 127, invalid's.
+		case 24, 29, 36, 37, 40, 41, 42, 43:
 			goto invalid
 		case 127:
 			goto invalid

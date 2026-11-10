@@ -119,18 +119,6 @@ func (r *Runtime) regCall(callee, this Value, args []Value) (Value, error) {
 	return v, err
 }
 
-// regCallOp is call and call_method, the instruction before k's pc.
-func (r *Runtime) regCallOp(f *frame, c *regCode, k *regKept, wb int) (Value, error) {
-	pc := k.pc - 1
-	f.pc = c.src[pc] + 1
-	w := regAt(c.code, pc)
-	b := wb + int(w.A())
-	if w.Op() == bytecode.RCall {
-		return r.regCall(r.stack[b], Undefined, r.stack[b+1:b+1+int(w.X())])
-	}
-	return r.regCall(r.stack[b+1], r.stack[b], r.stack[b+2:b+2+int(w.X())])
-}
-
 // regCallW is call_w and call_method_w: a call whose callee's frame
 // starts at the caller's window, R[A], its parameters the arguments where
 // they lie. It writes the call's value to R[B] itself, so that the loop
@@ -976,6 +964,8 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 	var v Value
 	var err error
 	switch w.Op() {
+	case bytecode.RCold:
+		return Undefined, r.regColdSub(f, c, k, regs, w)
 	case bytecode.RGetGlobal:
 		v, err = r.regGetGlobal(f, cl, w)
 	case bytecode.RSetGlobal:
@@ -1002,8 +992,6 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		v, err = r.arith(bytecode.OpMul, regs[w.B()], regs[w.C()])
 	case bytecode.RBin:
 		v, err = r.regBinary(bytecode.Op(w.X()), regs[w.B()], regs[w.C()])
-	case bytecode.RBinI:
-		v, err = r.regBinImm(bytecode.Op(w.X()), regs[w.B()], w.SC())
 	case bytecode.RAndI, bytecode.ROrI, bytecode.RXorI, bytecode.RShlI, bytecode.RShrI, bytecode.RUShrI:
 		v, err = r.regBinImm(regStackOp[w.Op()], regs[w.B()], w.SC())
 	case bytecode.RBitAnd, bytecode.RBitOr, bytecode.RBitXor, bytecode.RShl, bytecode.RShr, bytecode.RUShr:
@@ -1027,14 +1015,6 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 	case bytecode.RNewArray:
 		b := wb + int(w.B())
 		v = Obj(r.newArrayFrom(r.stack[b : b+int(w.C())]))
-	case bytecode.RClosure:
-		v = Obj(r.makeClosure(f, cl.consts[w.BC()]))
-	case bytecode.RNew:
-		b := wb + int(w.A())
-		if v, err = r.construct(regs[w.A()], r.stack[b+1:b+1+int(w.X())]); err == nil {
-			regs[w.B()] = v
-		}
-		return v, err
 	case bytecode.RGetIndexPre:
 		// x[++i]: the step, then the read, each as the stack form makes it.
 		// Assigned, not declared: the switch's err is what the call returns.
@@ -1174,11 +1154,6 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 			s.p1 = t
 		}
 		v = Obj(sharedShare(r, s, t))
-	case bytecode.RCloseUpvals:
-		if len(f.openUpvalues) != 0 {
-			r.closeUpvaluesFrom(f, int(w.A()))
-		}
-		return Undefined, nil
 	case bytecode.RAddI:
 		v, err = r.regBinImm(bytecode.OpAdd, regs[w.B()], w.SC())
 	case bytecode.RSubI:
@@ -1207,13 +1182,6 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 	case bytecode.RJSEq, bytecode.RJSNe:
 		// A === the loop's regStrictEq does not answer: strings, BigInts.
 		return Bool(regs[w.A()].StrictEquals(regs[w.B()]) == (w.Op() == bytecode.RJSEq)), nil
-	case bytecode.RJmpCmp, bytecode.RJmpCmpI:
-		b := Int32(w.SB())
-		if w.Op() == bytecode.RJmpCmp {
-			b = regs[w.B()]
-		}
-		res, err := r.regCompare(bytecode.Op(w.X()&^bytecode.RCmpTrue), regs[w.A()], b)
-		return Bool(res == (w.X()&bytecode.RCmpTrue != 0)), err
 	default:
 		panic("register code: no slow path for " + w.Op().String())
 	}

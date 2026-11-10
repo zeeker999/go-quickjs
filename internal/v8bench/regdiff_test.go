@@ -589,3 +589,38 @@ function uses(s) { return [esc(s), s.split(/,\s*/).length, (s.match(/\d+/g) || [
 	}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffRegExpLiteralCalls compares a literal's exec and test
+// (lit_exec, lit_test, call_lit) and a literal given to replace, split and
+// match (call_arg_lit) with the tree's where the RegExp may be given back
+// and where it must not be: a sticky or global literal's lastIndex at each
+// evaluation, an object argument whose toString runs, the methods replaced
+// on the prototype and read through a getter in the order the call reads
+// them, a replacer function, a split's limit, errors thrown by the call and
+// by its arguments, and the RegExp kept by the method it calls.
+func TestRegDiffRegExpLiteralCalls(t *testing.T) {
+	src := `
+var kept = [];
+function loop(a) { var c = 0, s = ""; for (var j = 0; j < 8; j++) { if (/^a.c$/.test(a[j & 3])) c++; var m = /(\d+)-(\d+)/.exec("x" + j + "-" + (j * 3)); s += m[1] + m[2] + /a/y.test("ba") + /a/g.exec("aa").index } return c + s }
+function objs() { var log = [], o = { toString: function () { log.push("ts"); return "abc" } }; return [/b/.test(o), /b/.exec(o)[0], "a,b,,c".split(/,/, 2).join("|"), "a1b22".replace(/\d+/g, function (d) { log.push(d); return "#" }), "x".match(/y/), log.join()].join(";") }
+function patched() {
+	var p = RegExp.prototype, t = p.test, e = p.exec, log = [];
+	p.test = function (s) { log.push("test:" + s); kept.push(this); return t.call(this, s) };
+	var r1 = /q/.test("q"), r2 = "aqa".replace(/q/, "Q"), r3 = "q1q".split(/1/).join();
+	p.test = t;
+	p.exec = function (s) { log.push("exec:" + s); kept.push(this); return e.call(this, s) };
+	var r4 = /q/.test("zq"), r5 = /q/.exec("q")[0], r6 = "q".match(/q/)[0];
+	p.exec = e;
+	Object.defineProperty(p, "test", { get: function () { log.push("get"); return t }, configurable: true });
+	var r7 = /q/.test((log.push("arg"), "q"));
+	Object.defineProperty(p, "test", { value: t, writable: true, configurable: true });
+	return [r1, r2, r3, r4, r5, r6, r7, log.join(), kept.length, kept[0] === kept[1]].join(";")
+}
+function errs() { var out = []; try { /a/.test({ toString: function () { throw new RangeError("r") } }) } catch (x) { out.push(x.name) } try { "s".replace(/s/, function () { throw new TypeError("t") }) } catch (x) { out.push(x.name) } try { /a/.exec(Symbol()) } catch (x) { out.push(x.name) } return out.join() }
+`
+	calls := []string{`loop(["abc", "axc", "ab", "abcd"])`, `objs()`, `patched()`, `errs()`}
+	for i := range calls {
+		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])
+	}
+	regDiff(t, src, calls)
+}

@@ -59,7 +59,13 @@ type gen struct {
 	// slotReg is the register of each stack slot the function's bindings
 	// are in, or -1.
 	slotReg []int32
-	inits   int
+	// dead is the call whose value the expression being compiled leaves
+	// unused but for its truth: a statement's, a condition's.
+	dead *ast.Call
+	// reuses says the code has a call_reuse, whose frame's locals the
+	// runtime finds by LocalReg.
+	reuses bool
+	inits  int
 	// lexical marks the slots of let and const bindings; tdz those whose
 	// dead zone some read checks or a closure may see.
 	tdz []bool
@@ -1011,6 +1017,8 @@ func (g *gen) discard(e ast.Expr) {
 		}
 		g.assign(n, -1, false)
 		return
+	case *ast.Call:
+		g.dead = n
 	case *ast.Sequence:
 		for _, x := range n.Exprs {
 			g.discard(x)
@@ -1210,6 +1218,11 @@ func (g *gen) expr(e ast.Expr, dst int) int {
 		} else {
 			g.emit(bytecode.MakeRBC(bytecode.RLoadConst, 0, r16(d), g.constIdx(bytecode.Constant{Kind: bytecode.ConstString, Str: n.Value})))
 		}
+		return d
+	case *ast.RegexpLit:
+		d := g.dest(dst)
+		g.at(n.Start)
+		g.emit(bytecode.MakeRBC(bytecode.RCold, uint8(bytecode.RColdNewRegExp), r16(d), g.regexpConst(n)))
 		return d
 	case *ast.BoolLit:
 		d := g.dest(dst)
@@ -1654,6 +1667,9 @@ func (g *gen) cond(e ast.Expr, when bool, target *mark) {
 			g.jump(bytecode.MakeR(op, 0, r16(a), r16(b), 0), target, true)
 			return
 		}
+	}
+	if c, ok := e.(*ast.Call); ok {
+		g.dead = c
 	}
 	r := g.expr(e, -1)
 	op := bytecode.RJmpF
@@ -2255,6 +2271,8 @@ func (g *gen) args(args []ast.Expr, at int) {
 }
 
 func (g *gen) call(n *ast.Call, dst int) int {
+	dead := g.dead == n
+	g.dead = nil
 	if n.Optional || len(n.Args) > 255 {
 		g.fail("an optional call or too many arguments")
 		return g.dest(dst)
@@ -2267,9 +2285,13 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	if d, ok := g.charCodeAt(n, dst); ok {
 		return d
 	}
+	if d, ok := g.regexpLitCall(n, dst, dead); ok {
+		return d
+	}
 	argc := len(n.Args)
 	w := g.allocN(2 + argc)
 	op := bytecode.RCallW
+	argLit, mname := false, ""
 	switch c := n.Callee.(type) {
 	case *ast.Member:
 		if c.Optional {
@@ -2304,6 +2326,12 @@ func (g *gen) call(n *ast.Call, dst int) int {
 			g.emit(bytecode.MakeR(bytecode.RGetMethod, 0, r16(w), r16(w+1), g.propSite(bytecode.OpGetPropThis, g.nameIdx(name))))
 		}
 		op = bytecode.RCallMW
+		if name, ok := propName(c); ok && !c.Computed {
+			mname = name
+			if argc > 0 && (name == "replace" || name == "split" || name == "match") {
+				_, argLit = n.Args[0].(*ast.RegexpLit)
+			}
+		}
 	case *ast.Super:
 		g.fail("super()")
 		return w
@@ -2324,8 +2352,126 @@ func (g *gen) call(n *ast.Call, dst int) int {
 		d = w
 	}
 	g.at(n.TracePos())
+	dead = dead && (mname == "exec" || mname == "replace")
+	if argLit {
+		// A RegExp literal given to replace, split or match, which may
+		// have its RegExp back once the call is done with it.
+		at := g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdCallArgLit), r16(w), r16(d), uint16(argc)))
+		g.aux(at, g.regexpConst(n.Args[0].(*ast.RegexpLit))|deadBit(dead))
+		return d
+	}
+	if dead {
+		at := g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdCallDead), r16(w), r16(d), uint16(argc)))
+		g.aux(at, deadBit(true))
+		return d
+	}
+	if mname == "exec" && dst >= 0 {
+		if spc, ok := g.reuseCall(n, dst); ok {
+			at := g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdCallReuse), r16(w), r16(d), uint16(argc)))
+			g.aux(at, spc)
+			g.reuses = true
+			return d
+		}
+	}
 	g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), g.callSite()))
 	return d
+}
+
+// deadBit is the bit of a regexp call's Aux that says nothing reads its
+// value but its truth.
+func deadBit(dead bool) uint32 {
+	if dead {
+		return bytecode.RColdDead
+	}
+	return 0
+}
+
+// reuseCall finds the stack form's call of exec n compiles to, whose value
+// the next instruction stores in the local whose register is dst, and
+// returns its pc, which the runtime asks whether its arrays may be made
+// again (execReuseOf). It is the one call_method at n's position.
+func (g *gen) reuseCall(n *ast.Call, dst int) (uint32, bool) {
+	local := -1
+	for i, r := range g.slotReg {
+		if int(r) == dst && !g.fn.Locals[i].Captured {
+			local = i
+		}
+	}
+	if local < 0 {
+		return 0, false
+	}
+	code, pos, found := g.fn.Code, int32(n.TracePos()), -1
+	for i, l := range g.fn.Lines {
+		if l.Pos != pos {
+			continue
+		}
+		end := uint32(len(code))
+		if i+1 < len(g.fn.Lines) {
+			end = g.fn.Lines[i+1].PC
+		}
+		for pc := l.PC; pc < end && int(pc) < len(code); pc++ {
+			if code[pc].Op == bytecode.OpCallMethod {
+				if found >= 0 {
+					return 0, false
+				}
+				found = int(pc)
+			}
+		}
+	}
+	if found < 0 || found+1 >= len(code) || code[found+1].A != uint32(local) {
+		return 0, false
+	}
+	switch code[found+1].Op {
+	case bytecode.OpSetLocal, bytecode.OpPutLocal, bytecode.OpSetLocalGet, bytecode.OpInitLocal:
+		return uint32(found), true
+	}
+	return 0, false
+}
+
+// regexpConst is the constant of the RegExp literal n.
+func (g *gen) regexpConst(n *ast.RegexpLit) uint32 {
+	return g.constIdx(bytecode.Constant{Kind: bytecode.ConstRegExp, Str: n.Pattern, Flags: n.Flags})
+}
+
+// regexpLitCall compiles /x/.exec(...) and /x/.test(...) as lit_exec or
+// lit_test and call_lit, the literal's RegExp the receiver, and reports
+// false for any other call: the method is not read where it is the
+// built-in, and the RegExp, where the built-in given a primitive was
+// called, is the literal's again.
+func (g *gen) regexpLitCall(n *ast.Call, dst int, dead bool) (int, bool) {
+	m, ok := n.Callee.(*ast.Member)
+	if !ok || m.Computed || m.Optional {
+		return 0, false
+	}
+	lit, ok := m.Object.(*ast.RegexpLit)
+	if !ok {
+		return 0, false
+	}
+	name, ok := propName(m)
+	if !ok || name != "exec" && name != "test" {
+		return 0, false
+	}
+	k := g.regexpConst(lit)
+	if k >= limit16 {
+		return 0, false
+	}
+	sub := bytecode.RColdLitExec
+	if name == "test" {
+		sub = bytecode.RColdLitTest
+	}
+	argc := len(n.Args)
+	w := g.allocN(2 + argc)
+	g.at(lit.Start)
+	g.emit(bytecode.MakeR(bytecode.RCold, uint8(sub), r16(w), uint16(k), g.propSite(bytecode.OpGetPropThis, g.nameIdx(name))))
+	g.args(n.Args, w+2)
+	d := dst
+	if d < 0 {
+		d = w
+	}
+	g.at(n.TracePos())
+	at := g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdCallLit), r16(w), r16(d), uint16(argc)))
+	g.aux(at, k|deadBit(dead && name == "exec"))
+	return d, true
 }
 
 // charCodeAt compiles recv.charCodeAt(i), a receiver in a binding and its
@@ -2856,11 +3002,21 @@ func (g *gen) finish() *bytecode.RegCode {
 		Aux: aux, Switches: switches, Literals: g.literals, ObjKeys: g.objKeys, UsesArguments: (g.fn.UsesArguments || g.fn.MakesArguments) && !g.fn.ForwardsArguments,
 		ForwardsArguments: g.fn.ForwardsArguments,
 		Code:              g.code, NumRegs: g.max + 1, SrcPC: src, SiteName: g.siteName, This: -1,
-		Wide: true, Params: g.fn.ParamCount, Inits: g.inits, Caps: g.caps, CallSites: g.calls,
+		LocalReg: g.localReg(),
+		Wide:     true, Params: g.fn.ParamCount, Inits: g.inits, Caps: g.caps, CallSites: g.calls,
 	}
 	if why := Verify(rc, g.fn); why != "" {
 		Refuse(g.fn, why)
 		return nil
 	}
 	return rc
+}
+
+// localReg is LocalReg: each local's register, where the code has a
+// call_reuse, and nil otherwise.
+func (g *gen) localReg() []int32 {
+	if !g.reuses {
+		return nil
+	}
+	return append([]int32(nil), g.slotReg...)
 }
