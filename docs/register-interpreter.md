@@ -767,6 +767,28 @@ primitive, does without. The tree's
   answered only arrays inline and sent a string to the slow path, where the
   tree's node answers both. `string_length` 15.6 to 7.0 ns in one build
   (the tree 8.1, the comparison engine 5.5).
+- **A local's appends grow its string in place,** as the tree's do
+  (`strAppend`): the stack compiler, which decides which additions are
+  appends (`localAppend`) and which reads are followed by a `str_freeze`,
+  records both for the backend (the Record's `Appends` and `Freezes`), so
+  that the two forms agree on every binding. An append is `append`; a
+  recorded read the register form makes a value of -- a move, an
+  argument, a store, a return -- is preceded by `str_freeze` of the
+  binding's register. A read the register form makes no value of, a
+  compare's operand or a step, keeps nothing and is not frozen, and
+  `x.length` is no read for either form. A short circuit around an append
+  whose value nothing uses (`r !== l && (t += x)`) is an append too.
+  Neither is a case of its own: with `append` as one -- a call of
+  `strAppendOp` out of line, nothing more -- `runReg` passed Go's
+  big-function size, and so it did with a smaller case that left only a
+  miss to the slow path. `append` is the slow path's (`regSlow`, one
+  dispatch more than a case of its own, which the call it makes anyway
+  outweighs), `str_freeze` `regCold`'s. With `append` a case of its own,
+  `string_build1` was 52.6 to 32 ns and `string_build_large1` 54 to 30 in
+  one build; through the slow path, 35.4 and 33.7 against the tree's 33.3
+  and 31.8, `template_numbers` 131 to 103 (the tree 105),
+  `local_append_read` 61 to 42 (the tree 47), against the comparison
+  engine's 50, 52, 131 and 58.
 - **An object literal of plain keys is made at once**
   (`new_object_lit`): its values go into registers in order and one
   operation, behind `regCold`, makes the object with its site's room and

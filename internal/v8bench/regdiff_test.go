@@ -454,6 +454,39 @@ function lens() { var s = "", r = []; for (var i = 0; i < 20; i++) { s += "a\ud8
 	regDiff(t, src, calls)
 }
 
+// TestRegDiffAppends compares appends to a local (append, str_freeze)
+// with the tree's: strings kept by an array, an object, a call, a return
+// or a global between appends, which must not see the appends after; a
+// read of the length, which keeps nothing; numbers, objects whose
+// conversion runs code or throws, symbols, and a local that holds no
+// string; strings long enough to be grown in place many times over.
+func TestRegDiffAppends(t *testing.T) {
+	src := `
+var held;
+function keepAll(n) { var out = "", keep = []; for (var i = 0; i < n; i++) { out += "ab"; if (i % 3 == 0) keep.push(out) } return keep.map(function (s) { return s.length }).join() + out.length }
+function inObject(n) { var out = "", o = {}; for (var i = 0; i < n; i++) { out += "x"; if (i == 5) o.s = out } return o.s + " " + out.length }
+function passed(n) { var out = ""; for (var i = 0; i < n; i++) { out += "y"; if (i == 7) held = out } out += "z"; return held + " " + out.length }
+function early(n) { var out = ""; for (var i = 0; i < n; i++) { out += "<" + i + ">"; if (i == n - 3) return out } return "" }
+function retKept() { var a = early(9), b = early(9); a += "!"; return a + " " + b }
+function lengths(n) { var out = "", c = 0; for (var i = 0; i < n; i++) { out += "<x>"; c += out.length } return c + " " + out.length }
+function nums(n) { var out = ""; for (var i = 0; i < n; i++) { out += i; out += ","; out += i / 4; out += -0 } return out }
+function conv() { var log = [], out = "s"; var o = { toString: function () { log.push("ts"); return "O" }, valueOf: function () { log.push("vo"); return 7 } }; out += o; out += null; out += undefined; out += true; out += 1n; return out + log.join() }
+function throws() { var out = "a", r = []; var bad = { valueOf: function () { throw new Error("no") } }; try { out += bad } catch (e) { r.push(e.message, e.stack.split(String.fromCharCode(10))[1]) } out += "b"; try { out += Symbol() } catch (e) { r.push(e.name) } out += "c"; return out + r.join() }
+function notString(n) { var out = 0; for (var i = 0; i < n; i++) out += i; var u; u += "x"; var o = {}; o += "y"; return out + " " + u + " " + o }
+function long(n) { var out = "", keep = []; for (var i = 0; i < n; i++) { out += "0123456789abcdef"; if (i % 50 == 0) keep.push(out) } var t = 0; for (var j = 0; j < keep.length; j++) t += keep[j].length * (j + 1) + keep[j].charCodeAt(keep[j].length - 1); return t + " " + out.length + " " + out.slice(-20) }
+function surrogate() { var out = "", hi = String.fromCharCode(0xd83d), lo = String.fromCharCode(0xde00), k = []; for (var i = 0; i < 6; i++) { out += hi; k.push(out); out += lo } return out.length + " " + k.map(function (s) { return s.length + ":" + s.charCodeAt(s.length - 1) }).join() + " " + out.codePointAt(0) }
+function guarded(n) { var t = "", r = 0, e = "&"; for (var l = 0; l < n; l++) { r !== l && (t += "(" + l + ")"), r = l + 1, t += e; l % 3 || (t += "|"); l % 5 && (t += "#") } var k = t; t += "end"; return k.length + " " + t }
+function cut(n) { var out = "", parts = []; for (var i = 0; i < n; i++) { out += "abc"; if (i % 4 == 0) parts.push(out.slice(1)) } out += "z"; return parts.join("|").length + " " + out.length }
+`
+	calls := []string{
+		`keepAll(40)`, `inObject(20)`, `passed(20)`, `retKept()`, `lengths(300)`, `nums(30)`, `conv()`, `throws()`, `notString(10)`, `long(400)`, `surrogate()`, `cut(60)`, `guarded(20)`,
+	}
+	for i := range calls {
+		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])
+	}
+	regDiff(t, src, calls)
+}
+
 // TestRegDiffLeafRun compares short bodies of numbers and upvalues that
 // register code runs without a frame (regLeafRun) with the tree's, where
 // they run and where they give up: what is no number, a store to an

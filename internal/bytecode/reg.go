@@ -348,6 +348,14 @@ const (
 	// ObjKeys[Aux[pc]], their values R[B] on, site C: the literal made at
 	// once, its values evaluated before it, which nothing can tell apart.
 	RNewObjectLit
+	// RAppend: R[A] = R[A] + R[B], an addition to a local the stack
+	// compiler made an append (bytecode.AddOwned): the string the local
+	// alone holds grown in place where it can be (the VM's strAppend),
+	// anything else added as RAdd adds it. Its value is the local's.
+	RAppend
+	// RStrFreeze: R[A], a read of a binding an append grows, is no longer
+	// the binding's alone (the stack form's str_freeze, StrFreezeA).
+	RStrFreeze
 
 	// RInvalid is the last operation there can be, which no code holds:
 	// the interpreter's switch has a case for it so that its jump table
@@ -471,7 +479,7 @@ var rOpNames = [...]string{
 	RPostInc: "post_inc", RPostDec: "post_dec", RGetLength: "get_length",
 	RJEq: "jeq", RJNe: "jne", RJEqI: "jeq_imm", RJNeI: "jne_imm", RJNull: "jnull", RJNotNull: "jnotnull",
 	RThrow: "throw", RInstanceOf: "instanceof", RIn: "in", RDelete: "delete", RArguments: "arguments", RNewArrayK: "new_array_k", RAddProp: "add_prop", RAddPropI: "add_prop_imm", RApplyArgs: "apply_args",
-	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RSwitch: "switch", RJTypeof: "jtypeof", RTypeof: "typeof", RSwitchTypeof: "switch_typeof", RNewObjectLit: "new_object_lit", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
+	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RSwitch: "switch", RJTypeof: "jtypeof", RTypeof: "typeof", RSwitchTypeof: "switch_typeof", RNewObjectLit: "new_object_lit", RAppend: "append", RStrFreeze: "str_freeze", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
 }
 
 func (op ROp) String() string {
@@ -532,8 +540,10 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s, %s, %s", op, r(w.A()), r(w.B()), r(w.C()))
 	case RApplyArgs:
 		return fmt.Sprintf("%s %s = %s.apply(%s, %s, arguments %s)", op, r(w.A()), r(w.B()+1), r(w.B()), r(w.B()+2), r(w.C()))
-	case RThrow, RArguments:
+	case RThrow, RArguments, RStrFreeze:
 		return fmt.Sprintf("%s %s", op, r(w.A()))
+	case RAppend:
+		return fmt.Sprintf("%s %s, %s", op, r(w.A()), r(w.B()))
 	case RGetIndex, RAdd, RSub, RMul, RBitAnd, RBitOr, RBitXor, RShl, RShr, RUShr:
 		return fmt.Sprintf("%s %s, %s, %s", op, r(w.A()), r(w.B()), r(w.C()))
 	case RSetIndex:

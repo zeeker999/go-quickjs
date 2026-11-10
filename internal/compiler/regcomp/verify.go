@@ -91,8 +91,10 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 					ok = ok && int(k) < len(fn.Names)
 				}
 			}
-		case bytecode.RTypeof:
+		case bytecode.RTypeof, bytecode.RAppend:
 			ok = reg(a) && reg(b)
+		case bytecode.RStrFreeze:
+			ok = reg(a)
 		case bytecode.RJTypeof:
 			ok = reg(a) && w.X()&^bytecode.RCmpTrue < 8 && in(pc, int64(w.SC()))
 		case bytecode.RSwitch, bytecode.RSwitchTypeof:

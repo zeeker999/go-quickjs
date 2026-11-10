@@ -491,7 +491,7 @@ func (c *compiler) compileIdentReadStatic(n *ast.Ident) {
 			c.reg.NoteRead(n, regcomp.Res{Kind: regcomp.ResLocalCheck, Index: l.slot})
 			c.emit(bytecode.OpGetLocalCheck, l.slot, 0)
 		}
-		c.compiledRead(l)
+		c.compiledRead(l, n)
 		return
 	}
 	if idx, ok := c.resolveUpvalue(n.Name); ok {
@@ -503,7 +503,7 @@ func (c *compiler) compileIdentReadStatic(n *ast.Ident) {
 			c.emit(bytecode.OpGetUpvalue, idx, 0)
 		}
 		if l, _ := c.enclosingBinding(n.Name); l != nil {
-			c.compiledRead(l)
+			c.compiledRead(l, n)
 		}
 		return
 	}

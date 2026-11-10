@@ -196,6 +196,11 @@ func (r *Runtime) regCold(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		r.regTypeof(c, k, regs)
 	case bytecode.RNewObjectLit:
 		r.regNewObjectLit(f, c, k, regs)
+	case bytecode.RStrFreeze:
+		// A read of a binding an append grows, which what read it may
+		// keep: a keep costs more than this call, and runReg had no room
+		// for a case of its own below Go's big-function size.
+		strFreeze[struct{}](regs[w.A()])
 	}
 }
 

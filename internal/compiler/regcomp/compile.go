@@ -1016,6 +1016,17 @@ func (g *gen) discard(e ast.Expr) {
 			g.discard(x)
 		}
 		return
+	case *ast.Logical:
+		// A short circuit around an append whose value nothing uses, as
+		// the stack form compiles it: the append stores, and leaves
+		// nothing.
+		if a, ok := n.Right.(*ast.Assign); ok && n.Op != "??" && g.rec.Appends[a] {
+			skip := g.newMark()
+			g.cond(n.Left, n.Op == "||", skip)
+			g.discard(a)
+			g.bind(skip)
+			return
+		}
 	}
 	g.expr(e, -1)
 }
@@ -1332,10 +1343,12 @@ func (g *gen) ident(n *ast.Ident, dst int) int {
 			g.at(int(n.Start))
 			g.emit(bytecode.MakeR(bytecode.RCheckRef, 0, r16(r), uint16(res.Index), 0))
 		}
+		g.freeze(n, r)
 		return g.place(r, dst)
 	case ResUpval:
 		d := g.dest(dst)
 		g.emit(bytecode.MakeRBC(bytecode.RGetUpval, 0, r16(d), res.Index))
+		g.freeze(n, d)
 		return d
 	case ResGlobal:
 		d := g.dest(dst)
@@ -1763,7 +1776,41 @@ func (g *gen) storeIdent(id *ast.Ident, value ast.Expr, init bool) int {
 	return 0
 }
 
+// freeze emits str_freeze of r, the read n, where the stack form follows
+// that read by one: the binding is one an append grows, and what reads it
+// here may keep what it read. A read the register form makes no value of
+// -- a compare's operand, a step -- keeps nothing and is not frozen.
+func (g *gen) freeze(n *ast.Ident, r int) {
+	if g.rec.Freezes[n] {
+		g.emit(bytecode.MakeR(bytecode.RStrFreeze, 0, r16(r), 0, 0))
+	}
+}
+
+// appendLocal compiles n, an append to a local whose value nothing uses
+// (Record's Appends), as append, and returns the local's register and
+// whether it did.
+func (g *gen) appendLocal(n *ast.Assign) (int, bool) {
+	id, ok := n.Target.(*ast.Ident)
+	if !ok {
+		return 0, false
+	}
+	res, ok := g.rec.Write[id]
+	if !ok || res.Kind != ResLocal || int(res.Index) >= len(g.slotReg) || g.slotReg[res.Index] < 0 {
+		return 0, false
+	}
+	r := int(g.slotReg[res.Index])
+	v := g.expr(n.Value, -1)
+	g.at(int(n.Start))
+	g.emit(bytecode.MakeR(bytecode.RAppend, 0, r16(r), r16(v), 0))
+	return r, true
+}
+
 func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
+	if !keep && dst < 0 && n.Op == "+=" && g.rec.Appends[n] {
+		if r, ok := g.appendLocal(n); ok {
+			return r
+		}
+	}
 	if n.Op == "=" {
 		switch t := n.Target.(type) {
 		case *ast.Ident:
