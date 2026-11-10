@@ -267,3 +267,34 @@ function stackOf(f) { try { var v = f(); return v && v.stack ? frames(v) : Strin
 	}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffChainsAndClosures compares string chains -- when each part
+// is converted, against what the parts after it do, numbers, -0, symbols
+// that throw, chains past maxChainParts -- and closures made once in a
+// loop or taking what they capture by value.
+func TestRegDiffChainsAndClosures(t *testing.T) {
+	src := `
+var log = [];
+function o(n) { return { toString: function () { log.push("s" + n); return "<" + n + ">" }, valueOf: function () { log.push("v" + n); return n } } }
+function e(n) { log.push("e" + n); return n }
+function chain(a, b, c) { return a + b + "|" + c + e(1) + "|" + o(3) + -0 + 1.5 + e("x") }
+function pre(a, b) { return a + b + "s" + o(1) + "" + b }
+function long(a) { var s = ""; for (var i = 0; i < 3; i++) s = "a" + a + 1 + a + 2 + a + 3 + a + 4 + a + 5 + a + 6 + a + 7 + a + 8 + a + 9 + a + 10 + a + 11 + a + 12 + a + 13 + a + 14 + a + 15 + a + 16 + a + 17 + a + 18 + a + i; return s }
+function sym(a) { try { return "x" + a + Symbol() } catch (x) { return x.constructor.name } }
+function reuse(n) { 'use strict'; var t = 0; for (var i = 0; i < n; i++) { var g = function () { return i }; t += g() } return t }
+function byValue(a, b, c) { 'use strict'; return () => a + b + c }
+function mixed(a, b, c) { 'use strict'; b++; var f = function () { return a + b + c }; b++; return f() }
+function run(f) { log = []; var v = f(); return v + " / " + log.join() }
+`
+	calls := []string{
+		`run(function () { return chain(1, 2, o(2)) })`, `run(function () { return chain("a", o(1), 3) })`,
+		`run(function () { return pre(1, 2) })`, `run(function () { return pre(o(4), "z") })`,
+		`run(function () { return long(7) })`, `run(function () { return long(o(9)) })`,
+		`run(function () { return sym(1) })`, `run(function () { return reuse(5) + reuse(1) })`,
+		`run(function () { var f = byValue(1, 2, 3); return f() + f() })`, `run(function () { return mixed(1, 2, 3) })`,
+	}
+	for i := range calls {
+		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])
+	}
+	regDiff(t, src, calls)
+}

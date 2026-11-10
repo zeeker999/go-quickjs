@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"slices"
 	"sort"
 
 	"github.com/go-quickjs/go-quickjs/internal/ast"
@@ -65,10 +66,13 @@ type gen struct {
 	// lazyArgs says the arguments object is made only on demand: its
 	// local's register is undefined until args_index makes it.
 	lazyArgs bool
-	top      int
-	max      int
-	loops    []*loop
-	label    string
+	// leafSites are the stack form's property sites a leaf's register code
+	// has not taken yet (propSite).
+	leafSites map[leafSiteKey][]uint32
+	top       int
+	max       int
+	loops     []*loop
+	label     string
 
 	consts   map[any]uint32
 	names    map[string]uint32
@@ -292,6 +296,47 @@ func (g *gen) stackSite(in bytecode.Instr) uint16 {
 	}
 	g.siteName[in.B] = in.A
 	return uint16(in.B)
+}
+
+// propSite is the cache site of a read (get_prop), a method's read
+// (get_prop_this) or a store (set_prop), op, of the name with index name.
+// In a leaf -- a body the frameless evaluators run from the stack form,
+// with the stack form's sites -- it is the next site of the stack form's
+// of that kind and name not yet taken, so that a run of the register code
+// fills the caches those evaluators read: an entry is the shape's answer
+// for the name and kind, whichever site of them holds it. Anywhere else,
+// and past the stack form's sites, it is a site of its own.
+func (g *gen) propSite(op bytecode.Op, name uint32) uint16 {
+	if g.fn.Leaf == bytecode.LeafNone {
+		return g.site(name)
+	}
+	if g.leafSites == nil {
+		g.leafSites = map[leafSiteKey][]uint32{}
+		for _, in := range g.fn.Code {
+			switch in.Op {
+			case bytecode.OpGetProp, bytecode.OpGetPropThis, bytecode.OpSetProp:
+				if in.B != 0 && in.B < uint32(len(g.siteName)) && in.A < uint32(len(g.fn.Names)) {
+					k := leafSiteKey{in.Op, g.fn.Names[in.A]}
+					g.leafSites[k] = append(g.leafSites[k], in.B)
+				}
+			}
+		}
+	}
+	k := leafSiteKey{op, g.fn.Names[name]}
+	q := g.leafSites[k]
+	if len(q) == 0 {
+		return g.site(name)
+	}
+	g.leafSites[k] = q[1:]
+	g.siteName[q[0]] = name
+	return uint16(q[0])
+}
+
+// leafSiteKey is a kind of property access and its name, which propSite
+// pairs the two forms' sites by.
+type leafSiteKey struct {
+	op   bytecode.Op
+	name string
 }
 
 func (g *gen) nameIdx(name string) uint32 {
@@ -799,6 +844,20 @@ func (g *gen) varDecl(n *ast.VarDecl) {
 			g.emit(bytecode.MakeR(bytecode.RLoadUndef, 0, r16(int(g.slotReg[res.Index])), 0, 0))
 			continue
 		}
+		if fn, ok := d.Init.(*ast.FuncLit); ok && n.Kind == ast.DeclVar && g.rec.Reused[fn] && len(g.loops) > 0 {
+			if res, ok := g.rec.Write[id]; ok && (res.Kind == ResLocal || res.Kind == ResLocalInit) && g.slotReg[res.Index] >= 0 {
+				// A function nothing can tell from the one the last
+				// iteration made, which the var holds then: made the
+				// first time, and left after that, as the stack form
+				// makes it.
+				skip := g.newMark()
+				g.jump(bytecode.MakeR(bytecode.RJmpT, 0, r16(int(g.slotReg[res.Index])), 0, 0), skip, false)
+				g.storeIdent(id, d.Init, true)
+				g.top = g.topAfterBindings()
+				g.bind(skip)
+				continue
+			}
+		}
 		g.storeIdent(id, d.Init, true)
 		g.top = g.topAfterBindings()
 	}
@@ -1178,6 +1237,11 @@ var immOps = map[string]bytecode.ROp{
 }
 
 func (g *gen) binary(n *ast.Binary, dst int) int {
+	if n.Op == "+" {
+		if d, ok := g.stringChain(n, dst); ok {
+			return d
+		}
+	}
 	switch n.Op {
 	case "instanceof", "in":
 		a := g.guard(g.expr(n.Left, -1), n.Right)
@@ -1570,7 +1634,7 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 			}
 			v := g.expr(n.Value, -1)
 			g.at(int(n.Start))
-			g.emit(bytecode.MakeR(bytecode.RSetProp, 0, r16(o), r16(v), g.site(g.nameIdx(name))))
+			g.emit(bytecode.MakeR(bytecode.RSetProp, 0, r16(o), r16(v), g.propSite(bytecode.OpSetProp, g.nameIdx(name))))
 			return g.place(v, dst)
 		}
 		g.fail("an assignment target the backend does not compile")
@@ -1618,14 +1682,14 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 		if t.Computed {
 			g.emit(bytecode.MakeR(bytecode.RGetIndex, 0, r16(cur), r16(o), r16(k)))
 		} else {
-			g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(cur), r16(o), g.site(name)))
+			g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(cur), r16(o), g.propSite(bytecode.OpGetProp, name)))
 		}
 		v := g.operate(text, op, nil, n.Value, cur, cur, int(n.Start))
 		g.at(int(n.Start))
 		if t.Computed {
 			g.emit(bytecode.MakeR(bytecode.RSetIndex, 0, r16(o), r16(k), r16(v)))
 		} else {
-			g.emit(bytecode.MakeR(bytecode.RSetProp, 0, r16(o), r16(v), g.site(name)))
+			g.emit(bytecode.MakeR(bytecode.RSetProp, 0, r16(o), r16(v), g.propSite(bytecode.OpSetProp, name)))
 		}
 		return g.place(v, dst)
 	}
@@ -1773,10 +1837,10 @@ func (g *gen) update(n *ast.Update, keep bool, dst int) int {
 		}
 		name := g.nameIdx(s)
 		g.at(t.Property.Pos())
-		g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(cur), r16(o), g.site(name)))
+		g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(cur), r16(o), g.propSite(bytecode.OpGetProp, name)))
 		return g.stepped(n, cur, step, keep, dst, func(v int) {
 			g.at(n.Start)
-			g.emit(bytecode.MakeR(bytecode.RSetProp, 0, r16(o), r16(v), g.site(name)))
+			g.emit(bytecode.MakeR(bytecode.RSetProp, 0, r16(o), r16(v), g.propSite(bytecode.OpSetProp, name)))
 		})
 	}
 	g.fail("an update target")
@@ -1888,7 +1952,7 @@ func (g *gen) member(n *ast.Member, dst int) int {
 		g.emit(bytecode.MakeR(bytecode.RGetLength, 0, r16(d), r16(o), 0))
 		return d
 	}
-	g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(d), r16(o), g.site(g.nameIdx(name))))
+	g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(d), r16(o), g.propSite(bytecode.OpGetProp, g.nameIdx(name))))
 	return d
 }
 
@@ -1934,7 +1998,7 @@ func (g *gen) call(n *ast.Call, dst int) int {
 			}
 			o := g.expr(c.Object, -1)
 			g.at(c.Property.Pos())
-			g.emit(bytecode.MakeR(bytecode.RGetMethodW, 0, r16(w), r16(o), g.site(g.nameIdx(name))))
+			g.emit(bytecode.MakeR(bytecode.RGetMethodW, 0, r16(w), r16(o), g.propSite(bytecode.OpGetPropThis, g.nameIdx(name))))
 		} else if g.into(c.Object, w+1); c.Computed {
 			k := g.expr(c.Property, -1)
 			g.at(c.Property.Pos())
@@ -1946,7 +2010,7 @@ func (g *gen) call(n *ast.Call, dst int) int {
 				return w
 			}
 			g.at(c.Property.Pos())
-			g.emit(bytecode.MakeR(bytecode.RGetMethod, 0, r16(w), r16(w+1), g.site(g.nameIdx(name))))
+			g.emit(bytecode.MakeR(bytecode.RGetMethod, 0, r16(w), r16(w+1), g.propSite(bytecode.OpGetPropThis, g.nameIdx(name))))
 		}
 		op = bytecode.RCallMW
 	case *ast.Super:
@@ -1971,6 +2035,132 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	g.at(n.TracePos())
 	g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), g.callSite()))
 	return d
+}
+
+// maxChainParts is the most parts stringChain joins in one concat, as the
+// stack form's compileStringChain: a longer chain is joined a run at a
+// time, each run's string the first part of the next.
+const maxChainParts = 32
+
+// stringChain compiles a + b + c + ..., once a string literal among its
+// operands has made every addition from there on a concatenation, as one
+// concat of the parts in consecutive registers, as the stack form's
+// compileStringChain does and with its conversions where it makes them:
+// the operands before the literal added as they were and their sum
+// converted where the literal was added to it, each operand after it
+// converted as soon as it is evaluated (str_part), but a literal or a
+// number, which concat writes out itself. It reports false, having emitted
+// nothing, where the stack form makes the additions.
+func (g *gen) stringChain(n *ast.Binary, dst int) (int, bool) {
+	var adds []*ast.Binary
+	for b := n; ; {
+		adds = append(adds, b)
+		l, ok := b.Left.(*ast.Binary)
+		if !ok || l.Op != "+" {
+			break
+		}
+		b = l
+	}
+	if len(adds) < 2 {
+		return 0, false
+	}
+	slices.Reverse(adds)
+	operand := func(i int) ast.Expr {
+		if i == 0 {
+			return adds[0].Left
+		}
+		return adds[i-1].Right
+	}
+	first := -1
+	for i := range len(adds) + 1 {
+		if _, ok := operand(i).(*ast.StringLit); ok {
+			first = i
+			break
+		}
+		if _, ok := operand(i).(*ast.TemplateLit); ok && i == 0 {
+			// The stack form's chain starts at a template, which this
+			// backend leaves to it.
+			return 0, false
+		}
+	}
+	if first < 0 {
+		return 0, false
+	}
+	empty := func(e ast.Expr) bool {
+		s, ok := e.(*ast.StringLit)
+		return ok && s.Value == ""
+	}
+	parts := 0
+	if first > 0 {
+		parts++
+	}
+	for i := first; i <= len(adds); i++ {
+		if !empty(operand(i)) {
+			parts++
+		}
+	}
+	if parts < 3 {
+		return 0, false
+	}
+	w := g.top
+	k := 0
+	// next is the register of the next part, taken before the part is
+	// compiled into it, so that what the part computes goes past it.
+	next := func() int {
+		g.top = w + k
+		return g.alloc()
+	}
+	part := func() {
+		k++
+		if k == maxChainParts {
+			g.at(int(n.Start))
+			g.emit(bytecode.MakeR(bytecode.RConcat, 0, r16(w), r16(w), uint16(k)))
+			k = 1
+		}
+	}
+	convert := func(pos int) {
+		g.at(pos)
+		g.emit(bytecode.MakeR(bytecode.RStrPart, 0, r16(w+k), 0, 0))
+	}
+	if first > 0 {
+		if first == 1 {
+			g.into(operand(0), next())
+		} else {
+			g.into(adds[first-2], next())
+		}
+		convert(adds[first-1].Start)
+		part()
+	}
+	for i := first; i <= len(adds); i++ {
+		switch e := operand(i); e.(type) {
+		case *ast.StringLit:
+			if empty(e) {
+				continue
+			}
+			g.into(e, next())
+		case *ast.NumberLit:
+			g.into(e, next())
+		default:
+			g.into(e, next())
+			convert(adds[i-1].Start)
+		}
+		part()
+	}
+	d := dst
+	if d < 0 {
+		d = w
+	}
+	if k > 1 {
+		g.at(int(n.Start))
+		g.emit(bytecode.MakeR(bytecode.RConcat, 0, r16(d), r16(w), uint16(k)))
+	} else if d != w {
+		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(d), r16(w), 0))
+	}
+	g.top = w
+	if dst < 0 {
+		g.top = w + 1
+	}
+	return d, true
 }
 
 // isArguments reports whether e is the function's own arguments binding.

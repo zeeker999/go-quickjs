@@ -93,9 +93,11 @@ func regAt(code unsafe.Pointer, pc int) bytecode.RInstr {
 
 // firstForm is what firstTree builds for a function: its register code,
 // run by a tree of one node, where the register interpreter is on and the
-// form covers it, and its tree otherwise.
+// form covers it, and its tree otherwise. With the tree tier off there is
+// neither: the stack interpreter runs everything, as it does without the
+// register interpreter.
 func firstForm(fn *bytecode.Function) *tree {
-	if regTier.Load() {
+	if regTier.Load() && treeTier.Load() {
 		if t := regTreeOf(fn); t != nil {
 			return t
 		}
@@ -1008,17 +1010,19 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RThrow:
 			return Undefined, r.regThrow(f, c, pc, regs)
 		case bytecode.RNewW, bytecode.RClosureW, bytecode.RInstanceOf, bytecode.RIn, bytecode.RDelete, bytecode.RArguments, bytecode.RNewArrayK,
-			bytecode.RApplyArgs, bytecode.RArgsLen, bytecode.RArgsIndex:
+			bytecode.RApplyArgs, bytecode.RArgsLen, bytecode.RArgsIndex, bytecode.RConcat:
+			goto slow
+		case bytecode.RStrPart:
+			// A string or a number is joined as it is.
+			if v := regs[w.A()]; v.IsString() || v.IsNumber() {
+				continue
+			}
 			goto slow
 		// Every value of the switch is a case, so that it is a jump table
 		// that needs no range check: Go makes one only of a switch whose
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile.
-		case 110:
-			goto invalid
-		case 111:
-			goto invalid
 		case 112:
 			goto invalid
 		case 113:

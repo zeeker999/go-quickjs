@@ -524,6 +524,16 @@ func (r *Runtime) regClosure(f *frame, c *regCode, w bytecode.RInstr, wb int) *O
 	tmpl := f.cl.consts[k]
 	fn := f.cl.fn
 	caps := c.rc.Caps[k]
+	if c.wide {
+		// What an arrow captures of this is the frame's register 1, which
+		// the frame record does not keep (regEnterW).
+		f.this = r.stack[wb+1]
+	}
+	if t := tmpl.template(); t.fn.CapturesByValue {
+		// What it takes by value copied from its registers, as
+		// newClosureIn's newClosureByValue copies it from the slots.
+		return regMadeClosure(newClosureByValue[struct{}](r, f, t, caps, wb))
+	}
 	// The cells newClosureIn reads, kept in the template's code for the next
 	// closure; the upvalues this closure is the first to open, one
 	// allocation, as newClosureIn's room.
@@ -556,13 +566,13 @@ func (r *Runtime) regClosure(f *frame, c *regCode, w bytecode.RInstr, wb int) *O
 		}
 		cells[cellOfLocal(fn, int(u.Index))] = up
 	}
-	if c.wide {
-		// What an arrow captures of this is the frame's register 1, which
-		// the frame record does not keep (regEnterW).
-		f.this = r.stack[wb+1]
-	}
 	o := r.newClosureIn(f, tmpl, cells)
 	clear(cells)
+	return regMadeClosure(o)
+}
+
+// regMadeClosure is closure_w's closure o, its function's code planned.
+func regMadeClosure(o *Object) *Object {
 	if fd := o.fn(); fd != nil {
 		if atomic.LoadPointer(&fd.closure.fn.VMCode) == nil && fd.closure.fn.Reg != nil && regTier.Load() {
 			firstTree(fd.closure.fn)
@@ -781,6 +791,13 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		} else {
 			v = Int(len(f.args))
 		}
+	case bytecode.RConcat:
+		// The registers are the parts' own, which concatParts may convert
+		// in place: nothing reads them after.
+		b := int(w.B())
+		v, err = concatParts(r, regs[b:b+int(w.C())])
+	case bytecode.RStrPart:
+		v, err = r.add(Str(emptyString), regs[w.A()])
 	case bytecode.RArgsIndex:
 		key := regs[w.C()]
 		if !regs[w.B()].IsObject() {

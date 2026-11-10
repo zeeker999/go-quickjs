@@ -57,6 +57,9 @@ type Record struct {
 	Read  map[*ast.Ident]Res
 	Write map[*ast.Ident]Res
 	Funcs map[*ast.FuncDecl]uint32
+	// Reused are the function expressions a var declaration in a loop
+	// makes only the first time (the compiler's reusedClosures).
+	Reused map[*ast.FuncLit]bool
 	// Bail says the function has something whose resolution the record
 	// cannot express -- a with, an eval's variables, an Annex B function --
 	// and is left to the stack form.

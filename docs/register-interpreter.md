@@ -637,6 +637,23 @@ What the measurements found, against the design:
   loop's own alignment moves the small loops: `loop_locals` is 10.4 to 11.3
   ns with `runReg` at 32 mod 64 and 13.1 at 0, which the placements do not
   vary.
+- **What the tree's mechanisms gave, register code gives too.** The
+  package's tests in register mode found wrong answers and costs the
+  differential test had not: a trace read the heap frame's this and
+  new.target, which the lean call does not write -- a frame's `regKind`
+  now says they are its window's -- and placed a call at its expression's
+  start; a block's `let` hid a function expression's own name; an apply
+  other than the built-in was given a new arguments object each call,
+  now one kept in the binding's register (`apply_args`'s C). The tree's
+  mechanisms the register code lacked are its own now: `concat` and
+  `str_part`, the stack form's string chain, one string made where an
+  addition made one each; closures that take a value by value
+  (`newClosureByValue` reading registers); a loop's function expression
+  made once (the record's `Reused`); `in` through the realm's cache; and
+  a leaf's property reads and stores on the stack form's sites
+  (`propSite`), which the frameless evaluators read, so that a run of its
+  register code fills them. With the tree tier off, the stack
+  interpreter runs everything, register code included.
 
 #### Raw int32 registers (step 5, designed, deferred)
 
