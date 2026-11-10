@@ -440,6 +440,20 @@ function proxied() { var log = [], a = [1], p = new Proxy(a, { set: function (o,
 	regDiff(t, src, calls)
 }
 
+// TestRegDiffLength compares get_length with the tree's: strings flat,
+// built and cut, with surrogates, and what is no string or array -- a
+// String object, a function, an object with a getter, null.
+func TestRegDiffLength(t *testing.T) {
+	src := `
+function lens() { var s = "", r = []; for (var i = 0; i < 20; i++) { s += "a\ud83d\ude00"; r.push(s.length) } var c = s.slice(3, 11), e = ""; r.push(c.length, e.length, "x".length, (s + c).length); var xs = [new String("abc"), function (a, b) {}, { get length() { return "g" } }, { length: -1 }, [1, , 3], 5, true]; for (var i = 0; i < xs.length; i++) { var x = xs[i]; r.push(x.length) } try { var n = null; r.push(n.length) } catch (e) { r.push(e.name) } return r.join() }
+`
+	calls := []string{`lens()`}
+	for i := range calls {
+		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])
+	}
+	regDiff(t, src, calls)
+}
+
 // TestRegDiffLeafRun compares short bodies of numbers and upvalues that
 // register code runs without a frame (regLeafRun) with the tree's, where
 // they run and where they give up: what is no number, a store to an

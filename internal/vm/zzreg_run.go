@@ -1076,6 +1076,9 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			if o := regs[w.B()]; o.IsObject() && o.object().class == ClassArray {
 				regs[w.A()] = Uint32(o.object().arrayLength())
 				continue
+			} else if o.IsString() {
+				regs[w.A()] = Int(o.String().Len())
+				continue
 			}
 			goto slow
 		case bytecode.RAddProp, bytecode.RAddPropI:

@@ -763,6 +763,10 @@ primitive, does without. The tree's
   `regElemMiss`'s typed array, `setElem` and `typedStore`, which an array
   the fast path missed never answers: 41 to 31 ns and 45 to 34 in one
   build.
+- **A string's length is the loop's,** as an array's is: `get_length`
+  answered only arrays inline and sent a string to the slow path, where the
+  tree's node answers both. `string_length` 15.6 to 7.0 ns in one build
+  (the tree 8.1, the comparison engine 5.5).
 - **An object literal of plain keys is made at once**
   (`new_object_lit`): its values go into registers in order and one
   operation, behind `regCold`, makes the object with its site's room and
