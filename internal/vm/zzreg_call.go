@@ -237,7 +237,9 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 				if rc.newTarget {
 					nf.newTarget = Undefined
 				}
+				nf.regKind = regFrameCall
 				v, err := r.runReg(nf, rc)
+				nf.regKind = 0
 				if rc.ncap != 0 && len(nf.openUpvalues) != 0 {
 					regCloseUpvalues(nf)
 				}
@@ -479,16 +481,17 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int,
 	if f.thisRef != nil || f.withScopes != nil || f.evalVars != nil || f.native != "" || f.args != nil {
 		regClearFrame(f)
 	}
-	if rc.newTarget {
-		// What an arrow made here captures of new.target.
-		f.newTarget = newTarget
-	}
+	// What an arrow made here captures of new.target, and what a stack
+	// trace reads.
+	f.newTarget = newTarget
+	f.regKind = regFrameEnter
 	if rc.args {
 		f.args = kept
 		p := int(rc.params)
 		f.locals = r.stack[base+2 : base+2+p : base+2+p]
 	}
 	v, err := r.runReg(f, rc)
+	f.regKind = 0
 	if len(f.openUpvalues) != 0 {
 		regCloseUpvalues(f)
 	}
@@ -791,7 +794,7 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		v, err = r.getIndexed(regs[w.B()], key)
 	case bytecode.RApplyArgs:
 		b := int(w.B())
-		v, err = r.regApplyArgs(f, regs[b], regs[b+1], regs[b+2])
+		v, err = r.regApplyArgs(f, regs[b], regs[b+1], regs[b+2], &regs[w.C()])
 	case bytecode.RAddProp, bytecode.RAddPropI:
 		b := Int32(w.SB())
 		if w.Op() == bytecode.RAddProp {
@@ -1011,6 +1014,18 @@ func (r *Runtime) regIn(key, obj Value) (Value, error) {
 	if !obj.IsObject() {
 		return Undefined, r.throwTypeError("the right operand of \"in\" must be an object")
 	}
+	// An index straight to its walk; a name to the cache, then to its walk,
+	// which remembers the answer there, as the tree's in does.
+	o := obj.Object()
+	if i := uint32(key.num); float64(i) == key.num && i < atomIndexTag {
+		if has, ok := hasIndexQuick(o, i); ok {
+			return Bool(has), nil
+		}
+	} else if has, ok := hasCached(r, key, o); ok {
+		return Bool(has), nil
+	} else if has, ok := hasQuick(r, key, o); ok {
+		return Bool(has), nil
+	}
 	n, err := r.toPropertyName(key)
 	if err != nil {
 		return Undefined, err
@@ -1191,10 +1206,16 @@ func (r *Runtime) regNewObject(cl *closure, w bytecode.RInstr) *Object {
 
 // regApplyArgs is apply_args: target.apply(this, the frame's arguments),
 // which the built-in apply makes with the arguments as passed, no object
-// made; any other apply is given one.
-func (r *Runtime) regApplyArgs(f *frame, target, apply, this Value) (Value, error) {
+// made; any other apply is given one, made once and kept in the arguments
+// binding's register, slot, so that every call is given the same one.
+func (r *Runtime) regApplyArgs(f *frame, target, apply, this Value, slot *Value) (Value, error) {
 	if !apply.IsObject() || apply.Object() != r.applyFn {
-		return r.call(apply, target, []Value{this, Obj(r.newArgumentsObject(f))})
+		o := *slot
+		if !o.IsObject() {
+			o = Obj(r.newArgumentsObject(f))
+			*slot = o
+		}
+		return r.call(apply, target, []Value{this, o})
 	}
 	args := f.args
 	if f.cl.fn.MappedArguments {
@@ -1210,4 +1231,26 @@ func (r *Runtime) regApplyArgs(f *frame, target, apply, this Value) (Value, erro
 		}
 	}
 	return r.applyCall(target, this, args)
+}
+
+// A register frame's regKind: what a stack trace reads of it where the heap
+// frame's this and newTarget are not written.
+const (
+	// regFrameCall is regCallW's frame: its this is its window's second
+	// register, and it is no construct.
+	regFrameCall = 1 + iota
+	// regFrameEnter is regEnterW's: its this is its window's, its
+	// new.target the frame's.
+	regFrameEnter
+)
+
+// regFrameThis is the this and new.target of register frame f, for a stack
+// trace.
+func (r *Runtime) regFrameThis(f *frame) (this, newTarget Value) {
+	this = r.stack[f.base+1]
+	newTarget = Undefined
+	if f.regKind == regFrameEnter {
+		newTarget = f.newTarget
+	}
+	return this, newTarget
 }

@@ -1576,27 +1576,8 @@ func (c *compiler) compileMemberRead(n *ast.Member) {
 	c.emitAt(n.Property.Pos(), bytecode.OpGetProp, c.nameIdx(name), 0)
 }
 
-// callPos is where a call is in a stack trace, as V8 places it: at the name
-// called, when the callee ends in one -- `f()`, `a.b()` -- and otherwise at
-// the argument list's parenthesis.
-func callPos(n *ast.Call) int {
-	switch c := n.Callee.(type) {
-	case *ast.Ident:
-		if !c.Paren {
-			return int(n.Start)
-		}
-	case *ast.Member:
-		if !c.Computed && c.Property != nil {
-			return c.Property.Pos()
-		}
-	case *ast.Super:
-		return int(n.Start)
-	}
-	if n.Open > 0 {
-		return int(n.Open)
-	}
-	return int(n.Start)
-}
+// callPos is where a call is in a stack trace (ast.Call.TracePos).
+func callPos(n *ast.Call) int { return n.TracePos() }
 
 func (c *compiler) compileCall(n *ast.Call) {
 	if phase, ok := importPhase(n); ok {

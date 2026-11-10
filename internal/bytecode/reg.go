@@ -276,7 +276,9 @@ const (
 	// RApplyArgs: R[A] = R[B+1].call(R[B], R[B+2], ...the frame's
 	// arguments): f.apply(x, arguments) of a function whose arguments object
 	// is never made (Function.ForwardsArguments), the arguments as passed
-	// handed on without it; R[B] is f and R[B+1] what f.apply read.
+	// handed on without it; R[B] is f and R[B+1] what f.apply read. R[C]
+	// is the arguments binding, where an apply other than the built-in is
+	// given the object, made once.
 	RApplyArgs
 	// RGetIndexPre: R[C] += SX, then R[A] = R[B][R[C]] -- x[++i] and
 	// x[--i] of a local i, its step X a signed 8-bit immediate.
@@ -448,7 +450,7 @@ func (rc *RegCode) Format(pc int) string {
 	case RInstanceOf, RIn, RDelete:
 		return fmt.Sprintf("%s %s, %s, %s", op, r(w.A()), r(w.B()), r(w.C()))
 	case RApplyArgs:
-		return fmt.Sprintf("%s %s = %s.apply(%s, %s, arguments)", op, r(w.A()), r(w.B()+1), r(w.B()), r(w.B()+2))
+		return fmt.Sprintf("%s %s = %s.apply(%s, %s, arguments %s)", op, r(w.A()), r(w.B()+1), r(w.B()), r(w.B()+2), r(w.C()))
 	case RThrow, RArguments:
 		return fmt.Sprintf("%s %s", op, r(w.A()))
 	case RGetIndex, RAdd, RSub, RMul, RBitAnd, RBitOr, RBitXor, RShl, RShr, RUShr:

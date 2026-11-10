@@ -232,3 +232,38 @@ func TestRegDiffInt32(t *testing.T) {
 		t.Errorf("only %d functions ran as register code", built)
 	}
 }
+
+// TestRegDiffStacksAndNames compares what a stack trace says of register
+// frames -- each call's position, its function's name, whether it is a
+// construct, its receiver's type -- after the call sites' caches are warm,
+// and the names a function's body resolves: its own name shadowed in a
+// block, the arguments object an apply other than the built-in is given.
+func TestRegDiffStacksAndNames(t *testing.T) {
+	src := `
+function frames(e) { return e.stack.split("\n").slice(1).map(function (s) { return s.trim() }).join(" | ") }
+function thrower() { return null.x }
+function calls(n) { return n > 0 ? calls(n - 1) + 1 : thrower() }
+function made() { return new Error("m") }
+function viaArrow() { return (() => made())() }
+function L() { return Error.call(this) }
+function M() { this.e = made() }
+var o = { m: function () { return made() }, n: function named() { return made() } };
+function Foo() {} Foo.prototype.m = function () { return made() };
+var a = {}; a.b = function () { return made() };
+function self() { return (function g() { { let g = 1 } return typeof g })() }
+function selfVar() { return (function g() { var g; return typeof g })() }
+function own(a) { var f = { apply: function (t, args) { return args } }; var x = f.apply(null, arguments); a = 2; var y = f.apply(null, arguments); return [x === y, x[0], x.length] }
+function warm(f) { for (var i = 0; i < 4; i++) f() }
+function stackOf(f) { try { var v = f(); return v && v.stack ? frames(v) : String(v) } catch (e) { return frames(e) } }
+`
+	var calls []string
+	for _, f := range []string{
+		"function () { return calls(3) }",
+		"made", "viaArrow", "function () { return new L() }", "function () { return new M().e }",
+		"function () { return o.m() }", "function () { return o.n() }", "function () { return new Foo().m() }",
+		"function () { return a.b() }", "self", "selfVar", "function () { return own(1, 2) }",
+	} {
+		calls = append(calls, fmt.Sprintf("(function () { var f = %s; warm(function () { try { f() } catch (e) {} }); return stackOf(f) })()", f))
+	}
+	regDiff(t, src, calls)
+}

@@ -468,13 +468,20 @@ func (g *gen) switchStmt(n *ast.SwitchStmt, label string) {
 	g.loops = g.loops[:len(g.loops)-1]
 }
 
-// declares reports whether the statements declare name, with var, let,
-// const or a function declaration, anywhere but in a nested function: what
-// shadows a function expression's own name.
-func declares(list []ast.Stmt, name string) bool {
+// declares reports whether the statements of a function's body declare
+// name, with var or a function declaration anywhere but in a nested
+// function, or with let or const in the body itself: what shadows a
+// function expression's own name. A let or const of a nested block shadows
+// it only there, in a binding of its own.
+func declares(list []ast.Stmt, name string) bool { return declaresIn(list, name, true) }
+
+func declaresIn(list []ast.Stmt, name string, body bool) bool {
 	for _, s := range list {
 		switch n := s.(type) {
 		case *ast.VarDecl:
+			if !body && n.Kind != ast.DeclVar {
+				continue
+			}
 			for _, d := range n.Decls {
 				if id, ok := d.Target.(*ast.Ident); !ok || id.Name == name {
 					return true
@@ -485,27 +492,27 @@ func declares(list []ast.Stmt, name string) bool {
 				return true
 			}
 		case *ast.BlockStmt:
-			if declares(n.Body, name) {
+			if declaresIn(n.Body, name, false) {
 				return true
 			}
 		case *ast.IfStmt:
-			if declares([]ast.Stmt{n.Cons}, name) || n.Alt != nil && declares([]ast.Stmt{n.Alt}, name) {
+			if declaresIn([]ast.Stmt{n.Cons}, name, false) || n.Alt != nil && declaresIn([]ast.Stmt{n.Alt}, name, false) {
 				return true
 			}
 		case *ast.ForStmt:
-			if n.Init != nil && declares([]ast.Stmt{n.Init}, name) || declares([]ast.Stmt{n.Body}, name) {
+			if n.Init != nil && declaresIn([]ast.Stmt{n.Init}, name, false) || declaresIn([]ast.Stmt{n.Body}, name, false) {
 				return true
 			}
 		case *ast.WhileStmt:
-			if declares([]ast.Stmt{n.Body}, name) {
+			if declaresIn([]ast.Stmt{n.Body}, name, false) {
 				return true
 			}
 		case *ast.DoWhileStmt:
-			if declares([]ast.Stmt{n.Body}, name) {
+			if declaresIn([]ast.Stmt{n.Body}, name, false) {
 				return true
 			}
 		case *ast.LabeledStmt:
-			if declares([]ast.Stmt{n.Body}, name) {
+			if declaresIn([]ast.Stmt{n.Body}, name, false) {
 				return true
 			}
 		case *ast.ExprStmt, *ast.ReturnStmt, *ast.EmptyStmt, *ast.BreakStmt, *ast.ContinueStmt:
@@ -1961,7 +1968,7 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	if d < 0 {
 		d = w
 	}
-	g.at(int(n.Start))
+	g.at(n.TracePos())
 	g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), g.callSite()))
 	return d
 }
@@ -1979,7 +1986,8 @@ func (g *gen) isArguments(e ast.Expr) bool {
 
 // applyArgs compiles f.apply(x, arguments) of a function whose arguments
 // object is never made: f, what f.apply reads and x in three registers,
-// and apply_args, which hands on the frame's arguments as passed.
+// and apply_args, which hands on the frame's arguments as passed, R[C]
+// the arguments binding's register.
 func (g *gen) applyArgs(n *ast.Call, m *ast.Member, dst int) int {
 	if _, ok := m.Object.(*ast.Super); ok {
 		g.fail("super")
@@ -2006,8 +2014,11 @@ func (g *gen) applyArgs(n *ast.Call, m *ast.Member, dst int) int {
 	if d < 0 {
 		d = w
 	}
-	g.at(int(n.Start))
-	g.emit(bytecode.MakeR(bytecode.RApplyArgs, 0, r16(d), r16(w), 0))
+	// The arguments binding's register, undefined until an apply other
+	// than the built-in is given the object, which is kept there so that
+	// every such call is given the same one.
+	g.at(n.TracePos())
+	g.emit(bytecode.MakeR(bytecode.RApplyArgs, 0, r16(d), r16(w), r16(int(g.slotReg[g.rec.Read[n.Args[1].(*ast.Ident)].Index]))))
 	return d
 }
 

@@ -114,7 +114,7 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 		case bytecode.RInstanceOf:
 			ok = reg(a) && reg(b) && reg(c) && pc < len(rc.Aux) && rc.Aux[pc] != 0 && int(rc.Aux[pc]) <= int(fn.PropSites)
 		case bytecode.RApplyArgs:
-			ok = reg(a) && int(b)+3 <= n && rc.ForwardsArguments
+			ok = reg(a) && int(b)+3 <= n && reg(c) && rc.ForwardsArguments
 		case bytecode.RRetUndef:
 		default:
 			ok = false
