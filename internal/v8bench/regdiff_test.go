@@ -2,6 +2,7 @@ package v8bench
 
 import (
 	"fmt"
+	"github.com/go-quickjs/go-quickjs/internal/compiler/regcomp"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -578,6 +579,7 @@ function scan(s) { var h = 0, i; for (i = 0; i < s.length; i++) h = (h * 31 + s.
 // literal given to replace, split, match and test, whose RegExp the tree
 // may have back; flags; and a literal's object kept and compared.
 func TestRegDiffRegExpLiterals(t *testing.T) {
+	regExpLiterals(t)
 	src := `
 function esc(s) { return s.indexOf("<") < 0 ? s : s.replace(/</g, "&lt;") }
 function lits() { var r = [], k = [], i; for (i = 0; i < 4; i++) { var x = /a(b)?/g; k.push(x); r.push(x.lastIndex, x.exec("xabab") + "", x.lastIndex) } r.push(k[0] === k[1], k[0].source, k[0].flags, /x/imsu.flags, /\u{1F600}/u.test("\ud83d\ude00")); return r.join() }
@@ -599,6 +601,7 @@ function uses(s) { return [esc(s), s.split(/,\s*/).length, (s.match(/\d+/g) || [
 // them, a replacer function, a split's limit, errors thrown by the call and
 // by its arguments, and the RegExp kept by the method it calls.
 func TestRegDiffRegExpLiteralCalls(t *testing.T) {
+	regExpLiterals(t)
 	src := `
 var kept = [];
 function loop(a) { var c = 0, s = ""; for (var j = 0; j < 8; j++) { if (/^a.c$/.test(a[j & 3])) c++; var m = /(\d+)-(\d+)/.exec("x" + j + "-" + (j * 3)); s += m[1] + m[2] + /a/y.test("ba") + /a/g.exec("aa").index } return c + s }
@@ -623,4 +626,12 @@ function errs() { var out = []; try { /a/.test({ toString: function () { throw n
 		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])
 	}
 	regDiff(t, src, calls)
+}
+
+// regExpLiterals compiles RegExp literals as register code for the test,
+// which they are not by default (regcomp.RegExpLiterals).
+func regExpLiterals(t *testing.T) {
+	saved := regcomp.RegExpLiterals
+	regcomp.RegExpLiterals = true
+	t.Cleanup(func() { regcomp.RegExpLiterals = saved })
 }

@@ -1221,6 +1221,13 @@ func (g *gen) expr(e ast.Expr, dst int) int {
 		return d
 	case *ast.RegexpLit:
 		d := g.dest(dst)
+		if !RegExpLiterals {
+			// The literal's operations stay the tree's until they are
+			// as fast in register code (see the design's "Where stage 1
+			// stands").
+			g.fail("a RegExp literal")
+			return d
+		}
 		g.at(n.Start)
 		g.emit(bytecode.MakeRBC(bytecode.RCold, uint8(bytecode.RColdNewRegExp), r16(d), g.regexpConst(n)))
 		return d
@@ -3020,3 +3027,8 @@ func (g *gen) localReg() []int32 {
 	}
 	return append([]int32(nil), g.slotReg...)
 }
+
+// RegExpLiterals turns on the register code of a function with a RegExp
+// literal (new_regexp, lit_exec, lit_test, call_lit, call_arg_lit), which
+// QJS_REGEXPLIT sets: off, such a function is the tree's.
+var RegExpLiterals = os.Getenv("QJS_REGEXPLIT") != ""

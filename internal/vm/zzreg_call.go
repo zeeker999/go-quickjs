@@ -965,7 +965,7 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 	var err error
 	switch w.Op() {
 	case bytecode.RCold:
-		return Undefined, r.regColdSub(f, c, k, regs, w)
+		return Undefined, r.regColdSub(f, c, k, regs)
 	case bytecode.RGetGlobal:
 		v, err = r.regGetGlobal(f, cl, w)
 	case bytecode.RSetGlobal:

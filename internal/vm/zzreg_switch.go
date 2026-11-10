@@ -202,12 +202,14 @@ func (r *Runtime) regCold(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 // regColdSub is cold's operations, by the sub-operation in X: one opcode
 // value for every operation that does not run per turn of a hot loop, and
 // may throw. The loop runs cold through the slow path's case, regSlow,
-// whose error it returns: an error check in regCold's case of its own made
-// empty_loop 7.5% and string_build1 6.4% slower at every placement, the
-// loop's blocks laid out otherwise.
+// whose error it returns: an error check in regCold's case made empty_loop
+// 7.5% and string_build1 6.4% slower at every placement, and a case of
+// cold's own, before the free values', empty_loop 7.6% and loop_sum 4.4%,
+// the loop's blocks laid out otherwise.
 // Every one of them may throw: the frame's pc is the instruction's first.
-func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value, w bytecode.RInstr) error {
+func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value) error {
 	pc := k.pc - 1
+	w := regAt(c.code, pc)
 	f.pc = c.src[pc] + 1
 	switch bytecode.RColdOp(w.X()) {
 	case bytecode.RColdNewRegExp:
@@ -307,7 +309,7 @@ func (r *Runtime) regRegExpCall(f *frame, c *regCode, w bytecode.RInstr, pc int,
 	case sub == bytecode.RColdCallReuse && o == r.regexpExecFn && c.reuse[int32(pc)] != nil:
 		v, err = reuseCallRest[struct{}](r, c.reuse[int32(pc)], r.stack[wb:wb+int(c.numRegs)], o, o.fn(), recv, args)
 	default:
-		v, err = r.regCall(fv, recv, args)
+		v, err = r.callRest(o, o.fn(), recv, args)
 	}
 	if err != nil {
 		return err

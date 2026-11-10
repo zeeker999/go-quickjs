@@ -894,6 +894,29 @@ primitive, does without. The tree's
   regexp tests 6 to 48% slower at every placement. Those mechanisms are
   owed to register code before the literal is: they are what the tree
   wins by.
+
+  They are now cold operations (`regColdSub`): `new_regexp`; `lit_exec`
+  or `lit_test` and `call_lit` (the method unread where it is the
+  built-in, the RegExp given back, `regexpLitMethod` and the spares);
+  `call_arg_lit` (`regexpArgCall`); `call_dead` (exec or replace whose
+  value only its truth is read, `deadCallRest`); `call_reuse` (`m =
+  re.exec(s)`, the stack form's call found by position and
+  `execReuseOf`'s site put in registers, `reuseCallRest`). The last two
+  run in every function; the literal's need `QJS_REGEXPLIT`
+  (`regcomp.RegExpLiterals`), since with them, against s2 (the tree),
+  `regexp_replace` was 25%, `regexp_split` 11%, `regexp_replace_dollar`
+  10%, `regexp_match_g`, `regexp_sticky`, `regexp_exec_g`,
+  `regexp_search_i` and `html_escape_plain` 7 to 10% slower at every
+  placement, `template_list` 23% and `template_row` 13% faster. Two cold
+  operations a call, each through `regSlow` and a second dispatch, are
+  what is left: a profile of `regexp_ascii` has `regSlow` at 3.4% and
+  `regRegExpCall` at 6%, its loads from the frame, the code and the
+  constants, against the tree's one node. A case of cold's own in the
+  loop took 4 points off but made `empty_loop` 7.6% slower (layout). What
+  is next: one operation for a call whose arguments are locals or
+  constants (the literal made, the method chosen and the call made at
+  once, nothing observable between), and `call_arg_lit` making the
+  literal itself.
 - **The opcode space was full but for two values.** The dispatch masks the
   operation to 7 bits so that its jump table needs no range check, and
   with `char_code_at` 126 of the 128 values were taken. Widening the mask
