@@ -268,6 +268,20 @@ func (r *Runtime) regLit(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value)
 	regs[a+1] = lit
 	test := x&bytecode.RLitTest != 0
 	if m := r.regexpLitMethod(test); m != nil {
+		if x&(bytecode.RLitCall|bytecode.RLitDead) == bytecode.RLitCall && !regs[a+2].IsObject() {
+			// The built-in on the literal given a primitive, called
+			// at once, and the RegExp given back (RMarkLitRecv).
+			v, err := r.callRest(m, m.fn(), lit, regs[a+2:a+3])
+			if err != nil {
+				return err
+			}
+			if !test || r.regexpLitMethod(false) != nil {
+				// test calls exec, which must be the built-in too.
+				r.regexpLiteralDone(&f.cl.fn.Constants[kc], lit.Object())
+			}
+			regs[w.B()] = v
+			return nil
+		}
 		regs[a] = Obj(m)
 	} else {
 		name := atomExec

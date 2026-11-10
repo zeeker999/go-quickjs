@@ -562,7 +562,7 @@ are.
   receiver coerced as `callClosure` coerces it), not through `regCall`
   and `callDirect`: `generator_create` 480 to 404 ns, the tree 430. The
   step's recover goes when a generator's body is register code (stage
-  3): without it `generator_create` was 383. A key string a for-in handed out is read by
+  2, item 3): without it `generator_create` was 383. A key string a for-in handed out is read by
   `get_index`'s slow path as the tree reads it (`stringKeyRead`), and
   `f.call(t, ...)` goes to `callThrough` without the generic call's
   search (`has_own_call_for_in`). A for-of loop's body is in the
@@ -677,8 +677,8 @@ on the old pipeline -- until the end state, in which the stack interpreter
 and the tree tier are removed. So no new feature is left to them, not for
 a form, not for a while, not because the tree is faster: what is added
 runs entirely as register code. The fallbacks there are -- regcomp's
-refusals, `QJS_REGEXPLIT` (RegExp literals), `call_dead` and `call_reuse`
-off by default -- are a list to burn down, not a design. The tree tier is
+refusals (the inventory below) -- are a list to burn down, not a
+design. The tree tier is
 the floor to beat and the place to port mechanisms from, never a place to
 send code.
 
@@ -973,41 +973,41 @@ primitive, does without. The tree's
   to 1,813 ns (the tree 1,924, the comparison engine 1,878),
   `html_escape_mixed` 800 to 636, `int_toString` 81.5 to 77.1 (the tree
   70, the comparison engine 82); the V8 suite level.
-- **A RegExp literal stays the tree's for now.** As a `new_regexp` through
-  the slow path it made `template_list` 304 to 228 ns (the tree 253:
-  `extra_esc` and its caller no longer crossed), but every function with a
-  literal lost the tree's mechanisms around it: the literal's RegExp given
-  back after `/x/.exec(s)` and `test` (`regexpLitMethod`, the spares), a
-  literal handed to `replace`, `split` or `match` searched without its
-  object (`regexpArgCall`), and an exec's array made again in the memory
-  of the last (`reuseExecCall`) or not at all where nothing reads it.
-  `regexp_sticky` was 255 to 377 ns, `regexp_ascii` 217 to 294, eleven
-  regexp tests 6 to 48% slower at every placement. Those mechanisms are
-  owed to register code before the literal is: they are what the tree
-  wins by.
+- **A RegExp literal is register code** (`QJS_REGEXPLIT` and
+  `QJS_REGCALLS` removed). As a `new_regexp` through the slow path it made
+  `template_list` 304 to 228 ns, but every function with a literal lost
+  the tree's mechanisms around it: the literal's RegExp given back after
+  `/x/.exec(s)` and `test` (`regexpLitMethod`, the spares), a literal
+  handed to `replace`, `split` or `match` searched without its object
+  (`regexpArgCall`), and an exec's array made again in the memory of the
+  last (`reuseExecCall`) or not at all where nothing reads it
+  (`regexp_sticky` 255 to 377 ns, eleven regexp tests 6 to 48% slower).
+  As cold operations (`lit_exec`, `call_lit`, `call_arg_lit`,
+  `call_dead`, `call_reuse`), two second dispatches a call, `regexp_replace`
+  was still 25% and `html_escape_plain` 8.3% slower.
 
-  They are now cold operations (`regColdSub`): `new_regexp`; `lit_exec`
-  or `lit_test` and `call_lit` (the method unread where it is the
-  built-in, the RegExp given back, `regexpLitMethod` and the spares);
-  `call_arg_lit` (`regexpArgCall`); `call_dead` (exec or replace whose
-  value only its truth is read, `deadCallRest`); `call_reuse` (`m =
-  re.exec(s)`, the stack form's call found by position and
-  `execReuseOf`'s site put in registers, `reuseCallRest`). The last two
-  run in every function; the literal's need `QJS_REGEXPLIT`
-  (`regcomp.RegExpLiterals`), since with them, against s2 (the tree),
-  `regexp_replace` was 25%, `regexp_split` 11%, `regexp_replace_dollar`
-  10%, `regexp_match_g`, `regexp_sticky`, `regexp_exec_g`,
-  `regexp_search_i` and `html_escape_plain` 7 to 10% slower at every
-  placement, `template_list` 23% and `template_row` 13% faster. Two cold
-  operations a call, each through `regSlow` and a second dispatch, are
-  what is left: a profile of `regexp_ascii` has `regSlow` at 3.4% and
-  `regRegExpCall` at 6%, its loads from the frame, the code and the
-  constants, against the tree's one node. A case of cold's own in the
-  loop took 4 points off but made `empty_loop` 7.6% slower (layout). What
-  is next: one operation for a call whose arguments are locals or
-  constants (the literal made, the method chosen and the call made at
-  once, nothing observable between), and `call_arg_lit` making the
-  literal itself.
+  Now the call is always the hot `call_method_w`, and what the tree's
+  nodes do around it is a **mark** of the call (`RegCode.Marks`:
+  `RMarkDead`, `RMarkReuse`, `RMarkLitRecv`, `RMarkLitArg`, their operand
+  in `Aux`, all 32 bits), which changes nothing of the dispatch: the site's
+  discovery (`regCallSlow`) caches a callee as `regCallMarked` only where
+  the mark is its -- the realm's exec, test or replace, any callee for a
+  literal argument, a reuse only where `execReuseOf` has a site -- and
+  `regCallW` sends those to `regMarkedCall`; every other callee keeps its
+  kind. Marked where no reuse site existed, the call went through
+  `callRest` with a frame where `regNative` had none, 10% slower: a mark
+  applies only where it does something. A literal argument is made by the
+  call itself (`RMarkLitArg`): nothing can see it made after the
+  arguments that follow. The literal's method is `regexp_lit`, a direct
+  operation (value 29): the literal made or given back and its method
+  chosen; with `RLitCall`, for one argument that is a constant or a local
+  nothing captures in a function with no arguments object -- which the
+  method's read, a getter, could neither write nor see uninitialized --
+  the call made at once, the built-in called without the window. Any
+  other argument is evaluated between `regexp_lit` and the marked call:
+  the method must be read before it. A constant past 16 bits keeps the
+  general form (`new_regexp` and the call), never a refusal.
+
 - **The opcode space was full but for two values.** The dispatch masks the
   operation to 7 bits so that its jump table needs no range check, and
   with `char_code_at` 126 of the 128 values were taken. Widening the mask
@@ -1095,23 +1095,139 @@ loop counter may be live across a back edge; the literal rule, no raw
 register live across anything that can call out, would forbid every raw
 counter.
 
-### Stage 2: frames
+### Stage 2: zero refusals
 
-The lean frame record everywhere a frame is read: stack traces, the
-debugger's frames, errors' positions, generators. Exceptions with handler
-tables, `try`, `catch` and `finally`; `arguments` and rest parameters;
-destructuring; classes and `super`; `for-in` and `for-of`; templates;
-spreads; optional chains; tail calls. Built-ins' callbacks all enter
-directly.
+The register tier is the baseline interpreter: it refuses nothing V8's
+Ignition compiles, which in practice is everything. No form stays in the
+old tiers, not generators, not eval, not the debugger's code; each is
+compiled as register code, and the old tiers go when the last refusal
+does. The refusals are counted by `internal/cmd/regrefusals`, which
+compiles every file of the directories it is given with the register
+form on and counts the functions regcomp compiled and those it refused,
+by the first reason each met (a function refused for one reason may meet
+another once it is gone):
 
-### Stage 3: generators, async, eval, with, the debugger
+```sh
+go run ./internal/cmd/regrefusals D:/Data/v8-v7 D:/Data/octane D:/Data/bundles /path/to/test262/test
+```
 
-Generators and async functions as copied windows, with the settled-await
-fast path; direct eval through binding descriptors; `with`; the debugger's
-statement markers and binding tables. At its end every function has
-register code and the stack interpreter runs nothing.
+At 8474d6d0 (RegExp literals compiled; test262's negative tests, 4,728
+files, do not compile and are not counted):
 
-### Stage 4: the JIT and the tree tier
+| | files | functions | register code | refused |
+|---|---|---|---|---|
+| V8 suite | 10 | 820 | 808 (98.5%) | 12 |
+| Octane | 21 | 6,976 | 6,801 (97.5%) | 175 |
+| bundles (Babel, Three.js) | 2 | 9,829 | 6,234 (63.4%) | 3,595 |
+| test262 | 54,084 | 162,893 | 63,090 (38.7%) | 99,803 |
+| all | 54,117 | 180,518 | 76,933 (42.6%) | 103,585 |
+
+Every reason, all four together (V8, Octane and bundles where they have
+it):
+
+| functions | reason | V8 / Octane / bundles |
+|---|---|---|
+| 49,389 | top-level code | 10 / 21 / 2 |
+| 12,737 | generator or async | 0 / 0 / 11 |
+| 9,844 | class constructor | 0 / 0 / 128 |
+| 7,154 | getter, setter, field initializer or static block | 0 / 39 / 141 |
+| 5,382 | private members | |
+| 3,899 | parameter patterns, defaults or rest | 0 / 0 / 176 |
+| 2,981 | a field's initializer (`ast.FieldInit`) | |
+| 2,819 | tail call | 0 / 83 / 2,566 |
+| 1,912 | a BigInt literal | |
+| 1,449 | private methods' installation (`ast.InstallPrivateMethods`) | |
+| 1,426 | an object literal's property (accessors, methods, spreads, computed) | 0 / 12 / 5 |
+| 757 | direct eval | 1 / 1 / 0 |
+| 655 | a template literal | 0 / 0 / 7 |
+| 527 | a with, an eval's variables or an Annex B function | 0 / 3 / 1 |
+| 434 | a name the backend does not read | 0 / 0 / 335 |
+| 206 | a destructuring declaration | 0 / 0 / 4 |
+| 201 | an arguments binding the record does not name | 0 / 1 / 0 |
+| 197 | a for-of or for-in loop's pattern or member | |
+| 189 | a spread element | |
+| 153 | arguments | 0 / 1 / 52 |
+| 146 | super | 0 / 0 / 119 |
+| 98 | an assignment target (patterns) | |
+| 96 | a class declaration inside | 0 / 0 / 1 |
+| 96 | a strict global store of a value that runs code | 0 / 2 / 0 |
+| 92 | a name the record does not resolve | |
+| 83 | typeof of a global | 1 / 9 / 12 |
+| 71 | a class expression inside | |
+| 69 | a spread argument | 0 / 0 / 1 |
+| 67 | `super` as an expression | |
+| 59 | a logical assignment | |
+| 47 | a store the backend does not compile | 0 / 0 / 19 |
+| 45 | `new.target` | |
+| 41 | a using declaration | |
+| 39 | an object literal's key | 0 / 1 / 0 |
+| 35 | an optional chain | |
+| 27 | a catch clause's pattern | |
+| 19 | a hole | |
+| 17 | an object literal's `__proto__` or a key twice | 0 / 0 / 4 |
+| 15 | a function declaration in a block | |
+| 13 | delete of a super property | |
+| 12 | `super()` | |
+| 11 | a labelled statement that is not a loop | 0 / 0 / 1 |
+| 9 | an optional call or too many arguments (a cap: 255) | 0 / 0 / 9 |
+| 8 | a private name | |
+| 8 | delete of a name or an optional chain | 0 / 1 / 0 |
+| 7 | a captured lexical binding in a loop | |
+| 6 | a declaration in a switch | |
+| 6 | a with statement | |
+| 6 | a tagged template | |
+| 5 | a call of eval | |
+| 5 | a for-of or for-in head's declaration | |
+| 4 | `??` | |
+| 4 | an update target | |
+| 3 | `import.meta` | |
+| 2 | a compound assignment target | |
+| 2 | a lexical declaration in a switch | 0 / 0 / 1 |
+| 1 | a site past 16 bits (a cap) | 0 / 1 / 0 |
+
+Not in the corpora, and refused as well: code compiled for a debugger
+(`WithDebugger`), `for await`, a finally clause nested more than four
+copies deep, and the caps -- more than 65,536 registers, a jump past 16
+bits, a name past 16 bits, more than 255 arguments, properties or
+elements in one instruction. A cap goes as a wide form, never a refusal.
+
+The plan to zero, in the order of what each costs real code first -- the
+V8 suite, Octane and the bundles -- and then test262, each form with its
+regdiff cases and test262 in register mode on its directories:
+
+1. **Tail calls** (2,819; 2,566 of the bundles', strict code's `return
+   f()`): a call in tail position as an ordinary call where the stack form
+   makes it a tail call only for frames it owns, or `ret_call` reusing the
+   frame. `tail_mutual` runs in the tree for it.
+2. **Top-level code** (49,389, most of test262; every script and module):
+   a script's and a module's body as a function of registers, its
+   bindings the global object's and the global lexical environment's.
+3. **Generators, async functions, `for await`** (12,737): the frame's
+   window copied into the generator on a suspension ("Generators and async functions"
+   above), the settled-await fast path; the step's recover goes
+   with them.
+4. **Classes** (about 27,000 together: constructors, accessors, fields,
+   static blocks, private members and methods, `super`, `new.target`,
+   class expressions inside functions).
+5. **Parameter patterns, defaults and rest; destructuring everywhere**
+   (declarations, assignment targets, catch clauses, for-of and for-in
+   heads; about 4,500).
+6. **BigInt literals** (1,912), **templates and tagged templates** (661),
+   **object literals of every property kind** (1,482).
+7. **The arguments object in every form** (354), **spreads** (258),
+   **names the backend does not read** (434, 335 of the bundles'), names
+   the record does not resolve (92), `typeof` of a global (83), strict
+   global stores (96), logical assignment (59), optional chains (44),
+   `??` in the forms left (4).
+8. **eval and `with`** (757 direct evals, 527 functions beside an eval's
+   variables, a with or an Annex B function, 11 more): binding
+   descriptors for what an eval can reach.
+9. **`using`** (41), labelled blocks (11), declarations in switches (8),
+   function declarations in blocks (15), captured loop bindings (7), the
+   finally depth (completion dispatch, no cap), the debugger's code
+   (statement markers in register code), and the caps.
+
+### Stage 3: the JIT and the tree tier
 
 The JIT's front end reads register code, or the AST, and its
 deoptimization rebuilds register frames: with the stack interpreter and
@@ -1119,7 +1235,7 @@ the tree tier removed, the stack form is no input it can keep. The tree
 tier is measured against the register interpreter suite by suite, its
 mechanisms ported, and removed.
 
-### Stage 5: one pipeline
+### Stage 4: one pipeline
 
 The stack compiler stops emitting code; scope resolution stays as the
 front end both backends shared. `executeAt` and the stack form's
