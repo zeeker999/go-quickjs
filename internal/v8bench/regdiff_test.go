@@ -460,10 +460,11 @@ function self() { var o = { a: 1 }; o = { a: o.a + 1, b: o, c: typeof o }; retur
 function order() { var log = []; function v(k) { log.push(k); return k } var o = { b: v("b"), a: v("a"), 2: v(2), 1: v(1) }; return log.join() + " " + Object.keys(o).join() }
 function others(j) { var k = "dyn"; var o = { [k]: 1, a: 2 }, p = { a: 1, a: 2 }, q = { __proto__: null, a: 1 }, g = { get a() { return j } }, m = { m() { return 3 } }, sp = { ...p, z: 1 }; return [desc(o), desc(p), Object.getPrototypeOf(q), g.a, m.m(), desc(sp)].join() }
 function frozenProto() { Object.defineProperty(Object.prototype, "ro", { value: 1, writable: false, configurable: true }); Object.defineProperty(Object.prototype, "acc", { set: function (v) { throw new Error("setter") }, configurable: true }); try { var o = { ro: 2, acc: 3 }; return desc(o) } finally { delete Object.prototype.ro; delete Object.prototype.acc } }
+function kept(n) { var out = []; for (var i = 0; i < n; i++) { var o = { a: i, b: "s" + i, c: i / 2 }; if (i % 4 == 1) o.d = 1; if (i % 5 == 2) delete o.b; if (i % 7 == 3) Object.freeze(o); out.push(desc(o)) } return out.join() }
 function wide() { var src = "return {"; for (var i = 0; i < 300; i++) src += "p" + i + ": " + i + ","; src += "}"; var o = Function(src)(); return Object.keys(o).length + " " + o.p299 }
 `
 	calls := []string{
-		`lits(1)`, `lits(-0)`, `grow(20)`, `many(3)`, `thrower()`, `self()`, `order()`, `others(5)`, `frozenProto()`, `wide()`,
+		`lits(1)`, `lits(-0)`, `grow(20)`, `many(3)`, `thrower()`, `self()`, `order()`, `others(5)`, `frozenProto()`, `wide()`, `kept(30)`,
 	}
 	for i := range calls {
 		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])

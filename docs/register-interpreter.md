@@ -767,7 +767,11 @@ primitive, does without. The tree's
   the literal is done. A computed key, an accessor, a method, a spread,
   `__proto__`, a key twice or more than 255 keys keep the form of one
   instruction each. `object_literal_fixed` 171 to 127 ns in one build (the
-  tree 101).
+  tree 101), 197 to 141 over the placements. Where every key was added
+  along a transition from the site's root, the site keeps the shape they
+  led to (`propCache`'s `next`, its root in `s1`), as the tree's literal
+  node does, and the next object from that root is given its values in
+  place and that shape: 141 to 105 ns in one build, the tree 109.
 
 #### Raw int32 registers (step 5, designed, deferred)
 

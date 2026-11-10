@@ -209,14 +209,30 @@ func (r *Runtime) regNewObjectLit(f *frame, c *regCode, k *regKept, regs *[1 << 
 	w := regAt(c.code, pc)
 	cl := f.cl
 	n := int(w.X())
-	root := r.shapes.siteRoot(&cl.ic[w.C()], r.proto.object)
+	ic := &cl.ic[w.C()]
+	root := r.shapes.siteRoot(ic, r.proto.object)
 	m := n
 	if root != nil && int(root.slack) > m {
 		m = int(root.slack)
 	}
 	o := newShapedLiteral(root.orRoot(ClassObject, r.proto.object), ClassObject, m)
-	keys := c.rc.ObjKeys[c.rc.Aux[pc]]
 	vals := regs[w.B() : int(w.B())+n]
+	if final := ic.next; final != nil && root != nil && ic.s1 == root && n <= int(o.valc) {
+		// The shape the keys led to from this root before, which the
+		// site keeps as the tree's literal node does: transitions are
+		// never undone, so the values go in place.
+		dst := o.vals()[:n]
+		copy(dst, vals)
+		o.setVals(dst)
+		o.shape = final
+		if verifyShapes {
+			checkShape(o)
+		}
+		regs[w.A()] = Obj(o)
+		return
+	}
+	along := root != nil
+	keys := c.rc.ObjKeys[c.rc.Aux[pc]]
 	for i, key := range keys {
 		name := cl.names[key]
 		if next := o.transition(name, propDefault); next != nil {
@@ -225,8 +241,13 @@ func (r *Runtime) regNewObjectLit(f *frame, c *regCode, k *regKept, regs *[1 << 
 			// No transition where the shape tree is full: the long way,
 			// which for a fresh extensible object of distinct keys
 			// cannot fail.
+			along = false
 			_ = r.defineOwnProp(o, name, vals[i], propDefault)
 		}
+	}
+	if s := o.shape; along && s != nil && !s.unique && !s.loose && int(s.n) == n && int(o.valn) == n &&
+		(s.index != nil || n <= linearScanLimit) {
+		ic.next, ic.s1 = s, root
 	}
 	regs[w.A()] = Obj(o)
 }
