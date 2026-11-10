@@ -661,7 +661,14 @@ Each stage lands on its own, is measured against the one before by the
 placements, plain and with the JIT, and keeps test262 at 100,247 passed and
 none failed in every mode -- plain, with the JIT, with every runtime made
 `WithDebugger`, and in the register tier. What a stage does not cover runs
-on the old pipeline.
+on the old pipeline -- until the end state, in which the stack interpreter
+and the tree tier are removed. So no new feature is left to them, not for
+a form, not for a while, not because the tree is faster: what is added
+runs entirely as register code. The fallbacks there are -- regcomp's
+refusals, `QJS_REGEXPLIT` (RegExp literals), `call_dead` and `call_reuse`
+off by default -- are a list to burn down, not a design. The tree tier is
+the floor to beat and the place to port mechanisms from, never a place to
+send code.
 
 ### Stage 0: the evidence (done)
 
@@ -1094,9 +1101,11 @@ register code and the stack interpreter runs nothing.
 
 ### Stage 4: the JIT and the tree tier
 
-The JIT's front end reads register code and its deoptimization rebuilds
-register frames. The tree tier is measured against the register interpreter
-suite by suite and retired where it no longer wins.
+The JIT's front end reads register code, or the AST, and its
+deoptimization rebuilds register frames: with the stack interpreter and
+the tree tier removed, the stack form is no input it can keep. The tree
+tier is measured against the register interpreter suite by suite, its
+mechanisms ported, and removed.
 
 ### Stage 5: one pipeline
 
