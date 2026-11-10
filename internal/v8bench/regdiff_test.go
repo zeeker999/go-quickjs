@@ -333,11 +333,28 @@ function konstF() { return 1.5 }
 function konstT() { return true }
 function konstN() { return null }
 function konsts(n) { var s = 0, t = []; for (var i = 0; i < n; i++) { s += konst() + konstF(i) + konst(1, 2); t.push(konstT(), konstN(), konst.call("x"), new konst() instanceof konst) } return s + t.join() }
+function upd(t, k, j) { t[0] += j; t[1]++; t[2]--; t[k] += j; t[k]++; t[k] -= 0; t[k + 1] += 2; t[3] += -1; t[k] += "s"; return JSON.stringify(t) + typeof t[0] }
+function updLoop(t, n) { for (var i = 0; i < n; i++) { t[i & 3] += i; t[i & 1]++; t[(i & 1) + 2] += 1.5 } return JSON.stringify(t) }
+function updLog() { var log = [], k = { toString: function () { log.push("k"); return "a" } }, o = { get a() { log.push("get"); return 1 }, set a(v) { log.push("set " + v) } }; o[k] += 2; o[k]++; var j = 3; o[k] += j; return log.join() }
+function updBad(t, k) { try { t[k] += 1; return "ok " + JSON.stringify(t) } catch (e) { return e.constructor.name + ": " + e.message } }
+function updStr(s) { var t = ["5", 2n, null, undefined, true, {}]; for (var i = 0; i < t.length; i++) { try { t[i]++ } catch (e) { t[i] = e.name } } var u = ["5", null]; u[0] += 1; u[1] += 1; return t.map(String).join() + " " + u.join() }
+function updHoles() { var t = [1, , 3]; t[1] += 1; t[5]++; var f = Object.freeze([1, 2]); f[0] += 1; var a = (function () { return arguments })(1, 2); a[0] += 5; return JSON.stringify(t) + f.join() + a[0] + a.length }
+function updStrict() { 'use strict'; var f = Object.freeze([1, 2]); try { f[0] += 1 } catch (e) { return e.name } }
+function updStack(k) { 'use strict'; var f = Object.freeze([1]), o = { get 0() { return 1 }, set 0(v) { throw new Error("s") } }, out = []; var j = 2;
+  try { f[k] += j } catch (e) { out.push(e.stack.split(String.fromCharCode(10))[1]) }
+  try { o[k]++ } catch (e) { out.push(e.stack.split(String.fromCharCode(10))[2]) }
+  try { o[0] += 1 } catch (e) { out.push(e.stack.split(String.fromCharCode(10))[2]) }
+  try { null[k] += 1 } catch (e) { out.push(e.stack.split(String.fromCharCode(10))[1]) }
+  return out.join(" | ") }
+function updTyped() { var t = new Int8Array(3); t[0] += 127; t[0]++; t[1] -= 1; t[2] += 1.7; return t.join() }
 function kept(n) { var all = []; for (var j = 0; j < n; j++) { var a = []; for (var i = 0; i < 300; i++) a.push(j); all.push(a) } return all.map(function (a) { return a.length + ":" + a[299] }).join() }
 `
 	calls := []string{
 		`negs(-1)`, `negs(0)`, `negs(-0)`, `negs(-2)`, `negs(-32768)`, `negs(-2147483648)`, `negs("-1")`, `negs(undefined)`, `negs(5)`, `negs(-1.5)`, `negs({ valueOf: function () { return -1 } })`,
 		`konsts(5)`,
+		`upd([1, 2, 3, 4, 5], 0, 2)`, `upd([1, 2, 3, 4, 5], "1", 2)`, `upd({}, "x", 1)`, `upd([1, 2, 3, 4, 5], 1.5, 2)`, `upd([1, 2, 3, 4, 5], -1, 2)`,
+		`updLoop([0, 0, 0, 0], 50)`, `updLog()`, `updBad(null, 1)`, `updBad(undefined, "x")`, `updBad(null, { toString: function () { throw 1 } })`,
+		`updBad([1], { toString: function () { return "0" } })`, `updBad("abc", 0)`, `updBad(5, 0)`, `updStr()`, `updHoles()`, `updStrict()`, `updTyped()`, `updStack(0)`, `updStack("0")`,
 		`grow(300, 6)`, `grow(3, 4)`, `grow(0, 3)`, `grow(700, 3)`, `fresh()`, `kept(4)`,
 	}
 	for i := range calls {

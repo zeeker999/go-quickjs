@@ -319,6 +319,15 @@ const (
 	// came to need: B is its site, which learns it (the tree's
 	// arrayEmptyNode's).
 	RNewArrayE
+	// RAddIndex: R[A][R[B]] += R[C]; RAddIndexK: R[A][C] += R[B], a key
+	// that is an index; RAddIndexI: R[A][R[B]] += SC. Each is a statement's
+	// element update, its value unused, read where the value's evaluation
+	// cannot change what the read sees, as RAddProp's. X, in K and I, says
+	// an update, ++ or --, which converts by ToNumeric where += adds as +
+	// does. The key is converted once.
+	RAddIndex
+	RAddIndexK
+	RAddIndexI
 
 	// RInvalid is the last operation there can be, which no code holds:
 	// the interpreter's switch has a case for it so that its jump table
@@ -377,7 +386,8 @@ type RegCode struct {
 	CallSites int
 	// Aux is, for an instruction that needs one more operand than its word
 	// holds, that operand, by its pc: instanceof's cache site. Nil where no
-	// instruction needs one.
+	// instruction needs one; for add_index, the stack instruction of its
+	// store, where the store's errors are placed.
 	Aux []uint32
 	// Literals are the elements of the code's literals of constants
 	// (RNewArrayK), each a constant or one of the values no constant is.
@@ -416,7 +426,7 @@ var rOpNames = [...]string{
 	RPostInc: "post_inc", RPostDec: "post_dec", RGetLength: "get_length",
 	RJEq: "jeq", RJNe: "jne", RJEqI: "jeq_imm", RJNeI: "jne_imm", RJNull: "jnull", RJNotNull: "jnotnull",
 	RThrow: "throw", RInstanceOf: "instanceof", RIn: "in", RDelete: "delete", RArguments: "arguments", RNewArrayK: "new_array_k", RAddProp: "add_prop", RAddPropI: "add_prop_imm", RApplyArgs: "apply_args",
-	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
+	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
 }
 
 func (op ROp) String() string {
@@ -491,6 +501,12 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s @%d, %d", op, r(w.A()), w.C(), w.SB())
 	case RNewArrayK:
 		return fmt.Sprintf("%s %s, x%d @%d", op, r(w.A()), w.B(), w.C())
+	case RAddIndex:
+		return fmt.Sprintf("%s %s[%s], %s", op, r(w.A()), r(w.B()), r(w.C()))
+	case RAddIndexK:
+		return fmt.Sprintf("%s.%d %s[%d], %s", op, w.X(), r(w.A()), w.C(), r(w.B()))
+	case RAddIndexI:
+		return fmt.Sprintf("%s.%d %s[%s], %d", op, w.X(), r(w.A()), r(w.B()), w.SC())
 	case RNewArrayE:
 		return fmt.Sprintf("%s %s @%d", op, r(w.A()), w.B())
 	case RNewArray:

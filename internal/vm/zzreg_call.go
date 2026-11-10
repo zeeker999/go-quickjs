@@ -767,6 +767,12 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		return Undefined, r.regDefineField(cl, w, regs[w.A()], regs[w.B()])
 	case bytecode.RNewObject:
 		v = Obj(r.regNewObject(cl, w))
+	case bytecode.RAddIndex:
+		return Undefined, r.regAddIndex(f, c.rc.Aux[pc], regs[w.A()], regs[w.B()], regs[w.C()], false)
+	case bytecode.RAddIndexK:
+		return Undefined, r.regAddIndex(f, c.rc.Aux[pc], regs[w.A()], Int32(int32(w.C())), regs[w.B()], w.X() != 0)
+	case bytecode.RAddIndexI:
+		return Undefined, r.regAddIndex(f, c.rc.Aux[pc], regs[w.A()], regs[w.B()], Int32(w.SC()), w.X() != 0)
 	case bytecode.RNewArrayE:
 		// The tree's node for the literal, made here: its site in the
 		// closure's arrays, named to native code by the stack form's pc.
@@ -1090,6 +1096,38 @@ func (r *Runtime) regAddProp(cl *closure, c *regCode, w bytecode.RInstr, obj, b 
 		return r.setPropCached(&cl.ic[w.C()], obj.Object(), name, sum, cl.fn.Strict)
 	}
 	return r.setValueProp(obj, name, sum, cl.fn.Strict)
+}
+
+// regAddIndex is add_index's slow path: the key converted once, as
+// key_of_base converts it, the element read, b added as + adds or, for an
+// update, stepped as ++ steps, and the sum stored, at store, the stack
+// instruction whose position the store's errors take.
+func (r *Runtime) regAddIndex(f *frame, store uint32, obj, key, b Value, update bool) error {
+	if !key.IsString() && !key.IsNumber() && !key.IsSymbol() {
+		if obj.IsNullish() {
+			return r.throwTypeError("cannot read property of %s", r.describe(obj))
+		}
+		k, err := r.toPropertyKey(key)
+		if err != nil {
+			return err
+		}
+		key = r.keyToValue(k)
+	}
+	cur, err := r.getIndexed(obj, key)
+	if err != nil {
+		return err
+	}
+	var sum Value
+	if update {
+		sum, err = r.regStep(cur, b.Number())
+	} else {
+		sum, err = r.add(cur, b)
+	}
+	if err != nil {
+		return err
+	}
+	f.pc = store + 1
+	return r.setIndexed(obj, key, sum, f.cl.fn.Strict)
 }
 
 // regThrow is throw: the value thrown, from the instruction at pc.

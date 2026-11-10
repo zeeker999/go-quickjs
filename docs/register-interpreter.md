@@ -678,6 +678,29 @@ primitive, does without. The tree's
   (`propSite`), which the frameless evaluators read, so that a run of its
   register code fills them. With the tree tier off, the stack
   interpreter runs everything, register code included.
+- **What a call answers without a frame, every entry answers.** A body
+  that returns a constant is answered at the call site as one returning a
+  parameter is (`regLeafConst`): `func_call` 34 to 19 ns against the
+  tree's 28. A built-in's callback enters through `regDirect`, which now
+  answers the same bodies -- a constant, a parameter, a short pure body
+  through `pureCall`, a this-leaf through `leafCall` -- as `callDirect`
+  does a function without register code; a register closure is planned at
+  `closure_w`, so its callbacks had skipped that and made a frame each:
+  `map_forEach` and `set_forEach` -19%, `typed_forEach` -22%. A pure body
+  `pureByTree` gives a tree is entered as code: `forward_call6`'s
+  six-operand sum was 11% slower through the evaluator.
+- **An empty literal learns its room** (`new_array_empty`, the tree's
+  `arrayEmptyNode` and its site): `array_push_args3` grew every array
+  from nothing, -29%.
+- **An element's update is one operation.** `o[k] += v` and `o[k]++` as
+  statements are `add_index` (a key and a value in registers),
+  `add_index_k` (a 16-bit index) and `add_index_imm` (an immediate value),
+  on `add_prop`'s conditions: the value a constant or a binding no one
+  else writes. The key is converted once; the instruction is placed at the
+  key, where the stack form reads, and Aux names the stack form's store,
+  whose position a store's error takes. `array_update` 18 to 6 ns.
+- **A negative literal is an immediate** wherever a literal is
+  (`numberLit`): `!== -1`, `x + -1`, `x > -2`, a switch's cases.
 
 #### Raw int32 registers (step 5, designed, deferred)
 

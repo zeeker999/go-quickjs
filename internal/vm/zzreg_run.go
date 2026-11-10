@@ -173,7 +173,9 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 		coerceThis: fn.CoerceThis, rc: rc, fn: fn, wide: true, ncap: int32(ncap), newTarget: fn.UsesNewTarget, args: rc.UsesArguments || rc.ForwardsArguments,
 	}
 	switch {
-	case fn.Leaf == bytecode.LeafPure && !fn.PureCalls:
+	case fn.Leaf == bytecode.LeafPure && !fn.PureCalls && !pureByTree(fn):
+		// A longer body runs faster as code than in the frameless
+		// evaluator, as the tree tier finds (pureByTree).
 		c.leaf = regLeafPure
 	case fn.Leaf != bytecode.LeafNone && fn.Leaf != bytecode.LeafPure:
 		c.leaf = regLeafThis
@@ -1075,6 +1077,41 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				}
 			}
 			goto slow
+		case bytecode.RAddIndex:
+			// A dense element's number and a number added in place, as
+			// set_index's fast path writes an element.
+			if o, k, b := regs[w.A()], regs[w.B()], regs[w.C()]; o.IsObject() && k.IsNumber() && b.IsNumber() {
+				obj := o.Object()
+				if i, es := uint32(k.Number()), obj.elemsOf(); float64(i) == k.Number() && uint(i) < uint(len(es)) && obj.flags&(objMappedArguments|objSharedElems) == 0 {
+					if p := &es[i]; p.IsNumber() {
+						*p = regNum(p.Number() + b.Number())
+						continue
+					}
+				}
+			}
+			goto slow
+		case bytecode.RAddIndexK:
+			if o, b := regs[w.A()], regs[w.B()]; o.IsObject() && b.IsNumber() {
+				obj := o.Object()
+				if i, es := uint(w.C()), obj.elemsOf(); i < uint(len(es)) && obj.flags&(objMappedArguments|objSharedElems) == 0 {
+					if p := &es[i]; p.IsNumber() {
+						*p = regNum(p.Number() + b.Number())
+						continue
+					}
+				}
+			}
+			goto slow
+		case bytecode.RAddIndexI:
+			if o, k := regs[w.A()], regs[w.B()]; o.IsObject() && k.IsNumber() {
+				obj := o.Object()
+				if i, es := uint32(k.Number()), obj.elemsOf(); float64(i) == k.Number() && uint(i) < uint(len(es)) && obj.flags&(objMappedArguments|objSharedElems) == 0 {
+					if p := &es[i]; p.IsNumber() {
+						*p = regNum(p.Number() + float64(w.SC()))
+						continue
+					}
+				}
+			}
+			goto slow
 		case bytecode.RThrow:
 			return Undefined, r.regThrow(f, c, pc, regs)
 		case bytecode.RNewW, bytecode.RClosureW, bytecode.RInstanceOf, bytecode.RIn, bytecode.RDelete, bytecode.RArguments, bytecode.RNewArrayK,
@@ -1099,12 +1136,6 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile.
-		case 115:
-			goto invalid
-		case 116:
-			goto invalid
-		case 117:
-			goto invalid
 		case 118:
 			goto invalid
 		case 119:

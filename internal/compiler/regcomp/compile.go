@@ -84,6 +84,9 @@ type gen struct {
 	// arrays is how many empty array literals the code has, each a site
 	// that learns its arrays' room.
 	arrays int
+	// stores is, for an instruction that reads and then stores, the
+	// position of its store, whose stack instruction goes to Aux.
+	stores map[int]int32
 	err    string
 }
 
@@ -872,13 +875,16 @@ func (g *gen) varDecl(n *ast.VarDecl) {
 func (g *gen) discard(e ast.Expr) {
 	switch n := e.(type) {
 	case *ast.Update:
-		if m, ok := n.Operand.(*ast.Member); ok && g.addProp(m, nil, map[string]int32{"++": 1, "--": -1}[n.Op], n.Start) {
-			return
+		if m, ok := n.Operand.(*ast.Member); ok {
+			step := map[string]int32{"++": 1, "--": -1}[n.Op]
+			if g.addProp(m, nil, step, n.Start) || g.addIndex(m, nil, step, n.Start) {
+				return
+			}
 		}
 		g.update(n, false, -1)
 		return
 	case *ast.Assign:
-		if m, ok := n.Target.(*ast.Member); ok && n.Op == "+=" && g.addProp(m, n.Value, 0, int(n.Start)) {
+		if m, ok := n.Target.(*ast.Member); ok && n.Op == "+=" && (g.addProp(m, n.Value, 0, int(n.Start)) || g.addIndex(m, n.Value, 0, int(n.Start))) {
 			return
 		}
 		g.assign(n, -1, false)
@@ -1766,6 +1772,70 @@ func (g *gen) addProp(m *ast.Member, value ast.Expr, imm int32, pos int) bool {
 	return true
 }
 
+// addIndex compiles o[k] += value and o[k]++ as addProp does o.name's, one
+// add_index: the key in a register, or an index of 16 bits (add_index_k),
+// and the value a binding no one else writes or a constant, an immediate
+// where the key is in a register (add_index_imm).
+func (g *gen) addIndex(m *ast.Member, value ast.Expr, imm int32, pos int) bool {
+	if !m.Computed {
+		return false
+	}
+	if _, isSuper := m.Object.(*ast.Super); isSuper {
+		return false
+	}
+	x := uint8(0)
+	valImm := value == nil
+	if valImm {
+		x = 1
+	} else if i, ok := imm16(value); ok {
+		imm, valImm = i, true
+	} else {
+		id, isIdent := value.(*ast.Ident)
+		if !isIdent {
+			return false
+		}
+		res, ok := g.rec.Read[id]
+		if !ok || res.Kind != ResLocal || g.fn.Locals[res.Index].Captured {
+			return false
+		}
+	}
+	key, keyImm := imm16(m.Property)
+	keyImm = keyImm && key >= 0
+	o := g.expr(m.Object, -1)
+	if !keyImm {
+		o = g.guard(o, m.Property)
+		k := g.expr(m.Property, -1)
+		if valImm {
+			g.readStore(m, pos, bytecode.MakeR(bytecode.RAddIndexI, x, r16(o), r16(k), uint16(int16(imm))))
+			return true
+		}
+		v := g.expr(value, -1)
+		g.readStore(m, pos, bytecode.MakeR(bytecode.RAddIndex, 0, r16(o), r16(k), r16(v)))
+		return true
+	}
+	var v int
+	if valImm {
+		v = g.number(float64(imm), -1)
+	} else {
+		v = g.expr(value, -1)
+	}
+	g.readStore(m, pos, bytecode.MakeR(bytecode.RAddIndexK, x, r16(o), r16(v), uint16(key)))
+	return true
+}
+
+// readStore emits w, which reads m and stores to it: placed at m's key,
+// where the stack form reads it, with the store's position, the
+// statement's, kept for its stack instruction (Aux), where an error of the
+// store is placed.
+func (g *gen) readStore(m *ast.Member, pos int, w bytecode.RInstr) {
+	g.at(m.Property.Pos())
+	at := g.emit(w)
+	if g.stores == nil {
+		g.stores = map[int]int32{}
+	}
+	g.stores[at] = int32(pos)
+}
+
 // readForWrite reads the binding a compound assignment or an update of
 // id names, which the stack form may have read with the store's own
 // resolution rather than a read of its own.
@@ -2473,6 +2543,14 @@ func (g *gen) finish() *bytecode.RegCode {
 		j := sort.Search(len(table), func(j int) bool { return table[j].pos > p }) - 1
 		if j >= 0 && int(table[j].pc) < len(g.fn.Code) {
 			src[i] = table[j].pc
+		}
+	}
+	for at, p := range g.stores {
+		j := sort.Search(len(table), func(j int) bool { return table[j].pos > p }) - 1
+		if j >= 0 && int(table[j].pc) < len(g.fn.Code) {
+			g.aux(at, table[j].pc)
+		} else {
+			g.aux(at, src[at])
 		}
 	}
 	for len(g.siteName) <= int(g.fn.PropSites) {
