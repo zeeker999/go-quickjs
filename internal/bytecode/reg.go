@@ -307,6 +307,11 @@ const (
 	// RStrPart: R[A] = "" + R[A] where R[A] is neither a string nor a
 	// number, a part of a chain converted where its addition converted it.
 	RStrPart
+	// RKeyOfBase: R[A] = ToPropertyKey(R[C]), after a TypeError if R[B],
+	// the object it is for, is null or undefined: a computed member's key
+	// both read and written, converted once (to_property_key_of_base). A
+	// string, a symbol or a number is the key as it is.
+	RKeyOfBase
 
 	// RInvalid is the last operation there can be, which no code holds:
 	// the interpreter's switch has a case for it so that its jump table
@@ -385,7 +390,7 @@ var rOpNames = [...]string{
 	RLoadThis: "load_this", RCheckRef: "check_ref",
 	RGetUpval: "get_upval", RSetUpval: "set_upval",
 	RGetGlobal: "get_global", RSetGlobal: "set_global",
-	RGetProp: "get_prop", RGetMethod: "get_method", RGetMethodW: "get_method_w", RArgsLen: "args_len", RArgsIndex: "args_index", RConcat: "concat", RStrPart: "str_part", RSetProp: "set_prop",
+	RGetProp: "get_prop", RGetMethod: "get_method", RGetMethodW: "get_method_w", RArgsLen: "args_len", RArgsIndex: "args_index", RConcat: "concat", RStrPart: "str_part", RKeyOfBase: "key_of_base", RSetProp: "set_prop",
 	RGetIndex: "get_index", RSetIndex: "set_index", RDefineField: "define_field",
 	RNewObject: "new_object", RNewArray: "new_array", RClosure: "closure",
 	RAdd: "add", RSub: "sub", RMul: "mul", RBin: "bin", RBinI: "bin_imm",
@@ -451,6 +456,8 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s = %s..%s", op, r(w.A()), r(w.B()), r(w.B()+w.C()-1))
 	case RStrPart:
 		return fmt.Sprintf("%s %s", op, r(w.A()))
+	case RKeyOfBase:
+		return fmt.Sprintf("%s %s = key of %s for %s", op, r(w.A()), r(w.C()), r(w.B()))
 	case RArgsIndex:
 		return fmt.Sprintf("%s %s, %s[%s]", op, r(w.A()), r(w.B()), r(w.C()))
 	case RGetProp, RGetMethod, RGetMethodW:

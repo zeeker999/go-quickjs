@@ -1341,7 +1341,9 @@ func (c *compiler) compileUpdateKeep(n *ast.Update, keep bool) {
 		}
 		name := c.nameIdx(propKeyName(target.Property))
 		c.dupObject()
-		c.emit(bytecode.OpGetProp, name, 0)
+		// Placed at the member, as the computed read is: a read of null's
+		// property had the position of whatever came before it.
+		c.emitAt(int(target.Start), bytecode.OpGetProp, name, 0)
 		switch {
 		case !keep:
 			// Only the store is wanted, and the increment converts.
@@ -1389,7 +1391,9 @@ func (c *compiler) compileIndexForUpdate(m *ast.Member) {
 		return
 	}
 	c.compileExpr(m.Property)
-	c.emit(bytecode.OpToPropertyKeyOfBase, 0, 0)
+	// At the key, as V8 places a null object's error here: unplaced, it had
+	// the position of whatever came before it.
+	c.emitAt(m.Property.Pos(), bytecode.OpToPropertyKeyOfBase, 0, 0)
 	c.emit(bytecode.OpDup2, 0, 0)
 }
 

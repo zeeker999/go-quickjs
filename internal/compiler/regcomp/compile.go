@@ -1668,7 +1668,7 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 		var k int
 		var name uint32
 		if t.Computed {
-			k = g.guard(g.expr(t.Property, -1), n.Value)
+			k = g.key(t, g.guard(g.expr(t.Property, -1), n.Value), o)
 		} else {
 			s, ok := propName(t)
 			if !ok {
@@ -1822,8 +1822,8 @@ func (g *gen) update(n *ast.Update, keep bool, dst int) int {
 		o := g.expr(t.Object, -1)
 		cur := g.alloc()
 		if t.Computed {
-			k := g.expr(t.Property, -1)
-			g.at(t.Property.Pos())
+			k := g.key(t, g.expr(t.Property, -1), o)
+			g.at(int(t.Start))
 			g.emit(bytecode.MakeR(bytecode.RGetIndex, 0, r16(cur), r16(o), r16(k)))
 			return g.stepped(n, cur, step, keep, dst, func(v int) {
 				g.at(n.Start)
@@ -1836,7 +1836,7 @@ func (g *gen) update(n *ast.Update, keep bool, dst int) int {
 			return 0
 		}
 		name := g.nameIdx(s)
-		g.at(t.Property.Pos())
+		g.at(int(t.Start))
 		g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(cur), r16(o), g.propSite(bytecode.OpGetProp, name)))
 		return g.stepped(n, cur, step, keep, dst, func(v int) {
 			g.at(n.Start)
@@ -2034,6 +2034,26 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	}
 	g.at(n.TracePos())
 	g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), g.callSite()))
+	return d
+}
+
+// key is the register of the key k of t, a computed member read and then
+// written, converted once to a property key with its object o checked
+// first (key_of_base), as the stack form's to_property_key_of_base: the
+// read and the write would otherwise each convert an object's key, and
+// run its toString twice. A literal key needs nothing; a binding's value
+// is converted into a temporary, the binding left as it is.
+func (g *gen) key(t *ast.Member, k, o int) int {
+	switch t.Property.(type) {
+	case *ast.StringLit, *ast.NumberLit:
+		return k
+	}
+	d := k
+	if k < g.topAfterBindings() {
+		d = g.alloc()
+	}
+	g.at(t.Property.Pos())
+	g.emit(bytecode.MakeR(bytecode.RKeyOfBase, 0, r16(d), r16(o), r16(k)))
 	return d
 }
 

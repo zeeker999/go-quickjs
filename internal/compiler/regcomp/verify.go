@@ -59,6 +59,8 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			ok = reg(a) && c >= 2 && int(b)+int(c) <= n
 		case bytecode.RStrPart:
 			ok = reg(a)
+		case bytecode.RKeyOfBase:
+			ok = reg(a) && reg(b) && reg(c)
 		case bytecode.RGetMethodW:
 			ok = int(a)+1 < n && reg(b) && site(c)
 		case bytecode.RSetProp:

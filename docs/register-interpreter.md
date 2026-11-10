@@ -644,7 +644,10 @@ What the measurements found, against the design:
   now says they are its window's -- and placed a call at its expression's
   start; a block's `let` hid a function expression's own name; an apply
   other than the built-in was given a new arguments object each call,
-  now one kept in the binding's register (`apply_args`'s C). The tree's
+  now one kept in the binding's register (`apply_args`'s C); a computed
+  key both read and written ran an object's toString twice, now
+  converted once (`key_of_base`, the stack form's
+  `to_property_key_of_base`). The tree's
   mechanisms the register code lacked are its own now: `concat` and
   `str_part`, the stack form's string chain, one string made where an
   addition made one each; closures that take a value by value

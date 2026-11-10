@@ -796,6 +796,16 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		// in place: nothing reads them after.
 		b := int(w.B())
 		v, err = concatParts(r, regs[b:b+int(w.C())])
+	case bytecode.RKeyOfBase:
+		if base := regs[w.B()]; base.IsNullish() {
+			return Undefined, r.throwTypeError("cannot read property of %s", r.describe(base))
+		}
+		var k Atom
+		if k, err = r.toPropertyKey(regs[w.C()]); err == nil {
+			// An object's Symbol.toPrimitive may give a symbol: the key
+			// keeps whichever kind it turned out to be.
+			v = r.keyToValue(k)
+		}
 	case bytecode.RStrPart:
 		v, err = r.add(Str(emptyString), regs[w.A()])
 	case bytecode.RArgsIndex:

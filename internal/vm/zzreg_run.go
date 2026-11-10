@@ -1012,6 +1012,14 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		case bytecode.RNewW, bytecode.RClosureW, bytecode.RInstanceOf, bytecode.RIn, bytecode.RDelete, bytecode.RArguments, bytecode.RNewArrayK,
 			bytecode.RApplyArgs, bytecode.RArgsLen, bytecode.RArgsIndex, bytecode.RConcat:
 			goto slow
+		case bytecode.RKeyOfBase:
+			// A key whose conversion runs nothing is left as it is, and a
+			// null or undefined object is the read's to report.
+			if v := regs[w.C()]; v.IsString() || v.IsNumber() || v.IsSymbol() {
+				regs[w.A()] = v
+				continue
+			}
+			goto slow
 		case bytecode.RStrPart:
 			// A string or a number is joined as it is.
 			if v := regs[w.A()]; v.IsString() || v.IsNumber() {
@@ -1023,8 +1031,6 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile.
-		case 112:
-			goto invalid
 		case 113:
 			goto invalid
 		case 114:

@@ -285,6 +285,12 @@ function reuse(n) { 'use strict'; var t = 0; for (var i = 0; i < n; i++) { var g
 function byValue(a, b, c) { 'use strict'; return () => a + b + c }
 function mixed(a, b, c) { 'use strict'; b++; var f = function () { return a + b + c }; b++; return f() }
 function run(f) { log = []; var v = f(); return v + " / " + log.join() }
+function keys() { var o = { "<1>": 1 }, k = o(1); o[k] += 1; o[k]++; ++o[k]; return o["<1>"] }
+function bad(b) { var k = o(2); b[k] += 1 }
+function bad2(b) { var k = o(2); b[k]++ }
+function upd(t) { t.x++ }
+function updLoop(t) { for (var i = 0; i < 2; i++) t[0] += 1 }
+function caught(f, a) { try { f(a) } catch (x) { return x.message + " " + x.stack.split(String.fromCharCode(10))[1] } }
 `
 	calls := []string{
 		`run(function () { return chain(1, 2, o(2)) })`, `run(function () { return chain("a", o(1), 3) })`,
@@ -292,6 +298,8 @@ function run(f) { log = []; var v = f(); return v + " / " + log.join() }
 		`run(function () { return long(7) })`, `run(function () { return long(o(9)) })`,
 		`run(function () { return sym(1) })`, `run(function () { return reuse(5) + reuse(1) })`,
 		`run(function () { var f = byValue(1, 2, 3); return f() + f() })`, `run(function () { return mixed(1, 2, 3) })`,
+		`run(keys)`, `run(function () { return caught(bad, null) })`, `run(function () { return caught(bad2, undefined) })`,
+		`caught(upd, null)`, `caught(upd, undefined)`, `caught(updLoop, null)`,
 	}
 	for i := range calls {
 		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])
