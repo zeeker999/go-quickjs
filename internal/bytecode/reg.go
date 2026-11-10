@@ -344,6 +344,10 @@ const (
 	// of the first case of Switches[BC] that is the type's name, or the
 	// next instruction.
 	RSwitchTypeof
+	// RNewObjectLit: R[A] = an object literal of the X properties named
+	// ObjKeys[Aux[pc]], their values R[B] on, site C: the literal made at
+	// once, its values evaluated before it, which nothing can tell apart.
+	RNewObjectLit
 
 	// RInvalid is the last operation there can be, which no code holds:
 	// the interpreter's switch has a case for it so that its jump table
@@ -430,6 +434,9 @@ type RegCode struct {
 	// Literals are the elements of the code's literals of constants
 	// (RNewArrayK), each a constant or one of the values no constant is.
 	Literals [][]LitElem
+	// ObjKeys are the keys of the code's object literals made at once
+	// (RNewObjectLit), each an index of the function's names.
+	ObjKeys [][]uint16
 	// UsesArguments says the code makes the arguments object, whose frame
 	// keeps the arguments as passed (RArguments).
 	UsesArguments bool
@@ -464,7 +471,7 @@ var rOpNames = [...]string{
 	RPostInc: "post_inc", RPostDec: "post_dec", RGetLength: "get_length",
 	RJEq: "jeq", RJNe: "jne", RJEqI: "jeq_imm", RJNeI: "jne_imm", RJNull: "jnull", RJNotNull: "jnotnull",
 	RThrow: "throw", RInstanceOf: "instanceof", RIn: "in", RDelete: "delete", RArguments: "arguments", RNewArrayK: "new_array_k", RAddProp: "add_prop", RAddPropI: "add_prop_imm", RApplyArgs: "apply_args",
-	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RSwitch: "switch", RJTypeof: "jtypeof", RTypeof: "typeof", RSwitchTypeof: "switch_typeof", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
+	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RSwitch: "switch", RJTypeof: "jtypeof", RTypeof: "typeof", RSwitchTypeof: "switch_typeof", RNewObjectLit: "new_object_lit", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
 }
 
 func (op ROp) String() string {
@@ -533,6 +540,8 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s[%s], %s", op, r(w.A()), r(w.B()), r(w.C()))
 	case RNewObject:
 		return fmt.Sprintf("%s %s, %d @%d", op, r(w.A()), w.B(), w.C())
+	case RNewObjectLit:
+		return fmt.Sprintf("%s %s, %s x%d @%d", op, r(w.A()), r(w.B()), w.X(), w.C())
 	case RAddProp:
 		return fmt.Sprintf("%s %s @%d, %s", op, r(w.A()), w.C(), r(w.B()))
 	case RAddPropI:

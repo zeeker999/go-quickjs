@@ -443,3 +443,30 @@ function held(xs) { var calls = 0, last = 0, both = 0; var r = xs.reduce((acc, x
 	}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffObjectLiterals compares object literals made at once
+// (new_object_lit) with the tree's: key order with index-like keys,
+// values that throw or read the binding the literal goes to, many keys,
+// sites whose objects grow afterwards, and literals the form leaves to
+// define_field.
+func TestRegDiffObjectLiterals(t *testing.T) {
+	src := `
+function desc(o) { return JSON.stringify(Object.getOwnPropertyNames(o).map(function (k) { var d = Object.getOwnPropertyDescriptor(o, k); return [k, typeof d.value === "number" && Object.is(d.value, -0) ? "-0" : d.value, d.writable, d.enumerable, d.configurable] })) + Object.isExtensible(o) + (Object.getPrototypeOf(o) === Object.prototype) }
+function lits(j) { var a = { x: j, y: j + 1, s: "k", t: true, n: null, u: undefined, z: -0 }; var b = { "1": j, "0": 2, b: 3, "01": 4, "-0": 5, "4294967295": 6, "4294967294": 7, a: 8 }; var c = { get: 1, set: 2, "__proto_": 3, constructor: 4, toString: 5 }; return desc(a) + desc(b) + desc(c) }
+function grow(n) { var out = []; for (var i = 0; i < n; i++) { var o = { a: i, b: i * 2 }; if (i & 1) o.c = i; if (i % 3 == 0) delete o.a; out.push(JSON.stringify(o)) } return out.join() }
+function many(j) { var o = { k0: j, k1: 1, k2: 2, k3: 3, k4: 4, k5: 5, k6: 6, k7: 7, k8: 8, k9: 9, k10: 10, k11: 11, k12: 12, k13: 13, k14: 14, k15: 15, k16: 16, k17: 17, k18: 18, k19: 19 }; o.k20 = 20; return desc(o) }
+function thrower() { var o = 1, log = []; try { o = { a: log.push("a"), b: (function () { throw new Error("x") })(), c: log.push("c") } } catch (e) { log.push(e.message + " " + e.stack.split(String.fromCharCode(10))[1]) } return String(o) + log.join() }
+function self() { var o = { a: 1 }; o = { a: o.a + 1, b: o, c: typeof o }; return o.a + " " + o.b.a + " " + o.c }
+function order() { var log = []; function v(k) { log.push(k); return k } var o = { b: v("b"), a: v("a"), 2: v(2), 1: v(1) }; return log.join() + " " + Object.keys(o).join() }
+function others(j) { var k = "dyn"; var o = { [k]: 1, a: 2 }, p = { a: 1, a: 2 }, q = { __proto__: null, a: 1 }, g = { get a() { return j } }, m = { m() { return 3 } }, sp = { ...p, z: 1 }; return [desc(o), desc(p), Object.getPrototypeOf(q), g.a, m.m(), desc(sp)].join() }
+function frozenProto() { Object.defineProperty(Object.prototype, "ro", { value: 1, writable: false, configurable: true }); Object.defineProperty(Object.prototype, "acc", { set: function (v) { throw new Error("setter") }, configurable: true }); try { var o = { ro: 2, acc: 3 }; return desc(o) } finally { delete Object.prototype.ro; delete Object.prototype.acc } }
+function wide() { var src = "return {"; for (var i = 0; i < 300; i++) src += "p" + i + ": " + i + ","; src += "}"; var o = Function(src)(); return Object.keys(o).length + " " + o.p299 }
+`
+	calls := []string{
+		`lits(1)`, `lits(-0)`, `grow(20)`, `many(3)`, `thrower()`, `self()`, `order()`, `others(5)`, `frozenProto()`, `wide()`,
+	}
+	for i := range calls {
+		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])
+	}
+	regDiff(t, src, calls)
+}

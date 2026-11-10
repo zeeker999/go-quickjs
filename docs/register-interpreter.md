@@ -725,7 +725,7 @@ primitive, does without. The tree's
   path's.
 - **A typed array's element is out of line, not the slow path's.**
   `get_index`, `set_index` and their immediate forms answer a dense
-  element inline and send what they miss to `regTypedElem`, which reads or
+  element inline and send what they miss to `regElemMiss`, which reads or
   writes a typed array's element in its buffer as `elemAt` and `setElem`
   do, before the slow path: `typed_*_read` 24 to 15.5 ns and
   `typed_*_write` 24 to 14 against the tree's 13 and 14. get_index and the
@@ -754,6 +754,20 @@ primitive, does without. The tree's
   operation: `func_closure_call` 40 to 30 ns over the placements (the
   tree 33), `closure_counter` -22%, `array_reduce` -15%,
   `array_reduce_upvalue` 59 to 48 (the tree 62).
+- **An element appended or a hole filled is out of line too**
+  (`regElemMiss`, the tree's `setIndexMiss`: `appendElem`, `fillHole`),
+  not the slow path's: `array_prop_create` 54 to 44 ns and
+  `array_index_append` 56 to 48 in one build (the tree 33 and 36).
+- **An object literal of plain keys is made at once**
+  (`new_object_lit`): its values go into registers in order and one
+  operation, behind `regCold`, makes the object with its site's room and
+  takes each key's transition, where `new_object` and a `define_field`
+  each went through the slow path. The values evaluated before the object
+  is made is a difference nothing can see: the object is no one's until
+  the literal is done. A computed key, an accessor, a method, a spread,
+  `__proto__`, a key twice or more than 255 keys keep the form of one
+  instruction each. `object_literal_fixed` 171 to 127 ns in one build (the
+  tree 101).
 
 #### Raw int32 registers (step 5, designed, deferred)
 

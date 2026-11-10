@@ -80,6 +80,7 @@ type gen struct {
 	siteName []uint32
 	auxes    map[int]uint32
 	literals [][]bytecode.LitElem
+	objKeys  [][]uint16
 	calls    int
 	// arrays is how many empty array literals the code has, each a site
 	// that learns its arrays' room.
@@ -2518,6 +2519,9 @@ func (g *gen) object(n *ast.ObjectLit, dst int) int {
 		g.fail("too many properties")
 		return g.dest(dst)
 	}
+	if lit := g.objectAtOnce(n, dst); lit >= 0 {
+		return lit
+	}
 	d := g.dest(dst)
 	g.at(n.Start)
 	g.emit(bytecode.MakeR(bytecode.RNewObject, 0, r16(d), uint16(len(n.Props)), g.site(0)))
@@ -2545,6 +2549,54 @@ func (g *gen) object(n *ast.ObjectLit, dst int) int {
 		v := g.expr(p.Value, -1)
 		g.emit(bytecode.MakeR(bytecode.RDefineField, 0, r16(d), r16(v), g.name16(key)))
 	}
+	return d
+}
+
+// objectAtOnce compiles a literal of plain keys and values, none twice and
+// no __proto__, of at most 255, as new_object_lit: its values into
+// registers in order, then the object made of them at once, rather than a
+// define_field each. It is -1 for any other literal, nothing emitted.
+func (g *gen) objectAtOnce(n *ast.ObjectLit, dst int) int {
+	if len(n.Props) == 0 || len(n.Props) > 255 {
+		return -1
+	}
+	keys := make([]uint16, 0, len(n.Props))
+	seen := map[string]bool{}
+	for _, p := range n.Props {
+		if p.Kind != ast.PropInit || p.Computed || p.Method {
+			return -1
+		}
+		var key string
+		switch k := p.Key.(type) {
+		case *ast.Ident:
+			key = k.Name
+		case *ast.StringLit:
+			key = k.Value
+		default:
+			return -1
+		}
+		if key == "__proto__" || seen[key] {
+			return -1
+		}
+		seen[key] = true
+	}
+	base := g.allocN(len(n.Props))
+	for i, p := range n.Props {
+		var key string
+		switch k := p.Key.(type) {
+		case *ast.Ident:
+			key = k.Name
+		case *ast.StringLit:
+			key = k.Value
+		}
+		keys = append(keys, g.name16(key))
+		g.into(p.Value, base+i)
+	}
+	g.objKeys = append(g.objKeys, keys)
+	d := g.dest(dst)
+	g.at(n.Start)
+	at := g.emit(bytecode.MakeR(bytecode.RNewObjectLit, uint8(len(n.Props)), r16(d), r16(base), g.site(0)))
+	g.aux(at, uint32(len(g.objKeys)-1))
 	return d
 }
 
@@ -2710,7 +2762,7 @@ func (g *gen) finish() *bytecode.RegCode {
 		}
 	}
 	rc := &bytecode.RegCode{
-		Aux: aux, Switches: switches, Literals: g.literals, UsesArguments: (g.fn.UsesArguments || g.fn.MakesArguments) && !g.fn.ForwardsArguments,
+		Aux: aux, Switches: switches, Literals: g.literals, ObjKeys: g.objKeys, UsesArguments: (g.fn.UsesArguments || g.fn.MakesArguments) && !g.fn.ForwardsArguments,
 		ForwardsArguments: g.fn.ForwardsArguments,
 		Code:              g.code, NumRegs: g.max + 1, SrcPC: src, SiteName: g.siteName, This: -1,
 		Wide: true, Params: g.fn.ParamCount, Inits: g.inits, Caps: g.caps, CallSites: g.calls,

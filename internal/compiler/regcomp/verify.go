@@ -83,6 +83,14 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			ok = reg(a) && reg(b)
 		case bytecode.RNewObject:
 			ok = reg(a) && site(c)
+		case bytecode.RNewObjectLit:
+			ok = reg(a) && site(c) && w.X() > 0 && int(b)+int(w.X()) <= n && pc < len(rc.Aux) && int(rc.Aux[pc]) < len(rc.ObjKeys) &&
+				len(rc.ObjKeys[rc.Aux[pc]]) == int(w.X())
+			if ok {
+				for _, k := range rc.ObjKeys[rc.Aux[pc]] {
+					ok = ok && int(k) < len(fn.Names)
+				}
+			}
 		case bytecode.RTypeof:
 			ok = reg(a) && reg(b)
 		case bytecode.RJTypeof:

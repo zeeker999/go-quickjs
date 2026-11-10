@@ -570,7 +570,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				}
 			}
 			kept.pc = pc
-			if regTypedElem(c, &kept, regs) {
+			if regElemMiss(c, &kept, regs) {
 				pc = kept.pc
 				continue
 			}
@@ -1134,7 +1134,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				}
 			}
 			goto slow
-		case bytecode.RNewArrayE, bytecode.RSwitch, bytecode.RSwitchTypeof, bytecode.RTypeof:
+		case bytecode.RNewArrayE, bytecode.RSwitch, bytecode.RSwitchTypeof, bytecode.RTypeof, bytecode.RNewObjectLit:
 			// Operations not run per turn of a hot loop: one case, which
 			// moves none of the others' code, and a second dispatch.
 			kept.pc = pc
@@ -1184,8 +1184,6 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile.
-		case 122:
-			goto invalid
 		case 123:
 			goto invalid
 		case 124:
@@ -1225,9 +1223,9 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		continue
 	typed:
 		// An element get_index and the immediate forms have not found
-		// dense: a typed array's, out of line (regTypedElem).
+		// dense: a typed array's, out of line (regElemMiss).
 		kept.pc = pc
-		if regTypedElem(c, &kept, regs) {
+		if regElemMiss(c, &kept, regs) {
 			pc = kept.pc
 			continue
 		}
@@ -1291,13 +1289,14 @@ type regKept struct {
 	pad [2]int
 }
 
-// regTypedElem is the element of a typed array get_index, set_index and
-// their immediate forms read or write where their fast path has found no
-// dense element, as the tree's getIndexMiss and setElem do: elemAt and
-// setElem take it from the buffer and put a number there that the element
-// takes as it is, typedRead and typedStore the rest they can. False sends
-// what is left -- an appended element, a hole, a value that is no number,
-// a getter, a proxy -- to the slow path. Neither can throw or run code.
+// regElemMiss is the element get_index, set_index and their immediate
+// forms read or write where their fast path has found no dense element, as
+// the tree's getIndexMiss and setIndexMiss do: a typed array's, from or to
+// its buffer as elemAt and setElem read and write it, typedRead and
+// typedStore the rest they can; an element appended at an array's length,
+// or a hole filled (appendElem, fillHole). False sends what is left -- a
+// hole read, a value a typed array converts with code, a getter, a proxy
+// -- to the slow path. None of it can throw or run code.
 //
 // It is the one call of a label get_index and the immediate forms share,
 // so that the loop grows by a jump each, and set_index's before its slow
@@ -1306,7 +1305,7 @@ type regKept struct {
 // the operation again, as regSlow does, out of the loop.
 //
 //go:noinline
-func regTypedElem(c *regCode, k *regKept, regs *[1 << 16]Value) bool {
+func regElemMiss(c *regCode, k *regKept, regs *[1 << 16]Value) bool {
 	w := regAt(c.code, k.pc-1)
 	var obj, key Value
 	switch w.Op() {
@@ -1392,7 +1391,12 @@ func regTypedElem(c *regCode, k *regKept, regs *[1 << 16]Value) bool {
 				}
 			}
 		}
-		return setElem(obj, key, v) || typedStore(obj, key.num, v)
+		if setElem(obj, key, v) || typedStore(obj, key.num, v) {
+			return true
+		}
+		// An element appended at an array's length, or a hole filled,
+		// as the tree's setIndexMiss stores them.
+		return obj.IsObject() && (appendElem(obj.object(), key.num, v) || fillHole(obj.object(), key.num, v))
 	}
 	return false
 }

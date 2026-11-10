@@ -194,7 +194,41 @@ func (r *Runtime) regCold(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		regSwitchTypeof(c, k, regs[w.A()])
 	case bytecode.RTypeof:
 		r.regTypeof(c, k, regs)
+	case bytecode.RNewObjectLit:
+		r.regNewObjectLit(f, c, k, regs)
 	}
+}
+
+// regNewObjectLit is new_object_lit: the literal made with the room its
+// site's objects came to need, as new_object makes it, and each property
+// defined as define_field defines it, the values read from their
+// registers. A fresh ordinary object takes each new key by a transition,
+// and defining one can neither throw nor run code.
+func (r *Runtime) regNewObjectLit(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value) {
+	pc := k.pc - 1
+	w := regAt(c.code, pc)
+	cl := f.cl
+	n := int(w.X())
+	root := r.shapes.siteRoot(&cl.ic[w.C()], r.proto.object)
+	m := n
+	if root != nil && int(root.slack) > m {
+		m = int(root.slack)
+	}
+	o := newShapedLiteral(root.orRoot(ClassObject, r.proto.object), ClassObject, m)
+	keys := c.rc.ObjKeys[c.rc.Aux[pc]]
+	vals := regs[w.B() : int(w.B())+n]
+	for i, key := range keys {
+		name := cl.names[key]
+		if next := o.transition(name, propDefault); next != nil {
+			o.appendTransition(vals[i], next)
+		} else {
+			// No transition where the shape tree is full: the long way,
+			// which for a fresh extensible object of distinct keys
+			// cannot fail.
+			_ = r.defineOwnProp(o, name, vals[i], propDefault)
+		}
+	}
+	regs[w.A()] = Obj(o)
 }
 
 // regSwitch is switch: k's pc, past the instruction, made the body's
