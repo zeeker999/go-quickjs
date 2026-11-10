@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"errors"
 	"slices"
 	"sync/atomic"
 	"unsafe"
@@ -167,9 +168,6 @@ func (r *Runtime) regCallOnce(callee, this Value, args []Value) (Value, error) {
 func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 	pc := k.pc - 1
 	w := regAt(c.code, pc)
-	if r.frameDepth >= tailCallDepth && pc < len(c.rc.Marks) && c.rc.Marks[pc]&bytecode.RMarkTail != 0 && r.regTail(f, w, wb) {
-		return errTailCall
-	}
 	base := wb + int(w.A())
 	win := regWindow(r.stack, base)
 	if calls := f.cl.regCalls; uint(w.C()) < uint(len(calls)) {
@@ -253,8 +251,10 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 				o, cl, rc := e.callee, e.cl, e.rc
 				argc := int(w.X())
 				top := base + int(rc.numRegs)
-				if top > len(r.stack) || r.frameDepth >= r.maxFrames {
-					return r.throwRangeError("maximum call stack size exceeded")
+				if top > len(r.stack) || r.frameDepth >= r.callDeep {
+					if err := r.regDeepCall(f, c, w, wb, pc, top, e); err != nil {
+						return err
+					}
 				}
 				if r.interruptCounter--; r.interruptCounter <= 0 {
 					if err := r.checkInterruptNow(); err != nil {
@@ -299,7 +299,7 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 				nf.regKind = regFrameCall
 				v, err := r.runReg(nf, rc)
 				nf.regKind = 0
-				if rc.ncap != 0 && len(nf.openUpvalues) != 0 {
+				if len(nf.openUpvalues) != 0 {
 					regCloseUpvalues(nf)
 				}
 				r.frameDepth--
@@ -341,6 +341,14 @@ func regCloseUpvalues(f *frame) {
 //
 //go:noinline
 func (r *Runtime) regCallMiss(f *frame, c *regCode, w bytecode.RInstr, wb, pc int) error {
+	if r.frameDepth >= tailCallDepth && regMarkAt(c, pc)&bytecode.RMarkTail != 0 {
+		if r.regTailInPlace(f, c, w, wb) {
+			return errRegRestart
+		}
+		if r.regTail(f, w, wb) {
+			return errTailCall
+		}
+	}
 	v, err := r.regCallSlow(f, c, w, wb+int(w.A()), pc)
 	if err == errTailCall {
 		// The callee's frame, entered by regEnterW, ended in a tail call.
@@ -776,6 +784,120 @@ func (r *Runtime) regTailRest() (Value, error) {
 	tc := r.pendingTail
 	r.pendingTail = tailCall{}
 	return r.regCall(tc.callee, tc.this, tc.args)
+}
+
+// regDeepCall is regCallW's check of a call past callDeep, its callee's
+// frame to reach top: past maxFrames or the stack, a RangeError; a call in
+// tail position (RMarkTail) once the stack is tailCallDepth deep, its
+// frame given to the callee in place (regTailInPlace, errRegRestart) or
+// given up (regTail, errTailCall); nil for an ordinary call.
+//
+//go:noinline
+func (r *Runtime) regDeepCall(f *frame, c *regCode, w bytecode.RInstr, wb, pc, top int, e *regCallCache) error {
+	if top > len(r.stack) || r.frameDepth >= r.maxFrames {
+		return r.throwRangeError("maximum call stack size exceeded")
+	}
+	if r.frameDepth >= tailCallDepth && regMarkAt(c, pc)&bytecode.RMarkTail != 0 {
+		// The site's callee, whose this regCallW has put in the window.
+		if r.regTailTo(f, w, wb, e.callee, e.cl, e.rc, regWindow(r.stack, wb+int(w.A()))[1]) {
+			return errRegRestart
+		}
+		if r.regTail(f, w, wb) {
+			return errTailCall
+		}
+	}
+	return nil
+}
+
+// regMarkAt is the marks of the call at pc, or 0.
+func regMarkAt(c *regCode, pc int) uint8 {
+	if pc < len(c.rc.Marks) {
+		return c.rc.Marks[pc]
+	}
+	return 0
+}
+
+// errRegRestart is how a call in tail position tells runReg that its frame
+// is now the callee's (regTailInPlace), to run from its first instruction
+// with r.regRestart's code.
+var errRegRestart = errors.New("register frame restarted")
+
+// regTailInPlace is a call in tail position, the stack deep, of a function
+// of this realm whose register code is of the form's own layout and needs
+// nothing of its surroundings: the frame f, regCallW's or regEnterW's, an
+// ordinary call's, its arguments kept nowhere, becomes the callee's -- its
+// captured bindings closed, the arguments moved to the parameters, the
+// rest of the bindings undefined -- as the tree's restarts and swaps of
+// frames do (selfRestart, tailSwap), with no unwinding and no frame made.
+// It reports whether it did.
+func (r *Runtime) regTailInPlace(f *frame, c *regCode, w bytecode.RInstr, wb int) bool {
+	win := regWindow(r.stack, wb+int(w.A()))
+	if !win[0].IsObject() {
+		return false
+	}
+	o := win[0].Object()
+	fd := o.fn()
+	if fd == nil || fd.closure == nil || fd.bound || fd.native != nil || fd.closure.realm != r.Realm {
+		return false
+	}
+	cl := fd.closure
+	rc := cl.reg
+	if rc == nil {
+		rc = r.regOf(cl)
+	}
+	if rc == nil || isClassConstructorKind(cl.fn.Kind) {
+		return false
+	}
+	this := Undefined
+	if w.Op() == bytecode.RCallMW {
+		this = win[1]
+	}
+	if x := fd.extra; x != nil {
+		if !fd.arrow || x.lexThisRef != nil || x.rare != nil {
+			return false
+		}
+		this = x.lexThis
+	} else if rc.coerceThis && !this.IsObject() {
+		if !this.IsNullish() {
+			return false
+		}
+		this = r.globalThis
+	}
+	return r.regTailTo(f, w, wb, o, cl, rc, this)
+}
+
+// regTailTo is regTailInPlace's frame given to o, of closure cl and
+// register code rc, called with this, which its caller has found.
+func (r *Runtime) regTailTo(f *frame, w bytecode.RInstr, wb int, o *Object, cl *closure, rc *regCode, this Value) bool {
+	if f.regKind != regFrameCall && f.regKind != regFrameEnter || !f.newTarget.IsUndefined() ||
+		f.thisRef != nil || f.args != nil || f.withScopes != nil || f.evalVars != nil ||
+		!rc.wide || rc.args || rc.locals != 0 {
+		return false
+	}
+	base := f.base
+	if base+int(rc.numRegs) > len(r.stack) {
+		return false
+	}
+	if len(f.openUpvalues) != 0 {
+		regCloseUpvalues(f)
+	}
+	argc := min(int(w.X()), int(rc.params))
+	src := wb + int(w.A()) + 2
+	nw := regWindow(r.stack, base)
+	copy(r.stack[base+2:base+2+argc], r.stack[src:src+argc])
+	nw[0], nw[1] = Obj(o), this
+	for i := min(argc, int(rc.params)); i < int(rc.params+rc.inits); i++ {
+		nw[2+i] = Undefined
+	}
+	if top := base + int(rc.numRegs); top > r.stackTop {
+		r.stackTop = top
+		if top > r.stackHigh {
+			r.stackHigh = top
+		}
+	}
+	f.cl, f.callee, f.this, f.pc = cl, o, this, 0
+	r.regRestart = rc
+	return true
 }
 
 // regTail is call_w or call_method_w of a call in tail position, as the

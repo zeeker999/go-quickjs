@@ -343,6 +343,13 @@ type Runtime struct {
 	// than each job taken from the front of the slice, which made an append
 	// at its end reallocate it about once a job.
 	jobHead int
+
+	// callDeep is min(maxFrames, tailCallDepth): past it, a register
+	// call checks the limit and whether it is a tail call (regDeepCall).
+	callDeep int
+	// regRestart is the register code a register frame was given in place
+	// by a tail call (regTailInPlace), which runReg continues with.
+	regRestart *regCode
 }
 
 // Realm is a set of intrinsics and the global object that goes with them.

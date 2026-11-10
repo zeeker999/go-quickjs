@@ -60,6 +60,7 @@ func New(cfg Config) *Runtime {
 		// rather than the size of an array.
 		frames:           make([][]frame, 0, 8),
 		maxFrames:        maxFrames,
+		callDeep:         min(maxFrames, tailCallDepth),
 		locale:           cfg.Locale,
 		nodeQuirks:       cfg.NodeQuirks,
 		interruptCounter: interruptCheckInterval,
