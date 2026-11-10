@@ -371,6 +371,16 @@ the ones Go allows:
   every case. A test pins it, as `TestIntendedInlining` pins the helpers.
 - **No constants in registers.** What Go's loop-invariant pass would take
   out of the loop is read from a variable (above).
+- **The loop holds only the hot operations.** Every case added moves the
+  code of every case after it, and the placements, which move the loop as
+  a whole, cannot vary that: each case is a lottery for unrelated tests.
+  An operation that does not run per turn of a hot loop -- a switch's
+  table, `typeof` as a value, an empty literal, what sets a frame up --
+  is a label of the one case that calls `regCold`, which switches on the
+  operation again. Measured: the switch operations as cases of their own
+  made `prop_update` 8.9%, `call_fib` 8.7% and six other tests 5 to 7%
+  slower at every placement; behind `regCold`, all are level and the
+  switches keep their gain.
 
 What remains is Go's: a register store of a `Value` is a write-barrier
 check, the loop's instruction word is still saved at the dispatch where a

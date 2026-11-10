@@ -1117,28 +1117,18 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				}
 			}
 			goto slow
-		case bytecode.RNewArrayE:
+		case bytecode.RNewArrayE, bytecode.RSwitch, bytecode.RSwitchTypeof, bytecode.RTypeof:
+			// Operations not run per turn of a hot loop: one case, which
+			// moves none of the others' code, and a second dispatch.
 			kept.pc = pc
-			r.regNewArrayE(f, c, &kept, regs)
-			pc = kept.pc
-		case bytecode.RSwitch:
-			kept.pc = pc
-			regSwitch(c, &kept, regs[w.A()], cl.consts)
-			pc = kept.pc
-		case bytecode.RSwitchTypeof:
-			kept.pc = pc
-			regSwitchTypeof(c, &kept, regs[w.A()])
-			pc = kept.pc
-		case bytecode.RTypeof:
-			kept.pc = pc
-			r.regTypeof(c, &kept, regs)
+			r.regCold(f, c, &kept, regs)
 			pc = kept.pc
 		case bytecode.RJTypeof:
 			// An object's type asked inline where it is a function's or
 			// an ordinary object's; a proxy and document.all's kind are
 			// the slow path's.
 			v := regs[w.A()]
-			t := regTypeOf[v.Kind()]
+			t := regTypeOf(v.Kind())
 			if v.IsObject() {
 				o := v.object()
 				d := o.dataOf()

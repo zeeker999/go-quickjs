@@ -7,10 +7,26 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
-// regTypeOf is the index in typeofNames of typeof a value of each kind
-// but an object, whose is its own: undefined for the rest.
-var regTypeOf = [256]uint8{KindNumber: typeNumber, KindNull: typeObject, KindBool: typeBoolean,
-	KindString: typeString, KindSymbol: typeSymbol, KindBigInt: typeBigInt, KindObject: typeObject}
+// regTypeOf is the index in typeofNames of typeof a value of kind k but
+// an object, whose is its own: undefined for the rest. A switch, not a
+// table: package data moves the runtime's data lines.
+func regTypeOf(k Kind) uint8 {
+	switch k {
+	case KindNumber:
+		return typeNumber
+	case KindNull, KindObject:
+		return typeObject
+	case KindBool:
+		return typeBoolean
+	case KindString:
+		return typeString
+	case KindSymbol:
+		return typeSymbol
+	case KindBigInt:
+		return typeBigInt
+	}
+	return typeUndefined
+}
 
 // regSwitchTable is a switch instruction's table, as the tree tier's
 // switchLookup makes one of the same cases: a number by an array's index
@@ -161,6 +177,24 @@ func (t *regSwitchTable) lookup(v Value, consts []Value) int32 {
 		return t.other[2]
 	}
 	return -1
+}
+
+// regCold is the operations runReg leaves to a case of one call: each
+// case added to the loop moves the code of every other, which no placement
+// varies, so only what runs per turn of a hot loop is a case of its own.
+// It switches on the operation again.
+func (r *Runtime) regCold(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value) {
+	w := regAt(c.code, k.pc-1)
+	switch w.Op() {
+	case bytecode.RNewArrayE:
+		r.regNewArrayE(f, c, k, regs)
+	case bytecode.RSwitch:
+		regSwitch(c, k, regs[w.A()], f.cl.consts)
+	case bytecode.RSwitchTypeof:
+		regSwitchTypeof(c, k, regs[w.A()])
+	case bytecode.RTypeof:
+		r.regTypeof(c, k, regs)
+	}
 }
 
 // regSwitch is switch: k's pc, past the instruction, made the body's
