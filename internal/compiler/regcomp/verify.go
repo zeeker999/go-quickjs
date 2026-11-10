@@ -95,9 +95,6 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			ok = reg(a) && reg(b)
 		case bytecode.RStrFreeze:
 			ok = reg(a)
-		case bytecode.RNewRegExp:
-			k := int(w.BC())
-			ok = reg(a) && k < len(fn.Constants) && fn.Constants[k].Kind == bytecode.ConstRegExp
 		case bytecode.RCharCodeAt:
 			ok = reg(a) && reg(b) && reg(uint16(w.X())) && site(c) && pc < len(rc.Aux) && int(rc.Aux[pc]) < len(fn.Code)
 		case bytecode.RJTypeof:

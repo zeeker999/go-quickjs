@@ -364,9 +364,6 @@ const (
 	// is the stack instruction of the read, where the read's errors are
 	// placed.
 	RCharCodeAt
-	// RNewRegExp: R[A] = a new RegExp of the literal Constants[BC], as
-	// new_regexp makes it.
-	RNewRegExp
 
 	// RInvalid is the last operation there can be, which no code holds:
 	// the interpreter's switch has a case for it so that its jump table
@@ -490,7 +487,7 @@ var rOpNames = [...]string{
 	RPostInc: "post_inc", RPostDec: "post_dec", RGetLength: "get_length",
 	RJEq: "jeq", RJNe: "jne", RJEqI: "jeq_imm", RJNeI: "jne_imm", RJNull: "jnull", RJNotNull: "jnotnull",
 	RThrow: "throw", RInstanceOf: "instanceof", RIn: "in", RDelete: "delete", RArguments: "arguments", RNewArrayK: "new_array_k", RAddProp: "add_prop", RAddPropI: "add_prop_imm", RApplyArgs: "apply_args",
-	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RSwitch: "switch", RJTypeof: "jtypeof", RTypeof: "typeof", RSwitchTypeof: "switch_typeof", RNewObjectLit: "new_object_lit", RAppend: "append", RStrFreeze: "str_freeze", RCharCodeAt: "char_code_at", RNewRegExp: "new_regexp", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
+	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RSwitch: "switch", RJTypeof: "jtypeof", RTypeof: "typeof", RSwitchTypeof: "switch_typeof", RNewObjectLit: "new_object_lit", RAppend: "append", RStrFreeze: "str_freeze", RCharCodeAt: "char_code_at", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
 }
 
 func (op ROp) String() string {
@@ -517,7 +514,7 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s, %s", op, r(w.A()), r(w.B()))
 	case RLoadInt:
 		return fmt.Sprintf("%s %s, %d", op, r(w.A()), int32(w.BC()))
-	case RLoadConst, RClosure, RNewRegExp:
+	case RLoadConst, RClosure:
 		return fmt.Sprintf("%s %s, k%d", op, r(w.A()), w.BC())
 	case RLoadUndef, RLoadNull, RLoadTrue, RLoadFalse, RLoadEmpty, RLoadUninit, RLoadThis, RRet, RCloseUpvals:
 		return fmt.Sprintf("%s %s", op, r(w.A()))

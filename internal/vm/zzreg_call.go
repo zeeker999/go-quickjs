@@ -1029,8 +1029,6 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		v = Obj(r.newArrayFrom(r.stack[b : b+int(w.C())]))
 	case bytecode.RClosure:
 		v = Obj(r.makeClosure(f, cl.consts[w.BC()]))
-	case bytecode.RNewRegExp:
-		v, err = r.newRegExpLiteral(&cl.fn.Constants[w.BC()])
 	case bytecode.RNew:
 		b := wb + int(w.A())
 		if v, err = r.construct(regs[w.A()], r.stack[b+1:b+1+int(w.X())]); err == nil {

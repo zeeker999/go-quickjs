@@ -636,7 +636,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			}
 			goto slow
 		case bytecode.RBin, bytecode.RUnary, bytecode.RDefineField, bytecode.RNewObject,
-			bytecode.RNewArray, bytecode.RClosure, bytecode.RNew, bytecode.RCloseUpvals, bytecode.RNewRegExp:
+			bytecode.RNewArray, bytecode.RClosure, bytecode.RNew, bytecode.RCloseUpvals:
 			// What the loop has no fast path of its own for.
 			kept.pc = pc
 			if _, err := r.regSlow(f, c, &kept, regs); err != nil {
@@ -1179,6 +1179,8 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile.
+		case 126:
+			goto invalid
 		case 127:
 			goto invalid
 		}

@@ -1211,11 +1211,6 @@ func (g *gen) expr(e ast.Expr, dst int) int {
 			g.emit(bytecode.MakeRBC(bytecode.RLoadConst, 0, r16(d), g.constIdx(bytecode.Constant{Kind: bytecode.ConstString, Str: n.Value})))
 		}
 		return d
-	case *ast.RegexpLit:
-		d := g.dest(dst)
-		g.at(n.Start)
-		g.emit(bytecode.MakeRBC(bytecode.RNewRegExp, 0, r16(d), g.constIdx(bytecode.Constant{Kind: bytecode.ConstRegExp, Str: n.Pattern, Flags: n.Flags})))
-		return d
 	case *ast.BoolLit:
 		d := g.dest(dst)
 		op := bytecode.RLoadFalse

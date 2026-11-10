@@ -845,6 +845,42 @@ primitive, does without. The tree's
   led to (`propCache`'s `next`, its root in `s1`), as the tree's literal
   node does, and the next object from that root is given its values in
   place and that shape: 141 to 105 ns in one build, the tree 109.
+- **s.charCodeAt(i) is one operation** (`char_code_at`), as the tree's
+  `charCodeAtCall` node is: a receiver in a binding, the argument a local
+  no one else writes in one of the first 256 registers (X). `regCharCodeAt`
+  reads the code unit where the receiver is a string, the method the
+  built-in found in the cache of a primitive prototype's data properties
+  that `primProp` fills, and the argument a number; anything else is the
+  read and the call as `get_method_w` and `call_method_w` make them, the
+  read placed at its own position (Aux) and the call at the
+  instruction's. The case is a call with the pc kept, 27 nodes. The slow
+  path of a method's read on a string or a number reads the same cache
+  before `getValueProp`. Over the placements, `html_escape_entities` 2,538
+  to 1,813 ns (the tree 1,924, the comparison engine 1,878),
+  `html_escape_mixed` 800 to 636, `int_toString` 81.5 to 77.1 (the tree
+  70, the comparison engine 82); the V8 suite level.
+- **A RegExp literal stays the tree's for now.** As a `new_regexp` through
+  the slow path it made `template_list` 304 to 228 ns (the tree 253:
+  `extra_esc` and its caller no longer crossed), but every function with a
+  literal lost the tree's mechanisms around it: the literal's RegExp given
+  back after `/x/.exec(s)` and `test` (`regexpLitMethod`, the spares), a
+  literal handed to `replace`, `split` or `match` searched without its
+  object (`regexpArgCall`), and an exec's array made again in the memory
+  of the last (`reuseExecCall`) or not at all where nothing reads it.
+  `regexp_sticky` was 255 to 377 ns, `regexp_ascii` 217 to 294, eleven
+  regexp tests 6 to 48% slower at every placement. Those mechanisms are
+  owed to register code before the literal is: they are what the tree
+  wins by.
+- **The opcode space is full but for two values.** The dispatch masks the
+  operation to 7 bits so that its jump table needs no range check, and
+  with `char_code_at` 126 of the 128 values are taken (126 and 127 are
+  `invalid`'s). Widening the mask costs a case value for each of the 128
+  new values, more than the loop's budget. The operations only the
+  translation reference (`regform`) emits -- `bin_imm`, `jmp_cmp`,
+  `jmp_cmp_imm`, `call`, `call_method`, `new`, `close_upvals`, `closure`
+  -- keep cases and fast paths in the loop that register code never runs;
+  sent to the slow path they would give back nodes, not values. Cold
+  operations to come share one value, their own in X, behind `regCold`.
 
 #### Raw int32 registers (step 5, designed, deferred)
 
