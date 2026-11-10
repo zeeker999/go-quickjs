@@ -377,18 +377,25 @@ the ones Go allows:
   count against 5,000, `-cases 40` each case clause of 40 nodes or more,
   and the callees above cost 20 the loop would call if it were big. The
   budget is spent with care, a hot case at a time:
-  - **The tails are shared.** A case is a fast path and a `goto`: to
-    `slow` (the slow path, `regSlow`), `cmpSlow`, `typed`, `jump`, or
-    `taken`, a compare-and-branch taken, whose offset `SC` the tail reads.
-    The shared `taken` took 167 nodes out of the 29 compare-and-branches'
-    `off = w.SC()` and 49 instructions out of the loop. A case with no
-    fast path is a value of the one case that jumps to `slow`. A tail that
-    stores the pc (`slow`'s `kept.pc = pc`) is reached after a call only
-    with the pc read back from `kept`: set_index's `goto slow` after
-    `regSetMiss` without it made the pc live across the call, Go saved it
-    at every dispatch, and `crypto_am3` and a dozen loops were 8 to 11%
-    slower at every placement. `TestRegDispatchKeepsNoPC` disassembles the
-    loop and fails if its dispatch stores to the stack.
+  - **The compare-and-branches share their taken tail.** A case is a
+    fast path and a `goto`: to `slow` (the slow path, `regSlow`),
+    `cmpSlow`, `typed`, `jump`, or `taken`, a compare-and-branch taken,
+    whose offset `SC` the tail reads. The shared `taken` took 167 nodes out
+    of the 29 compare-and-branches' `off = w.SC()` and 49 instructions out
+    of the loop.
+  - **The slow calls are not shared.** `set_global`, `set_index`'s miss
+    and the operations with no fast path each keep their own call of
+    `regSlow`. Sent to the one `slow` tail, they saved 45 nodes and made
+    `int_arith`, `float_arith`, `loop_sum` and `loop_props` 7 to 11% slower
+    at every placement, the inner ones (`regInner`, `regTail`) included,
+    with every instruction on those loops' paths the same: the loop's
+    blocks laid out otherwise. A tail that stores the pc (`slow`'s
+    `kept.pc = pc`) is reached after a call only with the pc read back
+    from `kept`: set_index's `goto slow` after `regSetMiss` without it made
+    the pc live across the call, Go saved it at every dispatch, and
+    `crypto_am3` and a dozen loops were 8 to 11% slower at every
+    placement. `TestRegDispatchKeepsNoPC` disassembles the loop and fails
+    if its dispatch stores to the stack.
   - **A case costs what its source says.** The compare-and-branches are
     about 53 nodes each, the bitwise operators 73 to 77, a fused element
     read or update 100 to 128, `append` (a call of `regAppend` with the pc
@@ -398,9 +405,9 @@ the ones Go allows:
     and added 40 instructions: its `ok` is materialised and tested where
     the written-out `&&` branches. A saving is checked with `hotdiff
     -funcs '(*Runtime).runReg'` against the build before it.
-  - At d931057d the loop was at 4,981, 19 below the limit; with the shared
-    tails and `append` and `str_freeze` as cases of their own it is at
-    4,790, 210 below.
+  - At d931057d the loop was at 4,981, 19 below the limit; with the
+    shared taken tail and `append` and `str_freeze` as cases of their own
+    it is at 4,875, 125 below.
 - **No constants in registers.** What Go's loop-invariant pass would take
   out of the loop is read from a variable (above).
 - **The loop holds only the hot operations.** Every case added moves the

@@ -467,7 +467,11 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 					continue
 				}
 			}
-			goto slow
+			kept.pc = pc
+			if _, err := r.regSlow(f, c, &kept, regs); err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
 
 		case bytecode.RGetProp, bytecode.RGetMethod:
 			if o := regs[w.B()]; o.IsObject() {
@@ -570,9 +574,10 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				pc = kept.pc
 				continue
 			}
-			// Read back, so that the pc is not live across the call.
+			if _, err := r.regSlow(f, c, &kept, regs); err != nil {
+				return Undefined, err
+			}
 			pc = kept.pc
-			goto slow
 
 		case bytecode.RAdd:
 			a, b := regs[w.B()], regs[w.C()]
@@ -630,6 +635,15 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				continue
 			}
 			goto slow
+		case bytecode.RBin, bytecode.RUnary, bytecode.RDefineField, bytecode.RNewObject,
+			bytecode.RNewArray, bytecode.RClosure, bytecode.RNew, bytecode.RCloseUpvals:
+			// What the loop has no fast path of its own for.
+			kept.pc = pc
+			if _, err := r.regSlow(f, c, &kept, regs); err != nil {
+				return Undefined, err
+			}
+			pc = kept.pc
+
 		case bytecode.RJmp:
 			off = int32(w.BC())
 			goto jump
@@ -1122,9 +1136,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			}
 		case bytecode.RThrow:
 			return Undefined, r.regThrow(f, c, pc, regs)
-		case bytecode.RBin, bytecode.RUnary, bytecode.RDefineField, bytecode.RNewObject,
-			bytecode.RNewArray, bytecode.RClosure, bytecode.RNew, bytecode.RCloseUpvals,
-			bytecode.RNewW, bytecode.RClosureW, bytecode.RInstanceOf, bytecode.RIn, bytecode.RDelete, bytecode.RArguments, bytecode.RNewArrayK,
+		case bytecode.RNewW, bytecode.RClosureW, bytecode.RInstanceOf, bytecode.RIn, bytecode.RDelete, bytecode.RArguments, bytecode.RNewArrayK,
 			bytecode.RApplyArgs, bytecode.RArgsLen, bytecode.RArgsIndex, bytecode.RConcat:
 			// What the loop has no fast path of its own for.
 			goto slow
