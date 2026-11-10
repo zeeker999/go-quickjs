@@ -738,6 +738,19 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		}
 		regs[w.C()] = n
 		v, err = r.getIndexed(regs[w.B()], n)
+	case bytecode.RGetIndexPost:
+		// x[i++]: the step, its old value the key, then the read, as the
+		// stack form makes them.
+		var old, n Value
+		if old, err = r.toNumeric(regs[w.C()]); err != nil {
+			return Undefined, err
+		}
+		if n, err = r.regStep(old, float64(int8(w.X()))); err != nil {
+			return Undefined, err
+		}
+		o := regs[w.B()]
+		regs[w.C()] = n
+		v, err = r.getIndexed(o, old)
 	case bytecode.RGetIndexI:
 		v, err = r.getIndexed(regs[w.B()], Int32(int32(w.C())))
 	case bytecode.RSetIndexI:

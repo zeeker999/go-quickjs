@@ -632,8 +632,15 @@ What the measurements found, against the design:
   does; `arguments.length` and `arguments[i]` of a function whose object
   is made on demand are `args_len` and `args_index`. The V8 suite has no
   refusal left that costs a crossing.
-- **x[i++] as one operation measured slower** (`crypto_am3` 91 to 101 ns at
-  two placements, 4 ns of it the fusion itself) and was dropped. The
+- **x[i++] is one operation** (`get_index_post`). First measured slower
+  (`crypto_am3` 91 to 101 ns at two placements) against a base whose pads
+  were off their targets; with both builds' pads regenerated, at four
+  placements, `crypto_am3` is 2% faster and Crypto 1 to 4% at every one.
+  NavierStokes, which has no `x[i++]`, is 23% slower at one placement and
+  level at the others: the case moves the loop's code, which that
+  placement puts on a bad alignment. `get_method_w`, re-measured the same
+  way, stays: without it `method_call` is 7% slower at every placement and
+  the V8 total slower at every one. The
   loop's own alignment moves the small loops: `loop_locals` is 10.4 to 11.3
   ns with `runReg` at 32 mod 64 and 13.1 at 0, which the placements do not
   vary.

@@ -291,6 +291,7 @@ function bad2(b) { var k = o(2); b[k]++ }
 function upd(t) { t.x++ }
 function updLoop(t) { for (var i = 0; i < 2; i++) t[0] += 1 }
 function made(t, i) { t[i - 1] += 1; t[i + ""] |= 2; t[` + "`k${i}`" + `] += "s"; t[-i]++; t[i++] += 1; t[!i] = 1; return JSON.stringify(t) + i }
+function post(t, i) { var s = []; for (var n = 0; n < 4; n++) s.push(t[i++], t[i--]); return s.join() + " " + typeof i + " " + i }
 function madeObj(t) { var k = o(5); t[k + ""] += 1; t["" + e(6)] += 1; return JSON.stringify(t) }
 function caught(f, a) { try { f(a) } catch (x) { return x.message + " " + x.stack.split(String.fromCharCode(10))[1] } }
 `
@@ -304,6 +305,8 @@ function caught(f, a) { try { f(a) } catch (x) { return x.message + " " + x.stac
 		`caught(upd, null)`, `caught(upd, undefined)`, `caught(updLoop, null)`,
 		`made({}, 3)`, `run(function () { return madeObj({}) })`, `run(function () { return caught(madeObj, null) })`,
 		`caught(made, null)`, `caught(made, undefined)`,
+		`post([1, 2, , 4, 5], 0)`, `post([1, 2, 3], "1")`, `post("abcdef", 1)`, `post({ 1: "a", 2: "b" }, 1)`,
+		`run(function () { return post([7, 8, 9], o(1)) })`, `caught(post, null)`, `post([1, 2], 1.5)`, `post([1, 2], -1)`,
 	}
 	for i := range calls {
 		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])

@@ -474,6 +474,22 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				}
 			}
 			goto slow
+		case bytecode.RGetIndexPost:
+			// x[i++]: the element read at the key, then the key stepped;
+			// neither is written until both are known.
+			obj, key := regs[w.B()], regs[w.C()]
+			if obj.IsObject() && key.IsNumber() {
+				o := obj.Object()
+				if i := uint32(key.Number()); float64(i) == key.Number() &&
+					uint(i) < uint(len(o.elemsOf())) && o.flags&objMappedArguments == 0 {
+					if v := o.elemsOf()[i]; !isHole(v) {
+						regs[w.C()] = Value{num: key.Number() + float64(int8(w.X()))}
+						regs[w.A()] = v
+						continue
+					}
+				}
+			}
+			goto slow
 		case bytecode.RSetIndex:
 			obj, key := regs[w.A()], regs[w.B()]
 			if obj.IsObject() && key.IsNumber() {
@@ -1031,8 +1047,6 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile.
-		case 113:
-			goto invalid
 		case 114:
 			goto invalid
 		case 115:

@@ -312,6 +312,9 @@ const (
 	// both read and written, converted once (to_property_key_of_base). A
 	// string, a symbol or a number is the key as it is.
 	RKeyOfBase
+	// RGetIndexPost: R[A] = R[B][R[C]], then R[C] += SX -- x[i++] and
+	// x[i--] of a local i, the read's key the step's old value.
+	RGetIndexPost
 
 	// RInvalid is the last operation there can be, which no code holds:
 	// the interpreter's switch has a case for it so that its jump table
@@ -409,7 +412,7 @@ var rOpNames = [...]string{
 	RPostInc: "post_inc", RPostDec: "post_dec", RGetLength: "get_length",
 	RJEq: "jeq", RJNe: "jne", RJEqI: "jeq_imm", RJNeI: "jne_imm", RJNull: "jnull", RJNotNull: "jnotnull",
 	RThrow: "throw", RInstanceOf: "instanceof", RIn: "in", RDelete: "delete", RArguments: "arguments", RNewArrayK: "new_array_k", RAddProp: "add_prop", RAddPropI: "add_prop_imm", RApplyArgs: "apply_args",
-	RGetIndexPre: "get_index_pre", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
+	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
 }
 
 func (op ROp) String() string {
@@ -512,6 +515,8 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s, %s[%d]", op, r(w.A()), r(w.B()), w.C())
 	case RGetIndexPre:
 		return fmt.Sprintf("%s %s, %s[%s += %d]", op, r(w.A()), r(w.B()), r(w.C()), int8(w.X()))
+	case RGetIndexPost:
+		return fmt.Sprintf("%s %s, %s[%s], %s += %d", op, r(w.A()), r(w.B()), r(w.C()), r(w.C()), int8(w.X()))
 	case RJLtU, RJNLtU, RJLeU, RJNLeU:
 		return fmt.Sprintf("%s %s, u%d %s", op, r(w.A()), w.B(), target(w.SC()))
 	case RSetIndexI:

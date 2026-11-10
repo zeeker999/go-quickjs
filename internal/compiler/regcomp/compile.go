@@ -1878,8 +1878,14 @@ func propName(m *ast.Member) (string, bool) {
 // preStepped is the register and step of e where e is ++i or --i of a
 // local i, which an element's read steps in place (RGetIndexPre).
 func (g *gen) preStepped(e ast.Expr) (int, int8, bool) {
+	return g.localStep(e, true)
+}
+
+// localStep is the register and step of e where e is an update of a local
+// i, prefix or postfix as prefix says.
+func (g *gen) localStep(e ast.Expr, prefix bool) (int, int8, bool) {
 	u, ok := e.(*ast.Update)
-	if !ok || !u.Prefix {
+	if !ok || u.Prefix != prefix {
 		return 0, 0, false
 	}
 	id, ok := u.Operand.(*ast.Ident)
@@ -1933,6 +1939,13 @@ func (g *gen) member(n *ast.Member, dst int) int {
 			d := g.dest(dst)
 			g.at(n.Property.Pos())
 			g.emit(bytecode.MakeR(bytecode.RGetIndexPre, uint8(step), r16(d), r16(o), r16(k)))
+			return d
+		}
+		if k, step, ok := g.localStep(n.Property, false); ok {
+			// x[i++] of a local i: the read and the step as one operation.
+			d := g.dest(dst)
+			g.at(n.Property.Pos())
+			g.emit(bytecode.MakeR(bytecode.RGetIndexPost, uint8(step), r16(d), r16(o), r16(k)))
 			return d
 		}
 		k := g.expr(n.Property, -1)
