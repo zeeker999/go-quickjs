@@ -76,8 +76,10 @@ type regCode struct {
 	// value a regLeafConst body does.
 	leafArg int32
 	leafVal Value
-	rc      *bytecode.RegCode
-	fn      *bytecode.Function
+	// switches is each switch instruction's table, made from the code's.
+	switches []*regSwitchTable
+	rc       *bytecode.RegCode
+	fn       *bytecode.Function
 }
 
 // regWindow is the frame's registers from base. The register form's
@@ -199,6 +201,9 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 				}
 			}
 		}
+	}
+	for _, cases := range rc.Switches {
+		c.switches = append(c.switches, newRegSwitchTable(cases))
 	}
 	t := &tree{reg: c}
 	t.blocks = []tblock{{body: []tstmt{regStmt(c)}, next: regNext}}
@@ -1112,10 +1117,46 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				}
 			}
 			goto slow
+		case bytecode.RNewArrayE:
+			kept.pc = pc
+			r.regNewArrayE(f, c, &kept, regs)
+			pc = kept.pc
+		case bytecode.RSwitch:
+			kept.pc = pc
+			regSwitch(c, &kept, regs[w.A()], cl.consts)
+			pc = kept.pc
+		case bytecode.RSwitchTypeof:
+			kept.pc = pc
+			regSwitchTypeof(c, &kept, regs[w.A()])
+			pc = kept.pc
+		case bytecode.RTypeof:
+			kept.pc = pc
+			r.regTypeof(c, &kept, regs)
+			pc = kept.pc
+		case bytecode.RJTypeof:
+			// An object's type asked inline where it is a function's or
+			// an ordinary object's; a proxy and document.all's kind are
+			// the slow path's.
+			v := regs[w.A()]
+			t := regTypeOf[v.Kind()]
+			if v.IsObject() {
+				o := v.object()
+				d := o.dataOf()
+				if _, isProxy := d.(*proxyData); isProxy || o.flags&objHTMLDDA != 0 {
+					goto cmpSlow
+				}
+				if _, isFn := d.(*funcData); isFn {
+					t = typeFunction
+				}
+			}
+			if (t == w.X()&^bytecode.RCmpTrue) == (w.X()&bytecode.RCmpTrue != 0) {
+				off = w.SC()
+				goto jump
+			}
 		case bytecode.RThrow:
 			return Undefined, r.regThrow(f, c, pc, regs)
 		case bytecode.RNewW, bytecode.RClosureW, bytecode.RInstanceOf, bytecode.RIn, bytecode.RDelete, bytecode.RArguments, bytecode.RNewArrayK,
-			bytecode.RApplyArgs, bytecode.RArgsLen, bytecode.RArgsIndex, bytecode.RConcat, bytecode.RNewArrayE:
+			bytecode.RApplyArgs, bytecode.RArgsLen, bytecode.RArgsIndex, bytecode.RConcat:
 			goto slow
 		case bytecode.RKeyOfBase:
 			// A key whose conversion runs nothing is left as it is, and a
@@ -1136,14 +1177,6 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile.
-		case 118:
-			goto invalid
-		case 119:
-			goto invalid
-		case 120:
-			goto invalid
-		case 121:
-			goto invalid
 		case 122:
 			goto invalid
 		case 123:

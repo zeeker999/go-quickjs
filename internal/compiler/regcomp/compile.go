@@ -87,7 +87,10 @@ type gen struct {
 	// stores is, for an instruction that reads and then stores, the
 	// position of its store, whose stack instruction goes to Aux.
 	stores map[int]int32
-	err    string
+	// switches is each switch instruction's table, its cases' bodies by
+	// their marks, bound by the end.
+	switches [][]switchEntry
+	err      string
 }
 
 type loop struct {
@@ -473,7 +476,21 @@ func (g *gen) switchStmt(n *ast.SwitchStmt, label string) {
 			}
 		}
 	}
-	d := g.expr(n.Disc, -1)
+	// switch (typeof x) of string cases alone looks x's type up, with no
+	// string made or compared.
+	op := bytecode.RSwitch
+	disc := n.Disc
+	if u, ok := n.Disc.(*ast.Unary); ok && u.Op == "typeof" && g.stringCases(n) {
+		global := false
+		if id, ok := u.Operand.(*ast.Ident); ok {
+			res := g.rec.Read[id]
+			global = res.Kind == ResGlobal || res.Kind == ResNone
+		}
+		if !global {
+			op, disc = bytecode.RSwitchTypeof, u.Operand
+		}
+	}
+	d := g.expr(disc, -1)
 	if g.isBinding(d) {
 		t := g.alloc()
 		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(t), r16(d), 0))
@@ -486,21 +503,53 @@ func (g *gen) switchStmt(n *ast.SwitchStmt, label string) {
 	g.loops = append(g.loops, l)
 	bodies := make([]*mark, len(n.Cases))
 	def := -1
-	for i, c := range n.Cases {
+	for i := range n.Cases {
 		bodies[i] = g.newMark()
-		if c.Test == nil {
-			def = i
-			continue
-		}
+	}
+	// A run of cases whose selectors are literals, which evaluating does
+	// nothing, is one lookup: strings and numbers compared by === one at
+	// a time each go to the slow path or cost a dispatch. A case of
+	// another selector is compared where it is, between the runs.
+	compare := func(i int) {
 		mark := g.top
-		if imm, ok := imm16(c.Test); ok {
+		if imm, ok := imm16(n.Cases[i].Test); ok {
 			g.jump(bytecode.MakeR(bytecode.RJSEqI, 0, r16(d), uint16(int16(imm)), 0), bodies[i], true)
 		} else {
-			v := g.expr(c.Test, -1)
+			v := g.expr(n.Cases[i].Test, -1)
 			g.jump(bytecode.MakeR(bytecode.RJSEq, 0, r16(d), r16(v), 0), bodies[i], true)
 		}
 		g.top = mark
 	}
+	var table []switchEntry
+	var run []int
+	strs := false
+	flush := func() {
+		if len(table) >= 2 || strs {
+			g.emit(bytecode.MakeRBC(op, 0, r16(d), uint32(len(g.switches))))
+			g.switches = append(g.switches, table)
+		} else {
+			for _, i := range run {
+				compare(i)
+			}
+		}
+		table, run, strs = nil, nil, false
+	}
+	for i, c := range n.Cases {
+		if c.Test == nil {
+			def = i
+			continue
+		}
+		if e, ok := g.switchLit(c.Test); ok {
+			e.body = bodies[i]
+			table = append(table, e)
+			run = append(run, i)
+			strs = strs || e.c.Kind == bytecode.SwitchStr
+			continue
+		}
+		flush()
+		compare(i)
+	}
+	flush()
 	if def >= 0 {
 		g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), bodies[def], false)
 	} else {
@@ -517,6 +566,78 @@ func (g *gen) switchStmt(n *ast.SwitchStmt, label string) {
 	}
 	g.bind(l.brk)
 	g.loops = g.loops[:len(g.loops)-1]
+}
+
+// typeNames are the VM's typeofNames, in its order.
+var typeNames = [8]string{"undefined", "object", "boolean", "number", "string", "symbol", "bigint", "function"}
+
+// typeofCompare is x and the type's index where n compares typeof x with a
+// string literal that names a type, by ===, ==, !== or !=, x not a global's
+// name, whose typeof the backend leaves to the stack form.
+func (g *gen) typeofCompare(n *ast.Binary) (ast.Expr, int, bool) {
+	switch n.Op {
+	case "===", "==", "!==", "!=":
+	default:
+		return nil, 0, false
+	}
+	u, isU := n.Left.(*ast.Unary)
+	s, isS := n.Right.(*ast.StringLit)
+	if !isU || !isS {
+		u, isU = n.Right.(*ast.Unary)
+		s, isS = n.Left.(*ast.StringLit)
+	}
+	if !isU || !isS || u.Op != "typeof" {
+		return nil, 0, false
+	}
+	if id, ok := u.Operand.(*ast.Ident); ok {
+		if res := g.rec.Read[id]; res.Kind == ResGlobal || res.Kind == ResNone {
+			return nil, 0, false
+		}
+	}
+	for i, name := range typeNames {
+		if name == s.Value {
+			return u.Operand, i, true
+		}
+	}
+	return nil, 0, false
+}
+
+// stringCases reports whether every case of n but the default has a
+// string literal for its selector.
+func (g *gen) stringCases(n *ast.SwitchStmt) bool {
+	for _, c := range n.Cases {
+		if _, ok := c.Test.(*ast.StringLit); c.Test != nil && !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// switchEntry is a case of a switch instruction's table, its body's pc
+// the mark's.
+type switchEntry struct {
+	c    bytecode.SwitchCase
+	body *mark
+}
+
+// switchLit is the table's case of a selector that is a literal.
+func (g *gen) switchLit(e ast.Expr) (switchEntry, bool) {
+	if v, ok := numberLit(e); ok {
+		return switchEntry{c: bytecode.SwitchCase{Kind: bytecode.SwitchNum, Num: v}}, true
+	}
+	switch n := e.(type) {
+	case *ast.StringLit:
+		k := g.constIdx(bytecode.Constant{Kind: bytecode.ConstString, Str: n.Value})
+		return switchEntry{c: bytecode.SwitchCase{Kind: bytecode.SwitchStr, Str: n.Value, K: k}}, true
+	case *ast.BoolLit:
+		if n.Value {
+			return switchEntry{c: bytecode.SwitchCase{Kind: bytecode.SwitchTrue}}, true
+		}
+		return switchEntry{c: bytecode.SwitchCase{Kind: bytecode.SwitchFalse}}, true
+	case *ast.NullLit:
+		return switchEntry{c: bytecode.SwitchCase{Kind: bytecode.SwitchNull}}, true
+	}
+	return switchEntry{}, false
 }
 
 // declares reports whether the statements of a function's body declare
@@ -1371,7 +1492,11 @@ func (g *gen) unary(n *ast.Unary, dst int) int {
 				return g.dest(dst)
 			}
 		}
-		return g.unaryOp(bytecode.OpTypeOf, n.Operand, dst, n.Start)
+		a := g.expr(n.Operand, -1)
+		d := g.dest(dst)
+		g.at(n.Start)
+		g.emit(bytecode.MakeR(bytecode.RTypeof, 0, r16(d), r16(a), 0))
+		return d
 	case "delete":
 		m, ok := n.Operand.(*ast.Member)
 		if !ok || m.Optional {
@@ -1484,6 +1609,18 @@ func (g *gen) cond(e ast.Expr, when bool, target *mark) {
 				g.jump(bytecode.MakeR(op, 0, r16(a), 0, 0), target, true)
 				return
 			}
+		}
+		if x, i, ok := g.typeofCompare(n); ok {
+			// typeof x === "name": the type asked of x, with no string
+			// made or compared.
+			a := g.expr(x, -1)
+			flag := uint8(i)
+			if (n.Op == "===" || n.Op == "==") == when {
+				flag |= bytecode.RCmpTrue
+			}
+			g.at(n.Start)
+			g.jump(bytecode.MakeR(bytecode.RJTypeof, flag, r16(a), 0, 0), target, true)
+			return
 		}
 		if op, ok := g.compareJump(n.Op, when); ok {
 			a := g.guard(g.expr(n.Left, -1), n.Right)
@@ -2545,6 +2682,15 @@ func (g *gen) finish() *bytecode.RegCode {
 			src[i] = table[j].pc
 		}
 	}
+	var switches [][]bytecode.SwitchCase
+	for _, t := range g.switches {
+		cases := make([]bytecode.SwitchCase, len(t))
+		for i, e := range t {
+			cases[i] = e.c
+			cases[i].To = uint32(e.body.at)
+		}
+		switches = append(switches, cases)
+	}
 	for at, p := range g.stores {
 		j := sort.Search(len(table), func(j int) bool { return table[j].pos > p }) - 1
 		if j >= 0 && int(table[j].pc) < len(g.fn.Code) {
@@ -2564,7 +2710,7 @@ func (g *gen) finish() *bytecode.RegCode {
 		}
 	}
 	rc := &bytecode.RegCode{
-		Aux: aux, Literals: g.literals, UsesArguments: (g.fn.UsesArguments || g.fn.MakesArguments) && !g.fn.ForwardsArguments,
+		Aux: aux, Switches: switches, Literals: g.literals, UsesArguments: (g.fn.UsesArguments || g.fn.MakesArguments) && !g.fn.ForwardsArguments,
 		ForwardsArguments: g.fn.ForwardsArguments,
 		Code:              g.code, NumRegs: g.max + 1, SrcPC: src, SiteName: g.siteName, This: -1,
 		Wide: true, Params: g.fn.ParamCount, Inits: g.inits, Caps: g.caps, CallSites: g.calls,

@@ -347,6 +347,20 @@ function updStack(k) { 'use strict'; var f = Object.freeze([1]), o = { get 0() {
   try { null[k] += 1 } catch (e) { out.push(e.stack.split(String.fromCharCode(10))[1]) }
   return out.join(" | ") }
 function updTyped() { var t = new Int8Array(3); t[0] += 127; t[0]++; t[1] -= 1; t[2] += 1.7; return t.join() }
+function sw(x) { switch (x) { case "a": return 1; case "bb": return 2; case 3: return 3; case -0: return "z"; case "a": return "dup"; case true: return "t"; case null: return "n"; case false: return "f"; case NaN: return "nan"; default: return "d"; case "ccc": return "c" } }
+function swFall(x) { var r = []; switch (x) { case 1: r.push(1); case 2: r.push(2); break; default: r.push("d"); case 3: r.push(3) } return r.join() }
+function swMixed(x, y) { var r = []; switch (x) { case "k": r.push("k"); break; case y: r.push("y"); break; case "m": r.push("m"); break; case 7: r.push(7) } return r.join() }
+function swNums(x) { switch (x) { case 100: return "a"; case 2.5: return "b"; case -3: return "c"; case 1e9: return "e"; case 4: return "f"; case 5: return "g"; case 6: return "h"; case 7: return "i"; case 8: return "j"; case 9: return "k"; default: return "-" } }
+function swDense(x) { switch (x) { case 0: return 0; case 1: return 1; case 2: return 2; case 4: return 4; case 1: return "dup" } return "none" }
+function swType(x) { switch (typeof x) { case "number": return 1; case "string": return 2; case "undefined": return 3; case "object": return 4; case "function": return 5; default: return 6 } }
+function swRope(n) { var s = ""; for (var i = 0; i < n; i++) s += "b"; return sw(s) + sw("a" + s.slice(1)) + sw("c" + "cc") }
+function swAll() { var out = [], xs = ["a", "bb", 3, 0, -0, true, false, null, undefined, NaN, "3", 3.5, "ccc", "cc", {}, [3], 4, 2.5, -3, 1e9, 9, 10]; for (var i = 0; i < xs.length; i++) out.push(sw(xs[i]) + "/" + swFall(xs[i]) + "/" + swMixed(xs[i], 3) + "/" + swNums(xs[i]) + "/" + swDense(xs[i]) + "/" + swType(xs[i])); return out.join() + swRope(2) + swRope(3) + swRope(1) }
+function swOne(x) { switch (x) { case "only": return 1 } return 0 }
+function swNoDefault(x) { var r = 0; switch (x) { case "p": r = 1; break; case "q": r = 2 } return r + swOne(x) + swOne("on" + "ly") }
+function tof(x) { var r = []; for (var i = 0; i < typeNames.length; i++) { var t = typeNames[i]; r.push((typeof x === "undefined") + "" + (typeof x == "object") + (typeof x !== "boolean") + (typeof x != "number") + ("string" === typeof x) + (typeof x === "symbol") + (typeof x === "bigint") + (typeof x === "function") + (typeof x === "nope") + (typeof x === t)); if (typeof x === "function") r.push("f"); else if (typeof x !== "object") r.push("no") } return r.join() }
+var typeNames = ["undefined", "object", "boolean", "number", "string", "symbol", "bigint", "function"];
+function tofAll() { var p = new Proxy(function () {}, {}), q = new Proxy({}, {}); class K {} var xs = [1, "s", function () {}, null, {}, undefined, true, Math.max, Symbol(), 1n, p, q, K, [], new Date(0), (function () { return arguments })(), async function () {}, function* () {}, () => 1, Function.prototype.bind.call(function () {}), Object.create(null)]; var r = []; for (var i = 0; i < xs.length; i++) r.push(tof(xs[i])); try { tofTdz() } catch (e) { r.push(e.name) } r.push(xs.map(function (v) { var t = typeof v; return t + (t === typeof v) + swType(v) }).join()); return r.join("|") }
+function tofTdz() { if (typeof z === "number") return 1; let z = 1; return 2 }
 function kept(n) { var all = []; for (var j = 0; j < n; j++) { var a = []; for (var i = 0; i < 300; i++) a.push(j); all.push(a) } return all.map(function (a) { return a.length + ":" + a[299] }).join() }
 `
 	calls := []string{
@@ -354,7 +368,7 @@ function kept(n) { var all = []; for (var j = 0; j < n; j++) { var a = []; for (
 		`konsts(5)`,
 		`upd([1, 2, 3, 4, 5], 0, 2)`, `upd([1, 2, 3, 4, 5], "1", 2)`, `upd({}, "x", 1)`, `upd([1, 2, 3, 4, 5], 1.5, 2)`, `upd([1, 2, 3, 4, 5], -1, 2)`,
 		`updLoop([0, 0, 0, 0], 50)`, `updLog()`, `updBad(null, 1)`, `updBad(undefined, "x")`, `updBad(null, { toString: function () { throw 1 } })`,
-		`updBad([1], { toString: function () { return "0" } })`, `updBad("abc", 0)`, `updBad(5, 0)`, `updStr()`, `updHoles()`, `updStrict()`, `updTyped()`, `updStack(0)`, `updStack("0")`,
+		`updBad([1], { toString: function () { return "0" } })`, `updBad("abc", 0)`, `updBad(5, 0)`, `updStr()`, `updHoles()`, `updStrict()`, `updTyped()`, `swAll()`, `tofAll()`, `swNoDefault("p")`, `swNoDefault("q")`, `swNoDefault(1)`, `updStack(0)`, `updStack("0")`,
 		`grow(300, 6)`, `grow(3, 4)`, `grow(0, 3)`, `grow(700, 3)`, `fresh()`, `kept(4)`,
 	}
 	for i := range calls {

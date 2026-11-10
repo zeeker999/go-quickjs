@@ -701,6 +701,18 @@ primitive, does without. The tree's
   whose position a store's error takes. `array_update` 18 to 6 ns.
 - **A negative literal is an immediate** wherever a literal is
   (`numberLit`): `!== -1`, `x + -1`, `x > -2`, a switch's cases.
+- **A switch's literal cases are one lookup** (`switch`, the table in
+  `Switches`): each run of cases whose selectors are literals -- numbers,
+  strings, booleans, null -- between cases of other selectors, made as the
+  tree's `switchLookup` makes its table: integers of a small range by an
+  index, strings by length, then the constant's pointer, then their units.
+  `switch (typeof x)` of string cases asks x's type (`switch_typeof`), and
+  `typeof x === "name"` is one compare-and-branch (`jtypeof`), an object's
+  type asked inline but a proxy's and document.all's. `typeof` is an
+  operation of its own, out of the loop. `string_switch_*` were 5 to 11
+  times the tree's time, a slow-path `===` a case; `typeof_test` 3 times.
+  An empty literal's array is made by a call of its own, not the slow
+  path's.
 
 #### Raw int32 registers (step 5, designed, deferred)
 

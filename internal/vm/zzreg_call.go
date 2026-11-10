@@ -773,11 +773,6 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		return Undefined, r.regAddIndex(f, c.rc.Aux[pc], regs[w.A()], Int32(int32(w.C())), regs[w.B()], w.X() != 0)
 	case bytecode.RAddIndexI:
 		return Undefined, r.regAddIndex(f, c.rc.Aux[pc], regs[w.A()], regs[w.B()], Int32(w.SC()), w.X() != 0)
-	case bytecode.RNewArrayE:
-		// The tree's node for the literal, made here: its site in the
-		// closure's arrays, named to native code by the stack form's pc.
-		n := arrayEmptyNode[struct{}]{site: int(w.B()), pc: int32(c.src[pc])}
-		v = n.make(regTctx(r, f, cl))
 	case bytecode.RNewArray:
 		b := wb + int(w.B())
 		v = Obj(r.newArrayFrom(r.stack[b : b+int(w.C())]))
@@ -955,6 +950,9 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 	case bytecode.RJmpF, bytecode.RJmpT:
 		// A truthiness the loop's regTruth does not answer.
 		return Bool(regs[w.A()].Truthy() == (w.Op() == bytecode.RJmpT)), nil
+	case bytecode.RJTypeof:
+		t := typeofKind[struct{}](regs[w.A()])
+		return Bool((t == int(w.X()&^bytecode.RCmpTrue)) == (w.X()&bytecode.RCmpTrue != 0)), nil
 	case bytecode.RJSEq, bytecode.RJSNe:
 		// A === the loop's regStrictEq does not answer: strings, BigInts.
 		return Bool(regs[w.A()].StrictEquals(regs[w.B()]) == (w.Op() == bytecode.RJSEq)), nil

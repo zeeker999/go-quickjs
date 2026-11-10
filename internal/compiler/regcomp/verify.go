@@ -83,6 +83,17 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			ok = reg(a) && reg(b)
 		case bytecode.RNewObject:
 			ok = reg(a) && site(c)
+		case bytecode.RTypeof:
+			ok = reg(a) && reg(b)
+		case bytecode.RJTypeof:
+			ok = reg(a) && w.X()&^bytecode.RCmpTrue < 8 && in(pc, int64(w.SC()))
+		case bytecode.RSwitch, bytecode.RSwitchTypeof:
+			ok = reg(a) && int(w.BC()) < len(rc.Switches)
+			if ok {
+				for _, sc := range rc.Switches[w.BC()] {
+					ok = ok && int(sc.To) < len(code)
+				}
+			}
 		case bytecode.RAddIndex:
 			ok = reg(a) && reg(b) && reg(c)
 		case bytecode.RAddIndexK, bytecode.RAddIndexI:

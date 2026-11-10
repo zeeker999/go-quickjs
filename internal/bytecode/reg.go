@@ -328,6 +328,22 @@ const (
 	RAddIndex
 	RAddIndexK
 	RAddIndexI
+	// RSwitch: a switch's leading cases whose selectors are literals, looked
+	// up as one: R[A] goes to the body of the first case of Switches[BC]
+	// it strictly equals, and to the next instruction where it equals
+	// none -- the chain of the switch's other cases, or its default.
+	RSwitch
+	// RJTypeof: jump by SC if typeof R[A] is the type of index X&^RCmpTrue
+	// in the VM's typeofNames -- undefined, object, boolean, number,
+	// string, symbol, bigint, function -- and X's RCmpTrue bit says it is,
+	// or neither: typeof x === "name" and its kind as one compare.
+	RJTypeof
+	// RTypeof: R[A] = typeof R[B].
+	RTypeof
+	// RSwitchTypeof: switch (typeof R[A]) of string cases alone: the body
+	// of the first case of Switches[BC] that is the type's name, or the
+	// next instruction.
+	RSwitchTypeof
 
 	// RInvalid is the last operation there can be, which no code holds:
 	// the interpreter's switch has a case for it so that its jump table
@@ -353,6 +369,26 @@ const (
 	LitFalse
 	LitNull
 	LitUndefined
+)
+
+// SwitchCase is a case of an RSwitch's table: its selector, a literal, by
+// Kind -- a number Num, a string Str, Constants[K], true, false, null --
+// and the pc of its body.
+type SwitchCase struct {
+	Kind uint8
+	Num  float64
+	Str  string
+	K    uint32
+	To   uint32
+}
+
+// The kinds of a SwitchCase.
+const (
+	SwitchNum = iota
+	SwitchStr
+	SwitchTrue
+	SwitchFalse
+	SwitchNull
 )
 
 // RegCode is a function's code in the register form.
@@ -389,6 +425,8 @@ type RegCode struct {
 	// instruction needs one; for add_index, the stack instruction of its
 	// store, where the store's errors are placed.
 	Aux []uint32
+	// Switches is each RSwitch's table, in its cases' order.
+	Switches [][]SwitchCase
 	// Literals are the elements of the code's literals of constants
 	// (RNewArrayK), each a constant or one of the values no constant is.
 	Literals [][]LitElem
@@ -426,7 +464,7 @@ var rOpNames = [...]string{
 	RPostInc: "post_inc", RPostDec: "post_dec", RGetLength: "get_length",
 	RJEq: "jeq", RJNe: "jne", RJEqI: "jeq_imm", RJNeI: "jne_imm", RJNull: "jnull", RJNotNull: "jnotnull",
 	RThrow: "throw", RInstanceOf: "instanceof", RIn: "in", RDelete: "delete", RArguments: "arguments", RNewArrayK: "new_array_k", RAddProp: "add_prop", RAddPropI: "add_prop_imm", RApplyArgs: "apply_args",
-	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
+	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RSwitch: "switch", RJTypeof: "jtypeof", RTypeof: "typeof", RSwitchTypeof: "switch_typeof", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
 }
 
 func (op ROp) String() string {
@@ -507,6 +545,12 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s.%d %s[%d], %s", op, w.X(), r(w.A()), w.C(), r(w.B()))
 	case RAddIndexI:
 		return fmt.Sprintf("%s.%d %s[%s], %d", op, w.X(), r(w.A()), r(w.B()), w.SC())
+	case RTypeof:
+		return fmt.Sprintf("%s %s, %s", op, r(w.A()), r(w.B()))
+	case RJTypeof:
+		return fmt.Sprintf("%s %s, %d %v -> %+d", op, r(w.A()), w.X()&^RCmpTrue, w.X()&RCmpTrue != 0, w.SC())
+	case RSwitch, RSwitchTypeof:
+		return fmt.Sprintf("%s %s, table%d", op, r(w.A()), w.BC())
 	case RNewArrayE:
 		return fmt.Sprintf("%s %s @%d", op, r(w.A()), w.B())
 	case RNewArray:
