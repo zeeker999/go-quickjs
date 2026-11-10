@@ -2532,27 +2532,22 @@ func (g *gen) regexpLitCall(n *ast.Call, dst int, dead bool) (int, bool) {
 		if d < 0 {
 			d = w
 		}
-		sub := bytecode.RColdLitCallExec
-		if name == "test" {
-			sub = bytecode.RColdLitCallTest
+		x := uint8(bytecode.RLitCall) | litTest(name)
+		if dead && name == "exec" {
+			x |= bytecode.RLitDead
 		}
 		g.at(n.TracePos())
-		at := g.emit(bytecode.MakeR(bytecode.RCold, uint8(sub), r16(w), r16(d), uint16(k)))
-		g.mark(at, deadMark(dead && name == "exec"))
+		at := g.emit(bytecode.MakeR(bytecode.RLit, x, r16(w), r16(d), uint16(k)))
 		if g.stores == nil {
 			g.stores = map[int]int32{}
 		}
 		g.stores[at] = int32(lit.Start)
 		return d, true
 	}
-	sub := bytecode.RColdLitExec
-	if name == "test" {
-		sub = bytecode.RColdLitTest
-	}
 	argc := len(n.Args)
 	w := g.allocN(2 + argc)
 	g.at(lit.Start)
-	g.emit(bytecode.MakeR(bytecode.RCold, uint8(sub), r16(w), uint16(k), g.propSite(bytecode.OpGetPropThis, g.nameIdx(name))))
+	g.emit(bytecode.MakeR(bytecode.RLit, litTest(name), r16(w), 0, uint16(k)))
 	g.args(n.Args, w+2)
 	d := dst
 	if d < 0 {
@@ -2563,6 +2558,14 @@ func (g *gen) regexpLitCall(n *ast.Call, dst int, dead bool) (int, bool) {
 	g.aux(at, k)
 	g.mark(at, bytecode.RMarkLitRecv|deadMark(dead && name == "exec"))
 	return d, true
+}
+
+// litTest is regexp_lit's flag of a literal's test, for name test.
+func litTest(name string) uint8 {
+	if name == "test" {
+		return bytecode.RLitTest
+	}
+	return 0
 }
 
 // unchanging reports whether e's value, read before a method's read, is

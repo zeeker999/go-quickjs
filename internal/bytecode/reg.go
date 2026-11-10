@@ -149,7 +149,19 @@ const (
 	// operator: a division, a remainder, a power, a bitwise operator or a
 	// shift, an equality or a relational comparison.
 	RBin
-	_ // free: 29, the translation reference's bin_imm, removed
+	// RLit is a RegExp literal's exec or test, a per-turn step of the
+	// loops that match (value 29, out of the free list): R[A+1] = the
+	// literal of Constants[C], made or given back, and R[A] its method,
+	// exec or test (RLitTest), not read where it is the realm's built-in,
+	// which reading runs nothing to find, and read otherwise -- at the
+	// instruction's position, or with RLitCall at the stack form's
+	// instruction Aux. With RLitCall the method is then called with the
+	// window's one argument, R[A+2], which nothing can change by the read,
+	// R[B] = its value, the literal given back as RMarkLitRecv's call
+	// gives it; RLitDead says nothing reads the value but its truth.
+	// Without RLitCall a call_method_w marked RMarkLitRecv follows, after
+	// the arguments.
+	RLit
 	// RInc and RDec: R[A] = ToNumeric(R[B]) + 1 or - 1.
 	RInc
 	RDec
@@ -378,21 +390,6 @@ type RColdOp uint8
 const (
 	// RColdNewRegExp: R[A] = the RegExp literal of Constants[BC].
 	RColdNewRegExp RColdOp = iota
-	// RColdLitExec and RColdLitTest: R[A+1] = the RegExp literal of
-	// Constants[B], and R[A] its exec or test, read at site C -- not read
-	// where it is the realm's built-in, which reading runs nothing to find
-	// (a call's window: the callee, the receiver, the arguments).
-	RColdLitExec
-	RColdLitTest
-	// RColdLitCallExec and RColdLitCallTest are lit_exec or lit_test and
-	// the call_method_w after them in one, for a call of one argument that
-	// its window holds already, which nothing can change by the method's
-	// read: R[B] = the literal of Constants[C]'s exec or test, read as
-	// lit_exec reads it, at the stack form's instruction Aux, called on the
-	// literal with R[A+2], the literal given back as RMarkLitRecv's call
-	// gives it; its marks may have RMarkDead.
-	RColdLitCallExec
-	RColdLitCallTest
 	// RColdForOfStart and RColdForInStart: R[A] = a cursor over R[B], a
 	// for-of loop's or a for-in loop's (startForOf, startForIn).
 	RColdForOfStart
@@ -403,6 +400,13 @@ const (
 	// does: an error of its return method's is dropped.
 	RColdIterClose
 	RColdIterCloseThrow
+)
+
+// The flags of regexp_lit's X.
+const (
+	RLitTest = 1 << iota
+	RLitCall
+	RLitDead
 )
 
 // The marks of a call (RegCode.Marks), by its pc: what the call of a
@@ -433,9 +437,7 @@ const (
 )
 
 var rColdNames = [...]string{
-	RColdNewRegExp: "new_regexp", RColdLitExec: "lit_exec", RColdLitTest: "lit_test",
-	RColdLitCallExec: "lit_exec_call",
-	RColdLitCallTest: "lit_test_call", RColdForOfStart: "for_of_start", RColdForInStart: "for_in_start",
+	RColdNewRegExp: "new_regexp", RColdForOfStart: "for_of_start", RColdForInStart: "for_in_start",
 	RColdIterClose: "iter_close", RColdIterCloseThrow: "iter_close_throw",
 }
 
@@ -592,7 +594,7 @@ var rOpNames = [...]string{
 	RPostInc: "post_inc", RPostDec: "post_dec", RGetLength: "get_length",
 	RJEq: "jeq", RJNe: "jne", RJEqI: "jeq_imm", RJNeI: "jne_imm", RJNull: "jnull", RJNotNull: "jnotnull",
 	RThrow: "throw", RInstanceOf: "instanceof", RIn: "in", RDelete: "delete", RArguments: "arguments", RNewArrayK: "new_array_k", RAddProp: "add_prop", RAddPropI: "add_prop_imm", RApplyArgs: "apply_args",
-	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RSwitch: "switch", RJTypeof: "jtypeof", RTypeof: "typeof", RSwitchTypeof: "switch_typeof", RNewObjectLit: "new_object_lit", RAppend: "append", RStrFreeze: "str_freeze", RCharCodeAt: "char_code_at", RIterNext: "iter_next", RCold: "cold", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
+	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RSwitch: "switch", RJTypeof: "jtypeof", RTypeof: "typeof", RSwitchTypeof: "switch_typeof", RNewObjectLit: "new_object_lit", RAppend: "append", RStrFreeze: "str_freeze", RCharCodeAt: "char_code_at", RIterNext: "iter_next", RLit: "regexp_lit", RCold: "cold", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
 }
 
 func (op ROp) String() string {
@@ -714,14 +716,19 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s, k%d", op, r(w.A()), w.BC())
 	case RCallW, RCallMW, RNewW:
 		return fmt.Sprintf("%s %s = %s(%d)", op, r(w.B()), r(w.A()), w.X())
+	case RLit:
+		m := "exec"
+		if w.X()&RLitTest != 0 {
+			m = "test"
+		}
+		if w.X()&RLitCall != 0 {
+			return fmt.Sprintf("%s %s = k%d.%s(%s)", op, r(w.B()), w.C(), m, r(w.A()+2))
+		}
+		return fmt.Sprintf("%s %s = k%d.%s", op, r(w.A()), w.C(), m)
 	case RCold:
 		switch sub := RColdOp(w.X()); sub {
 		case RColdNewRegExp:
 			return fmt.Sprintf("%s.%s %s, k%d", op, sub, r(w.A()), w.BC())
-		case RColdLitExec, RColdLitTest:
-			return fmt.Sprintf("%s.%s %s, k%d @%d", op, sub, r(w.A()), w.B(), w.C())
-		case RColdLitCallExec, RColdLitCallTest:
-			return fmt.Sprintf("%s.%s %s = k%d(%s)", op, sub, r(w.B()), w.C(), r(w.A()+2))
 		case RColdIterClose, RColdIterCloseThrow:
 			return fmt.Sprintf("%s.%s %s", op, sub, r(w.B()))
 		}

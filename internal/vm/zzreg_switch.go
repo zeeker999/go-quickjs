@@ -219,10 +219,6 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		}
 		regs[w.A()] = v
 		return nil
-	case bytecode.RColdLitExec, bytecode.RColdLitTest:
-		return r.regLitMethod(f, c, w, regs)
-	case bytecode.RColdLitCallExec, bytecode.RColdLitCallTest:
-		return r.regLitCall(f, c, w, pc, regs)
 	case bytecode.RColdForOfStart, bytecode.RColdForInStart:
 		start := (*Runtime).startForOf
 		if bytecode.RColdOp(w.X()) == bytecode.RColdForInStart {
@@ -250,45 +246,27 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 	panic("register code: no cold operation " + bytecode.RColdOp(w.X()).String())
 }
 
-// regLitMethod is lit_exec and lit_test: the literal's RegExp, made or
-// given back (newRegExpLiteral), in the window's receiver, and its method
-// in the callee's register -- the built-in, unread, where reading it would
-// find it running nothing (regexpLitMethod), as the tree's literal call
-// does, and read as get_method reads it otherwise.
-func (r *Runtime) regLitMethod(f *frame, c *regCode, w bytecode.RInstr, regs *[1 << 16]Value) error {
-	a := w.A()
-	lit, err := r.newRegExpLiteral(&f.cl.fn.Constants[w.B()])
+// regLit is regexp_lit: the literal's RegExp made or given back in the
+// window's receiver and its method in the callee's register -- the
+// built-in, unread, where reading it would find it running nothing to
+// find it (regexpLitMethod), as the tree's literal call does, and read
+// otherwise, at the instruction's position or, for one that calls, at the
+// stack form's instruction of the literal (Aux) -- and, with RLitCall,
+// the method called with the window's one argument as a call_method_w
+// marked RMarkLitRecv calls it.
+//
+//go:noinline
+func (r *Runtime) regLit(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value) error {
+	pc := k.pc - 1
+	w := regAt(c.code, pc)
+	f.pc = c.src[pc] + 1
+	a, x, kc := w.A(), w.X(), uint32(w.C())
+	lit, err := r.newRegExpLiteral(&f.cl.fn.Constants[kc])
 	if err != nil {
 		return err
 	}
 	regs[a+1] = lit
-	if m := r.regexpLitMethod(bytecode.RColdOp(w.X()) == bytecode.RColdLitTest); m != nil {
-		regs[a] = Obj(m)
-		return nil
-	}
-	v, err := r.regGetMethod(f.cl, c, bytecode.MakeR(bytecode.RGetMethod, 0, a, a+1, w.C()), lit)
-	if err != nil {
-		return err
-	}
-	regs[a] = v
-	return nil
-}
-
-// regLitCall is lit_exec_call and lit_test_call: the literal's RegExp made
-// or given back in the window's receiver, its method chosen as lit_exec
-// chooses it -- read, where it is not the realm's built-in, at the stack
-// form's instruction of the literal -- and called with the window's one
-// argument as a call_method_w marked RMarkLitRecv calls it.
-func (r *Runtime) regLitCall(f *frame, c *regCode, w bytecode.RInstr, pc int, regs *[1 << 16]Value) error {
-	a, k := w.A(), uint32(w.C())
-	aux := c.rc.Aux[pc]
-	cst := &f.cl.fn.Constants[k]
-	lit, err := r.newRegExpLiteral(cst)
-	if err != nil {
-		return err
-	}
-	regs[a+1] = lit
-	test := bytecode.RColdOp(w.X()) == bytecode.RColdLitCallTest
+	test := x&bytecode.RLitTest != 0
 	if m := r.regexpLitMethod(test); m != nil {
 		regs[a] = Obj(m)
 	} else {
@@ -296,7 +274,9 @@ func (r *Runtime) regLitCall(f *frame, c *regCode, w bytecode.RInstr, pc int, re
 		if test {
 			name = r.atoms.intern("test")
 		}
-		f.pc = aux + 1
+		if x&bytecode.RLitCall != 0 {
+			f.pc = c.rc.Aux[pc] + 1
+		}
 		v, err := r.getValueProp(lit, name)
 		if err != nil {
 			return err
@@ -304,11 +284,14 @@ func (r *Runtime) regLitCall(f *frame, c *regCode, w bytecode.RInstr, pc int, re
 		regs[a] = v
 		f.pc = c.src[pc] + 1
 	}
-	m := uint8(bytecode.RMarkLitRecv)
-	if pc < len(c.rc.Marks) {
-		m |= c.rc.Marks[pc] & bytecode.RMarkDead
+	if x&bytecode.RLitCall == 0 {
+		return nil
 	}
-	v, err := r.regMarkedCall(f, c, f.base-int(c.locals)+int(a), 1, pc, m, k)
+	m := uint8(bytecode.RMarkLitRecv)
+	if x&bytecode.RLitDead != 0 {
+		m |= bytecode.RMarkDead
+	}
+	v, err := r.regMarkedCall(f, c, f.base-int(c.locals)+int(a), 1, pc, m, kc)
 	if err != nil {
 		return err
 	}

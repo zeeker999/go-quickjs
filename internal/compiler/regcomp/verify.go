@@ -128,6 +128,12 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 						(m&bytecode.RMarkLitArg == 0 || w.X() > 0)
 				}
 			}
+		case bytecode.RLit:
+			k := int(c)
+			ok = reg(a) && reg(a+1) && k < len(fn.Constants) && fn.Constants[k].Kind == bytecode.ConstRegExp
+			if ok && w.X()&bytecode.RLitCall != 0 {
+				ok = reg(b) && int(a)+3 <= n && pc < len(rc.Aux) && int64(rc.Aux[pc]) < int64(len(fn.Code))
+			}
 		case bytecode.RNewW:
 			ok = reg(b) && int(a)+int(w.X())+2 <= n
 		case bytecode.RJmp:
@@ -213,16 +219,11 @@ func auxAt(rc *bytecode.RegCode, pc int) uint32 {
 
 // coldOK checks cold's operands, by its sub-operation.
 func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RInstr, reg func(uint16) bool, site func(uint16) bool) bool {
-	a, b, c := w.A(), w.B(), w.C()
+	a, b := w.A(), w.B()
 	regexpK := func(k uint32) bool { return int(k) < len(fn.Constants) && fn.Constants[k].Kind == bytecode.ConstRegExp }
 	switch bytecode.RColdOp(w.X()) {
 	case bytecode.RColdNewRegExp:
 		return reg(a) && regexpK(w.BC())
-	case bytecode.RColdLitExec, bytecode.RColdLitTest:
-		return reg(a) && reg(a+1) && regexpK(uint32(b)) && site(c)
-	case bytecode.RColdLitCallExec, bytecode.RColdLitCallTest:
-		return reg(b) && int(a)+3 <= rc.NumRegs && regexpK(uint32(c)) && pc < len(rc.Aux) &&
-			int64(rc.Aux[pc]) < int64(len(fn.Code))
 	case bytecode.RColdForOfStart, bytecode.RColdForInStart:
 		return reg(a) && reg(b)
 	case bytecode.RColdIterClose, bytecode.RColdIterCloseThrow:
