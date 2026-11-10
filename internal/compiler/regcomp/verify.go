@@ -119,7 +119,7 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			if m := markAt(rc, pc); ok && m != 0 {
 				aux := auxAt(rc, pc)
 				switch {
-				case w.Op() != bytecode.RCallMW:
+				case m&^bytecode.RMarkTail != 0 && w.Op() != bytecode.RCallMW:
 					ok = false
 				case m&bytecode.RMarkReuse != 0:
 					ok = int64(aux)+1 < int64(len(fn.Code)) && len(rc.LocalReg) == len(fn.Locals)

@@ -252,6 +252,12 @@ func regStmt(c *regCode) tstmt {
 				}
 			}
 			v, err := r.regEnterFrame(f, c)
+			if err == errTailCall {
+				// The frame ended in a tail call: runTree leaves with
+				// errTailCall, as after tailCallNode's.
+				r.treeTail = true
+				return
+			}
 			if err != nil {
 				t.throw(err)
 			}
@@ -279,6 +285,10 @@ func regStmt(c *regCode) tstmt {
 			}
 		}
 		v, err := r.runReg(f, c)
+		if err == errTailCall {
+			r.treeTail = true
+			return
+		}
 		if err != nil {
 			t.throw(err)
 		}

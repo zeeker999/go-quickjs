@@ -990,3 +990,33 @@ func TestRegDiffRegExpWideConstants(t *testing.T) {
 		t.Errorf("wide is not register code")
 	}
 }
+
+// TestRegDiffTailCalls compares calls in tail position in strict code
+// (RMarkTail): chains deep past tailCallDepth in constant space, mutual and
+// through methods, conditionals, logical and comma forms; a construct's
+// tail call, which keeps its frame; callees that are built-ins, functions
+// the backend refuses, and that throw at depth; and a stack trace.
+func TestRegDiffTailCalls(t *testing.T) {
+	src := `
+"use strict";
+function even(n) { return n === 0 ? true : odd(n - 1) }
+function odd(n) { return n === 0 ? false : even(n - 1) }
+var o = { k: 0, down(n) { return n === 0 ? this.k : (this.k++, this.down(n - 1)) } };
+function sum(n, acc) { if (n === 0) return acc; return sum(n - 1, acc + n) }
+function cond(n) { return n > 0 && (n % 2 ? cond(n - 1) : (0, cond(n - 1))) || n }
+function nat(n) { return Math.max(n, 3) }
+function* gen() { yield 1 }
+function viaGen() { return gen().next().value }
+function args() { return arguments.length }
+function viaArgs(n) { return args(n, n) }
+function thrower(n) { if (n === 0) throw new RangeError("deep " + n); return thrower(n - 1) }
+function C(n) { this.n = n; return mk(n) }
+function mk(n) { return { made: n } }
+function deep(n) { return n === 0 ? new C(2).made : deep(n - 1) }
+function trace(n) { if (n === 0) return new Error("x").stack.split(String.fromCharCode(10)).length; return trace(n - 1) }
+function deepTry(n) { try { return thrower(n) } catch (e) { return e.message } }
+`
+	calls := []string{`even(100001)`, `odd(77777)`, `o.k = 0, o.down(50000)`, `sum(200000, 0)`, `cond(1001)`, `nat(5)`,
+		`viaGen()`, `viaArgs(4)`, `deepTry(50000)`, `deep(100)`, `trace(5)`, `trace(10)`}
+	regDiff(t, src, calls)
+}

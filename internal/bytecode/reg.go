@@ -434,6 +434,9 @@ const (
 	// String.prototype's replace, split or match searching with it
 	// directly (regexpArgCall).
 	RMarkLitArg
+	// RMarkTail marks a call in tail position, as the stack form makes it
+	// (tail_call): once the stack is deep, its frame is given up.
+	RMarkTail
 )
 
 var rColdNames = [...]string{

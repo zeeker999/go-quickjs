@@ -62,8 +62,6 @@ func why(fn *bytecode.Function) string {
 		return "getter, setter, field initializer or static block"
 	case fn.PrivateSites != 0:
 		return "private members"
-	case fn.HasTailCall:
-		return "tail call"
 	}
 	return ""
 }

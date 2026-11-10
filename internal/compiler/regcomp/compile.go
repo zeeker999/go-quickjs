@@ -2417,6 +2417,11 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	g.at(n.TracePos())
 	dead = dead && (mname == "exec" || mname == "replace")
 	at := g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), g.callSite()))
+	if g.rec.Tails[n] && !argLit {
+		// A call in tail position, whose frame is given up once the
+		// stack is deep, as the stack form's tail_call gives it up.
+		g.mark(at, bytecode.RMarkTail)
+	}
 	if argLit {
 		// A RegExp literal given to replace, split or match, made by the
 		// call, which may have its RegExp back once it is done with it.

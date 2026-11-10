@@ -207,7 +207,10 @@ func TestRestCallFromNodes(t *testing.T) {
 			t.Errorf("tree %v: got %s\nwant %s", tree, got, want)
 		}
 	}
-	if made < 20 {
+	// The tree's accounting: in the register tier the functions are
+	// register code, their tail calls register code's (the answers are
+	// compared above all the same).
+	if made < 20 && !regTier.Load() {
 		t.Errorf("%d calls made by restCall", made)
 	}
 }

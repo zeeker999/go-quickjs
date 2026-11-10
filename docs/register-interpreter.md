@@ -1196,9 +1196,21 @@ V8 suite, Octane and the bundles -- and then test262, each form with its
 regdiff cases and test262 in register mode on its directories:
 
 1. **Tail calls** (2,819; 2,566 of the bundles', strict code's `return
-   f()`): a call in tail position as an ordinary call where the stack form
-   makes it a tail call only for frames it owns, or `ret_call` reusing the
-   frame. `tail_mutual` runs in the tree for it.
+   f()`) -- done. The stack compiler records the calls it makes tail calls
+   (`Record.Tails`), and regcomp marks them (`RMarkTail`): the call is
+   call_w or call_method_w as ever, and `regCallW` reads the mark only
+   once the stack is `tailCallDepth` deep. There, a frame that is no
+   construct's and shares no derived constructor's this is given up as
+   the stack form's `tail_call` gives it up: the call pending
+   (`r.pendingTail`) and the loop leaving with `errTailCall`, which its
+   caller makes: `regCallW`, `regCallMiss` and `regDirect` through
+   `regCall`, whose loop makes every later call of a chain in place (a
+   bound function resolved to its target there, as `tailTarget` does), and
+   a frame the tree or run made through `treeTail`, as after
+   `tailCallNode`. A function with a tail call is not given a `treeCall`
+   (`regPlan`), whose callers expect none: `planTreeCall`'s `treeRest`.
+   After it: Octane 98.7% register code, the bundles 89.0% (63.4%), all
+   44.1%.
 2. **Top-level code** (49,389, most of test262; every script and module):
    a script's and a module's body as a function of registers, its
    bindings the global object's and the global lexical environment's.
