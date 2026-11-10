@@ -82,9 +82,9 @@ type regCode struct {
 	switches []*regSwitchTable
 	rc       *bytecode.RegCode
 	fn       *bytecode.Function
-	// reuse is the sites of the code's call_reuse instructions whose
-	// arrays may be made again, by pc (regReuseSites).
-	reuse map[int32]*execReuseSite
+	// reuse is the sites of the code's calls of exec marked RMarkReuse
+	// whose arrays may be made again, by call site (regReuseSites).
+	reuse []*execReuseSite
 }
 
 // regWindow is the frame's registers from base. The register form's

@@ -384,23 +384,15 @@ const (
 	// (a call's window: the callee, the receiver, the arguments).
 	RColdLitExec
 	RColdLitTest
-	// RColdCallLit: R[B] = R[A](R[A+2] ... R[A+1+C]) with this R[A+1], the
-	// RegExp of a literal of Constants[Aux] that lit_exec or lit_test made:
-	// given back to the literal where the call was the built-in's, given a
-	// primitive, which keeps nothing of it.
-	RColdCallLit
-	// RColdCallArgLit is call_lit with the RegExp of the literal its first
-	// argument, R[A+2]: given back where the call was String.prototype's
-	// replace, split or match searching with it directly (regexpArgCall).
-	RColdCallArgLit
-	// RColdCallDead is call_method_w of exec or replace whose value
-	// nothing reads but its truth: the function told so, as the tree's
-	// deadExec tells it, to make no array or string.
-	RColdCallDead
-	// RColdCallReuse is call_method_w of exec whose value goes to the
-	// local of register B, Aux the stack form's call (execReuseOf): the
-	// array of a match may be made again in the memory of the last.
-	RColdCallReuse
+	// RColdLitCallExec and RColdLitCallTest are lit_exec or lit_test and
+	// the call_method_w after them in one, for a call of one argument that
+	// its window holds already, which nothing can change by the method's
+	// read: R[B] = the literal of Constants[C]'s exec or test, read as
+	// lit_exec reads it, at the stack form's instruction Aux, called on the
+	// literal with R[A+2], the literal given back as RMarkLitRecv's call
+	// gives it; its marks may have RMarkDead.
+	RColdLitCallExec
+	RColdLitCallTest
 	// RColdForOfStart and RColdForInStart: R[A] = a cursor over R[B], a
 	// for-of loop's or a for-in loop's (startForOf, startForIn).
 	RColdForOfStart
@@ -413,15 +405,37 @@ const (
 	RColdIterCloseThrow
 )
 
-// RColdDead is the bit of call_lit's, call_arg_lit's and call_dead's Aux
-// that says nothing reads the call's value but its truth; the rest is the
-// literal's constant.
-const RColdDead = 1 << 31
+// The marks of a call (RegCode.Marks), by its pc: what the call of a
+// built-in at a call_method_w does around it, which changes nothing of
+// the instruction's dispatch -- the site's call of a built-in reads them --
+// and what lit_exec_call and lit_test_call do. Their operand, a constant
+// or a pc, is the instruction's Aux, all 32 bits of it.
+const (
+	// RMarkDead says nothing reads the call's value but its truth: a call
+	// of exec or replace is told so, as the tree's deadExec tells it, to
+	// make no array or string.
+	RMarkDead = 1 << iota
+	// RMarkReuse marks a call of exec whose value goes to the local of
+	// register B, its Aux the stack form's call (execReuseOf): the array
+	// of a match may be made again in the memory of the last.
+	RMarkReuse
+	// RMarkLitRecv: the receiver is the RegExp lit_exec or lit_test made
+	// of the literal of constant Aux, given back to the literal where the
+	// call was the realm's exec or test given a primitive, which keeps
+	// nothing of it.
+	RMarkLitRecv
+	// RMarkLitArg: the call makes its first argument, R[A+2], the literal
+	// of constant Aux, itself -- nothing can see it made after the
+	// arguments that follow -- and gives it back where the call was
+	// String.prototype's replace, split or match searching with it
+	// directly (regexpArgCall).
+	RMarkLitArg
+)
 
 var rColdNames = [...]string{
 	RColdNewRegExp: "new_regexp", RColdLitExec: "lit_exec", RColdLitTest: "lit_test",
-	RColdCallLit: "call_lit", RColdCallArgLit: "call_arg_lit", RColdCallDead: "call_dead",
-	RColdCallReuse: "call_reuse", RColdForOfStart: "for_of_start", RColdForInStart: "for_in_start",
+	RColdLitCallExec: "lit_exec_call",
+	RColdLitCallTest: "lit_test_call", RColdForOfStart: "for_of_start", RColdForInStart: "for_in_start",
 	RColdIterClose: "iter_close", RColdIterCloseThrow: "iter_close_throw",
 }
 
@@ -502,6 +516,9 @@ type RegCode struct {
 	// instruction needs one; for add_index, the stack instruction of its
 	// store, where the store's errors are placed.
 	Aux []uint32
+	// Marks is each call's marks (RMarkDead, ...), by its pc; nil where no
+	// call has any.
+	Marks []uint8
 	// Switches is each RSwitch's table, in its cases' order.
 	Switches [][]SwitchCase
 	// Literals are the elements of the code's literals of constants
@@ -703,8 +720,8 @@ func (rc *RegCode) Format(pc int) string {
 			return fmt.Sprintf("%s.%s %s, k%d", op, sub, r(w.A()), w.BC())
 		case RColdLitExec, RColdLitTest:
 			return fmt.Sprintf("%s.%s %s, k%d @%d", op, sub, r(w.A()), w.B(), w.C())
-		case RColdCallLit, RColdCallArgLit, RColdCallDead, RColdCallReuse:
-			return fmt.Sprintf("%s.%s %s = %s(%d)", op, sub, r(w.B()), r(w.A()), w.C())
+		case RColdLitCallExec, RColdLitCallTest:
+			return fmt.Sprintf("%s.%s %s = k%d(%s)", op, sub, r(w.B()), w.C(), r(w.A()+2))
 		case RColdIterClose, RColdIterCloseThrow:
 			return fmt.Sprintf("%s.%s %s", op, sub, r(w.B()))
 		}

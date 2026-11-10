@@ -2,7 +2,6 @@ package v8bench
 
 import (
 	"fmt"
-	"github.com/go-quickjs/go-quickjs/internal/compiler/regcomp"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -579,7 +578,6 @@ function scan(s) { var h = 0, i; for (i = 0; i < s.length; i++) h = (h * 31 + s.
 // literal given to replace, split, match and test, whose RegExp the tree
 // may have back; flags; and a literal's object kept and compared.
 func TestRegDiffRegExpLiterals(t *testing.T) {
-	regExpLiterals(t)
 	src := `
 function esc(s) { return s.indexOf("<") < 0 ? s : s.replace(/</g, "&lt;") }
 function lits() { var r = [], k = [], i; for (i = 0; i < 4; i++) { var x = /a(b)?/g; k.push(x); r.push(x.lastIndex, x.exec("xabab") + "", x.lastIndex) } r.push(k[0] === k[1], k[0].source, k[0].flags, /x/imsu.flags, /\u{1F600}/u.test("\ud83d\ude00")); return r.join() }
@@ -601,7 +599,6 @@ function uses(s) { return [esc(s), s.split(/,\s*/).length, (s.match(/\d+/g) || [
 // them, a replacer function, a split's limit, errors thrown by the call and
 // by its arguments, and the RegExp kept by the method it calls.
 func TestRegDiffRegExpLiteralCalls(t *testing.T) {
-	regExpLiterals(t)
 	src := `
 var kept = [];
 function loop(a) { var c = 0, s = ""; for (var j = 0; j < 8; j++) { if (/^a.c$/.test(a[j & 3])) c++; var m = /(\d+)-(\d+)/.exec("x" + j + "-" + (j * 3)); s += m[1] + m[2] + /a/y.test("ba") + /a/g.exec("aa").index } return c + s }
@@ -619,21 +616,46 @@ function patched() {
 	Object.defineProperty(p, "test", { value: t, writable: true, configurable: true });
 	return [r1, r2, r3, r4, r5, r6, r7, log.join(), kept.length, kept[0] === kept[1]].join(";")
 }
+function fused(a) {
+	var p = RegExp.prototype, t = p.test, e = p.exec, log = [], s = "xq", n = 5, u = "uq", out = [];
+	for (var j = 0; j < 4; j++) { out.push(/q/.test(s), /\d/.test(n), /q/.exec(s).index, /z/.exec("z")[0], /a/g.test(s)); if (/q/.exec(s)) out.push("dead") }
+	Object.defineProperty(p, "test", { get: function () { log.push("get:" + s); s = "changed"; return t }, configurable: true });
+	out.push(/q/.test(s), /q/.test("q"), /q/.test(u), /k/.test(null));
+	Object.defineProperty(p, "test", { get: function () { throw new EvalError("getter") }, configurable: true });
+	try { /q/.test(u) } catch (x) { out.push(x.name, String(x.stack).split(String.fromCharCode(10))[1]) }
+	Object.defineProperty(p, "test", { value: t, writable: true, configurable: true });
+	p.exec = function (x) { log.push("exec:" + x); return e.call(this, x) };
+	out.push(/q/.test(s), /h/.exec(s)[0], /q/.exec(u)[0]);
+	if (/c/.exec(s)) out.push("deadPatched");
+	p.exec = e;
+	return out.join() + ";" + log.join();
+}
+var gre = /(\w)(\d)?/g, gre2 = /b/;
+function marked(a) {
+	var m, out = [], c = 0;
+	for (var j = 0; j < 6; j++) {
+		gre.lastIndex = 0;
+		m = gre.exec(a[j & 3]);
+		if (m) out.push(m[0] + m.index + (m[2] === undefined ? "u" : m[2]));
+		if (gre2.exec(a[j & 3])) c++;
+		if (a[j & 3].replace(gre2, "B")) c++;
+	}
+	var keep = []; for (j = 0; j < 3; j++) { m = gre2.exec("abc"); keep.push(m) } out.push(keep[0] === keep[1], keep[0][0]);
+	return out.join() + c;
+}
+function argLit() {
+	var log = [], out = [];
+	try { "abc".replace(/b/g, (log.push("arg2"), "B")); out.push("x".replace(/x/, (function () { throw new SyntaxError("second") })())) } catch (x) { out.push(x.name) }
+	out.push("a-b".split(/-/).join("+"), "a1b2".match(/\d/g).join(""), "zz".replace(/z/g, "$&$&"));
+	return out.join() + ";" + log.join();
+}
 function errs() { var out = []; try { /a/.test({ toString: function () { throw new RangeError("r") } }) } catch (x) { out.push(x.name) } try { "s".replace(/s/, function () { throw new TypeError("t") }) } catch (x) { out.push(x.name) } try { /a/.exec(Symbol()) } catch (x) { out.push(x.name) } return out.join() }
 `
-	calls := []string{`loop(["abc", "axc", "ab", "abcd"])`, `objs()`, `patched()`, `errs()`}
+	calls := []string{`loop(["abc", "axc", "ab", "abcd"])`, `objs()`, `patched()`, `errs()`, `fused()`, `marked(["a1", "b", "", "c2d"])`, `argLit()`}
 	for i := range calls {
 		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])
 	}
 	regDiff(t, src, calls)
-}
-
-// regExpLiterals compiles RegExp literals as register code for the test,
-// which they are not by default (regcomp.RegExpLiterals).
-func regExpLiterals(t *testing.T) {
-	saved := regcomp.RegExpLiterals
-	regcomp.RegExpLiterals = true
-	t.Cleanup(func() { regcomp.RegExpLiterals = saved })
 }
 
 // TestRegDiffTry compares try statements in register code: exceptions of
@@ -950,4 +972,21 @@ function gens() {
 		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])
 	}
 	regDiff(t, src, calls)
+}
+
+// TestRegDiffRegExpWideConstants compares RegExp literals' calls in a
+// function whose literals' constants are past 16 bits, which lit_exec_call
+// and lit_exec cannot name in their words: the calls are made through the
+// literal's own instruction and call_method_w's Aux, all 32 bits of it.
+func TestRegDiffRegExpWideConstants(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("function wide(s) {\n\tvar x, out = [];\n")
+	for i := 0; i < 70000; i++ {
+		fmt.Fprintf(&b, "\tx = \"c%d\";\n", i)
+	}
+	b.WriteString("\tfor (var j = 0; j < 3; j++) out.push(/q/.test(s), /(q)/.exec(s)[1], s.replace(/q/g, x), s.split(/u/).length, /a/.exec(\"za\").index);\n\treturn out.join();\n}\n")
+	built := regDiff(t, b.String(), []string{`wide("uqu")`, `wide("q")`})
+	if built == 0 {
+		t.Errorf("wide is not register code")
+	}
 }

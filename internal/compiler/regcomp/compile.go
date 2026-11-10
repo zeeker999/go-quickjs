@@ -62,6 +62,8 @@ type gen struct {
 	// dead is the call whose value the expression being compiled leaves
 	// unused but for its truth: a statement's, a condition's.
 	dead *ast.Call
+	// marks is the calls' marks, by pc (RegCode.Marks).
+	marks map[int]uint8
 	// reuses says the code has a call_reuse, whose frame's locals the
 	// runtime finds by LocalReg.
 	reuses bool
@@ -1276,13 +1278,6 @@ func (g *gen) expr(e ast.Expr, dst int) int {
 		return d
 	case *ast.RegexpLit:
 		d := g.dest(dst)
-		if !RegExpLiterals {
-			// The literal's operations stay the tree's until they are
-			// as fast in register code (see the design's "Where stage 1
-			// stands").
-			g.fail("a RegExp literal")
-			return d
-		}
 		g.at(n.Start)
 		g.emit(bytecode.MakeRBC(bytecode.RCold, uint8(bytecode.RColdNewRegExp), r16(d), g.regexpConst(n)))
 		return d
@@ -2408,44 +2403,54 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	default:
 		g.into(n.Callee, w)
 	}
-	g.args(n.Args, w+2)
+	if argLit {
+		// The literal is made by call_arg_lit: nothing can see it made
+		// after the arguments that follow it.
+		g.args(n.Args[1:], w+3)
+	} else {
+		g.args(n.Args, w+2)
+	}
 	d := dst
 	if d < 0 {
 		d = w
 	}
 	g.at(n.TracePos())
 	dead = dead && (mname == "exec" || mname == "replace")
+	at := g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), g.callSite()))
 	if argLit {
-		// A RegExp literal given to replace, split or match, which may
-		// have its RegExp back once the call is done with it.
-		at := g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdCallArgLit), r16(w), r16(d), uint16(argc)))
-		g.aux(at, g.regexpConst(n.Args[0].(*ast.RegexpLit))|deadBit(dead))
-		return d
-	}
-	if dead && (regexpCalls || RegExpLiterals) {
-		at := g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdCallDead), r16(w), r16(d), uint16(argc)))
-		g.aux(at, deadBit(true))
-		return d
-	}
-	if mname == "exec" && dst >= 0 && (regexpCalls || RegExpLiterals) {
+		// A RegExp literal given to replace, split or match, made by the
+		// call, which may have its RegExp back once it is done with it.
+		g.aux(at, g.regexpConst(n.Args[0].(*ast.RegexpLit)))
+		g.mark(at, bytecode.RMarkLitArg|deadMark(dead))
+	} else if dead {
+		// A call of exec or replace whose value nothing reads but its
+		// truth: a mark the call of the built-in reads.
+		g.mark(at, bytecode.RMarkDead)
+	} else if mname == "exec" && dst >= 0 {
 		if spc, ok := g.reuseCall(n, dst); ok {
-			at := g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdCallReuse), r16(w), r16(d), uint16(argc)))
 			g.aux(at, spc)
+			g.mark(at, bytecode.RMarkReuse)
 			g.reuses = true
-			return d
 		}
 	}
-	g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), g.callSite()))
 	return d
 }
 
-// deadBit is the bit of a regexp call's Aux that says nothing reads its
-// value but its truth.
-func deadBit(dead bool) uint32 {
+// deadMark is the mark of a regexp call that says nothing reads its value
+// but its truth.
+func deadMark(dead bool) uint8 {
 	if dead {
-		return bytecode.RColdDead
+		return bytecode.RMarkDead
 	}
 	return 0
+}
+
+// mark gives the call at pc marks m (RegCode.Marks).
+func (g *gen) mark(pc int, m uint8) {
+	if g.marks == nil {
+		g.marks = map[int]uint8{}
+	}
+	g.marks[pc] |= m
 }
 
 // reuseCall finds the stack form's call of exec n compiles to, whose value
@@ -2517,6 +2522,29 @@ func (g *gen) regexpLitCall(n *ast.Call, dst int, dead bool) (int, bool) {
 	if k >= limit16 {
 		return 0, false
 	}
+	if len(n.Args) == 1 && g.unchanging(n.Args[0]) {
+		// One argument that the method's read cannot change, put in the
+		// window first: the literal made, its method read and called by
+		// one operation.
+		w := g.allocN(3)
+		g.into(n.Args[0], w+2)
+		d := dst
+		if d < 0 {
+			d = w
+		}
+		sub := bytecode.RColdLitCallExec
+		if name == "test" {
+			sub = bytecode.RColdLitCallTest
+		}
+		g.at(n.TracePos())
+		at := g.emit(bytecode.MakeR(bytecode.RCold, uint8(sub), r16(w), r16(d), uint16(k)))
+		g.mark(at, deadMark(dead && name == "exec"))
+		if g.stores == nil {
+			g.stores = map[int]int32{}
+		}
+		g.stores[at] = int32(lit.Start)
+		return d, true
+	}
 	sub := bytecode.RColdLitExec
 	if name == "test" {
 		sub = bytecode.RColdLitTest
@@ -2531,9 +2559,26 @@ func (g *gen) regexpLitCall(n *ast.Call, dst int, dead bool) (int, bool) {
 		d = w
 	}
 	g.at(n.TracePos())
-	at := g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdCallLit), r16(w), r16(d), uint16(argc)))
-	g.aux(at, k|deadBit(dead && name == "exec"))
+	at := g.emit(bytecode.MakeR(bytecode.RCallMW, uint8(argc), r16(w), r16(d), g.callSite()))
+	g.aux(at, k)
+	g.mark(at, bytecode.RMarkLitRecv|deadMark(dead && name == "exec"))
 	return d, true
+}
+
+// unchanging reports whether e's value, read before a method's read, is
+// what it would be read after it: a constant, or a local of the function's
+// own that nothing captures, in a function with no arguments object to
+// write it through, and that needs no check of its initialization -- which
+// the read, a getter, could neither write nor see uninitialized.
+func (g *gen) unchanging(e ast.Expr) bool {
+	switch n := e.(type) {
+	case *ast.NumberLit, *ast.StringLit, *ast.BoolLit, *ast.NullLit:
+		return true
+	case *ast.Ident:
+		res, ok := g.rec.Read[n]
+		return ok && res.Kind == ResLocal && !g.fn.Locals[res.Index].Captured && !g.fn.UsesArguments
+	}
+	return false
 }
 
 // charCodeAt compiles recv.charCodeAt(i), a receiver in a binding and its
@@ -3053,6 +3098,13 @@ func (g *gen) finish() *bytecode.RegCode {
 	for len(g.siteName) <= int(g.fn.PropSites) {
 		g.siteName = append(g.siteName, 0)
 	}
+	var marks []uint8
+	if len(g.marks) > 0 {
+		marks = make([]uint8, len(g.code))
+		for pc, m := range g.marks {
+			marks[pc] = m
+		}
+	}
 	var aux []uint32
 	if len(g.auxes) > 0 {
 		aux = make([]uint32, len(g.code))
@@ -3061,7 +3113,7 @@ func (g *gen) finish() *bytecode.RegCode {
 		}
 	}
 	rc := &bytecode.RegCode{
-		Aux: aux, Switches: switches, Literals: g.literals, ObjKeys: g.objKeys, UsesArguments: (g.fn.UsesArguments || g.fn.MakesArguments) && !g.fn.ForwardsArguments,
+		Aux: aux, Marks: marks, Switches: switches, Literals: g.literals, ObjKeys: g.objKeys, UsesArguments: (g.fn.UsesArguments || g.fn.MakesArguments) && !g.fn.ForwardsArguments,
 		ForwardsArguments: g.fn.ForwardsArguments,
 		Code:              g.code, NumRegs: g.max + 1, SrcPC: src, SiteName: g.siteName, This: -1,
 		LocalReg: g.localReg(),
@@ -3083,14 +3135,3 @@ func (g *gen) localReg() []int32 {
 	}
 	return append([]int32(nil), g.slotReg...)
 }
-
-// RegExpLiterals turns on the register code of a function with a RegExp
-// literal (new_regexp, lit_exec, lit_test, call_lit, call_arg_lit), which
-// QJS_REGEXPLIT sets: off, such a function is the tree's.
-var RegExpLiterals = os.Getenv("QJS_REGEXPLIT") != ""
-
-// regexpCalls turns on call_dead and call_reuse where RegExp literals
-// are not (QJS_REGCALLS). Timed in one build with and without them, they
-// won nothing and made html_escape_plain 8.3%, html_escape_mixed 3.3%
-// and html_escape_entities 2.5% slower: two cold operations a call.
-var regexpCalls = os.Getenv("QJS_REGCALLS") != ""

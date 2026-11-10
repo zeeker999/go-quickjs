@@ -166,7 +166,7 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 						e.kind &^= regCallOut | regCallLeaf
 					}
 					f.pc = regSrc(c, pc) + 1
-					return r.regCallMiss(f, c, w, wb)
+					return r.regCallMiss(f, c, w, wb, pc)
 				}
 				// The this is given to the body, not written to the
 				// window: a miss writes it (regCallSlow).
@@ -193,11 +193,18 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 					}
 				}
 				f.pc = regSrc(c, pc) + 1
-				return r.regCallMiss(f, c, w, wb)
+				return r.regCallMiss(f, c, w, wb, pc)
 			}
 			f.pc = regSrc(c, pc) + 1
 			if e.kind == regCallNative {
 				return r.regNative(e.callee, w, wb)
+			}
+			if e.kind == regCallMarked {
+				v, err := r.regMarkedCall(f, c, base, int(w.X()), pc, c.rc.Marks[pc], regAuxAt(c, pc))
+				if err == nil {
+					regWindow(r.stack, wb)[w.B()] = v
+				}
+				return err
 			}
 			ok := e.kind == regCallEnter
 			if e.kind == regCallThis {
@@ -270,7 +277,7 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 		}
 	}
 	f.pc = regSrc(c, pc) + 1
-	return r.regCallMiss(f, c, w, wb)
+	return r.regCallMiss(f, c, w, wb, pc)
 }
 
 // regSrc is the stack form's instruction of register instruction pc, which
@@ -294,8 +301,8 @@ func regCloseUpvalues(f *frame) {
 // its arguments, a this to coerce, or a callee of no register code.
 //
 //go:noinline
-func (r *Runtime) regCallMiss(f *frame, c *regCode, w bytecode.RInstr, wb int) error {
-	v, err := r.regCallSlow(f, c, w, wb+int(w.A()))
+func (r *Runtime) regCallMiss(f *frame, c *regCode, w bytecode.RInstr, wb, pc int) error {
+	v, err := r.regCallSlow(f, c, w, wb+int(w.A()), pc)
 	if err != nil {
 		return err
 	}
@@ -333,7 +340,117 @@ func (r *Runtime) regGenCall(o *Object, cl *closure, method bool, base, argc int
 	return Obj(gen), nil
 }
 
-func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base int) (Value, error) {
+// regCallSlow is the call of instruction w at pc, its window at base,
+// that its site's cache does not answer.
+// regMarkedCall is the call of call_method_w pc, its window at base, of
+// argc arguments, which its Aux, aux, marks, and what the tree's nodes of
+// such calls do around it, x its operand (Aux). RMarkLitArg makes the
+// call's first argument,
+// the literal; a literal's RegExp is given back where the call keeps
+// nothing of it and runs nothing of the script's (regexpLiteralDone):
+// exec or test, the realm's own, given a primitive, of the literal's
+// RegExp (RMarkLitRecv); replace, split or match searching with it
+// directly (regexpArgCall). A call of the realm's exec or replace whose
+// value nothing reads but its truth (RMarkDead) tells the function so, as
+// deadExec's node does (regDeadCall); one of exec whose value goes to a
+// local that keeps it only as execReuseOf says (RMarkReuse) has its array
+// made in the memory of the last (reuseCallRest).
+func (r *Runtime) regMarkedCall(f *frame, c *regCode, base, argc, pc int, m uint8, x uint32) (Value, error) {
+	k := x
+	args := r.stack[base+2 : base+2+argc]
+	if m&bytecode.RMarkLitArg != 0 {
+		lit, err := r.newRegExpLiteral(&f.cl.fn.Constants[k])
+		if err != nil {
+			return Undefined, err
+		}
+		args[0] = lit
+	}
+	fv, recv := r.stack[base], r.stack[base+1]
+	if !fv.IsObject() {
+		return r.regCall(fv, recv, args)
+	}
+	o := fv.Object()
+	var rx *Object
+	if m&bytecode.RMarkLitArg != 0 {
+		if r.regexpArgCall(o, recv, args) {
+			rx = args[0].Object()
+		}
+	} else if m&bytecode.RMarkLitRecv != 0 && recv.IsObject() && (argc == 0 || !args[0].IsObject()) {
+		if exec := r.regexpLitMethod(false); exec != nil && (o == exec || o == r.regexpLitMethod(true)) {
+			rx = recv.Object()
+		}
+	}
+	var v Value
+	var err error
+	switch {
+	case m&bytecode.RMarkReuse != 0:
+		if site := regReuseAt(c, pc); site != nil && o == r.regexpExecFn {
+			wb := f.base - int(c.locals)
+			v, err = reuseCallRest[struct{}](r, site, r.stack[wb:wb+int(c.numRegs)], o, o.fn(), recv, args)
+		} else {
+			v, err = r.regMarkedRest(o, recv, args)
+		}
+	case m&bytecode.RMarkDead != 0 && (o == r.regexpExecFn || o == r.strReplaceFn):
+		v, err = r.regDeadCall(o, recv, args)
+	default:
+		v, err = r.regMarkedRest(o, recv, args)
+	}
+	if err != nil {
+		return Undefined, err
+	}
+	if rx != nil {
+		r.regexpLiteralDone(&f.cl.fn.Constants[k], rx)
+	}
+	return v, nil
+}
+
+// regMarkedRest is regMarkedCall's call of o on recv with args: a
+// built-in's as callRest makes it, without callDirect's search; anything
+// else's as register code calls (regCall).
+func (r *Runtime) regMarkedRest(o *Object, recv Value, args []Value) (Value, error) {
+	if fd := o.fn(); fd != nil && fd.native != nil {
+		return r.callRest(o, fd, recv, args)
+	}
+	return r.regCall(Obj(o), recv, args)
+}
+
+// regMarked reports whether call_method_w pc's Aux, aux, marks a call of o
+// that regMarkedCall makes: of anything where the call makes its literal
+// argument; of the realm's exec or test on a literal; of its exec or
+// replace whose value is dead, or exec's reused at a site execReuseOf has
+// (regReuseSites). What regMarkedCall does otherwise is the call
+// regNative or regCallW makes, slower.
+func (r *Runtime) regMarked(c *regCode, o *Object, pc int, m uint8) bool {
+	switch {
+	case m&bytecode.RMarkLitArg != 0:
+		return true
+	case m&bytecode.RMarkLitRecv != 0:
+		return o == r.regexpExecFn || o == r.regexpTestFn
+	case m&bytecode.RMarkReuse != 0:
+		return o == r.regexpExecFn && regReuseAt(c, pc) != nil
+	case m&bytecode.RMarkDead != 0:
+		return o == r.regexpExecFn || o == r.strReplaceFn
+	}
+	return false
+}
+
+// regAuxAt is the Aux of the instruction at pc, or 0.
+func regAuxAt(c *regCode, pc int) uint32 {
+	if pc < len(c.rc.Aux) {
+		return c.rc.Aux[pc]
+	}
+	return 0
+}
+
+// regReuseAt is the reuse site of call_method_w pc, or nil.
+func regReuseAt(c *regCode, pc int) *execReuseSite {
+	if s := regAt(c.code, pc).C(); int(s) < len(c.reuse) {
+		return c.reuse[s]
+	}
+	return nil
+}
+
+func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base, pc int) (Value, error) {
 	argc := int(w.X())
 	method := w.Op() == bytecode.RCallMW
 	callee := r.stack[base]
@@ -354,6 +471,16 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base int)
 		)
 		if e != nil && e.callee == o && e.kind == regCallGen {
 			return r.regGenCall(o, e.cl, method, base, argc)
+		}
+		if method && pc < len(c.rc.Marks) {
+			// A call its marks say regMarkedCall makes where they are the
+			// callee's, and the site then sends it there.
+			if m := c.rc.Marks[pc]; m != 0 && r.regMarked(c, o, pc, m) {
+				if e != nil {
+					*e = regCallCache{callee: o, kind: regCallMarked}
+				}
+				return r.regMarkedCall(f, c, base, argc, pc, m, regAuxAt(c, pc))
+			}
 		}
 		if e != nil && e.callee == o && e.kind != 0 && e.kind != regCallNative {
 			// A callee the site knows, whose call is not regCallW's alone.
@@ -485,6 +612,10 @@ const (
 	// regCallGen is a generator function of this realm, whose object
 	// regGenCall makes.
 	regCallGen = 5
+	// regCallMarked is the realm's exec or replace at a call_method_w
+	// whose Aux marks its value dead or reused, which regMarkedCall
+	// calls: the mark costs the site's other callees nothing.
+	regCallMarked = 6
 
 	regCallOut = 8
 	// regCallLeaf marks a callee whose body regCallW may answer without a

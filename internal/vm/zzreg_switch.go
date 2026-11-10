@@ -221,8 +221,8 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		return nil
 	case bytecode.RColdLitExec, bytecode.RColdLitTest:
 		return r.regLitMethod(f, c, w, regs)
-	case bytecode.RColdCallLit, bytecode.RColdCallArgLit, bytecode.RColdCallDead, bytecode.RColdCallReuse:
-		return r.regRegExpCall(f, c, w, pc, regs)
+	case bytecode.RColdLitCallExec, bytecode.RColdLitCallTest:
+		return r.regLitCall(f, c, w, pc, regs)
 	case bytecode.RColdForOfStart, bytecode.RColdForInStart:
 		start := (*Runtime).startForOf
 		if bytecode.RColdOp(w.X()) == bytecode.RColdForInStart {
@@ -274,83 +274,76 @@ func (r *Runtime) regLitMethod(f *frame, c *regCode, w bytecode.RInstr, regs *[1
 	return nil
 }
 
-// regRegExpCall is call_lit, call_arg_lit, call_dead and call_reuse: the
-// call of the window's callee, as call_method_w makes it, and what the
-// tree's nodes of those calls do around it. A literal's RegExp is given
-// back where the call keeps nothing of it and runs nothing of the
-// script's (regexpLiteralDone): exec or test, the realm's own, given a
-// primitive, of the literal's RegExp; replace, split or match searching
-// with it directly (regexpArgCall). A call of the realm's exec or replace
-// whose value nothing reads but its truth tells the function so, as
-// deadExec's node does (deadCallRest); one of exec whose value goes to a
-// local that keeps it only as execReuseOf says, the site's
-// (reuseCallRest).
-func (r *Runtime) regRegExpCall(f *frame, c *regCode, w bytecode.RInstr, pc int, regs *[1 << 16]Value) error {
-	wb := f.base - int(c.locals)
-	b := wb + int(w.A())
-	n := int(w.C())
-	fv, recv := r.stack[b], r.stack[b+1]
-	args := r.stack[b+2 : b+2+n]
-	if !fv.IsObject() {
-		v, err := r.regCall(fv, recv, args)
-		if err == nil {
-			regs[w.B()] = v
-		}
-		return err
-	}
-	o := fv.Object()
+// regLitCall is lit_exec_call and lit_test_call: the literal's RegExp made
+// or given back in the window's receiver, its method chosen as lit_exec
+// chooses it -- read, where it is not the realm's built-in, at the stack
+// form's instruction of the literal -- and called with the window's one
+// argument as a call_method_w marked RMarkLitRecv calls it.
+func (r *Runtime) regLitCall(f *frame, c *regCode, w bytecode.RInstr, pc int, regs *[1 << 16]Value) error {
+	a, k := w.A(), uint32(w.C())
 	aux := c.rc.Aux[pc]
-	sub := bytecode.RColdOp(w.X())
-	var rx *Object
-	switch sub {
-	case bytecode.RColdCallArgLit:
-		if args[0].IsObject() && r.regexpArgCall(o, recv, args) {
-			rx = args[0].Object()
-		}
-	case bytecode.RColdCallLit:
-		if recv.IsObject() && (n == 0 || !args[0].IsObject()) {
-			if exec := r.regexpLitMethod(false); exec != nil && (o == exec || o == r.regexpLitMethod(true)) {
-				rx = recv.Object()
-			}
-		}
-	}
-	var v Value
-	var err error
-	switch {
-	case aux&bytecode.RColdDead != 0 && sub != bytecode.RColdCallReuse && o == r.regexpExecFn:
-		var mark *Object
-		if recv.IsObject() {
-			mark = recv.Object()
-		}
-		v, err = deadCallRest[struct{}](r, r.regexpExecDead, mark, o, o.fn(), recv, args)
-	case aux&bytecode.RColdDead != 0 && sub != bytecode.RColdCallReuse && o == r.strReplaceFn:
-		var mark *Object
-		if n > 0 && args[0].IsObject() {
-			mark = args[0].Object()
-		}
-		v, err = deadCallRest[struct{}](r, r.strReplaceDead, mark, o, o.fn(), recv, args)
-	case sub == bytecode.RColdCallReuse && o == r.regexpExecFn && c.reuse[int32(pc)] != nil:
-		v, err = reuseCallRest[struct{}](r, c.reuse[int32(pc)], r.stack[wb:wb+int(c.numRegs)], o, o.fn(), recv, args)
-	default:
-		v, err = r.callRest(o, o.fn(), recv, args)
-	}
+	cst := &f.cl.fn.Constants[k]
+	lit, err := r.newRegExpLiteral(cst)
 	if err != nil {
 		return err
 	}
-	if rx != nil {
-		r.regexpLiteralDone(&f.cl.fn.Constants[aux&^bytecode.RColdDead], rx)
+	regs[a+1] = lit
+	test := bytecode.RColdOp(w.X()) == bytecode.RColdLitCallTest
+	if m := r.regexpLitMethod(test); m != nil {
+		regs[a] = Obj(m)
+	} else {
+		name := atomExec
+		if test {
+			name = r.atoms.intern("test")
+		}
+		f.pc = aux + 1
+		v, err := r.getValueProp(lit, name)
+		if err != nil {
+			return err
+		}
+		regs[a] = v
+		f.pc = c.src[pc] + 1
+	}
+	m := uint8(bytecode.RMarkLitRecv)
+	if pc < len(c.rc.Marks) {
+		m |= c.rc.Marks[pc] & bytecode.RMarkDead
+	}
+	v, err := r.regMarkedCall(f, c, f.base-int(c.locals)+int(a), 1, pc, m, k)
+	if err != nil {
+		return err
 	}
 	regs[w.B()] = v
 	return nil
 }
 
-// regReuseSites is the sites of rc's call_reuse instructions, by pc, whose
-// arrays execReuseOf says may be made again: its answer, of the stack
-// form's call and locals, put in the frame's registers.
-func regReuseSites(fn *bytecode.Function, rc *bytecode.RegCode) map[int32]*execReuseSite {
-	var out map[int32]*execReuseSite
+// regDeadCall is a call of o on recv with args whose value nothing reads
+// but its truth: of the realm's exec or replace, the function told so, as
+// deadExec's node tells it (deadCallRest); of anything else, the call.
+func (r *Runtime) regDeadCall(o *Object, recv Value, args []Value) (Value, error) {
+	switch o {
+	case r.regexpExecFn:
+		var mark *Object
+		if recv.IsObject() {
+			mark = recv.Object()
+		}
+		return deadCallRest[struct{}](r, r.regexpExecDead, mark, o, o.fn(), recv, args)
+	case r.strReplaceFn:
+		var mark *Object
+		if len(args) > 0 && args[0].IsObject() {
+			mark = args[0].Object()
+		}
+		return deadCallRest[struct{}](r, r.strReplaceDead, mark, o, o.fn(), recv, args)
+	}
+	return r.callRest(o, o.fn(), recv, args)
+}
+
+// regReuseSites is the sites of rc's calls of exec marked RMarkReuse, by
+// call site, whose arrays execReuseOf says may be made again: its answer,
+// of the stack form's call and locals, put in the frame's registers.
+func regReuseSites(fn *bytecode.Function, rc *bytecode.RegCode) []*execReuseSite {
+	var out []*execReuseSite
 	for pc, w := range rc.Code {
-		if w.Op() != bytecode.RCold || bytecode.RColdOp(w.X()) != bytecode.RColdCallReuse {
+		if w.Op() != bytecode.RCallMW || pc >= len(rc.Marks) || rc.Marks[pc]&bytecode.RMarkReuse == 0 {
 			continue
 		}
 		spc := int(rc.Aux[pc])
@@ -363,9 +356,9 @@ func regReuseSites(fn *bytecode.Function, rc *bytecode.RegCode) map[int32]*execR
 			rs.s = int(rc.LocalReg[site.s])
 		}
 		if out == nil {
-			out = map[int32]*execReuseSite{}
+			out = make([]*execReuseSite, rc.CallSites)
 		}
-		out[int32(pc)] = rs
+		out[w.C()] = rs
 	}
 	return out
 }

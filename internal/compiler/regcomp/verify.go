@@ -116,6 +116,18 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			ok = reg(a) && int(b)+int(c) <= n
 		case bytecode.RCallW, bytecode.RCallMW:
 			ok = reg(b) && int(a)+int(w.X())+2 <= n && int(c) < rc.CallSites
+			if m := markAt(rc, pc); ok && m != 0 {
+				aux := auxAt(rc, pc)
+				switch {
+				case w.Op() != bytecode.RCallMW:
+					ok = false
+				case m&bytecode.RMarkReuse != 0:
+					ok = int64(aux)+1 < int64(len(fn.Code)) && len(rc.LocalReg) == len(fn.Locals)
+				case m&(bytecode.RMarkLitRecv|bytecode.RMarkLitArg) != 0:
+					ok = int64(aux) < int64(len(fn.Constants)) && fn.Constants[aux].Kind == bytecode.ConstRegExp &&
+						(m&bytecode.RMarkLitArg == 0 || w.X() > 0)
+				}
+			}
 		case bytecode.RNewW:
 			ok = reg(b) && int(a)+int(w.X())+2 <= n
 		case bytecode.RJmp:
@@ -183,6 +195,22 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 	return ""
 }
 
+// markAt is the marks of the call at pc, or 0.
+func markAt(rc *bytecode.RegCode, pc int) uint8 {
+	if pc < len(rc.Marks) {
+		return rc.Marks[pc]
+	}
+	return 0
+}
+
+// auxAt is the Aux of the instruction at pc, or 0.
+func auxAt(rc *bytecode.RegCode, pc int) uint32 {
+	if pc < len(rc.Aux) {
+		return rc.Aux[pc]
+	}
+	return 0
+}
+
 // coldOK checks cold's operands, by its sub-operation.
 func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RInstr, reg func(uint16) bool, site func(uint16) bool) bool {
 	a, b, c := w.A(), w.B(), w.C()
@@ -192,18 +220,13 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 		return reg(a) && regexpK(w.BC())
 	case bytecode.RColdLitExec, bytecode.RColdLitTest:
 		return reg(a) && reg(a+1) && regexpK(uint32(b)) && site(c)
-	case bytecode.RColdCallLit, bytecode.RColdCallArgLit:
-		return reg(b) && int(a)+2+int(c) <= rc.NumRegs && pc < len(rc.Aux) && regexpK(rc.Aux[pc]&^bytecode.RColdDead) &&
-			(bytecode.RColdOp(w.X()) == bytecode.RColdCallLit || c > 0)
-	case bytecode.RColdCallDead:
-		return reg(b) && int(a)+2+int(c) <= rc.NumRegs && pc < len(rc.Aux) && rc.Aux[pc] == bytecode.RColdDead
+	case bytecode.RColdLitCallExec, bytecode.RColdLitCallTest:
+		return reg(b) && int(a)+3 <= rc.NumRegs && regexpK(uint32(c)) && pc < len(rc.Aux) &&
+			int64(rc.Aux[pc]) < int64(len(fn.Code))
 	case bytecode.RColdForOfStart, bytecode.RColdForInStart:
 		return reg(a) && reg(b)
 	case bytecode.RColdIterClose, bytecode.RColdIterCloseThrow:
 		return reg(b)
-	case bytecode.RColdCallReuse:
-		return reg(b) && int(a)+2+int(c) <= rc.NumRegs && pc < len(rc.Aux) && int(rc.Aux[pc])+1 < len(fn.Code) &&
-			len(rc.LocalReg) == len(fn.Locals)
 	}
 	return false
 }
