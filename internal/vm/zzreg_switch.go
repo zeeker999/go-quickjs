@@ -223,6 +223,40 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		return r.regLitMethod(f, c, w, regs)
 	case bytecode.RColdCallLit, bytecode.RColdCallArgLit, bytecode.RColdCallDead, bytecode.RColdCallReuse:
 		return r.regRegExpCall(f, c, w, pc, regs)
+	case bytecode.RColdForOfStart, bytecode.RColdForInStart:
+		start := (*Runtime).startForOf
+		if bytecode.RColdOp(w.X()) == bytecode.RColdForInStart {
+			start = (*Runtime).startForIn
+		}
+		v, err := start(r, regs[w.B()])
+		if err != nil {
+			return err
+		}
+		regs[w.A()] = v
+		return nil
+	case bytecode.RColdIterNext:
+		v, more, err := r.iterNext(regs[w.B()])
+		if err != nil {
+			return err
+		}
+		if !more {
+			k.pc += int(w.SC())
+			return nil
+		}
+		regs[w.A()] = v
+		return nil
+	case bytecode.RColdIterClose:
+		return r.iterCloseNormal(regs[w.B()])
+	case bytecode.RColdIterCloseThrow:
+		// As closeIteratorsIn closes a cursor an exception leaves: what
+		// its return method throws is dropped.
+		st := cursorOf(regs[w.B()])
+		if st == nil || st.forIn || st.done || st.delegation || st.arr != nil && !r.unwalkToClose(st) {
+			return nil
+		}
+		st.done = true
+		r.closeIterator(st.iter)
+		return nil
 	}
 	panic("register code: no cold operation " + bytecode.RColdOp(w.X()).String())
 }

@@ -195,6 +195,13 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 			(bytecode.RColdOp(w.X()) == bytecode.RColdCallLit || c > 0)
 	case bytecode.RColdCallDead:
 		return reg(b) && int(a)+2+int(c) <= rc.NumRegs && pc < len(rc.Aux) && rc.Aux[pc] == bytecode.RColdDead
+	case bytecode.RColdForOfStart, bytecode.RColdForInStart:
+		return reg(a) && reg(b)
+	case bytecode.RColdIterNext:
+		t := pc + 1 + int(w.SC())
+		return reg(a) && reg(b) && t >= 0 && t < len(rc.Code)
+	case bytecode.RColdIterClose, bytecode.RColdIterCloseThrow:
+		return reg(b)
 	case bytecode.RColdCallReuse:
 		return reg(b) && int(a)+2+int(c) <= rc.NumRegs && pc < len(rc.Aux) && int(rc.Aux[pc])+1 < len(fn.Code) &&
 			len(rc.LocalReg) == len(fn.Locals)

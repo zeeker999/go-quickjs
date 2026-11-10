@@ -858,25 +858,38 @@ func (g *gen) stmt(s ast.Stmt) {
 			g.fail("a break without its target")
 			return
 		}
-		g.leave(g.protsOutside(l), func() { g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), l.brk, false) })
+		g.leave(g.protsOutside(l, false), func() { g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), l.brk, false) })
 	case *ast.ContinueStmt:
 		l := g.findLoop(n.Label, true)
 		if l == nil {
 			g.fail("a continue without its loop")
 			return
 		}
-		g.leave(g.protsOutside(l), func() { g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), l.cont, false) })
+		g.leave(g.protsOutside(l, true), func() { g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), l.cont, false) })
 	case *ast.ThrowStmt:
 		r := g.expr(n.Arg, -1)
 		g.at(n.Start)
+		if len(g.prots) > 0 {
+			// The handler the table would find, entered as it would be:
+			// nothing is made of the value that the handler would not
+			// take straight back out, as the tree's throwToHandler does.
+			p := g.prots[len(g.prots)-1]
+			g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(p.reg), r16(r), 0))
+			g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), p.to, false)
+			return
+		}
 		g.emit(bytecode.MakeR(bytecode.RThrow, 0, r16(r), 0, 0))
 	case *ast.SwitchStmt:
 		g.switchStmt(n, label)
 	case *ast.TryStmt:
 		g.tryStmt(n)
+	case *ast.ForOfStmt:
+		g.forOfStmt(n.Left, n.Right, n.Body, n.Await, false, label, n.Start)
+	case *ast.ForInStmt:
+		g.forOfStmt(n.Left, n.Right, n.Body, false, true, label, n.Start)
 	case *ast.LabeledStmt:
 		switch n.Body.(type) {
-		case *ast.ForStmt, *ast.WhileStmt, *ast.DoWhileStmt:
+		case *ast.ForStmt, *ast.WhileStmt, *ast.DoWhileStmt, *ast.ForOfStmt, *ast.ForInStmt:
 			g.label = n.Label
 			g.stmt(n.Body)
 		default:

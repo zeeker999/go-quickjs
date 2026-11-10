@@ -760,3 +760,111 @@ function stackOfCaught() { function a() { throw new Error("here") } try { a() } 
 	}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffForOfIn compares for-of and for-in loops in register code:
+// arrays, strings, Maps, Sets, generators and iterators of user code as
+// the iterated objects; targets var, let, const, an upvalue and a global;
+// the iterator closed, in the spec's order, by break, continue of an outer
+// loop, return and throw, and not by its end or by a throw of its own
+// next; return methods that throw, return a primitive or are missing; an
+// array changed while it is walked; for-in over objects, arrays, strings,
+// prototypes, keys deleted and added; labels; and the loops nested.
+func TestRegDiffForOfIn(t *testing.T) {
+	src := `
+var glob, gl = [];
+function iter(n, log, opts) {
+	opts = opts || {};
+	var i = 0;
+	var it = {
+		next: function () { log.push("next" + i); if (opts.nextThrows === i) throw "nextErr"; return i < n ? { value: i++, done: false } : { value: undefined, done: true } }
+	};
+	if (opts.ret !== "none") it["return"] = function () { log.push("return"); if (opts.ret === "throws") throw "retErr"; if (opts.ret === "prim") return 1; return {} };
+	var o = {};
+	o[Symbol.iterator] = function () { log.push("iter"); return it };
+	return o;
+}
+function holey(a, b) { return [a, , b] }
+function* gen(log) { try { yield 1; yield 2; yield 3 } finally { log.push("genFinally") } }
+function sums() {
+	var s = 0, t = "", m = new Map([[1, "a"], [2, "b"]]), out = [];
+	for (var x of [1, 2, 3]) s += x;
+	for (let c of "héllo") t += c.toUpperCase();
+	for (const kv of m) out.push(kv[0] + kv[1]);
+	for (const e of new Set([4, 5])) s += e;
+	for (glob of [7, 8]) s += glob;
+	var up = 0;
+	(function () { for (up of [9, 10]) s += up })();
+	var arr = [1, 2, 3];
+	for (var a of arr) { if (a === 1) arr.push(4); if (a === 2) arr.length = 3; s += a }
+	var holes = holey(1, 3);
+	for (var h of holes) out.push(h);
+	return [s, t, out.join(), x, glob, up].join(";");
+}
+function closes(kind) {
+	var log = [];
+	function f() {
+		outer: for (var j = 0; j < 2; j++) {
+			for (var v of iter(5, log, { ret: kind === 4 ? "throws" : kind === 5 ? "prim" : kind === 6 ? "none" : "ok", nextThrows: kind === 7 ? 1 : -1 })) {
+				log.push("v" + v);
+				if (v === 1) {
+					if (kind === 0 || kind >= 4 && kind <= 6) break;
+					if (kind === 1) continue outer;
+					if (kind === 2) return "ret";
+					if (kind === 3) throw "body";
+				}
+			}
+			log.push("after" + j);
+		}
+		return "end";
+	}
+	var r;
+	try { r = f() } catch (e) { r = "threw " + e }
+	return r + ":" + log.join("|");
+}
+function gens() {
+	var log = [], s = 0;
+	for (var v of gen(log)) { s += v; if (v === 2) break }
+	for (var w of gen(log)) s += w;
+	try { for (var u of gen(log)) throw "x" } catch (e) { log.push(e) }
+	return s + ":" + log.join("|");
+}
+function inFinally() {
+	var log = [];
+	for (var v of iter(3, log)) { try { if (v === 1) break } finally { log.push("fin" + v) } }
+	try { for (var w of iter(3, log)) { if (w === 0) continue; return log.join("|") } } finally { log.push("outerFin") }
+}
+function keys() {
+	function P() { this.a = 1; this.b = 2 }
+	P.prototype.c = 3;
+	var o = new P(), out = [], k;
+	for (k in o) out.push(k);
+	for (var i in holey(5, 8)) out.push(i);
+	for (let s in "ab") out.push(s);
+	for (k in { x: 1, y: 2, z: 3 }) { out.push(k); }
+	var d = { p: 1, q: 2, r: 3 };
+	for (k in d) { out.push(k); delete d.q; d.added = 1 }
+	for (k in null) out.push("no");
+	for (k in undefined) out.push("no");
+	for (k in 5) out.push("no");
+	lab: for (k in { m: 1, n: 2 }) { for (var z in { y: 1 }) { if (k === "m") continue lab; break lab } }
+	out.push(k);
+	return out.join();
+}
+function nestedLoops() {
+	var s = 0;
+	for (var a of [[1, 2], [3, 4]]) for (var b of a) for (var c in a) s += b * c;
+	return s;
+}
+function dead() { try { for (let x of [x]) {} } catch (e) { return e.name } }
+function notIterable() { var out = []; try { for (var x of 5) {} } catch (e) { out.push(e.name) } try { for (var y of {}) {} } catch (e) { out.push(e.name) } return out.join() }
+function hot(n) { var a = []; for (var i = 0; i < n; i++) a.push(i); var s = 0; for (var k = 0; k < 10; k++) for (var v of a) s += v; return s }
+`
+	calls := []string{`sums()`, `gens()`, `inFinally()`, `keys()`, `nestedLoops()`, `dead()`, `notIterable()`, `hot(500)`}
+	for k := 0; k <= 7; k++ {
+		calls = append(calls, fmt.Sprintf("closes(%d)", k))
+	}
+	for i := range calls {
+		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])
+	}
+	regDiff(t, src, calls)
+}

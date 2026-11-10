@@ -398,6 +398,19 @@ const (
 	// local of register B, Aux the stack form's call (execReuseOf): the
 	// array of a match may be made again in the memory of the last.
 	RColdCallReuse
+	// RColdForOfStart and RColdForInStart: R[A] = a cursor over R[B], a
+	// for-of loop's or a for-in loop's (startForOf, startForIn).
+	RColdForOfStart
+	RColdForInStart
+	// RColdIterNext: R[A] = the next value of cursor R[B], or a jump by
+	// SC where it has none.
+	RColdIterNext
+	// RColdIterClose closes cursor R[B] as a break, a continue or a
+	// return that leaves its loop does: an error of its return method's is
+	// thrown. RColdIterCloseThrow closes it as a throw that leaves the loop
+	// does: an error of its return method's is dropped.
+	RColdIterClose
+	RColdIterCloseThrow
 )
 
 // RColdDead is the bit of call_lit's, call_arg_lit's and call_dead's Aux
@@ -408,7 +421,8 @@ const RColdDead = 1 << 31
 var rColdNames = [...]string{
 	RColdNewRegExp: "new_regexp", RColdLitExec: "lit_exec", RColdLitTest: "lit_test",
 	RColdCallLit: "call_lit", RColdCallArgLit: "call_arg_lit", RColdCallDead: "call_dead",
-	RColdCallReuse: "call_reuse",
+	RColdCallReuse: "call_reuse", RColdForOfStart: "for_of_start", RColdForInStart: "for_in_start",
+	RColdIterNext: "iter_next", RColdIterClose: "iter_close", RColdIterCloseThrow: "iter_close_throw",
 }
 
 func (op RColdOp) String() string {
@@ -689,6 +703,10 @@ func (rc *RegCode) Format(pc int) string {
 			return fmt.Sprintf("%s.%s %s, k%d @%d", op, sub, r(w.A()), w.B(), w.C())
 		case RColdCallLit, RColdCallArgLit, RColdCallDead, RColdCallReuse:
 			return fmt.Sprintf("%s.%s %s = %s(%d)", op, sub, r(w.B()), r(w.A()), w.C())
+		case RColdIterNext:
+			return fmt.Sprintf("%s.%s %s, %s, done %+d", op, sub, r(w.A()), r(w.B()), w.SC())
+		case RColdIterClose, RColdIterCloseThrow:
+			return fmt.Sprintf("%s.%s %s", op, sub, r(w.B()))
 		}
 		return fmt.Sprintf("%s.%s %s, %s, %s", op, RColdOp(w.X()), r(w.A()), r(w.B()), r(w.C()))
 	default:

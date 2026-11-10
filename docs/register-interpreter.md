@@ -525,8 +525,24 @@ are.
   reads it. A catch clause's pattern, a binding a closure captures in a
   loop (each turn's is a new one) and a using declaration's scope stay
   the stack form's.
-- Iterators a loop holds open are closed by the unwinding (stage 2's
-  for-of).
+- **A throw statement with a handler around it in its function** is a
+  move of its value into the handler's register and a jump to it, with
+  no `Thrown` made, as the tree's `throwToHandler` does: through the
+  table, `try_throw` was 33 to 128 ns (the frames captured for nothing).
+- **for-of and for-in loops** keep their cursor in a register of their
+  own: `for_of_start` or `for_in_start` makes it (`startForOf`,
+  `startForIn`, with their fast paths for an array and a generator) and
+  `iter_next` steps it at the head of each turn, jumping out where it has
+  no value; all three are cold operations. A for-of loop's body is in the
+  ranges of a handler of its own, the cursor's, which closes the iterator
+  as a throw does (`iter_close_throw`, its return method's error dropped)
+  and throws again; a break, a continue of an outer loop or a return that
+  leaves the loop closes it on the way out as it runs a finally clause
+  (`iter_close`, its error thrown), and `iter_next` is outside the
+  ranges, so that an iterator whose `next` threw is not closed. A for-in
+  cursor needs no closing. A pattern or a member as the target, a
+  captured lexical binding (each turn's is a new one) and `for await`
+  stay the stack form's.
 
 ## Generators and async functions
 
