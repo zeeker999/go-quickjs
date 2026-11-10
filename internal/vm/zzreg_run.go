@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"encoding/binary"
 	"math"
 	"os"
 	"sync/atomic"
@@ -515,7 +516,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 					}
 				}
 			}
-			goto slow
+			goto typed
 		case bytecode.RGetIndexPre:
 			// x[++i]: the key stepped, then the element read; neither is
 			// written until both are known, so that the slow path does both.
@@ -560,6 +561,10 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				}
 			}
 			kept.pc = pc
+			if regTypedElem(c, &kept, regs) {
+				pc = kept.pc
+				continue
+			}
 			if _, err := r.regSlow(f, c, &kept, regs); err != nil {
 				return Undefined, err
 			}
@@ -1028,7 +1033,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 					}
 				}
 			}
-			goto slow
+			goto typed
 		case bytecode.RSetIndexI:
 			if obj := regs[w.A()]; obj.IsObject() {
 				o := obj.Object()
@@ -1037,7 +1042,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 					continue
 				}
 			}
-			goto slow
+			goto typed
 		case bytecode.RCallMW:
 			kept.pc = pc
 			if err := r.regCallW(f, c, &kept, wb); err != nil {
@@ -1076,7 +1081,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 						b = Int32(w.SB())
 					}
 					if p.IsNumber() && b.IsNumber() {
-						*p = regNum(p.Number() + b.Number())
+						p.num = regNum(p.Number() + b.Number()).num
 						continue
 					}
 				}
@@ -1084,12 +1089,15 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			goto slow
 		case bytecode.RAddIndex:
 			// A dense element's number and a number added in place, as
-			// set_index's fast path writes an element.
+			// set_index's fast path writes an element. Only the number's
+			// word is written, as the tree's updates write it: a number's
+			// pointer word is nil already, and the word alone needs no
+			// write barrier's check.
 			if o, k, b := regs[w.A()], regs[w.B()], regs[w.C()]; o.IsObject() && k.IsNumber() && b.IsNumber() {
 				obj := o.Object()
 				if i, es := uint32(k.Number()), obj.elemsOf(); float64(i) == k.Number() && uint(i) < uint(len(es)) && obj.flags&(objMappedArguments|objSharedElems) == 0 {
 					if p := &es[i]; p.IsNumber() {
-						*p = regNum(p.Number() + b.Number())
+						p.num = regNum(p.Number() + b.Number()).num
 						continue
 					}
 				}
@@ -1100,7 +1108,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				obj := o.Object()
 				if i, es := uint(w.C()), obj.elemsOf(); i < uint(len(es)) && obj.flags&(objMappedArguments|objSharedElems) == 0 {
 					if p := &es[i]; p.IsNumber() {
-						*p = regNum(p.Number() + b.Number())
+						p.num = regNum(p.Number() + b.Number()).num
 						continue
 					}
 				}
@@ -1111,7 +1119,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				obj := o.Object()
 				if i, es := uint32(k.Number()), obj.elemsOf(); float64(i) == k.Number() && uint(i) < uint(len(es)) && obj.flags&(objMappedArguments|objSharedElems) == 0 {
 					if p := &es[i]; p.IsNumber() {
-						*p = regNum(p.Number() + float64(w.SC()))
+						p.num = regNum(p.Number() + float64(w.SC())).num
 						continue
 					}
 				}
@@ -1206,6 +1214,15 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			goto jump
 		}
 		continue
+	typed:
+		// An element get_index and the immediate forms have not found
+		// dense: a typed array's, out of line (regTypedElem).
+		kept.pc = pc
+		if regTypedElem(c, &kept, regs) {
+			pc = kept.pc
+			continue
+		}
+		pc = kept.pc
 	slow:
 		// What a case's fast path did not answer.
 		kept.pc = pc
@@ -1263,6 +1280,112 @@ func regInt32(v Value) (int32, bool) {
 type regKept struct {
 	pc  int
 	pad [2]int
+}
+
+// regTypedElem is the element of a typed array get_index, set_index and
+// their immediate forms read or write where their fast path has found no
+// dense element, as the tree's getIndexMiss and setElem do: elemAt and
+// setElem take it from the buffer and put a number there that the element
+// takes as it is, typedRead and typedStore the rest they can. False sends
+// what is left -- an appended element, a hole, a value that is no number,
+// a getter, a proxy -- to the slow path. Neither can throw or run code.
+//
+// It is the one call of a label get_index and the immediate forms share,
+// so that the loop grows by a jump each, and set_index's before its slow
+// path, which keeps the code after that case where it was: with the case
+// shorter, crypto_am3 was 5.5% slower at every placement. It switches on
+// the operation again, as regSlow does, out of the loop.
+//
+//go:noinline
+func regTypedElem(c *regCode, k *regKept, regs *[1 << 16]Value) bool {
+	w := regAt(c.code, k.pc-1)
+	var obj, key Value
+	switch w.Op() {
+	case bytecode.RGetIndex, bytecode.RGetIndexI:
+		obj, key = regs[w.B()], Value{num: float64(w.C())}
+		if w.Op() == bytecode.RGetIndex {
+			key = regs[w.C()]
+		}
+		if obj.IsObject() && obj.object().class == ClassTypedArray {
+			// The element read here, as elemAt reads it, rather than
+			// through a second call.
+			t, ok := obj.object().dataOf().(*typedArrayData)
+			i := uint32(key.num)
+			if ok && float64(i) == key.num && uint(i) < uint(t.fixedLength) {
+				if st := t.st; st != nil && t.end <= len(st.bytes) {
+					b, j := st.bytes[t.byteOffset:t.end], int(i)
+					var v Value
+					switch t.kind {
+					case elemInt8:
+						v = Int(int(int8(b[j])))
+					case elemUint8, elemUint8Clamped:
+						v = Int(int(b[j]))
+					case elemInt16:
+						v = Int(int(int16(binary.LittleEndian.Uint16(b[j<<1:]))))
+					case elemUint16:
+						v = Int(int(binary.LittleEndian.Uint16(b[j<<1:])))
+					case elemInt32:
+						v = Int32(int32(binary.LittleEndian.Uint32(b[j<<2:])))
+					case elemUint32:
+						v = Uint32(binary.LittleEndian.Uint32(b[j<<2:]))
+					case elemFloat32:
+						v = Float(float64(math.Float32frombits(binary.LittleEndian.Uint32(b[j<<2:]))))
+					case elemFloat64:
+						v = Float(math.Float64frombits(binary.LittleEndian.Uint64(b[j<<3:])))
+					default:
+						goto long
+					}
+					regs[w.A()] = v
+					return true
+				}
+			}
+		}
+	long:
+		if v, ok := elemAt(obj, key); ok {
+			regs[w.A()] = v
+			return true
+		}
+		if v, ok := typedRead(obj, key.num); ok {
+			regs[w.A()] = v
+			return true
+		}
+		return false
+	case bytecode.RSetIndex, bytecode.RSetIndexI:
+		obj, key = regs[w.A()], Value{num: float64(w.B())}
+		if w.Op() == bytecode.RSetIndex {
+			key = regs[w.B()]
+		}
+		v := regs[w.C()]
+		if obj.IsObject() && obj.object().class == ClassTypedArray && v.IsNumber() {
+			// A number stored here, as setElem stores it.
+			t, ok := obj.object().dataOf().(*typedArrayData)
+			i := uint32(key.num)
+			if ok && float64(i) == key.num && uint(i) < uint(t.fixedLength) {
+				if st := t.st; st != nil && t.end <= len(st.bytes) && !st.immutable {
+					b, n, j := st.bytes[t.byteOffset:t.end], v.num, int(i)
+					switch t.kind {
+					case elemInt8, elemUint8:
+						b[j] = byte(toInt32Wrap(n))
+					case elemUint8Clamped:
+						b[j] = clampUint8(n)
+					case elemInt16, elemUint16:
+						binary.LittleEndian.PutUint16(b[j<<1:], uint16(toInt32Wrap(n)))
+					case elemInt32, elemUint32:
+						binary.LittleEndian.PutUint32(b[j<<2:], uint32(toInt32Wrap(n)))
+					case elemFloat32:
+						binary.LittleEndian.PutUint32(b[j<<2:], math.Float32bits(float32(n)))
+					case elemFloat64:
+						binary.LittleEndian.PutUint64(b[j<<3:], math.Float64bits(n))
+					default:
+						return typedStore(obj, key.num, v)
+					}
+					return true
+				}
+			}
+		}
+		return setElem(obj, key, v) || typedStore(obj, key.num, v)
+	}
+	return false
 }
 
 // regBinImm is bin_imm's slow path.

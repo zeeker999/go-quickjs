@@ -376,3 +376,37 @@ function kept(n) { var all = []; for (var j = 0; j < n; j++) { var a = []; for (
 	}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffTyped compares typed arrays' elements read and written by
+// get_index, set_index and their immediate forms, out of line
+// (regTypedGet, regTypedSet), with the tree's, and updates that write a
+// number's word alone.
+func TestRegDiffTyped(t *testing.T) {
+	src := `
+var kinds = [Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array, Uint32Array, Float32Array, Float64Array];
+var vals = [0, -0, 1, -1, 1.5, -1.5, 127, 128, 255, 256, -129, 65535, 65536, 2147483647, 2147483648, -2147483649, 4294967296, NaN, Infinity, -Infinity, 0.1, 1e300, "7", "x", true, null, undefined, { valueOf: function () { return 3 } }];
+function show(v) { return Object.is(v, -0) ? "-0" : String(v) }
+function rw(K) { var t = new K(4), out = []; for (var i = 0; i < vals.length; i++) { t[0] = vals[i]; t[1] = t[0]; var k = 2; t[k] = vals[i]; out.push(show(t[0]), show(t[1]), show(t[k])) } return out.join() }
+function rwAll() { var r = []; for (var i = 0; i < kinds.length; i++) r.push(rw(kinds[i])); return r.join("|") }
+function keys(K) { var t = new K([10, 20, 30]), out = [], ks = [0, 1, 2, 3, -1, -0, 0.5, NaN, "1", "01", Infinity, 2147483648, 4294967295]; for (var i = 0; i < ks.length; i++) { var k = ks[i]; out.push(show(t[k])); t[k] = 9; out.push(show(t[k]), t.length) } out.push(t[3], t[7], t[-1]); t[3] = 1; t[7] = 1; out.push(Object.keys(t).join("/")); return out.join() }
+function keysAll() { var r = []; for (var i = 0; i < kinds.length; i++) r.push(keys(kinds[i])); return r.join("|") }
+function big() { var t = new BigInt64Array(2), u = new BigUint64Array(2), out = []; t[0] = 5n; t[1] = -1n; u[0] = -1n; out.push(t[0], t[1], u[0], u[1]); try { t[0] = 1 } catch (e) { out.push(e.name) } try { t[1] = "x" } catch (e) { out.push(e.name) } t[1] = "12"; out.push(t[1]); return out.join() }
+function proto() { Object.defineProperty(Object.prototype, "5", { get: function () { return "got" }, set: function (v) { throw new Error("set") }, configurable: true }); var t = new Int32Array(2), r = []; r.push(t[5], t[0]); t[5] = 1; r.push(t[5]); var a = [1, 2]; r.push(a[5]); delete Object.prototype[5]; return r.join() }
+function detach() { var b = new ArrayBuffer(8), t = new Int16Array(b), r = []; t[0] = 7; r.push(t[0]); b.transfer(); r.push(t[0], t.length); t[0] = 9; r.push(t[0]); return r.join() }
+function resizable() { var b = new ArrayBuffer(4, { maxByteLength: 16 }), t = new Uint8Array(b), f = new Uint8Array(b, 0, 2), r = []; for (var i = 0; i < 4; i++) t[i] = i + 1; r.push(t[3], f[1], f[2]); b.resize(16); t[10] = 5; r.push(t[10], t.length); b.resize(1); r.push(t[3], f[1], f[0], t.length); t[3] = 1; f[0] = 2; r.push(t[0], f[0]); return r.join() }
+function viaProxy() { var t = new Float64Array(2), p = new Proxy(t, { get: function (o, k) { return k === "0" ? "p" + o[k] : o[k] }, set: function (o, k, v) { o[k] = v * 2; return true } }); p[0] = 3; p[1] = 4; return [p[0], p[1], t[0], t[1]].join() }
+function frozen() { 'use strict'; var r = [], e = Object.freeze(new Int8Array(0)); try { e[0] = 1 } catch (x) { r.push(x.name) } r.push(e[0]); var t = new Int8Array(2); Object.preventExtensions(t); t[1] = 3; r.push(t[1]); try { Object.freeze(t) } catch (x) { r.push(x.name) } return r.join() }
+function sloppyOut() { var t = new Int8Array(2); t[5] = 1; t[-1] = 2; t["x"] = 3; return [t[5], t[-1], t.x, t.length].join() }
+function strictOut() { 'use strict'; var t = new Int8Array(2), r = []; t[5] = 1; r.push(t[5]); try { t[0] = Symbol() } catch (e) { r.push(e.name + " " + e.stack.split(String.fromCharCode(10))[1]) } return r.join() }
+function loop(K, n) { var t = new K(16), s = 0; for (var j = 0; j < n; j++) { for (var i = 0; i < 16; i++) t[i] = i * j - 3.25; s += t[0] + t[1] + t[15] } return show(s) }
+function loopAll() { var r = []; for (var i = 0; i < kinds.length; i++) r.push(loop(kinds[i], 40)); return r.join() }
+function words() { var a = [1, -0, 0.5, 2], o = { x: 1, y: -0 }; var z = -0; a[0] += NaN; a[1] += z; a[2] += 0.25; a[3] += -0; o.x += NaN; o.y += z; var k = 2; a[k] += 1e308; a[k] += 1e308; return [a.map(show).join(), show(o.x), show(o.y)].join() }
+`
+	calls := []string{
+		`rwAll()`, `keysAll()`, `big()`, `proto()`, `detach()`, `resizable()`, `viaProxy()`, `frozen()`, `sloppyOut()`, `strictOut()`, `loopAll()`, `words()`,
+	}
+	for i := range calls {
+		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])
+	}
+	regDiff(t, src, calls)
+}

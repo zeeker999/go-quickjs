@@ -723,6 +723,19 @@ primitive, does without. The tree's
   times the tree's time, a slow-path `===` a case; `typeof_test` 3 times.
   An empty literal's array is made by a call of its own, not the slow
   path's.
+- **A typed array's element is out of line, not the slow path's.**
+  `get_index`, `set_index` and their immediate forms answer a dense
+  element inline and send what they miss to `regTypedElem`, which reads or
+  writes a typed array's element in its buffer as `elemAt` and `setElem`
+  do, before the slow path: `typed_*_read` 24 to 15.5 ns and
+  `typed_*_write` 24 to 14 against the tree's 13 and 14. get_index and the
+  immediate forms reach it through a label they share, a jump each in the
+  loop; set_index calls it before its own slow-path call, since with the
+  case made shorter the cases after it moved and `crypto_am3` was 5.5%
+  slower at every placement. An update of a number in place (`add_prop`,
+  `add_index`) writes the number's word alone, as the tree's updates do,
+  with no write barrier's check: `array_update` 6.3 to 5.9 ns,
+  `prop_update` 5.5 to 5.1.
 
 #### Raw int32 registers (step 5, designed, deferred)
 
