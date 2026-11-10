@@ -124,9 +124,12 @@ about the code, the rest about where it and its data are.
   against the others and against the dispatch. The placements vary that
   too: never-taken tests in the first case, executeAt's `OpNop` (three
   times the placement's number) and runReg's `RNop` (`regInner`, 0 to 7
-  calls of a three-test filler, a permutation over the eight), written
-  only into the placement builds. A test slower at some of those inner
-  layouts and level at others is placement.
+  calls of a three-test filler, a permutation over the eight), and in
+  runReg's last case, after which its shared tails are laid out
+  (`regTail`, another permutation), written only into the placement
+  builds: the cases move against the dispatch and the tails against the
+  cases. A test slower at some of those inner layouts and level at others
+  is placement.
 - **Native code's layout inside a function.** Moving a whole native
   function by lines changes little; moving code within its lines, or
   changing distances inside it, does. The JIT's placements move code by

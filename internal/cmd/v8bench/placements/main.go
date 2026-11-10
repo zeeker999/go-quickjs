@@ -178,16 +178,17 @@ const (
 	// inner is how many never-taken tests each placement adds to nop's
 	// case, times its number.
 	inner = 3
-	// regGo and regNop are the register interpreter's loop and its first
-	// case, which regInner fills.
-	regGo  = "internal/vm/zzreg_run.go"
-	regNop = "\t\tcase bytecode.RNop:\n"
-	// regInnerMax is one more than the most calls regInner gives a
-	// placement, and padKeysLen the keys the tests of both fillers read:
-	// as many in every placement, so that the zeroed data after them is
-	// where it is whatever the placement.
+	// regGo is the register interpreter's loop; regNop its first case,
+	// which regInner fills, and regLast its last, which regTail fills.
+	regGo   = "internal/vm/zzreg_run.go"
+	regNop  = "\t\tcase bytecode.RNop:\n"
+	regLast = "\t\tcase 127:\n"
+	// regInnerMax is one more than the most calls regInner or regTail
+	// gives a placement, and padKeysLen the keys the tests of the three
+	// fillers read: as many in every placement, so that the zeroed data
+	// after them is where it is whatever the placement.
 	regInnerMax = 8
-	padKeysLen  = 3 * regInnerMax
+	padKeysLen  = 6 * regInnerMax
 )
 
 // regInner is how many calls of padRegInner placement n puts in runReg's
@@ -201,6 +202,16 @@ const (
 // loop's IR nodes before inlining, which is what Go's big-function size
 // counts; the tests' bytes come after it.
 func regInner(n int) int { return (5*n + 2) % regInnerMax }
+
+// regTail is how many calls of padRegInner placement n puts in runReg's
+// last case, an invalid instruction's, after which the loop's shared tails
+// are laid out -- the slow path, the taken jump, the back edge -- so that
+// they move against the cases as regInner moves the cases against the
+// dispatch: a change that adds or removes code among the cases moves the
+// tails against every case, which regInner does not vary. Another
+// permutation, 7n mod 8: -k 4's placements 0, 3, 5 and 6 get 0, 5, 3 and
+// 2, so that the tails move against the dispatch by 2, 6, 6 and 2 calls.
+func regTail(n int) int { return 7 * n % regInnerMax }
 
 // placementsOf is the placements -k takes: placements 0, 3, 5 and 6 for
 // four, over which every target but the closures is at each phase twice;
@@ -298,8 +309,8 @@ func buildCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	if bytes.Count(regSrc, []byte(regNop)) != 1 {
-		return fmt.Errorf("%s has no case for register nop to put the tests in", regGo)
+	if bytes.Count(regSrc, []byte(regNop)) != 1 || bytes.Count(regSrc, []byte(regLast)) != 1 {
+		return fmt.Errorf("%s has no first or no last case to put the tests in", regGo)
 	}
 	for _, p := range pads {
 		if _, err := os.Stat(p); err == nil {
@@ -330,20 +341,20 @@ func buildCmd(args []string) error {
 
 	for _, n := range placementsOf(*k) {
 		exe := exePath(*out, *label, n)
-		ref, err := buildAt(src, regSrc, [nPads]int{}, inner*n, regInner(n), dataPhase(n), exe)
+		ref, err := buildAt(src, regSrc, [nPads]int{}, inner*n, n, dataPhase(n), exe)
 		if err != nil {
 			return err
 		}
 		counts := padCounts(ref, n)
-		got, err := buildAt(src, regSrc, counts, inner*n, regInner(n), dataPhase(n), exe)
+		got, err := buildAt(src, regSrc, counts, inner*n, n, dataPhase(n), exe)
 		if err != nil {
 			return err
 		}
 		if p, want := phases(got), design(n); p != want {
 			return fmt.Errorf("placement %d: phases %v, want %v (pads %v)", n, p, want, counts)
 		}
-		fmt.Printf("%s-%d: pads %v, phases %v, runReg's inner calls %d, distances %d %d %d %d\n", *label, n, counts,
-			phases(got), regInner(n), got[1]-got[0], got[2]-got[1], got[3]-got[2], got[4]-got[3])
+		fmt.Printf("%s-%d: pads %v, phases %v, runReg's fillers %d %d, distances %d %d %d %d\n", *label, n, counts,
+			phases(got), regInner(n), regTail(n), got[1]-got[0], got[2]-got[1], got[3]-got[2], got[4]-got[3])
 	}
 	fmt.Printf("built %d placements of %s in %s\n", *k, *label, *out)
 	return nil
@@ -351,7 +362,7 @@ func buildCmd(args []string) error {
 
 // buildAt writes the pads and the tests, builds v8bench to exe, and says
 // where the targets are in it.
-func buildAt(src, regSrc []byte, counts [nPads]int, tests, regCalls, data int, exe string) ([nPads]uint64, error) {
+func buildAt(src, regSrc []byte, counts [nPads]int, tests, n, data int, exe string) ([nPads]uint64, error) {
 	var addrs [nPads]uint64
 	var body strings.Builder
 	for i := range tests {
@@ -361,7 +372,7 @@ func buildAt(src, regSrc []byte, counts [nPads]int, tests, regCalls, data int, e
 	if err := os.WriteFile(vmGo, []byte(patched), 0o644); err != nil {
 		return addrs, err
 	}
-	if err := os.WriteFile(regGo, []byte(regFill(regSrc, regCalls)), 0o644); err != nil {
+	if err := os.WriteFile(regGo, []byte(regFill(regSrc, regInner(n), regTail(n))), 0o644); err != nil {
 		return addrs, err
 	}
 	for p, m := range counts {
@@ -408,14 +419,18 @@ func buildAt(src, regSrc []byte, counts [nPads]int, tests, regCalls, data int, e
 	return addrs, nil
 }
 
-// regFill is the loop's source with calls calls of padRegInner in its
-// nop case, each on keys of its own.
-func regFill(regSrc []byte, calls int) string {
-	var body strings.Builder
-	for j := range calls {
-		fmt.Fprintf(&body, "\t\t\tpadRegInner(uint32(w.A()), %d)\n", 3*j)
+// regFill is the loop's source with first calls of padRegInner in its
+// nop case and last in its last case, each on keys of its own.
+func regFill(regSrc []byte, first, last int) string {
+	var head, tail strings.Builder
+	for j := range first {
+		fmt.Fprintf(&head, "\t\t\tpadRegInner(uint32(w.A()), %d)\n", 3*j)
 	}
-	return strings.Replace(string(regSrc), regNop, regNop+body.String(), 1)
+	for j := range last {
+		fmt.Fprintf(&tail, "\t\t\tpadRegInner(uint32(w.A()), %d)\n", 3*(regInnerMax+j))
+	}
+	s := strings.Replace(string(regSrc), regNop, regNop+head.String(), 1)
+	return strings.Replace(s, regLast, regLast+tail.String(), 1)
 }
 
 // padFile is pad p with m functions. The first holds the one init, which
