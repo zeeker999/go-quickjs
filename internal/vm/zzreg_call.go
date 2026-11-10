@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"slices"
 	"sync/atomic"
 	"unsafe"
 
@@ -165,6 +166,19 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 					}
 					regWindow(r.stack, wb)[w.B()] = v
 					return nil
+				}
+				if e.rc.leaf == regLeafCode {
+					if v, ok := r.regLeafRun(e.cl, e.rc, base, int(w.X())); ok {
+						regWindow(r.stack, wb)[w.B()] = v
+						return nil
+					}
+					if e.cl.pureMiss >= pureMissLimit {
+						// A body that keeps meeting what it cannot run
+						// without a frame is entered with one from now on.
+						e.kind &^= regCallOut | regCallLeaf
+					}
+					f.pc = regSrc(c, pc) + 1
+					return r.regCallMiss(f, c, w, wb)
 				}
 				// The this is given to the body, not written to the
 				// window: a miss writes it (regCallSlow).
@@ -629,6 +643,20 @@ func (r *Runtime) regDirect(o *Object, fd *funcData, c *regCode, this Value, arg
 		return Undefined, nil
 	case regLeafConst:
 		return c.leafVal, nil
+	case regLeafCode:
+		// The parameters' arguments in a window at the top of the stack,
+		// the rest of them unread; the body reads neither its callee's
+		// register nor its this's (regLeafRunnable).
+		m := min(int(c.params), len(args))
+		if base := r.stackTop; base+2+m <= len(r.stack) {
+			w := r.stack[base+2 : base+2+m : base+2+m]
+			for i, a := range args[:m] {
+				w[i] = a
+			}
+			if v, ok := r.regLeafRun(fd.closure, c, base, m); ok {
+				return v, nil
+			}
+		}
 	case regLeafPure:
 		if fd.closure.pureMiss < pureMissLimit {
 			if v, ok := r.pureCall(fd, this, args); ok {
@@ -662,6 +690,229 @@ func (r *Runtime) regDirect(o *Object, fd *funcData, c *regCode, this Value, arg
 		w[2+i] = a
 	}
 	return r.regEnterW(o, fd.closure, c, base, m, args, Undefined)
+}
+
+// regLeafRunnable reports whether rc is a body regLeafRun runs: straight
+// code to its first return, of at most regLeafMax instructions, each a
+// load, a move, an upvalue's read or store or an arithmetic operation of
+// numbers, reading neither the callee's register nor its this's, writing
+// no parameter's register, making at most regLeafStores stores to
+// upvalues and reading none it has stored to. The stores are held until
+// the return, so a run that gives up has changed nothing the frame that
+// then runs the body could see: the arguments are where they were, and no
+// store has been made.
+func regLeafRunnable(rc *bytecode.RegCode) bool {
+	var stored []uint32
+	for i, w := range rc.Code {
+		if i >= regLeafMax {
+			return false
+		}
+		switch w.Op() {
+		case bytecode.RRet:
+			return w.A() >= 2
+		case bytecode.RRetUndef:
+			return true
+		case bytecode.RSetUpval:
+			if len(stored) == regLeafStores || w.A() < 2 {
+				return false
+			}
+			stored = append(stored, uint32(w.BC()))
+			continue
+		case bytecode.RGetUpval:
+			if slices.Contains(stored, uint32(w.BC())) {
+				return false
+			}
+		case bytecode.RAdd, bytecode.RSub, bytecode.RMul:
+			if w.B() < 2 || w.C() < 2 {
+				return false
+			}
+		case bytecode.RAddI, bytecode.RSubI, bytecode.RInc, bytecode.RDec, bytecode.RMove:
+			if w.B() < 2 {
+				return false
+			}
+		case bytecode.RLoadInt, bytecode.RLoadConst, bytecode.RLoadUndef, bytecode.RLoadNull,
+			bytecode.RLoadTrue, bytecode.RLoadFalse:
+		default:
+			return false
+		}
+		if int(w.A()) < 2+rc.Params {
+			return false
+		}
+	}
+	return false
+}
+
+// regLeafStores is how many stores to upvalues a body regLeafRun runs may
+// make: they are held until it returns.
+const regLeafStores = 4
+
+// regLeafMax is the longest body regLeafRun runs: past it, a frame costs
+// less than the run's dispatch, as the tree tier finds for pure bodies.
+const regLeafMax = 12
+
+// regLeafOp is an instruction of a body regLeafRun runs: its operation
+// one of a few numbered densely, so that the run's switch is a jump table,
+// and a load's value or an immediate's number made once.
+type regLeafOp struct {
+	op      uint8
+	a, b, c uint16
+	k       Value
+}
+
+// The operations of regLeafOp.
+const (
+	rlMove = iota
+	rlLoad
+	rlGetUp
+	rlSetUp
+	rlAdd
+	rlSub
+	rlMul
+	// rlAddK adds k: add_imm, sub_imm of the negated immediate (x - y is
+	// x + -y, -0 and NaN alike), inc and dec.
+	rlAddK
+	rlRet
+	rlRetUndef
+)
+
+// regLeafOps is rc's code, which regLeafRunnable has passed, as regLeafRun
+// runs it, to its first return.
+func regLeafOps(fn *bytecode.Function, rc *bytecode.RegCode) []regLeafOp {
+	var ops []regLeafOp
+	for _, w := range rc.Code {
+		o := regLeafOp{a: w.A(), b: w.B(), c: w.C()}
+		switch w.Op() {
+		case bytecode.RMove:
+			o.op = rlMove
+		case bytecode.RLoadInt, bytecode.RLoadConst, bytecode.RLoadUndef, bytecode.RLoadNull, bytecode.RLoadTrue, bytecode.RLoadFalse:
+			v, ok := regConstOf(fn, w)
+			if !ok {
+				return nil
+			}
+			o.op, o.k = rlLoad, v
+		case bytecode.RGetUpval:
+			o.op, o.b = rlGetUp, uint16(w.BC())
+		case bytecode.RSetUpval:
+			o.op, o.b = rlSetUp, uint16(w.BC())
+		case bytecode.RAdd:
+			o.op = rlAdd
+		case bytecode.RSub:
+			o.op = rlSub
+		case bytecode.RMul:
+			o.op = rlMul
+		case bytecode.RAddI:
+			o.op, o.k = rlAddK, Float(float64(w.SC()))
+		case bytecode.RSubI:
+			o.op, o.k = rlAddK, Float(-float64(w.SC()))
+		case bytecode.RInc:
+			o.op, o.k = rlAddK, Float(1)
+		case bytecode.RDec:
+			o.op, o.k = rlAddK, Float(-1)
+		case bytecode.RRet:
+			o.op = rlRet
+		default:
+			o.op = rlRetUndef
+		}
+		ops = append(ops, o)
+		if o.op >= rlRet {
+			return ops
+		}
+	}
+	return nil
+}
+
+// regLeafRun runs cl's register code c, a regLeafCode body, in the window
+// at base, where the callee, its this and argc arguments are, without a
+// frame: an arithmetic operation of what is no number gives up, before any
+// store, and the call is then made with one. It is the frameless evaluator
+// of a pure body (pureCallAt) for the register form, whose instructions
+// are fewer, dispatched by a switch of their own (regLeafOp).
+func (r *Runtime) regLeafRun(cl *closure, c *regCode, base, argc int) (Value, bool) {
+	if cl.pureMiss >= pureMissLimit {
+		return Undefined, false
+	}
+	top := base + int(c.numRegs)
+	if top > len(r.stack) {
+		return Undefined, false
+	}
+	if top > r.stackHigh {
+		r.stackHigh = top
+	}
+	regs := regWindow(r.stack, base)
+	for i := argc; i < int(c.params+c.inits); i++ {
+		regs[2+i] = Undefined
+	}
+	// The stores to upvalues, made when the body returns.
+	var held [regLeafStores]regHeld
+	n := 0
+	for i := range c.leafOps {
+		o := &c.leafOps[i]
+		switch o.op {
+		case rlMove:
+			regs[o.a] = regs[o.b]
+		case rlLoad:
+			regs[o.a] = o.k
+		case rlGetUp:
+			regs[o.a] = cl.upvalues[o.b].get()
+		case rlSetUp:
+			held[n] = regHeld{cl.upvalues[o.b].slot, regs[o.a]}
+			n++
+		case rlAdd:
+			a, b := regs[o.b], regs[o.c]
+			if !a.IsNumber() || !b.IsNumber() {
+				cl.pureMiss++
+				return Undefined, false
+			}
+			regs[o.a] = regNum(a.Number() + b.Number())
+		case rlSub:
+			a, b := regs[o.b], regs[o.c]
+			if !a.IsNumber() || !b.IsNumber() {
+				cl.pureMiss++
+				return Undefined, false
+			}
+			regs[o.a] = regNum(a.Number() - b.Number())
+		case rlMul:
+			a, b := regs[o.b], regs[o.c]
+			if !a.IsNumber() || !b.IsNumber() {
+				cl.pureMiss++
+				return Undefined, false
+			}
+			regs[o.a] = regNum(a.Number() * b.Number())
+		case rlAddK:
+			a := regs[o.b]
+			if !a.IsNumber() {
+				cl.pureMiss++
+				return Undefined, false
+			}
+			regs[o.a] = regNum(a.Number() + o.k.num)
+		case rlRet:
+			regLeafStore(held[:n])
+			return regs[o.a], true
+		case rlRetUndef:
+			regLeafStore(held[:n])
+			return Undefined, true
+		}
+	}
+	return Undefined, true
+}
+
+// regHeld is a store regLeafRun holds until its body returns: the slot of
+// an upvalue and the value.
+type regHeld struct {
+	p *Value
+	v Value
+}
+
+// regLeafStore makes regLeafRun's held stores, in their order. A number
+// over a number writes its word alone, with no write barrier's check.
+func regLeafStore(held []regHeld) {
+	for _, h := range held {
+		if h.v.IsNumber() && h.p.IsNumber() {
+			h.p.num = h.v.num
+		} else {
+			*h.p = h.v
+		}
+	}
 }
 
 // regPlan gives a closure of a template with register code of the form's

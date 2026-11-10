@@ -410,3 +410,36 @@ function words() { var a = [1, -0, 0.5, 2], o = { x: 1, y: -0 }; var z = -0; a[0
 	}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffLeafRun compares short bodies of numbers and upvalues that
+// register code runs without a frame (regLeafRun) with the tree's, where
+// they run and where they give up: what is no number, a store to an
+// upvalue after the operation that gave up, too few arguments, errors and
+// their stack lines.
+func TestRegDiffLeafRun(t *testing.T) {
+	src := `
+function show(v) { return Object.is(v, -0) ? "-0" : typeof v === "symbol" ? "sym" : String(v) }
+function counter(n) { var c = 0; function inc() { c++ } function dec(a) { c-- } function add(a) { c += a } function sub(a, b) { c = c - a * b } for (var i = 0; i < n; i++) { inc(); add(i); sub(i, 2); dec() } return show(c) }
+function mixed(xs) { var s = 0, out = []; xs.forEach((x) => { s += x }); out.push(show(s)); var p = 1; xs.forEach(function (x, i) { p = p * 1 + i }); out.push(show(p)); out.push(show(xs.reduce((a, x) => a + x + 1, 0))); out.push(xs.map((x) => x * 2).map(show).join("/")); return out.join() }
+function strs() { var s = "", n = 0; function f(a) { s += a } function g(a) { n += a } for (var i = 0; i < 40; i++) { f(i); g(i % 3 ? i : "x") } return s.length + " " + n }
+function args() { var u = 0; function f(a, b) { u = a + b } f(1); var r1 = show(u); f(1, 2, 3); var r2 = show(u); f(); return r1 + r2 + show(u) }
+function negs() { var z = 0; function f(a) { z = a * -1 } f(0); var r = show(z); f(-0); r += show(z); f(NaN); r += show(z); f(Infinity); return r + show(z) }
+function rets() { var k = 3; function a(x) { return x + k } function b(x) { var t = k; return t } function c() { return } function d(x) { k = x; return x * 2 } return [a(1), a("s"), a(), b(), c(), d(4), k, d("q"), k].map(show).join() }
+function tdz() { var r = []; try { f() } catch (e) { r.push(e.name) } let q = 1; function f() { q += 1 } f(); r.push(q); return r.join() }
+function konst() { const c = 1; function f() { c = 2 } try { f() } catch (e) { return e.name } return "none" }
+function sym() { var s = 0; function f(a) { s += a } try { f(Symbol()) } catch (e) { return e.name + " " + show(s) + " " + e.stack.split(String.fromCharCode(10))[1] } }
+function valueOf() { var s = 0, log = []; function f(a) { s += a } f({ valueOf: function () { log.push("v"); return 5 } }); f(2); return show(s) + log.join() }
+function bigs() { var s = 0n; function f(a) { s += a } f(1n); f(2n); try { f(1) } catch (e) { return show(s) + e.name } }
+function many() { var s = 0; function f(a) { s += a } for (var i = 0; i < 300; i++) f(i & 1 ? "a" : i); for (var j = 0; j < 50; j++) f(j); return s.length + show(s).slice(0, 12) }
+function methods() { var n = 0, o = { m: function (a) { n += a }, k: function () { return 7 } }; for (var i = 0; i < 10; i++) { o.m(i); o.m.call(null, 1) } return show(n) + o.k() }
+function ctor() { var n = 0; function F(a) { n += a } var x = new F(2); return show(n) + (x instanceof F) }
+function held(xs) { var calls = 0, last = 0, both = 0; var r = xs.reduce((acc, x) => { calls++; last = x; return acc + x; }, 0); function f(a) { both = a; both2 = both; return a * 1 } var both2 = 0; for (var i = 0; i < xs.length; i++) f(xs[i]); function g(a) { calls = calls + 1; last = a; calls = calls * 2; return a - 1 } var gs = xs.map(g); return [show(r), calls, show(last), show(both), show(both2), gs.map(show).join("/")].join() }
+`
+	calls := []string{
+		`counter(50)`, `held([1, 2, 3])`, `held([1, "s", 3])`, `held([2, Symbol(), 1].slice(0, 1))`, `held([{ valueOf: function () { return 4 } }, 1])`, `held([1n, 2n])`, `mixed([1, 2, 3, 4.5, -0])`, `mixed([1, "2", 3])`, `mixed([NaN, 1])`, `mixed([])`, `strs()`, `args()`, `negs()`, `rets()`, `tdz()`, `konst()`, `sym()`, `valueOf()`, `bigs()`, `many()`, `methods()`, `ctor()`,
+	}
+	for i := range calls {
+		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])
+	}
+	regDiff(t, src, calls)
+}

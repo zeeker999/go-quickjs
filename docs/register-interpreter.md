@@ -736,6 +736,24 @@ primitive, does without. The tree's
   `add_index`) writes the number's word alone, as the tree's updates do,
   with no write barrier's check: `array_update` 6.3 to 5.9 ns,
   `prop_update` 5.5 to 5.1.
+- **A short body of numbers and upvalues runs as its register code
+  without a frame** (`regLeafCode`, `regLeafRun`): a pure body that is
+  straight code to its first return, of at most 12 loads, moves, upvalue
+  reads and stores and arithmetic operations, reading neither the
+  callee's register nor its this's and writing no parameter's register --
+  a counter, an accumulator, a callback that maps or reduces numbers and
+  counts its calls. It is translated once into operations numbered
+  densely (`regLeafOp`), whose switch is a jump table, and run in the
+  call's window by `regCallW` and `regDirect` (which writes only the
+  parameters' arguments there). Its stores to upvalues, at most four, are
+  held until it returns, and none is read after it is made, so what is no
+  number gives up having changed nothing, and the call is made with a
+  frame, as the frameless evaluator's misses are, counted by the same
+  `pureMiss`. `pureCallAt` dispatched each stack instruction through a
+  switch of scattered cases, and gave up on a store made before an
+  operation: `func_closure_call` 40 to 30 ns over the placements (the
+  tree 33), `closure_counter` -22%, `array_reduce` -15%,
+  `array_reduce_upvalue` 59 to 48 (the tree 62).
 
 #### Raw int32 registers (step 5, designed, deferred)
 

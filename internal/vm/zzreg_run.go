@@ -77,6 +77,8 @@ type regCode struct {
 	// value a regLeafConst body does.
 	leafArg int32
 	leafVal Value
+	// leafOps is a regLeafCode body's code as regLeafRun runs it.
+	leafOps []regLeafOp
 	// switches is each switch instruction's table, made from the code's.
 	switches []*regSwitchTable
 	rc       *bytecode.RegCode
@@ -176,6 +178,10 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 		coerceThis: fn.CoerceThis, rc: rc, fn: fn, wide: true, ncap: int32(ncap), newTarget: fn.UsesNewTarget, args: rc.UsesArguments || rc.ForwardsArguments,
 	}
 	switch {
+	case fn.Leaf == bytecode.LeafPure && !fn.PureCalls && regLeafRunnable(rc) && regLeafOps(fn, rc) != nil:
+		// A short straight body of numbers and upvalues is run as its
+		// register code without a frame (regLeafRun).
+		c.leaf, c.leafOps = regLeafCode, regLeafOps(fn, rc)
 	case fn.Leaf == bytecode.LeafPure && !fn.PureCalls && !pureByTree(fn):
 		// A longer body runs faster as code than in the frameless
 		// evaluator, as the tree tier finds (pureByTree).
@@ -216,6 +222,9 @@ const (
 	regLeafNone = iota
 	regLeafPure
 	regLeafThis
+	// regLeafCode is run as its register code by regLeafRun, with no
+	// frame, at the call site.
+	regLeafCode
 	// regLeafArg returns its parameter leafArg, and regLeafConst the
 	// constant leafVal, undefined for nothing: regCallW answers them from
 	// the window and the code.
