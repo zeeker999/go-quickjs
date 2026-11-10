@@ -570,7 +570,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				}
 			}
 			kept.pc = pc
-			if regElemMiss(c, &kept, regs) {
+			if regSetMiss(c, &kept, regs) {
 				pc = kept.pc
 				continue
 			}
@@ -1399,6 +1399,24 @@ func regElemMiss(c *regCode, k *regKept, regs *[1 << 16]Value) bool {
 		return obj.IsObject() && (appendElem(obj.object(), key.num, v) || fillHole(obj.object(), key.num, v))
 	}
 	return false
+}
+
+// regSetMiss is set_index's miss: on an array, an element appended at its
+// length or a hole filled, as the tree's setIndexMiss stores them, where
+// setElem would store nothing the loop's fast path has not; on anything
+// else, regElemMiss's typed array's element. False sends what is left --
+// a shared literal's element, a setter, a proxy -- to the slow path. None
+// of it can throw or run code.
+//
+//go:noinline
+func regSetMiss(c *regCode, k *regKept, regs *[1 << 16]Value) bool {
+	w := regAt(c.code, k.pc-1)
+	if obj := regs[w.A()]; obj.IsObject() && obj.object().class == ClassArray {
+		key, v := regs[w.B()], regs[w.C()]
+		o := obj.object()
+		return appendElem(o, key.num, v) || fillHole(o, key.num, v)
+	}
+	return regElemMiss(c, k, regs)
 }
 
 // regBinImm is bin_imm's slow path.

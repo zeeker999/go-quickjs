@@ -758,6 +758,11 @@ primitive, does without. The tree's
   (`regElemMiss`, the tree's `setIndexMiss`: `appendElem`, `fillHole`),
   not the slow path's: `array_prop_create` 54 to 44 ns and
   `array_index_append` 56 to 48 in one build (the tree 33 and 36).
+  set_index's miss asks an array for them first, in a function of its own
+  (`regSetMiss`), as the tree's `setIndexMiss` does, rather than after
+  `regElemMiss`'s typed array, `setElem` and `typedStore`, which an array
+  the fast path missed never answers: 41 to 31 ns and 45 to 34 in one
+  build.
 - **An object literal of plain keys is made at once**
   (`new_object_lit`): its values go into registers in order and one
   operation, behind `regCold`, makes the object with its site's room and

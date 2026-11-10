@@ -411,6 +411,35 @@ function words() { var a = [1, -0, 0.5, 2], o = { x: 1, y: -0 }; var z = -0; a[0
 	regDiff(t, src, calls)
 }
 
+// TestRegDiffElemWrites compares element writes on arrays that the fast
+// path does not answer (regSetMiss) with the tree's: appends at the
+// length, holes filled, a shared literal's element, a frozen or
+// non-extensible array, a read-only length, a setter or a read-only
+// element up the chain, sparse arrays, an arguments object and keys that
+// are no index.
+func TestRegDiffElemWrites(t *testing.T) {
+	src := `
+function show(a) { return JSON.stringify(a) + a.length + Object.keys(a).join("/") }
+function app(n) { var a = []; for (var i = 0; i < n; i++) a[i] = i; var b = []; for (var i = 0; i < n; i++) b[b.length] = "s" + i; return show(a) + show(b) }
+function holes() { var a = new Array(6); for (var i = 5; i >= 0; i -= 2) a[i] = i; var b = [1, , 3]; b[1] = 2; var c = [1, 2, 3]; delete c[1]; c[1] = 9; return show(a) + show(b) + show(c) }
+function lit() { var r = []; for (var j = 0; j < 3; j++) { var a = [1, 2, 3]; a[j] = 9; a[3] = 4; r.push(show(a)) } return r.join() }
+function locked() { 'use strict'; var r = [], f = Object.freeze([1]), p = Object.preventExtensions([1, 2]), s = Object.seal([1]), l = [1, 2]; Object.defineProperty(l, "length", { writable: false }); var cases = [[f, 0], [f, 1], [p, 1], [p, 2], [s, 0], [s, 1], [l, 1], [l, 2]]; for (var i = 0; i < cases.length; i++) { try { cases[i][0][cases[i][1]] = 7; r.push("ok") } catch (e) { r.push(e.name) } } return r.join() + show(f) + show(p) + show(s) + show(l) }
+function sloppyLocked() { var f = Object.freeze([1]), l = [1]; Object.defineProperty(l, "length", { writable: false }); f[1] = 2; f[0] = 3; l[1] = 2; return show(f) + show(l) }
+function chain() { var log = []; Object.defineProperty(Array.prototype, "3", { set: function (v) { log.push("set" + v) }, configurable: true }); Object.defineProperty(Object.prototype, "5", { value: "ro", writable: false, configurable: true }); try { var a = [0, 1, 2]; a[3] = 3; a[3] = 4; var b = [0, 1, 2, , 4]; b[5] = 5; b[6] = 6; return show(a) + show(b) + log.join() } finally { delete Array.prototype[3]; delete Object.prototype[5] } }
+function sparse() { var a = []; a[100] = 1; a[0] = 0; a[1] = 1; var b = [1, 2]; b[4294967294] = 3; b[4294967295] = 4; b[2] = 5; return show(a).length + " " + a[100] + b.length + Object.keys(b).join("/") }
+function args() { var a = arguments; a[0] = 1; a[a.length] = 2; a[5] = 3; return JSON.stringify(a) + a.length }
+function keys() { var a = [1], ks = [-1, -0, 0.5, NaN, "1", "x", 1, 2, 4294967296]; for (var i = 0; i < ks.length; i++) a[ks[i]] = i; return show(a) + Object.getOwnPropertyNames(a).join("/") }
+function proxied() { var log = [], a = [1], p = new Proxy(a, { set: function (o, k, v) { log.push(k); o[k] = v; return true } }); for (var i = 0; i < 3; i++) p[p.length] = i; return show(a) + log.join() }
+`
+	calls := []string{
+		`app(40)`, `holes()`, `lit()`, `locked()`, `sloppyLocked()`, `chain()`, `sparse()`, `args(5, 6)`, `keys()`, `proxied()`,
+	}
+	for i := range calls {
+		calls[i] = fmt.Sprintf("(function () { var r; for (var k = 0; k < 4; k++) r = %s; return r })()", calls[i])
+	}
+	regDiff(t, src, calls)
+}
+
 // TestRegDiffLeafRun compares short bodies of numbers and upvalues that
 // register code runs without a frame (regLeafRun) with the tree's, where
 // they run and where they give up: what is no number, a store to an
