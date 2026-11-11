@@ -616,7 +616,40 @@ const (
 	RColdAddDisposable
 	RColdDispose
 	RColdDisposeStep
+	// RColdDirectEval is a call written eval(...) (the stack form's
+	// direct_eval): the callee R[A], its receiver R[A+1] and C arguments
+	// from R[A+2], or, where Aux has RDirectEvalSpread, an array of them
+	// in R[A+2]; R[B] = what it gives. Where the callee is the realm's
+	// eval and the first argument a string, the code runs in the
+	// caller's scope, the function's EvalScopes[Aux&^RDirectEvalSpread];
+	// otherwise it is an ordinary call, a tail call where marked
+	// RMarkTail.
+	RColdDirectEval
+	// The probes of a name a with object or an eval's variable may
+	// answer (regcomp's with.go), each of the name Names[B] in the
+	// innermost C of the frame's with objects and eval's variables, R[Aux]
+	// = whether one has it: RColdWithGet, R[A] = its value there;
+	// RColdWithGetThis, R[A] = its value and R[A+1] the object, a callee
+	// and its receiver; RColdWithDelete, R[A] = delete of it there;
+	// RColdWithSet stores R[A] there; RColdWithResolve, R[A] = the object,
+	// or undefined. RColdWithRead, R[A] = Names[C] of the object R[B], and
+	// RColdWithWrite stores R[A] there: a reference's read and store past
+	// its with_resolve. RColdWithPush puts the object of R[A] on the
+	// frame's with objects (ToObject), and RColdWithPop takes it off.
+	RColdWithGet
+	RColdWithGetThis
+	RColdWithDelete
+	RColdWithSet
+	RColdWithResolve
+	RColdWithRead
+	RColdWithWrite
+	RColdWithPush
+	RColdWithPop
 )
+
+// RDirectEvalSpread is the bit of direct_eval's Aux that says its
+// arguments are an array.
+const RDirectEvalSpread = 1 << 31
 
 // The flags of regexp_lit's X.
 const (
@@ -695,7 +728,10 @@ var rColdNames = [...]string{
 	RColdGetUpvalCheck: "get_upval_check", RColdSetUpvalCheck: "set_upval_check",
 	RColdDeleteVar: "delete_var", RColdImport: "import", RColdImportMeta: "import_meta",
 	RColdNewDispose: "new_dispose_capability", RColdAddDisposable: "add_disposable", RColdDispose: "dispose",
-	RColdDisposeStep: "dispose_step",
+	RColdDisposeStep: "dispose_step", RColdDirectEval: "direct_eval",
+	RColdWithGet: "with_get", RColdWithGetThis: "with_get_this", RColdWithDelete: "with_delete",
+	RColdWithSet: "with_set", RColdWithResolve: "with_resolve", RColdWithRead: "with_read",
+	RColdWithWrite: "with_write", RColdWithPush: "with_push", RColdWithPop: "with_pop",
 }
 
 func (op RColdOp) String() string {
@@ -787,8 +823,8 @@ type RegCode struct {
 	// (RNewObjectLit), each an index of the function's names.
 	ObjKeys [][]uint16
 	// LocalReg is each local's register, or -1, where the code has a
-	// call_reuse, whose frame's locals the runtime reads by it; nil
-	// otherwise.
+	// call_reuse, whose frame's locals the runtime reads by it, or a
+	// direct_eval, whose code it links to them; nil otherwise.
 	LocalReg []int32
 	// UsesArguments says the code makes the arguments object, whose frame
 	// keeps the arguments as passed (RArguments).

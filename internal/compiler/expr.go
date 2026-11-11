@@ -472,9 +472,7 @@ func isNegZero(v float64) bool { return v == 0 && 1/v < 0 }
 func (c *compiler) compileIdentRead(n *ast.Ident) {
 	// Inside a `with` body the object may answer instead of the binding.
 	probe := c.withProbe(bytecode.OpWithGet, n.Name)
-	if probe >= 0 && c.reg != nil {
-		c.reg.Bail = true
-	}
+	c.regWith(n, probe)
 	c.compileIdentReadStatic(n)
 	c.patchWithProbe(probe)
 }
@@ -1055,6 +1053,7 @@ func (c *compiler) compileUnary(n *ast.Unary) {
 		// than throwing, which needs the non-throwing global read.
 		if id, ok := n.Operand.(*ast.Ident); ok {
 			probe := c.withProbe(bytecode.OpWithTypeof, id.Name)
+			c.regWith(id, probe)
 			// The non-throwing global read is only right for a name that
 			// resolves nowhere; a binding, or the function's own name, is
 			// read the ordinary way.
@@ -1113,6 +1112,7 @@ func (c *compiler) compileUnary(n *ast.Unary) {
 		}
 		if id, ok := n.Operand.(*ast.Ident); ok {
 			probe := c.withProbe(bytecode.OpWithDelete, id.Name)
+			c.regWith(id, probe)
 			defer c.patchWithProbe(probe)
 			// A local or captured binding cannot be deleted at all; a global
 			// can, but only if it is configurable, which a var declaration is
@@ -1689,6 +1689,7 @@ func (c *compiler) compileCall(n *ast.Call) {
 	// receiver and a callee, so the call is the same instruction either way.
 	if id, ok := n.Callee.(*ast.Ident); ok && c.withDepth > 0 {
 		probe := c.withProbe(bytecode.OpWithGetThis, id.Name)
+		c.regWith(id, probe)
 		c.emit(bytecode.OpPushUndef, 0, 0)
 		c.compileIdentReadStatic(id)
 		c.patchWithProbe(probe)
@@ -2435,9 +2436,7 @@ func (c *compiler) assignTo(target ast.Expr, initializing bool) {
 		// whatever the object holds.
 		if !initializing {
 			probe := c.withProbe(bytecode.OpWithSet, t.Name)
-			if probe >= 0 && c.reg != nil {
-				c.reg.Bail = true
-			}
+			c.regWith(t, probe)
 			defer c.patchWithProbe(probe)
 		}
 		c.assignToIdentStatic(t, initializing)

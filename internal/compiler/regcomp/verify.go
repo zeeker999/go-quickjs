@@ -239,6 +239,32 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 	case bytecode.RColdImport:
 		k := int(w.C()) & 3
 		return reg(a) && (k == 1 || k == 2) && int(b)+k <= rc.NumRegs
+	case bytecode.RColdDirectEval:
+		k := auxAt(rc, pc) &^ bytecode.RDirectEvalSpread
+		argc := int(w.C())
+		if auxAt(rc, pc)&bytecode.RDirectEvalSpread != 0 {
+			argc = 1
+		}
+		if !reg(b) || int(a)+2+argc > rc.NumRegs || int64(k) >= int64(len(fn.EvalScopes)) || markAt(rc, pc)&^bytecode.RMarkTail != 0 {
+			return false
+		}
+		// Each binding of the caller's the code may reach has a register.
+		for _, e := range fn.EvalScopes[k].Bindings {
+			if e.FromLocal && (int(e.Index) >= len(rc.LocalReg) || rc.LocalReg[e.Index] < 0) {
+				return false
+			}
+		}
+		return true
+	case bytecode.RColdWithGet, bytecode.RColdWithDelete, bytecode.RColdWithSet, bytecode.RColdWithResolve:
+		return reg(a) && int(b) < len(fn.Names) && pc < len(rc.Aux) && rc.Aux[pc] < uint32(rc.NumRegs)
+	case bytecode.RColdWithGetThis:
+		return reg(a) && int(a)+1 < rc.NumRegs && int(b) < len(fn.Names) && pc < len(rc.Aux) && rc.Aux[pc] < uint32(rc.NumRegs)
+	case bytecode.RColdWithRead, bytecode.RColdWithWrite:
+		return reg(a) && reg(b) && int(w.C()) < len(fn.Names)
+	case bytecode.RColdWithPush:
+		return reg(a)
+	case bytecode.RColdWithPop:
+		return true
 	case bytecode.RColdImportMeta, bytecode.RColdNewDispose:
 		return reg(a)
 	case bytecode.RColdAddDisposable, bytecode.RColdDispose:

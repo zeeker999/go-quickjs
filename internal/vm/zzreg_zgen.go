@@ -28,8 +28,9 @@ import (
 // regGenOf is the register code a call of cl, callee's closure, runs as a
 // generator's or an async function's body, or nil: the register tier is on,
 // the function has register code, and nothing of its surroundings is what
-// that code cannot run in -- a with, an eval's variables, or a derived
-// constructor's this the code does not read through its binding.
+// that code cannot run in: a derived constructor's this the code does not
+// read through its binding. The with objects and the eval's variables
+// around it are the frame's (frameRare), kept across a suspension.
 func (r *Runtime) regGenOf(cl *closure, callee *Object) *regCode {
 	if !regTier.Load() {
 		return nil
@@ -43,8 +44,7 @@ func (r *Runtime) regGenOf(cl *closure, callee *Object) *regCode {
 	}
 	if callee != nil {
 		if fd := callee.fn(); fd != nil {
-			if x := fd.extra; x != nil &&
-				(len(x.with()) > 0 || x.evalVars() != nil || x.lexThisRef != nil && !c.rc.ThisRef) {
+			if x := fd.extra; x != nil && x.lexThisRef != nil && !c.rc.ThisRef {
 				return nil
 			}
 		}
@@ -107,6 +107,23 @@ func (r *Runtime) newRegGenerator(cl *closure, c *regCode, this Value, args []Va
 	}
 	if fd != nil && fd.arrow && fd.extra.lexThisRef != nil {
 		g.rareOf().thisRef = fd.extra.lexThisRef
+	}
+	// The with objects and the eval's variables around it, and a scope
+	// for its own eval's, as newGenerator gives a generator's frames.
+	if fd != nil && fd.extra != nil {
+		if w := fd.extra.with(); len(w) > 0 {
+			g.rareOf().withScopes = w[:len(w):len(w)]
+		}
+		if ev := fd.extra.evalVars(); ev != nil {
+			g.rareOf().evalVars = ev
+		}
+	}
+	if fn.HasDirectEval {
+		ev := newObject(nil, ClassObject)
+		ev.flags |= objEvalVars
+		g.rareOf().evalVars = ev
+		w := g.withScopes()
+		g.rareOf().withScopes = append(w[:len(w):len(w)], ev)
 	}
 	if fn.Generator {
 		if w := regAt(c.code, 1); w.Op() == bytecode.RCold && bytecode.RColdOp(w.X()) == bytecode.RColdEndParams {
@@ -330,6 +347,8 @@ func (r *Runtime) regGenRun(g *generator, c *regCode, start int) (Value, *suspen
 	if s, ok := err.(*suspendSignal); ok {
 		sig, err = s, nil
 		g.pc = uint32(f.savedSP)
+		// The with objects it is inside, for its next resumption.
+		g.saveWith(f.withScopes)
 		copy(saved, w)
 		if ups := f.openUpvalues; len(ups) != 0 || g.saved != nil {
 			regMoveUps(ups, w, saved)

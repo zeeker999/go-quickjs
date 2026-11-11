@@ -89,6 +89,12 @@ type gen struct {
 	// finally clause's statement (usingScope).
 	usingCaps   []int
 	disposeCaps map[*ast.DisposeStmt]int
+	// withs is each name a with object or an eval's variable may answer,
+	// whose record says ResWith (with.go), and withRefs the registers of
+	// the object and the found flag a reference's read settled, which its
+	// store uses.
+	withs    map[*ast.Ident]*withName
+	withRefs map[*ast.Ident]withRef
 
 	consts   map[any]uint32
 	names    map[string]uint32
@@ -200,7 +206,17 @@ func (g *gen) layout() bool {
 			return false
 		}
 	}
-	g.lazyArgs = lazySlot >= 0 && !plain[lazySlot]
+	// A direct eval reaches a binding in scope by its slot (LocalReg),
+	// whichever it names: each has a register, and the arguments object
+	// is made as the function starts.
+	evals := len(g.rec.Evals) > 0
+	if evals {
+		for i := range used {
+			used[i] = true
+		}
+	}
+	g.lazyArgs = lazySlot >= 0 && !plain[lazySlot] && !evals
+	defer g.probedNames()
 	if c := g.rec.Completion; c >= 0 {
 		if int(c) >= n {
 			return false
@@ -591,7 +607,7 @@ func simpleArguments(fn *bytecode.Function) bool {
 	// A function whose arguments object is only handed on to apply
 	// (ForwardsArguments) has no object made: each such call is an
 	// apply_args, which hands on the frame's arguments as passed.
-	if fn.HasDirectEval || fn.Debug != nil || fn.TopLevel {
+	if fn.Debug != nil || fn.TopLevel {
 		return false
 	}
 	switch fn.Kind {
@@ -829,6 +845,10 @@ func declaresIn(list []ast.Stmt, name string, body bool) bool {
 				if declaresIn(c.Body, name, false) {
 					return true
 				}
+			}
+		case *ast.WithStmt:
+			if declaresIn([]ast.Stmt{n.Body}, name, false) {
+				return true
 			}
 		case *ast.TryStmt:
 			if declaresIn(n.Block, name, false) || n.Catch != nil && declaresIn(n.Catch.Body, name, false) ||
@@ -1097,6 +1117,8 @@ func (g *gen) stmt(s ast.Stmt) {
 	case *ast.TryStmt:
 		g.resetCompletion()
 		g.tryStmt(n)
+	case *ast.WithStmt:
+		g.withStmt(n)
 	case *ast.ForOfStmt:
 		g.resetCompletion()
 		g.forOfStmt(n.Left, n.Right, n.Body, n.Await, false, label, n.Start)
@@ -1702,6 +1724,8 @@ func (g *gen) ident(n *ast.Ident, dst int) int {
 		return g.dest(dst)
 	}
 	switch res.Kind {
+	case ResWith:
+		return g.withIdent(n, dst)
 	case ResLocal, ResLocalCheck:
 		if g.fn.ForwardsArguments && g.isArguments(n) {
 			// Never made: only apply_args hands the arguments on.
@@ -1752,6 +1776,12 @@ func (g *gen) typeofOperand(e ast.Expr) int {
 	id, ok := e.(*ast.Ident)
 	if !ok {
 		return g.expr(e, -1)
+	}
+	if g.withs[id] != nil {
+		g.probeOp(id, bytecode.OpWithTypeof)
+		d := g.alloc()
+		g.probed(id, bytecode.RColdWithGet, d, func() { g.place(g.typeofOperand(id), d) })
+		return d
 	}
 	if _, ok := g.rec.Read[id]; ok {
 		return g.expr(e, -1)
@@ -2028,6 +2058,9 @@ func (g *gen) deleteName(n *ast.Unary, id *ast.Ident, dst int) int {
 	}
 	d := g.dest(dst)
 	switch res.Kind {
+	case ResWith:
+		g.probeOp(id, bytecode.OpWithDelete)
+		g.probed(id, bytecode.RColdWithDelete, d, func() { g.deleteName(n, id, d) })
 	case ResLocal, ResUpval:
 		g.emit(bytecode.MakeR(bytecode.RLoadFalse, 0, r16(d), 0, 0))
 	case ResGlobal:
@@ -2227,6 +2260,8 @@ func (g *gen) storeIdent(id *ast.Ident, value ast.Expr, init bool) int {
 		return 0
 	}
 	switch res.Kind {
+	case ResWith:
+		return g.withAssign(id, value)
 	case ResLocal, ResLocalInit:
 		r := int(g.slotReg[res.Index])
 		g.into(value, r)
@@ -2547,6 +2582,10 @@ func (g *gen) readStore(m *ast.Member, pos int, w bytecode.RInstr) {
 // id names, which the stack form may have read with the store's own
 // resolution rather than a read of its own.
 func (g *gen) readForWrite(id *ast.Ident, dst int) int {
+	if w := g.withs[id]; w != nil && g.rec.Write[id].Kind == ResWith {
+		g.withRefFor(id)
+		return g.refRead(id, g.withRefs[id], dst)
+	}
 	if _, ok := g.rec.Read[id]; ok {
 		return g.ident(id, dst)
 	}
@@ -2571,7 +2610,9 @@ func (g *gen) readForWrite(id *ast.Ident, dst int) int {
 func (g *gen) storeValue(id *ast.Ident, v int) {
 	res := g.rec.Write[id]
 	switch res.Kind {
-	case ResLocal:
+	case ResWith:
+		g.withStore(id, v)
+	case ResLocal, ResLocalInit:
 		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(int(g.slotReg[res.Index])), r16(v), 0))
 	case ResLocalCheck:
 		r := int(g.slotReg[res.Index])
@@ -2803,6 +2844,45 @@ func (g *gen) member(n *ast.Member, dst int) int {
 	return d
 }
 
+// directEval compiles a call the stack form made a direct eval: the
+// callee, undefined as its receiver and the arguments -- or an array of
+// them, where one is a spread -- in a window, and direct_eval (cold) at
+// the call's position, its scope's index in Aux.
+func (g *gen) directEval(n *ast.Call, idx uint32, dst int) int {
+	argc := len(n.Args)
+	spread := hasSpread(n.Args)
+	if spread {
+		argc = 1
+		idx |= bytecode.RDirectEvalSpread
+	}
+	w := g.allocN(2 + argc)
+	static := func() {
+		g.into(n.Callee, w)
+		g.emit(bytecode.MakeR(bytecode.RLoadUndef, 0, r16(w+1), 0, 0))
+	}
+	if id, ok := n.Callee.(*ast.Ident); ok && g.withs[id] != nil {
+		// A with object's own eval is called with it as the receiver.
+		g.probeOp(id, bytecode.OpWithGetThis)
+		g.probed(id, bytecode.RColdWithGetThis, w, static)
+	} else {
+		static()
+	}
+	if spread {
+		g.spreadArray(n.Args, w+2)
+		argc = 0
+	} else {
+		g.args(n.Args, w+2)
+	}
+	d := g.dest(dst)
+	g.at(int(n.Start))
+	at := g.cold(bytecode.RColdDirectEval, w, d, argc)
+	g.aux(at, idx)
+	if g.rec.Tails[n] {
+		g.mark(at, bytecode.RMarkTail)
+	}
+	return d
+}
+
 func (g *gen) args(args []ast.Expr, at int) {
 	for i, a := range args {
 		if _, ok := a.(*ast.Spread); ok {
@@ -2818,6 +2898,9 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	g.dead = nil
 	if phase, ok := importPhase(n); ok {
 		return g.importCall(n, phase, dst)
+	}
+	if idx, ok := g.rec.Evals[n]; ok {
+		return g.directEval(n, idx, dst)
 	}
 	if hasSpread(n.Args) {
 		return g.spreadCall(n, dst)
@@ -2878,11 +2961,15 @@ func (g *gen) call(n *ast.Call, dst int) int {
 			}
 		}
 	case *ast.Ident:
-		if c.Name == "eval" {
-			if res := g.rec.Read[c]; res.Kind == ResGlobal {
-				g.fail("a call of eval")
-				return w
-			}
+		if g.withs[c] != nil && g.withs[c].probe.Op == bytecode.OpWithGetThis {
+			// Through the object that has the name, which is the call's
+			// receiver, as the stack form's with_get_this.
+			g.probed(c, bytecode.RColdWithGetThis, w, func() {
+				g.into(c, w)
+				g.emit(bytecode.MakeR(bytecode.RLoadUndef, 0, r16(w+1), 0, 0))
+			})
+			op = bytecode.RCallMW
+			break
 		}
 		g.into(c, w)
 	default:
@@ -3624,9 +3711,9 @@ func (g *gen) finish() *bytecode.RegCode {
 }
 
 // localReg is LocalReg: each local's register, where the code has a
-// call_reuse, and nil otherwise.
+// call_reuse or a direct_eval, and nil otherwise.
 func (g *gen) localReg() []int32 {
-	if !g.reuses {
+	if !g.reuses && len(g.rec.Evals) == 0 {
 		return nil
 	}
 	return append([]int32(nil), g.slotReg...)

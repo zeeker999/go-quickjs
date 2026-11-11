@@ -1624,3 +1624,154 @@ function runAsync() { (async () => { for (var f of [v1, v2, v3, v4, v5]) aout.pu
 	calls = append(calls, `runAsync()`, `aout.join(" | ")`)
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffEval compares direct evals: in strict functions, arrows,
+// methods and constructors, and in top-level code, reading and writing the
+// caller's bindings, its this, arguments, new.target and super, closures
+// the code makes over them, a binding in its dead zone, a spread, a value
+// that is no string, a callee that is not the realm's eval, and the errors
+// with their stack traces.
+func TestRegDiffEval(t *testing.T) {
+	src := `
+var frames = function (e) { return e.name + ": " + e.message + " | " + e.stack.split("\n").slice(1).map(function (s) { return s.trim() }).join(" | ") };
+function s1(a) { 'use strict'; var x = 1; let y = 2; const z = 3; eval("x = x + a; y++"); return x + y + z }
+function s2() { 'use strict'; eval("var q = 1"); return typeof q }
+function s3() { 'use strict'; return eval("this") }
+function s4() { 'use strict'; return eval("arguments.length + ':' + arguments[0]") }
+function S5() { 'use strict'; this.v = eval("new.target === S5") }
+function s6() { 'use strict'; return String(eval(42)) + String(eval()) + String(eval({})) }
+function s7() { 'use strict'; return eval("1") }
+function s8() { 'use strict'; var x = 4; return eval(...["x * 2", 9]) }
+function s9() { 'use strict'; return eval("(function inner() { throw new Error('in') })()") }
+function s10() { 'use strict'; try { eval("t") } catch (e) { return e.name } let t = 1 }
+function s11() { 'use strict'; var n = 1; var g = eval("(function () { return ++n })"); g(); g(); return n }
+function s12() { 'use strict'; var fs = []; for (let i = 0; i < 3; i++) fs.push(eval("() => i")); return fs.map(f => f()).join() }
+function s13() { 'use strict'; var a = 1; return (() => eval("a + this.k"))() }
+var o14 = { __proto__: { m() { return "p" } }, m() { 'use strict'; return eval("super.m()") + eval("'q'") } };
+function s15(a) { 'use strict'; var g = () => a; eval("a = 2"); return g() + a }
+function s16() { 'use strict'; return eval("1 +") }
+function s17() { 'use strict'; const c = 1; eval("c = 2") }
+class K { constructor(x) { this.x = eval("x * 3") } }
+class B {}
+class D extends B { constructor() { var n; try { eval("this") } catch (e) { n = e.name } super(); this.n = n + eval("this.constructor.name") } }
+function s18(n) { 'use strict'; return n == 0 ? "end" : eval("s18(n - 1)") }
+function s19() { 'use strict'; var r = []; for (var i = 0; i < 2; i++) { let j = i * 10; r.push(eval("j + i")) } return r.join() }
+function s20(a, b) { 'use strict'; return eval("[a, b, typeof arguments, arguments.length]").join() }
+var own = { toString() { return "own" } };
+`
+	calls := []string{
+		`s1(5)`,
+		`s2()`,
+		`s3.call(5)`,
+		`s4("a", "b")`,
+		`new S5().v`,
+		`s6()`,
+		`s7()`,
+		`(function () { var e = globalThis.eval; globalThis.eval = function (s) { return "mine:" + s + this }; try { return s7() } finally { globalThis.eval = e } })()`,
+		`s8()`,
+		`try { s9() } catch (e) { frames(e) }`,
+		`s10()`,
+		`s11()`,
+		`s12()`,
+		`s13.call({ k: 2 })`,
+		`o14.m()`,
+		`s15(1)`,
+		`try { s16() } catch (e) { e.name + ": " + e.message }`,
+		`try { s17() } catch (e) { frames(e) }`,
+		`new K(2).x`,
+		`new D().n`,
+		`s18(30)`,
+		`s19()`,
+		`s20(1)`,
+		`var tv = 1; eval("tv + 1")`,
+		`eval("var newGlobal = 3"); newGlobal`,
+		`let tl = 5; eval("tl * 2")`,
+		`{ let b = 7; eval("b + 1") }`,
+		`for (let i = 0; i < 2; i++) eval("i")`,
+		`eval("let inner = 1; inner") + typeof inner`,
+		`try { eval("(function () { throw new Error('top') })()") } catch (e) { frames(e) }`,
+		`(function () { 'use strict'; var e = globalThis.eval; globalThis.eval = own; try { return eval("x") } catch (e) { return e.name } finally { globalThis.eval = e } })()`,
+	}
+	regDiff(t, src, calls)
+}
+
+// TestRegDiffWith compares with statements and the variables a direct eval
+// declares in sloppy functions: reads, writes, compound and logical
+// assignments, updates, typeof, delete and calls through a with object --
+// its receiver, its own eval, Symbol.unscopables -- patterns and var
+// initializers that resolve before their value, the object popped on
+// every way out, closures and generators made inside, a getter's throw
+// with its stack trace, and an eval's var, function and let.
+func TestRegDiffWith(t *testing.T) {
+	src := `
+var frames = function (e) { return e.name + ": " + e.message + " | " + e.stack.split("\n").slice(1).map(function (s) { return s.trim() }).join(" | ") };
+function w1(o) { var x = 1, r = []; with (o) { r.push(x); x = 5; r.push(x); x += 2; x++; r.push(typeof y, typeof x) } return r.join() + "/" + x + "/" + JSON.stringify(o) }
+var wo = { v: 3, f() { return this.v } };
+function w2() { with (wo) return f() }
+function w3(o) { with (o) { delete z; return typeof z + delete nope } }
+function w4(o) { var s = 0; with (o) { for (var i = 0; i < 3; i++) { if (i == 1) continue; s += k } } return s }
+function w5(o) { for (var i = 0; i < 3; i++) { with (o) { if (i == 1) break } } return typeof k }
+function w6(o) { try { with (o) { throw new Error("in") } } catch (e) { return e.message + typeof q } }
+function w7(o) { with (o) { var fn = function () { return a } } return fn() }
+function w8(o) { with (o) { var [p, q] = [1, 2] } return [p, q, o.p, o.q].join() }
+function w9(o) { with (o) { var t = 3 } return t + "," + o.t }
+function w10(o) { with (o) { a ||= 4; b ??= 5; c &&= 6 } return JSON.stringify(o) }
+var ev = { eval(s) { return "own:" + s + (this === ev) } };
+function w12() { with (ev) return eval("1") }
+function* wg(o) { with (o) { yield x; yield x + 1 } return typeof x }
+var unsc = { u: 1, [Symbol.unscopables]: { u: true } }; var u = "global";
+function w13() { with (unsc) return u }
+function w14(o) { with (o) { return x } }
+function w15(o) { with (o) { return (function () { 'use strict'; return typeof v })() } }
+function w16(o) { var n = 0; with (o) { for (k in { a: 1, b: 2 }) n++; for (m of [1]) n++ } return n + JSON.stringify(o) }
+function w17(o) { with (o) { with ({ x: "inner" }) { var r = x + y } } return r }
+function w18(o) { with (o) { return x } }
+function e1() { eval("var ev1 = 5"); return ev1 }
+function e2() { var x = 1; eval("var x = 2"); return x }
+function e3() { eval("var y = 1"); return (function () { return y })() }
+function e4(a) { eval("a = 7"); return a + arguments[0] }
+function e5() { eval("function inner() { return 9 }"); return inner() }
+function e7() { eval("var q = 1"); var d = delete q; return d + typeof q }
+function e8() { return eval("this") === globalThis }
+function e9() { var eval = function (s) { return "local:" + s }; return eval("1") }
+function e10() { eval("let lx = 1"); return typeof lx }
+function e11() { for (var i = 0; i < 2; i++) eval("var c" + i + " = i"); return c0 + c1 }
+function e12() { eval("var x = 1"); with ({}) { return x } }
+function* eg() { eval("var gv = 3"); yield gv }
+function e13() { eval("throw new Error('ev')") }
+function e14() { var r = []; eval("var gx = 1"); r.push(gx); gx = 2; r.push(eval("gx")); gx++; r.push(gx); return r.join() }
+function e15() { eval("var fnv = function () { return fnv2 }; var fnv2 = 8"); return fnv() }
+`
+	calls := []string{
+		`w1({})`, `w1({ x: 10 })`, `w1({ y: 1 })`,
+		`w2()`,
+		`w3({ z: 1 })`,
+		`w4({ k: 2 })`,
+		`w5({ k: 1 })`,
+		`w6({})`,
+		`w7({ a: "A" })`, `w7({})`,
+		`w8({ p: 0 })`,
+		`w9({ t: 0 })`, `w9({})`,
+		`w10({ a: 0, b: null, c: 1 })`,
+		`w12()`,
+		`[...wg({ x: 1 })].join()`, `var it = wg({ x: 1 }); it.next(); x = "g"; it.next().value + it.next().value`,
+		`w13()`,
+		// The stack form places the probe at the with statement, the
+		// register form at the name, where V8 does: the frames compared
+		// are the getter's and the caller's.
+		`try { w14({ get x() { throw new Error("getter") } }) } catch (e) { var s = e.stack.split("
+"); s[1] + s[3] + s.length }`,
+		`w15({ v: 1 })`,
+		`w16({ k: 0, m: 0 })`, `w16({})`,
+		`w17({ y: "Y" })`,
+		`try { w18(null) } catch (e) { frames(e) }`,
+		`w18(5)`,
+		`var tw = { k: 1 }; with (tw) { k = 2 }; tw.k`,
+		`e1()`, `e2()`, `e3()`, `e4(1)`, `e5()`, `e7()`, `e8()`, `e9()`, `e10()`, `e11()`, `e12()`,
+		`[...eg()].join()`,
+		`try { e13() } catch (e) { frames(e) }`,
+		`e14()`, `e15()`,
+		`typeof ev1 + typeof gx`,
+	}
+	regDiff(t, src, calls)
+}

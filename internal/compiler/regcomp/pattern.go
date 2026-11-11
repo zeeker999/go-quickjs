@@ -80,6 +80,12 @@ func (g *gen) prepareLeaf(el ast.Expr, declaring bool) leaf {
 	if ap, ok := el.(*ast.AssignPattern); ok {
 		l.target, l.def = ap.Target, ap.Default
 	}
+	if id, ok := l.target.(*ast.Ident); ok && g.withs[id] != nil && g.withs[id].probe.Op == bytecode.OpWithResolve {
+		// The name is resolved before the value it receives is read,
+		// as the stack form's prepareRef resolves it.
+		g.withResolve(id)
+		return l
+	}
 	m, ok := l.target.(*ast.Member)
 	if !ok || declaring {
 		return l
@@ -142,7 +148,7 @@ func (g *gen) storeLeaf(id *ast.Ident, v int, declaring bool) {
 	case ResGlobalLexInit, ResModuleLexInit:
 		g.lexInit(res.Kind, id.Name, v, int(id.Start))
 	case ResIgnore:
-	case ResUpval, ResGlobal, ResConstAssign:
+	case ResUpval, ResGlobal, ResConstAssign, ResWith:
 		g.storeValue(id, v)
 	default:
 		g.fail("a store the backend does not compile")

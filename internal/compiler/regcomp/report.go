@@ -44,8 +44,6 @@ func Refusal(fn *bytecode.Function) string {
 // yet, or "".
 func why(fn *bytecode.Function) string {
 	switch {
-	case fn.HasDirectEval:
-		return "direct eval"
 	case fn.Debug != nil:
 		return "compiled for a debugger"
 	case fn.TopLevel:

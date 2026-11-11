@@ -589,7 +589,7 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base, pc 
 			if rc = cl.reg; rc == nil {
 				rc = r.regOf(cl)
 			}
-			if rc != nil && rc.wide && !rc.suspends && cl.realm == r.Realm && !isClassConstructorKind(cl.fn.Kind) {
+			if rc != nil && rc.wide && !rc.suspends && cl.realm == r.Realm && !isClassConstructorKind(cl.fn.Kind) && !cl.fn.HasDirectEval {
 				if x := fd.extra; x == nil {
 					switch {
 					case !method:
@@ -1407,6 +1407,11 @@ func regPlan(fd *funcData) {
 		// runFD make: a call throws, and a derived one's this is bound.
 		return
 	}
+	if fd.closure.fn.HasDirectEval {
+		// A frame with a scope of its own for the eval's variables,
+		// which runFD makes.
+		return
+	}
 	if x := fd.extra; x != nil && (!fd.arrow || x.lexThisRef != nil || x.rare != nil) {
 		return
 	}
@@ -1748,7 +1753,7 @@ func (r *Runtime) regConstruct(callee Value, base, argc int) (Value, error) {
 	if rc == nil {
 		rc = r.regOf(cl)
 	}
-	if rc == nil || !rc.wide || rc.suspends {
+	if rc == nil || !rc.wide || rc.suspends || cl.fn.HasDirectEval {
 		return r.construct(callee, args)
 	}
 	var protoVal Value

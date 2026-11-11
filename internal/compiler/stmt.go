@@ -641,7 +641,12 @@ func (c *compiler) storeVar(name string) {
 	// quietly left its value behind would push the loop it sits in off its own
 	// operands.
 	probe := c.withProbe(bytecode.OpWithSet, name)
-	if probe >= 0 && c.reg != nil {
+	switch {
+	case c.regIdent != nil:
+		c.regWith(c.regIdent, probe)
+	case probe >= 0 && c.reg != nil:
+		// Eval code's function declaration, which the register form
+		// does not compile.
 		c.reg.Bail = true
 	}
 	if probe >= 0 {

@@ -76,8 +76,18 @@ func regTopCode(body []ast.Stmt, fn *bytecode.Function, rec *regcomp.Record) {
 	switch {
 	case rec == nil:
 	case rec.Bail:
-		regcomp.Refuse(fn, "a with, an eval's variables or an Annex B function")
+		regcomp.Refuse(fn, "a name the record resolves two ways")
 	default:
 		fn.Reg = regcomp.CompileTop(body, fn, rec)
 	}
+}
+
+// regWith records the probe at pc, if any, that the stack form compiled
+// for name id before its static access (regcomp.Record.Withs).
+func (c *compiler) regWith(id *ast.Ident, pc int) {
+	if pc < 0 || c.reg == nil {
+		return
+	}
+	in := c.fn.Code[pc]
+	c.reg.NoteWith(id, regcomp.WithProbe{Op: in.Op, Limit: uint16(in.A >> bytecode.WithLimitShift)})
 }

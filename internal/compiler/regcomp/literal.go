@@ -322,12 +322,6 @@ func (g *gen) spreadCall(n *ast.Call, dst int) int {
 			g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(w), r16(w+1), g.propSite(bytecode.OpGetProp, g.nameIdx(name))))
 		}
 	} else {
-		if id, ok := n.Callee.(*ast.Ident); ok && id.Name == "eval" {
-			if res := g.rec.Read[id]; res.Kind == ResGlobal {
-				g.fail("a call of eval")
-				return w
-			}
-		}
 		g.emit(bytecode.MakeR(bytecode.RLoadUndef, 0, r16(w+1), 0, 0))
 		g.into(n.Callee, w)
 	}

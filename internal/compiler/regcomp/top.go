@@ -40,8 +40,6 @@ func CompileTop(body []ast.Stmt, fn *bytecode.Function, rec *Record) *bytecode.R
 // yet, or "".
 func whyTop(fn *bytecode.Function) string {
 	switch {
-	case fn.HasDirectEval:
-		return "direct eval"
 	case fn.Debug != nil:
 		return "compiled for a debugger"
 	}

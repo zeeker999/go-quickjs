@@ -305,6 +305,12 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		return r.regColdGen(f, c, k, w, regs)
 	case bytecode.RColdGetUpvalCheck, bytecode.RColdSetUpvalCheck:
 		return r.regColdNames(f, w, regs)
+	case bytecode.RColdDirectEval:
+		return r.regDirectEval(f, c, pc, w, regs)
+	case bytecode.RColdWithGet, bytecode.RColdWithGetThis, bytecode.RColdWithDelete, bytecode.RColdWithSet,
+		bytecode.RColdWithResolve, bytecode.RColdWithRead, bytecode.RColdWithWrite, bytecode.RColdWithPush,
+		bytecode.RColdWithPop:
+		return r.regColdWith(f, c, pc, w, regs)
 	}
 	panic("register code: no cold operation " + bytecode.RColdOp(w.X()).String())
 }

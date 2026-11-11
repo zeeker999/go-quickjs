@@ -37,6 +37,9 @@ type prot struct {
 	// loops is how many loops were around the statement: a break or a
 	// continue to one of them leaves the handler.
 	loops int
+	// with marks a with statement's body, whose object an exit takes off
+	// the frame's with objects (with_pop).
+	with bool
 }
 
 // protect puts p in force from here.
@@ -79,7 +82,7 @@ func (g *gen) leave(from int, last func()) {
 	crossed := g.prots[from:]
 	fin := false
 	for _, p := range crossed {
-		fin = fin || p.finally != nil || p.cursor >= 0
+		fin = fin || p.finally != nil || p.cursor >= 0 || p.with
 	}
 	if !fin {
 		last()
@@ -89,6 +92,10 @@ func (g *gen) leave(from int, last func()) {
 	for i := len(crossed) - 1; i >= 0; i-- {
 		p := crossed[i]
 		g.suspend(p)
+		if p.with {
+			g.cold(bytecode.RColdWithPop, 0, 0, 0)
+			continue
+		}
 		if p.cursor >= 0 {
 			// A loop left closes its iterator, which may throw.
 			if p.async {
@@ -378,7 +385,7 @@ func (g *gen) handlerTable() []bytecode.RHandler {
 // iterator, is around the code: what a return runs on its way out.
 func (g *gen) finallyAround() bool {
 	for _, p := range g.prots {
-		if p.finally != nil || p.cursor >= 0 {
+		if p.finally != nil || p.cursor >= 0 || p.with {
 			return true
 		}
 	}
@@ -440,7 +447,7 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 			// The head's expression sees the binding in its dead zone.
 			g.emit(bytecode.MakeR(bytecode.RLoadUninit, 0, r16(dst), 0, 0))
 		}
-	case ResUpval, ResUpvalCheck, ResGlobal, ResGlobalVar, ResGlobalLexInit, ResModuleLexInit, ResLocalCheck, ResConstAssign, ResIgnore:
+	case ResUpval, ResUpvalCheck, ResGlobal, ResGlobalVar, ResGlobalLexInit, ResModuleLexInit, ResLocalCheck, ResConstAssign, ResIgnore, ResWith:
 		// Stored at the head of each turn (storeValue).
 	default:
 		g.fail("a for-of or for-in loop's store the backend does not compile")

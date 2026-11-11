@@ -56,6 +56,10 @@ const (
 	// ResUpvalCheck is upvalue Index, read or written with a check of its
 	// dead zone (the stack form's get_upvalue_check, set_upvalue_check).
 	ResUpvalCheck
+	// ResWith is a name a with object or an eval's variable may answer:
+	// a probe of them (Record.Withs) before its static access, whose
+	// resolution the backend keeps aside (gen.withs).
+	ResWith
 )
 
 // Res is an identifier's resolution.
@@ -91,6 +95,13 @@ type Record struct {
 	// Tails is each call the stack form compiled as a tail call
 	// (tail_call, tail_call_method, tail_direct_eval).
 	Tails map[ast.Expr]bool
+	// Evals is each call the stack form compiled as a direct eval
+	// (direct_eval), with the index of its scope in the function's
+	// EvalScopes.
+	Evals map[*ast.Call]uint32
+	// Withs is each name the stack form compiled with a probe of the with
+	// objects and the eval's variables in scope before its static access.
+	Withs map[*ast.Ident]WithProbe
 	// Templates is each tagged template's index in the function's
 	// Templates, its site, whose object every evaluation of it gives.
 	Templates map[*ast.TemplateLit]uint32
@@ -109,9 +120,8 @@ type Record struct {
 	// resolved it: a binding of the function's (ResLocal) or an upvalue
 	// (ResUpval).
 	Privates map[*ast.PrivateName]Res
-	// Bail says the function has something whose resolution the record
-	// cannot express -- a with, an eval's variables, an Annex B function --
-	// and is left to the stack form.
+	// Bail says the record saw one name resolved, or probed, two ways,
+	// which it cannot express.
 	Bail bool
 }
 
@@ -158,6 +168,40 @@ func (r *Record) NoteTail(n ast.Expr) {
 		r.Tails = map[ast.Expr]bool{}
 	}
 	r.Tails[n] = true
+}
+
+// NoteEval records that the stack form compiled call n as a direct eval
+// whose scope is the function's EvalScopes[idx].
+func (r *Record) NoteEval(n *ast.Call, idx uint32) {
+	if r == nil {
+		return
+	}
+	if r.Evals == nil {
+		r.Evals = map[*ast.Call]uint32{}
+	}
+	r.Evals[n] = idx
+}
+
+// WithProbe is a name's probe (Record.Withs): Op, the stack form's
+// with_get, with_get_this, with_typeof, with_delete, with_set,
+// with_get_under or with_resolve, of the innermost Limit scopes.
+type WithProbe struct {
+	Op    bytecode.Op
+	Limit uint16
+}
+
+// NoteWith records that the stack form compiled name id with probe p.
+func (r *Record) NoteWith(id *ast.Ident, p WithProbe) {
+	if r == nil {
+		return
+	}
+	if r.Withs == nil {
+		r.Withs = map[*ast.Ident]WithProbe{}
+	}
+	if old, ok := r.Withs[id]; ok && old != p {
+		r.Bail = true
+	}
+	r.Withs[id] = p
 }
 
 // NoteCatch records that the binding of catch clause c is in slot.

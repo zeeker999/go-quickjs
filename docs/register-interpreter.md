@@ -741,8 +741,8 @@ the language, and the JIT's README is updated with it.
   stack form's dynamic lookups for names inside one, as operations of the
   register form's own.
 
-All three are the last stage's: until then a function with a debugger, a
-direct eval or a `with` runs as now.
+A direct eval and a `with` are compiled (Stage 2, item 8); the
+debugger's code is not yet.
 
 ## Stages
 
@@ -1456,8 +1456,33 @@ regdiff cases and test262 in register mode on its directories:
    call's position, as the stack form's; `import.meta` is `import_meta`
    (cold).
 8. **eval and `with`** (757 direct evals, 527 functions beside an eval's
-   variables, a with or an Annex B function, 11 more): binding
-   descriptors for what an eval can reach.
+   variables, a with or an Annex B function, 11 more) -- done. A call the
+   stack form made a direct eval (`Record.Evals`, with its scope's index)
+   is `direct_eval` (cold): the callee, its receiver and the arguments, or
+   an array of them, in a window. Where the callee is the realm's eval and
+   the first argument a string, the code is compiled and linked to the
+   frame as evalIn links it to a heap frame's, each binding it names
+   captured from its register (`RegCode.LocalReg`, the slot's register)
+   as a closure's capture is, its this from register 1; otherwise it is
+   an ordinary call, a tail call where marked. A function with a direct
+   eval gives every binding a register and makes its arguments object as
+   it starts, and is called through runFD, which makes the scope of its
+   eval's variables. A name a with object or an eval's variable may
+   answer is compiled as the stack form compiles it (`Record.Withs`, the
+   probe and its limit): a cold probe of the innermost limit of the
+   frame's with objects and eval's variables -- `with_get`,
+   `with_get_this`, `with_delete`, `with_set` -- that sets a found flag
+   in a register of its own, and a jump around the static access; a
+   reference that is read and written, or resolved before its value is
+   made, is `with_resolve` and then `with_read` and `with_write` through
+   the object it found. A with statement's object is put on the frame's
+   with objects by `with_push` and taken off by `with_pop`, compiled for
+   each way out as a finally clause is, a throw's in a handler of its
+   own. A frame runs as register code whatever with objects and eval's
+   variables runFD gives it, and a generator keeps them across a
+   suspension. The stack form probed a binding typeof reads twice
+   (fixed with it). Eval code itself is still the stack form's (top-level
+   code of an eval: `regScript`).
 9. **`using` and `await using`** (177) -- done (regcomp's try.go,
    `usingScope`): a statement list, a for head or a for-of head that
    declares with using is a scope whose resources are in a register of
