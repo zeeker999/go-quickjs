@@ -1549,3 +1549,23 @@ function r4(...r) { var k = 1; return arguments.length + k }
 `
 	regDiff(t, src, []string{`r1(1, 2)`, `r2(1, 2, 3)`, `r3(1, 2, 3)`, `r4(4, 5)`, `r4()`})
 }
+
+// TestRegDiffArgumentsForms compares the arguments object of strict
+// functions that end in tail calls -- handed on, kept across calls made
+// in place past the tail-call depth, read after -- and of functions that
+// name eval without calling it.
+func TestRegDiffArgumentsForms(t *testing.T) {
+	src := `
+function t1(n) { "use strict"; if (n === 0) return arguments.length; return t1(n - 1, 1, 2) }
+function t2(n, acc) { "use strict"; var a = arguments; if (n === 0) return acc + ":" + a.length; return t2(n - 1, acc + a[0]) }
+function g3(a, b) { return a.length + ":" + a[0] + ":" + b }
+function t3() { "use strict"; return g3(arguments, arguments.length) }
+function t4(n) { "use strict"; var keep = []; function go(k) { keep.push(arguments); return k === 0 ? keep.length : go(k - 1, k) } return go(n) + ":" + keep[3][1] + ":" + keep[keep.length - 1].length }
+function t5() { "use strict"; return arguments.length > 1 ? t5(...[].slice.call(arguments, 1)) : arguments[0] }
+function e1() { var x = eval; return typeof x }
+function e2(a) { var x = eval; return [x === undefined, arguments.length, a].join() }
+function e3() { "use strict"; return eval }
+`
+	regDiff(t, src, []string{`t1(5)`, `t1(100)`, `t2(5, 0)`, `t2(100, 0)`, `t3(7, 8)`, `t4(5)`, `t4(80)`, `t5(1, 2, 3, 4)`,
+		`e1()`, `e2(1, 2)`, `typeof e3()`})
+}

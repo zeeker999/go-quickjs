@@ -509,14 +509,21 @@ func (g *gen) body() {
 	}
 	// The arguments object, made as the function starts, in its binding.
 	if (g.fn.UsesArguments || g.fn.MakesArguments) && !g.fn.ForwardsArguments && !g.lazyArgs {
-		made := false
+		named := false
 		for slot, l := range g.fn.Locals {
-			if l.Name == "arguments" && slot < len(g.slotReg) && g.slotReg[slot] >= 0 {
+			if l.Name != "arguments" || slot >= len(g.slotReg) {
+				continue
+			}
+			named = true
+			// A binding nothing reads has no register, and no object is
+			// made for it: a function that names eval without calling it
+			// has one, which the stack form fills for an eval that never
+			// comes.
+			if g.slotReg[slot] >= 0 {
 				g.emit(bytecode.MakeR(bytecode.RArguments, 0, r16(int(g.slotReg[slot])), 0, 0))
-				made = true
 			}
 		}
-		if !made {
+		if !named {
 			g.fail("an arguments binding the record does not name")
 			return
 		}
@@ -572,7 +579,7 @@ func simpleArguments(fn *bytecode.Function) bool {
 	// A function whose arguments object is only handed on to apply
 	// (ForwardsArguments) has no object made: each such call is an
 	// apply_args, which hands on the frame's arguments as passed.
-	if fn.HasDirectEval || fn.Debug != nil || fn.TopLevel || fn.HasTailCall {
+	if fn.HasDirectEval || fn.Debug != nil || fn.TopLevel {
 		return false
 	}
 	switch fn.Kind {

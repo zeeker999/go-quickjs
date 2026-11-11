@@ -1434,7 +1434,12 @@ regdiff cases and test262 in register mode on its directories:
    resolve (92), strict global stores (96). The strict global store of a
    value that runs code is done: whether the name resolves is settled
    before the value is made and reported after it, `check_global_ref`
-   and `assert_resolved`, as the stack form's.
+   and `assert_resolved`, as the stack form's. A strict function that
+   ends in a tail call makes its arguments object as any other: an
+   unmapped one is a copy, which a frame taken over in place leaves
+   alone (69). A function that names eval without calling it has an
+   arguments binding the stack form fills for an eval that never comes;
+   nothing reads it, it has no register, and none is made (217).
 8. **eval and `with`** (757 direct evals, 527 functions beside an eval's
    variables, a with or an Annex B function, 11 more): binding
    descriptors for what an eval can reach.
