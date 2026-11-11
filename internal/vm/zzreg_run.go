@@ -1157,12 +1157,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		// not compile: the values the translation reference's operations
 		// had, and 127, invalid's.
 		case bytecode.RCallWT, bytecode.RCallMWT:
-			kept.pc = pc
-			if err := r.regTailCallW(f, c, &kept, wb); err != nil {
-				failed = err
-				goto fail
-			}
-			pc = kept.pc
+			goto tail
 		case 40, 41, 42, 43:
 			goto invalid
 		case 127:
@@ -1225,6 +1220,16 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		if pc = r.regCatch(f, c, &kept, regs, failed); pc < 0 {
 			return Undefined, failed
 		}
+		continue
+	tail:
+		// tail_call_w and tail_call_method_w, after every other case and
+		// tail: here they move none of the loop's code.
+		kept.pc = pc
+		if err := r.regTailCallW(f, c, &kept, wb); err != nil {
+			failed = err
+			goto fail
+		}
+		pc = kept.pc
 	}
 }
 

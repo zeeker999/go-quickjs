@@ -1087,32 +1087,6 @@ func regLeafStore(held []regHeld) {
 	}
 }
 
-// regPlan gives a closure of a template with register code of the form's
-// own layout the tree that runs it as its tree's call, where nothing of its
-// surroundings but an arrow's this is to establish, so that callDirect --
-// a built-in's callback, a tree's call -- enters the register code at once.
-// An arrow's this is the one it captured, which regEnterFrame and
-// regDirect give it.
-func regPlan(fd *funcData) {
-	if fd.treeCall != nil || fd.bound || fd.native != nil || fd.closure == nil {
-		return
-	}
-	t := (*tree)(atomic.LoadPointer(&fd.closure.fn.VMCode))
-	if t == nil || t.reg == nil || !t.reg.wide {
-		return
-	}
-	if fd.closure.fn.HasTailCall {
-		// A frame that may end in a tail call, whose callers must make
-		// it: planTreeCall's treeRest, not a treeCall, whose callers
-		// expect none.
-		return
-	}
-	if x := fd.extra; x != nil && (!fd.arrow || x.lexThisRef != nil || x.rare != nil) {
-		return
-	}
-	fd.treeCall = t
-}
-
 // regOf is the register code of cl's function, built if the function has
 // not been run yet, and kept in its template for regCall's next call of it;
 // or nil.

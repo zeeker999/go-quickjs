@@ -2,6 +2,7 @@ package vm
 
 import (
 	"errors"
+	"sync/atomic"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
@@ -9,7 +10,12 @@ import (
 // The register interpreter's tail calls (tail_call_w and
 // tail_call_method_w; docs/register-interpreter.md, "Stage 2"), in a file
 // that sorts after the package's others but the layout lock's last pad:
-// what only a tail call runs moves none of the call path's code.
+// what only a tail call runs moves none of the call path's code. regPlan,
+// which refuses a treeCall to a function with a tail call, is here too:
+// with the call path grown by the tail calls' checks of its errors, 192
+// bytes, its 192 bytes leave regSlow, regIn, regNative and runReg where
+// they were before tail calls (weak_map_set, has_own_method_hit and
+// array_in 5 to 9% slower at every placement there).
 
 // regCallEnd is regCall's end in an error: where its frame ended in a tail
 // call (errTailCall), the chain the call starts made by regTailLoop,
@@ -272,4 +278,30 @@ func (r *Runtime) regTail(f *frame, w bytecode.RInstr, wb int) bool {
 	}
 	r.pendingTail = tailCall{callee: win[0], this: this, args: append([]Value(nil), win[2:2+int(w.X())]...)}
 	return true
+}
+
+// regPlan gives a closure of a template with register code of the form's
+// own layout the tree that runs it as its tree's call, where nothing of its
+// surroundings but an arrow's this is to establish, so that callDirect --
+// a built-in's callback, a tree's call -- enters the register code at once.
+// An arrow's this is the one it captured, which regEnterFrame and
+// regDirect give it.
+func regPlan(fd *funcData) {
+	if fd.treeCall != nil || fd.bound || fd.native != nil || fd.closure == nil {
+		return
+	}
+	t := (*tree)(atomic.LoadPointer(&fd.closure.fn.VMCode))
+	if t == nil || t.reg == nil || !t.reg.wide {
+		return
+	}
+	if fd.closure.fn.HasTailCall {
+		// A frame that may end in a tail call, whose callers must make
+		// it: planTreeCall's treeRest, not a treeCall, whose callers
+		// expect none.
+		return
+	}
+	if x := fd.extra; x != nil && (!fd.arrow || x.lexThisRef != nil || x.rare != nil) {
+		return
+	}
+	fd.treeCall = t
 }
