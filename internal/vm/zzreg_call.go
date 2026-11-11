@@ -325,6 +325,12 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base, pc 
 					}
 				}
 			}
+			if argc > int(rc.params) && !rc.args {
+				// The arguments past the parameters, which the bindings
+				// overwrite: f.arguments reads them. A frame that keeps
+				// its arguments has them in f.args.
+				r.regKeepWindow(base, int(rc.params), argc)
+			}
 			return r.regEnterW(o, cl, rc, base, argc, r.stack[base+2:base+2+argc], Undefined)
 		}
 	}

@@ -339,8 +339,8 @@ type Runtime struct {
 	// regExtras is, by frame depth, the arguments past its parameters the
 	// last register call made at that depth with more arguments than
 	// parameters was given, which the callee's bindings overwrite in its
-	// window: what f.arguments reads of them (regKeepArgs).
-	regExtras [][]Value
+	// window: what f.arguments reads of them (regKeepWindow).
+	regExtras []regExtra
 	// regRestart is the register code a register frame was given in place
 	// by a tail call (regTailInPlace), which runReg continues with.
 	regRestart *regCode

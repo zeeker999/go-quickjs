@@ -1139,11 +1139,6 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int,
 		r.argStack = append(r.argStack, args...)
 		kept = r.argStack[ka:len(r.argStack):len(r.argStack)]
 	}
-	if len(args) > int(rc.params) {
-		// The arguments past the parameters, which the bindings may
-		// overwrite: f.arguments reads them.
-		r.regKeepArgs(args, int(rc.params))
-	}
 	// Parameters no argument was given for, and the bindings past them.
 	for i := base + 2 + min(argc, int(rc.params)); i < base+2+int(rc.params)+int(rc.inits); i++ {
 		r.stack[i] = Undefined
