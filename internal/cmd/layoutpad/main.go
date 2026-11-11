@@ -130,6 +130,7 @@ var positions = []position{
 	{"Q", "zzreg_ru_layoutpad.go", "after zzreg_report.go, before zzreg_run.go: the register interpreter's hot block, runReg first"},
 	{"W", "zzreg_run_a_layoutpad.go", "after zzreg_run.go, before zzreg_run_call.go: the register interpreter's calls and slow path after its loop, regCallW first"},
 	{"P", "zzreg_run_layoutpad.go", "after zzreg_run_call.go, before zzreg_runs.go: the register interpreter's hot block after regSlow, regBinImm first"},
+	{"K", "zzreg_switch_a_layoutpad.go", "after zzreg_switch.go, before zzreg_switch_cold.go: what the register interpreter runs out of line after cold's dispatch, regDeadCall first"},
 	{"Z", "zzzz_layoutpad.go", "after every file: the closures, and the generics the last files call"},
 }
 
