@@ -617,6 +617,12 @@ func (r *Runtime) debugThrow(err error) {
 // stack as it is thrown.
 func (r *Runtime) exceptionCaught() bool {
 	for i := r.frameDepth - 1; i >= 0; i-- {
+		if c, _ := r.regDebugFrame(r.frameAt(i)); c != nil {
+			if regCaughtAt(c, r.frameAt(i).pc) {
+				return true
+			}
+			continue
+		}
 		for _, h := range r.frameAt(i).handlers {
 			if !h.isFinally {
 				return true

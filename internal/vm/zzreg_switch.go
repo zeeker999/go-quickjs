@@ -609,6 +609,10 @@ func (r *Runtime) regCharCodeAtSlow(f *frame, c *regCode, pc int, regs *[1 << 16
 //
 //go:noinline
 func (r *Runtime) regCatch(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value, err error) int {
+	if r.debug != nil {
+		// As unwindToHandler: a debugger may stop where it is thrown.
+		r.debugThrow(err)
+	}
 	if len(c.rc.Handlers) == 0 {
 		return -1
 	}

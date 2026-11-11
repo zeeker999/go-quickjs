@@ -270,6 +270,8 @@ func (c *compiler) declareLexicalNameMarked(name string, kind bindKind, pos int,
 	if mark {
 		c.emit(bytecode.OpPushUninitialized, 0, 0)
 		c.emit(bytecode.OpSetLocal, slot, 0)
+	} else {
+		c.reg.NoteUnmarked(slot)
 	}
 	c.markUninitialized(name)
 }

@@ -216,9 +216,39 @@ func (r *Runtime) regDebug(f *frame, c *regCode, pc int, w bytecode.RInstr, regs
 // as register code, for a debugger's look at its bindings: nil where it
 // runs as the stack form.
 func (r *Runtime) regDebugFrame(f *frame) (*regCode, *[1 << 16]Value) {
+	if f.cl == nil {
+		return nil, nil
+	}
 	c := f.cl.reg
-	if c == nil || !regTier.Load() {
+	if c == nil {
+		c = r.regOf(f.cl)
+	}
+	if c == nil {
 		return nil, nil
 	}
 	return c, regWindow(r.stack, f.base-int(c.locals))
+}
+
+// regCaughtAt reports whether register code c catches what an instruction
+// of it throws at the stack form's pc -- one past, as a frame keeps it --
+// in a catch clause's handler (RHandler.Catches), for a debugger asking
+// whether an exception is caught.
+func regCaughtAt(c *regCode, pc uint32) bool {
+	if pc == 0 {
+		return false
+	}
+	for i, s := range c.src {
+		if s != pc-1 {
+			continue
+		}
+		for j := range c.rc.Handlers {
+			h := &c.rc.Handlers[j]
+			for k := 0; h.Catches && k+1 < len(h.Ranges); k += 2 {
+				if uint32(i) >= h.Ranges[k] && uint32(i) < h.Ranges[k+1] {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

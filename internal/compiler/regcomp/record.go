@@ -126,6 +126,12 @@ type Record struct {
 	// there in the function's Debug.Statements, and whether it is a
 	// debugger statement (DebugMark).
 	Debugs map[int32]DebugMark
+	// Unmarked are the lexical bindings the stack form leaves out of
+	// their dead zone, nothing being able to see them there (its
+	// declareLexicalNameMarked). In a debugger's code, where every
+	// binding is captured for the debugger, the register form leaves them
+	// so too: a debugger's evaluation sees what the stack form's sees.
+	Unmarked map[uint32]bool
 	// Bail says the record saw one name resolved, or probed, two ways,
 	// which it cannot express.
 	Bail bool
@@ -329,6 +335,18 @@ func (r *Record) NoteDebug(pos int32, idx uint32, debugger bool) {
 	if _, ok := r.Debugs[pos]; !ok {
 		r.Debugs[pos] = DebugMark{idx, debugger}
 	}
+}
+
+// NoteUnmarked records that the stack form leaves the lexical binding of
+// slot out of its dead zone.
+func (r *Record) NoteUnmarked(slot uint32) {
+	if r == nil || r.quiet > 0 {
+		return
+	}
+	if r.Unmarked == nil {
+		r.Unmarked = map[uint32]bool{}
+	}
+	r.Unmarked[slot] = true
 }
 
 // NoteTemplate records that tagged template q's site is idx.

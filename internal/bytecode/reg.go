@@ -891,6 +891,10 @@ type RHandler struct {
 	Ranges []uint32
 	To     uint32
 	Reg    uint16
+	// Catches says the handler is a catch clause's, which keeps what it
+	// catches; any other throws it again once it has run (a finally
+	// clause, an iterator's close), which a debugger asks to know.
+	Catches bool
 }
 
 // HandlerAt is the handler of the instruction at pc, the innermost whose

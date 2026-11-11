@@ -1051,8 +1051,10 @@ func (g *gen) enterBlock(list []ast.Stmt) {
 				// closures of the turns before keep theirs, closed.
 				g.cold(bytecode.RColdCloseRegs, int(g.slotReg[slot]), 1, 0)
 			}
-			if g.tdz[slot] || g.fn.Locals[slot].Captured {
-				// A closure may read it before its declaration runs.
+			if g.tdz[slot] || g.fn.Locals[slot].Captured && !(g.fn.Debug != nil && g.rec.Unmarked[uint32(slot)]) {
+				// A closure may read it before its declaration runs. In a
+				// debugger's code, which captures every binding, a closure
+				// may where the stack form says one may (Record.Unmarked).
 				g.emit(bytecode.MakeR(bytecode.RLoadUninit, 0, r16(int(g.slotReg[slot])), 0, 0))
 			}
 		}

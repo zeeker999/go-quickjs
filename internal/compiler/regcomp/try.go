@@ -471,7 +471,8 @@ func (g *gen) catchReg(c *ast.CatchClause) (int, bool) {
 func (g *gen) handlerTable() []bytecode.RHandler {
 	var hs []bytecode.RHandler
 	for _, p := range g.handlers {
-		hs = append(hs, bytecode.RHandler{Ranges: p.ranges, To: uint32(p.to.at), Reg: r16(p.reg)})
+		hs = append(hs, bytecode.RHandler{Ranges: p.ranges, To: uint32(p.to.at), Reg: r16(p.reg),
+			Catches: p.finally == nil && p.cursor < 0 && !p.with})
 	}
 	return hs
 }
