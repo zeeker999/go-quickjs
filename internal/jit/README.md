@@ -1124,6 +1124,19 @@ Generic -- and `Evaluate` checks it as it runs: a Generic instruction
 whose check fails after a commit is `ErrGeneric`, which the evaluator has
 no Go for.
 
+**Feedback.** The VM's feedback for a register program is
+`jitRegFeedback` (`internal/vm/zzjit_zregfeedback.go`), asked by the
+program's instructions as the builder asks and read through their origin
+from the caches the register interpreter fills: a property site by its
+register instruction's C (`add_prop`'s read and store share the store's
+site), a global's by its name and C, a call's shape by its operands and
+its target by its C (`regCalls`), monomorphic from the first compile. What
+register code does not record yet -- what a fast path did not expect, a
+site's call count -- and the JIT's own tables, learned at the stack form's
+exits and keyed by its pcs, it answers with nothing: the builder
+speculates nothing there. It is a type of its own beside the stack form's
+`jitFeedback`, whose methods and snapshot it leaves as they are.
+
 **Refusals.** `LowerReg` refuses what `LowerSSA` refuses of the same
 function, by the same reasons: a function kind, direct eval, an arguments
 object the frame cannot own, a function of host operations alone at its
