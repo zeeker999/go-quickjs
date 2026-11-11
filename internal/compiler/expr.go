@@ -327,7 +327,13 @@ func (c *compiler) compileExprNamed(e ast.Expr, name string) {
 		c.emit(bytecode.OpPushNull, 0, 0)
 
 	case *ast.This:
-		c.emit(bytecode.OpPushThis, 0, 0)
+		if c.thisIsValue() {
+			c.emit(bytecode.OpPushThis, 0, 0)
+		} else {
+			// A derived constructor's this, which super() binds: a read
+			// before it throws, at the read.
+			c.emitAt(n.Start, bytecode.OpPushThis, 0, 0)
+		}
 
 	case *ast.NewTarget:
 		if c.inClassFieldInit() {
@@ -489,7 +495,8 @@ func (c *compiler) compileIdentReadStatic(n *ast.Ident) {
 			c.emit(bytecode.OpGetLocal, l.slot, 0)
 		} else {
 			c.reg.NoteRead(n, regcomp.Res{Kind: regcomp.ResLocalCheck, Index: l.slot})
-			c.emit(bytecode.OpGetLocalCheck, l.slot, 0)
+			// A read in the dead zone throws at the name.
+			c.emitAt(int(n.Start), bytecode.OpGetLocalCheck, l.slot, 0)
 		}
 		c.compiledRead(l, n)
 		return
@@ -497,7 +504,7 @@ func (c *compiler) compileIdentReadStatic(n *ast.Ident) {
 	if idx, ok := c.resolveUpvalue(n.Name); ok {
 		if c.fn.Upvalues[idx].TDZ {
 			c.reg.NoteRead(n, regcomp.Res{})
-			c.emit(bytecode.OpGetUpvalueCheck, idx, 0)
+			c.emitAt(int(n.Start), bytecode.OpGetUpvalueCheck, idx, 0)
 		} else {
 			c.reg.NoteRead(n, regcomp.Res{Kind: regcomp.ResUpval, Index: idx})
 			c.emit(bytecode.OpGetUpvalue, idx, 0)
@@ -1310,7 +1317,7 @@ func (c *compiler) compileUpdateKeep(n *ast.Update, keep bool) {
 			// not consult the prototype chain the way a property does.
 			name, ref := c.privateName(pn, int(target.Start))
 			c.emit(bytecode.OpDup, 0, 0)
-			c.emit(bytecode.OpGetPrivate, name, ref)
+			c.emitAt(int(target.Start), bytecode.OpGetPrivate, name, ref)
 			if !n.Prefix {
 				c.emit(bytecode.OpToNumeric, 0, 0)
 				c.emit(bytecode.OpInsert2, 0, 0)
@@ -1626,7 +1633,7 @@ func (c *compiler) compileCall(n *ast.Call) {
 			name, ref := c.privateName(pn, int(m.Start))
 			c.compileExpr(m.Object)
 			c.emit(bytecode.OpDup, 0, 0)
-			c.emit(bytecode.OpGetPrivate, name, ref)
+			c.emitAt(m.Property.Pos(), bytecode.OpGetPrivate, name, ref)
 			argc := c.compileArguments(n.Args)
 			// A call in tail position, as any method's is.
 			c.emitAt(callPos(n), c.callOp(n, bytecode.OpCallMethod), uint32(argc), 0)
@@ -1768,7 +1775,7 @@ func (c *compiler) compileSpreadCall(n *ast.Call) {
 			name, ref := c.privateName(pn, int(m.Start))
 			c.compileExpr(m.Object)
 			c.emit(bytecode.OpDup, 0, 0)
-			c.emit(bytecode.OpGetPrivate, name, ref)
+			c.emitAt(m.Property.Pos(), bytecode.OpGetPrivate, name, ref)
 			c.compileSpreadArguments(n.Args)
 			c.emitAt(callPos(n), bytecode.OpCallSpread, 0, 0)
 			return
@@ -2188,7 +2195,7 @@ func (c *compiler) compileMemberUpdate(m *ast.Member, op string, emitValue func(
 		name, ref := c.privateName(pn, int(m.Start))
 		c.compileExpr(m.Object)
 		c.emit(bytecode.OpDup, 0, 0)
-		c.emit(bytecode.OpGetPrivate, name, ref)
+		c.emitAt(int(m.Start), bytecode.OpGetPrivate, name, ref)
 		c.finishUpdate(op, emitValue, pos, 1, func() {
 			if keep {
 				c.emit(bytecode.OpInsert2, 0, 0)

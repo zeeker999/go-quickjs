@@ -196,6 +196,24 @@ var e = make(); e.stack.split("\n")[0] + " | " + frames(e)`, "AppError: m | at m
 	})
 }
 
+// TestStackTraceThrowPositions pins where a read that throws is: a derived
+// constructor's this before super(), a private method called on an object
+// without it, at its name, and a binding read in its dead zone, at the name,
+// each the first thing its function does.
+func TestStackTraceThrowPositions(t *testing.T) {
+	evalCases(t, []struct{ src, want string }{
+		{frames + `class G extends Object { constructor() { this.x = 1; super() } }
+try { new G() } catch (e) { frames(e) }`, "at new G (<eval>:2:42) | at <eval>:3:7"},
+		{frames + `class P { call(o) { return o.#m() } #m() {} }
+try { new P().call({}) } catch (e) { frames(e) }`, "at P.call (<eval>:2:30) | at <eval>:3:15"},
+		{frames + `function c9() { class Q extends (Q, Object) {} }
+try { c9() } catch (e) { frames(e) }`, "at c9 (<eval>:2:34) | at <eval>:3:7"},
+		{frames + `function c11() { foo(q); let q }
+function foo() {}
+try { c11() } catch (e) { frames(e) }`, "at c11 (<eval>:2:22) | at <eval>:4:7"},
+	})
+}
+
 // TestStackTraceAccessor pins the standard's inherited accessor and V8's own
 // accessor under WithNodeQuirks.
 func TestStackTraceAccessor(t *testing.T) {
