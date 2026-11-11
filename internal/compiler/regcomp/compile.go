@@ -2798,6 +2798,12 @@ func (g *gen) storeValue(id *ast.Ident, v int) {
 		r := int(g.slotReg[res.Index])
 		g.at(int(id.Start))
 		g.emit(bytecode.MakeR(bytecode.RCheckRef, 0, r16(r), uint16(res.Index), 0))
+		if !g.fn.Locals[res.Index].Mutable {
+			// A constant past its dead zone, as set_local_check finds it:
+			// a switch case's, which the dead zone marks.
+			g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdAssignConst), 0, g.name16(id.Name), 0))
+			return
+		}
 		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(r), r16(v), 0))
 	case ResUpval:
 		g.emit(bytecode.MakeRBC(bytecode.RSetUpval, 0, r16(v), res.Index))

@@ -1566,7 +1566,16 @@ function d7() { var o = Object.freeze({b: 1}); return [delete o?.b, "b" in o].jo
 		`e(() => s1(1))`, `e(() => s1(2))`, `e(() => s1(3))`, `e(() => s2(0))`, `e(() => s2(1))`, `s3()`, `e(s4)`, `e(() => s5(0))`, `e(() => s5(1))`,
 		`d1()`, `d2()`, `d3()`, `e(d4)`, `e(d5)`, `d6()`, `d7()`,
 		`"q"; L: { "w"; break L; 3 }`, `"q"; L: { break L; }`, `"q"; L: M: { "w"; if (true) break M; 3 }`,
-		`"q"; L: switch (1) { case 1: "s"; break L }`, `globalThis.gt = 1; var gw = 2; [delete gt, delete gw, typeof gt].join()`}
+		`"q"; L: switch (1) { case 1: "s"; break L }`, `globalThis.gt = 1; var gw = 2; [delete gt, delete gw, typeof gt].join()`,
+		// A switch case's constant, past its dead zone, is still one.
+		`(() => { switch (1) { case 1: const c = 1; try { c = 2 } catch (x) { return x.name + c } } })()`,
+		`e(() => { switch (1) { case 1: const c = 1; c += 2; return c } })`,
+		`e(() => { switch (1) { case 1: const c = 1; c++; return c } })`,
+		`e(() => { switch (1) { case 1: const c = 1; [c] = [5]; return c } })`,
+		`e(() => { switch (1) { case 1: const c = 1; for (c of [1]); return c } })`,
+		`e(() => { switch (1) { case 1: const c = 1; c ??= 3; return c && (c &&= 5) } })`,
+		`e(() => { switch (2) { case 1: const c = 1; case 2: c = 3; return c } })`,
+		`e(() => { switch (1) { case 1: const c = 1; (() => { c = 2 })(); return c } })`}
 	regDiff(t, src, calls)
 }
 
