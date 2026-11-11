@@ -275,8 +275,10 @@ func (g *gen) layout() bool {
 	}
 	// A direct eval reaches a binding in scope by its slot (LocalReg),
 	// whichever it names: each has a register, and the arguments object
-	// is made as the function starts.
-	evals := len(g.rec.Evals) > 0
+	// is made as the function starts. So does a debugger, at any place
+	// the code can stop: it shows the bindings in scope there, and
+	// evaluates code there as a direct eval.
+	evals := len(g.rec.Evals) > 0 || g.fn.Debug != nil
 	if evals {
 		for i := range used {
 			used[i] = true
@@ -727,7 +729,7 @@ func simpleArguments(fn *bytecode.Function) bool {
 	// A function whose arguments object is only handed on to apply
 	// (ForwardsArguments) has no object made: each such call is an
 	// apply_args, which hands on the frame's arguments as passed.
-	if fn.Debug != nil || fn.TopLevel {
+	if fn.TopLevel {
 		return false
 	}
 	switch fn.Kind {
@@ -1118,10 +1120,11 @@ func (g *gen) stmt(s ast.Stmt) {
 	defer func() { g.top = mark }()
 	label := g.label
 	g.label = nil
+	g.debugMark(s.Pos())
 	switch n := s.(type) {
 	case *ast.ExprStmt:
 		g.exprStmt(n.X)
-	case *ast.EmptyStmt:
+	case *ast.EmptyStmt, *ast.DebuggerStmt:
 	case *ast.BlockStmt:
 		g.stmts(n.Body)
 	case *ast.VarDecl:
@@ -1191,6 +1194,7 @@ func (g *gen) stmt(s ast.Stmt) {
 		g.bind(body)
 		g.stmt(n.Body)
 		g.bind(test)
+		g.debugMark(n.Test.Pos())
 		g.cond(n.Test, true, body)
 		g.bind(l.brk)
 		g.popLoop()
@@ -1201,6 +1205,7 @@ func (g *gen) stmt(s ast.Stmt) {
 		g.bind(body)
 		g.stmt(n.Body)
 		g.bind(l.cont)
+		g.debugMark(n.Test.Pos())
 		g.cond(n.Test, true, body)
 		g.bind(l.brk)
 		g.popLoop()
@@ -1376,12 +1381,14 @@ func (g *gen) forLoop(n *ast.ForStmt, label labelSet) {
 	g.closeRegs(copies)
 	if n.Update != nil {
 		mark := g.top
+		g.debugMark(n.Update.Pos())
 		g.discard(n.Update)
 		g.top = mark
 	}
 	g.bind(test)
 	if n.Test != nil {
 		mark := g.top
+		g.debugMark(n.Test.Pos())
 		g.cond(n.Test, true, body)
 		g.top = mark
 	} else {
@@ -3537,6 +3544,22 @@ func (g *gen) applyArgs(n *ast.Call, m *ast.Member, dst int) int {
 }
 
 // aux gives the instruction at pc its extra operand (RegCode.Aux).
+// debugMark is the cold debug of a place code compiled for a debugger can
+// stop at pos, where the stack form made one (Record.Debugs): at each
+// statement, loop test and update, and for-in and for-of head.
+func (g *gen) debugMark(pos int) {
+	m, ok := g.rec.Debugs[int32(pos)]
+	if !ok {
+		return
+	}
+	g.at(pos)
+	b := 0
+	if m.Debugger {
+		b = 1
+	}
+	g.aux(g.cold(bytecode.RColdDebug, 0, b, 0), m.Index)
+}
+
 func (g *gen) aux(pc int, v uint32) {
 	if g.auxes == nil {
 		g.auxes = map[int]uint32{}
@@ -3860,7 +3883,7 @@ func (g *gen) finish() *bytecode.RegCode {
 // localReg is LocalReg: each local's register, where the code has a
 // call_reuse or a direct_eval, and nil otherwise.
 func (g *gen) localReg() []int32 {
-	if !g.reuses && len(g.rec.Evals) == 0 {
+	if !g.reuses && len(g.rec.Evals) == 0 && g.fn.Debug == nil {
 		return nil
 	}
 	return append([]int32(nil), g.slotReg...)

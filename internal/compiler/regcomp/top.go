@@ -19,10 +19,6 @@ import (
 // fn and whose identifiers' resolution is rec, into register code, or
 // returns nil where it has anything the backend does not compile yet.
 func CompileTop(body []ast.Stmt, fn *bytecode.Function, rec *Record) *bytecode.RegCode {
-	if w := whyTop(fn); w != "" {
-		Refuse(fn, w)
-		return nil
-	}
 	g, ok := generate(fn, func() *gen { return &gen{lit: &ast.FuncLit{Body: body}, fn: fn, rec: rec} })
 	if !ok {
 		Refuse(fn, "its bindings' layout")
@@ -33,16 +29,6 @@ func CompileTop(body []ast.Stmt, fn *bytecode.Function, rec *Record) *bytecode.R
 		return nil
 	}
 	return g.finish()
-}
-
-// whyTop is what of top-level code's flags the backend does not compile
-// yet, or "".
-func whyTop(fn *bytecode.Function) string {
-	switch {
-	case fn.Debug != nil:
-		return "compiled for a debugger"
-	}
-	return ""
 }
 
 // topBody compiles what top-level code does before its first statement: its

@@ -649,6 +649,12 @@ const (
 	// (throw_reference_error): sloppy code's assignment to a call, made
 	// once the call has been.
 	RColdThrowRef
+	// RColdDebug is a place code compiled for a debugger can stop (the
+	// stack form's debug_stmt): its index in the function's
+	// Debug.Statements in Aux, and B 1 for a debugger statement. It does
+	// nothing unless a debugger has asked to stop somewhere, or B is 1
+	// and one is listening.
+	RColdDebug
 )
 
 // RDirectEvalSpread is the bit of direct_eval's Aux that says its
@@ -736,7 +742,7 @@ var rColdNames = [...]string{
 	RColdWithGet: "with_get", RColdWithGetThis: "with_get_this", RColdWithDelete: "with_delete",
 	RColdWithSet: "with_set", RColdWithResolve: "with_resolve", RColdWithRead: "with_read",
 	RColdWithWrite: "with_write", RColdWithPush: "with_push", RColdWithPop: "with_pop",
-	RColdThrowRef: "throw_reference_error",
+	RColdThrowRef: "throw_reference_error", RColdDebug: "debug",
 }
 
 func (op RColdOp) String() string {
@@ -828,8 +834,9 @@ type RegCode struct {
 	// (RNewObjectLit), each an index of the function's names.
 	ObjKeys [][]uint16
 	// LocalReg is each local's register, or -1, where the code has a
-	// call_reuse, whose frame's locals the runtime reads by it, or a
-	// direct_eval, whose code it links to them; nil otherwise.
+	// call_reuse, whose frame's locals the runtime reads by it, a
+	// direct_eval, whose code it links to them, or is compiled for a
+	// debugger, which shows and sets them; nil otherwise.
 	LocalReg []int32
 	// UsesArguments says the code makes the arguments object, whose frame
 	// keeps the arguments as passed (RArguments).

@@ -61,6 +61,12 @@ func (r *Runtime) regEval(f *frame, c *regCode, regs *[1 << 16]Value, scope byte
 		fn.Script.EvalOrigin = r.evalOrigin()
 		fn.Script.Referrer = r.activeReferrer()
 	}
+	return r.regEvalCode(f, c, regs, fn)
+}
+
+// regEvalCode runs fn, a direct eval's compiled code, in register frame
+// f's scope: regEval's, and a debugger's evaluation in a paused frame's.
+func (r *Runtime) regEvalCode(f *frame, c *regCode, regs *[1 << 16]Value, fn *bytecode.Function) (Value, error) {
 	cl := r.prepare(fn)
 	cl.upvalues = make([]*upvalue, len(fn.Upvalues))
 	for i, desc := range fn.Upvalues {
@@ -189,4 +195,30 @@ func (r *Runtime) regColdWith(f *frame, c *regCode, pc int, w bytecode.RInstr, r
 		regs[w.A()] = Obj(o)
 	}
 	return nil
+}
+
+// regDebug is debug, the stack form's debug_stmt: a place code compiled
+// for a debugger can stop, the statement's index in Aux. The frame's pc is
+// the stack form's debug_stmt's, which the debugger finds the statement,
+// its scope and its position by, and its this the one in register 1.
+func (r *Runtime) regDebug(f *frame, c *regCode, pc int, w bytecode.RInstr, regs *[1 << 16]Value) error {
+	d := r.debug
+	if d == nil || !d.armed && w.B() == 0 {
+		return nil
+	}
+	idx := regAuxAt(c, pc)
+	f.pc = f.cl.fn.Debug.Statements[idx].PC + 1
+	regSyncThis(f, regs)
+	return r.debugStatement(f, bytecode.Instr{Op: bytecode.OpDebugStmt, A: idx, B: uint32(w.B())})
+}
+
+// regDebugFrame is the register code and window of frame f where it runs
+// as register code, for a debugger's look at its bindings: nil where it
+// runs as the stack form.
+func (r *Runtime) regDebugFrame(f *frame) (*regCode, *[1 << 16]Value) {
+	c := f.cl.reg
+	if c == nil || !regTier.Load() {
+		return nil, nil
+	}
+	return c, regWindow(r.stack, f.base-int(c.locals))
 }

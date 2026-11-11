@@ -120,6 +120,12 @@ type Record struct {
 	// resolved it: a binding of the function's (ResLocal) or an upvalue
 	// (ResUpval).
 	Privates map[*ast.PrivateName]Res
+	// Debugs is, in code compiled for a debugger, each place it can stop
+	// -- a statement, a loop's test or update, a for-in or for-of head --
+	// by its position: the index of the stack form's first debug_stmt
+	// there in the function's Debug.Statements, and whether it is a
+	// debugger statement (DebugMark).
+	Debugs map[int32]DebugMark
 	// Bail says the record saw one name resolved, or probed, two ways,
 	// which it cannot express.
 	Bail bool
@@ -300,6 +306,29 @@ func (r *Record) NoteWrite(id *ast.Ident, res Res) {
 		r.Bail = true
 	}
 	r.Write[id] = res
+}
+
+// DebugMark is a place code compiled for a debugger can stop: its index
+// in the function's Debug.Statements, and whether it is a debugger
+// statement.
+type DebugMark struct {
+	Index    uint32
+	Debugger bool
+}
+
+// NoteDebug records the stack form's debug_stmt of index idx at pos, the
+// first there: a finally clause's later copies, compiled from the first's
+// resolution, stop where it does.
+func (r *Record) NoteDebug(pos int32, idx uint32, debugger bool) {
+	if r == nil || r.quiet > 0 {
+		return
+	}
+	if r.Debugs == nil {
+		r.Debugs = map[int32]DebugMark{}
+	}
+	if _, ok := r.Debugs[pos]; !ok {
+		r.Debugs[pos] = DebugMark{idx, debugger}
+	}
 }
 
 // NoteTemplate records that tagged template q's site is idx.

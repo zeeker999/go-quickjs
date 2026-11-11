@@ -63,9 +63,9 @@ func (c *compiler) regTop(op bytecode.Op, name, flag uint32, fn *ast.FuncLit) {
 
 // regScript reports whether top-level code compiled with opts is of the
 // kind the register form compiles: a script's, a module's or eval code's,
-// direct or indirect, but not a debugger's.
+// direct or indirect, a debugger's as any other.
 func regScript(opts Options) bool {
-	return !opts.Debug
+	return true
 }
 
 // regTopCode gives fn, top-level code of statements body whose resolution

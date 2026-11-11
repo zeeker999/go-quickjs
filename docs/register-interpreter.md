@@ -741,8 +741,8 @@ the language, and the JIT's README is updated with it.
   stack form's dynamic lookups for names inside one, as operations of the
   register form's own.
 
-A direct eval and a `with` are compiled (Stage 2, item 8); the
-debugger's code is not yet.
+A direct eval and a `with` are compiled (Stage 2, item 8), and so is the
+debugger's code (item 10).
 
 ## Stages
 
@@ -1263,7 +1263,7 @@ it):
 | 1 | a site past 16 bits (a cap) | 0 / 1 / 0 |
 
 Not in the corpora, and refused as well: code compiled for a debugger
-(`WithDebugger`), a finally clause nested more than four
+(`WithDebugger`; done, item 10), a finally clause nested more than four
 copies deep, and the caps -- more than 65,536 registers, a jump past 16
 bits, a name past 16 bits, more than 255 arguments, properties or
 elements in one instruction. A cap goes as a wide form, never a refusal.
@@ -1518,8 +1518,8 @@ regdiff cases and test262 in register mode on its directories:
    (B.3.3.1), a store the stack compiler records as the declaration's
    name's write -- it assigned it as the block was entered, which Node
    does not (fixed with it).
-9d. **The last refusals of the corpora** (40) -- 39 done; left: the
-   debugger statement, which is the debugger's code (next).
+9d. **The last refusals of the corpora** (40) -- done; the debugger
+   statement outside a debugger's code does nothing, as the stack form's.
    - *A finally clause's bindings* (9, "a name the record resolves two
      ways"): the stack form compiles a clause once for each way out --
      inline at the normal end, as the handler's, and at each break or
@@ -1580,6 +1580,21 @@ regdiff cases and test262 in register mode on its directories:
    record resolves, a with object's probe included). The completion value
    of a with statement whose body produces none is undefined (fixed with
    it).
+10. **The debugger's code** (`WithDebugger`) -- done. The stack compiler
+   records each debug_stmt it makes by its position (`Record.Debugs`,
+   the first copy's in a finally clause compiled more than once), and
+   regcomp makes a cold `debug` at each statement, loop test and update
+   and for-in or for-of head of that position, the statement's index in
+   Aux: it does nothing unless a debugger has asked to stop, and then sets
+   the frame's pc to the stack form's debug_stmt, by which the debugger
+   finds the statement, its scope and its position, and asks the debugger
+   as executeAt's case does. Every binding has a register, as beside a
+   direct eval, and `RegCode.LocalReg` names it: a `DebugFrame` of a frame
+   that runs as register code (`regDebugFrame`) reads and sets its
+   bindings there (`Scopes`, `SetVariable`), its this in register 1, and
+   evaluates code there as a direct eval of the register form's
+   (`regEvalCode`). Breakpoints and steps are the statements' indexes, as
+   in the stack form.
 
 ### Stage 3: the JIT and the tree tier
 

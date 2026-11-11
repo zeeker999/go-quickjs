@@ -259,6 +259,8 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		return r.throwTypeError("assignment to constant variable %q", r.atoms.name(f.cl.names[w.B()]))
 	case bytecode.RColdThrowRef:
 		return r.throwError(errReference, "%s", r.atoms.name(f.cl.names[w.B()]))
+	case bytecode.RColdDebug:
+		return r.regDebug(f, c, pc, w, regs)
 	case bytecode.RColdNewClass, bytecode.RColdSetFieldInit, bytecode.RColdDefineMethod,
 		bytecode.RColdClassGetter, bytecode.RColdClassSetter, bytecode.RColdClassGetterIndex,
 		bytecode.RColdClassSetterIndex, bytecode.RColdClassIndex, bytecode.RColdPrivateName,

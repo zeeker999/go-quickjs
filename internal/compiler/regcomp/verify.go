@@ -289,6 +289,8 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 		return reg(a) && reg(b) && reg(w.C())
 	case bytecode.RColdAssignConst, bytecode.RColdThrowRef:
 		return int(b) < len(fn.Names)
+	case bytecode.RColdDebug:
+		return b <= 1 && fn.Debug != nil && pc < len(rc.Aux) && int(rc.Aux[pc]) < len(fn.Debug.Statements)
 	case bytecode.RColdCheckGlobalRef:
 		return reg(a) && int(b) < len(fn.Names) && site(w.C())
 	case bytecode.RColdAssertResolved:

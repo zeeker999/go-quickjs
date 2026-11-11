@@ -474,6 +474,7 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 		// its binding is initialized.
 		val = g.alloc()
 	}
+	g.debugMark(int(left.Pos()))
 	g.at(pos)
 	g.iterStep(val, cursor, l.brk, await)
 	var p *prot
@@ -538,6 +539,7 @@ func (g *gen) forOfPattern(target ast.Expr, right ast.Expr, body ast.Stmt, await
 		g.patternBindings(target)
 	}
 	val := g.alloc()
+	g.debugMark(int(left.Pos()))
 	g.at(pos)
 	g.iterStep(val, cursor, l.brk, await)
 	var p *prot
