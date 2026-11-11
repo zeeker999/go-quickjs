@@ -124,7 +124,7 @@ about the code, the rest about where it and its data are.
   against the others and against the dispatch. The placements vary that
   too: never-taken tests in the first case, executeAt's `OpNop` (three
   times the placement's number) and runReg's `RNop` (`regInner`, 0 to 7
-  calls of a three-test filler, a permutation over the eight), and in
+  calls of a two-test filler, a permutation over the eight), and in
   runReg's last case, after which its shared tails are laid out
   (`regTail`, another permutation), written only into the placement
   builds: the cases move against the dispatch and the tails against the
