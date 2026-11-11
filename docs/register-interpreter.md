@@ -1264,7 +1264,7 @@ it):
 
 Not in the corpora, and refused as well: code compiled for a debugger
 (`WithDebugger`; done, item 10), a finally clause nested more than four
-copies deep, and the caps -- more than 65,536 registers, a jump past 16
+copies deep (done, item 11), and the caps -- more than 65,536 registers, a jump past 16
 bits, a name past 16 bits, more than 255 arguments, properties or
 elements in one instruction. A cap goes as a wide form, never a refusal.
 
@@ -1595,6 +1595,18 @@ regdiff cases and test262 in register mode on its directories:
    evaluates code there as a direct eval of the register form's
    (`regEvalCode`). Breakpoints and steps are the statements' indexes, as
    in the stack form.
+11. **Finally clauses nested past four copies** -- done (`finShared`). A
+   try statement compiled inside `finallyDepth` copies of clauses has its
+   clause compiled once, at its end, with a completion dispatch: each way
+   in loads its kind in a register of the statement's -- 0 the block's
+   normal end, 1 a throw from the handler, k > 1 an exit -- and jumps to
+   the clause, after which compares of the kind (`RJSEqI`) go on: past the
+   statement, to the throw again, or to the rest of exit k, the clauses
+   outside and its jump or return, compiled there with the registers the
+   exits keep live left alone. A clause inside one so compiled is
+   compiled once too, so that the code grows with the nesting, not as
+   its power. The stack form's copies of a clause with a try statement
+   of its own lost the clauses outside it (fixed with it).
 
 ### Stage 3: the JIT and the tree tier
 

@@ -40,6 +40,8 @@ type prot struct {
 	// with marks a with statement's body, whose object an exit takes off
 	// the frame's with objects (with_pop).
 	with bool
+	// shared is a finally clause's one copy, where it is compiled once.
+	shared *finShared
 }
 
 // protect puts p in force from here.
@@ -69,9 +71,11 @@ func (g *gen) suspend(p *prot) {
 
 func (g *gen) resume(p *prot) { p.open = len(g.code) }
 
-// finallyDepth bounds how deep finally clauses' copies nest: each clause
-// is compiled once for each way out of it, so that a clause inside one is
-// compiled for each of the outer's copies.
+// finallyDepth is how deep finally clauses' copies nest: each clause is
+// compiled once for each way out of it, so that a clause inside one is
+// compiled for each of the outer's copies. A clause deeper is compiled
+// once, with a completion dispatch (finShared), and so is every clause
+// inside it.
 const finallyDepth = 4
 
 // leave compiles an exit that leaves the handlers from g.prots[from:]: the
@@ -108,6 +112,23 @@ func (g *gen) leave(from int, last func()) {
 		if p.finally == nil {
 			continue
 		}
+		if s := p.shared; s != nil {
+			// The clause's one copy, by a way in of the exit's own, after
+			// which the rest of the exit goes on (finShared).
+			outer := saved[: from+i : from+i]
+			loops := savedLoops
+			s.conts = append(s.conts, func() {
+				g.prots, g.loops = outer, loops
+				g.leave(from, last)
+			})
+			g.number(float64(len(s.conts)+1), p.shared.kind)
+			s.top = max(s.top, g.top)
+			g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), s.entry, false)
+			for _, q := range crossed[i:] {
+				g.resume(q)
+			}
+			return
+		}
 		g.prots = saved[: from+i : from+i]
 		g.loops = savedLoops[:p.loops:p.loops]
 		g.finallyCopy(p.finally)
@@ -124,11 +145,14 @@ func (g *gen) leave(from int, last func()) {
 
 // finallyCopy compiles a copy of a finally clause's statements.
 func (g *gen) finallyCopy(list []ast.Stmt) {
-	if g.copies >= finallyDepth {
-		g.fail("finally clauses nested too deep")
-		return
-	}
 	g.copies++
+	g.finallyBody(list)
+	g.copies--
+}
+
+// finallyBody compiles a finally clause's statements, the statement's
+// completion value kept around them.
+func (g *gen) finallyBody(list []ast.Stmt) {
 	mark := g.top
 	if g.completion > 0 {
 		// What the clause produces is not the statement's value: the try
@@ -146,7 +170,6 @@ func (g *gen) finallyCopy(list []ast.Stmt) {
 		g.stmts(list)
 	}
 	g.top = mark
-	g.copies--
 }
 
 // protsOutside is how many handlers in force are around loop l: the ones
@@ -182,6 +205,9 @@ func (g *gen) tryStmt(n *ast.TryStmt) {
 	var fin, cat *prot
 	if n.Finally != nil {
 		fin = &prot{to: g.newMark(), reg: g.alloc(), finally: n.Finally, cursor: -1}
+		if g.copies >= finallyDepth {
+			fin.shared = &finShared{entry: g.newMark(), kind: g.alloc()}
+		}
 		defer g.hold()()
 		g.protect(fin)
 	}
@@ -214,6 +240,10 @@ func (g *gen) tryStmt(n *ast.TryStmt) {
 		return
 	}
 	g.unprotect(fin)
+	if fin.shared != nil {
+		g.finallyShared(fin, n.Finally, n.Start)
+		return
+	}
 	end := g.newMark()
 	g.finallyCopy(n.Finally)
 	g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), end, false)
@@ -222,6 +252,71 @@ func (g *gen) tryStmt(n *ast.TryStmt) {
 	g.at(n.Start)
 	g.emit(bytecode.MakeR(bytecode.RThrow, 0, r16(fin.reg), 0, 0))
 	g.bind(end)
+}
+
+// finShared is a finally clause compiled once, where copies of it would
+// nest deeper than finallyDepth: each way in sets kind -- 0 the try
+// block's normal end, 1 a throw, k > 1 the exit of conts[k-2] -- and
+// jumps to entry, and after the clause, the completion dispatch goes on
+// as kind says. top is the most registers a way in has live, which the
+// clause and the exits' rests leave alone.
+type finShared struct {
+	entry *mark
+	kind  int
+	conts []func()
+	top   int
+}
+
+// finallyShared compiles fin's clause, list, once, with its completion
+// dispatch: the try block's normal end falls in, a throw comes in from
+// the handler and is thrown again after it, and each exit that leaves
+// it goes on past it with the rest of the exit -- the clauses outside,
+// the jump or the return -- compiled there.
+func (g *gen) finallyShared(fin *prot, list []ast.Stmt, pos int) {
+	s := fin.shared
+	g.number(0, s.kind)
+	s.top = max(s.top, g.top)
+	g.bind(s.entry)
+	saved := g.top
+	g.top = s.top
+	g.finallyBody(list)
+	end, rethrow := g.newMark(), g.newMark()
+	g.jumpIfKind(s.kind, 0, end)
+	g.jumpIfKind(s.kind, 1, rethrow)
+	conts := make([]*mark, len(s.conts))
+	for i := range conts {
+		conts[i] = g.newMark()
+		g.jumpIfKind(s.kind, i+2, conts[i])
+	}
+	g.bind(rethrow)
+	g.at(pos)
+	g.emit(bytecode.MakeR(bytecode.RThrow, 0, r16(fin.reg), 0, 0))
+	prots, loops := g.prots, g.loops
+	// An exit's rest may make more of the clause's exits, of the clauses
+	// outside it: not of this one, which is behind it.
+	for i := 0; i < len(conts); i++ {
+		g.bind(conts[i])
+		g.top = s.top
+		s.conts[i]()
+		g.prots, g.loops = prots, loops
+	}
+	g.bind(fin.to)
+	g.number(1, s.kind)
+	g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), s.entry, false)
+	g.bind(end)
+	g.top = saved
+}
+
+// jumpIfKind jumps to m where register kind holds the integer k.
+func (g *gen) jumpIfKind(kind, k int, m *mark) {
+	if k <= 32767 {
+		g.jump(bytecode.MakeR(bytecode.RJSEqI, 0, r16(kind), uint16(int16(k)), 0), m, true)
+		return
+	}
+	t := g.alloc()
+	g.number(float64(k), t)
+	g.jump(bytecode.MakeR(bytecode.RJSEq, 0, r16(kind), r16(t), 0), m, true)
+	g.top = t
 }
 
 // usingKind reports whether a statement list declares anything with

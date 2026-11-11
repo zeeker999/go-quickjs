@@ -236,6 +236,82 @@ return gs;
 	regDiffAll(t, src, calls)
 }
 
+// TestRegDiffFinallyDeep compares finally clauses nested past finallyDepth,
+// compiled once with a completion dispatch: each kind of exit -- continue,
+// break, return, throw, a labelled continue and break, a continue and a
+// return inside a clause -- through six clauses, one with a try statement
+// of its own, the completion value of top-level code, a generator's yields
+// inside them and its return, and a throw's position.
+func TestRegDiffFinallyDeep(t *testing.T) {
+	src := `
+var log = [];
+function deep(mode, n) {
+  for (var j = 0; j < 2; j++) {
+    o: for (var i = 0; i < 3; i++) {
+      try { try { try { try { try { try {
+        log.push("in" + i);
+        if (mode == 0 && i == 1) continue;
+        if (mode == 1 && i == 1) break;
+        if (mode == 2 && i == 1) return "ret" + n;
+        if (mode == 3 && i == 1) throw new Error("boom" + n);
+        if (mode == 4 && i == 1) continue o;
+        if (mode == 5 && i == 2) break o;
+      } finally { log.push("f1"); }
+      } finally { log.push("f2"); if (mode == 6 && i == 1) continue; }
+      } finally { log.push("f3"); }
+      } finally { log.push("f4"); try { log.push("f4i") } finally { log.push("f4f") } }
+      } finally { log.push("f5"); if (mode == 7 && i == 0) return "f5ret"; }
+      } finally { log.push("f6"); }
+      log.push("after" + i);
+    }
+  }
+  return "end";
+}
+function run(m) {
+  log = [];
+  var r;
+  try { r = deep(m, m) } catch (e) { r = "caught " + e.message + " " + e.stack.split("\n")[1].trim() }
+  return r + " " + log.join(",");
+}
+function* gen() {
+  try { try { try { try { try { try { yield 1; return 9 } finally { yield 2 } } finally { yield 3 } } finally { yield 4 } } finally { yield 5 } } finally { yield 6 } } finally { yield 7 }
+}
+function early() { var it = gen(); it.next(); return JSON.stringify([it.return(42), it.next(), it.next(), it.next()]) }
+function nest(mode) {
+  var out = [];
+  for (var i = 0; i < 2; i++) {
+    try { out.push("a"); if (mode == 0) continue; }
+    finally { out.push("A");
+      try { out.push("b"); if (mode == 1) break; }
+      finally { out.push("B");
+        try { out.push("c"); if (mode == 2) return out.join() + "!r"; }
+        finally { out.push("C");
+          try { out.push("d"); if (mode == 3) throw new Error("t" + out.length); }
+          finally { out.push("D");
+            try { out.push("e"); if (mode == 4) continue; }
+            finally { out.push("E");
+              try { out.push("f"); if (mode == 5 && i == 0) break; }
+              finally { out.push("F"); if (mode == 6) return out.join() + "!F"; if (mode == 7 && i == 1) throw new Error("F" + out.length) }
+            }
+          }
+        }
+      }
+    }
+    out.push("z" + i);
+  }
+  return out.join();
+}
+function tryNest(m) { try { return nest(m) } catch (e) { return frames(e) } }
+var frames = function (e) { return e.name + ": " + e.message + " | " + e.stack.split("\n").slice(1, 3).map(function (s) { return s.trim() }).join(" | ") };
+`
+	calls := []string{`tryNest(0)`, `tryNest(1)`, `tryNest(2)`, `tryNest(3)`, `tryNest(4)`, `tryNest(5)`, `tryNest(6)`, `tryNest(7)`, `tryNest(8)`,
+		`run(0)`, `run(1)`, `run(2)`, `run(3)`, `run(4)`, `run(5)`, `run(6)`, `run(7)`,
+		`eval("try { try { try { try { try { 1 } finally { 2 } } finally { 3 } } finally { 4 } } finally { 5 } } finally { 6 }")`,
+		`eval("for (var k = 0; k < 2; k++) { try { try { try { try { try { 1; continue } finally { 2 } } finally { 3 } } finally { 4 } } finally { 5 } } finally { 6 } }")`,
+		`[...gen()].join()`, `early()`}
+	regDiffAll(t, src, calls)
+}
+
 // TestRegDiffEvalCode compares eval code run as register code: direct
 // evals' var and function declarations hoisted into the caller's
 // variables or the global object, strict eval's own, indirect evals, a
