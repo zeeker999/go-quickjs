@@ -1896,7 +1896,7 @@ func (c *compiler) compileChainLinkThis(e ast.Expr, jumps *[]chainJump) {
 	switch {
 	case m.Computed:
 		c.compileExpr(m.Property)
-		c.emit(bytecode.OpGetIndexThis, 0, 0)
+		c.emitAt(m.Property.Pos(), bytecode.OpGetIndexThis, 0, 0)
 	default:
 		if pn, private := m.Property.(*ast.PrivateName); private {
 			name, ref := c.privateName(pn, int(m.Start))
@@ -1904,7 +1904,7 @@ func (c *compiler) compileChainLinkThis(e ast.Expr, jumps *[]chainJump) {
 			c.emitAt(int(m.Start), bytecode.OpGetPrivate, name, ref)
 			break
 		}
-		c.emit(bytecode.OpGetPropThis, c.nameIdx(propKeyName(m.Property)), 0)
+		c.emitAt(m.Property.Pos(), bytecode.OpGetPropThis, c.nameIdx(propKeyName(m.Property)), 0)
 	}
 }
 
@@ -1927,7 +1927,7 @@ func (c *compiler) compileChainLink(e ast.Expr, jumps *[]chainJump) {
 		switch {
 		case n.Computed:
 			c.compileExpr(n.Property)
-			c.emit(bytecode.OpGetIndex, 0, 0)
+			c.emitAt(n.Property.Pos(), bytecode.OpGetIndex, 0, 0)
 		default:
 			if pn, private := n.Property.(*ast.PrivateName); private {
 				// A private name is not a property: it is reached through the
@@ -1938,7 +1938,8 @@ func (c *compiler) compileChainLink(e ast.Expr, jumps *[]chainJump) {
 				c.emitAt(int(n.Start), bytecode.OpGetPrivate, name, ref)
 				break
 			}
-			c.emit(bytecode.OpGetProp, c.nameIdx(propKeyName(n.Property)), 0)
+			// Placed at the property, as a member read outside a chain is.
+			c.emitAt(n.Property.Pos(), bytecode.OpGetProp, c.nameIdx(propKeyName(n.Property)), 0)
 		}
 
 	case *ast.Call:
@@ -1984,7 +1985,7 @@ func (c *compiler) compileChainLink(e ast.Expr, jumps *[]chainJump) {
 			switch {
 			case m.Computed:
 				c.compileExpr(m.Property)
-				c.emit(bytecode.OpGetIndexThis, 0, 0)
+				c.emitAt(m.Property.Pos(), bytecode.OpGetIndexThis, 0, 0)
 			default:
 				if pn, private := m.Property.(*ast.PrivateName); private {
 					// The receiver stays beneath the method, as
@@ -1994,7 +1995,7 @@ func (c *compiler) compileChainLink(e ast.Expr, jumps *[]chainJump) {
 					c.emitAt(int(m.Start), bytecode.OpGetPrivate, name, ref)
 					break
 				}
-				c.emit(bytecode.OpGetPropThis, c.nameIdx(propKeyName(m.Property)), 0)
+				c.emitAt(m.Property.Pos(), bytecode.OpGetPropThis, c.nameIdx(propKeyName(m.Property)), 0)
 			}
 			if n.Optional {
 				// The receiver is beneath the function here, so a short

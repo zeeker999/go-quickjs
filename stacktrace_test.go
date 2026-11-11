@@ -497,3 +497,18 @@ for (var f of [upd, updLoop, bad, bad2]) for (var i = 0; i < 3; i++) try { f(nul
 r.filter((s, i) => i % 3 == 2).join(" | ")`,
 		"at upd (<eval>:2:19) | at updLoop (<eval>:3:51) | at bad (<eval>:4:34) | at bad2 (<eval>:5:35)")
 }
+
+// TestStackPositionInAnOptionalChain pins where a trace places the error of
+// a read inside an optional chain past its link -- o?.a.b where a is null,
+// o.n?.() where o is null -- at the property, as outside a chain. Unplaced,
+// each had the position of whatever was compiled before it, or none.
+func TestStackPositionInAnOptionalChain(t *testing.T) {
+	checkEval(t, `function get(o) { return o?.a.b }
+function call(o) { return o.n?.() }
+function idx(o) { return o?.a[0] }
+function meth(o) { return o?.a.m() }
+var r = []
+for (var [f, v] of [[get, { a: null }], [call, null], [idx, { a: null }], [meth, { a: null }]]) try { f(v) } catch (e) { r.push(e.stack.split(String.fromCharCode(10))[1].trim()) }
+r.join(" | ")`,
+		"at get (<eval>:1:31) | at call (<eval>:2:29) | at idx (<eval>:3:31) | at meth (<eval>:4:32)")
+}
