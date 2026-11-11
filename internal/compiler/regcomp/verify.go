@@ -114,12 +114,12 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			ok = reg(a)
 		case bytecode.RNewArray:
 			ok = reg(a) && int(b)+int(c) <= n
-		case bytecode.RCallW, bytecode.RCallMW:
+		case bytecode.RCallW, bytecode.RCallMW, bytecode.RCallWT, bytecode.RCallMWT:
 			ok = reg(b) && int(a)+int(w.X())+2 <= n && int(c) < rc.CallSites
 			if m := markAt(rc, pc); ok && m != 0 {
 				aux := auxAt(rc, pc)
 				switch {
-				case m&^bytecode.RMarkTail != 0 && w.Op() != bytecode.RCallMW:
+				case !w.Op().MethodCall():
 					ok = false
 				case m&bytecode.RMarkReuse != 0:
 					ok = int64(aux)+1 < int64(len(fn.Code)) && len(rc.LocalReg) == len(fn.Locals)

@@ -992,7 +992,7 @@ func TestRegDiffRegExpWideConstants(t *testing.T) {
 }
 
 // TestRegDiffTailCalls compares calls in tail position in strict code
-// (RMarkTail): chains deep past tailCallDepth in constant space, mutual and
+// (tail_call_w): chains deep past tailCallDepth in constant space, mutual and
 // through methods, conditionals, logical and comma forms; a construct's
 // tail call, which keeps its frame; callees that are built-ins, functions
 // the backend refuses, and that throw at depth; and a stack trace.

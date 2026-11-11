@@ -436,7 +436,7 @@ the ones Go allows:
   list, and no hot operation is renumbered: its case's code would move.
   At the removal of the translation reference the free values were 24,
   29, 36, 37, 40, 41, 42 and 43, and 127 is `invalid`'s; `iter_next`
-  took 24.
+  took 24, `regexp_lit` 29, and the tail calls 36 and 37.
 
 What remains is Go's: a register store of a `Value` is a write-barrier
 check, the loop's instruction word is still saved at the dispatch where a
@@ -1197,22 +1197,26 @@ regdiff cases and test262 in register mode on its directories:
 
 1. **Tail calls** (2,819; 2,566 of the bundles', strict code's `return
    f()`) -- done. The stack compiler records the calls it makes tail calls
-   (`Record.Tails`), and regcomp marks them (`RMarkTail`): the call is
-   call_w or call_method_w as ever, and `regCallW` reads the mark only
-   once the stack is `tailCallDepth` deep (behind one compare,
-   `regDeepCall` past `maxFrames` or `tailCallDepth`). There, a
+   (`Record.Tails`), and regcomp makes them `tail_call_w` and
+   `tail_call_method_w`, call_w and call_method_w in tail position with
+   direct values of their own (36 and 37), so that `regCallW` checks
+   nothing of them: a mark read in `regCallW`'s depth check, its frame's
+   end checked for a restart and a tail call after every call, made
+   `call_fib` 12%, `call_mutual` 14% and the typed arrays' callbacks 6 to
+   16% slower at every placement. `regTailCallW` makes the call
+   `regCallW`'s until the stack is `tailCallDepth` deep. There, a
    callee of register code of the form's own layout that keeps no
    arguments takes the frame over in place (`regTailInPlace`): the
    frame's captured bindings closed, the arguments moved to the
-   parameters, the loop going on from the callee's first instruction
-   (`errRegRestart` in the fail tail), as the tree's `selfRestart` and
+   parameters, the frame run again from the callee's first instruction
+   by its caller (`errRegRestart`, checked only once the call has ended
+   in an error: `regCallWEnd`, `regRerun`), as the tree's `selfRestart` and
    `tailSwap` do -- unwinding to the caller each time made `tail_self`
    3.7 and `tail_mutual` 2.5 times the tree's. Any other frame that is no
    construct's and shares no derived constructor's this is given up as
    the stack form's `tail_call` gives it up: the call pending
    (`r.pendingTail`) and the loop leaving with `errTailCall`, which its
-   caller makes: `regCallW`, `regCallMiss` and `regDirect` through
-   `regCall`, whose loop makes every later call of a chain in place (a
+   caller makes: `regCallW` and `regCallMiss` through `regCall`, whose loop makes every later call of a chain in place (a
    bound function resolved to its target there, as `tailTarget` does), and
    a frame the tree or run made through `treeTail`, as after
    `tailCallNode`. A function with a tail call is not given a `treeCall`

@@ -19,63 +19,16 @@ import (
 // as callTree makes one, its registers run by runReg, with no tree, no
 // recover and no other Go call between the two loops. Anything else is
 // called as the stack interpreter calls it. A frame that ended in a tail
-// call (errTailCall) has its callee called here in its place, in this
-// same call of regCall, as run does: a chain of tail calls runs in
-// constant space.
-// regTailLoop is the loop over the calls a chain of frames ended in
-// (errTailCall), each made in place of the last at this depth.
-//
-//go:noinline
-func (r *Runtime) regTailLoop() (Value, error) {
-	saved := r.tailLoopDepth
-	r.tailLoopDepth = r.frameDepth
-	defer func() { r.tailLoopDepth = saved }()
-	v, err := Undefined, errTailCall
-	for err == errTailCall {
-		tc := r.pendingTail
-		r.pendingTail = tailCall{}
-		// A bound function is resolved to its target here, as run's
-		// tailTarget resolves it: called through the built-in, each would
-		// make its call a level deeper.
-		_, this, args, o, ok, terr := r.tailTarget(tc)
-		switch {
-		case terr != nil:
-			return Undefined, terr
-		case ok:
-			v, err = r.regCall(Obj(o), this, args)
-		default:
-			v, err = r.regCall(tc.callee, tc.this, tc.args)
-		}
-	}
-	return v, err
-}
-
-// A frame regCall runs or enters that ends in a tail call (errTailCall)
-// has its callee called in its place by regTailLoop, whose loop makes every
-// later call of the chain in place: a chain runs in constant space.
-// regCall leaves the error to the loop where the loop called it
-// (regCall's check of errTailCall).
-//
-// regCallOut is regCall's call of what it does not enter itself: a function of
-// register code that needs regDirect's set-up entered by regDirectOnce,
-// which leaves a tail call to regCall's loop, anything else by callDirect,
-// which makes its own.
+// call (errTailCall) has its callee called in its place, in this same call
+// of regCall, as run does: a chain of tail calls runs in constant space.
 func (r *Runtime) regCall(callee, this Value, args []Value) (Value, error) {
 	if !callee.IsObject() {
-		v, err := r.regCallOut(callee, this, args)
-		if err == errTailCall && r.tailLoopDepth != r.frameDepth {
-			return r.regTailLoop()
-		}
-		return v, err
+		return r.callDirect(callee, this, args)
 	}
 	o := callee.Object()
 	fd := o.fn()
 	if fd == nil || fd.closure == nil || fd.bound {
-		v, err := r.regCallOut(callee, this, args)
-		if err == errTailCall && r.tailLoopDepth != r.frameDepth {
-			return r.regTailLoop()
-		}
-		return v, err
+		return r.callDirect(callee, this, args)
 	}
 	cl := fd.closure
 	c := cl.reg
@@ -83,32 +36,20 @@ func (r *Runtime) regCall(callee, this Value, args []Value) (Value, error) {
 		c = r.regOf(cl)
 	}
 	if c == nil || c.wide || cl.realm != r.Realm {
-		v, err := r.regCallOut(callee, this, args)
-		if err == errTailCall && r.tailLoopDepth != r.frameDepth {
-			return r.regTailLoop()
-		}
-		return v, err
+		return r.callDirect(callee, this, args)
 	}
 	if fd.extra != nil {
 		// An arrow whose surroundings are its this alone; anything else a
 		// function carries of its surroundings is runFD's to establish.
 		x := fd.extra
 		if !fd.arrow || x.lexThisRef != nil || x.rare != nil {
-			v, err := r.regCallOut(callee, this, args)
-			if err == errTailCall && r.tailLoopDepth != r.frameDepth {
-				return r.regTailLoop()
-			}
-			return v, err
+			return r.callDirect(callee, this, args)
 		}
 		this = x.lexThis
 	}
 	if c.coerceThis && !this.IsObject() {
 		if !this.IsNullish() {
-			v, err := r.regCallOut(callee, this, args)
-			if err == errTailCall && r.tailLoopDepth != r.frameDepth {
-				return r.regTailLoop()
-			}
-			return v, err
+			return r.callDirect(callee, this, args)
 		}
 		this = r.globalThis
 	}
@@ -176,12 +117,52 @@ func (r *Runtime) regCall(callee, this Value, args []Value) (Value, error) {
 	if f.savedSP != 0 {
 		f.savedSP = 0
 	}
-	f.regKind = regFrameOwn
 	v, err := r.runReg(f, c)
-	f.regKind = 0
 	r.popFrameOf(f, base)
+	if err != nil {
+		return r.regCallEnd(v, err)
+	}
+	return v, err
+}
+
+// regCallEnd is regCall's end in an error: where its frame ended in a tail
+// call (errTailCall), the chain the call starts made by regTailLoop,
+// unless the loop called it (tailLoopDepth). Only regCall's own frame can
+// end so: a function with a tail call has no treeCall (regPlan,
+// planTreeCall), so callDirect makes its tail calls itself.
+//
+//go:noinline
+func (r *Runtime) regCallEnd(v Value, err error) (Value, error) {
 	if err == errTailCall && r.tailLoopDepth != r.frameDepth {
 		return r.regTailLoop()
+	}
+	return v, err
+}
+
+// regTailLoop is the loop over the calls a chain of frames ended in
+// (errTailCall), each made in place of the last at this depth.
+//
+//go:noinline
+func (r *Runtime) regTailLoop() (Value, error) {
+	saved := r.tailLoopDepth
+	r.tailLoopDepth = r.frameDepth
+	defer func() { r.tailLoopDepth = saved }()
+	v, err := Undefined, errTailCall
+	for err == errTailCall {
+		tc := r.pendingTail
+		r.pendingTail = tailCall{}
+		// A bound function is resolved to its target here, as run's
+		// tailTarget resolves it: called through the built-in, each would
+		// make its call a level deeper.
+		_, this, args, o, ok, terr := r.tailTarget(tc)
+		switch {
+		case terr != nil:
+			return Undefined, terr
+		case ok:
+			v, err = r.regCall(Obj(o), this, args)
+		default:
+			v, err = r.regCall(tc.callee, tc.this, tc.args)
+		}
 	}
 	return v, err
 }
@@ -284,11 +265,8 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 				o, cl, rc := e.callee, e.cl, e.rc
 				argc := int(w.X())
 				top := base + int(rc.numRegs)
-				if top > len(r.stack) || r.frameDepth >= r.maxFrames ||
-					r.frameDepth >= tailCallDepth && regMarkAt(c, pc)&bytecode.RMarkTail != 0 {
-					if err := r.regDeepCall(f, c, w, wb, pc, top, e); err != nil {
-						return err
-					}
+				if top > len(r.stack) || r.frameDepth >= r.maxFrames {
+					return r.throwRangeError("maximum call stack size exceeded")
 				}
 				if r.interruptCounter--; r.interruptCounter <= 0 {
 					if err := r.checkInterruptNow(); err != nil {
@@ -332,20 +310,14 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 				}
 				nf.regKind = regFrameCall
 				v, err := r.runReg(nf, rc)
-				if err == errRegRestart {
-					v, err = r.regRestartRun(nf)
-				}
 				nf.regKind = 0
 				if rc.ncap != 0 && len(nf.openUpvalues) != 0 {
 					regCloseUpvalues(nf)
 				}
 				r.frameDepth--
 				r.stackTop = saved
-				if err == errTailCall {
-					v, err = r.regTailRest()
-				}
 				if err != nil {
-					return err
+					return r.regCallWEnd(nf, err, saved, wb+int(w.B()))
 				}
 				regWindow(r.stack, wb)[w.B()] = v
 				return nil
@@ -378,14 +350,6 @@ func regCloseUpvalues(f *frame) {
 //
 //go:noinline
 func (r *Runtime) regCallMiss(f *frame, c *regCode, w bytecode.RInstr, wb, pc int) error {
-	if r.frameDepth >= tailCallDepth && regMarkAt(c, pc)&bytecode.RMarkTail != 0 {
-		if r.regTailInPlace(f, c, w, wb) {
-			return errRegRestart
-		}
-		if r.regTail(f, w, wb) {
-			return errTailCall
-		}
-	}
 	v, err := r.regCallSlow(f, c, w, wb+int(w.A()), pc)
 	if err == errTailCall {
 		// The callee's frame, entered by regEnterW, ended in a tail call.
@@ -540,7 +504,7 @@ func regReuseAt(c *regCode, pc int) *execReuseSite {
 
 func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base, pc int) (Value, error) {
 	argc := int(w.X())
-	method := w.Op() == bytecode.RCallMW
+	method := w.Op().MethodCall()
 	callee := r.stack[base]
 	if callee.IsObject() {
 		o := callee.Object()
@@ -785,9 +749,6 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int,
 		f.locals = r.stack[base+2 : base+2+p : base+2+p]
 	}
 	v, err := r.runReg(f, rc)
-	if err == errRegRestart {
-		v, err = r.regRestartRun(f)
-	}
 	f.regKind = 0
 	if len(f.openUpvalues) != 0 {
 		regCloseUpvalues(f)
@@ -798,23 +759,12 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int,
 		// The arguments kept for it, the last on the argument stack.
 		r.argStack = r.argStack[:len(r.argStack)-len(a)]
 	}
-	return v, err
-}
-
-// regCallOut is regCall's call of callee where it does not enter it.
-func (r *Runtime) regCallOut(callee, this Value, args []Value) (Value, error) {
-	if callee.IsObject() {
-		o := callee.Object()
-		if fd := o.fn(); fd != nil && fd.treeCall != nil && fd.closure.realm == r.Realm {
-			if c := fd.treeCall.reg; c != nil && c.wide {
-				if err := r.tick(); err != nil {
-					return Undefined, err
-				}
-				return r.regDirectOnce(o, fd, c, this, args)
-			}
-		}
+	if err != nil && err == errRegRestart {
+		// The frame, given to a callee in place, run again: it keeps no
+		// arguments (regTailTo).
+		return r.regRerun(f, regFrameEnter, saved)
 	}
-	return r.callDirect(callee, this, args)
+	return v, err
 }
 
 // regTailRest is the call a register frame, gone, ended in (errTailCall,
@@ -826,36 +776,69 @@ func (r *Runtime) regTailRest() (Value, error) {
 	return r.regCall(tc.callee, tc.this, tc.args)
 }
 
-// regDeepCall is regCallW's check of a call past maxFrames or
-// tailCallDepth, its callee's
-// frame to reach top: past maxFrames or the stack, a RangeError; a call in
-// tail position (RMarkTail) once the stack is tailCallDepth deep, its
-// frame given to the callee in place (regTailInPlace, errRegRestart) or
-// given up (regTail, errTailCall); nil for an ordinary call.
+// regTailCallW is tail_call_w and tail_call_method_w: call_w and
+// call_method_w in tail position, as the stack form makes tail_call. Once
+// the stack is tailCallDepth deep, the frame f, an ordinary call's, is
+// given to the callee in place (regTailInPlace, errRegRestart) or given up
+// (regTail, errTailCall), as the tree's restarts and tailCallNode's frame
+// are; otherwise, or where neither can be, the call is regCallW's.
 //
 //go:noinline
-func (r *Runtime) regDeepCall(f *frame, c *regCode, w bytecode.RInstr, wb, pc, top int, e *regCallCache) error {
-	if top > len(r.stack) || r.frameDepth >= r.maxFrames {
-		return r.throwRangeError("maximum call stack size exceeded")
-	}
-	if r.frameDepth >= tailCallDepth && regMarkAt(c, pc)&bytecode.RMarkTail != 0 {
-		// The site's callee, whose this regCallW has put in the window.
-		if r.regTailTo(f, w, wb, e.callee, e.cl, e.rc, regWindow(r.stack, wb+int(w.A()))[1]) {
+func (r *Runtime) regTailCallW(f *frame, c *regCode, k *regKept, wb int) error {
+	if r.frameDepth >= tailCallDepth {
+		pc := k.pc - 1
+		w := regAt(c.code, pc)
+		f.pc = regSrc(c, pc) + 1
+		if r.regTailInPlace(f, c, w, wb) {
 			return errRegRestart
 		}
 		if r.regTail(f, w, wb) {
 			return errTailCall
 		}
 	}
+	return r.regCallW(f, c, k, wb)
+}
+
+// regCallWEnd is regCallW's end of a frame nf that ended in an error,
+// which it returns, the frame closed and the stack's top saved again;
+// where the frame was given to a callee in place (errRegRestart), the
+// frame run again, and where it ended in a tail call (errTailCall), the
+// call made, its value written to the stack at dst.
+//
+//go:noinline
+func (r *Runtime) regCallWEnd(nf *frame, err error, saved, dst int) error {
+	var v Value
+	if err == errRegRestart {
+		v, err = r.regRerun(nf, regFrameCall, saved)
+	}
+	if err == errTailCall {
+		v, err = r.regTailRest()
+	}
+	if err != nil {
+		return err
+	}
+	r.stack[dst] = v
 	return nil
 }
 
-// regMarkAt is the marks of the call at pc, or 0.
-func regMarkAt(c *regCode, pc int) uint8 {
-	if pc < len(c.rc.Marks) {
-		return c.rc.Marks[pc]
+// regRerun runs again frame f, of kind kind, which its caller has closed
+// and whose stack top was saved, where a tail call has given it to a callee
+// in place (regTailTo): opened again at the same depth with the callee's
+// registers, run by regRestartRun, and closed.
+func (r *Runtime) regRerun(f *frame, kind uint8, saved int) (Value, error) {
+	r.frameDepth++
+	if top := f.base + int(r.regRestart.numRegs); top > r.stackTop {
+		r.stackTop = top
+		if top > r.stackHigh {
+			r.stackHigh = top
+		}
 	}
-	return 0
+	f.regKind = kind
+	v, err := r.regRestartRun(f)
+	f.regKind = 0
+	r.frameDepth--
+	r.stackTop = saved
+	return v, err
 }
 
 // errRegRestart is how a call in tail position tells runReg's caller that
@@ -911,7 +894,7 @@ func (r *Runtime) regTailInPlace(f *frame, c *regCode, w bytecode.RInstr, wb int
 		return false
 	}
 	this := Undefined
-	if w.Op() == bytecode.RCallMW {
+	if w.Op().MethodCall() {
 		this = win[1]
 	}
 	if x := fd.extra; x != nil {
@@ -982,7 +965,7 @@ func (r *Runtime) regTail(f *frame, w bytecode.RInstr, wb int) bool {
 	}
 	win := regWindow(r.stack, wb+int(w.A()))
 	this := Undefined
-	if w.Op() == bytecode.RCallMW {
+	if w.Op().MethodCall() {
 		this = win[1]
 	}
 	r.pendingTail = tailCall{callee: win[0], this: this, args: append([]Value(nil), win[2:2+int(w.X())]...)}
@@ -1075,16 +1058,6 @@ func regMadeClosure(o *Object) *Object {
 // and run there, without callTree's frame, runTree's recover and the copy
 // regEnterFrame makes. callDirect has counted the call.
 func (r *Runtime) regDirect(o *Object, fd *funcData, c *regCode, this Value, args []Value) (Value, error) {
-	v, err := r.regDirectOnce(o, fd, c, this, args)
-	if err == errTailCall {
-		return r.regTailRest()
-	}
-	return v, err
-}
-
-// regDirectOnce is regDirect's call, which returns errTailCall where the
-// frame ended in a tail call.
-func (r *Runtime) regDirectOnce(o *Object, fd *funcData, c *regCode, this Value, args []Value) (Value, error) {
 	if regReportOn {
 		regNoteCross(regCrossDirect, c.fn, "")
 	}
@@ -2090,16 +2063,11 @@ const (
 	// regFrameEnter is regEnterW's: its this is its window's, its
 	// new.target the frame's.
 	regFrameEnter
-	// regFrameOwn is regCall's own: its this and new.target the frame's.
-	regFrameOwn
 )
 
 // regFrameThis is the this and new.target of register frame f, for a stack
 // trace.
 func (r *Runtime) regFrameThis(f *frame) (this, newTarget Value) {
-	if f.regKind == regFrameOwn {
-		return f.this, f.newTarget
-	}
 	this = r.stack[f.base+1]
 	newTarget = Undefined
 	if f.regKind == regFrameEnter {
@@ -2116,7 +2084,7 @@ func (r *Runtime) regNative(o *Object, w bytecode.RInstr, wb int) error {
 	base := wb + int(w.A())
 	args := r.stack[base+2 : base+2+int(w.X())]
 	this := Undefined
-	if w.Op() == bytecode.RCallMW {
+	if w.Op().MethodCall() {
 		this = r.stack[base+1]
 	}
 	fd := o.fn()

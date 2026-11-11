@@ -2416,12 +2416,12 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	}
 	g.at(n.TracePos())
 	dead = dead && (mname == "exec" || mname == "replace")
-	at := g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), g.callSite()))
 	if g.rec.Tails[n] && !argLit {
 		// A call in tail position, whose frame is given up once the
 		// stack is deep, as the stack form's tail_call gives it up.
-		g.mark(at, bytecode.RMarkTail)
+		op = tailOp(op)
 	}
+	at := g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), g.callSite()))
 	if argLit {
 		// A RegExp literal given to replace, split or match, made by the
 		// call, which may have its RegExp back once it is done with it.
@@ -2563,6 +2563,14 @@ func (g *gen) regexpLitCall(n *ast.Call, dst int, dead bool) (int, bool) {
 	g.aux(at, k)
 	g.mark(at, bytecode.RMarkLitRecv|deadMark(dead && name == "exec"))
 	return d, true
+}
+
+// tailOp is call op's form in tail position.
+func tailOp(op bytecode.ROp) bytecode.ROp {
+	if op == bytecode.RCallMW {
+		return bytecode.RCallMWT
+	}
+	return bytecode.RCallWT
 }
 
 // litTest is regexp_lit's flag of a literal's test, for name test.

@@ -1156,7 +1156,14 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		// new operation takes its value out of this list, or the switch does
 		// not compile: the values the translation reference's operations
 		// had, and 127, invalid's.
-		case 36, 37, 40, 41, 42, 43:
+		case bytecode.RCallWT, bytecode.RCallMWT:
+			kept.pc = pc
+			if err := r.regTailCallW(f, c, &kept, wb); err != nil {
+				failed = err
+				goto fail
+			}
+			pc = kept.pc
+		case 40, 41, 42, 43:
 			goto invalid
 		case 127:
 			goto invalid

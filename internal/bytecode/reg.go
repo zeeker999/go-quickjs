@@ -173,8 +173,13 @@ const (
 	// RJmpF and RJmpT: jump by int32(BC) if R[A] is falsy or truthy.
 	RJmpF
 	RJmpT
-	_ // free: 36, the translation reference's jmp_cmp, removed
-	_ // free: 37, the translation reference's jmp_cmp_imm, removed
+	// RCallWT and RCallMWT are RCallW and RCallMW in tail position, as the
+	// stack form makes tail_call (values 36 and 37, out of the free list):
+	// once the stack is deep, the frame is given to the callee in place or
+	// given up. Ops of their own, so that the ordinary call checks nothing
+	// of it.
+	RCallWT
+	RCallMWT
 	// RRet returns R[A]; RRetUndef returns undefined.
 	RRet
 	RRetUndef
@@ -434,9 +439,6 @@ const (
 	// String.prototype's replace, split or match searching with it
 	// directly (regexpArgCall).
 	RMarkLitArg
-	// RMarkTail marks a call in tail position, as the stack form makes it
-	// (tail_call): once the stack is deep, its frame is given up.
-	RMarkTail
 )
 
 var rColdNames = [...]string{
@@ -586,7 +588,7 @@ var rOpNames = [...]string{
 	RNewObject: "new_object", RNewArray: "new_array",
 	RAdd: "add", RSub: "sub", RMul: "mul", RBin: "bin",
 	RInc: "inc", RDec: "dec", RUnary: "unary",
-	RJmp: "jmp", RJmpF: "jmp_false", RJmpT: "jmp_true", RRet: "ret", RRetUndef: "ret_undef",
+	RJmp: "jmp", RJmpF: "jmp_false", RJmpT: "jmp_true", RCallWT: "tail_call_w", RCallMWT: "tail_call_method_w", RRet: "ret", RRetUndef: "ret_undef",
 	RBitAnd: "bit_and", RBitOr: "bit_or", RBitXor: "bit_xor", RShl: "shl", RShr: "shr", RUShr: "ushr",
 	RAndI: "and_imm", ROrI: "or_imm", RXorI: "xor_imm", RShlI: "shl_imm", RShrI: "shr_imm", RUShrI: "ushr_imm",
 	RCallW: "call_w", RAddI: "add_imm", RSubI: "sub_imm",
@@ -599,6 +601,10 @@ var rOpNames = [...]string{
 	RThrow: "throw", RInstanceOf: "instanceof", RIn: "in", RDelete: "delete", RArguments: "arguments", RNewArrayK: "new_array_k", RAddProp: "add_prop", RAddPropI: "add_prop_imm", RApplyArgs: "apply_args",
 	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RSwitch: "switch", RJTypeof: "jtypeof", RTypeof: "typeof", RSwitchTypeof: "switch_typeof", RNewObjectLit: "new_object_lit", RAppend: "append", RStrFreeze: "str_freeze", RCharCodeAt: "char_code_at", RIterNext: "iter_next", RLit: "regexp_lit", RCold: "cold", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
 }
+
+// MethodCall reports whether op is call_method_w or its tail form, whose
+// this is R[A+1].
+func (op ROp) MethodCall() bool { return op == RCallMW || op == RCallMWT }
 
 func (op ROp) String() string {
 	if int(op) < len(rOpNames) && rOpNames[op] != "" {
@@ -717,7 +723,7 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s[%d], %s", op, r(w.A()), w.B(), r(w.C()))
 	case RClosureW:
 		return fmt.Sprintf("%s %s, k%d", op, r(w.A()), w.BC())
-	case RCallW, RCallMW, RNewW:
+	case RCallW, RCallMW, RCallWT, RCallMWT, RNewW:
 		return fmt.Sprintf("%s %s = %s(%d)", op, r(w.B()), r(w.A()), w.X())
 	case RLit:
 		m := "exec"

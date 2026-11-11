@@ -340,7 +340,7 @@ func (r *Runtime) regDeadCall(o *Object, recv Value, args []Value) (Value, error
 func regReuseSites(fn *bytecode.Function, rc *bytecode.RegCode) []*execReuseSite {
 	var out []*execReuseSite
 	for pc, w := range rc.Code {
-		if w.Op() != bytecode.RCallMW || pc >= len(rc.Marks) || rc.Marks[pc]&bytecode.RMarkReuse == 0 {
+		if !w.Op().MethodCall() || pc >= len(rc.Marks) || rc.Marks[pc]&bytecode.RMarkReuse == 0 {
 			continue
 		}
 		spc := int(rc.Aux[pc])
