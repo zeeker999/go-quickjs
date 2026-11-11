@@ -62,6 +62,11 @@ func regDiffRun(t *testing.T, src string, calls []string) []string {
 // returns how many functions the tier gave register code.
 func regDiff(t *testing.T, src string, calls []string) int64 {
 	t.Helper()
+	if regDiffHook != nil {
+		// Another test's reading of the corpus (regDiffHook).
+		regDiffHook(t, src, calls)
+		return 1 << 20
+	}
 	var off, again, on []string
 	withRegTier(false, func() { off = regDiffRun(t, src, calls) })
 	withRegTier(false, func() { again = regDiffRun(t, src, calls) })
@@ -101,6 +106,11 @@ func regDiff(t *testing.T, src string, calls []string) int64 {
 	}
 	return built
 }
+
+// regDiffHook, where it is set, is given each program and its calls in
+// regDiff's place: a test that reads the corpus another way runs the
+// differential tests with it set (TestRegLowerEvaluate).
+var regDiffHook func(t *testing.T, src string, calls []string)
 
 // regDiffResult is the expression a call is compared by: what it returns
 // and what it left in global_res, as text.
