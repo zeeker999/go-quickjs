@@ -257,6 +257,15 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 	case bytecode.RColdAssignConst:
 		// An assignment to a constant is a runtime error, not an early one.
 		return r.throwTypeError("assignment to constant variable %q", r.atoms.name(f.cl.names[w.B()]))
+	case bytecode.RColdCheckGlobalRef:
+		found, err := r.regCheckGlobalRef(f, f.cl.names[w.B()], int(w.C()))
+		regs[w.A()] = Bool(found)
+		return err
+	case bytecode.RColdAssertResolved:
+		if !regs[w.A()].Truthy() {
+			return r.throwReferenceError("%s is not defined", r.atoms.name(f.cl.names[w.B()]))
+		}
+		return nil
 	case bytecode.RColdGetGlobalOpt:
 		v, err := r.regGlobalOpt(f, f.cl.names[w.B()])
 		regs[w.A()] = v

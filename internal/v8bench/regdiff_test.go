@@ -1203,3 +1203,30 @@ function m1(a) { var args = arguments; var o = { f(x) { x[0] = 100; return 1 } }
 		"`top ${1 + 1}`", `m1(0)`, `var pa = { b: function () { return this._b }, _b: { c: 42 } }; String((pa?.b)?.().c) + String((null?.b)?.())`, `({ a: 1, ...{ b: 2 } }).b`, `[...[1, 2], 3].join()`, `undefined?.x ?? "n"`}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffStrictGlobalStores compares strict assignments to globals of a
+// value that runs code: the reference is settled before the value runs, so
+// a value that creates the global does not make the store resolvable, a
+// value that throws is what the assignment reports, and an existing global,
+// a lexical one and a global object's accessor take the store, with the
+// errors' stack traces.
+func TestRegDiffStrictGlobalStores(t *testing.T) {
+	src := `
+function frames(e) { return e.name + ": " + e.message + " | " + e.stack.split("\n").slice(1, 3).map(function (s) { return s.trim() }).join(" | ") }
+function mk(name, v) { globalThis[name] = 0; return v }
+function boom() { throw new Error("value") }
+var sg1 = 1;
+let sg2 = 2;
+var sgLog = [];
+Object.defineProperty(globalThis, "sg3", { get() { return 0 }, set(v) { sgLog.push(v) }, configurable: true });
+function s1() { "use strict"; sg1 = mk("x", 5); return sg1 }
+function s2() { "use strict"; sg2 = mk("x", 6); return sg2 }
+function s3() { "use strict"; try { sgNew1 = mk("sgNew1", 7); return "no" } catch (e) { return frames(e) + " " + globalThis.sgNew1 } }
+function s4() { "use strict"; try { sgNew2 = boom(); return "no" } catch (e) { return frames(e) + " " + ("sgNew2" in globalThis) } }
+function s5() { "use strict"; sg3 = mk("x", 8); return sgLog.join() }
+function s6() { "use strict"; var r = []; for (var i = 0; i < 3; i++) { sg1 = mk("x", i); r.push(sg1) } return r.join() }
+function s7() { "use strict"; try { sgNew3 = mk("x", 1) } catch (e) { return frames(e) } }
+`
+	calls := []string{`s1()`, `s2()`, `s3()`, `s4()`, `s5()`, `s6()`, `s7()`, `s7()`}
+	regDiff(t, src, calls)
+}

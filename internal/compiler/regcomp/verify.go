@@ -252,6 +252,10 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 		return reg(a) && reg(b) && reg(w.C())
 	case bytecode.RColdAssignConst:
 		return int(b) < len(fn.Names)
+	case bytecode.RColdCheckGlobalRef:
+		return reg(a) && int(b) < len(fn.Names) && site(w.C())
+	case bytecode.RColdAssertResolved:
+		return reg(a) && int(b) < len(fn.Names)
 	case bytecode.RColdArrayPush, bytecode.RColdArraySpread:
 		return reg(a) && reg(b)
 	case bytecode.RColdCallSpread:

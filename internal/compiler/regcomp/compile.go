@@ -1935,8 +1935,17 @@ func (g *gen) storeIdent(id *ast.Ident, value ast.Expr, init bool) int {
 			// runs no code cannot change the answer, and the store asks it
 			// (set_global_strict's folding, foldGlobalCheck).
 			if !g.runsNoCode(value) {
-				g.fail("a strict global store of a value that runs code")
-				return 0
+				// Settled before the value runs, reported after it, as
+				// the stack form's check_global_ref and assert_resolved.
+				ok := g.alloc()
+				g.at(int(id.Start))
+				name := g.name16(id.Name)
+				g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdCheckGlobalRef), r16(ok), name, g.globalSite()))
+				v := g.expr(value, -1)
+				g.at(int(id.Start))
+				g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdAssertResolved), r16(ok), name, 0))
+				g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), name, g.globalSite()))
+				return v
 			}
 			strict = 1
 		}

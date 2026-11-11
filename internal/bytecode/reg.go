@@ -471,6 +471,12 @@ const (
 	// RColdAssignConst throws the TypeError of an assignment to the
 	// constant Names[B] (assign_const).
 	RColdAssignConst
+	// A strict assignment to a global whose value runs code: R[A] = whether
+	// the global Names[B] resolves, asked before the value is made, through
+	// cache site C (check_global_ref); RColdAssertResolved throws the
+	// ReferenceError of Names[B] where R[A] says it did not (assert_resolved).
+	RColdCheckGlobalRef
+	RColdAssertResolved
 )
 
 // The flags of regexp_lit's X.
@@ -526,7 +532,8 @@ var rColdNames = [...]string{
 	RColdDefineIndex: "define_index", RColdSetFuncName: "set_func_name",
 	RColdSetHomeObject: "set_home_object", RColdSetProtoOf: "set_proto_of",
 	RColdArrayPush: "array_push", RColdArraySpread: "array_spread", RColdCallSpread: "call_spread",
-	RColdAssignConst: "assign_const",
+	RColdAssignConst: "assign_const", RColdCheckGlobalRef: "check_global_ref",
+	RColdAssertResolved: "assert_resolved",
 }
 
 func (op RColdOp) String() string {

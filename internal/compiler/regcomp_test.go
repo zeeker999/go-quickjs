@@ -108,9 +108,10 @@ func TestRegisterBackendCode(t *testing.T) {
 }
 
 // TestRegisterBackendFallsBack pins what the backend leaves to the stack
-// form, each function as a whole: a generator, a strict global store of a
-// value that runs code. A try statement is register code, with a handler
-// table, and so are a catch clause's pattern and an optional chain.
+// form, each function as a whole: a generator. A try statement is register
+// code, with a handler table, and so are a catch clause's pattern, an
+// optional chain and a strict global store of a value that runs code, which
+// settles whether the name resolves before the value runs.
 func TestRegisterBackendFallsBack(t *testing.T) {
 	fns := regFunctions(t, `
 		function tried() { try { return 1 } catch ({ e }) { return 2 } }
@@ -119,12 +120,19 @@ func TestRegisterBackendFallsBack(t *testing.T) {
 		function* gen() { yield 1 }
 		function strictStore() { 'use strict'; g = plain(1) }
 		function plain(x) { return x + 1 }`)
-	for _, name := range []string{"tried", "opt"} {
+	for _, name := range []string{"tried", "opt", "strictStore"} {
 		if f := fns[name]; f == nil || f.Reg == nil {
 			t.Errorf("%s: want register code", name)
 		}
 	}
-	for _, name := range []string{"gen", "strictStore"} {
+	if f := fns["strictStore"]; f != nil && f.Reg != nil {
+		for _, op := range []string{"check_global_ref", "assert_resolved", "set_global"} {
+			if !strings.Contains(f.Reg.String(), op) {
+				t.Errorf("strictStore has no %s:\n%s", op, f.Reg)
+			}
+		}
+	}
+	for _, name := range []string{"gen"} {
 		if f := fns[name]; f == nil || f.Reg != nil {
 			t.Errorf("%s: register code %v, want none", name, f != nil && f.Reg != nil)
 		}

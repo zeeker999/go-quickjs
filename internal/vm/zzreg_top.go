@@ -145,3 +145,23 @@ func (r *Runtime) regGlobalOpt(f *frame, name Atom) (Value, error) {
 	}
 	return r.getProp(env, name, r.globalReceiver(env))
 }
+
+// regCheckGlobalRef is check_global_ref: whether the global name resolves,
+// settled where a strict assignment's reference is evaluated, before its
+// value, through cache site site, as executeAt's case settles it.
+func (r *Runtime) regCheckGlobalRef(f *frame, name Atom, site int) (bool, error) {
+	cl := f.cl
+	env := cl.scope()
+	switch {
+	case hasOwnGlobal(env, &cl.ic[site], name):
+	case f.evalVars != nil && evalVarProp(f.evalVars, name).ok():
+	case r.globalLexProp(env, name).ok():
+	case !r.isGlobalScope(env) && r.moduleLexProp(env, name).ok():
+	case r.nodeQuirks && chainHasProxy(env):
+		// V8 asks a proxy on the global object's chain nothing before the
+		// store, which it counts as finding the name.
+	default:
+		return r.hasPropErr(env, name)
+	}
+	return true, nil
+}
