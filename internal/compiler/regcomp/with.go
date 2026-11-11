@@ -189,6 +189,8 @@ func (g *gen) withStmt(n *ast.WithStmt) {
 	o := g.expr(n.Object, -1)
 	g.at(n.Start)
 	g.cold(bytecode.RColdWithPush, o, 0, 0)
+	// A body that produces no value leaves the statement's undefined.
+	g.resetCompletion()
 	p := &prot{to: g.newMark(), reg: g.alloc(), cursor: -1, with: true}
 	defer g.hold()()
 	g.protect(p)

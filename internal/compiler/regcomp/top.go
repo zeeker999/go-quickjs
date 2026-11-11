@@ -71,9 +71,16 @@ func (g *gen) topBody() {
 			sub = bytecode.RColdDefineGlobalFunc
 			a = g.alloc()
 			g.closure(t.Fn, a)
+		case bytecode.OpSetUpvalue:
+			a = g.alloc()
+			g.closure(t.Fn, a)
+			g.storeValue(t.Id, a)
+			g.top = g.topAfterBindings()
+			continue
 		default:
-			// The stack compiler records only the six above (regTop's
-			// callers): any other is its bug, not a form to refuse.
+			// The stack compiler records only the seven above (regTop's
+			// callers and predeclareFunction's): any other is its bug,
+			// not a form to refuse.
 			panic("regcomp: top-level code's record holds " + t.Op.String())
 		}
 		g.emit(bytecode.MakeR(bytecode.RCold, uint8(sub), r16(a), name, flag))

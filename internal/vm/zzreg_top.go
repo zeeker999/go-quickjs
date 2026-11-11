@@ -40,6 +40,14 @@ func (r *Runtime) regColdTop(f *frame, w bytecode.RInstr, regs *[1 << 16]Value) 
 			return r.throwTypeError("cannot declare %q on a non-extensible global", r.atoms.name(name))
 		}
 	case bytecode.RColdDefineGlobalVar:
+		if f.evalVars != nil {
+			// Eval code inside a function: what it declares is that
+			// function's, as the stack form's define_global_var has it.
+			if !evalVarProp(f.evalVars, name).ok() {
+				f.evalVars.setOwnRaw(name, Undefined, propWritable|propConfigurable)
+			}
+			return nil
+		}
 		env := cl.scope()
 		if env == r.global {
 			if err := r.checkGlobalVarName(name); err != nil {
@@ -62,6 +70,10 @@ func (r *Runtime) regColdTop(f *frame, w bytecode.RInstr, regs *[1 << 16]Value) 
 		}
 	case bytecode.RColdDefineGlobalFunc:
 		fn := regs[w.A()]
+		if f.evalVars != nil {
+			f.evalVars.setOwnRaw(name, fn, propWritable|propConfigurable)
+			return nil
+		}
 		flags := propWritable | moduleBindingFlags(r.atoms.name(name))
 		if flag {
 			flags |= propConfigurable

@@ -61,13 +61,11 @@ func (c *compiler) regTop(op bytecode.Op, name, flag uint32, fn *ast.FuncLit) {
 	c.reg.NoteTop(regcomp.TopOp{Op: op, Name: c.fn.Names[name], Flag: flag, Pos: c.lastPos, Fn: fn})
 }
 
-// regScript reports whether top-level code compiled with opts is a script's
-// of the kind the register form compiles: not eval code, a module's, a
-// debugger's or the body of a function the Function constructor makes.
+// regScript reports whether top-level code compiled with opts is of the
+// kind the register form compiles: a script's, a module's or eval code's,
+// direct or indirect, but not a debugger's.
 func regScript(opts Options) bool {
-	return !opts.Debug && opts.EvalScope == nil && opts.EvalWithDepth == 0 && len(opts.PrivateNames) == 0 &&
-		len(opts.ArgumentNames) == 0 && !opts.EvalOwnVarScope && !opts.InFieldInit && !opts.EvalVarScopeIsGlobal &&
-		!opts.EvalConfigurable && !opts.AllowSuperProp && !opts.AllowSuperCall && !opts.AllowNewTarget
+	return !opts.Debug
 }
 
 // regTopCode gives fn, top-level code of statements body whose resolution

@@ -1481,8 +1481,7 @@ regdiff cases and test262 in register mode on its directories:
    own. A frame runs as register code whatever with objects and eval's
    variables runFD gives it, and a generator keeps them across a
    suspension. The stack form probed a binding typeof reads twice
-   (fixed with it). Eval code itself is still the stack form's (top-level
-   code of an eval: `regScript`).
+   (fixed with it). Eval code itself is register code too (item 9e).
 9. **`using` and `await using`** (177) -- done (regcomp's try.go,
    `usingScope`): a statement list, a for head or a for-of head that
    declares with using is a scope whose resources are in a register of
@@ -1519,10 +1518,14 @@ regdiff cases and test262 in register mode on its directories:
    (B.3.3.1), a store the stack compiler records as the declaration's
    name's write -- it assigned it as the block was entered, which Node
    does not (fixed with it).
-9d. **The last refusals of the corpora** (40) -- done.
+9d. **The last refusals of the corpora** (40) -- 37 done; left: two
+   functions of more than 65,535 sites (below) and the debugger
+   statement, which is the debugger's code (next).
    - *A finally clause's bindings* (9, "a name the record resolves two
-     ways"): the stack form compiles a clause once for each way out, each
-     copy's bindings in slots of their own (slots are never reused), so
+     ways"): the stack form compiles a clause once for each way out --
+     inline at the normal end, as the handler's, and at each break or
+     continue that leaves it (unwindTo) -- each copy's bindings in slots
+     of their own (slots are never reused), so
      a name in it resolved to one slot in one copy and another in the
      next. The record keeps the first copy's notes and drops the later
      ones' (`Record.BeginFinally`); regcomp compiles all its copies from
@@ -1549,10 +1552,32 @@ regdiff cases and test262 in register mode on its directories:
      again with its sites shared by key (`site16`, `siteKey`): the kind of
      cache and the name, a literal's keys or constants, a call's
      operation -- entries that answer alike for every instruction of the
-     key, a call's checked against its callee. Mandreel's global_init,
-     70,000 calls of a few functions, shares a site for each.
+     key, a call's checked against its callee. Not yet: a function whose
+     stack form alone has more than 65,535 sites, since the register
+     form's are numbered after them (Mandreel's global_init, 155,109;
+     test262's string-upper-lower-mapping.js, 65,561): what is left is a
+     site the register form numbers apart from the stack form's, or
+     forms that take theirs from Aux.
    - `with (o) f(...a)` passed no receiver in the stack form (fixed with
      it): a spread call probes with `with_get_this` as any call does.
+9e. **Eval code** -- done. The top level a direct or an indirect eval
+   evaluates, strict or sloppy, and the Function constructor's code, are
+   compiled as any top-level code (`regScript` refuses only a debugger's),
+   and so is every function written inside them, which the record skipped
+   where the code had an eval scope. The caller's bindings are upvalues by
+   name (`evalIn` captures them from the frame, its register for register
+   code); a with object's names are probed as in the caller. A var or a
+   function the code declares goes where the stack form's
+   define_global_var and define_global_func put it: the global object, or
+   inside a function the frame's eval variables (`f.evalVars`, which
+   runFD gives the frame), which the cold `define_global_var` and
+   `define_global_func` now do too. A function the code declares where
+   the caller binds the name as a var is stored into that binding, as
+   the stack form's storeVar does: a declaration of its own in the record
+   (`TopOp` set_upvalue, of an identifier of its own, whose write the
+   record resolves, a with object's probe included). The completion value
+   of a with statement whose body produces none is undefined (fixed with
+   it).
 
 ### Stage 3: the JIT and the tree tier
 

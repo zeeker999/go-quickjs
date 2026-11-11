@@ -171,12 +171,16 @@ func NewRecord() *Record {
 // TopOp is one of top-level code's declarations: the stack form's
 // instruction Op of name Name and flag Flag, at source position Pos, and
 // for define_global_func the function, Fn, whose closure it defines.
+// OpSetUpvalue is eval code's function declaration of a name its caller
+// binds as a var: Fn's closure stored as the record resolves the write of
+// Id, the declaration's name.
 type TopOp struct {
 	Op   bytecode.Op
 	Name string
 	Flag uint32
 	Pos  int32
 	Fn   *ast.FuncLit
+	Id   *ast.Ident
 }
 
 // NoteTop records top-level code's declaration op.

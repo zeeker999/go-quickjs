@@ -148,7 +148,17 @@ func (c *compiler) predeclareFunction(h hoistedFunc) {
 		// declared -- and what a reference to the name finds afterwards,
 		// whether it is written inside the eval or outside it.
 		if b, known := c.callerBinding(h.name); known && b.VarScoped {
+			// The register form makes the store as the write of an
+			// identifier of its own (regcomp.TopOp's Id): the name's is
+			// an Annex B alias's where it has one.
+			id := &ast.Ident{Name: h.name, Start: h.fd.Fn.Name.Start}
+			saved := c.regIdent
+			c.regIdent = id
 			c.storeVar(h.name)
+			c.regIdent = saved
+			if c.reg != nil && c.parent == nil {
+				c.reg.NoteTop(regcomp.TopOp{Op: bytecode.OpSetUpvalue, Name: h.name, Pos: c.lastPos, Fn: h.fd.Fn, Id: id})
+			}
 			return
 		}
 		c.emit(bytecode.OpDefineGlobalFunc, c.nameIdx(h.name),
@@ -1531,12 +1541,14 @@ func (c *compiler) unwindTo(target *loopCtx) {
 			c.emit(bytecode.OpPushUndef, 0, 0)
 			c.emit(bytecode.OpSetLocal, uint32(c.completionSlot), 0)
 		}
+		end := c.reg.BeginFinally(saved[i].body)
 		c.beginScope()
 		savedRecord := c.finallyRecord
 		c.finallyRecord = false
 		c.compileStatements(saved[i].body)
 		c.finallyRecord = savedRecord
 		c.endScope()
+		end()
 		if cv >= 0 {
 			c.emit(bytecode.OpGetLocal, uint32(cv), 0)
 			c.emit(bytecode.OpSetLocal, uint32(c.completionSlot), 0)
