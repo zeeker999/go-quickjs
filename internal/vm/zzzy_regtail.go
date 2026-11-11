@@ -224,7 +224,9 @@ func (r *Runtime) regTailInPlace(f *frame, c *regCode, w bytecode.RInstr, wb int
 func (r *Runtime) regTailTo(f *frame, w bytecode.RInstr, wb int, o *Object, cl *closure, rc *regCode, this Value) bool {
 	if f.regKind != regFrameCall && f.regKind != regFrameEnter || !f.newTarget.IsUndefined() ||
 		f.thisRef != nil || f.args != nil || f.withScopes != nil || f.evalVars != nil ||
-		!rc.wide || rc.args || rc.locals != 0 {
+		!rc.wide || rc.args || rc.locals != 0 || !cl.fn.Strict {
+		// A sloppy callee is given a frame of its own: its f.arguments
+		// reads its count from its caller's instruction (regLegacyArgs).
 		return false
 	}
 	base := f.base
@@ -304,4 +306,90 @@ func regPlan(fd *funcData) {
 		return
 	}
 	fd.treeCall = t
+}
+
+// regKeepWindow keeps the arguments past its params parameters of the
+// register frame about to be made at base with argc arguments, which its
+// bindings overwrite in its window, for f.arguments (regLegacyArgs);
+// regKeepArgs those of args. They are kept at the frame's depth, in a
+// slice of the runtime's that the next such call at that depth reuses.
+// Only a call with more arguments than parameters pays for it: regCallW
+// and regEnterW call these past one compare.
+//
+//go:noinline
+func (r *Runtime) regKeepWindow(base, params, argc int) {
+	r.regKeepArgs(r.stack[base+2:base+2+argc], params)
+}
+
+//go:noinline
+func (r *Runtime) regKeepArgs(args []Value, params int) {
+	d := r.frameDepth
+	for len(r.regExtras) <= d {
+		r.regExtras = append(r.regExtras, nil)
+	}
+	r.regExtras[d] = append(r.regExtras[d][:0], args[params:]...)
+}
+
+// regExtrasLetGo lets go of the arguments regKeepArgs kept for calls that
+// have returned, deeper than any frame now (clearReturnedFrames), keeping
+// the slices' room.
+func (r *Runtime) regExtrasLetGo() {
+	for i := r.frameDepth; i < len(r.regExtras); i++ {
+		e := r.regExtras[i]
+		clear(e[:cap(e)])
+		r.regExtras[i] = e[:0]
+	}
+}
+
+// regLegacyArgs is the arguments f.arguments reads of register frame f, at
+// depth i, made by regCallW or regEnterW, which keep no slice of them: the
+// count from its caller's call instruction -- the one call of the caller's
+// register code at the stack form's instruction its pc names, which is
+// where a call sets it -- the parameters from the window, as they are now,
+// and the arguments past them from what regKeepWindow and regKeepArgs kept. It reports
+// false where the caller runs no register code or names no one call: a
+// built-in's callback, a construct.
+func (r *Runtime) regLegacyArgs(i int, f *frame) ([]Value, bool) {
+	if i == 0 {
+		return nil, false
+	}
+	caller := r.frameAt(i - 1)
+	if caller.cl == nil || caller.cl.reg == nil || caller.pc == 0 || f.cl.reg == nil {
+		return nil, false
+	}
+	cc := caller.cl.reg
+	argc := -1
+	for pc, s := range cc.src {
+		if s != caller.pc-1 {
+			continue
+		}
+		switch w := regAt(cc.code, pc); w.Op() {
+		case bytecode.RCallW, bytecode.RCallMW, bytecode.RCallWT, bytecode.RCallMWT:
+			if argc >= 0 {
+				return nil, false
+			}
+			argc = int(w.X())
+		}
+	}
+	if argc < 0 {
+		return nil, false
+	}
+	params := int(f.cl.reg.params)
+	args := make([]Value, argc)
+	for k := 0; k < argc && k < params; k++ {
+		args[k] = r.stack[f.base+2+k]
+	}
+	if argc > params {
+		var extra []Value
+		if i < len(r.regExtras) {
+			extra = r.regExtras[i]
+		}
+		for k := params; k < argc; k++ {
+			args[k] = Undefined
+			if k-params < len(extra) {
+				args[k] = extra[k-params]
+			}
+		}
+	}
+	return args, true
 }

@@ -1020,3 +1020,56 @@ function deepTry(n) { try { return thrower(n) } catch (e) { return e.message } }
 		`viaGen()`, `viaArgs(4)`, `deepTry(50000)`, `deep(100)`, `trace(5)`, `trace(10)`}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffLegacyArguments compares a sloppy function's f.arguments
+// (WithNodeQuirks) in frames register code makes: the count, which the
+// caller's call instruction holds, and the arguments past the parameters,
+// which the callee's bindings overwrite in its window -- through a site's
+// first call, its cached callee, a method call, a tail call, a callback
+// and a forwarder.
+func TestRegDiffLegacyArguments(t *testing.T) {
+	src := `
+function f(a) { var x = 7, y = 8; return f.arguments.length + ":" + [...f.arguments].join() + ":" + (x + y) }
+function f2(a, b) { var t = a * 2; return [...f2.arguments].join() + "|" + t }
+function none() { var q = 1, w = 2; return none.arguments.length + q + w }
+function g() { var r = []; for (var i = 0; i < 3; i++) r.push(f(1, 2, 3), f(4), f()); return r.join(" ") }
+function h() { var o = { m: f2 }, r = []; for (var i = 0; i < 3; i++) r.push(o.m(5, 6, 7, 8), f2(9)); return r.join(" ") }
+function k() { var s = 0; for (var i = 0; i < 3; i++) s += none(1, 2, 3, 4) * 10 + none(); return s }
+function tl() { "use strict"; return f(i9, 10, 11) }
+var i9 = 9;
+function deep(n) { return n === 0 ? tl() : deep(n - 1) + "" }
+function viaCall() { var r = []; for (var i = 0; i < 3; i++) r.push(f.call(null, 1, 2, 3), f.apply(null, [4, 5]), Reflect.apply(f, null, [6, 7, 8, 9]), f.bind(null, 1)(2, 3)); return r.join(" ") }
+function fw() { return f.apply(null, arguments) }
+function viaFw() { return fw(1, 2, 3, 4) + " " + fw() }
+`
+	calls := []string{"none(1, 2, 3, 4)", "(function () { return none(1, 2, 3, 4) })()", "(function () { var s = 0; for (var i = 0; i < 3; i++) s += none(1, 2, 3, 4); return s })()", "g()", "h()", "k()", "tl()", "deep(40)", "viaCall()", "viaFw()", "g() + h()"}
+	run := func() []string {
+		rt := quickjs.New(quickjs.WithNodeQuirks())
+		defer rt.Close()
+		if _, err := rt.Eval(src); err != nil {
+			t.Fatalf("eval: %v", err)
+		}
+		out := make([]string, len(calls))
+		for i, c := range calls {
+			v, err := rt.Eval(c)
+			if err != nil {
+				out[i] = "error: " + err.Error()
+			} else {
+				out[i] = v.String()
+			}
+		}
+		return out
+	}
+	var off, on []string
+	withRegTier(false, func() { off = run() })
+	before := vm.RegsBuilt()
+	withRegTier(true, func() { on = run() })
+	if vm.RegsBuilt() == before {
+		t.Error("no function was register code")
+	}
+	for i, c := range calls {
+		if off[i] != on[i] {
+			t.Errorf("%s: %q, register code %q", c, off[i], on[i])
+		}
+	}
+}

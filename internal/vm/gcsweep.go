@@ -94,4 +94,5 @@ func (r *Runtime) clearReturnedFrames() {
 	}
 	r.frameHigh = r.frameDepth
 	arraySamplesLetGo[struct{}](r)
+	r.regExtrasLetGo()
 }

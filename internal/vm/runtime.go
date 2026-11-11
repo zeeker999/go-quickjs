@@ -336,6 +336,11 @@ type Runtime struct {
 	// tailLoopDepth is the frame depth regTailLoop makes its calls at, or
 	// -1: regCall leaves errTailCall to the loop that called it.
 	tailLoopDepth int
+	// regExtras is, by frame depth, the arguments past its parameters the
+	// last register call made at that depth with more arguments than
+	// parameters was given, which the callee's bindings overwrite in its
+	// window: what f.arguments reads of them (regKeepArgs).
+	regExtras [][]Value
 	// regRestart is the register code a register frame was given in place
 	// by a tail call (regTailInPlace), which runReg continues with.
 	regRestart *regCode

@@ -237,6 +237,11 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 						r.stackHigh = top
 					}
 				}
+				if argc > int(rc.params) {
+					// The arguments past the parameters, which the
+					// bindings overwrite: f.arguments reads them.
+					r.regKeepWindow(base, int(rc.params), argc)
+				}
 				// Parameters no argument was given for, and the bindings
 				// past them.
 				for i := min(argc, int(rc.params)); i < int(rc.params+rc.inits); i++ {
@@ -667,6 +672,11 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int,
 		// returns.
 		r.argStack = append(r.argStack, args...)
 		kept = r.argStack[ka:len(r.argStack):len(r.argStack)]
+	}
+	if len(args) > int(rc.params) {
+		// The arguments past the parameters, which the bindings may
+		// overwrite: f.arguments reads them.
+		r.regKeepArgs(args, int(rc.params))
 	}
 	// Parameters no argument was given for, and the bindings past them.
 	for i := base + 2 + min(argc, int(rc.params)); i < base+2+int(rc.params)+int(rc.inits); i++ {
