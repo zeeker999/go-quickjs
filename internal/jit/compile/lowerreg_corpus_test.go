@@ -15,7 +15,9 @@ import (
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/compiler"
+	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
+	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 	"github.com/go-quickjs/go-quickjs/internal/parser"
 )
@@ -95,14 +97,22 @@ func loweredFor(fn *bytecode.Function, reg bool) *ir.Program {
 	return p
 }
 
+// corpusEncoding is a value encoding the VM's is like, for the corpus's
+// compiles to machine code, which nothing runs.
+var corpusEncoding = abi.Encoding{ValueSize: 16, NumOffset: 0, RefOffset: 8,
+	Undefined: 0xFFF8000000000001, Null: 0xFFF8000000000002, True: 0xFFF8000000000103,
+	False: 0xFFF8000000000003, Uninitialized: 0xFFF8000000000008, CanonicalNaN: 0x7FF8000000000000,
+	Mega: true, UndefinedCell: 0x60000, StoreRef: 0x70000}
+
 // regPC is an error's register pc.
 var regPC = regexp.MustCompile(`register pc ([0-9]+)`)
 
 // pcIn takes the pcs out of an error's text, which is then its kind.
 var pcIn = regexp.MustCompile(`(register )?pc -?[0-9]+`)
 
-// ssaBuilt is what ssa.Build makes of the program fn's lowering makes, or
-// "" where the lowering refuses: "built", or "ssa: <reason>".
+// ssaBuilt is what ssa.Build makes of the program fn's lowering makes, and
+// mir of that, or "" where the lowering refuses: "built", "ssa: <reason>"
+// or "mir: <reason>".
 func ssaBuilt(fn *bytecode.Function, reg bool) string {
 	p := loweredFor(fn, reg)
 	if p == nil {
@@ -113,7 +123,15 @@ func ssaBuilt(fn *bytecode.Function, reg bool) string {
 		// jitCompileBytes, of the stack form's slots and instructions).
 		return "past the compile budget"
 	}
-	if _, err := ssa.BuildWith(p, nil); err != nil {
+	f, err := ssa.BuildWith(p, nil)
+	if err == nil {
+		// And its machine code, amd64's, as the VM compiles it.
+		ssa.Optimize(f)
+		if _, err := mir.CompileAMD64(f, corpusEncoding); err != nil {
+			return "mir: " + pcIn.ReplaceAllString(err.Error(), "pc N")
+		}
+	}
+	if err != nil {
 		why := pcIn.ReplaceAllString(err.Error(), "pc N")
 		if m := regPC.FindStringSubmatch(err.Error()); reg && m != nil {
 			// Which register operation, by its name.
@@ -243,7 +261,7 @@ func TestLowerRegCorpusRefusals(t *testing.T) {
 		for _, k := range rows {
 			fmt.Fprintf(&out, "%7d %7d  %s\n", stack[k], regs[k], k)
 		}
-		fmt.Fprintf(&out, "SSA builds, without feedback, of what each lowered: refused, stack form %d, register code %d\n", refusedSSA(stackSSA), refusedSSA(regSSA))
+		fmt.Fprintf(&out, "SSA builds and amd64 compiles, without feedback, of what each lowered: refused, stack form %d, register code %d\n", refusedSSA(stackSSA), refusedSSA(regSSA))
 		for _, k := range sortedKeys(stackSSA, regSSA) {
 			fmt.Fprintf(&out, "%7d %7d  %s\n", stackSSA[k], regSSA[k], k)
 		}
