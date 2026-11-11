@@ -23,6 +23,18 @@ const (
 // limit16 is where a 16-bit operand ends.
 const limit16 = 1 << 16
 
+// farReg is where slotReg's far bindings start: a slotReg of farReg+k is
+// the k-th far binding, whose register is past every near one, reached by
+// mov_far and mov_to_far alone (farOf). It is far past any temporary a
+// compile that runs out of registers numbers (errRegs), which r16 lets
+// through: that compile is made again.
+const farReg = 1 << 30
+
+// errRegs is the failure of a function that needs more than 16 bits of
+// near registers: compiled again with fewer of its bindings near
+// (nearCap).
+const errRegs = "more than 65,536 registers"
+
 // Compile compiles lit, whose stack form is fn and whose identifiers' resolution
 // is rec, into register code. It returns nil where the function has anything
 // the backend does not compile yet; the function then runs as before.
@@ -59,12 +71,13 @@ func Compile(lit *ast.FuncLit, fn *bytecode.Function, rec *Record) *bytecode.Reg
 // the stack form's moved past them.
 func generate(fn *bytecode.Function, mk func() *gen) (*gen, bool) {
 	sites, names, consts := fn.PropSites, len(fn.Names), len(fn.Constants)
-	far := false
+	far, nearCap := false, 0
 	for try := 0; ; try++ {
 		g := mk()
 		g.shareSites = try > 0
 		g.ownSites = try > 1
 		g.farJumps = far
+		g.nearCap = nearCap
 		if !g.layout() {
 			return nil, false
 		}
@@ -72,6 +85,15 @@ func generate(fn *bytecode.Function, mk func() *gen) (*gen, bool) {
 		if g.err == errJumps && !far {
 			// Compiled again, as it was but with its jumps far.
 			far = true
+			try--
+			fn.PropSites, fn.Names, fn.Constants = sites, fn.Names[:names], fn.Constants[:consts]
+			continue
+		}
+		if g.err == errRegs && nearCap == 0 {
+			// Compiled again with a quarter of the registers for the
+			// bindings used most, and the rest of them far, so that the
+			// temporaries have the other three.
+			nearCap = limit16 / 4
 			try--
 			fn.PropSites, fn.Names, fn.Constants = sites, fn.Names[:names], fn.Constants[:consts]
 			continue
@@ -133,6 +155,14 @@ type gen struct {
 	// farJumps says a jump of a 16-bit offset did not reach: the function
 	// is compiled again with each such jump far (jump).
 	farJumps bool
+	// nfar is how many bindings have far registers (farReg); farPCs is
+	// each instruction whose BC is one's k, which finish makes its
+	// register, past every near one. nearCap, where it is not 0, is how
+	// many near registers the bindings may take (layout): the function
+	// was compiled once and ran out of registers.
+	nfar    int
+	farPCs  []int
+	nearCap int
 
 	code []bytecode.RInstr
 	pos  []int32
@@ -363,10 +393,23 @@ func (g *gen) layout() bool {
 		params++
 	}
 	next := regParams + params
+	need := next
+	for i := params; i < n; i++ {
+		if used[i] {
+			need++
+		}
+	}
+	var far []bool
+	if need >= limit16 || g.nearCap > 0 {
+		far = g.farSlots(used, plain, params, lazySlot, evals)
+	}
 	for i := range g.slotReg {
 		switch {
 		case i < params:
 			g.slotReg[i] = int32(regParams + i)
+		case far != nil && far[i]:
+			g.slotReg[i] = int32(farReg + g.nfar)
+			g.nfar++
 		case used[i]:
 			g.slotReg[i] = int32(next)
 			next++
@@ -398,6 +441,91 @@ func (g *gen) layout() bool {
 	return true
 }
 
+// farSlots is, for a function whose bindings do not fit 16 bits of
+// registers (or did not leave its temporaries room, nearCap), which of them
+// have far registers, or nil where none can -- too many must be near, or
+// all fit. A binding only
+// plain reads and writes reach can be far -- one no closure captures, no
+// read finds in its dead zone, no direct eval or debugger reaches, nor
+// the arguments object, a catch clause's, a class's, a function
+// declaration's or the completion value -- and of those the ones used
+// least are, in slot order, until the rest fit.
+func (g *gen) farSlots(used, plain []bool, params, lazySlot int, evals bool) []bool {
+	if evals {
+		return nil
+	}
+	fn := g.fn
+	n := len(used)
+	can := make([]bool, n)
+	for i := params; i < n; i++ {
+		can[i] = used[i] && plain[i] && !g.tdz[i] && i != lazySlot && !fn.Locals[i].Captured && fn.Locals[i].Name != "arguments"
+	}
+	near := func(slot int64) {
+		if slot >= 0 && slot < int64(n) {
+			can[slot] = false
+		}
+	}
+	near(int64(g.rec.Completion))
+	for _, slot := range g.rec.Funcs {
+		near(int64(slot))
+	}
+	for _, cr := range g.rec.Classes {
+		near(int64(cr.Self))
+		near(int64(cr.Install))
+		for _, p := range cr.Privates {
+			near(int64(p.Slot))
+		}
+		for _, k := range cr.Keys {
+			near(int64(k))
+		}
+	}
+	for _, res := range g.rec.Privates {
+		near(int64(res.Index))
+	}
+	for _, slot := range g.rec.Catches {
+		near(int64(slot))
+	}
+	uses := make([]int, n)
+	for _, res := range g.rec.Read {
+		if int(res.Index) < n {
+			uses[res.Index]++
+		}
+	}
+	for _, res := range g.rec.Write {
+		if int(res.Index) < n {
+			uses[res.Index]++
+		}
+	}
+	room := g.nearCap
+	if room == 0 {
+		// A quarter of the registers left for the temporaries.
+		room = limit16 * 3 / 4
+	}
+	room -= regParams + params
+	var cands []int
+	for i := params; i < n; i++ {
+		switch {
+		case can[i]:
+			cands = append(cands, i)
+		case used[i]:
+			room--
+		}
+	}
+	if room < 0 {
+		return nil
+	}
+	if len(cands) <= room {
+		// All fit: nearCap asked for room the bindings do not take.
+		return nil
+	}
+	sort.SliceStable(cands, func(a, b int) bool { return uses[cands[a]] > uses[cands[b]] })
+	far := make([]bool, n)
+	for _, i := range cands[room:] {
+		far[i] = true
+	}
+	return far
+}
+
 // --- emission -------------------------------------------------------------
 
 func (g *gen) emit(w bytecode.RInstr) int {
@@ -408,7 +536,49 @@ func (g *gen) emit(w bytecode.RInstr) int {
 
 func (g *gen) at(pos int) { g.cur = int32(pos) }
 
-func r16(r int) uint16 { return uint16(r) }
+// r16 is register r as an operand. A far binding's register is never
+// one: every site that reads or writes a binding copies a far one through
+// a near temporary (movFar, movToFar), so one here is regcomp's bug.
+func r16(r int) uint16 {
+	if r >= farReg {
+		panic("regcomp: a far register as an operand")
+	}
+	return uint16(r)
+}
+
+// farOf is the k of slot's binding where it has a far register, and -1
+// where it has a near one or none.
+func (g *gen) farOf(slot uint32) int {
+	if int(slot) < len(g.slotReg) && g.slotReg[slot] >= farReg {
+		return int(g.slotReg[slot]) - farReg
+	}
+	return -1
+}
+
+// checkRef throws if register r, slot's binding, is in its dead zone
+// (check_ref): B the slot, for the error's name, or RNameFar past 16 bits
+// and FarNames the slot.
+func (g *gen) checkRef(r int, slot uint32) {
+	if slot < bytecode.RNameFar {
+		g.emit(bytecode.MakeR(bytecode.RCheckRef, 0, r16(r), uint16(slot), 0))
+		return
+	}
+	pc := g.emit(bytecode.MakeR(bytecode.RCheckRef, 0, r16(r), bytecode.RNameFar, 0))
+	if g.farNames == nil {
+		g.farNames = map[int]uint32{}
+	}
+	g.farNames[pc] = slot
+}
+
+// movFar copies the k-th far binding to register d (mov_far).
+func (g *gen) movFar(d, k int) {
+	g.farPCs = append(g.farPCs, g.emit(bytecode.MakeRBC(bytecode.RCold, uint8(bytecode.RColdMovFar), r16(d), uint32(k))))
+}
+
+// movToFar copies register v to the k-th far binding (mov_to_far).
+func (g *gen) movToFar(k, v int) {
+	g.farPCs = append(g.farPCs, g.emit(bytecode.MakeRBC(bytecode.RCold, uint8(bytecode.RColdMovToFar), r16(v), uint32(k))))
+}
 
 func (g *gen) alloc() int {
 	r := g.top
@@ -417,7 +587,7 @@ func (g *gen) alloc() int {
 		g.max = g.top
 	}
 	if g.top >= limit16 {
-		g.fail("more than 65,536 registers")
+		g.fail(errRegs)
 	}
 	return r
 }
@@ -668,6 +838,13 @@ func (g *gen) body() {
 		// A resumption goes on from here where the frame was suspended.
 		g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdGenEntry), 0, 0, 0))
 	}
+	if g.nfar > 0 {
+		// The far bindings start undefined, as the near ones the call
+		// makes (Inits).
+		at := g.emit(bytecode.MakeRBC(bytecode.RCold, uint8(bytecode.RColdFarInit), 0, 0))
+		g.farPCs = append(g.farPCs, at)
+		g.aux(at, uint32(g.nfar))
+	}
 	if lexical {
 		args = g.paramsAside()
 	}
@@ -698,7 +875,11 @@ func (g *gen) body() {
 	if lit.Name != nil && !declares(lit.Body, lit.Name.Name) {
 		for slot, l := range g.fn.Locals {
 			if slot < len(g.slotReg) && g.slotReg[slot] >= 0 && l.Name == lit.Name.Name && !g.declared(slot) {
-				g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(int(g.slotReg[slot])), regCallee, 0))
+				if k := g.farOf(uint32(slot)); k >= 0 {
+					g.movToFar(k, regCallee)
+				} else {
+					g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(int(g.slotReg[slot])), regCallee, 0))
+				}
 			}
 		}
 	}
@@ -1503,11 +1684,18 @@ func (g *gen) varDecl(n *ast.VarDecl) {
 				g.fail("a declaration without a binding")
 				return
 			}
+			if k := g.farOf(res.Index); k >= 0 {
+				u := g.alloc()
+				g.emit(bytecode.MakeR(bytecode.RLoadUndef, 0, r16(u), 0, 0))
+				g.movToFar(k, u)
+				g.top = g.stmtTop()
+				continue
+			}
 			g.emit(bytecode.MakeR(bytecode.RLoadUndef, 0, r16(int(g.slotReg[res.Index])), 0, 0))
 			continue
 		}
 		if fn, ok := d.Init.(*ast.FuncLit); ok && n.Kind == ast.DeclVar && g.rec.Reused[fn] && len(g.loops) > 0 {
-			if res, ok := g.rec.Write[id]; ok && (res.Kind == ResLocal || res.Kind == ResLocalInit) && g.slotReg[res.Index] >= 0 {
+			if res, ok := g.rec.Write[id]; ok && (res.Kind == ResLocal || res.Kind == ResLocalInit) && g.slotReg[res.Index] >= 0 && g.farOf(res.Index) < 0 {
 				// A function nothing can tell from the one the last
 				// iteration made, which the var holds then: made the
 				// first time, and left after that, as the stack form
@@ -1913,10 +2101,15 @@ func (g *gen) ident(n *ast.Ident, dst int) int {
 			g.fail("the arguments object of a function that forwards it")
 			return g.dest(dst)
 		}
+		if k := g.farOf(res.Index); k >= 0 {
+			d := g.dest(dst)
+			g.movFar(d, k)
+			return d
+		}
 		r := int(g.slotReg[res.Index])
 		if res.Kind == ResLocalCheck {
 			g.at(int(n.Start))
-			g.emit(bytecode.MakeR(bytecode.RCheckRef, 0, r16(r), uint16(res.Index), 0))
+			g.checkRef(r, res.Index)
 		}
 		g.freeze(n, r)
 		return g.place(r, dst)
@@ -2445,6 +2638,11 @@ func (g *gen) storeIdent(id *ast.Ident, value ast.Expr, init bool) int {
 	case ResWith:
 		return g.withAssign(id, value)
 	case ResLocal, ResLocalInit:
+		if k := g.farOf(res.Index); k >= 0 {
+			v := g.expr(value, -1)
+			g.movToFar(k, v)
+			return v
+		}
 		r := int(g.slotReg[res.Index])
 		g.into(value, r)
 		return r
@@ -2529,7 +2727,7 @@ func (g *gen) appendLocal(n *ast.Assign) (int, bool) {
 		return 0, false
 	}
 	res, ok := g.rec.Write[id]
-	if !ok || res.Kind != ResLocal || int(res.Index) >= len(g.slotReg) || g.slotReg[res.Index] < 0 {
+	if !ok || res.Kind != ResLocal || int(res.Index) >= len(g.slotReg) || g.slotReg[res.Index] < 0 || g.farOf(res.Index) >= 0 {
 		return 0, false
 	}
 	r := int(g.slotReg[res.Index])
@@ -2604,7 +2802,7 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 	switch t := n.Target.(type) {
 	case *ast.Ident:
 		res := g.rec.Write[t]
-		if res.Kind == ResLocal {
+		if res.Kind == ResLocal && g.farOf(res.Index) < 0 {
 			r := int(g.slotReg[res.Index])
 			if rr := g.rec.Read[t]; rr.Kind != ResLocal || rr.Index != res.Index {
 				g.fail("a compound assignment's read")
@@ -2810,11 +3008,15 @@ func (g *gen) storeValue(id *ast.Ident, v int) {
 	case ResWith:
 		g.withStore(id, v)
 	case ResLocal, ResLocalInit:
+		if k := g.farOf(res.Index); k >= 0 {
+			g.movToFar(k, v)
+			return
+		}
 		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(int(g.slotReg[res.Index])), r16(v), 0))
 	case ResLocalCheck:
 		r := int(g.slotReg[res.Index])
 		g.at(int(id.Start))
-		g.emit(bytecode.MakeR(bytecode.RCheckRef, 0, r16(r), uint16(res.Index), 0))
+		g.checkRef(r, res.Index)
 		if !g.fn.Locals[res.Index].Mutable {
 			// A constant past its dead zone, as set_local_check finds it:
 			// a switch case's, which the dead zone marks.
@@ -2867,7 +3069,7 @@ func (g *gen) update(n *ast.Update, keep bool, dst int) int {
 		return g.place(g.callTarget(t, n.Start), dst)
 	case *ast.Ident:
 		res := g.rec.Write[t]
-		if res.Kind == ResLocal {
+		if res.Kind == ResLocal && g.farOf(res.Index) < 0 {
 			r := int(g.slotReg[res.Index])
 			g.at(n.Start)
 			if !keep || n.Prefix {
@@ -2971,7 +3173,7 @@ func (g *gen) localStep(e ast.Expr, prefix bool) (int, int8, bool) {
 		return 0, 0, false
 	}
 	res := g.rec.Write[id]
-	if res.Kind != ResLocal {
+	if res.Kind != ResLocal || g.farOf(res.Index) >= 0 {
 		return 0, 0, false
 	}
 	if u.Op == "--" {
@@ -3917,6 +4119,10 @@ func (g *gen) finish() *bytecode.RegCode {
 			marks[pc] = m
 		}
 	}
+	// A far binding's k made its register, past every near one.
+	for _, pc := range g.farPCs {
+		g.code[pc] = g.code[pc].WithBC(uint32(g.max+1) + g.code[pc].BC())
+	}
 	var farNames []uint32
 	if len(g.farNames) > 0 {
 		farNames = make([]uint32, len(g.code))
@@ -3934,7 +4140,7 @@ func (g *gen) finish() *bytecode.RegCode {
 	rc := &bytecode.RegCode{
 		Aux: aux, FarNames: farNames, Marks: marks, Switches: switches, Literals: g.literals, ObjKeys: g.objKeys, UsesArguments: (g.fn.UsesArguments || g.fn.MakesArguments) && !g.fn.ForwardsArguments,
 		ForwardsArguments: g.fn.ForwardsArguments,
-		Code:              g.code, NumRegs: g.max + 1, SrcPC: src, SiteName: g.siteName, This: -1,
+		Code:              g.code, NumRegs: g.max + 1 + g.nfar, SrcPC: src, SiteName: g.siteName, This: -1,
 		LocalReg: g.localReg(),
 		Wide:     true, Params: g.fn.ParamCount, Inits: g.inits, Caps: g.caps, CallSites: g.calls,
 		Handlers: g.handlerTable(), BackLive: g.backLive, KeepsArgs: g.fn.HasRest || g.forwardsArgs, ThisRef: g.thisRef,
@@ -3952,7 +4158,16 @@ func (g *gen) localReg() []int32 {
 	if !g.reuses && len(g.rec.Evals) == 0 && g.fn.Debug == nil {
 		return nil
 	}
-	return append([]int32(nil), g.slotReg...)
+	regs := append([]int32(nil), g.slotReg...)
+	for i, r := range regs {
+		if r >= farReg {
+			// What reads a local by its register reads a near one: a far
+			// binding has none it can (farSlots keeps every binding a
+			// direct eval or a debugger reaches near).
+			regs[i] = -1
+		}
+	}
+	return regs
 }
 
 // capturedRegs is the registers of the bindings a lexical declaration

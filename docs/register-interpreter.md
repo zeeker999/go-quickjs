@@ -149,7 +149,7 @@ Nothing in a function is capped:
   allocator gives near registers to parameters, temporaries and the bindings
   used most, and far ones to the rest; an operation on a far binding is a
   move in, the operation, a move out. A function of that size is generated
-  code, run once.
+  code, run once (item 15).
 - **Sites, constants and names past 65,535.** An operation whose index would
   not fit has a wide form: the same operation followed by an extension word
   holding a 32-bit index, read by the wide form's case alone, so the narrow
@@ -1267,7 +1267,7 @@ it):
 
 Not in the corpora, and refused as well: code compiled for a debugger
 (`WithDebugger`; done, item 10), a finally clause nested more than four
-copies deep (done, item 11), and the caps -- more than 65,536 registers, a jump past 16
+copies deep (done, item 11), and the caps -- more than 65,536 registers (done, item 15), a jump past 16
 bits, a name past 16 bits (done, item 14), more than 255 arguments, properties or
 elements in one instruction. A cap goes as a wide form, never a refusal.
 
@@ -1657,6 +1657,27 @@ regdiff cases and test262 in register mode on its directories:
    (`ObjKeys`). The verifier checks either form (`nameOK`).
    `TestRegDiffFarNames` starts each function, and scripts, with 65,600
    other names.
+15. **Registers past 65,535** -- done. A function whose bindings alone
+   would not fit 16 bits of registers, or that ran out of them compiling
+   (compiled again with a quarter of them for its bindings, `nearCap`),
+   gives the bindings it uses least far registers (`farSlots`): those
+   only plain reads and writes reach -- no closure captures them, no read
+   finds them in their dead zone, no direct eval or debugger reaches the
+   function, and none is the arguments object, a catch clause's, a
+   class's, a function declaration's or the completion value. A far
+   binding's register is past every near one and every temporary, the
+   window NumRegs long; `mov_far` and `mov_to_far` (cold) are all that
+   reach it, and `far_init` makes the far bindings undefined as the
+   function starts. A read is a move in, a store a move out, a compound
+   assignment or an update the generic read and store, an append or a
+   for-of head's register the long way. `r16` panics on a far register,
+   which `generate` makes a refusal: a form that would name one as an
+   operand is refused, never compiled to read another register. A
+   check_ref's slot past 16 bits is FarNames', as a name is.
+   `TestRegDiffFarRegisters` declares 65,600 bindings before the ones its
+   cases use, in a function, a generator and a named function
+   expression, and has a template of 40,000 parts beside 30,000
+   bindings, which compiles the second time.
 
 ### Stage 3: the JIT and the tree tier
 

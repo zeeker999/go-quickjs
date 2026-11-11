@@ -11,7 +11,10 @@ import "github.com/go-quickjs/go-quickjs/internal/bytecode"
 func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 	n := rc.NumRegs
 	code := rc.Code
-	if len(code) == 0 || len(rc.SrcPC) != len(code) || n >= limit16 || n < regParams+rc.Params+rc.Inits {
+	// A window may be longer than 16 bits of registers reach: the far
+	// registers past them, which mov_far, mov_to_far and far_init name by
+	// a 32-bit BC, each checked below.
+	if len(code) == 0 || len(rc.SrcPC) != len(code) || n < regParams+rc.Params+rc.Inits {
 		return "no code"
 	}
 	reg := func(r uint16) bool { return int(r) < n }
@@ -34,7 +37,9 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 		case bytecode.RGetGlobal, bytecode.RSetGlobal:
 			ok = reg(a) && nameOK(rc, fn, pc, b) && site(c)
 		case bytecode.RCheckRef:
-			ok = reg(a) && int(b) < len(fn.Locals)
+			// The slot past 16 bits is FarNames', as a name is.
+			ok = reg(a) && (b != bytecode.RNameFar && int(b) < len(fn.Locals) ||
+				b == bytecode.RNameFar && pc < len(rc.FarNames) && rc.FarNames[pc] >= bytecode.RNameFar && int(rc.FarNames[pc]) < len(fn.Locals))
 		case bytecode.RLoadConst:
 			ok = reg(a) && int(w.BC()) < len(fn.Constants)
 		case bytecode.RClosureW:
@@ -334,6 +339,12 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 		return true
 	case bytecode.RColdCloseRegs:
 		return int(a)+int(b) <= rc.NumRegs
+	case bytecode.RColdMovFar, bytecode.RColdMovToFar:
+		// Far registers are reached past the 16 bits regs' type covers,
+		// within the window NumRegs makes.
+		return reg(a) && int64(w.BC()) < int64(rc.NumRegs)
+	case bytecode.RColdFarInit:
+		return pc < len(rc.Aux) && int64(w.BC())+int64(rc.Aux[pc]) <= int64(rc.NumRegs)
 	case bytecode.RColdGetUpvalCheck, bytecode.RColdSetUpvalCheck:
 		return reg(a) && int(w.BC()) < len(fn.Upvalues)
 	}

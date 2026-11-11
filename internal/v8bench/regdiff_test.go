@@ -1086,6 +1086,66 @@ function n4(o) {
 	}
 }
 
+// TestRegDiffFarRegisters compares functions whose bindings do not fit
+// 16 bits of registers, where those used least have far ones, reached by
+// mov_far and mov_to_far alone: each declares 65,600 bindings used five
+// times, and only then those the cases use, five times or fewer, which
+// are far (farSlots). Reads, stores, compound assignments and updates,
+// appends, patterns, for-in and for-of heads, a loop's counter, let and
+// const, typeof, a closure over a near binding beside them, the
+// arguments object, a generator suspended with its far bindings, and a
+// named function expression's own name; and a function whose bindings fit
+// but leave its temporaries too few registers.
+func TestRegDiffFarRegisters(t *testing.T) {
+	if testing.Short() {
+		t.Skip("compiles functions of 65,600 bindings three times")
+	}
+	var fill strings.Builder
+	for i := 0; i < 65600; i++ {
+		fmt.Fprintf(&fill, "var v%d = v%d + v%d + v%d + v%d;\n", i, i, i, i, i)
+	}
+	f := fill.String()
+	// A function whose 30,000 bindings fit, but not beside the 40,000
+	// temporaries of a template's 40,000 parts: compiled again with a
+	// quarter of the registers for its bindings (nearCap).
+	var deep strings.Builder
+	deep.WriteString("function deep(p) {\n" + f[:strings.Index(f, "var v30000 ")] + "var x = p, y = p + 1;\n\treturn `" + strings.Repeat("${x}-", 19999) + "${y}`;\n}\n")
+	src := deep.String() + `
+function big(p) {
+` + f + `var r = [];
+	var a1 = 5; r.push(a1, typeof a1);
+	var a2; a2 = p * 2; r.push(a2);
+	var a3 = 1; a3 += p; r.push(a3);
+	var a4 = 1; a4++; r.push(a4);
+	var a5 = 1; r.push(--a5);
+	var a6 = 1; r.push(a6++, a6);
+	var s = ""; s += "x"; s += "y";
+	var [d1, d2] = [1, 2]; var d3; ({d3} = {d3: 3}); r.push(s, d1, d2, d3);
+	for (var k in {m: 1, n: 2}) r.push(k);
+	for (var e of [7, 8]) r.push(e);
+	var t = 0; for (var i = 0; i < 4; i++) t += i;
+	r.push(t);
+	let l1 = 4; const c1 = 6; r.push(l1 + c1);
+	var cap = 1; var get = () => cap; cap = 2; r.push(get());
+	r.push(arguments.length, arguments[0]);
+	var o = {q: 9}; var q = o.q; r.push(q);
+	return r.join();
+}
+function* gen(p) {
+` + f + `var x = p; yield x; x = x + 1; yield x;
+	var y = yield x * 10; yield y;
+}
+var named = function self(p) {
+` + f + `var z = p + 1;
+	return typeof self + z;
+};
+`
+	calls := []string{`deep(2)`, `big(3)`, `big(-1)`, `var g = gen(5); [g.next().value, g.next().value, g.next().value, g.next(42).value, g.next().done].join()`, `named(1)`}
+	if built := regDiff(t, src, calls); built == 0 {
+		t.Errorf("no function is register code")
+	}
+}
+
 // TestRegDiffTailCalls compares calls in tail position in strict code
 // (RMarkTail): chains deep past tailCallDepth in constant space, mutual and
 // through methods, conditionals, logical and comma forms; a construct's

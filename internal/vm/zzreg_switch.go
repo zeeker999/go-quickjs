@@ -261,6 +261,17 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		return r.throwError(errReference, "%s", r.atoms.name(regName(f.cl, c, pc, w.B())))
 	case bytecode.RColdDebug:
 		return r.regDebug(f, c, pc, w, regs)
+	case bytecode.RColdMovFar:
+		regs[w.A()] = *regFar(regs, w.BC())
+		return nil
+	case bytecode.RColdMovToFar:
+		*regFar(regs, w.BC()) = regs[w.A()]
+		return nil
+	case bytecode.RColdFarInit:
+		for i, n := w.BC(), w.BC()+regAuxAt(c, pc); i < n; i++ {
+			*regFar(regs, i) = Undefined
+		}
+		return nil
 	case bytecode.RColdNewClass, bytecode.RColdSetFieldInit, bytecode.RColdDefineMethod,
 		bytecode.RColdClassGetter, bytecode.RColdClassSetter, bytecode.RColdClassGetterIndex,
 		bytecode.RColdClassSetterIndex, bytecode.RColdClassIndex, bytecode.RColdPrivateName,
@@ -775,4 +786,11 @@ func regGenCursor(st *iterState) *generator {
 		}
 	}
 	return nil
+}
+
+// regFar is far register i of the window regs starts: past the 65,536
+// registers regs' type covers, within the NumRegs the window was made with
+// (the verifier checks each far register an instruction names).
+func regFar(regs *[1 << 16]Value, i uint32) *Value {
+	return (*Value)(unsafe.Add(unsafe.Pointer(regs), uintptr(i)*unsafe.Sizeof(Value{})))
 }

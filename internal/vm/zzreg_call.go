@@ -2124,7 +2124,7 @@ func (r *Runtime) regDelete(cl *closure, obj, key Value) (Value, error) {
 func (r *Runtime) regThrowDeadZone(f *frame, c *regCode, next int) error {
 	pc := next - 1
 	f.pc = c.src[pc] + 1
-	return r.throwReferenceError("cannot access %q before initialization", f.cl.fn.Locals[regAt(c.code, pc).B()].Name)
+	return r.throwReferenceError("cannot access %q before initialization", f.cl.fn.Locals[regNameIdx(c, pc, regAt(c.code, pc).B())].Name)
 }
 
 // regGetGlobal is get_global's slow path: what the stack interpreter does,

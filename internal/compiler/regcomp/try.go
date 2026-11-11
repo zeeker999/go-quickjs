@@ -533,6 +533,11 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 	switch res.Kind {
 	case ResLocal, ResLocalInit:
 		slot := int(res.Index)
+		if g.farOf(res.Index) >= 0 {
+			// Stored at the head of each turn (storeValue), as a far
+			// binding is: never captured, never in its dead zone.
+			break
+		}
 		dst = int(g.slotReg[slot])
 		if lexical && g.fn.Locals[slot].Captured {
 			// Each turn's binding is a new one a closure keeps: closed at
