@@ -344,13 +344,18 @@ function f16() { eval("'use strict'; var s = 1"); return typeof s }
 function f17() { var ev = eval; ev("var iv2 = 3"); return typeof iv2 + iv2 }
 function f18() { var f = 88, r = typeof f; eval("r += typeof f; function f() { return 33 }"); return r + f() }
 function f19() { var wf = 1; with ({}) { eval("function wf() { return 2 }") } return typeof wf }
+function f20() { "use strict"; return eval("function sf(a) { return a * 2 }; sf")(4) + typeof sf }
+function f21() { "use strict"; return eval("var n = sf(); function sf() { return 'sf' }; n") }
+function f22() { "use strict"; eval("function st() {\n  throw new Error('e22') }; st()") }
 `
 	calls := []string{
 		`f1()`, `f2()`, `f3()`, `f4()`, `f5({ k: 4 })`, `new C().m()`,
 		`new E().w + "," + new E().m()`, `new f6()`, `f6()`, `f7(1, 2, 3)`,
 		`new Function("a", "b", "return a + b")(2, 3)`, `new Function("return this")() === globalThis`,
 		`f8()`, `try { f9() } catch (e) { frames(e) }`, `f10()`, `f11()`, `f12()`, `f13()`, `f14()`,
-		`f15()`, `f16()`, `f17()`, `f18()`, `f19()`,
+		`f15()`, `f16()`, `f17()`, `f18()`, `f19()`, `f20()`, `f21()`,
+		`try { f22() } catch (e) { frames(e) }`,
+		`(0, eval)("'use strict'; function si() { return 'si' }; si()") + typeof si`,
 		`eval("1; with ({}) { }") + "," + eval("2; with ({}) { 3 }")`,
 		`eval("var gv = 7; gv * 2") + gv`, `(0, eval)("var gi = 8; typeof gi") + gi`,
 		`(0, eval)("'use strict'; var sv = 9; typeof sv") + typeof sv`,

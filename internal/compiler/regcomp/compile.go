@@ -639,6 +639,15 @@ func (g *gen) body() {
 	if g.completion > 0 {
 		release()
 		g.topBody()
+		// Strict eval code's function declarations are its own bindings,
+		// made before its first statement as a function's are.
+		for _, s := range lit.Body {
+			if fd := hoistable(s); fd != nil {
+				if slot, ok := g.rec.Funcs[fd]; ok {
+					g.closure(fd.Fn, int(g.slotReg[slot]))
+				}
+			}
+		}
 		g.stmts(lit.Body)
 		g.retReg(g.completion)
 		return
