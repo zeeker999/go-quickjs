@@ -242,6 +242,46 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		st.done = true
 		r.closeIterator(st.iter)
 		return nil
+	case bytecode.RColdCheckGlobalLex, bytecode.RColdCheckGlobalVar, bytecode.RColdDefineGlobalVar,
+		bytecode.RColdDeclareGlobalLex, bytecode.RColdDefineGlobalFunc, bytecode.RColdInitGlobalLex,
+		bytecode.RColdDeclareModuleLex, bytecode.RColdInitModuleLex:
+		return r.regColdTop(f, w, regs)
+	case bytecode.RColdIterStep, bytecode.RColdIterRest, bytecode.RColdCheckCoercible, bytecode.RColdToPropertyKey,
+		bytecode.RColdObjectRest, bytecode.RColdRestParam, bytecode.RColdToString, bytecode.RColdTemplateObject:
+		return r.regColdPattern(f, c, pc, w, regs)
+	case bytecode.RColdCopyDataProps, bytecode.RColdDefineGetter, bytecode.RColdDefineSetter,
+		bytecode.RColdDefineGetterIndex, bytecode.RColdDefineSetterIndex, bytecode.RColdDefineIndex,
+		bytecode.RColdSetFuncName, bytecode.RColdSetHomeObject, bytecode.RColdSetProtoOf,
+		bytecode.RColdArrayPush, bytecode.RColdArraySpread, bytecode.RColdCallSpread:
+		return r.regColdObject(f, w, regs)
+	case bytecode.RColdAssignConst:
+		// An assignment to a constant is a runtime error, not an early one.
+		return r.throwTypeError("assignment to constant variable %q", r.atoms.name(f.cl.names[w.B()]))
+	case bytecode.RColdNewClass, bytecode.RColdSetFieldInit, bytecode.RColdDefineMethod,
+		bytecode.RColdClassGetter, bytecode.RColdClassSetter, bytecode.RColdClassGetterIndex,
+		bytecode.RColdClassSetterIndex, bytecode.RColdClassIndex, bytecode.RColdPrivateName,
+		bytecode.RColdNewPrivateMethods, bytecode.RColdAddPrivateMethod, bytecode.RColdAddPrivateGetter,
+		bytecode.RColdAddPrivateSetter, bytecode.RColdInstallPrivateMethods, bytecode.RColdDefinePrivate,
+		bytecode.RColdDefinePrivateMethod, bytecode.RColdDefinePrivateGetter, bytecode.RColdDefinePrivateSetter,
+		bytecode.RColdGetPrivate, bytecode.RColdSetPrivate, bytecode.RColdPrivateIn, bytecode.RColdSuperCall,
+		bytecode.RColdSuperForward, bytecode.RColdSuperSpread, bytecode.RColdSuperGet, bytecode.RColdSuperSet,
+		bytecode.RColdSuperBase, bytecode.RColdSuperGetIndex, bytecode.RColdSuperSetIndex, bytecode.RColdThis,
+		bytecode.RColdCheckThis, bytecode.RColdNewTarget, bytecode.RColdDerivedRet, bytecode.RColdDeleteSuper,
+		bytecode.RColdCloseRegs:
+		return r.regColdClass(f, c, pc, w, regs)
+	case bytecode.RColdCheckGlobalRef:
+		found, err := r.regCheckGlobalRef(f, f.cl.names[w.B()], int(w.C()))
+		regs[w.A()] = Bool(found)
+		return err
+	case bytecode.RColdAssertResolved:
+		if !regs[w.A()].Truthy() {
+			return r.throwReferenceError("%s is not defined", r.atoms.name(f.cl.names[w.B()]))
+		}
+		return nil
+	case bytecode.RColdGetGlobalOpt:
+		v, err := r.regGlobalOpt(f, f.cl.names[w.B()])
+		regs[w.A()] = v
+		return err
 	}
 	panic("register code: no cold operation " + bytecode.RColdOp(w.X()).String())
 }

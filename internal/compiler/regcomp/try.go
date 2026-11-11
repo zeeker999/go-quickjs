@@ -116,7 +116,21 @@ func (g *gen) finallyCopy(list []ast.Stmt) {
 	}
 	g.copies++
 	mark := g.top
-	g.stmts(list)
+	if g.completion > 0 {
+		// What the clause produces is not the statement's value: the try
+		// block's is, kept meanwhile; a break or a continue inside the
+		// clause carries the clause's own, undefined where it produced
+		// none, as the stack form's compileFinallyClause has it.
+		save := g.alloc()
+		release := g.hold()
+		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(save), r16(g.completion), 0))
+		g.resetCompletion()
+		g.stmts(list)
+		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(g.completion), r16(save), 0))
+		release()
+	} else {
+		g.stmts(list)
+	}
 	g.top = mark
 	g.copies--
 }
@@ -171,6 +185,12 @@ func (g *gen) tryStmt(n *ast.TryStmt) {
 		g.unprotect(cat)
 		g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), after, false)
 		g.bind(cat.to)
+		if pat := n.Catch.Param; pat != nil {
+			if _, ok := pat.(*ast.Ident); !ok {
+				g.patternBindings(pat)
+				g.pattern(pat, cat.reg, true)
+			}
+		}
 		g.stmts(n.Catch.Body)
 	}
 	g.bind(after)
@@ -194,10 +214,15 @@ func (g *gen) catchReg(c *ast.CatchClause) (int, bool) {
 	if c.Param == nil {
 		return g.alloc(), true
 	}
+	if _, ok := c.Param.(*ast.Ident); !ok {
+		// A pattern, which the clause's body unpacks first.
+		return g.alloc(), true
+	}
 	slot, ok := g.rec.Catches[c]
 	if !ok {
-		g.fail("a catch clause's pattern")
-		return 0, false
+		// bindCatchParam records every identifier's: none is the stack
+		// compiler's bug, not a form to refuse.
+		panic("regcomp: a catch clause's binding the record does not name")
 	}
 	if int(slot) >= len(g.slotReg) || g.slotReg[slot] < 0 {
 		return g.alloc(), true
@@ -256,7 +281,7 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 	}
 	id, ok := target.(*ast.Ident)
 	if !ok {
-		g.fail("a for-of or for-in loop's pattern or member")
+		g.forOfPattern(target, right, body, in, label, pos, lexical, left)
 		return
 	}
 	res, ok := g.rec.Write[id]
@@ -319,6 +344,56 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 	if dst < 0 {
 		g.storeValue(id, val)
 	}
+	g.stmt(body)
+	g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), l.cont, false)
+	if p != nil {
+		g.unprotect(p)
+		g.bind(p.to)
+		g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdIterCloseThrow), 0, r16(cursor), 0))
+		g.emit(bytecode.MakeR(bytecode.RThrow, 0, r16(p.reg), 0, 0))
+	}
+	g.bind(l.brk)
+	g.popLoop()
+}
+
+// forOfPattern is forOfStmt with a pattern, or an assignment's property,
+// for its target: each turn's value unpacked into it in the loop's body,
+// where a throw closes the iterator.
+func (g *gen) forOfPattern(target ast.Expr, right ast.Expr, body ast.Stmt, in bool, label string, pos int, lexical bool, left ast.Node) {
+	_, declaring := left.(*ast.VarDecl)
+	if lexical {
+		// The head's expression sees the bindings in their dead zone; a
+		// closure's binding is each turn's own.
+		for _, id := range patternNames(target, nil) {
+			if res, ok := g.rec.Write[id]; ok && res.Kind == ResLocalInit && g.fn.Locals[res.Index].Captured {
+				g.fail("a captured lexical binding in a loop")
+				return
+			}
+		}
+		g.patternBindings(target)
+	}
+	src := g.expr(right, -1)
+	cursor := g.alloc()
+	start := bytecode.RColdForOfStart
+	if in {
+		start = bytecode.RColdForInStart
+	}
+	g.at(pos)
+	g.emit(bytecode.MakeR(bytecode.RCold, uint8(start), r16(cursor), r16(src), 0))
+	l := g.pushLoop(label)
+	g.bind(l.cont)
+	val := g.alloc()
+	g.at(pos)
+	g.jump(bytecode.MakeR(bytecode.RIterNext, 0, r16(val), r16(cursor), 0), l.brk, true)
+	var p *prot
+	if !in {
+		p = &prot{to: g.newMark(), reg: g.alloc(), cursor: cursor, iterOf: l}
+		g.protect(p)
+	}
+	defer g.hold()()
+	mark := g.top
+	g.pattern(target, val, declaring)
+	g.top = mark
 	g.stmt(body)
 	g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), l.cont, false)
 	if p != nil {

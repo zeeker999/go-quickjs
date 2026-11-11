@@ -32,6 +32,9 @@ func Compile(lit *ast.FuncLit, fn *bytecode.Function, rec *Record) *bytecode.Reg
 		return nil
 	}
 	g := &gen{lit: lit, fn: fn, rec: rec}
+	// A derived constructor's this, and an arrow's written inside one, is
+	// the binding super() binds, read through the frame (this_bound).
+	g.thisRef = fn.Kind == bytecode.KindDerivedConstructor || fn.Kind == bytecode.KindArrow && !fn.ArrowThisValue
 	if !g.layout() {
 		Refuse(fn, "its bindings' layout")
 		return nil
@@ -107,6 +110,20 @@ type gen struct {
 	copies   int
 	held     int
 	err      string
+	// completion is top-level code's completion value's register, or 0
+	// (top.go).
+	completion int
+	// chain is the optional chain being compiled, or nil.
+	chain *chainCtx
+	// backLive is RegCode.BackLive.
+	backLive []uint32
+	// thisRef says this is read through the frame's binding
+	// (RegCode.ThisRef); forwardsArgs that a super call hands on the
+	// frame's arguments (RegCode.KeepsArgs).
+	thisRef, forwardsArgs bool
+	// thisBound says a derived constructor's super() has certainly bound
+	// this, which is then register 1.
+	thisBound bool
 }
 
 type loop struct {
@@ -176,11 +193,46 @@ func (g *gen) layout() bool {
 		}
 	}
 	g.lazyArgs = lazySlot >= 0 && !plain[lazySlot]
+	if c := g.rec.Completion; c >= 0 {
+		if int(c) >= n {
+			return false
+		}
+		used[c] = true
+	}
 	for _, slot := range g.rec.Funcs {
 		if int(slot) >= n {
 			return false
 		}
 		used[slot] = true
+	}
+	// A class's scope: its inner name, its private names' keys, its list
+	// of private methods and its computed keys, each a register.
+	mark := func(slot int32) bool {
+		if slot < 0 {
+			return true
+		}
+		if int(slot) >= n {
+			return false
+		}
+		used[slot] = true
+		return true
+	}
+	for _, cr := range g.rec.Classes {
+		ok := mark(cr.Self) && mark(cr.Install)
+		for _, p := range cr.Privates {
+			ok = ok && mark(int32(p.Slot))
+		}
+		for _, k := range cr.Keys {
+			ok = ok && mark(k)
+		}
+		if !ok {
+			return false
+		}
+	}
+	for _, res := range g.rec.Privates {
+		if res.Kind == ResLocal && !mark(int32(res.Index)) {
+			return false
+		}
 	}
 	for _, c := range fn.Constants {
 		if c.Kind != bytecode.ConstFunction || c.Fn == nil {
@@ -209,6 +261,9 @@ func (g *gen) layout() bool {
 		}
 	}
 	g.inits = next - regParams - params
+	if c := g.rec.Completion; c >= 0 {
+		g.completion = int(g.slotReg[c])
+	}
 	g.top, g.max = next, next
 	if next >= limit16 {
 		return false
@@ -293,6 +348,9 @@ func (g *gen) jump(w bytecode.RInstr, m *mark, short bool) {
 	at := g.emit(w)
 	ref := jumpRef{at: at, short: short}
 	if m.at >= 0 {
+		// A loop's backward jump: what is live at its head is the
+		// bindings and the registers the statements around it hold.
+		g.backLive = append(g.backLive, uint32(at), uint32(g.stmtTop()))
 		g.patch(ref, m.at)
 		return
 	}
@@ -406,12 +464,28 @@ func (g *gen) constIdx(c bytecode.Constant) uint32 {
 
 func (g *gen) body() {
 	lit := g.lit
+	// A list of parameters with a default, a pattern or a rest binds them
+	// one at a time: those a read checks or a closure may see are taken
+	// aside and put in their dead zone below, until their turn.
+	var args []int
+	lexical := !g.fn.HasSimpleParams || g.fn.HasRest
+	if lexical {
+		args = g.paramsAside()
+	}
+	release := g.hold()
 	// The bindings whose dead zone a read checks or a closure may see start
 	// in it; a self name a closure captures is the function.
 	for slot, need := range g.tdz {
 		if need && g.slotReg[slot] >= 0 {
 			g.emit(bytecode.MakeR(bytecode.RLoadUninit, 0, r16(int(g.slotReg[slot])), 0, 0))
 		}
+	}
+	if g.completion > 0 {
+		release()
+		g.topBody()
+		g.stmts(lit.Body)
+		g.retReg(g.completion)
+		return
 	}
 	if lit.Name != nil && !declares(lit.Body, lit.Name.Name) {
 		for slot, l := range g.fn.Locals {
@@ -434,6 +508,11 @@ func (g *gen) body() {
 			return
 		}
 	}
+	if lexical {
+		g.params(args)
+	}
+	release()
+	g.top = g.topAfterBindings()
 	// Hoisted function declarations of the body; one in a block is left to
 	// the stack form.
 	for _, s := range lit.Body {
@@ -446,8 +525,27 @@ func (g *gen) body() {
 			g.closure(fd.Fn, int(g.slotReg[slot]))
 		}
 	}
-	g.stmts(lit.Body)
-	g.emit(bytecode.MakeR(bytecode.RRetUndef, 0, 0, 0, 0))
+	if g.fn.Kind != bytecode.KindDerivedConstructor {
+		g.stmts(lit.Body)
+		g.retUndef()
+		return
+	}
+	// A derived constructor's statements: once one of them that always
+	// runs is a super() call, this is bound for good, and in register 1,
+	// where super_call put it.
+	g.enterBlock(lit.Body)
+	for _, s := range lit.Body {
+		if g.err != "" {
+			return
+		}
+		g.stmt(s)
+		if es, ok := s.(*ast.ExprStmt); ok {
+			if c, ok := es.X.(*ast.Call); ok && isSuper(c.Callee) {
+				g.thisBound = true
+			}
+		}
+	}
+	g.retUndef()
 }
 
 // simpleArguments reports whether fn's use of arguments is the one the
@@ -457,12 +555,13 @@ func simpleArguments(fn *bytecode.Function) bool {
 	// A function whose arguments object is only handed on to apply
 	// (ForwardsArguments) has no object made: each such call is an
 	// apply_args, which hands on the frame's arguments as passed.
-	if fn.HasRest || !fn.HasSimpleParams || fn.ParamsAreLexical || fn.Generator || fn.Async ||
-		fn.HasDirectEval || fn.Debug != nil || fn.TopLevel || fn.PrivateSites != 0 || fn.HasTailCall {
+	if fn.Generator || fn.Async ||
+		fn.HasDirectEval || fn.Debug != nil || fn.TopLevel || fn.HasTailCall {
 		return false
 	}
 	switch fn.Kind {
-	case bytecode.KindNormal, bytecode.KindMethod:
+	case bytecode.KindNormal, bytecode.KindMethod, bytecode.KindGetter, bytecode.KindSetter,
+		bytecode.KindConstructor, bytecode.KindDerivedConstructor:
 	default:
 		return false
 	}
@@ -605,11 +704,6 @@ func (g *gen) typeofCompare(n *ast.Binary) (ast.Expr, int, bool) {
 	if !isU || !isS || u.Op != "typeof" {
 		return nil, 0, false
 	}
-	if id, ok := u.Operand.(*ast.Ident); ok {
-		if res := g.rec.Read[id]; res.Kind == ResGlobal || res.Kind == ResNone {
-			return nil, 0, false
-		}
-	}
 	for i, name := range typeNames {
 		if name == s.Value {
 			return u.Operand, i, true
@@ -703,7 +797,26 @@ func declaresIn(list []ast.Stmt, name string, body bool) bool {
 			if declaresIn([]ast.Stmt{n.Body}, name, false) {
 				return true
 			}
-		case *ast.ExprStmt, *ast.ReturnStmt, *ast.EmptyStmt, *ast.BreakStmt, *ast.ContinueStmt:
+		case *ast.SwitchStmt:
+			for _, c := range n.Cases {
+				if declaresIn(c.Body, name, false) {
+					return true
+				}
+			}
+		case *ast.TryStmt:
+			if declaresIn(n.Block, name, false) || n.Catch != nil && declaresIn(n.Catch.Body, name, false) ||
+				declaresIn(n.Finally, name, false) {
+				return true
+			}
+		case *ast.ForOfStmt:
+			if s, ok := n.Left.(ast.Stmt); ok && declaresIn([]ast.Stmt{s}, name, false) || declaresIn([]ast.Stmt{n.Body}, name, false) {
+				return true
+			}
+		case *ast.ForInStmt:
+			if s, ok := n.Left.(ast.Stmt); ok && declaresIn([]ast.Stmt{s}, name, false) || declaresIn([]ast.Stmt{n.Body}, name, false) {
+				return true
+			}
+		case *ast.ExprStmt, *ast.ReturnStmt, *ast.EmptyStmt, *ast.BreakStmt, *ast.ContinueStmt, *ast.ThrowStmt:
 		default:
 			// A statement the backend does not compile anyway.
 			return true
@@ -746,11 +859,11 @@ func (g *gen) enterBlock(list []ast.Stmt) {
 		if !ok || vd.Kind == ast.DeclVar {
 			continue
 		}
+		var ids []*ast.Ident
 		for _, d := range vd.Decls {
-			id, ok := d.Target.(*ast.Ident)
-			if !ok {
-				continue
-			}
+			ids = patternNames(d.Target, ids)
+		}
+		for _, id := range ids {
 			res := g.rec.Write[id]
 			if res.Kind != ResLocalInit {
 				continue
@@ -785,7 +898,7 @@ func (g *gen) stmt(s ast.Stmt) {
 	g.label = ""
 	switch n := s.(type) {
 	case *ast.ExprStmt:
-		g.discard(n.X)
+		g.exprStmt(n.X)
 	case *ast.EmptyStmt:
 	case *ast.BlockStmt:
 		g.stmts(n.Body)
@@ -808,19 +921,20 @@ func (g *gen) stmt(s ast.Stmt) {
 			defer g.hold()()
 			g.leave(0, func() {
 				if v < 0 {
-					g.emit(bytecode.MakeR(bytecode.RRetUndef, 0, 0, 0, 0))
+					g.retUndef()
 				} else {
-					g.emit(bytecode.MakeR(bytecode.RRet, 0, r16(v), 0, 0))
+					g.retReg(v)
 				}
 			})
 			return
 		}
 		if n.Arg == nil {
-			g.emit(bytecode.MakeR(bytecode.RRetUndef, 0, 0, 0, 0))
+			g.retUndef()
 			return
 		}
 		g.ret(n.Arg)
 	case *ast.IfStmt:
+		g.resetCompletion()
 		els := g.newMark()
 		g.cond(n.Test, false, els)
 		g.stmt(n.Cons)
@@ -834,8 +948,10 @@ func (g *gen) stmt(s ast.Stmt) {
 		g.stmt(n.Alt)
 		g.bind(end)
 	case *ast.ForStmt:
+		g.resetCompletion()
 		g.forStmt(n, label)
 	case *ast.WhileStmt:
+		g.resetCompletion()
 		l := g.pushLoop(label)
 		test := g.newMark()
 		body := g.newMark()
@@ -848,6 +964,7 @@ func (g *gen) stmt(s ast.Stmt) {
 		g.bind(l.brk)
 		g.popLoop()
 	case *ast.DoWhileStmt:
+		g.resetCompletion()
 		l := g.pushLoop(label)
 		body := g.newMark()
 		g.bind(body)
@@ -884,13 +1001,27 @@ func (g *gen) stmt(s ast.Stmt) {
 		}
 		g.emit(bytecode.MakeR(bytecode.RThrow, 0, r16(r), 0, 0))
 	case *ast.SwitchStmt:
+		g.resetCompletion()
 		g.switchStmt(n, label)
 	case *ast.TryStmt:
+		g.resetCompletion()
 		g.tryStmt(n)
 	case *ast.ForOfStmt:
+		g.resetCompletion()
 		g.forOfStmt(n.Left, n.Right, n.Body, n.Await, false, label, n.Start)
 	case *ast.ForInStmt:
+		g.resetCompletion()
 		g.forOfStmt(n.Left, n.Right, n.Body, false, true, label, n.Start)
+	case *ast.ClassDecl:
+		g.storeIdent(n.Class.Name, n.Class, true)
+	case *ast.FieldInit:
+		g.fieldInit(n)
+	case *ast.InstallPrivateMethods:
+		g.installPrivate(n)
+	case *ast.ImportDecl:
+		// The linker made its bindings.
+	case *ast.ExportDecl:
+		g.exportDecl(n)
 	case *ast.LabeledStmt:
 		switch n.Body.(type) {
 		case *ast.ForStmt, *ast.WhileStmt, *ast.DoWhileStmt, *ast.ForOfStmt, *ast.ForInStmt:
@@ -918,7 +1049,7 @@ func (g *gen) ret(e ast.Expr) {
 		return
 	}
 	r := g.expr(e, -1)
-	g.emit(bytecode.MakeR(bytecode.RRet, 0, r16(r), 0, 0))
+	g.retReg(r)
 }
 
 func (g *gen) isTopLevel(fd *ast.FuncDecl) bool {
@@ -1020,14 +1151,27 @@ func (g *gen) varDecl(n *ast.VarDecl) {
 	for _, d := range n.Decls {
 		id, ok := d.Target.(*ast.Ident)
 		if !ok {
-			g.fail("a destructuring declaration")
-			return
+			if d.Init == nil {
+				// The parser allows one only in a for-of or for-in head,
+				// which forOfStmt compiles.
+				panic("regcomp: a pattern declared without a value")
+			}
+			g.pattern(d.Target, g.patternSource(d.Init), true)
+			g.top = g.stmtTop()
+			continue
 		}
 		if d.Init == nil {
 			if n.Kind == ast.DeclVar {
 				continue
 			}
 			res, ok := g.rec.Write[id]
+			if ok && (res.Kind == ResGlobalLexInit || res.Kind == ResModuleLexInit) {
+				v := g.alloc()
+				g.emit(bytecode.MakeR(bytecode.RLoadUndef, 0, r16(v), 0, 0))
+				g.lexInit(res.Kind, id.Name, v, int(id.Start))
+				g.top = g.stmtTop()
+				continue
+			}
 			if !ok || res.Kind != ResLocalInit {
 				g.fail("a declaration without a binding")
 				return
@@ -1122,7 +1266,10 @@ func (g *gen) guard(r int, rest ast.Expr) int {
 	if slot < 0 {
 		return r
 	}
-	captured := g.fn.Locals[slot].Captured
+	// A parameter a sloppy arguments object aliases is written through it
+	// by whatever the object is handed to, as a captured binding is.
+	captured := g.fn.Locals[slot].Captured ||
+		slot < g.fn.ParamCount && g.fn.MappedArguments && (g.fn.UsesArguments || g.fn.MakesArguments)
 	if g.writes(rest, slot) || captured && !pure(rest) {
 		t := g.alloc()
 		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(t), r16(r), 0))
@@ -1223,7 +1370,8 @@ func direct(e ast.Expr) bool {
 		// (assign), after the store's object and key are read.
 		t, ok := n.Target.(*ast.Member)
 		return n.Op == "=" && ok && t.Computed && !t.Optional && direct(n.Value)
-	case *ast.ObjectLit, *ast.ArrayLit, *ast.Logical, *ast.Conditional, *ast.Sequence, *ast.Update:
+	case *ast.ObjectLit, *ast.ArrayLit, *ast.Logical, *ast.Conditional, *ast.Sequence, *ast.Update,
+		*ast.ClassLit:
 		return false
 	}
 	return true
@@ -1247,6 +1395,8 @@ func (g *gen) into(e ast.Expr, dst int) {
 func (g *gen) inPlace(e ast.Expr) bool {
 	switch n := e.(type) {
 	case *ast.This:
+		return !g.thisRef || g.thisBound
+	case *regExpr:
 		return true
 	case *ast.Ident:
 		res, ok := g.rec.Read[n]
@@ -1294,7 +1444,11 @@ func (g *gen) expr(e ast.Expr, dst int) int {
 		g.emit(bytecode.MakeR(bytecode.RLoadNull, 0, r16(d), 0, 0))
 		return d
 	case *ast.This:
-		return g.place(regThis, dst)
+		return g.thisExpr(n, dst)
+	case *ast.ClassLit:
+		return g.class(n, dst)
+	case *ast.NewTarget:
+		return g.newTarget(dst)
 	case *ast.Ident:
 		return g.ident(n, dst)
 	case *ast.Binary:
@@ -1336,6 +1490,16 @@ func (g *gen) expr(e ast.Expr, dst int) int {
 		d := g.dest(dst)
 		g.closure(n, d)
 		return d
+	case *ast.BigIntLit:
+		return g.bigInt(n, dst)
+	case *ast.TemplateLit:
+		return g.template(n, dst)
+	case *ast.TaggedTemplate:
+		return g.taggedTemplate(n, dst)
+	case *ast.OptionalChain:
+		return g.optionalChain(n, dst)
+	case *regExpr:
+		return g.place(n.reg, dst)
 	}
 	g.fail(fmt.Sprintf("an expression the backend does not compile (%T)", e))
 	return g.dest(dst)
@@ -1440,6 +1604,23 @@ func (g *gen) ident(n *ast.Ident, dst int) int {
 	return g.dest(dst)
 }
 
+// typeofOperand compiles typeof's operand e: a name that resolves nowhere,
+// which the record does not resolve, as the stack form's get_global_opt,
+// which does not throw for an undeclared global.
+func (g *gen) typeofOperand(e ast.Expr) int {
+	id, ok := e.(*ast.Ident)
+	if !ok {
+		return g.expr(e, -1)
+	}
+	if _, ok := g.rec.Read[id]; ok {
+		return g.expr(e, -1)
+	}
+	d := g.alloc()
+	g.at(int(id.Start))
+	g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdGetGlobalOpt), r16(d), g.name16(id.Name), 0))
+	return d
+}
+
 // globalSite is a cache site of a global's read or write, which keeps no
 // name of the site table's.
 func (g *gen) globalSite() uint16 { return g.site(0) }
@@ -1474,6 +1655,9 @@ func (g *gen) binary(n *ast.Binary, dst int) int {
 	}
 	switch n.Op {
 	case "instanceof", "in":
+		if pn, ok := n.Left.(*ast.PrivateName); ok {
+			return g.privateIn(pn, n.Right, n.Start, dst)
+		}
 		a := g.guard(g.expr(n.Left, -1), n.Right)
 		b := g.expr(n.Right, -1)
 		d := g.dest(dst)
@@ -1538,6 +1722,9 @@ func (g *gen) operate(text string, op bytecode.Op, left, right ast.Expr, a, dst,
 }
 
 func (g *gen) logical(n *ast.Logical, dst int) int {
+	if n.Op == "??" {
+		return g.nullish(n, dst)
+	}
 	d := g.dest(dst)
 	end := g.newMark()
 	g.into(n.Left, d)
@@ -1546,9 +1733,6 @@ func (g *gen) logical(n *ast.Logical, dst int) int {
 		g.jump(bytecode.MakeR(bytecode.RJmpF, 0, r16(d), 0, 0), end, false)
 	case "||":
 		g.jump(bytecode.MakeR(bytecode.RJmpT, 0, r16(d), 0, 0), end, false)
-	default:
-		g.fail("??")
-		return d
 	}
 	g.into(n.Right, d)
 	g.bind(end)
@@ -1569,14 +1753,7 @@ func (g *gen) unary(n *ast.Unary, dst int) int {
 	case "~":
 		return g.unaryOp(bytecode.OpBitNot, n.Operand, dst, n.Start)
 	case "typeof":
-		if id, ok := n.Operand.(*ast.Ident); ok {
-			if res := g.rec.Read[id]; res.Kind == ResGlobal || res.Kind == ResNone {
-				// typeof of an undeclared global does not throw.
-				g.fail("typeof of a global")
-				return g.dest(dst)
-			}
-		}
-		a := g.expr(n.Operand, -1)
+		a := g.typeofOperand(n.Operand)
 		d := g.dest(dst)
 		g.at(n.Start)
 		g.emit(bytecode.MakeR(bytecode.RTypeof, 0, r16(d), r16(a), 0))
@@ -1598,8 +1775,10 @@ func (g *gen) unary(n *ast.Unary, dst int) int {
 			return g.dest(dst)
 		}
 		if _, isSuper := m.Object.(*ast.Super); isSuper {
-			g.fail("delete of a super property")
-			return g.dest(dst)
+			g.deleteSuper(n, m)
+			d := g.dest(dst)
+			g.emit(bytecode.MakeR(bytecode.RLoadTrue, 0, r16(d), 0, 0))
+			return d
 		}
 		o := g.expr(m.Object, -1)
 		var k int
@@ -1607,11 +1786,7 @@ func (g *gen) unary(n *ast.Unary, dst int) int {
 			o = g.guard(o, m.Property)
 			k = g.expr(m.Property, -1)
 		} else {
-			name, ok := propName(m)
-			if !ok {
-				g.fail("a property name the backend does not compile")
-				return g.dest(dst)
-			}
+			name := memberName(m)
 			k = g.alloc()
 			g.emit(bytecode.MakeRBC(bytecode.RLoadConst, 0, r16(k), g.constIdx(bytecode.Constant{Kind: bytecode.ConstString, Str: name})))
 		}
@@ -1697,7 +1872,7 @@ func (g *gen) cond(e ast.Expr, when bool, target *mark) {
 		if x, i, ok := g.typeofCompare(n); ok {
 			// typeof x === "name": the type asked of x, with no string
 			// made or compared.
-			a := g.expr(x, -1)
+			a := g.typeofOperand(x)
 			flag := uint8(i)
 			if (n.Op == "===" || n.Op == "==") == when {
 				flag |= bytecode.RCmpTrue
@@ -1833,8 +2008,17 @@ func (g *gen) storeIdent(id *ast.Ident, value ast.Expr, init bool) int {
 			// runs no code cannot change the answer, and the store asks it
 			// (set_global_strict's folding, foldGlobalCheck).
 			if !g.runsNoCode(value) {
-				g.fail("a strict global store of a value that runs code")
-				return 0
+				// Settled before the value runs, reported after it, as
+				// the stack form's check_global_ref and assert_resolved.
+				ok := g.alloc()
+				g.at(int(id.Start))
+				name := g.name16(id.Name)
+				g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdCheckGlobalRef), r16(ok), name, g.globalSite()))
+				v := g.expr(value, -1)
+				g.at(int(id.Start))
+				g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdAssertResolved), r16(ok), name, 0))
+				g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), name, g.globalSite()))
+				return v
 			}
 			strict = 1
 		}
@@ -1842,8 +2026,23 @@ func (g *gen) storeIdent(id *ast.Ident, value ast.Expr, init bool) int {
 		g.at(int(id.Start))
 		g.emit(bytecode.MakeR(bytecode.RSetGlobal, strict, r16(v), g.name16(id.Name), g.globalSite()))
 		return v
+	case ResGlobalVar:
+		// A var's store: the var exists, and the store is set_global's
+		// whatever the code's strictness, as the stack form's.
+		v := g.expr(value, -1)
+		g.at(int(id.Start))
+		g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite()))
+		return v
+	case ResGlobalLexInit, ResModuleLexInit:
+		v := g.expr(value, -1)
+		g.lexInit(res.Kind, id.Name, v, int(id.Start))
+		return v
 	case ResIgnore:
 		return g.expr(value, -1)
+	case ResConstAssign:
+		v := g.expr(value, -1)
+		g.assignConst(id)
+		return v
 	}
 	g.fail("a store the backend does not compile")
 	return 0
@@ -1889,7 +2088,14 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 		case *ast.Ident:
 			r := g.storeIdent(t, n.Value, false)
 			return g.place(r, dst)
+		case *ast.ArrayPattern, *ast.ObjectPattern:
+			v := g.patternSource(n.Value)
+			g.pattern(t, v, false)
+			return g.place(v, dst)
 		case *ast.Member:
+			if special(t) {
+				return g.specialStore(t, n.Value, dst)
+			}
 			o := g.guard(g.expr(t.Object, -1), n.Value)
 			if t.Computed {
 				if k, ok := imm16(t.Property); ok && k >= 0 {
@@ -1911,11 +2117,7 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 				g.emit(bytecode.MakeR(bytecode.RSetIndex, 0, r16(o), r16(k), r16(v)))
 				return g.place(v, dst)
 			}
-			name, ok := propName(t)
-			if !ok {
-				g.fail("a property name the backend does not compile")
-				return 0
-			}
+			name := memberName(t)
 			v := g.expr(n.Value, -1)
 			g.at(int(n.Start))
 			g.emit(bytecode.MakeR(bytecode.RSetProp, 0, r16(o), r16(v), g.propSite(bytecode.OpSetProp, g.nameIdx(name))))
@@ -1924,11 +2126,14 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 		g.fail("an assignment target the backend does not compile")
 		return 0
 	}
+	switch n.Op {
+	case "||=", "&&=", "??=":
+		return g.logicalAssign(n, dst)
+	}
 	text := n.Op[:len(n.Op)-1]
 	op, ok := binOps[text]
 	if !ok {
-		g.fail("a logical assignment")
-		return 0
+		panic("regcomp: an assignment operator " + n.Op)
 	}
 	switch t := n.Target.(type) {
 	case *ast.Ident:
@@ -1948,17 +2153,16 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 		g.storeValue(t, v)
 		return g.place(v, dst)
 	case *ast.Member:
+		if special(t) {
+			return g.specialCompound(t, text, op, n.Value, int(n.Start), dst)
+		}
 		o := g.guard(g.expr(t.Object, -1), n.Value)
 		var k int
 		var name uint32
 		if t.Computed {
 			k = g.key(t, g.guard(g.expr(t.Property, -1), n.Value), o)
 		} else {
-			s, ok := propName(t)
-			if !ok {
-				g.fail("a property name the backend does not compile")
-				return 0
-			}
+			s := memberName(t)
 			name = g.nameIdx(s)
 		}
 		cur := g.alloc()
@@ -2133,9 +2337,18 @@ func (g *gen) storeValue(id *ast.Ident, v int) {
 		}
 		g.at(int(id.Start))
 		g.emit(bytecode.MakeR(bytecode.RSetGlobal, strict, r16(v), g.name16(id.Name), g.globalSite()))
+	case ResConstAssign:
+		g.assignConst(id)
+	case ResIgnore:
 	default:
 		g.fail("a store the backend does not compile")
 	}
+}
+
+// assignConst throws as an assignment to the constant id does.
+func (g *gen) assignConst(id *ast.Ident) {
+	g.at(int(id.Start))
+	g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdAssignConst), 0, g.name16(id.Name), 0))
 }
 
 func (g *gen) update(n *ast.Update, keep bool, dst int) int {
@@ -2167,6 +2380,9 @@ func (g *gen) update(n *ast.Update, keep bool, dst int) int {
 		cur := g.readForWrite(t, g.alloc())
 		return g.stepped(n, cur, step, keep, dst, func(v int) { g.storeValue(t, v) })
 	case *ast.Member:
+		if special(t) {
+			return g.specialUpdate(n, t, step, keep, dst)
+		}
 		o := g.expr(t.Object, -1)
 		cur := g.alloc()
 		if t.Computed {
@@ -2178,11 +2394,7 @@ func (g *gen) update(n *ast.Update, keep bool, dst int) int {
 				g.emit(bytecode.MakeR(bytecode.RSetIndex, 0, r16(o), r16(k), r16(v)))
 			})
 		}
-		s, ok := propName(t)
-		if !ok {
-			g.fail("a property name the backend does not compile")
-			return 0
-		}
+		s := memberName(t)
 		name := g.nameIdx(s)
 		g.at(int(t.Start))
 		g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(cur), r16(o), g.propSite(bytecode.OpGetProp, name)))
@@ -2212,8 +2424,19 @@ func (g *gen) stepped(n *ast.Update, cur int, step bytecode.ROp, keep bool, dst 
 
 // --- properties, calls, literals ------------------------------------------
 
+// memberName is the name of m, a member that is neither computed nor
+// private: the parser gives such a member an identifier as its property,
+// so anything else is the parser's bug.
+func memberName(m *ast.Member) string {
+	name, ok := propName(m)
+	if !ok {
+		panic("regcomp: a member's property that is not a name")
+	}
+	return name
+}
+
 func propName(m *ast.Member) (string, bool) {
-	if m.Computed || m.Optional {
+	if m.Computed {
 		return "", false
 	}
 	id, ok := m.Property.(*ast.Ident)
@@ -2252,8 +2475,10 @@ func (g *gen) localStep(e ast.Expr, prefix bool) (int, int8, bool) {
 
 func (g *gen) member(n *ast.Member, dst int) int {
 	if n.Optional {
-		g.fail("an optional chain")
-		return g.dest(dst)
+		m := *n
+		m.Optional = false
+		m.Object = g.optionalLink(n.Object)
+		return g.member(&m, dst)
 	}
 	if id, ok := n.Object.(*ast.Ident); ok {
 		if res := g.rec.Read[id]; res.Kind == ResLazyArgs {
@@ -2272,6 +2497,9 @@ func (g *gen) member(n *ast.Member, dst int) int {
 			g.emit(bytecode.MakeR(bytecode.RArgsIndex, 0, r16(d), r16(a), r16(k)))
 			return d
 		}
+	}
+	if special(n) {
+		return g.specialMember(n, dst)
 	}
 	o := g.expr(n.Object, -1)
 	if n.Computed {
@@ -2302,11 +2530,7 @@ func (g *gen) member(n *ast.Member, dst int) int {
 		g.emit(bytecode.MakeR(bytecode.RGetIndex, 0, r16(d), r16(o), r16(k)))
 		return d
 	}
-	name, ok := propName(n)
-	if !ok {
-		g.fail("a property the backend does not compile")
-		return g.dest(dst)
-	}
+	name := memberName(n)
 	d := g.dest(dst)
 	g.at(n.Property.Pos())
 	if name == "length" {
@@ -2330,9 +2554,18 @@ func (g *gen) args(args []ast.Expr, at int) {
 func (g *gen) call(n *ast.Call, dst int) int {
 	dead := g.dead == n
 	g.dead = nil
-	if n.Optional || len(n.Args) > 255 {
+	if hasSpread(n.Args) {
+		return g.spreadCall(n, dst)
+	}
+	if len(n.Args) > 255 {
 		g.fail("an optional call or too many arguments")
 		return g.dest(dst)
+	}
+	if n.Optional || isChainCall(n) {
+		return g.chainCall(n, dst)
+	}
+	if isSuper(n.Callee) {
+		return g.superCall(n, dst)
 	}
 	if m, ok := n.Callee.(*ast.Member); ok && g.fn.ForwardsArguments && len(n.Args) == 2 && g.isArguments(n.Args[1]) {
 		if name, ok := propName(m); ok && name == "apply" && !m.Computed && !m.Optional {
@@ -2355,17 +2588,11 @@ func (g *gen) call(n *ast.Call, dst int) int {
 			g.fail("an optional chain")
 			return w
 		}
-		if _, ok := c.Object.(*ast.Super); ok {
-			g.fail("super")
-			return w
-		}
-		if !c.Computed && g.inPlace(c.Object) {
+		if special(c) {
+			g.specialCallee(c, w)
+		} else if !c.Computed && g.inPlace(c.Object) {
 			// A receiver in a binding: get_method_w puts it in the window.
-			name, ok := propName(c)
-			if !ok {
-				g.fail("a method name the backend does not compile")
-				return w
-			}
+			name := memberName(c)
 			o := g.expr(c.Object, -1)
 			g.at(c.Property.Pos())
 			g.emit(bytecode.MakeR(bytecode.RGetMethodW, 0, r16(w), r16(o), g.propSite(bytecode.OpGetPropThis, g.nameIdx(name))))
@@ -2374,11 +2601,7 @@ func (g *gen) call(n *ast.Call, dst int) int {
 			g.at(c.Property.Pos())
 			g.emit(bytecode.MakeR(bytecode.RGetIndex, 0, r16(w), r16(w+1), r16(k)))
 		} else {
-			name, ok := propName(c)
-			if !ok {
-				g.fail("a method name the backend does not compile")
-				return w
-			}
+			name := memberName(c)
 			g.at(c.Property.Pos())
 			g.emit(bytecode.MakeR(bytecode.RGetMethod, 0, r16(w), r16(w+1), g.propSite(bytecode.OpGetPropThis, g.nameIdx(name))))
 		}
@@ -2389,9 +2612,6 @@ func (g *gen) call(n *ast.Call, dst int) int {
 				_, argLit = n.Args[0].(*ast.RegexpLit)
 			}
 		}
-	case *ast.Super:
-		g.fail("super()")
-		return w
 	case *ast.Ident:
 		if c.Name == "eval" {
 			if res := g.rec.Read[c]; res.Kind == ResGlobal {
@@ -2861,6 +3081,15 @@ func (g *gen) newExpr(n *ast.New, dst int) int {
 		g.fail("too many arguments")
 		return g.dest(dst)
 	}
+	if hasSpread(n.Args) {
+		w := g.allocN(3)
+		g.into(n.Callee, w)
+		g.spreadArray(n.Args, w+2)
+		d := g.dest(dst)
+		g.at(n.Start)
+		g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdCallSpread), r16(w), r16(d), 1))
+		return d
+	}
 	argc := len(n.Args)
 	w := g.allocN(2 + argc)
 	g.into(n.Callee, w)
@@ -2885,29 +3114,13 @@ func (g *gen) object(n *ast.ObjectLit, dst int) int {
 	d := g.dest(dst)
 	g.at(n.Start)
 	g.emit(bytecode.MakeR(bytecode.RNewObject, 0, r16(d), uint16(len(n.Props)), g.site(0)))
-	seen := map[string]bool{}
 	for _, p := range n.Props {
-		if p.Kind != ast.PropInit || p.Computed || p.Method {
-			g.fail("an object literal's property the backend does not compile")
+		if g.err != "" {
 			return d
 		}
-		var key string
-		switch k := p.Key.(type) {
-		case *ast.Ident:
-			key = k.Name
-		case *ast.StringLit:
-			key = k.Value
-		default:
-			g.fail("an object literal's key the backend does not compile")
-			return d
-		}
-		if key == "__proto__" || seen[key] {
-			g.fail("an object literal's __proto__ or a key twice")
-			return d
-		}
-		seen[key] = true
-		v := g.expr(p.Value, -1)
-		g.emit(bytecode.MakeR(bytecode.RDefineField, 0, r16(d), r16(v), g.name16(key)))
+		mark := g.top
+		g.property(d, p)
+		g.top = mark
 	}
 	return d
 }
@@ -2984,15 +3197,15 @@ func (g *gen) array(n *ast.ArrayLit, dst int) int {
 		g.arrays++
 		return d
 	}
+	if hasSpread(n.Elements) {
+		return g.spreadArray(n.Elements, dst)
+	}
 	base := g.allocN(len(n.Elements))
 	for i, e := range n.Elements {
 		if e == nil {
-			g.fail("a hole")
-			return base
-		}
-		if _, ok := e.(*ast.Spread); ok {
-			g.fail("a spread element")
-			return base
+			// A hole: the length grows by one, with no element made.
+			g.emit(bytecode.MakeR(bytecode.RLoadUninit, 0, r16(base+i), 0, 0))
+			continue
 		}
 		g.into(e, base+i)
 	}
@@ -3047,6 +3260,16 @@ func (g *gen) closure(lit *ast.FuncLit, d int) {
 		}
 	}
 	if k < 0 {
+		g.fail("a function the stack form has no template of")
+		return
+	}
+	g.closureConst(k, d)
+}
+
+// closureConst makes a closure of the function of constant k into
+// register d.
+func (g *gen) closureConst(k, d int) {
+	if k < 0 || k >= len(g.fn.Constants) || g.fn.Constants[k].Kind != bytecode.ConstFunction || g.fn.Constants[k].Fn == nil {
 		g.fail("a function the stack form has no template of")
 		return
 	}
@@ -3134,7 +3357,7 @@ func (g *gen) finish() *bytecode.RegCode {
 		Code:              g.code, NumRegs: g.max + 1, SrcPC: src, SiteName: g.siteName, This: -1,
 		LocalReg: g.localReg(),
 		Wide:     true, Params: g.fn.ParamCount, Inits: g.inits, Caps: g.caps, CallSites: g.calls,
-		Handlers: g.handlerTable(),
+		Handlers: g.handlerTable(), BackLive: g.backLive, KeepsArgs: g.fn.HasRest || g.forwardsArgs, ThisRef: g.thisRef,
 	}
 	if why := Verify(rc, g.fn); why != "" {
 		Refuse(g.fn, why)

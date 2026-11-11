@@ -49,7 +49,13 @@ type regCode struct {
 	// wide marks code of the register form's own frame layout: register 0
 	// the function, 1 its this, the parameters from 2, and inits bindings
 	// after them that a call makes undefined. Only call_w enters it.
-	wide  bool
+	wide bool
+	// keep is the first parameter whose argument f.arguments reads as
+	// the call passed it, which the call keeps if the frame may overwrite
+	// it (regKeepWindow): params, but in a sloppy function whose
+	// parameter list is not plain (0) or one of whose parameters a
+	// closure captures (the first such). It fills the padding after wide.
+	keep  uint16
 	inits int32
 	// ncap is how many of the function's stack slots a closure captures,
 	// the cells a closure it makes is given (regClosure).
@@ -603,14 +609,16 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			}
 			goto cmpSlow
 		case bytecode.RJEq, bytecode.RJEqI:
-			if a, b := regs[w.A()], regs[w.B()]; w.Op() == bytecode.RJEqI {
+			// B is the immediate form's operand, no register: read only
+			// where it names one, which the verifier proves in the frame.
+			if a := regs[w.A()]; w.Op() == bytecode.RJEqI {
 				if a.IsNumber() {
 					if a.Number() == float64(w.SB()) {
 						goto taken
 					}
 					continue
 				}
-			} else if a.IsNumber() && b.IsNumber() {
+			} else if b := regs[w.B()]; a.IsNumber() && b.IsNumber() {
 				if a.Number() == b.Number() {
 					goto taken
 				}
@@ -618,14 +626,16 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			}
 			goto cmpSlow
 		case bytecode.RJNe, bytecode.RJNeI:
-			if a, b := regs[w.A()], regs[w.B()]; w.Op() == bytecode.RJNeI {
+			// B is the immediate form's operand, no register: read only
+			// where it names one, which the verifier proves in the frame.
+			if a := regs[w.A()]; w.Op() == bytecode.RJNeI {
 				if a.IsNumber() {
 					if a.Number() != float64(w.SB()) {
 						goto taken
 					}
 					continue
 				}
-			} else if a.IsNumber() && b.IsNumber() {
+			} else if b := regs[w.B()]; a.IsNumber() && b.IsNumber() {
 				if a.Number() != b.Number() {
 					goto taken
 				}
@@ -1051,10 +1061,10 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 						r.stackHigh = top
 					}
 				}
-				if argc > int(rc.params) {
+				if argc > int(rc.keep) {
 					// The arguments past the parameters, which the
 					// bindings overwrite: f.arguments reads them.
-					r.regKeepWindow(base, int(rc.params), argc)
+					r.regKeepWindow(base, int(rc.keep), argc)
 				}
 				// Parameters no argument was given for, and the bindings
 				// past them.
@@ -1250,6 +1260,10 @@ func (r *Runtime) regDirect(o *Object, fd *funcData, c *regCode, this Value, arg
 	w[1] = this
 	for i, a := range args[:m] {
 		w[2+i] = a
+	}
+	if r.nodeQuirks {
+		// f.arguments reads the arguments as the built-in passed them.
+		return r.regDirectLegacy(o, fd.closure, c, base, m, args)
 	}
 	return r.regEnterW(o, fd.closure, c, base, m, args, Undefined)
 }
@@ -1916,7 +1930,10 @@ func (r *Runtime) regBackEdge(f *frame, c *regCode, k *regKept) error {
 	if err := r.checkInterruptNow(); err != nil {
 		return err
 	}
-	r.sweepStaleSlots(f.base - int(c.locals) + int(c.numRegs))
+	// The temporaries past what the loop's head has live are stale: a
+	// value a call's window was given stays there until the window is
+	// used again.
+	r.sweepStaleSlots(f.base - int(c.locals) + c.rc.LiveAt(k.pc-1))
 	return nil
 }
 

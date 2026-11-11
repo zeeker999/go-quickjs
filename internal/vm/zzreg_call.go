@@ -260,7 +260,7 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base, pc 
 			if rc = cl.reg; rc == nil {
 				rc = r.regOf(cl)
 			}
-			if rc != nil && rc.wide && cl.realm == r.Realm {
+			if rc != nil && rc.wide && cl.realm == r.Realm && !isClassConstructorKind(cl.fn.Kind) {
 				if x := fd.extra; x == nil {
 					switch {
 					case !method:
@@ -319,17 +319,17 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base, pc 
 						// for good: its calls are entered as frames.
 						e.kind &^= regCallOut | regCallLeaf
 					}
-				} else if this := r.stack[base+1]; this.IsObject() {
+				} else if this := r.stack[base+1]; leaf == regLeafThis && this.IsObject() {
 					if v, ok := r.leafCall(cl, this.Object(), r.stack[base+2:base+2+argc]); ok {
 						return v, nil
 					}
 				}
 			}
-			if argc > int(rc.params) && !rc.args {
+			if argc > int(rc.keep) && !rc.args {
 				// The arguments past the parameters, which the bindings
 				// overwrite: f.arguments reads them. A frame that keeps
 				// its arguments has them in f.args.
-				r.regKeepWindow(base, int(rc.params), argc)
+				r.regKeepWindow(base, int(rc.keep), argc)
 			}
 			return r.regEnterW(o, cl, rc, base, argc, r.stack[base+2:base+2+argc], Undefined)
 		}

@@ -405,6 +405,156 @@ const (
 	// does: an error of its return method's is dropped.
 	RColdIterClose
 	RColdIterCloseThrow
+	// Top-level code's declarations, each what the stack form's instruction
+	// of the same name does, of the name Names[B] and the flag C:
+	// check_global_lex, check_global_var, define_global_var,
+	// declare_global_lex, and define_global_func of the function R[A].
+	// RColdInitGlobalLex initializes the script's lexical binding Names[B]
+	// to R[A] (init_global_lex).
+	RColdCheckGlobalLex
+	RColdCheckGlobalVar
+	RColdDefineGlobalVar
+	RColdDeclareGlobalLex
+	RColdDefineGlobalFunc
+	RColdInitGlobalLex
+	// RColdGetGlobalOpt: R[A] = the global Names[B], or undefined where
+	// there is none (get_global_opt, typeof's operand).
+	RColdGetGlobalOpt
+	// RColdDeclareModuleLex declares the module's lexical binding Names[B],
+	// mutable where C is not 0, in its dead zone (declare_module_lex), and
+	// RColdInitModuleLex initializes it to R[A] (init_module_lex).
+	RColdDeclareModuleLex
+	RColdInitModuleLex
+	// Destructuring's: RColdIterStep, R[A] = the next value of cursor R[B],
+	// undefined past its end (iter_step); RColdIterRest, R[A] = an array of
+	// the values cursor R[B] has left (iter_rest); RColdCheckCoercible
+	// throws where R[A] is undefined or null (check_coercible);
+	// RColdToPropertyKey, R[A] = R[A] as a property key (to_property_key);
+	// RColdObjectRest, R[A] = an object of R[B]'s own enumerable properties
+	// but the Aux keys in the registers from C (object_rest).
+	RColdIterStep
+	RColdIterRest
+	RColdCheckCoercible
+	RColdToPropertyKey
+	RColdObjectRest
+	// RColdRestParam: R[A] = an array of the arguments from the B-th
+	// (rest_param).
+	RColdRestParam
+	// RColdToString: R[A] = ToString(R[A]), a template's substitution
+	// converted before what follows it runs (to_string).
+	RColdToString
+	// RColdTemplateObject: R[A] = the template object of the function's
+	// Templates[BC], one for each site (template_object).
+	RColdTemplateObject
+	// An object literal's: RColdCopyDataProps copies R[B]'s own enumerable
+	// properties to R[A] (copy_data_props, a spread); RColdDefineGetter and
+	// RColdDefineSetter define accessor R[B] of R[A] named Names[C];
+	// RColdDefineGetterIndex and RColdDefineSetterIndex define accessor
+	// R[C] of R[A] keyed R[B]; RColdDefineIndex defines R[A][R[B]] = R[C]
+	// (define_index); RColdSetFuncName names function R[A] after key R[B],
+	// with "get " or "set " for C 1 or 2 (set_func_name);
+	// RColdSetHomeObject makes R[B] function R[A]'s home object;
+	// RColdSetProtoOf sets R[A]'s prototype to R[B] where it is an object
+	// or null (__proto__: v).
+	RColdCopyDataProps
+	RColdDefineGetter
+	RColdDefineSetter
+	RColdDefineGetterIndex
+	RColdDefineSetterIndex
+	RColdDefineIndex
+	RColdSetFuncName
+	RColdSetHomeObject
+	RColdSetProtoOf
+	// Spreads: RColdArrayPush appends R[B] to array R[A], a hole where it
+	// is the uninitialized marker (array_push); RColdArraySpread appends
+	// what iterating R[B] gives (array_spread); RColdCallSpread calls R[A]
+	// with this R[A+1] and the elements of array R[A+2] as its arguments,
+	// or constructs it where C is 1, into R[B] (call_spread, new_spread).
+	RColdArrayPush
+	RColdArraySpread
+	RColdCallSpread
+	// RColdAssignConst throws the TypeError of an assignment to the
+	// constant Names[B] (assign_const).
+	RColdAssignConst
+	// A strict assignment to a global whose value runs code: R[A] = whether
+	// the global Names[B] resolves, asked before the value is made, through
+	// cache site C (check_global_ref); RColdAssertResolved throws the
+	// ReferenceError of Names[B] where R[A] says it did not (assert_resolved).
+	RColdCheckGlobalRef
+	RColdAssertResolved
+	// Classes' (each what the stack form's instruction of the same name
+	// does): RColdNewClass makes R[A] the constructor of a class extending
+	// R[B] (new_class); RColdSetFieldInit gives constructor R[A] the
+	// instances' field initializer R[B] (set_field_init); RColdDefineMethod
+	// defines R[A]'s method Names[C] = R[B], not enumerable (define_method);
+	// RColdClassGetter and RColdClassSetter define accessor R[B] of R[A]
+	// named Names[C], and RColdClassGetterIndex, RColdClassSetterIndex and
+	// RColdClassIndex accessor or method R[C] of R[A] keyed R[B], each not
+	// enumerable, as a class's members are.
+	RColdNewClass
+	RColdSetFieldInit
+	RColdDefineMethod
+	RColdClassGetter
+	RColdClassSetter
+	RColdClassGetterIndex
+	RColdClassSetterIndex
+	RColdClassIndex
+	// Private names': RColdPrivateName, R[A] = a new key of the private
+	// name Names[B] (private_name); RColdNewPrivateMethods, R[A] = a new
+	// list of private methods (new_private_methods); RColdAddPrivateMethod,
+	// RColdAddPrivateGetter and RColdAddPrivateSetter add function R[B] to
+	// list R[A] under key R[C]; RColdInstallPrivateMethods gives this the
+	// methods of list R[A]; RColdDefinePrivate, RColdDefinePrivateMethod,
+	// RColdDefinePrivateGetter and RColdDefinePrivateSetter add field,
+	// method or accessor R[B] to R[A] under key R[C]; RColdGetPrivate,
+	// R[A] = R[B].#R[C]; RColdSetPrivate, R[A].#R[C] = R[B];
+	// RColdPrivateIn, R[A] = whether R[B] has the private member keyed
+	// R[C] (#x in o).
+	RColdPrivateName
+	RColdNewPrivateMethods
+	RColdAddPrivateMethod
+	RColdAddPrivateGetter
+	RColdAddPrivateSetter
+	RColdInstallPrivateMethods
+	RColdDefinePrivate
+	RColdDefinePrivateMethod
+	RColdDefinePrivateGetter
+	RColdDefinePrivateSetter
+	RColdGetPrivate
+	RColdSetPrivate
+	RColdPrivateIn
+	// super's and this's: RColdSuperCall, R[A] = this, bound by a call of
+	// the parent constructor with the B arguments in the registers from C
+	// (super_call); RColdSuperForward with the frame's arguments, as a
+	// derived class's constructor it was not given makes it;
+	// RColdSuperSpread with the elements of array R[B]; RColdSuperGet, R[A]
+	// = super[Names[B]]; RColdSuperSet, super[Names[B]] = R[A];
+	// RColdSuperBase, R[A] = what super reads from, or null
+	// (super_base); RColdSuperGetIndex, R[A] = R[B][R[C]] read with this as
+	// the receiver; RColdSuperSetIndex, R[A][R[B]] = R[C] written with this
+	// as the receiver; RColdThis, R[A] = this, which a derived
+	// constructor's super() binds (this_bound); RColdCheckThis throws
+	// where it is not bound yet (check_this_init); RColdNewTarget, R[A] =
+	// new.target; RColdDerivedRet, R[A] = what a derived constructor
+	// returning R[A] hands back (derived_ret); RColdDeleteSuper throws the
+	// ReferenceError of a super reference deleted.
+	RColdSuperCall
+	RColdSuperForward
+	RColdSuperSpread
+	RColdSuperGet
+	RColdSuperSet
+	RColdSuperBase
+	RColdSuperGetIndex
+	RColdSuperSetIndex
+	RColdThis
+	RColdCheckThis
+	RColdNewTarget
+	RColdDerivedRet
+	RColdDeleteSuper
+	// RColdCloseRegs closes the upvalues closures keep open on the B
+	// registers from R[A], whose bindings a scope's end leaves: the next
+	// entry of the scope makes new ones (close_regs).
+	RColdCloseRegs
 )
 
 // The flags of regexp_lit's X.
@@ -444,6 +594,36 @@ const (
 var rColdNames = [...]string{
 	RColdNewRegExp: "new_regexp", RColdForOfStart: "for_of_start", RColdForInStart: "for_in_start",
 	RColdIterClose: "iter_close", RColdIterCloseThrow: "iter_close_throw",
+	RColdCheckGlobalLex: "check_global_lex", RColdCheckGlobalVar: "check_global_var",
+	RColdDefineGlobalVar: "define_global_var", RColdDeclareGlobalLex: "declare_global_lex",
+	RColdDefineGlobalFunc: "define_global_func", RColdInitGlobalLex: "init_global_lex",
+	RColdGetGlobalOpt: "get_global_opt", RColdDeclareModuleLex: "declare_module_lex",
+	RColdInitModuleLex: "init_module_lex", RColdIterStep: "iter_step", RColdIterRest: "iter_rest",
+	RColdCheckCoercible: "check_coercible", RColdToPropertyKey: "to_property_key",
+	RColdObjectRest: "object_rest", RColdRestParam: "rest_param", RColdToString: "to_string",
+	RColdTemplateObject: "template_object", RColdCopyDataProps: "copy_data_props",
+	RColdDefineGetter: "define_getter", RColdDefineSetter: "define_setter",
+	RColdDefineGetterIndex: "define_getter_index", RColdDefineSetterIndex: "define_setter_index",
+	RColdDefineIndex: "define_index", RColdSetFuncName: "set_func_name",
+	RColdSetHomeObject: "set_home_object", RColdSetProtoOf: "set_proto_of",
+	RColdArrayPush: "array_push", RColdArraySpread: "array_spread", RColdCallSpread: "call_spread",
+	RColdAssignConst: "assign_const", RColdCheckGlobalRef: "check_global_ref",
+	RColdAssertResolved: "assert_resolved",
+	RColdNewClass:       "new_class", RColdSetFieldInit: "set_field_init", RColdDefineMethod: "define_method",
+	RColdClassGetter: "class_getter", RColdClassSetter: "class_setter",
+	RColdClassGetterIndex: "class_getter_index", RColdClassSetterIndex: "class_setter_index",
+	RColdClassIndex: "class_index", RColdPrivateName: "private_name",
+	RColdNewPrivateMethods: "new_private_methods", RColdAddPrivateMethod: "add_private_method",
+	RColdAddPrivateGetter: "add_private_getter", RColdAddPrivateSetter: "add_private_setter",
+	RColdInstallPrivateMethods: "install_private_methods", RColdDefinePrivate: "define_private",
+	RColdDefinePrivateMethod: "define_private_method", RColdDefinePrivateGetter: "define_private_getter",
+	RColdDefinePrivateSetter: "define_private_setter", RColdGetPrivate: "get_private",
+	RColdSetPrivate: "set_private", RColdPrivateIn: "private_in", RColdSuperCall: "super_call",
+	RColdSuperForward: "super_forward", RColdSuperSpread: "super_spread", RColdSuperGet: "super_get",
+	RColdSuperSet: "super_set", RColdSuperBase: "super_base", RColdSuperGetIndex: "super_get_index",
+	RColdSuperSetIndex: "super_set_index", RColdThis: "this_bound", RColdCheckThis: "check_this_init",
+	RColdNewTarget: "new_target", RColdDerivedRet: "derived_ret", RColdDeleteSuper: "delete_super",
+	RColdCloseRegs: "close_regs",
 }
 
 func (op RColdOp) String() string {
@@ -546,6 +726,37 @@ type RegCode struct {
 	ForwardsArguments bool
 	// Handlers are the code's exception handlers, innermost first.
 	Handlers []RHandler
+	// BackLive is, for each backward jump, by pc in order, its pc and the
+	// first register past those live at the loop's head: the registers from
+	// there are temporaries no turn reads before it writes them, which the
+	// sweep of stale slots clears (sweepStaleSlots).
+	BackLive []uint32
+	// KeepsArgs says a frame keeps its arguments as passed, for a rest
+	// parameter (rest_param) or a super call that hands them on
+	// (super_forward).
+	KeepsArgs bool
+	// ThisRef says the code reads this from the binding a derived
+	// constructor's super() binds (this_bound), not from register 1: a
+	// derived constructor's, or an arrow's written inside one.
+	ThisRef bool
+}
+
+// LiveAt is how many of the frame's registers are live at the head of the
+// loop the backward jump at pc goes to, or NumRegs where pc is none.
+func (rc *RegCode) LiveAt(pc int) int {
+	lo, hi := 0, len(rc.BackLive)/2
+	for lo < hi {
+		m := (lo + hi) / 2
+		switch p := int(rc.BackLive[2*m]); {
+		case p == pc:
+			return int(rc.BackLive[2*m+1])
+		case p < pc:
+			lo = m + 1
+		default:
+			hi = m
+		}
+	}
+	return rc.NumRegs
 }
 
 // RHandler is an exception handler of register code: an exception the

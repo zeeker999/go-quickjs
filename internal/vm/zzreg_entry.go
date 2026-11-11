@@ -63,7 +63,20 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 	c := &regCode{
 		code: unsafe.Pointer(unsafe.SliceData(rc.Code)), src: rc.SrcPC, siteName: rc.SiteName,
 		numRegs: int32(rc.NumRegs), params: int32(rc.Params), inits: int32(rc.Inits),
-		coerceThis: fn.CoerceThis, rc: rc, fn: fn, wide: true, ncap: int32(ncap), newTarget: fn.UsesNewTarget, args: rc.UsesArguments || rc.ForwardsArguments,
+		coerceThis: fn.CoerceThis, rc: rc, fn: fn, wide: true, ncap: int32(ncap), newTarget: fn.UsesNewTarget, args: rc.UsesArguments || rc.ForwardsArguments || rc.KeepsArgs,
+	}
+	c.keep = uint16(rc.Params)
+	if !fn.Strict {
+		if !fn.HasSimpleParams {
+			c.keep = 0
+		} else {
+			for k := 0; k < rc.Params && k < len(fn.Locals); k++ {
+				if fn.Locals[k].Captured {
+					c.keep = uint16(k)
+					break
+				}
+			}
+		}
 	}
 	if rc.LocalReg != nil {
 		c.reuse = regReuseSites(fn, rc)
@@ -133,13 +146,14 @@ func regConstOf(fn *bytecode.Function, w bytecode.RInstr) (Value, bool) {
 
 // regStmt is the one node of a register function's tree: it runs the frame
 // a call through runFD or callTree has made as register code. A frame of
-// the few calls the code cannot run in -- an arrow sharing a derived
-// constructor's this, a function made inside a with or beside an eval -- is
-// run by the stack interpreter instead.
+// the few calls the code cannot run in -- a function made inside a with or
+// beside an eval -- is run by the stack interpreter instead. A derived
+// constructor's frame, and an arrow's sharing its this, is run where its
+// code reads this from the binding (RegCode.ThisRef).
 func regStmt(c *regCode) tstmt {
 	return func(t *tctx) {
 		r, f := t.r, t.f
-		if c.wide && f.thisRef == nil && f.withScopes == nil && f.evalVars == nil {
+		if c.wide && (f.thisRef == nil || c.rc.ThisRef) && f.withScopes == nil && f.evalVars == nil {
 			if f.cl.reg == nil {
 				f.cl.reg = c
 			}

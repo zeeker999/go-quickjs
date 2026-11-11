@@ -153,6 +153,7 @@ func (c *compiler) predeclareFunction(h hoistedFunc) {
 		}
 		c.emit(bytecode.OpDefineGlobalFunc, c.nameIdx(h.name),
 			boolBit(c.opts.EvalConfigurable))
+		c.regTop(bytecode.OpDefineGlobalFunc, c.nameIdx(h.name), boolBit(c.opts.EvalConfigurable), h.fd.Fn)
 		return
 	}
 
@@ -259,6 +260,7 @@ func (c *compiler) declareLexicalNameMarked(name string, kind bindKind, pos int,
 			mutable = 1
 		}
 		c.emitAt(pos, bytecode.OpDeclareGlobalLex, c.nameIdx(name), mutable)
+		c.regTop(bytecode.OpDeclareGlobalLex, c.nameIdx(name), mutable, nil)
 		return
 	}
 	slot := c.declare(name, kind, pos)
@@ -449,7 +451,7 @@ func (c *compiler) compileStatement(s ast.Stmt) {
 		c.compileDispose(n)
 
 	case *ast.InstallPrivateMethods:
-		c.compileIdentRead(&ast.Ident{Name: n.Binding, Start: int32(n.Start)})
+		c.compileIdentRead(n.Binding)
 		c.emitAt(n.Start, bytecode.OpInstallPrivateMethods, 0, 0)
 
 	case *ast.FieldInit:
@@ -570,10 +572,12 @@ func (c *compiler) initBinding(target ast.Expr, kind ast.DeclKind) {
 		// A block of its own would have declared a local, so reaching here
 		// means the binding is the top-level one.
 		if c.globalLex[id.Name] {
+			c.reg.NoteWrite(id, regcomp.Res{Kind: regcomp.ResGlobalLexInit})
 			c.emit(bytecode.OpInitGlobalLex, c.nameIdx(id.Name), 0)
 			return
 		}
 		if c.isModuleLex(id.Name) {
+			c.reg.NoteWrite(id, regcomp.Res{Kind: regcomp.ResModuleLexInit})
 			c.emit(bytecode.OpInitModuleLex, c.nameIdx(id.Name), 0)
 			return
 		}
@@ -666,7 +670,7 @@ func (c *compiler) storeVar(name string) {
 		return
 	}
 	if c.regIdent != nil {
-		c.reg.NoteWrite(c.regIdent, regcomp.Res{Kind: regcomp.ResGlobal})
+		c.reg.NoteWrite(c.regIdent, regcomp.Res{Kind: regcomp.ResGlobalVar})
 	}
 	c.emit(bytecode.OpSetGlobal, c.nameIdx(name), 0)
 }
@@ -1474,12 +1478,28 @@ func (c *compiler) unwindTo(target *loopCtx) {
 		// so that a jump inside it does not undo again what this one has.
 		c.exits = append([]pendingExit(nil), savedExits[:top]...)
 		c.exitHandlers = append([]int(nil), savedExitHandlers[:top]...)
+		// What the clause produces is not the jump's value, as for the
+		// clause compileFinallyClause compiles: the try block's is, unless
+		// the clause itself leaves abruptly.
+		cv := int32(-1)
+		if c.completionSlot >= 0 {
+			cv = int32(c.declare(fmt.Sprintf("%%cv%d", *c.hiddenCount), bindVar, 0))
+			*c.hiddenCount++
+			c.emit(bytecode.OpGetLocal, uint32(c.completionSlot), 0)
+			c.emit(bytecode.OpSetLocal, uint32(cv), 0)
+			c.emit(bytecode.OpPushUndef, 0, 0)
+			c.emit(bytecode.OpSetLocal, uint32(c.completionSlot), 0)
+		}
 		c.beginScope()
 		savedRecord := c.finallyRecord
 		c.finallyRecord = false
 		c.compileStatements(saved[i].body)
 		c.finallyRecord = savedRecord
 		c.endScope()
+		if cv >= 0 {
+			c.emit(bytecode.OpGetLocal, uint32(cv), 0)
+			c.emit(bytecode.OpSetLocal, uint32(c.completionSlot), 0)
+		}
 		c.exits, c.exitHandlers = savedExits, savedExitHandlers
 	}
 	// What is left is the handler of a catch clause the jump leaves without

@@ -1,6 +1,10 @@
 package vm
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+)
 
 // privateMemberScript reads and writes private members -- fields, methods,
 // accessors, static ones -- in loops, three rounds of them, so that the
@@ -285,9 +289,26 @@ func TestPrivateSitesCached(t *testing.T) {
 	if len(keys) != 3 || keys[0].flags&propAccessor == 0 || keys[1].flags&propAccessor != 0 || keys[2].flags&propAccessor != 0 {
 		t.Fatalf("keys %v", keys)
 	}
-	// The code reads #n, writes it, reads #m and reads #g, in that order.
+	// The code reads #n, writes it, reads #m and reads #g, in that order:
+	// the stack form's sites, or, as register code, the sites of its
+	// get_private and set_private (their Aux's high half).
+	sites := make([]uint32, 4)
+	for i := range sites {
+		sites[i] = fn.PropSites + 1 + uint32(i)
+	}
+	if rc := fn.Reg; rc != nil && regTier.Load() {
+		sites = sites[:0]
+		for pc, w := range rc.Code {
+			if w.Op() == bytecode.RCold && (bytecode.RColdOp(w.X()) == bytecode.RColdGetPrivate || bytecode.RColdOp(w.X()) == bytecode.RColdSetPrivate) {
+				sites = append(sites, rc.Aux[pc]>>16)
+			}
+		}
+		if len(sites) != 4 {
+			t.Fatalf("%d private reads and writes in the register code, want 4", len(sites))
+		}
+	}
 	for i, want := range []int32{1, 1, 2, -1} {
-		e := &cl.ic[fn.PropSites+1+uint32(i)]
+		e := &cl.ic[sites[i]]
 		if want < 0 {
 			if e.ownShape != noShape {
 				t.Errorf("private site %d: the getter's member is cached", i)

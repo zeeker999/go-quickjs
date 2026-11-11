@@ -327,7 +327,13 @@ func (c *compiler) compileExprNamed(e ast.Expr, name string) {
 		c.emit(bytecode.OpPushNull, 0, 0)
 
 	case *ast.This:
-		c.emit(bytecode.OpPushThis, 0, 0)
+		if c.thisIsValue() {
+			c.emit(bytecode.OpPushThis, 0, 0)
+		} else {
+			// A derived constructor's this, which super() binds: a read
+			// before it throws, at the read.
+			c.emitAt(n.Start, bytecode.OpPushThis, 0, 0)
+		}
 
 	case *ast.NewTarget:
 		if c.inClassFieldInit() {
@@ -489,7 +495,8 @@ func (c *compiler) compileIdentReadStatic(n *ast.Ident) {
 			c.emit(bytecode.OpGetLocal, l.slot, 0)
 		} else {
 			c.reg.NoteRead(n, regcomp.Res{Kind: regcomp.ResLocalCheck, Index: l.slot})
-			c.emit(bytecode.OpGetLocalCheck, l.slot, 0)
+			// A read in the dead zone throws at the name.
+			c.emitAt(int(n.Start), bytecode.OpGetLocalCheck, l.slot, 0)
 		}
 		c.compiledRead(l, n)
 		return
@@ -497,7 +504,7 @@ func (c *compiler) compileIdentReadStatic(n *ast.Ident) {
 	if idx, ok := c.resolveUpvalue(n.Name); ok {
 		if c.fn.Upvalues[idx].TDZ {
 			c.reg.NoteRead(n, regcomp.Res{})
-			c.emit(bytecode.OpGetUpvalueCheck, idx, 0)
+			c.emitAt(int(n.Start), bytecode.OpGetUpvalueCheck, idx, 0)
 		} else {
 			c.reg.NoteRead(n, regcomp.Res{Kind: regcomp.ResUpval, Index: idx})
 			c.emit(bytecode.OpGetUpvalue, idx, 0)
@@ -781,7 +788,9 @@ func (c *compiler) templateIdx(q *ast.TemplateLit) uint32 {
 		t.Raw[i] = e.Raw
 	}
 	c.fn.Templates = append(c.fn.Templates, t)
-	return uint32(len(c.fn.Templates) - 1)
+	idx := uint32(len(c.fn.Templates) - 1)
+	c.reg.NoteTemplate(q, idx)
+	return idx
 }
 
 // constantElems reports whether the code from start is n instructions, each
@@ -1308,7 +1317,7 @@ func (c *compiler) compileUpdateKeep(n *ast.Update, keep bool) {
 			// not consult the prototype chain the way a property does.
 			name, ref := c.privateName(pn, int(target.Start))
 			c.emit(bytecode.OpDup, 0, 0)
-			c.emit(bytecode.OpGetPrivate, name, ref)
+			c.emitAt(int(target.Start), bytecode.OpGetPrivate, name, ref)
 			if !n.Prefix {
 				c.emit(bytecode.OpToNumeric, 0, 0)
 				c.emit(bytecode.OpInsert2, 0, 0)
@@ -1624,7 +1633,7 @@ func (c *compiler) compileCall(n *ast.Call) {
 			name, ref := c.privateName(pn, int(m.Start))
 			c.compileExpr(m.Object)
 			c.emit(bytecode.OpDup, 0, 0)
-			c.emit(bytecode.OpGetPrivate, name, ref)
+			c.emitAt(m.Property.Pos(), bytecode.OpGetPrivate, name, ref)
 			argc := c.compileArguments(n.Args)
 			// A call in tail position, as any method's is.
 			c.emitAt(callPos(n), c.callOp(n, bytecode.OpCallMethod), uint32(argc), 0)
@@ -1766,7 +1775,7 @@ func (c *compiler) compileSpreadCall(n *ast.Call) {
 			name, ref := c.privateName(pn, int(m.Start))
 			c.compileExpr(m.Object)
 			c.emit(bytecode.OpDup, 0, 0)
-			c.emit(bytecode.OpGetPrivate, name, ref)
+			c.emitAt(m.Property.Pos(), bytecode.OpGetPrivate, name, ref)
 			c.compileSpreadArguments(n.Args)
 			c.emitAt(callPos(n), bytecode.OpCallSpread, 0, 0)
 			return
@@ -1896,7 +1905,7 @@ func (c *compiler) compileChainLinkThis(e ast.Expr, jumps *[]chainJump) {
 	switch {
 	case m.Computed:
 		c.compileExpr(m.Property)
-		c.emit(bytecode.OpGetIndexThis, 0, 0)
+		c.emitAt(m.Property.Pos(), bytecode.OpGetIndexThis, 0, 0)
 	default:
 		if pn, private := m.Property.(*ast.PrivateName); private {
 			name, ref := c.privateName(pn, int(m.Start))
@@ -1904,7 +1913,7 @@ func (c *compiler) compileChainLinkThis(e ast.Expr, jumps *[]chainJump) {
 			c.emitAt(int(m.Start), bytecode.OpGetPrivate, name, ref)
 			break
 		}
-		c.emit(bytecode.OpGetPropThis, c.nameIdx(propKeyName(m.Property)), 0)
+		c.emitAt(m.Property.Pos(), bytecode.OpGetPropThis, c.nameIdx(propKeyName(m.Property)), 0)
 	}
 }
 
@@ -1927,7 +1936,7 @@ func (c *compiler) compileChainLink(e ast.Expr, jumps *[]chainJump) {
 		switch {
 		case n.Computed:
 			c.compileExpr(n.Property)
-			c.emit(bytecode.OpGetIndex, 0, 0)
+			c.emitAt(n.Property.Pos(), bytecode.OpGetIndex, 0, 0)
 		default:
 			if pn, private := n.Property.(*ast.PrivateName); private {
 				// A private name is not a property: it is reached through the
@@ -1938,7 +1947,8 @@ func (c *compiler) compileChainLink(e ast.Expr, jumps *[]chainJump) {
 				c.emitAt(int(n.Start), bytecode.OpGetPrivate, name, ref)
 				break
 			}
-			c.emit(bytecode.OpGetProp, c.nameIdx(propKeyName(n.Property)), 0)
+			// Placed at the property, as a member read outside a chain is.
+			c.emitAt(n.Property.Pos(), bytecode.OpGetProp, c.nameIdx(propKeyName(n.Property)), 0)
 		}
 
 	case *ast.Call:
@@ -1984,7 +1994,7 @@ func (c *compiler) compileChainLink(e ast.Expr, jumps *[]chainJump) {
 			switch {
 			case m.Computed:
 				c.compileExpr(m.Property)
-				c.emit(bytecode.OpGetIndexThis, 0, 0)
+				c.emitAt(m.Property.Pos(), bytecode.OpGetIndexThis, 0, 0)
 			default:
 				if pn, private := m.Property.(*ast.PrivateName); private {
 					// The receiver stays beneath the method, as
@@ -1994,7 +2004,7 @@ func (c *compiler) compileChainLink(e ast.Expr, jumps *[]chainJump) {
 					c.emitAt(int(m.Start), bytecode.OpGetPrivate, name, ref)
 					break
 				}
-				c.emit(bytecode.OpGetPropThis, c.nameIdx(propKeyName(m.Property)), 0)
+				c.emitAt(m.Property.Pos(), bytecode.OpGetPropThis, c.nameIdx(propKeyName(m.Property)), 0)
 			}
 			if n.Optional {
 				// The receiver is beneath the function here, so a short
@@ -2185,7 +2195,7 @@ func (c *compiler) compileMemberUpdate(m *ast.Member, op string, emitValue func(
 		name, ref := c.privateName(pn, int(m.Start))
 		c.compileExpr(m.Object)
 		c.emit(bytecode.OpDup, 0, 0)
-		c.emit(bytecode.OpGetPrivate, name, ref)
+		c.emitAt(int(m.Start), bytecode.OpGetPrivate, name, ref)
 		c.finishUpdate(op, emitValue, pos, 1, func() {
 			if keep {
 				c.emit(bytecode.OpInsert2, 0, 0)
@@ -2333,12 +2343,14 @@ func (c *compiler) assignToIdentStatic(t *ast.Ident, initializing bool) {
 	if initializing && c.globalLex[t.Name] {
 		// The binding is the script-level lexical one, and this is what takes
 		// it out of its dead zone.
+		c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResGlobalLexInit})
 		c.emit(bytecode.OpDup, 0, 0)
 		c.emit(bytecode.OpInitGlobalLex, c.nameIdx(t.Name), 0)
 		return
 	}
 	if initializing && c.isModuleLex(t.Name) {
 		// The same, for a module's top-level binding.
+		c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResModuleLexInit})
 		c.emit(bytecode.OpDup, 0, 0)
 		c.emit(bytecode.OpInitModuleLex, c.nameIdx(t.Name), 0)
 		return

@@ -5,7 +5,10 @@
 // generation and register allocation.
 package regcomp
 
-import "github.com/go-quickjs/go-quickjs/internal/ast"
+import (
+	"github.com/go-quickjs/go-quickjs/internal/ast"
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+)
 
 // ResKind is what an identifier resolved to.
 type ResKind uint8
@@ -41,6 +44,15 @@ const (
 	// a function whose arguments object is made only on demand, into local
 	// Index (the stack form's arguments_length and arguments_index).
 	ResLazyArgs
+	// ResGlobalVar is a var declaration's store to a global, which top-level
+	// code makes with set_global whatever its strictness: the var exists.
+	ResGlobalVar
+	// ResGlobalLexInit is the initialization of a script's top-level let,
+	// const or class binding (init_global_lex).
+	ResGlobalLexInit
+	// ResModuleLexInit is the initialization of a module's top-level let,
+	// const or class binding (init_module_lex).
+	ResModuleLexInit
 )
 
 // Res is an identifier's resolution.
@@ -72,6 +84,24 @@ type Record struct {
 	// Tails is each call the stack form compiled as a tail call
 	// (tail_call, tail_call_method, tail_direct_eval).
 	Tails map[ast.Expr]bool
+	// Templates is each tagged template's index in the function's
+	// Templates, its site, whose object every evaluation of it gives.
+	Templates map[*ast.TemplateLit]uint32
+	// Top is what top-level code does before its first statement, as the
+	// stack form does it, in order: the checks and declarations of the
+	// names it binds in the global object and the global lexical
+	// environment, and its function declarations' definitions.
+	Top []TopOp
+	// Completion is the stack slot of top-level code's completion value,
+	// which an expression statement sets, or -1 for a function.
+	Completion int32
+	// Classes is each class the function defines, as the stack form
+	// defines it (ClassRec).
+	Classes map[*ast.ClassLit]*ClassRec
+	// Privates is where each private name's key is, as the stack form
+	// resolved it: a binding of the function's (ResLocal) or an upvalue
+	// (ResUpval).
+	Privates map[*ast.PrivateName]Res
 	// Bail says the function has something whose resolution the record
 	// cannot express -- a with, an eval's variables, an Annex B function --
 	// and is left to the stack form.
@@ -80,7 +110,25 @@ type Record struct {
 
 // NewRecord makes an empty record.
 func NewRecord() *Record {
-	return &Record{Read: map[*ast.Ident]Res{}, Write: map[*ast.Ident]Res{}, Funcs: map[*ast.FuncDecl]uint32{}}
+	return &Record{Read: map[*ast.Ident]Res{}, Write: map[*ast.Ident]Res{}, Funcs: map[*ast.FuncDecl]uint32{}, Completion: -1}
+}
+
+// TopOp is one of top-level code's declarations: the stack form's
+// instruction Op of name Name and flag Flag, at source position Pos, and
+// for define_global_func the function, Fn, whose closure it defines.
+type TopOp struct {
+	Op   bytecode.Op
+	Name string
+	Flag uint32
+	Pos  int32
+	Fn   *ast.FuncLit
+}
+
+// NoteTop records top-level code's declaration op.
+func (r *Record) NoteTop(op TopOp) {
+	if r != nil {
+		r.Top = append(r.Top, op)
+	}
 }
 
 // NoteAppend records that n is an append to a local.
@@ -147,4 +195,80 @@ func (r *Record) NoteWrite(id *ast.Ident, res Res) {
 		r.Bail = true
 	}
 	r.Write[id] = res
+}
+
+// NoteTemplate records that tagged template q's site is idx.
+func (r *Record) NoteTemplate(q *ast.TemplateLit, idx uint32) {
+	if r == nil {
+		return
+	}
+	if r.Templates == nil {
+		r.Templates = map[*ast.TemplateLit]uint32{}
+	}
+	r.Templates[q] = idx
+}
+
+// ClassRec is what the stack form made of one class the function defines:
+// the slots of the class scope's bindings and the constants of the
+// functions it made, which the register form makes in the same order.
+type ClassRec struct {
+	// Self is the slot of the class's inner name, or -1 for a class
+	// without a name of its own.
+	Self int32
+	// Privates are the class's private names, each minted into its slot.
+	Privates []ClassPrivate
+	// Install is the slot of the list of the private methods each instance
+	// is given, or -1.
+	Install int32
+	// Keys is, for each of the class's fields, the slot its computed key
+	// is kept in, or -1.
+	Keys []int32
+	// Ctor is the constant of the constructor's function, and Init that of
+	// the instances' field initializer, or -1.
+	Ctor, Init int32
+	// Members is, for each of the class's members, the constant of its
+	// function, or -1 for the constructor.
+	Members []int32
+	// Statics are the static fields' and blocks' functions, in the order
+	// they run.
+	Statics []ClassStatic
+}
+
+// ClassPrivate is one of a class's private names: its key's slot and its
+// name, with its #.
+type ClassPrivate struct {
+	Slot uint32
+	Name string
+}
+
+// ClassStatic is a static field's or block's function, the constant
+// Const: the field Field of the class's fields, or a block for -1.
+type ClassStatic struct {
+	Const uint32
+	Field int32
+}
+
+// NoteClass records what the stack form made of class cls.
+func (r *Record) NoteClass(cls *ast.ClassLit, cr *ClassRec) {
+	if r == nil {
+		return
+	}
+	if r.Classes == nil {
+		r.Classes = map[*ast.ClassLit]*ClassRec{}
+	}
+	r.Classes[cls] = cr
+}
+
+// NotePrivate records where private name pn's key is.
+func (r *Record) NotePrivate(pn *ast.PrivateName, res Res) {
+	if r == nil {
+		return
+	}
+	if r.Privates == nil {
+		r.Privates = map[*ast.PrivateName]Res{}
+	}
+	if old, ok := r.Privates[pn]; ok && old != res {
+		r.Bail = true
+	}
+	r.Privates[pn] = res
 }

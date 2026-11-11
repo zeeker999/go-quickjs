@@ -54,14 +54,8 @@ func why(fn *bytecode.Function) string {
 		return "top-level code"
 	case fn.UsesArguments || fn.MakesArguments:
 		return "arguments"
-	case fn.HasRest || !fn.HasSimpleParams || fn.ParamsAreLexical:
-		return "parameter patterns, defaults or rest"
-	case fn.Kind == bytecode.KindConstructor || fn.Kind == bytecode.KindDerivedConstructor:
-		return "class constructor"
-	case fn.Kind != bytecode.KindNormal && fn.Kind != bytecode.KindArrow && fn.Kind != bytecode.KindMethod:
+	case fn.Kind == bytecode.KindClassFieldInit || fn.Kind == bytecode.KindStaticBlock:
 		return "getter, setter, field initializer or static block"
-	case fn.PrivateSites != 0:
-		return "private members"
 	}
 	return ""
 }
