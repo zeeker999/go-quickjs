@@ -2346,7 +2346,7 @@ func (c *compiler) assignToIdentStatic(t *ast.Ident, initializing bool) {
 		} else {
 			c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResLocalCheck, Index: l.slot})
 			c.emit(bytecode.OpDup, 0, 0)
-			c.emit(bytecode.OpSetLocalCheck, l.slot, 0)
+			c.emitAt(int(t.Start), bytecode.OpSetLocalCheck, l.slot, 0)
 		}
 		return
 	}

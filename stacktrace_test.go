@@ -530,3 +530,18 @@ for (var [f, v] of [[get, { a: null }], [call, null], [idx, { a: null }], [meth,
 r.join(" | ")`,
 		"at get (<eval>:1:31) | at call (<eval>:2:29) | at idx (<eval>:3:31) | at meth (<eval>:4:32)")
 }
+
+// TestStackPositionOfADeadZoneStore pins where a trace places the
+// ReferenceError of an assignment to a let in its dead zone: at the name,
+// as a read's. Unplaced, it had the position of whatever was compiled
+// before it -- a call, another case's return -- or none.
+func TestStackPositionOfADeadZoneStore(t *testing.T) {
+	checkEval(t, `function first() { x = 5; let x }
+function sw(v) { switch (v) { case 1: let x = 10; return x; case 2: x = 5; return x } }
+function bl() { { f(); x = 5 } let x; function f() {} }
+function pa() { [x] = [1]; let x }
+var r = []
+for (var [f, v] of [[first], [sw, 2], [bl], [pa]]) try { f(v) } catch (e) { r.push(e.stack.split(String.fromCharCode(10))[1].trim()) }
+r.join(" | ")`,
+		"at first (<eval>:1:20) | at sw (<eval>:2:69) | at bl (<eval>:3:24) | at pa (<eval>:4:18)")
+}
