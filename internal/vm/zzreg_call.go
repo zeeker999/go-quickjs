@@ -22,8 +22,15 @@ import (
 // call (errTailCall) has its callee called here in its place, in this
 // same call of regCall, as run does: a chain of tail calls runs in
 // constant space.
-func (r *Runtime) regCall(callee, this Value, args []Value) (Value, error) {
-	v, err := r.regCallOnce(callee, this, args)
+// regTailLoop is the loop over the calls a chain of frames ended in
+// (errTailCall), each made in place of the last at this depth.
+//
+//go:noinline
+func (r *Runtime) regTailLoop() (Value, error) {
+	saved := r.tailLoopDepth
+	r.tailLoopDepth = r.frameDepth
+	defer func() { r.tailLoopDepth = saved }()
+	v, err := Undefined, errTailCall
 	for err == errTailCall {
 		tc := r.pendingTail
 		r.pendingTail = tailCall{}
@@ -35,29 +42,40 @@ func (r *Runtime) regCall(callee, this Value, args []Value) (Value, error) {
 		case terr != nil:
 			return Undefined, terr
 		case ok:
-			v, err = r.regCallOnce(Obj(o), this, args)
+			v, err = r.regCall(Obj(o), this, args)
 		default:
-			v, err = r.regCallOnce(tc.callee, tc.this, tc.args)
+			v, err = r.regCall(tc.callee, tc.this, tc.args)
 		}
 	}
 	return v, err
 }
 
-// regCallOnce is regCall's call, which returns errTailCall where the
-// callee's frame ended in a tail call.
+// A frame regCall runs or enters that ends in a tail call (errTailCall)
+// has its callee called in its place by regTailLoop, whose loop makes every
+// later call of the chain in place: a chain runs in constant space.
+// regCall leaves the error to the loop where the loop called it
+// (regCall's check of errTailCall).
 //
-// regCallOut is its call of what it does not enter itself: a function of
+// regCallOut is regCall's call of what it does not enter itself: a function of
 // register code that needs regDirect's set-up entered by regDirectOnce,
 // which leaves a tail call to regCall's loop, anything else by callDirect,
 // which makes its own.
-func (r *Runtime) regCallOnce(callee, this Value, args []Value) (Value, error) {
+func (r *Runtime) regCall(callee, this Value, args []Value) (Value, error) {
 	if !callee.IsObject() {
-		return r.regCallOut(callee, this, args)
+		v, err := r.regCallOut(callee, this, args)
+		if err == errTailCall && r.tailLoopDepth != r.frameDepth {
+			return r.regTailLoop()
+		}
+		return v, err
 	}
 	o := callee.Object()
 	fd := o.fn()
 	if fd == nil || fd.closure == nil || fd.bound {
-		return r.regCallOut(callee, this, args)
+		v, err := r.regCallOut(callee, this, args)
+		if err == errTailCall && r.tailLoopDepth != r.frameDepth {
+			return r.regTailLoop()
+		}
+		return v, err
 	}
 	cl := fd.closure
 	c := cl.reg
@@ -65,20 +83,32 @@ func (r *Runtime) regCallOnce(callee, this Value, args []Value) (Value, error) {
 		c = r.regOf(cl)
 	}
 	if c == nil || c.wide || cl.realm != r.Realm {
-		return r.regCallOut(callee, this, args)
+		v, err := r.regCallOut(callee, this, args)
+		if err == errTailCall && r.tailLoopDepth != r.frameDepth {
+			return r.regTailLoop()
+		}
+		return v, err
 	}
 	if fd.extra != nil {
 		// An arrow whose surroundings are its this alone; anything else a
 		// function carries of its surroundings is runFD's to establish.
 		x := fd.extra
 		if !fd.arrow || x.lexThisRef != nil || x.rare != nil {
-			return r.regCallOut(callee, this, args)
+			v, err := r.regCallOut(callee, this, args)
+			if err == errTailCall && r.tailLoopDepth != r.frameDepth {
+				return r.regTailLoop()
+			}
+			return v, err
 		}
 		this = x.lexThis
 	}
 	if c.coerceThis && !this.IsObject() {
 		if !this.IsNullish() {
-			return r.regCallOut(callee, this, args)
+			v, err := r.regCallOut(callee, this, args)
+			if err == errTailCall && r.tailLoopDepth != r.frameDepth {
+				return r.regTailLoop()
+			}
+			return v, err
 		}
 		this = r.globalThis
 	}
@@ -150,6 +180,9 @@ func (r *Runtime) regCallOnce(callee, this Value, args []Value) (Value, error) {
 	v, err := r.runReg(f, c)
 	f.regKind = 0
 	r.popFrameOf(f, base)
+	if err == errTailCall && r.tailLoopDepth != r.frameDepth {
+		return r.regTailLoop()
+	}
 	return v, err
 }
 
@@ -251,7 +284,7 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 				o, cl, rc := e.callee, e.cl, e.rc
 				argc := int(w.X())
 				top := base + int(rc.numRegs)
-				if top > len(r.stack) || r.frameDepth >= r.callDeep {
+				if top > len(r.stack) || r.frameDepth >= r.maxFrames || r.frameDepth >= tailCallDepth {
 					if err := r.regDeepCall(f, c, w, wb, pc, top, e); err != nil {
 						return err
 					}
@@ -298,11 +331,13 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 				}
 				nf.regKind = regFrameCall
 				v, err := r.runReg(nf, rc)
-				for err == errRegRestart {
+				if err == errRegRestart {
 					v, err = r.regRestartRun(nf)
 				}
 				nf.regKind = 0
-				if len(nf.openUpvalues) != 0 {
+				if (rc.ncap != 0 || nf.cl != cl) && len(nf.openUpvalues) != 0 {
+					// The frame's own captures, or those of the code a
+					// tail call gave it in place.
 					regCloseUpvalues(nf)
 				}
 				r.frameDepth--
@@ -751,7 +786,7 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int,
 		f.locals = r.stack[base+2 : base+2+p : base+2+p]
 	}
 	v, err := r.runReg(f, rc)
-	for err == errRegRestart {
+	if err == errRegRestart {
 		v, err = r.regRestartRun(f)
 	}
 	f.regKind = 0
@@ -767,7 +802,7 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int,
 	return v, err
 }
 
-// regCallOut is regCallOnce's call of callee where it does not enter it.
+// regCallOut is regCall's call of callee where it does not enter it.
 func (r *Runtime) regCallOut(callee, this Value, args []Value) (Value, error) {
 	if callee.IsObject() {
 		o := callee.Object()
@@ -792,7 +827,8 @@ func (r *Runtime) regTailRest() (Value, error) {
 	return r.regCall(tc.callee, tc.this, tc.args)
 }
 
-// regDeepCall is regCallW's check of a call past callDeep, its callee's
+// regDeepCall is regCallW's check of a call past maxFrames or
+// tailCallDepth, its callee's
 // frame to reach top: past maxFrames or the stack, a RangeError; a call in
 // tail position (RMarkTail) once the stack is tailCallDepth deep, its
 // frame given to the callee in place (regTailInPlace, errRegRestart) or
@@ -828,11 +864,18 @@ func regMarkAt(c *regCode, pc int) uint8 {
 // instruction with r.regRestart's code (regRestartRun): the loop leaves
 // through its fail tail, which regCatch leaves to the caller.
 //
-// regRestartRun runs frame f again with the code a tail call gave it.
+// regRestartRun runs frame f again with the code a tail call gave it, as
+// many times as its tail calls give it another.
+//
+//go:noinline
 func (r *Runtime) regRestartRun(f *frame) (Value, error) {
-	rc := r.regRestart
-	r.regRestart = nil
-	return r.runReg(f, rc)
+	v, err := Undefined, errRegRestart
+	for err == errRegRestart {
+		rc := r.regRestart
+		r.regRestart = nil
+		v, err = r.runReg(f, rc)
+	}
+	return v, err
 }
 
 var errRegRestart = errors.New("register frame restarted")

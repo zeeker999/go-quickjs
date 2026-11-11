@@ -333,6 +333,12 @@ type Runtime struct {
 	// filled in, whose epoch is 0, holds nothing. After everything the
 	// interpreter reads, so that none of it moves.
 	typedEpoch uint64
+	// tailLoopDepth is the frame depth regTailLoop makes its calls at, or
+	// -1: regCall leaves errTailCall to the loop that called it.
+	tailLoopDepth int
+	// regRestart is the register code a register frame was given in place
+	// by a tail call (regTailInPlace), which runReg continues with.
+	regRestart *regCode
 	// jitFields is the optional native tier's state, empty in builds
 	// without it. It comes after everything the interpreter reads, so that
 	// a build with the tier moves none of their offsets, and before the last
@@ -343,13 +349,6 @@ type Runtime struct {
 	// than each job taken from the front of the slice, which made an append
 	// at its end reallocate it about once a job.
 	jobHead int
-
-	// callDeep is min(maxFrames, tailCallDepth): past it, a register
-	// call checks the limit and whether it is a tail call (regDeepCall).
-	callDeep int
-	// regRestart is the register code a register frame was given in place
-	// by a tail call (regTailInPlace), which runReg continues with.
-	regRestart *regCode
 }
 
 // Realm is a set of intrinsics and the global object that goes with them.

@@ -1200,7 +1200,7 @@ regdiff cases and test262 in register mode on its directories:
    (`Record.Tails`), and regcomp marks them (`RMarkTail`): the call is
    call_w or call_method_w as ever, and `regCallW` reads the mark only
    once the stack is `tailCallDepth` deep (behind one compare,
-   `regDeepCall` past `callDeep`, which checks the limit too). There, a
+   `regDeepCall` past `maxFrames` or `tailCallDepth`). There, a
    callee of register code of the form's own layout that keeps no
    arguments takes the frame over in place (`regTailInPlace`): the
    frame's captured bindings closed, the arguments moved to the
