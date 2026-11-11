@@ -284,7 +284,8 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 				o, cl, rc := e.callee, e.cl, e.rc
 				argc := int(w.X())
 				top := base + int(rc.numRegs)
-				if top > len(r.stack) || r.frameDepth >= r.maxFrames || r.frameDepth >= tailCallDepth {
+				if top > len(r.stack) || r.frameDepth >= r.maxFrames ||
+					r.frameDepth >= tailCallDepth && regMarkAt(c, pc)&bytecode.RMarkTail != 0 {
 					if err := r.regDeepCall(f, c, w, wb, pc, top, e); err != nil {
 						return err
 					}
@@ -335,9 +336,7 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 					v, err = r.regRestartRun(nf)
 				}
 				nf.regKind = 0
-				if (rc.ncap != 0 || nf.cl != cl) && len(nf.openUpvalues) != 0 {
-					// The frame's own captures, or those of the code a
-					// tail call gave it in place.
+				if rc.ncap != 0 && len(nf.openUpvalues) != 0 {
 					regCloseUpvalues(nf)
 				}
 				r.frameDepth--
@@ -874,6 +873,11 @@ func (r *Runtime) regRestartRun(f *frame) (Value, error) {
 		rc := r.regRestart
 		r.regRestart = nil
 		v, err = r.runReg(f, rc)
+	}
+	// The captures of the code the frame was given, which its caller
+	// closes only by the first code's.
+	if len(f.openUpvalues) != 0 {
+		regCloseUpvalues(f)
 	}
 	return v, err
 }
