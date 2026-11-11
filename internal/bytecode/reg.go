@@ -181,7 +181,11 @@ const (
 	_ // free: 40, the translation reference's call, removed
 	_ // free: 41, the translation reference's call_method, removed
 	_ // free: 42, the translation reference's new, removed
-	_ // free: 43, the translation reference's close_upvals, removed
+	// RYield suspends a generator's frame with R[B], and on its
+	// resumption R[A] = the value sent in, the next instruction a jump past
+	// the return path a return resumes at: the step of a loop over a
+	// generator, which a resumption by next goes on past (zzreg_zgen.go).
+	RYield
 
 	// The bitwise operators and shifts, each an operation of its own so
 	// that no instruction decides at run time which operator it is: R[A] =
@@ -551,12 +555,11 @@ const (
 	// entry of the scope makes new ones (close_regs).
 	RColdCloseRegs
 	// A generator's and an async function's (zzreg_zgen.go): RColdGenEntry,
-	// the code's first instruction, goes on where the frame was suspended,
-	// at the pc the resumption gives, or throws there what it injects;
-	// RColdEndParams suspends a generator its creation ran once its
-	// parameters are bound; RColdYield suspends the frame with R[B], and on
-	// its resumption R[A] = the value sent in, the next instruction a jump
-	// past the return path a return resumes at; RColdAwait suspends it to
+	// the code's first instruction, run by its first run and by a
+	// resumption that throws, which it throws at the suspension; a
+	// resumption that goes on starts at its pc. RColdEndParams suspends a
+	// generator its creation ran once its parameters are bound (RYield is
+	// a yield's); RColdAwait suspends it to
 	// await R[B], and on its resumption R[A] = what that settled to;
 	// RColdYieldStar suspends a yield* with R[B], and on any resumption R[A]
 	// = the value sent in and R[A+1] how, a ResumeNext, ResumeThrow or
@@ -578,7 +581,6 @@ const (
 	// object.
 	RColdGenEntry
 	RColdEndParams
-	RColdYield
 	RColdAwait
 	RColdYieldStar
 	RColdIterResume
@@ -665,7 +667,7 @@ var rColdNames = [...]string{
 	RColdSuperSetIndex: "super_set_index", RColdThis: "this_bound", RColdCheckThis: "check_this_init",
 	RColdNewTarget: "new_target", RColdDerivedRet: "derived_ret", RColdDeleteSuper: "delete_super",
 	RColdCloseRegs: "close_regs", RColdGenEntry: "gen_entry", RColdEndParams: "end_params",
-	RColdYield: "yield", RColdAwait: "await", RColdYieldStar: "yield_star", RColdIterResume: "iter_resume",
+	RColdAwait: "await", RColdYieldStar: "yield_star", RColdIterResume: "iter_resume",
 	RColdIterUnpackDelegate: "iter_unpack_delegate", RColdForAwaitOfStart: "for_await_of_start",
 	RColdAsyncIterNext: "async_iter_next", RColdIterResult: "iter_result",
 	RColdAsyncIterClose: "async_iter_close", RColdAsyncIterCheck: "async_iter_check",
@@ -856,7 +858,7 @@ var rOpNames = [...]string{
 	RPostInc: "post_inc", RPostDec: "post_dec", RGetLength: "get_length",
 	RJEq: "jeq", RJNe: "jne", RJEqI: "jeq_imm", RJNeI: "jne_imm", RJNull: "jnull", RJNotNull: "jnotnull",
 	RThrow: "throw", RInstanceOf: "instanceof", RIn: "in", RDelete: "delete", RArguments: "arguments", RNewArrayK: "new_array_k", RAddProp: "add_prop", RAddPropI: "add_prop_imm", RApplyArgs: "apply_args",
-	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RSwitch: "switch", RJTypeof: "jtypeof", RTypeof: "typeof", RSwitchTypeof: "switch_typeof", RNewObjectLit: "new_object_lit", RAppend: "append", RStrFreeze: "str_freeze", RCharCodeAt: "char_code_at", RIterNext: "iter_next", RLit: "regexp_lit", RCold: "cold", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
+	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RSwitch: "switch", RJTypeof: "jtypeof", RTypeof: "typeof", RSwitchTypeof: "switch_typeof", RNewObjectLit: "new_object_lit", RAppend: "append", RStrFreeze: "str_freeze", RCharCodeAt: "char_code_at", RIterNext: "iter_next", RYield: "yield", RLit: "regexp_lit", RCold: "cold", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
 }
 
 func (op ROp) String() string {
@@ -872,7 +874,7 @@ func (rc *RegCode) Format(pc int) string {
 	r := func(n uint16) string { return fmt.Sprintf("r%d", n) }
 	target := func(off int32) string { return fmt.Sprintf("-> %d", pc+1+int(off)) }
 	switch op := w.Op(); op {
-	case RMove, RInc, RDec, RPostInc, RPostDec, RGetLength:
+	case RMove, RInc, RDec, RPostInc, RPostDec, RGetLength, RYield:
 		return fmt.Sprintf("%s %s, %s", op, r(w.A()), r(w.B()))
 	case RLoadInt:
 		return fmt.Sprintf("%s %s, %d", op, r(w.A()), int32(w.BC()))

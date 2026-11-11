@@ -436,7 +436,7 @@ the ones Go allows:
   list, and no hot operation is renumbered: its case's code would move.
   At the removal of the translation reference the free values were 24,
   29, 36, 37, 40, 41, 42 and 43, and 127 is `invalid`'s; `iter_next`
-  took 24.
+  took 24, and `yield`, a loop over a generator's step, 43.
 
 What remains is Go's: a register store of a `Value` is a write-barrier
 check, the loop's instruction word is still saved at the dispatch where a
@@ -590,10 +590,15 @@ binding. A generator of register code keeps its window in its `vals`,
 `numRegs` values and then, where the code keeps them, its arguments; its
 `pc` is a register pc, and `generator.reg` marks it.
 
-- **The code's first instruction is `gen_entry`** (cold), which goes on at
-  the pc the resumption gives in the frame's `savedSP`, or throws there,
-  at a negated pc, the value a throw injects. The loop is not told of
-  generators at all: no start pc, no case of its own.
+- **The code's first instruction is `gen_entry`** (cold), which a
+  resumption that goes on skips: `runReg` starts at the pc it is given,
+  0 for any other frame. `gen_entry` runs at the frame's first run, and
+  at a throw injected, which it throws at the suspension, a negated pc
+  in the frame's `savedSP`. `yield` is a case of the loop's own
+  (`RYield`), the step of a loop over a generator: through `cold`, the
+  three switches its suspension and `gen_entry` went through
+  (`regSlow`, `regColdSub`, `regColdGen`) were a third of a for-of's
+  step.
 - **A generator's creation runs its parameters' binding** up to
   `end_params`, which suspends it, as the stack form's prologue does: a
   default or a pattern that throws, throws at the call. An async
@@ -617,6 +622,13 @@ binding. A generator of register code keeps its window in its `vals`,
   loop. An operation whose next instruction is a jump (`iter_resume`,
   `iter_unpack_delegate`, `iter_result`, `async_iter_close`) takes it to
   leave and skips it to go on: the verifier checks the jump is there.
+  A synchronous yield* to a generator its realm's next steps is stepped
+  directly, as the tree's `delegateNext` steps one (`regDelegateNext`):
+  what the delegate yields goes on as a value, the frame suspended as at
+  the `yield_star` four instructions on (the verifier checks it is
+  there), with no result object at any level of a chain of delegations.
+  The delegation's steps are placed at the operand's position, as the
+  stack form's are.
 - **A for await's step** is `async_iter_next`, `await` and `iter_result`
   into a register of its own; the body is in the ranges of the cursor's
   handler, which closes it as AsyncIteratorClose does -- the return
@@ -626,9 +638,16 @@ binding. A generator of register code keeps its window in its `vals`,
 - **The drivers are the stack form's:** next, return and throw, an async
   function's steps and an async generator's queue call `resumeFull`, and
   `resumeFrame` hands a register generator's resumption to
-  `regGenResume`, which answers with the same `resumeResult`. A for-of
-  over a register generator steps it with no recover (`regGenCursor`),
-  its body throwing as register code throws.
+  `regGenResume`, which answers with the same `resumeResult`; next
+  resumes a suspended register generator of its realm at once. A for-of
+  over a register generator steps it with no recover (`regGenStep`),
+  its body throwing as register code throws: next's frame pushed as
+  `stepIter` pushes it, no result object, no search for a tree. A
+  generator whose parameters need no code (`end_params` the second
+  instruction) is not run at its creation; its first resumption starts
+  past `end_params`. A call site of a generator function or an async
+  function makes its object without the generic call's search
+  (`regGenCall`), an async function's first step at once.
 - **An await's job continues in place.** An async function its await's
   job resumes from the job queue (`generator.awaitJob`, a frame of kind
   `regFrameAwaitJob`) goes on in place at an await of a value that is not

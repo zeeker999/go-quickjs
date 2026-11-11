@@ -647,8 +647,13 @@ func (g *generator) nextTree() *tree {
 // resumeFull runs a generator and reports what kind of suspension stopped it.
 func (r *Runtime) resumeFull(g *generator, sent Value, mode resumeMode) (resumeResult, error) {
 	if mode == resumeNext {
-		// The common case, a body its tree runs, is resumed there.
-		if t := g.nextTree(); t != nil {
+		// The common case, a body its tree runs, is resumed there; one of
+		// register code, suspended and of this realm, at once.
+		if g.reg {
+			if g.state <= genSuspendedYield && (g.cl.realm == nil || g.cl.realm == r.Realm) {
+				return r.regGenResume(g, sent, mode)
+			}
+		} else if t := g.nextTree(); t != nil {
 			if res, ran, err := resumeTree(r, g, t, sent); ran {
 				return res, err
 			}

@@ -109,7 +109,11 @@ func (r *Runtime) newRegGenerator(cl *closure, c *regCode, this Value, args []Va
 		g.rareOf().thisRef = fd.extra.lexThisRef
 	}
 	if fn.Generator {
-		if _, _, err := r.regGenRun(g, c, 0); err != nil {
+		if w := regAt(c.code, 1); w.Op() == bytecode.RCold && bytecode.RColdOp(w.X()) == bytecode.RColdEndParams {
+			// Parameters the window's copy has bound, end_params next to
+			// gen_entry: the body starts past it.
+			g.pc = 2
+		} else if _, _, err := r.regGenRun(g, c, 0); err != nil {
 			return nil, err
 		}
 	}
@@ -142,8 +146,7 @@ func (r *Runtime) regGenResume(g *generator, sent Value, mode resumeMode) (resum
 	start := int(g.pc)
 	if start > 0 {
 		w := regAt(c.code, start-1)
-		switch bytecode.RColdOp(w.X()) {
-		case bytecode.RColdYield:
+		if w.Op() == bytecode.RYield {
 			g.vals[w.A()] = sent
 			switch mode {
 			case resumeThrow:
@@ -153,14 +156,17 @@ func (r *Runtime) regGenResume(g *generator, sent Value, mode resumeMode) (resum
 			default:
 				start += 1 + int(regJumpOff(regAt(c.code, start)))
 			}
-		case bytecode.RColdAwait:
-			g.vals[w.A()] = sent
-			if mode == resumeThrow {
-				start = -start
+		} else {
+			switch bytecode.RColdOp(w.X()) {
+			case bytecode.RColdAwait:
+				g.vals[w.A()] = sent
+				if mode == resumeThrow {
+					start = -start
+				}
+			case bytecode.RColdYieldStar:
+				g.vals[w.A()] = sent
+				g.vals[w.A()+1] = Int(int(mode))
 			}
-		case bytecode.RColdYieldStar:
-			g.vals[w.A()] = sent
-			g.vals[w.A()+1] = Int(int(mode))
 		}
 	}
 	g.state = genExecuting
@@ -170,6 +176,12 @@ func (r *Runtime) regGenResume(g *generator, sent Value, mode resumeMode) (resum
 		g.state = genSuspendedYield
 		g.started = true
 		res := resumeResult{value: sig.value, how: suspendHow(sig)}
+		if sig.delegate && !sig.raw && !g.async {
+			// A value a delegate stepped directly gave (regDelegateNext),
+			// whose result object is of the delegate's next's realm, this
+			// one, as resumeFrame's.
+			res.realm = g.cl.realm
+		}
 		// The suspension is the runtime's one, which is not to keep the
 		// value alive.
 		sig.value = Undefined
@@ -180,6 +192,84 @@ func (r *Runtime) regGenResume(g *generator, sent Value, mode resumeMode) (resum
 		return resumeResult{value: Undefined, how: resumeDone}, err
 	}
 	return resumeResult{value: v, how: resumeDone}, nil
+}
+
+// regGenStep is iter_next of a for-of's cursor over g, a generator of
+// register code stepped by its realm's next: next's frame, as stepIter
+// writes it out, and the body resumed from its suspension
+// (regGenResume), without the general resumption's search for a tree and
+// its answers for a generator running, finished or of another realm,
+// which stepIter steps. The cursor is done once it is, or once a step
+// fails.
+func (r *Runtime) regGenStep(st *iterState, g *generator) (Value, bool, error) {
+	if g.state > genSuspendedYield || g.cl.realm != nil && g.cl.realm != r.Realm {
+		v, ok, err := r.stepIter(st.iter, st.next)
+		if !ok {
+			st.done = true
+		}
+		return v, ok, err
+	}
+	if err := r.tick(); err != nil {
+		st.done = true
+		return Undefined, false, err
+	}
+	if r.frameDepth >= r.maxFrames {
+		st.done = true
+		return Undefined, false, r.throwRangeError("maximum call stack size exceeded")
+	}
+	off := r.frameDepth - r.frameBase
+	if uint(off) >= uint(len(r.cur)) {
+		r.seekFrameBlock()
+		off = r.frameDepth - r.frameBase
+	}
+	r.frameDepth++
+	if r.frameDepth > r.frameHigh {
+		r.frameHigh = r.frameDepth
+	}
+	gn := r.genNextFn
+	f := &r.cur[off]
+	f.cl = nil
+	f.native = gn.fn().name
+	f.this = st.iter
+	f.newTarget = Undefined
+	f.callee = gn
+	f.args = nil
+	if len(f.handlers) != 0 {
+		f.handlers = f.handlers[:0]
+	}
+	if len(f.openUpvalues) != 0 {
+		f.openUpvalues = f.openUpvalues[:0]
+	}
+	got, err := r.regGenResume(g, Undefined, resumeNext)
+	r.frameDepth--
+	if err != nil {
+		st.done = true
+		return Undefined, false, err
+	}
+	if !got.raw() || !got.value.IsObject() {
+		if got.done() {
+			st.done = true
+			return Undefined, false, nil
+		}
+		return got.value, true, nil
+	}
+	// A delegate's own result, which a yield* hands out as it is.
+	res := got.value
+	done, err := r.getValueProp(res, atomDone)
+	if err != nil {
+		st.done = true
+		return Undefined, false, err
+	}
+	if done.Truthy() {
+		st.done = true
+		return Undefined, false, nil
+	}
+	v, err := r.getValueProp(res, atomValue)
+	if err != nil {
+		st.done = true
+		return Undefined, false, err
+	}
+	return v, true, nil
 }
 
 // regGenRun runs g's frame, of register code c, from start (see
@@ -223,21 +313,28 @@ func (r *Runtime) regGenRun(g *generator, c *regCode, start int) (Value, *suspen
 	f.handlers, f.openUpvalues = nil, ups
 	g.frameRare(f)
 	f.native = ""
-	f.savedSP = start
+	// A resumption that goes on runs from its pc; one that throws runs
+	// gen_entry, which throws at the suspension.
+	f.savedSP = 0
+	if start < 0 {
+		f.savedSP, start = start, 0
+	}
 	f.paramsOnly = false
 	f.regKind = 0
 	if g.awaitJob {
 		g.awaitJob = false
 		f.regKind = regFrameAwaitJob
 	}
-	v, err := r.runReg(f, c)
+	v, err := r.runReg(f, c, start)
 	var sig *suspendSignal
 	if s, ok := err.(*suspendSignal); ok {
 		sig, err = s, nil
 		g.pc = uint32(f.savedSP)
 		copy(saved, w)
-		regMoveUps(f.openUpvalues, w, saved)
-		g.keep(nil, nil, f.openUpvalues)
+		if ups := f.openUpvalues; len(ups) != 0 || g.saved != nil {
+			regMoveUps(ups, w, saved)
+			g.keep(nil, nil, ups)
+		}
 	} else {
 		for _, u := range f.openUpvalues {
 			u.close()
@@ -250,6 +347,71 @@ func (r *Runtime) regGenRun(g *generator, c *regCode, start int) (Value, *suspen
 	r.frameDepth--
 	r.stackTop = base
 	return v, sig, err
+}
+
+// regYield is yield's suspension of frame f with v, to go on at pc, the
+// instruction after it (regGenResume).
+func (r *Runtime) regYield(f *frame, v Value, pc int) error {
+	f.savedSP = pc
+	sig := &r.treeSig
+	*sig = suspendSignal{value: v}
+	return sig
+}
+
+// regDelegate is the generator a synchronous yield*'s cursor st steps by
+// its realm's intrinsic next, or nil: the delegation steps it directly
+// (regDelegateNext), as the tree's delegateNext does.
+func (r *Runtime) regDelegate(st *iterState) *generator {
+	if st.forIn || st.arr != nil || !st.iter.IsObject() || !st.next.IsObject() {
+		return nil
+	}
+	n, it := st.next.Object(), st.iter.Object()
+	if fd := n.fn(); fd == nil || fd.iterNext != iterNextGenerator || fd.realm != nil && fd.realm != r.Realm ||
+		it.class != ClassGenerator {
+		return nil
+	}
+	return genOf(it)
+}
+
+// regDelegateNext is iter_resume of a synchronous yield* whose delegate,
+// g, is a generator its realm's next steps, resumed by next: g is
+// stepped directly, as a for-of steps one, in next's frame, and neither
+// next's result nor its arguments are made. What g yields the delegation
+// yields on as a value, the frame suspended as at the yield_star after
+// iter_unpack_delegate (the verifier checks it is there), which the
+// consumer's next puts in a result object or a for-of reads as it is; g's
+// return value ends the delegation, the jump after iter_resume taken
+// with it; a result object g hands over as it is, a delegation of its
+// own to another iterator, goes to iter_unpack_delegate as any result
+// does.
+func (r *Runtime) regDelegateNext(f *frame, k *regKept, w bytecode.RInstr, regs *[1 << 16]Value, st *iterState, g *generator) error {
+	st.delegation = true
+	if err := r.tick(); err != nil {
+		return err
+	}
+	n := st.next.Object()
+	if err := r.nativeFrame(n, n.fn(), st.iter, nil, Undefined); err != nil {
+		return err
+	}
+	got, err := r.resumeFull(g, regs[w.C()], resumeNext)
+	r.frameDepth--
+	if err != nil {
+		return err
+	}
+	switch {
+	case got.raw() && got.value.IsObject():
+		regs[w.A()] = got.value
+		k.pc++
+	case got.done():
+		st.done = true
+		regs[w.A()] = got.value
+	default:
+		f.savedSP = k.pc + 4
+		sig := &r.treeSig
+		*sig = suspendSignal{value: got.value, delegate: true}
+		return sig
+	}
+	return nil
 }
 
 // regMoveUps points each of ups open on a register of window from at the
@@ -272,12 +434,11 @@ func regMoveUps(ups []*upvalue, from, to []Value) {
 func (r *Runtime) regColdGen(f *frame, c *regCode, k *regKept, w bytecode.RInstr, regs *[1 << 16]Value) error {
 	switch op := bytecode.RColdOp(w.X()); op {
 	case bytecode.RColdGenEntry:
+		// Run only by a frame's first run and by a throw injected: a
+		// resumption that goes on starts past it (regGenRun).
 		pc := f.savedSP
 		f.savedSP = 0
-		switch {
-		case pc > 0:
-			k.pc = pc
-		case pc < 0:
+		if pc < 0 {
 			// A throw injected at the suspension at -pc-1, its value in
 			// the suspension's register.
 			k.pc = -pc
@@ -285,7 +446,7 @@ func (r *Runtime) regColdGen(f *frame, c *regCode, k *regKept, w bytecode.RInstr
 			return r.throw(regs[regAt(c.code, -pc-1).A()])
 		}
 		return nil
-	case bytecode.RColdEndParams, bytecode.RColdYield, bytecode.RColdAwait, bytecode.RColdYieldStar:
+	case bytecode.RColdEndParams, bytecode.RColdAwait, bytecode.RColdYieldStar:
 		if op == bytecode.RColdAwait && f.regKind == regFrameAwaitJob && !r.HasPendingJobs() {
 			// An await's job, the queue's last, would resume the frame
 			// with what a settled value settled to as the queue's next
@@ -311,6 +472,13 @@ func (r *Runtime) regColdGen(f *frame, c *regCode, k *regKept, w bytecode.RInstr
 		}
 		return sig
 	case bytecode.RColdIterResume:
+		if !c.fn.Async && resumeMode(regs[w.C()+1].Number()) == resumeNext {
+			if st := cursorOf(regs[w.B()]); st != nil {
+				if g := r.regDelegate(st); g != nil {
+					return r.regDelegateNext(f, k, w, regs, st, g)
+				}
+			}
+		}
 		res, done, err := r.iterResume(regs[w.B()], regs[w.C()], resumeMode(regs[w.C()+1].Number()), c.fn.Async)
 		if err != nil {
 			return err

@@ -140,6 +140,8 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			ok = in(pc, int64(int32(w.BC())))
 		case bytecode.RIterNext:
 			ok = reg(a) && reg(b) && in(pc, int64(w.SC()))
+		case bytecode.RYield:
+			ok = fn.Generator && reg(a) && reg(b) && pc+2 < len(code) && code[pc+1].Op() == bytecode.RJmp
 		case bytecode.RJmpF, bytecode.RJmpT:
 			ok = reg(a) && in(pc, int64(int32(w.BC())))
 		case bytecode.RJLt, bytecode.RJNLt, bytecode.RJLe, bytecode.RJNLe, bytecode.RJGt, bytecode.RJNGt,
@@ -308,14 +310,16 @@ func suspendOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.R
 		return pc == 0
 	case bytecode.RColdEndParams:
 		return fn.Generator
-	case bytecode.RColdYield:
-		return fn.Generator && reg(a) && reg(b) && jumpNext()
 	case bytecode.RColdAwait:
 		return fn.Async && reg(a) && reg(b)
 	case bytecode.RColdYieldStar:
 		return fn.Generator && int(a)+1 < rc.NumRegs && reg(b)
 	case bytecode.RColdIterResume:
-		return reg(a) && reg(b) && int(w.C())+1 < rc.NumRegs && jumpNext()
+		// A synchronous generator's delegation may suspend at the
+		// yield_star four instructions on (the VM's regDelegateNext).
+		return reg(a) && reg(b) && int(w.C())+1 < rc.NumRegs && jumpNext() &&
+			(fn.Async || pc+5 < len(rc.Code) && rc.Code[pc+4].Op() == bytecode.RCold &&
+				bytecode.RColdOp(rc.Code[pc+4].X()) == bytecode.RColdYieldStar)
 	case bytecode.RColdIterUnpackDelegate:
 		return reg(a) && reg(b) && reg(w.C()) && jumpNext()
 	case bytecode.RColdForAwaitOfStart, bytecode.RColdAsyncIterNext:

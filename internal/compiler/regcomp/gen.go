@@ -38,7 +38,7 @@ func (g *gen) yieldExpr(n *ast.Yield, dst int) int {
 	}
 	t := g.alloc()
 	g.at(n.Start)
-	g.cold(bytecode.RColdYield, t, v, 0)
+	g.emit(bytecode.MakeR(bytecode.RYield, 0, r16(t), r16(v), 0))
 	next := g.newMark()
 	g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), next, false)
 	g.retFrom(t)
@@ -86,8 +86,12 @@ func (g *gen) awaitReg(v, pos int) int {
 func (g *gen) yieldStar(n *ast.Yield, dst int) int {
 	async := g.fn.Async
 	src := g.expr(n.Arg, -1)
+	// The delegation's steps are placed where the stack form's are, at
+	// its operand's last position (a stack trace through the delegate
+	// names it); its awaits at the yield.
+	at := int(g.cur)
 	cur := g.alloc()
-	g.at(n.Start)
+	g.at(at)
 	start := bytecode.RColdForOfStart
 	if async {
 		start = bytecode.RColdForAwaitOfStart
@@ -104,17 +108,17 @@ func (g *gen) yieldStar(n *ast.Yield, dst int) int {
 	end := g.newMark()
 	loop := g.newMark()
 	g.bind(loop)
-	g.at(n.Start)
+	g.at(at)
 	g.cold(bytecode.RColdIterResume, v, cur, sent)
 	g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), end, false)
 	if async {
 		g.at(n.Start)
 		g.cold(bytecode.RColdAwait, v, v, 0)
 	}
-	g.at(n.Start)
+	g.at(at)
 	g.cold(bytecode.RColdIterUnpackDelegate, v, v, cur)
 	g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), end, false)
-	g.at(n.Start)
+	g.at(at)
 	g.cold(bytecode.RColdYieldStar, sent, v, 0)
 	g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), loop, false)
 	g.bind(end)

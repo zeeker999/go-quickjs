@@ -282,7 +282,7 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		v, err := r.regGlobalOpt(f, f.cl.names[w.B()])
 		regs[w.A()] = v
 		return err
-	case bytecode.RColdGenEntry, bytecode.RColdEndParams, bytecode.RColdYield, bytecode.RColdAwait,
+	case bytecode.RColdGenEntry, bytecode.RColdEndParams, bytecode.RColdAwait,
 		bytecode.RColdYieldStar, bytecode.RColdIterResume, bytecode.RColdIterUnpackDelegate,
 		bytecode.RColdForAwaitOfStart, bytecode.RColdAsyncIterNext, bytecode.RColdIterResult,
 		bytecode.RColdAsyncIterClose, bytecode.RColdAsyncIterCheck:
@@ -704,9 +704,13 @@ func (r *Runtime) regIterNext(f *frame, c *regCode, k *regKept, regs *[1 << 16]V
 					return nil
 				}
 			}
-		} else if !st.forIn && r.genNextFn != nil && st.next.ref == unsafe.Pointer(r.genNextFn) && !regGenCursor(st) {
+		} else if !st.forIn && r.genNextFn != nil && st.next.ref == unsafe.Pointer(r.genNextFn) {
 			f.pc = c.src[pc] + 1
-			v, more, err = r.regIterNextTree(f, cur)
+			if g := regGenCursor(st); g != nil {
+				v, more, err = r.regGenStep(st, g)
+			} else {
+				v, more, err = r.regIterNextTree(f, cur)
+			}
 			goto stepped
 		} else if !st.forIn {
 			f.pc = c.src[pc] + 1
@@ -728,13 +732,17 @@ stepped:
 	return nil
 }
 
-// regGenCursor reports whether st steps a generator of register code,
-// whose step regStepNext makes as next's, with no recover: its body
-// throws as register code throws, with an error.
-func regGenCursor(st *iterState) bool {
+// regGenCursor is the generator of register code st steps, or nil: its
+// step is regGenStep's, with no recover, its body throwing as register
+// code throws, with an error.
+func regGenCursor(st *iterState) *generator {
 	if !st.iter.IsObject() {
-		return false
+		return nil
 	}
-	o := st.iter.Object()
-	return o.class == ClassGenerator && genOf(o).reg
+	if o := st.iter.Object(); o.class == ClassGenerator {
+		if g := genOf(o); g.reg {
+			return g
+		}
+	}
+	return nil
 }

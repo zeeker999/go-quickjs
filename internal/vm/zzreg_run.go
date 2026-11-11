@@ -290,7 +290,7 @@ func regStmt(c *regCode) tstmt {
 				r.stackHigh = top
 			}
 		}
-		v, err := r.runReg(f, c)
+		v, err := r.runReg(f, c, 0)
 		if err == errTailCall {
 			r.treeTail = true
 			return
@@ -344,7 +344,7 @@ func (r *Runtime) regEnterFrame(f *frame, c *regCode) (Value, error) {
 	if c.args {
 		f.locals = w[2 : 2+p : 2+p]
 	}
-	v, err := r.runReg(f, c)
+	v, err := r.runReg(f, c, 0)
 	f.base, f.locals = saved, savedLocals
 	return v, err
 }
@@ -378,14 +378,16 @@ func regTruthy(v Value) bool {
 	return math.Float64bits(v.num) == trueBits || math.Float64bits(v.num) != falseBits && v.Truthy()
 }
 
-// runReg runs frame f as register code c and returns what it returns.
+// runReg runs frame f as register code c, from instruction start, and
+// returns what it returns. Only a generator's resumption starts past the
+// first instruction (regGenRun).
 //
 // A case that finishes its instruction continues the loop; one that can
 // fail sets the frame's pc to the stack form's instruction first, which is
 // what a stack trace or an error's position reads, keeps the pc, and goes
 // to the fail tail with the error, where a handler of the frame's may
 // catch it (regCatch).
-func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
+func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 	if r.stopped != nil {
 		return Undefined, r.stopped
 	}
@@ -399,7 +401,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 	// across the call and Go does not store them at every dispatch.
 	var kept regKept
 	var failed error
-	pc := 0
+	pc := start
 	for {
 		var off int32
 		w := regAt(code, pc)
@@ -1160,13 +1162,20 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				goto fail
 			}
 			pc = kept.pc
+		case bytecode.RYield:
+			// A generator's step, suspended with what it yields: the
+			// frame's suspension, which no handler of its own takes
+			// (regCatch), as no other error leaves without the fail tail.
+			kept.pc = pc
+			failed = r.regYield(f, regs[w.B()], pc)
+			goto fail
 		// Every value of the switch is a case, so that it is a jump table
 		// that needs no range check: Go makes one only of a switch whose
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile: the values the translation reference's operations
 		// had, and 127, invalid's.
-		case 36, 37, 40, 41, 42, 43:
+		case 36, 37, 40, 41, 42:
 			goto invalid
 		case 127:
 			goto invalid

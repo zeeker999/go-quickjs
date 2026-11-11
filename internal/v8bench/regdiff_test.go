@@ -1364,6 +1364,60 @@ function runAsync() { out = []; log = []; settle("a1", a1(3)); settle("a2", a2()
 	regDiff(t, src, calls)
 }
 
+// TestRegDiffGeneratorSteps compares the lean steps of register
+// generators: a for-of's step (regGenStep), next resuming one at once, a
+// yield as an instruction of its own, a body starting past end_params, and
+// a yield* to a generator stepped directly (regDelegateNext) -- the values
+// it yields on, its return ending the delegation, return and throw sent
+// through it, a delegate that hands a result over as it is, a delegate
+// running, finishing or throwing, and the frames a stack trace sees.
+func TestRegDiffGeneratorSteps(t *testing.T) {
+	src := `
+var log = [];
+function frames(e) { return e.name + ": " + e.message + " | " + e.stack.split("\n").slice(1, 4).map(function (s) { return s.trim() }).join(" | ") }
+function* count(n) { for (var i = 0; i < n; i++) yield i }
+function* inner(n) { try { for (var i = 0; i < n; i++) { var s = yield i; if (s !== undefined) log.push("sent " + s) } return "ret" + n } finally { log.push("inner fin") } }
+function* outer(n) { var r = yield* inner(n); log.push("got " + r); return r }
+function s1() { var s = 0; for (var v of count(5)) s += v; for (var v of count(9)) { if (v > 2) break; s += v } return s }
+function s2() { return JSON.stringify([[...outer(3)], log.splice(0)]) }
+function s3() { var g = outer(3); return JSON.stringify([g.next(), g.next("a"), g.return("R"), g.next(), log.splice(0)]) }
+function s4() { var g = outer(3); g.next(); try { g.throw(new Error("E")) } catch (e) { return frames(e) + " " + JSON.stringify([g.next(), log.splice(0)]) } }
+function* arr() { var r = yield* [1, 2]; log.push("arr ret " + r) }
+function* viaArr() { yield* arr() }
+function s5() { return JSON.stringify([[...viaArr()], log.splice(0)]) }
+function* deep(k) { if (k == 0) { yield "leaf"; return 1 } return 1 + (yield* deep(k - 1)) }
+function s6() { var g = deep(4); return JSON.stringify([g.next(), g.next()]) }
+function* self() { yield* g7 }
+var g7;
+function s7() { g7 = self(); try { g7.next() } catch (e) { return frames(e) } }
+function* thrower() { yield 1; throw new Error("in delegate") }
+function* wrap() { try { yield* thrower() } catch (e) { log.push(frames(e)); yield 9 } }
+function s8() { return JSON.stringify([[...wrap()], log.splice(0)]) }
+function* stk() { yield frames(new Error("s")) }
+function* stkOuter() { yield* stk() }
+function s9() { return [...stkOuter()].join() + " " + stkOuter().next().value }
+var custom = { [Symbol.iterator]() { return { n: 0, next(v) { return { value: this.n++, done: this.n > 2 } } } } };
+function* viaCustom() { var r = yield* custom; log.push("custom ret " + r) }
+function s10() { return JSON.stringify([[...viaCustom()], log.splice(0)]) }
+function* done() { return "early" }
+function* viaDone() { var r = yield* done(); yield r }
+function s11() { var d = done(); d.next(); function* again() { return yield* d } return JSON.stringify([[...viaDone()], again().next()]) }
+function* plain(a, b) { yield a + b; yield arguments.length }
+function s12() { var g = plain(1, 2, 3); var r = [g.next(), g.next(), g.next()]; return JSON.stringify(r) }
+function* lazy(a = log.push("default")) { yield a }
+function s13() { var g = lazy(); log.push("made"); return JSON.stringify([g.next(), log.splice(0)]) }
+function* yThrow() { try { yield 1 } catch (e) { yield "caught " + e } }
+function s14() { var g = yThrow(); g.next(); return JSON.stringify([g.throw("t"), g.next()]) }
+var holder = { gen: function* () { yield frames(new Error("m")) } };
+function* notIter() { yield* 5 }
+function* member() { yield* holder.gen() }
+function* member2() { yield* holder["gen"]() }
+function s15() { var r = [[...member()].join(), [...member2()].join()]; try { notIter().next() } catch (e) { r.push(frames(e)) } return r.join(" ; ") }
+`
+	calls := []string{`s1()`, `s2()`, `s3()`, `s4()`, `s5()`, `s6()`, `s7()`, `s8()`, `s9()`, `s10()`, `s11()`, `s12()`, `s13()`, `s14()`, `s15()`}
+	regDiff(t, src, calls)
+}
+
 // TestRegDiffLoopBindings compares lexical bindings a closure keeps in a
 // loop, each turn's its own: for heads' let, copied from turn to turn,
 // for-of and for-in heads, blocks of a loop's body, catch clauses, and a
