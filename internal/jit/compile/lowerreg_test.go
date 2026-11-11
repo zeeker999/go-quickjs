@@ -225,7 +225,7 @@ function codes(s) { let h = 0; for (let i = 0; i < s.length; i++) h = h * 31 + s
 				if committed && in.MayExit() {
 					t.Errorf("%s: %s: instruction %d leaves after a commit", name, fn.Reg.Format(pc), k-i)
 				}
-				committed = committed || in.Commits(p.Regs)
+				committed = committed || p.CommitsAt(k)
 			}
 			if op == bytecode.RAddProp && (!p.Code[i+1].Generic || !p.Code[i+2].Generic) {
 				t.Errorf("%s: add_prop's addition and store are not Generic", name)

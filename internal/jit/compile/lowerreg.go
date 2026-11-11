@@ -824,10 +824,11 @@ func (l *regLowering) lower(pc int) {
 		l.emit(ir.Instruction{Op: ir.Return, Left: ir.Literal(ir.Value{Kind: ir.Undefined})}, false)
 	case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW:
 		// A call, made natively where the VM knows its callee (the VM's
-		// feedback, by the call's register pc), by Go otherwise; one in
-		// tail position as the stack form's (ir.Instruction's Tail).
-		tail := op != bytecode.RNewW && pc < len(rc.Marks) && rc.Marks[pc]&bytecode.RMarkTail != 0
-		l.emit(ir.Instruction{Op: ir.Host, Tail: tail, Extra: int(w.X()), When: op == bytecode.RCallMW}, false)
+		// feedback, by the call's register pc), by Go otherwise.
+		// Not marked Tail: the new pipeline reads a tail call's operands
+		// from the operand stack's top, which register code has none of;
+		// the register form's tail calls are Stage 3a-3's.
+		l.emit(ir.Instruction{Op: ir.Host, Extra: int(w.X()), When: op == bytecode.RCallMW}, false)
 	case bytecode.RClosureW:
 		l.emit(ir.Instruction{Op: ir.Closure, Dest: int(a), Key: w.BC()}, false)
 	case bytecode.RThrow:
@@ -898,12 +899,13 @@ func (l *regLowering) lower(pc int) {
 		}
 	case bytecode.RNewObjectLit:
 		// The object, its fields defined in order, then given to register
-		// A: a field's definition by Go, after the first, which commits.
+		// A: the definitions, on an object nothing else sees yet, commit
+		// nothing (ir.Program's CommitsAt), the copy last.
 		keys := rc.ObjKeys[rc.Aux[pc]]
 		t := l.temp()
 		l.emit(ir.Instruction{Op: ir.ObjectLiteral, Dest: t}, false)
 		for i, k := range keys {
-			l.emit(ir.Instruction{Op: ir.FieldDefine, Left: ir.Slot(t), Right: ir.Slot(int(b) + i), Key: k, Generic: i > 0}, false)
+			l.emit(ir.Instruction{Op: ir.FieldDefine, Left: ir.Slot(t), Right: ir.Slot(int(b) + i), Key: k}, false)
 		}
 		copyTo(int(a), ir.Slot(t))
 	case bytecode.RAppend:

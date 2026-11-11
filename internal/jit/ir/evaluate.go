@@ -25,6 +25,24 @@ func (p *Program) Evaluate(slots []Value, pc int, budget uint64) (Exit, error) {
 
 // EvaluateArrays is the correctness oracle for borrowed dense array storage.
 func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budget uint64) (Exit, error) {
+	return p.EvaluateHost(slots, arrays, nil, pc, budget)
+}
+
+// A Runner makes what the evaluator does not: an instruction it would leave
+// at -- a host operation, a guard that failed, a Generic instruction's
+// slow path -- is the host's to run whole, as Go runs it at a host exit,
+// before the evaluator leaves. Run runs in, instruction pc of p, over
+// slots, and reports whether it did, and where the code goes on; where it
+// did not, the evaluator leaves as it would have. A host may run a call
+// by evaluating the callee's program in turn. The differential tests'
+// model of the VM is one (the oracle package).
+type Runner interface {
+	Run(p *Program, pc int, in *Instruction, slots []Value) (next int, ok bool, err error)
+}
+
+// EvaluateHost is EvaluateArrays with h, if not nil, making what the
+// evaluator does not.
+func (p *Program) EvaluateHost(slots []Value, arrays []ArrayView, h Runner, pc int, budget uint64) (Exit, error) {
 	if p == nil || len(slots) != p.Locals+p.StackSize || pc < 0 || pc >= len(p.Code) ||
 		len(p.Maps) != len(p.Code) || p.Maps[pc].Depth < 0 || !p.starts(pc) {
 		return Exit{}, ErrState
@@ -52,13 +70,28 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 			return exit, nil
 		}
 		in := p.Code[pc]
+		var err error
 		if in.Check && slots[in.CheckSlot].Kind == Uninitialized {
-			return exit, nil
+			// A dead zone's check: the host's to throw, which it may not.
+		} else {
+			exit, err = p.evaluate(&in, slots, arrays, read, exit, &pc)
 		}
-		exit, err := p.evaluate(&in, slots, arrays, read, exit, &pc)
 		if exit.Kind != running {
 			if err != nil || exit.Kind == Returned {
 				return exit, err
+			}
+			if h != nil {
+				next, ok, err := h.Run(p, pc, &in, slots)
+				if err != nil {
+					return Exit{}, err
+				}
+				if ok {
+					// Made whole, as Go makes it.
+					committed = committed || p.Origin != nil && p.CommitsAt(pc)
+					steps++
+					pc = next
+					continue
+				}
 			}
 			if committed && in.Generic {
 				// Go's to make, which the evaluator is not.

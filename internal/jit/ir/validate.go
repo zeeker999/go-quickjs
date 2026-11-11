@@ -93,7 +93,7 @@ func (p *Program) Validate() error {
 				// instruction again, what has committed of it twice.
 				return fmt.Errorf("jit IR: pc %d: an exit after register pc %d committed", pc, p.Origin[pc])
 			}
-			committed = committed || in.Commits(p.Regs)
+			committed = committed || p.CommitsAt(pc)
 		} else if in.Generic {
 			return fmt.Errorf("jit IR: pc %d: generic outside an expansion", pc)
 		}

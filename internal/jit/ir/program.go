@@ -490,6 +490,29 @@ func (in *Instruction) Commits(regs int) bool {
 	return a >= 0 && a < regs || b >= 0 && b < regs
 }
 
+// CommitsAt is Commits of register code's instruction i, in its origin
+// (Origin): a field's definition, a property's or an element's write, to an
+// object the origin made in a scratch slot -- a literal's, which nothing
+// else can see yet -- commits nothing, as an exit before the object is
+// given to a register makes another.
+func (p *Program) CommitsAt(i int) bool {
+	in := &p.Code[i]
+	if in.Generic || p.Origin == nil {
+		return in.Commits(p.Regs)
+	}
+	switch in.Op {
+	case FieldDefine, PropertyWrite, ArrayWrite:
+		if s := in.Left.Slot; s >= p.Regs {
+			for q := i - 1; q >= 0 && p.Origin[q] == p.Origin[i]; q-- {
+				if a, b := p.Code[q].Writes(); a == s || b == s {
+					return p.Code[q].Op != ObjectLiteral && p.Code[q].Op != ArrayLiteral
+				}
+			}
+		}
+	}
+	return in.Commits(p.Regs)
+}
+
 // Writes is the slots in writes, -1 for none: its Dest and, for a pair's
 // or an update's second result, its Extra. Insert2 and Insert3, which move
 // the operand stack's top, write from Dest to Dest+3: Writes reports their
