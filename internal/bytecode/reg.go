@@ -595,6 +595,8 @@ const (
 	// the store where it is a constant (zzreg_znames.go).
 	RColdGetUpvalCheck
 	RColdSetUpvalCheck
+	// RColdDeleteVar: R[A] = delete of the global Names[B] (delete_var).
+	RColdDeleteVar
 )
 
 // The flags of regexp_lit's X.
@@ -672,6 +674,7 @@ var rColdNames = [...]string{
 	RColdAsyncIterNext: "async_iter_next", RColdIterResult: "iter_result",
 	RColdAsyncIterClose: "async_iter_close", RColdAsyncIterCheck: "async_iter_check",
 	RColdGetUpvalCheck: "get_upval_check", RColdSetUpvalCheck: "set_upval_check",
+	RColdDeleteVar: "delete_var",
 }
 
 func (op RColdOp) String() string {

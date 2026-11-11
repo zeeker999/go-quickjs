@@ -1114,15 +1114,19 @@ func (c *compiler) compileUnary(n *ast.Unary) {
 			defer c.patchWithProbe(probe)
 			// A local or captured binding cannot be deleted at all; a global
 			// can, but only if it is configurable, which a var declaration is
-			// not.
-			if _, isLocal := c.resolveLocal(id.Name); isLocal {
+			// not. The register form is told which: the binding's
+			// resolution, or a global.
+			if l, isLocal := c.resolveLocal(id.Name); isLocal {
+				c.reg.NoteRead(id, regcomp.Res{Kind: regcomp.ResLocal, Index: l.slot})
 				c.emit(bytecode.OpPushFalse, 0, 0)
 				return
 			}
-			if _, isUpvalue := c.resolveUpvalue(id.Name); isUpvalue {
+			if idx, isUpvalue := c.resolveUpvalue(id.Name); isUpvalue {
+				c.reg.NoteRead(id, regcomp.Res{Kind: regcomp.ResUpval, Index: idx})
 				c.emit(bytecode.OpPushFalse, 0, 0)
 				return
 			}
+			c.reg.NoteRead(id, regcomp.Res{Kind: regcomp.ResGlobal})
 			c.emitAt(n.Start, bytecode.OpDeleteVar, c.nameIdx(id.Name), 0)
 			return
 		}

@@ -271,7 +271,7 @@ func (g *gen) finallyAround() bool {
 // its own, which closes the iterator for a throw and throws again; a
 // break, continue or return that leaves the loop closes it on its way out
 // (leave). A for-in loop's cursor needs no closing.
-func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in bool, label string, pos int) {
+func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in bool, label labelSet, pos int) {
 	var target ast.Expr
 	lexical := false
 	fresh := -1
@@ -359,7 +359,7 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 // forOfPattern is forOfStmt with a pattern, or an assignment's property,
 // for its target: each turn's value unpacked into it in the loop's body,
 // where a throw closes the iterator.
-func (g *gen) forOfPattern(target ast.Expr, right ast.Expr, body ast.Stmt, await, in bool, label string, pos int, lexical bool, left ast.Node) {
+func (g *gen) forOfPattern(target ast.Expr, right ast.Expr, body ast.Stmt, await, in bool, label labelSet, pos int, lexical bool, left ast.Node) {
 	_, declaring := left.(*ast.VarDecl)
 	if lexical {
 		// The head's expression sees the bindings in their dead zone; a

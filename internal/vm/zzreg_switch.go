@@ -282,6 +282,10 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		v, err := r.regGlobalOpt(f, f.cl.names[w.B()])
 		regs[w.A()] = v
 		return err
+	case bytecode.RColdDeleteVar:
+		v, err := deleteVar(r, f, f.cl, f.cl.names[w.B()])
+		regs[w.A()] = v
+		return err
 	case bytecode.RColdGenEntry, bytecode.RColdEndParams, bytecode.RColdAwait,
 		bytecode.RColdYieldStar, bytecode.RColdIterResume, bytecode.RColdIterUnpackDelegate,
 		bytecode.RColdForAwaitOfStart, bytecode.RColdAsyncIterNext, bytecode.RColdIterResult,

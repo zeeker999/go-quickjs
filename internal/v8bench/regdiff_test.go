@@ -1472,3 +1472,41 @@ function a10() { for (gv of [1, 2]) {} for (gl in {a: 1}) {} return gv + gl }
 		`var out = []; for (var tv of [1, 2]) out.push(tv); for (let tl of [3]) out.push(tl); for (tk in {k: 1}) out.push(tk); out.join() + tv + tk`}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffLabelsSwitchDelete compares labelled statements that are no
+// loop -- blocks, a try, a switch, labels on labels -- a switch's lexical
+// and class declarations, and delete of a name and of an optional chain,
+// with the errors' positions.
+func TestRegDiffLabelsSwitchDelete(t *testing.T) {
+	src := `
+function e(f) { try { return String(f()) } catch (x) { return x.name + ": " + x.message + " | " + x.stack.split("\n").slice(1, 3).map(function (s) { return s.trim() }).join(" | ") } }
+function l1() { var r = []; a: { r.push(1); if (r.length) break a; r.push(2) } return r.join() }
+function l2() { var n = 0; a: b: for (var i = 0; i < 5; i++) { for (;;) { n++; if (i % 2) continue a; if (i == 4) break b; continue b } } return n + ":" + i }
+function l3() { var r = []; out: try { r.push("t"); break out; } finally { r.push("f") } r.push("e"); return r.join() }
+function l4() { var closed = 0; var it = { [Symbol.iterator]() { return { next() { return { value: 1, done: false } }, return() { closed++; return {} } } } }; blk: { for (var x of it) { break blk } } return closed }
+function l5(v) { var r = ""; s: switch (v) { case 1: r += "a"; break s; case 2: r += "b"; default: r += "d" } return r }
+function l6() { var r = []; for (var i = 0; i < 3; i++) { x: { if (i == 1) break; r.push(i) } } return r.join() + i }
+function l7() { var r = []; a: { b: { r.push(1); break a; } r.push(2) } c: d: { r.push(3); break c; } return r.join() }
+function l8() { var r = []; a: if (r.length == 0) { r.push(1); break a; } else r.push(2); b: { try { r.push(3); break b } catch (e) {} finally { r.push(4) } } return r.join() }
+function l9() { var r = []; for (var i = 0; i < 3; i++) { a: { b: { if (i == 0) continue; if (i == 1) break b; break a } r.push("b" + i) } r.push(i) } return r.join() }
+function s1(v) { switch (v) { case 1: let x = 10; return x; case 2: x = 5; return x; default: const y = v; return y } }
+function s2(v) { switch (v) { case 0: class C { m() { return "c" } } return new C().m(); case 1: return (() => typeof C)() } }
+function s3() { var fs = []; for (var i = 0; i < 3; i++) { switch (i) { case 0: case 1: let k = i; fs.push(() => k); break; default: let j; fs.push(() => j) } } return fs.map(f => f()).join() }
+function s4() { switch (1) { case 0: let z = 1; case 1: return (() => z)() } }
+function s5(v) { var r = []; switch (v) { case 0: let a = 1; r.push(a); case 1: a = 2; r.push(a); } return r.join() }
+var gv = 1; globalThis.gd = 2;
+function d1() { var v = 1; let l = 2; return [delete v, delete l, delete d1, delete gv, delete nosuch, delete gd, typeof gd, v, l].join() }
+function d2() { var u = 1; return (() => delete u)() + "," + u }
+function d3() { var o = {b: {c: 1}}, n = null; return [delete o?.b.c, "c" in o.b, delete n?.b, delete n?.b.c, delete o.b?.["x"], delete o?.b, "b" in o].join() }
+function d4() { "use strict"; var o = Object.freeze({b: 1}); return delete o?.b }
+function d5() { var o = {}; return delete o?.b.c }
+function d6() { var o = {m() { return {x: 1} }}, n; return [delete o?.m().x, delete n?.m().x, delete this, delete 1, delete (0, o)].join() }
+function d7() { var o = Object.freeze({b: 1}); return [delete o?.b, "b" in o].join() }
+`
+	calls := []string{`l1()`, `l2()`, `l3()`, `l4()`, `l5(1)`, `l5(2)`, `l5(3)`, `l6()`, `l7()`, `l8()`, `l9()`,
+		`e(() => s1(1))`, `e(() => s1(2))`, `e(() => s1(3))`, `e(() => s2(0))`, `e(() => s2(1))`, `s3()`, `e(s4)`, `e(() => s5(0))`, `e(() => s5(1))`,
+		`d1()`, `d2()`, `d3()`, `e(d4)`, `e(d5)`, `d6()`, `d7()`,
+		`"q"; L: { "w"; break L; 3 }`, `"q"; L: { break L; }`, `"q"; L: M: { "w"; if (true) break M; 3 }`,
+		`"q"; L: switch (1) { case 1: "s"; break L }`, `globalThis.gt = 1; var gw = 2; [delete gt, delete gw, typeof gt].join()`}
+	regDiff(t, src, calls)
+}

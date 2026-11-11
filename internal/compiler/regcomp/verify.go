@@ -234,7 +234,7 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 		bytecode.RColdDeclareGlobalLex, bytecode.RColdDefineGlobalFunc, bytecode.RColdInitGlobalLex,
 		bytecode.RColdDeclareModuleLex, bytecode.RColdInitModuleLex:
 		return reg(a) && int(b) < len(fn.Names) && fn.TopLevel
-	case bytecode.RColdGetGlobalOpt:
+	case bytecode.RColdGetGlobalOpt, bytecode.RColdDeleteVar:
 		return reg(a) && int(b) < len(fn.Names)
 	case bytecode.RColdIterStep, bytecode.RColdIterRest:
 		return reg(a) && reg(b)

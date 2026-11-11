@@ -83,7 +83,7 @@ type gen struct {
 	top       int
 	max       int
 	loops     []*loop
-	label     string
+	label     labelSet
 
 	consts   map[any]uint32
 	names    map[string]uint32
@@ -127,9 +127,12 @@ type gen struct {
 }
 
 type loop struct {
-	label        string
-	brk, cont    *mark
-	isLoop       bool
+	label     labelSet
+	brk, cont *mark
+	isLoop    bool
+	// named says the statement is a labelled one that is no loop or
+	// switch: only a break naming it leaves it.
+	named        bool
 	scopeTopMark int
 }
 
@@ -583,20 +586,16 @@ func simpleArguments(fn *bytecode.Function) bool {
 // switchStmt compiles a switch: the discriminant once, each case's test
 // with ===, in order, jumping to its body, and default's body where no test
 // matched; the bodies in order, each falling into the next.
-func (g *gen) switchStmt(n *ast.SwitchStmt, label string) {
+func (g *gen) switchStmt(n *ast.SwitchStmt, label labelSet) {
+	var all []ast.Stmt
 	for _, c := range n.Cases {
 		for _, s := range c.Body {
-			switch d := s.(type) {
-			case *ast.VarDecl:
-				if d.Kind != ast.DeclVar {
-					g.fail("a lexical declaration in a switch")
-					return
-				}
-			case *ast.FuncDecl, *ast.ClassDecl:
-				g.fail("a declaration in a switch")
+			if _, ok := s.(*ast.FuncDecl); ok {
+				g.fail("a function declaration in a block")
 				return
 			}
 		}
+		all = append(all, c.Body...)
 	}
 	// switch (typeof x) of string cases alone looks x's type up, with no
 	// string made or compared.
@@ -618,8 +617,10 @@ func (g *gen) switchStmt(n *ast.SwitchStmt, label string) {
 		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(t), r16(d), 0))
 		d = t
 	}
+	// The case block is one scope, entered once the discriminant is made.
+	g.enterBlock(all)
 	l := &loop{label: label, brk: g.newMark()}
-	if label != "" {
+	if len(label) > 0 {
 		l.cont = nil
 	}
 	g.loops = append(g.loops, l)
@@ -902,7 +903,7 @@ func (g *gen) stmt(s ast.Stmt) {
 	mark := g.top
 	defer func() { g.top = mark }()
 	label := g.label
-	g.label = ""
+	g.label = nil
 	switch n := s.(type) {
 	case *ast.ExprStmt:
 		g.exprStmt(n.X)
@@ -1036,12 +1037,19 @@ func (g *gen) stmt(s ast.Stmt) {
 	case *ast.ExportDecl:
 		g.exportDecl(n)
 	case *ast.LabeledStmt:
+		labels := append(label[:len(label):len(label)], n.Label)
 		switch n.Body.(type) {
-		case *ast.ForStmt, *ast.WhileStmt, *ast.DoWhileStmt, *ast.ForOfStmt, *ast.ForInStmt:
-			g.label = n.Label
+		case *ast.ForStmt, *ast.WhileStmt, *ast.DoWhileStmt, *ast.ForOfStmt, *ast.ForInStmt,
+			*ast.SwitchStmt, *ast.LabeledStmt:
+			g.label = labels
 			g.stmt(n.Body)
 		default:
-			g.fail("a labelled statement that is not a loop")
+			// Any other statement: a break naming it goes to its end.
+			l := &loop{label: labels, brk: g.newMark(), named: true}
+			g.loops = append(g.loops, l)
+			g.stmt(n.Body)
+			g.popLoop()
+			g.bind(l.brk)
 		}
 	default:
 		g.fail(fmt.Sprintf("a statement the backend does not compile (%T)", s))
@@ -1074,7 +1082,7 @@ func (g *gen) isTopLevel(fd *ast.FuncDecl) bool {
 	return false
 }
 
-func (g *gen) pushLoop(label string) *loop {
+func (g *gen) pushLoop(label labelSet) *loop {
 	l := &loop{label: label, brk: g.newMark(), cont: g.newMark(), isLoop: true}
 	g.loops = append(g.loops, l)
 	return l
@@ -1086,20 +1094,33 @@ func (g *gen) findLoop(label string, cont bool) *loop {
 	for i := len(g.loops) - 1; i >= 0; i-- {
 		l := g.loops[i]
 		if cont && !l.isLoop {
-			// A switch is no continue's target.
-			if label != "" && l.label == label {
+			// A switch or a labelled statement is no continue's target.
+			if label != "" && l.label.has(label) {
 				return nil
 			}
 			continue
 		}
-		if label == "" || l.label == label {
+		if label == "" && !l.named || l.label.has(label) {
 			return l
 		}
 	}
 	return nil
 }
 
-func (g *gen) forStmt(n *ast.ForStmt, label string) {
+// labelSet is the labels of a statement: `a: b: while (...)` is the
+// target of a break or a continue naming either.
+type labelSet []string
+
+func (s labelSet) has(name string) bool {
+	for _, x := range s {
+		if x == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *gen) forStmt(n *ast.ForStmt, label labelSet) {
 	// The head's bindings are each turn's own where a closure captures
 	// them; the check is made as the loop is entered.
 	l := g.pushLoop(label)
@@ -1795,40 +1816,21 @@ func (g *gen) unary(n *ast.Unary, dst int) int {
 		g.emit(bytecode.MakeR(bytecode.RTypeof, 0, r16(d), r16(a), 0))
 		return d
 	case "delete":
-		m, ok := n.Operand.(*ast.Member)
-		if !ok || m.Optional {
-			if !ok {
-				// delete of anything but a property is true, its operand
-				// evaluated: a name is the stack form's.
-				if _, isName := n.Operand.(*ast.Ident); !isName {
-					g.discard(n.Operand)
-					d := g.dest(dst)
-					g.emit(bytecode.MakeR(bytecode.RLoadTrue, 0, r16(d), 0, 0))
-					return d
-				}
+		switch o := n.Operand.(type) {
+		case *ast.Member:
+			return g.deleteMember(n, o, dst)
+		case *ast.OptionalChain:
+			if m, ok := o.Base.(*ast.Member); ok {
+				return g.deleteChain(n, m, dst)
 			}
-			g.fail("delete of a name or an optional chain")
-			return g.dest(dst)
+		case *ast.Ident:
+			return g.deleteName(n, o, dst)
 		}
-		if _, isSuper := m.Object.(*ast.Super); isSuper {
-			g.deleteSuper(n, m)
-			d := g.dest(dst)
-			g.emit(bytecode.MakeR(bytecode.RLoadTrue, 0, r16(d), 0, 0))
-			return d
-		}
-		o := g.expr(m.Object, -1)
-		var k int
-		if m.Computed {
-			o = g.guard(o, m.Property)
-			k = g.expr(m.Property, -1)
-		} else {
-			name := memberName(m)
-			k = g.alloc()
-			g.emit(bytecode.MakeRBC(bytecode.RLoadConst, 0, r16(k), g.constIdx(bytecode.Constant{Kind: bytecode.ConstString, Str: name})))
-		}
+		// delete of anything but a property or a name is true, its
+		// operand evaluated.
+		g.discard(n.Operand)
 		d := g.dest(dst)
-		g.at(n.Start)
-		g.emit(bytecode.MakeR(bytecode.RDelete, 0, r16(d), r16(o), r16(k)))
+		g.emit(bytecode.MakeR(bytecode.RLoadTrue, 0, r16(d), 0, 0))
 		return d
 	case "void":
 		g.discard(n.Operand)
@@ -1838,6 +1840,82 @@ func (g *gen) unary(n *ast.Unary, dst int) int {
 	}
 	g.fail("the unary operator " + n.Op)
 	return g.dest(dst)
+}
+
+// deleteMember compiles delete o.k, delete o[k] and, inside an optional
+// chain, delete o?.k.
+func (g *gen) deleteMember(n *ast.Unary, m *ast.Member, dst int) int {
+	if m.Optional {
+		mm := *m
+		mm.Optional = false
+		mm.Object = g.optionalLink(m.Object)
+		m = &mm
+	}
+	if _, isSuper := m.Object.(*ast.Super); isSuper {
+		g.deleteSuper(n, m)
+		d := g.dest(dst)
+		g.emit(bytecode.MakeR(bytecode.RLoadTrue, 0, r16(d), 0, 0))
+		return d
+	}
+	o := g.expr(m.Object, -1)
+	var k int
+	if m.Computed {
+		o = g.guard(o, m.Property)
+		k = g.expr(m.Property, -1)
+	} else {
+		name := memberName(m)
+		k = g.alloc()
+		g.emit(bytecode.MakeRBC(bytecode.RLoadConst, 0, r16(k), g.constIdx(bytecode.Constant{Kind: bytecode.ConstString, Str: name})))
+	}
+	d := g.dest(dst)
+	g.at(n.Start)
+	g.emit(bytecode.MakeR(bytecode.RDelete, 0, r16(d), r16(o), r16(k)))
+	return d
+}
+
+// deleteChain compiles delete of an optional chain's property, a?.b or
+// a?.b.c: true where a link is nullish, as optionalChain's undefined.
+func (g *gen) deleteChain(n *ast.Unary, m *ast.Member, dst int) int {
+	saved := g.chain
+	c := &chainCtx{nullish: g.newMark()}
+	g.chain = c
+	r := g.deleteMember(n, m, -1)
+	g.chain = saved
+	d := dst
+	if d < 0 || g.isBinding(d) && d != r {
+		d = g.alloc()
+	}
+	if r != d {
+		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(d), r16(r), 0))
+	}
+	end := g.newMark()
+	g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), end, false)
+	g.bind(c.nullish)
+	g.emit(bytecode.MakeR(bytecode.RLoadTrue, 0, r16(d), 0, 0))
+	g.bind(end)
+	return g.place(d, dst)
+}
+
+// deleteName compiles delete of a name, which sloppy code alone has:
+// false for a binding, and for a global what deleting the property gives
+// (delete_var), as the stack form resolved it.
+func (g *gen) deleteName(n *ast.Unary, id *ast.Ident, dst int) int {
+	res, ok := g.rec.Read[id]
+	if !ok {
+		g.fail("a name the record does not resolve")
+		return g.dest(dst)
+	}
+	d := g.dest(dst)
+	switch res.Kind {
+	case ResLocal, ResUpval:
+		g.emit(bytecode.MakeR(bytecode.RLoadFalse, 0, r16(d), 0, 0))
+	case ResGlobal:
+		g.at(n.Start)
+		g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdDeleteVar), r16(d), g.name16(id.Name), 0))
+	default:
+		panic("regcomp: delete of a name resolved as " + fmt.Sprint(res.Kind))
+	}
+	return d
 }
 
 func (g *gen) unaryOp(op bytecode.Op, operand ast.Expr, dst, pos int) int {
