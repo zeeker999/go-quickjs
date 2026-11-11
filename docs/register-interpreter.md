@@ -1199,7 +1199,15 @@ regdiff cases and test262 in register mode on its directories:
    f()`) -- done. The stack compiler records the calls it makes tail calls
    (`Record.Tails`), and regcomp marks them (`RMarkTail`): the call is
    call_w or call_method_w as ever, and `regCallW` reads the mark only
-   once the stack is `tailCallDepth` deep. There, a frame that is no
+   once the stack is `tailCallDepth` deep (behind one compare,
+   `regDeepCall` past `callDeep`, which checks the limit too). There, a
+   callee of register code of the form's own layout that keeps no
+   arguments takes the frame over in place (`regTailInPlace`): the
+   frame's captured bindings closed, the arguments moved to the
+   parameters, the loop going on from the callee's first instruction
+   (`errRegRestart` in the fail tail), as the tree's `selfRestart` and
+   `tailSwap` do -- unwinding to the caller each time made `tail_self`
+   3.7 and `tail_mutual` 2.5 times the tree's. Any other frame that is no
    construct's and shares no derived constructor's this is given up as
    the stack form's `tail_call` gives it up: the call pending
    (`r.pendingTail`) and the loop leaving with `errTailCall`, which its

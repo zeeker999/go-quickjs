@@ -298,6 +298,9 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 				}
 				nf.regKind = regFrameCall
 				v, err := r.runReg(nf, rc)
+				for err == errRegRestart {
+					v, err = r.regRestartRun(nf)
+				}
 				nf.regKind = 0
 				if len(nf.openUpvalues) != 0 {
 					regCloseUpvalues(nf)
@@ -748,6 +751,9 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int,
 		f.locals = r.stack[base+2 : base+2+p : base+2+p]
 	}
 	v, err := r.runReg(f, rc)
+	for err == errRegRestart {
+		v, err = r.regRestartRun(f)
+	}
 	f.regKind = 0
 	if len(f.openUpvalues) != 0 {
 		regCloseUpvalues(f)
@@ -817,9 +823,18 @@ func regMarkAt(c *regCode, pc int) uint8 {
 	return 0
 }
 
-// errRegRestart is how a call in tail position tells runReg that its frame
-// is now the callee's (regTailInPlace), to run from its first instruction
-// with r.regRestart's code.
+// errRegRestart is how a call in tail position tells runReg's caller that
+// its frame is now the callee's (regTailInPlace), to run from its first
+// instruction with r.regRestart's code (regRestartRun): the loop leaves
+// through its fail tail, which regCatch leaves to the caller.
+//
+// regRestartRun runs frame f again with the code a tail call gave it.
+func (r *Runtime) regRestartRun(f *frame) (Value, error) {
+	rc := r.regRestart
+	r.regRestart = nil
+	return r.runReg(f, rc)
+}
+
 var errRegRestart = errors.New("register frame restarted")
 
 // regTailInPlace is a call in tail position, the stack deep, of a function

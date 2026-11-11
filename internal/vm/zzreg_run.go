@@ -1213,16 +1213,6 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 	invalid:
 		panic("register code: invalid instruction")
 	fail:
-		if failed == errRegRestart {
-			// A call in tail position gave the frame to its callee
-			// (regTailInPlace): its code from the first instruction.
-			c, r.regRestart = r.regRestart, nil
-			cl, code = f.cl, c.code
-			wb = f.base - int(c.locals)
-			regs = regWindow(r.stack, wb)
-			pc = 0
-			continue
-		}
 		// An exception: the instruction at kept.pc-1 threw failed, which
 		// a handler of the frame's may catch (regCatch).
 		if pc = r.regCatch(f, c, &kept, regs, failed); pc < 0 {
