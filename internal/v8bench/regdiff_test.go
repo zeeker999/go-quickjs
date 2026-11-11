@@ -1156,3 +1156,50 @@ function c2() { try { try { throw null } catch ({ m }) { return "no" } } catch (
 	}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffLiterals compares templates and tagged templates (each site's
+// object, the conversions' order, a symbol's TypeError), BigInt literals,
+// object literals of every property kind (accessors, methods and their
+// names, computed and number keys, __proto__, spreads, keys twice), array
+// holes and spreads, spread calls and constructions, optional chains and
+// calls (this kept, document.all-like values aside), ??, logical
+// assignment to names, properties and elements, and assignment to a
+// constant, with their errors.
+func TestRegDiffLiterals(t *testing.T) {
+	src := `
+var log = [];
+function frames(e) { return e.name + ": " + e.message + " | " + e.stack.split("\n").slice(1, 3).map(function (s) { return s.trim() }).join(" | ") }
+function obj(tag) { return { toString() { log.push("ts " + tag); return "S" + tag }, valueOf() { log.push("vo " + tag); return 1 } } }
+function t1(a, b) { log = []; var s = ` + "`x${a}-${obj(1)}${(log.push(\"e\"), b)}y${obj(2)}`" + `; return s + " " + log.join() }
+function t2(x) { return ` + "`${x}`" + ` + "|" + ` + "`${x}${x}`" + ` + "|" + ` + "``" + ` }
+function tag(s, ...v) { return [s.length, s.raw.join("/"), v.join(), this === undefined, Object.isFrozen(s)].join(";") }
+function t3(x) { var o = { tag, k: "K" }; return tag` + "`a${x}b\n`" + ` + o.tag` + "`c${x}`" + ` + o["tag"]` + "`q`" + ` }
+function t4() { var r = []; for (var i = 0; i < 2; i++) r.push((function (s) { return s })` + "`same`" + `); return r[0] === r[1] }
+function t5() { try { return ` + "`${Symbol(\"s\")}`" + ` } catch (e) { return frames(e) } }
+function b1(x) { return [10n ** 20n + 1n, typeof 1n, 0x1fn, x * 2n].join() }
+function o1(k, v) { var b = { x: 1 }; var o = { a: 1, a: 2, [k]: v, [k + "f"]: function () {}, [k + "g"]: () => 1, m() { return this.a }, get g() { return 5 }, set g(x) { this.s = x }, get [k + "h"]() { return 6 }, 1: "one", 2.5: function () {}, 3() {}, get 4() { return 4 }, ...b, __proto__: { inh: 7 }, "__proto__x": 1, ...null, ...undefined, ..."hi" }; o.g = 9;
+  return JSON.stringify(o) + Object.getOwnPropertyNames(o).join() + o.m() + o.inh + o[k + "f"].name + o[k + "g"].name + o[2.5].name + o[3].name + Object.getOwnPropertyDescriptor(o, "4").get.name + Object.getOwnPropertyDescriptor(o, "g").set.name + Object.getOwnPropertyDescriptor(o, k + "h").get.name }
+function o2() { var __proto__ = 3; var o = { __proto__ }; var p = { ["__proto__"]: 4 }; var q = { __proto__: null }; return o.__proto__ + "," + p.__proto__ + "," + Object.getPrototypeOf(q) }
+function o3() { log = []; var k = obj("k"); var o = { [k]: (log.push("v"), 1) }; return log.join() + Object.keys(o) }
+function o4() { try { return { [Symbol.toPrimitive]: 1, [{ toString() { throw new Error("key") } }]: 2 } } catch (e) { return frames(e) } }
+function s1(a) { var b = [1, , 3]; var c = [...a, , ...b, 4, ...new Set([9, 9])]; return c.length + ":" + JSON.stringify(c) + (1 in b) + (1 in c) + [, ,].length }
+function s2(a) { var o = { m(...x) { return this.k + x.join() }, k: "K" }; return Math.max(...a, 0) + o.m(...a, 7) + o["m"](...[1]) + new Array(...[3]).length }
+function s3(v) { try { return Math.max(...v) } catch (e) { return frames(e) } }
+function c1(o) { return [o?.a, o?.a.b, o?.["a"], o?.m(), o?.m?.(), o.n?.(), (o?.m)(), o?.a?.b?.c, o?.m(...[1])].join() }
+function c2(f) { return f?.() + "," + (f?.(1)?.x) }
+function c3(a, b) { return (a ?? b) + "," + (a ?? (b ?? 3)) + "," + (a?.x ?? "dflt") }
+function c4() { try { var u; (u?.m)() } catch (e) { return frames(e) } }
+var cobj = { a: { b: 2 }, m(x) { return this === cobj ? "this" + (x || "") : "no" } };
+var g1;
+function l1() { var a = 0, b = 1, c = null; log = []; a ||= 5; b &&= 7; c ??= 9; var o = { get x() { log.push("get"); return 0 }, set x(v) { log.push("set" + v) } }; o.x ||= 3; o.x &&= 4; o.x ??= 5; var k = obj("k"); var p = {}; p[k] ??= 1; p[k] ??= 2; g1 ??= "g"; var f; f ||= function () {}; return [a, b, c, JSON.stringify(p), log.join(), g1, f.name, (a ||= 1), (c &&= 2)].join() }
+function l2() { "use strict"; const k = 1; try { k ||= 2; k &&= 3 } catch (e) { return frames(e) + k } }
+function l3() { const k = 1; try { k = 2 } catch (e) { return frames(e) } }
+function l4() { let x = 1; const c = 2; try { [x, c] = [3, 4] } catch (e) { return frames(e) + x } }
+function m1(a) { var args = arguments; var o = { f(x) { x[0] = 100; return 1 } }; var t = 0; for (var i = 0; i < 3; i++) { a = i; t += a + o.f(args) } return t + ":" + a }
+`
+	calls := []string{`t1(1, 2)`, `t2(5)`, `t2({})`, `t3(5)`, `t4()`, `t5()`, `b1(3n)`, `o1("z", 8)`, `o2()`, `o3()`, `o4()`,
+		`s1([5, 6])`, `s2([1, 2])`, `s3(5)`, `s3([1, 2])`, `c1(cobj)`, `c1({ a: 0, m() { return 1 }, n: null })`, `try { c1(null) } catch (e) { frames(e) }`,
+		`c2(null)`, `c2(() => ({ x: 5 }))`, `c3(null, 0)`, `c3(0, 1)`, `c3(undefined, undefined)`, `c4()`, `l1()`, `l2()`, `l3()`, `l4()`,
+		"`top ${1 + 1}`", `m1(0)`, `var pa = { b: function () { return this._b }, _b: { c: 42 } }; String((pa?.b)?.().c) + String((null?.b)?.())`, `({ a: 1, ...{ b: 2 } }).b`, `[...[1, 2], 3].join()`, `undefined?.x ?? "n"`}
+	regDiff(t, src, calls)
+}

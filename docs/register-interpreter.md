@@ -1277,12 +1277,35 @@ regdiff cases and test262 in register mode on its directories:
    (`RegCode.KeepsArgs`). A for-of or for-in head's pattern or property is
    unpacked at the head of each turn, inside the iterator's handler.
 6. **BigInt literals** (1,912), **templates and tagged templates** (661),
-   **object literals of every property kind** (1,482).
-7. **The arguments object in every form** (354), **spreads** (258),
-   **names the backend does not read** (434, 335 of the bundles'), names
-   the record does not resolve (92), `typeof` of a global (83), strict
-   global stores (96), logical assignment (59), optional chains (44),
-   `??` in the forms left (4).
+   **object literals of every property kind** (1,482) -- done, with
+   spreads, holes, optional chains, `??`, logical assignment and
+   assignment to a constant (regcomp's literal.go). A BigInt is a
+   constant. A template's parts go to a window that one `concat` joins,
+   converting each with ToString; a substitution is converted at once
+   (`to_string`, cold) only where a later part may run code, which could
+   see the order. A tagged template is a call, a method's with its
+   receiver, given its site's object (`template_object`, the site the
+   stack compiler records, `Record.Templates`). An object literal's other
+   properties are cold operations doing what the stack form's do:
+   `copy_data_props` (a spread), `define_getter`, `define_setter` and
+   their computed forms, `define_index` after `to_property_key`,
+   `set_func_name`, `set_home_object` and `set_proto_of` (`__proto__:
+   v`); a number key is a computed one. An array's hole is the
+   uninitialized marker in its window; with a spread, the elements
+   before it are made at once and the rest pushed or spread
+   (`array_push`, `array_spread`), and a call or a `new` with a spread is
+   `call_spread` of such an array. An optional link checks its object
+   with `jnot_null`, and where that falls through, === undefined and
+   === null, so that document.all's stand-in goes on; a nullish link
+   jumps to the chain's end, where it is undefined, and `(o?.m)()` keeps
+   its receiver. `??` is the same check; `a ||= b`, `&&=` and `??=` read
+   the target once, a computed key converted once (`key_of_base`), and
+   store only where the read does not decide. An assignment to a constant
+   throws (`assign_const`). The stack form's reads in an optional chain
+   had no position of their own (fixed with it).
+7. **The arguments object in every form** (354), **names the backend does
+   not read** (434, 335 of the bundles'), names the record does not
+   resolve (92), strict global stores (96).
 8. **eval and `with`** (757 direct evals, 527 functions beside an eval's
    variables, a with or an Annex B function, 11 more): binding
    descriptors for what an eval can reach.

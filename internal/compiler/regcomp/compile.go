@@ -110,6 +110,8 @@ type gen struct {
 	// completion is top-level code's completion value's register, or 0
 	// (top.go).
 	completion int
+	// chain is the optional chain being compiled, or nil.
+	chain *chainCtx
 	// backLive is RegCode.BackLive.
 	backLive []uint32
 }
@@ -1199,7 +1201,10 @@ func (g *gen) guard(r int, rest ast.Expr) int {
 	if slot < 0 {
 		return r
 	}
-	captured := g.fn.Locals[slot].Captured
+	// A parameter a sloppy arguments object aliases is written through it
+	// by whatever the object is handed to, as a captured binding is.
+	captured := g.fn.Locals[slot].Captured ||
+		slot < g.fn.ParamCount && g.fn.MappedArguments && (g.fn.UsesArguments || g.fn.MakesArguments)
 	if g.writes(rest, slot) || captured && !pure(rest) {
 		t := g.alloc()
 		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(t), r16(r), 0))
@@ -1323,7 +1328,7 @@ func (g *gen) into(e ast.Expr, dst int) {
 // or the this's, with no instruction but a check of its initialisation.
 func (g *gen) inPlace(e ast.Expr) bool {
 	switch n := e.(type) {
-	case *ast.This:
+	case *ast.This, *regExpr:
 		return true
 	case *ast.Ident:
 		res, ok := g.rec.Read[n]
@@ -1413,6 +1418,16 @@ func (g *gen) expr(e ast.Expr, dst int) int {
 		d := g.dest(dst)
 		g.closure(n, d)
 		return d
+	case *ast.BigIntLit:
+		return g.bigInt(n, dst)
+	case *ast.TemplateLit:
+		return g.template(n, dst)
+	case *ast.TaggedTemplate:
+		return g.taggedTemplate(n, dst)
+	case *ast.OptionalChain:
+		return g.optionalChain(n, dst)
+	case *regExpr:
+		return g.place(n.reg, dst)
 	}
 	g.fail(fmt.Sprintf("an expression the backend does not compile (%T)", e))
 	return g.dest(dst)
@@ -1632,6 +1647,9 @@ func (g *gen) operate(text string, op bytecode.Op, left, right ast.Expr, a, dst,
 }
 
 func (g *gen) logical(n *ast.Logical, dst int) int {
+	if n.Op == "??" {
+		return g.nullish(n, dst)
+	}
 	d := g.dest(dst)
 	end := g.newMark()
 	g.into(n.Left, d)
@@ -1640,9 +1658,6 @@ func (g *gen) logical(n *ast.Logical, dst int) int {
 		g.jump(bytecode.MakeR(bytecode.RJmpF, 0, r16(d), 0, 0), end, false)
 	case "||":
 		g.jump(bytecode.MakeR(bytecode.RJmpT, 0, r16(d), 0, 0), end, false)
-	default:
-		g.fail("??")
-		return d
 	}
 	g.into(n.Right, d)
 	g.bind(end)
@@ -1942,6 +1957,10 @@ func (g *gen) storeIdent(id *ast.Ident, value ast.Expr, init bool) int {
 		return v
 	case ResIgnore:
 		return g.expr(value, -1)
+	case ResConstAssign:
+		v := g.expr(value, -1)
+		g.assignConst(id)
+		return v
 	}
 	g.fail("a store the backend does not compile")
 	return 0
@@ -2026,11 +2045,14 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 		g.fail("an assignment target the backend does not compile")
 		return 0
 	}
+	switch n.Op {
+	case "||=", "&&=", "??=":
+		return g.logicalAssign(n, dst)
+	}
 	text := n.Op[:len(n.Op)-1]
 	op, ok := binOps[text]
 	if !ok {
-		g.fail("a logical assignment")
-		return 0
+		panic("regcomp: an assignment operator " + n.Op)
 	}
 	switch t := n.Target.(type) {
 	case *ast.Ident:
@@ -2235,9 +2257,18 @@ func (g *gen) storeValue(id *ast.Ident, v int) {
 		}
 		g.at(int(id.Start))
 		g.emit(bytecode.MakeR(bytecode.RSetGlobal, strict, r16(v), g.name16(id.Name), g.globalSite()))
+	case ResConstAssign:
+		g.assignConst(id)
+	case ResIgnore:
 	default:
 		g.fail("a store the backend does not compile")
 	}
+}
+
+// assignConst throws as an assignment to the constant id does.
+func (g *gen) assignConst(id *ast.Ident) {
+	g.at(int(id.Start))
+	g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdAssignConst), 0, g.name16(id.Name), 0))
 }
 
 func (g *gen) update(n *ast.Update, keep bool, dst int) int {
@@ -2315,7 +2346,7 @@ func (g *gen) stepped(n *ast.Update, cur int, step bytecode.ROp, keep bool, dst 
 // --- properties, calls, literals ------------------------------------------
 
 func propName(m *ast.Member) (string, bool) {
-	if m.Computed || m.Optional {
+	if m.Computed {
 		return "", false
 	}
 	id, ok := m.Property.(*ast.Ident)
@@ -2354,8 +2385,10 @@ func (g *gen) localStep(e ast.Expr, prefix bool) (int, int8, bool) {
 
 func (g *gen) member(n *ast.Member, dst int) int {
 	if n.Optional {
-		g.fail("an optional chain")
-		return g.dest(dst)
+		m := *n
+		m.Optional = false
+		m.Object = g.optionalLink(n.Object)
+		return g.member(&m, dst)
 	}
 	if id, ok := n.Object.(*ast.Ident); ok {
 		if res := g.rec.Read[id]; res.Kind == ResLazyArgs {
@@ -2432,9 +2465,15 @@ func (g *gen) args(args []ast.Expr, at int) {
 func (g *gen) call(n *ast.Call, dst int) int {
 	dead := g.dead == n
 	g.dead = nil
-	if n.Optional || len(n.Args) > 255 {
+	if hasSpread(n.Args) {
+		return g.spreadCall(n, dst)
+	}
+	if len(n.Args) > 255 {
 		g.fail("an optional call or too many arguments")
 		return g.dest(dst)
+	}
+	if n.Optional || isChainCall(n) {
+		return g.chainCall(n, dst)
 	}
 	if m, ok := n.Callee.(*ast.Member); ok && g.fn.ForwardsArguments && len(n.Args) == 2 && g.isArguments(n.Args[1]) {
 		if name, ok := propName(m); ok && name == "apply" && !m.Computed && !m.Optional {
@@ -2955,6 +2994,15 @@ func (g *gen) newExpr(n *ast.New, dst int) int {
 		g.fail("too many arguments")
 		return g.dest(dst)
 	}
+	if hasSpread(n.Args) {
+		w := g.allocN(3)
+		g.into(n.Callee, w)
+		g.spreadArray(n.Args, w+2)
+		d := g.dest(dst)
+		g.at(n.Start)
+		g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdCallSpread), r16(w), r16(d), 1))
+		return d
+	}
 	argc := len(n.Args)
 	w := g.allocN(2 + argc)
 	g.into(n.Callee, w)
@@ -2979,29 +3027,13 @@ func (g *gen) object(n *ast.ObjectLit, dst int) int {
 	d := g.dest(dst)
 	g.at(n.Start)
 	g.emit(bytecode.MakeR(bytecode.RNewObject, 0, r16(d), uint16(len(n.Props)), g.site(0)))
-	seen := map[string]bool{}
 	for _, p := range n.Props {
-		if p.Kind != ast.PropInit || p.Computed || p.Method {
-			g.fail("an object literal's property the backend does not compile")
+		if g.err != "" {
 			return d
 		}
-		var key string
-		switch k := p.Key.(type) {
-		case *ast.Ident:
-			key = k.Name
-		case *ast.StringLit:
-			key = k.Value
-		default:
-			g.fail("an object literal's key the backend does not compile")
-			return d
-		}
-		if key == "__proto__" || seen[key] {
-			g.fail("an object literal's __proto__ or a key twice")
-			return d
-		}
-		seen[key] = true
-		v := g.expr(p.Value, -1)
-		g.emit(bytecode.MakeR(bytecode.RDefineField, 0, r16(d), r16(v), g.name16(key)))
+		mark := g.top
+		g.property(d, p)
+		g.top = mark
 	}
 	return d
 }
@@ -3078,15 +3110,15 @@ func (g *gen) array(n *ast.ArrayLit, dst int) int {
 		g.arrays++
 		return d
 	}
+	if hasSpread(n.Elements) {
+		return g.spreadArray(n.Elements, dst)
+	}
 	base := g.allocN(len(n.Elements))
 	for i, e := range n.Elements {
 		if e == nil {
-			g.fail("a hole")
-			return base
-		}
-		if _, ok := e.(*ast.Spread); ok {
-			g.fail("a spread element")
-			return base
+			// A hole: the length grows by one, with no element made.
+			g.emit(bytecode.MakeR(bytecode.RLoadUninit, 0, r16(base+i), 0, 0))
+			continue
 		}
 		g.into(e, base+i)
 	}

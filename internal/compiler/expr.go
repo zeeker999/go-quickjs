@@ -781,7 +781,9 @@ func (c *compiler) templateIdx(q *ast.TemplateLit) uint32 {
 		t.Raw[i] = e.Raw
 	}
 	c.fn.Templates = append(c.fn.Templates, t)
-	return uint32(len(c.fn.Templates) - 1)
+	idx := uint32(len(c.fn.Templates) - 1)
+	c.reg.NoteTemplate(q, idx)
+	return idx
 }
 
 // constantElems reports whether the code from start is n instructions, each

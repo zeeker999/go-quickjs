@@ -247,8 +247,16 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		bytecode.RColdDeclareModuleLex, bytecode.RColdInitModuleLex:
 		return r.regColdTop(f, w, regs)
 	case bytecode.RColdIterStep, bytecode.RColdIterRest, bytecode.RColdCheckCoercible, bytecode.RColdToPropertyKey,
-		bytecode.RColdObjectRest, bytecode.RColdRestParam:
+		bytecode.RColdObjectRest, bytecode.RColdRestParam, bytecode.RColdToString, bytecode.RColdTemplateObject:
 		return r.regColdPattern(f, c, pc, w, regs)
+	case bytecode.RColdCopyDataProps, bytecode.RColdDefineGetter, bytecode.RColdDefineSetter,
+		bytecode.RColdDefineGetterIndex, bytecode.RColdDefineSetterIndex, bytecode.RColdDefineIndex,
+		bytecode.RColdSetFuncName, bytecode.RColdSetHomeObject, bytecode.RColdSetProtoOf,
+		bytecode.RColdArrayPush, bytecode.RColdArraySpread, bytecode.RColdCallSpread:
+		return r.regColdObject(f, w, regs)
+	case bytecode.RColdAssignConst:
+		// An assignment to a constant is a runtime error, not an early one.
+		return r.throwTypeError("assignment to constant variable %q", r.atoms.name(f.cl.names[w.B()]))
 	case bytecode.RColdGetGlobalOpt:
 		v, err := r.regGlobalOpt(f, f.cl.names[w.B()])
 		regs[w.A()] = v

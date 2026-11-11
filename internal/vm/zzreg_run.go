@@ -898,14 +898,16 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			}
 			goto cmpSlow
 		case bytecode.RJEq, bytecode.RJEqI:
-			if a, b := regs[w.A()], regs[w.B()]; w.Op() == bytecode.RJEqI {
+			// B is the immediate form's operand, no register: read only
+			// where it names one, which the verifier proves in the frame.
+			if a := regs[w.A()]; w.Op() == bytecode.RJEqI {
 				if a.IsNumber() {
 					if a.Number() == float64(w.SB()) {
 						goto taken
 					}
 					continue
 				}
-			} else if a.IsNumber() && b.IsNumber() {
+			} else if b := regs[w.B()]; a.IsNumber() && b.IsNumber() {
 				if a.Number() == b.Number() {
 					goto taken
 				}
@@ -913,14 +915,16 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			}
 			goto cmpSlow
 		case bytecode.RJNe, bytecode.RJNeI:
-			if a, b := regs[w.A()], regs[w.B()]; w.Op() == bytecode.RJNeI {
+			// B is the immediate form's operand, no register: read only
+			// where it names one, which the verifier proves in the frame.
+			if a := regs[w.A()]; w.Op() == bytecode.RJNeI {
 				if a.IsNumber() {
 					if a.Number() != float64(w.SB()) {
 						goto taken
 					}
 					continue
 				}
-			} else if a.IsNumber() && b.IsNumber() {
+			} else if b := regs[w.B()]; a.IsNumber() && b.IsNumber() {
 				if a.Number() != b.Number() {
 					goto taken
 				}

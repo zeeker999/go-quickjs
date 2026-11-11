@@ -242,6 +242,24 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 		return reg(a) && reg(b) && pc < len(rc.Aux) && int(w.C())+int(rc.Aux[pc]) <= rc.NumRegs
 	case bytecode.RColdRestParam:
 		return reg(a) && rc.KeepsArgs
+	case bytecode.RColdToString:
+		return reg(a)
+	case bytecode.RColdCopyDataProps, bytecode.RColdSetHomeObject, bytecode.RColdSetProtoOf:
+		return reg(a) && reg(b)
+	case bytecode.RColdDefineGetter, bytecode.RColdDefineSetter:
+		return reg(a) && reg(b) && int(w.C()) < len(fn.Names)
+	case bytecode.RColdDefineGetterIndex, bytecode.RColdDefineSetterIndex, bytecode.RColdDefineIndex:
+		return reg(a) && reg(b) && reg(w.C())
+	case bytecode.RColdAssignConst:
+		return int(b) < len(fn.Names)
+	case bytecode.RColdArrayPush, bytecode.RColdArraySpread:
+		return reg(a) && reg(b)
+	case bytecode.RColdCallSpread:
+		return int(a)+2 < rc.NumRegs && reg(b) && w.C() <= 1
+	case bytecode.RColdSetFuncName:
+		return reg(a) && reg(b) && w.C() <= 2
+	case bytecode.RColdTemplateObject:
+		return reg(a) && int(w.BC()) < len(fn.Templates)
 	}
 	return false
 }

@@ -435,6 +435,42 @@ const (
 	// RColdRestParam: R[A] = an array of the arguments from the B-th
 	// (rest_param).
 	RColdRestParam
+	// RColdToString: R[A] = ToString(R[A]), a template's substitution
+	// converted before what follows it runs (to_string).
+	RColdToString
+	// RColdTemplateObject: R[A] = the template object of the function's
+	// Templates[BC], one for each site (template_object).
+	RColdTemplateObject
+	// An object literal's: RColdCopyDataProps copies R[B]'s own enumerable
+	// properties to R[A] (copy_data_props, a spread); RColdDefineGetter and
+	// RColdDefineSetter define accessor R[B] of R[A] named Names[C];
+	// RColdDefineGetterIndex and RColdDefineSetterIndex define accessor
+	// R[C] of R[A] keyed R[B]; RColdDefineIndex defines R[A][R[B]] = R[C]
+	// (define_index); RColdSetFuncName names function R[A] after key R[B],
+	// with "get " or "set " for C 1 or 2 (set_func_name);
+	// RColdSetHomeObject makes R[B] function R[A]'s home object;
+	// RColdSetProtoOf sets R[A]'s prototype to R[B] where it is an object
+	// or null (__proto__: v).
+	RColdCopyDataProps
+	RColdDefineGetter
+	RColdDefineSetter
+	RColdDefineGetterIndex
+	RColdDefineSetterIndex
+	RColdDefineIndex
+	RColdSetFuncName
+	RColdSetHomeObject
+	RColdSetProtoOf
+	// Spreads: RColdArrayPush appends R[B] to array R[A], a hole where it
+	// is the uninitialized marker (array_push); RColdArraySpread appends
+	// what iterating R[B] gives (array_spread); RColdCallSpread calls R[A]
+	// with this R[A+1] and the elements of array R[A+2] as its arguments,
+	// or constructs it where C is 1, into R[B] (call_spread, new_spread).
+	RColdArrayPush
+	RColdArraySpread
+	RColdCallSpread
+	// RColdAssignConst throws the TypeError of an assignment to the
+	// constant Names[B] (assign_const).
+	RColdAssignConst
 )
 
 // The flags of regexp_lit's X.
@@ -483,7 +519,14 @@ var rColdNames = [...]string{
 	RColdGetGlobalOpt: "get_global_opt", RColdDeclareModuleLex: "declare_module_lex",
 	RColdInitModuleLex: "init_module_lex", RColdIterStep: "iter_step", RColdIterRest: "iter_rest",
 	RColdCheckCoercible: "check_coercible", RColdToPropertyKey: "to_property_key",
-	RColdObjectRest: "object_rest", RColdRestParam: "rest_param",
+	RColdObjectRest: "object_rest", RColdRestParam: "rest_param", RColdToString: "to_string",
+	RColdTemplateObject: "template_object", RColdCopyDataProps: "copy_data_props",
+	RColdDefineGetter: "define_getter", RColdDefineSetter: "define_setter",
+	RColdDefineGetterIndex: "define_getter_index", RColdDefineSetterIndex: "define_setter_index",
+	RColdDefineIndex: "define_index", RColdSetFuncName: "set_func_name",
+	RColdSetHomeObject: "set_home_object", RColdSetProtoOf: "set_proto_of",
+	RColdArrayPush: "array_push", RColdArraySpread: "array_spread", RColdCallSpread: "call_spread",
+	RColdAssignConst: "assign_const",
 }
 
 func (op RColdOp) String() string {

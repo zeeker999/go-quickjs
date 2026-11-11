@@ -139,7 +139,7 @@ func (g *gen) storeLeaf(id *ast.Ident, v int, declaring bool) {
 	case ResGlobalLexInit, ResModuleLexInit:
 		g.lexInit(res.Kind, id.Name, v, int(id.Start))
 	case ResIgnore:
-	case ResUpval, ResGlobal:
+	case ResUpval, ResGlobal, ResConstAssign:
 		g.storeValue(id, v)
 	default:
 		g.fail("a store the backend does not compile")

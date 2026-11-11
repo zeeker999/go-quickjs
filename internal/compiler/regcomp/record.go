@@ -84,6 +84,9 @@ type Record struct {
 	// Tails is each call the stack form compiled as a tail call
 	// (tail_call, tail_call_method, tail_direct_eval).
 	Tails map[ast.Expr]bool
+	// Templates is each tagged template's index in the function's
+	// Templates, its site, whose object every evaluation of it gives.
+	Templates map[*ast.TemplateLit]uint32
 	// Top is what top-level code does before its first statement, as the
 	// stack form does it, in order: the checks and declarations of the
 	// names it binds in the global object and the global lexical
@@ -185,4 +188,15 @@ func (r *Record) NoteWrite(id *ast.Ident, res Res) {
 		r.Bail = true
 	}
 	r.Write[id] = res
+}
+
+// NoteTemplate records that tagged template q's site is idx.
+func (r *Record) NoteTemplate(q *ast.TemplateLit, idx uint32) {
+	if r == nil {
+		return
+	}
+	if r.Templates == nil {
+		r.Templates = map[*ast.TemplateLit]uint32{}
+	}
+	r.Templates[q] = idx
 }
