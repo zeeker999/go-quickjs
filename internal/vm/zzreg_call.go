@@ -1165,11 +1165,12 @@ func (r *Runtime) regDirectOnce(o *Object, fd *funcData, c *regCode, this Value,
 // function data fd, or top-level code, whose callee is nil -- as register
 // code entered directly, its frame given what runFD gives one of its
 // surroundings: the with objects and an eval's variables of the functions
-// around it, and a scope for the variables of its own direct eval. It
-// reports false, having done nothing, where cl has no register code to
-// enter so: the tiers' own runs (regTier off), a generator's body, and a
-// frame with a this binding. A chain of tail calls the frame ends in is
-// made here, in its place.
+// around it, a scope for the variables of its own direct eval, and the
+// this binding of a derived constructor's construction or an arrow
+// sharing one. It reports false, having done nothing, where cl has no
+// register code to enter so: the tiers' own runs (regTier off) and a
+// generator's body. A chain of tail calls the frame ends in is made
+// here, in its place.
 //
 //go:noinline
 func (r *Runtime) regRunFD(cl *closure, this Value, args []Value, newTarget Value, callee *Object, fd *funcData) (Value, error, bool) {
@@ -1183,12 +1184,32 @@ func (r *Runtime) regRunFD(cl *closure, this Value, args []Value, newTarget Valu
 		return Undefined, nil, false
 	}
 	fn := cl.fn
-	arrow := fd != nil && fd.arrow
-	if !newTarget.IsUndefined() && !arrow || arrow && fd.extra != nil && fd.extra.lexThisRef != nil {
-		// A construction, or an arrow sharing a derived constructor's
-		// this binding: runFD's still (vm.RegFallbacks counts it). An
-		// arrow's new.target is the one it captured.
-		return Undefined, nil, false
+	// The this binding super() binds: a derived constructor's
+	// construction makes one, holding the object made for it until then,
+	// and an arrow written inside one shares it, as runFD's frames do.
+	var thisRef *thisBinding
+	cell := false
+	if fd != nil {
+		if fd.arrow {
+			if fd.extra != nil {
+				thisRef = fd.extra.lexThisRef
+			}
+		} else if fd.ctorKind == ctorDerived && !newTarget.IsUndefined() {
+			if c.cellThis {
+				// The runtime's cell for the frame's depth, which nothing
+				// keeps past the frame: the construction allocates its
+				// object alone.
+				d := r.frameDepth
+				if d >= len(r.thisCells) {
+					r.thisCells = make([]thisBinding, d+d/2+16)
+				}
+				thisRef = &r.thisCells[d]
+				*thisRef = thisBinding{value: this}
+				cell = true
+			} else {
+				thisRef = &thisBinding{value: this}
+			}
+		}
 	}
 	if regReportOn {
 		regNoteCross(regCrossEnter, fn, "")
@@ -1232,7 +1253,11 @@ func (r *Runtime) regRunFD(cl *closure, this Value, args []Value, newTarget Valu
 	for i, a := range args[:m] {
 		w[2+i] = a
 	}
-	v, err := r.regEnterScoped(callee, cl, c, base, m, args, newTarget, with, evalVars)
+	v, err := r.regEnterScoped(callee, cl, c, base, m, args, newTarget, thisRef, with, evalVars)
+	if cell {
+		// The object is the construction's now, not the cell's to keep.
+		thisRef.value = Undefined
+	}
 	if err == errTailCall && r.tailLoopDepth != r.frameDepth {
 		// The chain made here, in constant space; inside regTailLoop's
 		// call at this depth, by its loop (regCall).
@@ -1243,7 +1268,7 @@ func (r *Runtime) regRunFD(cl *closure, this Value, args []Value, newTarget Valu
 
 // regEnterScoped is regEnterW's entry of a frame regRunFD has made the
 // window of, given the surroundings regRunFD found for it.
-func (r *Runtime) regEnterScoped(o *Object, cl *closure, rc *regCode, base, argc int, args []Value, newTarget Value, with []*Object, evalVars *Object) (Value, error) {
+func (r *Runtime) regEnterScoped(o *Object, cl *closure, rc *regCode, base, argc int, args []Value, newTarget Value, thisRef *thisBinding, with []*Object, evalVars *Object) (Value, error) {
 	top := base + int(rc.numRegs)
 	if top > len(r.stack) || r.frameDepth >= r.maxFrames {
 		return Undefined, r.throwRangeError("maximum call stack size exceeded")
@@ -1287,6 +1312,10 @@ func (r *Runtime) regEnterScoped(o *Object, cl *closure, rc *regCode, base, argc
 	}
 	f.withScopes, f.evalVars = with, evalVars
 	f.newTarget = newTarget
+	// The frame record's this is what super() reads and rebinds
+	// (superCall), and what a direct eval's code shares: register 1
+	// otherwise, which regSyncThis writes back before either.
+	f.this, f.thisRef = r.stack[base+1], thisRef
 	f.regKind = regFrameEnter
 	if rc.args {
 		f.args = kept
@@ -1301,7 +1330,7 @@ func (r *Runtime) regEnterScoped(o *Object, cl *closure, rc *regCode, base, argc
 	if len(f.openUpvalues) != 0 {
 		regCloseUpvalues(f)
 	}
-	f.withScopes, f.evalVars = nil, nil
+	f.withScopes, f.evalVars, f.thisRef = nil, nil, nil
 	r.frameDepth--
 	r.stackTop = saved
 	if a := f.args; a != nil {

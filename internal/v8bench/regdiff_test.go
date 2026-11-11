@@ -69,10 +69,8 @@ func regDiff(t *testing.T, src string, calls []string) int64 {
 	built := vm.RegsBuilt() - before
 	// Register mode runs everything as register code, entered as its own:
 	// nothing in the stack interpreter or the tree tier, nothing entered
-	// through their frames. Until the count is zero everywhere, it fails
-	// only where QJS_REGFALLSTRICT asks (docs/register-interpreter.md,
-	// item 13).
-	if n, by := vm.RegFallbacks(); n != 0 && os.Getenv("QJS_REGFALLSTRICT") != "" {
+	// through their frames (docs/register-interpreter.md, item 13).
+	if n, by := vm.RegFallbacks(); n != 0 {
 		t.Errorf("%d fallbacks to the other tiers (QJS_REGFALLTRACE names them):\n%s", n, by)
 	}
 	bad, skipped := 0, 0
@@ -1305,6 +1303,54 @@ function c13() { var r = []; class N { #x = 1; static t(o) { try { return o.#x }
 `
 	calls := []string{`c1()`, `c2()`, `c3()`, `c4()`, `c5(0)`, `c5(1)`, `c5(2)`, `c5(3)`, `c5(4)`, `c5(5)`, `c6()`, `c7()`, `c8()`, `c9()`, `c10()`, `c11()`, `c12()`, `c13()`, `c14()`,
 		`class TopA { constructor(v) { this.v = v } } class TopB extends TopA { get w() { return this.v + 1 } } new TopB(1).w`}
+	regDiff(t, src, calls)
+}
+
+// TestRegDiffConstructions compares constructions entered as register
+// code: a derived constructor's this binding -- read before super() binds
+// it, bound by an arrow, by eval code or by an iterator's return handler
+// after the body has left, a second super() -- the results a derived
+// construction checks after its body, a base constructor with a direct
+// eval or inside a with, new.target an arrow captures, and the stack
+// traces of errors thrown in them.
+func TestRegDiffConstructions(t *testing.T) {
+	src := `
+function frames(e) { return e.name + ": " + e.message + " | " + e.stack.split("\n").slice(1, 3).map(function (s) { return s.trim() }).join(" | ") }
+var seen = [];
+class A { constructor(x) { this.x = x; this.nt = new.target.name; seen.push("A" + x) } }
+class D1 extends A { constructor() { var f = () => super(2); try { throw null } catch (e) { return } finally { f() } } }
+var iter = { [Symbol.iterator]() { return this }, next() { return { done: false } }, return() { this.f(); return { done: true } } }
+class D2 extends A { constructor() { iter.f = () => super(3); for (var k of iter) { return } } }
+class D3 extends A { constructor() { super(4); this.arrow = () => this; return this.arrow } }
+class D4 extends A { constructor() { var g = () => this; try { g() } catch (e) { seen.push(e.name) } super(5); this.same = g() === this } }
+class D5 extends A { constructor() { eval("super(6)"); this.e = eval("this.x + 1") } }
+class D6 extends A { constructor(k) { if (k) { super(7) } else { (() => super(8))() } eval("this.k = k"); this.direct = (0, eval)("typeof this") } }
+class E2 { constructor(x) { eval("this.v = x") } }
+class D7 extends E2 { constructor() { var n; try { eval("this") } catch (e) { n = e.name } super(1); this.n = n + eval("this.constructor.name") } }
+class D8 extends A { constructor() { return } }
+class D9 extends A { constructor() { super(1); return 1 } }
+class D10 extends A { constructor() { super(1); super(2) } }
+class D11 extends A { constructor() { var t = () => new.target; super(1); this.t = t() === D11 } }
+class D12 extends A { constructor() { super(1); null.x } }
+class D13 extends A { constructor() { var f = () => eval("super(2)"); f(); this.q = (() => eval("this.x"))() } }
+class D14 extends A { constructor() { super(1); this.p = (async () => this.x)() } }
+function FB(x) { this.fb = x; this.nt = new.target === FB }
+class D15 extends FB { constructor() { super(3) } }
+function E1(x) { eval("var y = x * 2"); this.y = y; this.nt = new.target === E1 }
+var W; with ({ k: 9 }) { W = function (j) { this.k = k + j } }
+function Rec(n) { this.n = n; this.next = n > 0 ? new Rec(n - 1) : null }
+function Tail(n) { this.n = n; return mk(n) } function mk(n) { return n > 1 ? { made: n } : 0 }
+function c1() { seen = []; var r = [new D1().x, new D2().x, typeof new D3(), new D3()().x, new D4().same, new D5().e, new D6(1).k, new D6(0).x, new D6(0).direct]; return r.join() + " " + seen.join() }
+function c2() { return [new D7().n, new D11().t, new D13().q, new D15().fb, new D15().nt, new E1(4).y, new E1(4).nt, new W(1).k].join() }
+function c3(k) { try { return k === 0 ? new D8() : k === 1 ? new D9() : k === 2 ? new D10() : new D12() } catch (e) { return frames(e) } }
+class DR extends A { constructor(n) { super(n); this.c = n > 0 ? new DR(n - 1) : null } }
+class DS extends A { constructor(n) { var c = n > 0 ? new DS(n - 1) : null; super(n); this.c = c; this.ok = this.x === n } }
+function c4() { var r = new Rec(20), n = 0; while (r) { n += r.n; r = r.next } return [n, JSON.stringify(new Tail(1)), JSON.stringify(new Tail(2)), JSON.stringify(new DR(3)), JSON.stringify(new DS(3))].join() }
+function c5() { return Reflect.construct(D5, [], D15).constructor.name + "," + Reflect.construct(E1, [1], W).nt }
+async function c6() { return await new D14().p }
+var out6; c6().then(function (v) { out6 = v })
+`
+	calls := []string{`c1()`, `c2()`, `c3(0)`, `c3(1)`, `c3(2)`, `c3(3)`, `c4()`, `c5()`, `out6`}
 	regDiff(t, src, calls)
 }
 

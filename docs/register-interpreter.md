@@ -1622,11 +1622,17 @@ regdiff cases and test262 in register mode on its directories:
    functions around it, a scope for its own direct eval's -- and a chain
    of tail calls it ends in made in its place, in constant space
    (regTailLoop). A direct eval's function and one inside a with are so
-   no longer entered through runFD. Still runFD's, and counted (item
-   13): constructions, and a frame with a this binding -- a derived
-   constructor's, or the one an arrow shares with it. Strict eval code's
-   function declarations, bindings of its own rather than top-level
-   declarations, are made (they were not: test262's name-unicode.js,
+   no longer entered through runFD, nor is a construction
+   (constructRun, and callTreeWith whatever the new.target; planTreeNew
+   gives register code no tree's) or a frame with a this binding: a
+   derived constructor's construction makes the binding super() binds,
+   an arrow written inside one shares it, and the frame record's this
+   is register 1 at entry, which superCall reads and rebinds. Eval
+   code's this is the call site's, which may be such a binding: top-level
+   code records it (`Record.ThisRef`, the stack compiler's thisIsValue)
+   and reads this through the binding, as such an arrow does. Strict
+   eval code's function declarations, bindings of its own rather than
+   top-level declarations, are made (they were not: test262's name-unicode.js,
    strict).
 13. **The fallback counter** (`vm.RegFallbacks`, QJS_REGFALLTRACE to
    name each). Register mode counts every time it hands code to the
@@ -1634,11 +1640,10 @@ regdiff cases and test262 in register mode on its directories:
    register code; a frame regStmt runs in the stack interpreter; and
    register code entered through runTree, a frame runFD or callTree
    made rather than its own -- the node that runs register code in a
-   tree is reached no other way. The regdiff tests (the micro list, the
-   V8 suite and every corpus of theirs) and test262 in register mode,
-   where it runs the language's directories alone, fail on any where
-   QJS_REGFALLSTRICT is set; once the count is zero the check is
-   unconditional.
+   tree is reached no other way. With constructions entered as
+   register code (item 12) the count is zero, and the regdiff tests (the
+   micro list, the V8 suite and every corpus of theirs) and test262 in
+   register mode, every directory, fail on any.
 
 ### Stage 3: the JIT and the tree tier
 

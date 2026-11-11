@@ -525,6 +525,7 @@ func Compile(prog *ast.Program, opts Options) (fn *bytecode.Function, err error)
 		// A script's code as register code too (regcomp.CompileTop).
 		c.reg = regcomp.NewRecord()
 		c.reg.Completion = c.completionSlot
+		c.reg.ThisRef = !c.thisIsValue()
 	}
 
 	c.checkEvalVarNames(prog.Body)
