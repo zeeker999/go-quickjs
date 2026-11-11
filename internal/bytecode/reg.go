@@ -661,6 +661,11 @@ const (
 // arguments are an array.
 const RDirectEvalSpread = 1 << 31
 
+// RNameFar is a name operand that says the name's index in Names is past
+// 16 bits: FarNames, by the instruction's pc, has it. Only the cold
+// operations and the miss paths that read a name read it.
+const RNameFar = 0xFFFF
+
 // The flags of regexp_lit's X.
 const (
 	RLitTest = 1 << iota
@@ -832,7 +837,10 @@ type RegCode struct {
 	Literals [][]LitElem
 	// ObjKeys are the keys of the code's object literals made at once
 	// (RNewObjectLit), each an index of the function's names.
-	ObjKeys [][]uint16
+	ObjKeys [][]uint32
+	// FarNames is, for an instruction whose name operand is RNameFar,
+	// the name's index in Names, by its pc; nil where none is.
+	FarNames []uint32
 	// LocalReg is each local's register, or -1, where the code has a
 	// call_reuse, whose frame's locals the runtime reads by it, a
 	// direct_eval, whose code it links to them, or is compiled for a

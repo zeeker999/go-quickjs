@@ -32,7 +32,7 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 		case bytecode.RGetUpval, bytecode.RSetUpval:
 			ok = reg(a) && int(w.BC()) < len(fn.Upvalues)
 		case bytecode.RGetGlobal, bytecode.RSetGlobal:
-			ok = reg(a) && int(b) < len(fn.Names) && site(c)
+			ok = reg(a) && nameOK(rc, fn, pc, b) && site(c)
 		case bytecode.RCheckRef:
 			ok = reg(a) && int(b) < len(fn.Locals)
 		case bytecode.RLoadConst:
@@ -66,7 +66,7 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 		case bytecode.RSetProp:
 			ok = reg(a) && reg(b) && site(c)
 		case bytecode.RDefineField:
-			ok = reg(a) && reg(b) && int(c) < len(fn.Names)
+			ok = reg(a) && reg(b) && nameOK(rc, fn, pc, c)
 		case bytecode.RGetIndex, bytecode.RSetIndex, bytecode.RAdd, bytecode.RSub, bytecode.RMul, bytecode.RBin,
 			bytecode.RBitAnd, bytecode.RBitOr, bytecode.RBitXor, bytecode.RShl, bytecode.RShr, bytecode.RUShr:
 			ok = reg(a) && reg(b) && reg(c)
@@ -204,6 +204,16 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 }
 
 // markAt is the marks of the call at pc, or 0.
+// nameOK reports whether op, the name operand of the instruction at pc,
+// names one of fn's names: its index, or RNameFar and FarNames' index
+// past 16 bits.
+func nameOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, op uint16) bool {
+	if op != bytecode.RNameFar {
+		return int(op) < len(fn.Names)
+	}
+	return pc < len(rc.FarNames) && rc.FarNames[pc] >= bytecode.RNameFar && int(rc.FarNames[pc]) < len(fn.Names)
+}
+
 func markAt(rc *bytecode.RegCode, pc int) uint8 {
 	if pc < len(rc.Marks) {
 		return rc.Marks[pc]
@@ -233,9 +243,9 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 	case bytecode.RColdCheckGlobalLex, bytecode.RColdCheckGlobalVar, bytecode.RColdDefineGlobalVar,
 		bytecode.RColdDeclareGlobalLex, bytecode.RColdDefineGlobalFunc, bytecode.RColdInitGlobalLex,
 		bytecode.RColdDeclareModuleLex, bytecode.RColdInitModuleLex:
-		return reg(a) && int(b) < len(fn.Names) && fn.TopLevel
+		return reg(a) && nameOK(rc, fn, pc, b) && fn.TopLevel
 	case bytecode.RColdGetGlobalOpt, bytecode.RColdDeleteVar:
-		return reg(a) && int(b) < len(fn.Names)
+		return reg(a) && nameOK(rc, fn, pc, b)
 	case bytecode.RColdImport:
 		k := int(w.C()) & 3
 		return reg(a) && (k == 1 || k == 2) && int(b)+k <= rc.NumRegs
@@ -256,11 +266,11 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 		}
 		return true
 	case bytecode.RColdWithGet, bytecode.RColdWithDelete, bytecode.RColdWithSet, bytecode.RColdWithResolve:
-		return reg(a) && int(b) < len(fn.Names) && pc < len(rc.Aux) && rc.Aux[pc] < uint32(rc.NumRegs)
+		return reg(a) && nameOK(rc, fn, pc, b) && pc < len(rc.Aux) && rc.Aux[pc] < uint32(rc.NumRegs)
 	case bytecode.RColdWithGetThis:
-		return reg(a) && int(a)+1 < rc.NumRegs && int(b) < len(fn.Names) && pc < len(rc.Aux) && rc.Aux[pc] < uint32(rc.NumRegs)
+		return reg(a) && int(a)+1 < rc.NumRegs && nameOK(rc, fn, pc, b) && pc < len(rc.Aux) && rc.Aux[pc] < uint32(rc.NumRegs)
 	case bytecode.RColdWithRead, bytecode.RColdWithWrite:
-		return reg(a) && reg(b) && int(w.C()) < len(fn.Names)
+		return reg(a) && reg(b) && nameOK(rc, fn, pc, w.C())
 	case bytecode.RColdWithPush:
 		return reg(a)
 	case bytecode.RColdWithPop:
@@ -284,17 +294,17 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 	case bytecode.RColdCopyDataProps, bytecode.RColdSetHomeObject, bytecode.RColdSetProtoOf:
 		return reg(a) && reg(b)
 	case bytecode.RColdDefineGetter, bytecode.RColdDefineSetter:
-		return reg(a) && reg(b) && int(w.C()) < len(fn.Names)
+		return reg(a) && reg(b) && nameOK(rc, fn, pc, w.C())
 	case bytecode.RColdDefineGetterIndex, bytecode.RColdDefineSetterIndex, bytecode.RColdDefineIndex:
 		return reg(a) && reg(b) && reg(w.C())
 	case bytecode.RColdAssignConst, bytecode.RColdThrowRef:
-		return int(b) < len(fn.Names)
+		return nameOK(rc, fn, pc, b)
 	case bytecode.RColdDebug:
 		return b <= 1 && fn.Debug != nil && pc < len(rc.Aux) && int(rc.Aux[pc]) < len(fn.Debug.Statements)
 	case bytecode.RColdCheckGlobalRef:
-		return reg(a) && int(b) < len(fn.Names) && site(w.C())
+		return reg(a) && nameOK(rc, fn, pc, b) && site(w.C())
 	case bytecode.RColdAssertResolved:
-		return reg(a) && int(b) < len(fn.Names)
+		return reg(a) && nameOK(rc, fn, pc, b)
 	case bytecode.RColdArrayPush, bytecode.RColdArraySpread:
 		return reg(a) && reg(b)
 	case bytecode.RColdCallSpread:
@@ -306,7 +316,7 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 	case bytecode.RColdNewClass, bytecode.RColdSetFieldInit, bytecode.RColdSuperSpread:
 		return reg(a) && reg(b)
 	case bytecode.RColdDefineMethod, bytecode.RColdClassGetter, bytecode.RColdClassSetter:
-		return reg(a) && reg(b) && int(w.C()) < len(fn.Names)
+		return reg(a) && reg(b) && nameOK(rc, fn, pc, w.C())
 	case bytecode.RColdClassGetterIndex, bytecode.RColdClassSetterIndex, bytecode.RColdClassIndex,
 		bytecode.RColdAddPrivateMethod, bytecode.RColdAddPrivateGetter, bytecode.RColdAddPrivateSetter,
 		bytecode.RColdDefinePrivate, bytecode.RColdDefinePrivateMethod, bytecode.RColdDefinePrivateGetter,
@@ -314,7 +324,7 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 		bytecode.RColdPrivateIn, bytecode.RColdSuperGetIndex, bytecode.RColdSuperSetIndex:
 		return reg(a) && reg(b) && reg(w.C())
 	case bytecode.RColdPrivateName, bytecode.RColdSuperGet, bytecode.RColdSuperSet:
-		return reg(a) && int(b) < len(fn.Names)
+		return reg(a) && nameOK(rc, fn, pc, b)
 	case bytecode.RColdNewPrivateMethods, bytecode.RColdInstallPrivateMethods, bytecode.RColdSuperBase,
 		bytecode.RColdThis, bytecode.RColdNewTarget, bytecode.RColdDerivedRet, bytecode.RColdSuperForward:
 		return reg(a)

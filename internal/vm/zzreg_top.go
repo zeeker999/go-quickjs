@@ -10,9 +10,9 @@ import "github.com/go-quickjs/go-quickjs/internal/bytecode"
 
 // regColdTop runs top-level code's cold operation w, of the name Names[B]
 // and the flag C, in frame f.
-func (r *Runtime) regColdTop(f *frame, w bytecode.RInstr, regs *[1 << 16]Value) error {
+func (r *Runtime) regColdTop(f *frame, c *regCode, pc int, w bytecode.RInstr, regs *[1 << 16]Value) error {
 	cl := f.cl
-	name := cl.names[w.B()]
+	name := regName(cl, c, pc, w.B())
 	flag := w.C() != 0
 	switch bytecode.RColdOp(w.X()) {
 	case bytecode.RColdCheckGlobalLex:

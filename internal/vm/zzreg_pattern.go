@@ -58,7 +58,7 @@ func (r *Runtime) regColdPattern(f *frame, c *regCode, pc int, w bytecode.RInstr
 
 // regColdObject runs an object literal's cold operation w in frame f, each
 // what the stack form's instruction of the same name does.
-func (r *Runtime) regColdObject(f *frame, w bytecode.RInstr, regs *[1 << 16]Value) error {
+func (r *Runtime) regColdObject(f *frame, rc *regCode, pc int, w bytecode.RInstr, regs *[1 << 16]Value) error {
 	a, b, c := regs[w.A()], regs[w.B()], regs[w.C()]
 	switch op := bytecode.RColdOp(w.X()); op {
 	case bytecode.RColdCopyDataProps:
@@ -67,7 +67,7 @@ func (r *Runtime) regColdObject(f *frame, w bytecode.RInstr, regs *[1 << 16]Valu
 		}
 	case bytecode.RColdDefineGetter, bytecode.RColdDefineSetter:
 		if a.IsObject() && b.IsObject() {
-			r.defineHalfAccessor(a.Object(), f.cl.names[w.C()], b.Object(), op == bytecode.RColdDefineGetter, memberFlags(0))
+			r.defineHalfAccessor(a.Object(), regName(f.cl, rc, pc, w.C()), b.Object(), op == bytecode.RColdDefineGetter, memberFlags(0))
 		}
 	case bytecode.RColdDefineGetterIndex, bytecode.RColdDefineSetterIndex:
 		k, err := r.toPropertyKey(b)

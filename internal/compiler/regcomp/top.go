@@ -69,7 +69,7 @@ func (g *gen) topBody() {
 			// not a form to refuse.
 			panic("regcomp: top-level code's record holds " + t.Op.String())
 		}
-		g.emit(bytecode.MakeR(bytecode.RCold, uint8(sub), r16(a), name, flag))
+		g.far(g.emit(bytecode.MakeR(bytecode.RCold, uint8(sub), r16(a), name, flag)), t.Name)
 		g.top = g.topAfterBindings()
 	}
 }
@@ -103,7 +103,7 @@ func (g *gen) lexInit(kind ResKind, name string, v, pos int) {
 		sub = bytecode.RColdInitModuleLex
 	}
 	g.at(pos)
-	g.emit(bytecode.MakeR(bytecode.RCold, uint8(sub), r16(v), g.name16(name), 0))
+	g.far(g.emit(bytecode.MakeR(bytecode.RCold, uint8(sub), r16(v), g.name16(name), 0)), name)
 }
 
 // exportDecl compiles a module's export declaration: the declaration it

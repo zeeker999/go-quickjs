@@ -1004,6 +1004,88 @@ func TestRegDiffRegExpWideConstants(t *testing.T) {
 	}
 }
 
+// TestRegDiffFarNames compares code whose names run past 16 bits, where an
+// instruction's name operand is RNameFar and RegCode.FarNames has the
+// index: each function, and each script, starts with 65,600 reads of
+// globals by typeof, each a name of its own, and only then names what it
+// uses -- globals read, written and deleted, sloppy and strict, an object
+// literal's keys made at once and one by one, accessors, a class's
+// members, private names and super, a with's names, a constant's and an
+// assignment target's errors -- and in scripts and indirect eval code that
+// declare 65,600 vars first, top-level declarations.
+func TestRegDiffFarNames(t *testing.T) {
+	if testing.Short() {
+		t.Skip("compiles a dozen programs of 65,600 statements three times")
+	}
+	var fill strings.Builder
+	for i := 0; i < 65600; i++ {
+		fmt.Fprintf(&fill, "typeof f%d;\n", i)
+	}
+	f := fill.String()
+	// A script's declarations take its first names: past 16 bits, those
+	// after 65,600 others.
+	var d strings.Builder
+	d.WriteString("var d0")
+	for i := 1; i < 65600; i++ {
+		fmt.Fprintf(&d, ", d%d", i)
+	}
+	d.WriteString(";\n")
+	decls := d.String()
+	src := `
+var gA = 1, gD = 2;
+class B { bm() { return "bm" } get bx() { return 10 } }
+function n1() {
+` + f + `gA = gA + 1; gA += 2; var r = [gA, typeof gZ, typeof gA, delete gD, typeof gD];
+	try { gNo } catch (x) { r.push(x.name + ": " + x.message) }
+	var k = "kk", ob = {ka: 1, kb: 2}, oc = {[k]: 1, kc: 3, get ga() { return 4 }, set ga(v) { this.kv = v }}, od = {...ob, kd: 5};
+	oc.ga = 6;
+	r.push(JSON.stringify(ob), JSON.stringify(oc), oc.ga, JSON.stringify(od));
+	const cc = 1;
+	try { cc = 2 } catch (x) { r.push(x.name + ": " + x.message) }
+	try { n1() = 1 } catch (x) { r.push(x.name + ": " + x.message) }
+	return r.join(" | ");
+}
+function n2() {
+	"use strict";
+` + f + `var r = []; gA = 7; r.push(gA);
+	try { gU = 1 } catch (x) { r.push(x.name + ": " + x.message) }
+	try { gV += 1 } catch (x) { r.push(x.name + ": " + x.message) }
+	try { gW = String(r.length) } catch (x) { r.push(x.name + ": " + x.message) }
+	gA = String(gA + 1); r.push(gA);
+	return r.join(" | ");
+}
+function n3() {
+` + f + `class K extends B { #p = 1; static sm() { return "sm" } get kg() { return 2 } set kg(v) { this.q = v } m() { return this.#p } }
+	var k = new K(); k.kg = 3;
+	return [K.sm(), k.kg, k.q, k.m(), k.bm(), Object.getOwnPropertyNames(K.prototype).join("/")].join();
+}
+class C2 extends B {
+	#p = 1;
+	m() {
+` + f + `this.#p += 1; super.by = 5; return [this.#p, super.bx, super.bm(), this.by, #p in this].join();
+	}
+	n(o) {
+` + f + `try { return this.#p } catch (x) { return x.name } finally { try { C2.prototype.m.call(o) } catch (x) { globalThis.pe = x.name + ": " + x.message } }
+	}
+}
+function n4(o) {
+` + f + `with (o) { wx = wx + 1; wn = 9; return [wx, wy, typeof wz, wn].join() }
+}
+`
+	calls := []string{`n1()`, `n2()`, `n3()`, `new C2().m()`, `new C2().n({}) + " " + pe`,
+		`var wo = {wx: 1, wy: 2, wn: 0}; n4(wo) + " " + wo.wx + " " + wo.wn`,
+		f + `var tv = 1; let tl = 2; const tc = 3; function tf() { return 4 } class tk {} tv + tl + tc + tf() + typeof tk`,
+		`tv + tl + tc + tf() + typeof tk`,
+		`(0, eval)(` + "`" + f + "var iv = 5; let il = 6; iv + il`" + `) + "," + iv + "," + typeof il`,
+		decls + `let dl = 1; const dc = 2; function dfn() { return 3 } class dk {} d65599 = 4; d65599 + dl + dc + dfn() + typeof dk`,
+		`(0, eval)(decls + "var dv = 5; d1 = dv; d1")`,
+		"let" + decls[3:] + `var ev = 1; let el = 2; function efn() { return 3 } class ek {} ev + el + efn() + typeof ek + typeof d1`,
+		`(function () { return eval(` + "`" + f + "var dv = 7; let dl = 8; dv + dl + gA`" + `) + "," + dv })()`}
+	if built := regDiff(t, src, calls); built == 0 {
+		t.Errorf("no function is register code")
+	}
+}
+
 // TestRegDiffTailCalls compares calls in tail position in strict code
 // (RMarkTail): chains deep past tailCallDepth in constant space, mutual and
 // through methods, conditionals, logical and comma forms; a construct's

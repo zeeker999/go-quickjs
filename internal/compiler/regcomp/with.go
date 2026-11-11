@@ -88,7 +88,7 @@ func (g *gen) probeOp(id *ast.Ident, ops ...bytecode.Op) bytecode.Op {
 func (g *gen) probe(id *ast.Ident, sub bytecode.RColdOp, a int) int {
 	flag := g.alloc()
 	g.at(int(id.Start))
-	at := g.cold(sub, a, int(g.name16(id.Name)), int(g.withs[id].probe.Limit))
+	at := g.far(g.cold(sub, a, int(g.name16(id.Name)), int(g.withs[id].probe.Limit)), id.Name)
 	g.aux(at, uint32(flag))
 	return flag
 }
@@ -133,7 +133,7 @@ func (g *gen) refRead(id *ast.Ident, ref withRef, dst int) int {
 	static, end := g.newMark(), g.newMark()
 	g.jump(bytecode.MakeR(bytecode.RJmpF, 0, r16(ref.flag), 0, 0), static, false)
 	g.at(int(id.Start))
-	g.cold(bytecode.RColdWithRead, d, ref.base, int(g.name16(id.Name)))
+	g.far(g.cold(bytecode.RColdWithRead, d, ref.base, int(g.name16(id.Name))), id.Name)
 	g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), end, false)
 	g.bind(static)
 	g.withStatic(id, func() { g.readForWrite(id, d) })
@@ -154,7 +154,7 @@ func (g *gen) withStore(id *ast.Ident, v int) {
 	static, end := g.newMark(), g.newMark()
 	g.jump(bytecode.MakeR(bytecode.RJmpF, 0, r16(ref.flag), 0, 0), static, false)
 	g.at(int(id.Start))
-	g.cold(bytecode.RColdWithWrite, v, ref.base, int(g.name16(id.Name)))
+	g.far(g.cold(bytecode.RColdWithWrite, v, ref.base, int(g.name16(id.Name))), id.Name)
 	g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), end, false)
 	g.bind(static)
 	g.withStatic(id, func() { g.storeValue(id, v) })

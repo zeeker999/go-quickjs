@@ -154,7 +154,10 @@ Nothing in a function is capped:
   not fit has a wide form: the same operation followed by an extension word
   holding a 32-bit index, read by the wide form's case alone, so the narrow
   form's case never tests for it. Global reads, loads of constants and
-  closures already take a 32-bit BC and need none.
+  closures already take a 32-bit BC and need none. A name past 16 bits
+  needs no wide form either: only cold operations and miss paths read a
+  name, so its operand is `RNameFar` and `RegCode.FarNames`, by the
+  instruction's pc, holds the index (item 14).
 - **Jumps past 32,767 instructions.** A compare-and-branch's offset is 16
   bits; one that would not fit is the opposite branch over a `jmp`, whose
   offset is 32 bits.
@@ -1265,7 +1268,7 @@ it):
 Not in the corpora, and refused as well: code compiled for a debugger
 (`WithDebugger`; done, item 10), a finally clause nested more than four
 copies deep (done, item 11), and the caps -- more than 65,536 registers, a jump past 16
-bits, a name past 16 bits, more than 255 arguments, properties or
+bits, a name past 16 bits (done, item 14), more than 255 arguments, properties or
 elements in one instruction. A cap goes as a wide form, never a refusal.
 
 The plan to zero, in the order of what each costs real code first -- the
@@ -1644,6 +1647,16 @@ regdiff cases and test262 in register mode on its directories:
    register code (item 12) the count is zero, and the regdiff tests (the
    micro list, the V8 suite and every corpus of theirs) and test262 in
    register mode, every directory, fail on any.
+14. **Names past 16 bits** -- done. A name operand (a global's read or
+   write, a cold operation's name, a private member's in its Aux) whose
+   index in the function's names is 65,535 or more is `RNameFar`, and
+   `RegCode.FarNames`, by the instruction's pc, has the index
+   (`regNameIdx`, `regName`): the hot cases never read a name, so none
+   tests for it. A global's cache site is keyed by the full index, and an
+   object literal made at once keeps its keys as 32-bit indexes
+   (`ObjKeys`). The verifier checks either form (`nameOK`).
+   `TestRegDiffFarNames` starts each function, and scripts, with 65,600
+   other names.
 
 ### Stage 3: the JIT and the tree tier
 

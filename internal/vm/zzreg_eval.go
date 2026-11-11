@@ -147,16 +147,16 @@ func (r *Runtime) regColdWith(f *frame, c *regCode, pc int, w bytecode.RInstr, r
 		f.withScopes = f.withScopes[:len(f.withScopes)-1]
 		return nil
 	case bytecode.RColdWithRead:
-		v, err := r.withRead(regs[w.B()].Object(), f.cl.names[w.C()], strict)
+		v, err := r.withRead(regs[w.B()].Object(), regName(f.cl, c, pc, w.C()), strict)
 		if err != nil {
 			return err
 		}
 		regs[w.A()] = v
 		return nil
 	case bytecode.RColdWithWrite:
-		return r.withWrite(regs[w.B()].Object(), f.cl.names[w.C()], regs[w.A()], strict)
+		return r.withWrite(regs[w.B()].Object(), regName(f.cl, c, pc, w.C()), regs[w.A()], strict)
 	}
-	name := f.cl.names[w.B()]
+	name := regName(f.cl, c, pc, w.B())
 	o, found, err := r.withFound(f.withScopes, name, int(w.C()))
 	if err != nil {
 		return err

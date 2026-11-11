@@ -181,7 +181,10 @@ type gen struct {
 	siteName []uint32
 	auxes    map[int]uint32
 	literals [][]bytecode.LitElem
-	objKeys  [][]uint16
+	objKeys  [][]uint32
+	// farNames is the index of each name past 16 bits an instruction
+	// names, by its pc (RNameFar).
+	farNames map[int]uint32
 	calls    int
 	// arrays is how many empty array literals the code has, each a site
 	// that learns its arrays' room.
@@ -609,12 +612,27 @@ func (g *gen) nameIdx(name string) uint32 {
 	return i
 }
 
+// name16 is name's operand: its index in the function's names, or
+// RNameFar past 16 bits, where the instruction that has it is given the
+// index by far.
 func (g *gen) name16(name string) uint16 {
 	i := g.nameIdx(name)
-	if i >= limit16 {
-		g.fail("a name past 16 bits")
+	if i >= bytecode.RNameFar {
+		return bytecode.RNameFar
 	}
 	return uint16(i)
+}
+
+// far gives the instruction at pc the index of name, its operand
+// name16's, where that is past 16 bits (RegCode.FarNames). It returns pc.
+func (g *gen) far(pc int, name string) int {
+	if i := g.nameIdx(name); i >= bytecode.RNameFar {
+		if g.farNames == nil {
+			g.farNames = map[int]uint32{}
+		}
+		g.farNames[pc] = i
+	}
+	return pc
 }
 
 func (g *gen) constIdx(c bytecode.Constant) uint32 {
@@ -1915,8 +1933,7 @@ func (g *gen) ident(n *ast.Ident, dst int) int {
 	case ResGlobal:
 		d := g.dest(dst)
 		g.at(int(n.Start))
-		name := g.name16(n.Name)
-		g.emit(bytecode.MakeR(bytecode.RGetGlobal, 0, r16(d), name, g.globalSite("RGetGlobal", name)))
+		g.far(g.emit(bytecode.MakeR(bytecode.RGetGlobal, 0, r16(d), g.name16(n.Name), g.globalSite("RGetGlobal", n.Name))), n.Name)
 		return d
 	case ResCallee:
 		return g.place(regCallee, dst)
@@ -1951,14 +1968,14 @@ func (g *gen) typeofOperand(e ast.Expr) int {
 	}
 	d := g.alloc()
 	g.at(int(id.Start))
-	g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdGetGlobalOpt), r16(d), g.name16(id.Name), 0))
+	g.far(g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdGetGlobalOpt), r16(d), g.name16(id.Name), 0)), id.Name)
 	return d
 }
 
 // globalSite is a cache site of a global's read or write, which keeps no
 // name of the site table's.
-func (g *gen) globalSite(kind string, name uint16) uint16 {
-	return g.site16(siteKey{kind: kind, name: uint32(name)})
+func (g *gen) globalSite(kind string, name string) uint16 {
+	return g.site16(siteKey{kind: kind, name: g.nameIdx(name)})
 }
 
 var binOps = map[string]bytecode.Op{
@@ -2230,7 +2247,7 @@ func (g *gen) deleteName(n *ast.Unary, id *ast.Ident, dst int) int {
 		g.emit(bytecode.MakeR(bytecode.RLoadFalse, 0, r16(d), 0, 0))
 	case ResGlobal:
 		g.at(n.Start)
-		g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdDeleteVar), r16(d), g.name16(id.Name), 0))
+		g.far(g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdDeleteVar), r16(d), g.name16(id.Name), 0)), id.Name)
 	default:
 		panic("regcomp: delete of a name resolved as " + fmt.Sprint(res.Kind))
 	}
@@ -2458,25 +2475,25 @@ func (g *gen) storeIdent(id *ast.Ident, value ast.Expr, init bool) int {
 				ok := g.alloc()
 				g.at(int(id.Start))
 				name := g.name16(id.Name)
-				g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdCheckGlobalRef), r16(ok), name, g.globalSite("check_global_ref", name)))
+				g.far(g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdCheckGlobalRef), r16(ok), name, g.globalSite("check_global_ref", id.Name))), id.Name)
 				v := g.expr(value, -1)
 				g.at(int(id.Start))
-				g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdAssertResolved), r16(ok), name, 0))
-				g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), name, g.globalSite("RSetGlobal", name)))
+				g.far(g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdAssertResolved), r16(ok), name, 0)), id.Name)
+				g.far(g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), name, g.globalSite("RSetGlobal", id.Name))), id.Name)
 				return v
 			}
 			strict = 1
 		}
 		v := g.expr(value, -1)
 		g.at(int(id.Start))
-		g.emit(bytecode.MakeR(bytecode.RSetGlobal, strict, r16(v), g.name16(id.Name), g.globalSite("RSetGlobal", g.name16(id.Name))))
+		g.far(g.emit(bytecode.MakeR(bytecode.RSetGlobal, strict, r16(v), g.name16(id.Name), g.globalSite("RSetGlobal", id.Name))), id.Name)
 		return v
 	case ResGlobalVar:
 		// A var's store: the var exists, and the store is set_global's
 		// whatever the code's strictness, as the stack form's.
 		v := g.expr(value, -1)
 		g.at(int(id.Start))
-		g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite("RSetGlobal", g.name16(id.Name))))
+		g.far(g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite("RSetGlobal", id.Name))), id.Name)
 		return v
 	case ResGlobalLexInit, ResModuleLexInit:
 		v := g.expr(value, -1)
@@ -2641,7 +2658,7 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 func (g *gen) callTarget(call *ast.Call, pos int) int {
 	r := g.expr(call, -1)
 	g.at(pos)
-	g.cold(bytecode.RColdThrowRef, 0, int(g.name16("invalid assignment target")), 0)
+	g.far(g.cold(bytecode.RColdThrowRef, 0, int(g.name16("invalid assignment target")), 0), "invalid assignment target")
 	return r
 }
 
@@ -2779,7 +2796,7 @@ func (g *gen) readForWrite(id *ast.Ident, dst int) int {
 		g.emit(bytecode.MakeRBC(bytecode.RCold, uint8(bytecode.RColdGetUpvalCheck), r16(d), res.Index))
 	case ResGlobal:
 		g.at(int(id.Start))
-		g.emit(bytecode.MakeR(bytecode.RGetGlobal, 0, r16(d), g.name16(id.Name), g.globalSite("RGetGlobal", g.name16(id.Name))))
+		g.far(g.emit(bytecode.MakeR(bytecode.RGetGlobal, 0, r16(d), g.name16(id.Name), g.globalSite("RGetGlobal", id.Name))), id.Name)
 	default:
 		g.fail("a compound assignment's read")
 	}
@@ -2801,7 +2818,7 @@ func (g *gen) storeValue(id *ast.Ident, v int) {
 		if !g.fn.Locals[res.Index].Mutable {
 			// A constant past its dead zone, as set_local_check finds it:
 			// a switch case's, which the dead zone marks.
-			g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdAssignConst), 0, g.name16(id.Name), 0))
+			g.far(g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdAssignConst), 0, g.name16(id.Name), 0)), id.Name)
 			return
 		}
 		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(r), r16(v), 0))
@@ -2813,7 +2830,7 @@ func (g *gen) storeValue(id *ast.Ident, v int) {
 	case ResGlobalVar:
 		// A var's store: set_global whatever the code's strictness.
 		g.at(int(id.Start))
-		g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite("RSetGlobal", g.name16(id.Name))))
+		g.far(g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite("RSetGlobal", id.Name))), id.Name)
 	case ResGlobalLexInit, ResModuleLexInit:
 		g.lexInit(res.Kind, id.Name, v, int(id.Start))
 	case ResGlobal:
@@ -2825,7 +2842,7 @@ func (g *gen) storeValue(id *ast.Ident, v int) {
 			strict = 1
 		}
 		g.at(int(id.Start))
-		g.emit(bytecode.MakeR(bytecode.RSetGlobal, strict, r16(v), g.name16(id.Name), g.globalSite("RSetGlobal", g.name16(id.Name))))
+		g.far(g.emit(bytecode.MakeR(bytecode.RSetGlobal, strict, r16(v), g.name16(id.Name), g.globalSite("RSetGlobal", id.Name))), id.Name)
 	case ResConstAssign:
 		g.assignConst(id)
 	case ResIgnore:
@@ -2837,7 +2854,7 @@ func (g *gen) storeValue(id *ast.Ident, v int) {
 // assignConst throws as an assignment to the constant id does.
 func (g *gen) assignConst(id *ast.Ident) {
 	g.at(int(id.Start))
-	g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdAssignConst), 0, g.name16(id.Name), 0))
+	g.far(g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdAssignConst), 0, g.name16(id.Name), 0)), id.Name)
 }
 
 func (g *gen) update(n *ast.Update, keep bool, dst int) int {
@@ -3686,7 +3703,7 @@ func (g *gen) objectAtOnce(n *ast.ObjectLit, dst int) int {
 	if len(n.Props) == 0 || len(n.Props) > 255 {
 		return -1
 	}
-	keys := make([]uint16, 0, len(n.Props))
+	keys := make([]uint32, 0, len(n.Props))
 	seen := map[string]bool{}
 	for _, p := range n.Props {
 		if p.Kind != ast.PropInit || p.Computed || p.Method {
@@ -3715,7 +3732,7 @@ func (g *gen) objectAtOnce(n *ast.ObjectLit, dst int) int {
 		case *ast.StringLit:
 			key = k.Value
 		}
-		keys = append(keys, g.name16(key))
+		keys = append(keys, g.nameIdx(key))
 		g.into(p.Value, base+i)
 	}
 	g.objKeys = append(g.objKeys, keys)
@@ -3900,6 +3917,13 @@ func (g *gen) finish() *bytecode.RegCode {
 			marks[pc] = m
 		}
 	}
+	var farNames []uint32
+	if len(g.farNames) > 0 {
+		farNames = make([]uint32, len(g.code))
+		for pc, v := range g.farNames {
+			farNames[pc] = v
+		}
+	}
 	var aux []uint32
 	if len(g.auxes) > 0 {
 		aux = make([]uint32, len(g.code))
@@ -3908,7 +3932,7 @@ func (g *gen) finish() *bytecode.RegCode {
 		}
 	}
 	rc := &bytecode.RegCode{
-		Aux: aux, Marks: marks, Switches: switches, Literals: g.literals, ObjKeys: g.objKeys, UsesArguments: (g.fn.UsesArguments || g.fn.MakesArguments) && !g.fn.ForwardsArguments,
+		Aux: aux, FarNames: farNames, Marks: marks, Switches: switches, Literals: g.literals, ObjKeys: g.objKeys, UsesArguments: (g.fn.UsesArguments || g.fn.MakesArguments) && !g.fn.ForwardsArguments,
 		ForwardsArguments: g.fn.ForwardsArguments,
 		Code:              g.code, NumRegs: g.max + 1, SrcPC: src, SiteName: g.siteName, This: -1,
 		LocalReg: g.localReg(),

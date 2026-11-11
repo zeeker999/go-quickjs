@@ -541,6 +541,22 @@ func regAuxAt(c *regCode, pc int) uint32 {
 	return 0
 }
 
+// regNameIdx is the index in the function's names of op, the name
+// operand of the instruction at pc: op itself, or, where it is RNameFar,
+// the index past 16 bits FarNames has for the instruction. Only cold
+// operations and miss paths read a name.
+func regNameIdx(c *regCode, pc int, op uint16) uint32 {
+	if op == bytecode.RNameFar {
+		return c.rc.FarNames[pc]
+	}
+	return uint32(op)
+}
+
+// regName is the name regNameIdx finds, of closure cl's names.
+func regName(cl *closure, c *regCode, pc int, op uint16) Atom {
+	return cl.names[regNameIdx(c, pc, op)]
+}
+
 // regReuseAt is the reuse site of call_method_w pc, or nil.
 func regReuseAt(c *regCode, pc int) *execReuseSite {
 	if s := regAt(c.code, pc).C(); int(s) < len(c.reuse) {
@@ -1651,9 +1667,9 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 	case bytecode.RCold:
 		return Undefined, r.regColdSub(f, c, k, regs)
 	case bytecode.RGetGlobal:
-		v, err = r.regGetGlobal(f, cl, w)
+		v, err = r.regGetGlobal(f, cl, c, pc, w)
 	case bytecode.RSetGlobal:
-		return Undefined, r.regSetGlobal(f, cl, w, regs[w.A()])
+		return Undefined, r.regSetGlobal(f, cl, c, pc, w, regs[w.A()])
 	case bytecode.RGetProp:
 		v, err = r.regGetProp(cl, c, w, regs[w.B()])
 	case bytecode.RGetMethod:
@@ -1696,7 +1712,7 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 	case bytecode.RUnary:
 		v, err = r.regUnary(bytecode.Op(w.X()), regs[w.B()])
 	case bytecode.RDefineField:
-		return Undefined, r.regDefineField(cl, w, regs[w.A()], regs[w.B()])
+		return Undefined, r.regDefineField(cl, regName(cl, c, pc, w.C()), regs[w.A()], regs[w.B()])
 	case bytecode.RNewObject:
 		v = Obj(r.regNewObject(cl, w))
 	case bytecode.RAddIndex:
@@ -2114,18 +2130,18 @@ func (r *Runtime) regThrowDeadZone(f *frame, c *regCode, next int) error {
 // regGetGlobal is get_global's slow path: what the stack interpreter does,
 // then the layout of the global object the site found the slot in noted,
 // for the loop's check.
-func (r *Runtime) regGetGlobal(f *frame, cl *closure, w bytecode.RInstr) (Value, error) {
-	in := bytecode.Instr{Op: bytecode.OpGetGlobal, A: uint32(w.B()), B: uint32(w.C())}
+func (r *Runtime) regGetGlobal(f *frame, cl *closure, c *regCode, pc int, w bytecode.RInstr) (Value, error) {
+	in := bytecode.Instr{Op: bytecode.OpGetGlobal, A: regNameIdx(c, pc, w.B()), B: uint32(w.C())}
 	v, err := r.getGlobalAt(regTctx(r, f, cl), in, int(f.pc-1))
 	if err == nil {
-		r.regNoteGlobal(cl, w.C(), cl.names[w.B()], false)
+		r.regNoteGlobal(cl, w.C(), cl.names[in.A], false)
 	}
 	return v, err
 }
 
 // regSetGlobal is set_global's, or set_global_strict's, slow path.
-func (r *Runtime) regSetGlobal(f *frame, cl *closure, w bytecode.RInstr, v Value) error {
-	in := bytecode.Instr{Op: bytecode.OpSetGlobal, A: uint32(w.B()), B: uint32(w.C())}
+func (r *Runtime) regSetGlobal(f *frame, cl *closure, c *regCode, pc int, w bytecode.RInstr, v Value) error {
+	in := bytecode.Instr{Op: bytecode.OpSetGlobal, A: regNameIdx(c, pc, w.B()), B: uint32(w.C())}
 	var err error
 	if w.X() != 0 {
 		in.Op = bytecode.OpSetGlobalStrict
@@ -2134,7 +2150,7 @@ func (r *Runtime) regSetGlobal(f *frame, cl *closure, w bytecode.RInstr, v Value
 		err = r.setGlobalIn(f, cl, in, v)
 	}
 	if err == nil {
-		r.regNoteGlobal(cl, w.C(), cl.names[w.B()], true)
+		r.regNoteGlobal(cl, w.C(), cl.names[in.A], true)
 	}
 	return err
 }
@@ -2236,11 +2252,10 @@ func (r *Runtime) regSetProp(cl *closure, c *regCode, w bytecode.RInstr, obj, v 
 }
 
 // regDefineField is define_field.
-func (r *Runtime) regDefineField(cl *closure, w bytecode.RInstr, obj, v Value) error {
+func (r *Runtime) regDefineField(cl *closure, name Atom, obj, v Value) error {
 	if !obj.IsObject() {
 		return nil
 	}
-	name := cl.names[w.C()]
 	if o := obj.Object(); o.class == ClassObject && o.flags&objExtensible != 0 {
 		if next := o.transition(name, propDefault); next != nil {
 			o.appendTransition(v, next)

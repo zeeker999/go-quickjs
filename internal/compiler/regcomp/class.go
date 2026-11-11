@@ -80,7 +80,7 @@ type sref struct {
 	m        *ast.Member
 	super    bool
 	obj, key int
-	name     uint16
+	name     string
 	// pos is where a read throws: the member's, or a called private
 	// method's name.
 	pos int
@@ -105,7 +105,7 @@ func (g *gen) specialRef(m *ast.Member, convert bool) sref {
 			return s
 		}
 		name := memberName(m)
-		s.name = g.name16(name)
+		s.name = name
 		return s
 	}
 	pn := m.Property.(*ast.PrivateName)
@@ -148,10 +148,10 @@ func (g *gen) specialGet(s sref, dst int) int {
 		g.cold(bytecode.RColdSuperGetIndex, d, s.obj, s.key)
 	case s.super:
 		g.at(int(m.Start))
-		g.cold(bytecode.RColdSuperGet, d, int(s.name), 0)
+		g.far(g.cold(bytecode.RColdSuperGet, d, int(g.name16(s.name)), 0), s.name)
 	default:
 		g.at(s.pos)
-		g.aux(g.cold(bytecode.RColdGetPrivate, d, s.obj, s.key), g.privateAux(s))
+		g.privateAux(g.cold(bytecode.RColdGetPrivate, d, s.obj, s.key), s)
 	}
 	return d
 }
@@ -164,18 +164,19 @@ func (g *gen) specialSet(s sref, v, pos int) {
 	case s.super && m.Computed:
 		g.cold(bytecode.RColdSuperSetIndex, s.obj, s.key, v)
 	case s.super:
-		g.cold(bytecode.RColdSuperSet, v, int(s.name), 0)
+		g.far(g.cold(bytecode.RColdSuperSet, v, int(g.name16(s.name)), 0), s.name)
 	default:
-		g.aux(g.cold(bytecode.RColdSetPrivate, s.obj, v, s.key), g.privateAux(s))
+		g.privateAux(g.cold(bytecode.RColdSetPrivate, s.obj, v, s.key), s)
 	}
 }
 
 // privateAux is a private member's read's or write's Aux: a cache site of
 // its own in the high 16 bits, the name, with its #, for the errors in
 // the low.
-func (g *gen) privateAux(s sref) uint32 {
-	name := g.name16("#" + s.m.Property.(*ast.PrivateName).Name)
-	return uint32(g.site16(siteKey{kind: "private", name: uint32(name)}))<<16 | uint32(name)
+func (g *gen) privateAux(pc int, s sref) {
+	name := "#" + s.m.Property.(*ast.PrivateName).Name
+	g.aux(pc, uint32(g.site16(siteKey{kind: "private", name: g.nameIdx(name)}))<<16|uint32(g.name16(name)))
+	g.far(pc, name)
 }
 
 // specialMember reads super.x, super[k] or o.#x into dst.
@@ -300,7 +301,7 @@ func (g *gen) class(cls *ast.ClassLit, dst int) int {
 		r := g.classSlot(int32(p.Slot))
 		scope = append(scope, r)
 		g.at(cls.Start)
-		g.cold(bytecode.RColdPrivateName, r, int(g.name16(p.Name)), 0)
+		g.far(g.cold(bytecode.RColdPrivateName, r, int(g.name16(p.Name)), 0), p.Name)
 	}
 	install := -1
 	if cr.Install >= 0 {
@@ -460,7 +461,7 @@ func (g *gen) classMember(m ast.Property, k, ctor, install int, prototype func()
 	case ast.PropSet:
 		sub = bytecode.RColdClassSetter
 	}
-	g.cold(sub, target, fn, int(g.name16(key)))
+	g.far(g.cold(sub, target, fn, int(g.name16(key))), key)
 }
 
 // keyName is the name a key that is not computed gives a class's member,

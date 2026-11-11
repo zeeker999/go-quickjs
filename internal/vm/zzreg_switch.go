@@ -245,7 +245,7 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 	case bytecode.RColdCheckGlobalLex, bytecode.RColdCheckGlobalVar, bytecode.RColdDefineGlobalVar,
 		bytecode.RColdDeclareGlobalLex, bytecode.RColdDefineGlobalFunc, bytecode.RColdInitGlobalLex,
 		bytecode.RColdDeclareModuleLex, bytecode.RColdInitModuleLex:
-		return r.regColdTop(f, w, regs)
+		return r.regColdTop(f, c, pc, w, regs)
 	case bytecode.RColdIterStep, bytecode.RColdIterRest, bytecode.RColdCheckCoercible, bytecode.RColdToPropertyKey,
 		bytecode.RColdObjectRest, bytecode.RColdRestParam, bytecode.RColdToString, bytecode.RColdTemplateObject:
 		return r.regColdPattern(f, c, pc, w, regs)
@@ -253,12 +253,12 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		bytecode.RColdDefineGetterIndex, bytecode.RColdDefineSetterIndex, bytecode.RColdDefineIndex,
 		bytecode.RColdSetFuncName, bytecode.RColdSetHomeObject, bytecode.RColdSetProtoOf,
 		bytecode.RColdArrayPush, bytecode.RColdArraySpread, bytecode.RColdCallSpread:
-		return r.regColdObject(f, w, regs)
+		return r.regColdObject(f, c, pc, w, regs)
 	case bytecode.RColdAssignConst:
 		// An assignment to a constant is a runtime error, not an early one.
-		return r.throwTypeError("assignment to constant variable %q", r.atoms.name(f.cl.names[w.B()]))
+		return r.throwTypeError("assignment to constant variable %q", r.atoms.name(regName(f.cl, c, pc, w.B())))
 	case bytecode.RColdThrowRef:
-		return r.throwError(errReference, "%s", r.atoms.name(f.cl.names[w.B()]))
+		return r.throwError(errReference, "%s", r.atoms.name(regName(f.cl, c, pc, w.B())))
 	case bytecode.RColdDebug:
 		return r.regDebug(f, c, pc, w, regs)
 	case bytecode.RColdNewClass, bytecode.RColdSetFieldInit, bytecode.RColdDefineMethod,
@@ -274,20 +274,20 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		bytecode.RColdCloseRegs:
 		return r.regColdClass(f, c, pc, w, regs)
 	case bytecode.RColdCheckGlobalRef:
-		found, err := r.regCheckGlobalRef(f, f.cl.names[w.B()], int(w.C()))
+		found, err := r.regCheckGlobalRef(f, regName(f.cl, c, pc, w.B()), int(w.C()))
 		regs[w.A()] = Bool(found)
 		return err
 	case bytecode.RColdAssertResolved:
 		if !regs[w.A()].Truthy() {
-			return r.throwReferenceError("%s is not defined", r.atoms.name(f.cl.names[w.B()]))
+			return r.throwReferenceError("%s is not defined", r.atoms.name(regName(f.cl, c, pc, w.B())))
 		}
 		return nil
 	case bytecode.RColdGetGlobalOpt:
-		v, err := r.regGlobalOpt(f, f.cl.names[w.B()])
+		v, err := r.regGlobalOpt(f, regName(f.cl, c, pc, w.B()))
 		regs[w.A()] = v
 		return err
 	case bytecode.RColdDeleteVar:
-		v, err := deleteVar(r, f, f.cl, f.cl.names[w.B()])
+		v, err := deleteVar(r, f, f.cl, regName(f.cl, c, pc, w.B()))
 		regs[w.A()] = v
 		return err
 	case bytecode.RColdImport:
