@@ -95,8 +95,8 @@ func (g *gen) prepareLeaf(el ast.Expr, declaring bool) leaf {
 	if m.Computed {
 		l.key = g.alloc()
 		g.into(m.Property, l.key)
-	} else if _, ok := propName(m); !ok {
-		g.fail("a property name the backend does not compile")
+	} else {
+		memberName(m)
 	}
 	return l
 }
@@ -116,7 +116,7 @@ func (g *gen) storeRef(l leaf, v int, declaring bool) {
 			g.emit(bytecode.MakeR(bytecode.RSetIndex, 0, r16(l.obj), r16(l.key), r16(v)))
 			return
 		}
-		name, _ := propName(m)
+		name := memberName(m)
 		g.emit(bytecode.MakeR(bytecode.RSetProp, 0, r16(l.obj), r16(v), g.propSite(bytecode.OpSetProp, g.nameIdx(name))))
 		return
 	}

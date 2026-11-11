@@ -103,11 +103,7 @@ func (g *gen) taggedTemplate(n *ast.TaggedTemplate, dst int) int {
 			g.at(m.Property.Pos())
 			g.emit(bytecode.MakeR(bytecode.RGetIndex, 0, r16(w), r16(w+1), r16(k)))
 		} else {
-			name, ok := propName(m)
-			if !ok {
-				g.fail("a method name the backend does not compile")
-				return w
-			}
+			name := memberName(m)
 			g.at(m.Property.Pos())
 			g.emit(bytecode.MakeR(bytecode.RGetMethod, 0, r16(w), r16(w+1), g.propSite(bytecode.OpGetPropThis, g.nameIdx(name))))
 		}
@@ -321,11 +317,7 @@ func (g *gen) spreadCall(n *ast.Call, dst int) int {
 			g.at(m.Property.Pos())
 			g.emit(bytecode.MakeR(bytecode.RGetIndex, 0, r16(w), r16(w+1), r16(k)))
 		} else {
-			name, ok := propName(m)
-			if !ok {
-				g.fail("a method name the backend does not compile")
-				return w
-			}
+			name := memberName(m)
 			// At the stack form's position: its get_prop has none of its own.
 			g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(w), r16(w+1), g.propSite(bytecode.OpGetProp, g.nameIdx(name))))
 		}
@@ -481,11 +473,7 @@ func (g *gen) chainCall(n *ast.Call, dst int) int {
 			g.at(m.Property.Pos())
 			g.emit(bytecode.MakeR(bytecode.RGetIndex, 0, r16(w), r16(w+1), r16(k)))
 		} else {
-			name, ok := propName(m)
-			if !ok {
-				g.fail("a method name the backend does not compile")
-				return w
-			}
+			name := memberName(m)
 			g.at(m.Property.Pos())
 			g.emit(bytecode.MakeR(bytecode.RGetMethod, 0, r16(w), r16(w+1), g.propSite(bytecode.OpGetPropThis, g.nameIdx(name))))
 		}
@@ -576,11 +564,7 @@ func (g *gen) logicalAssign(n *ast.Assign, dst int) int {
 			g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(d), r16(v), 0))
 			break
 		}
-		name, ok := propName(t)
-		if !ok {
-			g.fail("a property name the backend does not compile")
-			return d
-		}
+		name := memberName(t)
 		g.at(t.Property.Pos())
 		g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(d), r16(o), g.propSite(bytecode.OpGetProp, g.nameIdx(name))))
 		short()

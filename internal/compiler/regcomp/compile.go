@@ -1786,11 +1786,7 @@ func (g *gen) unary(n *ast.Unary, dst int) int {
 			o = g.guard(o, m.Property)
 			k = g.expr(m.Property, -1)
 		} else {
-			name, ok := propName(m)
-			if !ok {
-				g.fail("a property name the backend does not compile")
-				return g.dest(dst)
-			}
+			name := memberName(m)
 			k = g.alloc()
 			g.emit(bytecode.MakeRBC(bytecode.RLoadConst, 0, r16(k), g.constIdx(bytecode.Constant{Kind: bytecode.ConstString, Str: name})))
 		}
@@ -2121,11 +2117,7 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 				g.emit(bytecode.MakeR(bytecode.RSetIndex, 0, r16(o), r16(k), r16(v)))
 				return g.place(v, dst)
 			}
-			name, ok := propName(t)
-			if !ok {
-				g.fail("a property name the backend does not compile")
-				return 0
-			}
+			name := memberName(t)
 			v := g.expr(n.Value, -1)
 			g.at(int(n.Start))
 			g.emit(bytecode.MakeR(bytecode.RSetProp, 0, r16(o), r16(v), g.propSite(bytecode.OpSetProp, g.nameIdx(name))))
@@ -2170,11 +2162,7 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 		if t.Computed {
 			k = g.key(t, g.guard(g.expr(t.Property, -1), n.Value), o)
 		} else {
-			s, ok := propName(t)
-			if !ok {
-				g.fail("a property name the backend does not compile")
-				return 0
-			}
+			s := memberName(t)
 			name = g.nameIdx(s)
 		}
 		cur := g.alloc()
@@ -2406,11 +2394,7 @@ func (g *gen) update(n *ast.Update, keep bool, dst int) int {
 				g.emit(bytecode.MakeR(bytecode.RSetIndex, 0, r16(o), r16(k), r16(v)))
 			})
 		}
-		s, ok := propName(t)
-		if !ok {
-			g.fail("a property name the backend does not compile")
-			return 0
-		}
+		s := memberName(t)
 		name := g.nameIdx(s)
 		g.at(int(t.Start))
 		g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(cur), r16(o), g.propSite(bytecode.OpGetProp, name)))
@@ -2439,6 +2423,17 @@ func (g *gen) stepped(n *ast.Update, cur int, step bytecode.ROp, keep bool, dst 
 }
 
 // --- properties, calls, literals ------------------------------------------
+
+// memberName is the name of m, a member that is neither computed nor
+// private: the parser gives such a member an identifier as its property,
+// so anything else is the parser's bug.
+func memberName(m *ast.Member) string {
+	name, ok := propName(m)
+	if !ok {
+		panic("regcomp: a member's property that is not a name")
+	}
+	return name
+}
 
 func propName(m *ast.Member) (string, bool) {
 	if m.Computed {
@@ -2535,11 +2530,7 @@ func (g *gen) member(n *ast.Member, dst int) int {
 		g.emit(bytecode.MakeR(bytecode.RGetIndex, 0, r16(d), r16(o), r16(k)))
 		return d
 	}
-	name, ok := propName(n)
-	if !ok {
-		g.fail("a property the backend does not compile")
-		return g.dest(dst)
-	}
+	name := memberName(n)
 	d := g.dest(dst)
 	g.at(n.Property.Pos())
 	if name == "length" {
@@ -2601,11 +2592,7 @@ func (g *gen) call(n *ast.Call, dst int) int {
 			g.specialCallee(c, w)
 		} else if !c.Computed && g.inPlace(c.Object) {
 			// A receiver in a binding: get_method_w puts it in the window.
-			name, ok := propName(c)
-			if !ok {
-				g.fail("a method name the backend does not compile")
-				return w
-			}
+			name := memberName(c)
 			o := g.expr(c.Object, -1)
 			g.at(c.Property.Pos())
 			g.emit(bytecode.MakeR(bytecode.RGetMethodW, 0, r16(w), r16(o), g.propSite(bytecode.OpGetPropThis, g.nameIdx(name))))
@@ -2614,11 +2601,7 @@ func (g *gen) call(n *ast.Call, dst int) int {
 			g.at(c.Property.Pos())
 			g.emit(bytecode.MakeR(bytecode.RGetIndex, 0, r16(w), r16(w+1), r16(k)))
 		} else {
-			name, ok := propName(c)
-			if !ok {
-				g.fail("a method name the backend does not compile")
-				return w
-			}
+			name := memberName(c)
 			g.at(c.Property.Pos())
 			g.emit(bytecode.MakeR(bytecode.RGetMethod, 0, r16(w), r16(w+1), g.propSite(bytecode.OpGetPropThis, g.nameIdx(name))))
 		}

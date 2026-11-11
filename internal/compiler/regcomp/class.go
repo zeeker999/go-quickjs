@@ -104,10 +104,7 @@ func (g *gen) specialRef(m *ast.Member, convert bool) sref {
 			}
 			return s
 		}
-		name, ok := propName(m)
-		if !ok {
-			g.fail("a property name the backend does not compile")
-		}
+		name := memberName(m)
 		s.name = g.name16(name)
 		return s
 	}
@@ -123,15 +120,16 @@ func (g *gen) specialRef(m *ast.Member, convert bool) sref {
 
 // privateKey is the register holding private name pn's key.
 func (g *gen) privateKey(pn *ast.PrivateName) int {
+	// The stack compiler resolves every private name it compiles, as a
+	// binding of the function's, which layout gives a register, or an
+	// upvalue; anything else is its bug.
 	res, ok := g.rec.Privates[pn]
 	switch {
 	case !ok:
-		g.fail("a private name the record does not resolve")
-		return 0
+		panic("regcomp: a private name the record does not resolve: #" + pn.Name)
 	case res.Kind == ResLocal:
 		if int(res.Index) >= len(g.slotReg) || g.slotReg[res.Index] < 0 {
-			g.fail("a private name the record does not resolve")
-			return 0
+			panic("regcomp: a private name's key without a register: #" + pn.Name)
 		}
 		return int(g.slotReg[res.Index])
 	}
@@ -274,8 +272,8 @@ func (g *gen) privateIn(pn *ast.PrivateName, obj ast.Expr, pos, dst int) int {
 // classSlot is the register of a class scope's binding in slot.
 func (g *gen) classSlot(slot int32) int {
 	if slot < 0 || int(slot) >= len(g.slotReg) || g.slotReg[slot] < 0 {
-		g.fail("a class binding without a register")
-		return 0
+		// layout gives each of a class's bindings a register.
+		panic("regcomp: a class binding without a register")
 	}
 	return int(g.slotReg[slot])
 }
@@ -284,8 +282,8 @@ func (g *gen) classSlot(slot int32) int {
 func (g *gen) class(cls *ast.ClassLit, dst int) int {
 	cr := g.rec.Classes[cls]
 	if cr == nil {
-		g.fail("a class the record does not name")
-		return g.dest(dst)
+		// The stack compiler records every class it compiles.
+		panic("regcomp: a class the record does not name")
 	}
 	var scope []int
 	if cr.Self >= 0 {
