@@ -160,7 +160,7 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 		case bytecode.RAddPropI:
 			ok = reg(a) && site(c)
 		case bytecode.RNewArrayK:
-			ok = reg(a) && site(c) && pc < len(rc.Aux) && int(rc.Aux[pc]) < len(rc.Literals) && len(rc.Literals[rc.Aux[pc]]) == int(b) && b > 0
+			ok = reg(a) && site(c) && pc < len(rc.Aux) && int(rc.Aux[pc]) < len(rc.Literals) && (len(rc.Literals[rc.Aux[pc]]) == int(b) && b > 0 || b == 0 && len(rc.Literals[rc.Aux[pc]]) >= limit16)
 			if ok {
 				for _, e := range rc.Literals[rc.Aux[pc]] {
 					if e.Kind > bytecode.LitUndefined || e.Kind == bytecode.LitConst && int(e.K) >= len(fn.Constants) {
@@ -287,7 +287,7 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 		return reg(a) && reg(b) && int(w.C()) < len(fn.Names)
 	case bytecode.RColdDefineGetterIndex, bytecode.RColdDefineSetterIndex, bytecode.RColdDefineIndex:
 		return reg(a) && reg(b) && reg(w.C())
-	case bytecode.RColdAssignConst:
+	case bytecode.RColdAssignConst, bytecode.RColdThrowRef:
 		return int(b) < len(fn.Names)
 	case bytecode.RColdCheckGlobalRef:
 		return reg(a) && int(b) < len(fn.Names) && site(w.C())

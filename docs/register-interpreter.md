@@ -1519,6 +1519,40 @@ regdiff cases and test262 in register mode on its directories:
    (B.3.3.1), a store the stack compiler records as the declaration's
    name's write -- it assigned it as the block was entered, which Node
    does not (fixed with it).
+9d. **The last refusals of the corpora** (40) -- done.
+   - *A finally clause's bindings* (9, "a name the record resolves two
+     ways"): the stack form compiles a clause once for each way out, each
+     copy's bindings in slots of their own (slots are never reused), so
+     a name in it resolved to one slot in one copy and another in the
+     next. The record keeps the first copy's notes and drops the later
+     ones' (`Record.BeginFinally`); regcomp compiles all its copies from
+     the first's slots, which no other binding has, and finds the first
+     copy's function constants (`closure` by start).
+   - *Sloppy code's assignment to a call* (12: `f() = v`, `f() += v`,
+     `f()++`, `for (f() in o)`): the call made, then
+     `throw_reference_error` (cold) at the target, the value never made,
+     as the stack form's compileCallTarget. A logical assignment to a call
+     is a syntax error, and the other targets are panics, not refusals.
+   - *Annex B's `for (var a = init in o)`* (4): the initializer assigned
+     once, before the object is made. *A let's own initializer storing
+     it in its dead zone* (`let y = [y] = []`, 2): the pattern's store
+     checks the dead zone as an assignment's does.
+   - *The caps as wide forms.* A call of more than 255 arguments -- plain,
+     a method's, an optional chain's, new, super(), a tagged template's,
+     a direct eval's -- passes an array of them as a spread call does
+     (`wideArgs`, `call_spread`); a spread call through an optional chain
+     is chainCall's. An array literal of more than `arrayChunk` (1,024)
+     elements makes that many at once and pushes the rest; a literal of
+     constants past 16 bits names its count by its table's (new_array_k's
+     B 0); an object literal's room is a hint, at most 65,535. A function
+     with more cache sites, or call sites, than 16 bits number is compiled
+     again with its sites shared by key (`site16`, `siteKey`): the kind of
+     cache and the name, a literal's keys or constants, a call's
+     operation -- entries that answer alike for every instruction of the
+     key, a call's checked against its callee. Mandreel's global_init,
+     70,000 calls of a few functions, shares a site for each.
+   - `with (o) f(...a)` passed no receiver in the stack form (fixed with
+     it): a spread call probes with `with_get_this` as any call does.
 
 ### Stage 3: the JIT and the tree tier
 

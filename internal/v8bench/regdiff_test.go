@@ -72,6 +72,10 @@ func regDiff(t *testing.T, src string, calls []string) int64 {
 			len(calls)-skipped, skipped, built)
 	}()
 	for i := range calls {
+		if os.Getenv("QJS_REGDIFF_SHOW") != "" {
+			// Each answer, to see that a case tests what it says.
+			t.Logf("%.100s => %.300s", calls[i], on[i])
+		}
 		if off[i] != again[i] {
 			skipped++
 			continue

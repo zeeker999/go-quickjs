@@ -1,6 +1,8 @@
 package regcomp
 
 import (
+	"fmt"
+
 	"github.com/go-quickjs/go-quickjs/internal/ast"
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
@@ -49,10 +51,12 @@ func (g *gen) pattern(target ast.Expr, v int, declaring bool) {
 		}
 		l := g.prepareLeaf(t, false)
 		g.storeRef(l, v, false)
-	default:
+	case *ast.Call:
 		// A call, which sloppy code may name as a for-in or for-of
 		// head's target: the call is made, and then a ReferenceError.
-		g.fail("an assignment target the backend does not compile")
+		g.callTarget(t, int(t.Start))
+	default:
+		panic(fmt.Sprintf("regcomp: a pattern's target %T", target))
 	}
 }
 
@@ -144,11 +148,13 @@ func (g *gen) storeLeaf(id *ast.Ident, v int, declaring bool) {
 		}
 	case ResGlobalVar:
 		g.at(int(id.Start))
-		g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite()))
+		g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite("RSetGlobal", g.name16(id.Name))))
 	case ResGlobalLexInit, ResModuleLexInit:
 		g.lexInit(res.Kind, id.Name, v, int(id.Start))
 	case ResIgnore:
-	case ResUpval, ResGlobal, ResConstAssign, ResWith:
+	case ResUpval, ResUpvalCheck, ResLocalCheck, ResGlobal, ResConstAssign, ResWith:
+		// ResLocalCheck and ResUpvalCheck: a let's own initializer
+		// assigning it, in its dead zone (let y = [y] = []).
 		g.storeValue(id, v)
 	default:
 		g.fail("a store the backend does not compile")

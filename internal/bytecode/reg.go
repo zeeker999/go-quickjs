@@ -645,6 +645,10 @@ const (
 	RColdWithWrite
 	RColdWithPush
 	RColdWithPop
+	// RColdThrowRef throws a ReferenceError of message Names[B]
+	// (throw_reference_error): sloppy code's assignment to a call, made
+	// once the call has been.
+	RColdThrowRef
 )
 
 // RDirectEvalSpread is the bit of direct_eval's Aux that says its
@@ -732,6 +736,7 @@ var rColdNames = [...]string{
 	RColdWithGet: "with_get", RColdWithGetThis: "with_get_this", RColdWithDelete: "with_delete",
 	RColdWithSet: "with_set", RColdWithResolve: "with_resolve", RColdWithRead: "with_read",
 	RColdWithWrite: "with_write", RColdWithPush: "with_push", RColdWithPop: "with_pop",
+	RColdThrowRef: "throw_reference_error",
 }
 
 func (op RColdOp) String() string {

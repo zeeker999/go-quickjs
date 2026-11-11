@@ -123,6 +123,44 @@ type Record struct {
 	// Bail says the record saw one name resolved, or probed, two ways,
 	// which it cannot express.
 	Bail bool
+
+	// finallies are the finally clauses the stack form has compiled a
+	// copy of, and quiet how many copies other than a clause's first are
+	// being compiled: the notes made there are dropped (BeginFinally).
+	finallies map[ast.Stmt]bool
+	quiet     int
+}
+
+// BeginFinally is called as the stack form compiles a copy of the finally
+// clause of statements list, and the function it returns as the copy
+// ends. The stack form compiles a clause once for each way out of it,
+// each copy's bindings in slots of their own, as slots are never reused;
+// regcomp compiles its copies from one resolution, the first copy's, in
+// which each binding of the clause's is a slot no other binding has --
+// the slot whose function constant regcomp's closure finds first. The
+// notes of every later copy are dropped.
+func (r *Record) BeginFinally(list []ast.Stmt) func() {
+	if r == nil || len(list) == 0 {
+		return func() {}
+	}
+	if !r.finallies[list[0]] {
+		if r.finallies == nil {
+			r.finallies = map[ast.Stmt]bool{}
+		}
+		r.finallies[list[0]] = true
+		return func() {}
+	}
+	r.quiet++
+	return func() { r.quiet-- }
+}
+
+// NoteFunc records that hoisted function declaration fd is stored in
+// slot.
+func (r *Record) NoteFunc(fd *ast.FuncDecl, slot uint32) {
+	if r == nil || r.quiet > 0 {
+		return
+	}
+	r.Funcs[fd] = slot
 }
 
 // NewRecord makes an empty record.
@@ -150,7 +188,7 @@ func (r *Record) NoteTop(op TopOp) {
 
 // NoteAppend records that n is an append to a local.
 func (r *Record) NoteAppend(n *ast.Assign) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if r.Appends == nil {
@@ -161,7 +199,7 @@ func (r *Record) NoteAppend(n *ast.Assign) {
 
 // NoteTail records that the stack form compiled call n as a tail call.
 func (r *Record) NoteTail(n ast.Expr) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if r.Tails == nil {
@@ -173,7 +211,7 @@ func (r *Record) NoteTail(n ast.Expr) {
 // NoteEval records that the stack form compiled call n as a direct eval
 // whose scope is the function's EvalScopes[idx].
 func (r *Record) NoteEval(n *ast.Call, idx uint32) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if r.Evals == nil {
@@ -192,7 +230,7 @@ type WithProbe struct {
 
 // NoteWith records that the stack form compiled name id with probe p.
 func (r *Record) NoteWith(id *ast.Ident, p WithProbe) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if r.Withs == nil {
@@ -208,7 +246,7 @@ func (r *Record) NoteWith(id *ast.Ident, p WithProbe) {
 // NoteHead records slot as a binding of the dead-zone environment a for-of
 // or for-in loop's head d makes for its expression.
 func (r *Record) NoteHead(d *ast.VarDecl, slot uint32) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if r.Heads == nil {
@@ -218,7 +256,7 @@ func (r *Record) NoteHead(d *ast.VarDecl, slot uint32) {
 }
 
 func (r *Record) NoteCatch(c *ast.CatchClause, slot uint32) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if r.Catches == nil {
@@ -229,7 +267,7 @@ func (r *Record) NoteCatch(c *ast.CatchClause, slot uint32) {
 
 // NoteFreeze records that the read id is followed by a str_freeze.
 func (r *Record) NoteFreeze(id *ast.Ident) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if r.Freezes == nil {
@@ -240,7 +278,7 @@ func (r *Record) NoteFreeze(id *ast.Ident) {
 
 // NoteRead records a read of id.
 func (r *Record) NoteRead(id *ast.Ident, res Res) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if old, ok := r.Read[id]; ok && old != res {
@@ -251,7 +289,7 @@ func (r *Record) NoteRead(id *ast.Ident, res Res) {
 
 // NoteWrite records a write of id.
 func (r *Record) NoteWrite(id *ast.Ident, res Res) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if old, ok := r.Write[id]; ok && old != res {
@@ -262,7 +300,7 @@ func (r *Record) NoteWrite(id *ast.Ident, res Res) {
 
 // NoteTemplate records that tagged template q's site is idx.
 func (r *Record) NoteTemplate(q *ast.TemplateLit, idx uint32) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if r.Templates == nil {
@@ -313,7 +351,7 @@ type ClassStatic struct {
 
 // NoteClass records what the stack form made of class cls.
 func (r *Record) NoteClass(cls *ast.ClassLit, cr *ClassRec) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if r.Classes == nil {
@@ -324,7 +362,7 @@ func (r *Record) NoteClass(cls *ast.ClassLit, cr *ClassRec) {
 
 // NotePrivate records where private name pn's key is.
 func (r *Record) NotePrivate(pn *ast.PrivateName, res Res) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if r.Privates == nil {

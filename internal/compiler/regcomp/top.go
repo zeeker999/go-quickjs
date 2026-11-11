@@ -23,12 +23,11 @@ func CompileTop(body []ast.Stmt, fn *bytecode.Function, rec *Record) *bytecode.R
 		Refuse(fn, w)
 		return nil
 	}
-	g := &gen{lit: &ast.FuncLit{Body: body}, fn: fn, rec: rec}
-	if !g.layout() {
+	g, ok := generate(fn, func() *gen { return &gen{lit: &ast.FuncLit{Body: body}, fn: fn, rec: rec} })
+	if !ok {
 		Refuse(fn, "its bindings' layout")
 		return nil
 	}
-	g.body()
 	if g.err != "" {
 		Refuse(fn, g.err)
 		return nil

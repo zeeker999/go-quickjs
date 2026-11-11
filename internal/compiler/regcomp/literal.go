@@ -1,6 +1,8 @@
 package regcomp
 
 import (
+	"fmt"
+
 	"github.com/go-quickjs/go-quickjs/internal/ast"
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
@@ -87,9 +89,11 @@ func (g *gen) taggedTemplate(n *ast.TaggedTemplate, dst int) int {
 		panic("regcomp: a tagged template the record does not name")
 	}
 	argc := 1 + len(n.Quasi.Exprs)
-	if argc > 255 {
-		g.fail("an optional call or too many arguments")
-		return g.dest(dst)
+	wide := argc > 255
+	if wide {
+		// The template object and the substitutions in an array, as a
+		// spread call's.
+		argc = 1
 	}
 	w := g.allocN(2 + argc)
 	op := bytecode.RCallW
@@ -112,13 +116,19 @@ func (g *gen) taggedTemplate(n *ast.TaggedTemplate, dst int) int {
 		g.into(n.Tag, w)
 	}
 	g.emit(bytecode.MakeRBC(bytecode.RCold, uint8(bytecode.RColdTemplateObject), r16(w+2), idx))
-	g.args(n.Quasi.Exprs, w+3)
 	d := dst
 	if d < 0 {
 		d = w
 	}
+	if wide {
+		g.arrayFrom(w+2, n.Quasi.Exprs, w+2)
+		g.at(n.Start)
+		g.cold(bytecode.RColdCallSpread, w, d, 0)
+		return d
+	}
+	g.args(n.Quasi.Exprs, w+3)
 	g.at(n.Start)
-	at := g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), g.callSite()))
+	at := g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), g.callSite(op)))
 	if g.rec.Tails[n] {
 		g.mark(at, bytecode.RMarkTail)
 	}
@@ -243,24 +253,49 @@ func hasSpread(list []ast.Expr) bool {
 	return false
 }
 
-// spreadArray makes into dst an array of els, which has a spread: the
-// elements before the first spread made at once, then each pushed or
-// spread onto it in order, a hole pushed as the marker.
+// arrayChunk is how many elements an array made at once takes at most,
+// each in a register: a literal of more, or arguments past 255, are made
+// as an array of the first arrayChunk and the rest pushed onto it.
+const arrayChunk = 1024
+
+// wideArgs reports whether a call's arguments are passed as an array: one
+// is a spread, or they are more than an instruction's 8 bits count.
+func wideArgs(args []ast.Expr) bool {
+	return len(args) > 255 || hasSpread(args)
+}
+
+// spreadArray makes into dst an array of els, which has a spread or more
+// elements than arrayChunk: the elements before the first spread, up to
+// arrayChunk of them, made at once, then each pushed or spread onto it in
+// order, a hole pushed as the marker.
 func (g *gen) spreadArray(els []ast.Expr, dst int) int {
+	return g.arrayFrom(-1, els, dst)
+}
+
+// arrayFrom is spreadArray of the value in register pre, where pre is not
+// negative, and then els.
+func (g *gen) arrayFrom(pre int, els []ast.Expr, dst int) int {
+	lead := 0
+	if pre >= 0 {
+		lead = 1
+	}
 	first := 0
-	for first < len(els) {
+	for first < len(els) && lead+first < arrayChunk {
 		if _, ok := els[first].(*ast.Spread); ok {
 			break
 		}
 		first++
 	}
-	base := g.allocN(first)
+	base := g.allocN(lead + first)
+	if pre >= 0 {
+		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(base), r16(pre), 0))
+	}
 	for i, e := range els[:first] {
 		if e == nil {
-			g.emit(bytecode.MakeR(bytecode.RLoadUninit, 0, r16(base+i), 0, 0))
+			g.emit(bytecode.MakeR(bytecode.RLoadUninit, 0, r16(base+lead+i), 0, 0))
 			continue
 		}
-		g.into(e, base+i)
+		g.into(e, base+lead+i)
 	}
 	d := dst
 	if d < 0 || g.isBinding(d) {
@@ -268,7 +303,7 @@ func (g *gen) spreadArray(els []ast.Expr, dst int) int {
 		// the binding it goes to.
 		d = g.alloc()
 	}
-	g.emit(bytecode.MakeR(bytecode.RNewArray, 0, r16(d), r16(base), uint16(first)))
+	g.emit(bytecode.MakeR(bytecode.RNewArray, 0, r16(d), r16(base), uint16(lead+first)))
 	for _, e := range els[first:] {
 		mark := g.top
 		switch x := e.(type) {
@@ -292,13 +327,6 @@ func (g *gen) spreadArray(els []ast.Expr, dst int) int {
 // stack form's call_spread: the function, its this -- a method's receiver,
 // or undefined -- and an array of the arguments in a window.
 func (g *gen) spreadCall(n *ast.Call, dst int) int {
-	if _, ok := n.Callee.(*ast.OptionalChain); ok {
-		g.fail("an optional call or too many arguments")
-		return g.dest(dst)
-	}
-	if isSuper(n.Callee) {
-		return g.superCall(n, dst)
-	}
 	w := g.allocN(3)
 	if m, ok := n.Callee.(*ast.Member); ok && special(m) {
 		mm := *m
@@ -321,6 +349,14 @@ func (g *gen) spreadCall(n *ast.Call, dst int) int {
 			// At the stack form's position: its get_prop has none of its own.
 			g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(w), r16(w+1), g.propSite(bytecode.OpGetProp, g.nameIdx(name))))
 		}
+	} else if id, ok := n.Callee.(*ast.Ident); ok && g.withs[id] != nil {
+		// Through a with object, which is the receiver where it has the
+		// name (with_get_this), as a call's without a spread.
+		g.probeOp(id, bytecode.OpWithGetThis)
+		g.probed(id, bytecode.RColdWithGetThis, w, func() {
+			g.emit(bytecode.MakeR(bytecode.RLoadUndef, 0, r16(w+1), 0, 0))
+			g.into(n.Callee, w)
+		})
 	} else {
 		g.emit(bytecode.MakeR(bytecode.RLoadUndef, 0, r16(w+1), 0, 0))
 		g.into(n.Callee, w)
@@ -436,6 +472,11 @@ func isChainCall(n *ast.Call) bool {
 // that was nullish calls undefined, which throws, as it does anywhere.
 func (g *gen) chainCall(n *ast.Call, dst int) int {
 	argc := len(n.Args)
+	wide := wideArgs(n.Args)
+	if wide {
+		// The arguments in an array, as a spread call's.
+		argc = 1
+	}
 	w := g.allocN(2 + argc)
 	op := bytecode.RCallW
 	callee := n.Callee
@@ -491,13 +532,19 @@ func (g *gen) chainCall(n *ast.Call, dst int) int {
 		}
 		g.nullishJump(w, g.chain.nullish)
 	}
-	g.args(n.Args, w+2)
 	d := dst
 	if d < 0 {
 		d = w
 	}
+	if wide {
+		g.spreadArray(n.Args, w+2)
+		g.at(n.TracePos())
+		g.cold(bytecode.RColdCallSpread, w, d, 0)
+		return d
+	}
+	g.args(n.Args, w+2)
 	g.at(n.TracePos())
-	at := g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), g.callSite()))
+	at := g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), g.callSite(op)))
 	if g.rec.Tails[n] {
 		g.mark(at, bytecode.RMarkTail)
 	}
@@ -567,8 +614,8 @@ func (g *gen) logicalAssign(n *ast.Assign, dst int) int {
 		g.emit(bytecode.MakeR(bytecode.RSetProp, 0, r16(o), r16(v), g.propSite(bytecode.OpSetProp, g.nameIdx(name))))
 		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(d), r16(v), 0))
 	default:
-		g.fail("an assignment target the backend does not compile")
-		return d
+		// A call is assign's; the parser allows nothing else.
+		panic(fmt.Sprintf("regcomp: a logical assignment's target %T", n.Target))
 	}
 	g.bind(end)
 	return g.place(d, dst)

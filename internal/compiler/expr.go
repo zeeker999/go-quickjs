@@ -1818,6 +1818,7 @@ func (c *compiler) compileSpreadCall(n *ast.Call) {
 		// Through a with object, as a call without a spread: the object
 		// the name is found on is the receiver.
 		probe := c.withProbe(bytecode.OpWithGetThis, id.Name)
+		c.regWith(id, probe)
 		c.emit(bytecode.OpPushUndef, 0, 0)
 		c.compileIdentReadStatic(id)
 		c.patchWithProbe(probe)

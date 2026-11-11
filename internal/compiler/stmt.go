@@ -157,9 +157,7 @@ func (c *compiler) predeclareFunction(h hoistedFunc) {
 		return
 	}
 
-	if c.reg != nil {
-		c.reg.Funcs[h.fd] = h.slot
-	}
+	c.reg.NoteFunc(h.fd, h.slot)
 	c.emit(bytecode.OpSetLocal, h.slot, 0)
 }
 
@@ -1273,6 +1271,7 @@ func (c *compiler) compileFinallyClause(pos int, finally []ast.Stmt, record bool
 	if record {
 		c.pushExit(exitCompletion)
 	}
+	defer c.reg.BeginFinally(finally)()
 	c.beginScope()
 	savedRecord := c.finallyRecord
 	c.finallyRecord = record

@@ -406,9 +406,15 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 	var using ast.DeclKind
 	switch l := left.(type) {
 	case *ast.VarDecl:
-		if l.Kind != ast.DeclVar && l.Kind != ast.DeclLet && l.Kind != ast.DeclConst && !l.Kind.IsUsing() || len(l.Decls) != 1 || l.Decls[0].Init != nil {
-			g.fail("a for-of or for-in head's declaration")
-			return
+		if len(l.Decls) != 1 || l.Decls[0].Init != nil && (!in || l.Kind != ast.DeclVar) {
+			// The parser allows one declaration, with an initializer
+			// only as Annex B's for (var a = 0 in o).
+			panic("regcomp: a for-of or for-in head's declaration")
+		}
+		if l.Decls[0].Init != nil {
+			// Assigned once, before the object is evaluated, as the
+			// stack form's compileForIn.
+			g.varDecl(l)
 		}
 		target, lexical = l.Decls[0].Target, l.Kind != ast.DeclVar
 		if l.Kind.IsUsing() {

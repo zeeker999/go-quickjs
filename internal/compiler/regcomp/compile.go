@@ -31,20 +31,44 @@ func Compile(lit *ast.FuncLit, fn *bytecode.Function, rec *Record) *bytecode.Reg
 		Refuse(fn, w)
 		return nil
 	}
-	g := &gen{lit: lit, fn: fn, rec: rec}
-	// A derived constructor's this, and an arrow's written inside one, is
-	// the binding super() binds, read through the frame (this_bound).
-	g.thisRef = fn.Kind == bytecode.KindDerivedConstructor || fn.Kind == bytecode.KindArrow && !fn.ArrowThisValue
-	if !g.layout() {
+	g, ok := generate(fn, func() *gen {
+		g := &gen{lit: lit, fn: fn, rec: rec}
+		// A derived constructor's this, and an arrow's written inside one,
+		// is the binding super() binds, read through the frame
+		// (this_bound).
+		g.thisRef = fn.Kind == bytecode.KindDerivedConstructor || fn.Kind == bytecode.KindArrow && !fn.ArrowThisValue
+		return g
+	})
+	if !ok {
 		Refuse(fn, "its bindings' layout")
 		return nil
 	}
-	g.body()
 	if g.err != "" {
 		Refuse(fn, g.err)
 		return nil
 	}
 	return g.finish()
+}
+
+// generate lays out and compiles the gen made by mk, and reports whether
+// its bindings had a layout. A function with more cache sites than 16 bits
+// number (errSites) is compiled a second time with the sites of one key
+// shared, what the first made of the function's names, constants and
+// sites dropped.
+func generate(fn *bytecode.Function, mk func() *gen) (*gen, bool) {
+	sites, names, consts := fn.PropSites, len(fn.Names), len(fn.Constants)
+	for share := false; ; share = true {
+		g := mk()
+		g.shareSites = share
+		if !g.layout() {
+			return nil, false
+		}
+		g.body()
+		if g.err != errSites || share {
+			return g, true
+		}
+		fn.PropSites, fn.Names, fn.Constants = sites, fn.Names[:names], fn.Constants[:consts]
+	}
 }
 
 // trace prints why a function has no register code (QJS_REGTRACE).
@@ -54,6 +78,12 @@ type gen struct {
 	lit *ast.FuncLit
 	fn  *bytecode.Function
 	rec *Record
+
+	// shareSites says the function has more cache sites than 16 bits
+	// number, and is compiled again with the sites of one key shared
+	// (site16).
+	shareSites bool
+	shared     map[siteKey]uint16
 
 	code []bytecode.RInstr
 	pos  []int32
@@ -387,15 +417,51 @@ func (g *gen) jump(w bytecode.RInstr, m *mark, short bool) {
 	m.refs = append(m.refs, ref)
 }
 
-func (g *gen) site(name uint32) uint16 {
+func (g *gen) site(name uint32) uint32 {
 	g.fn.PropSites++
 	s := g.fn.PropSites
-	if s >= limit16 {
-		g.fail("a site past 16 bits")
-		return 0
-	}
 	g.siteName = append(g.siteName, 0)
 	g.siteName[s] = name
+	return s
+}
+
+// errSites is the failure of a site past 16 bits, which Compile meets
+// by compiling the function again with its sites shared (gen.shareSites).
+const errSites = "a site past 16 bits"
+
+// siteKey is what a site an instruction's 16-bit operand names is shared
+// by, where a function has more sites than 16 bits number: the kind of
+// cache, the name it answers for, and for a literal its keys or its
+// constants. Two instructions of one key keep the same entries -- a
+// shape's answer for that kind and name, a literal's room and final shape
+// for its keys, its constants' array -- so that one site serves both, as
+// a polymorphic one.
+type siteKey struct {
+	kind string
+	name uint32
+	keys string
+}
+
+// site16 is a cache site for an instruction's 16-bit operand: one of its
+// own, or in a function compiled with its sites shared, the one of its
+// key.
+func (g *gen) site16(k siteKey) uint16 {
+	if g.shareSites {
+		if s, ok := g.shared[k]; ok {
+			return s
+		}
+	}
+	s := g.site(k.name)
+	if s >= limit16 {
+		g.fail(errSites)
+		return 0
+	}
+	if g.shareSites {
+		if g.shared == nil {
+			g.shared = map[siteKey]uint16{}
+		}
+		g.shared[k] = uint16(s)
+	}
 	return uint16(s)
 }
 
@@ -406,6 +472,10 @@ func (g *gen) stackSite(in bytecode.Instr) uint16 {
 	if in.B == 0 || in.B >= uint32(len(g.siteName)) || in.A >= uint32(len(g.fn.Names)) {
 		g.fail("a stack site out of range")
 		return 0
+	}
+	if in.B >= limit16 {
+		// Past 16 bits: a site of the register form's.
+		return g.propSite(bytecode.OpGetProp, in.A)
 	}
 	g.siteName[in.B] = in.A
 	return uint16(in.B)
@@ -421,7 +491,7 @@ func (g *gen) stackSite(in bytecode.Instr) uint16 {
 // and past the stack form's sites, it is a site of its own.
 func (g *gen) propSite(op bytecode.Op, name uint32) uint16 {
 	if g.fn.Leaf == bytecode.LeafNone {
-		return g.site(name)
+		return g.site16(siteKey{kind: op.String(), name: name})
 	}
 	if g.leafSites == nil {
 		g.leafSites = map[leafSiteKey][]uint32{}
@@ -437,8 +507,8 @@ func (g *gen) propSite(op bytecode.Op, name uint32) uint16 {
 	}
 	k := leafSiteKey{op, g.fn.Names[name]}
 	q := g.leafSites[k]
-	if len(q) == 0 {
-		return g.site(name)
+	if len(q) == 0 || q[0] >= limit16 {
+		return g.site16(siteKey{kind: op.String(), name: name})
 	}
 	g.leafSites[k] = q[1:]
 	g.siteName[q[0]] = name
@@ -1753,7 +1823,7 @@ func (g *gen) ident(n *ast.Ident, dst int) int {
 		d := g.dest(dst)
 		g.at(int(n.Start))
 		name := g.name16(n.Name)
-		g.emit(bytecode.MakeR(bytecode.RGetGlobal, 0, r16(d), name, g.globalSite()))
+		g.emit(bytecode.MakeR(bytecode.RGetGlobal, 0, r16(d), name, g.globalSite("RGetGlobal", name)))
 		return d
 	case ResCallee:
 		return g.place(regCallee, dst)
@@ -1794,7 +1864,9 @@ func (g *gen) typeofOperand(e ast.Expr) int {
 
 // globalSite is a cache site of a global's read or write, which keeps no
 // name of the site table's.
-func (g *gen) globalSite() uint16 { return g.site(0) }
+func (g *gen) globalSite(kind string, name uint16) uint16 {
+	return g.site16(siteKey{kind: kind, name: uint32(name)})
+}
 
 var binOps = map[string]bytecode.Op{
 	"+": bytecode.OpAdd, "-": bytecode.OpSub, "*": bytecode.OpMul, "/": bytecode.OpDiv, "%": bytecode.OpMod,
@@ -2293,25 +2365,25 @@ func (g *gen) storeIdent(id *ast.Ident, value ast.Expr, init bool) int {
 				ok := g.alloc()
 				g.at(int(id.Start))
 				name := g.name16(id.Name)
-				g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdCheckGlobalRef), r16(ok), name, g.globalSite()))
+				g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdCheckGlobalRef), r16(ok), name, g.globalSite("check_global_ref", name)))
 				v := g.expr(value, -1)
 				g.at(int(id.Start))
 				g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdAssertResolved), r16(ok), name, 0))
-				g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), name, g.globalSite()))
+				g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), name, g.globalSite("RSetGlobal", name)))
 				return v
 			}
 			strict = 1
 		}
 		v := g.expr(value, -1)
 		g.at(int(id.Start))
-		g.emit(bytecode.MakeR(bytecode.RSetGlobal, strict, r16(v), g.name16(id.Name), g.globalSite()))
+		g.emit(bytecode.MakeR(bytecode.RSetGlobal, strict, r16(v), g.name16(id.Name), g.globalSite("RSetGlobal", g.name16(id.Name))))
 		return v
 	case ResGlobalVar:
 		// A var's store: the var exists, and the store is set_global's
 		// whatever the code's strictness, as the stack form's.
 		v := g.expr(value, -1)
 		g.at(int(id.Start))
-		g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite()))
+		g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite("RSetGlobal", g.name16(id.Name))))
 		return v
 	case ResGlobalLexInit, ResModuleLexInit:
 		v := g.expr(value, -1)
@@ -2358,6 +2430,11 @@ func (g *gen) appendLocal(n *ast.Assign) (int, bool) {
 }
 
 func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
+	if call, ok := n.Target.(*ast.Call); ok {
+		// Sloppy code's assignment to a call, of any operator: the value
+		// is never made.
+		return g.place(g.callTarget(call, int(n.Start)), dst)
+	}
 	if !keep && dst < 0 && n.Op == "+=" && g.rec.Appends[n] {
 		if r, ok := g.appendLocal(n); ok {
 			return r
@@ -2403,8 +2480,7 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 			g.emit(bytecode.MakeR(bytecode.RSetProp, 0, r16(o), r16(v), g.propSite(bytecode.OpSetProp, g.nameIdx(name))))
 			return g.place(v, dst)
 		}
-		g.fail("an assignment target the backend does not compile")
-		return 0
+		panic(fmt.Sprintf("regcomp: an assignment target %T", n.Target))
 	}
 	switch n.Op {
 	case "||=", "&&=", "??=":
@@ -2461,8 +2537,19 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 		}
 		return g.place(v, dst)
 	}
-	g.fail("a compound assignment target")
-	return 0
+	panic(fmt.Sprintf("regcomp: a compound assignment target %T", n.Target))
+}
+
+// callTarget compiles call, which sloppy code assigned to, updated or
+// named as a for-in or for-of head's target, as the stack form's
+// compileCallTarget: the call is made, and then the assignment is a
+// ReferenceError, at position pos. The call's value, in the register it
+// returns, stands for the expression's on the path nothing reaches.
+func (g *gen) callTarget(call *ast.Call, pos int) int {
+	r := g.expr(call, -1)
+	g.at(pos)
+	g.cold(bytecode.RColdThrowRef, 0, int(g.name16("invalid assignment target")), 0)
+	return r
 }
 
 // addProp compiles o.name += value, or, with value nil, o.name += imm, whose
@@ -2499,7 +2586,7 @@ func (g *gen) addProp(m *ast.Member, value ast.Expr, imm int32, pos int) bool {
 		v = g.expr(value, -1)
 	}
 	g.at(pos)
-	site := g.site(g.nameIdx(name))
+	site := g.site16(siteKey{kind: "add_prop", name: g.nameIdx(name)})
 	if op == bytecode.RAddProp {
 		g.emit(bytecode.MakeR(op, 0, r16(o), r16(v), site))
 	} else {
@@ -2599,7 +2686,7 @@ func (g *gen) readForWrite(id *ast.Ident, dst int) int {
 		g.emit(bytecode.MakeRBC(bytecode.RCold, uint8(bytecode.RColdGetUpvalCheck), r16(d), res.Index))
 	case ResGlobal:
 		g.at(int(id.Start))
-		g.emit(bytecode.MakeR(bytecode.RGetGlobal, 0, r16(d), g.name16(id.Name), g.globalSite()))
+		g.emit(bytecode.MakeR(bytecode.RGetGlobal, 0, r16(d), g.name16(id.Name), g.globalSite("RGetGlobal", g.name16(id.Name))))
 	default:
 		g.fail("a compound assignment's read")
 	}
@@ -2627,7 +2714,7 @@ func (g *gen) storeValue(id *ast.Ident, v int) {
 	case ResGlobalVar:
 		// A var's store: set_global whatever the code's strictness.
 		g.at(int(id.Start))
-		g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite()))
+		g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite("RSetGlobal", g.name16(id.Name))))
 	case ResGlobalLexInit, ResModuleLexInit:
 		g.lexInit(res.Kind, id.Name, v, int(id.Start))
 	case ResGlobal:
@@ -2639,7 +2726,7 @@ func (g *gen) storeValue(id *ast.Ident, v int) {
 			strict = 1
 		}
 		g.at(int(id.Start))
-		g.emit(bytecode.MakeR(bytecode.RSetGlobal, strict, r16(v), g.name16(id.Name), g.globalSite()))
+		g.emit(bytecode.MakeR(bytecode.RSetGlobal, strict, r16(v), g.name16(id.Name), g.globalSite("RSetGlobal", g.name16(id.Name))))
 	case ResConstAssign:
 		g.assignConst(id)
 	case ResIgnore:
@@ -2660,6 +2747,8 @@ func (g *gen) update(n *ast.Update, keep bool, dst int) int {
 		step = bytecode.RDec
 	}
 	switch t := n.Operand.(type) {
+	case *ast.Call:
+		return g.place(g.callTarget(t, n.Start), dst)
 	case *ast.Ident:
 		res := g.rec.Write[t]
 		if res.Kind == ResLocal {
@@ -2706,8 +2795,7 @@ func (g *gen) update(n *ast.Update, keep bool, dst int) int {
 			g.emit(bytecode.MakeR(bytecode.RSetProp, 0, r16(o), r16(v), g.propSite(bytecode.OpSetProp, name)))
 		})
 	}
-	g.fail("an update target")
-	return 0
+	panic(fmt.Sprintf("regcomp: an update target %T", n.Operand))
 }
 
 // stepped is an update of the value in cur, stored by store.
@@ -2850,7 +2938,7 @@ func (g *gen) member(n *ast.Member, dst int) int {
 // the call's position, its scope's index in Aux.
 func (g *gen) directEval(n *ast.Call, idx uint32, dst int) int {
 	argc := len(n.Args)
-	spread := hasSpread(n.Args)
+	spread := wideArgs(n.Args)
 	if spread {
 		argc = 1
 		idx |= bytecode.RDirectEvalSpread
@@ -2902,18 +2990,14 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	if idx, ok := g.rec.Evals[n]; ok {
 		return g.directEval(n, idx, dst)
 	}
-	if hasSpread(n.Args) {
-		return g.spreadCall(n, dst)
-	}
-	if len(n.Args) > 255 {
-		g.fail("an optional call or too many arguments")
-		return g.dest(dst)
-	}
 	if n.Optional || isChainCall(n) {
 		return g.chainCall(n, dst)
 	}
 	if isSuper(n.Callee) {
 		return g.superCall(n, dst)
+	}
+	if wideArgs(n.Args) {
+		return g.spreadCall(n, dst)
 	}
 	if m, ok := n.Callee.(*ast.Member); ok && g.fn.ForwardsArguments && len(n.Args) == 2 && g.isArguments(n.Args[1]) {
 		if name, ok := propName(m); ok && name == "apply" && !m.Computed && !m.Optional {
@@ -2988,7 +3072,7 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	}
 	g.at(n.TracePos())
 	dead = dead && (mname == "exec" || mname == "replace")
-	at := g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), g.callSite()))
+	at := g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), g.callSite(op)))
 	if g.rec.Tails[n] && !argLit {
 		// A call in tail position, whose frame is given up once the
 		// stack is deep, as the stack form's tail_call gives it up.
@@ -3131,7 +3215,7 @@ func (g *gen) regexpLitCall(n *ast.Call, dst int, dead bool) (int, bool) {
 		d = w
 	}
 	g.at(n.TracePos())
-	at := g.emit(bytecode.MakeR(bytecode.RCallMW, uint8(argc), r16(w), r16(d), g.callSite()))
+	at := g.emit(bytecode.MakeR(bytecode.RCallMW, uint8(argc), r16(w), r16(d), g.callSite(bytecode.RCallMW)))
 	g.aux(at, k)
 	g.mark(at, bytecode.RMarkLitRecv|deadMark(dead && name == "exec"))
 	return d, true
@@ -3387,7 +3471,7 @@ func (g *gen) applyArgs(n *ast.Call, m *ast.Member, dst int) int {
 	} else {
 		g.into(m.Object, w)
 		g.at(m.Property.Pos())
-		g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(w+1), r16(w), g.site(g.nameIdx("apply"))))
+		g.emit(bytecode.MakeR(bytecode.RGetProp, 0, r16(w+1), r16(w), g.propSite(bytecode.OpGetProp, g.nameIdx("apply"))))
 		g.into(n.Args[0], w+2)
 	}
 	d := dst
@@ -3411,21 +3495,34 @@ func (g *gen) aux(pc int, v uint32) {
 }
 
 // callSite is a call's cache: the function it called last, and how.
-func (g *gen) callSite() uint16 {
+//
+// Past 16 bits, the function is compiled again with its sites shared
+// (errSites): the calls of one operation share one, whose entry is
+// checked against the callee it is made for.
+func (g *gen) callSite(op bytecode.ROp) uint16 {
+	k := siteKey{kind: "call " + op.String()}
+	if g.shareSites {
+		if s, ok := g.shared[k]; ok {
+			return s
+		}
+	}
 	s := g.calls
 	g.calls++
 	if s >= limit16 {
-		g.fail("a call site past 16 bits")
+		g.fail(errSites)
+		return 0
+	}
+	if g.shareSites {
+		if g.shared == nil {
+			g.shared = map[siteKey]uint16{}
+		}
+		g.shared[k] = uint16(s)
 	}
 	return uint16(s)
 }
 
 func (g *gen) newExpr(n *ast.New, dst int) int {
-	if len(n.Args) > 255 {
-		g.fail("too many arguments")
-		return g.dest(dst)
-	}
-	if hasSpread(n.Args) {
+	if wideArgs(n.Args) {
 		w := g.allocN(3)
 		g.into(n.Callee, w)
 		g.spreadArray(n.Args, w+2)
@@ -3448,16 +3545,13 @@ func (g *gen) newExpr(n *ast.New, dst int) int {
 }
 
 func (g *gen) object(n *ast.ObjectLit, dst int) int {
-	if len(n.Props) >= limit16 {
-		g.fail("too many properties")
-		return g.dest(dst)
-	}
 	if lit := g.objectAtOnce(n, dst); lit >= 0 {
 		return lit
 	}
 	d := g.dest(dst)
 	g.at(n.Start)
-	g.emit(bytecode.MakeR(bytecode.RNewObject, 0, r16(d), uint16(len(n.Props)), g.site(0)))
+	// B is the room the literal asks for, a hint.
+	g.emit(bytecode.MakeR(bytecode.RNewObject, 0, r16(d), uint16(min(len(n.Props), limit16-1)), g.site16(siteKey{kind: "new_object"})))
 	for _, p := range n.Props {
 		if g.err != "" {
 			return d
@@ -3512,36 +3606,39 @@ func (g *gen) objectAtOnce(n *ast.ObjectLit, dst int) int {
 	g.objKeys = append(g.objKeys, keys)
 	d := g.dest(dst)
 	g.at(n.Start)
-	at := g.emit(bytecode.MakeR(bytecode.RNewObjectLit, uint8(len(n.Props)), r16(d), r16(base), g.site(0)))
+	at := g.emit(bytecode.MakeR(bytecode.RNewObjectLit, uint8(len(n.Props)), r16(d), r16(base), g.site16(siteKey{kind: "object_lit", keys: fmt.Sprint(keys)})))
 	g.aux(at, uint32(len(g.objKeys)-1))
 	return d
 }
 
 func (g *gen) array(n *ast.ArrayLit, dst int) int {
-	if len(n.Elements) >= limit16 {
-		g.fail("too many elements")
-		return g.dest(dst)
-	}
 	if elems, ok := g.constantElements(n.Elements); ok {
 		// A literal of constants: its arrays share them until one is
 		// written, as the stack form's do.
 		g.literals = append(g.literals, elems)
 		d := g.dest(dst)
-		at := g.emit(bytecode.MakeR(bytecode.RNewArrayK, 0, r16(d), uint16(len(elems)), g.site(0)))
+		// B is the count, or 0 past 16 bits: the literal's.
+		count := uint16(len(elems))
+		if len(elems) >= limit16 {
+			count = 0
+		}
+		at := g.emit(bytecode.MakeR(bytecode.RNewArrayK, 0, r16(d), count, g.site16(siteKey{kind: "array_k", keys: fmt.Sprint(elems)})))
 		g.aux(at, uint32(len(g.literals)-1))
 		return d
 	}
 	if len(n.Elements) == 0 {
 		if g.arrays >= limit16 {
-			g.fail("an array site past 16 bits")
-			return g.dest(dst)
+			// Past 16 bits of empty arrays' sites: one made with none.
+			d := g.dest(dst)
+			g.emit(bytecode.MakeR(bytecode.RNewArray, 0, r16(d), r16(d), 0))
+			return d
 		}
 		d := g.dest(dst)
 		g.emit(bytecode.MakeR(bytecode.RNewArrayE, 0, r16(d), uint16(g.arrays), 0))
 		g.arrays++
 		return d
 	}
-	if hasSpread(n.Elements) {
+	if hasSpread(n.Elements) || len(n.Elements) > arrayChunk {
 		return g.spreadArray(n.Elements, dst)
 	}
 	base := g.allocN(len(n.Elements))
