@@ -95,6 +95,13 @@ type Record struct {
 	// Completion is the stack slot of top-level code's completion value,
 	// which an expression statement sets, or -1 for a function.
 	Completion int32
+	// Classes is each class the function defines, as the stack form
+	// defines it (ClassRec).
+	Classes map[*ast.ClassLit]*ClassRec
+	// Privates is where each private name's key is, as the stack form
+	// resolved it: a binding of the function's (ResLocal) or an upvalue
+	// (ResUpval).
+	Privates map[*ast.PrivateName]Res
 	// Bail says the function has something whose resolution the record
 	// cannot express -- a with, an eval's variables, an Annex B function --
 	// and is left to the stack form.
@@ -199,4 +206,69 @@ func (r *Record) NoteTemplate(q *ast.TemplateLit, idx uint32) {
 		r.Templates = map[*ast.TemplateLit]uint32{}
 	}
 	r.Templates[q] = idx
+}
+
+// ClassRec is what the stack form made of one class the function defines:
+// the slots of the class scope's bindings and the constants of the
+// functions it made, which the register form makes in the same order.
+type ClassRec struct {
+	// Self is the slot of the class's inner name, or -1 for a class
+	// without a name of its own.
+	Self int32
+	// Privates are the class's private names, each minted into its slot.
+	Privates []ClassPrivate
+	// Install is the slot of the list of the private methods each instance
+	// is given, or -1.
+	Install int32
+	// Keys is, for each of the class's fields, the slot its computed key
+	// is kept in, or -1.
+	Keys []int32
+	// Ctor is the constant of the constructor's function, and Init that of
+	// the instances' field initializer, or -1.
+	Ctor, Init int32
+	// Members is, for each of the class's members, the constant of its
+	// function, or -1 for the constructor.
+	Members []int32
+	// Statics are the static fields' and blocks' functions, in the order
+	// they run.
+	Statics []ClassStatic
+}
+
+// ClassPrivate is one of a class's private names: its key's slot and its
+// name, with its #.
+type ClassPrivate struct {
+	Slot uint32
+	Name string
+}
+
+// ClassStatic is a static field's or block's function, the constant
+// Const: the field Field of the class's fields, or a block for -1.
+type ClassStatic struct {
+	Const uint32
+	Field int32
+}
+
+// NoteClass records what the stack form made of class cls.
+func (r *Record) NoteClass(cls *ast.ClassLit, cr *ClassRec) {
+	if r == nil {
+		return
+	}
+	if r.Classes == nil {
+		r.Classes = map[*ast.ClassLit]*ClassRec{}
+	}
+	r.Classes[cls] = cr
+}
+
+// NotePrivate records where private name pn's key is.
+func (r *Record) NotePrivate(pn *ast.PrivateName, res Res) {
+	if r == nil {
+		return
+	}
+	if r.Privates == nil {
+		r.Privates = map[*ast.PrivateName]Res{}
+	}
+	if old, ok := r.Privates[pn]; ok && old != res {
+		r.Bail = true
+	}
+	r.Privates[pn] = res
 }

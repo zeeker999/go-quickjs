@@ -236,13 +236,14 @@ var regDump = os.Getenv("QJS_REGDUMP") != ""
 
 // regStmt is the one node of a register function's tree: it runs the frame
 // a call through runFD or callTree has made as register code. A frame of
-// the few calls the code cannot run in -- an arrow sharing a derived
-// constructor's this, a function made inside a with or beside an eval -- is
-// run by the stack interpreter instead.
+// the few calls the code cannot run in -- a function made inside a with or
+// beside an eval -- is run by the stack interpreter instead. A derived
+// constructor's frame, and an arrow's sharing its this, is run where its
+// code reads this from the binding (RegCode.ThisRef).
 func regStmt(c *regCode) tstmt {
 	return func(t *tctx) {
 		r, f := t.r, t.f
-		if c.wide && f.thisRef == nil && f.withScopes == nil && f.evalVars == nil {
+		if c.wide && (f.thisRef == nil || c.rc.ThisRef) && f.withScopes == nil && f.evalVars == nil {
 			if f.cl.reg == nil {
 				f.cl.reg = c
 			}

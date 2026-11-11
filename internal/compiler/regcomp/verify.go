@@ -264,6 +264,27 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 		return reg(a) && reg(b) && w.C() <= 2
 	case bytecode.RColdTemplateObject:
 		return reg(a) && int(w.BC()) < len(fn.Templates)
+	case bytecode.RColdNewClass, bytecode.RColdSetFieldInit, bytecode.RColdSuperSpread:
+		return reg(a) && reg(b)
+	case bytecode.RColdDefineMethod, bytecode.RColdClassGetter, bytecode.RColdClassSetter:
+		return reg(a) && reg(b) && int(w.C()) < len(fn.Names)
+	case bytecode.RColdClassGetterIndex, bytecode.RColdClassSetterIndex, bytecode.RColdClassIndex,
+		bytecode.RColdAddPrivateMethod, bytecode.RColdAddPrivateGetter, bytecode.RColdAddPrivateSetter,
+		bytecode.RColdDefinePrivate, bytecode.RColdDefinePrivateMethod, bytecode.RColdDefinePrivateGetter,
+		bytecode.RColdDefinePrivateSetter, bytecode.RColdGetPrivate, bytecode.RColdSetPrivate,
+		bytecode.RColdPrivateIn, bytecode.RColdSuperGetIndex, bytecode.RColdSuperSetIndex:
+		return reg(a) && reg(b) && reg(w.C())
+	case bytecode.RColdPrivateName, bytecode.RColdSuperGet, bytecode.RColdSuperSet:
+		return reg(a) && int(b) < len(fn.Names)
+	case bytecode.RColdNewPrivateMethods, bytecode.RColdInstallPrivateMethods, bytecode.RColdSuperBase,
+		bytecode.RColdThis, bytecode.RColdNewTarget, bytecode.RColdDerivedRet, bytecode.RColdSuperForward:
+		return reg(a)
+	case bytecode.RColdSuperCall:
+		return reg(a) && int(w.C())+int(b) <= rc.NumRegs
+	case bytecode.RColdCheckThis, bytecode.RColdDeleteSuper:
+		return true
+	case bytecode.RColdCloseRegs:
+		return int(a)+int(b) <= rc.NumRegs
 	}
 	return false
 }

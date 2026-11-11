@@ -46,8 +46,6 @@ func whyTop(fn *bytecode.Function) string {
 		return "direct eval"
 	case fn.Debug != nil:
 		return "compiled for a debugger"
-	case fn.PrivateSites != 0:
-		return "private members"
 	}
 	return ""
 }
@@ -130,7 +128,10 @@ func (g *gen) exportDecl(n *ast.ExportDecl) {
 		g.lexInit(ResModuleLexInit, "*default*", v, n.Start)
 	case n.Default:
 		if cd, ok := n.Decl.(*ast.ClassDecl); ok && cd.Class.Name == nil {
-			g.fail("an anonymous class exported by default")
+			// export default class {}: the expression it looks like, which
+			// initializes the module's binding of the default export.
+			v := g.expr(cd.Class, -1)
+			g.lexInit(ResModuleLexInit, "*default*", v, n.Start)
 			return
 		}
 		if _, ok := n.Decl.(*ast.FuncDecl); !ok {

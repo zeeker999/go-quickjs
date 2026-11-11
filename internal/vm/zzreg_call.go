@@ -578,7 +578,7 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base, pc 
 			if rc = cl.reg; rc == nil {
 				rc = r.regOf(cl)
 			}
-			if rc != nil && rc.wide && cl.realm == r.Realm {
+			if rc != nil && rc.wide && cl.realm == r.Realm && !isClassConstructorKind(cl.fn.Kind) {
 				if x := fd.extra; x == nil {
 					switch {
 					case !method:
@@ -1389,6 +1389,11 @@ func regPlan(fd *funcData) {
 		// A frame that may end in a tail call, whose callers must make
 		// it: planTreeCall's treeRest, not a treeCall, whose callers
 		// expect none.
+		return
+	}
+	if isClassConstructorKind(fd.closure.fn.Kind) {
+		// A class's constructor is only constructed, which construct and
+		// runFD make: a call throws, and a derived one's this is bound.
 		return
 	}
 	if x := fd.extra; x != nil && (!fd.arrow || x.lexThisRef != nil || x.rare != nil) {

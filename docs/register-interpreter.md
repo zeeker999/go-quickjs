@@ -1253,8 +1253,39 @@ regdiff cases and test262 in register mode on its directories:
 4. **Classes** (about 27,000 together: constructors, accessors, fields,
    static blocks, private members and methods, `super`, `new.target`,
    class expressions inside functions, and a module's `export default
-   class {}`, refused until then as "an anonymous class exported by
-   default").
+   class {}`) -- done (regcomp's class.go, the VM's zzreg_class.go). The
+   stack compiler records what it made of each class (`Record.Classes`,
+   a `ClassRec`): the slots of the class scope's bindings -- its inner
+   name, its private names' keys, its list of private methods, its
+   computed field keys -- and the constants of the constructor, the
+   instances' field initializer, each member's function and each static
+   field's or block's, in the order they run; and where each private
+   name's key is (`Record.Privates`, a register or an upvalue). The
+   register form makes the class in the stack form's order with cold
+   operations of the stack form's instructions' names (`new_class`,
+   `define_method`, `class_getter` and the rest, `private_name`,
+   `add_private_method`, `define_private`, `set_field_init`), the static
+   elements called as methods of the class, and closes the class scope's
+   captured bindings at its end (`close_regs`), so that a class made in
+   a loop gives each evaluation's methods their own. A field initializer's
+   `FieldInit` is `define_index` or `define_private` on this, and its
+   `InstallPrivateMethods` `install_private_methods`. A private member is
+   read, written, updated, called and tested (`#x in o`) through its
+   key's register (`get_private`, `set_private`, `private_in`, the name
+   for the errors in the instruction's Aux); `super.x`, `super[k]` and
+   `super.m()` through `super_get`, `super_set`, `super_base` and the
+   index forms, the frame's this written to the record first. A derived
+   constructor's this, and an arrow's written inside one, is the binding
+   super() binds (`RegCode.ThisRef`): `this_bound` reads it, checked,
+   `super_call` (`super_forward` for the constructor a derived class is
+   given, `super_spread`) binds it, and every return goes through
+   `derived_ret` (`derivedResult`); `regStmt` runs such a frame. A class
+   constructor has no direct call path (`regPlan`, `regCallSlow`): a call
+   throws, and a construction goes through construct and runFD. The stack
+   form's this before super(), a private method's read for a call and a
+   read in the dead zone had no position of their own (fixed with it).
+   After it, with the strict global store (item 7): all corpora 89.6%
+   register code (70.0%), Octane 99.9%, the bundles 94.1%.
 5. **Parameter patterns, defaults and rest; destructuring everywhere**
    (declarations, assignment targets, catch clauses, for-of and for-in
    heads; about 4,500) -- done (regcomp's pattern.go). A pattern unpacks
@@ -1305,7 +1336,10 @@ regdiff cases and test262 in register mode on its directories:
    had no position of their own (fixed with it).
 7. **The arguments object in every form** (354), **names the backend does
    not read** (434, 335 of the bundles'), names the record does not
-   resolve (92), strict global stores (96).
+   resolve (92), strict global stores (96). The strict global store of a
+   value that runs code is done: whether the name resolves is settled
+   before the value is made and reported after it, `check_global_ref`
+   and `assert_resolved`, as the stack form's.
 8. **eval and `with`** (757 direct evals, 527 functions beside an eval's
    variables, a with or an Annex B function, 11 more): binding
    descriptors for what an eval can reach.

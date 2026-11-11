@@ -257,6 +257,18 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 	case bytecode.RColdAssignConst:
 		// An assignment to a constant is a runtime error, not an early one.
 		return r.throwTypeError("assignment to constant variable %q", r.atoms.name(f.cl.names[w.B()]))
+	case bytecode.RColdNewClass, bytecode.RColdSetFieldInit, bytecode.RColdDefineMethod,
+		bytecode.RColdClassGetter, bytecode.RColdClassSetter, bytecode.RColdClassGetterIndex,
+		bytecode.RColdClassSetterIndex, bytecode.RColdClassIndex, bytecode.RColdPrivateName,
+		bytecode.RColdNewPrivateMethods, bytecode.RColdAddPrivateMethod, bytecode.RColdAddPrivateGetter,
+		bytecode.RColdAddPrivateSetter, bytecode.RColdInstallPrivateMethods, bytecode.RColdDefinePrivate,
+		bytecode.RColdDefinePrivateMethod, bytecode.RColdDefinePrivateGetter, bytecode.RColdDefinePrivateSetter,
+		bytecode.RColdGetPrivate, bytecode.RColdSetPrivate, bytecode.RColdPrivateIn, bytecode.RColdSuperCall,
+		bytecode.RColdSuperForward, bytecode.RColdSuperSpread, bytecode.RColdSuperGet, bytecode.RColdSuperSet,
+		bytecode.RColdSuperBase, bytecode.RColdSuperGetIndex, bytecode.RColdSuperSetIndex, bytecode.RColdThis,
+		bytecode.RColdCheckThis, bytecode.RColdNewTarget, bytecode.RColdDerivedRet, bytecode.RColdDeleteSuper,
+		bytecode.RColdCloseRegs:
+		return r.regColdClass(f, c, pc, w, regs)
 	case bytecode.RColdCheckGlobalRef:
 		found, err := r.regCheckGlobalRef(f, f.cl.names[w.B()], int(w.C()))
 		regs[w.A()] = Bool(found)

@@ -23,6 +23,8 @@ type leaf struct {
 	member *ast.Member
 	obj    int
 	key    int
+	// spec is a super property's or a private member's reference.
+	spec *sref
 }
 
 // pattern unpacks the value in register v into target: a declaration's
@@ -82,12 +84,9 @@ func (g *gen) prepareLeaf(el ast.Expr, declaring bool) leaf {
 	if !ok || declaring {
 		return l
 	}
-	if _, isSuper := m.Object.(*ast.Super); isSuper {
-		g.fail("super")
-		return l
-	}
-	if _, private := m.Property.(*ast.PrivateName); private {
-		g.fail("a private name")
+	if special(m) {
+		s := g.specialRef(m, false)
+		l.spec = &s
 		return l
 	}
 	l.member = m
@@ -106,6 +105,10 @@ func (g *gen) prepareLeaf(el ast.Expr, declaring bool) leaf {
 func (g *gen) storeRef(l leaf, v int, declaring bool) {
 	if l.def != nil {
 		v = g.withDefault(v, l.def)
+	}
+	if l.spec != nil {
+		g.specialSet(*l.spec, v, int(l.spec.m.Start))
+		return
 	}
 	if m := l.member; m != nil {
 		g.at(int(m.Start))

@@ -32,6 +32,9 @@ func Compile(lit *ast.FuncLit, fn *bytecode.Function, rec *Record) *bytecode.Reg
 		return nil
 	}
 	g := &gen{lit: lit, fn: fn, rec: rec}
+	// A derived constructor's this, and an arrow's written inside one, is
+	// the binding super() binds, read through the frame (this_bound).
+	g.thisRef = fn.Kind == bytecode.KindDerivedConstructor || fn.Kind == bytecode.KindArrow && !fn.ArrowThisValue
 	if !g.layout() {
 		Refuse(fn, "its bindings' layout")
 		return nil
@@ -114,6 +117,13 @@ type gen struct {
 	chain *chainCtx
 	// backLive is RegCode.BackLive.
 	backLive []uint32
+	// thisRef says this is read through the frame's binding
+	// (RegCode.ThisRef); forwardsArgs that a super call hands on the
+	// frame's arguments (RegCode.KeepsArgs).
+	thisRef, forwardsArgs bool
+	// thisBound says a derived constructor's super() has certainly bound
+	// this, which is then register 1.
+	thisBound bool
 }
 
 type loop struct {
@@ -194,6 +204,35 @@ func (g *gen) layout() bool {
 			return false
 		}
 		used[slot] = true
+	}
+	// A class's scope: its inner name, its private names' keys, its list
+	// of private methods and its computed keys, each a register.
+	mark := func(slot int32) bool {
+		if slot < 0 {
+			return true
+		}
+		if int(slot) >= n {
+			return false
+		}
+		used[slot] = true
+		return true
+	}
+	for _, cr := range g.rec.Classes {
+		ok := mark(cr.Self) && mark(cr.Install)
+		for _, p := range cr.Privates {
+			ok = ok && mark(int32(p.Slot))
+		}
+		for _, k := range cr.Keys {
+			ok = ok && mark(k)
+		}
+		if !ok {
+			return false
+		}
+	}
+	for _, res := range g.rec.Privates {
+		if res.Kind == ResLocal && !mark(int32(res.Index)) {
+			return false
+		}
 	}
 	for _, c := range fn.Constants {
 		if c.Kind != bytecode.ConstFunction || c.Fn == nil {
@@ -445,7 +484,7 @@ func (g *gen) body() {
 		release()
 		g.topBody()
 		g.stmts(lit.Body)
-		g.emit(bytecode.MakeR(bytecode.RRet, 0, r16(g.completion), 0, 0))
+		g.retReg(g.completion)
 		return
 	}
 	if lit.Name != nil && !declares(lit.Body, lit.Name.Name) {
@@ -486,8 +525,27 @@ func (g *gen) body() {
 			g.closure(fd.Fn, int(g.slotReg[slot]))
 		}
 	}
-	g.stmts(lit.Body)
-	g.emit(bytecode.MakeR(bytecode.RRetUndef, 0, 0, 0, 0))
+	if g.fn.Kind != bytecode.KindDerivedConstructor {
+		g.stmts(lit.Body)
+		g.retUndef()
+		return
+	}
+	// A derived constructor's statements: once one of them that always
+	// runs is a super() call, this is bound for good, and in register 1,
+	// where super_call put it.
+	g.enterBlock(lit.Body)
+	for _, s := range lit.Body {
+		if g.err != "" {
+			return
+		}
+		g.stmt(s)
+		if es, ok := s.(*ast.ExprStmt); ok {
+			if c, ok := es.X.(*ast.Call); ok && isSuper(c.Callee) {
+				g.thisBound = true
+			}
+		}
+	}
+	g.retUndef()
 }
 
 // simpleArguments reports whether fn's use of arguments is the one the
@@ -498,11 +556,12 @@ func simpleArguments(fn *bytecode.Function) bool {
 	// (ForwardsArguments) has no object made: each such call is an
 	// apply_args, which hands on the frame's arguments as passed.
 	if fn.Generator || fn.Async ||
-		fn.HasDirectEval || fn.Debug != nil || fn.TopLevel || fn.PrivateSites != 0 || fn.HasTailCall {
+		fn.HasDirectEval || fn.Debug != nil || fn.TopLevel || fn.HasTailCall {
 		return false
 	}
 	switch fn.Kind {
-	case bytecode.KindNormal, bytecode.KindMethod:
+	case bytecode.KindNormal, bytecode.KindMethod, bytecode.KindGetter, bytecode.KindSetter,
+		bytecode.KindConstructor, bytecode.KindDerivedConstructor:
 	default:
 		return false
 	}
@@ -862,15 +921,15 @@ func (g *gen) stmt(s ast.Stmt) {
 			defer g.hold()()
 			g.leave(0, func() {
 				if v < 0 {
-					g.emit(bytecode.MakeR(bytecode.RRetUndef, 0, 0, 0, 0))
+					g.retUndef()
 				} else {
-					g.emit(bytecode.MakeR(bytecode.RRet, 0, r16(v), 0, 0))
+					g.retReg(v)
 				}
 			})
 			return
 		}
 		if n.Arg == nil {
-			g.emit(bytecode.MakeR(bytecode.RRetUndef, 0, 0, 0, 0))
+			g.retUndef()
 			return
 		}
 		g.ret(n.Arg)
@@ -953,6 +1012,12 @@ func (g *gen) stmt(s ast.Stmt) {
 	case *ast.ForInStmt:
 		g.resetCompletion()
 		g.forOfStmt(n.Left, n.Right, n.Body, false, true, label, n.Start)
+	case *ast.ClassDecl:
+		g.storeIdent(n.Class.Name, n.Class, true)
+	case *ast.FieldInit:
+		g.fieldInit(n)
+	case *ast.InstallPrivateMethods:
+		g.installPrivate(n)
 	case *ast.ImportDecl:
 		// The linker made its bindings.
 	case *ast.ExportDecl:
@@ -984,7 +1049,7 @@ func (g *gen) ret(e ast.Expr) {
 		return
 	}
 	r := g.expr(e, -1)
-	g.emit(bytecode.MakeR(bytecode.RRet, 0, r16(r), 0, 0))
+	g.retReg(r)
 }
 
 func (g *gen) isTopLevel(fd *ast.FuncDecl) bool {
@@ -1305,7 +1370,8 @@ func direct(e ast.Expr) bool {
 		// (assign), after the store's object and key are read.
 		t, ok := n.Target.(*ast.Member)
 		return n.Op == "=" && ok && t.Computed && !t.Optional && direct(n.Value)
-	case *ast.ObjectLit, *ast.ArrayLit, *ast.Logical, *ast.Conditional, *ast.Sequence, *ast.Update:
+	case *ast.ObjectLit, *ast.ArrayLit, *ast.Logical, *ast.Conditional, *ast.Sequence, *ast.Update,
+		*ast.ClassLit:
 		return false
 	}
 	return true
@@ -1328,7 +1394,9 @@ func (g *gen) into(e ast.Expr, dst int) {
 // or the this's, with no instruction but a check of its initialisation.
 func (g *gen) inPlace(e ast.Expr) bool {
 	switch n := e.(type) {
-	case *ast.This, *regExpr:
+	case *ast.This:
+		return !g.thisRef || g.thisBound
+	case *regExpr:
 		return true
 	case *ast.Ident:
 		res, ok := g.rec.Read[n]
@@ -1376,7 +1444,11 @@ func (g *gen) expr(e ast.Expr, dst int) int {
 		g.emit(bytecode.MakeR(bytecode.RLoadNull, 0, r16(d), 0, 0))
 		return d
 	case *ast.This:
-		return g.place(regThis, dst)
+		return g.thisExpr(n, dst)
+	case *ast.ClassLit:
+		return g.class(n, dst)
+	case *ast.NewTarget:
+		return g.newTarget(dst)
 	case *ast.Ident:
 		return g.ident(n, dst)
 	case *ast.Binary:
@@ -1583,6 +1655,9 @@ func (g *gen) binary(n *ast.Binary, dst int) int {
 	}
 	switch n.Op {
 	case "instanceof", "in":
+		if pn, ok := n.Left.(*ast.PrivateName); ok {
+			return g.privateIn(pn, n.Right, n.Start, dst)
+		}
 		a := g.guard(g.expr(n.Left, -1), n.Right)
 		b := g.expr(n.Right, -1)
 		d := g.dest(dst)
@@ -1700,8 +1775,10 @@ func (g *gen) unary(n *ast.Unary, dst int) int {
 			return g.dest(dst)
 		}
 		if _, isSuper := m.Object.(*ast.Super); isSuper {
-			g.fail("delete of a super property")
-			return g.dest(dst)
+			g.deleteSuper(n, m)
+			d := g.dest(dst)
+			g.emit(bytecode.MakeR(bytecode.RLoadTrue, 0, r16(d), 0, 0))
+			return d
 		}
 		o := g.expr(m.Object, -1)
 		var k int
@@ -2020,6 +2097,9 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 			g.pattern(t, v, false)
 			return g.place(v, dst)
 		case *ast.Member:
+			if special(t) {
+				return g.specialStore(t, n.Value, dst)
+			}
 			o := g.guard(g.expr(t.Object, -1), n.Value)
 			if t.Computed {
 				if k, ok := imm16(t.Property); ok && k >= 0 {
@@ -2081,6 +2161,9 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 		g.storeValue(t, v)
 		return g.place(v, dst)
 	case *ast.Member:
+		if special(t) {
+			return g.specialCompound(t, text, op, n.Value, int(n.Start), dst)
+		}
 		o := g.guard(g.expr(t.Object, -1), n.Value)
 		var k int
 		var name uint32
@@ -2309,6 +2392,9 @@ func (g *gen) update(n *ast.Update, keep bool, dst int) int {
 		cur := g.readForWrite(t, g.alloc())
 		return g.stepped(n, cur, step, keep, dst, func(v int) { g.storeValue(t, v) })
 	case *ast.Member:
+		if special(t) {
+			return g.specialUpdate(n, t, step, keep, dst)
+		}
 		o := g.expr(t.Object, -1)
 		cur := g.alloc()
 		if t.Computed {
@@ -2417,6 +2503,9 @@ func (g *gen) member(n *ast.Member, dst int) int {
 			return d
 		}
 	}
+	if special(n) {
+		return g.specialMember(n, dst)
+	}
 	o := g.expr(n.Object, -1)
 	if n.Computed {
 		if k, ok := imm16(n.Property); ok && k >= 0 {
@@ -2484,6 +2573,9 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	if n.Optional || isChainCall(n) {
 		return g.chainCall(n, dst)
 	}
+	if isSuper(n.Callee) {
+		return g.superCall(n, dst)
+	}
 	if m, ok := n.Callee.(*ast.Member); ok && g.fn.ForwardsArguments && len(n.Args) == 2 && g.isArguments(n.Args[1]) {
 		if name, ok := propName(m); ok && name == "apply" && !m.Computed && !m.Optional {
 			return g.applyArgs(n, m, dst)
@@ -2505,11 +2597,9 @@ func (g *gen) call(n *ast.Call, dst int) int {
 			g.fail("an optional chain")
 			return w
 		}
-		if _, ok := c.Object.(*ast.Super); ok {
-			g.fail("super")
-			return w
-		}
-		if !c.Computed && g.inPlace(c.Object) {
+		if special(c) {
+			g.specialCallee(c, w)
+		} else if !c.Computed && g.inPlace(c.Object) {
 			// A receiver in a binding: get_method_w puts it in the window.
 			name, ok := propName(c)
 			if !ok {
@@ -2539,9 +2629,6 @@ func (g *gen) call(n *ast.Call, dst int) int {
 				_, argLit = n.Args[0].(*ast.RegexpLit)
 			}
 		}
-	case *ast.Super:
-		g.fail("super()")
-		return w
 	case *ast.Ident:
 		if c.Name == "eval" {
 			if res := g.rec.Read[c]; res.Kind == ResGlobal {
@@ -3185,6 +3272,16 @@ func (g *gen) closure(lit *ast.FuncLit, d int) {
 		g.fail("a function the stack form has no template of")
 		return
 	}
+	g.closureConst(k, d)
+}
+
+// closureConst makes a closure of the function of constant k into
+// register d.
+func (g *gen) closureConst(k, d int) {
+	if k < 0 || k >= len(g.fn.Constants) || g.fn.Constants[k].Kind != bytecode.ConstFunction || g.fn.Constants[k].Fn == nil {
+		g.fail("a function the stack form has no template of")
+		return
+	}
 	tmpl := g.fn.Constants[k].Fn
 	caps := make([]uint16, len(tmpl.Upvalues))
 	for i, u := range tmpl.Upvalues {
@@ -3269,7 +3366,7 @@ func (g *gen) finish() *bytecode.RegCode {
 		Code:              g.code, NumRegs: g.max + 1, SrcPC: src, SiteName: g.siteName, This: -1,
 		LocalReg: g.localReg(),
 		Wide:     true, Params: g.fn.ParamCount, Inits: g.inits, Caps: g.caps, CallSites: g.calls,
-		Handlers: g.handlerTable(), BackLive: g.backLive, KeepsArgs: g.fn.HasRest,
+		Handlers: g.handlerTable(), BackLive: g.backLive, KeepsArgs: g.fn.HasRest || g.forwardsArgs, ThisRef: g.thisRef,
 	}
 	if why := Verify(rc, g.fn); why != "" {
 		Refuse(g.fn, why)

@@ -451,7 +451,7 @@ func (c *compiler) compileStatement(s ast.Stmt) {
 		c.compileDispose(n)
 
 	case *ast.InstallPrivateMethods:
-		c.compileIdentRead(&ast.Ident{Name: n.Binding, Start: int32(n.Start)})
+		c.compileIdentRead(n.Binding)
 		c.emitAt(n.Start, bytecode.OpInstallPrivateMethods, 0, 0)
 
 	case *ast.FieldInit:

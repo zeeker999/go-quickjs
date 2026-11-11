@@ -93,15 +93,10 @@ func (g *gen) taggedTemplate(n *ast.TaggedTemplate, dst int) int {
 	}
 	w := g.allocN(2 + argc)
 	op := bytecode.RCallW
-	if m, ok := n.Tag.(*ast.Member); ok && !m.Optional {
-		if _, isSuper := m.Object.(*ast.Super); isSuper {
-			g.fail("super")
-			return w
-		}
-		if _, private := m.Property.(*ast.PrivateName); private {
-			g.fail("a private name")
-			return w
-		}
+	if m, ok := n.Tag.(*ast.Member); ok && !m.Optional && special(m) {
+		g.specialCallee(m, w)
+		op = bytecode.RCallMW
+	} else if ok && !m.Optional {
 		g.into(m.Object, w+1)
 		if m.Computed {
 			k := g.expr(m.Property, -1)
@@ -305,16 +300,17 @@ func (g *gen) spreadCall(n *ast.Call, dst int) int {
 		g.fail("an optional call or too many arguments")
 		return g.dest(dst)
 	}
+	if isSuper(n.Callee) {
+		return g.superCall(n, dst)
+	}
 	w := g.allocN(3)
-	if m, ok := n.Callee.(*ast.Member); ok {
-		if _, isSuper := m.Object.(*ast.Super); isSuper {
-			g.fail("super")
-			return w
+	if m, ok := n.Callee.(*ast.Member); ok && special(m) {
+		mm := *m
+		if m.Optional {
+			mm.Object, mm.Optional = g.optionalLink(m.Object), false
 		}
-		if _, private := m.Property.(*ast.PrivateName); private {
-			g.fail("a private name")
-			return w
-		}
+		g.specialCallee(&mm, w)
+	} else if ok {
 		obj := m.Object
 		if m.Optional {
 			obj = g.optionalLink(obj)
@@ -339,10 +335,6 @@ func (g *gen) spreadCall(n *ast.Call, dst int) int {
 				g.fail("a call of eval")
 				return w
 			}
-		}
-		if _, ok := n.Callee.(*ast.Super); ok {
-			g.fail("super()")
-			return w
 		}
 		g.emit(bytecode.MakeR(bytecode.RLoadUndef, 0, r16(w+1), 0, 0))
 		g.into(n.Callee, w)
@@ -471,15 +463,14 @@ func (g *gen) chainCall(n *ast.Call, dst int) int {
 		defer func() { g.chain = saved }()
 		callee = c.Base
 	}
-	if m, ok := callee.(*ast.Member); ok {
-		if _, isSuper := m.Object.(*ast.Super); isSuper {
-			g.fail("super")
-			return w
+	if m, ok := callee.(*ast.Member); ok && special(m) {
+		mm := *m
+		if m.Optional {
+			mm.Object, mm.Optional = g.optionalLink(m.Object), false
 		}
-		if _, private := m.Property.(*ast.PrivateName); private {
-			g.fail("a private name")
-			return w
-		}
+		g.specialCallee(&mm, w)
+		op = bytecode.RCallMW
+	} else if ok {
 		obj := m.Object
 		if m.Optional {
 			obj = g.optionalLink(obj)
@@ -558,13 +549,14 @@ func (g *gen) logicalAssign(n *ast.Assign, dst int) int {
 		g.storeValue(t, v)
 		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(d), r16(v), 0))
 	case *ast.Member:
-		if _, isSuper := t.Object.(*ast.Super); isSuper {
-			g.fail("super")
-			return d
-		}
-		if _, private := t.Property.(*ast.PrivateName); private {
-			g.fail("a private name")
-			return d
+		if special(t) {
+			s := g.specialRef(t, true)
+			g.specialGet(s, d)
+			short()
+			v := g.expr(n.Value, -1)
+			g.specialSet(s, v, int(n.Start))
+			g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(d), r16(v), 0))
+			break
 		}
 		o := g.expr(t.Object, -1)
 		if g.isBinding(o) {

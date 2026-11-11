@@ -1230,3 +1230,67 @@ function s7() { "use strict"; try { sgNew3 = mk("x", 1) } catch (e) { return fra
 	calls := []string{`s1()`, `s2()`, `s3()`, `s4()`, `s5()`, `s6()`, `s7()`, `s7()`}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffClasses compares class declarations and expressions: base and
+// derived constructors, super() with arguments, spread and forwarded,
+// super properties read, written, updated and called, computed keys,
+// accessors, static members and blocks, public and private fields,
+// private methods and accessors, #x in o, new.target, a derived
+// constructor's returns, arrows sharing its this, classes made in a loop,
+// and the errors -- a class called, this before super(), super() twice, a
+// private member missing, a derived constructor returning a primitive --
+// with their stack traces.
+func TestRegDiffClasses(t *testing.T) {
+	src := `
+var log = [];
+function frames(e) { return e.name + ": " + e.message + " | " + e.stack.split("\n").slice(1, 3).map(function (s) { return s.trim() }).join(" | ") }
+function key(k) { log.push("key " + k); return k }
+class A {
+  #p = 1; static #sp = 2; q = this.#p + 1; [key("ck")] = 3;
+  static s = A.#sp * 10; static { log.push("static " + A.s) }
+  constructor(x) { this.x = x; log.push("A " + new.target.name) }
+  m() { return "A.m" + this.x } get g() { return this.x * 2 } set g(v) { this.x = v }
+  static sm() { return "sm" } [key("cm")]() { return "cm" } get [key("cg")]() { return "cg" }
+  #pm() { return "pm" + this.#p } get #pg() { return this.#p * 7 } set #pg(v) { this.#p = v }
+  static #spm() { return "spm" }
+  priv(o) { return [this.#pm(), this.#pg, (this.#pg = 5, this.#p), #p in o, A.#spm(), this.#p++, ++this.#p, this.#p += 2].join() }
+  1() { return "one" } "s k"() { return "sk" }
+}
+class B extends A {
+  y = this.x + 100;
+  constructor(x, y) { super(x * 2); this.z = y }
+  m() { return "B>" + super.m() + "|" + super.g + "|" + super["m"]() }
+  setSuper() { super.g = 9; super["g"] = 11; super.q += 1; return this.x + "," + this.q }
+  static sm() { return "B" + super.sm() }
+}
+class C extends B {}
+class D extends A { constructor() { const f = () => super(4); f(); return undefined } }
+class E extends A { constructor() { super(1); return { e: 1 } } }
+class F extends A { constructor() { } }
+class G extends A { constructor() { this.x = 1; super(1) } }
+class H extends A { constructor() { super(1); super(2) } }
+class I extends A { constructor() { super(1); return 5 } }
+class J extends A { constructor(...a) { super(...a, 7) } }
+class K { static make() { return new this() } constructor() { this.nt = new.target === K } }
+function c1() { log = []; var a = new A(3); return [a.x, a.q, a.ck, a.m(), a.g, (a.g = 4, a.x), A.sm(), a.cm(), a.cg, a[1](), a["s k"](), a.priv(a), a.priv({}).split(",")[3], log.join()].join() }
+function c2() { var b = new B(2, 3); return [b.x, b.y, b.z, b.m(), b.setSuper(), B.sm(), Object.keys(b).join("/"), b instanceof A].join() }
+function c3() { var c = new C(5, 6); return [c.x, c.y, c.z, c.constructor.name, Object.getPrototypeOf(C) === B].join() }
+function c4() { return [new D().x, new E().e, new J(1).x, K.make().nt].join() }
+function c5(k) { try { return k === 0 ? A() : k === 1 ? new F() : k === 2 ? new G() : k === 3 ? new H() : k === 4 ? new I() : A.prototype.priv.call({}, {}) } catch (e) { return frames(e) } }
+function c6() { var out = []; for (var i = 0; i < 3; i++) { class L { #v = i; static n = i; get() { return this.#v } static has(o) { return #v in o } } out.push(L) } return [new out[0]().get(), new out[2]().get(), out[0].n, out[1].has(new out[1]()), out[1].has(new out[2]())].join() }
+function c7() { var X = class Named { who() { return Named.name } }; var Y = class { }; return [new X().who(), Y.name, typeof Named].join() }
+function c8() { try { class P extends 5 {} } catch (e) { return frames(e) } }
+function c9() { try { class Q extends (Q, Object) {} } catch (e) { return frames(e) } }
+function c10() { var o = { get a() { return 1 }, set a(v) { this.b = v }, m() { return super.toString === Object.prototype.toString } }; o.a = 3; return [o.a, o.b, o.m()].join() }
+function c11() { class M { static #c = 0; static inc() { return ++M.#c } static [Symbol.iterator]() {} static get #g() { return 1 } static gs() { return M.#g } } M.inc(); return M.inc() + "," + typeof M[Symbol.iterator] + M.gs() }
+function c12() { class S { static d() { try { delete super.x } catch (e) { return frames(e) } } static e(k) { try { delete super[k()] } catch (e) { return frames(e) } } } return S.d() + " ; " + S.e(() => "k") }
+class P2 { constructor() { return { from: "P2" } } }
+class R2 extends P2 { constructor(k) { super(); this.k = k; if (k) { this.j = this.k + 1 } } }
+class R3 extends P2 { constructor(k) { if (k) super(); else (() => super())(); this.k = k } }
+function c14() { var a = new R2(1), b = new R3(0), c = new R3(1); return JSON.stringify([a, b, c, a instanceof R2, b instanceof R3]) }
+function c13() { var r = []; class N { #x = 1; static t(o) { try { return o.#x } catch (e) { return frames(e) } } } r.push(N.t(new N()), N.t({}), N.t(1)); return r.join(" ; ") }
+`
+	calls := []string{`c1()`, `c2()`, `c3()`, `c4()`, `c5(0)`, `c5(1)`, `c5(2)`, `c5(3)`, `c5(4)`, `c5(5)`, `c6()`, `c7()`, `c8()`, `c9()`, `c10()`, `c11()`, `c12()`, `c13()`, `c14()`,
+		`class TopA { constructor(v) { this.v = v } } class TopB extends TopA { get w() { return this.v + 1 } } new TopB(1).w`}
+	regDiff(t, src, calls)
+}

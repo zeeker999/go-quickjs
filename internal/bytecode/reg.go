@@ -477,6 +477,79 @@ const (
 	// ReferenceError of Names[B] where R[A] says it did not (assert_resolved).
 	RColdCheckGlobalRef
 	RColdAssertResolved
+	// Classes' (each what the stack form's instruction of the same name
+	// does): RColdNewClass makes R[A] the constructor of a class extending
+	// R[B] (new_class); RColdSetFieldInit gives constructor R[A] the
+	// instances' field initializer R[B] (set_field_init); RColdDefineMethod
+	// defines R[A]'s method Names[C] = R[B], not enumerable (define_method);
+	// RColdClassGetter and RColdClassSetter define accessor R[B] of R[A]
+	// named Names[C], and RColdClassGetterIndex, RColdClassSetterIndex and
+	// RColdClassIndex accessor or method R[C] of R[A] keyed R[B], each not
+	// enumerable, as a class's members are.
+	RColdNewClass
+	RColdSetFieldInit
+	RColdDefineMethod
+	RColdClassGetter
+	RColdClassSetter
+	RColdClassGetterIndex
+	RColdClassSetterIndex
+	RColdClassIndex
+	// Private names': RColdPrivateName, R[A] = a new key of the private
+	// name Names[B] (private_name); RColdNewPrivateMethods, R[A] = a new
+	// list of private methods (new_private_methods); RColdAddPrivateMethod,
+	// RColdAddPrivateGetter and RColdAddPrivateSetter add function R[B] to
+	// list R[A] under key R[C]; RColdInstallPrivateMethods gives this the
+	// methods of list R[A]; RColdDefinePrivate, RColdDefinePrivateMethod,
+	// RColdDefinePrivateGetter and RColdDefinePrivateSetter add field,
+	// method or accessor R[B] to R[A] under key R[C]; RColdGetPrivate,
+	// R[A] = R[B].#R[C]; RColdSetPrivate, R[A].#R[C] = R[B];
+	// RColdPrivateIn, R[A] = whether R[B] has the private member keyed
+	// R[C] (#x in o).
+	RColdPrivateName
+	RColdNewPrivateMethods
+	RColdAddPrivateMethod
+	RColdAddPrivateGetter
+	RColdAddPrivateSetter
+	RColdInstallPrivateMethods
+	RColdDefinePrivate
+	RColdDefinePrivateMethod
+	RColdDefinePrivateGetter
+	RColdDefinePrivateSetter
+	RColdGetPrivate
+	RColdSetPrivate
+	RColdPrivateIn
+	// super's and this's: RColdSuperCall, R[A] = this, bound by a call of
+	// the parent constructor with the B arguments in the registers from C
+	// (super_call); RColdSuperForward with the frame's arguments, as a
+	// derived class's constructor it was not given makes it;
+	// RColdSuperSpread with the elements of array R[B]; RColdSuperGet, R[A]
+	// = super[Names[B]]; RColdSuperSet, super[Names[B]] = R[A];
+	// RColdSuperBase, R[A] = what super reads from, or null
+	// (super_base); RColdSuperGetIndex, R[A] = R[B][R[C]] read with this as
+	// the receiver; RColdSuperSetIndex, R[A][R[B]] = R[C] written with this
+	// as the receiver; RColdThis, R[A] = this, which a derived
+	// constructor's super() binds (this_bound); RColdCheckThis throws
+	// where it is not bound yet (check_this_init); RColdNewTarget, R[A] =
+	// new.target; RColdDerivedRet, R[A] = what a derived constructor
+	// returning R[A] hands back (derived_ret); RColdDeleteSuper throws the
+	// ReferenceError of a super reference deleted.
+	RColdSuperCall
+	RColdSuperForward
+	RColdSuperSpread
+	RColdSuperGet
+	RColdSuperSet
+	RColdSuperBase
+	RColdSuperGetIndex
+	RColdSuperSetIndex
+	RColdThis
+	RColdCheckThis
+	RColdNewTarget
+	RColdDerivedRet
+	RColdDeleteSuper
+	// RColdCloseRegs closes the upvalues closures keep open on the B
+	// registers from R[A], whose bindings a scope's end leaves: the next
+	// entry of the scope makes new ones (close_regs).
+	RColdCloseRegs
 )
 
 // The flags of regexp_lit's X.
@@ -534,6 +607,21 @@ var rColdNames = [...]string{
 	RColdArrayPush: "array_push", RColdArraySpread: "array_spread", RColdCallSpread: "call_spread",
 	RColdAssignConst: "assign_const", RColdCheckGlobalRef: "check_global_ref",
 	RColdAssertResolved: "assert_resolved",
+	RColdNewClass:       "new_class", RColdSetFieldInit: "set_field_init", RColdDefineMethod: "define_method",
+	RColdClassGetter: "class_getter", RColdClassSetter: "class_setter",
+	RColdClassGetterIndex: "class_getter_index", RColdClassSetterIndex: "class_setter_index",
+	RColdClassIndex: "class_index", RColdPrivateName: "private_name",
+	RColdNewPrivateMethods: "new_private_methods", RColdAddPrivateMethod: "add_private_method",
+	RColdAddPrivateGetter: "add_private_getter", RColdAddPrivateSetter: "add_private_setter",
+	RColdInstallPrivateMethods: "install_private_methods", RColdDefinePrivate: "define_private",
+	RColdDefinePrivateMethod: "define_private_method", RColdDefinePrivateGetter: "define_private_getter",
+	RColdDefinePrivateSetter: "define_private_setter", RColdGetPrivate: "get_private",
+	RColdSetPrivate: "set_private", RColdPrivateIn: "private_in", RColdSuperCall: "super_call",
+	RColdSuperForward: "super_forward", RColdSuperSpread: "super_spread", RColdSuperGet: "super_get",
+	RColdSuperSet: "super_set", RColdSuperBase: "super_base", RColdSuperGetIndex: "super_get_index",
+	RColdSuperSetIndex: "super_set_index", RColdThis: "this_bound", RColdCheckThis: "check_this_init",
+	RColdNewTarget: "new_target", RColdDerivedRet: "derived_ret", RColdDeleteSuper: "delete_super",
+	RColdCloseRegs: "close_regs",
 }
 
 func (op RColdOp) String() string {
@@ -642,8 +730,13 @@ type RegCode struct {
 	// sweep of stale slots clears (sweepStaleSlots).
 	BackLive []uint32
 	// KeepsArgs says a frame keeps its arguments as passed, for a rest
-	// parameter (rest_param).
+	// parameter (rest_param) or a super call that hands them on
+	// (super_forward).
 	KeepsArgs bool
+	// ThisRef says the code reads this from the binding a derived
+	// constructor's super() binds (this_bound), not from register 1: a
+	// derived constructor's, or an arrow's written inside one.
+	ThisRef bool
 }
 
 // LiveAt is how many of the frame's registers are live at the head of the
