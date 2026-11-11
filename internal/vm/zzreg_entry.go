@@ -31,6 +31,9 @@ func firstForm(fn *bytecode.Function) *tree {
 			return t
 		}
 	}
+	if regTier.Load() {
+		regFallback(regFallNoCode, fn)
+	}
 	return buildTree(fn)
 }
 
@@ -214,6 +217,7 @@ func regConstOf(consts []bytecode.Constant, w bytecode.RInstr) (Value, bool) {
 func regStmt(c *regCode) tstmt {
 	return func(t *tctx) {
 		r, f := t.r, t.f
+		regFallback(regFallTree, c.fn)
 		if c.wide && (f.thisRef == nil || c.rc.ThisRef) {
 			if f.cl.reg == nil {
 				r.regExtend(f.cl, c)
@@ -238,6 +242,7 @@ func regStmt(c *regCode) tstmt {
 			return
 		}
 		if c.wide || f.thisRef != nil || f.withScopes != nil || f.evalVars != nil {
+			regFallback(regFallStack, c.fn)
 			v, err := r.execute(f)
 			if err != nil {
 				t.throw(err)

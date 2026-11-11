@@ -344,13 +344,18 @@ function f16() { eval("'use strict'; var s = 1"); return typeof s }
 function f17() { var ev = eval; ev("var iv2 = 3"); return typeof iv2 + iv2 }
 function f18() { var f = 88, r = typeof f; eval("r += typeof f; function f() { return 33 }"); return r + f() }
 function f19() { var wf = 1; with ({}) { eval("function wf() { return 2 }") } return typeof wf }
+function f20() { "use strict"; return eval("function sf(a) { return a * 2 }; sf")(4) + typeof sf }
+function f21() { "use strict"; return eval("var n = sf(); function sf() { return 'sf' }; n") }
+function f22() { "use strict"; eval("function st() {\n  throw new Error('e22') }; st()") }
 `
 	calls := []string{
 		`f1()`, `f2()`, `f3()`, `f4()`, `f5({ k: 4 })`, `new C().m()`,
 		`new E().w + "," + new E().m()`, `new f6()`, `f6()`, `f7(1, 2, 3)`,
 		`new Function("a", "b", "return a + b")(2, 3)`, `new Function("return this")() === globalThis`,
 		`f8()`, `try { f9() } catch (e) { frames(e) }`, `f10()`, `f11()`, `f12()`, `f13()`, `f14()`,
-		`f15()`, `f16()`, `f17()`, `f18()`, `f19()`,
+		`f15()`, `f16()`, `f17()`, `f18()`, `f19()`, `f20()`, `f21()`,
+		`try { f22() } catch (e) { frames(e) }`,
+		`(0, eval)("'use strict'; function si() { return 'si' }; si()") + typeof si`,
 		`eval("1; with ({}) { }") + "," + eval("2; with ({}) { 3 }")`,
 		`eval("var gv = 7; gv * 2") + gv`, `(0, eval)("var gi = 8; typeof gi") + gi`,
 		`(0, eval)("'use strict'; var sv = 9; typeof sv") + typeof sv`,
@@ -358,6 +363,28 @@ function f19() { var wf = 1; with ({}) { eval("function wf() { return 2 }") } re
 		`eval("let gl = 1; gl") + typeof gl`,
 		`try { eval("\n\n  null.x") } catch (e) { frames(e) }`,
 		`try { (0, eval)("undefinedName") } catch (e) { frames(e) }`,
+	}
+	regDiffAll(t, src, calls)
+}
+
+// TestRegDiffFarJumps compares functions with jumps past a 16-bit offset,
+// compiled again with every such jump far: an if and an else over long
+// bodies, a loop's test and its backward jump, a break and a continue out
+// of one, a logical operator and a conditional around one, a switch, and a
+// throw's position past them.
+func TestRegDiffFarJumps(t *testing.T) {
+	body := strings.Repeat("a = a + 1 | 0; ", 20000)
+	src := `
+var frames = function (e) { return e.name + ": " + e.message + " | " + e.stack.split("\n").slice(1, 3).map(function (s) { return s.trim() }).join(" | ") };
+function j1(x) { var a = 0; if (x) { ` + body + ` } else { ` + body + ` a = -a } return a }
+function j2(n) { var a = 0, k = 0; for (var i = 0; i < n; i++) { if (i == 2) continue; if (i == 5) break; ` + body + ` k++ } return a + ":" + k }
+function j3(x) { var a = 0; var r = x && (function () { ` + body + ` return a })(); return x ? r : (function () { ` + body + ` return -a })() }
+function j4(x) { var a = 0; switch (x) { case 1: ` + body + ` break; case 2: a = 7; default: a += 1 } return a }
+function j5(x) { var a = 0; while (true) { ` + body + ` if (a > x) throw new Error("j5 " + a) } }
+`
+	calls := []string{
+		`j1(true)`, `j1(false)`, `j2(9)`, `j2(1)`, `j3(1)`, `j3(0)`, `j4(1)`, `j4(2)`, `j4(3)`,
+		`try { j5(30000) } catch (e) { frames(e) }`,
 	}
 	regDiffAll(t, src, calls)
 }

@@ -1250,7 +1250,9 @@ func (r *Runtime) regDirect(o *Object, fd *funcData, c *regCode, this Value, arg
 		this = fd.extra.lexThis
 	} else if c.coerceThis && !this.IsObject() {
 		if !this.IsNullish() {
-			return r.callTree(o, fd, this, args, false)
+			// The this made an object as runFD makes it.
+			v, err, _ := r.regRunFD(fd.closure, this, args, Undefined, o, fd)
+			return v, err
 		}
 		this = r.globalThis
 	}

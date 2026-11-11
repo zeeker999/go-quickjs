@@ -110,14 +110,23 @@ func generate(fn *bytecode.Function, own bool, mk func() *gen) (*gen, bool) {
 	if own {
 		last = 2
 	}
+	far := false
 	for try := 0; ; try++ {
 		g := mk()
 		g.shareSites = try > 0
 		g.ownSites = try > 1
+		g.farJumps = far
 		if !g.layout() {
 			return nil, false
 		}
 		g.body()
+		if g.err == errJumps && !far {
+			// Compiled again, as it was but with its jumps far.
+			far = true
+			try--
+			fn.PropSites, fn.Names, fn.Constants = sites, fn.Names[:names], fn.Constants[:consts]
+			continue
+		}
 		if g.err != errSites || try == last {
 			if g.ownSites && g.err == "" {
 				g.moveStackSites()
@@ -175,6 +184,9 @@ type gen struct {
 	// and the stack form's move past them (moveStackSites).
 	ownSites bool
 	nsites   uint32
+	// farJumps says a jump of a 16-bit offset did not reach: the function
+	// is compiled again with each such jump far (jump).
+	farJumps bool
 
 	code []bytecode.RInstr
 	pos  []int32
@@ -491,7 +503,7 @@ func (g *gen) patch(ref jumpRef, target int) {
 	off := int64(target) - int64(ref.at+1)
 	if ref.short {
 		if off < -1<<15 || off >= 1<<15 {
-			g.fail("a jump past 16 bits")
+			g.fail(errJumps)
 			return
 		}
 		g.code[ref.at] = g.code[ref.at].WithSC(int32(off))
@@ -502,6 +514,15 @@ func (g *gen) patch(ref jumpRef, target int) {
 
 // jump emits w, a jump to m: short says its offset is SC, else BC.
 func (g *gen) jump(w bytecode.RInstr, m *mark, short bool) {
+	if short && g.farJumps {
+		// A jump of a 16-bit offset in a function where one did not
+		// reach: the branch taken to a jmp of 32 bits, past a jmp over it
+		// where it is not.
+		g.emit(w.WithSC(1))
+		g.emit(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0).WithBC(1))
+		g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), m, false)
+		return
+	}
 	at := g.emit(w)
 	ref := jumpRef{at: at, short: short}
 	if m.at >= 0 {
@@ -536,6 +557,10 @@ const errSites = "a site past 16 bits"
 // which leaves a function compiled at its first call the other half for
 // its register form's shared sites.
 const lazySites = 1 << 15
+
+// errJumps is the failure of a jump past a 16-bit offset, which Compile
+// meets by compiling the function again with its jumps far (farJumps).
+const errJumps = "a jump past 16 bits"
 
 // siteKey is what a site an instruction's 16-bit operand names is shared
 // by, where a function has more sites than 16 bits number: the kind of
@@ -699,6 +724,15 @@ func (g *gen) body() {
 	if g.completion > 0 {
 		release()
 		g.topBody()
+		// Strict eval code's function declarations are its own bindings,
+		// made before its first statement as a function's are.
+		for _, s := range lit.Body {
+			if fd := hoistable(s); fd != nil {
+				if slot, ok := g.rec.Funcs[fd]; ok {
+					g.closure(fd.Fn, int(g.slotReg[slot]))
+				}
+			}
+		}
 		g.stmts(lit.Body)
 		g.retReg(g.completion)
 		return

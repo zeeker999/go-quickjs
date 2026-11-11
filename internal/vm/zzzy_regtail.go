@@ -155,7 +155,9 @@ func (r *Runtime) regRerun(f *frame, kind uint8, saved int) (Value, error) {
 // through its fail tail, which regCatch leaves to the caller.
 //
 // regRestartRun runs frame f again with the code a tail call gave it, as
-// many times as its tail calls give it another.
+// many times as its tail calls give it another. Each is a call, counted
+// for the host's interrupt as regEnterW counts one: a loop of calls in
+// tail position is stopped as a loop is.
 //
 //go:noinline
 func (r *Runtime) regRestartRun(f *frame) (Value, error) {
@@ -163,6 +165,11 @@ func (r *Runtime) regRestartRun(f *frame) (Value, error) {
 	for err == errRegRestart {
 		rc := r.regRestart
 		r.regRestart = nil
+		if r.interruptCounter--; r.interruptCounter <= 0 {
+			if err = r.checkInterruptNow(); err != nil {
+				break
+			}
+		}
 		v, err = r.runReg(f, rc, 0)
 	}
 	// The captures of the code the frame was given, which its caller
@@ -380,6 +387,24 @@ func (r *Runtime) regDirectLegacy(o *Object, cl *closure, c *regCode, base, m in
 	e.base, e.callee, e.all = base, o, true
 	e.vals = append(e.vals[:0], args...)
 	v, err := r.regEnterW(o, cl, c, base, m, args, Undefined)
+	if e := &r.regExtras[d]; e.all && e.base == base && e.callee == o {
+		clear(e.vals)
+		e.vals, e.callee, e.all = e.vals[:0], nil, false
+	}
+	return v, err
+}
+
+// regScopedLegacy is regDirectLegacy for a frame regRunFD enters: every
+// argument kept for f.arguments (regLegacyArgs) while the frame runs.
+func (r *Runtime) regScopedLegacy(o *Object, cl *closure, c *regCode, base, m int, args []Value, newTarget Value, with []*Object, evalVars *Object) (Value, error) {
+	d := r.frameDepth
+	for len(r.regExtras) <= d {
+		r.regExtras = append(r.regExtras, regExtra{})
+	}
+	e := &r.regExtras[d]
+	e.base, e.callee, e.all = base, o, true
+	e.vals = append(e.vals[:0], args...)
+	v, err := r.regEnterScoped(o, cl, c, base, m, args, newTarget, with, evalVars)
 	if e := &r.regExtras[d]; e.all && e.base == base && e.callee == o {
 		clear(e.vals)
 		e.vals, e.callee, e.all = e.vals[:0], nil, false
