@@ -40,7 +40,7 @@ func TestRegCompiledLazily(t *testing.T) {
 		}
 	}
 	for _, name := range []string{"never", "used", "twice", "made"} {
-		if f := byName[name]; f == nil || f.RegLater == nil || f.RegCompiled() != nil {
+		if f := byName[name]; f == nil || f.Reg == nil || f.RegCompiled() != nil {
 			t.Fatalf("%s: want register code to compile later, not yet compiled", name)
 		}
 	}

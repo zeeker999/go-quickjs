@@ -491,7 +491,7 @@ func (r *Runtime) regClosure(f *frame, c *regCode, w bytecode.RInstr, wb int) *O
 // register code (regPlan, regDirect, regLeafRun).
 func regMadeClosure(o *Object) *Object {
 	if fd := o.fn(); fd != nil {
-		if fn := fd.closure.fn; fn.Leaf != bytecode.LeafNone && fn.RegLater != nil &&
+		if fn := fd.closure.fn; fn.Leaf != bytecode.LeafNone && fn.Reg != nil &&
 			atomic.LoadPointer(&fn.VMCode) == nil && regTier.Load() {
 			firstTree(fn)
 		}

@@ -507,16 +507,13 @@ type Function struct {
 	ReadsMaker bool
 	// HasYieldStar says the code has a yield* (OpYieldStar).
 	HasYieldStar bool
-	// Reg is a script's or a module's register code, which the register
-	// backend compiled from its AST as the code was compiled, or nil
-	// (docs/register-interpreter.md). Last, so that no field moves. A
-	// function's is compiled at its first call (RegLater); read either
-	// with RegCode.
-	Reg *RegCode
-	// RegLater compiles the function's register code when it is first
-	// asked for (RegCode), or is nil: the register backend is off, or
-	// refused the function at once.
-	RegLater *RegLater
+	// Reg is the code's register code (docs/register-interpreter.md),
+	// read with RegCode: a function's, compiled when it is first asked
+	// for; a script's or a module's, which the register backend compiled
+	// from its AST as the code was compiled (RegReady); or nil, where the
+	// backend is off or refused the code at once. One pointer for both,
+	// and last, so that no field moves and Function stays the size it was.
+	Reg *RegLater
 }
 
 // LineAt returns the source line of the instruction at pc, or 0 if unknown.

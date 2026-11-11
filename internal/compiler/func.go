@@ -46,7 +46,7 @@ func (c *compiler) compileFunctionLiteral(fn *ast.FuncLit, inferredName string) 
 	if rec != nil && !rec.Bail {
 		// Compiled at the function's first call: one never called is
 		// never compiled (docs/register-interpreter.md, "Compiled lazily").
-		compiled.RegLater = regcomp.Later(fn, compiled, rec)
+		compiled.Reg = regcomp.Later(fn, compiled, rec)
 	} else if rec != nil {
 		regcomp.Refuse(compiled, "a name the record resolves two ways")
 	}

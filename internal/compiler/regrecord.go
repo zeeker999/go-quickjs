@@ -76,7 +76,7 @@ func regTopCode(body []ast.Stmt, fn *bytecode.Function, rec *regcomp.Record) {
 	case rec.Bail:
 		regcomp.Refuse(fn, "a name the record resolves two ways")
 	default:
-		fn.Reg = regcomp.CompileTop(body, fn, rec)
+		fn.Reg = bytecode.RegReady(regcomp.CompileTop(body, fn, rec))
 	}
 }
 

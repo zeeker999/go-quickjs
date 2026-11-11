@@ -897,7 +897,8 @@ type RegCode struct {
 
 // RegLater is a function's register code, compiled when it is first asked
 // for: functions never called are never compiled, as V8 compiles lazily.
-// It is safe for concurrent use: a Function is shared by the runtimes that
+// Top-level code's is compiled with the code, and given as one already
+// done (RegReady). It is safe for concurrent use: a Function is shared by the runtimes that
 // run its program.
 type RegLater struct {
 	mu   sync.Mutex
@@ -912,13 +913,21 @@ type RegLater struct {
 // asked for.
 func NewRegLater(make func() *RegCode) *RegLater { return &RegLater{make: make} }
 
+// RegReady returns rc, register code compiled already, as a RegLater, or
+// nil where rc is nil.
+func RegReady(rc *RegCode) *RegLater {
+	if rc == nil {
+		return nil
+	}
+	l := &RegLater{rc: rc}
+	l.done.Store(true)
+	return l
+}
+
 // RegCode is f's register code, compiled now if it is compiled lazily and
 // has not been, or nil where it has none.
 func (f *Function) RegCode() *RegCode {
-	if f.Reg != nil {
-		return f.Reg
-	}
-	l := f.RegLater
+	l := f.Reg
 	if l == nil {
 		return nil
 	}
@@ -937,10 +946,7 @@ func (f *Function) RegCode() *RegCode {
 // RegCompiled is f's register code where it has been compiled, without
 // compiling it, or nil.
 func (f *Function) RegCompiled() *RegCode {
-	if f.Reg != nil {
-		return f.Reg
-	}
-	if l := f.RegLater; l != nil && l.done.Load() {
+	if l := f.Reg; l != nil && l.done.Load() {
 		return l.rc
 	}
 	return nil
