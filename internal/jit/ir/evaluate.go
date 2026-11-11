@@ -2,12 +2,18 @@ package ir
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"unsafe"
 )
 
 // ErrState reports an invalid scratch size or a non-resumable entry PC.
 var ErrState = errors.New("jit IR: invalid execution state")
+
+// ErrGeneric reports a Generic instruction whose check failed after an
+// instruction of its origin had committed: what Go would make there, which
+// the evaluator has no Go for, and no exit may leave (Program's Origin).
+var ErrGeneric = errors.New("jit IR: a generic operation needs Go")
 
 // Evaluate executes a validated program in Go for at most budget instructions.
 // Slots is caller-owned scratch, containing locals followed by operands. Exits
@@ -20,7 +26,7 @@ func (p *Program) Evaluate(slots []Value, pc int, budget uint64) (Exit, error) {
 // EvaluateArrays is the correctness oracle for borrowed dense array storage.
 func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budget uint64) (Exit, error) {
 	if p == nil || len(slots) != p.Locals+p.StackSize || pc < 0 || pc >= len(p.Code) ||
-		len(p.Maps) != len(p.Code) || p.Maps[pc].Depth < 0 {
+		len(p.Maps) != len(p.Code) || p.Maps[pc].Depth < 0 || !p.starts(pc) {
 		return Exit{}, ErrState
 	}
 	read := func(o Operand) Value {
@@ -30,9 +36,18 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 		return slots[o.Slot]
 	}
 	var steps uint64
+	// committed says an instruction of the current origin's has changed
+	// what an exit at it would run again (Program's Origin): a register
+	// written, or memory. Only register code's programs have origins; an
+	// exit is at an origin's start, which a budget's exit and an entry
+	// are too.
+	committed := false
 	for {
+		if p.starts(pc) {
+			committed = false
+		}
 		exit := Exit{Kind: GuardExit, State: p.Maps[pc], Steps: steps}
-		if steps == budget {
+		if steps >= budget && p.starts(pc) {
 			exit.Kind = BudgetExit
 			return exit, nil
 		}
@@ -40,6 +55,39 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 		if in.Check && slots[in.CheckSlot].Kind == Uninitialized {
 			return exit, nil
 		}
+		exit, err := p.evaluate(&in, slots, arrays, read, exit, &pc)
+		if exit.Kind != running {
+			if err != nil || exit.Kind == Returned {
+				return exit, err
+			}
+			if committed && in.Generic {
+				// Go's to make, which the evaluator is not.
+				return Exit{}, ErrGeneric
+			}
+			if committed {
+				return Exit{}, fmt.Errorf("jit IR: pc %d: an exit after register pc %d committed", pc, p.Origin[pc])
+			}
+			return exit, err
+		}
+		if p.Origin != nil {
+			a, b := in.Writes()
+			committed = committed || a >= 0 && a < p.Regs || b >= 0 && b < p.Regs || in.Op == PropertyWrite || in.Op == ArrayWrite
+		}
+		steps++
+	}
+}
+
+// running is the kind evaluate returns where the instruction did not leave,
+// pc then where the code goes on.
+const running ExitKind = 255
+
+// evaluate runs in, the instruction at *pc, with exit its state's exit,
+// and returns that exit, of its kind, where it leaves, or one of the kind
+// running with *pc the next instruction.
+func (p *Program) evaluate(inp *Instruction, slots []Value, arrays []ArrayView, read func(Operand) Value, exit Exit, pcp *int) (Exit, error) {
+	in, pc := *inp, *pcp
+	steps := exit.Steps
+	{
 		next := pc + 1
 		switch in.Op {
 		case Nop:
@@ -346,8 +394,8 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 		default:
 			return Exit{}, ErrState
 		}
-		steps++
-		pc = next
+		*pcp = next
+		return Exit{Kind: running}, nil
 	}
 }
 
