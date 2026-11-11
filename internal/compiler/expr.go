@@ -1067,7 +1067,9 @@ func (c *compiler) compileUnary(n *ast.Unary) {
 				}
 			}
 			if probe >= 0 {
-				c.compileExpr(n.Operand)
+				// The binding past the probe, which has asked the with
+				// objects already: a second probe would ask them again.
+				c.compileIdentReadStatic(id)
 				c.emit(bytecode.OpTypeOf, 0, 0)
 				c.patchWithProbe(probe)
 				return
