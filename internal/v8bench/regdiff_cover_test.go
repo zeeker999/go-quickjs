@@ -366,3 +366,25 @@ function f22() { "use strict"; eval("function st() {\n  throw new Error('e22') }
 	}
 	regDiffAll(t, src, calls)
 }
+
+// TestRegDiffFarJumps compares functions with jumps past a 16-bit offset,
+// compiled again with every such jump far: an if and an else over long
+// bodies, a loop's test and its backward jump, a break and a continue out
+// of one, a logical operator and a conditional around one, a switch, and a
+// throw's position past them.
+func TestRegDiffFarJumps(t *testing.T) {
+	body := strings.Repeat("a = a + 1 | 0; ", 20000)
+	src := `
+var frames = function (e) { return e.name + ": " + e.message + " | " + e.stack.split("\n").slice(1, 3).map(function (s) { return s.trim() }).join(" | ") };
+function j1(x) { var a = 0; if (x) { ` + body + ` } else { ` + body + ` a = -a } return a }
+function j2(n) { var a = 0, k = 0; for (var i = 0; i < n; i++) { if (i == 2) continue; if (i == 5) break; ` + body + ` k++ } return a + ":" + k }
+function j3(x) { var a = 0; var r = x && (function () { ` + body + ` return a })(); return x ? r : (function () { ` + body + ` return -a })() }
+function j4(x) { var a = 0; switch (x) { case 1: ` + body + ` break; case 2: a = 7; default: a += 1 } return a }
+function j5(x) { var a = 0; while (true) { ` + body + ` if (a > x) throw new Error("j5 " + a) } }
+`
+	calls := []string{
+		`j1(true)`, `j1(false)`, `j2(9)`, `j2(1)`, `j3(1)`, `j3(0)`, `j4(1)`, `j4(2)`, `j4(3)`,
+		`try { j5(30000) } catch (e) { frames(e) }`,
+	}
+	regDiffAll(t, src, calls)
+}
