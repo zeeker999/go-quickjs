@@ -76,7 +76,6 @@ var intendedInlining = []string{
 	// set_index's cases: past the budget, each is a call with the pc
 	// live across it.
 	"regTypedAt",
-	"regTypedLoad",
 	"regTypedStore",
 }
 

@@ -7,27 +7,6 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
-// regTypeOf is the index in typeofNames of typeof a value of kind k but
-// an object, whose is its own: undefined for the rest. A switch, not a
-// table: package data moves the runtime's data lines.
-func regTypeOf(k Kind) uint8 {
-	switch k {
-	case KindNumber:
-		return typeNumber
-	case KindNull, KindObject:
-		return typeObject
-	case KindBool:
-		return typeBoolean
-	case KindString:
-		return typeString
-	case KindSymbol:
-		return typeSymbol
-	case KindBigInt:
-		return typeBigInt
-	}
-	return typeUndefined
-}
-
 // regSwitchTable is a switch instruction's table, as the tree tier's
 // switchLookup makes one of the same cases: a number by an array's index
 // where the cases are integers of a small range, by a short list or a map

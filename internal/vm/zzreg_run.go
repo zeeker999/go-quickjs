@@ -128,13 +128,13 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 		case bytecode.RLoadFalse:
 			regs[w.A()] = False
 		case bytecode.RLoadEmpty:
-			regs[w.A()] = Str(emptyString)
+			regs[w.A()] = Value{num: mkTag(KindString, 0), ref: unsafe.Pointer(emptyString)}
 		case bytecode.RLoadUninit:
 			regs[w.A()] = uninitialized
 		case bytecode.RLoadThis:
 			regs[w.A()] = f.this
 		case bytecode.RCheckRef:
-			if regs[w.A()].IsUninitialized() {
+			if regTagged(math.Float64bits(regs[w.A()].num), KindUninitialized) {
 				kept.pc = pc
 				failed = r.regThrowDeadZone(f, c, pc)
 				goto fail
@@ -181,10 +181,31 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 					regs[w.A()] = obj.valAt(int(s.idx))
 					continue
 				}
-				// A prototype's data property the site remembers: a method.
-				if h := s.holder(obj); h != nil && !s.getter {
-					regs[w.A()] = h.valAt(int(s.idx))
-					continue
+				// A prototype's data property the site remembers: a method,
+				// in the holder propCache.holder finds, written out.
+				if obj.shape == s.shape {
+					h := obj
+					if s.cell != nil {
+						h = nil
+						if s.cell.valid {
+							h = s.p2
+						}
+					} else if p1 := s.p1; p1 != nil {
+						h = nil
+						if p1.shape == s.s1 {
+							h = p1
+							if q := s.p2; q != nil {
+								h = nil
+								if q.shape == s.s2 {
+									h = q
+								}
+							}
+						}
+					}
+					if h != nil && !s.getter {
+						regs[w.A()] = h.valAt(int(s.idx))
+						continue
+					}
 				}
 			}
 			goto slow
@@ -198,9 +219,29 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 					p[0], p[1] = obj.valAt(int(s.idx)), o
 					continue
 				}
-				if h := s.holder(obj); h != nil && !s.getter {
-					p[0], p[1] = h.valAt(int(s.idx)), o
-					continue
+				if obj.shape == s.shape {
+					h := obj
+					if s.cell != nil {
+						h = nil
+						if s.cell.valid {
+							h = s.p2
+						}
+					} else if p1 := s.p1; p1 != nil {
+						h = nil
+						if p1.shape == s.s1 {
+							h = p1
+							if q := s.p2; q != nil {
+								h = nil
+								if q.shape == s.s2 {
+									h = q
+								}
+							}
+						}
+					}
+					if h != nil && !s.getter {
+						p[0], p[1] = h.valAt(int(s.idx)), o
+						continue
+					}
 				}
 			}
 			goto slow
@@ -332,17 +373,41 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 			goto jump
 		case bytecode.RJmpF:
 			// What needs a call is the compare's slow path's, so that
-			// nothing of the instruction is live across one.
-			if t, ok := regTruth(regs[w.A()]); !ok {
+			// nothing of the instruction is live across one. ToBoolean of
+			// what needs no call -- a boolean, an object, a number --
+			// written out in each.
+			v := regs[w.A()]
+			var t bool
+			switch b := math.Float64bits(v.num); {
+			case b == trueBits:
+				t = true
+			case b == falseBits:
+			case b == objectBits:
+				t = (*Object)(v.ref).flags&objHTMLDDA == 0
+			case v.IsNumber():
+				t = v.num != 0 && v.num == v.num
+			default:
 				goto cmpSlow
-			} else if !t {
+			}
+			if !t {
 				off = int32(w.BC())
 				goto jump
 			}
 		case bytecode.RJmpT:
-			if t, ok := regTruth(regs[w.A()]); !ok {
+			v := regs[w.A()]
+			var t bool
+			switch b := math.Float64bits(v.num); {
+			case b == trueBits:
+				t = true
+			case b == falseBits:
+			case b == objectBits:
+				t = (*Object)(v.ref).flags&objHTMLDDA == 0
+			case v.IsNumber():
+				t = v.num != 0 && v.num == v.num
+			default:
 				goto cmpSlow
-			} else if t {
+			}
+			if t {
 				off = int32(w.BC())
 				goto jump
 			}
@@ -351,84 +416,96 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 		case bytecode.RRetUndef:
 			return Undefined, nil
 		case bytecode.RAndI:
-			if x, ok := regInt32(regs[w.B()]); ok {
+			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+				x := int32(a.num)
 				regs[w.A()] = Int32(x & w.SC())
 				continue
 			}
 			goto slow
 		case bytecode.ROrI:
-			if x, ok := regInt32(regs[w.B()]); ok {
+			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+				x := int32(a.num)
 				regs[w.A()] = Int32(x | w.SC())
 				continue
 			}
 			goto slow
 		case bytecode.RXorI:
-			if x, ok := regInt32(regs[w.B()]); ok {
+			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+				x := int32(a.num)
 				regs[w.A()] = Int32(x ^ w.SC())
 				continue
 			}
 			goto slow
 		case bytecode.RShlI:
-			if x, ok := regInt32(regs[w.B()]); ok {
+			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+				x := int32(a.num)
 				regs[w.A()] = Int32(x << (uint32(w.SC()) & 31))
 				continue
 			}
 			goto slow
 		case bytecode.RShrI:
-			if x, ok := regInt32(regs[w.B()]); ok {
+			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+				x := int32(a.num)
 				regs[w.A()] = Int32(x >> (uint32(w.SC()) & 31))
 				continue
 			}
 			goto slow
 		case bytecode.RUShrI:
-			if x, ok := regInt32(regs[w.B()]); ok {
+			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+				x := int32(a.num)
 				regs[w.A()] = Uint32(uint32(x) >> (uint32(w.SC()) & 31))
 				continue
 			}
 			goto slow
 		case bytecode.RBitAnd:
-			if x, ok := regInt32(regs[w.B()]); ok {
-				if y, ok := regInt32(regs[w.C()]); ok {
+			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+				if b := regs[w.C()]; b.IsNumber() && regIsInt32(b.num) {
+					x, y := int32(a.num), int32(b.num)
 					regs[w.A()] = Int32(x & y)
 					continue
 				}
 			}
 			goto slow
 		case bytecode.RBitOr:
-			if x, ok := regInt32(regs[w.B()]); ok {
-				if y, ok := regInt32(regs[w.C()]); ok {
+			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+				if b := regs[w.C()]; b.IsNumber() && regIsInt32(b.num) {
+					x, y := int32(a.num), int32(b.num)
 					regs[w.A()] = Int32(x | y)
 					continue
 				}
 			}
 			goto slow
 		case bytecode.RBitXor:
-			if x, ok := regInt32(regs[w.B()]); ok {
-				if y, ok := regInt32(regs[w.C()]); ok {
+			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+				if b := regs[w.C()]; b.IsNumber() && regIsInt32(b.num) {
+					x, y := int32(a.num), int32(b.num)
 					regs[w.A()] = Int32(x ^ y)
 					continue
 				}
 			}
 			goto slow
 		case bytecode.RShl:
-			if x, ok := regInt32(regs[w.B()]); ok {
-				if y, ok := regInt32(regs[w.C()]); ok {
+			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+				if b := regs[w.C()]; b.IsNumber() && regIsInt32(b.num) {
+					x, y := int32(a.num), int32(b.num)
 					regs[w.A()] = Int32(x << (uint32(y) & 31))
 					continue
 				}
 			}
 			goto slow
 		case bytecode.RShr:
-			if x, ok := regInt32(regs[w.B()]); ok {
-				if y, ok := regInt32(regs[w.C()]); ok {
+			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+				if b := regs[w.C()]; b.IsNumber() && regIsInt32(b.num) {
+					x, y := int32(a.num), int32(b.num)
 					regs[w.A()] = Int32(x >> (uint32(y) & 31))
 					continue
 				}
 			}
 			goto slow
 		case bytecode.RUShr:
-			if x, ok := regInt32(regs[w.B()]); ok {
-				if y, ok := regInt32(regs[w.C()]); ok {
+			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+				if b := regs[w.C()]; b.IsNumber() && regIsInt32(b.num) {
+					x, y := int32(a.num), int32(b.num)
 					regs[w.A()] = Uint32(uint32(x) >> (uint32(y) & 31))
 					continue
 				}
@@ -650,7 +727,10 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 		case bytecode.RJNull, bytecode.RJNotNull:
 			// An object other than document.all's stand-in is not == null.
 			if a := regs[w.A()]; !a.IsObject() || a.object().flags&objHTMLDDA == 0 {
-				if a.IsNullish() == (w.Op() == bytecode.RJNull) {
+				// Value.IsNullish, written out.
+				b := math.Float64bits(a.num)
+				k := Kind(b & 0xFF)
+				if (b&tagMask == tagBase && (k == KindNull || k == KindUndefined)) == (w.Op() == bytecode.RJNull) {
 					goto taken
 				}
 				continue
@@ -724,10 +804,16 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 			goto slow
 		case bytecode.RGetLength:
 			if o := regs[w.B()]; o.IsObject() && o.object().class == ClassArray {
-				regs[w.A()] = Uint32(o.object().arrayLength())
+				// Object.arrayLength, written out.
+				obj := o.object()
+				n := uint32(len(obj.elemsOf()))
+				if obj.flags&objHasSparseElements != 0 && obj.arrayExt().arrayLen > n {
+					n = obj.arrayExt().arrayLen
+				}
+				regs[w.A()] = Uint32(n)
 				continue
-			} else if o.IsString() {
-				regs[w.A()] = Int(o.String().Len())
+			} else if regTagged(math.Float64bits(o.num), KindString) {
+				regs[w.A()] = Int((*String)(o.ref).Len())
 				continue
 			}
 			goto slow
@@ -771,7 +857,32 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 			// an ordinary object's; a proxy and document.all's kind are
 			// the slow path's.
 			v := regs[w.A()]
-			t := regTypeOf(v.Kind())
+			// typeof's answer of v's kind (Value.Kind, regTypeOf), written
+			// out.
+			var k Kind
+			switch bits := math.Float64bits(v.num); {
+			case bits>>51 != tagBase>>51:
+				k = KindNumber
+			case bits >= heapBigBits:
+				k = KindBigInt
+			default:
+				k = Kind(bits & 0xFF)
+			}
+			t := uint8(typeUndefined)
+			switch k {
+			case KindNumber:
+				t = typeNumber
+			case KindNull, KindObject:
+				t = typeObject
+			case KindBool:
+				t = typeBoolean
+			case KindString:
+				t = typeString
+			case KindSymbol:
+				t = typeSymbol
+			case KindBigInt:
+				t = typeBigInt
+			}
 			if v.IsObject() {
 				o := v.object()
 				d := o.dataOf()
@@ -796,14 +907,14 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 		case bytecode.RKeyOfBase:
 			// A key whose conversion runs nothing is left as it is, and a
 			// null or undefined object is the read's to report.
-			if v := regs[w.C()]; v.IsString() || v.IsNumber() || v.IsSymbol() {
+			if v := regs[w.C()]; regTagged(math.Float64bits(v.num), KindString) || v.IsNumber() || regTagged(math.Float64bits(v.num), KindSymbol) {
 				regs[w.A()] = v
 				continue
 			}
 			goto slow
 		case bytecode.RStrPart:
 			// A string or a number is joined as it is.
-			if v := regs[w.A()]; v.IsString() || v.IsNumber() {
+			if v := regs[w.A()]; regTagged(math.Float64bits(v.num), KindString) || v.IsNumber() {
 				continue
 			}
 			goto slow
@@ -817,8 +928,8 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 		case bytecode.RStrFreeze:
 			// A read of a binding an append grows, which what read it may
 			// keep: only a string an append owns is written.
-			if v := regs[w.A()]; v.IsString() {
-				if s := v.String(); s.building {
+			if v := regs[w.A()]; regTagged(math.Float64bits(v.num), KindString) {
+				if s := (*String)(v.ref); s.building {
 					s.building = false
 				}
 			}
@@ -877,7 +988,13 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 					goto fail
 				}
 				pc = kept.pc
-				off = regJumpOff(regAt(code, pc-1))
+				// regJumpOff, written out.
+				switch w := regAt(code, pc-1); w.Op() {
+				case bytecode.RJmp, bytecode.RJmpF, bytecode.RJmpT:
+					off = int32(w.BC())
+				default:
+					off = w.SC()
+				}
 			}
 		}
 		pc += int(off)
@@ -888,15 +1005,21 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 		if t, err := r.regSlow(f, c, &kept, regs); err != nil {
 			failed = err
 			goto fail
-		} else if pc = kept.pc; t.sameBits(True) {
+		} else if pc = kept.pc; math.Float64bits(t.num) == math.Float64bits(True.num) && t.ref == True.ref {
 			w = regAt(code, pc-1)
-			off = regJumpOff(w)
+			switch w.Op() {
+			case bytecode.RJmp, bytecode.RJmpF, bytecode.RJmpT:
+				off = int32(w.BC())
+			default:
+				off = w.SC()
+			}
 			goto jump
 		}
 		continue
 	typed:
 		// An element get_index and the immediate forms have not found
-		// dense: a typed array's, read here (regTypedAt, regTypedLoad),
+		// dense: a typed array's, read here (regTypedAt, regTypedLoad,
+		// written out),
 		// the operation and the key decoded again as a miss path may,
 		// or out of line (regElemMiss), which set_index_imm's store
 		// takes. Here rather than in get_index's case, whose code the
@@ -908,10 +1031,37 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 				if w.Op() == bytecode.RGetIndex {
 					k = regs[w.C()].num
 				}
-				if t, p := regTypedAt(r, o.Object(), k); t != nil {
-					if f, ok := regTypedLoad(t, p); ok {
-						regs[w.A()] = regNum(f)
-						continue
+				if obj := o.Object(); obj.class == ClassTypedArray {
+					if t, ok := obj.dataOf().(*typedArrayData); ok && t.epoch == r.typedEpoch && t.kind <= elemFloat64 {
+						if i := uint32(k); float64(i) == k && uint(i) < uint(t.length) {
+							p := unsafe.Add(t.data, uintptr(i)<<elemShifts[t.kind&15])
+							var n float64
+							ok := true
+							switch t.kind {
+							case elemInt32:
+								n = float64(*(*int32)(p))
+							case elemUint8, elemUint8Clamped:
+								n = float64(*(*uint8)(p))
+							case elemUint16:
+								n = float64(*(*uint16)(p))
+							case elemInt16:
+								n = float64(*(*int16)(p))
+							case elemInt8:
+								n = float64(*(*int8)(p))
+							case elemUint32:
+								n = float64(*(*uint32)(p))
+							case elemFloat64:
+								n = *(*float64)(p)
+							case elemFloat32:
+								n = float64(*(*float32)(p))
+							default:
+								ok = false
+							}
+							if ok {
+								regs[w.A()] = regNum(n)
+								continue
+							}
+						}
 					}
 				}
 			}

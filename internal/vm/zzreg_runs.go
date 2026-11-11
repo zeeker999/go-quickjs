@@ -630,22 +630,6 @@ var regTrace = os.Getenv("QJS_REGTRACE") != ""
 // regDump prints each function's register code as it is made.
 var regDump = os.Getenv("QJS_REGDUMP") != ""
 
-// regTruth is ToBoolean of what needs no call -- a boolean, an object, a
-// number -- and ok false for anything else.
-func regTruth(v Value) (t, ok bool) {
-	switch b := math.Float64bits(v.num); {
-	case b == trueBits:
-		return true, true
-	case b == falseBits:
-		return false, true
-	case b == objectBits:
-		return (*Object)(v.ref).flags&objHTMLDDA == 0, true
-	case v.IsNumber():
-		return v.num != 0 && v.num == v.num, true
-	}
-	return false, false
-}
-
 // regWordKind reports whether a value of tag bits is one that is === only
 // to a value of the same words: undefined, null, a boolean, a symbol or an
 // object.
@@ -683,18 +667,26 @@ func regNum(f float64) Value {
 	return Value{num: f}
 }
 
-// regInt32 is v as an int32, where it is a number that is one exactly:
-// what a bitwise operator's fast path takes without converting. The tag
-// test is not redundant in time: without it (a NaN fails the round trip's
-// compare as well), loop_int32 was 8.1% slower at every placement.
-func regInt32(v Value) (int32, bool) {
-	if v.IsNumber() {
-		f := v.Number()
-		if x := int32(f); float64(x) == f {
-			return x, true
-		}
-	}
-	return 0, false
+// regIsInt32 reports whether f, a number's, is an int32 exactly: what a
+// bitwise operator's fast path takes without converting, once its case
+// has seen the operand is a number (IsNumber). The tag test is not
+// redundant in time: without it (a NaN fails the round trip's compare as
+// well), loop_int32 was 8.1% slower at every placement. A bool, so that
+// the case converts once more for the value and no phi of it and 0 is
+// left to Go's branch elimination, which made it conditional moves.
+//
+// It and regTagged are runReg's own helpers, each of an inlining cost of
+// 20 or less, which Go inlines into a big function as well
+// (docs/register-interpreter.md, "The loop"): what costs more is written
+// out in the loop.
+func regIsInt32(f float64) bool {
+	return float64(int32(f)) == f
+}
+
+// regTagged reports whether bits, a value's, are a tagged value of kind k:
+// Value.isTag of bits the caller has read.
+func regTagged(bits uint64, k Kind) bool {
+	return bits&tagMask == tagBase && Kind(bits&0xFF) == k
 }
 
 // regKept is what the loop keeps in memory across a call: a struct Go does
@@ -711,10 +703,12 @@ type regKept struct {
 // written as native code does (cacheView): from the view's data pointer,
 // below its length, while its epoch is the runtime's. Nil -- another
 // object, a key that is no index in the view, a stale view, a BigInt
-// kind's -- leaves the element to regElemMiss. get_index's and set_index's cases call it once
-// the dense element has missed, so that asm.js-style heap reads and writes
-// make no call. It, regTypedLoad and regTypedStore are three so that each
-// stays below Go's inlining budget, which TestIntendedInlining pins.
+// kind's -- leaves the element to regElemMiss. regSetMiss calls it once a
+// set_index's dense element has missed, so that asm.js-style heap writes
+// make no call; runReg's typed tail has its reads written out, as it,
+// regTypedStore and a load by the element's kind would cost past the 20
+// Go inlines into a big function. It and regTypedStore are two so that
+// each stays below Go's inlining budget, which TestIntendedInlining pins.
 func regTypedAt(r *Runtime, o *Object, k float64) (*typedArrayData, unsafe.Pointer) {
 	if o.class == ClassTypedArray {
 		if t, ok := o.dataOf().(*typedArrayData); ok && t.epoch == r.typedEpoch && t.kind <= elemFloat64 {
@@ -726,35 +720,9 @@ func regTypedAt(r *Runtime, o *Object, k float64) (*typedArrayData, unsafe.Point
 	return nil, nil
 }
 
-// regTypedLoad is the element at p of every kind but Float16Array's, as
-// a float64 the caller makes a Value with regNum, whose NaN check is the
-// float kinds' canonical NaN: in here it took the helper past Go's
-// inlining budget.
-func regTypedLoad(t *typedArrayData, p unsafe.Pointer) (float64, bool) {
-	switch t.kind {
-	case elemInt32:
-		return float64(*(*int32)(p)), true
-	case elemUint8, elemUint8Clamped:
-		return float64(*(*uint8)(p)), true
-	case elemUint16:
-		return float64(*(*uint16)(p)), true
-	case elemInt16:
-		return float64(*(*int16)(p)), true
-	case elemInt8:
-		return float64(*(*int8)(p)), true
-	case elemUint32:
-		return float64(*(*uint32)(p)), true
-	case elemFloat64:
-		return *(*float64)(p), true
-	case elemFloat32:
-		return float64(*(*float32)(p)), true
-	}
-	return 0, false
-}
-
 // regTypedStore stores n as the element at p: a float kind's any number,
 // an integer kind's (Uint8ClampedArray's aside) ToInt32(n) wrapped to its
-// width, for n below 2^63 in magnitude, as regInt32 takes it. False -- a
+// width, for n below 2^63 in magnitude, as regIsInt32 takes it. False -- a
 // view of an immutable buffer, another kind, a NaN, an infinity or a
 // larger number -- leaves the store to regSetMiss.
 func regTypedStore(t *typedArrayData, p unsafe.Pointer, n float64) bool {
