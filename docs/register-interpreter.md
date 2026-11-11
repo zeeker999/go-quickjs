@@ -1302,7 +1302,17 @@ regdiff cases and test262 in register mode on its directories:
    yield* and for await as loops of the code's own, an await's job going
    on in place at a settled value, and a for-of's step of a register
    generator with no recover. The JIT learns no register generator
-   (`jitGenSeen`, `jitGenMakeable`). Their arguments object is made by
+   (`jitGenSeen`, `jitGenMakeable`).
+3b. **Captured lexical bindings in loops** (878, with catch bindings and
+   a head expression's closure of the head's binding) -- done: each
+   turn's binding is a new one by closing the captures open on its
+   register (`close_regs`) where the binding is made again -- a block's
+   entry, a for-of or for-in turn's head, a catch clause's entry, its
+   value waiting in a temporary meanwhile -- so that the closures of the
+   turns before keep theirs, closed. A for head's let is copied from turn
+   to turn (CreatePerIterationEnvironment): closed after the head's
+   initialization and at each turn's end, before the update. A head
+   expression's closure of the head's binding reads it in its dead zone. Their arguments object is made by
    the creation's run, from the arguments the generator keeps; a mapped
    one's aliases are captures of the parameters' registers, which move
    with the window.
@@ -1400,7 +1410,7 @@ regdiff cases and test262 in register mode on its directories:
    variables, a with or an Annex B function, 11 more): binding
    descriptors for what an eval can reach.
 9. **`using`** (41), labelled blocks (11), declarations in switches (8),
-   function declarations in blocks (15), captured loop bindings (7), the
+   function declarations in blocks (15), the
    finally depth (completion dispatch, no cap), the debugger's code
    (statement markers in register code), and the caps.
 

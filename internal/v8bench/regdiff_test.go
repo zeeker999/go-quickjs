@@ -1363,3 +1363,28 @@ function runAsync() { out = []; log = []; settle("a1", a1(3)); settle("a2", a2()
 		`runAsync()`, `out.sort().join(" ; ") + " // " + log.join()`}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffLoopBindings compares lexical bindings a closure keeps in a
+// loop, each turn's its own: for heads' let, copied from turn to turn,
+// for-of and for-in heads, blocks of a loop's body, catch clauses, and a
+// head's expression's closure of the binding in its dead zone.
+func TestRegDiffLoopBindings(t *testing.T) {
+	src := `
+function t1() { var fs = []; for (let i = 0; i < 3; i++) { fs.push(() => i); } return fs.map(f => f()).join() }
+function t2() { var fs = []; for (let i = 0, g = () => i; i < 3; i++) { fs.push(() => i + "/" + g()); if (i == 1) continue; } return fs.map(f => f()).join() }
+function t3() { var fs = []; for (const x of [1, 2, 3]) fs.push(() => x); for (let [a, b = a] of [[1, 2], [3]]) fs.push(() => a + b); return fs.map(f => f()).join() }
+function t4() { var fs = []; var i = 0; while (i < 3) { let j = i * 10; fs.push(() => j); j++; i++ } return fs.map(f => f()).join() }
+function t5() { var fs = []; for (var i = 0; i < 3; i++) { try { throw i } catch (e) { fs.push(() => e); e = -1 } } for (var i = 0; i < 2; i++) { try { throw [i] } catch ([e]) { fs.push(() => e) } } return fs.map(f => f()).join() }
+function t6() { var fs = []; for (let i = 0; i < 3; i++) { fs.push(() => i++); } return fs.map(f => f()).join() + ";" + fs.map(f => f()).join() }
+function t7() { var fs = []; for (var k in {a: 1, b: 2}) { let kk = k; fs.push(() => kk) } for (const k in {c: 1, d: 2}) fs.push(() => k); return fs.map(f => f()).join() }
+function t8() { var fs = []; for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) fs.push(() => i * 10 + j); return fs.map(f => f()).join() }
+function t9() { var fs = []; outer: for (let i = 0; i < 3; i++) { for (const x of [1, 2]) { fs.push(() => i + ":" + x); if (x == 1) continue outer } } return fs.map(f => f()).join() }
+function t10() { var g; try { for (const x of (g = () => x, [1])) {} } catch (e) { } try { return g() } catch (e) { return e.name + ": " + e.message } }
+function t11() { var fs = []; for (let i = 0; i < 3; i++) { let r = () => i; if (i == 1) { fs.push(r); break } fs.push(r) } return fs.map(f => f()).join() }
+function* t12g() { for (let i = 0; i < 3; i++) yield () => i }
+function t12() { return [...t12g()].map(f => f()).join() }
+function t13() { var fs = []; for (let i = 0; i < 2; i++) { do { let k = i; fs.push(() => k) } while (false) } return fs.map(f => f()).join() }
+`
+	calls := []string{`t1()`, `t2()`, `t3()`, `t4()`, `t5()`, `t6()`, `t7()`, `t8()`, `t9()`, `t10()`, `t11()`, `t12()`, `t13()`}
+	regDiff(t, src, calls)
+}

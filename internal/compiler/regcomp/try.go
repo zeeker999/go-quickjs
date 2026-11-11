@@ -192,6 +192,7 @@ func (g *gen) tryStmt(n *ast.TryStmt) {
 		g.unprotect(cat)
 		g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), after, false)
 		g.bind(cat.to)
+		g.freshCatch(n.Catch, cat.reg)
 		if pat := n.Catch.Param; pat != nil {
 			if _, ok := pat.(*ast.Ident); !ok {
 				g.patternBindings(pat)
@@ -235,9 +236,10 @@ func (g *gen) catchReg(c *ast.CatchClause) (int, bool) {
 		return g.alloc(), true
 	}
 	if g.fn.Locals[slot].Captured && g.inLoop() {
-		// Each turn's binding is a new one a closure keeps.
-		g.fail("a captured catch binding in a loop")
-		return 0, false
+		// Each turn's binding is a new one a closure keeps: the value
+		// waits in a temporary until the clause closes the binding of the
+		// turn before (freshCatch).
+		return g.alloc(), true
 	}
 	return int(g.slotReg[slot]), true
 }
@@ -272,6 +274,7 @@ func (g *gen) finallyAround() bool {
 func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in bool, label string, pos int) {
 	var target ast.Expr
 	lexical := false
+	fresh := -1
 	switch l := left.(type) {
 	case *ast.VarDecl:
 		if l.Kind != ast.DeclVar && l.Kind != ast.DeclLet && l.Kind != ast.DeclConst || len(l.Decls) != 1 || l.Decls[0].Init != nil {
@@ -296,20 +299,19 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 	switch res.Kind {
 	case ResLocal, ResLocalInit:
 		slot := int(res.Index)
-		if lexical && g.fn.Locals[slot].Captured {
-			// Each turn's binding is a new one a closure keeps.
-			g.fail("a captured lexical binding in a loop")
-			return
-		}
 		dst = int(g.slotReg[slot])
+		if lexical && g.fn.Locals[slot].Captured {
+			// Each turn's binding is a new one a closure keeps: closed at
+			// the head of each turn, the closures of the turns before keep
+			// theirs.
+			fresh = dst
+		}
 		if lexical {
 			// The head's expression has a binding of the name of its own,
-			// in its dead zone for good: a closure there that captures it
-			// keeps the stack form's.
+			// in its dead zone for good, where a closure there reads it.
 			for i, l := range g.fn.Locals {
-				if i != slot && l.Name == id.Name && l.Captured {
-					g.fail("a closure of a for-of or for-in head's binding")
-					return
+				if i != slot && l.Name == id.Name && l.Captured && i < len(g.slotReg) && g.slotReg[i] >= 0 {
+					g.emit(bytecode.MakeR(bytecode.RLoadUninit, 0, r16(int(g.slotReg[i])), 0, 0))
 				}
 			}
 		}
@@ -328,6 +330,9 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 	g.emit(bytecode.MakeR(bytecode.RCold, uint8(cursorStart(await, in)), r16(cursor), r16(src), 0))
 	l := g.pushLoop(label)
 	g.bind(l.cont)
+	if fresh >= 0 {
+		g.closeRegs([]int{fresh})
+	}
 	val := dst
 	if val < 0 {
 		val = g.alloc()
@@ -362,12 +367,6 @@ func (g *gen) forOfPattern(target ast.Expr, right ast.Expr, body ast.Stmt, await
 	if lexical {
 		// The head's expression sees the bindings in their dead zone; a
 		// closure's binding is each turn's own.
-		for _, id := range patternNames(target, nil) {
-			if res, ok := g.rec.Write[id]; ok && res.Kind == ResLocalInit && g.fn.Locals[res.Index].Captured {
-				g.fail("a captured lexical binding in a loop")
-				return
-			}
-		}
 		g.patternBindings(target)
 	}
 	src := g.expr(right, -1)
@@ -376,6 +375,11 @@ func (g *gen) forOfPattern(target ast.Expr, right ast.Expr, body ast.Stmt, await
 	g.emit(bytecode.MakeR(bytecode.RCold, uint8(cursorStart(await, in)), r16(cursor), r16(src), 0))
 	l := g.pushLoop(label)
 	g.bind(l.cont)
+	if lexical {
+		// Each turn's bindings are new ones, in their dead zone until the
+		// pattern initializes them.
+		g.patternBindings(target)
+	}
 	val := g.alloc()
 	g.at(pos)
 	g.iterStep(val, cursor, l.brk, await)
@@ -459,4 +463,20 @@ func (g *gen) asyncClose(cursor int) {
 	g.cold(bytecode.RColdAwait, v, v, 0)
 	g.cold(bytecode.RColdAsyncIterCheck, v, 0, 0)
 	g.bind(skip)
+}
+
+// freshCatch gives a catch clause in a loop whose binding a closure keeps
+// its value, from reg, the clause's register, once the captures of the
+// turn before's binding are closed.
+func (g *gen) freshCatch(c *ast.CatchClause, reg int) {
+	if _, ok := c.Param.(*ast.Ident); !ok {
+		return
+	}
+	slot, ok := g.rec.Catches[c]
+	if !ok || int(slot) >= len(g.slotReg) || g.slotReg[slot] < 0 || !g.fn.Locals[slot].Captured || !g.inLoop() {
+		return
+	}
+	b := int(g.slotReg[slot])
+	g.closeRegs([]int{b})
+	g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(b), r16(reg), 0))
 }

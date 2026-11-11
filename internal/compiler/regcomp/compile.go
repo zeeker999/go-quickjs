@@ -877,9 +877,9 @@ func (g *gen) enterBlock(list []ast.Stmt) {
 			}
 			slot := int(res.Index)
 			if g.inLoop() && g.fn.Locals[slot].Captured {
-				// Each turn's binding is a new one a closure keeps.
-				g.fail("a captured lexical binding in a loop")
-				return
+				// Each turn's binding is a new one a closure keeps: the
+				// closures of the turns before keep theirs, closed.
+				g.cold(bytecode.RColdCloseRegs, int(g.slotReg[slot]), 1, 0)
 			}
 			if g.tdz[slot] || g.fn.Locals[slot].Captured {
 				// A closure may read it before its declaration runs.
@@ -1103,11 +1103,20 @@ func (g *gen) forStmt(n *ast.ForStmt, label string) {
 	// The head's bindings are each turn's own where a closure captures
 	// them; the check is made as the loop is entered.
 	l := g.pushLoop(label)
+	var copies []int
 	if n.Init != nil {
 		switch init := n.Init.(type) {
 		case *ast.VarDecl:
 			g.enterBlock([]ast.Stmt{init})
 			g.varDecl(init)
+			// A let binding a closure keeps is each turn's own, copied
+			// from the turn before's (CreatePerIterationEnvironment):
+			// closed after the head's initialization and at each turn's
+			// end, the closures made before keep theirs.
+			if init.Kind == ast.DeclLet {
+				copies = g.capturedRegs(init)
+				g.closeRegs(copies)
+			}
 		case *ast.ExprStmt:
 			g.discard(init.X)
 		default:
@@ -1121,6 +1130,7 @@ func (g *gen) forStmt(n *ast.ForStmt, label string) {
 	g.bind(body)
 	g.stmt(n.Body)
 	g.bind(l.cont)
+	g.closeRegs(copies)
 	if n.Update != nil {
 		mark := g.top
 		g.discard(n.Update)
@@ -3386,4 +3396,29 @@ func (g *gen) localReg() []int32 {
 		return nil
 	}
 	return append([]int32(nil), g.slotReg...)
+}
+
+// capturedRegs is the registers of the bindings a lexical declaration
+// declares that a closure keeps.
+func (g *gen) capturedRegs(d *ast.VarDecl) []int {
+	var ids []*ast.Ident
+	for _, x := range d.Decls {
+		ids = patternNames(x.Target, ids)
+	}
+	var regs []int
+	for _, id := range ids {
+		if res, ok := g.rec.Write[id]; ok && res.Kind == ResLocalInit && g.fn.Locals[res.Index].Captured && g.slotReg[res.Index] >= 0 {
+			regs = append(regs, int(g.slotReg[res.Index]))
+		}
+	}
+	return regs
+}
+
+// closeRegs closes the captures open on each of regs (close_regs): the
+// closures that keep them keep the values they have, and the next closure
+// made opens new ones.
+func (g *gen) closeRegs(regs []int) {
+	for _, r := range regs {
+		g.cold(bytecode.RColdCloseRegs, r, 1, 0)
+	}
 }

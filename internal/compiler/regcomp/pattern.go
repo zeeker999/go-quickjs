@@ -385,8 +385,9 @@ func (g *gen) patternSource(e ast.Expr) int {
 
 // patternBindings puts the lexical bindings target declares in their dead
 // zone where a read checks it, before what runs ahead of their
-// initialization, and refuses the ones a closure keeps in a loop, of which
-// each turn's is a new one.
+// initialization; in a loop, where each turn's binding is a new one, the
+// ones a closure keeps are closed first, which leaves the closures of the
+// turns before with theirs (close_regs).
 func (g *gen) patternBindings(target ast.Expr) {
 	for _, id := range patternNames(target, nil) {
 		res, ok := g.rec.Write[id]
@@ -395,8 +396,7 @@ func (g *gen) patternBindings(target ast.Expr) {
 		}
 		slot := int(res.Index)
 		if g.fn.Locals[slot].Captured && g.inLoop() {
-			g.fail("a captured lexical binding in a loop")
-			return
+			g.cold(bytecode.RColdCloseRegs, int(g.slotReg[slot]), 1, 0)
 		}
 		if g.tdz[slot] || g.fn.Locals[slot].Captured {
 			g.emit(bytecode.MakeR(bytecode.RLoadUninit, 0, r16(int(g.slotReg[slot])), 0, 0))
