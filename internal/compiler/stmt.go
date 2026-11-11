@@ -157,19 +157,6 @@ func (c *compiler) predeclareFunction(h hoistedFunc) {
 		return
 	}
 
-	// Annex B: a plain function declared inside a block is also assigned to a
-	// var-scoped binding of the same name, which is what makes
-	//
-	//	function outer() { { function f() {} } return f; }
-	//
-	// work in sloppy mode. The binding is created by hoisting like any other
-	// var; only the assignment happens here, when the declaration is reached.
-	if c.annexB[h.fd] {
-		if c.reg != nil {
-			c.reg.Bail = true
-		}
-		c.emitAnnexBFunctionAlias(h.name)
-	}
 	if c.reg != nil {
 		c.reg.Funcs[h.fd] = h.slot
 	}
@@ -357,7 +344,23 @@ func (c *compiler) compileStatement(s ast.Stmt) {
 		c.compileVarDecl(n)
 
 	case *ast.FuncDecl:
-		// Already emitted by predeclareFunction.
+		// Made by predeclareFunction as its block was entered. Annex B: a
+		// plain function declared inside a block is also assigned to a
+		// var-scoped binding of the same name, which is what makes
+		//
+		//	function outer() { { function f() {} } return f; }
+		//
+		// work in sloppy mode. The binding is created by hoisting like any
+		// other var; the assignment, of what the block's binding holds,
+		// happens here, when the declaration is evaluated (B.3.3.1).
+		if c.annexB[n] {
+			if c.reg != nil {
+				c.reg.Bail = true
+			}
+			c.compileIdentReadStatic(n.Fn.Name)
+			c.emitAnnexBFunctionAlias(n.Fn.Name.Name)
+			c.emit(bytecode.OpDrop, 0, 0)
+		}
 
 	case *ast.ClassDecl:
 		c.compileClass(n.Class, n.Class.Name.Name)
