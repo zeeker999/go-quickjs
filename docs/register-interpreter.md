@@ -455,6 +455,16 @@ the ones Go allows:
   layout lock's lever Q (`zzreg_ru_layoutpad.go`, the anchor `runReg`)
   puts the block at a fixed address modulo 4 KB whatever changes before
   it; the placements' pad before it (`zzreg_ru_pad.go`) moves it whole.
+  The block is two files: `zzreg_run.go`, `runReg` to `regSlow`, and
+  `zzreg_runs.go`, `regSlow`'s operators on, `regBinImm` first; lever P
+  (`zzreg_run_layoutpad.go`, the anchor `regBinImm`) between them keeps
+  the second half where it is, so that a case added to `regSlow` or to
+  `runReg` moves nothing after it. Its target is 64 bytes past where
+  `regBinImm` was before the split, a pad of a few stores: at the old
+  place, a pad of 4 KB, every function and variable after it the same
+  modulo 4 KB, `loop_arith` was 9.2% and `loop_int32` 5.2% slower at
+  every placement, with `runReg` -- all those loops run -- at the same
+  address and the same code. The 64 bytes measured level.
   It stays where the register files were, after the JIT's, not first in
   the package: there it moves none of the old tiers' code, whose anchors
   all come before it, and only the A pad would change to take the
@@ -476,8 +486,8 @@ the ones Go allows:
   and moves the hot cases' code against each other: `private_field`'s
   case moved `crypto_am3`'s loop (8.6% at every placement), a `regSlow`
   case the block after it. The anchor after `regSlow` (lever P) fixes
-  the second; the first would need a lock inside the loop. Its design:
-  the anchors are the hot cases' entries -- `add`, `get_index`, `jlt`,
+  the second, and is built; the first would need a lock inside the
+  loop. Its design: the anchors are the hot cases' entries -- `add`, `get_index`, `jlt`,
   `call_w`, the dispatch -- read from the loop's jump table, which Go
   emits as a read-only table of the cases' addresses, so `layoutpad`
   would read the table's symbol and each entry's target from the build;
