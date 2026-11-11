@@ -308,6 +308,9 @@ func (p *Program) evaluate(inp *Instruction, slots []Value, arrays []ArrayView, 
 			}
 			v, ok := binary(in.Operator, a, b)
 			if !ok {
+				v, ok = nullEquality(in.Operator, a, b, in.Strict)
+			}
+			if !ok {
 				if in.Operator == Eq || in.Operator == Ne || in.Operator == Mod || in.Operator == Pow {
 					exit.Kind = HostExit
 				}
@@ -366,7 +369,11 @@ func (p *Program) evaluate(inp *Instruction, slots []Value, arrays []ArrayView, 
 				condition, ok = k == Null || k == Undefined, true
 			} else {
 				var v Value
-				v, ok = binary(in.Operator, read(in.Left), read(in.Right))
+				l, r := read(in.Left), read(in.Right)
+				v, ok = binary(in.Operator, l, r)
+				if !ok {
+					v, ok = nullEquality(in.Operator, l, r, in.Strict)
+				}
 				condition = v.Bits != 0
 			}
 			if !ok {
@@ -447,6 +454,29 @@ func binary(op Operator, a, b Value) (Value, bool) {
 		return Bool(x != y), true
 	}
 	return Value{}, false
+}
+
+// nullEquality is a == b, or a != b, strictly where strict says, where one
+// of them is null or undefined and the other no object: an object may be
+// Annex B's [[IsHTMLDDA]], which == null takes for null.
+func nullEquality(op Operator, a, b Value, strict bool) (Value, bool) {
+	nullish := func(v Value) bool { return v.Kind == Null || v.Kind == Undefined }
+	if op != Eq && op != Ne || !nullish(a) && !nullish(b) {
+		return Value{}, false
+	}
+	var eq bool
+	switch o := b; {
+	case !nullish(a):
+		o = a
+		fallthrough
+	case !nullish(b):
+		if o.Kind != Number && o.Kind != Boolean && o.Kind != String {
+			return Value{}, false
+		}
+	default:
+		eq = !strict || a.Kind == b.Kind
+	}
+	return Bool(eq == (op == Eq)), true
 }
 
 // ToUint32 implements JavaScript's numeric truncation modulo 2^32. Native

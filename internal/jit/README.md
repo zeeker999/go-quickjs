@@ -19,8 +19,8 @@ This file states the design and the contracts the code keeps.
 
 | Package or file | Role |
 |---|---|
-| `ir` | The slot IR, one instruction per bytecode PC, with a state map at each. `Validate` checks a program, and `Evaluate`, a Go interpreter of the IR, is the oracle the SSA tests compare with. |
-| `compile` | Lowers bytecode into the IR (`LowerSSA`, and `LowerSSAInline` for a callee to inline), or refuses it (`Refusal`). It never imports the VM. |
+| `ir` | The slot IR, one instruction per bytecode PC, with a state map at each -- or, register code's, one or more per register instruction, each with its register pc (`Origin`). `Validate` checks a program, the atomicity rule of register code's expansions included, and `Evaluate`, a Go interpreter of the IR, is the oracle the SSA tests compare with. |
+| `compile` | Lowers bytecode into the IR (`LowerSSA`, and `LowerSSAInline` for a callee to inline), or refuses it (`Refusal`). `LowerReg` lowers register code instead (see [Register code's front end](#register-codes-front-end)). It never imports the VM. |
 | `ssa` | Builds SSA from a program and the VM's feedback (`Feedback`), and optimizes it. `eval.go` runs SSA over a heap model, for tests. |
 | `mir` | Selects instructions, allocates registers and encodes amd64 and arm64 machine code (`CompileAMD64`, `CompileARM64`), both on every target. |
 | `abi` | The contract between the code and the VM: the context block (`Context`), the exits, and the value encoding (`Encoding`), given as data. |
@@ -1068,6 +1068,71 @@ the callee leaves native code; and an exit that leaves its frame to a
 description (`abi.ExitDescriptor`) Go writes from it (`jit.ApplyExit`).
 Nothing is Go's for the marking's sake, and nothing leaves native code
 for it: code is compiled only with `storeRef` (`abi.Encoding.StoreRef`).
+
+## Register code's front end
+
+The register interpreter's code (`bytecode.RegCode`,
+docs/register-interpreter.md) is lowered into the same slot IR by
+`compile.LowerReg` (`LowerRegHot`, `LowerRegInline` for the entries
+`LowerSSAHot` and `LowerSSAInline` serve). Nothing runs it but tests: the
+VM's JIT lowers the stack form, and goes on doing so until the register
+form's exits, OSR and tier-up exist and its compiles have been measured
+against the stack form's (Stage 3a-3).
+
+**Slots.** A register is a slot: the program's first `Regs` slots are the
+frame's window, register 0 the function, 1 its this and the parameters
+from 2 (`ParamBase`). The captured bindings' slots follow them
+(`UpvalueBase`), and then scratch slots the expansions below use, which no
+state holds. There is no operand stack: every state's `Depth` is 0 and
+`StackSize` 0. An exit's records write registers, and its PC is a register
+pc. `Live` is a backward liveness over the registers -- each Host's by its
+register instruction, a register a closure captures live throughout, a
+handler's live registers live at every instruction it guards -- so an
+exit writes only the registers the interpreter may read.
+
+**One register instruction, one or more IR instructions.** Most register
+instructions are one IR instruction with their operands named: `add r4,
+r2, r3` is a `Binary`, a compare-and-branch a `Branch`, a property's read
+a `PropertyRead` of its register. The fused ones are several, of the same
+origin (`ir.Program.Origin`): `add_prop` is the property's read, the
+addition and the store; `add_index*` the element's read, the addition and
+the store; `get_index_pre` and `get_index_post` the step and the read into
+scratch slots, then both registers written; `get_method_w` the method's
+read, then the receiver and the method copied into the call's window;
+`char_code_at` the method's permission and the code unit; `new_object_lit`
+the object and its fields; a compare with a captured bound the bound's
+read and the compare; `jtypeof` and a switch's cases the tests and their
+branches. Where a register instruction's operands are a run of registers
+that is not where its result goes -- `new_array`'s elements, `concat`'s
+parts -- they are copied to scratch slots first, which the operation reads
+as the stack form's top. What the stack form leaves to Go whole -- a call,
+`regexp_lit`, a cold operation that is not one of the few it lowers -- is
+one `Host`, alone in its origin: Go runs the whole register instruction.
+
+**The atomicity rule.** An exit anywhere in an origin's instructions runs
+the register instruction again from its start, in the interpreter. So
+nothing may leave once something of it has committed (`Instruction's
+Commits`): a register written, memory changed, code run -- a property's
+read may call a getter, a store a setter. An expansion puts what may
+leave first and writes its registers last; where a commit cannot come
+last, what follows it is `Generic`: it never leaves, what it does not
+expect being Go's to make. `add_prop`'s addition and store are Generic
+after its read, and a literal's fields after the first. `ir.Validate`
+enforces the rule -- a jump only to an origin's first instruction, a Host
+alone, every instruction that may leave before any that commits but the
+Generic -- and `Evaluate` checks it as it runs: a Generic instruction
+whose check fails after a commit is `ErrGeneric`, which the evaluator has
+no Go for.
+
+**Refusals.** `LowerReg` refuses what `LowerSSA` refuses of the same
+function, by the same reasons: a function kind, direct eval, an arguments
+object the frame cannot own, a function of host operations alone at its
+entry (`HostOnly`), a with statement's probes and a debugger's stops. Far
+registers, past what a slot's number names, are the slot budget's. A
+register function has no parameter prologue -- its defaults are ordinary
+code over its registers -- so none is refused for one.
+`TestLowerRegCorpusRefusals` counts both lowerings by reason over
+directories of code (`QUICKJS_JIT_REG_REFUSALS`, a path list).
 
 ## The execution boundary
 
