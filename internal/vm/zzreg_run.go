@@ -93,6 +93,12 @@ type regCode struct {
 	// reuse is the sites of the code's calls of exec marked RMarkReuse
 	// whose arrays may be made again, by call site (regReuseSites).
 	reuse []*execReuseSite
+	// genFrom is the first register a generator's or an async function's
+	// vals keep (newRegGenerator): 2 where nothing captures the callee's
+	// register or this's and nothing reads a local by its register
+	// (LocalReg), which a resumption makes again from the generator; 0
+	// otherwise.
+	genFrom int32
 }
 
 // regWindow is the frame's registers from base. The register form's
@@ -161,6 +167,9 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 	}
 	if rc.LocalReg != nil {
 		c.reuse = regReuseSites(fn, rc)
+	}
+	if c.suspends && rc.LocalReg == nil && !regCapsFrame(rc) {
+		c.genFrom = 2
 	}
 	if fn.Kind == bytecode.KindDerivedConstructor {
 		c.cellThis = true

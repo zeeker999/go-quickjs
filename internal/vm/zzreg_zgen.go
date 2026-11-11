@@ -70,23 +70,33 @@ func (r *Runtime) newRegGenerator(cl *closure, c *regCode, this Value, args []Va
 	} else if cl.genLoops {
 		room = genLoopKind
 	}
-	gobj, vals := genAlloc(n+kept, room)
-	w := vals[:n:n]
-	w[0], w[1] = Undefined, this
+	// The window's registers from genFrom: the callee's and this's, which
+	// a resumption makes again, kept only where the code needs them kept.
+	from := int(c.genFrom)
+	gobj, vals := genAlloc(n-from+kept, room)
 	var fd *funcData
 	if callee != nil {
-		w[0] = Obj(callee)
 		if fd = callee.fn(); fd != nil && fd.arrow {
-			w[1] = fd.extra.lexThis
+			// An arrow's this is its surroundings', its frame's as a
+			// call's is: the generator's this is this's register,
+			// which a resumption makes again from it (genFrom).
+			this = fd.extra.lexThis
 		}
 	}
+	if from == 0 {
+		vals[0], vals[1] = Undefined, this
+		if callee != nil {
+			vals[0] = Obj(callee)
+		}
+	}
+	w := vals[: n-from : n-from]
 	p := int(c.params)
 	m := min(p, len(args))
-	copy(w[2:2+m], args[:m])
+	copy(w[2-from:2-from+m], args[:m])
 	for i := 2 + m; i < 2+p+int(c.inits); i++ {
-		w[i] = Undefined
+		w[i-from] = Undefined
 	}
-	copy(vals[n:], args[:kept])
+	copy(vals[n-from:], args[:kept])
 	gobj.Object = Object{class: ClassGenerator, flags: objExtensible}
 	g := &gobj.g
 	*g = generator{
@@ -163,8 +173,10 @@ func (r *Runtime) regGenResume(g *generator, sent Value, mode resumeMode) (resum
 	start := int(g.pc)
 	if start > 0 {
 		w := regAt(c.code, start-1)
+		// vals keeps the window's registers from genFrom.
+		a := int(w.A()) - int(c.genFrom)
 		if w.Op() == bytecode.RYield {
-			g.vals[w.A()] = sent
+			g.vals[a] = sent
 			switch mode {
 			case resumeThrow:
 				start = -start
@@ -176,13 +188,13 @@ func (r *Runtime) regGenResume(g *generator, sent Value, mode resumeMode) (resum
 		} else {
 			switch bytecode.RColdOp(w.X()) {
 			case bytecode.RColdAwait:
-				g.vals[w.A()] = sent
+				g.vals[a] = sent
 				if mode == resumeThrow {
 					start = -start
 				}
 			case bytecode.RColdYieldStar:
-				g.vals[w.A()] = sent
-				g.vals[w.A()+1] = Int(int(mode))
+				g.vals[a] = sent
+				g.vals[a+1] = Int(int(mode))
 			}
 		}
 	}
@@ -308,10 +320,19 @@ func (r *Runtime) regGenRun(g *generator, c *regCode, start int) (Value, *suspen
 		r.stackHigh = top
 	}
 	w := r.stack[base:top:top]
-	saved := g.vals[:n:n]
-	copy(w, saved)
+	from := int(c.genFrom)
+	saved := g.vals[: n-from : n-from]
+	kept := w[from:]
+	copy(kept, saved)
+	if from != 0 {
+		// The callee's register and this's, which the generator keeps.
+		w[0], w[1] = Undefined, g.this
+		if cal := g.callee; cal != nil {
+			w[0] = Obj(cal)
+		}
+	}
 	ups := g.savedUpvalues()
-	regMoveUps(ups, saved, w)
+	regMoveUps(ups, saved, kept)
 	f := r.pushFrame()
 	f.cl = g.cl
 	f.locals = nil
@@ -326,7 +347,7 @@ func (r *Runtime) regGenRun(g *generator, c *regCode, start int) (Value, *suspen
 	f.pc = 0
 	f.this = g.this
 	f.callee = g.callee
-	f.args = g.vals[n:]
+	f.args = g.vals[n-from:]
 	f.handlers, f.openUpvalues = nil, ups
 	g.frameRare(f)
 	f.native = ""
@@ -349,9 +370,9 @@ func (r *Runtime) regGenRun(g *generator, c *regCode, start int) (Value, *suspen
 		g.pc = uint32(f.savedSP)
 		// The with objects it is inside, for its next resumption.
 		g.saveWith(f.withScopes)
-		copy(saved, w)
+		copy(saved, kept)
 		if ups := f.openUpvalues; len(ups) != 0 || g.saved != nil {
-			regMoveUps(ups, w, saved)
+			regMoveUps(ups, kept, saved)
 			g.keep(nil, nil, ups)
 		}
 	} else {
@@ -366,6 +387,19 @@ func (r *Runtime) regGenRun(g *generator, c *regCode, start int) (Value, *suspen
 	r.frameDepth--
 	r.stackTop = base
 	return v, sig, err
+}
+
+// regCapsFrame reports whether a closure rc makes captures the callee's
+// register or this's, which a generator's vals then keep (genFrom).
+func regCapsFrame(rc *bytecode.RegCode) bool {
+	for _, caps := range rc.Caps {
+		for _, r := range caps {
+			if r < 2 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // regYield is yield's suspension of frame f with v, to go on at pc, the
