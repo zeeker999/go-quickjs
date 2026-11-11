@@ -1257,7 +1257,25 @@ regdiff cases and test262 in register mode on its directories:
    default").
 5. **Parameter patterns, defaults and rest; destructuring everywhere**
    (declarations, assignment targets, catch clauses, for-of and for-in
-   heads; about 4,500).
+   heads; about 4,500) -- done (regcomp's pattern.go). A pattern unpacks
+   a register in the stack form's order: an array pattern's cursor is
+   for_of_start's, stepped by `iter_step` and `iter_rest` (cold) and
+   closed by `iter_close` at the end, its steps in the ranges of a
+   handler of the cursor's that closes it for a throw (`iter_close_throw`,
+   which an iterator whose `next` threw has marked done), as a for-of
+   body's; an object pattern checks its source (`check_coercible`), reads
+   each key -- a computed one converted first (`to_property_key`) -- after
+   its leaf's object and key are evaluated, and makes its rest
+   (`object_rest`) leaving out the keys it read, kept in a window, each
+   evaluated once (the stack form evaluated a computed one again for the
+   rest: fixed with it, as Node has it). A default replaces undefined,
+   the source copied first where it is a binding a store may assign. A
+   list of parameters with a default, a pattern or a rest binds them in
+   order: those a checked read or a closure may see wait in a register of
+   their own while the parameter is in its dead zone (`paramsAside`), and
+   a rest is `rest_param` over the arguments the frame keeps
+   (`RegCode.KeepsArgs`). A for-of or for-in head's pattern or property is
+   unpacked at the head of each turn, inside the iterator's handler.
 6. **BigInt literals** (1,912), **templates and tagged templates** (661),
    **object literals of every property kind** (1,482).
 7. **The arguments object in every form** (354), **spreads** (258),

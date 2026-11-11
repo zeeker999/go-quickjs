@@ -1096,3 +1096,63 @@ Object.defineProperty(globalThis, "fixed", { value: 1, configurable: false, writ
 	}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffPatterns compares parameter lists with defaults, patterns and
+// a rest, and destructuring in declarations, assignments, for-of and for-in
+// heads and catch clauses: the order of the steps, the reads and the
+// targets' evaluation, defaults, the dead zone of parameters and of a
+// head's bindings, iterators closed by a pattern done early and by a throw
+// and not by one their next threw, rest elements and objects, holes, and
+// the errors -- destructuring null, a non-iterable, a parameter read before
+// its turn -- with their stack traces.
+func TestRegDiffPatterns(t *testing.T) {
+	src := `
+var log = [];
+function frames(e) { return e.name + ": " + e.message + " | " + e.stack.split("\n").slice(1, 3).map(function (s) { return s.trim() }).join(" | ") }
+function iter(n, opts) { opts = opts || {}; var i = 0; var it = {}; it[Symbol.iterator] = function () { log.push("iter"); return { next: function () { log.push("next" + i); if (opts.throwAt === i) throw new Error("next " + i); return i < n ? { value: i++, done: false } : { value: undefined, done: true } }, return: function () { log.push("return"); if (opts.badReturn) throw new Error("return"); return {} } } }; return it }
+function obj() { var o = {}; ["a", "b", "c"].forEach(function (k) { Object.defineProperty(o, k, { get: function () { log.push("get " + k); return k }, enumerable: true }) }); return o }
+function key(k) { log.push("key " + k); return k }
+function p1(a, b = a + 1, c = b * 2) { return [a, b, c].join() }
+function p2([a, b] = [1, 2], {c, d: e = 5} = {}) { return [a, b, c, e].join() }
+function p3(a, ...rest) { return a + ":" + rest.join() + ":" + rest.length + ":" + arguments.length }
+function p4(...[x, y]) { return [x, y].join() }
+function p5(a = b, b) { return a }
+function p6(f = function () { return a }, a = 2) { return f() }
+function p7(a, b = arguments.length) { return b + ":" + arguments[0] }
+function p8({a}) { return a }
+function p9(a = 1) { var a; return a }
+function p10(a, g = () => a) { a = 5; return g() }
+function p11(a = a) { return a }
+function p12(a, [b] = [b]) { return a + b }
+function d1(n) { log = []; var [a, , b, ...c] = iter(n); return [a, b, c.join(), log.join()].join("/") }
+function d2(n) { log = []; let [a, b] = iter(n); return [a, b, log.join()].join("/") }
+function d3() { log = []; const { [key("a")]: x, b, ...rest } = obj(); return [x, b, JSON.stringify(rest), log.join()].join("/") }
+function d4(v) { var { a = 1, b: { c } = { c: 2 } } = v; return a + c }
+function d5() { log = []; try { var [a = (() => { throw new Error("def") })()] = iter(3) } catch (e) { return frames(e) + " / " + log.join() } }
+function d6() { log = []; try { var [a, b] = iter(5, { throwAt: 1 }) } catch (e) { return e.message + " / " + log.join() } }
+function d7() { log = []; try { var [a] = iter(5, { badReturn: true }) } catch (e) { return e.message + " / " + log.join() } }
+function d8(v) { try { var { a } = v } catch (e) { return frames(e) } }
+function d9(v) { try { var [a] = v } catch (e) { return frames(e) } }
+function a1() { var o = {}, arr = [], x, y; [o.a, arr[0], ...o.rest] = [1, 2, 3, 4]; ({ x, y: arr[1] = 9, z: o["z" + 1] } = { x: 7, z: 8 }); return JSON.stringify([o, arr, x]) }
+function a2() { log = []; var o = { set p(v) { log.push("set " + v) } }; [o.p, o[key("p")]] = iter(2); return log.join() }
+function a3() { var a = 1, b = 2; [a, b] = [b, a]; var r = ({ a, b } = { a: 3, b: 4 }); return [a, b, r.a].join() }
+function a4() { var o = { o: 1, p: 2 }; ({ o, p: o } = o); return o }
+function f1(xs) { var out = []; for (var [k, v = "d"] of xs) out.push(k + v); for (let { length: n } of ["ab", "c"]) out.push(n); for (const [i] in { x: 1, yz: 2 }) out.push(i); return out.join() }
+function f2() { var o = {}, out = []; for (o.k of [1, 2]) out.push(o.k); for ([o.a, o.b] of [[3, 4]]) out.push(o.a + o.b); return out.join() }
+function f3() { log = []; try { for (var [a] of [iter(3)]) throw new Error("body") } catch (e) { return e.message + " / " + log.join() } }
+function f4() { try { for (let [a = a] of [[]]) {} } catch (e) { return e.name } }
+function c1() { try { throw { m: 1, n: [2, 3] } } catch ({ m, n: [x, ...y] }) { return m + x + y.length } }
+function c2() { try { try { throw null } catch ({ m }) { return "no" } } catch (e) { return frames(e) } }
+`
+	calls := []string{
+		`p1(1)`, `p1(1, 5)`, `p1(1, undefined, 0)`, `p2()`, `p2([7], { c: 3, d: 4 })`, `p3(1, 2, 3)`, `p3()`, `p4(1, 2, 3)`,
+		`try { p5() } catch (e) { frames(e) }`, `p5(1)`, `p6()`, `p7(1)`, `p7(1, 2, 3)`,
+		`try { p8() } catch (e) { frames(e) }`, `p8({ a: 4 })`, `p9()`, `p9(3)`, `p10(1)`, `try { p11() } catch (e) { frames(e) }`, `p11(2)`, `try { p12(1) } catch (e) { frames(e) }`, `p12(1, [2])`, `p1.length + "," + p2.length + "," + p3.length`,
+		`d1(0)`, `d1(2)`, `d1(6)`, `d2(1)`, `d2(4)`, `d3()`, `d4({})`, `d4({ a: 2, b: { c: 3 } })`, `d5()`, `d6()`, `d7()`,
+		`d8(null)`, `d8(undefined)`, `d8(1)`, `d9(1)`, `d9({})`, `d9("xy")`,
+		`a1()`, `a2()`, `a3()`, `a4()`, `f1([[1, 2], [3]])`, `f2()`, `f3()`, `f4()`, `c1()`, `c2()`,
+		`var [g1, g2 = 5] = [1]; let { g3, ...g4 } = { g3: 2, g5: 6 }; g1 + g2 + g3 + JSON.stringify(g4)`,
+		`try { let [h1] = null } catch (e) { frames(e) }`,
+	}
+	regDiff(t, src, calls)
+}

@@ -423,6 +423,15 @@ func (g *gen) constIdx(c bytecode.Constant) uint32 {
 
 func (g *gen) body() {
 	lit := g.lit
+	// A list of parameters with a default, a pattern or a rest binds them
+	// one at a time: those a read checks or a closure may see are taken
+	// aside and put in their dead zone below, until their turn.
+	var args []int
+	lexical := !g.fn.HasSimpleParams || g.fn.HasRest
+	if lexical {
+		args = g.paramsAside()
+	}
+	release := g.hold()
 	// The bindings whose dead zone a read checks or a closure may see start
 	// in it; a self name a closure captures is the function.
 	for slot, need := range g.tdz {
@@ -431,6 +440,7 @@ func (g *gen) body() {
 		}
 	}
 	if g.completion > 0 {
+		release()
 		g.topBody()
 		g.stmts(lit.Body)
 		g.emit(bytecode.MakeR(bytecode.RRet, 0, r16(g.completion), 0, 0))
@@ -457,6 +467,11 @@ func (g *gen) body() {
 			return
 		}
 	}
+	if lexical {
+		g.params(args)
+	}
+	release()
+	g.top = g.topAfterBindings()
 	// Hoisted function declarations of the body; one in a block is left to
 	// the stack form.
 	for _, s := range lit.Body {
@@ -480,7 +495,7 @@ func simpleArguments(fn *bytecode.Function) bool {
 	// A function whose arguments object is only handed on to apply
 	// (ForwardsArguments) has no object made: each such call is an
 	// apply_args, which hands on the frame's arguments as passed.
-	if fn.HasRest || !fn.HasSimpleParams || fn.ParamsAreLexical || fn.Generator || fn.Async ||
+	if fn.Generator || fn.Async ||
 		fn.HasDirectEval || fn.Debug != nil || fn.TopLevel || fn.PrivateSites != 0 || fn.HasTailCall {
 		return false
 	}
@@ -783,11 +798,11 @@ func (g *gen) enterBlock(list []ast.Stmt) {
 		if !ok || vd.Kind == ast.DeclVar {
 			continue
 		}
+		var ids []*ast.Ident
 		for _, d := range vd.Decls {
-			id, ok := d.Target.(*ast.Ident)
-			if !ok {
-				continue
-			}
+			ids = patternNames(d.Target, ids)
+		}
+		for _, id := range ids {
 			res := g.rec.Write[id]
 			if res.Kind != ResLocalInit {
 				continue
@@ -1069,8 +1084,14 @@ func (g *gen) varDecl(n *ast.VarDecl) {
 	for _, d := range n.Decls {
 		id, ok := d.Target.(*ast.Ident)
 		if !ok {
-			g.fail("a destructuring declaration")
-			return
+			if d.Init == nil {
+				// The parser allows one only in a for-of or for-in head,
+				// which forOfStmt compiles.
+				panic("regcomp: a pattern declared without a value")
+			}
+			g.pattern(d.Target, g.patternSource(d.Init), true)
+			g.top = g.stmtTop()
+			continue
 		}
 		if d.Init == nil {
 			if n.Kind == ast.DeclVar {
@@ -1966,6 +1987,10 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 		case *ast.Ident:
 			r := g.storeIdent(t, n.Value, false)
 			return g.place(r, dst)
+		case *ast.ArrayPattern, *ast.ObjectPattern:
+			v := g.patternSource(n.Value)
+			g.pattern(t, v, false)
+			return g.place(v, dst)
 		case *ast.Member:
 			o := g.guard(g.expr(t.Object, -1), n.Value)
 			if t.Computed {
@@ -3203,7 +3228,7 @@ func (g *gen) finish() *bytecode.RegCode {
 		Code:              g.code, NumRegs: g.max + 1, SrcPC: src, SiteName: g.siteName, This: -1,
 		LocalReg: g.localReg(),
 		Wide:     true, Params: g.fn.ParamCount, Inits: g.inits, Caps: g.caps, CallSites: g.calls,
-		Handlers: g.handlerTable(), BackLive: g.backLive,
+		Handlers: g.handlerTable(), BackLive: g.backLive, KeepsArgs: g.fn.HasRest,
 	}
 	if why := Verify(rc, g.fn); why != "" {
 		Refuse(g.fn, why)

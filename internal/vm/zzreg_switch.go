@@ -246,6 +246,9 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		bytecode.RColdDeclareGlobalLex, bytecode.RColdDefineGlobalFunc, bytecode.RColdInitGlobalLex,
 		bytecode.RColdDeclareModuleLex, bytecode.RColdInitModuleLex:
 		return r.regColdTop(f, w, regs)
+	case bytecode.RColdIterStep, bytecode.RColdIterRest, bytecode.RColdCheckCoercible, bytecode.RColdToPropertyKey,
+		bytecode.RColdObjectRest, bytecode.RColdRestParam:
+		return r.regColdPattern(f, c, pc, w, regs)
 	case bytecode.RColdGetGlobalOpt:
 		v, err := r.regGlobalOpt(f, f.cl.names[w.B()])
 		regs[w.A()] = v

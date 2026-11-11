@@ -108,9 +108,9 @@ func TestRegisterBackendCode(t *testing.T) {
 }
 
 // TestRegisterBackendFallsBack pins what the backend leaves to the stack
-// form, each function as a whole: a catch clause's pattern, an optional
-// chain, a generator, a strict global store of a value that runs code. A
-// try statement is register code, with a handler table.
+// form, each function as a whole: an optional chain, a generator, a strict
+// global store of a value that runs code. A try statement is register code,
+// with a handler table, and so is a catch clause's pattern.
 func TestRegisterBackendFallsBack(t *testing.T) {
 	fns := regFunctions(t, `
 		function tried() { try { return 1 } catch ({ e }) { return 2 } }
@@ -119,7 +119,10 @@ func TestRegisterBackendFallsBack(t *testing.T) {
 		function* gen() { yield 1 }
 		function strictStore() { 'use strict'; g = plain(1) }
 		function plain(x) { return x + 1 }`)
-	for _, name := range []string{"tried", "opt", "gen", "strictStore"} {
+	if f := fns["tried"]; f == nil || f.Reg == nil {
+		t.Errorf("tried: want register code")
+	}
+	for _, name := range []string{"opt", "gen", "strictStore"} {
 		if f := fns[name]; f == nil || f.Reg != nil {
 			t.Errorf("%s: register code %v, want none", name, f != nil && f.Reg != nil)
 		}

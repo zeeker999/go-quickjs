@@ -420,6 +420,21 @@ const (
 	// RColdInitModuleLex initializes it to R[A] (init_module_lex).
 	RColdDeclareModuleLex
 	RColdInitModuleLex
+	// Destructuring's: RColdIterStep, R[A] = the next value of cursor R[B],
+	// undefined past its end (iter_step); RColdIterRest, R[A] = an array of
+	// the values cursor R[B] has left (iter_rest); RColdCheckCoercible
+	// throws where R[A] is undefined or null (check_coercible);
+	// RColdToPropertyKey, R[A] = R[A] as a property key (to_property_key);
+	// RColdObjectRest, R[A] = an object of R[B]'s own enumerable properties
+	// but the Aux keys in the registers from C (object_rest).
+	RColdIterStep
+	RColdIterRest
+	RColdCheckCoercible
+	RColdToPropertyKey
+	RColdObjectRest
+	// RColdRestParam: R[A] = an array of the arguments from the B-th
+	// (rest_param).
+	RColdRestParam
 )
 
 // The flags of regexp_lit's X.
@@ -466,7 +481,9 @@ var rColdNames = [...]string{
 	RColdDefineGlobalVar: "define_global_var", RColdDeclareGlobalLex: "declare_global_lex",
 	RColdDefineGlobalFunc: "define_global_func", RColdInitGlobalLex: "init_global_lex",
 	RColdGetGlobalOpt: "get_global_opt", RColdDeclareModuleLex: "declare_module_lex",
-	RColdInitModuleLex: "init_module_lex",
+	RColdInitModuleLex: "init_module_lex", RColdIterStep: "iter_step", RColdIterRest: "iter_rest",
+	RColdCheckCoercible: "check_coercible", RColdToPropertyKey: "to_property_key",
+	RColdObjectRest: "object_rest", RColdRestParam: "rest_param",
 }
 
 func (op RColdOp) String() string {
@@ -574,6 +591,9 @@ type RegCode struct {
 	// there are temporaries no turn reads before it writes them, which the
 	// sweep of stale slots clears (sweepStaleSlots).
 	BackLive []uint32
+	// KeepsArgs says a frame keeps its arguments as passed, for a rest
+	// parameter (rest_param).
+	KeepsArgs bool
 }
 
 // LiveAt is how many of the frame's registers are live at the head of the

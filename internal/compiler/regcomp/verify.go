@@ -234,6 +234,14 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 		return reg(a) && int(b) < len(fn.Names) && fn.TopLevel
 	case bytecode.RColdGetGlobalOpt:
 		return reg(a) && int(b) < len(fn.Names)
+	case bytecode.RColdIterStep, bytecode.RColdIterRest:
+		return reg(a) && reg(b)
+	case bytecode.RColdCheckCoercible, bytecode.RColdToPropertyKey:
+		return reg(a)
+	case bytecode.RColdObjectRest:
+		return reg(a) && reg(b) && pc < len(rc.Aux) && int(w.C())+int(rc.Aux[pc]) <= rc.NumRegs
+	case bytecode.RColdRestParam:
+		return reg(a) && rc.KeepsArgs
 	}
 	return false
 }
