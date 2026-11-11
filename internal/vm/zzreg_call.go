@@ -1141,7 +1141,9 @@ func (r *Runtime) regDirectOnce(o *Object, fd *funcData, c *regCode, this Value,
 		this = fd.extra.lexThis
 	} else if c.coerceThis && !this.IsObject() {
 		if !this.IsNullish() {
-			return r.callTree(o, fd, this, args, false)
+			// The this made an object as runFD makes it.
+			v, err, _ := r.regRunFD(fd.closure, this, args, Undefined, o, fd)
+			return v, err
 		}
 		this = r.globalThis
 	}
@@ -1157,6 +1159,155 @@ func (r *Runtime) regDirectOnce(o *Object, fd *funcData, c *regCode, this Value,
 		w[2+i] = a
 	}
 	return r.regEnterW(o, fd.closure, c, base, m, args, Undefined)
+}
+
+// regRunFD runs what runFD would run -- a call of cl, the callee's
+// function data fd, or top-level code, whose callee is nil -- as register
+// code entered directly, its frame given what runFD gives one of its
+// surroundings: the with objects and an eval's variables of the functions
+// around it, and a scope for the variables of its own direct eval. It
+// reports false, having done nothing, where cl has no register code to
+// enter so: the tiers' own runs (regTier off), a generator's body, and a
+// frame with a this binding. A chain of tail calls the frame ends in is
+// made here, in its place.
+//
+//go:noinline
+func (r *Runtime) regRunFD(cl *closure, this Value, args []Value, newTarget Value, callee *Object, fd *funcData) (Value, error, bool) {
+	c := cl.reg
+	if c == nil {
+		if c = r.regOf(cl); c == nil {
+			return Undefined, nil, false
+		}
+	}
+	if c.suspends {
+		return Undefined, nil, false
+	}
+	fn := cl.fn
+	arrow := fd != nil && fd.arrow
+	if !newTarget.IsUndefined() && !arrow || arrow && fd.extra != nil && fd.extra.lexThisRef != nil {
+		// A construction, or an arrow sharing a derived constructor's
+		// this binding: runFD's still (vm.RegFallbacks counts it). An
+		// arrow's new.target is the one it captured.
+		return Undefined, nil, false
+	}
+	if regReportOn {
+		regNoteCross(regCrossEnter, fn, "")
+	}
+	if fn.CoerceThis && !this.IsObject() && newTarget.IsUndefined() {
+		if this.IsNullish() {
+			this = r.globalThis
+		} else {
+			o, err := r.toObject(this)
+			if err != nil {
+				return Undefined, err, true
+			}
+			this = Obj(o)
+		}
+	}
+	var with []*Object
+	var evalVars *Object
+	if fd != nil && fd.extra != nil {
+		if w := fd.extra.with(); len(w) > 0 {
+			with = w[:len(w):len(w)]
+		}
+		evalVars = fd.extra.evalVars()
+	}
+	if fn.HasDirectEval {
+		// A scope of its own for the variables the eval declares, inside
+		// what the functions around it put on the chain, as runFD's.
+		evalVars = &Object{class: ClassObject, flags: objExtensible | objEvalVars}
+		with = append(with[:len(with):len(with)], evalVars)
+	}
+	base := r.stackTop
+	if base+int(c.numRegs) > len(r.stack) {
+		return Undefined, r.throwRangeError("maximum call stack size exceeded"), true
+	}
+	m := min(int(c.params), len(args))
+	w := r.stack[base : base+2+m : base+2+m]
+	w[0] = Undefined
+	if callee != nil {
+		w[0] = Obj(callee)
+	}
+	w[1] = this
+	for i, a := range args[:m] {
+		w[2+i] = a
+	}
+	v, err := r.regEnterScoped(callee, cl, c, base, m, args, newTarget, with, evalVars)
+	if err == errTailCall && r.tailLoopDepth != r.frameDepth {
+		// The chain made here, in constant space; inside regTailLoop's
+		// call at this depth, by its loop (regCall).
+		v, err = r.regTailLoop()
+	}
+	return v, err, true
+}
+
+// regEnterScoped is regEnterW's entry of a frame regRunFD has made the
+// window of, given the surroundings regRunFD found for it.
+func (r *Runtime) regEnterScoped(o *Object, cl *closure, rc *regCode, base, argc int, args []Value, newTarget Value, with []*Object, evalVars *Object) (Value, error) {
+	top := base + int(rc.numRegs)
+	if top > len(r.stack) || r.frameDepth >= r.maxFrames {
+		return Undefined, r.throwRangeError("maximum call stack size exceeded")
+	}
+	saved := r.stackTop
+	if top > saved {
+		r.stackTop = top
+		if top > r.stackHigh {
+			r.stackHigh = top
+		}
+	}
+	var kept []Value
+	if rc.args {
+		ka := len(r.argStack)
+		r.argStack = append(r.argStack, args...)
+		kept = r.argStack[ka:len(r.argStack):len(r.argStack)]
+	}
+	for i := base + 2 + min(argc, int(rc.params)); i < base+2+int(rc.params)+int(rc.inits); i++ {
+		r.stack[i] = Undefined
+	}
+	off := r.frameDepth - r.frameBase
+	if uint(off) >= uint(len(r.cur)) {
+		r.seekFrameBlock()
+		off = r.frameDepth - r.frameBase
+	}
+	r.frameDepth++
+	if r.frameDepth > r.frameHigh {
+		r.frameHigh = r.frameDepth
+	}
+	f := &r.cur[off]
+	f.cl = cl
+	f.callee = o
+	f.base = base
+	f.pc = 0
+	if len(f.openUpvalues) != 0 {
+		f.openUpvalues = f.openUpvalues[:0]
+	}
+	regClearFrame(f)
+	if len(f.handlers) != 0 {
+		f.handlers = f.handlers[:0]
+	}
+	f.withScopes, f.evalVars = with, evalVars
+	f.newTarget = newTarget
+	f.regKind = regFrameEnter
+	if rc.args {
+		f.args = kept
+		p := int(rc.params)
+		f.locals = r.stack[base+2 : base+2+p : base+2+p]
+	}
+	v, err := r.runReg(f, rc, 0)
+	if err == errRegRestart {
+		v, err = r.regRestartRun(f)
+	}
+	f.regKind = 0
+	if len(f.openUpvalues) != 0 {
+		regCloseUpvalues(f)
+	}
+	f.withScopes, f.evalVars = nil, nil
+	r.frameDepth--
+	r.stackTop = saved
+	if a := f.args; a != nil {
+		r.argStack = r.argStack[:len(r.argStack)-len(a)]
+	}
+	return v, err
 }
 
 // regLeafRunnable reports whether rc is a body regLeafRun runs: straight

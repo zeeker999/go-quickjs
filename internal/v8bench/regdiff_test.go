@@ -64,8 +64,17 @@ func regDiff(t *testing.T, src string, calls []string) int64 {
 	withRegTier(false, func() { off = regDiffRun(t, src, calls) })
 	withRegTier(false, func() { again = regDiffRun(t, src, calls) })
 	before := vm.RegsBuilt()
+	vm.ResetRegFallbacks()
 	withRegTier(true, func() { on = regDiffRun(t, src, calls) })
 	built := vm.RegsBuilt() - before
+	// Register mode runs everything as register code, entered as its own:
+	// nothing in the stack interpreter or the tree tier, nothing entered
+	// through their frames. Until the count is zero everywhere, it fails
+	// only where QJS_REGFALLSTRICT asks (docs/register-interpreter.md,
+	// item 13).
+	if n, by := vm.RegFallbacks(); n != 0 && os.Getenv("QJS_REGFALLSTRICT") != "" {
+		t.Errorf("%d fallbacks to the other tiers (QJS_REGFALLTRACE names them):\n%s", n, by)
+	}
 	bad, skipped := 0, 0
 	defer func() {
 		t.Logf("%d calls compared, %d not (their answers vary), %d functions as register code",

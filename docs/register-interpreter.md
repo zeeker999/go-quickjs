@@ -1560,6 +1560,11 @@ regdiff cases and test262 in register mode on its directories:
      gave a site, and the object literals' `LiteralKeys`): the two forms
      index one closure's caches, and only the register form's operands
      are 16 bits.
+   - A jump of a 16-bit offset that does not reach (`errJumps`): the
+     function is compiled again with every such jump far
+     (`farJumps`), the branch taken to a `jmp` of 32 bits, past a
+     `jmp` over it where it is not: three instructions where there was
+     one, only in a function past 32,767 of them.
    - `with (o) f(...a)` passed no receiver in the stack form (fixed with
      it): a spread call probes with `with_get_this` as any call does.
 9e. **Eval code** -- done. The top level a direct or an indirect eval
@@ -1607,6 +1612,33 @@ regdiff cases and test262 in register mode on its directories:
    compiled once too, so that the code grows with the nesting, not as
    its power. The stack form's copies of a clause with a try statement
    of its own lost the clauses outside it (fixed with it).
+12. **Entries as register code's own** (`regRunFD`). What runFD would
+   run -- a call through callObject or callDirect, a script's or an
+   eval's code, a tree's call (callTreeWith) -- is entered as register
+   code directly where the function has any (`fn.Reg`, which only
+   register mode's compiler makes, so that the default tiers' paths test
+   a field they hold already): its frame given what runFD gives one of
+   its surroundings -- the with objects and the eval's variables of the
+   functions around it, a scope for its own direct eval's -- and a chain
+   of tail calls it ends in made in its place, in constant space
+   (regTailLoop). A direct eval's function and one inside a with are so
+   no longer entered through runFD. Still runFD's, and counted (item
+   13): constructions, and a frame with a this binding -- a derived
+   constructor's, or the one an arrow shares with it. Strict eval code's
+   function declarations, bindings of its own rather than top-level
+   declarations, are made (they were not: test262's name-unicode.js,
+   strict).
+13. **The fallback counter** (`vm.RegFallbacks`, QJS_REGFALLTRACE to
+   name each). Register mode counts every time it hands code to the
+   other tiers: a function firstForm builds a tree for, having no
+   register code; a frame regStmt runs in the stack interpreter; and
+   register code entered through runTree, a frame runFD or callTree
+   made rather than its own -- the node that runs register code in a
+   tree is reached no other way. The regdiff tests (the micro list, the
+   V8 suite and every corpus of theirs) and test262 in register mode,
+   where it runs the language's directories alone, fail on any where
+   QJS_REGFALLSTRICT is set; once the count is zero the check is
+   unconditional.
 
 ### Stage 3: the JIT and the tree tier
 
