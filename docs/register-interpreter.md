@@ -578,6 +578,16 @@ the ones Go allows:
   the block after it; a switch on the operation at `regColdSub`'s head
   with the functions in the block moved `regColdWrap`, and
   `bigint64_fnv1a` was 5.8% slower at every placement.
+  `yield`, a loop over a generator's step, took 43. Its case
+  made Go allocate the loop's registers otherwise (100 instructions
+  more, a frame 72 bytes smaller): against the loop before it,
+  `typed_u64_read` and `method_moves` were 6 and 8.5% slower at every
+  placement of four, and nothing else 3% at all four; with yield sent
+  to the slow path's case instead, the loop of the same allocation as
+  before, 13 tests were 3.8 to 11.7% slower than with its case at every
+  placement -- `array_read`, `global_read`, `int_arith`, `float_arith`,
+  `string_length`, `loop_sum`, `loop_locals`, `loop_elements`, the
+  generators' -- and the case stays.
 
 What remains is Go's: a register store of a `Value` is a write-barrier
 check, the loop's instruction word is still saved at the dispatch where a
@@ -719,15 +729,83 @@ are.
 
 ## Generators and async functions
 
-A generator's frame is its window. Suspension copies the window and the pc
-into the generator object, and resumption copies them back to the top of
-the stack and continues at the pc, as the stack form does with its operand
-stack -- but there is no operand stack, so the copy is the frame's
-registers alone. An `await` whose operand is already settled, or not a
-thenable, with no job waiting, continues without suspending at all: the
-profiling found every await fully suspending and resuming, which is most of
-`async_await`'s 3.65x and is a defect to fix in the existing interpreter
-first.
+A generator's frame is its window (regcomp's gen.go, the VM's
+zzreg_zgen.go). Suspension copies the window and the pc into the generator
+object, and resumption copies them back to the top of the stack and
+continues at the pc, as the stack form does with its operand stack -- but
+there is no operand stack, so the copy is the frame's registers alone. The
+captures open on the window's registers move with it, pointed at the
+generator's copy on a suspension and back at the stack on a resumption
+(`regMoveUps`), so that two closures made in different resumptions share a
+binding. A generator of register code keeps its window in its `vals`,
+`numRegs` values and then, where the code keeps them, its arguments; its
+`pc` is a register pc, and `generator.reg` marks it.
+
+- **The code's first instruction is `gen_entry`** (cold), which a
+  resumption that goes on skips: `runReg` starts at the pc it is given,
+  0 for any other frame. `gen_entry` runs at the frame's first run, and
+  at a throw injected, which it throws at the suspension, a negated pc
+  in the frame's `savedSP`. `yield` is a case of the loop's own
+  (`RYield`), the step of a loop over a generator: through `cold`, the
+  three switches its suspension and `gen_entry` went through
+  (`regSlow`, `regColdSub`, `regColdGen`) were a third of a for-of's
+  step.
+- **A generator's creation runs its parameters' binding** up to
+  `end_params`, which suspends it, as the stack form's prologue does: a
+  default or a pattern that throws, throws at the call. An async
+  function's are bound by its first resumption, which runs at once
+  (`runAsync`), an error there rejecting its promise as the specification
+  has it.
+- **What a resumption delivers goes to the suspension's own register,**
+  never a binding's, written before the code runs (`regGenResume`):
+  `yield` (R[A] the value sent in), `await` (what it settled to),
+  `yield_star` (the value and how, a pair). A return injected at a yield
+  is compiled after it, a return statement there, through the finally
+  clauses and the loops' iterators it leaves (`retFrom`); the yield's next
+  instruction jumps past it, and a resumption by next starts past that
+  jump. A throw injected is thrown at the suspension itself, inside its
+  handlers' ranges.
+- **`yield*` is a loop of the code's own,** as the stack form's is:
+  `iter_resume` sends what the generator was resumed with to the
+  delegate's next, throw or return, `iter_unpack_delegate` reads its
+  result (an async generator awaits it first), `yield_star` suspends with
+  it, and a return the delegation carried out returns from after the
+  loop. An operation whose next instruction is a jump (`iter_resume`,
+  `iter_unpack_delegate`, `iter_result`, `async_iter_close`) takes it to
+  leave and skips it to go on: the verifier checks the jump is there.
+  A synchronous yield* to a generator its realm's next steps is stepped
+  directly, as the tree's `delegateNext` steps one (`regDelegateNext`):
+  what the delegate yields goes on as a value, the frame suspended as at
+  the `yield_star` four instructions on (the verifier checks it is
+  there), with no result object at any level of a chain of delegations.
+  The delegation's steps are placed at the operand's position, as the
+  stack form's are.
+- **A for await's step** is `async_iter_next`, `await` and `iter_result`
+  into a register of its own; the body is in the ranges of the cursor's
+  handler, which closes it as AsyncIteratorClose does -- the return
+  method's result awaited, what closing throws dropped -- and a break, a
+  continue of an outer loop or a return that leaves it closes it the same
+  way, the result awaited and checked to be an object.
+- **The drivers are the stack form's:** next, return and throw, an async
+  function's steps and an async generator's queue call `resumeFull`, and
+  `resumeFrame` hands a register generator's resumption to
+  `regGenResume`, which answers with the same `resumeResult`; next
+  resumes a suspended register generator of its realm at once. A for-of
+  over a register generator steps it with no recover (`regGenStep`),
+  its body throwing as register code throws: next's frame pushed as
+  `stepIter` pushes it, no result object, no search for a tree. A
+  generator whose parameters need no code (`end_params` the second
+  instruction) is not run at its creation; its first resumption starts
+  past `end_params`. A call site of a generator function or an async
+  function makes its object without the generic call's search
+  (`regGenCall`), an async function's first step at once.
+- **An await's job continues in place.** An async function its await's
+  job resumes from the job queue (`generator.awaitJob`, a frame of kind
+  `regFrameAwaitJob`) goes on in place at an await of a value that is not
+  an object or of a fulfilled promise of the realm's own constructor,
+  where no job is waiting: the job the await would queue would be the
+  queue's next, and the frame would be resumed with that value. The first
+  run of an async function, which its caller's code follows, never does.
 
 ## Closures and upvalues
 
@@ -805,8 +883,8 @@ the language, and the JIT's README is updated with it.
   stack form's dynamic lookups for names inside one, as operations of the
   register form's own.
 
-All three are the last stage's: until then a function with a debugger, a
-direct eval or a `with` runs as now.
+A direct eval and a `with` are compiled (Stage 2, item 8), and so is the
+debugger's code (item 10).
 
 ## Stages
 
@@ -1374,8 +1452,8 @@ it):
 | 1 | a site past 16 bits (a cap) | 0 / 1 / 0 |
 
 Not in the corpora, and refused as well: code compiled for a debugger
-(`WithDebugger`), `for await`, a finally clause nested more than four
-copies deep, and the caps -- more than 65,536 registers, a jump past 16
+(`WithDebugger`; done, item 10), a finally clause nested more than four
+copies deep (done, item 11), and the caps -- more than 65,536 registers, a jump past 16
 bits, a name past 16 bits, more than 255 arguments, properties or
 elements in one instruction. A cap goes as a wide form, never a refusal.
 
@@ -1442,10 +1520,37 @@ regdiff cases and test262 in register mode on its directories:
    Program's register literals are seeded like its stack ones
    (`listSites`). Eval code, a module with top-level await and code
    compiled for a debugger are items 3 and 8.
-3. **Generators, async functions, `for await`** (12,737): the frame's
-   window copied into the generator on a suspension ("Generators and async functions"
-   above), the settled-await fast path; the step's recover goes
-   with them.
+3. **Generators, async functions, async generators, `for await` and a
+   module's top-level await** (12,737) -- done ("Generators and async
+   functions" above): the frame's window copied into the generator on a
+   suspension, a return injected at a yield compiled as a return there,
+   yield* and for await as loops of the code's own, an await's job going
+   on in place at a settled value, and a for-of's step of a register
+   generator with no recover. The JIT learns no register generator
+   (`jitGenSeen`, `jitGenMakeable`).
+3b. **Captured lexical bindings in loops** (878, with catch bindings and
+   a head expression's closure of the head's binding) -- done: each
+   turn's binding is a new one by closing the captures open on its
+   register (`close_regs`) where the binding is made again -- a block's
+   entry, a for-of or for-in turn's head, a catch clause's entry, its
+   value waiting in a temporary meanwhile -- so that the closures of the
+   turns before keep theirs, closed. A for head's let is copied from turn
+   to turn (CreatePerIterationEnvironment): closed after the head's
+   initialization and at each turn's end, before the update. A head
+   expression's closure of the head's binding reads it in its dead zone,
+   the bindings the stack compiler records for the head (`Record.Heads`).
+3c. **Names in their dead zone, and for-of and for-in stores** (626 and
+   721) -- done: the stack compiler records a dead-zone upvalue's read and
+   write as `ResUpvalCheck` (`get_upval_check`, `set_upval_check`, cold,
+   the dead zone outranking constness), a binding of its own function
+   written before its declaration as `ResLocalCheck` (`check_ref` and a
+   move), and a function expression's own name written as the constant's
+   store or nothing, by strictness. A for-of or for-in loop stores each
+   turn's value to any binding a store reaches: a global var, a global
+   or a module's let, a checked binding, a constant (which throws). Their arguments object is made by
+   the creation's run, from the arguments the generator keeps; a mapped
+   one's aliases are captures of the parameters' registers, which move
+   with the window.
 4. **Classes** (about 27,000 together: constructors, accessors, fields,
    static blocks, private members and methods, `super`, `new.target`,
    class expressions inside functions, and a module's `export default
@@ -1540,14 +1645,170 @@ regdiff cases and test262 in register mode on its directories:
    resolve (92), strict global stores (96). The strict global store of a
    value that runs code is done: whether the name resolves is settled
    before the value is made and reported after it, `check_global_ref`
-   and `assert_resolved`, as the stack form's.
+   and `assert_resolved`, as the stack form's. A strict function that
+   ends in a tail call makes its arguments object as any other: an
+   unmapped one is a copy, which a frame taken over in place leaves
+   alone (69). A function that names eval without calling it has an
+   arguments binding the stack form fills for an eval that never comes;
+   nothing reads it, it has no register, and none is made (217). What
+   the record did not resolve was one form, 642 functions of test262's:
+   dynamic import, `import(x)`, `import.source(x)` and
+   `import.defer(x)`, whose callee the parser makes a name -- done: a
+   cold `import` of the specifier and the options in a window, at the
+   call's position, as the stack form's; `import.meta` is `import_meta`
+   (cold).
 8. **eval and `with`** (757 direct evals, 527 functions beside an eval's
-   variables, a with or an Annex B function, 11 more): binding
-   descriptors for what an eval can reach.
-9. **`using`** (41), labelled blocks (11), declarations in switches (8),
-   function declarations in blocks (15), captured loop bindings (7), the
-   finally depth (completion dispatch, no cap), the debugger's code
-   (statement markers in register code), and the caps.
+   variables, a with or an Annex B function, 11 more) -- done. A call the
+   stack form made a direct eval (`Record.Evals`, with its scope's index)
+   is `direct_eval` (cold): the callee, its receiver and the arguments, or
+   an array of them, in a window. Where the callee is the realm's eval and
+   the first argument a string, the code is compiled and linked to the
+   frame as evalIn links it to a heap frame's, each binding it names
+   captured from its register (`RegCode.LocalReg`, the slot's register)
+   as a closure's capture is, its this from register 1; otherwise it is
+   an ordinary call, a tail call where marked. A function with a direct
+   eval gives every binding a register and makes its arguments object as
+   it starts, and is called through runFD, which makes the scope of its
+   eval's variables. A name a with object or an eval's variable may
+   answer is compiled as the stack form compiles it (`Record.Withs`, the
+   probe and its limit): a cold probe of the innermost limit of the
+   frame's with objects and eval's variables -- `with_get`,
+   `with_get_this`, `with_delete`, `with_set` -- that sets a found flag
+   in a register of its own, and a jump around the static access; a
+   reference that is read and written, or resolved before its value is
+   made, is `with_resolve` and then `with_read` and `with_write` through
+   the object it found. A with statement's object is put on the frame's
+   with objects by `with_push` and taken off by `with_pop`, compiled for
+   each way out as a finally clause is, a throw's in a handler of its
+   own. A frame runs as register code whatever with objects and eval's
+   variables runFD gives it, and a generator keeps them across a
+   suspension. The stack form probed a binding typeof reads twice
+   (fixed with it). Eval code itself is register code too (item 9e).
+9. **`using` and `await using`** (177) -- done (regcomp's try.go,
+   `usingScope`): a statement list, a for head or a for-of head that
+   declares with using is a scope whose resources are in a register of
+   its own (`new_dispose_capability`), each value added as it is
+   declared, before its binding is initialized (`add_disposable`), and a
+   finally clause that disposes of them, compiled for each way out as
+   any other: the normal end and each exit with no exception to fold in
+   (`dispose`), a throw with the one it folds in. An await using scope's
+   disposal is a loop of `dispose_step`s, each running the disposers
+   until one leaves a value to await, which the loop awaits in a handler
+   whose throw the next step folds in, as the stack form's
+   compileDispose. Then the finally depth (completion dispatch, no cap),
+   the debugger's code (statement markers in register code), and the
+   caps.
+9b. **Labelled statements that are no loop, declarations in switches,
+   delete of a name** (69, 36 and 41) -- done. A labelled statement of any
+   other kind is a target only a break naming it reaches (`loop.named`),
+   and a statement's labels are a set (`labelSet`): `a: b: while` is the
+   target of a break or a continue naming either, which the parser and
+   the stack compiler took as b's alone (fixed with it). A switch's case
+   block is one scope, entered once the discriminant is made
+   (`enterBlock` of every case's statements). delete of a name is false
+   for a binding and `delete_var` (cold) for a global, as the stack form
+   resolved it (the record's read of the operand); delete of an optional
+   chain's property deletes it, true where a link is nullish -- the stack
+   form deleted nothing (fixed with it).
+9c. **Function declarations in blocks, switches and behind labels**
+   (128, and the Annex B functions of item 8's count) -- done. A block's
+   functions are made as it is entered, after its lexical bindings, a
+   closure's capture closed first in a loop (`enterBlock`); a labelled
+   declaration is its list's, as an unlabelled one is (the stack form
+   never made one: fixed with it). Annex B's var is assigned as the
+   declaration is evaluated, with what the block's binding holds then
+   (B.3.3.1), a store the stack compiler records as the declaration's
+   name's write -- it assigned it as the block was entered, which Node
+   does not (fixed with it).
+9d. **The last refusals of the corpora** (40) -- done; the debugger
+   statement outside a debugger's code does nothing, as the stack form's.
+   - *A finally clause's bindings* (9, "a name the record resolves two
+     ways"): the stack form compiles a clause once for each way out --
+     inline at the normal end, as the handler's, and at each break or
+     continue that leaves it (unwindTo) -- each copy's bindings in slots
+     of their own (slots are never reused), so
+     a name in it resolved to one slot in one copy and another in the
+     next. The record keeps the first copy's notes and drops the later
+     ones' (`Record.BeginFinally`); regcomp compiles all its copies from
+     the first's slots, which no other binding has, and finds the first
+     copy's function constants (`closure` by start).
+   - *Sloppy code's assignment to a call* (12: `f() = v`, `f() += v`,
+     `f()++`, `for (f() in o)`): the call made, then
+     `throw_reference_error` (cold) at the target, the value never made,
+     as the stack form's compileCallTarget. A logical assignment to a call
+     is a syntax error, and the other targets are panics, not refusals.
+   - *Annex B's `for (var a = init in o)`* (4): the initializer assigned
+     once, before the object is made. *A let's own initializer storing
+     it in its dead zone* (`let y = [y] = []`, 2): the pattern's store
+     checks the dead zone as an assignment's does.
+   - *The caps as wide forms.* A call of more than 255 arguments -- plain,
+     a method's, an optional chain's, new, super(), a tagged template's,
+     a direct eval's -- passes an array of them as a spread call does
+     (`wideArgs`, `call_spread`); a spread call through an optional chain
+     is chainCall's. An array literal of more than `arrayChunk` (1,024)
+     elements makes that many at once and pushes the rest; a literal of
+     constants past 16 bits names its count by its table's (new_array_k's
+     B 0); an object literal's room is a hint, at most 65,535. A function
+     with more cache sites, or call sites, than 16 bits number is compiled
+     again with its sites shared by key (`site16`, `siteKey`): the kind of
+     cache and the name, a literal's keys or constants, a call's
+     operation -- entries that answer alike for every instruction of the
+     key, a call's checked against its callee. A function whose stack
+     form alone has nearly as many (Mandreel's global_init, 155,109;
+     test262's string-upper-lower-mapping.js, 65,561) is compiled a
+     third time with the register form's sites numbered first, from 1,
+     shared by key, and the stack form's moved past them
+     (`moveStackSites`: the B of every instruction the stack compiler
+     gave a site, and the object literals' `LiteralKeys`): the two forms
+     index one closure's caches, and only the register form's operands
+     are 16 bits.
+   - `with (o) f(...a)` passed no receiver in the stack form (fixed with
+     it): a spread call probes with `with_get_this` as any call does.
+9e. **Eval code** -- done. The top level a direct or an indirect eval
+   evaluates, strict or sloppy, and the Function constructor's code, are
+   compiled as any top-level code (`regScript` refuses only a debugger's),
+   and so is every function written inside them, which the record skipped
+   where the code had an eval scope. The caller's bindings are upvalues by
+   name (`evalIn` captures them from the frame, its register for register
+   code); a with object's names are probed as in the caller. A var or a
+   function the code declares goes where the stack form's
+   define_global_var and define_global_func put it: the global object, or
+   inside a function the frame's eval variables (`f.evalVars`, which
+   runFD gives the frame), which the cold `define_global_var` and
+   `define_global_func` now do too. A function the code declares where
+   the caller binds the name as a var is stored into that binding, as
+   the stack form's storeVar does: a declaration of its own in the record
+   (`TopOp` set_upvalue, of an identifier of its own, whose write the
+   record resolves, a with object's probe included). The completion value
+   of a with statement whose body produces none is undefined (fixed with
+   it).
+10. **The debugger's code** (`WithDebugger`) -- done. The stack compiler
+   records each debug_stmt it makes by its position (`Record.Debugs`,
+   the first copy's in a finally clause compiled more than once), and
+   regcomp makes a cold `debug` at each statement, loop test and update
+   and for-in or for-of head of that position, the statement's index in
+   Aux: it does nothing unless a debugger has asked to stop, and then sets
+   the frame's pc to the stack form's debug_stmt, by which the debugger
+   finds the statement, its scope and its position, and asks the debugger
+   as executeAt's case does. Every binding has a register, as beside a
+   direct eval, and `RegCode.LocalReg` names it: a `DebugFrame` of a frame
+   that runs as register code (`regDebugFrame`) reads and sets its
+   bindings there (`Scopes`, `SetVariable`), its this in register 1, and
+   evaluates code there as a direct eval of the register form's
+   (`regEvalCode`). Breakpoints and steps are the statements' indexes, as
+   in the stack form.
+11. **Finally clauses nested past four copies** -- done (`finShared`). A
+   try statement compiled inside `finallyDepth` copies of clauses has its
+   clause compiled once, at its end, with a completion dispatch: each way
+   in loads its kind in a register of the statement's -- 0 the block's
+   normal end, 1 a throw from the handler, k > 1 an exit -- and jumps to
+   the clause, after which compares of the kind (`RJSEqI`) go on: past the
+   statement, to the throw again, or to the rest of exit k, the clauses
+   outside and its jump or return, compiled there with the registers the
+   exits keep live left alone. A clause inside one so compiled is
+   compiled once too, so that the code grows with the nesting, not as
+   its power. The stack form's copies of a clause with a try statement
+   of its own lost the clauses outside it (fixed with it).
 
 ### Stage 3: the JIT
 

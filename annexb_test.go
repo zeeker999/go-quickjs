@@ -100,6 +100,35 @@ func TestBlockFunctionAliasKeepsItsBinding(t *testing.T) {
 	}
 }
 
+// TestLabelledFunctionDeclarations covers sloppy code's `L: function f() {}`,
+// which declares f as the unlabelled declaration would: hoisted with the list
+// it is in, a script's, a function's or a block's, as in Node.
+func TestLabelledFunctionDeclarations(t *testing.T) {
+	evalCases(t, []struct{ src, want string }{
+		{`(function () { L: function f() { return 1 } return f() })()`, "1"},
+		{`L: function gl() { return "gl" } gl()`, "gl"},
+		{`(function () { var r = f(); L: M: function f() { return 2 } return r })()`, "2"},
+		{`(function () { var r; { r = f(); L: function f() { return 3 } } return r + "," + typeof f })()`, "3,function"},
+		{`(function () { switch (1) { case 1: L: function f() { return 4 } } return f() })()`, "4"},
+		{`try { eval("{ L: function f() {} let f; }") } catch (e) { e.name }`, "SyntaxError"},
+	})
+}
+
+// TestAnnexBAliasAtTheDeclaration pins when B.3.3 assigns a block function to
+// its var: as the declaration is evaluated, with what the block's binding
+// holds then, not as the block is entered, as in Node.
+func TestAnnexBAliasAtTheDeclaration(t *testing.T) {
+	evalCases(t, []struct{ src, want string }{
+		{`(function () { { f = 1; function f() {} } return typeof f })()`, "number"},
+		{`(function () { var h = () => typeof g, x; { x = h(); function g() {} } return x + "," + typeof g })()`, "undefined,function"},
+		{`(function () { var r = []; for (var i = 0; i < 2; i++) { r.push(typeof k); { function k() {} } } return r.join() })()`, "undefined,function"},
+		{`(function () { { function m() { return 1 } m = 2; } return typeof m })()`, "function"},
+		{`(function () { switch (2) { case 1: function s() {} } return typeof s })()`, "undefined"},
+		{`{ q = 5; function q() {} } typeof q`, "number"},
+		{`var t0 = typeof w; { function w() {} } t0 + "," + typeof w`, "undefined,function"},
+	})
+}
+
 // TestAnnexBBlockFunctionHoisting pins where B.3.3 hoists a function declared
 // in a block to a var of the same name: exactly where replacing the
 // declaration with `var f` would be legal and f is not a parameter.

@@ -17,7 +17,7 @@ func (c *compiler) compileFunctionLiteral(fn *ast.FuncLit, inferredName string) 
 	trace := c.traceName
 	c.traceName = ""
 	sub := newCompiler(c, c.opts)
-	if registerForm.Load() && !c.opts.Debug && c.opts.EvalScope == nil {
+	if registerForm.Load() {
 		sub.reg = regcomp.NewRecord()
 	}
 	sub.lit = fn
@@ -48,7 +48,7 @@ func (c *compiler) compileFunctionLiteral(fn *ast.FuncLit, inferredName string) 
 		// never compiled (docs/register-interpreter.md, "Compiled lazily").
 		compiled.RegLater = regcomp.Later(fn, compiled, rec)
 	} else if rec != nil {
-		regcomp.Refuse(compiled, "a with, an eval's variables or an Annex B function")
+		regcomp.Refuse(compiled, "a name the record resolves two ways")
 	}
 
 	idx := c.addConst(bytecode.Constant{Kind: bytecode.ConstFunction, Fn: compiled})

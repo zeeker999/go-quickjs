@@ -107,20 +107,22 @@ func TestRegisterBackendCode(t *testing.T) {
 	has("cap", "closure_w")
 }
 
-// TestRegisterBackendFallsBack pins what the backend leaves to the stack
-// form, each function as a whole: a generator. A try statement is register
-// code, with a handler table, and so are a catch clause's pattern, an
-// optional chain and a strict global store of a value that runs code, which
-// settles whether the name resolves before the value runs.
+// TestRegisterBackendFallsBack pins forms the backend once left to the
+// stack form, each function as a whole: a generator and a direct eval
+// are register code. A try statement is register code, with a handler
+// table, and so are a catch clause's pattern, an optional chain and a
+// strict global store of a value that runs code, which settles whether
+// the name resolves before the value runs.
 func TestRegisterBackendFallsBack(t *testing.T) {
 	fns := regFunctions(t, `
 		function tried() { try { return 1 } catch ({ e }) { return 2 } }
 		function handled(x) { try { return x.y } catch (e) { return e } finally { x = 0 } }
 		function opt(o) { return o?.x }
 		function* gen() { yield 1 }
+		function ev(s) { return eval(s) }
 		function strictStore() { 'use strict'; g = plain(1) }
 		function plain(x) { return x + 1 }`)
-	for _, name := range []string{"tried", "opt", "strictStore"} {
+	for _, name := range []string{"tried", "opt", "strictStore", "gen"} {
 		if f := fns[name]; f == nil || f.RegCode() == nil {
 			t.Errorf("%s: want register code", name)
 		}
@@ -132,9 +134,15 @@ func TestRegisterBackendFallsBack(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"gen"} {
-		if f := fns[name]; f == nil || f.RegCode() != nil {
-			t.Errorf("%s: register code %v, want none", name, f != nil && f.RegCode() != nil)
+	// A direct eval in a sloppy function is register code, its callee
+	// probed among the eval's variables, which may declare eval.
+	if f := fns["ev"]; f == nil || f.RegCode() == nil {
+		t.Errorf("ev: want register code")
+	} else {
+		for _, op := range []string{"direct_eval", "with_get_this"} {
+			if !strings.Contains(f.RegCode().String(), op) {
+				t.Errorf("ev has no %s:\n%s", op, f.RegCode())
+			}
 		}
 	}
 	if f := fns["handled"]; f == nil || f.RegCode() == nil || len(f.RegCode().Handlers) != 2 {

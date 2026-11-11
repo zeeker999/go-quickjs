@@ -472,9 +472,7 @@ func isNegZero(v float64) bool { return v == 0 && 1/v < 0 }
 func (c *compiler) compileIdentRead(n *ast.Ident) {
 	// Inside a `with` body the object may answer instead of the binding.
 	probe := c.withProbe(bytecode.OpWithGet, n.Name)
-	if probe >= 0 && c.reg != nil {
-		c.reg.Bail = true
-	}
+	c.regWith(n, probe)
 	c.compileIdentReadStatic(n)
 	c.patchWithProbe(probe)
 }
@@ -503,7 +501,7 @@ func (c *compiler) compileIdentReadStatic(n *ast.Ident) {
 	}
 	if idx, ok := c.resolveUpvalue(n.Name); ok {
 		if c.fn.Upvalues[idx].TDZ {
-			c.reg.NoteRead(n, regcomp.Res{})
+			c.reg.NoteRead(n, regcomp.Res{Kind: regcomp.ResUpvalCheck, Index: idx})
 			c.emitAt(int(n.Start), bytecode.OpGetUpvalueCheck, idx, 0)
 		} else {
 			c.reg.NoteRead(n, regcomp.Res{Kind: regcomp.ResUpval, Index: idx})
@@ -1055,6 +1053,7 @@ func (c *compiler) compileUnary(n *ast.Unary) {
 		// than throwing, which needs the non-throwing global read.
 		if id, ok := n.Operand.(*ast.Ident); ok {
 			probe := c.withProbe(bytecode.OpWithTypeof, id.Name)
+			c.regWith(id, probe)
 			// The non-throwing global read is only right for a name that
 			// resolves nowhere; a binding, or the function's own name, is
 			// read the ordinary way.
@@ -1067,7 +1066,9 @@ func (c *compiler) compileUnary(n *ast.Unary) {
 				}
 			}
 			if probe >= 0 {
-				c.compileExpr(n.Operand)
+				// The binding past the probe, which has asked the with
+				// objects already: a second probe would ask them again.
+				c.compileIdentReadStatic(id)
 				c.emit(bytecode.OpTypeOf, 0, 0)
 				c.patchWithProbe(probe)
 				return
@@ -1077,6 +1078,12 @@ func (c *compiler) compileUnary(n *ast.Unary) {
 		c.emit(bytecode.OpTypeOf, 0, 0)
 
 	case "delete":
+		if ch, ok := n.Operand.(*ast.OptionalChain); ok {
+			if m, ok := ch.Base.(*ast.Member); ok {
+				c.compileDeleteChain(n, m)
+				return
+			}
+		}
 		if m, ok := n.Operand.(*ast.Member); ok {
 			// A private name is not a property key a program may remove: there
 			// is no object that could carry it afterwards, and no way to ask.
@@ -1105,18 +1112,23 @@ func (c *compiler) compileUnary(n *ast.Unary) {
 		}
 		if id, ok := n.Operand.(*ast.Ident); ok {
 			probe := c.withProbe(bytecode.OpWithDelete, id.Name)
+			c.regWith(id, probe)
 			defer c.patchWithProbe(probe)
 			// A local or captured binding cannot be deleted at all; a global
 			// can, but only if it is configurable, which a var declaration is
-			// not.
-			if _, isLocal := c.resolveLocal(id.Name); isLocal {
+			// not. The register form is told which: the binding's
+			// resolution, or a global.
+			if l, isLocal := c.resolveLocal(id.Name); isLocal {
+				c.reg.NoteRead(id, regcomp.Res{Kind: regcomp.ResLocal, Index: l.slot})
 				c.emit(bytecode.OpPushFalse, 0, 0)
 				return
 			}
-			if _, isUpvalue := c.resolveUpvalue(id.Name); isUpvalue {
+			if idx, isUpvalue := c.resolveUpvalue(id.Name); isUpvalue {
+				c.reg.NoteRead(id, regcomp.Res{Kind: regcomp.ResUpval, Index: idx})
 				c.emit(bytecode.OpPushFalse, 0, 0)
 				return
 			}
+			c.reg.NoteRead(id, regcomp.Res{Kind: regcomp.ResGlobal})
 			c.emitAt(n.Start, bytecode.OpDeleteVar, c.nameIdx(id.Name), 0)
 			return
 		}
@@ -1677,6 +1689,7 @@ func (c *compiler) compileCall(n *ast.Call) {
 	// receiver and a callee, so the call is the same instruction either way.
 	if id, ok := n.Callee.(*ast.Ident); ok && c.withDepth > 0 {
 		probe := c.withProbe(bytecode.OpWithGetThis, id.Name)
+		c.regWith(id, probe)
 		c.emit(bytecode.OpPushUndef, 0, 0)
 		c.compileIdentReadStatic(id)
 		c.patchWithProbe(probe)
@@ -1801,6 +1814,18 @@ func (c *compiler) compileSpreadCall(n *ast.Call) {
 		c.emitAt(callPos(n), bytecode.OpCallSpread, 0, 0)
 		return
 	}
+	if id, ok := n.Callee.(*ast.Ident); ok && c.withDepth > 0 {
+		// Through a with object, as a call without a spread: the object
+		// the name is found on is the receiver.
+		probe := c.withProbe(bytecode.OpWithGetThis, id.Name)
+		c.regWith(id, probe)
+		c.emit(bytecode.OpPushUndef, 0, 0)
+		c.compileIdentReadStatic(id)
+		c.patchWithProbe(probe)
+		c.compileSpreadArguments(n.Args)
+		c.emitAt(callPos(n), bytecode.OpCallSpread, 0, 0)
+		return
+	}
 	// A plain call has no receiver, so undefined stands in for one.
 	c.emit(bytecode.OpPushUndef, 0, 0)
 	c.compileExpr(n.Callee)
@@ -1869,6 +1894,39 @@ func (c *compiler) compileChain(n *ast.OptionalChain, wantThis bool) {
 		}
 		c.emit(bytecode.OpPushUndef, 0, 0)
 		// Every pad but the last has to jump over the ones that follow it.
+		if i < len(jumps)-1 {
+			exits = append(exits, c.emitJump(bytecode.OpJump))
+		}
+	}
+	c.patchJump(done)
+	for _, pc := range exits {
+		c.patchJump(pc)
+	}
+}
+
+// compileDeleteChain compiles delete of an optional chain's property, a?.b
+// or a?.b.c: the property is removed where no link short-circuited, and the
+// result is true where one did.
+func (c *compiler) compileDeleteChain(n *ast.Unary, m *ast.Member) {
+	if pn, private := m.Property.(*ast.PrivateName); private {
+		c.errorf(n.Start, "a private name cannot be deleted: #%s", pn.Name)
+		return
+	}
+	var jumps []chainJump
+	c.compileChainLink(m.Object, &jumps)
+	if m.Optional {
+		jumps = append(jumps, chainJump{pc: c.emitJump(bytecode.OpJumpIfNullish), live: 1})
+	}
+	c.compileMemberKey(m)
+	c.emitAt(n.Start, bytecode.OpDeleteProp, 0, 0)
+	done := c.emitJump(bytecode.OpJump)
+	var exits []int
+	for i, j := range jumps {
+		c.patchJumpTo(j.pc, c.here())
+		for range j.live {
+			c.emit(bytecode.OpDrop, 0, 0)
+		}
+		c.emit(bytecode.OpPushTrue, 0, 0)
 		if i < len(jumps)-1 {
 			exits = append(exits, c.emitJump(bytecode.OpJump))
 		}
@@ -2280,7 +2338,11 @@ func (c *compiler) assignToIdentStatic(t *ast.Ident, initializing bool) {
 			// A function expression's own name is an immutable binding, and
 			// assigning to it outside strict mode is quietly discarded rather
 			// than refused.
-			c.reg.NoteWrite(t, regcomp.Res{})
+			if c.fn.Strict {
+				c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResConstAssign})
+			} else {
+				c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResIgnore})
+			}
 			if c.fn.Strict {
 				c.emitAt(int(t.Start), bytecode.OpAssignConst, c.nameIdx(t.Name), 0)
 			}
@@ -2301,9 +2363,9 @@ func (c *compiler) assignToIdentStatic(t *ast.Ident, initializing bool) {
 			c.reg.NoteWrite(t, regcomp.Res{Kind: kind, Index: l.slot})
 			c.emit(bytecode.OpPutLocal, l.slot, 0)
 		} else {
-			c.reg.NoteWrite(t, regcomp.Res{})
+			c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResLocalCheck, Index: l.slot})
 			c.emit(bytecode.OpDup, 0, 0)
-			c.emit(bytecode.OpSetLocalCheck, l.slot, 0)
+			c.emitAt(int(t.Start), bytecode.OpSetLocalCheck, l.slot, 0)
 		}
 		return
 	}
@@ -2386,9 +2448,7 @@ func (c *compiler) assignTo(target ast.Expr, initializing bool) {
 		// whatever the object holds.
 		if !initializing {
 			probe := c.withProbe(bytecode.OpWithSet, t.Name)
-			if probe >= 0 && c.reg != nil {
-				c.reg.Bail = true
-			}
+			c.regWith(t, probe)
 			defer c.patchWithProbe(probe)
 		}
 		c.assignToIdentStatic(t, initializing)

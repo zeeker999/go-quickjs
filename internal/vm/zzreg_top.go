@@ -40,6 +40,14 @@ func (r *Runtime) regColdTop(f *frame, w bytecode.RInstr, regs *[1 << 16]Value) 
 			return r.throwTypeError("cannot declare %q on a non-extensible global", r.atoms.name(name))
 		}
 	case bytecode.RColdDefineGlobalVar:
+		if f.evalVars != nil {
+			// Eval code inside a function: what it declares is that
+			// function's, as the stack form's define_global_var has it.
+			if !evalVarProp(f.evalVars, name).ok() {
+				f.evalVars.setOwnRaw(name, Undefined, propWritable|propConfigurable)
+			}
+			return nil
+		}
 		env := cl.scope()
 		if env == r.global {
 			if err := r.checkGlobalVarName(name); err != nil {
@@ -62,6 +70,10 @@ func (r *Runtime) regColdTop(f *frame, w bytecode.RInstr, regs *[1 << 16]Value) 
 		}
 	case bytecode.RColdDefineGlobalFunc:
 		fn := regs[w.A()]
+		if f.evalVars != nil {
+			f.evalVars.setOwnRaw(name, fn, propWritable|propConfigurable)
+			return nil
+		}
 		flags := propWritable | moduleBindingFlags(r.atoms.name(name))
 		if flag {
 			flags |= propConfigurable
@@ -112,6 +124,38 @@ func (r *Runtime) regColdTop(f *frame, w bytecode.RInstr, regs *[1 << 16]Value) 
 // regGlobalOpt is get_global_opt's value of the global name: typeof's
 // operand, which is undefined for an undeclared name rather than an error,
 // where a lexical binding in its dead zone still throws.
+// regColdDispose is a using scope's cold operations, what the stack form's
+// new_dispose_capability, add_disposable and dispose do.
+func (r *Runtime) regColdDispose(w bytecode.RInstr, regs *[1 << 16]Value) error {
+	switch bytecode.RColdOp(w.X()) {
+	case bytecode.RColdNewDispose:
+		o := newObjectExt(nil, ClassObject, objExtensible)
+		o.setData(&disposeCapability{})
+		regs[w.A()] = Obj(o)
+		return nil
+	case bytecode.RColdAddDisposable:
+		c := regs[w.A()].Object().dataOf().(*disposeCapability)
+		return r.addDisposableResource(c, regs[w.B()], w.C() == 1)
+	case bytecode.RColdDispose:
+		c := regs[w.A()].Object().dataOf().(*disposeCapability)
+		// A throw leaving the scope is folded into what the disposal
+		// throws.
+		var completion error
+		if w.C() == 1 {
+			completion = r.throw(regs[w.B()])
+		}
+		if err := r.disposeResources(c, completion); err != nil && err != completion {
+			return err
+		}
+		return nil
+	}
+	a := w.A()
+	mode := uint32(w.C()) | bytecode.DisposeStep
+	v, more, err := usingStep(r, regs[w.B()], regs[a], Int(int(completionThrow)), mode)
+	regs[a], regs[a+1] = v, Bool(more)
+	return err
+}
+
 func (r *Runtime) regGlobalOpt(f *frame, name Atom) (Value, error) {
 	env := f.cl.scope()
 	if f.evalVars != nil {

@@ -61,6 +61,9 @@ type regCode struct {
 	newTarget bool
 	// args says a frame keeps its arguments as passed, for RArguments.
 	args bool
+	// suspends marks a generator's or an async function's code, which
+	// only a generator's resumption runs (zzreg_zgen.go).
+	suspends bool
 	// leaf is what a call may answer without a frame: a pure body that
 	// calls nothing, or one that only reads or writes its this's
 	// properties; read here rather than in the function, a line away.
@@ -80,14 +83,16 @@ type regCode struct {
 	reuse []*execReuseSite
 }
 
-// runReg runs frame f as register code c and returns what it returns.
+// runReg runs frame f as register code c, from instruction start, and
+// returns what it returns. Only a generator's resumption starts past the
+// first instruction (regGenRun).
 //
 // A case that finishes its instruction continues the loop; one that can
 // fail sets the frame's pc to the stack form's instruction first, which is
 // what a stack trace or an error's position reads, keeps the pc, and goes
 // to the fail tail with the error, where a handler of the frame's may
 // catch it (regCatch).
-func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
+func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 	if r.stopped != nil {
 		return Undefined, r.stopped
 	}
@@ -101,7 +106,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 	// across the call and Go does not store them at every dispatch.
 	var kept regKept
 	var failed error
-	pc := 0
+	pc := start
 	for {
 		var off int32
 		w := regAt(code, pc)
@@ -838,6 +843,13 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				goto fail
 			}
 			pc = kept.pc
+		case bytecode.RYield:
+			// A generator's step, suspended with what it yields: the
+			// frame's suspension, which no handler of its own takes
+			// (regCatch), as no other error leaves without the fail tail.
+			kept.pc = pc
+			failed = r.regYield(f, regs[w.B()], pc)
+			goto fail
 		// Every value of the switch is a case, so that it is a jump table
 		// that needs no range check: Go makes one only of a switch whose
 		// cases are dense, and the mask tells it the value is below 128. A
@@ -846,7 +858,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		// had, and 127, invalid's.
 		case bytecode.RCallWT, bytecode.RCallMWT:
 			goto tail
-		case 42, 43:
+		case 42:
 			goto invalid
 		case 127:
 			goto invalid
@@ -1087,7 +1099,7 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 					nf.newTarget = Undefined
 				}
 				nf.regKind = regFrameCall
-				v, err := r.runReg(nf, rc)
+				v, err := r.runReg(nf, rc, 0)
 				nf.regKind = 0
 				if rc.ncap != 0 && len(nf.openUpvalues) != 0 {
 					regCloseUpvalues(nf)
@@ -1174,7 +1186,7 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int,
 		p := int(rc.params)
 		f.locals = r.stack[base+2 : base+2+p : base+2+p]
 	}
-	v, err := r.runReg(f, rc)
+	v, err := r.runReg(f, rc, 0)
 	f.regKind = 0
 	if len(f.openUpvalues) != 0 {
 		regCloseUpvalues(f)

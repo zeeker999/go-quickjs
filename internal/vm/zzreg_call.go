@@ -116,7 +116,7 @@ func (r *Runtime) regCall(callee, this Value, args []Value) (Value, error) {
 	if f.savedSP != 0 {
 		f.savedSP = 0
 	}
-	v, err := r.runReg(f, c)
+	v, err := r.runReg(f, c, 0)
 	r.popFrameOf(f, base)
 	if err != nil {
 		return r.regCallEnd(v, err)
@@ -144,10 +144,12 @@ func (r *Runtime) regCallMiss(f *frame, c *regCode, w bytecode.RInstr, wb, pc in
 	return nil
 }
 
-// regGenCall is a call of o, a generator function of this realm with
-// closure cl, whose window is at base: its object made as callClosure makes
-// it, the receiver coerced as there, with no frame, since the body does not
-// run until the object is stepped.
+// regGenCall is a call of o, a generator function or an async function of
+// this realm with closure cl, whose window is at base: its object made as
+// callClosure makes it, the receiver coerced as there, with no frame, since
+// the body does not run until the object is stepped; an async function's
+// first step is made at once (runAsync), an error binding its parameters
+// rejecting its promise.
 func (r *Runtime) regGenCall(o *Object, cl *closure, method bool, base, argc int) (Value, error) {
 	if err := r.tick(); err != nil {
 		return Undefined, err
@@ -167,9 +169,18 @@ func (r *Runtime) regGenCall(o *Object, cl *closure, method bool, base, argc int
 			this = r.globalThis
 		}
 	}
-	gen, err := r.newGenerator(cl, this, r.stack[base+2:base+2+argc], o, false, Undefined)
+	async := cl.fn.Async
+	gen, err := r.newGenerator(cl, this, r.stack[base+2:base+2+argc], o, async, Undefined)
 	if err != nil {
+		if async {
+			p := r.newPromise()
+			r.rejectPromise(p, thrownValue(err))
+			return Obj(p), nil
+		}
 		return Undefined, err
+	}
+	if async {
+		return r.runAsync(genOf(gen)), nil
 	}
 	return Obj(gen), nil
 }
@@ -260,7 +271,7 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base, pc 
 			if rc = cl.reg; rc == nil {
 				rc = r.regOf(cl)
 			}
-			if rc != nil && rc.wide && cl.realm == r.Realm && !isClassConstructorKind(cl.fn.Kind) {
+			if rc != nil && rc.wide && !rc.suspends && cl.realm == r.Realm && !isClassConstructorKind(cl.fn.Kind) && !cl.fn.HasDirectEval {
 				if x := fd.extra; x == nil {
 					switch {
 					case !method:
@@ -276,10 +287,10 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base, pc 
 				} else if fd.arrow && x.lexThisRef == nil && x.rare == nil {
 					kind, this = regCallThis, x.lexThis
 				}
-			} else if fn := cl.fn; e != nil && fn.Generator && !fn.Async && fd.extra == nil && cl.realm == r.Realm {
-				// A generator of this realm: the site makes its object as
-				// callClosure makes one (regCallGen), without the generic
-				// call's search.
+			} else if fn := cl.fn; e != nil && fn.Generator != fn.Async && fd.extra == nil && cl.realm == r.Realm {
+				// A generator or an async function of this realm: the site
+				// makes its object as callClosure makes one (regCallGen),
+				// without the generic call's search.
 				e.callee, e.cl, e.rc, e.this, e.kind = o, cl, nil, Undefined, regCallGen
 				return r.regGenCall(o, cl, method, base, argc)
 			}
@@ -726,7 +737,7 @@ func (r *Runtime) regConstruct(callee Value, base, argc int) (Value, error) {
 	if rc == nil {
 		rc = r.regOf(cl)
 	}
-	if rc == nil || !rc.wide {
+	if rc == nil || !rc.wide || rc.suspends || cl.fn.HasDirectEval {
 		return r.construct(callee, args)
 	}
 	var protoVal Value
@@ -1055,11 +1066,18 @@ const (
 	// regFrameEnter is regEnterW's: its this is its window's, its
 	// new.target the frame's.
 	regFrameEnter
+	// regFrameAwaitJob is an async function's, resumed by its await's
+	// job from the job queue, its this and new.target the frame's
+	// (regColdGen).
+	regFrameAwaitJob
 )
 
 // regFrameThis is the this and new.target of register frame f, for a stack
 // trace.
 func (r *Runtime) regFrameThis(f *frame) (this, newTarget Value) {
+	if f.regKind == regFrameAwaitJob {
+		return f.this, f.newTarget
+	}
 	this = r.stack[f.base+1]
 	newTarget = Undefined
 	if f.regKind == regFrameEnter {

@@ -175,7 +175,7 @@ func (g *gen) specialSet(s sref, v, pos int) {
 // the low.
 func (g *gen) privateAux(s sref) uint32 {
 	name := g.name16("#" + s.m.Property.(*ast.PrivateName).Name)
-	return uint32(g.site(uint32(name)))<<16 | uint32(name)
+	return uint32(g.site16(siteKey{kind: "private", name: uint32(name)}))<<16 | uint32(name)
 }
 
 // specialMember reads super.x, super[k] or o.#x into dst.
@@ -234,7 +234,7 @@ func (g *gen) superCall(n *ast.Call, dst int) int {
 		g.at(n.TracePos())
 		g.cold(bytecode.RColdSuperForward, d, 0, 0)
 		g.forwardsArgs = true
-	case hasSpread(n.Args):
+	case wideArgs(n.Args):
 		a := g.alloc()
 		g.spreadArray(n.Args, a)
 		g.at(n.TracePos())
@@ -364,7 +364,7 @@ func (g *gen) class(cls *ast.ClassLit, dst int) int {
 			pos = cls.Fields[st.Field].Start
 		}
 		g.at(pos)
-		g.emit(bytecode.MakeR(bytecode.RCallMW, 0, r16(w), r16(w), g.callSite()))
+		g.emit(bytecode.MakeR(bytecode.RCallMW, 0, r16(w), r16(w), g.callSite(bytecode.RCallMW)))
 	}
 	// The class scope's bindings closures keep are closed: the next
 	// evaluation of the class makes new ones.

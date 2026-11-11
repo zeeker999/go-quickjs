@@ -259,6 +259,10 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 	case bytecode.RColdAssignConst:
 		// An assignment to a constant is a runtime error, not an early one.
 		return r.throwTypeError("assignment to constant variable %q", r.atoms.name(f.cl.names[w.B()]))
+	case bytecode.RColdThrowRef:
+		return r.throwError(errReference, "%s", r.atoms.name(f.cl.names[w.B()]))
+	case bytecode.RColdDebug:
+		return r.regDebug(f, c, pc, w, regs)
 	case bytecode.RColdNewClass, bytecode.RColdSetFieldInit, bytecode.RColdDefineMethod,
 		bytecode.RColdClassGetter, bytecode.RColdClassSetter, bytecode.RColdClassGetterIndex,
 		bytecode.RColdClassSetterIndex, bytecode.RColdClassIndex, bytecode.RColdPrivateName,
@@ -284,6 +288,35 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		v, err := r.regGlobalOpt(f, f.cl.names[w.B()])
 		regs[w.A()] = v
 		return err
+	case bytecode.RColdDeleteVar:
+		v, err := deleteVar(r, f, f.cl, f.cl.names[w.B()])
+		regs[w.A()] = v
+		return err
+	case bytecode.RColdImport:
+		options := Undefined
+		if w.C()&3 == 2 {
+			options = regs[w.B()+1]
+		}
+		regs[w.A()] = r.importCall(uint32(w.C()>>2), regs[w.B()], options)
+		return nil
+	case bytecode.RColdImportMeta:
+		regs[w.A()] = r.importMeta(f.cl.env)
+		return nil
+	case bytecode.RColdNewDispose, bytecode.RColdAddDisposable, bytecode.RColdDispose, bytecode.RColdDisposeStep:
+		return r.regColdDispose(w, regs)
+	case bytecode.RColdGenEntry, bytecode.RColdEndParams, bytecode.RColdAwait,
+		bytecode.RColdYieldStar, bytecode.RColdIterResume, bytecode.RColdIterUnpackDelegate,
+		bytecode.RColdForAwaitOfStart, bytecode.RColdAsyncIterNext, bytecode.RColdIterResult,
+		bytecode.RColdAsyncIterClose, bytecode.RColdAsyncIterCheck:
+		return r.regColdGen(f, c, k, w, regs)
+	case bytecode.RColdGetUpvalCheck, bytecode.RColdSetUpvalCheck:
+		return r.regColdNames(f, w, regs)
+	case bytecode.RColdDirectEval:
+		return r.regDirectEval(f, c, pc, w, regs)
+	case bytecode.RColdWithGet, bytecode.RColdWithGetThis, bytecode.RColdWithDelete, bytecode.RColdWithSet,
+		bytecode.RColdWithResolve, bytecode.RColdWithRead, bytecode.RColdWithWrite, bytecode.RColdWithPush,
+		bytecode.RColdWithPop:
+		return r.regColdWith(f, c, pc, w, regs)
 	}
 	// get_private and set_private, whose X is no sub-operation
 	// (bytecode.RPrivateX), which the loop's slow path sends here: so they
@@ -461,6 +494,10 @@ func (r *Runtime) regCharCodeAtSlow(f *frame, c *regCode, pc int, regs *[1 << 16
 //
 //go:noinline
 func (r *Runtime) regCatch(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value, err error) int {
+	if r.debug != nil {
+		// As unwindToHandler: a debugger may stop where it is thrown.
+		r.debugThrow(err)
+	}
 	if len(c.rc.Handlers) == 0 {
 		return -1
 	}
@@ -594,5 +631,20 @@ func (r *Runtime) regColdWrap(c *regCode, k *regKept, w bytecode.RInstr, regs *[
 		return err
 	}
 	regs[w.A()] = v
+	return nil
+}
+
+// regGenCursor is the generator of register code st steps, or nil: its
+// step is regGenStep's, with no recover, its body throwing as register
+// code throws, with an error.
+func regGenCursor(st *iterState) *generator {
+	if !st.iter.IsObject() {
+		return nil
+	}
+	if o := st.iter.Object(); o.class == ClassGenerator {
+		if g := genOf(o); g.reg {
+			return g
+		}
+	}
 	return nil
 }

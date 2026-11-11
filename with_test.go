@@ -7,6 +7,22 @@ import (
 	quickjs "github.com/go-quickjs/go-quickjs"
 )
 
+// A call with a spread through a with object has the object as its
+// receiver, as one without a spread does; a name the object does not
+// have is called with none.
+func TestWithSpreadCallReceiver(t *testing.T) {
+	checkEval(t, `var o = { v: 7, f(a, b) { return this.v + a + b } }
+	  function g() { return this === globalThis }
+	  var r = []
+	  with (o) { r.push(f(...[1, 2]), f(1, ...[3]), g(...[])) }
+	  r.join()`, "10,11,true")
+	checkEval(t, `var o = { f() { "use strict"; return this === o } }
+	  function h() { "use strict"; return this }
+	  var r = []
+	  with (o) { r.push(f(...[]), h(...[]) === undefined) }
+	  r.join()`, "true,true")
+}
+
 // Inside a `with` body an unqualified name may resolve to a property of the
 // object rather than to any binding, and which it is depends on what the object
 // holds at the moment the name is evaluated. Nothing else in the language works
@@ -511,4 +527,14 @@ func TestDestructuringResolvesTargetsFirst(t *testing.T) {
 	for _, tc := range cases {
 		checkEval(t, tc.src, tc.want)
 	}
+}
+
+// TestWithTypeofAsksOnce covers typeof of a binding inside a with body: the
+// with objects are asked about the name once, as for any other read, and
+// the binding is read past the probe without asking them again.
+func TestWithTypeofAsksOnce(t *testing.T) {
+	checkEval(t, `var log = []
+	  var p = new Proxy({}, { has(t, k) { log.push(String(k)); return false } })
+	  function f() { var x = 1; with (p) { return typeof x } }
+	  f() + ":" + log.join()`, "number:x")
 }

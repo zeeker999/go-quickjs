@@ -208,6 +208,21 @@ func TestLabeledBreakAndContinue(t *testing.T) {
 		n + " " + m + " " + k + " " + s + " " + log.join()`, "3 2 4 ac n3")
 }
 
+// TestLoopLabelSets covers a loop with several labels, `a: b: while`, which
+// a continue or a break naming any of them targets, as in Node; a block's
+// labels are no continue's.
+func TestLoopLabelSets(t *testing.T) {
+	checkEval(t, `
+		var n = 0;
+		a: b: for (var i = 0; i < 3; i++) { for (;;) { n++; continue a; } }
+		var m = 0;
+		c: d: e: while (m < 10) { m++; for (;;) { if (m == 2) continue d; if (m == 4) break c; continue e; } }
+		var k = 0;
+		f: g: { k++; break f; }
+		n + " " + i + " " + m + " " + k`, "3 3 4 1")
+	checkEval(t, `try { eval("a: b: { while (1) { continue a; } }") } catch (e) { e.name }`, "SyntaxError")
+}
+
 func TestFunctions(t *testing.T) {
 	tests := []struct{ src, want string }{
 		{"function f(n) { return n * 2; } f(21)", "42"},
@@ -3903,6 +3918,25 @@ func TestOptionalChainEdges(t *testing.T) {
 		{"try { eval('null?.`x`') } catch (e) { e.constructor.name }", "SyntaxError"},
 		// An ordinary tagged template is unaffected.
 		{"function t(s) { return s[0] } t`x`", "x"},
+	}
+	for _, tc := range cases {
+		checkEval(t, tc.src, tc.want)
+	}
+}
+
+// TestDeleteOptionalChain covers delete of an optional chain's property,
+// which removes it where no link short-circuited and is true where one
+// did, as in Node.
+func TestDeleteOptionalChain(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{`var o = {b: 1}; [delete o?.b, "b" in o].join()`, "true,false"},
+		{`var o = {b: {c: 1}}; [delete o?.b.c, "c" in o.b].join()`, "true,false"},
+		{`var o = {b: {c: 1}}; [delete o.b?.["c"], "c" in o.b].join()`, "true,false"},
+		{`var n = null; [delete n?.b, delete n?.b.c, delete n?.[f()]].join()`, "true,true,true"},
+		{`var o = Object.freeze({b: 1}); [delete o?.b, "b" in o].join()`, "false,true"},
+		{`"use strict"; var o = Object.freeze({b: 1}); try { delete o?.b; "none" } catch (e) { e.name }`, "TypeError"},
+		{`var o = {}; try { delete o?.b.c; "none" } catch (e) { e.name }`, "TypeError"},
+		{`var o = {m() { return {x: 1} }}; delete o?.m().x`, "true"},
 	}
 	for _, tc := range cases {
 		checkEval(t, tc.src, tc.want)

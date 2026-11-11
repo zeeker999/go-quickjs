@@ -194,7 +194,11 @@ const (
 	// 41, out of the free list), its Aux and X as RGetPrivate's.
 	RSetPrivate
 	_ // free: 42, the translation reference's new, removed
-	_ // free: 43, the translation reference's close_upvals, removed
+	// RYield suspends a generator's frame with R[B], and on its
+	// resumption R[A] = the value sent in, the next instruction a jump past
+	// the return path a return resumes at: the step of a loop over a
+	// generator, which a resumption by next goes on past (zzreg_zgen.go).
+	RYield
 
 	// The bitwise operators and shifts, each an operation of its own so
 	// that no instruction decides at run time which operator it is: R[A] =
@@ -573,7 +577,112 @@ const (
 	// and passes the call over -- never a BigInt past 64 bits, which the
 	// call would cut down again -- as the tree's wrapCall does (wrap).
 	RColdWrap
+	// A generator's and an async function's (zzreg_zgen.go): RColdGenEntry,
+	// the code's first instruction, run by its first run and by a
+	// resumption that throws, which it throws at the suspension; a
+	// resumption that goes on starts at its pc. RColdEndParams suspends a
+	// generator its creation ran once its parameters are bound (RYield is
+	// a yield's); RColdAwait suspends it to
+	// await R[B], and on its resumption R[A] = what that settled to;
+	// RColdYieldStar suspends a yield* with R[B], and on any resumption R[A]
+	// = the value sent in and R[A+1] how, a ResumeNext, ResumeThrow or
+	// ResumeReturn. RColdIterResume, R[A] = what cursor R[B]'s next, throw
+	// or return, by the kind in R[C+1], gives for R[C] -- the result, or, a
+	// return or a throw it has no method for ending the delegation, the
+	// value to end it with, the next instruction a jump taken then;
+	// RColdIterUnpackDelegate, R[A] = result R[B] where it is not done -- its
+	// value in an async generator -- and its value where it is, cursor R[C]
+	// marked done and the next instruction, a jump, taken.
+	// RColdForAwaitOfStart, R[A] = a cursor over R[B] for a for await or an
+	// async generator's yield* (startForAwaitOf). A for await's:
+	// RColdAsyncIterNext, R[A] = what cursor R[B]'s next returns;
+	// RColdIterResult, R[A] = result R[B]'s value, or where it is done, the
+	// next instruction, a jump, taken; RColdAsyncIterClose, R[A] = what
+	// cursor R[B]'s return method returns, the cursor done, or where it has
+	// none, the next instruction, a jump, taken; RColdAsyncIterCheck throws
+	// where R[A], what a return method's result settled to, is not an
+	// object.
+	RColdGenEntry
+	RColdEndParams
+	RColdAwait
+	RColdYieldStar
+	RColdIterResume
+	RColdIterUnpackDelegate
+	RColdForAwaitOfStart
+	RColdAsyncIterNext
+	RColdIterResult
+	RColdAsyncIterClose
+	RColdAsyncIterCheck
+	// RColdGetUpvalCheck, R[A] = upvalue BC, and RColdSetUpvalCheck,
+	// upvalue BC = R[A], throw where the binding is in its dead zone, and
+	// the store where it is a constant (zzreg_znames.go).
+	RColdGetUpvalCheck
+	RColdSetUpvalCheck
+	// RColdDeleteVar: R[A] = delete of the global Names[B] (delete_var).
+	RColdDeleteVar
+	// RColdImport: R[A] = import(R[B]), import.defer or import.source by
+	// the phase C>>2 (an Import constant), with the options R[B+1] where C&3
+	// is 2 (the stack form's import). RColdImportMeta: R[A] = import.meta.
+	RColdImport
+	RColdImportMeta
+	// A scope with using declarations (the stack form's
+	// new_dispose_capability, add_disposable and dispose):
+	// RColdNewDispose: R[A] = a new stack of resources; RColdAddDisposable
+	// adds R[B] to R[A]'s, an await using's where C is 1;
+	// RColdDispose disposes of R[A]'s, a throw of R[B] leaving the scope
+	// where C is 1; RColdDisposeStep is a step of an await using scope's
+	// disposal, of R[B]'s resources, the mode in C (bytecode.DisposeStart,
+	// DisposeRecord, DisposeFail, DisposeFinish): R[A] is what a throw
+	// leaving or an await failing threw, and is then what to await, and
+	// R[A+1] whether there is one.
+	RColdNewDispose
+	RColdAddDisposable
+	RColdDispose
+	RColdDisposeStep
+	// RColdDirectEval is a call written eval(...) (the stack form's
+	// direct_eval): the callee R[A], its receiver R[A+1] and C arguments
+	// from R[A+2], or, where Aux has RDirectEvalSpread, an array of them
+	// in R[A+2]; R[B] = what it gives. Where the callee is the realm's
+	// eval and the first argument a string, the code runs in the
+	// caller's scope, the function's EvalScopes[Aux&^RDirectEvalSpread];
+	// otherwise it is an ordinary call, a tail call where marked
+	// RMarkTail.
+	RColdDirectEval
+	// The probes of a name a with object or an eval's variable may
+	// answer (regcomp's with.go), each of the name Names[B] in the
+	// innermost C of the frame's with objects and eval's variables, R[Aux]
+	// = whether one has it: RColdWithGet, R[A] = its value there;
+	// RColdWithGetThis, R[A] = its value and R[A+1] the object, a callee
+	// and its receiver; RColdWithDelete, R[A] = delete of it there;
+	// RColdWithSet stores R[A] there; RColdWithResolve, R[A] = the object,
+	// or undefined. RColdWithRead, R[A] = Names[C] of the object R[B], and
+	// RColdWithWrite stores R[A] there: a reference's read and store past
+	// its with_resolve. RColdWithPush puts the object of R[A] on the
+	// frame's with objects (ToObject), and RColdWithPop takes it off.
+	RColdWithGet
+	RColdWithGetThis
+	RColdWithDelete
+	RColdWithSet
+	RColdWithResolve
+	RColdWithRead
+	RColdWithWrite
+	RColdWithPush
+	RColdWithPop
+	// RColdThrowRef throws a ReferenceError of message Names[B]
+	// (throw_reference_error): sloppy code's assignment to a call, made
+	// once the call has been.
+	RColdThrowRef
+	// RColdDebug is a place code compiled for a debugger can stop (the
+	// stack form's debug_stmt): its index in the function's
+	// Debug.Statements in Aux, and B 1 for a debugger statement. It does
+	// nothing unless a debugger has asked to stop somewhere, or B is 1
+	// and one is listening.
+	RColdDebug
 )
+
+// RDirectEvalSpread is the bit of direct_eval's Aux that says its
+// arguments are an array.
+const RDirectEvalSpread = 1 << 31
 
 // The flags of regexp_lit's X.
 const (
@@ -607,6 +716,11 @@ const (
 	// String.prototype's replace, split or match searching with it
 	// directly (regexpArgCall).
 	RMarkLitArg
+	// RMarkTail marks a direct eval in tail position, as the stack form
+	// makes it (tail_call): where it is an ordinary call and the stack is
+	// deep, its frame is given up. The calls of the loop have ops of their
+	// own for it (RCallWT, RCallMWT).
+	RMarkTail
 )
 
 var rColdNames = [...]string{
@@ -640,7 +754,19 @@ var rColdNames = [...]string{
 	RColdSuperSet: "super_set", RColdSuperBase: "super_base", RColdSuperGetIndex: "super_get_index",
 	RColdSuperSetIndex: "super_set_index", RColdThis: "this_bound", RColdCheckThis: "check_this_init",
 	RColdNewTarget: "new_target", RColdDerivedRet: "derived_ret", RColdDeleteSuper: "delete_super",
-	RColdCloseRegs: "close_regs",
+	RColdCloseRegs: "close_regs", RColdGenEntry: "gen_entry", RColdEndParams: "end_params",
+	RColdAwait: "await", RColdYieldStar: "yield_star", RColdIterResume: "iter_resume",
+	RColdIterUnpackDelegate: "iter_unpack_delegate", RColdForAwaitOfStart: "for_await_of_start",
+	RColdAsyncIterNext: "async_iter_next", RColdIterResult: "iter_result",
+	RColdAsyncIterClose: "async_iter_close", RColdAsyncIterCheck: "async_iter_check",
+	RColdGetUpvalCheck: "get_upval_check", RColdSetUpvalCheck: "set_upval_check",
+	RColdDeleteVar: "delete_var", RColdImport: "import", RColdImportMeta: "import_meta",
+	RColdNewDispose: "new_dispose_capability", RColdAddDisposable: "add_disposable", RColdDispose: "dispose",
+	RColdDisposeStep: "dispose_step", RColdDirectEval: "direct_eval",
+	RColdWithGet: "with_get", RColdWithGetThis: "with_get_this", RColdWithDelete: "with_delete",
+	RColdWithSet: "with_set", RColdWithResolve: "with_resolve", RColdWithRead: "with_read",
+	RColdWithWrite: "with_write", RColdWithPush: "with_push", RColdWithPop: "with_pop",
+	RColdThrowRef: "throw_reference_error", RColdDebug: "debug",
 }
 
 func (op RColdOp) String() string {
@@ -732,8 +858,9 @@ type RegCode struct {
 	// (RNewObjectLit), each an index of the function's names.
 	ObjKeys [][]uint16
 	// LocalReg is each local's register, or -1, where the code has a
-	// call_reuse, whose frame's locals the runtime reads by it; nil
-	// otherwise.
+	// call_reuse, whose frame's locals the runtime reads by it, a
+	// direct_eval, whose code it links to them, or is compiled for a
+	// debugger, which shows and sets them; nil otherwise.
 	LocalReg []int32
 	// UsesArguments says the code makes the arguments object, whose frame
 	// keeps the arguments as passed (RArguments).
@@ -849,6 +976,10 @@ type RHandler struct {
 	Ranges []uint32
 	To     uint32
 	Reg    uint16
+	// Catches says the handler is a catch clause's, which keeps what it
+	// catches; any other throws it again once it has run (a finally
+	// clause, an iterator's close), which a debugger asks to know.
+	Catches bool
 }
 
 // HandlerAt is the handler of the instruction at pc, the innermost whose
@@ -888,7 +1019,7 @@ var rOpNames = [...]string{
 	RPostInc: "post_inc", RPostDec: "post_dec", RGetLength: "get_length",
 	RJEq: "jeq", RJNe: "jne", RJEqI: "jeq_imm", RJNeI: "jne_imm", RJNull: "jnull", RJNotNull: "jnotnull",
 	RThrow: "throw", RInstanceOf: "instanceof", RIn: "in", RDelete: "delete", RArguments: "arguments", RNewArrayK: "new_array_k", RAddProp: "add_prop", RAddPropI: "add_prop_imm", RApplyArgs: "apply_args",
-	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RSwitch: "switch", RJTypeof: "jtypeof", RTypeof: "typeof", RSwitchTypeof: "switch_typeof", RNewObjectLit: "new_object_lit", RAppend: "append", RStrFreeze: "str_freeze", RCharCodeAt: "char_code_at", RIterNext: "iter_next", RLit: "regexp_lit", RGetPrivate: "get_private", RSetPrivate: "set_private", RCold: "cold", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
+	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RSwitch: "switch", RJTypeof: "jtypeof", RTypeof: "typeof", RSwitchTypeof: "switch_typeof", RNewObjectLit: "new_object_lit", RAppend: "append", RStrFreeze: "str_freeze", RCharCodeAt: "char_code_at", RIterNext: "iter_next", RYield: "yield", RLit: "regexp_lit", RGetPrivate: "get_private", RSetPrivate: "set_private", RCold: "cold", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
 }
 
 // MethodCall reports whether op is call_method_w or its tail form, whose
@@ -908,7 +1039,7 @@ func (rc *RegCode) Format(pc int) string {
 	r := func(n uint16) string { return fmt.Sprintf("r%d", n) }
 	target := func(off int32) string { return fmt.Sprintf("-> %d", pc+1+int(off)) }
 	switch op := w.Op(); op {
-	case RMove, RInc, RDec, RPostInc, RPostDec, RGetLength:
+	case RMove, RInc, RDec, RPostInc, RPostDec, RGetLength, RYield:
 		return fmt.Sprintf("%s %s, %s", op, r(w.A()), r(w.B()))
 	case RLoadInt:
 		return fmt.Sprintf("%s %s, %d", op, r(w.A()), int32(w.BC()))

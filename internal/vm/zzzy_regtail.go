@@ -163,7 +163,7 @@ func (r *Runtime) regRestartRun(f *frame) (Value, error) {
 	for err == errRegRestart {
 		rc := r.regRestart
 		r.regRestart = nil
-		v, err = r.runReg(f, rc)
+		v, err = r.runReg(f, rc, 0)
 	}
 	// The captures of the code the frame was given, which its caller
 	// closes only by the first code's.
@@ -224,7 +224,7 @@ func (r *Runtime) regTailInPlace(f *frame, c *regCode, w bytecode.RInstr, wb int
 func (r *Runtime) regTailTo(f *frame, w bytecode.RInstr, wb int, o *Object, cl *closure, rc *regCode, this Value) bool {
 	if f.regKind != regFrameCall && f.regKind != regFrameEnter || !f.newTarget.IsUndefined() ||
 		f.thisRef != nil || f.args != nil || f.withScopes != nil || f.evalVars != nil ||
-		!rc.wide || rc.args || rc.locals != 0 || !cl.fn.Strict {
+		!rc.wide || rc.suspends || rc.args || rc.locals != 0 || !cl.fn.Strict {
 		// A sloppy callee is given a frame of its own: its f.arguments
 		// reads its count from its caller's instruction (regLegacyArgs).
 		return false
@@ -293,7 +293,7 @@ func regPlan(fd *funcData) {
 		return
 	}
 	t := (*tree)(atomic.LoadPointer(&fd.closure.fn.VMCode))
-	if t == nil || t.reg == nil || !t.reg.wide {
+	if t == nil || t.reg == nil || !t.reg.wide || t.reg.suspends {
 		return
 	}
 	if fd.closure.fn.HasTailCall {
@@ -305,6 +305,11 @@ func regPlan(fd *funcData) {
 	if isClassConstructorKind(fd.closure.fn.Kind) {
 		// A class's constructor is only constructed, which construct and
 		// runFD make: a call throws, and a derived one's this is bound.
+		return
+	}
+	if fd.closure.fn.HasDirectEval {
+		// A frame with a scope of its own for the eval's variables,
+		// which runFD makes.
 		return
 	}
 	if x := fd.extra; x != nil && (!fd.arrow || x.lexThisRef != nil || x.rare != nil) {

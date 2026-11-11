@@ -19,35 +19,16 @@ import (
 // fn and whose identifiers' resolution is rec, into register code, or
 // returns nil where it has anything the backend does not compile yet.
 func CompileTop(body []ast.Stmt, fn *bytecode.Function, rec *Record) *bytecode.RegCode {
-	if w := whyTop(fn); w != "" {
-		Refuse(fn, w)
-		return nil
-	}
-	g := &gen{lit: &ast.FuncLit{Body: body}, fn: fn, rec: rec, orig: fn}
-	if !g.layout() {
+	g, ok := generate(fn, true, func() *gen { return &gen{lit: &ast.FuncLit{Body: body}, fn: fn, rec: rec, orig: fn} })
+	if !ok {
 		Refuse(fn, "its bindings' layout")
 		return nil
 	}
-	g.body()
 	if g.err != "" {
 		Refuse(fn, g.err)
 		return nil
 	}
 	return g.finish()
-}
-
-// whyTop is what of top-level code's flags the backend does not compile
-// yet, or "".
-func whyTop(fn *bytecode.Function) string {
-	switch {
-	case fn.Generator || fn.Async:
-		return "generator or async"
-	case fn.HasDirectEval:
-		return "direct eval"
-	case fn.Debug != nil:
-		return "compiled for a debugger"
-	}
-	return ""
 }
 
 // topBody compiles what top-level code does before its first statement: its
@@ -76,9 +57,16 @@ func (g *gen) topBody() {
 			sub = bytecode.RColdDefineGlobalFunc
 			a = g.alloc()
 			g.closure(t.Fn, a)
+		case bytecode.OpSetUpvalue:
+			a = g.alloc()
+			g.closure(t.Fn, a)
+			g.storeValue(t.Id, a)
+			g.top = g.topAfterBindings()
+			continue
 		default:
-			// The stack compiler records only the six above (regTop's
-			// callers): any other is its bug, not a form to refuse.
+			// The stack compiler records only the seven above (regTop's
+			// callers and predeclareFunction's): any other is its bug,
+			// not a form to refuse.
 			panic("regcomp: top-level code's record holds " + t.Op.String())
 		}
 		g.emit(bytecode.MakeR(bytecode.RCold, uint8(sub), r16(a), name, flag))

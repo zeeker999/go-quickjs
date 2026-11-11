@@ -124,6 +124,7 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 		code: unsafe.Pointer(unsafe.SliceData(rc.Code)), src: rc.SrcPC, siteName: rc.SiteName,
 		numRegs: int32(rc.NumRegs), params: int32(rc.Params), inits: int32(rc.Inits),
 		coerceThis: fn.CoerceThis, rc: rc, fn: fn, wide: true, ncap: int32(ncap), newTarget: fn.UsesNewTarget, args: rc.UsesArguments || rc.ForwardsArguments || rc.KeepsArgs,
+		suspends: fn.Generator || fn.Async,
 	}
 	c.keep = uint16(rc.Params)
 	if !fn.Strict {
@@ -142,6 +143,7 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 		c.reuse = regReuseSites(fn, rc)
 	}
 	switch {
+	case c.suspends:
 	case fn.Leaf == bytecode.LeafPure && !fn.PureCalls && regLeafRunnable(rc) && regLeafOps(fn, rc) != nil:
 		// A short straight body of numbers and upvalues is run as its
 		// register code without a frame (regLeafRun).
@@ -153,7 +155,7 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 	case fn.Leaf != bytecode.LeafNone && fn.Leaf != bytecode.LeafPure:
 		c.leaf = regLeafThis
 	}
-	if len(rc.Code) > 0 {
+	if len(rc.Code) > 0 && !c.suspends {
 		// A body that returns a parameter, a constant or nothing first
 		// thing -- what follows is unreachable: a call's answer is read
 		// from its window or the code, with no frame and no evaluator,
@@ -205,15 +207,14 @@ func regConstOf(consts []bytecode.Constant, w bytecode.RInstr) (Value, bool) {
 }
 
 // regStmt is the one node of a register function's tree: it runs the frame
-// a call through runFD or callTree has made as register code. A frame of
-// the few calls the code cannot run in -- a function made inside a with or
-// beside an eval -- is run by the stack interpreter instead. A derived
-// constructor's frame, and an arrow's sharing its this, is run where its
-// code reads this from the binding (RegCode.ThisRef).
+// a call through runFD or callTree has made as register code, the with
+// objects and the eval's variables runFD gave it among what it keeps. A
+// derived constructor's frame, and an arrow's sharing its this, is run
+// where its code reads this from the binding (RegCode.ThisRef).
 func regStmt(c *regCode) tstmt {
 	return func(t *tctx) {
 		r, f := t.r, t.f
-		if c.wide && (f.thisRef == nil || c.rc.ThisRef) && f.withScopes == nil && f.evalVars == nil {
+		if c.wide && (f.thisRef == nil || c.rc.ThisRef) {
 			if f.cl.reg == nil {
 				r.regExtend(f.cl, c)
 				f.cl.reg = c
@@ -256,7 +257,7 @@ func regStmt(c *regCode) tstmt {
 				r.stackHigh = top
 			}
 		}
-		v, err := r.runReg(f, c)
+		v, err := r.runReg(f, c, 0)
 		if err == errTailCall {
 			r.treeTail = true
 			return
@@ -310,7 +311,7 @@ func (r *Runtime) regEnterFrame(f *frame, c *regCode) (Value, error) {
 	if c.args {
 		f.locals = w[2 : 2+p : 2+p]
 	}
-	v, err := r.runReg(f, c)
+	v, err := r.runReg(f, c, 0)
 	f.base, f.locals = saved, savedLocals
 	return v, err
 }

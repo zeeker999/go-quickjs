@@ -196,8 +196,9 @@ func (l *localVar) lexical() bool {
 
 // loopCtx tracks the jumps a break or continue must patch.
 type loopCtx struct {
-	// label names the statement, or is empty for an unlabelled loop.
-	label string
+	// labels name the statement, none for an unlabelled loop: `a: b:
+	// while (...)` is the target of a break or a continue naming either.
+	labels []string
 	// isLoop distinguishes a loop, which continue may target, from a labelled
 	// block or switch, which it may not.
 	isLoop bool
@@ -211,6 +212,10 @@ type loopCtx struct {
 	continues []int
 	// scopeDepth is the depth to unwind to when the jump is taken.
 	scopeDepth int
+	// firstSlot is the first slot of the bindings the statement declares:
+	// a break or a continue leaves their scopes without the close at
+	// their end, which its target makes instead (popLoop, continueAt).
+	firstSlot uint32
 	// exits is how much of the enclosing exit stack is still in force here, so
 	// that a jump out of an inner statement undoes what it left behind.
 	exits int
@@ -302,6 +307,11 @@ type compiler struct {
 	locals     []localVar
 	localIndex map[string]int
 	nextSlot   uint32
+	// capturedEnd is one past the highest slot a closure or an eval has
+	// captured so far, 0 for none: a jump or a throw that leaves a scope
+	// skips its end's close, and what it lands on closes the slots it
+	// left when one of them may be captured (capturedFrom).
+	capturedEnd uint32
 	// paramCaptures are the closures' captures of this function's
 	// parameters that may take the value (UpvalueDesc's ByValue), which
 	// finish settles once every store to them is compiled.
@@ -413,9 +423,9 @@ type compiler struct {
 	// returnSlot is a hidden local a return routed through a finally clause
 	// parks its value in while the statements it leaves are undone, or -1.
 	returnSlot int32
-	// pendingLabel carries a label from a labelled statement to the loop it
-	// labels, which is the next context pushed.
-	pendingLabel string
+	// pendingLabels carries the labels of a labelled statement to the loop
+	// they label, which is the next context pushed.
+	pendingLabels []string
 
 	// module is non-nil while compiling module code, collecting the shape the
 	// linker needs.
@@ -1381,6 +1391,17 @@ func (c *compiler) declare(name string, kind bindKind, pos int) uint32 {
 	return slot
 }
 
+// noteCaptured marks a binding of this function's as captured.
+func (c *compiler) noteCaptured(l *localVar) {
+	l.captured = true
+	c.capturedEnd = max(c.capturedEnd, l.slot+1)
+}
+
+// capturedFrom reports whether a binding at slot or above was captured.
+// Slots are never reused, so those of the bindings a statement declared
+// are the ones from where it began.
+func (c *compiler) capturedFrom(slot uint32) bool { return c.capturedEnd > slot }
+
 // markInitialized clears a lexical binding's dead zone.
 func (c *compiler) markInitialized(name string) {
 	if l, ok := c.resolveLocal(name); ok {
@@ -1501,7 +1522,7 @@ func (c *compiler) resolveUpvalue(name string) (uint32, bool) {
 		return 0, false
 	}
 	if l, ok := c.parent.resolveLocal(name); ok {
-		l.captured = true
+		c.parent.noteCaptured(l)
 		immutable := l.kind == bindConst || l.kind == bindFuncSelf
 		// A function is compiled where it is made, so a binding its maker
 		// has initialized by then -- as the maker's own reads would find it
@@ -1941,6 +1962,11 @@ func (c *varCollector) stmt(s ast.Stmt) {
 		}
 		c.block(body)
 	case *ast.LabeledStmt:
+		if fd, _, ok := hoistableFunction(n); ok {
+			// A labelled function declaration is the enclosing list's.
+			c.stmt(fd)
+			return
+		}
 		c.nested(n.Body)
 	case *ast.WithStmt:
 		c.nested(n.Body)

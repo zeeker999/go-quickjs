@@ -1,6 +1,8 @@
 package regcomp
 
 import (
+	"fmt"
+
 	"github.com/go-quickjs/go-quickjs/internal/ast"
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
@@ -49,10 +51,12 @@ func (g *gen) pattern(target ast.Expr, v int, declaring bool) {
 		}
 		l := g.prepareLeaf(t, false)
 		g.storeRef(l, v, false)
-	default:
+	case *ast.Call:
 		// A call, which sloppy code may name as a for-in or for-of
 		// head's target: the call is made, and then a ReferenceError.
-		g.fail("an assignment target the backend does not compile")
+		g.callTarget(t, int(t.Start))
+	default:
+		panic(fmt.Sprintf("regcomp: a pattern's target %T", target))
 	}
 }
 
@@ -79,6 +83,12 @@ func (g *gen) prepareLeaf(el ast.Expr, declaring bool) leaf {
 	l := leaf{target: el, obj: -1, key: -1}
 	if ap, ok := el.(*ast.AssignPattern); ok {
 		l.target, l.def = ap.Target, ap.Default
+	}
+	if id, ok := l.target.(*ast.Ident); ok && g.withs[id] != nil && g.withs[id].probe.Op == bytecode.OpWithResolve {
+		// The name is resolved before the value it receives is read,
+		// as the stack form's prepareRef resolves it.
+		g.withResolve(id)
+		return l
 	}
 	m, ok := l.target.(*ast.Member)
 	if !ok || declaring {
@@ -138,11 +148,13 @@ func (g *gen) storeLeaf(id *ast.Ident, v int, declaring bool) {
 		}
 	case ResGlobalVar:
 		g.at(int(id.Start))
-		g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite()))
+		g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite("RSetGlobal", g.name16(id.Name))))
 	case ResGlobalLexInit, ResModuleLexInit:
 		g.lexInit(res.Kind, id.Name, v, int(id.Start))
 	case ResIgnore:
-	case ResUpval, ResGlobal, ResConstAssign:
+	case ResUpval, ResUpvalCheck, ResLocalCheck, ResGlobal, ResConstAssign, ResWith:
+		// ResLocalCheck and ResUpvalCheck: a let's own initializer
+		// assigning it, in its dead zone (let y = [y] = []).
 		g.storeValue(id, v)
 	default:
 		g.fail("a store the backend does not compile")
@@ -385,8 +397,9 @@ func (g *gen) patternSource(e ast.Expr) int {
 
 // patternBindings puts the lexical bindings target declares in their dead
 // zone where a read checks it, before what runs ahead of their
-// initialization, and refuses the ones a closure keeps in a loop, of which
-// each turn's is a new one.
+// initialization; in a loop, where each turn's binding is a new one, the
+// ones a closure keeps are closed first, which leaves the closures of the
+// turns before with theirs (close_regs).
 func (g *gen) patternBindings(target ast.Expr) {
 	for _, id := range patternNames(target, nil) {
 		res, ok := g.rec.Write[id]
@@ -395,8 +408,7 @@ func (g *gen) patternBindings(target ast.Expr) {
 		}
 		slot := int(res.Index)
 		if g.fn.Locals[slot].Captured && g.inLoop() {
-			g.fail("a captured lexical binding in a loop")
-			return
+			g.cold(bytecode.RColdCloseRegs, int(g.slotReg[slot]), 1, 0)
 		}
 		if g.tdz[slot] || g.fn.Locals[slot].Captured {
 			g.emit(bytecode.MakeR(bytecode.RLoadUninit, 0, r16(int(g.slotReg[slot])), 0, 0))

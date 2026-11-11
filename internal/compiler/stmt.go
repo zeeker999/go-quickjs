@@ -148,7 +148,17 @@ func (c *compiler) predeclareFunction(h hoistedFunc) {
 		// declared -- and what a reference to the name finds afterwards,
 		// whether it is written inside the eval or outside it.
 		if b, known := c.callerBinding(h.name); known && b.VarScoped {
+			// The register form makes the store as the write of an
+			// identifier of its own (regcomp.TopOp's Id): the name's is
+			// an Annex B alias's where it has one.
+			id := &ast.Ident{Name: h.name, Start: h.fd.Fn.Name.Start}
+			saved := c.regIdent
+			c.regIdent = id
 			c.storeVar(h.name)
+			c.regIdent = saved
+			if c.reg != nil && c.parent == nil {
+				c.reg.NoteTop(regcomp.TopOp{Op: bytecode.OpSetUpvalue, Name: h.name, Pos: c.lastPos, Fn: h.fd.Fn, Id: id})
+			}
 			return
 		}
 		c.emit(bytecode.OpDefineGlobalFunc, c.nameIdx(h.name),
@@ -157,28 +167,15 @@ func (c *compiler) predeclareFunction(h hoistedFunc) {
 		return
 	}
 
-	// Annex B: a plain function declared inside a block is also assigned to a
-	// var-scoped binding of the same name, which is what makes
-	//
-	//	function outer() { { function f() {} } return f; }
-	//
-	// work in sloppy mode. The binding is created by hoisting like any other
-	// var; only the assignment happens here, when the declaration is reached.
-	if c.annexB[h.fd] {
-		if c.reg != nil {
-			c.reg.Bail = true
-		}
-		c.emitAnnexBFunctionAlias(h.name)
-	}
-	if c.reg != nil {
-		c.reg.Funcs[h.fd] = h.slot
-	}
+	c.reg.NoteFunc(h.fd, h.slot)
 	c.emit(bytecode.OpSetLocal, h.slot, 0)
 }
 
 // emitAnnexBFunctionAlias copies a block-scoped function into the var binding
-// that shares its name.
-func (c *compiler) emitAnnexBFunctionAlias(name string) {
+// that shares its name, id's: the register form is told the var's store
+// as id's write.
+func (c *compiler) emitAnnexBFunctionAlias(id *ast.Ident) {
+	name := id.Name
 	// Hoisting made sure nothing lexical stands in the way, other than a simple
 	// catch parameter, which the alias passes over to reach the var -- or the
 	// function declared at the top level, whose binding the var is. The
@@ -189,6 +186,7 @@ func (c *compiler) emitAnnexBFunctionAlias(name string) {
 		if l.name != name || l.depth >= c.depth || !l.varScoped() {
 			continue
 		}
+		c.reg.NoteWrite(id, regcomp.Res{Kind: regcomp.ResLocal, Index: l.slot})
 		c.emit(bytecode.OpDup, 0, 0)
 		c.emit(bytecode.OpSetLocal, l.slot, 0)
 		return
@@ -204,9 +202,11 @@ func (c *compiler) emitAnnexBFunctionAlias(name string) {
 	c.emit(bytecode.OpDup, 0, 0)
 	if b, known := c.callerBinding(name); known && b.VarScoped && !c.evalOwnVars[name] {
 		idx, _ := c.resolveUpvalue(name)
+		c.reg.NoteWrite(id, regcomp.Res{Kind: regcomp.ResUpval, Index: idx})
 		c.emit(bytecode.OpSetUpvalue, idx, 0)
 		return
 	}
+	c.reg.NoteWrite(id, regcomp.Res{Kind: regcomp.ResGlobalVar})
 	c.emit(bytecode.OpSetGlobal, c.nameIdx(name), 0)
 }
 
@@ -270,6 +270,8 @@ func (c *compiler) declareLexicalNameMarked(name string, kind bindKind, pos int,
 	if mark {
 		c.emit(bytecode.OpPushUninitialized, 0, 0)
 		c.emit(bytecode.OpSetLocal, slot, 0)
+	} else {
+		c.reg.NoteUnmarked(slot)
 	}
 	c.markUninitialized(name)
 }
@@ -357,7 +359,20 @@ func (c *compiler) compileStatement(s ast.Stmt) {
 		c.compileVarDecl(n)
 
 	case *ast.FuncDecl:
-		// Already emitted by predeclareFunction.
+		// Made by predeclareFunction as its block was entered. Annex B: a
+		// plain function declared inside a block is also assigned to a
+		// var-scoped binding of the same name, which is what makes
+		//
+		//	function outer() { { function f() {} } return f; }
+		//
+		// work in sloppy mode. The binding is created by hoisting like any
+		// other var; the assignment, of what the block's binding holds,
+		// happens here, when the declaration is evaluated (B.3.3.1).
+		if c.annexB[n] {
+			c.compileIdentReadStatic(n.Fn.Name)
+			c.emitAnnexBFunctionAlias(n.Fn.Name)
+			c.emit(bytecode.OpDrop, 0, 0)
+		}
 
 	case *ast.ClassDecl:
 		c.compileClass(n.Class, n.Class.Name.Name)
@@ -636,7 +651,12 @@ func (c *compiler) storeVar(name string) {
 	// quietly left its value behind would push the loop it sits in off its own
 	// operands.
 	probe := c.withProbe(bytecode.OpWithSet, name)
-	if probe >= 0 && c.reg != nil {
+	switch {
+	case c.regIdent != nil:
+		c.regWith(c.regIdent, probe)
+	case probe >= 0 && c.reg != nil:
+		// Eval code's function declaration, which the register form
+		// does not compile.
 		c.reg.Bail = true
 	}
 	if probe >= 0 {
@@ -708,47 +728,77 @@ func (c *compiler) compileIf(n *ast.IfStmt) {
 // A pending label set by an enclosing labelled statement is consumed here, so
 // that `outer: for (...)` gives the loop itself the label and `continue outer`
 // reaches its update clause rather than its exit.
-func (c *compiler) pushLoop(label string, isLoop bool) *loopCtx {
-	if label == "" && c.pendingLabel != "" {
-		label = c.pendingLabel
-		c.pendingLabel = ""
+func (c *compiler) pushLoop(labels []string, isLoop bool) *loopCtx {
+	if labels == nil {
+		labels = c.pendingLabels
+		c.pendingLabels = nil
 	}
 	c.loops = append(c.loops, loopCtx{
-		label: label, isLoop: isLoop, scopeDepth: c.depth, exits: len(c.exits),
-		finallys: len(c.finallys), handlers: c.handlerDepth,
+		labels: labels, isLoop: isLoop, scopeDepth: c.depth, exits: len(c.exits),
+		finallys: len(c.finallys), handlers: c.handlerDepth, firstSlot: c.nextSlot,
 	})
 	return &c.loops[len(c.loops)-1]
 }
 
 // popLoop ends a loop context, patching its break jumps to the current
 // position and its continue jumps to continueTarget.
+//
+// A break leaves the scopes inside the statement without the close at their
+// ends, so that a binding a closure captured would stay open, and a scope
+// entered again -- the statement's next run, in a loop around it -- would
+// share it with that closure. Where one may be, the breaks land on a close
+// of the statement's bindings.
 func (c *compiler) popLoop(continueTarget int) {
 	l := c.loops[len(c.loops)-1]
 	c.loops = c.loops[:len(c.loops)-1]
-	for _, pc := range l.breaks {
-		c.patchJump(pc)
+	if len(l.breaks) > 0 && c.capturedFrom(l.firstSlot) {
+		at := c.here()
+		c.emit(bytecode.OpCloseUpvalues, l.firstSlot, 0)
+		for _, pc := range l.breaks {
+			c.patchJumpTo(pc, at)
+		}
+	} else {
+		for _, pc := range l.breaks {
+			c.patchJump(pc)
+		}
 	}
 	for _, pc := range l.continues {
 		c.patchJumpTo(pc, continueTarget)
 	}
 }
 
+// continueAt is where the innermost loop's continues go, given where they
+// would: a continue leaves the body's scopes without the close at their
+// ends, so where a binding of the body may be captured, they go to a close
+// of the body's bindings emitted here, which the end of the body passes
+// through too.
+func (c *compiler) continueAt(target int) int {
+	l := &c.loops[len(c.loops)-1]
+	if len(l.continues) == 0 || !c.capturedFrom(l.firstSlot) {
+		return target
+	}
+	at := c.here()
+	c.emit(bytecode.OpCloseUpvalues, l.firstSlot, 0)
+	return at
+}
+
 func (c *compiler) compileWhile(n *ast.WhileStmt) {
 	start := c.here()
-	c.pushLoop("", true)
+	c.pushLoop(nil, true)
 	c.debugExpr(n.Test)
 	exits := c.emitTestJumpIfFalse(n.Test)
 	c.compileStatement(n.Body)
+	cont := c.continueAt(start)
 	c.emit(bytecode.OpJump, uint32(start), 0)
 	c.patchTestJumps(exits)
-	c.popLoop(start)
+	c.popLoop(cont)
 }
 
 func (c *compiler) compileDoWhile(n *ast.DoWhileStmt) {
 	start := c.here()
-	c.pushLoop("", true)
+	c.pushLoop(nil, true)
 	c.compileStatement(n.Body)
-	testAt := c.here()
+	testAt := c.continueAt(c.here())
 	c.debugExpr(n.Test)
 	back := c.emitTestJumps(n.Test, true, c.pool.jumpList())
 	for _, j := range back {
@@ -819,7 +869,7 @@ func (c *compiler) compileForLoop(n *ast.ForStmt, firstSlot uint32, perIteration
 	}
 
 	start := c.here()
-	c.pushLoop("", true)
+	c.pushLoop(nil, true)
 
 	var exits []int
 	if n.Test != nil {
@@ -834,6 +884,8 @@ func (c *compiler) compileForLoop(n *ast.ForStmt, firstSlot uint32, perIteration
 		// the update clause changes it. This runs on the `continue` path too,
 		// because that is also the end of an iteration.
 		c.emit(bytecode.OpCloseUpvalues, firstSlot, 0)
+	} else {
+		updateAt = c.continueAt(updateAt)
 	}
 	if n.Update != nil {
 		c.debugExpr(n.Update)
@@ -874,6 +926,17 @@ func (c *compiler) beginHeadScope(left ast.Node) bool {
 	}
 	c.beginScope()
 	c.predeclareLexical(vd)
+	if c.reg != nil {
+		var names []string
+		for _, d := range vd.Decls {
+			names = appendPatternNames(names, d.Target)
+		}
+		for _, n := range names {
+			if l, ok := c.resolveLocal(n); ok {
+				c.reg.NoteHead(vd, uint32(l.slot))
+			}
+		}
+	}
 	return true
 }
 
@@ -927,7 +990,7 @@ func (c *compiler) compileForAwaitBody(left ast.Node, body ast.Stmt) {
 	})
 
 	start := c.here()
-	c.pushLoop("", true)
+	c.pushLoop(nil, true)
 	c.debugAt(left.Pos())
 
 	c.emit(bytecode.OpPushFalse, 0, 0)
@@ -942,8 +1005,9 @@ func (c *compiler) compileForAwaitBody(left ast.Node, body ast.Stmt) {
 	c.compileIterationBody(left, body)
 	c.endScope()
 
+	cont := c.continueAt(start)
 	c.emit(bytecode.OpJump, uint32(start), 0)
-	c.popLoop(start)
+	c.popLoop(cont)
 	// A break of this loop arrives here, its handler still in force.
 	c.emit(bytecode.OpPopCatch, 0, 0)
 	c.handlerDepth--
@@ -1025,7 +1089,7 @@ func (c *compiler) emitAsyncClose(cur, busy uint32, quiet bool) {
 // iterator already on the stack.
 func (c *compiler) compileForBody(left ast.Node, body ast.Stmt) {
 	start := c.here()
-	c.pushLoop("", true)
+	c.pushLoop(nil, true)
 	c.debugAt(left.Pos())
 
 	// IterNextOrJump advances the iterator, pushing the next value, or jumps
@@ -1036,9 +1100,10 @@ func (c *compiler) compileForBody(left ast.Node, body ast.Stmt) {
 	c.compileIterationBody(left, body)
 	c.endScope()
 
+	cont := c.continueAt(start)
 	c.emit(bytecode.OpJump, uint32(start), 0)
 	c.patchJump(exit)
-	c.popLoop(start)
+	c.popLoop(cont)
 	// ForOfStart left the cursor on the stack. A break arrives here with the
 	// iterator still open, so it is closed before the cursor is dropped; an
 	// exhausted one is already closed and the instruction leaves it alone.
@@ -1069,7 +1134,7 @@ func (c *compiler) bareJumpTarget(s ast.Stmt) (int, bool) {
 		if cont && !l.isLoop || label == "" && l.labelOnly {
 			continue
 		}
-		if label == "" || l.label == label {
+		if label == "" || l.named(label) {
 			if len(c.finallys) > l.finallys || c.handlerDepth > l.handlers || len(c.exits) > l.exits {
 				return -1, false
 			}
@@ -1081,7 +1146,7 @@ func (c *compiler) bareJumpTarget(s ast.Stmt) (int, bool) {
 
 func (c *compiler) compileBreak(n *ast.BreakStmt) {
 	for i := len(c.loops) - 1; i >= 0; i-- {
-		if n.Label == "" && !c.loops[i].labelOnly || c.loops[i].label == n.Label {
+		if n.Label == "" && !c.loops[i].labelOnly || n.Label != "" && c.loops[i].named(n.Label) {
 			c.unwindTo(&c.loops[i])
 			pc := c.emitJump(bytecode.OpJump)
 			c.loops[i].breaks = append(c.loops[i].breaks, pc)
@@ -1096,7 +1161,7 @@ func (c *compiler) compileContinue(n *ast.ContinueStmt) {
 		if !c.loops[i].isLoop {
 			continue
 		}
-		if n.Label == "" || c.loops[i].label == n.Label {
+		if n.Label == "" || c.loops[i].named(n.Label) {
 			c.unwindTo(&c.loops[i])
 			pc := c.emitJump(bytecode.OpJump)
 			c.loops[i].continues = append(c.loops[i].continues, pc)
@@ -1108,24 +1173,45 @@ func (c *compiler) compileContinue(n *ast.ContinueStmt) {
 
 func (c *compiler) compileLabeled(n *ast.LabeledStmt) {
 	// A labelled loop reuses the loop's own context so that `continue label`
-	// reaches the loop's update clause rather than its exit.
-	switch body := n.Body.(type) {
+	// reaches the loop's update clause rather than its exit. The labels in
+	// front of a statement, `a: b: while (...)`, are all its own.
+	labels := []string{n.Label}
+	body := n.Body
+	for {
+		inner, ok := body.(*ast.LabeledStmt)
+		if !ok {
+			break
+		}
+		labels = append(labels, inner.Label)
+		body = inner.Body
+	}
+	switch body.(type) {
 	case *ast.WhileStmt, *ast.DoWhileStmt, *ast.ForStmt, *ast.ForInStmt, *ast.ForOfStmt:
-		c.compileLabeledLoop(n.Label, body)
+		c.compileLabeledLoop(labels, body)
 	default:
-		c.pushLoop(n.Label, false).labelOnly = true
-		c.compileStatement(n.Body)
+		c.pushLoop(labels, false).labelOnly = true
+		c.compileStatement(body)
 		c.popLoop(c.here())
 	}
 }
 
-// compileLabeledLoop compiles a loop whose own context carries the label.
-func (c *compiler) compileLabeledLoop(label string, body ast.Stmt) {
-	// The loop compilers push their context themselves, so the label is
-	// applied by patching it immediately afterwards. To keep that simple the
-	// label is recorded in a pending field the next pushLoop consumes.
-	c.pendingLabel = label
+// compileLabeledLoop compiles a loop whose own context carries the labels.
+func (c *compiler) compileLabeledLoop(labels []string, body ast.Stmt) {
+	// The loop compilers push their context themselves, so the labels are
+	// applied by patching them immediately afterwards. To keep that simple
+	// they are recorded in a pending field the next pushLoop consumes.
+	c.pendingLabels = labels
 	c.compileStatement(body)
+}
+
+// named reports whether label is one of the statement's labels.
+func (l *loopCtx) named(label string) bool {
+	for _, x := range l.labels {
+		if x == label {
+			return true
+		}
+	}
+	return false
 }
 
 // compileTry compiles a try statement.
@@ -1231,6 +1317,7 @@ func (c *compiler) compileFinallyClause(pos int, finally []ast.Stmt, record bool
 	if record {
 		c.pushExit(exitCompletion)
 	}
+	defer c.reg.BeginFinally(finally)()
 	c.beginScope()
 	savedRecord := c.finallyRecord
 	c.finallyRecord = record
@@ -1258,6 +1345,7 @@ func (c *compiler) compileTryCatch(n *ast.TryStmt) {
 	}
 	catchPC := c.emitJump(bytecode.OpPushCatch)
 	c.handlerDepth++
+	first := c.nextSlot
 	c.beginScope()
 	c.compileStatements(n.Block)
 	c.endScope()
@@ -1268,6 +1356,12 @@ func (c *compiler) compileTryCatch(n *ast.TryStmt) {
 	skip := c.emitJump(bytecode.OpJump)
 
 	c.patchJump(catchPC)
+	// A throw leaves the block's scopes without the close at their ends:
+	// a binding a closure captured is closed here, or the block run again,
+	// in a loop, would share it with that closure.
+	if c.capturedFrom(first) {
+		c.emit(bytecode.OpCloseUpvalues, first, 0)
+	}
 	c.beginScope()
 	if n.Catch.Param != nil {
 		// The thrown value is on the stack when the handler runs.
@@ -1303,7 +1397,7 @@ func (c *compiler) compileSwitch(n *ast.SwitchStmt) {
 	c.compileExpr(n.Disc)
 	c.pushExit(exitDrop)
 	c.beginScope()
-	c.pushLoop("", false)
+	c.pushLoop(nil, false)
 
 	// The bindings of every clause belong to the case block as a whole, and
 	// they are created before the first case expression is evaluated: a
@@ -1469,7 +1563,12 @@ func (c *compiler) unwindTo(target *loopCtx) {
 		// clause is compiled a second time at the jump site rather than being
 		// routed through. Clauses are small and rarely nested, so the
 		// duplication is bounded.
-		c.finallys = saved[:i]
+		//
+		// Capped, so that a try statement inside the clause appends its
+		// own entry to a copy rather than over saved[i], the next
+		// clause outward, which this jump, or one compiled around it,
+		// still has to inline.
+		c.finallys = saved[:i:i]
 		if saved[i].emit != nil {
 			saved[i].emit()
 			continue
@@ -1490,12 +1589,14 @@ func (c *compiler) unwindTo(target *loopCtx) {
 			c.emit(bytecode.OpPushUndef, 0, 0)
 			c.emit(bytecode.OpSetLocal, uint32(c.completionSlot), 0)
 		}
+		end := c.reg.BeginFinally(saved[i].body)
 		c.beginScope()
 		savedRecord := c.finallyRecord
 		c.finallyRecord = false
 		c.compileStatements(saved[i].body)
 		c.finallyRecord = savedRecord
 		c.endScope()
+		end()
 		if cv >= 0 {
 			c.emit(bytecode.OpGetLocal, uint32(cv), 0)
 			c.emit(bytecode.OpSetLocal, uint32(c.completionSlot), 0)
@@ -1527,16 +1628,20 @@ func (c *compiler) isModuleLex(name string) bool {
 }
 
 // hoistableFunction returns the function declaration a statement contains and
-// the name it binds, looking through an export wrapper.
+// the name it binds, looking through an export wrapper and labels.
 //
 // `export default function () {}` is hoisted too, under the name the linker
-// looks for rather than under one of its own.
+// looks for rather than under one of its own. A labelled function declaration,
+// `L: function f() {}`, which sloppy code may write, is the list's as an
+// unlabelled one is.
 func hoistableFunction(s ast.Stmt) (*ast.FuncDecl, string, bool) {
 	switch n := s.(type) {
 	case *ast.FuncDecl:
 		if n.Fn.Name != nil {
 			return n, n.Fn.Name.Name, true
 		}
+	case *ast.LabeledStmt:
+		return hoistableFunction(n.Body)
 	case *ast.ExportDecl:
 		fd, ok := n.Decl.(*ast.FuncDecl)
 		switch {

@@ -408,7 +408,11 @@ func (r *Runtime) regIterNext(f *frame, c *regCode, k *regKept, regs *[1 << 16]V
 			}
 		} else if !st.forIn && r.genNextFn != nil && st.next.ref == unsafe.Pointer(r.genNextFn) {
 			f.pc = c.src[pc] + 1
-			v, more, err = r.regIterNextTree(f, cur)
+			if g := regGenCursor(st); g != nil {
+				v, more, err = r.regGenStep(st, g)
+			} else {
+				v, more, err = r.regIterNextTree(f, cur)
+			}
 			goto stepped
 		} else if !st.forIn {
 			f.pc = c.src[pc] + 1

@@ -37,7 +37,7 @@ func (c *compiler) regNoteUpvalueWrite(t *ast.Ident, initializing bool) {
 	u := c.fn.Upvalues[idx]
 	switch {
 	case u.TDZ && !initializing:
-		c.reg.NoteWrite(t, regcomp.Res{})
+		c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResUpvalCheck, Index: idx})
 	case u.FuncSelf && !initializing:
 		if c.fn.Strict {
 			c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResConstAssign})
@@ -61,13 +61,11 @@ func (c *compiler) regTop(op bytecode.Op, name, flag uint32, fn *ast.FuncLit) {
 	c.reg.NoteTop(regcomp.TopOp{Op: op, Name: c.fn.Names[name], Flag: flag, Pos: c.lastPos, Fn: fn})
 }
 
-// regScript reports whether top-level code compiled with opts is a script's
-// of the kind the register form compiles: not eval code, a module's, a
-// debugger's or the body of a function the Function constructor makes.
+// regScript reports whether top-level code compiled with opts is of the
+// kind the register form compiles: a script's, a module's or eval code's,
+// direct or indirect, a debugger's as any other.
 func regScript(opts Options) bool {
-	return !opts.Debug && opts.EvalScope == nil && opts.EvalWithDepth == 0 && len(opts.PrivateNames) == 0 &&
-		len(opts.ArgumentNames) == 0 && !opts.EvalOwnVarScope && !opts.InFieldInit && !opts.EvalVarScopeIsGlobal &&
-		!opts.EvalConfigurable && !opts.AllowSuperProp && !opts.AllowSuperCall && !opts.AllowNewTarget
+	return true
 }
 
 // regTopCode gives fn, top-level code of statements body whose resolution
@@ -76,8 +74,18 @@ func regTopCode(body []ast.Stmt, fn *bytecode.Function, rec *regcomp.Record) {
 	switch {
 	case rec == nil:
 	case rec.Bail:
-		regcomp.Refuse(fn, "a with, an eval's variables or an Annex B function")
+		regcomp.Refuse(fn, "a name the record resolves two ways")
 	default:
 		fn.Reg = regcomp.CompileTop(body, fn, rec)
 	}
+}
+
+// regWith records the probe at pc, if any, that the stack form compiled
+// for name id before its static access (regcomp.Record.Withs).
+func (c *compiler) regWith(id *ast.Ident, pc int) {
+	if pc < 0 || c.reg == nil {
+		return
+	}
+	in := c.fn.Code[pc]
+	c.reg.NoteWith(id, regcomp.WithProbe{Op: in.Op, Limit: uint16(in.A >> bytecode.WithLimitShift)})
 }

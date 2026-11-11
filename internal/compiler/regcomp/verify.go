@@ -144,6 +144,8 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			ok = in(pc, int64(int32(w.BC())))
 		case bytecode.RIterNext:
 			ok = reg(a) && reg(b) && in(pc, int64(w.SC()))
+		case bytecode.RYield:
+			ok = fn.Generator && reg(a) && reg(b) && pc+2 < len(code) && code[pc+1].Op() == bytecode.RJmp
 		case bytecode.RJmpF, bytecode.RJmpT:
 			ok = reg(a) && in(pc, int64(int32(w.BC())))
 		case bytecode.RJLt, bytecode.RJNLt, bytecode.RJLe, bytecode.RJNLe, bytecode.RJGt, bytecode.RJNGt,
@@ -162,7 +164,7 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 		case bytecode.RAddPropI:
 			ok = reg(a) && site(c)
 		case bytecode.RNewArrayK:
-			ok = reg(a) && site(c) && pc < len(rc.Aux) && int(rc.Aux[pc]) < len(rc.Literals) && len(rc.Literals[rc.Aux[pc]]) == int(b) && b > 0
+			ok = reg(a) && site(c) && pc < len(rc.Aux) && int(rc.Aux[pc]) < len(rc.Literals) && (len(rc.Literals[rc.Aux[pc]]) == int(b) && b > 0 || b == 0 && len(rc.Literals[rc.Aux[pc]]) >= limit16)
 			if ok {
 				for _, e := range rc.Literals[rc.Aux[pc]] {
 					if e.Kind > bytecode.LitUndefined || e.Kind == bytecode.LitConst && int(e.K) >= len(fn.Constants) {
@@ -236,8 +238,43 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 		bytecode.RColdDeclareGlobalLex, bytecode.RColdDefineGlobalFunc, bytecode.RColdInitGlobalLex,
 		bytecode.RColdDeclareModuleLex, bytecode.RColdInitModuleLex:
 		return reg(a) && int(b) < len(fn.Names) && fn.TopLevel
-	case bytecode.RColdGetGlobalOpt:
+	case bytecode.RColdGetGlobalOpt, bytecode.RColdDeleteVar:
 		return reg(a) && int(b) < len(fn.Names)
+	case bytecode.RColdImport:
+		k := int(w.C()) & 3
+		return reg(a) && (k == 1 || k == 2) && int(b)+k <= rc.NumRegs
+	case bytecode.RColdDirectEval:
+		k := auxAt(rc, pc) &^ bytecode.RDirectEvalSpread
+		argc := int(w.C())
+		if auxAt(rc, pc)&bytecode.RDirectEvalSpread != 0 {
+			argc = 1
+		}
+		if !reg(b) || int(a)+2+argc > rc.NumRegs || int64(k) >= int64(len(fn.EvalScopes)) || markAt(rc, pc)&^bytecode.RMarkTail != 0 {
+			return false
+		}
+		// Each binding of the caller's the code may reach has a register.
+		for _, e := range fn.EvalScopes[k].Bindings {
+			if e.FromLocal && (int(e.Index) >= len(rc.LocalReg) || rc.LocalReg[e.Index] < 0) {
+				return false
+			}
+		}
+		return true
+	case bytecode.RColdWithGet, bytecode.RColdWithDelete, bytecode.RColdWithSet, bytecode.RColdWithResolve:
+		return reg(a) && int(b) < len(fn.Names) && pc < len(rc.Aux) && rc.Aux[pc] < uint32(rc.NumRegs)
+	case bytecode.RColdWithGetThis:
+		return reg(a) && int(a)+1 < rc.NumRegs && int(b) < len(fn.Names) && pc < len(rc.Aux) && rc.Aux[pc] < uint32(rc.NumRegs)
+	case bytecode.RColdWithRead, bytecode.RColdWithWrite:
+		return reg(a) && reg(b) && int(w.C()) < len(fn.Names)
+	case bytecode.RColdWithPush:
+		return reg(a)
+	case bytecode.RColdWithPop:
+		return true
+	case bytecode.RColdImportMeta, bytecode.RColdNewDispose:
+		return reg(a)
+	case bytecode.RColdAddDisposable, bytecode.RColdDispose:
+		return reg(a) && reg(b) && w.C() <= 1
+	case bytecode.RColdDisposeStep:
+		return int(a)+1 < rc.NumRegs && reg(b)
 	case bytecode.RColdIterStep, bytecode.RColdIterRest:
 		return reg(a) && reg(b)
 	case bytecode.RColdCheckCoercible, bytecode.RColdToPropertyKey:
@@ -262,8 +299,10 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 		return reg(a) && reg(b) && int(w.C()) < len(fn.Names)
 	case bytecode.RColdDefineGetterIndex, bytecode.RColdDefineSetterIndex, bytecode.RColdDefineIndex:
 		return reg(a) && reg(b) && reg(w.C())
-	case bytecode.RColdAssignConst:
+	case bytecode.RColdAssignConst, bytecode.RColdThrowRef:
 		return int(b) < len(fn.Names)
+	case bytecode.RColdDebug:
+		return b <= 1 && fn.Debug != nil && pc < len(rc.Aux) && int(rc.Aux[pc]) < len(fn.Debug.Statements)
 	case bytecode.RColdCheckGlobalRef:
 		return reg(a) && int(b) < len(fn.Names) && site(w.C())
 	case bytecode.RColdAssertResolved:
@@ -296,6 +335,47 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 		return true
 	case bytecode.RColdCloseRegs:
 		return int(a)+int(b) <= rc.NumRegs
+	case bytecode.RColdGetUpvalCheck, bytecode.RColdSetUpvalCheck:
+		return reg(a) && int(w.BC()) < len(fn.Upvalues)
+	}
+	return suspendOK(rc, fn, pc, w, reg)
+}
+
+// suspendOK checks a generator's and an async function's cold operations:
+// gen_entry first of the code and nowhere else, each suspension in a
+// function that suspends, and a jump after each operation whose next
+// instruction is one, with an instruction after it.
+func suspendOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RInstr, reg func(uint16) bool) bool {
+	if !fn.Generator && !fn.Async {
+		return false
+	}
+	jumpNext := func() bool {
+		return pc+2 < len(rc.Code) && rc.Code[pc+1].Op() == bytecode.RJmp
+	}
+	a, b := w.A(), w.B()
+	switch bytecode.RColdOp(w.X()) {
+	case bytecode.RColdGenEntry:
+		return pc == 0
+	case bytecode.RColdEndParams:
+		return fn.Generator
+	case bytecode.RColdAwait:
+		return fn.Async && reg(a) && reg(b)
+	case bytecode.RColdYieldStar:
+		return fn.Generator && int(a)+1 < rc.NumRegs && reg(b)
+	case bytecode.RColdIterResume:
+		// A synchronous generator's delegation may suspend at the
+		// yield_star four instructions on (the VM's regDelegateNext).
+		return reg(a) && reg(b) && int(w.C())+1 < rc.NumRegs && jumpNext() &&
+			(fn.Async || pc+5 < len(rc.Code) && rc.Code[pc+4].Op() == bytecode.RCold &&
+				bytecode.RColdOp(rc.Code[pc+4].X()) == bytecode.RColdYieldStar)
+	case bytecode.RColdIterUnpackDelegate:
+		return reg(a) && reg(b) && reg(w.C()) && jumpNext()
+	case bytecode.RColdForAwaitOfStart, bytecode.RColdAsyncIterNext:
+		return fn.Async && reg(a) && reg(b)
+	case bytecode.RColdIterResult, bytecode.RColdAsyncIterClose:
+		return fn.Async && reg(a) && reg(b) && jumpNext()
+	case bytecode.RColdAsyncIterCheck:
+		return fn.Async && reg(a)
 	}
 	return false
 }

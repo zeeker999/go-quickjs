@@ -53,6 +53,13 @@ const (
 	// ResModuleLexInit is the initialization of a module's top-level let,
 	// const or class binding (init_module_lex).
 	ResModuleLexInit
+	// ResUpvalCheck is upvalue Index, read or written with a check of its
+	// dead zone (the stack form's get_upvalue_check, set_upvalue_check).
+	ResUpvalCheck
+	// ResWith is a name a with object or an eval's variable may answer:
+	// a probe of them (Record.Withs) before its static access, whose
+	// resolution the backend keeps aside (gen.withs).
+	ResWith
 )
 
 // Res is an identifier's resolution.
@@ -81,9 +88,20 @@ type Record struct {
 	// Catches is the stack slot of each catch clause's binding, where it
 	// is an identifier.
 	Catches map[*ast.CatchClause]uint32
+	// Heads is, for a for-of or for-in loop's lexical declaration, the
+	// stack slots of the bindings its head's expression sees in their
+	// dead zone (ForIn/OfHeadEvaluation's TDZ environment).
+	Heads map[*ast.VarDecl][]uint32
 	// Tails is each call the stack form compiled as a tail call
 	// (tail_call, tail_call_method, tail_direct_eval).
 	Tails map[ast.Expr]bool
+	// Evals is each call the stack form compiled as a direct eval
+	// (direct_eval), with the index of its scope in the function's
+	// EvalScopes.
+	Evals map[*ast.Call]uint32
+	// Withs is each name the stack form compiled with a probe of the with
+	// objects and the eval's variables in scope before its static access.
+	Withs map[*ast.Ident]WithProbe
 	// Templates is each tagged template's index in the function's
 	// Templates, its site, whose object every evaluation of it gives.
 	Templates map[*ast.TemplateLit]uint32
@@ -102,10 +120,59 @@ type Record struct {
 	// resolved it: a binding of the function's (ResLocal) or an upvalue
 	// (ResUpval).
 	Privates map[*ast.PrivateName]Res
-	// Bail says the function has something whose resolution the record
-	// cannot express -- a with, an eval's variables, an Annex B function --
-	// and is left to the stack form.
+	// Debugs is, in code compiled for a debugger, each place it can stop
+	// -- a statement, a loop's test or update, a for-in or for-of head --
+	// by its position: the index of the stack form's first debug_stmt
+	// there in the function's Debug.Statements, and whether it is a
+	// debugger statement (DebugMark).
+	Debugs map[int32]DebugMark
+	// Unmarked are the lexical bindings the stack form leaves out of
+	// their dead zone, nothing being able to see them there (its
+	// declareLexicalNameMarked). In a debugger's code, where every
+	// binding is captured for the debugger, the register form leaves them
+	// so too: a debugger's evaluation sees what the stack form's sees.
+	Unmarked map[uint32]bool
+	// Bail says the record saw one name resolved, or probed, two ways,
+	// which it cannot express.
 	Bail bool
+
+	// finallies are the finally clauses the stack form has compiled a
+	// copy of, and quiet how many copies other than a clause's first are
+	// being compiled: the notes made there are dropped (BeginFinally).
+	finallies map[ast.Stmt]bool
+	quiet     int
+}
+
+// BeginFinally is called as the stack form compiles a copy of the finally
+// clause of statements list, and the function it returns as the copy
+// ends. The stack form compiles a clause once for each way out of it,
+// each copy's bindings in slots of their own, as slots are never reused;
+// regcomp compiles its copies from one resolution, the first copy's, in
+// which each binding of the clause's is a slot no other binding has --
+// the slot whose function constant regcomp's closure finds first. The
+// notes of every later copy are dropped.
+func (r *Record) BeginFinally(list []ast.Stmt) func() {
+	if r == nil || len(list) == 0 {
+		return func() {}
+	}
+	if !r.finallies[list[0]] {
+		if r.finallies == nil {
+			r.finallies = map[ast.Stmt]bool{}
+		}
+		r.finallies[list[0]] = true
+		return func() {}
+	}
+	r.quiet++
+	return func() { r.quiet-- }
+}
+
+// NoteFunc records that hoisted function declaration fd is stored in
+// slot.
+func (r *Record) NoteFunc(fd *ast.FuncDecl, slot uint32) {
+	if r == nil || r.quiet > 0 {
+		return
+	}
+	r.Funcs[fd] = slot
 }
 
 // NewRecord makes an empty record.
@@ -116,12 +183,16 @@ func NewRecord() *Record {
 // TopOp is one of top-level code's declarations: the stack form's
 // instruction Op of name Name and flag Flag, at source position Pos, and
 // for define_global_func the function, Fn, whose closure it defines.
+// OpSetUpvalue is eval code's function declaration of a name its caller
+// binds as a var: Fn's closure stored as the record resolves the write of
+// Id, the declaration's name.
 type TopOp struct {
 	Op   bytecode.Op
 	Name string
 	Flag uint32
 	Pos  int32
 	Fn   *ast.FuncLit
+	Id   *ast.Ident
 }
 
 // NoteTop records top-level code's declaration op.
@@ -133,7 +204,7 @@ func (r *Record) NoteTop(op TopOp) {
 
 // NoteAppend records that n is an append to a local.
 func (r *Record) NoteAppend(n *ast.Assign) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if r.Appends == nil {
@@ -144,7 +215,7 @@ func (r *Record) NoteAppend(n *ast.Assign) {
 
 // NoteTail records that the stack form compiled call n as a tail call.
 func (r *Record) NoteTail(n ast.Expr) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if r.Tails == nil {
@@ -153,9 +224,55 @@ func (r *Record) NoteTail(n ast.Expr) {
 	r.Tails[n] = true
 }
 
+// NoteEval records that the stack form compiled call n as a direct eval
+// whose scope is the function's EvalScopes[idx].
+func (r *Record) NoteEval(n *ast.Call, idx uint32) {
+	if r == nil || r.quiet > 0 {
+		return
+	}
+	if r.Evals == nil {
+		r.Evals = map[*ast.Call]uint32{}
+	}
+	r.Evals[n] = idx
+}
+
+// WithProbe is a name's probe (Record.Withs): Op, the stack form's
+// with_get, with_get_this, with_typeof, with_delete, with_set,
+// with_get_under or with_resolve, of the innermost Limit scopes.
+type WithProbe struct {
+	Op    bytecode.Op
+	Limit uint16
+}
+
+// NoteWith records that the stack form compiled name id with probe p.
+func (r *Record) NoteWith(id *ast.Ident, p WithProbe) {
+	if r == nil || r.quiet > 0 {
+		return
+	}
+	if r.Withs == nil {
+		r.Withs = map[*ast.Ident]WithProbe{}
+	}
+	if old, ok := r.Withs[id]; ok && old != p {
+		r.Bail = true
+	}
+	r.Withs[id] = p
+}
+
 // NoteCatch records that the binding of catch clause c is in slot.
+// NoteHead records slot as a binding of the dead-zone environment a for-of
+// or for-in loop's head d makes for its expression.
+func (r *Record) NoteHead(d *ast.VarDecl, slot uint32) {
+	if r == nil || r.quiet > 0 {
+		return
+	}
+	if r.Heads == nil {
+		r.Heads = map[*ast.VarDecl][]uint32{}
+	}
+	r.Heads[d] = append(r.Heads[d], slot)
+}
+
 func (r *Record) NoteCatch(c *ast.CatchClause, slot uint32) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if r.Catches == nil {
@@ -166,7 +283,7 @@ func (r *Record) NoteCatch(c *ast.CatchClause, slot uint32) {
 
 // NoteFreeze records that the read id is followed by a str_freeze.
 func (r *Record) NoteFreeze(id *ast.Ident) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if r.Freezes == nil {
@@ -177,7 +294,7 @@ func (r *Record) NoteFreeze(id *ast.Ident) {
 
 // NoteRead records a read of id.
 func (r *Record) NoteRead(id *ast.Ident, res Res) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if old, ok := r.Read[id]; ok && old != res {
@@ -188,7 +305,7 @@ func (r *Record) NoteRead(id *ast.Ident, res Res) {
 
 // NoteWrite records a write of id.
 func (r *Record) NoteWrite(id *ast.Ident, res Res) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if old, ok := r.Write[id]; ok && old != res {
@@ -197,9 +314,44 @@ func (r *Record) NoteWrite(id *ast.Ident, res Res) {
 	r.Write[id] = res
 }
 
+// DebugMark is a place code compiled for a debugger can stop: its index
+// in the function's Debug.Statements, and whether it is a debugger
+// statement.
+type DebugMark struct {
+	Index    uint32
+	Debugger bool
+}
+
+// NoteDebug records the stack form's debug_stmt of index idx at pos, the
+// first there: a finally clause's later copies, compiled from the first's
+// resolution, stop where it does.
+func (r *Record) NoteDebug(pos int32, idx uint32, debugger bool) {
+	if r == nil || r.quiet > 0 {
+		return
+	}
+	if r.Debugs == nil {
+		r.Debugs = map[int32]DebugMark{}
+	}
+	if _, ok := r.Debugs[pos]; !ok {
+		r.Debugs[pos] = DebugMark{idx, debugger}
+	}
+}
+
+// NoteUnmarked records that the stack form leaves the lexical binding of
+// slot out of its dead zone.
+func (r *Record) NoteUnmarked(slot uint32) {
+	if r == nil || r.quiet > 0 {
+		return
+	}
+	if r.Unmarked == nil {
+		r.Unmarked = map[uint32]bool{}
+	}
+	r.Unmarked[slot] = true
+}
+
 // NoteTemplate records that tagged template q's site is idx.
 func (r *Record) NoteTemplate(q *ast.TemplateLit, idx uint32) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if r.Templates == nil {
@@ -250,7 +402,7 @@ type ClassStatic struct {
 
 // NoteClass records what the stack form made of class cls.
 func (r *Record) NoteClass(cls *ast.ClassLit, cr *ClassRec) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if r.Classes == nil {
@@ -261,7 +413,7 @@ func (r *Record) NoteClass(cls *ast.ClassLit, cr *ClassRec) {
 
 // NotePrivate records where private name pn's key is.
 func (r *Record) NotePrivate(pn *ast.PrivateName, res Res) {
-	if r == nil {
+	if r == nil || r.quiet > 0 {
 		return
 	}
 	if r.Privates == nil {
