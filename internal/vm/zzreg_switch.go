@@ -246,73 +246,6 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 	panic("register code: no cold operation " + bytecode.RColdOp(w.X()).String())
 }
 
-// regLit is regexp_lit: the literal's RegExp made or given back in the
-// window's receiver and its method in the callee's register -- the
-// built-in, unread, where reading it would find it running nothing to
-// find it (regexpLitMethod), as the tree's literal call does, and read
-// otherwise, at the instruction's position or, for one that calls, at the
-// stack form's instruction of the literal (Aux) -- and, with RLitCall,
-// the method called with the window's one argument as a call_method_w
-// marked RMarkLitRecv calls it.
-//
-//go:noinline
-func (r *Runtime) regLit(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value) error {
-	pc := k.pc - 1
-	w := regAt(c.code, pc)
-	f.pc = c.src[pc] + 1
-	a, x, kc := w.A(), w.X(), uint32(w.C())
-	lit, err := r.newRegExpLiteral(&f.cl.fn.Constants[kc])
-	if err != nil {
-		return err
-	}
-	regs[a+1] = lit
-	test := x&bytecode.RLitTest != 0
-	if m := r.regexpLitMethod(test); m != nil {
-		if x&(bytecode.RLitCall|bytecode.RLitDead) == bytecode.RLitCall && !regs[a+2].IsObject() {
-			// The built-in on the literal given a primitive, called
-			// at once, and the RegExp given back (RMarkLitRecv).
-			v, err := r.callRest(m, m.fn(), lit, regs[a+2:a+3])
-			if err != nil {
-				return err
-			}
-			if !test || r.regexpLitMethod(false) != nil {
-				// test calls exec, which must be the built-in too.
-				r.regexpLiteralDone(&f.cl.fn.Constants[kc], lit.Object())
-			}
-			regs[w.B()] = v
-			return nil
-		}
-		regs[a] = Obj(m)
-	} else {
-		name := atomExec
-		if test {
-			name = r.atoms.intern("test")
-		}
-		if x&bytecode.RLitCall != 0 {
-			f.pc = c.rc.Aux[pc] + 1
-		}
-		v, err := r.getValueProp(lit, name)
-		if err != nil {
-			return err
-		}
-		regs[a] = v
-		f.pc = c.src[pc] + 1
-	}
-	if x&bytecode.RLitCall == 0 {
-		return nil
-	}
-	m := uint8(bytecode.RMarkLitRecv)
-	if x&bytecode.RLitDead != 0 {
-		m |= bytecode.RMarkDead
-	}
-	v, err := r.regMarkedCall(f, c, f.base-int(c.locals)+int(a), 1, pc, m, kc)
-	if err != nil {
-		return err
-	}
-	regs[w.B()] = v
-	return nil
-}
-
 // regDeadCall is a call of o on recv with args whose value nothing reads
 // but its truth: of the realm's exec or replace, the function told so, as
 // deadExec's node tells it (deadCallRest); of anything else, the call.
@@ -449,62 +382,6 @@ func (r *Runtime) regNewArrayE(f *frame, c *regCode, k *regKept, regs *[1 << 16]
 	regs[w.A()] = n.make(regTctx(r, f, f.cl))
 }
 
-// regAppend is append, a case of runReg's: an append to a local, its
-// string grown in place where it alone holds it, as the tree's
-// strAppendNode grows it. The case keeps nothing of the instruction across
-// the call; this reads it back.
-//
-//go:noinline
-func (r *Runtime) regAppend(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value) error {
-	pc := k.pc - 1
-	w := regAt(c.code, pc)
-	f.pc = c.src[pc] + 1
-	v, err := strAppendOp[struct{}](r, regs[w.A()], regs[w.B()])
-	if err == nil {
-		regs[w.A()] = v
-	}
-	return err
-}
-
-// regCharCodeAt is char_code_at, a case of runReg's: s.charCodeAt(i) of a
-// string, its method the built-in read from the cache primProp fills and
-// its argument a number, read here as the tree's charCodeAtCall reads it,
-// without the method's read on the slow path, the call's site and the
-// built-in's conversions; anything else is regCharCodeAtSlow's. The case
-// keeps nothing of the instruction across the call; this reads it back.
-//
-//go:noinline
-func (r *Runtime) regCharCodeAt(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value) error {
-	pc := k.pc - 1
-	w := regAt(c.code, pc)
-	if o := regs[w.B()]; o.IsString() {
-		key := f.cl.names[c.siteName[w.C()]]
-		p := r.proto.str
-		if e := &r.primProps[key&63]; e.key == key && e.proto == p && e.shape == p.shape {
-			if m := p.vals()[e.idx]; m.IsObject() {
-				if fd := m.Object().fn(); fd != nil && fd.elemOp == elemStrCharCodeAt && !fd.bound {
-					if a := regs[w.X()]; a.IsNumber() {
-						x := a.Number()
-						if x != x {
-							x = 0
-						}
-						// ToIntegerOrInfinity truncates toward zero, so any
-						// position above -1 and below the length is a code
-						// unit's.
-						v := Float(math.NaN())
-						if s := o.String(); x > -1 && x < float64(s.Len()) {
-							v = Int(s.CharCodeAt(int(x)))
-						}
-						regs[w.A()] = v
-						return nil
-					}
-				}
-			}
-		}
-	}
-	return r.regCharCodeAtSlow(f, c, pc, regs)
-}
-
 // regCharCodeAtSlow is char_code_at as get_method_w and call_method_w make
 // it: the method read, with the read's position (Aux), then the argument
 // read, and the call, with the call's.
@@ -631,52 +508,4 @@ func (r *Runtime) regStepNext(st *iterState) (Value, bool, error) {
 		return Undefined, false, err
 	}
 	return v, true, nil
-}
-
-// regIterNext is iter_next: R[A] = the next value of cursor R[B], or a
-// jump by SC where it has none, the step at the head of each turn of a
-// for-of or a for-in loop. An array's element in its dense storage is
-// read here, as the tree's iterNextTree reads it; a generator's cursor is
-// stepped as the tree steps it (regIterNextTree); anything else as
-// iterNext steps it.
-//
-//go:noinline
-func (r *Runtime) regIterNext(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value) error {
-	pc := k.pc - 1
-	w := regAt(c.code, pc)
-	cur := regs[w.B()]
-	var v Value
-	var more bool
-	var err error
-	if st := cursorOf(cur); st != nil && !st.done {
-		if a := st.arr; a != nil {
-			if i := st.idx; i < int(a.arrayLength()) && i < len(a.elemsOf()) {
-				if x := a.elemsOf()[i]; !isHole(x) {
-					st.idx++
-					regs[w.A()] = x
-					return nil
-				}
-			}
-		} else if !st.forIn && r.genNextFn != nil && st.next.ref == unsafe.Pointer(r.genNextFn) {
-			f.pc = c.src[pc] + 1
-			v, more, err = r.regIterNextTree(f, cur)
-			goto stepped
-		} else if !st.forIn {
-			f.pc = c.src[pc] + 1
-			v, more, err = r.regStepNext(st)
-			goto stepped
-		}
-	}
-	f.pc = c.src[pc] + 1
-	v, more, err = r.iterNext(cur)
-stepped:
-	if err != nil {
-		return err
-	}
-	if !more {
-		k.pc += int(w.SC())
-		return nil
-	}
-	regs[w.A()] = v
-	return nil
 }

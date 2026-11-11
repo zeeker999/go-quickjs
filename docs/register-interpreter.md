@@ -408,6 +408,34 @@ the ones Go allows:
   - At d931057d the loop was at 4,981, 19 below the limit; with the
     shared taken tail and `append` and `str_freeze` as cases of their own
     it is at 4,875, 125 below.
+- **The hot code is one block.** `zzreg_run.go` holds, declared first
+  and in this order, `runReg`; the call and its return, `regCallW` and
+  `regEnterW`; what a call runs out of line, `regDirect` (a built-in's
+  callback), `regNative`, `regLeafRun`, `regCloseUpvalues`; and what an
+  iteration runs out of line, `regSlow` and its operators, `regElemMiss`,
+  `regSetMiss`, `regBackEdge`, `regAppend`, `regCharCodeAt`,
+  `regIterNext`, `regLit`, `regMarkedCall`. Go lays a package's functions
+  out in file order, so the distances between them -- which decide what
+  shares the op cache's sets -- depend on their own sizes alone, and the
+  layout lock's lever Q (`zzreg_ru_layoutpad.go`, the anchor `runReg`)
+  puts the block at a fixed address modulo 4 KB whatever changes before
+  it; the placements' pad before it (`zzreg_ru_pad.go`) moves it whole.
+  It stays where the register files were, after the JIT's, not first in
+  the package: there it moves none of the old tiers' code, whose anchors
+  all come before it, and only the A pad would change to take the
+  built-ins back behind 80 KB of it -- and the files after it (`zzz_*`)
+  are pinned by nothing either way.
+  Before, the block was spread over `zzreg_call.go`, `zzreg_run.go` and
+  `zzreg_switch.go`, with the cold `zzreg_report.go` between: a change to
+  a miss path moved `regSlow`, `regIn` and `regNative` against `runReg`,
+  and the tail calls' 4.8 KB in `zzreg_call.go` made `forward_loop` 11%
+  slower at every placement with no instruction of its path changed. New
+  hot code -- what a call, a return or a loop's turn runs -- goes into
+  the block, after what is there; cold code -- miss paths, `regCold`,
+  set-up, the report, the tail calls (`zzzy_regtail.go`) -- never does.
+  The set-up and the entries from a tree are in `zzreg_entry.go`. An
+  unrelated function added before the block, with the pads regenerated,
+  leaves every function of the block where it was.
 - **No constants in registers.** What Go's loop-invariant pass would take
   out of the loop is read from a variable (above).
 - **The loop holds only the hot operations.** Every case added moves the
