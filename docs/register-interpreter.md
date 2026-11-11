@@ -400,20 +400,35 @@ the ones Go allows:
   keeps the pc in a memory record and reads it, and its instruction, back
   afterwards, so that Go has no reason to save them at every dispatch.
   Slow paths are out of line and re-read their instruction from the code.
-- **The loop stays below Go's big-function size.** Go's inliner calls a
-  function of 5,000 or more IR nodes big and inlines only callees of cost
-  20 or less into it; past that, `regInt32` (cost 41, 18 calls),
-  `regTruth`, `Value.IsString`, `propCache.holder` and a dozen more become
-  calls in every case. The count is of the loop's own source, before
-  anything is inlined into it: a helper inlined costs the loop the few
-  nodes of its call, not its body. `TestRegLoopCallsNoHelper` pins it --
-  every call the loop's source makes of a function Go can inline is
-  inlined there, which a big loop's calls of these helpers would not be --
-  as `TestIntendedInlining` pins the helpers, and `internal/cmd/bigfunc`
-  measures it: `go run ./internal/cmd/bigfunc -func runReg` prints the
-  count against 5,000, `-cases 40` each case clause of 40 nodes or more,
-  and the callees above cost 20 the loop would call if it were big. The
-  budget is spent with care, a hot case at a time:
+- **The loop is big, and calls no helper above cost 20.** Go's inliner
+  calls a function of 5,000 or more IR nodes big, and that is all being
+  big does (Go 1.24.13's and 1.27.3's `inl.go`): the cost of a callee it
+  inlines into it drops from 80 to 20 (40 for a closure), and PGO's hot
+  calls are refused. So the loop calls only helpers of cost 20 or less --
+  `IsNumber` 12, `Object` 15, `mkTag` 15, `regTagged` 13 (`isTag` of bits
+  read once), `regIsInt32` (a number's round trip through int32, a
+  bool), `RInstr`'s fields 3 to 6 -- and writes the rest out where it
+  uses them: ToBoolean (`regTruth`, 69) in `jmp_f` and `jmp_t`, the
+  prototype holder (`propCache.holder`, 65) in the property reads,
+  `IsNullish` (35), `arrayLength` (52), typeof's kind (`Kind` 30,
+  `regTypeOf` 29), `regJumpOff` (28), the typed element read (`regTypedAt`
+  80, `regTypedLoad` 62). It is at 5,438 nodes, and a helper above 20 is
+  what would cost it: `TestRegLoopCallsNoHelper` fails on one, every call
+  the loop's source makes of a function Go can inline being inlined at
+  the call. `internal/cmd/bigfunc` measures it: `-func runReg` prints the
+  count, `-cases 40` each case clause of 40 nodes or more, and the
+  callees above cost 20 the loop calls; `-force runReg` compiles it as big
+  whatever its size and `-small` as not big, to compare what `-m` says it
+  inlines and its code, and `-costs` prints each inlinable function's
+  cost, which `-m=2` runs out of memory printing. No written-out case kept
+  Go's code for the inlined helper -- the shape of an inlined call's
+  parameters and its inline marks steer it -- and the base had
+  materialised `regInt32`'s ok and tested it: 3,444 instructions became
+  3,338, the frame 0x1b8 bytes 0x1a0, and over two placements
+  `loop_int32` was 8.6% faster, `int_arith` 3.2%, the closure tests 3 to
+  6%. The placements' filler in the loop (`padRegInner`) is two tests,
+  of cost 20: three cost 31, and were calls in the big loop. What the
+  budget was spent on while it bound:
   - **The compare-and-branches share their taken tail.** A case is a
     fast path and a `goto`: to `slow` (the slow path, `regSlow`),
     `cmpSlow`, `typed`, `jump`, or `taken`, a compare-and-branch taken,
@@ -474,8 +489,9 @@ the ones Go allows:
     (`array_prop_create`, `array_index_append`, `array_new_fill_down`)
     6 to 9% slower; a class test put first there, the empty loops and
     nine more 6 to 12%.
-- **The hot code is one block.** `zzreg_run.go` holds, declared first
-  and in this order, `runReg`; the call and its return, `regCallW` and
+- **The hot code is one block.** `zzreg_run.go` holds `runReg`, and
+  `zzreg_run_call.go` after it, declared in this order, the call and its
+  return, `regCallW` and
   `regEnterW`; what a call runs out of line, `regDirect` (a built-in's
   callback), `regNative`, `regLeafRun`, `regCloseUpvalues`; and what an
   iteration runs out of line, `regSlow` and its operators, `regElemMiss`,
@@ -486,11 +502,21 @@ the ones Go allows:
   layout lock's lever Q (`zzreg_ru_layoutpad.go`, the anchor `runReg`)
   puts the block at a fixed address modulo 4 KB whatever changes before
   it; the placements' pad before it (`zzreg_ru_pad.go`) moves it whole.
-  The block is two files: `zzreg_run.go`, `runReg` to `regSlow`, and
-  `zzreg_runs.go`, `regSlow`'s operators on, `regBinImm` first; lever P
-  (`zzreg_run_layoutpad.go`, the anchor `regBinImm`) between them keeps
-  the second half where it is, so that a case added to `regSlow` or to
-  `runReg` moves nothing after it. Its target is 64 bytes past where
+  The block is three files: `zzreg_run.go`, `runReg`;
+  `zzreg_run_call.go`, `regCallW` to `regSlow`; and `zzreg_runs.go`,
+  `regSlow`'s operators on, `regBinImm` first. Lever W
+  (`zzreg_run_a_layoutpad.go`, the anchor `regCallW`) keeps the calls
+  where they are against `runReg` whatever the loop's size does, and
+  lever P (`zzreg_run_layoutpad.go`, the anchor `regBinImm`) the third
+  file, so that a case added to `regSlow` or to `runReg` moves nothing
+  after it. W's target is where `regCallW` was at 679d54b3: when the
+  loop's helpers were written out (it became 512 bytes shorter) the
+  calls moved 512 bytes back against it, and `arguments_read` and
+  `arguments_strict_read` -- a call and three `args_index` slow paths a
+  turn -- were 8.8% and 7.5% slower at every placement; the base with
+  3,584 bytes of pad after `runReg` (512 back modulo 4 KB, its code
+  unchanged) was 8.4% and 11.4% slower at three of four. With W, both
+  are level (+1.2%, +0.5%). Its target is 64 bytes past where
   `regBinImm` was before the split, a pad of a few stores: at the old
   place, a pad of 4 KB, every function and variable after it the same
   modulo 4 KB, `loop_arith` was 9.2% and `loop_int32` 5.2% slower at

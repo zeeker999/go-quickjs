@@ -2,7 +2,7 @@
 
 package vm
 
-// layoutPadP is the layout lock's pad P, after zzreg_run.go, before zzreg_runs.go: the register interpreter's hot block after regSlow, regBinImm first.
+// layoutPadP is the layout lock's pad P, after zzreg_run_call.go, before zzreg_runs.go: the register interpreter's hot block after regSlow, regBinImm first.
 // It is never called: see internal/cmd/layoutpad.
 //
 //go:noinline

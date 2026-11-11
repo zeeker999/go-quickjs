@@ -9,8 +9,7 @@ import (
 )
 
 // The register interpreter's calls and slow paths: what its loop does out
-// of line, so that the loop stays small enough for Go to inline into it what
-// it inlines (see zzreg_run.go).
+// of line, so that the loop's cases stay small (see zzreg_run.go).
 
 // regCall calls callee with this and args from the register interpreter. A
 // function of this realm that has register code, and that a call runs with

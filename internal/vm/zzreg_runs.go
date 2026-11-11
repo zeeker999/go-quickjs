@@ -10,10 +10,10 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jsnum"
 )
 
-// The register interpreter's hot block after regSlow (zzreg_run.go): its
-// operators, the miss paths and what an iteration runs out of line. The
-// layout lock's pad P, between the two files, puts this half at a fixed
-// address modulo 4 KB, so that a case regSlow takes moves none of it
+// The register interpreter's hot block after regSlow (zzreg_run_call.go):
+// its operators, the miss paths and what an iteration runs out of line.
+// The layout lock's pad P, between the two files, puts this part at a
+// fixed address modulo 4 KB, so that a case regSlow takes moves none of it
 // (docs/register-interpreter.md, "The loop").
 
 // regBinImm is bin_imm's slow path.
