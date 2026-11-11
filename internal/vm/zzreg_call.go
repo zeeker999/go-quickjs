@@ -317,7 +317,7 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 				r.frameDepth--
 				r.stackTop = saved
 				if err != nil {
-					return r.regCallWEnd(nf, err, saved, wb+int(w.B()))
+					return r.regCallWEnd(nf, regFrameCall, err, saved, wb+int(w.B()))
 				}
 				regWindow(r.stack, wb)[w.B()] = v
 				return nil
@@ -351,15 +351,26 @@ func regCloseUpvalues(f *frame) {
 //go:noinline
 func (r *Runtime) regCallMiss(f *frame, c *regCode, w bytecode.RInstr, wb, pc int) error {
 	v, err := r.regCallSlow(f, c, w, wb+int(w.A()), pc)
-	if err == errTailCall {
-		// The callee's frame, entered by regEnterW, ended in a tail call.
-		v, err = r.regTailRest()
-	}
 	if err != nil {
-		return err
+		return r.regMissEnd(err, wb+int(w.B()))
 	}
 	r.stack[wb+int(w.B())] = v
 	return nil
+}
+
+// regMissEnd is regCallMiss's end of a call that ended in an error, which
+// it returns: where the callee's frame, entered by regEnterW, was given to
+// a callee in place (errRegRestart), the frame -- the one past the top, as
+// regEnterW left it -- run again, and where it ended in a tail call
+// (errTailCall), the call made, its value written to the stack at dst.
+//
+//go:noinline
+func (r *Runtime) regMissEnd(err error, dst int) error {
+	if err == errRegRestart {
+		u := uint(r.frameDepth)
+		return r.regCallWEnd(&r.frames[u/frameBlockSize][u%frameBlockSize], regFrameEnter, err, r.stackTop, dst)
+	}
+	return r.regCallWEnd(nil, 0, err, 0, dst)
 }
 
 // regGenCall is a call of o, a generator function of this realm with
@@ -759,11 +770,6 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int,
 		// The arguments kept for it, the last on the argument stack.
 		r.argStack = r.argStack[:len(r.argStack)-len(a)]
 	}
-	if err != nil && err == errRegRestart {
-		// The frame, given to a callee in place, run again: it keeps no
-		// arguments (regTailTo).
-		return r.regRerun(f, regFrameEnter, saved)
-	}
 	return v, err
 }
 
@@ -799,17 +805,18 @@ func (r *Runtime) regTailCallW(f *frame, c *regCode, k *regKept, wb int) error {
 	return r.regCallW(f, c, k, wb)
 }
 
-// regCallWEnd is regCallW's end of a frame nf that ended in an error,
+// regCallWEnd is regCallW's end of a frame nf, of kind kind, that ended
+// in an error,
 // which it returns, the frame closed and the stack's top saved again;
 // where the frame was given to a callee in place (errRegRestart), the
 // frame run again, and where it ended in a tail call (errTailCall), the
 // call made, its value written to the stack at dst.
 //
 //go:noinline
-func (r *Runtime) regCallWEnd(nf *frame, err error, saved, dst int) error {
+func (r *Runtime) regCallWEnd(nf *frame, kind uint8, err error, saved, dst int) error {
 	var v Value
 	if err == errRegRestart {
-		v, err = r.regRerun(nf, regFrameCall, saved)
+		v, err = r.regRerun(nf, kind, saved)
 	}
 	if err == errTailCall {
 		v, err = r.regTailRest()
