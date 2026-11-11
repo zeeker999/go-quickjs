@@ -6,8 +6,9 @@
 // it only callees of cost 20 or less: past it, every helper above that cost
 // becomes a call in the whole function. The register interpreter's loop,
 // runReg, is kept below it (docs/register-interpreter.md, "The loop"), and
-// TestRegLoopIsNotBig says whether it is; this says by how much. -m=2, which
-// prints the verdict and not the size, runs out of memory on package vm.
+// TestRegLoopCallsNoHelper says whether it calls what it should not; this
+// says by how much it is below. -m=2, which prints the verdict and not the
+// size, runs out of memory on package vm.
 //
 // It builds the toolchain's own compiler with inl.go given through
 // -overlay, so that IsBigFunc prints the count it makes of each function of

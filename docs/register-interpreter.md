@@ -406,8 +406,10 @@ the ones Go allows:
   `regTruth`, `Value.IsString`, `propCache.holder` and a dozen more become
   calls in every case. The count is of the loop's own source, before
   anything is inlined into it: a helper inlined costs the loop the few
-  nodes of its call, not its body. `TestRegLoopIsNotBig` pins it, as
-  `TestIntendedInlining` pins the helpers, and `internal/cmd/bigfunc`
+  nodes of its call, not its body. `TestRegLoopCallsNoHelper` pins it --
+  every call the loop's source makes of a function Go can inline is
+  inlined there, which a big loop's calls of these helpers would not be --
+  as `TestIntendedInlining` pins the helpers, and `internal/cmd/bigfunc`
   measures it: `go run ./internal/cmd/bigfunc -func runReg` prints the
   count against 5,000, `-cases 40` each case clause of 40 nodes or more,
   and the callees above cost 20 the loop would call if it were big. The
@@ -2600,7 +2602,7 @@ Stop at the first that fails.
 - `TestJITSameWorkWhileMarking` with its breach list unchanged, and every
   native path also tested under `jitMarkingForTest`;
 - the full suite with and without the tag;
-- `TestRegLoopIsNotBig` and `TestRegDispatchKeepsNoPC` passing;
+- `TestRegLoopCallsNoHelper` and `TestRegDispatchKeepsNoPC` passing;
 - untagged builds unchanged by `hotdiff`.
 
 1. **3a-1, feedback.**
