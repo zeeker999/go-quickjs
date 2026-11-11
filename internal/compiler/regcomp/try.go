@@ -319,7 +319,8 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 			// The head's expression sees the binding in its dead zone.
 			g.emit(bytecode.MakeR(bytecode.RLoadUninit, 0, r16(dst), 0, 0))
 		}
-	case ResUpval, ResGlobal:
+	case ResUpval, ResUpvalCheck, ResGlobal, ResGlobalVar, ResGlobalLexInit, ResModuleLexInit, ResLocalCheck, ResConstAssign, ResIgnore:
+		// Stored at the head of each turn (storeValue).
 	default:
 		g.fail("a for-of or for-in loop's store the backend does not compile")
 		return

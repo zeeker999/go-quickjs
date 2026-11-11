@@ -285,6 +285,8 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 		return true
 	case bytecode.RColdCloseRegs:
 		return int(a)+int(b) <= rc.NumRegs
+	case bytecode.RColdGetUpvalCheck, bytecode.RColdSetUpvalCheck:
+		return reg(a) && int(w.BC()) < len(fn.Upvalues)
 	}
 	return suspendOK(rc, fn, pc, w, reg)
 }

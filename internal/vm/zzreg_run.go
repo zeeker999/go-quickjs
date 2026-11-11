@@ -69,7 +69,7 @@ type regCode struct {
 	// args says a frame keeps its arguments as passed, for RArguments.
 	args bool
 	// suspends marks a generator's or an async function's code, which
-	// only a generator's resumption runs (zzreg_gen.go).
+	// only a generator's resumption runs (zzreg_zgen.go).
 	suspends bool
 	// leaf is what a call may answer without a frame: a pure body that
 	// calls nothing, or one that only reads or writes its this's

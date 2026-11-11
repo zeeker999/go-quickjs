@@ -550,7 +550,7 @@ const (
 	// registers from R[A], whose bindings a scope's end leaves: the next
 	// entry of the scope makes new ones (close_regs).
 	RColdCloseRegs
-	// A generator's and an async function's (zzreg_gen.go): RColdGenEntry,
+	// A generator's and an async function's (zzreg_zgen.go): RColdGenEntry,
 	// the code's first instruction, goes on where the frame was suspended,
 	// at the pc the resumption gives, or throws there what it injects;
 	// RColdEndParams suspends a generator its creation ran once its
@@ -588,6 +588,11 @@ const (
 	RColdIterResult
 	RColdAsyncIterClose
 	RColdAsyncIterCheck
+	// RColdGetUpvalCheck, R[A] = upvalue BC, and RColdSetUpvalCheck,
+	// upvalue BC = R[A], throw where the binding is in its dead zone, and
+	// the store where it is a constant (zzreg_znames.go).
+	RColdGetUpvalCheck
+	RColdSetUpvalCheck
 )
 
 // The flags of regexp_lit's X.
@@ -664,6 +669,7 @@ var rColdNames = [...]string{
 	RColdIterUnpackDelegate: "iter_unpack_delegate", RColdForAwaitOfStart: "for_await_of_start",
 	RColdAsyncIterNext: "async_iter_next", RColdIterResult: "iter_result",
 	RColdAsyncIterClose: "async_iter_close", RColdAsyncIterCheck: "async_iter_check",
+	RColdGetUpvalCheck: "get_upval_check", RColdSetUpvalCheck: "set_upval_check",
 }
 
 func (op RColdOp) String() string {

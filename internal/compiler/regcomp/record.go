@@ -53,6 +53,9 @@ const (
 	// ResModuleLexInit is the initialization of a module's top-level let,
 	// const or class binding (init_module_lex).
 	ResModuleLexInit
+	// ResUpvalCheck is upvalue Index, read or written with a check of its
+	// dead zone (the stack form's get_upvalue_check, set_upvalue_check).
+	ResUpvalCheck
 )
 
 // Res is an identifier's resolution.

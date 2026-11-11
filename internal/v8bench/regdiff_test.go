@@ -1388,3 +1388,31 @@ function t13() { var fs = []; for (let i = 0; i < 2; i++) { do { let k = i; fs.p
 	calls := []string{`t1()`, `t2()`, `t3()`, `t4()`, `t5()`, `t6()`, `t7()`, `t8()`, `t9()`, `t10()`, `t11()`, `t12()`, `t13()`}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffNames compares names read and written in their dead zone --
+// a closure's upvalue, a binding of the function's own a for-of head or
+// an assignment writes before its declaration -- a constant's upvalue
+// written, a function expression's own name written, and for-of and
+// for-in loops that store to a global var, a global let, a checked
+// binding or a constant, with the errors' positions.
+func TestRegDiffNames(t *testing.T) {
+	src := `
+function e(f) { try { return String(f()) } catch (x) { return x.name + ": " + x.message + " | " + x.stack.split("\n").slice(1, 3).map(function (s) { return s.trim() }).join(" | ") } }
+function a1() { var f = () => x; var r = e(f); let x = 1; return r + "," + f() }
+function a2() { var f = () => { x = 2 }; var r = e(f); let x = 1; f(); return r + "," + x }
+function a3() { var f = () => { c = 2 }; const c = 1; return e(f) }
+function a4() { var f = () => x++; var r = e(f); let x = 1; f(); return r + "," + x }
+function a5() { return e(() => { for (h of [1]) {} let h; }) }
+function a6() { var r = []; for (let x of [1]) { r.push(e(() => { y += 1 })); let y = 2; } return r.join() }
+var fe = function self() { self = 1; return typeof self };
+var fs = function self() { "use strict"; return e(() => { self = 1 }) };
+function a7() { var f = () => typeof x; var r = e(f); let x; return r }
+function a8() { return e(() => { z = 1; let z; }) }
+function a9() { const q = 1; return e(() => { for (q of [2]) {} }) }
+var gv; let gl;
+function a10() { for (gv of [1, 2]) {} for (gl in {a: 1}) {} return gv + gl }
+`
+	calls := []string{`a1()`, `a2()`, `a3()`, `a4()`, `a5()`, `a6()`, `fe()`, `fs()`, `a7()`, `a8()`, `a9()`, `a10()`,
+		`var out = []; for (var tv of [1, 2]) out.push(tv); for (let tl of [3]) out.push(tl); for (tk in {k: 1}) out.push(tk); out.join() + tv + tk`}
+	regDiff(t, src, calls)
+}

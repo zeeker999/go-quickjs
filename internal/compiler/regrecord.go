@@ -37,7 +37,7 @@ func (c *compiler) regNoteUpvalueWrite(t *ast.Ident, initializing bool) {
 	u := c.fn.Upvalues[idx]
 	switch {
 	case u.TDZ && !initializing:
-		c.reg.NoteWrite(t, regcomp.Res{})
+		c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResUpvalCheck, Index: idx})
 	case u.FuncSelf && !initializing:
 		if c.fn.Strict {
 			c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResConstAssign})

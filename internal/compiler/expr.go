@@ -503,7 +503,7 @@ func (c *compiler) compileIdentReadStatic(n *ast.Ident) {
 	}
 	if idx, ok := c.resolveUpvalue(n.Name); ok {
 		if c.fn.Upvalues[idx].TDZ {
-			c.reg.NoteRead(n, regcomp.Res{})
+			c.reg.NoteRead(n, regcomp.Res{Kind: regcomp.ResUpvalCheck, Index: idx})
 			c.emitAt(int(n.Start), bytecode.OpGetUpvalueCheck, idx, 0)
 		} else {
 			c.reg.NoteRead(n, regcomp.Res{Kind: regcomp.ResUpval, Index: idx})
@@ -2280,7 +2280,11 @@ func (c *compiler) assignToIdentStatic(t *ast.Ident, initializing bool) {
 			// A function expression's own name is an immutable binding, and
 			// assigning to it outside strict mode is quietly discarded rather
 			// than refused.
-			c.reg.NoteWrite(t, regcomp.Res{})
+			if c.fn.Strict {
+				c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResConstAssign})
+			} else {
+				c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResIgnore})
+			}
 			if c.fn.Strict {
 				c.emitAt(int(t.Start), bytecode.OpAssignConst, c.nameIdx(t.Name), 0)
 			}
@@ -2301,7 +2305,7 @@ func (c *compiler) assignToIdentStatic(t *ast.Ident, initializing bool) {
 			c.reg.NoteWrite(t, regcomp.Res{Kind: kind, Index: l.slot})
 			c.emit(bytecode.OpPutLocal, l.slot, 0)
 		} else {
-			c.reg.NoteWrite(t, regcomp.Res{})
+			c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResLocalCheck, Index: l.slot})
 			c.emit(bytecode.OpDup, 0, 0)
 			c.emit(bytecode.OpSetLocalCheck, l.slot, 0)
 		}

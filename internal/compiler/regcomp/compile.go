@@ -1615,6 +1615,11 @@ func (g *gen) ident(n *ast.Ident, dst int) int {
 		g.emit(bytecode.MakeRBC(bytecode.RGetUpval, 0, r16(d), res.Index))
 		g.freeze(n, d)
 		return d
+	case ResUpvalCheck:
+		d := g.dest(dst)
+		g.at(int(n.Start))
+		g.emit(bytecode.MakeRBC(bytecode.RCold, uint8(bytecode.RColdGetUpvalCheck), r16(d), res.Index))
+		return d
 	case ResGlobal:
 		d := g.dest(dst)
 		g.at(int(n.Start))
@@ -2027,9 +2032,19 @@ func (g *gen) storeIdent(id *ast.Ident, value ast.Expr, init bool) int {
 		r := int(g.slotReg[res.Index])
 		g.into(value, r)
 		return r
+	case ResLocalCheck:
+		// A binding in its dead zone throws as it is set, after the value
+		// is made.
+		v := g.expr(value, -1)
+		g.storeValue(id, v)
+		return v
 	case ResUpval:
 		v := g.expr(value, -1)
 		g.emit(bytecode.MakeRBC(bytecode.RSetUpval, 0, r16(v), res.Index))
+		return v
+	case ResUpvalCheck:
+		v := g.expr(value, -1)
+		g.storeValue(id, v)
 		return v
 	case ResGlobal:
 		var strict uint8
@@ -2341,6 +2356,9 @@ func (g *gen) readForWrite(id *ast.Ident, dst int) int {
 	switch res.Kind {
 	case ResUpval:
 		g.emit(bytecode.MakeRBC(bytecode.RGetUpval, 0, r16(d), res.Index))
+	case ResUpvalCheck:
+		g.at(int(id.Start))
+		g.emit(bytecode.MakeRBC(bytecode.RCold, uint8(bytecode.RColdGetUpvalCheck), r16(d), res.Index))
 	case ResGlobal:
 		g.at(int(id.Start))
 		g.emit(bytecode.MakeR(bytecode.RGetGlobal, 0, r16(d), g.name16(id.Name), g.globalSite()))
@@ -2356,8 +2374,22 @@ func (g *gen) storeValue(id *ast.Ident, v int) {
 	switch res.Kind {
 	case ResLocal:
 		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(int(g.slotReg[res.Index])), r16(v), 0))
+	case ResLocalCheck:
+		r := int(g.slotReg[res.Index])
+		g.at(int(id.Start))
+		g.emit(bytecode.MakeR(bytecode.RCheckRef, 0, r16(r), uint16(res.Index), 0))
+		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(r), r16(v), 0))
 	case ResUpval:
 		g.emit(bytecode.MakeRBC(bytecode.RSetUpval, 0, r16(v), res.Index))
+	case ResUpvalCheck:
+		g.at(int(id.Start))
+		g.emit(bytecode.MakeRBC(bytecode.RCold, uint8(bytecode.RColdSetUpvalCheck), r16(v), res.Index))
+	case ResGlobalVar:
+		// A var's store: set_global whatever the code's strictness.
+		g.at(int(id.Start))
+		g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite()))
+	case ResGlobalLexInit, ResModuleLexInit:
+		g.lexInit(res.Kind, id.Name, v, int(id.Start))
 	case ResGlobal:
 		// An update's or a compound assignment's store, after its read has
 		// resolved the name: in strict code the store asks again, and a

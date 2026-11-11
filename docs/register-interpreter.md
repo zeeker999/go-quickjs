@@ -579,7 +579,7 @@ are.
 ## Generators and async functions
 
 A generator's frame is its window (regcomp's gen.go, the VM's
-zzreg_gen.go). Suspension copies the window and the pc into the generator
+zzreg_zgen.go). Suspension copies the window and the pc into the generator
 object, and resumption copies them back to the top of the stack and
 continues at the pc, as the stack form does with its operand stack -- but
 there is no operand stack, so the copy is the frame's registers alone. The
@@ -1312,7 +1312,16 @@ regdiff cases and test262 in register mode on its directories:
    turns before keep theirs, closed. A for head's let is copied from turn
    to turn (CreatePerIterationEnvironment): closed after the head's
    initialization and at each turn's end, before the update. A head
-   expression's closure of the head's binding reads it in its dead zone. Their arguments object is made by
+   expression's closure of the head's binding reads it in its dead zone.
+3c. **Names in their dead zone, and for-of and for-in stores** (626 and
+   721) -- done: the stack compiler records a dead-zone upvalue's read and
+   write as `ResUpvalCheck` (`get_upval_check`, `set_upval_check`, cold,
+   the dead zone outranking constness), a binding of its own function
+   written before its declaration as `ResLocalCheck` (`check_ref` and a
+   move), and a function expression's own name written as the constant's
+   store or nothing, by strictness. A for-of or for-in loop stores each
+   turn's value to any binding a store reaches: a global var, a global
+   or a module's let, a checked binding, a constant (which throws). Their arguments object is made by
    the creation's run, from the arguments the generator keeps; a mapped
    one's aliases are captures of the parameters' registers, which move
    with the window.
