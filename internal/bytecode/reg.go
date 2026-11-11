@@ -550,6 +550,44 @@ const (
 	// registers from R[A], whose bindings a scope's end leaves: the next
 	// entry of the scope makes new ones (close_regs).
 	RColdCloseRegs
+	// A generator's and an async function's (zzreg_gen.go): RColdGenEntry,
+	// the code's first instruction, goes on where the frame was suspended,
+	// at the pc the resumption gives, or throws there what it injects;
+	// RColdEndParams suspends a generator its creation ran once its
+	// parameters are bound; RColdYield suspends the frame with R[B], and on
+	// its resumption R[A] = the value sent in, the next instruction a jump
+	// past the return path a return resumes at; RColdAwait suspends it to
+	// await R[B], and on its resumption R[A] = what that settled to;
+	// RColdYieldStar suspends a yield* with R[B], and on any resumption R[A]
+	// = the value sent in and R[A+1] how, a ResumeNext, ResumeThrow or
+	// ResumeReturn. RColdIterResume, R[A] = what cursor R[B]'s next, throw
+	// or return, by the kind in R[C+1], gives for R[C] -- the result, or, a
+	// return or a throw it has no method for ending the delegation, the
+	// value to end it with, the next instruction a jump taken then;
+	// RColdIterUnpackDelegate, R[A] = result R[B] where it is not done -- its
+	// value in an async generator -- and its value where it is, cursor R[C]
+	// marked done and the next instruction, a jump, taken.
+	// RColdForAwaitOfStart, R[A] = a cursor over R[B] for a for await or an
+	// async generator's yield* (startForAwaitOf). A for await's:
+	// RColdAsyncIterNext, R[A] = what cursor R[B]'s next returns;
+	// RColdIterResult, R[A] = result R[B]'s value, or where it is done, the
+	// next instruction, a jump, taken; RColdAsyncIterClose, R[A] = what
+	// cursor R[B]'s return method returns, the cursor done, or where it has
+	// none, the next instruction, a jump, taken; RColdAsyncIterCheck throws
+	// where R[A], what a return method's result settled to, is not an
+	// object.
+	RColdGenEntry
+	RColdEndParams
+	RColdYield
+	RColdAwait
+	RColdYieldStar
+	RColdIterResume
+	RColdIterUnpackDelegate
+	RColdForAwaitOfStart
+	RColdAsyncIterNext
+	RColdIterResult
+	RColdAsyncIterClose
+	RColdAsyncIterCheck
 )
 
 // The flags of regexp_lit's X.
@@ -621,7 +659,11 @@ var rColdNames = [...]string{
 	RColdSuperSet: "super_set", RColdSuperBase: "super_base", RColdSuperGetIndex: "super_get_index",
 	RColdSuperSetIndex: "super_set_index", RColdThis: "this_bound", RColdCheckThis: "check_this_init",
 	RColdNewTarget: "new_target", RColdDerivedRet: "derived_ret", RColdDeleteSuper: "delete_super",
-	RColdCloseRegs: "close_regs",
+	RColdCloseRegs: "close_regs", RColdGenEntry: "gen_entry", RColdEndParams: "end_params",
+	RColdYield: "yield", RColdAwait: "await", RColdYieldStar: "yield_star", RColdIterResume: "iter_resume",
+	RColdIterUnpackDelegate: "iter_unpack_delegate", RColdForAwaitOfStart: "for_await_of_start",
+	RColdAsyncIterNext: "async_iter_next", RColdIterResult: "iter_result",
+	RColdAsyncIterClose: "async_iter_close", RColdAsyncIterCheck: "async_iter_check",
 }
 
 func (op RColdOp) String() string {

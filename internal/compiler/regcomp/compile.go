@@ -469,6 +469,10 @@ func (g *gen) body() {
 	// aside and put in their dead zone below, until their turn.
 	var args []int
 	lexical := !g.fn.HasSimpleParams || g.fn.HasRest
+	if suspends(g.fn) {
+		// A resumption goes on from here where the frame was suspended.
+		g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdGenEntry), 0, 0, 0))
+	}
 	if lexical {
 		args = g.paramsAside()
 	}
@@ -513,6 +517,10 @@ func (g *gen) body() {
 	}
 	release()
 	g.top = g.topAfterBindings()
+	if g.fn.Generator {
+		// A generator's creation binds its parameters and stops here.
+		g.cold(bytecode.RColdEndParams, 0, 0, 0)
+	}
 	// Hoisted function declarations of the body; one in a block is left to
 	// the stack form.
 	for _, s := range lit.Body {
@@ -555,8 +563,7 @@ func simpleArguments(fn *bytecode.Function) bool {
 	// A function whose arguments object is only handed on to apply
 	// (ForwardsArguments) has no object made: each such call is an
 	// apply_args, which hands on the frame's arguments as passed.
-	if fn.Generator || fn.Async ||
-		fn.HasDirectEval || fn.Debug != nil || fn.TopLevel || fn.HasTailCall {
+	if fn.HasDirectEval || fn.Debug != nil || fn.TopLevel || fn.HasTailCall {
 		return false
 	}
 	switch fn.Kind {
@@ -910,6 +917,12 @@ func (g *gen) stmt(s ast.Stmt) {
 			g.fail("a function declaration in a block")
 		}
 	case *ast.ReturnStmt:
+		if g.fn.Async && g.fn.Generator && n.Arg != nil {
+			// An async generator awaits what it returns.
+			v := g.expr(n.Arg, -1)
+			g.retFrom(g.awaitReg(v, n.Start))
+			return
+		}
 		if g.finallyAround() {
 			// The value is taken before the finally clauses run, which
 			// may assign what it was read from.
@@ -1346,6 +1359,10 @@ func (g *gen) writes(e ast.Expr, slot int) bool {
 			for _, y := range x.Exprs {
 				walk(y)
 			}
+		case *ast.Yield:
+			walk(x.Arg)
+		case *ast.Await:
+			walk(x.Arg)
 		case *ast.ArrayLit:
 			for _, y := range x.Elements {
 				walk(y)
@@ -1498,6 +1515,10 @@ func (g *gen) expr(e ast.Expr, dst int) int {
 		return g.taggedTemplate(n, dst)
 	case *ast.OptionalChain:
 		return g.optionalChain(n, dst)
+	case *ast.Yield:
+		return g.yieldExpr(n, dst)
+	case *ast.Await:
+		return g.awaitExpr(n, dst)
 	case *regExpr:
 		return g.place(n.reg, dst)
 	}

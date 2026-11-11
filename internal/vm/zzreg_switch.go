@@ -282,6 +282,11 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		v, err := r.regGlobalOpt(f, f.cl.names[w.B()])
 		regs[w.A()] = v
 		return err
+	case bytecode.RColdGenEntry, bytecode.RColdEndParams, bytecode.RColdYield, bytecode.RColdAwait,
+		bytecode.RColdYieldStar, bytecode.RColdIterResume, bytecode.RColdIterUnpackDelegate,
+		bytecode.RColdForAwaitOfStart, bytecode.RColdAsyncIterNext, bytecode.RColdIterResult,
+		bytecode.RColdAsyncIterClose, bytecode.RColdAsyncIterCheck:
+		return r.regColdGen(f, c, k, w, regs)
 	}
 	panic("register code: no cold operation " + bytecode.RColdOp(w.X()).String())
 }
@@ -697,7 +702,7 @@ func (r *Runtime) regIterNext(f *frame, c *regCode, k *regKept, regs *[1 << 16]V
 					return nil
 				}
 			}
-		} else if !st.forIn && r.genNextFn != nil && st.next.ref == unsafe.Pointer(r.genNextFn) {
+		} else if !st.forIn && r.genNextFn != nil && st.next.ref == unsafe.Pointer(r.genNextFn) && !regGenCursor(st) {
 			f.pc = c.src[pc] + 1
 			v, more, err = r.regIterNextTree(f, cur)
 			goto stepped
@@ -719,4 +724,15 @@ stepped:
 	}
 	regs[w.A()] = v
 	return nil
+}
+
+// regGenCursor reports whether st steps a generator of register code,
+// whose step regStepNext makes as next's, with no recover: its body
+// throws as register code throws, with an error.
+func regGenCursor(st *iterState) bool {
+	if !st.iter.IsObject() {
+		return false
+	}
+	o := st.iter.Object()
+	return o.class == ClassGenerator && genOf(o).reg
 }

@@ -1294,3 +1294,72 @@ function c13() { var r = []; class N { #x = 1; static t(o) { try { return o.#x }
 		`class TopA { constructor(v) { this.v = v } } class TopB extends TopA { get w() { return this.v + 1 } } new TopB(1).w`}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffGenerators compares generators, async functions, async
+// generators, yield* and for await as register code: what each
+// resumption delivers -- a value, a throw, a return through finally
+// clauses and loops' iterators -- the delegation's forwarding and closing
+// order, the creation's binding of parameters, captures across
+// suspensions, and the errors' positions.
+func TestRegDiffGenerators(t *testing.T) {
+	src := `
+var log = [];
+var out = [];
+function frames(e) { return e.name + ": " + e.message + " | " + e.stack.split("\n").slice(1, 3).map(function (s) { return s.trim() }).join(" | ") }
+function* g1(a, b = a + 1) { let x = yield a; try { yield x + b; } finally { log.push("fin") } return 7 }
+function c1() { var it = g1(1); return JSON.stringify([it.next(), it.next(10), it.next(), it.next(), log.splice(0)]) }
+function c2() { var it = g1(1); it.next(); it.next(5); return JSON.stringify([it.return(42), it.next(), log.splice(0)]) }
+function c3() { var it = g1(1); it.next(); try { it.throw(new Error("boom")) } catch (e) { return frames(e) + JSON.stringify(it.next()) } }
+function* inner() { try { log.push("in"); var s = yield 1; log.push("s" + s); yield 2 } catch (e) { log.push("caught " + e); yield 3 } finally { log.push("inner fin") } return "r" }
+function* outer() { var r = yield* inner(); log.push("got " + r); yield 4; return 5 }
+function c4() { return JSON.stringify([[...outer()], log.splice(0)]) }
+function c5() { var o = outer(); return JSON.stringify([o.next(), o.next("x"), o.throw("t"), o.next(), o.next(), o.next(), log.splice(0)]) }
+function c6() { var o = outer(); o.next(); return JSON.stringify([o.return(9), o.next(), log.splice(0)]) }
+function* cnt() { let k = 0; const f = () => k; while (true) { k++; var v = yield f(); if (v) k = v } }
+function c7() { var c = cnt(); return [c.next().value, c.next().value, c.next(10).value, c.next().value].join() }
+function* bad(a = (() => { throw new TypeError("param") })()) { yield a }
+function c8() { try { bad(); return "none" } catch (e) { return frames(e) } }
+function* g9() { try { for (var x of [1, 2, 3]) { try { yield x } finally { log.push("f" + x) } } } finally { log.push("outer") } }
+function c9() { var it = g9(); it.next(); it.next(); return JSON.stringify([it.return("R"), log.splice(0)]) }
+function* g10() { yield* [1, 2]; yield* "ab"; var it = { [Symbol.iterator]() { return this }, next(v) { log.push("n" + v); return { value: 0, done: log.length > 2 } }, return(v) { log.push("ret " + v); return { value: "rv", done: true } } }; return yield* it }
+function c10() { var it = g10(); var r = [it.next(), it.next(), it.next(), it.next(), it.next("A"), it.next("B"), it.next("C")]; return JSON.stringify([r, log.splice(0)]) }
+function c11() { var it = g10(); for (var i = 0; i < 5; i++) it.next(); return JSON.stringify([it.return("q"), log.splice(0)]) }
+function* g12() { var e = new Error("here"); yield e.stack.split("\n")[1].trim(); throw new RangeError("late") }
+function c12() { var it = g12(); var a = it.next().value; try { it.next() } catch (e) { return a + " ; " + frames(e) } }
+function* g13() { yield this === undefined ? "u" : typeof this; yield arguments.length }
+function c13() { var o = { g: g13 }; return [o.g().next().value, g13.call(5).next().value].join() }
+var c14g = function* () { var x = 0; while (x < 3) { yield x++ } };
+function c14() { var s = 0; for (var v of c14g()) s += v; for (var v of c14g()) { if (v == 1) break } return s }
+function c15() { var it = g1(1); var r = [it.return(3), it.next()]; var it2 = g1(1); try { it2.throw(4) } catch (e) { r.push(e) } return JSON.stringify(r) }
+function* g17(a, b) { arguments[0] = 9; yield a; a = 5; yield arguments[0] + "," + arguments.length; b = 7; yield arguments[1] }
+function* g17s(a, ...r) { arguments[0] = 9; yield a + "," + arguments[0] + "," + arguments.length + "," + r.length }
+function c17() { return [...g17(1, 2, 3)].join("|") + " " + [...g17s(1, 2)].join() }
+function* g18() { var fs = []; for (var i = 0; i < 3; i++) { let j = i; fs.push(() => j + i); yield } return fs.map(f => f()).join() }
+function c18() { var it = g18(), r; do { r = it.next() } while (!r.done); return r.value }
+function* g16() { var it = yield; it.next() }
+function c16() { var it = g16(); it.next(); try { it.next(it) } catch (e) { return frames(e) } }
+async function a1(x) { var y = await x; var z = await Promise.resolve(y * 2); try { await Promise.reject(new Error("rej")) } catch (e) { z += 1 } return z }
+async function a2() { await null; throw new TypeError("async throw") }
+var a3 = async (a, b = await0()) => a + b;
+function await0() { return 0 }
+async function a4() { var p = Promise.reject(new RangeError("r")); try { return await p } finally { log.push("a4 fin") } }
+async function* ag1() { try { yield 1; var v = await Promise.resolve(2); yield v; yield Promise.resolve(3) } finally { log.push("ag fin") } return 4 }
+async function* ag2() { var r = yield* ag1(); log.push("ag2 " + r) }
+function mkIter(n, bad) { var i = 0; return { [Symbol.asyncIterator]() { return this }, next() { log.push("next"); return Promise.resolve({ value: i, done: i++ >= n }) }, return(v) { log.push("return"); return bad ? 5 : Promise.resolve({ done: true }) } } }
+async function f1() { var s = 0; for await (const v of mkIter(3)) s += v; return s }
+async function f2() { for await (const v of mkIter(5)) { if (v == 2) break } return "b" }
+async function f3() { try { for await (const v of mkIter(5)) { throw new Error("t" + v) } } catch (e) { return e.message } }
+async function f4() { for await (const v of mkIter(5)) { return "r" + v } }
+async function f5() { try { for await (const v of mkIter(5, true)) { break } } catch (e) { return frames(e) } }
+async function f6() { var r = []; for await (const [a, b] of [[1, 2], Promise.resolve([3, 4])]) r.push(a + b); return r.join() }
+async function* f7g() { for await (const v of mkIter(4)) { yield v } }
+async function f7() { var it = f7g(); await it.next(); await it.next(); return JSON.stringify(await it.return(9)) }
+async function f8() { var it = ag2(); var r = []; for (var i = 0; i < 5; i++) r.push(await it.next()); return JSON.stringify(r) }
+async function f9() { var it = ag1(); await it.next(); return JSON.stringify([await it.return(Promise.resolve("rr")), await it.next()]) }
+function settle(name, p) { p.then(function (v) { out.push(name + "=" + v) }, function (e) { out.push(name + "!" + frames(e)) }) }
+function runAsync() { out = []; log = []; settle("a1", a1(3)); settle("a2", a2()); settle("a3", a3(1)); settle("a4", a4()); settle("f1", f1()); settle("f2", f2()); settle("f3", f3()); settle("f4", f4()); settle("f5", f5()); settle("f6", f6()); settle("f7", f7()); settle("f8", f8()); settle("f9", f9()); return "started" }
+`
+	calls := []string{`c1()`, `c2()`, `c3()`, `c4()`, `c5()`, `c6()`, `c7()`, `c8()`, `c9()`, `c10()`, `c11()`, `c12()`, `c13()`, `c14()`, `c15()`, `c16()`, `c17()`, `c18()`,
+		`runAsync()`, `out.sort().join(" ; ") + " // " + log.join()`}
+	regDiff(t, src, calls)
+}

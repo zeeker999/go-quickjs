@@ -578,15 +578,64 @@ are.
 
 ## Generators and async functions
 
-A generator's frame is its window. Suspension copies the window and the pc
-into the generator object, and resumption copies them back to the top of
-the stack and continues at the pc, as the stack form does with its operand
-stack -- but there is no operand stack, so the copy is the frame's
-registers alone. An `await` whose operand is already settled, or not a
-thenable, with no job waiting, continues without suspending at all: the
-profiling found every await fully suspending and resuming, which is most of
-`async_await`'s 3.65x and is a defect to fix in the existing interpreter
-first.
+A generator's frame is its window (regcomp's gen.go, the VM's
+zzreg_gen.go). Suspension copies the window and the pc into the generator
+object, and resumption copies them back to the top of the stack and
+continues at the pc, as the stack form does with its operand stack -- but
+there is no operand stack, so the copy is the frame's registers alone. The
+captures open on the window's registers move with it, pointed at the
+generator's copy on a suspension and back at the stack on a resumption
+(`regMoveUps`), so that two closures made in different resumptions share a
+binding. A generator of register code keeps its window in its `vals`,
+`numRegs` values and then, where the code keeps them, its arguments; its
+`pc` is a register pc, and `generator.reg` marks it.
+
+- **The code's first instruction is `gen_entry`** (cold), which goes on at
+  the pc the resumption gives in the frame's `savedSP`, or throws there,
+  at a negated pc, the value a throw injects. The loop is not told of
+  generators at all: no start pc, no case of its own.
+- **A generator's creation runs its parameters' binding** up to
+  `end_params`, which suspends it, as the stack form's prologue does: a
+  default or a pattern that throws, throws at the call. An async
+  function's are bound by its first resumption, which runs at once
+  (`runAsync`), an error there rejecting its promise as the specification
+  has it.
+- **What a resumption delivers goes to the suspension's own register,**
+  never a binding's, written before the code runs (`regGenResume`):
+  `yield` (R[A] the value sent in), `await` (what it settled to),
+  `yield_star` (the value and how, a pair). A return injected at a yield
+  is compiled after it, a return statement there, through the finally
+  clauses and the loops' iterators it leaves (`retFrom`); the yield's next
+  instruction jumps past it, and a resumption by next starts past that
+  jump. A throw injected is thrown at the suspension itself, inside its
+  handlers' ranges.
+- **`yield*` is a loop of the code's own,** as the stack form's is:
+  `iter_resume` sends what the generator was resumed with to the
+  delegate's next, throw or return, `iter_unpack_delegate` reads its
+  result (an async generator awaits it first), `yield_star` suspends with
+  it, and a return the delegation carried out returns from after the
+  loop. An operation whose next instruction is a jump (`iter_resume`,
+  `iter_unpack_delegate`, `iter_result`, `async_iter_close`) takes it to
+  leave and skips it to go on: the verifier checks the jump is there.
+- **A for await's step** is `async_iter_next`, `await` and `iter_result`
+  into a register of its own; the body is in the ranges of the cursor's
+  handler, which closes it as AsyncIteratorClose does -- the return
+  method's result awaited, what closing throws dropped -- and a break, a
+  continue of an outer loop or a return that leaves it closes it the same
+  way, the result awaited and checked to be an object.
+- **The drivers are the stack form's:** next, return and throw, an async
+  function's steps and an async generator's queue call `resumeFull`, and
+  `resumeFrame` hands a register generator's resumption to
+  `regGenResume`, which answers with the same `resumeResult`. A for-of
+  over a register generator steps it with no recover (`regGenCursor`),
+  its body throwing as register code throws.
+- **An await's job continues in place.** An async function its await's
+  job resumes from the job queue (`generator.awaitJob`, a frame of kind
+  `regFrameAwaitJob`) goes on in place at an await of a value that is not
+  an object or of a fulfilled promise of the realm's own constructor,
+  where no job is waiting: the job the await would queue would be the
+  queue's next, and the frame would be resumed with that value. The first
+  run of an async function, which its caller's code follows, never does.
 
 ## Closures and upvalues
 
@@ -1186,7 +1235,7 @@ it):
 | 1 | a site past 16 bits (a cap) | 0 / 1 / 0 |
 
 Not in the corpora, and refused as well: code compiled for a debugger
-(`WithDebugger`), `for await`, a finally clause nested more than four
+(`WithDebugger`), a finally clause nested more than four
 copies deep, and the caps -- more than 65,536 registers, a jump past 16
 bits, a name past 16 bits, more than 255 arguments, properties or
 elements in one instruction. A cap goes as a wide form, never a refusal.
@@ -1246,10 +1295,17 @@ regdiff cases and test262 in register mode on its directories:
    Program's register literals are seeded like its stack ones
    (`listSites`). Eval code, a module with top-level await and code
    compiled for a debugger are items 3 and 8.
-3. **Generators, async functions, `for await`** (12,737): the frame's
-   window copied into the generator on a suspension ("Generators and async functions"
-   above), the settled-await fast path; the step's recover goes
-   with them.
+3. **Generators, async functions, async generators, `for await` and a
+   module's top-level await** (12,737) -- done ("Generators and async
+   functions" above): the frame's window copied into the generator on a
+   suspension, a return injected at a yield compiled as a return there,
+   yield* and for await as loops of the code's own, an await's job going
+   on in place at a settled value, and a for-of's step of a register
+   generator with no recover. The JIT learns no register generator
+   (`jitGenSeen`, `jitGenMakeable`). Their arguments object is made by
+   the creation's run, from the arguments the generator keeps; a mapped
+   one's aliases are captures of the parameters' registers, which move
+   with the window.
 4. **Classes** (about 27,000 together: constructors, accessors, fields,
    static blocks, private members and methods, `super`, `new.target`,
    class expressions inside functions, and a module's `export default

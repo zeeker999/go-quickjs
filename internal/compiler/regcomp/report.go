@@ -44,8 +44,6 @@ func Refusal(fn *bytecode.Function) string {
 // yet, or "".
 func why(fn *bytecode.Function) string {
 	switch {
-	case fn.Generator || fn.Async:
-		return "generator or async"
 	case fn.HasDirectEval:
 		return "direct eval"
 	case fn.Debug != nil:

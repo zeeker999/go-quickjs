@@ -68,6 +68,9 @@ type regCode struct {
 	newTarget bool
 	// args says a frame keeps its arguments as passed, for RArguments.
 	args bool
+	// suspends marks a generator's or an async function's code, which
+	// only a generator's resumption runs (zzreg_gen.go).
+	suspends bool
 	// leaf is what a call may answer without a frame: a pure body that
 	// calls nothing, or one that only reads or writes its this's
 	// properties; read here rather than in the function, a line away.
@@ -146,11 +149,13 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 		code: unsafe.Pointer(unsafe.SliceData(rc.Code)), src: rc.SrcPC, siteName: rc.SiteName,
 		numRegs: int32(rc.NumRegs), params: int32(rc.Params), inits: int32(rc.Inits),
 		coerceThis: fn.CoerceThis, rc: rc, fn: fn, wide: true, ncap: int32(ncap), newTarget: fn.UsesNewTarget, args: rc.UsesArguments || rc.ForwardsArguments || rc.KeepsArgs,
+		suspends: fn.Generator || fn.Async,
 	}
 	if rc.LocalReg != nil {
 		c.reuse = regReuseSites(fn, rc)
 	}
 	switch {
+	case c.suspends:
 	case fn.Leaf == bytecode.LeafPure && !fn.PureCalls && regLeafRunnable(rc) && regLeafOps(fn, rc) != nil:
 		// A short straight body of numbers and upvalues is run as its
 		// register code without a frame (regLeafRun).
@@ -162,7 +167,7 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 	case fn.Leaf != bytecode.LeafNone && fn.Leaf != bytecode.LeafPure:
 		c.leaf = regLeafThis
 	}
-	if len(rc.Code) > 0 {
+	if len(rc.Code) > 0 && !c.suspends {
 		// A body that returns a parameter, a constant or nothing first
 		// thing -- what follows is unreachable: a call's answer is read
 		// from its window or the code, with no frame and no evaluator,

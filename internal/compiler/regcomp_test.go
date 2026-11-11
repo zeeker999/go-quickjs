@@ -118,9 +118,10 @@ func TestRegisterBackendFallsBack(t *testing.T) {
 		function handled(x) { try { return x.y } catch (e) { return e } finally { x = 0 } }
 		function opt(o) { return o?.x }
 		function* gen() { yield 1 }
+		function ev(s) { return eval(s) }
 		function strictStore() { 'use strict'; g = plain(1) }
 		function plain(x) { return x + 1 }`)
-	for _, name := range []string{"tried", "opt", "strictStore"} {
+	for _, name := range []string{"tried", "opt", "strictStore", "gen"} {
 		if f := fns[name]; f == nil || f.Reg == nil {
 			t.Errorf("%s: want register code", name)
 		}
@@ -132,7 +133,7 @@ func TestRegisterBackendFallsBack(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"gen"} {
+	for _, name := range []string{"ev"} {
 		if f := fns[name]; f == nil || f.Reg != nil {
 			t.Errorf("%s: register code %v, want none", name, f != nil && f.Reg != nil)
 		}

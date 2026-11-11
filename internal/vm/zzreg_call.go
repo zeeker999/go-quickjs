@@ -578,7 +578,7 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base, pc 
 			if rc = cl.reg; rc == nil {
 				rc = r.regOf(cl)
 			}
-			if rc != nil && rc.wide && cl.realm == r.Realm && !isClassConstructorKind(cl.fn.Kind) {
+			if rc != nil && rc.wide && !rc.suspends && cl.realm == r.Realm && !isClassConstructorKind(cl.fn.Kind) {
 				if x := fd.extra; x == nil {
 					switch {
 					case !method:
@@ -933,7 +933,7 @@ func (r *Runtime) regTailInPlace(f *frame, c *regCode, w bytecode.RInstr, wb int
 func (r *Runtime) regTailTo(f *frame, w bytecode.RInstr, wb int, o *Object, cl *closure, rc *regCode, this Value) bool {
 	if f.regKind != regFrameCall && f.regKind != regFrameEnter || !f.newTarget.IsUndefined() ||
 		f.thisRef != nil || f.args != nil || f.withScopes != nil || f.evalVars != nil ||
-		!rc.wide || rc.args || rc.locals != 0 {
+		!rc.wide || rc.suspends || rc.args || rc.locals != 0 {
 		return false
 	}
 	base := f.base
@@ -1382,7 +1382,7 @@ func regPlan(fd *funcData) {
 		return
 	}
 	t := (*tree)(atomic.LoadPointer(&fd.closure.fn.VMCode))
-	if t == nil || t.reg == nil || !t.reg.wide {
+	if t == nil || t.reg == nil || !t.reg.wide || t.reg.suspends {
 		return
 	}
 	if fd.closure.fn.HasTailCall {
@@ -1737,7 +1737,7 @@ func (r *Runtime) regConstruct(callee Value, base, argc int) (Value, error) {
 	if rc == nil {
 		rc = r.regOf(cl)
 	}
-	if rc == nil || !rc.wide {
+	if rc == nil || !rc.wide || rc.suspends {
 		return r.construct(callee, args)
 	}
 	var protoVal Value
@@ -2097,12 +2097,16 @@ const (
 	regFrameEnter
 	// regFrameOwn is regCall's own: its this and new.target the frame's.
 	regFrameOwn
+	// regFrameAwaitJob is an async function's, resumed by its await's
+	// job from the job queue, its this and new.target the frame's
+	// (regColdGen).
+	regFrameAwaitJob
 )
 
 // regFrameThis is the this and new.target of register frame f, for a stack
 // trace.
 func (r *Runtime) regFrameThis(f *frame) (this, newTarget Value) {
-	if f.regKind == regFrameOwn {
+	if f.regKind == regFrameOwn || f.regKind == regFrameAwaitJob {
 		return f.this, f.newTarget
 	}
 	this = r.stack[f.base+1]

@@ -40,8 +40,6 @@ func CompileTop(body []ast.Stmt, fn *bytecode.Function, rec *Record) *bytecode.R
 // yet, or "".
 func whyTop(fn *bytecode.Function) string {
 	switch {
-	case fn.Generator || fn.Async:
-		return "generator or async"
 	case fn.HasDirectEval:
 		return "direct eval"
 	case fn.Debug != nil:

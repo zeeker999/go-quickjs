@@ -31,6 +31,9 @@ type prot struct {
 	// does not leave; -1 and nil otherwise.
 	cursor int
 	iterOf *loop
+	// async marks a for await's cursor, closed as AsyncIteratorClose
+	// closes it: its return method's result awaited (asyncClose).
+	async bool
 	// loops is how many loops were around the statement: a break or a
 	// continue to one of them leaves the handler.
 	loops int
@@ -88,7 +91,11 @@ func (g *gen) leave(from int, last func()) {
 		g.suspend(p)
 		if p.cursor >= 0 {
 			// A loop left closes its iterator, which may throw.
-			g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdIterClose), 0, r16(p.cursor), 0))
+			if p.async {
+				g.asyncClose(p.cursor)
+			} else {
+				g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdIterClose), 0, r16(p.cursor), 0))
+			}
 			continue
 		}
 		if p.finally == nil {
@@ -263,10 +270,6 @@ func (g *gen) finallyAround() bool {
 // break, continue or return that leaves the loop closes it on its way out
 // (leave). A for-in loop's cursor needs no closing.
 func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in bool, label string, pos int) {
-	if await {
-		g.fail("for await")
-		return
-	}
 	var target ast.Expr
 	lexical := false
 	switch l := left.(type) {
@@ -281,7 +284,7 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 	}
 	id, ok := target.(*ast.Ident)
 	if !ok {
-		g.forOfPattern(target, right, body, in, label, pos, lexical, left)
+		g.forOfPattern(target, right, body, await, in, label, pos, lexical, left)
 		return
 	}
 	res, ok := g.rec.Write[id]
@@ -321,12 +324,8 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 	}
 	src := g.expr(right, -1)
 	cursor := g.alloc()
-	start := bytecode.RColdForOfStart
-	if in {
-		start = bytecode.RColdForInStart
-	}
 	g.at(pos)
-	g.emit(bytecode.MakeR(bytecode.RCold, uint8(start), r16(cursor), r16(src), 0))
+	g.emit(bytecode.MakeR(bytecode.RCold, uint8(cursorStart(await, in)), r16(cursor), r16(src), 0))
 	l := g.pushLoop(label)
 	g.bind(l.cont)
 	val := dst
@@ -334,10 +333,10 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 		val = g.alloc()
 	}
 	g.at(pos)
-	g.jump(bytecode.MakeR(bytecode.RIterNext, 0, r16(val), r16(cursor), 0), l.brk, true)
+	g.iterStep(val, cursor, l.brk, await)
 	var p *prot
 	if !in {
-		p = &prot{to: g.newMark(), reg: g.alloc(), cursor: cursor, iterOf: l}
+		p = &prot{to: g.newMark(), reg: g.alloc(), cursor: cursor, iterOf: l, async: await}
 		g.protect(p)
 	}
 	defer g.hold()()
@@ -349,8 +348,7 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 	if p != nil {
 		g.unprotect(p)
 		g.bind(p.to)
-		g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdIterCloseThrow), 0, r16(cursor), 0))
-		g.emit(bytecode.MakeR(bytecode.RThrow, 0, r16(p.reg), 0, 0))
+		g.closeThrow(p)
 	}
 	g.bind(l.brk)
 	g.popLoop()
@@ -359,7 +357,7 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 // forOfPattern is forOfStmt with a pattern, or an assignment's property,
 // for its target: each turn's value unpacked into it in the loop's body,
 // where a throw closes the iterator.
-func (g *gen) forOfPattern(target ast.Expr, right ast.Expr, body ast.Stmt, in bool, label string, pos int, lexical bool, left ast.Node) {
+func (g *gen) forOfPattern(target ast.Expr, right ast.Expr, body ast.Stmt, await, in bool, label string, pos int, lexical bool, left ast.Node) {
 	_, declaring := left.(*ast.VarDecl)
 	if lexical {
 		// The head's expression sees the bindings in their dead zone; a
@@ -374,20 +372,16 @@ func (g *gen) forOfPattern(target ast.Expr, right ast.Expr, body ast.Stmt, in bo
 	}
 	src := g.expr(right, -1)
 	cursor := g.alloc()
-	start := bytecode.RColdForOfStart
-	if in {
-		start = bytecode.RColdForInStart
-	}
 	g.at(pos)
-	g.emit(bytecode.MakeR(bytecode.RCold, uint8(start), r16(cursor), r16(src), 0))
+	g.emit(bytecode.MakeR(bytecode.RCold, uint8(cursorStart(await, in)), r16(cursor), r16(src), 0))
 	l := g.pushLoop(label)
 	g.bind(l.cont)
 	val := g.alloc()
 	g.at(pos)
-	g.jump(bytecode.MakeR(bytecode.RIterNext, 0, r16(val), r16(cursor), 0), l.brk, true)
+	g.iterStep(val, cursor, l.brk, await)
 	var p *prot
 	if !in {
-		p = &prot{to: g.newMark(), reg: g.alloc(), cursor: cursor, iterOf: l}
+		p = &prot{to: g.newMark(), reg: g.alloc(), cursor: cursor, iterOf: l, async: await}
 		g.protect(p)
 	}
 	defer g.hold()()
@@ -399,9 +393,70 @@ func (g *gen) forOfPattern(target ast.Expr, right ast.Expr, body ast.Stmt, in bo
 	if p != nil {
 		g.unprotect(p)
 		g.bind(p.to)
-		g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdIterCloseThrow), 0, r16(cursor), 0))
-		g.emit(bytecode.MakeR(bytecode.RThrow, 0, r16(p.reg), 0, 0))
+		g.closeThrow(p)
 	}
 	g.bind(l.brk)
 	g.popLoop()
+}
+
+// cursorStart is the operation that makes a loop's cursor.
+func cursorStart(await, in bool) bytecode.RColdOp {
+	switch {
+	case await:
+		return bytecode.RColdForAwaitOfStart
+	case in:
+		return bytecode.RColdForInStart
+	}
+	return bytecode.RColdForOfStart
+}
+
+// iterStep steps a loop's cursor into val, jumping to brk where it has no
+// value: iter_next, or for a for await, the next method's result awaited
+// and unpacked, in a register of its own, which code that runs meanwhile
+// could otherwise see in the binding.
+func (g *gen) iterStep(val, cursor int, brk *mark, await bool) {
+	if !await {
+		g.jump(bytecode.MakeR(bytecode.RIterNext, 0, r16(val), r16(cursor), 0), brk, true)
+		return
+	}
+	t := g.alloc()
+	g.cold(bytecode.RColdAsyncIterNext, t, cursor, 0)
+	g.cold(bytecode.RColdAwait, t, t, 0)
+	g.cold(bytecode.RColdIterResult, val, t, 0)
+	g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), brk, false)
+	g.top = t
+}
+
+// closeThrow is the handler of a for-of loop's body, p, whose exception,
+// in p's register, leaves the loop: the iterator closed, what closing it
+// throws dropped, and the exception thrown again. A for await's return
+// method's result is awaited, as AsyncIteratorClose awaits it.
+func (g *gen) closeThrow(p *prot) {
+	if !p.async {
+		g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdIterCloseThrow), 0, r16(p.cursor), 0))
+		g.emit(bytecode.MakeR(bytecode.RThrow, 0, r16(p.reg), 0, 0))
+		return
+	}
+	q := &prot{to: g.newMark(), reg: g.alloc(), cursor: -1}
+	g.protect(q)
+	v := g.alloc()
+	g.cold(bytecode.RColdAsyncIterClose, v, p.cursor, 0)
+	g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), q.to, false)
+	g.cold(bytecode.RColdAwait, v, v, 0)
+	g.unprotect(q)
+	g.bind(q.to)
+	g.emit(bytecode.MakeR(bytecode.RThrow, 0, r16(p.reg), 0, 0))
+}
+
+// asyncClose closes a for await's cursor as a break, a continue or a
+// return that leaves the loop does: its return method called, where it has
+// one, and the result awaited and checked to be an object.
+func (g *gen) asyncClose(cursor int) {
+	v := g.alloc()
+	skip := g.newMark()
+	g.cold(bytecode.RColdAsyncIterClose, v, cursor, 0)
+	g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), skip, false)
+	g.cold(bytecode.RColdAwait, v, v, 0)
+	g.cold(bytecode.RColdAsyncIterCheck, v, 0, 0)
+	g.bind(skip)
 }

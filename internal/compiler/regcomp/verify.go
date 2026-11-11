@@ -286,5 +286,42 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 	case bytecode.RColdCloseRegs:
 		return int(a)+int(b) <= rc.NumRegs
 	}
+	return suspendOK(rc, fn, pc, w, reg)
+}
+
+// suspendOK checks a generator's and an async function's cold operations:
+// gen_entry first of the code and nowhere else, each suspension in a
+// function that suspends, and a jump after each operation whose next
+// instruction is one, with an instruction after it.
+func suspendOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RInstr, reg func(uint16) bool) bool {
+	if !fn.Generator && !fn.Async {
+		return false
+	}
+	jumpNext := func() bool {
+		return pc+2 < len(rc.Code) && rc.Code[pc+1].Op() == bytecode.RJmp
+	}
+	a, b := w.A(), w.B()
+	switch bytecode.RColdOp(w.X()) {
+	case bytecode.RColdGenEntry:
+		return pc == 0
+	case bytecode.RColdEndParams:
+		return fn.Generator
+	case bytecode.RColdYield:
+		return fn.Generator && reg(a) && reg(b) && jumpNext()
+	case bytecode.RColdAwait:
+		return fn.Async && reg(a) && reg(b)
+	case bytecode.RColdYieldStar:
+		return fn.Generator && int(a)+1 < rc.NumRegs && reg(b)
+	case bytecode.RColdIterResume:
+		return reg(a) && reg(b) && int(w.C())+1 < rc.NumRegs && jumpNext()
+	case bytecode.RColdIterUnpackDelegate:
+		return reg(a) && reg(b) && reg(w.C()) && jumpNext()
+	case bytecode.RColdForAwaitOfStart, bytecode.RColdAsyncIterNext:
+		return fn.Async && reg(a) && reg(b)
+	case bytecode.RColdIterResult, bytecode.RColdAsyncIterClose:
+		return fn.Async && reg(a) && reg(b) && jumpNext()
+	case bytecode.RColdAsyncIterCheck:
+		return fn.Async && reg(a)
+	}
 	return false
 }
