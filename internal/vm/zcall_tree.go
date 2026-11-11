@@ -385,7 +385,7 @@ func (r *Runtime) tailFromTree() (Value, error) {
 func (r *Runtime) callTreeWith(o *Object, fd *funcData, t *tree, this Value, args []Value, newTarget Value, nested bool) (Value, error) {
 	cl := fd.closure
 	fn := cl.fn
-	if t.reg != nil && newTarget.IsUndefined() {
+	if t.reg != nil {
 		if v, err, ok := r.regRunFD(cl, this, args, newTarget, o, fd); ok {
 			return v, err
 		}

@@ -23,7 +23,7 @@ func (r *Runtime) regColdClass(f *frame, c *regCode, pc int, w bytecode.RInstr, 
 		}
 	case bytecode.RColdDefineMethod:
 		if a.IsObject() {
-			key := f.cl.names[w.C()]
+			key := regName(f.cl, c, pc, w.C())
 			// A static member named after a function's synthesized length
 			// or name replaces it in place, so it has to exist first.
 			r.materializeFunctionProp(a.Object(), key)
@@ -31,7 +31,7 @@ func (r *Runtime) regColdClass(f *frame, c *regCode, pc int, w bytecode.RInstr, 
 		}
 	case bytecode.RColdClassGetter, bytecode.RColdClassSetter:
 		if a.IsObject() && b.IsObject() {
-			r.defineHalfAccessor(a.Object(), f.cl.names[w.C()], b.Object(), op == bytecode.RColdClassGetter, memberFlags(1))
+			r.defineHalfAccessor(a.Object(), regName(f.cl, c, pc, w.C()), b.Object(), op == bytecode.RColdClassGetter, memberFlags(1))
 		}
 	case bytecode.RColdClassGetterIndex, bytecode.RColdClassSetterIndex:
 		k, err := r.toPropertyKey(b)
@@ -50,7 +50,7 @@ func (r *Runtime) regColdClass(f *frame, c *regCode, pc int, w bytecode.RInstr, 
 			return r.createDataProperty(a.Object(), k, x, memberFlags(1))
 		}
 	case bytecode.RColdPrivateName:
-		regs[w.A()] = r.newPrivateName(f.cl.names[w.B()])
+		regs[w.A()] = r.newPrivateName(regName(f.cl, c, pc, w.B()))
 	case bytecode.RColdNewPrivateMethods:
 		regs[w.A()] = r.newPrivateMethods()
 	case bytecode.RColdAddPrivateMethod:
@@ -119,14 +119,14 @@ func (r *Runtime) regColdClass(f *frame, c *regCode, pc int, w bytecode.RInstr, 
 		}
 	case bytecode.RColdSuperGet:
 		regSyncThis(f, regs)
-		v, err := r.superGet(f, f.cl.names[w.B()])
+		v, err := r.superGet(f, regName(f.cl, c, pc, w.B()))
 		if err != nil {
 			return err
 		}
 		regs[w.A()] = v
 	case bytecode.RColdSuperSet:
 		regSyncThis(f, regs)
-		return r.superSet(f, f.cl.names[w.B()], a, f.cl.fn.Strict)
+		return r.superSet(f, regName(f.cl, c, pc, w.B()), a, f.cl.fn.Strict)
 	case bytecode.RColdSuperBase:
 		regSyncThis(f, regs)
 		base, _, err := r.superRef(f)
@@ -233,7 +233,7 @@ func (r *Runtime) regGetPrivate(f *frame, c *regCode, k *regKept, regs *[1 << 16
 		}
 	}
 	f.pc = c.src[pc] + 1
-	v, err := r.getPrivate(ob, key, f.cl.names[aux&0xffff])
+	v, err := r.getPrivate(ob, key, regName(f.cl, c, pc, uint16(aux)))
 	if err != nil {
 		return err
 	}
@@ -273,7 +273,7 @@ func (r *Runtime) regSetPrivate(f *frame, c *regCode, k *regKept, regs *[1 << 16
 		}
 	}
 	f.pc = c.src[pc] + 1
-	return r.setPrivate(ob, key, f.cl.names[aux&0xffff], v)
+	return r.setPrivate(ob, key, regName(f.cl, c, pc, uint16(aux)), v)
 }
 
 // regPrivateKey is the key of the private name whose binding holds v, as

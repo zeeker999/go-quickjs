@@ -64,6 +64,11 @@ type regCode struct {
 	// suspends marks a generator's or an async function's code, which
 	// only a generator's resumption runs (zzreg_zgen.go).
 	suspends bool
+	// cellThis marks a derived constructor whose this binding is the
+	// runtime's cell for its frame's depth (thisCells): its body makes no
+	// closure, no direct eval and no debugger's stop, the things that can
+	// keep a binding past its frame, as planTreeNew finds for a tree.
+	cellThis bool
 	// leaf is what a call may answer without a frame: a pure body that
 	// calls nothing, or one that only reads or writes its this's
 	// properties; read here rather than in the function, a line away.

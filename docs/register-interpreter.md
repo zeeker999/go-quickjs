@@ -149,12 +149,15 @@ Nothing in a function is capped:
   allocator gives near registers to parameters, temporaries and the bindings
   used most, and far ones to the rest; an operation on a far binding is a
   move in, the operation, a move out. A function of that size is generated
-  code, run once.
+  code, run once (item 15).
 - **Sites, constants and names past 65,535.** An operation whose index would
   not fit has a wide form: the same operation followed by an extension word
   holding a 32-bit index, read by the wide form's case alone, so the narrow
   form's case never tests for it. Global reads, loads of constants and
-  closures already take a 32-bit BC and need none.
+  closures already take a 32-bit BC and need none. A name past 16 bits
+  needs no wide form either: only cold operations and miss paths read a
+  name, so its operand is `RNameFar` and `RegCode.FarNames`, by the
+  instruction's pc, holds the index (item 14).
 - **Jumps past 32,767 instructions.** A compare-and-branch's offset is 16
   bits; one that would not fit is the opposite branch over a `jmp`, whose
   offset is 32 bits.
@@ -1481,8 +1484,8 @@ it):
 
 Not in the corpora, and refused as well: code compiled for a debugger
 (`WithDebugger`; done, item 10), a finally clause nested more than four
-copies deep (done, item 11), and the caps -- more than 65,536 registers, a jump past 16
-bits, a name past 16 bits, more than 255 arguments, properties or
+copies deep (done, item 11), and the caps -- more than 65,536 registers (done, item 15), a jump past 16
+bits, a name past 16 bits (done, item 14), more than 255 arguments, properties or
 elements in one instruction. A cap goes as a wide form, never a refusal.
 
 The plan to zero, in the order of what each costs real code first -- the
@@ -1852,11 +1855,17 @@ regdiff cases and test262 in register mode on its directories:
    functions around it, a scope for its own direct eval's -- and a chain
    of tail calls it ends in made in its place, in constant space
    (regTailLoop). A direct eval's function and one inside a with are so
-   no longer entered through runFD. Still runFD's, and counted (item
-   13): constructions, and a frame with a this binding -- a derived
-   constructor's, or the one an arrow shares with it. Strict eval code's
-   function declarations, bindings of its own rather than top-level
-   declarations, are made (they were not: test262's name-unicode.js,
+   no longer entered through runFD, nor is a construction
+   (constructRun, and callTreeWith whatever the new.target; planTreeNew
+   gives register code no tree's) or a frame with a this binding: a
+   derived constructor's construction makes the binding super() binds,
+   an arrow written inside one shares it, and the frame record's this
+   is register 1 at entry, which superCall reads and rebinds. Eval
+   code's this is the call site's, which may be such a binding: top-level
+   code records it (`Record.ThisRef`, the stack compiler's thisIsValue)
+   and reads this through the binding, as such an arrow does. Strict
+   eval code's function declarations, bindings of its own rather than
+   top-level declarations, are made (they were not: test262's name-unicode.js,
    strict).
 13. **The fallback counter** (`vm.RegFallbacks`, QJS_REGFALLTRACE to
    name each). Register mode counts every time it hands code to the
@@ -1864,11 +1873,41 @@ regdiff cases and test262 in register mode on its directories:
    register code; a frame regStmt runs in the stack interpreter; and
    register code entered through runTree, a frame runFD or callTree
    made rather than its own -- the node that runs register code in a
-   tree is reached no other way. The regdiff tests (the micro list, the
-   V8 suite and every corpus of theirs) and test262 in register mode,
-   where it runs the language's directories alone, fail on any where
-   QJS_REGFALLSTRICT is set; once the count is zero the check is
-   unconditional.
+   tree is reached no other way. With constructions entered as
+   register code (item 12) the count is zero, and the regdiff tests (the
+   micro list, the V8 suite and every corpus of theirs) and test262 in
+   register mode, every directory, fail on any.
+14. **Names past 16 bits** -- done. A name operand (a global's read or
+   write, a cold operation's name, a private member's in its Aux) whose
+   index in the function's names is 65,535 or more is `RNameFar`, and
+   `RegCode.FarNames`, by the instruction's pc, has the index
+   (`regNameIdx`, `regName`): the hot cases never read a name, so none
+   tests for it. A global's cache site is keyed by the full index, and an
+   object literal made at once keeps its keys as 32-bit indexes
+   (`ObjKeys`). The verifier checks either form (`nameOK`).
+   `TestRegDiffFarNames` starts each function, and scripts, with 65,600
+   other names.
+15. **Registers past 65,535** -- done. A function whose bindings alone
+   would not fit 16 bits of registers, or that ran out of them compiling
+   (compiled again with a quarter of them for its bindings, `nearCap`),
+   gives the bindings it uses least far registers (`farSlots`): those
+   only plain reads and writes reach -- no closure captures them, no read
+   finds them in their dead zone, no direct eval or debugger reaches the
+   function, and none is the arguments object, a catch clause's, a
+   class's, a function declaration's or the completion value. A far
+   binding's register is past every near one and every temporary, the
+   window NumRegs long; `mov_far` and `mov_to_far` (cold) are all that
+   reach it, and `far_init` makes the far bindings undefined as the
+   function starts. A read is a move in, a store a move out, a compound
+   assignment or an update the generic read and store, an append or a
+   for-of head's register the long way. `r16` panics on a far register,
+   which `generate` makes a refusal: a form that would name one as an
+   operand is refused, never compiled to read another register. A
+   check_ref's slot past 16 bits is FarNames', as a name is.
+   `TestRegDiffFarRegisters` declares 65,600 bindings before the ones its
+   cases use, in a function, a generator and a named function
+   expression, and has a template of 40,000 parts beside 30,000
+   bindings, which compiles the second time.
 
 ### Stage 3: the JIT
 

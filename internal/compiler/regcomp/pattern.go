@@ -143,12 +143,14 @@ func (g *gen) storeLeaf(id *ast.Ident, v int, declaring bool) {
 	}
 	switch res.Kind {
 	case ResLocal, ResLocalInit:
-		if r := int(g.slotReg[res.Index]); r != v {
+		if k := g.farOf(res.Index); k >= 0 {
+			g.movToFar(k, v)
+		} else if r := int(g.slotReg[res.Index]); r != v {
 			g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(r), r16(v), 0))
 		}
 	case ResGlobalVar:
 		g.at(int(id.Start))
-		g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite("RSetGlobal", g.name16(id.Name))))
+		g.far(g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite("RSetGlobal", id.Name))), id.Name)
 	case ResGlobalLexInit, ResModuleLexInit:
 		g.lexInit(res.Kind, id.Name, v, int(id.Start))
 	case ResIgnore:

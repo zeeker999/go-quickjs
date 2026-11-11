@@ -113,6 +113,11 @@ type Record struct {
 	// Completion is the stack slot of top-level code's completion value,
 	// which an expression statement sets, or -1 for a function.
 	Completion int32
+	// ThisRef says top-level code's this is the call site's, which may be
+	// a derived constructor's binding, unbound until super() binds it:
+	// eval code's, and a debugger's at a frame (the stack compiler's
+	// thisIsValue).
+	ThisRef bool
 	// Classes is each class the function defines, as the stack form
 	// defines it (ClassRec).
 	Classes map[*ast.ClassLit]*ClassRec

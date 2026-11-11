@@ -483,9 +483,9 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 	case bytecode.RCold, bytecode.RGetPrivate, bytecode.RSetPrivate:
 		return Undefined, r.regColdSub(f, c, k, regs)
 	case bytecode.RGetGlobal:
-		v, err = r.regGetGlobal(f, cl, w)
+		v, err = r.regGetGlobal(f, cl, c, pc, w)
 	case bytecode.RSetGlobal:
-		return Undefined, r.regSetGlobal(f, cl, w, regs[w.A()])
+		return Undefined, r.regSetGlobal(f, cl, c, pc, w, regs[w.A()])
 	case bytecode.RGetProp:
 		v, err = r.regGetProp(cl, c, w, regs[w.B()])
 	case bytecode.RGetMethod:
@@ -528,7 +528,7 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 	case bytecode.RUnary:
 		v, err = r.regUnary(bytecode.Op(w.X()), regs[w.B()])
 	case bytecode.RDefineField:
-		return Undefined, r.regDefineField(cl, w, regs[w.A()], regs[w.B()])
+		return Undefined, r.regDefineField(cl, regName(cl, c, pc, w.C()), regs[w.A()], regs[w.B()])
 	case bytecode.RNewObject:
 		v = Obj(r.regNewObject(cl, w))
 	case bytecode.RAddIndex:

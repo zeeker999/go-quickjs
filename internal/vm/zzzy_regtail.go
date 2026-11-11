@@ -396,7 +396,7 @@ func (r *Runtime) regDirectLegacy(o *Object, cl *closure, c *regCode, base, m in
 
 // regScopedLegacy is regDirectLegacy for a frame regRunFD enters: every
 // argument kept for f.arguments (regLegacyArgs) while the frame runs.
-func (r *Runtime) regScopedLegacy(o *Object, cl *closure, c *regCode, base, m int, args []Value, newTarget Value, with []*Object, evalVars *Object) (Value, error) {
+func (r *Runtime) regScopedLegacy(o *Object, cl *closure, c *regCode, base, m int, args []Value, newTarget Value, thisRef *thisBinding, with []*Object, evalVars *Object) (Value, error) {
 	d := r.frameDepth
 	for len(r.regExtras) <= d {
 		r.regExtras = append(r.regExtras, regExtra{})
@@ -404,7 +404,7 @@ func (r *Runtime) regScopedLegacy(o *Object, cl *closure, c *regCode, base, m in
 	e := &r.regExtras[d]
 	e.base, e.callee, e.all = base, o, true
 	e.vals = append(e.vals[:0], args...)
-	v, err := r.regEnterScoped(o, cl, c, base, m, args, newTarget, with, evalVars)
+	v, err := r.regEnterScoped(o, cl, c, base, m, args, newTarget, thisRef, with, evalVars)
 	if e := &r.regExtras[d]; e.all && e.base == base && e.callee == o {
 		clear(e.vals)
 		e.vals, e.callee, e.all = e.vals[:0], nil, false

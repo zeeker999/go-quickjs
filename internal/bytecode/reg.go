@@ -678,11 +678,25 @@ const (
 	// nothing unless a debugger has asked to stop somewhere, or B is 1
 	// and one is listening.
 	RColdDebug
+	// RColdMovFar copies far register BC to register A (mov_far): a
+	// binding past the 65,536 registers a 16-bit operand reaches, which
+	// a function whose bindings do not fit them has (far registers, past
+	// NumRegs' near ones). RColdMovToFar copies register A to far register
+	// BC (mov_to_far), and RColdFarInit makes the Aux far registers from
+	// BC undefined (far_init), as the function starts.
+	RColdMovFar
+	RColdMovToFar
+	RColdFarInit
 )
 
 // RDirectEvalSpread is the bit of direct_eval's Aux that says its
 // arguments are an array.
 const RDirectEvalSpread = 1 << 31
+
+// RNameFar is a name operand that says the name's index in Names is past
+// 16 bits: FarNames, by the instruction's pc, has it. Only the cold
+// operations and the miss paths that read a name read it.
+const RNameFar = 0xFFFF
 
 // The flags of regexp_lit's X.
 const (
@@ -767,6 +781,7 @@ var rColdNames = [...]string{
 	RColdWithSet: "with_set", RColdWithResolve: "with_resolve", RColdWithRead: "with_read",
 	RColdWithWrite: "with_write", RColdWithPush: "with_push", RColdWithPop: "with_pop",
 	RColdThrowRef: "throw_reference_error", RColdDebug: "debug",
+	RColdMovFar: "mov_far", RColdMovToFar: "mov_to_far", RColdFarInit: "far_init",
 }
 
 func (op RColdOp) String() string {
@@ -816,7 +831,10 @@ const (
 type RegCode struct {
 	Code []RInstr
 	// NumRegs is how many registers a frame of the code uses: the
-	// function's locals, its temporaries, and the register form's own.
+	// function's locals, its temporaries, and the register form's own;
+	// and, where its bindings do not fit 16 bits, its far registers after
+	// them all, which only RColdMovFar, RColdMovToFar and RColdFarInit
+	// reach.
 	NumRegs int
 	// SrcPC is, for each instruction, the stack form's instruction it was
 	// made from: what a frame's pc holds while the instruction runs, so
@@ -856,7 +874,11 @@ type RegCode struct {
 	Literals [][]LitElem
 	// ObjKeys are the keys of the code's object literals made at once
 	// (RNewObjectLit), each an index of the function's names.
-	ObjKeys [][]uint16
+	ObjKeys [][]uint32
+	// FarNames is, for an instruction whose name operand is RNameFar,
+	// the name's index in Names, by its pc -- for check_ref, whose B is
+	// a slot, the slot's index in Locals; nil where none is.
+	FarNames []uint32
 	// LocalReg is each local's register, or -1, where the code has a
 	// call_reuse, whose frame's locals the runtime reads by it, a
 	// direct_eval, whose code it links to them, or is compiled for a

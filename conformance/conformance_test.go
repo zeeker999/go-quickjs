@@ -229,16 +229,12 @@ func TestConformance(t *testing.T) {
 	t.Logf("test262: %d passed, %d failed, %d skipped (%.2f%% of executed)",
 		pass, fail, skip, rate)
 	if os.Getenv("QJS_REG") != "" {
-		// Register mode runs the language's tests as register code alone
-		// (vm.RegFallbacks): held to it where QJS_REGFALLSTRICT asks,
-		// until the count is zero; the built-ins' tests are not yet.
+		// Register mode runs every test as register code alone
+		// (vm.RegFallbacks): nothing in the stack interpreter or the
+		// tree tier, nothing entered through their frames.
 		n, by := vm.RegFallbacks()
 		t.Logf("register mode: %d fallbacks to the other tiers", n)
-		language := true
-		for _, d := range subdirs {
-			language = language && strings.HasPrefix(d, "language")
-		}
-		if n != 0 && language && os.Getenv("QJS_REGFALLSTRICT") != "" {
+		if n != 0 {
 			t.Errorf("%d fallbacks to the other tiers (QJS_REGFALLTRACE names them):\n%s", n, by)
 		}
 	}

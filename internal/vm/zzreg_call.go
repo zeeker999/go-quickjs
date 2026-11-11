@@ -222,6 +222,22 @@ func regAuxAt(c *regCode, pc int) uint32 {
 	return 0
 }
 
+// regNameIdx is the index in the function's names of op, the name
+// operand of the instruction at pc: op itself, or, where it is RNameFar,
+// the index past 16 bits FarNames has for the instruction. Only cold
+// operations and miss paths read a name.
+func regNameIdx(c *regCode, pc int, op uint16) uint32 {
+	if op == bytecode.RNameFar {
+		return c.rc.FarNames[pc]
+	}
+	return uint32(op)
+}
+
+// regName is the name regNameIdx finds, of closure cl's names.
+func regName(cl *closure, c *regCode, pc int, op uint16) Atom {
+	return cl.names[regNameIdx(c, pc, op)]
+}
+
 // regReuseAt is the reuse site of call_method_w pc, or nil.
 func regReuseAt(c *regCode, pc int) *execReuseSite {
 	if s := regAt(c.code, pc).C(); int(s) < len(c.reuse) {
@@ -506,11 +522,12 @@ func regMadeClosure(o *Object) *Object {
 // function data fd, or top-level code, whose callee is nil -- as register
 // code entered directly, its frame given what runFD gives one of its
 // surroundings: the with objects and an eval's variables of the functions
-// around it, and a scope for the variables of its own direct eval. It
-// reports false, having done nothing, where cl has no register code to
-// enter so: the tiers' own runs (regTier off), a generator's body, and a
-// frame with a this binding. A chain of tail calls the frame ends in is
-// made here, in its place.
+// around it, a scope for the variables of its own direct eval, and the
+// this binding of a derived constructor's construction or an arrow
+// sharing one. It reports false, having done nothing, where cl has no
+// register code to enter so: the tiers' own runs (regTier off) and a
+// generator's body. A chain of tail calls the frame ends in is made
+// here, in its place.
 //
 //go:noinline
 func (r *Runtime) regRunFD(cl *closure, this Value, args []Value, newTarget Value, callee *Object, fd *funcData) (Value, error, bool) {
@@ -524,12 +541,32 @@ func (r *Runtime) regRunFD(cl *closure, this Value, args []Value, newTarget Valu
 		return Undefined, nil, false
 	}
 	fn := cl.fn
-	arrow := fd != nil && fd.arrow
-	if !newTarget.IsUndefined() && !arrow || arrow && fd.extra != nil && fd.extra.lexThisRef != nil {
-		// A construction, or an arrow sharing a derived constructor's
-		// this binding: runFD's still (vm.RegFallbacks counts it). An
-		// arrow's new.target is the one it captured.
-		return Undefined, nil, false
+	// The this binding super() binds: a derived constructor's
+	// construction makes one, holding the object made for it until then,
+	// and an arrow written inside one shares it, as runFD's frames do.
+	var thisRef *thisBinding
+	cell := false
+	if fd != nil {
+		if fd.arrow {
+			if fd.extra != nil {
+				thisRef = fd.extra.lexThisRef
+			}
+		} else if fd.ctorKind == ctorDerived && !newTarget.IsUndefined() {
+			if c.cellThis {
+				// The runtime's cell for the frame's depth, which nothing
+				// keeps past the frame: the construction allocates its
+				// object alone.
+				d := r.frameDepth
+				if d >= len(r.thisCells) {
+					r.thisCells = make([]thisBinding, d+d/2+16)
+				}
+				thisRef = &r.thisCells[d]
+				*thisRef = thisBinding{value: this}
+				cell = true
+			} else {
+				thisRef = &thisBinding{value: this}
+			}
+		}
 	}
 	if regReportOn {
 		regNoteCross(regCrossEnter, fn, "")
@@ -577,9 +614,13 @@ func (r *Runtime) regRunFD(cl *closure, this Value, args []Value, newTarget Valu
 	var err error
 	if r.nodeQuirks && !fn.Strict && !c.args {
 		// f.arguments reads the arguments as they were passed.
-		v, err = r.regScopedLegacy(callee, cl, c, base, m, args, newTarget, with, evalVars)
+		v, err = r.regScopedLegacy(callee, cl, c, base, m, args, newTarget, thisRef, with, evalVars)
 	} else {
-		v, err = r.regEnterScoped(callee, cl, c, base, m, args, newTarget, with, evalVars)
+		v, err = r.regEnterScoped(callee, cl, c, base, m, args, newTarget, thisRef, with, evalVars)
+	}
+	if cell {
+		// The object is the construction's now, not the cell's to keep.
+		thisRef.value = Undefined
 	}
 	if err == errTailCall && r.tailLoopDepth != r.frameDepth {
 		// The chain made here, in constant space; inside regTailLoop's
@@ -591,7 +632,7 @@ func (r *Runtime) regRunFD(cl *closure, this Value, args []Value, newTarget Valu
 
 // regEnterScoped is regEnterW's entry of a frame regRunFD has made the
 // window of, given the surroundings regRunFD found for it.
-func (r *Runtime) regEnterScoped(o *Object, cl *closure, rc *regCode, base, argc int, args []Value, newTarget Value, with []*Object, evalVars *Object) (Value, error) {
+func (r *Runtime) regEnterScoped(o *Object, cl *closure, rc *regCode, base, argc int, args []Value, newTarget Value, thisRef *thisBinding, with []*Object, evalVars *Object) (Value, error) {
 	top := base + int(rc.numRegs)
 	if top > len(r.stack) || r.frameDepth >= r.maxFrames {
 		return Undefined, r.throwRangeError("maximum call stack size exceeded")
@@ -640,6 +681,10 @@ func (r *Runtime) regEnterScoped(o *Object, cl *closure, rc *regCode, base, argc
 	}
 	f.withScopes, f.evalVars = with, evalVars
 	f.newTarget = newTarget
+	// The frame record's this is what super() reads and rebinds
+	// (superCall), and what a direct eval's code shares: register 1
+	// otherwise, which regSyncThis writes back before either.
+	f.this, f.thisRef = r.stack[base+1], thisRef
 	f.regKind = regFrameEnter
 	if rc.args {
 		f.args = kept
@@ -654,7 +699,7 @@ func (r *Runtime) regEnterScoped(o *Object, cl *closure, rc *regCode, base, argc
 	if len(f.openUpvalues) != 0 {
 		regCloseUpvalues(f)
 	}
-	f.withScopes, f.evalVars = nil, nil
+	f.withScopes, f.evalVars, f.thisRef = nil, nil, nil
 	r.frameDepth--
 	r.stackTop = saved
 	if a := f.args; a != nil {
@@ -1063,24 +1108,24 @@ func (r *Runtime) regDelete(cl *closure, obj, key Value) (Value, error) {
 func (r *Runtime) regThrowDeadZone(f *frame, c *regCode, next int) error {
 	pc := next - 1
 	f.pc = c.src[pc] + 1
-	return r.throwReferenceError("cannot access %q before initialization", f.cl.fn.Locals[regAt(c.code, pc).B()].Name)
+	return r.throwReferenceError("cannot access %q before initialization", f.cl.fn.Locals[regNameIdx(c, pc, regAt(c.code, pc).B())].Name)
 }
 
 // regGetGlobal is get_global's slow path: what the stack interpreter does,
 // then the layout of the global object the site found the slot in noted,
 // for the loop's check.
-func (r *Runtime) regGetGlobal(f *frame, cl *closure, w bytecode.RInstr) (Value, error) {
-	in := bytecode.Instr{Op: bytecode.OpGetGlobal, A: uint32(w.B()), B: uint32(w.C())}
+func (r *Runtime) regGetGlobal(f *frame, cl *closure, c *regCode, pc int, w bytecode.RInstr) (Value, error) {
+	in := bytecode.Instr{Op: bytecode.OpGetGlobal, A: regNameIdx(c, pc, w.B()), B: uint32(w.C())}
 	v, err := r.getGlobalAt(regTctx(r, f, cl), in, int(f.pc-1))
 	if err == nil {
-		r.regNoteGlobal(cl, w.C(), cl.names[w.B()], false)
+		r.regNoteGlobal(cl, w.C(), cl.names[in.A], false)
 	}
 	return v, err
 }
 
 // regSetGlobal is set_global's, or set_global_strict's, slow path.
-func (r *Runtime) regSetGlobal(f *frame, cl *closure, w bytecode.RInstr, v Value) error {
-	in := bytecode.Instr{Op: bytecode.OpSetGlobal, A: uint32(w.B()), B: uint32(w.C())}
+func (r *Runtime) regSetGlobal(f *frame, cl *closure, c *regCode, pc int, w bytecode.RInstr, v Value) error {
+	in := bytecode.Instr{Op: bytecode.OpSetGlobal, A: regNameIdx(c, pc, w.B()), B: uint32(w.C())}
 	var err error
 	if w.X() != 0 {
 		in.Op = bytecode.OpSetGlobalStrict
@@ -1089,7 +1134,7 @@ func (r *Runtime) regSetGlobal(f *frame, cl *closure, w bytecode.RInstr, v Value
 		err = r.setGlobalIn(f, cl, in, v)
 	}
 	if err == nil {
-		r.regNoteGlobal(cl, w.C(), cl.names[w.B()], true)
+		r.regNoteGlobal(cl, w.C(), cl.names[in.A], true)
 	}
 	return err
 }
@@ -1191,11 +1236,10 @@ func (r *Runtime) regSetProp(cl *closure, c *regCode, w bytecode.RInstr, obj, v 
 }
 
 // regDefineField is define_field.
-func (r *Runtime) regDefineField(cl *closure, w bytecode.RInstr, obj, v Value) error {
+func (r *Runtime) regDefineField(cl *closure, name Atom, obj, v Value) error {
 	if !obj.IsObject() {
 		return nil
 	}
-	name := cl.names[w.C()]
 	if o := obj.Object(); o.class == ClassObject && o.flags&objExtensible != 0 {
 		if next := o.transition(name, propDefault); next != nil {
 			o.appendTransition(v, next)

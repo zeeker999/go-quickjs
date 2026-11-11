@@ -145,6 +145,15 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 	if rc.LocalReg != nil {
 		c.reuse = regReuseSites(fn, rc)
 	}
+	if fn.Kind == bytecode.KindDerivedConstructor {
+		c.cellThis = true
+		for _, in := range fn.Code {
+			switch in.Op {
+			case bytecode.OpClosure, bytecode.OpDirectEval, bytecode.OpTailDirectEval, bytecode.OpDebugStmt:
+				c.cellThis = false
+			}
+		}
+	}
 	switch {
 	case c.suspends:
 	case fn.Leaf == bytecode.LeafPure && !fn.PureCalls && regLeafRunnable(rc) && regLeafOps(fn, rc) != nil:

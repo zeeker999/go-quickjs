@@ -1,12 +1,14 @@
 package v8bench
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	quickjs "github.com/go-quickjs/go-quickjs"
 	"github.com/go-quickjs/go-quickjs/internal/compiler"
@@ -69,10 +71,8 @@ func regDiff(t *testing.T, src string, calls []string) int64 {
 	built := vm.RegsBuilt() - before
 	// Register mode runs everything as register code, entered as its own:
 	// nothing in the stack interpreter or the tree tier, nothing entered
-	// through their frames. Until the count is zero everywhere, it fails
-	// only where QJS_REGFALLSTRICT asks (docs/register-interpreter.md,
-	// item 13).
-	if n, by := vm.RegFallbacks(); n != 0 && os.Getenv("QJS_REGFALLSTRICT") != "" {
+	// through their frames (docs/register-interpreter.md, item 13).
+	if n, by := vm.RegFallbacks(); n != 0 {
 		t.Errorf("%d fallbacks to the other tiers (QJS_REGFALLTRACE names them):\n%s", n, by)
 	}
 	bad, skipped := 0, 0
@@ -1004,6 +1004,148 @@ func TestRegDiffRegExpWideConstants(t *testing.T) {
 	}
 }
 
+// TestRegDiffFarNames compares code whose names run past 16 bits, where an
+// instruction's name operand is RNameFar and RegCode.FarNames has the
+// index: each function, and each script, starts with 65,600 reads of
+// globals by typeof, each a name of its own, and only then names what it
+// uses -- globals read, written and deleted, sloppy and strict, an object
+// literal's keys made at once and one by one, accessors, a class's
+// members, private names and super, a with's names, a constant's and an
+// assignment target's errors -- and in scripts and indirect eval code that
+// declare 65,600 vars first, top-level declarations.
+func TestRegDiffFarNames(t *testing.T) {
+	if testing.Short() {
+		t.Skip("compiles a dozen programs of 65,600 statements three times")
+	}
+	var fill strings.Builder
+	for i := 0; i < 65600; i++ {
+		fmt.Fprintf(&fill, "typeof f%d;\n", i)
+	}
+	f := fill.String()
+	// A script's declarations take its first names: past 16 bits, those
+	// after 65,600 others.
+	var d strings.Builder
+	d.WriteString("var d0")
+	for i := 1; i < 65600; i++ {
+		fmt.Fprintf(&d, ", d%d", i)
+	}
+	d.WriteString(";\n")
+	decls := d.String()
+	src := `
+var gA = 1, gD = 2;
+class B { bm() { return "bm" } get bx() { return 10 } }
+function n1() {
+` + f + `gA = gA + 1; gA += 2; var r = [gA, typeof gZ, typeof gA, delete gD, typeof gD];
+	try { gNo } catch (x) { r.push(x.name + ": " + x.message) }
+	var k = "kk", ob = {ka: 1, kb: 2}, oc = {[k]: 1, kc: 3, get ga() { return 4 }, set ga(v) { this.kv = v }}, od = {...ob, kd: 5};
+	oc.ga = 6;
+	r.push(JSON.stringify(ob), JSON.stringify(oc), oc.ga, JSON.stringify(od));
+	const cc = 1;
+	try { cc = 2 } catch (x) { r.push(x.name + ": " + x.message) }
+	try { n1() = 1 } catch (x) { r.push(x.name + ": " + x.message) }
+	return r.join(" | ");
+}
+function n2() {
+	"use strict";
+` + f + `var r = []; gA = 7; r.push(gA);
+	try { gU = 1 } catch (x) { r.push(x.name + ": " + x.message) }
+	try { gV += 1 } catch (x) { r.push(x.name + ": " + x.message) }
+	try { gW = String(r.length) } catch (x) { r.push(x.name + ": " + x.message) }
+	gA = String(gA + 1); r.push(gA);
+	return r.join(" | ");
+}
+function n3() {
+` + f + `class K extends B { #p = 1; static sm() { return "sm" } get kg() { return 2 } set kg(v) { this.q = v } m() { return this.#p } }
+	var k = new K(); k.kg = 3;
+	return [K.sm(), k.kg, k.q, k.m(), k.bm(), Object.getOwnPropertyNames(K.prototype).join("/")].join();
+}
+class C2 extends B {
+	#p = 1;
+	m() {
+` + f + `this.#p += 1; super.by = 5; return [this.#p, super.bx, super.bm(), this.by, #p in this].join();
+	}
+	n(o) {
+` + f + `try { return this.#p } catch (x) { return x.name } finally { try { C2.prototype.m.call(o) } catch (x) { globalThis.pe = x.name + ": " + x.message } }
+	}
+}
+function n4(o) {
+` + f + `with (o) { wx = wx + 1; wn = 9; return [wx, wy, typeof wz, wn].join() }
+}
+`
+	calls := []string{`n1()`, `n2()`, `n3()`, `new C2().m()`, `new C2().n({}) + " " + pe`,
+		`var wo = {wx: 1, wy: 2, wn: 0}; n4(wo) + " " + wo.wx + " " + wo.wn`,
+		f + `var tv = 1; let tl = 2; const tc = 3; function tf() { return 4 } class tk {} tv + tl + tc + tf() + typeof tk`,
+		`tv + tl + tc + tf() + typeof tk`,
+		`(0, eval)(` + "`" + f + "var iv = 5; let il = 6; iv + il`" + `) + "," + iv + "," + typeof il`,
+		decls + `let dl = 1; const dc = 2; function dfn() { return 3 } class dk {} d65599 = 4; d65599 + dl + dc + dfn() + typeof dk`,
+		`(0, eval)(decls + "var dv = 5; d1 = dv; d1")`,
+		"let" + decls[3:] + `var ev = 1; let el = 2; function efn() { return 3 } class ek {} ev + el + efn() + typeof ek + typeof d1`,
+		`(function () { return eval(` + "`" + f + "var dv = 7; let dl = 8; dv + dl + gA`" + `) + "," + dv })()`}
+	if built := regDiff(t, src, calls); built == 0 {
+		t.Errorf("no function is register code")
+	}
+}
+
+// TestRegDiffFarRegisters compares functions whose bindings do not fit
+// 16 bits of registers, where those used least have far ones, reached by
+// mov_far and mov_to_far alone: each declares 65,600 bindings used five
+// times, and only then those the cases use, five times or fewer, which
+// are far (farSlots). Reads, stores, compound assignments and updates,
+// appends, patterns, for-in and for-of heads, a loop's counter, let and
+// const, typeof, a closure over a near binding beside them, the
+// arguments object, a generator suspended with its far bindings, and a
+// named function expression's own name; and a function whose bindings fit
+// but leave its temporaries too few registers.
+func TestRegDiffFarRegisters(t *testing.T) {
+	if testing.Short() {
+		t.Skip("compiles functions of 65,600 bindings three times")
+	}
+	var fill strings.Builder
+	for i := 0; i < 65600; i++ {
+		fmt.Fprintf(&fill, "var v%d = v%d + v%d + v%d + v%d;\n", i, i, i, i, i)
+	}
+	f := fill.String()
+	// A function whose 30,000 bindings fit, but not beside the 40,000
+	// temporaries of a template's 40,000 parts: compiled again with a
+	// quarter of the registers for its bindings (nearCap).
+	var deep strings.Builder
+	deep.WriteString("function deep(p) {\n" + f[:strings.Index(f, "var v30000 ")] + "var x = p, y = p + 1;\n\treturn `" + strings.Repeat("${x}-", 19999) + "${y}`;\n}\n")
+	src := deep.String() + `
+function big(p) {
+` + f + `var r = [];
+	var a1 = 5; r.push(a1, typeof a1);
+	var a2; a2 = p * 2; r.push(a2);
+	var a3 = 1; a3 += p; r.push(a3);
+	var a4 = 1; a4++; r.push(a4);
+	var a5 = 1; r.push(--a5);
+	var a6 = 1; r.push(a6++, a6);
+	var s = ""; s += "x"; s += "y";
+	var [d1, d2] = [1, 2]; var d3; ({d3} = {d3: 3}); r.push(s, d1, d2, d3);
+	for (var k in {m: 1, n: 2}) r.push(k);
+	for (var e of [7, 8]) r.push(e);
+	var t = 0; for (var i = 0; i < 4; i++) t += i;
+	r.push(t);
+	let l1 = 4; const c1 = 6; r.push(l1 + c1);
+	var cap = 1; var get = () => cap; cap = 2; r.push(get());
+	r.push(arguments.length, arguments[0]);
+	var o = {q: 9}; var q = o.q; r.push(q);
+	return r.join();
+}
+function* gen(p) {
+` + f + `var x = p; yield x; x = x + 1; yield x;
+	var y = yield x * 10; yield y;
+}
+var named = function self(p) {
+` + f + `var z = p + 1;
+	return typeof self + z;
+};
+`
+	calls := []string{`deep(2)`, `big(3)`, `big(-1)`, `var g = gen(5); [g.next().value, g.next().value, g.next().value, g.next(42).value, g.next().done].join()`, `named(1)`}
+	if built := regDiff(t, src, calls); built == 0 {
+		t.Errorf("no function is register code")
+	}
+}
+
 // TestRegDiffTailCalls compares calls in tail position in strict code
 // (tail_call_w): chains deep past tailCallDepth in constant space, mutual and
 // through methods, conditionals, logical and comma forms; a construct's
@@ -1089,6 +1231,26 @@ function viaCap() { var r = []; for (var i = 0; i < 3; i++) r.push(cap(1), cap(1
 			t.Errorf("%s: %q, register code %q", c, off[i], on[i])
 		}
 	}
+}
+
+// TestRegTailCallsStop checks that an endless loop of calls in tail
+// position, each made in its frame's place (regRestartRun), polls as a
+// loop does: the host's context stops it.
+func TestRegTailCallsStop(t *testing.T) {
+	withRegTier(true, func() {
+		rt := quickjs.New()
+		defer rt.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		for _, src := range []string{
+			`"use strict"; function inf(n) { return inf(n + 1) } inf(0)`,
+			`"use strict"; function a(n) { return b(n + 1) } function b(n) { return a(n + 1) } a(0)`,
+		} {
+			if _, err := rt.EvalContext(ctx, src); err == nil {
+				t.Errorf("%s: an endless loop of calls in tail position ended", src)
+			}
+		}
+	})
 }
 
 // TestRegDiffTopLevel compares top-level code as register code: a script's
@@ -1439,6 +1601,54 @@ function tw(x, y) { "use strict"; return BigInt.asIntN(64, x * y) }
 	regDiff(t, src, calls)
 }
 
+// TestRegDiffConstructions compares constructions entered as register
+// code: a derived constructor's this binding -- read before super() binds
+// it, bound by an arrow, by eval code or by an iterator's return handler
+// after the body has left, a second super() -- the results a derived
+// construction checks after its body, a base constructor with a direct
+// eval or inside a with, new.target an arrow captures, and the stack
+// traces of errors thrown in them.
+func TestRegDiffConstructions(t *testing.T) {
+	src := `
+function frames(e) { return e.name + ": " + e.message + " | " + e.stack.split("\n").slice(1, 3).map(function (s) { return s.trim() }).join(" | ") }
+var seen = [];
+class A { constructor(x) { this.x = x; this.nt = new.target.name; seen.push("A" + x) } }
+class D1 extends A { constructor() { var f = () => super(2); try { throw null } catch (e) { return } finally { f() } } }
+var iter = { [Symbol.iterator]() { return this }, next() { return { done: false } }, return() { this.f(); return { done: true } } }
+class D2 extends A { constructor() { iter.f = () => super(3); for (var k of iter) { return } } }
+class D3 extends A { constructor() { super(4); this.arrow = () => this; return this.arrow } }
+class D4 extends A { constructor() { var g = () => this; try { g() } catch (e) { seen.push(e.name) } super(5); this.same = g() === this } }
+class D5 extends A { constructor() { eval("super(6)"); this.e = eval("this.x + 1") } }
+class D6 extends A { constructor(k) { if (k) { super(7) } else { (() => super(8))() } eval("this.k = k"); this.direct = (0, eval)("typeof this") } }
+class E2 { constructor(x) { eval("this.v = x") } }
+class D7 extends E2 { constructor() { var n; try { eval("this") } catch (e) { n = e.name } super(1); this.n = n + eval("this.constructor.name") } }
+class D8 extends A { constructor() { return } }
+class D9 extends A { constructor() { super(1); return 1 } }
+class D10 extends A { constructor() { super(1); super(2) } }
+class D11 extends A { constructor() { var t = () => new.target; super(1); this.t = t() === D11 } }
+class D12 extends A { constructor() { super(1); null.x } }
+class D13 extends A { constructor() { var f = () => eval("super(2)"); f(); this.q = (() => eval("this.x"))() } }
+class D14 extends A { constructor() { super(1); this.p = (async () => this.x)() } }
+function FB(x) { this.fb = x; this.nt = new.target === FB }
+class D15 extends FB { constructor() { super(3) } }
+function E1(x) { eval("var y = x * 2"); this.y = y; this.nt = new.target === E1 }
+var W; with ({ k: 9 }) { W = function (j) { this.k = k + j } }
+function Rec(n) { this.n = n; this.next = n > 0 ? new Rec(n - 1) : null }
+function Tail(n) { this.n = n; return mk(n) } function mk(n) { return n > 1 ? { made: n } : 0 }
+function c1() { seen = []; var r = [new D1().x, new D2().x, typeof new D3(), new D3()().x, new D4().same, new D5().e, new D6(1).k, new D6(0).x, new D6(0).direct]; return r.join() + " " + seen.join() }
+function c2() { return [new D7().n, new D11().t, new D13().q, new D15().fb, new D15().nt, new E1(4).y, new E1(4).nt, new W(1).k].join() }
+function c3(k) { try { return k === 0 ? new D8() : k === 1 ? new D9() : k === 2 ? new D10() : new D12() } catch (e) { return frames(e) } }
+class DR extends A { constructor(n) { super(n); this.c = n > 0 ? new DR(n - 1) : null } }
+class DS extends A { constructor(n) { var c = n > 0 ? new DS(n - 1) : null; super(n); this.c = c; this.ok = this.x === n } }
+function c4() { var r = new Rec(20), n = 0; while (r) { n += r.n; r = r.next } return [n, JSON.stringify(new Tail(1)), JSON.stringify(new Tail(2)), JSON.stringify(new DR(3)), JSON.stringify(new DS(3))].join() }
+function c5() { return Reflect.construct(D5, [], D15).constructor.name + "," + Reflect.construct(E1, [1], W).nt }
+async function c6() { return await new D14().p }
+var out6; c6().then(function (v) { out6 = v })
+`
+	calls := []string{`c1()`, `c2()`, `c3(0)`, `c3(1)`, `c3(2)`, `c3(3)`, `c4()`, `c5()`, `out6`}
+	regDiff(t, src, calls)
+}
+
 // TestRegDiffGenerators compares generators, async functions, async
 // generators, yield* and for await as register code: what each
 // resumption delivers -- a value, a throw, a return through finally
@@ -1651,7 +1861,16 @@ function d7() { var o = Object.freeze({b: 1}); return [delete o?.b, "b" in o].jo
 		`e(() => s1(1))`, `e(() => s1(2))`, `e(() => s1(3))`, `e(() => s2(0))`, `e(() => s2(1))`, `s3()`, `e(s4)`, `e(() => s5(0))`, `e(() => s5(1))`,
 		`d1()`, `d2()`, `d3()`, `e(d4)`, `e(d5)`, `d6()`, `d7()`,
 		`"q"; L: { "w"; break L; 3 }`, `"q"; L: { break L; }`, `"q"; L: M: { "w"; if (true) break M; 3 }`,
-		`"q"; L: switch (1) { case 1: "s"; break L }`, `globalThis.gt = 1; var gw = 2; [delete gt, delete gw, typeof gt].join()`}
+		`"q"; L: switch (1) { case 1: "s"; break L }`, `globalThis.gt = 1; var gw = 2; [delete gt, delete gw, typeof gt].join()`,
+		// A switch case's constant, past its dead zone, is still one.
+		`(() => { switch (1) { case 1: const c = 1; try { c = 2 } catch (x) { return x.name + c } } })()`,
+		`e(() => { switch (1) { case 1: const c = 1; c += 2; return c } })`,
+		`e(() => { switch (1) { case 1: const c = 1; c++; return c } })`,
+		`e(() => { switch (1) { case 1: const c = 1; [c] = [5]; return c } })`,
+		`e(() => { switch (1) { case 1: const c = 1; for (c of [1]); return c } })`,
+		`e(() => { switch (1) { case 1: const c = 1; c ??= 3; return c && (c &&= 5) } })`,
+		`e(() => { switch (2) { case 1: const c = 1; case 2: c = 3; return c } })`,
+		`e(() => { switch (1) { case 1: const c = 1; (() => { c = 2 })(); return c } })`}
 	regDiff(t, src, calls)
 }
 

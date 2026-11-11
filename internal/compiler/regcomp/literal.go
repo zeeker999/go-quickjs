@@ -222,13 +222,13 @@ func (g *gen) property(d int, p ast.Property) {
 		if p.Kind == ast.PropSet {
 			sub = bytecode.RColdDefineSetter
 		}
-		g.emit(bytecode.MakeR(bytecode.RCold, uint8(sub), r16(d), r16(v), g.name16(name)))
+		g.far(g.emit(bytecode.MakeR(bytecode.RCold, uint8(sub), r16(d), r16(v), g.name16(name))), name)
 		return
 	}
 	if p.Method {
 		cold(bytecode.RColdSetHomeObject, v, d, 0)
 	}
-	g.emit(bytecode.MakeR(bytecode.RDefineField, 0, r16(d), r16(v), g.name16(name)))
+	g.far(g.emit(bytecode.MakeR(bytecode.RDefineField, 0, r16(d), r16(v), g.name16(name))), name)
 }
 
 // anonymousFn reports whether e is an anonymous function definition, which
