@@ -84,6 +84,11 @@ type gen struct {
 	max       int
 	loops     []*loop
 	label     labelSet
+	// usingCaps are the registers of the scopes with using declarations
+	// around the code, innermost last, and disposeCaps each scope's, by its
+	// finally clause's statement (usingScope).
+	usingCaps   []int
+	disposeCaps map[*ast.DisposeStmt]int
 
 	consts   map[any]uint32
 	names    map[string]uint32
@@ -558,16 +563,23 @@ func (g *gen) body() {
 	// runs is a super() call, this is bound for good, and in register 1,
 	// where super_call put it.
 	g.enterBlock(lit.Body)
-	for _, s := range lit.Body {
-		if g.err != "" {
-			return
-		}
-		g.stmt(s)
-		if es, ok := s.(*ast.ExprStmt); ok {
-			if c, ok := es.X.(*ast.Call); ok && isSuper(c.Callee) {
-				g.thisBound = true
+	run := func() {
+		for _, s := range lit.Body {
+			if g.err != "" {
+				return
+			}
+			g.stmt(s)
+			if es, ok := s.(*ast.ExprStmt); ok {
+				if c, ok := es.X.(*ast.Call); ok && isSuper(c.Callee) {
+					g.thisBound = true
+				}
 			}
 		}
+	}
+	if has, async := usingKind(lit.Body); has {
+		g.usingScope(lit.Body[0].Pos(), async, run)
+	} else {
+		run()
 	}
 	g.retUndef()
 }
@@ -858,12 +870,20 @@ func (g *gen) declared(slot int) bool {
 
 func (g *gen) stmts(list []ast.Stmt) {
 	g.enterBlock(list)
-	for _, s := range list {
-		if g.err != "" {
-			return
+	run := func() {
+		for _, s := range list {
+			if g.err != "" {
+				return
+			}
+			g.stmt(s)
 		}
-		g.stmt(s)
 	}
+	if has, async := usingKind(list); has {
+		// The scope's resources are disposed of however it is left.
+		g.usingScope(list[0].Pos(), async, run)
+		return
+	}
+	run()
 }
 
 // enterBlock puts the lexical bindings a block declares that start in their
@@ -1093,6 +1113,8 @@ func (g *gen) stmt(s ast.Stmt) {
 		// The linker made its bindings.
 	case *ast.ExportDecl:
 		g.exportDecl(n)
+	case *ast.DisposeStmt:
+		g.disposeOut(n, -1)
 	case *ast.LabeledStmt:
 		labels := append(label[:len(label):len(label)], n.Label)
 		switch n.Body.(type) {
@@ -1169,6 +1191,16 @@ func (s labelSet) has(name string) bool {
 }
 
 func (g *gen) forStmt(n *ast.ForStmt, label labelSet) {
+	if vd, ok := n.Init.(*ast.VarDecl); ok && vd.Kind.IsUsing() {
+		// What the head declares is disposed of when the loop is done
+		// with, not at each turn.
+		g.usingScope(n.Start, vd.Kind == ast.DeclAwaitUsing, func() { g.forLoop(n, label) })
+		return
+	}
+	g.forLoop(n, label)
+}
+
+func (g *gen) forLoop(n *ast.ForStmt, label labelSet) {
 	// The head's bindings are each turn's own where a closure captures
 	// them; the check is made as the loop is entered.
 	l := g.pushLoop(label)
@@ -1236,8 +1268,8 @@ func (g *gen) hold() func() {
 }
 
 func (g *gen) varDecl(n *ast.VarDecl) {
-	if n.Kind != ast.DeclVar && n.Kind != ast.DeclLet && n.Kind != ast.DeclConst {
-		g.fail("a using declaration")
+	if n.Kind.IsUsing() {
+		g.usingDecl(n)
 		return
 	}
 	for _, d := range n.Decls {
@@ -1600,6 +1632,10 @@ func (g *gen) expr(e ast.Expr, dst int) int {
 		return g.awaitExpr(n, dst)
 	case *regExpr:
 		return g.place(n.reg, dst)
+	case *ast.ImportMeta:
+		d := g.dest(dst)
+		g.cold(bytecode.RColdImportMeta, d, 0, 0)
+		return d
 	}
 	g.fail(fmt.Sprintf("an expression the backend does not compile (%T)", e))
 	return g.dest(dst)
@@ -1888,6 +1924,43 @@ func (g *gen) unary(n *ast.Unary, dst int) int {
 	}
 	g.fail("the unary operator " + n.Op)
 	return g.dest(dst)
+}
+
+// importPhase reports whether n is import(...), import.defer(...) or
+// import.source(...), and which: the parser writes each as a call of a
+// name no script can write (the stack form's importPhase).
+func importPhase(n *ast.Call) (int, bool) {
+	id, ok := n.Callee.(*ast.Ident)
+	if !ok {
+		return 0, false
+	}
+	switch id.Name {
+	case "import":
+		return bytecode.ImportEvaluate, true
+	case "import.defer":
+		return bytecode.ImportDefer, true
+	case "import.source":
+		return bytecode.ImportSource, true
+	}
+	return 0, false
+}
+
+// importCall compiles an import call: its specifier and options in a
+// window, the promise of the module made by import (cold), at the call's
+// position, as the stack form's import.
+func (g *gen) importCall(n *ast.Call, phase, dst int) int {
+	argc := len(n.Args)
+	if argc < 1 || argc > 2 || hasSpread(n.Args) {
+		panic("regcomp: an import call of other than one or two arguments")
+	}
+	w := g.allocN(argc)
+	for i, a := range n.Args {
+		g.into(a, w+i)
+	}
+	d := g.dest(dst)
+	g.at(n.TracePos())
+	g.cold(bytecode.RColdImport, d, w, phase<<2|argc)
+	return d
 }
 
 // deleteMember compiles delete o.k, delete o[k] and, inside an optional
@@ -2743,6 +2816,9 @@ func (g *gen) args(args []ast.Expr, at int) {
 func (g *gen) call(n *ast.Call, dst int) int {
 	dead := g.dead == n
 	g.dead = nil
+	if phase, ok := importPhase(n); ok {
+		return g.importCall(n, phase, dst)
+	}
 	if hasSpread(n.Args) {
 		return g.spreadCall(n, dst)
 	}

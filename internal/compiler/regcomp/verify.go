@@ -236,6 +236,15 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 		return reg(a) && int(b) < len(fn.Names) && fn.TopLevel
 	case bytecode.RColdGetGlobalOpt, bytecode.RColdDeleteVar:
 		return reg(a) && int(b) < len(fn.Names)
+	case bytecode.RColdImport:
+		k := int(w.C()) & 3
+		return reg(a) && (k == 1 || k == 2) && int(b)+k <= rc.NumRegs
+	case bytecode.RColdImportMeta, bytecode.RColdNewDispose:
+		return reg(a)
+	case bytecode.RColdAddDisposable, bytecode.RColdDispose:
+		return reg(a) && reg(b) && w.C() <= 1
+	case bytecode.RColdDisposeStep:
+		return int(a)+1 < rc.NumRegs && reg(b)
 	case bytecode.RColdIterStep, bytecode.RColdIterRest:
 		return reg(a) && reg(b)
 	case bytecode.RColdCheckCoercible, bytecode.RColdToPropertyKey:

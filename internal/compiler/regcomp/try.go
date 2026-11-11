@@ -168,8 +168,9 @@ func (g *gen) loopIndex(l *loop) int {
 // tryStmt compiles a try statement.
 func (g *gen) tryStmt(n *ast.TryStmt) {
 	if n.Inline {
-		g.fail("a using declaration's scope")
-		return
+		// Nothing makes one: a using scope is the statements' own
+		// (usingScope).
+		panic("regcomp: an inline try statement")
 	}
 	var fin, cat *prot
 	if n.Finally != nil {
@@ -214,6 +215,126 @@ func (g *gen) tryStmt(n *ast.TryStmt) {
 	g.at(n.Start)
 	g.emit(bytecode.MakeR(bytecode.RThrow, 0, r16(fin.reg), 0, 0))
 	g.bind(end)
+}
+
+// usingKind reports whether a statement list declares anything with
+// using, and whether any of it is await using (the stack form's).
+func usingKind(body []ast.Stmt) (has, async bool) {
+	for _, s := range body {
+		if vd, ok := s.(*ast.VarDecl); ok && vd.Kind.IsUsing() {
+			has = true
+			async = async || vd.Kind == ast.DeclAwaitUsing
+		}
+	}
+	return has, async
+}
+
+// usingScope compiles body as a scope with using declarations, as the
+// stack form's compileDisposeScope: its resources in a register of their
+// own (new_dispose_capability), and a finally clause that disposes of
+// them, compiled for each way out -- its normal end and each exit with
+// no exception to fold in, a throw with the one it folds in.
+func (g *gen) usingScope(pos int, async bool, body func()) {
+	c := g.alloc()
+	g.at(pos)
+	g.cold(bytecode.RColdNewDispose, c, 0, 0)
+	ds := &ast.DisposeStmt{Async: async, Start: pos}
+	if g.disposeCaps == nil {
+		g.disposeCaps = map[*ast.DisposeStmt]int{}
+	}
+	g.disposeCaps[ds] = c
+	fin := &prot{to: g.newMark(), reg: g.alloc(), finally: []ast.Stmt{ds}, cursor: -1}
+	defer g.hold()()
+	g.protect(fin)
+	g.usingCaps = append(g.usingCaps, c)
+	body()
+	g.usingCaps = g.usingCaps[:len(g.usingCaps)-1]
+	g.unprotect(fin)
+	if g.err != "" {
+		return
+	}
+	end := g.newMark()
+	g.finallyCopy(fin.finally)
+	g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), end, false)
+	g.bind(fin.to)
+	g.disposeOut(ds, fin.reg)
+	g.at(pos)
+	g.emit(bytecode.MakeR(bytecode.RThrow, 0, r16(fin.reg), 0, 0))
+	g.bind(end)
+}
+
+// usingDecl compiles a using or await using declaration: each value added
+// to the innermost scope's resources (add_disposable, which throws for a
+// value with no disposer) before its binding is initialized.
+func (g *gen) usingDecl(n *ast.VarDecl) {
+	if len(g.usingCaps) == 0 {
+		panic("regcomp: a using declaration outside a scope that disposes")
+	}
+	c := g.usingCaps[len(g.usingCaps)-1]
+	async := 0
+	if n.Kind == ast.DeclAwaitUsing {
+		async = 1
+	}
+	for _, d := range n.Decls {
+		id, ok := d.Target.(*ast.Ident)
+		if !ok || d.Init == nil {
+			panic("regcomp: a using declaration of other than a name and a value")
+		}
+		v := g.expr(d.Init, -1)
+		g.at(id.Pos())
+		g.cold(bytecode.RColdAddDisposable, c, v, async)
+		g.storeIdent(id, &regExpr{Ident: id, reg: v}, true)
+		g.top = g.stmtTop()
+	}
+}
+
+// disposeOut compiles a using scope's disposal, the scope's finally
+// clause, where thrown is the register of a throw leaving the scope, or -1.
+// An await using scope's is a loop of steps, each running the disposers
+// until one leaves a value to await, which the loop awaits, an await that
+// throws folded in by the next step (the stack form's compileDispose).
+func (g *gen) disposeOut(ds *ast.DisposeStmt, thrown int) {
+	c, ok := g.disposeCaps[ds]
+	if !ok {
+		panic("regcomp: a disposal of no scope")
+	}
+	if !ds.Async {
+		g.at(ds.Start)
+		if thrown >= 0 {
+			g.cold(bytecode.RColdDispose, c, thrown, 1)
+		} else {
+			g.cold(bytecode.RColdDispose, c, c, 0)
+		}
+		return
+	}
+	// The loop's registers are live across its backward jumps, whose
+	// sweep of stale registers spares only what is held.
+	t := g.allocN(2)
+	defer g.hold()()
+	mode := bytecode.DisposeStart
+	if thrown >= 0 {
+		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(t), r16(thrown), 0))
+		mode |= bytecode.DisposeRecord
+	}
+	check, done := g.newMark(), g.newMark()
+	g.at(ds.Start)
+	g.cold(bytecode.RColdDisposeStep, t, c, mode)
+	g.bind(check)
+	g.jump(bytecode.MakeR(bytecode.RJmpF, 0, r16(t+1), 0, 0), done, false)
+	p := &prot{to: g.newMark(), reg: t, cursor: -1}
+	g.protect(p)
+	g.awaitReg(t, ds.Start)
+	g.unprotect(p)
+	g.at(ds.Start)
+	g.cold(bytecode.RColdDisposeStep, t, c, 0)
+	g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), check, false)
+	g.bind(p.to)
+	g.at(ds.Start)
+	g.cold(bytecode.RColdDisposeStep, t, c, bytecode.DisposeFail)
+	g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), check, false)
+	g.bind(done)
+	g.at(ds.Start)
+	g.cold(bytecode.RColdDisposeStep, t, c, bytecode.DisposeFinish)
 }
 
 // catchReg is the register a catch clause's value goes to: its binding's,
@@ -275,13 +396,17 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 	var target ast.Expr
 	lexical := false
 	fresh := -1
+	var using ast.DeclKind
 	switch l := left.(type) {
 	case *ast.VarDecl:
-		if l.Kind != ast.DeclVar && l.Kind != ast.DeclLet && l.Kind != ast.DeclConst || len(l.Decls) != 1 || l.Decls[0].Init != nil {
+		if l.Kind != ast.DeclVar && l.Kind != ast.DeclLet && l.Kind != ast.DeclConst && !l.Kind.IsUsing() || len(l.Decls) != 1 || l.Decls[0].Init != nil {
 			g.fail("a for-of or for-in head's declaration")
 			return
 		}
 		target, lexical = l.Decls[0].Target, l.Kind != ast.DeclVar
+		if l.Kind.IsUsing() {
+			using = l.Kind
+		}
 	case ast.Expr:
 		target = l
 	}
@@ -331,7 +456,9 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 		g.closeRegs([]int{fresh})
 	}
 	val := dst
-	if val < 0 {
+	if val < 0 || using != 0 {
+		// A using head's value is added to the turn's resources before
+		// its binding is initialized.
 		val = g.alloc()
 	}
 	g.at(pos)
@@ -342,10 +469,29 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 		g.protect(p)
 	}
 	defer g.hold()()
-	if dst < 0 {
-		g.storeValue(id, val)
+	if using != 0 {
+		// Each turn's value is disposed of at the turn's end, before the
+		// loop goes on or, leaving, closes its iterator.
+		g.usingScope(int(id.Pos()), using == ast.DeclAwaitUsing, func() {
+			async := 0
+			if using == ast.DeclAwaitUsing {
+				async = 1
+			}
+			g.at(int(id.Pos()))
+			g.cold(bytecode.RColdAddDisposable, g.usingCaps[len(g.usingCaps)-1], val, async)
+			if dst >= 0 {
+				g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(dst), r16(val), 0))
+			} else {
+				g.storeValue(id, val)
+			}
+			g.stmt(body)
+		})
+	} else {
+		if dst < 0 {
+			g.storeValue(id, val)
+		}
+		g.stmt(body)
 	}
-	g.stmt(body)
 	g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), l.cont, false)
 	if p != nil {
 		g.unprotect(p)

@@ -286,6 +286,18 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		v, err := deleteVar(r, f, f.cl, f.cl.names[w.B()])
 		regs[w.A()] = v
 		return err
+	case bytecode.RColdImport:
+		options := Undefined
+		if w.C()&3 == 2 {
+			options = regs[w.B()+1]
+		}
+		regs[w.A()] = r.importCall(uint32(w.C()>>2), regs[w.B()], options)
+		return nil
+	case bytecode.RColdImportMeta:
+		regs[w.A()] = r.importMeta(f.cl.env)
+		return nil
+	case bytecode.RColdNewDispose, bytecode.RColdAddDisposable, bytecode.RColdDispose, bytecode.RColdDisposeStep:
+		return r.regColdDispose(w, regs)
 	case bytecode.RColdGenEntry, bytecode.RColdEndParams, bytecode.RColdAwait,
 		bytecode.RColdYieldStar, bytecode.RColdIterResume, bytecode.RColdIterUnpackDelegate,
 		bytecode.RColdForAwaitOfStart, bytecode.RColdAsyncIterNext, bytecode.RColdIterResult,

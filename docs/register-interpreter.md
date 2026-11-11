@@ -1449,14 +1449,29 @@ regdiff cases and test262 in register mode on its directories:
    alone (69). A function that names eval without calling it has an
    arguments binding the stack form fills for an eval that never comes;
    nothing reads it, it has no register, and none is made (217). What
-   the record does not resolve is now one form, 642 functions of
-   test262's: dynamic import, `import(x)`, `import.source(x)` and
-   `import.defer(x)`, whose callee the parser makes a name.
+   the record did not resolve was one form, 642 functions of test262's:
+   dynamic import, `import(x)`, `import.source(x)` and
+   `import.defer(x)`, whose callee the parser makes a name -- done: a
+   cold `import` of the specifier and the options in a window, at the
+   call's position, as the stack form's; `import.meta` is `import_meta`
+   (cold).
 8. **eval and `with`** (757 direct evals, 527 functions beside an eval's
    variables, a with or an Annex B function, 11 more): binding
    descriptors for what an eval can reach.
-9. **`using`** (41), the finally depth (completion dispatch, no cap), the
-   debugger's code (statement markers in register code), and the caps.
+9. **`using` and `await using`** (177) -- done (regcomp's try.go,
+   `usingScope`): a statement list, a for head or a for-of head that
+   declares with using is a scope whose resources are in a register of
+   its own (`new_dispose_capability`), each value added as it is
+   declared, before its binding is initialized (`add_disposable`), and a
+   finally clause that disposes of them, compiled for each way out as
+   any other: the normal end and each exit with no exception to fold in
+   (`dispose`), a throw with the one it folds in. An await using scope's
+   disposal is a loop of `dispose_step`s, each running the disposers
+   until one leaves a value to await, which the loop awaits in a handler
+   whose throw the next step folds in, as the stack form's
+   compileDispose. Then the finally depth (completion dispatch, no cap),
+   the debugger's code (statement markers in register code), and the
+   caps.
 9b. **Labelled statements that are no loop, declarations in switches,
    delete of a name** (69, 36 and 41) -- done. A labelled statement of any
    other kind is a target only a break naming it reaches (`loop.named`),

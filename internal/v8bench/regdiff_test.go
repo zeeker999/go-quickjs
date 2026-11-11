@@ -1569,3 +1569,58 @@ function e3() { "use strict"; return eval }
 	regDiff(t, src, []string{`t1(5)`, `t1(100)`, `t2(5, 0)`, `t2(100, 0)`, `t3(7, 8)`, `t4(5)`, `t4(80)`, `t5(1, 2, 3, 4)`,
 		`e1()`, `e2(1, 2)`, `typeof e3()`})
 }
+
+// TestRegDiffImportCalls compares import(), import.source() and
+// import.defer() calls: their arguments' order, the promise, and what it
+// settles to with no loader, read once the jobs have run.
+func TestRegDiffImportCalls(t *testing.T) {
+	src := `
+var log = [], settled = [];
+function i1() { var p = import((log.push(1), "./a.js"), (log.push(2), { with: {} })); p.catch(() => 0); return [p instanceof Promise, log.join()].join() }
+function i2(s) { return import(s).then(() => "ok", e => e.name) }
+function i3(s) { return import.source(s).then(() => "ok", e => e.name) }
+function i4(s) { return import.defer(s).then(() => "ok", e => e.name) }
+function i5() { "use strict"; return import({ toString() { throw new RangeError("x") } }).then(() => "ok", e => e.name) }
+function run() { for (var f of [() => i2("./a.js"), () => i3("./a.js"), () => i4("./a.js"), i5, () => i2(Symbol())]) f().then(v => settled.push(v)) }
+`
+	regDiff(t, src, []string{`i1()`, `run(); "ran"`, `settled.join()`})
+}
+
+// TestRegDiffUsing compares using and await using declarations: in
+// blocks, function bodies, for heads and for-of heads, sync and async,
+// left normally, by break, continue, return, a throw and a generator's
+// return, with disposers that throw (SuppressedError), null values and a
+// value with no disposer.
+func TestRegDiffUsing(t *testing.T) {
+	src := `
+var log = [];
+function res(n, fail) { return { [Symbol.dispose]() { log.push("d" + n); if (fail) throw new Error("e" + n) } } }
+function ares(n, fail) { return { async [Symbol.asyncDispose]() { log.push("a" + n); if (fail) throw new Error("ae" + n) } } }
+function show(f) { log = []; try { var v = f(); return log.join() + "=" + v } catch (e) { return log.join() + "!" + e.name + ":" + (e.message || "") + (e.error ? "/" + e.error.message + "/" + (e.suppressed && e.suppressed.message) : "") } }
+function u1() { using a = res(1), b = res(2); { using c = res(3); log.push("in") } return "r" }
+function u2() { using a = res(1, true); using b = res(2, true); return "r" }
+function u3() { using a = res(1); throw new Error("body") }
+function u4() { for (using x = res(1); log.length < 1;) log.push("t"); for (using y of [res(2), null, res(3)]) { if (!y) continue; log.push("b") } return "r" }
+function u5() { var r = []; for (var i = 0; i < 3; i++) { using z = res(i); if (i == 1) break; r.push(i) } return r.join() }
+function u6() { using q = 5 }
+function u7() { using n = null, u = undefined; return "ok" }
+function* u8() { using a = res(1); yield 1; yield 2 }
+function u9() { var g = u8(); g.next(); g.return(7); return "done" }
+function u10() { var fs = []; for (using x of [res(1), res(2)]) fs.push(() => typeof x); return fs.map(f => f()).join() }
+function u11(k) { switch (k) { case 1: { using a = res(1); return "one" } default: return "def" } }
+async function v1() { await using a = ares(1), b = res(2); log.push("body"); return "r" }
+async function v2() { await using a = ares(1, true); await using b = ares(2, true); return "r" }
+async function v3() { for (await using x of [ares(1), ares(2)]) log.push("b"); { await using y = null; } return "r" }
+async function v4() { await using a = ares(1); throw new Error("body") }
+async function v5() { for await (await using x of [ares(1), Promise.resolve(ares(2))]) log.push("b"); return "r" }
+async function shows(f) { log = []; try { var v = await f(); return log.join() + "=" + v } catch (e) { return log.join() + "!" + e.name + ":" + e.message + (e.error ? "/" + e.error.message + "/" + (e.suppressed && e.suppressed.message) : "") } }
+var aout = [];
+function runAsync() { (async () => { for (var f of [v1, v2, v3, v4, v5]) aout.push(await shows(f)) })(); return "ran" }
+`
+	calls := []string{}
+	for _, f := range []string{"u1", "u2", "u3", "u4", "u5", "u6", "u7", "u9", "u10", "() => u11(1)"} {
+		calls = append(calls, "show("+f+")")
+	}
+	calls = append(calls, `runAsync()`, `aout.join(" | ")`)
+	regDiff(t, src, calls)
+}

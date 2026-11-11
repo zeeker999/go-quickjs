@@ -597,6 +597,25 @@ const (
 	RColdSetUpvalCheck
 	// RColdDeleteVar: R[A] = delete of the global Names[B] (delete_var).
 	RColdDeleteVar
+	// RColdImport: R[A] = import(R[B]), import.defer or import.source by
+	// the phase C>>2 (an Import constant), with the options R[B+1] where C&3
+	// is 2 (the stack form's import). RColdImportMeta: R[A] = import.meta.
+	RColdImport
+	RColdImportMeta
+	// A scope with using declarations (the stack form's
+	// new_dispose_capability, add_disposable and dispose):
+	// RColdNewDispose: R[A] = a new stack of resources; RColdAddDisposable
+	// adds R[B] to R[A]'s, an await using's where C is 1;
+	// RColdDispose disposes of R[A]'s, a throw of R[B] leaving the scope
+	// where C is 1; RColdDisposeStep is a step of an await using scope's
+	// disposal, of R[B]'s resources, the mode in C (bytecode.DisposeStart,
+	// DisposeRecord, DisposeFail, DisposeFinish): R[A] is what a throw
+	// leaving or an await failing threw, and is then what to await, and
+	// R[A+1] whether there is one.
+	RColdNewDispose
+	RColdAddDisposable
+	RColdDispose
+	RColdDisposeStep
 )
 
 // The flags of regexp_lit's X.
@@ -674,7 +693,9 @@ var rColdNames = [...]string{
 	RColdAsyncIterNext: "async_iter_next", RColdIterResult: "iter_result",
 	RColdAsyncIterClose: "async_iter_close", RColdAsyncIterCheck: "async_iter_check",
 	RColdGetUpvalCheck: "get_upval_check", RColdSetUpvalCheck: "set_upval_check",
-	RColdDeleteVar: "delete_var",
+	RColdDeleteVar: "delete_var", RColdImport: "import", RColdImportMeta: "import_meta",
+	RColdNewDispose: "new_dispose_capability", RColdAddDisposable: "add_disposable", RColdDispose: "dispose",
+	RColdDisposeStep: "dispose_step",
 }
 
 func (op RColdOp) String() string {
