@@ -1035,35 +1035,6 @@ func (r *Runtime) regNewObject(cl *closure, w bytecode.RInstr) *Object {
 	return newShapedLiteral(root.orRoot(ClassObject, r.proto.object), ClassObject, m)
 }
 
-// regApplyArgs is apply_args: target.apply(this, the frame's arguments),
-// which the built-in apply makes with the arguments as passed, no object
-// made; any other apply is given one, made once and kept in the arguments
-// binding's register, slot, so that every call is given the same one.
-func (r *Runtime) regApplyArgs(f *frame, target, apply, this Value, slot *Value) (Value, error) {
-	if !apply.IsObject() || apply.Object() != r.applyFn {
-		o := *slot
-		if !o.IsObject() {
-			o = Obj(r.newArgumentsObject(f))
-			*slot = o
-		}
-		return r.call(apply, target, []Value{this, o})
-	}
-	args := f.args
-	if f.cl.fn.MappedArguments {
-		n := min(f.cl.fn.ParamCount, len(args), len(f.locals))
-		for i := 0; i < n; i++ {
-			if !f.locals[i].sameBits(args[i]) {
-				// A parameter has been assigned, which a mapped object
-				// would show.
-				args = append([]Value(nil), args...)
-				copy(args, f.locals[:n])
-				break
-			}
-		}
-	}
-	return r.applyCall(target, this, args)
-}
-
 // A register frame's regKind: what a stack trace reads of it where the heap
 // frame's this and newTarget are not written.
 const (

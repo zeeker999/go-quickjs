@@ -2155,6 +2155,35 @@ func (r *Runtime) regMarkedCall(f *frame, c *regCode, base, argc, pc int, m uint
 	return v, nil
 }
 
+// regApplyArgs is apply_args: target.apply(this, the frame's arguments),
+// which the built-in apply makes with the arguments as passed, no object
+// made; any other apply is given one, made once and kept in the arguments
+// binding's register, slot, so that every call is given the same one.
+func (r *Runtime) regApplyArgs(f *frame, target, apply, this Value, slot *Value) (Value, error) {
+	if !apply.IsObject() || apply.Object() != r.applyFn {
+		o := *slot
+		if !o.IsObject() {
+			o = Obj(r.newArgumentsObject(f))
+			*slot = o
+		}
+		return r.call(apply, target, []Value{this, o})
+	}
+	args := f.args
+	if f.cl.fn.MappedArguments {
+		n := min(f.cl.fn.ParamCount, len(args), len(f.locals))
+		for i := 0; i < n; i++ {
+			if !f.locals[i].sameBits(args[i]) {
+				// A parameter has been assigned, which a mapped object
+				// would show.
+				args = append([]Value(nil), args...)
+				copy(args, f.locals[:n])
+				break
+			}
+		}
+	}
+	return r.applyCall(target, this, args)
+}
+
 // regWindow is the frame's registers from base. The register form's
 // verifier proves that every register an instruction names is below the
 // frame's count, which the frame has, so the array's length is never
