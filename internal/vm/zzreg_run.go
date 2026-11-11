@@ -309,9 +309,12 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			}
 			goto slow
 		case bytecode.RBin, bytecode.RUnary, bytecode.RDefineField, bytecode.RNewObject,
-			bytecode.RNewArray, bytecode.RCold, bytecode.RGetPrivate, bytecode.RSetPrivate:
-			// What the loop has no fast path of its own for, and cold's
-			// operations, which may throw (regColdSub).
+			bytecode.RNewArray, bytecode.RCold, bytecode.RGetPrivate, bytecode.RSetPrivate,
+			bytecode.RAddIndex, bytecode.RAddIndexI:
+			// What the loop has no fast path of its own for, cold's
+			// operations, which may throw (regColdSub), and what runs
+			// per turn of no loop the suites have: a[i] += v and a[i] += 1
+			// of a key in a register (regAddIndex).
 			kept.pc = pc
 			if _, err := r.regSlow(f, c, &kept, regs); err != nil {
 				failed = err
@@ -741,39 +744,12 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				}
 			}
 			goto slow
-		case bytecode.RAddIndex:
-			// A dense element's number and a number added in place, as
-			// set_index's fast path writes an element. Only the number's
-			// word is written, as the tree's updates write it: a number's
-			// pointer word is nil already, and the word alone needs no
-			// write barrier's check.
-			if o, k, b := regs[w.A()], regs[w.B()], regs[w.C()]; o.IsObject() && k.IsNumber() && b.IsNumber() {
-				obj := o.Object()
-				if i, es := uint32(k.Number()), obj.elemsOf(); float64(i) == k.Number() && uint(i) < uint(len(es)) && obj.flags&(objMappedArguments|objSharedElems) == 0 {
-					if p := &es[i]; p.IsNumber() {
-						p.num = regNum(p.Number() + b.Number()).num
-						continue
-					}
-				}
-			}
-			goto slow
 		case bytecode.RAddIndexK:
 			if o, b := regs[w.A()], regs[w.B()]; o.IsObject() && b.IsNumber() {
 				obj := o.Object()
 				if i, es := uint(w.C()), obj.elemsOf(); i < uint(len(es)) && obj.flags&(objMappedArguments|objSharedElems) == 0 {
 					if p := &es[i]; p.IsNumber() {
 						p.num = regNum(p.Number() + b.Number()).num
-						continue
-					}
-				}
-			}
-			goto slow
-		case bytecode.RAddIndexI:
-			if o, k := regs[w.A()], regs[w.B()]; o.IsObject() && k.IsNumber() {
-				obj := o.Object()
-				if i, es := uint32(k.Number()), obj.elemsOf(); float64(i) == k.Number() && uint(i) < uint(len(es)) && obj.flags&(objMappedArguments|objSharedElems) == 0 {
-					if p := &es[i]; p.IsNumber() {
-						p.num = regNum(p.Number() + float64(w.SC())).num
 						continue
 					}
 				}

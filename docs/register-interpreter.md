@@ -443,6 +443,14 @@ the ones Go allows:
   - At d931057d the loop was at 4,981, 19 below the limit; with the
     shared taken tail and `append` and `str_freeze` as cases of their own
     it is at 4,875, 125 below.
+  - **A case no suite runs per turn leaves the loop whole.** Counted over
+    Octane, the V8 suite, AWFY and the micro-benchmarks, `add_index` and
+    `add_index_imm` (`a[i] += v`, `a[i] += 1`; 126 and 112 nodes) ran
+    957 times in all: they are labels of the slow path's case, which
+    `regSlow` answers (`regAddIndex`), their opcode values unchanged.
+    The loop is at 4,629, 371 below. What stays was counted too:
+    `add_index_k` and `jtypeof` run only in micro-benchmarks made for
+    them, `get_index_pre` is 0.66% of the V8 suite's instructions.
 - **The hot code is one block.** `zzreg_run.go` holds, declared first
   and in this order, `runReg`; the call and its return, `regCallW` and
   `regEnterW`; what a call runs out of line, `regDirect` (a built-in's
