@@ -269,7 +269,7 @@ func (r *Runtime) regGenStep(st *iterState, g *generator) (Value, bool, error) {
 	if len(f.openUpvalues) != 0 {
 		f.openUpvalues = f.openUpvalues[:0]
 	}
-	got, err := r.regGenResume(g, Undefined, resumeNext)
+	got, err := r.regGenNext(g)
 	r.frameDepth--
 	if err != nil {
 		st.done = true
@@ -623,4 +623,33 @@ func (r *Runtime) regSettled(v Value) (Value, bool) {
 		return d.value, true
 	}
 	return Undefined, false
+}
+
+// regGenNext is regGenResume of next with undefined, a for-of's step
+// (regGenStep): a yield's, a loop's every step but its first, run past the
+// jump after it without regGenResume's other resumptions' switch. It is
+// last in the file, so that what comes before it, regDelegateNext's
+// steps among them, stays where it was.
+func (r *Runtime) regGenNext(g *generator) (resumeResult, error) {
+	c := g.cl.reg
+	pc := int(g.pc)
+	if pc <= 0 {
+		return r.regGenResume(g, Undefined, resumeNext)
+	}
+	w := regAt(c.code, pc-1)
+	if w.Op() != bytecode.RYield {
+		return r.regGenResume(g, Undefined, resumeNext)
+	}
+	g.vals[int(w.A())-int(c.genFrom)] = Undefined
+	g.state = genExecuting
+	v, sig, err := r.regGenRun(g, c, pc+1+int(regJumpOff(regAt(c.code, pc))))
+	if sig != nil {
+		g.delegating = sig.delegate
+		g.state = genSuspendedYield
+		res := resumeResult{value: sig.value, how: suspendHow(sig)}
+		sig.value = Undefined
+		return res, nil
+	}
+	g.state = genCompleted
+	return resumeResult{value: v, how: resumeDone}, err
 }

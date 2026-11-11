@@ -599,8 +599,15 @@ captures open on the window's registers move with it, pointed at the
 generator's copy on a suspension and back at the stack on a resumption
 (`regMoveUps`), so that two closures made in different resumptions share a
 binding. A generator of register code keeps its window in its `vals`,
-`numRegs` values and then, where the code keeps them, its arguments; its
-`pc` is a register pc, and `generator.reg` marks it.
+its registers from `genFrom` and then, where the code keeps them, its
+arguments; its `pc` is a register pc, and `generator.reg` marks it.
+`genFrom` is 2 where no closure the code makes captures the callee's
+register or this's and nothing reads a local by its register: a
+resumption makes those two again from the generator, whose `this` is
+this's register (an async arrow's lexical this). Each generator and
+async function keeps two values fewer: `extra_pair_gen` keeps 3, in
+the allocation of 4 rather than 8 (the tree's keeps its 2 locals), and
+`async_chain` is 7.8% faster.
 
 - **The code's first instruction is `gen_entry`** (cold), which a
   resumption that goes on skips: `runReg` starts at the pc it is given,
