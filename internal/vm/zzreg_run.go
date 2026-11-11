@@ -312,7 +312,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 			}
 			goto slow
 		case bytecode.RBin, bytecode.RUnary, bytecode.RDefineField, bytecode.RNewObject,
-			bytecode.RNewArray, bytecode.RCold:
+			bytecode.RNewArray, bytecode.RCold, bytecode.RGetPrivate, bytecode.RSetPrivate:
 			// What the loop has no fast path of its own for, and cold's
 			// operations, which may throw (regColdSub).
 			kept.pc = pc
@@ -873,7 +873,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		// had, and 127, invalid's.
 		case bytecode.RCallWT, bytecode.RCallMWT:
 			goto tail
-		case 40, 41, 42, 43:
+		case 42, 43:
 			goto invalid
 		case 127:
 			goto invalid
@@ -1415,7 +1415,7 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 	var v Value
 	var err error
 	switch w.Op() {
-	case bytecode.RCold:
+	case bytecode.RCold, bytecode.RGetPrivate, bytecode.RSetPrivate:
 		return Undefined, r.regColdSub(f, c, k, regs)
 	case bytecode.RGetGlobal:
 		v, err = r.regGetGlobal(f, cl, w)

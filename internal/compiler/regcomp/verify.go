@@ -91,6 +91,10 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 					ok = ok && int(k) < len(fn.Names)
 				}
 			}
+		case bytecode.RGetPrivate, bytecode.RSetPrivate:
+			// Aux: the cache site, or 0, and the name for the errors.
+			ok = reg(a) && reg(b) && reg(c) && w.X() == bytecode.RPrivateX && pc < len(rc.Aux) &&
+				site(uint16(rc.Aux[pc]>>16)) && int(rc.Aux[pc]&0xffff) < len(fn.Names)
 		case bytecode.RTypeof, bytecode.RAppend:
 			ok = reg(a) && reg(b)
 		case bytecode.RStrFreeze:
@@ -279,8 +283,7 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 	case bytecode.RColdClassGetterIndex, bytecode.RColdClassSetterIndex, bytecode.RColdClassIndex,
 		bytecode.RColdAddPrivateMethod, bytecode.RColdAddPrivateGetter, bytecode.RColdAddPrivateSetter,
 		bytecode.RColdDefinePrivate, bytecode.RColdDefinePrivateMethod, bytecode.RColdDefinePrivateGetter,
-		bytecode.RColdDefinePrivateSetter, bytecode.RColdGetPrivate, bytecode.RColdSetPrivate,
-		bytecode.RColdPrivateIn, bytecode.RColdSuperGetIndex, bytecode.RColdSuperSetIndex:
+		bytecode.RColdDefinePrivateSetter, bytecode.RColdPrivateIn, bytecode.RColdSuperGetIndex, bytecode.RColdSuperSetIndex:
 		return reg(a) && reg(b) && reg(w.C())
 	case bytecode.RColdPrivateName, bytecode.RColdSuperGet, bytecode.RColdSuperSet:
 		return reg(a) && int(b) < len(fn.Names)

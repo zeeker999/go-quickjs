@@ -265,7 +265,7 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		bytecode.RColdNewPrivateMethods, bytecode.RColdAddPrivateMethod, bytecode.RColdAddPrivateGetter,
 		bytecode.RColdAddPrivateSetter, bytecode.RColdInstallPrivateMethods, bytecode.RColdDefinePrivate,
 		bytecode.RColdDefinePrivateMethod, bytecode.RColdDefinePrivateGetter, bytecode.RColdDefinePrivateSetter,
-		bytecode.RColdGetPrivate, bytecode.RColdSetPrivate, bytecode.RColdPrivateIn, bytecode.RColdSuperCall,
+		bytecode.RColdPrivateIn, bytecode.RColdSuperCall,
 		bytecode.RColdSuperForward, bytecode.RColdSuperSpread, bytecode.RColdSuperGet, bytecode.RColdSuperSet,
 		bytecode.RColdSuperBase, bytecode.RColdSuperGetIndex, bytecode.RColdSuperSetIndex, bytecode.RColdThis,
 		bytecode.RColdCheckThis, bytecode.RColdNewTarget, bytecode.RColdDerivedRet, bytecode.RColdDeleteSuper,
@@ -284,6 +284,12 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		v, err := r.regGlobalOpt(f, f.cl.names[w.B()])
 		regs[w.A()] = v
 		return err
+	}
+	// get_private and set_private, whose X is no sub-operation
+	// (bytecode.RPrivateX), which the loop's slow path sends here: so they
+	// move none of the hot block's code.
+	if w.Op() != bytecode.RCold {
+		return r.regPrivate(f, c, k, regs)
 	}
 	panic("register code: no cold operation " + bytecode.RColdOp(w.X()).String())
 }

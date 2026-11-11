@@ -1352,6 +1352,36 @@ function c13() { var r = []; class N { #x = 1; static t(o) { try { return o.#x }
 	regDiff(t, src, calls)
 }
 
+// TestRegDiffPrivateSites compares get_private and set_private, cached by
+// shape: loops over objects of one shape and of several, a class evaluated
+// twice, whose methods share their sites with keys of their own, a method
+// and an accessor read, a method and a getter-only accessor written, a
+// frozen object's field written, a member missing and a primitive, with
+// their stack traces.
+func TestRegDiffPrivateSites(t *testing.T) {
+	src := `
+function frames(e) { return e.name + ": " + e.message + " | " + e.stack.split("\n").slice(1, 3).map(function (s) { return s.trim() }).join(" | ") }
+function make() {
+	return class {
+		#n = 0; #m() { return this.#n } get #g() { return this.#n * 2 }
+		constructor(extra) { if (extra) this["e" + extra] = extra }
+		add(k) { for (var j = 0; j < k; j++) this.#n = (this.#n + j) | 0; return this.#n }
+		sum(k) { var s = 0; for (var j = 0; j < k; j++) s += this.#m() + this.#g; return s }
+		static peek(o) { try { return o.#n } catch (e) { return frames(e) } }
+		static poke(o, v) { try { o.#n = v; return o.#n } catch (e) { return frames(e) } }
+		static setM(o) { try { o.#m = 1 } catch (e) { return frames(e) } }
+		static setG(o) { try { o.#g = 1 } catch (e) { return frames(e) } }
+	};
+}
+var A = make(), B = make();
+function p1() { var r = [], a = new A(), b = new B(); r.push(a.add(50), b.add(7), a.sum(5), b.sum(5)); return r.join() }
+function p2() { var r = [], s = 0; for (var i = 0; i < 40; i++) { var o = new A(i % 5); s += o.add(i) + A.peek(o) } r.push(s, A.peek(new B()), B.peek(new A())); return r.join(" ; ") }
+function p3() { var a = new A(), r = [A.poke(a, 5), A.poke(Object.freeze(a), 6), A.poke({}, 1), A.poke(1, 1), A.peek(null), A.setM(a), A.setG(a)]; return r.join(" ; ") }
+function p4() { var a = new A(), b = new B(), s = 0; for (var i = 0; i < 30; i++) { s += A.poke(a, i) + B.poke(b, i * 2); if (i == 20) s += typeof A.poke(b, 1) } return s }
+`
+	regDiff(t, src, []string{`p1()`, `p2()`, `p3()`, `p4()`})
+}
+
 // TestRegDiffBigIntArith compares BigInt arithmetic in register code, which
 // regSlow makes by bigOp and bigBits and regCompare and regStep by their
 // short forms: an int64's and past it, division by zero, a Number beside a

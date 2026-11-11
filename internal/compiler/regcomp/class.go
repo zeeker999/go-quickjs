@@ -151,7 +151,7 @@ func (g *gen) specialGet(s sref, dst int) int {
 		g.cold(bytecode.RColdSuperGet, d, int(s.name), 0)
 	default:
 		g.at(s.pos)
-		g.aux(g.cold(bytecode.RColdGetPrivate, d, s.obj, s.key), g.privateAux(s))
+		g.aux(g.emit(bytecode.MakeR(bytecode.RGetPrivate, bytecode.RPrivateX, r16(d), r16(s.obj), r16(s.key))), g.privateAux(s))
 	}
 	return d
 }
@@ -166,7 +166,7 @@ func (g *gen) specialSet(s sref, v, pos int) {
 	case s.super:
 		g.cold(bytecode.RColdSuperSet, v, int(s.name), 0)
 	default:
-		g.aux(g.cold(bytecode.RColdSetPrivate, s.obj, v, s.key), g.privateAux(s))
+		g.aux(g.emit(bytecode.MakeR(bytecode.RSetPrivate, bytecode.RPrivateX, r16(s.obj), r16(v), r16(s.key))), g.privateAux(s))
 	}
 }
 

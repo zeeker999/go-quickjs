@@ -414,7 +414,7 @@ the ones Go allows:
   callback), `regNative`, `regLeafRun`, `regCloseUpvalues`; and what an
   iteration runs out of line, `regSlow` and its operators, `regElemMiss`,
   `regSetMiss`, `regBackEdge`, `regAppend`, `regCharCodeAt`,
-  `regIterNext`, `regLit`, `regMarkedCall`. Go lays a package's functions
+  `regIterNext`, `regLit`, `regMarkedCall`, `regApplyArgs`. Go lays a package's functions
   out in file order, so the distances between them -- which decide what
   shares the op cache's sets -- depend on their own sizes alone, and the
   layout lock's lever Q (`zzreg_ru_layoutpad.go`, the anchor `runReg`)
@@ -464,7 +464,23 @@ the ones Go allows:
   list, and no hot operation is renumbered: its case's code would move.
   At the removal of the translation reference the free values were 24,
   29, 36, 37, 40, 41, 42 and 43, and 127 is `invalid`'s; `iter_next`
-  took 24, `regexp_lit` 29, and the tail calls 36 and 37.
+  took 24, `regexp_lit` 29, the tail calls 36 and 37, and `get_private`
+  and `set_private`, a class's reads and writes of its private members,
+  40 and 41. They have no code in the loop: their values are labels of
+  the slow path's case, `regSlow` passes them with `cold` to
+  `regColdSub`, whose switch on X passes `RPrivateX` (0xff, no
+  sub-operation) on at its end to `regPrivate`, in `zzreg_class.go`,
+  before the block. That is a dispatch fewer than as `cold` operations
+  (`regColdClass`), and moves nothing of the block: `private_field` went
+  from 60.6 to 57.0 ns (the tree 24.1). As cases of their own -- a call
+  each, as `append` is, inline or after `tail` -- it was 38.5 ns, but
+  the 60 nodes changed `runReg`'s spill slots: a slot at 0x80 went to
+  0x78, every instruction using it three bytes shorter, the code from
+  the 765th instruction on moved, and `crypto_am3` was 8.6% slower at
+  every placement. A case in `regSlow` grew it by 64 bytes and moved
+  the block after it; a switch on the operation at `regColdSub`'s head
+  with the functions in the block moved `regColdWrap`, and
+  `bigint64_fnv1a` was 5.8% slower at every placement.
 
 What remains is Go's: a register store of a `Value` is a write-barrier
 check, the loop's instruction word is still saved at the dispatch where a

@@ -87,59 +87,6 @@ func (r *Runtime) regColdClass(f *frame, c *regCode, pc int, w bytecode.RInstr, 
 		if a.IsObject() && b.IsObject() {
 			r.definePrivateAccessor(a.Object(), regPrivateKey(f, x), b.Object(), op == bytecode.RColdDefinePrivateGetter)
 		}
-	case bytecode.RColdGetPrivate:
-		if !b.IsObject() {
-			return r.throwTypeError("cannot read a private member of %s", r.describe(b))
-		}
-		aux := regAuxAt(c, pc)
-		ob, key := b.Object(), regPrivateKey(f, x)
-		// The member where the site's cache remembers it for the object's
-		// shape, or found and remembered, as the tree's privateRead does.
-		if site := aux >> 16; site != 0 {
-			e := &f.cl.ic[site]
-			if ob.shape == e.ownShape && ob.shape.keys[e.idx].key == key {
-				regs[w.A()] = ob.vals()[e.idx]
-				return nil
-			}
-			if p, h := e.polyEntry(ob); h == ob && ob.shape.keys[p.idx].key == key {
-				regs[w.A()] = ob.vals()[p.idx]
-				return nil
-			}
-			if i := ob.findOwn(key); i >= 0 && ob.shape.keys[i].flags&(propAccessor|propDeleted|propUninit) == 0 {
-				e.noteOwn(ob, i)
-				regs[w.A()] = ob.vals()[i]
-				return nil
-			}
-		}
-		v, err := r.getPrivate(ob, key, f.cl.names[aux&0xffff])
-		if err != nil {
-			return err
-		}
-		regs[w.A()] = v
-	case bytecode.RColdSetPrivate:
-		if !a.IsObject() {
-			return r.throwTypeError("cannot write a private member of %s", r.describe(a))
-		}
-		aux := regAuxAt(c, pc)
-		ob, key := a.Object(), regPrivateKey(f, x)
-		if site := aux >> 16; site != 0 {
-			e := &f.cl.ic[site]
-			if ob.shape == e.ownShape && ob.shape.keys[e.idx].key == key {
-				ob.vals()[e.idx] = b
-				return nil
-			}
-			if p, h := e.polyEntry(ob); h == ob && ob.shape.keys[p.idx].key == key {
-				ob.vals()[p.idx] = b
-				return nil
-			}
-			if i := ob.findOwn(key); i >= 0 &&
-				ob.shape.keys[i].flags&(propAccessor|propDeleted|propUninit|propWritable) == propWritable {
-				e.noteOwn(ob, i)
-				ob.vals()[i] = b
-				return nil
-			}
-		}
-		return r.setPrivate(ob, key, f.cl.names[aux&0xffff], b)
 	case bytecode.RColdPrivateIn:
 		if !b.IsObject() {
 			return r.throwTypeError("the right operand of \"in\" must be an object, not %s", r.describe(b))
@@ -241,6 +188,92 @@ func (r *Runtime) regColdClass(f *frame, c *regCode, pc int, w bytecode.RInstr, 
 		regCloseRegs(f, regs, int(w.A()), int(w.B()))
 	}
 	return nil
+}
+
+// regPrivate is get_private or set_private, which regColdSub passes on.
+func (r *Runtime) regPrivate(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value) error {
+	if regAt(c.code, k.pc-1).Op() == bytecode.RGetPrivate {
+		return r.regGetPrivate(f, c, k, regs)
+	}
+	return r.regSetPrivate(f, c, k, regs)
+}
+
+// regGetPrivate is get_private, a slow path of runReg's, R[A] = R[B].#R[C]:
+// the member where the site's cache (Aux's high 16 bits) remembers it for
+// the object's shape, or found and remembered, as the tree's privateRead
+// does, and getPrivate's answer otherwise. A function's caches are its
+// closures', which every evaluation of the class shares, each with names
+// of its own: the key at the remembered index is checked.
+//
+//go:noinline
+func (r *Runtime) regGetPrivate(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value) error {
+	pc := k.pc - 1
+	w := regAt(c.code, pc)
+	b := regs[w.B()]
+	if !b.IsObject() {
+		f.pc = c.src[pc] + 1
+		return r.throwTypeError("cannot read a private member of %s", r.describe(b))
+	}
+	aux := c.rc.Aux[pc]
+	ob, key := b.Object(), regPrivateKey(f, regs[w.C()])
+	if site := aux >> 16; site != 0 {
+		e := &f.cl.ic[site]
+		if ob.shape == e.ownShape && ob.shape.keys[e.idx].key == key {
+			regs[w.A()] = ob.vals()[e.idx]
+			return nil
+		}
+		if p, h := e.polyEntry(ob); h == ob && ob.shape.keys[p.idx].key == key {
+			regs[w.A()] = ob.vals()[p.idx]
+			return nil
+		}
+		if i := ob.findOwn(key); i >= 0 && ob.shape.keys[i].flags&(propAccessor|propDeleted|propUninit) == 0 {
+			e.noteOwn(ob, i)
+			regs[w.A()] = ob.vals()[i]
+			return nil
+		}
+	}
+	f.pc = c.src[pc] + 1
+	v, err := r.getPrivate(ob, key, f.cl.names[aux&0xffff])
+	if err != nil {
+		return err
+	}
+	regs[w.A()] = v
+	return nil
+}
+
+// regSetPrivate is set_private, a slow path of runReg's, R[A].#R[C] = R[B]:
+// cached as regGetPrivate's read is, a writable field's.
+//
+//go:noinline
+func (r *Runtime) regSetPrivate(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value) error {
+	pc := k.pc - 1
+	w := regAt(c.code, pc)
+	a := regs[w.A()]
+	if !a.IsObject() {
+		f.pc = c.src[pc] + 1
+		return r.throwTypeError("cannot write a private member of %s", r.describe(a))
+	}
+	aux := c.rc.Aux[pc]
+	ob, key, v := a.Object(), regPrivateKey(f, regs[w.C()]), regs[w.B()]
+	if site := aux >> 16; site != 0 {
+		e := &f.cl.ic[site]
+		if ob.shape == e.ownShape && ob.shape.keys[e.idx].key == key {
+			ob.vals()[e.idx] = v
+			return nil
+		}
+		if p, h := e.polyEntry(ob); h == ob && ob.shape.keys[p.idx].key == key {
+			ob.vals()[p.idx] = v
+			return nil
+		}
+		if i := ob.findOwn(key); i >= 0 &&
+			ob.shape.keys[i].flags&(propAccessor|propDeleted|propUninit|propWritable) == propWritable {
+			e.noteOwn(ob, i)
+			ob.vals()[i] = v
+			return nil
+		}
+	}
+	f.pc = c.src[pc] + 1
+	return r.setPrivate(ob, key, f.cl.names[aux&0xffff], v)
 }
 
 // regPrivateKey is the key of the private name whose binding holds v, as

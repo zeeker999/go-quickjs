@@ -299,7 +299,7 @@ func TestPrivateSitesCached(t *testing.T) {
 	if rc := fn.Reg; rc != nil && regTier.Load() {
 		sites = sites[:0]
 		for pc, w := range rc.Code {
-			if w.Op() == bytecode.RCold && (bytecode.RColdOp(w.X()) == bytecode.RColdGetPrivate || bytecode.RColdOp(w.X()) == bytecode.RColdSetPrivate) {
+			if w.Op() == bytecode.RGetPrivate || w.Op() == bytecode.RSetPrivate {
 				sites = append(sites, rc.Aux[pc]>>16)
 			}
 		}

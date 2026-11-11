@@ -183,8 +183,14 @@ const (
 	// RRet returns R[A]; RRetUndef returns undefined.
 	RRet
 	RRetUndef
-	_ // free: 40, the translation reference's call, removed
-	_ // free: 41, the translation reference's call_method, removed
+	// RGetPrivate: R[A] = R[B].#R[C], a read of a private member, a
+	// per-turn step of a class's methods (value 40, out of the free list):
+	// Aux is its cache site in the high 16 bits, 0 for none, and its name,
+	// with its #, for the errors in the low. X is RPrivateX.
+	RGetPrivate
+	// RSetPrivate: R[A].#R[C] = R[B], a write of a private member (value
+	// 41, out of the free list), its Aux and X as RGetPrivate's.
+	RSetPrivate
 	_ // free: 42, the translation reference's new, removed
 	_ // free: 43, the translation reference's close_upvals, removed
 
@@ -392,6 +398,11 @@ const RCmpTrue = 0x80
 // RColdOp is cold's sub-operation, in its X.
 type RColdOp uint8
 
+// RPrivateX is the X of get_private and set_private, which the loop's
+// slow path passes, as cold's, to regColdSub: no sub-operation, so that
+// its switch passes them on.
+const RPrivateX = 0xff
+
 const (
 	// RColdNewRegExp: R[A] = the RegExp literal of Constants[BC].
 	RColdNewRegExp RColdOp = iota
@@ -506,9 +517,7 @@ const (
 	// list R[A] under key R[C]; RColdInstallPrivateMethods gives this the
 	// methods of list R[A]; RColdDefinePrivate, RColdDefinePrivateMethod,
 	// RColdDefinePrivateGetter and RColdDefinePrivateSetter add field,
-	// method or accessor R[B] to R[A] under key R[C]; RColdGetPrivate,
-	// R[A] = R[B].#R[C]; RColdSetPrivate, R[A].#R[C] = R[B];
-	// RColdPrivateIn, R[A] = whether R[B] has the private member keyed
+	// method or accessor R[B] to R[A] under key R[C]; RColdPrivateIn, R[A] = whether R[B] has the private member keyed
 	// R[C] (#x in o).
 	RColdPrivateName
 	RColdNewPrivateMethods
@@ -520,8 +529,6 @@ const (
 	RColdDefinePrivateMethod
 	RColdDefinePrivateGetter
 	RColdDefinePrivateSetter
-	RColdGetPrivate
-	RColdSetPrivate
 	RColdPrivateIn
 	// super's and this's: RColdSuperCall, R[A] = this, bound by a call of
 	// the parent constructor with the B arguments in the registers from C
@@ -626,8 +633,7 @@ var rColdNames = [...]string{
 	RColdAddPrivateGetter: "add_private_getter", RColdAddPrivateSetter: "add_private_setter",
 	RColdInstallPrivateMethods: "install_private_methods", RColdDefinePrivate: "define_private",
 	RColdDefinePrivateMethod: "define_private_method", RColdDefinePrivateGetter: "define_private_getter",
-	RColdDefinePrivateSetter: "define_private_setter", RColdGetPrivate: "get_private",
-	RColdSetPrivate: "set_private", RColdPrivateIn: "private_in", RColdSuperCall: "super_call",
+	RColdDefinePrivateSetter: "define_private_setter", RColdPrivateIn: "private_in", RColdSuperCall: "super_call",
 	RColdSuperForward: "super_forward", RColdSuperSpread: "super_spread", RColdSuperGet: "super_get",
 	RColdSuperSet: "super_set", RColdSuperBase: "super_base", RColdSuperGetIndex: "super_get_index",
 	RColdSuperSetIndex: "super_set_index", RColdThis: "this_bound", RColdCheckThis: "check_this_init",
@@ -819,7 +825,7 @@ var rOpNames = [...]string{
 	RPostInc: "post_inc", RPostDec: "post_dec", RGetLength: "get_length",
 	RJEq: "jeq", RJNe: "jne", RJEqI: "jeq_imm", RJNeI: "jne_imm", RJNull: "jnull", RJNotNull: "jnotnull",
 	RThrow: "throw", RInstanceOf: "instanceof", RIn: "in", RDelete: "delete", RArguments: "arguments", RNewArrayK: "new_array_k", RAddProp: "add_prop", RAddPropI: "add_prop_imm", RApplyArgs: "apply_args",
-	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RSwitch: "switch", RJTypeof: "jtypeof", RTypeof: "typeof", RSwitchTypeof: "switch_typeof", RNewObjectLit: "new_object_lit", RAppend: "append", RStrFreeze: "str_freeze", RCharCodeAt: "char_code_at", RIterNext: "iter_next", RLit: "regexp_lit", RCold: "cold", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
+	RGetIndexPre: "get_index_pre", RGetIndexPost: "get_index_post", RNewArrayE: "new_array_empty", RAddIndex: "add_index", RAddIndexK: "add_index_k", RAddIndexI: "add_index_imm", RSwitch: "switch", RJTypeof: "jtypeof", RTypeof: "typeof", RSwitchTypeof: "switch_typeof", RNewObjectLit: "new_object_lit", RAppend: "append", RStrFreeze: "str_freeze", RCharCodeAt: "char_code_at", RIterNext: "iter_next", RLit: "regexp_lit", RGetPrivate: "get_private", RSetPrivate: "set_private", RCold: "cold", RJLtU: "jlt_upval", RJNLtU: "jnlt_upval", RJLeU: "jle_upval", RJNLeU: "jnle_upval",
 }
 
 // MethodCall reports whether op is call_method_w or its tail form, whose
@@ -875,6 +881,10 @@ func (rc *RegCode) Format(pc int) string {
 		return fmt.Sprintf("%s %s name%d, %s", op, r(w.A()), w.C(), r(w.B()))
 	case RInstanceOf, RIn, RDelete:
 		return fmt.Sprintf("%s %s, %s, %s", op, r(w.A()), r(w.B()), r(w.C()))
+	case RGetPrivate:
+		return fmt.Sprintf("%s %s, %s.#%s", op, r(w.A()), r(w.B()), r(w.C()))
+	case RSetPrivate:
+		return fmt.Sprintf("%s %s.#%s, %s", op, r(w.A()), r(w.C()), r(w.B()))
 	case RApplyArgs:
 		return fmt.Sprintf("%s %s = %s.apply(%s, %s, arguments %s)", op, r(w.A()), r(w.B()+1), r(w.B()), r(w.B()+2), r(w.C()))
 	case RThrow, RArguments, RStrFreeze:
