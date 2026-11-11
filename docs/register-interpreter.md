@@ -1204,7 +1204,11 @@ regdiff cases and test262 in register mode on its directories:
    end checked for a restart and a tail call after every call, made
    `call_fib` 12%, `call_mutual` 14% and the typed arrays' callbacks 6 to
    16% slower at every placement. `regTailCallW` makes the call
-   `regCallW`'s until the stack is `tailCallDepth` deep. There, a
+   `regCallW`'s until the stack is `tailCallDepth` deep; what only a tail
+   call runs is in `zzzy_regtail.go`, after every other file, since in
+   `zzreg_call.go` it moved the call path's functions against `applyCall`
+   and `nativeFrame` and made `forward_loop` 11% and
+   `string_switch_miss` 8% slower at every placement. There, a
    callee of register code of the form's own layout that keeps no
    arguments takes the frame over in place (`regTailInPlace`): the
    frame's captured bindings closed, the arguments moved to the
