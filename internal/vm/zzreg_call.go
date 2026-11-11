@@ -664,6 +664,7 @@ var regStackOp = [128]bytecode.Op{
 	bytecode.RShlI: bytecode.OpShl, bytecode.RShrI: bytecode.OpShr, bytecode.RUShrI: bytecode.OpUShr,
 	bytecode.RBitAnd: bytecode.OpBitAnd, bytecode.RBitOr: bytecode.OpBitOr, bytecode.RBitXor: bytecode.OpBitXor,
 	bytecode.RShl: bytecode.OpShl, bytecode.RShr: bytecode.OpShr, bytecode.RUShr: bytecode.OpUShr,
+	bytecode.RAdd: bytecode.OpAdd, bytecode.RSub: bytecode.OpSub, bytecode.RMul: bytecode.OpMul,
 }
 
 // regJumpCmp is each compare-and-branch operation's comparison: its stack

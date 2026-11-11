@@ -2630,6 +2630,14 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	} else {
 		g.args(n.Args, w+2)
 	}
+	if op == bytecode.RCallMW && argc == 2 && (mname == "asUintN" || mname == "asIntN") && len(g.code) > 0 {
+		// X.asUintN(w, x op y): the operator, the arguments' last
+		// instruction, may make the call's value at once (RColdWrap).
+		if l := g.code[len(g.code)-1]; int(l.A()) == w+3 && wrapsOp(l.Op()) {
+			g.code[len(g.code)-1] = bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdWrap), l.A(), l.B(), l.C())
+			g.aux(len(g.code)-1, uint32(l.Op()))
+		}
+	}
 	d := dst
 	if d < 0 {
 		d = w
@@ -2783,6 +2791,18 @@ func (g *gen) regexpLitCall(n *ast.Call, dst int, dead bool) (int, bool) {
 	g.aux(at, k)
 	g.mark(at, bytecode.RMarkLitRecv|deadMark(dead && name == "exec"))
 	return d, true
+}
+
+// wrapsOp reports whether op is an operator RColdWrap may make: one the
+// tree's wrapCall makes BigInt.asUintN's and asIntN's of from its
+// operands (wrapsOperator).
+func wrapsOp(op bytecode.ROp) bool {
+	switch op {
+	case bytecode.RAdd, bytecode.RSub, bytecode.RMul,
+		bytecode.RBitAnd, bytecode.RBitOr, bytecode.RBitXor, bytecode.RShl, bytecode.RShr:
+		return true
+	}
+	return false
 }
 
 // tailOp is call op's form in tail position.

@@ -555,6 +555,15 @@ const (
 	// registers from R[A], whose bindings a scope's end leaves: the next
 	// entry of the scope makes new ones (close_regs).
 	RColdCloseRegs
+	// RColdWrap is R[A] = R[B] op R[C], op the operator Aux names -- add,
+	// sub, mul or a bitwise one but >>> -- whose value is the second
+	// argument of the two of the call of a method named asUintN or asIntN
+	// right after it, X.asUintN(w, x op y): where the callee is
+	// BigInt.asUintN or asIntN and x and y BigInts held in their Values,
+	// it makes the call's value, x op y of width w, at once (wrapShort)
+	// and passes the call over -- never a BigInt past 64 bits, which the
+	// call would cut down again -- as the tree's wrapCall does (wrap).
+	RColdWrap
 )
 
 // The flags of regexp_lit's X.
@@ -608,8 +617,8 @@ var rColdNames = [...]string{
 	RColdSetHomeObject: "set_home_object", RColdSetProtoOf: "set_proto_of",
 	RColdArrayPush: "array_push", RColdArraySpread: "array_spread", RColdCallSpread: "call_spread",
 	RColdAssignConst: "assign_const", RColdCheckGlobalRef: "check_global_ref",
-	RColdAssertResolved: "assert_resolved",
-	RColdNewClass:       "new_class", RColdSetFieldInit: "set_field_init", RColdDefineMethod: "define_method",
+	RColdAssertResolved: "assert_resolved", RColdWrap: "wrap",
+	RColdNewClass: "new_class", RColdSetFieldInit: "set_field_init", RColdDefineMethod: "define_method",
 	RColdClassGetter: "class_getter", RColdClassSetter: "class_setter",
 	RColdClassGetterIndex: "class_getter_index", RColdClassSetterIndex: "class_setter_index",
 	RColdClassIndex: "class_index", RColdPrivateName: "private_name",

@@ -1351,3 +1351,47 @@ function c13() { var r = []; class N { #x = 1; static t(o) { try { return o.#x }
 		`class TopA { constructor(v) { this.v = v } } class TopB extends TopA { get w() { return this.v + 1 } } new TopB(1).w`}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffBigIntArith compares BigInt arithmetic in register code, which
+// regSlow makes by bigOp and bigBits and regCompare and regStep by their
+// short forms: an int64's and past it, division by zero, a Number beside a
+// BigInt, >>>, and the loops of the micro-benchmarks.
+func TestRegDiffBigIntArith(t *testing.T) {
+	src := `
+var B = BigInt;
+function ops(a, b) {
+	var r = [a + b, a - b, a * b, a & b, a | b, a ^ b, a << B(3), a >> B(2), a < b, a <= b, a > b, a >= b, a == b, a === b];
+	if (b !== B(0)) r.push(a / b, a % b);
+	r.push(a ** B(3));
+	var c = a; c++; r.push(c); c--; c--; r.push(c);
+	return r.join();
+}
+function big() { var x = B(1); for (var i = 0; i < 70; i++) x = x * B(3) + B(i); return String(x) + " " + String(x % B(1000003)) + " " + String(x >> B(64)) }
+function divmod() { var s = 0, t = B(0); for (var j = 0; j < 50; j++) { var x = B(9007199254740993000) + B(j); while (x > B(0)) { t += x % B(10); x /= B(10) } } return String(t) }
+function xorshift() { var x = B(88172645463325252); for (var i = 0; i < 100; i++) { x ^= BigInt.asUintN(64, x << B(13)); x ^= x >> B(7); x ^= BigInt.asUintN(64, x << B(17)) } return String(x) }
+function errs() { var r = []; try { B(1) / B(0) } catch (e) { r.push(e.name) } try { B(1) + 1 } catch (e) { r.push(e.name) } try { B(1) >>> B(1) } catch (e) { r.push(e.name) } return r.join() }
+function wraps(x, y) {
+	var r = [], n = [64, 63, 32, 1, 0, 65, 3.5, -1], m = { asUintN: function (w, v) { return "m" + w + ":" + v } };
+	for (var i = 0; i < n.length; i++) {
+		var w = n[i];
+		try {
+			r.push(BigInt.asUintN(w, x + y), BigInt.asUintN(w, x - y), BigInt.asUintN(w, x * y), BigInt.asIntN(w, x * y),
+				BigInt.asUintN(w, x & y), BigInt.asIntN(w, x | y), BigInt.asUintN(w, x ^ y), BigInt.asIntN(w, x << B(13)),
+				BigInt.asUintN(w, x >> B(7)), BigInt.asIntN(w, x << y), m.asUintN(w, x * y))
+		} catch (e) { r.push(e.name) }
+	}
+	try { BigInt.asUintN(64, x + 1) } catch (e) { r.push(e.name) }
+	try { BigInt.asUintN(64, 2 * 3) } catch (e) { r.push(e.name) }
+	r.push(BigInt.asUintN(64, 5 * 3), tw(x, y), tw(tw(x, y), x))
+	return r.join()
+}
+function tw(x, y) { "use strict"; return BigInt.asIntN(64, x * y) }
+`
+	calls := []string{
+		"ops(B(7), B(3))", "ops(B(-7), B(3))", "ops(B(9223372036854775807), B(2))", "ops(B(-9223372036854775808), B(-1))",
+		"ops(B(2) ** B(70), B(12345))", "ops(B(5), B(0))", "big()", "divmod()", "xorshift()", "errs()",
+		"wraps(B(7), B(3))", "wraps(B(-123456789012345), B(3))", "wraps(B(2) ** B(63) + B(5), B(-1))", "wraps(B(2) ** B(70), B(9))",
+		"wraps(B(-9223372036854775808), B(-1))",
+	}
+	regDiff(t, src, calls)
+}

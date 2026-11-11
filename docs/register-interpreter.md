@@ -1347,7 +1347,12 @@ regdiff cases and test262 in register mode on its directories:
    **object literals of every property kind** (1,482) -- done, with
    spreads, holes, optional chains, `??`, logical assignment and
    assignment to a constant (regcomp's literal.go). A BigInt is a
-   constant. A template's parts go to a window that one `concat` joins,
+   constant. `X.asUintN(w, x op y)` and `asIntN`'s -- a 64-bit hash's or
+   generator's step -- make their operator `wrap`, cold, right before
+   the call: where the callee is BigInt's and x and y BigInts held in
+   their Values, it makes the call's value on machine words
+   (`wrapShort`, the tree's `wrapCall`) and passes the call over, with
+   no BigInt past 64 bits on the heap. A template's parts go to a window that one `concat` joins,
    converting each with ToString; a substitution is converted at once
    (`to_string`, cold) only where a later part may run code, which could
    see the order. A tagged template is a call, a method's with its

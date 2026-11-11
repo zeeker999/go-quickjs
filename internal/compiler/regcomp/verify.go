@@ -238,6 +238,14 @@ func coldOK(rc *bytecode.RegCode, fn *bytecode.Function, pc int, w bytecode.RIns
 		return reg(a) && reg(b)
 	case bytecode.RColdCheckCoercible, bytecode.RColdToPropertyKey:
 		return reg(a)
+	case bytecode.RColdWrap:
+		// The operator Aux names, whose value is the second argument of
+		// the two-argument method call right after it.
+		if !reg(a) || !reg(b) || !reg(w.C()) || pc+1 >= len(rc.Code) || !wrapsOp(bytecode.ROp(auxAt(rc, pc))) {
+			return false
+		}
+		cw := rc.Code[pc+1]
+		return (cw.Op() == bytecode.RCallMW || cw.Op() == bytecode.RCallMWT) && cw.X() == 2 && int(cw.A())+3 == int(a)
 	case bytecode.RColdObjectRest:
 		return reg(a) && reg(b) && pc < len(rc.Aux) && int(w.C())+int(rc.Aux[pc]) <= rc.NumRegs
 	case bytecode.RColdRestParam:

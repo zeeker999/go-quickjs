@@ -219,6 +219,8 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		}
 		regs[w.A()] = v
 		return nil
+	case bytecode.RColdWrap:
+		return r.regColdWrap(c, k, w, regs)
 	case bytecode.RColdForOfStart, bytecode.RColdForInStart:
 		start := (*Runtime).startForOf
 		if bytecode.RColdOp(w.X()) == bytecode.RColdForInStart {
@@ -548,4 +550,43 @@ func (r *Runtime) regStepNext(st *iterState) (Value, bool, error) {
 		return Undefined, false, err
 	}
 	return v, true, nil
+}
+
+// regColdWrap is wrap, R[A] = R[B] op R[C] for X.asUintN(w, x op y) or
+// asIntN's, the call right after it: where the callee is BigInt.asUintN
+// or asIntN and x and y BigInts held in their Values, the call's value
+// made at once, x op y of the call's width, as the tree's wrapCall makes
+// it (wrapShort), and the call passed over -- a built-in that has nothing
+// else to do; anything else the operator's value as ever, for the call.
+func (r *Runtime) regColdWrap(c *regCode, k *regKept, w bytecode.RInstr, regs *[1 << 16]Value) error {
+	op := regStackOp[bytecode.ROp(regAuxAt(c, k.pc-1))&127]
+	a, b := regs[w.B()], regs[w.C()]
+	if a.isShortBig() && b.isShortBig() {
+		cw := regAt(c.code, k.pc)
+		if fv := regs[cw.A()]; fv.IsObject() {
+			if fd := fv.Object().fn(); fd != nil && (fd.mathOp == mathAsUintN || fd.mathOp == mathAsIntN) {
+				if v, ok := wrapShort(fd.mathOp == mathAsIntN, regs[int(cw.A())+2], op, a, b); ok {
+					regs[w.A()] = v
+					regs[cw.B()] = v
+					k.pc++
+					return nil
+				}
+			}
+		}
+	}
+	var v Value
+	var err error
+	switch op {
+	case bytecode.OpAdd:
+		v, err = r.add(a, b)
+	case bytecode.OpSub, bytecode.OpMul:
+		v, err = r.arith(op, a, b)
+	default:
+		v, err = r.regBinary(op, a, b)
+	}
+	if err != nil {
+		return err
+	}
+	regs[w.A()] = v
+	return nil
 }

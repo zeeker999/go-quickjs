@@ -1740,6 +1740,11 @@ func (r *Runtime) regCompare(op bytecode.Op, a, b Value) (bool, error) {
 	if a.IsNumber() && b.IsNumber() {
 		return compareFloats(op, a.Number(), b.Number()), nil
 	}
+	if res, ok := pureBigCompare[struct{}](op, a, b); ok {
+		// Two BigInts an int64 holds, as the tree's compare nodes order
+		// them.
+		return res, nil
+	}
 	c, err := r.compare(a, b)
 	if err != nil {
 		return false, err
@@ -1749,6 +1754,12 @@ func (r *Runtime) regCompare(op bytecode.Op, a, b Value) (bool, error) {
 
 // regStep is ++ or -- of a value that is not a number.
 func (r *Runtime) regStep(a Value, delta float64) (Value, error) {
+	if a.IsBigInt() {
+		if v, ok := shortArith(bytecode.OpAdd, a, shortBig(int64(delta))); ok {
+			return v, nil
+		}
+		return r.bigOp(bytecode.OpAdd, a, shortBig(int64(delta)))
+	}
 	n, err := r.toNumeric(a)
 	if err != nil {
 		return Undefined, err
