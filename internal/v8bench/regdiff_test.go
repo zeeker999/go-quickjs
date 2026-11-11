@@ -1,12 +1,14 @@
 package v8bench
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	quickjs "github.com/go-quickjs/go-quickjs"
 	"github.com/go-quickjs/go-quickjs/internal/compiler"
@@ -1030,6 +1032,26 @@ function deepTry(n) { try { return thrower(n) } catch (e) { return e.message } }
 	calls := []string{`even(100001)`, `odd(77777)`, `o.k = 0, o.down(50000)`, `sum(200000, 0)`, `cond(1001)`, `nat(5)`,
 		`viaGen()`, `viaArgs(4)`, `deepTry(50000)`, `deep(100)`, `trace(5)`, `trace(10)`}
 	regDiff(t, src, calls)
+}
+
+// TestRegTailCallsStop checks that an endless loop of calls in tail
+// position, each made in its frame's place (regRestartRun), polls as a
+// loop does: the host's context stops it.
+func TestRegTailCallsStop(t *testing.T) {
+	withRegTier(true, func() {
+		rt := quickjs.New()
+		defer rt.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		for _, src := range []string{
+			`"use strict"; function inf(n) { return inf(n + 1) } inf(0)`,
+			`"use strict"; function a(n) { return b(n + 1) } function b(n) { return a(n + 1) } a(0)`,
+		} {
+			if _, err := rt.EvalContext(ctx, src); err == nil {
+				t.Errorf("%s: an endless loop of calls in tail position ended", src)
+			}
+		}
+	})
 }
 
 // TestRegDiffTopLevel compares top-level code as register code: a script's

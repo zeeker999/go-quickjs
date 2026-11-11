@@ -883,6 +883,15 @@ func (r *Runtime) regRestartRun(f *frame) (Value, error) {
 	for err == errRegRestart {
 		rc := r.regRestart
 		r.regRestart = nil
+		// A call made in the frame's place polls as a call that makes a
+		// frame does (regEnterW): an endless loop of calls in tail
+		// position is stopped as a loop is.
+		if r.interruptCounter--; r.interruptCounter <= 0 {
+			if err = r.checkInterruptNow(); err != nil {
+				v = Undefined
+				break
+			}
+		}
 		v, err = r.runReg(f, rc, 0)
 	}
 	// The captures of the code the frame was given, which its caller
