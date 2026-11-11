@@ -265,7 +265,7 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 				}
 			}
 			kept.pc = pc
-			if regSetMiss(c, &kept, regs) {
+			if r.regSetMiss(c, &kept, regs) {
 				pc = kept.pc
 				continue
 			}
@@ -884,7 +884,26 @@ func (r *Runtime) runReg(f *frame, c *regCode) (Value, error) {
 		continue
 	typed:
 		// An element get_index and the immediate forms have not found
-		// dense: a typed array's, out of line (regElemMiss).
+		// dense: a typed array's, read here (regTypedAt, regTypedLoad),
+		// the operation and the key decoded again as a miss path may,
+		// or out of line (regElemMiss), which set_index_imm's store
+		// takes. Here rather than in get_index's case, whose code the
+		// hot loops run: there it moved the loop's blocks, and empty
+		// loops were 13% slower at every placement.
+		if w.Op() != bytecode.RSetIndexI {
+			if o := regs[w.B()]; o.IsObject() {
+				k := float64(w.C())
+				if w.Op() == bytecode.RGetIndex {
+					k = regs[w.C()].num
+				}
+				if t, p := regTypedAt(r, o.Object(), k); t != nil {
+					if f, ok := regTypedLoad(t, p); ok {
+						regs[w.A()] = regNum(f)
+						continue
+					}
+				}
+			}
+		}
 		kept.pc = pc
 		if regElemMiss(c, &kept, regs) {
 			pc = kept.pc

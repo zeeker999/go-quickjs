@@ -219,6 +219,12 @@ func regElemMiss(c *regCode, k *regKept, regs *[1 << 16]Value) bool {
 						v = Float(float64(math.Float32frombits(binary.LittleEndian.Uint32(b[j<<2:]))))
 					case elemFloat64:
 						v = Float(math.Float64frombits(binary.LittleEndian.Uint64(b[j<<3:])))
+					case elemBigInt64:
+						// A BigInt kind's here too, rather than through
+						// elemAt, typedRead and the slow path's read.
+						v = shortBig(int64(binary.LittleEndian.Uint64(b[j<<3:])))
+					case elemBigUint64:
+						v = bigFromUint64(binary.LittleEndian.Uint64(b[j<<3:]))
 					default:
 						goto long
 					}
@@ -288,12 +294,19 @@ func regElemMiss(c *regCode, k *regKept, regs *[1 << 16]Value) bool {
 // of it can throw or run code.
 //
 //go:noinline
-func regSetMiss(c *regCode, k *regKept, regs *[1 << 16]Value) bool {
+func (r *Runtime) regSetMiss(c *regCode, k *regKept, regs *[1 << 16]Value) bool {
 	w := regAt(c.code, k.pc-1)
 	if obj := regs[w.A()]; obj.IsObject() && obj.object().class == ClassArray {
 		key, v := regs[w.B()], regs[w.C()]
 		o := obj.object()
 		return appendElem(o, key.num, v) || fillHole(o, key.num, v)
+	} else if v := regs[w.C()]; obj.IsObject() && v.IsNumber() {
+		// A typed array's element stored as native code stores it, before
+		// regElemMiss's call: in set_index's case, the store made the
+		// loop's appends 6 to 9% slower at every placement.
+		if t, p := regTypedAt(r, obj.object(), regs[w.B()].num); t != nil && regTypedStore(t, p, v.num) {
+			return true
+		}
 	}
 	return regElemMiss(c, k, regs)
 }
@@ -689,3 +702,86 @@ type regKept struct {
 	pc  int
 	pad [2]int
 }
+
+// regTypedAt is the address of a typed array's element at k, read and
+// written as native code does (cacheView): from the view's data pointer,
+// below its length, while its epoch is the runtime's. Nil -- another
+// object, a key that is no index in the view, a stale view, a BigInt
+// kind's -- leaves the element to regElemMiss. get_index's and set_index's cases call it once
+// the dense element has missed, so that asm.js-style heap reads and writes
+// make no call. It, regTypedLoad and regTypedStore are three so that each
+// stays below Go's inlining budget, which TestIntendedInlining pins.
+func regTypedAt(r *Runtime, o *Object, k float64) (*typedArrayData, unsafe.Pointer) {
+	if o.class == ClassTypedArray {
+		if t, ok := o.dataOf().(*typedArrayData); ok && t.epoch == r.typedEpoch && t.kind <= elemFloat64 {
+			if i := uint32(k); float64(i) == k && uint(i) < uint(t.length) {
+				return t, unsafe.Add(t.data, uintptr(i)<<elemShifts[t.kind&15])
+			}
+		}
+	}
+	return nil, nil
+}
+
+// regTypedLoad is the element at p of every kind but Float16Array's, as
+// a float64 the caller makes a Value with regNum, whose NaN check is the
+// float kinds' canonical NaN: in here it took the helper past Go's
+// inlining budget.
+func regTypedLoad(t *typedArrayData, p unsafe.Pointer) (float64, bool) {
+	switch t.kind {
+	case elemInt32:
+		return float64(*(*int32)(p)), true
+	case elemUint8, elemUint8Clamped:
+		return float64(*(*uint8)(p)), true
+	case elemUint16:
+		return float64(*(*uint16)(p)), true
+	case elemInt16:
+		return float64(*(*int16)(p)), true
+	case elemInt8:
+		return float64(*(*int8)(p)), true
+	case elemUint32:
+		return float64(*(*uint32)(p)), true
+	case elemFloat64:
+		return *(*float64)(p), true
+	case elemFloat32:
+		return float64(*(*float32)(p)), true
+	}
+	return 0, false
+}
+
+// regTypedStore stores n as the element at p: a float kind's any number,
+// an integer kind's (Uint8ClampedArray's aside) ToInt32(n) wrapped to its
+// width, for n below 2^63 in magnitude, as regInt32 takes it. False -- a
+// view of an immutable buffer, another kind, a NaN, an infinity or a
+// larger number -- leaves the store to regSetMiss.
+func regTypedStore(t *typedArrayData, p unsafe.Pointer, n float64) bool {
+	if t.readonly {
+		return false
+	}
+	switch t.kind {
+	case elemFloat64:
+		*(*float64)(p) = n
+		return true
+	case elemFloat32:
+		*(*float32)(p) = float32(n)
+		return true
+	}
+	if math.Float64bits(n)&(1<<63-1) < regInt64Bound {
+		switch x := int64(n); t.kind {
+		case elemInt32, elemUint32:
+			*(*int32)(p) = int32(x)
+			return true
+		case elemInt8, elemUint8:
+			*(*int8)(p) = int8(x)
+			return true
+		case elemInt16, elemUint16:
+			*(*int16)(p) = int16(x)
+			return true
+		}
+	}
+	return false
+}
+
+// regInt64Bound is 2^63's bits: a float64 whose bits without the sign are
+// below it converts to an int64 exactly, and a NaN's, an infinity's and a
+// tagged value's are not.
+const regInt64Bound = 0x43e0000000000000

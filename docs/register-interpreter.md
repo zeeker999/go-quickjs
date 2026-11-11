@@ -451,6 +451,27 @@ the ones Go allows:
     The loop is at 4,629, 371 below. What stays was counted too:
     `add_index_k` and `jtypeof` run only in micro-benchmarks made for
     them, `get_index_pre` is 0.66% of the V8 suite's instructions.
+  - **A typed array's element is read in the loop.** Once the dense
+    element has missed, `get_index`'s and `get_index_imm`'s shared miss
+    label (`typed`) reads a typed array's element as native code does:
+    the view's data pointer and length, cached while its epoch is the
+    runtime's (`cacheView`), `regTypedAt` (no BigInt kind), then
+    `regTypedLoad` for every kind but Float16Array, a float64 the loop
+    makes a Value with `regNum`. Each helper is within Go's inlining
+    budget of 80 (in one, with the Value made inside, it was 125); the
+    loop spends 97 nodes. A store is `regSetMiss`'s, one call, by
+    `regTypedStore`: a float kind's number, an integer kind's (clamped
+    aside) ToInt32 of a number below 2^63. Any other kind, key or view
+    goes on to `regElemMiss`, which now reads the BigInt kinds too.
+    Measured over placements, each placement of the code mattered more
+    than its instructions: the read in `get_index`'s case laid the
+    loop's blocks out otherwise (a call's tail before the dispatch), and
+    `empty_down_loop`, `prop_update`, `array_for` and eight more were 5
+    to 14% slower at every placement, Mandreel 11%; the store in
+    `set_index`'s case, before `regSetMiss`, made the appends
+    (`array_prop_create`, `array_index_append`, `array_new_fill_down`)
+    6 to 9% slower; a class test put first there, the empty loops and
+    nine more 6 to 12%.
 - **The hot code is one block.** `zzreg_run.go` holds, declared first
   and in this order, `runReg`; the call and its return, `regCallW` and
   `regEnterW`; what a call runs out of line, `regDirect` (a built-in's
