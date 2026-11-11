@@ -1269,7 +1269,12 @@ What stands in the way is the loop, not the proof:
   inlining `regInt32`, `regTruth` and a dozen more into every case.
 - **A cheaper check is not one.** `regInt32` without its tag test (a NaN
   fails the round trip's compare too) made `loop_int32` 8.1% slower at
-  every placement and zlib 1.6%: dropped.
+  every placement and zlib 1.6%: dropped. Nor is ToInt32 by truncation:
+  `regInt32` as one compare of the bits without the sign against 2^63's
+  (a tagged value, a NaN and the infinities fail it) and `int64(f)`'s
+  low 32 bits, which takes fractions and numbers past 2^32 too, made
+  Mandreel 2.5% and zlib 2.2% slower over four placements (35131ca9 ->
+  it): dropped. `TestRegBitwiseToInt32` pins what either answers.
 
 So the raw registers need room first: a wider opcode field and a loop
 whose rarely hot cases leave it for `regCold`, or a second loop for code
