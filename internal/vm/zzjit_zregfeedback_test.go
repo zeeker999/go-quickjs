@@ -68,6 +68,11 @@ for (var k = 0; k < 20; k++) work(pt, 5);
 		t.Fatal(err)
 	}
 	f := r.jitRegFeedbackFor(cl, p)
+	// The SSA builder takes the program with its feedback: the sites
+	// below are what it is compiled for.
+	if _, err := ssa.BuildWith(p, f); err != nil {
+		t.Fatalf("the SSA build of work's register program: %v", err)
+	}
 	pt := r.global.getOwn(r.atoms.intern("pt")).value().Object()
 	shape := uintptr(unsafe.Pointer(pt.shape))
 	globals := r.global

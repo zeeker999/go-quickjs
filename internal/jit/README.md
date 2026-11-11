@@ -1111,18 +1111,47 @@ one `Host`, alone in its origin: Go runs the whole register instruction.
 
 **The atomicity rule.** An exit anywhere in an origin's instructions runs
 the register instruction again from its start, in the interpreter. So
-nothing may leave once something of it has committed (`Instruction's
-Commits`): a register written, memory changed, code run -- a property's
-read may call a getter, a store a setter. An expansion puts what may
-leave first and writes its registers last; where a commit cannot come
-last, what follows it is `Generic`: it never leaves, what it does not
-expect being Go's to make. `add_prop`'s addition and store are Generic
-after its read, and a literal's fields after the first. `ir.Validate`
-enforces the rule -- a jump only to an origin's first instruction, a Host
-alone, every instruction that may leave before any that commits but the
-Generic -- and `Evaluate` checks it as it runs: a Generic instruction
-whose check fails after a commit is `ErrGeneric`, which the evaluator has
-no Go for.
+nothing may leave once something of it has committed (`Program's
+CommitsAt`): a register written, memory changed, code run -- a property's
+read may call a getter, a store a setter. A field defined on, or a write
+to, an object the origin itself made in a scratch slot commits nothing:
+an exit before the object reaches a register makes another. An expansion
+puts what may leave first and writes its registers last; where a commit
+cannot come last, what follows it is `Generic`: it never leaves, what it
+does not expect being Go's to make. `add_prop`'s addition and store are
+Generic after its read. `ir.Validate` enforces the rule -- a jump only to
+an origin's first instruction, a Host alone, every instruction that may
+leave before any that commits but the Generic -- and `Evaluate` checks it
+as it runs: a Generic instruction whose check fails after a commit is
+`ErrGeneric`, unless a `Runner` makes it.
+
+**The SSA build.** `ssa.Build` takes a register program as it takes the
+stack form's: a state's PC is the origin's register pc, its depth 0, a
+Host built as an exit to the interpreter, which runs the register
+instruction (or as what its feedback says, where the feedback knows the
+register instruction). The builder keeps the atomicity rule as it builds
+(`atomicInstruction`): what an instruction commits depends on how it is
+built -- a property's read calls an accessor only where the feedback gives
+accessors; an arithmetic operation, a comparison or a string's addition,
+Generic or not, has Go make only what runs nothing, leaving the rest to an
+exit -- and a build that makes an exit after a commit in the same origin
+is refused, by its register pc. A Generic instruction is built as one
+whose speculation failed before (the builder's `generic`). A tail call is
+not marked in register code's program: the builder reads a tail call's
+operands from the operand stack's top. `TestLowerRegCorpusRefusals` builds
+both forms' programs, without feedback, and counts what the builder
+refuses, beside what the lowerings do.
+
+**The oracle.** `internal/jit/oracle` runs register programs through
+`EvaluateHost` with a heap of its own, the differential tests' model of
+the VM at a host exit (`ir.Runner`): globals, objects with prototypes,
+arrays, strings, closures and their captured registers (closed at a
+scope's end, `close_regs`), the program's own functions called by
+evaluating their programs, a few built-ins, and the exceptions it is sure
+of. What it does not model it declines, and the evaluation leaves there.
+`TestRegLowerEvaluate` (internal/v8bench) compares what it returns, or
+throws, with the register interpreter's answer for each call of the
+register interpreter's differential corpus.
 
 **Feedback.** The VM's feedback for a register program is
 `jitRegFeedback` (`internal/vm/zzjit_zregfeedback.go`), asked by the

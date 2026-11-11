@@ -7,13 +7,16 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/compiler"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 	"github.com/go-quickjs/go-quickjs/internal/parser"
 )
 
@@ -63,6 +66,71 @@ func regLoweringOf(fn *bytecode.Function) (string, []error) {
 	return "entry: " + reason(err), invalid
 }
 
+// loweredFor is the program LowerSSA's chain makes of fn (ssaRefusal's:
+// the entry's, else, for host-only code, the hot or the callee's
+// lowering), or, reg, LowerReg's; nil where it refuses.
+func loweredFor(fn *bytecode.Function, reg bool) *ir.Program {
+	type lower func(*bytecode.Function) (*ir.Program, error)
+	chain := [3]lower{LowerSSA, LowerSSAHot, LowerSSAInline}
+	if reg {
+		if fn.Reg == nil {
+			return nil
+		}
+		on := func(l func(*bytecode.RegCode, *bytecode.Function) (*ir.Program, error)) lower {
+			return func(fn *bytecode.Function) (*ir.Program, error) { return l(fn.Reg, fn) }
+		}
+		chain = [3]lower{on(LowerReg), on(LowerRegHot), on(LowerRegInline)}
+	}
+	p, err := chain[0](fn)
+	switch {
+	case err == nil:
+	case HostOnly(err) && (fn.Async || fn.Generator):
+		p, err = chain[1](fn)
+	case HostOnly(err):
+		p, err = chain[2](fn)
+	}
+	if err != nil {
+		return nil
+	}
+	return p
+}
+
+// regPC is an error's register pc.
+var regPC = regexp.MustCompile(`register pc ([0-9]+)`)
+
+// pcIn takes the pcs out of an error's text, which is then its kind.
+var pcIn = regexp.MustCompile(`(register )?pc -?[0-9]+`)
+
+// ssaBuilt is what ssa.Build makes of the program fn's lowering makes, or
+// "" where the lowering refuses: "built", or "ssa: <reason>".
+func ssaBuilt(fn *bytecode.Function, reg bool) string {
+	p := loweredFor(fn, reg)
+	if p == nil {
+		return ""
+	}
+	if int64(len(p.Code))*int64(max(p.Locals+p.StackSize, 256))*8+32<<10 > 32<<20 {
+		// Past what the VM compiles at v8bench's budget of 32 MiB (its
+		// jitCompileBytes, of the stack form's slots and instructions).
+		return "past the compile budget"
+	}
+	if _, err := ssa.BuildWith(p, nil); err != nil {
+		why := pcIn.ReplaceAllString(err.Error(), "pc N")
+		if m := regPC.FindStringSubmatch(err.Error()); reg && m != nil {
+			// Which register operation, by its name.
+			if pc, _ := strconv.Atoi(m[1]); pc < len(fn.Reg.Code) {
+				w := fn.Reg.Code[pc]
+				name := w.Op().String()
+				if w.Op() == bytecode.RCold {
+					name = bytecode.RColdOp(w.X()).String()
+				}
+				why += " (" + name + ")"
+			}
+		}
+		return why
+	}
+	return "built"
+}
+
 // TestLowerRegCorpusRefusals is Stage 3a-2's gate (docs/register-
 // interpreter.md, Stage 3, section 6): every function of the .js files
 // under each directory QUICKJS_JIT_REG_REFUSALS lists (a path list: the V8
@@ -80,8 +148,11 @@ func TestLowerRegCorpusRefusals(t *testing.T) {
 	defer compiler.SetRegisterForm(false)
 	for _, dir := range dirs {
 		stack, regs := map[string]int{}, map[string]int{}
+		// What the SSA builder makes, without feedback, of the programs
+		// both lowerings make.
+		stackSSA, regSSA := map[string]int{}, map[string]int{}
 		var invalid []error
-		files, total := 0, 0
+		files, total, budgetLogs := 0, 0, 0
 		var walk func(fn *bytecode.Function, count bool)
 		walk = func(fn *bytecode.Function, count bool) {
 			if count && !fn.TopLevel {
@@ -90,6 +161,18 @@ func TestLowerRegCorpusRefusals(t *testing.T) {
 				r, bad := regLoweringOf(fn)
 				regs[r]++
 				invalid = append(invalid, bad...)
+				if k := ssaBuilt(fn, false); k != "" {
+					stackSSA[k]++
+				}
+				if k := ssaBuilt(fn, true); k != "" {
+					regSSA[k]++
+					if sk := ssaBuilt(fn, false); sk != "" && k != sk && budgetLogs < 20 {
+						budgetLogs++
+						p, q := loweredFor(fn, false), loweredFor(fn, true)
+						t.Logf("%s: stack form %s, %d instructions of %d slots; register code %s, %d of %d (%d registers)",
+							fn.Name, ssaBuilt(fn, false), len(p.Code), p.Locals+p.StackSize, k, len(q.Code), q.Locals, q.Regs)
+					}
+				}
 			}
 			for _, c := range fn.Constants {
 				if c.Kind == bytecode.ConstFunction && c.Fn != nil {
@@ -160,7 +243,14 @@ func TestLowerRegCorpusRefusals(t *testing.T) {
 		for _, k := range rows {
 			fmt.Fprintf(&out, "%7d %7d  %s\n", stack[k], regs[k], k)
 		}
+		fmt.Fprintf(&out, "SSA builds, without feedback, of what each lowered: refused, stack form %d, register code %d\n", refusedSSA(stackSSA), refusedSSA(regSSA))
+		for _, k := range sortedKeys(stackSSA, regSSA) {
+			fmt.Fprintf(&out, "%7d %7d  %s\n", stackSSA[k], regSSA[k], k)
+		}
 		t.Log("\n" + out.String())
+		if refusedSSA(regSSA) > refusedSSA(stackSSA) {
+			t.Errorf("%s: the SSA builder refuses %d register programs, %d of the stack form's", dir, refusedSSA(regSSA), refusedSSA(stackSSA))
+		}
 		for i, err := range invalid {
 			if i == 20 {
 				t.Errorf("and %d more", len(invalid)-20)
@@ -172,4 +262,36 @@ func TestLowerRegCorpusRefusals(t *testing.T) {
 			t.Errorf("%s: the register lowering refuses %d functions, the stack form's %d", dir, refused(regs), refused(stack))
 		}
 	}
+}
+
+// refusedSSA is how many of m's builds the builder refused: not those
+// past the compile budget, which the VM does not ask for.
+func refusedSSA(m map[string]int) int {
+	n := 0
+	for k, v := range m {
+		if k != "built" && k != "past the compile budget" {
+			n += v
+		}
+	}
+	return n
+}
+
+// sortedKeys are the keys of a and b, the most common first.
+func sortedKeys(a, b map[string]int) []string {
+	var ks []string
+	for k := range a {
+		ks = append(ks, k)
+	}
+	for k := range b {
+		if _, ok := a[k]; !ok {
+			ks = append(ks, k)
+		}
+	}
+	slices.SortFunc(ks, func(x, y string) int {
+		if c := cmp.Compare(max(a[y], b[y]), max(a[x], b[x])); c != 0 {
+			return c
+		}
+		return strings.Compare(x, y)
+	})
+	return ks
 }
