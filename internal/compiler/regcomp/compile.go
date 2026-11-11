@@ -251,6 +251,12 @@ func (g *gen) layout() bool {
 		}
 	}
 	params := fn.ParamCount
+	if fn.HasRest && params < n {
+		// The rest parameter's slot, after the others, is where rest_param
+		// makes its array (params): its register is kept for it whether or
+		// not anything reads it, or the binding given it would be written.
+		params++
+	}
 	next := regParams + params
 	for i := range g.slotReg {
 		switch {
@@ -263,7 +269,7 @@ func (g *gen) layout() bool {
 			g.slotReg[i] = -1
 		}
 	}
-	g.inits = next - regParams - params
+	g.inits = next - regParams - fn.ParamCount
 	if c := g.rec.Completion; c >= 0 {
 		g.completion = int(g.slotReg[c])
 	}
@@ -524,10 +530,10 @@ func (g *gen) body() {
 		// A generator's creation binds its parameters and stops here.
 		g.cold(bytecode.RColdEndParams, 0, 0, 0)
 	}
-	// Hoisted function declarations of the body; one in a block is left to
-	// the stack form.
+	// Hoisted function declarations of the body; a block's are made as the
+	// block is entered (enterBlock).
 	for _, s := range lit.Body {
-		if fd, ok := s.(*ast.FuncDecl); ok {
+		if fd := hoistable(s); fd != nil {
 			slot, ok := g.rec.Funcs[fd]
 			if !ok {
 				g.fail("a function declaration without a binding")
@@ -589,12 +595,6 @@ func simpleArguments(fn *bytecode.Function) bool {
 func (g *gen) switchStmt(n *ast.SwitchStmt, label labelSet) {
 	var all []ast.Stmt
 	for _, c := range n.Cases {
-		for _, s := range c.Body {
-			if _, ok := s.(*ast.FuncDecl); ok {
-				g.fail("a function declaration in a block")
-				return
-			}
-		}
 		all = append(all, c.Body...)
 	}
 	// switch (typeof x) of string cases alone looks x's type up, with no
@@ -888,6 +888,53 @@ func (g *gen) enterBlock(list []ast.Stmt) {
 			}
 		}
 	}
+	if len(list) == 0 || len(g.lit.Body) > 0 && &list[0] == &g.lit.Body[0] {
+		// The body's own functions are made before its first statement.
+		return
+	}
+	// A block's function declarations, made as it is entered, after its
+	// lexical bindings, as the stack form's hoistBlockDeclarations makes
+	// them. In a loop each entry's bindings are new ones: the captures of
+	// the turn before are closed first, all of them, since one function
+	// may capture another's binding, which is made after it.
+	var funcs []*ast.FuncDecl
+	for _, s := range list {
+		fd := hoistable(s)
+		if fd == nil {
+			continue
+		}
+		slot, ok := g.rec.Funcs[fd]
+		if !ok {
+			g.fail("a function declaration without a binding")
+			return
+		}
+		if g.inLoop() && g.fn.Locals[slot].Captured {
+			g.cold(bytecode.RColdCloseRegs, int(g.slotReg[slot]), 1, 0)
+		}
+		funcs = append(funcs, fd)
+	}
+	for _, fd := range funcs {
+		r := int(g.slotReg[g.rec.Funcs[fd]])
+		g.closure(fd.Fn, r)
+	}
+}
+
+// hoistable is the function declaration s is, through its labels, or nil:
+// the stack form's hoistableFunction but for an export.
+func hoistable(s ast.Stmt) *ast.FuncDecl {
+	for {
+		switch n := s.(type) {
+		case *ast.FuncDecl:
+			if n.Fn.Name != nil {
+				return n
+			}
+			return nil
+		case *ast.LabeledStmt:
+			s = n.Body
+		default:
+			return nil
+		}
+	}
 }
 
 func (g *gen) inLoop() bool {
@@ -913,9 +960,12 @@ func (g *gen) stmt(s ast.Stmt) {
 	case *ast.VarDecl:
 		g.varDecl(n)
 	case *ast.FuncDecl:
-		// Hoisted to the body's start; one in a block is the stack form's.
-		if !g.isTopLevel(n) {
-			g.fail("a function declaration in a block")
+		// Made as its list is entered. Annex B: a sloppy block's function
+		// is also assigned to its var as the declaration is evaluated, what
+		// the block's binding holds then, where the stack form recorded
+		// the var's store (emitAnnexBFunctionAlias).
+		if _, ok := g.rec.Write[n.Fn.Name]; ok {
+			g.storeIdent(n.Fn.Name, n.Fn.Name, false)
 		}
 	case *ast.ReturnStmt:
 		if g.fn.Async && g.fn.Generator && n.Arg != nil {
@@ -1071,15 +1121,6 @@ func (g *gen) ret(e ast.Expr) {
 	}
 	r := g.expr(e, -1)
 	g.retReg(r)
-}
-
-func (g *gen) isTopLevel(fd *ast.FuncDecl) bool {
-	for _, s := range g.lit.Body {
-		if s == ast.Stmt(fd) {
-			return true
-		}
-	}
-	return false
 }
 
 func (g *gen) pushLoop(label labelSet) *loop {

@@ -1510,3 +1510,42 @@ function d7() { var o = Object.freeze({b: 1}); return [delete o?.b, "b" in o].jo
 		`"q"; L: switch (1) { case 1: "s"; break L }`, `globalThis.gt = 1; var gw = 2; [delete gt, delete gw, typeof gt].join()`}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffBlockFunctions compares function declarations in blocks, in
+// switches and behind labels: strict code's, a block's own binding made as
+// the block is entered, Annex B's var assigned as the declaration is
+// evaluated, in loops, async ones, and a thrower's stack.
+func TestRegDiffBlockFunctions(t *testing.T) {
+	src := `
+function b1() { "use strict"; var r = []; { r.push(f()); function f() { return 1 } } return r.join() + typeof f }
+function b2() { var r = [typeof f]; { r.push(typeof f); function f() { return 2 } } r.push(typeof f); return r.join() }
+function b3() { { f = 1; function f() {} } return typeof f }
+function b4() { var fs = []; for (var i = 0; i < 3; i++) { function g() { return i } fs.push(g) } return fs.map(f => f()).join() + (fs[0] === fs[1]) }
+function b5() { var fs = []; for (let i = 0; i < 3; i++) { { function g() { return i } fs.push(g) } } return fs.map(f => f()).join() }
+function b6(v) { switch (v) { case 1: function s() { return "s" } return s(); default: return typeof s } }
+function b7() { L: function f() { return 7 } var r; { r = g(); L: M: function g() { return 8 } } return f() + r }
+function b8() { { async function af() { return 7 } var p = af() } return typeof af + (p instanceof Promise) }
+function b9() { var get = () => f; { function f() { return 9 } } return get()() }
+function b10(f) { { function f() {} } return typeof f }
+function b11() { { function thrower() { throw new Error("x") } } try { thrower() } catch (e) { return e.stack.split("\n").slice(0, 3).map(s => s.trim()).join(" | ") } }
+function b12() { var h = () => typeof g, x; { x = h(); function g() {} } return x + "," + typeof g }
+function b13() { var r = []; for (var i = 0; i < 2; i++) { r.push(typeof k); { function k() {} } } return r.join() }
+function b14() { "use strict"; var fs = []; for (let i = 0; i < 2; i++) { function q() { return i } fs.push(q) } return fs.map(f => f()).join() }
+`
+	calls := []string{`b1()`, `b2()`, `b3()`, `b4()`, `b5()`, `b6(1)`, `b6(2)`, `b7()`, `b8()`, `b9()`, `b10(1)`, `b11()`, `b12()`, `b13()`, `b14()`,
+		`{ function tf() { return "tf" } } tf()`, `"use strict"; { function ts() {} } typeof ts`, `{ tq = 5; function tq() {} } typeof tq`,
+		`L: function tl() { return "tl" } tl()`}
+	regDiff(t, src, calls)
+}
+
+// TestRegDiffRestArguments compares a rest parameter nothing reads beside
+// the arguments object, whose register the rest's array was made in.
+func TestRegDiffRestArguments(t *testing.T) {
+	src := `
+function r1(..._) { return arguments.toString() + arguments.length }
+function r2(x, ...r) { return arguments.length + ":" + x }
+function r3(x, ...[a, b]) { return arguments.length + ":" + a + b }
+function r4(...r) { var k = 1; return arguments.length + k }
+`
+	regDiff(t, src, []string{`r1(1, 2)`, `r2(1, 2, 3)`, `r3(1, 2, 3)`, `r4(4, 5)`, `r4()`})
+}

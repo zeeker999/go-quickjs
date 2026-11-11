@@ -1438,10 +1438,30 @@ regdiff cases and test262 in register mode on its directories:
 8. **eval and `with`** (757 direct evals, 527 functions beside an eval's
    variables, a with or an Annex B function, 11 more): binding
    descriptors for what an eval can reach.
-9. **`using`** (41), labelled blocks (11), declarations in switches (8),
-   function declarations in blocks (15), the
-   finally depth (completion dispatch, no cap), the debugger's code
-   (statement markers in register code), and the caps.
+9. **`using`** (41), the finally depth (completion dispatch, no cap), the
+   debugger's code (statement markers in register code), and the caps.
+9b. **Labelled statements that are no loop, declarations in switches,
+   delete of a name** (69, 36 and 41) -- done. A labelled statement of any
+   other kind is a target only a break naming it reaches (`loop.named`),
+   and a statement's labels are a set (`labelSet`): `a: b: while` is the
+   target of a break or a continue naming either, which the parser and
+   the stack compiler took as b's alone (fixed with it). A switch's case
+   block is one scope, entered once the discriminant is made
+   (`enterBlock` of every case's statements). delete of a name is false
+   for a binding and `delete_var` (cold) for a global, as the stack form
+   resolved it (the record's read of the operand); delete of an optional
+   chain's property deletes it, true where a link is nullish -- the stack
+   form deleted nothing (fixed with it).
+9c. **Function declarations in blocks, switches and behind labels**
+   (128, and the Annex B functions of item 8's count) -- done. A block's
+   functions are made as it is entered, after its lexical bindings, a
+   closure's capture closed first in a loop (`enterBlock`); a labelled
+   declaration is its list's, as an unlabelled one is (the stack form
+   never made one: fixed with it). Annex B's var is assigned as the
+   declaration is evaluated, with what the block's binding holds then
+   (B.3.3.1), a store the stack compiler records as the declaration's
+   name's write -- it assigned it as the block was entered, which Node
+   does not (fixed with it).
 
 ### Stage 3: the JIT and the tree tier
 

@@ -164,8 +164,10 @@ func (c *compiler) predeclareFunction(h hoistedFunc) {
 }
 
 // emitAnnexBFunctionAlias copies a block-scoped function into the var binding
-// that shares its name.
-func (c *compiler) emitAnnexBFunctionAlias(name string) {
+// that shares its name, id's: the register form is told the var's store
+// as id's write.
+func (c *compiler) emitAnnexBFunctionAlias(id *ast.Ident) {
+	name := id.Name
 	// Hoisting made sure nothing lexical stands in the way, other than a simple
 	// catch parameter, which the alias passes over to reach the var -- or the
 	// function declared at the top level, whose binding the var is. The
@@ -176,6 +178,7 @@ func (c *compiler) emitAnnexBFunctionAlias(name string) {
 		if l.name != name || l.depth >= c.depth || !l.varScoped() {
 			continue
 		}
+		c.reg.NoteWrite(id, regcomp.Res{Kind: regcomp.ResLocal, Index: l.slot})
 		c.emit(bytecode.OpDup, 0, 0)
 		c.emit(bytecode.OpSetLocal, l.slot, 0)
 		return
@@ -191,9 +194,11 @@ func (c *compiler) emitAnnexBFunctionAlias(name string) {
 	c.emit(bytecode.OpDup, 0, 0)
 	if b, known := c.callerBinding(name); known && b.VarScoped && !c.evalOwnVars[name] {
 		idx, _ := c.resolveUpvalue(name)
+		c.reg.NoteWrite(id, regcomp.Res{Kind: regcomp.ResUpval, Index: idx})
 		c.emit(bytecode.OpSetUpvalue, idx, 0)
 		return
 	}
+	c.reg.NoteWrite(id, regcomp.Res{Kind: regcomp.ResGlobalVar})
 	c.emit(bytecode.OpSetGlobal, c.nameIdx(name), 0)
 }
 
@@ -354,11 +359,8 @@ func (c *compiler) compileStatement(s ast.Stmt) {
 		// other var; the assignment, of what the block's binding holds,
 		// happens here, when the declaration is evaluated (B.3.3.1).
 		if c.annexB[n] {
-			if c.reg != nil {
-				c.reg.Bail = true
-			}
 			c.compileIdentReadStatic(n.Fn.Name)
-			c.emitAnnexBFunctionAlias(n.Fn.Name.Name)
+			c.emitAnnexBFunctionAlias(n.Fn.Name)
 			c.emit(bytecode.OpDrop, 0, 0)
 		}
 
