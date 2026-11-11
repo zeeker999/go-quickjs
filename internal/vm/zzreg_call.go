@@ -637,7 +637,7 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base, pc 
 						// for good: its calls are entered as frames.
 						e.kind &^= regCallOut | regCallLeaf
 					}
-				} else if this := r.stack[base+1]; this.IsObject() {
+				} else if this := r.stack[base+1]; leaf == regLeafThis && this.IsObject() {
 					if v, ok := r.leafCall(cl, this.Object(), r.stack[base+2:base+2+argc]); ok {
 						return v, nil
 					}

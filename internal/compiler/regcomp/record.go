@@ -5,7 +5,10 @@
 // generation and register allocation.
 package regcomp
 
-import "github.com/go-quickjs/go-quickjs/internal/ast"
+import (
+	"github.com/go-quickjs/go-quickjs/internal/ast"
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+)
 
 // ResKind is what an identifier resolved to.
 type ResKind uint8
@@ -41,6 +44,15 @@ const (
 	// a function whose arguments object is made only on demand, into local
 	// Index (the stack form's arguments_length and arguments_index).
 	ResLazyArgs
+	// ResGlobalVar is a var declaration's store to a global, which top-level
+	// code makes with set_global whatever its strictness: the var exists.
+	ResGlobalVar
+	// ResGlobalLexInit is the initialization of a script's top-level let,
+	// const or class binding (init_global_lex).
+	ResGlobalLexInit
+	// ResModuleLexInit is the initialization of a module's top-level let,
+	// const or class binding (init_module_lex).
+	ResModuleLexInit
 )
 
 // Res is an identifier's resolution.
@@ -72,6 +84,14 @@ type Record struct {
 	// Tails is each call the stack form compiled as a tail call
 	// (tail_call, tail_call_method, tail_direct_eval).
 	Tails map[ast.Expr]bool
+	// Top is what top-level code does before its first statement, as the
+	// stack form does it, in order: the checks and declarations of the
+	// names it binds in the global object and the global lexical
+	// environment, and its function declarations' definitions.
+	Top []TopOp
+	// Completion is the stack slot of top-level code's completion value,
+	// which an expression statement sets, or -1 for a function.
+	Completion int32
 	// Bail says the function has something whose resolution the record
 	// cannot express -- a with, an eval's variables, an Annex B function --
 	// and is left to the stack form.
@@ -80,7 +100,25 @@ type Record struct {
 
 // NewRecord makes an empty record.
 func NewRecord() *Record {
-	return &Record{Read: map[*ast.Ident]Res{}, Write: map[*ast.Ident]Res{}, Funcs: map[*ast.FuncDecl]uint32{}}
+	return &Record{Read: map[*ast.Ident]Res{}, Write: map[*ast.Ident]Res{}, Funcs: map[*ast.FuncDecl]uint32{}, Completion: -1}
+}
+
+// TopOp is one of top-level code's declarations: the stack form's
+// instruction Op of name Name and flag Flag, at source position Pos, and
+// for define_global_func the function, Fn, whose closure it defines.
+type TopOp struct {
+	Op   bytecode.Op
+	Name string
+	Flag uint32
+	Pos  int32
+	Fn   *ast.FuncLit
+}
+
+// NoteTop records top-level code's declaration op.
+func (r *Record) NoteTop(op TopOp) {
+	if r != nil {
+		r.Top = append(r.Top, op)
+	}
 }
 
 // NoteAppend records that n is an append to a local.

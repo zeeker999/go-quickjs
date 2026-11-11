@@ -107,6 +107,11 @@ type gen struct {
 	copies   int
 	held     int
 	err      string
+	// completion is top-level code's completion value's register, or 0
+	// (top.go).
+	completion int
+	// backLive is RegCode.BackLive.
+	backLive []uint32
 }
 
 type loop struct {
@@ -176,6 +181,12 @@ func (g *gen) layout() bool {
 		}
 	}
 	g.lazyArgs = lazySlot >= 0 && !plain[lazySlot]
+	if c := g.rec.Completion; c >= 0 {
+		if int(c) >= n {
+			return false
+		}
+		used[c] = true
+	}
 	for _, slot := range g.rec.Funcs {
 		if int(slot) >= n {
 			return false
@@ -209,6 +220,9 @@ func (g *gen) layout() bool {
 		}
 	}
 	g.inits = next - regParams - params
+	if c := g.rec.Completion; c >= 0 {
+		g.completion = int(g.slotReg[c])
+	}
 	g.top, g.max = next, next
 	if next >= limit16 {
 		return false
@@ -293,6 +307,9 @@ func (g *gen) jump(w bytecode.RInstr, m *mark, short bool) {
 	at := g.emit(w)
 	ref := jumpRef{at: at, short: short}
 	if m.at >= 0 {
+		// A loop's backward jump: what is live at its head is the
+		// bindings and the registers the statements around it hold.
+		g.backLive = append(g.backLive, uint32(at), uint32(g.stmtTop()))
 		g.patch(ref, m.at)
 		return
 	}
@@ -412,6 +429,12 @@ func (g *gen) body() {
 		if need && g.slotReg[slot] >= 0 {
 			g.emit(bytecode.MakeR(bytecode.RLoadUninit, 0, r16(int(g.slotReg[slot])), 0, 0))
 		}
+	}
+	if g.completion > 0 {
+		g.topBody()
+		g.stmts(lit.Body)
+		g.emit(bytecode.MakeR(bytecode.RRet, 0, r16(g.completion), 0, 0))
+		return
 	}
 	if lit.Name != nil && !declares(lit.Body, lit.Name.Name) {
 		for slot, l := range g.fn.Locals {
@@ -605,11 +628,6 @@ func (g *gen) typeofCompare(n *ast.Binary) (ast.Expr, int, bool) {
 	if !isU || !isS || u.Op != "typeof" {
 		return nil, 0, false
 	}
-	if id, ok := u.Operand.(*ast.Ident); ok {
-		if res := g.rec.Read[id]; res.Kind == ResGlobal || res.Kind == ResNone {
-			return nil, 0, false
-		}
-	}
 	for i, name := range typeNames {
 		if name == s.Value {
 			return u.Operand, i, true
@@ -703,7 +721,26 @@ func declaresIn(list []ast.Stmt, name string, body bool) bool {
 			if declaresIn([]ast.Stmt{n.Body}, name, false) {
 				return true
 			}
-		case *ast.ExprStmt, *ast.ReturnStmt, *ast.EmptyStmt, *ast.BreakStmt, *ast.ContinueStmt:
+		case *ast.SwitchStmt:
+			for _, c := range n.Cases {
+				if declaresIn(c.Body, name, false) {
+					return true
+				}
+			}
+		case *ast.TryStmt:
+			if declaresIn(n.Block, name, false) || n.Catch != nil && declaresIn(n.Catch.Body, name, false) ||
+				declaresIn(n.Finally, name, false) {
+				return true
+			}
+		case *ast.ForOfStmt:
+			if s, ok := n.Left.(ast.Stmt); ok && declaresIn([]ast.Stmt{s}, name, false) || declaresIn([]ast.Stmt{n.Body}, name, false) {
+				return true
+			}
+		case *ast.ForInStmt:
+			if s, ok := n.Left.(ast.Stmt); ok && declaresIn([]ast.Stmt{s}, name, false) || declaresIn([]ast.Stmt{n.Body}, name, false) {
+				return true
+			}
+		case *ast.ExprStmt, *ast.ReturnStmt, *ast.EmptyStmt, *ast.BreakStmt, *ast.ContinueStmt, *ast.ThrowStmt:
 		default:
 			// A statement the backend does not compile anyway.
 			return true
@@ -785,7 +822,7 @@ func (g *gen) stmt(s ast.Stmt) {
 	g.label = ""
 	switch n := s.(type) {
 	case *ast.ExprStmt:
-		g.discard(n.X)
+		g.exprStmt(n.X)
 	case *ast.EmptyStmt:
 	case *ast.BlockStmt:
 		g.stmts(n.Body)
@@ -821,6 +858,7 @@ func (g *gen) stmt(s ast.Stmt) {
 		}
 		g.ret(n.Arg)
 	case *ast.IfStmt:
+		g.resetCompletion()
 		els := g.newMark()
 		g.cond(n.Test, false, els)
 		g.stmt(n.Cons)
@@ -834,8 +872,10 @@ func (g *gen) stmt(s ast.Stmt) {
 		g.stmt(n.Alt)
 		g.bind(end)
 	case *ast.ForStmt:
+		g.resetCompletion()
 		g.forStmt(n, label)
 	case *ast.WhileStmt:
+		g.resetCompletion()
 		l := g.pushLoop(label)
 		test := g.newMark()
 		body := g.newMark()
@@ -848,6 +888,7 @@ func (g *gen) stmt(s ast.Stmt) {
 		g.bind(l.brk)
 		g.popLoop()
 	case *ast.DoWhileStmt:
+		g.resetCompletion()
 		l := g.pushLoop(label)
 		body := g.newMark()
 		g.bind(body)
@@ -884,13 +925,21 @@ func (g *gen) stmt(s ast.Stmt) {
 		}
 		g.emit(bytecode.MakeR(bytecode.RThrow, 0, r16(r), 0, 0))
 	case *ast.SwitchStmt:
+		g.resetCompletion()
 		g.switchStmt(n, label)
 	case *ast.TryStmt:
+		g.resetCompletion()
 		g.tryStmt(n)
 	case *ast.ForOfStmt:
+		g.resetCompletion()
 		g.forOfStmt(n.Left, n.Right, n.Body, n.Await, false, label, n.Start)
 	case *ast.ForInStmt:
+		g.resetCompletion()
 		g.forOfStmt(n.Left, n.Right, n.Body, false, true, label, n.Start)
+	case *ast.ImportDecl:
+		// The linker made its bindings.
+	case *ast.ExportDecl:
+		g.exportDecl(n)
 	case *ast.LabeledStmt:
 		switch n.Body.(type) {
 		case *ast.ForStmt, *ast.WhileStmt, *ast.DoWhileStmt, *ast.ForOfStmt, *ast.ForInStmt:
@@ -1028,6 +1077,13 @@ func (g *gen) varDecl(n *ast.VarDecl) {
 				continue
 			}
 			res, ok := g.rec.Write[id]
+			if ok && (res.Kind == ResGlobalLexInit || res.Kind == ResModuleLexInit) {
+				v := g.alloc()
+				g.emit(bytecode.MakeR(bytecode.RLoadUndef, 0, r16(v), 0, 0))
+				g.lexInit(res.Kind, id.Name, v, int(id.Start))
+				g.top = g.stmtTop()
+				continue
+			}
 			if !ok || res.Kind != ResLocalInit {
 				g.fail("a declaration without a binding")
 				return
@@ -1440,6 +1496,23 @@ func (g *gen) ident(n *ast.Ident, dst int) int {
 	return g.dest(dst)
 }
 
+// typeofOperand compiles typeof's operand e: a name that resolves nowhere,
+// which the record does not resolve, as the stack form's get_global_opt,
+// which does not throw for an undeclared global.
+func (g *gen) typeofOperand(e ast.Expr) int {
+	id, ok := e.(*ast.Ident)
+	if !ok {
+		return g.expr(e, -1)
+	}
+	if _, ok := g.rec.Read[id]; ok {
+		return g.expr(e, -1)
+	}
+	d := g.alloc()
+	g.at(int(id.Start))
+	g.emit(bytecode.MakeR(bytecode.RCold, uint8(bytecode.RColdGetGlobalOpt), r16(d), g.name16(id.Name), 0))
+	return d
+}
+
 // globalSite is a cache site of a global's read or write, which keeps no
 // name of the site table's.
 func (g *gen) globalSite() uint16 { return g.site(0) }
@@ -1569,14 +1642,7 @@ func (g *gen) unary(n *ast.Unary, dst int) int {
 	case "~":
 		return g.unaryOp(bytecode.OpBitNot, n.Operand, dst, n.Start)
 	case "typeof":
-		if id, ok := n.Operand.(*ast.Ident); ok {
-			if res := g.rec.Read[id]; res.Kind == ResGlobal || res.Kind == ResNone {
-				// typeof of an undeclared global does not throw.
-				g.fail("typeof of a global")
-				return g.dest(dst)
-			}
-		}
-		a := g.expr(n.Operand, -1)
+		a := g.typeofOperand(n.Operand)
 		d := g.dest(dst)
 		g.at(n.Start)
 		g.emit(bytecode.MakeR(bytecode.RTypeof, 0, r16(d), r16(a), 0))
@@ -1697,7 +1763,7 @@ func (g *gen) cond(e ast.Expr, when bool, target *mark) {
 		if x, i, ok := g.typeofCompare(n); ok {
 			// typeof x === "name": the type asked of x, with no string
 			// made or compared.
-			a := g.expr(x, -1)
+			a := g.typeofOperand(x)
 			flag := uint8(i)
 			if (n.Op == "===" || n.Op == "==") == when {
 				flag |= bytecode.RCmpTrue
@@ -1841,6 +1907,17 @@ func (g *gen) storeIdent(id *ast.Ident, value ast.Expr, init bool) int {
 		v := g.expr(value, -1)
 		g.at(int(id.Start))
 		g.emit(bytecode.MakeR(bytecode.RSetGlobal, strict, r16(v), g.name16(id.Name), g.globalSite()))
+		return v
+	case ResGlobalVar:
+		// A var's store: the var exists, and the store is set_global's
+		// whatever the code's strictness, as the stack form's.
+		v := g.expr(value, -1)
+		g.at(int(id.Start))
+		g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite()))
+		return v
+	case ResGlobalLexInit, ResModuleLexInit:
+		v := g.expr(value, -1)
+		g.lexInit(res.Kind, id.Name, v, int(id.Start))
 		return v
 	case ResIgnore:
 		return g.expr(value, -1)
@@ -3126,7 +3203,7 @@ func (g *gen) finish() *bytecode.RegCode {
 		Code:              g.code, NumRegs: g.max + 1, SrcPC: src, SiteName: g.siteName, This: -1,
 		LocalReg: g.localReg(),
 		Wide:     true, Params: g.fn.ParamCount, Inits: g.inits, Caps: g.caps, CallSites: g.calls,
-		Handlers: g.handlerTable(),
+		Handlers: g.handlerTable(), BackLive: g.backLive,
 	}
 	if why := Verify(rc, g.fn); why != "" {
 		Refuse(g.fn, why)

@@ -2333,12 +2333,14 @@ func (c *compiler) assignToIdentStatic(t *ast.Ident, initializing bool) {
 	if initializing && c.globalLex[t.Name] {
 		// The binding is the script-level lexical one, and this is what takes
 		// it out of its dead zone.
+		c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResGlobalLexInit})
 		c.emit(bytecode.OpDup, 0, 0)
 		c.emit(bytecode.OpInitGlobalLex, c.nameIdx(t.Name), 0)
 		return
 	}
 	if initializing && c.isModuleLex(t.Name) {
 		// The same, for a module's top-level binding.
+		c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResModuleLexInit})
 		c.emit(bytecode.OpDup, 0, 0)
 		c.emit(bytecode.OpInitModuleLex, c.nameIdx(t.Name), 0)
 		return

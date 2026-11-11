@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 
 	"github.com/go-quickjs/go-quickjs/internal/ast"
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/compiler/regcomp"
 )
 
@@ -47,5 +48,36 @@ func (c *compiler) regNoteUpvalueWrite(t *ast.Ident, initializing bool) {
 		c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResConstAssign})
 	default:
 		c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResUpval, Index: idx})
+	}
+}
+
+// regTop records one of top-level code's declarations, op of the name with
+// index name and flag, as the stack form has just emitted it, for the
+// register form to make in the same order (regcomp.Record.Top).
+func (c *compiler) regTop(op bytecode.Op, name, flag uint32, fn *ast.FuncLit) {
+	if c.reg == nil || c.parent != nil {
+		return
+	}
+	c.reg.NoteTop(regcomp.TopOp{Op: op, Name: c.fn.Names[name], Flag: flag, Pos: c.lastPos, Fn: fn})
+}
+
+// regScript reports whether top-level code compiled with opts is a script's
+// of the kind the register form compiles: not eval code, a module's, a
+// debugger's or the body of a function the Function constructor makes.
+func regScript(opts Options) bool {
+	return !opts.Debug && opts.EvalScope == nil && opts.EvalWithDepth == 0 && len(opts.PrivateNames) == 0 &&
+		len(opts.ArgumentNames) == 0 && !opts.EvalOwnVarScope && !opts.InFieldInit && !opts.EvalVarScopeIsGlobal &&
+		!opts.EvalConfigurable && !opts.AllowSuperProp && !opts.AllowSuperCall && !opts.AllowNewTarget
+}
+
+// regTopCode gives fn, top-level code of statements body whose resolution
+// rec recorded, its register code, where rec is not nil.
+func regTopCode(body []ast.Stmt, fn *bytecode.Function, rec *regcomp.Record) {
+	switch {
+	case rec == nil:
+	case rec.Bail:
+		regcomp.Refuse(fn, "a with, an eval's variables or an Annex B function")
+	default:
+		fn.Reg = regcomp.CompileTop(body, fn, rec)
 	}
 }

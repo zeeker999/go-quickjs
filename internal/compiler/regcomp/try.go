@@ -116,7 +116,21 @@ func (g *gen) finallyCopy(list []ast.Stmt) {
 	}
 	g.copies++
 	mark := g.top
-	g.stmts(list)
+	if g.completion > 0 {
+		// What the clause produces is not the statement's value: the try
+		// block's is, kept meanwhile; a break or a continue inside the
+		// clause carries the clause's own, undefined where it produced
+		// none, as the stack form's compileFinallyClause has it.
+		save := g.alloc()
+		release := g.hold()
+		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(save), r16(g.completion), 0))
+		g.resetCompletion()
+		g.stmts(list)
+		g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(g.completion), r16(save), 0))
+		release()
+	} else {
+		g.stmts(list)
+	}
 	g.top = mark
 	g.copies--
 }

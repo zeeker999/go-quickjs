@@ -1219,16 +1219,42 @@ regdiff cases and test262 in register mode on its directories:
    (`regPlan`), whose callers expect none: `planTreeCall`'s `treeRest`.
    After it: Octane 98.7% register code, the bundles 89.0% (63.4%), all
    44.1%.
-2. **Top-level code** (49,389, most of test262; every script and module):
-   a script's and a module's body as a function of registers, its
-   bindings the global object's and the global lexical environment's.
+2. **Top-level code** (49,389, most of test262; every script and module)
+   -- done for scripts and modules (`regcomp.CompileTop`, top.go): the
+   body a function of registers, its bindings the global object's, the
+   global lexical environment's or the module's. What it declares before
+   its first statement the stack compiler records as it emits it
+   (`Record.Top`): `check_global_lex`, `check_global_var`,
+   `define_global_var`, `declare_global_lex`, `declare_module_lex` and
+   `define_global_func` of each hoisted function's closure, made in that
+   order as cold operations that do what executeAt's cases do
+   (zzreg_top.go); a lexical declaration's store is `init_global_lex` or
+   `init_module_lex` (`ResGlobalLexInit`, `ResModuleLexInit`), and a
+   var's `set_global` whatever the strictness (`ResGlobalVar`). A
+   module's declarations function (`<module bindings>`) is register code
+   of no statements. The completion value is a register of its own
+   (`Record.Completion`): an expression statement sets it once its value
+   is made, the statements that may produce none reset it, and each copy
+   of a finally clause keeps the try block's around the clause, as the
+   stack form does -- whose copy before a break or a continue did not,
+   and gave the clause's value where Node gives the block's (fixed with
+   it). `typeof` of a name no binding resolves is `get_global_opt`
+   (cold), which the fused `typeof x === "..."` takes too. A loop's
+   backward jump records how many registers its head has live
+   (`RegCode.BackLive`), and the sweep of stale slots clears the rest:
+   a call's window kept what it was given until written over. A
+   Program's register literals are seeded like its stack ones
+   (`listSites`). Eval code, a module with top-level await and code
+   compiled for a debugger are items 3 and 8.
 3. **Generators, async functions, `for await`** (12,737): the frame's
    window copied into the generator on a suspension ("Generators and async functions"
    above), the settled-await fast path; the step's recover goes
    with them.
 4. **Classes** (about 27,000 together: constructors, accessors, fields,
    static blocks, private members and methods, `super`, `new.target`,
-   class expressions inside functions).
+   class expressions inside functions, and a module's `export default
+   class {}`, refused until then as "an anonymous class exported by
+   default").
 5. **Parameter patterns, defaults and rest; destructuring everywhere**
    (declarations, assignment targets, catch clauses, for-of and for-in
    heads; about 4,500).

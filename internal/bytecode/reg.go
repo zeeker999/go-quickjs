@@ -400,6 +400,26 @@ const (
 	// does: an error of its return method's is dropped.
 	RColdIterClose
 	RColdIterCloseThrow
+	// Top-level code's declarations, each what the stack form's instruction
+	// of the same name does, of the name Names[B] and the flag C:
+	// check_global_lex, check_global_var, define_global_var,
+	// declare_global_lex, and define_global_func of the function R[A].
+	// RColdInitGlobalLex initializes the script's lexical binding Names[B]
+	// to R[A] (init_global_lex).
+	RColdCheckGlobalLex
+	RColdCheckGlobalVar
+	RColdDefineGlobalVar
+	RColdDeclareGlobalLex
+	RColdDefineGlobalFunc
+	RColdInitGlobalLex
+	// RColdGetGlobalOpt: R[A] = the global Names[B], or undefined where
+	// there is none (get_global_opt, typeof's operand).
+	RColdGetGlobalOpt
+	// RColdDeclareModuleLex declares the module's lexical binding Names[B],
+	// mutable where C is not 0, in its dead zone (declare_module_lex), and
+	// RColdInitModuleLex initializes it to R[A] (init_module_lex).
+	RColdDeclareModuleLex
+	RColdInitModuleLex
 )
 
 // The flags of regexp_lit's X.
@@ -442,6 +462,11 @@ const (
 var rColdNames = [...]string{
 	RColdNewRegExp: "new_regexp", RColdForOfStart: "for_of_start", RColdForInStart: "for_in_start",
 	RColdIterClose: "iter_close", RColdIterCloseThrow: "iter_close_throw",
+	RColdCheckGlobalLex: "check_global_lex", RColdCheckGlobalVar: "check_global_var",
+	RColdDefineGlobalVar: "define_global_var", RColdDeclareGlobalLex: "declare_global_lex",
+	RColdDefineGlobalFunc: "define_global_func", RColdInitGlobalLex: "init_global_lex",
+	RColdGetGlobalOpt: "get_global_opt", RColdDeclareModuleLex: "declare_module_lex",
+	RColdInitModuleLex: "init_module_lex",
 }
 
 func (op RColdOp) String() string {
@@ -544,6 +569,29 @@ type RegCode struct {
 	ForwardsArguments bool
 	// Handlers are the code's exception handlers, innermost first.
 	Handlers []RHandler
+	// BackLive is, for each backward jump, by pc in order, its pc and the
+	// first register past those live at the loop's head: the registers from
+	// there are temporaries no turn reads before it writes them, which the
+	// sweep of stale slots clears (sweepStaleSlots).
+	BackLive []uint32
+}
+
+// LiveAt is how many of the frame's registers are live at the head of the
+// loop the backward jump at pc goes to, or NumRegs where pc is none.
+func (rc *RegCode) LiveAt(pc int) int {
+	lo, hi := 0, len(rc.BackLive)/2
+	for lo < hi {
+		m := (lo + hi) / 2
+		switch p := int(rc.BackLive[2*m]); {
+		case p == pc:
+			return int(rc.BackLive[2*m+1])
+		case p < pc:
+			lo = m + 1
+		default:
+			hi = m
+		}
+	}
+	return rc.NumRegs
 }
 
 // RHandler is an exception handler of register code: an exception the

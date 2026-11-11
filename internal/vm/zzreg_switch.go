@@ -242,6 +242,14 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		st.done = true
 		r.closeIterator(st.iter)
 		return nil
+	case bytecode.RColdCheckGlobalLex, bytecode.RColdCheckGlobalVar, bytecode.RColdDefineGlobalVar,
+		bytecode.RColdDeclareGlobalLex, bytecode.RColdDefineGlobalFunc, bytecode.RColdInitGlobalLex,
+		bytecode.RColdDeclareModuleLex, bytecode.RColdInitModuleLex:
+		return r.regColdTop(f, w, regs)
+	case bytecode.RColdGetGlobalOpt:
+		v, err := r.regGlobalOpt(f, f.cl.names[w.B()])
+		regs[w.A()] = v
+		return err
 	}
 	panic("register code: no cold operation " + bytecode.RColdOp(w.X()).String())
 }

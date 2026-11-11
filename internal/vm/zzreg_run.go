@@ -1546,6 +1546,9 @@ func (r *Runtime) regBackEdge(f *frame, c *regCode, k *regKept) error {
 	if err := r.checkInterruptNow(); err != nil {
 		return err
 	}
-	r.sweepStaleSlots(f.base - int(c.locals) + int(c.numRegs))
+	// The temporaries past what the loop's head has live are stale: a
+	// value a call's window was given stays there until the window is
+	// used again.
+	r.sweepStaleSlots(f.base - int(c.locals) + c.rc.LiveAt(k.pc-1))
 	return nil
 }

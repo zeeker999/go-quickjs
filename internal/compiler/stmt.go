@@ -153,6 +153,7 @@ func (c *compiler) predeclareFunction(h hoistedFunc) {
 		}
 		c.emit(bytecode.OpDefineGlobalFunc, c.nameIdx(h.name),
 			boolBit(c.opts.EvalConfigurable))
+		c.regTop(bytecode.OpDefineGlobalFunc, c.nameIdx(h.name), boolBit(c.opts.EvalConfigurable), h.fd.Fn)
 		return
 	}
 
@@ -259,6 +260,7 @@ func (c *compiler) declareLexicalNameMarked(name string, kind bindKind, pos int,
 			mutable = 1
 		}
 		c.emitAt(pos, bytecode.OpDeclareGlobalLex, c.nameIdx(name), mutable)
+		c.regTop(bytecode.OpDeclareGlobalLex, c.nameIdx(name), mutable, nil)
 		return
 	}
 	slot := c.declare(name, kind, pos)
@@ -570,10 +572,12 @@ func (c *compiler) initBinding(target ast.Expr, kind ast.DeclKind) {
 		// A block of its own would have declared a local, so reaching here
 		// means the binding is the top-level one.
 		if c.globalLex[id.Name] {
+			c.reg.NoteWrite(id, regcomp.Res{Kind: regcomp.ResGlobalLexInit})
 			c.emit(bytecode.OpInitGlobalLex, c.nameIdx(id.Name), 0)
 			return
 		}
 		if c.isModuleLex(id.Name) {
+			c.reg.NoteWrite(id, regcomp.Res{Kind: regcomp.ResModuleLexInit})
 			c.emit(bytecode.OpInitModuleLex, c.nameIdx(id.Name), 0)
 			return
 		}
@@ -666,7 +670,7 @@ func (c *compiler) storeVar(name string) {
 		return
 	}
 	if c.regIdent != nil {
-		c.reg.NoteWrite(c.regIdent, regcomp.Res{Kind: regcomp.ResGlobal})
+		c.reg.NoteWrite(c.regIdent, regcomp.Res{Kind: regcomp.ResGlobalVar})
 	}
 	c.emit(bytecode.OpSetGlobal, c.nameIdx(name), 0)
 }

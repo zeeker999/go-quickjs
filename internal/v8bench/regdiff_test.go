@@ -1020,3 +1020,79 @@ function deepTry(n) { try { return thrower(n) } catch (e) { return e.message } }
 		`viaGen()`, `viaArgs(4)`, `deepTry(50000)`, `deep(100)`, `trace(5)`, `trace(10)`}
 	regDiff(t, src, calls)
 }
+
+// TestRegDiffTopLevel compares top-level code as register code: a script's
+// declarations in the global object and the global lexical environment,
+// made before its first statement, and their errors -- a lexical
+// redeclaration across scripts, a var over a let, a function over a
+// non-configurable global, a binding read in its dead zone -- its function
+// declarations hoisted, typeof of undeclared and uninitialized names, and
+// its completion value through loops, switches, try statements and finally
+// clauses, breaks and continues, and throws.
+func TestRegDiffTopLevel(t *testing.T) {
+	src := `
+var v1 = 1, v2;
+let l1 = 2, l2;
+const c1 = 3;
+function f1() { return v1 + l1 + c1 + typeof l2 + typeof v2 }
+var frames = function (e) { return e.name + ": " + e.message + " | " + e.stack.split("\n").slice(1).map(function (s) { return s.trim() }).join(" | ") };
+Object.defineProperty(globalThis, "fixed", { value: 1, configurable: false, writable: false });
+`
+	calls := []string{
+		`f1()`,
+		`v1 = 5; f1()`,
+		`let l1 = 3`,
+		`var l1 = 3`,
+		`try { eval("let v1 = 2") } catch (e) { frames(e) }`,
+		`function fixed() {}`,
+		`fixed`,
+		`typeof nope + typeof l1 + typeof f1 + typeof fixed`,
+		`typeof late; let late = 1`,
+		`try { typeof later; let later = 1 } catch (e) { e.name }`,
+		`early; let early2 = 1; var early`,
+		`hoisted(); function hoisted() { return "h" }`,
+		`1; if (false) {}`,
+		`1; {}`,
+		`2; var q;`,
+		`for (var i = 0; i < 3; i++) i * 10`,
+		`for (var i = 0; i < 3; i++) { if (i == 1) break; i * 10 }`,
+		`for (var i = 0; i < 3; i++) { if (i == 1) continue; i * 10 }`,
+		`do { 7; break } while (false)`,
+		`switch (2) { case 1: "a"; case 2: "b"; case 3: "c"; break; default: "d" }`,
+		`try { 1 } finally { 2 }`,
+		`try { 1; throw 0 } catch (e) { }`,
+		`try { 1; throw 0 } catch (e) { 4 }`,
+		`try { 1 } catch (e) { 4 } finally { 5 }`,
+		`L: for (var j = 0; j < 2; j++) { try { 3; continue L } finally { 9 } }`,
+		`for (var j = 0; j < 2; j++) { try { 3; break } finally { 9; } }`,
+		`for (var j = 0; j < 2; j++) { try { 3 } finally { 9; break } }`,
+		`for (var k of [1, 2, 3]) k + 1`,
+		`for (var k in { a: 1, b: 2 }) k`,
+		`var w = 0; while (w < 3) w++`,
+		`try { null.x } catch (e) { frames(e) }`,
+		`null.x`,
+		`undeclared`,
+		`"use strict"; undeclared2 = 1`,
+		`"use strict"; var NaN = 1`,
+		`var NaN = 1; NaN`,
+		`"use strict"; var sv = 4; sv`,
+		`const k1 = 1; k1 = 2`,
+		`let tz = tz`,
+		`class K {}; typeof K`,
+		`var o = { m() { return 1 } }; o.m()`,
+		`(function () { return this === globalThis })()`,
+		`this === globalThis`,
+		`function g2() { return 1 } function g2() { return 2 } g2()`,
+		`var s = ""; for (var x = 0; x < 5; x++) s += x; s`,
+		`new Error("top").stack.split("\n").length`,
+		`frames(new Error("here"))`,
+		// A function's own name read inside a switch, a try or a loop of
+		// its body, and an arrow that returns its parameter called with an
+		// object for its this.
+		`(function f(n) { switch (n) { case 0: return typeof f } return f(0) })(1)`,
+		`(function g() { try { return typeof g } finally {} })()`,
+		`(function h(a) { for (var x of a) return typeof h })([1])`,
+		`var af = eval => eval; af(1) + (function () { var a = x => x, k = () => 7; return a(5) + k() })()`,
+	}
+	regDiff(t, src, calls)
+}
