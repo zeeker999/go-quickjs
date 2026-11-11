@@ -136,14 +136,6 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 			regs[w.A()] = Value{num: mkTag(KindString, 0), ref: unsafe.Pointer(emptyString)}
 		case bytecode.RLoadUninit:
 			regs[w.A()] = uninitialized
-		case bytecode.RLoadThis:
-			regs[w.A()] = f.this
-		case bytecode.RCheckRef:
-			if regTagged(math.Float64bits(regs[w.A()].num), KindUninitialized) {
-				kept.pc = pc
-				failed = r.regThrowDeadZone(f, c, pc)
-				goto fail
-			}
 		case bytecode.RGetUpval:
 			regs[w.A()] = cl.upvalues[w.BC()].get()
 		case bytecode.RSetUpval:
@@ -471,15 +463,6 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 				}
 			}
 			goto slow
-		case bytecode.RBitOr:
-			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
-				if b := regs[w.C()]; b.IsNumber() && regIsInt32(b.num) {
-					x, y := int32(a.num), int32(b.num)
-					regs[w.A()] = Int32(x | y)
-					continue
-				}
-			}
-			goto slow
 		case bytecode.RBitXor:
 			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
 				if b := regs[w.C()]; b.IsNumber() && regIsInt32(b.num) {
@@ -489,29 +472,11 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 				}
 			}
 			goto slow
-		case bytecode.RShl:
-			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
-				if b := regs[w.C()]; b.IsNumber() && regIsInt32(b.num) {
-					x, y := int32(a.num), int32(b.num)
-					regs[w.A()] = Int32(x << (uint32(y) & 31))
-					continue
-				}
-			}
-			goto slow
 		case bytecode.RShr:
 			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
 				if b := regs[w.C()]; b.IsNumber() && regIsInt32(b.num) {
 					x, y := int32(a.num), int32(b.num)
 					regs[w.A()] = Int32(x >> (uint32(y) & 31))
-					continue
-				}
-			}
-			goto slow
-		case bytecode.RUShr:
-			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
-				if b := regs[w.C()]; b.IsNumber() && regIsInt32(b.num) {
-					x, y := int32(a.num), int32(b.num)
-					regs[w.A()] = Uint32(uint32(x) >> (uint32(y) & 31))
 					continue
 				}
 			}
@@ -551,25 +516,9 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 				continue
 			}
 			goto cmpSlow
-		case bytecode.RJNLtU:
-			if a, b := regs[w.A()], cl.upvalues[w.B()].get(); a.IsNumber() && b.IsNumber() {
-				if !(a.Number() < b.Number()) {
-					goto taken
-				}
-				continue
-			}
-			goto cmpSlow
 		case bytecode.RJLeU:
 			if a, b := regs[w.A()], cl.upvalues[w.B()].get(); a.IsNumber() && b.IsNumber() {
 				if a.Number() <= b.Number() {
-					goto taken
-				}
-				continue
-			}
-			goto cmpSlow
-		case bytecode.RJNLeU:
-			if a, b := regs[w.A()], cl.upvalues[w.B()].get(); a.IsNumber() && b.IsNumber() {
-				if !(a.Number() <= b.Number()) {
 					goto taken
 				}
 				continue
@@ -607,30 +556,6 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 				continue
 			}
 			goto cmpSlow
-		case bytecode.RJLeI:
-			if a := regs[w.A()]; a.IsNumber() {
-				if a.Number() <= float64(w.SB()) {
-					goto taken
-				}
-				continue
-			}
-			goto cmpSlow
-		case bytecode.RJNLe:
-			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
-				if !(a.Number() <= b.Number()) {
-					goto taken
-				}
-				continue
-			}
-			goto cmpSlow
-		case bytecode.RJNLeI:
-			if a := regs[w.A()]; a.IsNumber() {
-				if !(a.Number() <= float64(w.SB())) {
-					goto taken
-				}
-				continue
-			}
-			goto cmpSlow
 		case bytecode.RJGt:
 			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
 				if a.Number() > b.Number() {
@@ -663,50 +588,9 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 				continue
 			}
 			goto cmpSlow
-		case bytecode.RJGe:
-			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
-				if a.Number() >= b.Number() {
-					goto taken
-				}
-				continue
-			}
-			goto cmpSlow
 		case bytecode.RJGeI:
 			if a := regs[w.A()]; a.IsNumber() {
 				if a.Number() >= float64(w.SB()) {
-					goto taken
-				}
-				continue
-			}
-			goto cmpSlow
-		case bytecode.RJNGe:
-			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
-				if !(a.Number() >= b.Number()) {
-					goto taken
-				}
-				continue
-			}
-			goto cmpSlow
-		case bytecode.RJNGeI:
-			if a := regs[w.A()]; a.IsNumber() {
-				if !(a.Number() >= float64(w.SB())) {
-					goto taken
-				}
-				continue
-			}
-			goto cmpSlow
-		case bytecode.RJEq, bytecode.RJEqI:
-			// B is the immediate form's operand, no register: read only
-			// where it names one, which the verifier proves in the frame.
-			if a := regs[w.A()]; w.Op() == bytecode.RJEqI {
-				if a.IsNumber() {
-					if a.Number() == float64(w.SB()) {
-						goto taken
-					}
-					continue
-				}
-			} else if b := regs[w.B()]; a.IsNumber() && b.IsNumber() {
-				if a.Number() == b.Number() {
 					goto taken
 				}
 				continue
@@ -729,18 +613,6 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 				continue
 			}
 			goto cmpSlow
-		case bytecode.RJNull, bytecode.RJNotNull:
-			// An object other than document.all's stand-in is not == null.
-			if a := regs[w.A()]; !a.IsObject() || a.object().flags&objHTMLDDA == 0 {
-				// Value.IsNullish, written out.
-				b := math.Float64bits(a.num)
-				k := Kind(b & 0xFF)
-				if (b&tagMask == tagBase && (k == KindNull || k == KindUndefined)) == (w.Op() == bytecode.RJNull) {
-					goto taken
-				}
-				continue
-			}
-			goto cmpSlow
 		case bytecode.RJSEq, bytecode.RJSNe:
 			// Two numbers, or two values one of which is undefined, null, a
 			// boolean, a symbol or an object, equal only if their words
@@ -755,11 +627,6 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 				goto cmpSlow
 			}
 			if eq == (w.Op() == bytecode.RJSEq) {
-				goto taken
-			}
-		case bytecode.RJSEqI:
-			// Only a number is === a number.
-			if a := regs[w.A()]; a.IsNumber() && a.Number() == float64(w.SB()) {
 				goto taken
 			}
 		case bytecode.RJSNeI:
@@ -901,21 +768,9 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 			if (t == w.X()&^bytecode.RCmpTrue) == (w.X()&bytecode.RCmpTrue != 0) {
 				goto taken
 			}
-		case bytecode.RThrow:
-			kept.pc = pc
-			failed = r.regThrow(f, c, pc, regs)
-			goto fail
 		case bytecode.RNewW, bytecode.RClosureW, bytecode.RInstanceOf, bytecode.RIn, bytecode.RDelete, bytecode.RArguments, bytecode.RNewArrayK,
 			bytecode.RApplyArgs, bytecode.RArgsLen, bytecode.RArgsIndex, bytecode.RConcat:
 			// What the loop has no fast path of its own for.
-			goto slow
-		case bytecode.RKeyOfBase:
-			// A key whose conversion runs nothing is left as it is, and a
-			// null or undefined object is the read's to report.
-			if v := regs[w.C()]; regTagged(math.Float64bits(v.num), KindString) || v.IsNumber() || regTagged(math.Float64bits(v.num), KindSymbol) {
-				regs[w.A()] = v
-				continue
-			}
 			goto slow
 		case bytecode.RStrPart:
 			// A string or a number is joined as it is.
@@ -966,14 +821,165 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 			kept.pc = pc
 			failed = r.regYield(f, regs[w.B()], pc)
 			goto fail
+		case bytecode.RCallWT, bytecode.RCallMWT:
+			goto tail
+		// The hot cases are above, in their order; every other case is
+		// below them, so that an edit to one moves no hot case's code.
+		// The hot ones are layoutcases.txt's hot line, by dispatch counts
+		// over the suites and the micro-benchmarks, and TestLayoutLock
+		// fails where one has moved (docs/register-interpreter.md, "The
+		// loop"). A new operation is a cold sub-operation or a case here.
+		case bytecode.RLoadThis:
+			regs[w.A()] = f.this
+		case bytecode.RCheckRef:
+			if regTagged(math.Float64bits(regs[w.A()].num), KindUninitialized) {
+				kept.pc = pc
+				failed = r.regThrowDeadZone(f, c, pc)
+				goto fail
+			}
+		case bytecode.RBitOr:
+			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+				if b := regs[w.C()]; b.IsNumber() && regIsInt32(b.num) {
+					x, y := int32(a.num), int32(b.num)
+					regs[w.A()] = Int32(x | y)
+					continue
+				}
+			}
+			goto slow
+		case bytecode.RShl:
+			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+				if b := regs[w.C()]; b.IsNumber() && regIsInt32(b.num) {
+					x, y := int32(a.num), int32(b.num)
+					regs[w.A()] = Int32(x << (uint32(y) & 31))
+					continue
+				}
+			}
+			goto slow
+		case bytecode.RUShr:
+			if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+				if b := regs[w.C()]; b.IsNumber() && regIsInt32(b.num) {
+					x, y := int32(a.num), int32(b.num)
+					regs[w.A()] = Uint32(uint32(x) >> (uint32(y) & 31))
+					continue
+				}
+			}
+			goto slow
+		case bytecode.RJNLtU:
+			if a, b := regs[w.A()], cl.upvalues[w.B()].get(); a.IsNumber() && b.IsNumber() {
+				if !(a.Number() < b.Number()) {
+					goto taken
+				}
+				continue
+			}
+			goto cmpSlow
+		case bytecode.RJNLeU:
+			if a, b := regs[w.A()], cl.upvalues[w.B()].get(); a.IsNumber() && b.IsNumber() {
+				if !(a.Number() <= b.Number()) {
+					goto taken
+				}
+				continue
+			}
+			goto cmpSlow
+		case bytecode.RJLeI:
+			if a := regs[w.A()]; a.IsNumber() {
+				if a.Number() <= float64(w.SB()) {
+					goto taken
+				}
+				continue
+			}
+			goto cmpSlow
+		case bytecode.RJNLe:
+			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
+				if !(a.Number() <= b.Number()) {
+					goto taken
+				}
+				continue
+			}
+			goto cmpSlow
+		case bytecode.RJNLeI:
+			if a := regs[w.A()]; a.IsNumber() {
+				if !(a.Number() <= float64(w.SB())) {
+					goto taken
+				}
+				continue
+			}
+			goto cmpSlow
+		case bytecode.RJGe:
+			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
+				if a.Number() >= b.Number() {
+					goto taken
+				}
+				continue
+			}
+			goto cmpSlow
+		case bytecode.RJNGe:
+			if a, b := regs[w.A()], regs[w.B()]; a.IsNumber() && b.IsNumber() {
+				if !(a.Number() >= b.Number()) {
+					goto taken
+				}
+				continue
+			}
+			goto cmpSlow
+		case bytecode.RJNGeI:
+			if a := regs[w.A()]; a.IsNumber() {
+				if !(a.Number() >= float64(w.SB())) {
+					goto taken
+				}
+				continue
+			}
+			goto cmpSlow
+		case bytecode.RJEq, bytecode.RJEqI:
+			// B is the immediate form's operand, no register: read only
+			// where it names one, which the verifier proves in the frame.
+			if a := regs[w.A()]; w.Op() == bytecode.RJEqI {
+				if a.IsNumber() {
+					if a.Number() == float64(w.SB()) {
+						goto taken
+					}
+					continue
+				}
+			} else if b := regs[w.B()]; a.IsNumber() && b.IsNumber() {
+				if a.Number() == b.Number() {
+					goto taken
+				}
+				continue
+			}
+			goto cmpSlow
+		case bytecode.RJNull, bytecode.RJNotNull:
+			// An object other than document.all's stand-in is not == null.
+			if a := regs[w.A()]; !a.IsObject() || a.object().flags&objHTMLDDA == 0 {
+				// Value.IsNullish, written out.
+				b := math.Float64bits(a.num)
+				k := Kind(b & 0xFF)
+				if (b&tagMask == tagBase && (k == KindNull || k == KindUndefined)) == (w.Op() == bytecode.RJNull) {
+					goto taken
+				}
+				continue
+			}
+			goto cmpSlow
+		case bytecode.RJSEqI:
+			// Only a number is === a number.
+			if a := regs[w.A()]; a.IsNumber() && a.Number() == float64(w.SB()) {
+				goto taken
+			}
+		case bytecode.RThrow:
+			kept.pc = pc
+			failed = r.regThrow(f, c, pc, regs)
+			goto fail
+		case bytecode.RKeyOfBase:
+			// A key whose conversion runs nothing is left as it is, and a
+			// null or undefined object is the read's to report.
+			if v := regs[w.C()]; regTagged(math.Float64bits(v.num), KindString) || v.IsNumber() || regTagged(math.Float64bits(v.num), KindSymbol) {
+				regs[w.A()] = v
+				continue
+			}
+			goto slow
 		// Every value of the switch is a case, so that it is a jump table
 		// that needs no range check: Go makes one only of a switch whose
 		// cases are dense, and the mask tells it the value is below 128. A
 		// new operation takes its value out of this list, or the switch does
 		// not compile: the values the translation reference's operations
 		// had, and 127, invalid's.
-		case bytecode.RCallWT, bytecode.RCallMWT:
-			goto tail
 		case 42:
 			goto invalid
 		case 127:

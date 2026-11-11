@@ -257,6 +257,20 @@ What each lever cannot move:
   recorded with `layoutpad -record -targets FILE` at the base chosen as the
   measured-best layout, the tool built beforehand.
 
+The register interpreter's hot cases are held by order and a golden
+file, not by a lever: Q pins `runReg`'s start, so a case's address modulo
+4 KB is decided by the code before it in the loop, and the cases are laid
+out in the switch's source order. The hot cases (by dispatch counts over
+the suites and the micro-benchmarks) come first and every other case after
+them; `internal/vm/layoutcases.txt` holds each hot case's offset in
+`runReg`, which `layoutpad` reads from the build's dispatch table and
+`TestLayoutLock` checks. A new register operation is a cold sub-operation
+or a case after the hot ones; an edit to a hot case rewrites the golden
+file with `go generate ./internal/vm` and is timed. Levers inside the
+loop were designed and not built: a case starts at any byte, and holding
+it exactly would take some 1,000 stores of filler per lever in the loop
+itself (docs/register-interpreter.md, "The loop").
+
 The pads are never called and their variables never read: one init calls
 them behind a variable that is never true, which keeps the linker from
 dropping them, and every variable is the same size whatever the levers are

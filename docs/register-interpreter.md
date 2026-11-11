@@ -541,29 +541,45 @@ the ones Go allows:
   The set-up and the entries from a tree are in `zzreg_entry.go`. An
   unrelated function added before the block, with the pads regenerated,
   leaves every function of the block where it was.
-- **The inside of `runReg` is not locked** (designed, not built). Every
-  case added changes Go's spill slots and the order of the loop's blocks,
-  and moves the hot cases' code against each other: `private_field`'s
-  case moved `crypto_am3`'s loop (8.6% at every placement), a `regSlow`
-  case the block after it. The anchor after `regSlow` (lever P) fixes
-  the second, and is built; the first would need a lock inside the
-  loop. Its design: the anchors are the hot cases' entries -- `add`, `get_index`, `jlt`,
-  `call_w`, the dispatch -- read from the loop's jump table, which Go
-  emits as a read-only table of the cases' addresses, so `layoutpad`
-  would read the table's symbol and each entry's target from the build;
-  the levers are filler in cases that never run (`invalid`'s), stores
-  under a false constant as the pads are, that Go lays out before the hot
-  cases. What it would cost: Go orders a function's blocks by its own
-  layout pass, not by the source, so a filler's place among the cases is
-  found by measurement and may change with Go's version; a filler is IR
-  nodes in a loop 135 below the big-function limit (a 64-byte filler is
-  about nine stores, some 40 nodes), so the lock would spend a third of
-  the budget; and it holds the cases' entries, not the spill slots, whose
-  change -- an instruction three bytes shorter everywhere a slot is used --
-  moves the code inside every case. It would hold what a case added far
-  from the hot ones moves, not what a hot case's own change does. Not
-  built until the budget has room (the raw registers above need the same
-  room).
+- **The hot cases come first, and a golden file holds where they are.**
+  With lever Q pinning `runReg`'s start, a case's address modulo 4 KB --
+  its op-cache set -- is decided by the code before it in the loop alone,
+  and Go lays the cases out in the switch's source order (the dispatch
+  table's entries rise with the cases). So the hot cases are first, in
+  their order, and every other case is after them: an edit to a case that
+  is not hot moves no hot case. `internal/vm/layoutcases.txt` names the
+  hot ones and holds each one's offset from `runReg`'s start in the lock's
+  four configurations, which `internal/cmd/layoutpad` reads from the
+  build's dispatch table (the table the `LEAQ` before the dispatch's
+  indirect jump loads, read from the PE or ELF image); `TestLayoutLock`
+  fails, naming the case and by how much, where one has moved. A
+  deliberate edit to a hot case rewrites the offsets with `go generate
+  ./internal/vm` and is timed; a new operation is a cold sub-operation
+  (`RColdOp`) or a case after the hot ones.
+  The hot set is measured, not chosen: dispatches by opcode, counted in
+  register mode over the V8 suite, Octane and AWFY (37 benchmarks, each
+  weighted alike) and each micro-benchmark on its own. The fewest
+  operations covering 95% of the suites' dispatches are 55 (`get_prop`
+  15.8%, `add` 5.2%, `move` 5.1%, `call_method_w` 4.5%, `mul` 3.8%,
+  `get_index` 3.4% ...); every operation 5% or more of a micro-benchmark's
+  adds 43 more, 98 in all, 98.3% of the suites' dispatches. The 18 cases
+  of no hot operation went after them: `load_this`, `check_ref`, `bit_or`,
+  `shl`, `ushr`, `jnlt_upval`, `jnle_upval`, `jle_imm`, `jnle`,
+  `jnle_imm`, `jge`, `jnge`, `jnge_imm`, `jeq`/`jeq_imm`,
+  `jnull`/`jnotnull`, `jseq_imm`, `throw`, `key_of_base`. `nop` stays
+  first, where the placements put their filler, and 42 and 127 last with
+  `invalid`. Over four placements against e41b0755 the reorder was level:
+  the micro-benchmarks 0.999 by the geometric mean, none 3% slower at every
+  placement, the V8 suite +0.2%.
+  This replaces the levers inside the loop designed before -- anchors on
+  the hot cases' entries, filler in never-run cases. In the loop a case can
+  start at any byte, and an exact offset modulo 4 KB takes some 1,000
+  stores of 7 and 10 bytes per lever, written into `runReg` itself: about
+  2,000 lines and up to 14 KB of dead code in the loop, its IR nodes
+  doubled, and the hot cases spread over more lines and sets, the cost the
+  lock exists to avoid, against a failure that moving the cold cases out
+  of the way prevents (`private_field`'s case among the hot ones moved
+  `crypto_am3`'s loop).
 - **No constants in registers.** What Go's loop-invariant pass would take
   out of the loop is read from a variable (above).
 - **The loop holds only the hot operations.** Every case added moves the

@@ -240,6 +240,10 @@ func main() {
 		}
 		fatal(errors.New("no configuration picked"))
 	}
+	cf, err := readCaseFile()
+	if err != nil {
+		fatal(err)
+	}
 	switch {
 	case *check:
 		drift := false
@@ -248,13 +252,14 @@ func main() {
 			if err != nil {
 				fatal(err)
 			}
-			for _, line := range compare(c, syms) {
+			lines := append(compare(c, syms), cf.compareCases(c, syms)...)
+			for _, line := range lines {
 				fmt.Printf("%s: %s\n", c, line)
-				drift = true
 			}
-			if !drift {
-				fmt.Printf("%s: every anchor at its target\n", c)
+			if len(lines) == 0 {
+				fmt.Printf("%s: every anchor at its target, every hot case where it was\n", c)
 			}
+			drift = drift || len(lines) > 0
 		}
 		if drift {
 			fmt.Println("layoutpad: the layout has drifted from its targets: run go generate ./internal/vm (go run ./internal/cmd/layoutpad)")
@@ -306,9 +311,14 @@ func main() {
 			fatal(err)
 		}
 		for _, c := range picked {
-			if err := solve(c, *verbose); err != nil {
+			syms, err := solve(c, *verbose)
+			if err != nil {
 				fatal(err)
 			}
+			cf.record(c, syms)
+		}
+		if err := cf.write(t.configs); err != nil {
+			fatal(err)
 		}
 	}
 }
@@ -456,6 +466,9 @@ type symbol struct {
 type symtab struct {
 	list   []symbol // by address
 	byName map[string]symbol
+	// cases is each opcode's case in runReg, an offset from its start
+	// (readCases).
+	cases [128]uint64
 }
 
 // build builds v8bench for c as its targets are measured and reads its
@@ -481,7 +494,11 @@ func build(c *config) (*symtab, error) {
 	if err != nil {
 		return nil, fmt.Errorf("go tool nm: %w", err)
 	}
-	return parseNM(out), nil
+	syms := parseNM(out)
+	if syms.cases, err = readCases(exe, syms, c.goos); err != nil {
+		return nil, fmt.Errorf("%s: %w", c, err)
+	}
+	return syms, nil
 }
 
 func parseNM(out []byte) *symtab {
@@ -790,7 +807,7 @@ var dataLevers = []struct {
 }{{"DH", dataVars, "[%s]*byte"}, {"DW", dataVars, "[8 * %s]byte"}, {"DG", dataVars / 2, "[16 * %s]byte"}}
 
 // solve sets c's levers so that every anchor is at its target.
-func solve(c *config, verbose bool) error {
+func solve(c *config, verbose bool) (*symtab, error) {
 	v := readValues(c)
 	active := map[string]bool{}
 	for _, a := range c.anchors {
@@ -809,11 +826,11 @@ func solve(c *config, verbose bool) error {
 	clear(leverBefore)
 	for iter := 0; iter < 12; iter++ {
 		if err := writeValues(c, v); err != nil {
-			return err
+			return nil, err
 		}
 		syms, err := build(c)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if verbose {
 			for _, line := range compare(c, syms) {
@@ -822,22 +839,22 @@ func solve(c *config, verbose bool) error {
 		}
 		code, err := solveCode(c, syms, v, verbose)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if code {
 			continue
 		}
 		data, err := solveData(c, syms, v)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if data {
 			continue
 		}
 		fmt.Printf("%s: every anchor at its target (%s)\n", c, describe(v))
-		return nil
+		return syms, nil
 	}
-	return fmt.Errorf("%s: the levers did not settle", c)
+	return nil, fmt.Errorf("%s: the levers did not settle", c)
 }
 
 func describe(v map[string]int) string {
