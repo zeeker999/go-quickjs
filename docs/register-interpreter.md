@@ -436,7 +436,16 @@ the ones Go allows:
   list, and no hot operation is renumbered: its case's code would move.
   At the removal of the translation reference the free values were 24,
   29, 36, 37, 40, 41, 42 and 43, and 127 is `invalid`'s; `iter_next`
-  took 24, and `yield`, a loop over a generator's step, 43.
+  took 24, and `yield`, a loop over a generator's step, 43. Its case
+  made Go allocate the loop's registers otherwise (100 instructions
+  more, a frame 72 bytes smaller): against the loop before it,
+  `typed_u64_read` and `method_moves` were 6 and 8.5% slower at every
+  placement of four, and nothing else 3% at all four; with yield sent
+  to the slow path's case instead, the loop of the same allocation as
+  before, 13 tests were 3.8 to 11.7% slower than with its case at every
+  placement -- `array_read`, `global_read`, `int_arith`, `float_arith`,
+  `string_length`, `loop_sum`, `loop_locals`, `loop_elements`, the
+  generators' -- and the case stays.
 
 What remains is Go's: a register store of a `Value` is a write-barrier
 check, the loop's instruction word is still saved at the dispatch where a
@@ -1439,7 +1448,10 @@ regdiff cases and test262 in register mode on its directories:
    unmapped one is a copy, which a frame taken over in place leaves
    alone (69). A function that names eval without calling it has an
    arguments binding the stack form fills for an eval that never comes;
-   nothing reads it, it has no register, and none is made (217).
+   nothing reads it, it has no register, and none is made (217). What
+   the record does not resolve is now one form, 642 functions of
+   test262's: dynamic import, `import(x)`, `import.source(x)` and
+   `import.defer(x)`, whose callee the parser makes a name.
 8. **eval and `with`** (757 direct evals, 527 functions beside an eval's
    variables, a with or an Annex B function, 11 more): binding
    descriptors for what an eval can reach.
