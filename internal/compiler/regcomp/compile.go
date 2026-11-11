@@ -54,21 +54,53 @@ func Compile(lit *ast.FuncLit, fn *bytecode.Function, rec *Record) *bytecode.Reg
 // its bindings had a layout. A function with more cache sites than 16 bits
 // number (errSites) is compiled a second time with the sites of one key
 // shared, what the first made of the function's names, constants and
-// sites dropped.
+// sites dropped; and where the stack form alone has nearly as many, a
+// third time with the register form's sites numbered first, from 1, and
+// the stack form's moved past them.
 func generate(fn *bytecode.Function, mk func() *gen) (*gen, bool) {
 	sites, names, consts := fn.PropSites, len(fn.Names), len(fn.Constants)
-	for share := false; ; share = true {
+	for try := 0; ; try++ {
 		g := mk()
-		g.shareSites = share
+		g.shareSites = try > 0
+		g.ownSites = try > 1
 		if !g.layout() {
 			return nil, false
 		}
 		g.body()
-		if g.err != errSites || share {
+		if g.err != errSites || try == 2 {
+			if g.ownSites && g.err == "" {
+				g.moveStackSites()
+			}
 			return g, true
 		}
 		fn.PropSites, fn.Names, fn.Constants = sites, fn.Names[:names], fn.Constants[:consts]
 	}
+}
+
+// moveStackSites renumbers the stack form's cache sites past the nsites
+// the register form numbered from 1: every instruction that has one in its
+// B (the compiler's emit and its array literal of constants) and the
+// object literals' keys (LiteralKeys). The two forms index one closure's
+// caches, and the register form's 16-bit operands reach only the first.
+func (g *gen) moveStackSites() {
+	n := g.nsites
+	fn := g.fn
+	for i := range fn.Code {
+		in := &fn.Code[i]
+		switch in.Op {
+		case bytecode.OpGetProp, bytecode.OpGetPropThis, bytecode.OpSetProp,
+			bytecode.OpNewObject, bytecode.OpInstanceOf, bytecode.OpGetGlobal,
+			bytecode.OpSetGlobal, bytecode.OpCheckGlobalRef, bytecode.OpSetGlobalStrict,
+			bytecode.OpNewArray:
+			if in.B != 0 {
+				in.B += n
+			}
+		}
+	}
+	for i := range fn.LiteralKeys {
+		fn.LiteralKeys[i].Site += n
+	}
+	fn.PropSites += n
 }
 
 // trace prints why a function has no register code (QJS_REGTRACE).
@@ -84,6 +116,11 @@ type gen struct {
 	// (site16).
 	shareSites bool
 	shared     map[siteKey]uint16
+	// ownSites says the stack form alone has more sites than 16 bits
+	// number: the register form numbers its own from 1 (nsites of them),
+	// and the stack form's move past them (moveStackSites).
+	ownSites bool
+	nsites   uint32
 
 	code []bytecode.RInstr
 	pos  []int32
@@ -336,7 +373,11 @@ func (g *gen) layout() bool {
 		}
 	}
 	g.caps = make([][]uint16, len(fn.Constants))
-	g.siteName = make([]uint32, fn.PropSites+1)
+	if g.ownSites {
+		g.siteName = make([]uint32, 1)
+	} else {
+		g.siteName = make([]uint32, fn.PropSites+1)
+	}
 	return true
 }
 
@@ -418,6 +459,11 @@ func (g *gen) jump(w bytecode.RInstr, m *mark, short bool) {
 }
 
 func (g *gen) site(name uint32) uint32 {
+	if g.ownSites {
+		g.nsites++
+		g.siteName = append(g.siteName, name)
+		return g.nsites
+	}
 	g.fn.PropSites++
 	s := g.fn.PropSites
 	g.siteName = append(g.siteName, 0)
@@ -469,6 +515,10 @@ func (g *gen) site16(k siteKey) uint16 {
 // get_prop whose A is its name and B its site, for a read of the register
 // form that shares it.
 func (g *gen) stackSite(in bytecode.Instr) uint16 {
+	if g.ownSites {
+		// The stack form's sites move past the register form's.
+		return g.propSite(bytecode.OpGetProp, in.A)
+	}
 	if in.B == 0 || in.B >= uint32(len(g.siteName)) || in.A >= uint32(len(g.fn.Names)) {
 		g.fail("a stack site out of range")
 		return 0
@@ -490,7 +540,7 @@ func (g *gen) stackSite(in bytecode.Instr) uint16 {
 // for the name and kind, whichever site of them holds it. Anywhere else,
 // and past the stack form's sites, it is a site of its own.
 func (g *gen) propSite(op bytecode.Op, name uint32) uint16 {
-	if g.fn.Leaf == bytecode.LeafNone {
+	if g.fn.Leaf == bytecode.LeafNone || g.ownSites {
 		return g.site16(siteKey{kind: op.String(), name: name})
 	}
 	if g.leafSites == nil {

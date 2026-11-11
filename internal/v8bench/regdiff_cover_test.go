@@ -194,6 +194,48 @@ function w16(o) { with (o) { return m(...[1]) } }
 	regDiffAll(t, src, calls)
 }
 
+// TestRegDiffStackSitesPast16Bits compares functions whose stack form alone
+// has more cache sites than 16 bits number, which the register form numbers
+// from 1 with the stack form's moved past them: property reads and writes,
+// method calls, global reads and writes, strict code's global store,
+// instanceof, object literals and an array literal of constants, read
+// polymorphically, and a throw's position past them all.
+func TestRegDiffStackSitesPast16Bits(t *testing.T) {
+	var sloppy, strict strings.Builder
+	for i := 0; i < 36000; i++ {
+		fmt.Fprintf(&sloppy, "s += o.p%d; o.q%d = s;\n", i%5, i%3)
+	}
+	for i := 0; i < 34000; i++ {
+		fmt.Fprintf(&strict, "gs = gs + o.p%d;\n", i%4)
+	}
+	src := `
+var frames = function (e) { return e.name + ": " + e.message + " | " + e.stack.split("\n").slice(1, 3).map(function (s) { return s.trim() }).join(" | ") };
+var gv = 1, gs = 0;
+function C() {}
+function w1(o) {
+var s = gv;
+` + sloppy.String() + `
+var lit = { a: s, b: o.p0 }, arr = [1, 2, 3], m = o.m ? o.m(2) : 0;
+gv = gv + 1;
+return s + ":" + o.q2 + ":" + lit.a + lit.b + ":" + arr.join() + ":" + (o instanceof C) + ":" + m + ":" + gv + ":" + o.r.x;
+}
+function w2(o) {
+"use strict";
+` + strict.String() + `
+gs = gs + 1; undeclared = gs;
+return gs;
+}
+`
+	calls := []string{
+		`try { w1({ p0: 1, p1: 2, p2: 3, p3: 4, p4: 5, r: { x: 7 } }) } catch (e) { frames(e) }`,
+		`try { var c = new C(); c.p0 = 2; c.m = function (x) { return x * this.p0 }; c.r = { x: 8 }; w1(c) } catch (e) { frames(e) }`,
+		`try { w1({ get p0() { return 1 }, p1: 1 }) } catch (e) { frames(e) }`,
+		`try { w2({ p0: 1, p1: 1, p2: 1, p3: 1 }) } catch (e) { frames(e) }`,
+		`try { undeclared = 0; w2({ p0: 1, p1: 1, p2: 1, p3: 1 }) } catch (e) { frames(e) }`,
+	}
+	regDiffAll(t, src, calls)
+}
+
 // TestRegDiffEvalCode compares eval code run as register code: direct
 // evals' var and function declarations hoisted into the caller's
 // variables or the global object, strict eval's own, indirect evals, a

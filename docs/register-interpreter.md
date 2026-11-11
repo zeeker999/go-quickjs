@@ -1518,9 +1518,8 @@ regdiff cases and test262 in register mode on its directories:
    (B.3.3.1), a store the stack compiler records as the declaration's
    name's write -- it assigned it as the block was entered, which Node
    does not (fixed with it).
-9d. **The last refusals of the corpora** (40) -- 37 done; left: two
-   functions of more than 65,535 sites (below) and the debugger
-   statement, which is the debugger's code (next).
+9d. **The last refusals of the corpora** (40) -- 39 done; left: the
+   debugger statement, which is the debugger's code (next).
    - *A finally clause's bindings* (9, "a name the record resolves two
      ways"): the stack form compiles a clause once for each way out --
      inline at the normal end, as the handler's, and at each break or
@@ -1552,12 +1551,15 @@ regdiff cases and test262 in register mode on its directories:
      again with its sites shared by key (`site16`, `siteKey`): the kind of
      cache and the name, a literal's keys or constants, a call's
      operation -- entries that answer alike for every instruction of the
-     key, a call's checked against its callee. Not yet: a function whose
-     stack form alone has more than 65,535 sites, since the register
-     form's are numbered after them (Mandreel's global_init, 155,109;
-     test262's string-upper-lower-mapping.js, 65,561): what is left is a
-     site the register form numbers apart from the stack form's, or
-     forms that take theirs from Aux.
+     key, a call's checked against its callee. A function whose stack
+     form alone has nearly as many (Mandreel's global_init, 155,109;
+     test262's string-upper-lower-mapping.js, 65,561) is compiled a
+     third time with the register form's sites numbered first, from 1,
+     shared by key, and the stack form's moved past them
+     (`moveStackSites`: the B of every instruction the stack compiler
+     gave a site, and the object literals' `LiteralKeys`): the two forms
+     index one closure's caches, and only the register form's operands
+     are 16 bits.
    - `with (o) f(...a)` passed no receiver in the stack form (fixed with
      it): a spread call probes with `with_get_this` as any call does.
 9e. **Eval code** -- done. The top level a direct or an indirect eval
