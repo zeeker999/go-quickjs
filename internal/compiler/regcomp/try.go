@@ -309,11 +309,7 @@ func (g *gen) forOfStmt(left ast.Node, right ast.Expr, body ast.Stmt, await, in 
 		if lexical {
 			// The head's expression has a binding of the name of its own,
 			// in its dead zone for good, where a closure there reads it.
-			for i, l := range g.fn.Locals {
-				if i != slot && l.Name == id.Name && l.Captured && i < len(g.slotReg) && g.slotReg[i] >= 0 {
-					g.emit(bytecode.MakeR(bytecode.RLoadUninit, 0, r16(int(g.slotReg[i])), 0, 0))
-				}
-			}
+			g.headTDZ(left)
 		}
 		if lexical && g.tdz[slot] {
 			// The head's expression sees the binding in its dead zone.
@@ -368,6 +364,7 @@ func (g *gen) forOfPattern(target ast.Expr, right ast.Expr, body ast.Stmt, await
 	if lexical {
 		// The head's expression sees the bindings in their dead zone; a
 		// closure's binding is each turn's own.
+		g.headTDZ(left)
 		g.patternBindings(target)
 	}
 	src := g.expr(right, -1)
@@ -480,4 +477,19 @@ func (g *gen) freshCatch(c *ast.CatchClause, reg int) {
 	b := int(g.slotReg[slot])
 	g.closeRegs([]int{b})
 	g.emit(bytecode.MakeR(bytecode.RMove, 0, r16(b), r16(reg), 0))
+}
+
+// headTDZ puts the bindings a for-of or for-in loop's head's expression
+// sees in their dead zone, an environment of their own
+// (Record.Heads), in it, where a closure there may read them.
+func (g *gen) headTDZ(left ast.Node) {
+	d, ok := left.(*ast.VarDecl)
+	if !ok {
+		return
+	}
+	for _, slot := range g.rec.Heads[d] {
+		if int(slot) < len(g.slotReg) && g.slotReg[slot] >= 0 && g.fn.Locals[slot].Captured {
+			g.emit(bytecode.MakeR(bytecode.RLoadUninit, 0, r16(int(g.slotReg[slot])), 0, 0))
+		}
+	}
 }

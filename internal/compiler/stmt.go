@@ -874,6 +874,17 @@ func (c *compiler) beginHeadScope(left ast.Node) bool {
 	}
 	c.beginScope()
 	c.predeclareLexical(vd)
+	if c.reg != nil {
+		var names []string
+		for _, d := range vd.Decls {
+			names = appendPatternNames(names, d.Target)
+		}
+		for _, n := range names {
+			if l, ok := c.resolveLocal(n); ok {
+				c.reg.NoteHead(vd, uint32(l.slot))
+			}
+		}
+	}
 	return true
 }
 

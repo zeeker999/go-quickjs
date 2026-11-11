@@ -84,6 +84,10 @@ type Record struct {
 	// Catches is the stack slot of each catch clause's binding, where it
 	// is an identifier.
 	Catches map[*ast.CatchClause]uint32
+	// Heads is, for a for-of or for-in loop's lexical declaration, the
+	// stack slots of the bindings its head's expression sees in their
+	// dead zone (ForIn/OfHeadEvaluation's TDZ environment).
+	Heads map[*ast.VarDecl][]uint32
 	// Tails is each call the stack form compiled as a tail call
 	// (tail_call, tail_call_method, tail_direct_eval).
 	Tails map[ast.Expr]bool
@@ -157,6 +161,18 @@ func (r *Record) NoteTail(n ast.Expr) {
 }
 
 // NoteCatch records that the binding of catch clause c is in slot.
+// NoteHead records slot as a binding of the dead-zone environment a for-of
+// or for-in loop's head d makes for its expression.
+func (r *Record) NoteHead(d *ast.VarDecl, slot uint32) {
+	if r == nil {
+		return
+	}
+	if r.Heads == nil {
+		r.Heads = map[*ast.VarDecl][]uint32{}
+	}
+	r.Heads[d] = append(r.Heads[d], slot)
+}
+
 func (r *Record) NoteCatch(c *ast.CatchClause, slot uint32) {
 	if r == nil {
 		return

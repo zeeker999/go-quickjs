@@ -1384,8 +1384,10 @@ function t11() { var fs = []; for (let i = 0; i < 3; i++) { let r = () => i; if 
 function* t12g() { for (let i = 0; i < 3; i++) yield () => i }
 function t12() { return [...t12g()].map(f => f()).join() }
 function t13() { var fs = []; for (let i = 0; i < 2; i++) { do { let k = i; fs.push(() => k) } while (false) } return fs.map(f => f()).join() }
+function t14() { let y = 'out'; var pb = () => y, pe, pd; for (const [y, z = pd = () => y] of (pe = () => y, [[1]])) {} try { pe() } catch (e) { return [pb(), pd(), e.name].join() } }
 `
-	calls := []string{`t1()`, `t2()`, `t3()`, `t4()`, `t5()`, `t6()`, `t7()`, `t8()`, `t9()`, `t10()`, `t11()`, `t12()`, `t13()`}
+	calls := []string{`t1()`, `t2()`, `t3()`, `t4()`, `t5()`, `t6()`, `t7()`, `t8()`, `t9()`, `t10()`, `t11()`, `t12()`, `t13()`, `t14()`,
+		`var pd, pe, pb; for (let [x, _ = pd = function() { return x }] of (pe = function() { typeof x }, [['in']])) pb = function() { return x }; try { pe() } catch (e) { [pd(), pb(), e.name].join() }`}
 	regDiff(t, src, calls)
 }
 

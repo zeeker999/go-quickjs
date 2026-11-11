@@ -1312,7 +1312,8 @@ regdiff cases and test262 in register mode on its directories:
    turns before keep theirs, closed. A for head's let is copied from turn
    to turn (CreatePerIterationEnvironment): closed after the head's
    initialization and at each turn's end, before the update. A head
-   expression's closure of the head's binding reads it in its dead zone.
+   expression's closure of the head's binding reads it in its dead zone,
+   the bindings the stack compiler records for the head (`Record.Heads`).
 3c. **Names in their dead zone, and for-of and for-in stores** (626 and
    721) -- done: the stack compiler records a dead-zone upvalue's read and
    write as `ResUpvalCheck` (`get_upval_check`, `set_upval_check`, cold,
