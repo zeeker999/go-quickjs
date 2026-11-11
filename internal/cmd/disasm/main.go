@@ -244,7 +244,7 @@ func (p *printer) header(fn *bytecode.Function, indent string) {
 
 func (p *printer) code(fn *bytecode.Function, indent string) {
 	if p.reg {
-		if fn.Reg == nil {
+		if rc := fn.RegCode(); rc == nil {
 			fmt.Fprintln(p.w, indent+"  register code: none (the stack form runs it; QJS_REGTRACE says why)")
 		} else {
 			fmt.Fprintf(p.w, "%s  register code: %d instructions, %d registers (stack form: %d instructions)%s",

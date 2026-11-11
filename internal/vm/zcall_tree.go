@@ -53,9 +53,14 @@ func planTreeCall(fd *funcData) {
 	case fn.HasTailCall:
 		fd.treeRest = true
 	default:
+		regBindPlan(fd, t)
 		fd.treeCall = t
 	}
 	fd.treePlanned = true
+	// A closure planned at its first call, not as it was made, is planned
+	// as regMadeClosure plans one: its register code is built only now
+	// (bytecode.RegLater).
+	regPlan(fd)
 }
 
 // makeClosure builds a closure from a nested function template

@@ -3,6 +3,8 @@ package bytecode
 import (
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 // The register form of a function's code: what the register interpreter
@@ -754,6 +756,67 @@ type RegCode struct {
 	// constructor's super() binds (this_bound), not from register 1: a
 	// derived constructor's, or an arrow's written inside one.
 	ThisRef bool
+	// Names, Constants and PropSites are the function's names, constants
+	// and property sites with those the register code adds, where it was
+	// compiled at the function's first call (RegLater): the Function's own
+	// are shared by then and never change, and a runtime adds what is past
+	// them to a closure's tables as it first runs the code (regExtend).
+	// Nil and 0 for code compiled with its function, whose additions are
+	// the Function's.
+	Names     []string
+	Constants []Constant
+	PropSites uint32
+}
+
+// RegLater is a function's register code, compiled when it is first asked
+// for: functions never called are never compiled, as V8 compiles lazily.
+// It is safe for concurrent use: a Function is shared by the runtimes that
+// run its program.
+type RegLater struct {
+	mu   sync.Mutex
+	done atomic.Bool
+	rc   *RegCode
+	// make compiles the code, holding what the compiler recorded until
+	// then; it is dropped once it has run.
+	make func() *RegCode
+}
+
+// NewRegLater returns the register code that make compiles when first
+// asked for.
+func NewRegLater(make func() *RegCode) *RegLater { return &RegLater{make: make} }
+
+// RegCode is f's register code, compiled now if it is compiled lazily and
+// has not been, or nil where it has none.
+func (f *Function) RegCode() *RegCode {
+	if f.Reg != nil {
+		return f.Reg
+	}
+	l := f.RegLater
+	if l == nil {
+		return nil
+	}
+	if l.done.Load() {
+		return l.rc
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.done.Load() {
+		l.rc, l.make = l.make(), nil
+		l.done.Store(true)
+	}
+	return l.rc
+}
+
+// RegCompiled is f's register code where it has been compiled, without
+// compiling it, or nil.
+func (f *Function) RegCompiled() *RegCode {
+	if f.Reg != nil {
+		return f.Reg
+	}
+	if l := f.RegLater; l != nil && l.done.Load() {
+		return l.rc
+	}
+	return nil
 }
 
 // LiveAt is how many of the frame's registers are live at the head of the

@@ -2067,7 +2067,7 @@ func (r *Runtime) regLit(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value)
 	w := regAt(c.code, pc)
 	f.pc = c.src[pc] + 1
 	a, x, kc := w.A(), w.X(), uint32(w.C())
-	lit, err := r.newRegExpLiteral(&f.cl.fn.Constants[kc])
+	lit, err := r.newRegExpLiteral(regConst(f.cl.fn, c, kc))
 	if err != nil {
 		return err
 	}
@@ -2083,7 +2083,7 @@ func (r *Runtime) regLit(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value)
 			}
 			if !test || r.regexpLitMethod(false) != nil {
 				// test calls exec, which must be the built-in too.
-				r.regexpLiteralDone(&f.cl.fn.Constants[kc], lit.Object())
+				r.regexpLiteralDone(regConst(f.cl.fn, c, kc), lit.Object())
 			}
 			regs[w.B()] = v
 			return nil
@@ -2138,7 +2138,7 @@ func (r *Runtime) regMarkedCall(f *frame, c *regCode, base, argc, pc int, m uint
 	k := x
 	args := r.stack[base+2 : base+2+argc]
 	if m&bytecode.RMarkLitArg != 0 {
-		lit, err := r.newRegExpLiteral(&f.cl.fn.Constants[k])
+		lit, err := r.newRegExpLiteral(regConst(f.cl.fn, c, k))
 		if err != nil {
 			return Undefined, err
 		}
@@ -2178,7 +2178,7 @@ func (r *Runtime) regMarkedCall(f *frame, c *regCode, base, argc, pc int, m uint
 		return Undefined, err
 	}
 	if rx != nil {
-		r.regexpLiteralDone(&f.cl.fn.Constants[k], rx)
+		r.regexpLiteralDone(regConst(f.cl.fn, c, k), rx)
 	}
 	return v, nil
 }
@@ -2302,7 +2302,9 @@ func regNum(f float64) Value {
 }
 
 // regInt32 is v as an int32, where it is a number that is one exactly:
-// what a bitwise operator's fast path takes without converting.
+// what a bitwise operator's fast path takes without converting. The tag
+// test is not redundant in time: without it (a NaN fails the round trip's
+// compare as well), loop_int32 was 8.1% slower at every placement.
 func regInt32(v Value) (int32, bool) {
 	if v.IsNumber() {
 		f := v.Number()

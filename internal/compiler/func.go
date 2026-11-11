@@ -44,7 +44,9 @@ func (c *compiler) compileFunctionLiteral(fn *ast.FuncLit, inferredName string) 
 	rec := sub.reg
 	compiled := sub.release()
 	if rec != nil && !rec.Bail {
-		compiled.Reg = regcomp.Compile(fn, compiled, rec)
+		// Compiled at the function's first call: one never called is
+		// never compiled (docs/register-interpreter.md, "Compiled lazily").
+		compiled.RegLater = regcomp.Later(fn, compiled, rec)
 	} else if rec != nil {
 		regcomp.Refuse(compiled, "a with, an eval's variables or an Annex B function")
 	}

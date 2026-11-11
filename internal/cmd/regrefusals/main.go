@@ -76,7 +76,7 @@ func main() {
 			}
 			walk(fn, func(f *bytecode.Function) {
 				t.funcs++
-				if f.Reg != nil {
+				if f.RegCode() != nil {
 					t.regCode++
 					return
 				}

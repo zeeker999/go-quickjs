@@ -122,7 +122,7 @@ func regReportPrint() {
 				l, _ := fn.Script.Position(fn.Start)
 				what += fmt.Sprintf(" (line %d)", l)
 			}
-			if fn.Reg == nil {
+			if fn.RegCode() == nil {
 				why := regcomp.Refusal(fn)
 				if why == "" {
 					why = "no register code"

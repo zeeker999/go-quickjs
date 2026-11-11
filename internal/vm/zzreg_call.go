@@ -471,11 +471,18 @@ func (r *Runtime) regClosure(f *frame, c *regCode, w bytecode.RInstr, wb int) *O
 	return regMadeClosure(o)
 }
 
-// regMadeClosure is closure_w's closure o, its function's code planned.
+// regMadeClosure is closure_w's closure o, its function's code planned
+// where it has been built, as makeClosure plans: a function's code is built
+// at its first call, which plans the closure called (regStmt), so that one
+// never called is never compiled (bytecode.RegLater). A leaf's is built as
+// it is made: its calls are answered by the stack form's leaf evaluators
+// (pureCall, leafCall), which build nothing, until a plan sends them to its
+// register code (regPlan, regDirect, regLeafRun).
 func regMadeClosure(o *Object) *Object {
 	if fd := o.fn(); fd != nil {
-		if atomic.LoadPointer(&fd.closure.fn.VMCode) == nil && fd.closure.fn.Reg != nil && regTier.Load() {
-			firstTree(fd.closure.fn)
+		if fn := fd.closure.fn; fn.Leaf != bytecode.LeafNone && fn.RegLater != nil &&
+			atomic.LoadPointer(&fn.VMCode) == nil && regTier.Load() {
+			firstTree(fn)
 		}
 		if atomic.LoadPointer(&fd.closure.fn.VMCode) != nil {
 			planTreeCall(fd)
@@ -578,7 +585,7 @@ func regLeafOps(fn *bytecode.Function, rc *bytecode.RegCode) []regLeafOp {
 		case bytecode.RMove:
 			o.op = rlMove
 		case bytecode.RLoadInt, bytecode.RLoadConst, bytecode.RLoadUndef, bytecode.RLoadNull, bytecode.RLoadTrue, bytecode.RLoadFalse:
-			v, ok := regConstOf(fn, w)
+			v, ok := regConstOf(regConsts(fn, rc), w)
 			if !ok {
 				return nil
 			}
@@ -643,6 +650,9 @@ func (r *Runtime) regOf(cl *closure) *regCode {
 	t := (*tree)(atomic.LoadPointer(&cl.fn.VMCode))
 	if t == nil {
 		t = firstTree(cl.fn)
+	}
+	if t.reg != nil && cl.reg == nil {
+		r.regExtend(cl, t.reg)
 	}
 	cl.reg = t.reg
 	return t.reg

@@ -81,21 +81,21 @@ func TestRegisterBackendCode(t *testing.T) {
 	}
 	for name, listing := range want {
 		f := fns[name]
-		if f == nil || f.Reg == nil {
+		if f == nil || f.RegCode() == nil {
 			t.Fatalf("%s has no register code", name)
 		}
-		if got := strings.TrimRight(f.Reg.String(), "\n"); got != strings.TrimPrefix(listing, "\n") {
+		if got := strings.TrimRight(f.RegCode().String(), "\n"); got != strings.TrimPrefix(listing, "\n") {
 			t.Errorf("%s:\n%s\nwant:\n%s", name, got, strings.TrimPrefix(listing, "\n"))
 		}
 	}
 	for _, name := range []string{"stores", "method", "post", "cap"} {
-		if fns[name] == nil || fns[name].Reg == nil {
+		if fns[name] == nil || fns[name].RegCode() == nil {
 			t.Errorf("%s has no register code", name)
 		}
 	}
 	has := func(name, op string) {
-		if f := fns[name]; f != nil && f.Reg != nil && !strings.Contains(f.Reg.String(), op) {
-			t.Errorf("%s has no %s:\n%s", name, op, f.Reg)
+		if f := fns[name]; f != nil && f.RegCode() != nil && !strings.Contains(f.RegCode().String(), op) {
+			t.Errorf("%s has no %s:\n%s", name, op, f.RegCode())
 		}
 	}
 	has("stores", "set_index_imm")
@@ -121,26 +121,26 @@ func TestRegisterBackendFallsBack(t *testing.T) {
 		function strictStore() { 'use strict'; g = plain(1) }
 		function plain(x) { return x + 1 }`)
 	for _, name := range []string{"tried", "opt", "strictStore"} {
-		if f := fns[name]; f == nil || f.Reg == nil {
+		if f := fns[name]; f == nil || f.RegCode() == nil {
 			t.Errorf("%s: want register code", name)
 		}
 	}
-	if f := fns["strictStore"]; f != nil && f.Reg != nil {
+	if f := fns["strictStore"]; f != nil && f.RegCode() != nil {
 		for _, op := range []string{"check_global_ref", "assert_resolved", "set_global"} {
-			if !strings.Contains(f.Reg.String(), op) {
-				t.Errorf("strictStore has no %s:\n%s", op, f.Reg)
+			if !strings.Contains(f.RegCode().String(), op) {
+				t.Errorf("strictStore has no %s:\n%s", op, f.RegCode())
 			}
 		}
 	}
 	for _, name := range []string{"gen"} {
-		if f := fns[name]; f == nil || f.Reg != nil {
-			t.Errorf("%s: register code %v, want none", name, f != nil && f.Reg != nil)
+		if f := fns[name]; f == nil || f.RegCode() != nil {
+			t.Errorf("%s: register code %v, want none", name, f != nil && f.RegCode() != nil)
 		}
 	}
-	if f := fns["handled"]; f == nil || f.Reg == nil || len(f.Reg.Handlers) != 2 {
+	if f := fns["handled"]; f == nil || f.RegCode() == nil || len(f.RegCode().Handlers) != 2 {
 		t.Errorf("handled: want register code with two handlers")
 	}
-	if f := fns["plain"]; f == nil || f.Reg == nil {
+	if f := fns["plain"]; f == nil || f.RegCode() == nil {
 		t.Errorf("plain has no register code")
 	}
 	// The stack form is the same with the backend on as off.

@@ -31,17 +31,53 @@ func Compile(lit *ast.FuncLit, fn *bytecode.Function, rec *Record) *bytecode.Reg
 		Refuse(fn, w)
 		return nil
 	}
-	g := &gen{lit: lit, fn: fn, rec: rec}
+	return compile(lit, fn, rec, fn)
+}
+
+// Later is lit's register code as Compile compiles it, compiled when it is
+// first asked for (bytecode.Function.RegCode), or nil where fn's kind
+// refuses it at once. The record and the AST are kept until then. The
+// code compiled so adds nothing to fn, whose tables are shared by the
+// runtimes running it by then: its names, constants and sites are the
+// RegCode's (RegCode.Names), the sites numbered past the private members'
+// so that the stack form's numbering stays as it is.
+func Later(lit *ast.FuncLit, fn *bytecode.Function, rec *Record) *bytecode.RegLater {
+	if w := why(fn); w != "" && !(w == "arguments" && simpleArguments(fn)) {
+		Refuse(fn, w)
+		return nil
+	}
+	return bytecode.NewRegLater(func() *bytecode.RegCode {
+		view := *fn
+		view.Names = fn.Names[:len(fn.Names):len(fn.Names)]
+		view.Constants = fn.Constants[:len(fn.Constants):len(fn.Constants)]
+		view.PropSites = fn.PropSites + fn.PrivateSites
+		rc := compile(lit, &view, rec, fn)
+		if rc != nil {
+			// Never nil, which says the code was compiled with its
+			// function (RegCode.Names).
+			rc.Names = append(make([]string, 0, len(view.Names)), view.Names...)
+			rc.Constants = append(make([]bytecode.Constant, 0, len(view.Constants)), view.Constants...)
+			rc.PropSites = view.PropSites
+		}
+		return rc
+	})
+}
+
+// compile compiles lit into register code with the tables of fn, which
+// are those of orig, the function refusals are recorded for, or a view of
+// them that the code's additions go to.
+func compile(lit *ast.FuncLit, fn *bytecode.Function, rec *Record, orig *bytecode.Function) *bytecode.RegCode {
+	g := &gen{lit: lit, fn: fn, rec: rec, orig: orig}
 	// A derived constructor's this, and an arrow's written inside one, is
 	// the binding super() binds, read through the frame (this_bound).
 	g.thisRef = fn.Kind == bytecode.KindDerivedConstructor || fn.Kind == bytecode.KindArrow && !fn.ArrowThisValue
 	if !g.layout() {
-		Refuse(fn, "its bindings' layout")
+		Refuse(orig, "its bindings' layout")
 		return nil
 	}
 	g.body()
 	if g.err != "" {
-		Refuse(fn, g.err)
+		Refuse(orig, g.err)
 		return nil
 	}
 	return g.finish()
@@ -54,6 +90,9 @@ type gen struct {
 	lit *ast.FuncLit
 	fn  *bytecode.Function
 	rec *Record
+	// orig is the function refusals are recorded for: fn, or the function
+	// fn is a view of (Later).
+	orig *bytecode.Function
 
 	code []bytecode.RInstr
 	pos  []int32
@@ -3380,7 +3419,7 @@ func (g *gen) finish() *bytecode.RegCode {
 		Handlers: g.handlerTable(), BackLive: g.backLive, KeepsArgs: g.fn.HasRest || g.forwardsArgs, ThisRef: g.thisRef,
 	}
 	if why := Verify(rc, g.fn); why != "" {
-		Refuse(g.fn, why)
+		Refuse(g.orig, why)
 		return nil
 	}
 	return rc

@@ -341,6 +341,41 @@ register code is compared the same way between two revisions of the
 backend, by its own listing. Once the stack form is retired, compilediff
 compares register code alone.
 
+### Compiled at the first call
+
+A function's register code is compiled when it is first called, as V8
+compiles lazily: one never called is never compiled. The stack compiler
+records what the backend needs as it compiles (the `Record`), and keeps
+it, with the function's AST, in a `bytecode.RegLater` until then;
+`Function.RegCode` compiles it once, under a lock, since a program's
+functions are shared by the runtimes running it. A script's or a module's
+code, which runs as soon as it is compiled, is compiled with it
+(`Function.Reg`). What reads register code before a call -- the program
+sites a re-run seeds (`zzz_rerun.go`) -- reads it only where it has been
+compiled (`RegCompiled`); a closure made before its function's first call
+is planned at that call (`regStmt`, `planTreeCall`), not as it is made.
+A leaf's code (`Function.Leaf`) is compiled as its closure is made, as
+all were: the stack form's leaf evaluators (`pureCall`, `leafCall`)
+answer its calls and build nothing, so it would never reach a first call
+of its own, and a sort's comparator ran in `pureCallAt` rather than
+`regLeafRun` (`array_sort` +15%, the callbacks of `forEach`, `map` and
+a replacer 6 to 18% slower at every placement, until it was).
+
+The backend added names, constants and property sites to the Function as
+it compiled. By the first call those are shared: every runtime that loaded
+the program has made a closure's tables from them (`prepare`), and another
+goroutine may be reading them. So code compiled lazily adds nothing to the
+Function: it compiles over a view of it whose slices are full to their
+capacity, and keeps the tables with its additions in the `RegCode`
+(`Names`, `Constants`, `PropSites`), its sites numbered past the private
+members' so that the stack form's numbering stays as it is. A runtime adds
+what is past a closure template's tables where the template is first
+given its register code (`regExtend`): where `cl.reg` is set (`regOf`,
+`regStmt`), which every entry into the code reads, and where a plan lets
+a call enter the code without it (`regBindPlan`, for `regDirect`). A table
+missed would be an index out of range, not a wrong read: the loop's reads
+of names, constants and caches are bounds-checked.
+
 ## The loop
 
 The interpreter is a loop of its own, `runReg`, in files that sort after
@@ -436,6 +471,29 @@ the ones Go allows:
   The set-up and the entries from a tree are in `zzreg_entry.go`. An
   unrelated function added before the block, with the pads regenerated,
   leaves every function of the block where it was.
+- **The inside of `runReg` is not locked** (designed, not built). Every
+  case added changes Go's spill slots and the order of the loop's blocks,
+  and moves the hot cases' code against each other: `private_field`'s
+  case moved `crypto_am3`'s loop (8.6% at every placement), a `regSlow`
+  case the block after it. The anchor after `regSlow` (lever P) fixes
+  the second; the first would need a lock inside the loop. Its design:
+  the anchors are the hot cases' entries -- `add`, `get_index`, `jlt`,
+  `call_w`, the dispatch -- read from the loop's jump table, which Go
+  emits as a read-only table of the cases' addresses, so `layoutpad`
+  would read the table's symbol and each entry's target from the build;
+  the levers are filler in cases that never run (`invalid`'s), stores
+  under a false constant as the pads are, that Go lays out before the hot
+  cases. What it would cost: Go orders a function's blocks by its own
+  layout pass, not by the source, so a filler's place among the cases is
+  found by measurement and may change with Go's version; a filler is IR
+  nodes in a loop 135 below the big-function limit (a 64-byte filler is
+  about nine stores, some 40 nodes), so the lock would spend a third of
+  the budget; and it holds the cases' entries, not the spill slots, whose
+  change -- an instruction three bytes shorter everywhere a slot is used --
+  moves the code inside every case. It would hold what a case added far
+  from the hot ones moves, not what a hot case's own change does. Not
+  built until the budget has room (the raw registers above need the same
+  room).
 - **No constants in registers.** What Go's loop-invariant pass would take
   out of the loop is read from a variable (above).
 - **The loop holds only the hot operations.** Every case added moves the
@@ -1138,6 +1196,48 @@ frame and a ToPrimitive read nothing of the frame's registers, so a raw
 loop counter may be live across a back edge; the literal rule, no raw
 register live across anything that can call out, would forbid every raw
 counter.
+
+Reopened, 2026-11-11, for asm.js-style code, where the deferral's reasons
+do not hold. Octane's zlib, Mandreel and Game Boy were 38.5%, 26.9% and
+17.9% slower than the tree. Profiled (`-cpuprofile`, two runs each):
+
+| | zlib | Mandreel | Game Boy |
+|---|---:|---:|---:|
+| time, tree → register (ms, one profile run) | 16,263 → 21,490 | 5,187 → 6,383 | 869 → 983 |
+| `regInt32` and its `IsNumber`, register | 8.1 s of 22.1 | 1.5 s of 7.1 | small |
+| the tree's `toInt32` and `i32Exact` | 1.05 s of 16.6 | | |
+| `regElemMiss` (a typed array's element) | 3.8 s, 17% | 1.5 s, 21% | 0.16 s, 8.5% |
+
+zlib's gap is the conversions: the bitwise operators' round trip of each
+operand through a float (`regInt32`) and of each result back (`Int32`),
+`or_imm`'s `x|0` alone 3.5 s of it, where the tree's int32 trees keep an
+int32 in a Go variable through an expression. Mandreel's is the typed
+heap as much: every `heap32[(r1+2)]` is a dense-array check missed and a
+call of `regElemMiss`, which decodes the instruction again. Its locals are
+declared without initialisers (`var r0;`) and its keys are sums, nothing
+of which is provable; zlib's are initialised (`var b=0,c=0`) and coerced
+(`a=a|0`), and 700 to 1,300 of its 4,319 `|0`s are of a bare local.
+
+What stands in the way is the loop, not the proof:
+
+- **Opcodes.** The design needs a raw form of each bitwise operator, its
+  immediate form, the wrapping add and subtract, the compares-and-branches,
+  `get_index` and `set_index` with a raw key, and the conversions in and
+  out: about twenty values. Two are free (42 and 43); the 7-bit space is
+  spent.
+- **The loop's budget.** `runReg` is at 4,865 of Go's 5,000 nodes; twenty
+  cases of 25 to 40 nodes each put it past the limit, where Go stops
+  inlining `regInt32`, `regTruth` and a dozen more into every case.
+- **A cheaper check is not one.** `regInt32` without its tag test (a NaN
+  fails the round trip's compare too) made `loop_int32` 8.1% slower at
+  every placement and zlib 1.6%: dropped.
+
+So the raw registers need room first: a wider opcode field and a loop
+whose rarely hot cases leave it for `regCold`, or a second loop for code
+the backend has typed int32 throughout (an asm.js function), entered at
+the call and holding no Value register at all, which keeps `runReg` as it
+is. Either is a change to the loop's layout as large as any made, and is
+measured over the placements as one.
 
 ### Stage 2: zero refusals
 

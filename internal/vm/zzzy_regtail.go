@@ -310,6 +310,7 @@ func regPlan(fd *funcData) {
 	if x := fd.extra; x != nil && (!fd.arrow || x.lexThisRef != nil || x.rare != nil) {
 		return
 	}
+	regBindPlan(fd, t)
 	fd.treeCall = t
 }
 

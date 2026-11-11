@@ -281,7 +281,13 @@ func TestPrivateSitesCached(t *testing.T) {
 	if fn.PrivateSites != 4 {
 		t.Fatalf("PrivateSites = %d, want 4", fn.PrivateSites)
 	}
-	if len(cl.ic) != int(fn.PropSites+fn.PrivateSites)+1 {
+	want := int(fn.PropSites+fn.PrivateSites) + 1
+	if rc := fn.RegCompiled(); rc != nil && rc.Names != nil && regTier.Load() {
+		// Register code compiled at the function's first call numbers its
+		// own sites past the private members' (bytecode.RegLater).
+		want = int(rc.PropSites) + 1
+	}
+	if len(cl.ic) != want {
 		t.Fatalf("%d caches for %d sites and %d private ones", len(cl.ic), fn.PropSites, fn.PrivateSites)
 	}
 	// The getter is installed first, then the fields in their order.
@@ -296,7 +302,7 @@ func TestPrivateSitesCached(t *testing.T) {
 	for i := range sites {
 		sites[i] = fn.PropSites + 1 + uint32(i)
 	}
-	if rc := fn.Reg; rc != nil && regTier.Load() {
+	if rc := fn.RegCode(); rc != nil && regTier.Load() {
 		sites = sites[:0]
 		for pc, w := range rc.Code {
 			if w.Op() == bytecode.RGetPrivate || w.Op() == bytecode.RSetPrivate {

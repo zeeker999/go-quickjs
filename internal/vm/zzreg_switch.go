@@ -213,7 +213,7 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 	f.pc = c.src[pc] + 1
 	switch bytecode.RColdOp(w.X()) {
 	case bytecode.RColdNewRegExp:
-		v, err := r.newRegExpLiteral(&f.cl.fn.Constants[w.BC()])
+		v, err := r.newRegExpLiteral(regConst(f.cl.fn, c, w.BC()))
 		if err != nil {
 			return err
 		}

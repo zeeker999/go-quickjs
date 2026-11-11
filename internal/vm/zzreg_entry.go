@@ -35,15 +35,75 @@ func firstForm(fn *bytecode.Function) *tree {
 }
 
 // regTreeOf translates fn into register code and returns the tree that runs
-// it, or nil.
+// it, or nil. A function's register code is compiled here, at its first
+// call (bytecode.RegLater).
 func regTreeOf(fn *bytecode.Function) *tree {
-	if rc := fn.Reg; rc != nil && rc.Wide {
+	if rc := fn.RegCode(); rc != nil && rc.Wide {
 		return regTreeWide(fn, rc)
 	}
 	if regTrace {
 		println("reg: not", fn.Name, "(no register code)")
 	}
 	return nil
+}
+
+// regExtend adds to cl's tables -- its names, constants and caches, which
+// every closure of its template in this runtime shares -- those of c's code
+// past its function's own, where the code was compiled at the function's
+// first call (RegCode.Names): a runtime makes a function's tables as it
+// loads its program, before the code exists, and the code adds nothing to
+// the Function, which the runtimes running it share. It runs where a
+// closure is first given its register code (cl.reg), which every entry
+// into the code reads but those a plan makes (regBindPlan).
+func (r *Runtime) regExtend(cl *closure, c *regCode) {
+	rc := c.rc
+	if rc.Names == nil {
+		return
+	}
+	if n := len(rc.Names); len(cl.names) < n {
+		names := make([]Atom, n)
+		copy(names, cl.names)
+		for i := len(cl.names); i < n; i++ {
+			names[i] = r.atoms.intern(rc.Names[i])
+		}
+		cl.names = names
+	}
+	if n := len(rc.Constants); len(cl.consts) < n {
+		consts := make([]Value, n)
+		copy(consts, cl.consts)
+		for i := len(cl.consts); i < n; i++ {
+			consts[i] = r.materialize(rc.Constants[i])
+		}
+		cl.consts = consts
+	}
+	if len(cl.ic) <= int(rc.PropSites) {
+		ic := newPropCaches(int(rc.PropSites))
+		copy(ic, cl.ic)
+		cl.ic = ic
+	}
+}
+
+// regBindPlan gives fd's closure its register code where a plan lets a
+// call enter it without asking (fd.treeCall): a built-in's callback
+// (regDirect) reads the code from the plan, not from cl.reg.
+func regBindPlan(fd *funcData, t *tree) {
+	if cl := fd.closure; t.reg != nil && cl.reg == nil {
+		cl.realm.agent.regExtend(cl, t.reg)
+		cl.reg = t.reg
+	}
+}
+
+// regConsts is the constants of rc's code, whose function is fn.
+func regConsts(fn *bytecode.Function, rc *bytecode.RegCode) []bytecode.Constant {
+	if rc.Constants != nil {
+		return rc.Constants
+	}
+	return fn.Constants
+}
+
+// regConst is constant k of c's code, whose function is fn.
+func regConst(fn *bytecode.Function, c *regCode, k uint32) *bytecode.Constant {
+	return &regConsts(fn, c.rc)[k]
 }
 
 // regTreeWide is the tree that runs fn's register code rc, which the
@@ -106,7 +166,7 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 		case bytecode.RRetUndef:
 			c.leaf, c.leafVal = regLeafConst, Undefined
 		default:
-			if v, ok := regConstOf(fn, w); ok && len(rc.Code) > 1 {
+			if v, ok := regConstOf(regConsts(fn, rc), w); ok && len(rc.Code) > 1 {
 				if ret := rc.Code[1]; ret.Op() == bytecode.RRet && ret.A() == w.A() {
 					c.leaf, c.leafVal = regLeafConst, v
 				}
@@ -124,7 +184,7 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 // regConstOf is the value instruction w loads, where it loads a constant
 // that is the same in every realm and runtime: a number, a boolean, null or
 // undefined.
-func regConstOf(fn *bytecode.Function, w bytecode.RInstr) (Value, bool) {
+func regConstOf(consts []bytecode.Constant, w bytecode.RInstr) (Value, bool) {
 	switch w.Op() {
 	case bytecode.RLoadInt:
 		return Int32(int32(w.BC())), true
@@ -137,8 +197,8 @@ func regConstOf(fn *bytecode.Function, w bytecode.RInstr) (Value, bool) {
 	case bytecode.RLoadFalse:
 		return False, true
 	case bytecode.RLoadConst:
-		if k := int(w.BC()); k < len(fn.Constants) && fn.Constants[k].Kind == bytecode.ConstNumber {
-			return Float(fn.Constants[k].Num), true
+		if k := int(w.BC()); k < len(consts) && consts[k].Kind == bytecode.ConstNumber {
+			return Float(consts[k].Num), true
 		}
 	}
 	return Undefined, false
@@ -155,6 +215,7 @@ func regStmt(c *regCode) tstmt {
 		r, f := t.r, t.f
 		if c.wide && (f.thisRef == nil || c.rc.ThisRef) && f.withScopes == nil && f.evalVars == nil {
 			if f.cl.reg == nil {
+				r.regExtend(f.cl, c)
 				f.cl.reg = c
 			}
 			if f.callee != nil {

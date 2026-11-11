@@ -188,7 +188,7 @@ func listSites[_ any](p *programSites, fn *bytecode.Function, constant int) bool
 			p.at = append(p.at, in.B)
 		}
 	}
-	if rc := fn.Reg; rc != nil {
+	if rc := fn.RegCompiled(); rc != nil {
 		// The register code's literals have sites of their own.
 		for _, w := range rc.Code {
 			if op := w.Op(); op == bytecode.RNewObject || op == bytecode.RNewObjectLit {
