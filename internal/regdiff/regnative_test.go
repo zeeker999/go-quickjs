@@ -1,4 +1,4 @@
-package v8bench
+package regdiff
 
 import (
 	"strings"

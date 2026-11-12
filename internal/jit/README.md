@@ -1154,7 +1154,7 @@ evaluator leaves for good -- a return the evaluator cannot make, the
 budget -- `runReg` goes on with the frame from that register pc. That is
 what Stage 3a-3's native code's host exits and deoptimizations are to do.
 Inside an expansion it runs the instruction whole only where nothing of
-it has committed. `TestRegLowerEvaluate` (internal/v8bench, JIT builds)
+it has committed. `TestRegLowerEvaluate` (internal/regdiff, JIT builds)
 compares each call of the register interpreter's differential corpus so
 made with an ordinary call in a second runtime that has run the same
 calls; `QUICKJS_REGLOWER_SHARD=k/n` runs a shard of it.

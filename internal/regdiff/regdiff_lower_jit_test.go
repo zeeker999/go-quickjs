@@ -1,6 +1,6 @@
 //go:build quickjs_jit && !android && !ios && ((linux && amd64) || (windows && amd64) || (darwin && arm64))
 
-package v8bench
+package regdiff
 
 import (
 	"cmp"

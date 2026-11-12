@@ -20,6 +20,9 @@ The main areas are:
   local time and `Temporal` are bindings over
   [go-intl](https://github.com/go-quickjs/go-intl), which holds the locale
   data, the calendars and the time zones.
+- `internal/regdiff`: tests only, the register interpreter's differential
+  tests, over cases of their own and the corpora `internal/v8bench` holds
+  for the benchmark runners.
 - `stdlib`: opt-in host functionality.
 - `cmd/qjs`: the command-line host.
 - `conformance`: the test262 runner. The test262 checkout is external.
