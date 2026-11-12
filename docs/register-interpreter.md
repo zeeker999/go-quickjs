@@ -571,12 +571,18 @@ back-edge budget, `R10` the least tag, `RDI` the context; `RAX` holds the
 instruction word, and `RCX`, `RDX`, `RSI`, `R8`, `R9` and three SSE
 registers are a handler's scratch.
 
-**What is native.** The numbers' arithmetic, increments, bitwise
-operators and compare-and-branches; moves, constants and globals by their
-site; property reads and writes by the monomorphic cache, `in` by the
+**What is native.** The numbers' arithmetic, increments, `-x`, `+x`,
+the bitwise operators of any number (by ToInt32) and the
+compare-and-branches, of registers, immediates and upvalues; truthiness
+of a boolean, a number, an object, a string, undefined and null; `==`
+and `!=` of numbers, of one word kind and of undefined or null against
+anything; `===` and `!==`; moves, constants, upvalues read and written,
+and globals read and written by their site; property reads and writes by
+the monomorphic cache and `o.n +=` of an own number; `in` by the
 runtime's in cache, `typeof`, the length of an array or a string, the
-elements of dense and typed arrays (every kind but Float16 and BigInt64);
-`===` and `!==`; short BigInts' add, sub and mul; and calls and returns:
+elements of dense arrays (read, `x[++i]`, `x[i++]`, written over any
+element) and typed arrays (every kind but Float16 and BigInt64); short
+BigInts' add, sub and mul; and calls and returns:
 `call_w` and `call_method_w` enter a callee their site's cache knows as
 `rhCallW` does -- its this, the frame record, the stack top and depth --
 and run it, the caller's state pushed on the native frame stack; a

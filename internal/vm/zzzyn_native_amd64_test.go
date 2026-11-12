@@ -354,6 +354,8 @@ var nativeCallCases = []struct {
 	{"argumentsMethod", `var o = { k: 2, m() { var t = 0; for (var j = 0; j < arguments.length; j++) t += arguments[j]; return t + this.k } }; function run(n) { var s = 0; for (var i = 0; i < n; i++) s += o.m(i, 1, 2); return s }`, true},
 	{"argumentsMapped", `function f(a, b) { a = 10; return arguments[0] + (b === undefined ? 0 : arguments[1]) + arguments.length } function run(n) { var s = 0; for (var i = 0; i < n; i++) s += f(i) + f(i, 1, 2); return s }`, true},
 	{"argumentsStrict", `function f(a) { "use strict"; a = 3; return arguments[0] + a } function run(n) { var s = 0; for (var i = 0; i < n; i++) s += f(i, 5); return s }`, true},
+	{"leafThis", `var o = { k: 2, get() { return this.k }, set(v) { this.k = v } }; function run(n) { var s = 0; for (var i = 0; i < n; i++) { o.set(i); s += o.get() } return s }`, true},
+	{"leafPure", `function sq(x) { return x * x + 1 } function run(n) { var s = 0; for (var i = 0; i < n; i++) s += sq(i); return s }`, true},
 	{"forwarder", `function t(a, b) { return (a | 0) + (b | 0) } function fw() { return t.apply(this, arguments) } function run(n) { var s = 0; for (var i = 0; i < n; i++) s += fw(i, 2) + fw(); return s }`, true},
 	{"argumentsThrow", `function f() { if (arguments.length > 1) throw new Error("x" + arguments[1]); return arguments[0] } function run(n) { var s = 0; for (var i = 0; i < n; i++) { try { s += f(i, i & 1 ? i : undefined) } catch (e) { s += e.message.length } } return s }`, true},
 	{"argumentsClosure", `function f(a) { var g = function () { return a + 1 }; return arguments.length + (typeof g).length + a } function run(n) { var s = 0; for (var i = 0; i < n; i++) s += f(i, 2, 3); return s }`, true},
@@ -639,9 +641,9 @@ func TestRegNativeFileMix(t *testing.T) {
 	was := regNativeOn
 	defer func() { SetRegTier(false); regNativeOn = was }()
 	nativeCounting(t)
-	var counts [256]int64
-	orig := regTable
-	defer func() { regTable = orig }()
+	var counts, slow [256]int64
+	orig, origSlow := regTable, regSlowTable
+	defer func() { regTable, regSlowTable = orig, origSlow }()
 	run := func(native bool) {
 		regNativeOn = native
 		r := New(Config{})
@@ -656,23 +658,28 @@ func TestRegNativeFileMix(t *testing.T) {
 			counts[op]++
 			return h(regs, w, pc, st)
 		}
+		hs := origSlow[i]
+		regSlowTable[i] = func(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+			slow[op]++
+			return hs(regs, w, pc, st)
+		}
 	}
 	run(false)
-	regTable = orig
+	regTable, regSlowTable = orig, origSlow
 	before, enters := nativeExitOps(), atomic.LoadInt64(&nativeEnters)
 	run(true)
 	after := nativeExitOps()
 	var total, exited int64
 	type row struct {
-		op       bytecode.ROp
-		n, exits int64
+		op             bytecode.ROp
+		n, slow, exits int64
 	}
 	var rows []row
 	for op := range counts {
 		e := after[op] - before[op]
 		total += counts[op]
 		exited += e
-		rows = append(rows, row{bytecode.ROp(op), counts[op], e})
+		rows = append(rows, row{bytecode.ROp(op), counts[op], slow[op], e})
 	}
 	for i := range rows {
 		for j := i + 1; j < len(rows); j++ {
@@ -686,7 +693,7 @@ func TestRegNativeFileMix(t *testing.T) {
 		if r.exits == 0 {
 			break
 		}
-		t.Logf("  %-22s %10d dispatched %10d exits (%5.1f%% of all exits)", r.op, r.n, r.exits, 100*float64(r.exits)/float64(max(exited, 1)))
+		t.Logf("  %-22s %10d dispatched %10d slow in Go %10d exits (%5.1f%% of all exits)", r.op, r.n, r.slow, r.exits, 100*float64(r.exits)/float64(max(exited, 1)))
 	}
 }
 
@@ -811,6 +818,70 @@ func TestRegNativeMore3(t *testing.T) {
 	for _, marking := range []bool{false, true} {
 		nativeMarking(t, marking)
 		if got := nativeRunSrc(t, nativeMore3Src, true); got != want {
+			t.Errorf("native (marking %v):\n%s\nwant\n%s", marking, got, want)
+		}
+	}
+}
+
+// nativeMore4Src is code for properties added by a site's transition:
+// constructors' objects past the room their allocation carries and past
+// linearScanLimit, a frozen and a sealed object, a setter up the
+// prototype chain added after the site has cached the transition, and a
+// prototype changed under it.
+const nativeMore4Src = `
+	function P(n) { this.a = n; this.b = {n: n}; this.c = "s"; this.d = n + 1; this.e = n * 2; this.f = 6; this.g = 7; this.h = 8; this.i = 9; this.j = 10 }
+	var out = [], ps = []
+	for (var i = 0; i < 30; i++) ps.push(new P(i))
+	out.push(ps.map(function (p) { return Object.keys(p).length + p.b.n + p.j }).join())
+	function add(o, v) { o.x = v; return o }
+	var objs = []
+	for (var i = 0; i < 20; i++) objs.push(add({}, i))
+	var fr = Object.freeze({}), se = Object.seal({}), ne = Object.preventExtensions({})
+	for (var o of [fr, se, ne]) { try { add(o, 1) } catch (e) { out.push(e.constructor.name) } }
+	out.push(objs.map(function (o) { return o.x }).join(), "x" in fr, "x" in se)
+	var proto = {}, seen = []
+	function Q() { this.y = 1 }
+	Q.prototype = proto
+	for (var i = 0; i < 5; i++) new Q()
+	Object.defineProperty(proto, "y", { set: function (v) { seen.push(v) } })
+	var q = new Q()
+	out.push(seen.join(), Object.keys(q).join(), q.y)
+	out.join("\n")`
+
+// TestRegNativeMore4 runs nativeMore4Src as TestRegNativeMore runs its.
+func TestRegNativeMore4(t *testing.T) {
+	want := nativeRunSrc(t, nativeMore4Src, false)
+	for _, marking := range []bool{false, true} {
+		nativeMarking(t, marking)
+		if got := nativeRunSrc(t, nativeMore4Src, true); got != want {
+			t.Errorf("native (marking %v):\n%s\nwant\n%s", marking, got, want)
+		}
+	}
+}
+
+// nativeMore5Src is code for reads at sites of several shapes: up to the
+// entries a site keeps and past them, a property deleted and redefined
+// as an accessor under the site, methods of several classes.
+const nativeMore5Src = `
+	var shapes = [{x: 1}, {y: 0, x: 2}, {z: 0, y: 0, x: 3}, {w: 0, z: 0, y: 0, x: 4}, {v: 0, w: 0, z: 0, y: 0, x: 5}], out = []
+	function rd(o) { return o.x }
+	function sum(n, k) { var s = 0; for (var i = 0; i < n; i++) s += rd(shapes[i % k]); return s }
+	out.push(sum(100, 2), sum(100, 3), sum(100, 5))
+	delete shapes[1].x
+	Object.defineProperty(shapes[2], "x", { get: function () { return 30 } })
+	out.push(sum(100, 3), String(rd(shapes[1])))
+	class A { m() { return 1 } } class B { m() { return 2 } } class C extends A { m() { return 3 } }
+	var cs = [new A(), new B(), new C(), new A()], t = 0
+	for (var i = 0; i < 60; i++) t += cs[i & 3].m()
+	out.push(t)
+	out.join("\n")`
+
+// TestRegNativeMore5 runs nativeMore5Src as TestRegNativeMore runs its.
+func TestRegNativeMore5(t *testing.T) {
+	want := nativeRunSrc(t, nativeMore5Src, false)
+	for _, marking := range []bool{false, true} {
+		nativeMarking(t, marking)
+		if got := nativeRunSrc(t, nativeMore5Src, true); got != want {
 			t.Errorf("native (marking %v):\n%s\nwant\n%s", marking, got, want)
 		}
 	}

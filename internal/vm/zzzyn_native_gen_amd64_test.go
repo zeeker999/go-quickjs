@@ -141,6 +141,8 @@ const (
 	ncNull     = int32(unsafe.Offsetof(nativeCtx{}.null))
 	ncUninit   = int32(unsafe.Offsetof(nativeCtx{}.uninit))
 	ncEmptyStr = int32(unsafe.Offsetof(nativeCtx{}.emptyStr))
+	ncSetterNx = int32(unsafe.Offsetof(nativeCtx{}.setterNext))
+	ncPolyEnt  = int32(unsafe.Offsetof(nativeCtx{}.polyEntries))
 	ncScratch  = int32(unsafe.Offsetof(nativeCtx{}.scratch))
 	ncFrames   = int32(unsafe.Offsetof(nativeCtx{}.frames))
 	ncCap      = int32(unsafe.Offsetof(nativeCtx{}.cap))
@@ -724,13 +726,15 @@ func (g *nativeGen) ownSlot(dst, obj Reg) {
 func (g *nativeGen) readSlot() {
 	a := g.a
 	own, holder, noCell, p1Holder := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
+	poly, polyLoop, polyNext, shaped, done := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
 	shapeOff := int32(unsafe.Offsetof(Object{}.shape))
 	a.Load(R8, RCX, int32(unsafe.Offsetof(propCache{}.ownShape)))
 	a.CmpMem(R8, RSI, shapeOff, true)
 	a.Jcc(CondE, own)
 	a.Load(R8, RCX, int32(unsafe.Offsetof(propCache{}.shape)))
 	a.CmpMem(R8, RSI, shapeOff, true)
-	a.Jcc(CondNE, g.exit)
+	a.Jcc(CondNE, poly)
+	a.Bind(shaped)
 	a.LoadU8(R8, RCX, int32(unsafe.Offsetof(propCache{}.getter)))
 	a.Op(Test, R8, R8, false)
 	a.Jcc(CondNE, g.exit)
@@ -767,6 +771,33 @@ func (g *nativeGen) readSlot() {
 	a.ShiftImm(Shl, R8, 4, true)
 	a.AddMem(R8, RSI, int32(unsafe.Offsetof(Object{}.valp)))
 	a.MovRR(RCX, R8)
+	a.Jmp(done)
+	// A site of several shapes: the entries it remembered before, an own
+	// data property of the object's shape among them.
+	a.Bind(poly)
+	a.Load(R8, RCX, int32(unsafe.Offsetof(propCache{}.poly)))
+	a.Op(Test, R8, R8, true)
+	a.Jcc(CondE, g.exit)
+	a.LoadU8(R9, R8, int32(unsafe.Offsetof(propPoly{}.n)))
+	a.Op(Test, R9, R9, false)
+	a.Jcc(CondE, g.exit)
+	a.AddMem(R8, RDI, ncPolyEnt)
+	a.Load(RDX, RSI, shapeOff)
+	a.Bind(polyLoop)
+	a.CmpMem(RDX, R8, int32(unsafe.Offsetof(propCache{}.ownShape)), true)
+	a.MovRR(RCX, R8)
+	a.Jcc(CondE, own)
+	// An entry of the shape for a prototype's property: its holder found
+	// as the site's own entry's is.
+	a.CmpMem(RDX, R8, int32(unsafe.Offsetof(propCache{}.shape)), true)
+	a.Jcc(CondNE, polyNext)
+	a.Jmp(shaped)
+	a.Bind(polyNext)
+	a.OpImm(Add, R8, int32(unsafe.Sizeof(propCache{})), true)
+	a.OpImm(Sub, R9, 1, false)
+	a.Jcc(CondNE, polyLoop)
+	a.Jmp(g.exit)
+	a.Bind(done)
 }
 
 // element puts the address of the dense element of the object in obj at
@@ -1169,6 +1200,78 @@ func (g *nativeGen) frameArgs() {
 	a.Bind(done)
 }
 
+// addProp is set_prop's addition of the property by the transition the
+// site at RCX remembers, as rsSetProp makes it: the object in RSI of the
+// site's shape, extensible, with room for one more value, and nothing up
+// the prototype chain the site found changed; the value at the address in
+// RDX appended, the shape the transition's. Anything else exits: a full
+// table, an index to build, a setter's entry.
+func (g *nativeGen) addProp() {
+	a := g.a
+	p1ok, p2ok, idxok := a.NewLabel(), a.NewLabel(), a.NewLabel()
+	shapeOff := int32(unsafe.Offsetof(Object{}.shape))
+	a.Load(R8, RCX, int32(unsafe.Offsetof(propCache{}.shape)))
+	a.CmpMem(R8, RSI, shapeOff, true)
+	a.Jcc(CondNE, g.exit)
+	a.Load(R8, RCX, int32(unsafe.Offsetof(propCache{}.next)))
+	a.Op(Test, R8, R8, true)
+	a.Jcc(CondE, g.exit)
+	a.CmpMem(R8, RDI, ncSetterNx, true)
+	a.Jcc(CondE, g.exit)
+	a.LoadU16(R9, RSI, offObjFlags)
+	a.OpImm(And, R9, int32(objExtensible), false)
+	a.Jcc(CondE, g.exit)
+	a.Load(R9, RCX, int32(unsafe.Offsetof(propCache{}.p1)))
+	a.Op(Test, R9, R9, true)
+	a.Jcc(CondE, p1ok)
+	a.Load(R9, R9, shapeOff)
+	a.CmpMem(R9, RCX, int32(unsafe.Offsetof(propCache{}.s1)), true)
+	a.Jcc(CondE, p1ok)
+	a.Load(R9, RCX, int32(unsafe.Offsetof(propCache{}.cell)))
+	a.Op(Test, R9, R9, true)
+	a.Jcc(CondE, g.exit)
+	a.LoadU8(R9, R9, offCellValid)
+	a.Op(Test, R9, R9, false)
+	a.Jcc(CondE, g.exit)
+	a.Bind(p1ok)
+	a.Load(R9, RCX, int32(unsafe.Offsetof(propCache{}.p2)))
+	a.Op(Test, R9, R9, true)
+	a.Jcc(CondE, p2ok)
+	a.Load(R9, R9, shapeOff)
+	a.CmpMem(R9, RCX, int32(unsafe.Offsetof(propCache{}.s2)), true)
+	a.Jcc(CondNE, g.exit)
+	a.Bind(p2ok)
+	// Room for the value; a shape of no index past linearScanLimit
+	// values is given one by Go.
+	a.LoadU32(R9, RSI, int32(unsafe.Offsetof(Object{}.valn)))
+	a.LoadU32(RCX, RSI, int32(unsafe.Offsetof(Object{}.valc)))
+	a.Op(Cmp, R9, RCX, true)
+	a.Jcc(CondAE, g.exit)
+	a.CmpMemImm8(R8, int32(unsafe.Offsetof(shape{}.index)), 0)
+	a.Jcc(CondNE, idxok)
+	a.OpImm(Cmp, R9, linearScanLimit, true)
+	a.Jcc(CondAE, g.exit)
+	a.Bind(idxok)
+	a.Store(RDI, scr(sE), RSI)
+	a.Store(RDI, scr(sRC), R8)
+	// The value at valn, then valn past it, then the shape.
+	a.MovRR(RAX, R9)
+	a.ShiftImm(Shl, RAX, 4, true)
+	a.AddMem(RAX, RSI, int32(unsafe.Offsetof(Object{}.valp)))
+	a.OpImm(Add, R9, 1, true)
+	a.Load(RCX, RDX, 0)
+	a.Store(RAX, 0, RCX)
+	a.Load(RCX, RDX, 8)
+	a.Store32(RSI, int32(unsafe.Offsetof(Object{}.valn)), R9)
+	a.Lea(RAX, RAX, 8)
+	g.ptrStore()
+	a.Load(RSI, RDI, scr(sE))
+	a.Load(RCX, RDI, scr(sRC))
+	a.Lea(RAX, RSI, shapeOff)
+	g.ptrStore()
+	g.next()
+}
+
 // ptrTo stores the pointer in RCX at the address in RAX, by ptrStore,
 // where the word there differs.
 func (g *nativeGen) ptrTo() {
@@ -1244,21 +1347,22 @@ func (g *nativeGen) call() {
 	a.LeaIdx(RAX, R12, RDX, 1, 0)
 	g.storeValue()
 	a.Bind(notLeaf)
-	// A callee that keeps its arguments, which rhCallW leaves to
-	// regCallMiss (regCallOut, no leaf): entered here as regEnterW enters
-	// it (sEnt), its kind the cache's without the mark.
+	// A callee rhCallW leaves to regCallMiss (regCallOut): one that keeps
+	// its arguments, entered here as regEnterW enters it (sEnt), and a
+	// leaf Go answers without a frame (regCallLeaf), a pure body or one
+	// that reads or writes its this, which a frame here costs less than
+	// an exit; its kind the cache's without the marks.
 	plain := a.NewLabel()
 	a.StoreImm(RDI, scr(sEnt), 0)
 	a.LoadU8(R9, RCX, offEKind)
 	a.MovRR(R8, R9)
 	a.OpImm(And, R8, regCallOut|regCallLeaf, false)
-	a.OpImm(Cmp, R8, regCallOut, false)
-	a.Jcc(CondNE, plain)
+	a.Jcc(CondE, plain)
+	a.OpImm(And, R9, ^(regCallOut|regCallLeaf)&0xff, false)
 	a.Load(R8, RCX, offERC)
 	a.LoadU8(RDX, R8, offRCArgs)
 	a.Op(Test, RDX, RDX, false)
-	a.Jcc(CondE, g.ex(4))
-	a.OpImm(And, R9, ^regCallOut&0xff, false)
+	a.Jcc(CondE, plain)
 	a.StoreImm(RDI, scr(sEnt), 1)
 	a.Bind(plain)
 	// Entered as it is, with the cache's this, or with an object this.
@@ -2090,7 +2194,26 @@ func nativeEmit() ([]byte, nativeOffsets) {
 				a.Jcc(CondB, same)
 				a.Bind(notWord)
 			}
+			// Two strings: the same one, or of different lengths; any
+			// other pair Go's.
+			for _, x := range []Reg{R9, R8} {
+				a.MovRR(RCX, x)
+				a.ShiftImm(Shr, RCX, 16, true)
+				a.ShiftImm(Shl, RCX, 16, true)
+				a.Op(Cmp, RCX, R10, true)
+				a.Jcc(CondNE, g.exit)
+				a.MovZX8(RCX, x)
+				a.OpImm(Cmp, RCX, int32(KindString), false)
+				a.Jcc(CondNE, g.exit)
+			}
 			a.Load(RAX, RBX, 0)
+			a.LoadIdx(R9, R12, RDX, 1, 8)
+			a.LoadIdx(R8, R12, RSI, 1, 8)
+			a.Op(Cmp, R9, R8, true)
+			a.Jcc(CondE, eq)
+			a.Load(RCX, R9, offStrLen)
+			a.CmpMem(RCX, R8, offStrLen, true)
+			a.Jcc(CondNE, ne)
 			a.Jmp(g.exit)
 			a.Bind(same)
 			a.Load(RAX, RBX, 0)
@@ -2136,15 +2259,23 @@ func nativeEmit() ([]byte, nativeOffsets) {
 	h(bytecode.RGetProp, getProp)
 	h(bytecode.RGetMethod, getProp)
 	h(bytecode.RSetProp, func() {
+		add := a.NewLabel()
 		g.decA(RDX)
 		g.object(RSI, RDX)
 		g.decB(RDX)
 		a.LeaIdx(RDX, R12, RDX, 1, 0)
 		g.site(RCX)
-		// The slot's address in RAX, the instruction's last use past.
-		g.ownSlot(RAX, RSI)
+		// The own slot's address in RAX, the instruction's last use past.
+		a.Load(R8, RCX, int32(unsafe.Offsetof(propCache{}.ownShape)))
+		a.CmpMem(R8, RSI, int32(unsafe.Offsetof(Object{}.shape)), true)
+		a.Jcc(CondNE, add)
+		a.LoadS32(RAX, RCX, int32(unsafe.Offsetof(propCache{}.idx)))
+		a.ShiftImm(Shl, RAX, 4, true)
+		a.AddMem(RAX, RSI, int32(unsafe.Offsetof(Object{}.valp)))
 		g.loadValue(RDX)
 		g.storeValue()
+		a.Bind(add)
+		g.addProp()
 	})
 	// An element read: a number of a dense array's where the register
 	// holds none, any value of one by storeValue, a typed array's.

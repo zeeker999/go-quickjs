@@ -40,8 +40,9 @@ import (
 
 // regNativeOn runs register frames by the native handlers. QJS_NONATIVE
 // set in the environment, read once, leaves them to the Go table's loop,
-// to compare the two and as an escape hatch.
-var regNativeOn = os.Getenv("QJS_NONATIVE") == ""
+// to compare the two and as an escape hatch. The quickjs_verify tag's
+// shape checks are the Go handlers' alone.
+var regNativeOn = os.Getenv("QJS_NONATIVE") == "" && !verifyShapes
 
 // nativeCtx is what the code reads and writes: ip in, where to start, and
 // out, the instruction it left to Go; the top frame's registers, caches,
@@ -118,6 +119,12 @@ type nativeCtx struct {
 	null     uint64
 	uninit   uint64
 	emptyStr uintptr
+	// setterNext is the transition a site's entry has for a setter's
+	// write, which is no addition.
+	setterNext uintptr
+	// polyEntries is where a site's propPoly has its entries, which the
+	// JIT's tag moves.
+	polyEntries uintptr
 	// frames is the native frame stack's first record (recs), and cap
 	// how many it has room for: frames[d-1] is the caller's state that
 	// frame d returns to. A call past cap exits; Go grows the stack
@@ -232,7 +239,21 @@ func (r *Runtime) nativeRun(f *frame, c *regCode, start int) (Value, error) {
 			ctx.grow()
 			continue
 		}
-		if pc = regTable[op](s.regs, w, pc, s); pc >= 0 {
+		pc = regTable[op](s.regs, w, pc, s)
+		// The instructions after it that have no native handler are run
+		// here too, rather than each entering the code to exit at once.
+		for pc >= 0 {
+			w = regAt(code, pc)
+			op = w.Op()
+			if nativeHas[op] {
+				break
+			}
+			if nativeCount {
+				atomic.AddInt64(&nativeExits[op], 1)
+			}
+			pc = regTable[op](s.regs, w, pc, s)
+		}
+		if pc >= 0 {
 			ctx.ip = uintptr(code) + uintptr(pc)*8
 			continue
 		}
@@ -271,6 +292,8 @@ func (r *Runtime) newNativeCtx(st *regState) *nativeCtx {
 	ctx.null = math.Float64bits(Null.num)
 	ctx.uninit = math.Float64bits(uninitialized.num)
 	ctx.emptyStr = uintptr(unsafe.Pointer(emptyString))
+	ctx.setterNext = uintptr(unsafe.Pointer(setterNext))
+	ctx.polyEntries = unsafe.Offsetof(propPoly{}.entries)
 	// The runtime's: a regState is of one runtime's list.
 	ctx.rt = uintptr(unsafe.Pointer(r)) + rtBase
 	ctx.wb = uintptr(unsafe.Pointer(&nativeWB.enabled))
@@ -497,6 +520,17 @@ var nativeWB struct {
 
 // nativeBase is the handlers' block's address, where the code is entered.
 var nativeBase = nativeHandlersAddr()
+
+// nativeHas says which operations have a handler of their own in the
+// native table, every other's the exit stub's, which the last's is.
+var nativeHas = func() (has [256]bool) {
+	at := nativeTableAddr()
+	t := (*[256]uintptr)(nativePtr(&at))
+	for op := range t {
+		has[op] = t[op] != t[len(t)-1]
+	}
+	return has
+}()
 
 // nativeStoreRef is jumped to by native code to store a pointer while the
 // collector marks: the slot in AX, the pointer in CX, where to go on in
