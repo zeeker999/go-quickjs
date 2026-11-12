@@ -3,6 +3,7 @@ package vm
 import (
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -78,10 +79,14 @@ func nativeKernelSource(t testing.TB, names ...string) string {
 	return out.String()
 }
 
-// nativeCounting turns the native handlers' counters on for a test.
+// nativeCounting turns the native handlers' counters on for a test, and
+// holds the collector off: a collection between two runs may empty a
+// cache one run then misses, an exit the other has not. The flag the
+// code reads for the collector's is what a test sets (nativeMarking).
 func nativeCounting(t testing.TB) {
 	nativeCount = true
-	t.Cleanup(func() { nativeCount = false })
+	gc := debug.SetGCPercent(-1)
+	t.Cleanup(func() { nativeCount = false; debug.SetGCPercent(gc) })
 }
 
 // nativeMarking has the contexts made after it store as while the
@@ -604,5 +609,186 @@ func TestRegNativeOpMix(t *testing.T) {
 		}
 		t.Logf("%-24s %7.2f instructions an op, %6.2f exited (%4.1f%%): %s", name,
 			float64(total)/float64(ops), float64(exited)/float64(ops), 100*float64(exited)/float64(max(total, 1)), strings.Join(parts, ", "))
+	}
+}
+
+// TestRegNativeFileMix, with QJS_NATIVE_FILES naming JavaScript files
+// (comma-separated) and QJS_NATIVE_EXPR what to run after them, logs the
+// operation mix of the whole run as TestRegNativeOpMix does: each
+// operation's dispatches by the Go table and its exits from the native
+// handlers, the most frequent first.
+func TestRegNativeFileMix(t *testing.T) {
+	files := os.Getenv("QJS_NATIVE_FILES")
+	if files == "" {
+		t.Skip("QJS_NATIVE_FILES names no file")
+	}
+	var src strings.Builder
+	for _, f := range strings.Split(files, ",") {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src.Write(b)
+		src.WriteString("\n")
+	}
+	src.WriteString(os.Getenv("QJS_NATIVE_EXPR"))
+	compiler.SetRegisterForm(true)
+	fn := compileForTest(t, src.String())
+	compiler.SetRegisterForm(false)
+	SetRegTier(true)
+	was := regNativeOn
+	defer func() { SetRegTier(false); regNativeOn = was }()
+	nativeCounting(t)
+	var counts [256]int64
+	orig := regTable
+	defer func() { regTable = orig }()
+	run := func(native bool) {
+		regNativeOn = native
+		r := New(Config{})
+		defer r.Close()
+		if _, err := r.Run(fn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range regTable {
+		h, op := orig[i], i
+		regTable[i] = func(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+			counts[op]++
+			return h(regs, w, pc, st)
+		}
+	}
+	run(false)
+	regTable = orig
+	before, enters := nativeExitOps(), atomic.LoadInt64(&nativeEnters)
+	run(true)
+	after := nativeExitOps()
+	var total, exited int64
+	type row struct {
+		op       bytecode.ROp
+		n, exits int64
+	}
+	var rows []row
+	for op := range counts {
+		e := after[op] - before[op]
+		total += counts[op]
+		exited += e
+		rows = append(rows, row{bytecode.ROp(op), counts[op], e})
+	}
+	for i := range rows {
+		for j := i + 1; j < len(rows); j++ {
+			if rows[j].exits > rows[i].exits {
+				rows[i], rows[j] = rows[j], rows[i]
+			}
+		}
+	}
+	t.Logf("%d instructions, %d exits (%.1f%%), %d entries", total, exited, 100*float64(exited)/float64(max(total, 1)), atomic.LoadInt64(&nativeEnters)-enters)
+	for _, r := range rows[:min(len(rows), 25)] {
+		if r.exits == 0 {
+			break
+		}
+		t.Logf("  %-22s %10d dispatched %10d exits (%5.1f%% of all exits)", r.op, r.n, r.exits, 100*float64(r.exits)/float64(max(exited, 1)))
+	}
+}
+
+// nativeMoreSrc is code for the handlers made native after the kernels':
+// == and != of every pair of kinds, constants loaded over registers that
+// held objects, upvalues read, written and compared against, a key of
+// each kind, x[++i], and the bitwise operators of fractions, negatives,
+// NaNs, infinities and numbers past 2^32 and 2^63.
+const nativeMoreSrc = `
+	var vals = [0, -0, 1, 1.5, NaN, Infinity, "", "1", "a", true, false, null, undefined, {}, [], Symbol.iterator, 1n, function () {}]
+	var out = []
+	function eqs() {
+		var s = ""
+		for (var i = 0; i < vals.length; i++)
+			for (var j = 0; j < vals.length; j++) {
+				var a = vals[i], b = vals[j], r = 0
+				try { if (a == b) r |= 1; if (a != b) r |= 2 } catch (e) { r = 9 }
+				s += r
+			}
+		return s
+	}
+	out.push(eqs())
+	function loads(n) {
+		var t = 0, x
+		for (var i = 0; i < n; i++) {
+			x = {}; x = null; if (x === null) t++
+			x = []; x = true; if (x) t++
+			x = {}; x = false; if (!x) t++
+			x = vals[i % vals.length]; x = ""; t += x.length
+		}
+		return t
+	}
+	out.push(loads(100))
+	function counter() {
+		var c = 0, lim = 50, f = 0.5
+		function inc() { c++; return c }
+		function under() { var k = 0; for (var i = 0; i < lim; i++) k += i; for (var j = 0; j <= lim; j += 7) k++; while (!(k < lim)) k -= 100; return k }
+		function nan() { var k = 0; lim = NaN; for (var i = 0; i < 3; i++) { if (i < lim) k++; if (!(i <= lim)) k += 10 } lim = 50; return k }
+		return [inc, under, nan, function (v) { c = v; f = {o: v} }, function () { return f }]
+	}
+	var cs = counter()
+	for (var i = 0; i < 20; i++) cs[0]()
+	cs[3]("str")
+	out.push(cs[0](), cs[1](), cs[2](), JSON.stringify(cs[4]()))
+	function keys() {
+		var o = {a: 1, 1: 2}, sym = Symbol("s"), r = []
+		o[sym] = 3
+		var ks = ["a", 1, sym, 1.5, {toString() { return "a" }}]
+		for (var k of ks) { o[k] = (o[k] | 0) + 1; r.push(String(o[k])) }
+		return r.join()
+	}
+	out.push(keys())
+	function pre(a) { var i = -1, s = 0, h = [1, , 3]; while (i < a.length - 1) s += a[++i]; try { var j = 0; s += h[++j] } catch (e) { s = "e" } return s }
+	out.push(pre([1, 2, 3, 4.5]), pre(new Float64Array([1, 2])), pre("abc"))
+	function bits() {
+		var xs = [0, 1, -1, 1.5, -1.5, 2147483648, 4294967296.5, -4294967297, 1e20, 9.3e18, NaN, Infinity, -Infinity, 2 ** 63, -(2 ** 63)], r = []
+		for (var x of xs) r.push(x | 0, x & 255, x ^ 3, x << 1, x >> 2, x >>> 3, x | x, x & 7.5, 1 << x, -1 >>> x)
+		return r.join()
+	}
+	out.push(bits())
+	out.join("\n")`
+
+// TestRegNativeMore runs nativeMoreSrc by the Go table's loop and by the
+// native handlers, with the collector idle and as while it marks: the
+// same answers, and the same exits marking or not.
+func TestRegNativeMore(t *testing.T) {
+	nativeCounting(t)
+	want := nativeRunSrc(t, nativeMoreSrc, false)
+	var exits [2]int64
+	for i, marking := range []bool{false, true} {
+		nativeMarking(t, marking)
+		before := atomic.LoadInt64(&nativeEnters)
+		if got := nativeRunSrc(t, nativeMoreSrc, true); got != want {
+			t.Errorf("native (marking %v):\n%s\nwant\n%s", marking, got, want)
+		}
+		exits[i] = atomic.LoadInt64(&nativeEnters) - before
+	}
+	if exits[0] != exits[1] {
+		t.Errorf("%d exits, %d while marking", exits[0], exits[1])
+	}
+}
+
+// nativeMore2Src is code for global writes and property additions:
+// globals written of every kind, a global made read-only and deleted
+// between writes, and o.n += of numbers, NaNs and what is no number.
+const nativeMore2Src = `
+	var g1 = 0, g2 = null, out = []
+	function globals(n) { for (var i = 0; i < n; i++) { g1 = i; g2 = {i: i}; g1 += 0.5 } return g1 + g2.i }
+	out.push(globals(50))
+	Object.defineProperty(globalThis, "g1", {writable: false})
+	out.push(globals(5), g1)
+	function adds(o, n) { for (var i = 0; i < n; i++) { o.n += 2; o.n++; o.m += o.n; o.s += 1 } return [o.n, o.m, o.s].join() }
+	out.push(adds({n: 0, m: 0.5, s: "x"}, 20), adds({n: NaN, m: Infinity, s: 1}, 3), adds({n: 1e308, m: -0, s: null}, 3))
+	out.join("\n")`
+
+// TestRegNativeMore2 runs nativeMore2Src as TestRegNativeMore runs its.
+func TestRegNativeMore2(t *testing.T) {
+	want := nativeRunSrc(t, nativeMore2Src, false)
+	for _, marking := range []bool{false, true} {
+		nativeMarking(t, marking)
+		if got := nativeRunSrc(t, nativeMore2Src, true); got != want {
+			t.Errorf("native (marking %v):\n%s\nwant\n%s", marking, got, want)
+		}
 	}
 }

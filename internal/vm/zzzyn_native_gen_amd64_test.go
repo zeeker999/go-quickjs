@@ -138,6 +138,9 @@ const (
 	ncHas      = int32(unsafe.Offsetof(nativeCtx{}.has))
 	ncBigHigh  = int32(unsafe.Offsetof(nativeCtx{}.bigHigh))
 	ncBigHighX = int32(unsafe.Offsetof(nativeCtx{}.bigHighX))
+	ncNull     = int32(unsafe.Offsetof(nativeCtx{}.null))
+	ncUninit   = int32(unsafe.Offsetof(nativeCtx{}.uninit))
+	ncEmptyStr = int32(unsafe.Offsetof(nativeCtx{}.emptyStr))
 	ncScratch  = int32(unsafe.Offsetof(nativeCtx{}.scratch))
 	ncFrames   = int32(unsafe.Offsetof(nativeCtx{}.frames))
 	ncCap      = int32(unsafe.Offsetof(nativeCtx{}.cap))
@@ -218,6 +221,146 @@ func (g *nativeGen) num(x XReg, off Reg) {
 	a.Op(Cmp, R9, R10, true)
 	a.Jcc(CondAE, g.exit)
 	a.MovQToX(x, R9)
+}
+
+// toInt32 makes dst's low half ToInt32 of the number in x, its
+// truncation modulo 2^32, where the truncation is an int64; a NaN, an
+// infinity or a number past 2^63 exits. RDX is its scratch.
+func (g *nativeGen) toInt32(dst Reg, x XReg) {
+	a := g.a
+	a.Cvttsd2si(dst, x)
+	a.MovImm(RDX, 1<<63)
+	a.Op(Cmp, dst, RDX, true)
+	a.Jcc(CondE, g.exit)
+}
+
+// upval puts in dst the address of the value of the frame closure's
+// upvalue whose index is in idx, or exits past the closure's upvalues.
+func (g *nativeGen) upval(dst, idx Reg) {
+	a := g.a
+	a.Load(dst, RDI, ncNF)
+	a.Load(dst, dst, offFCl)
+	a.CmpMem(idx, dst, offClUpvals+8, true)
+	a.Jcc(CondAE, g.exit)
+	a.Load(dst, dst, offClUpvals)
+	a.LoadIdx(dst, dst, idx, 8, 0)
+	a.Load(dst, dst, 0)
+}
+
+// cmpU is a compare-and-branch of A with upvalue B, as cmp's swapped
+// form: the jump taken on cond.
+func (g *nativeGen) cmpU(cond Cond) {
+	a := g.a
+	g.decA(RDX)
+	g.num(0, RDX)
+	g.decB(RCX)
+	a.ShiftImm(Shr, RCX, 4, true)
+	g.upval(RSI, RCX)
+	a.Load(R9, RSI, 0)
+	a.Op(Cmp, R9, R10, true)
+	a.Jcc(CondAE, g.exit)
+	a.MovQToX(1, R9)
+	a.SSEOp(UcomiSD, 1, 0)
+	tk := a.NewLabel()
+	a.Jcc(cond, tk)
+	g.next()
+	a.Bind(tk)
+	g.immSC(RCX)
+	g.taken(RCX)
+}
+
+// nullish goes to yes if the word in x is undefined's or null's. RCX is
+// its scratch.
+func (g *nativeGen) nullish(x Reg, yes Label) {
+	a := g.a
+	no := a.NewLabel()
+	a.MovRR(RCX, x)
+	a.ShiftImm(Shr, RCX, 16, true)
+	a.ShiftImm(Shl, RCX, 16, true)
+	a.Op(Cmp, RCX, R10, true)
+	a.Jcc(CondNE, no)
+	a.MovZX8(RCX, x)
+	a.OpImm(Cmp, RCX, int32(KindNull), false)
+	a.Jcc(CondE, yes)
+	a.OpImm(Cmp, RCX, int32(KindUndefined), false)
+	a.Jcc(CondE, yes)
+	a.Bind(no)
+}
+
+// looseEq is == and != (jeq, jne): two numbers; two values of one word
+// kind, equal only if their words are; undefined or null and anything,
+// equal only to undefined, null or document.all's kind, which exits; any
+// other pair, which converts, exits.
+func (g *nativeGen) looseEq(jumpIfEq bool) {
+	a := g.a
+	eq, ne, words, aNull, bNull, same := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
+	g.decA(RDX)
+	g.decB(RSI)
+	a.LoadIdx(R9, R12, RDX, 1, 0)
+	a.LoadIdx(R8, R12, RSI, 1, 0)
+	a.Op(Cmp, R9, R10, true)
+	a.Jcc(CondAE, words)
+	a.Op(Cmp, R8, R10, true)
+	a.Jcc(CondAE, words)
+	a.MovQToX(0, R9)
+	a.MovQToX(1, R8)
+	a.SSEOp(UcomiSD, 0, 1)
+	a.Jcc(CondP, ne)
+	a.Jcc(CondNE, ne)
+	a.Jmp(eq)
+	a.Bind(words)
+	g.nullish(R9, aNull)
+	g.nullish(R8, bNull)
+	// Neither: one word kind, the same word.
+	a.Op(Cmp, R9, R8, true)
+	a.Jcc(CondNE, g.exit)
+	a.MovRR(RCX, R9)
+	a.Op(Sub, RCX, R10, true)
+	a.MovImm(RAX, heapBigBits-tagBase)
+	a.Op(Cmp, RCX, RAX, true)
+	a.Jcc(CondAE, g.exit)
+	a.MovZX8(RCX, R9)
+	a.MovImm(RAX, 1<<KindBool|1<<KindSymbol|1<<KindObject)
+	a.Bt(RAX, RCX)
+	a.Jcc(CondAE, g.exit)
+	a.Bind(same)
+	a.LoadIdx(R9, R12, RDX, 1, 8)
+	a.LoadIdx(R8, R12, RSI, 1, 8)
+	a.Op(Cmp, R9, R8, true)
+	a.Jcc(CondNE, ne)
+	a.Jmp(eq)
+	// undefined or null against the other: equal if it is either, or
+	// document.all's kind; not equal to anything else.
+	for _, x := range []struct {
+		l          Label
+		other, off Reg
+	}{{aNull, R8, RSI}, {bNull, R9, RDX}} {
+		a.Bind(x.l)
+		g.nullish(x.other, eq)
+		a.CmpMem(x.other, RDI, ncObjBits, true)
+		a.Jcc(CondNE, ne)
+		a.LoadIdx(RCX, R12, x.off, 1, 8)
+		a.LoadU16(RCX, RCX, offObjFlags)
+		a.OpImm(And, RCX, int32(objHTMLDDA), false)
+		a.Jcc(CondNE, g.exit)
+		a.Jmp(ne)
+	}
+	a.Bind(eq)
+	a.Load(RAX, RBX, 0)
+	if jumpIfEq {
+		g.immSC(RCX)
+		g.taken(RCX)
+	} else {
+		g.next()
+	}
+	a.Bind(ne)
+	a.Load(RAX, RBX, 0)
+	if jumpIfEq {
+		g.next()
+	} else {
+		g.immSC(RCX)
+		g.taken(RCX)
+	}
 }
 
 // int32 makes dst the int32 the number in x is exactly, or exits.
@@ -518,7 +661,7 @@ func (g *nativeGen) bitImm(emit func(), unsigned ...bool) {
 	a := g.a
 	g.decB(RSI)
 	g.num(0, RSI)
-	g.int32(R9, 0)
+	g.toInt32(R9, 0)
 	g.immSC(RCX)
 	emit()
 	// A 32-bit operation has cleared R9's upper half: an unsigned
@@ -534,8 +677,8 @@ func (g *nativeGen) bitReg(emit func(), unsigned ...bool) {
 	g.num(0, RSI)
 	g.decC(R8)
 	g.num(1, R8)
-	g.int32(RCX, 1)
-	g.int32(R9, 0)
+	g.toInt32(RCX, 1)
+	g.toInt32(R9, 0)
 	emit()
 	// A 32-bit operation has cleared R9's upper half: an unsigned
 	// result converts as the 64-bit integer it is.
@@ -887,6 +1030,7 @@ var (
 	sizeFrame    = int32(unsafe.Sizeof(frame{}))
 
 	offClCode      = int32(unsafe.Offsetof(closure{}.closureCode))
+	offClUpvals    = int32(unsafe.Offsetof(closure{}.upvalues))
 	offCCIC        = ccRel(unsafe.Offsetof(closureCode{}.ic))
 	offCCConsts    = ccRel(unsafe.Offsetof(closureCode{}.consts))
 	offCCRegEpochs = ccRel(unsafe.Offsetof(closureCode{}.regEpochs))
@@ -1553,6 +1697,124 @@ func nativeEmit() ([]byte, nativeOffsets) {
 		g.storeA(0)
 	})
 	h(bytecode.RLoadUndef, func() { a.LoadSD(0, RDI, ncUndef); g.storeA(0) })
+	h(bytecode.RLoadNull, func() { a.LoadSD(0, RDI, ncNull); g.storeA(0) })
+	h(bytecode.RLoadTrue, func() { a.LoadSD(0, RDI, ncTrue); g.storeA(0) })
+	h(bytecode.RLoadFalse, func() { a.LoadSD(0, RDI, ncFalse); g.storeA(0) })
+	h(bytecode.RLoadUninit, func() { a.LoadSD(0, RDI, ncUninit); g.storeA(0) })
+	h(bytecode.RLoadEmpty, func() {
+		a.Load(R9, RDI, ncStrBits)
+		a.Load(R8, RDI, ncEmptyStr)
+		g.decA(RDX)
+		a.LeaIdx(RAX, R12, RDX, 1, 0)
+		g.storeValue()
+	})
+	h(bytecode.RGetUpval, func() {
+		a.MovRR(RCX, RAX)
+		a.ShiftImm(Shr, RCX, 32, true)
+		g.upval(RSI, RCX)
+		g.loadValue(RSI)
+		g.decA(RDX)
+		a.LeaIdx(RAX, R12, RDX, 1, 0)
+		g.storeValue()
+	})
+	h(bytecode.RSetUpval, func() {
+		g.decA(RDX)
+		a.LoadIdx(R9, R12, RDX, 1, 0)
+		a.LoadIdx(R8, R12, RDX, 1, 8)
+		a.MovRR(RCX, RAX)
+		a.ShiftImm(Shr, RCX, 32, true)
+		g.upval(RAX, RCX)
+		g.storeValue()
+	})
+	h(bytecode.RJLtU, func() { g.cmpU(CondA) })
+	h(bytecode.RSetGlobal, func() {
+		// The slot the site remembers while the global epoch is its, as
+		// get_global reads it, written.
+		a.MovRR(RCX, RAX)
+		a.ShiftImm(Shr, RCX, 48, true)
+		a.Load(R8, RDI, ncCC)
+		a.CmpMem(RCX, R8, offCCRegEpochs+8, true)
+		a.Jcc(CondAE, g.exit)
+		a.ShiftImm(Shl, RCX, 3, true)
+		a.AddMem(RCX, R8, offCCRegEpochs)
+		a.Load(RCX, RCX, 0)
+		a.Load(RSI, RDI, ncEpoch)
+		a.Load(RSI, RSI, 0)
+		a.OpImm(Add, RSI, 1, true)
+		a.Op(Cmp, RCX, RSI, true)
+		a.Jcc(CondNE, g.exit)
+		g.site(RCX)
+		a.Load(RSI, RCX, int32(unsafe.Offsetof(propCache{}.p1)))
+		a.LoadS32(RCX, RCX, int32(unsafe.Offsetof(propCache{}.idx)))
+		a.LoadU32(R8, RSI, int32(unsafe.Offsetof(Object{}.valn)))
+		a.Op(Cmp, RCX, R8, true)
+		a.Jcc(CondAE, g.exit)
+		a.ShiftImm(Shl, RCX, 4, true)
+		a.AddMem(RCX, RSI, int32(unsafe.Offsetof(Object{}.valp)))
+		g.decA(RDX)
+		a.LoadIdx(R9, R12, RDX, 1, 0)
+		a.LoadIdx(R8, R12, RDX, 1, 8)
+		a.MovRR(RAX, RCX)
+		g.storeValue()
+	})
+	// o.n += R[B] and o.n += SB of an own number the site remembers:
+	// its word alone written.
+	for _, imm := range []bool{false, true} {
+		op := bytecode.RAddProp
+		if imm {
+			op = bytecode.RAddPropI
+		}
+		h(op, func() {
+			g.decA(RDX)
+			g.object(RSI, RDX)
+			if imm {
+				g.immSB(R9)
+				a.Cvtsi2sd(1, R9, true)
+			} else {
+				g.decB(RDX)
+				g.num(1, RDX)
+			}
+			g.site(RCX)
+			g.ownSlot(RDX, RSI)
+			a.Load(R9, RDX, 0)
+			a.Op(Cmp, R9, R10, true)
+			a.Jcc(CondAE, g.exit)
+			a.MovQToX(0, R9)
+			a.SSEOp(AddSD, 0, 1)
+			g.canon(0)
+			a.StoreSD(RDX, 0, 0)
+			g.next()
+		})
+	}
+	h(bytecode.RJNLtU, func() { g.cmpU(CondBE) })
+	h(bytecode.RJLeU, func() { g.cmpU(CondAE) })
+	h(bytecode.RJNLeU, func() { g.cmpU(CondB) })
+	h(bytecode.RJEq, func() { g.looseEq(true) })
+	h(bytecode.RJNe, func() { g.looseEq(false) })
+	h(bytecode.RKeyOfBase, func() {
+		// A string, a number or a symbol is its own key.
+		key := a.NewLabel()
+		g.decC(RSI)
+		a.LeaIdx(RSI, R12, RSI, 1, 0)
+		a.Load(R9, RSI, 0)
+		a.Op(Cmp, R9, R10, true)
+		a.Jcc(CondB, key)
+		a.MovRR(RCX, R9)
+		a.ShiftImm(Shr, RCX, 16, true)
+		a.ShiftImm(Shl, RCX, 16, true)
+		a.Op(Cmp, RCX, R10, true)
+		a.Jcc(CondNE, g.exit)
+		a.MovZX8(RCX, R9)
+		a.OpImm(Cmp, RCX, int32(KindString), false)
+		a.Jcc(CondE, key)
+		a.OpImm(Cmp, RCX, int32(KindSymbol), false)
+		a.Jcc(CondNE, g.exit)
+		a.Bind(key)
+		a.Load(R8, RSI, 8)
+		g.decA(RDX)
+		a.LeaIdx(RAX, R12, RDX, 1, 0)
+		g.storeValue()
+	})
 	h(bytecode.RAdd, func() { g.arith(AddSD, 0) })
 	h(bytecode.RSub, func() { g.arith(SubSD, 0) })
 	h(bytecode.RMul, func() { g.arith(MulSD, 0) })
@@ -1864,6 +2126,28 @@ func nativeEmit() ([]byte, nativeOffsets) {
 		a.ShiftImm(Shr, RCX, 48, true)
 		g.dense(RCX, RSI, objMappedArguments, miss)
 		getElem(miss)
+	})
+	h(bytecode.RGetIndexPre, func() {
+		// The key stepped by X, a signed byte, then the read at it.
+		g.decB(RSI)
+		g.object(RSI, RSI)
+		g.decC(R8)
+		g.num(0, R8)
+		a.MovRR(RCX, RAX)
+		a.ShiftImm(Shl, RCX, 48, true)
+		a.ShiftImm(Sar, RCX, 56, true)
+		a.Cvtsi2sd(1, RCX, true)
+		a.SSEOp(AddSD, 1, 0)
+		g.element(RCX, RSI, 1, objMappedArguments, g.exit)
+		a.CmpMemImm8(RCX, 8, 0)
+		a.Jcc(CondNE, g.exit)
+		g.decA(RDX)
+		g.noRef(RDX)
+		g.decC(R8)
+		a.StoreSDIdx(R12, R8, 1, 0, 1)
+		a.Load(R9, RCX, 0)
+		a.StoreIdx(R12, RDX, 1, 0, R9)
+		g.next()
 	})
 	h(bytecode.RGetIndexPost, func() {
 		g.decB(RSI)

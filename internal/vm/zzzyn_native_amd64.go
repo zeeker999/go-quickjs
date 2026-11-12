@@ -113,6 +113,11 @@ type nativeCtx struct {
 	// points into.
 	bigHigh  uintptr
 	bigHighX uintptr
+	// null and uninit are null's and the uninitialized binding's words,
+	// and emptyStr the empty string's.
+	null     uint64
+	uninit   uint64
+	emptyStr uintptr
 	// frames is the native frame stack's first record (recs), and cap
 	// how many it has room for: frames[d-1] is the caller's state that
 	// frame d returns to. A call past cap exits; Go grows the stack
@@ -263,6 +268,9 @@ func (r *Runtime) newNativeCtx(st *regState) *nativeCtx {
 	ctx.typedType = nativeTypeWord((*typedArrayData)(nil))
 	ctx.bigHigh = uintptr(unsafe.Pointer(&shortBigHigh[0]))
 	ctx.bigHighX = uintptr(unsafe.Pointer(&shortBigHighX[0]))
+	ctx.null = math.Float64bits(Null.num)
+	ctx.uninit = math.Float64bits(uninitialized.num)
+	ctx.emptyStr = uintptr(unsafe.Pointer(emptyString))
 	// The runtime's: a regState is of one runtime's list.
 	ctx.rt = uintptr(unsafe.Pointer(r)) + rtBase
 	ctx.wb = uintptr(unsafe.Pointer(&nativeWB.enabled))
