@@ -1517,6 +1517,133 @@ bytes and compile time. The region machinery is shaped for int32 regions
 (`guard_int32`, raw integer and bitwise operations, Crypto's `am3`)
 without building them.
 
+#### Raw int32 regions (designed, 2026-11-12, not built)
+
+The float64 regions' machinery, for the bitwise operators: what zlib's
+and am3's conversions cost (`regInt32` 8.1 s of zlib's 22.1) is each
+operand's round trip through a float and each result's boxing, where the
+tree keeps an int32 in a Go variable through an expression. An int32
+region is a float64 region whose interiors are held as int64s and whose
+leaves are guarded as int32s.
+
+- **Exactness.** JavaScript computes `(s + i*3) | 0` in float64 and
+  applies ToInt32 to the root. An int64 interior equals the float64 one
+  exactly while every interior is an integer of magnitude at most 2^53:
+  a float64 operation on exact integers whose exact result is within 2^53
+  is exact, and ToInt32 of an exact integer is its low 32 bits. So the
+  backend bounds every interior's magnitude statically: a guarded leaf
+  by 2^31, a constant by itself, `&` `|` `^` `<<` `>>` by 2^31, `>>>` by
+  2^32, `+` and `-` by the sum of their operands' bounds, `*` by the
+  product, `%` by its dividend's, unary `-` by its operand's. An
+  operation whose bound is at most 2^53 checks nothing. Past it, its
+  checking form (`_c`) compares the result's magnitude with 2^53 and
+  bails past it (below), and its bound is 2^53 after. An operation whose
+  operands' bounds could overflow an int64 -- a product of bounds past
+  2^63 -- ends the region: today's generic instruction computes it as a
+  `Value`, a leaf of the region above it.
+- **Multiplication.** `i*3` of a guarded leaf `i` is bounded by 3 * 2^31
+  and checks nothing. A product of two guarded leaves, am3's `xh*l`, is
+  bounded by 2^62, fits an int64, and is `imul_c`, one compare of its
+  magnitude. A product of a checked interior (2^53) and an operand
+  bounded past 2^9 ends the region. No product is computed in float64
+  inside an int32 region.
+- **A bail, not an exit.** A failed check jumps to the region's generic
+  code, as a failed guard does. Nothing has been written but the
+  region's interiors, which nothing outside reads, so the generic code
+  runs the expression from its start with the leaves as they were: the
+  same value, the same rounding of a product past 2^53, the same effects.
+  A region's guard and checks have the one target.
+- **Division and modulo.** `/` is not an int32 operation: a region with
+  one is a float64 region. Such a region may end at a ToInt32 consumer
+  -- asm.js's `(a / b) | 0` -- through `f2i32_v`, the root's whole
+  ToInt32 of a float64: int64 truncation below 2^63, 0 for NaN and the
+  infinities, the generic conversion (which calls no script) for the
+  rest. `%` is `irem_c`: Go's remainder truncates and takes the
+  dividend's sign, as JavaScript's does for a divisor that is not zero.
+  A zero divisor, whose result is NaN, bails.
+- **-0.** An int64 has no -0, and the integer operations make one:
+  `0 * -1`, `-0`, `-4 % 2`, `-0 - 0`, a leaf holding -0 (the guard admits
+  it: the round trip takes it for 0). Where the root is a ToInt32 or
+  ToUint32 consumer -- `|`, `&`, `^`, the shifts, `>>> 0` -- the
+  conversion loses a zero's sign, and inside the region none is
+  observable, since nothing in it divides. Where the root is not, the
+  backend tracks whether it may be -0: a bitwise result never; a leaf
+  may; `a + b` only if both may; `a - b` if `a` may; `a * b` if one may be
+  zero and the other negative; unary `-` if its operand may be zero; `%`
+  if its dividend may be negative or -0. A root that may be -0 is boxed
+  by `ibox_z`, which bails on a zero result so that the generic code
+  makes the zero with its sign. A root whose single reader cannot tell
+  -0 from 0 -- an element key (ToPropertyKey(-0) is "0"), a compare, a
+  branch's test, a bitwise operator -- is boxed by `ibox`.
+- **A root past int32.** Where the root is not a ToInt32 consumer --
+  `(a & 0xff) + b`, `(x >> 2) * 3` -- its value is the int64 interior,
+  at most 2^53 by the bounds, boxed as its float64, which is exact.
+  ToUint32's root (`ibox_u`) boxes the `uint32` of its interior.
+- **The guard.** `guard_i32` tests up to three leaf registers: each a
+  number whose float64 is an int32 -- `IsNumber` and `regIsInt32`'s round
+  trip. A `Value` holds a float64 and there is no int32 tag, so an int32
+  leaf is always a float64 that holds one. Inside the region an interior
+  is an int64 and needs no round trip: a bitwise operator's ToInt32 of
+  one is its low 32 bits. `regIsInt32` thus moves to the guard, once for
+  each leaf in a region. The generic bitwise cases outside regions keep
+  it as it is.
+- **Which kind.** A region over `+ - * %` and the bitwise operators,
+  with at least one bitwise operator and no `/`, is an int32 region; any
+  other is a float64 one. A leaf that is a number but not an int32 fails
+  the guard each time and runs the generic code, at the guard's cost
+  over today. The counting build measures each site's guard failures
+  over the corpora before the pass is the default.
+- **Raw operations.** `iadd`, `isub`, `imul_c`, `irem_c`, the five
+  bitwise ones, unary `ineg` and `inot`, `iadd_c` and `isub_c` for the
+  checked bounds, and the immediate forms of the bitwise operators and of
+  `iadd` (an asm.js expression's constants). Each writes the number word
+  of its register as an int64's bits. The root is boxed by a separate
+  `ibox`, `ibox_z` or `ibox_u` instruction rather than a boxing form of
+  each operation: one dispatch more for each region, against a dozen
+  opcode values. About twenty values in all, from those stage 1 frees.
+- **The verifier.** The float64 region's rules, and: an int32 interior
+  is read only by int32 operations of its region. It recomputes every
+  bound and rejects an unchecked operation past 2^53, a product whose
+  operands' bounds pass 2^63, an unchecked `%`, and an `ibox` where the
+  root may be -0 and its reader can tell.
+- **Tested by difference.** regdiff's int32 arithmetic: products past
+  2^53 (`(a*b)|0` of two int32s near 2^31, where Math.imul gives another
+  answer), sums past 2^32 and 2^53, -0 from each source with and without
+  a ToInt32 root, a zero divisor, `>>> 0` of negatives, shifts by 32 and
+  more, and in turn a leaf of 1.5, -0, NaN, 2^31 and a string.
+
+Where a region is not formed, it costs nothing; where its guard fails, it
+costs the guard. In zlib's `c = (c + 1) | 0`, it saves the round trips
+of `c` and of `c + 1` and one boxing. A bare `x | 0` is one operation,
+not a region, and stays `or_imm`.
+
+**Opcode values for the regions.** Stage 1 frees 20 values, and one more
+is free: 21, against 11 for the float64 regions and about 20 for the
+int32 ones. A region instruction that interprets its own operations is
+not the answer: that is a frameless evaluator inside the loop, which this
+design rules out. A region operation gets a value of its own, as every
+other operation does, only by its measured frequency: once the region
+pass exists behind its switch, the dispatch counts over the corpora decide
+which get values. The rest are cold sub-operations, which a region may
+hold like any other instruction. The expected direct ones are
+`guard_num`, `guard_i32`, `fadd`, `fsub`, `fmul`, the boxing roots,
+`iadd`, `isub`, `imul_c`, the bitwise operations and shifts, and `ibox`.
+The expected cold ones are `fdiv`, `fneg`, `irem_c`, `ineg`, `inot`,
+`ibox_u`, `ibox_z`, and the immediate forms where a register operand
+does as well.
+
+Open, 2026-11-12: `string_concat` is 5.5% slower at every placement since
+f25d1df4 put a computed receiver in the call's result register and copied
+it into the window with `get_method_w`. Both forms take the slow path for
+a primitive string receiver (`regGetMethod`'s `primProps`), so the new
+form costs one store more. The code it runs is identical, as are its
+offsets modulo 4 KB, its data, its allocations and its collections; the
+time is in data loads, and the old shape is level at only two
+placements of four. The fix is a fast path in `get_method` and
+`get_method_w` for a primitive string's method, read inline from
+`primProps`. It is general -- every `"str".method()` -- and is made with
+stage 1's hot-case edit.
+
 ### Stage 2: zero refusals
 
 The register tier is the baseline interpreter: it refuses nothing V8's
