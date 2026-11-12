@@ -1408,6 +1408,90 @@ the call and holding no Value register at all, which keeps `runReg` as it
 is. Either is a change to the loop's layout as large as any made, and is
 measured over the placements as one.
 
+#### Raw float64 temporaries (designed, 2026-11-11, not built)
+
+What NavierStokes measured: in register mode it was 10% slower than the
+tree tier (two placements' worth of profile, three runs a mode, 6 s of
+samples). Its time is `lin_solve`'s loop, 14 instructions an element --
+`x[currentRow] = (x0[currentRow] + a*(x[currentRow-1] + x[++currentRow] +
+x[lastRow++] + x[nextRow++]))*invC` -- and every intermediate of the
+right side is a `Value` written to its register: the operands' tag tests
+(`IsNumber`, 13.9% of the run), the canonical NaN of each result
+(`regNum`, 3.8%), and the store of both words. The tree evaluates the same
+expression as nested nodes that return float64s, and tests and boxes only
+at the leaves and the root. The index cases' checks, the other 17%, were
+trimmed by 2d91b42b (NavierStokes -7.7%).
+
+The design keeps an expression's float64 intermediates raw, as the tree
+does, without speculation and without a second representation of `Value`:
+
+- **A raw region.** The backend marks a region: a maximal straight run of
+  the arithmetic operators `+ - * /` and unary `-` (and, with the int32
+  design above, the bitwise ones) over at least two operations, whose
+  leaves are registers the region does not write -- locals, and
+  temporaries computed before it, an element or a property read among
+  them -- and whose interior results are read only inside it. Nothing in
+  a region calls, stores, throws or jumps: loads stay outside it, as
+  Values. Its root's value is the one result it writes as a `Value`.
+- **One guard at the head.** `guard_num` tests up to three leaf registers
+  are numbers (more leaves, more guards), and on any that is not, jumps to
+  the region's generic code: the same expression compiled as today. Once
+  every leaf is a number, `+ - * /` of numbers is a number and nothing in
+  the region can leave it, so its operations test nothing.
+- **Raw operations.** `fadd`, `fsub`, `fmul`, `fdiv` and `fneg` write only
+  the number word of their result register -- a float64 whose NaN, if it
+  is one, has whatever bits the FPU gave it -- and read only number words:
+  a leaf's, which is the number itself, or an interior's. The root's
+  operation is the boxing form (`fadd_v` ...): it writes the whole `Value`,
+  its NaN canonical (`regNum`'s test, once a region, not once an
+  operation) and its pointer word nil. `IsNumber` is the guard's alone.
+- **No rebox, no exit in the middle.** A failed guard is before anything
+  was written but the region's own interiors, which nothing outside reads,
+  so the generic code runs the expression from its start with the leaves
+  as they were: the same answer, the same side effects (a string `+`'s, a
+  `valueOf`'s), the same throw (a BigInt mixed with a Number), the same
+  stack trace -- the generic instructions carry the source positions.
+  Nothing raw is ever seen by a reader of `Value`s: the interiors are dead
+  when the region ends, and the root is boxed.
+- **The generic code.** Out of line, after the function's last
+  instruction, ending in a jump back to the instruction after the region:
+  the region costs no dispatch where the guard holds. Code size: each
+  region twice, plus a guard and a jump.
+- **The collector.** An interior's pointer word is not written: it keeps
+  whatever the register held before, a pointer the collector already
+  knew, so nothing it sees is invalid; `sweepStaleSlots` clears it at the
+  next back edge, as it clears any dead temporary today. No raw word is
+  ever read as a pointer.
+- **The verifier.** It checks each region: its interiors are written by
+  raw operations and read only by raw ones of the same region; every leaf
+  is covered by its guard and not written in the region; no instruction in
+  it calls, stores or jumps, and no label is inside it (a jump or a
+  handler cannot enter it); the guard's target is the region's generic
+  code, which ends in a jump to the region's end. A register is raw only
+  between its raw write and its last raw read, so no join, no handler and
+  no call ever meets one. A generator's suspension, a debugger's stop and
+  a direct eval are statements, never inside an expression's region.
+- **Opcodes.** Eleven values: `guard_num`, five raw operations and five
+  boxing ones. The 7-bit space has one free value (42). The 18 cases of no
+  hot operation (layoutcases.txt) become cold sub-operations, which frees
+  them, and the raw operations are cases after the hot ones until timing
+  puts them among them (a hot-case edit, with the golden file).
+- **What it saves, estimated.** In `lin_solve` the region is the right
+  side above: 7 operations, 5 leaves in 2 guards. Per element: 7 tag tests
+  of operand pairs become 5 in two instructions, 6 canonical NaNs become 1,
+  6 pointer-word stores become 1, one dispatch more (the second guard)
+  for none of the boxing. Of the 14% and 3.8% above, about two thirds go:
+  10% of NavierStokes, which would put it level with the tree. Crypto's
+  `am3` gains with the int32 form, not this one.
+- **Tested by difference.** regdiff's arithmetic over numbers, strings,
+  BigInts, objects with `valueOf`, NaNs of every payload, -0 and the
+  infinities, each leaf of a region in turn not a number.
+
+What it does not do: speculate on a load's type, or keep a value raw
+across a statement, a call or a loop's back edge -- a loop variable stays a
+`Value`. That is where the int32 design's verifier of kinds would be
+needed; this one needs none beyond the region's.
+
 ### Stage 2: zero refusals
 
 The register tier is the baseline interpreter: it refuses nothing V8's
