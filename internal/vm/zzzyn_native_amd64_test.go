@@ -345,7 +345,14 @@ var nativeCallCases = []struct {
 	{"leafConst", `function k() { return 7 } function run(n) { var s = 0; for (var i = 0; i < n; i++) s += k(); return s }`, true},
 	{"builtin", `function run(n) { var s = 0; for (var i = 0; i < n; i++) s += Math.max(i, 3); return s }`, false},
 	{"generator", `function* g() { yield 1 } function run(n) { var s = 0; for (var i = 0; i < n; i++) s += g().next().value; return s }`, false},
-	{"arguments", `function f() { return arguments.length } function run(n) { var s = 0; for (var i = 0; i < n; i++) s += f(i, i); return s }`, false},
+	{"arguments", `function f() { return arguments.length } function run(n) { var s = 0; for (var i = 0; i < n; i++) s += f(i, i); return s }`, true},
+	{"argumentsMethod", `var o = { k: 2, m() { var t = 0; for (var j = 0; j < arguments.length; j++) t += arguments[j]; return t + this.k } }; function run(n) { var s = 0; for (var i = 0; i < n; i++) s += o.m(i, 1, 2); return s }`, true},
+	{"argumentsMapped", `function f(a, b) { a = 10; return arguments[0] + (b === undefined ? 0 : arguments[1]) + arguments.length } function run(n) { var s = 0; for (var i = 0; i < n; i++) s += f(i) + f(i, 1, 2); return s }`, true},
+	{"argumentsStrict", `function f(a) { "use strict"; a = 3; return arguments[0] + a } function run(n) { var s = 0; for (var i = 0; i < n; i++) s += f(i, 5); return s }`, true},
+	{"forwarder", `function t(a, b) { return (a | 0) + (b | 0) } function fw() { return t.apply(this, arguments) } function run(n) { var s = 0; for (var i = 0; i < n; i++) s += fw(i, 2) + fw(); return s }`, true},
+	{"argumentsThrow", `function f() { if (arguments.length > 1) throw new Error("x" + arguments[1]); return arguments[0] } function run(n) { var s = 0; for (var i = 0; i < n; i++) { try { s += f(i, i & 1 ? i : undefined) } catch (e) { s += e.message.length } } return s }`, true},
+	{"argumentsClosure", `function f(a) { var g = function () { return a + 1 }; return arguments.length + (typeof g).length + a } function run(n) { var s = 0; for (var i = 0; i < n; i++) s += f(i, 2, 3); return s }`, true},
+	{"argumentsKept", `var keep = []; function f() { keep[keep.length] = arguments; return arguments.length } function run(n) { var s = 0; for (var i = 0; i < n; i++) s += f(i, [i]); var t = 0; for (var k of keep) t += k[0] + k[1][0]; return s + t }`, true},
 	{"newTarget", `function f() { return new.target === undefined ? 1 : 2 } function run(n) { var s = 0; for (var i = 0; i < n; i++) s += f(); return s }`, false},
 	{"bound", `var b = function (x) { return x + 1 }.bind(null); function run(n) { var s = 0; for (var i = 0; i < n; i++) s += b(i); return s }`, false},
 }
@@ -407,9 +414,9 @@ func TestRegNativeCallExits(t *testing.T) {
 		if got != want {
 			t.Errorf("%s: %s, want %s", c.name, got, want)
 		}
-		// The script's call of run and the site's first two calls, which
-		// fill its cache, are Go's.
-		if c.native && exits > 3 {
+		// The script's call of run and each site's first two calls, which
+		// fill its cache, are Go's: a case has no more than two sites.
+		if c.native && exits > 5 {
 			t.Errorf("%s: %d calls left to Go, want the call made natively", c.name, exits)
 		} else if !c.native && exits < n {
 			t.Errorf("%s: %d calls left to Go of %d, want every one: rhCallW answers it by a path of its own", c.name, exits, n)

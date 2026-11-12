@@ -579,9 +579,12 @@ elements of dense and typed arrays (every kind but Float16 and BigInt64);
 `===` and `!==`; short BigInts' add, sub and mul; and calls and returns:
 `call_w` and `call_method_w` enter a callee their site's cache knows as
 `rhCallW` does -- its this, the frame record, the stack top and depth --
-and run it, the caller's state pushed on the native frame stack, and a
-leaf that returns a parameter or a constant is answered with no frame;
-`ret` pops it. A fast path that misses jumps to the exit; nothing is
+and run it, the caller's state pushed on the native frame stack; a
+callee that keeps its arguments (one that reads `arguments`, which
+`rhCallW` leaves to `regCallMiss`) is entered as `regEnterW` enters it,
+its arguments appended to the runtime's argument stack; and a leaf that
+returns a parameter or a constant is answered with no frame. `ret` pops
+the frame, and gives an entered frame's arguments back. A fast path that misses jumps to the exit; nothing is
 written before it does.
 
 **The exit stub.** An operation of no native handler has the exit stub's

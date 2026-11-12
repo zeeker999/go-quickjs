@@ -869,6 +869,7 @@ var (
 	offRtMaxFrames  = rtRel(unsafe.Offsetof(Runtime{}.maxFrames))
 	offRtInterrupt  = rtRel(unsafe.Offsetof(Runtime{}.interruptCounter))
 	offRtCur        = rtRel(unsafe.Offsetof(Runtime{}.cur))
+	offRtArgStack   = rtRel(unsafe.Offsetof(Runtime{}.argStack))
 
 	offFCl       = int32(unsafe.Offsetof(frame{}.cl))
 	offFBase     = int32(unsafe.Offsetof(frame{}.base))
@@ -876,6 +877,8 @@ var (
 	offFRegKind  = int32(unsafe.Offsetof(frame{}.regKind))
 	offFCallee   = int32(unsafe.Offsetof(frame{}.callee))
 	offFArgs     = int32(unsafe.Offsetof(frame{}.args))
+	offFLocals   = int32(unsafe.Offsetof(frame{}.locals))
+	offFNewTgt   = int32(unsafe.Offsetof(frame{}.newTarget))
 	offFOpenUp   = int32(unsafe.Offsetof(frame{}.openUpvalues))
 	offFThisRef  = int32(unsafe.Offsetof(frame{}.thisRef))
 	offFEvalVars = int32(unsafe.Offsetof(frame{}.evalVars))
@@ -898,6 +901,7 @@ var (
 	offRCNewTarget = int32(unsafe.Offsetof(regCode{}.newTarget))
 	offRCNcap      = int32(unsafe.Offsetof(regCode{}.ncap))
 	offRCLeaf      = int32(unsafe.Offsetof(regCode{}.leaf))
+	offRCArgs      = int32(unsafe.Offsetof(regCode{}.args))
 	offRCLeafArg   = int32(unsafe.Offsetof(regCode{}.leafArg))
 	offRCLeafVal   = int32(unsafe.Offsetof(regCode{}.leafVal))
 
@@ -912,6 +916,125 @@ var (
 	recSaved = int32(unsafe.Offsetof(nativeRec{}.saved))
 	recBOff  = int32(unsafe.Offsetof(nativeRec{}.bOff))
 )
+
+// keepArgs puts an entered frame's arguments, the window's argc from
+// register 2, on the runtime's argument stack, as regEnterW appends them,
+// and its length past them; sKa is where they start.
+func (g *nativeGen) keepArgs() {
+	a := g.a
+	done, loop, end := a.NewLabel(), a.NewLabel(), a.NewLabel()
+	a.CmpMemImm8(RDI, scr(sEnt), 0)
+	a.Jcc(CondE, done)
+	a.Load(R9, RDI, ncRT)
+	a.Load(RCX, R9, offRtArgStack+8)
+	a.Store(RDI, scr(sKa), RCX)
+	a.Op(Xor, RCX, RCX, true)
+	a.Bind(loop)
+	a.CmpMem(RCX, RDI, scr(sArgc), true)
+	a.Jcc(CondGE, end)
+	// The word of the number, plainly; the pointer word by ptrStore
+	// where it differs.
+	a.Store(RDI, scr(sI), RCX)
+	a.MovRR(RDX, RCX)
+	a.ShiftImm(Shl, RDX, 4, true)
+	a.AddMem(RDX, RDI, scr(sWin))
+	a.Load(R9, RDI, ncRT)
+	a.Load(RAX, R9, offRtArgStack+8)
+	a.Op(Add, RAX, RCX, true)
+	a.ShiftImm(Shl, RAX, 4, true)
+	a.AddMem(RAX, R9, offRtArgStack)
+	a.Load(R8, RDX, 32)
+	a.Store(RAX, 0, R8)
+	a.Load(RCX, RDX, 40)
+	a.Lea(RAX, RAX, 8)
+	g.ptrTo()
+	a.Load(RCX, RDI, scr(sI))
+	a.OpImm(Add, RCX, 1, true)
+	a.Jmp(loop)
+	a.Bind(end)
+	a.Load(R9, RDI, ncRT)
+	a.Load(RCX, RDI, scr(sKa))
+	a.AddMem(RCX, RDI, scr(sArgc))
+	a.Store(R9, offRtArgStack+8, RCX)
+	a.Bind(done)
+}
+
+// frameArgs writes the frame record's args: an entered frame's those
+// keepArgs kept, its locals its parameters' registers, its new.target
+// undefined and its kind regEnterW's; any other frame's cleared, as
+// regClearFrame clears what a frame's last user left.
+func (g *nativeGen) frameArgs() {
+	a := g.a
+	ent, done, zero, haveP, cleared := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
+	a.CmpMemImm8(RDI, scr(sEnt), 0)
+	a.Jcc(CondNE, ent)
+	a.Load(RSI, RDI, scr(sNF))
+	a.CmpMemImm8(RSI, offFArgs, 0)
+	a.Jcc(CondE, done)
+	a.Op(Xor, RCX, RCX, true)
+	a.Store(RSI, offFArgs+8, RCX)
+	a.Store(RSI, offFArgs+16, RCX)
+	a.Lea(RAX, RSI, offFArgs)
+	g.ptrStore()
+	a.Jmp(done)
+	a.Bind(ent)
+	a.Load(RSI, RDI, scr(sNF))
+	a.MovImm(RCX, regFrameEnter)
+	a.Store8(RSI, offFRegKind, RCX)
+	// args: the argument stack from sKa, argc of them; a slice of no
+	// room is the stack's own pointer, as Go makes it.
+	a.Load(RCX, RDI, scr(sArgc))
+	a.Store(RSI, offFArgs+8, RCX)
+	a.Store(RSI, offFArgs+16, RCX)
+	a.Load(R9, RDI, ncRT)
+	a.Op(Test, RCX, RCX, true)
+	a.Jcc(CondE, zero)
+	a.Load(RCX, RDI, scr(sKa))
+	a.ShiftImm(Shl, RCX, 4, true)
+	a.AddMem(RCX, R9, offRtArgStack)
+	a.Jmp(cleared)
+	a.Bind(zero)
+	a.Load(RCX, R9, offRtArgStack)
+	a.Bind(cleared)
+	a.Lea(RAX, RSI, offFArgs)
+	g.ptrTo()
+	// locals: the stack from base+2, params of them.
+	a.Load(RSI, RDI, scr(sNF))
+	a.Load(R8, RDI, scr(sRC))
+	a.LoadS32(RCX, R8, offRCParams)
+	a.Store(RSI, offFLocals+8, RCX)
+	a.Store(RSI, offFLocals+16, RCX)
+	a.Load(R9, RDI, ncRT)
+	a.Op(Test, RCX, RCX, true)
+	a.Load(RCX, R9, offRtStack)
+	a.Jcc(CondE, haveP)
+	a.Load(RDX, RDI, scr(sBase))
+	a.OpImm(Add, RDX, 2, true)
+	a.ShiftImm(Shl, RDX, 4, true)
+	a.Op(Add, RCX, RDX, true)
+	a.Bind(haveP)
+	a.Lea(RAX, RSI, offFLocals)
+	g.ptrTo()
+	// new.target: undefined.
+	a.Load(RSI, RDI, scr(sNF))
+	a.Load(R8, RDI, ncUndef)
+	a.Store(RSI, offFNewTgt, R8)
+	a.Op(Xor, RCX, RCX, true)
+	a.Lea(RAX, RSI, offFNewTgt+8)
+	g.ptrTo()
+	a.Bind(done)
+}
+
+// ptrTo stores the pointer in RCX at the address in RAX, by ptrStore,
+// where the word there differs.
+func (g *nativeGen) ptrTo() {
+	a := g.a
+	same := a.NewLabel()
+	a.CmpMem(RCX, RAX, 0, true)
+	a.Jcc(CondE, same)
+	g.ptrStore()
+	a.Bind(same)
+}
 
 // call is call_w and call_method_w: a callee the site's cache knows,
 // entered as regCallW enters it -- its this, the frame record, the stack
@@ -977,8 +1100,24 @@ func (g *nativeGen) call() {
 	a.LeaIdx(RAX, R12, RDX, 1, 0)
 	g.storeValue()
 	a.Bind(notLeaf)
-	// Entered as it is, with the cache's this, or with an object this.
+	// A callee that keeps its arguments, which rhCallW leaves to
+	// regCallMiss (regCallOut, no leaf): entered here as regEnterW enters
+	// it (sEnt), its kind the cache's without the mark.
+	plain := a.NewLabel()
+	a.StoreImm(RDI, scr(sEnt), 0)
 	a.LoadU8(R9, RCX, offEKind)
+	a.MovRR(R8, R9)
+	a.OpImm(And, R8, regCallOut|regCallLeaf, false)
+	a.OpImm(Cmp, R8, regCallOut, false)
+	a.Jcc(CondNE, plain)
+	a.Load(R8, RCX, offERC)
+	a.LoadU8(RDX, R8, offRCArgs)
+	a.Op(Test, RDX, RDX, false)
+	a.Jcc(CondE, g.ex(4))
+	a.OpImm(And, R9, ^regCallOut&0xff, false)
+	a.StoreImm(RDI, scr(sEnt), 1)
+	a.Bind(plain)
+	// Entered as it is, with the cache's this, or with an object this.
 	a.OpImm(Cmp, R9, regCallEnter, false)
 	a.Jcc(CondE, ok)
 	a.OpImm(Cmp, R9, regCallThis, false)
@@ -1000,9 +1139,13 @@ func (g *nativeGen) call() {
 	a.ShiftImm(Shr, RDX, 8, true)
 	a.MovZX8(RDX, RDX)
 	a.Store(RDI, scr(sArgc), RDX)
+	kept := a.NewLabel()
+	a.CmpMemImm8(RDI, scr(sEnt), 0)
+	a.Jcc(CondNE, kept)
 	a.LoadU16(R9, R8, offRCKeep)
 	a.Op(Cmp, RDX, R9, true)
 	a.Jcc(CondA, g.ex(6))
+	a.Bind(kept)
 	a.LoadU8(R9, R8, offRCNewTarget)
 	a.Op(Test, R9, R9, false)
 	a.Jcc(CondNE, g.ex(7))
@@ -1034,13 +1177,26 @@ func (g *nativeGen) call() {
 	a.AddMem(RSI, R9, offRtCur)
 	// What a frame's last user left set: one test of the five words or'd.
 	a.Load(R8, RSI, offFThisRef)
-	for _, off := range []int32{offFEvalVars, offFWith, offFNative + 8, offFArgs} {
+	for _, off := range []int32{offFEvalVars, offFWith, offFNative + 8} {
 		a.Load(R9, RSI, off)
 		a.Op(Or, R8, R9, true)
 	}
 	a.Op(Test, R8, R8, true)
 	a.Jcc(CondNE, g.ex(12))
 	a.Store(RDI, scr(sNF), RSI)
+	// The arguments an entered frame keeps go on the runtime's argument
+	// stack, which must have the room: Go grows it.
+	noKeep := a.NewLabel()
+	a.CmpMemImm8(RDI, scr(sEnt), 0)
+	a.Jcc(CondE, noKeep)
+	a.Load(R9, RDI, ncRT)
+	a.CmpMemImm8(R9, offRtArgStack, 0)
+	a.Jcc(CondE, g.ex(14))
+	a.Load(RCX, R9, offRtArgStack+8)
+	a.AddMem(RCX, RDI, scr(sArgc))
+	a.CmpMem(RCX, R9, offRtArgStack+16, true)
+	a.Jcc(CondA, g.ex(14))
+	a.Bind(noKeep)
 	a.Load(R8, RDI, ncDepth)
 	a.CmpMem(R8, RDI, ncCap, true)
 	a.Jcc(CondGE, g.ex(13))
@@ -1079,6 +1235,7 @@ func (g *nativeGen) call() {
 	a.Jcc(CondLE, noTop)
 	a.Store(R9, offRtStackHigh, RDX)
 	a.Bind(noTop)
+	g.keepArgs()
 	// Parameters no argument was given for, and the bindings past them:
 	// undefined, from min(argc, params) to params+inits.
 	a.Load(R8, RDI, scr(sRC))
@@ -1133,6 +1290,7 @@ func (g *nativeGen) call() {
 	a.Store(RSI, offFOpenUp+8, RCX)
 	a.MovImm(RCX, regFrameCall)
 	a.Store8(RSI, offFRegKind, RCX)
+	g.frameArgs()
 	for _, f := range [][2]int32{{offECl, offFCl}, {offECallee, offFCallee}} {
 		same := a.NewLabel()
 		a.Load(RCX, RDI, scr(sE))
@@ -1213,11 +1371,21 @@ func (g *nativeGen) ret(undef bool) {
 	}
 	a.Store(RDI, scr(sV0), R8)
 	a.Store(RDI, scr(sV1), R9)
-	// The frame closed.
+	// The frame closed; an entered frame's arguments given back to the
+	// argument stack, as regEnterW gives them.
 	a.Load(RSI, RDI, ncNF)
+	a.Load(R9, RDI, ncRT)
+	notEnt := a.NewLabel()
+	a.LoadU8(RCX, RSI, offFRegKind)
+	a.OpImm(Cmp, RCX, regFrameEnter, false)
+	a.Jcc(CondNE, notEnt)
+	a.Load(RCX, RSI, offFArgs+8)
+	a.Load(RDX, R9, offRtArgStack+8)
+	a.Op(Sub, RDX, RCX, true)
+	a.Store(R9, offRtArgStack+8, RDX)
+	a.Bind(notEnt)
 	a.Op(Xor, RCX, RCX, false)
 	a.Store8(RSI, offFRegKind, RCX)
-	a.Load(R9, RDI, ncRT)
 	a.DecMem(R9, offRtFrameDepth)
 	a.Load(R8, RDI, ncDepth)
 	a.OpImm(Sub, R8, 1, true)

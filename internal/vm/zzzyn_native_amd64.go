@@ -385,12 +385,18 @@ func (r *Runtime) nativeEnd(s *regState, ctx *nativeCtx, pc int, w bytecode.RIns
 		// runReg, or meets the throw.
 		rec := ctx.recs[d-1]
 		nf, rc := s.f, s.c
+		kind := nf.regKind
 		nf.regKind = 0
-		if rc.ncap != 0 && len(nf.openUpvalues) != 0 {
+		if (rc.ncap != 0 || kind == regFrameEnter) && len(nf.openUpvalues) != 0 {
 			regCloseUpvalues(nf)
 		}
 		r.frameDepth--
 		r.stackTop = int(rec.saved)
+		if a := nf.args; kind == regFrameEnter && a != nil {
+			// The arguments kept for it, the last on the argument stack,
+			// as regEnterW gives them back.
+			r.argStack = r.argStack[:len(r.argStack)-len(a)]
+		}
 		nativePop(ctx, &rec)
 		caller := r.nativeTop(ctx.st, ctx)
 		retPC := int((rec.retIP - rec.codeBase) / 8)
@@ -398,6 +404,14 @@ func (r *Runtime) nativeEnd(s *regState, ctx *nativeCtx, pc int, w bytecode.RIns
 		if err := s.err; err == nil {
 			r.stack[dst] = v
 			pc = retPC + 1
+		} else if kind == regFrameEnter {
+			// regCallMiss's end of regEnterW's frame.
+			if err = r.regMissEnd(err, dst); err == nil {
+				pc = retPC + 1
+			} else {
+				caller.kept.pc = retPC + 1
+				pc = caller.fail(err)
+			}
 		} else if err = r.regCallWEnd(nf, regFrameCall, err, int(rec.saved), dst); err == nil {
 			pc = retPC + 1
 		} else {
@@ -457,6 +471,10 @@ const (
 	sEnd
 	sV0
 	sV1
+	// sEnt says the callee is entered as regEnterW enters it, keeping its
+	// arguments, which start at sKa on the argument stack.
+	sEnt
+	sKa
 )
 
 // nativeWB is the runtime's write-barrier flag, as the JIT reads it
