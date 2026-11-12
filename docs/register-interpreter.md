@@ -576,9 +576,11 @@ the bitwise operators of any number (by ToInt32) and the
 compare-and-branches, of registers, immediates and upvalues; truthiness
 of a boolean, a number, an object, a string, undefined and null; `==`
 and `!=` of numbers, of one word kind and of undefined or null against
-anything; `===` and `!==`; moves, constants, upvalues read and written,
+anything; `===` and `!==` (two strings by identity and length); moves, constants, upvalues read and written,
 and globals read and written by their site; property reads and writes by
-the monomorphic cache and `o.n +=` of an own number; `in` by the
+the site's cache, its own entry or the entries of the shapes it met
+before (`propPoly`), and a property added by the transition it
+remembers; `o.n +=` of an own number; `in` by the
 runtime's in cache, `typeof`, the length of an array or a string, the
 elements of dense arrays (read, `x[++i]`, `x[i++]`, written over any
 element) and typed arrays (every kind but Float16 and BigInt64); short
@@ -589,7 +591,9 @@ and run it, the caller's state pushed on the native frame stack; a
 callee that keeps its arguments (one that reads `arguments`, which
 `rhCallW` leaves to `regCallMiss`) is entered as `regEnterW` enters it,
 its arguments appended to the runtime's argument stack; and a leaf that
-returns a parameter or a constant is answered with no frame. `ret` pops
+returns a parameter or a constant is answered with no frame, while one
+Go answers frameless otherwise (a pure body, one that reads or writes
+its this) is entered with a frame, cheaper here than an exit. `ret` pops
 the frame, and gives an entered frame's arguments back. A fast path that misses jumps to the exit; nothing is
 written before it does.
 
@@ -599,8 +603,9 @@ instruction's address and the budget in the context and returns to
 `nativeRun`, which runs the instruction by its Go handler from
 `regTable` -- and, where that gives back `^pc`, its slow function from
 `regSlowTable` -- in the top frame's `regState`, and enters the code
-again at the pc it gives. There is no second interpreter: what the Go
-table does, an exit does. A frame the code entered itself that ends in Go
+again at the pc it gives -- after running in Go, too, the instructions
+that follow it and have no native handler, which would only exit again.
+There is no second interpreter: what the Go table does, an exit does. A frame the code entered itself that ends in Go
 -- a throw, a return that closes captured upvalues -- ends there as
 `rhCallW` ends a callee after `runReg` (`nativeEnd`), and its caller goes
 on or meets the throw. Its state is made for it from its frame record
