@@ -1694,6 +1694,125 @@ the tree tier removed, the stack form is no input it can keep. The tree
 tier is measured against the register interpreter suite by suite, its
 mechanisms ported, and removed.
 
+#### 3a-3's working plan (2026-11-12)
+
+**Where 3a-2 left it.** On reg-cov, behind tests only:
+- `compile.LowerReg` lowers every register operation into the slot IR,
+  with `ir.Program.Origin` and the atomicity rule, which `ir.Validate`
+  enforces.
+- `ssa.Build` takes register programs and keeps the rule as it builds
+  (`atomicInstruction`), and mir compiles them. Every program of the V8
+  suite, Octane and the bundles builds and compiles, both forms alike.
+- `jitRegFeedback` answers by register pc from the caches runReg fills:
+  property sites, global sites, call shapes and targets (`regCalls`),
+  constants.
+- `vm.RegLowerCall`, with `regRunner`, is an exit's VM side today. The
+  evaluator stands where native code will: a host exit runs the whole
+  register instruction on the frame's real registers by the
+  interpreter's slow paths, and a deoptimization resumes `runReg(f, c,
+  pc)` at the exit's register pc. `runReg` already takes a start pc,
+  since generators use it, so no edit of it is needed for entry at an
+  arbitrary pc.
+
+**Step A: built entirely in `zzjit_*` files, no register-tier edit.**
+- **A1, an exit's frame rebuilt as a register frame** (`jitRegExit`).
+  - An exit's records write the window's registers `[wb, wb+Regs)`, by
+    `Program.Live`, and materialize escape analysis's virtual objects
+    into registers.
+  - It sets `f.pc = c.src[pc] + 1`, as `regSlow` does.
+  - A host exit then runs the register instruction whole by
+    `regRunner`'s dispatch (`regSlow`, `regCallW`, `regCold` and the
+    rest, all called out of the loop as they are today), and native code
+    goes on at the next entry.
+  - A deoptimization runs `runReg(f, c, pc)`.
+  - The context's `Locals` is the window's base: `r.stack` never moves,
+    so native code reads and writes registers in place.
+- **A2, inlined frames.** An inlined callee is materialized as a
+  register frame at `wb + A` of the caller's call instruction:
+  - its frame is pushed as `regLowerEnter` pushes one, without running
+    it, and `runReg` runs it from its exit's pc;
+  - the caller then resumes at the call's pc + 1, with the value in B.
+- **A3, the OSR entry map.** Each loop header's register pc goes to an
+  `ssa.Func` entry at `p.At(pc)`, its live registers from
+  `Program.Live`: the register form has one entry per loop header, as
+  the stack form.
+- **A4, the feedback snapshot for background compiles.**
+  `jitRegFeedback` is asked ahead, as `jitFeedback` is
+  (`zzjit_snapshot.go`): snapgen extended to the second type, its
+  generated file regenerated. Until then, register code compiles in the
+  foreground only.
+- **A5, calls between register functions.**
+  - `NativeCalls` and `Inline` come from `regCalls` targets, with the
+    callees' programs from `LowerRegInline`.
+  - A native callee's link is its register entry.
+  - Frequency waits for 3a-1's call counts; until then a call is
+    weighted by the caller's own hotness.
+- **A6, the compile pipeline** (`jitRegFor`): LowerReg, then ssa.Build
+  with jitRegFeedback, Optimize, mir and SSACode, in the JIT's existing
+  code cache, keyed by function and form.
+- **Testing step A.**
+  - A test-only native entry, `RegLowerCall` with native code in the
+    evaluator's place, runs the regdiff corpus with every function
+    compiled at its first call. It is compared with ordinary calls, as
+    TestRegLowerEvaluate does now.
+  - TestJITSameWorkWhileMarking gets register-code cases, and every
+    native path is tested under `jitMarkingForTest`.
+
+**Step B: the smallest hook set in the register tier**, which the
+coordinator sequences after a merge of reg-cov into reg. No hook is in
+runReg's loop, and runReg itself is not edited.
+- **B1, calls** (`zzreg_call.go`, outside the loop): `regEnterW` and
+  `regDirect`/`regDirectOnce`, the callbacks' entry.
+  - One branch behind `jitBuilt`: `if jitBuilt { if rc.hot--; rc.hot < 0
+    { return r.regEnterHot(...) } }`.
+  - `regEnterHot` (zzjit, out of line) counts, compiles and enters
+    native code, and holds `hot` negative once the function has code.
+  - `regCode` gains `hot int32` (`zzreg_run.go`, a field, not the loop).
+  - Untagged builds compile it out; tagged builds pay a decrement on a
+    line regEnterW already loads. That is measured with
+    `placements -micro`, tagged and untagged. If it shows, the fallback
+    credits the callee when `interruptCounter` runs out, the decrement
+    regEnterW already makes.
+- **B2, loops** (`regBackEdge` in `zzreg_run.go`): it is called out of
+  line from the loop's jump tail when `r.backEdges` runs out, and the
+  tail does not change.
+  - Behind `jitBuilt`, it takes the budget from
+    `r.jit.backEdgeBudget()` and calls `r.jitRegLoop(f, c, k)` (zzjit).
+  - That function finds the header from the jump at `k.pc - 1`, enters
+    native code at A3's entry, and on its return sets `k.pc` and returns
+    the sentinel `errRegGoOn`.
+- **B3, going on after native code** (`regCatch` in `zzreg_switch.go`,
+  outside the loop): its first test is `if err == errRegGoOn { return
+  k.pc }`. The fail tail already continues at whatever regCatch returns,
+  so OSR out of native code adds no instruction to runReg.
+  - A frame native code finished resumes at a `ret r0` that regcomp
+    appends to every function (a regcomp change, not the tier's), its
+    value written to r0.
+- **No hook needed** in `regSlow`, `regColdSub` or `regCallW`: an exit
+  calls them from zzjit as `regRunner` does now.
+  - 3a-1's feedback, `regSeen` and call counts, records in their slow
+    branches: that is 3a-1's hook set, apart from 3a-3's.
+- **Generators** are a step after B: `regGenRun` (`zzreg_zgen.go`)
+  entering a resumption's native code, the suspended window replacing
+  the stack form's `GenSteps`.
+
+**Order and gates.**
+1. A6, A1 and A3 with the test-only entry.
+   - Gate: the regdiff corpus native at first call, compared with
+     ordinary calls, 0 disagreements; the marking test's register cases.
+2. A5 and A2, with the same gates; inlined frames' rebuild under
+   `QJS_JIT_STRESS`'s deopt settings through the test entry.
+3. B1 to B3, scheduled by the coordinator, and an env switch
+   (`QJS_JITREG`) routing the JIT to register code.
+   - Gate: test262 `-conformance.jit` in register mode, 0 failures and
+     0 fallbacks; `QJS_JIT_STRESS` clean; hotdiff of runReg the same,
+     and of `regEnterW` in untagged builds.
+4. A4, then 3a-3's timing gate: the JIT's placements (`-jit -k 4`,
+   JITPAD, JITSEED and JITLINE varied) on V8, Octane, AWFY, `ssr`,
+   `fresh` and the micro-benchmarks against the stack-form JIT,
+   foreground and with `-jitbackground`. Only then does the stack path
+   go.
+
 ### Stage 4: one pipeline
 
 The stack compiler stops emitting code; scope resolution stays as the
