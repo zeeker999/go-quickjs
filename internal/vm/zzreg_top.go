@@ -14,8 +14,8 @@ func (r *Runtime) regColdTop(f *frame, c *regCode, pc int, w bytecode.RInstr, re
 	cl := f.cl
 	name := regName(cl, c, pc, w.B())
 	flag := w.C() != 0
-	switch bytecode.RColdOp(w.X()) {
-	case bytecode.RColdCheckGlobalLex:
+	switch w.Op() {
+	case bytecode.RCheckGlobalLex:
 		if r.globalLex.getOwn(name).ok() {
 			return r.throwError(errSyntax, "%q has already been declared", r.atoms.name(name))
 		}
@@ -26,7 +26,7 @@ func (r *Runtime) regColdTop(f *frame, c *regCode, pc int, w bytecode.RInstr, re
 			return r.throwError(errSyntax,
 				"%q is already a property of the global object that cannot be removed", r.atoms.name(name))
 		}
-	case bytecode.RColdCheckGlobalVar:
+	case bytecode.RCheckGlobalVar:
 		if cl.scope() != r.global {
 			return nil
 		}
@@ -39,7 +39,7 @@ func (r *Runtime) regColdTop(f *frame, c *regCode, pc int, w bytecode.RInstr, re
 		if !r.hasOwnProp(r.global, name) && !r.global.IsExtensible() {
 			return r.throwTypeError("cannot declare %q on a non-extensible global", r.atoms.name(name))
 		}
-	case bytecode.RColdDefineGlobalVar:
+	case bytecode.RDefineGlobalVar:
 		if f.evalVars != nil {
 			// Eval code inside a function: what it declares is that
 			// function's, as the stack form's define_global_var has it.
@@ -68,7 +68,7 @@ func (r *Runtime) regColdTop(f *frame, c *regCode, pc int, w bytecode.RInstr, re
 			}
 			env.setOwnRaw(name, Undefined, flags)
 		}
-	case bytecode.RColdDefineGlobalFunc:
+	case bytecode.RDefineGlobalFunc:
 		fn := regs[w.A()]
 		if f.evalVars != nil {
 			f.evalVars.setOwnRaw(name, fn, propWritable|propConfigurable)
@@ -97,21 +97,21 @@ func (r *Runtime) regColdTop(f *frame, c *regCode, pc int, w bytecode.RInstr, re
 			}
 		}
 		env.setOwnRaw(name, fn, flags)
-	case bytecode.RColdDeclareGlobalLex:
+	case bytecode.RDeclareGlobalLex:
 		flags := propFlags(propConfigurable)
 		if flag {
 			flags |= propWritable
 		}
 		r.declareGlobalLex(name, flags)
-	case bytecode.RColdInitGlobalLex:
+	case bytecode.RInitGlobalLex:
 		r.globalLex.setOwnRaw(name, regs[w.A()], r.globalLex.getOwn(name).flags())
-	case bytecode.RColdDeclareModuleLex:
+	case bytecode.RDeclareModuleLex:
 		flags := propUninit | moduleBindingFlags(r.atoms.name(name))
 		if flag {
 			flags |= propWritable
 		}
 		cl.scope().setOwnRaw(name, uninitialized, flags)
-	case bytecode.RColdInitModuleLex:
+	case bytecode.RInitModuleLex:
 		if p := cl.scope().getOwn(name); p.ok() {
 			// Its attributes change, so its layout does.
 			p.setValue(regs[w.A()])
@@ -127,16 +127,16 @@ func (r *Runtime) regColdTop(f *frame, c *regCode, pc int, w bytecode.RInstr, re
 // regColdDispose is a using scope's cold operations, what the stack form's
 // new_dispose_capability, add_disposable and dispose do.
 func (r *Runtime) regColdDispose(w bytecode.RInstr, regs *[1 << 16]Value) error {
-	switch bytecode.RColdOp(w.X()) {
-	case bytecode.RColdNewDispose:
+	switch w.Op() {
+	case bytecode.RNewDispose:
 		o := newObjectExt(nil, ClassObject, objExtensible)
 		o.setData(&disposeCapability{})
 		regs[w.A()] = Obj(o)
 		return nil
-	case bytecode.RColdAddDisposable:
+	case bytecode.RAddDisposable:
 		c := regs[w.A()].Object().dataOf().(*disposeCapability)
 		return r.addDisposableResource(c, regs[w.B()], w.C() == 1)
-	case bytecode.RColdDispose:
+	case bytecode.RDispose:
 		c := regs[w.A()].Object().dataOf().(*disposeCapability)
 		// A throw leaving the scope is folded into what the disposal
 		// throws.

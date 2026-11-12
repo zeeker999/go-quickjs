@@ -136,7 +136,7 @@ func (r *Runtime) newRegGenerator(cl *closure, c *regCode, this Value, args []Va
 		g.rareOf().withScopes = append(w[:len(w):len(w)], ev)
 	}
 	if fn.Generator {
-		if w := regAt(c.code, 1); w.Op() == bytecode.RCold && bytecode.RColdOp(w.X()) == bytecode.RColdEndParams {
+		if w := regAt(c.code, 1); w.Op() == bytecode.REndParams {
 			// Parameters the window's copy has bound, end_params next to
 			// gen_entry: the body starts past it.
 			g.pc = 2
@@ -186,13 +186,13 @@ func (r *Runtime) regGenResume(g *generator, sent Value, mode resumeMode) (resum
 				start += 1 + int(regJumpOff(regAt(c.code, start)))
 			}
 		} else {
-			switch bytecode.RColdOp(w.X()) {
-			case bytecode.RColdAwait:
+			switch w.Op() {
+			case bytecode.RAwait:
 				g.vals[a] = sent
 				if mode == resumeThrow {
 					start = -start
 				}
-			case bytecode.RColdYieldStar:
+			case bytecode.RYieldStar:
 				g.vals[a] = sent
 				g.vals[a+1] = Int(int(mode))
 			}
@@ -483,10 +483,10 @@ func regMoveUps(ups []*upvalue, from, to []Value) {
 }
 
 // regColdGen is the cold operations of generators and async functions
-// (bytecode.RColdGenEntry and those after it).
+// (bytecode.RGenEntry and those after it).
 func (r *Runtime) regColdGen(f *frame, c *regCode, k *regKept, w bytecode.RInstr, regs *[1 << 16]Value) error {
-	switch op := bytecode.RColdOp(w.X()); op {
-	case bytecode.RColdGenEntry:
+	switch op := w.Op(); op {
+	case bytecode.RGenEntry:
 		// Run only by a frame's first run and by a throw injected: a
 		// resumption that goes on starts past it (regGenRun).
 		pc := f.savedSP
@@ -499,8 +499,8 @@ func (r *Runtime) regColdGen(f *frame, c *regCode, k *regKept, w bytecode.RInstr
 			return r.throw(regs[regAt(c.code, -pc-1).A()])
 		}
 		return nil
-	case bytecode.RColdEndParams, bytecode.RColdAwait, bytecode.RColdYieldStar:
-		if op == bytecode.RColdAwait && f.regKind == regFrameAwaitJob && !r.HasPendingJobs() {
+	case bytecode.REndParams, bytecode.RAwait, bytecode.RYieldStar:
+		if op == bytecode.RAwait && f.regKind == regFrameAwaitJob && !r.HasPendingJobs() {
 			// An await's job, the queue's last, would resume the frame
 			// with what a settled value settled to as the queue's next
 			// job: it goes on in place.
@@ -516,15 +516,15 @@ func (r *Runtime) regColdGen(f *frame, c *regCode, k *regKept, w bytecode.RInstr
 		sig := &r.treeSig
 		*sig = suspendSignal{
 			value:    Undefined,
-			await:    op == bytecode.RColdAwait,
-			delegate: op == bytecode.RColdYieldStar,
-			raw:      op == bytecode.RColdYieldStar && !c.fn.Async,
+			await:    op == bytecode.RAwait,
+			delegate: op == bytecode.RYieldStar,
+			raw:      op == bytecode.RYieldStar && !c.fn.Async,
 		}
-		if op != bytecode.RColdEndParams {
+		if op != bytecode.REndParams {
 			sig.value = regs[w.B()]
 		}
 		return sig
-	case bytecode.RColdIterResume:
+	case bytecode.RIterResume:
 		if !c.fn.Async && resumeMode(regs[w.C()+1].Number()) == resumeNext {
 			if st := cursorOf(regs[w.B()]); st != nil {
 				if g := r.regDelegate(st); g != nil {
@@ -541,7 +541,7 @@ func (r *Runtime) regColdGen(f *frame, c *regCode, k *regKept, w bytecode.RInstr
 			k.pc++
 		}
 		return nil
-	case bytecode.RColdIterUnpackDelegate:
+	case bytecode.RIterUnpackDelegate:
 		res := regs[w.B()]
 		if !res.IsObject() {
 			return r.throwTypeError("an iterator result must be an object")
@@ -562,9 +562,9 @@ func (r *Runtime) regColdGen(f *frame, c *regCode, k *regKept, w bytecode.RInstr
 			k.pc++
 		}
 		return nil
-	case bytecode.RColdForAwaitOfStart, bytecode.RColdAsyncIterNext:
+	case bytecode.RForAwaitOfStart, bytecode.RAsyncIterNext:
 		start := (*Runtime).startForAwaitOf
-		if op == bytecode.RColdAsyncIterNext {
+		if op == bytecode.RAsyncIterNext {
 			start = (*Runtime).asyncIterNext
 		}
 		v, err := start(r, regs[w.B()])
@@ -573,7 +573,7 @@ func (r *Runtime) regColdGen(f *frame, c *regCode, k *regKept, w bytecode.RInstr
 		}
 		regs[w.A()] = v
 		return nil
-	case bytecode.RColdIterResult:
+	case bytecode.RIterResult:
 		res := regs[w.B()]
 		if !res.IsObject() {
 			return r.throwTypeError("an iterator result must be an object")
@@ -589,18 +589,18 @@ func (r *Runtime) regColdGen(f *frame, c *regCode, k *regKept, w bytecode.RInstr
 		regs[w.A()] = v
 		k.pc++
 		return nil
-	case bytecode.RColdAsyncIterClose:
+	case bytecode.RAsyncIterClose:
 		v, ok, err := asyncIterClose(r, regs[w.B()], 0)
 		if ok {
 			regs[w.A()] = v
 			k.pc++
 		}
 		return err
-	case bytecode.RColdAsyncIterCheck:
+	case bytecode.RAsyncIterCheck:
 		_, _, err := asyncIterClose(r, regs[w.A()], 1)
 		return err
 	}
-	panic("register code: no cold operation " + bytecode.RColdOp(w.X()).String())
+	panic("register code: no cold operation " + w.Op().String())
 }
 
 // regSettled is what an await of v resumes with as its job's next, where

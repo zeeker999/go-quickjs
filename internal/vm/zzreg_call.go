@@ -885,7 +885,7 @@ func regTctx(r *Runtime, f *frame, cl *closure) *tctx {
 
 // regStackOp is the stack form's operator of each specialised operation,
 // whose slow path is the stack form's.
-var regStackOp = [128]bytecode.Op{
+var regStackOp = [256]bytecode.Op{
 	bytecode.RAndI: bytecode.OpBitAnd, bytecode.ROrI: bytecode.OpBitOr, bytecode.RXorI: bytecode.OpBitXor,
 	bytecode.RShlI: bytecode.OpShl, bytecode.RShrI: bytecode.OpShr, bytecode.RUShrI: bytecode.OpUShr,
 	bytecode.RBitAnd: bytecode.OpBitAnd, bytecode.RBitOr: bytecode.OpBitOr, bytecode.RBitXor: bytecode.OpBitXor,
@@ -896,7 +896,7 @@ var regStackOp = [128]bytecode.Op{
 // regJumpCmp is each compare-and-branch operation's comparison: its stack
 // form operator, whether it jumps when the comparison does not hold, and
 // whether its right operand is a register.
-var regJumpCmp = [128]struct {
+var regJumpCmp = [256]struct {
 	op              bytecode.Op
 	not, reg, upval bool
 }{

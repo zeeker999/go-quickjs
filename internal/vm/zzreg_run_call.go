@@ -480,7 +480,7 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 	var v Value
 	var err error
 	switch w.Op() {
-	case bytecode.RCold, bytecode.RGetPrivate, bytecode.RSetPrivate:
+	case bytecode.RGetPrivate, bytecode.RSetPrivate:
 		return Undefined, r.regColdSub(f, c, k, regs)
 	case bytecode.RGetGlobal:
 		v, err = r.regGetGlobal(f, cl, c, pc, w)
@@ -708,6 +708,9 @@ func (r *Runtime) regSlow(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value
 		// A === the loop's regStrictEq does not answer: strings, BigInts.
 		return Bool(regs[w.A()].StrictEquals(regs[w.B()]) == (w.Op() == bytecode.RJSEq)), nil
 	default:
+		if w.Op().Cold() {
+			return Undefined, r.regColdSub(f, c, k, regs)
+		}
 		panic("register code: no slow path for " + w.Op().String())
 	}
 	if err == nil {

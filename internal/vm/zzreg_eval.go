@@ -132,9 +132,9 @@ func (r *Runtime) evalLinked(caller *frame, cl *closure) (Value, error) {
 // with_set, with_resolve, with_get_under and with_put_under do them.
 func (r *Runtime) regColdWith(f *frame, c *regCode, pc int, w bytecode.RInstr, regs *[1 << 16]Value) error {
 	strict := f.cl.fn.Strict
-	op := bytecode.RColdOp(w.X())
+	op := w.Op()
 	switch op {
-	case bytecode.RColdWithPush:
+	case bytecode.RWithPush:
 		o, err := r.withObject(regs[w.A()])
 		if err != nil {
 			return err
@@ -143,17 +143,17 @@ func (r *Runtime) regColdWith(f *frame, c *regCode, pc int, w bytecode.RInstr, r
 		// array a closure made under an earlier with keeps (with_push).
 		f.withScopes = append(f.withScopes[:len(f.withScopes):len(f.withScopes)], o)
 		return nil
-	case bytecode.RColdWithPop:
+	case bytecode.RWithPop:
 		f.withScopes = f.withScopes[:len(f.withScopes)-1]
 		return nil
-	case bytecode.RColdWithRead:
+	case bytecode.RWithRead:
 		v, err := r.withRead(regs[w.B()].Object(), regName(f.cl, c, pc, w.C()), strict)
 		if err != nil {
 			return err
 		}
 		regs[w.A()] = v
 		return nil
-	case bytecode.RColdWithWrite:
+	case bytecode.RWithWrite:
 		return r.withWrite(regs[w.B()].Object(), regName(f.cl, c, pc, w.C()), regs[w.A()], strict)
 	}
 	name := regName(f.cl, c, pc, w.B())
@@ -163,19 +163,19 @@ func (r *Runtime) regColdWith(f *frame, c *regCode, pc int, w bytecode.RInstr, r
 	}
 	regs[regAuxAt(c, pc)] = Bool(found)
 	if !found {
-		if op == bytecode.RColdWithResolve {
+		if op == bytecode.RWithResolve {
 			regs[w.A()] = Undefined
 		}
 		return nil
 	}
 	switch op {
-	case bytecode.RColdWithGet, bytecode.RColdWithGetThis:
+	case bytecode.RWithGet, bytecode.RWithGetThis:
 		v, err := r.withRead(o, name, strict)
 		if err != nil {
 			return err
 		}
 		regs[w.A()] = v
-		if op == bytecode.RColdWithGetThis {
+		if op == bytecode.RWithGetThis {
 			// The bindings a direct eval declared are no object a script
 			// sees: a call through one has no receiver.
 			regs[w.A()+1] = Obj(o)
@@ -183,15 +183,15 @@ func (r *Runtime) regColdWith(f *frame, c *regCode, pc int, w bytecode.RInstr, r
 				regs[w.A()+1] = Undefined
 			}
 		}
-	case bytecode.RColdWithDelete:
+	case bytecode.RWithDelete:
 		ok, err := r.deleteProp(o, name, strict)
 		if err != nil {
 			return err
 		}
 		regs[w.A()] = Bool(ok)
-	case bytecode.RColdWithSet:
+	case bytecode.RWithSet:
 		return r.withWrite(o, name, regs[w.A()], strict)
-	case bytecode.RColdWithResolve:
+	case bytecode.RWithResolve:
 		regs[w.A()] = Obj(o)
 	}
 	return nil

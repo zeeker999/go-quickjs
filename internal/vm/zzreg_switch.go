@@ -190,19 +190,19 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 	pc := k.pc - 1
 	w := regAt(c.code, pc)
 	f.pc = c.src[pc] + 1
-	switch bytecode.RColdOp(w.X()) {
-	case bytecode.RColdNewRegExp:
+	switch w.Op() {
+	case bytecode.RNewRegExp:
 		v, err := r.newRegExpLiteral(regConst(f.cl.fn, c, w.BC()))
 		if err != nil {
 			return err
 		}
 		regs[w.A()] = v
 		return nil
-	case bytecode.RColdWrap:
+	case bytecode.RWrap:
 		return r.regColdWrap(c, k, w, regs)
-	case bytecode.RColdForOfStart, bytecode.RColdForInStart:
+	case bytecode.RForOfStart, bytecode.RForInStart:
 		start := (*Runtime).startForOf
-		if bytecode.RColdOp(w.X()) == bytecode.RColdForInStart {
+		if w.Op() == bytecode.RForInStart {
 			start = (*Runtime).startForIn
 		}
 		v, err := start(r, regs[w.B()])
@@ -211,9 +211,9 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		}
 		regs[w.A()] = v
 		return nil
-	case bytecode.RColdIterClose:
+	case bytecode.RIterClose:
 		return r.iterCloseNormal(regs[w.B()])
-	case bytecode.RColdIterCloseThrow:
+	case bytecode.RIterCloseThrow:
 		// As closeIteratorsIn closes a cursor an exception leaves: what
 		// its return method throws is dropped.
 		st := cursorOf(regs[w.B()])
@@ -223,96 +223,96 @@ func (r *Runtime) regColdSub(f *frame, c *regCode, k *regKept, regs *[1 << 16]Va
 		st.done = true
 		r.closeIterator(st.iter)
 		return nil
-	case bytecode.RColdCheckGlobalLex, bytecode.RColdCheckGlobalVar, bytecode.RColdDefineGlobalVar,
-		bytecode.RColdDeclareGlobalLex, bytecode.RColdDefineGlobalFunc, bytecode.RColdInitGlobalLex,
-		bytecode.RColdDeclareModuleLex, bytecode.RColdInitModuleLex:
+	case bytecode.RCheckGlobalLex, bytecode.RCheckGlobalVar, bytecode.RDefineGlobalVar,
+		bytecode.RDeclareGlobalLex, bytecode.RDefineGlobalFunc, bytecode.RInitGlobalLex,
+		bytecode.RDeclareModuleLex, bytecode.RInitModuleLex:
 		return r.regColdTop(f, c, pc, w, regs)
-	case bytecode.RColdIterStep, bytecode.RColdIterRest, bytecode.RColdCheckCoercible, bytecode.RColdToPropertyKey,
-		bytecode.RColdObjectRest, bytecode.RColdRestParam, bytecode.RColdToString, bytecode.RColdTemplateObject:
+	case bytecode.RIterStep, bytecode.RIterRest, bytecode.RCheckCoercible, bytecode.RToPropertyKey,
+		bytecode.RObjectRest, bytecode.RRestParam, bytecode.RToString, bytecode.RTemplateObject:
 		return r.regColdPattern(f, c, pc, w, regs)
-	case bytecode.RColdCopyDataProps, bytecode.RColdDefineGetter, bytecode.RColdDefineSetter,
-		bytecode.RColdDefineGetterIndex, bytecode.RColdDefineSetterIndex, bytecode.RColdDefineIndex,
-		bytecode.RColdSetFuncName, bytecode.RColdSetHomeObject, bytecode.RColdSetProtoOf,
-		bytecode.RColdArrayPush, bytecode.RColdArraySpread, bytecode.RColdCallSpread:
+	case bytecode.RCopyDataProps, bytecode.RDefineGetter, bytecode.RDefineSetter,
+		bytecode.RDefineGetterIndex, bytecode.RDefineSetterIndex, bytecode.RDefineIndex,
+		bytecode.RSetFuncName, bytecode.RSetHomeObject, bytecode.RSetProtoOf,
+		bytecode.RArrayPush, bytecode.RArraySpread, bytecode.RCallSpread:
 		return r.regColdObject(f, c, pc, w, regs)
-	case bytecode.RColdAssignConst:
+	case bytecode.RAssignConst:
 		// An assignment to a constant is a runtime error, not an early one.
 		return r.throwTypeError("assignment to constant variable %q", r.atoms.name(regName(f.cl, c, pc, w.B())))
-	case bytecode.RColdThrowRef:
+	case bytecode.RThrowRef:
 		return r.throwError(errReference, "%s", r.atoms.name(regName(f.cl, c, pc, w.B())))
-	case bytecode.RColdDebug:
+	case bytecode.RDebug:
 		return r.regDebug(f, c, pc, w, regs)
-	case bytecode.RColdMovFar:
+	case bytecode.RMovFar:
 		regs[w.A()] = *regFar(regs, w.BC())
 		return nil
-	case bytecode.RColdMovToFar:
+	case bytecode.RMovToFar:
 		*regFar(regs, w.BC()) = regs[w.A()]
 		return nil
-	case bytecode.RColdFarInit:
+	case bytecode.RFarInit:
 		for i, n := w.BC(), w.BC()+regAuxAt(c, pc); i < n; i++ {
 			*regFar(regs, i) = Undefined
 		}
 		return nil
-	case bytecode.RColdNewClass, bytecode.RColdSetFieldInit, bytecode.RColdDefineMethod,
-		bytecode.RColdClassGetter, bytecode.RColdClassSetter, bytecode.RColdClassGetterIndex,
-		bytecode.RColdClassSetterIndex, bytecode.RColdClassIndex, bytecode.RColdPrivateName,
-		bytecode.RColdNewPrivateMethods, bytecode.RColdAddPrivateMethod, bytecode.RColdAddPrivateGetter,
-		bytecode.RColdAddPrivateSetter, bytecode.RColdInstallPrivateMethods, bytecode.RColdDefinePrivate,
-		bytecode.RColdDefinePrivateMethod, bytecode.RColdDefinePrivateGetter, bytecode.RColdDefinePrivateSetter,
-		bytecode.RColdPrivateIn, bytecode.RColdSuperCall,
-		bytecode.RColdSuperForward, bytecode.RColdSuperSpread, bytecode.RColdSuperGet, bytecode.RColdSuperSet,
-		bytecode.RColdSuperBase, bytecode.RColdSuperGetIndex, bytecode.RColdSuperSetIndex, bytecode.RColdThis,
-		bytecode.RColdCheckThis, bytecode.RColdNewTarget, bytecode.RColdDerivedRet, bytecode.RColdDeleteSuper,
-		bytecode.RColdCloseRegs:
+	case bytecode.RNewClass, bytecode.RSetFieldInit, bytecode.RDefineMethod,
+		bytecode.RClassGetter, bytecode.RClassSetter, bytecode.RClassGetterIndex,
+		bytecode.RClassSetterIndex, bytecode.RClassIndex, bytecode.RPrivateName,
+		bytecode.RNewPrivateMethods, bytecode.RAddPrivateMethod, bytecode.RAddPrivateGetter,
+		bytecode.RAddPrivateSetter, bytecode.RInstallPrivateMethods, bytecode.RDefinePrivate,
+		bytecode.RDefinePrivateMethod, bytecode.RDefinePrivateGetter, bytecode.RDefinePrivateSetter,
+		bytecode.RPrivateIn, bytecode.RSuperCall,
+		bytecode.RSuperForward, bytecode.RSuperSpread, bytecode.RSuperGet, bytecode.RSuperSet,
+		bytecode.RSuperBase, bytecode.RSuperGetIndex, bytecode.RSuperSetIndex, bytecode.RThis,
+		bytecode.RCheckThis, bytecode.RNewTarget, bytecode.RDerivedRet, bytecode.RDeleteSuper,
+		bytecode.RCloseRegs:
 		return r.regColdClass(f, c, pc, w, regs)
-	case bytecode.RColdCheckGlobalRef:
+	case bytecode.RCheckGlobalRef:
 		found, err := r.regCheckGlobalRef(f, regName(f.cl, c, pc, w.B()), int(w.C()))
 		regs[w.A()] = Bool(found)
 		return err
-	case bytecode.RColdAssertResolved:
+	case bytecode.RAssertResolved:
 		if !regs[w.A()].Truthy() {
 			return r.throwReferenceError("%s is not defined", r.atoms.name(regName(f.cl, c, pc, w.B())))
 		}
 		return nil
-	case bytecode.RColdGetGlobalOpt:
+	case bytecode.RGetGlobalOpt:
 		v, err := r.regGlobalOpt(f, regName(f.cl, c, pc, w.B()))
 		regs[w.A()] = v
 		return err
-	case bytecode.RColdDeleteVar:
+	case bytecode.RDeleteVar:
 		v, err := deleteVar(r, f, f.cl, regName(f.cl, c, pc, w.B()))
 		regs[w.A()] = v
 		return err
-	case bytecode.RColdImport:
+	case bytecode.RImport:
 		options := Undefined
 		if w.C()&3 == 2 {
 			options = regs[w.B()+1]
 		}
 		regs[w.A()] = r.importCall(uint32(w.C()>>2), regs[w.B()], options)
 		return nil
-	case bytecode.RColdImportMeta:
+	case bytecode.RImportMeta:
 		regs[w.A()] = r.importMeta(f.cl.env)
 		return nil
-	case bytecode.RColdNewDispose, bytecode.RColdAddDisposable, bytecode.RColdDispose, bytecode.RColdDisposeStep:
+	case bytecode.RNewDispose, bytecode.RAddDisposable, bytecode.RDispose, bytecode.RDisposeStep:
 		return r.regColdDispose(w, regs)
-	case bytecode.RColdGenEntry, bytecode.RColdEndParams, bytecode.RColdAwait,
-		bytecode.RColdYieldStar, bytecode.RColdIterResume, bytecode.RColdIterUnpackDelegate,
-		bytecode.RColdForAwaitOfStart, bytecode.RColdAsyncIterNext, bytecode.RColdIterResult,
-		bytecode.RColdAsyncIterClose, bytecode.RColdAsyncIterCheck:
+	case bytecode.RGenEntry, bytecode.REndParams, bytecode.RAwait,
+		bytecode.RYieldStar, bytecode.RIterResume, bytecode.RIterUnpackDelegate,
+		bytecode.RForAwaitOfStart, bytecode.RAsyncIterNext, bytecode.RIterResult,
+		bytecode.RAsyncIterClose, bytecode.RAsyncIterCheck:
 		return r.regColdGen(f, c, k, w, regs)
-	case bytecode.RColdGetUpvalCheck, bytecode.RColdSetUpvalCheck:
+	case bytecode.RGetUpvalCheck, bytecode.RSetUpvalCheck:
 		return r.regColdNames(f, w, regs)
-	case bytecode.RColdDirectEval:
+	case bytecode.RDirectEval:
 		return r.regDirectEval(f, c, pc, w, regs)
-	case bytecode.RColdWithGet, bytecode.RColdWithGetThis, bytecode.RColdWithDelete, bytecode.RColdWithSet,
-		bytecode.RColdWithResolve, bytecode.RColdWithRead, bytecode.RColdWithWrite, bytecode.RColdWithPush,
-		bytecode.RColdWithPop:
+	case bytecode.RWithGet, bytecode.RWithGetThis, bytecode.RWithDelete, bytecode.RWithSet,
+		bytecode.RWithResolve, bytecode.RWithRead, bytecode.RWithWrite, bytecode.RWithPush,
+		bytecode.RWithPop:
 		return r.regColdWith(f, c, pc, w, regs)
 	}
 	// get_private and set_private, whose X is no sub-operation
 	// (bytecode.RPrivateX), which the loop's slow path sends here: so they
 	// move none of the hot block's code.
-	if w.Op() != bytecode.RCold {
+	if !w.Op().Cold() {
 		return r.regPrivate(f, c, k, regs)
 	}
-	panic("register code: no cold operation " + bytecode.RColdOp(w.X()).String())
+	panic("register code: no cold operation " + w.Op().String())
 }

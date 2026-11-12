@@ -368,9 +368,6 @@ func (r *Runtime) RegLowerCall(fnv Value, args []Value, budget uint64) RegLowerR
 		// Left for good: the frame as the state has it, runReg from its pc.
 		w := regAt(c.code, int(exit.State.PC))
 		res.Resumed = w.Op().String()
-		if w.Op() == bytecode.RCold {
-			res.Resumed = bytecode.RColdOp(w.X()).String()
-		}
 		if exit.Kind == ir.BudgetExit {
 			res.Resumed = "budget"
 		}

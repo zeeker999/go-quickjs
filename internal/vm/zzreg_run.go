@@ -122,7 +122,7 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 		var off int32
 		w := regAt(code, pc)
 		pc++
-		switch w.Op() & 127 {
+		switch w.Op() {
 		case bytecode.RNop:
 		case bytecode.RMove:
 			regs[w.A()] = regs[w.B()]
@@ -368,7 +368,7 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 			}
 			goto slow
 		case bytecode.RBin, bytecode.RUnary, bytecode.RDefineField, bytecode.RNewObject,
-			bytecode.RNewArray, bytecode.RCold, bytecode.RGetPrivate, bytecode.RSetPrivate,
+			bytecode.RNewArray, bytecode.RGetPrivate, bytecode.RSetPrivate,
 			bytecode.RAddIndex, bytecode.RAddIndexI:
 			// What the loop has no fast path of its own for, cold's
 			// operations, which may throw (regColdSub), and what runs
@@ -996,10 +996,8 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 		// new operation takes its value out of this list, or the switch does
 		// not compile: the values the translation reference's operations
 		// had, and 127, invalid's.
-		case 42:
-			goto invalid
-		case 127:
-			goto invalid
+		default:
+			goto slow
 		}
 		continue
 	taken:
@@ -1131,8 +1129,6 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 			}
 		}
 		goto slow
-	invalid:
-		panic("register code: invalid instruction")
 	fail:
 		// An exception: the instruction at kept.pc-1 threw failed, which
 		// a handler of the frame's may catch (regCatch).
