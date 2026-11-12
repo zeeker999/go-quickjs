@@ -3437,9 +3437,14 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	// is taken, so that what computing it takes is given back first
 	// (freeAbove) and the windows of a chain are not one above another:
 	// get_method_w puts it in the window.
-	recv := -1
+	recv, recvTemp := -1, false
 	if c, ok := n.Callee.(*ast.Member); ok && !c.Optional && !special(c) && !c.Computed && !g.inPlace(c.Object) {
+		m := g.top
 		recv = g.expr(c.Object, -1)
+		// A temporary of its own, or a binding's register that an
+		// assignment left it in -- (o = x).f() -- which the call's value
+		// must not take.
+		recvTemp = recv >= m
 	}
 	w := g.allocN(2 + argc)
 	op := bytecode.RCallW
@@ -3510,7 +3515,7 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	d := dst
 	if d < 0 {
 		d = w
-		if recv >= 0 {
+		if recvTemp {
 			// The receiver's register, below the window, which the window
 			// has its copy of: a chain's calls then each leave their value
 			// where the one before left its.
