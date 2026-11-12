@@ -1881,8 +1881,9 @@ func nativeEmit() ([]byte, nativeOffsets) {
 			a.Jcc(CondNE, isFalse)
 			a.Jmp(isTrue)
 			a.Bind(notObj)
+			tagged := a.NewLabel()
 			a.Op(Cmp, R9, R10, true)
-			a.Jcc(CondAE, g.exit)
+			a.Jcc(CondAE, tagged)
 			a.MovQToX(0, R9)
 			a.SSEOp(XorPD, 1, 1)
 			a.SSEOp(UcomiSD, 0, 1)
@@ -1902,8 +1903,65 @@ func nativeEmit() ([]byte, nativeOffsets) {
 				a.ShiftImm(Sar, RCX, 32, true)
 				g.taken(RCX)
 			}
+			// undefined and null are false, a string true unless empty;
+			// anything else is Go's.
+			a.Bind(tagged)
+			g.nullish(R9, isFalse)
+			a.MovRR(RCX, R9)
+			a.ShiftImm(Shr, RCX, 16, true)
+			a.ShiftImm(Shl, RCX, 16, true)
+			a.Op(Cmp, RCX, R10, true)
+			a.Jcc(CondNE, g.exit)
+			a.MovZX8(RCX, R9)
+			a.OpImm(Cmp, RCX, int32(KindString), false)
+			a.Jcc(CondNE, g.exit)
+			a.LoadIdx(R9, R12, RDX, 1, 8)
+			a.CmpMemImm8(R9, offStrLen, 0)
+			a.Jcc(CondE, isFalse)
+			a.Jmp(isTrue)
 		})
 	}
+	// == of the immediate SB: a number's, else Go's.
+	h(bytecode.RJEqI, func() {
+		ne := a.NewLabel()
+		g.decA(RDX)
+		g.num(0, RDX)
+		g.immSB(RCX)
+		a.Cvtsi2sd(1, RCX, true)
+		a.SSEOp(UcomiSD, 0, 1)
+		a.Jcc(CondP, ne)
+		a.Jcc(CondNE, ne)
+		g.immSC(RCX)
+		g.taken(RCX)
+		a.Bind(ne)
+		g.next()
+	})
+	// -x, +x and ~x of a number; anything else, and !x, Go's.
+	h(bytecode.RUnary, func() {
+		pos, not := a.NewLabel(), a.NewLabel()
+		g.decB(RSI)
+		g.num(0, RSI)
+		a.MovRR(R8, RAX)
+		a.ShiftImm(Shr, R8, 8, true)
+		a.MovZX8(R8, R8)
+		a.OpImm(Cmp, R8, int32(bytecode.OpPos), false)
+		a.Jcc(CondE, pos)
+		a.OpImm(Cmp, R8, int32(bytecode.OpBitNot), false)
+		a.Jcc(CondE, not)
+		a.OpImm(Cmp, R8, int32(bytecode.OpNeg), false)
+		a.Jcc(CondNE, g.exit)
+		a.MovImm(RCX, 1<<63)
+		a.Op(Xor, R9, RCX, true)
+		a.MovQToX(0, R9)
+		a.Bind(pos)
+		g.canon(0)
+		g.storeA(0)
+		a.Bind(not)
+		g.toInt32(R9, 0)
+		a.OpImm(Xor, R9, -1, false)
+		a.Cvtsi2sd(0, R9, false)
+		g.storeA(0)
+	})
 	for _, op := range []bytecode.ROp{bytecode.RJNull, bytecode.RJNotNull} {
 		jumpIfNull := op == bytecode.RJNull
 		h(op, func() {
@@ -2170,16 +2228,16 @@ func nativeEmit() ([]byte, nativeOffsets) {
 		a.StoreIdx(R12, RDX, 1, 0, R9)
 		g.next()
 	})
-	// An element write: a number over a number in a dense array, a number
+	// An element write: any value over a dense array's element, a number
 	// to a typed array.
 	setElem := func(miss Label) {
-		a.CmpMemImm8(RCX, 8, 0)
-		a.Jcc(CondNE, g.exit)
+		// Any value over a dense array's element, its pointer word by
+		// storeValue.
 		g.decC(R8)
-		g.noRef(R8)
 		a.LoadIdx(R9, R12, R8, 1, 0)
-		a.Store(RCX, 0, R9)
-		g.next()
+		a.LoadIdx(R8, R12, R8, 1, 8)
+		a.MovRR(RAX, RCX)
+		g.storeValue()
 		a.Bind(miss)
 		g.decC(R8)
 		g.num(1, R8)

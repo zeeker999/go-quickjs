@@ -792,3 +792,26 @@ func TestRegNativeMore2(t *testing.T) {
 		}
 	}
 }
+
+// nativeMore3Src is code for truthiness, == of an immediate, the unary
+// operators and element writes of any value.
+const nativeMore3Src = `
+	var vals = [0, -0, 1, 1.5, NaN, Infinity, "", "1", "a", true, false, null, undefined, {}, [], Symbol.iterator, 0n, 1n, function () {}], out = []
+	function truth() { var s = ""; for (var v of vals) { s += v ? 1 : 0; if (!v) s += "n"; while (v) { s += "w"; v = 0 } } return s }
+	function eqi() { var s = ""; for (var v of vals) { try { s += (v == 1 ? 1 : 0) + "" + (v != 0 ? 1 : 0) } catch (e) { s += "e" } } return s }
+	function un() { var r = []; for (var v of vals) { try { r.push(String(-v), String(+v), String(~v), String(!v)) } catch (e) { r.push("e") } } return r.join() }
+	function un2() { var r = [], xs = [0, -0, 1.5, NaN, -Infinity, 2 ** 31, 2 ** 32 + 0.5, -(2 ** 53), 1e300]; for (var x of xs) r.push(1 / -x, +x, ~x, -(-x)); return r.join() }
+	function elems() { var a = [1, 2, 3, 4], o = {}, r = []; for (var i = 0; i < 40; i++) { a[i & 3] = i & 1 ? o : "s" + i; a[0] = null; a[1] = a } r.push(a.length, typeof a[2], a[1] === a, a[0]); var f = Object.freeze([1, 2]); try { f[0] = 5 } catch (e) {} r.push(f[0]); return r.join() }
+	out.push(truth(), eqi(), un(), un2(), elems())
+	out.join("\n")`
+
+// TestRegNativeMore3 runs nativeMore3Src as TestRegNativeMore runs its.
+func TestRegNativeMore3(t *testing.T) {
+	want := nativeRunSrc(t, nativeMore3Src, false)
+	for _, marking := range []bool{false, true} {
+		nativeMarking(t, marking)
+		if got := nativeRunSrc(t, nativeMore3Src, true); got != want {
+			t.Errorf("native (marking %v):\n%s\nwant\n%s", marking, got, want)
+		}
+	}
+}
