@@ -344,6 +344,9 @@ type Runtime struct {
 	// regRestart is the register code a register frame was given in place
 	// by a tail call (regTailInPlace), which runReg continues with.
 	regRestart *regCode
+	// regFree is the register frames' states not in use, a list by their
+	// next (regEnter): a frame's handlers are given its state.
+	regFree *regState
 	// jitFields is the optional native tier's state, empty in builds
 	// without it. It comes after everything the interpreter reads, so that
 	// a build with the tier moves none of their offsets, and before the last

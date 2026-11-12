@@ -13,7 +13,7 @@ import (
 // what only a tail call runs moves none of the call path's code. regPlan,
 // which refuses a treeCall to a function with a tail call, is here too:
 // with the call path grown by the tail calls' checks of its errors, 192
-// bytes, its 192 bytes leave regSlow, regIn, regNative and runReg where
+// bytes, its 192 bytes leave the slow path, regIn, regNative and runReg where
 // they were before tail calls (weak_map_set, has_own_method_hit and
 // array_in 5 to 9% slower at every placement there).
 

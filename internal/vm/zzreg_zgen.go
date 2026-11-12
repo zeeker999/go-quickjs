@@ -482,125 +482,143 @@ func regMoveUps(ups []*upvalue, from, to []Value) {
 	}
 }
 
-// regColdGen is the cold operations of generators and async functions
-// (bytecode.RGenEntry and those after it).
-func (r *Runtime) regColdGen(f *frame, c *regCode, k *regKept, w bytecode.RInstr, regs *[1 << 16]Value) error {
-	switch op := w.Op(); op {
-	case bytecode.RGenEntry:
-		// Run only by a frame's first run and by a throw injected: a
-		// resumption that goes on starts past it (regGenRun).
-		pc := f.savedSP
-		f.savedSP = 0
-		if pc < 0 {
-			// A throw injected at the suspension at -pc-1, its value in
-			// the suspension's register.
-			k.pc = -pc
-			f.pc = c.src[-pc-1] + 1
-			return r.throw(regs[regAt(c.code, -pc-1).A()])
-		}
-		return nil
-	case bytecode.REndParams, bytecode.RAwait, bytecode.RYieldStar:
-		if op == bytecode.RAwait && f.regKind == regFrameAwaitJob && !r.HasPendingJobs() {
-			// An await's job, the queue's last, would resume the frame
-			// with what a settled value settled to as the queue's next
-			// job: it goes on in place.
-			if v, ok := r.regSettled(regs[w.B()]); ok {
-				if err := r.checkInterrupt(); err != nil {
-					return err
-				}
-				regs[w.A()] = v
-				return nil
-			}
-		}
-		f.savedSP = k.pc
-		sig := &r.treeSig
-		*sig = suspendSignal{
-			value:    Undefined,
-			await:    op == bytecode.RAwait,
-			delegate: op == bytecode.RYieldStar,
-			raw:      op == bytecode.RYieldStar && !c.fn.Async,
-		}
-		if op != bytecode.REndParams {
-			sig.value = regs[w.B()]
-		}
-		return sig
-	case bytecode.RIterResume:
-		if !c.fn.Async && resumeMode(regs[w.C()+1].Number()) == resumeNext {
-			if st := cursorOf(regs[w.B()]); st != nil {
-				if g := r.regDelegate(st); g != nil {
-					return r.regDelegateNext(f, k, w, regs, st, g)
-				}
-			}
-		}
-		res, done, err := r.iterResume(regs[w.B()], regs[w.C()], resumeMode(regs[w.C()+1].Number()), c.fn.Async)
-		if err != nil {
-			return err
-		}
-		regs[w.A()] = res
-		if !done {
-			k.pc++
-		}
-		return nil
-	case bytecode.RIterUnpackDelegate:
-		res := regs[w.B()]
-		if !res.IsObject() {
-			return r.throwTypeError("an iterator result must be an object")
-		}
-		done, err := r.getValueProp(res, atomDone)
-		if err != nil {
-			return err
-		}
-		if done.Truthy() || c.fn.Async {
-			v, err := r.getValueProp(res, atomValue)
-			if err != nil {
+// regGenEntry is gen_entry.
+func (r *Runtime) regGenEntry(f *frame, c *regCode, k *regKept, w bytecode.RInstr, regs *[1 << 16]Value) error {
+	// Run only by a frame's first run and by a throw injected: a
+	// resumption that goes on starts past it (regGenRun).
+	pc := f.savedSP
+	f.savedSP = 0
+	if pc < 0 {
+		// A throw injected at the suspension at -pc-1, its value in
+		// the suspension's register.
+		k.pc = -pc
+		f.pc = c.src[-pc-1] + 1
+		return r.throw(regs[regAt(c.code, -pc-1).A()])
+	}
+	return nil
+}
+
+// regSuspend is end_params, await, yield_star.
+func (r *Runtime) regSuspend(f *frame, c *regCode, k *regKept, w bytecode.RInstr, regs *[1 << 16]Value) error {
+	op := w.Op()
+	if op == bytecode.RAwait && f.regKind == regFrameAwaitJob && !r.HasPendingJobs() {
+		// An await's job, the queue's last, would resume the frame
+		// with what a settled value settled to as the queue's next
+		// job: it goes on in place.
+		if v, ok := r.regSettled(regs[w.B()]); ok {
+			if err := r.checkInterrupt(); err != nil {
 				return err
 			}
-			res = v
+			regs[w.A()] = v
+			return nil
 		}
-		regs[w.A()] = res
-		if !done.Truthy() {
-			k.pc++
+	}
+	f.savedSP = k.pc
+	sig := &r.treeSig
+	*sig = suspendSignal{
+		value:    Undefined,
+		await:    op == bytecode.RAwait,
+		delegate: op == bytecode.RYieldStar,
+		raw:      op == bytecode.RYieldStar && !c.fn.Async,
+	}
+	if op != bytecode.REndParams {
+		sig.value = regs[w.B()]
+	}
+	return sig
+}
+
+// regIterResume is iter_resume.
+func (r *Runtime) regIterResume(f *frame, c *regCode, k *regKept, w bytecode.RInstr, regs *[1 << 16]Value) error {
+	if !c.fn.Async && resumeMode(regs[w.C()+1].Number()) == resumeNext {
+		if st := cursorOf(regs[w.B()]); st != nil {
+			if g := r.regDelegate(st); g != nil {
+				return r.regDelegateNext(f, k, w, regs, st, g)
+			}
 		}
-		return nil
-	case bytecode.RForAwaitOfStart, bytecode.RAsyncIterNext:
-		start := (*Runtime).startForAwaitOf
-		if op == bytecode.RAsyncIterNext {
-			start = (*Runtime).asyncIterNext
-		}
-		v, err := start(r, regs[w.B()])
-		if err != nil {
-			return err
-		}
-		regs[w.A()] = v
-		return nil
-	case bytecode.RIterResult:
-		res := regs[w.B()]
-		if !res.IsObject() {
-			return r.throwTypeError("an iterator result must be an object")
-		}
-		done, err := r.getValueProp(res, atomDone)
-		if err != nil || done.Truthy() {
-			return err
-		}
+	}
+	res, done, err := r.iterResume(regs[w.B()], regs[w.C()], resumeMode(regs[w.C()+1].Number()), c.fn.Async)
+	if err != nil {
+		return err
+	}
+	regs[w.A()] = res
+	if !done {
+		k.pc++
+	}
+	return nil
+}
+
+// regIterUnpackDelegate is iter_unpack_delegate.
+func (r *Runtime) regIterUnpackDelegate(f *frame, c *regCode, k *regKept, w bytecode.RInstr, regs *[1 << 16]Value) error {
+	res := regs[w.B()]
+	if !res.IsObject() {
+		return r.throwTypeError("an iterator result must be an object")
+	}
+	done, err := r.getValueProp(res, atomDone)
+	if err != nil {
+		return err
+	}
+	if done.Truthy() || c.fn.Async {
 		v, err := r.getValueProp(res, atomValue)
 		if err != nil {
 			return err
 		}
-		regs[w.A()] = v
+		res = v
+	}
+	regs[w.A()] = res
+	if !done.Truthy() {
 		k.pc++
-		return nil
-	case bytecode.RAsyncIterClose:
-		v, ok, err := asyncIterClose(r, regs[w.B()], 0)
-		if ok {
-			regs[w.A()] = v
-			k.pc++
-		}
-		return err
-	case bytecode.RAsyncIterCheck:
-		_, _, err := asyncIterClose(r, regs[w.A()], 1)
+	}
+	return nil
+}
+
+// regAsyncStart is for_await_of_start, async_iter_next.
+func (r *Runtime) regAsyncStart(f *frame, c *regCode, k *regKept, w bytecode.RInstr, regs *[1 << 16]Value) error {
+	op := w.Op()
+	start := (*Runtime).startForAwaitOf
+	if op == bytecode.RAsyncIterNext {
+		start = (*Runtime).asyncIterNext
+	}
+	v, err := start(r, regs[w.B()])
+	if err != nil {
 		return err
 	}
-	panic("register code: no cold operation " + w.Op().String())
+	regs[w.A()] = v
+	return nil
+}
+
+// regIterResult is iter_result.
+func (r *Runtime) regIterResult(f *frame, c *regCode, k *regKept, w bytecode.RInstr, regs *[1 << 16]Value) error {
+	res := regs[w.B()]
+	if !res.IsObject() {
+		return r.throwTypeError("an iterator result must be an object")
+	}
+	done, err := r.getValueProp(res, atomDone)
+	if err != nil || done.Truthy() {
+		return err
+	}
+	v, err := r.getValueProp(res, atomValue)
+	if err != nil {
+		return err
+	}
+	regs[w.A()] = v
+	k.pc++
+	return nil
+}
+
+// regAsyncIterClose is async_iter_close.
+func (r *Runtime) regAsyncIterClose(f *frame, c *regCode, k *regKept, w bytecode.RInstr, regs *[1 << 16]Value) error {
+	v, ok, err := asyncIterClose(r, regs[w.B()], 0)
+	if ok {
+		regs[w.A()] = v
+		k.pc++
+	}
+	return err
+}
+
+// regAsyncIterCheck is async_iter_check.
+func (r *Runtime) regAsyncIterCheck(f *frame, c *regCode, k *regKept, w bytecode.RInstr, regs *[1 << 16]Value) error {
+	_, _, err := asyncIterClose(r, regs[w.A()], 1)
+	return err
 }
 
 // regSettled is what an await of v resumes with as its job's next, where
