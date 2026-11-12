@@ -496,3 +496,106 @@ func TestRegNativeConcurrent(t *testing.T) {
 		}
 	}
 }
+
+// TestRegNativeOpMix, with QJS_NATIVE_MIX naming micro-benchmarks
+// (comma-separated, each name:n), logs each one's operation mix: the
+// instructions dispatched an operation by their operation, run by the Go
+// table, and how many of them the native handlers left to Go. It is how
+// a test slower natively shows which native paths it lacks.
+func TestRegNativeOpMix(t *testing.T) {
+	only := os.Getenv("QJS_NATIVE_MIX")
+	if only == "" {
+		t.Skip("QJS_NATIVE_MIX names no test")
+	}
+	var defs string
+	for _, f := range []string{"../v8bench/microbench.js", "../v8bench/microbench_extra.js"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := strings.ReplaceAll(string(b), "\r\n", "\n")
+		if i := strings.LastIndex(s, "\nif (typeof scriptArgs === \"undefined\")"); i >= 0 {
+			s = s[:i+1]
+		}
+		defs += s
+	}
+	compiler.SetRegisterForm(true)
+	defFn := compileForTest(t, "if (typeof console === 'undefined') globalThis.console = { log: function () {} };\n"+defs)
+	compiler.SetRegisterForm(false)
+	SetRegTier(true)
+	was := regNativeOn
+	defer func() { SetRegTier(false); regNativeOn = was }()
+	nativeCounting(t)
+	var counts [256]int64
+	orig := regTable
+	defer func() { regTable = orig }()
+	for _, spec := range strings.Split(only, ",") {
+		name, n, _ := strings.Cut(spec, ":")
+		if n == "" {
+			n = "1000"
+		}
+		compiler.SetRegisterForm(true)
+		call := compileForTest(t, fmt.Sprintf("String(%s(%s))", name, n))
+		compiler.SetRegisterForm(false)
+		var before, after [256]int64
+		run := func(native bool) int64 {
+			regNativeOn = native
+			r := New(Config{})
+			defer r.Close()
+			if _, err := r.Run(defFn); err != nil {
+				t.Fatal(err)
+			}
+			counts = [256]int64{}
+			before = nativeExitOps()
+			v, err := r.Run(call)
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			after = nativeExitOps()
+			var ops int64
+			fmt.Sscan(v.String().Go(), &ops)
+			return max(ops, 1)
+		}
+		for i := range regTable {
+			h, op := orig[i], i
+			regTable[i] = func(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+				counts[op]++
+				return h(regs, w, pc, st)
+			}
+		}
+		ops := run(false)
+		regTable = orig
+		mix := counts
+		run(true)
+		var total, exited int64
+		type row struct {
+			op       bytecode.ROp
+			n, exits int64
+		}
+		var rows []row
+		for op := range mix {
+			total += mix[op]
+			e := after[op] - before[op]
+			exited += e
+			if mix[op] > 0 || e > 0 {
+				rows = append(rows, row{bytecode.ROp(op), mix[op], e})
+			}
+		}
+		for i := range rows {
+			for j := i + 1; j < len(rows); j++ {
+				if rows[j].n > rows[i].n {
+					rows[i], rows[j] = rows[j], rows[i]
+				}
+			}
+		}
+		var parts []string
+		for _, r := range rows {
+			if r.n*50 < total && r.exits*50 < total {
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("%s %.2f/%.2f", r.op, float64(r.n)/float64(ops), float64(r.exits)/float64(ops)))
+		}
+		t.Logf("%-24s %7.2f instructions an op, %6.2f exited (%4.1f%%): %s", name,
+			float64(total)/float64(ops), float64(exited)/float64(ops), 100*float64(exited)/float64(max(total, 1)), strings.Join(parts, ", "))
+	}
+}
