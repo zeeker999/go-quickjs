@@ -14,7 +14,7 @@ import (
 // kept the pc past its instruction first, by st.at or st.kept.pc =: the
 // tail finds the handler of the instruction at st.kept.pc-1, and a pc left
 // from an instruction before would find another's or none. A call that
-// reads the kept pc (regCallW, regElemMiss) is given it the same way.
+// reads the kept pc (rhCallW, regElemMiss) is given it the same way.
 func TestRegThrowsKeepPC(t *testing.T) {
 	files, err := filepath.Glob("zzreg_table*.go")
 	if err != nil || len(files) == 0 {

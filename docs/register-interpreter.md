@@ -381,270 +381,162 @@ of names, constants and caches are bounds-checked.
 
 ## The loop
 
-The interpreter is a loop of its own, `runReg`, in files that sort after
-the package's other files (`zzreg_*.go`): `executeAt` and the other hot
-functions keep their code and their addresses, and the closures move by
-the size of what is added, which the placements measure. Its techniques are
-the ones Go allows:
+The interpreter is a small fixed loop, `runReg`, over a table of
+handlers, a Go function an operation (`zzreg_table.go`,
+`zzreg_table_cold.go`), in files that sort after the package's other
+files (`zzreg_*.go`): `executeAt` and the other hot functions keep their
+code and their addresses.
 
-- **The register window is unchecked.** The loop holds a pointer to an
-  array of 65,536 values at the frame's first register, so `regs[w.A()]`
-  has no bounds check. A verifier proves, for every function, that every
-  register an instruction names is below the frame's count, and the frame
-  is given that many slots before it runs.
-- **The code is read unchecked,** at a pc the verifier proves is in the
-  code: every jump lands on an instruction, and the last instruction does
-  not run on past the end.
-- **The switch is a jump table with no range check,** the opcode masked and
-  every value of the mask a case: Go makes a jump table only of a switch
-  whose cases are dense, and checks its range unless the value is provably
-  inside it.
-- **Nothing of an instruction is live across a call.** A case that calls out
-  keeps the pc in a memory record and reads it, and its instruction, back
-  afterwards, so that Go has no reason to save them at every dispatch.
-  Slow paths are out of line and re-read their instruction from the code.
-- **The loop is big, and calls no helper above cost 20.** Go's inliner
-  calls a function of 5,000 or more IR nodes big, and that is all being
-  big does (Go 1.24.13's and 1.27.3's `inl.go`): the cost of a callee it
-  inlines into it drops from 80 to 20 (40 for a closure), and PGO's hot
-  calls are refused. So the loop calls only helpers of cost 20 or less --
-  `IsNumber` 12, `Object` 15, `mkTag` 15, `regTagged` 13 (`isTag` of bits
-  read once), `regIsInt32` (a number's round trip through int32, a
-  bool), `RInstr`'s fields 3 to 6 -- and writes the rest out where it
-  uses them: ToBoolean (`regTruth`, 69) in `jmp_f` and `jmp_t`, the
-  prototype holder (`propCache.holder`, 65) in the property reads,
-  `IsNullish` (35), `arrayLength` (52), typeof's kind (`Kind` 30,
-  `regTypeOf` 29), `regJumpOff` (28), the typed element read (`regTypedAt`
-  80, `regTypedLoad` 62). It is at 5,438 nodes, and a helper above 20 is
-  what would cost it: `TestRegLoopCallsNoHelper` fails on one, every call
-  the loop's source makes of a function Go can inline being inlined at
-  the call. `internal/cmd/bigfunc` measures it: `-func runReg` prints the
-  count, `-cases 40` each case clause of 40 nodes or more, and the
-  callees above cost 20 the loop calls; `-force runReg` compiles it as big
-  whatever its size and `-small` as not big, to compare what `-m` says it
-  inlines and its code, and `-costs` prints each inlinable function's
-  cost, which `-m=2` runs out of memory printing. No written-out case kept
-  Go's code for the inlined helper -- the shape of an inlined call's
-  parameters and its inline marks steer it -- and the base had
-  materialised `regInt32`'s ok and tested it: 3,444 instructions became
-  3,338, the frame 0x1b8 bytes 0x1a0, and over two placements
-  `loop_int32` was 8.6% faster, `int_arith` 3.2%, the closure tests 3 to
-  6%. The placements' filler in the loop (`padRegInner`) is two tests,
-  of cost 20: three cost 31, and were calls in the big loop. What the
-  budget was spent on while it bound:
-  - **The compare-and-branches share their taken tail.** A case is a
-    fast path and a `goto`: to `slow` (the slow path, `regSlow`),
-    `cmpSlow`, `typed`, `jump`, or `taken`, a compare-and-branch taken,
-    whose offset `SC` the tail reads. The shared `taken` took 167 nodes out
-    of the 29 compare-and-branches' `off = w.SC()` and 49 instructions out
-    of the loop.
-  - **The slow calls are not shared.** `set_global`, `set_index`'s miss
-    and the operations with no fast path each keep their own call of
-    `regSlow`. Sent to the one `slow` tail, they saved 45 nodes and made
-    `int_arith`, `float_arith`, `loop_sum` and `loop_props` 7 to 11% slower
-    at every placement, the inner ones (`regInner`, `regTail`) included,
-    with every instruction on those loops' paths the same: the loop's
-    blocks laid out otherwise. A tail that stores the pc (`slow`'s
-    `kept.pc = pc`) is reached after a call only with the pc read back
-    from `kept`: set_index's `goto slow` after `regSetMiss` without it made
-    the pc live across the call, Go saved it at every dispatch, and
-    `crypto_am3` and a dozen loops were 8 to 11% slower at every
-    placement. `TestRegDispatchKeepsNoPC` disassembles the loop and fails
-    if its dispatch stores to the stack.
-  - **A case costs what its source says.** The compare-and-branches are
-    about 53 nodes each, the bitwise operators 73 to 77, a fused element
-    read or update 100 to 128, `append` (a call of `regAppend` with the pc
-    kept) about 20.
-  - **A helper that returns a bool with values does not fold.** A
-    `regNums(a, b) (x, y float64, ok bool)` in the compares saved 96 nodes
-    and added 40 instructions: its `ok` is materialised and tested where
-    the written-out `&&` branches. A saving is checked with `hotdiff
-    -funcs '(*Runtime).runReg'` against the build before it.
-  - At d931057d the loop was at 4,981, 19 below the limit; with the
-    shared taken tail and `append` and `str_freeze` as cases of their own
-    it is at 4,875, 125 below.
-  - **A case no suite runs per turn leaves the loop whole.** Counted over
-    Octane, the V8 suite, AWFY and the micro-benchmarks, `add_index` and
-    `add_index_imm` (`a[i] += v`, `a[i] += 1`; 126 and 112 nodes) ran
-    957 times in all: they are labels of the slow path's case, which
-    `regSlow` answers (`regAddIndex`), their opcode values unchanged.
-    The loop is at 4,629, 371 below. What stays was counted too:
-    `add_index_k` and `jtypeof` run only in micro-benchmarks made for
-    them, `get_index_pre` is 0.66% of the V8 suite's instructions.
-  - **A typed array's element is read in the loop.** Once the dense
-    element has missed, `get_index`'s and `get_index_imm`'s shared miss
-    label (`typed`) reads a typed array's element as native code does:
-    the view's data pointer and length, cached while its epoch is the
-    runtime's (`cacheView`), `regTypedAt` (no BigInt kind), then
-    `regTypedLoad` for every kind but Float16Array, a float64 the loop
-    makes a Value with `regNum`. Each helper is within Go's inlining
-    budget of 80 (in one, with the Value made inside, it was 125); the
-    loop spends 97 nodes. A store is `regSetMiss`'s, one call, by
-    `regTypedStore`: a float kind's number, an integer kind's (clamped
-    aside) ToInt32 of a number below 2^63. Any other kind, key or view
-    goes on to `regElemMiss`, which now reads the BigInt kinds too.
-    Measured over placements, each placement of the code mattered more
-    than its instructions: the read in `get_index`'s case laid the
-    loop's blocks out otherwise (a call's tail before the dispatch), and
-    `empty_down_loop`, `prop_update`, `array_for` and eight more were 5
-    to 14% slower at every placement, Mandreel 11%; the store in
-    `set_index`'s case, before `regSetMiss`, made the appends
-    (`array_prop_create`, `array_index_append`, `array_new_fill_down`)
-    6 to 9% slower; a class test put first there, the empty loops and
-    nine more 6 to 12%.
-- **The hot code is one block.** `zzreg_run.go` holds `runReg`, and
-  `zzreg_run_call.go` after it, declared in this order, the call and its
-  return, `regCallW` and
-  `regEnterW`; what a call runs out of line, `regDirect` (a built-in's
-  callback), `regNative`, `regLeafRun`, `regCloseUpvalues`; and what an
-  iteration runs out of line, `regSlow` and its operators, `regElemMiss`,
-  `regSetMiss`, `regBackEdge`, `regAppend`, `regCharCodeAt`,
-  `regIterNext`, `regLit`, `regMarkedCall`, `regApplyArgs`. Go lays a package's functions
-  out in file order, so the distances between them -- which decide what
-  shares the op cache's sets -- depend on their own sizes alone, and the
-  layout lock's lever Q (`zzreg_ru_layoutpad.go`, the anchor `runReg`)
-  puts the block at a fixed address modulo 4 KB whatever changes before
-  it; the placements' pad before it (`zzreg_ru_pad.go`) moves it whole.
-  The block is three files: `zzreg_run.go`, `runReg`;
-  `zzreg_run_call.go`, `regCallW` to `regSlow`; and `zzreg_runs.go`,
-  `regSlow`'s operators on, `regBinImm` first. Lever W
-  (`zzreg_run_a_layoutpad.go`, the anchor `regCallW`) keeps the calls
-  where they are against `runReg` whatever the loop's size does, and
-  lever P (`zzreg_run_layoutpad.go`, the anchor `regBinImm`) the third
-  file, so that a case added to `regSlow` or to `runReg` moves nothing
-  after it. W's target is where `regCallW` was at 679d54b3: when the
-  loop's helpers were written out (it became 512 bytes shorter) the
-  calls moved 512 bytes back against it, and `arguments_read` and
-  `arguments_strict_read` -- a call and three `args_index` slow paths a
-  turn -- were 8.8% and 7.5% slower at every placement; the base with
-  3,584 bytes of pad after `runReg` (512 back modulo 4 KB, its code
-  unchanged) was 8.4% and 11.4% slower at three of four. With W, both
-  are level (+1.2%, +0.5%). Its target is 64 bytes past where
-  `regBinImm` was before the split, a pad of a few stores: at the old
-  place, a pad of 4 KB, every function and variable after it the same
-  modulo 4 KB, `loop_arith` was 9.2% and `loop_int32` 5.2% slower at
-  every placement, with `runReg` -- all those loops run -- at the same
-  address and the same code. The 64 bytes measured level.
-  It stays where the register files were, after the JIT's, not first in
-  the package: there it moves none of the old tiers' code, whose anchors
-  all come before it, and only the A pad would change to take the
-  built-ins back behind 80 KB of it -- and the files after it (`zzz_*`)
-  are pinned by nothing either way.
-  Before, the block was spread over `zzreg_call.go`, `zzreg_run.go` and
-  `zzreg_switch.go`, with the cold `zzreg_report.go` between: a change to
-  a miss path moved `regSlow`, `regIn` and `regNative` against `runReg`,
-  and the tail calls' 4.8 KB in `zzreg_call.go` made `forward_loop` 11%
-  slower at every placement with no instruction of its path changed. New
-  hot code -- what a call, a return or a loop's turn runs -- goes into
-  the block, after what is there; cold code -- miss paths, `regCold`,
-  set-up, the report, the tail calls (`zzzy_regtail.go`) -- never does.
-  The set-up and the entries from a tree are in `zzreg_entry.go`. An
-  unrelated function added before the block, with the pads regenerated,
-  leaves every function of the block where it was.
-- **The hot cases come first, and a golden file holds where they are.**
-  With lever Q pinning `runReg`'s start, a case's address modulo 4 KB --
-  its op-cache set -- is decided by the code before it in the loop alone,
-  and Go lays the cases out in the switch's source order (the dispatch
-  table's entries rise with the cases). So the hot cases are first, in
-  their order, and every other case is after them: an edit to a case that
-  is not hot moves no hot case. `internal/vm/layoutcases.txt` names the
-  hot ones and holds each one's offset from `runReg`'s start in the lock's
-  four configurations, which `internal/cmd/layoutpad` reads from the
-  build's dispatch table (the table the `LEAQ` before the dispatch's
-  indirect jump loads, read from the PE or ELF image); `TestLayoutLock`
-  fails, naming the case and by how much, where one has moved. A
-  deliberate edit to a hot case rewrites the offsets with `go generate
-  ./internal/vm` and is timed; a new operation is a cold sub-operation
-  (`RColdOp`) or a case after the hot ones.
-  The hot set is measured, not chosen: dispatches by opcode, counted in
-  register mode over the V8 suite, Octane and AWFY (37 benchmarks, each
-  weighted alike) and each micro-benchmark on its own. The fewest
-  operations covering 95% of the suites' dispatches are 55 (`get_prop`
-  15.8%, `add` 5.2%, `move` 5.1%, `call_method_w` 4.5%, `mul` 3.8%,
-  `get_index` 3.4% ...); every operation 5% or more of a micro-benchmark's
-  adds 43 more, 98 in all, 98.3% of the suites' dispatches. The 18 cases
-  of no hot operation went after them: `load_this`, `check_ref`, `bit_or`,
-  `shl`, `ushr`, `jnlt_upval`, `jnle_upval`, `jle_imm`, `jnle`,
-  `jnle_imm`, `jge`, `jnge`, `jnge_imm`, `jeq`/`jeq_imm`,
-  `jnull`/`jnotnull`, `jseq_imm`, `throw`, `key_of_base`. `nop` stays
-  first, where the placements put their filler, and 42 and 127 last with
-  `invalid`. Over four placements against e41b0755 the reorder was level:
-  the micro-benchmarks 0.999 by the geometric mean, none 3% slower at every
-  placement, the V8 suite +0.2%.
-  This replaces the levers inside the loop designed before -- anchors on
-  the hot cases' entries, filler in never-run cases. In the loop a case can
-  start at any byte, and an exact offset modulo 4 KB takes some 1,000
-  stores of 7 and 10 bytes per lever, written into `runReg` itself: about
-  2,000 lines and up to 14 KB of dead code in the loop, its IR nodes
-  doubled, and the hot cases spread over more lines and sets, the cost the
-  lock exists to avoid, against a failure that moving the cold cases out
-  of the way prevents (`private_field`'s case among the hot ones moved
-  `crypto_am3`'s loop).
-- **No constants in registers.** What Go's loop-invariant pass would take
-  out of the loop is read from a variable (above).
-- **The loop holds only the hot operations.** Every case added moves the
-  code of every case after it, and the placements, which move the loop as
-  a whole, cannot vary that: each case is a lottery for unrelated tests.
-  An operation that does not run per turn of a hot loop -- a switch's
-  table, `typeof` as a value, an empty literal, what sets a frame up --
-  is a label of the one case that calls `regCold`, which switches on the
-  operation again. Measured: the switch operations as cases of their own
-  made `prop_update` 8.9%, `call_fib` 8.7% and six other tests 5 to 7%
-  slower at every placement; behind `regCold`, all are level and the
-  switches keep their gain.
-- **Opcode values are for per-iteration hot steps.** The 7-bit space holds
-  128 values, each a case. An operation that runs per turn of a hot loop
-  takes a direct value of its own, out of the free list (`runReg`'s
-  `goto invalid` case, which lists them; a value taken out of it and left
-  there does not compile). Every other operation -- stage 2's handlers
-  and iterator steps but the hot ones, a literal's set-up, a rare
-  conversion -- is `cold`, one value, its sub-operation (`RColdOp`) in X,
-  dispatched a second time (`regColdSub`). `cold` is a value of the slow
-  path's case, whose call of `regSlow` already returns an error: with an
-  error check added to `regCold`'s case instead, `empty_loop` was 7.5%
-  and `string_build1` 6.4% slower at every placement, and without it
-  level (the loop's blocks laid out otherwise, every instruction of those
-  loops the same). A value freed goes to the end of the free
-  list, and no hot operation is renumbered: its case's code would move.
-  At the removal of the translation reference the free values were 24,
-  29, 36, 37, 40, 41, 42 and 43, and 127 is `invalid`'s; `iter_next`
-  took 24, `regexp_lit` 29, the tail calls 36 and 37, and `get_private`
-  and `set_private`, a class's reads and writes of its private members,
-  40 and 41. They have no code in the loop: their values are labels of
-  the slow path's case, `regSlow` passes them with `cold` to
-  `regColdSub`, whose switch on X passes `RPrivateX` (0xff, no
-  sub-operation) on at its end to `regPrivate`, in `zzreg_class.go`,
-  before the block. That is a dispatch fewer than as `cold` operations
-  (`regColdClass`), and moves nothing of the block: `private_field` went
-  from 60.6 to 57.0 ns (the tree 24.1). As cases of their own -- a call
-  each, as `append` is, inline or after `tail` -- it was 38.5 ns, but
-  the 60 nodes changed `runReg`'s spill slots: a slot at 0x80 went to
-  0x78, every instruction using it three bytes shorter, the code from
-  the 765th instruction on moved, and `crypto_am3` was 8.6% slower at
-  every placement. A case in `regSlow` grew it by 64 bytes and moved
-  the block after it; a switch on the operation at `regColdSub`'s head
-  with the functions in the block moved `regColdWrap`, and
-  `bigint64_fnv1a` was 5.8% slower at every placement.
-  `yield`, a loop over a generator's step, took 43. Its case
-  made Go allocate the loop's registers otherwise (100 instructions
-  more, a frame 72 bytes smaller): against the loop before it,
-  `typed_u64_read` and `method_moves` were 6 and 8.5% slower at every
-  placement of four, and nothing else 3% at all four; with yield sent
-  to the slow path's case instead, the loop of the same allocation as
-  before, 13 tests were 3.8 to 11.7% slower than with its case at every
-  placement -- `array_read`, `global_read`, `int_arith`, `float_arith`,
-  `string_length`, `loop_sum`, `loop_locals`, `loop_elements`, the
-  generators' -- and the case stays.
+```go
+st := r.regEnter(f, c)
+regs, code, pc := st.regs, c.code, start
+for {
+	w := regAt(code, pc)
+	if pc = regTable[w.Op()](regs, w, pc, st); pc < 0 {
+		if pc == regDone {
+			break
+		}
+		pc = ^pc
+		w = regAt(code, pc)
+		if pc = regSlowTable[w.Op()](regs, w, pc, st); pc < 0 {
+			break
+		}
+	}
+}
+```
 
-What remains is Go's: a register store of a `Value` is a write-barrier
-check, the loop's instruction word is still saved at the dispatch where a
-case's register pressure needs it, and every case ends in a jump back to
-the one indirect branch. A case that would call with the pc live -- a
-jump's truthiness or `===` of strings, a throw's `pc-1` -- answers what
-needs no call inline and leaves the rest to the compare's slow path, or
-passes the loop's pc rather than `pc-1`, which Go would keep from before
-the increment: with none left, the dispatch stores no pc. `am3` runs at
-3.6 ns an instruction against the comparison engine's 3.3.
+Every operation costs the same to reach: one load of its table entry and
+one indirect call, whatever it is and however often a program runs it.
+What is hot is decided by the program, not the interpreter, so no
+operation is privileged with a place in the loop and none pays a second
+dispatch. The loop is 30 instructions, `runReg` with the state it takes
+and gives back 800 bytes and 143 IR nodes, and an operation added does
+not change it; `TestRegLoopIsSmall` holds it below 864 bytes and fails
+where the loop stores to the stack between one dispatch and the next.
+
+**The handlers' protocol.** A handler is given the frame's registers, the
+instruction, its pc and the frame's state (`regState`), in the registers
+Go's ABI passes them in, and returns the pc to go on at:
+
+- `pc+1`, or a jump's target, where it has done the instruction;
+- `^pc` where its fast path has not -- an operand of another kind, a
+  cache that missed, a number to store into a register that holds a
+  pointer, a back edge that spent the interrupt budget: the loop then runs
+  the operation's slow function from `regSlowTable`, which does the whole
+  instruction as the stack form does (`rsGetProp`, `rsAdd`, `rsCompare`
+  ...), and never returns `^pc` itself;
+- `regDone` (`math.MinInt`) once the frame has returned, or has thrown
+  what none of its handlers catches (`st.err`), a generator's suspension
+  and a tail call's restart among them, which no handler of the frame's
+  takes. What `ret` returns the loop reads from the instruction it ended
+  at, so that `ret`'s handler stores nothing and is a leaf; that made
+  `call_fib` and `call_mutual` 3 to 4% faster.
+
+An operation of no fast path -- a call, a closure, an operation of no hot
+loop -- has its whole self as its handler. A call's is the call path
+itself, `rhCallW`, the first function after the loop: as a handler that
+called `regCallW` it was one frame more a call, and `call_mutual` and
+`method_call` were 17% slower. The 106 operations of no hot
+loop -- declarations, classes, destructuring, generators, with, eval
+(`ROp.Cold`) -- are handlers of their own in the same table, each calling
+its operation's function (`regNewClass`, `regIterStep`, `regSuspend`,
+...): `cold` and its sub-operations in X are gone, and with them the
+switches that dispatched them a second time (`regColdSub` and the group
+functions it called).
+
+**Leaf handlers.** A fast path that misses gives back `^pc` rather than
+calling its slow function, and a number is stored by its `num` word alone
+where the register's `ref` is nil -- a store of no pointer, which needs no
+write barrier. So the arithmetic, the bitwise operators, `inc` and `dec`,
+the loads of a constant that is no pointer, the compare-and-branches and
+the jumps are leaves: no frame, no stack check, no call. A store of a
+pointer is a write-barrier check, and makes a handler that stores one --
+`move`, `get_prop`, `load_const` -- a function with a frame as before.
+A temporary register that held an object and is given a number is the
+slow function's, which stores the number with the barrier before it
+tries the operation's conversions: register allocation reuses
+temporaries across kinds, and with the slow functions converting every
+such store Box2D was 20%, zlib 13% and `bigint64_search` 33% slower.
+
+**Errors and positions.** A handler or slow function that can throw or
+run code keeps the pc past its instruction in `st.kept` first, by
+`st.at(pc)`, which also sets the frame's pc to the stack form's
+instruction, what a stack trace and an error's position read; the calls
+that read the kept pc (`regCallW`, `regElemMiss`, an iterator's step) are
+given it the same way. The fail tail, `st.fail`, finds the handler of the
+instruction at `st.kept.pc-1` (`regCatch`) and goes on there, or ends the
+frame with the error. `TestRegThrowsKeepPC` reads the handlers' source
+and fails where one goes to the tail, or hands a call the kept pc, before
+it has kept it. The loop keeps no pc of its own across a handler: the pc
+is an argument and the result, and what it keeps -- the registers, the
+code, the state -- is saved once before the loop and read back after each
+call.
+
+**The interrupt.** A jump back counts down the runtime's budget in its
+handler (`regJump`); where the budget is spent it gives back `^pc`, and
+its slow function makes the check (`regJumpSlow`, `regBackEdge`), the
+condition evaluated again, which has no side effect.
+
+**State per runtime.** A frame's state is a `regState` from the runtime's
+free list, taken as the frame starts and given back, its pointers
+cleared, as it ends (`regEnter`, `regLeave`): separate runtimes on
+separate goroutines share none, and a frame that a Go panic leaves keeps
+its own, which the collector takes.
+
+**The window and the code are unchecked.** A handler indexes the frame's
+registers through a pointer to an array of 65,536 values at its first
+register, so `regs[w.A()]` has no bounds check: the verifier proves, for
+every function, that every register an instruction names is below the
+frame's count, and the frame is given that many slots before it runs. The
+code is read at a pc the verifier proves is in it: every jump lands on an
+instruction, the last does not run on past the end, and every operation
+an instruction holds has a handler (`ROpCount` bounds them; the table's
+other entries panic).
+
+**Why a table.** A measured bake-off of dispatchers chose it. `runReg` as a
+switch failed every criterion:
+
+- it varied 10 to 27% across code placements, against 1 to 5% for a
+  table of handlers;
+- rebuilding it with ten unrelated operations added moved kernels by up
+  to 27% (`loop_locals`, `prop_in`), against 3% at most for the table;
+- an operation of no hot loop paid 5 to 8 ns for its second dispatch;
+- it was 19.9 KB and about 4,630 IR nodes, grew with every case, and
+  needed a layout lock of its own, a golden file of its cases' offsets,
+  levers and an IR node budget to be kept where it measured best.
+
+The table's handlers measured 4 to 7% slower than the switch on the hot
+operations of kernels (`crypto_am3` 3.59 against 3.28 ns an instruction,
+`loop_locals` 2.48 against 1.84, `call_fib` 8.3 against 5.9) and 10 to
+15% faster on what the switch dispatched twice (`typeof_value` 4.6
+against 5.3, `prop_in` 4.6 against 5.4, `bigint64_arith` 8.8 against
+10.1). The best Go form measured was this one: the arguments in
+registers, the next pc returned, and the leaf number stores, worth 3% on
+`crypto_am3` (3.48). A state in a struct read by the handler, the next
+instruction or handler returned, and handlers that called the next
+instruction's handler themselves were all slower; `//go:nosplit` was worth
+about 1%. The table is also the portable form of what machine code does
+on amd64 and arm64: generated native threaded handlers over it, which
+leave to its Go handlers what they do not do themselves. The suites over
+eight placements against the switch: TIMING.
+
+**Removed with the switch.** The golden file of the hot cases' offsets
+(`layoutcases.txt`) and `layoutpad`'s reader of the dispatch table; the
+levers P and K inside the old loop's block (`regBinImm`, `regDeadCall`),
+which held its slow path and cold's dispatch where they were; the free
+opcode values and the 7-bit mask the switch's jump table needed; and the
+IR node budget (`TestRegLoopCallsNoHelper`), which kept the switch below
+Go's big-function size, past which it inlines only callees of cost 20.
+The layout lock keeps the levers Q, which anchors `runReg`, and W, which
+anchors the call path after it (`rhCallW`, where `regCallW` was); the
+handlers follow. The
+placements' filler in the loop's cases (`padRegInner`) applies only to a
+loop that has them.
+
+What remains is Go's: every operation ends in a return to the loop and its
+one indirect call, a handler that stores a pointer has a frame and a
+write-barrier check, and a Go call passes no more than the four arguments
+in registers, so the state's fields are loads.
 
 ## Frames and calls
 

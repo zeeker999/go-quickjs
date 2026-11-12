@@ -101,17 +101,20 @@ type regCode struct {
 // The loop is the same few instructions for every operation: the
 // instruction read, its handler called through regTable, and the pc it
 // returns gone on at (zzreg_table.go). A handler's ^pc runs the
-// operation's slow function from regSlowTable; regDone leaves, with the
-// state's value or error. Nothing of the loop is kept across a handler but
-// the registers, the code and the state, which the call saves.
+// operation's slow function from regSlowTable; regDone leaves: with the
+// state's error, or with what the return it ended at returns, which the
+// loop reads itself, so that ret's handler stores nothing. Nothing of the
+// loop is kept across a handler but the registers, the code and the
+// state, which the call saves.
 func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 	if r.stopped != nil {
 		return Undefined, r.stopped
 	}
 	st := r.regEnter(f, c)
 	regs, code, pc := st.regs, c.code, start
+	var w bytecode.RInstr
 	for {
-		w := regAt(code, pc)
+		w = regAt(code, pc)
 		if pc = regTable[w.Op()](regs, w, pc, st); pc < 0 {
 			if pc == regDone {
 				break
@@ -123,14 +126,20 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 			}
 		}
 	}
-	v, err := st.ret, st.err
+	err := st.err
 	r.regLeave(st)
-	return v, err
+	if err != nil {
+		return Undefined, err
+	}
+	if w.Op() == bytecode.RRet {
+		return regs[w.A()], nil
+	}
+	return Undefined, nil
 }
 
-// regDone is the pc a handler returns once its frame has returned, or has
-// thrown what none of its handlers catches: runReg leaves with the state's
-// ret and err.
+// regDone is the pc a handler returns once its frame has returned, by ret
+// or ret_undef, or has thrown what none of its handlers catches, the
+// state's err.
 const regDone = math.MinInt
 
 // regState is what a register frame's handlers are given besides its
@@ -151,7 +160,6 @@ type regState struct {
 	// call that goes on elsewhere -- a switch, an iterator's step, a
 	// generator's resumption -- sets.
 	kept regKept
-	ret  Value
 	err  error
 	next *regState
 }
@@ -173,7 +181,7 @@ func (r *Runtime) regEnter(f *frame, c *regCode) *regState {
 // regLeave gives st back, holding nothing of its frame's that the
 // collector would keep: its registers' window is the runtime's stack.
 func (r *Runtime) regLeave(st *regState) {
-	st.f, st.c, st.cl, st.ret, st.err = nil, nil, nil, Value{}, nil
+	st.f, st.c, st.cl, st.err = nil, nil, nil, nil
 	st.next = r.regFree
 	r.regFree = st
 }
@@ -214,6 +222,6 @@ func (st *regState) fail(err error) int {
 	if pc := st.r.regCatch(st.f, st.c, &st.kept, st.regs, err); pc >= 0 {
 		return pc
 	}
-	st.ret, st.err = Undefined, err
+	st.err = err
 	return regDone
 }

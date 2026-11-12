@@ -613,7 +613,7 @@ const (
 	// frame, at the call site.
 	regLeafCode
 	// regLeafArg returns its parameter leafArg, and regLeafConst the
-	// constant leafVal, undefined for nothing: regCallW answers them from
+	// constant leafVal, undefined for nothing: rhCallW answers them from
 	// the window and the code.
 	regLeafArg
 	regLeafConst

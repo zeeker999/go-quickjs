@@ -759,7 +759,7 @@ type closureCode struct {
 	// reg is the template's register code, once a call has found it has
 	// some, for the register interpreter's calls (see zzreg_call.go).
 	reg *regCode
-	// regCalls are the register code's call caches (regCallW), made at its
+	// regCalls are the register code's call caches (rhCallW), made at its
 	// first call.
 	regCalls []regCallCache
 	// regEpochs is the global epoch each global site of the register code

@@ -18,8 +18,9 @@ import (
 //     pointer, a back edge that spent the interrupt budget -- for runReg to
 //     run the operation's slow function, from regSlowTable, which does
 //     the whole instruction as the stack form does;
-//   - regDone where the frame has returned, or has thrown what no handler
-//     of its own catches, with st.ret or st.err.
+//   - regDone where the frame has returned, by ret or ret_undef, whose
+//     value runReg reads from the instruction, or has thrown what no
+//     handler of its own catches, with st.err.
 //
 // A handler whose fast path makes no call and stores no pointer -- a number
 // stored by its num word alone, into a register whose ref is nil -- is a
@@ -72,18 +73,18 @@ func init() {
 		{bytecode.RDec, rhDec, rsDec},
 		{bytecode.RAddI, rhAddI, rsAddI},
 		{bytecode.RSubI, rhSubI, rsSubI},
-		{bytecode.RAndI, rhAndI, rsBinImm},
-		{bytecode.ROrI, rhOrI, rsBinImm},
-		{bytecode.RXorI, rhXorI, rsBinImm},
-		{bytecode.RShlI, rhShlI, rsBinImm},
-		{bytecode.RShrI, rhShrI, rsBinImm},
-		{bytecode.RUShrI, rhUShrI, rsBinImm},
-		{bytecode.RBitAnd, rhBitAnd, rsBitwise},
-		{bytecode.RBitOr, rhBitOr, rsBitwise},
-		{bytecode.RBitXor, rhBitXor, rsBitwise},
-		{bytecode.RShl, rhShl, rsBitwise},
-		{bytecode.RShr, rhShr, rsBitwise},
-		{bytecode.RUShr, rhUShr, rsBitwise},
+		{bytecode.RAndI, rhAndI, rsAndI},
+		{bytecode.ROrI, rhOrI, rsOrI},
+		{bytecode.RXorI, rhXorI, rsXorI},
+		{bytecode.RShlI, rhShlI, rsShlI},
+		{bytecode.RShrI, rhShrI, rsShrI},
+		{bytecode.RUShrI, rhUShrI, rsUShrI},
+		{bytecode.RBitAnd, rhBitAnd, rsBitAnd},
+		{bytecode.RBitOr, rhBitOr, rsBitOr},
+		{bytecode.RBitXor, rhBitXor, rsBitXor},
+		{bytecode.RShl, rhShl, rsShl},
+		{bytecode.RShr, rhShr, rsShr},
+		{bytecode.RUShr, rhUShr, rsUShr},
 		{bytecode.RPostInc, rhPostInc, rsPostStep},
 		{bytecode.RPostDec, rhPostDec, rsPostStep},
 		{bytecode.RGetLength, rhGetLength, rsGetLength},
@@ -756,6 +757,10 @@ func rhAdd(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
 }
 
 func rsAdd(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a, b := regs[w.B()], regs[w.C()]; a.IsNumber() && b.IsNumber() {
+		regs[w.A()] = regNum(a.Number() + b.Number())
+		return pc + 1
+	}
 	st.at(pc)
 	v, err := st.r.add(regs[w.B()], regs[w.C()])
 	return st.put(regs, w, v, err)
@@ -772,6 +777,10 @@ func rhSub(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
 }
 
 func rsSub(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a, b := regs[w.B()], regs[w.C()]; a.IsNumber() && b.IsNumber() {
+		regs[w.A()] = regNum(a.Number() - b.Number())
+		return pc + 1
+	}
 	st.at(pc)
 	v, err := st.r.arith(bytecode.OpSub, regs[w.B()], regs[w.C()])
 	return st.put(regs, w, v, err)
@@ -788,6 +797,10 @@ func rhMul(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
 }
 
 func rsMul(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a, b := regs[w.B()], regs[w.C()]; a.IsNumber() && b.IsNumber() {
+		regs[w.A()] = regNum(a.Number() * b.Number())
+		return pc + 1
+	}
 	st.at(pc)
 	v, err := st.r.arith(bytecode.OpMul, regs[w.B()], regs[w.C()])
 	return st.put(regs, w, v, err)
@@ -804,6 +817,10 @@ func rhInc(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
 }
 
 func rsInc(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a := regs[w.B()]; a.IsNumber() {
+		regs[w.A()] = regNum(a.Number() + 1)
+		return pc + 1
+	}
 	st.at(pc)
 	v, err := st.r.regStep(regs[w.B()], 1)
 	return st.put(regs, w, v, err)
@@ -820,6 +837,10 @@ func rhDec(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
 }
 
 func rsDec(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a := regs[w.B()]; a.IsNumber() {
+		regs[w.A()] = regNum(a.Number() - 1)
+		return pc + 1
+	}
 	st.at(pc)
 	v, err := st.r.regStep(regs[w.B()], -1)
 	return st.put(regs, w, v, err)
@@ -836,6 +857,10 @@ func rhAddI(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
 }
 
 func rsAddI(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a := regs[w.B()]; a.IsNumber() {
+		regs[w.A()] = regNum(a.Number() + float64(w.SC()))
+		return pc + 1
+	}
 	st.at(pc)
 	v, err := st.r.regBinImm(bytecode.OpAdd, regs[w.B()], w.SC())
 	return st.put(regs, w, v, err)
@@ -852,6 +877,10 @@ func rhSubI(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
 }
 
 func rsSubI(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a := regs[w.B()]; a.IsNumber() {
+		regs[w.A()] = regNum(a.Number() - float64(w.SC()))
+		return pc + 1
+	}
 	st.at(pc)
 	v, err := st.r.regBinImm(bytecode.OpSub, regs[w.B()], w.SC())
 	return st.put(regs, w, v, err)
@@ -918,6 +947,117 @@ func rhUShrI(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int 
 		}
 	}
 	return ^pc
+}
+
+// The bitwise operators' slow functions: an operand that is an int32,
+// stored by a register that held a pointer, and the conversion otherwise.
+
+func rsAndI(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+		x := int32(a.num)
+		regs[w.A()] = Int32(x & w.SC())
+		return pc + 1
+	}
+	return rsBinImm(regs, w, pc, st)
+}
+
+func rsOrI(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+		x := int32(a.num)
+		regs[w.A()] = Int32(x | w.SC())
+		return pc + 1
+	}
+	return rsBinImm(regs, w, pc, st)
+}
+
+func rsXorI(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+		x := int32(a.num)
+		regs[w.A()] = Int32(x ^ w.SC())
+		return pc + 1
+	}
+	return rsBinImm(regs, w, pc, st)
+}
+
+func rsShlI(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+		x := int32(a.num)
+		regs[w.A()] = Int32(x << (uint32(w.SC()) & 31))
+		return pc + 1
+	}
+	return rsBinImm(regs, w, pc, st)
+}
+
+func rsShrI(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+		x := int32(a.num)
+		regs[w.A()] = Int32(x >> (uint32(w.SC()) & 31))
+		return pc + 1
+	}
+	return rsBinImm(regs, w, pc, st)
+}
+
+func rsUShrI(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a := regs[w.B()]; a.IsNumber() && regIsInt32(a.num) {
+		x := int32(a.num)
+		regs[w.A()] = Uint32(uint32(x) >> (uint32(w.SC()) & 31))
+		return pc + 1
+	}
+	return rsBinImm(regs, w, pc, st)
+}
+
+func rsBitAnd(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a, b := regs[w.B()], regs[w.C()]; a.IsNumber() && regIsInt32(a.num) && b.IsNumber() && regIsInt32(b.num) {
+		x, y := int32(a.num), int32(b.num)
+		regs[w.A()] = Int32(x & y)
+		return pc + 1
+	}
+	return rsBitwise(regs, w, pc, st)
+}
+
+func rsBitOr(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a, b := regs[w.B()], regs[w.C()]; a.IsNumber() && regIsInt32(a.num) && b.IsNumber() && regIsInt32(b.num) {
+		x, y := int32(a.num), int32(b.num)
+		regs[w.A()] = Int32(x | y)
+		return pc + 1
+	}
+	return rsBitwise(regs, w, pc, st)
+}
+
+func rsBitXor(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a, b := regs[w.B()], regs[w.C()]; a.IsNumber() && regIsInt32(a.num) && b.IsNumber() && regIsInt32(b.num) {
+		x, y := int32(a.num), int32(b.num)
+		regs[w.A()] = Int32(x ^ y)
+		return pc + 1
+	}
+	return rsBitwise(regs, w, pc, st)
+}
+
+func rsShl(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a, b := regs[w.B()], regs[w.C()]; a.IsNumber() && regIsInt32(a.num) && b.IsNumber() && regIsInt32(b.num) {
+		x, y := int32(a.num), int32(b.num)
+		regs[w.A()] = Int32(x << (uint32(y) & 31))
+		return pc + 1
+	}
+	return rsBitwise(regs, w, pc, st)
+}
+
+func rsShr(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a, b := regs[w.B()], regs[w.C()]; a.IsNumber() && regIsInt32(a.num) && b.IsNumber() && regIsInt32(b.num) {
+		x, y := int32(a.num), int32(b.num)
+		regs[w.A()] = Int32(x >> (uint32(y) & 31))
+		return pc + 1
+	}
+	return rsBitwise(regs, w, pc, st)
+}
+
+func rsUShr(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a, b := regs[w.B()], regs[w.C()]; a.IsNumber() && regIsInt32(a.num) && b.IsNumber() && regIsInt32(b.num) {
+		x, y := int32(a.num), int32(b.num)
+		regs[w.A()] = Uint32(uint32(x) >> (uint32(y) & 31))
+		return pc + 1
+	}
+	return rsBitwise(regs, w, pc, st)
 }
 
 func rsBinImm(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
@@ -1020,6 +1160,15 @@ func rhPostDec(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) in
 }
 
 func rsPostStep(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if a := regs[w.B()]; a.IsNumber() {
+		d := 1.0
+		if w.Op() == bytecode.RPostDec {
+			d = -1
+		}
+		regs[w.A()] = a
+		regs[w.B()] = regNum(a.Number() + d)
+		return pc + 1
+	}
 	r := st.r
 	st.at(pc)
 	old, err := r.toNumeric(regs[w.B()])
@@ -1060,6 +1209,15 @@ func rhGetLength(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) 
 }
 
 func rsGetLength(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if o := regs[w.B()]; o.IsObject() && o.object().class == ClassArray {
+		obj := o.object()
+		n := uint32(len(obj.elemsOf()))
+		if obj.flags&objHasSparseElements != 0 && obj.arrayExt().arrayLen > n {
+			n = obj.arrayExt().arrayLen
+		}
+		regs[w.A()] = Uint32(n)
+		return pc + 1
+	}
 	r := st.r
 	st.at(pc)
 	if o := regs[w.B()]; o.IsString() {
@@ -1655,25 +1813,27 @@ func rsJTypeof(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) in
 
 // The operations of no fast path, each its handler and the whole of it.
 
+// rhRet and rhRetUndef end the frame: runReg reads what ret returns from
+// the instruction it ended at.
 func rhRet(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
-	st.ret = regs[w.A()]
 	return regDone
 }
 
 func rhRetUndef(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
-	st.ret = Undefined
 	return regDone
 }
 
-func rhCallW(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
-	st.kept.pc = pc + 1
-	return st.done(st.r.regCallW(st.f, st.c, &st.kept, st.wb))
-}
-
-// rhCallWT is tail_call_w and tail_call_method_w.
+// rhCallWT is tail_call_w and tail_call_method_w: once the stack is deep,
+// the frame given to the callee in place or given up (regTailCallW), and
+// call_w's call otherwise.
 func rhCallWT(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
-	st.kept.pc = pc + 1
-	return st.done(st.r.regTailCallW(st.f, st.c, &st.kept, st.wb))
+	if r := st.r; r.frameDepth >= tailCallDepth {
+		st.kept.pc = pc + 1
+		if err, ok := r.regTailCallW(st.f, st.c, pc, w, st.wb); ok {
+			return st.fail(err)
+		}
+	}
+	return rhCallW(regs, w, pc, st)
 }
 
 func rhThrow(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {

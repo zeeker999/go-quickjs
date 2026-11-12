@@ -3,14 +3,14 @@ package vm
 import "github.com/go-quickjs/go-quickjs/internal/bytecode"
 
 // The register interpreter's calls and slow path, after its loop
-// (zzreg_run.go): regCallW first, which the layout lock's pad W
+// (zzreg_run.go): rhCallW first, which the layout lock's pad W
 // (zzreg_run_a_layoutpad.go) keeps where it was against runReg whatever
 // the loop's size does (docs/optimizing.md, "The layout lock").
 
-// regCallW is call_w and call_method_w: a call whose callee's frame
-// starts at the caller's window, R[A], its parameters the arguments where
-// they lie. It writes the call's value to R[B] itself, so that the loop
-// keeps nothing of the instruction across the call.
+// rhCallW is call_w's and call_method_w's handler: a call whose callee's
+// frame starts at the caller's window, R[A], its parameters the arguments
+// where they lie. It writes the call's value to R[B] itself, and is the
+// call path's first function, called from the loop with nothing between.
 //
 // A callee the site called last, of the form's own layout and with nothing
 // of its surroundings to establish but a this its cache holds, is entered
@@ -19,9 +19,9 @@ import "github.com/go-quickjs/go-quickjs/internal/bytecode"
 // loops. What the frame needs is read from the callee's register code,
 // whose facts are the function's, precomputed. Anything else is
 // regCallMiss's.
-func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
-	pc := k.pc - 1
-	w := regAt(c.code, pc)
+func rhCallW(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	r, f, c, wb := st.r, st.f, st.c, st.wb
+	st.kept.pc = pc + 1
 	base := wb + int(w.A())
 	win := regWindow(r.stack, base)
 	if calls := f.cl.regCalls; uint(w.C()) < uint(len(calls)) {
@@ -41,12 +41,12 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 						}
 					}
 					regWindow(r.stack, wb)[w.B()] = v
-					return nil
+					return pc + 1
 				}
 				if e.rc.leaf == regLeafCode {
 					if v, ok := r.regLeafRun(e.cl, e.rc, base, int(w.X())); ok {
 						regWindow(r.stack, wb)[w.B()] = v
-						return nil
+						return pc + 1
 					}
 					if e.cl.pureMiss >= pureMissLimit {
 						// A body that keeps meeting what it cannot run
@@ -54,7 +54,7 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 						e.kind &^= regCallOut | regCallLeaf
 					}
 					f.pc = regSrc(c, pc) + 1
-					return r.regCallMiss(f, c, w, wb, pc)
+					return st.done(r.regCallMiss(f, c, w, wb, pc))
 				}
 				// The this is given to the body, not written to the
 				// window: a miss writes it (regCallSlow).
@@ -77,22 +77,22 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 					}
 					if ok {
 						regWindow(r.stack, wb)[w.B()] = v
-						return nil
+						return pc + 1
 					}
 				}
 				f.pc = regSrc(c, pc) + 1
-				return r.regCallMiss(f, c, w, wb, pc)
+				return st.done(r.regCallMiss(f, c, w, wb, pc))
 			}
 			f.pc = regSrc(c, pc) + 1
 			if e.kind == regCallNative {
-				return r.regNative(e.callee, w, wb)
+				return st.done(r.regNative(e.callee, w, wb))
 			}
 			if e.kind == regCallMarked {
 				v, err := r.regMarkedCall(f, c, base, int(w.X()), pc, c.rc.Marks[pc], regAuxAt(c, pc))
 				if err == nil {
 					regWindow(r.stack, wb)[w.B()] = v
 				}
-				return err
+				return st.done(err)
 			}
 			ok := e.kind == regCallEnter
 			if e.kind == regCallThis {
@@ -106,11 +106,11 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 				argc := int(w.X())
 				top := base + int(rc.numRegs)
 				if top > len(r.stack) || r.frameDepth >= r.maxFrames {
-					return r.throwRangeError("maximum call stack size exceeded")
+					return st.done(r.throwRangeError("maximum call stack size exceeded"))
 				}
 				if r.interruptCounter--; r.interruptCounter <= 0 {
 					if err := r.checkInterruptNow(); err != nil {
-						return err
+						return st.done(err)
 					}
 				}
 				saved := r.stackTop
@@ -162,15 +162,15 @@ func (r *Runtime) regCallW(f *frame, c *regCode, k *regKept, wb int) error {
 				r.frameDepth--
 				r.stackTop = saved
 				if err != nil {
-					return r.regCallWEnd(nf, regFrameCall, err, saved, wb+int(w.B()))
+					return st.done(r.regCallWEnd(nf, regFrameCall, err, saved, wb+int(w.B())))
 				}
 				regWindow(r.stack, wb)[w.B()] = v
-				return nil
+				return pc + 1
 			}
 		}
 	}
 	f.pc = regSrc(c, pc) + 1
-	return r.regCallMiss(f, c, w, wb, pc)
+	return st.done(r.regCallMiss(f, c, w, wb, pc))
 }
 
 // regEnterW runs a register function of the form's own layout in the
@@ -264,7 +264,7 @@ func (r *Runtime) regDirect(o *Object, fd *funcData, c *regCode, this Value, arg
 		regNoteCross(regCrossDirect, c.fn, "")
 	}
 	// A body answered without a frame is answered here, as callDirect
-	// answers one without register code and regCallW one a register call
+	// answers one without register code and rhCallW one a register call
 	// makes: a built-in's callback is most often such a body.
 	switch c.leaf {
 	case regLeafArg:
