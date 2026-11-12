@@ -256,11 +256,15 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 			obj, key := regs[w.B()], regs[w.C()]
 			if obj.IsObject() && key.IsNumber() {
 				o := obj.Object()
+				// One test of the flags for both: o has elements, and is no
+				// mapped arguments object, whose elements are its frame's.
 				if i := uint32(key.Number()); float64(i) == key.Number() &&
-					uint(i) < uint(len(o.elemsOf())) && o.flags&objMappedArguments == 0 {
-					if v := o.elemsOf()[i]; !isHole(v) {
-						regs[w.A()] = v
-						continue
+					o.flags&(objHasExt|objMappedArguments) == objHasExt {
+					if es := o.extAt().elems; uint(i) < uint(len(es)) {
+						if v := es[i]; !isHole(v) {
+							regs[w.A()] = v
+							continue
+						}
 					}
 				}
 			}
@@ -272,12 +276,13 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 			if obj.IsObject() && key.IsNumber() {
 				k := key.Number() + float64(int8(w.X()))
 				o := obj.Object()
-				if i := uint32(k); float64(i) == k &&
-					uint(i) < uint(len(o.elemsOf())) && o.flags&objMappedArguments == 0 {
-					if v := o.elemsOf()[i]; !isHole(v) {
-						regs[w.C()] = Value{num: k}
-						regs[w.A()] = v
-						continue
+				if i := uint32(k); float64(i) == k && o.flags&(objHasExt|objMappedArguments) == objHasExt {
+					if es := o.extAt().elems; uint(i) < uint(len(es)) {
+						if v := es[i]; !isHole(v) {
+							regs[w.C()] = Value{num: k}
+							regs[w.A()] = v
+							continue
+						}
 					}
 				}
 			}
@@ -289,11 +294,13 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 			if obj.IsObject() && key.IsNumber() {
 				o := obj.Object()
 				if i := uint32(key.Number()); float64(i) == key.Number() &&
-					uint(i) < uint(len(o.elemsOf())) && o.flags&objMappedArguments == 0 {
-					if v := o.elemsOf()[i]; !isHole(v) {
-						regs[w.C()] = Value{num: key.Number() + float64(int8(w.X()))}
-						regs[w.A()] = v
-						continue
+					o.flags&(objHasExt|objMappedArguments) == objHasExt {
+					if es := o.extAt().elems; uint(i) < uint(len(es)) {
+						if v := es[i]; !isHole(v) {
+							regs[w.C()] = Value{num: key.Number() + float64(int8(w.X()))}
+							regs[w.A()] = v
+							continue
+						}
 					}
 				}
 			}
@@ -303,9 +310,11 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 			if obj.IsObject() && key.IsNumber() {
 				o := obj.Object()
 				if i := uint32(key.Number()); float64(i) == key.Number() &&
-					uint(i) < uint(len(o.elemsOf())) && o.flags&(objMappedArguments|objSharedElems) == 0 && !isHole(o.elemsOf()[i]) {
-					o.extOf().elems[i] = regs[w.C()]
-					continue
+					o.flags&(objHasExt|objMappedArguments|objSharedElems) == objHasExt {
+					if es := o.extAt().elems; uint(i) < uint(len(es)) && !isHole(es[i]) {
+						es[i] = regs[w.C()]
+						continue
+					}
 				}
 			}
 			kept.pc = pc
