@@ -44,6 +44,15 @@ import (
 // shape checks are the Go handlers' alone.
 var regNativeOn = os.Getenv("QJS_NONATIVE") == "" && !verifyShapes
 
+// SetRegNative runs register frames by the native handlers or not, and
+// reports whether they were: a test's switch, as QJS_NONATIVE is the
+// environment's. The frames a runtime runs meanwhile run as they began.
+func SetRegNative(on bool) bool {
+	was := regNativeOn
+	regNativeOn = on && !verifyShapes
+	return was
+}
+
 // nativeCtx is what the code reads and writes: ip in, where to start, and
 // out, the instruction it left to Go; the top frame's registers, caches,
 // constants and code; and the native frame stack, frames, one record for
@@ -135,6 +144,13 @@ type nativeCtx struct {
 	// scratch is what a handler keeps across a store by storeRef, which
 	// keeps no register but DI.
 	scratch [16]uint64
+	// fv is the top frame's feedback vector, a slot a site into which a
+	// handler ORs the kinds of value it met (the JIT's next step, as
+	// Ignition's): none yet, its room kept here and in the frame record,
+	// which a call switches and a return gives back, and R14, which no
+	// handler uses, kept for it to be pinned in, so that a handler's note
+	// is one OR to memory and spills nothing.
+	fv uintptr
 
 	// What only Go reads: the frame's state, the records frames points
 	// into, and the states of the frames above the base frame, made when
@@ -160,6 +176,7 @@ type nativeRec struct {
 	cc       uintptr
 	saved    int64
 	bOff     int64
+	fv       uintptr
 }
 
 // The Runtime's and a closureCode's fields the code reads are at offsets
@@ -354,6 +371,7 @@ func nativeSetTop(ctx *nativeCtx, regs uintptr, f *frame, c *regCode) {
 	ctx.rc = uintptr(unsafe.Pointer(c))
 	ctx.nf = uintptr(unsafe.Pointer(f))
 	ctx.cc = uintptr(unsafe.Pointer(cl.closureCode)) + ccBase
+	ctx.fv = 0
 }
 
 // nativeTop is the top frame's state, depth above the base frame: one
@@ -481,7 +499,7 @@ func nativePtr(p *uintptr) unsafe.Pointer { return *(*unsafe.Pointer)(unsafe.Poi
 // nativePop makes the caller rec records the top frame again.
 func nativePop(ctx *nativeCtx, rec *nativeRec) {
 	ctx.regs, ctx.ic, ctx.codeBase = rec.regs, rec.ic, rec.codeBase
-	ctx.rc, ctx.nf, ctx.cc = rec.rc, rec.nf, rec.cc
+	ctx.rc, ctx.nf, ctx.cc, ctx.fv = rec.rc, rec.nf, rec.cc, rec.fv
 	ctx.depth--
 	ctx.filled = min(ctx.filled, ctx.depth)
 	ctx.topOK = 0

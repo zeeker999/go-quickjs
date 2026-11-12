@@ -649,6 +649,21 @@ different answer or a different count of exits;
 `TestRegNativeCallExits` checks the call handler against `rhCallW` case
 by case, and `TestRegNativeConcurrent` two runtimes at once.
 
+**Room for feedback.** The JIT's next step gives each function a
+feedback vector, as Ignition does: a slot a site, into which every
+handler, native and Go, ORs the kinds of value it met (a small integer,
+a double, a string, anything else; elements' kinds; a site of several
+shapes), the hotness of calls and back edges coming from the budget the
+code already keeps. The context has its pointer (`fv`, none yet), which
+the frame record keeps and a call switches as it switches the closure's
+caches; and no handler uses `R14`, which is kept for it to be pinned in,
+so that a handler's note is one OR to memory and spills nothing.
+`TestRegNativeCaches` (internal/v8bench) runs the register interpreter's
+corpus natively and by the Go table and checks that the caches the JIT
+reads -- the property sites, the global sites' epochs, the call sites'
+kinds and callees (`RegCacheDigest`) -- end up the same: the native fast
+paths and the Go handlers they leave to fill them alike.
+
 **Preemption.** The code is not preemptible: Go reaches it at the exits,
 and a loop that never exits still spends the back-edge budget, and a
 recursion the interrupt counter, which the handlers count down as the Go

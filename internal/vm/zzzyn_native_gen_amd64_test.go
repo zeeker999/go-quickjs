@@ -146,6 +146,7 @@ const (
 	ncScratch  = int32(unsafe.Offsetof(nativeCtx{}.scratch))
 	ncFrames   = int32(unsafe.Offsetof(nativeCtx{}.frames))
 	ncCap      = int32(unsafe.Offsetof(nativeCtx{}.cap))
+	ncFV       = int32(unsafe.Offsetof(nativeCtx{}.fv))
 	recSize    = int32(unsafe.Sizeof(nativeRec{}))
 )
 
@@ -162,6 +163,7 @@ var nativeTopFields = [][2]int32{
 	{int32(unsafe.Offsetof(nativeRec{}.codeBase)), ncCodeBase},
 	{int32(unsafe.Offsetof(nativeRec{}.rc)), ncRC},
 	{int32(unsafe.Offsetof(nativeRec{}.nf)), ncNF},
+	{int32(unsafe.Offsetof(nativeRec{}.fv)), ncFV},
 }
 
 // nativeGen emits the handlers.
@@ -1586,6 +1588,8 @@ func (g *nativeGen) call() {
 	a.Store(RDI, ncCodeBase, RBX)
 	a.Load(RCX, RDI, scr(sNF))
 	a.Store(RDI, ncNF, RCX)
+	// The callee's feedback vector: none yet.
+	a.StoreImm(RDI, ncFV, 0)
 	// Run it, counted (made).
 	a.IncMem(RDI, ncMade)
 	g.dispatch()
