@@ -831,6 +831,10 @@ type ALU uint8
 const (
 	Add ALU = 0x01
 	Or  ALU = 0x09
+	// Adc and Sbb add and subtract with the carry: a wider integer's
+	// upper words.
+	Adc ALU = 0x11
+	Sbb ALU = 0x19
 	And ALU = 0x21
 	Sub ALU = 0x29
 	Xor ALU = 0x31
@@ -846,6 +850,10 @@ func (op ALU) subcode() byte {
 		return 0
 	case Or:
 		return 1
+	case Adc:
+		return 2
+	case Sbb:
+		return 3
 	case And:
 		return 4
 	case Sub:

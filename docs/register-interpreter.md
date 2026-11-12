@@ -551,6 +551,97 @@ one indirect call, a handler that stores a pointer has a frame and a
 write-barrier check, and a Go call passes no more than the four arguments
 in registers, so the state's fields are loads.
 
+## Native handlers
+
+On amd64 a register frame runs by native threaded handlers
+(`zzzyn_native_amd64.go`), machine code for the hot operations over the
+same instructions and the same frames; the Go table is what they leave
+work to, and every other architecture's interpreter. `runReg` hands its
+frame to `nativeRun` before its loop; `QJS_NONATIVE` set in the
+environment (read once, `regNativeOn`) keeps the frames in the Go table's
+loop, to compare the two and as an escape hatch.
+
+**The dispatch.** Each handler ends in its own dispatch, as V8's
+Ignition's do: the next instruction read, its operation's handler's
+address loaded from the native table, an indirect jump -- four
+instructions, nothing spilled. The pinned registers hold what every
+handler needs: `RBX` the instruction's address, `R12` the frame's
+registers, `R13` the native table, `R15` the closure's caches, `R11` the
+back-edge budget, `R10` the least tag, `RDI` the context; `RAX` holds the
+instruction word, and `RCX`, `RDX`, `RSI`, `R8`, `R9` and three SSE
+registers are a handler's scratch.
+
+**What is native.** The numbers' arithmetic, increments, bitwise
+operators and compare-and-branches; moves, constants and globals by their
+site; property reads and writes by the monomorphic cache, `in` by the
+runtime's in cache, `typeof`, the length of an array or a string, the
+elements of dense and typed arrays (every kind but Float16 and BigInt64);
+`===` and `!==`; short BigInts' add, sub and mul; and calls and returns:
+`call_w` and `call_method_w` enter a callee their site's cache knows as
+`rhCallW` does -- its this, the frame record, the stack top and depth --
+and run it, the caller's state pushed on the native frame stack, and a
+leaf that returns a parameter or a constant is answered with no frame;
+`ret` pops it. A fast path that misses jumps to the exit; nothing is
+written before it does.
+
+**The exit stub.** An operation of no native handler has the exit stub's
+address in the table, and every miss jumps to it: it stores the
+instruction's address and the budget in the context and returns to
+`nativeRun`, which runs the instruction by its Go handler from
+`regTable` -- and, where that gives back `^pc`, its slow function from
+`regSlowTable` -- in the top frame's `regState`, and enters the code
+again at the pc it gives. There is no second interpreter: what the Go
+table does, an exit does. A frame the code entered itself that ends in Go
+-- a throw, a return that closes captured upvalues -- ends there as
+`rhCallW` ends a callee after `runReg` (`nativeEnd`), and its caller goes
+on or meets the throw. Its state is made for it from its frame record
+when Go first needs it (`nativeTop`), and the callers' pcs, which only Go
+reads -- a stack trace, the debugger -- are written then
+(`nativeFillPCs`).
+
+**The context.** What the code reads beyond the pinned registers is the
+context, `nativeCtx`, which a frame's `regState` keeps, made at its first
+native run: the top frame's code, caches and closure, the runtime's
+fields it reads (by addresses set once), and the native frame stack, one
+record a call the code made itself. The stack starts at 8 records and Go
+doubles it when a call finds it full, up to 128; a call past that is
+Go's, whose frame runs in a code entry of its own. Each runtime's states
+are its own, so separate runtimes on separate goroutines share no
+context.
+
+**Generation and the shared-code rules.** The handlers are written with
+the JIT's assembler by `nativeEmit`, a test's code
+(`zzzyn_native_gen_amd64_test.go`), and assembled into the binary as one
+TEXT symbol of bytes and the table as GLOBL/DATA
+(`zzzyn_native_handlers_amd64.s`, `go generate ./internal/vm`);
+`TestRegNativeGenerated` fails while the file is not what the emitter
+makes. The package's code needs no assembler and no JIT. The block is one
+for every runtime and every build tag: position-independent, never
+patched, with no runtime's constant in it -- every address it needs is
+the context's, and the Runtime's and a closureCode's fields, whose
+offsets the JIT's tag changes, are read relative to a base the context
+gives (`rtBase`, `ccBase`), which the test checks under each tag.
+
+**The marking rule.** A handler stores a number's word alone where the
+register held no pointer; a pointer word it stores plainly while the
+collector does not mark, and by the barrier's routine
+(`nativeStoreRef`, a store with Go's write barrier) while it does,
+reading the runtime's write-barrier flag. That is the only difference:
+the code does the same work whether the collector marks or not, and
+never leaves native code or calls Go for the marking's sake.
+`TestRegNativeKernels`, `TestRegNativeFastPaths` and `TestRegNativeCalls`
+run each case with the flag read as set and as clear and fail on a
+different answer or a different count of exits;
+`TestRegNativeCallExits` checks the call handler against `rhCallW` case
+by case, and `TestRegNativeConcurrent` two runtimes at once.
+
+**Preemption.** The code is not preemptible: Go reaches it at the exits,
+and a loop that never exits still spends the back-edge budget, and a
+recursion the interrupt counter, which the handlers count down as the Go
+handlers do and exit at its end, so that the interrupt check, and with
+it the scheduler and the collector, run as often as in the Go table's
+loop.
+
 ## Frames and calls
 
 A call between two register functions is made in the loop's case and a
