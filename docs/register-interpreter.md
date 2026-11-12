@@ -518,7 +518,20 @@ instruction's handler themselves were all slower; `//go:nosplit` was worth
 about 1%. The table is also the portable form of what machine code does
 on amd64 and arm64: generated native threaded handlers over it, which
 leave to its Go handlers what they do not do themselves. The suites over
-eight placements against the switch: TIMING.
+eight placements against the switch, register mode: the
+micro-benchmarks 1.029 by the geometric mean (149 of 384 3% or more
+slower, 57 3% or more faster), the V8 suite 9.0% slower, Octane 20.6%,
+AWFY 14.9%. What the switch held in its own cases lost most: the
+property and global reads and writes 22 to 41% (`prop_write` 4.66
+against 6.34 ns, `global_write` 4.52 against 6.39), `loop_locals` 34%,
+calls 9 to 24%, `crypto_am3` 18%, Box2D and zlib 25%; what it dispatched
+twice gained: `async_await` 33%, the switches 9 to 17%, `private_field`
+12%, `loop_arith` 12%. `crypto_am3` was 4.5% slower before `call_w`'s
+handler became the call path and 18% after, at every placement, with no
+instruction of its loop's handlers changed. The likely cause is their
+layout: the handlers' order in their file, which no placement varies,
+puts `add`, `shr_imm` and `jlt_imm` on the same op-cache sets. The Go table is the portable fallback, not the end: it lands with
+the native handlers.
 
 **Removed with the switch.** The golden file of the hot cases' offsets
 (`layoutcases.txt`) and `layoutpad`'s reader of the dispatch table; the
