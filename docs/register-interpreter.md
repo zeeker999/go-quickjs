@@ -1492,6 +1492,24 @@ across a statement, a call or a loop's back edge -- a loop variable stays a
 `Value`. That is where the int32 design's verifier of kinds would be
 needed; this one needs none beyond the region's.
 
+Scheduled, 2026-11-11, after the measured gaps against the tree. At
+2d91b42b NavierStokes is level with the tree in register mode (1,653 ms
+against 1,680, three runs each): the indexing trim closed the gap this
+design was first written for. What it still removes is 17 to 19% of a
+float loop (`IsNumber` 12.5%, `regNum` 5.0% of NavierStokes), and level
+with the tree is not the goal: the tree goes once register mode is level
+or better everywhere, and the aim is the comparison engine. The order:
+generator resumption in place and the forwarder construction path first,
+both measured gaps against the tree, then this, in two stages, each
+timed alone -- the 18 cases of no hot operation made cold sub-operations,
+which frees their opcode values (a compare-and-branch that slows a test
+3% at every placement stays a case), then the region pass, its opcodes,
+the verifier's rules and the differential tests behind a compiler switch,
+made the default only if it earns it over its cost in register-code
+bytes and compile time. The region machinery is shaped for int32 regions
+(`guard_int32`, raw integer and bitwise operations, Crypto's `am3`)
+without building them.
+
 ### Stage 2: zero refusals
 
 The register tier is the baseline interpreter: it refuses nothing V8's
