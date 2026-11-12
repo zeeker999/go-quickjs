@@ -57,11 +57,11 @@ func TestRegisterBackendCode(t *testing.T) {
    2  get_global r3, name0 @3
    3  sub_imm r5, r2, 1
    4  call_w r3 = r3(1)
-   5  get_global r6, name0 @4
-   6  sub_imm r8, r2, 2
-   7  call_w r6 = r6(1)
-   8  add r9, r3, r6
-   9  ret r9
+   5  get_global r4, name0 @4
+   6  sub_imm r6, r2, 2
+   7  call_w r4 = r4(1)
+   8  add r3, r3, r4
+   9  ret r3
   10  ret_undef`,
 		"locals": `
    0  load_int r4, 1

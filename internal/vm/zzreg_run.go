@@ -86,6 +86,12 @@ type regCode struct {
 	// reuse is the sites of the code's calls of exec marked RMarkReuse
 	// whose arrays may be made again, by call site (regReuseSites).
 	reuse []*execReuseSite
+	// genFrom is the first register a generator's or an async function's
+	// vals keep (newRegGenerator): 2 where nothing captures the callee's
+	// register or this's and nothing reads a local by its register
+	// (LocalReg), which a resumption makes again from the generator; 0
+	// otherwise.
+	genFrom int32
 }
 
 // runReg runs frame f as register code c, from instruction start, and
