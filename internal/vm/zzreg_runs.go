@@ -683,6 +683,15 @@ func regIsInt32(f float64) bool {
 	return float64(int32(f)) == f
 }
 
+// regVerifyAdd is storeCached's check of an addition the site's cache
+// answers, in a build with the quickjs_verify tag, for set_prop's case:
+// out of line, so that the case calls nothing Go would inline into it.
+//
+//go:noinline
+func regVerifyAdd(r *Runtime, s *propCache, obj *Object, cl *closure, c *regCode, w bytecode.RInstr) {
+	r.verifyStoreCache(s, obj, cl.names[c.siteName[w.C()]])
+}
+
 // regTagged reports whether bits, a value's, are a tagged value of kind k:
 // Value.isTag of bits the caller has read.
 func regTagged(bits uint64, k Kind) bool {

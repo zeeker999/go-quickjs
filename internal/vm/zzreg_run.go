@@ -245,12 +245,13 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 		case bytecode.RSetProp:
 			if o := regs[w.A()]; o.IsObject() {
 				obj := o.Object()
-				if s := &cl.ic[w.C()]; obj.shape == s.ownShape {
+				s := &cl.ic[w.C()]
+				if obj.shape == s.ownShape {
 					obj.vals()[s.idx] = regs[w.B()]
 					continue
 				}
 			}
-			goto slow
+			goto setAdd
 		case bytecode.RGetIndex:
 			obj, key := regs[w.B()], regs[w.C()]
 			if obj.IsObject() && key.IsNumber() {
@@ -1092,6 +1093,29 @@ func (r *Runtime) runReg(f *frame, c *regCode, start int) (Value, error) {
 		}
 		pc = kept.pc
 		continue
+	setAdd:
+		// A property set_prop adds, by the transition the site remembers,
+		// where nothing up the prototype chain the site found intercepts
+		// it: storeCached's addition, written out. A tail after the
+		// others rather than set_prop's own code, so that it moves no hot
+		// case (layoutcases.txt).
+		if o := regs[w.A()]; o.IsObject() {
+			obj := o.Object()
+			s := &cl.ic[w.C()]
+			if obj.shape == s.shape && s.next != nil && s.next != setterNext && obj.flags&objExtensible != 0 &&
+				(s.p1 == nil || s.p1.shape == s.s1 || s.cell != nil && s.cell.valid) && (s.p2 == nil || s.p2.shape == s.s2) {
+				if verifyShapes {
+					regVerifyAdd(r, s, obj, cl, c, w)
+				}
+				// The pc kept across the call, as every case that calls
+				// out keeps it (TestRegDispatchKeepsNoPC).
+				kept.pc = pc
+				obj.appendTransition(regs[w.B()], s.next)
+				pc = kept.pc
+				continue
+			}
+		}
+		goto slow
 	invalid:
 		panic("register code: invalid instruction")
 	fail:
