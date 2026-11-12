@@ -600,6 +600,34 @@ func (g *gen) allocN(n int) int {
 	return r
 }
 
+// freeAbove gives back the registers an expression took from mark on but
+// its value's, d: a call's window and what its callee and arguments took,
+// dead once the call is made. Kept until the statement's end, a chain of
+// calls -- a.f(x).f(y).f(z)..., each call's receiver the one before it --
+// took a window for each, the innermost the highest: minified bundles'
+// chains of thousands of calls had a register for each instruction.
+func (g *gen) freeAbove(mark, d int) int {
+	if d >= mark {
+		g.top = d + 1
+	} else {
+		g.top = mark
+	}
+	return d
+}
+
+// result is dst, or, for -1, the first temporary an operation's
+// operands took from mark on, the rest given back: what an operation
+// writes it writes after it has read its operands, so its value may be
+// where one of them was. Each step of a long expression -- a determinant's
+// products and sums -- had taken one of its own.
+func (g *gen) result(mark, dst int) int {
+	if dst >= 0 {
+		return dst
+	}
+	g.top = mark
+	return g.alloc()
+}
+
 // dest is dst, or a fresh temporary for -1.
 func (g *gen) dest(dst int) int {
 	if dst >= 0 {
@@ -1736,8 +1764,13 @@ func (g *gen) discard(e ast.Expr) {
 	case *ast.Call:
 		g.dead = n
 	case *ast.Sequence:
+		// Each expression's registers given back before the next, as a
+		// statement's are: a minified bundle's comma sequences of
+		// assignments, a statement each, took a register for each.
+		mark := g.top
 		for _, x := range n.Exprs {
 			g.discard(x)
+			g.top = mark
 		}
 		return
 	case *ast.Logical:
@@ -1991,16 +2024,20 @@ func (g *gen) expr(e ast.Expr, dst int) int {
 		g.bind(end)
 		return d
 	case *ast.Sequence:
+		mark := g.top
 		for _, x := range n.Exprs[:len(n.Exprs)-1] {
 			g.discard(x)
+			g.top = mark
 		}
 		return g.expr(n.Exprs[len(n.Exprs)-1], dst)
 	case *ast.Member:
 		return g.member(n, dst)
 	case *ast.Call:
-		return g.call(n, dst)
+		mark := g.top
+		return g.freeAbove(mark, g.call(n, dst))
 	case *ast.New:
-		return g.newExpr(n, dst)
+		mark := g.top
+		return g.freeAbove(mark, g.newExpr(n, dst))
 	case *ast.ObjectLit:
 		return g.object(n, dst)
 	case *ast.ArrayLit:
@@ -2245,19 +2282,20 @@ func (g *gen) binary(n *ast.Binary, dst int) int {
 // operate is left op right into dst; a is left's register, where it has
 // been evaluated already (a compound assignment's target), or -1.
 func (g *gen) operate(text string, op bytecode.Op, left, right ast.Expr, a, dst, pos int) int {
+	mark := g.top
 	if a < 0 {
 		a = g.guard(g.expr(left, -1), right)
 	}
 	if imm, ok := imm16(right); ok {
 		if rop, ok := immOps[text]; ok {
-			d := g.dest(dst)
+			d := g.result(mark, dst)
 			g.at(pos)
 			g.emit(bytecode.MakeR(rop, 0, r16(d), r16(a), uint16(int16(imm))))
 			return d
 		}
 	}
 	b := g.expr(right, -1)
-	d := g.dest(dst)
+	d := g.result(mark, dst)
 	g.at(pos)
 	if rop, ok := regOps[text]; ok {
 		g.emit(bytecode.MakeR(rop, 0, r16(d), r16(a), r16(b)))
@@ -2448,8 +2486,9 @@ func (g *gen) deleteName(n *ast.Unary, id *ast.Ident, dst int) int {
 }
 
 func (g *gen) unaryOp(op bytecode.Op, operand ast.Expr, dst, pos int) int {
+	mark := g.top
 	a := g.expr(operand, -1)
-	d := g.dest(dst)
+	d := g.result(mark, dst)
 	g.at(pos)
 	g.emit(bytecode.MakeR(bytecode.RUnary, uint8(op), r16(d), r16(a), 0))
 	return d
@@ -3290,12 +3329,16 @@ func (g *gen) directEval(n *ast.Call, idx uint32, dst int) int {
 }
 
 func (g *gen) args(args []ast.Expr, at int) {
+	// Each argument in its place, what computing it took given back
+	// before the next (into's registers, below the mark, stay).
+	mark := g.top
 	for i, a := range args {
 		if _, ok := a.(*ast.Spread); ok {
 			g.fail("a spread argument")
 			return
 		}
 		g.into(a, at+i)
+		g.top = mark
 	}
 }
 
@@ -3329,6 +3372,15 @@ func (g *gen) call(n *ast.Call, dst int) int {
 		return d
 	}
 	argc := len(n.Args)
+	// A receiver computed -- a call's, as each of a chain of calls'
+	// a.f(x).g(y)... is the one before it -- is computed before the window
+	// is taken, so that what computing it takes is given back first
+	// (freeAbove) and the windows of a chain are not one above another:
+	// get_method_w puts it in the window.
+	recv := -1
+	if c, ok := n.Callee.(*ast.Member); ok && !c.Optional && !special(c) && !c.Computed && !g.inPlace(c.Object) {
+		recv = g.expr(c.Object, -1)
+	}
 	w := g.allocN(2 + argc)
 	op := bytecode.RCallW
 	argLit, mname := false, ""
@@ -3340,6 +3392,9 @@ func (g *gen) call(n *ast.Call, dst int) int {
 		}
 		if special(c) {
 			g.specialCallee(c, w)
+		} else if recv >= 0 {
+			g.at(c.Property.Pos())
+			g.emit(bytecode.MakeR(bytecode.RGetMethodW, 0, r16(w), r16(recv), g.propSite(bytecode.OpGetPropThis, g.nameIdx(memberName(c)))))
 		} else if !c.Computed && g.inPlace(c.Object) {
 			// A receiver in a binding: get_method_w puts it in the window.
 			name := memberName(c)
@@ -3387,6 +3442,12 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	d := dst
 	if d < 0 {
 		d = w
+		if recv >= 0 {
+			// The receiver's register, below the window, which the window
+			// has its copy of: a chain's calls then each leave their value
+			// where the one before left its.
+			d = recv
+		}
 	}
 	g.at(n.TracePos())
 	dead = dead && (mname == "exec" || mname == "replace")
@@ -3926,6 +3987,7 @@ func (g *gen) objectAtOnce(n *ast.ObjectLit, dst int) int {
 		seen[key] = true
 	}
 	base := g.allocN(len(n.Props))
+	mark := g.top
 	for i, p := range n.Props {
 		var key string
 		switch k := p.Key.(type) {
@@ -3936,6 +3998,7 @@ func (g *gen) objectAtOnce(n *ast.ObjectLit, dst int) int {
 		}
 		keys = append(keys, g.nameIdx(key))
 		g.into(p.Value, base+i)
+		g.top = mark
 	}
 	g.objKeys = append(g.objKeys, keys)
 	d := g.dest(dst)
@@ -3976,6 +4039,7 @@ func (g *gen) array(n *ast.ArrayLit, dst int) int {
 		return g.spreadArray(n.Elements, dst)
 	}
 	base := g.allocN(len(n.Elements))
+	mark := g.top
 	for i, e := range n.Elements {
 		if e == nil {
 			// A hole: the length grows by one, with no element made.
@@ -3983,6 +4047,9 @@ func (g *gen) array(n *ast.ArrayLit, dst int) int {
 			continue
 		}
 		g.into(e, base+i)
+		// What computing it took, given back: each element's an object
+		// literal's of its own values had taken them all at once.
+		g.top = mark
 	}
 	d := g.dest(dst)
 	g.emit(bytecode.MakeR(bytecode.RNewArray, 0, r16(d), r16(base), uint16(len(n.Elements))))
