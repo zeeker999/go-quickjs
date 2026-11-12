@@ -33,9 +33,9 @@ func (p *Program) EvaluateArrays(slots []Value, arrays []ArrayView, pc int, budg
 // slow path -- is the host's to run whole, as Go runs it at a host exit,
 // before the evaluator leaves. Run runs in, instruction pc of p, over
 // slots, and reports whether it did, and where the code goes on; where it
-// did not, the evaluator leaves as it would have. A host may run a call
-// by evaluating the callee's program in turn. The differential tests'
-// model of the VM is one (the oracle package).
+// did not, the evaluator leaves as it would have. The VM's, which runs
+// the register instruction on the frame's registers, is one
+// (vm.RegLowerCall).
 type Runner interface {
 	Run(p *Program, pc int, in *Instruction, slots []Value) (next int, ok bool, err error)
 }

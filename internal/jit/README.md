@@ -1142,16 +1142,22 @@ operands from the operand stack's top. `TestLowerRegCorpusRefusals` builds
 both forms' programs, without feedback, and counts what the builder
 refuses, beside what the lowerings do.
 
-**The oracle.** `internal/jit/oracle` runs register programs through
-`EvaluateHost` with a heap of its own, the differential tests' model of
-the VM at a host exit (`ir.Runner`): globals, objects with prototypes,
-arrays, strings, closures and their captured registers (closed at a
-scope's end, `close_regs`), the program's own functions called by
-evaluating their programs, a few built-ins, and the exceptions it is sure
-of. What it does not model it declines, and the evaluation leaves there.
-`TestRegLowerEvaluate` (internal/v8bench) compares what it returns, or
-throws, with the register interpreter's answer for each call of the
-register interpreter's differential corpus.
+**The VM's side of an exit.** `vm.RegLowerCall`
+(`internal/vm/zzjit_zregrunner.go`) runs a call's register frame by the
+evaluator over its program, `EvaluateHost` given a Runner backed by the
+VM (`regRunner`): what the evaluator would leave at -- a host operation,
+a guard that failed, a Generic instruction's slow path -- the VM runs on
+the frame's real registers, the whole register instruction, by the
+interpreter's own slow paths (`regSlow`, `regCallW`, `regCold` and the
+rest), exceptions to the frame's handlers by `regCatch`; and where the
+evaluator leaves for good -- a return the evaluator cannot make, the
+budget -- `runReg` goes on with the frame from that register pc. That is
+what Stage 3a-3's native code's host exits and deoptimizations are to do.
+Inside an expansion it runs the instruction whole only where nothing of
+it has committed. `TestRegLowerEvaluate` (internal/v8bench, JIT builds)
+compares each call of the register interpreter's differential corpus so
+made with an ordinary call in a second runtime that has run the same
+calls; `QUICKJS_REGLOWER_SHARD=k/n` runs a shard of it.
 
 **Feedback.** The VM's feedback for a register program is
 `jitRegFeedback` (`internal/vm/zzjit_zregfeedback.go`), asked by the
