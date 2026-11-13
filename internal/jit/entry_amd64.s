@@ -54,6 +54,12 @@ TEXT ·storeRef(SB), NOSPLIT|NOFRAME, $0-0
 	ADJSP $-40
 	JMP AX
 
+// framePointer is its caller's frame pointer, BP: a frameless function's
+// is its caller's.
+TEXT ·framePointer(SB), NOSPLIT|NOFRAME, $0-8
+	MOVQ BP, ret+0(FP)
+	RET
+
 // storeRefAddr is storeRef's address.
 TEXT ·storeRefAddr(SB), NOSPLIT, $0-8
 	LEAQ ·storeRef(SB), AX

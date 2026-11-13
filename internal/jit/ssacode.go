@@ -254,6 +254,10 @@ func enterSSA(code *byte, ctx *abi.Context)
 func callGo()
 func callGoAddr() uintptr
 
+// framePointer is its caller's frame pointer (entry_*.s), which a test
+// checks native code's calls of Go leave as they found it.
+func framePointer() uintptr
+
 // CallGo is where native code jumps to call Go (abi.Encoding's CallGo).
 func CallGo() uint64 { return uint64(callGoAddr()) }
 

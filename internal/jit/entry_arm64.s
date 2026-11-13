@@ -22,9 +22,14 @@ TEXT ·enterRaw(SB), NOSPLIT|NOFRAME, $0-16
 // here, its context in R0, SP and the link register as the Go function that
 // entered it left them -- native code touches neither -- so that, to the Go
 // runtime, this is a function that one called, its return address saved
-// where a frame's is.
+// where a frame's is. Its frame's top word, just below the SP it is entered
+// with, it leaves alone: there the Go function that entered the code keeps
+// its caller's frame pointer (arm64's frame layout, the frame pointer saved
+// at -8 from the SP of the function that saves it), which it restores as it
+// returns -- written there, its caller had gone on with the context's
+// address for a frame pointer.
 TEXT ·callGo(SB), NOSPLIT|NOFRAME, $0-0
-	SUB $32, RSP
+	SUB $48, RSP
 	NO_LOCAL_POINTERS
 	MOVD R30, 0(RSP)
 	MOVD R0, 24(RSP)
@@ -33,7 +38,7 @@ TEXT ·callGo(SB), NOSPLIT|NOFRAME, $0-0
 	MOVD 16(RSP), R16
 	MOVD 24(RSP), R0
 	MOVD 0(RSP), R30
-	ADD $32, RSP
+	ADD $48, RSP
 	JMP (R16)
 
 // storeRef is amd64's: the word's address in R15, the pointer in R17,
@@ -122,6 +127,12 @@ TEXT ·storeRefClobber(SB), NOSPLIT|NOFRAME, $0-0
 TEXT ·storeRefClobberAddr(SB), NOSPLIT, $0-8
 	MOVD $·storeRefClobber(SB), R0
 	MOVD R0, ret+0(FP)
+	RET
+
+// framePointer is its caller's frame pointer, R29: a frameless function's
+// is its caller's.
+TEXT ·framePointer(SB), NOSPLIT|NOFRAME, $0-8
+	MOVD R29, ret+0(FP)
 	RET
 
 // callGoAddr is callGo's address (abi.Encoding's CallGo).
