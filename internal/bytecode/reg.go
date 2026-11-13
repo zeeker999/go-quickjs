@@ -37,6 +37,10 @@ type RInstr uint64
 // ROp is a register operation.
 type ROp uint8
 
+// RAddAppend is an RAdd's X where the addition is an append to an upvalue
+// (RAdd).
+const RAddAppend uint8 = 1
+
 // MakeR builds an instruction from its fields.
 func MakeR(op ROp, x uint8, a, b, c uint16) RInstr {
 	return RInstr(uint64(op) | uint64(x)<<8 | uint64(a)<<16 | uint64(b)<<32 | uint64(c)<<48)
@@ -143,7 +147,11 @@ const (
 	// where it has none: a for-of or for-in loop's step, at the head of
 	// each turn.
 	RIterNext
-	// RAdd, RSub, RMul: R[A] = R[B] op R[C].
+	// RAdd, RSub, RMul: R[A] = R[B] op R[C]. An RAdd whose X is
+	// RAddAppend is an append to an upvalue the stack compiler made one
+	// (AddOwned's mark on its set_upvalue): R[B] the binding's string,
+	// which the VM may grow in place (its strAppend); a tier that ignores
+	// the mark adds, which is always right.
 	RAdd
 	RSub
 	RMul

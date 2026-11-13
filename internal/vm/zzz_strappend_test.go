@@ -5,6 +5,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
 // strAppendTestSrc appends to captured bindings every way that could show a
@@ -781,6 +784,53 @@ func TestStrAppendAllocations(t *testing.T) {
 	}
 	if n := b.Mallocs - a.Mallocs; n > 1000 && allocsOrdinary() {
 		t.Errorf("10,000 appends made %d allocations", n)
+	}
+}
+
+// Register code's appends to an upvalue grow the string as the tree's do
+// (the add marked bytecode.RAddAppend): a run of them makes one string
+// and its right side, not a node each, natively and by the Go table, and
+// the reads between them see what they read.
+func TestRegStrAppendUpvalue(t *testing.T) {
+	compiler.SetRegisterForm(true)
+	SetRegTier(true)
+	t.Cleanup(func() { compiler.SetRegisterForm(bytecode.RegDefault()); SetRegTier(bytecode.RegDefault()) })
+	for _, native := range []bool{false, true} {
+		was := SetRegNative(native)
+		r := New(Config{})
+		if _, err := r.Run(compileForTest(t, `
+			function appends(n) {
+				var s = ""
+				var sink = { push(x) { s += x } }
+				for (var i = 0; i < n; i++) sink.push("<x>")
+				return s.length
+			}
+			function reads(n) {
+				var s = "", kept = []
+				var sink = { push(x) { s += x }, get() { return s } }
+				for (var i = 0; i < n; i++) { sink.push(i); if (i % 3 == 0) kept.push(sink.get()) }
+				return kept.join("|") + "/" + s
+			}
+			appends(100)`)); err != nil {
+			t.Fatal(err)
+		}
+		var a, b runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&a)
+		v, err := r.Run(compileForTest(t, `appends(10000)`))
+		runtime.ReadMemStats(&b)
+		if err != nil || v.Number() != 30000 {
+			t.Fatalf("native %v: = %v, %v", native, v, err)
+		}
+		if n := b.Mallocs - a.Mallocs; n > 1000 && allocsOrdinary() {
+			t.Errorf("native %v: 10,000 appends made %d allocations", native, n)
+		}
+		v, err = r.Run(compileForTest(t, `reads(10)`))
+		if want := "0|0123|0123456|0123456789/0123456789"; err != nil || v.String().Go() != want {
+			t.Errorf("native %v: reads = %v, %v, want %s", native, v, err, want)
+		}
+		r.Close()
+		SetRegNative(was)
 	}
 }
 

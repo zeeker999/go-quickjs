@@ -2980,6 +2980,15 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 		}
 		old := g.guard(g.readForWrite(t, -1), n.Value)
 		v := g.operate(text, op, nil, n.Value, old, -1, int(n.Start))
+		if res.Kind == ResUpval && !keep && dst < 0 && n.Op == "+=" && g.rec.Appends[n] {
+			// An append to an upvalue the stack compiler made one
+			// (ownedAppend): the add marked, which grows the string the
+			// binding alone holds in place, as the tree's upvalueAdd does.
+			if last := len(g.code) - 1; g.code[last].Op() == bytecode.RAdd && g.code[last].A() == uint16(v) {
+				w := g.code[last]
+				g.code[last] = bytecode.MakeR(bytecode.RAdd, bytecode.RAddAppend, w.A(), w.B(), w.C())
+			}
+		}
 		g.storeValue(t, v)
 		return g.place(v, dst)
 	case *ast.Member:

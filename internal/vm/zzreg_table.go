@@ -762,6 +762,13 @@ func rsAdd(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
 		return pc + 1
 	}
 	st.at(pc)
+	if w.X() == bytecode.RAddAppend {
+		// An append to an upvalue: R[B] the string the binding alone
+		// holds, grown in place where it can be, as the tree's upvalueAdd
+		// grows it (strAppend).
+		v, err := strAppendOp[struct{}](st.r, regs[w.B()], regs[w.C()])
+		return st.put(regs, w, v, err)
+	}
 	v, err := st.r.add(regs[w.B()], regs[w.C()])
 	return st.put(regs, w, v, err)
 }
