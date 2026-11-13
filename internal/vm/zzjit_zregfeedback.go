@@ -3,6 +3,7 @@
 package vm
 
 import (
+	"math"
 	"slices"
 	"unsafe"
 
@@ -324,4 +325,58 @@ func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
 		return nil
 	}
 	return []ssa.CallSite{{Go: ssa.GoCall, Argc: argc, Method: method, New: w.Op() == bytecode.RNewW, ThisSlot: -1}}
+}
+
+// The runtime's addresses the builder asks once a function, the same for
+// either form's code: jitFeedback's answers.
+
+// ArrayProtos is ssa.AppendFeedback's, jitFeedback's.
+func (f *jitRegFeedback) ArrayProtos() ([2]ssa.Holder, bool) { return f.fb.ArrayProtos() }
+
+// GenNext is ssa.GenStepFeedback's half that is the realm's, jitFeedback's.
+func (f *jitRegFeedback) GenNext() uintptr { return f.fb.GenNext() }
+
+// GenSteps is ssa.GenStepFeedback's other half: no generator is known to
+// a register loop's step yet (jitEntry's genSteps are the stack form's).
+func (f *jitRegFeedback) GenSteps(pc int) []ssa.GenStep { return nil }
+
+// HasCache is ssa.HasCacheFeedback's, jitFeedback's.
+func (f *jitRegFeedback) HasCache() uintptr { return f.fb.HasCache() }
+
+// KeyAtoms is ssa.KeyAtomsFeedback's, jitFeedback's.
+func (f *jitRegFeedback) KeyAtoms() (uintptr, uintptr) { return f.fb.KeyAtoms() }
+
+// MapNexts is ssa.MapStepFeedback's, jitFeedback's.
+func (f *jitRegFeedback) MapNexts() [2]uintptr { return f.fb.MapNexts() }
+
+// TypeofCells is ssa.TypeofFeedback's, jitFeedback's.
+func (f *jitRegFeedback) TypeofCells() (uintptr, bool) { return f.fb.TypeofCells() }
+
+// WalkedCloseCell is ssa.WalkedCloseFeedback's, jitFeedback's.
+func (f *jitRegFeedback) WalkedCloseCell() uintptr { return f.fb.WalkedCloseCell() }
+
+// TypedKind is ssa.TypedKindFeedback's: the cell the element kinds native
+// code met at the program's instruction pc gather in, as jitFeedback's,
+// by the register instruction's pc -- kept in the function's lowering
+// beside the stack form's cells, under keys of their own (-1-pc).
+func (f *jitRegFeedback) TypedKind(pc int) (ssa.TypedSite, bool) {
+	s := f.fb.r.jit
+	if s == nil || pc < 0 || pc >= len(f.p.Origin) {
+		return ssa.TypedSite{}, false
+	}
+	l := s.lowering(f.fb.fn)
+	key := -1 - int32(f.p.Origin[pc])
+	cell := l.typedCells[key]
+	if cell == nil {
+		if l.typedCells == nil {
+			l.typedCells = map[int32]*Value{}
+		}
+		cell = new(Value)
+		l.typedCells[key] = cell
+		l.bytes += jitTypedCellBytes
+		s.lowerBytes += jitTypedCellBytes
+	}
+	k := f.fb.keep()
+	k.cells = append(k.cells, cell)
+	return ssa.TypedSite{Kinds: uint16(math.Float64bits(cell.num)), Cell: uintptr(unsafe.Pointer(cell))}, true
 }

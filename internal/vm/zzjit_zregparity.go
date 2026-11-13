@@ -220,6 +220,21 @@ func CompareFeedback(stack, reg *Runtime) FeedbackParity {
 				}
 				js := byStack[s]
 				if len(js) == 0 {
+					// A register instruction made of several stack ones --
+					// a constant folded into its user, a method's read and
+					// its call -- has the position of one of them: the
+					// nearest of the same operation, a few instructions on.
+					for d := 1; d <= 8 && len(js) == 0; d++ {
+						for _, q := range []int{s + d, s - d} {
+							for _, j := range byStack[q] {
+								if rp.Code[j].Op == sp.Code[s].Op {
+									js = append(js, j)
+								}
+							}
+						}
+					}
+				}
+				if len(js) == 0 {
 					note(res.Gaps, meth.Name+": no instruction", fmt.Sprintf("%s: %s", where, a))
 					continue
 				}
@@ -267,6 +282,10 @@ func jitParityCall(m reflect.Value, args []reflect.Value) (s string, ok bool) {
 		}
 	}()
 	out := m.Call(args)
+	if last := out[len(out)-1]; last.Kind() == reflect.Bool && !last.Bool() && len(out) > 1 {
+		// An answer with its ok false is none.
+		return "", true
+	}
 	zero := true
 	parts := make([]string, len(out))
 	for i, v := range out {
