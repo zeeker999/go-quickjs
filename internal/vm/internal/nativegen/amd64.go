@@ -6,8 +6,12 @@ import (
 	. "github.com/go-quickjs/go-quickjs/internal/jit/asm/amd64"
 )
 
+// nativeGen emits the handlers of a variant (nativeEmit).
 type nativeGen struct {
-	a    *Asm
+	a *Asm
+	// v is the variant emitted: a handler that differs in one tells it
+	// by v.
+	v    *variant
 	exit Label
 	// exitRet is the exit that returns to nativeRun whatever the state:
 	// the base frame's return, a call the frame stack has no room for.

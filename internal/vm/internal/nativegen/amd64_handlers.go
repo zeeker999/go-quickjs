@@ -1,20 +1,30 @@
 package nativegen
 
 import (
+	"fmt"
+
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	. "github.com/go-quickjs/go-quickjs/internal/jit/asm/amd64"
 )
 
-// nativeEmit makes amd64's handlers' code: position-independent, every
-// address it needs given by the context, so that it may be placed
-// anywhere: the assembled block (zzzyn_native_handlers_amd64.s).
-func nativeEmit() (*block, error) {
-	g := &nativeGen{a: &Asm{}}
+// nativeEmit makes amd64's handlers' code for variant v:
+// position-independent, every address it needs given by the context, so
+// that it may be placed anywhere. plain's is the handlers' block
+// (zzzyn_native_handlers_amd64.s): the entry, the exit stub and every
+// handler. Another variant's is its own handlers alone, which reach
+// plain's code through the variant's table, R13: the exits through its
+// slots after the operations' (slotExit, slotExitRet), another handler
+// through that operation's entry.
+func nativeEmit(v *variant) (*block, error) {
+	g := &nativeGen{a: &Asm{}, v: v}
 	a := g.a
 	g.exit, g.exitRet = a.NewLabel(), a.NewLabel()
 	labels := map[bytecode.ROp]Label{}
 	var order []bytecode.ROp
 	h := func(op bytecode.ROp, body func()) {
+		if !v.has(op) {
+			return
+		}
 		a.Align(16)
 		l := a.NewLabel()
 		a.Bind(l)
@@ -22,17 +32,41 @@ func nativeEmit() (*block, error) {
 		order = append(order, op)
 		body()
 	}
+	// label is op's handler's label, for a jump to it: in a variant's
+	// block, where op's is plain's, a jump through op's table entry.
+	var far []bytecode.ROp
+	farLabels := map[bytecode.ROp]Label{}
+	var missing []bytecode.ROp
+	label := func(op bytecode.ROp) Label {
+		if l, ok := labels[op]; ok {
+			return l
+		}
+		if v.has(op) {
+			// Its handler not laid out yet: a jump to it would need a
+			// label bound later, which no handler has needed.
+			missing = append(missing, op)
+			return a.NewLabel()
+		}
+		if l, ok := farLabels[op]; ok {
+			return l
+		}
+		farLabels[op] = a.NewLabel()
+		far = append(far, op)
+		return farLabels[op]
+	}
 
-	// The entry, at the code's start: the pinned registers from the
-	// context, and the first dispatch.
-	a.Load(RBX, RDI, ncIP)
-	a.Load(R12, RDI, ncRegs)
-	a.Load(R13, RDI, ncTable)
-	a.Load(R15, RDI, ncIC)
-	a.Load(R11, RDI, ncBudget)
-	a.Load(R10, RDI, ncTagBase)
-	g.dispatch()
-	g.exitStub()
+	if v == plain {
+		// The entry, at the code's start: the pinned registers from the
+		// context, and the first dispatch.
+		a.Load(RBX, RDI, ncIP)
+		a.Load(R12, RDI, ncRegs)
+		a.Load(R13, RDI, ncTable)
+		a.Load(R15, RDI, ncIC)
+		a.Load(R11, RDI, ncBudget)
+		a.Load(R10, RDI, ncTagBase)
+		g.dispatch()
+		g.exitStub()
+	}
 
 	extra := func() {
 		h(bytecode.RBitOr, func() { g.bitReg(func() { a.Op(Or, R9, RCX, false) }) })
@@ -915,13 +949,12 @@ func nativeEmit() (*block, error) {
 	// call_method_w's (rhCallWT); deeper, Go's, which gives the frame to
 	// the callee in place.
 	for _, op := range []bytecode.ROp{bytecode.RCallWT, bytecode.RCallMWT} {
-		plain := labels[bytecode.RCallW]
 		h(op, func() {
 			a.Load(R9, RDI, ncRT)
 			a.Load(RCX, R9, offRtFrameDepth)
 			a.OpImm(Cmp, RCX, tailCallDepth, true)
 			a.Jcc(CondGE, g.exit)
-			a.Jmp(plain)
+			a.Jmp(label(bytecode.RCallW))
 		})
 	}
 	h(bytecode.RCharCodeAt, func() {
@@ -1011,11 +1044,30 @@ func nativeEmit() (*block, error) {
 		a.StoreImm(RDI, scr(15), int32(n))
 		a.Jmp(g.exit)
 	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("%s: a jump to %v before its handler", v.name, missing)
+	}
+	b := &block{at: map[bytecode.ROp]int{}, order: order}
+	if v != plain {
+		if len(order) == 0 {
+			// No handler of its own: its table is plain's.
+			return b, nil
+		}
+		// The jumps to plain's code, through the table.
+		a.Bind(g.exit)
+		a.JmpMem(R13, 8*slotExit)
+		a.Bind(g.exitRet)
+		a.JmpMem(R13, 8*slotExitRet)
+		for _, op := range far {
+			a.Bind(farLabels[op])
+			a.JmpMem(R13, 8*int32(op))
+		}
+	}
 	code, err := a.Finish()
 	if err != nil {
 		return nil, err
 	}
-	b := &block{code: code, exit: a.Offset(g.exit), exitRet: a.Offset(g.exitRet), at: map[bytecode.ROp]int{}, order: order}
+	b.code, b.exit, b.exitRet = code, a.Offset(g.exit), a.Offset(g.exitRet)
 	for _, op := range order {
 		b.at[op] = a.Offset(labels[op])
 	}

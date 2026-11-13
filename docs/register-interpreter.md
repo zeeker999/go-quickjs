@@ -700,6 +700,31 @@ the context's, and the Runtime's and a closureCode's fields, whose
 offsets the JIT's tag changes, are read relative to a base the context
 gives (`rtBase`, `ccBase`), which the test checks under each tag.
 
+**Dispatchers: architectures and variants.** The generator makes several
+native dispatchers, on two axes. The first is the architecture: amd64
+now, arm64 next, others later, each with its emitter and its files. The
+second is the variant, within an architecture: a dispatch table over the
+handlers, which a runtime picks through its contexts' table pointer
+(`ctx.table`, `R13` in the code; `nativeDispatch`). `plain` is the only
+one in builds without the JIT, and the one a runtime that does not run
+the JIT uses in builds with it. `feedback` is a runtime's that runs the
+JIT, in builds with it alone: its handlers that record the JIT's
+feedback OR the kinds of value they met into the function's feedback
+slot (below), every other handler plain's; none records yet. Mode
+tables, such as the debugger's, are to be variants too. A handler is
+generated once: plain's block holds the entry, the exit stub and every
+handler, and a variant only the handlers it overrides, in a block of its
+own beside its table (`zzzyn_native_feedback_amd64.s`, built with the
+JIT alone), whose entries point at those and at plain's handlers for
+every other operation. Its own handlers reach plain's code through the
+table: the exits through two slots after the operations', another
+handler through its operation's entry. `TestRegNativeGenerated` checks
+every file, each from the layout of its variant's build;
+`TestRegNativePlainSameWithJIT` that plain's is the same in a build with
+the JIT and without; `TestRegNativeLinked` that a binary links what the
+generator makes for its build; `TestRegNativeFeedbackSelected` that a
+runtime picks its table.
+
 **The marking rule.** A handler stores a number's word alone where the
 register held no pointer; a pointer word it stores plainly while the
 collector does not mark, and by the barrier's routine

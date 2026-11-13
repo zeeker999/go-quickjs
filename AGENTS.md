@@ -169,9 +169,11 @@ Do not manually edit generated files or their binary companions:
   the package's `zzjit_*.go` files only. After changing a method of
   `jitFeedback`, run `go generate ./internal/vm`; `TestSnapshotGenerated`
   fails while either file is out of date.
-- `internal/vm/zzzyn_native_handlers_amd64.s`, the register interpreter's
-  native handlers on amd64 and their table, machine code made with the
-  JIT's assembler by `internal/vm/internal/nativegen`
+- `internal/vm/zzzyn_native_handlers_amd64.s` and
+  `zzzyn_native_feedback_amd64.s`, the register interpreter's native
+  handlers on amd64 with their plain table, and the feedback dispatcher's
+  table and own handlers, built with the JIT alone: machine code made with
+  the JIT's assembler by `internal/vm/internal/nativegen`
   (docs/register-interpreter.md, "Native handlers"). The generator reads
   package vm's private layout -- the context, a frame, the Runtime fields
   and the constants the handlers use -- as plain numbers from
@@ -179,9 +181,10 @@ Do not manually edit generated files or their binary companions:
   build tag, `quickjs_nativelayout`, builds. After changing the emitter, or
   a layout its offsets come from, run `go generate ./internal/vm` on amd64
   (`go run ./internal/nativegen/cmd` in `internal/vm` alone; a field or a
-  constant the emitter newly reads goes in `NativeLayout` first);
-  `TestRegNativeGenerated` fails while the file is out of date, under
-  either build tag.
+  constant the emitter newly reads goes in `NativeLayout` first). It reads
+  the layout of a build without tags and with `quickjs_jit`, one per
+  variant; `TestRegNativeGenerated` fails while either file is out of
+  date.
 - `internal/vm/*_layoutpad.go` and `internal/vm/layoutpad_*.go`, the layout
   lock's pads and the constants that size them for each configuration,
   written by `internal/cmd/layoutpad` from `layoutlock.txt`'s targets.

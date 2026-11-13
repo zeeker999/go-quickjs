@@ -188,6 +188,8 @@ type nativeCtx struct {
 	states []*regState
 	// top is the top frame's state while topOK says so (nativeTop).
 	top *regState
+	// disp is the dispatcher whose table is table (nativeDispatch).
+	disp *nativeTable
 }
 
 // nativeMaxDepth is how deep the native frame stack goes.
@@ -309,7 +311,7 @@ func (r *Runtime) nativeRun(f *frame, c *regCode, start int) (Value, error) {
 		for pc >= 0 {
 			w = regAt(code, pc)
 			op = w.Op()
-			if nativeHas[op] {
+			if ctx.disp.has[op] {
 				break
 			}
 			if nativeCount {
@@ -381,7 +383,8 @@ func (r *Runtime) nativeFinish(st *regState, ctx *nativeCtx, v Value, restarted 
 func (r *Runtime) newNativeCtx(st *regState) *nativeCtx {
 	ctx := new(nativeCtx)
 	ctx.st = st
-	ctx.table = nativeTableAddr()
+	ctx.disp = r.nativeDispatch()
+	ctx.table = ctx.disp.addr
 	ctx.objBits = objectBits
 	ctx.tagBase = tagBase
 	ctx.one = 1
@@ -642,16 +645,45 @@ var nativeWB struct {
 // nativeBase is the handlers' block's address, where the code is entered.
 var nativeBase = nativeHandlersAddr()
 
-// nativeHas says which operations have a handler of their own in the
-// native table, every other's the exit stub's, which the last's is.
-var nativeHas = func() (has [256]bool) {
-	at := nativeTableAddr()
-	t := (*[256]uintptr)(nativePtr(&at))
+// nativeTable is a native dispatcher (internal/vm/internal/nativegen,
+// "Variants"): its table's address, which a context gives the code
+// (ctx.table), and which operations have a handler in it, every other's
+// entry the exit stub's.
+type nativeTable struct {
+	addr uintptr
+	has  [256]bool
+}
+
+// newNativeTable is the dispatcher whose table is at addr.
+func newNativeTable(addr uintptr) *nativeTable {
+	d := &nativeTable{addr: addr}
+	t := (*[256]uintptr)(nativePtr(&addr))
 	for op := range t {
-		has[op] = t[op] != t[len(t)-1]
+		d.has[op] = t[op] != nativeExitAddr
 	}
-	return has
+	return d
+}
+
+// nativeExitAddr is the exit stub's address: plain's table's entry of the
+// last operation, which has no handler.
+var nativeExitAddr = func() uintptr {
+	at := nativeTableAddr()
+	return (*[256]uintptr)(nativePtr(&at))[255]
 }()
+
+// nativePlain is the plain dispatcher, the only one in builds without
+// the JIT; nativeFeedback, in builds with it, a runtime's that runs the
+// JIT, whose handlers record the JIT's feedback
+// (zzzyn_native_feedback_amd64.go), and plain in builds without.
+var nativePlain = newNativeTable(nativeTableAddr())
+
+// nativeDispatch is the dispatcher r's contexts give the code.
+func (r *Runtime) nativeDispatch() *nativeTable {
+	if r.jitOn() {
+		return nativeFeedback
+	}
+	return nativePlain
+}
 
 // nativeStoreRef is jumped to by native code to store a pointer while the
 // collector marks: the slot in AX, the pointer in CX, where to go on in
