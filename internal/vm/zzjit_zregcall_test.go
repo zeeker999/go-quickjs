@@ -4,8 +4,10 @@ package vm
 
 import (
 	"fmt"
-	"runtime"
 	"testing"
+
+	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
 // regCallSrc's functions call one another natively from register code
@@ -128,15 +130,6 @@ func TestJITRegNativeCalls(t *testing.T) {
 			}
 			t.Logf("native calls %v; unwound %d, resumed %d, entries %d", native, st.Unwound, st.Resumed, st.Entries)
 			t.Logf("register code %d bytes of %d", r.jit.regBytes(), r.jitBudget())
-			if runtime.GOARCH != "amd64" {
-				// arm64's backend makes a register code's call a call of
-				// Go (mir's arm64 call): the answers, compared above, and
-				// calls of Go made from native code.
-				if st.GoCalls == 0 || st.Entries == 0 {
-					t.Errorf("no native code entered, or no call of Go made from it: %+v", st)
-				}
-				return
-			}
 			for _, name := range []string{"add", "three", "leaf3", "mid3", "fib", "depth", "goes", "Q", "R", "T", "mkAdder", "midCap", "nt"} {
 				if native[name] == 0 {
 					t.Errorf("%s: never called natively", name)
@@ -212,5 +205,66 @@ func TestJITRegExpLiteralCalls(t *testing.T) {
 			}
 			t.Logf("%+v", rts[0].RegNativeStats())
 		})
+	}
+}
+
+// TestJITRegCallsCompileForARM64 compiles again, with arm64's backend, the
+// register code regCallSrc's callers and callees were compiled to, on any
+// host: the native calls between register functions (ssa.CallSite's
+// Window), which arm64 makes as amd64 does, compile there. The macOS
+// runners run them (TestJITRegNativeCalls).
+func TestJITRegCallsCompileForARM64(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	RecordJITCompiles(true)
+	defer RecordJITCompiles(false)
+	rts := regNativeRuntimes(t, regCallSrc)
+	r := rts[0]
+	r.SetJITWarmUp(1, 1)
+	for _, name := range []string{"plain", "chain", "makes", "catches", "deep", "tails", "callsGo", "constructs", "closures", "frameOps"} {
+		fn, _ := r.GetProp(Obj(r.Global()), r.Intern(name))
+		for range 8 {
+			r.Call(fn, Undefined, []Value{Float(300)})
+		}
+	}
+	jitParityLog.Lock()
+	seen := jitParityLog.seen[r]
+	jitParityLog.Unlock()
+	windows, fns := 0, 0
+	for _, cl := range seen {
+		e := r.jit.regCache[r.jitKeyOf(cl.fn)]
+		if e == nil || e.p == nil || e.code == nil {
+			continue
+		}
+		p := e.p
+		f, err := ssa.BuildWith(p, r.jitRegFeedbackFor(cl, p))
+		if err != nil {
+			continue
+		}
+		// As jitRegCompile lays the register frame out.
+		f.FrameLocals = p.Regs
+		f.Scratch = p.Locals - (p.UpvalueBase + p.Upvalues)
+		f.ThisSlot = -1
+		f.Params, f.StartOnly = p.ParamBase+p.Params, false
+		f.Cells = p.Cells
+		f.CallEntry = true
+		ssa.Optimize(f)
+		for _, b := range f.Blocks {
+			for _, v := range b.Values {
+				if v.Op == ssa.OpCall && len(v.Calls()) != 0 && v.Calls()[0].Window != 0 && v.Calls()[0].Go == 0 {
+					windows++
+				}
+			}
+		}
+		if _, err := mir.CompileARM64(f, jitEncoding); err != nil {
+			t.Errorf("%s: %v", cl.fn.Name, err)
+			continue
+		}
+		fns++
+	}
+	t.Logf("%d functions compiled for arm64, %d native calls of register code", fns, windows)
+	if windows == 0 {
+		t.Error("no native call of register code compiled")
 	}
 }

@@ -1490,8 +1490,9 @@ callees are under way, it makes each level's frame as `regEnterW` would
 While Go runs beside them, every level's code is pinned (`jitRegEntry`'s
 `levels`): the cache neither drops it nor compiles the function again until
 the level is done, so that the code a level runs is its function's in the
-cache for as long as it runs. On arm64 the backend makes such a call a call
-of Go for now.
+cache for as long as it runs. Both backends make such a call natively, the
+same way (`mir`'s `call`, `windowSetup`): a change to how register code is
+compiled lands in amd64's and arm64's together.
 
 ## The execution boundary
 
