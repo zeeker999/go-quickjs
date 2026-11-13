@@ -155,13 +155,13 @@ func (r *Runtime) jitRegHot(cl *closure, c *regCode) *jitRegEntry {
 			// they hold, a site that knew nothing then knowing a shape now
 			// -- as V8's NotifyICChanged finds and the stack form's code
 			// learns (jitFeedbackMark): compiled again for it once it has
-			// run jitInvocationsAfterICUpdate invocations' worth more, as
+			// run the runtime's jitICThreshold invocations' worth more, as
 			// the stack form's budget is raised to: a sample's worth where
-			// samples are the interrupt budget's, a sample each where every
-			// call is one (jitRegStressSample).
+			// samples are the interrupt budget's, as many samples where
+			// every call is one (jitRegStressSample).
 			e.icWait = 1
 			if r.jitCallThreshold <= 1 {
-				e.icWait = jitInvocationsAfterICUpdate
+				e.icWait = max(1, int(r.jitICThreshold))
 			}
 		}
 		if e.icWait != 0 {

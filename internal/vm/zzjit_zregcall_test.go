@@ -4,6 +4,7 @@ package vm
 
 import (
 	"fmt"
+	"runtime"
 	"testing"
 )
 
@@ -127,6 +128,15 @@ func TestJITRegNativeCalls(t *testing.T) {
 			}
 			t.Logf("native calls %v; unwound %d, resumed %d, entries %d", native, st.Unwound, st.Resumed, st.Entries)
 			t.Logf("register code %d bytes of %d", r.jit.regBytes(), r.jitBudget())
+			if runtime.GOARCH != "amd64" {
+				// arm64's backend makes a register code's call a call of
+				// Go (mir's arm64 call): the answers, compared above, and
+				// calls of Go made from native code.
+				if st.GoCalls == 0 || st.Entries == 0 {
+					t.Errorf("no native code entered, or no call of Go made from it: %+v", st)
+				}
+				return
+			}
 			for _, name := range []string{"add", "three", "leaf3", "mid3", "fib", "depth", "goes", "Q", "R", "T", "mkAdder", "midCap", "nt"} {
 				if native[name] == 0 {
 					t.Errorf("%s: never called natively", name)

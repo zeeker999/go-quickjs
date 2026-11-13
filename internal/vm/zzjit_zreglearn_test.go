@@ -49,6 +49,20 @@ func regLearnRun(r *Runtime, k int) string {
 	return regNativeShow(r, Float(s), nil)
 }
 
+// jitRegLearnPlain has r tier up as it does with no QJS_JIT_STRESS, which
+// the learning TestJITRegPolymorphicLearned compares is written for: each
+// form's code compiled once its sites' caches know the first shape, then
+// left at the second's. Under the stress each form's first code is
+// compiled at its first call, a scan before any cache knew a shape, and
+// what each then learns depends on when its compiles happen -- in the
+// background or at once, at which check installed -- not on what its
+// exits teach it.
+func jitRegLearnPlain(r *Runtime) {
+	r.jitStress = jitStressConfig{}
+	r.jitCallThreshold, r.jitICThreshold = jitInvocationsForMaglev, jitInvocationsAfterICUpdate
+	r.interruptCounter = interruptCheckInterval
+}
+
 // regLearnSite is the Property answer for the first instruction of op in
 // the program the code of the global function name of r's was compiled
 // from: of its register code where reg says, of its stack code otherwise.
@@ -88,6 +102,7 @@ func regLearnSite(t *testing.T, r *Runtime, name string, op ir.Op, reg bool) ssa
 // the stack form's code is, from what each learned at its exits.
 func TestJITRegPolymorphicLearned(t *testing.T) {
 	rts := regNativeRuntimes(t, regLearnSrc)
+	jitRegLearnPlain(rts[0])
 	var got [2]string
 	for i, r := range rts {
 		got[i] = regLearnRun(r, 3000)
@@ -104,16 +119,11 @@ func TestJITRegPolymorphicLearned(t *testing.T) {
 	SetJITRegTier(false)
 	sr := New(Config{JIT: true})
 	t.Cleanup(sr.Close)
+	jitRegLearnPlain(sr)
 	if _, err := sr.Run(compileForTest(t, regLearnSrc)); err != nil {
 		t.Fatal(err)
 	}
 	regLearnRun(sr, 3000)
-	// Its compiles handed to the background (QJS_JIT_STRESS's background)
-	// installed before its code is read: the register form's are made at
-	// once.
-	for sr.jit != nil && sr.jit.inFlight() {
-		sr.jitDrain()
-	}
 	for _, c := range []struct {
 		name string
 		op   ir.Op

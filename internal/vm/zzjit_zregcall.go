@@ -558,6 +558,11 @@ func (r *Runtime) jitRegUnwind(idx int) (Value, error) {
 			rpc, _ := jit.CallPC(c)
 			l.pc = int(rpc)
 		} else {
+			if c.ExitKind == abi.ExitTable {
+				// An exit that left its frame and its fields to Go, which
+				// writes them before they are read.
+				s.ssaRecords += uint64(s.exitScratch.Apply(c))
+			}
 			l.pc = int(c.ExitPC)
 		}
 		c.Live, c.ReturnTo = 0, 0

@@ -1394,10 +1394,11 @@ threshold, which makes every call a sample), and its code is kept on its
 template's `closureCode` (`jitReg`). A sample of a function with code
 whose caches' feedback changed since it was compiled -- what they hold,
 the stack form's `jitFeedbackMark`, as V8's `NotifyICChanged` finds it --
-has it compiled again (`jitRegReopt`) once it has run
-`jitInvocationsAfterICUpdate` invocations' worth more, as the stack form's
-budget is raised to -- a sample's worth where samples are the interrupt
-budget's, a sample each where every call is one: code compiled before a
+has it compiled again (`jitRegReopt`) once it has run the runtime's
+`jitICThreshold` invocations' worth more (`jitInvocationsAfterICUpdate`,
+1 under `QJS_JIT_STRESS`'s threshold), as the stack form's budget is
+raised to -- a sample's worth where samples are the interrupt budget's,
+as many samples where every call is one: code compiled before a
 site's cache knew a shape reads it by a scan, which never leaves native
 code to learn one. Plain functions, methods, arrows,
 accessors and classes' constructors of the form's own layout are compiled
