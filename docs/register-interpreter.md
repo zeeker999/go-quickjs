@@ -16,12 +16,12 @@ forms went badly and the reasons decide most of what follows.
 
 ## Status
 
-The register interpreter is the default on amd64, where its handlers are
-native (`internal/vm/zzzyn_native_*`): every function is compiled to
-register code and run as it, none falling back to the old tiers. Other
-architectures, arm64 included, keep the stack interpreter and the tree
-tier by default, and move over as their native handlers land; their
-register code runs on the Go handler table (`zzreg_table*.go`), which is
+The register interpreter is the default on amd64 and arm64, where its
+handlers are native (`internal/vm/zzzyn_native_*`): every function is
+compiled to register code and run as it, none falling back to the old
+tiers. Other architectures keep the stack interpreter and the tree tier
+by default, and move over as their native handlers land; their register
+code runs on the Go handler table (`zzreg_table*.go`), which is
 slower than the tiers it would replace. The default is one constant an
 architecture, `regArch` in `internal/bytecode/regdefault_*.go`, read
 through `bytecode.RegDefault`.
@@ -36,8 +36,9 @@ is shared between the two. This stays until the JIT reads register code
 `QJS_REG` in the environment overrides the default: `QJS_REG=0` runs the
 old tiers everywhere, `QJS_REG=1` the register interpreter everywhere. The
 first is temporary, for comparing with the tiers being replaced, and goes
-with them; the second is how arm64 is tested until it is the default there.
-`QJS_NONATIVE=1` runs register code on the Go handlers on amd64 too.
+with them; the second is how an architecture without native handlers is
+tested. `QJS_NONATIVE=1` runs register code on the Go handlers on amd64
+and arm64 too.
 
 ## The measure
 
@@ -578,11 +579,13 @@ in registers, so the state's fields are loads.
 
 ## Native handlers
 
-On amd64 a register frame runs by native threaded handlers
-(`zzzyn_native_amd64.go`), machine code for the hot operations over the
+On amd64 and arm64 a register frame runs by native threaded handlers
+(`zzzyn_native_run.go`), machine code for the hot operations over the
 same instructions and the same frames; the Go table is what they leave
-work to, and every other architecture's interpreter. `runReg` hands its
-frame to `nativeRun` before its loop; `QJS_NONATIVE` set in the
+work to, and every other architecture's interpreter. arm64's are amd64's
+handler for handler, in its instructions (nativegen's `arm64*.go`);
+what follows says amd64's registers, and arm64's where they differ.
+`runReg` hands its frame to `nativeRun` before its loop; `QJS_NONATIVE` set in the
 environment (read once, `regNativeOn`) keeps the frames in the Go table's
 loop, to compare the two and as an escape hatch.
 
@@ -594,7 +597,16 @@ handler needs: `RBX` the instruction's address, `R12` the frame's
 registers, `R13` the native table, `R15` the closure's caches, `R11` the
 back-edge budget, `R10` the least tag, `RDI` the context; `RAX` holds the
 instruction word, and `RCX`, `RDX`, `RSI`, `R8`, `R9` and three SSE
-registers are a handler's scratch.
+registers are a handler's scratch. On arm64 the dispatch is four
+instructions too -- the word loaded, its operation extracted, the entry
+loaded by a scaled index, the jump -- and the pinned registers are `R19`
+to `R25` in that order, `R0` the instruction word, `R1` to `R7`, `R16`, `R17` and
+`D0` to `D3` the scratch; `R15` is kept free as amd64's `R14` is. The code
+uses `R26` only for the func value of an exit's call and `R27` only as
+the encoder's temporary, and never touches `R18` (the platform's), `R28`
+(the goroutine), `R29` (the frame pointer) or `R30`, which holds
+`nativeEnter`'s return to `nativeRun` throughout, so that a profile taken
+in the code, and the trampolines' frames, unwind to it.
 
 **What is native.** The numbers' arithmetic, increments, `-x`, `+x`,
 the bitwise operators of any number (by ToInt32) and the
@@ -641,7 +653,10 @@ callee in place (`regTailTo`); where it is the base frame, `nativeRun`
 goes on with the callee's code in the same code entry
 (`nativeRestart`), rather than ending it for `regRestartRun` to run each
 callee in an entry of its own. A fast path that misses jumps to
-the exit; nothing is written before it does.
+the exit; nothing is written before it does. arm64 answers one case more:
+NaN made an integer -- ToInt32's 0, an integer typed array's element 0
+-- where FCVTZS gives 0 and CVTTSD2SI no integer; what has no int64 is
+told by the limits FCVTZS saturates to, and exits as on amd64.
 
 **The exit stub.** An operation of no native handler has the exit stub's
 address in the table, and every miss jumps to it. It writes the
@@ -665,7 +680,12 @@ Go's internal register convention (ABIInternal) on amd64, which the
 exit stub and the trampoline write by hand: the four arguments in `AX`,
 `BX`, `CX` and `DI`, the func value in `DX`, the result in `AX`, the
 goroutine in `R14`, `X15` zero, and the arguments' spill room in the
-caller's frame. Go does not promise it across releases;
+caller's frame; on arm64 the arguments in `R0` to `R3`, the func value
+in `R26`, the result in `R0`, the goroutine in `R28`, the spill room at
+`8(RSP)` to `40(RSP)`, and the word below the stack pointer `nativeCallH`
+is entered with left alone: it holds `nativeRun`'s caller's frame
+pointer, which Go's arm64 frames save at `-8(RSP)`. Go does not promise
+the convention across releases;
 `TestRegNativeCallHConvention` calls a Go handler through `nativeCallH`
 and fails, saying which part differs, where the toolchain's convention
 is not this one, and CI runs it under Go 1.24 and Go 1.27. The call made
@@ -696,10 +716,12 @@ was read once a host had dropped that realm and it was collected
 
 **Generation and the shared-code rules.** The handlers are written with
 the JIT's assembler by a generator, `internal/vm/internal/nativegen`, and
-assembled into the binary as one TEXT symbol of bytes and the table as
-GLOBL/DATA (`zzzyn_native_handlers_amd64.s`, `go generate
-./internal/vm`); `TestRegNativeGenerated` fails while the file is not
-what the generator makes. The generator does not import package vm: it
+assembled into the binary as one TEXT symbol of machine code -- BYTE
+directives on amd64, WORD directives on arm64, whose assembler takes
+nothing else -- and the table as GLOBL/DATA
+(`zzzyn_native_handlers_<arch>.s`, `go generate ./internal/vm`);
+`TestRegNativeGenerated` fails while a file is not what the generator
+makes. The generator does not import package vm: it
 reads vm's private layout -- the context's, the frame records', the
 Runtime's and the other types' offsets, the constants the handlers test
 against -- as plain numbers, which vm's `NativeLayout` gives in a build
@@ -716,24 +738,29 @@ gives (`rtBase`, `ccBase`), which the test checks under each tag.
 
 **Dispatchers: architectures and variants.** The generator makes several
 native dispatchers, on two axes. The first is the architecture: amd64
-now, arm64 next, others later, each with its emitter and its files. The
+and arm64 now, others later, each with its emitter and its files.
+arm64's reuses the JIT's arm64 encoder (`internal/jit/asm/arm64`) and is
+not layout-tuned: the layout lock and its pads are amd64's alone. The
 second is the variant, within an architecture: a dispatch table over the
 handlers, which a runtime picks through its contexts' table pointer
-(`ctx.table`, `R13` in the code; `nativeDispatch`). `plain` is the only
-one in builds without the JIT, and the one a runtime that does not run
-the JIT uses in builds with it. `feedback` is a runtime's that runs the
+(`ctx.table`, `R13` in the code, `R21` on arm64; `nativeDispatch`).
+`plain` is the only one in builds without the JIT, and the one a runtime
+that does not run the JIT uses in builds with it. `feedback` is a runtime's that runs the
 JIT, in builds with it alone: its handlers that record the JIT's
 feedback OR the kinds of value they met into the function's feedback
 slot (below), every other handler plain's; none records yet. Mode
 tables, such as the debugger's, are to be variants too. A handler is
 generated once: plain's block holds the entry, the exit stub and every
 handler, and a variant only the handlers it overrides, in a block of its
-own beside its table (`zzzyn_native_feedback_amd64.s`, built with the
-JIT alone), whose entries point at those and at plain's handlers for
+own beside its table (`zzzyn_native_feedback_<arch>.s`, built with
+the JIT alone), whose entries point at those and at plain's handlers for
 every other operation. Its own handlers reach plain's code through the
 table: the exits through two slots after the operations', another
-handler through its operation's entry. `TestRegNativeGenerated` checks
-every file, each from the layout of its variant's build;
+handler through its operation's entry -- on arm64, which has no jump
+through memory, by a load of the entry into `R16` and a jump through
+it. `TestRegNativeGenerated` checks every file, each from the layout of
+its variant's build (on linux arm64, whose build has no JIT, every file
+but the feedback dispatchers', which the hosts with the JIT check);
 `TestRegNativePlainSameWithJIT` that plain's is the same in a build with
 the JIT and without; `TestRegNativeLinked` that a binary links what the
 generator makes for its build; `TestRegNativeFeedbackSelected` that a
@@ -758,8 +785,8 @@ a runtime without the JIT runs handlers that record nothing. Should a
 record need a vector of its own -- a slot a site, as Ignition has -- the
 context has room for its pointer (`fv`, none yet), which the frame record
 would keep and a call switch as it switches the closure's caches; and no
-handler uses `R14`, which is kept for it to be pinned in, so that a
-handler's note is one OR to memory and spills nothing.
+handler uses `R14` (`R15` on arm64), which is kept for it to be pinned
+in, so that a handler's note is one OR to memory and spills nothing.
 `TestRegNativeCaches` (internal/regdiff) runs the register interpreter's
 corpus natively and by the Go table and checks that the caches the JIT
 reads -- the property sites, the global sites' epochs, the call sites'
@@ -1087,8 +1114,8 @@ send code.
 ### The plan now (2026-11-13)
 
 **Where it stands.**
-- The register interpreter is the default on amd64 for runtimes without
-  the JIT, on native threaded handlers that `internal/vm/internal/nativegen`
+- The register interpreter is the default on amd64 and arm64 for runtimes
+  without the JIT, on native threaded handlers that `internal/vm/internal/nativegen`
   generates ("Native handlers"). Stages 1 and 2 are done: no function is
   refused.
 - The JIT reads register code behind `QJS_JITREG=1`
@@ -1105,10 +1132,10 @@ for work that runs alongside on separate branches.
    functions; the feedback snapshot for background compiles. Then the
    switch-over: JIT runtimes run the register tier, and the JIT's
    stack-form path is removed.
-2. **The arm64 native port.** An arm64 emitter in nativegen, the same
-   handlers and tables as amd64's, then `regArch` turned on for arm64.
-   Correctness under qemu and on CI's Linux and macOS arm64 runners; one
-   timing on arm64 hardware at the end.
+2. **The arm64 native port** (done, but its timing). An arm64 emitter
+   in nativegen, the same handlers and tables as amd64's, and `regArch`
+   on for arm64; checked under qemu and on CI's Linux and macOS arm64
+   runners. One timing on arm64 hardware is left.
 3. **Optimization.** The benchmark gaps left against the old tiers and
    against the comparison engine: re-entering register code from Go
    (callbacks, generator resumptions, call-cache misses), CodeLoad's
