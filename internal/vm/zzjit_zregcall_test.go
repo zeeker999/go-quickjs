@@ -1,4 +1,4 @@
-//go:build quickjs_jit && !android && !ios && ((linux && amd64) || (windows && amd64) || (darwin && arm64))
+//go:build quickjs_jit && !android && !ios && ((linux && amd64) || (windows && amd64) || ((darwin || linux) && arm64))
 
 package vm
 
@@ -215,8 +215,8 @@ func TestJITRegExpLiteralCalls(t *testing.T) {
 // TestJITRegCallsCompileForARM64 compiles again, with arm64's backend, the
 // register code regCallSrc's callers and callees were compiled to, on any
 // host: the native calls between register functions (ssa.CallSite's
-// Window), which arm64 makes as amd64 does, compile there. The macOS
-// runners run them (TestJITRegNativeCalls).
+// Window), which arm64 makes as amd64 does, compile there. arm64 hosts
+// run them (TestJITRegNativeCalls).
 func TestJITRegCallsCompileForARM64(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")

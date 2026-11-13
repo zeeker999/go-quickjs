@@ -11,8 +11,8 @@ are native code generated for each architecture, as V8's Ignition runs
 bytecode -- not QuickJS's stack bytecode.
 
 No cgo, no WebAssembly, no C toolchain, the JIT included. It cross-compiles
-anywhere Go does; the JIT runs on `linux/amd64`, `windows/amd64` and
-`darwin/arm64`, and elsewhere the engine runs without it.
+anywhere Go does; the JIT runs on `linux/amd64`, `windows/amd64`,
+`darwin/arm64` and `linux/arm64`, and elsewhere the engine runs without it.
 
 ```go
 rt := quickjs.New()
@@ -61,16 +61,17 @@ measurement and [Not implemented](docs/status.md#not-implemented) for what is mi
 
 ## Performance
 
-On amd64, functions run in the register interpreter, whose handlers are
-native code generated for it ([its design](docs/register-interpreter.md)).
-On other architectures, and in a runtime with the JIT, they still run in
-the stack bytecode interpreter the engine started with, after QuickJS's,
-most of them as trees of Go closures built from their bytecode. Both move
-to the register interpreter -- other architectures as their native
-handlers land, the JIT once it compiles from register code -- and the
-stack interpreter is then removed. The JIT, which is optional and
-experimental, compiles hot functions to native code on `linux/amd64`,
-`windows/amd64` and `darwin/arm64`. It follows V8's optimizing compilers:
+On amd64 and arm64, functions run in the register interpreter, whose
+handlers are native code generated for it ([its
+design](docs/register-interpreter.md)). On other architectures, and in a
+runtime with the JIT, they still run in the stack bytecode interpreter the
+engine started with, after QuickJS's, most of them as trees of Go
+closures built from their bytecode. Both move to the register interpreter
+-- other architectures as their native handlers land, the JIT once it
+compiles from register code -- and the stack interpreter is then
+removed. The JIT, which is optional and experimental, compiles hot
+functions to native code on `linux/amd64`, `windows/amd64`,
+`darwin/arm64` and `linux/arm64`. It follows V8's optimizing compilers:
 it speculates on what the inline caches have seen, inlines calls, and falls
 back to the interpreter when a speculation fails. It needs both a build
 with `-tags quickjs_jit` and a runtime made with `quickjs.WithJIT()` (or
