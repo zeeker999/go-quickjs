@@ -2530,6 +2530,11 @@ type InlineSite struct {
 	// (Upvalues), and its scratch slots. Params is 2 plus its parameters,
 	// ThisSlot -1, and its result goes to the call's register (Dest).
 	Window bool
+	// FunctionCell, for such a callee inlined at a property's read or
+	// write whose accessor it is (AccessorSite's Inline), is the address
+	// of a cell holding its function object, its window's register 0: no
+	// operand of the read's is the function.
+	FunctionCell uintptr
 }
 
 // Inlining's bounds, by size alone, as V8's JSInliningHeuristic has them:
@@ -3941,6 +3946,21 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 	if !ok || !inlineFits(*total, len(site.Program.Code)) ||
 		site.Argc < 0 || site.Params < 0 || pc+1 >= len(b.p.Code) || !reachable(b.p, pc+1) {
 		return nil, false
+	}
+	if site.Window && isAccessor {
+		// A register callee that is the accessor a register read or write
+		// calls (AccessorSite's Inline): its window the function, from
+		// its cell, the receiver and a setter's value (accessorInline);
+		// a getter's result the read's register.
+		if !site.Method || site.Argc != b2i(accessor.Setter) || site.Construct || site.Restart || site.Forward || site.Arguments ||
+			site.ReadsArguments || site.LexThis || site.Captured != nil || site.ThisSlot >= 0 || site.Params < 2 || site.FunctionCell == 0 {
+			return nil, false
+		}
+		result := b.cur.base + b.p.Code[pc].Dest
+		if accessor.Setter {
+			result = -1
+		}
+		return b.inlineFrame(site, calls, givenCalls, total, result, pc)
 	}
 	if in := &b.p.Code[pc]; in.Window || site.Window {
 		// Register code's call of a register callee (InlineSite's Window):

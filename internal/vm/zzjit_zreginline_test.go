@@ -18,7 +18,9 @@ import (
 // from the exit's, finishing them in the interpreter; and callees inlined
 // in inlined callees, left two levels deep, throwing through both; and
 // constructions inlined, their receivers from pools, left where a callee
-// meets a new shape or throws.
+// meets a new shape or throws; and getters and setters inlined at the
+// reads and writes that call them, a class's and a prototype's, left
+// where a getter meets a new shape or throws.
 const regInlineSrc = `
 function P(x) { this.x = x }
 P.prototype.get = function () { return this.x };
@@ -59,6 +61,19 @@ function constructs(n) {
 		try { s += new Vs(i % 50 == 49 ? null : a).v } catch (e) { m = e.constructor.name }
 	}
 	return s + m + (new V(1, 2) instanceof V) + Object.keys(new Vr(3)) + Object.getPrototypeOf(new Vs(a)).constructor.name;
+}
+class Pt { constructor(x) { this._x = x; this.o = { v: 1 } } get x() { return this._x } set x(v) { this._x = v } get nn() { return this.o.v } }
+var proto = { get g() { return this.k * 2 } };
+function accessors(n) {
+	var p = new Pt(1), q = Object.create(proto), s = 0, m = "";
+	q.k = 3;
+	for (var i = 0; i < n; i++) {
+		p.x = i;
+		s += p.x + q.g;
+		p.o = i % 50 == 49 ? null : i % 61 == 60 ? { w: 0, v: 2 } : { v: 1 };
+		try { s += p.nn } catch (e) { m = e.constructor.name }
+	}
+	return s + m;
 }
 function guarded(o) { try { return mid(o) } catch (e) { return -1 } }
 function throws2(n) {
@@ -101,7 +116,7 @@ func TestJITRegInline(t *testing.T) {
 				name    string
 				n       float64
 				unwound uint64
-			}{{"inlines", 2000, 0}, {"shapes", 2000, 40}, {"throws", 1000, 220}, {"callsGo", 600, 60}, {"nested", 2000, 60}, {"throws2", 1000, 700}, {"constructs", 1000, 220}} {
+			}{{"inlines", 2000, 0}, {"shapes", 2000, 40}, {"throws", 1000, 220}, {"callsGo", 600, 60}, {"nested", 2000, 60}, {"throws2", 1000, 700}, {"constructs", 1000, 220}, {"accessors", 1000, 220}} {
 				var got [2]string
 				before := rts[0].RegNativeStats().Unwound
 				for i, r := range rts {
@@ -125,13 +140,19 @@ func TestJITRegInline(t *testing.T) {
 				t.Error("no callee inlined")
 			}
 			// constructs' code inlines its constructions -- V's, Vr's, Vs's
-			// -- as the stack form's does.
-			fn, _ := r.GetProp(Obj(r.Global()), r.Intern("constructs"))
-			if cl := fn.Object().fn().closure; cl != nil {
-				if e := r.jit.regCache[r.jitKeyOf(cl.fn)]; e == nil || e.p == nil {
-					t.Error("constructs: not compiled")
-				} else if f, err := ssa.BuildWith(e.p, r.jitRegFeedbackFor(cl, e.p)); err != nil || len(f.Inlined) < 3 {
-					t.Errorf("constructs: %v, %d callees inlined", err, len(f.Inlined))
+			// -- and accessors' its getters and setters, as the stack
+			// form's does.
+			for _, c := range []struct {
+				name string
+				n    int
+			}{{"constructs", 3}, {"accessors", 3}} {
+				fn, _ := r.GetProp(Obj(r.Global()), r.Intern(c.name))
+				if cl := fn.Object().fn().closure; cl != nil {
+					if e := r.jit.regCache[r.jitKeyOf(cl.fn)]; e == nil || e.p == nil {
+						t.Errorf("%s: not compiled", c.name)
+					} else if f, err := ssa.BuildWith(e.p, r.jitRegFeedbackFor(cl, e.p)); err != nil || len(f.Inlined) < c.n {
+						t.Errorf("%s: %v, %d callees inlined", c.name, err, len(f.Inlined))
+					}
 				}
 			}
 			// The same code, arm64's backend's, compiled on any host.

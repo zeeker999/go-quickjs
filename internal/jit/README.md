@@ -1527,7 +1527,14 @@ in it as in the root: an exit inside it runs its register instruction
 whole again (`atomicInstruction`, each frame's `readCalls`). Its own
 calls are asked the same way, of its own caches and what its code
 learned, and inlined in it as deep as the builder allows
-(`maxInlineDepth`); accessors are not inlined yet.
+(`maxInlineDepth`). A getter or setter a register read or write calls
+(`jitRegFeedback`'s `Accessor`, `accessorOf`, the stack form's cases) is
+inlined there the same way (`AccessorSite`'s `Inline`), once the receiver
+and the accessor are checked (`accessorOp`): its window its function,
+from a cell (`InlineSite`'s `FunctionCell`), the receiver and a setter's
+value; a getter's result the read's register. An accessor not inlined is
+still made by Go at an exit: register code has no native call of one
+yet.
 
 An exit inside an inlined callee writes the caller's state at the call --
 a host exit there -- and the callee's window past the caller's slots,

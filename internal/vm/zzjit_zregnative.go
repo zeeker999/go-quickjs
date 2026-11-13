@@ -877,8 +877,14 @@ func (r *Runtime) regFinishCall(f *frame, c *regCode, wb, rpc int, v Value, err 
 	k := regKept{pc: rpc + 1}
 	if err == nil {
 		dest := int(w.B())
-		if op := w.Op(); op == bytecode.RInstanceOf || op == bytecode.RTypeof {
+		switch w.Op() {
+		case bytecode.RInstanceOf, bytecode.RTypeof, bytecode.RGetProp:
+			// R[A]'s: a getter's, called for get_prop (an accessor
+			// inlined, jitRegInlined), as typeof's and instanceof's.
 			dest = int(w.A())
+		case bytecode.RSetProp:
+			// A setter's result, dropped.
+			return k.pc, true, nil
 		}
 		r.stack[wb+dest] = v
 		return k.pc, true, nil

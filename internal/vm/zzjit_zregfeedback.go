@@ -216,8 +216,45 @@ func (f *jitRegFeedback) Accessor(pc int) (ssa.AccessorSite, bool) {
 	if !ok || cache == nil || !write && !plain {
 		return ssa.AccessorSite{}, false
 	}
-	a, _, _, ok := f.fb.accessorOf(rpc, cache, key, write)
-	return a, ok
+	a, callee, cl, ok := f.fb.accessorOf(rpc, cache, key, write)
+	if !ok || cl == nil {
+		return a, ok
+	}
+	if site, ok := f.accessorInline(callee, cl, write); ok {
+		a.Inline = &site
+	}
+	return a, true
+}
+
+// accessorInline is the getter or setter callee, cl's function object, of
+// a register read or write, to inline (AccessorSite's Inline), as a
+// method's call of it is (Inline): register code native callers may call,
+// not the compiled function's, nor an arrow; its window the function, from
+// a cell (InlineSite's FunctionCell), the receiver, a setter's value.
+func (f *jitRegFeedback) accessorInline(callee *Object, cl *closure, write bool) (ssa.InlineSite, bool) {
+	r := f.fb.r
+	argc := jitB2i(write)
+	if cl.reg == nil || !r.jitRegCallable(callee, cl, cl.reg, argc) || callee.fn().arrow || cl.fn == f.fb.fn || cl.fn == f.fb.keep().fn ||
+		jitNoInline != nil && jitNoInline(cl.fn) {
+		return ssa.InlineSite{}, false
+	}
+	p, err := jitcompile.LowerRegInline(cl.reg.rc, cl.fn)
+	if err != nil || p.Validate() != nil {
+		return ssa.InlineSite{}, false
+	}
+	r.jitRegSeenFeedback(cl, cl.reg)
+	k := f.fb.keep()
+	cell := new(Value)
+	*cell = Obj(callee)
+	k.cells = append(k.cells, cell)
+	k.holders = append(k.holders, callee)
+	k.inlined = append(k.inlined, cl)
+	return ssa.InlineSite{
+		Program: p, Feedback: &jitRegFeedback{fb: &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitKeyOf(cl.fn)), root: k}, rc: cl.fn.RegCode(), p: p},
+		Callee: uintptr(unsafe.Pointer(callee)), Closure: uintptr(unsafe.Pointer(cl)),
+		Argc: argc, Method: true, Params: 2 + int(cl.reg.params), ThisSlot: -1, Window: true,
+		Upvalues: jitUpvalueCells(cl), FunctionCell: uintptr(unsafe.Pointer(cell)),
+	}, true
 }
 
 // Global is ssa.Feedback's: the global a read, a write or a strict
