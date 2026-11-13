@@ -86,20 +86,22 @@ func (f *jitRegFeedback) regCallSites(pc int, w bytecode.RInstr, argc int, metho
 	rpc := int32(f.p.Origin[pc])
 	newW := w.Op() == bytecode.RNewW
 	var sites []ssa.CallSite
+	// The closures of the sites, by index.
+	var closures []*closure
 	add := func(o *Object, cl *closure, rc *regCode, pool *abi.ObjectPool, byCode bool) {
 		for i, s := range sites {
 			if s.Callee == uintptr(unsafe.Pointer(o)) || s.ByCode != 0 && jitRegSameCode(s, cl) {
 				return
 			}
-			if byCode && s.Closure != 0 && jitRegSameClosureCode((*closure)(unsafe.Pointer(s.Closure)), cl) {
+			if byCode && jitRegSameClosureCode(closures[i], cl) {
 				// The same function's, checked by its code from here.
-				sites = slices.Delete(sites, i, i+1)
+				sites, closures = slices.Delete(sites, i, i+1), slices.Delete(closures, i, i+1)
 				break
 			}
 		}
 		if len(sites) < jitCallTargets {
 			if site, ok := f.regCallSite(pc, o, cl, rc, argc, method, pool, byCode); ok {
-				sites = append(sites, site)
+				sites, closures = append(sites, site), append(closures, cl)
 			}
 		}
 	}

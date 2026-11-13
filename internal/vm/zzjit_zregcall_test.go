@@ -138,3 +138,69 @@ func TestJITRegNativeCalls(t *testing.T) {
 		})
 	}
 }
+
+// regLitSrc calls RegExp literals' exec and test in loops, which register
+// code makes one instruction of (regexp_lit): lowered as the stack form's
+// code is (compile's regexpLit), the literal from its pool, its method
+// read, called; then RegExp.prototype.exec replaced, and a getter put in
+// its place, which the code was not compiled for.
+const regLitSrc = `
+function lits(n, s) {
+	var k = 0, m = "";
+	for (var i = 0; i < n; i++) {
+		var r = /a(b+)?c/.exec(s + i);
+		if (r) { k += r.length; m = r[1] || m }
+		if (/\d$/.test(s + i)) k++;
+		if (/x/.exec(s)) k += 2;
+	}
+	return k + m;
+}
+function swap() { var e = RegExp.prototype.exec; RegExp.prototype.exec = function (t) { return e.call(this, t + "c") }; return e }
+function getter() { var e = RegExp.prototype.exec; Object.defineProperty(RegExp.prototype, "exec", { get() { return e }, configurable: true }) }
+`
+
+// TestJITRegExpLiteralCalls runs regLitSrc's lits natively and as ordinary
+// calls and compares them: Go makes no regexp_lit whole at host exits.
+func TestJITRegExpLiteralCalls(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regLitSrc)
+			rts[0].SetJITWarmUp(1, 1)
+			run := func(name string, args ...Value) {
+				t.Helper()
+				var got [2]string
+				for i, r := range rts {
+					fn, _ := r.GetProp(Obj(r.Global()), r.Intern(name))
+					v, err := r.Call(fn, Undefined, args)
+					got[i] = regNativeShow(r, v, err)
+				}
+				if got[0] != got[1] {
+					t.Errorf("%s: with the JIT %q, without %q", name, got[0], got[1])
+				}
+			}
+			for range 6 {
+				run("lits", Float(3000), Str(NewString("abbc")))
+			}
+			// Of 54,000 made: all were left to Go before; now only where a
+			// pool runs out, or before the code is compiled.
+			if n := rts[0].RegNativeStats().HostOps["regexp_lit"]; n*100 > 54000 {
+				t.Errorf("%d regexp_lit left to Go at host exits", n)
+			}
+			run("swap")
+			for range 3 {
+				run("lits", Float(500), Str(NewString("abb")))
+			}
+			run("getter")
+			for range 3 {
+				run("lits", Float(500), Str(NewString("abbc")))
+			}
+			t.Logf("%+v", rts[0].RegNativeStats())
+		})
+	}
+}

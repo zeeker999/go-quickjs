@@ -85,6 +85,9 @@ func (f *jitRegFeedback) propertyAt(pc int) (rpc int, key Atom, c *propCache, wr
 	if !ok || f.fb.cl == nil {
 		return
 	}
+	if w.Op() == bytecode.RLit {
+		return f.regLitProperty(pc, w, op)
+	}
 	switch w.Op() {
 	case bytecode.RGetProp, bytecode.RGetMethod, bytecode.RGetMethodW, bytecode.RSetProp, bytecode.RAddProp, bytecode.RAddPropI:
 	default:
@@ -105,6 +108,43 @@ func (f *jitRegFeedback) propertyAt(pc int) (rpc int, key Atom, c *propCache, wr
 	method = w.Op() == bytecode.RGetMethod || w.Op() == bytecode.RGetMethodW
 	plain = w.Op() == bytecode.RGetProp
 	return int(f.p.Origin[pc]), key, c, write, method, plain, true
+}
+
+// regLitProperty is propertyAt's for regexp_lit's read of its method,
+// exec or test, of its literal's RegExp (compile's regexpLit), which no
+// cache of the interpreter's has: a cache of the code's own, filled by a
+// read of the method off a RegExp of the literal, as the stack form's
+// get_prop_this's -- or none where it is found an accessor, which a read
+// would call before the call it ends in (ir's windowLast).
+func (f *jitRegFeedback) regLitProperty(pc int, w bytecode.RInstr, op ir.Op) (rpc int, key Atom, c *propCache, write, method, plain, ok bool) {
+	fb, r := f.fb, f.fb.r
+	consts, k := regConsts(fb.cl.fn, f.rc), int(w.C())
+	if op != ir.ReferenceRead || fb.e == nil || !f.regLitFed(pc) || k >= len(consts) {
+		return 0, 0, nil, false, false, false, false
+	}
+	rpc = int(f.p.Origin[pc])
+	key = atomExec
+	if w.X()&bytecode.RLitTest != 0 {
+		key = r.atoms.intern("test")
+	}
+	if fb.e.regLitReads == nil {
+		fb.e.regLitReads = map[int32]*propCache{}
+	}
+	c = fb.e.regLitReads[int32(rpc)]
+	if c == nil {
+		lit, err := r.newRegExpLiteral(&consts[k])
+		if err != nil || !lit.IsObject() {
+			return 0, 0, nil, false, false, false, false
+		}
+		// Filled by the first read, answered by the second.
+		c = new(propCache)
+		r.cachedProp(c, lit.Object(), key)
+		if _, found := r.cachedProp(c, lit.Object(), key); !found || c.getter {
+			return 0, 0, nil, false, false, false, false
+		}
+		fb.e.regLitReads[int32(rpc)] = c
+	}
+	return rpc, key, c, false, true, false, true
 }
 
 // Property is ssa.Feedback's: the property site of a read or a write the
@@ -342,7 +382,20 @@ func (f *jitRegFeedback) Generic(pc int) bool {
 	if f.fb.e == nil || pc < 0 || pc >= len(f.p.Origin) {
 		return false
 	}
+	if w, _, ok := f.at(pc); ok && w.Op() == bytecode.RLit {
+		// Its expansion, the call's last, which a read built generic
+		// would commit before (regLitFed): fed no more instead.
+		return false
+	}
 	return slices.Contains(f.fb.e.failed, int32(f.p.Origin[pc]))
+}
+
+// regLitFed reports whether the program's instruction pc, of regexp_lit's
+// expansion (compile's regexpLit), is fed: not after a guard of it failed,
+// from which on the builder leaves the instruction to Go whole at its
+// start -- a literal, a read or a call it is not fed for is an exit there.
+func (f *jitRegFeedback) regLitFed(pc int) bool {
+	return f.fb.e == nil || !slices.Contains(f.fb.e.failed, int32(f.p.Origin[pc]))
 }
 
 // Resumed is ssa.ResumeFeedback's: Go has gone on at register pc rpc, after
@@ -353,8 +406,12 @@ func (f *jitRegFeedback) Resumed(rpc int) bool {
 	return f.fb.e != nil && slices.Contains(f.fb.e.resumed, uint32(rpc))
 }
 
-// EntryGeneric is ssa.Feedback's: nothing, as Generic.
-func (f *jitRegFeedback) EntryGeneric(pc int) bool { return false }
+// EntryGeneric is ssa.Feedback's: an entry at register pc pc whose
+// speculation failed before (jitRegEntrySeen), which the builder asks by
+// the state's PC, a register pc.
+func (f *jitRegFeedback) EntryGeneric(pc int) bool {
+	return f.fb.e != nil && slices.Contains(f.fb.e.failedEntries, uint32(pc))
+}
 
 // Inline is ssa.Feedback's: nothing yet. The call's target is known
 // (callTarget); making it an InlineSite takes the callee's program, which
@@ -391,6 +448,15 @@ func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
 		return []ssa.CallSite{{Go: ssa.GoCall, InstanceOf: true, Argc: 1, ThisSlot: -1}}
 	}
 	rpc := int(f.p.Origin[pc])
+	if w.Op() == bytecode.RLit {
+		// regexp_lit's call of the method its expansion read, of its one
+		// argument: Go's from native code, as call_method_w's marked to
+		// give the literal back (jitRegGoCall), or the leaf's (Leaf).
+		if !f.regLitFed(pc) {
+			return nil
+		}
+		return []ssa.CallSite{{Go: ssa.GoCall, Argc: 1, Method: true, ThisSlot: -1}}
+	}
 	if rpc < len(f.rc.Marks) && f.rc.Marks[rpc]&bytecode.RMarkTail != 0 {
 		return nil
 	}
@@ -430,6 +496,18 @@ func (f *jitRegFeedback) BigIntSole() (uint64, bool) {
 // makes (jitLeafSeen).
 func (f *jitRegFeedback) Leaf(pc int) (uintptr, bool) {
 	w, op, ok := f.at(pc)
+	if ok && op == ir.Host && f.p.Code[pc].Window && w.Op() == bytecode.RLit {
+		// regexp_lit's call: the realm's exec or test, read where it is
+		// the built-in (regexpLitMethod), a leaf as the stack form's code
+		// learns it at its calls of Go (jitRegExpLitSite); the literal's
+		// RegExp, from the pool, nothing keeps.
+		m := f.fb.r.regexpLitMethod(w.X()&bytecode.RLitTest != 0)
+		if m == nil || !f.regLitFed(pc) {
+			return 0, false
+		}
+		f.fb.keep().holders = append(f.fb.keep().holders, m)
+		return uintptr(unsafe.Pointer(m)), true
+	}
 	if !ok || op != ir.Host || !f.p.Code[pc].Window || w.Op() != bytecode.RCallW && w.Op() != bytecode.RCallMW {
 		return 0, false
 	}
@@ -449,10 +527,14 @@ func (f *jitRegFeedback) Leaf(pc int) (uintptr, bool) {
 		return 0, false
 	}
 	// RegExp's exec and test too, as the stack form's code learns them at
-	// its calls of Go (jitRegExpLitSite), but where the call is marked to
-	// give a literal's RegExp back, or to make its result otherwise, which
-	// the interpreter's call does (regMarkedCall).
-	const marked = bytecode.RMarkDead | bytecode.RMarkReuse | bytecode.RMarkLitRecv | bytecode.RMarkLitArg
+	// its calls of Go (jitRegExpLitSite) -- a literal's call among them
+	// (RMarkLitRecv), its RegExp then from the pool (regexp_lit's
+	// lowering, compile's regexpLit), and one whose value nothing reads
+	// but its truth (RMarkDead), which the leaf makes whole -- but where
+	// the call makes its first argument (RMarkLitArg), or its array in the
+	// memory of the last (RMarkReuse), which the interpreter's call does
+	// (regMarkedCall).
+	const marked = bytecode.RMarkReuse | bytecode.RMarkLitArg
 	regexp := (fd.elemOp == elemRegExpExec || fd.elemOp == elemRegExpTest) && marks&marked == 0
 	if !jitLeafOp(fd.elemOp) && !regexp {
 		return 0, false
@@ -590,8 +672,15 @@ func (f *jitRegFeedback) literalAt(pc int) *jitLiteral {
 	case bytecode.RNewArrayE:
 		return r.jitArrayLiteral(e, cl, rpc, 0)
 	case bytecode.RNewRegExp:
-		if k := int(w.BC()); k < len(cl.fn.Constants) && cl.fn.Constants[k].Kind == bytecode.ConstRegExp {
-			return r.jitRegExpLiteral(e, cl, rpc, &cl.fn.Constants[k])
+		// The register code's constant (regConsts), its own table where
+		// it has one.
+		if consts, k := regConsts(cl.fn, f.rc), int(w.BC()); k < len(consts) && consts[k].Kind == bytecode.ConstRegExp {
+			return r.jitRegExpLiteral(e, cl, rpc, &consts[k])
+		}
+	case bytecode.RLit:
+		// regexp_lit's literal (compile's regexpLit).
+		if consts, k := regConsts(cl.fn, f.rc), int(w.C()); f.regLitFed(pc) && k < len(consts) && consts[k].Kind == bytecode.ConstRegExp {
+			return r.jitRegExpLiteral(e, cl, rpc, &consts[k])
 		}
 	}
 	return nil

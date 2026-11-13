@@ -221,12 +221,19 @@ func TestJITRegCalls(t *testing.T) {
 	rts := regNativeRuntimes(t, regCallsSrc)
 	for _, s := range []string{"hello", "h\U0001F600\u00e9llo\u4e00x", "ab"} {
 		var got [2]string
+		// Native code reads a string's code units where it has made them
+		// (mir's stringUnit), Go making them at the first read that needs
+		// them, at an exit: made here first, so that what the code's calls
+		// do is what the test sees, whenever QJS_JIT_STRESS's budget has
+		// the code entered first.
+		str := NewString(s)
+		str.units()
 		for i, r := range rts {
 			fn, _ := r.GetProp(Obj(r.Global()), r.Intern("calls"))
 			var v Value
 			var err error
 			for range 3 {
-				v, err = r.Call(fn, Undefined, []Value{Str(NewString(s)), Float(2000)})
+				v, err = r.Call(fn, Undefined, []Value{Str(str), Float(2000)})
 			}
 			got[i] = regNativeShow(r, v, err)
 		}
@@ -267,6 +274,30 @@ func TestJITRegCalls(t *testing.T) {
 	// Made natively: none of the calls is left to Go whole.
 	if n := st.HostOps["call_method_w"] + st.HostOps["call_w"]; n != 0 {
 		t.Errorf("%d calls left to Go at host exits: %v", n, st.HostOps)
+	}
+	// A string whose code units are not made yet: native code's first read
+	// of one leaves for Go, at most once, which makes them, and reads them
+	// natively from then on -- no call left to Go after the first.
+	fresh := func() Value { return Str(NewString("h\U0001F600éllo一y")) }
+	calls := func(r *Runtime, s Value) string {
+		fn, _ := r.GetProp(Obj(r.Global()), r.Intern("calls"))
+		v, err := r.Call(fn, Undefined, []Value{s, Float(2000)})
+		return regNativeShow(r, v, err)
+	}
+	left := func() uint64 {
+		return r.RegNativeStats().HostOps["call_method_w"] + r.RegNativeStats().HostOps["call_w"]
+	}
+	s0, s1 := fresh(), fresh()
+	before := left()
+	if a, b := calls(r, s0), calls(rts[1], s1); a != b {
+		t.Errorf("a fresh string: with the JIT %q, without %q", a, b)
+	}
+	first := left()
+	for range 2 {
+		calls(r, s0)
+	}
+	if first-before > 1 || left() != first {
+		t.Errorf("a fresh string: %d calls left to Go at the first call, %d after it; want at most 1, 0", first-before, left()-first)
 	}
 }
 
@@ -322,8 +353,10 @@ func TestJITRegLiterals(t *testing.T) {
 			defines++
 		}
 	}
-	if lits != 5 || defines != 3 {
-		t.Errorf("%d literals, %d fields defined natively; want 5, 3", lits, defines)
+	// Two arrays, two objects and the RegExp in the loop, and keep's array
+	// before it.
+	if lits != 6 || defines != 3 {
+		t.Errorf("%d literals, %d fields defined natively; want 6, 3", lits, defines)
 	}
 	if st := r.RegNativeStats(); st.Entries == 0 {
 		t.Errorf("no native code entered")

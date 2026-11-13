@@ -789,6 +789,32 @@ func (p *Program) starts(i int) bool {
 	return p.Origin == nil || i <= 0 || i >= len(p.Origin) || p.Origin[i] != p.Origin[i-1]
 }
 
+// windowLast reports whether register code's instruction pc is a call (a
+// Window Host) that ends its origin, of a window of scratch slots, every
+// instruction before it in the origin writing only scratch slots -- a
+// literal from its pool, a property's read, a copy -- as regexp_lit's
+// call is lowered: what it writes before the call nothing outside the
+// origin sees, and the builder makes its read commit nothing (its
+// atomicity rule), so that an exit at the call runs the instruction whole
+// again.
+func (p *Program) windowLast(pc int) bool {
+	in := &p.Code[pc]
+	if p.Origin == nil || in.Op != Host || !in.Window || in.Left.Slot < p.Regs || p.starts(pc) || !p.starts(pc+1) {
+		return false
+	}
+	for q := pc - 1; q >= 0 && p.Origin[q] == p.Origin[pc]; q-- {
+		switch c := &p.Code[q]; c.Op {
+		case ObjectLiteral, ReferenceRead, PropertyRead, Copy:
+			if c.Dest < p.Regs || c.Generic {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // ExitKind identifies a completed return or a resumable exit.
 type ExitKind uint8
 

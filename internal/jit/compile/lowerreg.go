@@ -2,6 +2,7 @@ package compile
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -89,6 +90,11 @@ type regLowering struct {
 	// scratch is the first scratch slot, used how many the current
 	// register instruction has taken, most the most any has.
 	scratch, used, most int
+	// lits are the regexp_lit calls lowered as the stack form's
+	// (regexpLit), by register pc; litHosts those lowered as Go's whole,
+	// their window's registers live past them.
+	lits     []int
+	litHosts map[int]bool
 }
 
 // emit appends in, of the current register instruction's origin; a
@@ -97,6 +103,72 @@ func (l *regLowering) emit(in ir.Instruction, jump bool) {
 	l.code = append(l.code, in)
 	l.origin = append(l.origin, uint32(l.pc))
 	l.patch = append(l.patch, jump)
+}
+
+// regexpLit lowers regexp_lit at pc, w, that calls -- /x/.exec(s) or
+// /x/.test(s), RLitCall -- as the stack form's code is lowered: the
+// literal's RegExp from its pool (ObjectLiteral), its method read
+// (ReferenceRead), both in scratch slots, the argument copied past them,
+// and the call of the method in that window (a Window Host), its value to
+// R[B] -- nothing committed before the call, so that an exit anywhere runs
+// the instruction whole again, as the interpreter makes it. The window's
+// registers, R[A] and R[A+1], are not written: where they are live past
+// the instruction (litHosts, lowerReg's check), or the method's name is
+// not the function's, it reports false and the instruction is Go's whole.
+func (l *regLowering) regexpLit(pc int, w bytecode.RInstr) bool {
+	x := w.X()
+	if l.litHosts[pc] {
+		return false
+	}
+	name := "exec"
+	if x&bytecode.RLitTest != 0 {
+		name = "test"
+	}
+	key := slices.Index(l.fn.Names, name)
+	if key < 0 {
+		return false
+	}
+	a := w.A()
+	if x&bytecode.RLitCall == 0 {
+		// One that does not call: the literal and its method to the
+		// window, R[A+1] and R[A], for the call_method_w after it --
+		// the read first, which may run a getter, then only copies.
+		method, lit := l.temp(), l.temp()
+		l.emit(ir.Instruction{Op: ir.ObjectLiteral, Dest: lit}, false)
+		l.emit(ir.Instruction{Op: ir.ReferenceRead, Left: ir.Slot(lit), Dest: method, Key: uint32(key)}, false)
+		l.emit(ir.Instruction{Op: ir.Copy, Dest: int(a) + 1, Left: ir.Slot(lit)}, false)
+		l.emit(ir.Instruction{Op: ir.Copy, Dest: int(a), Left: ir.Slot(method)}, false)
+		return true
+	}
+	method, lit, arg := l.temp(), l.temp(), l.temp()
+	l.emit(ir.Instruction{Op: ir.ObjectLiteral, Dest: lit}, false)
+	l.emit(ir.Instruction{Op: ir.ReferenceRead, Left: ir.Slot(lit), Dest: method, Key: uint32(key)}, false)
+	l.emit(ir.Instruction{Op: ir.Copy, Dest: arg, Left: reg(a + 2)}, false)
+	l.emit(ir.Instruction{Op: ir.Host, Extra: 1, When: true, Window: true, Left: ir.Slot(method), Dest: int(w.B())}, false)
+	l.lits = append(l.lits, pc)
+	return true
+}
+
+// litsLive are the register pcs of l's regexpLit calls whose window's
+// registers -- R[A] and R[A+1], but the one the value goes to -- are live
+// past them in p, whose instructions of register pc q start at start[q].
+func (l *regLowering) litsLive(p *ir.Program, start []int) []int {
+	var live []int
+	for _, pc := range l.lits {
+		w := l.rc.Code[pc]
+		a, b := int(w.A()), int(w.B())
+		next := start[pc+1]
+		if next >= len(p.Code) {
+			continue
+		}
+		for _, r := range [2]int{a, a + 1} {
+			if r != b && p.LiveAt(next, r) {
+				live = append(live, pc)
+				break
+			}
+		}
+	}
+	return live
 }
 
 // temp is a scratch slot of the current register instruction's.
@@ -250,6 +322,12 @@ func regStringConst(fn *bytecode.Function, s string) int {
 }
 
 func lowerReg(rc *bytecode.RegCode, fn *bytecode.Function, m lowering) (*ir.Program, error) {
+	return lowerRegLits(rc, fn, m, nil)
+}
+
+// lowerRegLits is lowerReg, the regexp_lit calls at the register pcs in
+// litHosts Go's whole (regexpLit).
+func lowerRegLits(rc *bytecode.RegCode, fn *bytecode.Function, m lowering, litHosts map[int]bool) (*ir.Program, error) {
 	switch {
 	case fn == nil || rc == nil:
 		return nil, refuse(-1, "nil function")
@@ -281,7 +359,7 @@ func lowerReg(rc *bytecode.RegCode, fn *bytecode.Function, m lowering) (*ir.Prog
 	if err != nil {
 		return nil, err
 	}
-	l := &regLowering{rc: rc, fn: fn, m: m, scratch: rc.NumRegs + len(fn.Upvalues)}
+	l := &regLowering{rc: rc, fn: fn, m: m, scratch: rc.NumRegs + len(fn.Upvalues), litHosts: litHosts}
 	start := make([]int, n+1)
 	for pc := range n {
 		start[pc] = len(l.code)
@@ -353,6 +431,18 @@ func lowerReg(rc *bytecode.RegCode, fn *bytecode.Function, m lowering) (*ir.Prog
 	}
 	regCaptured(p, rc, fn)
 	liveRegs(p, rc)
+	if live := l.litsLive(p, start); len(live) != 0 {
+		// Their window's registers read past them, which the lowering
+		// does not write: Go's whole.
+		hosts := maps.Clone(litHosts)
+		if hosts == nil {
+			hosts = map[int]bool{}
+		}
+		for _, pc := range live {
+			hosts[pc] = true
+		}
+		return lowerRegLits(rc, fn, m, hosts)
+	}
 	return p, nil
 }
 
@@ -869,7 +959,11 @@ func (l *regLowering) lower(pc int) {
 	case bytecode.RArguments:
 		// Go's, from the frame's arguments (ir's Frame).
 		l.emit(ir.Instruction{Op: ir.Host, Frame: true, Dest: int(a)}, false)
-	case bytecode.RNewArrayK, bytecode.RApplyArgs, bytecode.RLit:
+	case bytecode.RLit:
+		if !l.regexpLit(pc, w) {
+			host()
+		}
+	case bytecode.RNewArrayK, bytecode.RApplyArgs:
 		host()
 	case bytecode.RAddProp, bytecode.RAddPropI:
 		// o.k += v: the read, which may run a getter, so that the addition

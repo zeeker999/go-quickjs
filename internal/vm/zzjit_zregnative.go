@@ -54,6 +54,13 @@ type jitRegEntry struct {
 	// keep it from being closed.
 	invalid bool
 	runs    int
+	// mark is what its function's caches held when it was compiled
+	// (jitFeedbackMark): changed, the code is compiled again at its next
+	// sample (jitRegHot).
+	mark uint64
+	// icWait counts down the samples left until the code is compiled
+	// again for its caches' changed feedback (jitRegHot), 0 for none.
+	icWait int
 	// stale marks code that learned what to be compiled again for
 	// (jitRegReopt): its runs go on in it, and the next ask compiles it
 	// again.
@@ -172,6 +179,7 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, callee bool) *jitRegEnt
 		r.jitParityNote(cl)
 	}
 	r.jitRegSeenFeedback(cl, c)
+	e.mark = jitFeedbackMark(cl)
 	rf := r.jitRegFeedbackFor(cl, p)
 	w := jit.GetWorkspace()
 	defer jit.PutWorkspace(w)
@@ -472,7 +480,13 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 		// again at the next ask, from what the interpreter learns.
 		s.guards++
 		r.jitRegMaterialize(f, e, wb)
-		r.jitRegDeoptSeen(f, c, e, wb, exitPC)
+		if int64(ctx.ExitSite) < 0 {
+			// An entry's speculation, at a loop's header or the start: the
+			// entry's, as the stack form's code learns it (EntryGeneric).
+			r.jitRegEntrySeen(f, exitPC)
+		} else {
+			r.jitRegDeoptSeen(f, c, e, wb, exitPC)
+		}
 		r.jitRegInvalidate(f.cl, e)
 		s.interpreted++
 		return 0, exitPC, Undefined, false, nil, false
@@ -746,6 +760,10 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	}
 	switch {
 	case op == bytecode.RCallW && kind == 0, op == bytecode.RCallMW && kind == abi.GoCallMethod, op == bytecode.RNewW && kind == abi.GoCallNew:
+	case op == bytecode.RLit && kind == abi.GoCallMethod && w.X()&bytecode.RLitCall != 0:
+		// regexp_lit's call, of the method its expansion read, on its
+		// literal's RegExp, of its one argument (compile's regexpLit).
+		argc = 1
 	case op == bytecode.RInstanceOf && kind == abi.GoCallInstanceOf:
 		// As regSlow makes it, by the site's cache: it may run code.
 		aux := int(c.rc.Aux[rpc])
@@ -798,6 +816,14 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	var err error
 	if op == bytecode.RNewW {
 		v, err = r.regConstruct(r.stack[top], top, argc)
+	} else if op == bytecode.RLit {
+		// As regLit calls it: the RegExp given back where the built-in
+		// called keeps nothing of it (RMarkLitRecv).
+		m := uint8(bytecode.RMarkLitRecv)
+		if w.X()&bytecode.RLitDead != 0 {
+			m |= bytecode.RMarkDead
+		}
+		v, err = r.regMarkedCall(f, c, top, 1, rpc, m, uint32(w.C()))
 	} else {
 		v, err = r.regCallSlow(f, c, w, top, rpc)
 		if err == errTailCall {

@@ -1113,8 +1113,17 @@ branches. Where a register instruction's operands are a run of registers
 that is not where its result goes -- `new_array`'s elements, `concat`'s
 parts -- they are copied to scratch slots first, which the operation reads
 as the stack form's top. What the stack form leaves to Go whole -- a call,
-`regexp_lit`, a cold operation that is not one of the few it lowers -- is
-one `Host`, alone in its origin: Go runs the whole register instruction.
+a cold operation that is not one of the few it lowers -- is one `Host`,
+alone in its origin: Go runs the whole register instruction. But
+`regexp_lit` that calls -- `/x/.exec(s)`, `/x/.test(s)` -- is lowered as
+the stack form's code is (`compile`'s `regexpLit`): the literal's RegExp
+from its pool, its method read, both in scratch slots, the argument
+copied past them, and the call of the method in that window of scratch
+slots, a `Window` Host ending the origin; the window's registers, R[A] and
+R[A+1], are not written, and where they are live past the instruction it
+is Go's whole. One that does not call is the literal and the read, copied
+to R[A+1] and R[A] last, for the `call_method_w` after it, a leaf's call
+of the realm's `exec` or `test`.
 
 **The atomicity rule.** An exit anywhere in an origin's instructions runs
 the register instruction again from its start, in the interpreter. So
@@ -1144,7 +1153,11 @@ run a getter (the builder's `readCalls`); an arithmetic operation, a
 comparison or a string's addition,
 Generic or not, has Go make only what runs nothing, leaving the rest to an
 exit -- and a build that makes an exit after a commit in the same origin
-is refused, by its register pc. A Generic instruction is built as one
+is refused, by its register pc. The one call an origin may end in after
+other instructions (`ir.Program`'s `windowLast`, `regexp_lit`'s) follows
+only writes of scratch slots and a read whose feedback never makes it call
+-- the VM answers none for an accessor -- so it commits nothing before the
+call, whose exit runs the instruction whole again. A Generic instruction is built as one
 whose speculation failed before (the builder's `generic`). A loop's step
 (`iter_next`) writes its register only where the loop goes on: the builder
 assigns the step's value in the block after it (`stepOn`), so the done
@@ -1333,9 +1346,14 @@ of a shape its cases do not have, a site that knew none -- has the site
 learn it before the interpreter runs the instruction, as the stack form's
 code does (`jitRegDeoptSeen`, `jitDeoptSeenOp`): the cache learns the
 shape as the interpreter makes the operation, and what the cache cannot
-hold, the function's entry notes (`regLearned`). Any other guard that
-fails notes its register pc, and the function's next compiles build the
-instructions of that register pc generic (`jitRegFeedback`'s `Generic`).
+hold, the function's entry notes (`regLearned`). An entry's speculation
+that fails -- at a loop's header or the start, a register loaded not of
+the kind compiled for -- notes the entry, which the next compiles enter
+generic (`jitRegEntrySeen`, `EntryGeneric`), as the stack form's
+`failedEntries`. Any other guard that fails notes its register pc, and
+the function's next compiles build the instructions of that register pc
+generic (`jitRegFeedback`'s `Generic`) -- but `regexp_lit`'s expansion,
+which Go makes whole from then on (`regLitFed`).
 A property read or write a host exit leaves to Go is learned as the stack
 form's are (`jitRegHostSeen`, `jitRegWriteSeen`); where that teaches the
 site something its code was not compiled for, the code is invalid from
@@ -1373,7 +1391,15 @@ they already spend:
 A function is compiled (`jitRegFor`) at its `jitRegSamples`-th sample, or
 at its first where the runtime compiles at a first call (`QJS_JIT_STRESS`'s
 threshold, which makes every call a sample), and its code is kept on its
-template's `closureCode` (`jitReg`). Plain functions, methods, arrows,
+template's `closureCode` (`jitReg`). A sample of a function with code
+whose caches' feedback changed since it was compiled -- what they hold,
+the stack form's `jitFeedbackMark`, as V8's `NotifyICChanged` finds it --
+has it compiled again (`jitRegReopt`) once it has run
+`jitInvocationsAfterICUpdate` invocations' worth more, as the stack form's
+budget is raised to -- a sample's worth where samples are the interrupt
+budget's, a sample each where every call is one: code compiled before a
+site's cache knew a shape reads it by a scan, which never leaves native
+code to learn one. Plain functions, methods, arrows,
 accessors and classes' constructors of the form's own layout are compiled
 (`jitRegTakes`), their frames the call path's -- an arrow's this, a
 constructor's object or a derived one's uninitialized this in register 1,

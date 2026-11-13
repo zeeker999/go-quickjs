@@ -150,7 +150,26 @@ func (r *Runtime) jitRegHot(cl *closure, c *regCode) *jitRegEntry {
 		return nil
 	}
 	if e := cc.jitReg; e != nil {
-		if !e.invalid {
+		if !e.invalid && !e.stale && e.icWait == 0 && e.mark != jitFeedbackMark(cl) {
+			// Its caches' feedback changed since it was compiled -- what
+			// they hold, a site that knew nothing then knowing a shape now
+			// -- as V8's NotifyICChanged finds and the stack form's code
+			// learns (jitFeedbackMark): compiled again for it once it has
+			// run jitInvocationsAfterICUpdate invocations' worth more, as
+			// the stack form's budget is raised to: a sample's worth where
+			// samples are the interrupt budget's, a sample each where every
+			// call is one (jitRegStressSample).
+			e.icWait = 1
+			if r.jitCallThreshold <= 1 {
+				e.icWait = jitInvocationsAfterICUpdate
+			}
+		}
+		if e.icWait != 0 {
+			if e.icWait--; e.icWait == 0 {
+				r.jitRegReopt(cl, e)
+			}
+		}
+		if !e.invalid && !e.stale {
 			return e
 		}
 		cc.jitReg = nil
@@ -313,6 +332,19 @@ func (r *Runtime) jitRegDeoptSeen(f *frame, c *regCode, e *jitRegEntry, wb, rpc 
 	}
 	if !slices.Contains(l.failed, int32(rpc)) {
 		l.failed = append(l.failed, int32(rpc))
+	}
+}
+
+// jitRegEntrySeen learns that an entry's speculation of f's function's
+// code failed at register pc rpc -- a loop's header or the start, the
+// registers it loads not of the kinds the code was compiled for -- which
+// the next compiles enter generic there (jitRegFeedback's EntryGeneric),
+// as the stack form's code learns it (failedEntries), the instructions
+// there not made generic for it.
+func (r *Runtime) jitRegEntrySeen(f *frame, rpc int) {
+	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	if !slices.Contains(l.failedEntries, uint32(rpc)) {
+		l.failedEntries = append(l.failedEntries, uint32(rpc))
 	}
 }
 
