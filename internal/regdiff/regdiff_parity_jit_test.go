@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/compiler"
 	"github.com/go-quickjs/go-quickjs/internal/v8bench"
 	"github.com/go-quickjs/go-quickjs/internal/vm"
@@ -116,10 +117,12 @@ func TestJITFeedbackParity(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			vm.RecordJITCompiles(true)
 			defer vm.RecordJITCompiles(false)
+			jitReg := vm.SetJITRegTier(true)
 			defer func() {
-				env := os.Getenv("QJS_REG") != ""
+				env := bytecode.RegDefault()
 				compiler.SetRegisterForm(env)
 				vm.SetRegTier(env)
+				vm.SetJITRegTier(jitReg)
 			}()
 			var rts [2]*vm.Runtime
 			for i := range rts {

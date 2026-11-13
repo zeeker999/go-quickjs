@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
@@ -49,7 +50,8 @@ func regNativeRuntimes(t *testing.T, src string) [2]*Runtime {
 	prog := compileForTest(t, src)
 	compiler.SetRegisterForm(false)
 	SetRegTier(true)
-	t.Cleanup(func() { SetRegTier(false) })
+	was := SetJITRegTier(true)
+	t.Cleanup(func() { SetRegTier(bytecode.RegDefault()); SetJITRegTier(was) })
 	var rts [2]*Runtime
 	for i := range rts {
 		rts[i] = New(Config{JIT: i == 0})

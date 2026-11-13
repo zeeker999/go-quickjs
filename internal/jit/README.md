@@ -1289,6 +1289,11 @@ of the micro-benchmarks so as well.
 
 ### Tier-up from the register tier
 
+A runtime with the JIT runs register code only where `QJS_JITREG` is set
+(or `vm.SetJITRegTier`), the register interpreter on (`Runtime.RegTier`);
+otherwise it runs the stack form's tiers and their JIT, until the register
+form's JIT is brought level with the stack form's.
+
 No handler of the register tier's dispatchers -- the Go handler table's
 or the native handlers' -- does any work for the JIT
 (`internal/vm/zzjit_zregtier.go`). Hotness is sampled at the two budgets

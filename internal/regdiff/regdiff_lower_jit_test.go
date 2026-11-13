@@ -433,11 +433,13 @@ func TestRegLowerEvaluate(t *testing.T) {
 func regCorpusRun(t *testing.T, check func(t *testing.T, top *bytecode.Function, part, parts int), report func()) {
 	compiler.SetRegisterForm(true)
 	vm.SetRegTier(true)
+	jitReg := vm.SetJITRegTier(true)
 	regDiffHook = func(t *testing.T, src string, calls []string) { check(t, regLowerCompile(src), 0, 1) }
 	t.Cleanup(func() {
 		// After every case, the parallel ones' included.
 		regDiffHook = nil
-		env := os.Getenv("QJS_REG") != ""
+		vm.SetJITRegTier(jitReg)
+		env := bytecode.RegDefault()
 		compiler.SetRegisterForm(env)
 		vm.SetRegTier(env)
 		report()

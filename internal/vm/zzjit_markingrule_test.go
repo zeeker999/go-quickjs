@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
@@ -174,7 +175,8 @@ func jitMarkingRegRun(t *testing.T, src string, names []string, marking bool) ma
 	prog := compileForTest(t, src)
 	compiler.SetRegisterForm(false)
 	SetRegTier(true)
-	defer SetRegTier(false)
+	defer SetRegTier(bytecode.RegDefault())
+	defer SetJITRegTier(SetJITRegTier(true))
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	if _, err := r.Run(prog); err != nil {
 		t.Fatal(err)
