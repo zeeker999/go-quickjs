@@ -472,13 +472,18 @@ func (g *armGen) call() {
 // frame's with upvalues to close.
 func (g *armGen) ret(undef bool) {
 	a := g.a
-	noCap, base := a.NewLabel(), a.NewLabel()
+	noCap, base, open := a.NewLabel(), a.NewLabel(), a.NewLabel()
 	g.cmpMemImm(rCtx, ncDepth, 0)
 	a.BCond(EQ, base)
+	// Upvalues open on the frame are closed by Go, as amd64's.
+	a.Load(rS, rCtx, ncNF)
 	a.Load(rC, rCtx, ncRC)
 	a.LoadS32(r8, rC, offRCNcap)
-	a.Cbz(r8, noCap, false)
-	a.Load(rS, rCtx, ncNF)
+	a.Cbnz(r8, open, false)
+	a.LoadU8(r8, rS, offFRegKind)
+	a.CmpImm(r8, int64(regFrameEnter), false)
+	a.BCond(NE, noCap)
+	a.Bind(open)
 	g.cmpMemImm(rS, offFOpenUp+8, 0)
 	a.BCond(NE, g.exit)
 	a.Bind(noCap)

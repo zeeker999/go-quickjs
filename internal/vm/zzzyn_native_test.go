@@ -888,3 +888,32 @@ func TestRegNativeMore5(t *testing.T) {
 		}
 	}
 }
+
+// A sloppy callee that keeps its arguments maps its arguments object onto
+// its parameters' registers, which its return closes, as the miss's
+// regEnterW closes them: the native code's return of a frame it entered
+// so left them open on registers the next frames overwrote, and an
+// arguments object kept past the call read what they held -- the
+// arguments object itself, Array -- by a call or a call in tail position
+// the site's cache answered.
+func TestRegNativeKeptArgumentsClosed(t *testing.T) {
+	src := `
+	var kept = [];
+	var s1 = function s(n, a) { kept.push(arguments); return arguments.length + ":" + Array.prototype.join.call(arguments, ","); };
+	function viaTail(n, a) { return n === 0 ? s1(n, a, "x") : viaTail(n - 1, a + 1); }
+	function viaCall(n, a) { var v = s1(n, a, "x"); return v; }
+	var out = [];
+	for (var i = 0; i < 3; i++) out.push(viaTail(3, 0));
+	for (var i = 0; i < 3; i++) out.push(viaCall(0, 3));
+	out.push(kept.map(function (a) { return Array.prototype.join.call(a, ","); }).join(" "));
+	out.join(" | ")`
+	want := "3:0,3,x | 3:0,3,x | 3:0,3,x | 3:0,3,x | 3:0,3,x | 3:0,3,x | 0,3,x 0,3,x 0,3,x 0,3,x 0,3,x 0,3,x"
+	for _, native := range []bool{false, true} {
+		for _, marking := range []bool{false, true} {
+			nativeMarking(t, marking)
+			if got := nativeRunSrc(t, src, native); got != want {
+				t.Errorf("native %v (marking %v): %s, want %s", native, marking, got, want)
+			}
+		}
+	}
+}

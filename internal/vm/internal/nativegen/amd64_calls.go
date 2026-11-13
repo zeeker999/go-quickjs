@@ -511,14 +511,21 @@ func (g *nativeGen) call() {
 // is a frame's with upvalues to close.
 func (g *nativeGen) ret(undef bool) {
 	a := g.a
-	noCap, base := a.NewLabel(), a.NewLabel()
+	noCap, base, open := a.NewLabel(), a.NewLabel(), a.NewLabel()
 	a.CmpMemImm8(RDI, ncDepth, 0)
 	a.Jcc(CondE, base)
+	// Upvalues open on the frame are closed by Go, as nativeEnd closes
+	// them: a frame of captured registers, or an entered one's, whose
+	// arguments object a sloppy body maps onto its parameters.
+	a.Load(RSI, RDI, ncNF)
 	a.Load(RCX, RDI, ncRC)
 	a.LoadS32(R8, RCX, offRCNcap)
 	a.Op(Test, R8, R8, false)
-	a.Jcc(CondE, noCap)
-	a.Load(RSI, RDI, ncNF)
+	a.Jcc(CondNE, open)
+	a.LoadU8(R8, RSI, offFRegKind)
+	a.OpImm(Cmp, R8, regFrameEnter, false)
+	a.Jcc(CondNE, noCap)
+	a.Bind(open)
 	a.CmpMemImm8(RSI, offFOpenUp+8, 0)
 	a.Jcc(CondNE, g.exit)
 	a.Bind(noCap)
