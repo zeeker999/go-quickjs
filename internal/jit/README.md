@@ -1459,8 +1459,12 @@ its code learned: its receiver taken from a pool of objects made as
 `regConstruct` makes one (`jitNewPool`, `ssa.CallSite`'s `Pool`), in the
 callee's register 1 and its context's `This`, which the result is where
 the callee returns no object. A call learned so has the code compiled again (`jitRegReopt`, no
-deoptimization): its runs go on in it, stale, and the next ask compiles
-it. A callee native callers call that has no code is
+deoptimization): its runs go on in it, stale, until a budget is spent --
+at a loop's poll the interpreter goes on, whose next sample compiles it
+anew, as the stack form's code is compiled again in its run once due
+(`jitRecompileInRun`, `jitLearnedDue`) -- and its link holds no entry
+meanwhile, so that native callers call it through Go, where it is
+sampled: stale code only native callers reach is compiled again too. A callee native callers call that has no code is
 compiled at their first call of it through Go (`jitRegNativeCallee`), as
 the stack form's `jitNativeCallee`: a function of host operations alone is
 lowered for them (`LowerRegInline`), and one Go enters that is hot and
@@ -1529,11 +1533,13 @@ first; the innermost finished in the interpreter from its exit, learning
 there as a frame's own exits do (`jitRegInlineLeft`); each other from
 its call with what its callee answered (`regFinishCall`); and the
 caller's call given the outermost's answer (`regPending`), as a native
-callee's. An exit that learned something -- a guard's failure, a site's
-case, a change of the callee's caches (`jitFeedbackMark`) -- has the
-caller's code invalid from there, compiled again for it; one that
-learned nothing counts against inlining at the call (`jitInlineLeft`):
-past `jitInlineExits`, the call is a native call.
+callee's. A guard's failure there has the caller's code invalid, as one
+of its own does; an exit that learned something else -- a site's case, a
+change of the callee's caches (`jitFeedbackMark`) -- has it compiled
+again for it (`jitRegReopt`); one that learned nothing counts against
+inlining at the call, by the stack form's own rule (`jitInlineLeft`,
+`jitInlineExits`, `notInline`): past it, the code compiled next makes a
+native call there.
 
 ## The execution boundary
 

@@ -225,13 +225,21 @@ func (r *Runtime) jitRegInvalidate(cl *closure, e *jitRegEntry) {
 // jitRegReopt marks e, cl's function's code, stale for what it learned at
 // its calls of Go or its exits (jitRegCallSeen), no deoptimization: its
 // runs go on in it, as V8's code runs on with feedback it was not compiled
-// for, but the function is sampled anew and compiled again for it, which
-// no limit of deoptimizations counts -- what can be learned so is bounded.
+// for, until a budget is spent (jitRegLeft's poll), but the function is
+// sampled anew and compiled again for it, which no limit of
+// deoptimizations counts -- what can be learned so is bounded. Its native
+// callers call it through Go from here (its link has no entry), where it
+// is sampled: code only native callers reach -- a callee of a loop's -- had
+// otherwise never been compiled again, as the stack form's code is by its
+// own exits (jitRecompileInRun).
 func (r *Runtime) jitRegReopt(cl *closure, e *jitRegEntry) {
 	if e.invalid || e.stale {
 		return
 	}
 	e.stale = true
+	if key := r.jitKeyOf(cl.fn); r.jit.regCache[key] == e {
+		r.jit.regLinkUpdate(key, nil)
+	}
 	if cc := cl.closureCode; cc != nil {
 		if cc.jitReg == e {
 			cc.jitReg = nil

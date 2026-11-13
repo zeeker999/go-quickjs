@@ -548,7 +548,12 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 		if err := r.checkInterruptNow(); err != nil {
 			return 0, 0, Undefined, false, err, false
 		}
-		if r.jitStressDeopt(s) {
+		if r.jitStressDeopt(s) || e.stale {
+			// Code stale for what it learned (jitRegReopt) is due to be
+			// compiled again once a budget has been spent since, as the
+			// stack form's (jitRecompileInRun, jitLearnedDue): here, at the
+			// budget's end, the loop goes on in the interpreter, whose
+			// next sample at its header compiles it anew (jitRegLoop).
 			s.interpreted++
 			return 0, exitPC, Undefined, false, nil, false
 		}

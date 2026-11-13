@@ -87,20 +87,26 @@ func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at int
 			var learned bool
 			v, err, learned = r.jitRegInlineLeft(f, x, owner)
 			l := s.regLearnedOf(r.jitKeyOf(cl.fn))
-			if !learned {
-				// Left with nothing to learn, counted against inlining
-				// the callee at the call (jitInlineLeft), as the stack
-				// form's code counts it: past jitInlineExits, it is
-				// called natively there.
-				r.jitInlineLeft(l, at)
-			}
-			if learned || l.inlineReopt {
-				// The owner's code is invalid from here -- its runs, and
-				// its native callers, leave it, as for a property site it
-				// cannot hold (polyReopt) -- and is compiled again for
-				// what was learned.
-				l.inlineReopt = false
+			switch {
+			case x.kind == abi.ExitDeopt:
+				// A guard's failure: the owner's code invalid from here,
+				// as at one of its own (jitRegLeft), the stack form's
+				// code's at one inside a callee it inlined.
 				r.jitRegInvalidate(cl, owner)
+			case learned:
+				// The callee's feedback learned what the owner's code was
+				// not compiled for: compiled again for it (jitRegReopt).
+				r.jitRegReopt(cl, owner)
+			default:
+				// Left with nothing to learn: counted against inlining the
+				// callee at the call, by the stack form's own rule
+				// (jitInlineLeft, jitInlineExits): past it the call is a
+				// native call in the code compiled next.
+				r.jitInlineLeft(l, at)
+				if l.inlineReopt {
+					l.inlineReopt = false
+					r.jitRegReopt(cl, owner)
+				}
 			}
 		} else {
 			var next int
