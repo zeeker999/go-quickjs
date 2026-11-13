@@ -904,6 +904,48 @@ func armEmit(v *variant) (*block, error) {
 		a.LoadF(0, rCtx, ncNaN)
 		g.storeA(0)
 	})
+	// o[k] += v of a dense array's number element, as amd64's: the object
+	// in rS, the value in D1, the key in D0 or rC.
+	elemAdd := func() {
+		a.Load(r9, rC, 0)
+		a.Cmp(r9, rTag, true)
+		a.BCond(HS, g.exit)
+		a.FMovToF(0, r9)
+		a.FArith(FAdd, 0, 0, 1)
+		g.canon(0)
+		a.StoreF(rC, 0, 0)
+		g.next()
+	}
+	elemMask := objMappedArguments | objSharedElems
+	h(bytecode.RAddIndex, func() {
+		g.regA(rD)
+		g.object(rS, rD)
+		g.regC(rD)
+		g.num(1, rD)
+		g.regB(r8)
+		g.num(0, r8)
+		g.element(rC, rS, 0, elemMask, g.exit)
+		elemAdd()
+	})
+	h(bytecode.RAddIndexK, func() {
+		g.regA(rD)
+		g.object(rS, rD)
+		g.regB(rD)
+		g.num(1, rD)
+		a.ShiftImm(Lsr, rC, rW, 48, true)
+		g.dense(rC, rS, elemMask, g.exit)
+		elemAdd()
+	})
+	h(bytecode.RAddIndexI, func() {
+		g.regA(rD)
+		g.object(rS, rD)
+		g.immSC(r9)
+		a.Scvtf(1, r9, true)
+		g.regB(r8)
+		g.num(0, r8)
+		g.element(rC, rS, 0, elemMask, g.exit)
+		elemAdd()
+	})
 
 	for n, l := range g.exits {
 		if n == 0 {

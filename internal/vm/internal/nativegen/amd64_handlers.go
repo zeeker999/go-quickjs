@@ -1040,6 +1040,51 @@ func nativeEmit(v *variant) (*block, error) {
 		a.LoadSD(0, RDI, ncNaN)
 		g.storeA(0)
 	})
+	// o[k] += v, a statement's update of a dense array's element that
+	// holds a number, by a number: its word alone written, as
+	// rhAddIndexK writes it. The object in RSI, the value in X1, the key
+	// in X0 or RCX; anything else exits.
+	elemAdd := func() {
+		a.Load(R9, RCX, 0)
+		a.Op(Cmp, R9, R10, true)
+		a.Jcc(CondAE, g.exit)
+		a.MovQToX(0, R9)
+		a.SSEOp(AddSD, 0, 1)
+		g.canon(0)
+		a.StoreSD(RCX, 0, 0)
+		g.next()
+	}
+	elemMask := objMappedArguments | objSharedElems
+	h(bytecode.RAddIndex, func() {
+		g.decA(RDX)
+		g.object(RSI, RDX)
+		g.decC(RDX)
+		g.num(1, RDX)
+		g.decB(R8)
+		g.num(0, R8)
+		g.element(RCX, RSI, 0, elemMask, g.exit)
+		elemAdd()
+	})
+	h(bytecode.RAddIndexK, func() {
+		g.decA(RDX)
+		g.object(RSI, RDX)
+		g.decB(RDX)
+		g.num(1, RDX)
+		a.MovRR(RCX, RAX)
+		a.ShiftImm(Shr, RCX, 48, true)
+		g.dense(RCX, RSI, elemMask, g.exit)
+		elemAdd()
+	})
+	h(bytecode.RAddIndexI, func() {
+		g.decA(RDX)
+		g.object(RSI, RDX)
+		g.immSC(R9)
+		a.Cvtsi2sd(1, R9, true)
+		g.decB(R8)
+		g.num(0, R8)
+		g.element(RCX, RSI, 0, elemMask, g.exit)
+		elemAdd()
+	})
 
 	for n, l := range g.exits {
 		if n == 0 {

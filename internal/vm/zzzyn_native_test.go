@@ -333,6 +333,30 @@ const nativeFastSrc = `
 			leafer.konst(), leafer.none(i), leafer.arg("s" + i));
 		out.push(ls.join(","));
 	}
+	// o[k] += v, o[3] += v, o[k] += 2 and o[k]++ over dense numbers and
+	// what they are not: a hole, a string, an object, a sloppy function's
+	// arguments, a frozen array, a typed array, a plain object with index
+	// keys, a string, and keys past the end, negative, fractional, NaN,
+	// -0 and a string.
+	function updates(o, k, v) {
+		o[k] += v; o[3] += v; o[k] += 2; o[k]++;
+		return o;
+	}
+	function mapped(a, b, c, d) { updates(arguments, 1, 5); return [a, b, c, d].join(" ") }
+	var keys = [0, 1, 3, 9, -1, 1.5, NaN, -0, "1", 2 ** 32];
+	for (var round = 0; round < 3; round++) {
+		var u = [];
+		for (var i = 0; i < keys.length; i++) {
+			var k = keys[i];
+			u.push(updates([1, 2, 3, 4, 5], k, 10).join(" "), updates([1, , 3, 4], k, 0.5).join(" "),
+				updates(["a", "b", 3, 4], k, 1).join(" "), updates([{}, [], 3, 4], k, 1).length,
+				updates(Object.freeze([1, 2, 3, 4]), k, 1).join(" "), updates(new Int8Array([1, 2, 3, 120]), k, 7).join(" "),
+				JSON.stringify(updates({ 0: 1, 1: 2, 3: 4 }, k, 3)), updates([1, 2, 3, 4], k, "x").join(" "),
+				updates([1.5, 2.5, 3.5, 4.5], k, NaN).join(" "));
+		}
+		u.push(mapped(1, 2, 3, 4));
+		out.push(u.join("/"));
+	}
 	out.join(String.fromCharCode(10))`
 
 // nativeCallCases are calls each of which rhCallW answers one way: the
@@ -963,5 +987,45 @@ func TestRegCallSameTemplate(t *testing.T) {
 	enters, calls = atomic.LoadInt64(&nativeEnters)-enters, atomic.LoadInt64(&nativeCalls)-calls
 	if enters > 210 || calls < 199 {
 		t.Errorf("%d entries of the code and %d calls it made itself, want 210 entries at most and 199 calls or more", enters, calls)
+	}
+}
+
+// An element's update of a dense array's number, o[k] += v in each of its
+// forms, is the native code's own: none exits to Go but the first store
+// to the literal's shared elements.
+func TestRegNativeAddIndex(t *testing.T) {
+	nativeCounting(t)
+	before := nativeExitOps()
+	got := nativeRunSrc(t, `
+		function run() {
+			var tab = [1, 2, 3, 4];
+			for (var j = 0; j < 1000; j++) {
+				tab[0] += j; tab[1] += 0.5;
+				var k = j & 3;
+				tab[k] += j; tab[k] += 3; tab[k]++; tab[k]--;
+			}
+			return tab.join(" ");
+		}
+		run()`, true)
+	if want := nativeRunSrc(t, `
+		function run() {
+			var tab = [1, 2, 3, 4];
+			for (var j = 0; j < 1000; j++) {
+				tab[0] += j; tab[1] += 0.5;
+				var k = j & 3;
+				tab[k] += j; tab[k] += 3; tab[k]++; tab[k]--;
+			}
+			return tab.join(" ");
+		}
+		run()`, false); got != want {
+		t.Fatalf("native %s, want %s", got, want)
+	}
+	after := nativeExitOps()
+	for _, op := range []bytecode.ROp{bytecode.RAddIndex, bytecode.RAddIndexK, bytecode.RAddIndexI} {
+		// The literal's elements are shared until the first store copies
+		// them, which Go makes.
+		if n := after[op] - before[op]; n > 1 {
+			t.Errorf("%v exited to Go %d times, want 1 at most", op, n)
+		}
 	}
 }
