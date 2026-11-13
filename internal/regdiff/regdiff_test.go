@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -61,6 +62,20 @@ func regDiffRun(t *testing.T, src string, calls []string) []string {
 // the tier off differ -- a clock, Math.random -- is not compared. It
 // returns how many functions the tier gave register code.
 func regDiff(t *testing.T, src string, calls []string) int64 {
+	t.Helper()
+	regDiffAlone.RLock()
+	defer regDiffAlone.RUnlock()
+	return regDiffLocked(t, src, calls)
+}
+
+// regDiffAlone is held by regDiffAll alone, which sets regcomp.OnRefuse
+// for the process, and shared by every other comparison: where those run
+// at once (TestRegLowerEvaluate's subtests), no other program compiles
+// while a refusal is taken for regDiffAll's.
+var regDiffAlone sync.RWMutex
+
+// regDiffLocked is regDiff, its caller holding regDiffAlone.
+func regDiffLocked(t *testing.T, src string, calls []string) int64 {
 	t.Helper()
 	if regDiffHook != nil {
 		// Another test's reading of the corpus (regDiffHook).

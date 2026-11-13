@@ -1157,7 +1157,14 @@ Inside an expansion it runs the instruction whole only where nothing of
 it has committed. `TestRegLowerEvaluate` (internal/regdiff, JIT builds)
 compares each call of the register interpreter's differential corpus so
 made with an ordinary call in a second runtime that has run the same
-calls; `QUICKJS_REGLOWER_SHARD=k/n` runs a shard of it.
+calls. Its cases run in parallel, the micro-benchmarks in 16 parts, and
+each function is called with 3 sets of arguments; the full sweep,
+`QUICKJS_REGLOWER_FULL=1`, calls each with 8 and runs the
+micro-benchmarks whole, since a part's functions have not been called as
+the whole's calls before them called them, and fewer of its calls are
+evaluated. `QUICKJS_REGLOWER_ARGS=n` sets the number of sets of
+arguments, and `QUICKJS_REGLOWER_SHARD=k/n` runs a shard of the cases.
+`-short` skips it.
 
 **Feedback.** The VM's feedback for a register program is
 `jitRegFeedback` (`internal/vm/zzjit_zregfeedback.go`), asked by the
