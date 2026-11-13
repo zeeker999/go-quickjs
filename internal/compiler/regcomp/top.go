@@ -26,6 +26,7 @@ func CompileTop(body []ast.Stmt, fn *bytecode.Function, rec *Record) *bytecode.R
 		Refuse(fn, "its bindings' layout")
 		return nil
 	}
+	defer g.release()
 	if g.err != "" {
 		Refuse(fn, g.err)
 		return nil

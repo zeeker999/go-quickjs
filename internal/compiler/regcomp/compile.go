@@ -1,11 +1,13 @@
 package regcomp
 
 import (
+	"cmp"
 	"fmt"
 	"math"
 	"os"
 	"slices"
 	"sort"
+	"sync"
 
 	"github.com/go-quickjs/go-quickjs/internal/ast"
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -100,11 +102,37 @@ func compile(lit *ast.FuncLit, fn *bytecode.Function, rec *Record, orig *bytecod
 		Refuse(orig, "its bindings' layout")
 		return nil
 	}
+	defer g.release()
 	if g.err != "" {
 		Refuse(orig, g.err)
 		return nil
 	}
 	return g.finish()
+}
+
+// scratch is what compiling a function grows as it goes, which finish
+// copies out at its size or reads and drops: the code, each instruction's
+// position, and the table of the stack form's positions. It is kept from
+// one compile for the next (scratchPool), so that each does not grow its
+// buffers from nothing.
+type scratch struct {
+	code  []bytecode.RInstr
+	pos   []int32
+	table []posEntry
+}
+
+// scratchPool holds the scratch no compile has. Separate runtimes compile
+// at once, each compile with one of its own.
+var scratchPool = sync.Pool{New: func() any { return new(scratch) }}
+
+// release gives g's scratch back, once nothing of g's reads it.
+func (g *gen) release() {
+	s := g.s
+	if s == nil {
+		return
+	}
+	g.s, g.code, g.pos = nil, nil, nil
+	scratchPool.Put(s)
 }
 
 // generate lays out and compiles the gen made by mk, and reports whether
@@ -123,16 +151,26 @@ func generate(fn *bytecode.Function, own bool, mk func() *gen) (*gen, bool) {
 		last = 2
 	}
 	far, nearCap := false, 0
+	s := scratchPool.Get().(*scratch)
+	// Room for the code at once, rather than a doubling at a time: the
+	// register form has about as many instructions as the stack form,
+	// five in six over the suites and test262, a few past it.
+	if n := len(fn.Code) + len(fn.Code)/4; cap(s.code) < n {
+		s.code, s.pos = make([]bytecode.RInstr, 0, n), make([]int32, 0, n)
+	}
 	for try := 0; ; try++ {
 		g := mk()
+		g.s, g.code, g.pos = s, s.code[:0], s.pos[:0]
 		g.shareSites = try > 0
 		g.ownSites = try > 1
 		g.farJumps = far
 		g.nearCap = nearCap
 		if !g.layout() {
+			g.release()
 			return nil, false
 		}
 		g.body()
+		s.code, s.pos = g.code[:0], g.pos[:0]
 		if g.err == errJumps && !far {
 			// Compiled again, as it was but with its jumps far.
 			far = true
@@ -221,6 +259,9 @@ type gen struct {
 	code []bytecode.RInstr
 	pos  []int32
 	cur  int32
+	// s is the scratch code and pos are grown in, which finish copies out
+	// of and release gives back.
+	s *scratch
 
 	// slotReg is the register of each stack slot the function's bindings
 	// are in, or -1.
@@ -4230,25 +4271,31 @@ func (g *gen) closureConst(k, d int) {
 func (g *gen) finish() *bytecode.RegCode {
 	// Each instruction's position, as the stack form's instruction at the
 	// same place: what a frame's pc names for a stack trace.
-	type entry struct {
-		pos int32
-		pc  uint32
+	table := g.s.table[:0]
+	if cap(table) < len(g.fn.Lines) {
+		table = make([]posEntry, 0, len(g.fn.Lines))
 	}
-	var table []entry
 	for i, l := range g.fn.Lines {
 		end := uint32(len(g.fn.Code))
 		if i+1 < len(g.fn.Lines) {
 			end = g.fn.Lines[i+1].PC
 		}
 		if l.PC < end {
-			table = append(table, entry{l.Pos, l.PC})
+			table = append(table, posEntry{l.Pos, l.PC})
 		}
 	}
-	sort.SliceStable(table, func(i, j int) bool { return table[i].pos < table[j].pos })
+	g.s.table = table
+	byPos := func(a, b posEntry) int { return cmp.Compare(a.pos, b.pos) }
+	if !slices.IsSortedFunc(table, byPos) {
+		slices.SortStableFunc(table, byPos)
+	}
 	src := make([]uint32, len(g.code))
+	k := 0
 	for i, p := range g.pos {
-		j := sort.Search(len(table), func(j int) bool { return table[j].pos > p }) - 1
-		if j >= 0 && int(table[j].pc) < len(g.fn.Code) {
+		// The positions mostly rise with the code, so each is looked for
+		// from where the last was found.
+		k = upTo(table, p, k)
+		if j := k - 1; j >= 0 && int(table[j].pc) < len(g.fn.Code) {
 			src[i] = table[j].pc
 		}
 	}
@@ -4262,15 +4309,15 @@ func (g *gen) finish() *bytecode.RegCode {
 		switches = append(switches, cases)
 	}
 	for at, p := range g.stores {
-		j := sort.Search(len(table), func(j int) bool { return table[j].pos > p }) - 1
+		j := upTo(table, p, 0) - 1
 		if j >= 0 && int(table[j].pc) < len(g.fn.Code) {
 			g.aux(at, table[j].pc)
 		} else {
 			g.aux(at, src[at])
 		}
 	}
-	for len(g.siteName) <= int(g.fn.PropSites) {
-		g.siteName = append(g.siteName, 0)
+	if n := int(g.fn.PropSites) + 1 - len(g.siteName); n > 0 {
+		g.siteName = append(g.siteName, make([]uint32, n)...)
 	}
 	var marks []uint8
 	if len(g.marks) > 0 {
@@ -4300,7 +4347,7 @@ func (g *gen) finish() *bytecode.RegCode {
 	rc := &bytecode.RegCode{
 		Aux: aux, FarNames: farNames, Marks: marks, Switches: switches, Literals: g.literals, ObjKeys: g.objKeys, UsesArguments: (g.fn.UsesArguments || g.fn.MakesArguments) && !g.fn.ForwardsArguments,
 		ForwardsArguments: g.fn.ForwardsArguments,
-		Code:              g.code, NumRegs: g.max + 1 + g.nfar, SrcPC: src, SiteName: g.siteName, This: -1,
+		Code:              slices.Clone(g.code), NumRegs: g.max + 1 + g.nfar, SrcPC: src, SiteName: g.siteName, This: -1,
 		LocalReg: g.localReg(),
 		Wide:     true, Params: g.fn.ParamCount, Inits: g.inits, Caps: g.caps, CallSites: g.calls,
 		Handlers: g.handlerTable(), BackLive: g.backLive, KeepsArgs: g.fn.HasRest || g.forwardsArgs, ThisRef: g.thisRef,
@@ -4310,6 +4357,51 @@ func (g *gen) finish() *bytecode.RegCode {
 		return nil
 	}
 	return rc
+}
+
+// posEntry is a source position and the stack form's instruction there.
+type posEntry struct {
+	pos int32
+	pc  uint32
+}
+
+// upTo is how many of t's entries, sorted by position, are at p or
+// before it: the index of the first past it. k is where the search
+// starts, the answer for a position near p, from which it gallops out to
+// the bounds of a binary search.
+func upTo(t []posEntry, p int32, k int) int {
+	lo, hi := 0, len(t)
+	if k > len(t) {
+		k = len(t)
+	}
+	if k < len(t) && t[k].pos <= p {
+		lo = k + 1
+		for step := 1; k+step < len(t); step *= 2 {
+			if t[k+step].pos > p {
+				hi = k + step
+				break
+			}
+			lo = k + step + 1
+		}
+	} else {
+		hi = k
+		for step := 1; k-step >= 0; step *= 2 {
+			if t[k-step].pos <= p {
+				lo = k - step + 1
+				break
+			}
+			hi = k - step
+		}
+	}
+	for lo < hi {
+		m := int(uint(lo+hi) >> 1)
+		if t[m].pos > p {
+			hi = m
+		} else {
+			lo = m + 1
+		}
+	}
+	return lo
 }
 
 // localReg is LocalReg: each local's register, where the code has a
