@@ -291,3 +291,69 @@ func regNoInline(t *testing.T) {
 	jitNoInline = func(*bytecode.Function) bool { return true }
 	t.Cleanup(func() { jitNoInline = saved })
 }
+
+// regReuseSrc is Octane's RegExp's Exec, a match's array kept in a local
+// that only its length and elements are read from, which register code
+// marks for the interpreter to make again in the memory of the last
+// (bytecode.RMarkReuse).
+const regReuseSrc = `
+function execs(n, s) {
+	var re = /(\d+)-(\w+)/, sum = 0;
+	for (var i = 0; i < n; i++) {
+		re.lastIndex = 0;
+		var array = re.exec(s + i);
+		if (array) for (var j = 0; j < array.length; j++) { var p = array[j]; if (p) sum += p.length }
+	}
+	return sum;
+}
+`
+
+// TestJITRegExecReuseLeaf runs regReuseSrc's execs natively and in a
+// JIT-less runtime: its exec, marked RMarkReuse, is a leaf of the native
+// code (jitRegFeedback's Leaf), which makes each array anew, as the stack
+// form's native code does; the answers equal, the collector idle and
+// marking, and the call neither left to Go at an exit nor made by Go.
+func TestJITRegExecReuseLeaf(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regReuseSrc)
+			rts[0].SetJITWarmUp(1, 1)
+			fn, _ := rts[0].GetProp(Obj(rts[0].Global()), rts[0].Intern("execs"))
+			rc := fn.Object().fn().closure.fn.RegCode()
+			reuse := false
+			for _, m := range rc.Marks {
+				reuse = reuse || m&bytecode.RMarkReuse != 0
+			}
+			if !reuse {
+				t.Fatal("execs' exec is not marked RMarkReuse")
+			}
+			var got [2]string
+			for i, r := range rts {
+				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("execs"))
+				for range 8 {
+					v, err := r.Call(fn, Undefined, []Value{Float(2000), Str(NewString("x 12-ab "))})
+					got[i] = regNativeShow(r, v, err)
+				}
+			}
+			if got[0] != got[1] {
+				t.Errorf("with the JIT %q, without %q", got[0], got[1])
+			}
+			st := rts[0].RegNativeStats()
+			t.Logf("hosts %v, calls of Go %d", st.HostOps, st.GoCalls)
+			if n := st.HostOps["call_method_w"]; n > 8 {
+				t.Errorf("exec left to Go at %d exits", n)
+			}
+			// The leaf's, not a call of Go each turn (jitRegGoCallOn), as
+			// before it was a leaf.
+			if st.GoCalls > 8 {
+				t.Errorf("exec made by %d calls of Go, not the leaf", st.GoCalls)
+			}
+		})
+	}
+}

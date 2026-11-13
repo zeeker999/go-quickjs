@@ -644,13 +644,16 @@ func (f *jitRegFeedback) Leaf(pc int) (uintptr, bool) {
 	// RegExp's exec and test too, as the stack form's code learns them at
 	// its calls of Go (jitRegExpLitSite) -- a literal's call among them
 	// (RMarkLitRecv), its RegExp then from the pool (regexp_lit's
-	// lowering, compile's regexpLit), and one whose value nothing reads
-	// but its truth (RMarkDead), which the leaf makes whole -- but where
-	// the call makes its first argument (RMarkLitArg), or its array in the
-	// memory of the last (RMarkReuse), which the interpreter's call does
-	// (regMarkedCall).
-	const marked = bytecode.RMarkReuse | bytecode.RMarkLitArg
-	regexp := (fd.elemOp == elemRegExpExec || fd.elemOp == elemRegExpTest) && marks&marked == 0
+	// lowering, compile's regexpLit), one whose value nothing reads but
+	// its truth (RMarkDead), which the leaf makes whole, and an exec whose
+	// array the interpreter may make again in the memory of the last
+	// (RMarkReuse), which the leaf makes anew, as the stack form's native
+	// code does (zzz_regexpreuse.go): the old array, which only the local
+	// the new one replaces could reach, the interpreter's next call may
+	// make again, its slots' check finding the local holds it no more --
+	// but not where the call makes its first argument (RMarkLitArg),
+	// which the interpreter's call does (regMarkedCall).
+	regexp := (fd.elemOp == elemRegExpExec || fd.elemOp == elemRegExpTest) && marks&bytecode.RMarkLitArg == 0
 	if !jitLeafOp(fd.elemOp) && !regexp {
 		return 0, false
 	}

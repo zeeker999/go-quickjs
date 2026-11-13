@@ -188,9 +188,11 @@ func TestJITRegLeaf(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		want int
-	}{{"leaves", 4}, {"rx", 1}} {
-		// rx's test is marked dead -- only its truth is read -- which the
-		// interpreter's call makes (regMarkedCall).
+	}{{"leaves", 4}, {"rx", 2}} {
+		// rx's exec, its array kept in a local the interpreter may make
+		// it again in (RMarkReuse), and its test, marked dead -- only its
+		// truth is read -- both leaves, as the stack form's code calls
+		// them: the leaf makes the array anew, and the whole answer.
 		v, _ := r.GetProp(Obj(r.Global()), r.Intern(c.name))
 		cl := v.Object().fn().closure
 		e := r.jitRegFor(cl, cl.reg)
