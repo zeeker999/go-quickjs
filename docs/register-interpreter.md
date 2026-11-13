@@ -1097,8 +1097,12 @@ send code.
   calls between register functions. JIT runtimes still run the stack form
   by default. Stage 3 below says what was built and what is left.
 
-**The order from here.** Each step finishes before the next starts, but
-for work that runs alongside on separate branches.
+**The order from here.** Steps 1 and 2 run alongside each other; each
+later step starts when those before it are done. From 2026-11-13 the
+JIT's two backends move together: every change to how the JIT compiles
+register code lands in `mir`'s amd64 and arm64 backends in the same
+commit, tested on CI's macOS arm64 jobs, so that the switch-over finds
+no arm64 backlog.
 1. **The JIT on register code (Stage 3).** The remaining feedback-parity
    gaps (RegExp literals, call frequencies, inlined callees' feedback);
    inlining register callees; top-level code, generators and async
