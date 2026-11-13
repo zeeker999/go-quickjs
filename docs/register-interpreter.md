@@ -600,6 +600,9 @@ the realm's cache of their prototypes' data properties (`primProps`), as
 `regGetMethod` reads it; for-of's step over a dense array by the
 intrinsic iterator, its end included; `s.charCodeAt(i)`
 (`char_code_at`) of a flat string, the built-in read from the same cache;
+BigInt64Array's and BigUint64Array's elements read and written, a BigInt
+held in its Value; Uint8ClampedArray's writes, clamped and rounded to
+even; the compare-and-branches of two such BigInts, as 128-bit integers;
 and a call in tail position while the stack is shallower than
 `tailCallDepth`, which is `call_w`'s. Deeper, Go gives the frame to the
 callee in place (`regTailTo`); where it is the base frame, `nativeRun`

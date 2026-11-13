@@ -223,3 +223,29 @@ func TestRegNativeTailCalls(t *testing.T) {
 		for (var i = 0; i < 50; i++) t += self(20, i)
 		String(t)`, bytecode.RCallWT)
 }
+
+// TestRegNativeTypedBigClamped runs the elements of BigInt64Array and
+// BigUint64Array read and written natively, and Uint8ClampedArray's
+// writes: the int64 range's ends, values past 64 bits, which wrap, and
+// heap BigInts, which Go writes; every kind of number clamped.
+func TestRegNativeTypedBigClamped(t *testing.T) {
+	nativeCheck(t, `
+		var out = []
+		var bigs = [0n, 1n, -1n, 2n ** 63n - 1n, -(2n ** 63n), 2n ** 63n, 2n ** 64n - 1n, -(2n ** 64n) + 1n, 2n ** 64n, 2n ** 70n + 5n, -(2n ** 65n) - 3n, 12345678901234567n]
+		function rw(T) { var a = new T(bigs.length), r = []; for (var i = 0; i < bigs.length; i++) a[i] = bigs[i]; for (var i = 0; i < a.length; i++) r.push(String(a[i])); a[0] = 5n; a[1] = a[0] + 1n; r.push(String(a[1])); try { a[2] = 1 } catch (e) { r.push(e.name) } return r.join() }
+		out.push(rw(BigInt64Array), rw(BigUint64Array))
+		function sum(a) { var s = 0n; for (var i = 0; i < a.length; i++) s += a[i]; return s }
+		out.push(String(sum(BigInt64Array.from(bigs.slice(0, 5)))), String(sum(BigUint64Array.from([1n, 2n, 3n]))))
+		var nums = [NaN, -1, -0, 0, 0.4, 0.5, 0.6, 1.5, 2.5, 3.5, 127.5, 254.5, 254.6, 255, 255.5, 300, -Infinity, Infinity, 1e300, -1e300, 2 ** 53, "7", null, true]
+		function clamp() { var a = new Uint8ClampedArray(nums.length); for (var i = 0; i < nums.length; i++) a[i] = nums[i]; return Array.from(a).join() }
+		out.push(clamp())
+		var pairs = [[1n, 2n], [2n, 1n], [-5n, 3n], [3n, -5n], [-(2n ** 63n), 2n ** 63n - 1n], [2n ** 63n, 2n ** 63n - 1n], [-(2n ** 64n) + 1n, -(2n ** 63n)], [7n, 7n], [2n ** 100n, 1n], [1n, 2], [2, 1n], [1n, "2"]]
+		function cmps() { var r = []; for (var [x, y] of pairs) { var s = ""; if (x < y) s += "<"; if (x <= y) s += "l"; if (x > y) s += ">"; if (x >= y) s += "g"; if (!(x < y)) s += "!"; r.push(s) } return r.join() }
+		out.push(cmps())
+		var sorted = BigInt64Array.from([5n, -3n, 2n ** 62n, -(2n ** 63n), 0n, 7n]).sort()
+		out.push(String(sorted))
+		out.join("\n")`, `
+		var a = new BigInt64Array(64), u = new BigUint64Array(64), c = new Uint8ClampedArray(64), t = 0n, n = 0
+		for (var k = 0; k < 20; k++) for (var i = 0; i < 64; i++) { a[i] = BigInt(i) - 30n; u[i] = a[i]; c[i] = i * 4.5 - 10; if (a[i] < 0n) t += a[i]; if (a[i] >= u[i]) n++ }
+		String(t) + " " + n + " " + c[3]`, bytecode.RSetIndex, bytecode.RGetIndex, bytecode.RJLt, bytecode.RJNLt, bytecode.RJGe, bytecode.RJNGe)
+}

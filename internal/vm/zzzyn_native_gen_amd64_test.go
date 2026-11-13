@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -499,14 +500,20 @@ func (g *nativeGen) taken(off Reg) {
 // pair if nan).
 func (g *nativeGen) cmp(imm, swap bool, cond Cond, nan bool) {
 	a := g.a
+	// Two registers' BigInts held in their Values are compared as
+	// integers (bigCmp).
+	big := g.exit
+	if !imm {
+		big = a.NewLabel()
+	}
 	g.decA(RDX)
-	g.num(0, RDX)
+	g.numOr(0, RDX, big)
 	if imm {
 		g.immSB(RCX)
 		a.Cvtsi2sd(1, RCX, true)
 	} else {
 		g.decB(RSI)
-		g.num(1, RSI)
+		g.numOr(1, RSI, big)
 	}
 	if swap {
 		a.SSEOp(UcomiSD, 1, 0)
@@ -522,6 +529,42 @@ func (g *nativeGen) cmp(imm, swap bool, cond Cond, nan bool) {
 	a.Bind(tk)
 	g.immSC(RCX)
 	g.taken(RCX)
+	if big != g.exit {
+		a.Bind(big)
+		g.bigCmp(swap)
+		a.Jcc(cond, tk)
+		g.next()
+	}
+}
+
+// bigCmp sets the flags as an unsigned compare of A with B (of B with A
+// where swap) would for two BigInts held in their Values, which it
+// compares as 128-bit integers; anything else exits. RAX is read again
+// after.
+func (g *nativeGen) bigCmp(swap bool) {
+	a := g.a
+	hiSame, done := a.NewLabel(), a.NewLabel()
+	g.decA(R9)
+	g.bigShort(R9, R8, R9, true)
+	g.decB(RSI)
+	g.bigShort(RSI, RAX, RSI, true)
+	x0, x1, y0, y1 := R9, R8, RSI, RAX
+	if swap {
+		x0, x1, y0, y1 = RSI, RAX, R9, R8
+	}
+	a.Op(Cmp, x1, y1, true)
+	a.Jcc(CondE, hiSame)
+	// The high words differ: compared signed, as unsigned with the sign
+	// bit flipped.
+	a.MovImm(RCX, 1<<63)
+	a.Op(Xor, x1, RCX, true)
+	a.Op(Xor, y1, RCX, true)
+	a.Op(Cmp, x1, y1, true)
+	a.Jmp(done)
+	a.Bind(hiSame)
+	a.Op(Cmp, x0, y0, true)
+	a.Bind(done)
+	a.Load(RAX, RBX, 0)
 }
 
 // arith is R[A] = R[B] op R[C], or op an immediate SC, or op 1.
@@ -928,8 +971,15 @@ func (g *nativeGen) bigArith(op SSE) {
 		a.MovRR(R8, R9)
 		a.ShiftImm(Sar, R8, 63, true)
 	}
-	// The answer R8:R9: of the int64 range where R8 is R9's sign, else
-	// one past it where R8 is 0 (2^63 up) or -1 (below -2^63, -2^64 not).
+	g.bigStoreA()
+}
+
+// bigStoreA stores the 128-bit integer R8:R9 to register A as a BigInt held
+// in its Value, as shortBigMag holds it: of the int64 range where R8 is
+// R9's sign, else one past it where R8 is 0 (2^63 up) or -1 (below -2^63,
+// -2^64 not); anything wider exits. RAX is read again first.
+func (g *nativeGen) bigStoreA() {
+	a := g.a
 	small, past, store := a.NewLabel(), a.NewLabel(), a.NewLabel()
 	a.MovRR(RDX, R9)
 	a.ShiftImm(Sar, RDX, 63, true)
@@ -1173,7 +1223,7 @@ func (g *nativeGen) typedView(obj, idx Reg) {
 // typedRead puts in X0 the element at the index in idx of the typed array
 // in obj, a number of any kind but a float16 or a BigInt, as runReg's
 // typed tail reads it; else it exits. R8, R9 and RDX are its scratch.
-func (g *nativeGen) typedRead(obj, idx Reg) {
+func (g *nativeGen) typedRead(obj, idx Reg, big *Label) {
 	a := g.a
 	g.typedView(obj, idx)
 	a.LoadU8(RDX, R8, offTKind)
@@ -1214,8 +1264,37 @@ func (g *nativeGen) typedRead(obj, idx Reg) {
 		a.Jmp(done)
 		a.Bind(next)
 	}
+	if big != nil {
+		// A BigInt kind: big, the element's address in R8, the kind in RDX.
+		notBig := a.NewLabel()
+		a.OpImm(Cmp, RDX, int32(elemBigInt64), false)
+		a.Jcc(CondB, notBig)
+		a.OpImm(Cmp, RDX, int32(elemBigUint64), false)
+		a.Jcc(CondA, notBig)
+		a.LeaIdx(R8, R8, idx, 8, 0)
+		a.Jmp(*big)
+		a.Bind(notBig)
+	}
 	a.Jmp(g.exit)
 	a.Bind(done)
+}
+
+// typedBigRead stores the element at R8 of a BigInt64Array or a
+// BigUint64Array, its kind in RDX, to register A, a BigInt held in its
+// Value.
+func (g *nativeGen) typedBigRead() {
+	a := g.a
+	unsigned, enc := a.NewLabel(), a.NewLabel()
+	a.Load(R9, R8, 0)
+	a.OpImm(Cmp, RDX, int32(elemBigUint64), false)
+	a.Jcc(CondE, unsigned)
+	a.MovRR(R8, R9)
+	a.ShiftImm(Sar, R8, 63, true)
+	a.Jmp(enc)
+	a.Bind(unsigned)
+	a.Op(Xor, R8, R8, false)
+	a.Bind(enc)
+	g.bigStoreA()
 }
 
 // typedWrite stores the number in X1 as the element at the index in idx
@@ -1275,8 +1354,70 @@ func (g *nativeGen) typedWrite(obj, idx Reg) {
 		a.Jmp(done)
 		a.Bind(next)
 	}
-	a.Jmp(g.exit)
+	// Uint8ClampedArray's ToUint8Clamp: NaN and what is not above 0 are
+	// 0, what is not below 255 255, else the nearest integer, ties to the
+	// even one.
+	zero, top, put, up := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
+	a.OpImm(Cmp, RDX, int32(elemUint8Clamped), false)
+	a.Jcc(CondNE, g.exit)
+	a.LeaIdx(R8, R8, idx, 1, 0)
+	a.SSEOp(XorPD, 3, 3)
+	a.SSEOp(UcomiSD, 1, 3)
+	a.Jcc(CondP, zero)
+	a.Jcc(CondBE, zero)
+	a.MovImm(R9, 255)
+	a.Cvtsi2sd(3, R9, true)
+	a.SSEOp(UcomiSD, 1, 3)
+	a.Jcc(CondAE, top)
+	a.Cvttsd2si(R9, 1)
+	a.Cvtsi2sd(3, R9, true)
+	a.SSEOp(MovAPD, 0, 1)
+	a.SSEOp(SubSD, 0, 3)
+	a.MovImm(RDX, math.Float64bits(0.5))
+	a.MovQToX(3, RDX)
+	a.SSEOp(UcomiSD, 0, 3)
+	a.Jcc(CondA, up)
+	a.Jcc(CondB, put)
+	a.MovRR(RDX, R9)
+	a.OpImm(And, RDX, 1, false)
+	a.Jcc(CondE, put)
+	a.Bind(up)
+	a.OpImm(Add, R9, 1, false)
+	a.Jmp(put)
+	a.Bind(zero)
+	a.Op(Xor, R9, R9, false)
+	a.Jmp(put)
+	a.Bind(top)
+	a.MovImm(R9, 255)
+	a.Bind(put)
+	a.Store8(R8, 0, R9)
 	a.Bind(done)
+}
+
+// typedBigWrite stores register C, a BigInt held in its Value, as the
+// element at the index in idx of the BigInt64Array or BigUint64Array in
+// obj: its low 64 bits, ToBigInt64's and ToBigUint64's wrapping; anything
+// else exits.
+func (g *nativeGen) typedBigWrite(obj, idx Reg) {
+	a := g.a
+	a.Store(RDI, scr(sI), idx)
+	g.decC(R9)
+	g.bigShort(R9, R8, R9, true)
+	a.Store(RDI, scr(sV0), R9)
+	a.Load(idx, RDI, scr(sI))
+	g.typedView(obj, idx)
+	a.LoadU8(RDX, R8, offTReadonly)
+	a.Op(Test, RDX, RDX, false)
+	a.Jcc(CondNE, g.exit)
+	a.LoadU8(RDX, R8, offTKind)
+	a.OpImm(Cmp, RDX, int32(elemBigInt64), false)
+	a.Jcc(CondB, g.exit)
+	a.OpImm(Cmp, RDX, int32(elemBigUint64), false)
+	a.Jcc(CondA, g.exit)
+	a.Load(R8, R8, offTData)
+	a.LeaIdx(R8, R8, idx, 8, 0)
+	a.Load(R9, RDI, scr(sV0))
+	a.Store(R8, 0, R9)
 }
 
 // ptrStore stores RCX, a pointer word, at [RAX]: plainly while the
@@ -2624,8 +2765,11 @@ func nativeEmit() ([]byte, nativeOffsets) {
 		a.LeaIdx(RAX, R12, RDX, 1, 0)
 		g.storeValue()
 		a.Bind(miss)
-		g.typedRead(RSI, RCX)
+		big := a.NewLabel()
+		g.typedRead(RSI, RCX, &big)
 		g.storeA(0)
+		a.Bind(big)
+		g.typedBigRead()
 	}
 	h(bytecode.RGetIndex, func() {
 		miss := a.NewLabel()
@@ -2699,9 +2843,13 @@ func nativeEmit() ([]byte, nativeOffsets) {
 		a.MovRR(RAX, RCX)
 		g.storeValue()
 		a.Bind(miss)
+		bigW := a.NewLabel()
 		g.decC(R8)
-		g.num(1, R8)
+		g.numOr(1, R8, bigW)
 		g.typedWrite(RSI, RCX)
+		g.next()
+		a.Bind(bigW)
+		g.typedBigWrite(RSI, RCX)
 		g.next()
 	}
 	h(bytecode.RSetIndex, func() {
