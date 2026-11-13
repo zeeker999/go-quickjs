@@ -10,6 +10,11 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
+// The handlers' files, after the other generators', before layoutpad's
+// (zzzz_layoutpad.go), which measures what they make.
+//
+//go:generate go run ./internal/nativegen/cmd
+
 // The register interpreter's native threaded handlers on amd64
 // (docs/register-interpreter.md, "Native handlers"): machine code for the
 // hot operations, each handler ending in its own indirect jump through
@@ -20,10 +25,11 @@ import (
 // its Go handler from regTable (and its slow function), as runReg would,
 // and enters the code again after it.
 //
-// The code is made offline by nativeEmit (zzzyn_native_gen_amd64_test.go)
-// and assembled into the binary (zzzyn_native_handlers_amd64.s, go
-// generate): one block for every runtime and every build tag, never
-// patched, every address it needs given by the context in DI.
+// The code is made offline by internal/vm/internal/nativegen, from the
+// package's layout (zzzyn_native_layout_amd64.go), and assembled into the
+// binary (zzzyn_native_handlers_amd64.s, go generate): one block for
+// every runtime and every build tag, never patched, every address it
+// needs given by the context in DI.
 //
 // The machine registers, kept across the dispatch:
 //

@@ -681,12 +681,19 @@ are its own, so separate runtimes on separate goroutines share no
 context.
 
 **Generation and the shared-code rules.** The handlers are written with
-the JIT's assembler by `nativeEmit`, a test's code
-(`zzzyn_native_gen_amd64_test.go`), and assembled into the binary as one
-TEXT symbol of bytes and the table as GLOBL/DATA
-(`zzzyn_native_handlers_amd64.s`, `go generate ./internal/vm`);
-`TestRegNativeGenerated` fails while the file is not what the emitter
-makes. The package's code needs no assembler and no JIT. The block is one
+the JIT's assembler by a generator, `internal/vm/internal/nativegen`, and
+assembled into the binary as one TEXT symbol of bytes and the table as
+GLOBL/DATA (`zzzyn_native_handlers_amd64.s`, `go generate
+./internal/vm`); `TestRegNativeGenerated` fails while the file is not
+what the generator makes. The generator does not import package vm: it
+reads vm's private layout -- the context's, the frame records', the
+Runtime's and the other types' offsets, the constants the handlers test
+against -- as plain numbers, which vm's `NativeLayout` gives in a build
+with the `quickjs_nativelayout` tag, which a helper of the generator alone
+builds and runs. Each architecture's emitter is files of its own beside
+the shared layout, the shared list of the operations the handlers answer
+and the writer of the block. The package's code needs no assembler and
+no JIT. The block is one
 for every runtime and every build tag: position-independent, never
 patched, with no runtime's constant in it -- every address it needs is
 the context's, and the Runtime's and a closureCode's fields, whose
