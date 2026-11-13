@@ -34,6 +34,9 @@ type jitRegInlineLevel struct {
 	// holds: the construction's result where the callee returns no object.
 	construct bool
 	this      Value
+	// threw marks the innermost level whose operation Go made at its host
+	// exit threw (jitRegInlineLeft).
+	threw bool
 }
 
 // jitRegInlined finishes the inlined callees whose frames an exit of the
@@ -99,6 +102,9 @@ func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at int
 	for k := n - 1; k >= 0; k-- {
 		x, f := &levels[k], frames[k]
 		if k == n-1 {
+			// Told before Go runs the instruction, which may fill the pool
+			// it finds empty.
+			atSite := r.jitRegLeftAtSite(x)
 			var learned bool
 			v, err, learned = r.jitRegInlineLeft(f, x, owner)
 			l := s.regLearnedOf(r.jitKeyOf(cl.fn))
@@ -112,6 +118,15 @@ func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at int
 				// The callee's feedback learned what the owner's code was
 				// not compiled for: compiled again for it (jitRegReopt).
 				r.jitRegReopt(cl, owner)
+			case atSite || x.threw || owner.stale:
+				// Left at a site of the callee's -- or by code to be
+				// compiled again, which may be what it leaves for -- not
+				// for being inlined, as the stack form's unwinding counts
+				// none such; or left to throw, which the callee's own code,
+				// called natively, leaves native code for just the same: a
+				// read of null's property, at a site the callee's own code
+				// made megamorphic deoptimizing for it (jitDeoptSeenOp),
+				// had had constructs' Vs called natively after 16 throws.
 			default:
 				// Left with nothing to learn: counted against inlining the
 				// callee at the call, by the stack form's own rule
@@ -148,6 +163,43 @@ func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at int
 	return v, err, true
 }
 
+// jitRegLeftAtSite reports whether the innermost inlined level x left,
+// at a host exit, for a site of its own rather than for being inlined, as
+// the stack form's unwinding tells (jitShapeMiss, jitPoolEmptied): a
+// property's read or write whose site is not megamorphic -- a shape its
+// cases lack, a receiver whose read throws -- or a construction whose
+// pool ran out, which Go fills again. Neither counts against inlining the
+// callee (jitInlineLeft): a callee reading a property of the null its
+// caller passes now and then, a TypeError the caller catches, had been
+// called natively after 16 of them.
+func (r *Runtime) jitRegLeftAtSite(x *jitRegInlineLevel) bool {
+	rc := x.cl.reg.rc
+	if x.kind != abi.ExitHost || x.pc < 0 || x.pc >= len(rc.Code) {
+		return false
+	}
+	w := rc.Code[x.pc]
+	l := r.jit.regLearnedOf(r.jitKeyOf(x.cl.fn))
+	switch w.Op() {
+	case bytecode.RGetProp, bytecode.RGetMethod, bytecode.RGetMethodW, bytecode.RSetProp, bytecode.RAddProp, bytecode.RAddPropI:
+		if site := int(w.C()); site < len(x.cl.ic) && x.cl.ic[site].fills >= maxCacheFills {
+			return false
+		}
+		for i := range l.poly {
+			if p := &l.poly[i]; int(p.pc) == x.pc && p.mega {
+				return false
+			}
+		}
+		return true
+	case bytecode.RNewW:
+		for _, t := range jitTargets(l) {
+			if int(t.pc) == x.pc && t.pool != nil && t.pool.Count == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // jitRegInlineLeft finishes f, the innermost inlined callee's frame, from
 // where it left (x), in the interpreter, learning from it as from an exit
 // of its own code (jitRegLeft), what it learns its function's own: a
@@ -172,7 +224,7 @@ func (r *Runtime) jitRegInlineLeft(f *frame, x *jitRegInlineLevel, owner *jitReg
 		f.pc = regSrc(c, pc) + 1
 		s.noteRegHost(c, pc)
 		l := s.regLearnedOf(r.jitKeyOf(x.cl.fn))
-		before, mark := l.polyReopt, jitFeedbackMark(x.cl)
+		before, failed, mark := l.polyReopt, len(l.failed), jitFeedbackMark(x.cl)
 		seen := r.jitRegHostSeen(f, c, x.wb, pc)
 		next, ran, err := r.regWhole(f, c, x.wb, pc)
 		if !ran {
@@ -183,11 +235,16 @@ func (r *Runtime) jitRegInlineLeft(f *frame, x *jitRegInlineLevel, owner *jitReg
 		}
 		// The site met what the code inlining it was not compiled for --
 		// its own code's to be compiled again for too (polyReopt) -- or
-		// its caches learned it, which the code inlining it reads, as a
-		// function's own code is compiled again for its caches' changes
-		// (jitFeedbackMark).
-		learned = !before && l.polyReopt || jitFeedbackMark(x.cl) != mark
+		// a value not a number at a read the code takes for a number's
+		// (jitNumberMissed), which a guard of the callee's own code
+		// deoptimizes for but one inlined leaves to Go at, the read
+		// generic once compiled again: str's in callsGo, of a string, had
+		// left at each; or its caches learned it, which the code inlining
+		// it reads, as a function's own code is compiled again for its
+		// caches' changes (jitFeedbackMark).
+		learned = !before && l.polyReopt || len(l.failed) != failed || jitFeedbackMark(x.cl) != mark
 		if err != nil {
+			x.threw = true
 			return Undefined, err, learned
 		}
 		if r.stopped != nil {

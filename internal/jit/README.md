@@ -1554,10 +1554,16 @@ caller's call given the outermost's answer (`regPending`), as a native
 callee's. A guard's failure there has the caller's code invalid, as one
 of its own does; an exit that learned something else -- a site's case, a
 change of the callee's caches (`jitFeedbackMark`) -- has it compiled
-again for it (`jitRegReopt`); one that learned nothing counts against
-inlining at the call, by the stack form's own rule (`jitInlineLeft`,
-`jitInlineExits`, `notInline`): past it, the code compiled next makes a
-native call there.
+again for it (`jitRegReopt`), a read's value not a number among it
+(`jitNumberMissed`), the read generic in that code. One that learned
+nothing counts against inlining at the call, by the stack form's own
+rule (`jitInlineLeft`, `jitInlineExits`, `notInline`): past it, the code
+compiled next makes a native call there. Not counted, as the stack
+form's unwinding counts none such: an exit at a site of the callee's --
+a property's read or write whose site is not megamorphic, a construction
+whose pool ran out (`jitRegLeftAtSite`) -- or of stale code; nor one
+whose operation threw, which the callee called natively leaves native
+code for just the same.
 
 ## The execution boundary
 
