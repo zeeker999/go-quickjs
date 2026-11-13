@@ -1303,7 +1303,24 @@ invalid, its exit finishes (`regPending`, `regFinishCall`): the answer to
 the call's register, or the exception to the frame's handlers, never the
 call made again. The calls of Go that need the stack form's frame
 (`jitGoRun`'s) find none on a register run, refuse, and leave it to an
-exit.
+exit; but those made on the frame (`ssa.GoHost`, `GoArgument`, `GoCells`,
+`GoClosure`, `GoClose`) Go makes on the register frame
+(`internal/vm/zzjit_zregframe.go`, `jitRegFrameOp`) -- the run's own, or a
+native callee's, which has none of the VM's (a stand-in of its closure,
+function object and receiver, its window at its context's `Base`): a
+`new.target`, a rest parameter's array and an unmapped arguments object of
+the arguments the frame kept, `arguments[k]` and `arguments.length` of
+them, and the cells of code whose captured registers are in cells of their
+own (`ir.Program`'s `Cells`, the k-th captured register's the k-th cell):
+on the run's own frame open on the window's registers, the upvalues its
+closures share, which the frame closes as it ends; for a native callee,
+closed cells holding the registers' values, which Go opens on its window
+where it makes the callee's frame (`jitRegReopenCells`). A closure is made
+of them as `regClosure` makes one, and a scope's end (`close_regs`) gives
+its registers fresh cells. Left to an exit: a mapped arguments object,
+which aliases the registers, a native callee's rest parameters and
+arguments -- its calls keep none -- and a closure a native callee makes
+that captures by value, which reads its window's registers.
 
 **On-stack replacement.** The build's entries at a loop's header (`Entry`'s
 `OSR`) are by the instruction its register pc lowers to first (`p.At`), so
@@ -1404,7 +1421,8 @@ Which functions a call makes natively the feedback says
 cache holds (`regCalls`), and those the code learned it calls at its calls
 of Go and at its exits (`jitRegCallSeen`, kept by register pc in the
 function's learned entry), up to `jitCallTargets`, each checked by its
-object -- where the function runs register code of the form's own layout
+object, or, a closure its maker makes anew -- another object of a function
+the call has called -- by its code (`ssa.CallSite`'s `ByCode`) -- where the function runs register code of the form's own layout
 of the runtime's realm, a frame the call path makes as a call's (not a
 class's constructor, nor one that keeps its arguments or shares a derived
 constructor's this), as the stack form calls natively what `jitCallSeen`

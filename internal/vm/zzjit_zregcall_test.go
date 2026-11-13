@@ -70,6 +70,15 @@ function constructs(n) {
 	}
 	return s + m + (new Q(1, 2) instanceof Q) + Object.keys(new R(3)) + Object.getPrototypeOf(new Q(0, 0)).constructor.name;
 }
+function counter(n) { var k = 0; var inc = function () { k++ }; for (var i = 0; i < n; i++) inc(); return k }
+function loopClosures(n) { var fs = []; for (let i = 0; i < n; i++) fs.push(() => i); var s = 0; for (var j = 0; j < fs.length; j++) s += fs[j](); return s }
+function mkAdder(a) { return function (b) { return a + b } }
+function midCap(k) { var x = k; var g = function () { return x }; x = x + 1; var t = [1, 2].map(function (e) { return x + e }); x++; return g() + t[1] }
+function closures(n) { var s = 0; for (var i = 0; i < n; i++) s += mkAdder(i)(1) + midCap(i); return s + counter(n) + loopClosures(n / 100) }
+function restf(...xs) { return xs.length }
+function argsf() { "use strict"; return arguments.length + (arguments[0] | 0) }
+function nt() { return new.target === undefined ? 1 : 2 }
+function frameOps(n) { var s = 0; for (var i = 0; i < n; i++) s += restf(i, i) + argsf(i, 2) + nt(); return s }
 function stack(k) { return new Error("e" + k).stack.split("\n").length }
 function midStack(k) { return stack(k) }
 function stacks(n) { var s = 0; for (var i = 0; i < n; i++) s += midStack(i); return s }
@@ -95,7 +104,7 @@ func TestJITRegNativeCalls(t *testing.T) {
 			for _, c := range []struct {
 				name string
 				n    float64
-			}{{"plain", 400}, {"chain", 600}, {"makes", 300}, {"catches", 400}, {"uncaught", 400}, {"deep", 20}, {"tails", 100}, {"callsGo", 300}, {"stacks", 100}, {"constructs", 300}} {
+			}{{"plain", 400}, {"chain", 600}, {"makes", 300}, {"catches", 400}, {"uncaught", 400}, {"deep", 20}, {"tails", 100}, {"callsGo", 300}, {"stacks", 100}, {"constructs", 300}, {"closures", 3000}, {"frameOps", 3000}} {
 				var got [2]string
 				for i, r := range rts {
 					fn, _ := r.GetProp(Obj(r.Global()), r.Intern(c.name))
@@ -117,7 +126,8 @@ func TestJITRegNativeCalls(t *testing.T) {
 				}
 			}
 			t.Logf("native calls %v; unwound %d, resumed %d, entries %d", native, st.Unwound, st.Resumed, st.Entries)
-			for _, name := range []string{"add", "three", "leaf3", "mid3", "fib", "depth", "goes", "Q", "R", "T"} {
+			t.Logf("register code %d bytes of %d", r.jit.regBytes(), r.jitBudget())
+			for _, name := range []string{"add", "three", "leaf3", "mid3", "fib", "depth", "goes", "Q", "R", "T", "mkAdder", "midCap", "nt"} {
 				if native[name] == 0 {
 					t.Errorf("%s: never called natively", name)
 				}

@@ -3,6 +3,7 @@
 package vm
 
 import (
+	"slices"
 	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -24,6 +25,11 @@ import (
 // pins each level's code (jitRegEntry's levels), which the cache then
 // neither drops nor compiles again until the level is done: the code each
 // level runs is its function's in the cache for as long as it runs.
+
+// jitRegFrameOps are the calls of Go on the frame (ssa.GoHost,
+// GoArgument, GoCells, GoClosure, GoClose) that Go makes for native code
+// of a register frame (jitRegFrameOp); it leaves the others to an exit.
+var jitRegFrameOps = map[ssa.GoOp]bool{ssa.GoHost: true, ssa.GoArgument: true, ssa.GoCells: true, ssa.GoClosure: true, ssa.GoClose: true}
 
 // regLinkOf is the link native callers call cl's function's register code
 // c through (ssa.CallSite's Entry): its code's call entry while it has
@@ -80,21 +86,26 @@ func (f *jitRegFeedback) regCallSites(pc int, w bytecode.RInstr, argc int, metho
 	rpc := int32(f.p.Origin[pc])
 	newW := w.Op() == bytecode.RNewW
 	var sites []ssa.CallSite
-	add := func(o *Object, cl *closure, rc *regCode, pool *abi.ObjectPool) {
-		for _, s := range sites {
-			if s.Callee == uintptr(unsafe.Pointer(o)) {
+	add := func(o *Object, cl *closure, rc *regCode, pool *abi.ObjectPool, byCode bool) {
+		for i, s := range sites {
+			if s.Callee == uintptr(unsafe.Pointer(o)) || s.ByCode != 0 && jitRegSameCode(s, cl) {
 				return
+			}
+			if byCode && s.Closure != 0 && jitRegSameClosureCode((*closure)(unsafe.Pointer(s.Closure)), cl) {
+				// The same function's, checked by its code from here.
+				sites = slices.Delete(sites, i, i+1)
+				break
 			}
 		}
 		if len(sites) < jitCallTargets {
-			if site, ok := f.regCallSite(pc, o, cl, rc, argc, method, pool); ok {
+			if site, ok := f.regCallSite(pc, o, cl, rc, argc, method, pool, byCode); ok {
 				sites = append(sites, site)
 			}
 		}
 	}
 	if calls := f.fb.cl.regCalls; !newW && uint(w.C()) < uint(len(calls)) {
 		if e := &calls[w.C()]; jitRegCallKind(e) {
-			add(e.callee, e.cl, e.rc, nil)
+			add(e.callee, e.cl, e.rc, nil, false)
 			if len(sites) != 0 && l != nil && !jitRegCallKnown(l, rpc, e.callee) {
 				l.nativeCalls = append(l.nativeCalls, jitInline{pc: rpc, cl: e.cl, obj: e.callee})
 			}
@@ -103,11 +114,23 @@ func (f *jitRegFeedback) regCallSites(pc int, w bytecode.RInstr, argc int, metho
 	if l != nil {
 		for _, x := range l.nativeCalls {
 			if x.pc == rpc && (x.pool != nil) == newW {
-				add(x.obj, x.cl, x.cl.reg, x.pool)
+				add(x.obj, x.cl, x.cl.reg, x.pool, x.byCode)
 			}
 		}
 	}
 	return sites
+}
+
+// jitRegSameClosureCode reports whether closures a and b run the same
+// function in the same environment and realm.
+func jitRegSameClosureCode(a, b *closure) bool {
+	return a.fn == b.fn && a.env == b.env && a.realm == b.realm
+}
+
+// jitRegSameCode reports whether site, checked by its function's code,
+// calls cl's.
+func jitRegSameCode(site ssa.CallSite, cl *closure) bool {
+	return site.ByCode == uintptr(unsafe.Pointer(cl.fn)) && site.Env == uintptr(unsafe.Pointer(cl.env)) && site.Realm == uintptr(unsafe.Pointer(cl.realm))
 }
 
 // jitRegCallKind reports whether e, a call site's cache, holds a callee the
@@ -175,6 +198,22 @@ func (r *Runtime) jitRegCallSeen(f *frame, c *regCode, e *jitRegEntry, rpc int, 
 	}
 	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
 	n := 0
+	for i := range l.nativeCalls {
+		x := &l.nativeCalls[i]
+		if int(x.pc) == rpc && x.pool == nil && x.obj != o && jitRegSameClosureCode(x.cl, cl) {
+			// Another object of a function the call has called, a closure
+			// its maker makes anew: called by its code from here
+			// (ssa.CallSite's ByCode), as the stack form's call learns it
+			// (jitSameCode).
+			if x.byCode {
+				r.jitRegNativeCallee(cl, cl.reg)
+				return false
+			}
+			x.byCode = true
+			r.jitRegReopt(f.cl, e)
+			return true
+		}
+	}
 	for _, x := range l.nativeCalls {
 		if int(x.pc) == rpc {
 			if x.obj == o {
@@ -250,7 +289,7 @@ func (r *Runtime) jitRegCallable(o *Object, cl *closure, rc *regCode, argc int) 
 // constructor's, an arrow's sharing a derived constructor's this), one the
 // JIT does not compile, or past the arguments a sloppy callee's frame keeps
 // for f.arguments.
-func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode, argc int, method bool, pool *abi.ObjectPool) (ssa.CallSite, bool) {
+func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode, argc int, method bool, pool *abi.ObjectPool, byCode bool) (ssa.CallSite, bool) {
 	fb := f.fb
 	r := fb.r
 	if !r.jitRegCallable(o, cl, rc, argc) || pool != nil && (!r.jitRegConstructable(o, argc) || pool.Count == 0) {
@@ -266,6 +305,11 @@ func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode
 		Entry: uintptr(unsafe.Pointer(&l.entry)), Count: uintptr(unsafe.Pointer(&l.in)),
 		Argc: argc, Method: method, Params: 2 + int(rc.params), LocalCount: int(rc.numRegs), ThisSlot: -1,
 		Window: f.p.Code[pc].Left.Slot + 1,
+	}
+	if byCode && pool == nil {
+		// Checked by its code, its environment and its realm, not its
+		// object: the closure is the callee's at run time (mir's byCode).
+		site.ByCode, site.Env, site.Realm = uintptr(unsafe.Pointer(cl.fn)), uintptr(unsafe.Pointer(cl.env)), uintptr(unsafe.Pointer(cl.realm))
 	}
 	if pool != nil {
 		// A construction: its receiver from the pool, made as regConstruct
@@ -540,6 +584,9 @@ func (r *Runtime) jitRegUnwind(idx int) (Value, error) {
 			pc++
 		}
 		frames[k] = r.jitRegPushLevel(l, pc)
+		// Its captured registers' cells, closed while it ran natively, open
+		// on its window as the interpreter's are.
+		r.jitRegReopenCells(frames[k], l.e, l.wb, s.ssaCtxs[l.ctx], false)
 	}
 	var v Value
 	var err error

@@ -74,6 +74,11 @@ type FeedbackParity struct {
 	// feedback there were, Matched how many the register form's answered
 	// alike at a register instruction of the same source position.
 	Functions, Answers, Matched int
+	// FrameOps counts the functions whose register form's build makes a
+	// call of Go on its frame -- ssa.GoHost, GoArgument, GoCells,
+	// GoClosure, GoClose -- and FrameOpsLeft those of them with one that
+	// native code of a register frame leaves to an exit (jitRegFrameOps).
+	FrameOps, FrameOpsLeft int
 	// Gaps counts the answers not matched, by method and why: the
 	// register form's feedback has no such method ("unanswered"), no
 	// register instruction is at the stack instruction's position ("no
@@ -92,6 +97,7 @@ func (p FeedbackParity) String() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d functions compiled by both forms; %d answers of the stack form's feedback, %d answered alike by the register form's\n",
 		p.Functions, p.Answers, p.Matched)
+	fmt.Fprintf(&b, "%d of them make calls of Go on the register frame, %d one left to an exit there\n", p.FrameOps, p.FrameOpsLeft)
 	for _, part := range []struct {
 		title string
 		m     map[string]int
@@ -426,6 +432,7 @@ func jitParityDecisions(res *FeedbackParity, name string, sp *ir.Program, sfb ss
 		refused                   bool
 		why                       string
 		inlined, hosts, unentered int
+		frameOps, frameLeft       bool
 	}
 	build := func(p *ir.Program, fb ssa.Feedback) (b built) {
 		defer func() {
@@ -439,9 +446,30 @@ func jitParityDecisions(res *FeedbackParity, name string, sp *ir.Program, sfb ss
 		if err != nil {
 			return built{refused: true, why: err.Error()}
 		}
-		return built{inlined: len(f.Inlined), hosts: len(f.HostsLeft), unentered: len(f.Unentered)}
+		b = built{inlined: len(f.Inlined), hosts: len(f.HostsLeft), unentered: len(f.Unentered)}
+		for _, blk := range f.Blocks {
+			for _, v := range blk.Values {
+				if v.Op != ssa.OpCall || len(v.Calls()) == 0 {
+					continue
+				}
+				switch op := v.Calls()[0].Go; op {
+				case ssa.GoHost, ssa.GoArgument, ssa.GoCells, ssa.GoClosure, ssa.GoClose:
+					b.frameOps = true
+					if !jitRegFrameOps[op] {
+						b.frameLeft = true
+					}
+				}
+			}
+		}
+		return b
 	}
 	s, r := build(sp, sfb), build(rp, rfb)
+	if r.frameOps {
+		res.FrameOps++
+		if r.frameLeft {
+			res.FrameOpsLeft++
+		}
+	}
 	pair := func(what string, a, b int) {
 		if a != b {
 			note(res.Decisions, what, fmt.Sprintf("%s: stack %d, register %d", name, a, b))

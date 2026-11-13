@@ -643,6 +643,10 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 	if r.stackTop == raised {
 		r.stackTop = saved
 	}
+	if err == nil && ctx.Cells != nil {
+		// Its cells, as the frame has them, for whatever runs it now.
+		r.jitRegReopenCells(f, e, wb, ctx, true)
+	}
 	if len(s.builders) != 0 {
 		r.jitFreezeBuilders()
 	}
