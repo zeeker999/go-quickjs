@@ -79,7 +79,10 @@ type nativeCtx struct {
 	proxyType  uintptr
 	typedType  uintptr
 	typedEpoch uintptr
-	// has is the address of the runtime's in cache (Runtime.has).
+	// has is where a Realm has its in cache (Realm.has): an offset from
+	// the realm running now, as primProps is, never a realm's address,
+	// which a context made in one realm and kept for the next would read
+	// once the first was collected.
 	has uintptr
 	// bigHigh is shortBigHigh's address, which a short BigInt's ref
 	// points into.
