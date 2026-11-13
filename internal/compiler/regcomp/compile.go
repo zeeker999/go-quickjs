@@ -1849,7 +1849,13 @@ func (g *gen) discard(e ast.Expr) {
 	switch n := e.(type) {
 	case *ast.Update:
 		if m, ok := n.Operand.(*ast.Member); ok {
-			step := map[string]int32{"++": 1, "--": -1}[n.Op]
+			var step int32
+			switch n.Op {
+			case "++":
+				step = 1
+			case "--":
+				step = -1
+			}
 			if g.addProp(m, nil, step, n.Start) || g.addIndex(m, nil, step, n.Start) {
 				return
 			}
@@ -2719,21 +2725,31 @@ func (g *gen) upvalOperand(e ast.Expr) (uint32, bool) {
 // compareJump is the register form of the compare-and-branch that jumps
 // when the comparison text is when.
 func (g *gen) compareJump(text string, when bool) (bytecode.ROp, bool) {
-	type pair struct{ yes, no bytecode.ROp }
-	ops := map[string]pair{
-		"<": {bytecode.RJLt, bytecode.RJNLt}, "<=": {bytecode.RJLe, bytecode.RJNLe},
-		">": {bytecode.RJGt, bytecode.RJNGt}, ">=": {bytecode.RJGe, bytecode.RJNGe},
-		"===": {bytecode.RJSEq, bytecode.RJSNe}, "!==": {bytecode.RJSNe, bytecode.RJSEq},
-		"==": {bytecode.RJEq, bytecode.RJNe}, "!=": {bytecode.RJNe, bytecode.RJEq},
-	}
-	p, ok := ops[text]
-	if !ok {
+	var yes, no bytecode.ROp
+	switch text {
+	case "<":
+		yes, no = bytecode.RJLt, bytecode.RJNLt
+	case "<=":
+		yes, no = bytecode.RJLe, bytecode.RJNLe
+	case ">":
+		yes, no = bytecode.RJGt, bytecode.RJNGt
+	case ">=":
+		yes, no = bytecode.RJGe, bytecode.RJNGe
+	case "===":
+		yes, no = bytecode.RJSEq, bytecode.RJSNe
+	case "!==":
+		yes, no = bytecode.RJSNe, bytecode.RJSEq
+	case "==":
+		yes, no = bytecode.RJEq, bytecode.RJNe
+	case "!=":
+		yes, no = bytecode.RJNe, bytecode.RJEq
+	default:
 		return 0, false
 	}
 	if when {
-		return p.yes, true
+		return yes, true
 	}
-	return p.no, true
+	return no, true
 }
 
 // immOffset is how far a compare-and-branch's immediate form is from its
