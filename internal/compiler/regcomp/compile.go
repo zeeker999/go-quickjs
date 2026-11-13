@@ -45,7 +45,9 @@ func Compile(lit *ast.FuncLit, fn *bytecode.Function, rec *Record) *bytecode.Reg
 		Refuse(fn, w)
 		return nil
 	}
-	return compile(lit, fn, rec, fn)
+	sc := getScratch()
+	defer putScratch(sc)
+	return compile(lit, fn, rec, fn, sc)
 }
 
 // Later is lit's register code as Compile compiles it, compiled when it is
@@ -66,15 +68,21 @@ func Later(lit *ast.FuncLit, fn *bytecode.Function, rec *Record) *bytecode.RegLa
 		return nil
 	}
 	if fn.PropSites+fn.PrivateSites >= lazySites {
-		rc := compile(lit, fn, rec, fn)
+		sc := getScratch()
+		rc := compile(lit, fn, rec, fn, sc)
+		putScratch(sc)
 		return bytecode.NewRegLater(func() *bytecode.RegCode { return rc })
 	}
 	return bytecode.NewRegLater(func() *bytecode.RegCode {
-		view := *fn
+		sc := getScratch()
+		defer putScratch(sc)
+		// The view is the scratch's, which nothing compiled keeps.
+		sc.view = *fn
+		view := &sc.view
 		view.Names = fn.Names[:len(fn.Names):len(fn.Names)]
 		view.Constants = fn.Constants[:len(fn.Constants):len(fn.Constants)]
 		view.PropSites = fn.PropSites + fn.PrivateSites
-		rc := compile(lit, &view, rec, fn)
+		rc := compile(lit, view, rec, fn, sc)
 		if rc != nil {
 			// Never nil, which says the code was compiled with its
 			// function (RegCode.Names).
@@ -88,21 +96,19 @@ func Later(lit *ast.FuncLit, fn *bytecode.Function, rec *Record) *bytecode.RegLa
 
 // compile compiles lit into register code with the tables of fn, which
 // are those of orig, the function refusals are recorded for, or a view of
-// them that the code's additions go to.
-func compile(lit *ast.FuncLit, fn *bytecode.Function, rec *Record, orig *bytecode.Function) *bytecode.RegCode {
-	g, ok := generate(fn, fn == orig, func() *gen {
-		g := &gen{lit: lit, fn: fn, rec: rec, orig: orig}
+// them that the code's additions go to, in scratch sc.
+func compile(lit *ast.FuncLit, fn *bytecode.Function, rec *Record, orig *bytecode.Function, sc *scratch) *bytecode.RegCode {
+	g, ok := generate(fn, fn == orig, sc, func(g *gen) {
+		*g = gen{lit: lit, fn: fn, rec: rec, orig: orig}
 		// A derived constructor's this, and an arrow's written inside
 		// one, is the binding super() binds, read through the frame
 		// (this_bound).
 		g.thisRef = fn.Kind == bytecode.KindDerivedConstructor || fn.Kind == bytecode.KindArrow && !fn.ArrowThisValue
-		return g
 	})
 	if !ok {
 		Refuse(orig, "its bindings' layout")
 		return nil
 	}
-	defer g.release()
 	if g.err != "" {
 		Refuse(orig, g.err)
 		return nil
@@ -112,30 +118,35 @@ func compile(lit *ast.FuncLit, fn *bytecode.Function, rec *Record, orig *bytecod
 
 // scratch is what compiling a function grows as it goes, which finish
 // copies out at its size or reads and drops: the code, each instruction's
-// position, and the table of the stack form's positions. It is kept from
-// one compile for the next (scratchPool), so that each does not grow its
-// buffers from nothing.
+// position, and the table of the stack form's positions; and the gen
+// itself, and the view of a function compiled at its first call (Later).
+// It is kept from one compile for the next (scratchPool), so that each
+// does not grow its buffers from nothing, nor make a gen anew.
 type scratch struct {
 	code  []bytecode.RInstr
 	pos   []int32
 	table []posEntry
+	g     gen
+	view  bytecode.Function
 }
 
 // scratchPool holds the scratch no compile has. Separate runtimes compile
 // at once, each compile with one of its own.
 var scratchPool = sync.Pool{New: func() any { return new(scratch) }}
 
-// release gives g's scratch back, once nothing of g's reads it.
-func (g *gen) release() {
-	s := g.s
-	if s == nil {
-		return
-	}
-	g.s, g.code, g.pos = nil, nil, nil
-	scratchPool.Put(s)
+// getScratch is a scratch for a compile, which putScratch gives back once
+// nothing reads it.
+func getScratch() *scratch { return scratchPool.Get().(*scratch) }
+
+// putScratch gives sc back, dropping what its gen and its view hold of
+// the compile, which the pool would otherwise keep alive.
+func putScratch(sc *scratch) {
+	sc.g = gen{}
+	sc.view = bytecode.Function{}
+	scratchPool.Put(sc)
 }
 
-// generate lays out and compiles the gen made by mk, and reports whether
+// generate lays out and compiles the gen mk makes, in s, and reports whether
 // its bindings had a layout. A function with more cache sites than 16 bits
 // number (errSites) is compiled a second time with the sites of one key
 // shared, what the first made of the function's names, constants and
@@ -144,14 +155,13 @@ func (g *gen) release() {
 // the stack form's moved past them. That third time is only for own, a
 // function the compiler still holds; compiled at its first call
 // (Later), a function has fewer than lazySites sites in its stack form.
-func generate(fn *bytecode.Function, own bool, mk func() *gen) (*gen, bool) {
+func generate(fn *bytecode.Function, own bool, s *scratch, mk func(*gen)) (*gen, bool) {
 	sites, names, consts := fn.PropSites, len(fn.Names), len(fn.Constants)
 	last := 1
 	if own {
 		last = 2
 	}
 	far, nearCap := false, 0
-	s := scratchPool.Get().(*scratch)
 	// Room for the code at once, rather than a doubling at a time: the
 	// register form has about as many instructions as the stack form,
 	// five in six over the suites and test262, a few past it.
@@ -159,14 +169,14 @@ func generate(fn *bytecode.Function, own bool, mk func() *gen) (*gen, bool) {
 		s.code, s.pos = make([]bytecode.RInstr, 0, n), make([]int32, 0, n)
 	}
 	for try := 0; ; try++ {
-		g := mk()
+		g := &s.g
+		mk(g)
 		g.s, g.code, g.pos = s, s.code[:0], s.pos[:0]
 		g.shareSites = try > 0
 		g.ownSites = try > 1
 		g.farJumps = far
 		g.nearCap = nearCap
 		if !g.layout() {
-			g.release()
 			return nil, false
 		}
 		g.body()
@@ -260,7 +270,7 @@ type gen struct {
 	pos  []int32
 	cur  int32
 	// s is the scratch code and pos are grown in, which finish copies out
-	// of and release gives back.
+	// of, and which holds the gen.
 	s *scratch
 
 	// slotReg is the register of each stack slot the function's bindings
