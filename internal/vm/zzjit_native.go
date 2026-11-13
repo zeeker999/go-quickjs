@@ -993,6 +993,9 @@ type jitState struct {
 	rt      *Runtime
 	skipped map[weak.Pointer[bytecode.Function]]string
 	cache   map[jitKey]*jitEntry
+	// regCache is the code compiled from functions' register code, by the
+	// same keys (zzjit_zregnative.go): the cache's other form.
+	regCache map[jitKey]*jitRegEntry
 	// byFn is cache by its functions' addresses (entryFor).
 	byFn map[jitFnAddr]jitFnEntry
 	// links are the functions' links (jitLink), by the same keys.
@@ -2394,9 +2397,10 @@ func (r *Runtime) releaseJIT() {
 	for key, e := range r.jit.cache {
 		r.jit.dropEntry(key, e)
 	}
+	r.jit.dropRegCode()
 	// Not while a native run is under way, suspended in a call of Go that
 	// released it: it goes on with the state its contexts and pins are in.
-	if len(r.jit.cache) == 0 && r.jit.ctxTop == 0 {
+	if len(r.jit.cache) == 0 && len(r.jit.regCache) == 0 && r.jit.ctxTop == 0 {
 		r.jit = nil
 	}
 }

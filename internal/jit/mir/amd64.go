@@ -574,12 +574,15 @@ func (c *compiler) slotAddr(slot int, ref bool, scratch amd64.Reg) (amd64.Reg, i
 		return regLocals, int32(slot)*c.enc.ValueSize + off
 	case slot == c.f.ThisSlot:
 		return regCtx, abi.OffThis + off
-	case slot < c.f.Locals:
+	case slot < c.f.Locals-c.f.Scratch:
 		c.a.Load(scratch, regCtx, abi.OffUpvalues)
 		c.a.Load(scratch, scratch, int32(slot-c.f.FrameLocals)*8)
 		c.a.Load(scratch, scratch, c.enc.UpvalueSlot)
 		return scratch, off
 	}
+	// An operand's, or, below Locals, a register program's scratch slot
+	// (ssa.Func's Scratch): the context's Stack is past those, which are
+	// past the window.
 	return regStack, int32(slot-c.f.Locals)*c.enc.ValueSize + off
 }
 

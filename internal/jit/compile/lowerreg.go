@@ -1061,6 +1061,11 @@ func liveRegs(p *ir.Program, rc *bytecode.RegCode) {
 				}
 			} else {
 				a, b := ins.Writes()
+				if ins.Op == ir.IterStep && !ins.When {
+					// A loop's step writes its value only where it goes on:
+					// at the loop's end the register is what it was.
+					a = -1
+				}
 				kill(in, a)
 				kill(in, b)
 				for _, r := range irReads(ins) {
@@ -1080,6 +1085,16 @@ func liveRegs(p *ir.Program, rc *bytecode.RegCode) {
 				copy(s, in)
 				changed = true
 			}
+		}
+	}
+	// An exit anywhere in a register instruction's lowering runs it again
+	// from its start (ir.Program's Origin): what is live at each of its
+	// instructions is what is live at its first, which the interpreter
+	// reads -- new_array's elements, copied to scratch slots, are read
+	// there, not where the literal is made.
+	for i := 1; i < len(p.Code); i++ {
+		if p.Origin[i] == p.Origin[i-1] {
+			copy(at(i), at(i-1))
 		}
 	}
 	p.Live, p.LiveLocals, p.LiveWords = live, n, words

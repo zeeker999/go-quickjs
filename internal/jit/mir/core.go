@@ -721,7 +721,9 @@ type stubKey struct {
 // every frame state then holds its value from entry there (in whatever
 // representation the optimizer chose), and exits leave those slots alone.
 func capturedUnchanged(f *ssa.Func) error {
-	for i := f.FrameLocals; i < f.Locals; i++ {
+	// A register program's scratch slots (ssa.Func's Scratch), written
+	// inside one register instruction, are values, in no frame state.
+	for i := f.FrameLocals; i < f.Locals-f.Scratch; i++ {
 		if f.Written(i) {
 			return fmt.Errorf("%w: captured slot %d is written", ErrUnsupported, i)
 		}

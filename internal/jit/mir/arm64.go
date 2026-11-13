@@ -355,12 +355,15 @@ func (c *a64Compiler) slotAddr(slot int, ref bool, scratch arm64.Reg) (arm64.Reg
 		return a64Locals, int32(slot)*c.enc.ValueSize + off
 	case slot == c.f.ThisSlot:
 		return a64Ctx, abi.OffThis + off
-	case slot < c.f.Locals:
+	case slot < c.f.Locals-c.f.Scratch:
 		c.a.Load(scratch, a64Ctx, abi.OffUpvalues)
 		c.a.Load(scratch, scratch, int32(slot-c.f.FrameLocals)*8)
 		c.a.Load(scratch, scratch, c.enc.UpvalueSlot)
 		return scratch, off
 	}
+	// An operand's, or, below Locals, a register program's scratch slot
+	// (ssa.Func's Scratch): the context's Stack is past those, which are
+	// past the window.
 	return a64Stack, int32(slot-c.f.Locals)*c.enc.ValueSize + off
 }
 

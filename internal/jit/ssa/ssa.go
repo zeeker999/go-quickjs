@@ -1134,6 +1134,14 @@ type Func struct {
 	// their cells (abi.Context.Upvalues) and never writes. Build sets it to
 	// Locals; a VM whose program has captured bindings lowers it.
 	FrameLocals int
+	// Scratch is, for register code's program (ir.Program's Origin), how
+	// many of the last Locals are its expansions' scratch slots, past its
+	// registers and its captured bindings: live only inside one register
+	// instruction, never in a frame state. Where one is in memory -- a run
+	// of operands an operation reads as the stack form's top -- it is past
+	// the window, below the context's Stack, as an operand slot is above
+	// it.
+	Scratch int
 	// ThisSlot is the slot the receiver is read from, one of those past
 	// FrameLocals, which native code finds in the context
 	// (abi.Context.This); -1 if none.

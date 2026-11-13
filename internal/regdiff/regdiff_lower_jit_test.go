@@ -412,17 +412,27 @@ func TestRegLowerEvaluate(t *testing.T) {
 	if testing.Short() {
 		t.Skip("lowers and evaluates the register interpreter's whole corpus")
 	}
-	compiler.SetRegisterForm(true)
-	vm.SetRegTier(true)
 	st := newRegLowerStats()
 	var mu sync.Mutex
-	check := func(t *testing.T, top *bytecode.Function, part, parts int) {
+	regCorpusRun(t, func(t *testing.T, top *bytecode.Function, part, parts int) {
 		own := newRegLowerStats()
 		regLowerCheck(t, own, top, part, parts)
 		mu.Lock()
 		st.add(own)
 		mu.Unlock()
-	}
+	}, func() { regLowerReport(t, st) })
+}
+
+// regCorpusRun runs check over the register interpreter's corpus (the
+// regDiff tests), each case's program compiled with the register form on:
+// the cases beside each other, each in runtimes of its own, and the
+// micro-benchmarks' functions in regLowerChunks parts. The register form
+// and tier are on for the process until every case is done; then report
+// runs. TestRegLowerEvaluate and TestRegNativeCall read the corpus so,
+// QUICKJS_REGLOWER_SHARD choosing its cases.
+func regCorpusRun(t *testing.T, check func(t *testing.T, top *bytecode.Function, part, parts int), report func()) {
+	compiler.SetRegisterForm(true)
+	vm.SetRegTier(true)
 	regDiffHook = func(t *testing.T, src string, calls []string) { check(t, regLowerCompile(src), 0, 1) }
 	t.Cleanup(func() {
 		// After every case, the parallel ones' included.
@@ -430,7 +440,7 @@ func TestRegLowerEvaluate(t *testing.T) {
 		env := os.Getenv("QJS_REG") != ""
 		compiler.SetRegisterForm(env)
 		vm.SetRegTier(env)
-		regLowerReport(t, st)
+		report()
 	})
 	// micro is the micro-benchmarks' case, in parts.
 	micro := func(t *testing.T) {

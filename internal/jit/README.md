@@ -1074,10 +1074,12 @@ for it: code is compiled only with `storeRef` (`abi.Encoding.StoreRef`).
 The register interpreter's code (`bytecode.RegCode`,
 docs/register-interpreter.md) is lowered into the same slot IR by
 `compile.LowerReg` (`LowerRegHot`, `LowerRegInline` for the entries
-`LowerSSAHot` and `LowerSSAInline` serve). Nothing runs it but tests: the
-VM's JIT lowers the stack form, and goes on doing so until the register
-form's exits, OSR and tier-up exist and its compiles have been measured
-against the stack form's (Stage 3a-3).
+`LowerSSAHot` and `LowerSSAInline` serve), and compiled to native code
+that runs on the register frame (see [Native code on a register
+frame](#native-code-on-a-register-frame)). Only tests enter that code: the
+register tier has no hook into it yet, and the VM's JIT lowers the stack
+form until the register form's tier-up exists and its compiles have been
+measured against the stack form's (Stage 3a-3).
 
 **Slots.** A register is a slot: the program's first `Regs` slots are the
 frame's window, register 0 the function, 1 its this and the parameters
@@ -1087,8 +1089,11 @@ state holds. There is no operand stack: every state's `Depth` is 0 and
 `StackSize` 0. An exit's records write registers, and its PC is a register
 pc. `Live` is a backward liveness over the registers -- each Host's by its
 register instruction, a register a closure captures live throughout, a
-handler's live registers live at every instruction it guards -- so an
-exit writes only the registers the interpreter may read.
+handler's live registers live at every instruction it guards, a loop's
+step's register not written at the loop's end, and every instruction of a
+register instruction's lowering live as its first, where an exit inside it
+runs it again -- so an exit writes only the registers the interpreter may
+read.
 
 **One register instruction, one or more IR instructions.** Most register
 instructions are one IR instruction with their operands named: `add r4,
@@ -1188,6 +1193,67 @@ register function has no parameter prologue -- its defaults are ordinary
 code over its registers -- so none is refused for one.
 `TestLowerRegCorpusRefusals` counts both lowerings by reason over
 directories of code (`QUICKJS_JIT_REG_REFUSALS`, a path list).
+
+### Native code on a register frame
+
+**The compile** (`jitRegFor`, `internal/vm/zzjit_zregnative.go`):
+`LowerReg`, then `ssa.BuildIn` with `jitRegFeedback`, `Optimize`, the
+backend and the arena, as the stack form's; the code is kept in the
+runtime's cache beside the stack form's, by the same key (`jitState`'s
+`regCache`), and dropped with it. The backend sees the register frame as
+its locals: `FrameLocals` is `Regs`, so that a register is a word of the
+window, which the context's `Locals` addresses in place -- the VM's stack
+never moves, so native code reads and writes the frame's registers where
+the interpreter does. The captured bindings' slots past them are read
+through their cells (`Context.Upvalues`), as the stack form's are. The
+scratch slots past those live inside one register instruction: the
+builder leaves every slot past `Regs` out of every frame state
+(`stateSlots`), so no entry loads one and no exit's record writes one,
+and their writes are no captured binding's (`capturedUnchanged`). Where
+one is in memory -- a run of operands an operation reads as the stack
+form's top, `new_array`'s elements, `concat`'s parts -- it is past the
+window: the context's `Stack` is past the scratch slots (`ssa.Func`'s
+`Scratch`), which are below it as an operand slot is above it, and what
+escape analysis leaves unmade has its homes past them, where the backend
+puts slots past the program's `Locals`. The VM's stack's top covers them
+while the code runs.
+
+**Exits rebuild the register frame.** An exit's records write the
+registers live at its register pc, in the window, natively as it leaves
+(or Go, from its description, for an `ExitTable`), and Go makes the objects
+escape analysis left unmade into the registers that name them
+(`jitRegMaterialize`). Then, by its kind (`jitRegRun`):
+- a host exit has Go run the whole register instruction at the exit's pc
+  by the interpreter's own slow paths (`regWhole`: `regSlow`, `regCallW`,
+  `regCold` and the rest, as runReg calls them, `f.pc` set as `regSlow`
+  sets it), an exception to the frame's handlers by `regCatch`; native code
+  goes on at the entry of the register pc the instruction went on to, and
+  where the code has none, `runReg` runs the rest of the invocation from
+  there;
+- a deoptimization has `runReg(f, c, pc)` run the rest of the invocation
+  from the exit's register pc, and the code is compiled again at the next
+  ask, from what the interpreter learned;
+- a poll is the interpreter's back-edge check, and native code goes on at
+  the loop's header.
+
+Calls of Go from register code's native code find no frame of the VM's
+(`jitGoRun`'s is the stack form's), so those that need one refuse and
+leave it to an exit.
+
+**On-stack replacement.** The build's entries at a loop's header (`Entry`'s
+`OSR`) are by the instruction its register pc lowers to first (`p.At`), so
+a frame the interpreter runs goes on natively at a loop's header with the
+registers live there loaded from the window: the code's OSR entry map is
+its loops' headers by register pc (`jitRegEntry`'s `loops`, `loopEntry`).
+
+**Testing.** `vm.RegNativeCall` enters it: the call's frame made as
+`regEnterW` makes it, and run natively from its start, or, by the evaluator
+with the VM up to the second time it reaches a loop's header, from there.
+`TestJITRegNative` (internal/vm) runs functions so, the collector seen idle
+and marking; `TestRegNativeCall` (internal/v8bench) runs the regDiff
+corpus so, compiled at each function's first call, each answer compared
+with an ordinary call's; and `TestJITSameWorkWhileMarking` runs every test
+of the micro-benchmarks so as well.
 
 ## The execution boundary
 

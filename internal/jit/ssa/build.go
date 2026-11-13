@@ -6005,7 +6005,7 @@ func (b *builder) plan() error {
 			b.edge(blk, b.blockAt[end+1])
 		case ir.Host, ir.Call, ir.PropertyRead, ir.PropertyWrite, ir.ReferenceRead, ir.BindingRead, ir.BindingWrite, ir.BindingCheck,
 			ir.ObjectLiteral, ir.FieldDefine, ir.ArrayLiteral, ir.StringConst, ir.BigIntConst, ir.UpvalueRead, ir.UpvalueWrite, ir.StringAdd, ir.StringConcat, ir.Rethrow,
-			ir.Closure, ir.CloseUpvalues, ir.HasProperty, ir.DeleteProperty:
+			ir.Closure, ir.CloseUpvalues, ir.HasProperty, ir.DeleteProperty, ir.ArgumentRead:
 			if fr := b.inlined[end]; fr != nil {
 				// Into the callee, whose returns go to the block after it.
 				blk.Kind = BlockPlain
@@ -6376,6 +6376,13 @@ func (b *builder) nullish(blk *Block, in ir.Instruction, operand func(ir.Operand
 func (b *builder) stateSlots(p *ir.Program, pc, n, base int, own bool, before []int32) []int32 {
 	l := append(b.named[:0], before...)
 	excluded := func(i int) bool {
+		if p.Origin != nil && i >= p.Regs {
+			// Register code's slots past its registers -- its captured
+			// bindings', in their cells, and its expansions' scratch,
+			// live only inside one register instruction -- which the
+			// register frame has no place for (ir.Program's Regs).
+			return true
+		}
 		return own && (i >= p.UpvalueBase && i < p.UpvalueBase+p.Upvalues || p.IsCaptured(i))
 	}
 	liveEnd := 0
