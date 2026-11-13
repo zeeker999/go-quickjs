@@ -21,6 +21,16 @@ func compileForTest(t testing.TB, src string) *bytecode.Function {
 	return fn
 }
 
+// newOldTiersForTest is New(cfg) running its code on the stack interpreter
+// and the tree tier, register form or not, as a runtime with the JIT runs
+// it: for the tests of those tiers' own workings, which register code
+// does not have.
+func newOldTiersForTest(cfg Config) *Runtime {
+	r := New(cfg)
+	r.oldTiers = true
+	return r
+}
+
 // TestReleasedStacksAreClear pins that a stack a closed runtime gives back
 // holds nothing of what ran on it -- the frames of functions, generators and
 // all -- so that the next runtime to take it keeps nothing of the last one

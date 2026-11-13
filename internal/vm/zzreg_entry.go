@@ -1,7 +1,6 @@
 package vm
 
 import (
-	"os"
 	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -10,11 +9,36 @@ import (
 // The register interpreter's set-up and its entries from the tree: what
 // runs once a function or a frame, out of the hot block (zzreg_run.go).
 
-func init() { regTier.Store(os.Getenv("QJS_REG") != "") }
+func init() { regTier.Store(bytecode.RegDefault()) }
 
 // SetRegTier turns the register interpreter on or off for functions not yet
 // run, for tests that compare it with the other tiers.
 func SetRegTier(on bool) { regTier.Store(on) }
+
+// RegTierOn reports whether the register interpreter is on in the process
+// (SetRegTier), for runtimes without the JIT.
+func RegTierOn() bool { return regTier.Load() }
+
+// RegTier reports whether r runs register code: the register interpreter
+// is on, and r has no JIT, which reads the stack form alone, so that a
+// runtime with it runs the stack interpreter and the tree tier as before.
+// Its host compiles its code with no register form where it does not
+// (compiler.Options.NoRegister).
+func (r *Runtime) RegTier() bool { return r.regOn() }
+
+// regOn is RegTier: oldTiers keeps a test's runtime off register code too.
+func (r *Runtime) regOn() bool { return regTier.Load() && !r.oldTiers && !r.jitOn() }
+
+// regKeepOld marks fn, which r loads, as code the tree the runtimes share
+// runs on the old tiers, where r does not run register code and fn has a
+// register form all the same: a host compiles a runtime's code for it, so
+// this is code compiled for another, which a test may hand a runtime of
+// either kind (bytecode.Function.OldTiers).
+func (r *Runtime) regKeepOld(fn *bytecode.Function) {
+	if fn.Reg != nil && regTier.Load() && !r.regOn() {
+		fn.KeepOldTiers()
+	}
+}
 
 // RegsBuilt is how many functions have been given register code, for tests
 // that check it ran.
@@ -25,13 +49,17 @@ func RegsBuilt() int64 { return regsBuilt.Load() }
 // form covers it, and its tree otherwise. With the tree tier off there is
 // neither: the stack interpreter runs everything, as it does without the
 // register interpreter.
+//
+// A function compiled with no register form (compiler.Options.NoRegister),
+// for a runtime with the JIT, or marked as such a runtime's
+// (regKeepOld), is given its tree, with no fallback counted.
 func firstForm(fn *bytecode.Function) *tree {
-	if regTier.Load() && treeTier.Load() {
-		if t := regTreeOf(fn); t != nil {
-			return t
+	if regTier.Load() && fn.Reg != nil && !fn.OldTiers() {
+		if treeTier.Load() {
+			if t := regTreeOf(fn); t != nil {
+				return t
+			}
 		}
-	}
-	if regTier.Load() {
 		regFallback(regFallNoCode, fn)
 	}
 	return buildTree(fn)
