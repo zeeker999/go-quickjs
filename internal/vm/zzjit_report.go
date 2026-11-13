@@ -54,10 +54,14 @@ var JITCrossHook func(f JITFunction, code *mir.Code, err error)
 // JITHoldClocks stops the clocks the JIT's cache ages code by: what a run
 // compiles, and with what, then depends on the run alone if the collector
 // is off, which ends weak references' part in it, and two builds' code
-// can be compared compile by compile. Call it before any runtime compiles.
-func JITHoldClocks() {
+// can be compared compile by compile. Call it before any runtime compiles,
+// and restore, which it returns, after the last is done: the clocks run
+// again.
+func JITHoldClocks() (restore func()) {
+	epoch, flush := jitEpochNow, jitFlushNow
 	jitEpochNow = func() uint64 { return 0 }
 	jitFlushNow = func() uint64 { return 0 }
+	return func() { jitEpochNow, jitFlushNow = epoch, flush }
 }
 
 // SetJITReport has the JIT note, for JITReport, the functions it does not

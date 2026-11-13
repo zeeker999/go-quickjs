@@ -35,6 +35,9 @@ var jitParityLog struct {
 	sync.Mutex
 	on   atomic.Bool
 	seen map[*Runtime]map[*bytecode.Function]*closure
+	// order numbers each runtime's functions as it first compiled them,
+	// which pairs functions of the same name and text (CompareFeedback).
+	order map[*Runtime]map[*bytecode.Function]int
 }
 
 // RecordJITCompiles has every runtime note the closures it compiles, of
@@ -43,7 +46,7 @@ func RecordJITCompiles(on bool) {
 	jitParityLog.Lock()
 	defer jitParityLog.Unlock()
 	jitParityLog.on.Store(on)
-	jitParityLog.seen = nil
+	jitParityLog.seen, jitParityLog.order = nil, nil
 }
 
 // jitParityNote notes that r compiles cl's function (RecordJITCompiles).
@@ -58,13 +61,30 @@ func (r *Runtime) jitParityNote(cl *closure) {
 	}
 	if jitParityLog.seen == nil {
 		jitParityLog.seen = map[*Runtime]map[*bytecode.Function]*closure{}
+		jitParityLog.order = map[*Runtime]map[*bytecode.Function]int{}
 	}
-	m := jitParityLog.seen[r]
+	m, o := jitParityLog.seen[r], jitParityLog.order[r]
 	if m == nil {
-		m = map[*bytecode.Function]*closure{}
-		jitParityLog.seen[r] = m
+		m, o = map[*bytecode.Function]*closure{}, map[*bytecode.Function]int{}
+		jitParityLog.seen[r], jitParityLog.order[r] = m, o
 	}
 	m[cl.fn] = cl
+	if _, ok := o[cl.fn]; !ok {
+		o[cl.fn] = len(o)
+	}
+}
+
+// SeedRandom seeds r's Math.random, so that runtimes given one seed draw
+// the same numbers: CompareFeedback's two runs of one program, which
+// Math.random steers -- the micro-benchmarks', Octane's before its
+// harness replaces it -- and which must make the same compiles from one
+// run to the next.
+func (r *Runtime) SeedRandom(seed uint64) {
+	m := &mathRandom{s0: seed, s1: seed ^ 0x9e3779b97f4a7c15}
+	if m.s0 == 0 && m.s1 == 0 {
+		m.s1 = 1
+	}
+	r.rnd = m
 }
 
 // FeedbackParity is what CompareFeedback found.
@@ -90,6 +110,11 @@ type FeedbackParity struct {
 	Decisions map[string]int
 	// Examples are a few of each gap and decision, as text.
 	Examples map[string][]string
+	// Compiled is how many functions each runtime compiled, the stack
+	// form's first; Compared names those compared, with their script and
+	// line, in the order compared.
+	Compiled [2]int
+	Compared []string
 }
 
 // String is the report, gaps and decisions most first.
@@ -98,6 +123,7 @@ func (p FeedbackParity) String() string {
 	fmt.Fprintf(&b, "%d functions compiled by both forms; %d answers of the stack form's feedback, %d answered alike by the register form's\n",
 		p.Functions, p.Answers, p.Matched)
 	fmt.Fprintf(&b, "%d of them make calls of Go on the register frame, %d one left to an exit there\n", p.FrameOps, p.FrameOpsLeft)
+	fmt.Fprintf(&b, "compiled: %d functions by the stack form, %d by the register form\n", p.Compiled[0], p.Compiled[1])
 	for _, part := range []struct {
 		title string
 		m     map[string]int
@@ -133,8 +159,9 @@ func (p FeedbackParity) String() string {
 func CompareFeedback(stack, reg *Runtime) FeedbackParity {
 	jitParityLog.Lock()
 	ss, rs := jitParityLog.seen[stack], jitParityLog.seen[reg]
+	so, ro := jitParityLog.order[stack], jitParityLog.order[reg]
 	jitParityLog.Unlock()
-	res := FeedbackParity{Gaps: map[string]int{}, Decisions: map[string]int{}, Examples: map[string][]string{}}
+	res := FeedbackParity{Gaps: map[string]int{}, Decisions: map[string]int{}, Examples: map[string][]string{}, Compiled: [2]int{len(ss), len(rs)}}
 	note := func(m map[string]int, k, ex string) {
 		m[k]++
 		if len(res.Examples[k]) < 3 {
@@ -142,22 +169,37 @@ func CompareFeedback(stack, reg *Runtime) FeedbackParity {
 		}
 	}
 	key := func(fn *bytecode.Function) string { return fn.Name + "\x00" + fn.Text }
-	byKey := map[string]*closure{}
-	for fn, cl := range rs {
-		byKey[key(fn)] = cl
-	}
-	fns := slices.SortedFunc(func(yield func(*bytecode.Function) bool) {
-		for fn := range ss {
-			if !yield(fn) {
-				return
+	// Each runtime's functions by key and in the order they were first
+	// compiled: functions of one name and text -- an eval's, a function
+	// made of code made anew -- are paired in that order, the k-th of the
+	// stack form's with the k-th of the register form's.
+	sorted := func(seen map[*bytecode.Function]*closure, order map[*bytecode.Function]int) []*bytecode.Function {
+		return slices.SortedFunc(func(yield func(*bytecode.Function) bool) {
+			for fn := range seen {
+				if !yield(fn) {
+					return
+				}
 			}
-		}
-	}, func(a, b *bytecode.Function) int { return strings.Compare(key(a), key(b)) })
-	for _, fn := range fns {
-		scl, rcl := ss[fn], byKey[key(fn)]
-		if rcl == nil || rcl.reg == nil {
+		}, func(a, b *bytecode.Function) int {
+			if c := strings.Compare(key(a), key(b)); c != 0 {
+				return c
+			}
+			return cmp.Compare(order[a], order[b])
+		})
+	}
+	byKey := map[string][]*closure{}
+	for _, fn := range sorted(rs, ro) {
+		byKey[key(fn)] = append(byKey[key(fn)], rs[fn])
+	}
+	nth := map[string]int{}
+	for _, fn := range sorted(ss, so) {
+		k := key(fn)
+		scl, rcls, i := ss[fn], byKey[k], nth[k]
+		nth[k]++
+		if i >= len(rcls) || rcls[i].reg == nil {
 			continue
 		}
+		rcl := rcls[i]
 		se := stack.jit.cache[stack.jitKeyOf(fn)]
 		if se == nil || se.ssaProg == nil {
 			continue
@@ -168,6 +210,8 @@ func CompareFeedback(stack, reg *Runtime) FeedbackParity {
 			continue
 		}
 		res.Functions++
+		jf := jitFunctionOf(fn)
+		res.Compared = append(res.Compared, fmt.Sprintf("%s %s:%d", jf.Name, jf.Script, jf.Line))
 		sfb := &jitFeedback{r: stack, fn: fn, cl: scl, e: se, prog: sp}
 		rfb := reg.jitRegFeedbackFor(rcl, rp)
 		if rfb == nil {

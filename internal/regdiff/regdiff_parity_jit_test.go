@@ -5,7 +5,10 @@ package regdiff
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"testing"
@@ -50,6 +53,9 @@ function parityBench(name) {
 	BenchmarkSuite.suites.forEach(function (s) {
 		s.benchmarks.forEach(function (b) {
 			if (b.name !== name) return;
+			// Math.random made the harness's own, seeded alike each time,
+			// as its runs have it (Octane's RunStep).
+			if (BenchmarkSuite.ResetRNG) BenchmarkSuite.ResetRNG();
 			try {
 				b.Setup();
 				for (var i = 0; i < %d; i++) b.run();
@@ -108,14 +114,33 @@ function parityNames() {
 // each form's feedback answers compared site by site, and what each
 // form's build decides from it (vm.CompareFeedback). It reports every gap;
 // QUICKJS_PARITY_STRICT=1 fails on any.
+//
+// Its report is the same from one run to the next of the same code, as
+// -jitheld's compiles are (v8bench): the JIT's clocks held, the collector
+// off -- at a memory limit of 3 GiB where GOMEMLIMIT sets none -- each
+// runtime's Math.random seeded alike, Octane's replaced by its harness's
+// before each benchmark, as its runs replace it, and each runtime's clock
+// its own, a millisecond on at each look. Nothing else the two runtimes do
+// depends on time: they compile in the foreground, and the tiers count
+// invocations and budgets, not time.
 func TestJITFeedbackParity(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs the benchmarks' corpora twice")
 	}
 	regDiffAlone.Lock()
 	defer regDiffAlone.Unlock()
+	gc := debug.SetGCPercent(-1)
+	t.Cleanup(func() { debug.SetGCPercent(gc) })
+	if limit := debug.SetMemoryLimit(-1); limit == math.MaxInt64 {
+		debug.SetMemoryLimit(3 << 30)
+		t.Cleanup(func() { debug.SetMemoryLimit(limit) })
+	}
+	t.Cleanup(vm.JITHoldClocks())
 	for _, c := range parityCorpora(t) {
 		t.Run(c.name, func(t *testing.T) {
+			// What the corpus before left, collected at the same point of
+			// every run.
+			runtime.GC()
 			vm.RecordJITCompiles(true)
 			defer vm.RecordJITCompiles(false)
 			jitReg := vm.SetJITRegTier(true)
@@ -136,8 +161,15 @@ func TestJITFeedbackParity(t *testing.T) {
 					t.Fatal("not compiled")
 				}
 				vm.SetRegTier(i == 1)
-				r := vm.New(vm.Config{MemoryLimit: 1 << 30, JIT: true})
+				// The JIT's budget v8bench's runs give it (-jitmem), which
+				// the corpora's code fits.
+				r := vm.New(vm.Config{MemoryLimit: 1 << 30, JIT: true, JITMemoryLimit: 32 << 20})
 				defer r.Close()
+				r.SeedRandom(1)
+				// A clock of its own, a millisecond on at each look:
+				// Octane's Game Boy paces its emulation by Date.
+				tick := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+				r.SetClock(func() time.Time { tick = tick.Add(time.Millisecond); return tick })
 				// eval and the Function constructor, which Octane's code
 				// loads its benchmarks with and the micro-benchmarks make
 				// fresh functions by, compiled in the form both are.
@@ -178,6 +210,9 @@ func TestJITFeedbackParity(t *testing.T) {
 			}
 			res := vm.CompareFeedback(rts[0], rts[1])
 			t.Log("\n" + res.String())
+			if os.Getenv("QUICKJS_PARITY_LIST") == "1" {
+				t.Log("compared:\n" + strings.Join(res.Compared, "\n"))
+			}
 			if res.Functions == 0 {
 				t.Error("no function compiled by both forms")
 			}
