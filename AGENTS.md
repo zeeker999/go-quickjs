@@ -4,9 +4,15 @@ This file applies to the entire repository.
 
 ## Project overview
 
-`go-quickjs` is a pure-Go JavaScript engine modeled after QuickJS-NG. Keep it
-portable: production code must not require cgo, WebAssembly, a C compiler, or
-platform-specific runtime dependencies.
+`go-quickjs` is a pure-Go JavaScript engine. It began as a reimplementation
+of QuickJS-NG and keeps its name, its `qjs` command and its embedding model,
+but its execution is its own design: register code, run by an interpreter
+whose handlers are native code generated for each architecture
+(docs/register-interpreter.md), and a JIT modeled on V8's. The stack
+bytecode interpreter it started with, after QuickJS's, remains only until
+the other architectures and the JIT have moved over. Keep the engine
+portable: production code must not require cgo, WebAssembly, a C compiler,
+or platform-specific runtime dependencies.
 
 The main areas are:
 
