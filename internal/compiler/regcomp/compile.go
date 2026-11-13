@@ -317,6 +317,8 @@ type gen struct {
 	auxes    map[int]uint32
 	literals [][]bytecode.LitElem
 	objKeys  [][]uint32
+	// objKeysHash is each one's hash (RegCode's ObjKeysHash).
+	objKeysHash []uint64
 	// farNames is the index of each name past 16 bits an instruction
 	// names, by its pc (RNameFar).
 	farNames map[int]uint32
@@ -4157,6 +4159,7 @@ func (g *gen) objectAtOnce(n *ast.ObjectLit, dst int) int {
 	}
 	base := g.allocN(len(n.Props))
 	mark := g.top
+	strs := make([]string, 0, len(n.Props))
 	for i, p := range n.Props {
 		var key string
 		switch k := p.Key.(type) {
@@ -4166,10 +4169,18 @@ func (g *gen) objectAtOnce(n *ast.ObjectLit, dst int) int {
 			key = k.Value
 		}
 		keys = append(keys, g.nameIdx(key))
+		strs = append(strs, key)
 		g.into(p.Value, base+i)
 		g.top = mark
 	}
 	g.objKeys = append(g.objKeys, keys)
+	// The hash the realm's root for literals of these keys is found by,
+	// as the stack form's LiteralKeys says it.
+	var h uint64
+	if len(strs) <= bytecode.MaxLiteralKeys {
+		h = bytecode.HashLiteralKeys(strs)
+	}
+	g.objKeysHash = append(g.objKeysHash, h)
 	d := g.dest(dst)
 	g.at(n.Start)
 	at := g.emit(bytecode.MakeR(bytecode.RNewObjectLit, uint8(len(n.Props)), r16(d), r16(base), g.site16(siteKey{kind: "object_lit", keys: fmt.Sprint(keys)})))
@@ -4380,7 +4391,7 @@ func (g *gen) finish() *bytecode.RegCode {
 		}
 	}
 	rc := &bytecode.RegCode{
-		Aux: aux, FarNames: farNames, Marks: marks, Switches: switches, Literals: g.literals, ObjKeys: g.objKeys, UsesArguments: (g.fn.UsesArguments || g.fn.MakesArguments) && !g.fn.ForwardsArguments,
+		Aux: aux, FarNames: farNames, Marks: marks, Switches: switches, Literals: g.literals, ObjKeys: g.objKeys, ObjKeysHash: g.objKeysHash, UsesArguments: (g.fn.UsesArguments || g.fn.MakesArguments) && !g.fn.ForwardsArguments,
 		ForwardsArguments: g.fn.ForwardsArguments,
 		Code:              slices.Clone(g.code), NumRegs: g.max + 1 + g.nfar, SrcPC: src, SiteName: g.siteName, This: -1,
 		LocalReg: g.localReg(),

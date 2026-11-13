@@ -815,8 +815,12 @@ type RegCode struct {
 	// (RNewArrayK), each a constant or one of the values no constant is.
 	Literals [][]LitElem
 	// ObjKeys are the keys of the code's object literals made at once
-	// (RNewObjectLit), each an index of the function's names.
-	ObjKeys [][]uint32
+	// (RNewObjectLit), each an index of the function's names, and
+	// ObjKeysHash each one's hash (HashLiteralKeys), 0 for more than
+	// MaxLiteralKeys: what the VM finds the realm's root for literals of
+	// those keys by, as the stack form's LiteralKeys.
+	ObjKeys     [][]uint32
+	ObjKeysHash []uint64
 	// FarNames is, for an instruction whose name operand is RNameFar,
 	// the name's index in Names, by its pc -- for check_ref, whose B is
 	// a slot, the slot's index in Locals; nil where none is.

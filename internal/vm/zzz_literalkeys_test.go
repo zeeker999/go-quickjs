@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
 // shapeOfNew is the layout of the object src, compiled for this run alone,
@@ -54,6 +55,44 @@ func TestLiteralKeysShareALayout(t *testing.T) {
 		if got := shapeOfNew(t, r, src); got == want {
 			t.Errorf("%s: the layout of {a, b}", src)
 		}
+	}
+}
+
+// Register code's literals made at once (new_object_lit) take the realm's
+// root for their keys as the tree's do: one layout for the same keys in
+// any function, a closure made anew or two of one function's sites, and
+// one of their own for other keys.
+func TestRegLiteralKeysShareALayout(t *testing.T) {
+	compiler.SetRegisterForm(true)
+	SetRegTier(true)
+	t.Cleanup(func() { compiler.SetRegisterForm(bytecode.RegDefault()); SetRegTier(bytecode.RegDefault()) })
+	for _, native := range []bool{false, true} {
+		was := SetRegNative(native)
+		r := New(Config{})
+		want := shapeOfNew(t, r, `(function () { return {a: 1, b: 2} })()`)
+		if want == nil || want.unique || want.loose || want.n != 2 {
+			t.Fatalf("native %v: no shared layout: %+v", native, want)
+		}
+		for _, src := range []string{
+			`(function (x) { return {a: x, b: "y"} })(3)`,
+			`(function () { var f = function (i) { return {"a": i, 'b': i} }; f(1); return f(2) })()`,
+			`(function () { let o; for (let i = 0; i < 50; i++) o = i & 1 ? {a: i, b: i} : {a: 0, b: 0}; return o })()`,
+			`(function () { return {a: [1, 2], b: {c: 1}} })()`,
+		} {
+			if got := shapeOfNew(t, r, src); got != want {
+				t.Errorf("native %v: %s: a layout of its own", native, src)
+			}
+		}
+		for _, src := range []string{
+			`(function () { return {b: 1, a: 2} })()`,
+			`(function () { return {a: 1, b: 2, c: 3} })()`,
+		} {
+			if got := shapeOfNew(t, r, src); got == want {
+				t.Errorf("native %v: %s: the layout of {a, b}", native, src)
+			}
+		}
+		r.Close()
+		SetRegNative(was)
 	}
 }
 
