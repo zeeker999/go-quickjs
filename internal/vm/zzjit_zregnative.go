@@ -780,6 +780,25 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 		// regexp_lit's call, of the method its expansion read, on its
 		// literal's RegExp, of its one argument (compile's regexpLit).
 		argc = 1
+	case op == bytecode.RGetProp && kind == abi.GoCallGet, op == bytecode.RSetProp && kind == abi.GoCallSet:
+		// A property's read or write whose site found an accessor the code
+		// does not inline nor call natively (ssa.AccessorSite's call of
+		// Go): made as the interpreter makes it, through the site's cache,
+		// the getter or the setter called on the frame.
+		f.pc = regSrc(c, rpc) + 1
+		last, shared := s.ssaCtx, s.ssaSharedGen
+		s.goCalls++
+		v, err := r.jitRegPropertyMade(f, w, Atom(ctx.GoOp>>abi.GoOpIndexShift), jitGoArg(ctx, 0), jitGoArg(ctx, 1))
+		s.ssaCtx = last
+		if s.ssaSharedGen != shared {
+			r.jitShareContexts(idx, f)
+		}
+		if err != nil || r.stopped != nil || run.e.invalid {
+			s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: v, err: err}
+			return false
+		}
+		*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
+		return true
 	case op == bytecode.RInstanceOf && kind == abi.GoCallInstanceOf:
 		// As regSlow makes it, by the site's cache: it may run code.
 		aux := int(c.rc.Aux[rpc])
@@ -865,6 +884,33 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	}
 	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
 	return true
+}
+
+// jitRegPropertyMade makes, for native code, the property read or write w
+// of f's register code, of key, on obj -- of val, a write -- as the
+// interpreter makes it, through the site's cache: a getter or a setter is
+// called, with obj as its this. A write's result is undefined.
+func (r *Runtime) jitRegPropertyMade(f *frame, w bytecode.RInstr, key Atom, obj, val Value) (Value, error) {
+	var c *propCache
+	if site := int(w.C()); site < len(f.cl.ic) {
+		c = &f.cl.ic[site]
+	}
+	if w.Op() == bytecode.RSetProp {
+		if obj.IsObject() && c != nil {
+			return Undefined, r.setPropCached(c, obj.Object(), key, val, f.cl.fn.Strict)
+		}
+		return Undefined, r.setValueProp(obj, key, val, f.cl.fn.Strict)
+	}
+	if obj.IsObject() && c != nil {
+		o := obj.Object()
+		if v, ok := plainOwn(o, key); ok {
+			return v, nil
+		}
+		if v, ok, err := r.cachedGet(c, o, key); ok {
+			return v, err
+		}
+	}
+	return r.getValueProp(obj, key)
 }
 
 // regFinishCall finishes, on f's registers, a window at wb, the call at

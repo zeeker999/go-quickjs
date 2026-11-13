@@ -1532,9 +1532,12 @@ learned, and inlined in it as deep as the builder allows
 inlined there the same way (`AccessorSite`'s `Inline`), once the receiver
 and the accessor are checked (`accessorOp`): its window its function,
 from a cell (`InlineSite`'s `FunctionCell`), the receiver and a setter's
-value; a getter's result the read's register. An accessor not inlined is
-still made by Go at an exit: register code has no native call of one
-yet.
+value; a getter's result the read's register. An accessor not inlined
+-- a built-in's, a bound function's, a callee past inlining's bounds --
+Go reads or writes by, a call of Go on the register frame
+(`jitRegGoCallOn`'s `GoCallGet` and `GoCallSet`, `jitRegPropertyMade`),
+through the site's cache as the interpreter does, native code going on
+after it; register code makes no native call of an accessor yet.
 
 An exit inside an inlined callee writes the caller's state at the call --
 a host exit there -- and the callee's window past the caller's slots,
