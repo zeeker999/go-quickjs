@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/compiler"
+	"github.com/go-quickjs/go-quickjs/internal/parser"
 	"github.com/go-quickjs/go-quickjs/internal/v8bench"
 	"github.com/go-quickjs/go-quickjs/internal/vm"
 )
@@ -137,13 +138,15 @@ func TestJITFeedbackParity(t *testing.T) {
 				vm.SetRegTier(i == 1)
 				r := vm.New(vm.Config{MemoryLimit: 1 << 30, JIT: true})
 				defer r.Close()
+				// eval and the Function constructor, which Octane's code
+				// loads its benchmarks with and the micro-benchmarks make
+				// fresh functions by, compiled in the form both are.
+				r.SetEvaluator(parityEvaluator)
 				rts[i] = r
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 				r.SetContext(ctx)
 				if _, err := r.Run(top); err != nil {
 					cancel()
-					// Octane's code-load and run.js want eval, which a
-					// bare runtime has none of.
 					t.Skipf("run: %v", err)
 				}
 				calls := c.calls
@@ -183,6 +186,24 @@ func TestJITFeedbackParity(t *testing.T) {
 			}
 		})
 	}
+}
+
+// parityEvaluator compiles eval's and the Function constructor's code, as
+// the embedding API's runtime does.
+func parityEvaluator(source string, req vm.EvalRequest) (*bytecode.Function, error) {
+	popts := parser.Options{}
+	copts := compiler.Options{Source: "<eval>", Text: source, EvalConfigurable: true, EvalOwnVarScope: true}
+	if sc := req.Scope; req.Direct {
+		popts.Strict, popts.AllowSuperProp, popts.AllowSuperCall, popts.AllowNewTarget = sc.Strict, sc.AllowSuperProp, sc.AllowSuperCall, sc.AllowNewTarget
+		copts.EvalScope, copts.EvalWithDepth, copts.PrivateNames, copts.ArgumentNames = sc.Bindings, sc.WithDepth, sc.PrivateNames, sc.ArgumentNames
+		copts.InFieldInit, copts.AllowSuperProp, copts.AllowSuperCall, copts.AllowNewTarget = sc.InFieldInit, sc.AllowSuperProp, sc.AllowSuperCall, sc.AllowNewTarget
+		copts.EvalVarScopeIsGlobal = sc.VarScopeIsGlobal
+	}
+	prog, err := parser.Parse(source, popts)
+	if err != nil {
+		return nil, err
+	}
+	return compiler.Compile(prog, copts)
 }
 
 // parityGlobal is the global name of r's.
