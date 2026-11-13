@@ -250,6 +250,9 @@ func (r *Runtime) nativeRun(f *frame, c *regCode, start int) (Value, error) {
 	if nativeCount {
 		ctx.cntExits = uintptr(unsafe.Pointer(&nativeExits[0]))
 	}
+	// restarted says a tail call has given the frame to its callee in
+	// place and the code goes on with the callee's (nativeRestart).
+	restarted := false
 	for {
 		ctx.budget = int64(r.backEdges)
 		if nativeCount {
@@ -262,8 +265,7 @@ func (r *Runtime) nativeRun(f *frame, c *regCode, start int) (Value, error) {
 			ctx.retDone = 0
 			v := Value{num: math.Float64frombits(ctx.scratch[sV0]), ref: *(*unsafe.Pointer)(unsafe.Pointer(&ctx.scratch[sV1]))}
 			ctx.scratch[sV1] = 0
-			r.nativeLeave(st, ctx)
-			return v, nil
+			return r.nativeFinish(st, ctx, v, restarted)
 		}
 		s := ctx.top
 		if ctx.topOK == 0 {
@@ -273,12 +275,11 @@ func (r *Runtime) nativeRun(f *frame, c *regCode, start int) (Value, error) {
 			// A Go handler the code called ended the top frame (regDone).
 			ctx.ended = 0
 			if v, done := r.nativeEnd(s, ctx, regDone, regAt(s.c.code, int(ctx.pc))); done {
-				err := st.err
-				r.nativeLeave(st, ctx)
-				if err != nil {
-					return Undefined, err
+				if st.err == errRegRestart && r.nativeRestart(st, ctx) {
+					restarted = true
+					continue
 				}
-				return v, nil
+				return r.nativeFinish(st, ctx, v, restarted)
 			}
 			continue
 		}
@@ -289,7 +290,7 @@ func (r *Runtime) nativeRun(f *frame, c *regCode, start int) (Value, error) {
 		if nativeCount {
 			atomic.AddInt64(&nativeExits[op], 1)
 		}
-		if ctx.depth == ctx.cap && ctx.cap < nativeMaxDepth && (op == bytecode.RCallW || op == bytecode.RCallMW) {
+		if ctx.depth == ctx.cap && ctx.cap < nativeMaxDepth && (op == bytecode.RCallW || op == bytecode.RCallMW || op == bytecode.RCallWT || op == bytecode.RCallMWT) {
 			// A call the frame stack has no room for: the stack grown,
 			// the call tried again, nothing of it done.
 			ctx.grow()
@@ -315,14 +316,58 @@ func (r *Runtime) nativeRun(f *frame, c *regCode, start int) (Value, error) {
 			continue
 		}
 		if v, done := r.nativeEnd(s, ctx, pc, w); done {
-			err := st.err
-			r.nativeLeave(st, ctx)
-			if err != nil {
-				return Undefined, err
+			if st.err == errRegRestart && r.nativeRestart(st, ctx) {
+				restarted = true
+				continue
 			}
-			return v, nil
+			return r.nativeFinish(st, ctx, v, restarted)
 		}
 	}
+}
+
+// nativeRestart goes on with the base frame given to a callee in place by
+// a tail call (errRegRestart, regTailTo), as regRestartRun runs it again
+// -- the interrupt counted, the code r.regRestart, from its first
+// instruction -- but in this code entry, rather than in one of its own
+// for each call. It reports false where the frame ends instead, with the
+// error in st.
+func (r *Runtime) nativeRestart(st *regState, ctx *nativeCtx) bool {
+	rc := r.regRestart
+	r.regRestart = nil
+	if r.interruptCounter--; r.interruptCounter <= 0 {
+		if err := r.checkInterruptNow(); err != nil {
+			st.err = err
+			return false
+		}
+	}
+	if r.stopped != nil {
+		st.err = r.stopped
+		return false
+	}
+	f := st.f
+	st.err = nil
+	st.c, st.cl = rc, f.cl
+	st.wb = f.base - int(rc.locals)
+	st.regs = regWindow(r.stack, st.wb)
+	nativeSetTop(ctx, uintptr(unsafe.Pointer(st.regs)), f, rc)
+	ctx.ip = uintptr(rc.code)
+	ctx.top, ctx.topOK = st, 1
+	return true
+}
+
+// nativeFinish ends nativeRun with v or st's error. A frame given to
+// callees in place closes the captures of the last one's code, as
+// regRestartRun closes them: its caller closes only the first's.
+func (r *Runtime) nativeFinish(st *regState, ctx *nativeCtx, v Value, restarted bool) (Value, error) {
+	if restarted && len(st.f.openUpvalues) != 0 {
+		regCloseUpvalues(st.f)
+	}
+	err := st.err
+	r.nativeLeave(st, ctx)
+	if err != nil {
+		return Undefined, err
+	}
+	return v, nil
 }
 
 // newNativeCtx makes st's context, its words that are the runtime's and

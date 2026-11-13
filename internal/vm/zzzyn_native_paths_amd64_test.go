@@ -185,3 +185,41 @@ func TestRegNativeCharCodeAt(t *testing.T) {
 		for (var j = 0; j < 30; j++) t += sum(s) + sum(u)
 		String(t)`, bytecode.RCharCodeAt)
 }
+
+// TestRegNativeTailCalls runs calls in tail position natively while the
+// stack is shallow and, deeper, frames given to their callees in place by
+// Go and run on in the same code entry: self and mutual recursion past
+// tailCallDepth, captured bindings, a throw from deep in a chain, method
+// and arrow callees, sloppy callees that get frames of their own, an
+// interrupt's count, and the stack traces of errors made at the bottom.
+func TestRegNativeTailCalls(t *testing.T) {
+	nativeCheck(t, `
+		"use strict"
+		var out = []
+		function self(n, acc) { if (n === 0) return acc; return self(n - 1, (acc + n) | 0) }
+		function even(n) { return n === 0 ? 1 : odd(n - 1) }
+		function odd(n) { return n === 0 ? 0 : even(n - 1) }
+		out.push(self(10, 0), self(5000, 0), even(3001), odd(3001))
+		function caps(n, fs) { if (n === 0) return fs.map(function (f) { return f() }).join(); var k = n; fs.push(function () { return k }); return caps(n - 1, fs) }
+		out.push(caps(40, []))
+		function thrower(n) { if (n === 0) throw new RangeError("deep " + n); return thrower(n - 1) }
+		try { thrower(100) } catch (e) { out.push(e.message) }
+		var o = { m(n) { return n === 0 ? "m" : this.m(n - 1) } }
+		var arrow = (n) => n === 0 ? "a" : arrow(n - 1)
+		out.push(o.m(200), arrow(200))
+		function trace(n) { if (n === 0) return new Error("t").stack.split("\n").slice(0, 4).join("|"); return trace(n - 1) }
+		out.push(trace(10), trace(100))
+		function mixed(n) { if (n === 0) return "x".repeat(3); if (n % 7 === 0) return mixed(n - 1) + ""; return mixed(n - 1) }
+		out.push(mixed(300))
+		out.join("\n")`, "")
+	nativeCheck(t, `
+		var out = []
+		function sloppy(n, acc) { if (n === 0) return acc + sloppy.length; return sloppy(n - 1, acc + 1) }
+		out.push(sloppy(200, 0))
+		out.join("\n")`, `
+		"use strict"
+		function self(n, acc) { if (n === 0) return acc; return self(n - 1, (acc + n) | 0) }
+		var t = 0
+		for (var i = 0; i < 50; i++) t += self(20, i)
+		String(t)`, bytecode.RCallWT)
+}

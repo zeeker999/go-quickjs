@@ -2930,6 +2930,19 @@ func nativeEmit() ([]byte, nativeOffsets) {
 		g.immSC(RCX)
 		g.taken(RCX)
 	})
+	// A call in tail position while the stack is shallow is call_w's or
+	// call_method_w's (rhCallWT); deeper, Go's, which gives the frame to
+	// the callee in place.
+	for _, op := range []bytecode.ROp{bytecode.RCallWT, bytecode.RCallMWT} {
+		plain := labels[bytecode.RCallW]
+		h(op, func() {
+			a.Load(R9, RDI, ncRT)
+			a.Load(RCX, R9, offRtFrameDepth)
+			a.OpImm(Cmp, RCX, tailCallDepth, true)
+			a.Jcc(CondGE, g.exit)
+			a.Jmp(plain)
+		})
+	}
 	h(bytecode.RCharCodeAt, func() {
 		// s.charCodeAt(i) of a flat string, the method the built-in read
 		// from the realm's cache of String.prototype's properties and i a

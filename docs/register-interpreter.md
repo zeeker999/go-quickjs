@@ -598,8 +598,14 @@ the frame, and gives an entered frame's arguments back. Later additions:
 `x--` as `x++`; a string's or a number's method (`get_method_w`), from
 the realm's cache of their prototypes' data properties (`primProps`), as
 `regGetMethod` reads it; for-of's step over a dense array by the
-intrinsic iterator, its end included; and `s.charCodeAt(i)`
-(`char_code_at`) of a flat string, the built-in read from the same cache. A fast path that misses jumps to
+intrinsic iterator, its end included; `s.charCodeAt(i)`
+(`char_code_at`) of a flat string, the built-in read from the same cache;
+and a call in tail position while the stack is shallower than
+`tailCallDepth`, which is `call_w`'s. Deeper, Go gives the frame to the
+callee in place (`regTailTo`); where it is the base frame, `nativeRun`
+goes on with the callee's code in the same code entry
+(`nativeRestart`), rather than ending it for `regRestartRun` to run each
+callee in an entry of its own. A fast path that misses jumps to
 the exit; nothing is written before it does.
 
 **The exit stub.** An operation of no native handler has the exit stub's
