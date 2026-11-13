@@ -44,6 +44,7 @@ var (
 	ncCCBase    int32
 	ncMade      int32
 	ncFilled    int32
+	ncUsed      int32
 	ncTopOK     int32
 	ncRetDone   int32
 	ncStrBits   int32
@@ -220,6 +221,7 @@ func loadOffsets() {
 	ncCCBase = off("nativeCtx.ccBase")
 	ncMade = off("nativeCtx.made")
 	ncFilled = off("nativeCtx.filled")
+	ncUsed = off("nativeCtx.used")
 	ncTopOK = off("nativeCtx.topOK")
 	ncRetDone = off("nativeCtx.retDone")
 	ncStrBits = off("nativeCtx.strBits")

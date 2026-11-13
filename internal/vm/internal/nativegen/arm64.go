@@ -697,6 +697,14 @@ func (g *armGen) makeTop(slow Label) {
 	a.B(fill)
 	a.Bind(filled)
 	a.Store(rCtx, ncFilled, r8)
+	// The depth among those the run has used (used), which its end
+	// clears.
+	used := a.NewLabel()
+	a.Load(rC, rCtx, ncUsed)
+	a.Cmp(r8, rC, true)
+	a.BCond(LE, used)
+	a.Store(rCtx, ncUsed, r8)
+	a.Bind(used)
 	// Its frame, code, closure and window, each where it differs, and its
 	// window's base.
 	a.Store(rCtx, scr(sV0), rS)

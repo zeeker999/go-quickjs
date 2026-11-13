@@ -629,6 +629,13 @@ func (g *nativeGen) makeTop(slow Label) {
 	a.Jmp(fill)
 	a.Bind(filled)
 	a.Store(RDI, ncFilled, R8)
+	// The depth among those the run has used (used), which its end
+	// clears.
+	used := a.NewLabel()
+	a.CmpMem(R8, RDI, ncUsed, true)
+	a.Jcc(CondLE, used)
+	a.Store(RDI, ncUsed, R8)
+	a.Bind(used)
 	// Its frame, code, closure and window, each where it differs, and its
 	// window's base.
 	a.Store(RDI, scr(sV0), RSI)

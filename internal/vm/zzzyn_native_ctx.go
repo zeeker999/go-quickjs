@@ -144,6 +144,12 @@ type nativeCtx struct {
 	top *regState
 	// disp is the dispatcher whose table is table (nativeDispatch).
 	disp *nativeTable
+	// used is how many of states the run has given a frame, the deepest
+	// depth nativeTop or the exit stub (makeTop) has made a state for:
+	// what nativeLeave clears, so
+	// that a context whose stack a deep recursion grew costs a callback's
+	// entry no more than one never grown.
+	used int64
 }
 
 // nativeMaxDepth is how deep the native frame stack goes.
