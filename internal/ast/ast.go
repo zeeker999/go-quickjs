@@ -68,8 +68,8 @@ type Ident struct {
 
 // ID numbers the identifier among those of the function it is written in,
 // from 1, as the parser makes them: the compiler's record of their
-// resolution keeps each at its number (FuncLit.Idents). A name the compiler
-// makes has none, 0.
+// resolution keeps each at its number (FuncLit.Idents). A property's name,
+// which nothing resolves, and a name the compiler makes have none, 0.
 func (n *Ident) ID() uint32 { return n.bits >> 1 }
 
 // SetID gives the identifier number id, which is less than 1<<31: an

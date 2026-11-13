@@ -1053,6 +1053,7 @@ func (p *parser) parseObjectProperty() ast.Property {
 	// A shorthand is an identifier reference, so a word that cannot be referred
 	// to where it stands cannot be one.
 	p.checkIdentReference(id.Name, p.tok)
+	p.nodes.numberIdent(id)
 	if p.isPunct("=") {
 		p.next()
 		def := p.parseAssign()

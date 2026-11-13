@@ -151,11 +151,24 @@ type arena struct {
 }
 
 func (a *arena) ident(name string, start int) *ast.Ident {
-	n := a.idents.alloc()
-	a.nIdents++
-	n.Name, n.Start = name, int32(start)
-	n.SetID(a.nIdents)
+	n := a.name(name, start)
+	a.numberIdent(n)
 	return n
+}
+
+// name is an identifier that names a property -- `a.b`'s b, `{b: 1}`'s --
+// which nothing resolves, and so is given no number (ast.Ident.ID) until
+// it is found to be a reference too, as a shorthand property's is.
+func (a *arena) name(name string, start int) *ast.Ident {
+	n := a.idents.alloc()
+	n.Name, n.Start = name, int32(start)
+	return n
+}
+
+// numberIdent gives n the next number of the function being parsed.
+func (a *arena) numberIdent(n *ast.Ident) {
+	a.nIdents++
+	n.SetID(a.nIdents)
 }
 
 // beginIdents starts the numbering of a function's identifiers

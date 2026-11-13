@@ -376,7 +376,7 @@ func (p *parser) canInsertSemicolon() bool {
 func (p *parser) parseIdentName() *ast.Ident {
 	switch p.tok.Kind {
 	case lexer.Ident, lexer.Keyword:
-		id := p.nodes.ident(p.tok.Value, p.tok.Pos)
+		id := p.nodes.name(p.tok.Value, p.tok.Pos)
 		p.next()
 		return id
 	}
