@@ -3079,7 +3079,7 @@ func nativeEmit() ([]byte, nativeOffsets) {
 		g.storeValue()
 	})
 	h(bytecode.RIn, func() {
-		// R[A] = R[B] in R[C]: a string key's answer the runtime's in
+		// R[A] = R[B] in R[C]: a string key's answer the realm's in
 		// cache remembers of an object's layout and chain (hasCached);
 		// anything else Go's, which fills the cache.
 		found := a.NewLabel()
@@ -3101,7 +3101,12 @@ func nativeEmit() ([]byte, nativeOffsets) {
 		a.Load(R9, RSI, offObjShape)
 		a.Op(Test, R9, R9, true)
 		a.Jcc(CondE, g.exit)
-		a.Load(RCX, RDI, ncHas)
+		// The cache of the realm running now, the Runtime's first word,
+		// at the offset the context gives (ncHas): a context lives on
+		// from realm to realm, and the one it was made in may be gone.
+		a.Load(RCX, RDI, ncRT)
+		a.Load(RCX, RCX, rtRel(0))
+		a.AddMem(RCX, RDI, ncHas)
 		a.Load(RCX, RCX, 0)
 		a.Op(Test, RCX, RCX, true)
 		a.Jcc(CondE, g.exit)

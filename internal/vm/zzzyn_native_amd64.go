@@ -122,7 +122,10 @@ type nativeCtx struct {
 	proxyType  uintptr
 	typedType  uintptr
 	typedEpoch uintptr
-	// has is the address of the runtime's in cache (Runtime.has).
+	// has is where a Realm has its in cache (Realm.has): an offset from
+	// the realm running now, as primProps is, never a realm's address,
+	// which a context made in one realm and kept for the next would read
+	// once the first was collected.
 	has uintptr
 	// bigHigh is shortBigHigh's address, which a short BigInt's ref
 	// points into.
@@ -404,13 +407,13 @@ func (r *Runtime) newNativeCtx(st *regState) *nativeCtx {
 	}
 	ctx.typeofs = uintptr(unsafe.Pointer(&r.typeofStrs[0]))
 	ctx.typedEpoch = uintptr(unsafe.Pointer(&r.typedEpoch))
-	ctx.has = uintptr(unsafe.Pointer(&r.has))
 	ctx.goTable = uintptr(unsafe.Pointer(&regTable[0]))
 	ctx.slowTable = uintptr(unsafe.Pointer(&regSlowTable[0]))
 	ctx.callH = nativeCallHAddr()
 	ctx.protoStr = unsafe.Offsetof(Realm{}.proto) + unsafe.Offsetof(intrinsics{}.str)
 	ctx.protoNum = unsafe.Offsetof(Realm{}.proto) + unsafe.Offsetof(intrinsics{}.number)
 	ctx.primProps = unsafe.Offsetof(Realm{}.primProps)
+	ctx.has = unsafe.Offsetof(Realm{}.has)
 	ctx.grow()
 	st.native = ctx
 	return ctx

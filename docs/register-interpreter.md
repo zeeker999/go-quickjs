@@ -610,7 +610,7 @@ and globals read and written by their site; property reads and writes by
 the site's cache, its own entry or the entries of the shapes it met
 before (`propPoly`), and a property added by the transition it
 remembers; `o.n +=` of an own number; `in` by the
-runtime's in cache, `typeof`, the length of an array or a string, the
+realm's in cache, `typeof`, the length of an array or a string, the
 elements of dense arrays (read, `x[++i]`, `x[i++]`, written over any
 element) and typed arrays (every kind but Float16 and BigInt64); short
 BigInts' add, sub and mul; and calls and returns:
@@ -678,7 +678,13 @@ record a call the code made itself. The stack starts at 8 records and Go
 doubles it when a call finds it full, up to 128; a call past that is
 Go's, whose frame runs in a code entry of its own. Each runtime's states
 are its own, so separate runtimes on separate goroutines share no
-context.
+context. A realm's fields -- its prototypes, its caches of the in
+operator's answers and of the primitives' methods -- are read through
+the realm running now, the Runtime's first word, at offsets the context
+gives: a context lives on from realm to realm with its state, and an
+address of the realm it was made in, which the collector does not see,
+was read once a host had dropped that realm and it was collected
+(`TestRegNativeInDroppedRealm`).
 
 **Generation and the shared-code rules.** The handlers are written with
 the JIT's assembler by `nativeEmit`, a test's code
