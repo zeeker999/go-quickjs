@@ -417,17 +417,18 @@ func (f *jitRegFeedback) EntryGeneric(pc int) bool {
 // Inline is ssa.Feedback's: a plain call or a method's, call_w's or
 // call_method_w's, of one function -- the one its site's cache holds and
 // its code learned it calls (regCallSites), no other -- that runs register
-// code native callers may call, not the caller's own, nor an arrow, is the
-// callee to inline, its program its register code lowered for an inlined
-// frame (LowerRegInline), asked by its own register feedback, the root's
-// keep holding what its sites name; the builder decides whether its
-// program may be (ssa's InlineCalls) and fits. A call whose inlined callee
-// left native code too often is not inlined again (jitInlineLeft's
-// notInline), as the stack form's. A callee's own calls are not inlined
-// in it yet.
+// code native callers may call, not the caller's own nor the compiled
+// function's, nor an arrow, is the callee to inline, its program its
+// register code lowered for an inlined frame (LowerRegInline), asked by
+// its own register feedback, the root's keep holding what its sites name;
+// the builder decides whether its program may be (ssa's InlineCalls) and
+// fits, and how deep. An inlined callee's calls are asked so too, of its
+// own caches and what its code learned, as V8 inlines a callee's callees.
+// A call whose inlined callee left native code too often is not inlined
+// again (jitInlineLeft's notInline), as the stack form's.
 func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 	w, op, ok := f.at(pc)
-	if !ok || op != ir.Host || !f.p.Code[pc].Window || f.fb.root != nil {
+	if !ok || op != ir.Host || !f.p.Code[pc].Window {
 		return ssa.InlineSite{}, false
 	}
 	method := w.Op() == bytecode.RCallMW
@@ -448,7 +449,7 @@ func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 		return ssa.InlineSite{}, false
 	}
 	site, o, cl := sites[0], objs[0], cls[0]
-	if cl.fn == f.fb.fn || jitNoInline != nil && jitNoInline(cl.fn) {
+	if cl.fn == f.fb.fn || cl.fn == f.fb.keep().fn || jitNoInline != nil && jitNoInline(cl.fn) {
 		return ssa.InlineSite{}, false
 	}
 	p, err := jitcompile.LowerRegInline(cl.reg.rc, cl.fn)

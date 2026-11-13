@@ -13,7 +13,8 @@ import (
 // and extra arguments; and callees that leave the inlined code -- a shape
 // the callee was not compiled for, a receiver that is no object, a throw
 // the caller catches, a call it makes that Go runs -- whose frames Go makes
-// from the exit's, finishing them in the interpreter.
+// from the exit's, finishing them in the interpreter; and callees inlined
+// in inlined callees, left two levels deep, throwing through both.
 const regInlineSrc = `
 function P(x) { this.x = x }
 P.prototype.get = function () { return this.x };
@@ -43,6 +44,15 @@ function str(o) { return o.x + "!" }
 function callsGo(n) { var s = 0; for (var i = 0; i < n; i++) s += str(i % 3 ? { x: i } : { x: "k" + i }).length; return s }
 function mid(o) { return rd(o) + 1 }
 function nested(n) { var a = { x: 3 }, b = { z: 1, x: 4 }, s = 0; for (var i = 0; i < n; i++) s += mid(i % 61 == 60 ? b : a); return s }
+function guarded(o) { try { return mid(o) } catch (e) { return -1 } }
+function throws2(n) {
+	var a = { x: 1 }, s = 0, m = "";
+	for (var i = 0; i < n; i++) {
+		try { s += mid(i % 50 == 49 ? undefined : a) } catch (e) { m = e.constructor.name }
+		s += guarded(i % 70 == 69 ? null : a);
+	}
+	return s + m;
+}
 `
 
 // TestJITRegInline runs regInlineSrc's callers in a runtime whose register
@@ -62,11 +72,22 @@ func TestJITRegInline(t *testing.T) {
 			defer RecordJITCompiles(false)
 			rts := regNativeRuntimes(t, regInlineSrc)
 			rts[0].SetJITWarmUp(1, 1)
+			// Each case's callers' exits inside the callees they inline
+			// are left, at most, unwound -- learned from, the code compiled
+			// again, or the call made natively after jitInlineExits: not
+			// at every call that misses (1,600 times in shapes, 10,000 in
+			// nested, the code's runs going on in code compiled stale), but
+			// at every throw, which leaves native code: each inlined level
+			// it leaves counted: throws2's 8 runs throw 160 times through
+			// mid and rd, two levels, and 112 through guarded, mid and rd,
+			// three, some 650 levels -- under QJS_JIT_STRESS too.
 			for _, c := range []struct {
-				name string
-				n    float64
-			}{{"inlines", 2000}, {"shapes", 2000}, {"throws", 1000}, {"callsGo", 600}, {"nested", 2000}} {
+				name    string
+				n       float64
+				unwound uint64
+			}{{"inlines", 2000, 0}, {"shapes", 2000, 40}, {"throws", 1000, 220}, {"callsGo", 600, 60}, {"nested", 2000, 60}, {"throws2", 1000, 700}} {
 				var got [2]string
+				before := rts[0].RegNativeStats().Unwound
 				for i, r := range rts {
 					fn, _ := r.GetProp(Obj(r.Global()), r.Intern(c.name))
 					for range 8 {
@@ -77,20 +98,15 @@ func TestJITRegInline(t *testing.T) {
 				if got[0] != got[1] {
 					t.Errorf("%s: with the JIT %q, without %q", c.name, got[0], got[1])
 				}
+				if n := rts[0].RegNativeStats().Unwound - before; n > c.unwound {
+					t.Errorf("%s: unwound %d, past %d: inlined callees left too often", c.name, n, c.unwound)
+				}
 			}
 			r := rts[0]
 			st := r.RegNativeStats()
 			t.Logf("inlined %d; unwound %d, guards %d, hosts %d, entries %d", r.jit.inlined, st.Unwound, st.Guards, st.Hosts, st.Entries)
 			if r.jit.inlined == 0 {
 				t.Error("no callee inlined")
-			}
-			// Left at the exits of the callees inlined, learned from -- the
-			// code compiled again -- or the call made natively after
-			// jitInlineExits: not at every call that misses (about 1,600
-			// in shapes, 10,000 in nested, with the code's runs going on in
-			// code compiled stale).
-			if st.Unwound > 200 {
-				t.Errorf("unwound %d: inlined callees left too often", st.Unwound)
 			}
 			// The same code, arm64's backend's, compiled on any host.
 			if fns, _, inlined := regCompileARM64(t, r); inlined == 0 {

@@ -1515,7 +1515,9 @@ call's undefined or global object (`ThisCell`) in 1, the arguments from
 (`Upvalues`); its result to the call's register. The atomicity rule holds
 in it as in the root: an exit inside it runs its register instruction
 whole again (`atomicInstruction`, each frame's `readCalls`). Its own
-calls are not inlined in it yet, nor constructions or accessors.
+calls are asked the same way, of its own caches and what its code
+learned, and inlined in it as deep as the builder allows
+(`maxInlineDepth`); constructions and accessors are not inlined yet.
 
 An exit inside an inlined callee writes the caller's state at the call --
 a host exit there -- and the callee's window past the caller's slots,
