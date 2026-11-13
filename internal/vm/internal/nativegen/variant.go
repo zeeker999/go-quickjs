@@ -108,3 +108,9 @@ func (v *variant) table(p, b *block) []Slot {
 	t[slotExitRet] = Slot{Off: p.exitRet}
 	return t
 }
+
+// HasJIT reports whether a build for goos and goarch with the quickjs_jit
+// tag has the JIT, and so the feedback dispatcher.
+func HasJIT(goos, goarch string) bool {
+	return holds(jitBuild, goarch, goos, []string{"quickjs_jit"})
+}
