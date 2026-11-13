@@ -190,6 +190,7 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, callee bool) *jitRegEnt
 		e.refusal = fmt.Sprintf("%v: %v", jitRefused, err)
 		return e
 	}
+	s.inlined += uint64(len(f.Inlined))
 	// The register frame: its window's registers are its locals, in place
 	// at the context's Locals; its captured bindings past them, in their
 	// cells; its scratch slots past those, which are only values.
@@ -677,6 +678,16 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 			if src := jitSource(&ctx.RetFrom); src != nil && src.ref != nil {
 				ret = *src
 			}
+		}
+	}
+	if err == nil && ctx.ExitKind == abi.ExitHost {
+		// An exit inside a callee the code inlined at the call it left at:
+		// Go finishes the callee, and the call goes on with what it
+		// answered, as a native callee's (regPending).
+		rpc := int(ctx.ExitPC)
+		f.pc = regSrc(c, rpc) + 1
+		if v, uerr, ok := r.jitRegInlined(idx, f.cl, e, rpc); ok {
+			s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: v, err: uerr}
 		}
 	}
 	// What the run kept, as jitRunDone clears a stack form's run's, and

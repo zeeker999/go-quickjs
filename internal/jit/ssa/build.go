@@ -2522,6 +2522,14 @@ type InlineSite struct {
 	// object a sloppy callee's this is coerced to, or undefined, a strict
 	// one's, as the interpreter's call gives it (callFunction).
 	ThisCell uintptr
+	// Window marks a callee that runs register code, inlined at register
+	// code's call (ir.Instruction's Window): its program's slots are its
+	// window's registers -- its function in 0, its receiver in 1 (a method
+	// call's, ThisCell's, or undefined), its arguments from 2, undefined in
+	// the rest -- then its captured bindings, read in their cells
+	// (Upvalues), and its scratch slots. Params is 2 plus its parameters,
+	// ThisSlot -1, and its result goes to the call's register (Dest).
+	Window bool
 }
 
 // Inlining's bounds, by size alone, as V8's JSInliningHeuristic has them:
@@ -3129,11 +3137,6 @@ type builder struct {
 	// atomicErr is the exit such a build made.
 	atomic    bool
 	atomicErr error
-	// readCalls are the root's property reads of register code built to
-	// call -- an accessor, or Go for what a megamorphic site's own table
-	// and the megamorphic cache do not have -- which commit
-	// (commitsBuilt).
-	readCalls []int32
 	// p and fb are the program the block being translated is in, and its
 	// feedback: the function's own (root), or an inlined callee's.
 	p      *ir.Program
@@ -3749,6 +3752,11 @@ func (b *builder) generic(pc int) bool {
 type frame struct {
 	p  *ir.Program
 	fb Feedback
+	// readCalls are the frame's property reads of register code built to
+	// call -- an accessor, or Go for what a megamorphic site's own table
+	// and the megamorphic cache do not have -- which commit
+	// (commitsBuilt).
+	readCalls []int32
 	// base is a callee's first slot among the builder's, past the
 	// function's own and earlier callees'; blockAt its blocks, by its PC.
 	base    int
@@ -3934,6 +3942,17 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 		site.Argc < 0 || site.Params < 0 || pc+1 >= len(b.p.Code) || !reachable(b.p, pc+1) {
 		return nil, false
 	}
+	if in := &b.p.Code[pc]; in.Window || site.Window {
+		// Register code's call of a register callee (InlineSite's Window):
+		// its operands the call's window's registers, of its shape -- a
+		// plain call or a method's, no construction yet -- its result the
+		// call's register.
+		if !in.Window || !site.Window || isAccessor || site.Argc != in.Extra || site.Method != in.When || site.Construct || site.Restart ||
+			site.Forward || site.Arguments || site.ReadsArguments || site.LexThis || site.Captured != nil || site.ThisSlot >= 0 || site.Params < 2 {
+			return nil, false
+		}
+		return b.inlineFrame(site, calls, givenCalls, total, b.cur.base+in.Dest, pc)
+	}
 	depth, after := b.p.Maps[pc].Depth, b.p.Maps[pc+1].Depth
 	callee := site.Argc + 1
 	if site.Method {
@@ -3988,7 +4007,7 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 // frame Go makes again or of its arguments, whose callees are given
 // nothing a closure could be.
 func (b *builder) inlineCalls(site InlineSite, accessor bool) (calls, given []int, ok bool) {
-	if !b.provisional && b.given == nil || accessor || site.Construct || site.Restart || site.Forward || site.Arguments || site.Captured != nil {
+	if !b.provisional && b.given == nil || accessor || site.Construct || site.Restart || site.Forward || site.Arguments || site.Captured != nil || site.Window {
 		calls, ok = InlineCalls(site.Program)
 		return calls, nil, ok
 	}
@@ -4731,6 +4750,10 @@ func (b *builder) inlineBlocks(fr *frame, from, to *Block) {
 // its receiver, and undefined in every other.
 func (b *builder) inlineCall(blk *Block, pc int, fr *frame, guard func(Op, Type, ir.ExitKind, ...*Value) *Value, state func() *FrameState) {
 	site := fr.site
+	if site.Window {
+		b.inlineWindowCall(blk, pc, fr, guard, state)
+		return
+	}
 	sp := b.cur.base + b.p.Locals + b.p.Maps[pc].Depth
 	if site.Forward {
 		b.forwardCall(blk, pc, sp, fr, guard)
@@ -4803,6 +4826,61 @@ func (b *builder) inlineCall(blk *Block, pc int, fr *frame, guard func(Op, Type,
 		fr.init[site.ThisSlot] = this
 	case site.ThisSlot >= 0:
 		fr.init[site.ThisSlot] = b.read(sp-site.Argc-2, blk)
+	}
+}
+
+// inlineWindowCall is inlineCall of register code's call at pc of a
+// register callee (InlineSite's Window): the function, the call's window's
+// register 0, checked to be the callee, as a native call's is; a method
+// call's receiver, register 1, checked to be an object where the callee
+// would coerce it; room past the frame for the callee's, which an exit
+// inside it writes there; and the callee's start given its window -- the
+// function, the receiver, the arguments, past which undefined.
+func (b *builder) inlineWindowCall(blk *Block, pc int, fr *frame, guard func(Op, Type, ir.ExitKind, ...*Value) *Value, state func() *FrameState) {
+	site, in := fr.site, b.p.Code[pc]
+	a := b.cur.base + in.Left.Slot
+	fn := b.read(a, blk)
+	if site.Callee != 0 {
+		object := guard(OpObjectOf, Ptr, ir.HostExit, fn)
+		same := guard(OpSameObject, None, ir.HostExit, object)
+		same.Const = ir.Value{Bits: uint64(site.Callee)}
+	}
+	var this *Value
+	if site.Method {
+		this = b.read(a+1, blk)
+		if site.Coerce {
+			// A receiver that is not an object is coerced, which Go does.
+			guard(OpObjectOf, Ptr, ir.HostExit, this)
+		}
+	}
+	room := guard(OpFrameRoom, None, ir.HostExit)
+	room.Index = fr.base - b.root.p.Locals + fr.p.Locals + fr.p.StackSize
+	room.Const = ir.Value{Bits: uint64(fr.depth)}
+	fr.call = state()
+	undefined := b.f.newValue(blk, OpConst, Tagged)
+	undefined.Const = ir.Value{Kind: ir.Undefined}
+	fr.init = b.f.refsOf(fr.p.Locals + fr.p.StackSize)
+	for s := range fr.init {
+		fr.init[s] = undefined
+	}
+	fr.init[0] = fn
+	switch {
+	case this != nil:
+		fr.init[1] = this
+	case site.ThisCell != 0:
+		// A plain call's: the global object or undefined (ThisCell).
+		cell := b.f.newValue(blk, OpConstCell, Source)
+		cell.Const = ir.Value{Bits: uint64(site.ThisCell)}
+		v := b.f.newValue(blk, OpLoadCell, Tagged, cell)
+		v.Shadow = cell
+		fr.init[1] = v
+	}
+	fr.args, fr.argSlot = make([]*Value, site.Argc), a+2
+	for i := range fr.args {
+		fr.args[i] = b.read(a+2+i, blk)
+		if 2+i < site.Params && 2+i < len(fr.init) {
+			fr.init[2+i] = fr.args[i]
+		}
 	}
 }
 
@@ -6922,7 +7000,7 @@ func (f *Func) entryForBlock(blk *Block) (Entry, bool) {
 // from the one before it, so what came before is theirs alone.
 func (b *builder) atomicInstruction(blk *Block, pc int) {
 	p := b.p
-	if p.Origin == nil || b.cur != b.root {
+	if p.Origin == nil {
 		b.instruction(blk, pc)
 		return
 	}
@@ -6934,11 +7012,11 @@ func (b *builder) atomicInstruction(blk *Block, pc int) {
 	b.atomic = false
 }
 
-// readCalled notes that the root's read at pc, of register code, is built
-// to call (readCalls).
+// readCalled notes that the read at pc of the frame being translated, of
+// register code, is built to call (frame's readCalls).
 func (b *builder) readCalled(pc int) {
-	if b.p.Origin != nil && b.cur == b.root {
-		b.readCalls = append(b.readCalls, int32(pc))
+	if b.p.Origin != nil {
+		b.cur.readCalls = append(b.cur.readCalls, int32(pc))
 	}
 }
 
@@ -6953,7 +7031,7 @@ func (b *builder) commitsBuilt(pc int) bool {
 	in := &b.p.Code[pc]
 	switch in.Op {
 	case ir.PropertyRead, ir.ReferenceRead:
-		if slices.Contains(b.readCalls, int32(pc)) {
+		if slices.Contains(b.cur.readCalls, int32(pc)) {
 			return true
 		}
 	case ir.Binary, ir.Unary, ir.Update, ir.Branch, ir.StringConcat, ir.StringPart:

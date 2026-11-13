@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
+	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
@@ -413,10 +414,77 @@ func (f *jitRegFeedback) EntryGeneric(pc int) bool {
 	return f.fb.e != nil && slices.Contains(f.fb.e.failedEntries, uint32(pc))
 }
 
-// Inline is ssa.Feedback's: nothing yet. The call's target is known
-// (callTarget); making it an InlineSite takes the callee's program, which
-// the stack form's JIT lowers from its stack code (Stage 3a-3).
-func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) { return ssa.InlineSite{}, false }
+// Inline is ssa.Feedback's: a plain call or a method's, call_w's or
+// call_method_w's, of one function -- the one its site's cache holds and
+// its code learned it calls (regCallSites), no other -- that runs register
+// code native callers may call, not the caller's own, nor an arrow, is the
+// callee to inline, its program its register code lowered for an inlined
+// frame (LowerRegInline), asked by its own register feedback, the root's
+// keep holding what its sites name; the builder decides whether its
+// program may be (ssa's InlineCalls) and fits. A call whose inlined callee
+// left native code too often is not inlined again (jitInlineLeft's
+// notInline), as the stack form's. A callee's own calls are not inlined
+// in it yet.
+func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) {
+	w, op, ok := f.at(pc)
+	if !ok || op != ir.Host || !f.p.Code[pc].Window || f.fb.root != nil {
+		return ssa.InlineSite{}, false
+	}
+	method := w.Op() == bytecode.RCallMW
+	if w.Op() != bytecode.RCallW && !method {
+		return ssa.InlineSite{}, false
+	}
+	rpc := int32(f.p.Origin[pc])
+	if int(rpc) < len(f.rc.Marks) && f.rc.Marks[rpc]&bytecode.RMarkTail != 0 {
+		return ssa.InlineSite{}, false
+	}
+	l := f.fb.e
+	if l != nil && slices.Contains(l.notInline, rpc) {
+		return ssa.InlineSite{}, false
+	}
+	argc := int(w.X())
+	sites, objs, cls := f.regCallTargets(pc, w, argc, method)
+	if len(sites) != 1 || sites[0].ByCode != 0 || sites[0].ArrowThis {
+		return ssa.InlineSite{}, false
+	}
+	site, o, cl := sites[0], objs[0], cls[0]
+	if cl.fn == f.fb.fn || jitNoInline != nil && jitNoInline(cl.fn) {
+		return ssa.InlineSite{}, false
+	}
+	p, err := jitcompile.LowerRegInline(cl.reg.rc, cl.fn)
+	if err != nil || p.Validate() != nil {
+		return ssa.InlineSite{}, false
+	}
+	r := f.fb.r
+	// What its sites' caches have seen besides their entries, as its own
+	// compiles take it (jitRegSeenFeedback).
+	r.jitRegSeenFeedback(cl, cl.reg)
+	k := f.fb.keep()
+	callee := &jitRegFeedback{fb: &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitKeyOf(cl.fn)), root: k}, rc: cl.fn.RegCode(), p: p}
+	in := ssa.InlineSite{
+		Program: p, Feedback: callee, Callee: site.Callee, Closure: site.Closure,
+		Argc: argc, Method: method, Params: 2 + int(cl.reg.params), ThisSlot: -1, Window: true,
+		Coerce: site.Coerce, Upvalues: jitUpvalueCells(cl),
+	}
+	if site.PlainThis {
+		// A plain call's receiver, which the callee reads: the global
+		// object a sloppy one's is, or undefined.
+		cell := new(Value)
+		*cell = Undefined
+		if site.Global != 0 {
+			*cell = r.globalThis
+		}
+		k.cells = append(k.cells, cell)
+		in.ThisCell = uintptr(unsafe.Pointer(cell))
+	}
+	k.holders = append(k.holders, o)
+	k.inlined = append(k.inlined, cl)
+	if l != nil && !slices.ContainsFunc(l.inlines, func(x jitInline) bool { return x.pc == rpc && x.obj == o }) {
+		// Where its exits are counted (jitInlineLeft).
+		l.inlines = append(l.inlines, jitInline{pc: rpc, cl: cl, obj: o})
+	}
+	return in, true
+}
 
 // GoCalls is ssa.GoFeedback's: native code made from register code calls
 // Go, which makes what needs no frame of the VM's from what the code

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
@@ -100,6 +101,9 @@ func TestJITRegNativeCalls(t *testing.T) {
 			if marking {
 				jitMarkingForTest(t)
 			}
+			// Its callees called, none inlined (jitRegFeedback's Inline):
+			// the native calls are what it is about.
+			regNoInline(t)
 			rts := regNativeRuntimes(t, regCallSrc)
 			// Compiled at their first calls: callers before their callees,
 			// whose calls they learn at their calls of Go.
@@ -219,6 +223,7 @@ func TestJITRegCallsCompileForARM64(t *testing.T) {
 	}
 	RecordJITCompiles(true)
 	defer RecordJITCompiles(false)
+	regNoInline(t)
 	rts := regNativeRuntimes(t, regCallSrc)
 	r := rts[0]
 	r.SetJITWarmUp(1, 1)
@@ -228,10 +233,23 @@ func TestJITRegCallsCompileForARM64(t *testing.T) {
 			r.Call(fn, Undefined, []Value{Float(300)})
 		}
 	}
+	fns, windows, _ := regCompileARM64(t, r)
+	t.Logf("%d functions compiled for arm64, %d native calls of register code", fns, windows)
+	if windows == 0 {
+		t.Error("no native call of register code compiled")
+	}
+}
+
+// regCompileARM64 compiles again with arm64's backend, on any host, the
+// register code r compiled since RecordJITCompiles, failing t where the
+// backend refuses one, and returns how many functions it compiled, how
+// many native calls of register code they make, and how many callees they
+// inline.
+func regCompileARM64(t *testing.T, r *Runtime) (fns, windows, inlined int) {
+	t.Helper()
 	jitParityLog.Lock()
 	seen := jitParityLog.seen[r]
 	jitParityLog.Unlock()
-	windows, fns := 0, 0
 	for _, cl := range seen {
 		e := r.jit.regCache[r.jitKeyOf(cl.fn)]
 		if e == nil || e.p == nil || e.code == nil {
@@ -249,6 +267,7 @@ func TestJITRegCallsCompileForARM64(t *testing.T) {
 		f.Params, f.StartOnly = p.ParamBase+p.Params, false
 		f.Cells = p.Cells
 		f.CallEntry = true
+		inlined += len(f.Inlined)
 		ssa.Optimize(f)
 		for _, b := range f.Blocks {
 			for _, v := range b.Values {
@@ -263,8 +282,12 @@ func TestJITRegCallsCompileForARM64(t *testing.T) {
 		}
 		fns++
 	}
-	t.Logf("%d functions compiled for arm64, %d native calls of register code", fns, windows)
-	if windows == 0 {
-		t.Error("no native call of register code compiled")
-	}
+	return fns, windows, inlined
+}
+
+// regNoInline has no function inlined until the test ends (jitNoInline).
+func regNoInline(t *testing.T) {
+	saved := jitNoInline
+	jitNoInline = func(*bytecode.Function) bool { return true }
+	t.Cleanup(func() { jitNoInline = saved })
 }

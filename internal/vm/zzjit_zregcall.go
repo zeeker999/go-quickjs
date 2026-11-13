@@ -82,11 +82,18 @@ func (s *jitState) regLinkUpdate(key jitKey, e *jitRegEntry) {
 // cache holds is learned too, so that a call of it Go makes, its code not
 // compiled yet, is not taken for news.
 func (f *jitRegFeedback) regCallSites(pc int, w bytecode.RInstr, argc int, method bool) []ssa.CallSite {
+	sites, _, _ := f.regCallTargets(pc, w, argc, method)
+	return sites
+}
+
+// regCallTargets is regCallSites with each site's function object and
+// closure, by index.
+func (f *jitRegFeedback) regCallTargets(pc int, w bytecode.RInstr, argc int, method bool) ([]ssa.CallSite, []*Object, []*closure) {
 	l := f.fb.e
 	rpc := int32(f.p.Origin[pc])
 	newW := w.Op() == bytecode.RNewW
 	var sites []ssa.CallSite
-	// The closures of the sites, by index.
+	var objs []*Object
 	var closures []*closure
 	add := func(o *Object, cl *closure, rc *regCode, pool *abi.ObjectPool, byCode bool) {
 		for i, s := range sites {
@@ -95,13 +102,13 @@ func (f *jitRegFeedback) regCallSites(pc int, w bytecode.RInstr, argc int, metho
 			}
 			if byCode && jitRegSameClosureCode(closures[i], cl) {
 				// The same function's, checked by its code from here.
-				sites, closures = slices.Delete(sites, i, i+1), slices.Delete(closures, i, i+1)
+				sites, objs, closures = slices.Delete(sites, i, i+1), slices.Delete(objs, i, i+1), slices.Delete(closures, i, i+1)
 				break
 			}
 		}
 		if len(sites) < jitCallTargets {
 			if site, ok := f.regCallSite(pc, o, cl, rc, argc, method, pool, byCode); ok {
-				sites, closures = append(sites, site), append(closures, cl)
+				sites, objs, closures = append(sites, site), append(objs, o), append(closures, cl)
 			}
 		}
 	}
@@ -120,7 +127,7 @@ func (f *jitRegFeedback) regCallSites(pc int, w bytecode.RInstr, argc int, metho
 			}
 		}
 	}
-	return sites
+	return sites, objs, closures
 }
 
 // jitRegSameClosureCode reports whether closures a and b run the same
@@ -602,6 +609,12 @@ func (r *Runtime) jitRegUnwind(idx int) (Value, error) {
 		c := s.ssaCtxs[l.ctx]
 		switch {
 		case k == n-1:
+			if iv, ierr, ok := r.jitRegInlined(l.ctx, l.cl, l.e, l.pc); ok {
+				// It left inside a callee its code inlined, at the call
+				// it is inlined at: Go finishes the callee, and the call
+				// goes on with what it answered (regPending).
+				s.regPending = jitGoPending{set: true, pc: l.pc, ctx: l.ctx, v: iv, err: ierr}
+			}
 			v, err = r.jitRegFinishLevel(f, l, c)
 		case err == nil && r.stopped == nil && !l.e.invalid && l.e.code != nil && levels[k+1].back != 0 && l.e.code.Contains(levels[k+1].back):
 			// On in its native code where the call returns to.

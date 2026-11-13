@@ -377,6 +377,16 @@ func jitParityCall(r *Runtime, m reflect.Value, args []reflect.Value) (s string,
 		// which each form lays out its own way (ssa.CallSite's Window).
 		out[0] = reflect.ValueOf(jitParitySites(sites))
 	}
+	if site, ok := out[0].Interface().(ssa.InlineSite); ok {
+		// A callee to inline: which, at a call of what shape, not its
+		// program, its feedback or its frame's layout, each form's own
+		// (ssa.InlineSite's Window) -- nor whether its receiver is
+		// coerced, which the register form says only of a callee that
+		// reads it, nor the cells of its receiver and captured bindings.
+		site.Program, site.Feedback, site.Params, site.ThisSlot, site.Window = nil, nil, 0, 0, false
+		site.Coerce, site.ThisCell, site.Upvalues = false, 0, 0
+		out[0] = reflect.ValueOf(site)
+	}
 	if last := out[len(out)-1]; last.Kind() == reflect.Bool && !last.Bool() && len(out) > 1 {
 		// An answer with its ok false is none.
 		return "", true
