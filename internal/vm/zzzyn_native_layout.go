@@ -11,6 +11,14 @@ import "reflect"
 // test values and states against. Its helper (nativegen/cmd/layout),
 // built with the quickjs_nativelayout tag that alone builds this file,
 // prints them for the generator, which never imports the package.
+//
+// It builds on every architecture, with the types it reads
+// (zzzyn_native_ctx.go), so that the helper runs on any host: Go lays
+// these structs out alike on every 64-bit one, so a 64-bit host's layout
+// is amd64's and arm64's (nativegen.ReadLayout). What a host cannot give
+// is a build's whose files its own GOOS and GOARCH leave out: the JIT's,
+// whose fields the Runtime has only where the JIT is built, which
+// jitBuilt says.
 func NativeLayout() (offsets, sizes map[string]uintptr, consts map[string]uint64) {
 	offsets, sizes = map[string]uintptr{}, map[string]uintptr{}
 	for _, t := range []reflect.Type{
@@ -63,6 +71,10 @@ func NativeLayout() (offsets, sizes map[string]uintptr, consts map[string]uint64
 		}
 	}
 	consts = map[string]uint64{
+		// jitBuilt says the build has the JIT, whose fields the Runtime
+		// and a closure's code have in it alone.
+		"jitBuilt": 0,
+
 		"rtBase": uint64(rtBase),
 		"ccBase": uint64(ccBase),
 
@@ -138,6 +150,9 @@ func NativeLayout() (offsets, sizes map[string]uintptr, consts map[string]uint64
 		"sV1":    sV1,
 		"sEnt":   sEnt,
 		"sKa":    sKa,
+	}
+	if jitBuilt {
+		consts["jitBuilt"] = 1
 	}
 	return offsets, sizes, consts
 }

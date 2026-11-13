@@ -17,8 +17,12 @@
 // layout as plain numbers (Layout): offsets by "Type.field", sizes by
 // type and constants by name, which vm's NativeLayout gives in a build
 // with the quickjs_nativelayout tag, which nothing else builds; the
-// helper cmd/layout, built with that tag and the build's others for the
-// target architecture, prints them as JSON (ReadLayout).
+// helper cmd/layout, built with that tag and the build's others, prints
+// them as JSON (ReadLayout). NativeLayout and the types it reads build on
+// every architecture, and Go lays those types out alike on every 64-bit
+// one, so the helper is built for the host and any 64-bit host reads
+// amd64's layout. Only the JIT's build, which a host's GOOS and GOARCH
+// may leave out (linux arm64's), needs a host whose build has it.
 //
 // The build that reads the layout has none of what the generator writes
 // but the handlers' file, which the package needs to link: a variant's

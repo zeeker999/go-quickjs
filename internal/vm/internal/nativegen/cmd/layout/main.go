@@ -2,14 +2,17 @@
 
 // Command layout prints package vm's layout as the native handlers'
 // generator reads it (nativegen.Layout, as JSON): vm's NativeLayout,
-// which only the quickjs_nativelayout tag builds. nativegen.ReadLayout
-// runs it, built for the architecture and the tags whose layout it reads.
+// which only the quickjs_nativelayout tag builds, and the architecture
+// and word size it was built for. nativegen.ReadLayout runs it on the
+// host, built with the tags whose layout it reads.
 package main
 
 import (
 	"encoding/json"
 	"log"
 	"os"
+	"runtime"
+	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/vm"
 	"github.com/go-quickjs/go-quickjs/internal/vm/internal/nativegen"
@@ -17,7 +20,15 @@ import (
 
 func main() {
 	offsets, sizes, consts := vm.NativeLayout()
-	l := nativegen.Layout{Offsets: map[string]int64{}, Sizes: map[string]int64{}, Consts: consts}
+	l := nativegen.Layout{
+		GOARCH:   runtime.GOARCH,
+		PtrSize:  int64(unsafe.Sizeof(uintptr(0))),
+		Offsets:  map[string]int64{},
+		Sizes:    map[string]int64{},
+		Consts:   consts,
+		JITBuilt: consts["jitBuilt"] != 0,
+	}
+	delete(consts, "jitBuilt")
 	for k, v := range offsets {
 		l.Offsets[k] = int64(v)
 	}

@@ -16,7 +16,7 @@ import (
 // The native handlers are generated offline by
 // internal/vm/internal/nativegen (go generate ./internal/vm), from the
 // package's layout, which its helper reads in a build with the
-// quickjs_nativelayout tag (zzzyn_native_layout_amd64.go).
+// quickjs_nativelayout tag (zzzyn_native_layout.go).
 
 // nativeBuildTags are the build tags this test binary was built with.
 func nativeBuildTags() []string {

@@ -177,13 +177,15 @@ Do not manually edit generated files or their binary companions:
   (docs/register-interpreter.md, "Native handlers"). The generator reads
   package vm's private layout -- the context, a frame, the Runtime fields
   and the constants the handlers use -- as plain numbers from
-  `NativeLayout` (`zzzyn_native_layout_amd64.go`), which only its helper's
+  `NativeLayout` (`zzzyn_native_layout.go`), which only its helper's
   build tag, `quickjs_nativelayout`, builds. After changing the emitter, or
   a layout its offsets come from, run `go generate ./internal/vm` on amd64
   (`go run ./internal/nativegen/cmd` in `internal/vm` alone; a field or a
   constant the emitter newly reads goes in `NativeLayout` first). It reads
   the layout of a build without tags and with `quickjs_jit`, one per
-  variant; `TestRegNativeGenerated` fails while either file is out of
+  variant, from the host's own build: any 64-bit host gives amd64's
+  layout, but only one whose build has the JIT (linux or windows amd64,
+  darwin arm64) gives the JIT's; `TestRegNativeGenerated` fails while either file is out of
   date.
 - `internal/vm/*_layoutpad.go` and `internal/vm/layoutpad_*.go`, the layout
   lock's pads and the constants that size them for each configuration,

@@ -8,7 +8,7 @@ package vm
 // every other handler plain's. Its table and its own handlers are
 // generated (zzzyn_native_feedback_amd64.s), in builds with the JIT
 // alone, and not in the build that reads the package's layout for the
-// generator (zzzyn_native_layout_amd64.go), which must not need them.
+// generator (zzzyn_native_layout.go), which must not need them.
 var nativeFeedback = newNativeTable(nativeFeedbackTableAddr())
 
 // nativeFeedbackTableAddr is the feedback dispatcher's table's address.
