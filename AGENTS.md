@@ -187,15 +187,15 @@ Do not manually edit generated files or their binary companions:
   `NativeLayout` (`zzzyn_native_layout.go`), which only its helper's
   build tag, `quickjs_nativelayout`, builds. After changing the emitter, or
   a layout its offsets come from, run `go generate ./internal/vm` on amd64
-  or darwin arm64 (`go run ./internal/nativegen/cmd` in `internal/vm`
+  or arm64 (`go run ./internal/nativegen/cmd` in `internal/vm`
   alone; a field or a constant the emitter newly reads goes in
   `NativeLayout` first). It reads
   the layout of a build without tags and with `quickjs_jit`, one per
   variant, from the host's own build: any 64-bit host gives amd64's and
   arm64's layout, but only one whose build has the JIT (linux or windows
-  amd64, darwin arm64) gives the JIT's. `TestRegNativeGenerated` fails
-  while a file is out of date; on linux arm64, which has no JIT, it checks
-  every file but the feedback dispatchers'.
+  amd64, darwin or linux arm64) gives the JIT's. `TestRegNativeGenerated`
+  fails while a file is out of date; on a host with no JIT (darwin amd64,
+  say), it checks every file but the feedback dispatchers'.
 - `internal/vm/*_layoutpad.go` and `internal/vm/layoutpad_*.go`, the layout
   lock's pads and the constants that size them for each configuration,
   written by `internal/cmd/layoutpad` from `layoutlock.txt`'s targets.
@@ -258,8 +258,8 @@ git diff --check
 The long checks run once, on the final code: the full suite with and without
 the JIT's tag, test262's modes and the timing across suites. Until the old
 tiers are removed, a change to what they share with the register
-interpreter runs the suite with `QJS_REG=0` as well, and on arm64 (or with
-`GOARCH=arm64` under an emulator) with `QJS_REG=1`; where the register
+interpreter runs the suite with `QJS_REG=0` as well, and on an architecture without
+native handlers (386, say) with `QJS_REG=1`; where the register
 interpreter is on, the conformance runner fails on any function that falls
 back to the old tiers (`vm.RegFallbacks`, `QJS_REGFALLTRACE` names them). While a change
 is iterated, test the packages it touches and time only the benchmarks it is

@@ -124,7 +124,7 @@ func lookup(goarch string) (*arch, error) {
 // host's GOOS with the tags tags has -- plain, and each variant whose
 // file's constraint holds there -- from that build's layout (ReadLayout).
 // A build none of whose variants needs the JIT has its layout read as it
-// is, with the quickjs_jit tag or not: linux's on arm64 has no JIT
+// is, with the quickjs_jit tag or not: darwin's on amd64 has no JIT
 // whatever its tags.
 func Build(goarch string, tags ...string) (*Output, error) {
 	ar, err := lookup(goarch)
@@ -195,13 +195,13 @@ func holds(expr, goarch, goos string, tags []string) bool {
 func Generate() ([]File, error) {
 	files, unread, err := GenerateReadable()
 	if err == nil && len(unread) > 0 {
-		err = fmt.Errorf("nativegen: %s/%s cannot read the layouts of %s, whose builds have the JIT: generate on linux or windows amd64, or darwin arm64", runtime.GOOS, runtime.GOARCH, strings.Join(unread, ", "))
+		err = fmt.Errorf("nativegen: %s/%s cannot read the layouts of %s, whose builds have the JIT: generate on linux or windows amd64, or darwin or linux arm64", runtime.GOOS, runtime.GOARCH, strings.Join(unread, ", "))
 	}
 	return files, err
 }
 
 // GenerateReadable is Generate on a host that may not read every
-// variant's layout -- one whose own build has no JIT, linux's on arm64,
+// variant's layout -- one whose own build has no JIT, darwin's on amd64,
 // cannot read a layout with the JIT's fields (ReadLayout) -- making
 // every file it can and naming those it leaves out.
 func GenerateReadable() (files []File, unread []string, err error) {

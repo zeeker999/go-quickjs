@@ -69,8 +69,8 @@ var nativeTestTables = map[string]uintptr{"plain": nativePlain.addr}
 // build with other tags has -- is what the generator makes now
 // (nativegen.Generate). A change to the emitter or to the layouts its
 // offsets come from fails it until the files are written again (go
-// generate ./internal/vm). A host whose own build has no JIT (linux's on
-// arm64) cannot read the layouts of the builds with it: it checks every
+// generate ./internal/vm). A host whose own build has no JIT (darwin's
+// on amd64) cannot read the layouts of the builds with it: it checks every
 // other file, and the hosts with the JIT check those.
 func TestRegNativeGenerated(t *testing.T) {
 	if testing.Short() {
@@ -146,7 +146,7 @@ func TestRegNativeLinked(t *testing.T) {
 // with the JIT makes -- the handlers' block, its table and their file --
 // is the one a build without it makes: one file serves both, and the
 // feedback dispatcher only adds to it. Where a build with the JIT's tag
-// has no JIT (linux on arm64), it is the build without, and has no
+// has no JIT (darwin on amd64), it is the build without, and has no
 // feedback dispatcher.
 func TestRegNativePlainSameWithJIT(t *testing.T) {
 	without, with := nativeBuild(t), nativeBuild(t, "quickjs_jit")

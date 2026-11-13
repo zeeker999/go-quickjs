@@ -759,8 +759,9 @@ table: the exits through two slots after the operations', another
 handler through its operation's entry -- on arm64, which has no jump
 through memory, by a load of the entry into `R16` and a jump through
 it. `TestRegNativeGenerated` checks every file, each from the layout of
-its variant's build (on linux arm64, whose build has no JIT, every file
-but the feedback dispatchers', which the hosts with the JIT check);
+its variant's build (on a host whose build has no JIT, darwin amd64
+say, every file but the feedback dispatchers', which the hosts with the
+JIT check);
 `TestRegNativePlainSameWithJIT` that plain's is the same in a build with
 the JIT and without; `TestRegNativeLinked` that a binary links what the
 generator makes for its build; `TestRegNativeFeedbackSelected` that a

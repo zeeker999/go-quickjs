@@ -35,7 +35,7 @@ type variant struct {
 }
 
 // jitBuild is the JIT's build constraint (internal/vm's zzjit_*.go).
-const jitBuild = "quickjs_jit && !android && !ios && ((linux && amd64) || (windows && amd64) || (darwin && arm64))"
+const jitBuild = "quickjs_jit && !android && !ios && ((linux && amd64) || (windows && amd64) || ((darwin || linux) && arm64))"
 
 // variants are the dispatchers, plain first.
 //
