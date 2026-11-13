@@ -1476,7 +1476,7 @@ func (c *compiler) compileSwitch(n *ast.SwitchStmt) {
 // nameOf returns the name a declaration target implies, used to give an
 // anonymous function the name of the variable it is assigned to.
 func nameOf(target ast.Expr) string {
-	if id, ok := target.(*ast.Ident); ok && !id.Paren {
+	if id, ok := target.(*ast.Ident); ok && !id.Paren() {
 		return id.Name
 	}
 	return ""

@@ -367,8 +367,9 @@ stack compiler is the source of truth for the stack form, a register backend
 change must leave the stack code exactly as it was: compilediff's verdict
 of no difference over the test262 tree and the suites is the proof, and the
 register code is compared the same way between two revisions of the
-backend, by its own listing. Once the stack form is retired, compilediff
-compares register code alone.
+backend: each function's, compiled as its first call would, every field of
+its `RegCode`, or the refusal or panic that left it none. Once the stack
+form is retired, compilediff compares register code alone.
 
 ### Compiled at the first call
 

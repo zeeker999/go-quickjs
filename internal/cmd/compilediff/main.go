@@ -5,6 +5,10 @@
 // every field of every function, its constants, each instruction's position,
 // what the script's line table answers, and the exact error of what is
 // rejected. A field added to bytecode.Function is in the output by itself.
+// So is each function's register code, compiled as its first call would
+// compile it, whatever the platform: every field of its RegCode, an
+// instruction a line, or why it has none -- the backend's refusal, or what
+// its compile panicked with.
 //
 // Against a revision, in one command, from the repository's root, which
 // builds this tool's source over that revision in a temporary directory, runs
