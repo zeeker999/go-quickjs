@@ -14,8 +14,9 @@ import (
 // program meets only what the path answers.
 
 // nativeWarmExits is how often a fast case's operation may exit while
-// the caches it reads fill, in a run of a thousand of it.
-const nativeWarmExits = 8
+// the caches it reads fill, in a run of a thousand of it; a test whose
+// fast case grows what it writes to raises it for the growth's exits.
+var nativeWarmExits int64 = 8
 
 // nativeCheck runs src by the Go table and by the native handlers,
 // marking and not, and fails on a different answer or different exits;
@@ -248,4 +249,43 @@ func TestRegNativeTypedBigClamped(t *testing.T) {
 		var a = new BigInt64Array(64), u = new BigUint64Array(64), c = new Uint8ClampedArray(64), t = 0n, n = 0
 		for (var k = 0; k < 20; k++) for (var i = 0; i < 64; i++) { a[i] = BigInt(i) - 30n; u[i] = a[i]; c[i] = i * 4.5 - 10; if (a[i] < 0n) t += a[i]; if (a[i] >= u[i]) n++ }
 		String(t) + " " + n + " " + c[3]`, bytecode.RSetIndex, bytecode.RGetIndex, bytecode.RJLt, bytecode.RJNLt, bytecode.RJGe, bytecode.RJNGe)
+}
+
+// TestRegNativeArrayAppend runs element writes at an array's length
+// natively where it has room: arrays grown past their room, frozen,
+// sealed, of a length made read-only, sparse, with index keys of their
+// own or on their prototype chain, with a prototype changed, subclassed,
+// and arguments objects, which Go writes.
+func TestRegNativeArrayAppend(t *testing.T) {
+	// Each of the eight arrays grows past its room some ten times.
+	nativeWarmExits = 100
+	defer func() { nativeWarmExits = 8 }()
+	nativeCheck(t, `
+		var out = []
+		function fill(a, n) { for (var i = a.length; i < n; i++) a[i] = i * 2; return a }
+		function fill2(a, n) { for (var i = 0; i < n; i++) a[a.length] = i; return a }
+		out.push(fill([], 50).join(), fill2([1, 2], 40).length)
+		function tryFill(a) { try { fill(a, a.length + 3) } catch (e) { return e.name + a.length } return a.length + ":" + Array.prototype.join.call(a) }
+		var fr = Object.freeze([1]), se = Object.seal([1]), ro = [1, 2]
+		Object.defineProperty(ro, "length", { writable: false })
+		var sp = [1]; sp[100] = 5; sp.length = 2
+		var own = [1]; own.x = 1; own["7"] = 9
+		var sub = new (class extends Array {})(); sub.push(1)
+		var other = [1]; Object.setPrototypeOf(other, { 3: "p" })
+		out.push(tryFill(fr), tryFill(se), tryFill(ro), tryFill(sp), tryFill(own), tryFill(sub), tryFill(other))
+		function args() { fill(arguments, 4); return [].slice.call(arguments).join() + arguments.length }
+		out.push(args(1))
+		Array.prototype[5] = "proto"
+		out.push(fill([], 8).join(), [].concat(fill2([], 7)).join())
+		delete Array.prototype[5]
+		Object.defineProperty(Object.prototype, "6", { set: function (v) { out.push("set " + v) }, configurable: true })
+		out.push(fill([], 8).join())
+		delete Object.prototype[6]
+		var tas = fill(new Int8Array(4), 4)
+		out.push(String(tas), fill([], 9).length)
+		out.join("\n")`, `
+		function fill(n) { var a = []; for (var i = 0; i < n; i++) a[i] = i; var b = []; for (var i = 0; i < n; i++) b[b.length] = a[i]; return a.length + b.length }
+		var t = 0
+		for (var j = 0; j < 4; j++) t += fill(500)
+		String(t)`, bytecode.RSetIndex)
 }

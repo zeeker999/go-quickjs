@@ -603,6 +603,9 @@ intrinsic iterator, its end included; `s.charCodeAt(i)`
 BigInt64Array's and BigUint64Array's elements read and written, a BigInt
 held in its Value; Uint8ClampedArray's writes, clamped and rounded to
 even; the compare-and-branches of two such BigInts, as 128-bit integers;
+an element written at the length of an array with room for it, as
+`appendElem` appends it, the array's and its prototype chain's index
+keys and elements checked;
 and a call in tail position while the stack is shallower than
 `tailCallDepth`, which is `call_w`'s. Deeper, Go gives the frame to the
 callee in place (`regTailTo`); where it is the base frame, `nativeRun`

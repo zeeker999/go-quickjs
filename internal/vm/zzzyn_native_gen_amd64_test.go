@@ -1394,6 +1394,95 @@ func (g *nativeGen) typedWrite(obj, idx Reg) {
 	a.Bind(done)
 }
 
+// arrayAppend is an element write at the index in idx, the length, of the
+// array in obj with room for one more, as appendElem appends it: the
+// array extensible, its length writable, dense and of no index keys, and
+// its prototype chain of ordinary objects and arrays with neither
+// elements nor index keys; the value register C's. An object that is no
+// array goes to notArray; a full array, anything else exits.
+func (g *nativeGen) arrayAppend(obj, idx Reg, notArray Label) {
+	a := g.a
+	loop, done := a.NewLabel(), a.NewLabel()
+	a.LoadU8(RDX, obj, offObjClass)
+	a.OpImm(Cmp, RDX, int32(ClassArray), false)
+	a.Jcc(CondNE, notArray)
+	const want = objExtensible | objArrayLengthWritable | objHasExt
+	a.LoadU16(RDX, obj, offObjFlags)
+	a.OpImm(And, RDX, int32(want|objHasSparseElements|objMappedArguments|objSharedElems|objPolyProto), false)
+	a.OpImm(Cmp, RDX, int32(want), false)
+	a.Jcc(CondNE, g.exit)
+	a.CmpMem(idx, obj, sizeObj+8, true)
+	a.Jcc(CondNE, g.exit)
+	a.CmpMem(idx, obj, sizeObj+16, true)
+	a.Jcc(CondAE, g.exit)
+	g.noIndexKeys(obj)
+	// The chain: ordinary objects and arrays of no elements, no index
+	// keys, no prototype of their own word.
+	a.MovRR(R8, obj)
+	a.Bind(loop)
+	a.Load(R8, R8, offObjShape)
+	a.Op(Test, R8, R8, true)
+	a.Jcc(CondE, done)
+	a.Load(R8, R8, offShapeProto)
+	a.Op(Test, R8, R8, true)
+	a.Jcc(CondE, done)
+	a.LoadU8(RDX, R8, offObjClass)
+	ok := a.NewLabel()
+	a.OpImm(Cmp, RDX, int32(ClassObject), false)
+	a.Jcc(CondE, ok)
+	a.OpImm(Cmp, RDX, int32(ClassArray), false)
+	a.Jcc(CondNE, g.exit)
+	a.Bind(ok)
+	a.LoadU16(RDX, R8, offObjFlags)
+	a.MovRR(R9, RDX)
+	a.OpImm(And, R9, int32(objPolyProto), false)
+	a.Jcc(CondNE, g.exit)
+	noElems := a.NewLabel()
+	a.OpImm(And, RDX, int32(objHasExt), false)
+	a.Jcc(CondE, noElems)
+	a.CmpMemImm8(R8, sizeObj+8, 0)
+	a.Jcc(CondNE, g.exit)
+	a.Bind(noElems)
+	g.noIndexKeys(R8)
+	a.Jmp(loop)
+	a.Bind(done)
+	// The value at elems[len], then the length past it.
+	a.MovRR(RAX, idx)
+	a.ShiftImm(Shl, RAX, 4, true)
+	a.AddMem(RAX, obj, sizeObj)
+	a.Lea(R9, idx, 1)
+	a.Store(obj, sizeObj+8, R9)
+	a.Load(RCX, RBX, 0)
+	a.ShiftImm(Shr, RCX, 44, true)
+	a.OpImm(And, RCX, 0xFFFF0, false)
+	a.LoadIdx(R9, R12, RCX, 1, 0)
+	a.LoadIdx(R8, R12, RCX, 1, 8)
+	g.storeValue()
+}
+
+// noIndexKeys exits unless the object in obj has no key that is an array
+// index, as Object.noIndexKeys says: its shape's index says so, or it has
+// no keys. RDX is its scratch.
+func (g *nativeGen) noIndexKeys(obj Reg) {
+	a := g.a
+	noIdx, ok := a.NewLabel(), a.NewLabel()
+	a.Load(RDX, obj, offObjShape)
+	a.Op(Test, RDX, RDX, true)
+	a.Jcc(CondE, noIdx)
+	a.Load(RDX, RDX, offShapeIndex)
+	a.Op(Test, RDX, RDX, true)
+	a.Jcc(CondE, noIdx)
+	a.LoadU8(RDX, RDX, offIdxIndexKeys)
+	a.Op(Test, RDX, RDX, false)
+	a.Jcc(CondNE, g.exit)
+	a.Jmp(ok)
+	a.Bind(noIdx)
+	a.LoadU32(RDX, obj, int32(unsafe.Offsetof(Object{}.valn)))
+	a.Op(Test, RDX, RDX, false)
+	a.Jcc(CondNE, g.exit)
+	a.Bind(ok)
+}
+
 // typedBigWrite stores register C, a BigInt held in its Value, as the
 // element at the index in idx of the BigInt64Array or BigUint64Array in
 // obj: its low 64 bits, ToBigInt64's and ToBigUint64's wrapping; anything
@@ -1497,6 +1586,8 @@ var (
 	offRtCur        = rtRel(unsafe.Offsetof(Runtime{}.cur))
 	offRtArgStack   = rtRel(unsafe.Offsetof(Runtime{}.argStack))
 	offRtBackEdges  = rtRel(unsafe.Offsetof(Runtime{}.backEdges))
+	offShapeIndex   = int32(unsafe.Offsetof(shape{}.index))
+	offIdxIndexKeys = int32(unsafe.Offsetof(propIndex{}.indexKeys))
 	offStrS         = int32(unsafe.Offsetof(String{}.s))
 	offStrLeft      = int32(unsafe.Offsetof(String{}.left))
 	offStrAux       = int32(unsafe.Offsetof(String{}.aux))
@@ -2843,7 +2934,9 @@ func nativeEmit() ([]byte, nativeOffsets) {
 		a.MovRR(RAX, RCX)
 		g.storeValue()
 		a.Bind(miss)
-		bigW := a.NewLabel()
+		bigW, typed := a.NewLabel(), a.NewLabel()
+		g.arrayAppend(RSI, RCX, typed)
+		a.Bind(typed)
 		g.decC(R8)
 		g.numOr(1, R8, bigW)
 		g.typedWrite(RSI, RCX)
