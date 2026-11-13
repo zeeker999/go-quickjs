@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -33,10 +34,17 @@ func (r *Runtime) regOn() bool { return regTier.Load() && !r.oldTiers && !r.jitO
 // runs on the old tiers, where r does not run register code and fn has a
 // register form all the same: a host compiles a runtime's code for it, so
 // this is code compiled for another, which a test may hand a runtime of
-// either kind (bytecode.Function.OldTiers).
+// either kind (bytecode.Function.OldTiers). Where a runtime that runs
+// register code has given fn its register code's tree, the tree is
+// dropped, for the next call to build the old tiers' one: what has kept
+// the register code -- a closure's, a plan's, a suspended generator's --
+// goes on running it, as register code and a tree run side by side.
 func (r *Runtime) regKeepOld(fn *bytecode.Function) {
 	if fn.Reg != nil && regTier.Load() && !r.regOn() {
 		fn.KeepOldTiers()
+		if t := (*tree)(atomic.LoadPointer(&fn.VMCode)); t != nil && t.reg != nil {
+			atomic.CompareAndSwapPointer(&fn.VMCode, unsafe.Pointer(t), nil)
+		}
 	}
 }
 
