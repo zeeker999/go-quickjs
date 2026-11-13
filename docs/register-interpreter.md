@@ -687,7 +687,7 @@ code already keeps. The context has its pointer (`fv`, none yet), which
 the frame record keeps and a call switches as it switches the closure's
 caches; and no handler uses `R14`, which is kept for it to be pinned in,
 so that a handler's note is one OR to memory and spills nothing.
-`TestRegNativeCaches` (internal/v8bench) runs the register interpreter's
+`TestRegNativeCaches` (internal/regdiff) runs the register interpreter's
 corpus natively and by the Go table and checks that the caches the JIT
 reads -- the property sites, the global sites' epochs, the call sites'
 kinds and callees (`RegCacheDigest`) -- end up the same: the native fast
@@ -1390,7 +1390,7 @@ tried (2026-10-02).
   files, the V8 suite's programs and generated int32 arithmetic -- overflow
   past int32, -0, NaN, shifts by 32 or more, `>>> 0`, mixes with doubles --
   with the register tier on and off, and compares every result.
-  (Built: `internal/v8bench/regdiff_test.go`, run after every step.)
+  (Built: `internal/regdiff/regdiff_test.go`, run after every step.)
 
 Deferred, 2026-11-09, on these measurements:
 
