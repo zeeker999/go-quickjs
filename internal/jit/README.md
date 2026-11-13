@@ -1501,8 +1501,9 @@ compiled lands in amd64's and arm64's together.
 ### Inlined register callees
 
 Register code inlines what it calls as the stack form's code does
-(`jitRegFeedback`'s `Inline`, `ssa.InlineSite`'s `Window`): a plain call
-or a method's (`call_w`, `call_method_w`) of one function -- the one its
+(`jitRegFeedback`'s `Inline`, `ssa.InlineSite`'s `Window`): a plain
+call, a method's or a construction of a base constructor (`call_w`,
+`call_method_w`, `new_w`) of one function -- the one its
 site's cache holds and its code learned it calls, no other, not checked
 by its code -- that runs register code native callers may call, not the
 caller itself, nor an arrow, is offered with its register code lowered
@@ -1516,12 +1517,17 @@ function, checked to be the callee, in register 0, a method call's
 receiver -- an object where the callee would coerce it -- or a plain
 call's undefined or global object (`ThisCell`) in 1, the arguments from
 2, undefined in the rest; its captured bindings read in their cells
-(`Upvalues`); its result to the call's register. The atomicity rule holds
+(`Upvalues`); its result to the call's register. A construction's
+receiver is taken from the pool of the objects its code learned it
+makes, kept in a cell, in register 1, which is the result: the callee
+returns nothing or it (`returnsWindowReceiver`), and every state inside
+it holds register 1, live or not, for Go to make the result of where it
+finishes the callee. The atomicity rule holds
 in it as in the root: an exit inside it runs its register instruction
 whole again (`atomicInstruction`, each frame's `readCalls`). Its own
 calls are asked the same way, of its own caches and what its code
 learned, and inlined in it as deep as the builder allows
-(`maxInlineDepth`); constructions and accessors are not inlined yet.
+(`maxInlineDepth`); accessors are not inlined yet.
 
 An exit inside an inlined callee writes the caller's state at the call --
 a host exit there -- and the callee's window past the caller's slots,
@@ -1529,7 +1535,8 @@ each level in a context of its own (`abi.LiveInline`), as the stack
 form's. Go finishes them (`jitRegInlined`, from `jitRegStretch` for the
 run's own code and from `jitRegUnwind` for a native callee's): each
 level's frame made as `regEnterW` would at its window, the outermost
-first; the innermost finished in the interpreter from its exit, learning
+first, a construction's with its new.target, its result its receiver
+where the callee returns no object; the innermost finished in the interpreter from its exit, learning
 there as a frame's own exits do (`jitRegInlineLeft`); each other from
 its call with what its callee answered (`regFinishCall`); and the
 caller's call given the outermost's answer (`regPending`), as a native

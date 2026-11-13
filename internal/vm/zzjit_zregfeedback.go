@@ -414,10 +414,11 @@ func (f *jitRegFeedback) EntryGeneric(pc int) bool {
 	return f.fb.e != nil && slices.Contains(f.fb.e.failedEntries, uint32(pc))
 }
 
-// Inline is ssa.Feedback's: a plain call or a method's, call_w's or
-// call_method_w's, of one function -- the one its site's cache holds and
-// its code learned it calls (regCallSites), no other -- that runs register
-// code native callers may call, not the caller's own nor the compiled
+// Inline is ssa.Feedback's: a plain call, a method's or a construction of
+// a base constructor -- call_w's, call_method_w's, new_w's -- of one
+// function, the one its site's cache holds and its code learned it calls
+// or constructs with (regCallSites), no other, that runs register code
+// native callers may call, not the caller's own nor the compiled
 // function's, nor an arrow, is the callee to inline, its program its
 // register code lowered for an inlined frame (LowerRegInline), asked by
 // its own register feedback, the root's keep holding what its sites name;
@@ -431,8 +432,8 @@ func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 	if !ok || op != ir.Host || !f.p.Code[pc].Window {
 		return ssa.InlineSite{}, false
 	}
-	method := w.Op() == bytecode.RCallMW
-	if w.Op() != bytecode.RCallW && !method {
+	method, construct := w.Op() == bytecode.RCallMW, w.Op() == bytecode.RNewW
+	if w.Op() != bytecode.RCallW && !method && !construct {
 		return ssa.InlineSite{}, false
 	}
 	rpc := int32(f.p.Origin[pc])
@@ -466,6 +467,14 @@ func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 		Program: p, Feedback: callee, Callee: site.Callee, Closure: site.Closure,
 		Argc: argc, Method: method, Params: 2 + int(cl.reg.params), ThisSlot: -1, Window: true,
 		Coerce: site.Coerce, Upvalues: jitUpvalueCells(cl),
+	}
+	if construct {
+		// A construction's (new_w's) of a base constructor, its receiver
+		// from the pool of the objects its code learned it makes
+		// (regCallSites, ssa.CallSite's Pool), as the stack form inlines
+		// one (jitInlineTarget).
+		in.Construct, in.Coerce = true, false
+		in.Pool, in.ProtoIndex, in.ProtoKey = site.Pool, site.ProtoIndex, site.ProtoKey
 	}
 	if site.PlainThis {
 		// A plain call's receiver, which the callee reads: the global

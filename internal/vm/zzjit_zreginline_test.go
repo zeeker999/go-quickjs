@@ -5,6 +5,8 @@ package vm
 import (
 	"fmt"
 	"testing"
+
+	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
 // regInlineSrc's callers call small register functions that register code
@@ -14,7 +16,9 @@ import (
 // the callee was not compiled for, a receiver that is no object, a throw
 // the caller catches, a call it makes that Go runs -- whose frames Go makes
 // from the exit's, finishing them in the interpreter; and callees inlined
-// in inlined callees, left two levels deep, throwing through both.
+// in inlined callees, left two levels deep, throwing through both; and
+// constructions inlined, their receivers from pools, left where a callee
+// meets a new shape or throws.
 const regInlineSrc = `
 function P(x) { this.x = x }
 P.prototype.get = function () { return this.x };
@@ -44,6 +48,18 @@ function str(o) { return o.x + "!" }
 function callsGo(n) { var s = 0; for (var i = 0; i < n; i++) s += str(i % 3 ? { x: i } : { x: "k" + i }).length; return s }
 function mid(o) { return rd(o) + 1 }
 function nested(n) { var a = { x: 3 }, b = { z: 1, x: 4 }, s = 0; for (var i = 0; i < n; i++) s += mid(i % 61 == 60 ? b : a); return s }
+function V(x, y) { this.x = x; this.y = y }
+function Vr(x) { this.x = x; return this }
+function Vs(o) { this.v = o.x }
+function constructs(n) {
+	var s = 0, a = { x: 1 }, b = { y: 0, x: 2 }, m = "";
+	for (var i = 0; i < n; i++) {
+		var v = new V(i, 2), w = new Vr(i);
+		s += v.x + v.y + w.x + new Vs(i % 61 == 60 ? b : a).v;
+		try { s += new Vs(i % 50 == 49 ? null : a).v } catch (e) { m = e.constructor.name }
+	}
+	return s + m + (new V(1, 2) instanceof V) + Object.keys(new Vr(3)) + Object.getPrototypeOf(new Vs(a)).constructor.name;
+}
 function guarded(o) { try { return mid(o) } catch (e) { return -1 } }
 function throws2(n) {
 	var a = { x: 1 }, s = 0, m = "";
@@ -85,7 +101,7 @@ func TestJITRegInline(t *testing.T) {
 				name    string
 				n       float64
 				unwound uint64
-			}{{"inlines", 2000, 0}, {"shapes", 2000, 40}, {"throws", 1000, 220}, {"callsGo", 600, 60}, {"nested", 2000, 60}, {"throws2", 1000, 700}} {
+			}{{"inlines", 2000, 0}, {"shapes", 2000, 40}, {"throws", 1000, 220}, {"callsGo", 600, 60}, {"nested", 2000, 60}, {"throws2", 1000, 700}, {"constructs", 1000, 220}} {
 				var got [2]string
 				before := rts[0].RegNativeStats().Unwound
 				for i, r := range rts {
@@ -107,6 +123,16 @@ func TestJITRegInline(t *testing.T) {
 			t.Logf("inlined %d; unwound %d, guards %d, hosts %d, entries %d", r.jit.inlined, st.Unwound, st.Guards, st.Hosts, st.Entries)
 			if r.jit.inlined == 0 {
 				t.Error("no callee inlined")
+			}
+			// constructs' code inlines its constructions -- V's, Vr's, Vs's
+			// -- as the stack form's does.
+			fn, _ := r.GetProp(Obj(r.Global()), r.Intern("constructs"))
+			if cl := fn.Object().fn().closure; cl != nil {
+				if e := r.jit.regCache[r.jitKeyOf(cl.fn)]; e == nil || e.p == nil {
+					t.Error("constructs: not compiled")
+				} else if f, err := ssa.BuildWith(e.p, r.jitRegFeedbackFor(cl, e.p)); err != nil || len(f.Inlined) < 3 {
+					t.Errorf("constructs: %v, %d callees inlined", err, len(f.Inlined))
+				}
 			}
 			// The same code, arm64's backend's, compiled on any host.
 			if fns, _, inlined := regCompileARM64(t, r); inlined == 0 {

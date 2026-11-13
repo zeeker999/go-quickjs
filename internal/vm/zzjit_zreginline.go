@@ -5,6 +5,7 @@ package vm
 import (
 	"unsafe"
 
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 )
 
@@ -28,6 +29,11 @@ type jitRegInlineLevel struct {
 	pc   int
 	kind uint64
 	site int64
+	// construct marks a construction's callee (its caller's new_w), this
+	// its receiver, its window's register 1, which every state inside it
+	// holds: the construction's result where the callee returns no object.
+	construct bool
+	this      Value
 }
 
 // jitRegInlined finishes the inlined callees whose frames an exit of the
@@ -76,7 +82,16 @@ func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at int
 			// one, which a stack trace shows.
 			pc++
 		}
-		lv := jitRegLevel{cl: x.cl, c: rc, wb: x.wb}
+		// A construction's, where its caller's call is new_w: the owner's
+		// at the call the outermost is inlined at, or the level's below.
+		caller, at := cl.reg, at
+		if k > 0 {
+			caller, at = levels[k-1].cl.reg, levels[k-1].pc
+		}
+		if at < len(caller.rc.Code) && regAt(caller.code, at).Op() == bytecode.RNewW {
+			x.construct, x.this = true, r.stack[x.wb+1]
+		}
+		lv := jitRegLevel{cl: x.cl, c: rc, wb: x.wb, construct: x.construct}
 		frames = append(frames, r.jitRegPushLevel(&lv, pc))
 	}
 	var v Value
@@ -123,6 +138,10 @@ func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at int
 		r.jitRegPopLevel(f, x.wb)
 		if err == errTailCall {
 			v, err = r.regTailRest()
+		}
+		if x.construct && err == nil && !v.IsObject() {
+			// A construction's result is its receiver, unless an object.
+			v = x.this
 		}
 	}
 	r.stackTop = saved

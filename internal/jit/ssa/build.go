@@ -3945,10 +3945,16 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 	if in := &b.p.Code[pc]; in.Window || site.Window {
 		// Register code's call of a register callee (InlineSite's Window):
 		// its operands the call's window's registers, of its shape -- a
-		// plain call or a method's, no construction yet -- its result the
+		// plain call, a method's or a construction -- its result the
 		// call's register.
-		if !in.Window || !site.Window || isAccessor || site.Argc != in.Extra || site.Method != in.When || site.Construct || site.Restart ||
+		if !in.Window || !site.Window || isAccessor || site.Argc != in.Extra || site.Method != in.When || site.Restart ||
 			site.Forward || site.Arguments || site.ReadsArguments || site.LexThis || site.Captured != nil || site.ThisSlot >= 0 || site.Params < 2 {
+			return nil, false
+		}
+		if site.Construct && (site.Pool == 0 || site.Method || b.f.Keeps >= b.f.keepLimit() || !returnsWindowReceiver(site.Program)) {
+			// A construction's receiver, from its pool, is kept in a cell
+			// as a call's result is; and the callee returns nothing or it,
+			// so that the receiver is the result.
 			return nil, false
 		}
 		return b.inlineFrame(site, calls, givenCalls, total, b.cur.base+in.Dest, pc)
@@ -4829,13 +4835,26 @@ func (b *builder) inlineCall(blk *Block, pc int, fr *frame, guard func(Op, Type,
 	}
 }
 
+// returnsWindowReceiver reports whether every return p, a register
+// callee's program, may make returns undefined or its receiver, its window's
+// register 1: a construction's result is then its receiver.
+func returnsWindowReceiver(p *ir.Program) bool {
+	for pc, in := range p.Code {
+		if reachable(p, pc) && in.Op == ir.Return && in.Left != ir.Literal(ir.Value{Kind: ir.Undefined}) && in.Left != ir.Slot(1) {
+			return false
+		}
+	}
+	return true
+}
+
 // inlineWindowCall is inlineCall of register code's call at pc of a
 // register callee (InlineSite's Window): the function, the call's window's
 // register 0, checked to be the callee, as a native call's is; a method
 // call's receiver, register 1, checked to be an object where the callee
 // would coerce it; room past the frame for the callee's, which an exit
-// inside it writes there; and the callee's start given its window -- the
-// function, the receiver, the arguments, past which undefined.
+// inside it writes there; a construction's receiver from its pool, kept in
+// a cell; and the callee's start given its window -- the function, the
+// receiver, the arguments, past which undefined.
 func (b *builder) inlineWindowCall(blk *Block, pc int, fr *frame, guard func(Op, Type, ir.ExitKind, ...*Value) *Value, state func() *FrameState) {
 	site, in := fr.site, b.p.Code[pc]
 	a := b.cur.base + in.Left.Slot
@@ -4857,6 +4876,23 @@ func (b *builder) inlineWindowCall(blk *Block, pc int, fr *frame, guard func(Op,
 	room.Index = fr.base - b.root.p.Locals + fr.p.Locals + fr.p.StackSize
 	room.Const = ir.Value{Bits: uint64(fr.depth)}
 	fr.call = state()
+	if site.Construct {
+		// The receiver, from the pool, as a construction's, kept in a cell:
+		// the call's function and arguments its operands, nothing run.
+		args := make([]*Value, site.Argc+1)
+		args[0] = fn
+		for i := range site.Argc {
+			args[1+i] = b.read(a+2+i, blk)
+		}
+		call := guard(OpCall, Tagged, ir.HostExit, args...)
+		b.f.cache(call).Calls = []*CallSite{{Callee: site.Callee, Argc: site.Argc, ThisSlot: -1, Pool: site.Pool,
+			ProtoIndex: site.ProtoIndex, ProtoKey: site.ProtoKey, Receiver: true}}
+		call.Index = fr.keep
+		cell := b.f.newValue(blk, OpCallCell, Source, call)
+		fr.receiver = b.f.newValue(blk, OpKept, Tagged, cell, call)
+		fr.receiver.Shadow = cell
+		this = fr.receiver
+	}
 	undefined := b.f.newValue(blk, OpConst, Tagged)
 	undefined.Const = ir.Value{Kind: ir.Undefined}
 	fr.init = b.f.refsOf(fr.p.Locals + fr.p.StackSize)
@@ -6648,6 +6684,23 @@ func (b *builder) stateSlots(p *ir.Program, pc, n, base int, own bool, before []
 	return b.f.presentOf(l)
 }
 
+// withSlot is present with slot among its entries from from on, in their
+// order, if it is not one of them already.
+func (b *builder) withSlot(present []int32, from int, slot int32) []int32 {
+	at := from
+	for at < len(present) && present[at] < slot {
+		at++
+	}
+	if at < len(present) && present[at] == slot {
+		return present
+	}
+	l := append(b.named[:0], present[:at]...)
+	l = append(l, slot)
+	l = append(l, present[at:]...)
+	b.named = l[:0]
+	return b.f.presentOf(l)
+}
+
 // state captures the frame at a PC: every live slot's current value. Inside
 // an inlined callee it is the caller's at the call and the callee's
 // (InlineState).
@@ -6685,6 +6738,12 @@ func (b *builder) frameState(blk *Block, pc int) *FrameState {
 		}
 		// The callee's locals live there, as the caller's below.
 		s.present = b.stateSlots(b.p, pc, b.p.Locals+depth, fr.base, false, callSlots)
+		if fr.site.Window && fr.site.Construct {
+			// A register construction's receiver, its window's register 1,
+			// live or not: Go makes the construction's result of it where
+			// the callee returns no object.
+			s.present = b.withSlot(s.present, len(callSlots), int32(fr.base+1))
+		}
 		for _, i := range s.present[len(callSlots):] {
 			s.Slots[i] = b.read(int(i), blk)
 			s.Slots[i].Uses++
