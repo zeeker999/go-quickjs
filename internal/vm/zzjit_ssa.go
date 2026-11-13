@@ -332,16 +332,27 @@ func (r *Runtime) jitPolyWriteSeen(f *frame, e *jitEntry, pc int, in bytecode.In
 	if int(in.B) >= len(f.cl.ic) {
 		return
 	}
+	key, named := Atom(0), int(in.A) < len(f.cl.names)
+	if named {
+		key = f.cl.names[in.A]
+	}
+	r.jitPolyWriteSeenOp(e, pc, &f.cl.ic[in.B], key, named, o, before)
+}
+
+// jitPolyWriteSeenOp is jitPolyWriteSeen's, of either form's code: the
+// write at pc, its site's cache cache, of key where named, to o, of shape
+// before then.
+func (r *Runtime) jitPolyWriteSeenOp(e *jitEntry, pc int, cache *propCache, key Atom, named bool, o *Object, before *shape) {
 	i := slices.IndexFunc(e.poly, func(p jitPolySite) bool { return int(p.pc) == pc })
 	if i < 0 {
 		e.poly = append(e.poly, jitPolySite{pc: uint32(pc)})
 		i = len(e.poly) - 1
 	}
 	p := &e.poly[i]
-	if o != nil && int(in.A) < len(f.cl.names) {
+	if o != nil && named {
 		// A setter on the object's prototypes, as for a read's getter: of
 		// the shape the object had, which the setter may have changed.
-		if a, ok := r.jitAccessorCaseOf(o, before, f.cl.names[in.A], true); ok {
+		if a, ok := r.jitAccessorCaseOf(o, before, key, true); ok {
 			if jitAddAccessorCase(p, a) {
 				e.polyReopt = true
 			}
@@ -351,14 +362,14 @@ func (r *Runtime) jitPolyWriteSeen(f *frame, e *jitEntry, pc int, in bytecode.In
 	if len(p.cases)+len(p.adds) >= jitPropertyCases {
 		return
 	}
-	c := f.cl.ic[in.B]
+	c := *cache
 	if c.shape == nil || c.shape == noShape || c.getter || c.next == setterNext || c.idx < 0 || c.next == nil && c.p1 != nil {
 		// No cache: an addition along a chain deeper than one holds, as
 		// the object took it.
-		if o == nil || int(in.A) >= len(f.cl.names) {
+		if o == nil || !named {
 			return
 		}
-		a, ok := r.jitDeepAddOf(o, before, f.cl.names[in.A])
+		a, ok := r.jitDeepAddOf(o, before, key)
 		if !ok || slices.ContainsFunc(p.adds, func(k jitDeepAdd) bool { return k.from == a.from }) {
 			return
 		}
@@ -396,28 +407,57 @@ const jitPropertyCases = 4
 // it holds, a string's method -- the code is compiled again for (polyReopt),
 // on the existing tiers' budget, its code invalidated meanwhile.
 func (r *Runtime) jitPolySeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) {
-	recv := r.stack[sp-1]
-	if recv.IsString() && in.Op == bytecode.OpGetPropThis && !slices.Contains(e.strSites, uint32(pc)) {
+	op := jitPropOp{recv: r.stack[sp-1], method: in.Op == bytecode.OpGetPropThis, unnamed: int(in.A) >= len(f.cl.names)}
+	if !op.unnamed {
+		op.key = f.cl.names[in.A]
+	}
+	if int(in.B) < len(f.cl.ic) {
+		op.c = &f.cl.ic[in.B]
+	}
+	r.jitPolySeenOp(e, pc, op)
+}
+
+// jitPropOp is a named property's operation as what the JIT learns at its
+// exits sees it, of either form's code: its key, its receiver, its site's
+// cache (nil where it has none, as an object pattern's read), and whether
+// it is a write, a method's read (get_prop_this's, get_method's), or an
+// object pattern's read (get_prop_under's); unnamed marks one whose key is
+// past its closure's names.
+type jitPropOp struct {
+	key                           Atom
+	recv                          Value
+	c                             *propCache
+	write, method, under, unnamed bool
+}
+
+// plain reports whether op is a plain read: get_prop's, not a method's.
+func (op *jitPropOp) plain() bool { return !op.write && !op.method && !op.under }
+
+// jitPolySeenOp is jitPolySeen's, of either form's code: the read op at pc
+// that native code left to Go.
+func (r *Runtime) jitPolySeenOp(e *jitEntry, pc int, op jitPropOp) {
+	recv := op.recv
+	if recv.IsString() && op.method && !slices.Contains(e.strSites, uint32(pc)) {
 		// A string's method: read off String.prototype by the code
 		// compiled again, as for a shape the read had not met.
 		e.strSites = append(e.strSites, uint32(pc))
 		e.polyReopt = true
 		return
 	}
-	if recv.IsBigInt() && in.Op == bytecode.OpGetPropThis && !slices.Contains(e.bigSites, uint32(pc)) {
+	if recv.IsBigInt() && op.method && !slices.Contains(e.bigSites, uint32(pc)) {
 		// A BigInt's: off BigInt.prototype, as a string's.
 		e.bigSites = append(e.bigSites, uint32(pc))
 		e.polyReopt = true
 		return
 	}
-	if r.jitPrimitiveSeen(f, e, pc, in, recv) {
+	if r.jitPrimitiveSeen(e, pc, &op) {
 		// A number's or a boolean's: off Number.prototype or
 		// Boolean.prototype, as a string's.
 		e.polyReopt = true
 		return
 	}
-	if !recv.IsObject() || int(in.A) >= len(f.cl.names) {
-		if !recv.IsObject() && !recv.IsNullish() && in.Op == bytecode.OpGetProp {
+	if !recv.IsObject() || op.unnamed {
+		if !recv.IsObject() && !recv.IsNullish() && op.plain() {
 			// A string's, a number's, a boolean's: Go reads it from
 			// native code once the code is compiled again (prim) -- an
 			// element type, React's createElement's a.defaultProps of
@@ -429,8 +469,8 @@ func (r *Runtime) jitPolySeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 		}
 		return
 	}
-	if in.Op == bytecode.OpGetPropThis && int(in.B) < len(f.cl.ic) && !slices.Contains(e.strSites, uint32(pc)) {
-		if c := &f.cl.ic[in.B]; (c.shape == nil || c.shape == noShape) && c.fills == 0 && r.proto.str != nil && r.proto.str.findOwn(f.cl.names[in.A]) >= 0 {
+	if op.method && op.c != nil && !slices.Contains(e.strSites, uint32(pc)) {
+		if c := op.c; (c.shape == nil || c.shape == noShape) && c.fills == 0 && r.proto.str != nil && r.proto.str.findOwn(op.key) >= 0 {
 			// An object's method, at a read the code took for a string's
 			// (jitFeedback's StringProperty), its cache knowing nothing: a
 			// loop the tree tier ran before it was compiled, a function
@@ -438,12 +478,12 @@ func (r *Runtime) jitPolySeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 			// cache takes the receiver, as the interpreter's read would
 			// have, and the code is compiled again for its shape; it had
 			// left there at every entry, and was judged slow for it.
-			r.fillPropCache(c, recv.Object(), f.cl.names[in.A], false)
+			r.fillPropCache(c, recv.Object(), op.key, false)
 			if c.shape != nil && c.shape != noShape {
 				e.polyReopt = true
 				return
 			}
-		} else if c.shape != nil && c.shape != noShape && c.shape == recv.Object().shape && r.proto.str != nil && r.proto.str.findOwn(f.cl.names[in.A]) >= 0 {
+		} else if c.shape != nil && c.shape != noShape && c.shape == recv.Object().shape && r.proto.str != nil && r.proto.str.findOwn(op.key) >= 0 {
 			// So too where the interpreter filled the cache between the
 			// compile and this exit, with the receiver's shape: the code
 			// still takes the read for a string's, and had left at every
@@ -453,24 +493,24 @@ func (r *Runtime) jitPolySeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 			return
 		}
 	}
-	if in.Op == bytecode.OpGetProp {
+	if op.plain() {
 		// A getter on the receiver's prototypes, which the code calls once
 		// compiled again for the receiver's shape too (jitFeedback's
 		// Accessor).
-		if a, ok := r.jitAccessorCaseOf(recv.Object(), recv.Object().shape, f.cl.names[in.A], false); ok {
+		if a, ok := r.jitAccessorCaseOf(recv.Object(), recv.Object().shape, op.key, false); ok {
 			if jitAddAccessorCase(jitPolySiteAt(e, pc), a) {
 				e.polyReopt = true
 			}
 			return
 		}
 	}
-	r.jit.megaFill(recv.Object(), f.cl.names[in.A])
-	absent := r.jitMegaFillProto(recv.Object(), f.cl.names[in.A])
+	r.jit.megaFill(recv.Object(), op.key)
+	absent := r.jitMegaFillProto(recv.Object(), op.key)
 	var c propCache
-	r.fillPropCache(&c, recv.Object(), f.cl.names[in.A], false)
+	r.fillPropCache(&c, recv.Object(), op.key, false)
 	if c.shape == nil {
 		// One a cache cannot hold, found past its two prototypes.
-		if d, ok := r.jitDeepReadOf(recv.Object(), f.cl.names[in.A]); ok && jitAddDeepRead(jitPolySiteAt(e, pc), d) {
+		if d, ok := r.jitDeepReadOf(recv.Object(), op.key); ok && jitAddDeepRead(jitPolySiteAt(e, pc), d) {
 			e.polyReopt = true
 		} else if p := jitPolySiteAt(e, pc); absent && !p.mega {
 			// None its cases could hold -- a property nothing has, a leaf's
@@ -507,10 +547,10 @@ func (r *Runtime) jitPolySeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Ins
 // another primitive already is read as StringProperty takes it, the other
 // kinds' receivers left to Go; a method the prototype does not have, Go
 // reads.
-func (r *Runtime) jitPrimitiveSeen(f *frame, e *jitEntry, pc int, in bytecode.Instr, recv Value) bool {
+func (r *Runtime) jitPrimitiveSeen(e *jitEntry, pc int, op *jitPropOp) bool {
 	var sites *[]uint32
 	var proto *Object
-	switch {
+	switch recv := op.recv; {
 	case recv.IsNumber():
 		sites, proto = &e.numSites, r.proto.number
 	case recv.IsBool():
@@ -518,14 +558,14 @@ func (r *Runtime) jitPrimitiveSeen(f *frame, e *jitEntry, pc int, in bytecode.In
 	default:
 		return false
 	}
-	if in.Op != bytecode.OpGetPropThis || int(in.A) >= len(f.cl.names) || proto == nil {
+	if !op.method || op.unnamed || proto == nil {
 		return false
 	}
 	at := uint32(pc)
 	if slices.Contains(e.strSites, at) || slices.Contains(e.bigSites, at) || slices.Contains(e.numSites, at) || slices.Contains(e.boolSites, at) {
 		return false
 	}
-	key := f.cl.names[in.A]
+	key := op.key
 	i := proto.findOwn(key)
 	if key.IsIndex() || i < 0 || proto.shape.keys[i].flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 {
 		return false
@@ -622,24 +662,34 @@ func (r *Runtime) jitDeoptSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.In
 	if int(in.A) >= len(f.cl.names) {
 		return
 	}
-	if e == nil {
-		// Nothing to note in: the cache learns what it can.
-		e = &jitEntry{jitLearned: &jitLearned{}}
-	}
-	key := f.cl.names[in.A]
-	write := in.Op == bytecode.OpSetProp
+	op := jitPropOp{key: f.cl.names[in.A], write: in.Op == bytecode.OpSetProp, method: in.Op == bytecode.OpGetPropThis, under: in.Op == bytecode.OpGetPropUnder}
 	at := sp - 1
-	if write {
+	if op.write {
 		at = sp - 2
 	}
-	if in.Op == bytecode.OpGetPropUnder {
+	if op.under {
 		at = sp - 1 - int(in.B)
 	}
 	if at < f.base || at >= len(r.stack) {
 		return
 	}
-	recv := r.stack[at]
-	if in.Op == bytecode.OpGetPropUnder {
+	op.recv = r.stack[at]
+	if !op.under && int(in.B) < len(f.cl.ic) {
+		op.c = &f.cl.ic[in.B]
+	}
+	r.jitDeoptSeenOp(e, pc, op, serial)
+}
+
+// jitDeoptSeenOp is jitDeoptSeen's, of either form's code: the operation op
+// at pc, which deoptimized in the code of compile serial, before the
+// interpreter makes it.
+func (r *Runtime) jitDeoptSeenOp(e *jitEntry, pc int, op jitPropOp, serial uint32) {
+	if e == nil {
+		// Nothing to note in: the cache learns what it can.
+		e = &jitEntry{jitLearned: &jitLearned{}}
+	}
+	key, write, recv := op.key, op.write, op.recv
+	if op.under {
 		// An object pattern's read, which has no cache, missed its source's
 		// own table -- a property the source lacks, its default the
 		// pattern's: it looks in the megamorphic cache from the next
@@ -654,27 +704,27 @@ func (r *Runtime) jitDeoptSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.In
 		}
 		return
 	}
-	if recv.IsBigInt() && in.Op == bytecode.OpGetPropThis && !slices.Contains(e.bigSites, uint32(pc)) {
+	if recv.IsBigInt() && op.method && !slices.Contains(e.bigSites, uint32(pc)) {
 		// A BigInt's method: read off BigInt.prototype by the code compiled
 		// again, the site no polymorphic one (jitFeedback's StringProperty).
 		e.bigSites = append(e.bigSites, uint32(pc))
 		return
 	}
-	if r.jitPrimitiveSeen(f, e, pc, in, recv) {
+	if r.jitPrimitiveSeen(e, pc, &op) {
 		// A number's or a boolean's: off Number.prototype or
 		// Boolean.prototype, so.
 		return
 	}
 	p := jitPolySiteAt(e, pc)
-	if recv.IsString() && in.Op == bytecode.OpGetPropThis && !slices.Contains(e.strSites, uint32(pc)) {
+	if recv.IsString() && op.method && !slices.Contains(e.strSites, uint32(pc)) {
 		// A string's method: read off String.prototype by the code
 		// compiled again.
 		e.strSites = append(e.strSites, uint32(pc))
 		return
 	}
-	if !recv.IsObject() || int(in.B) >= len(f.cl.ic) {
+	if !recv.IsObject() || op.c == nil {
 		p.mega = true
-		if !recv.IsObject() && !recv.IsNullish() && in.Op == bytecode.OpGetProp {
+		if !recv.IsObject() && !recv.IsNullish() && op.plain() {
 			// A primitive's read, Go's from native code in the code
 			// compiled again (jitPolySite's prim): one compile, not one to
 			// be megamorphic and another for the primitive.
@@ -709,7 +759,7 @@ func (r *Runtime) jitDeoptSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.In
 		jitAddAccessorCase(p, a)
 		return
 	}
-	c := &f.cl.ic[in.B]
+	c := op.c
 	if write || c.fills >= maxCacheFills {
 		// A write's cache learns as the interpreter writes -- an own
 		// property, an addition, or, for one it cannot hold, a fill all the
@@ -722,7 +772,7 @@ func (r *Runtime) jitDeoptSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.In
 	// which makes the read after, reads an object's small table without
 	// it (plainOwn).
 	if c.holder(o) == nil {
-		r.fillPropCache(c, o, key, in.Op == bytecode.OpGetProp)
+		r.fillPropCache(c, o, key, op.plain())
 	}
 	if c.fills >= maxCacheFills {
 		return
@@ -962,6 +1012,11 @@ func (fb *jitFeedback) privateProperty(pc int, in bytecode.Instr) (ssa.PropertyS
 // want a number unbox it, each with its own guard.
 func jitNumberMissed(e *jitEntry, pc int) {
 	if slices.Contains(e.failed, int32(pc)) {
+		return
+	}
+	if e.reg {
+		// A register instruction's: its every instruction built generic.
+		e.failed = append(e.failed, int32(pc))
 		return
 	}
 	if p := e.ssaProg; e.ssa == nil || p == nil || pc >= len(p.Code) || p.Code[pc].Op != ir.PropertyRead {
@@ -1223,76 +1278,89 @@ func jitNoteSeen(p *propPoly, old, n propCache) *propPoly {
 func (r *Runtime) jitSeenFeedback(cl *closure, e *jitEntry) {
 	for pc, in := range cl.fn.Code {
 		write := in.Op == bytecode.OpSetProp
-		if !write && in.Op != bytecode.OpGetProp && in.Op != bytecode.OpGetPropThis || int(in.B) >= len(cl.ic) || cl.ic[in.B].poly == nil {
+		if !write && in.Op != bytecode.OpGetProp && in.Op != bytecode.OpGetPropThis || int(in.B) >= len(cl.ic) {
 			continue
 		}
-		seen, now := cl.ic[in.B].seenOf(), cl.ic[in.B].shape
-		// What the site remembers besides its entry (poly), which every
-		// tier's reads and writes fill -- the tree's scans of an object's
-		// own table too, which note nothing in seen -- and what it met
-		// before that (seen). A chain's cell is no entry the code is
-		// compiled for (megamorphic).
-		var met []propCache
-		if seen != nil {
-			met = append(met, seen.entries[:seen.n]...)
+		key, named := Atom(0), int(in.A) < len(cl.names)
+		if named {
+			key = cl.names[in.A]
 		}
-		if p := cl.ic[in.B].poly; p != nil {
-			for _, c := range p.entries[:p.n] {
-				if c.cell == nil {
-					met = append(met, c)
-				}
+		r.jitSeenSite(e, pc, &cl.ic[in.B], write, key, named)
+	}
+}
+
+// jitSeenSite is jitSeenFeedback's, of either form's code: the site at pc,
+// its cache, a write's or a read's, of key where named.
+func (r *Runtime) jitSeenSite(e *jitEntry, pc int, cache *propCache, write bool, key Atom, named bool) {
+	if cache.poly == nil {
+		return
+	}
+	seen, now := cache.seenOf(), cache.shape
+	// What the site remembers besides its entry (poly), which every
+	// tier's reads and writes fill -- the tree's scans of an object's
+	// own table too, which note nothing in seen -- and what it met
+	// before that (seen). A chain's cell is no entry the code is
+	// compiled for (megamorphic).
+	var met []propCache
+	if seen != nil {
+		met = append(met, seen.entries[:seen.n]...)
+	}
+	if p := cache.poly; p != nil {
+		for _, c := range p.entries[:p.n] {
+			if c.cell == nil {
+				met = append(met, c)
 			}
 		}
-		for _, c := range met {
-			if c.shape == nil || c.shape == noShape || c.getter || c.idx < 0 || write && (c.next == setterNext || c.next == nil && c.p1 != nil) {
-				continue
-			}
-			i := slices.IndexFunc(e.poly, func(p jitPolySite) bool { return int(p.pc) == pc })
-			if i < 0 {
-				e.poly = append(e.poly, jitPolySite{pc: uint32(pc)})
-				i = len(e.poly) - 1
-			}
-			p := &e.poly[i]
-			if !write {
-				// What the site's objects were before they took the shape
-				// its cache remembers now (now) is a case while there is
-				// room.
-				jitAddReadCase(p, c, now)
-				continue
-			}
-			if len(p.cases)+len(p.adds) >= jitPropertyCases || slices.ContainsFunc(p.cases, func(k propCache) bool { return k.shape == c.shape }) {
-				continue
-			}
-			p.cases = append(p.cases, c)
-		}
-		if seen == nil {
+	}
+	for _, c := range met {
+		if c.shape == nil || c.shape == noShape || c.getter || c.idx < 0 || write && (c.next == setterNext || c.next == nil && c.p1 != nil) {
 			continue
 		}
-		if !write {
-			// The reads a cache could not hold, past its two prototypes.
-			for _, d := range seen.reads {
-				jitAddDeepRead(jitPolySiteAt(e, pc), d)
-			}
-			continue
-		}
-		if len(seen.deep) == 0 || int(in.A) >= len(cl.names) {
-			continue
-		}
-		// The additions along chains deeper than a cache holds, as the chain
-		// is now; one that changed since is left to Go.
 		i := slices.IndexFunc(e.poly, func(p jitPolySite) bool { return int(p.pc) == pc })
 		if i < 0 {
 			e.poly = append(e.poly, jitPolySite{pc: uint32(pc)})
 			i = len(e.poly) - 1
 		}
 		p := &e.poly[i]
-		for _, d := range seen.deep {
-			if len(p.cases)+len(p.adds) >= jitPropertyCases || slices.ContainsFunc(p.adds, func(k jitDeepAdd) bool { return k.from == d.from }) {
-				continue
-			}
-			if a, ok := r.jitDeepAddFrom(d.from, d.next, d.proto, cl.names[in.A]); ok {
-				p.adds = append(p.adds, a)
-			}
+		if !write {
+			// What the site's objects were before they took the shape
+			// its cache remembers now (now) is a case while there is
+			// room.
+			jitAddReadCase(p, c, now)
+			continue
+		}
+		if len(p.cases)+len(p.adds) >= jitPropertyCases || slices.ContainsFunc(p.cases, func(k propCache) bool { return k.shape == c.shape }) {
+			continue
+		}
+		p.cases = append(p.cases, c)
+	}
+	if seen == nil {
+		return
+	}
+	if !write {
+		// The reads a cache could not hold, past its two prototypes.
+		for _, d := range seen.reads {
+			jitAddDeepRead(jitPolySiteAt(e, pc), d)
+		}
+		return
+	}
+	if len(seen.deep) == 0 || !named {
+		return
+	}
+	// The additions along chains deeper than a cache holds, as the chain
+	// is now; one that changed since is left to Go.
+	i := slices.IndexFunc(e.poly, func(p jitPolySite) bool { return int(p.pc) == pc })
+	if i < 0 {
+		e.poly = append(e.poly, jitPolySite{pc: uint32(pc)})
+		i = len(e.poly) - 1
+	}
+	p := &e.poly[i]
+	for _, d := range seen.deep {
+		if len(p.cases)+len(p.adds) >= jitPropertyCases || slices.ContainsFunc(p.adds, func(k jitDeepAdd) bool { return k.from == d.from }) {
+			continue
+		}
+		if a, ok := r.jitDeepAddFrom(d.from, d.next, d.proto, key); ok {
+			p.adds = append(p.adds, a)
 		}
 	}
 }
@@ -1384,14 +1452,49 @@ func (r *Runtime) jitLiteralAt(e *jitEntry, cl *closure, pc int) *jitLiteral {
 	if in.Op != bytecode.OpNewObject || int(in.B) >= len(cl.ic) {
 		return nil
 	}
-	keySite[struct{}](r, cl, in.B)
-	root := r.shapes.siteRoot(&cl.ic[in.B], r.proto.object)
+	return r.jitObjectLiteral(e, cl, pc, in.B, int(in.A))
+}
+
+// jitObjectLiteral is the object literal at pc of cl's code, of either
+// form, made in e, its site's cache cl's at site, room for n fields: native
+// code makes its objects from a pool of the shape its site's objects start
+// with (shapeTree.siteRoot).
+func (r *Runtime) jitObjectLiteral(e *jitEntry, cl *closure, pc int, site uint32, n int) *jitLiteral {
+	keySite[struct{}](r, cl, site)
+	root := r.shapes.siteRoot(&cl.ic[site], r.proto.object)
 	if root == nil {
 		return nil
 	}
-	e.literals = append(e.literals, jitLiteral{pc: int32(pc), root: root, pool: new(abi.ObjectPool), n: int(in.A), fn: cl.fn})
+	e.literals = append(e.literals, jitLiteral{pc: int32(pc), root: root, pool: new(abi.ObjectPool), n: n, fn: cl.fn})
 	l := &e.literals[len(e.literals)-1]
 	l.pool.Source = unsafe.Pointer(&jitPoolSource{root: root, n: l.n})
+	r.jitFillLiteral(l)
+	return l
+}
+
+// jitArrayLiteral is the array literal at pc of cl's code, of either form,
+// of n elements, made in e: native code makes its arrays from a pool of
+// arrays with room for them, none yet.
+func (r *Runtime) jitArrayLiteral(e *jitEntry, cl *closure, pc, n int) *jitLiteral {
+	e.literals = append(e.literals, jitLiteral{pc: int32(pc), pool: new(abi.ObjectPool), array: true, n: n, fn: cl.fn})
+	l := &e.literals[len(e.literals)-1]
+	l.pool.Source = unsafe.Pointer(&jitPoolSource{array: true, n: n})
+	r.jitFillLiteral(l)
+	return l
+}
+
+// jitRegExpLiteral is the regular expression literal at pc of cl's code,
+// of either form, of pattern lit, made in e: native code takes fresh
+// RegExps of the pattern, each with its lastIndex 0, from a pool -- what
+// the literal makes at each evaluation. A pattern that does not compile
+// has Go throw.
+func (r *Runtime) jitRegExpLiteral(e *jitEntry, cl *closure, pc int, lit *bytecode.Constant) *jitLiteral {
+	if _, err := r.newRegExpLiteral(lit); err != nil {
+		return nil
+	}
+	e.literals = append(e.literals, jitLiteral{pc: int32(pc), pool: new(abi.ObjectPool), lit: lit, fn: cl.fn})
+	l := &e.literals[len(e.literals)-1]
+	l.pool.Source = unsafe.Pointer(&jitPoolSource{lit: lit})
 	r.jitFillLiteral(l)
 	return l
 }
@@ -3131,13 +3234,19 @@ func (fb *jitFeedback) Intrinsic(pc int) (ssa.Intrinsic, bool) {
 		keep.holders = append(keep.holders, o)
 		return k, true
 	}
-	k.Plain = plain
-	// The realm's Math functions of numbers, each made natively, as V8's
-	// code makes them: Math.pow where exact, and by Go called from there
-	// otherwise; Math.max and Math.min of any number of them; a rounding,
-	// the sign, fround, sqrt, abs, imul and clz32 by instructions of their
-	// own; every other by Go called from there, the VM's very function.
-	fd, n := o.fn(), int(fn.Code[pc].A)
+	return fb.mathIntrinsic(o, int(fn.Code[pc].A), plain)
+}
+
+// mathIntrinsic is the intrinsic a call of o, of n arguments, a plain
+// call's where plain says, makes, of either form's code: the realm's Math
+// functions of numbers, each made natively, as V8's code makes them:
+// Math.pow where exact, and by Go called from there otherwise; Math.max
+// and Math.min of any number of them; a rounding, the sign, fround, sqrt,
+// abs, imul and clz32 by instructions of their own; every other by Go
+// called from there, the VM's very function.
+func (fb *jitFeedback) mathIntrinsic(o *Object, n int, plain bool) (ssa.Intrinsic, bool) {
+	k := ssa.Intrinsic{Callee: uintptr(unsafe.Pointer(o)), Plain: plain}
+	fd := o.fn()
 	switch {
 	case n == 0:
 		// Only Math.random takes none: the next number of the runtime's
@@ -11105,15 +11214,22 @@ func (fb *jitFeedback) StringProperty(pc int) (ssa.PropertySite, bool) {
 	if in.Op != bytecode.OpGetPropThis || int(in.A) >= len(fb.cl.names) || int(in.B) >= len(fb.cl.ic) {
 		return ssa.PropertySite{}, false
 	}
-	c := &fb.cl.ic[in.B]
+	return fb.stringPropertyOf(pc, &fb.cl.ic[in.B], fb.cl.names[in.A], jitTreeRecv(fb.fn, pc))
+}
+
+// stringPropertyOf is StringProperty's, of either form's code: the method
+// read at pc, its cache c, of key; big says another tier saw it meet a
+// BigInt.
+func (fb *jitFeedback) stringPropertyOf(pc int, c *propCache, key Atom, big bool) (ssa.PropertySite, bool) {
+	e := fb.e
 	if c.shape != nil && c.shape != noShape || slices.ContainsFunc(e.poly, func(p jitPolySite) bool { return int(p.pc) == pc }) {
 		return ssa.PropertySite{}, false
 	}
-	key, proto, kind := fb.cl.names[in.A], fb.r.proto.str, ssa.PrimitiveString
+	proto, kind := fb.r.proto.str, ssa.PrimitiveString
 	str := slices.Contains(e.strSites, uint32(pc))
 	switch {
 	case str:
-	case slices.Contains(e.bigSites, uint32(pc)) || jitTreeRecv(fb.fn, pc):
+	case slices.Contains(e.bigSites, uint32(pc)) || big:
 		// A read that met BigInt receivers and no string: off
 		// BigInt.prototype, which the site names (Holders).
 		proto, kind = fb.r.proto.bigint, ssa.PrimitiveBigInt
@@ -11452,12 +11568,22 @@ func (fb *jitFeedback) deepCase(d *jitDeepRead) ssa.PropertyCase {
 // (jitNoteDeepRead), for an inlined callee's site too: up to
 // jitPropertyCases.
 func (fb *jitFeedback) deepCases(pc int) []ssa.PropertyCase {
+	var c *propCache
+	if in := fb.fn.Code[pc]; int(in.B) < len(fb.cl.ic) {
+		c = &fb.cl.ic[in.B]
+	}
+	return fb.deepCasesOf(pc, c)
+}
+
+// deepCasesOf is deepCases', of either form's code: the read at pc, its
+// cache c (nil for none).
+func (fb *jitFeedback) deepCasesOf(pc int, c *propCache) []ssa.PropertyCase {
 	var cases []ssa.PropertyCase
 	if fb.e != nil && fb.root == nil {
 		cases = fb.cases(pc, 0)
 	}
-	if in := fb.fn.Code[pc]; int(in.B) < len(fb.cl.ic) && fb.cl.ic[in.B].seenOf() != nil {
-		reads := fb.cl.ic[in.B].seenOf().reads
+	if c != nil && c.seenOf() != nil {
+		reads := c.seenOf().reads
 		for i := range reads {
 			d := &reads[i]
 			if len(cases) < jitPropertyCases && !slices.ContainsFunc(cases, func(k ssa.PropertyCase) bool { return k.Shape == uintptr(unsafe.Pointer(d.shape)) }) {

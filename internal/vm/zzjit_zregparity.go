@@ -183,6 +183,8 @@ func CompareFeedback(stack, reg *Runtime) FeedbackParity {
 		}
 		sv, rv := reflect.ValueOf(sfb), reflect.ValueOf(rfb)
 		st := sv.Type()
+		stext := func(m reflect.Value, args []reflect.Value) (string, bool) { return jitParityCall(stack, m, args) }
+		rtext := func(m reflect.Value, args []reflect.Value) (string, bool) { return jitParityCall(reg, m, args) }
 		for m := range st.NumMethod() {
 			meth := st.Method(m)
 			mt := meth.Type
@@ -192,12 +194,12 @@ func CompareFeedback(stack, reg *Runtime) FeedbackParity {
 			}
 			rm := rv.MethodByName(meth.Name)
 			if !pcArg {
-				a, ok := jitParityCall(sv.Method(m), nil)
+				a, ok := stext(sv.Method(m), nil)
 				if !ok || a == "" {
 					continue
 				}
 				res.Answers++
-				switch b, _ := jitParityCall(rm, nil); {
+				switch b, _ := rtext(rm, nil); {
 				case !rm.IsValid():
 					note(res.Gaps, meth.Name+": unanswered", fmt.Sprintf("%s: %s", name, a))
 				case b != a:
@@ -207,8 +209,14 @@ func CompareFeedback(stack, reg *Runtime) FeedbackParity {
 				}
 				continue
 			}
+			asked, known := jitParityMethods[meth.Name]
 			for s := range sp.Code {
-				a, ok := jitParityCall(sv.Method(m), []reflect.Value{reflect.ValueOf(s)})
+				if known && !jitParityAsked(asked, sp.Code[s].Op) {
+					// The build never asks the method there (jitSnapOps):
+					// its answer, whatever it is, is no feedback.
+					continue
+				}
+				a, ok := stext(sv.Method(m), []reflect.Value{reflect.ValueOf(s)})
 				if !ok || a == "" {
 					continue
 				}
@@ -218,21 +226,27 @@ func CompareFeedback(stack, reg *Runtime) FeedbackParity {
 					note(res.Gaps, meth.Name+": unanswered", fmt.Sprintf("%s: %s", where, a))
 					continue
 				}
-				js := byStack[s]
-				if len(js) == 0 {
-					// A register instruction made of several stack ones --
-					// a constant folded into its user, a method's read and
-					// its call -- has the position of one of them: the
-					// nearest of the same operation, a few instructions on.
-					for d := 1; d <= 8 && len(js) == 0; d++ {
-						for _, q := range []int{s + d, s - d} {
-							for _, j := range byStack[q] {
-								if rp.Code[j].Op == sp.Code[s].Op {
-									js = append(js, j)
-								}
+				// The register instructions of the same position and of the
+				// same operation; a register instruction made of several
+				// stack ones -- a constant folded into its user, a method's
+				// read and its call -- has the position of one of them: the
+				// nearest of the same operation, a few instructions on; and
+				// failing those, those of the position, of other operations.
+				var js []int
+				for d := 0; d <= 8; d++ {
+					for _, q := range []int{s + d, s - d} {
+						if d == 0 && q != s+d {
+							continue
+						}
+						for _, j := range byStack[q] {
+							if rp.Code[j].Op == sp.Code[s].Op && !slices.Contains(js, j) {
+								js = append(js, j)
 							}
 						}
 					}
+				}
+				if len(js) == 0 {
+					js = byStack[s]
 				}
 				if len(js) == 0 {
 					note(res.Gaps, meth.Name+": no instruction", fmt.Sprintf("%s: %s", where, a))
@@ -241,7 +255,13 @@ func CompareFeedback(stack, reg *Runtime) FeedbackParity {
 				matched := false
 				var got string
 				for _, j := range js {
-					b, _ := jitParityCall(rm, []reflect.Value{reflect.ValueOf(j)})
+					arg := j
+					if meth.Name == "Resumed" || meth.Name == "EntryGeneric" {
+						// Asked by a state's PC, register code's a register
+						// pc.
+						arg = int(rp.Maps[j].PC)
+					}
+					b, _ := rtext(rm, []reflect.Value{reflect.ValueOf(arg)})
 					if b == a {
 						matched = true
 						break
@@ -270,9 +290,29 @@ func jitParityStackOp(fn *bytecode.Function, pc int) any {
 	return "past the code"
 }
 
+// jitParityMethods are the methods of a PC by name, as the snapshot numbers
+// them (jitSnapNames).
+var jitParityMethods = func() map[string]jitSnapMethod {
+	m := map[string]jitSnapMethod{}
+	for i, name := range jitSnapNames {
+		if jitSnapAtPC[i] {
+			m[name] = jitSnapMethod(i)
+		}
+	}
+	return m
+}()
+
+// jitParityAsked reports whether the build asks method m at an instruction
+// of op (jitSnapAsks): the sparse methods, Generic, EntryGeneric and
+// Resumed, it asks at every one.
+func jitParityAsked(m jitSnapMethod, op ir.Op) bool {
+	return jitSnapSparse&(1<<m) != 0 || int(op) < len(jitSnapAsks) && jitSnapAsks[op]&(1<<m) != 0
+}
+
 // jitParityCall calls method m with args and returns its results as text,
-// "" where they are all zero; ok is false where it panicked.
-func jitParityCall(m reflect.Value, args []reflect.Value) (s string, ok bool) {
+// "" where they are all zero, a property's or a global's key by its name in
+// r; ok is false where it panicked.
+func jitParityCall(r *Runtime, m reflect.Value, args []reflect.Value) (s string, ok bool) {
 	if !m.IsValid() {
 		return "", false
 	}
@@ -292,7 +332,7 @@ func jitParityCall(m reflect.Value, args []reflect.Value) (s string, ok bool) {
 		if !v.IsZero() {
 			zero = false
 		}
-		parts[i] = jitParityText(v, 0)
+		parts[i] = jitParityText(r, v, 0)
 	}
 	if zero {
 		return "", true
@@ -302,8 +342,8 @@ func jitParityCall(m reflect.Value, args []reflect.Value) (s string, ok bool) {
 
 // jitParityText is v as text that two runtimes' answers share where they
 // mean the same: an address is only whether it is one, a pointer's target
-// is shown, to a depth.
-func jitParityText(v reflect.Value, depth int) string {
+// is shown, to a depth, and a key, an atom of r's, is its name.
+func jitParityText(r *Runtime, v reflect.Value, depth int) string {
 	switch v.Kind() {
 	case reflect.Uintptr, reflect.UnsafePointer:
 		if v.IsZero() {
@@ -317,7 +357,7 @@ func jitParityText(v reflect.Value, depth int) string {
 		if depth > 2 {
 			return "&"
 		}
-		return "&" + jitParityText(v.Elem(), depth+1)
+		return "&" + jitParityText(r, v.Elem(), depth+1)
 	case reflect.Struct:
 		var b strings.Builder
 		b.WriteString("{")
@@ -326,7 +366,11 @@ func jitParityText(v reflect.Value, depth int) string {
 			if v.Field(i).IsZero() {
 				continue
 			}
-			fmt.Fprintf(&b, "%s:%s ", t.Field(i).Name, jitParityText(v.Field(i), depth+1))
+			if f := v.Field(i); t.Field(i).Name == "Key" && f.Kind() == reflect.Uint32 {
+				fmt.Fprintf(&b, "Key:%q ", r.AtomName(Atom(f.Uint())))
+				continue
+			}
+			fmt.Fprintf(&b, "%s:%s ", t.Field(i).Name, jitParityText(r, v.Field(i), depth+1))
 		}
 		b.WriteString("}")
 		return b.String()
@@ -338,7 +382,7 @@ func jitParityText(v reflect.Value, depth int) string {
 		var b strings.Builder
 		fmt.Fprintf(&b, "[%d:", n)
 		for i := range min(n, 8) {
-			b.WriteString(jitParityText(v.Index(i), depth+1))
+			b.WriteString(jitParityText(r, v.Index(i), depth+1))
 			b.WriteString(" ")
 		}
 		b.WriteString("]")
@@ -357,19 +401,20 @@ func jitParityText(v reflect.Value, depth int) string {
 func jitParityDecisions(res *FeedbackParity, name string, sp *ir.Program, sfb ssa.Feedback, rp *ir.Program, rfb ssa.Feedback, note func(map[string]int, string, string)) {
 	type built struct {
 		refused                   bool
+		why                       string
 		inlined, hosts, unentered int
 	}
 	build := func(p *ir.Program, fb ssa.Feedback) (b built) {
 		defer func() {
-			if recover() != nil {
-				b.refused = true
+			if x := recover(); x != nil {
+				b.refused, b.why = true, fmt.Sprint("panic: ", x)
 			}
 		}()
 		w := jit.GetWorkspace()
 		defer jit.PutWorkspace(w)
 		f, err := ssa.BuildIn(&w.SSA, p, fb)
 		if err != nil {
-			return built{refused: true}
+			return built{refused: true, why: err.Error()}
 		}
 		return built{inlined: len(f.Inlined), hosts: len(f.HostsLeft), unentered: len(f.Unentered)}
 	}
@@ -381,7 +426,7 @@ func jitParityDecisions(res *FeedbackParity, name string, sp *ir.Program, sfb ss
 	}
 	switch {
 	case s.refused != r.refused:
-		note(res.Decisions, "refused", fmt.Sprintf("%s: stack %v, register %v", name, s.refused, r.refused))
+		note(res.Decisions, "refused", fmt.Sprintf("%s: stack %v, register %v (%s%s)", name, s.refused, r.refused, s.why, r.why))
 		return
 	case s.refused:
 		return

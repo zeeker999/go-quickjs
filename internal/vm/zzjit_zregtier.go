@@ -44,12 +44,19 @@ const jitRegSamples = 2
 const jitRegDeoptLimit = 8
 
 // jitRegTakes reports whether cl's register code c is compiled: a plain
-// function's or a method's code of the form's own layout that does not
-// suspend and has a frame -- a leaf's calls are answered without one.
+// function's, a method's, an arrow's, an accessor's or a class's
+// constructor's code of the form's own layout that does not suspend and
+// has a frame -- a leaf's calls are answered without one. Its frame is the
+// call path's, an arrow's this, a constructor's object or a derived one's
+// uninitialized this in its register 1 as the interpreter has them.
 func jitRegTakes(cl *closure, c *regCode) bool {
-	k := cl.fn.Kind
-	return c.wide && !c.suspends && c.leaf == regLeafNone && (k == bytecode.KindNormal || k == bytecode.KindMethod) && !cl.fn.TopLevel &&
-		c.rc == cl.fn.RegCode()
+	switch cl.fn.Kind {
+	case bytecode.KindNormal, bytecode.KindMethod, bytecode.KindArrow, bytecode.KindGetter, bytecode.KindSetter,
+		bytecode.KindConstructor, bytecode.KindDerivedConstructor:
+	default:
+		return false
+	}
+	return c.wide && !c.suspends && c.leaf == regLeafNone && !cl.fn.TopLevel && c.rc == cl.fn.RegCode()
 }
 
 // jitRegHas reports whether cl's function has native code made from its
@@ -141,15 +148,161 @@ func (r *Runtime) jitRegInvalidate(cl *closure, e *jitRegEntry) {
 	}
 }
 
-// regNoteFailed notes that a guard of the code of the function whose key
-// is key failed at register pc rpc (regFailed).
-func (s *jitState) regNoteFailed(key jitKey, rpc int) {
-	if s.regFailed == nil {
-		s.regFailed = map[jitKey][]int32{}
+// regLearnedOf is what the code of the function whose key is key learned
+// at its exits (regLearned), made if it has learned nothing yet.
+func (s *jitState) regLearnedOf(key jitKey) *jitEntry {
+	if l := s.regLearned[key]; l != nil {
+		return l
 	}
-	if l := s.regFailed[key]; !slices.Contains(l, int32(rpc)) {
-		s.regFailed[key] = append(l, int32(rpc))
+	if s.regLearned == nil {
+		s.regLearned = map[jitKey]*jitEntry{}
 	}
+	l := &jitEntry{jitLearned: &jitLearned{reg: true}}
+	s.regLearned[key] = l
+	return l
+}
+
+// jitRegPropOp is the named property operation of the register instruction
+// at rpc of c, on the frame whose window is at wb, as the JIT's learning
+// sees it (jitPropOp): get_prop's, get_method's and get_method_w's reads,
+// set_prop's write, add_prop's read and store, which share the store's
+// site; false for any other instruction.
+func (r *Runtime) jitRegPropOp(f *frame, c *regCode, wb, rpc int) (jitPropOp, bool) {
+	if rpc < 0 || rpc >= len(c.rc.Code) {
+		return jitPropOp{}, false
+	}
+	w := c.rc.Code[rpc]
+	recv := int(w.B())
+	op := jitPropOp{}
+	switch w.Op() {
+	case bytecode.RGetProp:
+	case bytecode.RGetMethod, bytecode.RGetMethodW:
+		op.method = true
+	case bytecode.RSetProp:
+		op.write, recv = true, int(w.A())
+	case bytecode.RAddProp, bytecode.RAddPropI:
+		recv = int(w.A())
+	default:
+		return jitPropOp{}, false
+	}
+	site := int(w.C())
+	if site >= len(c.rc.SiteName) || int(c.rc.SiteName[site]) >= len(f.cl.names) || wb+recv >= len(r.stack) {
+		return jitPropOp{}, false
+	}
+	op.key, op.recv = f.cl.names[c.rc.SiteName[site]], r.stack[wb+recv]
+	if site < len(f.cl.ic) {
+		op.c = &f.cl.ic[site]
+	}
+	return op, true
+}
+
+// jitRegSeenFeedback adds to what cl's register code c learned
+// (regLearned) what its property sites' caches have seen besides their
+// entries, at each compile, as the stack form's compiles do
+// (jitSeenFeedback): the shapes the interpreter met at each, which the code
+// is compiled for from the first, not learned one exit and one compile at
+// a time.
+func (r *Runtime) jitRegSeenFeedback(cl *closure, c *regCode) {
+	l := r.jitState().regLearnedOf(r.jitKeyOf(cl.fn))
+	for rpc, w := range c.rc.Code {
+		write := false
+		switch w.Op() {
+		case bytecode.RGetProp, bytecode.RGetMethod, bytecode.RGetMethodW:
+		case bytecode.RSetProp:
+			write = true
+		default:
+			// add_prop's site is its store's, whose read the stack form
+			// makes at a site of its own.
+			continue
+		}
+		site := int(w.C())
+		if site >= len(cl.ic) || site >= len(c.rc.SiteName) || int(c.rc.SiteName[site]) >= len(cl.names) {
+			continue
+		}
+		r.jitSeenSite(l, rpc, &cl.ic[site], write, cl.names[c.rc.SiteName[site]], true)
+	}
+}
+
+// jitRegDeoptSeen learns from a deoptimization of e, code made from c, at
+// register pc rpc, the frame's window at wb holding the state at its
+// instruction's start, before the interpreter runs it: a property site's
+// receiver of a shape its cases do not have, or that its cache cannot
+// hold, as the stack form's code learns (jitDeoptSeenOp) -- the site's
+// cache learning the shape as the interpreter makes the operation, the
+// code compiled again with its cases -- and any other guard's failure as
+// a register pc the next compiles build generic.
+func (r *Runtime) jitRegDeoptSeen(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) {
+	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	if op, ok := r.jitRegPropOp(f, c, wb, rpc); ok {
+		r.jit.shapeDeopts++
+		r.jitDeoptSeenOp(l, rpc, op, e.serial)
+		return
+	}
+	if !slices.Contains(l.failed, int32(rpc)) {
+		l.failed = append(l.failed, int32(rpc))
+	}
+}
+
+// jitRegResumeSeen learns that Go goes on at register pc rpc of e's code,
+// which has no entry there: where that is after a call the code was built
+// with no entry after (jitRegEntry's unresumed), the function's next
+// compile has one (jitRegFeedback's Resumed), and the code is invalid from
+// here, as the stack form's code is compiled again with the entry
+// (jitGoOn).
+func (r *Runtime) jitRegResumeSeen(f *frame, e *jitRegEntry, rpc int) {
+	if e.invalid || !slices.Contains(e.unresumed, rpc) {
+		return
+	}
+	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	if slices.Contains(l.resumed, uint32(rpc)) {
+		return
+	}
+	l.resumed = append(l.resumed, uint32(rpc))
+	r.jitRegInvalidate(f.cl, e)
+}
+
+// jitRegHostSeen learns from a host exit at register pc rpc of c, before
+// Go runs its instruction: a property read native code left to Go -- a
+// megamorphic site's receiver that neither its table nor the megamorphic
+// cache had, a primitive's -- as the stack form's code learns
+// (jitPolySeenOp). A write's it learns after Go made it (jitRegWriteSeen),
+// from what it returns: its operation, the object written and its shape
+// before.
+func (r *Runtime) jitRegHostSeen(f *frame, c *regCode, wb, rpc int) jitRegWrite {
+	op, ok := r.jitRegPropOp(f, c, wb, rpc)
+	if !ok {
+		return jitRegWrite{}
+	}
+	if op.write {
+		x := jitRegWrite{op: op, write: true}
+		if op.recv.IsObject() {
+			x.o = op.recv.Object()
+			x.before = x.o.shape
+		}
+		return x
+	}
+	r.jitPolySeenOp(r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn)), rpc, op)
+	return jitRegWrite{}
+}
+
+// jitRegWrite is a property write a host exit is about to have Go make
+// (jitRegHostSeen): its operation, and the object it writes, of shape
+// before then.
+type jitRegWrite struct {
+	op     jitPropOp
+	write  bool
+	o      *Object
+	before *shape
+}
+
+// jitRegWriteSeen learns from the property write x at register pc rpc,
+// which Go made at a host exit: the cases its cache now knows, as the
+// stack form's code learns (jitPolyWriteSeenOp).
+func (r *Runtime) jitRegWriteSeen(f *frame, c *regCode, e *jitRegEntry, rpc int, x jitRegWrite) {
+	if x.op.c == nil {
+		return
+	}
+	r.jitPolyWriteSeenOp(r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn)), rpc, x.op.c, x.op.key, true, x.o, x.before)
 }
 
 // jitRegEnter runs f, the frame regEnterW made for a call of cl, its

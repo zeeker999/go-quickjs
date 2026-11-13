@@ -1138,8 +1138,10 @@ Host built as an exit to the interpreter, which runs the register
 instruction (or as what its feedback says, where the feedback knows the
 register instruction). The builder keeps the atomicity rule as it builds
 (`atomicInstruction`): what an instruction commits depends on how it is
-built -- a property's read calls an accessor only where the feedback gives
-accessors; an arithmetic operation, a comparison or a string's addition,
+built -- a property's read commits only where it is built to call, an
+accessor the feedback gives or Go for a megamorphic site's miss, which may
+run a getter (the builder's `readCalls`); an arithmetic operation, a
+comparison or a string's addition,
 Generic or not, has Go make only what runs nothing, leaving the rest to an
 exit -- and a build that makes an exit after a commit in the same origin
 is refused, by its register pc. A Generic instruction is built as one
@@ -1184,12 +1186,39 @@ program's instructions as the builder asks and read through their origin
 from the caches the register interpreter fills: a property site by its
 register instruction's C (`add_prop`'s read and store share the store's
 site), a global's by its name and C, a call's shape by its operands and
-its target by its C (`regCalls`), monomorphic from the first compile. What
-register code does not record yet -- what a fast path did not expect, a
-site's call count -- and the JIT's own tables, learned at the stack form's
-exits and keyed by its pcs, it answers with nothing: the builder
-speculates nothing there. It is a type of its own beside the stack form's
-`jitFeedback`, whose methods and snapshot it leaves as they are.
+its target by its C (`regCalls`) -- a leaf's call (`Leaf`) from the
+first compile, where the stack form's code learns it at its calls of Go.
+What the function's native code learned at its exits it keeps by
+register pc across its compiles, in an entry of its own (`jitState`'s
+`regLearned`, a `jitEntry` holding only a `jitLearned`): the register pcs
+whose guards failed (`Generic`), and a property site's cases, accessors,
+primitive receivers and megamorphic mark, learned as the stack form's
+code learns them at its deoptimizations and host exits -- the same
+functions, of either form's operation (`jitPropOp`: `jitDeoptSeenOp`,
+`jitPolySeenOp`, `jitPolyWriteSeenOp`) -- and the shapes each site's
+cache met before the one it holds, taken at each compile
+(`jitRegSeenFeedback`, as `jitSeenFeedback`). `Property`, `Accessor` and
+`StringProperty` answer from the cache and those, by the same functions
+as the stack form's (`megamorphicOf`, `deepCasesOf`, `accessorOf`,
+`stringPropertyOf`). The entry keeps the literals' pools by register pc
+(`Literal`: `new_object`'s, `new_object_lit`'s, `new_array`'s and
+`new_regexp`'s, made by `jitObjectLiteral`, `jitArrayLiteral` and
+`jitRegExpLiteral`, as the stack form's), and `new_object_lit`'s fields
+are defined along their shapes' transitions (`Define`); and the register
+pcs after calls Go went on at (`Resumed`, asked by a state's PC), which
+the code had been built with no entry at (`jitRegResumeSeen`). What
+neither records yet -- a site's call count -- it answers with nothing:
+the builder speculates nothing there. It is a
+type of its own beside the stack form's `jitFeedback`, whose methods and
+snapshot it leaves as they are.
+
+**Feedback parity.** `TestJITFeedbackParity` (internal/regdiff) runs a
+corpus in two runtimes with the JIT, one on the stack form's tiers, one
+on the register tier, and compares, for every function both compiled,
+each answer of the stack form's feedback with the register form's at the
+register instruction of the same source position -- only where the
+builder asks the method (`jitSnapOps`), keys by their names -- and what
+each form's build decides (`vm.CompareFeedback`).
 
 **Refusals.** `LowerReg` refuses what `LowerSSA` refuses of the same
 function, by the same reasons: a function kind, direct eval, an arguments
@@ -1252,7 +1281,16 @@ reads their operands from the window's registers, in the stack form's
 order, and writes the result to the instruction's register
 (`windowCall`); the feedback makes each call a call of Go (`NativeCalls`)
 but one in tail position, which the interpreter makes in constant space at
-a host exit. Go makes such a call on the run's register frame
+a host exit. A call of a leaf the feedback names (`Leaf`) is made as the
+stack form's is (`windowLeaf`, `leafMade`): its function checked, natively
+where native code makes the leaf itself, a call of Go of the leaf
+(`GoLeaf`) otherwise, its result to the call's register. So are the calls
+the builder makes itself -- Math's functions (`Intrinsic`), a string's
+`charCodeAt`, `substring`, `slice`, `substr` and `charAt`,
+`String.fromCharCode` -- their operands where the call's form has them
+(`callSlots`: the stack form's on its operand stack, register code's in
+its window), the feedback naming the built-in its site's cache last
+called (`regCalls`). Go makes such a call on the run's register frame
 (`jitState`'s `regRuns`, `jitRegGoCall`), as the interpreter's slow path
 does (`regCallSlow`, `regConstruct`): the function, the receiver and the
 arguments put in a window of their own past the VM's stack's top -- never
@@ -1271,11 +1309,18 @@ a frame the interpreter runs goes on natively at a loop's header with the
 registers live there loaded from the window: the code's OSR entry map is
 its loops' headers by register pc (`jitRegEntry`'s `loops`, `loopEntry`).
 
-**Learning at deoptimizations.** A guard that fails notes its register pc
-for the function (`jitState`'s `regFailed`), and the function's next
-compiles build the instructions of that register pc generic
-(`jitRegFeedback`'s `Generic`), as the stack form's code learns at its
-exits; the code is invalidated, the function sampled anew and compiled
+**Learning at exits.** A property site's guard that fails -- a receiver
+of a shape its cases do not have, a site that knew none -- has the site
+learn it before the interpreter runs the instruction, as the stack form's
+code does (`jitRegDeoptSeen`, `jitDeoptSeenOp`): the cache learns the
+shape as the interpreter makes the operation, and what the cache cannot
+hold, the function's entry notes (`regLearned`). Any other guard that
+fails notes its register pc, and the function's next compiles build the
+instructions of that register pc generic (`jitRegFeedback`'s `Generic`).
+A property read or write a host exit leaves to Go is learned as the stack
+form's are (`jitRegHostSeen`, `jitRegWriteSeen`); where that teaches the
+site something its code was not compiled for, the code is invalid from
+there. The code is invalidated, the function sampled anew and compiled
 again, up to `jitRegDeoptLimit` times.
 
 **Testing.** `vm.RegNativeCall` enters it: the call's frame made as
@@ -1309,9 +1354,12 @@ they already spend:
 A function is compiled (`jitRegFor`) at its `jitRegSamples`-th sample, or
 at its first where the runtime compiles at a first call (`QJS_JIT_STRESS`'s
 threshold, which makes every call a sample), and its code is kept on its
-template's `closureCode` (`jitReg`). Plain functions and methods of the
-form's own layout are compiled; generators, async functions, arrows,
-top-level code and leaves are not yet.
+template's `closureCode` (`jitReg`). Plain functions, methods, arrows,
+accessors and classes' constructors of the form's own layout are compiled
+(`jitRegTakes`), their frames the call path's -- an arrow's this, a
+constructor's object or a derived one's uninitialized this in register 1,
+as the interpreter has them; generators, async functions, top-level code
+and leaves are not yet.
 
 The code is entered:
 - by a call whose frame Go makes (`regEnterW`, `jitRegEnter`): a call site

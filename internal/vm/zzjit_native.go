@@ -1003,11 +1003,16 @@ type jitState struct {
 	// regCache is the code compiled from functions' register code, by the
 	// same keys (zzjit_zregnative.go): the cache's other form.
 	regCache map[jitKey]*jitRegEntry
-	// regFailed are the register pcs a guard of a function's code made
-	// from its register code failed at, by the function's key: what its
-	// next compiles build generic (jitRegFeedback's Generic), as the stack
-	// form's code learns at its exits (jitEntry's failed).
-	regFailed map[jitKey][]int32
+	// regLearned is what the code made from a function's register code
+	// learned at its exits, by the function's key, kept across its
+	// compiles: an entry holding only what it learned (jitLearned), by
+	// register pc -- the pcs whose guards failed, which its next compiles
+	// build generic (jitRegFeedback's Generic), and the property sites'
+	// cases, primitives and megamorphic marks (jitRegPropertySeen) -- as
+	// the stack form's entries learn by stack pc. regSerial numbers the
+	// register code's compiles (jitRegEntry's serial).
+	regLearned map[jitKey]*jitEntry
+	regSerial  uint32
 	// regHostOps counts register code's host exits by the register
 	// instruction Go ran whole, for tests (RegNativeStats' HostOps).
 	regHostOps map[string]uint64

@@ -61,6 +61,15 @@ type jitRegEntry struct {
 	// ret returns, and goesOn whether it can (findReturns).
 	retPC, retReg, retUndef int
 	goesOn                  bool
+	// serial numbers the compile (jitState's regSerial): a property site
+	// that deoptimizes for a shape again in code compiled since it first
+	// did is megamorphic (jitDeoptSeenOp).
+	serial uint32
+	// unresumed are the register pcs after calls the code has no entry
+	// after, Go not having gone on there (ssa.Func's Unresumed): where Go
+	// goes on at one, the code is compiled again with the entry
+	// (jitRegResumeSeen).
+	unresumed []int
 }
 
 // loopEntry is the entry, an instruction of the program, of the loop
@@ -116,9 +125,12 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode) *jitRegEntry {
 		return e
 	}
 	e.p = p
+	s.regSerial++
+	e.serial = s.regSerial
 	if jitParityLog.on.Load() {
 		r.jitParityNote(cl)
 	}
+	r.jitRegSeenFeedback(cl, c)
 	rf := r.jitRegFeedbackFor(cl, p)
 	w := jit.GetWorkspace()
 	defer jit.PutWorkspace(w)
@@ -182,6 +194,7 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode) *jitRegEntry {
 	}
 	slices.Sort(e.loops)
 	e.findReturns(c.rc)
+	e.unresumed = slices.Clone(f.Unresumed)
 	// What the code reads by address, its feedback's keep; the closure
 	// and the function the feedback asked are not.
 	e.keep = rf.fb.keep()
@@ -199,9 +212,9 @@ func (s *jitState) regBytes() int {
 		}
 		n += e.bytes
 	}
-	for key := range s.regFailed {
+	for key := range s.regLearned {
 		if key.gone() {
-			delete(s.regFailed, key)
+			delete(s.regLearned, key)
 		}
 	}
 	return n
@@ -364,6 +377,7 @@ func (r *Runtime) jitRegGoOn(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) 
 		if e.invalid || e.code == nil || ipc < 0 || !e.code.HasEntry(ipc) || wb+e.p.Regs+e.scratch+e.frame > len(r.stack) {
 			// No entry here, or code a guard of which failed: the
 			// interpreter runs the rest of the invocation.
+			r.jitRegResumeSeen(f, e, rpc)
 			s.interpreted++
 			return rpc, Undefined, false, nil
 		}
@@ -383,7 +397,7 @@ func (r *Runtime) jitRegGoOn(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) 
 			// again at the next ask, from what the interpreter learns.
 			s.guards++
 			r.jitRegMaterialize(f, e, wb)
-			s.regNoteFailed(r.jitKeyOf(f.cl.fn), exitPC)
+			r.jitRegDeoptSeen(f, c, e, wb, exitPC)
 			r.jitRegInvalidate(f.cl, e)
 			s.interpreted++
 			return exitPC, Undefined, false, nil
@@ -403,7 +417,19 @@ func (r *Runtime) jitRegGoOn(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) 
 				next, ran, err = r.regFinishCall(f, c, wb, exitPC, p.v, p.err)
 			} else {
 				s.noteRegHost(c, exitPC)
+				seen := r.jitRegHostSeen(f, c, wb, exitPC)
 				next, ran, err = r.regWhole(f, c, wb, exitPC)
+				if seen.write && err == nil && ran {
+					r.jitRegWriteSeen(f, c, e, exitPC, seen)
+				}
+				if l := s.regLearned[r.jitKeyOf(f.cl.fn)]; l != nil && l.polyReopt {
+					// The site met what the code was not compiled for and
+					// its cache cannot hold: compiled again for it, as the
+					// stack form's code is (jitRecompileInRun), its code
+					// invalid from here.
+					l.polyReopt = false
+					r.jitRegInvalidate(f.cl, e)
+				}
 			}
 			if !ran {
 				s.interpreted++

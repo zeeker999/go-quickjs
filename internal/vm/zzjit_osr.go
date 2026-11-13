@@ -16,6 +16,9 @@ import (
 // so that what one learns at its exits, the next compile of either is
 // compiled for.
 type jitLearned struct {
+	// reg marks what a function's register code's native code learned
+	// (jitState's regLearned), whose pcs are register pcs throughout.
+	reg bool
 	// failed and failedEntries are the sites, by slot IR PC, and the
 	// entries, by PC, whose speculation failed in the code (jitDeoptimized).
 	failed        []int32

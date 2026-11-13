@@ -4,6 +4,7 @@ package vm
 
 import (
 	"math"
+	"math/bits"
 	"slices"
 	"unsafe"
 
@@ -21,15 +22,17 @@ import (
 // property site by its instruction's C, a global's by its C and name, a
 // call's by its C (regCalls).
 //
-// It answers what register code records today. What the register
-// interpreter does not record yet -- what a fast path did not expect
-// (Generic), call counts at a site (Frequency), the JIT's own tables
-// learned at its exits, which the stack form's code keys by its stack pcs
-// -- it answers with nothing, and the builder then speculates nothing
-// there. It is the stack form's jitFeedback's other face, of its own type
-// while the stack form's JIT stays the default: no method of jitFeedback
-// asks which form it serves, and the snapshot of a background compile
-// (zzjit_snapshot_gen.go) is of jitFeedback alone.
+// What the code made from the function's register code learned at its
+// exits, by register pc (jitState's regLearned), is its jitFeedback's
+// entry: the property sites' cases, primitives and megamorphic marks it
+// met, and the register pcs whose guards failed (Generic), which the stack
+// form's code learns by stack pc in its own entry. What neither records
+// yet -- call counts at a site (Frequency) -- it answers with nothing, and
+// the builder then speculates nothing there. It is the stack form's
+// jitFeedback's other face, of its own type while the stack form's JIT
+// stays the default: no method of jitFeedback asks which form it serves,
+// and the snapshot of a background compile (zzjit_snapshot_gen.go) is of
+// jitFeedback alone.
 type jitRegFeedback struct {
 	fb *jitFeedback
 	rc *bytecode.RegCode
@@ -42,7 +45,8 @@ func (r *Runtime) jitRegFeedbackFor(cl *closure, p *ir.Program) *jitRegFeedback 
 	if cl == nil || cl.fn == nil || cl.fn.RegCode() == nil || p == nil || p.Origin == nil {
 		return nil
 	}
-	return &jitRegFeedback{fb: &jitFeedback{r: r, fn: cl.fn, cl: cl}, rc: cl.fn.RegCode(), p: p}
+	fb := &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitKeyOf(cl.fn))}
+	return &jitRegFeedback{fb: fb, rc: cl.fn.RegCode(), p: p}
 }
 
 // at is the register instruction of the program's instruction pc, and what
@@ -70,45 +74,109 @@ func (f *jitRegFeedback) name(rpc int, n uint16) (Atom, bool) {
 	return f.fb.cl.names[i], true
 }
 
-// Property is ssa.Feedback's: the property site of a read or a write the
-// program's instruction pc makes -- get_prop's, get_method's,
-// get_method_w's, set_prop's, or add_prop's read or store, which share the
-// store's site -- as its cache, by the register instruction's C, knows it.
-// A cache that gave up, or holds dictionary objects or a chain's cell, is
-// megamorphic; a read whose cache never filled searches the receiver's own
-// table (Scan), as the stack form's.
-func (f *jitRegFeedback) Property(pc int) (ssa.PropertySite, bool) {
+// propertyAt is the property site the program's instruction pc reads or
+// writes -- get_prop's, get_method's, get_method_w's, set_prop's, or
+// add_prop's read or store, which share the store's site -- its register
+// pc, its key, its cache by the register instruction's C (nil past the
+// closure's caches), and whether it is a write, a method's read, or a
+// plain read (get_prop's).
+func (f *jitRegFeedback) propertyAt(pc int) (rpc int, key Atom, c *propCache, write, method, plain, ok bool) {
 	w, op, ok := f.at(pc)
 	if !ok || f.fb.cl == nil {
-		return ssa.PropertySite{}, false
+		return
 	}
 	switch w.Op() {
 	case bytecode.RGetProp, bytecode.RGetMethod, bytecode.RGetMethodW, bytecode.RSetProp, bytecode.RAddProp, bytecode.RAddPropI:
 	default:
-		return ssa.PropertySite{}, false
+		return 0, 0, nil, false, false, false, false
 	}
 	if op != ir.PropertyRead && op != ir.ReferenceRead && op != ir.PropertyWrite {
+		return 0, 0, nil, false, false, false, false
+	}
+	site := int(w.C())
+	if site >= len(f.rc.SiteName) || int(f.rc.SiteName[site]) >= len(f.fb.cl.names) {
+		return 0, 0, nil, false, false, false, false
+	}
+	key = f.fb.cl.names[f.rc.SiteName[site]]
+	if site < len(f.fb.cl.ic) {
+		c = &f.fb.cl.ic[site]
+	}
+	write = op == ir.PropertyWrite
+	method = w.Op() == bytecode.RGetMethod || w.Op() == bytecode.RGetMethodW
+	plain = w.Op() == bytecode.RGetProp
+	return int(f.p.Origin[pc]), key, c, write, method, plain, true
+}
+
+// Property is ssa.Feedback's: the property site of a read or a write the
+// program's instruction pc makes (propertyAt), as the stack form's
+// (jitFeedback's): as its cache knows it, with the cases the code met
+// at its exits (jitRegDeoptSeen, jitRegHostSeen), a read's past what a
+// cache holds, or a write's additions. A cache that gave up, or holds
+// dictionary objects or a chain's cell, or a site that met more than its
+// cases hold, is megamorphic; a read whose cache never filled searches the
+// receiver's own table (Scan).
+func (f *jitRegFeedback) Property(pc int) (ssa.PropertySite, bool) {
+	rpc, key, cache, write, _, plain, ok := f.propertyAt(pc)
+	if !ok {
 		return ssa.PropertySite{}, false
 	}
-	c := int(w.C())
-	if c >= len(f.rc.SiteName) || int(f.rc.SiteName[c]) >= len(f.fb.cl.names) {
-		return ssa.PropertySite{}, false
-	}
-	key := f.fb.cl.names[f.rc.SiteName[c]]
-	if c >= len(f.fb.cl.ic) {
+	if cache == nil {
 		return ssa.PropertySite{Key: uint32(key)}, true
 	}
-	cache := &f.fb.cl.ic[c]
-	write := op == ir.PropertyWrite
-	site, ok := f.fb.siteOf(key, write, cache)
+	fb := f.fb
+	site, ok := fb.siteOf(key, write, cache)
 	if !ok {
 		return site, false
 	}
-	site.Megamorphic = cache.fills >= maxCacheFills || cache.shape == dictShape || cache.cell != nil
-	if !write && !site.Megamorphic && w.Op() == bytecode.RGetProp && cache.fills == 0 {
+	deep := false
+	if !write && site.Shape == 0 && site.Holders[0].Object == 0 && (cache.shape == nil || cache.shape == noShape || cache.cell != nil) {
+		// A read its cache could not hold, the property past the two
+		// prototypes it holds: compiled for the first of the shapes it
+		// met, the others its cases.
+		if cases := fb.deepCasesOf(rpc, cache); len(cases) != 0 {
+			k := cases[0]
+			site.Shape, site.Index, site.Holders, site.More, site.Cases = k.Shape, k.Index, k.Holders, k.More, cases[1:]
+			deep = true
+		}
+	}
+	if write {
+		site.Cases, site.Adds = fb.writeCases(rpc, site)
+	} else if site.Shape != 0 && !deep {
+		site.Cases = fb.cases(rpc, site.Shape)
+	}
+	site.Megamorphic = fb.megamorphicOf(rpc, cache, write, site)
+	site.Primitives = jitPolyPrim(fb.e, rpc)
+	if plain && !site.Megamorphic && cache.fills == 0 {
 		site.Scan = true
 	}
 	return site, true
+}
+
+// StringProperty is ssa.StringPropertyFeedback's: a method's read whose
+// cache holds no shape, of a method of the prototype of the primitive its
+// receivers have been -- a string's, or the BigInt's, number's or
+// boolean's the code met at its exits -- read off that prototype, as the
+// stack form's (jitFeedback's stringPropertyOf).
+func (f *jitRegFeedback) StringProperty(pc int) (ssa.PropertySite, bool) {
+	rpc, key, cache, _, method, _, ok := f.propertyAt(pc)
+	if !ok || !method || cache == nil || f.fb.e == nil {
+		return ssa.PropertySite{}, false
+	}
+	return f.fb.stringPropertyOf(rpc, cache, key, false)
+}
+
+// Accessor is ssa.AccessorFeedback's: the getter a plain read found on its
+// receivers' prototypes, or the setter a write found, as the stack form's
+// (jitFeedback's accessorOf): from its cache, the entries it held before,
+// and what the code met at its exits. Go calls it from native code: native
+// calls of register code's callees, and inlining them, are not made yet.
+func (f *jitRegFeedback) Accessor(pc int) (ssa.AccessorSite, bool) {
+	rpc, key, cache, write, _, plain, ok := f.propertyAt(pc)
+	if !ok || cache == nil || !write && !plain {
+		return ssa.AccessorSite{}, false
+	}
+	a, _, _, ok := f.fb.accessorOf(rpc, cache, key, write)
+	return a, ok
 }
 
 // Global is ssa.Feedback's: the global a read, a write or a strict
@@ -268,14 +336,21 @@ func (f *jitRegFeedback) BigIntCell(pc int) (uintptr, uint64, int, bool) {
 
 // Generic is ssa.Feedback's: the register instruction of the program's
 // instruction pc is one a guard of the function's code failed at before
-// (jitState's regFailed), as the stack form's code learns at its exits:
+// (jitState's regLearned), as the stack form's code learns at its exits:
 // built generic, what it did not expect is Go's to make.
 func (f *jitRegFeedback) Generic(pc int) bool {
-	s := f.fb.r.jit
-	if s == nil || s.regFailed == nil || pc < 0 || pc >= len(f.p.Origin) {
+	if f.fb.e == nil || pc < 0 || pc >= len(f.p.Origin) {
 		return false
 	}
-	return slices.Contains(s.regFailed[f.fb.r.jitKeyOf(f.fb.fn)], int32(f.p.Origin[pc]))
+	return slices.Contains(f.fb.e.failed, int32(f.p.Origin[pc]))
+}
+
+// Resumed is ssa.ResumeFeedback's: Go has gone on at register pc rpc, after
+// a call the code had no entry after (jitRegResumeSeen), which the next
+// compile has one at. The builder asks it by the state's PC, a register
+// pc.
+func (f *jitRegFeedback) Resumed(rpc int) bool {
+	return f.fb.e != nil && slices.Contains(f.fb.e.resumed, uint32(rpc))
 }
 
 // EntryGeneric is ssa.Feedback's: nothing, as Generic.
@@ -326,6 +401,250 @@ func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
 	}
 	return []ssa.CallSite{{Go: ssa.GoCall, Argc: argc, Method: method, New: w.Op() == bytecode.RNewW, ThisSlot: -1}}
 }
+
+// BigIntSole is ssa.BigIntRecycleFeedback's: no register holds its value
+// alone, as far as the builder is told -- which of them do, register code
+// is not analyzed for yet (the stack form's soleLocals) -- and the code may
+// give BigInts' blocks back, as the stack form's code of a function that
+// does not suspend may (register code that suspends is not compiled).
+func (f *jitRegFeedback) BigIntSole() (uint64, bool) {
+	fn := f.fb.fn
+	if bits.UintSize != 64 || fn.Generator || fn.Async {
+		return 0, false
+	}
+	return 0, true
+}
+
+// Leaf is ssa.LeafFeedback's: the built-in the call at the program's
+// instruction pc -- call_w's or call_method_w's, not one in tail position
+// -- last called, as its site's cache holds it (regCalls), where that is a
+// leaf of the realm's that native code calls without a frame
+// (jitLeafOp): answered from the interpreter's cache at the first compile,
+// where the stack form's code learns it at the calls of Go its native code
+// makes (jitLeafSeen).
+func (f *jitRegFeedback) Leaf(pc int) (uintptr, bool) {
+	w, op, ok := f.at(pc)
+	if !ok || op != ir.Host || !f.p.Code[pc].Window || w.Op() != bytecode.RCallW && w.Op() != bytecode.RCallMW {
+		return 0, false
+	}
+	var marks uint8
+	if rpc := int(f.p.Origin[pc]); rpc < len(f.rc.Marks) {
+		marks = f.rc.Marks[rpc]
+	}
+	if marks&bytecode.RMarkTail != 0 {
+		return 0, false
+	}
+	callee, cl, ok := f.callTarget(pc)
+	if !ok || cl != nil {
+		return 0, false
+	}
+	fd := callee.fn()
+	if fd == nil || fd.native == nil || fd.bound || fd.realm != nil && fd.realm != f.fb.r.Realm {
+		return 0, false
+	}
+	// RegExp's exec and test too, as the stack form's code learns them at
+	// its calls of Go (jitRegExpLitSite), but where the call is marked to
+	// give a literal's RegExp back, or to make its result otherwise, which
+	// the interpreter's call does (regMarkedCall).
+	const marked = bytecode.RMarkDead | bytecode.RMarkReuse | bytecode.RMarkLitRecv | bytecode.RMarkLitArg
+	regexp := (fd.elemOp == elemRegExpExec || fd.elemOp == elemRegExpTest) && marks&marked == 0
+	if !jitLeafOp(fd.elemOp) && !regexp {
+		return 0, false
+	}
+	f.fb.keep().holders = append(f.fb.keep().holders, callee)
+	return uintptr(unsafe.Pointer(callee)), true
+}
+
+// methodCall is the built-in the call at the program's instruction pc --
+// call_w's, or call_method_w's where method says, not one in tail
+// position -- last called, as its site's cache holds it (regCalls), and
+// its argument count: the function the stack form's code finds read
+// before its call, or learns at its calls of Go.
+func (f *jitRegFeedback) methodCall(pc int, method bool) (*Object, int, bool) {
+	w, op, ok := f.at(pc)
+	want := bytecode.RCallW
+	if method {
+		want = bytecode.RCallMW
+	}
+	if !ok || op != ir.Host || !f.p.Code[pc].Window || w.Op() != want {
+		return nil, 0, false
+	}
+	if rpc := int(f.p.Origin[pc]); rpc < len(f.rc.Marks) && f.rc.Marks[rpc]&bytecode.RMarkTail != 0 {
+		return nil, 0, false
+	}
+	callee, cl, ok := f.callTarget(pc)
+	if !ok || cl != nil {
+		return nil, 0, false
+	}
+	return callee, int(w.X()), true
+}
+
+// CharCode is ssa.CharCodeFeedback's: the method call of one argument at
+// the program's instruction pc calls String.prototype.charCodeAt, the
+// realm's own (methodCall).
+func (f *jitRegFeedback) CharCode(pc int) bool {
+	o, n, ok := f.methodCall(pc, true)
+	return ok && n == 1 && f.fb.r.jitCharCodeAt.IsObject() && o == f.fb.r.jitCharCodeAt.Object()
+}
+
+// Substring is ssa.SubstringFeedback's: String.prototype's substring,
+// slice, substr or charAt, the realm's own, which the method call at the
+// program's instruction pc calls (methodCall), and which it is.
+func (f *jitRegFeedback) Substring(pc int) (uintptr, int, bool) {
+	o, n, ok := f.methodCall(pc, true)
+	if !ok || !f.fb.r.jitIsSubstring(o, n) {
+		return 0, 0, false
+	}
+	kind, _ := f.fb.r.jitSubstringOf(o)
+	return uintptr(unsafe.Pointer(o)), kind, true
+}
+
+// FromCharCode is ssa.FromCharCodeFeedback's: String.fromCharCode, the
+// realm's own, which the method call of one argument at the program's
+// instruction pc calls (methodCall).
+func (f *jitRegFeedback) FromCharCode(pc int) (uintptr, bool) {
+	o, n, ok := f.methodCall(pc, true)
+	if !ok || n != 1 || !f.fb.r.jitFromCharCode.IsObject() || o != f.fb.r.jitFromCharCode.Object() {
+		return 0, false
+	}
+	return uintptr(unsafe.Pointer(o)), true
+}
+
+// Intrinsic is ssa.IntrinsicFeedback's: the realm's Math function a call
+// at the program's instruction pc -- a method's, Math.sqrt(x), or a plain
+// one of the function read before -- calls (methodCall), made natively or
+// by Go called from native code, as the stack form's (mathIntrinsic). The
+// BigInt functions native code makes are the stack form's alone yet.
+func (f *jitRegFeedback) Intrinsic(pc int) (ssa.Intrinsic, bool) {
+	o, n, ok := f.methodCall(pc, true)
+	plain := false
+	if !ok {
+		if o, n, ok = f.methodCall(pc, false); !ok {
+			return ssa.Intrinsic{}, false
+		}
+		plain = true
+	}
+	if n > jitMathArgs {
+		return ssa.Intrinsic{}, false
+	}
+	if fd := o.fn(); fd == nil || fd.native == nil || fd.mathOp == mathBigInt || fd.mathOp == mathAsIntN || fd.mathOp == mathAsUintN {
+		return ssa.Intrinsic{}, false
+	}
+	return f.fb.mathIntrinsic(o, n, plain)
+}
+
+// Literal is ssa.LiteralFeedback's: the literal the program's instruction
+// pc makes natively from its pool -- new_object's and new_object_lit's
+// object, new_array's and new_array_empty's array, new_regexp's RegExp --
+// kept, by register pc, in what the function's code learned (regLearned),
+// across its compiles, as the stack form's entry keeps its own by stack
+// pc (jitLiteralAt).
+func (f *jitRegFeedback) Literal(pc int) (ssa.LiteralSite, bool) {
+	l := f.literalAt(pc)
+	if l == nil {
+		return ssa.LiteralSite{}, false
+	}
+	k := f.fb.keep()
+	k.pools = append(k.pools, l.pool)
+	if l.root != nil {
+		k.shapes = append(k.shapes, remember(l.root))
+	}
+	return ssa.LiteralSite{Pool: uintptr(unsafe.Pointer(l.pool)), Shared: l.shared}, true
+}
+
+// literalAt is the literal of the register instruction of the program's
+// instruction pc, an ObjectLiteral or an ArrayLiteral, made if it has none.
+func (f *jitRegFeedback) literalAt(pc int) *jitLiteral {
+	w, op, ok := f.at(pc)
+	e, cl, r := f.fb.e, f.fb.cl, f.fb.r
+	if !ok || e == nil || cl == nil || op != ir.ObjectLiteral && op != ir.ArrayLiteral {
+		return nil
+	}
+	rpc := int(f.p.Origin[pc])
+	for i := range e.literals {
+		if int(e.literals[i].pc) == rpc && e.literals[i].fn == cl.fn {
+			return &e.literals[i]
+		}
+	}
+	switch w.Op() {
+	case bytecode.RNewObject, bytecode.RNewObjectLit:
+		n := int(w.B())
+		if w.Op() == bytecode.RNewObjectLit {
+			n = int(w.X())
+		}
+		if int(w.C()) >= len(cl.ic) {
+			return nil
+		}
+		return r.jitObjectLiteral(e, cl, rpc, uint32(w.C()), n)
+	case bytecode.RNewArray:
+		if int(w.C()) > ir.MaxArrayLiteral {
+			return nil
+		}
+		return r.jitArrayLiteral(e, cl, rpc, int(w.C()))
+	case bytecode.RNewArrayE:
+		return r.jitArrayLiteral(e, cl, rpc, 0)
+	case bytecode.RNewRegExp:
+		if k := int(w.BC()); k < len(cl.fn.Constants) && cl.fn.Constants[k].Kind == bytecode.ConstRegExp {
+			return r.jitRegExpLiteral(e, cl, rpc, &cl.fn.Constants[k])
+		}
+	}
+	return nil
+}
+
+// Define is ssa.LiteralFeedback's: what the field the program's
+// instruction pc defines on a new_object_lit's object adds, along the
+// shapes' transitions from the shape its pool's objects have -- the
+// fields before it, in the literal's order, each a step -- as the stack
+// form's define_field (jitFeedback's Define). Go defines a field whose
+// transition no object has taken yet.
+func (f *jitRegFeedback) Define(pc int) (*ssa.PropertyAdd, bool) {
+	w, op, ok := f.at(pc)
+	cl := f.fb.cl
+	if !ok || op != ir.FieldDefine || w.Op() != bytecode.RNewObjectLit || cl == nil {
+		return nil, false
+	}
+	// The literal's object, the origin's first instruction, and the field's
+	// place among its definitions after it.
+	first := pc
+	for first > 0 && f.p.Origin[first-1] == f.p.Origin[pc] {
+		first--
+	}
+	l := f.literalAt(first)
+	if l == nil || l.root == nil {
+		return nil, false
+	}
+	keys := f.rc.ObjKeys[f.rc.Aux[f.p.Origin[pc]]]
+	i := pc - first - 1
+	if i < 0 || i >= len(keys) {
+		return nil, false
+	}
+	for _, k := range keys[:i+1] {
+		if int(k) >= len(cl.names) {
+			return nil, false
+		}
+	}
+	s := l.root
+	for _, k := range keys[:i] {
+		if s.next == nil || s.nextEdge() != (shapeEdge{cl.names[k], propDefault}) {
+			return nil, false
+		}
+		s = s.next
+	}
+	key := cl.names[keys[i]]
+	if s.next == nil || s.nextEdge() != (shapeEdge{key, propDefault}) {
+		return nil, false
+	}
+	next := s.next
+	if next.index == nil && int(next.n) > linearScanLimit {
+		return nil, false
+	}
+	k := f.fb.keep()
+	k.shapes = append(k.shapes, remember(s), remember(next))
+	return &ssa.PropertyAdd{From: uintptr(unsafe.Pointer(s)), Next: uintptr(unsafe.Pointer(next)), Flags: uint8(next.flags), Define: true, Key: uint32(key)}, true
+}
+
+// LeafKind is ssa.LeafKindFeedback's, jitFeedback's.
+func (f *jitRegFeedback) LeafKind(fn uintptr) ssa.LeafKind { return f.fb.LeafKind(fn) }
 
 // The runtime's addresses the builder asks once a function, the same for
 // either form's code: jitFeedback's answers.
