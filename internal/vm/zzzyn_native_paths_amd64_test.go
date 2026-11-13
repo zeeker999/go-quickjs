@@ -79,8 +79,8 @@ func TestRegNativeExitCalls(t *testing.T) {
 		function getter(n) { var o = { get g() { if (n-- == 2) throw new RangeError("r"); return n } }, r = []; for (var i = 0; i < 4; i++) { try { r.push(o.g) } catch (e) { r.push(e.message) } } return r.join() }
 		function* gen(n) { for (var i = 0; i < n; i++) yield i * 2 }
 		function gens(n) { var t = 0; for (var v of gen(n)) t += v; var g = gen(3); t += g.next().value + g.next().value; return t }
-		function stack() { function f(n) { return n ? f(n - 1) : new Error("e").stack.split("\n").length } return f(5) }
-		out.push(strs(50), thrower({x: {y: 1}}), thrower({}), deep(20), getter(5), gens(10), stack() > 3)
+		function stack() { function f(n) { return n ? f(n - 1) : new Error("e").stack } function g(n) { var s = "x".repeat(n); return n ? g(n - 1) + s.length : h() } function h() { return new Error("h").stack } return f(5) + g(3) }
+		out.push(strs(50), thrower({x: {y: 1}}), thrower({}), deep(20), getter(5), gens(10), stack())
 		var calls = 0
 		function inner(x) { calls++; return [x].concat([1]).length + Math.max(x, 1) }
 		function outer(n) { var t = 0; for (var i = 0; i < n; i++) t += inner(i); return t }
@@ -153,4 +153,35 @@ func TestRegNativeArrayForOf(t *testing.T) {
 		out.join("\n")`, `
 		function sum(a, n) { var s = 0; for (var i = 0; i < n; i++) for (var v of a) s += v; return s }
 		String(sum([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 100))`, bytecode.RIterNext)
+}
+
+// TestRegNativeCharCodeAt runs s.charCodeAt(i) natively over flat
+// strings, ASCII and not, at positions in and out of range and of every
+// kind, with ropes, the method replaced and bound, and receivers that are
+// no string, which Go answers.
+func TestRegNativeCharCodeAt(t *testing.T) {
+	nativeCheck(t, `
+		var out = []
+		function codes(s, ps) { var r = []; for (var p of ps) r.push(s.charCodeAt(p)); return r.join() }
+		var ps = [0, 1, 2.9, -0.5, -1, 3, 4, 100, NaN, Infinity, -Infinity, "1", null, undefined, true, 1e300, -0, 2 ** 53]
+		out.push(codes("abcd", ps), codes("añ€😀", ps), codes("", ps))
+		var rope = "ab"; for (var i = 0; i < 20; i++) rope += String.fromCharCode(65 + i)
+		out.push(codes(rope, [0, 5, 21]), codes(rope, [21, 22]))
+		var wide = "é"; for (var i = 0; i < 5; i++) wide += "ü"
+		out.push(codes(wide, [0, 5, 6]))
+		function sum(s) { var t = 0; for (var i = 0; i < s.length; i++) t = (t * 31 + s.charCodeAt(i)) | 0; return t }
+		out.push(sum("hello world"), sum("ünïcödé"))
+		var saved = String.prototype.charCodeAt
+		String.prototype.charCodeAt = function (i) { return -i }
+		out.push(sum("abc"))
+		String.prototype.charCodeAt = saved.bind("zzz")
+		out.push(sum("abc"))
+		String.prototype.charCodeAt = saved
+		function other(v) { try { return v.charCodeAt(0) } catch (e) { return e.name } }
+		out.push(other(5), other(null), other({charCodeAt: function () { return "o" }}), other(new String("q")), sum("abc"))
+		out.join("\n")`, `
+		function sum(s) { var t = 0; for (var i = 0; i < s.length; i++) t = (t * 31 + s.charCodeAt(i)) | 0; return t }
+		var s = "the quick brown fox jumps over the lazy dog", u = "ünïcödé ünïcödé", t = 0
+		for (var j = 0; j < 30; j++) t += sum(s) + sum(u)
+		String(t)`, bytecode.RCharCodeAt)
 }
