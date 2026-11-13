@@ -576,7 +576,8 @@ the bitwise operators of any number (by ToInt32) and the
 compare-and-branches, of registers, immediates and upvalues; truthiness
 of a boolean, a number, an object, a string, undefined and null; `==`
 and `!=` of numbers, of one word kind and of undefined or null against
-anything; `===` and `!==` (two strings by identity and length); moves, constants, upvalues read and written,
+anything; `===` and `!==` (two strings by identity and length, and two flat ones
+of one length by their text, eight bytes at a time); moves, constants, upvalues read and written,
 and globals read and written by their site; property reads and writes by
 the site's cache, its own entry or the entries of the shapes it met
 before (`propPoly`), and a property added by the transition it

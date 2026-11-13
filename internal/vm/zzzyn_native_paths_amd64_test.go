@@ -289,3 +289,22 @@ func TestRegNativeArrayAppend(t *testing.T) {
 		for (var j = 0; j < 4; j++) t += fill(500)
 		String(t)`, bytecode.RSetIndex)
 }
+
+// TestRegNativeStringEquals runs === and !== of two flat strings of one
+// length natively, by their text: ASCII and not, of one length in code
+// units and not in bytes, lone surrogates, lengths around eight bytes,
+// and ropes, which Go flattens first.
+func TestRegNativeStringEquals(t *testing.T) {
+	nativeCheck(t, `
+		var out = []
+		var strs = ["", "a", "b", "é", "ab", "abcdefgh", "abcdefgi", "abcdefghi", "abcdefghj", "bbcdefghi", "ünïcödé", "ünïcödè", "\ud83d", "\ude00", "😀", "\ud83d\ude00", "x".repeat(17), "x".repeat(16) + "y", String.fromCharCode(97, 98)]
+		function eq() { var r = ""; for (var x of strs) for (var y of strs) { r += x === y ? 1 : 0; if (x !== y) r += "!" } return r }
+		out.push(eq())
+		var rope = "ab"; rope += "cdefgh"
+		function eq2(a, b) { return [a === b, a !== b, b === a].join() }
+		out.push(eq2(rope, "abcdefgh"), eq2(rope, "abcdefgx"), eq2("ab" + String(1), "ab1"))
+		out.join("\n")`, `
+		var keys = ["alpha", "beta", "gamma", "delta", "alphabetical", "betamaximum"], copies = keys.map(function (k) { return k.split("").join("") }), n = 0
+		for (var j = 0; j < 30; j++) for (var i = 0; i < keys.length; i++) for (var k = 0; k < keys.length; k++) if (keys[i] === copies[k]) n++
+		String(n)`, bytecode.RJSEq, bytecode.RJSNe)
+}

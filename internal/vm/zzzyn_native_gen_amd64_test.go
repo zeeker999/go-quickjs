@@ -1483,6 +1483,51 @@ func (g *nativeGen) noIndexKeys(obj Reg) {
 	a.Bind(ok)
 }
 
+// flatEq goes to eq or ne as the strings at R9 and R8, of one length,
+// are equal or not, where both are flat: their text compared, as Equals
+// compares it, eight bytes at a time; a rope exits. RAX is read again
+// before either.
+func (g *nativeGen) flatEq(eq, ne Label) {
+	a := g.a
+	loop, tail, same, differ := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
+	a.CmpMemImm8(R9, offStrLeft, 0)
+	a.Jcc(CondNE, g.exit)
+	a.CmpMemImm8(R8, offStrLeft, 0)
+	a.Jcc(CondNE, g.exit)
+	a.Load(RCX, R9, offStrS+8)
+	a.CmpMem(RCX, R8, offStrS+8, true)
+	a.Jcc(CondNE, differ)
+	a.Load(RSI, R9, offStrS)
+	a.Load(RDX, R8, offStrS)
+	a.Bind(loop)
+	a.OpImm(Cmp, RCX, 8, true)
+	a.Jcc(CondB, tail)
+	a.Load(RAX, RSI, 0)
+	a.CmpMem(RAX, RDX, 0, true)
+	a.Jcc(CondNE, differ)
+	a.OpImm(Add, RSI, 8, true)
+	a.OpImm(Add, RDX, 8, true)
+	a.OpImm(Sub, RCX, 8, true)
+	a.Jmp(loop)
+	a.Bind(tail)
+	a.Op(Test, RCX, RCX, true)
+	a.Jcc(CondE, same)
+	a.LoadU8(RAX, RSI, 0)
+	a.LoadU8(R9, RDX, 0)
+	a.Op(Cmp, RAX, R9, false)
+	a.Jcc(CondNE, differ)
+	a.OpImm(Add, RSI, 1, true)
+	a.OpImm(Add, RDX, 1, true)
+	a.OpImm(Sub, RCX, 1, true)
+	a.Jmp(tail)
+	a.Bind(same)
+	a.Load(RAX, RBX, 0)
+	a.Jmp(eq)
+	a.Bind(differ)
+	a.Load(RAX, RBX, 0)
+	a.Jmp(ne)
+}
+
 // typedBigWrite stores register C, a BigInt held in its Value, as the
 // element at the index in idx of the BigInt64Array or BigUint64Array in
 // obj: its low 64 bits, ToBigInt64's and ToBigUint64's wrapping; anything
@@ -2755,8 +2800,9 @@ func nativeEmit() ([]byte, nativeOffsets) {
 				a.Jcc(CondB, same)
 				a.Bind(notWord)
 			}
-			// Two strings: the same one, or of different lengths; any
-			// other pair Go's.
+			// Two strings: the same one, of different lengths, or two
+			// flat ones compared by their text (flatEq); any other pair
+			// Go's.
 			for _, x := range []Reg{R9, R8} {
 				a.MovRR(RCX, x)
 				a.ShiftImm(Shr, RCX, 16, true)
@@ -2775,7 +2821,7 @@ func nativeEmit() ([]byte, nativeOffsets) {
 			a.Load(RCX, R9, offStrLen)
 			a.CmpMem(RCX, R8, offStrLen, true)
 			a.Jcc(CondNE, ne)
-			a.Jmp(g.exit)
+			g.flatEq(eq, ne)
 			a.Bind(same)
 			a.Load(RAX, RBX, 0)
 			a.Op(Cmp, R9, R8, true)
