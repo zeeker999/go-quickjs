@@ -660,7 +660,15 @@ the runtime's `backEdges` across the calls. Where the frame has ended
 (`regDone`), and where Go has made no state for the depth yet, the stub
 returns to `nativeRun`, which ends the frame, or makes the state and runs
 the instruction, and enters the code again; so does a call the native frame
-stack has no room for, and the base frame's return. The call made
+stack has no room for, and the base frame's return. The call depends on
+Go's internal register convention (ABIInternal) on amd64, which the
+exit stub and the trampoline write by hand: the four arguments in `AX`,
+`BX`, `CX` and `DI`, the func value in `DX`, the result in `AX`, the
+goroutine in `R14`, `X15` zero, and the arguments' spill room in the
+caller's frame. Go does not promise it across releases;
+`TestRegNativeCallHConvention` calls a Go handler through `nativeCallH`
+and fails, saying which part differs, where the toolchain's convention
+is not this one, and CI runs it under Go 1.24 and Go 1.27. The call made
 `array_push_args3_single`, whose pushes exit, 19% faster than the return
 and the entry (199 to 162 ns an operation), and `string_indexOf` 13%. There is no second interpreter: what the Go table does, an exit does. A frame the code entered itself that ends in Go
 -- a throw, a return that closes captured upvalues -- ends there as
