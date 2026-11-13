@@ -56,6 +56,11 @@ type jitRegEntry struct {
 	runs    int
 	bytes   int
 	refusal string
+	// retPC and retUndef are where the interpreter ends a frame the code
+	// returned from by on-stack replacement, retReg the register retPC's
+	// ret returns, and goesOn whether it can (findReturns).
+	retPC, retReg, retUndef int
+	goesOn                  bool
 }
 
 // loopEntry is the entry, an instruction of the program, of the loop
@@ -111,6 +116,9 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode) *jitRegEntry {
 		return e
 	}
 	e.p = p
+	if jitParityLog.on.Load() {
+		r.jitParityNote(cl)
+	}
 	rf := r.jitRegFeedbackFor(cl, p)
 	w := jit.GetWorkspace()
 	defer jit.PutWorkspace(w)
@@ -173,6 +181,7 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode) *jitRegEntry {
 		}
 	}
 	slices.Sort(e.loops)
+	e.findReturns(c.rc)
 	// What the code reads by address, its feedback's keep; the closure
 	// and the function the feedback asked are not.
 	e.keep = rf.fb.keep()
@@ -189,6 +198,11 @@ func (s *jitState) regBytes() int {
 			continue
 		}
 		n += e.bytes
+	}
+	for key := range s.regFailed {
+		if key.gone() {
+			delete(s.regFailed, key)
+		}
 	}
 	return n
 }
@@ -326,24 +340,42 @@ func (r *Runtime) jitRegMaterialize(f *frame, e *jitRegEntry, wb int) {
 // register pc rpc, an entry's, until it returns, and goes on in the
 // register interpreter where the code leaves for good (step A1 of 3a-3).
 func (r *Runtime) jitRegRun(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) (Value, error) {
+	pc, v, done, err := r.jitRegGoOn(f, c, e, wb, rpc)
+	switch {
+	case err != nil:
+		return Undefined, err
+	case done:
+		return v, nil
+	}
+	return r.runReg(f, c, pc)
+}
+
+// jitRegGoOn runs f, running c with its window at wb, in e's code from
+// register pc rpc, an entry's, until it returns -- done, with what it
+// returns -- or throws what no handler of the frame's takes, err, or
+// leaves the frame to the register interpreter, which goes on with it at
+// register pc pc: after a deoptimization, at a register pc the code has no
+// entry at, or where the code is not to run. A frame the interpreter runs
+// goes on so in its own loop (jitRegLoop); a call's, in runReg.
+func (r *Runtime) jitRegGoOn(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) (pc int, v Value, done bool, err error) {
 	s := r.jit
 	for {
 		ipc := e.p.At(uint32(rpc))
-		if e.invalid || e.code == nil || ipc < 0 || !e.code.HasEntry(ipc) {
+		if e.invalid || e.code == nil || ipc < 0 || !e.code.HasEntry(ipc) || wb+e.p.Regs+e.scratch+e.frame > len(r.stack) {
 			// No entry here, or code a guard of which failed: the
 			// interpreter runs the rest of the invocation.
 			s.interpreted++
-			return r.runReg(f, c, rpc)
+			return rpc, Undefined, false, nil
 		}
 		ctx, ret, ok := r.jitRegStretch(f, c, e, wb, ipc)
 		if !ok {
 			s.interpreted++
-			return r.runReg(f, c, rpc)
+			return rpc, Undefined, false, nil
 		}
 		exitPC := int(ctx.ExitPC)
 		switch ctx.ExitKind {
 		case abi.ExitReturn:
-			return ret, nil
+			return 0, ret, true, nil
 		case abi.ExitDeopt:
 			// A guard failed before its instruction committed anything: the
 			// frame holds the state at its start, which the interpreter runs
@@ -351,9 +383,10 @@ func (r *Runtime) jitRegRun(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) (
 			// again at the next ask, from what the interpreter learns.
 			s.guards++
 			r.jitRegMaterialize(f, e, wb)
-			e.invalid = true
+			s.regNoteFailed(r.jitKeyOf(f.cl.fn), exitPC)
+			r.jitRegInvalidate(f.cl, e)
 			s.interpreted++
-			return r.runReg(f, c, exitPC)
+			return exitPC, Undefined, false, nil
 		case abi.ExitHost:
 			// Go runs the register instruction whole, then native code goes
 			// on at the next entry.
@@ -362,7 +395,6 @@ func (r *Runtime) jitRegRun(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) (
 			f.pc = regSrc(c, exitPC) + 1
 			var next int
 			var ran bool
-			var err error
 			if p := s.regPending; p.set && p.pc == exitPC {
 				// A call Go made from native code, which left after it
 				// (jitRegGoCall): what it answered goes to the frame, as
@@ -375,13 +407,13 @@ func (r *Runtime) jitRegRun(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) (
 			}
 			if !ran {
 				s.interpreted++
-				return r.runReg(f, c, exitPC)
+				return exitPC, Undefined, false, nil
 			}
 			if err != nil {
-				return Undefined, err
+				return 0, Undefined, false, err
 			}
 			if r.stopped != nil {
-				return Undefined, r.stopped
+				return 0, Undefined, false, r.stopped
 			}
 			rpc = next
 		case abi.ExitPoll:
@@ -389,11 +421,11 @@ func (r *Runtime) jitRegRun(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) (
 			s.budgets++
 			r.backEdges = s.backEdgeBudget()
 			if err := r.checkInterruptNow(); err != nil {
-				return Undefined, err
+				return 0, Undefined, false, err
 			}
 			if r.jitStressDeopt(s) {
 				s.interpreted++
-				return r.runReg(f, c, exitPC)
+				return exitPC, Undefined, false, nil
 			}
 			rpc = exitPC
 		default:
@@ -401,7 +433,7 @@ func (r *Runtime) jitRegRun(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) (
 			// left, the interpreter goes on with from its start.
 			r.jitRegMaterialize(f, e, wb)
 			s.interpreted++
-			return r.runReg(f, c, exitPC)
+			return exitPC, Undefined, false, nil
 		}
 	}
 }

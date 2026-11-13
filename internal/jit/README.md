@@ -1076,10 +1076,12 @@ docs/register-interpreter.md) is lowered into the same slot IR by
 `compile.LowerReg` (`LowerRegHot`, `LowerRegInline` for the entries
 `LowerSSAHot` and `LowerSSAInline` serve), and compiled to native code
 that runs on the register frame (see [Native code on a register
-frame](#native-code-on-a-register-frame)). Only tests enter that code: the
-register tier has no hook into it yet, and the VM's JIT lowers the stack
-form until the register form's tier-up exists and its compiles have been
-measured against the stack form's (Stage 3a-3).
+frame](#native-code-on-a-register-frame)). A runtime that runs the JIT
+on the register tier compiles a function's register code once it is hot
+and enters it from the register tier (see [Tier-up from the register
+tier](#tier-up-from-the-register-tier)); the stack form's tiers still
+lower the stack form, until the register form's compiles have been
+measured against them (Stage 3a-3).
 
 **Slots.** A register is a slot: the program's first `Regs` slots are the
 frame's window, register 0 the function, 1 its this and the parameters
@@ -1141,7 +1143,12 @@ accessors; an arithmetic operation, a comparison or a string's addition,
 Generic or not, has Go make only what runs nothing, leaving the rest to an
 exit -- and a build that makes an exit after a commit in the same origin
 is refused, by its register pc. A Generic instruction is built as one
-whose speculation failed before (the builder's `generic`). A tail call is
+whose speculation failed before (the builder's `generic`). A loop's step
+(`iter_next`) writes its register only where the loop goes on: the builder
+assigns the step's value in the block after it (`stepOn`), so the done
+edge keeps what the register held, and the step is a call of Go from
+native code; one whose next instruction something else jumps to, or an
+inlined callee's, is left to Go. A tail call is
 not marked in register code's program: the builder reads a tail call's
 operands from the operand stack's top. `TestLowerRegCorpusRefusals` builds
 both forms' programs, without feedback, and counts what the builder
@@ -1264,6 +1271,13 @@ a frame the interpreter runs goes on natively at a loop's header with the
 registers live there loaded from the window: the code's OSR entry map is
 its loops' headers by register pc (`jitRegEntry`'s `loops`, `loopEntry`).
 
+**Learning at deoptimizations.** A guard that fails notes its register pc
+for the function (`jitState`'s `regFailed`), and the function's next
+compiles build the instructions of that register pc generic
+(`jitRegFeedback`'s `Generic`), as the stack form's code learns at its
+exits; the code is invalidated, the function sampled anew and compiled
+again, up to `jitRegDeoptLimit` times.
+
 **Testing.** `vm.RegNativeCall` enters it: the call's frame made as
 `regEnterW` makes it, and run natively from its start, or, by the evaluator
 with the VM up to the second time it reaches a loop's header, from there.
@@ -1272,6 +1286,44 @@ and marking; `TestRegNativeCall` (internal/regdiff) runs the regDiff
 corpus so, compiled at each function's first call, each answer compared
 with an ordinary call's; and `TestJITSameWorkWhileMarking` runs every test
 of the micro-benchmarks so as well.
+
+### Tier-up from the register tier
+
+No handler of the register tier's dispatchers -- the Go handler table's
+or the native handlers' -- does any work for the JIT
+(`internal/vm/zzjit_zregtier.go`). Hotness is sampled at the two budgets
+they already spend:
+- a call that spends the interrupt budget -- `rhCallW`'s and `regEnterW`'s
+  check, which the native call handler leaves to `rhCallW` -- credits its
+  callee (`jitRegCallSample`, `jitRegSample`);
+- a back edge that spends the back-edge budget -- `regBackEdge`, which
+  every dispatcher's jump leaves to its Go slow function -- credits its
+  frame's function (`jitRegLoop`), the budget varied as the stack form's
+  is (`backEdgeBudget`).
+
+A function is compiled (`jitRegFor`) at its `jitRegSamples`-th sample, or
+at its first where the runtime compiles at a first call (`QJS_JIT_STRESS`'s
+threshold, which makes every call a sample), and its code is kept on its
+template's `closureCode` (`jitReg`). Plain functions and methods of the
+form's own layout are compiled; generators, async functions, arrows,
+top-level code and leaves are not yet.
+
+The code is entered:
+- by a call whose frame Go makes (`regEnterW`, `jitRegEnter`): a call site
+  sampled calling a function that has code is marked `regCallJIT`, which
+  neither `rhCallW`'s fast path nor the native call handler enters, so its
+  calls go to `regCallSlow` and `regEnterW`;
+- by on-stack replacement at the loop whose back edge took the sample
+  (`jitRegLoop`), from inside the dispatcher that runs the frame, which
+  goes on where the code leaves it (`jitRegGoOn`): at the register pc of a
+  deoptimization or of an instruction with no entry after it; or, where
+  the code returned, at a `ret_undef` of the code's own, or at a `ret`
+  whose register no closure captures, given the value (`findReturns`).
+  Code with neither, where it has a `ret`, is not entered so. An exception
+  no handler of the frame's takes ends the frame (`regDone`).
+
+Native code calls register functions through Go (`jitRegGoCall`), which
+enters their code as any call from Go does.
 
 ## The execution boundary
 

@@ -3,6 +3,7 @@
 package vm
 
 import (
+	"slices"
 	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -264,9 +265,17 @@ func (f *jitRegFeedback) BigIntCell(pc int) (uintptr, uint64, int, bool) {
 	return uintptr(unsafe.Pointer(cell)), 0, ssa.BigConstHeap, true
 }
 
-// Generic is ssa.Feedback's: nothing, until the register interpreter
-// records what its fast paths did not expect (Stage 3a-1's regSeen).
-func (f *jitRegFeedback) Generic(pc int) bool { return false }
+// Generic is ssa.Feedback's: the register instruction of the program's
+// instruction pc is one a guard of the function's code failed at before
+// (jitState's regFailed), as the stack form's code learns at its exits:
+// built generic, what it did not expect is Go's to make.
+func (f *jitRegFeedback) Generic(pc int) bool {
+	s := f.fb.r.jit
+	if s == nil || s.regFailed == nil || pc < 0 || pc >= len(f.p.Origin) {
+		return false
+	}
+	return slices.Contains(s.regFailed[f.fb.r.jitKeyOf(f.fb.fn)], int32(f.p.Origin[pc]))
+}
 
 // EntryGeneric is ssa.Feedback's: nothing, as Generic.
 func (f *jitRegFeedback) EntryGeneric(pc int) bool { return false }

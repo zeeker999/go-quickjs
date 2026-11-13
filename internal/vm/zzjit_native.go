@@ -460,6 +460,13 @@ type jitCodeFields struct {
 	// function's frames of the template's closures, which they have since
 	// one of its invocations they counted (jitCountRun, jitCountCallAt).
 	jitCounting bool
+	// jitRegHot counts the samples of the function's runs the register
+	// tier took (jitRegSample), jitRegDeopts its code's deoptimizations,
+	// and jitRegRefused says it is not compiled from its register code;
+	// jitReg is its code, nil until compiled (zzjit_zregtier.go).
+	jitRegHot, jitRegDeopts uint8
+	jitRegRefused           bool
+	jitReg                  *jitRegEntry
 }
 
 // hint is the hint of the code of cl's function, its template's closures'
@@ -996,6 +1003,11 @@ type jitState struct {
 	// regCache is the code compiled from functions' register code, by the
 	// same keys (zzjit_zregnative.go): the cache's other form.
 	regCache map[jitKey]*jitRegEntry
+	// regFailed are the register pcs a guard of a function's code made
+	// from its register code failed at, by the function's key: what its
+	// next compiles build generic (jitRegFeedback's Generic), as the stack
+	// form's code learns at its exits (jitEntry's failed).
+	regFailed map[jitKey][]int32
 	// regHostOps counts register code's host exits by the register
 	// instruction Go ran whole, for tests (RegNativeStats' HostOps).
 	regHostOps map[string]uint64
@@ -1346,6 +1358,8 @@ func (r *Runtime) initJIT(enabled bool, memoryLimit int64) {
 	r.jitStress = jitStressDefault
 	if r.jitStress.threshold {
 		r.jitCallThreshold, r.jitICThreshold = 1, 1
+		// Every call a sample of the register tier's (jitRegStressSample).
+		r.interruptCounter = 1
 	}
 }
 

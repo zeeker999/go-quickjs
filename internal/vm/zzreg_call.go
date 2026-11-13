@@ -280,7 +280,7 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base, pc 
 		}
 		if e != nil && e.callee == o && e.kind != 0 && e.kind != regCallNative {
 			// A callee the site knows, whose call is not rhCallW's alone.
-			cl, rc, kind, this = e.cl, e.rc, e.kind&^(regCallOut|regCallLeaf), e.this
+			cl, rc, kind, this = e.cl, e.rc, e.kind&^regCallMarks, e.this
 		} else if fd := o.fn(); fd != nil && fd.closure != nil && !fd.bound {
 			cl = fd.closure
 			if rc = cl.reg; rc == nil {
@@ -315,6 +315,9 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base, pc 
 					e.kind |= regCallOut | regCallLeaf
 				} else if rc.args {
 					e.kind |= regCallOut
+				}
+				if jitBuilt && r.jitRegHas(cl) {
+					e.kind |= regCallJIT
 				}
 			}
 		}
@@ -423,7 +426,17 @@ const (
 	// regCallLeaf marks a callee whose body rhCallW may answer without a
 	// frame (leafCall, pureCall).
 	regCallLeaf = 16
+	// regCallJIT marks a callee that has native code made from its
+	// register code: no fast path enters it, rhCallW's nor the native
+	// handlers', and regCallSlow's regEnterW enters the code
+	// (jitRegEnter). Builds without the JIT never set it.
+	regCallJIT = 32
 )
+
+// regCallMarks are the marks of a call cache's kind that say how a call
+// enters its callee, not what it gives it as this: regCallJIT's only in a
+// build with the JIT, whose untagged code is as it was without it.
+const regCallMarks = regCallOut | regCallLeaf | regCallJITMark
 
 // regIsObject reports whether *v is an object, its tag read as a word.
 func regIsObject(v *Value) bool {

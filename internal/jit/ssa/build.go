@@ -3034,6 +3034,9 @@ func makesClosure(p *ir.Program) bool {
 }
 
 type builder struct {
+	// stepOn is the register a register loop's step writes, by the block
+	// where its loop goes on, which assigns it there (iterStep).
+	stepOn map[*Block]stepDef
 	// atomic says the root's instruction being built follows one of its
 	// register instruction's that committed (atomicInstruction);
 	// atomicErr is the exit such a build made.
@@ -3253,10 +3256,17 @@ func (b *builder) hostOf(pc int) bool {
 		return !b.cur.site.ReadsArguments || b.generic(pc)
 	case ir.IterStep:
 		// A call of Go (GoCall, Step), where the VM answers it. Register
-		// code's loop step is Go's: it writes its register only where the
-		// loop goes on, which the step's one result, its done the
-		// uninitialized value, would not keep to.
-		return !b.goCalls() || b.p.Origin != nil && !b.p.Code[pc].When
+		// code's loop step writes its register only where the loop goes
+		// on: the root's assigns it in the block after the step (stepOn),
+		// which the step alone may reach; an inlined callee's, and one
+		// whose next instruction something else jumps to, is Go's.
+		if !b.goCalls() {
+			return true
+		}
+		if b.p.Origin != nil && !b.p.Code[pc].When {
+			return b.cur != b.root || b.stepJoined(pc)
+		}
+		return false
 	case ir.Closure, ir.CloseUpvalues:
 		// A call of Go (GoClosure, GoClose), on the function's own frame --
 		// a closure's with a keep cell for it (closureKeep).
@@ -3266,6 +3276,29 @@ func (b *builder) hostOf(pc int) bool {
 		if b.p.Code[pc].Op == ir.Closure {
 			_, ok := b.closureKeep(pc)
 			return !ok
+		}
+	}
+	return false
+}
+
+// stepDef is a register loop step's result and its register (stepOn).
+type stepDef struct {
+	slot int
+	v    *Value
+}
+
+// stepJoined reports whether anything but the loop step at pc goes to the
+// instruction after it: a jump, a branch, another step, a handler.
+func (b *builder) stepJoined(pc int) bool {
+	next := pc + 1
+	for q, in := range b.p.Code {
+		if q != pc && (in.Op == ir.Jump || in.Op == ir.Branch || in.Op == ir.IterStep) && in.Target == next {
+			return true
+		}
+	}
+	for _, h := range b.p.Handlers {
+		if int(h.PC) == next {
+			return true
 		}
 	}
 	return false
@@ -4987,6 +5020,12 @@ func (b *builder) goKeyedWrite(blk *Block, in ir.Instruction, operand func(ir.Op
 // which no step yields, for a cursor done, any other its next value. What
 // Go refuses leaves for Go to make after an exit.
 func (b *builder) iterStep(blk *Block, pc int, in ir.Instruction, operand func(ir.Operand) *Value, guard func(Op, Type, ir.ExitKind, ...*Value) *Value) {
+	// Where the loop goes on, read before a guard splits blk, which gives
+	// its successors to the block it goes on in.
+	var on *Block
+	if b.p.Origin != nil && !in.When && len(blk.Succs) == 2 {
+		on = blk.Succs[1]
+	}
 	call := guard(OpCall, Tagged, ir.HostExit, operand(in.Left))
 	if b.f.Keeps < b.f.keepLimit() && in.Rest {
 		// A rest element's: no step natively, which takes one value.
@@ -5001,7 +5040,17 @@ func (b *builder) iterStep(blk *Block, pc int, in ir.Instruction, operand func(i
 	cell := b.f.newValue(blk, OpCallCell, Source, call)
 	r := b.f.newValue(blk, OpKept, Tagged, cell, call)
 	r.Shadow = cell
-	b.assign(in.Dest, blk, r)
+	if on != nil {
+		// Register code's: its register written where the loop goes on
+		// alone, the block after the step (Succs[1]), which the step
+		// alone reaches (hostOf); done, it keeps what it held.
+		if b.stepOn == nil {
+			b.stepOn = map[*Block]stepDef{}
+		}
+		b.stepOn[on] = stepDef{in.Dest, r}
+	} else {
+		b.assign(in.Dest, blk, r)
+	}
 	// The step runs the iterator's next, which may assign a captured
 	// binding, as a native call's callee may.
 	if b.hasCells() {
@@ -5816,7 +5865,11 @@ func (b *builder) plan() error {
 			if !in.When {
 				leaders[in.Target] = true
 			}
-			if resumes(pc) {
+			// Register code's step made natively has none after it: the
+			// block after it, which assigns the step's register (stepOn),
+			// is reached from the step alone. Where Go makes the step
+			// after all, the interpreter goes on to the loop's header.
+			if resumes(pc) && !(b.p.Origin != nil && !in.When && !b.host(pc)) {
 				entries[pc+1] = true
 			}
 		case ir.Rethrow:
@@ -6557,6 +6610,15 @@ func (b *builder) fill(blk *Block) {
 	if blk.LoopHeader {
 		blk.Header = b.state(blk, blk.PC)
 		blk.Header.Site = -1
+	}
+	if d, ok := b.stepOn[blk]; ok {
+		// The register a register loop's step writes where the loop
+		// goes on (iterStep).
+		delete(b.stepOn, blk)
+		if len(blk.Preds) != 1 {
+			panic("ssa: a register loop step's block is reached from elsewhere")
+		}
+		b.assign(d.slot, blk, d.v)
 	}
 	end := b.endOf[blk.ID]
 	// BigInt operators made on their low bits end in their block (wraps).

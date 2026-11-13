@@ -2287,6 +2287,9 @@ func (r *Runtime) compileSSA(fn *bytecode.Function, cl *closure, p *ir.Program, 
 	if e != nil && cl != nil {
 		r.jitSeenFeedback(cl, e)
 	}
+	if jitParityLog.on.Load() {
+		r.jitParityNote(cl)
+	}
 	// The compile's time is the JIT's, which the cache's clocks leave out
 	// (running).
 	r.jit.compileBegin()
