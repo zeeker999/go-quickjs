@@ -917,3 +917,51 @@ func TestRegNativeKeptArgumentsClosed(t *testing.T) {
 		}
 	}
 }
+
+// nativeTemplateSrc calls, at each of its sites, a closure made anew each
+// time its maker runs: plain functions sloppy and strict, a method, and
+// arrows each with a this of its own, and a bound function and a function
+// with a property among them, which the site's cache answers as the
+// closure of its template it met before or leaves to the miss.
+const nativeTemplateSrc = `
+	function plain(k) { var f = function () { return this === globalThis ? k : -1 }; return f() }
+	function strict(k) { "use strict"; var f = function () { return this === undefined ? k : -1 }; return f() }
+	function method(k) { var o = { k: k }; o.m = function () { return this.k }; return o.m() }
+	function arrow(k) { var o = { k: k, a: function () { var f = () => this.k; return f() } }; return o.a() }
+	function mixed(k) {
+		var f = function (x) { return x + (this && this.b || 0) };
+		if (k % 3 === 1) f = f.bind({ b: 100 });
+		if (k % 3 === 2) f.p = 1;
+		return f(k);
+	}
+	var s = [];
+	for (var k = 0; k < 6; k++) s.push(plain(k), strict(k), method(k), arrow(k), mixed(k));
+	s.join()`
+
+// A site whose callee is a closure made anew each time its maker runs
+// answers it as the closure of its template it met before: the cache is
+// made the new closure's and the call entered as a hit (regSameTemplate),
+// each closure's own this kept.
+func TestRegCallSameTemplate(t *testing.T) {
+	want := "0,0,0,0,0,1,1,1,1,101,2,2,2,2,2,3,3,3,3,3,4,4,4,4,104,5,5,5,5,5"
+	for _, native := range []bool{false, true} {
+		if got := nativeRunSrc(t, nativeTemplateSrc, native); got != want {
+			t.Errorf("native %v: %s, want %s", native, got, want)
+		}
+	}
+	// The closure is entered by the native code, once the exit that met
+	// it has made the cache its own, not by Go from the miss, which runs
+	// it in a code entry of its own: an entry for each call of outer, not
+	// two.
+	nativeCounting(t)
+	enters, calls := atomic.LoadInt64(&nativeEnters), atomic.LoadInt64(&nativeCalls)
+	nativeRunSrc(t, `
+		function outer(k) { var f = function () { var a = [k]; return a[0] }; return f() }
+		var s = 0;
+		for (var k = 0; k < 200; k++) s += outer(k);
+		String(s)`, true)
+	enters, calls = atomic.LoadInt64(&nativeEnters)-enters, atomic.LoadInt64(&nativeCalls)-calls
+	if enters > 210 || calls < 199 {
+		t.Errorf("%d entries of the code and %d calls it made itself, want 210 entries at most and 199 calls or more", enters, calls)
+	}
+}
