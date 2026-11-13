@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -213,6 +214,15 @@ func regNativeAdd(sum, now, before vm.RegNativeStats) vm.RegNativeStats {
 	sum.Interpreted += now.Interpreted - before.Interpreted
 	sum.Records += now.Records - before.Records
 	sum.Materialized += now.Materialized - before.Materialized
+	sum.GoCalls += now.GoCalls - before.GoCalls
+	for k, n := range now.HostOps {
+		if d := n - before.HostOps[k]; d != 0 {
+			if sum.HostOps == nil {
+				sum.HostOps = map[string]uint64{}
+			}
+			sum.HostOps[k] += d
+		}
+	}
 	return sum
 }
 
@@ -276,11 +286,23 @@ func regNativeReport(t *testing.T, st *regNativeStats) {
 	fmt.Fprintf(&out, "%d calls compared, all agreeing unless reported: %d compiled first, %d entered natively, %d of them by OSR, %d made as ordinary calls; the runtimes made anew %d times at a limit; %d functions of a clock's or Math.random's not called\n",
 		st.calls, st.compiled, st.native, st.osr, skipped, st.limited, st.varies)
 	e := st.exits
-	fmt.Fprintf(&out, "native code: %d entries; exits: %d host, %d deoptimizations, %d polls; %d finished by runReg; %d records Go applied; %d objects made\n",
-		e.Entries, e.Hosts, e.Guards, e.Polls, e.Interpreted, e.Records, e.Materialized)
+	fmt.Fprintf(&out, "native code: %d entries; exits: %d host, %d deoptimizations, %d polls; %d finished by runReg; %d records Go applied; %d objects made; %d calls of Go that ran script\n",
+		e.Entries, e.Hosts, e.Guards, e.Polls, e.Interpreted, e.Records, e.Materialized, e.GoCalls)
 	for i, r := range rows {
 		if i < 15 {
 			fmt.Fprintf(&out, "  %6d %s\n", r.n, r.k)
+		}
+	}
+	ops := slices.SortedFunc(maps.Keys(e.HostOps), func(a, b string) int {
+		if c := cmp.Compare(e.HostOps[b], e.HostOps[a]); c != 0 {
+			return c
+		}
+		return strings.Compare(a, b)
+	})
+	fmt.Fprintf(&out, "host exits by register instruction:\n")
+	for i, k := range ops {
+		if i < 20 {
+			fmt.Fprintf(&out, "  %10d %s\n", e.HostOps[k], k)
 		}
 	}
 	t.Log("\n" + out.String())

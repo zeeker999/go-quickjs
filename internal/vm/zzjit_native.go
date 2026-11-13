@@ -996,6 +996,9 @@ type jitState struct {
 	// regCache is the code compiled from functions' register code, by the
 	// same keys (zzjit_zregnative.go): the cache's other form.
 	regCache map[jitKey]*jitRegEntry
+	// regHostOps counts register code's host exits by the register
+	// instruction Go ran whole, for tests (RegNativeStats' HostOps).
+	regHostOps map[string]uint64
 	// byFn is cache by its functions' addresses (entryFor).
 	byFn map[jitFnAddr]jitFnEntry
 	// links are the functions' links (jitLink), by the same keys.
@@ -1236,8 +1239,14 @@ type jitState struct {
 	goPinned    []*jit.SSACode
 	retired     []jitRetired
 	goPending   jitGoPending
-	ssaEntries  uint64
-	ssaRecords  uint64
+	// regRuns are the register frames native code made from register
+	// code runs on, by context (jitRegStretch), which its calls of Go
+	// make theirs on (jitRegGoCall); regPending is a call of Go one made
+	// that its exit finishes, as goPending is the stack form's.
+	regRuns    []jitRegRun
+	regPending jitGoPending
+	ssaEntries uint64
+	ssaRecords uint64
 	// backendPanics counts the compiles a backend refused for panicking.
 	backendPanics uint64
 	// inlined counts the callees the code placed inlines, and inlinedCode

@@ -30,6 +30,15 @@ function forin(n) { var k = n, s = 0; for (var i = 0; i < n; i++) s += i; for (k
 function holes(n) { var s = 0; for (var i = 0; i < n; i++) s += i; var t = [1, , 3, s]; t[1] += 1; return JSON.stringify(t) }
 function argsLen() { return arguments.length }
 function mixed(n) { var x = 0; for (var i = 0; i < n; i++) { x = i % 7 == 0 ? x + "a" : x + 1 } return x }
+function add2(a, b) { return a + b }
+function calls(n) { var s = 0; for (var i = 0; i < n; i++) { s = add2(s, i); s += Math.max(i, 1) } return s }
+function methods(n) { var p = new Point(1, 2), s = 0; for (var i = 0; i < n; i++) s += p.norm() + new Point(i, 1).x; return s }
+function boom(i) { if (i > 4) throw new RangeError("at " + i); return i }
+function callThrows(n) { var s = 0; try { for (var i = 0; i < n; i++) s += boom(i) } catch (e) { return e.message + s } return s }
+function callUncaught(n) { var s = 0; for (var i = 0; i < n; i++) s += boom(i); return s }
+var Odd = { [Symbol.hasInstance](x) { if (x > 5) throw new Error("odd " + x); return x % 2 == 1 } };
+function inst(n) { var p = new Point(1, 2), s = 0; for (var i = 0; i < n; i++) if (p instanceof Point && typeof p.x == typeof i) s += typeof s == "number" ? 1 : 0; return s + typeof p }
+function instThrows(n) { var s = 0; try { for (var i = 0; i < n; i++) if (i instanceof Odd) s++ } catch (e) { return e.message + s } return s }
 `
 
 // regNativeRuntimes are two runtimes that have run regNativeSrc in register
@@ -93,7 +102,8 @@ func TestJITRegNative(t *testing.T) {
 			}
 			rts := regNativeRuntimes(t, regNativeSrc)
 			natives, osrs := 0, 0
-			for _, name := range []string{"sum", "nested", "props", "strs", "counter", "thrower", "uncaught", "maker", "arr", "forin", "holes", "argsLen", "mixed"} {
+			for _, name := range []string{"sum", "nested", "props", "strs", "counter", "thrower", "uncaught", "maker", "arr", "forin", "holes", "argsLen", "mixed",
+				"calls", "methods", "callThrows", "callUncaught", "inst", "instThrows"} {
 				for i, n := range []float64{3, 5, 40, 2, 300, 7} {
 					var got, want string
 					for k, r := range rts {
@@ -124,6 +134,9 @@ func TestJITRegNative(t *testing.T) {
 			t.Logf("%d calls entered natively, %d by OSR; %+v", natives, osrs, st)
 			if natives == 0 || osrs == 0 || st.Entries == 0 {
 				t.Errorf("not run natively: %d calls, %d by OSR, %d entries", natives, osrs, st.Entries)
+			}
+			if st.GoCalls == 0 {
+				t.Errorf("no call made by Go from native code")
 			}
 		})
 	}

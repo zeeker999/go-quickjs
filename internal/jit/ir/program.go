@@ -439,6 +439,14 @@ type Instruction struct {
 	// native code there (ssa's GoHost), its Extra operands popped and its
 	// result, unless Dest is -1, at Dest.
 	Frame bool
+	// Window marks a Host of register code that is a call (call_w,
+	// call_method_w, new_w): its window's first register, the function's,
+	// at Left -- the receiver past it, then the Extra arguments -- and its
+	// result's register at Dest, which the new pipeline makes as the stack
+	// form's call (ssa's CallSite), its operands read from the registers;
+	// or a typeof, its operand at Left and no Extra; or an instanceof, its
+	// object at Left, its constructor at Right and Extra 1.
+	Window bool
 	// Generic marks a component of a register instruction's expansion
 	// (Program's Origin) that follows one that may have committed: it never
 	// leaves at its own state, which would run the instruction again from

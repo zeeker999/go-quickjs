@@ -4868,6 +4868,10 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	if ctx.Live == abi.LiveCall {
 		return r.jitGoCallNested(ctx, idx)
 	}
+	if ctx.Live == 0 && idx < len(s.regRuns) && s.regRuns[idx].f != nil && s.ssaCtxs[idx] == ctx {
+		// On a register frame (zzjit_zregnative.go).
+		return r.jitRegGoCall(ctx, idx)
+	}
 	if ctx.Live != 0 || idx >= len(s.goRuns) || s.goRuns[idx].f == nil || s.ssaCtxs[idx] != ctx {
 		return false
 	}

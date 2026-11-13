@@ -773,7 +773,8 @@ func (l *regLowering) lower(pc int) {
 		}
 		l.emit(ir.Instruction{Op: ir.Unary, Operator: o, Left: reg(b), Dest: int(a)}, false)
 	case bytecode.RTypeof:
-		host()
+		// Go's, from native code where the VM says so (ir's Window).
+		l.emit(ir.Instruction{Op: ir.Host, Window: true, Left: reg(b), Dest: int(a)}, false)
 	case bytecode.RJmp:
 		l.emit(ir.Instruction{Op: ir.Jump, Target: regTarget(pc, int32(w.BC()))}, true)
 	case bytecode.RJmpF, bytecode.RJmpT:
@@ -844,7 +845,7 @@ func (l *regLowering) lower(pc int) {
 		// Not marked Tail: the new pipeline reads a tail call's operands
 		// from the operand stack's top, which register code has none of;
 		// the register form's tail calls are Stage 3a-3's.
-		l.emit(ir.Instruction{Op: ir.Host, Extra: int(w.X()), When: op == bytecode.RCallMW}, false)
+		l.emit(ir.Instruction{Op: ir.Host, Extra: int(w.X()), When: op == bytecode.RCallMW, Window: true, Left: reg(a), Dest: int(b)}, false)
 	case bytecode.RClosureW:
 		l.emit(ir.Instruction{Op: ir.Closure, Dest: int(a), Key: w.BC()}, false)
 	case bytecode.RThrow:
@@ -858,7 +859,8 @@ func (l *regLowering) lower(pc int) {
 		}
 		host()
 	case bytecode.RInstanceOf:
-		host()
+		// Go's, from native code where the VM says so (ir's Window).
+		l.emit(ir.Instruction{Op: ir.Host, Window: true, Left: reg(b), Right: reg(c), Dest: int(a), Extra: 1}, false)
 	case bytecode.RIn:
 		// key in obj: Go's, called from native code where that runs nothing.
 		l.emit(ir.Instruction{Op: ir.HasProperty, Left: reg(b), Right: reg(c), Dest: int(a)}, false)

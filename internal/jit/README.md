@@ -1153,8 +1153,8 @@ evaluator over its program, `EvaluateHost` given a Runner backed by the
 VM (`regRunner`): what the evaluator would leave at -- a host operation,
 a guard that failed, a Generic instruction's slow path -- the VM runs on
 the frame's real registers, the whole register instruction, by the
-interpreter's own slow paths (`regSlow`, `regCallW`, `regCold` and the
-rest), exceptions to the frame's handlers by `regCatch`; and where the
+interpreter's own handlers (its handler from `regTable`, and its slow
+function from `regSlowTable` where the handler leaves it that), exceptions to the frame's handlers by `regCatch`; and where the
 evaluator leaves for good -- a return the evaluator cannot make, the
 budget -- `runReg` goes on with the frame from that register pc. That is
 what Stage 3a-3's native code's host exits and deoptimizations are to do.
@@ -1224,9 +1224,9 @@ registers live at its register pc, in the window, natively as it leaves
 escape analysis left unmade into the registers that name them
 (`jitRegMaterialize`). Then, by its kind (`jitRegRun`):
 - a host exit has Go run the whole register instruction at the exit's pc
-  by the interpreter's own slow paths (`regWhole`: `regSlow`, `regCallW`,
-  `regCold` and the rest, as runReg calls them, `f.pc` set as `regSlow`
-  sets it), an exception to the frame's handlers by `regCatch`; native code
+  by the interpreter's own handlers (`regWhole`: its handler from
+  `regTable` and its slow function from `regSlowTable`, as runReg and the
+  native handlers' exit stub run them), an exception to the frame's handlers by `regCatch`; native code
   goes on at the entry of the register pc the instruction went on to, and
   where the code has none, `runReg` runs the rest of the invocation from
   there;
@@ -1236,9 +1236,27 @@ escape analysis left unmade into the registers that name them
 - a poll is the interpreter's back-edge check, and native code goes on at
   the loop's header.
 
-Calls of Go from register code's native code find no frame of the VM's
-(`jitGoRun`'s is the stack form's), so those that need one refuse and
-leave it to an exit.
+**Calls of Go.** Register code's native code calls Go as the stack
+form's does (`jitRegFeedback`'s `GoCalls`): what needs no frame -- an
+addition, a concat, a leaf, a comparison, a poll -- is made from the words
+the code passes. A call, `call_w`'s, `call_method_w`'s or `new_w`'s, and a
+`typeof` are register code's own (`ir.Instruction`'s `Window`): the builder
+reads their operands from the window's registers, in the stack form's
+order, and writes the result to the instruction's register
+(`windowCall`); the feedback makes each call a call of Go (`NativeCalls`)
+but one in tail position, which the interpreter makes in constant space at
+a host exit. Go makes such a call on the run's register frame
+(`jitState`'s `regRuns`, `jitRegGoCall`), as the interpreter's slow path
+does (`regCallSlow`, `regConstruct`): the function, the receiver and the
+arguments put in a window of their own past the VM's stack's top -- never
+in the frame's, whose registers the code may still hold values in as it
+found them -- and the frame's pc past the call meanwhile. A call that
+threw, that the runtime stopped in, or after which the code was found
+invalid, its exit finishes (`regPending`, `regFinishCall`): the answer to
+the call's register, or the exception to the frame's handlers, never the
+call made again. The calls of Go that need the stack form's frame
+(`jitGoRun`'s) find none on a register run, refuse, and leave it to an
+exit.
 
 **On-stack replacement.** The build's entries at a loop's header (`Entry`'s
 `OSR`) are by the instruction its register pc lowers to first (`p.At`), so
@@ -1250,7 +1268,7 @@ its loops' headers by register pc (`jitRegEntry`'s `loops`, `loopEntry`).
 `regEnterW` makes it, and run natively from its start, or, by the evaluator
 with the VM up to the second time it reaches a loop's header, from there.
 `TestJITRegNative` (internal/vm) runs functions so, the collector seen idle
-and marking; `TestRegNativeCall` (internal/v8bench) runs the regDiff
+and marking; `TestRegNativeCall` (internal/regdiff) runs the regDiff
 corpus so, compiled at each function's first call, each answer compared
 with an ordinary call's; and `TestJITSameWorkWhileMarking` runs every test
 of the micro-benchmarks so as well.

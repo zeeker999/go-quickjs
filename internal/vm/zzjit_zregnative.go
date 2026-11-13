@@ -5,10 +5,12 @@ package vm
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"unsafe"
 
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
@@ -333,7 +335,7 @@ func (r *Runtime) jitRegRun(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) (
 			s.interpreted++
 			return r.runReg(f, c, rpc)
 		}
-		ctx, ret, ok := r.jitRegStretch(f, e, wb, ipc)
+		ctx, ret, ok := r.jitRegStretch(f, c, e, wb, ipc)
 		if !ok {
 			s.interpreted++
 			return r.runReg(f, c, rpc)
@@ -358,7 +360,19 @@ func (r *Runtime) jitRegRun(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) (
 			s.hosts++
 			r.jitRegMaterialize(f, e, wb)
 			f.pc = regSrc(c, exitPC) + 1
-			next, ran, err := r.regWhole(f, c, wb, exitPC)
+			var next int
+			var ran bool
+			var err error
+			if p := s.regPending; p.set && p.pc == exitPC {
+				// A call Go made from native code, which left after it
+				// (jitRegGoCall): what it answered goes to the frame, as
+				// the call's register instruction would have it.
+				s.regPending = jitGoPending{}
+				next, ran, err = r.regFinishCall(f, c, wb, exitPC, p.v, p.err)
+			} else {
+				s.noteRegHost(c, exitPC)
+				next, ran, err = r.regWhole(f, c, wb, exitPC)
+			}
 			if !ran {
 				s.interpreted++
 				return r.runReg(f, c, exitPC)
@@ -398,7 +412,7 @@ func (r *Runtime) jitRegRun(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) (
 // frame to Go (abi.ExitTable) applied here -- and, for a return, the value
 // returned, read before what the run kept is let go. ok is false where it
 // did not run: no context, or the code closed.
-func (r *Runtime) jitRegStretch(f *frame, e *jitRegEntry, wb, ipc int) (ctx *abi.Context, ret Value, ok bool) {
+func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc int) (ctx *abi.Context, ret Value, ok bool) {
 	s := r.jit
 	idx := s.ctxTop
 	if idx >= len(s.ssaCtxs)-1 && !r.jitGrowContexts() {
@@ -424,6 +438,12 @@ func (r *Runtime) jitRegStretch(f *frame, e *jitRegEntry, wb, ipc int) (ctx *abi
 		s.goRuns = append(s.goRuns, make([]jitGoRun, idx+1-len(s.goRuns))...)
 	}
 	s.goRuns[idx] = jitGoRun{}
+	// The register frame its calls of Go make theirs on (jitRegGoCall).
+	if idx >= len(s.regRuns) {
+		s.regRuns = append(s.regRuns, make([]jitRegRun, idx+1-len(s.regRuns))...)
+	}
+	s.regRuns[idx] = jitRegRun{f: f, c: c, e: e, wb: wb}
+	s.regPending = jitGoPending{}
 	s.entries++
 	s.ssaEntries++
 	saved, raised := r.stackTop, -1
@@ -462,12 +482,152 @@ func (r *Runtime) jitRegStretch(f *frame, e *jitRegEntry, wb, ipc int) (ctx *abi
 		ctx.RecordHigh = 0
 	}
 	s.goRuns[idx] = jitGoRun{}
+	s.regRuns[idx] = jitRegRun{}
 	s.ctxTop = top
 	e.runs--
 	if e.code == nil || err != nil {
 		return nil, Undefined, false
 	}
 	return ctx, ret, true
+}
+
+// jitRegRun is a register frame native code runs on, in a context
+// (jitState's regRuns): f, running c, its window at wb, in e's code.
+type jitRegRun struct {
+	f  *frame
+	c  *regCode
+	e  *jitRegEntry
+	wb int
+}
+
+// jitRegGoCall is a call of Go (ssa.GoCall) native code made from register
+// code makes at a typeof, which runs nothing, an instanceof, or a call,
+// call_w's, call_method_w's or new_w's, on the
+// register frame of the run in context idx, as the interpreter's slow path
+// makes it (regCallSlow, regConstruct), not leaving native code: the
+// function, the receiver and the arguments the code passed (abi.Context's
+// GoArgs) put in a window of their own past the VM's stack's top -- not in
+// the frame's, whose registers the code keeps values in as it found them
+// -- the frame's pc past the call meanwhile, as regCallW sets it, which a
+// stack trace shows. Its result goes to the call's keep cell. A call that
+// threw, or that the runtime stopped in, or after which the code was found
+// invalid, Go finishes at the exit native code then takes (regPending,
+// regFinishCall), the call not made again. A call in tail position, which
+// the interpreter makes in constant space, is no call of Go
+// (jitRegFeedback's NativeCalls).
+func (r *Runtime) jitRegGoCall(ctx *abi.Context, idx int) bool {
+	s := r.jit
+	run := s.regRuns[idx]
+	f, c := run.f, run.c
+	rpc := int(ctx.ExitPC)
+	if rpc >= len(c.rc.Code) {
+		return false
+	}
+	w := regAt(c.code, rpc)
+	op := w.Op()
+	argc := int(w.X())
+	kind := ctx.GoOp >> abi.GoOpKindShift & 0xff
+	if op == bytecode.RTypeof && kind == abi.GoCallTypeOf {
+		// typeof's name, as regTypeof makes it, which runs nothing.
+		*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = Str(r.typeofString(jitGoArg(ctx, 0)))
+		return true
+	}
+	switch {
+	case op == bytecode.RCallW && kind == 0, op == bytecode.RCallMW && kind == abi.GoCallMethod, op == bytecode.RNewW && kind == abi.GoCallNew:
+	case op == bytecode.RInstanceOf && kind == abi.GoCallInstanceOf:
+		// As regSlow makes it, by the site's cache: it may run code.
+		aux := int(c.rc.Aux[rpc])
+		if aux >= len(f.cl.ic) {
+			return false
+		}
+		f.pc = regSrc(c, rpc) + 1
+		last, shared := s.ssaCtx, s.ssaSharedGen
+		s.goCalls++
+		yes, err := r.instanceOfAt(&f.cl.ic[aux], jitGoArg(ctx, 0), jitGoArg(ctx, 1))
+		s.ssaCtx = last
+		if s.ssaSharedGen != shared {
+			r.jitShareContexts(idx, f)
+		}
+		if err != nil || r.stopped != nil || run.e.invalid {
+			s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: Bool(yes), err: err}
+			return false
+		}
+		*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = Bool(yes)
+		return true
+	default:
+		return false
+	}
+	if int(ctx.GoOp>>abi.GoOpArgcShift&0xff) != argc {
+		return false
+	}
+	top := r.stackTop
+	end := top + 2 + argc
+	if end > len(r.stack) {
+		return false
+	}
+	at := 0
+	this := Undefined
+	if op == bytecode.RCallMW {
+		this, at = jitGoArg(ctx, 0), 1
+	}
+	r.stack[top] = jitGoArg(ctx, at)
+	r.stack[top+1] = this
+	for i := range argc {
+		r.stack[top+2+i] = jitGoArg(ctx, at+1+i)
+	}
+	r.stackTop, r.stackHigh = end, max(r.stackHigh, end)
+	s.goCalls++
+	f.pc = regSrc(c, rpc) + 1
+	last, shared := s.ssaCtx, s.ssaSharedGen
+	goCallDepth := s.goCallDepth
+	s.goCallDepth = r.frameDepth + 1
+	var v Value
+	var err error
+	if op == bytecode.RNewW {
+		v, err = r.regConstruct(r.stack[top], top, argc)
+	} else {
+		v, err = r.regCallSlow(f, c, w, top, rpc)
+		if err == errTailCall {
+			// The callee's frame ended in a tail call.
+			v, err = r.regTailRest()
+		}
+	}
+	s.goCallDepth = goCallDepth
+	jitClearArgs(r.stack, top, end)
+	r.stackTop = top
+	s.ssaCtx = last
+	if s.ssaSharedGen != shared {
+		r.jitShareContexts(idx, f)
+	}
+	if err != nil || r.stopped != nil || run.e.invalid {
+		s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: v, err: err}
+		return false
+	}
+	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
+	return true
+}
+
+// regFinishCall finishes, on f's registers, a window at wb, the call at
+// register pc rpc of c that Go made for native code (jitRegGoCall) with v
+// or err as its answer, as regCallW finishes one: its value to its
+// register, its exception to the frame's handlers (regCatch). It reports
+// as regWhole does.
+func (r *Runtime) regFinishCall(f *frame, c *regCode, wb, rpc int, v Value, err error) (next int, ok bool, _ error) {
+	w := regAt(c.code, rpc)
+	k := regKept{pc: rpc + 1}
+	if err == nil {
+		dest := int(w.B())
+		if op := w.Op(); op == bytecode.RInstanceOf || op == bytecode.RTypeof {
+			dest = int(w.A())
+		}
+		r.stack[wb+dest] = v
+		return k.pc, true, nil
+	}
+	h := r.regCatch(f, c, &k, regWindow(r.stack, wb), err)
+	if h < 0 {
+		return 0, true, err
+	}
+	return h, true, nil
 }
 
 // RegNativeResult is how a call's native run went (RegNativeCall).
@@ -491,6 +651,11 @@ type RegNativeResult struct {
 // interpreter finished, the records Go applied, the objects it made.
 type RegNativeStats struct {
 	Entries, Hosts, Guards, Polls, Interpreted, Records, Materialized uint64
+	// GoCalls counts the calls of Go native code made that ran script, a
+	// call's on the register frame among them (jitRegGoCall).
+	GoCalls uint64
+	// HostOps is Hosts by the register instruction Go ran whole.
+	HostOps map[string]uint64
 }
 
 // RegNativeStats reports r's counts (RegNativeStats); zero before any.
@@ -500,7 +665,21 @@ func (r *Runtime) RegNativeStats() RegNativeStats {
 		return RegNativeStats{}
 	}
 	return RegNativeStats{Entries: s.ssaEntries, Hosts: s.hosts, Guards: s.guards, Polls: s.budgets,
-		Interpreted: s.interpreted, Records: s.ssaRecords, Materialized: s.materialized}
+		Interpreted: s.interpreted, Records: s.ssaRecords, Materialized: s.materialized, GoCalls: s.goCalls, HostOps: maps.Clone(s.regHostOps)}
+}
+
+// noteRegHost counts a host exit at register pc rpc of c by its register
+// instruction (RegNativeStats' HostOps).
+func (s *jitState) noteRegHost(c *regCode, rpc int) {
+	if rpc < 0 || rpc >= len(c.rc.Code) {
+		return
+	}
+	w := regAt(c.code, rpc)
+	k := w.Op().String()
+	if s.regHostOps == nil {
+		s.regHostOps = map[string]uint64{}
+	}
+	s.regHostOps[k]++
 }
 
 // RegNativeCall calls fn, a function of r's, with args, as a call from Go
@@ -518,8 +697,10 @@ func (r *Runtime) RegNativeCall(fnv Value, args []Value, osr bool) RegNativeResu
 		fd = o.fn()
 	}
 	var c *regCode
-	if fd != nil && fd.closure != nil && !fd.bound && fd.extra == nil && fd.treeCall != nil && fd.closure.realm == r.Realm {
-		c = fd.treeCall.reg
+	if fd != nil && fd.closure != nil && !fd.bound && fd.extra == nil && fd.closure.realm == r.Realm {
+		if c = fd.closure.reg; c == nil {
+			c = r.regOf(fd.closure)
+		}
 	}
 	plain := func(why string) RegNativeResult {
 		v, err := r.Call(fnv, Undefined, args)

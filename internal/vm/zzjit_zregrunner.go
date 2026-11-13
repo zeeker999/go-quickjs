@@ -269,8 +269,10 @@ func (r *Runtime) RegLowerCall(fnv Value, args []Value, budget uint64) RegLowerR
 		fd = o.fn()
 	}
 	var c *regCode
-	if fd != nil && fd.closure != nil && !fd.bound && fd.extra == nil && fd.treeCall != nil && fd.closure.realm == r.Realm {
-		c = fd.treeCall.reg
+	if fd != nil && fd.closure != nil && !fd.bound && fd.extra == nil && fd.closure.realm == r.Realm {
+		if c = fd.closure.reg; c == nil {
+			c = r.regOf(fd.closure)
+		}
 	}
 	plain := func(why string) RegLowerResult {
 		v, err := r.Call(fnv, Undefined, args)

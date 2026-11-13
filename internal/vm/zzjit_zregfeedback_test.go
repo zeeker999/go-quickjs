@@ -160,8 +160,22 @@ for (var k = 0; k < 20; k++) work(pt, 5);
 			}
 			bigs++
 		}
-		if f.Generic(pc) || f.EntryGeneric(pc) || f.NativeCalls(pc) != nil {
+		if f.Generic(pc) || f.EntryGeneric(pc) {
 			t.Errorf("pc %d: feedback register code does not record yet", pc)
+		}
+		// A call is a call of Go of its shape (jitRegGoCall); nothing else
+		// but a typeof and an instanceof is.
+		sites := f.NativeCalls(pc)
+		switch w.Op() {
+		case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW:
+			if len(sites) != 1 || sites[0].Go != ssa.GoCall || sites[0].Argc != int(w.X()) || sites[0].Method != (w.Op() == bytecode.RCallMW) {
+				t.Errorf("pc %d: call %s: sites %+v", pc, cl.fn.RegCode().Format(int(p.Origin[pc])), sites)
+			}
+		case bytecode.RTypeof, bytecode.RInstanceOf:
+		default:
+			if sites != nil {
+				t.Errorf("pc %d: %s: native calls %+v", pc, cl.fn.RegCode().Format(int(p.Origin[pc])), sites)
+			}
 		}
 	}
 	// p.x += 1 is a read and a store; p.norm a method's read; p.y and the

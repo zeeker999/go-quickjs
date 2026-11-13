@@ -6,6 +6,7 @@ import (
 	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
@@ -275,6 +276,43 @@ func (f *jitRegFeedback) EntryGeneric(pc int) bool { return false }
 // the stack form's JIT lowers from its stack code (Stage 3a-3).
 func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) { return ssa.InlineSite{}, false }
 
-// NativeCalls is ssa.Feedback's: nothing yet, as Inline: a native call
-// links the callee's code, compiled from its stack form.
-func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite { return nil }
+// GoCalls is ssa.GoFeedback's: native code made from register code calls
+// Go, which makes what needs no frame of the VM's from what the code
+// passes it, and a call on the register frame (jitRegGoCall); what needs
+// the stack form's frame, a call of Go refuses, and the code leaves there.
+func (f *jitRegFeedback) GoCalls() bool { return true }
+
+// NativeCalls is ssa.Feedback's: a call -- call_w's, call_method_w's or
+// new_w's, its operands no more than a call of Go takes -- is a call of
+// Go (ssa.GoCall), which makes it on the register frame without leaving
+// native code (jitRegGoCall). A call in tail position is not, which the
+// interpreter makes in constant space at a host exit.
+func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
+	w, op, ok := f.at(pc)
+	if !ok || op != ir.Host || !f.p.Code[pc].Window {
+		return nil
+	}
+	switch w.Op() {
+	case bytecode.RTypeof:
+		// Its name, which Go makes from native code.
+		return []ssa.CallSite{{Go: ssa.GoCall, TypeOf: true, ThisSlot: -1}}
+	case bytecode.RInstanceOf:
+		// Go's, from native code, by the site's cache, as the interpreter
+		// makes it: it may run code, a Symbol.hasInstance method or a
+		// proxy's trap.
+		return []ssa.CallSite{{Go: ssa.GoCall, InstanceOf: true, Argc: 1, ThisSlot: -1}}
+	}
+	rpc := int(f.p.Origin[pc])
+	if rpc < len(f.rc.Marks) && f.rc.Marks[rpc]&bytecode.RMarkTail != 0 {
+		return nil
+	}
+	argc, method := int(w.X()), w.Op() == bytecode.RCallMW
+	n := argc + 1
+	if method {
+		n++
+	}
+	if n > abi.MaxGoArgs {
+		return nil
+	}
+	return []ssa.CallSite{{Go: ssa.GoCall, Argc: argc, Method: method, New: w.Op() == bytecode.RNewW, ThisSlot: -1}}
+}

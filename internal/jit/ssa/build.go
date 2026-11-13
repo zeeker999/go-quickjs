@@ -3252,8 +3252,11 @@ func (b *builder) hostOf(pc int) bool {
 		}
 		return !b.cur.site.ReadsArguments || b.generic(pc)
 	case ir.IterStep:
-		// A call of Go (GoCall, Step), where the VM answers it.
-		return !b.goCalls()
+		// A call of Go (GoCall, Step), where the VM answers it. Register
+		// code's loop step is Go's: it writes its register only where the
+		// loop goes on, which the step's one result, its done the
+		// uninitialized value, would not keep to.
+		return !b.goCalls() || b.p.Origin != nil && !b.p.Code[pc].When
 	case ir.Closure, ir.CloseUpvalues:
 		// A call of Go (GoClosure, GoClose), on the function's own frame --
 		// a closure's with a keep cell for it (closureKeep).
@@ -8014,6 +8017,10 @@ func (b *builder) instruction(blk *Block, pc int) {
 			b.inlineCall(blk, pc, fr, guard, state)
 			break
 		}
+		if calls := b.callsAt(pc); calls != nil && b.cur == b.root && in.Window {
+			b.windowCall(blk, pc, in, calls, guard)
+			break
+		}
 		if calls := b.callsAt(pc); calls != nil && b.cur == b.root {
 			// The call's operands, from the receiver or the function on; its
 			// result is the slot below them, its pointer word kept.
@@ -8091,6 +8098,47 @@ func (b *builder) instruction(blk *Block, pc int) {
 		if in.Suspend && b.cur == b.root {
 			blk.YieldHandlers, blk.Yield = b.handlersAt(pc)
 		}
+	}
+}
+
+// windowCall makes register code's call at pc, in (ir.Instruction's
+// Window), by calls, as the stack form's is made: its operands read from
+// the window's registers in the stack form's order -- a method's receiver,
+// the function, the arguments; a plain call's and a construction's
+// function and arguments, register 1 of the window being no operand of
+// theirs; a typeof's operand; an instanceof's object and constructor --
+// and its result, kept in its cell, written to its register.
+func (b *builder) windowCall(blk *Block, pc int, in ir.Instruction, calls []*CallSite, guard func(Op, Type, ir.ExitKind, ...*Value) *Value) {
+	f, a := b.f, in.Left.Slot
+	args := make([]*Value, 0, in.Extra+2)
+	switch {
+	case calls[0].InstanceOf:
+		args = append(args, b.read(a, blk), b.read(in.Right.Slot, blk))
+	case calls[0].TypeOf:
+		args = append(args, b.read(a, blk))
+	}
+	if calls[0].Method {
+		args = append(args, b.read(a+1, blk))
+	}
+	if !calls[0].InstanceOf && !calls[0].TypeOf {
+		args = append(args, b.read(a, blk))
+		for i := range in.Extra {
+			args = append(args, b.read(a+2+i, blk))
+		}
+	}
+	call := guard(OpCall, Tagged, ir.HostExit, args...)
+	f.cache(call).Calls, call.Index = calls, b.callKeepAt(pc)
+	if calls[0].Go == GoCall {
+		// Go makes it, which counts it as an exit's would.
+		f.HostsLeft = append(f.HostsLeft, pc)
+	}
+	cell := f.newValue(blk, OpCallCell, Source, call)
+	r := f.newValue(blk, OpKept, Tagged, cell, call)
+	r.Shadow = cell
+	b.assign(in.Dest, blk, r)
+	// The callee may have assigned a captured binding.
+	if b.hasCells() {
+		b.reloadAfterCall(blk)
 	}
 }
 
@@ -8188,7 +8236,18 @@ func (b *builder) nativeCalls(pc int) []*CallSite {
 		// object: left out, an arrow reading its this, learned at a miss,
 		// missed at every call -- AWFY CD's Vector.forEach, 45,000 exits a
 		// run.
-		if site.Argc < 0 || depth < operands || after != depth-operands+1 || site.ThisSlot >= 0 && !site.Method && site.Pool == 0 && !site.ArrowThis && !site.Super && !site.PlainThis && !site.Forward {
+		if in := &b.p.Code[pc]; in.Window {
+			// Register code's call: its operands are its window's
+			// registers, not the operand stack's top (windowCall), the
+			// site's shape the instruction's.
+			if site.Argc != in.Extra || site.Method != in.When || site.Super || site.Instr != 0 || site.Forward || site.Accessor != AccessorNone || site.Step || site.ForOf || site.ForIn ||
+				site.TypeOf && (in.Extra != 0 || site.Go != GoCall) || site.InstanceOf && (in.Extra != 1 || site.Go != GoCall) || site.Literal || site.Via != 0 {
+				continue
+			}
+		} else if site.Argc < 0 || depth < operands || after != depth-operands+1 {
+			continue
+		}
+		if site.ThisSlot >= 0 && !site.Method && site.Pool == 0 && !site.ArrowThis && !site.Super && !site.PlainThis && !site.Forward {
 			continue
 		}
 		if site.ThisSlot < 0 {
