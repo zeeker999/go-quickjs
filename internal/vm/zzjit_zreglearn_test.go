@@ -108,6 +108,12 @@ func TestJITRegPolymorphicLearned(t *testing.T) {
 		t.Fatal(err)
 	}
 	regLearnRun(sr, 3000)
+	// Its compiles handed to the background (QJS_JIT_STRESS's background)
+	// installed before its code is read: the register form's are made at
+	// once.
+	for sr.jit != nil && sr.jit.inFlight() {
+		sr.jitDrain()
+	}
 	for _, c := range []struct {
 		name string
 		op   ir.Op
