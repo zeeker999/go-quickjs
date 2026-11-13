@@ -577,7 +577,10 @@ compare-and-branches, of registers, immediates and upvalues; truthiness
 of a boolean, a number, an object, a string, undefined and null; `==`
 and `!=` of numbers, of one word kind and of undefined or null against
 anything; `===` and `!==` (two strings by identity and length, and two flat ones
-of one length by their text, eight bytes at a time); moves, constants, upvalues read and written,
+of one length by their text, eight bytes at a time, up to 1,024 bytes:
+a longer text is Go's, so that an exit reads the counters a host's stop
+zeroes, which a loop comparing it each turn would not otherwise see until
+its budget ran out); moves, constants, upvalues read and written,
 and globals read and written by their site; property reads and writes by
 the site's cache, its own entry or the entries of the shapes it met
 before (`propPoly`), and a property added by the transition it

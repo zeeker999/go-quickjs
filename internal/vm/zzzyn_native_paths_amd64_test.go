@@ -297,7 +297,7 @@ func TestRegNativeArrayAppend(t *testing.T) {
 func TestRegNativeStringEquals(t *testing.T) {
 	nativeCheck(t, `
 		var out = []
-		var strs = ["", "a", "b", "é", "ab", "abcdefgh", "abcdefgi", "abcdefghi", "abcdefghj", "bbcdefghi", "ünïcödé", "ünïcödè", "\ud83d", "\ude00", "😀", "\ud83d\ude00", "x".repeat(17), "x".repeat(16) + "y", String.fromCharCode(97, 98)]
+		var strs = ["", "a", "b", "é", "ab", "abcdefgh", "abcdefgi", "abcdefghi", "abcdefghj", "bbcdefghi", "ünïcödé", "ünïcödè", "\ud83d", "\ude00", "😀", "\ud83d\ude00", "x".repeat(17), "x".repeat(16) + "y", String.fromCharCode(97, 98), "z".repeat(2000), "z".repeat(1999) + "y", "z".repeat(1024)]
 		function eq() { var r = ""; for (var x of strs) for (var y of strs) { r += x === y ? 1 : 0; if (x !== y) r += "!" } return r }
 		out.push(eq())
 		var rope = "ab"; rope += "cdefgh"

@@ -1483,6 +1483,9 @@ func (g *nativeGen) noIndexKeys(obj Reg) {
 	a.Bind(ok)
 }
 
+// nativeFlatEqMax is the longest text flatEq compares, in bytes.
+const nativeFlatEqMax = 1024
+
 // flatEq goes to eq or ne as the strings at R9 and R8, of one length,
 // are equal or not, where both are flat: their text compared, as Equals
 // compares it, eight bytes at a time; a rope exits. RAX is read again
@@ -1497,6 +1500,12 @@ func (g *nativeGen) flatEq(eq, ne Label) {
 	a.Load(RCX, R9, offStrS+8)
 	a.CmpMem(RCX, R8, offStrS+8, true)
 	a.Jcc(CondNE, differ)
+	// A long text is Go's: the exit reads the runtime's counters again,
+	// which a host's stop zeroes, as a loop that compares it each turn
+	// would otherwise not notice until its budget ran out
+	// (TestSlowTurnsAreInterruptible).
+	a.OpImm(Cmp, RCX, nativeFlatEqMax, true)
+	a.Jcc(CondA, g.exit)
 	a.Load(RSI, R9, offStrS)
 	a.Load(RDX, R8, offStrS)
 	a.Bind(loop)
