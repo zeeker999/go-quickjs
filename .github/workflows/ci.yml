@@ -358,3 +358,6 @@ jobs:
       # settings.
       - name: Test compiling in the background
         run: go test -tags quickjs_jit -race -count=1 -timeout 15m -run 'Background|Differential' ./internal/vm .
+
+      - name: Test the native handlers (throwaway)
+        run: go test -race -count=1 -timeout 15m -run 'TestRegNative|TestDroppedRealms|TestRealm' ./internal/vm
