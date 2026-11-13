@@ -102,52 +102,64 @@ func TestRegNativeGenerated(t *testing.T) {
 }
 
 const (
-	ncIP       = int32(unsafe.Offsetof(nativeCtx{}.ip))
-	ncRegs     = int32(unsafe.Offsetof(nativeCtx{}.regs))
-	ncTable    = int32(unsafe.Offsetof(nativeCtx{}.table))
-	ncIC       = int32(unsafe.Offsetof(nativeCtx{}.ic))
-	ncBudget   = int32(unsafe.Offsetof(nativeCtx{}.budget))
-	ncObjBits  = int32(unsafe.Offsetof(nativeCtx{}.objBits))
-	ncTagBase  = int32(unsafe.Offsetof(nativeCtx{}.tagBase))
-	ncOne      = int32(unsafe.Offsetof(nativeCtx{}.one))
-	ncNaN      = int32(unsafe.Offsetof(nativeCtx{}.nan))
-	ncHole     = int32(unsafe.Offsetof(nativeCtx{}.hole))
-	ncUndef    = int32(unsafe.Offsetof(nativeCtx{}.undef))
-	ncTrue     = int32(unsafe.Offsetof(nativeCtx{}.trueB))
-	ncFalse    = int32(unsafe.Offsetof(nativeCtx{}.falseB))
-	ncWB       = int32(unsafe.Offsetof(nativeCtx{}.wb))
-	ncStore    = int32(unsafe.Offsetof(nativeCtx{}.storeRef))
-	ncEpoch    = int32(unsafe.Offsetof(nativeCtx{}.epoch))
-	ncCodeBase = int32(unsafe.Offsetof(nativeCtx{}.codeBase))
-	ncRC       = int32(unsafe.Offsetof(nativeCtx{}.rc))
-	ncNF       = int32(unsafe.Offsetof(nativeCtx{}.nf))
-	ncDepth    = int32(unsafe.Offsetof(nativeCtx{}.depth))
-	ncRT       = int32(unsafe.Offsetof(nativeCtx{}.rt))
-	ncCC       = int32(unsafe.Offsetof(nativeCtx{}.cc))
-	ncCCBase   = int32(unsafe.Offsetof(nativeCtx{}.ccBase))
-	ncMade     = int32(unsafe.Offsetof(nativeCtx{}.made))
-	ncFilled   = int32(unsafe.Offsetof(nativeCtx{}.filled))
-	ncTopOK    = int32(unsafe.Offsetof(nativeCtx{}.topOK))
-	ncRetDone  = int32(unsafe.Offsetof(nativeCtx{}.retDone))
-	ncStrBits  = int32(unsafe.Offsetof(nativeCtx{}.strBits))
-	ncTypeofs  = int32(unsafe.Offsetof(nativeCtx{}.typeofs))
-	ncFuncT    = int32(unsafe.Offsetof(nativeCtx{}.funcType))
-	ncProxyT   = int32(unsafe.Offsetof(nativeCtx{}.proxyType))
-	ncTypedT   = int32(unsafe.Offsetof(nativeCtx{}.typedType))
-	ncTypedEp  = int32(unsafe.Offsetof(nativeCtx{}.typedEpoch))
-	ncHas      = int32(unsafe.Offsetof(nativeCtx{}.has))
-	ncBigHigh  = int32(unsafe.Offsetof(nativeCtx{}.bigHigh))
-	ncBigHighX = int32(unsafe.Offsetof(nativeCtx{}.bigHighX))
-	ncNull     = int32(unsafe.Offsetof(nativeCtx{}.null))
-	ncUninit   = int32(unsafe.Offsetof(nativeCtx{}.uninit))
-	ncEmptyStr = int32(unsafe.Offsetof(nativeCtx{}.emptyStr))
-	ncSetterNx = int32(unsafe.Offsetof(nativeCtx{}.setterNext))
-	ncPolyEnt  = int32(unsafe.Offsetof(nativeCtx{}.polyEntries))
-	ncScratch  = int32(unsafe.Offsetof(nativeCtx{}.scratch))
-	ncFrames   = int32(unsafe.Offsetof(nativeCtx{}.frames))
-	ncCap      = int32(unsafe.Offsetof(nativeCtx{}.cap))
-	ncFV       = int32(unsafe.Offsetof(nativeCtx{}.fv))
-	recSize    = int32(unsafe.Sizeof(nativeRec{}))
+	ncIP        = int32(unsafe.Offsetof(nativeCtx{}.ip))
+	ncPC        = int32(unsafe.Offsetof(nativeCtx{}.pc))
+	ncTop       = int32(unsafe.Offsetof(nativeCtx{}.top))
+	ncGoTable   = int32(unsafe.Offsetof(nativeCtx{}.goTable))
+	ncSlowTable = int32(unsafe.Offsetof(nativeCtx{}.slowTable))
+	ncCallH     = int32(unsafe.Offsetof(nativeCtx{}.callH))
+	ncAfter     = int32(unsafe.Offsetof(nativeCtx{}.after))
+	ncCntExits  = int32(unsafe.Offsetof(nativeCtx{}.cntExits))
+	ncEnded     = int32(unsafe.Offsetof(nativeCtx{}.ended))
+	ncProtoStr  = int32(unsafe.Offsetof(nativeCtx{}.protoStr))
+	ncProtoNum  = int32(unsafe.Offsetof(nativeCtx{}.protoNum))
+	ncPrimProps = int32(unsafe.Offsetof(nativeCtx{}.primProps))
+	ncW         = int32(unsafe.Offsetof(nativeCtx{}.w))
+	ncRegs      = int32(unsafe.Offsetof(nativeCtx{}.regs))
+	ncTable     = int32(unsafe.Offsetof(nativeCtx{}.table))
+	ncIC        = int32(unsafe.Offsetof(nativeCtx{}.ic))
+	ncBudget    = int32(unsafe.Offsetof(nativeCtx{}.budget))
+	ncObjBits   = int32(unsafe.Offsetof(nativeCtx{}.objBits))
+	ncTagBase   = int32(unsafe.Offsetof(nativeCtx{}.tagBase))
+	ncOne       = int32(unsafe.Offsetof(nativeCtx{}.one))
+	ncNaN       = int32(unsafe.Offsetof(nativeCtx{}.nan))
+	ncHole      = int32(unsafe.Offsetof(nativeCtx{}.hole))
+	ncUndef     = int32(unsafe.Offsetof(nativeCtx{}.undef))
+	ncTrue      = int32(unsafe.Offsetof(nativeCtx{}.trueB))
+	ncFalse     = int32(unsafe.Offsetof(nativeCtx{}.falseB))
+	ncWB        = int32(unsafe.Offsetof(nativeCtx{}.wb))
+	ncStore     = int32(unsafe.Offsetof(nativeCtx{}.storeRef))
+	ncEpoch     = int32(unsafe.Offsetof(nativeCtx{}.epoch))
+	ncCodeBase  = int32(unsafe.Offsetof(nativeCtx{}.codeBase))
+	ncRC        = int32(unsafe.Offsetof(nativeCtx{}.rc))
+	ncNF        = int32(unsafe.Offsetof(nativeCtx{}.nf))
+	ncDepth     = int32(unsafe.Offsetof(nativeCtx{}.depth))
+	ncRT        = int32(unsafe.Offsetof(nativeCtx{}.rt))
+	ncCC        = int32(unsafe.Offsetof(nativeCtx{}.cc))
+	ncCCBase    = int32(unsafe.Offsetof(nativeCtx{}.ccBase))
+	ncMade      = int32(unsafe.Offsetof(nativeCtx{}.made))
+	ncFilled    = int32(unsafe.Offsetof(nativeCtx{}.filled))
+	ncTopOK     = int32(unsafe.Offsetof(nativeCtx{}.topOK))
+	ncRetDone   = int32(unsafe.Offsetof(nativeCtx{}.retDone))
+	ncStrBits   = int32(unsafe.Offsetof(nativeCtx{}.strBits))
+	ncTypeofs   = int32(unsafe.Offsetof(nativeCtx{}.typeofs))
+	ncFuncT     = int32(unsafe.Offsetof(nativeCtx{}.funcType))
+	ncProxyT    = int32(unsafe.Offsetof(nativeCtx{}.proxyType))
+	ncTypedT    = int32(unsafe.Offsetof(nativeCtx{}.typedType))
+	ncTypedEp   = int32(unsafe.Offsetof(nativeCtx{}.typedEpoch))
+	ncHas       = int32(unsafe.Offsetof(nativeCtx{}.has))
+	ncBigHigh   = int32(unsafe.Offsetof(nativeCtx{}.bigHigh))
+	ncBigHighX  = int32(unsafe.Offsetof(nativeCtx{}.bigHighX))
+	ncNull      = int32(unsafe.Offsetof(nativeCtx{}.null))
+	ncUninit    = int32(unsafe.Offsetof(nativeCtx{}.uninit))
+	ncEmptyStr  = int32(unsafe.Offsetof(nativeCtx{}.emptyStr))
+	ncSetterNx  = int32(unsafe.Offsetof(nativeCtx{}.setterNext))
+	ncPolyEnt   = int32(unsafe.Offsetof(nativeCtx{}.polyEntries))
+	ncScratch   = int32(unsafe.Offsetof(nativeCtx{}.scratch))
+	ncFrames    = int32(unsafe.Offsetof(nativeCtx{}.frames))
+	ncCap       = int32(unsafe.Offsetof(nativeCtx{}.cap))
+	ncFV        = int32(unsafe.Offsetof(nativeCtx{}.fv))
+	recSize     = int32(unsafe.Sizeof(nativeRec{}))
 )
 
 // scr is scratch word i.
@@ -170,6 +182,9 @@ var nativeTopFields = [][2]int32{
 type nativeGen struct {
 	a    *Asm
 	exit Label
+	// exitRet is the exit that returns to nativeRun whatever the state:
+	// the base frame's return, a call the frame stack has no room for.
+	exitRet Label
 	// exits are the call handler's numbered exits (ex), which say in
 	// the scratch's last word which check left (QJS_DISPDBG).
 	exits []Label
@@ -535,6 +550,205 @@ func (g *nativeGen) arith(op SSE, operand int) {
 		a.Bind(big)
 		g.bigArith(op)
 	}
+}
+
+// exitStub is the exit, where the instruction at RBX is left to Go: its
+// Go handler called, by nativeCallH, in the top frame's state where Go has
+// made it (topOK), and where it gives back ^pc, its slow function; the
+// code goes on at the pc they give, or, where the frame has ended
+// (regDone), returns to nativeRun with ended set. Where Go has not made
+// the top frame's state -- the first exit after a call or a return the
+// code made itself -- it returns to nativeRun, which makes it and runs
+// the instruction. The instruction, its index and the budget are written
+// to the context either way; the budget is the runtime's backEdges across
+// the call.
+func (g *nativeGen) exitStub() {
+	a := g.a
+	slow, after, afterSlow, back, end, noCount := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
+	a.Align(16)
+	a.Bind(g.exit)
+	a.Store(RDI, ncIP, RBX)
+	a.Store(RDI, ncBudget, R11)
+	a.Load(RAX, RBX, 0)
+	a.Store(RDI, ncW, RAX)
+	a.MovRR(RCX, RBX)
+	a.Load(RDX, RDI, ncCodeBase)
+	a.Op(Sub, RCX, RDX, true)
+	a.ShiftImm(Shr, RCX, 3, true)
+	a.Store(RDI, ncPC, RCX)
+	a.CmpMemImm8(RDI, ncTopOK, 0)
+	a.Jcc(CondE, slow)
+	// Counted where a test counts.
+	a.Load(RDX, RDI, ncCntExits)
+	a.Op(Test, RDX, RDX, true)
+	a.Jcc(CondE, noCount)
+	a.MovZX8(R8, RAX)
+	a.LeaIdx(RDX, RDX, R8, 8, 0)
+	a.LockIncMem(RDX, 0)
+	a.Bind(noCount)
+	a.Load(RDX, RDI, ncRT)
+	a.Store(RDX, offRtBackEdges, R11)
+	a.LeaLabel(R8, after)
+	a.Store(RDI, ncAfter, R8)
+	// handler(st.regs, w, pc, st): the func value in DX.
+	a.MovRR(RBX, RAX)
+	a.MovZX8(RDX, RAX)
+	a.Load(R8, RDI, ncGoTable)
+	a.LoadIdx(RDX, R8, RDX, 8, 0)
+	a.Load(RSI, RDI, ncTop)
+	a.Load(RAX, RSI, offStRegs)
+	a.JmpMem(RDI, ncCallH)
+	a.Bind(after)
+	a.Op(Test, RAX, RAX, true)
+	a.Jcc(CondNS, back)
+	a.MovImm(RCX, uint64(1)<<63)
+	a.Op(Cmp, RAX, RCX, true)
+	a.Jcc(CondE, end)
+	// ^pc: the slow function of the instruction at pc.
+	a.LeaLabel(R8, afterSlow)
+	a.Store(RDI, ncAfter, R8)
+	a.Op(Xor, RCX, RCX, true)
+	a.Op(Sub, RCX, RAX, true)
+	a.OpImm(Sub, RCX, 1, true)
+	a.Load(R8, RDI, ncCodeBase)
+	a.LoadIdx(RBX, R8, RCX, 8, 0)
+	a.MovZX8(RDX, RBX)
+	a.Load(R8, RDI, ncSlowTable)
+	a.LoadIdx(RDX, R8, RDX, 8, 0)
+	a.Load(RSI, RDI, ncTop)
+	a.Load(RAX, RSI, offStRegs)
+	a.JmpMem(RDI, ncCallH)
+	a.Bind(afterSlow)
+	a.Op(Test, RAX, RAX, true)
+	a.Jcc(CondS, end)
+	// On at pc, the pinned registers put back, the budget the runtime's.
+	a.Bind(back)
+	a.Load(RDX, RDI, ncRT)
+	a.Load(R11, RDX, offRtBackEdges)
+	a.Load(RBX, RDI, ncCodeBase)
+	a.LeaIdx(RBX, RBX, RAX, 8, 0)
+	a.Load(R12, RDI, ncRegs)
+	a.Load(R13, RDI, ncTable)
+	a.Load(R15, RDI, ncIC)
+	a.Load(R10, RDI, ncTagBase)
+	g.dispatch()
+	// The frame ended: nativeRun ends it, the budget the runtime's.
+	a.Bind(end)
+	a.StoreImm(RDI, ncEnded, 1)
+	a.Load(RDX, RDI, ncRT)
+	a.Load(R11, RDX, offRtBackEdges)
+	a.Store(RDI, ncBudget, R11)
+	a.Bind(slow)
+	a.Ret()
+	// exitRet: the instruction, its index and the budget, and back to
+	// nativeRun.
+	a.Align(16)
+	a.Bind(g.exitRet)
+	a.Store(RDI, ncIP, RBX)
+	a.Store(RDI, ncBudget, R11)
+	a.Load(RAX, RBX, 0)
+	a.Store(RDI, ncW, RAX)
+	a.MovRR(RCX, RBX)
+	a.Load(RDX, RDI, ncCodeBase)
+	a.Op(Sub, RCX, RDX, true)
+	a.ShiftImm(Shr, RCX, 3, true)
+	a.Store(RDI, ncPC, RCX)
+	a.Ret()
+}
+
+// primMethod is get_method_w of a string's or a number's method: its
+// prototype's data property that the realm's cache of them remembers
+// (primProps), as regGetMethod reads it; R[A] the method, R[A+1] the
+// receiver. The receiver's words are in R9 and at the window's offset in
+// RSI; anything else exits.
+func (g *nativeGen) primMethod() {
+	a := g.a
+	num, have := a.NewLabel(), a.NewLabel()
+	a.Store(RDI, scr(sV0), R9)
+	a.LoadIdx(R8, R12, RSI, 1, 8)
+	a.Store(RDI, scr(sV1), R8)
+	// The realm running now, the Runtime's first word.
+	a.Load(RDX, RDI, ncRT)
+	a.Load(RDX, RDX, rtRel(0))
+	a.Op(Cmp, R9, R10, true)
+	a.Jcc(CondB, num)
+	a.MovRR(RCX, R9)
+	a.Op(Xor, RCX, R10, true)
+	a.ShiftImm(Shr, RCX, 16, true)
+	a.Jcc(CondNE, g.exit)
+	a.MovZX8(RCX, R9)
+	a.OpImm(Cmp, RCX, int32(KindString), false)
+	a.Jcc(CondNE, g.exit)
+	a.Load(R8, RDI, ncProtoStr)
+	a.Jmp(have)
+	a.Bind(num)
+	a.Load(R8, RDI, ncProtoNum)
+	a.Bind(have)
+	a.LoadIdx(R8, RDX, R8, 1, 0)
+	a.Op(Test, R8, R8, true)
+	a.Jcc(CondE, g.exit)
+	// The name: names[siteName[C]].
+	a.MovRR(RCX, RAX)
+	a.ShiftImm(Shr, RCX, 48, true)
+	a.Load(R9, RDI, ncRC)
+	a.Load(R9, R9, offRCSiteName)
+	a.LeaIdx(R9, R9, RCX, 4, 0)
+	a.LoadU32(RCX, R9, 0)
+	a.Load(R9, RDI, ncCC)
+	a.Load(R9, R9, offCCNames)
+	a.LeaIdx(R9, R9, RCX, 4, 0)
+	a.LoadU32(RCX, R9, 0)
+	// Its entry, primProps[name&63], of this prototype and its shape.
+	a.MovRR(R9, RCX)
+	a.OpImm(And, R9, 63, false)
+	a.LeaIdx(R9, R9, R9, 2, 0)
+	a.ShiftImm(Shl, R9, 3, true)
+	a.Op(Add, R9, RDX, true)
+	a.AddMem(R9, RDI, ncPrimProps)
+	a.LoadU32(RSI, R9, offPEKey)
+	a.Op(Cmp, RSI, RCX, false)
+	a.Jcc(CondNE, g.exit)
+	a.CmpMem(R8, R9, offPEProto, true)
+	a.Jcc(CondNE, g.exit)
+	a.Load(RSI, R9, offPEShape)
+	a.CmpMem(RSI, R8, offObjShape, true)
+	a.Jcc(CondNE, g.exit)
+	a.LoadS32(RCX, R9, offPEIdx)
+	a.ShiftImm(Shl, RCX, 4, true)
+	a.AddMem(RCX, R8, int32(unsafe.Offsetof(Object{}.valp)))
+	g.loadValue(RCX)
+	g.decA(RDX)
+	a.LeaIdx(RAX, R12, RDX, 1, 0)
+	a.Store(RAX, 0, R9)
+	a.Lea(RAX, RAX, 8)
+	a.MovRR(RCX, R8)
+	g.ptrStore()
+	a.Load(RAX, RBX, 0)
+	g.decA(RDX)
+	a.LeaIdx(RAX, R12, RDX, 1, 16)
+	a.Load(R9, RDI, scr(sV0))
+	a.Store(RAX, 0, R9)
+	a.Lea(RAX, RAX, 8)
+	a.Load(RCX, RDI, scr(sV1))
+	g.ptrStore()
+	g.next()
+}
+
+// postStep is x++ and x-- (post_inc, post_dec) of a number: R[A] the
+// old value where it holds no pointer, R[B] the new.
+func (g *nativeGen) postStep(op SSE) {
+	a := g.a
+	g.decB(RSI)
+	g.num(0, RSI)
+	g.decA(RDX)
+	g.noRef(RDX)
+	a.LoadSD(1, RDI, ncOne)
+	a.SSEOp(MovAPD, 3, 0)
+	a.SSEOp(op, 3, 1)
+	g.canon(3)
+	a.StoreSDIdx(R12, RDX, 1, 0, 0)
+	a.StoreSDIdx(R12, RSI, 1, 0, 3)
+	g.next()
 }
 
 // numOr is num going to miss rather than exiting.
@@ -1046,6 +1260,17 @@ var (
 	offRtInterrupt  = rtRel(unsafe.Offsetof(Runtime{}.interruptCounter))
 	offRtCur        = rtRel(unsafe.Offsetof(Runtime{}.cur))
 	offRtArgStack   = rtRel(unsafe.Offsetof(Runtime{}.argStack))
+	offRtBackEdges  = rtRel(unsafe.Offsetof(Runtime{}.backEdges))
+	offItDone       = int32(unsafe.Offsetof(iterObject{}.st) + unsafe.Offsetof(iterState{}.done))
+	offItArr        = int32(unsafe.Offsetof(iterObject{}.st) + unsafe.Offsetof(iterState{}.arr))
+	offItIdx        = int32(unsafe.Offsetof(iterObject{}.st) + unsafe.Offsetof(iterState{}.idx))
+	offCCNames      = ccRel(unsafe.Offsetof(closureCode{}.names))
+	offRCSiteName   = int32(unsafe.Offsetof(regCode{}.siteName))
+	offPEKey        = int32(unsafe.Offsetof(primEntry{}.key))
+	offPEIdx        = int32(unsafe.Offsetof(primEntry{}.idx))
+	offPEProto      = int32(unsafe.Offsetof(primEntry{}.proto))
+	offPEShape      = int32(unsafe.Offsetof(primEntry{}.shape))
+	offStRegs       = int32(unsafe.Offsetof(regState{}.regs))
 
 	offFCl       = int32(unsafe.Offsetof(frame{}.cl))
 	offFBase     = int32(unsafe.Offsetof(frame{}.base))
@@ -1449,7 +1674,7 @@ func (g *nativeGen) call() {
 	a.Bind(noKeep)
 	a.Load(R8, RDI, ncDepth)
 	a.CmpMem(R8, RDI, ncCap, true)
-	a.Jcc(CondGE, g.ex(13))
+	a.Jcc(CondGE, g.exitRet)
 
 	// Nothing is written before here.
 	//
@@ -1688,7 +1913,7 @@ func (g *nativeGen) ret(undef bool) {
 	a.Store(RDI, scr(sV0), R8)
 	a.Store(RDI, scr(sV1), R9)
 	a.StoreImm(RDI, ncRetDone, 1)
-	a.Jmp(g.exit)
+	a.Jmp(g.exitRet)
 }
 
 // nativeOffsets is where each handler starts in the code, the exit's
@@ -1705,7 +1930,7 @@ type nativeOffsets struct {
 func nativeEmit() ([]byte, nativeOffsets) {
 	g := &nativeGen{a: &Asm{}}
 	a := g.a
-	g.exit = a.NewLabel()
+	g.exit, g.exitRet = a.NewLabel(), a.NewLabel()
 	labels := map[bytecode.ROp]Label{}
 	var order []bytecode.ROp
 	h := func(op bytecode.ROp, body func()) {
@@ -1726,12 +1951,7 @@ func nativeEmit() ([]byte, nativeOffsets) {
 	a.Load(R11, RDI, ncBudget)
 	a.Load(R10, RDI, ncTagBase)
 	g.dispatch()
-	// The exit: the instruction left to Go, and the budget.
-	a.Align(16)
-	a.Bind(g.exit)
-	a.Store(RDI, ncIP, RBX)
-	a.Store(RDI, ncBudget, R11)
-	a.Ret()
+	g.exitStub()
 
 	extra := func() {
 		h(bytecode.RBitOr, func() { g.bitReg(func() { a.Op(Or, R9, RCX, false) }) })
@@ -1930,19 +2150,7 @@ func nativeEmit() ([]byte, nativeOffsets) {
 	h(bytecode.RSubI, func() { g.arith(SubSD, 1) })
 	h(bytecode.RInc, func() { g.arith(AddSD, 2) })
 	h(bytecode.RDec, func() { g.arith(SubSD, 2) })
-	h(bytecode.RPostInc, func() {
-		g.decB(RSI)
-		g.num(0, RSI)
-		g.decA(RDX)
-		g.noRef(RDX)
-		a.LoadSD(1, RDI, ncOne)
-		a.SSEOp(MovAPD, 3, 0)
-		a.SSEOp(AddSD, 3, 1)
-		g.canon(3)
-		a.StoreSDIdx(R12, RDX, 1, 0, 0)
-		a.StoreSDIdx(R12, RSI, 1, 0, 3)
-		g.next()
-	})
+	h(bytecode.RPostInc, func() { g.postStep(AddSD) })
 	h(bytecode.RAndI, func() { g.bitImm(func() { a.Op(And, R9, RCX, false) }) })
 	h(bytecode.ROrI, func() { g.bitImm(func() { a.Op(Or, R9, RCX, false) }) })
 	h(bytecode.RShlI, func() { g.bitImm(func() { a.ShiftCL(Shl, R9, false) }) })
@@ -2120,9 +2328,14 @@ func nativeEmit() ([]byte, nativeOffsets) {
 	}
 	h(bytecode.RGetMethodW, func() {
 		// R[A] = the method, R[A+1] = the receiver: two stores of
-		// pointers, the receiver kept across the first.
+		// pointers, the receiver kept across the first. A string's or a
+		// number's method is primMethod's.
+		prim := a.NewLabel()
 		g.decB(RSI)
-		g.object(RSI, RSI)
+		a.LoadIdx(R9, R12, RSI, 1, 0)
+		a.CmpMem(R9, RDI, ncObjBits, true)
+		a.Jcc(CondNE, prim)
+		a.LoadIdx(RSI, R12, RSI, 1, 8)
 		a.Store(RDI, scr(sV0), RSI)
 		g.site(RCX)
 		g.readSlot()
@@ -2142,6 +2355,8 @@ func nativeEmit() ([]byte, nativeOffsets) {
 		a.Load(RCX, RDI, scr(sV0))
 		g.ptrStore()
 		g.next()
+		a.Bind(prim)
+		g.primMethod()
 	})
 	// === against an immediate: only a number is equal to one.
 	h(bytecode.RJSEqI, func() {
@@ -2566,6 +2781,45 @@ func nativeEmit() ([]byte, nativeOffsets) {
 	// The bitwise operations and the compares of no kernel's, after the
 	// others.
 	extra()
+	// What came later goes last, so that it moves none of the above.
+	h(bytecode.RPostDec, func() { g.postStep(SubSD) })
+	h(bytecode.RIterNext, func() {
+		// A for-of's step over a dense array by the intrinsic iterator
+		// (iterState.arr): its next element but a hole, the cursor's
+		// index stepped. Anything else is Go's.
+		g.decB(RSI)
+		g.object(RSI, RSI)
+		a.LoadU8(RCX, RSI, offObjClass)
+		a.OpImm(Cmp, RCX, int32(ClassCursor), false)
+		a.Jcc(CondNE, g.exit)
+		a.LoadU8(RCX, RSI, offItDone)
+		a.Op(Test, RCX, RCX, false)
+		a.Jcc(CondNE, g.exit)
+		a.Load(R8, RSI, offItArr)
+		a.Op(Test, R8, R8, true)
+		a.Jcc(CondE, g.exit)
+		a.Load(RCX, RSI, offItIdx)
+		// Past the end of an array of no sparse elements, its length:
+		// the cursor done and the loop left, as iterNext leaves it.
+		end := a.NewLabel()
+		a.LoadU16(RDX, R8, offObjFlags)
+		a.OpImm(And, RDX, int32(objHasExt|objHasSparseElements), false)
+		a.OpImm(Cmp, RDX, int32(objHasExt), false)
+		a.Jcc(CondNE, g.exit)
+		a.CmpMem(RCX, R8, sizeObj+8, true)
+		a.Jcc(CondAE, end)
+		g.dense(RCX, R8, 0, g.exit)
+		a.IncMem(RSI, offItIdx)
+		g.loadValue(RCX)
+		g.decA(RDX)
+		a.LeaIdx(RAX, R12, RDX, 1, 0)
+		g.storeValue()
+		a.Bind(end)
+		a.MovImm(RCX, 1)
+		a.Store8(RSI, offItDone, RCX)
+		g.immSC(RCX)
+		g.taken(RCX)
+	})
 
 	for n, l := range g.exits {
 		if n == 0 {

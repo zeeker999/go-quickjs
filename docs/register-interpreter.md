@@ -594,18 +594,31 @@ its arguments appended to the runtime's argument stack; and a leaf that
 returns a parameter or a constant is answered with no frame, while one
 Go answers frameless otherwise (a pure body, one that reads or writes
 its this) is entered with a frame, cheaper here than an exit. `ret` pops
-the frame, and gives an entered frame's arguments back. A fast path that misses jumps to the exit; nothing is
-written before it does.
+the frame, and gives an entered frame's arguments back. Later additions:
+`x--` as `x++`; a string's or a number's method (`get_method_w`), from
+the realm's cache of their prototypes' data properties (`primProps`), as
+`regGetMethod` reads it; and for-of's step over a dense array by the
+intrinsic iterator, its end included. A fast path that misses jumps to
+the exit; nothing is written before it does.
 
 **The exit stub.** An operation of no native handler has the exit stub's
-address in the table, and every miss jumps to it: it stores the
-instruction's address and the budget in the context and returns to
-`nativeRun`, which runs the instruction by its Go handler from
-`regTable` -- and, where that gives back `^pc`, its slow function from
-`regSlowTable` -- in the top frame's `regState`, and enters the code
-again at the pc it gives -- after running in Go, too, the instructions
-that follow it and have no native handler, which would only exit again.
-There is no second interpreter: what the Go table does, an exit does. A frame the code entered itself that ends in Go
+address in the table, and every miss jumps to it. It writes the
+instruction, its index and the budget to the context and, where Go has
+made the top frame's state (`topOK`), calls the instruction's Go handler
+from `regTable` itself, through `nativeCallH`: a function that the Go
+function that entered the code called, as the JIT's `callGo` is, which
+gives the handler its arguments in Go's registers and its frame the room
+they spill to. Where the handler gives back `^pc`, the stub calls the
+slow function from `regSlowTable` the same way; the code goes on at the
+pc they give, the pinned registers put back from the context, the budget
+the runtime's `backEdges` across the calls. Where the frame has ended
+(`regDone`), and where Go has not made the top frame's state -- the first
+exit after a call or a return the code made itself -- the stub returns to
+`nativeRun`, which ends the frame, or makes the state and runs the
+instruction, and enters the code again; so does a call the native frame
+stack has no room for, and the base frame's return. The call made
+`array_push_args3_single`, whose pushes exit, 19% faster than the return
+and the entry (199 to 162 ns an operation), and `string_indexOf` 13%. There is no second interpreter: what the Go table does, an exit does. A frame the code entered itself that ends in Go
 -- a throw, a return that closes captured upvalues -- ends there as
 `rhCallW` ends a callee after `runReg` (`nativeEnd`), and its caller goes
 on or meets the throw. Its state is made for it from its frame record

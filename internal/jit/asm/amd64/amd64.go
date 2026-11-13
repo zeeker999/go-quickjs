@@ -818,6 +818,13 @@ func (a *Asm) IncMem(base Reg, disp int32) {
 	a.modrmMem(0, base, disp)
 }
 
+// LockIncMem increments the 64-bit integer at [base + disp] atomically
+// (LOCK INC): a counter other threads count too.
+func (a *Asm) LockIncMem(base Reg, disp int32) {
+	a.emit(0xF0)
+	a.IncMem(base, disp)
+}
+
 // DecMem decrements the 64-bit integer at [base + disp], setting the flags.
 func (a *Asm) DecMem(base Reg, disp int32) {
 	a.rex(true, 0, byte(base), false)

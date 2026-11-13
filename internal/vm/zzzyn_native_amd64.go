@@ -59,7 +59,12 @@ func SetRegNative(on bool) bool {
 // each call the code made itself, depth of them. A frame's regState keeps
 // one, made at its first native run and kept with the state.
 type nativeCtx struct {
-	ip      uintptr
+	ip uintptr
+	// pc and w are, at an exit, the instruction's index in the top frame's
+	// code and the instruction itself, which the exit stub writes beside
+	// ip so that Go goes on from them at once.
+	pc      int64
+	w       uint64
 	regs    uintptr
 	table   uintptr
 	ic      uintptr
@@ -144,6 +149,23 @@ type nativeCtx struct {
 	// scratch is what a handler keeps across a store by storeRef, which
 	// keeps no register but DI.
 	scratch [16]uint64
+	// The exit's call of Go (nativeCallH): the Go table's and the slow
+	// table's addresses, the trampoline's, where the code goes on after
+	// the call, the exits' counters' address where a test counts, and
+	// ended, set where a handler ended the top frame, which the code
+	// leaves to nativeRun.
+	goTable   uintptr
+	slowTable uintptr
+	callH     uintptr
+	after     uintptr
+	cntExits  uintptr
+	ended     int64
+	// protoStr, protoNum and primProps are where a Realm has its string
+	// and number prototypes and its cache of their properties (primProps),
+	// which the JIT's tag moves: offsets from the realm running now.
+	protoStr  uintptr
+	protoNum  uintptr
+	primProps uintptr
 	// fv is the top frame's feedback vector, a slot a site into which a
 	// handler ORs the kinds of value it met (the JIT's next step, as
 	// Ignition's): none yet, its room kept here and in the frame record,
@@ -158,6 +180,8 @@ type nativeCtx struct {
 	st     *regState
 	recs   []nativeRec
 	states []*regState
+	// top is the top frame's state while topOK says so (nativeTop).
+	top *regState
 }
 
 // nativeMaxDepth is how deep the native frame stack goes.
@@ -221,7 +245,11 @@ func (r *Runtime) nativeRun(f *frame, c *regCode, start int) (Value, error) {
 	ctx.depth, ctx.filled = 0, 0
 	nativeSetTop(ctx, uintptr(unsafe.Pointer(st.regs)), f, c)
 	ctx.ip = uintptr(c.code) + uintptr(start)*8
-	ctx.topOK = 0
+	ctx.top, ctx.topOK = st, 1
+	ctx.cntExits = 0
+	if nativeCount {
+		ctx.cntExits = uintptr(unsafe.Pointer(&nativeExits[0]))
+	}
 	for {
 		ctx.budget = int64(r.backEdges)
 		if nativeCount {
@@ -237,15 +265,26 @@ func (r *Runtime) nativeRun(f *frame, c *regCode, start int) (Value, error) {
 			r.nativeLeave(st, ctx)
 			return v, nil
 		}
-		// The instruction the code left, run by its Go handler in the top
-		// frame: only a frame's end goes further.
-		s := st
-		if ctx.depth != 0 {
+		s := ctx.top
+		if ctx.topOK == 0 {
 			s = r.nativeTop(st, ctx)
 		}
-		code := s.c.code
-		pc := int((ctx.ip - uintptr(code)) / 8)
-		w := regAt(code, pc)
+		if ctx.ended != 0 {
+			// A Go handler the code called ended the top frame (regDone).
+			ctx.ended = 0
+			if v, done := r.nativeEnd(s, ctx, regDone, regAt(s.c.code, int(ctx.pc))); done {
+				err := st.err
+				r.nativeLeave(st, ctx)
+				if err != nil {
+					return Undefined, err
+				}
+				return v, nil
+			}
+			continue
+		}
+		// The instruction the code left, run by its Go handler in the top
+		// frame: only a frame's end goes further.
+		pc, w := int(ctx.pc), bytecode.RInstr(ctx.w)
 		op := w.Op()
 		if nativeCount {
 			atomic.AddInt64(&nativeExits[op], 1)
@@ -259,6 +298,7 @@ func (r *Runtime) nativeRun(f *frame, c *regCode, start int) (Value, error) {
 		pc = regTable[op](s.regs, w, pc, s)
 		// The instructions after it that have no native handler are run
 		// here too, rather than each entering the code to exit at once.
+		code := s.c.code
 		for pc >= 0 {
 			w = regAt(code, pc)
 			op = w.Op()
@@ -320,6 +360,12 @@ func (r *Runtime) newNativeCtx(st *regState) *nativeCtx {
 	ctx.typeofs = uintptr(unsafe.Pointer(&r.typeofStrs[0]))
 	ctx.typedEpoch = uintptr(unsafe.Pointer(&r.typedEpoch))
 	ctx.has = uintptr(unsafe.Pointer(&r.has))
+	ctx.goTable = uintptr(unsafe.Pointer(&regTable[0]))
+	ctx.slowTable = uintptr(unsafe.Pointer(&regSlowTable[0]))
+	ctx.callH = nativeCallHAddr()
+	ctx.protoStr = unsafe.Offsetof(Realm{}.proto) + unsafe.Offsetof(intrinsics{}.str)
+	ctx.protoNum = unsafe.Offsetof(Realm{}.proto) + unsafe.Offsetof(intrinsics{}.number)
+	ctx.primProps = unsafe.Offsetof(Realm{}.primProps)
 	ctx.grow()
 	st.native = ctx
 	return ctx
@@ -345,6 +391,7 @@ func (r *Runtime) nativeLeave(st *regState, ctx *nativeCtx) {
 		atomic.AddInt64(&nativeCalls, ctx.made)
 	}
 	ctx.made = 0
+	ctx.top = nil
 	for _, s := range ctx.states {
 		if s == nil {
 			break
@@ -385,6 +432,7 @@ func nativeSetTop(ctx *nativeCtx, regs uintptr, f *frame, c *regCode) {
 func (r *Runtime) nativeTop(st0 *regState, ctx *nativeCtx) *regState {
 	d := ctx.depth
 	if d == 0 {
+		ctx.top, ctx.topOK = st0, 1
 		return st0
 	}
 	if ctx.filled < d {
@@ -392,6 +440,7 @@ func (r *Runtime) nativeTop(st0 *regState, ctx *nativeCtx) *regState {
 	}
 	s := ctx.states[d-1]
 	if ctx.topOK != 0 {
+		ctx.top = s
 		return s
 	}
 	if s == nil {
@@ -404,6 +453,7 @@ func (r *Runtime) nativeTop(st0 *regState, ctx *nativeCtx) *regState {
 	s.wb = nf.base - int(rc.locals)
 	s.regs = regWindow(r.stack, s.wb)
 	s.err = nil
+	ctx.top = s
 	ctx.topOK = 1
 	return s
 }
@@ -563,6 +613,15 @@ func nativeStoreRefAddr() uintptr
 //go:norace
 //go:nocheckptr
 func nativeStoreRefGo(slot *unsafe.Pointer, p unsafe.Pointer) { *slot = p }
+
+// nativeCallH is where an exit calls the Go handler of its instruction:
+// its func value in DX, its arguments in AX, BX, CX and SI (the state),
+// the context in DI. It is a function the Go function that entered the
+// code called, as the JIT's callGo is, and goes on at the context's after
+// with the handler's result in AX and the context in DI.
+func nativeCallH()
+
+func nativeCallHAddr() uintptr
 
 // nativeEnter jumps to code with the context in DI; the code returns to
 // nativeEnter's caller.
