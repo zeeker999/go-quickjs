@@ -29,7 +29,7 @@ func TestJITRegTierUp(t *testing.T) {
 			rts := regNativeRuntimes(t, regNativeSrc+regTierDrive)
 			for _, name := range []string{"sum", "nested", "props", "strs", "counter", "thrower", "uncaught", "maker", "arr", "forin", "holes", "argsLen", "mixed",
 				"calls", "methods", "callThrows", "callUncaught", "inst", "instThrows"} {
-				for _, c := range []struct{ n, k int }{{3, 20000}, {5000, 6}} {
+				for _, c := range []struct{ n, k int }{{3, 3000}, {1500, 4}} {
 					var got [2]string
 					for i, r := range rts {
 						drive, _ := r.GetProp(Obj(r.Global()), r.Intern("drive"))

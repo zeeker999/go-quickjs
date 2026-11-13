@@ -188,13 +188,15 @@ func jitMarkingRegRun(t *testing.T, src string, names []string, marking bool) ma
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		for range 3 {
-			if res := r.RegNativeCall(fn, []Value{Float(64)}, false); res.Err != nil {
+		// Less work than the stack form's runs: both forms' runs, marking
+		// and not, under checkptr take CI's job past its time.
+		for range 2 {
+			if res := r.RegNativeCall(fn, []Value{Float(32)}, false); res.Err != nil {
 				t.Fatalf("%s: %v", name, res.Err)
 			}
 		}
 		calls0, st0 := calls, r.RegNativeStats()
-		if res := r.RegNativeCall(fn, []Value{Float(256)}, false); res.Err != nil {
+		if res := r.RegNativeCall(fn, []Value{Float(96)}, false); res.Err != nil {
 			t.Fatalf("%s: %v", name, res.Err)
 		}
 		st := r.RegNativeStats()
