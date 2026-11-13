@@ -119,7 +119,10 @@ func (l *lists[T]) truncate(mark int) {
 // Rarer nodes -- classes, templates, switch statements -- are allocated
 // individually, because a slab for them would waste more than it saves.
 type arena struct {
-	idents   slab[ast.Ident]
+	idents slab[ast.Ident]
+	// nIdents is how many identifiers the function being parsed has
+	// numbered (ast.Ident.ID).
+	nIdents  uint32
 	numbers  slab[ast.NumberLit]
 	strings  slab[ast.StringLit]
 	binary   slab[ast.Binary]
@@ -149,7 +152,26 @@ type arena struct {
 
 func (a *arena) ident(name string, start int) *ast.Ident {
 	n := a.idents.alloc()
+	a.nIdents++
 	n.Name, n.Start = name, int32(start)
+	n.SetID(a.nIdents)
+	return n
+}
+
+// beginIdents starts the numbering of a function's identifiers
+// (ast.Ident.ID), and returns the numbering of the code around it, which
+// endIdents resumes.
+func (a *arena) beginIdents() uint32 {
+	outer := a.nIdents
+	a.nIdents = 0
+	return outer
+}
+
+// endIdents ends a function's numbering, resuming outer, and returns how
+// many identifiers it numbered.
+func (a *arena) endIdents(outer uint32) uint32 {
+	n := a.nIdents
+	a.nIdents = outer
 	return n
 }
 

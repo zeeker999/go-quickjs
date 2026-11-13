@@ -527,7 +527,7 @@ func Compile(prog *ast.Program, opts Options) (fn *bytecode.Function, err error)
 	c.emit(bytecode.OpSetLocal, uint32(c.completionSlot), 0)
 	if registerForm.Load() && !opts.NoRegister && regScript(opts) {
 		// A script's code as register code too (regcomp.CompileTop).
-		c.reg = regcomp.NewRecord()
+		c.reg = regcomp.NewRecord(prog.Idents)
 		c.reg.Completion = c.completionSlot
 		c.reg.ThisRef = !c.thisIsValue()
 	}

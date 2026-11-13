@@ -237,6 +237,7 @@ func Parse(src string, opts Options) (prog *ast.Program, err error) {
 		Body:   body,
 		Strict: p.strict,
 		Module: p.module,
+		Idents: p.nodes.nIdents,
 	}
 	// The whole source has been read, so the comments are its last.
 	if url, mapURL := p.lex.SourceURL(), p.lex.SourceMapURL(); url != "" || mapURL != "" {

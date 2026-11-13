@@ -403,12 +403,12 @@ func (g *gen) layout() bool {
 		}
 		return true
 	}
-	for _, res := range g.rec.Read {
+	for res := range g.rec.Reads() {
 		if !note(res) {
 			return false
 		}
 	}
-	for _, res := range g.rec.Write {
+	for res := range g.rec.Writes() {
 		if !note(res) {
 			return false
 		}
@@ -581,12 +581,12 @@ func (g *gen) farSlots(used, plain []bool, params, lazySlot int, evals bool) []b
 		near(int64(slot))
 	}
 	uses := make([]int, n)
-	for _, res := range g.rec.Read {
+	for res := range g.rec.Reads() {
 		if int(res.Index) < n {
 			uses[res.Index]++
 		}
 	}
-	for _, res := range g.rec.Write {
+	for res := range g.rec.Writes() {
 		if int(res.Index) < n {
 			uses[res.Index]++
 		}
@@ -1123,7 +1123,7 @@ func (g *gen) switchStmt(n *ast.SwitchStmt, label labelSet) {
 	if u, ok := n.Disc.(*ast.Unary); ok && u.Op == "typeof" && g.stringCases(n) {
 		global := false
 		if id, ok := u.Operand.(*ast.Ident); ok {
-			res := g.rec.Read[id]
+			res := g.rec.readRes(id)
 			global = res.Kind == ResGlobal || res.Kind == ResNone
 		}
 		if !global {
@@ -1359,7 +1359,7 @@ func declaresIn(list []ast.Stmt, name string, body bool) bool {
 // declared reports whether slot is a binding the record says the body
 // stores to or reads, which a self name is not.
 func (g *gen) declared(slot int) bool {
-	for _, res := range g.rec.Write {
+	for res := range g.rec.Writes() {
 		if (res.Kind == ResLocal || res.Kind == ResLocalInit || res.Kind == ResLocalCheck) && int(res.Index) == slot {
 			return true
 		}
@@ -1403,7 +1403,7 @@ func (g *gen) enterBlock(list []ast.Stmt) {
 			ids = patternNames(d.Target, ids)
 		}
 		for _, id := range ids {
-			res := g.rec.Write[id]
+			res := g.rec.writeRes(id)
 			if res.Kind != ResLocalInit {
 				continue
 			}
@@ -1498,7 +1498,7 @@ func (g *gen) stmt(s ast.Stmt) {
 		// is also assigned to its var as the declaration is evaluated, what
 		// the block's binding holds then, where the stack form recorded
 		// the var's store (emitAnnexBFunctionAlias).
-		if _, ok := g.rec.Write[n.Fn.Name]; ok {
+		if _, ok := g.rec.WriteOf(n.Fn.Name); ok {
 			g.storeIdent(n.Fn.Name, n.Fn.Name, false)
 		}
 	case *ast.ReturnStmt:
@@ -1801,7 +1801,7 @@ func (g *gen) varDecl(n *ast.VarDecl) {
 			if n.Kind == ast.DeclVar {
 				continue
 			}
-			res, ok := g.rec.Write[id]
+			res, ok := g.rec.WriteOf(id)
 			if ok && (res.Kind == ResGlobalLexInit || res.Kind == ResModuleLexInit) {
 				v := g.alloc()
 				g.emit(bytecode.MakeR(bytecode.RLoadUndef, 0, r16(v), 0, 0))
@@ -1824,7 +1824,7 @@ func (g *gen) varDecl(n *ast.VarDecl) {
 			continue
 		}
 		if fn, ok := d.Init.(*ast.FuncLit); ok && n.Kind == ast.DeclVar && g.rec.Reused[fn] && len(g.loops) > 0 {
-			if res, ok := g.rec.Write[id]; ok && (res.Kind == ResLocal || res.Kind == ResLocalInit) && g.slotReg[res.Index] >= 0 && g.farOf(res.Index) < 0 {
+			if res, ok := g.rec.WriteOf(id); ok && (res.Kind == ResLocal || res.Kind == ResLocalInit) && g.slotReg[res.Index] >= 0 && g.farOf(res.Index) < 0 {
 				// A function nothing can tell from the one the last
 				// iteration made, which the var holds then: made the
 				// first time, and left after that, as the stack form
@@ -1948,7 +1948,7 @@ func (g *gen) writes(e ast.Expr, slot int) bool {
 		switch x := n.(type) {
 		case *ast.Assign:
 			if id, ok := x.Target.(*ast.Ident); ok {
-				if res, ok := g.rec.Write[id]; ok && (res.Kind == ResLocal || res.Kind == ResLocalInit || res.Kind == ResLocalCheck) && int(res.Index) == slot {
+				if res, ok := g.rec.WriteOf(id); ok && (res.Kind == ResLocal || res.Kind == ResLocalInit || res.Kind == ResLocalCheck) && int(res.Index) == slot {
 					found = true
 					return
 				}
@@ -1958,7 +1958,7 @@ func (g *gen) writes(e ast.Expr, slot int) bool {
 			walk(x.Value)
 		case *ast.Update:
 			if id, ok := x.Operand.(*ast.Ident); ok {
-				if res, ok := g.rec.Write[id]; ok && int(res.Index) == slot && res.Kind != ResGlobal {
+				if res, ok := g.rec.WriteOf(id); ok && int(res.Index) == slot && res.Kind != ResGlobal {
 					found = true
 					return
 				}
@@ -2052,7 +2052,7 @@ func (g *gen) inPlace(e ast.Expr) bool {
 	case *regExpr:
 		return true
 	case *ast.Ident:
-		res, ok := g.rec.Read[n]
+		res, ok := g.rec.ReadOf(n)
 		return ok && (res.Kind == ResLocal || res.Kind == ResLocalCheck) &&
 			!(g.fn.ForwardsArguments && g.isArguments(n))
 	}
@@ -2225,7 +2225,7 @@ func (g *gen) number(v float64, dst int) int {
 }
 
 func (g *gen) ident(n *ast.Ident, dst int) int {
-	res, ok := g.rec.Read[n]
+	res, ok := g.rec.ReadOf(n)
 	if !ok {
 		g.fail("a name the record does not resolve")
 		return g.dest(dst)
@@ -2294,7 +2294,7 @@ func (g *gen) typeofOperand(e ast.Expr) int {
 		g.probed(id, bytecode.RWithGet, d, func() { g.place(g.typeofOperand(id), d) })
 		return d
 	}
-	if _, ok := g.rec.Read[id]; ok {
+	if _, ok := g.rec.ReadOf(id); ok {
 		return g.expr(e, -1)
 	}
 	d := g.alloc()
@@ -2565,7 +2565,7 @@ func (g *gen) deleteChain(n *ast.Unary, m *ast.Member, dst int) int {
 // false for a binding, and for a global what deleting the property gives
 // (delete_var), as the stack form resolved it.
 func (g *gen) deleteName(n *ast.Unary, id *ast.Ident, dst int) int {
-	res, ok := g.rec.Read[id]
+	res, ok := g.rec.ReadOf(id)
 	if !ok {
 		g.fail("a name the record does not resolve")
 		return g.dest(dst)
@@ -2709,7 +2709,7 @@ func (g *gen) upvalOperand(e ast.Expr) (uint32, bool) {
 	if !ok {
 		return 0, false
 	}
-	res, ok := g.rec.Read[id]
+	res, ok := g.rec.ReadOf(id)
 	if !ok || res.Kind != ResUpval || res.Index >= limit16 {
 		return 0, false
 	}
@@ -2758,7 +2758,7 @@ func (g *gen) runsNoCode(e ast.Expr) bool {
 	case *ast.NumberLit, *ast.StringLit, *ast.BoolLit, *ast.NullLit, *ast.FuncLit:
 		return true
 	case *ast.Ident:
-		res, ok := g.rec.Read[n]
+		res, ok := g.rec.ReadOf(n)
 		return ok && (res.Kind == ResLocal || res.Kind == ResUpval || res.Kind == ResLiteral && res.Lit == nil) &&
 			!(g.fn.ForwardsArguments && g.isArguments(n))
 	}
@@ -2769,7 +2769,7 @@ func (g *gen) runsNoCode(e ast.Expr) bool {
 // storeIdent stores value into the binding id names; init says it is the
 // binding's declaration.
 func (g *gen) storeIdent(id *ast.Ident, value ast.Expr, init bool) int {
-	res, ok := g.rec.Write[id]
+	res, ok := g.rec.WriteOf(id)
 	if !ok {
 		g.fail("a store the record does not resolve")
 		return 0
@@ -2866,7 +2866,7 @@ func (g *gen) appendLocal(n *ast.Assign) (int, bool) {
 	if !ok {
 		return 0, false
 	}
-	res, ok := g.rec.Write[id]
+	res, ok := g.rec.WriteOf(id)
 	if !ok || res.Kind != ResLocal || int(res.Index) >= len(g.slotReg) || g.slotReg[res.Index] < 0 || g.farOf(res.Index) >= 0 {
 		return 0, false
 	}
@@ -2941,10 +2941,10 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 	}
 	switch t := n.Target.(type) {
 	case *ast.Ident:
-		res := g.rec.Write[t]
+		res := g.rec.writeRes(t)
 		if res.Kind == ResLocal && g.farOf(res.Index) < 0 {
 			r := int(g.slotReg[res.Index])
-			if rr := g.rec.Read[t]; rr.Kind != ResLocal || rr.Index != res.Index {
+			if rr := g.rec.readRes(t); rr.Kind != ResLocal || rr.Index != res.Index {
 				g.fail("a compound assignment's read")
 				return 0
 			}
@@ -3022,7 +3022,7 @@ func (g *gen) addProp(m *ast.Member, value ast.Expr, imm int32, pos int) bool {
 			if !isIdent {
 				return false
 			}
-			res, ok := g.rec.Read[id]
+			res, ok := g.rec.ReadOf(id)
 			if !ok || res.Kind != ResLocal || g.fn.Locals[res.Index].Captured {
 				return false
 			}
@@ -3071,7 +3071,7 @@ func (g *gen) addIndex(m *ast.Member, value ast.Expr, imm int32, pos int) bool {
 		if !isIdent {
 			return false
 		}
-		res, ok := g.rec.Read[id]
+		res, ok := g.rec.ReadOf(id)
 		if !ok || res.Kind != ResLocal || g.fn.Locals[res.Index].Captured {
 			return false
 		}
@@ -3117,14 +3117,14 @@ func (g *gen) readStore(m *ast.Member, pos int, w bytecode.RInstr) {
 // id names, which the stack form may have read with the store's own
 // resolution rather than a read of its own.
 func (g *gen) readForWrite(id *ast.Ident, dst int) int {
-	if w := g.withs[id]; w != nil && g.rec.Write[id].Kind == ResWith {
+	if w := g.withs[id]; w != nil && g.rec.writeRes(id).Kind == ResWith {
 		g.withRefFor(id)
 		return g.refRead(id, g.withRefs[id], dst)
 	}
-	if _, ok := g.rec.Read[id]; ok {
+	if _, ok := g.rec.ReadOf(id); ok {
 		return g.ident(id, dst)
 	}
-	res := g.rec.Write[id]
+	res := g.rec.writeRes(id)
 	d := g.dest(dst)
 	switch res.Kind {
 	case ResUpval:
@@ -3143,7 +3143,7 @@ func (g *gen) readForWrite(id *ast.Ident, dst int) int {
 
 // storeValue stores register v into the binding id names.
 func (g *gen) storeValue(id *ast.Ident, v int) {
-	res := g.rec.Write[id]
+	res := g.rec.writeRes(id)
 	switch res.Kind {
 	case ResWith:
 		g.withStore(id, v)
@@ -3208,7 +3208,7 @@ func (g *gen) update(n *ast.Update, keep bool, dst int) int {
 	case *ast.Call:
 		return g.place(g.callTarget(t, n.Start), dst)
 	case *ast.Ident:
-		res := g.rec.Write[t]
+		res := g.rec.writeRes(t)
 		if res.Kind == ResLocal && g.farOf(res.Index) < 0 {
 			r := int(g.slotReg[res.Index])
 			g.at(n.Start)
@@ -3312,7 +3312,7 @@ func (g *gen) localStep(e ast.Expr, prefix bool) (int, int8, bool) {
 	if !ok {
 		return 0, 0, false
 	}
-	res := g.rec.Write[id]
+	res := g.rec.writeRes(id)
 	if res.Kind != ResLocal || g.farOf(res.Index) >= 0 {
 		return 0, 0, false
 	}
@@ -3330,7 +3330,7 @@ func (g *gen) member(n *ast.Member, dst int) int {
 		return g.member(&m, dst)
 	}
 	if id, ok := n.Object.(*ast.Ident); ok {
-		if res := g.rec.Read[id]; res.Kind == ResLazyArgs {
+		if res := g.rec.readRes(id); res.Kind == ResLazyArgs {
 			// The arguments read where they lie, the object's local
 			// undefined until something makes it (arguments_index).
 			a := int(g.slotReg[res.Index])
@@ -3752,7 +3752,7 @@ func (g *gen) unchanging(e ast.Expr) bool {
 	case *ast.NumberLit, *ast.StringLit, *ast.BoolLit, *ast.NullLit:
 		return true
 	case *ast.Ident:
-		res, ok := g.rec.Read[n]
+		res, ok := g.rec.ReadOf(n)
 		return ok && res.Kind == ResLocal && !g.fn.Locals[res.Index].Captured && !g.fn.UsesArguments
 	}
 	return false
@@ -3778,7 +3778,7 @@ func (g *gen) charCodeAt(n *ast.Call, dst int) (int, bool) {
 	if !ok {
 		return 0, false
 	}
-	res, ok := g.rec.Read[id]
+	res, ok := g.rec.ReadOf(id)
 	if !ok || res.Kind != ResLocal || g.fn.Locals[res.Index].Captured || g.slotReg[res.Index] >= 256 {
 		return 0, false
 	}
@@ -3956,7 +3956,7 @@ func (g *gen) isArguments(e ast.Expr) bool {
 	if !ok || id.Name != "arguments" {
 		return false
 	}
-	res, ok := g.rec.Read[id]
+	res, ok := g.rec.ReadOf(id)
 	return ok && (res.Kind == ResLocal || res.Kind == ResLocalCheck) && int(res.Index) < len(g.fn.Locals) &&
 		g.fn.Locals[res.Index].Name == "arguments"
 }
@@ -3995,7 +3995,7 @@ func (g *gen) applyArgs(n *ast.Call, m *ast.Member, dst int) int {
 	// than the built-in is given the object, which is kept there so that
 	// every such call is given the same one.
 	g.at(n.TracePos())
-	g.emit(bytecode.MakeR(bytecode.RApplyArgs, 0, r16(d), r16(w), r16(int(g.slotReg[g.rec.Read[n.Args[1].(*ast.Ident)].Index]))))
+	g.emit(bytecode.MakeR(bytecode.RApplyArgs, 0, r16(d), r16(w), r16(int(g.slotReg[g.rec.readRes(n.Args[1].(*ast.Ident)).Index]))))
 	return d
 }
 
@@ -4215,7 +4215,7 @@ func (g *gen) constantElements(els []ast.Expr) ([]bytecode.LitElem, bool) {
 		case *ast.NullLit:
 			out[i] = bytecode.LitElem{Kind: bytecode.LitNull}
 		case *ast.Ident:
-			if res, ok := g.rec.Read[v]; !ok || res.Kind != ResLiteral || res.Lit != nil {
+			if res, ok := g.rec.ReadOf(v); !ok || res.Kind != ResLiteral || res.Lit != nil {
 				return nil, false
 			}
 			out[i] = bytecode.LitElem{Kind: bytecode.LitUndefined}
@@ -4431,7 +4431,7 @@ func (g *gen) capturedRegs(d *ast.VarDecl) []int {
 	}
 	var regs []int
 	for _, id := range ids {
-		if res, ok := g.rec.Write[id]; ok && res.Kind == ResLocalInit && g.fn.Locals[res.Index].Captured && g.slotReg[res.Index] >= 0 {
+		if res, ok := g.rec.WriteOf(id); ok && res.Kind == ResLocalInit && g.fn.Locals[res.Index].Captured && g.slotReg[res.Index] >= 0 {
 			regs = append(regs, int(g.slotReg[res.Index]))
 		}
 	}
