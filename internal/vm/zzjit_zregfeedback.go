@@ -368,10 +368,13 @@ func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) { return ssa.Inli
 func (f *jitRegFeedback) GoCalls() bool { return true }
 
 // NativeCalls is ssa.Feedback's: a call -- call_w's, call_method_w's or
-// new_w's, its operands no more than a call of Go takes -- is a call of
-// Go (ssa.GoCall), which makes it on the register frame without leaving
-// native code (jitRegGoCall). A call in tail position is not, which the
-// interpreter makes in constant space at a host exit.
+// new_w's, its operands no more than a call of Go takes -- of the function
+// its site's cache holds (regCalls), or of one its code learned it calls,
+// a construction's with a pool of its objects, where that runs register
+// code native callers may call, is a native call of it (regCallSites); any
+// other is a call of Go (ssa.GoCall), which makes it on the register frame
+// without leaving native code (jitRegGoCall). A call in tail position is
+// neither, which the interpreter makes in constant space at a host exit.
 func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
 	w, op, ok := f.at(pc)
 	if !ok || op != ir.Host || !f.p.Code[pc].Window {
@@ -398,6 +401,9 @@ func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
 	}
 	if n > abi.MaxGoArgs {
 		return nil
+	}
+	if sites := f.regCallSites(pc, w, argc, method); len(sites) != 0 {
+		return sites
 	}
 	return []ssa.CallSite{{Go: ssa.GoCall, Argc: argc, Method: method, New: w.Op() == bytecode.RNewW, ThisSlot: -1}}
 }

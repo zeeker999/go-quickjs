@@ -1279,7 +1279,9 @@ the code passes. A call, `call_w`'s, `call_method_w`'s or `new_w`'s, and a
 `typeof` are register code's own (`ir.Instruction`'s `Window`): the builder
 reads their operands from the window's registers, in the stack form's
 order, and writes the result to the instruction's register
-(`windowCall`); the feedback makes each call a call of Go (`NativeCalls`)
+(`windowCall`); the feedback makes each call a native call of the
+functions it calls (see [Native calls of register
+code](#native-calls-of-register-code)), or a call of Go (`NativeCalls`),
 but one in tail position, which the interpreter makes in constant space at
 a host exit. A call of a leaf the feedback names (`Leaf`) is made as the
 stack form's is (`windowLeaf`, `leafMade`): its function checked, natively
@@ -1358,8 +1360,8 @@ template's `closureCode` (`jitReg`). Plain functions, methods, arrows,
 accessors and classes' constructors of the form's own layout are compiled
 (`jitRegTakes`), their frames the call path's -- an arrow's this, a
 constructor's object or a derived one's uninitialized this in register 1,
-as the interpreter has them; generators, async functions, top-level code
-and leaves are not yet.
+as the interpreter has them, and leaves' bodies for the calls that make
+frames; generators, async functions and top-level code are not yet.
 
 The code is entered:
 - by a call whose frame Go makes (`regEnterW`, `jitRegEnter`): a call site
@@ -1375,8 +1377,76 @@ The code is entered:
   Code with neither, where it has a `ret`, is not entered so. An exception
   no handler of the frame's takes ends the frame (`regDone`).
 
-Native code calls register functions through Go (`jitRegGoCall`), which
-enters their code as any call from Go does.
+### Native calls of register code
+
+Native code made from register code calls register functions' native
+code natively, as the stack form's native calls do
+(`internal/vm/zzjit_zregcall.go`): through the function's link
+(`jitLink`, the runtime's `regLinks`), which holds its code's call entry
+while it has code native callers may call -- set as the code is compiled,
+cleared as it is invalidated or dropped -- and, where it holds none, Go
+makes the call from native code (`jitRegGoCall`), as a call of Go. The
+callee's window is made at the VM's stack's top, past the caller's window,
+scratch slots and frame (`ssa.CallSite`'s `Window`): the call writes the
+function to its register 0, a method call's receiver to 1 -- or a plain
+call's undefined or global object, an arrow's captured this, for a callee
+that reads it -- and the arguments from 2, undefined in its parameters past
+them, and checks the room its link says its code takes (`LinkFrame`). The
+callee's code makes its frame at its call entry, as the stack form's does:
+its context the caller's next, its registers past the parameters
+undefined, its stack's top past its window, scratch slots and frame
+(`Func`'s `Scratch`). The call's state is described for Go
+(`abi.CallState`), every register the window does not hold as it is; the
+result comes back in registers to the call's keep cell and register.
+
+Which functions a call makes natively the feedback says
+(`jitRegFeedback`'s `NativeCalls`, `regCallSites`): the one its site's
+cache holds (`regCalls`), and those the code learned it calls at its calls
+of Go and at its exits (`jitRegCallSeen`, kept by register pc in the
+function's learned entry), up to `jitCallTargets`, each checked by its
+object -- where the function runs register code of the form's own layout
+of the runtime's realm, a frame the call path makes as a call's (not a
+class's constructor, nor one that keeps its arguments or shares a derived
+constructor's this), as the stack form calls natively what `jitCallSeen`
+saw. A construction (`new_w`) of a plain function, a base constructor
+that does not read `new.target`, is made so too, with the constructions
+its code learned: its receiver taken from a pool of objects made as
+`regConstruct` makes one (`jitNewPool`, `ssa.CallSite`'s `Pool`), in the
+callee's register 1 and its context's `This`, which the result is where
+the callee returns no object. A call learned so has the code compiled again (`jitRegReopt`, no
+deoptimization): its runs go on in it, stale, and the next ask compiles
+it. A callee native callers call that has no code is
+compiled at their first call of it through Go (`jitRegNativeCallee`), as
+the stack form's `jitNativeCallee`: a function of host operations alone is
+lowered for them (`LowerRegInline`), and one Go enters that is hot and
+makes a native call, as the stack form's `jitHotEntry`, by `LowerRegHot`.
+A leaf's body, which the interpreter's calls answer without a frame, is
+compiled for the calls that make one.
+
+No frame of the VM's is made for a native call. Where Go runs while native
+callees are under way, it makes each level's frame as `regEnterW` would
+-- its function, its window, past the call it makes -- from the context
+(`Closure`, `Base`) and the level's code, which it finds in the cache:
+- a call of Go a native callee makes (`jitRegGoCallNested`) is made on its
+  level's frame, each level below it given its own for the call, as the
+  interpreter's frames are during a call;
+- a callee that leaves native code -- an exit, a call of Go that threw or
+  found its code invalid -- has every native level finished by Go
+  (`jitRegUnwind`): the innermost from where it left, as a run of a
+  frame's code goes on from an exit (`jitRegLeft`); each caller from its
+  call, with what its callee answered: on in its native code where the
+  call returns to (`SSACode.Resume`, the result in the callee's context's
+  `RetValue`), if its code is still valid, or, its call's state written to
+  its window (`jit.ExpandCall`), by Go, the answer to the call's register
+  or the exception to the level's handlers (`regPending`), on from there;
+  and the run's own code goes on after the call the same way
+  (`jitRegStretch`). A frame given to a callee by a call in tail position
+  (`errRegRestart`, `errTailCall`) is finished as `regEnterW` finishes one.
+While Go runs beside them, every level's code is pinned (`jitRegEntry`'s
+`levels`): the cache neither drops it nor compiles the function again until
+the level is done, so that the code a level runs is its function's in the
+cache for as long as it runs. On arm64 the backend makes such a call a call
+of Go for now.
 
 ## The execution boundary
 

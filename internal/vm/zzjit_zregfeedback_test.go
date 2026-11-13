@@ -164,12 +164,19 @@ for (var k = 0; k < 20; k++) work(pt, 5);
 		if f.Generic(pc) || f.EntryGeneric(pc) {
 			t.Errorf("pc %d: feedback register code does not record yet", pc)
 		}
-		// A call is a call of Go of its shape (jitRegGoCall); nothing else
-		// but a typeof and an instanceof is.
+		// A call of a register function is a native call of the one its
+		// cache holds, its window the call's (regCallSite); of anything
+		// else, a call of Go of its shape (jitRegGoCall); nothing else but
+		// a typeof and an instanceof is either.
 		sites := f.NativeCalls(pc)
 		switch w.Op() {
 		case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW:
-			if len(sites) != 1 || sites[0].Go != ssa.GoCall || sites[0].Argc != int(w.X()) || sites[0].Method != (w.Op() == bytecode.RCallMW) {
+			want, native := ssa.GoCall, ssa.GoOp(0)
+			if calls := cl.regCalls; w.Op() != bytecode.RNewW && int(w.C()) < len(calls) && calls[w.C()].cl != nil {
+				want = native
+			}
+			if len(sites) != 1 || sites[0].Go != want || sites[0].Argc != int(w.X()) || sites[0].Method != (w.Op() == bytecode.RCallMW) ||
+				want == native && (sites[0].Window != p.Code[pc].Left.Slot+1 || sites[0].Callee != uintptr(unsafe.Pointer(cl.regCalls[w.C()].callee)) || sites[0].Entry == 0) {
 				t.Errorf("pc %d: call %s: sites %+v", pc, cl.fn.RegCode().Format(int(p.Origin[pc])), sites)
 			}
 		case bytecode.RTypeof, bytecode.RInstanceOf:

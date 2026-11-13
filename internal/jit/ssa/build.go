@@ -1948,6 +1948,20 @@ type CallSite struct {
 	// the interpreter's call gives it (callFunction).
 	PlainThis bool
 	Global    uintptr
+	// Window, where not 0, marks a native call register code makes (its
+	// ir.Instruction's Window) of a function that runs register code: one
+	// past the caller's register the call's window starts at, the function
+	// there, the receiver after it and the arguments from the third. The
+	// callee's window is made at the VM's stack's top, past the caller's
+	// window and the slots past it: the function in its register 0, the
+	// receiver in 1 -- a method call's, or a plain call's undefined, global
+	// object (PlainThis, Global) or captured this (ArrowThis) -- and the
+	// arguments from 2, undefined in its parameters past them; its code's
+	// call entry makes the rest of its registers undefined. Params is then
+	// the callee's ParamBase and parameters, LocalCount its Regs, ThisSlot
+	// -1: the frame is its window. The room the call checks is its link's
+	// (abi.Encoding's LinkFrame), which its code's frame sets.
+	Window int
 	// Accessor marks a property's read (AccessorGet) or write (AccessorSet)
 	// whose site found an accessor (AccessorSite), at its PC: a call of the
 	// getter, or of the setter with the value, its result dropped. Its
@@ -8409,7 +8423,13 @@ func (b *builder) nativeCalls(pc int) []*CallSite {
 			// registers, not the operand stack's top (windowCall), the
 			// site's shape the instruction's.
 			if site.Argc != in.Extra || site.Method != in.When || site.Super || site.Instr != 0 || site.Forward || site.Accessor != AccessorNone || site.Step || site.ForOf || site.ForIn ||
-				site.TypeOf && (in.Extra != 0 || site.Go != GoCall) || site.InstanceOf && (in.Extra != 1 || site.Go != GoCall) || site.Literal || site.Via != 0 {
+				site.TypeOf && (in.Extra != 0 || site.Go != GoCall) || site.InstanceOf && (in.Extra != 1 || site.Go != GoCall) || site.Literal || site.Via != 0 ||
+				site.Go == 0 && (site.Window != in.Left.Slot+1 || site.Generic || site.ThisSlot >= 0 || site.FrameArgs || site.Function || site.Tail ||
+					site.Pool != 0 && (site.Derived || site.Parent != 0 || site.Method)) {
+				// A native call's callee's window is made from the
+				// instruction's (CallSite's Window), the stack form's
+				// frames' fields none of register code's; a construction's
+				// of a base constructor.
 				continue
 			}
 		} else if site.Argc < 0 || depth < operands || after != depth-operands+1 {
@@ -8418,8 +8438,9 @@ func (b *builder) nativeCalls(pc int) []*CallSite {
 		if site.ThisSlot >= 0 && !site.Method && site.Pool == 0 && !site.ArrowThis && !site.Super && !site.PlainThis && !site.Forward {
 			continue
 		}
-		if site.ThisSlot < 0 {
-			// A receiver it never reads needs no coercing.
+		if site.ThisSlot < 0 && site.Window == 0 {
+			// A receiver it never reads needs no coercing: register code's
+			// callee's is in its window, as the feedback says.
 			site.Coerce = false
 		}
 		calls = append(calls, site)

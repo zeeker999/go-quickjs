@@ -1003,6 +1003,9 @@ type jitState struct {
 	// regCache is the code compiled from functions' register code, by the
 	// same keys (zzjit_zregnative.go): the cache's other form.
 	regCache map[jitKey]*jitRegEntry
+	// regLinks are the links native callers call functions' register code
+	// through, by the same keys (zzjit_zregcall.go).
+	regLinks map[jitKey]*jitLink
 	// regLearned is what the code made from a function's register code
 	// learned at its exits, by the function's key, kept across its
 	// compiles: an entry holding only what it learned (jitLearned), by

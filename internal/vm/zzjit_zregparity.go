@@ -322,6 +322,11 @@ func jitParityCall(r *Runtime, m reflect.Value, args []reflect.Value) (s string,
 		}
 	}()
 	out := m.Call(args)
+	if sites, ok := out[0].Interface().([]ssa.CallSite); ok && len(out) == 1 {
+		// Native calls: what is called, and how, not the callee's frame,
+		// which each form lays out its own way (ssa.CallSite's Window).
+		out[0] = reflect.ValueOf(jitParitySites(sites))
+	}
 	if last := out[len(out)-1]; last.Kind() == reflect.Bool && !last.Bool() && len(out) > 1 {
 		// An answer with its ok false is none.
 		return "", true
@@ -338,6 +343,24 @@ func jitParityCall(r *Runtime, m reflect.Value, args []reflect.Value) (s string,
 		return "", true
 	}
 	return strings.Join(parts, " "), true
+}
+
+// jitParitySites are sites, the native calls a call makes, with the fields
+// of the callee's frame cleared -- its parameters, locals, operand slots,
+// receiver's slot, captured bindings' cells, register window, where its
+// function object and its call's arguments go, its tail calls' frame,
+// whether its start makes its locals -- each form's own, and a receiver's
+// coercion only where the callee reads it (the builder clears it
+// otherwise).
+func jitParitySites(sites []ssa.CallSite) []ssa.CallSite {
+	out := make([]ssa.CallSite, len(sites))
+	for i, s := range sites {
+		s.Coerce = s.Coerce && (s.ThisSlot >= 0 || s.Window != 0)
+		s.Params, s.LocalCount, s.MaxStack, s.ThisSlot, s.StartOnly, s.Upvalues, s.Window = 0, 0, 0, 0, false, 0, 0
+		s.Function, s.FrameArgs, s.Tail, s.TailFrame = false, false, false, false
+		out[i] = s
+	}
+	return out
 }
 
 // jitParityText is v as text that two runtimes' answers share where they

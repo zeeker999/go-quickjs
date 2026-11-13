@@ -1226,7 +1226,7 @@ func (c *a64Compiler) callEntry() {
 	c.a.Load(at, a64Ctx, abi.OffStackBase)
 	c.a.AddLsl(base, at, base, 4)
 	c.a.Store(a64Ctx, abi.OffLocals, base)
-	c.a.AddImm(a64Stack, base, int64(c.f.FrameLocals)*int64(vs), true)
+	c.a.AddImm(a64Stack, base, int64(c.f.FrameLocals+c.f.Scratch)*int64(vs), true)
 	c.a.Store(a64Ctx, abi.OffStack, a64Stack)
 	c.a.Store(a64Ctx, abi.OffOpen, arm64.ZR)
 	c.a.Store(a64Ctx, abi.OffCells, arm64.ZR)
@@ -3763,6 +3763,17 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 		if generic {
 			defer c.a.Bind(join)
 		}
+	}
+	if site.Window != 0 {
+		// Register code's native call (ssa.CallSite's Window), which this
+		// backend does not make yet: Go makes it from native code, as a
+		// call of Go, or the code leaves there.
+		if generic {
+			c.a.B(goCall())
+		} else {
+			c.a.B(stub)
+		}
+		return
 	}
 	c.a.Load(a64B, a64Ctx, abi.OffLevel)
 	c.a.AddImm(a64B, a64B, 1, true)

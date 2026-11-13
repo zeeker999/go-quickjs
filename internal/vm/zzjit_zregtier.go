@@ -45,10 +45,12 @@ const jitRegDeoptLimit = 8
 
 // jitRegTakes reports whether cl's register code c is compiled: a plain
 // function's, a method's, an arrow's, an accessor's or a class's
-// constructor's code of the form's own layout that does not suspend and
-// has a frame -- a leaf's calls are answered without one. Its frame is the
-// call path's, an arrow's this, a constructor's object or a derived one's
-// uninitialized this in its register 1 as the interpreter has them.
+// constructor's code of the form's own layout that does not suspend. Its
+// frame is the call path's, an arrow's this, a constructor's object or a
+// derived one's uninitialized this in its register 1 as the interpreter
+// has them. A leaf's -- a body the interpreter's calls answer without a
+// frame -- is compiled for the calls that make one, native callers' among
+// them (regCallSite).
 func jitRegTakes(cl *closure, c *regCode) bool {
 	switch cl.fn.Kind {
 	case bytecode.KindNormal, bytecode.KindMethod, bytecode.KindArrow, bytecode.KindGetter, bytecode.KindSetter,
@@ -56,7 +58,7 @@ func jitRegTakes(cl *closure, c *regCode) bool {
 	default:
 		return false
 	}
-	return c.wide && !c.suspends && c.leaf == regLeafNone && !cl.fn.TopLevel && c.rc == cl.fn.RegCode()
+	return c.wide && !c.suspends && !cl.fn.TopLevel && c.rc == cl.fn.RegCode()
 }
 
 // jitRegHas reports whether cl's function has native code made from its
@@ -71,6 +73,50 @@ func (r *Runtime) jitRegSample(cl *closure, c *regCode) {
 		r.jitRegHot(cl, c)
 		r.jitRegStressSample()
 	}
+}
+
+// jitRegNativeCallee compiles cl's function's register code c for the
+// native callers that call it through its link, which has none yet: as the
+// stack form's native callers have a callee with no code compiled at their
+// first call of it (jitNativeCallee), not once it is hot -- they make no
+// sample of it.
+func (r *Runtime) jitRegNativeCallee(cl *closure, c *regCode) {
+	cc := cl.closureCode
+	if cc == nil || cc.jitRegRefused || cc.jitReg != nil || !r.jitEnabled {
+		return
+	}
+	if !jitRegTakes(cl, c) {
+		cc.jitRegRefused = true
+		return
+	}
+	e := r.jitRegForAs(cl, c, true)
+	switch {
+	case e == nil:
+	case e.code == nil:
+		cc.jitRegRefused = true
+	default:
+		cc.jitReg = e
+	}
+}
+
+// jitRegCallsNatively reports whether a call cl's function's register code
+// c makes would be a native call, of a callee its site's cache holds or
+// its code learned (regCallSites), as jitCallsNatively asks of the stack
+// form's: compiled for that alone, a function of host operations is worth
+// its code.
+func (r *Runtime) jitRegCallsNatively(cl *closure, c *regCode) bool {
+	if l := r.jit.regLearned[r.jitKeyOf(cl.fn)]; l != nil && len(l.nativeCalls) != 0 {
+		return true
+	}
+	for _, w := range c.rc.Code {
+		if op := w.Op(); op != bytecode.RCallW && op != bytecode.RCallMW || uint(w.C()) >= uint(len(cl.regCalls)) {
+			continue
+		}
+		if e := &cl.regCalls[w.C()]; jitRegCallKind(e) && r.jitRegCallable(e.callee, e.cl, e.rc, int(w.X())) {
+			return true
+		}
+	}
+	return false
 }
 
 // jitRegStressSample makes the next call a sample too where the runtime
@@ -123,7 +169,9 @@ func (r *Runtime) jitRegHot(cl *closure, c *regCode) *jitRegEntry {
 		// No room now.
 		return nil
 	case e.code == nil:
-		cc.jitRegRefused = true
+		// Refused for good, but for host operations alone, asked again once
+		// hot again (jitRegCompile).
+		cc.jitRegRefused = !e.hostOnly
 		return nil
 	}
 	cc.jitReg = e
@@ -134,7 +182,14 @@ func (r *Runtime) jitRegHot(cl *closure, c *regCode) *jitRegEntry {
 // deoptimization: the function is sampled anew, and compiled again from
 // what the interpreter learns meanwhile, up to jitRegDeoptLimit times.
 func (r *Runtime) jitRegInvalidate(cl *closure, e *jitRegEntry) {
-	e.invalid = true
+	if !e.invalid {
+		// Native callers call it no more.
+		e.invalid = true
+		key := r.jitKeyOf(cl.fn)
+		if r.jit.regCache[key] == e {
+			r.jit.regLinkUpdate(key, nil)
+		}
+	}
 	cc := cl.closureCode
 	if cc == nil {
 		return
@@ -145,6 +200,24 @@ func (r *Runtime) jitRegInvalidate(cl *closure, e *jitRegEntry) {
 	cc.jitRegHot = 0
 	if cc.jitRegDeopts++; cc.jitRegDeopts >= jitRegDeoptLimit {
 		cc.jitRegRefused = true
+	}
+}
+
+// jitRegReopt marks e, cl's function's code, stale for what it learned at
+// its calls of Go or its exits (jitRegCallSeen), no deoptimization: its
+// runs go on in it, as V8's code runs on with feedback it was not compiled
+// for, but the function is sampled anew and compiled again for it, which
+// no limit of deoptimizations counts -- what can be learned so is bounded.
+func (r *Runtime) jitRegReopt(cl *closure, e *jitRegEntry) {
+	if e.invalid || e.stale {
+		return
+	}
+	e.stale = true
+	if cc := cl.closureCode; cc != nil {
+		if cc.jitReg == e {
+			cc.jitReg = nil
+		}
+		cc.jitRegHot = 0
 	}
 }
 

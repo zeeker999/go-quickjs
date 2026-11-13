@@ -4499,6 +4499,18 @@ func jitHostCall(ctx *abi.Context) bool {
 	if jitGoCallWork != nil {
 		jitGoCallWork()
 	}
+	if ctx.Live == abi.LiveCall {
+		switch ssa.GoOp(ctx.GoOp & 0xff) {
+		case ssa.GoHost, ssa.GoArgument, ssa.GoCells, ssa.GoClosure, ssa.GoClose:
+			if len(r.jit.regRuns) != 0 && r.jitRegRootOf(int(ctx.Level)) >= 0 {
+				// A native callee of register code, whose frame is its
+				// window, which these, made on the stack form's frame, do
+				// not read: left to its exit, where Go makes its level's
+				// frame (zzjit_zregcall.go).
+				return false
+			}
+		}
+	}
 	switch ssa.GoOp(ctx.GoOp & 0xff) {
 	case ssa.GoLeaf:
 		return r.jitLeafCall(ctx)
@@ -4978,6 +4990,12 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 		return false
 	}
 	if ctx.Live == abi.LiveCall {
+		if len(s.regRuns) != 0 {
+			if root := r.jitRegRootOf(idx); root >= 0 {
+				// A native callee's of register code (zzjit_zregcall.go).
+				return r.jitRegGoCallNested(ctx, idx, root)
+			}
+		}
 		return r.jitGoCallNested(ctx, idx)
 	}
 	if ctx.Live == 0 && idx < len(s.regRuns) && s.regRuns[idx].f != nil && s.ssaCtxs[idx] == ctx {

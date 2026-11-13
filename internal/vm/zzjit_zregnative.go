@@ -54,6 +54,17 @@ type jitRegEntry struct {
 	// keep it from being closed.
 	invalid bool
 	runs    int
+	// stale marks code that learned what to be compiled again for
+	// (jitRegReopt): its runs go on in it, and the next ask compiles it
+	// again.
+	stale bool
+	// hostOnly marks a refusal of host operations alone (jitRegCompile),
+	// which a later ask lowers again.
+	hostOnly bool
+	// levels counts the native calls under way of the code that Go runs
+	// beside (jitRegLevelAt): the cache neither drops it nor compiles it
+	// again while any is.
+	levels  int
 	bytes   int
 	refusal string
 	// retPC and retUndef are where the interpreter ends a frame the code
@@ -88,18 +99,33 @@ func (e *jitRegEntry) loopEntry(rpc int) (int, bool) {
 // where the JIT has no memory for it now. An entry with no code holds the
 // refusal.
 func (r *Runtime) jitRegFor(cl *closure, c *regCode) *jitRegEntry {
+	return r.jitRegForAs(cl, c, false)
+}
+
+// jitRegForAs is jitRegFor, for native callers where callee says
+// (jitRegNativeCallee): a function of host operations alone, which a
+// compile for Go to enter refuses but where its calls are native ones
+// (jitRegCompile), is compiled for them, as the stack form compiles one for
+// native callers (LowerSSAInline). A refusal for that is not kept: asked
+// again, the function is lowered again.
+func (r *Runtime) jitRegForAs(cl *closure, c *regCode, callee bool) *jitRegEntry {
 	s := r.jitState()
 	if s.unavailable {
 		return nil
 	}
 	key := r.jitKeyOf(cl.fn)
 	if e := s.regCache[key]; e != nil {
-		if !e.invalid {
+		if !e.invalid && !e.hostOnly && !e.stale {
 			return e
+		}
+		if e.levels != 0 {
+			// Run by native calls under way, which find their code in the
+			// cache (jitRegLevelAt): compiled again once they are done.
+			return nil
 		}
 		s.dropReg(key, e)
 	}
-	e := r.jitRegCompile(cl, c)
+	e := r.jitRegCompile(cl, c, callee)
 	if e == nil {
 		return nil
 	}
@@ -107,16 +133,31 @@ func (r *Runtime) jitRegFor(cl *closure, c *regCode) *jitRegEntry {
 		s.regCache = map[jitKey]*jitRegEntry{}
 	}
 	s.regCache[key] = e
+	s.regLinkUpdate(key, e)
 	return e
 }
 
 // jitRegCompile is jitRegFor's compile (step A6 of 3a-3): LowerReg, the
 // SSA build with jitRegFeedback, Optimize, the backend, the code placed in
 // the JIT's arena. A refusal is an entry with no code; nil is no room.
-func (r *Runtime) jitRegCompile(cl *closure, c *regCode) *jitRegEntry {
+func (r *Runtime) jitRegCompile(cl *closure, c *regCode, callee bool) *jitRegEntry {
 	s := r.jit
 	e := &jitRegEntry{}
 	p, err := jitcompile.LowerReg(c.rc, cl.fn)
+	if err != nil && jitcompile.HostOnly(err) {
+		// Host operations alone, no loop, no element's work: compiled for
+		// its native callers (LowerRegInline), or, hot, where a call it
+		// makes is native (LowerRegHot), as the stack form compiles one
+		// (jitNativeCallee, jitHotEntry); refused for now otherwise.
+		switch {
+		case callee:
+			p, err = jitcompile.LowerRegInline(c.rc, cl.fn)
+		case r.jitRegCallsNatively(cl, c):
+			p, err = jitcompile.LowerRegHot(c.rc, cl.fn)
+		default:
+			e.hostOnly = true
+		}
+	}
 	if err == nil {
 		err = p.Validate()
 	}
@@ -143,15 +184,16 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode) *jitRegEntry {
 	}
 	// The register frame: its window's registers are its locals, in place
 	// at the context's Locals; its captured bindings past them, in their
-	// cells; its scratch slots past those, which are only values. Native
-	// callers do not call it yet (A5), so it has no call entry.
+	// cells; its scratch slots past those, which are only values.
 	f.FrameLocals = p.Regs
 	f.Scratch = p.Locals - (p.UpvalueBase + p.Upvalues)
 	e.scratch = f.Scratch
 	f.ThisSlot = -1
 	f.Params, f.StartOnly = p.ParamBase+p.Params, false
 	f.Cells = p.Cells
-	f.CallEntry = false
+	// Native callers call it (jitRegFeedback's NativeCalls), its window
+	// made past theirs: its call entry makes its frame (mir's callEntry).
+	f.CallEntry = true
 	looped := map[uint32]bool{}
 	for _, en := range f.Entries {
 		if en.OSR {
@@ -217,6 +259,11 @@ func (s *jitState) regBytes() int {
 			delete(s.regLearned, key)
 		}
 	}
+	for key := range s.regLinks {
+		if key.gone() {
+			delete(s.regLinks, key)
+		}
+	}
 	return n
 }
 
@@ -225,8 +272,9 @@ func (s *jitState) regBytes() int {
 func (s *jitState) dropReg(key jitKey, e *jitRegEntry) {
 	if s.regCache[key] == e {
 		delete(s.regCache, key)
+		s.regLinkUpdate(key, nil)
 	}
-	if e.code != nil && e.runs == 0 {
+	if e.code != nil && e.runs == 0 && e.levels == 0 {
 		_ = s.closeSSA(e.code, e.keep)
 		e.code = nil
 	}
@@ -371,108 +419,152 @@ func (r *Runtime) jitRegRun(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) (
 // entry at, or where the code is not to run. A frame the interpreter runs
 // goes on so in its own loop (jitRegLoop); a call's, in runReg.
 func (r *Runtime) jitRegGoOn(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) (pc int, v Value, done bool, err error) {
+	return r.jitRegGoOnAt(f, c, e, wb, rpc, -1, 0)
+}
+
+// jitRegGoOnAt is jitRegGoOn, but where resume is not 0 begun by going on
+// in e's code where a native call it made returns to, in context at, the
+// frame's level of a native call Go finished the callee of (jitRegUnwind),
+// the call's result in the next context's RetValue.
+func (r *Runtime) jitRegGoOnAt(f *frame, c *regCode, e *jitRegEntry, wb, rpc, at int, resume uintptr) (pc int, v Value, done bool, err error) {
 	s := r.jit
 	for {
-		ipc := e.p.At(uint32(rpc))
-		if e.invalid || e.code == nil || ipc < 0 || !e.code.HasEntry(ipc) || wb+e.p.Regs+e.scratch+e.frame > len(r.stack) {
-			// No entry here, or code a guard of which failed: the
-			// interpreter runs the rest of the invocation.
-			r.jitRegResumeSeen(f, e, rpc)
-			s.interpreted++
-			return rpc, Undefined, false, nil
+		ipc := 0
+		if resume == 0 {
+			ipc = e.p.At(uint32(rpc))
+			if e.invalid || e.code == nil || ipc < 0 || !e.code.HasEntry(ipc) || wb+e.p.Regs+e.scratch+e.frame > len(r.stack) {
+				// No entry here, or code a guard of which failed: the
+				// interpreter runs the rest of the invocation.
+				r.jitRegResumeSeen(f, e, rpc)
+				s.interpreted++
+				return rpc, Undefined, false, nil
+			}
 		}
-		ctx, ret, ok := r.jitRegStretch(f, c, e, wb, ipc)
+		ctx, ret, ok := r.jitRegStretch(f, c, e, wb, ipc, at, resume)
+		at, resume = -1, 0
 		if !ok {
 			s.interpreted++
 			return rpc, Undefined, false, nil
 		}
-		exitPC := int(ctx.ExitPC)
-		switch ctx.ExitKind {
-		case abi.ExitReturn:
-			return 0, ret, true, nil
-		case abi.ExitDeopt:
-			// A guard failed before its instruction committed anything: the
-			// frame holds the state at its start, which the interpreter runs
-			// the rest of the invocation from, and the code is compiled
-			// again at the next ask, from what the interpreter learns.
-			s.guards++
-			r.jitRegMaterialize(f, e, wb)
-			r.jitRegDeoptSeen(f, c, e, wb, exitPC)
-			r.jitRegInvalidate(f.cl, e)
-			s.interpreted++
-			return exitPC, Undefined, false, nil
-		case abi.ExitHost:
-			// Go runs the register instruction whole, then native code goes
-			// on at the next entry.
-			s.hosts++
-			r.jitRegMaterialize(f, e, wb)
-			f.pc = regSrc(c, exitPC) + 1
-			var next int
-			var ran bool
-			if p := s.regPending; p.set && p.pc == exitPC {
-				// A call Go made from native code, which left after it
-				// (jitRegGoCall): what it answered goes to the frame, as
-				// the call's register instruction would have it.
-				s.regPending = jitGoPending{}
-				next, ran, err = r.regFinishCall(f, c, wb, exitPC, p.v, p.err)
-			} else {
-				s.noteRegHost(c, exitPC)
-				seen := r.jitRegHostSeen(f, c, wb, exitPC)
-				next, ran, err = r.regWhole(f, c, wb, exitPC)
-				if seen.write && err == nil && ran {
-					r.jitRegWriteSeen(f, c, e, exitPC, seen)
-				}
-				if l := s.regLearned[r.jitKeyOf(f.cl.fn)]; l != nil && l.polyReopt {
-					// The site met what the code was not compiled for and
-					// its cache cannot hold: compiled again for it, as the
-					// stack form's code is (jitRecompileInRun), its code
-					// invalid from here.
-					l.polyReopt = false
-					r.jitRegInvalidate(f.cl, e)
-				}
-			}
-			if !ran {
-				s.interpreted++
-				return exitPC, Undefined, false, nil
-			}
-			if err != nil {
-				return 0, Undefined, false, err
-			}
-			if r.stopped != nil {
-				return 0, Undefined, false, r.stopped
-			}
-			rpc = next
-		case abi.ExitPoll:
-			// The interpreter's back-edge check, at a loop's header.
-			s.budgets++
-			r.backEdges = s.backEdgeBudget()
-			if err := r.checkInterruptNow(); err != nil {
-				return 0, Undefined, false, err
-			}
-			if r.jitStressDeopt(s) {
-				s.interpreted++
-				return exitPC, Undefined, false, nil
-			}
-			rpc = exitPC
-		default:
-			// No other way out of register code's native code yet: what it
-			// left, the interpreter goes on with from its start.
-			r.jitRegMaterialize(f, e, wb)
-			s.interpreted++
-			return exitPC, Undefined, false, nil
+		next, pc, v, done, err, native := r.jitRegLeft(f, c, e, wb, ctx, ret)
+		if !native {
+			return pc, v, done, err
 		}
+		rpc = next
 	}
 }
 
+// jitRegLeft is what Go makes of the way e's code, run on f's window at wb,
+// left in ctx, ret what a return returned: native code goes on at register
+// pc next, native; or the frame is done, with v; or it threw err, which no
+// handler of the frame's takes; or the interpreter goes on with it at
+// register pc pc.
+func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *abi.Context, ret Value) (next, pc int, v Value, done bool, err error, native bool) {
+	s := r.jit
+	exitPC := int(ctx.ExitPC)
+	switch ctx.ExitKind {
+	case abi.ExitReturn:
+		return 0, 0, ret, true, nil, false
+	case abi.ExitDeopt:
+		// A guard failed before its instruction committed anything: the
+		// frame holds the state at its start, which the interpreter runs
+		// the rest of the invocation from, and the code is compiled
+		// again at the next ask, from what the interpreter learns.
+		s.guards++
+		r.jitRegMaterialize(f, e, wb)
+		r.jitRegDeoptSeen(f, c, e, wb, exitPC)
+		r.jitRegInvalidate(f.cl, e)
+		s.interpreted++
+		return 0, exitPC, Undefined, false, nil, false
+	case abi.ExitHost:
+		// Go runs the register instruction whole, then native code goes
+		// on at the next entry.
+		s.hosts++
+		r.jitRegMaterialize(f, e, wb)
+		f.pc = regSrc(c, exitPC) + 1
+		var ran bool
+		if p := s.regPending; p.set && p.pc == exitPC && p.ctx == int(ctx.Level) {
+			// A call Go made from native code, which left after it
+			// (jitRegGoCall), or a native call whose callee Go finished
+			// (jitRegUnwind): what it answered goes to the frame, as the
+			// call's register instruction would have it.
+			s.regPending = jitGoPending{}
+			next, ran, err = r.regFinishCall(f, c, wb, exitPC, p.v, p.err)
+		} else {
+			s.noteRegHost(c, exitPC)
+			seen := r.jitRegHostSeen(f, c, wb, exitPC)
+			var callee Value
+			if w := regAt(c.code, exitPC); w.Op() == bytecode.RNewW && wb+int(w.A()) < len(r.stack) {
+				callee = r.stack[wb+int(w.A())]
+			}
+			next, ran, err = r.regWhole(f, c, wb, exitPC)
+			if seen.write && err == nil && ran {
+				r.jitRegWriteSeen(f, c, e, exitPC, seen)
+			}
+			if err == nil && ran {
+				// A call native code did not make, which it may once
+				// compiled again.
+				r.jitRegCallSeen(f, c, e, exitPC, callee)
+			}
+			if l := s.regLearned[r.jitKeyOf(f.cl.fn)]; l != nil && l.polyReopt {
+				// The site met what the code was not compiled for and
+				// its cache cannot hold: compiled again for it, as the
+				// stack form's code is (jitRecompileInRun), its code
+				// invalid from here.
+				l.polyReopt = false
+				r.jitRegInvalidate(f.cl, e)
+			}
+		}
+		if !ran {
+			s.interpreted++
+			return 0, exitPC, Undefined, false, nil, false
+		}
+		if err != nil {
+			return 0, 0, Undefined, false, err, false
+		}
+		if r.stopped != nil {
+			return 0, 0, Undefined, false, r.stopped, false
+		}
+		return next, 0, Undefined, false, nil, true
+	case abi.ExitPoll:
+		// The interpreter's back-edge check, at a loop's header.
+		s.budgets++
+		r.backEdges = s.backEdgeBudget()
+		if err := r.checkInterruptNow(); err != nil {
+			return 0, 0, Undefined, false, err, false
+		}
+		if r.jitStressDeopt(s) {
+			s.interpreted++
+			return 0, exitPC, Undefined, false, nil, false
+		}
+		return exitPC, 0, Undefined, false, nil, true
+	}
+	// No other way out of register code's native code yet: what it left,
+	// the interpreter goes on with from its start.
+	r.jitRegMaterialize(f, e, wb)
+	s.interpreted++
+	return 0, exitPC, Undefined, false, nil, false
+}
+
 // jitRegStretch runs e's code once, from its entry at instruction ipc, on
-// f's window at wb, in the next context, and returns that context with the
-// exit's kind, register pc and the frame written -- an exit that left its
-// frame to Go (abi.ExitTable) applied here -- and, for a return, the value
-// returned, read before what the run kept is let go. ok is false where it
-// did not run: no context, or the code closed.
-func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc int) (ctx *abi.Context, ret Value, ok bool) {
+// f's window at wb, in the next context -- or, resume not 0, going on where
+// a native call it made returns to (jitRegGoOnAt), in context at -- and
+// returns that context with the exit's kind, register pc and the frame
+// written -- an exit that left its frame to Go (abi.ExitTable) applied here
+// -- and, for a return, the value returned, read before what the run kept
+// is let go. A native call whose callee left native code Go finishes
+// (jitRegUnwind), and the code goes on after it where it can, as V8's lazy
+// deoptimization leaves the caller's frame alone; where it cannot -- code
+// a guard of which failed meanwhile, a throw -- the call's state is
+// written to the frame, its exit a host exit at the call, which Go
+// finishes with the callee's answer (regPending). ok is false where it did
+// not run: no context, or the code closed.
+func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, at int, resume uintptr) (ctx *abi.Context, ret Value, ok bool) {
 	s := r.jit
 	idx := s.ctxTop
+	if at >= 0 {
+		idx = at
+	}
 	if idx >= len(s.ssaCtxs)-1 && !r.jitGrowContexts() {
 		return nil, Undefined, false
 	}
@@ -487,7 +579,9 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc in
 	ctx.Locals = unsafe.Pointer(&r.stack[wb])
 	ctx.Stack = unsafe.Add(ctx.Locals, (p.Regs+e.scratch)*int(jitEncoding.ValueSize))
 	ctx.Upvalues = unsafe.Pointer(unsafe.SliceData(f.cl.upvalues))
-	ctx.Cells, ctx.Loop = nil, 0
+	if resume == 0 {
+		ctx.Cells, ctx.Loop = nil, 0
+	}
 	ctx.Open = uint64(len(f.openUpvalues))
 	// No frame for Go's calls from the code to read: the stack form's
 	// frame is what they read (jitGoRun), and they leave what needs one
@@ -510,7 +604,42 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc in
 		// which the stack's top covers while the code runs.
 		r.stackTop, r.stackHigh, raised = need, max(r.stackHigh, need), need
 	}
-	err := e.code.Run(ipc, ctx)
+	var err error
+	if resume != 0 {
+		err = e.code.Resume(resume, s.ssaCtxs[idx+1])
+	} else {
+		err = e.code.Run(ipc, ctx)
+	}
+	for err == nil && s.ssaCtxs[idx+1].Live == abi.LiveCall {
+		// A native call's callee left native code: Go finishes it, and
+		// every native call between, then the code goes on where the
+		// call returns to, its state as it left it, the call's result in
+		// the callee's context (RetValue), written with Go's barrier -- the
+		// one pointer native code stores before it tests the collector's
+		// flag again, into a keep cell nothing native reads the old value
+		// of (mir's resumeCall) -- the collector marking or not. Not into
+		// code that is invalid now, or closed: what Go ran may have run
+		// the function again and found its code wanting.
+		callee := s.ssaCtxs[idx+1]
+		back, base := callee.ReturnTo, callee.Base
+		rpc, _ := jit.CallPC(ctx)
+		f.pc = regSrc(c, int(rpc)) + 1
+		v, uerr := r.jitRegUnwind(idx)
+		if uerr == nil && r.stopped == nil && back != 0 && !e.invalid && e.code != nil && e.code.Contains(back) {
+			callee.Base, callee.Live, callee.ReturnTo = base, 0, 0
+			*(*Value)(unsafe.Pointer(&callee.RetValue)) = v
+			s.resumed++
+			s.regPending = jitGoPending{}
+			err = e.code.Resume(back, callee)
+			continue
+		}
+		// The call's state written to the frame below, the call's exit a
+		// host exit at it, which Go finishes with what the callee answered
+		// (jitRegLeft).
+		jit.ExpandCall(ctx)
+		s.regPending = jitGoPending{set: true, pc: int(rpc), ctx: idx, v: v, err: uerr}
+		break
+	}
 	if r.stackTop == raised {
 		r.stackTop = saved
 	}
@@ -532,12 +661,28 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc in
 			}
 		}
 	}
-	// What the run kept, as jitRunDone clears a stack form's run's.
+	// What the run kept, as jitRunDone clears a stack form's run's, and
+	// what its native calls' callees ran with in the contexts past it --
+	// closure, keeps, records, result -- each a frame gone once it
+	// returned, up to the first context no call ran in.
 	clear(ctx.Keep[:e.keeps])
 	ctx.This, ctx.Upvalues, ctx.Instance = abi.Slot{}, nil, abi.Slot{}
 	if n := max(ctx.RecordHigh, s.callRefs); n != 0 {
 		clear(ctx.RecordRef[:n])
 		ctx.RecordHigh = 0
+	}
+	for i := idx + 1; i < len(s.ssaCtxs); i++ {
+		c := s.ssaCtxs[i]
+		if c.Closure == nil {
+			break
+		}
+		if n := max(c.RecordHigh, s.callRefs); n != 0 {
+			clear(c.RecordRef[:n])
+			c.RecordHigh = 0
+		}
+		clear(c.Keep[:s.ssaKeeps])
+		c.Closure, c.Upvalues, c.Cells = nil, nil, nil
+		c.This, c.RetValue, c.Instance = abi.Slot{}, abi.Slot{}, abi.Slot{}
 	}
 	s.goRuns[idx] = jitGoRun{}
 	s.regRuns[idx] = jitRegRun{}
@@ -574,8 +719,13 @@ type jitRegRun struct {
 // the interpreter makes in constant space, is no call of Go
 // (jitRegFeedback's NativeCalls).
 func (r *Runtime) jitRegGoCall(ctx *abi.Context, idx int) bool {
+	return r.jitRegGoCallOn(ctx, idx, r.jit.regRuns[idx])
+}
+
+// jitRegGoCallOn is jitRegGoCall on run's frame, the run's own or a level's
+// of its native calls (jitRegGoCallNested).
+func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool {
 	s := r.jit
-	run := s.regRuns[idx]
 	f, c := run.f, run.c
 	rpc := int(ctx.ExitPC)
 	if rpc >= len(c.rc.Code) {
@@ -628,7 +778,8 @@ func (r *Runtime) jitRegGoCall(ctx *abi.Context, idx int) bool {
 	if op == bytecode.RCallMW {
 		this, at = jitGoArg(ctx, 0), 1
 	}
-	r.stack[top] = jitGoArg(ctx, at)
+	callee := jitGoArg(ctx, at)
+	r.stack[top] = callee
 	r.stack[top+1] = this
 	for i := range argc {
 		r.stack[top+2+i] = jitGoArg(ctx, at+1+i)
@@ -656,6 +807,11 @@ func (r *Runtime) jitRegGoCall(ctx *abi.Context, idx int) bool {
 	s.ssaCtx = last
 	if s.ssaSharedGen != shared {
 		r.jitShareContexts(idx, f)
+	}
+	if err == nil && r.stopped == nil {
+		// What the call called, which the code may call natively once
+		// compiled again (jitRegCallSeen).
+		r.jitRegCallSeen(f, c, run.e, rpc, callee)
 	}
 	if err != nil || r.stopped != nil || run.e.invalid {
 		s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: v, err: err}
@@ -712,6 +868,10 @@ type RegNativeStats struct {
 	// GoCalls counts the calls of Go native code made that ran script, a
 	// call's on the register frame among them (jitRegGoCall).
 	GoCalls uint64
+	// Unwound counts the native calls' callees Go finished after one of
+	// them left native code (jitRegUnwind), and Resumed the native callers
+	// that went on natively after such a callee.
+	Unwound, Resumed uint64
 	// HostOps is Hosts by the register instruction Go ran whole.
 	HostOps map[string]uint64
 }
@@ -723,7 +883,8 @@ func (r *Runtime) RegNativeStats() RegNativeStats {
 		return RegNativeStats{}
 	}
 	return RegNativeStats{Entries: s.ssaEntries, Hosts: s.hosts, Guards: s.guards, Polls: s.budgets,
-		Interpreted: s.interpreted, Records: s.ssaRecords, Materialized: s.materialized, GoCalls: s.goCalls, HostOps: maps.Clone(s.regHostOps)}
+		Interpreted: s.interpreted, Records: s.ssaRecords, Materialized: s.materialized, GoCalls: s.goCalls,
+		Unwound: s.unwound, Resumed: s.resumed, HostOps: maps.Clone(s.regHostOps)}
 }
 
 // noteRegHost counts a host exit at register pc rpc of c by its register

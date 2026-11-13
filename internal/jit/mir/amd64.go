@@ -1088,7 +1088,9 @@ func (c *compiler) callEntry() {
 	c.a.ShiftImm(amd64.Shl, base, 4, true)
 	c.a.AddMem(base, regCtx, abi.OffStackBase)
 	c.a.Store(regCtx, abi.OffLocals, base)
-	c.a.Lea(regStack, base, int32(c.f.FrameLocals)*vs)
+	// A register program's scratch slots between its window and its
+	// operands (ssa.Func's Scratch).
+	c.a.Lea(regStack, base, int32(c.f.FrameLocals+c.f.Scratch)*vs)
 	c.a.Store(regCtx, abi.OffStack, regStack)
 	c.a.StoreImm(regCtx, abi.OffOpen, 0)
 	// No cells of its captured locals until its start makes them
@@ -1604,6 +1606,20 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 		ops--
 	}
 	direct = direct && c.operandsLive(s, ops)
+	// Register code's call (ssa.CallSite's Window): its operands are the
+	// call's own values, which it writes to the callee's window whatever
+	// function the checks find (below), its state's slots the caller's
+	// registers, none of them the call's to skip.
+	win := site.Window != 0
+	if win {
+		if !generic || gen {
+			// Each call Go makes where it does not make it natively: a
+			// callee with no code, a context past the deepest.
+			c.a.Jmp(c.stubLabel(s, exitKind(v.Aux)))
+			return
+		}
+		direct = false
+	}
 	// The room check of such a call leaves the VM's stack's top in
 	// scratchC, where nothing after it reads the callee, for the callee's
 	// frame's address to be made of (topInC).
@@ -1699,7 +1715,22 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 			}
 		}
 		// Room in the VM's stack.
-		if keepTop {
+		if win {
+			// The callee's window and what its code takes past it, its
+			// link's (abi.Encoding's LinkFrame), which the code it runs now
+			// sets, and the arguments the call writes, which may be more
+			// than its registers. scratchC keeps the callee, which a
+			// construction's checks read.
+			c.a.Load(scratchB, regCtx, abi.OffStackTop)
+			c.a.Load(scratchB, scratchB, 0)
+			c.a.OpImm(amd64.Add, scratchB, int32(2+site.Argc), true)
+			c.a.CmpMem(scratchB, regCtx, abi.OffStackEnd, true)
+			guard.jump(amd64.CondA)
+			c.a.Load(scratchB, regCtx, abi.OffStackTop)
+			c.a.Load(scratchB, scratchB, 0)
+			c.movImm(scratchA, uint64(t.Entry)-uint64(c.enc.LinkEntry))
+			c.a.AddMem(scratchB, scratchA, c.enc.LinkFrame)
+		} else if keepTop {
 			c.a.Load(scratchC, regCtx, abi.OffStackTop)
 			c.a.Load(scratchC, scratchC, 0)
 			c.a.Lea(scratchB, scratchC, int32(t.LocalCount+t.MaxStack))
@@ -1768,7 +1799,7 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 	// where the callee has them, which it copies from there (words) -- and
 	// the description's address.
 	operands := -1
-	if !direct {
+	if !direct && !win {
 		operands = calleeSlot - 1
 	}
 	if site.Forward {
@@ -1796,6 +1827,29 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 	receiver := direct && site.Pool == 0 && !site.Super && !site.PlainThis && (site.ThisSlot >= 0 || site.Method && this < sp)
 	// Whether xScratch2 keeps the callee's frame's address (below).
 	framed := false
+	if win {
+		// Register code's (ssa.CallSite's Window): the callee's window past
+		// the VM's stack's top, its address in xScratch2 too, given the
+		// call's operands straight from where the code has them, whatever
+		// function the checks found -- the function in its register 0, a
+		// method call's receiver in 1, the arguments from 2 -- and, in
+		// setup, what each callee's own window needs besides.
+		c.a.Load(scratchC, regCtx, abi.OffStackTop)
+		c.a.Load(scratchC, scratchC, 0)
+		c.a.ShiftImm(amd64.Shl, scratchC, 4, true)
+		c.a.AddMem(scratchC, regCtx, abi.OffStackBase)
+		c.a.MovQToX(xScratch2, scratchC)
+		framed = true
+		inC, m := true, 0
+		if site.Method {
+			m = 1
+			c.directOperand(v, v.Args[0], true, vs, &inC)
+		}
+		c.directOperand(v, v.Args[m], true, 0, &inC)
+		for i := range site.Argc {
+			c.directOperand(v, v.Args[m+1+i], true, int32(2+i)*vs, &inC)
+		}
+	}
 	if direct {
 		// The callee's frame, past the VM's stack's top, in scratchC, which
 		// the operands are written through; kept in xScratch2 as well,
@@ -1894,6 +1948,37 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 	// setup writes what the call of t knows of its callee's frame and
 	// context. It keeps callLink, the callee's link.
 	setup := func(t *ssa.CallSite) {
+		if win {
+			frame()
+			c.windowSetup(t, locals, top, high2)
+			if t.Pool != 0 {
+				// A construction's receiver, the pool's last object, its cell
+				// cleared, in the window's register 1 and the callee's
+				// context's This, which the result is if not an object, and
+				// its new.target there, as the stack form's.
+				c.a.Load(calleeCtx, regCtx, abi.OffNext)
+				c.movImm(tmp, uint64(t.Pool))
+				c.a.Load(top, tmp, abi.OffPoolCount)
+				c.a.OpImm(amd64.Sub, top, 1, true)
+				c.a.Store(tmp, abi.OffPoolCount, top)
+				c.a.ShiftImm(amd64.Shl, top, 3, true)
+				c.a.Op(amd64.Add, top, tmp, true)
+				c.a.Load(high2, top, abi.OffPoolObjects)
+				c.storeImm(top, abi.OffPoolObjects, 0, tmp)
+				c.a.Store(calleeCtx, abi.OffThis+c.enc.RefOffset, high2)
+				c.storeImm(calleeCtx, abi.OffThis+c.enc.NumOffset, c.enc.Object, tmp)
+				c.a.Store(locals, vs+c.enc.RefOffset, high2)
+				c.storeImm(locals, vs+c.enc.NumOffset, c.enc.Object, tmp)
+				c.storeImm(calleeCtx, abi.OffNewTarget, uint64(t.Callee), top)
+			}
+			if t.ByCode != 0 {
+				c.a.Load(callClosure, regCtx, abi.OffCallClosure)
+			} else {
+				c.movImm(callClosure, uint64(t.Closure))
+			}
+			c.a.LeaLabel(callRet, back)
+			return
+		}
 		framed := false
 		// The arguments, its parameters', past the receiver of a call
 		// through Function.prototype.call; undefined in the others.
@@ -5837,6 +5922,37 @@ func (c *compiler) directOperand(v, x *ssa.Value, local bool, disp int32, inC *b
 	at()
 	c.a.Store(base, disp+c.enc.NumOffset, w)
 	c.a.Store(base, disp+c.enc.RefOffset, scratchB)
+}
+
+// windowSetup writes what register code's native call of t (ssa.CallSite's
+// Window) gives its callee's window, at locals, besides the operands the
+// call wrote there: undefined in its parameters past the arguments, and a
+// plain call's receiver -- the this an arrow captured (arrowThis, in the
+// context's CallThis), the global object or undefined (PlainThis). It
+// uses a and b.
+func (c *compiler) windowSetup(t *ssa.CallSite, locals, a, b amd64.Reg) {
+	vs := int32(c.enc.ValueSize)
+	for i := 2 + t.Argc; i < t.Params && i < t.LocalCount; i++ {
+		c.storeImm(locals, int32(i)*vs+c.enc.NumOffset, c.enc.Undefined, a)
+		c.storeImm(locals, int32(i)*vs+c.enc.RefOffset, 0, a)
+	}
+	switch {
+	case t.Pool != 0:
+		// A construction's, from its pool (call's setup).
+	case t.ArrowThis:
+		c.a.Load(b, regCtx, abi.OffCallThis)
+		c.a.Load(a, b, c.enc.NumOffset)
+		c.a.Store(locals, vs+c.enc.NumOffset, a)
+		c.a.Load(a, b, c.enc.RefOffset)
+		c.a.Store(locals, vs+c.enc.RefOffset, a)
+	case t.Method:
+	case t.Global != 0:
+		c.storeImm(locals, vs+c.enc.NumOffset, c.enc.Object, a)
+		c.storeImm(locals, vs+c.enc.RefOffset, uint64(t.Global), a)
+	default:
+		c.storeImm(locals, vs+c.enc.NumOffset, c.enc.Undefined, a)
+		c.storeImm(locals, vs+c.enc.RefOffset, 0, a)
+	}
 }
 
 // pointerWord leaves in scratchB the pointer word of a value whose number

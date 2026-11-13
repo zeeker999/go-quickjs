@@ -2673,14 +2673,17 @@ func exitKind(aux int) uint64 {
 // slots (ssa.Func's LoopsEnd), past which the frames of the callees its
 // loops call start.
 func (c *core) frameSize() int {
-	n := c.f.FrameLocals + c.f.StackSize
+	// Past the locals, a register program's scratch slots (ssa.Func's
+	// Scratch), where the operands, the loops' slots and the homes start.
+	at := c.f.FrameLocals + c.f.Scratch
+	n := at + c.f.StackSize
 	if c.f.Loops {
-		n = max(n, c.f.FrameLocals+c.f.LoopsEnd-c.f.Locals)
+		n = max(n, at+c.f.LoopsEnd-c.f.Locals)
 	}
 	if c.f.HomesEnd != 0 {
 		// The homes of the objects it does not make, which its exits write
 		// there (ssa's escape.go).
-		n = max(n, c.f.FrameLocals+c.f.HomesEnd-c.f.Locals)
+		n = max(n, at+c.f.HomesEnd-c.f.Locals)
 	}
 	return n
 }
