@@ -439,6 +439,17 @@ func (r *Runtime) jitRegGoOnAt(f *frame, c *regCode, e *jitRegEntry, wb, rpc, at
 	s := r.jit
 	for {
 		ipc := 0
+		if resume == 0 && e.stale && !e.invalid {
+			// Stale for what it learned (jitRegReopt), the run having left
+			// it: compiled again now and gone on in that code, as the stack
+			// form's run's code is compiled again at its exit
+			// (jitRecompileInRun) -- an inlining given up, a call learned
+			// -- rather than gone on in code that leaves at the same place
+			// again until its budget is spent.
+			if ne := r.jitRegFor(f.cl, c); ne != nil && ne.code != nil && !ne.invalid {
+				e = ne
+			}
+		}
 		if resume == 0 {
 			ipc = e.p.At(uint32(rpc))
 			if e.invalid || e.code == nil || ipc < 0 || !e.code.HasEntry(ipc) || wb+e.p.Regs+e.scratch+e.frame > len(r.stack) {

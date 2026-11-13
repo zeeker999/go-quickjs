@@ -225,7 +225,8 @@ func (r *Runtime) jitRegInvalidate(cl *closure, e *jitRegEntry) {
 // jitRegReopt marks e, cl's function's code, stale for what it learned at
 // its calls of Go or its exits (jitRegCallSeen), no deoptimization: its
 // runs go on in it, as V8's code runs on with feedback it was not compiled
-// for, until a budget is spent (jitRegLeft's poll), but the function is
+// for, until they leave it -- compiled again at an exit (jitRegGoOnAt), or
+// the interpreter's at a loop's poll (jitRegLeft) -- but the function is
 // sampled anew and compiled again for it, which no limit of
 // deoptimizations counts -- what can be learned so is bounded. Its native
 // callers call it through Go from here (its link has no entry), where it
