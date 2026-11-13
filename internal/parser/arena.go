@@ -1,6 +1,10 @@
 package parser
 
-import "github.com/go-quickjs/go-quickjs/internal/ast"
+import (
+	"sync"
+
+	"github.com/go-quickjs/go-quickjs/internal/ast"
+)
 
 // slab hands out pointers to elements of a pre-allocated block, turning N
 // individual heap allocations into one allocation per block.
@@ -106,6 +110,44 @@ func (l *lists[T]) finish(mark int) []T {
 	return l.buf[start:len(l.buf):len(l.buf)]
 }
 
+// listScratch is a parse's lists' scratch stacks, kept from one parse for
+// the next (listScratchPool), so that each parse does not grow them from
+// nothing: what a parse hands out is copied out of them (finish), so
+// nothing of a syntax tree is in them.
+type listScratch struct {
+	exprs []ast.Expr
+	stmts []ast.Stmt
+	decls []ast.Declarator
+	props []ast.Property
+}
+
+// listScratchPool holds the scratch stacks no parse has. Separate
+// runtimes parse at once, each parse with stacks of its own.
+var listScratchPool = sync.Pool{New: func() any { return new(listScratch) }}
+
+// takeScratch gives a's lists scratch stacks from the pool.
+func (a *arena) takeScratch() {
+	s := listScratchPool.Get().(*listScratch)
+	a.exprs.scratch, a.stmts.scratch = s.exprs, s.stmts
+	a.decls.scratch, a.props.scratch = s.decls, s.props
+	a.scratch = s
+}
+
+// giveScratch gives a's lists' scratch stacks back to the pool, emptied:
+// a parse that stopped at an error leaves lists unfinished on them.
+func (a *arena) giveScratch() {
+	s := a.scratch
+	clear(a.exprs.scratch)
+	clear(a.stmts.scratch)
+	clear(a.decls.scratch)
+	clear(a.props.scratch)
+	s.exprs, s.stmts = a.exprs.scratch[:0], a.stmts.scratch[:0]
+	s.decls, s.props = a.decls.scratch[:0], a.props.scratch[:0]
+	a.exprs.scratch, a.stmts.scratch, a.decls.scratch, a.props.scratch = nil, nil, nil, nil
+	a.scratch = nil
+	listScratchPool.Put(s)
+}
+
 // truncate abandons whatever lists were begun past mark, which a parse that
 // is rewound after an error, and retried another way, leaves unfinished.
 func (l *lists[T]) truncate(mark int) {
@@ -148,6 +190,8 @@ type arena struct {
 	stmts lists[ast.Stmt]
 	decls lists[ast.Declarator]
 	props lists[ast.Property]
+	// scratch is where the lists' scratch stacks came from (takeScratch).
+	scratch *listScratch
 }
 
 func (a *arena) ident(name string, start int) *ast.Ident {

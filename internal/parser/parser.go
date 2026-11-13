@@ -209,6 +209,8 @@ func Parse(src string, opts Options) (prog *ast.Program, err error) {
 		allowNewTarget: opts.AllowNewTarget,
 		nodeQuirks:     opts.NodeQuirks,
 	}
+	p.nodes.takeScratch()
+	defer p.nodes.giveScratch()
 	// The recursive-descent routines report errors by panicking with a
 	// *Error, which keeps their signatures free of error returns. Nothing else
 	// panics deliberately, so any other value is a genuine bug and is re-raised.
