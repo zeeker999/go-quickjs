@@ -1020,6 +1020,12 @@ type jitState struct {
 	regForced bool
 	// regHeld is what the register code in regCache takes (held).
 	regHeld int
+	// regLevelSlab and regFrameSlab hold the levels, and their frames, of
+	// calls of Go from native code deeper than their buffers on the Go
+	// stack take, each call's past those of the calls under way below it
+	// (jitRegGoCallNested).
+	regLevelSlab []jitRegLevel
+	regFrameSlab []*frame
 	// regLearned is what the code made from a function's register code
 	// learned at its exits, by the function's key, kept across its
 	// compiles: an entry holding only what it learned (jitLearned), by

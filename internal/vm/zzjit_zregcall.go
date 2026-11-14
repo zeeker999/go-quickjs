@@ -393,7 +393,17 @@ func (r *Runtime) jitRegLevelAt(i int) (jitRegLevel, bool) {
 	if cl == nil || cl.reg == nil {
 		return jitRegLevel{}, false
 	}
-	e := s.regCache[r.jitKeyOf(cl.fn)]
+	// Its closure's code, which is the cache's while it has code of this
+	// realm: a key made at each level of each call of Go from deep native
+	// recursion -- a weak handle and a map lookup -- had cost EarleyBoyer
+	// most of its time once its recursion ran natively.
+	var e *jitRegEntry
+	if cc := cl.closureCode; cc != nil {
+		e = cc.jitReg
+	}
+	if e == nil || e.code == nil || e.key.realm != r.jitRealmKey() {
+		e = s.regCache[r.jitKeyOf(cl.fn)]
+	}
 	if e == nil || e.code == nil || e.p == nil {
 		return jitRegLevel{}, false
 	}
@@ -478,7 +488,18 @@ func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 	var buf [8]jitRegLevel
 	levels := buf[:0]
 	if n > len(buf) {
-		levels = make([]jitRegLevel, 0, n)
+		// Deep native recursion: from the runtime's slab, past what
+		// calls of Go under way below hold of it, given back after --
+		// made anew at each call, a recursion thirty levels deep that
+		// called Go at every level allocated a gigabyte a run.
+		at := len(s.regLevelSlab)
+		s.regLevelSlab = slices.Grow(s.regLevelSlab, n)
+		levels = s.regLevelSlab[at : at : at+n]
+		defer func() {
+			clear(s.regLevelSlab[at : at+n])
+			s.regLevelSlab = s.regLevelSlab[:at]
+		}()
+		s.regLevelSlab = s.regLevelSlab[:at+n]
 	}
 	ok := true
 	for i := root + 1; i <= idx; i++ {
@@ -505,7 +526,14 @@ func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 		var fbuf [8]*frame
 		frames := fbuf[:0]
 		if n > len(fbuf) {
-			frames = make([]*frame, 0, n)
+			at := len(s.regFrameSlab)
+			s.regFrameSlab = slices.Grow(s.regFrameSlab, n)
+			frames = s.regFrameSlab[at : at : at+n]
+			defer func() {
+				clear(s.regFrameSlab[at : at+n])
+				s.regFrameSlab = s.regFrameSlab[:at]
+			}()
+			s.regFrameSlab = s.regFrameSlab[:at+n]
 		}
 		for k := range levels {
 			l := &levels[k]
