@@ -4,6 +4,7 @@ package vm
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -706,4 +707,63 @@ func jitParityDecisions(res *FeedbackParity, name string, fn *bytecode.Function,
 	pair("inlined", s.inlined, r.inlined)
 	pair("host operations left to Go", s.hosts, r.hosts)
 	pair("loops' entries dropped", s.unentered, r.unentered)
+}
+
+// JITRefusals is why the JIT would not compile fn, a function of a program
+// compiled with the register form, from each form's code, as far as its
+// code alone says, before any of it runs: from its register code -- what
+// jitRegTakes refuses, LowerReg's refusal (LowerRegHot's for a function of
+// host operations alone, which the register tier compiles once a call it
+// makes is native, as the stack form does), and the SSA build's with no
+// feedback -- and from its stack code (LowerSSA, LowerSSAHot, the build),
+// each "" where it is taken; a function too large for the JIT's default
+// budget is neither's (jitCompiles). The refusals that what runs teaches --
+// a deoptimization limit, the cache's room -- are not these. TestJITRefusals counts
+// them over the corpora, the list of what the register form refuses that
+// the stack form takes only ever shrinking.
+func JITRefusals(fn *bytecode.Function) (reg, stack string) {
+	build := func(p *ir.Program, err error, hot func() (*ir.Program, error)) string {
+		if err != nil && jitcompile.HostOnly(err) {
+			p, err = hot()
+		}
+		if err == nil {
+			err = p.Validate()
+		}
+		if err == nil {
+			_, err = ssa.Build(p)
+		}
+		if err != nil {
+			var rf *jitcompile.Refusal
+			if errors.As(err, &rf) {
+				return rf.Reason
+			}
+			return err.Error()
+		}
+		return ""
+	}
+	if !jitCompiles(fn, jitCacheBytes) {
+		// Too large for the default budget, whose compiles both forms
+		// make none of (jitCompiles); not built here.
+		const big = "too large for the JIT's memory"
+		return big, big
+	}
+	stack = func() string {
+		p, err := jitcompile.LowerSSA(fn)
+		return build(p, err, func() (*ir.Program, error) { return jitcompile.LowerSSAHot(fn) })
+	}()
+	rc := fn.RegCode()
+	switch {
+	case rc == nil:
+		return "no register code", stack
+	case !rc.Wide:
+		return "register code of the stack form's layout", stack
+	}
+	switch fn.Kind {
+	case bytecode.KindNormal, bytecode.KindMethod, bytecode.KindArrow, bytecode.KindGetter, bytecode.KindSetter,
+		bytecode.KindConstructor, bytecode.KindDerivedConstructor:
+	default:
+		return "function kind " + fmt.Sprint(fn.Kind), stack
+	}
+	p, err := jitcompile.LowerReg(rc, fn)
+	return build(p, err, func() (*ir.Program, error) { return jitcompile.LowerRegHot(rc, fn) }), stack
 }

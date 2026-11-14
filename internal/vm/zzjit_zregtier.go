@@ -45,12 +45,16 @@ const jitRegDeoptLimit = 8
 
 // jitRegTakes reports whether cl's register code c is compiled: a plain
 // function's, a method's, an arrow's, an accessor's or a class's
-// constructor's code of the form's own layout that does not suspend. Its
-// frame is the call path's, an arrow's this, a constructor's object or a
-// derived one's uninitialized this in its register 1 as the interpreter
-// has them. A leaf's -- a body the interpreter's calls answer without a
-// frame -- is compiled for the calls that make one, native callers' among
-// them (regCallSite).
+// constructor's code of the form's own layout, a generator's and an async
+// function's among them, and top-level code's -- a script's, a module's,
+// an indirect eval's. Its frame is the call path's, an arrow's this, a
+// constructor's object or a derived one's uninitialized this in its
+// register 1 as the interpreter has them; a suspended frame's as
+// regGenRun makes it again at each resumption. A leaf's -- a body the
+// interpreter's calls answer without a frame -- is compiled for the calls
+// that make one, native callers' among them (regCallSite). Only what
+// jitRegCalled says is entered at its start; the rest at its loops, by
+// on-stack replacement, and a suspended frame's code where it resumes.
 func jitRegTakes(cl *closure, c *regCode) bool {
 	switch cl.fn.Kind {
 	case bytecode.KindNormal, bytecode.KindMethod, bytecode.KindArrow, bytecode.KindGetter, bytecode.KindSetter,
@@ -58,7 +62,17 @@ func jitRegTakes(cl *closure, c *regCode) bool {
 	default:
 		return false
 	}
-	return c.wide && !c.suspends && !cl.fn.TopLevel && c.rc == cl.fn.RegCode()
+	return c.wide && c.rc == cl.fn.RegCode()
+}
+
+// jitRegCalled reports whether cl's register code c, which jitRegTakes,
+// is entered at its start by a call: that of neither a generator nor an
+// async function, whose call makes its object and whose frame the
+// interpreter suspends and makes again (regGenRun), nor top-level code,
+// which runs once, as V8 enters top-level code only by on-stack
+// replacement. Native callers call only such code, and inline only it.
+func jitRegCalled(cl *closure, c *regCode) bool {
+	return jitRegTakes(cl, c) && !c.suspends && !cl.fn.TopLevel && !cl.fn.IsModule
 }
 
 // jitRegHas reports whether cl's function has native code made from its
@@ -85,8 +99,7 @@ func (r *Runtime) jitRegNativeCallee(cl *closure, c *regCode) {
 	if cc == nil || cc.jitRegRefused || cc.jitReg != nil || !r.jitEnabled {
 		return
 	}
-	if !jitRegTakes(cl, c) {
-		cc.jitRegRefused = true
+	if !jitRegCalled(cl, c) {
 		return
 	}
 	e := r.jitRegForAs(cl, c, true)
@@ -421,13 +434,18 @@ func (r *Runtime) jitRegWriteSeen(f *frame, c *regCode, e *jitRegEntry, rpc int,
 
 // jitRegEnter runs f, the frame regEnterW made for a call of cl, its
 // register code c and its window at base, in cl's function's native code
-// from its start, and in the interpreter where the code leaves it.
-func (r *Runtime) jitRegEnter(f *frame, cl *closure, c *regCode, base int) (Value, error) {
+// from register pc start -- its start, or, for the frame of a generator or
+// an async function regGenRun made again, where it resumes -- and in the
+// interpreter where the code leaves it, or has no entry there.
+func (r *Runtime) jitRegEnter(f *frame, cl *closure, c *regCode, base, start int) (Value, error) {
 	e := cl.closureCode.jitReg
 	if e == nil || e.invalid || !r.jitEnabled {
-		return r.runReg(f, c, 0)
+		return r.runReg(f, c, start)
 	}
-	return r.jitRegRun(f, c, e, f.base-int(c.locals), 0)
+	if ipc := e.p.At(uint32(start)); start != 0 && e.code != nil && ipc >= 0 && e.code.HasEntry(ipc) {
+		r.jit.regResumes++
+	}
+	return r.jitRegRun(f, c, e, f.base-int(c.locals), start)
 }
 
 // jitRegLoop is the back edge to register pc target's sample, in the frame

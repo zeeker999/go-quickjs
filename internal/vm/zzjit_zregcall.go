@@ -273,7 +273,7 @@ func (r *Runtime) jitRegConstructable(o *Object, argc int) bool {
 // object, whose register code is rc, with argc arguments (regCallSite).
 func (r *Runtime) jitRegCallable(o *Object, cl *closure, rc *regCode, argc int) bool {
 	fd := o.fn()
-	if fd == nil || fd.closure != cl || fd.bound || cl.realm != r.Realm || rc == nil || rc != cl.reg || !jitRegTakes(cl, rc) ||
+	if fd == nil || fd.closure != cl || fd.bound || cl.realm != r.Realm || rc == nil || rc != cl.reg || !jitRegCalled(cl, rc) ||
 		rc.args || isClassConstructorKind(cl.fn.Kind) || cl.fn.HasDirectEval {
 		return false
 	}

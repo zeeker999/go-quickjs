@@ -131,7 +131,11 @@ func (x *regRunner) Run(p *ir.Program, pc int, in *ir.Instruction, slots []ir.Va
 // suspension or a call in tail position, which runReg's loop alone makes.
 func regWholeRuns(w bytecode.RInstr) bool {
 	switch w.Op() {
-	case bytecode.RRet, bytecode.RRetUndef, bytecode.RYield, bytecode.RCallWT, bytecode.RCallMWT:
+	case bytecode.RRet, bytecode.RRetUndef, bytecode.RYield, bytecode.RCallWT, bytecode.RCallMWT,
+		bytecode.RAwait, bytecode.RYieldStar, bytecode.REndParams, bytecode.RGenEntry, bytecode.RIterResume:
+		// RAwait, RYieldStar, REndParams and RIterResume may suspend the
+		// frame, which only the interpreter does, and RGenEntry reads
+		// how it resumed.
 		return false
 	}
 	return true

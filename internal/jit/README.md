@@ -190,7 +190,14 @@ operands. What the lowering leaves to Go whole -- a call, a cold operation
 instruction. A call, `call_w`'s, `call_method_w`'s or `new_w`'s, and a
 `typeof` are Hosts of their own kind (`ir.Instruction`'s `Window`), which
 the builder makes natively from what the feedback says (see [Calls of
-Go](#calls-of-go) and [Native calls](#native-calls)).
+Go](#calls-of-go) and [Native calls](#native-calls)). A call in tail
+position (`tail_call_w`, `tail_call_method_w`) is a plain Host: the
+interpreter makes it, as the ordinary call while the stack is shallow and
+giving the frame to the callee deeper (the VM's `rhCallWT`), so that native
+code keeps no frame a tail call gives up; native code leaves the frame to it
+there, and the frame ends after it. A private member's read or write
+(`get_private`, `set_private`) is a Host too, native code going on after
+it.
 
 `regexp_lit` that calls -- `/x/.exec(s)`, `/x/.test(s)` -- is the literal's
 RegExp from its pool, its method read, both in scratch slots, the argument
@@ -224,9 +231,9 @@ register code is of the form's own layout (`jitRegTakes`): their frames are
 the call path's, an arrow's this, a constructor's object or a derived one's
 uninitialized this in register 1, as the interpreter has them. A leaf's
 body, which the interpreter's calls answer without a frame, is compiled for
-the calls that make one. Generators, async functions and top-level code are
-not compiled yet: their code suspends, or runs once, and runs in the
-interpreter.
+the calls that make one. A generator's, an async function's and top-level
+code's are compiled too, and entered only where they can be (see [Tier-up
+and on-stack replacement](#tier-up-and-on-stack-replacement)).
 
 **Refusals.** `LowerReg` refuses a function kind it does not take, direct
 eval, an arguments object the frame cannot own (`compile`'s `argumentsOwn`),
@@ -240,7 +247,12 @@ alone, it is worth its code. A register function has no parameter prologue
 -- its defaults are ordinary code over its registers -- so none is refused
 for one. A panic in the lowering is a refusal (`lowerRegRecovered`).
 `TestLowerRegCorpusRefusals` counts the refusals by reason over directories
-of code (`QUICKJS_JIT_REG_REFUSALS`, a path list), beside the builder's.
+of code (`QUICKJS_JIT_REG_REFUSALS`, a path list), beside the builder's; and
+`TestJITRefusals` (internal/regdiff) counts, over the micro-benchmarks, the
+V8 suite, Octane, Are We Fast Yet, the bundles and test262, why the JIT
+would not compile each function from its register code -- what the tier
+takes, the lowering's and the build's refusals (`vm.JITRefusals`) -- kind by
+kind, and how many of each the stack form takes: a list that only shrinks.
 
 **The evaluator on a register frame.** `vm.RegLowerCall`
 (`zzjit_zregrunner.go`) runs a call's register frame by the IR's evaluator
@@ -426,6 +438,22 @@ call that has no code is compiled at their first call of it through Go
   interrupt budget's, as many samples where every call is one. Code compiled
   before a site's cache knew a shape reads it by a scan, which never leaves
   native code to learn one.
+
+**What is entered where.** Of the code compiled (`jitRegTakes`), what
+`jitRegCalled` says -- neither a generator's nor an async function's code,
+nor top-level code -- is entered at its start by calls, native callers'
+among them, and inlined. Top-level code, which runs once, is entered only by
+on-stack replacement at its loops, as V8 enters top-level code: its
+declarations before them run in the interpreter. A generator's or an async
+function's frame, which the interpreter suspends at each `yield` and `await`
+and makes again at each resumption (`regGenRun`), is entered at its loops
+and where it resumes (`jitRegEnter` from `regGenRun`): the lowering gives
+the code an entry at each resumption -- past an `await`, past the jump after
+a `yield` that a resumption by `next` goes on past, and at the return path
+that jump goes over (`lowerReg`'s entries). The suspensions -- `yield`,
+`await`, `yield*`, the parameters' end, a delegation's step -- and
+`gen_entry`, which reads how the frame resumed, are the interpreter's
+(`regWholeRuns`): native code leaves the frame to it there.
 
 **Entering.** The code is entered:
 
@@ -2301,8 +2329,9 @@ go with it:
 
 The switch-over needs, on register code: the feedback the tables in
 [Feedback](#feedback) list as not answered yet, call frequencies first (from
-the feedback dispatcher); top-level code, generators and async functions;
-the feedback snapshot, for compiles in the background; the `-jitcode` hook.
+the feedback dispatcher), and a loop's steps of a generator resumed natively
+(`GenSteps`); the feedback snapshot, for compiles in the background; the
+`-jitcode` hook.
 Then it removes:
 
 - `compile.LowerSSA`, `LowerSSAHot`, `LowerSSAInline`, `LowerSSAForward` and

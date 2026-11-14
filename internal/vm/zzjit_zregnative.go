@@ -149,6 +149,11 @@ func (r *Runtime) jitRegForAs(cl *closure, c *regCode, callee bool) *jitRegEntry
 // the JIT's arena. A refusal is an entry with no code; nil is no room.
 func (r *Runtime) jitRegCompile(cl *closure, c *regCode, callee bool) *jitRegEntry {
 	s := r.jit
+	if !jitCompiles(cl.fn, r.jitBudget()) {
+		// Too large for the JIT's memory, as the stack form's compile
+		// finds it (jitCompiles): no room, at every ask.
+		return nil
+	}
 	e := &jitRegEntry{}
 	p, err := jitcompile.LowerReg(c.rc, cl.fn)
 	if err != nil && jitcompile.HostOnly(err) {

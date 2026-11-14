@@ -37,11 +37,13 @@ func (*Runtime) jitOn() bool { return false }
 
 // The register tier's hooks (zzjit_zregtier.go), which jitBuilt's false
 // compiles out.
-func (*Runtime) jitRegSample(*closure, *regCode)                            {}
-func (*Runtime) jitRegCallSample(*regCallCache)                             {}
-func (*Runtime) jitRegHas(*closure) bool                                    { return false }
-func (*Runtime) jitRegEnter(*frame, *closure, *regCode, int) (Value, error) { return Undefined, nil }
-func (*Runtime) jitRegLoop(st *regState, target int) int                    { return target }
+func (*Runtime) jitRegSample(*closure, *regCode) {}
+func (*Runtime) jitRegCallSample(*regCallCache)  {}
+func (*Runtime) jitRegHas(*closure) bool         { return false }
+func (*Runtime) jitRegEnter(*frame, *closure, *regCode, int, int) (Value, error) {
+	return Undefined, nil
+}
+func (*Runtime) jitRegLoop(st *regState, target int) int { return target }
 
 func (*Runtime) jitRegExpNative(*regexp.Regexp) {}
 

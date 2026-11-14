@@ -1265,6 +1265,9 @@ type jitState struct {
 	// that its exit finishes, as goPending is the stack form's.
 	regRuns    []jitRegRun
 	regPending jitGoPending
+	// regResumes counts the suspended frames of register code entered in
+	// their native code where they resumed (jitRegEnter from regGenRun).
+	regResumes uint64
 	ssaEntries uint64
 	ssaRecords uint64
 	// backendPanics counts the compiles a backend refused for panicking.

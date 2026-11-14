@@ -408,6 +408,14 @@ func lowerRegLits(rc *bytecode.RegCode, fn *bytecode.Function, m lowering, litHo
 		case w.Op() == bytecode.REndParams && (fn.Async || fn.Generator):
 			// The first resumption enters past the parameters.
 			to = append(to, pc+1)
+		case w.Op() == bytecode.RAwait:
+			// An await's resumption enters after it (the VM's regGenRun).
+			to = append(to, pc+1)
+		case w.Op() == bytecode.RYield && pc+1 < n && rc.Code[pc+1].Op() == bytecode.RJmp:
+			// A yield's resumption by next enters past the jump after it,
+			// as regGenResume goes on; its return's, at the return path
+			// the jump goes past.
+			to = append(to, regTarget(pc+1, int32(rc.Code[pc+1].BC())), pc+2)
 		}
 		for _, t := range to {
 			if reach[pc] && t < n && reach[t] && !slices.Contains(p.Entries, start[t]) {
@@ -652,6 +660,9 @@ func regHostOnly(p *ir.Program, rc *bytecode.RegCode, fn *bytecode.Function, m l
 			// A call in tail position may be the function's own, which
 			// native code makes a jump to its start: a loop.
 			loop = loop || pc < len(rc.Marks) && rc.Marks[pc]&bytecode.RMarkTail != 0
+		case bytecode.RCallWT, bytecode.RCallMWT:
+			// The interpreter's call in tail position: a call all the same.
+			calls = true
 		}
 	}
 	return host && !loop && !indexed && !m.callee && !(m.hot && calls) && !GeneratorResumable(fn)
@@ -1043,9 +1054,20 @@ func (l *regLowering) lower(pc int) {
 		l.emit(ir.Instruction{Op: ir.StringMethod, Left: reg(b), Dest: t}, false)
 		l.emit(ir.Instruction{Op: ir.StringCode, Left: ir.Slot(t), Right: reg(b), Third: ir.Slot(int(w.X())), Dest: int(a)}, false)
 	case bytecode.RYield:
-		// As the stack form's yield: a synchronous generator's, which code
-		// a loop's step resumed natively makes itself (Suspend).
-		l.emit(ir.Instruction{Op: ir.Host, Suspend: fn.Generator && !fn.Async}, false)
+		// Go's: the interpreter suspends the frame (the VM's regWhole runs
+		// no yield), and its resumption enters the code past it.
+		l.emit(ir.Instruction{Op: ir.Host}, false)
+	case bytecode.RCallWT, bytecode.RCallMWT:
+		// A call in tail position: the interpreter's, which makes it as
+		// the ordinary call while the stack is shallow and gives the frame
+		// to the callee deeper (the VM's rhCallWT), so that native code
+		// keeps no frame a tail call would have given up; the frame is left
+		// to it there (regWhole runs none), and ends after it.
+		host()
+	case bytecode.RGetPrivate, bytecode.RSetPrivate:
+		// A private member's read or write: Go's, native code going on
+		// after it.
+		host()
 	default:
 		if !op.Cold() {
 			panic(fmt.Sprintf("jit: no register lowering for %v", op))
@@ -1321,8 +1343,12 @@ func regAccess(rc *bytecode.RegCode, pc int) (reads, writes []int, all bool) {
 		return out
 	}
 	switch w.Op() {
-	case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW:
+	case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW, bytecode.RCallWT, bytecode.RCallMWT:
 		return span(a, 2+int(w.X())), []int{b}, false
+	case bytecode.RGetPrivate:
+		return []int{b, c}, []int{a}, false
+	case bytecode.RSetPrivate:
+		return []int{a, b, c}, nil, false
 	case bytecode.RApplyArgs:
 		return append(span(b, 3), c), []int{a}, false
 	case bytecode.RInstanceOf:
