@@ -1113,18 +1113,56 @@ design. The tree tier is
 the floor to beat and the place to port mechanisms from, never a place to
 send code.
 
-### The plan now (2026-11-13)
+### The plan now (2026-11-14)
 
 **Where it stands.**
 - The register interpreter is the default on amd64 and arm64 for runtimes
   without the JIT, on native threaded handlers that `internal/vm/internal/nativegen`
   generates ("Native handlers"). Stages 1 and 2 are done: no function is
   refused.
+- The interpreter's optimization (step 3) is in its sixth round. Against
+  main's old tiers on the micro-benchmarks, at four placements, the
+  native interpreter's geometric mean is 0.82 with 44 tests still slower,
+  and the Go handler table's (the portable fallback) 0.995 with 99; the
+  suites are level or faster. Both interpreters are optimized and
+  measured: a mechanism goes into the shared Go path and both emitters.
+- The front end is faster (compile time -25% on Octane's code,
+  allocations -33%) and folds what V8's parser and bytecode generator
+  fold: unary operators and arithmetic on literals, string-literal
+  concatenation, constant conditions, dead branches and code after a
+  jump. `compilediff` compares register code too.
 - The JIT reads register code behind `QJS_JITREG=1`
   (`vm.SetJITRegTier`): native code made from register code, tier-up by
-  sampling, OSR, exits and deoptimization into register frames, and native
-  calls between register functions. JIT runtimes still run the stack form
-  by default. Stage 3 below says what was built and what is left.
+  sampling, OSR, exits and deoptimization into register frames, native
+  calls between register functions, inlining of calls, methods,
+  constructions and accessors, generators, async functions and top-level
+  code, call frequencies from the feedback dispatch table, and background
+  compiles. Feedback parity is reproducible and mostly closed. But its
+  code is still far slower than the stack-form JIT's (micro geometric
+  mean 1.71 against it; V8 +172%, AWFY +440%): most of the gap is
+  native loops whose calls still run in the interpreter -- callbacks of
+  built-ins, refused forwarders and strict `arguments`, closures, private
+  members, escape analysis's feedback -- and tail calls that finish in
+  the interpreter. Those are being closed as one batch. JIT runtimes
+  still run the stack form by default.
+- The JIT builds on linux/arm64 as well as darwin/arm64, linux/amd64 and
+  windows/amd64.
+- The test suites run in parallel: package vm's tests take a third of the
+  time they did. regdiff's peak memory is being bounded.
+
+**How the work is run** (the owner's rules).
+- Optimizations work in batches: several items implemented, then timed
+  once, targeted at two placements; a regression found in a batch is
+  traced to its part and fixed or dropped. History need not be clean:
+  everything is squashed before it lands.
+- Profiles before hypotheses; the register interpreter is compared with
+  the old tier that ran each test (the tree tier or the stack
+  interpreter), never bisected against main's history.
+- No frameless mini-evaluators, no new refusal kinds, no caps or
+  thresholds in place of root causes.
+- CI runs at milestones, not per commit, and no agent waits for it.
+- No timing beyond what decides a change; no measurement for its own
+  sake.
 
 **The order from here.** Steps 1 and 2 run alongside each other; each
 later step starts when those before it are done. From 2026-11-13 the
@@ -1133,24 +1171,29 @@ register code lands in `mir`'s amd64 and arm64 backends in the same
 commit, tested on CI's Linux and macOS arm64 jobs and under qemu (the
 JIT builds on linux/arm64 too), so that the switch-over finds no arm64
 backlog.
-1. **The JIT on register code (Stage 3).** The remaining feedback-parity
-   gaps (RegExp literals, call frequencies, inlined callees' feedback);
-   inlining register callees; top-level code, generators and async
-   functions; the feedback snapshot for background compiles. Then a
-   profiling and optimization round of the register JIT against the
-   stack-form JIT in the same build, as the interpreter's rounds were.
-   Then the switch-over: JIT runtimes run the register tier, and the
-   JIT's stack-form path is removed.
+1. **The JIT on register code (Stage 3).** Parity, inlining, coverage,
+   call frequencies and background compiles are done. Left: the
+   optimization rounds against the stack-form JIT in the same build --
+   the large structural gaps first, as one batch, then the rest -- and
+   the feedback register code does not answer yet. Then the switch-over:
+   JIT runtimes run the register tier, and the JIT's stack-form path is
+   removed. The gate: parity with every difference explained, test262 in
+   every mode, and one V8 timing with the JIT against the stack-form JIT
+   at two placements; the owner decides when.
 2. **The arm64 native port** (done, but its timing). An arm64 emitter
    in nativegen, the same handlers and tables as amd64's, and `regArch`
    on for arm64; checked under qemu and on CI's Linux and macOS arm64
    runners. One timing on arm64 hardware is left.
 3. **Optimization.** The benchmark gaps left against the old tiers and
-   against the comparison engine: re-entering register code from Go
-   (callbacks, generator resumptions, call-cache misses), CodeLoad's
-   second compile (gone with step 4's removal of the stack compiler's
-   output), Havlak, RegExp, and what the old tiers did that register code
-   does not yet (strings appended in place, literal layouts by keys).
+   against the comparison engine. Done in rounds 1 to 5: callbacks,
+   generators' steps and yields, closures, `switch`, private members,
+   `for-in`, tail calls in place, operands loaded from memory, appends in
+   place, literals and built-ins by light calls, and the Go table's own
+   fast paths. Left: sorts' comparators, call sites of several callees,
+   empty array literals, objects on fresh prototypes, `JSON.stringify`,
+   string-to-number, async chains, small BigInts (accepted for now), and
+   CodeLoad's second compile (gone with step 4's removal of the stack
+   compiler's output).
    Gaps that need new instructions -- the loop kernels' fused
    increment-and-branch, int32 arithmetic, multiplication by an
    immediate -- wait until the JIT's register work is merged, so that each
