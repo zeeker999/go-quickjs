@@ -659,7 +659,9 @@ callee in an entry of its own. A `switch` finds its case by its table
 (`switchW`), as `regSwitchTable.lookup` does: a number of a dense
 table, a flat string by its cases' constants and then by their texts,
 eight bytes at a time up to 1,024; a table of few or scattered numbers,
-a rope or a longer text is Go's. A fast path that misses jumps to
+a rope or a longer text is Go's. `bin`'s division of two numbers, and its remainder
+of two int32s, the first above zero and the second not zero, as `jsMod`
+takes them (`bin`); any other remainder is Go's (`math.Mod`). A fast path that misses jumps to
 the exit; nothing is written before it does. arm64 answers one case more:
 NaN made an integer -- ToInt32's 0, an integer typed array's element 0
 -- where FCVTZS gives 0 and CVTTSD2SI no integer; what has no int64 is

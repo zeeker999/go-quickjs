@@ -646,3 +646,18 @@ func TestRegNativeSwitch(t *testing.T) {
 		for (var i = 0; i < 4000; i++) s += sw(keys[i & 3])
 		String(s)`, bytecode.RSwitch)
 }
+
+// TestRegNativeBin runs divisions and remainders natively: int32s of
+// every sign, zeros of both signs, fractions, NaN, infinities, numbers
+// past int32, and operands that are not numbers, which Go answers.
+func TestRegNativeBin(t *testing.T) {
+	nativeCheck(t, `
+		var vals = [7, -7, 3, -3, 0, -0, 1, 2147483647, -2147483648, 2147483648, 4294967296, 0.5, -2.5, 1e300, NaN, Infinity, -Infinity, "6", null, true]
+		var out = []
+		function div(a, b) { return a / b }
+		function mod(a, b) { return a % b }
+		for (var x of vals) for (var y of vals) out.push(Object.is(div(x, y), -0) ? "-0" : String(div(x, y)), Object.is(mod(x, y), -0) ? "-0" : String(mod(x, y)))
+		out.join()`, `
+		function f(n) { var s = 0; for (var j = 0; j < n; j++) s += (j % 10) + (j % 7) / 2; return s }
+		String(f(5000))`, bytecode.RBin)
+}

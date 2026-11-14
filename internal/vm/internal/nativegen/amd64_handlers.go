@@ -1169,6 +1169,8 @@ func nativeEmit(v *variant) (*block, error) {
 	h(bytecode.RClosureW, g.closureW)
 	// A switch's case found by its table (amd64_switch.go).
 	h(bytecode.RSwitch, g.switchW)
+	// A division or a remainder of numbers (amd64_bin.go).
+	h(bytecode.RBin, g.bin)
 
 	for n, l := range g.exits {
 		if n == 0 {
