@@ -123,3 +123,85 @@ func TestJITRegWholeGoCalls(t *testing.T) {
 		}
 	}
 }
+
+// regAddPushSrc updates properties in place, add_prop, of numbers that
+// turn strings, and through a getter and setter, which count their calls;
+// and pushes and pops arrays, one frozen; and a push now and then of an
+// object's own push method.
+const regAddPushSrc = `
+var gets = 0, sets = 0;
+function update(n) {
+	var o = { a: 1, b: 2 }, s = "";
+	for (var j = 0; j < n; j++) {
+		o.a += j;
+		o.b += 1;
+		if (j == n - 7) o.a = "x";
+	}
+	return o.a + ":" + o.b;
+}
+function accessors(n) {
+	var o = { _v: 0, get v() { gets++; return this._v }, set v(x) { sets++; this._v = x } };
+	for (var j = 0; j < n; j++) o.v += j;
+	return o.v + ":" + gets + ":" + sets;
+}
+function pushes(n) {
+	var a = [], s = 0, f = Object.freeze([1]);
+	for (var j = 0; j < n; j++) {
+		a.push(j);
+		if (j % 3 == 0) s += a.pop();
+		a.push(1);
+		try { if (j % 97 == 0) f.push(j) } catch (e) { s += 1 }
+	}
+	return a.length + ":" + s;
+}
+function poly(n) {
+	var a = [], q = { n: 0, push(x) { this.n += x; return 0 } };
+	for (var j = 0; j < n; j++) (j % 50 == 49 ? q : a).push(1);
+	return a.length + ":" + q.n;
+}
+`
+
+// TestJITRegAddPropPush runs regAddPushSrc in a runtime whose register code
+// speculates on add_prop's addition after a read built to call nothing,
+// and pushes and pops natively, and in one with no JIT: the answers equal,
+// the getter and the setter called as often, and add_prop and the pushes
+// left to Go at exits only where their speculation failed.
+func TestJITRegAddPropPush(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regAddPushSrc)
+			rts[0].SetJITWarmUp(1, 1)
+			for _, name := range []string{"update", "accessors", "pushes", "poly"} {
+				if name == "poly" {
+					st := rts[0].RegNativeStats()
+					t.Logf("hosts %v, guards %d", st.HostOps, st.Guards)
+					if n := st.HostOps["add_prop"]; n > 100 {
+						t.Errorf("add_prop left to Go %d times", n)
+					}
+					// The frozen array's push, every 97 turns, and each
+					// array's growth.
+					if n := st.HostOps["call_method_w"]; n > 200 {
+						t.Errorf("call_method_w left to Go %d times", n)
+					}
+				}
+				var got [2]string
+				for i, r := range rts {
+					fn, _ := r.GetProp(Obj(r.Global()), r.Intern(name))
+					for range 6 {
+						v, err := r.Call(fn, Undefined, []Value{Float(1000)})
+						got[i] = regNativeShow(r, v, err)
+					}
+				}
+				if got[0] != got[1] {
+					t.Errorf("%s: with the JIT %q, without %q", name, got[0], got[1])
+				}
+			}
+		})
+	}
+}

@@ -587,7 +587,53 @@ func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
 	if sites := f.regCallSites(pc, w, argc, method); len(sites) != 0 {
 		return sites
 	}
+	if site, ok := f.regBuiltinSite(w, argc, method); ok {
+		return []ssa.CallSite{site}
+	}
 	return []ssa.CallSite{{Go: ssa.GoCall, Argc: argc, Method: method, New: w.Op() == bytecode.RNewW, ThisSlot: -1}}
+}
+
+// regBuiltinSite is the call of a built-in native code makes itself whose
+// target call_method_w w's site's cache holds (regCallNative), as the stack
+// form's NativeCalls makes one jitSeedBuiltin or jitCallSeen found: the
+// realm's Array.prototype.pop, of no argument, or push, of one, whose fast
+// path the call's checks keep to -- the receiver an array of the realm's
+// prototype, and, for push, the prototypes as they are now, with no index
+// in their tables. The call leaves anything else to Go.
+func (f *jitRegFeedback) regBuiltinSite(w bytecode.RInstr, argc int, method bool) (ssa.CallSite, bool) {
+	r := f.fb.r
+	calls := f.fb.cl.regCalls
+	if !method || uint(w.C()) >= uint(len(calls)) {
+		return ssa.CallSite{}, false
+	}
+	e := &calls[w.C()]
+	o := e.callee
+	if e.kind&^regCallMarks != regCallNative || o == nil {
+		return ssa.CallSite{}, false
+	}
+	fd := o.fn()
+	if fd == nil || fd.realm != r.Realm {
+		return ssa.CallSite{}, false
+	}
+	k := f.fb.keep()
+	switch {
+	case argc == 0 && fd.elemOp == elemPop:
+		k.holders = append(k.holders, o)
+		return ssa.CallSite{Callee: uintptr(unsafe.Pointer(o)), ThisSlot: -1, Method: true, Pop: true,
+			Protos: [2]ssa.Holder{{Object: uintptr(unsafe.Pointer(r.proto.array))}}}, true
+	case argc == 1 && fd.elemOp == elemPush:
+		ap, op := r.proto.array, r.proto.object
+		if ap.shape == nil || op.shape == nil || ap.shape.loose || op.shape.loose || ap.proto() != op || op.proto() != nil ||
+			!ap.noIndexKeys() || !op.noIndexKeys() {
+			return ssa.CallSite{}, false
+		}
+		k.shapes = append(k.shapes, remember(ap.shape), remember(op.shape))
+		k.holders = append(k.holders, o, ap, op)
+		return ssa.CallSite{Callee: uintptr(unsafe.Pointer(o)), ThisSlot: -1, Argc: 1, Method: true, Push: true,
+			Protos: [2]ssa.Holder{{Object: uintptr(unsafe.Pointer(ap)), Shape: uintptr(unsafe.Pointer(ap.shape))},
+				{Object: uintptr(unsafe.Pointer(op)), Shape: uintptr(unsafe.Pointer(op.shape))}}}, true
+	}
+	return ssa.CallSite{}, false
 }
 
 // BigIntSole is ssa.BigIntRecycleFeedback's: the registers of the first
