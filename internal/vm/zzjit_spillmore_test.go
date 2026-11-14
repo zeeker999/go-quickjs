@@ -78,11 +78,11 @@ func spillMoreCollect(r *Runtime) {
 }
 
 // Functions whose values need about 1,400 and 6,700 spill slots compile
-// and run natively, their slots past the context's 256 in its SpillMore:
-// in register form and in stack form, with the collector idle and
-// marking, their objects held only where native code keeps them across a
-// collection, and deoptimized with every value live, the exit reading the
-// slots past 256. Each answer is the interpreter's.
+// and run natively from their register code, their slots past the
+// context's 256 in its SpillMore, with the collector idle and marking:
+// references live in those slots across a collection, and a
+// deoptimization with values live in them, the exit reading them. Each
+// answer is an ordinary call's.
 func TestJITSpillMore(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -136,51 +136,6 @@ func TestJITSpillMore(t *testing.T) {
 				}
 			})
 		}
-		t.Run(fmt.Sprintf("stack/%d", n), func(t *testing.T) {
-			want := New(Config{})
-			t.Cleanup(want.Close)
-			spillMoreCollect(want)
-			if _, err := want.Run(compileForTest(t, src)); err != nil {
-				t.Fatal(err)
-			}
-			calls := []string{name + "(1.25, 0.5, 7, {v: 100}, 'pp0', 2)", name + "(2.25, 0.5, 9, {v: 101}, 'pp1', 2)", name + "(3.25, 0.5, 'q', {v: 102}, 'pp2', 2)"}
-			var answers []string
-			for _, call := range calls {
-				v, err := want.Run(compileForTest(t, "''+("+call+")"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				answers = append(answers, v.String().Go())
-			}
-			for _, marking := range []bool{false, true} {
-				t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
-					if marking {
-						jitMarkingForTest(t)
-					}
-					r := jitRuntimeForTest(t, Config{JIT: true})
-					r.jitMemoryLimit = 1 << 36
-					spillMoreCollect(r)
-					if _, err := r.Run(compileForTest(t, src)); err != nil {
-						t.Fatal(err)
-					}
-					for range 2 {
-						for i, call := range calls {
-							v, err := r.Run(compileForTest(t, "''+("+call+")"))
-							if err != nil {
-								t.Fatal(err)
-							}
-							if got := v.String().Go(); got != answers[i] {
-								t.Fatalf("%s: got %s, interpreter %s", call, got, answers[i])
-							}
-						}
-					}
-					jitNativeForTest(t, r, name)
-					if s := r.jit.ssaSpills; s < n/2 {
-						t.Errorf("%s: %d spill slots, want at least %d", name, s, n/2)
-					}
-				})
-			}
-		})
 	}
 }
 

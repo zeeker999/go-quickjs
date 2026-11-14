@@ -1377,6 +1377,9 @@ call of Go's operands name a slot by its number as before (`ExitSpill`,
 `abi.SpillOffset`), and Go reads it where it is (`Context.SpillAt`,
 `Context.Word`). Its words are raw, as `Spill`'s are: a reference spilled
 is kept where the collector sees it too (see [Calls of Go](#calls-of-go)).
+The VM places such code from register programs; its stack form's compile,
+which the register form replaces, keeps refusing code past the context's
+own slots, whose budget does not hold one.
 
 An interval whose uses but frame states' are all behind the new interval's
 start, each in its own block, none past a call that saves the registers nor
@@ -1976,9 +1979,10 @@ none of those, and each of its exits and native calls is counted where its
 code is made (mir's `recordRoom`, `callState`), the code refused if one
 would write more. Its spill slots are as many as its allocation takes
 (see Spill slots). Code of 300, 1,000 and 5,000 locals runs natively
-(`TestJITManySlots`), as does code of 1,000 and 5,000 values live at once,
-in some 1,400 and 6,700 spill slots, and one of 10,000 compiles for both
-backends (`TestJITSpillMore`, `TestJITSpillMoreCompiles`).
+(`TestJITManySlots`), as does register code of 1,000 and 5,000 values
+live at once, in some 1,400 and 6,700 spill slots, and one of 10,000
+compiles for both backends (`TestJITSpillMore`,
+`TestJITSpillMoreCompiles`).
 
 ## The execution boundary
 

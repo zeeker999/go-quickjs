@@ -2735,6 +2735,14 @@ func (r *Runtime) jitInstall(j *jitJob) (*jit.SSACode, *jitFeedback, error) {
 	if errors.Is(err, mir.ErrKeeps) && keepLimit == 0 {
 		return nil, nil, err
 	}
+	if err == nil && mc.Spills > abi.SpillSlots {
+		// The stack form, which the register form replaces, keeps the
+		// bound the context's own slots set (abi.Context's SpillMore): its
+		// budget, which a function past it would hold past -- a script's
+		// top level of hundreds of callees, running while its entry grows
+		// -- is not made for one.
+		err = fmt.Errorf("%w: more than %d spill slots", mir.ErrUnsupported, abi.SpillSlots)
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %v", jitRefused, err)
 	}
