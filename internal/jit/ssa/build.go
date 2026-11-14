@@ -8657,17 +8657,24 @@ func (b *builder) whole(blk *Block, pc int, in ir.Instruction, guard func(Op, Ty
 	p := b.p
 	reads, n, dest, _ := in.WholeOperands(p.Regs)
 	f := b.f
-	args := make([]*Value, n)
-	for i := range args {
-		args[i] = b.read(reads[i], blk)
-	}
-	call := guard(OpCall, Tagged, ir.HostExit, args...)
 	site := &CallSite{Go: GoCall, Whole: true, Argc: n, ThisSlot: -1}
 	if sites := b.fb.NativeCalls(pc); len(sites) == 1 && sites[0].Whole && sites[0].Argc == n {
 		// What native code makes of it itself first, as of the stack
 		// form's operation's site (CallSite's ArrayIter, Append, Copies).
 		site = &sites[0]
 	}
+	if site.StringSelf && n == 1 && dest == reads[0] {
+		// A computed key's conversion of its own register (StringSelf): a
+		// string is its own key, told natively, as the stack form's
+		// stringSelfCall tells it; Go converts any other.
+		b.wholeStringSelf(blk, pc, site, dest)
+		return true
+	}
+	args := make([]*Value, n)
+	for i := range args {
+		args[i] = b.read(reads[i], blk)
+	}
+	call := guard(OpCall, Tagged, ir.HostExit, args...)
 	f.cache(call).Calls, call.Index = []*CallSite{site}, f.Keeps
 	f.Keeps++
 	f.HostsLeft = append(f.HostsLeft, pc)
@@ -8682,6 +8689,37 @@ func (b *builder) whole(blk *Block, pc int, in ir.Instruction, guard func(Op, Ty
 		b.reloadAfterCall(blk)
 	}
 	return true
+}
+
+// wholeStringSelf is whole's call of Go of site, the operation at pc of
+// the one register reg it writes too, whose result is the register itself
+// where that holds a string (CallSite's StringSelf): told by its word,
+// natively, and by the call, on a branch of its own, for anything else,
+// as stringSelfCall makes the stack form's, native code going on after
+// either.
+func (b *builder) wholeStringSelf(blk *Block, pc int, site *CallSite, reg int) {
+	f := b.f
+	x := b.read(reg, blk)
+	st := b.state(blk, pc)
+	is := f.newValue(blk, OpTypeIs, Bool, x)
+	is.Index, is.Aux, is.State = int(ir.TypeString), int(ir.HostExit), st
+	st.addUse()
+	_, other, _ := b.split(blk, is, true)
+	call := f.newValue(other, OpCall, Tagged, x)
+	f.cache(call).Calls, call.Index = []*CallSite{site}, f.Keeps
+	f.Keeps++
+	call.Aux, call.State = int(ir.HostExit), st
+	st.addUse()
+	f.HostsLeft = append(f.HostsLeft, pc)
+	kept := f.newValue(other, OpCallCell, Source, call)
+	r := f.newValue(other, OpKept, Tagged, kept, call)
+	r.Shadow = kept
+	b.assign(reg, other, r)
+	// A key's conversion may run script, which may assign a captured
+	// binding, as a callee may.
+	if b.hasCells() {
+		b.reloadAfterCall(other)
+	}
 }
 
 // wholeAt reports whether whole makes the instruction at pc a call of Go

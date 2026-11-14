@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
+	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
@@ -347,15 +348,19 @@ func (f *jitRegFeedback) CellsPool() (uintptr, []int32, bool) {
 
 // jitRegFrameless makes register instruction op, whole, for native code
 // in ctx without its frame where that runs nothing and throws nothing, as
-// the stack form's operations are made (jitOpPlain, jitOpFrameless): an
-// object's spread -- learning the layouts' copy native code makes next
-// (jitCopyLearn) -- an array's spread of a dense array's elements, an
-// element appended. Its operands are the instruction's registers (compile's
-// RegAccess), the target first; it writes none. It reports whether it
-// made it; what it does not make, the instruction run whole on the frame
-// (jitRegWhole) makes.
+// the stack form's operations are made (jitOpPlain, jitOpFrameless), each
+// as the stack form's instruction of it: an object's spread -- learning
+// the layouts' copy native code makes next (jitCopyLearn) -- an array's
+// spread of a dense array's elements, an element appended, an object
+// pattern's rest, a computed key converted or defined, a literal's
+// __proto__. Its operands are the instruction's registers (compile's
+// RegAccess), in their order, the stack form's operands'; its result goes
+// to the call's keep cell, which the code reads where the instruction
+// writes a register. It reports whether it made it; what it does not
+// make, the instruction run whole on the frame (jitRegWhole) makes.
 func (r *Runtime) jitRegFrameless(ctx *abi.Context, op bytecode.ROp) bool {
 	var in bytecode.Instr
+	n := int(ctx.GoOp >> abi.GoOpArgcShift & 0xff)
 	switch op {
 	case bytecode.RCopyDataProps:
 		in.Op = bytecode.OpCopyDataProps
@@ -363,13 +368,24 @@ func (r *Runtime) jitRegFrameless(ctx *abi.Context, op bytecode.ROp) bool {
 		in.Op = bytecode.OpArraySpread
 	case bytecode.RArrayPush:
 		in.Op = bytecode.OpArrayPush
+	case bytecode.RSetProtoOf:
+		in.Op = bytecode.OpSetProtoOf
+	case bytecode.RObjectRest:
+		// The source, then the keys it leaves out.
+		in.Op, in.A = bytecode.OpObjectRest, uint32(n-1)
+	case bytecode.RDefineIndex:
+		// Its attributes are a literal's, memberFlags(0), as
+		// regDefineIndex defines it.
+		in.Op = bytecode.OpDefineIndex
+	case bytecode.RToPropertyKey:
+		in.Op = bytecode.OpToPropertyKey
 	default:
 		return false
 	}
-	if int(ctx.GoOp>>abi.GoOpArgcShift&0xff) != 2 {
+	if n < 1 || n != jitcompile.GoOperands(in) {
 		return false
 	}
-	args := unsafe.Slice((*Value)(unsafe.Pointer(&ctx.GoArgs[0])), 2)
+	args := unsafe.Slice((*Value)(unsafe.Pointer(&ctx.GoArgs[0])), n)
 	v, ok := r.jitOpFrameless(nil, nil, in, args)
 	if !ok {
 		return false
@@ -380,29 +396,43 @@ func (r *Runtime) jitRegFrameless(ctx *abi.Context, op bytecode.ROp) bool {
 
 // regWholeSite is the call of Go a register instruction run whole makes
 // (ssa.CallSite's Whole), with what native code makes of it itself first,
-// as the stack form's sites of the same operations have it: an array
-// spread by its elements (ArrayIter), an element appended (Append), an
-// object spread by the layouts Go has copied (Copies), a literal's field
-// defined along its shape's transition (DefineNext).
+// as the stack form's sites of the same operations have it: a for...of's
+// cursor taken from a generator's room (ForOf), a for...in's made without
+// a frame (ForIn), an array spread by its elements (ArrayIter), an element
+// appended (Append), an object spread by the layouts Go has copied
+// (Copies), a literal's field defined along its shape's transition
+// (DefineNext), a computed key that is a string its own (StringSelf).
 func (f *jitRegFeedback) regWholeSite(pc int, w bytecode.RInstr) []ssa.CallSite {
 	_, argc, _, ok := f.p.Code[pc].WholeOperands(f.p.Regs)
+	if !ok {
+		return nil
+	}
 	site := ssa.CallSite{Go: ssa.GoCall, Whole: true, Argc: argc, ThisSlot: -1}
 	r := f.fb.r
-	switch {
-	case ok && argc == 1 && w.Op() == bytecode.RForOfStart:
+	switch op := w.Op(); {
+	case argc == 1 && op == bytecode.RForOfStart:
 		// A for...of's cursor, of the iterable: one over a generator with
 		// room for it native code takes from the generator, by the
 		// runtime's cache of how generators iterate (mir's genForOf), as
-		// the stack form's for_of_start's site; Go makes any other.
-		if r.genNextFn == nil || r.genIterFn == nil {
-			return nil
-		}
+		// the stack form's for_of_start's site; Go makes any other, an
+		// array's without a frame (jitForOfPlain).
 		site.ForOf = true
-		site.GenIter, site.GenIterFn, site.GenNext = uintptr(unsafe.Pointer(&r.genIteration)), uintptr(unsafe.Pointer(r.genIterFn)), f.GenNext()
-		return []ssa.CallSite{site}
-	case !ok || argc != 2:
+		if r.genNextFn != nil && r.genIterFn != nil {
+			site.GenIter, site.GenIterFn, site.GenNext = uintptr(unsafe.Pointer(&r.genIteration)), uintptr(unsafe.Pointer(r.genIterFn)), f.GenNext()
+		}
+	case argc == 1 && op == bytecode.RForInStart:
+		// A for...in's cursor, of the object, which Go makes without a
+		// frame where that runs nothing (abi.GoCallForIn, jitForInPlain),
+		// as the stack form's for_in_start's site; its steps native code
+		// makes over the keys of its object's layout (mir's forInStep).
+		site.ForIn = true
+	case argc == 1 && op == bytecode.RToPropertyKey:
+		// A computed key: a string is its own, which native code tells
+		// (StringSelf), as the stack form's to_property_key's site.
+		site.StringSelf = true
+	case argc != 2:
 		return nil
-	case w.Op() == bytecode.RDefineField:
+	case op == bytecode.RDefineField:
 		// A literal's field along its shape's first transition by the
 		// key (DefineNext), as the stack form's define_field's.
 		key, ok := f.name(int(f.p.Origin[pc]), w.C())
@@ -410,11 +440,11 @@ func (f *jitRegFeedback) regWholeSite(pc int, w bytecode.RInstr) []ssa.CallSite 
 			return nil
 		}
 		site.Key, site.DefineNext = uint32(key), true
-	case w.Op() == bytecode.RArraySpread:
+	case op == bytecode.RArraySpread:
 		site.ArrayIter = uintptr(unsafe.Pointer(&r.jit.arrayIter))
-	case w.Op() == bytecode.RArrayPush:
+	case op == bytecode.RArrayPush:
 		site.Append = true
-	case w.Op() == bytecode.RCopyDataProps:
+	case op == bytecode.RCopyDataProps:
 		if r.jit.copies == nil {
 			r.jit.copies = new([jitCopyEntries]jitCopyEntry)
 		}
