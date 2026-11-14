@@ -67,10 +67,11 @@ func TestLiterals(t *testing.T) {
 
 func TestOperatorPrecedence(t *testing.T) {
 	tests := []struct{ src, want string }{
-		{"1 + 2 * 3", "(+ 1 (* 2 3))"},
-		{"1 * 2 + 3", "(+ (* 1 2) 3)"},
-		{"1 + 2 + 3", "(+ (+ 1 2) 3)"},     // left-associative
-		{"2 ** 3 ** 4", "(** 2 (** 3 4))"}, // right-associative
+		// Names, not numbers, which the parser folds (TestParseFolds).
+		{"a + b * c", "(+ a (* b c))"},
+		{"a * b + c", "(+ (* a b) c)"},
+		{"a + b + c", "(+ (+ a b) c)"},     // left-associative
+		{"a ** b ** c", "(** a (** b c))"}, // right-associative
 		{"a || b && c", "(|| a (&& b c))"},
 		{"a | b ^ c & d", "(| a (^ b (& c d)))"},
 		{"a == b < c", "(== a (< b c))"},
@@ -103,7 +104,45 @@ func TestUnaryBeforeExponentIsAnError(t *testing.T) {
 	// `-2 ** 2` is ambiguous to a reader, so the grammar rejects it.
 	checkError(t, "-2 ** 2", "requires parentheses")
 	checkError(t, "typeof a ** 2", "requires parentheses")
-	checkParse(t, "(-2) ** 2", "(** (- 2) 2)")
+	checkParse(t, "(-a) ** 2", "(** (- a) 2)")
+}
+
+// TestParseFolds pins the operators the parser folds as it builds them, as
+// V8's does (internal/fold): ! of a literal, -, + and ~ of a number, - of
+// a BigInt, and the arithmetic, shift and bitwise operators on two
+// numbers, from the bottom up, in the order the grammar binds them; and
+// what it leaves: names, which may be rebound, typeof and void, which the
+// compiler folds, a string's +, and + of a BigInt, which throws.
+func TestParseFolds(t *testing.T) {
+	for _, tt := range []struct{ src, want string }{
+		{"1 + 2 * 3", "7"},
+		{"(1 + 2) * 3", "9"},
+		{"2 ** 3 ** 2", "512"},
+		{"(-2) ** 2", "4"},
+		{"8 - 2 - 1", "5"},
+		{"1 << 31", "-2147483648"},
+		{"-1 >>> 0", "4294967295"},
+		{"~5", "-6"},
+		{"- -1", "1"},
+		{"!0", "true"},
+		{`!""`, "true"},
+		{"!null", "true"},
+		{"!0n", "true"},
+		{"!!1", "true"},
+		{"-1n", "-1n"},
+		{"-0x10n", "-16n"},
+		{"a + 1 + 2", "(+ (+ a 1) 2)"},
+		{"1 + 2 + a", "(+ 3 a)"},
+		{"!a", "(! a)"},
+		{"-NaN", "(- NaN)"},
+		{"!undefined", "(! undefined)"},
+		{"typeof 1", "(typeof 1)"},
+		{"void 0", "(void 0)"},
+		{`1 + "2"`, `(+ 1 "2")`},
+		{"+1n", "(+ 1n)"},
+	} {
+		checkParse(t, tt.src, tt.want)
+	}
 }
 
 func TestUpdateExpressions(t *testing.T) {
@@ -357,7 +396,7 @@ func TestAutomaticSemicolonInsertion(t *testing.T) {
 	checkParse(t, "a\n++b", "a (pre++ b)")
 	// No ASI when the next line continues the expression.
 	checkParse(t, "a\n.b", "(. a b)")
-	checkParse(t, "a = 1\n+ 2", "(= a (+ 1 2))")
+	checkParse(t, "a = b\n+ c", "(= a (+ b c))")
 	// `throw` is restricted and has no operand-less form, so this is an error.
 	checkError(t, "throw\n1", "newline is not allowed")
 	checkError(t, "a b", "expected ';'")
