@@ -55,10 +55,8 @@ func TestTreePropertyChains(t *testing.T) {
 		try { setter({ inner: null })(1) } catch (e) { out.push(e.constructor.name) }
 		out.join(' ')`
 	var want string
-	defer SetTreeTier(true)
 	for _, tree := range []bool{false, true} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, src))
 		r.Close()
 		if err != nil {

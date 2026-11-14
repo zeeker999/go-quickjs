@@ -16,7 +16,6 @@ import (
 // resumption made there; and an async function's awaits and its
 // rejections.
 func TestGeneratorResumption(t *testing.T) {
-	defer SetTreeTier(true)
 	for _, tt := range []struct {
 		name, src, want string
 		async           bool
@@ -56,13 +55,12 @@ var g = f(1, 2); [g.next().value, g.next().value, g.next(3).value, g.next().done
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			for _, on := range []bool{false, true} {
-				SetTreeTier(on)
 				src := tt.src
 				if tt.async {
 					src = "var out = 'pending'; " + src + "; Promise.resolve(p).then(v => out = String(v), e => out = 'E ' + e)"
 				}
 				fn := compileForTest(t, src)
-				r := New(Config{})
+				r := newTreeTierForTest(on, Config{})
 				v, err := r.Run(fn)
 				if err == nil && tt.async {
 					if err = r.runMicrotasks(); err == nil {
@@ -101,7 +99,6 @@ var g = f(1, 2); [g.next().value, g.next().value, g.next(3).value, g.next().done
 // reassigned, no parameters, the property's attributes, and an async
 // function's arguments. The answers are Node's.
 func TestGeneratorCreation(t *testing.T) {
-	defer SetTreeTier(true)
 	src := `var out = [];
 function* g(a, b) { yield a + b }
 g.prototype = null;
@@ -119,8 +116,7 @@ async function af(a, b) { return a + (await b) }
 af(2, 3).then(v => out.push('async ' + v))`
 	const want = `true,3,hi,undefined,2,01,1,NaN,{"value":{},"writable":true,"enumerable":false,"configurable":false},TypeError,async 5`
 	for _, on := range []bool{false, true} {
-		SetTreeTier(on)
-		r := New(Config{})
+		r := newTreeTierForTest(on, Config{})
 		_, err := r.Run(compileForTest(t, src))
 		if err == nil {
 			err = r.runMicrotasks()
@@ -149,7 +145,6 @@ af(2, 3).then(v => out.push('async ' + v))`
 // functions awaiting in turn, which keep the queue from emptying. The
 // answers are Node's.
 func TestAwaitOrder(t *testing.T) {
-	defer SetTreeTier(true)
 	src := `var log = [];
 async function a() { log.push('a1'); await 1; log.push('a2'); await null; log.push('a3'); return 'A' }
 async function b() { log.push('b1'); await Promise.resolve(); log.push('b2'); await undefined; log.push('b3') }
@@ -174,8 +169,7 @@ Promise.resolve().then(() => many.push('x'));`
 	}
 	want := wantLog + " " + strings.Join(many, ",")
 	for _, on := range []bool{false, true} {
-		SetTreeTier(on)
-		r := New(Config{})
+		r := newTreeTierForTest(on, Config{})
 		_, err := r.Run(compileForTest(t, src))
 		if err == nil {
 			err = r.runMicrotasks()
@@ -205,7 +199,6 @@ Promise.resolve().then(() => many.push('x'));`
 // prototype or a method of its own, an iterator method on the generator
 // itself, and the intrinsics replaced and put back. The answers are Node's.
 func TestForOfGenerator(t *testing.T) {
-	defer SetTreeTier(true)
 	src := `var log = [];
 function* g() { for (let i = 0; i < 2; i++) yield i }
 function run(it) { var s = []; for (const x of it) s.push(x); return s.join('') }
@@ -234,8 +227,7 @@ log.push(run(n()));
 log.join()`
 	const want = "01,sym,next,01,getnext,mynext,,own,,iter,78,gpiter,4,gpnext,gpnext,4,4"
 	for _, on := range []bool{false, true} {
-		SetTreeTier(on)
-		r := New(Config{})
+		r := newTreeTierForTest(on, Config{})
 		v, err := r.Run(compileForTest(t, src))
 		if err != nil {
 			r.Close()
@@ -255,10 +247,8 @@ log.join()`
 // the interpreter's, which finishes it at once. A generator still running,
 // whose frame is there, is not finished by a call in its body.
 func TestTreeStepFinishesLater(t *testing.T) {
-	defer SetTreeTier(true)
 	for _, on := range []bool{false, true} {
-		SetTreeTier(on)
-		r := New(Config{})
+		r := newTreeTierForTest(on, Config{})
 		v, err := r.Run(compileForTest(t, `function* g() { yield 1; null.x }
 function run(it) { var s = ''; try { for (var v of it) s += v } catch (e) { s += e.name } return s }
 var it = g(); var s = run(it); it`))
@@ -300,8 +290,6 @@ var it = g(); var s = run(it); it`))
 // so (resumeTreeBare): an exception the delegate throws leaves both
 // executing in a step, each finished by its next resumption.
 func TestTreeStepDelegates(t *testing.T) {
-	defer SetTreeTier(true)
-	SetTreeTier(true)
 	r := New(Config{})
 	defer r.Close()
 	v, err := r.Run(compileForTest(t, `function* inner() { yield 1; null.x }

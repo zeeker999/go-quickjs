@@ -106,7 +106,6 @@ last
 }
 
 func TestStrAppendMentions(t *testing.T) {
-	t.Cleanup(func() { SetTreeTier(true) })
 	for _, m := range strMentions {
 		t.Run(strings.ReplaceAll(m.name, " ", "_"), func(t *testing.T) {
 			src := strMentionProgram(m.decl, m.read)
@@ -117,8 +116,7 @@ func TestStrAppendMentions(t *testing.T) {
 				t.Fatalf("the program itself fails: %s", want)
 			}
 			for _, tree := range []bool{false, true} {
-				SetTreeTier(tree)
-				r := New(Config{})
+				r := newTreeTierForTest(tree, Config{})
 				got := strFuzzRun(t, r, src, false)
 				r.Close()
 				if got != want {

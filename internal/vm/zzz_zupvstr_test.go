@@ -59,8 +59,7 @@ const upvalueAddTestWant = "<x><x>é0é1é2😀|14|3|16|18|<x><x>é0é1é2😀y-
 // interpreter, as Node answers.
 func TestTreeUpvalueAdd(t *testing.T) {
 	for _, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, upvalueAddTestSrc))
 		r.Close()
 		if err != nil {
@@ -70,5 +69,4 @@ func TestTreeUpvalueAdd(t *testing.T) {
 			t.Errorf("tree tier %v: got\n%s\nwant\n%s", tree, got, upvalueAddTestWant)
 		}
 	}
-	SetTreeTier(true)
 }

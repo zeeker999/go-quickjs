@@ -15,8 +15,6 @@ import (
 // whose objects outgrew it, and outgrown: an object of twenty properties
 // built as a tree held a third more than the interpreter's.
 func TestSlackOutgrown(t *testing.T) {
-	defer SetTreeTier(true)
-	SetTreeTier(true)
 	for _, tt := range []struct {
 		name, src string
 		room      int

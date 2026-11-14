@@ -48,6 +48,14 @@ func newTreeTierForTest(tree bool, cfg Config) *Runtime {
 	return r
 }
 
+// newOldTiersTreeForTest is newOldTiersForTest(cfg) with the tree tier on
+// or off for its code, as newTreeTierForTest.
+func newOldTiersTreeForTest(tree bool, cfg Config) *Runtime {
+	r := newOldTiersForTest(cfg)
+	r.noTree = !tree
+	return r
+}
+
 // TestReleasedStacksAreClear pins that a stack a closed runtime gives back
 // holds nothing of what ran on it -- the frames of functions, generators and
 // all -- so that the next runtime to take it keeps nothing of the last one
@@ -101,8 +109,6 @@ func TestReleaseStackWhileRunning(t *testing.T) {
 // returns: the closure it ran, its locals and the value it returned would
 // otherwise stay reachable until the frame was used again.
 func TestReturnedTreeFramesAreCleared(t *testing.T) {
-	defer SetTreeTier(true)
-	SetTreeTier(true)
 	r := New(Config{})
 	defer r.Close()
 	before := TreesBuilt()

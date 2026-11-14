@@ -701,8 +701,7 @@ const strAppendTestWant = "76:-1591915514,103:239840560,130:-1972117050,157:1162
 // Appends answer as Node does, in the tree tier as in the interpreter.
 func TestStrAppend(t *testing.T) {
 	for _, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, strAppendTestSrc))
 		r.Close()
 		if err != nil {
@@ -712,7 +711,6 @@ func TestStrAppend(t *testing.T) {
 			t.Errorf("tree tier %v:\n%s", tree, firstDifference(got, strAppendTestWant))
 		}
 	}
-	SetTreeTier(true)
 }
 
 // A declaration captures the binding just as a function expression does.
@@ -731,10 +729,8 @@ result
 `
 
 func TestStrAppendDeclaration(t *testing.T) {
-	t.Cleanup(func() { SetTreeTier(true) })
 	for _, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, strAppendDeclarationSrc))
 		r.Close()
 		if err != nil {

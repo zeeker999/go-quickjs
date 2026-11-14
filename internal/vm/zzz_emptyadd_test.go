@@ -43,8 +43,7 @@ const emptyAddTestWant = `s,string:s,s/string,s,ss,asbs,[s|s] ,string:,/string,,
 // otherwise, in the tree tier and in the interpreter, each answer Node's.
 func TestEmptyStringAdd(t *testing.T) {
 	for _, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, emptyAddTestSrc))
 		r.Close()
 		if err != nil {
@@ -54,5 +53,4 @@ func TestEmptyStringAdd(t *testing.T) {
 			t.Errorf("tree tier %v:\ngot  %s\nwant %s", tree, got, emptyAddTestWant)
 		}
 	}
-	SetTreeTier(true)
 }

@@ -31,8 +31,7 @@ func TestSuperReturnsOwnObject(t *testing.T) {
 	const want = "true:true:true:0:false:true:true false:false:false:1:false:false:false false:false:false:2:true:false:false " +
 		"false:false:false:3:false:false:false false:1:2:true E:true:true A:true:true M:true:true D:true:true X:true:true"
 	for _, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, src))
 		r.Close()
 		if err != nil {
@@ -42,5 +41,4 @@ func TestSuperReturnsOwnObject(t *testing.T) {
 			t.Errorf("tree tier %v: got\n%s\nwant\n%s", tree, got, want)
 		}
 	}
-	SetTreeTier(true)
 }

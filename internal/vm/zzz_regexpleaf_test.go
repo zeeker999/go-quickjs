@@ -111,8 +111,7 @@ const regexpLeafTestWant = `null,1,false,1 null,0,false,0 null,0,false,0 null,1,
 // interpreter, and the check passes exactly where it says.
 func TestRegExpLeaves(t *testing.T) {
 	for _, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, regexpLeafTestSrc))
 		r.Close()
 		if err != nil {
@@ -122,7 +121,6 @@ func TestRegExpLeaves(t *testing.T) {
 			t.Errorf("tree tier %v:\ngot  %s\nwant %s", tree, got, regexpLeafTestWant)
 		}
 	}
-	SetTreeTier(true)
 	r := New(Config{})
 	defer r.Close()
 	if fd := r.regexpExecFn.fn(); fd.elemOp != elemRegExpExec || leafChecks[elemRegExpExec] == nil {
@@ -315,8 +313,7 @@ func TestRegExpLeafComplexity(t *testing.T) {
 		tree bool
 		call string
 	}{{true, "exec"}, {false, "test"}} {
-		SetTreeTier(c.tree)
-		r := New(Config{})
+		r := newTreeTierForTest(c.tree, Config{})
 		v, err := r.Run(compileForTest(t, `function f(re) { let _k = 0; try { return String(re.`+c.call+`('a'.repeat(40))) } catch (e) { return e.name + ': ' + e.message } }
 f(/(a+)+b/)`))
 		r.Close()
@@ -327,7 +324,6 @@ f(/(a+)+b/)`))
 			t.Errorf("tree tier %v, %s: %s, want %s", c.tree, c.call, got, want)
 		}
 	}
-	SetTreeTier(true)
 }
 
 // A leaf's call of exec or test whose match fails -- spends the step
@@ -348,8 +344,7 @@ for (var how of ['exec', 'test']) {
 out.join('|')`
 	want := "SyntaxError,regular expression is too complex,,0|SyntaxError,regular expression is too complex,,0"
 	for _, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, src))
 		r.Close()
 		if err != nil {
@@ -359,7 +354,6 @@ out.join('|')`
 			t.Errorf("tree tier %v:\ngot  %s\nwant %s", tree, got, want)
 		}
 	}
-	SetTreeTier(true)
 
 	// The leaf's call itself, without a frame: an error that is no
 	// exception, and the match remembered for the call made again.
@@ -447,8 +441,7 @@ func TestRegExpLeafSpentOnceNested(t *testing.T) {
 		t.Skip("spends the step budget")
 	}
 	for _, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		src := `function f0(re, s) { return re.exec(s) }
 function f1(re, s) { return f0(re, s) }
 function f2(re, s) { return f1(re, s) }
@@ -481,5 +474,4 @@ warm(); warm()`
 				tree, leaf, framed, float64(leaf)/float64(framed))
 		}
 	}
-	SetTreeTier(true)
 }

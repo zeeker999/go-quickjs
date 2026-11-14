@@ -47,8 +47,7 @@ func TestStrictEqualityWithStrings(t *testing.T) {
 		}
 	}
 	for _, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, strEqTestSrc))
 		r.Close()
 		if err != nil {
@@ -58,5 +57,4 @@ func TestStrictEqualityWithStrings(t *testing.T) {
 			t.Errorf("tree tier %v: got %s, want %s", tree, got, strEqTestWant)
 		}
 	}
-	SetTreeTier(true)
 }

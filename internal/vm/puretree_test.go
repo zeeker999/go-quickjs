@@ -28,8 +28,7 @@ func TestPureByTree(t *testing.T) {
 		}
 		[n, T.prototype.held, T.prototype.mark, T.prototype.one, T.prototype.viaHeld]`
 	for _, tree := range []bool{false, true} {
-		SetTreeTier(tree)
-		r := newOldTiersForTest(Config{})
+		r := newOldTiersTreeForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatalf("tree=%v: %v", tree, err)
@@ -53,5 +52,4 @@ func TestPureByTree(t *testing.T) {
 		}
 		r.Close()
 	}
-	SetTreeTier(true)
 }

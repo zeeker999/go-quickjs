@@ -93,10 +93,8 @@ func TestTreeGlobalHeap(t *testing.T) {
 		try { rd(0) } catch (e) { out.push(e.constructor.name) }
 		out.join(' | ')`
 	var want string
-	defer SetTreeTier(true)
 	for _, tree := range []bool{false, true} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, src))
 		r.Close()
 		if err != nil {
@@ -129,10 +127,8 @@ func TestTreeGlobalHeapShadowed(t *testing.T) {
 		let heap32 = [7, 8, 9];
 		wr(0, 70);
 		[rd(0), rd(1), heap32[0], globalThis.heap32[0]].join(',')`
-	defer SetTreeTier(true)
 	for _, tree := range []bool{false, true} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, first))
 		if err != nil {
 			t.Fatal(err)

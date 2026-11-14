@@ -72,8 +72,7 @@ const arrayGrowthTestWant = "100|4950|300|5250|100|4950|100|4950|257|32896|771|3
 func TestArrayGrowth(t *testing.T) {
 	var answers [2]string
 	for i, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, arrayGrowthTestSrc))
 		r.Close()
 		if err != nil {
@@ -81,7 +80,6 @@ func TestArrayGrowth(t *testing.T) {
 		}
 		answers[i] = v.String().Go()
 	}
-	SetTreeTier(true)
 	if answers[0] != answers[1] {
 		t.Errorf("tree tier:\n%s\ninterpreter:\n%s", answers[0], answers[1])
 	}

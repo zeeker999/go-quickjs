@@ -30,10 +30,8 @@ out.push(big.length, big[16], 0 in big);
 JSON.stringify(out);
 `
 	const want = `["[1,null,3,null,5]",false,4,5,false,18,2,"x",0,"[2,4,6]","[1,3]","[1,2,3,4]","[2,3]",2,"1-2-3",true,true,"[\"a\",null,\"c\"]",2,true,17,"z",false]`
-	defer SetTreeTier(true)
 	for _, tree := range []bool{false, true} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatal(err)

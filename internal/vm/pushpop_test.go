@@ -43,10 +43,8 @@ for (var k = 0; k < 3; k++) run();
 JSON.stringify(out);
 `
 	const want = `[2,4,6,8,10,110,null,0,"proto",1,true,2,true,2,7,true,2,2,"y",1,true,3,null,"set s",1,2,4,6,8,10,110,null,0,"proto",1,true,2,true,2,7,true,2,2,"y",1,true,3,null,"set s",1,2,4,6,8,10,110,null,0,"proto",1,true,2,true,2,7,true,2,2,"y",1,true,3,null,"set s",1]`
-	defer SetTreeTier(true)
 	for _, tree := range []bool{false, true} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatal(err)

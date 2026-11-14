@@ -89,8 +89,7 @@ const forInCursorTestWant = "x,y,z|p,q|||x,y,z|0,1,2|0,1||xp xq yp yq zp zq xx x
 // Loops answer as Node does, whichever cursor they are given.
 func TestForInCursor(t *testing.T) {
 	for _, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, forInCursorTestSrc))
 		r.Close()
 		if err != nil {
@@ -100,7 +99,6 @@ func TestForInCursor(t *testing.T) {
 			t.Errorf("tree tier %v: got\n%s\nwant\n%s", tree, got, forInCursorTestWant)
 		}
 	}
-	SetTreeTier(true)
 }
 
 // A loop takes the last loop's cursor once that has finished: loops run one

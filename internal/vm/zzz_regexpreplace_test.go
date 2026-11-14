@@ -79,12 +79,11 @@ const replaceFlatTestWant = "2637138712 3380 TypeError TypeError3 aa sub:aab bbb
 func TestRegExpReplaceFlat(t *testing.T) {
 	for _, tree := range []bool{true, false} {
 		for _, idle := range []bool{true, false} {
-			SetTreeTier(tree)
 			gc := debug.SetGCPercent(-1)
 			if !idle {
 				debug.SetGCPercent(1)
 			}
-			r := New(Config{})
+			r := newTreeTierForTest(tree, Config{})
 			v, err := r.Run(compileForTest(t, replaceFlatTestSrc))
 			r.Close()
 			debug.SetGCPercent(gc)
@@ -96,7 +95,6 @@ func TestRegExpReplaceFlat(t *testing.T) {
 			}
 		}
 	}
-	SetTreeTier(true)
 }
 
 // A replace in one pass stops where an interrupt stops it as replace's

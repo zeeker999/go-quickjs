@@ -310,11 +310,9 @@ func runGeneratorCases(t *testing.T, mk func() *Runtime, rounds int) {
 // TestGeneratorProtocol runs generatorCases in the interpreter and in the
 // tree tier.
 func TestGeneratorProtocol(t *testing.T) {
-	defer SetTreeTier(true)
 	for _, on := range []bool{false, true} {
-		SetTreeTier(on)
 		t.Run(map[bool]string{false: "interpreter", true: "tree"}[on], func(t *testing.T) {
-			runGeneratorCases(t, func() *Runtime { return New(Config{}) }, 3)
+			runGeneratorCases(t, func() *Runtime { return newTreeTierForTest(on, Config{}) }, 3)
 		})
 	}
 }

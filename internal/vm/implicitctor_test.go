@@ -37,8 +37,7 @@ func TestImplicitConstructorForwards(t *testing.T) {
 		r.join(' | ')`
 	const want = "1,2,3 | 0 | 2 | 4,5 | 7 | 3 | 3 | 1,2 | true | 5 | NaN"
 	for _, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, src))
 		r.Close()
 		if err != nil {
@@ -48,5 +47,4 @@ func TestImplicitConstructorForwards(t *testing.T) {
 			t.Errorf("tree tier %v: got %s, want %s", tree, got, want)
 		}
 	}
-	SetTreeTier(true)
 }

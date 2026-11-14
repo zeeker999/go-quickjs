@@ -10,9 +10,6 @@ import (
 )
 
 func TestArrayLiteralRoom(t *testing.T) {
-	was := treeTier.Load()
-	SetTreeTier(true)
-	t.Cleanup(func() { SetTreeTier(was) })
 	r := New(Config{})
 	defer r.Close()
 	if _, err := r.Run(compileForTest(t, `function fill(n) {
@@ -60,9 +57,6 @@ func TestArrayLiteralRoom(t *testing.T) {
 }
 
 func TestArrayLiteralRoomFirstUse(t *testing.T) {
-	was := treeTier.Load()
-	SetTreeTier(true)
-	t.Cleanup(func() { SetTreeTier(was) })
 	r := New(Config{})
 	defer r.Close()
 	r.SetEvaluator(func(source string, _ EvalRequest) (*bytecode.Function, error) {
@@ -154,9 +148,6 @@ func TestArrayLiteralRoomCollected(t *testing.T) {
 }
 
 func TestArrayLiteralRoomRealms(t *testing.T) {
-	was := treeTier.Load()
-	SetTreeTier(true)
-	t.Cleanup(func() { SetTreeTier(was) })
 	r := New(Config{})
 	defer r.Close()
 	fn := compileForTest(t, `function fill(n) {
@@ -199,9 +190,6 @@ func TestArrayLiteralRoomRealms(t *testing.T) {
 }
 
 func TestArrayLiteralRoomMemoryLimit(t *testing.T) {
-	was := treeTier.Load()
-	SetTreeTier(true)
-	t.Cleanup(func() { SetTreeTier(was) })
 	r := New(Config{MemoryLimit: 64 << 20})
 	defer r.Close()
 	if _, err := r.Run(compileForTest(t, `function fill() {
@@ -225,9 +213,6 @@ func TestArrayLiteralRoomMemoryLimit(t *testing.T) {
 }
 
 func TestArrayLiteralRoomAfterSmall(t *testing.T) {
-	was := treeTier.Load()
-	SetTreeTier(true)
-	t.Cleanup(func() { SetTreeTier(was) })
 	r := New(Config{})
 	defer r.Close()
 	if _, err := r.Run(compileForTest(t, `function fill(n) {
@@ -270,9 +255,6 @@ func TestArrayLiteralRoomAfterSmall(t *testing.T) {
 // The learned room changes where an append reallocates. Callback methods
 // must read subsequent mutations from the array's current elements.
 func TestArrayLiteralRoomCallbackGrowth(t *testing.T) {
-	was := treeTier.Load()
-	SetTreeTier(true)
-	t.Cleanup(func() { SetTreeTier(was) })
 	r := New(Config{})
 	defer r.Close()
 	if _, err := r.Run(compileForTest(t, `function fill(n) {

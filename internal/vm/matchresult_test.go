@@ -9,7 +9,6 @@ import "testing"
 // indices, named groups, an array changed after the match, and lastIndex
 // past non-ASCII text. The answers are Node's.
 func TestMatchResultStrings(t *testing.T) {
-	defer SetTreeTier(true)
 	const src = `function show(m) { return m === null ? "null" : JSON.stringify([m.slice(), m.index, m.length, m.groups, m.indices || null]); }
 function f() {
   var out = [];
@@ -49,9 +48,8 @@ true
 2
 55357`
 	for _, on := range []bool{false, true} {
-		SetTreeTier(on)
 		fn := compileForTest(t, src)
-		r := New(Config{})
+		r := newTreeTierForTest(on, Config{})
 		v, err := r.Run(fn)
 		if err != nil {
 			r.Close()
@@ -71,7 +69,6 @@ true
 // 71, 72 and 73 bytes, a template with $, text that is not ASCII, empty
 // matches, and lastIndex and the legacy statics after. The answers are Node's.
 func TestReplaceShortResults(t *testing.T) {
-	defer SetTreeTier(true)
 	const src = `function f() {
   var out = [], s = "the quick abc brown fox jumped abc over the lazy dog";
   out.push(s.replace(/abc /g, "-"), s.replace(/abc /g, ""), s.replace(/abc /, "-"));
@@ -87,9 +84,8 @@ func TestReplaceShortResults(t *testing.T) {
 f()`
 	const want = `the quick -brown fox jumped -over the lazy dog|the quick brown fox jumped over the lazy dog|the quick -brown fox jumped abc over the lazy dog||-|-a-a-a-|the quick abc br0000000000wn f0000000000x jumped abc 0000000000ver the lazy d0000000000g|56|the quick [abc]brown fox jumped [abc]over the lazy dog|the quick ᵃbrown fox jumped ᵃover the lazy dog|abca|71|72|73|a/b/c|ow,ox,ov,og||aXcX|0|b|abc`
 	for _, on := range []bool{false, true} {
-		SetTreeTier(on)
 		fn := compileForTest(t, src)
-		r := New(Config{})
+		r := newTreeTierForTest(on, Config{})
 		v, err := r.Run(fn)
 		if err != nil {
 			r.Close()

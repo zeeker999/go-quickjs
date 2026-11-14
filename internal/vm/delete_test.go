@@ -27,8 +27,7 @@ func TestDeletePrimitiveProperty(t *testing.T) {
 		r.join()`
 	const want = "false,false,false,true,true,true,true,true,true,false,TypeError,TypeError,true,true,falsefalse,TypeError"
 	for _, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, src))
 		r.Close()
 		if err != nil {
@@ -38,5 +37,4 @@ func TestDeletePrimitiveProperty(t *testing.T) {
 			t.Errorf("tree tier %v: got %s, want %s", tree, got, want)
 		}
 	}
-	SetTreeTier(true)
 }

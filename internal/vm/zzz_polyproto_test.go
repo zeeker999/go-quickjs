@@ -137,10 +137,8 @@ out.join("|");
 const polyProtoWant = `true|1|20|5||y,sv|y,sv|y,sv|{"y":2,"sv":5}|{"y":2,"sv":5}|{"y":2,"sv":5}|y,2;sv,5|2,5|{"y":{"value":2,"writable":true,"enumerable":true,"configurable":true},"sv":{"value":5,"writable":true,"enumerable":true,"configurable":true}}|false|true|true|true|true|true|y,sv,x,g,s|3|4||false|true|1||20|||false|undefined|true||true|false|true|b|b,c|1|true|true|1|false|2|TypeError|true|false|false|true|true|true|lit+base|hi,n|1|5|7|0|5|true|true|k5|8||2|3|31803|90|10|5|false|4175|3|3|true|1710|50|42|true|3|function|true|[object Tag]|ts|[{},{}]||{"own":2,"acc":3}|1|own,acc`
 
 func TestPolyProtoSemantics(t *testing.T) {
-	defer SetTreeTier(true)
 	for _, tree := range []bool{false, true} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, polyProtoSemantics))
 		if err != nil {
 			t.Fatal(err)

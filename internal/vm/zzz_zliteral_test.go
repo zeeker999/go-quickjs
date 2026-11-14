@@ -83,8 +83,7 @@ func TestTreeObjectLiterals(t *testing.T) {
 		}
 	}
 	for _, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := newOldTiersForTest(Config{})
+		r := newOldTiersTreeForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, literalTestSrc))
 		r.Close()
 		if err != nil {
@@ -94,7 +93,6 @@ func TestTreeObjectLiterals(t *testing.T) {
 			t.Errorf("tree tier %v: got\n%s\nwant\n%s", tree, got, literalTestWant)
 		}
 	}
-	SetTreeTier(true)
 	// Past the first two objects, the site knows the shape the fields lead
 	// to, which its objects are made with.
 	r := newOldTiersForTest(Config{})

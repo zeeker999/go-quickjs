@@ -98,10 +98,8 @@ true2000`
 // A sparse array made dense again answers as it did: Node's answers, in the
 // tree tier and in the interpreter.
 func TestDensify(t *testing.T) {
-	defer SetTreeTier(true)
 	for _, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		if _, err := r.Run(compileForTest(t, densifySrc)); err != nil {
 			t.Fatal(err)
 		}

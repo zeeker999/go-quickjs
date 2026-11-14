@@ -50,8 +50,7 @@ const pushTestWant = "300|300|s0,1,2,O,4,5,s6|296,O,298,299|30100:undefined|3,4,
 // answers.
 func TestPurePushPop(t *testing.T) {
 	for _, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, pushTestSrc))
 		r.Close()
 		if err != nil {
@@ -61,5 +60,4 @@ func TestPurePushPop(t *testing.T) {
 			t.Errorf("tree tier %v: got\n%s\nwant\n%s", tree, got, pushTestWant)
 		}
 	}
-	SetTreeTier(true)
 }

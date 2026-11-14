@@ -43,8 +43,7 @@ func TestReturnAt(t *testing.T) {
 		r[0] + ' | ' + (r[0] === r[1] && r[1] === r[2])`
 	const want = "undefined,undefined,2,null,7,true,true,object,[4],[object Object],{\"value\":9,\"done\":true},{\"v\":0},{\"v\":1},{\"other\":true},{\"v\":1},{\"mine\":1},TypeError,TypeError,ReferenceError | true"
 	for _, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, src))
 		r.Close()
 		if err != nil {
@@ -54,5 +53,4 @@ func TestReturnAt(t *testing.T) {
 			t.Errorf("tree tier %v: got\n%s\nwant\n%s", tree, got, want)
 		}
 	}
-	SetTreeTier(true)
 }

@@ -8,10 +8,8 @@ import "testing"
 // part (funcExtra's newTarget); any other arrow, the commonest of
 // closures, carries no room for it.
 func TestArrowNewTarget(t *testing.T) {
-	defer SetTreeTier(true)
 	for _, tree := range []bool{false, true} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, `
 			function F() { this.direct = () => new.target; this.nested = () => () => new.target;
 				this.plain = () => 1 }

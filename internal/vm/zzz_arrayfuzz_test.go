@@ -55,7 +55,6 @@ const log = [], kept = []
 }
 
 func TestArrayRoomRandom(t *testing.T) {
-	t.Cleanup(func() { SetTreeTier(true) })
 	count := 60
 	if testing.Short() {
 		count = 6

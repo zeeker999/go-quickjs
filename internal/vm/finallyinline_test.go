@@ -45,8 +45,7 @@ func TestFinallyInline(t *testing.T) {
 		s`
 	const want = `a|r|try|fin|504|0001101120|f|g|1k1k2|0,0,1,10,2,20|orig|e1|TypeErrorfrom finally|123|{"value":3,"done":false}|{"value":9,"done":true}|{"done":true}|t1,f1,fb,in,f1,f2,f3,f4,g,fb,g,hf,hf`
 	for _, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, src))
 		r.Close()
 		if err != nil {
@@ -56,7 +55,6 @@ func TestFinallyInline(t *testing.T) {
 			t.Errorf("tree tier %v: got\n%s\nwant\n%s", tree, got, want)
 		}
 	}
-	SetTreeTier(true)
 }
 
 // A try statement's value is its try block's, whichever copy of the clause
@@ -73,8 +71,7 @@ func TestFinallyInlineCompletion(t *testing.T) {
 		{"try { } finally { 9 }", "undefined"},
 	} {
 		for _, tree := range []bool{true, false} {
-			SetTreeTier(tree)
-			r := New(Config{})
+			r := newTreeTierForTest(tree, Config{})
 			v, err := r.Run(compileForTest(t, tc.src))
 			if err != nil {
 				t.Fatal(err)
@@ -89,7 +86,6 @@ func TestFinallyInlineCompletion(t *testing.T) {
 			}
 		}
 	}
-	SetTreeTier(true)
 }
 
 // The normal completion of a try with a finally runs no completion record
