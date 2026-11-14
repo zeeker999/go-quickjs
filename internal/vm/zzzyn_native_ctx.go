@@ -126,6 +126,9 @@ type nativeCtx struct {
 	protoStr  uintptr
 	protoNum  uintptr
 	primProps uintptr
+	// closureFn is the func value of nativeClosure, which closure_w's
+	// handler calls through callH with no exit.
+	closureFn uintptr
 	// fv is the top frame's feedback vector, a slot a site into which a
 	// handler ORs the kinds of value it met (the JIT's next step, as
 	// Ignition's): none yet, its room kept here and in the frame record,

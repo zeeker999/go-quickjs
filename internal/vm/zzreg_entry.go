@@ -221,6 +221,15 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 			}
 		case bytecode.RRetUndef:
 			c.leaf, c.leafVal = regLeafConst, Undefined
+		case bytecode.RGetUpval:
+			// A getter of a binding it captures, a regLeafCode body
+			// regLeafRun runs: the native call handler reads the
+			// callee's upvalue (leafUp).
+			if len(rc.Code) > 1 && c.leaf == regLeafCode {
+				if ret := rc.Code[1]; ret.Op() == bytecode.RRet && ret.A() == w.A() {
+					c.leafUp = int32(w.BC()) + 1
+				}
+			}
 		default:
 			if v, ok := regConstOf(regConsts(fn, rc), w); ok && len(rc.Code) > 1 {
 				if ret := rc.Code[1]; ret.Op() == bytecode.RRet && ret.A() == w.A() {

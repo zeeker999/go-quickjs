@@ -207,14 +207,18 @@ func (g *armGen) call() {
 	a.Load(r9, rS, 8)
 	g.cmpMem(r9, rC, offECallee)
 	a.BCond(NE, tmpl)
-	// A leaf that returns a parameter or a constant first thing: its
-	// answer read from the window or the code, with no frame.
+	// A leaf that returns a parameter, a constant or an upvalue first
+	// thing: its answer read from the window, the code or the closure,
+	// with no frame.
 	notLeaf, leafStore := a.NewLabel(), a.NewLabel()
 	a.LoadU8(r9, rC, offEKind)
 	a.TstImm(r9, uint64(regCallLeaf), false)
 	a.BCond(EQ, notLeaf)
 	a.Load(r8, rC, offERC)
 	a.LoadU8(r9, r8, offRCLeaf)
+	upLeaf := a.NewLabel()
+	a.CmpImm(r9, int64(regLeafCode), false)
+	a.BCond(EQ, upLeaf)
 	a.CmpImm(r9, int64(regLeafArg), false)
 	a.BCond(LO, notLeaf)
 	a.Load(rD, r8, offRCLeafVal+8)
@@ -235,6 +239,20 @@ func (g *armGen) call() {
 	a.MovRR(r8, rD)
 	g.regB(rW)
 	g.storeValue()
+	// A regLeafCode body that returns an upvalue first thing (leafUp).
+	a.Bind(upLeaf)
+	a.Load(r9, rC, offECl)
+	a.LoadS32(rD, r8, offRCLeafUp)
+	a.SubsImm(rD, rD, 1, true)
+	a.BCond(MI, notLeaf)
+	g.cmpMem(rD, r9, offClUpvals+8)
+	a.BCond(HS, notLeaf)
+	a.Load(r9, r9, offClUpvals)
+	a.LoadIdx(r9, r9, rD, true)
+	a.Load(r9, r9, offUpSlot)
+	a.Load(rC, r9, 0)
+	a.Load(rD, r9, 8)
+	a.B(leafStore)
 	a.Bind(notLeaf)
 	// A callee rhCallW leaves to regCallMiss (regCallOut) that keeps its
 	// arguments, entered as regEnterW enters it (sEnt), and a leaf Go
@@ -532,7 +550,7 @@ func (g *armGen) ret(undef bool) {
 	a.LoadU8(r8, rS, offFRegKind)
 	a.CmpImm(r8, int64(regFrameGenStep), false)
 	a.BCond(EQ, g.genRet)
-	// Upvalues open on the frame are closed by Go, as amd64's.
+	// Upvalues open on the frame are closed here, as amd64's.
 	a.Load(rC, rCtx, ncRC)
 	a.LoadS32(r8, rC, offRCNcap)
 	a.Cbnz(r8, open, false)
@@ -541,7 +559,12 @@ func (g *armGen) ret(undef bool) {
 	a.BCond(NE, noCap)
 	a.Bind(open)
 	g.cmpMemImm(rS, offFOpenUp+8, 0)
-	a.BCond(NE, g.exit)
+	a.BCond(EQ, noCap)
+	a.Store(rCtx, scr(sV0), ZR)
+	a.MovImm(rC, ^uint64(0))
+	a.Store(rCtx, scr(sV1), rC)
+	g.closeUps()
+	a.Load(rW, rIP, 0)
 	a.Bind(noCap)
 	// The value.
 	value := func() {

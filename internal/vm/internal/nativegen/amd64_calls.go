@@ -227,15 +227,18 @@ func (g *nativeGen) call() {
 	a.Load(R9, RSI, 8)
 	a.CmpMem(R9, RCX, offECallee, true)
 	a.Jcc(CondNE, tmpl)
-	// A leaf that returns a parameter or a constant first thing: its
-	// answer read from the window or the code, as regCallW reads it,
-	// with no frame.
+	// A leaf that returns a parameter, a constant or an upvalue first
+	// thing: its answer read from the window, the code or the callee's
+	// closure, as regCallW and regLeafRun read it, with no frame.
 	notLeaf, leafStore := a.NewLabel(), a.NewLabel()
 	a.LoadU8(R9, RCX, offEKind)
 	a.OpImm(And, R9, regCallLeaf, false)
 	a.Jcc(CondE, notLeaf)
 	a.Load(R8, RCX, offERC)
 	a.LoadU8(R9, R8, offRCLeaf)
+	upLeaf := a.NewLabel()
+	a.OpImm(Cmp, R9, regLeafCode, false)
+	a.Jcc(CondE, upLeaf)
 	a.OpImm(Cmp, R9, regLeafArg, false)
 	a.Jcc(CondB, notLeaf)
 	a.Load(RDX, R8, offRCLeafVal+8)
@@ -260,6 +263,21 @@ func (g *nativeGen) call() {
 	g.decB(RDX)
 	a.LeaIdx(RAX, R12, RDX, 1, 0)
 	g.storeValue()
+	// A regLeafCode body that returns an upvalue first thing (leafUp):
+	// the callee's upvalue, as regLeafRun reads it.
+	a.Bind(upLeaf)
+	a.Load(R9, RCX, offECl)
+	a.LoadS32(RDX, R8, offRCLeafUp)
+	a.OpImm(Sub, RDX, 1, true)
+	a.Jcc(CondS, notLeaf)
+	a.CmpMem(RDX, R9, offClUpvals+8, true)
+	a.Jcc(CondAE, notLeaf)
+	a.Load(R9, R9, offClUpvals)
+	a.LoadIdx(R9, R9, RDX, 8, 0)
+	a.Load(R9, R9, offUpSlot)
+	a.Load(RCX, R9, 0)
+	a.Load(RDX, R9, 8)
+	a.Jmp(leafStore)
 	a.Bind(notLeaf)
 	// A callee rhCallW leaves to regCallMiss (regCallOut): one that keeps
 	// its arguments, entered here as regEnterW enters it (sEnt), and a
@@ -573,8 +591,8 @@ func (g *nativeGen) call() {
 
 // ret is ret and ret_undef of a frame the code entered itself: its
 // caller's state off the native frame stack, the value in the caller's
-// register, and the caller goes on. The base frame's return is Go's, as
-// is a frame's with upvalues to close.
+// register, and the caller goes on; the upvalues open on it closed first
+// (closeUps), as nativeEnd closes them. The base frame's return is Go's.
 func (g *nativeGen) ret(undef bool) {
 	a := g.a
 	noCap, base, open := a.NewLabel(), a.NewLabel(), a.NewLabel()
@@ -585,7 +603,7 @@ func (g *nativeGen) ret(undef bool) {
 	a.LoadU8(R8, RSI, offFRegKind)
 	a.OpImm(Cmp, R8, regFrameGenStep, false)
 	a.Jcc(CondE, g.genRet)
-	// Upvalues open on the frame are closed by Go, as nativeEnd closes
+	// Upvalues open on the frame are closed here, as nativeEnd closes
 	// them: a frame of captured registers, or an entered one's, whose
 	// arguments object a sloppy body maps onto its parameters.
 	a.Load(RCX, RDI, ncRC)
@@ -597,7 +615,11 @@ func (g *nativeGen) ret(undef bool) {
 	a.Jcc(CondNE, noCap)
 	a.Bind(open)
 	a.CmpMemImm8(RSI, offFOpenUp+8, 0)
-	a.Jcc(CondNE, g.exit)
+	a.Jcc(CondE, noCap)
+	a.StoreImm(RDI, scr(sV0), 0)
+	a.StoreImm(RDI, scr(sV1), -1)
+	g.closeUps()
+	a.Load(RAX, RBX, 0)
 	a.Bind(noCap)
 	// The value.
 	if undef {

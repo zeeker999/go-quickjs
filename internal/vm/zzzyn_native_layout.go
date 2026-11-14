@@ -50,6 +50,7 @@ func NativeLayout() (offsets, sizes map[string]uintptr, consts map[string]uint64
 		reflect.TypeFor[generatorObject](),
 		reflect.TypeFor[generator](),
 		reflect.TypeFor[Realm](),
+		reflect.TypeFor[upvalue](),
 	} {
 		sizes[t.Name()] = t.Size()
 		depth := map[string]int{}
@@ -138,6 +139,7 @@ func NativeLayout() (offsets, sizes map[string]uintptr, consts map[string]uint64
 		"regCallOut":     uint64(regCallOut),
 		"regCallLeaf":    uint64(regCallLeaf),
 		"regLeafArg":     uint64(regLeafArg),
+		"regLeafCode":    uint64(regLeafCode),
 		"regFrameCall":   uint64(regFrameCall),
 		"regFrameEnter":  uint64(regFrameEnter),
 

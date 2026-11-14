@@ -37,6 +37,7 @@ var (
 	elemStrCharCodeAt int32
 
 	regCallEnter, regCallThis, regCallObjThis, regCallOut, regCallLeaf, regLeafArg int32
+	regLeafCode                                                                    int32
 	regFrameCall, regFrameEnter, regFrameGenStep                                   int32
 
 	// A generator's states.
@@ -94,7 +95,7 @@ func loadConsts() {
 		name string
 	}{{&elemStrCharCodeAt, "elemStrCharCodeAt"},
 		{&regCallEnter, "regCallEnter"}, {&regCallThis, "regCallThis"}, {&regCallObjThis, "regCallObjThis"},
-		{&regCallOut, "regCallOut"}, {&regCallLeaf, "regCallLeaf"}, {&regLeafArg, "regLeafArg"},
+		{&regCallOut, "regCallOut"}, {&regCallLeaf, "regCallLeaf"}, {&regLeafArg, "regLeafArg"}, {&regLeafCode, "regLeafCode"},
 		{&regFrameCall, "regFrameCall"}, {&regFrameEnter, "regFrameEnter"}, {&regFrameGenStep, "regFrameGenStep"},
 		{&genSuspendedYield, "genSuspendedYield"}, {&genExecuting, "genExecuting"},
 		{&genCompleted, "genCompleted"},

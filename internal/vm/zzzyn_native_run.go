@@ -121,6 +121,7 @@ var nativeSlowOnMiss = [...]bytecode.ROp{
 // sorts first).
 func init() {
 	nativeExitTable = regTable
+	nativeClosureFn = nativeClosure
 	for _, op := range nativeSlowOnMiss {
 		nativeExitTable[op] = regSlowTable[op]
 	}
@@ -307,6 +308,7 @@ func (r *Runtime) newNativeCtx(st *regState) *nativeCtx {
 	ctx.protoNum = unsafe.Offsetof(Realm{}.proto) + unsafe.Offsetof(intrinsics{}.number)
 	ctx.primProps = unsafe.Offsetof(Realm{}.primProps)
 	ctx.has = unsafe.Offsetof(Realm{}.has)
+	ctx.closureFn = *(*uintptr)(unsafe.Pointer(&nativeClosureFn))
 	ctx.grow()
 	st.native = ctx
 	return ctx
@@ -551,6 +553,24 @@ func (r *Runtime) nativeGenEnd(s *regState, ctx *nativeCtx, rec *nativeRec, v Va
 	caller.regs[w.A()] = v
 	return caller, retPC + 1, w
 }
+
+// nativeClosure is closure_w as its native handler calls it, through
+// callH with no exit: the top frame's closure made as rsClosureW makes
+// it (regClosure), with no state of the frame's, which nothing it does
+// reads. The handler stores it in R[A].
+//
+//go:nocheckptr
+func nativeClosure(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeCtx) *Object {
+	f := (*frame)(nativePtr(&ctx.nf))
+	c := (*regCode)(nativePtr(&ctx.rc))
+	f.pc = c.src[pc] + 1
+	return ctx.st.r.regClosure(f, c, w, f.base-int(c.locals))
+}
+
+// nativeClosureFn is nativeClosure's func value, whose address a
+// context gives the code (closureFn), set by init: nativeClosure reaches
+// newNativeCtx, which reads it.
+var nativeClosureFn func(*[1 << 16]Value, bytecode.RInstr, int, *nativeCtx) *Object
 
 // nativeFillPCs writes the pc of each caller on the native frame stack
 // that has none written yet: its source position past its call, as

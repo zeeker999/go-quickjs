@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -554,4 +555,66 @@ func TestRegNativeGenStep(t *testing.T) {
 		function* count(n) { for (var i = 0; i < n; i++) yield i }
 		function sum(n) { var s = 0; for (var v of count(n)) s += v; return s }
 		String(sum(5000))`, bytecode.RIterNext, bytecode.RYield)
+}
+
+// nativeClosuresSrc makes closures the native handlers make and close
+// (closure_w, close_regs, a return's closing): a binding of each turn
+// captured, several at once, captures of captures, an arrow's this,
+// closures under a with, a sloppy function's mapped arguments, and
+// closures kept past their maker's return and called later.
+const nativeClosuresSrc = `
+	var out = []
+	function turns(n) { var fs = []; for (let i = 0; i < n; i++) { let k = i * 2; fs.push(function () { return k + i }) } return fs.map(f => f()).join() }
+	out.push(turns(5))
+	function many(a, b) { var c = a + b; let d = c * 2; var f = function () { return a + b + c + d }; a = 10; return f() }
+	out.push(many(1, 2))
+	function outer(x) { return function (y) { return function (z) { return x + y + z } } }
+	out.push(outer(1)(2)(3))
+	var o = { v: 4, m() { var fs = []; for (let i = 0; i < 3; i++) fs.push(() => this.v + i); return fs.map(f => f()).join() } }
+	out.push(o.m())
+	function counter() { var c = 0; return { inc() { return ++c }, get() { return c } } }
+	var cs = []; for (var i = 0; i < 3; i++) cs.push(counter())
+	cs[0].inc(); cs[2].inc(); cs[2].inc()
+	out.push(cs.map(c => c.get()).join())
+	function mapped(a, b) { var f = function () { return a + b }; arguments[0] = 7; return f() + arguments.length }
+	out.push(mapped(1, 2))
+	function withed(w) { var r = []; with (w) { for (let i = 0; i < 2; i++) r.push(() => x + i) } return r.map(f => f()).join() }
+	out.push(withed({ x: 5 }))
+	function deep(n) { if (n == 0) return () => 0; let k = n; var g = deep(n - 1); return () => k + g() }
+	out.push(deep(50)())
+	function loopy(n) { var s = 0; for (let j = 0; j < n; j++) { let k = j; var f = function () { return k }; s = (s + f()) | 0 } return s }
+	out.push(loopy(1000))
+	function appends(a) { var s = a; var add = function (y) { s += y }; add("x"); add("y"); return s }
+	out.push(appends("a"), appends("b"))
+	function getters() { var fs = []; for (let i = 0; i < 3; i++) fs.push(function () { return i }); var s = 0; for (var j = 0; j < 100; j++) for (var f of fs) s += f(); return s }
+	out.push(getters())
+	function tdz() { var g = function () { return k }; var r; try { g() } catch (e) { r = e.name } let k = 1; return r + g() }
+	out.push(tdz())
+	function cb() { var k = 3; var r = [1, 2].map(function () { return k }); k = 4; return r.concat([1].map(function () { return k })).join() }
+	out.push(cb())
+	function setter() { var v = 1; var get = function () { return v }; var a = get(); v = "s"; return a + get() }
+	out.push(setter())
+	out.join("\n")`
+
+// TestRegNativeClosures runs nativeClosuresSrc natively and by the Go
+// table, marking and not; its fast case makes a closure each turn, with
+// no exit for closure_w or close_regs.
+func TestRegNativeClosures(t *testing.T) {
+	nativeCheck(t, nativeClosuresSrc, `
+		function loopy(n) { var s = 0; for (let j = 0; j < n; j++) { let k = j; var f = function () { return k }; s = (s + f()) | 0 } return s }
+		String(loopy(5000))`, bytecode.RClosureW, bytecode.RCloseRegs)
+}
+
+// TestRegNativeClosuresCollecting runs nativeClosuresSrc natively and by
+// the Go table with the collector running all the time (GOGC=1), so that
+// it marks while the closures and their upvalues are made and closed.
+func TestRegNativeClosuresCollecting(t *testing.T) {
+	gc := debug.SetGCPercent(1)
+	t.Cleanup(func() { debug.SetGCPercent(gc) })
+	want := nativeRunSrc(t, nativeClosuresSrc, false)
+	for range 3 {
+		if got := nativeRunSrc(t, nativeClosuresSrc, true); got != want {
+			t.Fatalf("native:\n%s\nwant\n%s", got, want)
+		}
+	}
 }

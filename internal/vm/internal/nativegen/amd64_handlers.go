@@ -1164,6 +1164,9 @@ func nativeEmit(v *variant) (*block, error) {
 		a.Bind(g.genRet)
 		g.genReturn()
 	})
+	// Closures and the upvalues they capture (amd64_closure.go).
+	h(bytecode.RCloseRegs, g.closeRegs)
+	h(bytecode.RClosureW, g.closureW)
 
 	for n, l := range g.exits {
 		if n == 0 {

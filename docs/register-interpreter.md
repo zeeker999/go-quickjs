@@ -1050,6 +1050,22 @@ instruction carries, for each of the new function's upvalues taken from its
 maker, the register of the binding, so that the function's template needs
 nothing of the maker's layout.
 
+Natively (nativegen's `closeUps`, `closeRegs` and `closureW`),
+`close_regs` and a return close the upvalues open on the frame as
+`regCloseRegs` and `nativeEnd` close them -- each one's value copied in,
+its slot pointed at it, the others kept in order -- with no exit, and
+`closure_w`'s closure is made by Go's `regClosure` through a call of
+`nativeClosure` by `nativeCallH`, as an exit calls a Go handler but with
+no exit's state: the instruction and the budget kept in the context, the
+pinned registers put back after, the closure stored in R[A]. A call of a
+`regLeafCode` body that returns an upvalue first thing, a getter of a
+binding it captures, is answered from the callee's closure with no frame
+(`regCode.leafUp`), as `regLeafRun` answers it. A loop that made a
+closure each turn exited twice a turn (`close_regs`, `closure_w`):
+`closure_make` went from 105 to 89 ns, `closure_counter` from 14.8 to
+7.3. The allocation itself is Go's, as the tree's is: the closure, its
+function data and the upvalues it opens are what main allocates.
+
 ## Inline caches
 
 Every property, element, global and call site has an entry in the

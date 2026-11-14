@@ -77,6 +77,9 @@ type regCode struct {
 	// leafArg is the parameter a regLeafArg body returns, and leafVal the
 	// value a regLeafConst body does.
 	leafArg int32
+	// leafUp is one past the upvalue a regLeafCode body returns first
+	// thing, which the native call handler reads, or 0.
+	leafUp  int32
 	leafVal Value
 	// leafOps is a regLeafCode body's code as regLeafRun runs it.
 	leafOps []regLeafOp

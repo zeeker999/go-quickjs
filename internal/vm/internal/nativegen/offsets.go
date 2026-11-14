@@ -207,6 +207,12 @@ var (
 	offFSavedSP  int32
 	offFParams   int32
 	offFThis     int32
+
+	// Closures and upvalues (closeUps, closure_w).
+	ncClosureFn int32
+	offUpSlot   int32
+	offUpClosed int32
+	offRCLeafUp int32
 )
 
 // nativeTopFields are the record's fields that the top frame's state is
@@ -416,6 +422,10 @@ func loadOffsets() {
 	offFSavedSP = off("frame.savedSP")
 	offFParams = off("frame.paramsOnly")
 	offFThis = off("frame.this")
+	ncClosureFn = off("nativeCtx.closureFn")
+	offUpSlot = off("upvalue.slot")
+	offUpClosed = off("upvalue.closed")
+	offRCLeafUp = off("regCode.leafUp")
 
 	nativeTopFields = [][2]int32{
 		{off("nativeRec.regs"), ncRegs},
