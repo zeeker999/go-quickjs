@@ -1493,8 +1493,20 @@ the cache:
 While Go runs beside them, every level's code is pinned (`jitRegEntry`'s
 `levels`): the cache neither drops it nor compiles the function again until
 the level is done, so that the code a level runs is its function's in the
-cache for as long as it runs. Both backends make such a call natively, the
-same way (`mir`'s `call`, `windowSetup`).
+cache for as long as it runs; Go finds it by the level's closure
+(`closureCode`'s `jitReg`), the cache's key only where that is not code of
+this realm (`jitRegLevelAt`). The levels and frames of a call of Go deeper
+than the buffers on Go's stack come from slabs on the JIT's state, each
+call's past those of the calls under way below it. Both backends make such
+a call natively, the same way (`mir`'s `call`, `windowSetup`).
+
+A callee that leaves native code on more than one in `jitUnwindShare` of
+its native callers' calls is compiled again while it learns, up to
+`jitUnwindReopts` times, then no longer called natively (`notNative`, its
+link cleared) until Go has made `jitNativeRetry` calls of it, doubled each
+time (`jitRegUnwound`, `jitRegRetryNative`), as the stack form's
+`jitUnwound` and `jitRetryNative` have it: its native callers make a call
+of Go there rather than have Go finish their levels at each call.
 
 ## Inlining
 
