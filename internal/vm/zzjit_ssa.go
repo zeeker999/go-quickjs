@@ -1540,7 +1540,13 @@ func (r *Runtime) jitFillLiteral(l *jitLiteral) {
 		// A literal of constants: its arrays as the tree tier makes them,
 		// each whole (sharedLiteralArray).
 		for i := range int(pool.Size) {
-			a := sharedLiteralArray(r, src.sharedOf, int(src.sharedPC))
+			var a *Object
+			if src.sharedReg {
+				ic := &src.sharedOf.ic[src.sharedPC]
+				a = sharedShare(r, ic, ic.p1)
+			} else {
+				a = sharedLiteralArray(r, src.sharedOf, int(src.sharedPC))
+			}
 			r.ensureShape(a)
 			pool.Objects[i] = unsafe.Pointer(a)
 		}
@@ -10061,11 +10067,14 @@ type jitPoolSource struct {
 	// array marks an array literal's pool; results, a call of next's pool
 	// of result objects (jitFillResults); sharedPC, with sharedOf, an
 	// array literal of constants whose arrays share them, made whole
-	// (sharedLiteralArray). The three share a word.
-	array    bool
-	results  bool
-	sharedPC int32
-	lit      *bytecode.Constant
+	// (sharedLiteralArray) -- or, with sharedReg, register code's
+	// new_array_k's, sharedPC its site's index in sharedOf's caches
+	// (jitRegSharedLiteral). The four share a word.
+	array     bool
+	results   bool
+	sharedReg bool
+	sharedPC  int32
+	lit       *bytecode.Constant
 	// A closure's (jitFillClosures): its template, the function it is made
 	// in and that function's closures' environment.
 	tmpl Value
@@ -10718,8 +10727,16 @@ func (r *Runtime) jitBigIntSeen(f *frame, e *jitEntry, site int) bool {
 	if site < 0 || p == nil || site >= len(p.Code) {
 		return false
 	}
-	in := p.Code[site]
-	generic := slices.Contains(e.failed, int32(site))
+	big, _ := jitTreeBig(f.cl.fn, site)
+	return jitBigIntNote(e, int32(site), p.Code[site], func(o ir.Operand) Value { return r.jitOperand(f, p, o) }, big, jitTreeWide(f.cl.fn, site))
+}
+
+// jitBigIntNote is jitBigIntSeen's learning, of either form's code: in, the
+// instruction whose guard failed or which is generic, at key -- the stack
+// form's site, the register form's register pc -- in e, its operands
+// read by operand, treeBig and treeWide what the tree tier saw of it.
+func jitBigIntNote(e *jitEntry, key int32, in ir.Instruction, operand func(ir.Operand) Value, treeBig, treeWide bool) bool {
+	generic := slices.Contains(e.failed, key)
 	native := false
 	switch {
 	case in.Op == ir.Binary && (in.Operator == ir.Add || in.Operator == ir.Sub || in.Operator == ir.Mul),
@@ -10745,29 +10762,29 @@ func (r *Runtime) jitBigIntSeen(f *frame, e *jitEntry, site int) bool {
 	if in.Left.Slot < 0 || right.Slot < 0 {
 		return false
 	}
-	a, b := r.jitOperand(f, p, in.Left), r.jitOperand(f, p, right)
+	a, b := operand(in.Left), operand(right)
 	if !a.IsBigInt() || !b.IsBigInt() {
 		return false
 	}
-	learned := slices.Contains(e.bigints, int32(site))
-	if big, _ := jitTreeBig(f.cl.fn, site); learned || big {
+	learned := slices.Contains(e.bigints, key)
+	if learned || treeBig {
 		// Its speculation, learned or the tree tier's, failed: made as one
 		// of BigInts from 0 to 2^64-1 where they are, once.
-		if !native || slices.Contains(e.bigwide, int32(site)) || jitTreeWide(f.cl.fn, site) || !jitBigUnsigned(a) || !jitBigUnsigned(b) {
+		if !native || slices.Contains(e.bigwide, key) || treeWide || !jitBigUnsigned(a) || !jitBigUnsigned(b) {
 			return false
 		}
-		e.bigwide = append(e.bigwide, int32(site))
+		e.bigwide = append(e.bigwide, key)
 		e.reopt = true
 		return true
 	}
-	e.bigints = append(e.bigints, int32(site))
+	e.bigints = append(e.bigints, key)
 	e.reopt = true
 	if !native {
 		return false
 	}
 	if !a.isInt64Big() || !b.isInt64Big() {
 		if jitBigUnsigned(a) && jitBigUnsigned(b) {
-			e.bigwide = append(e.bigwide, int32(site))
+			e.bigwide = append(e.bigwide, key)
 			return true
 		}
 		return false

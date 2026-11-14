@@ -963,7 +963,17 @@ func (l *regLowering) lower(pc int) {
 		if !l.regexpLit(pc, w) {
 			host()
 		}
-	case bytecode.RNewArrayK, bytecode.RApplyArgs:
+	case bytecode.RNewArrayK:
+		// An array of constants, its arrays sharing them (the VM's shared
+		// literals): natively from its site's pool, its arrays whole as Go
+		// makes them (ssa's LiteralSite's Shared), or, where the site has
+		// given sharing up, its elements written from the constants loaded
+		// to scratch slots -- as the stack form's new_array of the constants
+		// it pushes.
+		if !l.constArray(int(a), rc.Literals[rc.Aux[pc]]) {
+			host()
+		}
+	case bytecode.RApplyArgs:
 		host()
 	case bytecode.RAddProp, bytecode.RAddPropI:
 		// o.k += v: the read, which may run a getter, so that the addition
@@ -1042,6 +1052,63 @@ func (l *regLowering) lower(pc int) {
 		}
 		l.lowerCold(pc, w)
 	}
+}
+
+// constArray lowers new_array_k's literal of the constants lit to dest:
+// each loaded to a scratch slot, the literal made over them (ArrayLiteral),
+// its result copied out. It reports false, lowering nothing, for a literal
+// longer than an ArrayLiteral takes or of a constant other than a number,
+// a string or a BigInt.
+func (l *regLowering) constArray(dest int, lit []bytecode.LitElem) bool {
+	consts := l.fn.Constants
+	if len(lit) > ir.MaxArrayLiteral {
+		return false
+	}
+	for _, x := range lit {
+		if x.Kind != bytecode.LitConst {
+			continue
+		}
+		if int(x.K) >= len(consts) {
+			return false
+		}
+		switch consts[x.K].Kind {
+		case bytecode.ConstNumber, bytecode.ConstString, bytecode.ConstBigInt:
+		default:
+			return false
+		}
+	}
+	base := l.scratch + l.used
+	for range lit {
+		l.temp()
+	}
+	if len(lit) == 0 {
+		base = l.temp()
+	}
+	for i, x := range lit {
+		v := ir.Value{Kind: ir.Undefined}
+		switch x.Kind {
+		case bytecode.LitConst:
+			switch c := consts[x.K]; c.Kind {
+			case bytecode.ConstNumber:
+				l.emit(ir.Instruction{Op: ir.Copy, Dest: base + i, Left: number(c.Num)}, false)
+			case bytecode.ConstString:
+				l.emit(ir.Instruction{Op: ir.StringConst, Dest: base + i, Key: x.K}, false)
+			case bytecode.ConstBigInt:
+				l.emit(ir.Instruction{Op: ir.BigIntConst, Dest: base + i, Key: x.K}, false)
+			}
+			continue
+		case bytecode.LitTrue:
+			v = ir.Bool(true)
+		case bytecode.LitFalse:
+			v = ir.Bool(false)
+		case bytecode.LitNull:
+			v.Kind = ir.Null
+		}
+		l.emit(ir.Instruction{Op: ir.Copy, Dest: base + i, Left: ir.Literal(v)}, false)
+	}
+	l.emit(ir.Instruction{Op: ir.ArrayLiteral, Dest: base, Extra: len(lit)}, false)
+	l.emit(ir.Instruction{Op: ir.Copy, Dest: dest, Left: ir.Slot(base)}, false)
+	return true
 }
 
 // lowerCold appends the IR of operation w at pc, one of no hot loop: the few the stack

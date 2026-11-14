@@ -646,6 +646,9 @@ func bigArith(op ir.Operator) bool {
 // to the slots past it, by the stack's depths.
 func (b *builder) bigFresh(pc, slot int) bool {
 	p := b.p
+	if p.Origin != nil {
+		return b.regBigFresh(pc, slot)
+	}
 	d := slot - p.Locals
 	if d < 0 {
 		return false
@@ -678,12 +681,70 @@ func (b *builder) bigFresh(pc, slot int) bool {
 	return false
 }
 
+// regBigFresh is bigFresh in a register program, whose operators write
+// registers, not a stack: slot, an operand of the instruction at pc, is a
+// register an operator (bigArith), its register instruction's whole
+// lowering, wrote earlier in the block, which no instruction since has
+// read or written -- each an operator or a copy of other slots -- and which
+// nothing reads after pc before writing it (ir.Program's Live). Not one
+// the instruction at pc writes: its old value is the register's, which
+// the register's own giving back takes (bigOwner's ReleaseOld) -- both
+// would give the block back twice. Nor one of the registers that hold
+// their values alone (BigIntSole), whose values are given back where an
+// operator writes the register next, the block then long reused.
+func (b *builder) regBigFresh(pc, slot int) bool {
+	p := b.p
+	if slot < 0 || slot >= p.Regs || p.IsCaptured(slot) || !regWhole(p, pc) || pc+1 >= len(p.Code) ||
+		p.Code[pc].Dest == slot || p.LiveAt(pc+1, slot) || slot < 64 && b.sole&(1<<uint(slot)) != 0 {
+		return false
+	}
+	touches := func(c ir.Instruction) bool {
+		return c.Left.Slot == slot || c.Right.Slot == slot || c.Third.Slot == slot || c.Dest == slot || c.Check && c.CheckSlot == slot
+	}
+	for k := pc - 1; k >= 0; k-- {
+		if b.blockAt[k+1] != nil || !reachable(p, k) {
+			return false
+		}
+		c := p.Code[k]
+		if c.Op == ir.Binary && c.Dest == slot {
+			return bigArith(c.Operator) && regWhole(p, k)
+		}
+		switch c.Op {
+		case ir.Binary, ir.Unary, ir.Copy, ir.Nop:
+			if touches(c) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// regWhole reports whether the instruction at pc of a register program is
+// the whole lowering of its register instruction (ir.Program's Origin).
+func regWhole(p *ir.Program, pc int) bool {
+	o := p.Origin
+	return pc >= 0 && pc < len(o) && (pc == 0 || o[pc-1] != o[pc]) && (pc+1 == len(o) || o[pc+1] != o[pc])
+}
+
 // bigOwner is the local the instruction right after pc stores in's result
 // to, taking it off the stack, as the tree tier's ownedStore takes it: one
 // that checks nothing, whose guard's state would still have the value the
 // local held, given back.
 func (b *builder) bigOwner(pc int, in ir.Instruction) (int, bool) {
 	p := b.p
+	if p.Origin != nil {
+		// A register program's operator writes its register itself -- s =
+		// s * x is one mul into s's -- its value given back once the
+		// result is made, the operator its register instruction's whole
+		// lowering, which an exit after it does not make again.
+		k := in.Dest
+		if !regWhole(p, pc) || k < 0 || k >= p.Regs || p.IsCaptured(k) {
+			return 0, false
+		}
+		return k, true
+	}
 	k := pc + 1
 	if k+1 >= len(p.Maps) || b.blockAt[k] != nil || !reachable(p, k) {
 		return 0, false

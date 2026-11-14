@@ -3,7 +3,9 @@
 package vm
 
 import (
+	"fmt"
 	"testing"
+	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
@@ -433,5 +435,145 @@ func TestJITRegKinds(t *testing.T) {
 		if !kinds[k] {
 			t.Errorf("no code of kind %v compiled: %v", k, kinds)
 		}
+	}
+}
+
+// regReplaceSrc replaces by RegExps held in bindings, as the V8 suite's
+// RegExp does: a captured binding's global RegExp and a global's, a string
+// template and an empty one, one call's result unused -- leaves, as the
+// stack form's code calls them (jitReplaceLeafSeen) -- and a literal's,
+// which the call makes and gives back, and a function's replacement, which
+// the leaf's check refuses each call of, both left calls of Go.
+const regReplaceSrc = `
+var g = /[aeiou]/;
+var replaces = (function () {
+	var re = /\s+/g;
+	return function (s, n) {
+		var out = "", k = 0;
+		for (var i = 0; i < n; i++) {
+			out = s.replace(re, "-");
+			s.replace(g, "");
+			k += out.replace(/-/g, "+").length + s.replace(re, function (m) { return m.length }).length;
+		}
+		return out + k + g.lastIndex + re.lastIndex;
+	};
+})();
+`
+
+func TestJITRegReplaceLeaf(t *testing.T) {
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regReplaceSrc)
+			for _, s := range []string{"a b  c\td", "x\U0001F600 y", ""} {
+				var got [2]string
+				for i, r := range rts {
+					fn, _ := r.GetProp(Obj(r.Global()), r.Intern("replaces"))
+					var v Value
+					var err error
+					for range 3 {
+						v, err = r.Call(fn, Undefined, []Value{Str(NewString(s)), Float(2000)})
+					}
+					got[i] = regNativeShow(r, v, err)
+				}
+				if got[0] != got[1] {
+					t.Errorf("%q: with the JIT %q, without %q", s, got[0], got[1])
+				}
+			}
+			r := rts[0]
+			v, _ := r.GetProp(Obj(r.Global()), r.Intern("replaces"))
+			cl := v.Object().fn().closure
+			e := r.jitRegFor(cl, cl.reg)
+			if e == nil || e.p == nil {
+				t.Fatalf("not compiled: %+v", e)
+			}
+			fb := r.jitRegFeedbackFor(cl, e.p)
+			leaves := 0
+			for pc := range e.p.Code {
+				if o, ok := fb.Leaf(pc); ok && o == uintptr(unsafe.Pointer(r.strReplaceFn)) {
+					leaves++
+				}
+			}
+			// The two replaces by bindings' RegExps with string templates
+			// and the one by a function's -- whose leaf's check refuses it,
+			// Go then making the call -- but not the literal's.
+			if leaves != 3 {
+				t.Errorf("%d calls of replace's leaf, want 3", leaves)
+			}
+		})
+	}
+}
+
+// regSharedSrc makes array literals of constants, whose arrays share them
+// until one is written (new_array_k): read, written, grown, and kept, in a
+// loop, as the stack form's code makes them natively from a pool of the
+// arrays Go makes (ssa's LiteralSite's Shared).
+const regSharedSrc = `
+var kept = [];
+function shared(n) {
+	var s = 0;
+	for (var i = 0; i < n; i++) {
+		var a = [1, 2.5, "x", true, null], b = [3, 4, 5];
+		s += a[0] + a[1] + b[i % 3] + a.length;
+		if (i % 7 == 0) { b[1] = i; s += b[1] }
+		if (i % 11 == 0) { a.push(i); s += a.length }
+		if (i % 97 == 0) kept.push(a, b);
+	}
+	return s + ":" + kept.length + ":" + kept.slice(-4).join("|") + ":" + [3, 4, 5].join();
+}
+`
+
+func TestJITRegSharedLiteral(t *testing.T) {
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regSharedSrc)
+			var got [2]string
+			for i, r := range rts {
+				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("shared"))
+				for range 4 {
+					v, err := r.Call(fn, Undefined, []Value{Float(3000)})
+					got[i] = regNativeShow(r, v, err)
+				}
+			}
+			if got[0] != got[1] {
+				t.Errorf("with the JIT %q, without %q", got[0], got[1])
+			}
+			r := rts[0]
+			v, _ := r.GetProp(Obj(r.Global()), r.Intern("shared"))
+			cl := v.Object().fn().closure
+			e := r.jitRegFor(cl, cl.reg)
+			if e == nil || e.p == nil {
+				t.Fatalf("not compiled: %+v", e)
+			}
+			fb := r.jitRegFeedbackFor(cl, e.p)
+			pooled, shared := 0, 0
+			for pc := range e.p.Code {
+				if w, _, ok := fb.at(pc); !ok || w.Op() != bytecode.RNewArrayK {
+					continue
+				}
+				if site, ok := fb.Literal(pc); ok {
+					pooled++
+					if site.Shared {
+						shared++
+					}
+				}
+			}
+			// a's, b's and the return's: the return's, never written, its
+			// arrays sharing its constants; a's and b's sharing them where
+			// the code was compiled before their sites gave sharing up for
+			// the writes to their arrays (at the first call, under
+			// QJS_JIT_STRESS), their elements written natively after.
+			if pooled != 3 || shared < 1 {
+				t.Errorf("%d literals of constants made from a pool, %d sharing them; want 3, 1 or more sharing", pooled, shared)
+			}
+			if st := r.RegNativeStats(); st.HostOps["new_array_k"] > 8 {
+				t.Errorf("new_array_k left to Go %d times", st.HostOps["new_array_k"])
+			}
+		})
 	}
 }

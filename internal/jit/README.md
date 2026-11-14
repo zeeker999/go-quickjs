@@ -299,10 +299,17 @@ the function's key:
 - the functions a call was seen to call at its calls of Go and at its exits
   (`jitRegCallSeen`), and the constructions;
 - the literals' pools by register pc (`Literal`: `new_object`'s,
-  `new_object_lit`'s, `new_array`'s and `new_regexp`'s, made by
-  `jitObjectLiteral`, `jitArrayLiteral` and `jitRegExpLiteral`), and
-  `new_object_lit`'s fields defined along their shapes' transitions
-  (`Define`);
+  `new_object_lit`'s, `new_array`'s, `new_array_k`'s and `new_regexp`'s,
+  made by `jitObjectLiteral`, `jitArrayLiteral`, `jitRegSharedLiteral` and
+  `jitRegExpLiteral`), and `new_object_lit`'s fields defined along their
+  shapes' transitions (`Define`). `new_array_k`'s arrays share its
+  constants, made as the interpreter makes them, where its site does
+  still, and are written from the constants loaded to scratch slots where
+  it has given sharing up;
+- the operators that met BigInts at a guard's failure or a generic one's
+  host exit (`BigInt`, `BigIntWide`, `jitRegBigIntSeen`,
+  `jitRegBigIntExit`, the stack form's `jitBigIntNote`), which the next
+  compiles make natively or call Go for (see [BigInts](#bigints));
 - the register pcs after calls Go went on at, which the code had been built
   with no entry at (`Resumed`, `jitRegResumeSeen`).
 
@@ -741,6 +748,18 @@ it as it reaches `callGo`, through a routine the Go runtime sees as
 the result in a block given back, the value before's, or a new one -- as
 V8's code allocates a BigInt inline -- gives back as the call would, and
 leaves what would throw to the call.
+
+Register code's operator writes its register itself, so a result stored
+over a value the register holds alone gives that value's block back
+(`ReleaseOld`, `bigOwner`), and an operand is fresh where an operator wrote
+it earlier in the block, nothing read it since and nothing reads it after
+(`regBigFresh`, the program's `Live`) -- not a register of those that hold
+their values alone, whose old values only their own stores give back. The
+registers that do (`BigIntSole`, `regSoleRegisters`) are those past the
+parameters no closure captures, read only as operators' operands, tests and
+branches: a move, a call's window, a return, a global's store, a property's
+read or a postfix update of one has it hold its value no more, and an
+instruction the analysis does not know has the function none.
 
 ### Typed arrays and elements
 
@@ -1757,7 +1776,9 @@ would keep every JIT runtime alive.
 leaves (see [Built-ins and leaves](#built-ins-and-leaves)): native code
 calls them without a frame, for any pattern, global and sticky ones
 included, given a string and a writable `lastIndex`; so is a string's
-`replace` by a RegExp that is no literal's. A match that would fail -- its
+`replace` by a RegExp that is no literal's, of two arguments, which
+register code's feedback answers where the call's site holds
+`String.prototype.replace` (`Leaf`). A match that would fail -- its
 step budget spent, the check's interrupt met -- errs with nothing written
 (`errRegExpLeafAgain`), and the call is made again with a frame, which
 throws; the match already found past the budget is remembered

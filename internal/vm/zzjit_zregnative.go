@@ -496,7 +496,9 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 			// An entry's speculation, at a loop's header or the start: the
 			// entry's, as the stack form's code learns it (EntryGeneric).
 			r.jitRegEntrySeen(f, exitPC)
-		} else {
+		} else if !r.jitRegBigIntSeen(f, e, wb, int(int64(ctx.ExitSite))) {
+			// An operator of BigInts it learned is not generic: the code
+			// compiled again makes it of them (jitBigIntNote).
 			r.jitRegDeoptSeen(f, c, e, wb, exitPC)
 		}
 		r.jitRegInvalidate(f.cl, e)
@@ -519,6 +521,11 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 		} else {
 			s.noteRegHost(c, exitPC)
 			seen := r.jitRegHostSeen(f, c, wb, exitPC)
+			if r.jitRegBigIntExit(f, e, wb, int(int64(ctx.ExitSite))) {
+				// A generic operator that met BigInts, which the code
+				// compiled again calls Go for (ssa.GoArith).
+				r.jitRegReopt(f.cl, e)
+			}
 			var callee Value
 			if w := regAt(c.code, exitPC); w.Op() == bytecode.RNewW && wb+int(w.A()) < len(r.stack) {
 				callee = r.stack[wb+int(w.A())]

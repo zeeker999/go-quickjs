@@ -5,6 +5,7 @@ package vm
 import (
 	"cmp"
 	"fmt"
+	"math/bits"
 	"reflect"
 	"slices"
 	"strings"
@@ -244,12 +245,24 @@ func CompareFeedback(stack, reg *Runtime) FeedbackParity {
 			}
 			rm := rv.MethodByName(meth.Name)
 			if !pcArg {
-				a, ok := stext(sv.Method(m), nil)
+				call := func(text func(reflect.Value, []reflect.Value) (string, bool), v reflect.Value) (string, bool) {
+					if meth.Name == "BigIntSole" && v.IsValid() {
+						// The bindings that hold their values alone: how
+						// many, not which, each form numbering them its own
+						// way -- the stack form's locals, the register
+						// form's registers, which take its bindings in the
+						// order its backend meets them.
+						out := v.Call(nil)
+						return fmt.Sprint(bits.OnesCount64(out[0].Uint()), out[1].Bool()), true
+					}
+					return text(v, nil)
+				}
+				a, ok := call(stext, sv.Method(m))
 				if !ok || a == "" {
 					continue
 				}
 				res.Answers++
-				switch b, _ := rtext(rm, nil); {
+				switch b, _ := call(rtext, rm); {
 				case !rm.IsValid():
 					note(res.Gaps, meth.Name+": unanswered", fmt.Sprintf("%s: %s", name, a))
 				case b != a:

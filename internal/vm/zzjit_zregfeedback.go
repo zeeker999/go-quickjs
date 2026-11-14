@@ -342,8 +342,9 @@ func (f *jitRegFeedback) callTarget(pc int) (*Object, *closure, bool) {
 }
 
 // constant is the constant a StringConst or a BigIntConst at the
-// program's instruction pc reads -- load_const's, a switch's case's, or
-// load_empty's empty string -- and whether it is one of op's.
+// program's instruction pc reads -- load_const's, a switch's case's, an
+// element of new_array_k's, or load_empty's empty string -- and whether it
+// is one of op's.
 func (f *jitRegFeedback) constant(pc int, op ir.Op) (Value, bool) {
 	w, iop, ok := f.at(pc)
 	if !ok || iop != op || f.fb.cl == nil {
@@ -353,7 +354,7 @@ func (f *jitRegFeedback) constant(pc int, op ir.Op) (Value, bool) {
 		return Str(emptyString), op == ir.StringConst
 	}
 	k := f.p.Code[pc].Key
-	if w.Op() != bytecode.RLoadConst && w.Op() != bytecode.RSwitch || int(k) >= len(f.fb.cl.consts) {
+	if w.Op() != bytecode.RLoadConst && w.Op() != bytecode.RSwitch && w.Op() != bytecode.RNewArrayK || int(k) >= len(f.fb.cl.consts) {
 		return Value{}, false
 	}
 	v := f.fb.cl.consts[k]
@@ -589,17 +590,80 @@ func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
 	return []ssa.CallSite{{Go: ssa.GoCall, Argc: argc, Method: method, New: w.Op() == bytecode.RNewW, ThisSlot: -1}}
 }
 
-// BigIntSole is ssa.BigIntRecycleFeedback's: no register holds its value
-// alone, as far as the builder is told -- which of them do, register code
-// is not analyzed for yet (the stack form's soleLocals) -- and the code may
-// give BigInts' blocks back, as the stack form's code of a function that
-// does not suspend may (register code that suspends is not compiled).
+// BigIntSole is ssa.BigIntRecycleFeedback's: the registers of the first
+// 64 that hold their values alone (regSoleRegisters), as the stack form's
+// locals do (soleLocals), and whether the code may give BigInts' blocks
+// back at all, as the stack form's code of a function that does not
+// suspend may (register code that suspends is not compiled).
 func (f *jitRegFeedback) BigIntSole() (uint64, bool) {
 	fn := f.fb.fn
 	if bits.UintSize != 64 || fn.Generator || fn.Async {
 		return 0, false
 	}
-	return 0, true
+	return regSoleRegisters(fn, f.rc, f.p), true
+}
+
+// regSoleRegisters is the registers of rc, fn's register code lowered to
+// p, of the first 64, that hold their values alone: past the function,
+// this and the parameters, none a closure captures (ir.Program's
+// Captured), each read only as an operand of an operator that makes a
+// value of its own -- arithmetic, bitwise, a comparison, a test, a
+// branch -- in a function that is no generator, no async function, has no
+// direct eval and no arguments object, of instructions this knows: any
+// other has the function none. A move from one, a call's window or a
+// return of it, a store of it to a global, a read of its property or a
+// postfix update of it, which leaves its value in another register, has
+// it hold its value no more. What an operator stores to one is the
+// register's alone (the VM's bigSoleBit), and its old value given back
+// where it was so (ssa's ReleaseOld), as the stack form's soleLocals says
+// of its locals.
+func regSoleRegisters(fn *bytecode.Function, rc *bytecode.RegCode, p *ir.Program) uint64 {
+	if bits.UintSize != 64 || fn.Generator || fn.Async || fn.HasDirectEval || fn.UsesArguments || rc.UsesArguments || rc.LocalReg != nil {
+		return 0
+	}
+	var cand uint64
+	for k := 2 + fn.ParamCount; k < rc.NumRegs && k < 64; k++ {
+		if !p.IsCaptured(k) {
+			cand |= 1 << uint(k)
+		}
+	}
+	escaped := uint64(0)
+	escape := func(k int) {
+		if k >= 0 && k < 64 {
+			escaped |= 1 << uint(k)
+		}
+	}
+	for _, w := range rc.Code {
+		a, b := int(w.A()), int(w.B())
+		switch w.Op() {
+		case bytecode.RNop, bytecode.RLoadInt, bytecode.RLoadConst, bytecode.RLoadUndef, bytecode.RLoadNull,
+			bytecode.RLoadTrue, bytecode.RLoadFalse, bytecode.RLoadEmpty, bytecode.RLoadUninit, bytecode.RGetGlobal,
+			bytecode.RAdd, bytecode.RSub, bytecode.RMul, bytecode.RBin, bytecode.RAddI, bytecode.RSubI,
+			bytecode.RBitAnd, bytecode.RBitOr, bytecode.RBitXor, bytecode.RShl, bytecode.RShr, bytecode.RUShr,
+			bytecode.RAndI, bytecode.ROrI, bytecode.RXorI, bytecode.RShlI, bytecode.RShrI, bytecode.RUShrI,
+			bytecode.RInc, bytecode.RDec, bytecode.RUnary,
+			bytecode.RJmp, bytecode.RJmpF, bytecode.RJmpT,
+			bytecode.RJLt, bytecode.RJNLt, bytecode.RJLe, bytecode.RJNLe, bytecode.RJGt, bytecode.RJNGt, bytecode.RJGe, bytecode.RJNGe,
+			bytecode.RJLtI, bytecode.RJNLtI, bytecode.RJLeI, bytecode.RJNLeI, bytecode.RJGtI, bytecode.RJNGtI, bytecode.RJGeI, bytecode.RJNGeI,
+			bytecode.RJSEq, bytecode.RJSNe, bytecode.RJSEqI, bytecode.RJSNeI,
+			bytecode.RJEq, bytecode.RJNe, bytecode.RJEqI, bytecode.RJNeI, bytecode.RJNull, bytecode.RJNotNull,
+			bytecode.RRetUndef:
+			// Operands, results of their own, tests and branches.
+		case bytecode.RMove, bytecode.RPostInc, bytecode.RPostDec, bytecode.RGetLength, bytecode.RGetMethod, bytecode.RGetMethodW, bytecode.RGetProp:
+			// Its value left in another register, or read a property of.
+			escape(b)
+		case bytecode.RRet, bytecode.RSetGlobal:
+			escape(a)
+		case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW, bytecode.RCallWT, bytecode.RCallMWT:
+			// The window, the callee's frame.
+			for k := a; k < a+2+int(w.X()); k++ {
+				escape(k)
+			}
+		default:
+			return 0
+		}
+	}
+	return cand &^ escaped
 }
 
 // Leaf is ssa.LeafFeedback's: the built-in the call at the program's
@@ -654,7 +718,15 @@ func (f *jitRegFeedback) Leaf(pc int) (uintptr, bool) {
 	// but not where the call makes its first argument (RMarkLitArg),
 	// which the interpreter's call does (regMarkedCall).
 	regexp := (fd.elemOp == elemRegExpExec || fd.elemOp == elemRegExpTest) && marks&bytecode.RMarkLitArg == 0
-	if !jitLeafOp(fd.elemOp) && !regexp {
+	// String.prototype.replace of two arguments, s.replace(re, ""), whose
+	// leaf checks at each call that they are a RegExp it replaces with
+	// directly and a string (jitReplaceLeaf), as the stack form's code
+	// learns it at its calls of Go (jitReplaceLeafSeen) or guesses it
+	// (jitReplaceLeafGuess) -- but not where the call makes its RegExp, a
+	// literal's (RMarkLitArg), whose call of Go gives the literal its
+	// RegExp back, as the stack form's does.
+	replace := callee == f.fb.r.strReplaceFn && w.Op() == bytecode.RCallMW && w.X() == 2 && marks&bytecode.RMarkLitArg == 0
+	if !jitLeafOp(fd.elemOp) && !regexp && !replace {
 		return 0, false
 	}
 	f.fb.keep().holders = append(f.fb.keep().holders, callee)
@@ -789,6 +861,16 @@ func (f *jitRegFeedback) literalAt(pc int) *jitLiteral {
 		return r.jitArrayLiteral(e, cl, rpc, int(w.C()))
 	case bytecode.RNewArrayE:
 		return r.jitArrayLiteral(e, cl, rpc, 0)
+	case bytecode.RNewArrayK:
+		// Its arrays sharing its constants where the site does still, the
+		// interpreter's; where it has given sharing up, of their own, the
+		// constants written to them (jitArrayLiteral), as the stack form's.
+		if l := r.jitRegSharedLiteral(e, cl, f.rc, rpc, w); l != nil {
+			return l
+		}
+		if rpc < len(f.rc.Aux) && int(f.rc.Aux[rpc]) < len(f.rc.Literals) {
+			return r.jitArrayLiteral(e, cl, rpc, len(f.rc.Literals[f.rc.Aux[rpc]]))
+		}
 	case bytecode.RNewRegExp:
 		// The register code's constant (regConsts), its own table where
 		// it has one.
@@ -802,6 +884,52 @@ func (f *jitRegFeedback) literalAt(pc int) *jitLiteral {
 		}
 	}
 	return nil
+}
+
+// jitRegSharedLiteral is the literal of new_array_k w at register pc rpc
+// of cl's register code rc, made in e: an array of the constants of
+// Literals[Aux[rpc]] whose arrays share them, natively from a pool of
+// arrays made as the interpreter makes them (rsNewArrayK, sharedShare),
+// over its site's storage, made here where the interpreter has not made
+// it -- as the stack form's new_array of constants (jitLiteralAt,
+// sharedLiteralSite). nil where the site has given sharing up, its arrays
+// then Go's.
+func (r *Runtime) jitRegSharedLiteral(e *jitEntry, cl *closure, rc *bytecode.RegCode, rpc int, w bytecode.RInstr) *jitLiteral {
+	if int(w.C()) >= len(cl.ic) || rpc >= len(rc.Aux) || int(rc.Aux[rpc]) >= len(rc.Literals) {
+		return nil
+	}
+	ic := &cl.ic[w.C()]
+	if ic.p1 == nil {
+		lit := rc.Literals[rc.Aux[rpc]]
+		vals := make([]Value, len(lit))
+		for i, x := range lit {
+			switch x.Kind {
+			case bytecode.LitConst:
+				if int(x.K) >= len(cl.consts) {
+					return nil
+				}
+				vals[i] = cl.consts[x.K]
+			case bytecode.LitTrue:
+				vals[i] = True
+			case bytecode.LitFalse:
+				vals[i] = False
+			case bytecode.LitNull:
+				vals[i] = Null
+			default:
+				vals[i] = Undefined
+			}
+		}
+		ic.p1 = sharedMade(r, vals)
+	}
+	if ic.idx < 0 || sharedCount(ic.p1.extAt().elems).num >= sharedGiveUp {
+		return nil
+	}
+	n := len(ic.p1.extAt().elems)
+	e.literals = append(e.literals, jitLiteral{pc: int32(rpc), pool: new(abi.ObjectPool), array: true, n: n, fn: cl.fn, shared: true})
+	l := &e.literals[len(e.literals)-1]
+	l.pool.Source = unsafe.Pointer(&jitPoolSource{array: true, n: n, sharedOf: cl, sharedReg: true, sharedPC: int32(w.C())})
+	r.jitFillLiteral(l)
+	return l
 }
 
 // Define is ssa.LiteralFeedback's: what the field the program's
