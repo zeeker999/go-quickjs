@@ -377,13 +377,13 @@ speculates nothing: it builds the site generically, or leaves it to Go.
 | what exits taught | `Generic`, `EntryGeneric`, `Resumed` |
 | steps, `in`, `typeof`, scopes' ends, typed arrays' kinds | `GenNext`, `MapNexts`, `KeyAtoms`, `HasCache`, `TypeofCells`, `WalkedCloseCell`, `TypedKind` |
 | elements' kinds learned at exits, captured typed arrays | `TypedRead`, `TypedBigRead`, `KeyedRead`, `KeyedWrite`, `StringRead`, `UpvalueTyped` |
+| `instanceof` of the constructor a global or a captured binding read just before holds, the searches, `parseInt`, BigInts' strings, by the built-in its site's cache holds | `InstanceOf`, `IndexOf`, `ParseInt`, `BigString` |
 
 | Not answered yet | Methods | So |
 |---|---|---|
 | generators a step resumes | `GenSteps` | the step a call of Go |
-| `indexOf`, `parseInt`, `instanceof` | `IndexOf`, `ParseInt`, `InstanceOf` | Go's |
 | closures and cells from pools | `Closure`, `CellsPool` | Go makes them on the register frame |
-| an inlined callee's exits, keeps, BigInts' strings, pure bodies | `InlineExit`, `KeepLimit`, `BigString`, `PureBody` | nothing speculated |
+| an inlined callee's exits, keeps, pure bodies | `InlineExit`, `KeepLimit`, `PureBody` | nothing speculated |
 
 **The feedback dispatcher.** The native handlers come in variants, each a
 dispatch table over the same handlers (`internal/vm/internal/nativegen`,

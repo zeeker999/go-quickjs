@@ -3386,7 +3386,13 @@ func (fb *jitFeedback) InstanceOf(pc int) (ssa.InstanceOfSite, bool) {
 	if !ok || !v.IsObject() {
 		return ssa.InstanceOfSite{}, false
 	}
-	ctor := v.Object()
+	return fb.instanceOfSite(v.Object())
+}
+
+// instanceOfSite is InstanceOf's site of an instanceof of the constructor
+// ctor, the value the code reads before it, as either form's code finds it.
+func (fb *jitFeedback) instanceOfSite(ctor *Object) (ssa.InstanceOfSite, bool) {
+	r := fb.r
 	fd := ctor.fn()
 	if fd == nil || fd.bound || proxyOf(ctor) != nil {
 		// A built-in is one too: sc_Vector is Array.
@@ -7429,25 +7435,7 @@ func (r *Runtime) jitChainValue(cl *closure, p *ir.Program, q, n int) (Value, bo
 	}
 	switch in.Op {
 	case bytecode.OpGetGlobal:
-		// The global object's data property of the name -- or the
-		// script's lexical binding that shadows it, in the realm's global
-		// scope -- looked up, not through the read's cache, which native
-		// code that reads it never fills.
-		h := cl.scope()
-		if h != nil && r.globalLex.valn != 0 && r.lexShadows(cl.names[in.A]) {
-			if !r.isGlobalScope(h) {
-				return Undefined, false
-			}
-			h = r.globalLex
-		}
-		if h == nil {
-			return Undefined, false
-		}
-		prop := h.getOwnVisible(cl.names[in.A])
-		if !prop.ok() || prop.flags()&propAccessor != 0 || prop.value().IsUninitialized() {
-			return Undefined, false
-		}
-		return prop.value(), true
+		return r.jitGlobalValue(cl, cl.names[in.A])
 	case bytecode.OpGetProp, bytecode.OpGetPropThis:
 		recv, ok := r.jitChainReceiver(cl, p, q, n)
 		if !ok {
@@ -7460,6 +7448,29 @@ func (r *Runtime) jitChainValue(cl *closure, p *ir.Program, q, n int) (Value, bo
 		return prop.value(), true
 	}
 	return Undefined, false
+}
+
+// jitGlobalValue is the value of the global name, as a read of it in cl's
+// code finds it now: the global object's data property of the name -- or
+// the script's lexical binding that shadows it, in the realm's global
+// scope -- looked up, not through the read's cache, which native code
+// that reads it never fills.
+func (r *Runtime) jitGlobalValue(cl *closure, name Atom) (Value, bool) {
+	h := cl.scope()
+	if h != nil && r.globalLex.valn != 0 && r.lexShadows(name) {
+		if !r.isGlobalScope(h) {
+			return Undefined, false
+		}
+		h = r.globalLex
+	}
+	if h == nil {
+		return Undefined, false
+	}
+	prop := h.getOwnVisible(name)
+	if !prop.ok() || prop.flags()&propAccessor != 0 || prop.value().IsUninitialized() {
+		return Undefined, false
+	}
+	return prop.value(), true
 }
 
 // jitChainReceiver is the object the property read at q of cl's code reads

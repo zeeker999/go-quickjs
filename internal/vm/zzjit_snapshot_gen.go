@@ -1540,6 +1540,47 @@ func (q *jitRegSnapshot) ForEach(pc int) (r0 ssa.ForEachSite, r1 bool) {
 	return r0, r1
 }
 
+func (q *jitRegSnapshot) InstanceOf(pc int) (r0 ssa.InstanceOfSite, r1 bool) {
+	a := q.get(snapInstanceOf, int64(pc))
+	if a == nil {
+		return
+	}
+	r0, _ = a[0].(ssa.InstanceOfSite)
+	r1, _ = a[1].(bool)
+	return r0, r1
+}
+
+func (q *jitRegSnapshot) IndexOf(pc int) (r0 uintptr, r1 int, r2 bool) {
+	a := q.get(snapIndexOf, int64(pc))
+	if a == nil {
+		return
+	}
+	r0, _ = a[0].(uintptr)
+	r1, _ = a[1].(int)
+	r2, _ = a[2].(bool)
+	return r0, r1, r2
+}
+
+func (q *jitRegSnapshot) ParseInt(pc int) (r0 uintptr, r1 bool) {
+	a := q.get(snapParseInt, int64(pc))
+	if a == nil {
+		return
+	}
+	r0, _ = a[0].(uintptr)
+	r1, _ = a[1].(bool)
+	return r0, r1
+}
+
+func (q *jitRegSnapshot) BigString(pc int) (r0 uintptr, r1 bool) {
+	a := q.get(snapBigString, int64(pc))
+	if a == nil {
+		return
+	}
+	r0, _ = a[0].(uintptr)
+	r1, _ = a[1].(bool)
+	return r0, r1
+}
+
 // askOnceReg asks fb the questions of no argument.
 func (s *jitSnapshot) askOnceReg(fb *jitRegFeedback) {
 	{
@@ -1917,6 +1958,42 @@ func jitRegSnapAskForEach(s *jitSnapshot, fb *jitRegFeedback, pc int) {
 	}
 }
 
+func jitRegSnapAskInstanceOf(s *jitSnapshot, fb *jitRegFeedback, pc int) {
+	before := s.begin(fb.fb)
+	r0, r1 := fb.InstanceOf(pc)
+	s.end(fb.fb, before, snapInstanceOf, int64(pc))
+	if jitSnapAnswered(r1) {
+		s.put(snapInstanceOf, int64(pc), r0, r1)
+	}
+}
+
+func jitRegSnapAskIndexOf(s *jitSnapshot, fb *jitRegFeedback, pc int) {
+	before := s.begin(fb.fb)
+	r0, r1, r2 := fb.IndexOf(pc)
+	s.end(fb.fb, before, snapIndexOf, int64(pc))
+	if jitSnapAnswered(r2) {
+		s.put(snapIndexOf, int64(pc), r0, r1, r2)
+	}
+}
+
+func jitRegSnapAskParseInt(s *jitSnapshot, fb *jitRegFeedback, pc int) {
+	before := s.begin(fb.fb)
+	r0, r1 := fb.ParseInt(pc)
+	s.end(fb.fb, before, snapParseInt, int64(pc))
+	if jitSnapAnswered(r1) {
+		s.put(snapParseInt, int64(pc), r0, r1)
+	}
+}
+
+func jitRegSnapAskBigString(s *jitSnapshot, fb *jitRegFeedback, pc int) {
+	before := s.begin(fb.fb)
+	r0, r1 := fb.BigString(pc)
+	s.end(fb.fb, before, snapBigString, int64(pc))
+	if jitSnapAnswered(r1) {
+		s.put(snapBigString, int64(pc), r0, r1)
+	}
+}
+
 // jitRegSnapAskers are the register askers by method, nil for one the
 // register feedback has not or of another argument.
 var jitRegSnapAskers [len(jitSnapNames)]func(s *jitSnapshot, fb *jitRegFeedback, pc int)
@@ -1968,7 +2045,11 @@ const jitRegSnapMethods uint64 = 0 |
 	1<<snapWalkedCloseCell |
 	1<<snapTypedKind |
 	1<<snapFrequency |
-	1<<snapForEach
+	1<<snapForEach |
+	1<<snapInstanceOf |
+	1<<snapIndexOf |
+	1<<snapParseInt |
+	1<<snapBigString
 
 // The register askers are set at init, as jitSnapAskers are.
 func init() {
@@ -2007,5 +2088,9 @@ func init() {
 		snapTypedKind:      jitRegSnapAskTypedKind,
 		snapFrequency:      jitRegSnapAskFrequency,
 		snapForEach:        jitRegSnapAskForEach,
+		snapInstanceOf:     jitRegSnapAskInstanceOf,
+		snapIndexOf:        jitRegSnapAskIndexOf,
+		snapParseInt:       jitRegSnapAskParseInt,
+		snapBigString:      jitRegSnapAskBigString,
 	}
 }
