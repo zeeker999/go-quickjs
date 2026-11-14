@@ -12446,11 +12446,16 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 			// the frames of the callees they call start past them.
 			r.stackTop, r.stackHigh, raised = need, max(r.stackHigh, need), need
 		}
+		// No register run's native code is the innermost meanwhile
+		// (jitRegRootOf).
+		regRunAt := s.regRunAt
+		s.regRunAt = 0
 		if resume != 0 {
 			err, resume = e.ssa.Resume(resume, s.ssaCtxs[idx+1]), 0
 		} else {
 			err = e.ssa.Run(pc, ctx)
 		}
+		s.regRunAt = regRunAt
 		if r.stackTop == raised {
 			// Back where it was raised, no callee of the code's still
 			// live: the frame's own top again. A callee that left is

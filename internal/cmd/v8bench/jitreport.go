@@ -50,6 +50,8 @@ var jitReport struct {
 	funcs               map[string]vm.JITFunction
 	hostOps             map[string]uint64
 	goCallOps           map[string]uint64
+	nested, levels      uint64
+	levelsMade, putOff  uint64
 }
 
 // reportStart has the runtime's JIT note what it skips, for the report,
@@ -342,6 +344,14 @@ func (r runtimeOf) Report(name string) {
 		}
 		fmt.Println()
 	}
+	// Its calls of Go from native callees' code, and the levels of native
+	// calls Go found the code of: each such call's calling level, and the
+	// levels it unwinds.
+	if n := rs.NestedGoCalls - jitReport.nested; n != 0 {
+		fmt.Printf("  jit: register calls of Go from native callees %d, levels found %d, put off %d, made for a read %d times\n",
+			n, rs.Levels-jitReport.levels, rs.LevelsPutOff-jitReport.putOff, rs.LevelsMade-jitReport.levelsMade)
+	}
+	jitReport.nested, jitReport.levels, jitReport.levelsMade, jitReport.putOff = rs.NestedGoCalls, rs.Levels, rs.LevelsMade, rs.LevelsPutOff
 	var used, other []vm.JITFunction
 	now := map[string]vm.JITFunction{}
 	for _, f := range v.JITReport() {

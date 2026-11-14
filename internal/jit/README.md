@@ -1733,14 +1733,26 @@ from the context (`Closure`, `Base`) and the level's code, which it finds in
 the cache by the function's key, kept by its template (`jitRegKeyOf`):
 
 - a call of Go a native callee makes (`jitRegGoCallNested`) is made on its
-  level's frame, each level below it given its own for the call, as the
-  interpreter's frames are during a call -- the levels and the frames on
-  stacks of the state's (`regNestLevels`), allocated by none; a derived
-  construction's level, and a super()'s parent's, as `runFD` makes a
-  construction's: its new.target, and for a derived constructor its
-  function, instance and this binding from its context (`jitDerivedFrame`);
-  a write a call of Go makes with no frame (`jitGoCallPlain`) by the
-  register instruction at the register pc (`jitRegPlainSet`);
+  level's frame, the one level Go finds the code of for the call, whatever
+  the depth, as the stack form's `jitGoCallNested` makes one: the run it
+  is of is the one whose native code runs now (`regRunAt`, set around
+  `SSACode.Run` and `Resume`), not found by a walk down the contexts; the
+  levels between the run's and the calling one have no frames until one
+  of them is read (`jitLazyLevels`) -- a stack trace, a function's caller,
+  through `frameAt` -- room left for them below the calling level's frame,
+  so that the depth of calls is what it would be, and are then made in the
+  realm the call was made in, as below, and pinned until the call returns
+  (`jitRegMakeLazy`, `jitRegLazyDone`, on the state's `regLazyLevels`).
+  Levels among which a generator's resumption may be, each with its next's
+  frame below its own, are all given frames for the call (`jitRegGensIn`,
+  asked only once a link has had a generator entry, `regGens`): the
+  levels and frames on stacks of the state's (`regNestLevels`), allocated
+  by none. A derived construction's level, and a super()'s parent's, as
+  `runFD` makes a construction's: its new.target, and for a derived
+  constructor its function, instance and this binding from its context
+  (`jitDerivedFrame`); a write a call of Go makes with no frame
+  (`jitGoCallPlain`) by the register instruction at the register pc
+  (`jitRegPlainSet`);
 - a callee that leaves native code -- an exit, a call of Go that threw or
   found its code invalid -- has every native level finished by Go
   (`jitRegUnwind`): the innermost from where it left, as a run of a frame's
@@ -1769,16 +1781,21 @@ A call of Go from the last context, and an unwinding from it, add contexts
 (`jitGrowContexts`), as the stack form's do: a recursion of native calls is
 native past the contexts the runtime started with.
 
-While Go runs beside them, every level's code is pinned (`jitRegEntry`'s
-`levels`): the cache neither drops it nor compiles the function again until
-the level is done, so that the code a level runs is its function's in the
-cache for as long as it runs; Go finds it by the level's closure
-(`closureCode`'s `jitReg`) while the cache holds it (`jitRegEntry`'s
-`cached`), the cache's key otherwise or where that is not code of this
-realm (`jitRegLevelAt`). The levels and frames of a call of Go are on
-stacks of the JIT's state (`regNestLevels`), each call's past those of the
-calls under way below it. Both backends make such
-a call natively, the same way (`mir`'s `call`, `windowSetup`).
+While Go runs beside them, every level's code is held: the cache neither
+drops it nor compiles the function again until the level is done, so that
+the code a level runs is its function's in the cache for as long as it
+runs. A level Go found the code of pins it (`jitRegEntry`'s `levels`); one
+a call of Go put off holds it by its context, whose callee returns into it
+(`ReturnTo`, `SSACode.Contains`), which the cache counts only when it asks
+-- before it compiles the function again or lets the code go
+(`regLevelsOf`) -- so that a call of Go pins nothing for the levels below
+it. Go finds a level's code by its closure (`closureCode`'s `jitReg`)
+while the cache holds it (`jitRegEntry`'s `cached`), the cache's key
+otherwise or where that is not code of this realm (`jitRegLevelAt`). The
+levels and frames of a call of Go are on stacks of the JIT's state
+(`regNestLevels`, `regLazyLevels`), each call's past those of the calls
+under way below it. Both backends make such a call natively, the same way
+(`mir`'s `call`, `windowSetup`).
 
 A callee that leaves native code on more than one in `jitUnwindShare` of
 its native callers' calls is compiled again while it learns, up to

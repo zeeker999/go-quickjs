@@ -50,7 +50,7 @@ func (s *jitState) regLinkOf(cl *closure, c *regCode) *jitLink {
 	l := &jitLink{key: key, params: 2 + uint64(c.params), locals: uint64(c.numRegs), frame: uint64(c.numRegs),
 		flags: s.rt.jitRegLinkFlags(cl, c)}
 	if e := s.regCache[key]; e != nil && e.code != nil && !e.invalid && (e.life == nil || !e.life.notNative) {
-		l.regSet(e)
+		l.regSet(s, e)
 	}
 	s.regLinks[key] = l
 	s.regHint(cl, l)
@@ -127,10 +127,15 @@ func (s *jitState) regUnhint(l *jitLink) {
 
 // regSet has native callers call e's code through l: its call entry, and
 // the room its frame takes past the VM's stack's top, which a call checks
-// (abi.Encoding's LinkFrame) -- never less than any code it had took.
-func (l *jitLink) regSet(e *jitRegEntry) {
+// (abi.Encoding's LinkFrame) -- never less than any code it had took; a
+// generator's steps its generator entry, from which on s's native callees
+// may be generators' resumptions (jitState's regGens).
+func (l *jitLink) regSet(s *jitState, e *jitRegEntry) {
 	l.setCode(e.code)
 	l.frame = max(l.frame, uint64(e.p.Regs+e.scratch+e.frame))
+	if l.gen != 0 {
+		s.regGens = true
+	}
 }
 
 // regLinkUpdate sets the link of the function whose key is key, if it has
@@ -144,7 +149,7 @@ func (s *jitState) regLinkUpdate(key jitKey, e *jitRegEntry) {
 		l.clearCode()
 		return
 	}
-	l.regSet(e)
+	l.regSet(s, e)
 }
 
 // regCallSites are the native calls jitRegFeedback's NativeCalls answers
@@ -849,6 +854,7 @@ func (r *Runtime) jitRegLevelAt(i int) (jitRegLevel, bool) {
 		return jitRegLevel{}, false
 	}
 	e.levels++
+	s.regLevelsFound++
 	l := jitRegLevel{ctx: i, cl: cl, c: cl.reg, e: e, wb: int(c.Base), back: c.ReturnTo, base: c.Base}
 	if cl.fn.Generator {
 		r.jitRegGenLevel(&l, c)
@@ -948,33 +954,115 @@ func (r *Runtime) jitRegPopLevel(f *frame, wb int, gen bool) {
 }
 
 // jitRegRootOf is the context of the run of register code whose native
-// calls run in the contexts up to idx, or -1 where there is none.
+// calls run in the contexts up to idx, or -1 where there is none: the run
+// whose native code runs now (jitState's regRunAt), as calls of Go come
+// only from it, its native callees' levels between -- asked at each call
+// of Go from a native callee's code, it walks none of them.
 func (r *Runtime) jitRegRootOf(idx int) int {
 	s := r.jit
-	root := idx - 1
-	for root >= 0 && s.ssaCtxs[root].Live == abi.LiveCall {
-		root--
-	}
-	if root < 0 || s.ssaCtxs[root].Live != 0 || root >= len(s.regRuns) || s.regRuns[root].f == nil {
+	root := s.regRunAt - 1
+	if root < 0 || root >= idx || idx >= len(s.ssaCtxs) || s.ssaCtxs[root].Live != 0 || s.ssaCtxs[root+1].Live != abi.LiveCall || root >= len(s.regRuns) || s.regRuns[root].f == nil {
 		return -1
 	}
 	return root
 }
 
 // jitRegGoCallNested is jitRegGoCall for a native callee's code, in
-// context idx, of the run in context root: each level from the run's on
-// is given the VM's frame while the call runs -- its function, its window,
-// past the call it makes -- as the interpreter's frames are during a
-// call, for a stack trace, and the depth of calls, to show; the call is
-// made on the calling level's frame; and every level's code is pinned
-// meanwhile. A call that threw, or after which the level's code is
-// invalid, Go finishes at the exit native code then takes (regPending),
-// once the callee levels have left native code (jitRegUnwind).
+// context idx, of the run in context root, as the stack form's
+// jitGoCallNested makes one: the calling level is given the VM's frame
+// while the call runs -- its function, its window, past the call it makes
+// -- and the call is made on it, its code pinned meanwhile; the levels
+// between the run's and it have no frames of the VM's until one of them
+// is read (jitLazyLevels): a stack trace, a function's caller. Room is left
+// for them below the calling level's, so that the depth of calls is what
+// it would be, and their code is held by the contexts they run in, which
+// the cache asks before it compiles any again or closes it
+// (jitRegLevelsOf). Making and pinning every level's frame at each call
+// had cost a call of Go from deep in a recursion of native calls work for
+// each level: EarleyBoyer's, two dozen levels deep, about a fifth of its
+// time. Levels a generator's resumption may be among, which have two
+// frames each, are given theirs now (jitRegGoCallLevels). A call that
+// threw, or after which the level's code is invalid, Go finishes at the
+// exit native code then takes (regPending), once the callee levels have
+// left native code (jitRegUnwind).
 func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 	s := r.jit
 	if idx >= len(s.ssaCtxs) || s.ssaCtxs[idx] != ctx {
 		return false
 	}
+	s.regNestedCalls++
+	if s.regGens && r.jitRegGensIn(root, idx) {
+		return r.jitRegGoCallLevels(ctx, idx, root)
+	}
+	run := s.regRuns[root]
+	rpc, _ := jit.CallPC(s.ssaCtxs[root])
+	// Its caller's call, which says whether it is a construction's.
+	caller, at := run.c, int(rpc)
+	if idx-1 > root {
+		cc := s.ssaCtxs[idx-1]
+		cl := (*closure)(cc.Closure)
+		if cl == nil || cl.reg == nil {
+			return false
+		}
+		p, _ := jit.CallPC(cc)
+		caller, at = cl.reg, int(p)
+	}
+	l, found := r.jitRegLevelAt(idx)
+	if !found {
+		return false
+	}
+	run.f.pc = regSrc(run.c, int(rpc)) + 1
+	r.jitRegConstructs(&l, caller, at)
+	depthBefore := r.frameDepth
+	lazy := idx - root - 1
+	if lazy != 0 {
+		r.jitFrameBlocks(depthBefore + lazy)
+		r.frameDepth = depthBefore + lazy
+	}
+	f := r.jitRegPushLevel(&l, 0)
+	if lazy != 0 {
+		s.lazy = append(s.lazy, jitLazyLevels{root: root, idx: idx, depth: depthBefore, runF: run.f, reg: true, realm: r.Realm})
+		s.lazyTop = depthBefore + lazy
+		s.lazyCalls++
+		s.regLazyLevelsPut += uint64(lazy)
+	}
+	ctxTop := s.ctxTop
+	s.ctxTop = max(ctxTop, idx+1)
+	top := r.stackTop
+	ok := r.jitRegGoCallOn(ctx, idx, jitRegRun{f: f, c: l.c, e: l.e, wb: l.wb, own: -1, root: root})
+	s.ctxTop = ctxTop
+	r.jitRegPopLevel(f, l.wb, false)
+	if lazy != 0 {
+		r.jitRegLazyDone()
+	}
+	r.frameDepth = depthBefore
+	r.stackTop = top
+	l.e.levels--
+	s.regClose(l.e)
+	return ok
+}
+
+// jitRegGensIn reports whether a level of the native calls in the contexts
+// from root+1 to idx is a generator's resumption (jitRegGenLevel), which
+// has a frame of its next's below its own.
+func (r *Runtime) jitRegGensIn(root, idx int) bool {
+	s := r.jit
+	for i := root + 1; i <= idx; i++ {
+		c := s.ssaCtxs[i]
+		if g := jitGenLevel(c, (*closure)(c.Closure), abi.ExitHost); g != nil && g.reg {
+			return true
+		}
+	}
+	return false
+}
+
+// jitRegGoCallLevels is jitRegGoCallNested where a generator's resumption
+// is among the levels: each level from the run's on is given the VM's
+// frame while the call runs, a generator's its next's below it, as the
+// interpreter's frames are during a call, and every level's code is pinned
+// meanwhile.
+func (r *Runtime) jitRegGoCallLevels(ctx *abi.Context, idx, root int) bool {
+	s := r.jit
 	// Its levels and their frames on the state's stacks of them, past an
 	// enclosing call's: a call of Go deep in a recursion of native calls,
 	// past eight levels, had allocated both.
@@ -1016,13 +1104,7 @@ func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 		s.ctxTop = max(ctxTop, idx+1)
 		last := &levels[len(levels)-1]
 		top := r.stackTop
-		own := 0
-		for k := range levels {
-			if levels[k].e == last.e {
-				own++
-			}
-		}
-		ok = r.jitRegGoCallOn(ctx, idx, jitRegRun{f: frames[len(frames)-1], c: last.c, e: last.e, wb: last.wb, own: own})
+		ok = r.jitRegGoCallOn(ctx, idx, jitRegRun{f: frames[len(frames)-1], c: last.c, e: last.e, wb: last.wb, own: -1, root: root})
 		s.ctxTop = ctxTop
 		for k := len(frames) - 1; k >= 0; k-- {
 			r.jitRegPopLevel(frames[k], levels[k].wb, levels[k].gen != nil)
@@ -1037,6 +1119,99 @@ func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 	clear(s.regNestFrames[fbase:])
 	s.regNestLevels, s.regNestFrames = s.regNestLevels[:lbase], s.regNestFrames[:fbase]
 	return ok
+}
+
+// jitRegMakeLazy makes the frames of the levels lz, a call of Go from a
+// native callee's code, put off (jitLazyLevels), at the depth it left
+// room at, as jitRegGoCallLevels would have made them: each level's code
+// found in the realm the call was made in and pinned, until the call is
+// done (jitRegLazyDone). A level whose code Go does not find -- which the
+// cache keeps while the contexts hold it (jitRegLevelsOf) -- is the room
+// of a frame of no function's, which a stack trace passes over.
+func (r *Runtime) jitRegMakeLazy(lz *jitLazyLevels) {
+	s := r.jit
+	ctxs := s.ssaCtxs
+	lz.from = len(s.regLazyLevels)
+	s.regLazyMade++
+	realm := r.Realm
+	r.Realm = lz.realm
+	run := s.regRuns[lz.root]
+	p, _ := jit.CallPC(ctxs[lz.root])
+	caller, at := run.c, int(p)
+	for i := lz.root + 1; i < lz.idx; i++ {
+		l, found := r.jitRegLevelAt(i)
+		p, _ := jit.CallPC(ctxs[i])
+		if !found {
+			f := r.pushFrame()
+			*f = frame{openUpvalues: f.openUpvalues[:0], handlers: f.handlers[:0]}
+			caller = nil
+			continue
+		}
+		if caller != nil {
+			r.jitRegConstructs(&l, caller, at)
+		}
+		f := r.jitRegPushLevel(&l, regSrc(l.c, int(p))+1)
+		s.regLazyLevels = append(s.regLazyLevels, l)
+		s.regLazyFrames = append(s.regLazyFrames, f)
+		caller, at = l.c, int(p)
+	}
+	r.Realm = realm
+}
+
+// jitRegLazyDone ends the innermost call of Go's put-off levels
+// (jitLazyDone), as the call returns: the frames made of them, if any
+// were, ended, and their code let go.
+func (r *Runtime) jitRegLazyDone() {
+	s := r.jit
+	from := len(s.regLazyLevels)
+	if lz := &s.lazy[len(s.lazy)-1]; lz.made {
+		from = lz.from
+	}
+	r.jitLazyDone()
+	for k := from; k < len(s.regLazyLevels); k++ {
+		f := s.regLazyFrames[k]
+		f.regKind = 0
+		if len(f.openUpvalues) != 0 {
+			regCloseUpvalues(f)
+		}
+		e := s.regLazyLevels[k].e
+		e.levels--
+		s.regClose(e)
+	}
+	clear(s.regLazyLevels[from:])
+	clear(s.regLazyFrames[from:])
+	s.regLazyLevels, s.regLazyFrames = s.regLazyLevels[:from], s.regLazyFrames[:from]
+}
+
+// regLevelsOf is how many native calls under way run e's code that Go
+// runs beside: those whose levels Go found it for (jitRegEntry's levels),
+// and those below calls of Go that put their levels off (jitLazyLevels),
+// whose contexts say what they run -- where a level's callee returns to --
+// counted only when asked: the cache asks before it compiles e's function
+// again or lets go of e's code.
+func (s *jitState) regLevelsOf(e *jitRegEntry) int {
+	n := e.levels
+	if len(s.lazy) == 0 || e.code == nil {
+		return n
+	}
+	for j := range s.lazy {
+		if lz := &s.lazy[j]; lz.reg && !lz.made {
+			n += s.regLevelsIn(e, lz.root, lz.idx)
+		}
+	}
+	return n
+}
+
+// regLevelsIn counts the levels of the native calls in the contexts from
+// root+1 to idx-1 that run e's code: those whose callee returns to it.
+func (s *jitState) regLevelsIn(e *jitRegEntry, root, idx int) int {
+	n := 0
+	for i := root + 1; i < idx; i++ {
+		if e.code.Contains(s.ssaCtxs[i+1].ReturnTo) {
+			n++
+		}
+	}
+	return n
 }
 
 // jitRegUnwound counts a native call of e's code that left native code
@@ -1084,7 +1259,7 @@ func (r *Runtime) jitRegRetryNative(e *jitRegEntry) {
 	if l := r.jit.regLinks[e.key]; l != nil {
 		l.in = 0
 		if r.jit.regCache[e.key] == e && e.code != nil && !e.invalid {
-			l.regSet(e)
+			l.regSet(r.jit, e)
 		}
 	}
 }

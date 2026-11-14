@@ -189,7 +189,7 @@ func (r *Runtime) jitRegForAs(cl *closure, c *regCode, callee bool) *jitRegEntry
 		if !e.invalid && !e.hostOnly {
 			return e
 		}
-		if e.levels != 0 {
+		if s.regLevelsOf(e) != 0 {
 			// Run by native calls under way, which find their code in the
 			// cache (jitRegLevelAt): compiled again once they are done.
 			return nil
@@ -479,7 +479,7 @@ func (s *jitState) regUses(e *jitRegEntry) uint64 {
 // of it, a native call of it, or a compile of its function in the
 // background, which replaces it.
 func (s *jitState) regInUse(e *jitRegEntry) bool {
-	return e.runs != 0 || e.levels != 0 || s.regPendingJobs[e.key] != nil
+	return e.runs != 0 || s.regPendingJobs[e.key] != nil || s.regLevelsOf(e) != 0
 }
 
 // regAge notes, at epoch now, which register code was used since the last
@@ -597,7 +597,7 @@ func (s *jitState) dropReg(key jitKey, e *jitRegEntry) {
 // regClose closes the code of e, which the cache let go of (dropped), once
 // no run and no native call is in it.
 func (s *jitState) regClose(e *jitRegEntry) {
-	if e.dropped && e.code != nil && e.runs == 0 && e.levels == 0 {
+	if e.dropped && e.code != nil && e.runs == 0 && s.regLevelsOf(e) == 0 {
 		_ = s.closeSSA(e.code, e.keep)
 		e.code = nil
 	}
@@ -1161,6 +1161,10 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 	}
 	var err error
 	edges := r.backEdges - s.pollCredit
+	// The run calls of Go from its native callees' code are of
+	// (jitRegRootOf), until it leaves.
+	runAt := s.regRunAt
+	s.regRunAt = idx + 1
 	if resume != 0 {
 		err = e.code.Resume(resume, s.ssaCtxs[idx+1])
 	} else {
@@ -1196,6 +1200,7 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 		s.regPending = jitGoPending{set: true, pc: int(rpc), ctx: idx, v: v, err: uerr}
 		break
 	}
+	s.regRunAt = runAt
 	if r.stackTop == raised {
 		r.stackTop = saved
 	}
@@ -1404,10 +1409,12 @@ type jitRegRun struct {
 	osr   bool
 	edges int
 	rpc   int
-	// own counts, for a call of Go from a native callee's code
-	// (jitRegGoCallNested), the levels of the call's own that run e's
-	// code, which leaving unwinds (jitRegCompileDueNow).
-	own int
+	// own counts the levels of the call's own that run e's code, which
+	// leaving unwinds (jitRegCompileDueNow): none for the run's own, and,
+	// -1, counted when asked for a call of Go from a native callee's code
+	// (jitRegGoCallNested), whose run is in context root.
+	own  int
+	root int
 }
 
 // jitRegGoCall is a call of Go (ssa.GoCall) native code made from register
@@ -1669,7 +1676,7 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 			r.jitRegGenCallSeen(f, run.e, rpc, this, callee, argc)
 		}
 	}
-	if err != nil || r.stopped != nil || run.e.invalid || r.jitRegCompileDueNow(&run) {
+	if err != nil || r.stopped != nil || run.e.invalid || r.jitRegCompileDueNow(&run, idx) {
 		s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: v, err: err}
 		return false
 	}
@@ -1840,7 +1847,7 @@ func (r *Runtime) jitRegSuperMade(ctx *abi.Context, idx int, run jitRegRun, rpc 
 		r.jitShareContexts(idx, f)
 	}
 	v := f.this
-	if err != nil || r.stopped != nil || run.e.invalid || r.jitRegCompileDueNow(&run) {
+	if err != nil || r.stopped != nil || run.e.invalid || r.jitRegCompileDueNow(&run, idx) {
 		s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: v, err: err}
 		return false
 	}
@@ -1984,6 +1991,13 @@ type RegNativeStats struct {
 	// WholeLeft counts the instructions Go ran whole for native code,
 	// called from it, that it finished at an exit (jitRegWhole).
 	WholeLeft uint64
+	// NestedGoCalls counts the calls of Go from native callees' code
+	// (jitRegGoCallNested); Levels the levels of native calls whose code
+	// Go found and pinned (jitRegLevelAt) -- a call's calling level, and
+	// every level it unwinds -- and LevelsMade the times Go made the
+	// frames of levels a call of Go had put off, one of them read
+	// (jitRegMakeLazy), of LevelsPutOff the calls put off in all.
+	NestedGoCalls, Levels, LevelsMade, LevelsPutOff uint64
 }
 
 // RegNativeStats reports r's counts (RegNativeStats); zero before any.
@@ -1995,7 +2009,7 @@ func (r *Runtime) RegNativeStats() RegNativeStats {
 	return RegNativeStats{Entries: s.ssaEntries, Hosts: s.hosts, Guards: s.guards, Polls: s.budgets,
 		Interpreted: s.interpreted, Records: s.ssaRecords, Materialized: s.materialized, GoCalls: s.goCalls,
 		Unwound: s.unwound, Resumed: s.resumed, HostOps: maps.Clone(s.regHostOps), WholeLeft: s.wholeLeft,
-		GoCallOps: s.regGoOpsByName()}
+		GoCallOps: s.regGoOpsByName(), NestedGoCalls: s.regNestedCalls, Levels: s.regLevelsFound, LevelsMade: s.regLazyMade, LevelsPutOff: s.regLazyLevelsPut}
 }
 
 // jitRegGoKey is what a call of Go register code made made
