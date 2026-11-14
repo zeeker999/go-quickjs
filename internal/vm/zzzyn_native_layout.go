@@ -105,6 +105,7 @@ func NativeLayout() (offsets, sizes map[string]uintptr, consts map[string]uint64
 
 		"genSuspendedYield": uint64(genSuspendedYield),
 		"genExecuting":      uint64(genExecuting),
+		"genCompleted":      uint64(genCompleted),
 		"regFrameGenStep":   uint64(regFrameGenStep),
 
 		"objExtensible":          uint64(objExtensible),

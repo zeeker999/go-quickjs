@@ -1011,21 +1011,25 @@ the allocation of 4 rather than 8 (the tree's keeps its 2 locals), and
   past `end_params`. A call site of a generator function or an async
   function makes its object without the generic call's search
   (`regGenCall`), an async function's first step at once.
-  Natively, the step and the yield are the code's own (nativegen's
-  `genStep` and `genYield`): iter_next over a generator of this realm
-  suspended at a yield, with no captures kept, no arguments and nothing
-  rare, pushes next's frame record and the generator's as `regGenStep`
-  and `regGenRun` write them, copies its window to the stack's top, the
+  Natively, the step, the yield and the return are the code's own
+  (nativegen's `genStep`, `genYield` and `genReturn`): iter_next over a
+  generator of this realm suspended at a yield or at `end_params` (its
+  first step), with no captures kept, no arguments and nothing rare,
+  pushes next's frame record and the generator's as `regGenStep` and
+  `regGenRun` write them, copies its window to the stack's top, the
   caller's state on the native frame stack with the generator
-  (`nativeRec.gen`), and goes on at the yield's continuation, the frame
+  (`nativeRec.gen`), and goes on where the resumption goes on, the frame
   of kind `regFrameGenStep`; the yield copies the window back, pops both
-  frames and goes on past iter_next with the value. Anything else is
-  Go's: a first step, a return, a throw, a yield with captures open on
-  the window, `yield*`; a frame of that kind Go ends, `nativeGenEnd`
-  ends as `regGenRun`, `regGenNext` and `regGenStep` end a step. The
-  two exits a step took (iter_next, then the yield, each in a code
-  entry of its own) and Go's bookkeeping were the step's cost:
-  `generator_for_of` went from 42.7 to 28.8 ns.
+  frames and goes on past iter_next with the value; a return pops them,
+  the generator done, and leaves the loop, the cursor done. Anything
+  else is Go's: a throw, a yield with captures open on the window or
+  inside a with, a return with captures open, `yield*`; a frame of that
+  kind Go ends, `nativeGenEnd` ends as `regGenRun`, `regGenNext` and
+  `regGenStep` end a step. The two exits a step took (iter_next, then
+  the yield, each in a code entry of its own) and Go's bookkeeping were
+  the step's cost: `generator_for_of` went from 42.7 to 27.6 ns, and
+  `generator_create`, a short generator's first and last steps, from
+  213 to 151.
 - **An await's job continues in place.** An async function its await's
   job resumes from the job queue (`generator.awaitJob`, a frame of kind
   `regFrameAwaitJob`) goes on in place at an await of a value that is not

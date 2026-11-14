@@ -18,6 +18,10 @@ func armEmit(v *variant) (*block, error) {
 	g := &armGen{a: &Asm{}, v: v}
 	a := g.a
 	g.exit, g.exitRet = a.NewLabel(), a.NewLabel()
+	g.genRet = g.exit
+	if v.has(bytecode.RYield) {
+		g.genRet = a.NewLabel()
+	}
 	labels := map[bytecode.ROp]Label{}
 	var order []bytecode.ROp
 	h := func(op bytecode.ROp, body func()) {
@@ -1011,6 +1015,8 @@ func armEmit(v *variant) (*block, error) {
 		g.genYield()
 		a.Bind(genStep)
 		g.genStep()
+		a.Bind(g.genRet)
+		g.genReturn()
 	})
 
 	for n, l := range g.exits {

@@ -544,6 +544,10 @@ func TestRegNativeGenStep(t *testing.T) {
 		function* stepped() { for (var i = 0; i < 4; i++) yield i }
 		var g2 = stepped(); g2.next = function () { return { done: this.n > 2, value: this.n++ } }; g2.n = 0
 		out.push(sum(g2), sum(stepped()))
+		function* inWith(o) { yield 0; with (o) { yield x; x += 1; yield x } yield typeof x }
+		out.push([...inWith({ x: 5 })].join())
+		function* firstWith(o) { with (o) { yield x; yield y } }
+		out.push([...firstWith({ x: 1, y: 2 })].join())
 		function* rets() { var r = yield 1; yield r }
 		out.push([...rets()].map(String).join())
 		out.join("\n")`, `

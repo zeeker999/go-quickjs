@@ -116,7 +116,7 @@ func (g *nativeGen) genStep() {
 	a.Jcc(CondE, g.exit)
 	a.LoadU8(RCX, R8, offGState)
 	a.OpImm(Cmp, RCX, genSuspendedYield, false)
-	a.Jcc(CondNE, g.exit)
+	a.Jcc(CondA, g.exit)
 	a.LoadU8(RCX, R8, offGAwaitJob)
 	a.Op(Test, RCX, RCX, false)
 	a.Jcc(CondNE, g.exit)
@@ -148,13 +148,17 @@ func (g *nativeGen) genStep() {
 	a.Jcc(CondNE, g.exit)
 	a.Store(RDI, scr(sRC), RCX)
 	// Its pc: past a yield, at the jump past the yield's return path,
-	// which a resumption by next takes.
+	// which a resumption by next takes; or past end_params, its body's
+	// first step, which sends nothing (regGenResume).
+	first, pcOK := a.NewLabel(), a.NewLabel()
 	a.LoadU32(RDX, R8, offGPC)
 	a.Op(Test, RDX, RDX, false)
 	a.Jcc(CondE, g.exit)
 	a.Load(RSI, RCX, offRCCode)
 	a.LoadIdx(R9, RSI, RDX, 8, -8)
 	a.MovZX8(R8, R9)
+	a.OpImm(Cmp, R8, int32(bytecode.REndParams), false)
+	a.Jcc(CondE, first)
 	a.OpImm(Cmp, R8, int32(bytecode.RYield), false)
 	a.Jcc(CondNE, g.exit)
 	// The yield's register, less genFrom, in vals.
@@ -172,6 +176,13 @@ func (g *nativeGen) genStep() {
 	a.Op(Add, R9, RDX, true)
 	a.OpImm(Add, R9, 1, true)
 	a.Store(RDI, scr(sKind), R9)
+	a.Jmp(pcOK)
+	a.Bind(first)
+	a.Store(RDI, scr(sKind), RDX)
+	a.StoreImm(RDI, scr(sKa), -1)
+	a.LoadS32(R8, RCX, offRCGenFrom)
+	a.Store(RDI, scr(sEnt), R8)
+	a.Bind(pcOK)
 	// The window at the stack's top, with room.
 	a.Load(R9, RDI, ncRT)
 	a.Load(RDX, R9, offRtStackTop)
@@ -224,10 +235,13 @@ func (g *nativeGen) genStep() {
 	a.Store(R9, offRtStackHigh, RCX)
 	a.Bind(top)
 	// The generator executing, undefined sent to its yield's register.
+	sent := a.NewLabel()
 	a.Load(R8, RDI, scr(sE))
 	a.MovImm(RCX, uint64(genExecuting))
 	a.Store8(R8, offGState, RCX)
 	a.Load(RCX, RDI, scr(sKa))
+	a.Op(Test, RCX, RCX, true)
+	a.Jcc(CondS, sent)
 	a.ShiftImm(Shl, RCX, 4, true)
 	a.AddMem(RCX, R8, offGVals)
 	a.Load(RDX, RDI, ncUndef)
@@ -235,6 +249,7 @@ func (g *nativeGen) genStep() {
 	a.Lea(RAX, RCX, 8)
 	a.Op(Xor, RCX, RCX, true)
 	g.ptrTo()
+	a.Bind(sent)
 	// next's frame record, as regGenStep writes it: no closure, next's
 	// name, the cursor's iterator its this, undefined new.target, next
 	// its callee, no arguments, no handlers or captures.
@@ -398,7 +413,7 @@ func (g *nativeGen) genStep() {
 // suspended as regGenRun suspends it -- its pc past the yield, its window
 // copied back to vals, next's frame and its own popped -- and the caller
 // on past its iter_next with the value. Any other frame's yield, and one
-// with captures open on its registers, is Go's.
+// with captures open on its registers or inside a with, is Go's.
 func (g *nativeGen) genYield() {
 	a := g.a
 	a.CmpMemImm8(RDI, ncDepth, 0)
@@ -408,6 +423,9 @@ func (g *nativeGen) genYield() {
 	a.OpImm(Cmp, RCX, regFrameGenStep, false)
 	a.Jcc(CondNE, g.exit)
 	a.CmpMemImm8(RSI, offFOpenUp, 0)
+	a.Jcc(CondNE, g.exit)
+	// The with objects it is inside, which the generator keeps (saveWith).
+	a.CmpMemImm8(RSI, offFWith+8, 0)
 	a.Jcc(CondNE, g.exit)
 	// The value.
 	g.decB(R8)
@@ -431,6 +449,8 @@ func (g *nativeGen) genYield() {
 	a.Store32(RDX, offGPC, RCX)
 	a.MovImm(RCX, uint64(genSuspendedYield))
 	a.Store8(RDX, offGState, RCX)
+	a.MovImm(RCX, 1)
+	a.Store8(RDX, offGStarted, RCX)
 	a.Op(Xor, RCX, RCX, false)
 	a.Store8(RDX, offGDeleg, RCX)
 	// The window from genFrom back to vals.
@@ -486,5 +506,58 @@ func (g *nativeGen) genYield() {
 	a.Lea(RAX, RAX, 8)
 	a.Load(RCX, RDI, scr(sV1))
 	g.ptrTo()
+	g.dispatch()
+}
+
+// genReturn is ret and ret_undef in a generator's frame genStep entered:
+// the generator done, as regGenRun and regGenNext end it, next's frame
+// and its own popped, and the caller's loop left as regGenStep and
+// regIterNext leave it -- the cursor done, iter_next's jump taken -- the
+// value dropped, as a for-of drops it. A frame with captures open on its
+// registers is Go's (nativeGenEnd).
+func (g *nativeGen) genReturn() {
+	a := g.a
+	a.Load(RSI, RDI, ncNF)
+	a.CmpMemImm8(RSI, offFOpenUp, 0)
+	a.Jcc(CondNE, g.exit)
+	a.Op(Xor, RCX, RCX, false)
+	a.Store8(RSI, offFRegKind, RCX)
+	a.Load(R8, RDI, ncDepth)
+	a.OpImm(Sub, R8, 1, true)
+	a.Store(RDI, ncDepth, R8)
+	a.StoreImm(RDI, ncTopOK, 0)
+	low := a.NewLabel()
+	a.CmpMem(R8, RDI, ncFilled, true)
+	a.Jcc(CondGE, low)
+	a.Store(RDI, ncFilled, R8)
+	a.Bind(low)
+	a.MovImm(RCX, uint64(recSize))
+	a.Imul(R8, RCX)
+	a.AddMem(R8, RDI, ncFrames)
+	a.MovRR(RSI, R8)
+	a.Load(RDX, RSI, recGen)
+	a.MovImm(RCX, uint64(genCompleted))
+	a.Store8(RDX, offGState, RCX)
+	a.Load(R9, RDI, ncRT)
+	a.Load(RCX, R9, offRtFrameDepth)
+	a.OpImm(Sub, RCX, 2, true)
+	a.Store(R9, offRtFrameDepth, RCX)
+	a.Load(RCX, RSI, recSaved)
+	a.Store(R9, offRtStackTop, RCX)
+	for _, f := range nativeTopFields {
+		a.Load(RCX, RSI, f[0])
+		a.Store(RDI, f[1], RCX)
+	}
+	// The caller at its iter_next: the cursor done, the loop left.
+	a.Load(RBX, RSI, recRetIP)
+	a.Load(R12, RDI, ncRegs)
+	a.Load(R15, RDI, ncIC)
+	a.Load(RAX, RBX, 0)
+	g.decB(RSI)
+	a.LoadIdx(RSI, R12, RSI, 1, 8)
+	a.MovImm(RCX, 1)
+	a.Store8(RSI, offItDone, RCX)
+	g.immSC(RCX)
+	a.LeaIdx(RBX, RBX, RCX, 8, 8)
 	g.dispatch()
 }

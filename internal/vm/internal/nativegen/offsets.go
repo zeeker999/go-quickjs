@@ -196,6 +196,7 @@ var (
 	offGRare     int32
 	offGState    int32
 	offGDeleg    int32
+	offGStarted  int32
 	offGReg      int32
 	offGAwaitJob int32
 	offClRealm   int32
@@ -404,6 +405,7 @@ func loadOffsets() {
 	offGRare = off("generator.rare")
 	offGState = off("generator.state")
 	offGDeleg = off("generator.delegating")
+	offGStarted = off("generator.started")
 	offGReg = off("generator.reg")
 	offGAwaitJob = off("generator.awaitJob")
 	offClRealm = off("closure.realm")

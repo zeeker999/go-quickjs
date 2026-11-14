@@ -84,6 +84,7 @@ type armGen struct {
 	exit    Label
 	exitRet Label
 	exits   []Label
+	genRet  Label
 }
 
 func (g *armGen) ex(n int) Label {

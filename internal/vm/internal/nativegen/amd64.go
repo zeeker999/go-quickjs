@@ -19,6 +19,10 @@ type nativeGen struct {
 	// exits are the call handler's numbered exits (ex), which say in
 	// the scratch's last word which check left (QJS_DISPDBG).
 	exits []Label
+	// genRet is a generator's return from a frame genStep entered
+	// (genReturn), where the variant has yield's handler; the exit
+	// where not.
+	genRet Label
 }
 
 // ex is the call handler's exit number n.

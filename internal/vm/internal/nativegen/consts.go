@@ -40,7 +40,7 @@ var (
 	regFrameCall, regFrameEnter, regFrameGenStep                                   int32
 
 	// A generator's states.
-	genSuspendedYield, genExecuting int32
+	genSuspendedYield, genExecuting, genCompleted int32
 
 	tailCallDepth, linearScanLimit int32
 	hasCacheBits                   uint8
@@ -97,6 +97,7 @@ func loadConsts() {
 		{&regCallOut, "regCallOut"}, {&regCallLeaf, "regCallLeaf"}, {&regLeafArg, "regLeafArg"},
 		{&regFrameCall, "regFrameCall"}, {&regFrameEnter, "regFrameEnter"}, {&regFrameGenStep, "regFrameGenStep"},
 		{&genSuspendedYield, "genSuspendedYield"}, {&genExecuting, "genExecuting"},
+		{&genCompleted, "genCompleted"},
 		{&tailCallDepth, "tailCallDepth"}, {&linearScanLimit, "linearScanLimit"}} {
 		*c.p = int32(k(c.name))
 	}

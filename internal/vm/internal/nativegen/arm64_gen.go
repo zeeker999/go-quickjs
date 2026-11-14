@@ -97,7 +97,7 @@ func (g *armGen) genStep() {
 	a.Cbz(rC, g.exit, false)
 	a.LoadU8(rC, r8, offGState)
 	a.CmpImm(rC, int64(genSuspendedYield), false)
-	a.BCond(NE, g.exit)
+	a.BCond(HI, g.exit)
 	a.LoadU8(rC, r8, offGAwaitJob)
 	a.Cbnz(rC, g.exit, false)
 	a.Load(rC, r8, offGSaved)
@@ -123,13 +123,17 @@ func (g *armGen) genStep() {
 	a.LoadU8(rD, rC, offRCArgs)
 	a.Cbnz(rD, g.exit, false)
 	a.Store(rCtx, scr(sRC), rC)
-	// Its pc: past a yield, at the jump past the yield's return path.
+	// Its pc: past a yield, at the jump past the yield's return path;
+	// or past end_params, its body's first step, which sends nothing.
+	first, pcOK := a.NewLabel(), a.NewLabel()
 	a.LoadU32(rD, r8, offGPC)
 	a.Cbz(rD, g.exit, false)
 	a.Load(rS, rC, offRCCode)
 	a.AddLsl(rS, rS, rD, 3)
 	a.Load(r9, rS, -8)
 	a.Ubfx(r8, r9, 0, 8)
+	a.CmpImm(r8, int64(bytecode.REndParams), false)
+	a.BCond(EQ, first)
 	a.CmpImm(r8, int64(bytecode.RYield), false)
 	a.BCond(NE, g.exit)
 	// The yield's register, less genFrom, in vals.
@@ -146,6 +150,14 @@ func (g *armGen) genStep() {
 	a.Op(Add, r9, r9, rD, true)
 	a.AddImm(r9, r9, 1, true)
 	a.Store(rCtx, scr(sKind), r9)
+	a.B(pcOK)
+	a.Bind(first)
+	a.Store(rCtx, scr(sKind), rD)
+	a.MovImm(r8, ^uint64(0))
+	a.Store(rCtx, scr(sKa), r8)
+	a.LoadS32(r8, rC, offRCGenFrom)
+	a.Store(rCtx, scr(sEnt), r8)
+	a.Bind(pcOK)
 	// The window at the stack's top, with room.
 	a.Load(r9, rCtx, ncRT)
 	a.Load(rD, r9, offRtStackTop)
@@ -201,7 +213,10 @@ func (g *armGen) genStep() {
 	a.Load(r8, rCtx, scr(sE))
 	a.MovImm(rC, uint64(genExecuting))
 	a.Store8(r8, offGState, rC)
+	sent := a.NewLabel()
 	a.Load(rC, rCtx, scr(sKa))
+	a.CmpImm(rC, 0, true)
+	a.BCond(MI, sent)
 	a.ShiftImm(Lsl, rC, rC, 4, true)
 	g.addMem(rC, r8, offGVals)
 	a.Load(rD, rCtx, ncUndef)
@@ -209,6 +224,7 @@ func (g *armGen) genStep() {
 	a.AddImm(rW, rC, 8, true)
 	a.MovImm(rC, 0)
 	g.ptrTo()
+	a.Bind(sent)
 	// next's frame record, as regGenStep writes it.
 	a.Load(rC, rCtx, scr(sNF))
 	a.AddImm(rC, rC, -int64(sizeFrame), true)
@@ -369,6 +385,8 @@ func (g *armGen) genYield() {
 	a.BCond(NE, g.exit)
 	a.Load(rC, rS, offFOpenUp)
 	a.Cbnz(rC, g.exit, true)
+	a.Load(rC, rS, offFWith+8)
+	a.Cbnz(rC, g.exit, true)
 	// The value.
 	g.regB(r8)
 	a.Load(r9, r8, 0)
@@ -390,6 +408,8 @@ func (g *armGen) genYield() {
 	a.Store32(rD, offGPC, rC)
 	a.MovImm(rC, uint64(genSuspendedYield))
 	a.Store8(rD, offGState, rC)
+	a.MovImm(rC, 1)
+	a.Store8(rD, offGStarted, rC)
 	a.Store8(rD, offGDeleg, ZR)
 	// The window from genFrom back to vals.
 	a.Load(r8, rCtx, ncRC)
@@ -439,5 +459,52 @@ func (g *armGen) genYield() {
 	a.AddImm(rW, rW, 8, true)
 	a.Load(rC, rCtx, scr(sV1))
 	g.ptrTo()
+	g.dispatch()
+}
+
+// genReturn is ret and ret_undef in a generator's frame genStep entered,
+// as amd64's.
+func (g *armGen) genReturn() {
+	a := g.a
+	a.Load(rS, rCtx, ncNF)
+	a.Load(rC, rS, offFOpenUp)
+	a.Cbnz(rC, g.exit, true)
+	a.Store8(rS, offFRegKind, ZR)
+	a.Load(r8, rCtx, ncDepth)
+	a.AddImm(r8, r8, -1, true)
+	a.Store(rCtx, ncDepth, r8)
+	g.storeImm(rCtx, ncTopOK, 0)
+	low := a.NewLabel()
+	g.cmpMem(r8, rCtx, ncFilled)
+	a.BCond(GE, low)
+	a.Store(rCtx, ncFilled, r8)
+	a.Bind(low)
+	a.MovImm(rC, uint64(recSize))
+	a.Mul(r8, r8, rC)
+	g.addMem(r8, rCtx, ncFrames)
+	a.MovRR(rS, r8)
+	a.Load(rD, rS, recGen)
+	a.MovImm(rC, uint64(genCompleted))
+	a.Store8(rD, offGState, rC)
+	a.Load(r9, rCtx, ncRT)
+	g.incMem(r9, offRtFrameDepth, -2)
+	a.Load(rC, rS, recSaved)
+	a.Store(r9, offRtStackTop, rC)
+	for _, f := range nativeTopFields {
+		a.Load(rC, rS, f[0])
+		a.Store(rCtx, f[1], rC)
+	}
+	// The caller at its iter_next: the cursor done, the loop left.
+	a.Load(rIP, rS, recRetIP)
+	a.Load(rRegs, rCtx, ncRegs)
+	a.Load(rIC, rCtx, ncIC)
+	a.Load(rW, rIP, 0)
+	g.regB(rS)
+	a.Load(rS, rS, 8)
+	a.MovImm(rC, 1)
+	a.Store8(rS, offItDone, rC)
+	g.immSC(rC)
+	a.AddLsl(rIP, rIP, rC, 3)
+	a.AddImm(rIP, rIP, 8, true)
 	g.dispatch()
 }
