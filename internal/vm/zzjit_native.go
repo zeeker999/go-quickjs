@@ -468,8 +468,11 @@ type jitCodeFields struct {
 	jitRegRefused           bool
 	jitReg                  *jitRegEntry
 	// jitRegKey is the template's function's key in the realm its closures
-	// run in (jitRegKeyOf), made at its first use.
+	// run in (jitRegKeyOf), made at its first use; jitRegCur is the code the
+	// cache held for it when a level last looked (jitRegLevelAt), while it
+	// still does (jitRegEntry's cached).
 	jitRegKey jitKey
+	jitRegCur *jitRegEntry
 	// jitRegCounts are what the feedback dispatcher counted of the
 	// function's register code (zzjit_zregfreq.go): its runs, then the
 	// calls made at each of its call sites; nil until its call sites'

@@ -71,8 +71,11 @@ type jitRegEntry struct {
 	// levels counts the native calls under way of the code that Go runs
 	// beside (jitRegLevelAt): the cache neither drops it nor compiles it
 	// again while any is.
-	levels  int
-	bytes   int
+	levels int
+	bytes  int
+	// cached says the cache holds e for its function (jitRegCached),
+	// which a closure's template's jitRegCur may say it is.
+	cached  bool
 	refusal string
 	// retPC and retUndef are where the interpreter ends a frame the code
 	// returned from by on-stack replacement, retReg the register retPC's
@@ -152,7 +155,11 @@ func (r *Runtime) jitRegCached(key jitKey, e *jitRegEntry) {
 	if s.regCache == nil {
 		s.regCache = map[jitKey]*jitRegEntry{}
 	}
+	if old := s.regCache[key]; old != nil {
+		old.cached = false
+	}
 	s.regCache[key] = e
+	e.cached = true
 	s.regLinkUpdate(key, e)
 }
 
@@ -331,6 +338,7 @@ func (s *jitState) regBytes() int {
 func (s *jitState) dropReg(key jitKey, e *jitRegEntry) {
 	if s.regCache[key] == e {
 		delete(s.regCache, key)
+		e.cached = false
 		s.regLinkUpdate(key, nil)
 	}
 	if e.code != nil && e.runs == 0 && e.levels == 0 {

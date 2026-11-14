@@ -488,7 +488,20 @@ func (r *Runtime) jitRegLevelAt(i int) (jitRegLevel, bool) {
 	if cl == nil || cl.reg == nil {
 		return jitRegLevel{}, false
 	}
-	e := s.regCache[r.jitRegKeyOf(cl)]
+	// The cache's code, which its template keeps a pointer to while the
+	// cache holds it, the cache asked otherwise: a map's search at every
+	// level of every call of Go had been a tenth of AWFY's Json.
+	cc := cl.closureCode
+	e := (*jitRegEntry)(nil)
+	if cc != nil && cl.realm == r.Realm {
+		e = cc.jitRegCur
+	}
+	if e == nil || !e.cached {
+		e = s.regCache[r.jitRegKeyOf(cl)]
+		if cc != nil && cl.realm == r.Realm {
+			cc.jitRegCur = e
+		}
+	}
 	if e == nil || e.code == nil || e.p == nil {
 		return jitRegLevel{}, false
 	}
