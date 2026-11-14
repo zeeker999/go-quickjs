@@ -979,12 +979,12 @@ func TestRegNativeGenNext(t *testing.T) {
 		String(sum)`, bytecode.RYield, bytecode.RGenEntry)
 }
 
-// TestRegDirectPureBodies runs built-ins' callbacks whose pure bodies a
-// register call enters with a frame (pureByTree) but regDirect evaluates
-// without one where it can (pureCall): comparators of BigInts, of strings
-// and of mixed values, ones the evaluator gives up on (an object's
-// valueOf, a getter), and a callback that reads an upvalue.
-func TestRegDirectPureBodies(t *testing.T) {
+// TestRegDirectCallbacks runs built-ins' callbacks of pure bodies longer
+// than a register call answers without a frame (pureByTree), which Go
+// enters with one (regDirect): comparators of BigInts, of strings and of
+// mixed values, ones that call an object's valueOf or a getter, and a
+// callback that reads an upvalue.
+func TestRegDirectCallbacks(t *testing.T) {
 	nativeCheck(t, `
 		var out = []
 		var cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0)
