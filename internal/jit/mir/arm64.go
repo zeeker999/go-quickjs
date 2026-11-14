@@ -4107,6 +4107,14 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 					c.windowArgs(t, locals, calleeCtx, top)
 				}
 			}
+			if t.Tail {
+				// As amd64's: whether its calls in tail position may give its
+				// frame up, set at every call of it.
+				c.a.Load(calleeCtx, a64Ctx, abi.OffNext)
+				c.movImm(top, b2u(t.TailFrame))
+				c.a.Store(calleeCtx, abi.OffTailFrame, top)
+				c.a.Store(calleeCtx, abi.OffFrameThis, arm64.ZR)
+			}
 			if t.Pool != 0 {
 				// As amd64's: a construction's receiver, the pool's last
 				// object, its cell cleared, in the window's register 1 and
@@ -7117,7 +7125,9 @@ func (c *a64Compiler) goArg(at int32, x *ssa.Value) {
 // arguments the frame's parameters; in a native callee's frame, one of a
 // function the call has, a jump to its code, its frame in this one's
 // place (tailJump). While the collector marks, each operand's pointer is
-// shaded first.
+// shaded first. Register code's writes its window to its registers, as
+// amd64's (ssa.TailWindow), and polls only where its start does not
+// (ssa.TailPolled).
 func (c *a64Compiler) tailSelf(v *ssa.Value, guard a64Guard) {
 	shallow := c.a.NewLabel()
 	c.a.Load(a64A, a64Ctx, abi.OffLevel)
@@ -7136,25 +7146,27 @@ func (c *a64Compiler) tailSelf(v *ssa.Value, guard a64Guard) {
 		c.a.B(stub)
 		return
 	}
-	poll, polled := c.a.NewLabel(), c.a.NewLabel()
-	c.a.Load(a64B, a64Ctx, abi.OffBackEdges)
-	c.a.Load(a64A, a64B, 0)
-	c.a.AddImm(a64A, a64A, -1, true)
-	c.a.Store(a64B, 0, a64A)
-	c.a.CmpImm(a64A, 0, true)
-	c.a.BCond(arm64.LE, poll)
-	state := v.State
-	c.cold = append(c.cold, func() {
-		c.a.Bind(poll)
-		if c.enc.CallGo != 0 {
-			stub := c.stubLabel(state, abi.ExitPoll)
-			c.goSaving(uint64(ssa.GoPoll), &stub)
-			c.a.B(polled)
-			return
-		}
-		c.exitTo(state, abi.ExitPoll)
-	})
-	c.a.Bind(polled)
+	if v.Key&ssa.TailPolled == 0 {
+		poll, polled := c.a.NewLabel(), c.a.NewLabel()
+		c.a.Load(a64B, a64Ctx, abi.OffBackEdges)
+		c.a.Load(a64A, a64B, 0)
+		c.a.AddImm(a64A, a64A, -1, true)
+		c.a.Store(a64B, 0, a64A)
+		c.a.CmpImm(a64A, 0, true)
+		c.a.BCond(arm64.LE, poll)
+		state := v.State
+		c.cold = append(c.cold, func() {
+			c.a.Bind(poll)
+			if c.enc.CallGo != 0 {
+				stub := c.stubLabel(state, abi.ExitPoll)
+				c.goSaving(uint64(ssa.GoPoll), &stub)
+				c.a.B(polled)
+				return
+			}
+			c.exitTo(state, abi.ExitPoll)
+		})
+		c.a.Bind(polled)
+	}
 	c.a.Load(a64A, a64Ctx, abi.OffTailFrame)
 	c.a.CmpImm(a64A, 0, true)
 	guard.jump(arm64.EQ)
@@ -7222,6 +7234,19 @@ func (c *a64Compiler) tailSelf(v *ssa.Value, guard a64Guard) {
 		c.a.Cbz(a64C, none, true)
 		c.a.Store(a64C, c.enc.NumOffset, a64A)
 		c.a.Store(a64C, c.enc.RefOffset, a64B)
+		c.a.Bind(none)
+	}
+	if v.Key&ssa.TailWindow != 0 {
+		// Register code's receiver, its register 1: the VM's frame's too,
+		// if Go entered the code with it (amd64's).
+		at := abi.OffGoArgs + size
+		none := c.a.NewLabel()
+		c.a.Load(a64C, a64Ctx, abi.OffFrameThis)
+		c.a.Cbz(a64C, none, true)
+		c.a.Load(a64A, a64Ctx, at+c.enc.NumOffset)
+		c.a.Store(a64C, c.enc.NumOffset, a64A)
+		c.a.Load(a64A, a64Ctx, at+c.enc.RefOffset)
+		c.a.Store(a64C, c.enc.RefOffset, a64A)
 		c.a.Bind(none)
 	}
 	c.a.B(c.labels[entry.ID])

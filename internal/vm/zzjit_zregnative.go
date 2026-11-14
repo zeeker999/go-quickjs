@@ -715,6 +715,19 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 		ctx.Cells, ctx.Loop = nil, 0
 	}
 	ctx.Open = uint64(len(f.openUpvalues))
+	if f.cl.fn.HasTailCall {
+		// Its calls of itself in tail position, deep in the stack, give
+		// the frame to the call in place natively where the interpreter
+		// would (ssa.OpTailSelf, regTailTo): its closure, and whether it
+		// would -- a call's frame, or regEnterW's of no construction, that
+		// shares no derived constructor's this and keeps no arguments --
+		// and its receiver's home, which a call with another rewrites.
+		ctx.Closure, ctx.TailFrame, ctx.FrameThis = unsafe.Pointer(f.cl), 0, unsafe.Pointer(&f.this)
+		if (f.regKind == regFrameCall || f.regKind == regFrameEnter && f.newTarget.IsUndefined()) && f.thisRef == nil &&
+			f.args == nil && f.withScopes == nil && f.evalVars == nil && !c.suspends {
+			ctx.TailFrame = 1
+		}
+	}
 	if p.Forwards {
 		// Its f.apply(x, arguments) hands the frame's arguments on natively
 		// (ssa.CallSite's Forward), from its context, as the stack form's
@@ -819,6 +832,7 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 	// returned, up to the first context no call ran in.
 	clear(ctx.Keep[:e.keeps])
 	ctx.This, ctx.Upvalues, ctx.Instance = abi.Slot{}, nil, abi.Slot{}
+	ctx.Closure, ctx.FrameThis = nil, nil
 	if n := max(ctx.RecordHigh, s.callRefs); n != 0 {
 		clear(ctx.RecordRef[:n])
 		ctx.RecordHigh = 0

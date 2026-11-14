@@ -1966,6 +1966,16 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 					c.windowArgs(t, locals, calleeCtx, top)
 				}
 			}
+			if t.Tail {
+				// Whether its calls in tail position may give its frame up
+				// (abi.Context's TailFrame), as the stack form's call says:
+				// set at every call of such a callee, so that none reads a
+				// flag an earlier frame in the context left -- a
+				// construction's, which no tail call gives up.
+				c.a.Load(calleeCtx, regCtx, abi.OffNext)
+				c.storeImm(calleeCtx, abi.OffTailFrame, b2u(t.TailFrame), top)
+				c.storeImm(calleeCtx, abi.OffFrameThis, 0, top)
+			}
 			if t.Pool != 0 {
 				// A construction's receiver, the pool's last object, its cell
 				// cleared, in the window's register 1 and the callee's
@@ -4809,7 +4819,11 @@ func (c *compiler) goArg(at int32, x *ssa.Value) {
 // where the collector does not see them: while it marks, each pointer is
 // stored through Go's write barrier first (refStore, into the context's
 // Shade), which shades it, whatever of the frame it has scanned as the
-// frame is written. The call polls, as a back-edge does. Any other call
+// frame is written. The call polls, as a back-edge does, but where the
+// code's start, which it jumps to, polls (ssa.TailPolled). Register code's
+// (ssa.TailWindow) writes its window, the function, the receiver and the
+// arguments, to its registers, and the receiver to the VM's frame where Go
+// entered the code with one (abi.Context's FrameThis). Any other call
 // leaves for Go to make.
 func (c *compiler) tailSelf(v *ssa.Value, guard guardTo) {
 	shallow := c.a.NewLabel()
@@ -4829,22 +4843,24 @@ func (c *compiler) tailSelf(v *ssa.Value, guard guardTo) {
 		c.a.Jmp(stub)
 		return
 	}
-	poll, polled := c.a.NewLabel(), c.a.NewLabel()
-	c.a.Load(scratchB, regCtx, abi.OffBackEdges)
-	c.a.DecMem(scratchB, 0)
-	c.a.Jcc(amd64.CondLE, poll)
-	state := v.State
-	c.cold = append(c.cold, func() {
-		c.a.Bind(poll)
-		if c.enc.CallGo != 0 {
-			stub := c.stubLabel(state, abi.ExitPoll)
-			c.goSaving(uint64(ssa.GoPoll), &stub)
-			c.a.Jmp(polled)
-			return
-		}
-		c.exitTo(state, abi.ExitPoll)
-	})
-	c.a.Bind(polled)
+	if v.Key&ssa.TailPolled == 0 {
+		poll, polled := c.a.NewLabel(), c.a.NewLabel()
+		c.a.Load(scratchB, regCtx, abi.OffBackEdges)
+		c.a.DecMem(scratchB, 0)
+		c.a.Jcc(amd64.CondLE, poll)
+		state := v.State
+		c.cold = append(c.cold, func() {
+			c.a.Bind(poll)
+			if c.enc.CallGo != 0 {
+				stub := c.stubLabel(state, abi.ExitPoll)
+				c.goSaving(uint64(ssa.GoPoll), &stub)
+				c.a.Jmp(polled)
+				return
+			}
+			c.exitTo(state, abi.ExitPoll)
+		})
+		c.a.Bind(polled)
+	}
 	c.a.Load(scratchA, regCtx, abi.OffTailFrame)
 	c.a.Op(amd64.Test, scratchA, scratchA, true)
 	guard.jump(amd64.CondE)
@@ -4915,6 +4931,21 @@ func (c *compiler) tailSelf(v *ssa.Value, guard guardTo) {
 		c.a.Jcc(amd64.CondE, none)
 		c.a.Store(scratchC, c.enc.NumOffset, scratchA)
 		c.a.Store(scratchC, c.enc.RefOffset, scratchB)
+		c.a.Bind(none)
+	}
+	if v.Key&ssa.TailWindow != 0 {
+		// Register code's receiver, its register 1, written above: the
+		// VM's frame's too, if Go entered the code with it, which
+		// load_this reads.
+		at := abi.OffGoArgs + size
+		none := c.a.NewLabel()
+		c.a.Load(scratchC, regCtx, abi.OffFrameThis)
+		c.a.Op(amd64.Test, scratchC, scratchC, true)
+		c.a.Jcc(amd64.CondE, none)
+		c.a.Load(scratchA, regCtx, at+c.enc.NumOffset)
+		c.a.Store(scratchC, c.enc.NumOffset, scratchA)
+		c.a.Load(scratchA, regCtx, at+c.enc.RefOffset)
+		c.a.Store(scratchC, c.enc.RefOffset, scratchA)
 		c.a.Bind(none)
 	}
 	c.a.Jmp(c.labels[entry.ID])

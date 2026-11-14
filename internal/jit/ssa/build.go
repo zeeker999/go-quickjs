@@ -8319,12 +8319,48 @@ func (b *builder) instruction(blk *Block, pc int) {
 			break
 		}
 		if in.Tail && in.Window {
-			// Register code's call in tail position: deep in the stack,
-			// where the interpreter gives the frame to the callee, it
-			// leaves for the interpreter to make (OpTailRoom); shallower,
+			// Register code's call in tail position: shallow in the stack,
 			// the ordinary call, its result the instruction's register.
-			room := guard(OpTailRoom, None, ir.HostExit)
-			room.Index = b.cur.depth
+			// Deeper, where the interpreter gives the frame to the callee
+			// in place (the VM's regTailTo), a call of the closure the frame
+			// runs is a jump to the code's start, as the stack form's
+			// (OpTailSelf): the window's function, receiver and arguments
+			// its registers 0, 1 and on -- the receiver a method call's,
+			// an arrow's the this it captured, its register 1, undefined
+			// otherwise -- undefined in the rest. Any other call there
+			// leaves for the interpreter to make (OpTailRoom's), as does
+			// one in an inlined frame, or in code whose frame holds what
+			// it may not give up: registers a closure captures, the
+			// arguments it keeps.
+			if p := b.root.p; b.cur == b.root && p.TailOwn && p.Captured == nil && !p.FrameArgs {
+				a := in.Left.Slot
+				args := make([]*Value, 0, in.Extra+3)
+				fn := b.read(a, blk)
+				args = append(args, fn, fn)
+				switch {
+				case p.ArrowThis:
+					args = append(args, b.read(1, blk))
+				case in.When:
+					args = append(args, b.read(a+1, blk))
+				default:
+					this := f.newValue(blk, OpConst, Tagged)
+					this.Const = ir.Value{Kind: ir.Undefined}
+					args = append(args, this)
+				}
+				for i := range in.Extra {
+					args = append(args, b.read(a+2+i, blk))
+				}
+				v := guard(OpTailSelf, None, ir.HostExit, args...)
+				v.Index, v.Const = p.ParamBase+p.Params, ir.Value{Bits: uint64(p.Regs)}
+				v.Key = TailWindow
+				if p.Origin != nil && !looped(p, 0) {
+					// The start polls (OpPoll), which the jump goes to.
+					v.Key |= TailPolled
+				}
+			} else {
+				room := guard(OpTailRoom, None, ir.HostExit)
+				room.Index = b.cur.depth
+			}
 		} else if in.Tail {
 			// Deep in the stack the frame is given up, where it holds no
 			// captured local: native code makes a call of the function
@@ -8721,7 +8757,7 @@ func (b *builder) nativeCalls(pc int) []*CallSite {
 			// site's shape the instruction's.
 			if site.Argc != in.Extra || site.Method != in.When || site.Super || site.Instr != 0 || site.Accessor != AccessorNone || site.Step || site.ForOf || site.ForIn ||
 				site.TypeOf && (in.Extra != 0 || site.Go != GoCall) || site.InstanceOf && (in.Extra != 1 || site.Go != GoCall) || site.Literal || site.Via != 0 ||
-				site.Go == 0 && !site.Push && !site.Pop && (site.Window != in.Left.Slot+1 || site.ThisSlot >= 0 || site.Function || site.Tail ||
+				site.Go == 0 && !site.Push && !site.Pop && (site.Window != in.Left.Slot+1 || site.ThisSlot >= 0 || site.Function ||
 					site.Pool != 0 && (site.Derived || site.Parent != 0 || site.Method)) {
 				// A native call's callee's window is made from the
 				// instruction's (CallSite's Window), the stack form's

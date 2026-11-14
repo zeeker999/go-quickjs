@@ -402,3 +402,145 @@ func TestJITRegForwardingConstructors(t *testing.T) {
 		})
 	}
 }
+
+// regTailSelfSrc's functions call themselves in tail position past
+// tailCallDepth: strict code, whose frame the interpreter gives the call in
+// place (regTailTo), which native code makes a jump to its start
+// (ssa.OpTailSelf) -- a plain function's, with fewer and more arguments
+// than it has parameters, a method's, given its receiver, an arrow's,
+// which keeps the this it captured, a construction's frame, which no call
+// gives up, and one that calls another now and then, its frame given back
+// to it by the interpreter, Go entering its code again -- beside two
+// functions calling each other, a self call in a try, which is no call in
+// tail position, and a sloppy function's, which makes none. Each driver
+// runs its recursion k times, natively once warm.
+const regTailSelfSrc = `
+function self(n, acc) { "use strict"; if (n === 0) return acc; return self(n - 1, acc + 1) }
+function deepSelf(n, k) { var s; for (var i = 0; i < k; i++) s = self(n, 0); return s }
+function mutA(n, acc) { "use strict"; if (n === 0) return acc; return mutB(n - 1, acc + 2) }
+function mutB(n, acc) { "use strict"; if (n === 0) return -acc; return mutA(n - 1, acc + 1) }
+function deepMut(n, k) { var s; for (var i = 0; i < k; i++) s = mutA(n, 0) + "," + mutA(n + 1, 0); return s }
+function counts(n, a, b, c) {
+	"use strict";
+	if (n === 0) return a + ":" + b + ":" + c;
+	if (n % 3 === 0) return counts(n - 1, a + 1);
+	if (n % 3 === 1) return counts(n - 1, a, (b | 0) + 1, (c | 0) + 2, 99, 100);
+	return counts(n - 1, a, b);
+}
+function deepCounts(n, k) { var s; for (var i = 0; i < k; i++) s = counts(n, 0, 0, 0); return s }
+function tried(n, acc) { "use strict"; try { if (n === 0) return acc; return tried(n - 1, acc + 1) } catch (e) { return "caught " + (e instanceof RangeError) } }
+function deepTried(n, k) { var s; for (var i = 0; i < k; i++) s = tried(n, 0); return s }
+var obj = { k: 3, m(n, acc) { "use strict"; if (n === 0) return acc + this.k; return this.m(n - 1, acc + this.k) } };
+var other = { k: 5, m: obj.m };
+function deepMethod(n, k) { var s; for (var i = 0; i < k; i++) s = obj.m(n, 0) + other.m(n, 1); return s }
+var maker = { k: 2, f(n) { "use strict"; const g = (n, acc) => n === 0 ? acc + this.k : g(n - 1, acc + this.k); return g(n, 0) } };
+function deepArrow(n, k) { var s; for (var i = 0; i < k; i++) s = maker.f(n); return s }
+function P(n, acc) { "use strict"; if (n <= 0) return { acc: acc, made: this !== undefined }; if (this) this.seen = n; return P(n - 1, acc + 1) }
+function nest(d, n) { if (d > 0) { var v = nest(d - 1, n); return v } var o = new P(n, 0); return JSON.stringify(o) + P.length + new P(0, 1).made }
+function deepNew(n, k) { var s; for (var i = 0; i < k; i++) s = nest(40, n); return s }
+function mix(n, acc) { "use strict"; if (n === 0) return acc; if (n % 100 === 0) return mix2(n - 1, acc); return mix(n - 1, acc + 1) }
+function mix2(n, acc) { "use strict"; return mix(n, acc + 2) }
+function deepMix(n, k) { var s; for (var i = 0; i < k; i++) s = mix(n, 0); return s }
+function sloppy(n, acc) { if (n === 0) return acc + ':' + (this === undefined); return sloppy(n - 1, acc + 1) }
+function deepSloppy(n, k) { var s; for (var i = 0; i < k; i++) s = sloppy(n, 0); return s }
+`
+
+// TestJITRegTailSelf runs regTailSelfSrc's functions natively and in a
+// runtime with no JIT and compares them: a recursion through calls of the
+// function itself in tail position runs as a loop in its frame, which
+// leaves native code at none of them, and a million calls deep uses the
+// stack no deeper than a thousand did.
+func TestJITRegTailSelf(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	want := map[string]string{
+		"deepSelf":   "1000000",
+		"deepMut":    "1500000,-1500002",
+		"deepCounts": "333333:1:2",
+		"deepTried":  "caught true",
+		"deepMethod": "8000009",
+		"deepArrow":  "2000002",
+		"deepNew":    `{"acc":1000000,"made":false}2true`,
+		"deepMix":    "1010000",
+		"deepSloppy": "1000:false",
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			RecordJITCompiles(true)
+			defer RecordJITCompiles(false)
+			rts := regNativeRuntimes(t, regTailSelfSrc)
+			r := rts[0]
+			r.SetJITWarmUp(1, 1)
+			run := func(name string, n, k float64) string {
+				t.Helper()
+				var got [2]string
+				for i, r := range rts {
+					fn, _ := r.GetProp(Obj(r.Global()), r.Intern(name))
+					v, err := r.Call(fn, Undefined, []Value{Float(n), Float(k)})
+					got[i] = regNativeShow(r, v, err)
+				}
+				if got[0] != got[1] {
+					t.Errorf("%s(%v): with the JIT %q, without %q", name, n, got[0], got[1])
+				}
+				return got[0]
+			}
+			for _, name := range []string{"deepSelf", "deepMut", "deepCounts", "deepMethod", "deepArrow", "deepNew", "deepMix", "deepSloppy"} {
+				// Until its code has learned what the guards met.
+				for range 8 {
+					run(name, 40, 50)
+				}
+				n := 1e6
+				if name == "deepSloppy" {
+					// No call in tail position in sloppy code: the stack
+					// grows.
+					n = 1000
+				}
+				st := r.RegNativeStats()
+				stack, frames := r.stackHigh, r.frameHigh
+				got := run(name, n, 1)
+				if got != want[name] {
+					t.Errorf("%s(%v) = %q, want %q", name, n, got, want[name])
+				}
+				st2 := r.RegNativeStats()
+				// The frames Go makes of the native levels while it polls,
+				// tailCallDepth of them at most.
+				if name != "deepSloppy" && (r.stackHigh > stack+64 || r.frameHigh > max(frames, tailCallDepth+8)) {
+					t.Errorf("%s: the stack grew from %d to %d, the frames from %d to %d", name, stack, r.stackHigh, frames, r.frameHigh)
+				}
+				exits := st2.HostOps["tail_call_w"] + st2.HostOps["tail_call_method_w"] - st.HostOps["tail_call_w"] - st.HostOps["tail_call_method_w"]
+				switch name {
+				case "deepSelf", "deepCounts", "deepMethod", "deepArrow", "deepNew":
+					// A loop in the frame, entered once: but for the
+					// construction's own call, whose frame no call gives up
+					// (abi.Context's TailFrame), the ordinary call Go makes.
+					if name == "deepNew" && exits == 1 {
+						exits--
+					}
+					if exits != 0 || st2.Entries-st.Entries > 100 {
+						t.Errorf("%s: %d calls in tail position left native code, %d entries", name, exits, st2.Entries-st.Entries)
+					}
+				case "deepMix":
+					// mix2's calls of mix, and mix's of mix2, given the frame
+					// in place by Go: none of mix's own.
+					if exits > 2*1e6/100+100 {
+						t.Errorf("%s: %d calls in tail position left native code", name, exits)
+					}
+				}
+				if st2.Entries == st.Entries {
+					t.Errorf("%s: no native code ran", name)
+				}
+			}
+			// A self call in a try is an ordinary call: the stack runs out.
+			if got := run("deepTried", 1e6, 1); got != want["deepTried"] {
+				t.Errorf("deepTried = %q, want %q", got, want["deepTried"])
+			}
+			if fns, _, _ := regCompileARM64(t, r); fns == 0 {
+				t.Error("nothing compiled for arm64")
+			}
+		})
+	}
+}

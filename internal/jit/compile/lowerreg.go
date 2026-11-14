@@ -388,6 +388,8 @@ func lowerRegLits(rc *bytecode.RegCode, fn *bytecode.Function, m lowering, litHo
 		UpvalueBase: rc.NumRegs, Upvalues: len(fn.Upvalues),
 		ArrowThis:        fn.Kind == bytecode.KindArrow && fn.UsesThis,
 		ClassConstructor: fn.Kind == bytecode.KindConstructor,
+		TailOwn: fn.Strict && (fn.Kind == bytecode.KindNormal || fn.Kind == bytecode.KindMethod || fn.Kind == bytecode.KindArrow ||
+			fn.Kind == bytecode.KindGetter || fn.Kind == bytecode.KindSetter),
 	}
 	for i := range p.Maps {
 		p.Maps[i] = ir.StateMap{PC: l.origin[i]}
@@ -650,20 +652,18 @@ func regHostOnly(p *ir.Program, rc *bytecode.RegCode, fn *bytecode.Function, m l
 			loop = true
 		}
 	}
-	for pc, w := range rc.Code {
+	for _, w := range rc.Code {
 		switch w.Op() {
 		case bytecode.RGetIndex, bytecode.RGetIndexI, bytecode.RSetIndex, bytecode.RSetIndexI, bytecode.RGetIndexPre, bytecode.RGetIndexPost,
 			bytecode.RAddIndex, bytecode.RAddIndexK, bytecode.RAddIndexI:
 			indexed = true
-		case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW:
+		case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW, bytecode.RApplyArgs:
 			calls = true
+		case bytecode.RCallWT, bytecode.RCallMWT:
 			// A call in tail position may be the function's own, which
-			// native code makes a jump to its start: a loop.
-			loop = loop || pc < len(rc.Marks) && rc.Marks[pc]&bytecode.RMarkTail != 0
-		case bytecode.RCallWT, bytecode.RCallMWT, bytecode.RApplyArgs:
-			// The interpreter's call in tail position, a forwarding call:
-			// calls all the same.
-			calls = true
+			// native code makes a jump to its start deep in the stack
+			// (ssa.OpTailSelf): a loop, as the stack form's.
+			calls, loop = true, true
 		}
 	}
 	return host && !loop && !indexed && !m.callee && !(m.hot && calls) && !GeneratorResumable(fn)

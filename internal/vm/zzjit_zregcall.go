@@ -454,6 +454,15 @@ func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode
 		site.Argc, site.Forward, site.Apply = 2, true, uintptr(unsafe.Pointer(r.applyFn))
 		k.holders = append(k.holders, r.applyFn)
 	}
+	if cl.fn.HasTailCall {
+		// Whether its calls of itself in tail position may give its frame
+		// up (ssa.OpTailSelf), which the call writes to its context at
+		// every call, as the stack form's (abi.Context's TailFrame): a
+		// call's frame, not a construction's, as the interpreter gives up
+		// one (regTailTo) -- an arrow's sharing a derived constructor's
+		// this is no callee of a native call (jitRegTarget).
+		site.Tail, site.TailFrame = true, pool == nil
+	}
 	if pool != nil {
 		// A construction: its receiver from the pool, made as regConstruct
 		// makes one, while the function's prototype is still the object

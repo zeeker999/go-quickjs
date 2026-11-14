@@ -672,6 +672,14 @@ type Program struct {
 	// new throws on: a call of itself in tail position is made as a call,
 	// for Go to throw, not a jump to its start (ssa's OpTailSelf).
 	ClassConstructor bool
+	// TailOwn marks register code whose frame the VM gives in place to a
+	// call of the function itself in tail position, deep in the stack
+	// (regTailTo), which native code makes a jump to its start (ssa's
+	// OpTailSelf): a strict plain function's, method's, arrow's, getter's
+	// or setter's -- not a sloppy one's, whose f.arguments reads its count
+	// from its caller's instruction and which the call gives a frame of its
+	// own, nor a class's constructor's, which a call throws for.
+	TailOwn bool
 	// DerivedConstructor marks a derived class's constructor, whose this
 	// slot (This) holds the uninitialized value until its super() binds
 	// it, and which returns that this: native code makes a return of

@@ -207,10 +207,28 @@ the builder makes natively from what the feedback says (see [Calls of
 Go](#calls-of-go) and [Native calls](#native-calls)). So is a call in tail
 position (`tail_call_w`, `tail_call_method_w`, `ir.Instruction`'s `Tail`):
 made as the ordinary call while the stack is shallow, natively or by Go, as
-the VM's `rhCallWT` makes it, native code going on after it; deeper, where
-the interpreter gives the frame to the callee, the call leaves for it
-(`ssa.OpTailRoom`), so that native code keeps no frame a tail call gives up,
-and the frame ends after it. A `wrap` -- `x op y`, the second argument of
+the VM's `rhCallWT` makes it, native code going on after it. Deeper, where
+the interpreter gives the frame to the callee in place (`regTailTo`), a
+call of the closure the frame runs is a jump to the code's start, as the
+stack form's (`ssa.OpTailSelf`, `ssa.TailWindow`): the window's function,
+receiver -- a method call's, an arrow's the this it captured, its register
+1, undefined for a plain call -- and arguments written to the frame's
+registers from 0, undefined in the rest, the receiver to the VM's frame too
+where Go entered the code with it (`abi.Context`'s `FrameThis`), which
+`load_this` reads; the jump goes to the start's poll (`ssa.TailPolled`), so
+that a recursion through such calls is a loop in the frame, as many calls
+deep as it likes. That is strict code of a plain function, a method, an
+arrow, a getter or a setter (`ir.Program`'s `TailOwn`) -- not a sloppy
+function's, whose frame the interpreter gives up for one of the callee's
+own, its `f.arguments` reading its count from its caller's instruction --
+that keeps no arguments and whose registers no closure captures, in a frame
+the interpreter would give up: Go's entry says whether, by the frame's
+kind (`abi.Context`'s `TailFrame`), and a native call of such a function
+sets it at every call (`ssa.CallSite`'s `Tail`), not for a construction,
+so that no frame reads a flag an earlier one left in the context. Any other
+call there leaves for the interpreter (`ssa.OpTailRoom`'s, or `OpTailSelf`'s
+exit), so that native code keeps no frame a tail call gives up, and the
+frame ends after it. A `wrap` -- `x op y`, the second argument of
 the `asUintN` or `asIntN` call right after it, which the interpreter makes
 with the call at once -- is the operator alone, the call made after it as
 any call, which native code makes of the operator's low bits (see
@@ -256,7 +274,9 @@ and on-stack replacement](#tier-up-and-on-stack-replacement)).
 **Refusals.** `LowerReg` refuses a function kind it does not take, direct
 eval, an arguments object the frame cannot own (`compile`'s `argumentsOwn`),
 an instruction it has no lowering for, a function of host operations alone
-at its entry (`HostOnly`), and a program past the slot budget: registers,
+at its entry (`HostOnly`) -- a call in tail position counts as a loop, as
+the stack form's does, since native code may make it a jump to the start --
+and a program past the slot budget: registers,
 captured bindings and scratch slots together within what a slot's number
 names (`abi.MaxSlot`). A function of host operations alone is lowered all
 the same for native callers (`LowerRegInline`) or where a call it makes
