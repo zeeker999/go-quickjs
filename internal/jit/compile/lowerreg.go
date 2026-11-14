@@ -149,6 +149,9 @@ type regLowering struct {
 	// their window's registers live past them.
 	lits     []int
 	litHosts map[int]bool
+	// ins counts, by register pc, the jumps and handlers that reach it,
+	// not the instruction before falling to it (regJumpIns).
+	ins []int
 }
 
 // emit appends in, of the current register instruction's origin; a
@@ -246,6 +249,87 @@ func (l *regLowering) lowerLoopTest(pc, t, b int) bool {
 		}
 	}
 	return true
+}
+
+// regJumpIns counts, by register pc, the jumps of rc's reachable code
+// and the handlers that go there.
+func regJumpIns(rc *bytecode.RegCode, reach []bool) []int {
+	ins := make([]int, len(rc.Code)+1)
+	for pc, w := range rc.Code {
+		if !reach[pc] {
+			continue
+		}
+		for _, t := range regSuccessors(rc, pc, w) {
+			if t != pc+1 && t >= 0 && t < len(ins) {
+				ins[t]++
+			}
+		}
+	}
+	for _, h := range rc.Handlers {
+		if int(h.To) < len(ins) {
+			ins[h.To]++
+		}
+	}
+	return ins
+}
+
+// boolBranch lowers, at pc, the register code a comparison's boolean
+// value compiles to -- a compare-and-branch to pc+3, load_false or
+// load_true to a register, a jump to pc+4, the other boolean to the
+// register at pc+3, which nothing else jumps into -- as the comparison
+// it is: the comparison's Binary to the register, negated where the
+// branch's way makes it so, and a jump past the loads, which are left
+// unreached. Lowered as the branches, the boolean was a phi of two
+// constants that a test of it, a callback's result's, branched on again;
+// as the stack form's lt or strict_eq makes it, it is the comparison,
+// which a branch on it takes as its condition. An exit at the comparison
+// runs the compare-and-branch again, which the interpreter goes on from
+// to the loads. Where the branch's lowering is not a Branch to pc+3 of
+// an operator a Binary has, nothing is lowered and it reports false.
+func (l *regLowering) boolBranch(pc int, reach []bool) bool {
+	rc := l.rc
+	if pc+4 >= len(rc.Code) {
+		return false
+	}
+	w := rc.Code[pc]
+	succ := regSuccessors(rc, pc, w)
+	if len(succ) != 2 || succ[0] != pc+1 || succ[1] != pc+3 {
+		return false
+	}
+	x, j, y := rc.Code[pc+1], rc.Code[pc+2], rc.Code[pc+3]
+	loads := func(a, b bytecode.ROp) bool {
+		return a == bytecode.RLoadTrue && b == bytecode.RLoadFalse || a == bytecode.RLoadFalse && b == bytecode.RLoadTrue
+	}
+	if !loads(x.Op(), y.Op()) || x.A() != y.A() || j.Op() != bytecode.RJmp || regTarget(pc+2, int32(j.BC())) != pc+4 {
+		return false
+	}
+	for q := pc + 1; q <= pc+4; q++ {
+		if !reach[q] {
+			return false
+		}
+	}
+	if l.ins[pc+1] != 0 || l.ins[pc+2] != 0 || l.ins[pc+3] != 1 {
+		return false
+	}
+	mark, lits := len(l.code), len(l.lits)
+	l.pc, l.used = pc, 0
+	l.lower(pc)
+	last := len(l.code) - 1
+	in := l.code[last]
+	switch {
+	case last < mark || in.Op != ir.Branch || !l.patch[last] || in.Target != pc+3:
+	case in.Operator == ir.Eq || in.Operator == ir.Lt || in.Operator == ir.Le || in.Operator == ir.Gt || in.Operator == ir.Ge:
+		r := int(x.A())
+		l.code[last] = ir.Instruction{Op: ir.Binary, Operator: in.Operator, Left: in.Left, Right: in.Right, Dest: r, Strict: in.Strict}
+		l.patch[last] = false
+		if in.When != (y.Op() == bytecode.RLoadTrue) {
+			l.emit(ir.Instruction{Op: ir.Unary, Operator: ir.Not, Left: ir.Slot(r), Dest: r}, false)
+		}
+		l.emit(ir.Instruction{Op: ir.Jump, Target: pc + 4}, true)
+		return true
+	}
+	l.code, l.origin, l.patch, l.lits = l.code[:mark], l.origin[:mark], l.patch[:mark], l.lits[:lits]
+	return false
 }
 
 // regexpLit lowers regexp_lit at pc, w, that calls -- /x/.exec(s) or
@@ -502,7 +586,7 @@ func lowerRegLits(rc *bytecode.RegCode, fn *bytecode.Function, m lowering, litHo
 	if err != nil {
 		return nil, err
 	}
-	l := &regLowering{rc: rc, fn: fn, m: m, scratch: rc.NumRegs + len(fn.Upvalues), this: -1, litHosts: litHosts}
+	l := &regLowering{rc: rc, fn: fn, m: m, scratch: rc.NumRegs + len(fn.Upvalues), this: -1, litHosts: litHosts, ins: regJumpIns(rc, reach)}
 	derived := fn.Kind == bytecode.KindDerivedConstructor
 	if derived {
 		// A derived constructor's this binding, past the captured
@@ -520,6 +604,9 @@ func lowerRegLits(rc *bytecode.RegCode, fn *bytecode.Function, m lowering, litHo
 			continue
 		}
 		if t, b, ok := l.loopTest(pc, reach); ok && l.lowerLoopTest(pc, t, b) {
+			continue
+		}
+		if l.boolBranch(pc, reach) {
 			continue
 		}
 		l.lower(pc)

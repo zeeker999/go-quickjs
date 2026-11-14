@@ -242,3 +242,85 @@ func TestJITRegPollMakesObjects(t *testing.T) {
 		})
 	}
 }
+
+// regCompareSrc's functions return comparisons, which register code
+// compiles to a compare-and-branch and the two booleans' loads (the
+// compile package's boolBranch): of numbers, NaN among them, strings,
+// mixed values, objects whose valueOf runs, null and undefined.
+const regCompareSrc = `
+function lt(a, b) { return a < b }
+function le(a, b) { return a <= b }
+function gt(a, b) { return a > b }
+function ge(a, b) { return a >= b }
+function eq(a, b) { return a == b }
+function ne(a, b) { return a != b }
+function seq(a, b) { return a === b }
+function sne(a, b) { return a !== b }
+function nle(a, b) { return !(a <= b) }
+function lti(a) { return a < 3 }
+function isNull(a) { return a == null }
+function notNull(a) { return a != null }
+var calls = 0;
+var vo = { valueOf() { calls++; return 2 } };
+var values = [1, 2, 3, -0, 0, NaN, Infinity, "2", "10", "a", null, undefined, true, vo];
+function table() {
+	var out = [];
+	for (var i = 0; i < values.length; i++) {
+		var a = values[i];
+		out.push(lti(a) ? 1 : 0, isNull(a) ? 1 : 0, notNull(a) ? 1 : 0);
+		for (var j = 0; j < values.length; j++) {
+			var b = values[j];
+			out.push(+lt(a, b), +le(a, b), +gt(a, b), +ge(a, b), +eq(a, b), +ne(a, b), +seq(a, b), +sne(a, b), +nle(a, b));
+		}
+	}
+	return out.join("") + ":" + calls;
+}
+function count(n, k) { var s = 0; for (var i = 0; i < n; i++) if (seq(i & 15, k)) s++; return s }
+`
+
+// A comparison's boolean is lowered as the comparison (boolBranch), not
+// as a branch to two constants: every answer the interpreter's, valueOf
+// run as often, idle and marking; and a test of the returned boolean,
+// inlined, branches on the comparison itself, no phi of the constants.
+func TestJITRegComparisonValues(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			listings := map[string]string{}
+			mir.Annotate = true
+			JITCodeHook = func(f JITFunction, _ []byte, c *mir.Code) { listings[f.Name] = c.Listing }
+			defer func() { JITCodeHook, mir.Annotate = nil, false }()
+			rts := regNativeRuntimes(t, regCompareSrc)
+			var got [2][2]string
+			for k, r := range rts {
+				tbl, _ := r.GetProp(Obj(r.Global()), r.Intern("table"))
+				cnt, _ := r.GetProp(Obj(r.Global()), r.Intern("count"))
+				for range 30 {
+					v, err := r.Call(tbl, Undefined, nil)
+					got[k][0] = regNativeShow(r, v, err)
+					v, err = r.Call(cnt, Undefined, []Value{Float(3000), Float(5)})
+					got[k][1] = regNativeShow(r, v, err)
+				}
+			}
+			if got[0] != got[1] {
+				t.Fatalf("with the JIT %q, without %q", got[0], got[1])
+			}
+			if got[1][1] != "188" {
+				t.Errorf("count = %s, want 188", got[1][1])
+			}
+			for _, name := range []string{"lt", "seq", "nle"} {
+				if l, ok := listings[name]; ok && strings.Contains(l, " = phi ") {
+					t.Errorf("%s's boolean is a phi:\n%s", name, l)
+				}
+			}
+			if l := listings["count"]; strings.Contains(l, "const tagged [2:") {
+				t.Errorf("count branches on a boolean's constants:\n%s", l)
+			}
+		})
+	}
+}

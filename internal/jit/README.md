@@ -271,6 +271,15 @@ test's origins, each origin's together after a `Nop` of the jump's, and
 (`At`). A test that suspends, steps an iterator or is in another handler
 than the jump is not copied.
 
+**Comparisons' booleans.** Register code makes a comparison's value a
+compare-and-branch to two loads of the booleans, which the interpreter
+runs as one branch; lowered so, the value was a phi of two constants that a
+test of it -- an inlined callback's result -- branched on again. Where
+nothing else jumps into the loads, the lowering makes the compare-and-branch
+the comparison's `Binary` to the register, negated where the branch's way
+says so, and a jump past the loads (`boolBranch`), as the stack form's `lt`
+or `strict_eq` is: a branch on the value is a branch on the comparison.
+
 **The atomicity rule.** An exit anywhere in an origin's instructions runs
 the register instruction again from its start, in the interpreter. So
 nothing may leave once something of it has committed (`Program`'s
