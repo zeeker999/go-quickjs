@@ -489,6 +489,7 @@ func lowerRegLits(rc *bytecode.RegCode, fn *bytecode.Function, m lowering, litHo
 	}
 	regCaptured(p, rc, fn)
 	liveRegs(p, rc)
+	regStringParts(p)
 	if live := l.litsLive(p, start); len(live) != 0 {
 		// Their window's registers read past them, which the lowering
 		// does not write: Go's whole.
@@ -502,6 +503,70 @@ func lowerRegLits(rc *bytecode.RegCode, fn *bytecode.Function, m lowering, litHo
 		return lowerRegLits(rc, fn, m, hosts)
 	}
 	return p, nil
+}
+
+// regStringParts makes each conversion of a part where it is -- to_string's
+// or str_part's, a StringConcat of one part -- whose register is read by a
+// concat of more parts and by nothing before it, a StringPart, as the
+// stack form's stringParts does: the concat converts a primitive that
+// calls nothing the same, so the part needs only checking to be one, not a
+// call of Go of its own. Register code's concat reads its parts where they
+// are, or copies of them in scratch slots (lowerReg's block): a copy of
+// the part's register into the concat's run is the concat's read. Where
+// anything else reads or writes the register first, a jump lands between
+// them, the code goes elsewhere, or the register is live past the concat
+// -- which would read it unconverted -- it stays as it is. An exit between
+// them leaves the register the primitive it was, which the interpreter's
+// concat converts the same. It runs on p's liveness (liveRegs).
+func regStringParts(p *ir.Program) {
+	targets := make([]bool, len(p.Code)+1)
+	for _, in := range p.Code {
+		if in.Op == ir.Jump || in.Op == ir.Branch || in.Op == ir.IterStep {
+			targets[in.Target] = true
+		}
+	}
+	for _, e := range p.Entries {
+		targets[e] = true
+	}
+	for pc := range p.Code {
+		in := p.Code[pc]
+		if in.Op != ir.StringConcat || in.Extra != 1 || p.Maps[pc].Depth < 0 || in.Dest < 0 || in.Dest >= p.Regs {
+			continue
+		}
+		d := in.Dest
+		copies := []int{d}
+		reads := func(c ir.Instruction) bool {
+			return c.Op == ir.StringConcat && c.Extra > 1 && slices.ContainsFunc(copies, func(s int) bool { return c.Dest <= s && s < c.Dest+c.Extra })
+		}
+		for k := pc + 1; k < len(p.Code); k++ {
+			c := p.Code[k]
+			if targets[k] || p.Maps[k].Depth < 0 {
+				break
+			}
+			if reads(c) {
+				// Live past the concat's origin, whose instructions are
+				// all as live as its first.
+				next := k + 1
+				for next < len(p.Code) && p.Origin[next] == p.Origin[k] {
+					next++
+				}
+				if next < len(p.Code) && !p.LiveAt(next, d) {
+					p.Code[pc] = ir.Instruction{Op: ir.StringPart, Left: ir.Slot(d), Dest: d}
+				}
+				break
+			}
+			if c.Op == ir.Copy && c.Left.Slot == d && c.Dest >= p.Regs {
+				// Into the concat's run of scratch slots.
+				copies = append(copies, c.Dest)
+				continue
+			}
+			if c.Op == ir.Jump || c.Op == ir.Branch || c.Op == ir.Return || c.Op == ir.Rethrow || c.Op == ir.Host && !c.Whole && !c.Window ||
+				c.Left.Slot == d || c.Right.Slot == d || c.Third.Slot == d || c.Dest == d || c.Extra == d && c.Op != ir.StringConcat && c.Op != ir.ArrayLiteral ||
+				c.Op == ir.StringConcat && c.Dest <= d && d < c.Dest+c.Extra || c.Window && c.Left.Slot <= d && d < c.Left.Slot+2+c.Extra {
+				break
+			}
+		}
+	}
 }
 
 // regReachable is which register instructions the code's start reaches,

@@ -187,7 +187,12 @@ origin (`ir.Program.Origin`):
 Where a register instruction's operands are a run of registers that is not
 where its result goes -- `new_array`'s elements, `concat`'s parts -- they
 are copied to scratch slots first, which the operation reads as a run of
-operands. What the lowering leaves to Go whole -- a call, a cold operation
+operands. A part's conversion where it is -- `to_string`'s, `str_part`'s -- that
+only a concat of more parts reads, itself or a copy of it in the concat's
+run, and that is not live past the concat, is a `StringPart`
+(`regStringParts`, the stack form's `stringParts`): a check that it is a
+primitive, which the concat converts the same, not a call of Go of its own.
+What the lowering leaves to Go whole -- a call, a cold operation
 -- is one `Host`, alone in its origin: Go runs the whole register
 instruction. Where Go can run it on the frame and the registers it reads
 and writes are known (`compile.RegAccess`: up to three read, one written)
