@@ -149,3 +149,29 @@ func TestRegTableFastPaths(t *testing.T) {
 		}
 	}
 }
+
+// TestRegStringImmOperand runs a string as the operand of a bitwise or an
+// arithmetic operator with an immediate (regBinImm), which converts it to
+// its number first -- but an addition's, which is a concatenation -- by
+// the Go table and natively.
+func TestRegStringImmOperand(t *testing.T) {
+	src := `
+		var ss = ["12345", "  7  ", "0x1F", "1e3", "", "abc", "-0", "4294967297", "-2147483649"], out = []
+		function or0(s) { return s | 0 }
+		function xor1(s) { return s ^ 1 }
+		function ushr0(s) { return s >>> 0 }
+		function sub1(s) { return s - 1 }
+		function add1(s) { return s + 1 }
+		for (var round = 0; round < 2; round++)
+			for (var f of [or0, xor1, ushr0, sub1, add1]) out.push(ss.map(f).join())
+		out.join("|")`
+	one := "12345,7,31,1000,0,0,0,1,2147483647|12344,6,30,1001,1,1,1,0,2147483646|" +
+		"12345,7,31,1000,0,0,0,1,2147483647|12344,6,30,999,-1,NaN,-1,4294967296,-2147483650|" +
+		"123451,  7  1,0x1F1,1e31,1,abc1,-01,42949672971,-21474836491"
+	want := one + "|" + one
+	for _, native := range []bool{false, true} {
+		if got := regTableRunSrc(t, src, native); got != want {
+			t.Errorf("native %v:\ngot  %s\nwant %s", native, got, want)
+		}
+	}
+}
