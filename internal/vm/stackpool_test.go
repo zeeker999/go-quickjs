@@ -37,6 +37,17 @@ func newOldTiersForTest(cfg Config) *Runtime {
 	return r
 }
 
+// newTreeTierForTest is New(cfg) with the tree tier on or off for the code
+// the runtime loads, as SetTreeTier sets it for the code the process runs
+// next, so that tests comparing the tiers need not switch the process's
+// and can run in parallel. On, it is the process's setting, which only
+// QJS_NOTREE turns off.
+func newTreeTierForTest(tree bool, cfg Config) *Runtime {
+	r := New(cfg)
+	r.noTree = !tree
+	return r
+}
+
 // TestReleasedStacksAreClear pins that a stack a closed runtime gives back
 // holds nothing of what ran on it -- the frames of functions, generators and
 // all -- so that the next runtime to take it keeps nothing of the last one
