@@ -10,6 +10,7 @@ import "testing"
 // which reads the holder or calls the accessor -- in either tier, and from a
 // pure body, which reads through own too.
 func TestOwnCacheOnlyForPlainOwnData(t *testing.T) {
+	t.Parallel()
 	const src = `
 		var log = [];
 		function P() {}

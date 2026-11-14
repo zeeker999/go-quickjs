@@ -13,6 +13,7 @@ import (
 // this and of a local, and a tree. Each function has a local of its own, so
 // that it is run on its tree rather than by pureCall.
 func TestEqualityValues(t *testing.T) {
+	t.Parallel()
 	const src = `
 		let log = ''
 		const vals = [0, -0, 1, NaN, '0', '1', '', 'go', true, false, null, undefined, 0n, 1n, dda,

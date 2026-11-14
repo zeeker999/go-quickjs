@@ -160,6 +160,7 @@ throw 2: TypeError bottom 0`
 // Calls in tail position answer what Node's do, made by the tree tier's
 // nodes (tailAll) and by the interpreter, in a runtime made twice.
 func TestTailCallsAgreeWithNode(t *testing.T) {
+	t.Parallel()
 	for round := range 4 {
 		r := newTreeTierForTest(round < 2, Config{})
 		v, err := r.Run(compileForTest(t, tailCallScript))
@@ -215,6 +216,7 @@ const deepTailScript = `(function () {
 // stack run in constant space, as strict code's tail calls must, on the
 // tree tier and in the interpreter alike.
 func TestDeepTailCalls(t *testing.T) {
+	t.Parallel()
 	const want = "705082704 100000 false false true true 150000 obj obj? c p super bound 2 arrow 100:100000:100000:100000 14285:200000 2:100000:undefined,3:75000:75001,3:50000:50001,3:25000:25001,3:0:1 RangeError deep true"
 	for _, tree := range []bool{true, false} {
 		r := newTreeTierForTest(tree, Config{MaxCallDepth: 400})
@@ -277,6 +279,7 @@ func TestTailCallsBuiltAsNodes(t *testing.T) {
 // spin's. By a plain call (tailAll) and by a private method's
 // (tailCallNode), tree tier on and off: Node v26.10.0's answers.
 func TestTailCallArgumentsAfterDefaults(t *testing.T) {
+	t.Parallel()
 	const src = `(function () {
 	"use strict";
 	function spin(n, a, b, c) { return n === 0 ? 0 : spin(n - 1, "s1", "s2", "s3"); }

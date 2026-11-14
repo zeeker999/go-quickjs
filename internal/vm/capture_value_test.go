@@ -18,6 +18,7 @@ import (
 // dead zone, as a hoisted function or a switch's other case sees it, or a
 // parameter list's later parameter. Each on both tiers.
 func TestCaptureByValue(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name, src, want string
 	}{
@@ -269,6 +270,7 @@ func runCaptureCase(t *testing.T, r *Runtime, c captureCase, rounds int) string 
 // TestCaptureByValueCases runs captureCases on both tiers, three calls of
 // each case's function in a runtime of its own.
 func TestCaptureByValueCases(t *testing.T) {
+	t.Parallel()
 	for _, c := range captureCases {
 		for _, on := range []bool{false, true} {
 			r := newTreeTierForTest(on, Config{})
@@ -288,6 +290,7 @@ func TestCaptureByValueCases(t *testing.T) {
 // parameters nothing assigns; none where the maker assigns one, nor in
 // code compiled for a debugger.
 func TestCaptureByValueMarks(t *testing.T) {
+	t.Parallel()
 	kinds := `'use strict'; function mk(a, b) { const c = 3; return [() => a + b + c, function f() { return a }, function* g() { yield a }, async function h() { return a }, async function* ag() { yield a }, class C { m() { return a + c } }, class D extends Object { constructor() { super(); this.v = b } }, { m() { return a }, get k() { return b } }] }`
 	for _, tt := range []struct {
 		name, src     string

@@ -14,6 +14,7 @@ import (
 // TypeError. Each function has a local of its own, so that it is run on
 // its tree rather than by pureCall.
 func TestSetPropAt(t *testing.T) {
+	t.Parallel()
 	const src = `
 		let log = ''
 		class S { set p(v) { log += 'set' + v + ';' } }

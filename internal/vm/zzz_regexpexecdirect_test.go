@@ -89,6 +89,7 @@ func TestRegExpExecDirect(t *testing.T) {
 // match that spends the step budget throws what the call with a frame
 // throws, its stack and Error.stackTraceLimit's getter run as often.
 func TestRegExpExecDirectFrameless(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	if _, err := r.Run(compileForTest(t, regexpExecDirectTestSrc+`; var rg = /(\d*)(\D*)/g, rp = /(\d*)(\D*)/`)); err != nil {

@@ -11,6 +11,7 @@ import "testing"
 // during the loop is not visited. The answers are the spec's order, which
 // Node gives.
 func TestForInDictionary(t *testing.T) {
+	t.Parallel()
 	src := `
 		function keys(o) { var s = []; for (var k in o) s.push(k); return s.join(',') }
 		var d = { z: 0, a: 1, b: 2 }; delete d.z;

@@ -12,6 +12,7 @@ import "testing"
 // ignored in sloppy code and throws in strict code. Each answer is the
 // interpreter's, and Node's.
 func TestTreePropertyChains(t *testing.T) {
+	t.Parallel()
 	src := `
 		function Box(o) { this.inner = o; }
 		Box.prototype.read = function () { return this.inner.v + ',' + this.inner.w; };

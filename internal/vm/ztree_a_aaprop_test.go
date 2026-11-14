@@ -15,6 +15,7 @@ import (
 // throws a TypeError. Each function has a local of its own beyond the one
 // it stores to, so that it is run on its tree rather than by pureCall.
 func TestStoreProp(t *testing.T) {
+	t.Parallel()
 	const src = `
 		class P { constructor(v) { this.v = v } get g() { return 'g' + this.v } walk() { let _k = 0, x = this.v; x = this.v; return x } }
 		P.prototype.q = 'proto'

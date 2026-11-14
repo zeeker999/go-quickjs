@@ -9,6 +9,7 @@ import "testing"
 // slot's key being the empty atom -- nor lead the layout's other objects
 // astray. Adding a key gives the object an index of its own.
 func TestDeleteBorrowsIndex(t *testing.T) {
+	t.Parallel()
 	const src = `
 	function make() {
 		var o = {};
@@ -68,6 +69,7 @@ func TestDeleteBorrowsIndex(t *testing.T) {
 // key has the index of the layout it left, which stays as it was, and an
 // object that then adds a key has one of its own without the deleted key.
 func TestDeleteBorrowedIndexShape(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	v, err := r.Run(compileForTest(t, `

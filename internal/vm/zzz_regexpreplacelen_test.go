@@ -146,6 +146,7 @@ func TestRegExpReplaceLen(t *testing.T) {
 // is made again with its frames. Where RegExp.prototype is no longer as
 // the realm made it, the replace is the script's.
 func TestRegExpReplaceLenFails(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	src := `var gets = 0, limit = Error.stackTraceLimit;

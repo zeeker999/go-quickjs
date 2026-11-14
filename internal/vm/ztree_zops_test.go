@@ -14,6 +14,7 @@ import (
 // errors and the order things run in included, and that the functions
 // named in trees run as trees.
 func TestTreeOps(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name, src, want string
 		trees           []string
@@ -127,6 +128,7 @@ func assertTreeIn(t *testing.T, fn *bytecode.Function, name string) {
 // (let ...) loop, built as a tree since its dead zone is, counted none --
 // while ?. and ?? find it neither. Each function runs as a tree.
 func TestTreeHTMLDDA(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct{ name, src, want string }{
 		{"eqNull", `function f(x) { let n = 0; for (let i = 0; i < 3; i++) if (x == null) n++; return n } f(dda) + ',' + f(null) + ',' + f(0)`, "3,3,0"},
 		{"neUndefined", `function f(x) { var n = 0; for (var i = 0; i < 3; i++) if (x != undefined) n++; return n } f(dda) + ',' + f(undefined) + ',' + f({})`, "0,0,3"},

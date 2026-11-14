@@ -9,6 +9,7 @@ import "testing"
 // an array-like receiver and a nullish one's TypeError. The output is
 // Node's.
 func TestShortMethodResults(t *testing.T) {
+	t.Parallel()
 	const src = `var out = [];
 var h = [1, , 3, , 5];
 out.push(JSON.stringify(h.slice()), 1 in h.slice(), h.slice(1).length, h.slice(-1)[0], h.slice(3).hasOwnProperty(0));

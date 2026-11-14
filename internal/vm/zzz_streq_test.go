@@ -36,6 +36,7 @@ const strEqTestWant = "ab/ab//3,ab/ab//3,b/b/f/3,b/b/f/3,b/b/f/3,bc/bc/f/3,b/b/f
 // the interpreter does, and as Node does. Each function has a local of its
 // own, so that it is run on its tree rather than by pureCall.
 func TestStrictEqualityWithStrings(t *testing.T) {
+	t.Parallel()
 	for _, c := range compileForTest(t, strEqTestSrc).Constants {
 		if c.Kind != bytecode.ConstFunction || c.Fn == nil {
 			continue

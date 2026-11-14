@@ -11,6 +11,7 @@ import (
 // has made the additions concatenations: the conversions it makes, and
 // when, are each addition's, on both tiers.
 func TestStringChain(t *testing.T) {
+	t.Parallel()
 	const obj = `var log = []; var o = { valueOf() { log.push('v'); return 7 }, toString() { log.push('s'); return 'S' } }; function g() { log.push('g'); return 'G' }; `
 	for _, tt := range []struct {
 		name, src, want string

@@ -13,6 +13,7 @@ import (
 // derived constructor's this, and an async generator's queue. A direct
 // eval's vars, the rest of it, are TestGeneratorEvalVars's.
 func TestGeneratorValues(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name, src, want string
 		async           bool
@@ -145,6 +146,7 @@ func TestGeneratorLoopRoom(t *testing.T) {
 // generator that finishes lets it go. Each resumption runs as its tree
 // and in the interpreter, which make the same saved part.
 func TestGeneratorSavedPart(t *testing.T) {
+	t.Parallel()
 	if unsafe.Sizeof(uintptr(0)) != 8 {
 		t.Skip("sizes of a 64-bit build")
 	}
@@ -224,6 +226,7 @@ func TestGeneratorSavedPart(t *testing.T) {
 // after -- arguments, a rest parameter, a default, a pattern, an eval --
 // they are kept.
 func TestGeneratorArgsKept(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		decl, call, want string
 		nargs            uint32

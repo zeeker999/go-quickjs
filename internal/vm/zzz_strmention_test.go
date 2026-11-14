@@ -106,6 +106,7 @@ last
 }
 
 func TestStrAppendMentions(t *testing.T) {
+	t.Parallel()
 	for _, m := range strMentions {
 		t.Run(strings.ReplaceAll(m.name, " ", "_"), func(t *testing.T) {
 			src := strMentionProgram(m.decl, m.read)

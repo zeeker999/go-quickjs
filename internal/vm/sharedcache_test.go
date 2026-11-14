@@ -9,6 +9,7 @@ import "testing"
 // front of the one that had it, and one is deleted -- in the interpreter
 // and the trees alike.
 func TestSharedCacheMegamorphic(t *testing.T) {
+	t.Parallel()
 	src := `
 		function Base() {} Base.prototype.kind = function () { return "base"; };
 		var classes = [];

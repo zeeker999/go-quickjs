@@ -19,6 +19,7 @@ import (
 // charCodeAt and a RegExp literal's argument. Each function has a local of
 // its own, so that it is run on its tree rather than by pureCall.
 func TestMethodProp(t *testing.T) {
+	t.Parallel()
 	const src = `
 		'use strict'
 		let log = ''

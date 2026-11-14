@@ -12,6 +12,7 @@ import (
 // calls, or a short one, stays frameless (pureCall), as does every call
 // from inside another pure body. Each answers the same in both tiers.
 func TestPureByTree(t *testing.T) {
+	t.Parallel()
 	const src = `
 		var HELD = 4, RUN = 2;
 		function T() { this.state = 0; this.v = 1 }

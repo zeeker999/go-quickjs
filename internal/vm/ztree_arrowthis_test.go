@@ -16,6 +16,7 @@ import (
 // this, and inside a derived constructor the ReferenceError before super()
 // and the object after it. Eval code's arrows are among treeScripts'.
 func TestArrowThis(t *testing.T) {
+	t.Parallel()
 	const src = `
 		function plain() { let _k = 0; return () => { let _j = 0; return typeof this + ':' + (this === undefined) } }
 		function sloppy() { let _k = 0; const f = () => { let _j = 0; return typeof this + this.valueOf() }; return f() }

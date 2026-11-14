@@ -129,6 +129,7 @@ func TestTreeFlowStraightCode(t *testing.T) {
 // TestTreeFlowBackEdges pins that a structured loop counts the back edges
 // the interpreter counts, which decide when the interrupt check runs.
 func TestTreeFlowBackEdges(t *testing.T) {
+	t.Parallel()
 	for _, src := range flowShapes {
 		var left [2]int
 		var res [2]Value

@@ -15,6 +15,7 @@ import "testing"
 // a valueOf in a chain calling functions of their own. On the trees and in
 // the interpreter.
 func TestTailSwapCalls(t *testing.T) {
+	t.Parallel()
 	src := `
 		var t1
 		function sloppyF(n) { return n === 0 ? 'sloppy' : t1(n - 1) }

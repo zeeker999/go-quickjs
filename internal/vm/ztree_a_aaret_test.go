@@ -12,6 +12,7 @@ import (
 // super() has not been called. Each function has a local of its own, so
 // that it is run on its tree rather than by pureCall.
 func TestReturnAt(t *testing.T) {
+	t.Parallel()
 	const src = `
 		function nothing(x) { let _k = 0; if (x) return; }
 		function local(x) { let _k = x + 1; return _k }

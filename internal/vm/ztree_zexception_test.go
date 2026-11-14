@@ -20,6 +20,7 @@ import (
 // clauses; closures made in a catch clause; and the frames a throwing
 // nested tree leaves, which the handler's frame must not keep.
 func TestTreeExceptionCompletions(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name, src, want string
 	}{
@@ -154,6 +155,7 @@ func TestTreeExceptionLoopStructures(t *testing.T) {
 // TestTreeExceptionInterrupt pins that an interrupt is not an exception a
 // tree's handler catches: neither the catch nor the finally clause runs.
 func TestTreeExceptionInterrupt(t *testing.T) {
+	t.Parallel()
 	for _, on := range []bool{false, true} {
 		r := newTreeTierForTest(on, Config{})
 		ctx, cancel := context.WithCancel(context.Background())
@@ -212,6 +214,7 @@ func TestTreeExceptionSharedAcrossRuntimes(t *testing.T) {
 // RangeError from inside nested trees, is caught by the handler that encloses
 // it, leaving no frames and no stack behind.
 func TestTreeExceptionStackLimit(t *testing.T) {
+	t.Parallel()
 	for _, on := range []bool{false, true} {
 		r := newTreeTierForTest(on, Config{MaxCallDepth: 24})
 		fn := compileForTest(t, `function g(n) { return g(n + 1) } function f() { var s = 0; for (var i = 0; i < 20; i++) { try { g(0) } catch (e) { if (e.constructor.name === 'RangeError') s++ } } return s } f()`)

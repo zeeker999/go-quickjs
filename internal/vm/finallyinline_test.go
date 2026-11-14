@@ -21,6 +21,7 @@ import (
 // returned before the clause changes what it was read from. On the trees
 // and in the interpreter.
 func TestFinallyInline(t *testing.T) {
+	t.Parallel()
 	src := `
 		var log = []
 		function a(x) { try { log.push('t' + x) } finally { log.push('f' + x) } return 'a' }
@@ -61,6 +62,7 @@ func TestFinallyInline(t *testing.T) {
 // runs, unless the clause breaks out, when it is what the clause produced:
 // as Node's eval gives them.
 func TestFinallyInlineCompletion(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ src, want string }{
 		{"try { 1 } finally { 2 }", "1"},
 		{"do { try { 3 } finally { break } } while (0)", "undefined"},
@@ -93,6 +95,7 @@ func TestFinallyInlineCompletion(t *testing.T) {
 // push_undef. A clause inside a clause, and code compiled for a debugger,
 // have their clause once.
 func TestFinallyInlineCode(t *testing.T) {
+	t.Parallel()
 	fnOf := func(src string, debug bool) *bytecode.Function {
 		t.Helper()
 		prog, err := parser.Parse(src, parser.Options{})

@@ -8,6 +8,7 @@ import "testing"
 // x < -1 beside them; -0 stays -0. The answers are the interpreter's and
 // the trees' alike, and Node's.
 func TestNegativeIntLiteral(t *testing.T) {
+	t.Parallel()
 	src := `
 		function f(x) {
 			var s = [x + -8, x - -8, x * -2, x >> -1, x >>> -30, (x + -8) >> 1, x === -1, x < -1];

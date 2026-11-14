@@ -8,6 +8,7 @@ import "testing"
 // Reflect.construct, coercion, an invalid date, and the function called
 // rather than constructed. The answers are Node's, in any time zone.
 func TestDateObjects(t *testing.T) {
+	t.Parallel()
 	const src = `function f() {
   var out = [];
   var a = new Date(0), b = new Date(a), c = new Date("1970-01-02T00:00:00Z"), d = new Date(Date.UTC(2020, 1, 29, 12)), e = new Date(NaN);

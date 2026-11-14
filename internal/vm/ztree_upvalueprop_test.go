@@ -7,6 +7,7 @@ import "testing"
 // of another layout, a string, null -- whose read throws a TypeError. Each
 // answer is the interpreter's, and the trees build the read.
 func TestTreeUpvalueProperty(t *testing.T) {
+	t.Parallel()
 	src := `
 		function make(o) {
 			function read(n) { var s = ''; for (var i = 0; i < n; i++) s += o.x + ',' + o.y + ';'; return s }

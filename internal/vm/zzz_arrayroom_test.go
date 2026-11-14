@@ -10,6 +10,7 @@ import (
 )
 
 func TestArrayLiteralRoom(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	if _, err := r.Run(compileForTest(t, `function fill(n) {
@@ -57,6 +58,7 @@ func TestArrayLiteralRoom(t *testing.T) {
 }
 
 func TestArrayLiteralRoomFirstUse(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	r.SetEvaluator(func(source string, _ EvalRequest) (*bytecode.Function, error) {
@@ -90,6 +92,7 @@ func TestArrayLiteralRoomFirstUse(t *testing.T) {
 }
 
 func TestArrayLiteralRoomSamples(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	a := newArrayObject(r.proto.array, 30000)
@@ -148,6 +151,7 @@ func TestArrayLiteralRoomCollected(t *testing.T) {
 }
 
 func TestArrayLiteralRoomRealms(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	fn := compileForTest(t, `function fill(n) {
@@ -190,6 +194,7 @@ func TestArrayLiteralRoomRealms(t *testing.T) {
 }
 
 func TestArrayLiteralRoomMemoryLimit(t *testing.T) {
+	t.Parallel()
 	r := New(Config{MemoryLimit: 64 << 20})
 	defer r.Close()
 	if _, err := r.Run(compileForTest(t, `function fill() {
@@ -213,6 +218,7 @@ func TestArrayLiteralRoomMemoryLimit(t *testing.T) {
 }
 
 func TestArrayLiteralRoomAfterSmall(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	if _, err := r.Run(compileForTest(t, `function fill(n) {
@@ -255,6 +261,7 @@ func TestArrayLiteralRoomAfterSmall(t *testing.T) {
 // The learned room changes where an append reallocates. Callback methods
 // must read subsequent mutations from the array's current elements.
 func TestArrayLiteralRoomCallbackGrowth(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	if _, err := r.Run(compileForTest(t, `function fill(n) {

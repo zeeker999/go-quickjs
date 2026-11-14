@@ -9,6 +9,7 @@ import "testing"
 // Every property of a primitive had been deleted, true. In the interpreter
 // and on the trees, a loop of each enough for the tree tier to take it.
 func TestDeletePrimitiveProperty(t *testing.T) {
+	t.Parallel()
 	const src = `
 		var r = []
 		r.push(delete 'ab'.length, delete 'ab'[0], delete 'ab'[1], delete 'ab'[5], delete 'ab'.x,

@@ -61,6 +61,7 @@ func newOldTiersTreeForTest(tree bool, cfg Config) *Runtime {
 // all -- so that the next runtime to take it keeps nothing of the last one
 // alive.
 func TestReleasedStacksAreClear(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	if _, err := r.Run(compileForTest(t, `
 		function deep(n, o) { return n ? deep(n - 1, {o}) : o }
@@ -86,6 +87,7 @@ func TestReleasedStacksAreClear(t *testing.T) {
 // TestReleaseStackWhileRunning pins that a runtime closed from inside its own
 // script keeps its stack, which the script is still running on.
 func TestReleaseStackWhileRunning(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	released := false
 	r.global.setOwnRaw(r.atoms.intern("closeNow"), Obj(r.newNativeFunc("closeNow", 0,

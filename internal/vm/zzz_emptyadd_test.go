@@ -42,6 +42,7 @@ const emptyAddTestWant = `s,string:s,s/string,s,ss,asbs,[s|s] ,string:,/string,,
 // "" + x of a local is x itself where it is a string, and the addition
 // otherwise, in the tree tier and in the interpreter, each answer Node's.
 func TestEmptyStringAdd(t *testing.T) {
+	t.Parallel()
 	for _, tree := range []bool{true, false} {
 		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, emptyAddTestSrc))

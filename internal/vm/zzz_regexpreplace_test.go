@@ -101,6 +101,7 @@ func TestRegExpReplaceFlat(t *testing.T) {
 // own way does (regExpReplace), at each of the ticks it is made at:
 // lastIndex and the legacy statics are those of the last match it made.
 func TestRegExpReplaceFlatInterrupt(t *testing.T) {
+	t.Parallel()
 	stopped := make(chan struct{})
 	close(stopped)
 	for _, re := range []string{"/b/g", "/b(a)?/g", "/b/", "/b/y"} {
@@ -150,6 +151,7 @@ func TestRegExpReplaceFlatInterrupt(t *testing.T) {
 // error, lastIndex and the legacy statics, with an interrupt at each of
 // the first ticks and where a match spends the step budget.
 func TestRegExpMatchAllASCII(t *testing.T) {
+	t.Parallel()
 	stopped := make(chan struct{})
 	close(stopped)
 	subject := strings.Repeat("ab", 6) + strings.Repeat("c", 40) + "ab"

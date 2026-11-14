@@ -11,6 +11,7 @@ import (
 // even, and only a tie from all of a number's digits, which breaks it upward.
 // Both must give what all the digits do, ties included.
 func TestNumberFormattingMatchesExactDigits(t *testing.T) {
+	t.Parallel()
 	rng := rand.New(rand.NewSource(1))
 	var xs []float64
 	for i := 0; i < 3000; i++ {
@@ -68,6 +69,7 @@ func TestNumberFormattingMatchesExactDigits(t *testing.T) {
 // does at the edges: ties taken upward, values that are not quite the decimal
 // they print as, integers past 2**64, and digits past what a double holds.
 func TestFormatFixedIntegerPath(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		x    float64
 		d    int
@@ -105,6 +107,7 @@ func TestFormatFixedIntegerPath(t *testing.T) {
 // decade (9.995 to one digit, 0.9999999999999999), and values either side of
 // 1 that the scaling reaches by division and by multiplication.
 func TestSignificantIntegerPath(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		x         float64
 		d         int

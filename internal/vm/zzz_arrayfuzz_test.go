@@ -55,6 +55,7 @@ const log = [], kept = []
 }
 
 func TestArrayRoomRandom(t *testing.T) {
+	t.Parallel()
 	count := 60
 	if testing.Short() {
 		count = 6

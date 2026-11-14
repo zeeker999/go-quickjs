@@ -71,6 +71,7 @@ const literalTestWant = "a=0,b=1,c=key,d=true,e=null,f=0,g=false,h=end | x=x0,y=
 // define_fields made, field for field, in the same order, with the same
 // side effects, in the tree tier as in the interpreter, as Node does.
 func TestTreeObjectLiterals(t *testing.T) {
+	t.Parallel()
 	for _, c := range compileForTest(t, literalTestSrc).Constants {
 		if c.Kind != bytecode.ConstFunction || c.Fn == nil {
 			continue

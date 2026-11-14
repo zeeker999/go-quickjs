@@ -10,6 +10,7 @@ import "testing"
 // subclass's instance, and the TypeError another receiver gets from the
 // built-in. The output is Node's.
 func TestCollectionOpWithoutFrame(t *testing.T) {
+	t.Parallel()
 	const src = `var out = [];
 function has(m, k) { return m.has(k) }
 function get(m, k) { return m.get(k) }

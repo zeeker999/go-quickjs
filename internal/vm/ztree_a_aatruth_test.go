@@ -14,6 +14,7 @@ import (
 // loop's test. Each function has a local of its own, so that it is run on
 // its tree rather than by pureCall.
 func TestTruthJump(t *testing.T) {
+	t.Parallel()
 	const src = `
 		const vals = [{}, [], function () {}, dda, null, undefined, 0, -0, NaN, 1, '', 'a', true, false, 0n, 1n, Symbol('s')]
 		function a(x) { let _k = 0; if (x) return 'a'; return 'b' }

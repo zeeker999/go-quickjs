@@ -7,6 +7,7 @@ import "testing"
 // other closure over it, and a binding made afresh -- a loop's let -- is a
 // new one, on both tiers.
 func TestCaptureRoom(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name, src, want string
 	}{
@@ -61,6 +62,7 @@ func TestCaptureRoomAllocs(t *testing.T) {
 // in its own allocation: what it holds and how it grows past them, mapped
 // and not, on both tiers.
 func TestArgumentsRoom(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name, src, want string
 	}{
@@ -130,6 +132,7 @@ func TestArgumentsRoomAllocs(t *testing.T) {
 // arguments object and copies the rest from its layout: the layout is the
 // runtime's, shared by its realms, and the function is the realm's.
 func TestArgumentsCalleePerRealm(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	src := `(function () { "use strict"; return Object.getOwnPropertyDescriptor(arguments, "callee").get })()`

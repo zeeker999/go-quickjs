@@ -13,6 +13,7 @@ import (
 // object converted by valueOf, an array, a symbol, and a valueOf that
 // throws, whose error the loose comparison passes on.
 func TestEqualityWithNumbers(t *testing.T) {
+	t.Parallel()
 	const src = `
 		const vals = [0, -0, 1, NaN, '0', '', '1', null, undefined, true, false, 0n, 1n, { valueOf() { return 1 } }, [0], Symbol.iterator]
 		const o = { p: 1 }

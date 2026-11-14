@@ -7,6 +7,7 @@ import "testing"
 // own past that, on both tiers: operands either side of each size's edge,
 // negative ones, and microbench's sum of squares. The answers are Node's.
 func TestBigIntResultRooms(t *testing.T) {
+	t.Parallel()
 	const src = `function f() {
   var out = [], xs = [];
   for (var k of [63, 64, 65, 127, 128, 191, 255, 256, 257, 447, 511, 512, 513, 1023, 1024, 1025, 2047]) {

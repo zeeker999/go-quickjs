@@ -18,6 +18,7 @@ import (
 // from being a pure body pureCall would evaluate instead -- and in the
 // interpreter, three rounds alike.
 func TestLogicalExpressions(t *testing.T) {
+	t.Parallel()
 	const src = `
 		const r = []
 		let log = ''

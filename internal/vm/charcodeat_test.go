@@ -11,6 +11,7 @@ import "testing"
 // on String.prototype, which the same site then calls. The answers are the
 // interpreter's and the trees' alike, and Node's.
 func TestCharCodeAtNode(t *testing.T) {
+	t.Parallel()
 	src := `
 		function at(s, i) { return s.charCodeAt(i); }
 		function at0(s) { return s.charCodeAt(); }

@@ -235,6 +235,7 @@ func TestRegExpDeadExecKinds(t *testing.T) {
 // lastIndex as it was, global or not, in the tree tier and in the
 // interpreter. (Each match spends the budget: half a second.)
 func TestRegExpDeadExecComplexity(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("spends the step budget")
 	}
@@ -274,6 +275,7 @@ out.join('|')`
 // that would run for ever, and the runtime runs on, its calls made as
 // before.
 func TestRegExpDeadExecDeadline(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	if _, err := r.Run(compileForTest(t, `function f(re, s) { for (var i = 0; i < 2; i++) re.exec(s) }`)); err != nil {
@@ -493,6 +495,7 @@ func regexpDeadMallocs(t *testing.T, r *Runtime, call string, count int) uint64 
 // lastIndex, global or not, in the tree tier and in the interpreter.
 // (Each match spends the budget: half a second.)
 func TestRegExpDeadReplaceComplexity(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("spends the step budget")
 	}
@@ -530,6 +533,7 @@ out.join('|')`
 // would run for ever, and the runtime runs on, its replaces made as
 // before.
 func TestRegExpDeadReplaceDeadline(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	if _, err := r.Run(compileForTest(t, `function f(re, s) { for (var i = 0; i < 2; i++) s.replace(re, '') }`)); err != nil {
@@ -554,6 +558,7 @@ func TestRegExpDeadReplaceDeadline(t *testing.T) {
 // string could be too long to be one -- which the replace that makes it
 // throws for -- and makes the matches otherwise.
 func TestRegExpDeadReplaceTooLong(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	rx, err := r.Run(compileForTest(t, `var re = /b/g; re.lastIndex = 7; re`))

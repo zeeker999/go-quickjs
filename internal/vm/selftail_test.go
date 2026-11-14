@@ -16,6 +16,7 @@ import "testing"
 // runs in its frame. Node, which makes no tail call, is asked 5,000 deep.
 // On the trees and in the interpreter, three rounds alike.
 func TestSelfTailCalls(t *testing.T) {
+	t.Parallel()
 	const src = `
 		"use strict"
 		const r = []

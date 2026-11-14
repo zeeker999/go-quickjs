@@ -16,6 +16,7 @@ import "testing"
 // loop. An async case leaves its promise in p, and out is what that settles
 // to: its value, or E and what it threw. The answers are Node's.
 func TestTreeDelegation(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name, src, want string
 		// async says the script settles out once its jobs have run.
@@ -118,6 +119,7 @@ func TestTreeDelegation(t *testing.T) {
 // the frames a stack trace in the delegate sees; a delegate already
 // running; and return and throw after steps made directly.
 func TestTreeDelegateToGenerator(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct{ name, src, want string }{
 		{name: "results", src: `function* inner() { yield 1; return 2 } function* f() { var r = yield* inner(); yield r }
 var g = f(), a = g.next(), b = g.next(), c = g.next(); [Object.keys(a).join(), Object.getPrototypeOf(a) === Object.prototype, a.value, a.done, a === b, b.value, b.done, c.value, c.done].join()`, want: "value,done,true,1,false,false,2,false,,true"},
@@ -161,6 +163,7 @@ var g = f(3), out = [], r = g.next(); for (var k = 10; !r.done; k += 10) { out.p
 // delegate's next makes is of the delegate's next's realm, and one made for
 // a value yield* stepped a generator to (see delegateNext) is of the same.
 func TestTreeDelegateToGeneratorRealm(t *testing.T) {
+	t.Parallel()
 	for _, on := range []bool{false, true} {
 		r := newTreeTierForTest(on, Config{})
 		other := r.NewRealm()

@@ -8,6 +8,7 @@ import "testing"
 // Values on every operator, a result past the int64 range, a division by
 // zero, a negative power, and a BigInt mixed with a number.
 func TestFastAddAndShortBigInts(t *testing.T) {
+	t.Parallel()
 	const src = `function f(a, b) { var r = []; r.push(a + b, a - b, a * b);
 	try { r.push(a / b) } catch (e) { r.push(e.name) }
 	try { r.push(a % b) } catch (e) { r.push(e.name) }

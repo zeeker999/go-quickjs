@@ -10,6 +10,7 @@ import "testing"
 // inside it does not; and that a return leaving a finally clause's own loop
 // does the same. The answers are Node's.
 func TestIteratorsClosedBeforeFinally(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct{ name, src, want string }{
 		{"returnThroughFinally", `var log = []; function* g(n) { try { yield 1; yield 2 } finally { log.push('close ' + n) } } function f() { try { for (const x of g('in')) return 'v' + x } finally { log.push('finally') } } f() + ' ' + log.join(',')`, "v1 close in,finally"},
 		{"breakThroughFinally", `var log = []; function* g(n) { try { yield 1; yield 2 } finally { log.push('close ' + n) } } function f() { outer: for (const y of g('out')) { try { for (const x of g('in')) break outer } finally { log.push('finally') } } return log.join(',') } f()`, "close in,finally,close out"},

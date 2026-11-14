@@ -190,6 +190,7 @@ func TestRegExpPristine(t *testing.T) {
 // layouts of their own that a change gives each another of; a realm made
 // later has its own, which a change to the first one's leaves pristine.
 func TestRegExpPristineRealms(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	p, ctor := r.proto.regexp, r.proto.regexpCtor

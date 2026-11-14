@@ -309,6 +309,7 @@ func TestRegExpLeaves(t *testing.T) {
 // tier and in the interpreter, where a RegExp neither global nor sticky
 // takes it.
 func TestRegExpLeafComplexity(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		tree bool
 		call string
@@ -410,6 +411,7 @@ out.join('|')`
 // A deadline stops a leaf's call of exec on a match that would run for
 // ever, and the runtime runs on.
 func TestRegExpLeafDeadline(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	if _, err := r.Run(compileForTest(t, `function f(re, s) { return re.exec(s) }`)); err != nil {

@@ -58,6 +58,7 @@ const upvalueAddTestWant = "<x><x>é0é1é2😀|14|3|16|18|<x><x>é0é1é2😀y-
 // An addition to a captured binding answers in the tree tier as in the
 // interpreter, as Node answers.
 func TestTreeUpvalueAdd(t *testing.T) {
+	t.Parallel()
 	for _, tree := range []bool{true, false} {
 		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, upvalueAddTestSrc))

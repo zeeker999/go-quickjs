@@ -10,6 +10,7 @@ import "testing"
 // directly and from a closure; and parameter lists with defaults, which
 // start in the dead zone and are bound one at a time.
 func TestTreeDeadZone(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name, src, want string
 		// inner names a closure of f's that is to run as a tree too.

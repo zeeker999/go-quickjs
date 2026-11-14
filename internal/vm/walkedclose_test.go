@@ -14,6 +14,7 @@ import (
 // Before, a walked array closed nothing, which V8 and the specification's
 // IteratorClose do not. Each answer is Node's, on both tiers.
 func TestWalkedArrayClose(t *testing.T) {
+	t.Parallel()
 	src := `
 		var log = [], out = []
 		var AIP = Object.getPrototypeOf([][Symbol.iterator]())

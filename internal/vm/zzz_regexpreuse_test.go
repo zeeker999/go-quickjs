@@ -207,6 +207,7 @@ func regexpReuseSiteOf(t *testing.T, fn *bytecode.Function, name string) *execRe
 // Exec's again, as many as the patterns' numbers of elements, the same
 // arrays on another run.
 func TestRegExpReuseSites(t *testing.T) {
+	t.Parallel()
 	fn := compileForTest(t, regexpReuseTestSrc)
 	cases := []struct {
 		name       string

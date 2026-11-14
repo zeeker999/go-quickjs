@@ -11,6 +11,7 @@ import "testing"
 // for loop's continue goes to its update, not to its head, and had none of
 // this. Each answer is Node's.
 func TestLoopContinueBeforeALaterTest(t *testing.T) {
+	t.Parallel()
 	const src = `
 const out = []
 function forIn(o) {

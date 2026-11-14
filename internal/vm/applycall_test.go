@@ -15,6 +15,7 @@ import (
 // tree tier, the target given its tree's call (planTreeCall), which r.call
 // never gave it.
 func TestApplyArgumentsCallsDirectly(t *testing.T) {
+	t.Parallel()
 	const src = `
 		var Class = { create: function () { return function () { this.initialize.apply(this, arguments) } } };
 		var Point = Class.create();

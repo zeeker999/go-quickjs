@@ -11,6 +11,7 @@ import "testing"
 // are still instances of the class extending them. Each answer is Node's,
 // on the trees and in the interpreter.
 func TestSuperReturnsOwnObject(t *testing.T) {
+	t.Parallel()
 	const src = `
 		const r = []
 		class P { constructor(k) { if (k === 1) return { own: 1 }; if (k === 2) return [1, 2]; if (k === 3) return new Map([[1, 1]]); this.v = k } }

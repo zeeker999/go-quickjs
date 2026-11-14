@@ -14,6 +14,7 @@ import "testing"
 // after such a call -- on the trees and in the interpreter, three rounds
 // alike.
 func TestTailCallArguments(t *testing.T) {
+	t.Parallel()
 	const src = `
 		"use strict"
 		const r = []

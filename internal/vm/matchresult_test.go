@@ -9,6 +9,7 @@ import "testing"
 // indices, named groups, an array changed after the match, and lastIndex
 // past non-ASCII text. The answers are Node's.
 func TestMatchResultStrings(t *testing.T) {
+	t.Parallel()
 	const src = `function show(m) { return m === null ? "null" : JSON.stringify([m.slice(), m.index, m.length, m.groups, m.indices || null]); }
 function f() {
   var out = [];
@@ -69,6 +70,7 @@ true
 // 71, 72 and 73 bytes, a template with $, text that is not ASCII, empty
 // matches, and lastIndex and the legacy statics after. The answers are Node's.
 func TestReplaceShortResults(t *testing.T) {
+	t.Parallel()
 	const src = `function f() {
   var out = [], s = "the quick abc brown fox jumped abc over the lazy dog";
   out.push(s.replace(/abc /g, "-"), s.replace(/abc /g, ""), s.replace(/abc /, "-"));

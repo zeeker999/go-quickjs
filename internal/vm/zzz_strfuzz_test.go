@@ -383,6 +383,7 @@ func strFuzzRun(t *testing.T, r *Runtime, src string, debug bool) string {
 }
 
 func TestStrAppendRandom(t *testing.T) {
+	t.Parallel()
 	count := 400
 	if testing.Short() {
 		count = 40

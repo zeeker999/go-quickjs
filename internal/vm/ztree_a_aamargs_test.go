@@ -16,6 +16,7 @@ import (
 // function has a local of its own, so that it is run on its tree rather
 // than by pureCall.
 func TestMethodLocals(t *testing.T) {
+	t.Parallel()
 	const src = `
 		'use strict'
 		class A {

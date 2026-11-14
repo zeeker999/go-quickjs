@@ -14,6 +14,7 @@ import "testing"
 // leaves its promise in p, and out is what that settles to: its value, or
 // E and what it threw.
 func TestTreeGenerators(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name, src, want string
 		// async says the script settles out once its jobs have run.
@@ -130,6 +131,7 @@ func TestTreeResumedLoopStructured(t *testing.T) {
 // do-while, with labelled break and continue, in a try inside a loop, and
 // an await in a loop of a loop.
 func TestTreeResumedLoops(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name, src, want string
 		async           bool

@@ -8,6 +8,7 @@ import "testing"
 // part (funcExtra's newTarget); any other arrow, the commonest of
 // closures, carries no room for it.
 func TestArrowNewTarget(t *testing.T) {
+	t.Parallel()
 	for _, tree := range []bool{false, true} {
 		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, `

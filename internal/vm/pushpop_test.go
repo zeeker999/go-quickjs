@@ -9,6 +9,7 @@ import "testing"
 // array-like, a setter on the prototype chain -- is the built-in's own
 // work, with its errors. The output is Node's.
 func TestPushPopWithoutFrame(t *testing.T) {
+	t.Parallel()
 	const src = `var out = [];
 function run() {
 	var a = [];
@@ -60,6 +61,7 @@ JSON.stringify(out);
 // held past its new length, one element at a time as a whole run at once,
 // so that nothing it held stays reachable through its storage.
 func TestTruncateClearsSlot(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	v, err := r.Run(compileForTest(t, `var a = [{}, {}, {}, {}, {}, {}]; a.length = 5; a.length = 4; a.length = 1; a`))

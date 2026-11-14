@@ -15,6 +15,7 @@ import "testing"
 // array, an accessor, deleted, and shadowed by a let. Each answer is the
 // interpreter's, and Node's.
 func TestTreeGlobalHeap(t *testing.T) {
+	t.Parallel()
 	src := `
 		heap32 = new Int32Array(16); heapFloat = new Float32Array(16); heapU16 = new Uint16Array(16); heapD = new Float64Array(16);
 		for (var i = 0; i < 16; i++) { heap32[i] = i * 3 - 7; heapFloat[i] = i / 4; heapU16[i] = 65535 - i; heapD[i] = i / 3 }
@@ -116,6 +117,7 @@ func TestTreeGlobalHeap(t *testing.T) {
 // a script run after the first declares heap32, and the functions the
 // first made then read the let's array.
 func TestTreeGlobalHeapShadowed(t *testing.T) {
+	t.Parallel()
 	first := `
 		heap32 = new Int32Array([1, 2, 3, 4]);
 		function rd(fp) { var r0; r0 = heap32[(fp+1)]; return r0 }

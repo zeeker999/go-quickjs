@@ -14,6 +14,7 @@ import (
 // undefined and === is neither. Each function has a local of its own, so
 // that it is run on its tree rather than by pureCall.
 func TestEqualityWithLiterals(t *testing.T) {
+	t.Parallel()
 	const src = `
 		const vals = [null, undefined, true, false, 0, -0, 1, NaN, '', 'null', 0n, {}, [], dda]
 		const o = { p: null }
@@ -77,6 +78,7 @@ func TestEqualityWithLiterals(t *testing.T) {
 // is no string, a number that reads as it, null, undefined, a symbol and
 // another string; of a local, of a property read and of a switch's cases.
 func TestEqualityWithStrings(t *testing.T) {
+	t.Parallel()
 	const src = `
 		const o = { d: 'forward' }
 		const part = 'for'
@@ -127,6 +129,7 @@ func TestEqualityWithStrings(t *testing.T) {
 // null's, which throws a TypeError. Each function has a local of its own,
 // so that it is run on its tree rather than by pureCall.
 func TestEqualityWithProps(t *testing.T) {
+	t.Parallel()
 	const src = `
 		class N { constructor(p) { this.p = p }
 		  t() { let _k = 0; if (this.p === null) return 'a'; if (this.p === undefined) return 'b'; if (this.p == null) return 'c'; if (this.p === 'go') return 'd'; return 'e' } }

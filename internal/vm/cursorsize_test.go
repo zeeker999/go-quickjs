@@ -11,6 +11,7 @@ import (
 // walks is kept apart in its own cursor's allocation, which fits 192
 // bytes.
 func TestCursorSizes(t *testing.T) {
+	t.Parallel()
 	if unsafe.Sizeof(uintptr(0)) != 8 {
 		t.Skip("sizes of a 64-bit build")
 	}
@@ -73,6 +74,7 @@ func TestCursorOneAllocation(t *testing.T) {
 // target's layout changed (Node asks for its own property descriptor
 // instead, and calls no has trap: "a|" and "a"), and whose throw ends it.
 func TestTreeForInAsInterpreter(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ src, want string }{
 		{"var o = { a: 1, b: 2, c: 3 }, s = ''; for (var k in o) s += k + o[k]; return s", "a1b2c3"},
 		{"var a = [1, , 3, 4], s = ''; for (var k in a) s += k + ':' + a[k] + ','; return s", "0:1,2:3,3:4,"},
@@ -109,6 +111,7 @@ func TestTreeForInAsInterpreter(t *testing.T) {
 // next replaced on their prototype and on one iterator, which Go's step
 // calls, and a walk left by break and taken up again.
 func TestTreeMapIterAsInterpreter(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ src, want string }{
 		{"var m = new Map([[1, 'a'], [2, 'b'], [3, 'c']]), s = ''; for (var v of m.values()) s += v; return s", "abc"},
 		{"var m = new Map([[1, 'a'], [2, 'b']]), s = ''; for (var k of m.keys()) s += k; for (var e of m) s += e[0] + e[1]; for (var e of m.entries()) s += e.join('='); return s", "121a2b1=a2=b"},

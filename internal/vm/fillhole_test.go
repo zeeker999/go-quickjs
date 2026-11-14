@@ -11,6 +11,7 @@ import "testing"
 // Object.prototype, which is asked instead. Each answer is Node's, three
 // rounds alike, on the trees and in the interpreter.
 func TestFillHoles(t *testing.T) {
+	t.Parallel()
 	const src = `
 		const out = []
 		function fill(a, order) { for (const i of order) a[i] = i * 10; return a }
@@ -63,6 +64,7 @@ func TestFillHoles(t *testing.T) {
 // run of holes and past the length dense storage is made for, filled and
 // grown as any array is.
 func TestNewArrayLengths(t *testing.T) {
+	t.Parallel()
 	const src = `
 		const out = []
 		for (const n of [0, 1, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 16, 17, 1024, 1025, 65536, 65537]) {

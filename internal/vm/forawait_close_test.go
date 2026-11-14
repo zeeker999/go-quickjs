@@ -15,6 +15,7 @@ import "testing"
 // injected into an async generator suspended in the loop's body closes it.
 // Each case leaves a promise in p, and out is what that settles to.
 func TestForAwaitClose(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct{ name, src, want string }{
 		{"asyncBreak", `var log = []; function tick(n) { if (n) Promise.resolve().then(() => { log.push('t'); tick(n - 1) }) } var it = { [Symbol.asyncIterator]() { return this }, next() { return Promise.resolve({ value: 1, done: false }) }, return() { log.push('R'); return Promise.resolve({}) } }; async function f() { tick(8); for await (const x of it) break; log.push('after') } var p = f().then(() => log.join(''))`, "tRtaftert"},
 		{"asyncBreakNoReturn", `var log = []; function tick(n) { if (n) Promise.resolve().then(() => { log.push('t'); tick(n - 1) }) } var it = { [Symbol.asyncIterator]() { return this }, next() { return Promise.resolve({ value: 1, done: false }) } }; async function f() { tick(8); for await (const x of it) break; log.push('after') } var p = f().then(() => log.join(''))`, "taftert"},

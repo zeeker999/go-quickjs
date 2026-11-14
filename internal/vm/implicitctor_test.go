@@ -13,6 +13,7 @@ import "testing"
 // constructors -- and so do those of a class extending Array and a
 // function. Each answer is Node's, on the trees and in the interpreter.
 func TestImplicitConstructorForwards(t *testing.T) {
+	t.Parallel()
 	const src = `
 		class B { constructor(...a) { this.a = a; this.n = arguments.length } }
 		class D extends B {}

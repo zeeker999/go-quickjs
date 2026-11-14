@@ -18,6 +18,7 @@ import (
 // place (methodProp), which spills nothing. Every function is a tree, one
 // node and a return but deepCall and deepGetGlobal.
 func TestLogicalCallsAndNullish(t *testing.T) {
+	t.Parallel()
 	const src = `
 		const r = []
 		let log = ''

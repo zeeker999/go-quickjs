@@ -88,6 +88,7 @@ const forInCursorTestWant = "x,y,z|p,q|||x,y,z|0,1,2|0,1||xp xq yp yq zp zq xx x
 
 // Loops answer as Node does, whichever cursor they are given.
 func TestForInCursor(t *testing.T) {
+	t.Parallel()
 	for _, tree := range []bool{true, false} {
 		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, forInCursorTestSrc))
@@ -134,6 +135,7 @@ func TestForInCursorUsedAgain(t *testing.T) {
 // step, so it is never there for another loop to take. A cursor that is
 // not done is not taken: the next loop has one of its own.
 func TestForInCursorKept(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	if _, err := r.startForIn(Null); err != nil {
