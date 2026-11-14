@@ -103,14 +103,18 @@ var nativeExitTable [256]regHandler
 // case their Go handlers' fast paths answer, and more: the arithmetic and
 // the bitwise operators, of numbers (by ToInt32 where the Go handler
 // takes int32s alone), into any register, where the Go handler's stores
-// only into one that holds no pointer. A compare-and-branch is not among
-// them: its Go handler counts a back edge's budget as the slow function
-// does not.
+// only into one that holds no pointer; and the property and global reads
+// and writes by their sites, whose own entries, holders and, for a read,
+// earlier shapes (propPoly) the native code reads as rhGetProp,
+// rhSetProp, rhGetGlobal and rhSetGlobal do, and more. A
+// compare-and-branch is not among them: its Go handler counts a back
+// edge's budget as the slow function does not.
 var nativeSlowOnMiss = [...]bytecode.ROp{
 	bytecode.RAdd, bytecode.RSub, bytecode.RMul, bytecode.RAddI, bytecode.RSubI,
 	bytecode.RInc, bytecode.RDec, bytecode.RPostInc, bytecode.RPostDec,
 	bytecode.RAndI, bytecode.ROrI, bytecode.RXorI, bytecode.RShlI, bytecode.RShrI, bytecode.RUShrI,
 	bytecode.RBitAnd, bytecode.RBitOr, bytecode.RBitXor, bytecode.RShl, bytecode.RShr, bytecode.RUShr,
+	bytecode.RGetProp, bytecode.RGetMethod, bytecode.RSetProp, bytecode.RGetGlobal, bytecode.RSetGlobal,
 }
 
 // The exit table, made after regTable (zzreg_table.go's init, which
