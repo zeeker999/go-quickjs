@@ -57,7 +57,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -80,6 +80,19 @@ jobs:
 
       - name: Run tests
         run: go test -count=1 ./...
+
+      # The VM's tests with the JIT made to compile on the first call and
+      # in the background, each compile installed at the third check after
+      # it was handed over (QJS_JIT_STRESS's background). It runs here
+      # rather than beside the JIT's test262, whose job it made the
+      # longest of the run: the jobs are as many as before, each shorter.
+      - name: Run the VM's tests, compiling in the background
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+          QUICKJS_REQUIRE_JIT: "1"
+          QJS_JIT_STRESS: threshold,budget=3,deopt=7,background=3
+        run: go test -tags quickjs_jit -count=1 -timeout 30m ./internal/vm .
 
   newest:
     # The module builds with the Go go.mod names, which the jobs above test;
@@ -225,16 +238,11 @@ jobs:
 
       # The VM's own tests under the same stress: those that count native
       # calls, exits and compiles take the JIT's own thresholds
-      # (jitRuntimeForTest, jitDefaultsForTest); the rest run stressed. And
-      # after them compiling in the background, each compile installed at
-      # the third check after it was handed over (QJS_JIT_STRESS's
-      # background). One after the other: the tests run in parallel, each
-      # run's taking the runner's CPUs, which two at once would fight over.
-      - name: Run the VM's tests, and compiling in the background
+      # (jitRuntimeForTest, jitDefaultsForTest); the rest run stressed. The
+      # same tests compiling in the background run in the Test job.
+      - name: Run the VM's tests
         shell: bash
-        run: |
-          go test -tags quickjs_jit -count=1 -timeout 30m ./internal/vm
-          QJS_JIT_STRESS=threshold,budget=3,deopt=7,background=3 go test -tags quickjs_jit -count=1 -timeout 30m ./internal/vm .
+        run: go test -tags quickjs_jit -count=1 -timeout 30m ./internal/vm
 
   # The JIT's kernels and the tree tier's, on arm64 (macOS and Linux)
   # and amd64 (Linux). A shared
