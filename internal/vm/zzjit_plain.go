@@ -72,6 +72,15 @@ func (r *Runtime) jitGoCallPlain(ctx *abi.Context) bool {
 		if idx >= len(s.ssaCtxs) || s.ssaCtxs[idx] != ctx {
 			return false
 		}
+		if cl, rin, reg := r.jitRegPlainSet(ctx, idx); reg {
+			// Register code's: its set_prop's site and name, at its
+			// register pc, never the stack form's instruction there.
+			if cl == nil || !r.jitPlainWrite(cl, rin, jitGoArg(ctx, 0), jitGoArg(ctx, 1)) {
+				return false
+			}
+			v = Undefined
+			break
+		}
 		var cl *closure
 		switch ctx.Live {
 		case 0:
@@ -387,7 +396,9 @@ func (r *Runtime) jitLeafSeen(ctx *abi.Context, in bytecode.Instr) {
 	}
 	st.LeafSeen = true
 	s, idx := r.jit, int(ctx.Level)
-	if idx >= len(s.ssaCtxs) || s.ssaCtxs[idx] != ctx {
+	if idx >= len(s.ssaCtxs) || s.ssaCtxs[idx] != ctx || r.jitRegCodeIn(ctx, idx) {
+		// Register code learns its calls' leaves from its sites' caches
+		// (jitRegFeedback's Leaf), not at its calls of Go by stack pc.
 		return
 	}
 	var cl *closure
