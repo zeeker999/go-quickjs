@@ -1064,4 +1064,19 @@ func TestRegCallbackSort(t *testing.T) {
 		out.push([2, 1].sort(function () { return arguments[0] - arguments[1] }).join(), [2, 1, 3].sort((a, b) => b - a).join())
 		var u8 = new Uint8Array([9, 4, 6]); out.push(u8.sort((a, b) => { let c = a - b; return c }).join())
 		out.join("\n")`, "")
+	// The iteration methods' callbacks, kept ready the same way: closures
+	// of each call's bindings, a callback that iterates in turn, a throw
+	// part way, a this of each kind, and typed arrays'.
+	nativeCheck(t, `
+		var out = [], fs = []
+		;[1, 2, 3].forEach(function (x, i) { let y = x * 10; fs.push(() => y + i) })
+		out.push(fs.map(f => f()).join())
+		out.push([1, 2, 3].map(function (x) { return [x, x + 1].map(function (y) { return y * this.k }, { k: x }).join("-") }).join())
+		try { [1, 2, 3, 4].forEach(function (x) { if (x === 3) throw new Error("at " + x); out.push(x) }) } catch (e) { out.push(e.message) }
+		var t = 0; [1, 2, 3].forEach(function (x) { t += x * (this === undefined ? 1 : 2) }); out.push(t)
+		out.push([5, 6].filter(function (x) { "use strict"; return this === undefined && x > 5 }).join())
+		out.push([1, 2, 3, 4].reduce(function (a, x) { let s = a + x; return s }, 0), [4, 5, 6].find(function (x) { var k = x % 5; return k === 0 }))
+		out.push(new Int32Array([3, 1, 2]).map(function (x) { let d = x * 2; return d }).join(), new BigInt64Array([2n, 3n]).reduce(function (a, x) { return a + x * x }, 0n))
+		out.push([1, 2, 3].some(function (x) { var r = x > 2; return r }), [1, 2, 3].every(function (x) { var r = x > 0; return r }))
+		out.join("\n")`, "")
 }
