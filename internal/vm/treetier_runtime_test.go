@@ -50,3 +50,25 @@ func TestTreeTierPerRuntime(t *testing.T) {
 		t.Error("a function run with a tree lost it to a runtime without the tier")
 	}
 }
+
+// SetOldTiers and SetNoTree, which a host's tests call on the runtime
+// under a quickjs.Runtime, set what newOldTiersForTest and
+// newTreeTierForTest do.
+func TestTierSettersPerRuntime(t *testing.T) {
+	t.Parallel()
+	r := New(Config{})
+	defer r.Close()
+	r.SetOldTiers()
+	r.SetNoTree()
+	if r.RegTier() || !r.oldTiers || !r.noTree {
+		t.Errorf("register tier %v, old tiers %v, no tree %v", r.RegTier(), r.oldTiers, r.noTree)
+	}
+	v, err := r.Run(compileForTest(t, `function f(n) { let s = 0; for (let i = 0; i < n; i++) s += i; return s } f(10)`))
+	if err != nil || v.Number() != 45 {
+		t.Fatalf("%v, %v", v, err)
+	}
+	f := r.global.getOwn(r.atoms.intern("f")).value().Object().fn().closure.fn
+	if (*tree)(atomic.LoadPointer(&f.VMCode)) != noTree {
+		t.Error("f was given a tree")
+	}
+}
