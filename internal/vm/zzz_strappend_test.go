@@ -703,9 +703,9 @@ const strAppendTestWant = "76:-1591915514,103:239840560,130:-1972117050,157:1162
 
 // Appends answer as Node does, in the tree tier as in the interpreter.
 func TestStrAppend(t *testing.T) {
+	t.Parallel()
 	for _, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, strAppendTestSrc))
 		r.Close()
 		if err != nil {
@@ -715,7 +715,6 @@ func TestStrAppend(t *testing.T) {
 			t.Errorf("tree tier %v:\n%s", tree, firstDifference(got, strAppendTestWant))
 		}
 	}
-	SetTreeTier(true)
 }
 
 // A declaration captures the binding just as a function expression does.
@@ -734,10 +733,9 @@ result
 `
 
 func TestStrAppendDeclaration(t *testing.T) {
-	t.Cleanup(func() { SetTreeTier(true) })
+	t.Parallel()
 	for _, tree := range []bool{true, false} {
-		SetTreeTier(tree)
-		r := New(Config{})
+		r := newTreeTierForTest(tree, Config{})
 		v, err := r.Run(compileForTest(t, strAppendDeclarationSrc))
 		r.Close()
 		if err != nil {
@@ -876,6 +874,7 @@ func TestStrAppendTailGrowth(t *testing.T) {
 // saves, with room for four times it, and a rope need not be written out for
 // an append. The short ones after it go on to a tail, of their own bytes.
 func TestStrAppendLongRightSide(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	long := NewString(strings.Repeat("z", strTailLongest+1))
@@ -929,6 +928,7 @@ func TestStrAppendLongRightSide(t *testing.T) {
 // A marked string's fields say what an append has made of it, and a read's
 // str_freeze ends it. The string is an ordinary one all the while.
 func TestStrAppendStates(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	long := NewString(strings.Repeat("x", 100))
@@ -988,6 +988,7 @@ func TestStrAppendStates(t *testing.T) {
 // A rope's flags are its sides', each from the right side, and a tail's are
 // kept as it grows, on the string and on the tail alike.
 func TestStrAppendFlags(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	long := strings.Repeat("x", 100)
@@ -1033,6 +1034,7 @@ func TestStrAppendFlags(t *testing.T) {
 // A meter counts what a concatenation takes, so a metered runtime's strings
 // are made as ever.
 func TestStrAppendMetered(t *testing.T) {
+	t.Parallel()
 	r := New(Config{MemoryLimit: 1 << 30})
 	defer r.Close()
 	long := NewString(strings.Repeat("x", 100))

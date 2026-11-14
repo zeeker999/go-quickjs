@@ -19,6 +19,7 @@ import (
 // a generator's body; nor s, in pending, whose read is still on the stack,
 // an operand, when it is assigned.
 func TestSoleLocals(t *testing.T) {
+	t.Parallel()
 	if bits.UintSize != 64 {
 		t.Skip("no BigInt is given back on a 32-bit machine")
 	}

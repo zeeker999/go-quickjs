@@ -1226,9 +1226,11 @@ backlog.
 1. **The JIT on register code (Stage 3).** The remaining feedback-parity
    gaps (RegExp literals, call frequencies, inlined callees' feedback);
    inlining register callees; top-level code, generators and async
-   functions; the feedback snapshot for background compiles. Then the
-   switch-over: JIT runtimes run the register tier, and the JIT's
-   stack-form path is removed.
+   functions; the feedback snapshot for background compiles. Then a
+   profiling and optimization round of the register JIT against the
+   stack-form JIT in the same build, as the interpreter's rounds were.
+   Then the switch-over: JIT runtimes run the register tier, and the
+   JIT's stack-form path is removed.
 2. **The arm64 native port** (done, but its timing). An arm64 emitter
    in nativegen, the same handlers and tables as amd64's, and `regArch`
    on for arm64; checked under qemu and on CI's Linux and macOS arm64
@@ -1239,9 +1241,23 @@ backlog.
    second compile (gone with step 4's removal of the stack compiler's
    output), Havlak, RegExp, and what the old tiers did that register code
    does not yet (strings appended in place, literal layouts by keys).
+   Gaps that need new instructions -- the loop kernels' fused
+   increment-and-branch, int32 arithmetic, multiplication by an
+   immediate -- wait until the JIT's register work is merged, so that each
+   new instruction lands with its native handlers on both architectures,
+   its Go handler and its JIT lowering in both backends at once.
 4. **The old tiers removed (Stage 4).** The stack interpreter, the tree
    tier, `QJS_REG=0`, `hotdiff` and their layout-lock anchors; the `zz`
    file-name prefixes that kept their layout; AGENTS.md's rules for them.
+   The regdiff tests that use the old tiers as their reference
+   (`TestRegDiff*`) are not dropped with them. Before the removal, the
+   corpus is run once on the old tiers and every program's output is
+   recorded as a golden file, and those tests become checks of the
+   register tier against the recorded answers. `TestJITFeedbackParity`
+   ends earlier, with the JIT's stack-form path at the switch-over. The
+   tests that compare register-tier paths with each other
+   (`TestRegNativeCall`, `TestRegLowerEvaluate`, `TestRegNativeCaches`,
+   `TestRegTailCallsStop`) stay, moved into package vm when regdiff goes.
 5. **The portable fallback's dispatcher.** A generated switch over the Go
    handlers, letting Go's inliner choose, against the handler table. The
    fallback is never layout-tuned: a platform that needs a fast

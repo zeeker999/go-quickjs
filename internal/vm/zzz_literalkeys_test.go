@@ -24,6 +24,7 @@ func shapeOfNew(t *testing.T, r *Runtime, src string) *shape {
 // of a realm: a script compiled anew, a function's and a script's, and two
 // sites of one function.
 func TestLiteralKeysShareALayout(t *testing.T) {
+	t.Parallel()
 	r := newOldTiersForTest(Config{})
 	defer r.Close()
 	want := shapeOfNew(t, r, `({a: 1, b: 2})`)
@@ -98,6 +99,7 @@ func TestRegLiteralKeysShareALayout(t *testing.T) {
 
 // Each realm has its own, of its own Object.prototype.
 func TestLiteralKeysByRealm(t *testing.T) {
+	t.Parallel()
 	r := newOldTiersForTest(Config{})
 	defer r.Close()
 	fn := compileForTest(t, `({a: 1, b: 2})`)
@@ -122,6 +124,7 @@ func TestLiteralKeysByRealm(t *testing.T) {
 // New code makes no shape for a literal whose keys the realm has met, and
 // nothing a run keeps of it holds the code.
 func TestFreshCodeMakesNoLiteralShapes(t *testing.T) {
+	t.Parallel()
 	r := newOldTiersForTest(Config{})
 	defer r.Close()
 	src := func(i int) string {
@@ -146,6 +149,7 @@ func TestFreshCodeMakesNoLiteralShapes(t *testing.T) {
 // Objects that grow teach the room of the literals of their keys, and of no
 // others, however many they have.
 func TestLiteralKeysRoom(t *testing.T) {
+	t.Parallel()
 	r := newOldTiersForTest(Config{})
 	defer r.Close()
 	v, err := r.Run(compileForTest(t, `
@@ -209,6 +213,7 @@ func TestLiteralKeysMadeUp(t *testing.T) {
 // With no room in the tree a literal does as it did: its objects are in no
 // layout of a root, and are right.
 func TestLiteralKeysTreeFull(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	r.shapes.count, r.shapes.settled = maxShapes, maxShapes
@@ -225,6 +230,7 @@ func TestLiteralKeysTreeFull(t *testing.T) {
 // of the literals' sites, a literal inside another after it: alike for the same
 // keys, in order, however written, and for no others.
 func TestLiteralKeysTable(t *testing.T) {
+	t.Parallel()
 	fn := compileForTest(t, `
 		var k = "k", a = {x: 1, y: {z: 2}}, b = {...a}, c = {}, d = {q: 1, q: 2}, e = {[k]: 1},
 			f = {get g() { return 1 }}, h = {m() {}, "n-1": 2, 3: 4}, i = {__proto__: null}, j = {r: 1, ...a},
@@ -267,6 +273,7 @@ func TestLiteralKeysTable(t *testing.T) {
 // The same keys are told alike from one function to another, and from one
 // compile to another, runtimes sharing what is compiled: nothing seeds it.
 func TestLiteralKeysAcrossCompiles(t *testing.T) {
+	t.Parallel()
 	a := compileForTest(t, `({one: 1, two: 2})`)
 	b := compileForTest(t, `function f() { return [{"one": {}, "two": 1}] }`)
 	inner := b.Constants[0].Fn
@@ -280,6 +287,7 @@ func TestLiteralKeysAcrossCompiles(t *testing.T) {
 // order, and what reads or adds to them finds them, in the interpreter, a tree
 // and, under the JIT's tests, native code.
 func TestLiteralKeysCollision(t *testing.T) {
+	t.Parallel()
 	r := newOldTiersForTest(Config{})
 	defer r.Close()
 	testLiteralKeysCollision(t, r)

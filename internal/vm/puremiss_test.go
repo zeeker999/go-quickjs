@@ -18,6 +18,7 @@ import (
 // whose frame the native code enters itself, without trying the body
 // frameless: there the template is tried pureMissLimit times at most.
 func TestPureMissPerTemplate(t *testing.T) {
+	t.Parallel()
 	for _, old := range []bool{true, false} {
 		r := New(Config{})
 		r.oldTiers = old
