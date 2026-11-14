@@ -560,7 +560,10 @@ register pc. The one call an origin may end in after other instructions
 slots and a read whose feedback never makes it call -- the VM answers none
 for an accessor -- so it commits nothing before the call, whose exit runs
 the instruction whole again. A Generic instruction is built as one whose
-speculation failed before (the builder's `generic`).
+speculation failed before (the builder's `generic`) only where what came
+before it in its origin committed as built: after a read built to call
+nothing, `add_prop`'s addition speculates on numbers, as the stack form's
+`add` does, its exit running the instruction again from its start.
 
 **Windows.** A call, `call_w`'s, `call_method_w`'s or `new_w`'s, and a
 `typeof` read their operands from the window's registers, in order -- the

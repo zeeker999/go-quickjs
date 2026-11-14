@@ -3752,8 +3752,12 @@ func (b *builder) generic(pc int) bool {
 	case in.Op == ir.Binary, in.Op == ir.Branch && in.Operator != ir.Truth, in.Op == ir.Rethrow, in.Op == ir.ArgumentRead,
 		in.Op == ir.Unary && in.Operator != ir.Not, in.Op == ir.Update:
 		// Or a register instruction's component after a commit (ir's
-		// Generic), which may not leave.
-		return in.Generic || b.fb != nil && b.fb.Generic(pc)
+		// Generic), which may not leave -- where what came before it in
+		// its origin committed as it was built (atomicInstruction): after
+		// a property's read built to call nothing, add_prop's addition
+		// speculates as the stack form's add does, and its exit runs the
+		// instruction again from its start, the read with it.
+		return in.Generic && b.atomic || b.fb != nil && b.fb.Generic(pc)
 	}
 	return false
 }
