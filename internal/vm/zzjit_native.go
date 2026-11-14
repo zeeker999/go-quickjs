@@ -1321,6 +1321,32 @@ type jitState struct {
 	// the one it runs in.
 	regNestLevels []jitRegLevel
 	regNestFrames []*frame
+	// regRunAt is one past the context of the run of register code whose
+	// native code runs now (jitRegStretch), 0 where none does or a stack
+	// form's run is the innermost: the run a call of Go from a native
+	// callee's code is of (jitRegRootOf), known without a walk down its
+	// levels.
+	regRunAt int
+	// regLazyLevels and regLazyFrames hold, as a stack, the levels of
+	// calls of Go from native callees' code that put them off
+	// (jitLazyLevels' reg) and the frames Go made of them once one was
+	// read (jitRegMakeLazy).
+	regLazyLevels []jitRegLevel
+	regLazyFrames []*frame
+	// regGens says a register function's link has had a generator entry
+	// (jitLink's gen): only then may a native callee's level be a
+	// generator's resumption, which a call of Go makes the frames of at
+	// once (jitRegGensIn).
+	regGens bool
+	// regLevelsFound counts the levels of native calls Go found the code
+	// of and pinned (jitRegLevelAt): the work a call of Go from a native
+	// callee's code does for the levels below it.
+	regLevelsFound uint64
+	// regNestedCalls counts the calls of Go from native callees' code
+	// (jitRegGoCallNested), and regLazyMade the times the levels such a
+	// call put off were made (jitRegMakeLazy), and regLazyLevelsPut the
+	// levels such calls put off.
+	regNestedCalls, regLazyMade, regLazyLevelsPut uint64
 	// regJobs are the register compiles in the background, in the order
 	// they were handed over, and regPendingJobs each by its function's
 	// key (zzjit_zregbg.go).

@@ -407,7 +407,7 @@ func (r *Runtime) jitRegLearnedDue(cl *closure, e *jitRegEntry) bool {
 // unwinds them: not while any other runs it.
 func (r *Runtime) jitRegLearnedDueWith(cl *closure, e *jitRegEntry, own int) bool {
 	life := e.life
-	if e.invalid || e.code == nil || life == nil || !life.reopt || e.levels != own || r.jit.regPendingJobs[e.key] != nil {
+	if e.invalid || e.code == nil || life == nil || !life.reopt || r.jit.regPendingJobs[e.key] != nil || r.jit.regLevelsOf(e) != own {
 		return false
 	}
 	c := cl.reg
@@ -612,7 +612,7 @@ func (r *Runtime) jitRegResumeSeen(f *frame, c *regCode, e *jitRegEntry, rpc int
 		return nil
 	}
 	l.resumed = append(l.resumed, uint32(rpc))
-	if e.levels != 0 || r.jit.regPendingJobs[e.key] != nil {
+	if r.jit.regPendingJobs[e.key] != nil || r.jit.regLevelsOf(e) != 0 {
 		r.jitRegReopt(f.cl, e)
 		return nil
 	}
@@ -932,7 +932,16 @@ func (e *jitRegEntry) findReturns(rc *bytecode.RegCode) {
 // its calls of Go -- a derived constructor's super()'s parent -- had
 // otherwise never been compiled again: neither sampled nor entered by Go,
 // nor leaving.
-func (r *Runtime) jitRegCompileDueNow(run *jitRegRun) bool {
+func (r *Runtime) jitRegCompileDueNow(run *jitRegRun, idx int) bool {
 	e := run.e
-	return e != nil && e.life != nil && e.life.reopt && r.jitRegLearnedDueWith(run.f.cl, e, run.own)
+	if e == nil || e.life == nil || !e.life.reopt {
+		return false
+	}
+	own := run.own
+	if own < 0 {
+		// A native callee's: the calling level, and those below it of the
+		// call's that run e's code too (jitRegLevelsIn).
+		own = 1 + r.jit.regLevelsIn(e, run.root, idx)
+	}
+	return r.jitRegLearnedDueWith(run.f.cl, e, own)
 }
