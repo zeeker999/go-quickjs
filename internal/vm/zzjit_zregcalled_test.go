@@ -16,7 +16,9 @@ import (
 // (ssa's calledClosures, InlineSite's LexThis) -- the maker's this a
 // method's receiver, then another object's -- and each meets a throw inside
 // the inlined arrow at its at, where Go makes the arrow, its this the
-// maker's, for the frame it was in; and callbacks made just before a
+// maker's, for the frame it was in; arrows of a sloppy and a strict maker
+// called plainly, their this the global object and undefined; and
+// callbacks made just before a
 // built-in's forEach, map or reduce, inlined in the loop and never made
 // (ssa.MadeCallback), one reading an object a turn may be no object.
 const regLexThisSetup = `
@@ -38,6 +40,9 @@ const regLexThisSetup = `
 		}
 		return r
 	}
+	function loose(n) { const g = (x) => x + (this === globalThis ? 1 : 2); let s = 0; for (let i = 0; i < n; i++) s += g(i); return s }
+	function tight(n) { 'use strict'; const g = (x) => x + (this === undefined ? 3 : 4); let s = 0; for (let i = 0; i < n; i++) s += g(i); return s }
+	function plainThis(n) { let s = 0; for (let i = 0; i < 20; i++) s += loose(n) * 1000 + tight(n); return s }
 	var boxes = [], plain = []
 	for (let i = 0; i < 20; i++) { boxes.push({ q: i }); plain.push(i) }
 	function builtins(n, at) {
@@ -65,7 +70,7 @@ func regCalledRounds(setup string) []string {
 	default:
 		for i := range 8 {
 			at := []string{"-1", "5"}[i/5]
-			rounds = append(rounds, "arrows(30, "+at+")", "builtins(40, "+at+")")
+			rounds = append(rounds, "arrows(30, "+at+")", "builtins(40, "+at+")", "plainThis(30)")
 		}
 	}
 	for i, r := range rounds {
@@ -94,7 +99,7 @@ func TestJITRegCalledClosures(t *testing.T) {
 	}{
 		{"called", calledSetup, []string{"squares", "turns", "bumps", "throws"}},
 		{"given", givenSetup, []string{"sum", "has", "count", "shapes", "throwsAt"}},
-		{"lexThis", regLexThisSetup, []string{"sum", "each", "builtins"}},
+		{"lexThis", regLexThisSetup, []string{"sum", "each", "builtins", "loose", "tight"}},
 	} {
 		for _, marking := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/marking=%v", setup.name, marking), func(t *testing.T) {
