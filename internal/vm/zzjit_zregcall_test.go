@@ -133,7 +133,7 @@ func TestJITRegNativeCalls(t *testing.T) {
 				}
 			}
 			t.Logf("native calls %v; unwound %d, resumed %d, entries %d", native, st.Unwound, st.Resumed, st.Entries)
-			t.Logf("register code %d bytes of %d", r.jit.regBytes(), r.jitBudget())
+			t.Logf("register code %d bytes of %d", r.jit.regHeld, r.jitBudget())
 			for _, name := range []string{"add", "three", "leaf3", "mid3", "fib", "depth", "goes", "Q", "R", "T", "mkAdder", "midCap", "nt"} {
 				if native[name] == 0 {
 					t.Errorf("%s: never called natively", name)

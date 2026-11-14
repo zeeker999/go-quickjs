@@ -170,8 +170,8 @@ func jitRegCallKnown(l *jitEntry, rpc int32, o *Object) bool {
 // left to it -- the function its site's cache holds now, as the stack
 // form's code learns a call's targets at its calls of Go (jitCallSeen):
 // one native callers may call that the call was not known to make is the
-// next compile's to call natively (regCallSites), the code stale from
-// here (jitRegReopt); up to jitCallTargets functions a call. It reports whether it
+// next compile's to call natively (regCallSites), the code to be compiled
+// again for it (jitRegReopt); up to jitCallTargets functions a call. It reports whether it
 // learned one.
 func (r *Runtime) jitRegCallSeen(f *frame, c *regCode, e *jitRegEntry, rpc int, callee Value) bool {
 	if e.invalid || rpc >= len(c.rc.Code) {
@@ -529,6 +529,7 @@ func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 	}
 	for k := range levels {
 		levels[k].e.levels--
+		s.regClose(levels[k].e)
 	}
 	return ok
 }
@@ -645,6 +646,7 @@ func (r *Runtime) jitRegUnwind(idx int) (Value, error) {
 		}
 		r.jitRegPopLevel(f, l.wb)
 		l.e.levels--
+		s.regClose(l.e)
 		if err == errTailCall {
 			// Ended in a call in tail position, its frame given up: the
 			// call made here.

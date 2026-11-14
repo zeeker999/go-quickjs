@@ -343,8 +343,8 @@ the function's key:
 - the register pcs after calls Go went on at, which the code had been built
   with no entry at (`Resumed`, `jitRegResumeSeen`).
 
-A guard's failure invalidates the code; anything else learned marks it
-stale, to be compiled again without a deoptimization (see
+A guard's failure invalidates the code; anything else learned marks it to
+be compiled again, valid meanwhile, without a deoptimization (see
 [Tier-up](#tier-up-and-on-stack-replacement)).
 
 **What it answers.** Where the feedback answers nothing, the builder
@@ -432,21 +432,41 @@ on the same side of the inliner's cut (`ssa.MinInliningFrequency`).
 
 No handler of the register interpreter's dispatchers -- the Go handler
 table's or the native handlers' -- does any work for tier-up
-(`zzjit_zregtier.go`). Hotness is sampled at the two budgets they already
-spend:
+(`zzjit_zregtier.go`). A function is compiled once the interpreter has
+spent a budget on it, the stack form's (`jitTierBudget`): `jitCallThreshold`
+invocations (400), each the function's length in register instructions
+(`jitRegBudget`). Nothing counts each invocation; the two budgets the
+dispatchers already spend are its samples, each spending the work it
+stands for:
 
 - a call that spends the interrupt budget -- `rhCallW`'s and `regEnterW`'s
-  check, which the native call handler leaves to `rhCallW` -- credits its
-  callee (`jitRegCallSample`, `jitRegSample`);
+  check, which the native call handler leaves to `rhCallW` -- spends its
+  callee's budget by the calls the interrupt budget counted, each the
+  callee's length (`jitRegCallSample`, `jitRegSample`, `jitRegCallWork`);
 - a back edge that spends the back-edge budget -- `regBackEdge`, which every
-  dispatcher's jump leaves to its Go slow function -- credits its frame's
-  function (`jitRegLoop`), the budget varied from one expiry to the next
-  (`backEdgeBudget`).
+  dispatcher's jump leaves to its Go slow function -- spends its frame's
+  function's by the back edges the budget counted, each the loop's length
+  from its header to the jump (`jitRegLoop`, `jitRegTierWork`), as V8's
+  `JumpLoop` spends its bytecodes' distance, the budget varied from one
+  expiry to the next (`backEdgeBudget`).
 
-**Compiling.** A function is compiled (`jitRegFor`) at its
-`jitRegSamples`-th sample (2), or at its first where the runtime compiles at
-a first call (`QJS_JIT_STRESS`'s threshold, which makes every call a sample,
-`jitRegStressSample`), from what its caches learned meanwhile; its code is
+The calls' counter runs out only at calls: a loop's check -- the
+interpreter's at a back edge, native code's poll -- checks for an interrupt
+without rearming it (`checkInterruptPoll`). Rearmed at every thousand back
+edges, it had run out only where calls outnumbered back edges four to one,
+and a program of interpreted callers calling compiled code that polls --
+AWFY's Towers -- had sampled its callers once a second.
+
+**Compiling.** A function's first sample begins its budget, as the stack
+form's `jitWarmFor` makes its entry warm, and notes its caches' feedback
+(`jitFeedbackMark`); it is compiled (`jitRegFor`) at the sample that spends
+the budget, its caches' feedback unchanged since -- a change raises what is
+left to `jitICThreshold` invocations' worth (`jitRegWarmUp`), as V8's
+`NotifyICChanged` delays a tier-up -- or at its first sample where the
+runtime compiles at a first call (`QJS_JIT_STRESS`'s threshold, which makes
+every call a sample, `jitRegStressSample`). What outlives a function's
+compiles -- what its code learned, its budget, its deoptimizations, what its
+runs did -- is its `regLearned` entry (`jitRegEntry`'s `life`); its code is
 kept on its template's `closureCode` (`jitReg`). A callee native callers
 call that has no code is compiled at their first call of it through Go
 (`jitRegNativeCallee`): they make no sample of it.
@@ -470,37 +490,55 @@ feedback's lists (`replay`) and placing the code as the compile on the spot
 (`jitRegPlace`). A question the snapshot was not asked is a miss
 (`jitSnapMiss`): the compile is built at the install instead
 (`regSnapMisses` counts them). Meanwhile the function runs in the
-interpreter, or in the code the compile replaces, and is not compiled again
-(`regPendingJobs`); its native callers call it through Go. Top-level code is
-compiled on the spot, as the stack form's is.
+interpreter, or in the code the compile replaces, valid and called by its
+native callers, and is not compiled again (`regPendingJobs`). A compile of
+a function deoptimized since it was prepared is thrown away at the install,
+as the stack form's is (`jitRegJob`'s `deopts`), and so is one whose code
+in the cache a native call still runs (`jitRegEntry`'s `levels`), that code
+asked to be compiled again. Top-level code is compiled on the spot, as the
+stack form's is.
 
 **Compiling again.** Code is compiled again, in place, when:
 
-- a guard failed: the code is invalidated (`jitRegInvalidate`), its link
-  cleared, the function sampled anew and compiled again from what the
-  interpreter learned, up to `jitRegDeoptLimit` (8) times, past which the
-  function stays in the interpreter -- but a deoptimization that taught
-  the code what it is compiled for next, an operator's BigInts or an entry
-  after a call Go went on at, which no limit counts
-  (`jitRegInvalidateLearned`): what each site learns so is bounded;
+- a guard failed: the code is invalidated (`jitRegInvalidate`), as the
+  stack form's `jitInvalidate` does it: its link cleared, Go no longer
+  enters it, and the interpreter runs the function until it has spent a
+  fresh budget, a change of its caches' feedback meanwhile delaying the
+  compile (`jitRegWarmUp`), as V8's deoptimizer resets a function's budget.
+  The calls Go makes of it for its native callers spend it too, an
+  invocation each (`jitRegNativeCalleeN`), a loop of a built-in's call an
+  invocation for each element; a leaf's, which the interpreter's calls
+  answer without a frame and so never sample, is compiled again at its
+  native callers' next ask. Past `jitMaxDeopts` (64) deoptimizations the
+  function is refused, its code let go of (`deoptimized more than 64
+  times`);
 - its exits learned what it is to be compiled for -- a call's target, a
-  site's case, a callee to inline: the code is stale (`jitRegReopt`), with
-  no deoptimization, as V8 never invalidates code for feedback. Its runs go
-  on in it until they leave it -- at an exit the code is compiled again and
-  the run goes on in the new code (`jitRegGoOnAt`); at a loop's poll,
-  which leaves for it rather than calling Go, the interpreter goes on,
-  whose next sample compiles it anew -- and its link
-  holds no entry meanwhile, so that native callers call it through Go,
-  where it is sampled: stale code only native callers reach is compiled
-  again too;
-- its caches' feedback changed since it was compiled -- what they hold, not
-  how often they were filled (`jitFeedbackMark`), as V8's `NotifyICChanged`
-  finds it: a sample has it compiled again once it has run `jitICThreshold`
-  invocations' worth more (`jitInvocationsAfterICUpdate`, 1 under
-  `QJS_JIT_STRESS`'s threshold), a sample's worth where samples are the
-  interrupt budget's, as many samples where every call is one. Code compiled
-  before a site's cache knew a shape reads it by a scan, which never leaves
-  native code to learn one.
+  site's case, a callee to inline, a loop of a built-in's call, an entry
+  after a call: the code is marked (`jitRegReopt`, the stack form's
+  `reoptPending`) with no deoptimization, as V8 never invalidates code for
+  feedback. It stays valid -- Go enters it, native callers call it through
+  its link -- and is compiled again once it has spent a budget since it
+  began to learn, with nothing more learned meanwhile (`jitRegLearnedDue`,
+  the stack form's `jitLearnedDue`): its invocations, Go's entries and the
+  runs it went on in after leaving, and native callers' calls, each its
+  length, with the work its native stretches did -- their back edges, each
+  its loops' mean length, and the instructions to where they left
+  (`jitRegStretchWork`, as `jitSSAProfit` counts it) -- and the
+  interpreter's in its loops before Go entered them (`jitRegSpent`). It is
+  compiled at a sample, at an exit, or at a loop's poll, which leaves for it
+  rather than calling Go while it learns (`GoPoll`), and a run goes on in
+  the new code (`jitRegGoOnAt`, `jitRegReoptimize`, the stack form's
+  `jitRecompileInRun`). Where Go goes on after a call the code was built
+  with no entry after (`unresumed`), the code is compiled again at once with
+  the entry and goes on in it (`jitRegResumeSeen`), as the stack form's
+  `jitGoOn` does. A recompile refused keeps the code it has.
+
+A change of a function's caches' feedback alone has its code compiled
+again for nothing: its mark (`jitFeedbackMark`, `jitLearnedMark`) only
+delays a compile. Recompiled for it, each exit the interpreter finished --
+filling the caches -- had dropped the code and compiled it again. Code
+compiled before a site's cache knew a shape reads it by a scan, which never
+leaves native code to learn one.
 
 **What is entered where.** Of the code compiled (`jitRegTakes`), what
 `jitRegCalled` says -- neither a generator's nor an async function's code,
@@ -528,7 +566,12 @@ that jump goes over (`lowerReg`'s entries). The suspensions -- `yield`,
 - by native callers, through the function's link (see [Native
   calls](#native-calls));
 - by on-stack replacement at the loop whose back edge took the sample
-  (`jitRegLoop`), from inside the dispatcher that runs the frame.
+  (`jitRegLoop`), from inside the dispatcher that runs the frame;
+- at the next back edge of a frame whose valid code left it where it has
+  no entry (`jitRegLeaveTo`), the interpreter's check made due there at
+  once (`regGoOn`, `regForced`) and spending no budget, as the stack form's
+  `jitGoOn` and `tryJITLoop` have it: the interpreter runs the rest of that
+  iteration, as from V8's deoptimizations, not the rest of the invocation.
 
 **On-stack replacement.** The build's entries at a loop's header
 (`ssa.Entry`'s `OSR`) are by the instruction its register pc lowers to first
@@ -1387,7 +1430,7 @@ where it needs the caller's frame (`jit.ExpandCall`).
 **Register functions' calls** (`zzjit_zregcall.go`). A register function's
 link (the runtime's `regLinks`) holds its code's call entry while it has
 code native callers may call -- set as the code is compiled, cleared as it
-is invalidated, made stale or dropped -- and, where it holds none, Go makes
+is invalidated or dropped -- and, where it holds none, Go makes
 the call from native code (`jitRegGoCall`), as a call of Go. The callee's
 window is made at the VM's stack's top, past the caller's window, scratch
 slots and frame (`ssa.CallSite`'s `Window`): the call writes the function to
@@ -1547,15 +1590,15 @@ frame's own exits do (`jitRegInlineLeft`); each other from its call with
 what its callee answered (`regFinishCall`); and the caller's call given the
 outermost's answer (`regPending`), as a native callee's. A guard's failure
 there has the caller's code invalid, as one of its own does; an exit that
-learned something else -- a site's case, a change of the callee's caches
-(`jitFeedbackMark`), a read's value not a number (`jitNumberMissed`), which
-the code compiled again reads generic -- has it compiled again for it
-(`jitRegReopt`). One that learned nothing counts against inlining at the
+learned something else -- a site's case, a read's value not a number
+(`jitNumberMissed`), which the code compiled again reads generic -- has it
+compiled again for it (`jitRegReopt`); a change of the callee's caches
+alone does not. One that learned nothing counts against inlining at the
 call (`jitInlineLeft`, `jitInlineExits`, `notInline`): past it, the code
 compiled next makes a native call there. None counts that left at a site
 of the callee's -- a property's read or write whose site is not
 megamorphic, a construction whose pool ran out (`jitRegLeftAtSite`) --
-nor one of stale code, nor one whose operation threw, which the callee
+nor one of code to be compiled again, nor one whose operation threw, which the callee
 called natively leaves native code for just the same.
 
 ## Exits and deoptimization
@@ -1569,9 +1612,9 @@ register pc.
 
 | Kind | What happened | What Go does on a register frame (`jitRegRun`) |
 |---|---|---|
-| `ExitDeopt` | A guard failed, before its instruction committed anything. | `runReg(f, c, pc)` runs the rest of the invocation from the exit's register pc; the failure is noted, the code invalidated, and the function compiled again at its next sample from what the interpreter learned. |
-| `ExitHost` | The instruction is Go's. | Go runs the whole register instruction at the exit's pc by the interpreter's own handlers (`regWhole`: its handler from `regTable`, its slow function from `regSlowTable`, as `runReg` and the native handlers' exit stub run them), an exception to the frame's handlers by `regCatch`; native code goes on at the entry of the register pc the instruction went on to, and where the code has none, `runReg` runs the rest of the invocation from there. |
-| `ExitPoll` | `BackEdges` ran out at a loop's header. | The interpreter's back-edge check; native code goes on at the loop's header. |
+| `ExitDeopt` | A guard failed, before its instruction committed anything. | The interpreter runs the rest of the invocation from the exit's register pc; the failure is noted, the code invalidated, and the function compiled again once the interpreter has spent a fresh budget. |
+| `ExitHost` | The instruction is Go's. | Go runs the whole register instruction at the exit's pc by the interpreter's own handlers (`regWhole`: its handler from `regTable`, its slow function from `regSlowTable`, as `runReg` and the native handlers' exit stub run them), an exception to the frame's handlers by `regCatch`; native code goes on at the entry of the register pc the instruction went on to, and where the code has none, the interpreter goes on to the frame's next back edge, where native code goes on (`jitRegLeaveTo`). |
+| `ExitPoll` | `BackEdges` ran out at a loop's header. | The interpreter's back-edge check; the code compiled again if what it learned is due; native code goes on at the loop's header. |
 | `ExitReturn` | The code returned. | `Ret` holds the result's number word, or `RetFrom` where the result is. |
 | `ExitEnter` | A native call's callee had no code native callers may call. | Its frame is made, its arguments in it, and Go runs it from its start; its caller's code goes on after the call. |
 | `ExitTable` | The exit left its frame to Go to write. | Go writes it from the exit's description (`abi.ExitDescriptor`, `jit.ApplyExit`) and the registers it saved, then reads the exit's own kind. |
@@ -1582,8 +1625,9 @@ from its description, for an `ExitTable`); then Go makes the objects escape
 analysis left unmade into the registers that name them
 (`jitRegMaterialize`), and goes on by the exit's kind. A frame native code
 called natively that Go finishes, or one where Go goes on at a register pc
-with no entry, runs in the interpreter to the end of the invocation,
-entering native code again only where a sample sends it there.
+with no entry, runs in the interpreter to its next back edge, where native
+code goes on at the loop's header (`jitRegLeaveTo`); a frame whose code was
+invalidated, to the end of the invocation.
 
 **Contracts.**
 
@@ -1602,9 +1646,11 @@ shape its cases do not have, a site that knew none -- has the site learn it
 before the interpreter runs the instruction (`jitRegDeoptSeen`); an entry's
 that fails notes the entry (`jitRegEntrySeen`); any other guard that fails
 notes its register pc (`Generic`). A property read or write a host exit
-leaves to Go is learned too (`jitRegHostSeen`, `jitRegWriteSeen`); where
-that teaches the site something its code was not compiled for, the code is
-stale from there. See [Feedback](#feedback) and
+leaves to Go is learned too (`jitRegHostSeen`, `jitRegWriteSeen`), and so
+is a loop of a built-in's call -- its function, receiver and callback --
+that left at its checks or inside it (`jitRegForEachSeen`); where that
+teaches the code something it was not compiled for, it is to be compiled
+again (`jitRegReopt`). See [Feedback](#feedback) and
 [Tier-up](#tier-up-and-on-stack-replacement) for what follows.
 
 **How many slots.** Nothing bounds a function's slots -- its registers, its
@@ -1692,9 +1738,13 @@ was not compiled for, so that nothing in it checks.
 **Refusals.** A refusal is an entry with no code, and marks the template
 refused (`closureCode`'s `jitRegRefused`), so that its samples ask nothing
 more -- but a function of host operations alone, which is lowered again once
-hot again (`hostOnly`). A compile the budget has no room for leaves no
-entry, and is asked for again at a later sample. Past `jitRegDeoptLimit`
-deoptimizations a function is refused too. When the OS denies executable
+a budget more is spent (`hostOnly`). Code no placement takes, past the size
+one may have, is a refusal too. A compile the budget has no room for leaves
+no entry, and is not compiled again until the cache has let some code go
+(its `life`'s `deferred` and `generation`, as the stack form's compiles are
+deferred): asked again at every sample, a callee of Mandreel's was compiled
+again at each call Go made of it. Past `jitMaxDeopts` deoptimizations a
+function is refused too. When the OS denies executable
 memory, the runtime marks the JIT unavailable for good.
 
 **Debugger.** Runtimes made `WithDebugger` never run native code.
@@ -1754,12 +1804,18 @@ not reuse until a chunk empties, and the workspace a compile is made in,
 which is the process's, the runtime's only while it compiles. Runtime
 construction allocates nothing for the JIT.
 
-**Register code's share.** Register code takes at most half the budget
-(`regBytes`), the stack form's code the rest while both exist; a register
-compile that would pass it, or for which the cache cannot make room, is not
-placed. Register code's entries are not aged out as the stack form's are:
-they go with their function, as the runtime releases its JIT, or when
-compiled again.
+**Register code in the budget.** Register code counts in what the JIT holds
+(`regHeld`, in `held`), against the one budget, and is aged, reclaimed and
+flushed as the stack form's entries are: its uses -- Go's entries, the runs
+it went on in, native callers' calls -- date it (`regAge`); `makeRoom`
+reclaims it with theirs, refusals first, then code unused this epoch and
+the one before, least recently used first (`regVictims`, `regReclaim`); and
+`flush` drops code unused between two of its looks (`regFlush`). Code let go
+of so has its function warm up anew (`regLetGo`), and compiled again it is
+compiled with all its function learned, which outlives its code
+(`regLearned`). Code a run or a native call is in is never let go of; code
+replaced while one is is closed once the last leaves it (`dropped`,
+`regClose`).
 
 **Making room** (`makeRoom`). A compile asks for room for what its entry
 will hold before its code is placed. The cache reclaims, in this order, each
