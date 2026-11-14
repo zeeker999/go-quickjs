@@ -1,8 +1,12 @@
 package parser
 
 import (
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/go-quickjs/go-quickjs/internal/ast"
+	"github.com/go-quickjs/go-quickjs/internal/wtf8"
 )
 
 // parseOK parses src and fails the test if it does not parse.
@@ -143,6 +147,77 @@ func TestParseFolds(t *testing.T) {
 	} {
 		checkParse(t, tt.src, tt.want)
 	}
+}
+
+// TestParseStringFolds pins + of two string literals, which the parser
+// joins as V8's does: a chain's left run, and the run at the end of a chain
+// whose left is not a literal (expr + "a" + "b" is expr + "ab"); a
+// template with no substitution as a string; and what it leaves: a number
+// and a string, which V8 does not join, a run in the middle of a chain, a
+// template with a substitution or an invalid escape, and a tagged one.
+func TestParseStringFolds(t *testing.T) {
+	for _, tt := range []struct{ src, want string }{
+		{`"a" + "b"`, `"ab"`},
+		{`"a" + "b" + "c"`, `"abc"`},
+		{`"a" + 'b' + ` + "`c`", `"abc"`},
+		{"`a` + `b`", `"ab"`},
+		{`"" + ""`, `""`},
+		{`x + "a" + "b"`, `(+ x "ab")`},
+		{`x + "a" + "b" + y`, `(+ (+ x "ab") y)`},
+		{`x + "a" + "b" + y + "c" + "d"`, `(+ (+ (+ x "ab") y) "cd")`},
+		{`"a" + "b" + x + "c"`, `(+ (+ "ab" x) "c")`},
+		{`"a" + ("b" + "c")`, `"abc"`},
+		{`("a" + x) + "b" + "c"`, `(+ (+ "a" x) "bc")`},
+		{`"a" + 1`, `(+ "a" 1)`},
+		{`1 + "a"`, `(+ 1 "a")`},
+		{`"a" + 1 + "b"`, `(+ (+ "a" 1) "b")`},
+		{`"a" - "b"`, `(- "a" "b")`},
+		{`"a" + "b" * 2`, `(+ "a" (* "b" 2))`},
+		{"`a${x}` + \"b\"", `(+ (tpl "a" x "") "b")`},
+		{"\"a\" + t`b`", `(+ "a" (tagged t (tpl "b")))`},
+	} {
+		checkParse(t, tt.src, tt.want)
+	}
+	// The halves of a surrogate pair in two literals are the pair, as the
+	// runtime's concatenation makes them; a lone half stays a lone half.
+	for _, tt := range []struct {
+		src  string
+		want []uint16
+	}{
+		{`"\uD800" + "\uDC00"`, []uint16{0xD800, 0xDC00}},
+		{`"\uD800" + "x"`, []uint16{0xD800, 'x'}},
+		{`"x" + "\uDC00"`, []uint16{'x', 0xDC00}},
+		{`"\uDC00" + "\uD800"`, []uint16{0xDC00, 0xD800}},
+	} {
+		prog, err := Parse(tt.src, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lit, ok := prog.Body[0].(*ast.ExprStmt).X.(*ast.StringLit)
+		if !ok {
+			t.Fatalf("%s: not folded", tt.src)
+		}
+		if got := wtf8.ToUTF16(lit.Value); !slices.Equal(got, tt.want) {
+			t.Errorf("%s: %x, want %x", tt.src, got, tt.want)
+		}
+		if tt.want[0] == 0xD800 && tt.want[1] == 0xDC00 && lit.Value != "\U00010000" {
+			t.Errorf("%s: the pair is %q, not the code point's one spelling", tt.src, lit.Value)
+		}
+	}
+	// A string literal that starts a statement and is joined is no longer
+	// the prologue's directive, so the "use strict" after it is not one.
+	checkParse(t, `function f() { "a" + "b"; "use strict"; with (x) {} }`,
+		`(decl (function f () ("ab" "use strict" (with x block()))))`)
+	// Past the most a string may have, the literals stay apart, for the
+	// program to throw as it runs.
+	defer func(n int) { maxFoldedString = n }(maxFoldedString)
+	maxFoldedString = 4
+	checkParse(t, `"ab" + "cd"`, `"abcd"`)
+	checkParse(t, `"ab" + "cd" + "e"`, `(+ "abcd" "e")`)
+	checkParse(t, `"ab" + "cde"`, `(+ "ab" "cde")`)
+	// Lengths are in UTF-16 code units: a pair is two, as at run time.
+	checkParse(t, `"\uD800" + "\uDC00x"`, `"𐀀x"`)
+	checkParse(t, `"\uD800" + "\uDC00xyz"`, `(+ "\xed\xa0\x80" "\xed\xb0\x80xyz")`)
 }
 
 func TestUpdateExpressions(t *testing.T) {

@@ -267,3 +267,37 @@ f(1);
 		t.Errorf("got\n%s\nwant\n%s", got, want)
 	}
 }
+
+// TestStringFolds checks + of string literals, which the parser joins as
+// V8's does, against the same + at run time: runs at a chain's start and
+// at its end, templates with no substitution, surrogate halves that meet
+// as a pair; numbers and strings, which are not joined, are checked too;
+// and a joined literal that starts a function is not its prologue's.
+func TestStringFolds(t *testing.T) {
+	pairs := [][2]string{
+		{`"a" + "b"`, `id("a") + "b"`},
+		{`"a" + "b" + "c"`, `id("a") + "b" + id("c")`},
+		{`"" + ""`, `id("") + ""`},
+		{"\"a\" + `b` + 'c'", `id("a") + "b" + "c"`},
+		{`id(1) + "a" + "b"`, `id(1) + id("a") + "b"`},
+		{`id({ toString() { return "o"; }, valueOf() { return 7; } }) + "a" + "b"`, `"7ab"`},
+		{`"\uD800" + "\uDC00"`, `id("\uD800") + "\uDC00"`},
+		{`("\uD800" + "\uDC00").length`, `2`},
+		{`("\uD800" + "\uDC00").codePointAt(0)`, `0x10000`},
+		{`("\uD800" + "\uDC00") === "\u{10000}"`, `true`},
+		{`"\uDC00" + "\uD800"`, `id("\uDC00") + "\uD800"`},
+		{`("x" + "\uD800").length`, `2`},
+		{`"x" + -0`, `"x0"`},
+		{`"x" + 0.1`, `"x0.1"`},
+		{`"x" + 1e21`, `"x1e+21"`},
+		{`1 + "a"`, `"1a"`},
+		{`"a" + 1 + "b"`, `"a1b"`},
+	}
+	src := foldChecks(pairs) + `
+// Function's code is sloppy but for its own prologue, in every mode.
+chk("prologue", Function('"a" + "b"; "use strict"; return this === undefined;')(), false);
+chk("prologue joined", Function('"use" + " strict"; return this === undefined;')(), false);
+chk("prologue kept", Function('"a"; "use strict"; return this === undefined;')(), true);
+`
+	runFoldModes(t, src, "")
+}

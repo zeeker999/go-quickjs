@@ -83,7 +83,7 @@ func foldReport(args []string, w io.Writer) (same bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	kinds := []string{"unary", "numeric", "condition", "deadbranch", "unreachable"}
+	kinds := []string{"unary", "numeric", "strings", "condition", "deadbranch", "unreachable"}
 	alone := map[string]map[string]funcLine{}
 	for _, k := range kinds {
 		if alone[k], err = run(self, k); err != nil {

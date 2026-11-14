@@ -275,9 +275,15 @@ func (p *parser) parseBinary(minPrec int) ast.Expr {
 // parseBinaryFrom performs precedence climbing over binary operators, starting
 // from an already-parsed left operand.
 func (p *parser) parseBinaryFrom(left ast.Expr, minPrec int) ast.Expr {
+	// A run of string literals the chain joins (strCat), which left ends
+	// with until the run is done; nil while there is none.
+	var cat *strCat
 	for {
 		op, prec, ok := p.peekBinaryOp()
 		if !ok || prec <= minPrec {
+			if cat != nil {
+				left = cat.done(p, left)
+			}
 			return left
 		}
 		p.next()
@@ -290,6 +296,16 @@ func (p *parser) parseBinaryFrom(left ast.Expr, minPrec int) ast.Expr {
 			right = p.parseBinaryFrom(p.parseOperandAt(prec), prec)
 		}
 
+		if cat != nil {
+			if op == "+" && cat.add(right) {
+				continue
+			}
+			left, cat = cat.done(p, left), nil
+		} else if op == "+" && isStrLit(right) {
+			if cat = p.startCat(left, right); cat != nil {
+				continue
+			}
+		}
 		switch op {
 		case "&&", "||", "??":
 			// `a ?? b || c` is a syntax error without parentheses, because the

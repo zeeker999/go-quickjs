@@ -7,7 +7,11 @@
 //     ShortcutLiteralBinaryExpression): ! of a literal, - + and ~ of a
 //     number, - of a BigInt, and an arithmetic, shift or bitwise operator
 //     on two numbers are the literal of their value (Not, Negate, BitNot,
-//     Numeric), so that 1 + 2 * 3 is 7 from the bottom up.
+//     Arith), so that 1 + 2 * 3 is 7 from the bottom up. + of two string
+//     literals is their concatenation (Strings), a chain's run of them
+//     joined once, up to the longest string there may be
+//     (MaxStringLength); + of a string and a number is left, as V8
+//     leaves it.
 //   - Each backend compiles typeof and void of a literal as the value
 //     (Value), a test that is a literal as a jump or none (Test), leaves
 //     out the branch a literal test never takes (Dead), and the
@@ -52,9 +56,11 @@ const (
 	// Unreachable is the statements of a list after one that always
 	// leaves it: compiled so too.
 	Unreachable
+	// Strings is + of two string literals (the parser's).
+	Strings
 
 	// All is every kind, what a compile does.
-	All = Unary | Numeric | Condition | DeadBranch | Unreachable
+	All = Unary | Numeric | Condition | DeadBranch | Unreachable | Strings
 )
 
 var kinds atomic.Uint32
@@ -62,7 +68,7 @@ var kinds atomic.Uint32
 // kindNames are the kinds' names in QJS_FOLD.
 var kindNames = map[string]Kind{
 	"unary": Unary, "numeric": Numeric, "condition": Condition,
-	"deadbranch": DeadBranch, "unreachable": Unreachable,
+	"deadbranch": DeadBranch, "unreachable": Unreachable, "strings": Strings,
 }
 
 // QJS_FOLD, where set, names the kinds the process folds, separated by
@@ -218,6 +224,16 @@ func Arith(op string, a, b float64) (float64, bool) {
 	}
 	return 0, false
 }
+
+// MaxStringLength is the most UTF-16 code units a string may have: the
+// runtime's (vm's maxStringLength), which a concatenation past it throws a
+// RangeError for, and V8's String::kMaxLength. Strings concatenates no
+// literals past it, so that the program throws as it runs, as it would
+// have.
+const MaxStringLength = is64Bit*(1<<29-24) + (1-is64Bit)*(1<<28-16)
+
+// is64Bit is 1 where an int has 64 bits, and 0 where it has 32, as vm's.
+const is64Bit = math.MaxInt >> 62 & 1
 
 // mod is the % operator on numbers, as the runtime's jsMod computes it.
 func mod(a, b float64) float64 {
