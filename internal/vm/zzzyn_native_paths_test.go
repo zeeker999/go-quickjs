@@ -974,3 +974,24 @@ func TestRegNativeGenNext(t *testing.T) {
 		for (var j = 0; j < 100; j++) sum += [...count(20)].length
 		String(sum)`, bytecode.RYield, bytecode.RGenEntry)
 }
+
+// TestRegDirectPureBodies runs built-ins' callbacks whose pure bodies a
+// register call enters with a frame (pureByTree) but regDirect evaluates
+// without one where it can (pureCall): comparators of BigInts, of strings
+// and of mixed values, ones the evaluator gives up on (an object's
+// valueOf, a getter), and a callback that reads an upvalue.
+func TestRegDirectPureBodies(t *testing.T) {
+	nativeCheck(t, `
+		var out = []
+		var cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0)
+		var big = new BigInt64Array([5n, -3n, 2n ** 62n, 0n, -(2n ** 63n), 7n])
+		for (var i = 0; i < 3; i++) out.push(big.slice().sort(cmp).join())
+		out.push(["b", "a", "c", "aa"].sort(cmp).join(), [3, "2", 1, "10"].sort(cmp).join())
+		var o = { valueOf() { return 2 } }, objs = [3, o, 1]
+		out.push(objs.sort(cmp).map(String).join())
+		var lim = 4, pick = (x) => (x < lim ? x * 2 : x > lim * 2 ? -x : 0)
+		out.push([1, 5, 9, 12].map(pick).join())
+		var g = { get v() { return 1 } }, longp = (x) => (x.v < 0 ? -1 : x.v > 0 ? 1 : 0)
+		out.push([g, { v: -2 }, { v: 0 }].map(longp).join())
+		out.join("\n")`, "")
+}

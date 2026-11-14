@@ -359,6 +359,16 @@ func (r *Runtime) regDirect(o *Object, fd *funcData, c *regCode, this Value, arg
 				return v, nil
 			}
 		}
+	case regLeafNone:
+		// A longer pure body, which a register call enters with a frame
+		// (pureByTree): from Go, where the frame is a code entry of its
+		// own, it is evaluated without one while it can be, as callDirect
+		// evaluates a pure body the tree has no tree for.
+		if cl := fd.closure; cl.fn.Leaf == bytecode.LeafPure && cl.pureMiss < pureMissLimit {
+			if v, ok := r.pureCall(fd, this, args); ok {
+				return v, nil
+			}
+		}
 	}
 	if fd.arrow {
 		this = fd.extra.lexThis
