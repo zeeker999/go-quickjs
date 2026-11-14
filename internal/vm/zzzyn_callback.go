@@ -27,7 +27,7 @@ type regCallback struct {
 // regCallbackOf is fn, called with this, as a regCallback, or nil where its
 // calls are callDirect's: a function regDirect does not enter with a frame
 // -- not register code of the form's own layout of this realm, a leaf
-// answered without one, a body that keeps its arguments, a sloppy one of a
+// answered without one (but one the frameless run has given up on), a body that keeps its arguments, a sloppy one of a
 // primitive this -- or one of a runtime of Node's quirks or a debugger, a
 // stack with no room for its window. The caller ends it (end).
 func (r *Runtime) regCallbackOf(fn, this Value) *regCallback {
@@ -40,7 +40,12 @@ func (r *Runtime) regCallbackOf(fn, this Value) *regCallback {
 		return nil
 	}
 	c := fd.treeCall.reg
-	if c == nil || !c.wide || c.leaf != regLeafNone || c.args {
+	if c == nil || !c.wide || c.args {
+		return nil
+	}
+	if c.leaf != regLeafNone && (c.leaf == regLeafArg || c.leaf == regLeafConst || fd.closure.pureMiss < pureMissLimit) {
+		// A leaf regDirect answers without a frame -- but one whose body
+		// the frameless run has given up on, which it enters with one.
 		return nil
 	}
 	if fd.arrow {

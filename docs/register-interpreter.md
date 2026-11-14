@@ -941,7 +941,10 @@ code (`nativeLoop`), with none of `callDirect`'s, `regDirect`'s and
 `regEnterW`'s work or a code entry made anew. The frame record is pushed
 for the call alone: what Go runs between two calls -- a comparator's
 result converted by its `valueOf` -- finds no frame of it. A leaf, which
-`regDirect` answers without a frame, is called as before.
+`regDirect` answers without a frame, is called as before, but for one
+whose frameless run has given up (`pureMiss`), which `regDirect` enters
+with a frame: a sum of BigInts (`typed_i64_reduce` 26.4 to 17.1 ns, the
+tree 24.3; `typed_u64_forEach` 54.3 to 44.8, the tree 48.3).
 `typed_i64_sort`, whose comparator of BigInts is no leaf, went from 199.7
 to 142.3 ns natively (the tree 153.7) and from 206 to 167 by the Go
 table; `array_reduce_upvalue` from 23.5 to 18.1.

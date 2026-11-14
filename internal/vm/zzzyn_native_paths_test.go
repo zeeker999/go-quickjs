@@ -1066,7 +1066,8 @@ func TestRegCallbackSort(t *testing.T) {
 		out.join("\n")`, "")
 	// The iteration methods' callbacks, kept ready the same way: closures
 	// of each call's bindings, a callback that iterates in turn, a throw
-	// part way, a this of each kind, and typed arrays'.
+	// part way, a this of each kind, typed arrays', and leaves the
+	// frameless run has given up on.
 	nativeCheck(t, `
 		var out = [], fs = []
 		;[1, 2, 3].forEach(function (x, i) { let y = x * 10; fs.push(() => y + i) })
@@ -1078,5 +1079,10 @@ func TestRegCallbackSort(t *testing.T) {
 		out.push([1, 2, 3, 4].reduce(function (a, x) { let s = a + x; return s }, 0), [4, 5, 6].find(function (x) { var k = x % 5; return k === 0 }))
 		out.push(new Int32Array([3, 1, 2]).map(function (x) { let d = x * 2; return d }).join(), new BigInt64Array([2n, 3n]).reduce(function (a, x) { return a + x * x }, 0n))
 		out.push([1, 2, 3].some(function (x) { var r = x > 2; return r }), [1, 2, 3].every(function (x) { var r = x > 0; return r }))
+		// Leaves of BigInts, whose frameless run gives up after its misses
+		// and which are then kept as frames.
+		var bigs = new BigInt64Array(100).map((_, i) => BigInt(i) - 50n), tot = 0n, s = 0n
+		for (var r = 0; r < 3; r++) { tot += bigs.reduce((a, x) => a + x, 7n); bigs.forEach((x) => { s += x * x }) }
+		out.push(tot, s)
 		out.join("\n")`, "")
 }
