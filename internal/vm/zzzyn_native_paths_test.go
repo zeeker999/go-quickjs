@@ -882,11 +882,9 @@ func TestRegNativeInIndex(t *testing.T) {
 // array, and the same strings read as keys after the loop.
 func TestRegNativeForIn(t *testing.T) {
 	// The first loop over an array makes its keys' strings, a step's exit
-	// each (keyString), which later loops hand out natively. An index key
-	// is read only right after its step hands it out: one read later, or
-	// one of a snapshot, whose keys are remembered at the loop's start, may
-	// find its keyAtoms entry taken by another string's, by their
-	// addresses, which would make the exits differ from run to run.
+	// each (keyString), which later loops hand out natively. A key is read
+	// by its text (keyIndex), wherever it lies, so that a read long after
+	// its step, or of a snapshot's key, exits alike in every run.
 	was := nativeWarmExits
 	nativeWarmExits += 8
 	defer func() { nativeWarmExits = was }()
@@ -895,7 +893,7 @@ func TestRegNativeForIn(t *testing.T) {
 		function sum(a) { var s = "", k; for (k in a) s += k + ":" + a[k] + ","; return s }
 		function keys(a) { var s = "", k; for (k in a) s += k + ","; return s }
 		var holes = [1, , 3, , 5], gone = [1, 2, 3]; delete gone[2]
-		out.push(sum([1, 2, 3]), keys(holes), keys(gone), sum([]))
+		out.push(sum([1, 2, 3]), keys(holes), keys(gone), sum(holes), sum([]))
 		var big = []; for (var i = 0; i < 1100; i++) big[i] = i
 		var t = 0; for (var k in big) t += big[k]; out.push(t)
 		var del = [1, 2, 3, 4, 5], s = ""; for (var k in del) { s += k; if (k == 1) { del.length = 3; delete del[0] } } out.push(s)
@@ -904,7 +902,8 @@ func TestRegNativeForIn(t *testing.T) {
 		function P() { this.a = 1; this.b = 2 } P.prototype.c = 3
 		var o = new P(), s4 = ""; for (var k in o) s4 += k + o[k]; out.push(s4)
 		var d = { x: 1, y: 2, z: 3 }, s5 = ""; for (var k in d) { s5 += k; delete d.z } out.push(s5)
-		var mixed = [1, 2]; mixed.foo = 7; var s6 = ""; for (var k in mixed) s6 += k; out.push(s6)
+		var mixed = [1, 2]; mixed.foo = 7; var s6 = ""; for (var k in mixed) s6 += k + mixed[k]; out.push(s6)
+		var later = []; for (var k in [5, 6, 7]) later.push(k); out.push(later.map(function (k) { return [9, 8, 7][k] }).join())
 		var str = "abc", s7 = ""; for (var k in str) s7 += str[k]; out.push(s7)
 		var args = (function () { var r = ""; for (var k in arguments) r += arguments[k]; return r })(4, 5, 6); out.push(args)
 		out.join("\n")`, `
@@ -916,6 +915,51 @@ func TestRegNativeForIn(t *testing.T) {
 			for (var k2 in objs[n & 3]) c++
 		}
 		String(sum) + " " + String(c)`, bytecode.RIterNext, bytecode.RGetIndex)
+}
+
+// TestRegNativeForInKeysAnyHeap runs reads by a for-in's keys natively in
+// heaps laid out differently -- strings allocated before each run, a
+// collection between runs, as while it marks and not -- and fails where
+// get_index's exits differ: which key strings it reads by depends on their
+// text alone (keyIndex), never on where they were allocated, which the
+// runtime's keyAtoms, by address, would make it.
+func TestRegNativeForInKeysAnyHeap(t *testing.T) {
+	nativeCounting(t)
+	src := `
+		var out = [], a = [], o = { x: 1, y: 2 }
+		for (var i = 0; i < 300; i++) a[i] = i
+		var s = 0
+		for (var r = 0; r < 4; r++) {
+			for (var k in a) s += a[k]
+			for (var k2 in o) s += o[k2]
+			var keys = []; for (var k3 in [7, 8, 9]) keys.push(k3)
+			for (var k4 of keys) s += [10, 20, 30][k4]
+			s += a["12"] + a["0"] + (a["012"] === undefined ? 1 : 0) + (a["1e1"] === undefined ? 1 : 0)
+		}
+		String(s)`
+	want := nativeRunSrc(t, src, false)
+	var keep [][]string
+	exits := map[int64]int{}
+	for i := 0; i < 8; i++ {
+		filler := make([]string, 0, i*500)
+		for j := 0; j < i*500; j++ {
+			filler = append(filler, strings.Repeat("x", 1+j%7))
+		}
+		keep = append(keep, filler)
+		runtime.GC()
+		nativeMarking(t, i%2 == 1)
+		before := nativeExitOps()
+		if got := nativeRunSrc(t, src, true); got != want {
+			t.Fatalf("run %d: %s, want %s", i, got, want)
+		}
+		after := nativeExitOps()
+		exits[after[bytecode.RGetIndex]-before[bytecode.RGetIndex]]++
+	}
+	nativeMarking(t, false)
+	runtime.KeepAlive(keep)
+	if len(exits) != 1 {
+		t.Errorf("get_index's exits differ from heap to heap: %v (count: runs)", exits)
+	}
 }
 
 // TestRegNativeGenNext runs a generator's next() natively (genNext): the

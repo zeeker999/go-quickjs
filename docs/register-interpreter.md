@@ -706,8 +706,10 @@ keys, walked by index while its element is in its dense storage and the
 runtime keeps the index's string (`intStrings`), handed out as
 `keyString` hands them out -- remembered in `keyAtoms` -- and an
 object's snapshot of keys while it keeps the shape they came from; and
-`get_index` by a key string `keyAtoms` names an index of
-(`keyIndex`), as `stringKeyRead` reads it (`array_for_in` 24.1 to 6.4
+`get_index` by a key string that is an index's canonical form, a flat
+ASCII string of up to nine digits, read by its text (`keyIndex`) -- never
+by `keyAtoms`, which is by the string's address, so that what exits does
+not depend on where strings were allocated or when the collector ran (`array_for_in` 24.1 to 6.4
 ns, the tree 20.2). The arithmetic and bitwise operations load an
 operand into a float register from memory (`numMem`), not through a
 general register: a chain of operations through one register waits on

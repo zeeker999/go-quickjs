@@ -98,19 +98,40 @@ func (g *armGen) keySlot(dst, s Reg) {
 }
 
 // keyIndex puts in rC the index the string at the register address addr
-// names, its num word in r9, as amd64's; anything else exits.
+// names, its num word in r9, as amd64's: a flat ASCII string of up to
+// nine digits in canonical form, read digit by digit; anything else
+// exits. rS is kept.
 func (g *armGen) keyIndex(addr Reg) {
 	a := g.a
+	digits, loop := a.NewLabel(), a.NewLabel()
 	g.kindIs(r9, KindString)
 	a.Load(r9, addr, 8)
-	g.keySlot(r8, r9)
-	g.cmpMem(r9, r8, offKAS)
+	a.Load(rC, r9, offStrLen)
+	a.Cbz(rC, g.exit, true)
+	a.CmpImm(rC, 9, true)
+	a.BCond(HI, g.exit)
+	a.Load(rD, r9, offStrLeft)
+	a.Cbnz(rD, g.exit, true)
+	a.LoadU8(rD, r9, offStrASCII)
+	a.Cbz(rD, g.exit, false)
+	a.Load(r8, r9, offStrS)
+	// No leading zero but "0" itself.
+	a.LoadU8(r9, r8, 0)
+	a.CmpImm(r9, '0', false)
+	a.BCond(NE, digits)
+	a.CmpImm(rC, 1, true)
 	a.BCond(NE, g.exit)
-	a.LoadU8(rC, r8, offKANone)
-	a.Cbnz(rC, g.exit, false)
-	a.LoadU32(rC, r8, offKAAtom)
-	a.MovImm(rD, uint64(uint32(atomIndexTag)))
-	a.Tst(rC, rD, false)
-	a.BCond(EQ, g.exit)
-	a.Op(Eor, rC, rC, rD, false)
+	a.Bind(digits)
+	a.MovImm(rD, 0)
+	a.Bind(loop)
+	a.LoadU8(r9, r8, 0)
+	a.SubsImm(r9, r9, '0', true)
+	a.CmpImm(r9, 9, true)
+	a.BCond(HI, g.exit)
+	a.AddLsl(rD, rD, rD, 2)
+	a.AddLsl(rD, r9, rD, 1)
+	a.AddImm(r8, r8, 1, true)
+	a.SubsImm(rC, rC, 1, true)
+	a.BCond(NE, loop)
+	a.MovRR(rC, rD)
 }

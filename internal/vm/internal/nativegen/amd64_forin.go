@@ -111,11 +111,15 @@ func (g *nativeGen) forInStep() {
 }
 
 // keyIndex puts in RCX the index that the string whose words are R9 (num)
-// and at the window's offset off+8 names, where the runtime handed it
-// out as an index's key (keyAtoms), as stringKeyRead finds it; anything
-// else exits. RDX and R8 are its scratch.
+// and at the window's offset off+8 names: a flat ASCII string of up to
+// nine digits, the first not 0 but in "0" itself -- the canonical form of
+// an array index, whose property key is that index, as a for-in's key is
+// -- read digit by digit, so that the answer depends on the string's text
+// alone, never on where it lies (keyAtoms is by address). Anything else
+// exits. RDX, R8 and R9 are its scratch; RSI is kept.
 func (g *nativeGen) keyIndex(off Reg) {
 	a := g.a
+	digits, loop := a.NewLabel(), a.NewLabel()
 	a.MovRR(RCX, R9)
 	a.Op(Xor, RCX, R10, true)
 	a.ShiftImm(Shr, RCX, 16, true)
@@ -124,22 +128,34 @@ func (g *nativeGen) keyIndex(off Reg) {
 	a.OpImm(Cmp, RCX, int32(KindString), false)
 	a.Jcc(CondNE, g.exit)
 	a.LoadIdx(R9, R12, off, 1, 8)
-	a.MovImm(RDX, keySlotMul)
-	a.MovRR(R8, R9)
-	a.Imul(R8, RDX)
-	a.ShiftImm(Shr, R8, 56, true)
-	a.MovImm(RDX, uint64(sizeKA))
-	a.Imul(R8, RDX)
-	a.Load(RDX, RDI, ncRT)
-	a.LeaIdx(R8, RDX, R8, 1, offRtKeyAtoms)
-	a.CmpMem(R9, R8, offKAS, true)
-	a.Jcc(CondNE, g.exit)
-	a.LoadU8(RCX, R8, offKANone)
-	a.Op(Test, RCX, RCX, false)
-	a.Jcc(CondNE, g.exit)
-	a.LoadU32(RCX, R8, offKAAtom)
-	a.MovImm(RDX, uint64(uint32(atomIndexTag)))
-	a.Op(Test, RCX, RDX, false)
+	a.Load(RCX, R9, offStrLen)
+	a.Op(Test, RCX, RCX, true)
 	a.Jcc(CondE, g.exit)
-	a.Op(Xor, RCX, RDX, false)
+	a.OpImm(Cmp, RCX, 9, true)
+	a.Jcc(CondA, g.exit)
+	a.CmpMemImm8(R9, offStrLeft, 0)
+	a.Jcc(CondNE, g.exit)
+	a.LoadU8(RDX, R9, offStrASCII)
+	a.Op(Test, RDX, RDX, false)
+	a.Jcc(CondE, g.exit)
+	a.Load(R8, R9, offStrS)
+	// No leading zero but "0" itself.
+	a.LoadU8(R9, R8, 0)
+	a.OpImm(Cmp, R9, '0', false)
+	a.Jcc(CondNE, digits)
+	a.OpImm(Cmp, RCX, 1, true)
+	a.Jcc(CondNE, g.exit)
+	a.Bind(digits)
+	a.Op(Xor, RDX, RDX, false)
+	a.Bind(loop)
+	a.LoadU8(R9, R8, 0)
+	a.OpImm(Sub, R9, '0', true)
+	a.OpImm(Cmp, R9, 9, true)
+	a.Jcc(CondA, g.exit)
+	a.LeaIdx(RDX, RDX, RDX, 4, 0)
+	a.LeaIdx(RDX, R9, RDX, 2, 0)
+	a.Lea(R8, R8, 1)
+	a.OpImm(Sub, RCX, 1, true)
+	a.Jcc(CondNE, loop)
+	a.MovRR(RCX, RDX)
 }
