@@ -3,7 +3,9 @@
 package vm
 
 import (
+	"context"
 	"testing"
+	"time"
 )
 
 // regReportOf is r's report line for the register code of the function
@@ -150,5 +152,40 @@ function run() { rec(13); return o.v }
 		if f, ok := regReportOf(r, name); !ok || f.Status != "native" {
 			t.Errorf("%s not compiled: %+v", name, f)
 		}
+	}
+}
+
+// TestJITRegStartPollOnce runs functions entered at their start under a
+// back-edge budget of one: the poll at the code's start (ssa.OpPoll)
+// leaves at every entry, and the run going on at the start passes it
+// again, which is counted once. Counted again, it left there again, for
+// ever.
+func TestJITRegStartPollOnce(t *testing.T) {
+	const src = `
+function get(o) { return o.a + 1 }
+function drive(n) { var o = { a: 1 }, s = 0; for (var i = 0; i < n; i++) s += get(o); return s }
+`
+	regNoInline(t)
+	rts := regNativeRuntimes(t, src)
+	r := rts[0]
+	r.SetJITWarmUp(1, 1)
+	r.jitStress = jitStressConfig{budget: 1}
+	r.jitState().stressBudget = 1
+	var got [2]string
+	for i, rt := range rts {
+		fn, _ := rt.GetProp(Obj(rt.Global()), rt.Intern("drive"))
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		rt.SetContext(ctx)
+		stop := watchStopForTest(rt, ctx)
+		v, err := rt.Call(fn, Undefined, []Value{Float(300)})
+		stop()
+		cancel()
+		got[i] = regNativeShow(rt, v, err)
+	}
+	if got[0] != got[1] || got[0] != "600" {
+		t.Fatalf("with the JIT %q, without %q, want 600", got[0], got[1])
+	}
+	if f, ok := regReportOf(r, "get"); !ok || f.Native == 0 {
+		t.Errorf("get never entered natively: %+v", f)
 	}
 }

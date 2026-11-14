@@ -892,6 +892,13 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 		s.budgets++
 		e.life.ssaStats.polls++
 		r.backEdges = s.backEdgeBudget()
+		if exitPC == 0 {
+			// The poll at the code's start (ssa.OpPoll), which the run
+			// going on there passes again: counted once. Under a stress
+			// budget of one back edge, a function entered at its start
+			// had polled and left there for ever.
+			r.backEdges++
+		}
 		if err := r.checkInterruptPoll(); err != nil {
 			return 0, 0, Undefined, false, err, false
 		}
