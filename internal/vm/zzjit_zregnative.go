@@ -1028,6 +1028,12 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 			return 0, 0, Undefined, false, err, false
 		}
 		if r.jitStressDeopt(s) {
+			// The interpreter goes on from the poll: the objects and the
+			// closures the code did not make, which the frame names by
+			// their homes and templates, made first, as at any exit that
+			// leaves the frame to it -- left out, a closure only called
+			// inlined was its template there, "not a function".
+			r.jitRegMaterialize(f, e, wb)
 			return 0, exitPC, Undefined, false, nil, false
 		}
 		return exitPC, 0, Undefined, false, nil, true
