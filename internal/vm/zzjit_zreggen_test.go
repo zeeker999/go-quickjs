@@ -166,6 +166,23 @@ function returned(n) {
 	}
 	return s;
 }
+function* own(n) { for (let i = 0; i < n; i++) yield i; }
+function cursors(n) {
+	let s = 0;
+	for (let k = 0; k < 3; k++) {
+		for (const v of count(n)) s += v;
+		const g = count(n);
+		for (const v of g) { s += v; if (v === 2) break; }
+		for (const v of g) s += 1000 * v;
+		const h = own(3);
+		h[Symbol.iterator] = function* () { yield 7; };
+		for (const v of h) s += v;
+		for (const v of [1, 2, 3]) s += v;
+		for (const v of 'ab') s += v.length;
+		for (const v of new Map([[1, 2]])) s += v[1];
+	}
+	return s;
+}
 function* pair(a, b) { yield a; yield b; }
 function pairs(n) {
 	let s = 0;
@@ -198,6 +215,7 @@ func TestJITRegGenSteps(t *testing.T) {
 		{"throws", 200, "59103,boom 199,012"},
 		{"pairs", 3000, "4501500"},
 		{"returned", 3000, "4498500,5999,5,true"},
+		{"cursors", 300, "134610"},
 	}
 	for _, marking := range []bool{false, true} {
 		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
@@ -226,6 +244,9 @@ func TestJITRegGenSteps(t *testing.T) {
 			if n := st.GoCallOps["whole iter_next"]; n > 20000 {
 				t.Errorf("%d steps of generators by calls of Go", n)
 			}
+			if n := st.GoCallOps["whole for_of_start"]; n > 20000 {
+				t.Errorf("%d for...of cursors made by calls of Go", n)
+			}
 			if n := st.GoCallOps["call_method_w->next"]; n > 5000 {
 				t.Errorf("%d calls of next by calls of Go", n)
 			}
@@ -237,7 +258,8 @@ func TestJITRegGenSteps(t *testing.T) {
 // TestJITRegGenStepsCompileForARM64 compiles again, with arm64's backend,
 // on any host, the register code regGenStepSrc's generators were compiled
 // to, their generator entries and native yields (mir's windowGenEntry,
-// windowYieldExit), and their callers' native steps and calls of next.
+// windowYieldExit), and their callers' native steps, calls of next and
+// for...of cursors taken from a generator's room (mir's genForOf).
 func TestJITRegGenStepsCompileForARM64(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -246,7 +268,7 @@ func TestJITRegGenStepsCompileForARM64(t *testing.T) {
 	defer RecordJITCompiles(false)
 	rts := regNativeRuntimes(t, regGenStepSrc)
 	r := rts[0]
-	for _, name := range []string{"forOf", "nexts", "finallies", "pairs"} {
+	for _, name := range []string{"forOf", "nexts", "finallies", "pairs", "cursors"} {
 		fn, _ := r.GetProp(Obj(r.Global()), r.Intern(name))
 		for range 12 {
 			r.Call(fn, Undefined, []Value{Float(500)})
@@ -259,7 +281,7 @@ func TestJITRegGenStepsCompileForARM64(t *testing.T) {
 	jitParityLog.Lock()
 	seen := jitParityLog.seen[r]
 	jitParityLog.Unlock()
-	gens, steps := 0, 0
+	gens, steps, cursors := 0, 0, 0
 	for _, cl := range seen {
 		e := r.jit.regCache[r.jitKeyOf(cl.fn)]
 		if e == nil || e.p == nil || e.code == nil {
@@ -279,13 +301,16 @@ func TestJITRegGenStepsCompileForARM64(t *testing.T) {
 				if v.Op == ssa.OpCall && len(v.Calls()) != 0 && len(v.Calls()[0].Gens) != 0 {
 					steps++
 				}
+				if v.Op == ssa.OpCall && len(v.Calls()) != 0 && v.Calls()[0].ForOf && v.Calls()[0].GenIter != 0 {
+					cursors++
+				}
 			}
 		}
 		if _, err := mir.CompileARM64(f, jitEncoding); err != nil {
 			t.Errorf("%s: %v", cl.fn.Name, err)
 		}
 	}
-	if gens < 3 || steps < 3 {
-		t.Errorf("%d generator entries, %d native steps compiled for arm64", gens, steps)
+	if gens < 3 || steps < 3 || cursors < 2 {
+		t.Errorf("%d generator entries, %d native steps, %d native cursors compiled for arm64", gens, steps, cursors)
 	}
 }

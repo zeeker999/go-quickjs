@@ -1165,6 +1165,9 @@ whose locals no closure captures and that keeps no arguments
 (`jitRegGenCallable`): nothing is open on its window's registers. The step
 learns its generators at the calls of Go that step them (`jitRegGenSeen`,
 from the step's `iter_next` and a `call_method_w` of the realm's `next`).
+Its loop's cursor, `for_of_start` Go runs whole, is taken natively from a
+generator's room as the stack form's is (`ssa.CallSite`'s `GenIter` on the
+whole call's site, mir's `genForOf`); Go makes any other.
 A level of such a resumption that leaves native code Go makes the frames
 of as `regGenRun` does -- next's below the generator's, its this, function
 and handlers the generator's (`jitRegPushLevel`) -- and finishes as

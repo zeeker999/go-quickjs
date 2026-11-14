@@ -389,6 +389,17 @@ func (f *jitRegFeedback) regWholeSite(pc int, w bytecode.RInstr) []ssa.CallSite 
 	site := ssa.CallSite{Go: ssa.GoCall, Whole: true, Argc: argc, ThisSlot: -1}
 	r := f.fb.r
 	switch {
+	case ok && argc == 1 && w.Op() == bytecode.RForOfStart:
+		// A for...of's cursor, of the iterable: one over a generator with
+		// room for it native code takes from the generator, by the
+		// runtime's cache of how generators iterate (mir's genForOf), as
+		// the stack form's for_of_start's site; Go makes any other.
+		if r.genNextFn == nil || r.genIterFn == nil {
+			return nil
+		}
+		site.ForOf = true
+		site.GenIter, site.GenIterFn, site.GenNext = uintptr(unsafe.Pointer(&r.genIteration)), uintptr(unsafe.Pointer(r.genIterFn)), f.GenNext()
+		return []ssa.CallSite{site}
 	case !ok || argc != 2:
 		return nil
 	case w.Op() == bytecode.RDefineField:

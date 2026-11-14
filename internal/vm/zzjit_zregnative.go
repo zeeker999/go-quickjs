@@ -888,7 +888,9 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 		r.jitRegGenStepSeen(f, run.e, rpc, jitGoArg(ctx, 0))
 	}
 	if kind == abi.GoCallWhole || (kind == abi.GoCallRest || kind == abi.GoCallStep) && (op == bytecode.RIterRest || op == bytecode.RIterStep) ||
-		kind == abi.GoCallStep && op == bytecode.RIterNext {
+		kind == abi.GoCallStep && op == bytecode.RIterNext || kind == abi.GoCallForOf && op == bytecode.RForOfStart {
+		// A for...of's cursor native code did not take from a generator's
+		// room (regWholeSite's ForOf) too.
 		// Or a destructuring's step or rest, which native code had no
 		// step of its own for: run whole too.
 		return r.jitRegWhole(ctx, idx, run, rpc)
