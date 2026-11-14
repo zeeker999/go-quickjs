@@ -602,8 +602,15 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 				r.jitRegReopt(f.cl, e)
 			}
 			var callee Value
-			if w := regAt(c.code, exitPC); w.Op() == bytecode.RNewW && wb+int(w.A()) < len(r.stack) {
+			w := regAt(c.code, exitPC)
+			if w.Op() == bytecode.RNewW && wb+int(w.A()) < len(r.stack) {
 				callee = r.stack[wb+int(w.A())]
+			}
+			// A method call's operands, which may be a loop's built-in's
+			// (jitRegForEachSeen), read before Go runs it.
+			var mcallee, mrecv, mcb Value
+			if w.Op() == bytecode.RCallMW && w.X() >= 1 && wb+int(w.A())+2 < len(r.stack) {
+				mcallee, mrecv, mcb = r.stack[wb+int(w.A())], r.stack[wb+int(w.A())+1], r.stack[wb+int(w.A())+2]
 			}
 			next, ran, err = r.regWhole(f, c, wb, exitPC)
 			if seen.write && err == nil && ran {
@@ -616,8 +623,13 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 			}
 			if err == nil && ran {
 				// A call native code did not make, which it may once
-				// compiled again.
+				// compiled again -- a loop's built-in's too, whose checks
+				// failed: a callback made anew at each call of its maker,
+				// called by its code from here, as at a call of Go.
 				r.jitRegCallSeen(f, c, e, exitPC, callee)
+				if mcallee.IsObject() {
+					r.jitRegForEachSeen(f, e, exitPC, mcallee, mrecv, mcb, int(w.X()))
+				}
 			}
 			if l := s.regLearned[r.jitKeyOf(f.cl.fn)]; l != nil && l.polyReopt {
 				// The site met what the code was not compiled for and
@@ -867,7 +879,8 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	op := w.Op()
 	argc := int(w.X())
 	kind := ctx.GoOp >> abi.GoOpKindShift & 0xff
-	if kind == abi.GoCallWhole || (kind == abi.GoCallRest || kind == abi.GoCallStep) && (op == bytecode.RIterRest || op == bytecode.RIterStep) {
+	if kind == abi.GoCallWhole || (kind == abi.GoCallRest || kind == abi.GoCallStep) && (op == bytecode.RIterRest || op == bytecode.RIterStep) ||
+		kind == abi.GoCallStep && op == bytecode.RIterNext {
 		// Or a destructuring's step or rest, which native code had no
 		// step of its own for: run whole too.
 		return r.jitRegWhole(ctx, idx, run, rpc)
@@ -1034,6 +1047,17 @@ func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int)
 	}
 	ops, argc, dest, ok := e.p.Code[ipc].WholeOperands(e.p.Regs)
 	whole := ctx.GoOp>>abi.GoOpKindShift&0xff == abi.GoCallWhole
+	// A for...of's or a for...in's step (iter_next, ir's IterStep): its
+	// cursor's register read, its value's written, as the interpreter's
+	// step makes it -- the uninitialized value once done, where it jumps
+	// to the loop's end -- as the stack form's call of Go steps a cursor
+	// (jitGoRun's OpIterNextOrJump). Left to an exit, Bounce's for...of
+	// left native code at its steps.
+	step := false
+	if in := &e.p.Code[ipc]; !ok && !whole && in.Op == ir.IterStep && !in.When && !in.Rest &&
+		in.Left.Slot >= 0 && in.Left.Slot < e.p.Regs && in.Dest >= 0 && in.Dest < e.p.Regs {
+		ops[0], argc, dest, ok, step = in.Left.Slot, 1, in.Dest, true, true
+	}
 	if !ok || whole && int(ctx.GoOp>>abi.GoOpArgcShift&0xff) != argc || wb+e.p.Regs > len(r.stack) {
 		return false
 	}
@@ -1088,7 +1112,12 @@ func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int)
 	if dest >= 0 {
 		v = r.stack[wb+dest]
 	}
-	if err != nil || next != after || r.stopped != nil || e.invalid {
+	done := false
+	if w := regAt(c.code, rpc); step && err == nil && next != after && next == rpc+1+int(w.SC()) {
+		// Done: the loop's end is next, its register as it was.
+		v, done = uninitialized, true
+	}
+	if err != nil || next != after && !done || r.stopped != nil || e.invalid {
 		// Left at the call's exit, whose records write the frame as it was
 		// before the instruction: then the register it wrote, or the
 		// handler's that took what it threw.
@@ -1097,6 +1126,8 @@ func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int)
 		case err != nil:
 		case h != nil && next == int(h.To):
 			p.reg, p.v = int(h.Reg), r.stack[wb+int(h.Reg)]
+		case done:
+			// The loop's end, nothing written.
 		default:
 			p.reg, p.v = dest, v
 		}

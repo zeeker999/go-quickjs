@@ -293,15 +293,17 @@ func (r *Runtime) jitRegCellsClosure(ctx *abi.Context, f *frame, c *regCode, e *
 	// regClosure has it.
 	f.this = r.stack[wb+1]
 	caps := c.rc.Caps[i]
-	if t.fn.CapturesByValue {
-		if level {
-			// Its by-value captures read the window's registers, which a
-			// native callee's cells hold: left to the exit.
-			return false
-		}
+	if t.fn.CapturesByValue && !level {
 		keepClosure(ctx, Obj(regMadeClosure(newClosureByValue[struct{}](r, f, t, caps, wb))))
 		return true
 	}
+	// A native callee's closure that captures by value takes the cells
+	// its registers' values are in, closed cells of the callee's own: what
+	// it takes by value is never assigned once it is made (bytecode's
+	// UpvalueDesc's ByValue), so the cell it shares holds its value as a
+	// copy would. Its window's registers, which the code does not keep,
+	// are not read; left to an exit, AWFY NBody's advance, a native
+	// callee, left native code at its forEach's arrow at every call.
 	byLocal := make([]*upvalue, max(int(c.ncap), 1))
 	for k, u := range t.fn.Upvalues {
 		if !u.FromParent || k >= len(caps) {

@@ -113,3 +113,74 @@ func TestJITRegPlainSetterCall(t *testing.T) {
 		t.Error("the setter never called by Go from native code")
 	}
 }
+
+// regLoopsSrc's for...of and for...in loops step their cursors by calls of
+// Go native code makes on the frame (jitRegWhole's step): arrays, a
+// string, a Map, a generator, an iterator that throws, a loop left by
+// break, a loop variable a closure captures; and a callee made anew at
+// each call of its maker, NBody's advance's arrow, given to forEach in a
+// native callee (jitRegCellsClosure, jitRegForEachSeen at a host exit).
+const regLoopsSrc = `
+function* gen(n) { for (var i = 0; i < n; i++) yield i * 2 }
+var bad = { [Symbol.iterator]() { var k = 0; return { next() { if (++k > 3) throw new Error("bad" + k); return { value: k, done: false } } } } };
+function loops(n) {
+	var arr = [1, 2, 3, 4, 5], m = new Map([["a", 1], ["b", 2]]), s = 0, t = "", fs = [];
+	for (var i = 0; i < n; i++) {
+		for (const x of arr) s += x;
+		for (const c of "hey") t = c;
+		for (const [k, v] of m) s += v + k.length;
+		for (const g of gen(3)) s += g;
+		for (const x of arr) { if (x == 3) break; s += x }
+		for (const k in { p: 1, q: 2 }) t += k;
+		if (i % 50 == 0) for (const x of arr) fs.push(() => x);
+		try { for (const b of bad) s += b } catch (e) { t += e.message }
+	}
+	var u = 0; for (const f of fs) u += f();
+	return s + ":" + t + ":" + u;
+}
+class Body { constructor(x) { this.x = x; this.vx = 1.5 } }
+class Sys {
+	constructor() { this.bodies = [new Body(1), new Body(2), new Body(3)] }
+	advance(dt) { this.bodies.forEach((b) => { b.x += dt * b.vx }) }
+}
+function advances(n) { var s = new Sys(); for (var i = 0; i < n; i++) s.advance(i % 3 == 0 ? 0.5 : 0.25); return s.bodies[0].x + s.bodies[2].x }
+class Ball { constructor(i) { this.x = i } bounce() { this.x = (this.x * 7 + 3) % 101; return this.x < 20 } }
+function bounces() { const balls = new Array(100); for (let i = 0; i < 100; i++) balls[i] = new Ball(i); let b = 0; for (let k = 0; k < 50; k++) for (const ball of balls) if (ball.bounce()) b += 1; return b }
+function main(n) { return loops(n) + "," + advances(n * 10) + "," + bounces() }
+`
+
+// TestJITRegLoopSteps runs regLoopsSrc's main natively and in a runtime
+// without the JIT and compares their answers; no step, no closure made by
+// a native callee, no forEach given a new arrow each call, leaves native
+// code at every turn.
+func TestJITRegLoopSteps(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regLoopsSrc)
+			var got [2]string
+			for i, r := range rts {
+				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("main"))
+				for range 20 {
+					v, err := r.Call(fn, Undefined, []Value{Float(300)})
+					got[i] = regNativeShow(r, v, err)
+				}
+			}
+			if got[0] != got[1] {
+				t.Errorf("with the JIT %q, without %q", got[0], got[1])
+			}
+			st := rts[0].RegNativeStats()
+			t.Logf("hosts %v, calls of Go %d", st.HostOps, st.GoCalls)
+			for _, op := range []string{"iter_next", "closure_w", "call_method_w"} {
+				if n := st.HostOps[op]; n > 200 {
+					t.Errorf("%s left to Go at %d host exits", op, n)
+				}
+			}
+		})
+	}
+}

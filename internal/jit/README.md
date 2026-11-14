@@ -1343,6 +1343,14 @@ the runtime stopped in, or after which the code was found invalid, its exit
 finishes (`regPending`, `regFinishCall`): the answer to the call's register,
 or the exception to the frame's handlers, never the call made again.
 
+**Loops' steps.** A for...of's or a for...in's step (`iter_next`, an
+`ir.IterStep` native code does not make itself) is a call of Go of the
+step (`ssa.CallSite`'s `Step`) that runs the register instruction on the
+frame as an instruction run whole is (below, `jitRegWhole`): the cursor's
+register given the code's value, the value it steps to the call's result,
+or the uninitialized value where the loop is done, as the stack form's call
+of Go steps its cursor.
+
 **Instructions run whole.** A whole Host (`ir.Instruction`'s `Whole`) is
 a call of Go (`ssa.CallSite`'s `Whole`, `abi.GoCallWhole`) that runs the
 register instruction at its PC on the register frame, by the interpreter's
@@ -1370,9 +1378,10 @@ scope's end -- Go makes from native code on the register frame
 callee's, which has none of the VM's -- a stand-in of its closure, function
 object and receiver, its window at its context's `Base`. Left to an exit: a
 mapped arguments object, which aliases the registers; a native callee's rest
-parameters and arguments, which its calls keep none of; and a closure a
-native callee makes that captures by value, which reads its window's
-registers. Where the code's captured registers are the frame's own slots,
+parameters and arguments, which its calls keep none of. A closure a
+native callee makes that captures by value shares the callee's closed cells
+of its registers in place of copies of them: what it takes by value is
+never assigned once it is made. Where the code's captured registers are the frame's own slots,
 not in cells of their own, a closure and a scope's end on the run's own
 frame are the interpreter's handler's (`jitRegFrameWhole`): the closure
 captures the upvalues open on the slots, the scope's end closes them.
