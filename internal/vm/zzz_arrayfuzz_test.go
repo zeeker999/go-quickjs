@@ -3,6 +3,7 @@ package vm
 import (
 	"fmt"
 	"math/rand/v2"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -61,15 +62,18 @@ func TestArrayRoomRandom(t *testing.T) {
 	}
 	first, count := strFuzzRange(t, count)
 	for seed := first; seed < first+count; seed++ {
-		src := arrayFuzzSource(seed)
-		ref := New(Config{Debug: true})
-		want := strFuzzRun(t, ref, src, true)
-		ref.Close()
-		r := New(Config{})
-		got := strFuzzRun(t, r, src, false)
-		r.Close()
-		if got != want {
-			t.Fatalf("seed %d: %s\n%s", seed, firstLogDifference(got, want), src)
-		}
+		t.Run(strconv.Itoa(seed), func(t *testing.T) {
+			t.Parallel()
+			src := arrayFuzzSource(seed)
+			ref := New(Config{Debug: true})
+			want := strFuzzRun(t, ref, src, true)
+			ref.Close()
+			r := New(Config{})
+			got := strFuzzRun(t, r, src, false)
+			r.Close()
+			if got != want {
+				t.Fatalf("seed %d: %s\n%s", seed, firstLogDifference(got, want), src)
+			}
+		})
 	}
 }

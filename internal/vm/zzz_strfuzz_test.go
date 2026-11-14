@@ -389,20 +389,34 @@ func TestStrAppendRandom(t *testing.T) {
 		count = 40
 	}
 	first, count := strFuzzRange(t, count)
-	for seed := first; seed < first+count; seed++ {
-		src := strFuzzSource(seed)
-		ref := New(Config{Debug: true})
-		want := strFuzzRun(t, ref, src, true)
-		ref.Close()
-		for _, tree := range []bool{false, true} {
+	// The tree tier is a switch of the process's, so the seeds run in two
+	// passes, each in parallel under one setting: the first with the tree
+	// tier on, which also runs each seed's reference, and the second with it
+	// off, against the references the first kept.
+	wants := make([]string, count)
+	for _, tree := range []bool{true, false} {
+		t.Run(fmt.Sprintf("tree=%v", tree), func(t *testing.T) {
 			SetTreeTier(tree)
-			r := New(Config{})
-			got := strFuzzRun(t, r, src, false)
-			r.Close()
-			if got != want {
-				t.Fatalf("seed %d, tree tier %v: %s\n%s", seed, tree, firstLogDifference(got, want), src)
+			for i := range count {
+				seed := first + i
+				t.Run(strconv.Itoa(seed), func(t *testing.T) {
+					t.Parallel()
+					src := strFuzzSource(seed)
+					if tree {
+						ref := New(Config{Debug: true})
+						wants[i] = strFuzzRun(t, ref, src, true)
+						ref.Close()
+					}
+					want := wants[i]
+					r := New(Config{})
+					got := strFuzzRun(t, r, src, false)
+					r.Close()
+					if got != want {
+						t.Fatalf("seed %d, tree tier %v: %s\n%s", seed, tree, firstLogDifference(got, want), src)
+					}
+				})
 			}
-		}
+		})
 	}
 }
 
