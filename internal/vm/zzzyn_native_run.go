@@ -738,18 +738,20 @@ func nativeIterRes(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeC
 // functions in turn, an array of them or a method of several layouts --
 // where the handler enters the callee with a frame.
 // The cache holds the callee the second time, so that a call the handler
-// leaves to Go anyway is rhCallW's then. Anything else is rhCallW's.
+// leaves to Go anyway is its Go handler's then (rhCallW, rhCallWT for the
+// calls in tail position whose handlers are call_w's). Anything else is
+// the Go handler's.
 func nativeCallMiss(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
 	r, f, c := st.r, st.f, st.c
 	win := regWindow(r.stack, st.wb+int(w.A()))
 	calls := f.cl.regCalls
 	if uint(w.C()) >= uint(len(calls)) || !regIsObject(&win[0]) {
-		return rhCallW(regs, w, pc, st)
+		return regTable[w.Op()](regs, w, pc, st)
 	}
 	e, o := &calls[w.C()], (*Object)(win[0].ref)
-	method := w.Op() == bytecode.RCallMW
+	method := w.Op().MethodCall()
 	if e.callee == o || e.kind == regCallGen || e.kind == regCallMarked || method && pc < len(c.rc.Marks) && c.rc.Marks[pc] != 0 {
-		return rhCallW(regs, w, pc, st)
+		return regTable[w.Op()](regs, w, pc, st)
 	}
 	if fd := o.fn(); fd != nil && fd.closure != nil && !fd.bound {
 		// Only a callee the handler enters with a frame: a leaf rhCallW's
@@ -761,7 +763,7 @@ func nativeCallMiss(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regStat
 			return pc
 		}
 	}
-	return rhCallW(regs, w, pc, st)
+	return regTable[w.Op()](regs, w, pc, st)
 }
 
 // nativeCallMissFn is nativeCallMiss's func value, set by init.

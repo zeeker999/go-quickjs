@@ -1000,8 +1000,9 @@ func TestRegDirectCallbacks(t *testing.T) {
 // TestRegNativePolyCalls runs call sites that call several functions in
 // turn: the exit makes the site's cache the new callee's and the call is
 // made again natively (nativeCallMiss) where the handler enters it with a
-// frame -- plain functions, methods of several layouts, arrows with their
-// this, sloppy methods of a primitive receiver -- and Go makes the rest:
+// frame -- plain functions, methods of several layouts, in tail position
+// too, arrows with their this, sloppy methods of a primitive receiver --
+// and Go makes the rest:
 // leaves, functions that keep their arguments, generators, bound
 // functions, built-ins and class constructors, which throw.
 func TestRegNativePolyCalls(t *testing.T) {
@@ -1019,6 +1020,16 @@ func TestRegNativePolyCalls(t *testing.T) {
 		}
 		var ms = [{ m() { return this.k + 1 }, k: 1 }, { k: "s", m() { return this.k + 2 } }, { m: function () { return typeof this } }]
 		for (var i = 0; i < 30; i++) out.push(ms[i % 3].m())
+		// Methods of several templates called in tail position, whose
+		// this the cache made again must keep.
+		var ts = [{ k: 1, m(n) { return this.k + n } }, { k: 2, m: function (n) { return this.k * n } }, { k: 3, m(n) { "use strict"; return this.k - n } }]
+		function tail(o, n) { "use strict"; return o.m(n) }
+		for (var i = 0; i < 30; i++) out.push(tail(ts[i % 3], i))
+		class Sched { constructor() { this.n = 0 } bump(x) { this.n += x; return this } hold() { return this.n }
+			task() { return (w) => w === 0 ? this.hold() : this.bump(w) } }
+		var sc = new Sched(), tk = sc.task(), ss = 0
+		for (var i = 0; i < 200; i++) { var rr = tk(i & 3); ss += typeof rr === "number" ? rr : rr.n }
+		out.push(ss)
 		String.prototype.sm = function () { return typeof this }
 		Number.prototype.sm = function () { return this + 1 }
 		var prims = ["a", 5]
