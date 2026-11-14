@@ -34,9 +34,10 @@ var (
 // Calls, leaves and caches; and the bases of the Runtime's and a
 // closureCode's fields the code reads relative to the context's rt and cc.
 var (
-	elemStrCharCodeAt int32
+	elemStrCharCodeAt, elemPush int32
 
 	regCallEnter, regCallThis, regCallObjThis, regCallOut, regCallLeaf, regLeafArg int32
+	regCallNative                                                                  int32
 	regLeafCode                                                                    int32
 	regFrameCall, regFrameEnter, regFrameGenStep                                   int32
 
@@ -93,7 +94,7 @@ func loadConsts() {
 	for _, c := range []struct {
 		p    *int32
 		name string
-	}{{&elemStrCharCodeAt, "elemStrCharCodeAt"},
+	}{{&elemStrCharCodeAt, "elemStrCharCodeAt"}, {&elemPush, "elemPush"}, {&regCallNative, "regCallNative"},
 		{&regCallEnter, "regCallEnter"}, {&regCallThis, "regCallThis"}, {&regCallObjThis, "regCallObjThis"},
 		{&regCallOut, "regCallOut"}, {&regCallLeaf, "regCallLeaf"}, {&regLeafArg, "regLeafArg"}, {&regLeafCode, "regLeafCode"},
 		{&regFrameCall, "regFrameCall"}, {&regFrameEnter, "regFrameEnter"}, {&regFrameGenStep, "regFrameGenStep"},

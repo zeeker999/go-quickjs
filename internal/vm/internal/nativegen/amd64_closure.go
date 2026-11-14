@@ -136,3 +136,28 @@ func (g *nativeGen) closureW() {
 	a.LeaIdx(RAX, R12, RDX, 1, 0)
 	g.storeValue()
 }
+
+// litCall is new_object_lit and new_array_e: nativeLit(regs, w, pc, ctx)
+// called through callH as closureW calls nativeClosure, with no exit's
+// state, Go storing the literal it makes in R[A]; the pinned registers
+// put back after, and on.
+func (g *nativeGen) litCall() {
+	a := g.a
+	after := a.NewLabel()
+	a.Store(RDI, ncIP, RBX)
+	a.Store(RDI, ncBudget, R11)
+	a.LeaLabel(R8, after)
+	a.Store(RDI, ncAfter, R8)
+	a.MovRR(RBX, RAX)
+	a.Load(RCX, RDI, ncIP)
+	a.Load(RDX, RDI, ncCodeBase)
+	a.Op(Sub, RCX, RDX, true)
+	a.ShiftImm(Shr, RCX, 3, true)
+	a.MovRR(RSI, RDI)
+	a.MovRR(RAX, R12)
+	a.Load(RDX, RDI, ncLitFn)
+	a.JmpMem(RDI, ncCallH)
+	a.Bind(after)
+	g.reload()
+	g.next()
+}

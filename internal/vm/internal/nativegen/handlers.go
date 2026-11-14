@@ -45,6 +45,7 @@ var handlerOps = []bytecode.ROp{
 	bytecode.RYield,
 	bytecode.RCloseRegs, bytecode.RClosureW, bytecode.RSwitch,
 	bytecode.RBin,
+	bytecode.RNewObjectLit, bytecode.RNewArrayE, bytecode.RStrFreeze,
 }
 
 // handlerOrder checks that order, the operations an emitter laid out

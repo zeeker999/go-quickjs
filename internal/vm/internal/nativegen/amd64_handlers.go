@@ -18,7 +18,7 @@ import (
 func nativeEmit(v *variant) (*block, error) {
 	g := &nativeGen{a: &Asm{}, v: v}
 	a := g.a
-	g.exit, g.exitRet = a.NewLabel(), a.NewLabel()
+	g.exit, g.exitRet, g.exitAfter = a.NewLabel(), a.NewLabel(), a.NewLabel()
 	g.genRet = g.exit
 	if v.has(bytecode.RYield) {
 		g.genRet = a.NewLabel()
@@ -1171,6 +1171,32 @@ func nativeEmit(v *variant) (*block, error) {
 	h(bytecode.RSwitch, g.switchW)
 	// A division or a remainder of numbers (amd64_bin.go).
 	h(bytecode.RBin, g.bin)
+	// str_freeze: R[A], where it is a string an append owns (building),
+	// no longer grown in place, as rhStrFreeze freezes it: its flag, a
+	// byte of no pointer, cleared where it is set, which leaves a string
+	// another runtime may share unwritten. Anything else is left as it is.
+	h(bytecode.RNewObjectLit, g.litCall)
+	h(bytecode.RNewArrayE, g.litCall)
+	h(bytecode.RStrFreeze, func() {
+		done := a.NewLabel()
+		g.decA(RDX)
+		a.LoadIdx(R9, R12, RDX, 1, 0)
+		a.MovRR(RCX, R9)
+		a.Op(Xor, RCX, R10, true)
+		a.ShiftImm(Shr, RCX, 16, true)
+		a.Jcc(CondNE, done)
+		a.MovZX8(RCX, R9)
+		a.OpImm(Cmp, RCX, int32(KindString), false)
+		a.Jcc(CondNE, done)
+		a.LoadIdx(RSI, R12, RDX, 1, 8)
+		a.LoadU8(RCX, RSI, offStrBuilding)
+		a.Op(Test, RCX, RCX, false)
+		a.Jcc(CondE, done)
+		a.Op(Xor, RCX, RCX, false)
+		a.Store8(RSI, offStrBuilding, RCX)
+		a.Bind(done)
+		g.next()
+	})
 
 	for n, l := range g.exits {
 		if n == 0 {

@@ -1,6 +1,7 @@
 package nativegen
 
 import (
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	. "github.com/go-quickjs/go-quickjs/internal/jit/asm/amd64"
 )
 
@@ -206,7 +207,7 @@ func (g *nativeGen) ptrTo() {
 func (g *nativeGen) call() {
 	a := g.a
 	ok, noThis, noTop, loop, loopEnd, skip, high := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
-	start, tmpl := a.NewLabel(), a.NewLabel()
+	start, tmpl, builtin := a.NewLabel(), a.NewLabel(), a.NewLabel()
 	a.Bind(start)
 
 	// e := &calls[C].
@@ -303,7 +304,7 @@ func (g *nativeGen) call() {
 	a.OpImm(Cmp, R9, regCallThis, false)
 	a.Jcc(CondE, ok)
 	a.OpImm(Cmp, R9, regCallObjThis, false)
-	a.Jcc(CondNE, g.ex(4))
+	a.Jcc(CondNE, builtin)
 	a.Load(R8, RSI, 16)
 	a.CmpMem(R8, RDI, ncObjBits, true)
 	a.Jcc(CondNE, g.ex(5))
@@ -587,6 +588,110 @@ func (g *nativeGen) call() {
 	g.ptrTo()
 	a.Load(RAX, RBX, 0)
 	a.Jmp(start)
+
+	// A built-in the site cached (regCallNative): Array.prototype.push of
+	// one argument is the code's own (push); any other is called in Go
+	// with no exit (light).
+	light := a.NewLabel()
+	a.Bind(builtin)
+	a.OpImm(Cmp, R9, regCallNative, false)
+	a.Jcc(CondNE, g.ex(4))
+	g.push(light)
+	a.Bind(light)
+	g.light()
+}
+
+// light is call_w's and call_method_w's call of the built-in its site
+// cached, made by nativeBuiltin, a Go function of a handler's form,
+// called through callH as the exit stub calls a handler and returning
+// to the stub's code after its call (exitAfter), which goes on at the pc
+// it gives or ends the frame: the exit's protocol but none of its work
+// before the call -- no state to make, no count, no handler to look up,
+// and no search of the site's cache again in rhCallW. A frame whose
+// state Go has not made yet (topOK) exits.
+func (g *nativeGen) light() {
+	a := g.a
+	a.CmpMemImm8(RDI, ncTopOK, 0)
+	a.Jcc(CondE, g.exit)
+	a.Store(RDI, ncIP, RBX)
+	a.Store(RDI, ncBudget, R11)
+	a.Load(RAX, RBX, 0)
+	a.Store(RDI, ncW, RAX)
+	a.MovRR(RCX, RBX)
+	a.Load(RDX, RDI, ncCodeBase)
+	a.Op(Sub, RCX, RDX, true)
+	a.ShiftImm(Shr, RCX, 3, true)
+	a.Store(RDI, ncPC, RCX)
+	a.Load(RDX, RDI, ncRT)
+	a.Store(RDX, offRtBackEdges, R11)
+	a.LeaLabel(R8, g.exitAfter)
+	a.Store(RDI, ncAfter, R8)
+	// nativeBuiltin(st.regs, w, pc, st): the func value in DX.
+	a.MovRR(RBX, RAX)
+	a.Load(RDX, RDI, ncBuiltinFn)
+	a.Load(RSI, RDI, ncTop)
+	a.Load(RAX, RSI, offStRegs)
+	a.JmpMem(RDI, ncCallH)
+}
+
+// push is call_method_w of Array.prototype.push, the built-in its site
+// cached, of one argument, on an array with room for it, as pureElemOp's
+// push appends it: the receiver an array an element appended at its
+// length is stored in as arrayAppend stores one (appendRoom), the
+// argument at elems[len], the length past it, and R[B] the new length. A
+// bound function, another built-in, another count of arguments, a full
+// array or anything else exits, before anything is written. RCX is the
+// site's cache entry, RSI the window, RAX the instruction.
+func (g *nativeGen) push(light Label) {
+	a := g.a
+	a.MovZX8(RDX, RAX)
+	a.OpImm(Cmp, RDX, int32(bytecode.RCallMW), false)
+	a.Jcc(CondNE, light)
+	a.MovRR(RDX, RAX)
+	a.ShiftImm(Shr, RDX, 8, true)
+	a.MovZX8(RDX, RDX)
+	a.OpImm(Cmp, RDX, 1, false)
+	a.Jcc(CondNE, light)
+	// The callee: push itself, not bound.
+	a.Load(R9, RCX, offECallee)
+	a.LoadU16(RDX, R9, offObjFlags)
+	a.OpImm(And, RDX, int32(objHasData), false)
+	a.Jcc(CondE, light)
+	a.Load(RDX, R9, sizeObj+offExtData)
+	a.CmpMem(RDX, RDI, ncFuncT, true)
+	a.Jcc(CondNE, light)
+	a.Load(R9, R9, sizeObj+offExtData+8)
+	a.LoadU8(RDX, R9, offFDElemOp)
+	a.OpImm(Cmp, RDX, int32(elemPush), false)
+	a.Jcc(CondNE, light)
+	a.LoadU8(RDX, R9, offFDBound)
+	a.Op(Test, RDX, RDX, false)
+	a.Jcc(CondNE, light)
+	// The receiver, an array with room.
+	a.Load(R9, RSI, 16)
+	a.CmpMem(R9, RDI, ncObjBits, true)
+	a.Jcc(CondNE, light)
+	a.Store(RDI, scr(sWin), RSI)
+	a.Load(RSI, RSI, 24)
+	g.appendRoom(RSI, RCX, light, light, true)
+	// The argument at elems[len], then the length past it.
+	a.Lea(R9, RCX, 1)
+	a.Store(RDI, scr(sI), R9)
+	a.ShiftImm(Shl, RCX, 4, true)
+	a.Load(RAX, RSI, sizeObj)
+	a.Op(Add, RAX, RCX, true)
+	a.Store(RSI, sizeObj+8, R9)
+	a.Load(RDX, RDI, scr(sWin))
+	a.Load(R9, RDX, 32)
+	a.Store(RAX, 0, R9)
+	a.Load(RCX, RDX, 40)
+	a.Lea(RAX, RAX, 8)
+	g.ptrStore()
+	// R[B], the new length.
+	a.Load(RAX, RBX, 0)
+	a.Load(RCX, RDI, scr(sI))
+	a.Cvtsi2sd(0, RCX, true)
+	g.storeB(0)
 }
 
 // ret is ret and ret_undef of a frame the code entered itself: its

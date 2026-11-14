@@ -138,10 +138,12 @@ func NativeLayout() (offsets, sizes map[string]uintptr, consts map[string]uint64
 		"elemBigUint64":    uint64(elemBigUint64),
 
 		"elemStrCharCodeAt": uint64(elemStrCharCodeAt),
+		"elemPush":          uint64(elemPush),
 
 		"regCallEnter":   uint64(regCallEnter),
 		"regCallThis":    uint64(regCallThis),
 		"regCallObjThis": uint64(regCallObjThis),
+		"regCallNative":  uint64(regCallNative),
 		"regCallOut":     uint64(regCallOut),
 		"regCallLeaf":    uint64(regCallLeaf),
 		"regLeafArg":     uint64(regLeafArg),

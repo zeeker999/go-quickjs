@@ -369,7 +369,7 @@ func nativeZeroed(n int) bool {
 // that stack. A toolchain whose convention differs fails it, and the
 // native handlers then need their trampoline changed.
 func TestRegNativeCallHConvention(t *testing.T) {
-	op := bytecode.RNewObjectLit
+	op := bytecode.RNewArray
 	if nativePlain.has[op] {
 		t.Fatalf("%s has a native handler: the test needs an operation that exits", op)
 	}
@@ -427,8 +427,8 @@ func TestRegNativeCallHConvention(t *testing.T) {
 		}
 		return orig(regs, w, pc, st)
 	}
-	src := `function f(n) { var s = 0; for (var i = 0; i < n; i++) { var o = {a: i, b: 1}; s += o.a + o.b } return s }
-		String(f(200)) + " " + String((function () { return {x: 7} })().x)`
+	src := `function f(n) { var s = 0; for (var i = 0; i < n; i++) { var o = [i, 1]; s += o[0] + o[1] } return s }
+		String(f(200)) + " " + String((function (k) { return [k] })(7)[0])`
 	if got := nativeRunSrc(t, src, true); got != "20100 7" {
 		t.Errorf("got %q, want %q", got, "20100 7")
 	}
@@ -660,4 +660,116 @@ func TestRegNativeBin(t *testing.T) {
 		out.join()`, `
 		function f(n) { var s = 0; for (var j = 0; j < n; j++) s += (j % 10) + (j % 7) / 2; return s }
 		String(f(5000))`, bytecode.RBin)
+}
+
+// TestRegNativeStrFreeze reads strings appends grow in place, natively and
+// by the Go table, marking and not: a closure's appends to the string it
+// captures read back each turn and kept, a local's grown and read,
+// constants, numbers and objects frozen, and the reads keeping what they
+// read while the appends go on; its fast case freezes with no exit.
+func TestRegNativeStrFreeze(t *testing.T) {
+	nativeCheck(t, `
+		var out = []
+		function sink() {
+			var s = ""
+			return { push: function (x) { s += x }, get: function () { return s }, len: function () { return s.length } }
+		}
+		var k = sink(), kept = []
+		for (var i = 0; i < 40; i++) { k.push(i % 3 ? "<x>" : String(i)); if (i % 7 == 0) kept.push(k.get()); out.push(k.len()) }
+		out.push(kept.join("|"), k.get())
+		function local(n) { var s = "a", r = []; for (var i = 0; i < n; i++) { s += i; r.push(s) } return r.join() }
+		out.push(local(12))
+		function other(v) { var f = function () { return v }; return f() }
+		out.push(other(1), other(null), other("c"), typeof other({}))
+		out.join()`, `
+		var k = (function () { var s = ""; return { push: function (x) { s += x }, get: function () { return s } } })()
+		var c = 0
+		for (var i = 0; i < 1000; i++) { k.push("<x>"); c += k.get().length }
+		String(c)`, bytecode.RStrFreeze)
+}
+
+// TestRegNativePush pushes one argument natively where an array has room,
+// against the Go table: arrays of every kind of element, literals whose
+// elements are shared, arrays grown past their room, frozen, sealed and
+// non-extensible ones, a length made read-only, holes, index keys on the
+// array and up its chain (a setter of Array.prototype's among them), an
+// array-like object, push bound and borrowed, other counts of arguments,
+// and a result kept in the receiver's register; its fast case pushes with
+// no exit but the growth's.
+func TestRegNativePush(t *testing.T) {
+	was := nativeWarmExits
+	nativeWarmExits = 16
+	defer func() { nativeWarmExits = was }()
+	nativeCheck(t, `
+		var out = []
+		function p1(a, v) { return a.push(v) }
+		function lit() { return [1, 2, 3] }
+		for (var round = 0; round < 3; round++) {
+			var a = [], s = []
+			for (var i = 0; i < 40; i++) s.push(p1(a, i % 3 ? {k: i} : i % 2 ? "s" + i : i))
+			out.push(s.join(), a.length, typeof a[1], a[39])
+			var l = lit(); out.push(p1(l, 4), l.join(), lit().join())
+			var f = Object.freeze([1]), z = Object.seal([1]), n = Object.preventExtensions([1])
+			for (var x of [f, z, n]) { try { out.push(p1(x, 2)) } catch (e) { out.push(e.constructor.name) } out.push(x.length) }
+			var ro = [1]; Object.defineProperty(ro, "length", { writable: false })
+			try { p1(ro, 2) } catch (e) { out.push(e.constructor.name, ro.length) }
+			var h = [1, , 3]; out.push(p1(h, 4), 1 in h)
+			var ik = [1]; ik.x = 1; out.push(p1(ik, 2))
+			var like = { length: 2, push: [].push }; out.push(p1(like, "v"), like[2], like.length)
+			var bp = [].push.bind(a); out.push(bp(1), a.length)
+			var b2 = []; out.push(b2.push(), b2.push(1, 2), b2.join())
+			var keep = [7]; keep = keep.push(8); out.push(keep)
+			var sub = Object.create([5]); out.push(p1(sub, 6), sub.length)
+			if (round == 1) {
+				var log = []
+				Object.defineProperty(Array.prototype, "3", { set: function (v) { log.push("set" + v) }, configurable: true })
+				var q = [0, 1, 2]; out.push(p1(q, 9), q.length, log.join(), q.hasOwnProperty(3))
+				delete Array.prototype[3]
+			}
+		}
+		out.join("|")`, `
+		var a = [], s = 0
+		for (var i = 0; i < 1000; i++) s += a.push(i)
+		String(s) + " " + a.length`, bytecode.RCallMW)
+}
+
+// nativeLitSrc makes object literals and empty arrays natively: one site
+// of fixed keys in a loop, sites of one first key and others of their
+// own, literals of many keys, of values of every kind and of nested
+// literals, empty arrays grown and kept, all read back.
+const nativeLitSrc = `
+	var out = [], kept = []
+	var makers = [function (j) { return { x: j, a: 1 } }, function (j) { return { x: j, b: "s" + j } },
+		function (j) { return { x: j, c: { d: [j] } } }, function (j) { return { x: j, e: null, f: undefined, g: 1.5 } }]
+	function many(j) { return { k0: j, k1: 1, k2: 2, k3: 3, k4: 4, k5: 5, k6: 6, k7: 7, k8: 8, k9: 9, k10: "t" } }
+	for (var j = 0; j < 200; j++) {
+		var o = makers[j & 3](j), m = many(j), a = [], b = []
+		a.push(j); b[0] = o; b[1] = m
+		if (j % 37 == 0) kept.push(o, a, b)
+		out.push(o.x + (o.a || 0) + (o.b ? o.b.length : 0) + (o.c ? o.c.d[0] : 0) + m.k0 + m.k9 + a.length + b.length)
+	}
+	out.push(kept.map(function (v) { return JSON.stringify(v) }).join(";"))
+	out.join()`
+
+// TestRegNativeLiterals makes object literals and empty arrays natively,
+// by nativeLit with no exit, against the Go table, marking and not; its
+// fast case makes both with no exit.
+func TestRegNativeLiterals(t *testing.T) {
+	nativeCheck(t, nativeLitSrc, `
+		var s = 0
+		for (var j = 0; j < 1000; j++) { var o = { x: j, y: 2 }, a = []; s += o.x + o.y + a.length }
+		String(s)`, bytecode.RNewObjectLit, bytecode.RNewArrayE)
+}
+
+// TestRegNativeLiteralsCollecting makes them while the collector runs
+// all along (GOGC=1).
+func TestRegNativeLiteralsCollecting(t *testing.T) {
+	gc := debug.SetGCPercent(1)
+	t.Cleanup(func() { debug.SetGCPercent(gc) })
+	want := nativeRunSrc(t, nativeLitSrc, false)
+	for range 3 {
+		if got := nativeRunSrc(t, nativeLitSrc, true); got != want {
+			t.Fatalf("native:\n%s\nwant\n%s", got, want)
+		}
+	}
 }

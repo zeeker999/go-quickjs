@@ -360,11 +360,13 @@ const nativeFastSrc = `
 	out.join(String.fromCharCode(10))`
 
 // nativeCallCases are calls each of which rhCallW answers one way: the
-// frame-entry path the native call handler takes itself (native), or a
-// path of Go's -- a built-in, a generator, a frame that keeps its
-// arguments or reads new.target, a bound function -- which it must leave
-// to Go. Each runs 64 times in a loop; the first call of a site, which
-// fills its cache, is Go's in any case.
+// frame-entry path the native call handler takes itself, or a built-in
+// the site cached, which it calls in Go with no exit (nativegen's light)
+// -- returning, throwing to a handler of the frame's, calling back
+// (native) -- or a path of Go's -- a generator, a frame that reads
+// new.target, a bound function -- which it must leave to Go. Each runs 64
+// times in a loop; the first call of a site, which fills its cache, is
+// Go's in any case.
 var nativeCallCases = []struct {
 	name, src string
 	native    bool
@@ -374,7 +376,10 @@ var nativeCallCases = []struct {
 	{"method", `var o = { k: 3, m(x) { var t = this.k; return t + x } }; function run(n) { var s = 0; for (var i = 0; i < n; i++) s += o.m(i); return s }`, true},
 	{"leafArg", `var o = { id(x) { return x } }; function run(n) { var s = 0; for (var i = 0; i < n; i++) s += o.id(i); return s }`, true},
 	{"leafConst", `function k() { return 7 } function run(n) { var s = 0; for (var i = 0; i < n; i++) s += k(); return s }`, true},
-	{"builtin", `function run(n) { var s = 0; for (var i = 0; i < n; i++) s += Math.max(i, 3); return s }`, false},
+	{"builtin", `function run(n) { var s = 0; for (var i = 0; i < n; i++) s += Math.max(i, 3); return s }`, true},
+	{"builtinThrows", `function run(n) { var s = 0; for (var i = 0; i < n; i++) { try { s += JSON.parse(i & 1 ? "1" : "x") } catch (e) { s += e.constructor.name.length } } return s }`, true},
+	{"builtinCallback", `function inc(x) { return x + 1 } function run(n) { var s = 0, a = [0]; for (var i = 0; i < n; i++) { a[0] = i; s += a.map(inc)[0] } return s }`, true},
+	{"builtinStack", `function depth(x) { return new Error("e").stack.split("\n").length + x } function run(n) { var s = 0, a = [0]; for (var i = 0; i < n; i++) s += a.map(depth)[0]; return s }`, true},
 	{"generator", `function* g() { yield 1 } function run(n) { var s = 0; for (var i = 0; i < n; i++) s += g().next().value; return s }`, false},
 	{"arguments", `function f() { return arguments.length } function run(n) { var s = 0; for (var i = 0; i < n; i++) s += f(i, i); return s }`, true},
 	{"argumentsMethod", `var o = { k: 2, m() { var t = 0; for (var j = 0; j < arguments.length; j++) t += arguments[j]; return t + this.k } }; function run(n) { var s = 0; for (var i = 0; i < n; i++) s += o.m(i, 1, 2); return s }`, true},

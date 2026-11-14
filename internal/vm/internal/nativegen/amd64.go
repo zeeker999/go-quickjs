@@ -16,6 +16,10 @@ type nativeGen struct {
 	// exitRet is the exit that returns to nativeRun whatever the state:
 	// the base frame's return, a call the frame stack has no room for.
 	exitRet Label
+	// exitAfter is where the exit stub goes on once its Go handler has
+	// returned, which a call of Go that keeps the exit's protocol returns
+	// to too (light).
+	exitAfter Label
 	// exits are the call handler's numbered exits (ex), which say in
 	// the scratch's last word which check left (QJS_DISPDBG).
 	exits []Label
@@ -260,6 +264,21 @@ func (g *nativeGen) storeA(x XReg) {
 	g.next()
 }
 
+// storeB is storeA's of register B.
+func (g *nativeGen) storeB(x XReg) {
+	a := g.a
+	done := a.NewLabel()
+	g.decB(RDX)
+	a.StoreSDIdx(R12, RDX, 1, 0, x)
+	a.CmpIdxImm8(R12, RDX, 1, 8, 0)
+	a.Jcc(CondE, done)
+	a.LeaIdx(RAX, R12, RDX, 1, 8)
+	a.Op(Xor, RCX, RCX, false)
+	g.ptrStore()
+	a.Bind(done)
+	g.next()
+}
+
 // storeValue stores the Value whose words are R9 (num) and R8 (ref) at
 // the address in RAX and goes on: the pointer word plainly while the
 // collector does not mark, and by the JIT's storeRef routine while it
@@ -441,7 +460,7 @@ func (g *nativeGen) arith(op SSE, operand int) {
 // the call.
 func (g *nativeGen) exitStub() {
 	a := g.a
-	slow, after, afterSlow, back, end, noCount := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
+	slow, afterSlow, back, end, noCount := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
 	a.Align(16)
 	a.Bind(g.exit)
 	a.Store(RDI, ncIP, RBX)
@@ -470,7 +489,7 @@ func (g *nativeGen) exitStub() {
 	a.Bind(noCount)
 	a.Load(RDX, RDI, ncRT)
 	a.Store(RDX, offRtBackEdges, R11)
-	a.LeaLabel(R8, after)
+	a.LeaLabel(R8, g.exitAfter)
 	a.Store(RDI, ncAfter, R8)
 	// handler(st.regs, w, pc, st): the func value in DX.
 	a.MovRR(RBX, RAX)
@@ -480,7 +499,7 @@ func (g *nativeGen) exitStub() {
 	a.Load(RSI, RDI, ncTop)
 	a.Load(RAX, RSI, offStRegs)
 	a.JmpMem(RDI, ncCallH)
-	a.Bind(after)
+	a.Bind(g.exitAfter)
 	a.Op(Test, RAX, RAX, true)
 	a.Jcc(CondNS, back)
 	a.MovImm(RCX, uint64(1)<<63)
@@ -1241,6 +1260,30 @@ func (g *nativeGen) typedWrite(obj, idx Reg) {
 // array goes to notArray; a full array, anything else exits.
 func (g *nativeGen) arrayAppend(obj, idx Reg, notArray Label) {
 	a := g.a
+	g.appendRoom(obj, idx, notArray, g.exit, false)
+	// The value at elems[len], then the length past it.
+	a.MovRR(RAX, idx)
+	a.ShiftImm(Shl, RAX, 4, true)
+	a.AddMem(RAX, obj, sizeObj)
+	a.Lea(R9, idx, 1)
+	a.Store(obj, sizeObj+8, R9)
+	a.Load(RCX, RBX, 0)
+	a.ShiftImm(Shr, RCX, 44, true)
+	a.OpImm(And, RCX, 0xFFFF0, false)
+	a.LoadIdx(R9, R12, RCX, 1, 0)
+	a.LoadIdx(R8, R12, RCX, 1, 8)
+	g.storeValue()
+}
+
+// appendRoom goes to notArray unless the object in obj is an array, and
+// to miss unless an element appended at idx, its length, is stored as
+// arrayAppend stores one: the array's own, extensible, of a writable
+// length, dense, with room past its elements, and no index key on it or
+// up its chain of ordinary objects and arrays of no elements. Where atLen
+// is set, idx is loaded with the length rather than compared with it.
+// RDX, R8 and R9 are its scratch.
+func (g *nativeGen) appendRoom(obj, idx Reg, notArray, miss Label, atLen bool) {
+	a := g.a
 	loop, done := a.NewLabel(), a.NewLabel()
 	a.LoadU8(RDX, obj, offObjClass)
 	a.OpImm(Cmp, RDX, int32(ClassArray), false)
@@ -1249,11 +1292,15 @@ func (g *nativeGen) arrayAppend(obj, idx Reg, notArray Label) {
 	a.LoadU16(RDX, obj, offObjFlags)
 	a.OpImm(And, RDX, int32(want|objHasSparseElements|objMappedArguments|objSharedElems|objPolyProto), false)
 	a.OpImm(Cmp, RDX, int32(want), false)
-	a.Jcc(CondNE, g.exit)
-	a.CmpMem(idx, obj, sizeObj+8, true)
-	a.Jcc(CondNE, g.exit)
+	a.Jcc(CondNE, miss)
+	if atLen {
+		a.Load(idx, obj, sizeObj+8)
+	} else {
+		a.CmpMem(idx, obj, sizeObj+8, true)
+		a.Jcc(CondNE, miss)
+	}
 	a.CmpMem(idx, obj, sizeObj+16, true)
-	a.Jcc(CondAE, g.exit)
+	a.Jcc(CondAE, miss)
 	g.noIndexKeys(obj)
 	// The chain: ordinary objects and arrays of no elements, no index
 	// keys, no prototype of their own word.
@@ -1270,33 +1317,21 @@ func (g *nativeGen) arrayAppend(obj, idx Reg, notArray Label) {
 	a.OpImm(Cmp, RDX, int32(ClassObject), false)
 	a.Jcc(CondE, ok)
 	a.OpImm(Cmp, RDX, int32(ClassArray), false)
-	a.Jcc(CondNE, g.exit)
+	a.Jcc(CondNE, miss)
 	a.Bind(ok)
 	a.LoadU16(RDX, R8, offObjFlags)
 	a.MovRR(R9, RDX)
 	a.OpImm(And, R9, int32(objPolyProto), false)
-	a.Jcc(CondNE, g.exit)
+	a.Jcc(CondNE, miss)
 	noElems := a.NewLabel()
 	a.OpImm(And, RDX, int32(objHasExt), false)
 	a.Jcc(CondE, noElems)
 	a.CmpMemImm8(R8, sizeObj+8, 0)
-	a.Jcc(CondNE, g.exit)
+	a.Jcc(CondNE, miss)
 	a.Bind(noElems)
 	g.noIndexKeys(R8)
 	a.Jmp(loop)
 	a.Bind(done)
-	// The value at elems[len], then the length past it.
-	a.MovRR(RAX, idx)
-	a.ShiftImm(Shl, RAX, 4, true)
-	a.AddMem(RAX, obj, sizeObj)
-	a.Lea(R9, idx, 1)
-	a.Store(obj, sizeObj+8, R9)
-	a.Load(RCX, RBX, 0)
-	a.ShiftImm(Shr, RCX, 44, true)
-	a.OpImm(And, RCX, 0xFFFF0, false)
-	a.LoadIdx(R9, R12, RCX, 1, 0)
-	a.LoadIdx(R8, R12, RCX, 1, 8)
-	g.storeValue()
 }
 
 // noIndexKeys exits unless the object in obj has no key that is an array

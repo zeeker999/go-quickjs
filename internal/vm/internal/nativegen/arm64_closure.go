@@ -119,3 +119,26 @@ func (g *armGen) closureW() {
 	g.regA(rW)
 	g.storeValue()
 }
+
+// litCall is new_object_lit and new_array_e, as amd64's: nativeLit
+// called through callH, its func value in R26.
+func (g *armGen) litCall() {
+	a := g.a
+	after := a.NewLabel()
+	a.Store(rCtx, ncIP, rIP)
+	a.Store(rCtx, ncBudget, rBud)
+	a.Adr(r8, after)
+	a.Store(rCtx, ncAfter, r8)
+	a.MovRR(rC, rW)
+	a.Load(rD, rCtx, ncCodeBase)
+	a.Op(Sub, rD, rIP, rD, true)
+	a.ShiftImm(Lsr, rD, rD, 3, true)
+	a.MovRR(rS, rCtx)
+	a.MovRR(rW, rRegs)
+	a.Load(rFn, rCtx, ncLitFn)
+	a.Load(rJ, rCtx, ncCallH)
+	a.Br(rJ)
+	a.Bind(after)
+	g.reload()
+	g.next()
+}

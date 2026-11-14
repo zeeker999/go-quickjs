@@ -126,6 +126,8 @@ var nativeSlowOnMiss = [...]bytecode.ROp{
 func init() {
 	nativeExitTable = regTable
 	nativeClosureFn = nativeClosure
+	nativeLitFn = nativeLit
+	nativeBuiltinFn = nativeBuiltin
 	for _, op := range nativeSlowOnMiss {
 		nativeExitTable[op] = regSlowTable[op]
 	}
@@ -313,6 +315,8 @@ func (r *Runtime) newNativeCtx(st *regState) *nativeCtx {
 	ctx.primProps = unsafe.Offsetof(Realm{}.primProps)
 	ctx.has = unsafe.Offsetof(Realm{}.has)
 	ctx.closureFn = *(*uintptr)(unsafe.Pointer(&nativeClosureFn))
+	ctx.litFn = *(*uintptr)(unsafe.Pointer(&nativeLitFn))
+	ctx.builtinFn = *(*uintptr)(unsafe.Pointer(&nativeBuiltinFn))
 	ctx.grow()
 	st.native = ctx
 	return ctx
@@ -575,6 +579,43 @@ func nativeClosure(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeC
 // context gives the code (closureFn), set by init: nativeClosure reaches
 // newNativeCtx, which reads it.
 var nativeClosureFn func(*[1 << 16]Value, bytecode.RInstr, int, *nativeCtx) *Object
+
+// nativeLit is new_object_lit and new_array_e as their native handler
+// calls them, through callH with no exit, as closure_w's calls
+// nativeClosure: the top frame's literal made into R[A] as
+// rhNewObjectLit and rhNewArrayE make it, which throws nothing, runs no
+// code and reads no state of the frame's but its frame, code and
+// registers.
+//
+//go:nocheckptr
+func nativeLit(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeCtx) {
+	f := (*frame)(nativePtr(&ctx.nf))
+	c := (*regCode)(nativePtr(&ctx.rc))
+	k := regKept{pc: pc + 1}
+	if w.Op() == bytecode.RNewObjectLit {
+		ctx.st.r.regNewObjectLit(f, c, &k, regs)
+		return
+	}
+	ctx.st.r.regNewArrayE(f, c, &k, regs)
+}
+
+// nativeLitFn is nativeLit's func value, set by init, as
+// nativeClosureFn is.
+var nativeLitFn func(*[1 << 16]Value, bytecode.RInstr, int, *nativeCtx)
+
+// nativeBuiltin is call_w's and call_method_w's call of the built-in its
+// site cached (regCallNative) as the call handler makes it, a handler of
+// the exit's protocol called with no exit (nativegen's light): rhCallW's
+// call of it, regNative, in the top frame's state, which the code has
+// made, without rhCallW's search of the cache the code has searched.
+func nativeBuiltin(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	st.kept.pc = pc + 1
+	st.f.pc = regSrc(st.c, pc) + 1
+	return st.done(st.r.regNative(st.cl.regCalls[w.C()].callee, w, st.wb))
+}
+
+// nativeBuiltinFn is nativeBuiltin's func value, set by init.
+var nativeBuiltinFn func(*[1 << 16]Value, bytecode.RInstr, int, *regState) int
 
 // nativeFillPCs writes the pc of each caller on the native frame stack
 // that has none written yet: its source position past its call, as

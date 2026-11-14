@@ -106,6 +106,7 @@ var (
 	offStrLeft      int32
 	offStrAux       int32
 	offStrASCII     int32
+	offStrBuilding  int32
 	offFDElemOp     int32
 	offFDBound      int32
 	offStF          int32
@@ -210,6 +211,8 @@ var (
 
 	// Closures and upvalues (closeUps, closure_w).
 	ncClosureFn int32
+	ncLitFn     int32
+	ncBuiltinFn int32
 	offUpSlot   int32
 	offUpClosed int32
 	offRCLeafUp int32
@@ -337,6 +340,7 @@ func loadOffsets() {
 	offStrLeft = off("String.left")
 	offStrAux = off("String.aux")
 	offStrASCII = off("String.ascii")
+	offStrBuilding = off("String.building")
 	offFDElemOp = off("funcData.elemOp")
 	offFDBound = off("funcData.bound")
 	offStF = off("regState.f")
@@ -437,6 +441,8 @@ func loadOffsets() {
 	offFParams = off("frame.paramsOnly")
 	offFThis = off("frame.this")
 	ncClosureFn = off("nativeCtx.closureFn")
+	ncLitFn = off("nativeCtx.litFn")
+	ncBuiltinFn = off("nativeCtx.builtinFn")
 	offUpSlot = off("upvalue.slot")
 	offUpClosed = off("upvalue.closed")
 	offRCLeafUp = off("regCode.leafUp")

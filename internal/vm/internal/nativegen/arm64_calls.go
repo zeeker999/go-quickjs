@@ -1,6 +1,7 @@
 package nativegen
 
 import (
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	. "github.com/go-quickjs/go-quickjs/internal/jit/asm/arm64"
 )
 
@@ -188,7 +189,7 @@ func (g *armGen) ptrTo() {
 func (g *armGen) call() {
 	a := g.a
 	ok, noThis, noTop, loop, loopEnd, skip, high := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
-	start, tmpl := a.NewLabel(), a.NewLabel()
+	start, tmpl, builtin := a.NewLabel(), a.NewLabel(), a.NewLabel()
 	a.Bind(start)
 
 	// e := &calls[C].
@@ -275,7 +276,7 @@ func (g *armGen) call() {
 	a.CmpImm(r9, int64(regCallThis), false)
 	a.BCond(EQ, ok)
 	a.CmpImm(r9, int64(regCallObjThis), false)
-	a.BCond(NE, g.ex(4))
+	a.BCond(NE, builtin)
 	a.Load(r8, rS, 16)
 	g.cmpMem(r8, rCtx, ncObjBits)
 	a.BCond(NE, g.ex(5))
@@ -534,6 +535,89 @@ func (g *armGen) call() {
 	g.ptrTo()
 	a.Load(rW, rIP, 0)
 	a.B(start)
+
+	// A built-in the site cached (regCallNative), as amd64's: push of one
+	// argument is the code's own, any other called with no exit.
+	light := a.NewLabel()
+	a.Bind(builtin)
+	a.CmpImm(r9, int64(regCallNative), false)
+	a.BCond(NE, g.ex(4))
+	g.push(light)
+	a.Bind(light)
+	g.light()
+}
+
+// light is amd64's (amd64_calls.go): nativeBuiltin called through callH
+// with the exit's protocol, returning to the exit stub's code after its
+// call, its func value in R26.
+func (g *armGen) light() {
+	a := g.a
+	a.Load(rT, rCtx, ncTopOK)
+	a.Cbz(rT, g.exit, true)
+	g.exitState()
+	a.Load(rD, rCtx, ncRT)
+	a.Store(rD, offRtBackEdges, rBud)
+	a.Adr(r8, g.exitAfter)
+	a.Store(rCtx, ncAfter, r8)
+	// nativeBuiltin(st.regs, w, pc, st): w in R1, pc in R2.
+	a.MovRR(rD, rC)
+	a.MovRR(rC, rW)
+	a.Load(rFn, rCtx, ncBuiltinFn)
+	a.Load(rS, rCtx, ncTop)
+	a.Load(rW, rS, offStRegs)
+	a.Load(rJ, rCtx, ncCallH)
+	a.Br(rJ)
+}
+
+// push is amd64's (amd64_calls.go): call_method_w of push, of one
+// argument, appended to an array with room for it. rC is the site's
+// cache entry, rS the window, rW the instruction.
+func (g *armGen) push(light Label) {
+	a := g.a
+	a.Ubfx(rD, rW, 0, 8)
+	a.CmpImm(rD, int64(bytecode.RCallMW), false)
+	a.BCond(NE, light)
+	a.Ubfx(rD, rW, 8, 8)
+	a.CmpImm(rD, 1, false)
+	a.BCond(NE, light)
+	// The callee: push itself, not bound.
+	a.Load(r9, rC, offECallee)
+	a.LoadU16(rD, r9, offObjFlags)
+	a.TstImm(rD, uint64(objHasData), false)
+	a.BCond(EQ, light)
+	a.Load(rD, r9, sizeObj+offExtData)
+	g.cmpMem(rD, rCtx, ncFuncT)
+	a.BCond(NE, light)
+	a.Load(r9, r9, sizeObj+offExtData+8)
+	a.LoadU8(rD, r9, offFDElemOp)
+	a.CmpImm(rD, int64(elemPush), false)
+	a.BCond(NE, light)
+	a.LoadU8(rD, r9, offFDBound)
+	a.Cbnz(rD, light, false)
+	// The receiver, an array with room.
+	a.Load(r9, rS, 16)
+	g.cmpMem(r9, rCtx, ncObjBits)
+	a.BCond(NE, light)
+	a.Store(rCtx, scr(sWin), rS)
+	a.Load(rS, rS, 24)
+	g.appendRoom(rS, rC, light, light, true)
+	// The argument at elems[len], then the length past it.
+	a.AddImm(r9, rC, 1, true)
+	a.Store(rCtx, scr(sI), r9)
+	a.Load(rW, rS, sizeObj)
+	a.AddLsl(rW, rW, rC, 4)
+	a.Store(rS, sizeObj+8, r9)
+	a.Load(rD, rCtx, scr(sWin))
+	a.Load(r9, rD, 32)
+	a.Store(rW, 0, r9)
+	a.Load(rC, rD, 40)
+	a.AddImm(rW, rW, 8, true)
+	g.ptrStore()
+	// R[B], the new length.
+	a.Load(rW, rIP, 0)
+	a.Load(rC, rCtx, scr(sI))
+	a.Scvtf(0, rC, true)
+	g.storeB(0)
 }
 
 // ret is ret and ret_undef of a frame the code entered itself, as

@@ -129,6 +129,12 @@ type nativeCtx struct {
 	// closureFn is the func value of nativeClosure, which closure_w's
 	// handler calls through callH with no exit.
 	closureFn uintptr
+	// litFn is the func value of nativeLit, which new_object_lit's and
+	// new_array_e's handler calls through callH with no exit.
+	litFn uintptr
+	// builtinFn is the func value of nativeBuiltin, which the call
+	// handler calls through callH for a built-in its site cached.
+	builtinFn uintptr
 	// fv is the top frame's feedback vector, a slot a site into which a
 	// handler ORs the kinds of value it met (the JIT's next step, as
 	// Ignition's): none yet, its room kept here and in the frame record,

@@ -17,7 +17,7 @@ import (
 func armEmit(v *variant) (*block, error) {
 	g := &armGen{a: &Asm{}, v: v}
 	a := g.a
-	g.exit, g.exitRet = a.NewLabel(), a.NewLabel()
+	g.exit, g.exitRet, g.exitAfter = a.NewLabel(), a.NewLabel(), a.NewLabel()
 	g.genRet = g.exit
 	if v.has(bytecode.RYield) {
 		g.genRet = a.NewLabel()
@@ -1025,6 +1025,26 @@ func armEmit(v *variant) (*block, error) {
 	h(bytecode.RSwitch, g.switchW)
 	// A division or a remainder of numbers (arm64_bin.go).
 	h(bytecode.RBin, g.bin)
+	// str_freeze, as amd64's.
+	h(bytecode.RNewObjectLit, g.litCall)
+	h(bytecode.RNewArrayE, g.litCall)
+	h(bytecode.RStrFreeze, func() {
+		done := a.NewLabel()
+		g.regA(rD)
+		a.Load(r9, rD, 0)
+		a.Op(Eor, rC, r9, rTag, true)
+		a.ShiftImm(Lsr, rC, rC, 16, true)
+		a.Cbnz(rC, done, true)
+		a.Ubfx(rC, r9, 0, 8)
+		a.CmpImm(rC, int64(KindString), false)
+		a.BCond(NE, done)
+		a.Load(rS, rD, 8)
+		a.LoadU8(rC, rS, offStrBuilding)
+		a.Cbz(rC, done, false)
+		a.Store8(rS, offStrBuilding, ZR)
+		a.Bind(done)
+		g.next()
+	})
 
 	for n, l := range g.exits {
 		if n == 0 {

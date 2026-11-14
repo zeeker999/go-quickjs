@@ -83,8 +83,10 @@ type armGen struct {
 	v       *variant
 	exit    Label
 	exitRet Label
-	exits   []Label
-	genRet  Label
+	// exitAfter is amd64's.
+	exitAfter Label
+	exits     []Label
+	genRet    Label
 }
 
 func (g *armGen) ex(n int) Label {
@@ -369,6 +371,21 @@ func (g *armGen) storeA(x FReg) {
 	g.next()
 }
 
+// storeB is storeA's of register B.
+func (g *armGen) storeB(x FReg) {
+	a := g.a
+	done := a.NewLabel()
+	g.regB(rD)
+	a.StoreF(rD, 0, x)
+	a.Load(rT, rD, 8)
+	a.Cbz(rT, done, true)
+	a.AddImm(rW, rD, 8, true)
+	a.MovImm(rC, 0)
+	g.ptrStore()
+	a.Bind(done)
+	g.next()
+}
+
 // storeValue stores the Value whose words are r9 (num) and r8 (ref) at
 // the address in rW and goes on, as amd64's: the pointer word by
 // ptrStore's routine while the collector marks.
@@ -520,7 +537,7 @@ func (g *armGen) arith(op FOp, operand int) {
 // the code goes on at the pc they give, or returns to nativeRun.
 func (g *armGen) exitStub() {
 	a := g.a
-	slow, after, afterSlow, back, end, noCount, count := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
+	slow, afterSlow, back, end, noCount, count := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
 	a.Bind(g.exit)
 	g.exitState()
 	ready := a.NewLabel()
@@ -544,7 +561,7 @@ func (g *armGen) exitStub() {
 	a.Bind(noCount)
 	a.Load(rD, rCtx, ncRT)
 	a.Store(rD, offRtBackEdges, rBud)
-	a.Adr(r8, after)
+	a.Adr(r8, g.exitAfter)
 	a.Store(rCtx, ncAfter, r8)
 	// handler(st.regs, w, pc, st): w in R1, pc in R2, the func value in
 	// R26.
@@ -557,7 +574,7 @@ func (g *armGen) exitStub() {
 	a.Load(rW, rS, offStRegs)
 	a.Load(rJ, rCtx, ncCallH)
 	a.Br(rJ)
-	a.Bind(after)
+	a.Bind(g.exitAfter)
 	a.CmpImm(rW, 0, true)
 	a.BCond(GE, back)
 	a.MovImm(rC, uint64(1)<<63)
@@ -1248,6 +1265,24 @@ func (g *armGen) typedWrite(obj, idx Reg) {
 // anything else exits.
 func (g *armGen) arrayAppend(obj, idx Reg, notArray Label) {
 	a := g.a
+	g.appendRoom(obj, idx, notArray, g.exit, false)
+	// The value at elems[len], then the length past it.
+	a.ShiftImm(Lsl, rW, idx, 4, true)
+	g.addMem(rW, obj, sizeObj)
+	a.AddImm(r9, idx, 1, true)
+	a.Store(obj, sizeObj+8, r9)
+	a.Load(rC, rIP, 0)
+	a.ShiftImm(Lsr, rC, rC, 48, true)
+	a.AddLsl(rC, rRegs, rC, 4)
+	g.loadValue(rC)
+	g.storeValue()
+}
+
+// appendRoom is amd64's (amd64.go): the checks of an element appended at
+// idx, the array's length, which it loads where atLen is set. rD and r8
+// are its scratch.
+func (g *armGen) appendRoom(obj, idx Reg, notArray, miss Label, atLen bool) {
+	a := g.a
 	loop, done := a.NewLabel(), a.NewLabel()
 	a.LoadU8(rD, obj, offObjClass)
 	a.CmpImm(rD, int64(ClassArray), false)
@@ -1256,11 +1291,15 @@ func (g *armGen) arrayAppend(obj, idx Reg, notArray Label) {
 	a.LoadU16(rD, obj, offObjFlags)
 	a.AndImm(rD, rD, uint64(want|objHasSparseElements|objMappedArguments|objSharedElems|objPolyProto), false)
 	a.CmpImm(rD, int64(want), false)
-	a.BCond(NE, g.exit)
-	g.cmpMem(idx, obj, sizeObj+8)
-	a.BCond(NE, g.exit)
+	a.BCond(NE, miss)
+	if atLen {
+		a.Load(idx, obj, sizeObj+8)
+	} else {
+		g.cmpMem(idx, obj, sizeObj+8)
+		a.BCond(NE, miss)
+	}
 	g.cmpMem(idx, obj, sizeObj+16)
-	a.BCond(HS, g.exit)
+	a.BCond(HS, miss)
 	g.noIndexKeys(obj)
 	// The chain: ordinary objects and arrays of no elements, no index
 	// keys, no prototype of their own word.
@@ -1275,30 +1314,20 @@ func (g *armGen) arrayAppend(obj, idx Reg, notArray Label) {
 	a.CmpImm(rD, int64(ClassObject), false)
 	a.BCond(EQ, ok)
 	a.CmpImm(rD, int64(ClassArray), false)
-	a.BCond(NE, g.exit)
+	a.BCond(NE, miss)
 	a.Bind(ok)
 	a.LoadU16(rD, r8, offObjFlags)
 	a.TstImm(rD, uint64(objPolyProto), false)
-	a.BCond(NE, g.exit)
+	a.BCond(NE, miss)
 	noElems := a.NewLabel()
 	a.TstImm(rD, uint64(objHasExt), false)
 	a.BCond(EQ, noElems)
 	g.cmpMemImm(r8, sizeObj+8, 0)
-	a.BCond(NE, g.exit)
+	a.BCond(NE, miss)
 	a.Bind(noElems)
 	g.noIndexKeys(r8)
 	a.B(loop)
 	a.Bind(done)
-	// The value at elems[len], then the length past it.
-	a.ShiftImm(Lsl, rW, idx, 4, true)
-	g.addMem(rW, obj, sizeObj)
-	a.AddImm(r9, idx, 1, true)
-	a.Store(obj, sizeObj+8, r9)
-	a.Load(rC, rIP, 0)
-	a.ShiftImm(Lsr, rC, rC, 48, true)
-	a.AddLsl(rC, rRegs, rC, 4)
-	g.loadValue(rC)
-	g.storeValue()
 }
 
 // noIndexKeys exits unless the object in obj has no key that is an array

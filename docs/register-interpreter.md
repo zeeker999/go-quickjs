@@ -680,7 +680,12 @@ table, a flat string by its cases' constants and then by their texts,
 eight bytes at a time up to 1,024; a table of few or scattered numbers,
 a rope or a longer text is Go's. `bin`'s division of two numbers, and its remainder
 of two int32s, the first above zero and the second not zero, as `jsMod`
-takes them (`bin`); any other remainder is Go's (`math.Mod`). A fast path that misses jumps to
+takes them (`bin`); any other remainder is Go's (`math.Mod`).
+`str_freeze` clears a string's mark of an append's, where it has it, as
+`rhStrFreeze` does. `Array.prototype.push` of one argument, its site's
+cached built-in, appends to an array with room for it as an element
+written at an array's length is appended (`appendRoom`), R[B] the new
+length (`push`). A fast path that misses jumps to
 the exit; nothing is written before it does. arm64 answers one case more:
 NaN made an integer -- ToInt32's 0, an integer typed array's element 0
 -- where FCVTZS gives 0 and CVTTSD2SI no integer; what has no int64 is
@@ -718,7 +723,26 @@ the convention across releases;
 and fails, saying which part differs, where the toolchain's convention
 is not this one, and CI runs it under Go 1.24 and Go 1.27. The call made
 `array_push_args3_single`, whose pushes exit, 19% faster than the return
-and the entry (199 to 162 ns an operation), and `string_indexOf` 13%. There is no second interpreter: what the Go table does, an exit does. A frame the code entered itself that ends in Go
+and the entry (199 to 162 ns an operation), and `string_indexOf` 13%. There is no second interpreter: what the Go table does, an exit does.
+
+**Calls of Go with no exit.** What Go does that throws nothing and runs
+no code is called through `nativeCallH` with none of an exit's work:
+`closure_w`'s closure (`nativeClosure`), `new_object_lit`'s and
+`new_array_e`'s literal (`nativeLit`), the instruction and the budget
+kept in the context and the pinned registers put back after. A call of
+the built-in a site cached (`regCallNative`) is made the same way
+(`light`): `nativeBuiltin`, a function of a handler's form, makes
+`rhCallW`'s call of it, `regNative`, and returns to the exit stub's code
+after its call (`exitAfter`), which goes on at the pc it gives or ends
+the frame, so that a built-in that throws or calls back is the exit's
+case; what it saves is the exit's work before the call -- no state to
+make, no count, no handler to look up, no search of the cache again --
+and a frame whose state Go has not made yet exits. `array_push` went
+from 18.7 to 9.5 ns, `array_push_args3_single` from 68.2 to 25.7,
+`object_literal_fixed` from 46.2 to 42.2, and calls of built-ins 2 to 8%
+faster (`math_imul` 15.2 to 14.1, `string_trim` 29.9 to 28.2).
+
+A frame the code entered itself that ends in Go
 -- a throw, a return that closes captured upvalues -- ends there as
 `rhCallW` ends a callee after `runReg` (`nativeEnd`), and its caller goes
 on or meets the throw. Its state is made for it from its frame record
