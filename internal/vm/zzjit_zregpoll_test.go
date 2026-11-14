@@ -48,7 +48,7 @@ func TestJITRegNativeHonoursLimits(t *testing.T) {
 			SetRegTier(true)
 			was := SetJITRegTier(true)
 			t.Cleanup(func() { SetRegTier(bytecode.RegDefault()); SetJITRegTier(was) })
-			r := New(Config{JIT: true, MemoryLimit: 64 << 20})
+			r := New(Config{JIT: true, MemoryLimit: 16 << 20})
 			t.Cleanup(r.Close)
 			r.jitStress = jitStressConfig{}
 			r.SetJITWarmUp(1, 1)
