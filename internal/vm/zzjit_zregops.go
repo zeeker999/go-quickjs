@@ -4,6 +4,7 @@ package vm
 
 import (
 	"math"
+	"slices"
 	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -117,6 +118,8 @@ var (
 	_ ssa.IndexOfFeedback    = (*jitRegFeedback)(nil)
 	_ ssa.ParseIntFeedback   = (*jitRegFeedback)(nil)
 	_ ssa.BigStringFeedback  = (*jitRegFeedback)(nil)
+	_ ssa.ClosureFeedback    = (*jitRegFeedback)(nil)
+	_ ssa.CellsFeedback      = (*jitRegFeedback)(nil)
 )
 
 // jitRegCodeIn reports whether the code making the call of Go in ctx, in
@@ -234,4 +237,97 @@ func (f *jitRegFeedback) regAllocSite(rpc int, w bytecode.RInstr, argc int) (ssa
 			Pool: uintptr(unsafe.Pointer(x.pool)), Alloc: true, Argc: argc}, true
 	}
 	return ssa.CallSite{}, false
+}
+
+// Closure is ssa.ClosureFeedback's: closure_w's closure at the program's
+// instruction pc made natively from a pool of closures of its template, as
+// the stack form's (jitFeedback's Closure): its captured registers' cells
+// those of the code's (ir.Program's Cells), by their place among the
+// captured registers (jitRegCapturedRegs), its maker's captured bindings'
+// from the closure's own. Not an arrow that reads its this, which native
+// code would write from its context's This, which register code's frame
+// does not hold (its window's register 1 does); nor one that reads its
+// maker's new.target or super; nor in a derived constructor's code, nor an
+// inlined callee's.
+func (f *jitRegFeedback) Closure(pc int) (ssa.ClosureSite, bool) {
+	fb := f.fb
+	w, op, ok := f.at(pc)
+	if !ok || op != ir.Closure || w.Op() != bytecode.RClosureW || fb.e == nil || fb.root != nil || fb.cl == nil ||
+		fb.fn.Kind == bytecode.KindDerivedConstructor {
+		return ssa.ClosureSite{}, false
+	}
+	k := int(w.BC())
+	if k >= len(fb.cl.consts) || k >= len(f.rc.Caps) || jitNeedsMaker(fb.cl.consts[k]) {
+		return ssa.ClosureSite{}, false
+	}
+	t := fb.cl.consts[k].template()
+	if t == nil || t.fn.Kind == bytecode.KindArrow && t.fn.UsesThis {
+		return ssa.ClosureSite{}, false
+	}
+	regs := jitRegCapturedRegs(f.p.Captured)
+	caps := make([]int32, len(t.fn.Upvalues))
+	for i, desc := range t.fn.Upvalues {
+		if !desc.FromParent {
+			caps[i] = int32(desc.Index) << 1
+			continue
+		}
+		if i >= len(f.rc.Caps[k]) {
+			return ssa.ClosureSite{}, false
+		}
+		at := slices.Index(regs, int(f.rc.Caps[k][i]))
+		if at < 0 {
+			return ssa.ClosureSite{}, false
+		}
+		caps[i] = int32(at)<<1 | 1
+	}
+	l := fb.r.jitRegClosureLiteral(fb.e, fb.cl, int(f.p.Origin[pc]), k)
+	if l == nil {
+		return ssa.ClosureSite{}, false
+	}
+	fb.keep().pools = append(fb.keep().pools, l.pool)
+	return ssa.ClosureSite{Pool: uintptr(unsafe.Pointer(l.pool)), Captures: caps}, true
+}
+
+// jitRegClosureLiteral is the pool of closures of cl's constant k, its
+// template, closure_w's at register pc rpc of cl's register code, in e,
+// made if e has none, as the stack form's jitLiteralAt makes a closure's.
+func (r *Runtime) jitRegClosureLiteral(e *jitEntry, cl *closure, rpc, k int) *jitLiteral {
+	for i := range e.literals {
+		if int(e.literals[i].pc) == rpc && e.literals[i].fn == cl.fn {
+			return &e.literals[i]
+		}
+	}
+	tmpl := cl.consts[k]
+	e.literals = append(e.literals, jitLiteral{pc: int32(rpc), pool: new(abi.ObjectPool), fn: cl.fn, tmpl: tmpl, env: cl.env})
+	l := &e.literals[len(e.literals)-1]
+	l.pool.Source = unsafe.Pointer(&jitPoolSource{tmpl: tmpl, fn: cl.fn, env: cl.env})
+	r.jitFillLiteral(l)
+	return l
+}
+
+// CellsPool is ssa.CellsFeedback's: the pool the code takes its captured
+// registers' cells from (ir.Program's Cells), at its entries and scopes'
+// ends, as the stack form's (jitFeedback's CellsPool): the captured
+// registers in their cells' order, each one's cell made holding the
+// register's value at the entry -- an argument, or undefined past them.
+func (f *jitRegFeedback) CellsPool() (uintptr, []int32, bool) {
+	fb := f.fb
+	if fb.e == nil || fb.root != nil || fb.cl == nil || !f.p.Cells {
+		return 0, nil, false
+	}
+	regs := jitRegCapturedRegs(f.p.Captured)
+	if n := len(regs); n == 0 || n > 4 {
+		return 0, nil, false
+	}
+	cells := make([]int32, len(regs))
+	for i, reg := range regs {
+		cells[i] = int32(reg)<<1 | 1
+	}
+	e := fb.e
+	if e.cellsPool == nil {
+		e.cellsPool = &abi.ObjectPool{Size: abi.PoolSize, Cells: uint64(len(regs))}
+		jitFillCells(e.cellsPool)
+	}
+	fb.keep().pools = append(fb.keep().pools, e.cellsPool)
+	return uintptr(unsafe.Pointer(e.cellsPool)), cells, true
 }

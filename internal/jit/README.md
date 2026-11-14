@@ -377,12 +377,12 @@ speculates nothing: it builds the site generically, or leaves it to Go.
 | what exits taught | `Generic`, `EntryGeneric`, `Resumed` |
 | steps, `in`, `typeof`, scopes' ends, typed arrays' kinds | `GenNext`, `MapNexts`, `KeyAtoms`, `HasCache`, `TypeofCells`, `WalkedCloseCell`, `TypedKind` |
 | elements' kinds learned at exits, captured typed arrays | `TypedRead`, `TypedBigRead`, `KeyedRead`, `KeyedWrite`, `StringRead`, `UpvalueTyped` |
+| closures and captured registers' cells from pools -- not an arrow that reads its this, which its context's This does not hold for register code | `Closure`, `CellsPool` |
 | `instanceof` of the constructor a global or a captured binding read just before holds, the searches, `parseInt`, BigInts' strings, by the built-in its site's cache holds | `InstanceOf`, `IndexOf`, `ParseInt`, `BigString` |
 
 | Not answered yet | Methods | So |
 |---|---|---|
 | generators a step resumes | `GenSteps` | the step a call of Go |
-| closures and cells from pools | `Closure`, `CellsPool` | Go makes them on the register frame |
 | an inlined callee's exits, keeps, pure bodies | `InlineExit`, `KeepLimit`, `PureBody` | nothing speculated |
 
 **The feedback dispatcher.** The native handlers come in variants, each a

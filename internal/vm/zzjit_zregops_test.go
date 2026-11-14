@@ -246,3 +246,50 @@ func TestJITRegArrayAlloc(t *testing.T) {
 		})
 	}
 }
+
+// regClosureSrc's functions make closures in loops natively from pools
+// (jitRegFeedback's Closure, CellsPool): of a loop's let, which each
+// iteration's closures capture anew, of a parameter, of a binding they
+// assign, by value, an arrow whose nested arrow reads its maker's this
+// (Go's), in native callees, kept and called later.
+const regClosureSrc = `
+function lets(n) { var fs = []; for (let i = 0; i < n; i++) { fs.push(function () { return i }) } var s = 0; for (var j = 0; j < fs.length; j++) s += fs[j](); return s }
+function counter(k) { var c = k; var inc = function () { c++; return c }; inc(); return inc() }
+function counters(n) { var s = 0; for (var i = 0; i < n; i++) s += counter(i); return s }
+function adder(a) { return function (b) { return a + b } }
+function adders(n) { var s = 0; for (var i = 0; i < n; i++) s += adder(i)(1); return s }
+var obj = { v: 7, nested(n) { var s = 0; for (var i = 0; i < n; i++) { var f = () => () => this.v + i; s += f()() } return s } };
+function mixed(n) { var t = 0, fs = []; for (var i = 0; i < n; i++) { const k = i * 2; var g = () => k + t; t += g(); if (i % 64 == 0) fs.push(g) } var u = 0; for (var h of fs) u += h(); return t + ":" + u }
+function main(n) { return lets(n) + "," + counters(n) + "," + adders(n) + "," + obj.nested(n) + "," + mixed(n) }
+`
+
+// TestJITRegClosurePools runs regClosureSrc's main natively and in a
+// runtime without the JIT and compares their answers, the closures made
+// from pools and the collector idle and marking.
+func TestJITRegClosurePools(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regClosureSrc)
+			rts[0].SetJITReport(true)
+			var got [2]string
+			for i, r := range rts {
+				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("main"))
+				for range 20 {
+					v, err := r.Call(fn, Undefined, []Value{Float(500)})
+					got[i] = regNativeShow(r, v, err)
+				}
+			}
+			if got[0] != got[1] {
+				t.Errorf("with the JIT %q, without %q", got[0], got[1])
+			}
+			st := rts[0].RegNativeStats()
+			t.Logf("hosts %v, calls of Go %d %v", st.HostOps, st.GoCalls, st.GoCallOps)
+		})
+	}
+}

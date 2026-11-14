@@ -1581,6 +1581,28 @@ func (q *jitRegSnapshot) BigString(pc int) (r0 uintptr, r1 bool) {
 	return r0, r1
 }
 
+func (q *jitRegSnapshot) Closure(pc int) (r0 ssa.ClosureSite, r1 bool) {
+	a := q.get(snapClosure, int64(pc))
+	if a == nil {
+		return
+	}
+	r0, _ = a[0].(ssa.ClosureSite)
+	r1, _ = a[1].(bool)
+	return r0, r1
+}
+
+func (q *jitRegSnapshot) CellsPool() (r0 uintptr, r1 []int32, r2 bool) {
+	a := q.get(snapCellsPool, 0)
+	if a == nil {
+		return
+	}
+	r0, _ = a[0].(uintptr)
+	r1, _ = a[1].([]int32)
+	r1 = jitSnapCopy(r1)
+	r2, _ = a[2].(bool)
+	return r0, r1, r2
+}
+
 // askOnceReg asks fb the questions of no argument.
 func (s *jitSnapshot) askOnceReg(fb *jitRegFeedback) {
 	{
@@ -1636,6 +1658,12 @@ func (s *jitSnapshot) askOnceReg(fb *jitRegFeedback) {
 		r0 := fb.WalkedCloseCell()
 		s.end(fb.fb, before, snapWalkedCloseCell, 0)
 		s.put(snapWalkedCloseCell, 0, r0)
+	}
+	{
+		before := s.begin(fb.fb)
+		r0, r1, r2 := fb.CellsPool()
+		s.end(fb.fb, before, snapCellsPool, 0)
+		s.put(snapCellsPool, 0, r0, r1, r2)
 	}
 }
 
@@ -1994,6 +2022,15 @@ func jitRegSnapAskBigString(s *jitSnapshot, fb *jitRegFeedback, pc int) {
 	}
 }
 
+func jitRegSnapAskClosure(s *jitSnapshot, fb *jitRegFeedback, pc int) {
+	before := s.begin(fb.fb)
+	r0, r1 := fb.Closure(pc)
+	s.end(fb.fb, before, snapClosure, int64(pc))
+	if jitSnapAnswered(r1) {
+		s.put(snapClosure, int64(pc), r0, r1)
+	}
+}
+
 // jitRegSnapAskers are the register askers by method, nil for one the
 // register feedback has not or of another argument.
 var jitRegSnapAskers [len(jitSnapNames)]func(s *jitSnapshot, fb *jitRegFeedback, pc int)
@@ -2049,7 +2086,9 @@ const jitRegSnapMethods uint64 = 0 |
 	1<<snapInstanceOf |
 	1<<snapIndexOf |
 	1<<snapParseInt |
-	1<<snapBigString
+	1<<snapBigString |
+	1<<snapClosure |
+	1<<snapCellsPool
 
 // The register askers are set at init, as jitSnapAskers are.
 func init() {
@@ -2092,5 +2131,6 @@ func init() {
 		snapIndexOf:        jitRegSnapAskIndexOf,
 		snapParseInt:       jitRegSnapAskParseInt,
 		snapBigString:      jitRegSnapAskBigString,
+		snapClosure:        jitRegSnapAskClosure,
 	}
 }
