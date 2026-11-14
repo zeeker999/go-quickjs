@@ -254,6 +254,9 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base, pc 
 		o := callee.Object()
 		if f.cl.regCalls == nil && c.rc.CallSites > 0 {
 			f.cl.regCalls = make([]regCallCache, c.rc.CallSites)
+			if jitBuilt {
+				r.jitRegCountsMake(f.cl.closureCode, c.rc.CallSites)
+			}
 		}
 		var e *regCallCache
 		if calls := f.cl.regCalls; uint(w.C()) < uint(len(calls)) {

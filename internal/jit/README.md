@@ -339,12 +339,12 @@ speculates nothing: it builds the site generically, or leaves it to Go.
 | calls: targets, inlining, calls of Go, leaves, built-ins it makes itself | `CallShape`, `CalledClosure`, `NativeCalls`, `Inline`, `GoCalls`, `Leaf`, `LeafKind`, `Intrinsic`, `CharCode`, `Substring`, `FromCharCode` |
 | literals, appends | `Literal`, `Define`, `ArrayProtos` |
 | constants | `StringCell`, `StringContent`, `BigIntCell`, `BigIntSole` |
+| call frequencies | `Frequency` |
 | what exits taught | `Generic`, `EntryGeneric`, `Resumed` |
 | steps, `in`, `typeof`, scopes' ends, typed arrays' kinds | `GenNext`, `MapNexts`, `KeyAtoms`, `HasCache`, `TypeofCells`, `WalkedCloseCell`, `TypedKind` |
 
 | Not answered yet | Methods | So |
 |---|---|---|
-| call frequencies | `Frequency` | calls ordered by loop depth (see [Inlining](#inlining)) |
 | array loops | `ForEach` | the method called |
 | generators a step resumes | `GenSteps` | the step a call of Go |
 | `indexOf`, `parseInt`, `instanceof` | `IndexOf`, `ParseInt`, `InstanceOf` | Go's |
@@ -359,11 +359,27 @@ docs/register-interpreter.md's "Native handlers"): plain, the only one in
 builds without the JIT and the one a runtime with the JIT off runs; and, in
 builds with the JIT alone, feedback, which a runtime that runs the JIT is
 given (`nativeDispatch`, `nativeFeedback`). A feedback handler overrides a
-plain one only where the JIT needs what no cache holds, OR-ing the kinds of
-value it met into the function's feedback slot (the native context's `fv`,
-kept in a register no handler uses: amd64's R14, arm64's R15), every other
-entry plain's handler. Its list of overrides is empty today; call
-frequencies (`Frequency`) are to come from it.
+plain one only where the JIT needs what no cache holds: it does its part and
+goes on in plain's handler of its operation, through a slot of its table
+that holds it (`nativegen`'s `slotPlain`), made by the variant's own emitter
+(`nativegen`'s feedback.go), so that plain's emitter and handlers know
+nothing of it; every other entry is plain's handler. Its calls -- `call_w`,
+`call_method_w` and those in tail position -- count the calls made at each
+call site, and its returns the function's runs, into the counts of the
+function's closure's code (`jitRegCounts`: slot 0 the runs, 1+C the calls at
+call site C), made with the call sites' caches where the runtime runs the
+JIT (`jitRegCountsMake`). `Frequency` is a site's calls over the runs, once
+`jitCountsEnough` runs are counted (zzjit_zregfreq.go); not a leaf's, whose
+calls the call path answers without a frame and so without its returns, nor
+a generator's or an async function's, whose runs end at suspensions too, nor
+a construction's, which Go makes. Native code counts nothing, as V8's
+optimized code counts nothing; a run that on-stack replacement took into
+native code ends at a return of the interpreter's (`jitRegLoop`), and
+counts. Nor does Go's dispatcher count, where it runs register frames in
+place of the native handlers (`QJS_NONATIVE`, a verifying build): no
+frequency is known there. None ORs the kinds of value it met into the function's feedback slot
+yet (the native context's `fv`, kept in a register no handler uses: amd64's
+R14, arm64's R15).
 `TestRegNativeFeedbackSelected` checks a runtime picks its table, and
 `TestRegNativePlainSameWithJIT` that a build with the JIT makes plain's as a
 build without does.
@@ -390,7 +406,9 @@ the stack form's call of Go is given the literal it made. `BigIntSole`, the
 bindings that hold their values alone, each form numbering its bindings its
 own way, is compared by what the builds make of it -- the source positions
 of the operators that give back their binding's old value -- and only where
-the build asks it, where an operator met BigInts.
+the build asks it, where an operator met BigInts. Call frequencies, which
+each form counts over runs of its own, are alike where both are known and
+on the same side of the inliner's cut (`ssa.MinInliningFrequency`).
 
 ## Tier-up and on-stack replacement
 
@@ -1360,7 +1378,8 @@ made less often than `ssa.MinInliningFrequency` (0.15, V8's
 not inlined, small or not, and is made a native call; the most frequent come
 first, a call whose frequency is not known taken as made once outside the
 loops and more often inside one (`ssa`'s `inlineOrder`). Register code's
-feedback knows no frequency yet, so its calls are ordered so. A callee's
+frequencies are what the feedback dispatcher counted (see
+[Feedback](#feedback)). A callee's
 throw, or a call its own code has never been seen to make, does not keep it
 from being inlined: native code leaves the inlined frame there, as V8's code
 deoptimizes at a call with no feedback.

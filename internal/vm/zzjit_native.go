@@ -467,6 +467,11 @@ type jitCodeFields struct {
 	jitRegHot, jitRegDeopts uint8
 	jitRegRefused           bool
 	jitReg                  *jitRegEntry
+	// jitRegCounts are what the feedback dispatcher counted of the
+	// function's register code (zzjit_zregfreq.go): its runs, then the
+	// calls made at each of its call sites; nil until its call sites'
+	// caches are made, and in a runtime that runs no JIT.
+	jitRegCounts []uint64
 }
 
 // hint is the hint of the code of cl's function, its template's closures'

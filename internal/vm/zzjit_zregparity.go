@@ -362,7 +362,7 @@ func CompareFeedback(stack, reg *Runtime) FeedbackParity {
 						arg = int(rp.Maps[j].PC)
 					}
 					b, _ := rtext(rm, []reflect.Value{reflect.ValueOf(arg)})
-					if b == a {
+					if b == a || meth.Name == "Frequency" && jitParityFrequencyAlike(a, b) {
 						matched = true
 						break
 					}
@@ -488,6 +488,24 @@ func jitParityBigIntSole(res *FeedbackParity, name string, fn *bytecode.Function
 		return
 	}
 	note(res.Gaps, "BigIntSole: differs", fmt.Sprintf("%s: old values given back at positions: stack %s, register %s", name, a, b))
+}
+
+// jitParityFrequencyAlike reports whether a and b, two forms' call
+// frequencies as text, decide alike: both known, and on the same side of
+// the inliner's cut (ssa.MinInliningFrequency), what decides whether the
+// call is inlined. Each form counts over runs of its own -- the stack
+// form's tiers while its entry warms, the feedback dispatcher from its
+// call sites' first caches on, past the runs native code made -- so that
+// the two are seldom the same number, nor within a factor of another.
+func jitParityFrequencyAlike(a, b string) bool {
+	var x, y float64
+	if _, err := fmt.Sscan(a, &x); err != nil {
+		return false
+	}
+	if _, err := fmt.Sscan(b, &y); err != nil {
+		return false
+	}
+	return x < ssa.MinInliningFrequency == (y < ssa.MinInliningFrequency)
 }
 
 // jitParityStackOp is the stack instruction at pc of fn's code.

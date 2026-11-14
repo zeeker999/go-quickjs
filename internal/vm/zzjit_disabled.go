@@ -44,6 +44,7 @@ func (*Runtime) jitRegEnter(*frame, *closure, *regCode, int, int) (Value, error)
 	return Undefined, nil
 }
 func (*Runtime) jitRegLoop(st *regState, target int) int { return target }
+func (*Runtime) jitRegCountsMake(*closureCode, int)      {}
 
 func (*Runtime) jitRegExpNative(*regexp.Regexp) {}
 
