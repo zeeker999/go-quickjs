@@ -243,3 +243,46 @@ function f(a) { var s = 0; for (var i = 0; i < a.length; i++) s += a[i] * 2 + 1;
 		t.Errorf("loop mean %d, want %d, the program's instructions from %d to %d (register: %d)", e.loopMean, want, e.at[head], e.at[q+1], q-head+1)
 	}
 }
+
+// TestJITRegSlowResumptionsSkip resumes, through a yield*, generators
+// whose code leaves at each resumption -- at the yield* it does not make
+// natively, at a yield with a capture open -- and checks that once judged
+// slow their resumptions are no longer entered, the next jitSSAProbe of
+// them run in the interpreter without a look at the code
+// (jitResumeSkip), until retried, as the stack form's jitResume has it.
+// Before, every resumption entered the code, which left at once: AWFY-like
+// generator_delegate's 400,000 resumptions each an entry and an exit.
+func TestJITRegSlowResumptionsSkip(t *testing.T) {
+	const src = `
+function* count(n) { for (var i = 0; i < n; i++) yield i }
+function* delegate(n) { yield* count(n) }
+function run(n) { var s = 0; for (var j = 0; j < n; j++) for (var v of delegate(100)) s += v; return s }
+`
+	regBothMarking(t, func(t *testing.T) {
+		rts := regNativeRuntimes(t, src)
+		r := rts[0]
+		r.jitStress = jitStressConfig{}
+		r.SetJITReport(true)
+		var got [2]string
+		for i, rt := range rts {
+			fn, _ := rt.GetProp(Obj(rt.Global()), rt.Intern("run"))
+			for range 4 {
+				v, err := rt.Call(fn, Undefined, []Value{Float(1000)})
+				got[i] = regNativeShow(rt, v, err)
+			}
+		}
+		if got[0] != got[1] || got[0] != "4950000" {
+			t.Fatalf("with the JIT %q, without %q, want 4950000", got[0], got[1])
+		}
+		d, ok := regReportOf(r, "delegate")
+		t.Logf("delegate %+v; slow resumptions %d", d, r.jit.slowResumes)
+		if !ok || d.Status != "slow" {
+			t.Skipf("delegate's code not judged slow: %+v", d)
+		}
+		// 404,000 resumptions: those after the judgement are entered once
+		// in jitSSAProbe+1 at most, until a retry.
+		if d.Native > 404000/jitSSAProbe*2 {
+			t.Errorf("delegate's code entered %d times", d.Native)
+		}
+	})
+}

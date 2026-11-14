@@ -690,7 +690,11 @@ new code is found not to pay in turn (`jitRegCached`, as the stack form's
 `jitReoptimize`). What Go declines counts toward the work the function
 spends for a compile for what it learned (`jitRegSpent`'s `slowCalls`), as
 its native callees' work between their calls of Go does (`calleeWork`).
-`JITReport` shows it as slow, with the calls the interpreter made of it.
+A resumption of a generator's or an async function's code judged slow is
+declined the same way, and the next `jitSSAProbe` resumptions run in the
+interpreter without a look at the code (`jitResumeSkip`), as the stack
+form's `jitResume` has it. `JITReport` shows it as slow, with the calls
+the interpreter made of it.
 
 ## The SSA build
 

@@ -715,13 +715,37 @@ func (r *Runtime) jitRegEnter(f *frame, cl *closure, c *regCode, base, start int
 		r.jitDrain()
 		e = cl.closureCode.jitReg
 	}
+	resume := start != 0 || c.suspends
+	if resume {
+		cc := cl.closureCode
+		if cc.jitResumeSkip != 0 {
+			// One of the resumptions counted at the last look (below).
+			cc.jitResumeSkip--
+			return r.runReg(f, c, start)
+		}
+		if e != nil && e.life.entrySlow && !e.invalid && !e.life.reopt {
+			// A resumption of a generator's or an async function's code
+			// judged slow (jitRegStretchWork), which Go does not enter
+			// until it retries it (jitRegRetrySlow), as the stack form's
+			// jitResume has it: the next jitSSAProbe resumptions, counted
+			// now, run in the interpreter without a look at the code.
+			// Before, every resumption entered the code, which left at
+			// once at its yield or await.
+			e.life.slowCalls += jitSSAProbe
+			cc.jitResumeSkip = jitSSAProbe
+			r.jit.slowResumes++
+			if r.jitRegRetrySlow(e); e.life.entrySlow {
+				return r.runReg(f, c, start)
+			}
+		}
+	}
 	if e == nil && start == 0 {
 		// Its calls' runs have spent what was left of its budget: compiled
 		// now if it is spent, counted on otherwise (jitRegCallTier), as
 		// the stack form's call spends it (tryJITAt).
 		e = r.jitRegCallTier(cl, c)
 	}
-	if e != nil && e.life.entrySlow && start == 0 && !e.life.reopt {
+	if e != nil && e.life.entrySlow && !resume && !e.life.reopt {
 		// Code that does not pay (jitRegStretchWork): the interpreter runs
 		// the call, until it is retried. Not code that learned what to be
 		// compiled again for, which, never entered, would never be
