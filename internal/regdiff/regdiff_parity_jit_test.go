@@ -5,7 +5,6 @@ package regdiff
 import (
 	"context"
 	"fmt"
-	"math"
 	"os"
 	"runtime"
 	"runtime/debug"
@@ -117,24 +116,22 @@ function parityNames() {
 //
 // Its report is the same from one run to the next of the same code, as
 // -jitheld's compiles are (v8bench): the JIT's clocks held, the collector
-// off -- at a memory limit of 3 GiB where GOMEMLIMIT sets none -- each
-// runtime's Math.random seeded alike, Octane's replaced by its harness's
-// before each benchmark, as its runs replace it, and each runtime's clock
-// its own, a millisecond on at each look. Nothing else the two runtimes do
+// off -- but at the package's memory limit, regDiffMemoryLimit, where
+// GOMEMLIMIT sets none (TestMain) -- each runtime's Math.random seeded
+// alike, Octane's replaced by its harness's before each benchmark, as its
+// runs replace it, and each runtime's clock its own, a millisecond on at
+// each look. Nothing else the two runtimes do
 // depends on time: they compile in the foreground, and the tiers count
 // invocations and budgets, not time.
 func TestJITFeedbackParity(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs the benchmarks' corpora twice")
 	}
+	heavy(t)
 	regDiffAlone.Lock()
 	defer regDiffAlone.Unlock()
 	gc := debug.SetGCPercent(-1)
 	t.Cleanup(func() { debug.SetGCPercent(gc) })
-	if limit := debug.SetMemoryLimit(-1); limit == math.MaxInt64 {
-		debug.SetMemoryLimit(3 << 30)
-		t.Cleanup(func() { debug.SetMemoryLimit(limit) })
-	}
 	t.Cleanup(vm.JITHoldClocks())
 	for _, c := range parityCorpora(t) {
 		t.Run(c.name, func(t *testing.T) {
