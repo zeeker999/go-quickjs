@@ -987,8 +987,7 @@ func (b *builder) indexOfAt(pc int) (fn uintptr, kind int, ok bool) {
 	if len(calls) != 1 || calls[0].Go != GoCall || !calls[0].Method || calls[0].Argc != 1 && calls[0].Argc != 2 {
 		return 0, 0, false
 	}
-	argc := calls[0].Argc
-	if b.p.Maps[pc].Depth < argc+2 || b.p.Maps[pc+1].Depth != b.p.Maps[pc].Depth-argc-1 {
+	if _, ok := b.callSlotsOf(pc, calls[0].Argc, true); !ok {
 		return 0, 0, false
 	}
 	f, ok := b.fb.(IndexOfFeedback)
@@ -1006,15 +1005,14 @@ func (b *builder) indexOfAt(pc int) (fn uintptr, kind int, ok bool) {
 func (b *builder) indexOfCall(blk *Block, pc int, fn uintptr, kind int, guard func(Op, Type, ir.ExitKind, ...*Value) *Value) {
 	f := b.f
 	argc := b.callsAt(pc)[0].Argc
-	sp := b.p.Locals + b.p.Maps[pc].Depth
-	base := sp - argc - 2
-	recv, callee := b.read(base, blk), b.read(base+1, blk)
+	cs, _ := b.callSlotsOf(pc, argc, true)
+	recv, callee := b.read(cs.recv, blk), b.read(cs.fn, blk)
 	object := guard(OpObjectOf, Ptr, ir.HostExit, callee)
 	same := guard(OpSameObject, None, ir.HostExit, object)
 	same.Const = ir.Value{Bits: uint64(fn)}
 	args := []*Value{recv}
 	for k := range argc {
-		args = append(args, b.read(base+2+k, blk))
+		args = append(args, b.read(cs.arg+k, blk))
 	}
 	site := &CallSite{Go: GoIndexOf, Argc: kind << 1, ThisSlot: -1}
 	if argc == 2 {
@@ -1025,7 +1023,7 @@ func (b *builder) indexOfCall(blk *Block, pc int, fn uintptr, kind int, guard fu
 	kept := f.newValue(blk, OpCallCell, Source, call)
 	r := f.newValue(blk, OpKept, Tagged, kept, call)
 	r.Shadow = kept
-	b.write(base, blk, r)
+	b.assign(cs.dest, blk, r)
 }
 
 // LeafFeedback is Feedback that knows the call at a PC, a method call or a
@@ -1082,11 +1080,13 @@ type callSlots struct {
 func (b *builder) callSlotsOf(pc, argc int, method bool) (callSlots, bool) {
 	p, in := b.p, &b.p.Code[pc]
 	if in.Window {
-		if b.cur != b.root || in.Extra != argc {
+		// In the frame being translated, an inlined callee's too: its
+		// registers past its base, as its instructions are read (shifted).
+		if in.Extra != argc {
 			return callSlots{}, false
 		}
-		a := in.Left.Slot
-		s := callSlots{fn: a, recv: -1, arg: a + 2, dest: in.Dest}
+		a := b.cur.base + in.Left.Slot
+		s := callSlots{fn: a, recv: -1, arg: a + 2, dest: b.cur.base + in.Dest}
 		if method {
 			s.recv = a + 1
 		}
@@ -1310,8 +1310,7 @@ func (b *builder) bigStringAt(pc int) (uintptr, bool) {
 	if len(calls) != 1 || calls[0].Go != GoCall || !calls[0].Method || calls[0].Argc > 1 {
 		return 0, false
 	}
-	argc := calls[0].Argc
-	if b.p.Maps[pc].Depth < argc+2 || b.p.Maps[pc+1].Depth != b.p.Maps[pc].Depth-argc-1 {
+	if _, ok := b.callSlotsOf(pc, calls[0].Argc, true); !ok {
 		return 0, false
 	}
 	f, ok := b.fb.(BigStringFeedback)
@@ -1327,22 +1326,21 @@ func (b *builder) bigStringAt(pc int) (uintptr, bool) {
 func (b *builder) bigStringCall(blk *Block, pc int, fn uintptr, guard func(Op, Type, ir.ExitKind, ...*Value) *Value) {
 	f := b.f
 	argc := b.callsAt(pc)[0].Argc
-	sp := b.p.Locals + b.p.Maps[pc].Depth
-	base := sp - argc - 2
-	recv, callee := b.read(base, blk), b.read(base+1, blk)
+	cs, _ := b.callSlotsOf(pc, argc, true)
+	recv, callee := b.read(cs.recv, blk), b.read(cs.fn, blk)
 	object := guard(OpObjectOf, Ptr, ir.HostExit, callee)
 	same := guard(OpSameObject, None, ir.HostExit, object)
 	same.Const = ir.Value{Bits: uint64(fn)}
 	args := []*Value{recv}
 	for k := range argc {
-		args = append(args, b.read(base+2+k, blk))
+		args = append(args, b.read(cs.arg+k, blk))
 	}
 	call := guard(OpCall, Tagged, ir.HostExit, args...)
 	f.cache(call).Calls, call.Index = []*CallSite{{Go: GoBigString, Argc: argc, ThisSlot: -1}}, b.callKeepAt(pc)
 	kept := f.newValue(blk, OpCallCell, Source, call)
 	r := f.newValue(blk, OpKept, Tagged, kept, call)
 	r.Shadow = kept
-	b.write(base, blk, r)
+	b.assign(cs.dest, blk, r)
 }
 
 // ParseIntFeedback is Feedback that knows a plain call at a PC of one
@@ -1360,8 +1358,10 @@ func (b *builder) parseIntAt(pc int) (uintptr, bool) {
 		return 0, false
 	}
 	calls := b.callsAt(pc)
-	if len(calls) != 1 || calls[0].Go != GoCall || calls[0].Method || calls[0].New || calls[0].Argc != 1 ||
-		b.p.Maps[pc].Depth < 2 || b.p.Maps[pc+1].Depth != b.p.Maps[pc].Depth-1 {
+	if len(calls) != 1 || calls[0].Go != GoCall || calls[0].Method || calls[0].New || calls[0].Argc != 1 {
+		return 0, false
+	}
+	if _, ok := b.callSlotsOf(pc, 1, false); !ok {
 		return 0, false
 	}
 	f, ok := b.fb.(ParseIntFeedback)
@@ -1381,11 +1381,11 @@ func (b *builder) parseIntAt(pc int) (uintptr, bool) {
 // argument or function, are Go's call.
 func (b *builder) parseIntCall(blk *Block, pc int, fn uintptr, guard func(Op, Type, ir.ExitKind, ...*Value) *Value, boxF func(*Value) *Value) {
 	f := b.f
-	sp := b.cur.base + b.p.Locals + b.p.Maps[pc].Depth
-	object := guard(OpObjectOf, Ptr, ir.HostExit, b.read(sp-2, blk))
+	cs, _ := b.callSlotsOf(pc, 1, false)
+	object := guard(OpObjectOf, Ptr, ir.HostExit, b.read(cs.fn, blk))
 	same := guard(OpSameObject, None, ir.HostExit, object)
 	same.Const = ir.Value{Bits: uint64(fn)}
-	x := guard(OpUnboxF64, Float64, ir.HostExit, b.read(sp-1, blk))
+	x := guard(OpUnboxF64, Float64, ir.HostExit, b.read(cs.arg, blk))
 	constant := func(c float64) *Value {
 		v := f.newValue(blk, OpConstF64, Float64)
 		v.Const = ir.Float(c)
@@ -1405,7 +1405,7 @@ func (b *builder) parseIntCall(blk *Block, pc int, fn uintptr, guard func(Op, Ty
 	// The integer part, a zero's +0: the only number left whose integer
 	// part is -0 is -0 itself.
 	r := f.newValue(blk, OpAddF64, Float64, f.newValue(blk, OpTruncF64, Float64, x), constant(0))
-	b.assign(b.cur.base+b.p.Locals+b.p.Maps[pc+1].Depth-1, blk, boxF(r))
+	b.assign(cs.dest, blk, boxF(r))
 }
 
 // SubstringFeedback is Feedback that knows a method call at a PC calls
@@ -1905,8 +1905,14 @@ type CallSite struct {
 	// ProtoIndex, of the key ProtoKey, holds still, the pool's -- and
 	// writes the call's receiver, or undefined, and its arguments, up to
 	// the function's Params and LocalCount, to it. Go makes any other
-	// call, and the call while the collector marks.
-	GenMake uintptr
+	// call, and the call while the collector marks. GenArgAt is the place
+	// of the first argument among the generator's values -- 0, its first
+	// local's, for the stack form's; a register generator's, its window's
+	// register 2 less the registers it does not keep -- and GenThisAt, where
+	// not 0, one past the value the receiver is written to besides the
+	// generator's this: a register generator's register 1.
+	GenMake             uintptr
+	GenArgAt, GenThisAt int
 	// ForOf marks a for...of's or a destructuring's cursor made of the
 	// iterable, its one operand; ForIn a for...in's, of the object.
 	ForOf, ForIn bool
@@ -2071,6 +2077,11 @@ type CallSite struct {
 	// closes, as V8's code allocates a block's context at each iteration.
 	Captures []int32
 	LexThis  bool
+	// LexThisReg, with LexThis, says the arrow's this is the frame's
+	// register 1, where register code has its this -- as the VM's
+	// closure_w takes it -- not the context's This, which the stack form's
+	// frame has.
+	LexThisReg bool
 	// Leaf, of a leaf's call (GoLeaf), is the address of the function the
 	// call checked it calls (OpSameObject's), which the VM keeps alive with
 	// the code: Go takes the leaf from there (abi.GoCallState's Leaf), and
@@ -2087,11 +2098,13 @@ type CallSite struct {
 
 // ClosureSite is a closure's site that native code makes the closure at
 // (ClosureFeedback): the address of the abi.ObjectPool its closures come
-// from, which the VM keeps alive, and CallSite's Captures and LexThis.
+// from, which the VM keeps alive, and CallSite's Captures, LexThis and
+// LexThisReg.
 type ClosureSite struct {
-	Pool     uintptr
-	Captures []int32
-	LexThis  bool
+	Pool       uintptr
+	Captures   []int32
+	LexThis    bool
+	LexThisReg bool
 }
 
 // ClosureFeedback is Feedback that knows the closures native code may make
@@ -5358,7 +5371,7 @@ func (b *builder) goFrame(blk *Block, pc int, in ir.Instruction, guard func(Op, 
 		// arrow's this, as AWFY Havlak's findSet's arrow does, which Go had
 		// made at every call, 414,000 a run.
 		if cs, ok := fb.Closure(pc); ok && cs.Pool != 0 && (b.p.Cells || !capturesLocals(cs.Captures)) {
-			site.Pool, site.Captures, site.LexThis = cs.Pool, cs.Captures, cs.LexThis
+			site.Pool, site.Captures, site.LexThis, site.LexThisReg = cs.Pool, cs.Captures, cs.LexThis, cs.LexThisReg
 		}
 	}
 	if fb, ok := b.fb.(CellsFeedback); ok && in.Op == ir.CloseUpvalues && b.p.Cells {
@@ -5701,8 +5714,15 @@ func (b *builder) charCodeCall(blk *Block, pc int, guard func(Op, Type, ir.ExitK
 // VM knows its constructor (InstanceOfFeedback): its operands the value and
 // the constructor, its result in the value's slot.
 func (b *builder) instanceOf(pc int) (InstanceOfSite, bool) {
-	if b.fb == nil || b.p.Code[pc].Op != ir.Host || pc+1 >= len(b.p.Code) || !reachable(b.p, pc+1) ||
-		b.p.Maps[pc+1].Depth != b.p.Maps[pc].Depth-1 || b.p.Maps[pc].Depth < 2 {
+	if b.fb == nil || b.p.Code[pc].Op != ir.Host || pc+1 >= len(b.p.Code) || !reachable(b.p, pc+1) {
+		return InstanceOfSite{}, false
+	}
+	if in := &b.p.Code[pc]; in.Window {
+		// Register code's, its operands its registers (instanceOfSlots).
+		if in.Extra != 1 || in.Right.Slot < 0 || b.fb.Generic(pc) {
+			return InstanceOfSite{}, false
+		}
+	} else if b.p.Maps[pc+1].Depth != b.p.Maps[pc].Depth-1 || b.p.Maps[pc].Depth < 2 {
 		return InstanceOfSite{}, false
 	}
 	f, ok := b.fb.(InstanceOfFeedback)
@@ -5723,8 +5743,14 @@ func (b *builder) instanceOf(pc int) (InstanceOfSite, bool) {
 // value's prototypes -- any check failing, Go makes it.
 func (b *builder) instanceOfOp(blk *Block, pc int, k InstanceOfSite, guard func(Op, Type, ir.ExitKind, ...*Value) *Value, boxB func(*Value) *Value) {
 	f := b.f
+	// Its operands, the value and the constructor, and its result: the
+	// stack form's on the operand stack, register code's in its registers.
 	sp := b.cur.base + b.p.Locals + b.p.Maps[pc].Depth
-	ctor := guard(OpObjectOf, Ptr, ir.HostExit, b.read(sp-1, blk))
+	value, ctorSlot, dest := sp-2, sp-1, b.cur.base+b.p.Locals+b.p.Maps[pc+1].Depth-1
+	if in := &b.p.Code[pc]; in.Window {
+		value, ctorSlot, dest = b.cur.base+in.Left.Slot, b.cur.base+in.Right.Slot, b.cur.base+in.Dest
+	}
+	ctor := guard(OpObjectOf, Ptr, ir.HostExit, b.read(ctorSlot, blk))
 	same := guard(OpSameObject, None, ir.HostExit, ctor)
 	same.Const = ir.Value{Bits: uint64(k.Ctor)}
 	read := func(site PropertySite) *Value {
@@ -5741,8 +5767,8 @@ func (b *builder) instanceOfOp(blk *Block, pc int, k InstanceOfSite, guard func(
 	fn := guard(OpSameObject, None, ir.HostExit, has)
 	fn.Const = ir.Value{Bits: uint64(k.HasInstanceFn)}
 	proto := guard(OpObjectOf, Ptr, ir.HostExit, read(k.Prototype))
-	yes := guard(OpInstanceOf, Bool, ir.HostExit, b.read(sp-2, blk), proto)
-	b.assign(b.cur.base+b.p.Locals+b.p.Maps[pc+1].Depth-1, blk, boxB(yes))
+	yes := guard(OpInstanceOf, Bool, ir.HostExit, b.read(value, blk), proto)
+	b.assign(dest, blk, boxB(yes))
 }
 
 // intrinsic is the intrinsic the call at pc in the frame being translated
@@ -7046,6 +7072,7 @@ func (b *builder) placeAfter(blk *Block, made []*Block, cont *Block) {
 	copy(f.Blocks[at:], made)
 	cont.Kind, cont.Control, cont.Succs, cont.State, cont.ExitKind = blk.Kind, blk.Control, blk.Succs, blk.State, blk.ExitKind
 	cont.Yield, cont.YieldHandlers, blk.Yield, blk.YieldHandlers = blk.Yield, blk.YieldHandlers, false, nil
+	cont.YieldSlot = blk.YieldSlot
 	for _, s := range cont.Succs {
 		for i, p := range s.Preds {
 			if p == blk {
@@ -8497,7 +8524,14 @@ func (b *builder) instruction(blk *Block, pc int) {
 		// A generator's yield, which code a loop's step resumed natively
 		// makes itself (Block's Yield), saving the handlers in force.
 		if in.Suspend && b.cur == b.root {
-			blk.YieldHandlers, blk.Yield = b.handlersAt(pc)
+			if b.p.Origin != nil {
+				// Register code's: its value in its operand's register, its
+				// handlers the code's by register pc, which a resumption
+				// finds again without anything saved.
+				blk.Yield, blk.YieldSlot = true, in.Left.Slot
+			} else {
+				blk.YieldHandlers, blk.Yield = b.handlersAt(pc)
+			}
 		}
 	}
 }
@@ -8523,7 +8557,13 @@ func (b *builder) whole(blk *Block, pc int, in ir.Instruction, guard func(Op, Ty
 		args[i] = b.read(reads[i], blk)
 	}
 	call := guard(OpCall, Tagged, ir.HostExit, args...)
-	f.cache(call).Calls, call.Index = []*CallSite{{Go: GoCall, Whole: true, Argc: n, ThisSlot: -1}}, f.Keeps
+	site := &CallSite{Go: GoCall, Whole: true, Argc: n, ThisSlot: -1}
+	if sites := b.fb.NativeCalls(pc); len(sites) == 1 && sites[0].Whole && sites[0].Argc == n {
+		// What native code makes of it itself first, as of the stack
+		// form's operation's site (CallSite's ArrayIter, Append, Copies).
+		site = &sites[0]
+	}
+	f.cache(call).Calls, call.Index = []*CallSite{site}, f.Keeps
 	f.Keeps++
 	f.HostsLeft = append(f.HostsLeft, pc)
 	if dest >= 0 {
@@ -8702,13 +8742,14 @@ func (b *builder) nativeCalls(pc int) []*CallSite {
 			// site's shape the instruction's.
 			if site.Argc != in.Extra || site.Method != in.When || site.Super || site.Instr != 0 || site.Forward || site.Accessor != AccessorNone || site.Step || site.ForOf || site.ForIn ||
 				site.TypeOf && (in.Extra != 0 || site.Go != GoCall) || site.InstanceOf && (in.Extra != 1 || site.Go != GoCall) || site.Literal || site.Via != 0 ||
-				site.Go == 0 && !site.Push && !site.Pop && (site.Window != in.Left.Slot+1 || site.Generic || site.ThisSlot >= 0 || site.FrameArgs || site.Function || site.Tail ||
+				site.Go == 0 && !site.Push && !site.Pop && !site.Alloc && (site.Window != in.Left.Slot+1 || site.Generic || site.ThisSlot >= 0 || site.FrameArgs || site.Function || site.Tail ||
 					site.Pool != 0 && (site.Derived || site.Parent != 0 || site.Method)) {
 				// A native call's callee's window is made from the
 				// instruction's (CallSite's Window), the stack form's
 				// frames' fields none of register code's; a construction's
 				// of a base constructor. A push or a pop native code makes
-				// itself has no frame.
+				// itself has no frame, nor a built-in's construction from
+				// a pool (Alloc).
 				continue
 			}
 		} else if site.Argc < 0 || depth < operands || after != depth-operands+1 {

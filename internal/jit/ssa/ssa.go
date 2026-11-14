@@ -1048,6 +1048,10 @@ type Block struct {
 	// (mir's yieldExit); the exit otherwise.
 	Yield         bool
 	YieldHandlers []ir.Handler
+	// YieldSlot is, for register code's yield (Func's GenWindow), the
+	// register its value is in; its handlers are the code's, by register
+	// pc, which nothing saves (YieldHandlers none).
+	YieldSlot int
 }
 
 // Entry is a place native code can be entered: an entry block, which loads
@@ -1081,6 +1085,12 @@ type Entry struct {
 type GenResume struct {
 	PC, Saved int
 	Started   bool
+	// Place and Sent are register code's (Func's GenWindow): the
+	// generator's place, its register pc, that the resumption is of --
+	// past end_params, or a yield's next instruction, where the code goes
+	// on at the entry for PC, the jump's target after it -- and the
+	// register the value sent in goes to, the yield's, or -1.
+	Place, Sent int
 }
 
 // Func is a function in SSA form.
@@ -1116,6 +1126,14 @@ type Func struct {
 	// there natively, and its returns finish it.
 	GenEntry   bool
 	GenResumes []GenResume
+	// GenWindow marks register code's generator entry and yields (mir's
+	// windowGenEntry, windowYieldExit): the frame is a window of
+	// FrameLocals registers made in the VM's stack, as a call entry makes
+	// one, from the generator's values, which keep the window's registers
+	// from GenFrom -- the callee's and this's, below it, made from the
+	// generator's callee and receiver -- and a yield writes them back.
+	GenWindow bool
+	GenFrom   int
 	// Loops says the code makes loops of built-ins' calls (OpLoopMark), whose
 	// word it clears at its entries; LoopsEnd is the slot past their slots,
 	// which the frame holds while they run: their callbacks' frames start

@@ -10,7 +10,6 @@ import (
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
-	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
@@ -305,7 +304,7 @@ func (f *jitRegFeedback) accessorInline(callee *Object, cl *closure, write bool)
 		jitNoInline != nil && jitNoInline(cl.fn) {
 		return ssa.InlineSite{}, false
 	}
-	p, err := jitcompile.LowerRegInline(cl.reg.rc, cl.fn)
+	p, err := f.fb.r.jitRegLower(cl, cl.reg.rc, jitLowerInline)
 	if err != nil || p.Validate() != nil {
 		return ssa.InlineSite{}, false
 	}
@@ -558,7 +557,7 @@ func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 	if cl.fn == f.fb.fn || cl.fn == f.fb.keep().fn || jitNoInline != nil && jitNoInline(cl.fn) {
 		return ssa.InlineSite{}, false
 	}
-	p, err := jitcompile.LowerRegInline(cl.reg.rc, cl.fn)
+	p, err := f.fb.r.jitRegLower(cl, cl.reg.rc, jitLowerInline)
 	if err != nil || p.Validate() != nil {
 		return ssa.InlineSite{}, false
 	}
@@ -617,6 +616,11 @@ func (f *jitRegFeedback) GoCalls() bool { return true }
 // neither, which the interpreter makes in constant space at a host exit.
 func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
 	w, op, ok := f.at(pc)
+	if ok && (op == ir.Host && f.p.Code[pc].Whole || op == ir.FieldDefine && w.Op() == bytecode.RDefineField) {
+		// An instruction Go runs whole, its fast paths native code's
+		// (regWholeSite).
+		return f.regWholeSite(pc, w)
+	}
 	if !ok || op != ir.Host || !f.p.Code[pc].Window {
 		return nil
 	}
@@ -653,13 +657,23 @@ func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
 	if n > abi.MaxGoArgs {
 		return nil
 	}
+	if site, ok := f.regAllocSite(rpc, w, argc); ok {
+		return []ssa.CallSite{site}
+	}
 	if sites := f.regCallSites(pc, w, argc, method); len(sites) != 0 {
 		return sites
 	}
 	if site, ok := f.regBuiltinSite(w, argc, method); ok {
 		return []ssa.CallSite{site}
 	}
-	return []ssa.CallSite{{Go: ssa.GoCall, Argc: argc, Method: method, New: w.Op() == bytecode.RNewW, ThisSlot: -1}}
+	site := ssa.CallSite{Go: ssa.GoCall, Argc: argc, Method: method, New: w.Op() == bytecode.RNewW, ThisSlot: -1}
+	// A call of the realm's next on generators the code resumes natively
+	// (regGenNextSite), or a generator function's call, its generator made
+	// natively (regGenMakeSite).
+	if f.regGenNextSite(rpc, &site); site.Pool == 0 {
+		f.regGenMakeSite(rpc, &site)
+	}
+	return []ssa.CallSite{site}
 }
 
 // regBuiltinSite is the call of a built-in native code makes itself whose
@@ -1190,9 +1204,15 @@ func (f *jitRegFeedback) ArrayProtos() ([2]ssa.Holder, bool) { return f.fb.Array
 // GenNext is ssa.GenStepFeedback's half that is the realm's, jitFeedback's.
 func (f *jitRegFeedback) GenNext() uintptr { return f.fb.GenNext() }
 
-// GenSteps is ssa.GenStepFeedback's other half: no generator is known to
-// a register loop's step yet (jitEntry's genSteps are the stack form's).
-func (f *jitRegFeedback) GenSteps(pc int) []ssa.GenStep { return nil }
+// GenSteps is ssa.GenStepFeedback's other half: the generators the step
+// of the program's instruction pc has met (jitRegGenSeen), which it
+// resumes natively (regGenSteps).
+func (f *jitRegFeedback) GenSteps(pc int) []ssa.GenStep {
+	if pc < 0 || pc >= len(f.p.Code) {
+		return nil
+	}
+	return f.regGenSteps(int(f.p.Origin[pc]))
+}
 
 // HasCache is ssa.HasCacheFeedback's, jitFeedback's.
 func (f *jitRegFeedback) HasCache() uintptr { return f.fb.HasCache() }

@@ -175,7 +175,7 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, callee bool) *jitRegEnt
 		return nil
 	}
 	e := &jitRegEntry{}
-	p, err := jitcompile.LowerReg(c.rc, cl.fn)
+	p, err := r.jitRegLower(cl, c.rc, jitLowerSSA)
 	if err != nil && jitcompile.HostOnly(err) {
 		// Host operations alone, no loop, no element's work: compiled for
 		// its native callers (LowerRegInline), or, hot, where a call it
@@ -183,9 +183,9 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, callee bool) *jitRegEnt
 		// (jitNativeCallee, jitHotEntry); refused for now otherwise.
 		switch {
 		case callee:
-			p, err = jitcompile.LowerRegInline(c.rc, cl.fn)
+			p, err = r.jitRegLower(cl, c.rc, jitLowerInline)
 		case r.jitRegCallsNatively(cl, c):
-			p, err = jitcompile.LowerRegHot(c.rc, cl.fn)
+			p, err = r.jitRegLower(cl, c.rc, jitLowerHot)
 		default:
 			e.hostOnly = true
 		}
@@ -228,7 +228,7 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, callee bool) *jitRegEnt
 		e.refusal = fmt.Sprintf("%v: %v", jitRefused, err)
 		return e
 	}
-	looped := jitRegShape(f, p)
+	looped := jitRegShape(f, p, cl, c)
 	ssa.Optimize(f)
 	mc, err := mir.CompileWith(&w.MIR, f, jitEncoding, mir.Settings())
 	if err != nil {
@@ -602,17 +602,34 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 				r.jitRegReopt(f.cl, e)
 			}
 			var callee Value
-			if w := regAt(c.code, exitPC); w.Op() == bytecode.RNewW && wb+int(w.A()) < len(r.stack) {
+			w := regAt(c.code, exitPC)
+			if w.Op() == bytecode.RNewW && wb+int(w.A()) < len(r.stack) {
 				callee = r.stack[wb+int(w.A())]
+			}
+			// A method call's operands, which may be a loop's built-in's
+			// (jitRegForEachSeen), read before Go runs it.
+			var mcallee, mrecv, mcb Value
+			if w.Op() == bytecode.RCallMW && w.X() >= 1 && wb+int(w.A())+2 < len(r.stack) {
+				mcallee, mrecv, mcb = r.stack[wb+int(w.A())], r.stack[wb+int(w.A())+1], r.stack[wb+int(w.A())+2]
 			}
 			next, ran, err = r.regWhole(f, c, wb, exitPC)
 			if seen.write && err == nil && ran {
 				r.jitRegWriteSeen(f, c, e, exitPC, seen)
 			}
+			if seen.elem {
+				// An element's kind learned: compiled again for it, no
+				// deoptimization, as the stack form's (e.reopt).
+				r.jitRegReopt(f.cl, e)
+			}
 			if err == nil && ran {
 				// A call native code did not make, which it may once
-				// compiled again.
+				// compiled again -- a loop's built-in's too, whose checks
+				// failed: a callback made anew at each call of its maker,
+				// called by its code from here, as at a call of Go.
 				r.jitRegCallSeen(f, c, e, exitPC, callee)
+				if mcallee.IsObject() {
+					r.jitRegForEachSeen(f, e, exitPC, mcallee, mrecv, mcb, int(w.X()))
+				}
 			}
 			if l := s.regLearned[r.jitKeyOf(f.cl.fn)]; l != nil && l.polyReopt {
 				// The site met what the code was not compiled for and
@@ -862,7 +879,18 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	op := w.Op()
 	argc := int(w.X())
 	kind := ctx.GoOp >> abi.GoOpKindShift & 0xff
-	if kind == abi.GoCallWhole || (kind == abi.GoCallRest || kind == abi.GoCallStep) && (op == bytecode.RIterRest || op == bytecode.RIterStep) {
+	if kind == abi.GoCallWhole && r.jitRegFrameless(ctx, op) {
+		return true
+	}
+	if kind == abi.GoCallStep && op == bytecode.RIterNext {
+		// A loop's step over a generator native code may resume once
+		// compiled again (jitRegGenStepSeen), its cursor the step's operand.
+		r.jitRegGenStepSeen(f, run.e, rpc, jitGoArg(ctx, 0))
+	}
+	if kind == abi.GoCallWhole || (kind == abi.GoCallRest || kind == abi.GoCallStep) && (op == bytecode.RIterRest || op == bytecode.RIterStep) ||
+		kind == abi.GoCallStep && op == bytecode.RIterNext || kind == abi.GoCallForOf && op == bytecode.RForOfStart {
+		// A for...of's cursor native code did not take from a generator's
+		// room (regWholeSite's ForOf) too.
 		// Or a destructuring's step or rest, which native code had no
 		// step of its own for: run whole too.
 		return r.jitRegWhole(ctx, idx, run, rpc)
@@ -897,8 +925,14 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 		last, shared := s.ssaCtx, s.ssaSharedGen
 		s.goCalls++
 		r.noteRegGoCall(w, false, Value{})
-		v, err := r.jitRegPropertyMade(f, w, Atom(ctx.GoOp>>abi.GoOpIndexShift), jitGoArg(ctx, 0), jitGoArg(ctx, 1))
+		recv := jitGoArg(ctx, 0)
+		v, err := r.jitRegPropertyMade(f, w, Atom(ctx.GoOp>>abi.GoOpIndexShift), recv, jitGoArg(ctx, 1))
 		s.ssaCtx = last
+		if err == nil && op != bytecode.RSetProp {
+			// A read native code did not find, learned as at an exit
+			// (jitRegReadSeen).
+			r.jitRegReadSeen(f, c, run, rpc, recv)
+		}
 		if s.ssaSharedGen != shared {
 			r.jitShareContexts(idx, f)
 		}
@@ -987,9 +1021,26 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 		// What the call called, which the code may call natively once
 		// compiled again (jitRegCallSeen), or make a loop of its own
 		// (jitRegForEachSeen).
-		r.jitRegCallSeen(f, c, run.e, rpc, callee)
+		if op == bytecode.RNewW && callee.IsObject() && callee.Object() == r.proto.arrayCtor {
+			// new Array(n), its length the call's operand (jitRegAllocLength).
+			n := Undefined
+			if argc == 1 {
+				n = jitGoArg(ctx, at+1)
+			}
+			r.jitRegAllocLength(f, run.e, rpc, w, callee.Object(), n)
+		} else {
+			r.jitRegCallSeen(f, c, run.e, rpc, callee)
+			if op == bytecode.RCallW || op == bytecode.RCallMW {
+				// A generator function's, whose generators the code may make
+				// (jitRegGenMakeSeen).
+				r.jitRegGenMakeSeen(f, run.e, rpc, callee)
+			}
+		}
 		if op == bytecode.RCallMW {
 			r.jitRegForEachSeen(f, run.e, rpc, callee, this, jitGoArg(ctx, at+1), argc)
+			// A generator's next, which the code may call natively
+			// (jitRegGenCallSeen).
+			r.jitRegGenCallSeen(f, run.e, rpc, this, callee, argc)
 		}
 	}
 	if err != nil || r.stopped != nil || run.e.invalid {
@@ -1029,12 +1080,25 @@ func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int)
 	}
 	ops, argc, dest, ok := e.p.Code[ipc].WholeOperands(e.p.Regs)
 	whole := ctx.GoOp>>abi.GoOpKindShift&0xff == abi.GoCallWhole
+	// A for...of's or a for...in's step (iter_next, ir's IterStep): its
+	// cursor's register read, its value's written, as the interpreter's
+	// step makes it -- the uninitialized value once done, where it jumps
+	// to the loop's end -- as the stack form's call of Go steps a cursor
+	// (jitGoRun's OpIterNextOrJump). Left to an exit, Bounce's for...of
+	// left native code at its steps.
+	step := false
+	if in := &e.p.Code[ipc]; !ok && !whole && in.Op == ir.IterStep && !in.When && !in.Rest &&
+		in.Left.Slot >= 0 && in.Left.Slot < e.p.Regs && in.Dest >= 0 && in.Dest < e.p.Regs {
+		ops[0], argc, dest, ok, step = in.Left.Slot, 1, in.Dest, true, true
+	}
 	if !ok || whole && int(ctx.GoOp>>abi.GoOpArgcShift&0xff) != argc || wb+e.p.Regs > len(r.stack) {
 		return false
 	}
 	own := ctx.Live == 0
 	switch op := regAt(c.code, rpc).Op(); {
-	case !own && (op == bytecode.RLoadThis || op == bytecode.RThis):
+	case !own && (op == bytecode.RLoadThis || op == bytecode.RThis || op == bytecode.RDerivedRet):
+		// What reads a this binding, which a native callee's stand-in
+		// frame has none of.
 		return false
 	case op == bytecode.RCloseRegs && (!own || ctx.Cells != nil):
 		// A scope's end where the code's captured registers are in cells
@@ -1083,7 +1147,12 @@ func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int)
 	if dest >= 0 {
 		v = r.stack[wb+dest]
 	}
-	if err != nil || next != after || r.stopped != nil || e.invalid {
+	done := false
+	if w := regAt(c.code, rpc); step && err == nil && next != after && next == rpc+1+int(w.SC()) {
+		// Done: the loop's end is next, its register as it was.
+		v, done = uninitialized, true
+	}
+	if err != nil || next != after && !done || r.stopped != nil || e.invalid {
 		// Left at the call's exit, whose records write the frame as it was
 		// before the instruction: then the register it wrote, or the
 		// handler's that took what it threw.
@@ -1092,6 +1161,8 @@ func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int)
 		case err != nil:
 		case h != nil && next == int(h.To):
 			p.reg, p.v = int(h.Reg), r.stack[wb+int(h.Reg)]
+		case done:
+			// The loop's end, nothing written.
 		default:
 			p.reg, p.v = dest, v
 		}
@@ -1171,6 +1242,14 @@ func (r *Runtime) regFinishCall(f *frame, c *regCode, wb, rpc int, v Value, err 
 		case bytecode.RSetProp:
 			// A setter's result, dropped.
 			return k.pc, true, nil
+		case bytecode.RIterNext:
+			// A loop's step whose generator Go finished (jitRegGenDone):
+			// done, the uninitialized value, to the loop's end, as
+			// regIterNext goes there; its value to R[A] otherwise.
+			if v.IsUninitialized() {
+				return rpc + 1 + int(w.SC()), true, nil
+			}
+			dest = int(w.A())
 		}
 		r.stack[wb+dest] = v
 		return k.pc, true, nil

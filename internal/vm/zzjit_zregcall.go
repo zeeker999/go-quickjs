@@ -122,7 +122,7 @@ func (f *jitRegFeedback) regCallTargets(pc int, w bytecode.RInstr, argc int, met
 	}
 	if l != nil {
 		for _, x := range l.nativeCalls {
-			if x.pc == rpc && (x.pool != nil) == newW && !x.forEach {
+			if x.pc == rpc && (x.pool != nil) == newW && !x.forEach && x.cl != nil {
 				add(x.obj, x.cl, x.cl.reg, x.pool, x.byCode)
 			}
 		}
@@ -198,6 +198,10 @@ func (r *Runtime) jitRegCallSeen(f *frame, c *regCode, e *jitRegEntry, rpc int, 
 			return false
 		}
 		o = callee.Object()
+		if o == r.proto.arrayCtor {
+			// new Array() or new Array(n): made from a pool (jitRegAllocSeen).
+			return r.jitRegAllocSeen(f, c, e, rpc, w, o)
+		}
 		if !r.jitRegConstructable(o, int(w.X())) {
 			return false
 		}
@@ -372,6 +376,11 @@ type jitRegLevel struct {
 	// its receiver, which the construction's result is if not an object.
 	construct bool
 	this      Value
+	// gen is, for the resumption of a generator a loop's step or a call of
+	// next made natively, the generator, and cursor the step's, nil for a
+	// call of next's (jitRegGenLevel).
+	gen    *generator
+	cursor *iterState
 }
 
 // jitRegConstructs marks l, the level whose caller's code c makes the call
@@ -398,12 +407,21 @@ func (r *Runtime) jitRegLevelAt(i int) (jitRegLevel, bool) {
 		return jitRegLevel{}, false
 	}
 	e.levels++
-	return jitRegLevel{ctx: i, cl: cl, c: cl.reg, e: e, wb: int(c.Base), back: c.ReturnTo, base: c.Base}, true
+	l := jitRegLevel{ctx: i, cl: cl, c: cl.reg, e: e, wb: int(c.Base), back: c.ReturnTo, base: c.Base}
+	if cl.fn.Generator {
+		r.jitRegGenLevel(&l, c)
+	}
+	return l, true
 }
 
 // jitRegPushLevel makes the VM's frame of a level, as regEnterW makes a
 // call's: its function, its window, its pc, its new.target undefined.
 func (r *Runtime) jitRegPushLevel(l *jitRegLevel, pc uint32) *frame {
+	if l.gen != nil {
+		// A generator's resumption: the frame of the realm's next that
+		// resumed it below its own, as regGenStep makes them.
+		r.jitPushGenNext(l.gen)
+	}
 	off := r.frameDepth - r.frameBase
 	if uint(off) >= uint(len(r.cur)) {
 		r.seekFrameBlock()
@@ -432,17 +450,26 @@ func (r *Runtime) jitRegPushLevel(l *jitRegLevel, pc uint32) *frame {
 		f.newTarget = Obj(f.callee)
 	}
 	f.regKind = regFrameEnter
+	if l.gen != nil {
+		// Its this, function and arguments the generator's, as regGenRun
+		// makes a resumption's frame.
+		r.jitRegGenFill(f, l)
+	}
 	return f
 }
 
 // jitRegPopLevel ends a level's frame f, as regEnterW ends a call's: what
-// closures captured of it closed, the VM's stack's top back at its window.
-func (r *Runtime) jitRegPopLevel(f *frame, wb int) {
+// closures captured of it closed, the VM's stack's top back at its window
+// -- a generator's resumption's, the frame of the next below it too.
+func (r *Runtime) jitRegPopLevel(f *frame, wb int, gen bool) {
 	f.regKind = 0
 	if len(f.openUpvalues) != 0 {
 		regCloseUpvalues(f)
 	}
 	r.frameDepth--
+	if gen {
+		r.frameDepth--
+	}
 	r.stackTop = wb
 }
 
@@ -523,7 +550,7 @@ func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 		ok = r.jitRegGoCallOn(ctx, idx, jitRegRun{f: frames[len(frames)-1], c: last.c, e: last.e, wb: last.wb})
 		s.ctxTop = ctxTop
 		for k := len(frames) - 1; k >= 0; k-- {
-			r.jitRegPopLevel(frames[k], levels[k].wb)
+			r.jitRegPopLevel(frames[k], levels[k].wb, levels[k].gen != nil)
 		}
 		r.stackTop = top
 	}
@@ -643,7 +670,12 @@ func (r *Runtime) jitRegUnwind(idx int) (Value, error) {
 			// position (regRestartRun).
 			v, err = r.regRestartRun(f)
 		}
-		r.jitRegPopLevel(f, l.wb)
+		if l.gen != nil {
+			// A generator's resumption: its suspension or its end saved,
+			// and the step's result (jitRegGenDone).
+			v, err = r.jitRegGenDone(f, l, v, err)
+		}
+		r.jitRegPopLevel(f, l.wb, l.gen != nil)
 		l.e.levels--
 		if err == errTailCall {
 			// Ended in a call in tail position, its frame given up: the

@@ -147,7 +147,9 @@ Its instructions name registers as their operands
 run of registers, a window of the callee's, which the interpreter's call
 makes the callee's frame. `compile.LowerReg` lowers a function's register
 code into the slot IR; `LowerRegHot` lowers one its callers have shown to be
-hot, and `LowerRegInline` one for native callers or for inlining. Code
+hot, and `LowerRegInline` one for native callers or for inlining; each
+has a form with hints (`LowerRegWith`, `Hints` by register pc), what the
+function's code learned at its exits (see [Feedback](#feedback)). Code
 compiled at a function's first call (`bytecode.RegLater`) keeps the names,
 constants and property sites it adds in its `RegCode`, which the lowering
 reads in place of the function's (`regView`).
@@ -185,12 +187,19 @@ origin (`ir.Program.Origin`):
 Where a register instruction's operands are a run of registers that is not
 where its result goes -- `new_array`'s elements, `concat`'s parts -- they
 are copied to scratch slots first, which the operation reads as a run of
-operands. What the lowering leaves to Go whole -- a call, a cold operation
+operands. A part's conversion where it is -- `to_string`'s, `str_part`'s -- that
+only a concat of more parts reads, itself or a copy of it in the concat's
+run, and that is not live past the concat, is a `StringPart`
+(`regStringParts`, the stack form's `stringParts`): a check that it is a
+primitive, which the concat converts the same, not a call of Go of its own.
+What the lowering leaves to Go whole -- a call, a cold operation
 -- is one `Host`, alone in its origin: Go runs the whole register
 instruction. Where Go can run it on the frame and the registers it reads
 and writes are known (`compile.RegAccess`: up to three read, one written)
 -- a for...in's or a for...of's cursor, an object's or an array's spread, a
-spread call, a computed key's definition -- it is a whole Host (`ir.Instruction`'s `Whole`), its
+spread call, a computed key's definition, `#x in o`, super's reads and
+writes by name and super's base (their receiver register 1), a derived
+constructor's result -- it is a whole Host (`ir.Instruction`'s `Whole`), its
 operands the registers it reads and its result the one it writes, which
 native code calls Go for and goes on after (see [Calls of
 Go](#calls-of-go)). So is what the builder leaves to Go of an operation
@@ -341,7 +350,19 @@ the function's key:
   `jitRegBigIntExit`, the stack form's `jitBigIntNote`), which the next
   compiles make natively or call Go for (see [BigInts](#bigints));
 - the register pcs after calls Go went on at, which the code had been built
-  with no entry at (`Resumed`, `jitRegResumeSeen`).
+  with no entry at (`Resumed`, `jitRegResumeSeen`);
+- the elements' kinds, as the stack form's code learns them
+  (`jitRegElemSeen`, zzjit_zregelem.go): at a host exit, an element read
+  by its cell that met a typed array's, a BigInt typed array's or a
+  string's element, or an object's property by its name (`TypedRead`,
+  `TypedBigRead`, `StringRead`, `KeyedRead`), and a write to an object
+  native code does not store to (`KeyedWrite`), the code stale from
+  there; at a deoptimization, an element read made as a number that met
+  what is none, and an addition that met a string, which every lowering
+  of the function's register code is made with from there (the hints,
+  `jitLearned`'s `regHints`, by register pc, `jitRegLower`): the read
+  made by its cell (ir's `Reference`), the addition Go's (`StringAdd`),
+  the additions of an element read of strings too (`stringConcats`).
 
 A guard's failure invalidates the code; anything else learned marks it
 stale, to be compiled again without a deoptimization (see
@@ -362,14 +383,15 @@ speculates nothing: it builds the site generically, or leaves it to Go.
 | call frequencies | `Frequency` |
 | what exits taught | `Generic`, `EntryGeneric`, `Resumed` |
 | steps, `in`, `typeof`, scopes' ends, typed arrays' kinds | `GenNext`, `MapNexts`, `KeyAtoms`, `HasCache`, `TypeofCells`, `WalkedCloseCell`, `TypedKind` |
+| elements' kinds learned at exits, captured typed arrays | `TypedRead`, `TypedBigRead`, `KeyedRead`, `KeyedWrite`, `StringRead`, `UpvalueTyped` |
+| a pure body (`bytecode.LeafPure`, the compiler's fact), whose operators take BigInts native code holds as such | `PureBody` |
+| closures and captured registers' cells from pools, an arrow's this its maker's register 1 (`ssa.ClosureSite`'s `LexThisReg`) | `Closure`, `CellsPool` |
+| `instanceof` of the constructor a global or a captured binding read just before holds, the searches, `parseInt`, BigInts' strings, by the built-in its site's cache holds | `InstanceOf`, `IndexOf`, `ParseInt`, `BigString` |
+| generators a loop's step or a call of `next` resumes natively, learned at the calls of Go that stepped them (`jitRegGenSeen`) | `GenSteps` |
 
 | Not answered yet | Methods | So |
 |---|---|---|
-| generators a step resumes | `GenSteps` | the step a call of Go |
-| `indexOf`, `parseInt`, `instanceof` | `IndexOf`, `ParseInt`, `InstanceOf` | Go's |
-| elements' kinds learned at exits | `TypedRead`, `TypedBigRead`, `KeyedRead`, `KeyedWrite`, `StringRead`, `UpvalueTyped` | generic element access |
-| closures and cells from pools | `Closure`, `CellsPool` | Go makes them on the register frame |
-| an inlined callee's exits, keeps, BigInts' strings, pure bodies | `InlineExit`, `KeepLimit`, `BigString`, `PureBody` | nothing speculated |
+| an inlined callee's exits, keeps | `InlineExit`, `KeepLimit` | nothing speculated |
 
 **The feedback dispatcher.** The native handlers come in variants, each a
 dispatch table over the same handlers (`internal/vm/internal/nativegen`,
@@ -516,7 +538,16 @@ a `yield` that a resumption by `next` goes on past, and at the return path
 that jump goes over (`lowerReg`'s entries). The suspensions -- `yield`,
 `await`, `yield*`, the parameters' end, a delegation's step -- and
 `gen_entry`, which reads how the frame resumed, are the interpreter's
-(`regWholeRuns`): native code leaves the frame to it there.
+(`regWholeRuns`): native code Go entered leaves the frame to it there. A
+synchronous generator's code a loop's step or a call of `next` resumed
+natively suspends it at a `yield` itself (see [Control
+flow](#control-flow), "Generators' steps"). A generator's code is compiled
+at its loops' samples, and one of no loop once the resumptions Go made of
+it have done `jitHotWork` of its code, a sample of its hotness at each
+(`jitRegResumed`), as the stack form counts a function's calls' work
+(`jitHotEntry`). Its entries are none OSR's -- none escape analysis may
+drop, for its resumptions' sake -- so its loops' headers are found from
+the program (`jitRegShape`).
 
 **Entering.** The code is entered:
 
@@ -1110,9 +1141,40 @@ operands and handlers as Go's suspension would and returns the value to the
 step (`ssa.Block`'s `Yield`); a return finishes it and returns the step's
 done. Anything else leaves as a native callee does, and Go finishes the
 resumption from the generator. Only a synchronous generator without `yield*`
-whose locals no closure captures is resumed so. Register code compiles no
-generator yet, and its feedback names none a step resumes (`GenSteps`): this
-serves the stack form's path until it does.
+whose locals no closure captures is resumed so.
+
+Register code's generator keeps its frame's window in its values only
+between runs, the registers from `genFrom` (the callee's and this's below
+them made again from the generator); its frame while it runs is a window in
+the VM's stack, which native code addresses, where the stack form's frame
+was the generator's own. So its code's generator entry (`ssa.Func`'s
+`GenWindow`, mir's `windowGenEntry`) makes the window past the VM's stack's
+top, as a call entry makes a native callee's: its registers copied from the
+generator's values, its function object and receiver to registers 0 and 1
+where the values keep neither, and the value sent in to the yield's
+register (`ssa.GenResume`'s `Sent`) -- where the generator's place (its
+register pc, `Place`) has an entry, the resumption by `next` going on at the
+jump's target after the yield, the first past `end_params`. A yield
+(`ssa.Block`'s `YieldSlot`, its value's register) writes the frame as an
+exit does, then copies the window's registers back to the generator's
+values -- their pointer words through `storeRef` while the collector marks,
+the copy's offset kept in the context's `RecordAt` -- and saves its place,
+suspended and begun, as `regGenRun` does; the handlers are the code's, by
+register pc, so nothing of them is saved. A generator resumed so is one
+whose locals no closure captures and that keeps no arguments
+(`jitRegGenCallable`): nothing is open on its window's registers. The step
+learns its generators at the calls of Go that step them (`jitRegGenSeen`,
+from the step's `iter_next` and a `call_method_w` of the realm's `next`).
+Its loop's cursor, `for_of_start` Go runs whole, is taken natively from a
+generator's room as the stack form's is (`ssa.CallSite`'s `GenIter` on the
+whole call's site, mir's `genForOf`); Go makes any other.
+A level of such a resumption that leaves native code Go makes the frames
+of as `regGenRun` does -- next's below the generator's, its this, function
+and handlers the generator's (`jitRegPushLevel`) -- and finishes as
+`regGenRun` finishes a resumption (`jitRegGenDone`): suspended, the window
+written back and the place saved, the step's result the value or, for a
+call of `next`, its result object; ended, the generator done and the step's
+cursor too, the step going on at its loop's end (`regFinishCall`).
 
 **Destructuring.** Destructuring from an iterator takes a cursor, as a
 for...of does: Go makes it, called from native code (`abi.GoCallForOf`).
@@ -1329,6 +1391,24 @@ the runtime stopped in, or after which the code was found invalid, its exit
 finishes (`regPending`, `regFinishCall`): the answer to the call's register,
 or the exception to the frame's handlers, never the call made again.
 
+**What native code makes first.** Of an instruction run whole, native code
+makes what the stack form's site of the same operation has it make itself
+(`jitRegFeedback`'s `NativeCalls` for a whole Host, `regWholeSite`): an
+object's spread by the layouts Go has copied (`ssa.CallSite`'s `Copies`),
+an array's spread by a dense array's elements (`ArrayIter`), an element
+appended (`Append`), a literal's field along its shape's transition
+(`DefineNext`); what it does not make, Go makes without the frame where
+that runs nothing (`jitRegFrameless`, the stack form's `jitOpFrameless`,
+which learns the layouts' copies), and on it otherwise.
+
+**Loops' steps.** A for...of's or a for...in's step (`iter_next`, an
+`ir.IterStep` native code does not make itself) is a call of Go of the
+step (`ssa.CallSite`'s `Step`) that runs the register instruction on the
+frame as an instruction run whole is (below, `jitRegWhole`): the cursor's
+register given the code's value, the value it steps to the call's result,
+or the uninitialized value where the loop is done, as the stack form's call
+of Go steps its cursor.
+
 **Instructions run whole.** A whole Host (`ir.Instruction`'s `Whole`) is
 a call of Go (`ssa.CallSite`'s `Whole`, `abi.GoCallWhole`) that runs the
 register instruction at its PC on the register frame, by the interpreter's
@@ -1356,9 +1436,10 @@ scope's end -- Go makes from native code on the register frame
 callee's, which has none of the VM's -- a stand-in of its closure, function
 object and receiver, its window at its context's `Base`. Left to an exit: a
 mapped arguments object, which aliases the registers; a native callee's rest
-parameters and arguments, which its calls keep none of; and a closure a
-native callee makes that captures by value, which reads its window's
-registers. Where the code's captured registers are the frame's own slots,
+parameters and arguments, which its calls keep none of. A closure a
+native callee makes that captures by value shares the callee's closed cells
+of its registers in place of copies of them: what it takes by value is
+never assigned once it is made. Where the code's captured registers are the frame's own slots,
 not in cells of their own, a closure and a scope's end on the run's own
 frame are the interpreter's handler's (`jitRegFrameWhole`): the closure
 captures the upvalues open on the slots, the scope's end closes them.
@@ -1415,7 +1496,17 @@ native code for Go, which learns there what to call next. A construction
 `new.target`, is made so too, with the constructions its code learned: its
 receiver taken from a pool of objects made as `regConstruct` makes one
 (`jitNewPool`, `ssa.CallSite`'s `Pool`), in the callee's register 1 and its
-context's `This`, which the result is where the callee returns no object. A
+context's `This`, which the result is where the callee returns no object.
+A call of a synchronous generator function of register code whose window
+binds its parameters with nothing run (end_params right after gen_entry),
+learned at the call Go made of it (`jitRegGenMakeSeen`), takes its
+generator from a pool, as the stack form's does (`ssa.CallSite`'s
+`GenMake`): the arguments written to the generator's registers from its
+window's register 2 (`GenArgAt`), a method's receiver to its register 1
+too (`GenThisAt`). A construction with the realm's Array, `new Array()` or `new Array(n)` of a
+length a pool's arrays have room for, learned at the call Go made of it
+(`jitRegAllocSeen`), takes its array from a pool (`ssa.CallSite`'s
+`Alloc`), as the stack form's does. A
 callee native callers call that has no code is compiled at their first call
 of it through Go (`jitRegNativeCallee`): a function of host operations alone
 is lowered for them (`LowerRegInline`).
@@ -2454,8 +2545,7 @@ go with it:
 
 The switch-over needs, on register code: the feedback the tables in
 [Feedback](#feedback) list as not answered yet, call frequencies first (from
-the feedback dispatcher), and a loop's steps of a generator resumed natively
-(`GenSteps`).
+the feedback dispatcher).
 Then it removes:
 
 - `compile.LowerSSA`, `LowerSSAHot`, `LowerSSAInline`, `LowerSSAForward` and
