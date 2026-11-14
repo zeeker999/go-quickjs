@@ -485,7 +485,10 @@ its own, to `jitSnapDepth` -- into a `jitRegSnapshot`, which has
 interfaces it would; a worker builds, optimizes and compiles from it
 (`jitRegJob`), touching nothing of the runtime's; and the runtime's
 goroutine installs it at a later check -- a sample (`jitRegHot`), at a call
-or a back edge -- putting back what the questions appended to the
+or a back edge, or a call of the function itself, which a compile handed to
+the workers marks (`closureCode`'s `jitEnters`) so that its calls go to the
+JIT (`jitRegEnter`), as the stack form's calls install theirs
+(`tryJITAt`) -- putting back what the questions appended to the
 feedback's lists (`replay`) and placing the code as the compile on the spot
 (`jitRegPlace`). A question the snapshot was not asked is a miss
 (`jitSnapMiss`): the compile is built at the install instead
@@ -558,11 +561,13 @@ that jump goes over (`lowerReg`'s entries). The suspensions -- `yield`,
 
 **Entering.** The code is entered:
 
-- by a call whose frame Go makes (`regEnterW`, `jitRegEnter`): a call site
-  sampled calling a function that has code is marked `regCallJIT`, which
-  neither `rhCallW`'s fast path nor the native call handler enters, so its
-  calls go to `regCallSlow` and `regEnterW`, whose test of the template's
-  code (`jitRegHas`) is the one test a call pays outside the handlers;
+- by a call from any site: the template's `closureCode` marks a function
+  with code (`jitEnters`, set with it, `setJITReg`), which `rhCallW`'s hit
+  and `regEnterW` test, entering the code (`jitRegEnter`), and the native
+  call handler too, on both architectures, leaving such a call to
+  `rhCallW` -- one test a call pays, as the stack interpreter's calls look
+  for their callee's code; a site filled before the callee was compiled had
+  entered it in the interpreter until a sample at that site marked it;
 - by native callers, through the function's link (see [Native
   calls](#native-calls));
 - by on-stack replacement at the loop whose back edge took the sample
@@ -585,6 +590,29 @@ code's own, or at a `ret` whose register no closure captures, given the
 value (`findReturns`). Code with neither, where it has a `ret`, is not
 entered so. An exception no handler of the frame's takes ends the frame
 (`regDone`).
+
+A loop whose entry escape analysis dropped (`ssa.Func`'s `Unentered`, by
+register pc: `jitRegEntry`'s `unentered`) has a frame found at its header
+with no entry at two checks in a row -- each a full budget of back edges,
+or the check made due at once after its code left it -- compile the
+function apart with that entry kept (`ssa.Func`'s `FrameAt`, its objects
+made) and go on in that code, kept beside the function's (`osr`, `osrOf`)
+for the frames that wait there next and let go of with it
+(`jitRegLoopCode`), as the stack form's `jitLearnLoopEntry` has it. A run
+in it stays in it at its exits while the function's code is the one it
+was compiled beside.
+
+**Profit.** Each native stretch -- an entry, a call of Go -- costs what an
+exit and an entry would (`jitSSAMinWork`), against the work the stretch did
+(`jitRegStretchWork`). Every `jitSSAProbe` stretches, code whose work does
+not make up for them Go no longer enters (`entrySlow`), native callers
+calling it still; stretches begun at a loop are judged apart (`loopSlow`),
+and so are the settled calls of Go -- not a call of a function it may come
+to call natively -- of a run begun at a loop (`jitRegRunGoProfit`), as the
+stack form's `jitSSAProfit` and `jitRunGoProfit` judge. Go enters such code
+again after `jitNativeRetry` calls of it, doubled each time
+(`jitRegRetrySlow`). `JITReport` shows it as slow, with the calls the
+interpreter made of it.
 
 ## The SSA build
 
