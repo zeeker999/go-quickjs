@@ -213,6 +213,20 @@ var (
 	offUpSlot   int32
 	offUpClosed int32
 	offRCLeafUp int32
+
+	// Switches (switchW).
+	offRCSwitches int32
+	offSwDense    int32
+	offSwLo       int32
+	offSwHi       int32
+	offSwByLen    int32
+	offSwFlat     int32
+	offSCK        int32
+	offSCTo       int32
+	offSCStr      int32
+	offSwFew      int32
+	offSwNums     int32
+	offSwOther    int32
 )
 
 // nativeTopFields are the record's fields that the top frame's state is
@@ -426,6 +440,18 @@ func loadOffsets() {
 	offUpSlot = off("upvalue.slot")
 	offUpClosed = off("upvalue.closed")
 	offRCLeafUp = off("regCode.leafUp")
+	offRCSwitches = off("regCode.switches")
+	offSwDense = off("regSwitchTable.dense")
+	offSwLo = off("regSwitchTable.lo")
+	offSwHi = off("regSwitchTable.hi")
+	offSwByLen = off("regSwitchTable.byLen")
+	offSwFlat = off("regSwitchTable.flat")
+	offSCK = off("SwitchCase.K")
+	offSCTo = off("SwitchCase.To")
+	offSCStr = off("SwitchCase.Str")
+	offSwFew = off("regSwitchTable.few")
+	offSwNums = off("regSwitchTable.nums")
+	offSwOther = off("regSwitchTable.other")
 
 	nativeTopFields = [][2]int32{
 		{off("nativeRec.regs"), ncRegs},

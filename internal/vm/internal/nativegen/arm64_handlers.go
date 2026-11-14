@@ -1021,6 +1021,8 @@ func armEmit(v *variant) (*block, error) {
 	// Closures and the upvalues they capture (arm64_closure.go).
 	h(bytecode.RCloseRegs, g.closeRegs)
 	h(bytecode.RClosureW, g.closureW)
+	// A switch's case found by its table (arm64_switch.go).
+	h(bytecode.RSwitch, g.switchW)
 
 	for n, l := range g.exits {
 		if n == 0 {

@@ -618,3 +618,31 @@ func TestRegNativeClosuresCollecting(t *testing.T) {
 		}
 	}
 }
+
+// TestRegNativeSwitch runs switches natively: numbers of dense tables in
+// and out of range, fractions, -0 and NaN, numbers of few and scattered
+// cases, which Go answers; strings by their constants and by their text,
+// built, non-ASCII, ropes, longer than the native compare goes, of a
+// length no case has; booleans, null, undefined and objects.
+func TestRegNativeSwitch(t *testing.T) {
+	nativeCheck(t, `
+		var out = []
+		function dense(x) { switch (x) { case 1: return "one"; case 2: return "two"; case 3: return "three"; case 4: return "four"; default: return "d" } }
+		out.push([1, 2, 3, 4, 0, 5, 2.5, -0, NaN, "1", 1e300, -1].map(dense).join())
+		function few(x) { switch (x) { case 7: return "s"; case 1000: return "k"; default: return "d" } }
+		function scattered(x) { switch (x) { case 1: return 1; case 100: return 2; case 1e6: return 3; case 7.5: return 4; case -3: return 5; case 42: return 6; case 99999: return 7; case 0.25: return 8; case 12345: return 9; default: return 0 } }
+		out.push([7, 1000, 8].map(few).join(), [1, 100, 1e6, 7.5, -3, 42, 99999, 0.25, 12345, 5].map(scattered).join())
+		function str(x) { switch (x) { case "a": return 1; case "div": return 2; case "span": return 3; case "héllo": return 4; case "": return 5; case "x".repeat(1100): return 6; case "dix": return 7; default: return 0 } }
+		var built = ["d" + "iv", "sp".concat("an"), "h\u00e9llo", "", "x".repeat(1100), "x".repeat(1099), "di" + "x", "dvi", "span ", "a", ["sp", "an"].join("")]
+		out.push(built.map(str).join(), ["a", "div", "span", "zzz", "dix"].map(str).join())
+		var rope = "spa"; for (var i = 0; i < 3; i++) rope += i; out.push(str(rope.slice(0, 3) + "n"))
+		function other(x) { switch (x) { case true: return "t"; case false: return "f"; case null: return "n"; case undefined: return "u"; case "1": return "s"; default: return "d" } }
+		out.push([true, false, null, undefined, {}, "1", 1].map(other).join())
+		function mixed(x) { switch (x) { case 1: return "n1"; case "1": return "s1"; case 2: return "n2"; default: return "d" } }
+		out.push([1, "1", 2, "2", true].map(mixed).join())
+		out.join("\n")`, `
+		function sw(k) { switch (k) { case "a": return 1; case "div": return 2; case "span": return 3; case 1: return 4; case 2: return 5; default: return 0 } }
+		var keys = ["d" + "iv", "a", "span", "zz"], s = 0
+		for (var i = 0; i < 4000; i++) s += sw(keys[i & 3])
+		String(s)`, bytecode.RSwitch)
+}

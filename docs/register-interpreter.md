@@ -655,7 +655,11 @@ and a call in tail position while the stack is shallower than
 callee in place (`regTailTo`); where it is the base frame, `nativeRun`
 goes on with the callee's code in the same code entry
 (`nativeRestart`), rather than ending it for `regRestartRun` to run each
-callee in an entry of its own. A fast path that misses jumps to
+callee in an entry of its own. A `switch` finds its case by its table
+(`switchW`), as `regSwitchTable.lookup` does: a number of a dense
+table, a flat string by its cases' constants and then by their texts,
+eight bytes at a time up to 1,024; a table of few or scattered numbers,
+a rope or a longer text is Go's. A fast path that misses jumps to
 the exit; nothing is written before it does. arm64 answers one case more:
 NaN made an integer -- ToInt32's 0, an integer typed array's element 0
 -- where FCVTZS gives 0 and CVTTSD2SI no integer; what has no int64 is

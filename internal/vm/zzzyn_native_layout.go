@@ -2,7 +2,11 @@
 
 package vm
 
-import "reflect"
+import (
+	"reflect"
+
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+)
 
 // NativeLayout is what the native handlers' generator
 // (internal/vm/internal/nativegen) reads of the package's private layout,
@@ -51,6 +55,8 @@ func NativeLayout() (offsets, sizes map[string]uintptr, consts map[string]uint64
 		reflect.TypeFor[generator](),
 		reflect.TypeFor[Realm](),
 		reflect.TypeFor[upvalue](),
+		reflect.TypeFor[regSwitchTable](),
+		reflect.TypeFor[bytecode.SwitchCase](),
 	} {
 		sizes[t.Name()] = t.Size()
 		depth := map[string]int{}
