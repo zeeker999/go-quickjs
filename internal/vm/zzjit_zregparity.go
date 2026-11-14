@@ -5,7 +5,6 @@ package vm
 import (
 	"cmp"
 	"fmt"
-	"math/bits"
 	"reflect"
 	"slices"
 	"strings"
@@ -100,6 +99,10 @@ type FeedbackParity struct {
 	// GoClosure, GoClose -- and FrameOpsLeft those of them with one that
 	// native code of a register frame leaves to an exit (jitRegFrameOps).
 	FrameOps, FrameOpsLeft int
+	// Paired counts the answers matched with register code of another
+	// shape that does the same work, by method and what the register code
+	// does instead; Matched counts them too.
+	Paired map[string]int
 	// Gaps counts the answers not matched, by method and why: the
 	// register form's feedback has no such method ("unanswered"), no
 	// register instruction is at the stack instruction's position ("no
@@ -128,7 +131,7 @@ func (p FeedbackParity) String() string {
 	for _, part := range []struct {
 		title string
 		m     map[string]int
-	}{{"gaps", p.Gaps}, {"decisions that differ", p.Decisions}} {
+	}{{"paired with register code of another shape", p.Paired}, {"gaps", p.Gaps}, {"decisions that differ", p.Decisions}} {
 		keys := slices.SortedFunc(func(yield func(string) bool) {
 			for k := range part.m {
 				if !yield(k) {
@@ -162,7 +165,7 @@ func CompareFeedback(stack, reg *Runtime) FeedbackParity {
 	ss, rs := jitParityLog.seen[stack], jitParityLog.seen[reg]
 	so, ro := jitParityLog.order[stack], jitParityLog.order[reg]
 	jitParityLog.Unlock()
-	res := FeedbackParity{Gaps: map[string]int{}, Decisions: map[string]int{}, Examples: map[string][]string{}, Compiled: [2]int{len(ss), len(rs)}}
+	res := FeedbackParity{Paired: map[string]int{}, Gaps: map[string]int{}, Decisions: map[string]int{}, Examples: map[string][]string{}, Compiled: [2]int{len(ss), len(rs)}}
 	note := func(m map[string]int, k, ex string) {
 		m[k]++
 		if len(res.Examples[k]) < 3 {
@@ -223,15 +226,24 @@ func CompareFeedback(stack, reg *Runtime) FeedbackParity {
 			name = "(anonymous)"
 		}
 		// The register program's instructions by the stack pc their
-		// register instruction's position is.
+		// register instruction's position is, and by that position: a
+		// register instruction's is the first stack instruction's of
+		// those of its source position (regcomp's finish), so that the
+		// instructions of one expression, an object literal's, all have
+		// the stack pc of its first.
 		byStack := map[int][]int{}
+		byPos := map[int32][]int{}
 		for j := range rp.Code {
 			rpc := int(rp.Origin[j])
 			if rpc < len(rcl.reg.src) {
 				s := int(rcl.reg.src[rpc])
 				byStack[s] = append(byStack[s], j)
+				if pos, ok := fn.PosAt(uint32(s)); ok {
+					byPos[pos] = append(byPos[pos], j)
+				}
 			}
 		}
+		ordinal := jitParityOrdinals(sp, rp)
 		sv, rv := reflect.ValueOf(sfb), reflect.ValueOf(rfb)
 		st := sv.Type()
 		stext := func(m reflect.Value, args []reflect.Value) (string, bool) { return jitParityCall(stack, m, args) }
@@ -244,17 +256,14 @@ func CompareFeedback(stack, reg *Runtime) FeedbackParity {
 				continue
 			}
 			rm := rv.MethodByName(meth.Name)
+			if meth.Name == "BigIntSole" {
+				// Compared by what the builds decide of it
+				// (jitParityDecisions): each form numbers its bindings its
+				// own way.
+				continue
+			}
 			if !pcArg {
 				call := func(text func(reflect.Value, []reflect.Value) (string, bool), v reflect.Value) (string, bool) {
-					if meth.Name == "BigIntSole" && v.IsValid() {
-						// The bindings that hold their values alone: how
-						// many, not which, each form numbering them its own
-						// way -- the stack form's locals, the register
-						// form's registers, which take its bindings in the
-						// order its backend meets them.
-						out := v.Call(nil)
-						return fmt.Sprint(bits.OnesCount64(out[0].Uint()), out[1].Bool()), true
-					}
 					return text(v, nil)
 				}
 				a, ok := call(stext, sv.Method(m))
@@ -293,8 +302,10 @@ func CompareFeedback(stack, reg *Runtime) FeedbackParity {
 				// same operation; a register instruction made of several
 				// stack ones -- a constant folded into its user, a method's
 				// read and its call -- has the position of one of them: the
-				// nearest of the same operation, a few instructions on; and
-				// failing those, those of the position, of other operations.
+				// nearest of the same operation, a few instructions on, those
+				// of the same source position, and the literal's of the same
+				// rank (jitParityOrdinals); failing those, those of the
+				// position, of other operations.
 				var js []int
 				for d := 0; d <= 8; d++ {
 					for _, q := range []int{s + d, s - d} {
@@ -308,10 +319,35 @@ func CompareFeedback(stack, reg *Runtime) FeedbackParity {
 						}
 					}
 				}
+				if pos, ok := fn.PosAt(uint32(s)); ok {
+					// Those of the same operation and source position.
+					for _, j := range byPos[pos] {
+						if rp.Code[j].Op == sp.Code[s].Op && !slices.Contains(js, j) {
+							js = append(js, j)
+						}
+					}
+				}
+				if j, ok := ordinal[s]; ok && !slices.Contains(js, j) {
+					js = append(js, j)
+				}
+				if sp.Code[s].Op == ir.FieldDefine {
+					// A field's definition, of its key: a nested literal's
+					// register code defines the inner literal's fields first.
+					for j := range rp.Code {
+						if rp.Code[j].Op == ir.FieldDefine && rp.Code[j].Key == sp.Code[s].Key && !slices.Contains(js, j) {
+							js = append(js, j)
+						}
+					}
+				}
 				if len(js) == 0 {
 					js = byStack[s]
 				}
 				if len(js) == 0 {
+					if why := jitParityPaired(fn, rcl.reg.rc, meth.Name, s); why != "" {
+						res.Matched++
+						note(res.Paired, meth.Name+": "+why, where)
+						continue
+					}
 					note(res.Gaps, meth.Name+": no instruction", fmt.Sprintf("%s: %s", where, a))
 					continue
 				}
@@ -340,9 +376,117 @@ func CompareFeedback(stack, reg *Runtime) FeedbackParity {
 				}
 			}
 		}
-		jitParityDecisions(&res, name, sp, sfb, rp, rfb, note)
+		jitParityDecisions(&res, name, fn, rcl.reg.src, sp, sfb, rp, rfb, note)
 	}
 	return res
+}
+
+// jitParityOrdinals pairs the object and array literals and the object
+// literals' fields' definitions of sp, a function's stack form's program,
+// with rp's, its register form's, the k-th of each operation with the
+// k-th, where each form has as many of it: both make the literals and
+// define their fields in about the source's order -- a nested literal's
+// register code first -- but register code places a literal's
+// instructions at the position of the statement it is in -- an object
+// literal returned, at the return -- or at none, where the stack form's
+// lie between those of the instructions around them.
+func jitParityOrdinals(sp, rp *ir.Program) map[int]int {
+	out := map[int]int{}
+	for _, op := range [...]ir.Op{ir.ObjectLiteral, ir.FieldDefine, ir.ArrayLiteral} {
+		var ss, rs []int
+		for i, in := range sp.Code {
+			if in.Op == op {
+				ss = append(ss, i)
+			}
+		}
+		for j, in := range rp.Code {
+			if in.Op == op {
+				rs = append(rs, j)
+			}
+		}
+		if len(ss) == len(rs) {
+			for k, i := range ss {
+				out[i] = rs[k]
+			}
+		}
+	}
+	return out
+}
+
+// jitParityPaired is why the answer of method at stack pc s of fn's code,
+// which no register instruction of rc, its register code, asks, is
+// answered by register code of another shape that does the same work, or
+// "": a RegExp literal that is a call's first argument, which the
+// register call makes in Go (RMarkLitArg), as the stack form's call of Go
+// is given the literal it made -- String.prototype's replace, split or
+// match, which Go searches with it.
+func jitParityPaired(fn *bytecode.Function, rc *bytecode.RegCode, method string, s int) string {
+	if method != "Literal" || s >= len(fn.Code) || fn.Code[s].Op != bytecode.OpNewRegExp || int(fn.Code[s].A) >= len(fn.Constants) {
+		return ""
+	}
+	lit := fn.Constants[fn.Code[s].A]
+	consts := regConsts(fn, rc)
+	for q, w := range rc.Code {
+		if q >= len(rc.Marks) || rc.Marks[q]&bytecode.RMarkLitArg == 0 || w.Op() != bytecode.RCallMW || q >= len(rc.Aux) || int(rc.Aux[q]) >= len(consts) {
+			continue
+		}
+		// The call of the literal's site: its first argument the same
+		// literal, and the call the stack form's next of it, a few
+		// instructions on.
+		k := consts[rc.Aux[q]]
+		if c := int(rc.SrcPC[q]); k.Kind == lit.Kind && k.Str == lit.Str && k.Flags == lit.Flags && c >= s-8 && c <= s+8 {
+			return "made by Go in the call it is the first argument of (RMarkLitArg)"
+		}
+	}
+	return ""
+}
+
+// jitParityBigIntSole compares BigIntSole's answers -- the bindings that
+// hold their values alone, the stack form's locals, the register form's
+// registers, each numbered its own way -- by what the builds made of them:
+// the source positions of the operators that give back the old value of
+// the binding they store to, stack and reg, the instructions of sp and rp
+// that do. It is an answer of the stack form's only where its build asks
+// it: where an operator of its program met BigInts (ssa's bigRelease).
+func jitParityBigIntSole(res *FeedbackParity, name string, fn *bytecode.Function, src []uint32, sp *ir.Program, sfb ssa.Feedback, rp *ir.Program, stack, reg []int, note func(map[string]int, string, string)) {
+	bf, ok := sfb.(ssa.BigIntFeedback)
+	if !ok {
+		return
+	}
+	asked := false
+	for pc := range sp.Code {
+		if bf.BigInt(pc) {
+			asked = true
+			break
+		}
+	}
+	if !asked {
+		return
+	}
+	positions := func(sites []int, stackPC func(int) int) string {
+		var pos []int32
+		for _, site := range sites {
+			if pc := stackPC(site); pc >= 0 {
+				p, _ := fn.PosAt(uint32(pc))
+				pos = append(pos, p)
+			}
+		}
+		slices.Sort(pos)
+		return fmt.Sprint(pos)
+	}
+	a := positions(stack, func(site int) int { return site })
+	b := positions(reg, func(site int) int {
+		if site < 0 || site >= len(rp.Origin) || int(rp.Origin[site]) >= len(src) {
+			return -1
+		}
+		return int(src[rp.Origin[site]])
+	})
+	res.Answers++
+	if a == b {
+		res.Matched++
+		return
+	}
+	note(res.Gaps, "BigIntSole: differs", fmt.Sprintf("%s: old values given back at positions: stack %s, register %s", name, a, b))
 }
 
 // jitParityStackOp is the stack instruction at pc of fn's code.
@@ -493,13 +637,19 @@ func jitParityText(r *Runtime, v reflect.Value, depth int) string {
 }
 
 // jitParityDecisions builds both forms' programs with their feedback and
-// notes where what the builds decided differs.
-func jitParityDecisions(res *FeedbackParity, name string, sp *ir.Program, sfb ssa.Feedback, rp *ir.Program, rfb ssa.Feedback, note func(map[string]int, string, string)) {
+// notes where what the builds decided differs; and compares BigIntSole's
+// answers by what the builds made of them, src being the stack pc of each
+// register instruction of fn's register code.
+func jitParityDecisions(res *FeedbackParity, name string, fn *bytecode.Function, src []uint32, sp *ir.Program, sfb ssa.Feedback, rp *ir.Program, rfb ssa.Feedback, note func(map[string]int, string, string)) {
 	type built struct {
 		refused                   bool
 		why                       string
 		inlined, hosts, unentered int
 		frameOps, frameLeft       bool
+		// releasedOld are the program's instructions whose BigInt operator
+		// gives back the old value of the binding it stores to, which holds
+		// its values alone (ssa.ReleaseOld, of BigIntSole).
+		releasedOld []int
 	}
 	build := func(p *ir.Program, fb ssa.Feedback) (b built) {
 		defer func() {
@@ -518,6 +668,9 @@ func jitParityDecisions(res *FeedbackParity, name string, sp *ir.Program, sfb ss
 			for _, v := range blk.Values {
 				if v.Op != ssa.OpCall || len(v.Calls()) == 0 {
 					continue
+				}
+				if v.Calls()[0].Release&ssa.ReleaseOld != 0 && v.State != nil {
+					b.releasedOld = append(b.releasedOld, v.State.Site)
 				}
 				switch op := v.Calls()[0].Go; op {
 				case ssa.GoHost, ssa.GoArgument, ssa.GoCells, ssa.GoClosure, ssa.GoClose:
@@ -549,6 +702,7 @@ func jitParityDecisions(res *FeedbackParity, name string, sp *ir.Program, sfb ss
 	case s.refused:
 		return
 	}
+	jitParityBigIntSole(res, name, fn, src, sp, sfb, rp, s.releasedOld, r.releasedOld, note)
 	pair("inlined", s.inlined, r.inlined)
 	pair("host operations left to Go", s.hosts, r.hosts)
 	pair("loops' entries dropped", s.unentered, r.unentered)

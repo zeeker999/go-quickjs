@@ -364,6 +364,21 @@ instruction of the same source position -- only where the builder asks the
 method (`jitSnapOps`), keys by their names -- and what each form's build
 decides (`vm.CompareFeedback`). If register code's feedback answers what the
 stack form's does, the code is the same: it is the gate for the switch-over.
+A register instruction's position is the first stack instruction's of its
+source position, so an answer is looked for at the register instructions of
+the same operation a few instructions on, then at those of the same
+position, then -- object literals and their fields' definitions, which
+register code places at the statement's position -- the k-th of the
+operation with the k-th, where both forms have as many, and a field's
+definition among those of its key, a nested literal's register code making
+the inner literal first. Two shapes of the
+same work are paired and listed apart: a RegExp literal that is a call's
+first argument, which the register call makes in Go (`RMarkLitArg`) where
+the stack form's call of Go is given the literal it made. `BigIntSole`, the
+bindings that hold their values alone, each form numbering its bindings its
+own way, is compared by what the builds make of it -- the source positions
+of the operators that give back their binding's old value -- and only where
+the build asks it, where an operator met BigInts.
 
 ## Tier-up and on-stack replacement
 
