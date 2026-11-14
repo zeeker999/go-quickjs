@@ -663,7 +663,14 @@ made) and go on in that code, kept beside the function's (`osr`, `osrOf`)
 for the frames that wait there next and let go of with it
 (`jitRegLoopCode`), as the stack form's `jitLearnLoopEntry` has it. A run
 in it stays in it at its exits while the function's code is the one it
-was compiled beside.
+was compiled beside. `FrameAt` is a header's register pc, the unit escape
+analysis compares with its headers' PCs. Any compile a frame waits at a
+loop for -- the check that spends the budget (`jitRegLoop`), a compile
+for what the code learned made in a run of a function hardly called yet,
+at the loop around where the frame goes on (`regLoopAround`) -- keeps
+that loop's entry the same way (`jitRegFrameAt`, the stack form's
+`jitFrameAt`), unless native callers call the function's code (its
+link's `refs`).
 
 **Profit.** Each native stretch -- an entry, the code entered again after
 an exit or a poll, a call of Go -- costs what an exit and an entry would
