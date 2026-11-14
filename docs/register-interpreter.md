@@ -1136,9 +1136,11 @@ backlog.
 1. **The JIT on register code (Stage 3).** The remaining feedback-parity
    gaps (RegExp literals, call frequencies, inlined callees' feedback);
    inlining register callees; top-level code, generators and async
-   functions; the feedback snapshot for background compiles. Then the
-   switch-over: JIT runtimes run the register tier, and the JIT's
-   stack-form path is removed.
+   functions; the feedback snapshot for background compiles. Then a
+   profiling and optimization round of the register JIT against the
+   stack-form JIT in the same build, as the interpreter's rounds were.
+   Then the switch-over: JIT runtimes run the register tier, and the
+   JIT's stack-form path is removed.
 2. **The arm64 native port** (done, but its timing). An arm64 emitter
    in nativegen, the same handlers and tables as amd64's, and `regArch`
    on for arm64; checked under qemu and on CI's Linux and macOS arm64
