@@ -544,7 +544,6 @@ func TestJITArrayWriteCoercionRelease(t *testing.T) {
 }
 
 func TestJITArrayGrowthLimits(t *testing.T) {
-	t.Parallel()
 	for _, memory := range []bool{false, true} {
 		cfg := Config{JIT: true}
 		if memory {
@@ -1469,7 +1468,6 @@ func TestJITReferenceCallbackRelease(t *testing.T) {
 }
 
 func TestJITReferenceCancellation(t *testing.T) {
-	t.Parallel()
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	p := compileForTest(t, `function forever(o){let s=0;for(;;)s+=o.array[0]}forever({array:[1]})`)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
@@ -2243,7 +2241,6 @@ func TestJITRuntimeGuardReentry(t *testing.T) {
 }
 
 func TestJITRuntimeCancellation(t *testing.T) {
-	t.Parallel()
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	p := compileForTest(t, `function forever() { let i=0; for(;;) i++ } forever()`)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
@@ -2259,7 +2256,6 @@ func TestJITRuntimeCancellation(t *testing.T) {
 }
 
 func TestJITPropertyLoopCancellation(t *testing.T) {
-	t.Parallel()
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	p := compileForTest(t, `function forever(o){for(;;){o.x=(o.x+1)|0}}forever({x:0})`)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
@@ -3621,7 +3617,6 @@ func TestJITLoopGuardSuppressesReentry(t *testing.T) {
 }
 
 func TestJITLoopPromotionCancellation(t *testing.T) {
-	t.Parallel()
 	for _, keyword := range []string{"var", "let"} {
 		t.Run(keyword, func(t *testing.T) {
 			r := New(Config{JIT: true})
