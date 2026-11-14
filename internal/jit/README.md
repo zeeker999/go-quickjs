@@ -1934,7 +1934,9 @@ register pc.
 live at its register pc, in the window, natively as the code leaves (or Go,
 from its description, for an `ExitTable`); then Go makes the objects escape
 analysis left unmade into the registers that name them
-(`jitRegMaterialize`), and goes on by the exit's kind. A frame native code
+(`jitRegMaterialize`) -- at every kind of exit, a loop's poll's included,
+whose loop carrying them has no entry at its header to go on at -- and goes
+on by the exit's kind. A frame native code
 called natively that Go finishes, or one where Go goes on at a register pc
 with no entry, runs in the interpreter to its next back edge, where native
 code goes on at the loop's header (`jitRegLeaveTo`); a frame whose code was

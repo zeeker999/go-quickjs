@@ -183,3 +183,62 @@ func TestJITRegCallFrames(t *testing.T) {
 		})
 	}
 }
+
+// regCarriedSrc's loops carry an object escape analysis keeps unmade, d,
+// which an exit inside them -- o a number at one turn -- and the polls at
+// their headers must make before the interpreter reads the frame: a
+// rotated for loop and a do-while.
+const regCarriedSrc = `
+function Vec(x, y) { this.x = x; this.y = y }
+Vec.prototype.add = function (o) { return new Vec(this.x + o.x, this.y + o.y) };
+var plain = { a: 1 };
+function forLoop(n, k) {
+	let s = new Vec(0, 0);
+	const d = new Vec(1, 2);
+	for (let i = 0; i < n; i++) { const o = i === k ? 1 : plain; o.a = 1; s = s.add(d) }
+	return s.x + s.y;
+}
+function doLoop(n, k) {
+	let s = new Vec(0, 0), i = 0;
+	const d = new Vec(1, 2);
+	do { const o = i === k ? 1 : plain; o.a = 1; s = s.add(d) } while (++i < n);
+	return s.x + s.y;
+}
+function driveFor(n, m) { var t = 0; for (var j = 0; j < n; j++) t += forLoop(m, 5); return t }
+function driveDo(n, m) { var t = 0; for (var j = 0; j < n; j++) t += doLoop(m, 5); return t }
+`
+
+// The objects native code did not make are made at a poll's exit too, as
+// at every other (jitRegLeft): a loop carrying one has no entry at its
+// header, so the frame goes on in the interpreter, or in code compiled for
+// it, which read the home's word left in the register as the object -- a
+// null, and s.add(d) threw. Exact answers, idle and marking.
+func TestJITRegPollMakesObjects(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regCarriedSrc)
+			for k, r := range rts {
+				for _, name := range []string{"driveFor", "driveDo"} {
+					fn, _ := r.GetProp(Obj(r.Global()), r.Intern(name))
+					for i := range 30 {
+						m := float64(20)
+						if i >= 20 {
+							m = []float64{500, 3}[i%2]
+						}
+						v, err := r.Call(fn, Undefined, []Value{Float(100), Float(m)})
+						want := fmt.Sprint(100 * 3 * m)
+						if got := regNativeShow(r, v, err); got != want {
+							t.Fatalf("runtime %d, %s call %d (%v turns): %s, want %s", k, name, i, m, got, want)
+						}
+					}
+				}
+			}
+		})
+	}
+}

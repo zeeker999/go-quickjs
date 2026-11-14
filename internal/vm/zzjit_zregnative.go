@@ -1025,6 +1025,14 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 		if err := r.checkInterruptPoll(); err != nil {
 			return 0, 0, Undefined, false, err, false
 		}
+		// The objects the code did not make, which the frame names by
+		// their homes: made before anything else reads the frame -- the
+		// interpreter, where the code has no entry at the header, escape
+		// analysis having dropped it for them (ssa.Func's Unentered), or
+		// code compiled for a frame waiting there -- as at any other
+		// exit. Left unmade, the interpreter read a home's word as the
+		// object, a null.
+		r.jitRegMaterialize(f, e, wb)
 		if r.jitStressDeopt(s) {
 			return 0, exitPC, Undefined, false, nil, false
 		}
