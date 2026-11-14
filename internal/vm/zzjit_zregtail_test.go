@@ -222,3 +222,52 @@ func TestJITRegClassConstructions(t *testing.T) {
 		})
 	}
 }
+
+// regInlineExitSrc's callees throw on a path seldom taken, as AWFY's
+// Towers' pushDisk does: inlined all the same, the throw an exit of the
+// inlined frame (jitRegFeedback's InlineExit), which leaves it to Go once
+// taken.
+const regInlineExitSrc = `
+function check(d) { if (d < 0) throw new RangeError("bad " + d); return d * 2 }
+function guard(o) { if (o === null) throw o; return o.v + 1 }
+function towers(n) {
+	var s = 0, o = { v: 3 }, m = "";
+	for (var i = 0; i < n; i++) {
+		try { s += check(i % 1000 == 999 ? -i : i) + guard(o) } catch (e) { m = e.message }
+	}
+	return s + m;
+}
+`
+
+// TestJITRegInlineExits runs regInlineExitSrc's towers natively and in a
+// runtime with no JIT and compares them: its callees are inlined, their
+// throws taken now and then.
+func TestJITRegInlineExits(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regInlineExitSrc)
+			r := rts[0]
+			r.SetJITWarmUp(1, 1)
+			for range 6 {
+				var got [2]string
+				for i, r := range rts {
+					fn, _ := r.GetProp(Obj(r.Global()), r.Intern("towers"))
+					v, err := r.Call(fn, Undefined, []Value{Float(5000)})
+					got[i] = regNativeShow(r, v, err)
+				}
+				if got[0] != got[1] {
+					t.Fatalf("towers: with the JIT %q, without %q", got[0], got[1])
+				}
+			}
+			if st := r.JITStats(); st.Inlined == 0 {
+				t.Errorf("no callee inlined: %+v", st)
+			}
+		})
+	}
+}

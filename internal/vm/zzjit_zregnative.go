@@ -231,6 +231,12 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, callee bool) *jitRegEnt
 	looped := jitRegShape(f, p)
 	ssa.Optimize(f)
 	mc, err := mir.CompileWith(&w.MIR, f, jitEncoding, mir.Settings())
+	if errors.Is(err, mir.ErrKeeps) {
+		// More keep cells live at once than the context has, which the
+		// build could not know: built again with no more than that, the
+		// calls past them left to Go, as the stack form's code is.
+		rf, f, looped, mc, err = r.jitRegBuild(w, cl, p, abi.MaxKeeps)
+	}
 	if err != nil {
 		e.refusal = fmt.Sprintf("%v: %v", jitRefused, err)
 		return e

@@ -9,6 +9,8 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
+	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
@@ -778,4 +780,51 @@ func (r *Runtime) jitRegFinishLevel(f *frame, l *jitRegLevel, c *abi.Context) (V
 		v, err = r.runReg(f, l.c, pc)
 	}
 	return v, err
+}
+
+// InlineExit is ssa.InlineExitFeedback's: of an inlined callee's
+// feedback, whether native code may leave the inlined frame at the
+// program's instruction pc, as the stack form's (jitInlineExit): a throw,
+// which leaves its frame anyway, and the call, or the construction, whose
+// result it throws -- throw new Error(...) -- as seldom run as the throw,
+// as V8's code inlines a function whose cold paths call the runtime to
+// throw. One taken after all counts toward the call's inlining's exits
+// (jitInlineLeft), which stop it, the callee then called natively; a
+// callee with such a path had been called natively, never inlined.
+func (f *jitRegFeedback) InlineExit(pc int) bool {
+	w, _, ok := f.at(pc)
+	if !ok || f.fb.root == nil {
+		return false
+	}
+	switch w.Op() {
+	case bytecode.RThrow:
+		return true
+	case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW:
+		next := int(f.p.Origin[pc]) + 1
+		return next < len(f.rc.Code) && f.rc.Code[next].Op() == bytecode.RThrow && f.rc.Code[next].A() == w.B()
+	}
+	return false
+}
+
+// KeepLimit is ssa.KeepFeedback's: the build's keep cells' limit, 0 for
+// the default (ssa.VirtualKeeps), as the stack form's: abi.MaxKeeps for a
+// build again of code whose keep cells live at once were more than the
+// context has (mir.ErrKeeps, jitRegBuild).
+func (f *jitRegFeedback) KeepLimit() int { return f.fb.keepLimit }
+
+// jitRegBuild builds cl's register code lowered to p, from its feedback
+// asked now, with its keep cells limited to keepLimit (KeepLimit), into
+// w's workspaces: its feedback, its SSA, its loops' headers and the
+// backend's code, or why it refused.
+func (r *Runtime) jitRegBuild(w *jit.Workspace, cl *closure, p *ir.Program, keepLimit int) (*jitRegFeedback, *ssa.Func, map[uint32]bool, *mir.Code, error) {
+	rf := r.jitRegFeedbackFor(cl, p)
+	rf.fb.keepLimit = keepLimit
+	f, err := ssa.BuildIn(&w.SSA, p, rf)
+	if err != nil {
+		return rf, nil, nil, nil, err
+	}
+	looped := jitRegShape(f, p)
+	ssa.Optimize(f)
+	mc, err := mir.CompileWith(&w.MIR, f, jitEncoding, mir.Settings())
+	return rf, f, looped, mc, err
 }
