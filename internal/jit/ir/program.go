@@ -445,7 +445,9 @@ type Instruction struct {
 	// result's register at Dest, which the new pipeline makes as the stack
 	// form's call (ssa's CallSite), its operands read from the registers;
 	// or a typeof, its operand at Left and no Extra; or an instanceof, its
-	// object at Left, its constructor at Right and Extra 1.
+	// object at Left, its constructor at Right and Extra 1; or a derived
+	// constructor's super(...), its Extra arguments from Left, the this it
+	// binds to Dest (and register 1 and the this slot, ssa's superCall).
 	Window bool
 	// Whole marks a Host of register code that Go runs whole on the
 	// register frame, called from native code (ssa's GoCall, Whole), which

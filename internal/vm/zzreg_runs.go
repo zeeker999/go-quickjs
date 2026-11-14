@@ -320,8 +320,16 @@ func (r *Runtime) regBackEdge(st *regState, pc, target int) int {
 	st.kept.pc = pc + 1
 	r.backEdges = backEdgeCheckInterval
 	f.pc = c.src[pc] + 1
+	calls := r.interruptCounter
 	if err := r.checkInterruptNow(); err != nil {
 		return st.fail(err)
+	}
+	if calls > 0 {
+		// The calls' budget goes on as it was, which samples the calls
+		// (rhCallW, regEnterW): reset at each back edge's check, it had
+		// never run out in a frame of a loop of calls, nor were its calls
+		// sampled.
+		r.interruptCounter = calls
 	}
 	// The temporaries past what the loop's head has live are stale: a
 	// value a call's window was given stays there until the window is

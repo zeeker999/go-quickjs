@@ -437,11 +437,20 @@ spend:
 
 - a call that spends the interrupt budget -- `rhCallW`'s and `regEnterW`'s
   check, which the native call handler leaves to `rhCallW` -- credits its
-  callee (`jitRegCallSample`, `jitRegSample`);
+  callee (`jitRegCallSample`, `jitRegSample`), and a call site of the
+  interpreter's whose callee has code is sent to `regEnterW`, which enters
+  it (`regCallJIT`) -- its only way there: a site whose cache was filled
+  before its callee had code enters it in the interpreter until sampled.
+  A sample of a callee that had code already takes the next sooner
+  (`jitRegResample`, 64 calls), so that such sites are, which calls of
+  compiled code had starved -- AWFY's Json's parse had run in the
+  interpreter, read by read through `regEnterW`;
 - a back edge that spends the back-edge budget -- `regBackEdge`, which every
   dispatcher's jump leaves to its Go slow function -- credits its frame's
   function (`jitRegLoop`), the budget varied from one expiry to the next
-  (`backEdgeBudget`).
+  (`backEdgeBudget`); its interrupt check leaves the calls' budget as it
+  was, which it had reset, so that a frame of a loop of calls had none of
+  them sampled.
 
 **Compiling.** A function is compiled (`jitRegFor`) at its
 `jitRegSamples`-th sample (2), or at its first where the runtime compiles at
@@ -1446,6 +1455,44 @@ callee native callers call that has no code is compiled at their first call
 of it through Go (`jitRegNativeCallee`): a function of host operations alone
 is lowered for them (`LowerRegInline`).
 
+**Derived constructions.** As the stack form's (`jitConstructsDerived`,
+`jitDerivedBase`, `jitSuperTarget`), a derived class's own constructor is
+constructed natively too, its instance from the class's pool, in the
+callee's register 1 as the interpreter has it, and in its context's
+`Instance`, its `This` the uninitialized value, its `Function` the class
+(`ssa.CallSite`'s `Derived`); a class without a constructor of its own --
+`constructor(...args) { super(...args) }`, register code that starts with
+`super_forward` (`jitRegForwardsSuper`) -- with the code of the class it
+extends, its prototype checked to be still that class (`Parent`), as V8
+skips a default derived constructor. A class's constructor of either kind
+that reads `new.target` is constructed so as well: only ever constructed,
+its new.target is its context's, which the frames Go makes of its level
+and the stand-in of them read (`jitRegReadsNewTarget`). A derived
+constructor's register code has a this slot past its captured bindings
+(`ir.Program`'s `This`, the context's `This`), the binding: `this_bound`,
+`check_this_init` and a `derived_ret` of `undefined` -- what `ret_undef`
+makes it, `load_undef` moved to its register, which the lowering finds
+(`undefinedAt`) -- read it checked, and leave to Go, which throws the
+`ReferenceError`, where it is unbound; `derived_ret` of anything else is
+Go's. Its `super_call` (`ssa.CallSite`'s `Super`, the builder's
+`superCall`) is a window call of the parent the code learned it constructs
+with at its calls of Go and its exits (`jitRegSuperSeen`), checked to be
+the running function's prototype (`mir`'s `superGuards`, of the context's
+`Function`, as the stack form's): the parent's window made with the function
+whose code runs in register 0 and the instance in 1, its context given the
+instance -- a derived parent's to bind, its this unbound -- new.target and
+that function (`mir`'s `windowSuper`), on both backends. The this it binds
+-- the result, or the instance where the parent returns no object -- is
+`super_call`'s register's, register 1's and the this slot's, stored in the
+context's `This` with the barrier while the collector marks. Any other
+super() is a call of Go on the frame (`jitRegSuperMade`), which binds the
+frame's this and the context's: one of a class that may make an arrow before
+a super() (`jitRegArrowBeforeSuper`), whose binding the arrow shares, one of
+a parent of fields or that reads nothing native callers construct. Go gives
+a derived frame it enters the code with that context at each entry
+(`jitRegDerivedContext`), and binds the frame's this from it after
+(`jitBindThis`).
+
 **Polls.** A native call is no interpreter's, which spends the interrupt
 budget: the callee's code spends the back-edge budget at its start
 instead (`ssa.OpPoll`, see [Polls](#polls)), and calls Go when it runs
@@ -1459,7 +1506,13 @@ the cache by the function's key, kept by its template (`jitRegKeyOf`):
 
 - a call of Go a native callee makes (`jitRegGoCallNested`) is made on its
   level's frame, each level below it given its own for the call, as the
-  interpreter's frames are during a call;
+  interpreter's frames are during a call -- the levels and the frames on
+  stacks of the state's (`regNestLevels`), allocated by none; a derived
+  construction's level, and a super()'s parent's, as `runFD` makes a
+  construction's: its new.target, and for a derived constructor its
+  function, instance and this binding from its context (`jitDerivedFrame`);
+  a write a call of Go makes with no frame (`jitGoCallPlain`) by the
+  register instruction at the register pc (`jitRegPlainAt`);
 - a callee that leaves native code -- an exit, a call of Go that threw or
   found its code invalid -- has every native level finished by Go
   (`jitRegUnwind`): the innermost from where it left, as a run of a frame's
@@ -1472,7 +1525,16 @@ the cache by the function's key, kept by its template (`jitRegKeyOf`):
   run's own code goes on after the call the same way (`jitRegStretch`). A
   frame given to a callee by a call in tail position (`errRegRestart`,
   `errTailCall`) is finished as `regEnterW` finishes one, in the callee's
-  native code where it has some (`regRestartRun`).
+  native code where it has some (`regRestartRun`). A derived
+  construction's result is an object, or what it throws (`jitDerivedResult`);
+  a super() whose parent Go finished binds the frame's this to it, or to the
+  instance (`jitSuperBound`);
+- a closure a native callee makes is made on a stand-in of its level --
+  closure, function object, its receiver, or, in a derived constructor, the
+  binding its context holds, an arrow made before it is bound left to the
+  exit -- its captures by value read from the level's cells
+  (`jitRegLevelByValue`); one that reads what its maker's frame has of its
+  own, new.target or the arguments (`ReadsMaker`), is left to the exit.
 
 A call of Go from the last context, and an unwinding from it, add contexts
 (`jitGrowContexts`), as the stack form's do: a recursion of native calls is

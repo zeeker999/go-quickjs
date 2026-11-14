@@ -4020,6 +4020,12 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 			// As amd64's: f and its receiver; the arguments the frame's.
 			c.directOperand(v, v.Args[0], a64D, 0)
 			c.directOperand(v, v.Args[2], a64D, vs)
+		case site.Super:
+			// As amd64's: the arguments, past the this slot; the function
+			// and the instance, in setup (windowSuper).
+			for i := range site.Argc {
+				c.directOperand(v, v.Args[1+i], a64D, int32(2+i)*vs)
+			}
 		default:
 			if site.Method {
 				m = 1
@@ -4120,13 +4126,34 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 				c.a.Op(arm64.Add, top, top, tmp, true)
 				c.a.Load(high2, top, abi.OffPoolObjects)
 				c.a.Store(top, abi.OffPoolObjects, arm64.ZR)
-				c.a.Store(calleeCtx, abi.OffThis+c.enc.RefOffset, high2)
+				if t.Derived {
+					// As amd64's: a derived constructor's instance, its
+					// this unbound, the function whose code it is.
+					c.a.Store(calleeCtx, abi.OffInstance+c.enc.RefOffset, high2)
+					c.movImm(tmp, c.enc.Object)
+					c.a.Store(calleeCtx, abi.OffInstance+c.enc.NumOffset, tmp)
+					c.a.Store(calleeCtx, abi.OffThis+c.enc.RefOffset, arm64.ZR)
+					c.movImm(tmp, c.enc.Uninitialized)
+					c.a.Store(calleeCtx, abi.OffThis+c.enc.NumOffset, tmp)
+					c.movImm(tmp, uint64(derivedFunction(t)))
+					c.a.Store(calleeCtx, abi.OffFunction, tmp)
+				} else {
+					c.a.Store(calleeCtx, abi.OffThis+c.enc.RefOffset, high2)
+					c.movImm(tmp, c.enc.Object)
+					c.a.Store(calleeCtx, abi.OffThis+c.enc.NumOffset, tmp)
+				}
 				c.movImm(tmp, c.enc.Object)
-				c.a.Store(calleeCtx, abi.OffThis+c.enc.NumOffset, tmp)
 				c.a.Store(locals, vs+c.enc.RefOffset, high2)
 				c.a.Store(locals, vs+c.enc.NumOffset, tmp)
 				c.movImm(top, uint64(t.Callee))
 				c.a.Store(calleeCtx, abi.OffNewTarget, top)
+				if t.Parent != 0 {
+					c.movImm(tmp, uint64(t.Parent))
+					c.a.Store(locals, c.enc.RefOffset, tmp)
+				}
+			}
+			if t.Super {
+				c.windowSuper(t, locals, calleeCtx, top, tmp)
 			}
 			if t.ByCode != 0 {
 				c.a.Load(a64CallClosure, a64Ctx, abi.OffCallClosure)
@@ -4900,6 +4927,38 @@ func (c *a64Compiler) directOperand(v, x *ssa.Value, base arm64.Reg, disp int32)
 	}
 	c.pointerWord(x, w)
 	c.a.Store(base, disp+c.enc.RefOffset, a64B)
+}
+
+// windowSuper is amd64's: register code's super(...), its callee's window
+// at locals given the function whose code runs and the instance, its
+// context, ctx, what a super()'s has. It uses a and b.
+func (c *a64Compiler) windowSuper(t *ssa.CallSite, locals, ctx, a, b arm64.Reg) {
+	vs := int32(c.enc.ValueSize)
+	fn := derivedFunction(t)
+	c.a.Load(ctx, a64Ctx, abi.OffNext)
+	c.movImm(b, c.enc.Object)
+	c.a.Store(locals, c.enc.NumOffset, b)
+	c.a.Store(locals, vs+c.enc.NumOffset, b)
+	c.movImm(b, uint64(fn))
+	c.a.Store(locals, c.enc.RefOffset, b)
+	c.a.Load(a, a64Ctx, abi.OffInstance+c.enc.RefOffset)
+	c.a.Store(locals, vs+c.enc.RefOffset, a)
+	if t.Derived {
+		c.a.Store(ctx, abi.OffInstance+c.enc.RefOffset, a)
+		c.movImm(b, c.enc.Object)
+		c.a.Store(ctx, abi.OffInstance+c.enc.NumOffset, b)
+		c.a.Store(ctx, abi.OffThis+c.enc.RefOffset, arm64.ZR)
+		c.movImm(b, c.enc.Uninitialized)
+		c.a.Store(ctx, abi.OffThis+c.enc.NumOffset, b)
+	} else {
+		c.a.Store(ctx, abi.OffThis+c.enc.RefOffset, a)
+		c.movImm(b, c.enc.Object)
+		c.a.Store(ctx, abi.OffThis+c.enc.NumOffset, b)
+	}
+	c.a.Load(a, a64Ctx, abi.OffNewTarget)
+	c.a.Store(ctx, abi.OffNewTarget, a)
+	c.movImm(a, uint64(fn))
+	c.a.Store(ctx, abi.OffFunction, a)
 }
 
 // windowForward is amd64's: register code's f.apply(x, arguments), its

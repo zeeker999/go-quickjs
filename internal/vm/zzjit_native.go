@@ -1304,6 +1304,13 @@ type jitState struct {
 	// that its exit finishes, as goPending is the stack form's.
 	regRuns    []jitRegRun
 	regPending jitGoPending
+	// regNestLevels and regNestFrames hold, as a stack, the levels a call
+	// of Go from a native callee's code under way runs past and the frames
+	// Go made of them (jitRegGoCallNested): such calls nest, script they
+	// run making native calls that call Go, each taking its stretch past
+	// the one it runs in.
+	regNestLevels []jitRegLevel
+	regNestFrames []*frame
 	// regJobs are the register compiles in the background, in the order
 	// they were handed over, and regPendingJobs each by its function's
 	// key (zzjit_zregbg.go).

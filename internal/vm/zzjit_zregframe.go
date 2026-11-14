@@ -3,6 +3,7 @@
 package vm
 
 import (
+	"slices"
 	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -38,6 +39,10 @@ func (r *Runtime) jitRegFrameRun(ctx *abi.Context) (run jitRegRun, level bool, o
 	switch ctx.Live {
 	case 0:
 		if idx < len(s.regRuns) && s.regRuns[idx].f != nil {
+			// A derived constructor's frame's binding, which a super()
+			// native code made bound in the context alone, as a closure
+			// made on it shares it (jitBindThis).
+			jitBindThis(s.regRuns[idx].f, ctx)
 			return s.regRuns[idx], false, true
 		}
 	case abi.LiveCall:
@@ -56,6 +61,11 @@ func (r *Runtime) jitRegFrameRun(ctx *abi.Context) (run jitRegRun, level bool, o
 		f.cl, f.base, f.this, f.newTarget = l.cl, l.wb+int(l.c.locals), r.stack[l.wb+1], Undefined
 		if v := r.stack[l.wb]; v.IsObject() {
 			f.callee = v.Object()
+		}
+		if isClassConstructorKind(l.cl.fn.Kind) && ctx.NewTarget != 0 {
+			// A class's constructor's, only ever constructed: its
+			// new.target, which its construction or super() wrote.
+			f.newTarget = Obj(*(**Object)(unsafe.Pointer(&ctx.NewTarget)))
 		}
 		return jitRegRun{f: f, c: l.c, e: l.e, wb: l.wb}, true, true
 	}
@@ -296,14 +306,29 @@ func (r *Runtime) jitRegCellsClosure(ctx *abi.Context, f *frame, c *regCode, e *
 		return false
 	}
 	// What an arrow captures of this is the window's register 1, as
-	// regClosure has it.
+	// regClosure has it -- but on a native callee's level of a derived
+	// constructor, whose stand-in frame has no binding to share, its
+	// context's This, which a super() bound, an arrow made before one, or
+	// one that reads what its maker's frame has of its own (new.target,
+	// super), left to the frame Go makes of the level at the exit, as the
+	// stack form's (jitCalleeMakes).
 	f.this = r.stack[wb+1]
+	if level && f.cl.fn.Kind == bytecode.KindDerivedConstructor && t.fn.Kind == bytecode.KindArrow {
+		this := *(*Value)(unsafe.Pointer(&ctx.This))
+		if this.IsUninitialized() || jitNeedsMaker(tmpl) {
+			return false
+		}
+		f.this = this
+	}
 	caps := c.rc.Caps[i]
+	if level && jitNeedsMaker(tmpl) {
+		// What it reads of its maker's frame -- new.target, the arguments
+		// -- the stand-in has not: left to the frame Go makes at the exit.
+		return false
+	}
 	if t.fn.CapturesByValue {
 		if level {
-			// Its by-value captures read the window's registers, which a
-			// native callee's cells hold: left to the exit.
-			return false
+			return r.jitRegLevelByValue(ctx, f, t, caps, regs, cells, wb)
 		}
 		keepClosure(ctx, Obj(regMadeClosure(newClosureByValue[struct{}](r, f, t, caps, wb))))
 		return true
@@ -330,6 +355,55 @@ func (r *Runtime) jitRegCellsClosure(ctx *abi.Context, f *frame, c *regCode, e *
 	if !level {
 		ctx.Open = uint64(len(f.openUpvalues))
 	}
+	return true
+}
+
+// jitRegLevelByValue makes, for a native callee's code in context ctx, on
+// its level's stand-in f, a closure of template t that captures by value
+// what it takes of the window's registers caps names -- each held, for a
+// native callee, in its cell of cells, a closed one of those of regs, the
+// captured registers, not in its window, which native code does not keep
+// its values in -- as newClosureByValue makes it on a frame of the VM's:
+// the values put in the window for it to read, and the window put back.
+// One that also captures a register's binding, which a native callee has
+// no frame of the VM's to keep open, is left to the exit, Go making it on
+// the frame it makes of the level. A native callee's closures that capture
+// by value had all left: AWFY's Havlak's IdentitySet.contains, an arrow of
+// its parameter, at each call once its callers were native.
+func (r *Runtime) jitRegLevelByValue(ctx *abi.Context, f *frame, t *closure, caps []uint16, regs []int, cells []*upvalue, wb int) bool {
+	var at [8]int
+	var saved [8]Value
+	n := 0
+	for k, u := range t.fn.Upvalues {
+		if !u.FromParent {
+			continue
+		}
+		if !u.ByValue || k >= len(caps) || n == len(at) {
+			return false
+		}
+		j := slices.Index(regs, int(caps[k]))
+		if j < 0 {
+			return false
+		}
+		at[n], n = j, n+1
+	}
+	n = 0
+	for k, u := range t.fn.Upvalues {
+		if u.FromParent {
+			slot := &r.stack[wb+int(caps[k])]
+			saved[n], *slot = *slot, *cells[at[n]].slot
+			n++
+		}
+	}
+	o := newClosureByValue[struct{}](r, f, t, caps, wb)
+	n = 0
+	for k, u := range t.fn.Upvalues {
+		if u.FromParent {
+			r.stack[wb+int(caps[k])] = saved[n]
+			n++
+		}
+	}
+	keepClosure(ctx, Obj(regMadeClosure(o)))
 	return true
 }
 

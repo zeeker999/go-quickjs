@@ -633,6 +633,10 @@ func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
 		return []ssa.CallSite{{Go: ssa.GoCall, InstanceOf: true, Argc: 1, ThisSlot: -1}}
 	}
 	rpc := int(f.p.Origin[pc])
+	if w.Op() == bytecode.RSuperCall {
+		// A derived constructor's super(...) (regSuperSites).
+		return f.regSuperSites(pc, w)
+	}
 	if w.Op() == bytecode.RLit {
 		// regexp_lit's call of the method its expansion read, of its one
 		// argument: Go's from native code, as call_method_w's marked to

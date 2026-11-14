@@ -86,7 +86,18 @@ func (r *Runtime) jitGoCallPlain(ctx *abi.Context) bool {
 		if st := jitGoCallState(ctx); st != nil && st.Inline != 0 {
 			cl, pc = r.jitGoInlined(ctx, cl, st.Inline), int(st.InlinePC)
 		}
-		if cl == nil || !jitGoPropertyAt(cl.fn, pc, in) || !r.jitPlainWrite(cl, cl.fn.Code[pc], jitGoArg(ctx, 0), jitGoArg(ctx, 1)) {
+		if cl != nil && r.jitRegIsFrameOp(ctx) {
+			// Register code's: pc is a register pc, its write's names and
+			// cache the register instruction's (jitRegPlainAt). Read as a
+			// stack pc, the stack form's instruction there had been
+			// written instead -- another property's, of the value this one
+			// stores: DeltaBlue's BinaryConstraint set its v1 to the null
+			// its direction was given, constructed natively.
+			w, ok := jitRegPlainAt(cl, pc)
+			if !ok || !r.jitPlainWrite(cl, w, jitGoArg(ctx, 0), jitGoArg(ctx, 1)) {
+				return false
+			}
+		} else if cl == nil || !jitGoPropertyAt(cl.fn, pc, in) || !r.jitPlainWrite(cl, cl.fn.Code[pc], jitGoArg(ctx, 0), jitGoArg(ctx, 1)) {
 			return false
 		}
 		v = Undefined
@@ -103,6 +114,23 @@ func (r *Runtime) jitGoCallPlain(ctx *abi.Context) bool {
 	}
 	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
 	return true
+}
+
+// jitRegPlainAt is set_prop at register pc pc of cl's register code as
+// jitPlainWrite takes a write: its name's index in cl's names and its
+// cache's in cl's caches, as the stack form's set_prop has them; ok false
+// for any other instruction.
+func jitRegPlainAt(cl *closure, pc int) (bytecode.Instr, bool) {
+	c := cl.reg
+	if c == nil || pc < 0 || pc >= len(c.rc.Code) {
+		return bytecode.Instr{}, false
+	}
+	w := regAt(c.code, pc)
+	site := int(w.C())
+	if w.Op() != bytecode.RSetProp || site >= len(c.rc.SiteName) {
+		return bytecode.Instr{}, false
+	}
+	return bytecode.Instr{Op: bytecode.OpSetProp, A: c.rc.SiteName[site], B: uint32(site)}, true
 }
 
 // jitGoCallState is the description of the call of Go ctx makes

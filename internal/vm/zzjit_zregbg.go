@@ -79,8 +79,14 @@ func jitRegShape(f *ssa.Func, p *ir.Program) map[uint32]bool {
 	// at the context's Locals; its captured bindings past them, in their
 	// cells; its scratch slots past those, which are only values.
 	f.FrameLocals = p.Regs
-	f.Scratch = p.Locals - (p.UpvalueBase + p.Upvalues)
+	f.Scratch = p.Locals - jitRegScratchBase(p)
 	f.ThisSlot = -1
+	if p.This {
+		// A derived constructor's this binding, past its captured
+		// bindings, which native code finds in the context (abi.Context's
+		// This), as the stack form's this slot.
+		f.ThisSlot = p.UpvalueBase + p.Upvalues
+	}
 	f.Params, f.StartOnly = p.ParamBase+p.Params, false
 	f.Cells = p.Cells
 	// Native callers call it (jitRegFeedback's NativeCalls), its window
@@ -93,6 +99,17 @@ func jitRegShape(f *ssa.Func, p *ir.Program) map[uint32]bool {
 		}
 	}
 	return looped
+}
+
+// jitRegScratchBase is the first of p's expansions' scratch slots, past its
+// captured bindings' and a derived constructor's this slot (ir.Program's
+// This).
+func jitRegScratchBase(p *ir.Program) int {
+	n := p.UpvalueBase + p.Upvalues
+	if p.This {
+		n++
+	}
+	return n
 }
 
 // jitRegSubmit hands j, its feedback asked ahead, to the process's

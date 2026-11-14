@@ -261,12 +261,7 @@ func regCompileARM64(t *testing.T, r *Runtime) (fns, windows, inlined int) {
 			continue
 		}
 		// As jitRegCompile lays the register frame out.
-		f.FrameLocals = p.Regs
-		f.Scratch = p.Locals - (p.UpvalueBase + p.Upvalues)
-		f.ThisSlot = -1
-		f.Params, f.StartOnly = p.ParamBase+p.Params, false
-		f.Cells = p.Cells
-		f.CallEntry = true
+		jitRegShape(f, p)
 		inlined += len(f.Inlined)
 		ssa.Optimize(f)
 		for _, b := range f.Blocks {

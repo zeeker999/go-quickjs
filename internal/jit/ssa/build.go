@@ -2031,7 +2031,11 @@ type CallSite struct {
 	// them -- as V8's code calls the parent constructor: Go makes it on
 	// the code's own frame, binding its this, which is the result and
 	// which the this slot takes. Its first operand is the this slot, the
-	// uninitialized value unless an earlier super() bound it.
+	// uninitialized value unless an earlier super() bound it. Register
+	// code's (Window) has the same operands, the arguments from its
+	// instruction's Left, the result its Dest's, register 1's and the this
+	// slot's (superCall); natively, the parent's window is made with the
+	// function whose code runs in register 0 and the instance in 1.
 	Super bool
 	// Derived marks a construction (Pool) whose callee's code is a derived
 	// constructor's (ir.Program's DerivedConstructor): the pool's object is
@@ -3450,7 +3454,27 @@ func (b *builder) closureKeep(pc int) (int, bool) {
 // DerivedConstructor), which Go makes: an object is the construction's
 // result, anything else a TypeError.
 func (b *builder) derivedReturnExits(in ir.Instruction) bool {
-	return in.Op == ir.Return && b.p.DerivedConstructor && (in.Left.Slot >= 0 || in.Left.Literal.Kind != ir.Undefined)
+	return in.Op == ir.Return && b.stackDerived() && (in.Left.Slot >= 0 || in.Left.Literal.Kind != ir.Undefined)
+}
+
+// stackDerived reports whether the program is the stack form's of a
+// derived constructor, whose returns the builder makes the derived
+// construction's (ir.Program's DerivedConstructor): register code's
+// derived_ret makes its return's operand that already.
+func (b *builder) stackDerived() bool {
+	return b.p.DerivedConstructor && b.p.Origin == nil
+}
+
+// thisCheckKind is how a check of slot that it is initialized leaves where
+// it is not (ir.Instruction's Check): a register code's derived
+// constructor's this slot (ir.Program's This), unbound, to Go, which
+// throws the ReferenceError -- as the stack form's return leaves -- or a
+// guard's exit, the interpreter going on.
+func (b *builder) thisCheckKind(slot int) ir.ExitKind {
+	if p := b.p; p.Origin != nil && p.This && slot == p.UpvalueBase+p.Upvalues {
+		return ir.HostExit
+	}
+	return ir.GuardExit
 }
 
 // literalKeep is a literal's site and the keep cell its object is kept in,
@@ -7271,7 +7295,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 	}
 
 	if in.Check {
-		guard(OpCheckInit, None, ir.GuardExit, b.read(in.CheckSlot, blk))
+		guard(OpCheckInit, None, b.thisCheckKind(in.CheckSlot), b.read(in.CheckSlot, blk))
 	}
 	switch in.Op {
 	case ir.Nop, ir.Jump:
@@ -7437,7 +7461,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 			blk.State.addUse()
 			break
 		}
-		if b.cur == b.root && b.p.DerivedConstructor {
+		if b.cur == b.root && b.stackDerived() {
 			// undefined: a derived constructor's this, as its construction
 			// returns it, if super() bound it; Go returns, and throws, if
 			// not.
@@ -8560,6 +8584,10 @@ func (b *builder) wholeAt(pc int) bool {
 // theirs; a typeof's operand; an instanceof's object and constructor --
 // and its result, kept in its cell, written to its register.
 func (b *builder) windowCall(blk *Block, pc int, in ir.Instruction, calls []*CallSite, guard func(Op, Type, ir.ExitKind, ...*Value) *Value) {
+	if calls[0].Super {
+		b.superCall(blk, pc, in, calls, guard)
+		return
+	}
 	if c := calls[0]; len(calls) == 1 && c.Go == GoCall && !c.New && !c.InstanceOf && !c.TypeOf && c.Argc <= abi.MaxGoArgs-2 && b.goCalls() && !b.fb.Generic(pc) {
 		// A leaf's call (LeafFeedback), as leafAt finds the stack form's.
 		if lf, ok := b.fb.(LeafFeedback); ok {
@@ -8616,6 +8644,38 @@ func (b *builder) windowCall(blk *Block, pc int, in ir.Instruction, calls []*Cal
 	r.Shadow = cell
 	b.assign(in.Dest, blk, r)
 	// The callee may have assigned a captured binding.
+	if b.hasCells() {
+		b.reloadAfterCall(blk)
+	}
+}
+
+// superCall makes register code's super(...) at pc, in, of a derived
+// constructor (CallSite's Super), as the stack form's is made: its
+// operands the this slot (ir.Program's This), the binding, which the call
+// checks is unbound, and the arguments, from the window's first register,
+// Left; the this it binds, its result, kept in its cell, is R[Dest]'s,
+// register 1's -- as the interpreter's super_call writes them -- and the
+// this slot's from here, which the call stores in the context's This.
+func (b *builder) superCall(blk *Block, pc int, in ir.Instruction, calls []*CallSite, guard func(Op, Type, ir.ExitKind, ...*Value) *Value) {
+	f, p := b.f, b.p
+	this := p.UpvalueBase + p.Upvalues
+	args := make([]*Value, 0, in.Extra+1)
+	args = append(args, b.read(this, blk))
+	for i := range in.Extra {
+		args = append(args, b.read(in.Left.Slot+i, blk))
+	}
+	call := guard(OpCall, Tagged, ir.HostExit, args...)
+	f.cache(call).Calls, call.Index = calls, b.callKeepAt(pc)
+	if calls[0].Go == GoCall {
+		// Go makes it, which counts it as an exit's would.
+		f.HostsLeft = append(f.HostsLeft, pc)
+	}
+	cell := f.newValue(blk, OpCallCell, Source, call)
+	r := f.newValue(blk, OpKept, Tagged, cell, call)
+	r.Shadow = cell
+	b.assign(in.Dest, blk, r)
+	b.assign(1, blk, r)
+	b.write(this, blk, r)
 	if b.hasCells() {
 		b.reloadAfterCall(blk)
 	}
@@ -8719,15 +8779,17 @@ func (b *builder) nativeCalls(pc int) []*CallSite {
 			// Register code's call: its operands are its window's
 			// registers, not the operand stack's top (windowCall), the
 			// site's shape the instruction's.
-			if site.Argc != in.Extra || site.Method != in.When || site.Super || site.Instr != 0 || site.Accessor != AccessorNone || site.Step || site.ForOf || site.ForIn ||
+			super := site.Super && b.p.This && b.cur == b.root
+			if site.Argc != in.Extra || site.Method != in.When || site.Super != super || site.Instr != 0 || site.Accessor != AccessorNone || site.Step || site.ForOf || site.ForIn ||
 				site.TypeOf && (in.Extra != 0 || site.Go != GoCall) || site.InstanceOf && (in.Extra != 1 || site.Go != GoCall) || site.Literal || site.Via != 0 ||
-				site.Go == 0 && !site.Push && !site.Pop && (site.Window != in.Left.Slot+1 || site.ThisSlot >= 0 || site.Function || site.Tail ||
-					site.Pool != 0 && (site.Derived || site.Parent != 0 || site.Method)) {
+				site.Go == 0 && !site.Push && !site.Pop && (site.Window != in.Left.Slot+1 && !super || site.ThisSlot >= 0 || site.Function || site.Tail ||
+					site.Pool != 0 && site.Method) {
 				// A native call's callee's window is made from the
 				// instruction's (CallSite's Window), the stack form's
-				// frames' fields none of register code's; a construction's
-				// of a base constructor. A push or a pop native code makes
-				// itself has no frame.
+				// frames' fields none of register code's; a super()'s, of
+				// a derived constructor's own code, from its this slot and
+				// its arguments (superCall). A push or a pop native code
+				// makes itself has no frame.
 				continue
 			}
 		} else if site.Argc < 0 || depth < operands || after != depth-operands+1 {

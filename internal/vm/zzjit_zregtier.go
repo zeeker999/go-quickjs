@@ -82,12 +82,29 @@ func (r *Runtime) jitRegHas(cl *closure) bool {
 }
 
 // jitRegSample is a sample of a run of cl's register code c (regEnterW).
+// One of code that had native code already says nothing of what the
+// interpreter runs: the interrupt budget's next sample is taken sooner
+// (jitRegResample), so that a call site of a frame the interpreter runs,
+// which enters a callee compiled after the site's cache was filled in the
+// interpreter, until a sample of the site marks it (jitRegCallSample), is
+// sampled. Calls of compiled code, through Go, had taken the samples -- a
+// parser's character reads, from frames the interpreter ran -- and left
+// whole call trees in the interpreter: AWFY's Json ran its parse there
+// unless a sample happened to fall on its first call site.
 func (r *Runtime) jitRegSample(cl *closure, c *regCode) {
 	if r.jitEnabled && cl.closureCode != nil {
+		had := cl.closureCode.jitReg != nil
 		r.jitRegHot(cl, c)
+		if had && r.interruptCounter > jitRegResample {
+			r.interruptCounter = jitRegResample
+		}
 		r.jitRegStressSample()
 	}
 }
+
+// jitRegResample is how many calls on the interrupt budget's next sample
+// is taken after one of a function that had native code (jitRegSample).
+const jitRegResample = 64
 
 // jitRegNativeCallee compiles cl's function's register code c for the
 // native callers that call it through its link, which has none yet: as the

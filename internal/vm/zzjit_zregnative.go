@@ -68,6 +68,11 @@ type jitRegEntry struct {
 	// hostOnly marks a refusal of host operations alone (jitRegCompile),
 	// which a later ask lowers again.
 	hostOnly bool
+	// callee marks code of host operations alone compiled for native
+	// callers (LowerRegInline), which, stale, is compiled again so
+	// (jitRegGoOnAt): compiled for Go to enter, it was refused at every
+	// entry, never replaced.
+	callee bool
 	// levels counts the native calls under way of the code that Go runs
 	// beside (jitRegLevelAt): the cache neither drops it nor compiles it
 	// again while any is.
@@ -191,6 +196,7 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, callee bool) *jitRegEnt
 		switch {
 		case callee:
 			p, err = jitcompile.LowerRegInline(c.rc, cl.fn)
+			e.callee = true
 		case r.jitRegCallsNatively(cl, c):
 			p, err = jitcompile.LowerRegHot(c.rc, cl.fn)
 		default:
@@ -360,7 +366,7 @@ func (s *jitState) dropRegCode() {
 // the window, where mir puts them -- a scratch slot first, then what is
 // past the program's Locals, an object's home, a loop's slot.
 func (r *Runtime) jitRegSlot(f *frame, p *ir.Program, wb, i int) *Value {
-	scratch := p.Locals - (p.UpvalueBase + p.Upvalues)
+	scratch := p.Locals - jitRegScratchBase(p)
 	switch {
 	case i < p.Regs:
 		return &r.stack[wb+i]
@@ -401,6 +407,10 @@ func (r *Runtime) jitRegApplyRecords(f *frame, p *ir.Program, wb int, ctx *abi.C
 			if s := jitSource(&rec.Arg); s != nil && s.ref != nil {
 				src[i] = *s
 			}
+		case p.This && int(rec.Arg) == p.UpvalueBase+p.Upvalues:
+			// A derived constructor's this binding, the context's This,
+			// which a record reads only, as the stack form's (jitSlot).
+			src[i] = *(*Value)(unsafe.Pointer(&ctx.This))
 		default:
 			src[i] = *r.jitRegSlot(f, p, wb, int(rec.Arg))
 		}
@@ -521,9 +531,13 @@ func (r *Runtime) jitRegGoOnAt(f *frame, c *regCode, e *jitRegEntry, wb, rpc, at
 			// form's run's code is compiled again at its exit
 			// (jitRecompileInRun) -- an inlining given up, a call learned
 			// -- rather than gone on in code that leaves at the same place
-			// again until its budget is spent.
-			if ne := r.jitRegFor(f.cl, c); ne != nil && ne.code != nil && !ne.invalid {
+			// again until its budget is spent; and the function's code
+			// from here, which the interpreter's calls enter.
+			if ne := r.jitRegForAs(f.cl, c, e.callee); ne != nil && ne.code != nil && !ne.invalid {
 				e = ne
+				if cc := f.cl.closureCode; cc != nil && f.cl.realm == r.Realm {
+					cc.jitReg = ne
+				}
 			}
 		}
 		if resume == 0 {
@@ -630,8 +644,9 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 			}
 			if err == nil && ran {
 				// A call native code did not make, which it may once
-				// compiled again.
+				// compiled again: a super()'s parent among them.
 				r.jitRegCallSeen(f, c, e, exitPC, callee)
+				r.jitRegSuperSeen(f, c, e, exitPC)
 			}
 			if l := s.regLearned[r.jitRegKeyOf(f.cl)]; l != nil && l.polyReopt {
 				// The site met what the code was not compiled for and
@@ -715,6 +730,12 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 		ctx.Cells, ctx.Loop = nil, 0
 	}
 	ctx.Open = uint64(len(f.openUpvalues))
+	if p.This {
+		// A derived constructor's: its this binding -- its this slot --
+		// and what its super() natively needs, as a native construction's
+		// context has them (ssa.CallSite's Super).
+		jitRegDerivedContext(ctx, f)
+	}
 	if p.Forwards {
 		// Its f.apply(x, arguments) hands the frame's arguments on natively
 		// (ssa.CallSite's Forward), from its context, as the stack form's
@@ -781,6 +802,11 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 	if r.stackTop == raised {
 		r.stackTop = saved
 	}
+	if p.This {
+		// A super() native code made bound the context's This, which no
+		// exit writes: the frame's binding is it.
+		jitBindThis(f, ctx)
+	}
 	if err == nil && ctx.Cells != nil {
 		// Its cells, as the frame has them, for whatever runs it now.
 		r.jitRegReopenCells(f, e, wb, ctx, true)
@@ -846,6 +872,25 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 	return ctx, ret, true
 }
 
+// jitRegDerivedContext gives ctx, the context native code runs f in, a
+// derived constructor's frame, what a native construction's has
+// (ssa.CallSite's Derived): its this binding, the uninitialized value
+// until its super() binds it (abi.Context's This, the code's this slot),
+// its instance, new.target and function, which its super() reads, as the
+// stack form's entry gives them.
+func jitRegDerivedContext(ctx *abi.Context, f *frame) {
+	if f.thisRef == nil || f.callee == nil || !f.newTarget.IsObject() || f.cl.fn.Kind != bytecode.KindDerivedConstructor {
+		return
+	}
+	this := uninitialized
+	if f.thisRef.init {
+		this = f.thisRef.value
+	}
+	*(*Value)(unsafe.Pointer(&ctx.This)) = this
+	*(*Value)(unsafe.Pointer(&ctx.Instance)) = f.thisRef.value
+	ctx.NewTarget, ctx.Function = uint64(uintptr(unsafe.Pointer(f.newTarget.Object()))), uint64(uintptr(unsafe.Pointer(f.callee)))
+}
+
 // jitRegRun is a register frame native code runs on, in a context
 // (jitState's regRuns): f, running c, its window at wb, in e's code.
 type jitRegRun struct {
@@ -891,6 +936,9 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 		// Or a destructuring's step or rest, which native code had no
 		// step of its own for: run whole too.
 		return r.jitRegWhole(ctx, idx, run, rpc)
+	}
+	if op == bytecode.RSuperCall && kind == abi.GoCallSuper {
+		return r.jitRegSuperMade(ctx, idx, run, rpc, w)
 	}
 	if op == bytecode.RTypeof && kind == abi.GoCallTypeOf {
 		// typeof's name, as regTypeof makes it, which runs nothing.
@@ -1139,6 +1187,52 @@ func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int)
 	return true
 }
 
+// jitRegSuperMade is the call of Go native code made from a derived
+// constructor's register code makes at its super_call, w, at register pc
+// rpc (ssa.CallSite's Super, GoCall), on run's frame -- the run's own, or a
+// level's Go made (jitRegPushLevel) -- as the stack form's is made
+// (jitGoCall): its operands the this slot, the binding, and the
+// arguments; the parent constructed by superCall, which binds the frame's
+// this, the this it bound the result, and the context's This, which a
+// native super() binds. The parent it constructed with is learned
+// (jitRegSuperSeen). What threw, or after which the code is invalid, Go
+// finishes at the exit native code then takes (regPending).
+func (r *Runtime) jitRegSuperMade(ctx *abi.Context, idx int, run jitRegRun, rpc int, w bytecode.RInstr) bool {
+	s := r.jit
+	f, c := run.f, run.c
+	argc := int(w.B())
+	if int(ctx.GoOp>>abi.GoOpArgcShift&0xff) != argc || f.thisRef == nil || f.callee == nil || f.cl.fn.Kind != bytecode.KindDerivedConstructor {
+		return false
+	}
+	jitBindThis(f, ctx)
+	if this := jitGoArg(ctx, 0); !this.IsUninitialized() && !f.thisRef.init {
+		// Bound by a super() native code made, which this one finds bound.
+		f.this, f.thisRef.value, f.thisRef.init = this, this, true
+	}
+	r.jitRegSuperSeen(f, c, run.e, rpc)
+	args := make([]Value, argc)
+	for i := range args {
+		args[i] = jitGoArg(ctx, 1+i)
+	}
+	f.pc = regSrc(c, rpc) + 1
+	last, shared := s.ssaCtx, s.ssaSharedGen
+	s.goCalls++
+	r.noteRegGoCall(w, false, Value{})
+	err := r.jitSuperCall(f, args)
+	s.ssaCtx = last
+	if s.ssaSharedGen != shared {
+		r.jitShareContexts(idx, f)
+	}
+	v := f.this
+	if err != nil || r.stopped != nil || run.e.invalid {
+		s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: v, err: err}
+		return false
+	}
+	*(*Value)(unsafe.Pointer(&ctx.This)) = v
+	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
+	return true
+}
+
 // regFinishWhole finishes, on the registers of a window at wb, an
 // instruction Go ran whole for native code (jitRegWhole) that did not go
 // on natively, as p says: the register it wrote written over what the
@@ -1204,6 +1298,18 @@ func (r *Runtime) regFinishCall(f *frame, c *regCode, wb, rpc int, v Value, err 
 		case bytecode.RSetProp:
 			// A setter's result, dropped.
 			return k.pc, true, nil
+		case bytecode.RSuperCall:
+			// The parent a super() native code made returned what Go
+			// finished it with (jitRegUnwind): the frame's this bound to
+			// it if an object, else to the instance (jitSuperBound) --
+			// bound already where Go made the super() -- R[A]'s, and a
+			// derived constructor's register 1's, as super_call writes
+			// them.
+			v = jitSuperBound(f, v)
+			dest = int(w.A())
+			if f.cl.fn.Kind == bytecode.KindDerivedConstructor {
+				r.stack[wb+1] = v
+			}
 		}
 		r.stack[wb+dest] = v
 		return k.pc, true, nil
