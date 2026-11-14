@@ -46,7 +46,7 @@ func (r *Runtime) jitRegFeedbackFor(cl *closure, p *ir.Program) *jitRegFeedback 
 	if cl == nil || cl.fn == nil || cl.fn.RegCode() == nil || p == nil || p.Origin == nil {
 		return nil
 	}
-	fb := &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitKeyOf(cl.fn))}
+	fb := &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitRegKeyOf(cl))}
 	return &jitRegFeedback{fb: fb, rc: cl.fn.RegCode(), p: p}
 }
 
@@ -317,7 +317,7 @@ func (f *jitRegFeedback) accessorInline(callee *Object, cl *closure, write bool)
 	k.holders = append(k.holders, callee)
 	k.inlined = append(k.inlined, cl)
 	return ssa.InlineSite{
-		Program: p, Feedback: &jitRegFeedback{fb: &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitKeyOf(cl.fn)), root: k}, rc: cl.fn.RegCode(), p: p},
+		Program: p, Feedback: &jitRegFeedback{fb: &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitRegKeyOf(cl)), root: k}, rc: cl.fn.RegCode(), p: p},
 		Callee: uintptr(unsafe.Pointer(callee)), Closure: uintptr(unsafe.Pointer(cl)),
 		Argc: argc, Method: true, Params: 2 + int(cl.reg.params), ThisSlot: -1, Window: true,
 		Upvalues: jitUpvalueCells(cl), FunctionCell: uintptr(unsafe.Pointer(cell)),
@@ -567,7 +567,7 @@ func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 	// compiles take it (jitRegSeenFeedback).
 	r.jitRegSeenFeedback(cl, cl.reg)
 	k := f.fb.keep()
-	callee := &jitRegFeedback{fb: &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitKeyOf(cl.fn)), root: k}, rc: cl.fn.RegCode(), p: p}
+	callee := &jitRegFeedback{fb: &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitRegKeyOf(cl)), root: k}, rc: cl.fn.RegCode(), p: p}
 	in := ssa.InlineSite{
 		Program: p, Feedback: callee, Callee: site.Callee, Closure: site.Closure,
 		Argc: argc, Method: method, Params: 2 + int(cl.reg.params), ThisSlot: -1, Window: true,

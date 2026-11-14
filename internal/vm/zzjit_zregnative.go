@@ -120,7 +120,7 @@ func (r *Runtime) jitRegForAs(cl *closure, c *regCode, callee bool) *jitRegEntry
 	if s.unavailable {
 		return nil
 	}
-	key := r.jitKeyOf(cl.fn)
+	key := r.jitRegKeyOf(cl)
 	if s.regPendingJobs[key] != nil {
 		// Being compiled in the background (jitRegSubmit): installed at
 		// a later check.
@@ -210,7 +210,7 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, callee bool) *jitRegEnt
 		// Asked ahead here, built on a worker (zzjit_zregbg.go).
 		snap := jitRegSnapshotOf(rf, p)
 		if !snap.s.bad {
-			j := &jitRegJob{cl: cl, c: c, key: r.jitKeyOf(cl.fn), realm: r.Realm, callee: callee, e: e, p: p, rf: rf, snap: snap,
+			j := &jitRegJob{cl: cl, c: c, key: r.jitRegKeyOf(cl), realm: r.Realm, callee: callee, e: e, p: p, rf: rf, snap: snap,
 				w: jit.GetWorkspace(), enc: jitEncoding, opts: mir.Settings()}
 			r.jitRegSubmit(j)
 			return nil
@@ -614,7 +614,7 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 				// compiled again.
 				r.jitRegCallSeen(f, c, e, exitPC, callee)
 			}
-			if l := s.regLearned[r.jitKeyOf(f.cl.fn)]; l != nil && l.polyReopt {
+			if l := s.regLearned[r.jitRegKeyOf(f.cl)]; l != nil && l.polyReopt {
 				// The site met what the code was not compiled for and
 				// its cache cannot hold: compiled again for it, as the
 				// stack form's code is (jitRecompileInRun), its code
@@ -933,6 +933,14 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	}
 	if int(ctx.GoOp>>abi.GoOpArgcShift&0xff) != argc {
 		return false
+	}
+	if idx == len(s.ssaCtxs)-1 && s.bounds.LevelLimit == uint64(len(s.ssaCtxs)) {
+		// A call native code made by Go for want of a context past this
+		// one (mir's native calls): more of them, for the calls after it
+		// to be native, as the stack form's code has them made
+		// (jitGoCallNested) -- a recursion of native calls had gone
+		// through Go every fourth level.
+		r.jitGrowContexts()
 	}
 	top := r.stackTop
 	end := top + 2 + argc
@@ -1340,7 +1348,7 @@ func (r *Runtime) RegNativeCall(fnv Value, args []Value, osr bool) RegNativeResu
 	}
 	cl := fd.closure
 	var compiled bool
-	if r.jit == nil || r.jit.regCache[r.jitKeyOf(cl.fn)] == nil || r.jit.regCache[r.jitKeyOf(cl.fn)].invalid {
+	if r.jit == nil || r.jit.regCache[r.jitRegKeyOf(cl)] == nil || r.jit.regCache[r.jitRegKeyOf(cl)].invalid {
 		compiled = true
 	}
 	// Compiled here, on the spot: the call runs the code it asks for,

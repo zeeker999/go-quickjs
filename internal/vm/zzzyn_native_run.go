@@ -277,8 +277,13 @@ func (r *Runtime) nativeLoop(st *regState, ctx *nativeCtx, f *frame, c *regCode,
 // -- the interrupt counted, the code r.regRestart, from its first
 // instruction -- but in this code entry, rather than in one of its own
 // for each call. It reports false where the frame ends instead, with the
-// error in st.
+// error in st -- errRegRestart itself where the callee has native code made
+// from its register code, whose caller's regRestartRun runs the frame in
+// it (jitRegEnter), as regEnterW runs a call's.
 func (r *Runtime) nativeRestart(st *regState, ctx *nativeCtx) bool {
+	if r.nativeRestartJIT(st.f) {
+		return false
+	}
 	rc := r.regRestart
 	r.regRestart = nil
 	if r.interruptCounter--; r.interruptCounter <= 0 {
@@ -300,6 +305,15 @@ func (r *Runtime) nativeRestart(st *regState, ctx *nativeCtx) bool {
 	ctx.ip = uintptr(rc.code)
 	ctx.top, ctx.topOK = st, 1
 	return true
+}
+
+// nativeRestartJIT reports whether frame f, given to a callee in place
+// (r.regRestart), runs it in the callee's native code made from its
+// register code, which regRestartRun enters (jitRegEnter): a recursion
+// through calls in tail position past tailCallDepth had run in this code
+// entry from there on, the functions' native code never entered.
+func (r *Runtime) nativeRestartJIT(f *frame) bool {
+	return jitBuilt && r.jitRegHas(f.cl) && f.cl.reg == r.regRestart
 }
 
 // nativeRestartDeep is nativeRestart's of a frame the code entered itself,
@@ -524,9 +538,11 @@ func (r *Runtime) nativeEnd(s *regState, ctx *nativeCtx, pc int, w bytecode.RIns
 		if d == 0 {
 			return v, true
 		}
-		if s.err == errRegRestart && s.f.regKind == regFrameCall && r.nativeRestartDeep(s, ctx) {
+		if s.err == errRegRestart && s.f.regKind == regFrameCall && !r.nativeRestartJIT(s.f) && r.nativeRestartDeep(s, ctx) {
 			// Given to a callee in place by Go (regTailTo): the callee's
-			// code goes on in the frame, which the code entered itself.
+			// code goes on in the frame, which the code entered itself --
+			// but code with native code, which the frame's end runs it in
+			// (regCallWEnd, regRerun, regRestartRun).
 			return Undefined, false
 		}
 		// Frame d is done: its caller goes on, as rhCallW does after

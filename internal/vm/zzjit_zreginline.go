@@ -117,7 +117,7 @@ func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at, wb
 			atSite := r.jitRegLeftAtSite(x)
 			var learned bool
 			v, err, learned = r.jitRegInlineLeft(f, x, owner)
-			l := s.regLearnedOf(r.jitKeyOf(cl.fn))
+			l := s.regLearnedOf(r.jitRegKeyOf(cl))
 			switch {
 			case x.kind == abi.ExitDeopt:
 				// A guard's failure: the owner's code invalid from here,
@@ -188,7 +188,7 @@ func (r *Runtime) jitRegLeftAtSite(x *jitRegInlineLevel) bool {
 		return false
 	}
 	w := rc.Code[x.pc]
-	l := r.jit.regLearnedOf(r.jitKeyOf(x.cl.fn))
+	l := r.jit.regLearnedOf(r.jitRegKeyOf(x.cl))
 	switch w.Op() {
 	case bytecode.RGetProp, bytecode.RGetMethod, bytecode.RGetMethodW, bytecode.RSetProp, bytecode.RAddProp, bytecode.RAddPropI:
 		if site := int(w.C()); site < len(x.cl.ic) && x.cl.ic[site].fills >= maxCacheFills {
@@ -233,7 +233,7 @@ func (r *Runtime) jitRegInlineLeft(f *frame, x *jitRegInlineLevel, owner *jitReg
 		s.hosts++
 		f.pc = regSrc(c, pc) + 1
 		s.noteRegHost(c, pc)
-		l := s.regLearnedOf(r.jitKeyOf(x.cl.fn))
+		l := s.regLearnedOf(r.jitRegKeyOf(x.cl))
 		before, failed, mark := l.polyReopt, len(l.failed), jitFeedbackMark(x.cl)
 		seen := r.jitRegHostSeen(f, c, x.wb, pc)
 		next, ran, err := r.regWhole(f, c, x.wb, pc)

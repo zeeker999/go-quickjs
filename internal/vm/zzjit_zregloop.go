@@ -56,7 +56,7 @@ func (r *Runtime) jitRegForEachSeen(f *frame, e *jitRegEntry, rpc int, callee, r
 		return
 	}
 	cl := fd.closure
-	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	l := r.jit.regLearnedOf(r.jitRegKeyOf(f.cl))
 	for i := range l.nativeCalls {
 		x := &l.nativeCalls[i]
 		if int(x.pc) != rpc || !x.forEach {
@@ -151,7 +151,7 @@ func (f *jitRegFeedback) callbackInline(x jitInline, site ssa.CallSite, argc int
 	r := f.fb.r
 	r.jitRegSeenFeedback(cl, cl.reg)
 	k := f.fb.keep()
-	callee := &jitRegFeedback{fb: &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitKeyOf(cl.fn)), root: k}, rc: cl.fn.RegCode(), p: p}
+	callee := &jitRegFeedback{fb: &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitRegKeyOf(cl)), root: k}, rc: cl.fn.RegCode(), p: p}
 	in := ssa.InlineSite{
 		Program: p, Feedback: callee, Callee: site.Callee, Closure: site.Closure,
 		Argc: argc, Method: true, Params: 2 + int(cl.reg.params), ThisSlot: -1, Window: true,

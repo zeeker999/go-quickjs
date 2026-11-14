@@ -118,7 +118,7 @@ func (r *Runtime) jitRegNativeCallee(cl *closure, c *regCode) {
 // form's: compiled for that alone, a function of host operations is worth
 // its code.
 func (r *Runtime) jitRegCallsNatively(cl *closure, c *regCode) bool {
-	if l := r.jit.regLearned[r.jitKeyOf(cl.fn)]; l != nil && len(l.nativeCalls) != 0 {
+	if l := r.jit.regLearned[r.jitRegKeyOf(cl)]; l != nil && len(l.nativeCalls) != 0 {
 		return true
 	}
 	for _, w := range c.rc.Code {
@@ -237,7 +237,7 @@ func (r *Runtime) jitRegInvalidateAs(cl *closure, e *jitRegEntry, counted bool) 
 	if !e.invalid {
 		// Native callers call it no more.
 		e.invalid = true
-		key := r.jitKeyOf(cl.fn)
+		key := r.jitRegKeyOf(cl)
 		if r.jit.regCache[key] == e {
 			r.jit.regLinkUpdate(key, nil)
 		}
@@ -274,7 +274,7 @@ func (r *Runtime) jitRegReopt(cl *closure, e *jitRegEntry) {
 		return
 	}
 	e.stale = true
-	if key := r.jitKeyOf(cl.fn); r.jit.regCache[key] == e {
+	if key := r.jitRegKeyOf(cl); r.jit.regCache[key] == e {
 		r.jit.regLinkUpdate(key, nil)
 	}
 	if cc := cl.closureCode; cc != nil {
@@ -340,7 +340,7 @@ func (r *Runtime) jitRegPropOp(f *frame, c *regCode, wb, rpc int) (jitPropOp, bo
 // is compiled for from the first, not learned one exit and one compile at
 // a time.
 func (r *Runtime) jitRegSeenFeedback(cl *closure, c *regCode) {
-	l := r.jitState().regLearnedOf(r.jitKeyOf(cl.fn))
+	l := r.jitState().regLearnedOf(r.jitRegKeyOf(cl))
 	for rpc, w := range c.rc.Code {
 		write := false
 		switch w.Op() {
@@ -369,7 +369,7 @@ func (r *Runtime) jitRegSeenFeedback(cl *closure, c *regCode) {
 // code compiled again with its cases -- and any other guard's failure as
 // a register pc the next compiles build generic.
 func (r *Runtime) jitRegDeoptSeen(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) {
-	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	l := r.jit.regLearnedOf(r.jitRegKeyOf(f.cl))
 	if op, ok := r.jitRegPropOp(f, c, wb, rpc); ok {
 		r.jit.shapeDeopts++
 		r.jitDeoptSeenOp(l, rpc, op, e.serial)
@@ -387,7 +387,7 @@ func (r *Runtime) jitRegDeoptSeen(f *frame, c *regCode, e *jitRegEntry, wb, rpc 
 // as the stack form's code learns it (failedEntries), the instructions
 // there not made generic for it.
 func (r *Runtime) jitRegEntrySeen(f *frame, rpc int) {
-	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	l := r.jit.regLearnedOf(r.jitRegKeyOf(f.cl))
 	if !slices.Contains(l.failedEntries, uint32(rpc)) {
 		l.failedEntries = append(l.failedEntries, uint32(rpc))
 	}
@@ -403,7 +403,7 @@ func (r *Runtime) jitRegResumeSeen(f *frame, e *jitRegEntry, rpc int) {
 	if e.invalid || !slices.Contains(e.unresumed, rpc) {
 		return
 	}
-	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	l := r.jit.regLearnedOf(r.jitRegKeyOf(f.cl))
 	if slices.Contains(l.resumed, uint32(rpc)) {
 		return
 	}
@@ -431,7 +431,7 @@ func (r *Runtime) jitRegHostSeen(f *frame, c *regCode, wb, rpc int) jitRegWrite 
 		}
 		return x
 	}
-	r.jitPolySeenOp(r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn)), rpc, op)
+	r.jitPolySeenOp(r.jit.regLearnedOf(r.jitRegKeyOf(f.cl)), rpc, op)
 	return jitRegWrite{}
 }
 
@@ -459,7 +459,7 @@ func (r *Runtime) jitRegPrivateSeen(f *frame, c *regCode, e *jitRegEntry, wb, rp
 	if i < 0 || ob.shape == nil || i >= ob.shape.n || int(i) >= int(ob.valn) || ob.shape.keys[i].isAccessor() || ob.vals()[i].IsNumber() {
 		return
 	}
-	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	l := r.jit.regLearnedOf(r.jitRegKeyOf(f.cl))
 	if slices.Contains(l.failed, int32(rpc)) {
 		return
 	}
@@ -484,7 +484,7 @@ func (r *Runtime) jitRegWriteSeen(f *frame, c *regCode, e *jitRegEntry, rpc int,
 	if x.op.c == nil {
 		return
 	}
-	r.jitPolyWriteSeenOp(r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn)), rpc, x.op.c, x.op.key, true, x.o, x.before)
+	r.jitPolyWriteSeenOp(r.jit.regLearnedOf(r.jitRegKeyOf(f.cl)), rpc, x.op.c, x.op.key, true, x.o, x.before)
 }
 
 // jitRegEnter runs f, the frame regEnterW made for a call of cl, its
