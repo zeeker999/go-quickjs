@@ -87,6 +87,8 @@ type armGen struct {
 	exitAfter Label
 	exits     []Label
 	genRet    Label
+	// genObj is amd64's.
+	genObj Label
 }
 
 func (g *armGen) ex(n int) Label {

@@ -27,6 +27,9 @@ type nativeGen struct {
 	// (genReturn), where the variant has yield's handler; the exit
 	// where not.
 	genRet Label
+	// genObj is genStep's entry with the generator's object in R8, which
+	// a call of next() takes (genNext).
+	genObj Label
 }
 
 // ex is the call handler's exit number n.

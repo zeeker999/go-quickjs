@@ -90,6 +90,7 @@ func (g *armGen) genStep() {
 	g.cmpMem(r9, rCtx, ncObjBits)
 	a.BCond(NE, g.exit)
 	a.Load(r8, rS, offItIter+8)
+	a.Bind(g.genObj)
 	a.LoadU8(rC, r8, offObjClass)
 	a.CmpImm(rC, int64(ClassGenerator), false)
 	a.BCond(NE, g.exit)
@@ -380,8 +381,9 @@ func (g *armGen) genStep() {
 // genYield is yield in a generator's frame genStep entered, as amd64's.
 func (g *armGen) genYield() {
 	a := g.a
+	base := a.NewLabel()
 	g.cmpMemImm(rCtx, ncDepth, 0)
-	a.BCond(EQ, g.exit)
+	a.BCond(EQ, base)
 	a.Load(rS, rCtx, ncNF)
 	a.LoadU8(rC, rS, offFRegKind)
 	a.CmpImm(rC, int64(regFrameGenStep), false)
@@ -462,6 +464,72 @@ func (g *armGen) genYield() {
 	a.AddImm(rW, rW, 8, true)
 	a.Load(rC, rCtx, scr(sV1))
 	g.ptrTo()
+	g.genWrap(false)
+	// The base frame's, as amd64's: retDone 2, and nativeRun suspends it.
+	a.Bind(base)
+	g.regB(r8)
+	a.Load(r9, r8, 0)
+	a.Store(rCtx, scr(sV0), r9)
+	a.Load(r9, r8, 8)
+	a.Store(rCtx, scr(sV1), r9)
+	g.storeImm(rCtx, ncRetDone, 2)
+	a.B(g.exitRet)
+}
+
+// genNext is call_method_w of the realm's generator next with no
+// argument, as amd64's: rC the cache's entry, rS the window, rW the
+// instruction.
+func (g *armGen) genNext(miss Label) {
+	a := g.a
+	a.Ubfx(rD, rW, 0, 8)
+	a.CmpImm(rD, int64(bytecode.RCallMW), false)
+	a.BCond(NE, miss)
+	a.Ubfx(rD, rW, 8, 8)
+	a.Cbnz(rD, miss, false)
+	a.Load(r9, rC, offECallee)
+	a.Load(rD, rCtx, ncRT)
+	a.Load(rD, rD, rtRel(0))
+	g.cmpMem(r9, rD, offRealmNext)
+	a.BCond(NE, miss)
+	a.Load(r8, rS, 16)
+	g.cmpMem(r8, rCtx, ncObjBits)
+	a.BCond(NE, miss)
+	a.Load(r8, rS, 24)
+	a.Store(rCtx, scr(sV0), r9)
+	a.Ubfx(rD, rW, 32, 16)
+	a.ShiftImm(Lsl, rD, rD, 4, true)
+	a.Store(rCtx, scr(sV1), rD)
+	a.B(g.genObj)
+}
+
+// genWrap makes the value a step next() entered gave its caller's
+// register B next's result, as amd64's; rIP is where the caller goes on,
+// written to the context. Then on.
+func (g *armGen) genWrap(done bool) {
+	a := g.a
+	after, on := a.NewLabel(), a.NewLabel()
+	a.Load(rW, rIP, -8)
+	a.Ubfx(rC, rW, 0, 8)
+	a.CmpImm(rC, int64(bytecode.RCallMW), false)
+	a.BCond(NE, on)
+	// nativeIterRes(regs, w, done, ctx) through callH, as litCall calls
+	// nativeLit.
+	a.Store(rCtx, ncBudget, rBud)
+	a.Adr(r8, after)
+	a.Store(rCtx, ncAfter, r8)
+	a.MovRR(rC, rW)
+	a.MovImm(rD, 0)
+	if done {
+		a.MovImm(rD, 1)
+	}
+	a.MovRR(rS, rCtx)
+	a.MovRR(rW, rRegs)
+	a.Load(rFn, rCtx, ncIterResFn)
+	a.Load(rJ, rCtx, ncCallH)
+	a.Br(rJ)
+	a.Bind(after)
+	g.reload()
+	a.Bind(on)
 	g.dispatch()
 }
 
@@ -472,6 +540,19 @@ func (g *armGen) genReturn() {
 	a.Load(rS, rCtx, ncNF)
 	a.Load(rC, rS, offFOpenUp)
 	a.Cbnz(rC, g.exit, true)
+	// The value, which a step next() entered gives its caller.
+	haveVal := a.NewLabel()
+	a.Load(r8, rCtx, ncUndef)
+	a.MovImm(r9, 0)
+	a.Ubfx(rC, rW, 0, 8)
+	a.CmpImm(rC, int64(bytecode.RRetUndef), false)
+	a.BCond(EQ, haveVal)
+	g.regA(rD)
+	a.Load(r8, rD, 0)
+	a.Load(r9, rD, 8)
+	a.Bind(haveVal)
+	a.Store(rCtx, scr(sV0), r8)
+	a.Store(rCtx, scr(sV1), r9)
 	a.Store8(rS, offFRegKind, ZR)
 	a.Load(r8, rCtx, ncDepth)
 	a.AddImm(r8, r8, -1, true)
@@ -497,11 +578,27 @@ func (g *armGen) genReturn() {
 		a.Load(rC, rS, f[0])
 		a.Store(rCtx, f[1], rC)
 	}
-	// The caller at its iter_next: the cursor done, the loop left.
+	// The caller at its iter_next: the cursor done, the loop left; at a
+	// call of next(), on past it with the value made its result.
+	cursor := a.NewLabel()
 	a.Load(rIP, rS, recRetIP)
 	a.Load(rRegs, rCtx, ncRegs)
 	a.Load(rIC, rCtx, ncIC)
 	a.Load(rW, rIP, 0)
+	a.Ubfx(rC, rW, 0, 8)
+	a.CmpImm(rC, int64(bytecode.RCallMW), false)
+	a.BCond(NE, cursor)
+	a.AddImm(rIP, rIP, 8, true)
+	a.Store(rCtx, ncIP, rIP)
+	a.MovRR(rW, rRegs)
+	g.addMem(rW, rS, recBOff)
+	a.Load(rC, rCtx, scr(sV0))
+	a.Store(rW, 0, rC)
+	a.AddImm(rW, rW, 8, true)
+	a.Load(rC, rCtx, scr(sV1))
+	g.ptrTo()
+	g.genWrap(true)
+	a.Bind(cursor)
 	g.regB(rS)
 	a.Load(rS, rS, 8)
 	a.MovImm(rC, 1)

@@ -18,9 +18,9 @@ func armEmit(v *variant) (*block, error) {
 	g := &armGen{a: &Asm{}, v: v}
 	a := g.a
 	g.exit, g.exitRet, g.exitAfter = a.NewLabel(), a.NewLabel(), a.NewLabel()
-	g.genRet = g.exit
+	g.genRet, g.genObj = g.exit, g.exit
 	if v.has(bytecode.RYield) {
-		g.genRet = a.NewLabel()
+		g.genRet, g.genObj = a.NewLabel(), a.NewLabel()
 	}
 	labels := map[bytecode.ROp]Label{}
 	var order []bytecode.ROp
@@ -1094,6 +1094,15 @@ func armEmit(v *variant) (*block, error) {
 		a.CmpImm(rC, int64(KindString), false)
 		a.BCond(NE, g.exit)
 		a.Bind(done)
+		g.next()
+	})
+	// gen_entry of a frame's first run, as amd64's.
+	h(bytecode.RGenEntry, func() {
+		a.Load(rS, rCtx, ncNF)
+		a.Load(rC, rS, offFSavedSP)
+		a.CmpImm(rC, 0, true)
+		a.BCond(LT, g.exit)
+		a.Store(rS, offFSavedSP, ZR)
 		g.next()
 	})
 

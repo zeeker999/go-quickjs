@@ -128,6 +128,7 @@ func init() {
 	nativeClosureFn = nativeClosure
 	nativeLitFn = nativeLit
 	nativeBuiltinFn = nativeBuiltin
+	nativeIterResFn = nativeIterRes
 	for _, op := range nativeSlowOnMiss {
 		nativeExitTable[op] = regSlowTable[op]
 	}
@@ -161,11 +162,19 @@ func (r *Runtime) nativeRun(f *frame, c *regCode, start int) (Value, error) {
 		}
 		nativeEnter(nativeBase, unsafe.Pointer(ctx))
 		r.backEdges = int(ctx.budget)
-		if ctx.retDone != 0 {
-			// The base frame returned: its value in the scratch.
+		if d := ctx.retDone; d != 0 {
+			// The base frame returned, or yielded (2): its value in the
+			// scratch.
 			ctx.retDone = 0
 			v := Value{num: math.Float64frombits(ctx.scratch[sV0]), ref: *(*unsafe.Pointer)(unsafe.Pointer(&ctx.scratch[sV1]))}
 			ctx.scratch[sV1] = 0
+			if d == 2 {
+				// rhYield's suspension, which no handler takes.
+				pc := int(ctx.pc)
+				st.kept.pc = pc + 1
+				st.err = r.regYield(st.f, v, pc+1)
+				v = Undefined
+			}
 			return r.nativeFinish(st, ctx, v, restarted)
 		}
 		s := ctx.top
@@ -349,6 +358,7 @@ func (r *Runtime) newNativeCtx(st *regState) *nativeCtx {
 	ctx.closureFn = *(*uintptr)(unsafe.Pointer(&nativeClosureFn))
 	ctx.litFn = *(*uintptr)(unsafe.Pointer(&nativeLitFn))
 	ctx.builtinFn = *(*uintptr)(unsafe.Pointer(&nativeBuiltinFn))
+	ctx.iterResFn = *(*uintptr)(unsafe.Pointer(&nativeIterResFn))
 	ctx.grow()
 	st.native = ctx
 	return ctx
@@ -575,8 +585,21 @@ func (r *Runtime) nativeGenEnd(s *regState, ctx *nativeCtx, rec *nativeRec, v Va
 	caller := r.nativeTop(ctx.st, ctx)
 	retPC := int((rec.retIP - rec.codeBase) / 8)
 	w := regAt(caller.c.code, retPC)
-	st := cursorOf(caller.regs[w.B()])
 	caller.kept.pc = retPC + 1
+	if w.Op() == bytecode.RCallMW {
+		// A step next() made (genNext): its result, as next makes it, or
+		// its throw at the call.
+		if err != nil {
+			return caller, caller.fail(err), w
+		}
+		if raw && v.IsObject() {
+			caller.regs[w.B()] = v
+		} else {
+			caller.regs[w.B()] = Obj(r.iterResult(v, done))
+		}
+		return caller, retPC + 1, w
+	}
+	st := cursorOf(caller.regs[w.B()])
 	if err == nil && raw && v.IsObject() {
 		// A delegate's own result, which a yield* hands out as it is.
 		res := v
@@ -653,6 +676,19 @@ func nativeBuiltin(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState
 
 // nativeBuiltinFn is nativeBuiltin's func value, set by init.
 var nativeBuiltinFn func(*[1 << 16]Value, bytecode.RInstr, int, *regState) int
+
+// nativeIterRes is the result of a generator's next(), called with no
+// exit as nativeLit is, where the call handler stepped the generator
+// itself (nativegen's genNext) and its yield or return gave the value to
+// the call's register B: the value made the { value, done } object next
+// returns (iterResult), done where pc is not 0. It throws nothing and runs
+// no code.
+func nativeIterRes(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeCtx) {
+	regs[w.B()] = Obj(ctx.st.r.iterResult(regs[w.B()], pc != 0))
+}
+
+// nativeIterResFn is nativeIterRes's func value, set by init.
+var nativeIterResFn func(*[1 << 16]Value, bytecode.RInstr, int, *nativeCtx)
 
 // nativeFillPCs writes the pc of each caller on the native frame stack
 // that has none written yet: its source position past its call, as

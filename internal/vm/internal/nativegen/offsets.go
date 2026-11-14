@@ -213,6 +213,7 @@ var (
 	ncClosureFn int32
 	ncLitFn     int32
 	ncBuiltinFn int32
+	ncIterResFn int32
 	offUpSlot   int32
 	offUpClosed int32
 	offRCLeafUp int32
@@ -455,6 +456,7 @@ func loadOffsets() {
 	ncClosureFn = off("nativeCtx.closureFn")
 	ncLitFn = off("nativeCtx.litFn")
 	ncBuiltinFn = off("nativeCtx.builtinFn")
+	ncIterResFn = off("nativeCtx.iterResFn")
 	offUpSlot = off("upvalue.slot")
 	offUpClosed = off("upvalue.closed")
 	offRCLeafUp = off("regCode.leafUp")

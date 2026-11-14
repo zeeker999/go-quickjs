@@ -596,7 +596,10 @@ func (g *nativeGen) call() {
 	a.Bind(builtin)
 	a.OpImm(Cmp, R9, regCallNative, false)
 	a.Jcc(CondNE, g.ex(4))
-	g.push(light)
+	notPush := a.NewLabel()
+	g.push(notPush)
+	a.Bind(notPush)
+	g.genNext(light)
 	a.Bind(light)
 	g.light()
 }

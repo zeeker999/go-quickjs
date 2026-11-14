@@ -916,3 +916,43 @@ func TestRegNativeForIn(t *testing.T) {
 		}
 		String(sum) + " " + String(c)`, bytecode.RIterNext, bytecode.RGetIndex)
 }
+
+// TestRegNativeGenNext runs a generator's next() natively (genNext): the
+// call handler steps the generator as for-of's iter_next does, and the
+// step's yield and return make next's result: first steps, values sent
+// back nowhere, returns with and without a value, a throw out of the
+// body and one caught in it, next() of a done generator and of a running
+// one, an argument sent (Go's), captures open on the frame (Go's), a
+// yield* that hands out its delegate's results, the call's register kept
+// where the step throws, and generators stepping generators.
+func TestRegNativeGenNext(t *testing.T) {
+	nativeCheck(t, `
+		var out = []
+		function* count(n) { for (var i = 0; i < n; i++) yield i * 3; return "end" }
+		function drain(g) { var s = "", r; for (r = g.next(); !r.done; r = g.next()) s += r.value + ","; return s + r.value + r.done }
+		out.push(drain(count(5)), drain(count(0)))
+		function* bare() { yield 1 }
+		var b = bare(); out.push(JSON.stringify([b.next(), b.next(), b.next()]))
+		function* thrower() { yield 1; throw new RangeError("t") }
+		var r = "kept", th = thrower(); r = th.next(); try { r = th.next() } catch (e) { out.push(e.message, JSON.stringify(r)) }
+		function* catcher() { try { yield 1; null.x } catch (e) { yield e.constructor.name } }
+		out.push(drain(catcher()))
+		function* sent() { var x = yield 1; yield x * 2 }
+		var s = sent(); out.push(s.next().value, s.next(21).value)
+		function* caps() { for (var i = 0; i < 3; i++) { var f = function () { return i }; yield f } }
+		var fs = [], c = caps(); for (var v = c.next(); !v.done; v = c.next()) fs.push(v.value()); out.push(fs.join())
+		function* deleg() { yield* count(3); yield* [7, 8] }
+		out.push(drain(deleg()))
+		var self; function* running() { try { self.next() } catch (e) { yield e.constructor.name } }
+		self = running(); out.push(self.next().value)
+		function* outer() { var g = count(3), r; while (!(r = g.next()).done) yield r.value + 100 }
+		out.push(drain(outer()))
+		out.join("\n")`, `
+		function* count(n) { for (var i = 0; i < n; i++) yield i }
+		var sum = 0
+		for (var j = 0; j < 100; j++) {
+			var g = count(20)
+			for (var r = g.next(); !r.done; r = g.next()) sum += r.value
+		}
+		String(sum)`, bytecode.RCallMW, bytecode.RYield, bytecode.RRet, bytecode.RRetUndef)
+}

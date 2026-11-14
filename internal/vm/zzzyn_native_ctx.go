@@ -64,8 +64,8 @@ type nativeCtx struct {
 	// topOK says states[depth-1] is the top frame's, made by nativeTop
 	// since the last call or return.
 	topOK int64
-	// retDone says the base frame has returned, its value in the
-	// scratch's sV0 and sV1.
+	// retDone says the base frame has returned (1) or yielded (2), its
+	// value in the scratch's sV0 and sV1.
 	retDone int64
 	// strBits is a string's tag word; typeofs the runtime's strings typeof
 	// answers (typeofStrs), nil where it has not made one yet; funcType,
@@ -135,6 +135,9 @@ type nativeCtx struct {
 	// builtinFn is the func value of nativeBuiltin, which the call
 	// handler calls through callH for a built-in its site cached.
 	builtinFn uintptr
+	// iterResFn is the func value of nativeIterRes, which a generator's
+	// step that next() entered calls for its result object.
+	iterResFn uintptr
 	// fv is the top frame's feedback vector, a slot a site into which a
 	// handler ORs the kinds of value it met (the JIT's next step, as
 	// Ignition's): none yet, its room kept here and in the frame record,

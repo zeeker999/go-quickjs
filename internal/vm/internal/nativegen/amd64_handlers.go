@@ -19,9 +19,9 @@ func nativeEmit(v *variant) (*block, error) {
 	g := &nativeGen{a: &Asm{}, v: v}
 	a := g.a
 	g.exit, g.exitRet, g.exitAfter = a.NewLabel(), a.NewLabel(), a.NewLabel()
-	g.genRet = g.exit
+	g.genRet, g.genObj = g.exit, g.exit
 	if v.has(bytecode.RYield) {
-		g.genRet = a.NewLabel()
+		g.genRet, g.genObj = a.NewLabel(), a.NewLabel()
 	}
 	labels := map[bytecode.ROp]Label{}
 	var order []bytecode.ROp
@@ -1264,6 +1264,19 @@ func nativeEmit(v *variant) (*block, error) {
 		a.OpImm(Cmp, RCX, int32(KindString), false)
 		a.Jcc(CondNE, g.exit)
 		a.Bind(done)
+		g.next()
+	})
+	// gen_entry of a frame's first run: nothing to do, as regGenEntry
+	// does nothing then; a throw injected (savedSP negative) is Go's.
+	h(bytecode.RGenEntry, func() {
+		zero := a.NewLabel()
+		a.Load(RSI, RDI, ncNF)
+		a.Load(RCX, RSI, offFSavedSP)
+		a.Op(Test, RCX, RCX, true)
+		a.Jcc(CondS, g.exit)
+		a.Jcc(CondE, zero)
+		a.StoreImm(RSI, offFSavedSP, 0)
+		a.Bind(zero)
 		g.next()
 	})
 

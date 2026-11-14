@@ -542,7 +542,10 @@ func (g *armGen) call() {
 	a.Bind(builtin)
 	a.CmpImm(r9, int64(regCallNative), false)
 	a.BCond(NE, g.ex(4))
-	g.push(light)
+	notPush := a.NewLabel()
+	g.push(notPush)
+	a.Bind(notPush)
+	g.genNext(light)
 	a.Bind(light)
 	g.light()
 }
