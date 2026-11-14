@@ -424,6 +424,9 @@ type compiler struct {
 	// was registered inside the statement, and goes before it is undone.
 	exits        []pendingExit
 	exitHandlers []int
+	// leaves says the statement just compiled always leaves the list it
+	// is in (fold.Leaves), which is all the list's compile reads of it.
+	leaves bool
 	// returnSlot is a hidden local a return routed through a finally clause
 	// parks its value in while the statements it leaves are undone, or -1.
 	returnSlot int32

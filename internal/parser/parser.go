@@ -131,6 +131,10 @@ type parser struct {
 
 	// nodes batches the allocation of the most common node types. See arena.go.
 	nodes arena
+	// freeCat is the string runs (strCat) no chain is joining, for the next.
+	freeCat *strCat
+	// strBlock is what strCat's joined strings are carved from.
+	strBlock []byte
 
 	// depth bounds nesting. A recursive-descent parser uses Go stack in
 	// proportion to how deeply the input nests, and a goroutine stack overflow
