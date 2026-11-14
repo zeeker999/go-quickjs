@@ -178,14 +178,18 @@ func regLowerCheck(t *testing.T, st *regLowerStats, top *bytecode.Function, part
 			}
 			return true
 		}
+		// Closed however the case ends, a first fresh that fails
+		// included.
+		defer func() {
+			for _, r := range rts {
+				if r != nil {
+					r.Close()
+				}
+			}
+		}()
 		if !fresh() {
 			return
 		}
-		defer func() {
-			for _, r := range rts {
-				r.Close()
-			}
-		}()
 		global := func(r *vm.Runtime, name string) vm.Value {
 			v, _ := r.GetProp(vm.Obj(r.Global()), r.Intern(name))
 			return v
@@ -444,7 +448,10 @@ func regCorpusRun(t *testing.T, check func(t *testing.T, top *bytecode.Function,
 		vm.SetRegTier(env)
 		report()
 	})
-	// micro is the micro-benchmarks' case, in parts.
+	// micro is the micro-benchmarks' case, in parts. A part is not heavy:
+	// it holds some 20 MB at once, its runtimes and its program's, and
+	// the parts are most of the test's time, which two at a time would
+	// make several times as long.
 	micro := func(t *testing.T) {
 		src, _ := regDiffMicro(t)
 		n := regLowerChunks()

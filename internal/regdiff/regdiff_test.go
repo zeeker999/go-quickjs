@@ -3,8 +3,10 @@ package regdiff
 import (
 	"context"
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"testing"
@@ -24,6 +26,27 @@ import (
 // register code's correctness rests on its verifier for memory and on these
 // for meaning: what a raw int32 register holds must be what the Value the
 // stack form keeps would be, at every overflow, -0, NaN and shift.
+
+// regDiffMemoryLimit is the soft limit on the test binary's memory
+// (debug.SetMemoryLimit) where GOMEMLIMIT sets none. The package's tests
+// run many cases at once, each in runtimes of its own, and the collector
+// would otherwise let the heap grow to twice what they hold live before
+// it collects; at the limit it collects sooner, and the binary's memory
+// stays near what is live. It is a soft limit: where more than it is
+// live, the collector runs more often, and the tests go on.
+const regDiffMemoryLimit = 2 << 30
+
+// TestMain runs the package's tests at regDiffMemoryLimit, and puts back
+// the limit there was after.
+func TestMain(m *testing.M) {
+	limit := debug.SetMemoryLimit(-1)
+	if limit == math.MaxInt64 {
+		debug.SetMemoryLimit(regDiffMemoryLimit)
+	}
+	code := m.Run()
+	debug.SetMemoryLimit(limit)
+	os.Exit(code)
+}
 
 // withRegTier runs f with the register backend and tier set to on, and puts
 // back what the environment says after.
@@ -96,6 +119,50 @@ var regDiffOn sync.Mutex
 // while a refusal is taken for regDiffAll's.
 var regDiffAlone sync.RWMutex
 
+// heavySlots bounds how many heavy tests run at once: those whose
+// program is a corpus's whole -- the micro-benchmarks, the V8 suite,
+// Int32's generated functions -- each runtime of which holds the corpus
+// compiled in every form and the benchmarks' heaps, and a test that runs
+// the corpora in runtimes of the JIT with the collector held off. Each
+// holds a slot (heavy); the small cases run beside them, as many at once
+// as -parallel lets.
+var heavySlots = make(chan struct{}, heavyLimit())
+
+// heavyLimit is how many heavy tests run at once:
+// QUICKJS_REGDIFF_HEAVY's number, or 2.
+func heavyLimit() int {
+	var n int
+	if _, err := fmt.Sscanf(os.Getenv("QUICKJS_REGDIFF_HEAVY"), "%d", &n); err == nil && n > 0 {
+		return n
+	}
+	return 2
+}
+
+// heavyHeld are the tests that hold a slot of heavySlots.
+var heavyHeld sync.Map
+
+// heavy has t, a test that runs a corpus's whole program, wait for a slot
+// of heavySlots and hold it until t and its cleanups are done. A
+// comparison of t's runs its three runtimes one after another
+// (regDiffLocked). A test calls it after t.Parallel and before it takes
+// regDiffAlone, and holds a slot itself rather than for subtests of its
+// own, so that no test waits for a slot that one waiting for it holds.
+func heavy(t *testing.T) {
+	t.Helper()
+	heavySlots <- struct{}{}
+	heavyHeld.Store(t, true)
+	t.Cleanup(func() {
+		heavyHeld.Delete(t)
+		<-heavySlots
+	})
+}
+
+// heavyHolds reports whether t holds a slot of heavySlots.
+func heavyHolds(t *testing.T) bool {
+	_, ok := heavyHeld.Load(t)
+	return ok
+}
+
 // regDiffLocked is regDiff, its caller holding regDiffAlone.
 func regDiffLocked(t *testing.T, src string, calls []string) int64 {
 	t.Helper()
@@ -104,35 +171,45 @@ func regDiffLocked(t *testing.T, src string, calls []string) int64 {
 		regDiffHook(t, src, calls)
 		return 1 << 20
 	}
-	// The three runs are made at once, each in a runtime of its own: the
-	// two with the tier off in runtimes of the old tiers, the one with it on
-	// counting the process's register code and fallbacks, which the others
-	// do not touch, one comparison's at a time (regDiffOn).
+	// The three runs, each in a runtime of its own: the two with the tier
+	// off in runtimes of the old tiers, the one with it on counting the
+	// process's register code and fallbacks, which the others do not
+	// touch, one comparison's at a time (regDiffOn). A small program's
+	// are made at once; a heavy comparison's (heavy) one after another,
+	// each runtime closed before the next is made, so that it holds one
+	// runtime of its corpus at a time and not three.
 	var off, again, on []string
 	var errs [3]error
 	var built, n int64
 	var by string
-	var wg sync.WaitGroup
-	wg.Add(3)
-	go func() {
-		defer wg.Done()
-		off, errs[0] = regDiffRun(src, calls, true)
-	}()
-	go func() {
-		defer wg.Done()
-		again, errs[1] = regDiffRun(src, calls, true)
-	}()
-	go func() {
-		defer wg.Done()
-		regDiffOn.Lock()
-		defer regDiffOn.Unlock()
-		before := vm.RegsBuilt()
-		vm.ResetRegFallbacks()
-		withRegTier(true, func() { on, errs[2] = regDiffRun(src, calls, false) })
-		built = vm.RegsBuilt() - before
-		n, by = vm.RegFallbacks()
-	}()
-	wg.Wait()
+	runs := [3]func(){
+		func() { off, errs[0] = regDiffRun(src, calls, true) },
+		func() { again, errs[1] = regDiffRun(src, calls, true) },
+		func() {
+			regDiffOn.Lock()
+			defer regDiffOn.Unlock()
+			before := vm.RegsBuilt()
+			vm.ResetRegFallbacks()
+			withRegTier(true, func() { on, errs[2] = regDiffRun(src, calls, false) })
+			built = vm.RegsBuilt() - before
+			n, by = vm.RegFallbacks()
+		},
+	}
+	if heavyHolds(t) {
+		for _, run := range runs {
+			run()
+		}
+	} else {
+		var wg sync.WaitGroup
+		wg.Add(len(runs))
+		for _, run := range runs {
+			go func() {
+				defer wg.Done()
+				run()
+			}()
+		}
+		wg.Wait()
+	}
 	for _, err := range errs {
 		if err != nil {
 			t.Fatalf("eval: %v", err)
@@ -209,6 +286,7 @@ func TestRegDiffMicrobenchmarks(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs every micro-benchmark three times")
 	}
+	heavy(t)
 	src, calls := regDiffMicro(t)
 	if built := regDiff(t, src, calls); built < 100 {
 		t.Errorf("only %d functions ran as register code", built)
@@ -228,6 +306,7 @@ func TestRegDiffV8Suite(t *testing.T) {
 	if err != nil {
 		t.Skip(err)
 	}
+	heavy(t)
 	var src strings.Builder
 	src.WriteString(files)
 	// Each benchmark run three times, its own checks of its answers on --
@@ -266,6 +345,7 @@ var global_res;
 // to NaN -- with shifts by 32 and more, >>> 0, and doubles mixed in.
 func TestRegDiffInt32(t *testing.T) {
 	regDiffParallel(t)
+	heavy(t)
 	rnd := rand.New(rand.NewSource(1))
 	consts := []string{"0", "1", "-1", "2", "7", "31", "32", "33", "64", "255", "0x3fff", "0xfffffff",
 		"0x7fffffff", "-0x80000000", "0x80000000", "0xffffffff", "4294967296", "-0", "0.5", "-1.5",
