@@ -195,7 +195,8 @@ primitive, which the concat converts the same, not a call of Go of its own.
 What the lowering leaves to Go whole -- a call, a cold operation
 -- is one `Host`, alone in its origin: Go runs the whole register
 instruction. Where Go can run it on the frame and the registers it reads
-and writes are known (`compile.RegAccess`: up to three read, one written)
+and writes are known (`compile.RegAccess`: up to three read, one written;
+a plain call's receiver register written by the call, not read)
 -- a for...in's or a for...of's cursor, an object's or an array's spread, a
 spread call, a computed key's definition, `#x in o`, super's reads and
 writes by name and super's base (their receiver register 1), a derived
@@ -1635,8 +1636,10 @@ its register 0, a method call's receiver to 1 -- or a plain call's undefined
 or global object, an arrow's captured this, for a callee that reads it --
 and the arguments from 2, undefined in its parameters past them, and checks
 the room its link says its code takes (`LinkFrame`). The callee's code makes
-its frame at its call entry: its context the caller's next, its registers
-past the parameters undefined, its stack's top past its window, scratch
+its frame at its call entry: its context the caller's next, its bindings
+past the parameters undefined (`Func`'s `InitEnd`, the register code's
+`Inits`, as the interpreter's call makes them) -- not its temporaries,
+which it writes before it reads them -- its stack's top past its window, scratch
 slots and frame (`Func`'s `Scratch`). The result comes back in registers to
 the call's keep cell and register.
 

@@ -1630,6 +1630,10 @@ func liveRegs(p *ir.Program, rc *bytecode.RegCode) {
 				for _, r := range writes {
 					kill(in, r)
 				}
+				if w := rc.Code[p.Origin[i]]; w.Op() == bytecode.RCallW || w.Op() == bytecode.RCallWT {
+					// The receiver the plain call writes (RegAccess).
+					kill(in, int(w.A())+1)
+				}
 				if all {
 					for k := range in {
 						in[k] = ^uint64(0)
@@ -1738,7 +1742,14 @@ func RegAccess(rc *bytecode.RegCode, pc int) (reads, writes []int, all bool) {
 		return out
 	}
 	switch w.Op() {
-	case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW, bytecode.RCallWT, bytecode.RCallMWT:
+	case bytecode.RCallW, bytecode.RCallWT:
+		// A plain call's receiver register, R[A+1], the call writes --
+		// undefined, the global object, an arrow's this (the VM's
+		// regCallThis) -- and reads nowhere: a read had kept the register
+		// live from the function's start, loaded at its entries and
+		// carried round its loops (liveRegs, which kills it).
+		return append([]int{a}, span(a+2, int(w.X()))...), []int{b}, false
+	case bytecode.RCallMW, bytecode.RNewW, bytecode.RCallMWT:
 		return span(a, 2+int(w.X())), []int{b}, false
 	case bytecode.RGetPrivate:
 		return []int{b, c}, []int{a}, false

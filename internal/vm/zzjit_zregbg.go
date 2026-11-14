@@ -93,6 +93,10 @@ func jitRegShape(f *ssa.Func, p *ir.Program, cl *closure, c *regCode) map[uint32
 		f.ThisSlot = p.UpvalueBase + p.Upvalues
 	}
 	f.Params, f.StartOnly = p.ParamBase+p.Params, false
+	// Its bindings undefined at its call entry, as the interpreter's call
+	// makes them, not its temporaries: each a pair of stores at every
+	// call, ten of them a call of fib's.
+	f.InitEnd = f.Params + c.rc.Inits
 	f.Cells = p.Cells
 	// Native callers call it (jitRegFeedback's NativeCalls), its window
 	// made past theirs: its call entry makes its frame (mir's callEntry).

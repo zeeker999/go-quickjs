@@ -4,6 +4,7 @@ package vm
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
@@ -123,6 +124,61 @@ function props(n) { var j, o = { x: 1, y: 2 }, s = 0; for (j = 0; j < n; j++) s 
 			}
 			if _, ok := o.loopEntry(e.unentered[0]); !ok || o.life.ssaStats.entries == 0 {
 				t.Errorf("the loop's code has entries %v, entered %d times", o.loops, o.life.ssaStats.entries)
+			}
+		})
+	}
+}
+
+// regFramesSrc's callees are called natively: fib's plain calls, whose
+// receiver register the call writes, and bindings that start undefined
+// beside temporaries a callee before them filled.
+const regFramesSrc = `
+function fib(k) { return k < 2 ? k : fib(k - 1) + fib(k - 2) }
+function fill(a) { var p = a * 3, q = [a, p], r = q.length + p; return r + q[1] }
+function late(a) { var u, w; let v; if (a > 5) { u = a * 2; v = u + 1 } else w = 'w'; return String(u) + ':' + v + ':' + w + ':' + typeof w }
+function drive(n) { var s = ''; for (var i = 0; i < n; i++) { s = fill(i) + '|' + late(i & 7) + '|' + fib(i & 7) } return s }
+`
+
+// A plain call's receiver register is the call's to write (compile's
+// RegAccess): no longer read by it, it is not live from the function's
+// start, where fib's code had loaded it at its entry and kept it in every
+// frame state. And a callee's call entry makes only its bindings
+// undefined (ssa.Func's InitEnd), as the interpreter's call does, not its
+// temporaries, which it writes before it reads them: answers exact with
+// what an earlier callee left in the window, idle and marking.
+func TestJITRegCallFrames(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			listings := map[string]string{}
+			mir.Annotate = true
+			JITCodeHook = func(f JITFunction, _ []byte, c *mir.Code) { listings[f.Name] = c.Listing }
+			defer func() { JITCodeHook, mir.Annotate = nil, false }()
+			rts := regNativeRuntimes(t, regFramesSrc)
+			var got [2]string
+			for k, r := range rts {
+				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("drive"))
+				for i := range 40 {
+					v, err := r.Call(fn, Undefined, []Value{Float(float64(60 + i%5))})
+					got[k] = regNativeShow(r, v, err)
+				}
+			}
+			// Node's.
+			if want := "380|14:15:undefined:undefined|13"; got[0] != got[1] || got[1] != want {
+				t.Errorf("with the JIT %q, without %q, want %q", got[0], got[1], want)
+			}
+			l, ok := listings["fib"]
+			if !ok {
+				t.Fatal("fib was not compiled")
+			}
+			start := strings.SplitN(l, "\nb1 ", 2)[0]
+			if n := strings.Count(start, "= load "); n != 1 {
+				t.Errorf("fib's entry loads %d registers, want its parameter alone:\n%s", n, start)
 			}
 		})
 	}

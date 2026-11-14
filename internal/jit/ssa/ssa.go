@@ -881,6 +881,15 @@ func (f *Func) setProperty(v *Value, holders *HolderChain, cases []PropertyCase,
 
 // cache is v's inline cache, made, from the workspace if there is one,
 // if it has none.
+// InitLocals is the end of the locals past Params the code's entry makes
+// undefined (InitEnd): FrameLocals, or InitEnd below it.
+func (f *Func) InitLocals() int {
+	if f.InitEnd != 0 && f.InitEnd < f.FrameLocals {
+		return f.InitEnd
+	}
+	return f.FrameLocals
+}
+
 func (f *Func) cache(v *Value) *InlineCache {
 	if v.IC == nil {
 		if f.ws != nil {
@@ -1123,6 +1132,12 @@ type Func struct {
 	// to it.
 	Params    int
 	StartOnly bool
+	// InitEnd, where not 0, ends the locals past Params the code's entry
+	// makes undefined: register code's bindings (bytecode.RegCode's
+	// Inits), which the interpreter's call makes undefined, before its
+	// temporaries, which the code writes before it reads them. 0 is every
+	// local to FrameLocals, the stack form's.
+	InitEnd int
 	// Cells marks code whose captured locals are in cells of their own
 	// (ir.Program's Cells): its native callers' call clears the context's
 	// (abi.Context's Cells), which its entries' call of Go makes (GoCells).
