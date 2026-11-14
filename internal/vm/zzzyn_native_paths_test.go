@@ -955,4 +955,22 @@ func TestRegNativeGenNext(t *testing.T) {
 			for (var r = g.next(); !r.done; r = g.next()) sum += r.value
 		}
 		String(sum)`, bytecode.RCallMW, bytecode.RYield, bytecode.RRet, bytecode.RRetUndef)
+	// A generator Go steps -- a spread's, Array.from's, a destructuring's
+	// -- runs as the base frame of a code entry of its own, whose yield
+	// the code makes (retDone 2) and whose first run's gen_entry it runs.
+	nativeCheck(t, `
+		var out = []
+		function* count(n) { for (var i = 0; i < n; i++) yield i; return "r" }
+		function* caps(n) { for (let i = 0; i < n; i++) yield () => i }
+		function* inWith(o) { with (o) { yield a; yield b } }
+		out.push([...count(5)].join(), Array.from(count(3)).join(), [...caps(3)].map(f => f()).join())
+		var [x, y, ...z] = count(6); out.push(x, y, z.join())
+		out.push([...inWith({ a: 1, b: 2 })].join())
+		function* thrower() { yield 1; throw new TypeError("t") }
+		try { [...thrower()] } catch (e) { out.push(e.message) }
+		out.join("\n")`, `
+		function* count(n) { for (var i = 0; i < n; i++) yield i }
+		var sum = 0
+		for (var j = 0; j < 100; j++) sum += [...count(20)].length
+		String(sum)`, bytecode.RYield, bytecode.RGenEntry)
 }
