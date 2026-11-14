@@ -106,7 +106,10 @@ var nativeExitTable [256]regHandler
 // only into one that holds no pointer; and the property and global reads
 // and writes by their sites, whose own entries, holders and, for a read,
 // earlier shapes (propPoly) the native code reads as rhGetProp,
-// rhSetProp, rhGetGlobal and rhSetGlobal do, and more. A
+// rhSetProp, rhGetGlobal and rhSetGlobal do, and more; bin's division
+// and int32 remainder (rhBin); the private members by their sites' own
+// entries (rhGetPrivateSite, rhSetPrivateSite); and in by the realm's in
+// cache, whose index keys' answers rsIn finds as rhIn does. A
 // compare-and-branch is not among them: its Go handler counts a back
 // edge's budget as the slow function does not.
 var nativeSlowOnMiss = [...]bytecode.ROp{
@@ -115,10 +118,11 @@ var nativeSlowOnMiss = [...]bytecode.ROp{
 	bytecode.RAndI, bytecode.ROrI, bytecode.RXorI, bytecode.RShlI, bytecode.RShrI, bytecode.RUShrI,
 	bytecode.RBitAnd, bytecode.RBitOr, bytecode.RBitXor, bytecode.RShl, bytecode.RShr, bytecode.RUShr,
 	bytecode.RGetProp, bytecode.RGetMethod, bytecode.RSetProp, bytecode.RGetGlobal, bytecode.RSetGlobal,
+	bytecode.RBin, bytecode.RGetPrivate, bytecode.RSetPrivate, bytecode.RIn,
 }
 
-// The exit table, made after regTable (zzreg_table.go's init, which
-// sorts first).
+// The exit table, made after regTable (zzreg_table.go's and
+// zzreg_zztable.go's inits, which sort first).
 func init() {
 	nativeExitTable = regTable
 	nativeClosureFn = nativeClosure

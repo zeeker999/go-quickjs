@@ -485,6 +485,25 @@ tries the operation's conversions: register allocation reuses
 temporaries across kinds, and with the slow functions converting every
 such store Box2D was 20%, zlib 13% and `bigint64_search` 33% slower.
 
+**The fast paths native code has.** What the native handlers answer
+with no exit, the Go table answers in its handlers too where the work is
+Go's to do as well: bin's division and int32 remainder (`rhBin`); a
+typed array's element written at a constant index -- a number, a
+Uint8ClampedArray's clamped, a BigInt held in its Value
+(`rsSetIndexITyped`); private members by their sites' own entries
+(`rhGetPrivateSite`, `rhSetPrivateSite`); `in` by the realm's in cache
+and by an array's elements (`rhIn`); a string's or a number's method from
+the realm's cache of their prototypes' properties (`rsGetMethodWPrim`);
+and an array's length written (`rsSetPropLength`). They are in a file of
+their own, which sorts after the handlers (`zzreg_zztable.go`) and whose
+init replaces the table's entries, so that no handler of
+`zzreg_table.go` moves: a branch added to `rhCallW` had moved every
+handler after it and cost the fallback 7 to 10%. Where a native handler
+answers all a fast path does, its exit calls the slow function at once
+(`nativeSlowOnMiss`). The typed arrays' writes were 13 to 62% faster
+(`typed_i64_write` 20.2 to 7.8 ns), `private_field` 17%, `prop_in` 17%,
+`array_length_decr` 31%, the number formats 5 to 16%.
+
 **Errors and positions.** A handler or slow function that can throw or
 run code keeps the pc past its instruction in `st.kept` first, by
 `st.at(pc)`, which also sets the frame's pc to the stack form's
