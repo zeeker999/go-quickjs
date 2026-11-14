@@ -49,6 +49,8 @@ func TestJITRegLoopsOneHeader(t *testing.T) {
 			JITCodeHook = func(f JITFunction, _ []byte, c *mir.Code) { listings[f.Name] = c.Listing }
 			defer func() { JITCodeHook, mir.Annotate = nil, false }()
 			rts := regNativeRuntimes(t, regLoopSrc)
+			// Compiled as the code asks, not as stress configures it.
+			rts[0].jitStress = jitStressConfig{}
 			var got [2]string
 			for k, r := range rts {
 				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("main"))
@@ -160,6 +162,8 @@ func TestJITRegCallFrames(t *testing.T) {
 			JITCodeHook = func(f JITFunction, _ []byte, c *mir.Code) { listings[f.Name] = c.Listing }
 			defer func() { JITCodeHook, mir.Annotate = nil, false }()
 			rts := regNativeRuntimes(t, regFramesSrc)
+			// Compiled as the code asks, not as stress configures it.
+			rts[0].jitStress = jitStressConfig{}
 			var got [2]string
 			for k, r := range rts {
 				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("drive"))
@@ -296,6 +300,8 @@ func TestJITRegComparisonValues(t *testing.T) {
 			JITCodeHook = func(f JITFunction, _ []byte, c *mir.Code) { listings[f.Name] = c.Listing }
 			defer func() { JITCodeHook, mir.Annotate = nil, false }()
 			rts := regNativeRuntimes(t, regCompareSrc)
+			// Compiled as the code asks, not as stress configures it.
+			rts[0].jitStress = jitStressConfig{}
 			var got [2][2]string
 			for k, r := range rts {
 				tbl, _ := r.GetProp(Obj(r.Global()), r.Intern("table"))
@@ -362,6 +368,9 @@ func TestJITRegLoopObjectsUnmade(t *testing.T) {
 			}
 			defer func() { JITCodeHook, mir.Annotate = nil, false }()
 			rts := regNativeRuntimes(t, regAccumulateSrc)
+			// Compiled as the code asks, not as stress configures it: the
+			// listing is the code a run without stress keeps.
+			rts[0].jitStress = jitStressConfig{}
 			for k, r := range rts {
 				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("drive"))
 				for i := range 40 {
