@@ -1905,8 +1905,14 @@ type CallSite struct {
 	// ProtoIndex, of the key ProtoKey, holds still, the pool's -- and
 	// writes the call's receiver, or undefined, and its arguments, up to
 	// the function's Params and LocalCount, to it. Go makes any other
-	// call, and the call while the collector marks.
-	GenMake uintptr
+	// call, and the call while the collector marks. GenArgAt is the place
+	// of the first argument among the generator's values -- 0, its first
+	// local's, for the stack form's; a register generator's, its window's
+	// register 2 less the registers it does not keep -- and GenThisAt, where
+	// not 0, one past the value the receiver is written to besides the
+	// generator's this: a register generator's register 1.
+	GenMake             uintptr
+	GenArgAt, GenThisAt int
 	// ForOf marks a for...of's or a destructuring's cursor made of the
 	// iterable, its one operand; ForIn a for...in's, of the object.
 	ForOf, ForIn bool

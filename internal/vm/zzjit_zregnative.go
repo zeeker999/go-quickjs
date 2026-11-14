@@ -1023,6 +1023,11 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 			r.jitRegAllocLength(f, run.e, rpc, w, callee.Object(), n)
 		} else {
 			r.jitRegCallSeen(f, c, run.e, rpc, callee)
+			if op == bytecode.RCallW || op == bytecode.RCallMW {
+				// A generator function's, whose generators the code may make
+				// (jitRegGenMakeSeen).
+				r.jitRegGenMakeSeen(f, run.e, rpc, callee)
+			}
 		}
 		if op == bytecode.RCallMW {
 			r.jitRegForEachSeen(f, run.e, rpc, callee, this, jitGoArg(ctx, at+1), argc)

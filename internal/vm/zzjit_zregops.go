@@ -449,3 +449,93 @@ func (f *jitRegFeedback) PureBody() bool {
 	fn := f.fb.fn
 	return fn != nil && fn.Leaf == bytecode.LeafPure && !fn.Generator && !fn.Async
 }
+
+// jitRegGenMakeable reports whether register code of cl's may make the
+// generators of o natively, as a call of it makes one (newRegGenerator),
+// as jitGenMakeable asks of the stack form's: a synchronous generator
+// function of register code, of cl's realm and scope, unbound, whose
+// window binds its parameters with nothing run -- end_params right after
+// gen_entry -- and keeps no arguments; no arguments object, no direct
+// eval, no receiver coerced that its body reads, no rare part; its
+// prototype its own data property holding an object.
+func (r *Runtime) jitRegGenMakeable(o *Object, cl *closure) bool {
+	fd := o.fn()
+	if fd == nil || fd.native != nil || fd.bound || fd.arrow || fd.closure == nil || fd.closure.realm != r.Realm || cl == nil ||
+		fd.closure.scope() != cl.scope() || r.debug != nil {
+		return false
+	}
+	c := r.regGenOf(fd.closure, o)
+	fn := fd.closure.fn
+	if c == nil || c.args || len(c.rc.Code) < 2 || regAt(c.code, 1).Op() != bytecode.REndParams ||
+		!fn.Generator || fn.Async || fn.UsesArguments || fn.HasDirectEval || fn.UsesThis && fn.CoerceThis {
+		return false
+	}
+	if x := fd.extra; x != nil && (len(x.with()) != 0 || x.lexThisRef != nil || x.evalVars() != nil) {
+		return false
+	}
+	p := o.getOwn(atomPrototype)
+	return p.ok() && p.flags()&(propAccessor|propPrivate|propDeleted) == 0 && p.value().IsObject()
+}
+
+// jitRegGenMakeSeen learns, after Go made the call at register pc rpc of
+// f's code e of callee, a generator function register code may make the
+// generators of (jitRegGenMakeable), which the next compile makes from a
+// pool (regGenMakeSite), as the stack form's code learns it
+// (jitGenMakeSeen); or one it makes so already, whose pool ran out, which
+// it fills again.
+func (r *Runtime) jitRegGenMakeSeen(f *frame, e *jitRegEntry, rpc int, callee Value) {
+	if !callee.IsObject() || e == nil || e.invalid {
+		return
+	}
+	o := callee.Object()
+	if fd := o.fn(); fd == nil || fd.closure == nil || !fd.closure.fn.Generator {
+		return
+	}
+	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	for _, x := range l.genMakes {
+		if int(x.pc) == rpc {
+			if x.obj == o && x.pool != nil && x.pool.Count == 0 {
+				r.jitRefillPool(x.pool)
+			}
+			return
+		}
+	}
+	if r.jitRegGenMakeable(o, f.cl) {
+		l.genMakes = append(l.genMakes, jitGenMake{pc: int32(rpc), obj: o})
+		r.jitRegReopt(f.cl, e)
+	}
+}
+
+// regGenMakeSite gives site, the call of Go of call_w or call_method_w at
+// register pc rpc, the generators of the function it learned it calls
+// (jitRegGenMakeSeen), from their pool, as the stack form's NativeCalls
+// does (ssa.CallSite's GenMake): their arguments written to the
+// generator's registers from the window's register 2 (GenArgAt), a
+// method's receiver to its register 1 too (GenThisAt), where its window
+// keeps it.
+func (f *jitRegFeedback) regGenMakeSite(rpc int, site *ssa.CallSite) {
+	fb := f.fb
+	if fb.e == nil || site.New {
+		return
+	}
+	for _, x := range fb.e.genMakes {
+		if int(x.pc) != rpc || !fb.r.jitRegGenMakeable(x.obj, fb.cl) {
+			continue
+		}
+		pool := fb.r.jitGenMakePool(fb.e, rpc, x.obj)
+		i := x.obj.findOwn(atomPrototype)
+		c := fb.r.regGenOf(x.obj.fn().closure, x.obj)
+		if pool == nil || i < 0 || c == nil {
+			continue
+		}
+		k := fb.keep()
+		k.pools, k.holders = append(k.pools, pool), append(k.holders, x.obj)
+		from := int(c.genFrom)
+		site.GenMake, site.Pool, site.ProtoIndex, site.ProtoKey = uintptr(unsafe.Pointer(x.obj)), uintptr(unsafe.Pointer(pool)), int(i), uint32(atomPrototype)
+		site.Params, site.LocalCount, site.GenArgAt = int(c.params), int(c.numRegs)-from, 2-from
+		if from == 0 {
+			site.GenThisAt = 2
+		}
+		return
+	}
+}

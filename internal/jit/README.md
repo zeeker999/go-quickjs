@@ -390,7 +390,7 @@ speculates nothing: it builds the site generically, or leaves it to Go.
 
 | Not answered yet | Methods | So |
 |---|---|---|
-| generators a step resumes | `GenSteps` | the step a call of Go |
+| generators a step resumes natively (a register generator's entry in native code, its yield returning to the step) | `GenSteps` | the step a call of Go, which resumes the generator's native code from Go (regGenRun) |
 | an inlined callee's exits, keeps | `InlineExit`, `KeepLimit` | nothing speculated |
 
 **The feedback dispatcher.** The native handlers come in variants, each a
@@ -1457,7 +1457,13 @@ native code for Go, which learns there what to call next. A construction
 receiver taken from a pool of objects made as `regConstruct` makes one
 (`jitNewPool`, `ssa.CallSite`'s `Pool`), in the callee's register 1 and its
 context's `This`, which the result is where the callee returns no object.
-A construction with the realm's Array, `new Array()` or `new Array(n)` of a
+A call of a synchronous generator function of register code whose window
+binds its parameters with nothing run (end_params right after gen_entry),
+learned at the call Go made of it (`jitRegGenMakeSeen`), takes its
+generator from a pool, as the stack form's does (`ssa.CallSite`'s
+`GenMake`): the arguments written to the generator's registers from its
+window's register 2 (`GenArgAt`), a method's receiver to its register 1
+too (`GenThisAt`). A construction with the realm's Array, `new Array()` or `new Array(n)` of a
 length a pool's arrays have room for, learned at the call Go made of it
 (`jitRegAllocSeen`), takes its array from a pool (`ssa.CallSite`'s
 `Alloc`), as the stack form's does. A

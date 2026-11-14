@@ -3856,10 +3856,14 @@ func genMakeArgs(v *ssa.Value, enc abi.Encoding, put func(x *ssa.Value, off int3
 	at := 0
 	if site.Method {
 		put(v.Args[0], enc.GenObject+enc.GenThis, false)
+		if site.GenThisAt != 0 {
+			// A register generator's register 1 too (CallSite's GenThisAt).
+			put(v.Args[0], int32(site.GenThisAt-1)*int32(enc.ValueSize), true)
+		}
 		at = 1
 	}
-	for i := 0; i < site.Argc && i < site.Params && i < site.LocalCount; i++ {
-		put(v.Args[at+1+i], int32(i)*int32(enc.ValueSize), true)
+	for i := 0; i < site.Argc && i < site.Params && site.GenArgAt+i < site.LocalCount; i++ {
+		put(v.Args[at+1+i], int32(site.GenArgAt+i)*int32(enc.ValueSize), true)
 	}
 }
 

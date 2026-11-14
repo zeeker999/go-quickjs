@@ -440,7 +440,7 @@ func TestJITRegOpsCompileForARM64(t *testing.T) {
 	}
 	RecordJITCompiles(true)
 	defer RecordJITCompiles(false)
-	for _, src := range []string{regElemSrc, regOpsSrc, regLoopsSrc, regAllocSrc, regClosureSrc, regClassSrc, regSpreadSrc, regArrowThisSrc, regStorageSrc, regTypedMethodsSrc, regPureSrc} {
+	for _, src := range []string{regElemSrc, regOpsSrc, regLoopsSrc, regAllocSrc, regClosureSrc, regClassSrc, regSpreadSrc, regArrowThisSrc, regStorageSrc, regTypedMethodsSrc, regPureSrc, regGenMakeSrc} {
 		rts := regNativeRuntimes(t, src)
 		r := rts[0]
 		fn, _ := r.GetProp(Obj(r.Global()), r.Intern("main"))
@@ -614,6 +614,68 @@ func TestJITRegPureBodies(t *testing.T) {
 						t.Fatalf("runtime %d: %q", i, got)
 					}
 				}
+			}
+		})
+	}
+}
+
+// regGenMakeSrc calls generator functions whose generators register code
+// makes natively from a pool (jitRegGenMakeSeen, ssa.CallSite's GenMake,
+// GenArgAt): a plain call of two arguments, a strict method's call, its
+// this the generator's register 1 too; then a generator function's
+// prototype replaced, which the pool was not made for.
+const regGenMakeSrc = `
+"use strict";
+function* range(a, b) { for (var i = a; i < b; i++) yield i }
+var o = { *items(k) { yield this.base + k; yield k }, base: 10 };
+function main(n) {
+	var s = 0;
+	for (var j = 0; j < n; j++) {
+		var g = range(j, j + 3); s += g.next().value + g.next().value;
+		for (var x of range(0, 2)) s += x;
+		var it = o.items(j); s += it.next().value + it.next().value;
+	}
+	return s;
+}
+function swap() { range.prototype = { tag: 1 }; return Object.getPrototypeOf(range(0, 1)).tag }
+`
+
+// TestJITRegGenMake runs regGenMakeSrc natively and in a runtime without
+// the JIT, before and after the swap: the generators made from pools.
+func TestJITRegGenMake(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regGenMakeSrc)
+			rts[0].SetJITReport(true)
+			call := func(name string) string {
+				var got [2]string
+				for i, r := range rts {
+					fn, _ := r.GetProp(Obj(r.Global()), r.Intern(name))
+					v, err := r.Call(fn, Undefined, []Value{Float(2000)})
+					got[i] = regNativeShow(r, v, err)
+				}
+				if got[0] != got[1] {
+					t.Errorf("%s: with the JIT %q, without %q", name, got[0], got[1])
+				}
+				return got[1]
+			}
+			for range 10 {
+				if got := call("main"); got != "8020000" {
+					t.Fatalf("main: %q", got)
+				}
+			}
+			if n := rts[0].RegNativeStats().GoCallOps["call_w->function"]; n > 2000 {
+				t.Errorf("%d generators made by calls of Go", n)
+			}
+			call("swap")
+			for range 3 {
+				call("main")
 			}
 		})
 	}

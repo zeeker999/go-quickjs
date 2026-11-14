@@ -666,7 +666,11 @@ func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
 	if site, ok := f.regBuiltinSite(w, argc, method); ok {
 		return []ssa.CallSite{site}
 	}
-	return []ssa.CallSite{{Go: ssa.GoCall, Argc: argc, Method: method, New: w.Op() == bytecode.RNewW, ThisSlot: -1}}
+	site := ssa.CallSite{Go: ssa.GoCall, Argc: argc, Method: method, New: w.Op() == bytecode.RNewW, ThisSlot: -1}
+	// A generator function's call, its generator made natively
+	// (regGenMakeSite).
+	f.regGenMakeSite(rpc, &site)
+	return []ssa.CallSite{site}
 }
 
 // regBuiltinSite is the call of a built-in native code makes itself whose
