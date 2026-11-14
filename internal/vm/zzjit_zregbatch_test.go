@@ -171,6 +171,10 @@ func TestJITRegBatchNative(t *testing.T) {
 	}
 	rts := regNativeRuntimes(t, regBatchSrc)
 	r := rts[0]
+	// Without QJS_JIT_STRESS's budgets and deoptimizations, whose exits
+	// these counts are not written for: TestJITRegBatch runs the same
+	// program under them, its answers checked.
+	r.jitStress = jitStressConfig{}
 	r.jitState().reporting = true
 	for _, name := range []string{"privates", "loops", "constructs", "bigints"} {
 		fn, _ := r.GetProp(Obj(r.Global()), r.Intern(name))
