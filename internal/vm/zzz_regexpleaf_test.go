@@ -390,14 +390,16 @@ out.join('|')`
 	if _, err := r.Run(compileForTest(t, `function g(re, s) { try { re.exec(s) } catch (e) {} }`)); err != nil {
 		t.Fatal(err)
 	}
+	// In the process's CPU time, which the machine's other processes --
+	// go test's other packages -- do not move as they do the clock.
 	best := func(src string) time.Duration {
 		b := time.Duration(1 << 62)
 		for range 3 {
-			start := time.Now()
+			start := processCPUForTest()
 			if _, err := r.Run(compileForTest(t, src)); err != nil {
 				t.Fatal(err)
 			}
-			b = min(b, time.Since(start))
+			b = min(b, processCPUForTest()-start)
 		}
 		return b
 	}
@@ -453,10 +455,11 @@ warm(); warm()`
 		if _, err := r.Run(compileForTest(t, src)); err != nil {
 			t.Fatal(err)
 		}
+		// In the process's CPU time, as TestRegExpLeafFailsAgainWithFrame.
 		best := func(src string) time.Duration {
 			b := time.Duration(1 << 62)
 			for range 2 {
-				start := time.Now()
+				start := processCPUForTest()
 				v, err := r.Run(compileForTest(t, src))
 				if err != nil {
 					t.Fatal(err)
@@ -464,7 +467,7 @@ warm(); warm()`
 				if got := v.String().Go(); got != "SyntaxError: regular expression is too complex" {
 					t.Fatalf("tree tier %v: %s = %s", tree, src, got)
 				}
-				b = min(b, time.Since(start))
+				b = min(b, processCPUForTest()-start)
 			}
 			return b
 		}
