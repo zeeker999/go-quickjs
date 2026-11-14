@@ -562,22 +562,24 @@ func (in *Instruction) Writes() (int, int) {
 // immediate; ok is false for any other, or for a slot past the regs
 // registers.
 func (in *Instruction) WholeOperands(regs int) (reads [3]int, n int, dest int, ok bool) {
-	var ops [3]Operand
+	// The operands' slots, -1 for a literal: no Operand copied, as Go asks
+	// at each such call.
+	slots := [3]int{in.Left.Slot, in.Right.Slot, in.Third.Slot}
 	dest = -1
 	switch {
 	case in.Op == Host && in.Whole:
 		if in.Extra > 3 {
 			return reads, 0, -1, false
 		}
-		ops, n, dest = [3]Operand{in.Left, in.Right, in.Third}, in.Extra, in.Dest
+		n, dest = in.Extra, in.Dest
 	case in.Op == FieldDefine, in.Op == PropertyWrite && !in.Private:
-		ops, n = [3]Operand{in.Left, in.Right}, 2
+		n = 2
 	case in.Op == ArrayWrite:
-		ops, n = [3]Operand{in.Left, in.Right, in.Third}, 3
+		n = 3
 	case in.Op == IterStep && in.When, in.Op == PropertyRead && !in.Private, in.Op == ReferenceRead:
-		ops, n, dest = [3]Operand{in.Left}, 1, in.Dest
+		n, dest = 1, in.Dest
 	case in.Op == ArrayRead && !in.Reference, in.Op == HasProperty, in.Op == DeleteProperty:
-		ops, n, dest = [3]Operand{in.Left, in.Right}, 2, in.Dest
+		n, dest = 2, in.Dest
 	default:
 		return reads, 0, -1, false
 	}
@@ -585,15 +587,15 @@ func (in *Instruction) WholeOperands(regs int) (reads [3]int, n int, dest int, o
 		return reads, 0, -1, false
 	}
 	k := 0
-	for _, o := range ops[:n] {
-		if o.Slot < 0 {
+	for _, slot := range slots[:n] {
+		if slot < 0 {
 			// The instruction's immediate.
 			continue
 		}
-		if o.Slot >= regs {
+		if slot >= regs {
 			return reads, 0, -1, false
 		}
-		reads[k] = o.Slot
+		reads[k] = slot
 		k++
 	}
 	return reads, k, dest, true
