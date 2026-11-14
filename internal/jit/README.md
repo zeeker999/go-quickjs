@@ -665,19 +665,32 @@ for the frames that wait there next and let go of with it
 in it stays in it at its exits while the function's code is the one it
 was compiled beside.
 
-**Profit.** Each native stretch -- an entry, a call of Go -- costs what an
-exit and an entry would (`jitSSAMinWork`), against the work the stretch did
-(`jitRegStretchWork`). Every `jitSSAProbe` stretches, code whose work does
-not make up for them Go no longer enters (`entrySlow`), native callers
-calling it still; stretches begun at a loop are judged apart (`loopSlow`),
-and so are the settled calls of Go -- not a call of a function it may come
-to call natively -- of a run begun at a loop (`jitRegRunGoProfit`), as the
-stack form's `jitSSAProfit` and `jitRunGoProfit` judge. Go enters such code
-again after `jitNativeRetry` calls of it, doubled each time
-(`jitRegRetrySlow`), and compiled again it is judged afresh: entered, and
-called natively, until the new code is found not to pay in turn
-(`jitRegCached`, as the stack form's `jitReoptimize`). `JITReport` shows it as slow, with the calls the
-interpreter made of it.
+**Profit.** Each native stretch -- an entry, the code entered again after
+an exit or a poll, a call of Go -- costs what an exit and an entry would
+(`jitSSAMinWork`), against the work the stretch did (`jitRegStretchWork`):
+its back edges, at the mean length of the function's loops in the
+program's instructions (`irLoopMean`, the stack form's `jitLoopLength`),
+and the distance to where it left. Every `jitSSAProbe` stretches (the
+stack form's `entries + goCalls`), code whose work does not make up for
+them Go no longer enters (`entrySlow`), native callers calling it still;
+stretches begun at a loop are judged apart (`loopSlow`), and so are the
+settled calls of Go -- not a call of a function it may come to call
+natively -- of a run begun at a loop (`jitRegRunGoProfit`), unless the code
+calls functions natively (`jitRegCodeCallsNatively`): judged slow there,
+the run leaves once that call is made (`jitRegRun`'s `leave`). A native
+callee's calls of Go are judged too, beyond its native callers' calls in
+(`jitRegCalleeProfit`, the stack form's `jitCalleeProfit`): code that does
+not pay is neither entered nor called natively (`notNative`). This is the
+stack form's `jitSSAProfit`, `jitRunGoProfit` and `jitCalleeProfit`. Go
+enters such code again after `jitNativeRetry` calls of it, doubled each
+time (`jitRegRetrySlow`), a loop's checks of code judged slow at loops
+counting as such calls, as the stack form's `tryJITAt` counts them; and
+compiled again it is judged afresh: entered, and called natively, until the
+new code is found not to pay in turn (`jitRegCached`, as the stack form's
+`jitReoptimize`). What Go declines counts toward the work the function
+spends for a compile for what it learned (`jitRegSpent`'s `slowCalls`), as
+its native callees' work between their calls of Go does (`calleeWork`).
+`JITReport` shows it as slow, with the calls the interpreter made of it.
 
 ## The SSA build
 

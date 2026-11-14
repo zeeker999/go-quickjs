@@ -171,3 +171,75 @@ function g(n) { var o = [1], s = 0; for (var i = 0; i < n; i++) s += f(o, i); re
 		}
 	})
 }
+
+// TestJITRegLoopOfGoCallsLeaves runs a loop entered by on-stack
+// replacement whose every turn is a call of Go and little else, and checks
+// that once its calls are judged not to pay (jitRegRunGoProfit) the run
+// leaves after the call it judged at, as the stack form's does
+// (jitRunGoProfit's result), and the interpreter runs the loop. Before,
+// the judgement was made and its result dropped: the loop ran its calls
+// of Go natively to its end.
+func TestJITRegLoopOfGoCallsLeaves(t *testing.T) {
+	const src = `
+function f(n) { var s = 0; for (var i = 0; i < n; i++) s += JSON.stringify(i & 7).length; return s }
+`
+	regBothMarking(t, func(t *testing.T) {
+		rts := regNativeRuntimes(t, src)
+		r := rts[0]
+		r.jitStress = jitStressConfig{}
+		var got [2]string
+		for i, rt := range rts {
+			fn, _ := rt.GetProp(Obj(rt.Global()), rt.Intern("f"))
+			v, err := rt.Call(fn, Undefined, []Value{Float(200000)})
+			got[i] = regNativeShow(rt, v, err)
+		}
+		if got[0] != got[1] || got[0] != "200000" {
+			t.Fatalf("with the JIT %q, without %q, want 200000", got[0], got[1])
+		}
+		fv, _ := r.GetProp(Obj(r.Global()), r.Intern("f"))
+		e := fv.Object().fn().closure.closureCode.jitReg
+		if e == nil {
+			t.Fatalf("f not compiled")
+		}
+		st := e.life.ssaStats
+		t.Logf("loopSlow %v, calls of Go %d, judged %d", e.life.loopSlow, st.goCalls, st.runGoCalls)
+		if !e.life.loopSlow {
+			t.Skipf("f's calls of Go were judged to pay")
+		}
+		if st.goCalls > 4*jitSSAProbe {
+			t.Errorf("%d calls of Go made natively after the loop was judged slow at %d", st.goCalls, st.runGoCalls)
+		}
+	})
+}
+
+// TestJITRegLoopMeanInProgramUnits checks that the loops' mean length a
+// stretch's back edges are counted by is in the program's instructions,
+// the units jitSSAMinWork is in, as the stack form's jitLoopLength is in
+// its own: the distance from each backward jump's target to it, as
+// lowered (irLoopMean).
+func TestJITRegLoopMeanInProgramUnits(t *testing.T) {
+	const src = `
+function f(a) { var s = 0; for (var i = 0; i < a.length; i++) s += a[i] * 2 + 1; return s }
+`
+	rts := regNativeRuntimes(t, src)
+	r := rts[0]
+	fv, _ := r.GetProp(Obj(r.Global()), r.Intern("f"))
+	cl := fv.Object().fn().closure
+	if cl.reg == nil {
+		r.regOf(cl)
+	}
+	e := r.jitRegFor(cl, cl.reg)
+	if e == nil || e.code == nil {
+		t.Fatalf("f not compiled: %+v", e)
+	}
+	bl := cl.reg.rc.BackLive
+	if len(bl) != 2 {
+		t.Fatalf("f has %d loops, want 1", len(bl)/2)
+	}
+	q := int(bl[0])
+	head := q + 1 + int(regJumpOff(regAt(cl.reg.code, q)))
+	want := int(e.at[q+1]) - int(e.at[head])
+	if e.loopMean != want {
+		t.Errorf("loop mean %d, want %d, the program's instructions from %d to %d (register: %d)", e.loopMean, want, e.at[head], e.at[q+1], q-head+1)
+	}
+}

@@ -1296,7 +1296,10 @@ type jitState struct {
 	callsDecided uint64
 	pinSerial    uint64
 	goMark       jitGoMark
-	levels       jitLevels
+	// regGoMark is goMark for register code: the last call of Go a native
+	// callee's code made (jitRegCalleeProfit).
+	regGoMark jitRegGoMark
+	levels    jitLevels
 	// lazy are the native levels whose frames calls of Go put off, the
 	// innermost call's last, and lazyTop the depth below which they are
 	// (jitLazyLevels).

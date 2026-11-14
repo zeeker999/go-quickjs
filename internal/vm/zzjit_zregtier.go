@@ -425,15 +425,18 @@ func (r *Runtime) jitRegLearnedDueWith(cl *closure, e *jitRegEntry, own int) boo
 // compiled, as jitLearnedSpent counts the stack form's: its invocations,
 // each its length -- Go's entries at its start, native callers' calls
 // through its link, the runs the interpreter went on with after the code
-// left -- the work its native stretches did (jitRegStretchWork), and the
+// left, the calls Go made without entering it (slowCalls) -- the work its
+// native stretches did (jitRegStretchWork) and its native calls between
+// their calls of Go (jitRegCalleeProfit's calleeWork), and the
 // interpreter's in its loops before Go entered them (jitEntry's osrWork).
 func (r *Runtime) jitRegSpent(c *regCode, e *jitRegEntry) int64 {
 	life := e.life
-	calls := life.starts + life.goOns
+	calls := life.starts + life.goOns + life.slowCalls
 	if l := r.jit.regLinks[e.key]; l != nil {
 		calls += l.in
 	}
-	return int64(calls)*int64(max(len(c.rc.Code), 1)) + int64(life.ssaStats.work) + life.osrWork
+	st := &life.ssaStats
+	return int64(calls)*int64(max(len(c.rc.Code), 1)) + int64(st.work+st.calleeWork) + life.osrWork
 }
 
 // jitRegReoptimize compiles cl's function's register code c again for what
@@ -825,8 +828,14 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 			e.life.osrWork += r.jitRegTierWork(n)
 		}
 	}
+	if e != nil && e.life.loopSlow && !forced {
+		// Code whose runs begun at a loop do not pay (loopSlow): the
+		// interpreter runs the loop, and Go enters it again once retried,
+		// as the stack form's tryJITAt has it (jitRetrySlow).
+		e.life.slowCalls++
+		r.jitRegRetrySlow(e)
+	}
 	if e == nil || !e.goesOn || e.life.loopSlow {
-		// Or code whose runs begun at a loop do not pay (loopSlow).
 		return target
 	}
 	if e = r.jitRegLoopCode(f, c, e, target); e == nil || !r.jitRegContextFree() {
@@ -836,7 +845,6 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 	if forced {
 		s.wentOn++
 	}
-	e.life.ssaStats.entries++
 	pc, v, done, err := r.jitRegGoOn(f, c, e, st.wb, target)
 	switch {
 	case err != nil:
