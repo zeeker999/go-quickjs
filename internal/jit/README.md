@@ -192,7 +192,9 @@ operands. What the lowering leaves to Go whole -- a call, a cold operation
 instruction. Where Go can run it on the frame and the registers it reads
 and writes are known (`compile.RegAccess`: up to three read, one written)
 -- a for...in's or a for...of's cursor, an object's or an array's spread, a
-spread call, a computed key's definition -- it is a whole Host (`ir.Instruction`'s `Whole`), its
+spread call, a computed key's definition, `#x in o`, super's reads and
+writes by name and super's base (their receiver register 1), a derived
+constructor's result -- it is a whole Host (`ir.Instruction`'s `Whole`), its
 operands the registers it reads and its result the one it writes, which
 native code calls Go for and goes on after (see [Calls of
 Go](#calls-of-go)). So is what the builder leaves to Go of an operation

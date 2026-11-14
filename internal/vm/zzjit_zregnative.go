@@ -1063,7 +1063,9 @@ func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int)
 	}
 	own := ctx.Live == 0
 	switch op := regAt(c.code, rpc).Op(); {
-	case !own && (op == bytecode.RLoadThis || op == bytecode.RThis):
+	case !own && (op == bytecode.RLoadThis || op == bytecode.RThis || op == bytecode.RDerivedRet):
+		// What reads a this binding, which a native callee's stand-in
+		// frame has none of.
 		return false
 	case op == bytecode.RCloseRegs && (!own || ctx.Cells != nil):
 		// A scope's end where the code's captured registers are in cells

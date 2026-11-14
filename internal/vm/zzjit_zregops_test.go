@@ -293,3 +293,67 @@ func TestJITRegClosurePools(t *testing.T) {
 		})
 	}
 }
+
+// regClassSrc's methods read and write through super, ask #p in o, and a
+// derived constructor with a loop -- entered natively by on-stack
+// replacement -- returns its this or an object: each Go's whole on the
+// frame, no longer an exit (compile's RegAccess).
+const regClassSrc = `
+class A { constructor(x) { this.x = x } get g() { return this.x * 2 } m(k) { return this.x + k } }
+class B extends A {
+	#p = 1;
+	constructor(x) { super(x); this.y = x + 1 }
+	m(k) { return super.m(k) + super.g + this.#p + super["m"](1) }
+	static has(o) { return #p in o }
+	get g() { return super.g + 1 }
+	set s(v) { super.x = v }
+}
+class D extends A { constructor(n) { super(n); var s = 0; for (var i = 0; i < n; i++) s += super.m(i); this.s = s; if (n == 77) return { neg: n } } }
+function run(n) {
+	var s = 0;
+	for (var i = 0; i < n; i++) { var b = new B(i & 15); s += b.m(i) + b.g + (B.has(b) ? 1 : 0) + (B.has({}) ? 100 : 0); b.s = 3; s += b.x }
+	var d = new D(500), e = new D(77);
+	try { B.has(1) } catch (err) { s += err.name }
+	return s + ":" + d.s + ":" + e.neg + ":" + (e instanceof D);
+}
+function main() { return run(3000) }
+`
+
+// TestJITRegClassOps runs regClassSrc's main natively and in a runtime
+// without the JIT and compares their answers: super's reads and writes,
+// #p in o and a derived constructor's return made on the frame, not at
+// exits.
+func TestJITRegClassOps(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regClassSrc)
+			var got [2]string
+			for i, r := range rts {
+				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("main"))
+				for range 10 {
+					v, err := r.Call(fn, Undefined, nil)
+					got[i] = regNativeShow(r, v, err)
+				}
+			}
+			if got[0] != got[1] {
+				t.Errorf("with the JIT %q, without %q", got[0], got[1])
+			}
+			if got[1] != "4654308TypeError:374750:77:false" {
+				t.Errorf("main: %q", got[1])
+			}
+			st := rts[0].RegNativeStats()
+			t.Logf("hosts %v", st.HostOps)
+			for _, op := range []string{"super_get", "super_get_index", "private_in", "super_base", "derived_ret"} {
+				if n := st.HostOps[op]; n > 20 {
+					t.Errorf("%s left to Go at %d host exits", op, n)
+				}
+			}
+		})
+	}
+}

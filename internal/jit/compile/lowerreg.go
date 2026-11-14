@@ -1474,6 +1474,22 @@ func RegAccess(rc *bytecode.RegCode, pc int) (reads, writes []int, all bool) {
 		return append(span(b, 3), c), []int{a}, false
 	case bytecode.RInstanceOf:
 		return []int{b, c}, []int{a}, false
+	case bytecode.RPrivateIn:
+		// #x in o, of the object and the key's register.
+		return []int{b, c}, []int{a}, false
+	case bytecode.RSuperGet, bytecode.RSuperBase:
+		// super's base is its home object's prototype, its receiver this,
+		// register 1 -- where a derived constructor's binding is not, the
+		// frame's.
+		return []int{1}, []int{a}, false
+	case bytecode.RSuperSet:
+		return []int{a, 1}, nil, false
+	case bytecode.RSuperGetIndex:
+		return []int{b, c, 1}, []int{a}, false
+	case bytecode.RDerivedRet:
+		// What a derived constructor returns: its operand, or the frame's
+		// this binding.
+		return []int{a}, []int{a}, false
 	case bytecode.RTypeof:
 		return []int{b}, []int{a}, false
 	case bytecode.RUnary:
