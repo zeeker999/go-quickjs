@@ -1041,6 +1041,12 @@ func (f *jitRegFeedback) literalAt(pc int) *jitLiteral {
 		if int(w.C()) >= len(cl.ic) {
 			return nil
 		}
+		if w.Op() == bytecode.RNewObjectLit && cl.reg != nil {
+			// Its root the realm's for literals of its keys, as the
+			// interpreter's first object takes it (regLiteralKeyedRoot),
+			// where the code makes the site's first.
+			r.regLiteralKeyedRoot(cl.reg, rpc, &cl.ic[w.C()])
+		}
 		return r.jitObjectLiteral(e, cl, rpc, uint32(w.C()), n)
 	case bytecode.RNewArray:
 		if int(w.C()) > ir.MaxArrayLiteral {
