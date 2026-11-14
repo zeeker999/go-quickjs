@@ -147,7 +147,9 @@ Its instructions name registers as their operands
 run of registers, a window of the callee's, which the interpreter's call
 makes the callee's frame. `compile.LowerReg` lowers a function's register
 code into the slot IR; `LowerRegHot` lowers one its callers have shown to be
-hot, and `LowerRegInline` one for native callers or for inlining. Code
+hot, and `LowerRegInline` one for native callers or for inlining; each
+has a form with hints (`LowerRegWith`, `Hints` by register pc), what the
+function's code learned at its exits (see [Feedback](#feedback)). Code
 compiled at a function's first call (`bytecode.RegLater`) keeps the names,
 constants and property sites it adds in its `RegCode`, which the lowering
 reads in place of the function's (`regView`).
@@ -341,7 +343,19 @@ the function's key:
   `jitRegBigIntExit`, the stack form's `jitBigIntNote`), which the next
   compiles make natively or call Go for (see [BigInts](#bigints));
 - the register pcs after calls Go went on at, which the code had been built
-  with no entry at (`Resumed`, `jitRegResumeSeen`).
+  with no entry at (`Resumed`, `jitRegResumeSeen`);
+- the elements' kinds, as the stack form's code learns them
+  (`jitRegElemSeen`, zzjit_zregelem.go): at a host exit, an element read
+  by its cell that met a typed array's, a BigInt typed array's or a
+  string's element, or an object's property by its name (`TypedRead`,
+  `TypedBigRead`, `StringRead`, `KeyedRead`), and a write to an object
+  native code does not store to (`KeyedWrite`), the code stale from
+  there; at a deoptimization, an element read made as a number that met
+  what is none, and an addition that met a string, which every lowering
+  of the function's register code is made with from there (the hints,
+  `jitLearned`'s `regHints`, by register pc, `jitRegLower`): the read
+  made by its cell (ir's `Reference`), the addition Go's (`StringAdd`),
+  the additions of an element read of strings too (`stringConcats`).
 
 A guard's failure invalidates the code; anything else learned marks it
 stale, to be compiled again without a deoptimization (see
@@ -362,12 +376,12 @@ speculates nothing: it builds the site generically, or leaves it to Go.
 | call frequencies | `Frequency` |
 | what exits taught | `Generic`, `EntryGeneric`, `Resumed` |
 | steps, `in`, `typeof`, scopes' ends, typed arrays' kinds | `GenNext`, `MapNexts`, `KeyAtoms`, `HasCache`, `TypeofCells`, `WalkedCloseCell`, `TypedKind` |
+| elements' kinds learned at exits, captured typed arrays | `TypedRead`, `TypedBigRead`, `KeyedRead`, `KeyedWrite`, `StringRead`, `UpvalueTyped` |
 
 | Not answered yet | Methods | So |
 |---|---|---|
 | generators a step resumes | `GenSteps` | the step a call of Go |
 | `indexOf`, `parseInt`, `instanceof` | `IndexOf`, `ParseInt`, `InstanceOf` | Go's |
-| elements' kinds learned at exits | `TypedRead`, `TypedBigRead`, `KeyedRead`, `KeyedWrite`, `StringRead`, `UpvalueTyped` | generic element access |
 | closures and cells from pools | `Closure`, `CellsPool` | Go makes them on the register frame |
 | an inlined callee's exits, keeps, BigInts' strings, pure bodies | `InlineExit`, `KeepLimit`, `BigString`, `PureBody` | nothing speculated |
 

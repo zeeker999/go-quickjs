@@ -1139,6 +1139,62 @@ func (q *jitRegSnapshot) BigIntFailed(pc int) (r0 bool) {
 	return r0
 }
 
+func (q *jitRegSnapshot) StringRead(pc int) (r0 bool) {
+	a := q.get(snapStringRead, int64(pc))
+	if a == nil {
+		return
+	}
+	r0, _ = a[0].(bool)
+	return r0
+}
+
+func (q *jitRegSnapshot) TypedRead(pc int) (r0 bool) {
+	a := q.get(snapTypedRead, int64(pc))
+	if a == nil {
+		return
+	}
+	r0, _ = a[0].(bool)
+	return r0
+}
+
+func (q *jitRegSnapshot) TypedBigRead(pc int) (r0 bool, r1 bool) {
+	a := q.get(snapTypedBigRead, int64(pc))
+	if a == nil {
+		return
+	}
+	r0, _ = a[0].(bool)
+	r1, _ = a[1].(bool)
+	return r0, r1
+}
+
+func (q *jitRegSnapshot) KeyedRead(pc int) (r0 bool) {
+	a := q.get(snapKeyedRead, int64(pc))
+	if a == nil {
+		return
+	}
+	r0, _ = a[0].(bool)
+	return r0
+}
+
+func (q *jitRegSnapshot) KeyedWrite(pc int) (r0 bool) {
+	a := q.get(snapKeyedWrite, int64(pc))
+	if a == nil {
+		return
+	}
+	r0, _ = a[0].(bool)
+	return r0
+}
+
+func (q *jitRegSnapshot) UpvalueTyped(pc int) (r0 uint8, r1 bool) {
+	a := q.get(snapUpvalueTyped, int64(pc))
+	if a == nil {
+		return
+	}
+	r0, _ = a[0].(uint8)
+	r1, _ = a[1].(bool)
+	return r0, r1
+}
+
 func (q *jitRegSnapshot) Property(pc int) (r0 ssa.PropertySite, r1 bool) {
 	a := q.get(snapProperty, int64(pc))
 	if a == nil {
@@ -1572,6 +1628,60 @@ func jitRegSnapAskBigIntFailed(s *jitSnapshot, fb *jitRegFeedback, pc int) {
 	}
 }
 
+func jitRegSnapAskStringRead(s *jitSnapshot, fb *jitRegFeedback, pc int) {
+	before := s.begin(fb.fb)
+	r0 := fb.StringRead(pc)
+	s.end(fb.fb, before, snapStringRead, int64(pc))
+	if jitSnapAnswered(r0) {
+		s.put(snapStringRead, int64(pc), r0)
+	}
+}
+
+func jitRegSnapAskTypedRead(s *jitSnapshot, fb *jitRegFeedback, pc int) {
+	before := s.begin(fb.fb)
+	r0 := fb.TypedRead(pc)
+	s.end(fb.fb, before, snapTypedRead, int64(pc))
+	if jitSnapAnswered(r0) {
+		s.put(snapTypedRead, int64(pc), r0)
+	}
+}
+
+func jitRegSnapAskTypedBigRead(s *jitSnapshot, fb *jitRegFeedback, pc int) {
+	before := s.begin(fb.fb)
+	r0, r1 := fb.TypedBigRead(pc)
+	s.end(fb.fb, before, snapTypedBigRead, int64(pc))
+	if jitSnapAnswered(r1) {
+		s.put(snapTypedBigRead, int64(pc), r0, r1)
+	}
+}
+
+func jitRegSnapAskKeyedRead(s *jitSnapshot, fb *jitRegFeedback, pc int) {
+	before := s.begin(fb.fb)
+	r0 := fb.KeyedRead(pc)
+	s.end(fb.fb, before, snapKeyedRead, int64(pc))
+	if jitSnapAnswered(r0) {
+		s.put(snapKeyedRead, int64(pc), r0)
+	}
+}
+
+func jitRegSnapAskKeyedWrite(s *jitSnapshot, fb *jitRegFeedback, pc int) {
+	before := s.begin(fb.fb)
+	r0 := fb.KeyedWrite(pc)
+	s.end(fb.fb, before, snapKeyedWrite, int64(pc))
+	if jitSnapAnswered(r0) {
+		s.put(snapKeyedWrite, int64(pc), r0)
+	}
+}
+
+func jitRegSnapAskUpvalueTyped(s *jitSnapshot, fb *jitRegFeedback, pc int) {
+	before := s.begin(fb.fb)
+	r0, r1 := fb.UpvalueTyped(pc)
+	s.end(fb.fb, before, snapUpvalueTyped, int64(pc))
+	if jitSnapAnswered(r1) {
+		s.put(snapUpvalueTyped, int64(pc), r0, r1)
+	}
+}
+
 func jitRegSnapAskProperty(s *jitSnapshot, fb *jitRegFeedback, pc int) {
 	before := s.begin(fb.fb)
 	r0, r1 := fb.Property(pc)
@@ -1818,6 +1928,12 @@ const jitRegSnapMethods uint64 = 0 |
 	1<<snapBigInt |
 	1<<snapBigIntWide |
 	1<<snapBigIntFailed |
+	1<<snapStringRead |
+	1<<snapTypedRead |
+	1<<snapTypedBigRead |
+	1<<snapKeyedRead |
+	1<<snapKeyedWrite |
+	1<<snapUpvalueTyped |
 	1<<snapProperty |
 	1<<snapStringProperty |
 	1<<snapAccessor |
@@ -1860,6 +1976,12 @@ func init() {
 		snapBigInt:         jitRegSnapAskBigInt,
 		snapBigIntWide:     jitRegSnapAskBigIntWide,
 		snapBigIntFailed:   jitRegSnapAskBigIntFailed,
+		snapStringRead:     jitRegSnapAskStringRead,
+		snapTypedRead:      jitRegSnapAskTypedRead,
+		snapTypedBigRead:   jitRegSnapAskTypedBigRead,
+		snapKeyedRead:      jitRegSnapAskKeyedRead,
+		snapKeyedWrite:     jitRegSnapAskKeyedWrite,
+		snapUpvalueTyped:   jitRegSnapAskUpvalueTyped,
 		snapProperty:       jitRegSnapAskProperty,
 		snapStringProperty: jitRegSnapAskStringProperty,
 		snapAccessor:       jitRegSnapAskAccessor,

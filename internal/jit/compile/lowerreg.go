@@ -43,6 +43,55 @@ func LowerRegInline(rc *bytecode.RegCode, fn *bytecode.Function) (*ir.Program, e
 	return lowerRegRecovered(rc, fn, lowering{ssa: true, callee: true})
 }
 
+// LowerRegWith is LowerReg with hints, whose PCs are register pcs: what
+// the function's native code learned at its exits (the stack form's
+// LowerSSAWith's).
+func LowerRegWith(rc *bytecode.RegCode, fn *bytecode.Function, h Hints) (*ir.Program, error) {
+	return lowerRegRecovered(rc, fn, lowering{ssa: true, hints: h})
+}
+
+// LowerRegHotWith is LowerRegHot with hints, as LowerRegWith's.
+func LowerRegHotWith(rc *bytecode.RegCode, fn *bytecode.Function, h Hints) (*ir.Program, error) {
+	return lowerRegRecovered(rc, fn, lowering{ssa: true, hot: true, hints: h})
+}
+
+// LowerRegInlineWith is LowerRegInline with hints, as LowerRegWith's.
+func LowerRegInlineWith(rc *bytecode.RegCode, fn *bytecode.Function, h Hints) (*ir.Program, error) {
+	return lowerRegRecovered(rc, fn, lowering{ssa: true, callee: true, hints: h})
+}
+
+// regHinted reports whether the program's instruction of register pc rpc
+// is one of pcs, a hint's register pcs.
+func regHinted(pcs []int32, rpc uint32) bool { return slices.Contains(pcs, int32(rpc)) }
+
+// regHints applies h, by register pc, to p as the stack form's lowering
+// does by its PCs (lowerFunction): an addition that met a string Go's
+// (hintedStringAdds), before the reads it takes are decided; then, after
+// them (selectNumericProperties), an element read that met what is no
+// number read as it is (ir's Reference). It returns the program pcs of the
+// element reads that read strings (Hints' StringReads), whose additions
+// stringConcats has Go make.
+func regHints(p *ir.Program, h Hints, after bool) []int32 {
+	var strs []int32
+	for pc := range p.Code {
+		in := &p.Code[pc]
+		if p.Maps[pc].Depth < 0 {
+			continue
+		}
+		rpc := p.Origin[pc]
+		switch {
+		case !after && in.Op == ir.Binary && in.Operator == ir.Add && regHinted(h.StringAdds, rpc):
+			*in = ir.Instruction{Op: ir.StringAdd, Left: in.Left, Right: in.Right, Dest: in.Dest, Generic: in.Generic}
+		case after && in.Op == ir.ArrayRead && (regHinted(h.ElementReads, rpc) || regHinted(h.StringReads, rpc)):
+			in.Reference = true
+			if regHinted(h.StringReads, rpc) {
+				strs = append(strs, int32(pc))
+			}
+		}
+	}
+	return strs
+}
+
 // lowerRegRecovered turns a panic in the lowering into a refusal, as
 // lowerRecovered does.
 func lowerRegRecovered(rc *bytecode.RegCode, fn *bytecode.Function, m lowering) (p *ir.Program, err error) {
@@ -426,8 +475,9 @@ func lowerRegLits(rc *bytecode.RegCode, fn *bytecode.Function, m lowering, litHo
 	if regHostOnly(p, rc, fn, m) {
 		return nil, refuse(-1, hostOnly)
 	}
+	regHints(p, m.hints, false)
 	selectNumericProperties(p, true)
-	stringConcats(p, nil)
+	stringConcats(p, regHints(p, m.hints, true))
 	markBools(p)
 	p.FrameArgs = fn.HasRest || fn.UsesArguments || fn.MappedArguments || fn.SuperForwards
 	p.FrameCallee = fn.FrameCallee

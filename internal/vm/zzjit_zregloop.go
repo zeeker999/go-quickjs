@@ -8,7 +8,6 @@ import (
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
-	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
@@ -144,7 +143,7 @@ func (f *jitRegFeedback) callbackInline(x jitInline, site ssa.CallSite, argc int
 		l != nil && slices.Contains(l.notInline, x.pc) {
 		return ssa.InlineSite{}, false
 	}
-	p, err := jitcompile.LowerRegInline(cl.reg.rc, cl.fn)
+	p, err := f.fb.r.jitRegLower(cl, cl.reg.rc, jitLowerInline)
 	if err != nil || p.Validate() != nil {
 		return ssa.InlineSite{}, false
 	}

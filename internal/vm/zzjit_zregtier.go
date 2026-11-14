@@ -370,6 +370,12 @@ func (r *Runtime) jitRegSeenFeedback(cl *closure, c *regCode) {
 // a register pc the next compiles build generic.
 func (r *Runtime) jitRegDeoptSeen(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) {
 	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	// An element read made as a number that met what is none, or an
+	// addition that met a string, learned as the stack form's code learns
+	// them at a deoptimization (jitIndexSeen, jitStringAddSeen): read as
+	// they are, or Go's, from the next lowering on -- and generic too.
+	r.jitRegElemSeen(l, c, wb, rpc, false)
+	r.jitRegStringAddSeen(l, c, wb, rpc)
 	if op, ok := r.jitRegPropOp(f, c, wb, rpc); ok {
 		r.jit.shapeDeopts++
 		r.jitDeoptSeenOp(l, rpc, op, e.serial)
@@ -421,7 +427,10 @@ func (r *Runtime) jitRegResumeSeen(f *frame, e *jitRegEntry, rpc int) {
 func (r *Runtime) jitRegHostSeen(f *frame, c *regCode, wb, rpc int) jitRegWrite {
 	op, ok := r.jitRegPropOp(f, c, wb, rpc)
 	if !ok {
-		return jitRegWrite{}
+		// An element's read or write native code left to Go: what it met,
+		// read or stored natively, or by Go from native code, once
+		// compiled again (jitRegElemSeen).
+		return jitRegWrite{elem: r.jitRegElemSeen(r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn)), c, wb, rpc, true)}
 	}
 	if op.write {
 		x := jitRegWrite{op: op, write: true}
@@ -475,6 +484,9 @@ type jitRegWrite struct {
 	write  bool
 	o      *Object
 	before *shape
+	// elem says an element's access learned what the code is to be
+	// compiled again for (jitRegElemSeen).
+	elem bool
 }
 
 // jitRegWriteSeen learns from the property write x at register pc rpc,

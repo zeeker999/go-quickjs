@@ -175,7 +175,7 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, callee bool) *jitRegEnt
 		return nil
 	}
 	e := &jitRegEntry{}
-	p, err := jitcompile.LowerReg(c.rc, cl.fn)
+	p, err := r.jitRegLower(cl, c.rc, jitLowerSSA)
 	if err != nil && jitcompile.HostOnly(err) {
 		// Host operations alone, no loop, no element's work: compiled for
 		// its native callers (LowerRegInline), or, hot, where a call it
@@ -183,9 +183,9 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, callee bool) *jitRegEnt
 		// (jitNativeCallee, jitHotEntry); refused for now otherwise.
 		switch {
 		case callee:
-			p, err = jitcompile.LowerRegInline(c.rc, cl.fn)
+			p, err = r.jitRegLower(cl, c.rc, jitLowerInline)
 		case r.jitRegCallsNatively(cl, c):
-			p, err = jitcompile.LowerRegHot(c.rc, cl.fn)
+			p, err = r.jitRegLower(cl, c.rc, jitLowerHot)
 		default:
 			e.hostOnly = true
 		}
@@ -608,6 +608,11 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 			next, ran, err = r.regWhole(f, c, wb, exitPC)
 			if seen.write && err == nil && ran {
 				r.jitRegWriteSeen(f, c, e, exitPC, seen)
+			}
+			if seen.elem {
+				// An element's kind learned: compiled again for it, no
+				// deoptimization, as the stack form's (e.reopt).
+				r.jitRegReopt(f.cl, e)
 			}
 			if err == nil && ran {
 				// A call native code did not make, which it may once

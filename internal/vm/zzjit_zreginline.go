@@ -252,7 +252,7 @@ func (r *Runtime) jitRegInlineLeft(f *frame, x *jitRegInlineLevel, owner *jitReg
 		// left at each; or its caches learned it, which the code inlining
 		// it reads, as a function's own code is compiled again for its
 		// caches' changes (jitFeedbackMark).
-		learned = !before && l.polyReopt || len(l.failed) != failed || jitFeedbackMark(x.cl) != mark
+		learned = !before && l.polyReopt || len(l.failed) != failed || jitFeedbackMark(x.cl) != mark || seen.elem
 		if err != nil {
 			x.threw = true
 			return Undefined, err, learned
