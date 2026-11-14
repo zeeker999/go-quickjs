@@ -721,8 +721,11 @@ func (r *Runtime) regEnterScoped(o *Object, cl *closure, rc *regCode, base, argc
 	}
 	var v Value
 	var err error
-	if jitBuilt && cl.jitEnters {
-		// Its function's calls go to the JIT, as regEnterW's (jitRegEnter).
+	if jitBuilt && cl.jitEnters && thisRef == nil && with == nil && evalVars == nil {
+		// Its function's calls go to the JIT, as regEnterW's (jitRegEnter):
+		// a frame of nothing more of its surroundings than regEnterW's --
+		// no this binding a derived constructor shares, no with or eval
+		// scope, which native code does not look in.
 		v, err = r.jitRegEnter(f, cl, rc, base, 0)
 	} else {
 		v, err = r.runReg(f, rc, 0)
