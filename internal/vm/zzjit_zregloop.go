@@ -65,7 +65,7 @@ func (r *Runtime) jitRegForEachSeen(f *frame, e *jitRegEntry, rpc int, callee, r
 		return
 	}
 	cl := fd.closure
-	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	l := r.jitRegLearnedFor(f, e)
 	for i := range l.nativeCalls {
 		x := &l.nativeCalls[i]
 		if int(x.pc) != rpc || !x.forEach {

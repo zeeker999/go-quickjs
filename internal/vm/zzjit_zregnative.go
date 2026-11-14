@@ -769,7 +769,11 @@ func (r *Runtime) jitRegLeaveTo(f *frame, e *jitRegEntry, rpc int) int {
 		life.goOns++
 		life.ssaStats.ended++
 	}
-	if cc := f.cl.closureCode; !e.invalid && cc != nil && cc.jitReg != nil && cc.jitReg.code != nil && !cc.jitReg.invalid {
+	if cc := f.cl.closureCode; !e.invalid && cc != nil && cc.jitReg != nil && cc.jitReg.code != nil && !cc.jitReg.invalid && len(cc.jitReg.loops) != 0 {
+		// Code with a loop to go on at: one with none, the frame's
+		// invocation ends in the interpreter, and the check made due at
+		// once would be its caller's loop's, for nothing -- each of AWFY
+		// Richards' runTask's 13 million exits had paid one.
 		s.regGoOn, s.regForced = f, true
 		r.backEdges = 1
 	}

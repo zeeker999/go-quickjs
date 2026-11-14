@@ -434,6 +434,16 @@ func (r *Runtime) jitRegReoptimize(cl *closure, c *regCode, e *jitRegEntry) *jit
 	return ne
 }
 
+// jitRegLearnedFor is what f's function's code learned (regLearned): e's,
+// the code running f, without a key made -- a weak handle and a map lookup
+// at each call of Go -- where e is f's function's code of this realm.
+func (r *Runtime) jitRegLearnedFor(f *frame, e *jitRegEntry) *jitEntry {
+	if e != nil && e.life != nil && f.cl.reg != nil && e.rc == f.cl.reg.rc && e.key.realm == r.jitRealmKey() {
+		return e.life
+	}
+	return r.jitState().regLearnedOf(r.jitKeyOf(f.cl.fn))
+}
+
 // regLearnedOf is what the code of the function whose key is key learned
 // at its exits (regLearned), made if it has learned nothing yet.
 func (s *jitState) regLearnedOf(key jitKey) *jitEntry {
@@ -518,7 +528,7 @@ func (r *Runtime) jitRegSeenFeedback(cl *closure, c *regCode) {
 // code compiled again with its cases -- and any other guard's failure as
 // a register pc the next compiles build generic.
 func (r *Runtime) jitRegDeoptSeen(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) {
-	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	l := r.jitRegLearnedFor(f, e)
 	if op, ok := r.jitRegPropOp(f, c, wb, rpc); ok {
 		r.jit.shapeDeopts++
 		r.jitDeoptSeenOp(l, rpc, op, e.serial)
@@ -646,7 +656,7 @@ func (r *Runtime) jitRegWriteSeen(f *frame, c *regCode, e *jitRegEntry, rpc int,
 	if x.op.c == nil {
 		return
 	}
-	r.jitPolyWriteSeenOp(r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn)), rpc, x.op.c, x.op.key, true, x.o, x.before)
+	r.jitPolyWriteSeenOp(r.jitRegLearnedFor(f, e), rpc, x.op.c, x.op.key, true, x.o, x.before)
 }
 
 // jitRegEnter runs f, the frame regEnterW made for a call of cl, its
@@ -665,6 +675,9 @@ func (r *Runtime) jitRegEnter(f *frame, cl *closure, c *regCode, base, start int
 	}
 	if start == 0 {
 		e.life.starts++
+		if e.life.notNative {
+			r.jitRegRetryNative(e)
+		}
 	} else if ipc := e.ipc(start); e.code != nil && ipc >= 0 && e.code.HasEntry(ipc) {
 		r.jit.regResumes++
 	}

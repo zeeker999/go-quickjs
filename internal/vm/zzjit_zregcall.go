@@ -44,7 +44,7 @@ func (s *jitState) regLinkOf(cl *closure, c *regCode) *jitLink {
 		s.regLinks = map[jitKey]*jitLink{}
 	}
 	l := &jitLink{key: key, params: 2 + uint64(c.params), locals: uint64(c.numRegs), frame: uint64(c.numRegs)}
-	if e := s.regCache[key]; e != nil && e.code != nil && !e.invalid {
+	if e := s.regCache[key]; e != nil && e.code != nil && !e.invalid && (e.life == nil || !e.life.notNative) {
 		l.regSet(e)
 	}
 	s.regLinks[key] = l
@@ -66,7 +66,7 @@ func (s *jitState) regLinkUpdate(key jitKey, e *jitRegEntry) {
 	if l == nil {
 		return
 	}
-	if e == nil || e.code == nil || e.invalid {
+	if e == nil || e.code == nil || e.invalid || e.life != nil && e.life.notNative {
 		l.clearCode()
 		return
 	}
@@ -205,7 +205,7 @@ func (r *Runtime) jitRegCallSeen(f *frame, c *regCode, e *jitRegEntry, rpc int, 
 	default:
 		return false
 	}
-	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	l := r.jitRegLearnedFor(f, e)
 	n := 0
 	for i := range l.nativeCalls {
 		x := &l.nativeCalls[i]
@@ -562,6 +562,56 @@ func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 	return ok
 }
 
+// jitRegUnwound counts a native call of e's code that left native code
+// (jitEntry's nativeOut), as the stack form's jitUnwound does: code that
+// leaves on more than one in jitUnwindShare of its native callers' calls
+// is compiled again, if it is learning, up to jitUnwindReopts times, its
+// native callers calling it still; past that, or learning nothing, native
+// callers no longer call it (notNative) -- they call Go at the call, which
+// makes it -- until Go has made jitRetryNative calls of it, more each time
+// (jitRegRetryNative). Before, a callee that left at every call was
+// unwound at every call, its callers' levels finished by Go each time:
+// AWFY Havlak's size, at and hashFn, a million times each.
+func (r *Runtime) jitRegUnwound(e *jitRegEntry) {
+	life := e.life
+	if life == nil || e.invalid {
+		return
+	}
+	l := r.jit.regLinks[e.key]
+	if l == nil {
+		return
+	}
+	if life.nativeOut++; life.nativeOut%jitUnwindProbe != 0 || life.nativeOut*jitUnwindShare <= l.in {
+		return
+	}
+	if life.unwindReopts < jitUnwindReopts && jitLearning(life) {
+		life.unwindReopts++
+		l.in, life.nativeOut = 0, 0
+		return
+	}
+	life.notNative, life.nativeRetry = true, 0
+	l.clearCode()
+	life.nativeBackoff = min(life.nativeBackoff+1, jitNativeBackoffs)
+}
+
+// jitRegRetryNative counts a call Go makes of e's code, which native
+// callers no longer call (notNative), and has them call it again after
+// jitNativeRetry such calls, doubled for each time it was found to leave
+// too often, its leaving counted afresh, as jitRetryNative does.
+func (r *Runtime) jitRegRetryNative(e *jitRegEntry) {
+	life := e.life
+	if life.nativeRetry++; life.nativeRetry < jitNativeRetry<<(life.nativeBackoff-1) {
+		return
+	}
+	life.notNative, life.nativeOut = false, 0
+	if l := r.jit.regLinks[e.key]; l != nil {
+		l.in = 0
+		if r.jit.regCache[e.key] == e && e.code != nil && !e.invalid {
+			l.regSet(e)
+		}
+	}
+}
+
 // jitRegUnwind finishes the native calls the code running in context idx
 // made, the innermost of which left native code, and returns what the
 // outermost returned or threw, as jitUnwindNative finishes the stack
@@ -612,6 +662,11 @@ func (r *Runtime) jitRegUnwind(idx int) (Value, error) {
 		}
 	}
 	s.unwound += uint64(n)
+	if n != 0 {
+		// The innermost left native code: counted against its native
+		// callers' calling it (jitRegUnwound).
+		r.jitRegUnwound(levels[n-1].e)
+	}
 	// What Go runs to finish a level runs in contexts past every level's:
 	// a level's native code, resumed after its call, finds its spills and
 	// keeps where it left them.
