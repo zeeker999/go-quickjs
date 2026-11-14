@@ -205,3 +205,71 @@ func TestJITRegAddPropPush(t *testing.T) {
 		})
 	}
 }
+
+// regFallbackSrc runs what the builder leaves to Go whole, called from
+// native code: a literal's field past a spread, a destructuring's steps
+// and rest, a BigInt stored in a BigInt64Array's and a BigUint64Array's
+// elements, and closures made in a loop of a function whose captured
+// registers are its frame's own, each turn's binding closed at its end.
+const regFallbackSrc = `
+function fields(n) {
+	var s = 0, base = { a: 1 };
+	for (var j = 0; j < n; j++) { var o = { ...base, b: j, c: 2 }; s += o.b + o.c }
+	return s;
+}
+function destruct(n) {
+	var s = 0, a = [1, 2, 3, 4];
+	for (var j = 0; j < n; j++) { var [x, y, ...r] = a; s += x + y + r.length }
+	return s;
+}
+function bigs(n) {
+	var t = new BigInt64Array(4), u = new BigUint64Array(4), v = 0n;
+	for (var j = 0; j < n; j++) { v += 3n; t[j & 3] = v; u[j & 3] = -v; t[1] = 1n << 70n }
+	return t.join() + "/" + u.join();
+}
+function closures(n) {
+	var s = 0, fs = [];
+	for (var j = 0; j < n; j++) { let k = j; var f = function () { return k }; s = (s + f()) | 0; if (j % 100 == 0) fs.push(f) }
+	return s + ":" + fs.map(function (g) { return g() }).join();
+}
+`
+
+// TestJITRegWholeFallbacks runs regFallbackSrc in a runtime whose register
+// code calls Go for what its builder leaves to Go whole, and in one with no
+// JIT, the collector idle and marking: the answers equal, and none of
+// those instructions left to Go at exits but a few times.
+func TestJITRegWholeFallbacks(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			jitClobberCallsForTest(t)
+			rts := regNativeRuntimes(t, regFallbackSrc)
+			rts[0].SetJITWarmUp(1, 1)
+			for _, name := range []string{"fields", "destruct", "bigs", "closures"} {
+				var got [2]string
+				for i, r := range rts {
+					fn, _ := r.GetProp(Obj(r.Global()), r.Intern(name))
+					for range 6 {
+						v, err := r.Call(fn, Undefined, []Value{Float(1000)})
+						got[i] = regNativeShow(r, v, err)
+					}
+				}
+				if got[0] != got[1] {
+					t.Errorf("%s: with the JIT %q, without %q", name, got[0], got[1])
+				}
+			}
+			st := rts[0].RegNativeStats()
+			t.Logf("hosts %v", st.HostOps)
+			for _, op := range []string{"define_field", "iter_step", "iter_rest", "set_index", "close_regs", "closure_w"} {
+				if n := st.HostOps[op]; n > 50 {
+					t.Errorf("%s left to Go %d times", op, n)
+				}
+			}
+		})
+	}
+}

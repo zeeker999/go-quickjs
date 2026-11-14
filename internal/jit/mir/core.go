@@ -3404,6 +3404,13 @@ func (c *core) goState(op uint64, keep int, v *ssa.Value, args []*ssa.Value) (*a
 			st.Inline, st.InlinePC = in.Closure, in.PC
 		}
 	}
+	if v != nil && v.State != nil && (ssa.GoOp(op&0xff) == ssa.GoClosure || ssa.GoOp(op&0xff) == ssa.GoClose) {
+		// A closure's or a scope's end: the instruction at the PC, which
+		// Go makes on a register frame whose captured registers are its
+		// slots as the interpreter makes it there (the VM's
+		// jitRegFrameWhole).
+		st.SetsPC, st.PC, st.Depth = true, uint32(v.State.PC), uint32(v.State.Depth)
+	}
 	if v != nil && ssa.GoOp(op&0xff) == ssa.GoLeaf && len(v.Calls()) == 1 {
 		// The leaf the call checked it calls, which Go takes from here,
 		// and whether anything reads its result.

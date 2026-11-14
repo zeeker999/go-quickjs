@@ -552,6 +552,53 @@ func (in *Instruction) Writes() (int, int) {
 	return -1, -1
 }
 
+// WholeOperands is, for register code's instruction in, the only one of
+// its origin, which Go may run whole on the register frame (ssa's
+// CallSite Whole), the registers it reads, n of them, in order, and the
+// one it writes, or -1: a whole Host's (Whole), or those of an operation
+// whose operands are its register instruction's own -- a field's
+// definition, a destructuring's step, an element's or a property's read
+// or write, in, delete -- a literal operand being the instruction's
+// immediate; ok is false for any other, or for a slot past the regs
+// registers.
+func (in *Instruction) WholeOperands(regs int) (reads [3]int, n int, dest int, ok bool) {
+	var ops [3]Operand
+	dest = -1
+	switch {
+	case in.Op == Host && in.Whole:
+		if in.Extra > 3 {
+			return reads, 0, -1, false
+		}
+		ops, n, dest = [3]Operand{in.Left, in.Right, in.Third}, in.Extra, in.Dest
+	case in.Op == FieldDefine, in.Op == PropertyWrite && !in.Private:
+		ops, n = [3]Operand{in.Left, in.Right}, 2
+	case in.Op == ArrayWrite:
+		ops, n = [3]Operand{in.Left, in.Right, in.Third}, 3
+	case in.Op == IterStep && in.When, in.Op == PropertyRead && !in.Private, in.Op == ReferenceRead:
+		ops, n, dest = [3]Operand{in.Left}, 1, in.Dest
+	case in.Op == ArrayRead && !in.Reference, in.Op == HasProperty, in.Op == DeleteProperty:
+		ops, n, dest = [3]Operand{in.Left, in.Right}, 2, in.Dest
+	default:
+		return reads, 0, -1, false
+	}
+	if dest >= regs {
+		return reads, 0, -1, false
+	}
+	k := 0
+	for _, o := range ops[:n] {
+		if o.Slot < 0 {
+			// The instruction's immediate.
+			continue
+		}
+		if o.Slot >= regs {
+			return reads, 0, -1, false
+		}
+		reads[k] = o.Slot
+		k++
+	}
+	return reads, k, dest, true
+}
+
 // genericOp reports whether an instruction of op may be Generic: one whose
 // slow path is Go's making of the same operation, which goes on after it.
 func genericOp(op Op) bool {

@@ -145,9 +145,50 @@ func (r *Runtime) jitRegFrameOp(ctx *abi.Context) bool {
 			}
 		}
 		if ctx.Cells == nil {
-			return false
+			// Code whose captured registers are the frame's own slots,
+			// which closures' upvalues are open on: the run's own frame's
+			// closure_w or close_regs, as the interpreter makes it there.
+			if level {
+				return false
+			}
+			return r.jitRegFrameWhole(ctx, f, c, wb)
 		}
 		return r.jitRegCellsClosure(ctx, f, c, run.e, wb, level, int(ctx.GoOp>>abi.GoOpIndexShift))
+	}
+	return false
+}
+
+// jitRegFrameWhole makes closure_w or close_regs at ctx's register pc on
+// f's registers, a window at wb, by the interpreter's handler (regWhole),
+// for native code whose captured registers are the frame's slots: a
+// closure captures the upvalues open on them, and a scope's end closes
+// them, the values staying in the slots native code reads. The closure,
+// which the handler writes to its register, goes to the call's keep cell,
+// the register put back: native code keeps values in the frame's
+// registers as it found them. Neither throws.
+func (r *Runtime) jitRegFrameWhole(ctx *abi.Context, f *frame, c *regCode, wb int) bool {
+	rpc := int(ctx.ExitPC)
+	if rpc >= len(c.rc.Code) {
+		return false
+	}
+	w := regAt(c.code, rpc)
+	switch w.Op() {
+	case bytecode.RClosureW:
+		a := wb + int(w.A())
+		saved := r.stack[a]
+		if _, _, err := r.regWhole(f, c, wb, rpc); err != nil {
+			return false
+		}
+		keepClosure(ctx, r.stack[a])
+		r.stack[a] = saved
+		ctx.Open = uint64(len(f.openUpvalues))
+		return true
+	case bytecode.RCloseRegs:
+		if _, _, err := r.regWhole(f, c, wb, rpc); err != nil {
+			return false
+		}
+		ctx.Open = uint64(len(f.openUpvalues))
+		return true
 	}
 	return false
 }

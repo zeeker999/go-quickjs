@@ -194,7 +194,11 @@ an object's or an array's spread, a spread call, a computed key's
 definition -- it is a whole Host (`ir.Instruction`'s `Whole`), its
 operands the registers it reads and its result the one it writes, which
 native code calls Go for and goes on after (see [Calls of
-Go](#calls-of-go)). A call, `call_w`'s, `call_method_w`'s or `new_w`'s, and a
+Go](#calls-of-go)). So is what the builder leaves to Go of an operation
+whose operands are its register instruction's own, the only instruction
+of its origin (`ir.Instruction`'s `WholeOperands`): a literal's field
+whose definition the feedback does not plan, a destructuring's step or
+rest. A call, `call_w`'s, `call_method_w`'s or `new_w`'s, and a
 `typeof` are Hosts of their own kind (`ir.Instruction`'s `Window`), which
 the builder makes natively from what the feedback says (see [Calls of
 Go](#calls-of-go) and [Native calls](#native-calls)). A call in tail
@@ -893,7 +897,10 @@ that has learned nothing, of what a global read found holding a typed array
 one as the code is compiled (`ssa.UpvalueTypedFeedback`), is compiled for
 that array's type from the first -- Emscripten's heaps, globals or an asm.js
 module's bindings its functions capture, read at every branch, would
-otherwise teach a compile each.
+otherwise teach a compile each. A store of any value native code does not
+make Go makes from native code where it runs nothing (`ssa.GoElemStore`),
+a BigInt's low 64 bits in a BigInt64Array's or a BigUint64Array's element
+among them (the VM's `jitStoreBigElem`).
 
 ### Array loops
 
@@ -1314,7 +1321,10 @@ object and receiver, its window at its context's `Base`. Left to an exit: a
 mapped arguments object, which aliases the registers; a native callee's rest
 parameters and arguments, which its calls keep none of; and a closure a
 native callee makes that captures by value, which reads its window's
-registers.
+registers. Where the code's captured registers are the frame's own slots,
+not in cells of their own, a closure and a scope's end on the run's own
+frame are the interpreter's handler's (`jitRegFrameWhole`): the closure
+captures the upvalues open on the slots, the scope's end closes them.
 
 ## Native calls
 

@@ -6067,7 +6067,10 @@ func jitStoreElem(o *Object, n float64, v Value) bool {
 		// What native code does not store: before the view's storage is
 		// looked at, which typedWrite does, for native code's next store;
 		// a Float16 element. A view out of its buffer, or past its length,
-		// leaves for Go.
+		// leaves for Go. A BigInt typed array's BigInt, its low 64 bits.
+		if v.IsBigInt() {
+			return jitStoreBigElem(o, i, v)
+		}
 		return typedWrite(o, i, v)
 	}
 	if uint(i) < uint(len(o.elemsOf())) && !isHole(o.elemsOf()[i]) {

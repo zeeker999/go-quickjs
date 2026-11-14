@@ -5389,7 +5389,7 @@ func (b *builder) goConcat(blk *Block, in ir.Instruction, operand func(ir.Operan
 // nativeHost reports whether native code makes the host operation at pc
 // itself: an intrinsic call or instanceof the VM knows.
 func (b *builder) nativeHost(pc int) bool {
-	if in := b.p.Code[pc]; (in.Frame || in.Whole) && b.cur == b.root && b.goCalls() {
+	if in := b.p.Code[pc]; (in.Frame || in.Whole && in.Extra <= 3) && b.cur == b.root && b.goCalls() {
 		// Go's from native code (GoHost).
 		return true
 	}
@@ -7842,6 +7842,9 @@ func (b *builder) instruction(blk *Block, pc int) {
 		b.assign(in.Dest, blk, k)
 	case ir.IterStep:
 		if b.host(pc) {
+			if b.whole(blk, pc, in, guard) {
+				break
+			}
 			blk.ExitKind = ir.HostExit
 			blk.State = state()
 			blk.State.addUse()
@@ -8224,6 +8227,9 @@ func (b *builder) instruction(blk *Block, pc int) {
 			break
 		}
 		if !ok {
+			if b.whole(blk, pc, in, guard) {
+				break
+			}
 			blk.ExitKind = ir.HostExit
 			blk.State = state()
 			blk.State.addUse()
@@ -8264,32 +8270,7 @@ func (b *builder) instruction(blk *Block, pc int) {
 			}
 			break
 		}
-		if in.Op == ir.Host && in.Whole && b.cur == b.root && b.goCalls() {
-			// Go runs it whole on the register frame, called from native
-			// code (CallSite's Whole), and native code goes on after it:
-			// its operands the registers it reads, its result the one it
-			// writes. What Go refuses, or what does not go on to the next
-			// instruction -- a throw, code found invalid -- leaves at the
-			// call, Go finishing it there.
-			ops := []ir.Operand{in.Left, in.Right, in.Third}
-			args := make([]*Value, in.Extra)
-			for i := range args {
-				args[i] = operand(ops[i])
-			}
-			call := guard(OpCall, Tagged, ir.HostExit, args...)
-			b.f.cache(call).Calls, call.Index = []*CallSite{{Go: GoCall, Whole: true, Argc: in.Extra, ThisSlot: -1}}, b.f.Keeps
-			b.f.Keeps++
-			b.f.HostsLeft = append(b.f.HostsLeft, pc)
-			if in.Dest >= 0 {
-				cell := f.newValue(blk, OpCallCell, Source, call)
-				r := f.newValue(blk, OpKept, Tagged, cell, call)
-				r.Shadow = cell
-				b.assign(in.Dest, blk, r)
-			}
-			// What it runs may assign a captured binding.
-			if b.hasCells() {
-				b.reloadAfterCall(blk)
-			}
+		if in.Op == ir.Host && in.Whole && b.whole(blk, pc, in, guard) {
 			break
 		}
 		if in.Tail {
@@ -8467,6 +8448,47 @@ func (b *builder) instruction(blk *Block, pc int) {
 			blk.YieldHandlers, blk.Yield = b.handlersAt(pc)
 		}
 	}
+}
+
+// whole makes register code's instruction at pc, in, which the builder
+// leaves to Go, a call of Go that runs it whole on the register frame
+// (CallSite's Whole), at the root, where it is its origin's only
+// instruction and its operands are its registers (ir.Instruction's
+// WholeOperands): its operands the registers it reads, its result the one
+// it writes, and native code goes on after it. What Go refuses, or what
+// does not go on to the next instruction -- a throw, code found invalid --
+// leaves at the call, Go finishing it there. It reports whether it made
+// the call.
+func (b *builder) whole(blk *Block, pc int, in ir.Instruction, guard func(Op, Type, ir.ExitKind, ...*Value) *Value) bool {
+	p := b.p
+	if b.cur != b.root || !b.goCalls() || p.Origin == nil || pc+1 >= len(p.Code) || p.Origin[pc+1] == p.Origin[pc] ||
+		pc > 0 && p.Origin[pc-1] == p.Origin[pc] {
+		return false
+	}
+	reads, n, dest, ok := in.WholeOperands(p.Regs)
+	if !ok {
+		return false
+	}
+	f := b.f
+	args := make([]*Value, n)
+	for i := range args {
+		args[i] = b.read(reads[i], blk)
+	}
+	call := guard(OpCall, Tagged, ir.HostExit, args...)
+	f.cache(call).Calls, call.Index = []*CallSite{{Go: GoCall, Whole: true, Argc: n, ThisSlot: -1}}, f.Keeps
+	f.Keeps++
+	f.HostsLeft = append(f.HostsLeft, pc)
+	if dest >= 0 {
+		cell := f.newValue(blk, OpCallCell, Source, call)
+		r := f.newValue(blk, OpKept, Tagged, cell, call)
+		r.Shadow = cell
+		b.assign(dest, blk, r)
+	}
+	// What it runs may assign a captured binding.
+	if b.hasCells() {
+		b.reloadAfterCall(blk)
+	}
+	return true
 }
 
 // windowCall makes register code's call at pc, in (ir.Instruction's

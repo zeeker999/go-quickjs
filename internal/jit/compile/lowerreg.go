@@ -1181,7 +1181,9 @@ func (l *regLowering) lowerCold(pc int, w bytecode.RInstr) {
 func (l *regLowering) hostAt(pc int) ir.Instruction {
 	switch l.rc.Code[pc].Op() {
 	case bytecode.RRet, bytecode.RRetUndef, bytecode.RYield, bytecode.RCallWT, bytecode.RCallMWT, bytecode.RAwait,
-		bytecode.RYieldStar, bytecode.REndParams, bytecode.RGenEntry, bytecode.RIterResume, bytecode.RThrow:
+		bytecode.RYieldStar, bytecode.REndParams, bytecode.RGenEntry, bytecode.RIterResume, bytecode.RThrow,
+		bytecode.RCheckThis, bytecode.RDeleteSuper:
+		// Or reads the frame's this binding, which no operand names.
 		return ir.Instruction{Op: ir.Host}
 	}
 	reads, writes, all := RegAccess(l.rc, pc)
@@ -1418,7 +1420,7 @@ func RegAccess(rc *bytecode.RegCode, pc int) (reads, writes []int, all bool) {
 		return nil, []int{a}, false
 	case bytecode.RToPropertyKey:
 		return []int{a}, []int{a}, false
-	case bytecode.RAssignConst, bytecode.RThrowRef, bytecode.RCheckThis, bytecode.RDeleteSuper:
+	case bytecode.RAssignConst, bytecode.RThrowRef, bytecode.RCheckThis, bytecode.RDeleteSuper, bytecode.RCloseRegs:
 		return nil, nil, false
 	case bytecode.RSetUpvalCheck:
 		return []int{a}, nil, false

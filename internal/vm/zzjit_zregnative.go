@@ -831,7 +831,9 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	op := w.Op()
 	argc := int(w.X())
 	kind := ctx.GoOp >> abi.GoOpKindShift & 0xff
-	if kind == abi.GoCallWhole {
+	if kind == abi.GoCallWhole || (kind == abi.GoCallRest || kind == abi.GoCallStep) && (op == bytecode.RIterRest || op == bytecode.RIterStep) {
+		// Or a destructuring's step or rest, which native code had no
+		// step of its own for: run whole too.
 		return r.jitRegWhole(ctx, idx, run, rpc)
 	}
 	if op == bytecode.RTypeof && kind == abi.GoCallTypeOf {
@@ -975,12 +977,22 @@ func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int)
 	if ipc < 0 || ipc+1 >= len(e.p.Code) {
 		return false
 	}
-	in := &e.p.Code[ipc]
-	if in.Op != ir.Host || !in.Whole || int(ctx.GoOp>>abi.GoOpArgcShift&0xff) != in.Extra || wb+e.p.Regs > len(r.stack) {
+	if e.p.Origin[ipc+1] == e.p.Origin[ipc] || ipc > 0 && e.p.Origin[ipc-1] == e.p.Origin[ipc] {
+		return false
+	}
+	ops, argc, dest, ok := e.p.Code[ipc].WholeOperands(e.p.Regs)
+	whole := ctx.GoOp>>abi.GoOpKindShift&0xff == abi.GoCallWhole
+	if !ok || whole && int(ctx.GoOp>>abi.GoOpArgcShift&0xff) != argc || wb+e.p.Regs > len(r.stack) {
 		return false
 	}
 	own := ctx.Live == 0
-	if op := regAt(c.code, rpc).Op(); !own && (op == bytecode.RLoadThis || op == bytecode.RThis) {
+	switch op := regAt(c.code, rpc).Op(); {
+	case !own && (op == bytecode.RLoadThis || op == bytecode.RThis):
+		return false
+	case op == bytecode.RCloseRegs && (!own || ctx.Cells != nil):
+		// A scope's end where the code's captured registers are in cells
+		// of their own, which it takes fresh ones for (jitRegCellsClosure):
+		// left to the exit, as a native callee's.
 		return false
 	}
 	after := int(e.p.Origin[ipc+1])
@@ -990,16 +1002,13 @@ func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int)
 		// not would go on alike.
 		return false
 	}
-	ops := [3]ir.Operand{in.Left, in.Right, in.Third}
 	var regs [4]int
 	var saved [4]Value
 	n := 0
-	for i := 0; i <= in.Extra; i++ {
-		reg := in.Dest
-		if i < in.Extra {
-			if reg = ops[i].Slot; reg < 0 {
-				return false
-			}
+	for i := 0; i <= argc; i++ {
+		reg := dest
+		if i < argc {
+			reg = ops[i]
 		}
 		if reg < 0 || own && e.p.IsCaptured(reg) || slices.Contains(regs[:n], reg) {
 			continue
@@ -1007,8 +1016,8 @@ func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int)
 		regs[n], saved[n] = reg, r.stack[wb+reg]
 		n++
 	}
-	for i := 0; i < in.Extra; i++ {
-		if reg := ops[i].Slot; !own || !e.p.IsCaptured(reg) {
+	for i := range argc {
+		if reg := ops[i]; !own || !e.p.IsCaptured(reg) {
 			r.stack[wb+reg] = jitGoArg(ctx, i)
 		}
 	}
@@ -1023,8 +1032,8 @@ func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int)
 		r.jitShareContexts(idx, f)
 	}
 	var v Value
-	if in.Dest >= 0 {
-		v = r.stack[wb+in.Dest]
+	if dest >= 0 {
+		v = r.stack[wb+dest]
 	}
 	if err != nil || next != after || r.stopped != nil || e.invalid {
 		// Left at the call's exit, whose records write the frame as it was
@@ -1036,7 +1045,7 @@ func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int)
 		case h != nil && next == int(h.To):
 			p.reg, p.v = int(h.Reg), r.stack[wb+int(h.Reg)]
 		default:
-			p.reg, p.v = in.Dest, v
+			p.reg, p.v = dest, v
 		}
 		s.regPending = p
 		s.wholeLeft++
