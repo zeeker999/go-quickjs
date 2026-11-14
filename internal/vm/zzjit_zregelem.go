@@ -36,6 +36,8 @@ func (r *Runtime) jitRegLower(cl *closure, rc *bytecode.RegCode, kind jitLowerKi
 		return jitcompile.LowerRegInlineWith(rc, cl.fn, h)
 	case jitLowerHot:
 		return jitcompile.LowerRegHotWith(rc, cl.fn, h)
+	case jitLowerForward:
+		return jitcompile.LowerRegForwardWith(rc, cl.fn, h)
 	}
 	return jitcompile.LowerRegWith(rc, cl.fn, h)
 }

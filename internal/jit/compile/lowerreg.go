@@ -43,6 +43,19 @@ func LowerRegInline(rc *bytecode.RegCode, fn *bytecode.Function) (*ir.Program, e
 	return lowerRegRecovered(rc, fn, lowering{ssa: true, callee: true})
 }
 
+// LowerRegForwardWith is LowerRegInline, with hints, for a callee that
+// hands its arguments on, f.apply(x, arguments) (apply_args), inlined
+// where its caller knows what it forwards to, as LowerSSAForward lowers
+// the stack form's: its apply_args is the inliner's to make the call of f
+// with the call's own arguments (ssa.InlineSite's Forward), not one that
+// reads them from the frame's context (ir.Program's Forwards).
+func LowerRegForwardWith(rc *bytecode.RegCode, fn *bytecode.Function, h Hints) (*ir.Program, error) {
+	if fn == nil || !forwardsNatively(fn) {
+		return nil, refuse(-1, "not a forwarding function")
+	}
+	return lowerRegRecovered(rc, fn, lowering{ssa: true, callee: true, forward: true, hints: h})
+}
+
 // LowerRegWith is LowerReg with hints, whose PCs are register pcs: what
 // the function's native code learned at its exits (the stack form's
 // LowerSSAWith's).
@@ -500,7 +513,7 @@ func lowerRegLits(rc *bytecode.RegCode, fn *bytecode.Function, m lowering, litHo
 	if fn.MappedArguments && fn.ParamCount > 0 && (fn.AssignsParams || paramCaptured(fn)) {
 		p.ArgumentParams = min(fn.ParamCount, rc.Params)
 	}
-	if forwardsNatively(fn) && slices.ContainsFunc(rc.Code, func(w bytecode.RInstr) bool { return w.Op() == bytecode.RApplyArgs }) {
+	if forwardsNatively(fn) && !m.forward && slices.ContainsFunc(rc.Code, func(w bytecode.RInstr) bool { return w.Op() == bytecode.RApplyArgs }) {
 		p.Forwards = true
 	}
 	regCaptured(p, rc, fn)

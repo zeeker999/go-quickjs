@@ -3411,7 +3411,7 @@ func (b *builder) hostOf(pc int) bool {
 		if b.cur == b.root {
 			return !b.goCalls() || b.f.Keeps >= b.f.keepLimit()
 		}
-		return !b.cur.site.ReadsArguments || b.generic(pc)
+		return !b.cur.site.ReadsArguments && !(b.cur.site.Window && b.cur.site.Arguments) || b.generic(pc)
 	case ir.IterStep:
 		// A call of Go (GoCall, Step), where the VM answers it. Register
 		// code's loop step writes its register only where the loop goes
@@ -4054,15 +4054,25 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 		// its operands the call's window's registers, of its shape -- a
 		// plain call, a method's or a construction -- its result the
 		// call's register.
-		if !in.Window || !site.Window || isAccessor || site.Argc != in.Extra || site.Method != in.When || site.Restart ||
-			site.Forward || site.Arguments || site.ReadsArguments || site.ThisSlot >= 0 || site.Params < 2 ||
-			site.LexThis && (site.Construct || site.Method || site.LexThisSlot < 0) || b.p.IsCaptured(in.Dest) {
+		if !in.Window || !site.Window || isAccessor || site.Restart || site.ThisSlot >= 0 || site.Params < 2 ||
+			site.LexThis && (site.Construct || site.Method || site.Forward || site.LexThisSlot < 0) || b.p.IsCaptured(in.Dest) {
 			// Nor one whose result is to a register a closure captures,
 			// which its cell holds: the inlined frame's return writes the
 			// slot, not the cell, which a call's own result stores
 			// (assign). A closure the root makes (calledSite), what it
 			// captured the root's own slots (Captured), is called plainly,
 			// an arrow's this the root's (LexThis).
+			return nil, false
+		}
+		if site.Forward {
+			// f.apply(x, arguments) -- apply_args, its window f, apply and
+			// x -- in a callee inlined with its call's arguments
+			// (Arguments): f called with x and those, as the stack form's
+			// forwardCall makes it (inlineWindowCall).
+			if in.Extra != 2 || site.Construct || site.Method || b.cur == b.root || !b.cur.site.Arguments || site.Argc != b.cur.site.Argc {
+				return nil, false
+			}
+		} else if site.Argc != in.Extra || site.Method != in.When {
 			return nil, false
 		}
 		if site.Construct && (site.Pool == 0 || site.Method || b.f.Keeps >= b.f.keepLimit() || !returnsWindowReceiver(site.Program)) {
@@ -4983,6 +4993,10 @@ func (b *builder) inlineWindowCall(blk *Block, pc int, fr *frame, guard func(Op,
 	site, in := fr.site, b.p.Code[pc]
 	a := b.cur.base + in.Left.Slot
 	fn := b.read(a, blk)
+	if site.Forward {
+		b.windowForwardCall(blk, a, fn, fr, guard, state)
+		return
+	}
 	if site.Callee != 0 {
 		object := guard(OpObjectOf, Ptr, ir.HostExit, fn)
 		same := guard(OpSameObject, None, ir.HostExit, object)
@@ -5048,6 +5062,46 @@ func (b *builder) inlineWindowCall(blk *Block, pc int, fr *frame, guard func(Op,
 		fr.args[i] = b.read(a+2+i, blk)
 		if 2+i < site.Params && 2+i < len(fr.init) {
 			fr.init[2+i] = fr.args[i]
+		}
+	}
+}
+
+// windowForwardCall is inlineWindowCall of apply_args, f.apply(x,
+// arguments), in a register callee inlined with its call's arguments
+// (InlineSite's Forward and Arguments): f, its window's register 0 at a,
+// checked to be the callee, and apply, register 1, the realm's own, as
+// the stack form's forwardCall checks them; x, register 2, the callee's
+// receiver, checked to be an object where the callee would coerce it;
+// and the callee's window its function, x and the arguments the frame
+// forwarding them was given, as V8 eliminates the arguments object.
+func (b *builder) windowForwardCall(blk *Block, a int, fn *Value, fr *frame, guard func(Op, Type, ir.ExitKind, ...*Value) *Value, state func() *FrameState) {
+	site := fr.site
+	object := guard(OpObjectOf, Ptr, ir.HostExit, fn)
+	same := guard(OpSameObject, None, ir.HostExit, object)
+	same.Const = ir.Value{Bits: uint64(site.Callee)}
+	apply := guard(OpObjectOf, Ptr, ir.HostExit, b.read(a+1, blk))
+	same = guard(OpSameObject, None, ir.HostExit, apply)
+	same.Const = ir.Value{Bits: uint64(site.Apply)}
+	this := b.read(a+2, blk)
+	if site.Coerce {
+		// A receiver that is not an object is coerced, which Go does.
+		guard(OpObjectOf, Ptr, ir.HostExit, this)
+	}
+	room := guard(OpFrameRoom, None, ir.HostExit)
+	room.Index = fr.base - b.root.p.Locals + fr.p.Locals + fr.p.StackSize
+	room.Const = ir.Value{Bits: uint64(fr.depth)}
+	fr.call = state()
+	undefined := b.f.newValue(blk, OpConst, Tagged)
+	undefined.Const = ir.Value{Kind: ir.Undefined}
+	fr.init = b.f.refsOf(fr.p.Locals + fr.p.StackSize)
+	for s := range fr.init {
+		fr.init[s] = undefined
+	}
+	fr.init[0], fr.init[1] = fn, this
+	fr.args, fr.argSlot = b.cur.args, b.cur.argSlot
+	for i, v := range fr.args {
+		if 2+i < site.Params && 2+i < len(fr.init) {
+			fr.init[2+i] = v
 		}
 	}
 }
@@ -8188,6 +8242,14 @@ func (b *builder) instruction(blk *Block, pc int) {
 		// eliminates the arguments object; any other key deoptimizes, and
 		// the interpreter, Go's from the next compile on (generic), makes
 		// it, its frame given the call's arguments.
+		if in.When {
+			// arguments.length (register code's args_len), the call's
+			// count.
+			n := f.newValue(blk, OpConst, Tagged)
+			n.Const = ir.Float(float64(len(b.cur.args)))
+			b.assign(in.Dest, blk, n)
+			break
+		}
 		if k, ok := constIndex(operand(in.Left)); ok && k < len(b.cur.args) {
 			b.assign(in.Dest, blk, b.cur.args[k])
 			break
@@ -8452,6 +8514,13 @@ func (b *builder) instruction(blk *Block, pc int) {
 				if p.Origin != nil && !looped(p, 0) {
 					// The start polls (OpPoll), which the jump goes to.
 					v.Key |= TailPolled
+				}
+				if calls := b.callsAt(pc); len(calls) != 0 && calls[0].Go == 0 {
+					// In a native callee's frame, a call of another of
+					// the functions the call has is a jump to its code,
+					// its window in place of this one, as the stack
+					// form's (mir's windowTailJump).
+					b.f.cache(v).Calls = calls
 				}
 			} else {
 				room := guard(OpTailRoom, None, ir.HostExit)
@@ -8902,7 +8971,7 @@ func (b *builder) nativeCalls(pc int) []*CallSite {
 			// site's shape the instruction's.
 			super := site.Super && b.p.This && b.cur == b.root
 			if site.Argc != in.Extra || site.Method != in.When || site.Super != super || site.Instr != 0 || site.Accessor != AccessorNone || site.Step || site.ForOf || site.ForIn ||
-				site.TypeOf && (in.Extra != 0 || site.Go != GoCall) || site.InstanceOf && (in.Extra != 1 || site.Go != GoCall) || site.Literal || site.Via != 0 ||
+				site.TypeOf && (in.Extra != 0 || site.Go != GoCall) || site.InstanceOf && (in.Extra != 1 || site.Go != GoCall) || site.Literal || site.Via != 0 && (!in.When || in.Extra < 1) ||
 				site.Go == 0 && !site.Push && !site.Pop && !site.Alloc && (site.Window != in.Left.Slot+1 && !super || site.ThisSlot >= 0 || site.Function ||
 					site.Pool != 0 && site.Method) {
 				// A native call's callee's window is made from the

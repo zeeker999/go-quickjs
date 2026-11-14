@@ -1131,6 +1131,13 @@ type Func struct {
 	// makes the frame and the context of a call of the function, once for
 	// all its callers (mir's Code.CallEntry, abi.Context's ReturnTo).
 	CallEntry bool
+	// TailEntry asks, of register code with a call entry, for the entry a
+	// call in tail position of another function's code jumps to, its frame
+	// given up and the callee's window written in its place (mir's
+	// windowTailJump, Code.TailEntry): it makes what the code's frame takes
+	// past its window -- its operands' address, the VM's stack's top -- as
+	// the call entry would, and goes on at the start.
+	TailEntry bool
 	// GenEntry asks, of a synchronous generator's code, for the entry a
 	// loop's step that resumes the generator natively jumps to (CallSite's
 	// Gens, mir's Code.GenEntry): it makes the generator's frame and

@@ -678,6 +678,11 @@ type jitEntry struct {
 	// leaves to Go (ssa.Func's HostsLeft): a call there its code has never
 	// been seen to make is one seldom made (jitInlineExit).
 	ssaHostsLeft []int32
+	// regCallsMade counts, of register code's learning, the calls Go made
+	// for its code or at its exits, by register pc (jitRegCallSeen): a call
+	// its code leaves to Go and has never made is seldom made (jitRegFeedback's
+	// InlineExit).
+	regCallsMade []uint8
 	// ssaUnresumed are the PCs after the calls the code makes or inlines
 	// that it has no entry after (ssa.Func's Unresumed), and resumeReopt
 	// marks code to be compiled again with an entry at one Go has gone on

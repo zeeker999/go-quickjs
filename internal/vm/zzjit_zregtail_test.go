@@ -128,13 +128,15 @@ func TestJITRegTailCalls(t *testing.T) {
 			for range 2 {
 				run("deep", 2000)
 			}
-			entries := r.RegNativeStats().Entries
+			before = r.RegNativeStats().HostOps
 			run("deep", 2000)
-			// The frames given to a callee in place past tailCallDepth: 8 or
-			// more of self's, for each of the 2,000 calls, each entered in
-			// its native code.
-			if n := r.RegNativeStats().Entries - entries; n < 2000*8 {
-				t.Errorf("%d entries of native code: the frames given to callees ran in the interpreter", n)
+			// The frames given to a callee in place past tailCallDepth --
+			// self's own, even's and odd's each other's -- natively: a jump
+			// to the callee's code in the frame (mir's tailSelf and
+			// windowTailJump), none of them left to the interpreter.
+			after = r.RegNativeStats().HostOps
+			if n := after["tail_call_w"] - before["tail_call_w"]; n != 0 {
+				t.Errorf("%d exits at tail_call_w in deep: the frames given to callees ran in the interpreter", n)
 			}
 			// arm64's backend compiles the same code, its generic calls of
 			// register code among it, on any host.

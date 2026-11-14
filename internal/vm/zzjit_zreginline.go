@@ -96,6 +96,10 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 		switch w := regAt(caller.code, cpc); w.Op() {
 		case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW:
 			called = r.stack[cwb+int(w.A())]
+		case bytecode.RApplyArgs:
+			// f of f.apply(x, arguments), inlined with the arguments
+			// (ssa.InlineSite's Forward).
+			called = r.stack[cwb+int(w.B())]
 		}
 		if loop := s.ssaCtxs[idx].Loop; k == 0 && loop != 0 {
 			// A loop's callback inlined in it: the loop's callback slot
@@ -137,7 +141,17 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 		if at < len(caller.rc.Code) && regAt(caller.code, at).Op() == bytecode.RNewW {
 			x.construct, x.this = true, r.stack[x.wb+1]
 		}
-		lv := jitRegLevel{cl: x.cl, c: rc, wb: x.wb, construct: x.construct}
+		lv := jitRegLevel{cl: x.cl, c: rc, wb: x.wb, construct: x.construct, inline: true}
+		if rc.args {
+			// Its call's arguments, which it keeps (ssa.InlineSite's
+			// ReadsArguments and Arguments): its caller's call's window's,
+			// or those its caller hands on.
+			cwb, cargs := wb, f.args
+			if k > 0 {
+				cwb, cargs = levels[k-1].wb, frames[k-1].args
+			}
+			lv.args = r.jitRegInlineArgs(caller, cwb, at, cargs)
+		}
 		frames = append(frames, r.jitRegPushLevel(&lv, pc))
 	}
 	var v Value
