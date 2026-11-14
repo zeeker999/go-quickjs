@@ -652,10 +652,12 @@ func nativeEmit(v *variant) (*block, error) {
 		g.element(RCX, RSI, 0, objMappedArguments, miss)
 		a.Bind(have)
 		getElem(miss)
-		a.Bind(str)
-		g.keyIndex(R8)
-		g.dense(RCX, RSI, objMappedArguments, g.exit)
-		a.Jmp(have)
+		g.late = append(g.late, func() {
+			a.Bind(str)
+			g.keyIndex(R8)
+			g.dense(RCX, RSI, objMappedArguments, g.exit)
+			a.Jmp(have)
+		})
 	})
 	h(bytecode.RGetIndexI, func() {
 		miss := a.NewLabel()
@@ -985,8 +987,10 @@ func nativeEmit(v *variant) (*block, error) {
 			a.Jcc(CondGE, tailIn)
 			a.Jmp(label(bytecode.RCallW))
 			if i == 0 {
-				a.Bind(tailIn)
-				g.tailTo()
+				g.late = append(g.late, func() {
+					a.Bind(tailIn)
+					g.tailTo()
+				})
 			}
 		})
 	}
@@ -1280,6 +1284,9 @@ func nativeEmit(v *variant) (*block, error) {
 		g.next()
 	})
 
+	for i := 0; i < len(g.late); i++ {
+		g.late[i]()
+	}
 	for n, l := range g.exits {
 		if n == 0 {
 			continue

@@ -30,7 +30,7 @@ func regTableRunSrc(t *testing.T, src string, native bool) string {
 // TestRegTableFastPaths runs what the Go table's fast paths of
 // zzreg_zztable.go answer -- bin's division and int32 remainder, typed
 // arrays' elements stored at a constant index (numbers, and BigInts held
-// in their Values), in by the realm's cache and by an array's elements,
+// in their Values) and at a register's, in by the realm's cache and by an array's elements,
 // private members by their sites, a string's and a number's methods by
 // the realm's cache, an array's length written -- and what they leave to
 // the slow paths, each a few times so that the caches fill, by the Go
@@ -72,6 +72,22 @@ func TestRegTableFastPaths(t *testing.T) {
 			"-56,127,1,0,44,255,4464,4294967295,5,1.100000023841858,true,2,2,255,0,-9223372036854775808,-5,7,18446744073709551615,9223372036854775808,2,|" +
 				"-56,127,1,0,44,255,4464,4294967295,5,1.100000023841858,true,2,2,255,0,-9223372036854775808,-5,7,18446744073709551615,9223372036854775808,2,|" +
 				"-56,127,1,0,44,255,4464,4294967295,5,1.100000023841858,true,2,2,255,0,-9223372036854775808,-5,7,18446744073709551615,9223372036854775808,2,"},
+		{"typed index", `
+			var out = []
+			for (var round = 0; round < 3; round++) {
+				var i8 = new Int8Array(4), f32 = new Float32Array(2), c = new Uint8ClampedArray(2), a = [1, , 3]
+				var vs = [200, -129, 1.9, NaN]
+				for (var k = 0; k < 4; k++) i8[k] = vs[k]
+				for (var k = 0; k < 2; k++) f32[k] = 1.1 * (k + 1)
+				for (var k = 0; k < 2; k++) c[k] = 2.5 * k + 1.5
+				for (var k = 0; k < 3; k++) a[k] = k * 10
+				i8[7] = 5; i8["1"] = 3; i8[1.5] = 9
+				out.push([...i8, ...f32, ...c, ...a, i8.length, i8[7], i8[1.5]].join())
+			}
+			out.join("|")`,
+			"-56,3,1,0,1.100000023841858,2.200000047683716,2,4,0,10,20,4,,|" +
+				"-56,3,1,0,1.100000023841858,2.200000047683716,2,4,0,10,20,4,,|" +
+				"-56,3,1,0,1.100000023841858,2.200000047683716,2,4,0,10,20,4,,"},
 		{"in", `
 			var proto = { inh: 1 }, o = Object.create(proto), a = [1, 2, , 4], out = []
 			o.a = 1

@@ -598,10 +598,12 @@ func (g *nativeGen) call() {
 	a.Jcc(CondNE, g.ex(4))
 	notPush := a.NewLabel()
 	g.push(notPush)
-	a.Bind(notPush)
-	g.genNext(light)
 	a.Bind(light)
 	g.light()
+	g.late = append(g.late, func() {
+		a.Bind(notPush)
+		g.genNext(light)
+	})
 }
 
 // light is call_w's and call_method_w's call of the built-in its site

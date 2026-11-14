@@ -409,8 +409,10 @@ func (g *nativeGen) genStep() {
 	a.Load(RCX, RDI, scr(sKind))
 	a.LeaIdx(RBX, RBX, RCX, 8, 0)
 	g.dispatch()
-	a.Bind(forIn)
-	g.forInStep()
+	g.late = append(g.late, func() {
+		a.Bind(forIn)
+		g.forInStep()
+	})
 }
 
 // genNext is call_method_w of the realm's generator next with no

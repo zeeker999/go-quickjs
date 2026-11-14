@@ -30,6 +30,10 @@ type nativeGen struct {
 	// genObj is genStep's entry with the generator's object in R8, which
 	// a call of next() takes (genNext).
 	genObj Label
+	// late is code a handler leaves out of line, its rarer paths, laid
+	// after the last handler, so that what a later round adds to an
+	// early handler moves none of the handlers after it.
+	late []func()
 }
 
 // ex is the call handler's exit number n.

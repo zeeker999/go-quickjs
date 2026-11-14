@@ -14,7 +14,8 @@ import (
 // (docs/register-interpreter.md, "The loop").
 func init() {
 	regTable[bytecode.RBin], regSlowTable[bytecode.RBin] = rhBin, rsBin
-	regSlowTable[bytecode.RSetIndexI] = rsSetIndexITyped
+	regTable[bytecode.RSetIndexI], regSlowTable[bytecode.RSetIndexI] = rhSetIndexITyped, rsSetIndexITyped
+	regTable[bytecode.RSetIndex] = rhSetIndexTyped
 	regTable[bytecode.RGetPrivate], regSlowTable[bytecode.RGetPrivate] = rhGetPrivateSite, rhGetPrivate
 	regTable[bytecode.RSetPrivate], regSlowTable[bytecode.RSetPrivate] = rhSetPrivateSite, rhSetPrivate
 	regTable[bytecode.RIn], regSlowTable[bytecode.RIn] = rhIn, rsIn
@@ -197,4 +198,47 @@ func rsSetPropLength(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regSta
 		}
 	}
 	return rsSetProp(regs, w, pc, st)
+}
+
+// rhSetIndexTyped is set_index's fast path, as native code's: an element of
+// dense storage written over, as rhSetIndex writes it, or a number stored
+// into a typed array's element (regTypedAt, regTypedStore), rather than
+// through set_index's slow path (regSetMiss) for each store. Anything
+// else is rsSetIndex's.
+func rhSetIndexTyped(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	obj, key := regs[w.A()], regs[w.B()]
+	if obj.IsObject() && key.IsNumber() {
+		o := obj.Object()
+		if i := uint32(key.Number()); float64(i) == key.Number() &&
+			o.flags&(objHasExt|objMappedArguments|objSharedElems) == objHasExt {
+			if es := o.extAt().elems; uint(i) < uint(len(es)) && !isHole(es[i]) {
+				es[i] = regs[w.C()]
+				return pc + 1
+			}
+		}
+		if v := regs[w.C()]; o.class == ClassTypedArray && v.IsNumber() {
+			if t, p := regTypedAt(st.r, o, key.Number()); t != nil && regTypedStore(t, p, v.num) {
+				return pc + 1
+			}
+		}
+	}
+	return ^pc
+}
+
+// rhSetIndexITyped is set_index_i's fast path, as rhSetIndexTyped is
+// set_index's: a dense element, or a typed array's number.
+func rhSetIndexITyped(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if obj := regs[w.A()]; obj.IsObject() {
+		o := obj.Object()
+		if i := uint(w.B()); i < uint(len(o.elemsOf())) && o.flags&(objMappedArguments|objSharedElems) == 0 && !isHole(o.elemsOf()[i]) {
+			o.extOf().elems[i] = regs[w.C()]
+			return pc + 1
+		}
+		if v := regs[w.C()]; o.class == ClassTypedArray && v.IsNumber() {
+			if t, p := regTypedAt(st.r, o, float64(w.B())); t != nil && regTypedStore(t, p, v.num) {
+				return pc + 1
+			}
+		}
+	}
+	return ^pc
 }

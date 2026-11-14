@@ -674,11 +674,21 @@ an element written at the length of an array with room for it, as
 `appendElem` appends it, the array's and its prototype chain's index
 keys and elements checked;
 and a call in tail position while the stack is shallower than
-`tailCallDepth`, which is `call_w`'s. Deeper, Go gives the frame to the
-callee in place (`regTailTo`); where it is the base frame, `nativeRun`
-goes on with the callee's code in the same code entry
-(`nativeRestart`), rather than ending it for `regRestartRun` to run each
-callee in an entry of its own. A `switch` finds its case by its table
+`tailCallDepth`, which is `call_w`'s. Deeper, in a frame the code
+entered by `call_w`, the frame is given to the callee its site's cache
+knows in place (`tailTo`), as `regTailTo` gives it -- the arguments
+moved to the parameters, the bindings past them undefined, the frame
+record the callee's -- where the callee's code may take a frame so
+(`regCode.tailTo`: strict, keeping no arguments, not suspending); the
+caller's state stays on the native frame stack, so that the callee's
+return goes to the frame's caller (`tail_self` 24.4 to 11.0 ns, the
+tree 21.2). Otherwise Go gives the frame to the callee in place
+(`regTailTo`); where it is the base frame, `nativeRun` goes on with the
+callee's code in the same code entry (`nativeRestart`), and where it is
+a frame the code entered, `nativeEnd` does (`nativeRestartDeep`) --
+once an interrupt's count fell due at a tail call, every later call of
+the chain had run in a code entry of its own -- rather than ending it
+for `regRestartRun` to run each callee in an entry of its own. A `switch` finds its case by its table
 (`switchW`), as `regSwitchTable.lookup` does: a number of a dense
 table, a flat string by its cases' constants and then by their texts,
 eight bytes at a time up to 1,024; a table of few or scattered numbers,
@@ -689,7 +699,20 @@ takes them (`bin`); any other remainder is Go's (`math.Mod`).
 `rhStrFreeze` does. `Array.prototype.push` of one argument, its site's
 cached built-in, appends to an array with room for it as an element
 written at an array's length is appended (`appendRoom`), R[B] the new
-length (`push`). A fast path that misses jumps to
+length (`push`). A for-in's step (`forInStep`): an array's index
+keys, walked by index while its element is in its dense storage and the
+runtime keeps the index's string (`intStrings`), handed out as
+`keyString` hands them out -- remembered in `keyAtoms` -- and an
+object's snapshot of keys while it keeps the shape they came from; and
+`get_index` by a key string `keyAtoms` names an index of
+(`keyIndex`), as `stringKeyRead` reads it (`array_for_in` 24.1 to 6.4
+ns, the tree 20.2). The arithmetic and bitwise operations load an
+operand into a float register from memory (`numMem`), not through a
+general register: a chain of operations through one register waits on
+the store's forwarding alone, a move between the register files a link
+fewer (`try_finally` 12.9 to 10.2 ns, and as fast with no try
+statement: the jump over its handler's copy was never the cost).
+A fast path that misses jumps to
 the exit; nothing is written before it does. arm64 answers one case more:
 NaN made an integer -- ToInt32's 0, an integer typed array's element 0
 -- where FCVTZS gives 0 and CVTTSD2SI no integer; what has no int64 is
@@ -1082,7 +1105,17 @@ the allocation of 4 rather than 8 (the tree's keeps its 2 locals), and
   the yield, each in a code entry of its own) and Go's bookkeeping were
   the step's cost: `generator_for_of` went from 42.7 to 27.6 ns, and
   `generator_create`, a short generator's first and last steps, from
-  213 to 151.
+  213 to 151. A call of the realm's next with no argument steps the
+  generator the same way (`genNext`), the call's register where the
+  value goes, and the yield and the return make next's result object of
+  it by a call of Go with no exit (`nativeIterRes`), as next makes it;
+  where Go ends that step, `nativeGenEnd` makes it, or throws at the
+  call (`generator_next` 65.8 to 48.7 ns, the tree 59.8). A yield in a
+  generator's body Go resumed (`regGenRun`), the code entry's base
+  frame, leaves the code with its value (`retDone` 2), and `nativeRun`
+  suspends the frame as `rhYield` would, with no exit; and `gen_entry`
+  of a frame's first run, which does nothing, is native, a throw
+  injected Go's.
 - **An await's job continues in place.** An async function its await's
   job resumes from the job queue (`generator.awaitJob`, a frame of kind
   `regFrameAwaitJob`) goes on in place at an await of a value that is not
