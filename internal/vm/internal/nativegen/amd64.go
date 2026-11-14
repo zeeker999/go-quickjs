@@ -1472,3 +1472,55 @@ func (g *nativeGen) reload() {
 	a.Load(R11, RDI, ncBudget)
 	a.Load(R10, RDI, ncTagBase)
 }
+
+// typeIndex puts in RCX the index of typeof's type of the Value at the
+// window's offset off (typeofNames): a number, a primitive, an object but
+// a proxy and document.all; anything else exits. R8, R9 and RDX are its
+// scratch.
+func (g *nativeGen) typeIndex(off Reg) {
+	a := g.a
+	idx, obj, num, big, notFn := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
+	a.LoadIdx(R9, R12, off, 1, 0)
+	a.Op(Cmp, R9, R10, true)
+	a.Jcc(CondB, num)
+	a.MovImm(R8, heapBigBits)
+	a.Op(Cmp, R9, R8, true)
+	a.Jcc(CondAE, big)
+	a.MovZX8(RCX, R9)
+	a.OpImm(Cmp, RCX, int32(KindObject), false)
+	a.Jcc(CondE, obj)
+	a.OpImm(Cmp, RCX, int32(KindUndefined), false)
+	a.Jcc(CondB, g.exit)
+	a.OpImm(Cmp, RCX, int32(KindBigInt), false)
+	a.Jcc(CondA, g.exit)
+	// undefined, null and a boolean one before their kind; a string,
+	// a symbol and a BigInt at it.
+	a.OpImm(Cmp, RCX, int32(KindString), false)
+	a.Jcc(CondAE, idx)
+	a.OpImm(Sub, RCX, 1, false)
+	a.Jmp(idx)
+	a.Bind(num)
+	a.MovImm(RCX, 3)
+	a.Jmp(idx)
+	a.Bind(big)
+	a.MovImm(RCX, 6)
+	a.Jmp(idx)
+	a.Bind(obj)
+	a.LoadIdx(R8, R12, off, 1, 8)
+	a.LoadU16(RDX, R8, offObjFlags)
+	a.MovImm(RCX, 1)
+	a.MovRR(R9, RDX)
+	a.OpImm(And, R9, int32(objHTMLDDA), false)
+	a.Jcc(CondNE, g.exit)
+	a.OpImm(And, RDX, int32(objHasData), false)
+	a.Jcc(CondE, idx)
+	a.Load(R9, R8, sizeObj+offExtData)
+	a.CmpMem(R9, RDI, ncFuncT, true)
+	a.Jcc(CondNE, notFn)
+	a.MovImm(RCX, 7)
+	a.Jmp(idx)
+	a.Bind(notFn)
+	a.CmpMem(R9, RDI, ncProxyT, true)
+	a.Jcc(CondE, g.exit)
+	a.Bind(idx)
+}

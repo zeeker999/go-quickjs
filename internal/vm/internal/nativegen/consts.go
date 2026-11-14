@@ -45,8 +45,10 @@ var (
 	genSuspendedYield, genExecuting, genCompleted int32
 
 	tailCallDepth, linearScanLimit int32
-	hasCacheBits                   uint8
-	hasCacheMul                    uint64
+	// atomIndexTag bounds an index an atom holds (hasIndexQuick's).
+	atomIndexTag int32
+	hasCacheBits uint8
+	hasCacheMul  uint64
 
 	rtBase, ccBase uint64
 )
@@ -100,7 +102,8 @@ func loadConsts() {
 		{&regFrameCall, "regFrameCall"}, {&regFrameEnter, "regFrameEnter"}, {&regFrameGenStep, "regFrameGenStep"},
 		{&genSuspendedYield, "genSuspendedYield"}, {&genExecuting, "genExecuting"},
 		{&genCompleted, "genCompleted"},
-		{&tailCallDepth, "tailCallDepth"}, {&linearScanLimit, "linearScanLimit"}} {
+		{&tailCallDepth, "tailCallDepth"}, {&linearScanLimit, "linearScanLimit"},
+		{&atomIndexTag, "atomIndexTag"}} {
 		*c.p = int32(k(c.name))
 	}
 	hasCacheBits, hasCacheMul = uint8(k("hasCacheBits")), k("hasCacheMul")

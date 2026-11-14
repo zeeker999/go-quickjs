@@ -153,6 +153,7 @@ func NativeLayout() (offsets, sizes map[string]uintptr, consts map[string]uint64
 
 		"tailCallDepth":   uint64(tailCallDepth),
 		"linearScanLimit": uint64(linearScanLimit),
+		"atomIndexTag":    uint64(atomIndexTag),
 		"hasCacheBits":    uint64(hasCacheBits),
 		"hasCacheMul":     uint64(hasCacheMul),
 

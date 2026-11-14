@@ -773,3 +773,68 @@ func TestRegNativeLiteralsCollecting(t *testing.T) {
 		}
 	}
 }
+
+// TestRegNativeTypeofJumps runs typeof's compares and branches natively,
+// against the Go table, marking and not: every type's value against
+// every type's name, both ways, functions of each kind, a proxy and a
+// revoked one; and a template's parts and ToNumeric, which a string or a
+// number passes and anything else converts in Go. Its fast case jumps by
+// typeof, makes a template's parts and steps a property with no exit.
+func TestRegNativeTypeofJumps(t *testing.T) {
+	nativeCheck(t, `
+		var vals = [1, -0, NaN, 1.5, "s", "", true, false, null, undefined, {}, [], function () {}, () => 1,
+			class {}, async function () {}, function* () {}, Symbol("y"), 10n, new Proxy({}, {}), new Proxy(function () {}, {}),
+			Object(1), new Date(0), /x/]
+		var out = []
+		function kinds(v) {
+			var s = ""
+			if (typeof v == "undefined") s += "u"; if (typeof v != "undefined") s += "U"
+			if (typeof v === "object") s += "o"; if (typeof v !== "object") s += "O"
+			if (typeof v == "boolean") s += "b"; if (typeof v == "number") s += "n"
+			if (typeof v == "string") s += "s"; if (typeof v == "symbol") s += "y"
+			if (typeof v == "bigint") s += "g"; if (typeof v === "function") s += "f"
+			if (typeof v != "function") s += "F"
+			return s
+		}
+		for (var round = 0; round < 3; round++) out.push(vals.map(kinds).join(" "))
+		var r = Proxy.revocable({}, {}); r.revoke(); out.push(kinds(r.proxy))
+		function tpl(a, b) { return a + "<" + b + ">" + `+"`${a}|${b}`"+` }
+		var parts = [[1, "x"], ["a", 2.5], [null, undefined], [true, {}], [[1, 2], { toString() { return "t" } }], [10n, Symbol.iterator.description]]
+		for (var p of parts) out.push(tpl(p[0], p[1]))
+		var o = { i: 0, s: "5", b: 2n, x: null }
+		for (var k = 0; k < 3; k++) { o.i++; o.s++; o.b++; o.x++ }
+		out.push(o.i, o.s, o.b, o.x)
+		out.join("|")`, `
+		function f(v) { return (typeof v == "number" ? 1 : 0) + (typeof v === "string" ? 2 : 0) + (typeof v != "object" ? 4 : 0) }
+		function g(a, b) { return `+"`${a}-${b}`"+` }
+		var o = { n: 0 }, s = 0, vals = [1, "x", null, 2.5]
+		for (var i = 0; i < 1000; i++) { s += f(vals[i & 3]); o.n++; s += g(i, "y").length }
+		String(s + o.n)`, bytecode.RJTypeof, bytecode.RStrPart, bytecode.RUnary)
+}
+
+// TestRegNativeInIndex runs in of number keys natively, against the Go
+// table, marking and not: arrays with holes, elements up the chain, an
+// array whose prototype is one, ordinary objects of elements and of index
+// keys, typed arrays, arguments, strings' wrappers, and keys that are no
+// index -- negative, fractional, -0, NaN, past 2^31 and past an int64;
+// its fast case asks of an array's indices with no exit.
+func TestRegNativeInIndex(t *testing.T) {
+	nativeCheck(t, `
+		var keys = [0, 1, 2, 3, 4, 7, 12, -1, 1.5, -0, NaN, 2147483647, 2147483648, 4294967295, 1e300, Infinity]
+		var holes = [1, 2, , 4], proto = [9, 9, 9, 9, 9, 9, 9, 9], sub = Object.create(proto)
+		sub[1] = 1
+		var obj = { 0: "a", 3: "b" }, plain = { x: 1 }, chained = Object.create([1, , 3])
+		var big = []; big[2147483647] = 1
+		var targets = [holes, proto, sub, obj, plain, chained, big, new Int8Array(3), new String("abc"), [], (function () { return arguments })(1, 2)]
+		var out = []
+		function has(k, o) { return k in o }
+		for (var round = 0; round < 3; round++) {
+			if (round == 2) { holes[2] = 3; Array.prototype[7] = 1 }
+			out.push(targets.map(function (o) { return keys.map(function (k) { return has(k, o) ? 1 : 0 }).join("") }).join(" "))
+		}
+		delete Array.prototype[7]
+		out.join("|")`, `
+		var a = [1, 2, 3, , 5, 6, 7, 8], s = 0
+		for (var j = 0; j < 1000; j++) { if ((j & 7) in a) s++; if (12 in a) s++ }
+		String(s)`, bytecode.RIn)
+}

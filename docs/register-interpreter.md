@@ -642,7 +642,11 @@ and globals read and written by their site; property reads and writes by
 the site's cache, its own entry or the entries of the shapes it met
 before (`propPoly`), and a property added by the transition it
 remembers; `o.n +=` of an own number; `in` by the
-realm's in cache, `typeof`, the length of an array or a string, the
+realm's in cache, and of an index by the elements of an array or an
+ordinary object and its chain, as `hasIndexQuick` finds it; `typeof`, and
+its compare-and-branch (`jtypeof`, `typeIndex`); a template's part that
+is a string or a number (`str_part`); `ToNumeric` of a number (`unary`);
+the length of an array or a string, the
 elements of dense arrays (read, `x[++i]`, `x[i++]`, written over any
 element) and typed arrays (every kind but Float16 and BigInt64); short
 BigInts' add, sub and mul; and calls and returns:

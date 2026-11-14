@@ -1457,3 +1457,52 @@ func (g *armGen) reload() {
 func tableAddrARM64(name, sym string) string {
 	return fmt.Sprintf("TEXT ·%s(SB), NOSPLIT, $0-8\n\tMOVD $·%s(SB), R0\n\tMOVD R0, ret+0(FP)\n\tRET\n", name, sym)
 }
+
+// typeIndex is amd64's: the index of typeof's type in rC, of the Value at
+// the address in addr. r8, r9 and rD are its scratch.
+func (g *armGen) typeIndex(addr Reg) {
+	a := g.a
+	idx, obj, num, big, notFn := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
+	a.Load(r9, addr, 0)
+	a.Cmp(r9, rTag, true)
+	a.BCond(LO, num)
+	a.MovImm(r8, heapBigBits)
+	a.Cmp(r9, r8, true)
+	a.BCond(HS, big)
+	a.Ubfx(rC, r9, 0, 8)
+	a.CmpImm(rC, int64(KindObject), false)
+	a.BCond(EQ, obj)
+	a.CmpImm(rC, int64(KindUndefined), false)
+	a.BCond(LO, g.exit)
+	a.CmpImm(rC, int64(KindBigInt), false)
+	a.BCond(HI, g.exit)
+	// undefined, null and a boolean one before their kind; a string,
+	// a symbol and a BigInt at it.
+	a.CmpImm(rC, int64(KindString), false)
+	a.BCond(HS, idx)
+	a.AddImm(rC, rC, -1, false)
+	a.B(idx)
+	a.Bind(num)
+	a.MovImm(rC, 3)
+	a.B(idx)
+	a.Bind(big)
+	a.MovImm(rC, 6)
+	a.B(idx)
+	a.Bind(obj)
+	a.Load(r8, addr, 8)
+	a.LoadU16(rD, r8, offObjFlags)
+	a.MovImm(rC, 1)
+	a.TstImm(rD, uint64(objHTMLDDA), false)
+	a.BCond(NE, g.exit)
+	a.TstImm(rD, uint64(objHasData), false)
+	a.BCond(EQ, idx)
+	a.Load(r9, r8, sizeObj+offExtData)
+	g.cmpMem(r9, rCtx, ncFuncT)
+	a.BCond(NE, notFn)
+	a.MovImm(rC, 7)
+	a.B(idx)
+	a.Bind(notFn)
+	g.cmpMem(r9, rCtx, ncProxyT)
+	a.BCond(EQ, g.exit)
+	a.Bind(idx)
+}
