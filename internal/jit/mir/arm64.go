@@ -4093,6 +4093,9 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 		if win {
 			frame()
 			c.windowSetup(t, locals, top, high2)
+			if t.FrameArgs {
+				c.windowArgs(t, locals, calleeCtx, top)
+			}
 			if t.Pool != 0 {
 				// As amd64's: a construction's receiver, the pool's last
 				// object, its cell cleared, in the window's register 1 and
@@ -4886,6 +4889,23 @@ func (c *a64Compiler) directOperand(v, x *ssa.Value, base arm64.Reg, disp int32)
 	}
 	c.pointerWord(x, w)
 	c.a.Store(base, disp+c.enc.RefOffset, a64B)
+}
+
+// windowArgs is amd64's: a register callee that keeps its arguments
+// given them in its context, ctx, from its window at locals. It uses a.
+func (c *a64Compiler) windowArgs(t *ssa.CallSite, locals, ctx, a arm64.Reg) {
+	vs := int32(c.enc.ValueSize)
+	num, ref := int32(unsafe.Offsetof(abi.GoArg{}.Num)), int32(unsafe.Offsetof(abi.GoArg{}.Ref))
+	c.a.Load(ctx, a64Ctx, abi.OffNext)
+	c.movImm(a, uint64(t.Argc))
+	c.a.Store(ctx, abi.OffArgc, a)
+	for i := range t.Argc {
+		at := abi.OffArgs + int32(i)*int32(unsafe.Sizeof(abi.GoArg{}))
+		c.a.Load(a, locals, int32(2+i)*vs+c.enc.NumOffset)
+		c.a.Store(ctx, at+num, a)
+		c.a.Load(a, locals, int32(2+i)*vs+c.enc.RefOffset)
+		c.a.Store(ctx, at+ref, a)
+	}
 }
 
 // genWindowSetup is amd64's: a generic call's of register code, its

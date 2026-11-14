@@ -369,7 +369,13 @@ func (r *Runtime) jitRegCallable(o *Object, cl *closure, rc *regCode, argc int) 
 func (r *Runtime) jitRegTarget(o *Object, cl *closure, rc *regCode, argc int) bool {
 	fd := o.fn()
 	if fd == nil || fd.closure != cl || fd.bound || cl.realm != r.Realm || rc == nil || rc != cl.reg || !jitRegCalled(cl, rc) ||
-		rc.args || cl.fn.HasDirectEval {
+		cl.fn.HasDirectEval {
+		return false
+	}
+	if rc.args && (argc > abi.MaxGoArgs || cl.fn.MappedArguments && cl.fn.ParamCount > 0) {
+		// One that keeps its arguments is given them in its context
+		// (ssa.CallSite's FrameArgs), as many as it holds; a sloppy one's
+		// arguments object aliasing its parameters is Go's to make.
 		return false
 	}
 	if cc := cl.closureCode; cc == nil || cc.jitRegRefused {
@@ -409,6 +415,13 @@ func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode
 		Entry: uintptr(unsafe.Pointer(&l.entry)), Count: uintptr(unsafe.Pointer(&l.in)),
 		Argc: argc, Method: method, Params: 2 + int(rc.params), LocalCount: int(rc.numRegs), ThisSlot: -1,
 		Window: f.p.Code[pc].Left.Slot + 1,
+		// A callee that keeps its arguments -- reads arguments, has a rest
+		// parameter -- is given all of them and their count in its context
+		// (abi.Context's Args), as the stack form's native call gives them
+		// (jitFrameArgs), which the frames Go makes of its level have
+		// (jitRegPushLevel) and its arguments' reads answer from
+		// (jitRegFrameOp's GoArgument).
+		FrameArgs: rc.args,
 	}
 	if byCode && pool == nil {
 		// Checked by its code, its environment and its realm, not its
@@ -539,8 +552,27 @@ func (r *Runtime) jitRegPushLevel(l *jitRegLevel, pc uint32) *frame {
 	if l.construct && f.callee != nil {
 		f.newTarget = Obj(f.callee)
 	}
+	if l.c.args {
+		// The arguments its native call gave its context (ssa.CallSite's
+		// FrameArgs), as regEnterW keeps a call's.
+		f.args = jitCtxArgs(r.jit.ssaCtxs[l.ctx])
+		p := int(l.c.params)
+		f.locals = r.stack[l.wb+2 : l.wb+2+p : l.wb+2+p]
+	}
 	f.regKind = regFrameEnter
 	return f
+}
+
+// jitCtxArgs is a copy of the arguments context c holds (abi.Context's
+// Argc and Args), which a native call of a function that keeps its
+// arguments wrote there.
+func jitCtxArgs(c *abi.Context) []Value {
+	n := min(int(c.Argc), len(c.Args))
+	args := make([]Value, n)
+	for i := range n {
+		args[i] = *(*Value)(unsafe.Pointer(&c.Args[i]))
+	}
+	return args
 }
 
 // jitRegPopLevel ends a level's frame f, as regEnterW ends a call's: what

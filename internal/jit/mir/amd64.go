@@ -1951,6 +1951,9 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 		if win {
 			frame()
 			c.windowSetup(t, locals, top, high2)
+			if t.FrameArgs {
+				c.windowArgs(t, locals, calleeCtx, top)
+			}
 			if t.Pool != 0 {
 				// A construction's receiver, the pool's last object, its cell
 				// cleared, in the window's register 1 and the callee's
@@ -5999,6 +6002,26 @@ func (c *compiler) windowSetup(t *ssa.CallSite, locals, a, b amd64.Reg) {
 	default:
 		c.storeImm(locals, vs+c.enc.NumOffset, c.enc.Undefined, a)
 		c.storeImm(locals, vs+c.enc.RefOffset, 0, a)
+	}
+}
+
+// windowArgs gives a register callee that keeps its arguments
+// (ssa.CallSite's FrameArgs) all of them and their count in its context,
+// ctx, read from its window at locals, where the call wrote them, as the
+// stack form's call writes them (call's setup): plain stores, the
+// collector marking or not, of what the VM's stack holds as long as the
+// callee runs. It uses a.
+func (c *compiler) windowArgs(t *ssa.CallSite, locals, ctx, a amd64.Reg) {
+	vs := int32(c.enc.ValueSize)
+	num, ref := int32(unsafe.Offsetof(abi.GoArg{}.Num)), int32(unsafe.Offsetof(abi.GoArg{}.Ref))
+	c.a.Load(ctx, regCtx, abi.OffNext)
+	c.storeImm(ctx, abi.OffArgc, uint64(t.Argc), a)
+	for i := range t.Argc {
+		at := abi.OffArgs + int32(i)*int32(unsafe.Sizeof(abi.GoArg{}))
+		c.a.Load(a, locals, int32(2+i)*vs+c.enc.NumOffset)
+		c.a.Store(ctx, at+num, a)
+		c.a.Load(a, locals, int32(2+i)*vs+c.enc.RefOffset)
+		c.a.Store(ctx, at+ref, a)
 	}
 }
 

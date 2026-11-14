@@ -551,7 +551,9 @@ func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 	}
 	argc := int(w.X())
 	sites, objs, cls := f.regCallTargets(pc, w, argc, method)
-	if len(sites) != 1 || sites[0].ByCode != 0 || sites[0].ArrowThis {
+	if len(sites) != 1 || sites[0].ByCode != 0 || sites[0].ArrowThis || sites[0].FrameArgs {
+		// A callee that keeps its arguments is called (ssa.CallSite's
+		// FrameArgs): its reads of them inlined would each leave.
 		return ssa.InlineSite{}, false
 	}
 	site, o, cl := sites[0], objs[0], cls[0]

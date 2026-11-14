@@ -1408,8 +1408,12 @@ checked by its object, or, a closure its maker makes anew -- another object
 of a function the call has called -- by its code (`ssa.CallSite`'s
 `ByCode`), where the function runs register code of the form's own layout of
 the runtime's realm, and its frame is one the call path makes as a call's
-(not a class's constructor, nor one that keeps its arguments or shares a
-derived constructor's this). A call that meets any other function leaves
+(not a class's constructor, nor one that shares a derived constructor's
+this). A callee that keeps its arguments -- reads `arguments`, has a rest
+parameter -- is given them and their count in its context (`ssa.CallSite`'s
+`FrameArgs`, `mir`'s `windowArgs`), as the stack form's call gives them,
+where its reads of them are answered from (`GoArgument`) and the frame Go
+makes of its level is given them (`jitRegPushLevel`); not inlined. A call that meets any other function leaves
 native code for Go, which learns there what to call next -- a call in tail
 position too, which Go makes at the exit as the interpreter's `tail_call`
 does (`regWholeTail`): the ordinary call while the stack is shallow, the

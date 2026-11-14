@@ -271,3 +271,67 @@ func TestJITRegInlineExits(t *testing.T) {
 		})
 	}
 }
+
+// regArgsSrc's callees keep their arguments -- read arguments, take the
+// rest -- and are called natively, given them in their contexts
+// (ssa.CallSite's FrameArgs): their reads of them answered from there,
+// and a frame Go makes of their level given them (jitRegPushLevel).
+const regArgsSrc = `
+function sum() { var s = 0; for (var i = 0; i < arguments.length; i++) s += arguments[i]; return s }
+function rest(a, ...more) { return a + more.length + (more[1] | 0) }
+function list() { "use strict"; var o = null; for (var i = arguments.length - 1; i >= 0; i--) o = { car: arguments[i], cdr: o }; return o }
+function len(o) { var n = 0; while (o) { n += o.car; o = o.cdr } return n }
+function stack() { return new Error("x").stack.split("\n").length + arguments.length }
+function args(n) {
+	var s = 0;
+	for (var i = 0; i < n; i++) s += sum(i, 1, 2) + sum() + rest(i, 2, 3, 4) + len(list(i, 2, 3)) + (i % 500 == 0 ? stack(1, 2) : 0);
+	return s;
+}
+`
+
+// TestJITRegArgumentsCallees runs regArgsSrc's args natively and in a
+// runtime with no JIT and compares them: its callees that keep their
+// arguments are called natively.
+func TestJITRegArgumentsCallees(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			regNoInline(t)
+			RecordJITCompiles(true)
+			defer RecordJITCompiles(false)
+			rts := regNativeRuntimes(t, regArgsSrc)
+			r := rts[0]
+			r.SetJITWarmUp(1, 1)
+			for range 6 {
+				var got [2]string
+				for i, r := range rts {
+					fn, _ := r.GetProp(Obj(r.Global()), r.Intern("args"))
+					v, err := r.Call(fn, Undefined, []Value{Float(3000)})
+					got[i] = regNativeShow(r, v, err)
+				}
+				if got[0] != got[1] {
+					t.Fatalf("args: with the JIT %q, without %q", got[0], got[1])
+				}
+			}
+			native := map[string]uint64{}
+			for key, l := range r.jit.regLinks {
+				if fn := key.Value(); fn != nil {
+					native[fn.Name] += l.in
+				}
+			}
+			for _, name := range []string{"sum", "rest", "list"} {
+				if native[name] == 0 {
+					t.Errorf("%s: never called natively: %v", name, native)
+				}
+			}
+			if fns, _, _ := regCompileARM64(t, r); fns == 0 {
+				t.Error("nothing compiled for arm64")
+			}
+		})
+	}
+}
