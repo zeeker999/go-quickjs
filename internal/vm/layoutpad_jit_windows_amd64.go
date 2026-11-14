@@ -40,10 +40,10 @@ const (
 	layoutPadNW  = 361
 	layoutPadNGW = -1
 	layoutPadNMW = -1
-	layoutPadNZ  = 458
+	layoutPadNZ  = 454
 	layoutPadNGZ = -1
 	layoutPadNMZ = -1
-	layoutPadNCZ = 334
+	layoutPadNCZ = 325
 	layoutPadNDH = 3
 	layoutPadNDW = 0
 	layoutPadNDG = 0

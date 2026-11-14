@@ -138,6 +138,13 @@ type nativeCtx struct {
 	// iterResFn is the func value of nativeIterRes, which a generator's
 	// step that next() entered calls for its result object.
 	iterResFn uintptr
+	// callMissFn is the func value of nativeCallMiss, which the call
+	// handler calls for a callee other than its site cached.
+	callMissFn uintptr
+	// miss asks the exit stub for nativeCallMiss rather than the
+	// instruction's Go handler: the call handler's callee other than its
+	// site cached.
+	miss uintptr
 	// fv is the top frame's feedback vector, a slot a site into which a
 	// handler ORs the kinds of value it met (the JIT's next step, as
 	// Ignition's): none yet, its room kept here and in the frame record,

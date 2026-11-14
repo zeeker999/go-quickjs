@@ -486,8 +486,7 @@ var nativeCallRegs = map[string][5]string{
 // path does calls the operation's slow function at once
 // (nativeExitTable), not the Go handler, which would only give back ^pc:
 // every operation of nativeSlowOnMiss has a native handler, and its
-// entry is its slow function; call_w's and call_method_w's is their miss
-// path (nativeCallMiss); the others' are their Go handlers. The
+// entry is its slow function; the others' are their Go handlers. The
 // answers of such misses -- strings, BigInts, objects, NaN and numbers
 // past int64 to the arithmetic and the bitwise operators, into registers
 // that held pointers -- are the table's, natively, with the collector
@@ -504,9 +503,6 @@ func TestRegNativeExitSlow(t *testing.T) {
 		want, what := regTable[op], "Go handler"
 		if slow[bytecode.ROp(op)] {
 			want, what = regSlowTable[op], "slow function"
-		}
-		if op := bytecode.ROp(op); op == bytecode.RCallW || op == bytecode.RCallMW {
-			want, what = nativeCallMiss, "miss path, nativeCallMiss"
 		}
 		if reflect.ValueOf(nativeExitTable[op]).Pointer() != reflect.ValueOf(want).Pointer() {
 			t.Errorf("%s: the exit table's entry is not its %s", bytecode.ROp(op), what)

@@ -207,7 +207,7 @@ func (g *nativeGen) ptrTo() {
 func (g *nativeGen) call() {
 	a := g.a
 	ok, noThis, noTop, loop, loopEnd, skip, high := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
-	start, tmpl, builtin := a.NewLabel(), a.NewLabel(), a.NewLabel()
+	start, tmpl, builtin, miss := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
 	a.Bind(start)
 
 	// e := &calls[C].
@@ -538,45 +538,45 @@ func (g *nativeGen) call() {
 	a.LoadU8(R8, RCX, offEKind)
 	a.OpImm(And, R8, int32(^(regCallOut|regCallLeaf)&0xff), false)
 	a.OpImm(Cmp, R8, regCallEnter, false)
-	a.Jcc(CondB, g.ex(3))
+	a.Jcc(CondB, miss)
 	a.OpImm(Cmp, R8, regCallObjThis, false)
-	a.Jcc(CondA, g.ex(3))
+	a.Jcc(CondA, miss)
 	a.LoadU16(RDX, R9, offObjFlags)
 	a.OpImm(And, RDX, int32(objHasData), false)
-	a.Jcc(CondE, g.ex(3))
+	a.Jcc(CondE, miss)
 	a.Load(RDX, R9, sizeObj+offExtData)
 	a.CmpMem(RDX, RDI, ncFuncT, true)
-	a.Jcc(CondNE, g.ex(3))
+	a.Jcc(CondNE, miss)
 	a.Load(RDX, R9, sizeObj+offExtData+8)
 	a.LoadU8(R8, RDX, offFDBound)
 	a.Op(Test, R8, R8, false)
-	a.Jcc(CondNE, g.ex(3))
+	a.Jcc(CondNE, miss)
 	a.LoadU8(R8, RDX, off("funcData.arrow"))
 	a.Op(Test, R8, R8, false)
-	a.Jcc(CondNE, g.ex(3))
+	a.Jcc(CondNE, miss)
 	a.Load(R8, RDX, off("funcData.extra"))
 	a.Op(Test, R8, R8, true)
-	a.Jcc(CondNE, g.ex(3))
+	a.Jcc(CondNE, miss)
 	a.Load(RDX, RDX, off("funcData.closure"))
 	a.Op(Test, RDX, RDX, true)
-	a.Jcc(CondE, g.ex(3))
+	a.Jcc(CondE, miss)
 	a.Load(R8, RCX, offECl)
 	a.Op(Test, R8, R8, true)
-	a.Jcc(CondE, g.ex(3))
+	a.Jcc(CondE, miss)
 	a.Load(RAX, RDX, offClCode)
 	a.CmpMem(RAX, R8, offClCode, true)
-	a.Jcc(CondNE, g.ex(3))
+	a.Jcc(CondNE, miss)
 	a.Load(RAX, RDX, off("closure.realm"))
 	a.CmpMem(RAX, R8, off("closure.realm"), true)
-	a.Jcc(CondNE, g.ex(3))
+	a.Jcc(CondNE, miss)
 	// Its register code, its closureCode's, the cached one.
 	a.Load(RAX, RDX, offClCode)
 	a.AddMem(RAX, RDI, ncCCBase)
 	a.Load(RAX, RAX, offCCReg)
 	a.Op(Test, RAX, RAX, true)
-	a.Jcc(CondE, g.ex(3))
+	a.Jcc(CondE, miss)
 	a.CmpMem(RAX, RCX, offERC, true)
-	a.Jcc(CondNE, g.ex(3))
+	a.Jcc(CondNE, miss)
 	a.Store(RDI, scr(sE), RCX)
 	a.Store(RDI, scr(sV0), RDX)
 	a.Lea(RAX, RCX, offECallee)
@@ -599,7 +599,14 @@ func (g *nativeGen) call() {
 	notPush := a.NewLabel()
 	g.push(notPush)
 	a.Bind(light)
-	g.light()
+	g.light(ncBuiltinFn)
+	// Another callee than the cache's, of another template: the exit, its
+	// Go function nativeCallMiss (ncMiss), which makes the cache the
+	// callee's where the code enters it with a frame and has the call made
+	// again.
+	a.Bind(miss)
+	a.StoreImm(RDI, ncMiss, 1)
+	a.Jmp(g.exit)
 	g.late = append(g.late, func() {
 		a.Bind(notPush)
 		g.genNext(light)
@@ -614,7 +621,7 @@ func (g *nativeGen) call() {
 // before the call -- no state to make, no count, no handler to look up,
 // and no search of the site's cache again in rhCallW. A frame whose
 // state Go has not made yet (topOK) exits.
-func (g *nativeGen) light() {
+func (g *nativeGen) light(fn int32) {
 	a := g.a
 	a.CmpMemImm8(RDI, ncTopOK, 0)
 	a.Jcc(CondE, g.exit)
@@ -631,9 +638,9 @@ func (g *nativeGen) light() {
 	a.Store(RDX, offRtBackEdges, R11)
 	a.LeaLabel(R8, g.exitAfter)
 	a.Store(RDI, ncAfter, R8)
-	// nativeBuiltin(st.regs, w, pc, st): the func value in DX.
+	// nativeBuiltin(st.regs, w, pc, st), or fn's: the func value in DX.
 	a.MovRR(RBX, RAX)
-	a.Load(RDX, RDI, ncBuiltinFn)
+	a.Load(RDX, RDI, fn)
 	a.Load(RSI, RDI, ncTop)
 	a.Load(RAX, RSI, offStRegs)
 	a.JmpMem(RDI, ncCallH)

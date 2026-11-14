@@ -210,14 +210,16 @@ var (
 	offFThis     int32
 
 	// Closures and upvalues (closeUps, closure_w).
-	ncClosureFn int32
-	ncLitFn     int32
-	ncBuiltinFn int32
-	ncIterResFn int32
-	offUpSlot   int32
-	offUpClosed int32
-	offRCLeafUp int32
-	offRCTailTo int32
+	ncClosureFn  int32
+	ncLitFn      int32
+	ncBuiltinFn  int32
+	ncIterResFn  int32
+	ncCallMissFn int32
+	ncMiss       int32
+	offUpSlot    int32
+	offUpClosed  int32
+	offRCLeafUp  int32
+	offRCTailTo  int32
 
 	offFiKeys      int32
 	offFiObj       int32
@@ -457,6 +459,8 @@ func loadOffsets() {
 	ncLitFn = off("nativeCtx.litFn")
 	ncBuiltinFn = off("nativeCtx.builtinFn")
 	ncIterResFn = off("nativeCtx.iterResFn")
+	ncCallMissFn = off("nativeCtx.callMissFn")
+	ncMiss = off("nativeCtx.miss")
 	offUpSlot = off("upvalue.slot")
 	offUpClosed = off("upvalue.closed")
 	offRCLeafUp = off("regCode.leafUp")

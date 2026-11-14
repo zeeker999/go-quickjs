@@ -583,6 +583,13 @@ func (g *armGen) exitStub() {
 	a.Ubfx(r8, rW, 0, 8)
 	a.Load(r9, rCtx, ncGoTable)
 	a.LoadIdx(rFn, r9, r8, true)
+	// nativeCallMiss where the call handler asks for it (ncMiss).
+	have := a.NewLabel()
+	a.Load(rT, rCtx, ncMiss)
+	a.Cbz(rT, have, true)
+	a.Store(rCtx, ncMiss, ZR)
+	a.Load(rFn, rCtx, ncCallMissFn)
+	a.Bind(have)
 	a.Load(rS, rCtx, ncTop)
 	a.Load(rW, rS, offStRegs)
 	a.Load(rJ, rCtx, ncCallH)

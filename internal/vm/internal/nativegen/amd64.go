@@ -503,6 +503,14 @@ func (g *nativeGen) exitStub() {
 	a.MovZX8(RDX, RAX)
 	a.Load(R8, RDI, ncGoTable)
 	a.LoadIdx(RDX, R8, RDX, 8, 0)
+	// A call's callee other than its site cached: nativeCallMiss, which
+	// the call handler asks for (ncMiss).
+	have := a.NewLabel()
+	a.CmpMemImm8(RDI, ncMiss, 0)
+	a.Jcc(CondE, have)
+	a.StoreImm(RDI, ncMiss, 0)
+	a.Load(RDX, RDI, ncCallMissFn)
+	a.Bind(have)
 	a.Load(RSI, RDI, ncTop)
 	a.Load(RAX, RSI, offStRegs)
 	a.JmpMem(RDI, ncCallH)

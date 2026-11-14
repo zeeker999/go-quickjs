@@ -129,11 +129,10 @@ func init() {
 	nativeLitFn = nativeLit
 	nativeBuiltinFn = nativeBuiltin
 	nativeIterResFn = nativeIterRes
+	nativeCallMissFn = nativeCallMiss
 	for _, op := range nativeSlowOnMiss {
 		nativeExitTable[op] = regSlowTable[op]
 	}
-	nativeExitTable[bytecode.RCallW] = nativeCallMiss
-	nativeExitTable[bytecode.RCallMW] = nativeCallMiss
 }
 
 // nativeRun runs frame f as register code c, from instruction start, by
@@ -228,6 +227,8 @@ func (r *Runtime) nativeLoop(st *regState, ctx *nativeCtx, f *frame, c *regCode,
 		// frame: only a frame's end goes further.
 		pc, w := int(ctx.pc), bytecode.RInstr(ctx.w)
 		op := w.Op()
+		miss := ctx.miss != 0
+		ctx.miss = 0
 		if nativeCount {
 			atomic.AddInt64(&nativeExits[op], 1)
 		}
@@ -238,7 +239,11 @@ func (r *Runtime) nativeLoop(st *regState, ctx *nativeCtx, f *frame, c *regCode,
 			ctx.grow()
 			continue
 		}
-		pc = regTable[op](s.regs, w, pc, s)
+		if miss {
+			pc = nativeCallMiss(s.regs, w, pc, s)
+		} else {
+			pc = regTable[op](s.regs, w, pc, s)
+		}
 		// The instructions after it that have no native handler are run
 		// here too, rather than each entering the code to exit at once.
 		code := s.c.code
@@ -389,6 +394,7 @@ func (r *Runtime) newNativeCtx(st *regState) *nativeCtx {
 	ctx.litFn = *(*uintptr)(unsafe.Pointer(&nativeLitFn))
 	ctx.builtinFn = *(*uintptr)(unsafe.Pointer(&nativeBuiltinFn))
 	ctx.iterResFn = *(*uintptr)(unsafe.Pointer(&nativeIterResFn))
+	ctx.callMissFn = *(*uintptr)(unsafe.Pointer(&nativeCallMissFn))
 	ctx.grow()
 	st.native = ctx
 	return ctx
@@ -723,8 +729,9 @@ func nativeIterRes(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeC
 	regs[w.B()] = Obj(ctx.st.r.iterResult(regs[w.B()], pc != 0))
 }
 
-// nativeCallMiss is call_w's and call_method_w's exit: where the site's
-// cache holds another callee than the window's, a closure the call handler
+// nativeCallMiss is call_w's and call_method_w's exit where the handler
+// meets a callee other than its site's cache holds and of another
+// template (ctx.miss): where it is a closure the handler
 // enters (regCallKind), the cache is made the new callee's and the call
 // made again, which the code then enters itself, rather than Go entering
 // it in a code entry of its own (regCallMiss) -- a site that calls several
@@ -756,6 +763,9 @@ func nativeCallMiss(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regStat
 	}
 	return rhCallW(regs, w, pc, st)
 }
+
+// nativeCallMissFn is nativeCallMiss's func value, set by init.
+var nativeCallMissFn func(*[1 << 16]Value, bytecode.RInstr, int, *regState) int
 
 // nativeIterResFn is nativeIterRes's func value, set by init.
 var nativeIterResFn func(*[1 << 16]Value, bytecode.RInstr, int, *nativeCtx)

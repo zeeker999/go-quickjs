@@ -189,7 +189,7 @@ func (g *armGen) ptrTo() {
 func (g *armGen) call() {
 	a := g.a
 	ok, noThis, noTop, loop, loopEnd, skip, high := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
-	start, tmpl, builtin := a.NewLabel(), a.NewLabel(), a.NewLabel()
+	start, tmpl, builtin, miss := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
 	a.Bind(start)
 
 	// e := &calls[C].
@@ -492,38 +492,38 @@ func (g *armGen) call() {
 	a.LoadU8(r8, rC, offEKind)
 	a.AndImm(r8, r8, uint64(^(regCallOut|regCallLeaf)&0xff), false)
 	a.CmpImm(r8, int64(regCallEnter), false)
-	a.BCond(LO, g.ex(3))
+	a.BCond(LO, miss)
 	a.CmpImm(r8, int64(regCallObjThis), false)
-	a.BCond(HI, g.ex(3))
+	a.BCond(HI, miss)
 	a.LoadU16(rD, r9, offObjFlags)
 	a.TstImm(rD, uint64(objHasData), false)
-	a.BCond(EQ, g.ex(3))
+	a.BCond(EQ, miss)
 	a.Load(rD, r9, sizeObj+offExtData)
 	g.cmpMem(rD, rCtx, ncFuncT)
-	a.BCond(NE, g.ex(3))
+	a.BCond(NE, miss)
 	a.Load(rD, r9, sizeObj+offExtData+8)
 	a.LoadU8(r8, rD, offFDBound)
-	a.Cbnz(r8, g.ex(3), false)
+	a.Cbnz(r8, miss, false)
 	a.LoadU8(r8, rD, off("funcData.arrow"))
-	a.Cbnz(r8, g.ex(3), false)
+	a.Cbnz(r8, miss, false)
 	a.Load(r8, rD, off("funcData.extra"))
-	a.Cbnz(r8, g.ex(3), true)
+	a.Cbnz(r8, miss, true)
 	a.Load(rD, rD, off("funcData.closure"))
-	a.Cbz(rD, g.ex(3), true)
+	a.Cbz(rD, miss, true)
 	a.Load(r8, rC, offECl)
-	a.Cbz(r8, g.ex(3), true)
+	a.Cbz(r8, miss, true)
 	a.Load(rJ, rD, offClCode)
 	g.cmpMem(rJ, r8, offClCode)
-	a.BCond(NE, g.ex(3))
+	a.BCond(NE, miss)
 	a.Load(rJ, rD, off("closure.realm"))
 	g.cmpMem(rJ, r8, off("closure.realm"))
-	a.BCond(NE, g.ex(3))
+	a.BCond(NE, miss)
 	a.Load(rJ, rD, offClCode)
 	g.addMem(rJ, rCtx, ncCCBase)
 	a.Load(rJ, rJ, offCCReg)
-	a.Cbz(rJ, g.ex(3), true)
+	a.Cbz(rJ, miss, true)
 	g.cmpMem(rJ, rC, offERC)
-	a.BCond(NE, g.ex(3))
+	a.BCond(NE, miss)
 	a.Store(rCtx, scr(sE), rC)
 	a.Store(rCtx, scr(sV0), rD)
 	a.AddImm(rW, rC, int64(offECallee), true)
@@ -547,13 +547,18 @@ func (g *armGen) call() {
 	a.Bind(notPush)
 	g.genNext(light)
 	a.Bind(light)
-	g.light()
+	g.light(ncBuiltinFn)
+	// Another callee than the cache's, of another template: the exit to
+	// nativeCallMiss, as amd64's.
+	a.Bind(miss)
+	g.storeImm(rCtx, ncMiss, 1)
+	a.B(g.exit)
 }
 
 // light is amd64's (amd64_calls.go): nativeBuiltin called through callH
 // with the exit's protocol, returning to the exit stub's code after its
 // call, its func value in R26.
-func (g *armGen) light() {
+func (g *armGen) light(fn int32) {
 	a := g.a
 	a.Load(rT, rCtx, ncTopOK)
 	a.Cbz(rT, g.exit, true)
@@ -565,7 +570,7 @@ func (g *armGen) light() {
 	// nativeBuiltin(st.regs, w, pc, st): w in R1, pc in R2.
 	a.MovRR(rD, rC)
 	a.MovRR(rC, rW)
-	a.Load(rFn, rCtx, ncBuiltinFn)
+	a.Load(rFn, rCtx, fn)
 	a.Load(rS, rCtx, ncTop)
 	a.Load(rW, rS, offStRegs)
 	a.Load(rJ, rCtx, ncCallH)

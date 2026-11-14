@@ -755,8 +755,9 @@ is not this one, and CI runs it under Go 1.24 and Go 1.27. The call made
 and the entry (199 to 162 ns an operation), and `string_indexOf` 13%. There is no second interpreter: what the Go table does, an exit does.
 
 **Call sites of several callees.** A call site's cache holds one
-callee. Where `call_w` or `call_method_w` meets another, its exit
-(`nativeCallMiss`) makes the cache the new callee's and makes the call
+callee. Where `call_w` or `call_method_w` meets another, of another
+template, the handler calls `nativeCallMiss` as it calls a built-in
+(`light`), which makes the cache the new callee's and makes the call
 again, which the code then enters itself, rather than Go entering it in
 a code entry of its own -- where the handler would enter it with a
 frame: a leaf, which the miss answers without one, and a frame that
@@ -764,7 +765,9 @@ keeps its arguments stay Go's, each cheaper there than the exit the call
 would come back to (with them, `func_closure_call` was twice as slow
 and the forwarders 20 to 35%). The cache is the same as `regCallMiss`
 would leave it: the last callee. `literal_sites_branch` went from 79.4
-to 68.2 ns (the tree 65.0).
+to 68.2 ns (the tree 65.0). Called from the exit stub, for every exit
+of the two operations, it had made `has_own_call_miss`, whose call exits
+with the cached callee, 6% slower.
 
 **Calls of Go with no exit.** What Go does that throws nothing and runs
 no code is called through `nativeCallH` with none of an exit's work:
