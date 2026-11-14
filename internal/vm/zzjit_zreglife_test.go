@@ -189,3 +189,44 @@ function drive(n) { var o = { a: 1 }, s = 0; for (var i = 0; i < n; i++) s += ge
 		t.Errorf("get never entered natively: %+v", f)
 	}
 }
+
+// TestJITRegInstallsAtCall compiles a function's register code in the
+// background and checks that a call of it from the interpreter -- at a
+// site the interpreter's caches answer, no sample -- installs the code
+// once done and enters it (jitEnters, jitRegEnter), as the stack form's
+// calls install theirs (tryJITAt): before, only a sample installed it.
+func TestJITRegInstallsAtCall(t *testing.T) {
+	const src = `
+function f(x) { var s = 0; for (var i = 0; i < x; i++) s += i; return s }
+function g(n) { return f(n) }
+`
+	rts := regNativeRuntimes(t, src)
+	r := rts[0]
+	r.jitStress = jitStressConfig{}
+	r.jitBackground = true
+	fv, _ := r.GetProp(Obj(r.Global()), r.Intern("f"))
+	cl := fv.Object().fn().closure
+	c := cl.reg
+	if c == nil {
+		c = r.regOf(cl)
+	}
+	if e := r.jitRegFor(cl, c); e != nil {
+		t.Fatalf("compiled on the spot: %+v", e)
+	}
+	if !cl.jitEnters || cl.closureCode.jitReg != nil {
+		t.Fatalf("a compile in the background not marked for its calls")
+	}
+	for _, j := range r.jit.regJobs {
+		<-j.done
+	}
+	r.interruptCounter = 1 << 30
+	gv, _ := r.GetProp(Obj(r.Global()), r.Intern("g"))
+	v, err := r.Call(gv, Undefined, []Value{Float(10)})
+	if got := regNativeShow(r, v, err); got != "45" {
+		t.Fatalf("g(10) = %q, want 45", got)
+	}
+	e := cl.closureCode.jitReg
+	if e == nil || e.code == nil || e.life.starts == 0 {
+		t.Fatalf("the call did not install and enter the code: %+v", e)
+	}
+}

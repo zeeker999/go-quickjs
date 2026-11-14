@@ -762,10 +762,12 @@ type closureCode struct {
 	// kept, and freshProtos is not set again.
 	freshProtos, sharedProtos bool
 	// jitEnters says the template's function has native code a call
-	// enters (the JIT's jitReg): rhCallW's hit, and the native call
-	// handler's, which leaves such a call to rhCallW, enter it, as the
-	// stack interpreter's calls look for their callee's code. Never set
-	// in a build without the JIT.
+	// enters (the JIT's jitReg), or a compile in the background that its
+	// next call installs: rhCallW's hit and regEnterW, and the native call
+	// handler's, which leaves such a call to rhCallW, go to the JIT
+	// (jitRegEnter), as the stack interpreter's calls look for their
+	// callee's code and install what is done (tryJITAt). Never set in a
+	// build without the JIT.
 	jitEnters bool
 	// arrays are this template's empty array literals' sites, in this
 	// realm, by the tree builder's count of them (arrayEmptyNode); nil

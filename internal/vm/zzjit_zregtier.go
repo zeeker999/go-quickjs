@@ -672,6 +672,13 @@ func (r *Runtime) jitRegWriteSeen(f *frame, c *regCode, e *jitRegEntry, rpc int,
 // interpreter where the code leaves it, or has no entry there.
 func (r *Runtime) jitRegEnter(f *frame, cl *closure, c *regCode, base, start int) (Value, error) {
 	e := cl.closureCode.jitReg
+	if e == nil && r.jit != nil && r.jit.inFlight() {
+		// A compile of it in the background (jitEnters): installed now if
+		// done, as the stack form's calls install theirs (tryJITAt), and
+		// entered from this call on.
+		r.jitDrain()
+		e = cl.closureCode.jitReg
+	}
 	if e == nil || e.invalid || e.code == nil || !r.jitEnabled {
 		if e != nil && e.code == nil {
 			// Let go of by the cache (regLetGo).

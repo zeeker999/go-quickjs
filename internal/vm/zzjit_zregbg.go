@@ -109,6 +109,11 @@ func (r *Runtime) jitRegSubmit(j *jitRegJob) {
 	}
 	s.regPendingJobs[j.key] = j
 	s.regJobs = append(s.regJobs, j)
+	if cc := j.cl.closureCode; cc != nil {
+		// Its calls go to the JIT, which installs it once done
+		// (jitRegEnter).
+		cc.jitEnters = true
+	}
 	s.bgSubmitted++
 	jitWorkers.submit(j)
 	if r.jitStress.background && r.jitStress.checks == 0 {
@@ -187,6 +192,9 @@ func (r *Runtime) jitRegDrainJobs(stress bool, k int) {
 // background go, as it releases its JIT (abandonJobs).
 func (s *jitState) jitRegAbandonJobs() {
 	for _, j := range s.regJobs {
+		if cc := j.cl.closureCode; cc != nil {
+			cc.jitEnters = cc.jitReg != nil
+		}
 		for {
 			st := j.state.Load()
 			if st == jitJobDone {
@@ -211,6 +219,10 @@ func (s *jitState) jitRegAbandonJobs() {
 func (r *Runtime) jitRegInstall(j *jitRegJob) {
 	s := r.jit
 	defer func() {
+		if cc := j.cl.closureCode; cc != nil {
+			// Its calls enter it if it has code, installed or not.
+			cc.jitEnters = cc.jitReg != nil
+		}
 		if j.w != nil {
 			jit.PutWorkspace(j.w)
 			j.w = nil

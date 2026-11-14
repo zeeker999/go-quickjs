@@ -321,8 +321,9 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int,
 	}
 	var v Value
 	var err error
-	if jitBuilt && r.jitRegHas(cl) {
-		// Native code made from its register code (jitRegEnter).
+	if jitBuilt && cl.jitEnters {
+		// Native code made from its register code, or a compile of it in
+		// the background to install (jitRegEnter).
 		v, err = r.jitRegEnter(f, cl, rc, base, 0)
 	} else {
 		v, err = r.runReg(f, rc, 0)
