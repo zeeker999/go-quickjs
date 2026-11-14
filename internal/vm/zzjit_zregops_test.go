@@ -429,3 +429,27 @@ func TestJITRegSpreads(t *testing.T) {
 		})
 	}
 }
+
+// TestJITRegOpsCompileForARM64 compiles again, with arm64's backend, on
+// any host, the register code this file's sources were compiled to: the
+// native instanceof, the element reads and writes learned, the steps, the
+// pools of arrays and closures, the spreads' fast paths.
+func TestJITRegOpsCompileForARM64(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	RecordJITCompiles(true)
+	defer RecordJITCompiles(false)
+	for _, src := range []string{regElemSrc, regOpsSrc, regLoopsSrc, regAllocSrc, regClosureSrc, regClassSrc, regSpreadSrc} {
+		rts := regNativeRuntimes(t, src)
+		r := rts[0]
+		fn, _ := r.GetProp(Obj(r.Global()), r.Intern("main"))
+		for range 10 {
+			r.Call(fn, Undefined, []Value{Float(300)})
+		}
+		fns, _, _ := regCompileARM64(t, r)
+		if fns == 0 {
+			t.Error("nothing compiled for arm64")
+		}
+	}
+}
