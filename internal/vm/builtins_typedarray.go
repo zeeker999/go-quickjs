@@ -1686,6 +1686,7 @@ func (r *Runtime) defineTypedArrayMethods(p *Object) {
 				el := t.getElem(i)
 				argv[0], argv[1], argv[2] = el, Int(i), this
 				var res Value
+				var err error
 				if ready != nil {
 					res, err = ready.call(argv[:])
 				} else {
