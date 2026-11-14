@@ -971,7 +971,9 @@ which, given to nothing else, the code never makes, as V8's escape analysis
 removes it: what it captures the inlined code reads and assigns as the
 caller's own slots, in place, and a frame state names its template where the
 closure would be, which Go makes the closure from at an exit, as V8's
-deoptimizer materializes an object. An exit inside the callback has Go make
+deoptimizer materializes an object -- register code's, `closure_w` writing
+the call's first argument just before it (`jitRegFeedback`'s
+`madeCallback`). An exit inside the callback has Go make
 its frame past the loop's, finish it and go on with the loop after its
 index; one that leaves too often has the callback called natively again.
 Where every closure the code makes is such a callback, a native call's frame
@@ -1065,6 +1067,28 @@ names the template, Go makes the closure at an exit, and an exit inside the
 inlined call has Go make its frame calling that closure. The entry after the
 closure, there for Go to go on after making it, is dropped. Where it makes
 no other closure, its cells go back to their pool too (`CellsBack`).
+
+Register code's are answered by `closure_w`'s register pc
+(`jitRegFeedback`'s `CalledClosure`): the template of the maker's constant
+the instruction names, what it captures by the register code's `Caps` -- a
+register of the maker's, or one of its own captured bindings -- and its
+function lowered for an inlined frame (`madeInline`), called plainly, its
+window the call's. An arrow that reads its this reads the maker's register
+1, as `closure_w` gives it the frame's (`InlineSite`'s `LexThis`), but in
+a derived constructor, whose this may not be bound yet. A scope's end that
+closes a register it captures (`close_regs`), which the lowering leaves to
+Go whole, is named to the build (`MadeCallback`'s `Closes`), which then
+inlines no call of the closure past it, as it inlines none past a stack
+form's `CloseUpvalues`. A call is found to call the closure by its window's
+register 0 in the call's state (`calledClosures`); one of a callee given it
+by its window's function, copied just before from a parameter's register
+(`givenCall`), so that a register callee calling what it is given is
+inlined with the closure in it (`InlineCallsGiven`). At an exit, Go makes
+each unmade closure on the maker's frame as `closure_w` would, its captured
+registers' cells open on the frame by then, and gives it to every register
+and inlined window naming its template (`jitRegMadeIn`); an inlined level
+named by a template is the closure its caller's call's window holds -- or
+the loop's callback slot, for a callback inlined in a loop (`jitRegInlined`).
 
 ### Closures and cells
 
@@ -1517,7 +1541,10 @@ sites' caches have seen added first (`jitRegSeenFeedback`), the root's keep
 holding what its sites name. A getter or setter a register read or write
 calls (`jitRegFeedback`'s `Accessor`, `accessorOf`) is offered the same way
 (`AccessorSite`'s `Inline`), once the receiver and the accessor are checked
-(`accessorOp`).
+(`accessorOp`). So is a closure the function makes and only calls, or only
+gives to a callee that calls it, unchecked and never made, an arrow reading
+its this among them, its this the maker's (see [Closures the code only
+calls](#allocation-and-escape-analysis)).
 
 **What the builder takes.** What a function inlines is bounded by size
 alone, as V8's JSInliningHeuristic bounds it, never by a count of calls: a

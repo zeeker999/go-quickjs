@@ -139,6 +139,13 @@ func (b *builder) calledClosures() (map[int]int, map[string]int) {
 		if st == nil {
 			return nil, false
 		}
+		if in := p.Code[pc]; in.Window {
+			// Register code's: its window's register 0.
+			if in.Left.Slot >= st.Own() {
+				return nil, false
+			}
+			return st.Slots[in.Left.Slot], true
+		}
 		at := p.Locals + st.Depth - argc - 1
 		if at < p.Locals || at >= st.Own() {
 			return nil, false
@@ -170,6 +177,10 @@ func (b *builder) calledClosures() (map[int]int, map[string]int) {
 		}
 		argc, method, ok := at.CallShape(gs.pc)
 		slot := gs.fr.base + gs.fr.p.Locals + gs.fr.p.Maps[gs.pc].Depth - argc - 1
+		if in := gs.fr.p.Code[gs.pc]; in.Window {
+			// A register callee's: its window's register 0.
+			slot = gs.fr.base + in.Left.Slot
+		}
 		if !ok || method || slot < gs.fr.base || slot >= len(gs.state.Slots) || gs.state.Slots[slot] == nil {
 			continue
 		}
@@ -196,11 +207,8 @@ func (b *builder) calledClosures() (map[int]int, map[string]int) {
 		if obj == nil {
 			continue
 		}
-		// The local the closure is kept in, the instruction after it.
-		home := -1
-		if next := p.Code[c.pc+1]; (next.Op == ir.Copy || next.Op == ir.StoreLoad) && next.Left.Slot == p.Code[c.pc].Dest && next.Dest < f.FrameLocals {
-			home = next.Dest
-		}
+		// The local the closure is kept in (calledHome).
+		home := calledHome(p, c.pc, f.FrameLocals)
 		// The entry after it, which the second build drops (unmakeCalled):
 		// the closure the slot it loads holds is the one made.
 		var after *Block
@@ -344,7 +352,7 @@ func (b *builder) calledClosures() (map[int]int, map[string]int) {
 				lo, hi = 0, len(p.Code)
 			}
 			for q := lo; q < hi; q++ {
-				if in := p.Code[q]; in.Op == ir.CloseUpvalues && reachable(p, q) && closesCaptured(int(in.Key), made.Captures) {
+				if in := p.Code[q]; (in.Op == ir.CloseUpvalues && closesCaptured(int(in.Key), made.Captures) || containsInt(made.Closes, q)) && reachable(p, q) {
 					return true
 				}
 			}
@@ -370,6 +378,22 @@ func (b *builder) calledClosures() (map[int]int, map[string]int) {
 		}
 	}
 	return called, given
+}
+
+// calledHome is the local the closure p makes at pc is kept in, or -1:
+// the instruction after it copies it there -- or, register code's, the
+// register it is made in, one of the frame's.
+func calledHome(p *ir.Program, pc, frameLocals int) int {
+	if p.Origin != nil {
+		if d := p.Code[pc].Dest; d >= 0 && d < p.Regs {
+			return d
+		}
+		return -1
+	}
+	if next := p.Code[pc+1]; (next.Op == ir.Copy || next.Op == ir.StoreLoad) && next.Left.Slot == p.Code[pc].Dest && next.Dest < frameLocals {
+		return next.Dest
+	}
+	return -1
 }
 
 // closesCaptured reports whether a scope's end closing the locals from key

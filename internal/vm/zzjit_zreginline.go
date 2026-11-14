@@ -3,6 +3,7 @@
 package vm
 
 import (
+	"slices"
 	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -40,14 +41,17 @@ type jitRegInlineLevel struct {
 }
 
 // jitRegInlined finishes the inlined callees whose frames an exit of the
-// code of owner, cl's function's entry, run in context idx, wrote in the
-// contexts past it (abi.LiveInline), and returns what the outermost
-// answered, or false where there are none. at is the register pc of the
-// owner's call the outermost is inlined at, wb the owner's window: the
-// objects its code did not make, which its frame's registers and the
-// callees' windows may name, are made first, once for both
-// (jitRegMaterializeSpans).
-func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at, wb int) (Value, error, bool) {
+// code of owner, the entry of the function frame f runs, run in context
+// idx, wrote in the contexts past it (abi.LiveInline), and returns what the
+// outermost answered, or false where there are none. at is the register pc
+// of the owner's call the outermost is inlined at, wb the owner's window:
+// the objects and closures its code did not make, which its frame's
+// registers and the callees' windows may name, are made first, once for
+// both (jitRegMaterializeSpans). A callee that is a closure the owner did
+// not make (ssa's calledClosures), named by its template, is the closure
+// made in its place, which its caller's call's window holds.
+func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb int) (Value, error, bool) {
+	cl := f.cl
 	s := r.jit
 	if idx+1 >= len(s.ssaCtxs) || s.ssaCtxs[idx+1].Live != abi.LiveInline {
 		return Undefined, nil, false
@@ -71,12 +75,41 @@ func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at, wb
 		c.Live, c.ReturnTo = 0, 0
 	}
 	n := len(levels)
-	if owner.frame != 0 {
+	if owner.frame != 0 || owner.keep != nil && len(owner.keep.made) != 0 {
 		spans := make([][2]int, 0, n)
 		for _, x := range levels {
 			spans = append(spans, [2]int{x.wb, x.wb + int(x.cl.reg.numRegs)})
 		}
-		r.jitRegMaterializeSpans(nil, owner, wb, spans)
+		r.jitRegMaterializeSpans(f, owner, wb, spans)
+	}
+	for k := range levels {
+		// The closure its caller's call called, the function in the call's
+		// window: the one made in place of a template.
+		caller, cwb, cpc := cl.reg, wb, at
+		if k > 0 {
+			caller, cwb, cpc = levels[k-1].cl.reg, levels[k-1].wb, levels[k-1].pc
+		}
+		if cpc >= len(caller.rc.Code) {
+			continue
+		}
+		called := Undefined
+		switch w := regAt(caller.code, cpc); w.Op() {
+		case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW:
+			called = r.stack[cwb+int(w.A())]
+		}
+		if loop := s.ssaCtxs[idx].Loop; k == 0 && loop != 0 {
+			// A loop's callback inlined in it: the loop's callback slot
+			// (jitRegLoopFinish's), which Go goes on calling.
+			called = r.stack[jitRegSlotIndex(owner.p, wb, owner.p.Locals+int(loop&0xffffffff)-1)+1]
+		}
+		if called.IsObject() {
+			if fd := called.Object().fn(); fd != nil && fd.closure != nil && fd.closure.fn == levels[k].cl.fn && fd.closure.reg != nil {
+				levels[k].cl = fd.closure
+			}
+		}
+		if kp := owner.keep; kp != nil && slices.Contains(kp.made, levels[k].cl) {
+			panic("vm: an inlined closure the code did not make is not where its call is")
+		}
 	}
 	s.unwound += uint64(n)
 	saved := r.stackTop

@@ -297,6 +297,10 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 	// The pools' roots and prototypes escape analysis took, which the
 	// objects it does not make are made with at an exit.
 	rf.fb.keepVirtuals(f.VirtualAsked)
+	// The closures it makes that it only calls (ssa.Func's Called), and its
+	// loops' callbacks, those it does not make among them.
+	rf.fb.called = f.Called
+	rf.fb.callbacks, rf.fb.unmade = f.Callbacks, f.Unmade
 	// What the code reads by address, its feedback's keep; the closure
 	// and the function the feedback asked are not.
 	e.keep = rf.fb.keep()
@@ -425,6 +429,9 @@ func (r *Runtime) jitRegMaterialize(f *frame, e *jitRegEntry, wb int) {
 // same objects as the frame's: one made for each home, which every slot
 // naming it, the frame's and the callees', is given.
 func (r *Runtime) jitRegMaterializeSpans(f *frame, e *jitRegEntry, wb int, spans [][2]int) {
+	if k := e.keep; k != nil && len(k.made) != 0 && f != nil {
+		r.jitRegMadeIn(f, e, wb, spans)
+	}
 	if e.frame == 0 {
 		return
 	}
@@ -480,6 +487,47 @@ func (r *Runtime) jitRegMaterializeSpans(f *frame, e *jitRegEntry, wb int, spans
 		}
 	}
 	r.jit.materialized += uint64(len(objs))
+}
+
+// jitRegMadeIn makes, in the registers of f's window at wb, its scratch
+// slots and frame, and the windows of the callees e's code inlined that an
+// exit inside them wrote (spans), the closures e's code did not make (ssa's
+// calledClosures): one for each template, on f, as closure_w makes it
+// (regClosure) -- its captured registers' cells open on the frame by now
+// (jitRegReopenCells) -- and every slot holding the template given it, as
+// the stack form's exits make them (jitMaterializeIn).
+func (r *Runtime) jitRegMadeIn(f *frame, e *jitRegEntry, wb int, spans [][2]int) {
+	made := e.keep.made
+	c := f.cl.reg
+	objs := make([]*Object, len(made))
+	fix := func(v *Value) {
+		t := v.template()
+		if t == nil {
+			return
+		}
+		i := slices.Index(made, t)
+		if i < 0 {
+			return
+		}
+		if objs[i] == nil {
+			k := slices.IndexFunc(f.cl.consts, func(x Value) bool { return x.template() == t })
+			if c == nil || k < 0 || k >= len(c.rc.Caps) {
+				panic("vm: an unmade closure's template is not its maker's")
+			}
+			objs[i] = r.regClosure(f, c, bytecode.MakeRBC(bytecode.RClosureW, 0, 0, uint32(k)), wb)
+			r.jit.materialized++
+		}
+		*v = Obj(objs[i])
+	}
+	end := min(len(r.stack), wb+e.p.Regs+e.scratch+e.frame)
+	for i := wb; i < end; i++ {
+		fix(&r.stack[i])
+	}
+	for _, sp := range spans {
+		for i := sp[0]; i < min(sp[1], len(r.stack)); i++ {
+			fix(&r.stack[i])
+		}
+	}
 }
 
 // jitRegRun runs f, running c with its window at wb, in e's code from
@@ -822,7 +870,7 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 		// answered, as a native callee's (regPending).
 		rpc := int(ctx.ExitPC)
 		f.pc = regSrc(c, rpc) + 1
-		if v, uerr, ok := r.jitRegInlined(idx, f.cl, e, rpc, wb); ok {
+		if v, uerr, ok := r.jitRegInlined(idx, f, e, rpc, wb); ok {
 			s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: v, err: uerr}
 		}
 	}
