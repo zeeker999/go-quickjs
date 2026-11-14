@@ -324,3 +324,57 @@ func TestJITRegComparisonValues(t *testing.T) {
 		})
 	}
 }
+
+// regAccumulateSrc's loop replaces its accumulator each turn through a
+// method that constructs the next, which native code inlines with the
+// construction: escape analysis keeps the objects unmade round the loop,
+// their fields in registers.
+const regAccumulateSrc = `
+function V2(x, y) { this.x = x; this.y = y }
+V2.prototype.add = function (o) { return new V2(this.x + o.x, this.y + o.y) };
+var vs = [];
+for (var i = 0; i < 16; i++) vs.push(new V2(i, i & 7));
+function sum(a, m) { var i, s = new V2(0, 0); for (i = 0; i < m; i++) s = s.add(a[i % a.length]); return s.x + s.y }
+function drive(n) { var t = 0; for (var j = 0; j < n; j++) t += sum(vs, 100); return t }
+`
+
+// An object a register loop begins with, merged at its header with the
+// one each turn makes, is used past the loop's end only from the copy of
+// the test before the loop (compile's loopTest), at the end of that
+// predecessor: escape analysis takes a phi's use there (liveAt), not in
+// the phi's block, which the loop reaches, and keeps the objects unmade,
+// where it had made one each turn. Exact answers, idle and marking.
+func TestJITRegLoopObjectsUnmade(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			var last string
+			mir.Annotate = true
+			JITCodeHook = func(f JITFunction, _ []byte, c *mir.Code) {
+				if f.Name == "sum" {
+					last = c.Listing
+				}
+			}
+			defer func() { JITCodeHook, mir.Annotate = nil, false }()
+			rts := regNativeRuntimes(t, regAccumulateSrc)
+			for k, r := range rts {
+				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("drive"))
+				for i := range 40 {
+					v, err := r.Call(fn, Undefined, []Value{Float(200)})
+					// Node's: 200 calls, each the sum of 100 vectors' x and y.
+					if got := regNativeShow(r, v, err); got != "213600" {
+						t.Fatalf("runtime %d, call %d: %s", k, i, got)
+					}
+				}
+			}
+			if !strings.Contains(last, "propread") || strings.Contains(last, "= call ") {
+				t.Errorf("sum makes an object each turn:\n%s", last)
+			}
+		})
+	}
+}

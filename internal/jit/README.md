@@ -1182,7 +1182,10 @@ Beyond TurboFan's, as Graal's partial escape analysis has it, a phi merging
 objects not made of one shape at the merge, none of them used past it, is an
 object not made of its own, at a loop's header too, its properties phis: an
 accumulator a loop replaces each turn (`sum = sum.add(v)`) is its properties
-alone. A use that needs an object made -- a call's operand, a store into an
+alone. Another phi's use of one is at the end of the predecessor it comes
+from (`liveAt`): a register loop's end, which the copy of its test before
+the loop reaches too, merges the object the loop began with from that way
+alone, which no turn of the loop is on. A use that needs an object made -- a call's operand, a store into an
 object that is made, a return -- has the code make it there, from its pool,
 its properties defined along the additions that made its state, and it is
 that object past there. An object made on every path anyway is made where it
