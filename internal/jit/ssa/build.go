@@ -8536,7 +8536,13 @@ func (b *builder) whole(blk *Block, pc int, in ir.Instruction, guard func(Op, Ty
 		args[i] = b.read(reads[i], blk)
 	}
 	call := guard(OpCall, Tagged, ir.HostExit, args...)
-	f.cache(call).Calls, call.Index = []*CallSite{{Go: GoCall, Whole: true, Argc: n, ThisSlot: -1}}, f.Keeps
+	site := &CallSite{Go: GoCall, Whole: true, Argc: n, ThisSlot: -1}
+	if sites := b.fb.NativeCalls(pc); len(sites) == 1 && sites[0].Whole && sites[0].Argc == n {
+		// What native code makes of it itself first, as of the stack
+		// form's operation's site (CallSite's ArrayIter, Append, Copies).
+		site = &sites[0]
+	}
+	f.cache(call).Calls, call.Index = []*CallSite{site}, f.Keeps
 	f.Keeps++
 	f.HostsLeft = append(f.HostsLeft, pc)
 	if dest >= 0 {

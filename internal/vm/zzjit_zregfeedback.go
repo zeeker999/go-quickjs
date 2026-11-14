@@ -616,6 +616,11 @@ func (f *jitRegFeedback) GoCalls() bool { return true }
 // neither, which the interpreter makes in constant space at a host exit.
 func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
 	w, op, ok := f.at(pc)
+	if ok && (op == ir.Host && f.p.Code[pc].Whole || op == ir.FieldDefine && w.Op() == bytecode.RDefineField) {
+		// An instruction Go runs whole, its fast paths native code's
+		// (regWholeSite).
+		return f.regWholeSite(pc, w)
+	}
 	if !ok || op != ir.Host || !f.p.Code[pc].Window {
 		return nil
 	}

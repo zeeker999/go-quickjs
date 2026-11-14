@@ -357,3 +357,75 @@ func TestJITRegClassOps(t *testing.T) {
 		})
 	}
 }
+
+// regSpreadSrc spreads objects and arrays and defines literals' fields
+// after a spread, which native code makes itself first where it can --
+// by the layouts Go copied, a dense array's elements, an element
+// appended, a field along its shape's transition (regWholeSite) -- or
+// Go without the frame (jitRegFrameless), or on it: a getter on the
+// source, holes, a string, null, an iterator replaced, a frozen target.
+const regSpreadSrc = `
+function sp(n) {
+	var s = 0, base = { a: 1, b: 2 }, arr = [1, 2, 3], log = 0;
+	var getter = { get a() { log++; return 5 }, z: 1 };
+	for (var i = 0; i < n; i++) {
+		var o = { ...base, c: i }, g = { ...getter, k: i }, t = { ..."hi", ...null, d: 1 };
+		var a = [...arr, i, ...arr], b = [0, , 2], c = [..."xy", ...b];
+		s += o.a + o.c + g.a + g.k + t[1].length + t.d + a.length + a[3] + b.length + c.length + (1 in b ? 1 : 0) + (3 in c ? 1 : 0);
+	}
+	return s + ":" + log + ":" + JSON.stringify(c) + Object.keys(o);
+}
+function swap() { Array.prototype[Symbol.iterator] = function* () { yield 9 } }
+function main() { return sp(3000) }
+`
+
+// TestJITRegSpreads runs regSpreadSrc's main natively and in a runtime
+// without the JIT and compares their answers, before and after arrays'
+// iterator is replaced, the collector idle and marking: no spread, push
+// or field definition a call of Go each.
+func TestJITRegSpreads(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regSpreadSrc)
+			rts[0].SetJITReport(true)
+			call := func(name string) [2]string {
+				var got [2]string
+				for i, r := range rts {
+					fn, _ := r.GetProp(Obj(r.Global()), r.Intern(name))
+					v, err := r.Call(fn, Undefined, nil)
+					got[i] = regNativeShow(r, v, err)
+				}
+				if got[0] != got[1] {
+					t.Errorf("%s: with the JIT %q, without %q", name, got[0], got[1])
+				}
+				return got
+			}
+			for range 10 {
+				call("main")
+			}
+			if got := call("main"); got[1] != `13567500:3000:["x","y",0,null,2]a,b,c` {
+				t.Errorf("main: %q", got[1])
+			}
+			st := rts[0].RegNativeStats()
+			t.Logf("calls of Go %v", st.GoCallOps)
+			// Of 33,000 turns: a push and a field natively; of three object
+			// spreads and four array spreads each, those of a string, of a
+			// getter's object and of an array with a hole Go's.
+			for op, most := range map[string]uint64{"whole array_push": 1000, "whole define_field": 1000, "whole array_spread": 66000, "whole copy_data_props": 66000} {
+				if n := st.GoCallOps[op]; n > most {
+					t.Errorf("%s: %d calls of Go", op, n)
+				}
+			}
+			call("swap")
+			for range 3 {
+				call("main")
+			}
+		})
+	}
+}

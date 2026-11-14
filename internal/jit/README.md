@@ -1345,6 +1345,16 @@ the runtime stopped in, or after which the code was found invalid, its exit
 finishes (`regPending`, `regFinishCall`): the answer to the call's register,
 or the exception to the frame's handlers, never the call made again.
 
+**What native code makes first.** Of an instruction run whole, native code
+makes what the stack form's site of the same operation has it make itself
+(`jitRegFeedback`'s `NativeCalls` for a whole Host, `regWholeSite`): an
+object's spread by the layouts Go has copied (`ssa.CallSite`'s `Copies`),
+an array's spread by a dense array's elements (`ArrayIter`), an element
+appended (`Append`), a literal's field along its shape's transition
+(`DefineNext`); what it does not make, Go makes without the frame where
+that runs nothing (`jitRegFrameless`, the stack form's `jitOpFrameless`,
+which learns the layouts' copies), and on it otherwise.
+
 **Loops' steps.** A for...of's or a for...in's step (`iter_next`, an
 `ir.IterStep` native code does not make itself) is a call of Go of the
 step (`ssa.CallSite`'s `Step`) that runs the register instruction on the

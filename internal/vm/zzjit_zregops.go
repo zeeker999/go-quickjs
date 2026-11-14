@@ -331,3 +331,72 @@ func (f *jitRegFeedback) CellsPool() (uintptr, []int32, bool) {
 	fb.keep().pools = append(fb.keep().pools, e.cellsPool)
 	return uintptr(unsafe.Pointer(e.cellsPool)), cells, true
 }
+
+// jitRegFrameless makes register instruction op, whole, for native code
+// in ctx without its frame where that runs nothing and throws nothing, as
+// the stack form's operations are made (jitOpPlain, jitOpFrameless): an
+// object's spread -- learning the layouts' copy native code makes next
+// (jitCopyLearn) -- an array's spread of a dense array's elements, an
+// element appended. Its operands are the instruction's registers (compile's
+// RegAccess), the target first; it writes none. It reports whether it
+// made it; what it does not make, the instruction run whole on the frame
+// (jitRegWhole) makes.
+func (r *Runtime) jitRegFrameless(ctx *abi.Context, op bytecode.ROp) bool {
+	var in bytecode.Instr
+	switch op {
+	case bytecode.RCopyDataProps:
+		in.Op = bytecode.OpCopyDataProps
+	case bytecode.RArraySpread:
+		in.Op = bytecode.OpArraySpread
+	case bytecode.RArrayPush:
+		in.Op = bytecode.OpArrayPush
+	default:
+		return false
+	}
+	if int(ctx.GoOp>>abi.GoOpArgcShift&0xff) != 2 {
+		return false
+	}
+	args := unsafe.Slice((*Value)(unsafe.Pointer(&ctx.GoArgs[0])), 2)
+	v, ok := r.jitOpFrameless(nil, nil, in, args)
+	if !ok {
+		return false
+	}
+	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
+	return true
+}
+
+// regWholeSite is the call of Go a register instruction run whole makes
+// (ssa.CallSite's Whole), with what native code makes of it itself first,
+// as the stack form's sites of the same operations have it: an array
+// spread by its elements (ArrayIter), an element appended (Append), an
+// object spread by the layouts Go has copied (Copies), a literal's field
+// defined along its shape's transition (DefineNext).
+func (f *jitRegFeedback) regWholeSite(pc int, w bytecode.RInstr) []ssa.CallSite {
+	_, argc, _, ok := f.p.Code[pc].WholeOperands(f.p.Regs)
+	site := ssa.CallSite{Go: ssa.GoCall, Whole: true, Argc: argc, ThisSlot: -1}
+	r := f.fb.r
+	switch {
+	case !ok || argc != 2:
+		return nil
+	case w.Op() == bytecode.RDefineField:
+		// A literal's field along its shape's first transition by the
+		// key (DefineNext), as the stack form's define_field's.
+		key, ok := f.name(int(f.p.Origin[pc]), w.C())
+		if !ok || key >= 1<<24 {
+			return nil
+		}
+		site.Key, site.DefineNext = uint32(key), true
+	case w.Op() == bytecode.RArraySpread:
+		site.ArrayIter = uintptr(unsafe.Pointer(&r.jit.arrayIter))
+	case w.Op() == bytecode.RArrayPush:
+		site.Append = true
+	case w.Op() == bytecode.RCopyDataProps:
+		if r.jit.copies == nil {
+			r.jit.copies = new([jitCopyEntries]jitCopyEntry)
+		}
+		site.Copies = uintptr(unsafe.Pointer(r.jit.copies))
+	default:
+		return nil
+	}
+	return []ssa.CallSite{site}
+}

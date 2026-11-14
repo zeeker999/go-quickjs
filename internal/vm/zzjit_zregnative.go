@@ -879,6 +879,9 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	op := w.Op()
 	argc := int(w.X())
 	kind := ctx.GoOp >> abi.GoOpKindShift & 0xff
+	if kind == abi.GoCallWhole && r.jitRegFrameless(ctx, op) {
+		return true
+	}
 	if kind == abi.GoCallWhole || (kind == abi.GoCallRest || kind == abi.GoCallStep) && (op == bytecode.RIterRest || op == bytecode.RIterStep) ||
 		kind == abi.GoCallStep && op == bytecode.RIterNext {
 		// Or a destructuring's step or rest, which native code had no
