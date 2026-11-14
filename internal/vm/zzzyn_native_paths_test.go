@@ -421,9 +421,10 @@ func TestRegNativeCallHConvention(t *testing.T) {
 		for {
 			f, more := frames.Next()
 			if afterCallH {
-				// nativeCallH's caller, to the unwinder: nativeRun.
-				if !strings.HasSuffix(f.Function, ".nativeRun") {
-					bad = append(bad, "nativeCallH's caller is "+f.Function+", not nativeRun")
+				// nativeCallH's caller, to the unwinder: nativeLoop, which
+				// entered the code.
+				if !strings.HasSuffix(f.Function, ".nativeLoop") {
+					bad = append(bad, "nativeCallH's caller is "+f.Function+", not nativeLoop")
 				}
 				afterCallH = false
 			}
@@ -1030,4 +1031,37 @@ func TestRegNativePolyCalls(t *testing.T) {
 		var cs = [function () { return 1 }, C]
 		for (var i = 0; i < 4; i++) { try { out.push(cs[i & 1]()) } catch (e) { out.push(e.constructor.name) } }
 		out.join()`, "")
+}
+
+// TestRegCallbackSort runs sorts' comparators kept ready from one call to
+// the next (regCallback), natively and by the Go table: comparators of
+// BigInts, of mixed values, with a this (sloppy, strict, an arrow's),
+// ones that make closures of their bindings each call, that call in tail
+// position past tailCallDepth, that sort in turn, that throw, whose result
+// converts by a valueOf that throws or reads a stack trace, and ones a
+// callback is not kept for: leaves, and bodies that keep their arguments.
+func TestRegCallbackSort(t *testing.T) {
+	nativeCheck(t, `
+		var out = []
+		var big = new BigInt64Array([5n, -3n, 2n ** 62n, 0n, -(2n ** 63n), 7n])
+		var cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0)
+		out.push(big.slice().sort(cmp).join(), [3, "2", 1, "10", 2].sort(cmp).join())
+		function sloppy(a, b) { out.length; return typeof this === "object" ? a - b : 0 }
+		function strict(a, b) { "use strict"; return this === undefined ? b - a : 0 }
+		var obj = { k: 1, sort(a) { return a.sort((x, y) => (x - y) * this.k) } }
+		out.push([3, 1, 2].sort(sloppy).join(), [3, 1, 2].sort(strict).join(), obj.sort([9, 7, 8]).join())
+		var made = []
+		out.push([4, 2, 3, 1].sort(function (a, b) { let d = a - b; made.push(() => d); return d }).join(), made.map(f => f()).join())
+		function down(n, d) { "use strict"; return n === 0 ? d : down(n - 1, d) }
+		out.push([5, 3, 4, 1, 2].sort((a, b) => down(100, a - b)).join())
+		out.push([[3, 1], [2, 2], [1, 3]].sort((a, b) => a.slice().sort((x, y) => x - y)[0] - b.slice().sort((x, y) => x - y)[0] || a[0] - b[0]).join("|"))
+		try { [1, 2, 3].sort((a, b) => { if (a === 2) throw new RangeError("c" + a + b); return a - b }) } catch (e) { out.push(e.message) }
+		var where = ""
+		try { [1, 2].sort(() => ({ valueOf() { where = new Error("s").stack.split("\n").length > 0 ? "ok" : ""; throw new TypeError("v") } })) } catch (e) { out.push(e.message, where) }
+		var st = []
+		function traced(a, b) { if (st.length === 0) st.push(new Error("t").stack.split("\n")[1].trim().split(" ")[1]); return a - b }
+		out.push([3, 2, 1].sort(traced).join(), st[0])
+		out.push([2, 1].sort(function () { return arguments[0] - arguments[1] }).join(), [2, 1, 3].sort((a, b) => b - a).join())
+		var u8 = new Uint8Array([9, 4, 6]); out.push(u8.sort((a, b) => { let c = a - b; return c }).join())
+		out.join("\n")`, "")
 }

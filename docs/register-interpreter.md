@@ -605,7 +605,9 @@ same instructions and the same frames; the Go table is what they leave
 work to, and every other architecture's interpreter. arm64's are amd64's
 handler for handler, in its instructions (nativegen's `arm64*.go`);
 what follows says amd64's registers, and arm64's where they differ.
-`runReg` hands its frame to `nativeRun` before its loop; `QJS_NONATIVE` set in the
+`runReg` hands its frame to `nativeRun` before its loop, whose
+`nativeLoop` enters the code and is what the code returns to (here
+`nativeRun` for short); `QJS_NONATIVE` set in the
 environment (read once, `regNativeOn`) keeps the frames in the Go table's
 loop, to compare the two and as an escape hatch.
 
@@ -625,7 +627,7 @@ to `R25` in that order, `R0` the instruction word, `R1` to `R7`, `R16`, `R17` an
 uses `R26` only for the func value of an exit's call and `R27` only as
 the encoder's temporary, and never touches `R18` (the platform's), `R28`
 (the goroutine), `R29` (the frame pointer) or `R30`, which holds
-`nativeEnter`'s return to `nativeRun` throughout, so that a profile taken
+`nativeEnter`'s return to `nativeLoop` throughout, so that a profile taken
 in the code, and the trampolines' frames, unwind to it.
 
 **What is native.** The numbers' arithmetic, increments, `-x`, `+x`,
@@ -743,7 +745,7 @@ goroutine in `R14`, `X15` zero, and the arguments' spill room in the
 caller's frame; on arm64 the arguments in `R0` to `R3`, the func value
 in `R26`, the result in `R0`, the goroutine in `R28`, the spill room at
 `8(RSP)` to `40(RSP)`, and the word below the stack pointer `nativeCallH`
-is entered with left alone: it holds `nativeRun`'s caller's frame
+is entered with left alone: it holds `nativeLoop`'s caller's frame
 pointer, which Go's arm64 frames save at `-8(RSP)`. Go does not promise
 the convention across releases;
 `TestRegNativeCallHConvention` calls a Go handler through `nativeCallH`
@@ -927,12 +929,22 @@ A built-in calling a callback enters the register code directly: the
 arguments, which are a Go slice, are copied into a window at the top of
 the stack, and `regEnter` runs the callee, with no tree, no `defer` and no
 `recover`. A register function calling a built-in passes it the window's
-arguments as its slice, without copying. A callback whose body is pure but longer than a
-register call answers without a frame (`pureByTree`) is evaluated
-without one from Go where it can be (`regDirect`, `pureCall`), as
-`callDirect` evaluates a pure body the tree has no tree for: from Go its
-frame is a code entry of its own (`typed_i64_sort`'s comparator of
-BigInts, 188.6 to 155 ns, the tree 153.7).
+arguments as its slice, without copying.
+
+A callback a built-in calls many times over -- a sort's comparator, the
+callback of forEach, map, filter, some, every, find, reduce and theirs of
+typed arrays -- is kept ready from one call to the next where it is a
+frame's (`regCallback`): its window reserved at the stack's top once,
+and natively its code entry's state and context kept too, so that each
+call writes the window's registers and the frame record and runs the
+code (`nativeLoop`), with none of `callDirect`'s, `regDirect`'s and
+`regEnterW`'s work or a code entry made anew. The frame record is pushed
+for the call alone: what Go runs between two calls -- a comparator's
+result converted by its `valueOf` -- finds no frame of it. A leaf, which
+`regDirect` answers without a frame, is called as before.
+`typed_i64_sort`, whose comparator of BigInts is no leaf, went from 199.7
+to 142.3 ns natively (the tree 153.7) and from 206 to 167 by the Go
+table; `array_reduce_upvalue` from 23.5 to 18.1.
 
 Stage 1 keeps the heap frame for what reads it today -- stack traces, the
 debugger, closures' `this`, errors' positions -- and writes only the fields

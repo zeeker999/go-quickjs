@@ -146,6 +146,35 @@ func (r *Runtime) nativeRun(f *frame, c *regCode, start int) (Value, error) {
 		ctx = r.newNativeCtx(st)
 	}
 	ctx.epoch = uintptr(unsafe.Pointer(&r.shapes.globalEpoch))
+	v, err := r.nativeLoop(st, ctx, f, c, start)
+	r.nativeLeave(st, ctx)
+	return v, err
+}
+
+// nativeCallback is a callback's code entry's state and context, which it
+// keeps from one call to the next (regCallback): a state off the
+// runtime's list, as regEnter takes one, given back by the callback's end.
+func (r *Runtime) nativeCallback(c *regCode) (*regState, *nativeCtx) {
+	st := r.regFree
+	if st == nil {
+		st = &regState{r: r}
+	} else {
+		r.regFree = st.next
+	}
+	ctx := st.native
+	if ctx == nil {
+		ctx = r.newNativeCtx(st)
+	}
+	ctx.epoch = uintptr(unsafe.Pointer(&r.shapes.globalEpoch))
+	return st, ctx
+}
+
+// nativeLoop is nativeRun's run of frame f, the base frame of st, whose
+// context ctx is, from instruction start: the code entered, and entered
+// again after each instruction it leaves to Go, until the frame returns
+// or throws. A callback's frame kept across calls (regCallback) is run by
+// it each call.
+func (r *Runtime) nativeLoop(st *regState, ctx *nativeCtx, f *frame, c *regCode, start int) (Value, error) {
 	ctx.depth, ctx.filled = 0, 0
 	nativeSetTop(ctx, uintptr(unsafe.Pointer(st.regs)), f, c)
 	ctx.ip = uintptr(c.code) + uintptr(start)*8
@@ -300,7 +329,7 @@ func (r *Runtime) nativeRestartDeep(s *regState, ctx *nativeCtx) bool {
 	return true
 }
 
-// nativeFinish ends nativeRun with v or st's error. A frame given to
+// nativeFinish ends nativeLoop with v or st's error. A frame given to
 // callees in place closes the captures of the last one's code, as
 // regRestartRun closes them: its caller closes only the first's.
 func (r *Runtime) nativeFinish(st *regState, ctx *nativeCtx, v Value, restarted bool) (Value, error) {
@@ -308,7 +337,6 @@ func (r *Runtime) nativeFinish(st *regState, ctx *nativeCtx, v Value, restarted 
 		regCloseUpvalues(st.f)
 	}
 	err := st.err
-	r.nativeLeave(st, ctx)
 	if err != nil {
 		return Undefined, err
 	}
@@ -388,6 +416,13 @@ func (ctx *nativeCtx) grow() {
 // used them: a callback's entry clears what it used, not the 128 states a
 // recursion once grew the stack to.
 func (r *Runtime) nativeLeave(st *regState, ctx *nativeCtx) {
+	nativeReset(ctx)
+	r.regLeave(st)
+}
+
+// nativeReset lets go of what a run of ctx's code left: the states of the
+// frames it entered, its top's, its count of calls.
+func nativeReset(ctx *nativeCtx) {
 	if nativeCount {
 		atomic.AddInt64(&nativeCalls, ctx.made)
 	}
@@ -399,7 +434,6 @@ func (r *Runtime) nativeLeave(st *regState, ctx *nativeCtx) {
 		}
 	}
 	ctx.used = 0
-	r.regLeave(st)
 }
 
 // nativeTypeWord is the type word of an interface holding v's dynamic
