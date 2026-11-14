@@ -2372,7 +2372,7 @@ go with it:
 The switch-over needs, on register code: the feedback the tables in
 [Feedback](#feedback) list as not answered yet, call frequencies first (from
 the feedback dispatcher), and a loop's steps of a generator resumed natively
-(`GenSteps`); the `-jitcode` hook.
+(`GenSteps`).
 Then it removes:
 
 - `compile.LowerSSA`, `LowerSSAHot`, `LowerSSAInline`, `LowerSSAForward` and

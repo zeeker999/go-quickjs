@@ -285,6 +285,11 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 	// and the function the feedback asked are not.
 	e.keep = rf.fb.keep()
 	e.keep.cl, e.keep.fn, e.keep.prog = nil, nil, nil
+	if JITCodeHook != nil {
+		// -jitcode's record of the code, as the stack form's compiles
+		// make it (jitInstall).
+		JITCodeHook(jitFunctionOf(c.fn), code.Text(), mc)
+	}
 	return true
 }
 
