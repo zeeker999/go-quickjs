@@ -815,7 +815,12 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 		}
 	} else {
 		n := int(st.kept.pc) - target
+		// A compile this check asks for keeps the entry of the loop the
+		// frame waits at (jitRegFrameAt), as the stack form's tryJITLoop
+		// has its compiles keep it (jitFrameAt).
+		r.jitFrameFn, r.jitFramePC = cl.fn, target
 		e = r.jitRegHot(cl, c, r.jitRegTierWork(n))
+		r.jitFrameFn = nil
 		if e != nil {
 			e.loopPC, e.loopLen = target, max(n, 1)
 			// The interpreter's work in the loop, which Go enters, counted
@@ -880,12 +885,11 @@ func (r *Runtime) jitRegLoopCode(f *frame, c *regCode, e *jitRegEntry, target in
 		return nil
 	}
 	e.osrMiss = 0
-	ipc := e.ipc(target)
-	if ipc <= 0 {
+	if target <= 0 {
 		return nil
 	}
 	s := r.jit
-	o := r.jitRegCompile(f.cl, c, e.key, false, ipc)
+	o := r.jitRegCompile(f.cl, c, e.key, false, target)
 	if o == nil || o.code == nil {
 		return nil
 	}

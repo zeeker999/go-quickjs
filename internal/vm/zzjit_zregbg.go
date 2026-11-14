@@ -41,6 +41,9 @@ type jitRegJob struct {
 	// compile its function deoptimized since is thrown away, as the stack
 	// form's is (jitReoptimized), what that taught asked for anew.
 	deopts uint16
+	// frameAt is the loop's header a frame waits at for the compile
+	// (jitRegFrameAt), whose entry escape analysis keeps.
+	frameAt int
 	// e is the entry being made, its program p, rf its feedback, which a
 	// build on the runtime's goroutine asks, snap that feedback asked ahead,
 	// which the worker's build asks.
@@ -196,6 +199,7 @@ func (j *jitRegJob) workRecovering() {
 		j.buildErr = err
 		return
 	}
+	f.FrameAt = j.frameAt
 	j.f = f
 	j.looped = jitRegShape(f, j.p, j.cl, j.c)
 	ssa.Optimize(f)
@@ -300,6 +304,7 @@ func (r *Runtime) jitRegInstall(j *jitRegJob) {
 		if err != nil {
 			e.refusal = fmt.Sprintf("%v: %v", jitRefused, err)
 		} else {
+			f.FrameAt = j.frameAt
 			j.looped = jitRegShape(f, j.p, j.cl, j.c)
 			ssa.Optimize(f)
 			j.f = f
@@ -315,7 +320,7 @@ func (r *Runtime) jitRegInstall(j *jitRegJob) {
 		// As on the spot (jitRegCompile): built again here, its keep cells
 		// limited to the context's.
 		s.compileBegin()
-		j.rf, j.f, j.looped, j.mc, j.err = r.jitRegBuild(j.w, j.cl, j.c, j.p, abi.MaxKeeps, 0)
+		j.rf, j.f, j.looped, j.mc, j.err = r.jitRegBuild(j.w, j.cl, j.c, j.p, abi.MaxKeeps, j.frameAt)
 		s.compileEnd()
 	}
 	if e.refusal == "" {

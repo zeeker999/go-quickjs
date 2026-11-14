@@ -265,17 +265,24 @@ func (r *Runtime) jitRegCached(key jitKey, e *jitRegEntry) {
 // compile handed to the background (jitRegSubmit), installed at a later
 // check (jitRegInstall).
 //
-// frameAt, where not 0, is the program's instruction a loop's header
-// lowers to whose entry a frame waits at (ssa.Func's FrameAt): code for
-// on-stack replacement there (jitRegLoopCode), compiled on the spot.
+// frameAt, where not 0, is the register pc of a loop's header whose entry
+// a frame waits at (ssa.Func's FrameAt, which escape analysis keeps): code
+// for on-stack replacement there (jitRegLoopCode), compiled on the spot.
+// Where it is 0, it is the loop a frame of the function waits at for this
+// compile, if any (jitRegFrameAt), as the stack form's compiles ask
+// (jitFrameAt).
 func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool, frameAt int) *jitRegEntry {
 	s := r.jit
+	osrAt := frameAt
+	if frameAt == 0 {
+		frameAt = r.jitRegFrameAt(cl, key)
+	}
 	if !jitCompiles(cl.fn, r.jitBudget()) {
 		// Too large for the JIT's memory, as the stack form's compile
 		// finds it (jitCompiles): no room, at every ask.
 		return nil
 	}
-	background := frameAt == 0 && r.jitInBackground(cl.fn)
+	background := osrAt == 0 && r.jitInBackground(cl.fn)
 	if background && s.jobsFull() {
 		// As many compiles in the background as there may be: asked again
 		// at a later sample, as the stack form's compile waits.
@@ -323,7 +330,7 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 		// Asked ahead here, built on a worker (zzjit_zregbg.go).
 		snap := jitRegSnapshotOf(rf, p)
 		if !snap.s.bad {
-			j := &jitRegJob{cl: cl, c: c, key: key, realm: r.Realm, callee: callee, e: e, p: p, rf: rf, snap: snap, deopts: e.life.deopts,
+			j := &jitRegJob{cl: cl, c: c, key: key, realm: r.Realm, callee: callee, e: e, p: p, rf: rf, snap: snap, deopts: e.life.deopts, frameAt: frameAt,
 				w: jit.GetWorkspace(), enc: jitEncoding, opts: mir.Settings()}
 			r.jitRegSubmit(j)
 			return nil
@@ -359,6 +366,40 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 		return nil
 	}
 	return e
+}
+
+// jitRegFrameAt is the register pc of the loop's header a frame of cl's
+// function waits at for this compile, whose key is key (ssa.Func's
+// FrameAt), or 0, as jitFrameAt is the stack form's: there is none, or the
+// compile is of another function, or native callers call the function's
+// code (its link's refs), whose calls would then make objects the code
+// could leave unmade, with no check of Go's to find out that they do.
+func (r *Runtime) jitRegFrameAt(cl *closure, key jitKey) int {
+	if r.jitFrameFn != cl.fn {
+		return 0
+	}
+	if l := r.jit.regLinks[key]; l != nil && l.refs != 0 {
+		return 0
+	}
+	return r.jitFramePC
+}
+
+// regLoopAround is the register pc of the header of the innermost loop of
+// c's around register pc rpc, 0 for none, as jitLoopAround finds the stack
+// form's: the target of the first backward jump from rpc on that goes to
+// rpc or before it.
+func regLoopAround(c *regCode, rpc int) int {
+	bl := c.rc.BackLive
+	for i := 0; i+1 < len(bl); i += 2 {
+		q := int(bl[i])
+		if q < rpc {
+			continue
+		}
+		if t := q + 1 + int(regJumpOff(regAt(c.code, q))); t <= rpc {
+			return t
+		}
+	}
+	return 0
 }
 
 // jitRegPlace places mc, e's code, the backend's of f, built from c's
@@ -423,12 +464,11 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 	for rpc := range e.at {
 		e.at[rpc] = int32(p.At(uint32(rpc)))
 	}
+	// Register pcs both: a header's PC is its register pc (ssa.Header's
+	// PC, which LowerReg's maps give), as the stack form keeps them
+	// (jitFeedback's unentered).
 	e.unresumed = slices.Clone(f.Unresumed)
-	for _, pc := range f.Unentered {
-		if pc >= 0 && pc < len(p.Origin) {
-			e.unentered = append(e.unentered, int(p.Origin[pc]))
-		}
-	}
+	e.unentered = slices.Clone(f.Unentered)
 	// The pools' roots and prototypes escape analysis took, which the
 	// objects it does not make are made with at an exit.
 	rf.fb.keepVirtuals(f.VirtualAsked)
@@ -827,8 +867,16 @@ func (r *Runtime) jitRegGoOnAt(f *frame, c *regCode, e *jitRegEntry, wb, rpc, at
 				// Due to be compiled again for what it learned: compiled
 				// now, at the exit, and gone on in that code, as the stack
 				// form's run's code is compiled again at its exits
-				// (jitRecompileInRun).
-				if ne := r.jitRegReoptimize(f.cl, c, e); ne != nil {
+				// (jitRecompileInRun) -- keeping the entry of the loop
+				// around where the frame goes on, as its compile does, for
+				// a function hardly called yet: one called for a long loop,
+				// which this frame is in (jitRegFrameAt).
+				if e.life.starts < jitKeptStarts {
+					r.jitFrameFn, r.jitFramePC = f.cl.fn, regLoopAround(c, rpc)
+				}
+				ne := r.jitRegReoptimize(f.cl, c, e)
+				r.jitFrameFn = nil
+				if ne != nil {
 					e = ne
 				}
 			}
