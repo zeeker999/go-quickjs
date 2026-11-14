@@ -7134,6 +7134,30 @@ func (c *a64Compiler) tailSelf(v *ssa.Value, guard a64Guard) {
 	c.a.B(stub)
 }
 
+// entryPoll is register code's poll at its start (ssa.OpPoll), as
+// amd64's.
+func (c *a64Compiler) entryPoll(v *ssa.Value) {
+	poll, polled := c.a.NewLabel(), c.a.NewLabel()
+	c.a.Load(a64B, a64Ctx, abi.OffBackEdges)
+	c.a.Load(a64A, a64B, 0)
+	c.a.AddImm(a64A, a64A, -1, true)
+	c.a.Store(a64B, 0, a64A)
+	c.a.CmpImm(a64A, 0, true)
+	c.a.BCond(arm64.LE, poll)
+	state := v.State
+	c.cold = append(c.cold, func() {
+		c.a.Bind(poll)
+		if c.enc.CallGo != 0 {
+			stub := c.stubLabel(state, abi.ExitPoll)
+			c.goSaving(uint64(ssa.GoPoll), &stub)
+			c.a.B(polled)
+			return
+		}
+		c.exitTo(state, abi.ExitPoll)
+	})
+	c.a.Bind(polled)
+}
+
 // tailJump is tailSelf's call of t, as amd64's.
 func (c *a64Compiler) tailJump(t *ssa.CallSite, n int, this bool, guard a64Guard) {
 	vs, size := int32(c.enc.ValueSize), int32(unsafe.Sizeof(abi.GoArg{}))
@@ -9164,6 +9188,8 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 			c.a.Cmp(a64C, a64B, true)
 			guard.jump(arm64.NE)
 		}
+	case ssa.OpPoll:
+		c.entryPoll(v)
 	case ssa.OpTailRoom:
 		c.a.Load(a64A, a64Ctx, abi.OffLevel)
 		if v.Index != 0 {

@@ -4918,6 +4918,29 @@ func (c *compiler) tailSelf(v *ssa.Value, guard guardTo) {
 	c.a.Jmp(stub)
 }
 
+// entryPoll is register code's poll at its start (ssa.OpPoll), as a
+// back edge's: the back-edge budget counted down, and, spent, Go called
+// (ssa.GoPoll), which checks for cancellation, the deadline and the memory
+// limit, or an exit to v's state (abi.ExitPoll).
+func (c *compiler) entryPoll(v *ssa.Value) {
+	poll, polled := c.a.NewLabel(), c.a.NewLabel()
+	c.a.Load(scratchB, regCtx, abi.OffBackEdges)
+	c.a.DecMem(scratchB, 0)
+	c.a.Jcc(amd64.CondLE, poll)
+	state := v.State
+	c.cold = append(c.cold, func() {
+		c.a.Bind(poll)
+		if c.enc.CallGo != 0 {
+			stub := c.stubLabel(state, abi.ExitPoll)
+			c.goSaving(uint64(ssa.GoPoll), &stub)
+			c.a.Jmp(polled)
+			return
+		}
+		c.exitTo(state, abi.ExitPoll)
+	})
+	c.a.Bind(polled)
+}
+
 // tailJump is tailSelf's call of t, its n arguments, and its receiver if
 // this, in the context's operands: its code, which native callers may call,
 // is entered at its start (its link's body, past its call entry) with its
@@ -10331,6 +10354,8 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 			c.cmpWord(scratchC, v.Const.Bits)
 			guard.jump(amd64.CondNE)
 		}
+	case ssa.OpPoll:
+		c.entryPoll(v)
 	case ssa.OpTailRoom:
 		c.a.Load(scratchA, regCtx, abi.OffLevel)
 		if v.Index != 0 {

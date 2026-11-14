@@ -6919,6 +6919,15 @@ func (b *builder) fill(blk *Block) {
 		b.assign(d.slot, blk, d.v)
 	}
 	end := b.endOf[blk.ID]
+	if b.cur == b.root && blk.PC == 0 && b.p.Origin != nil && !looped(b.p, 0) {
+		// Register code's start, where a call enters it -- a native
+		// caller's above all, which no interpreter's call counts -- polls
+		// as a back edge does (OpPoll): a recursion that runs natively, no
+		// loop in it, is checked for cancellation, its deadline and the
+		// memory limit as the interpreter's calls are.
+		v := b.f.newValue(blk, OpPoll, None)
+		v.Aux, v.State = int(ir.HostExit), b.state(blk, 0)
+	}
 	// BigInt operators made on their low bits end in their block (wraps).
 	b.region, b.words = nil, nil
 	for pc := blk.PC; pc <= end; pc++ {

@@ -334,6 +334,12 @@ const (
 	// returning where the frame would have. Key's bit 1 says the last of
 	// Args is the receiver the call gives, bit 2 that the code reads it.
 	OpTailSelf // function, arguments -> none
+	// OpPoll is register code's check at its start, as a back edge's: the
+	// interpreter's back-edge budget (abi.Context's BackEdges) counted
+	// down, and, spent, Go called (GoPoll), which checks for cancellation,
+	// the deadline and the memory limit and gives a new budget, or the
+	// code exits to State (abi.ExitPoll).
+	OpPoll // -> none
 	// OpSameSymbol guards that a value is the symbol at Const's address: a
 	// private member's key, which each evaluation of its class mints
 	// anew, the one its code was compiled for (ir.Instruction's Private).
@@ -618,7 +624,7 @@ var opNames = [...]string{
 	OpNot: "not", OpStrictNullish: "strictnullish", OpLooseNullish: "loosenullish", OpEqTagged: "eqtagged", OpToInt32: "toi32", OpAndI32: "and", OpOrI32: "or", OpXorI32: "xor", OpShlI32: "shl",
 	OpSarI32: "sar", OpShrU32: "shr", OpNotI32: "noti", OpMulI32: "muli", OpPrimitive: "primitive", OpClz32: "clz32", OpI32ToF64: "i2f", OpU32ToF64: "u2f",
 	OpBoolToF64: "b2f", OpBoolToI32: "b2i", OpConstI32: "consti", OpAddI32: "addi", OpSubI32: "subi", OpCmpI32: "cmpi", OpCheckI32: "checki",
-	OpSameObject: "sameobject", OpFrameRoom: "frameroom", OpTailRoom: "tailroom", OpTailSelf: "tailself", OpSameSymbol: "samesymbol", OpIterClosed: "iterclosed", OpKeepRef: "keepref", OpKeep: "keep", OpKept: "kept",
+	OpSameObject: "sameobject", OpFrameRoom: "frameroom", OpTailRoom: "tailroom", OpTailSelf: "tailself", OpPoll: "poll", OpSameSymbol: "samesymbol", OpIterClosed: "iterclosed", OpKeepRef: "keepref", OpKeep: "keep", OpKept: "kept",
 	OpCall: "call", OpCallCell: "callcell", OpSqrtF64: "sqrtf", OpAbsF64: "absf", OpInstanceOf: "instanceof", OpTypeIs: "typeis",
 	OpCheckTrue: "checktrue", OpConstCell: "constcell", OpUpvalueCell: "upvaluecell", OpUpvalueStale: "upvaluestale", OpLocalCell: "localcell", OpPowF64: "powf",
 	OpMaxF64: "maxf", OpMinF64: "minf", OpFloorF64: "floorf", OpCeilF64: "ceilf", OpTruncF64: "truncf", OpRoundF64: "roundf",
@@ -680,7 +686,7 @@ func (o Op) isGuard() bool {
 	switch o {
 	case OpUnboxF64, OpOddballF64, OpTruth, OpCheckInit, OpModF64, OpArrayOf, OpIndexedOf, OpElemKey, OpElemRead, OpBigElemRead, OpBigElemWrite, OpElemWrite, OpElemCell, OpElemStore, OpLength,
 		OpObjectOf, OpPropRead, OpPropWrite, OpPropCell, OpGlobalCell, OpLexCell, OpBindingCell, OpStringMethod, OpStringProp, OpStringCode, OpStringChar, OpCodeChar, OpLooseNullish, OpEqTagged,
-		OpSameObject, OpSameSymbol, OpIterClosed, OpFrameRoom, OpTailRoom, OpTailSelf, OpCall, OpInstanceOf, OpTypeIs, OpCheckTrue, OpPowF64, OpAccessorIs, OpPrimitive,
+		OpSameObject, OpSameSymbol, OpIterClosed, OpFrameRoom, OpTailRoom, OpTailSelf, OpPoll, OpCall, OpInstanceOf, OpTypeIs, OpCheckTrue, OpPowF64, OpAccessorIs, OpPrimitive,
 		OpBigUnbox, OpAddI64, OpSubI64, OpMulI64,
 		OpBigUnboxU64, OpBigLow, OpBigSign, OpAddU64, OpSubU64, OpMulU64, OpShlI64, OpShlU64, OpDivI64, OpModI64, OpDivU64, OpModU64, OpBigOfF64, OpPowI64,
 		OpHolderCell, OpChainCheck, OpProtoIs, OpCheckI32:
