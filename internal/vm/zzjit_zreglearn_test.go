@@ -509,7 +509,11 @@ func TestJITRegReplaceLeaf(t *testing.T) {
 // regSharedSrc makes array literals of constants, whose arrays share them
 // until one is written (new_array_k): read, written, grown, and kept, in a
 // loop, as the stack form's code makes them natively from a pool of the
-// arrays Go makes (ssa's LiteralSite's Shared).
+// arrays Go makes (ssa's LiteralSite's Shared). Its calls of Go fill every
+// register native code may keep with junk (jitClobberCallsForTest): a
+// literal whose pool Go fills is made again from its start, and its
+// elements -- a string's words in registers -- had been read after the
+// call as Go's code left them, a crash where Go 1.24's had used them.
 const regSharedSrc = `
 var kept = [];
 function shared(n) {
@@ -531,6 +535,7 @@ func TestJITRegSharedLiteral(t *testing.T) {
 			if marking {
 				jitMarkingForTest(t)
 			}
+			jitClobberCallsForTest(t)
 			rts := regNativeRuntimes(t, regSharedSrc)
 			var got [2]string
 			for i, r := range rts {

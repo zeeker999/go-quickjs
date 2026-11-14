@@ -1323,8 +1323,19 @@ func (c *core) allocate() error {
 			}
 			spend(v, bw)
 			again = callsAgain(v)
+			// A call whose pool Go fills is made again from its start, its
+			// operands read again after Go had the registers: they live
+			// across it, saved and restored (saves). Its state names them
+			// where they are its frame's slots, as the stack form's
+			// operands are; a register program's literal's elements are in
+			// scratch slots no state names, and a string element's words,
+			// in registers, had been what Go's call left there.
+			pa := p
+			if !fused && ssa.RefillsPools(v) {
+				pa = p + 1
+			}
 			for _, a := range v.Args {
-				use(a, p)
+				use(a, pa)
 				spend(a, bw)
 				if a.Op == ssa.OpBoxF64 || a.Op == ssa.OpBoxBool {
 					// An operation may make a box again of its operand
@@ -1332,12 +1343,12 @@ func (c *core) allocate() error {
 					// the box keeps the operand too, but a captured local's
 					// value is in no state, and its register had gone to
 					// another's: a Go call's argument was what that held.
-					use(a.Args[0], p)
+					use(a.Args[0], pa)
 					spend(a.Args[0], bw)
 					if x := i32Boxed(a); x != nil {
 						// A box of an int32's conversion is made of the
 						// int32 (materialize).
-						use(x, p)
+						use(x, pa)
 						spend(x, bw)
 					}
 				}
@@ -1348,7 +1359,7 @@ func (c *core) allocate() error {
 					// state names keeps its shadow alive there too, but a
 					// captured local's is in no state (its slot is its
 					// cell), and the slot IR reads a local as an operand.
-					use(a.Shadow, p)
+					use(a.Shadow, pa)
 					spend(a.Shadow, bw)
 				}
 			}

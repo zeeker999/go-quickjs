@@ -1046,7 +1046,12 @@ ends at it (`takesOperand`): each backend reads the operands before it
 writes the result.
 
 What lives across a native call in a register is saved to a slot of its own
-and restored after (a split value is never live there in its register).
+and restored after (a split value is never live there in its register). A
+call that takes an object from a pool is made again from its start once Go
+has filled the pool (`ssa.GoRefill`), so its operands -- a register code
+literal's elements, in scratch slots no frame state names -- live across
+it too (`ssa.RefillsPools`); tests make every call of Go fill the registers
+with junk first (`jit.CallGoClobber`).
 `CheckAllocations` has every compile check its allocation against liveness
 computed again by block sets and its uses listed: no two intervals meeting
 in a register or a slot, a split value's register only to its last use but a
