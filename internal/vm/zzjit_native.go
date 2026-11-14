@@ -1011,6 +1011,21 @@ type jitState struct {
 	// regLinks are the links native callers call functions' register code
 	// through, by the same keys (zzjit_zregcall.go).
 	regLinks map[jitKey]*jitLink
+	// regGoOn is the frame the interpreter runs where register code left
+	// it with no entry, and regForced marks the interpreter's check made
+	// due at once at its next back edge, where Go goes on in its code
+	// (jitRegGoOnAt, jitRegLoop), as goOn and forcedCheck are the stack
+	// form's.
+	regGoOn   *frame
+	regForced bool
+	// regHeld is what the register code in regCache takes (held).
+	regHeld int
+	// regLevelSlab and regFrameSlab hold the levels, and their frames, of
+	// calls of Go from native code deeper than their buffers on the Go
+	// stack take, each call's past those of the calls under way below it
+	// (jitRegGoCallNested).
+	regLevelSlab []jitRegLevel
+	regFrameSlab []*frame
 	// regLearned is what the code made from a function's register code
 	// learned at its exits, by the function's key, kept across its
 	// compiles: an entry holding only what it learned (jitLearned), by
@@ -1539,7 +1554,7 @@ func jitPoolBytes(pool *abi.ObjectPool) int {
 // programs it has lowered (jitLower), and what it holds besides
 // (sharedBytes).
 func (s *jitState) held() int {
-	return s.entryBytes + s.lowerBytes + s.sharedBytes()
+	return s.entryBytes + s.lowerBytes + s.sharedBytes() + s.regHeld
 }
 
 // sharedBytes is what the JIT holds for the runtime apart from its entries
@@ -1673,6 +1688,7 @@ func (e *jitEntry) makesLoops() bool { return e != nil && e.loops }
 type jitVictim struct {
 	key          jitKey
 	e            *jitEntry
+	re           *jitRegEntry
 	l            *jitLowering
 	class        uint8
 	used, serial uint64
@@ -1781,6 +1797,7 @@ func (s *jitState) listVictims(now uint64, need int) bool {
 		}
 		v = append(v, jitVictim{key: key, e: e, class: class, used: e.used, serial: e.serial, bytes: n})
 	}
+	v = s.regVictims(v, now)
 	for i := range v {
 		reclaimable += v[i].bytes
 	}
@@ -1819,6 +1836,10 @@ func (s *jitState) reclaim(x *jitVictim, now uint64) bool {
 			}
 		}
 	default:
+		if x.re != nil {
+			s.regReclaim(x, now)
+			return true
+		}
 		e := s.cache[x.key]
 		if e != x.e || s.inUse(e) || e.busy != 0 || e.holdsCode() != (x.class == jitVictimCode) ||
 			e.holdsCode() && e.used+jitCodeAge > now {
@@ -1999,6 +2020,7 @@ func (s *jitState) flush() {
 		}
 		s.flushed++
 	}
+	s.regFlush(tick, s.epoch())
 	jitFlushRealms[struct{}](s, used)
 }
 
@@ -2108,6 +2130,7 @@ func (s *jitState) age(now uint64) {
 			s.dropLowering(key, l)
 		}
 	}
+	s.regAge(now)
 	for key, l := range s.links {
 		if l.owner == nil && (l.refs == 0 || key.gone()) {
 			delete(s.links, key)

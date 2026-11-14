@@ -3,25 +3,36 @@
 package vm
 
 import (
+	"fmt"
 	"slices"
+	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
 // Tier-up from the register interpreter (docs/register-interpreter.md,
 // Stage 3, 3a-3's step B): a runtime that runs the JIT compiles a register
-// function's code once it is hot, and enters it at its calls and at its
-// loops' headers.
+// function's code once the interpreter has spent a budget on it, and
+// enters it at its calls and at its loops' headers.
 //
-// Hotness is sampled, not counted: no handler of either dispatcher -- the
-// Go handler table's or the native handlers' -- does any work for it. The
-// two budgets they already spend are the samples. A call that spends the
-// interrupt budget (rhCallW's and regEnterW's check, which the native
-// call handler leaves to rhCallW) credits its callee; a back edge that
-// spends the back-edge budget (regBackEdge, which every dispatcher's jump
-// leaves to its Go slow function) credits its frame's function. The
-// function is compiled at its jitRegSamples-th sample, from what its
-// caches learned meanwhile.
+// The budget is the stack form's (jitTierBudget): jitCallThreshold
+// invocations, each the function's length. No handler of either
+// dispatcher -- the Go handler table's or the native handlers' -- counts
+// for it: the two budgets they already spend are its samples. A call that
+// spends the interrupt budget (rhCallW's and regEnterW's check, which the
+// native call handler leaves to rhCallW) spends its callee's budget by
+// the calls the interrupt budget counted, each the callee's length; a
+// back edge that spends the back-edge budget (regBackEdge, which every
+// dispatcher's jump leaves to its Go slow function) spends its frame's
+// function's by the back edges it counted, each the loop's length
+// (jitRegTierWork), as the stack form's jitTierWork. A function's first
+// sample begins its budget, as the stack form's jitWarmFor makes an entry
+// warm, and a change of its caches' feedback meanwhile delays the compile
+// (jitRegWarmUp), as V8's NotifyICChanged does. Code a guard of which
+// failed is invalidated and compiled again on a fresh budget, up to
+// jitMaxDeopts times (jitRegInvalidate); code that learned at its exits
+// runs on, valid, and is compiled again once it has spent a budget itself
+// with nothing more learned (jitRegLearnedDue).
 //
 // Its code is entered:
 //   - by a call that makes its frame in Go (regEnterW, jitRegEnter): a
@@ -31,17 +42,14 @@ import (
 //     (jitRegLoop), in the dispatcher that runs the frame, which goes on
 //     where the code leaves it: at the register pc of a deoptimization or
 //     of an instruction with no entry after it, or, where the code
-//     returned, at a return of the code's own with what it returned.
+//     returned, at a return of the code's own with what it returned;
+//   - at the next back edge of a frame whose valid code left it where it
+//     has no entry (jitRegGoOnAt), the interpreter's check made due there
+//     at once, as the stack form's jitGoOn has it: the interpreter runs
+//     the rest of that iteration, not the rest of the invocation.
 
 // regCallJITMark is regCallJIT where the JIT is built in (regCallMarks).
 const regCallJITMark = regCallJIT
-
-// jitRegSamples is how many samples make a function hot.
-const jitRegSamples = 2
-
-// jitRegDeoptLimit is how many deoptimizations a function's code is
-// compiled again after: past it, the function stays in the interpreter.
-const jitRegDeoptLimit = 8
 
 // jitRegTakes reports whether cl's register code c is compiled: a plain
 // function's, a method's, an arrow's, an accessor's or a class's
@@ -75,6 +83,12 @@ func jitRegCalled(cl *closure, c *regCode) bool {
 	return jitRegTakes(cl, c) && !c.suspends && !cl.fn.TopLevel && !cl.fn.IsModule
 }
 
+// setJITReg makes e the template's code, which calls enter (jitEnters),
+// nil for none.
+func (cc *closureCode) setJITReg(e *jitRegEntry) {
+	cc.jitReg, cc.jitEnters = e, e != nil
+}
+
 // jitRegHas reports whether cl's function has native code made from its
 // register code.
 func (r *Runtime) jitRegHas(cl *closure) bool {
@@ -84,22 +98,76 @@ func (r *Runtime) jitRegHas(cl *closure) bool {
 // jitRegSample is a sample of a run of cl's register code c (regEnterW).
 func (r *Runtime) jitRegSample(cl *closure, c *regCode) {
 	if r.jitEnabled && cl.closureCode != nil {
-		r.jitRegHot(cl, c)
+		r.jitRegHot(cl, c, r.jitRegCallWork(c))
 		r.jitRegStressSample()
 	}
+}
+
+// jitRegCallWork is the work of c's function's budget a sample of its
+// calls spends (jitRegHot): the calls the interrupt budget counted --
+// every call where every call is a sample (jitRegStressSample) -- each its
+// length, as the stack form's invocations spend it (jitTierWork).
+func (r *Runtime) jitRegCallWork(c *regCode) int64 {
+	calls := int64(interruptCheckInterval)
+	if r.jitCallThreshold <= 1 {
+		calls = 1
+	}
+	return calls * int64(max(len(c.rc.Code), 1))
+}
+
+// jitRegTierWork is the work of a function's budget a sample of its
+// loop's back edges spends (jitRegLoop), at a backward jump n instructions
+// from the loop's header to it: as many back edges as the back-edge budget
+// had (jitState's edgesSpent), each n, as V8's JumpLoop spends its
+// bytecodes' distance and the stack form's loops spend theirs
+// (jitTierWork).
+func (r *Runtime) jitRegTierWork(n int) int64 {
+	edges := backEdgeCheckInterval
+	if s := r.jit; s != nil && s.edgesSpent != 0 {
+		edges = s.edgesSpent
+	}
+	return int64(edges) * int64(max(n, 1))
+}
+
+// jitRegLifeOf is the state of cl's function's register code that outlives
+// its compiles (jitRegEntry's life): what it learned (regLearned), its
+// budget, its deoptimizations, what its runs did.
+func (r *Runtime) jitRegLifeOf(cl *closure) *jitEntry {
+	if e := cl.closureCode.jitReg; e != nil && e.life != nil {
+		return e.life
+	}
+	return r.jitState().regLearnedOf(r.jitKeyOf(cl.fn))
 }
 
 // jitRegNativeCallee compiles cl's function's register code c for the
 // native callers that call it through its link, which has none yet: as the
 // stack form's native callers have a callee with no code compiled at their
 // first call of it (jitNativeCallee), not once it is hot -- they make no
-// sample of it.
+// sample of it. Code invalidated is once its calls have spent a fresh
+// budget (jitRegWarmUp).
 func (r *Runtime) jitRegNativeCallee(cl *closure, c *regCode) {
+	r.jitRegNativeCalleeN(cl, c, 1)
+}
+
+// jitRegNativeCalleeN is jitRegNativeCallee after calls calls of the
+// function Go made for its native callers.
+func (r *Runtime) jitRegNativeCalleeN(cl *closure, c *regCode, calls int64) {
 	cc := cl.closureCode
 	if cc == nil || cc.jitRegRefused || cc.jitReg != nil || !r.jitEnabled {
 		return
 	}
 	if !jitRegCalled(cl, c) {
+		return
+	}
+	if life := r.jitRegLifeOf(cl); life.invalid && c.leaf == regLeafNone && !r.jitRegWarmUp(cl, c, life, calls*int64(max(len(c.rc.Code), 1))) {
+		// Invalidated: each call of it Go makes for its native callers an
+		// invocation of the fresh budget it is compiled again after, as
+		// the stack form's calls spend it (jitTierUp), and the
+		// interpreter's samples the rest. Not a leaf's, which the
+		// interpreter's calls answer without a frame, sampling none: the
+		// register frame's own, which the stack form has no such calls
+		// of; it is compiled again at its native callers' next ask, its
+		// deoptimizations counted all the same (jitMaxDeopts).
 		return
 	}
 	e := r.jitRegForAs(cl, c, true)
@@ -108,7 +176,7 @@ func (r *Runtime) jitRegNativeCallee(cl *closure, c *regCode) {
 	case e.code == nil:
 		cc.jitRegRefused = true
 	default:
-		cc.jitReg = e
+		cc.setJITReg(e)
 	}
 }
 
@@ -148,16 +216,18 @@ func (r *Runtime) jitRegCallSample(e *regCallCache) {
 	if !r.jitEnabled || e.cl == nil || e.rc == nil || e.cl.closureCode == nil {
 		return
 	}
-	if r.jitRegHot(e.cl, e.rc) != nil {
+	if r.jitRegHot(e.cl, e.rc, r.jitRegCallWork(e.rc)) != nil {
 		e.kind |= regCallJIT
 	}
 	r.jitRegStressSample()
 }
 
-// jitRegHot counts a sample of cl's function, its register code c, and
-// returns its code: compiled at the jitRegSamples-th sample, nil before
-// and where it is not compiled.
-func (r *Runtime) jitRegHot(cl *closure, c *regCode) *jitRegEntry {
+// jitRegHot spends work of the budget of cl's function, its register code
+// c, at a sample, and returns its code: compiled once the budget is spent
+// (jitRegWarmUp), nil before and where it is not compiled. Code that
+// learned what to be compiled again for is, if that is due
+// (jitRegLearnedDue).
+func (r *Runtime) jitRegHot(cl *closure, c *regCode, work int64) *jitRegEntry {
 	if r.jit != nil && r.jit.inFlight() {
 		// A check: compiles in the background that are done installed
 		// (jitDrain).
@@ -168,34 +238,34 @@ func (r *Runtime) jitRegHot(cl *closure, c *regCode) *jitRegEntry {
 		return nil
 	}
 	if e := cc.jitReg; e != nil {
-		if !e.invalid && !e.stale && e.icWait == 0 && e.mark != jitFeedbackMark(cl) {
-			// Its caches' feedback changed since it was compiled -- what
-			// they hold, a site that knew nothing then knowing a shape now
-			// -- as V8's NotifyICChanged finds and the stack form's code
-			// learns (jitFeedbackMark): compiled again for it once it has
-			// run the runtime's jitICThreshold invocations' worth more, as
-			// the stack form's budget is raised to: a sample's worth where
-			// samples are the interrupt budget's, as many samples where
-			// every call is one (jitRegStressSample).
-			e.icWait = 1
-			if r.jitCallThreshold <= 1 {
-				e.icWait = max(1, int(r.jitICThreshold))
+		if !e.invalid && e.code != nil {
+			if e.life.reopt && r.jitRegLearnedDue(cl, e) {
+				if ne := r.jitRegReoptimize(cl, c, e); ne != nil {
+					return ne
+				}
 			}
-		}
-		if e.icWait != 0 {
-			if e.icWait--; e.icWait == 0 {
-				r.jitRegReopt(cl, e)
-			}
-		}
-		if !e.invalid && !e.stale {
 			return e
 		}
-		cc.jitReg = nil
+		cc.setJITReg(nil)
 	}
-	if cc.jitRegHot++; cc.jitRegHot < jitRegSamples && r.jitCallThreshold > 1 {
+	life := r.jitRegLifeOf(cl)
+	switch {
+	case life.invalid:
+		// Invalidated: compiled again once a fresh budget is spent.
+		if !r.jitRegWarmUp(cl, c, life, work) {
+			return nil
+		}
+	case !life.warming:
+		// Its first sample: its budget begins, as the stack form's entry
+		// warms (jitWarmFor) -- but where every call compiles.
+		life.warming = true
+		life.tierBudget, life.tierMark = jitRegBudget(r.jitCallThreshold, c), jitFeedbackMark(cl)
+		if r.jitCallThreshold > 1 {
+			return nil
+		}
+	case !r.jitRegWarmUp(cl, c, life, work):
 		return nil
 	}
-	cc.jitRegHot = 0
 	if !jitRegTakes(cl, c) {
 		cc.jitRegRefused = true
 		return nil
@@ -203,86 +273,182 @@ func (r *Runtime) jitRegHot(cl *closure, c *regCode) *jitRegEntry {
 	e := r.jitRegFor(cl, c)
 	switch {
 	case e == nil:
-		// No room now.
+		// No room now, or compiled in the background: asked again at the
+		// next sample, the budget spent.
 		return nil
 	case e.code == nil:
 		// Refused for good, but for host operations alone, asked again once
-		// hot again (jitRegCompile).
+		// a budget more is spent (jitRegCompile).
 		cc.jitRegRefused = !e.hostOnly
+		life.warming = false
 		return nil
 	}
-	cc.jitReg = e
+	cc.setJITReg(e)
 	return e
 }
 
-// jitRegInvalidate marks e, cl's function's code, invalid after a
-// deoptimization: the function is sampled anew, and compiled again from
-// what the interpreter learns meanwhile, up to jitRegDeoptLimit times.
+// jitRegBudget is the work the interpreter does with c's function before
+// it is compiled, or compiled again: calls invocations, each its length,
+// as jitTierBudget and jitICBudget count the stack form's.
+func jitRegBudget(calls uint16, c *regCode) int64 {
+	return int64(max(calls, 1)) * int64(max(len(c.rc.Code), 1))
+}
+
+// jitRegWarmUp spends work of the budget life holds for cl's function, its
+// register code c, which has no valid code: before its first compile, or
+// invalidated (jitRegInvalidate). It reports whether the budget is spent
+// with the function's caches' feedback unchanged since it began -- a
+// change raises what is left to jitICThreshold invocations' worth, as
+// V8's NotifyICChanged does and the stack form's budgets are raised
+// (jitWarmUp, jitTierUp) -- and the function deoptimized no more than
+// jitMaxDeopts times.
+func (r *Runtime) jitRegWarmUp(cl *closure, c *regCode, life *jitEntry, work int64) bool {
+	if life.tierBudget -= work; life.tierBudget > 0 {
+		return false
+	}
+	if m := jitFeedbackMark(cl); m != life.tierMark {
+		life.tierBudget, life.tierMark = max(life.tierBudget, jitRegBudget(r.jitICThreshold, c)), m
+		return false
+	}
+	return life.deopts <= jitMaxDeopts
+}
+
+// jitRegInvalidate invalidates e, cl's function's code, after a
+// deoptimization, as jitInvalidate does the stack form's: Go enters it no
+// more, nor do native callers call it (its link), and the interpreter
+// runs the function until it has spent a fresh budget (jitRegWarmUp),
+// what its caches learn meanwhile delaying the compile. Runs of the code
+// under way go on in it until they next leave it. Past jitMaxDeopts
+// deoptimizations the function is compiled no more, its code let go of.
 func (r *Runtime) jitRegInvalidate(cl *closure, e *jitRegEntry) {
-	r.jitRegInvalidateAs(cl, e, true)
-}
-
-// jitRegInvalidateLearned is jitRegInvalidate after a deoptimization that
-// taught the code what it is compiled for next -- an operator's BigInts, an
-// entry after a call Go went on at -- which no limit counts: what each site
-// can learn so is bounded, a deoptimization at most for each kind it
-// learns. Counted, a loop of seven BigInt operators, each learned at a
-// deoptimization of its own, had its function refused for good before its
-// code knew them all.
-func (r *Runtime) jitRegInvalidateLearned(cl *closure, e *jitRegEntry) {
-	r.jitRegInvalidateAs(cl, e, false)
-}
-
-func (r *Runtime) jitRegInvalidateAs(cl *closure, e *jitRegEntry, counted bool) {
-	if !e.invalid {
-		// Native callers call it no more.
-		e.invalid = true
-		key := r.jitKeyOf(cl.fn)
-		if r.jit.regCache[key] == e {
-			r.jit.regLinkUpdate(key, nil)
-		}
+	life := e.life
+	if life == nil || e.code == nil {
+		return
 	}
+	if life.deopts < ^uint16(0) {
+		life.deopts++
+	}
+	s := r.jit
 	cc := cl.closureCode
-	if cc == nil {
-		return
+	if !e.invalid {
+		e.invalid = true
+		if s.regCache[e.key] == e {
+			s.regLinkUpdate(e.key, nil)
+		}
+		s.invalidated++
+		if cc != nil && cc.jitReg == e {
+			cc.setJITReg(nil)
+		}
+		if c := cl.reg; c != nil {
+			life.invalid, life.warming, life.reopt, life.learning = true, true, false, false
+			life.tierBudget, life.tierMark = jitRegBudget(r.jitCallThreshold, c), jitFeedbackMark(cl)
+		}
 	}
-	if cc.jitReg == e {
-		cc.jitReg = nil
-	}
-	cc.jitRegHot = 0
-	if !counted {
-		return
-	}
-	if cc.jitRegDeopts++; cc.jitRegDeopts >= jitRegDeoptLimit {
+	if life.deopts > jitMaxDeopts && cc != nil && !cc.jitRegRefused {
 		cc.jitRegRefused = true
+		if s.regCache[e.key] == e {
+			s.regCache[e.key] = &jitRegEntry{key: e.key, life: life, refusal: fmt.Sprintf("deoptimized more than %d times", jitMaxDeopts)}
+			s.dropReg(e.key, e)
+		}
 	}
 }
 
-// jitRegReopt marks e, cl's function's code, stale for what it learned at
-// its calls of Go or its exits (jitRegCallSeen), no deoptimization: its
-// runs go on in it, as V8's code runs on with feedback it was not compiled
-// for, until they leave it -- compiled again at an exit (jitRegGoOnAt), or
-// the interpreter's at a loop's poll (jitRegLeft) -- but the function is
-// sampled anew and compiled again for it, which no limit of
-// deoptimizations counts -- what can be learned so is bounded. Its native
-// callers call it through Go from here (its link has no entry), where it
-// is sampled: code only native callers reach -- a callee of a loop's -- had
-// otherwise never been compiled again, as the stack form's code is by its
-// own exits (jitRecompileInRun).
+// jitRegReopt marks e, cl's function's code, to be compiled again for what
+// it learned at its calls of Go or its exits (jitRegCallSeen), no
+// deoptimization, as the stack form's code is marked (reoptPending): it
+// stays valid, entered by Go and called by native callers, as V8's code
+// runs on with feedback it was not compiled for, and is compiled again
+// once it has spent a budget since with nothing learned meanwhile
+// (jitRegLearnedDue) -- at a sample, or in a run, at an exit or a loop's
+// poll (jitRegGoOnAt, jitRegLeft), which goes on in the new code.
 func (r *Runtime) jitRegReopt(cl *closure, e *jitRegEntry) {
-	if e.invalid || e.stale {
+	if e.invalid || e.life == nil {
 		return
 	}
-	e.stale = true
-	if key := r.jitKeyOf(cl.fn); r.jit.regCache[key] == e {
-		r.jit.regLinkUpdate(key, nil)
+	e.life.reopt = true
+}
+
+// jitRegLearnedDue reports whether e's code, cl's function's, valid, is due
+// to be compiled again for what it learned (jitRegReopt), as
+// jitLearnedDue reports the stack form's: once it has spent a budget since
+// it began to learn (jitRegSpent), with nothing learned meanwhile
+// (jitLearnedMark), which raises what is left. Not while a native call
+// runs it, which finds its code in the cache (jitRegLevelAt), nor while it
+// is compiled in the background.
+func (r *Runtime) jitRegLearnedDue(cl *closure, e *jitRegEntry) bool {
+	life := e.life
+	if e.invalid || e.code == nil || life == nil || !life.reopt || e.levels != 0 || r.jit.regPendingJobs[e.key] != nil {
+		return false
 	}
-	if cc := cl.closureCode; cc != nil {
-		if cc.jitReg == e {
-			cc.jitReg = nil
-		}
-		cc.jitRegHot = 0
+	c := cl.reg
+	if c == nil {
+		return false
 	}
+	spent := r.jitRegSpent(c, e)
+	if !life.learning {
+		life.learning, life.tierBase, life.tierMark = true, spent, jitLearnedMark(cl, life)
+		life.tierBudget = jitRegBudget(r.jitCallThreshold, c)
+		return false
+	}
+	if spent-life.tierBase < life.tierBudget {
+		return false
+	}
+	if m := jitLearnedMark(cl, life); m != life.tierMark {
+		life.tierBudget = max(life.tierBudget-(spent-life.tierBase), jitRegBudget(r.jitICThreshold, c))
+		life.tierBase, life.tierMark = spent, m
+		return false
+	}
+	return true
+}
+
+// jitRegSpent is the work e's function has done since its code was first
+// compiled, as jitLearnedSpent counts the stack form's: its invocations,
+// each its length -- Go's entries at its start, native callers' calls
+// through its link, the runs the interpreter went on with after the code
+// left -- the work its native stretches did (jitRegStretchWork), and the
+// interpreter's in its loops before Go entered them (jitEntry's osrWork).
+func (r *Runtime) jitRegSpent(c *regCode, e *jitRegEntry) int64 {
+	life := e.life
+	calls := life.starts + life.goOns
+	if l := r.jit.regLinks[e.key]; l != nil {
+		calls += l.in
+	}
+	return int64(calls)*int64(max(len(c.rc.Code), 1)) + int64(life.ssaStats.work) + life.osrWork
+}
+
+// jitRegReoptimize compiles cl's function's register code c again for what
+// e, its code, learned, and returns the new code, which replaces e in the
+// cache, its link and its closure's (jitRegCached): runs in e go on in it
+// until they next leave it. nil where it was not compiled again: no room,
+// or a compile in the background, after which it is asked again once a
+// budget more is spent; or a refusal, which keeps e, not asked again for
+// what it has learned so far.
+func (r *Runtime) jitRegReoptimize(cl *closure, c *regCode, e *jitRegEntry) *jitRegEntry {
+	life := e.life
+	ne := r.jitRegCompileFor(cl, c, e.key, false)
+	switch {
+	case ne == nil:
+		life.reopt, life.learning = true, false
+		return nil
+	case ne.code == nil:
+		// The code it had stays (jitRegCompileFor).
+		life.reopt, life.learning = false, false
+		return nil
+	}
+	if cc := cl.closureCode; cc != nil && !cc.jitRegRefused {
+		cc.setJITReg(ne)
+	}
+	return ne
+}
+
+// jitRegLearnedFor is what f's function's code learned (regLearned): e's,
+// the code running f, without a key made -- a weak handle and a map lookup
+// at each call of Go -- where e is f's function's code of this realm.
+func (r *Runtime) jitRegLearnedFor(f *frame, e *jitRegEntry) *jitEntry {
+	if e != nil && e.life != nil && f.cl.reg != nil && e.rc == f.cl.reg.rc && e.key.realm == r.jitRealmKey() {
+		return e.life
+	}
+	return r.jitState().regLearnedOf(r.jitKeyOf(f.cl.fn))
 }
 
 // regLearnedOf is what the code of the function whose key is key learned
@@ -369,7 +535,7 @@ func (r *Runtime) jitRegSeenFeedback(cl *closure, c *regCode) {
 // code compiled again with its cases -- and any other guard's failure as
 // a register pc the next compiles build generic.
 func (r *Runtime) jitRegDeoptSeen(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) {
-	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	l := r.jitRegLearnedFor(f, e)
 	// An element read made as a number that met what is none, or an
 	// addition that met a string, learned as the stack form's code learns
 	// them at a deoptimization (jitIndexSeen, jitStringAddSeen): read as
@@ -400,21 +566,34 @@ func (r *Runtime) jitRegEntrySeen(f *frame, rpc int) {
 }
 
 // jitRegResumeSeen learns that Go goes on at register pc rpc of e's code,
-// which has no entry there: where that is after a call the code was built
-// with no entry after (jitRegEntry's unresumed), the function's next
-// compile has one (jitRegFeedback's Resumed), and the code is invalid from
-// here, as the stack form's code is compiled again with the entry
-// (jitGoOn).
-func (r *Runtime) jitRegResumeSeen(f *frame, e *jitRegEntry, rpc int) {
-	if e.invalid || !slices.Contains(e.unresumed, rpc) {
-		return
+// valid, which has no entry there: where that is after a call the code
+// was built with no entry after (jitRegEntry's unresumed), the function is
+// compiled again now with the entry (jitRegFeedback's Resumed), as the
+// stack form's code is (jitGoOn), and the frame goes on in that code from
+// here: it is returned, nil where there is none -- a native call in the
+// code, a compile in the background, which the function's next code has
+// the entry from.
+func (r *Runtime) jitRegResumeSeen(f *frame, c *regCode, e *jitRegEntry, rpc int) *jitRegEntry {
+	if e.invalid || e.code == nil || e.life == nil || f.cl.reg != c || !slices.Contains(e.unresumed, rpc) {
+		return nil
 	}
-	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	l := e.life
 	if slices.Contains(l.resumed, uint32(rpc)) {
-		return
+		return nil
 	}
 	l.resumed = append(l.resumed, uint32(rpc))
-	r.jitRegInvalidateLearned(f.cl, e)
+	if e.levels != 0 || r.jit.regPendingJobs[e.key] != nil {
+		r.jitRegReopt(f.cl, e)
+		return nil
+	}
+	ne := r.jitRegReoptimize(f.cl, c, e)
+	if ne == nil {
+		return nil
+	}
+	if ipc := ne.ipc(rpc); ipc < 0 || !ne.code.HasEntry(ipc) {
+		return nil
+	}
+	return ne
 }
 
 // jitRegHostSeen learns from a host exit at register pc rpc of c, before
@@ -496,7 +675,7 @@ func (r *Runtime) jitRegWriteSeen(f *frame, c *regCode, e *jitRegEntry, rpc int,
 	if x.op.c == nil {
 		return
 	}
-	r.jitPolyWriteSeenOp(r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn)), rpc, x.op.c, x.op.key, true, x.o, x.before)
+	r.jitPolyWriteSeenOp(r.jitRegLearnedFor(f, e), rpc, x.op.c, x.op.key, true, x.o, x.before)
 }
 
 // jitRegEnter runs f, the frame regEnterW made for a call of cl, its
@@ -506,10 +685,33 @@ func (r *Runtime) jitRegWriteSeen(f *frame, c *regCode, e *jitRegEntry, rpc int,
 // interpreter where the code leaves it, or has no entry there.
 func (r *Runtime) jitRegEnter(f *frame, cl *closure, c *regCode, base, start int) (Value, error) {
 	e := cl.closureCode.jitReg
-	if e == nil || e.invalid || !r.jitEnabled {
+	if e == nil && r.jit != nil && r.jit.inFlight() {
+		// A compile of it in the background (jitEnters): installed now if
+		// done, as the stack form's calls install theirs (tryJITAt), and
+		// entered from this call on.
+		r.jitDrain()
+		e = cl.closureCode.jitReg
+	}
+	if e != nil && e.life.entrySlow && start == 0 {
+		// Code that does not pay (jitRegStretchWork): the interpreter runs
+		// the call, until it is retried.
+		if r.jitRegRetrySlow(e); e.life.entrySlow {
+			return r.runReg(f, c, start)
+		}
+	}
+	if e == nil || e.invalid || e.code == nil || !r.jitEnabled {
+		if e != nil && e.code == nil {
+			// Let go of by the cache (regLetGo).
+			cl.closureCode.setJITReg(nil)
+		}
 		return r.runReg(f, c, start)
 	}
-	if ipc := e.p.At(uint32(start)); start != 0 && e.code != nil && ipc >= 0 && e.code.HasEntry(ipc) {
+	if start == 0 {
+		e.life.starts++
+		if e.life.notNative {
+			r.jitRegRetryNative(e)
+		}
+	} else if ipc := e.ipc(start); e.code != nil && ipc >= 0 && e.code.HasEntry(ipc) {
 		r.jit.regResumes++
 	}
 	return r.jitRegRun(f, c, e, f.base-int(c.locals), start)
@@ -523,20 +725,59 @@ func (r *Runtime) jitRegEnter(f *frame, cl *closure, c *regCode, base, start int
 // returned, its register given the value (jitRegEntry's returns); regDone
 // where the code threw what none of the frame's handlers takes, the error
 // in st.
+//
+// The check jitRegGoOnAt made due at once, after native code left a frame
+// where it has no entry (jitState's regGoOn), is no sample: no budget the
+// interpreter spent, whatever frame's back edge it is. The frame Go goes on
+// in enters its code at the loop's header -- the code of the run that left
+// it, or the code that replaced it -- as the stack form's frame does
+// (tryJITLoop's goOn).
 func (r *Runtime) jitRegLoop(st *regState, target int) int {
-	r.backEdges = r.jit.backEdgeBudget()
+	s := r.jit
+	r.backEdges = s.backEdgeBudget()
+	forced := false
+	if s != nil && s.regForced {
+		forced, s.regForced = true, false
+	}
 	f, c := st.f, st.c
 	cl := f.cl
 	if !r.jitEnabled || cl == nil || cl.closureCode == nil || cl.reg != c {
+		if forced {
+			s.regGoOn = nil
+		}
 		return target
 	}
-	e := r.jitRegHot(cl, c)
-	if e == nil || !e.goesOn {
+	var e *jitRegEntry
+	if forced {
+		if s.regGoOn == f {
+			e = cl.closureCode.jitReg
+		}
+		s.regGoOn = nil
+		if e == nil || e.invalid || e.code == nil {
+			return target
+		}
+	} else {
+		n := int(st.kept.pc) - target
+		e = r.jitRegHot(cl, c, r.jitRegTierWork(n))
+		if e != nil {
+			e.loopPC, e.loopLen = target, max(n, 1)
+			// The interpreter's work in the loop, which Go enters, counted
+			// toward what the code spends (jitRegSpent), as the stack
+			// form's osrWork.
+			e.life.osrWork += r.jitRegTierWork(n)
+		}
+	}
+	if e == nil || !e.goesOn || e.life.loopSlow {
+		// Or code whose runs begun at a loop do not pay (loopSlow).
 		return target
 	}
-	if _, ok := e.loopEntry(target); !ok {
+	if e = r.jitRegLoopCode(f, c, e, target); e == nil {
 		return target
 	}
+	if forced {
+		s.wentOn++
+	}
+	e.life.ssaStats.entries++
 	pc, v, done, err := r.jitRegGoOn(f, c, e, st.wb, target)
 	switch {
 	case err != nil:
@@ -552,6 +793,56 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 	}
 	// Unreachable: code that returns a value has a return of one.
 	panic("vm: native code returned where its register code has no return")
+}
+
+// jitRegLoopCode is the code f, running c, goes on in at the header of its
+// loop at register pc target, e being its function's: e where it has an
+// entry there; or the code compiled for frames waiting at a loop whose
+// entry escape analysis dropped from e (unentered), as the stack form's
+// jitLearnLoopEntry and osrEntry have it: a frame found there with no
+// entry at two checks in a row -- each a full budget of back edges, or
+// the check made due at once after its code left it -- has the function
+// compiled apart with that loop's entry kept (ssa.Func's FrameAt, its
+// objects made), and goes on in that code, kept beside e (osr) for the
+// frames that wait there next. nil where there is none.
+func (r *Runtime) jitRegLoopCode(f *frame, c *regCode, e *jitRegEntry, target int) *jitRegEntry {
+	if _, ok := e.loopEntry(target); ok {
+		return e
+	}
+	if o := e.osr; o != nil && !o.invalid && o.code != nil {
+		if _, ok := o.loopEntry(target); ok {
+			return o
+		}
+	}
+	if e.invalid || !slices.Contains(e.unentered, target) {
+		return nil
+	}
+	if at := uintptr(unsafe.Pointer(f)); e.osrMiss != at || e.osrMissPC != target {
+		e.osrMiss, e.osrMissPC = at, target
+		return nil
+	}
+	e.osrMiss = 0
+	ipc := e.ipc(target)
+	if ipc <= 0 {
+		return nil
+	}
+	s := r.jit
+	o := r.jitRegCompile(f.cl, c, e.key, false, ipc)
+	if o == nil || o.code == nil {
+		return nil
+	}
+	if old := e.osr; old != nil {
+		s.regHeld -= old.bytes
+		old.dropped = true
+		s.regClose(old)
+	}
+	o.osrOf, e.osr = e, o
+	s.regHeld += o.bytes
+	s.osrLearned++
+	if _, ok := o.loopEntry(target); ok {
+		return o
+	}
+	return nil
 }
 
 // findReturns finds the returns of e's register code rc that a frame the

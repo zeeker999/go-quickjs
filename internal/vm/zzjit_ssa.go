@@ -4870,14 +4870,15 @@ func jitHostCall(ctx *abi.Context) bool {
 			}
 		}
 		if idx := int(ctx.Level); ctx.Live == 0 && idx < len(s.regRuns) && s.regRuns[idx].f != nil && s.ssaCtxs[idx] == ctx {
-			if e := s.regRuns[idx].e; e != nil && e.stale && !e.invalid {
-				// Register code stale for what it learned (jitRegReopt), at
-				// a call of Go its loop goes on after: the loop leaves at
-				// its header (abi.ExitPoll), where the interpreter goes on
-				// and its next sample compiles the code again (jitRegLeft),
-				// as the stack form's run leaves above. Never leaving, a
-				// loop that runs a whole invocation natively had made each
-				// construction it learned by Go to the end.
+			if e := s.regRuns[idx].e; e != nil && e.life != nil && e.life.reopt && !e.invalid {
+				// Register code that learned what to be compiled again for
+				// (jitRegReopt), at a call of Go its loop goes on after: the
+				// loop leaves at its header (abi.ExitPoll), where its work is
+				// counted and the code compiled again once that is due, the
+				// loop going on in the new code (jitRegLeft), as the stack
+				// form's run leaves above. Never leaving, a loop that runs a
+				// whole invocation natively had made each construction it
+				// learned by Go to the end.
 				return false
 			}
 		}
@@ -4885,7 +4886,7 @@ func jitHostCall(ctx *abi.Context) bool {
 		r.backEdges = s.backEdgeBudget()
 		s.pollCredit += r.backEdges - old
 		s.budgets++
-		return r.checkInterruptNow() == nil
+		return r.checkInterruptPoll() == nil
 	case ssa.GoRandom:
 		// Math.random's cache, found empty: filled again, its next number
 		// the result.

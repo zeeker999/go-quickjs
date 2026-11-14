@@ -48,7 +48,7 @@ func (r *Runtime) jitRegBigIntSeen(f *frame, e *jitRegEntry, wb, site int) bool 
 	if site < 0 || p == nil || site >= len(p.Code) || site >= len(p.Origin) {
 		return false
 	}
-	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	l := r.jitRegLearnedFor(f, e)
 	return jitBigIntNote(l, int32(p.Origin[site]), p.Code[site], func(o ir.Operand) Value { return r.jitRegOperand(p, wb, o) }, false, false)
 }
 
@@ -74,7 +74,7 @@ func (r *Runtime) jitRegBigIntExit(f *frame, e *jitRegEntry, wb, site int) bool 
 	default:
 		return false
 	}
-	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	l := r.jitRegLearnedFor(f, e)
 	key := int32(p.Origin[site])
 	if in.Left.Slot < 0 || right.Slot < 0 || !r.jitRegOperand(p, wb, in.Left).IsBigInt() || !r.jitRegOperand(p, wb, right).IsBigInt() ||
 		!slices.Contains(l.failed, key) || slices.Contains(l.bigints, key) {

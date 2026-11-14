@@ -26,7 +26,7 @@ import (
 // f's code e -- call_method_w of argc arguments, callee on recv -- that it
 // is a loop's built-in given cb, as the stack form's code learns it
 // (jitForEachSeen): the next compile makes it a loop of its own (ForEach),
-// the code stale from here (jitRegReopt), the callback compiled for native
+// to be compiled again for it (jitRegReopt), the callback compiled for native
 // callers (jitRegNativeCallee). One whose callback is another function's,
 // or whose built-in or typed arrays' prototype is another, the call is
 // Go's, as a call of too many targets is; one given a new closure of the
@@ -39,23 +39,32 @@ func (r *Runtime) jitRegForEachSeen(f *frame, e *jitRegEntry, rpc int, callee, r
 	o := callee.Object()
 	kind := r.jitLoopKind(o)
 	var proto *Object
+	// The callback's calls the built-in makes, about: one for each
+	// element, which an invalidated callback spends its budget by
+	// (jitRegNativeCalleeN).
+	var calls int64
 	switch {
 	case kind == 0 || kind&abi.LoopKindMask == abi.LoopSort:
 		return
 	case kind&abi.LoopTyped != 0:
-		if r.jitLoopTyped(recv) == nil {
+		t := r.jitLoopTyped(recv)
+		if t == nil {
 			return
 		}
 		proto = recv.Object().proto()
+		calls = int64(t.length)
 	case r.plainArray(recv) == nil:
 		return
+	default:
+		calls = int64(len(recv.Object().elemsOf()))
 	}
+	calls = max(calls, 1)
 	fd := cb.Object().fn()
 	if fd == nil || fd.native != nil || fd.bound || fd.closure == nil || fd.closure.realm != r.Realm || fd.closure.reg == nil {
 		return
 	}
 	cl := fd.closure
-	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	l := r.jitRegLearnedFor(f, e)
 	for i := range l.nativeCalls {
 		x := &l.nativeCalls[i]
 		if int(x.pc) != rpc || !x.forEach {
@@ -68,11 +77,11 @@ func (r *Runtime) jitRegForEachSeen(f *frame, e *jitRegEntry, rpc int, callee, r
 			x.byCode = true
 			r.jitRegReopt(f.cl, e)
 		}
-		r.jitRegNativeCallee(cl, cl.reg)
+		r.jitRegNativeCalleeN(cl, cl.reg, calls)
 		return
 	}
 	l.nativeCalls = append(l.nativeCalls, jitInline{pc: int32(rpc), obj: o, forEach: true, cb: cl, cbObj: cb.Object(), proto: proto})
-	r.jitRegNativeCallee(cl, cl.reg)
+	r.jitRegNativeCalleeN(cl, cl.reg, calls)
 	r.jitRegReopt(f.cl, e)
 }
 
@@ -189,21 +198,37 @@ func (r *Runtime) jitRegLoopLeft(f *frame, c *regCode, e *jitRegEntry, wb int, c
 	switch ctx.ExitKind {
 	case abi.ExitDeopt:
 		s.guards++
+		e.life.ssaStats.guards++
 		r.jitRegInvalidate(f.cl, e)
 	case abi.ExitPoll:
 		s.budgets++
 		r.backEdges = s.backEdgeBudget()
 		if lerr == nil {
-			lerr = r.checkInterruptNow()
+			lerr = r.checkInterruptPoll()
 		}
 	default:
 		s.hosts++
+		e.life.ssaStats.hosts++
+	}
+	// The call's function, receiver and callback, in its window, as the
+	// loop was given them.
+	var callee, recv, cb Value
+	w := regAt(c.code, exitPC)
+	if a := wb + int(w.A()); a+2 < len(r.stack) {
+		callee, recv, cb = r.stack[a], r.stack[a+1], r.stack[a+2]
 	}
 	res, lerr = r.jitRegLoopFinish(f, c, e, wb, exitPC, loop, after, res, lerr)
+	if lerr == nil && r.stopped == nil {
+		// What the loop was given, which the code learns as at a call of
+		// Go that made it (jitRegForEachSeen): a callback made anew at
+		// each call of the code, which the loop's check of its object
+		// had left at; and the callback's calls Go made finishing the
+		// loop, which it spends its budget by where it is invalidated.
+		r.jitRegForEachSeen(f, e, exitPC, callee, recv, cb, int(w.X()))
+	}
 	next, ran, ferr := r.regFinishCall(f, c, wb, exitPC, res, lerr)
 	switch {
 	case !ran:
-		s.interpreted++
 		return 0, exitPC, Undefined, false, nil, false
 	case ferr != nil:
 		return 0, 0, Undefined, false, ferr, false

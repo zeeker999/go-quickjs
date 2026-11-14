@@ -128,7 +128,7 @@ func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at, wb
 				// The callee's feedback learned what the owner's code was
 				// not compiled for: compiled again for it (jitRegReopt).
 				r.jitRegReopt(cl, owner)
-			case atSite || x.threw || owner.stale:
+			case atSite || x.threw || owner.life.reopt:
 				// Left at a site of the callee's -- or by code to be
 				// compiled again, which may be what it leaves for -- not
 				// for being inlined, as the stack form's unwinding counts
@@ -234,7 +234,7 @@ func (r *Runtime) jitRegInlineLeft(f *frame, x *jitRegInlineLevel, owner *jitReg
 		f.pc = regSrc(c, pc) + 1
 		s.noteRegHost(c, pc)
 		l := s.regLearnedOf(r.jitKeyOf(x.cl.fn))
-		before, failed, mark := l.polyReopt, len(l.failed), jitFeedbackMark(x.cl)
+		before, failed := l.polyReopt, len(l.failed)
 		seen := r.jitRegHostSeen(f, c, x.wb, pc)
 		next, ran, err := r.regWhole(f, c, x.wb, pc)
 		if !ran {
@@ -249,10 +249,12 @@ func (r *Runtime) jitRegInlineLeft(f *frame, x *jitRegInlineLevel, owner *jitReg
 		// (jitNumberMissed), which a guard of the callee's own code
 		// deoptimizes for but one inlined leaves to Go at, the read
 		// generic once compiled again: str's in callsGo, of a string, had
-		// left at each; or its caches learned it, which the code inlining
-		// it reads, as a function's own code is compiled again for its
-		// caches' changes (jitFeedbackMark).
-		learned = !before && l.polyReopt || len(l.failed) != failed || jitFeedbackMark(x.cl) != mark || seen.elem
+		// left at each. A change of its caches alone is not: the stack
+		// form's code is compiled again for none (its mark only delays a
+		// compile, jitLearnedMark), and counted so, each exit had the
+		// code inlining it compiled again for what the interpreter's run
+		// of the callee filled.
+		learned = !before && l.polyReopt || len(l.failed) != failed || seen.elem
 		if err != nil {
 			x.threw = true
 			return Undefined, err, learned
@@ -264,7 +266,7 @@ func (r *Runtime) jitRegInlineLeft(f *frame, x *jitRegInlineLevel, owner *jitReg
 	case abi.ExitPoll:
 		s.budgets++
 		r.backEdges = s.backEdgeBudget()
-		if err := r.checkInterruptNow(); err != nil {
+		if err := r.checkInterruptPoll(); err != nil {
 			return Undefined, err, false
 		}
 	}

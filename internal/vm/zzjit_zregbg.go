@@ -22,9 +22,10 @@ import (
 // runtime's; and the runtime's goroutine installs it at a later check
 // (jitDrain), at a sample of the register tier's (jitRegHot), placing its
 // code as the compile made on the spot would have. Meanwhile the function
-// runs in the interpreter, or in its code that the compile replaces --
-// stale code goes on running, as V8's does -- and its native callers call
-// it through Go. A build that asked what the snapshot was not asked (a
+// runs in the interpreter, or in its code that the compile replaces, which
+// goes on running, valid, called by its native callers, as V8's does; a
+// compile of a function deoptimized since is thrown away, as the stack
+// form's is (jitReoptimized). A build that asked what the snapshot was not asked (a
 // miss), or whose questions took back what they cannot, is built on the
 // runtime's goroutine at the install instead.
 
@@ -35,6 +36,10 @@ type jitRegJob struct {
 	key    jitKey
 	realm  *Realm
 	callee bool
+	// deopts is the function's deoptimizations when it was prepared: a
+	// compile its function deoptimized since is thrown away, as the stack
+	// form's is (jitReoptimized), what that taught asked for anew.
+	deopts uint16
 	// e is the entry being made, its program p, rf its feedback, which a
 	// build on the runtime's goroutine asks, snap that feedback asked ahead,
 	// which the worker's build asks.
@@ -128,6 +133,11 @@ func (r *Runtime) jitRegSubmit(j *jitRegJob) {
 	}
 	s.regPendingJobs[j.key] = j
 	s.regJobs = append(s.regJobs, j)
+	if cc := j.cl.closureCode; cc != nil {
+		// Its calls go to the JIT, which installs it once done
+		// (jitRegEnter).
+		cc.jitEnters = true
+	}
 	s.bgSubmitted++
 	jitWorkers.submit(j)
 	if r.jitStress.background && r.jitStress.checks == 0 {
@@ -206,6 +216,9 @@ func (r *Runtime) jitRegDrainJobs(stress bool, k int) {
 // background go, as it releases its JIT (abandonJobs).
 func (s *jitState) jitRegAbandonJobs() {
 	for _, j := range s.regJobs {
+		if cc := j.cl.closureCode; cc != nil {
+			cc.jitEnters = cc.jitReg != nil
+		}
 		for {
 			st := j.state.Load()
 			if st == jitJobDone {
@@ -230,13 +243,26 @@ func (s *jitState) jitRegAbandonJobs() {
 func (r *Runtime) jitRegInstall(j *jitRegJob) {
 	s := r.jit
 	defer func() {
+		if cc := j.cl.closureCode; cc != nil {
+			// Its calls enter it if it has code, installed or not.
+			cc.jitEnters = cc.jitReg != nil
+		}
 		if j.w != nil {
 			jit.PutWorkspace(j.w)
 			j.w = nil
 		}
 	}()
-	if j.key.gone() {
+	e := j.e
+	old := s.regCache[j.key]
+	if j.key.gone() || e.life.deopts != j.deopts || old != nil && old.levels != 0 {
+		// Gone; or deoptimized since, compiled for what it has learned
+		// once a budget is spent (jitRegInvalidate); or run by a native
+		// call under way, which finds its code in the cache (jitRegLevelAt),
+		// asked again for what it learned once that is due.
 		s.bgDiscarded++
+		if old != nil && old.levels != 0 && old.code != nil && !old.invalid {
+			r.jitRegReopt(j.cl, old)
+		}
 		return
 	}
 	if j.allocErr != nil {
@@ -244,7 +270,6 @@ func (r *Runtime) jitRegInstall(j *jitRegJob) {
 		// tests set) ends the run as it does a compile on the spot.
 		panic(j.allocErr)
 	}
-	e := j.e
 	switch {
 	case j.panicked:
 		s.backendPanics++
@@ -277,13 +302,21 @@ func (r *Runtime) jitRegInstall(j *jitRegJob) {
 			return
 		}
 	}
+	if e.code == nil && old != nil && old.code != nil && !old.invalid {
+		// A refusal replaces no valid code (jitRegCompileFor), asked
+		// again for nothing it has learned so far.
+		old.life.reopt, old.life.learning = false, false
+		return
+	}
 	r.jitRegCached(j.key, e)
 	if cc := j.cl.closureCode; cc != nil && j.cl.reg == j.c {
 		switch {
 		case e.code == nil:
 			cc.jitRegRefused = cc.jitRegRefused || !e.hostOnly && !j.callee
-		case cc.jitReg == nil && !cc.jitRegRefused:
-			cc.jitReg = e
+		case !cc.jitRegRefused:
+			// The function's code from here, whatever it had: runs of
+			// that go on in this at their next exit (jitRegGoOnAt).
+			cc.setJITReg(e)
 		}
 	}
 }

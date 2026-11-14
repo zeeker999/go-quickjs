@@ -320,7 +320,7 @@ func (r *Runtime) regBackEdge(st *regState, pc, target int) int {
 	st.kept.pc = pc + 1
 	r.backEdges = backEdgeCheckInterval
 	f.pc = c.src[pc] + 1
-	if err := r.checkInterruptNow(); err != nil {
+	if err := r.checkInterruptPoll(); err != nil {
 		return st.fail(err)
 	}
 	// The temporaries past what the loop's head has live are stale: a

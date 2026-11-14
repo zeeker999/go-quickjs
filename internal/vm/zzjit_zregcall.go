@@ -44,7 +44,7 @@ func (s *jitState) regLinkOf(cl *closure, c *regCode) *jitLink {
 		s.regLinks = map[jitKey]*jitLink{}
 	}
 	l := &jitLink{key: key, params: 2 + uint64(c.params), locals: uint64(c.numRegs), frame: uint64(c.numRegs)}
-	if e := s.regCache[key]; e != nil && e.code != nil && !e.invalid {
+	if e := s.regCache[key]; e != nil && e.code != nil && !e.invalid && (e.life == nil || !e.life.notNative) {
 		l.regSet(e)
 	}
 	s.regLinks[key] = l
@@ -66,7 +66,7 @@ func (s *jitState) regLinkUpdate(key jitKey, e *jitRegEntry) {
 	if l == nil {
 		return
 	}
-	if e == nil || e.code == nil || e.invalid {
+	if e == nil || e.code == nil || e.invalid || e.life != nil && e.life.notNative {
 		l.clearCode()
 		return
 	}
@@ -170,8 +170,8 @@ func jitRegCallKnown(l *jitEntry, rpc int32, o *Object) bool {
 // left to it -- the function its site's cache holds now, as the stack
 // form's code learns a call's targets at its calls of Go (jitCallSeen):
 // one native callers may call that the call was not known to make is the
-// next compile's to call natively (regCallSites), the code stale from
-// here (jitRegReopt); up to jitCallTargets functions a call. It reports whether it
+// next compile's to call natively (regCallSites), the code to be compiled
+// again for it (jitRegReopt); up to jitCallTargets functions a call. It reports whether it
 // learned one.
 func (r *Runtime) jitRegCallSeen(f *frame, c *regCode, e *jitRegEntry, rpc int, callee Value) bool {
 	if e.invalid || rpc >= len(c.rc.Code) {
@@ -209,7 +209,7 @@ func (r *Runtime) jitRegCallSeen(f *frame, c *regCode, e *jitRegEntry, rpc int, 
 	default:
 		return false
 	}
-	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	l := r.jitRegLearnedFor(f, e)
 	n := 0
 	for i := range l.nativeCalls {
 		x := &l.nativeCalls[i]
@@ -402,7 +402,17 @@ func (r *Runtime) jitRegLevelAt(i int) (jitRegLevel, bool) {
 	if cl == nil || cl.reg == nil {
 		return jitRegLevel{}, false
 	}
-	e := s.regCache[r.jitKeyOf(cl.fn)]
+	// Its closure's code, which is the cache's while it has code of this
+	// realm: a key made at each level of each call of Go from deep native
+	// recursion -- a weak handle and a map lookup -- had cost EarleyBoyer
+	// most of its time once its recursion ran natively.
+	var e *jitRegEntry
+	if cc := cl.closureCode; cc != nil {
+		e = cc.jitReg
+	}
+	if e == nil || e.code == nil || e.key.realm != r.jitRealmKey() {
+		e = s.regCache[r.jitKeyOf(cl.fn)]
+	}
 	if e == nil || e.code == nil || e.p == nil {
 		return jitRegLevel{}, false
 	}
@@ -505,7 +515,18 @@ func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 	var buf [8]jitRegLevel
 	levels := buf[:0]
 	if n > len(buf) {
-		levels = make([]jitRegLevel, 0, n)
+		// Deep native recursion: from the runtime's slab, past what
+		// calls of Go under way below hold of it, given back after --
+		// made anew at each call, a recursion thirty levels deep that
+		// called Go at every level allocated a gigabyte a run.
+		at := len(s.regLevelSlab)
+		s.regLevelSlab = slices.Grow(s.regLevelSlab, n)
+		levels = s.regLevelSlab[at : at : at+n]
+		defer func() {
+			clear(s.regLevelSlab[at : at+n])
+			s.regLevelSlab = s.regLevelSlab[:at]
+		}()
+		s.regLevelSlab = s.regLevelSlab[:at+n]
 	}
 	ok := true
 	for i := root + 1; i <= idx; i++ {
@@ -532,7 +553,14 @@ func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 		var fbuf [8]*frame
 		frames := fbuf[:0]
 		if n > len(fbuf) {
-			frames = make([]*frame, 0, n)
+			at := len(s.regFrameSlab)
+			s.regFrameSlab = slices.Grow(s.regFrameSlab, n)
+			frames = s.regFrameSlab[at : at : at+n]
+			defer func() {
+				clear(s.regFrameSlab[at : at+n])
+				s.regFrameSlab = s.regFrameSlab[:at]
+			}()
+			s.regFrameSlab = s.regFrameSlab[:at+n]
 		}
 		for k := range levels {
 			l := &levels[k]
@@ -556,8 +584,59 @@ func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 	}
 	for k := range levels {
 		levels[k].e.levels--
+		s.regClose(levels[k].e)
 	}
 	return ok
+}
+
+// jitRegUnwound counts a native call of e's code that left native code
+// (jitEntry's nativeOut), as the stack form's jitUnwound does: code that
+// leaves on more than one in jitUnwindShare of its native callers' calls
+// is compiled again, if it is learning, up to jitUnwindReopts times, its
+// native callers calling it still; past that, or learning nothing, native
+// callers no longer call it (notNative) -- they call Go at the call, which
+// makes it -- until Go has made jitRetryNative calls of it, more each time
+// (jitRegRetryNative). Before, a callee that left at every call was
+// unwound at every call, its callers' levels finished by Go each time:
+// AWFY Havlak's size, at and hashFn, a million times each.
+func (r *Runtime) jitRegUnwound(e *jitRegEntry) {
+	life := e.life
+	if life == nil || e.invalid {
+		return
+	}
+	l := r.jit.regLinks[e.key]
+	if l == nil {
+		return
+	}
+	if life.nativeOut++; life.nativeOut%jitUnwindProbe != 0 || life.nativeOut*jitUnwindShare <= l.in {
+		return
+	}
+	if life.unwindReopts < jitUnwindReopts && jitLearning(life) {
+		life.unwindReopts++
+		l.in, life.nativeOut = 0, 0
+		return
+	}
+	life.notNative, life.nativeRetry = true, 0
+	l.clearCode()
+	life.nativeBackoff = min(life.nativeBackoff+1, jitNativeBackoffs)
+}
+
+// jitRegRetryNative counts a call Go makes of e's code, which native
+// callers no longer call (notNative), and has them call it again after
+// jitNativeRetry such calls, doubled for each time it was found to leave
+// too often, its leaving counted afresh, as jitRetryNative does.
+func (r *Runtime) jitRegRetryNative(e *jitRegEntry) {
+	life := e.life
+	if life.nativeRetry++; life.nativeRetry < jitNativeRetry<<(life.nativeBackoff-1) {
+		return
+	}
+	life.notNative, life.nativeOut = false, 0
+	if l := r.jit.regLinks[e.key]; l != nil {
+		l.in = 0
+		if r.jit.regCache[e.key] == e && e.code != nil && !e.invalid {
+			l.regSet(e)
+		}
+	}
 }
 
 // jitRegUnwind finishes the native calls the code running in context idx
@@ -610,6 +689,11 @@ func (r *Runtime) jitRegUnwind(idx int) (Value, error) {
 		}
 	}
 	s.unwound += uint64(n)
+	if n != 0 {
+		// The innermost left native code: counted against its native
+		// callers' calling it (jitRegUnwound).
+		r.jitRegUnwound(levels[n-1].e)
+	}
 	// What Go runs to finish a level runs in contexts past every level's:
 	// a level's native code, resumed after its call, finds its spills and
 	// keeps where it left them.
@@ -677,6 +761,7 @@ func (r *Runtime) jitRegUnwind(idx int) (Value, error) {
 		}
 		r.jitRegPopLevel(f, l.wb, l.gen != nil)
 		l.e.levels--
+		s.regClose(l.e)
 		if err == errTailCall {
 			// Ended in a call in tail position, its frame given up: the
 			// call made here.
