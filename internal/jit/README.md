@@ -552,8 +552,12 @@ prototypes a method was found on, a global's cell, the functions a call has
 called, a literal's pool. `ssa.Optimize` unboxes numbers, computes in int32s
 where the uses truncate, merges guards a dominating one already made,
 removes what escape analysis leaves unmade, removes dead code and keeps
-references alive across stores and calls (`keep.go`). The builder reads only
-the IR and the feedback: `ssa` and `mir` do not import `internal/bytecode`.
+references alive across stores and calls (`keep.go`). Its passes ask
+dominance of the dominator tree (Cooper, Harvey and Kennedy's), each block
+holding its interval of a walk of the tree, which an ancestor's encloses:
+linear in the blocks, as a function of 65,600 statements needs. The builder
+reads only the IR and the feedback: `ssa` and `mir` do not import
+`internal/bytecode`.
 
 **States and entries.** A state's PC is its origin's register pc, its depth
 0, and it holds the registers live there: the builder leaves every slot past
@@ -1416,6 +1420,11 @@ callee native callers call that has no code is compiled at their first call
 of it through Go (`jitRegNativeCallee`): a function of host operations alone
 is lowered for them (`LowerRegInline`).
 
+**Polls.** A native call is no interpreter's, which spends the interrupt
+budget: the callee's code spends the back-edge budget at its start
+instead (`ssa.OpPoll`, see [Polls](#polls)), and calls Go when it runs
+out, so that a native recursion meets the deadline and the memory limit.
+
 **Levels.** No frame of the VM's is made for a native call. Where Go runs
 while native callees are under way, it makes each level's frame as
 `regEnterW` would -- its function, its window, past the call it makes --
@@ -1634,9 +1643,14 @@ may do anything there, run JavaScript included, and the code goes on where
 Go says.
 
 **Polls.** Every back edge decrements the interpreter's back-edge counter
-(`Context.BackEdges`). When it runs out, the code calls Go (or, under a
+(`Context.BackEdges`), and so does register code's start (`ssa.OpPoll`),
+where every call enters it -- a native caller's, which no interpreter's
+call counts, above all -- as V8's prologue checks its interrupt budget:
+a recursion with no loop, run natively, is checked as the interpreter's
+calls check one. When the counter runs out, the code calls Go (or, under a
 stress budget, exits to it), which checks for cancellation, `Halt` and the
-memory limit, gives the loop a new budget, and lets the code go on.
+memory limit, gives a new budget, and lets the code go on. The call is the
+budget's alone: the collector's marking changes nothing of it.
 
 **Not a safe point.** Generated code is never a safe point. SIGURG, Windows'
 `SuspendThread` and SIGPROF see a PC outside Go's text:
