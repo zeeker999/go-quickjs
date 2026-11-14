@@ -1159,6 +1159,15 @@ backlog.
 4. **The old tiers removed (Stage 4).** The stack interpreter, the tree
    tier, `QJS_REG=0`, `hotdiff` and their layout-lock anchors; the `zz`
    file-name prefixes that kept their layout; AGENTS.md's rules for them.
+   The regdiff tests that use the old tiers as their reference
+   (`TestRegDiff*`) are not dropped with them. Before the removal, the
+   corpus is run once on the old tiers and every program's output is
+   recorded as a golden file, and those tests become checks of the
+   register tier against the recorded answers. `TestJITFeedbackParity`
+   ends earlier, with the JIT's stack-form path at the switch-over. The
+   tests that compare register-tier paths with each other
+   (`TestRegNativeCall`, `TestRegLowerEvaluate`, `TestRegNativeCaches`,
+   `TestRegTailCallsStop`) stay, moved into package vm when regdiff goes.
 5. **The portable fallback's dispatcher.** A generated switch over the Go
    handlers, letting Go's inliner choose, against the handler table. The
    fallback is never layout-tuned: a platform that needs a fast
