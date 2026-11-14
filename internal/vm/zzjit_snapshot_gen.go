@@ -1603,6 +1603,15 @@ func (q *jitRegSnapshot) CellsPool() (r0 uintptr, r1 []int32, r2 bool) {
 	return r0, r1, r2
 }
 
+func (q *jitRegSnapshot) PureBody() (r0 bool) {
+	a := q.get(snapPureBody, 0)
+	if a == nil {
+		return
+	}
+	r0, _ = a[0].(bool)
+	return r0
+}
+
 // askOnceReg asks fb the questions of no argument.
 func (s *jitSnapshot) askOnceReg(fb *jitRegFeedback) {
 	{
@@ -1664,6 +1673,12 @@ func (s *jitSnapshot) askOnceReg(fb *jitRegFeedback) {
 		r0, r1, r2 := fb.CellsPool()
 		s.end(fb.fb, before, snapCellsPool, 0)
 		s.put(snapCellsPool, 0, r0, r1, r2)
+	}
+	{
+		before := s.begin(fb.fb)
+		r0 := fb.PureBody()
+		s.end(fb.fb, before, snapPureBody, 0)
+		s.put(snapPureBody, 0, r0)
 	}
 }
 
@@ -2088,7 +2103,8 @@ const jitRegSnapMethods uint64 = 0 |
 	1<<snapParseInt |
 	1<<snapBigString |
 	1<<snapClosure |
-	1<<snapCellsPool
+	1<<snapCellsPool |
+	1<<snapPureBody
 
 // The register askers are set at init, as jitSnapAskers are.
 func init() {

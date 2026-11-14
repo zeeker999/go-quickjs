@@ -440,7 +440,7 @@ func TestJITRegOpsCompileForARM64(t *testing.T) {
 	}
 	RecordJITCompiles(true)
 	defer RecordJITCompiles(false)
-	for _, src := range []string{regElemSrc, regOpsSrc, regLoopsSrc, regAllocSrc, regClosureSrc, regClassSrc, regSpreadSrc, regArrowThisSrc, regStorageSrc} {
+	for _, src := range []string{regElemSrc, regOpsSrc, regLoopsSrc, regAllocSrc, regClosureSrc, regClassSrc, regSpreadSrc, regArrowThisSrc, regStorageSrc, regTypedMethodsSrc, regPureSrc} {
 		rts := regNativeRuntimes(t, src)
 		r := rts[0]
 		fn, _ := r.GetProp(Obj(r.Global()), r.Intern("main"))
@@ -581,5 +581,40 @@ func TestJITRegTypedMethods(t *testing.T) {
 	call("swap")
 	for range 3 {
 		call("main")
+	}
+}
+
+// regPureSrc's callbacks are pure bodies (bytecode.LeafPure) over a
+// BigInt64Array's elements, which native code reads as BigInts: inlined in
+// the loops of reduce and filter, their operators are BigInts' from the
+// first compile (jitRegFeedback's PureBody).
+const regPureSrc = `
+var big = new BigInt64Array(64); for (var i = 0; i < 64; i++) big[i] = BigInt(i * 7);
+function sums(n) { var s = 0n; for (var j = 0; j < n; j++) { s += big.reduce((a, x) => a + x * 3n, 0n); s += BigInt(big.filter((x) => x > 100n).length) } return s }
+function main(n) { return String(sums(n)) }
+`
+
+// TestJITRegPureBodies runs regPureSrc's main natively and in a runtime
+// without the JIT, the collector idle and marking.
+func TestJITRegPureBodies(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regPureSrc)
+			for i, r := range rts {
+				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("main"))
+				for range 10 {
+					v, err := r.Call(fn, Undefined, []Value{Float(400)})
+					if got := regNativeShow(r, v, err); got != "16954000" {
+						t.Fatalf("runtime %d: %q", i, got)
+					}
+				}
+			}
+		})
 	}
 }

@@ -120,6 +120,7 @@ var (
 	_ ssa.BigStringFeedback  = (*jitRegFeedback)(nil)
 	_ ssa.ClosureFeedback    = (*jitRegFeedback)(nil)
 	_ ssa.CellsFeedback      = (*jitRegFeedback)(nil)
+	_ ssa.PureBodyFeedback   = (*jitRegFeedback)(nil)
 )
 
 // jitRegCodeIn reports whether the code making the call of Go in ctx, in
@@ -435,4 +436,16 @@ func (r *Runtime) jitRegReadSeen(f *frame, c *regCode, run jitRegRun, rpc int, r
 		l.polyReopt = false
 		r.jitRegReopt(f.cl, run.e)
 	}
+}
+
+// PureBody is ssa.PureBodyFeedback's: the function is a pure body
+// (bytecode.LeafPure, which the compiler finds of its code, no tier's
+// marks), whose operators' sites register code learns only at its exits:
+// an operand native code already holds as a BigInt makes the operator
+// one of BigInts there, as the stack form's pure body does. The stack
+// form's answer leaves out a body the tree tier runs, whose sites the
+// tree marks; register code is run by no tier that marks its sites.
+func (f *jitRegFeedback) PureBody() bool {
+	fn := f.fb.fn
+	return fn != nil && fn.Leaf == bytecode.LeafPure && !fn.Generator && !fn.Async
 }
