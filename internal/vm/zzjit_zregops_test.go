@@ -184,3 +184,65 @@ func TestJITRegLoopSteps(t *testing.T) {
 		})
 	}
 }
+
+// regAllocSrc constructs arrays with the realm's Array, of no argument and
+// of a length, which register code takes from a pool (jitRegAllocSeen,
+// ssa.CallSite's Alloc), in a recursive native callee too; one past what a
+// pool's arrays have room for, a negative length, and Array replaced.
+const regAllocSrc = `
+function tree(d) { var a = new Array(4); if (d == 0) return a.length + (1 in a ? 1 : 0); for (var i = 0; i < 4; i++) a[i] = tree(d - 1); return a[0] + a[3] }
+function lists(n) {
+	var s = 0, kept = [];
+	for (var i = 0; i < n; i++) { var x = new Array(); x.push(i); var y = new Array(i & 7); y[0] = i; s += x.length + y.length + y[0]; if (i % 100 == 0) kept.push(y) }
+	var big = new Array(5000), bad = "";
+	try { new Array(-1) } catch (e) { bad = e.name }
+	return s + big.length + bad + kept.length + kept[3].length + JSON.stringify(kept[1]);
+}
+function swap() { var A = Array; Array = function (n) { this.n = n } ; return A }
+function main() { return tree(5) + "," + lists(3000) }
+`
+
+// TestJITRegArrayAlloc runs regAllocSrc's main natively and in a runtime
+// without the JIT, before and after Array is replaced, and compares their
+// answers: the constructions made from pools, not by Go at each.
+func TestJITRegArrayAlloc(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regAllocSrc)
+			rts[0].SetJITReport(true)
+			call := func(name string) [2]string {
+				var got [2]string
+				for i, r := range rts {
+					fn, _ := r.GetProp(Obj(r.Global()), r.Intern(name))
+					v, err := r.Call(fn, Undefined, nil)
+					got[i] = regNativeShow(r, v, err)
+				}
+				if got[0] != got[1] {
+					t.Errorf("%s: with the JIT %q, without %q", name, got[0], got[1])
+				}
+				return got
+			}
+			for range 20 {
+				call("main")
+			}
+			if got := call("main"); got[1] != `128,4517375RangeError304[100,null,null,null]` {
+				t.Errorf("main: %q", got[1])
+			}
+			st := rts[0].RegNativeStats()
+			t.Logf("calls of Go %v", st.GoCallOps)
+			if n := st.GoCallOps["new_w->Array"]; n > 3000 {
+				t.Errorf("%d constructions of Array made by Go", n)
+			}
+			call("swap")
+			for range 3 {
+				call("main")
+			}
+		})
+	}
+}

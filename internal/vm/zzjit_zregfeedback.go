@@ -652,6 +652,9 @@ func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
 	if n > abi.MaxGoArgs {
 		return nil
 	}
+	if site, ok := f.regAllocSite(rpc, w, argc); ok {
+		return []ssa.CallSite{site}
+	}
 	if sites := f.regCallSites(pc, w, argc, method); len(sites) != 0 {
 		return sites
 	}

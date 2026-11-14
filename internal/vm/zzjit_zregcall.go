@@ -122,7 +122,7 @@ func (f *jitRegFeedback) regCallTargets(pc int, w bytecode.RInstr, argc int, met
 	}
 	if l != nil {
 		for _, x := range l.nativeCalls {
-			if x.pc == rpc && (x.pool != nil) == newW && !x.forEach {
+			if x.pc == rpc && (x.pool != nil) == newW && !x.forEach && x.cl != nil {
 				add(x.obj, x.cl, x.cl.reg, x.pool, x.byCode)
 			}
 		}
@@ -198,6 +198,10 @@ func (r *Runtime) jitRegCallSeen(f *frame, c *regCode, e *jitRegEntry, rpc int, 
 			return false
 		}
 		o = callee.Object()
+		if o == r.proto.arrayCtor {
+			// new Array() or new Array(n): made from a pool (jitRegAllocSeen).
+			return r.jitRegAllocSeen(f, c, e, rpc, w, o)
+		}
 		if !r.jitRegConstructable(o, int(w.X())) {
 			return false
 		}

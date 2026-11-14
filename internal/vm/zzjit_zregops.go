@@ -3,6 +3,7 @@
 package vm
 
 import (
+	"math"
 	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -166,4 +167,71 @@ func (r *Runtime) jitRegPlainSet(ctx *abi.Context, idx int) (*closure, bytecode.
 		return nil, bytecode.Instr{}, true
 	}
 	return cl, bytecode.Instr{Op: bytecode.OpSetProp, A: c.rc.SiteName[w.C()], B: uint32(w.C())}, true
+}
+
+// jitRegAllocSeen learns, after Go made new_w w at register pc rpc of f's
+// code e, a construction with o, the realm's Array, of no argument or of
+// a length native code makes (jitArrayRoom), which needs nothing run: the
+// next compile takes its arrays from a pool (regAllocSite), as the stack
+// form's code learns it (jitAllocates), the code stale from here. It
+// reports whether it learned it.
+func (r *Runtime) jitRegAllocSeen(f *frame, c *regCode, e *jitRegEntry, rpc int, w bytecode.RInstr, o *Object) bool {
+	argc := int(w.X())
+	if argc > 1 {
+		return false
+	}
+	room := 0
+	if argc == 1 {
+		// The length, in the window's register past the receiver's, the
+		// call having written its result elsewhere.
+		a := f.base - int(c.locals) + int(w.A()) + 2
+		if int(w.B()) == int(w.A())+2 || a < 0 || a >= len(r.stack) {
+			return false
+		}
+		n := r.stack[a]
+		if !n.IsNumber() || n.num < 0 || n.num != math.Trunc(n.num) {
+			return false
+		}
+		if room = jitArrayRoom(n.num); room == 0 {
+			return false
+		}
+	}
+	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	for _, x := range l.nativeCalls {
+		if int(x.pc) == rpc && x.cl == nil && !x.forEach && x.pool != nil {
+			return false
+		}
+	}
+	pool := r.jitNewPool(o)
+	if argc == 1 {
+		pool = r.jitNewArrayPool(o, room)
+	}
+	l.nativeCalls = append(l.nativeCalls, jitInline{pc: int32(rpc), obj: o, pool: pool})
+	r.jitRegReopt(f.cl, e)
+	return true
+}
+
+// regAllocSite is the construction new_w w makes with the realm's Array
+// natively from a pool (jitRegAllocSeen), as the stack form's NativeCalls
+// makes one (ssa.CallSite's Alloc): new Array(), or new Array(n) of a
+// length its pool's arrays have room for; any other, and any other
+// function, Go's after an exit.
+func (f *jitRegFeedback) regAllocSite(rpc int, w bytecode.RInstr, argc int) (ssa.CallSite, bool) {
+	l, r := f.fb.e, f.fb.r
+	if w.Op() != bytecode.RNewW || argc > 1 || l == nil {
+		return ssa.CallSite{}, false
+	}
+	for _, x := range l.nativeCalls {
+		if int(x.pc) != rpc || x.cl != nil || x.forEach || x.pool == nil || x.obj != r.proto.arrayCtor {
+			continue
+		}
+		if argc == 1 && x.pool.Room == 0 {
+			return ssa.CallSite{}, false
+		}
+		k := f.fb.keep()
+		k.holders, k.pools = append(k.holders, x.obj), append(k.pools, x.pool)
+		return ssa.CallSite{Callee: uintptr(unsafe.Pointer(x.obj)), ThisSlot: -1,
+			Pool: uintptr(unsafe.Pointer(x.pool)), Alloc: true, Argc: argc}, true
+	}
+	return ssa.CallSite{}, false
 }

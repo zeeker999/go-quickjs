@@ -1438,7 +1438,11 @@ native code for Go, which learns there what to call next. A construction
 `new.target`, is made so too, with the constructions its code learned: its
 receiver taken from a pool of objects made as `regConstruct` makes one
 (`jitNewPool`, `ssa.CallSite`'s `Pool`), in the callee's register 1 and its
-context's `This`, which the result is where the callee returns no object. A
+context's `This`, which the result is where the callee returns no object.
+A construction with the realm's Array, `new Array()` or `new Array(n)` of a
+length a pool's arrays have room for, learned at the call Go made of it
+(`jitRegAllocSeen`), takes its array from a pool (`ssa.CallSite`'s
+`Alloc`), as the stack form's does. A
 callee native callers call that has no code is compiled at their first call
 of it through Go (`jitRegNativeCallee`): a function of host operations alone
 is lowered for them (`LowerRegInline`).
