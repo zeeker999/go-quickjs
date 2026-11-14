@@ -164,18 +164,12 @@ type ForEachSite struct {
 // an object escape analysis removed; Closure is the template's own address,
 // the inlined frame's closure an exit names (InlineState's Closure); and
 // Captures are what the closure would capture, in order: index<<1|1 the
-// maker's local, index<<1 the maker's own captured binding. Closes are
-// the maker's instructions that close what the closure captures of its
-// locals besides its ir.CloseUpvalues -- register code's close_regs, which
-// its lowering leaves to Go whole, naming no register the builder sees --
-// past which a call of the closure inlined would read anew what the
-// closure kept (calledClosures).
+// maker's local, index<<1 the maker's own captured binding.
 type MadeCallback struct {
 	PC       int
 	Template uintptr
 	Closure  uintptr
 	Captures []int32
-	Closes   []int
 }
 
 // ForEachFeedback is Feedback that knows the forEach, or another of the
@@ -1818,6 +1812,10 @@ type CallSite struct {
 	// Upvalues is the address of the callee closure's captured bindings'
 	// cells, its context's (abi.Context.Upvalues), or 0 for none.
 	Upvalues uintptr
+	// Closes, for a scope's end (GoClose) in register code, is how many
+	// registers from Argc it closes (close_regs's B), those alone; 0
+	// closes every one from Argc on, as close_upvalues does.
+	Closes int
 	// StartOnly says the callee's code makes its locals past its
 	// parameters undefined as it starts (Func's StartOnly): the call leaves
 	// them to it.
@@ -5417,7 +5415,7 @@ func (b *builder) goFrame(blk *Block, pc int, in ir.Instruction, guard func(Op, 
 	call := guard(OpCall, Tagged, ir.HostExit)
 	site := &CallSite{Go: GoClosure, Argc: int(in.Key), ThisSlot: -1}
 	if in.Op == ir.CloseUpvalues {
-		site.Go = GoClose
+		site.Go, site.Closes = GoClose, in.Extra
 	}
 	if fb, ok := b.fb.(ClosureFeedback); ok && in.Op == ir.Closure {
 		// Natively, from its pool: what it captures of the code's locals

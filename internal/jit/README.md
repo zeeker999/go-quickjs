@@ -1199,10 +1199,9 @@ function lowered for an inlined frame (`madeInline`), called plainly, its
 window the call's. An arrow that reads its this reads the maker's register
 1, as `closure_w` gives it the frame's (`InlineSite`'s `LexThis`), but in
 a derived constructor, whose this may not be bound yet. A scope's end that
-closes a register it captures (`close_regs`), which the lowering leaves to
-Go whole, is named to the build (`MadeCallback`'s `Closes`), which then
-inlines no call of the closure past it, as it inlines none past a stack
-form's `CloseUpvalues`. A call is found to call the closure by its window's
+closes a register it captures (`close_regs`, lowered to `ir.CloseUpvalues`
+of its registers) has the build inline no call of the closure past it, as
+past a stack form's `CloseUpvalues`. A call is found to call the closure by its window's
 register 0 in the call's state (`calledClosures`); one of a callee given it
 by its window's function, copied just before from a parameter's register
 (`givenCall`), so that a register callee calling what it is given is
@@ -1225,8 +1224,21 @@ closures share, which the frame closes as it ends; a native callee's are
 closed cells holding the registers' values, which Go opens on its window
 where it makes the callee's frame (`jitRegReopenCells`). A closure is made
 of them as the interpreter's `regClosure` makes one, and a scope's end
-(`close_regs`) gives its registers fresh cells holding what the old ones
-held (`ssa.GoClose`).
+(`close_regs`, `ir.CloseUpvalues` with `Key` its first register and
+`Extra` their count) gives its registers fresh cells holding what the old
+ones held (`ssa.GoClose`, its `CallSite`'s `Closes` the count): natively
+from the function's pool of cells (mir's `cellsClose`), the old cells
+closed, as the stack form's scope's end, on the run's own frame and a
+native callee's alike; by Go where the pool is empty
+(`jitRegCellsClosure`), which closes those registers alone.
+
+An arrow made from its pool takes its maker's register 1 as its this
+(`LexThisReg`), an arrow's maker too. A maker that shares a derived
+constructor's this binding (`funcExtra`'s `lexThisRef`) runs natively only
+once the binding is bound (`jitRegThisBound`), its register 1 made the
+value bound: bound, the binding is fixed -- a second `super()` throws --
+so capturing its value is exact, as the stack form runs no arrow sharing
+a binding not bound.
 
 A call of a closure that captures bindings checks the function the callee
 runs, in its environment and realm, not the object (`ssa.CallSite`'s

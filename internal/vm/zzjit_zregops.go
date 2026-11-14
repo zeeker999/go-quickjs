@@ -267,10 +267,7 @@ func (f *jitRegFeedback) Closure(pc int) (ssa.ClosureSite, bool) {
 		return ssa.ClosureSite{}, false
 	}
 	t := fb.cl.consts[k].template()
-	if t == nil || t.fn.Kind == bytecode.KindArrow && fb.fn.Kind == bytecode.KindArrow {
-		// An arrow an arrow makes may share a binding of this its maker
-		// shares with a derived constructor (funcExtra's lexThisRef), which
-		// the frame Go makes it on has: Go's.
+	if t == nil {
 		return ssa.ClosureSite{}, false
 	}
 	regs := jitRegCapturedRegs(f.p.Captured)
@@ -296,7 +293,12 @@ func (f *jitRegFeedback) Closure(pc int) (ssa.ClosureSite, bool) {
 	fb.keep().pools = append(fb.keep().pools, l.pool)
 	// An arrow's this is the maker's register 1, as closure_w takes it
 	// (regClosure), not the context's This, which register code's frame
-	// does not hold (ssa.ClosureSite's LexThisReg).
+	// does not hold (ssa.ClosureSite's LexThisReg). An arrow an arrow
+	// makes too, as the stack form's: where the maker shares a derived
+	// constructor's binding (funcExtra's lexThisRef), its code runs only
+	// once the binding is bound, which is then fixed -- a second super()
+	// throws -- and its register 1 the value bound (jitRegThisBound), so
+	// that capturing the value is exact.
 	arrow := t.fn.Kind == bytecode.KindArrow
 	return ssa.ClosureSite{Pool: uintptr(unsafe.Pointer(l.pool)), Captures: caps, LexThis: arrow, LexThisReg: arrow}, true
 }

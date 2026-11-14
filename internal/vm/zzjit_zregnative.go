@@ -816,6 +816,9 @@ func (r *Runtime) jitRegGoOn(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) 
 // frame's level of a native call Go finished the callee of (jitRegUnwind),
 // the call's result in the next context's RetValue.
 func (r *Runtime) jitRegGoOnAt(f *frame, c *regCode, e *jitRegEntry, wb, rpc, at int, resume uintptr) (pc int, v Value, done bool, err error) {
+	if resume == 0 && !r.jitRegThisBound(f, wb) {
+		return rpc, Undefined, false, nil
+	}
 	for {
 		ipc := 0
 		if resume == 0 && f.cl.reg == c {
@@ -858,6 +861,25 @@ func (r *Runtime) jitRegGoOnAt(f *frame, c *regCode, e *jitRegEntry, wb, rpc, at
 		}
 		rpc = next
 	}
+}
+
+// jitRegThisBound reports whether native code may run f, its window at
+// wb: not an arrow's frame that shares a derived constructor's this
+// binding (funcExtra's lexThisRef) not bound yet, which the interpreter
+// runs, as the stack form's code runs no such arrow (closureCallSite). One
+// bound has its register 1 made the value bound, which its maker's
+// lexThis, taken before super() bound it, may not be: the arrows its code
+// makes from their pools capture this from there (ssa.ClosureSite's
+// LexThisReg), and the binding, once bound, is fixed.
+func (r *Runtime) jitRegThisBound(f *frame, wb int) bool {
+	if f.thisRef == nil || f.cl.fn.Kind != bytecode.KindArrow {
+		return true
+	}
+	if !f.thisRef.init {
+		return false
+	}
+	r.stack[wb+1] = f.thisRef.value
+	return true
 }
 
 // jitRegLeaveTo leaves f, whose run of e's code left it, to the
@@ -1674,11 +1696,6 @@ func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int)
 	case !own && (op == bytecode.RLoadThis || op == bytecode.RThis || op == bytecode.RDerivedRet):
 		// What reads a this binding, which a native callee's stand-in
 		// frame has none of.
-		return false
-	case op == bytecode.RCloseRegs && (!own || ctx.Cells != nil):
-		// A scope's end where the code's captured registers are in cells
-		// of their own, which it takes fresh ones for (jitRegCellsClosure):
-		// left to the exit, as a native callee's.
 		return false
 	}
 	after := int(e.p.Origin[ipc+1])
