@@ -1139,6 +1139,24 @@ func (q *jitRegSnapshot) BigIntFailed(pc int) (r0 bool) {
 	return r0
 }
 
+func (q *jitRegSnapshot) InlineExit(pc int) (r0 bool) {
+	a := q.get(snapInlineExit, int64(pc))
+	if a == nil {
+		return
+	}
+	r0, _ = a[0].(bool)
+	return r0
+}
+
+func (q *jitRegSnapshot) KeepLimit() (r0 int) {
+	a := q.get(snapKeepLimit, 0)
+	if a == nil {
+		return
+	}
+	r0, _ = a[0].(int)
+	return r0
+}
+
 func (q *jitRegSnapshot) StringRead(pc int) (r0 bool) {
 	a := q.get(snapStringRead, int64(pc))
 	if a == nil {
@@ -1616,6 +1634,12 @@ func (q *jitRegSnapshot) PureBody() (r0 bool) {
 func (s *jitSnapshot) askOnceReg(fb *jitRegFeedback) {
 	{
 		before := s.begin(fb.fb)
+		r0 := fb.KeepLimit()
+		s.end(fb.fb, before, snapKeepLimit, 0)
+		s.put(snapKeepLimit, 0, r0)
+	}
+	{
+		before := s.begin(fb.fb)
 		r0 := fb.GoCalls()
 		s.end(fb.fb, before, snapGoCalls, 0)
 		s.put(snapGoCalls, 0, r0)
@@ -1709,6 +1733,15 @@ func jitRegSnapAskBigIntFailed(s *jitSnapshot, fb *jitRegFeedback, pc int) {
 	s.end(fb.fb, before, snapBigIntFailed, int64(pc))
 	if jitSnapAnswered(r0) {
 		s.put(snapBigIntFailed, int64(pc), r0)
+	}
+}
+
+func jitRegSnapAskInlineExit(s *jitSnapshot, fb *jitRegFeedback, pc int) {
+	before := s.begin(fb.fb)
+	r0 := fb.InlineExit(pc)
+	s.end(fb.fb, before, snapInlineExit, int64(pc))
+	if jitSnapAnswered(r0) {
+		s.put(snapInlineExit, int64(pc), r0)
 	}
 }
 
@@ -2057,6 +2090,8 @@ const jitRegSnapMethods uint64 = 0 |
 	1<<snapBigInt |
 	1<<snapBigIntWide |
 	1<<snapBigIntFailed |
+	1<<snapInlineExit |
+	1<<snapKeepLimit |
 	1<<snapStringRead |
 	1<<snapTypedRead |
 	1<<snapTypedBigRead |
@@ -2112,6 +2147,7 @@ func init() {
 		snapBigInt:         jitRegSnapAskBigInt,
 		snapBigIntWide:     jitRegSnapAskBigIntWide,
 		snapBigIntFailed:   jitRegSnapAskBigIntFailed,
+		snapInlineExit:     jitRegSnapAskInlineExit,
 		snapStringRead:     jitRegSnapAskStringRead,
 		snapTypedRead:      jitRegSnapAskTypedRead,
 		snapTypedBigRead:   jitRegSnapAskTypedBigRead,

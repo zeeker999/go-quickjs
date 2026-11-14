@@ -164,12 +164,18 @@ type ForEachSite struct {
 // an object escape analysis removed; Closure is the template's own address,
 // the inlined frame's closure an exit names (InlineState's Closure); and
 // Captures are what the closure would capture, in order: index<<1|1 the
-// maker's local, index<<1 the maker's own captured binding.
+// maker's local, index<<1 the maker's own captured binding. Closes are
+// the maker's instructions that close what the closure captures of its
+// locals besides its ir.CloseUpvalues -- register code's close_regs, which
+// its lowering leaves to Go whole, naming no register the builder sees --
+// past which a call of the closure inlined would read anew what the
+// closure kept (calledClosures).
 type MadeCallback struct {
 	PC       int
 	Template uintptr
 	Closure  uintptr
 	Captures []int32
+	Closes   []int
 }
 
 // ForEachFeedback is Feedback that knows the forEach, or another of the
@@ -375,8 +381,10 @@ func (b *builder) madeAt(pc int, made *MadeCallback) bool {
 	if b.cur != b.root || pc0 < 0 || pc0 >= pc || !reachable(p, pc0) || p.Code[pc0].Op != ir.Closure || b.host(pc0) || made.Template == 0 || made.Closure == 0 {
 		return false
 	}
-	slot := p.Locals + p.Maps[pc].Depth - b.callsAt(pc)[0].Argc
-	if p.Code[pc0].Dest != slot {
+	// The call's first argument, where its form has it (callSlotsOf).
+	cs, ok := b.callSlotsOf(pc, b.callsAt(pc)[0].Argc, true)
+	slot := cs.arg
+	if !ok || p.Code[pc0].Dest != slot {
 		return false
 	}
 	for q := pc0 + 1; q < pc; q++ {
@@ -2769,6 +2777,21 @@ func givenCall(p *ir.Program, pc int, targets []bool, argc func(pc int) (int, bo
 	if !ok || pc >= len(p.Maps) {
 		return false
 	}
+	if in := p.Code[pc]; in.Window {
+		// Register code's: its window's function copied from a parameter's
+		// register, the last write of that register before the call.
+		a := in.Left.Slot
+		for q := pc - 1; q >= 0 && !targets[q+1]; q-- {
+			c := p.Code[q]
+			if c.Op == ir.CopyPair && (c.Dest == a || c.Extra == a) {
+				return false
+			}
+			if c.Dest == a {
+				return c.Op == ir.Copy && c.Left.Slot >= p.ParamBase && c.Left.Slot < p.ParamBase+p.Params
+			}
+		}
+		return false
+	}
 	depth := p.Maps[pc].Depth - n - 1
 	if depth < 0 {
 		return false
@@ -4008,12 +4031,14 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 		// plain call, a method's or a construction -- its result the
 		// call's register.
 		if !in.Window || !site.Window || isAccessor || site.Argc != in.Extra || site.Method != in.When || site.Restart ||
-			site.Forward || site.Arguments || site.ReadsArguments || site.LexThis || site.Captured != nil || site.ThisSlot >= 0 || site.Params < 2 ||
-			b.p.IsCaptured(in.Dest) {
+			site.Forward || site.Arguments || site.ReadsArguments || site.ThisSlot >= 0 || site.Params < 2 ||
+			site.LexThis && (site.Construct || site.Method || site.LexThisSlot < 0) || b.p.IsCaptured(in.Dest) {
 			// Nor one whose result is to a register a closure captures,
 			// which its cell holds: the inlined frame's return writes the
 			// slot, not the cell, which a call's own result stores
-			// (assign).
+			// (assign). A closure the root makes (calledSite), what it
+			// captured the root's own slots (Captured), is called plainly,
+			// an arrow's this the root's (LexThis).
 			return nil, false
 		}
 		if site.Construct && (site.Pool == 0 || site.Method || b.f.Keeps >= b.f.keepLimit() || !returnsWindowReceiver(site.Program)) {
@@ -4078,7 +4103,7 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 // frame Go makes again or of its arguments, whose callees are given
 // nothing a closure could be.
 func (b *builder) inlineCalls(site InlineSite, accessor bool) (calls, given []int, ok bool) {
-	if !b.provisional && b.given == nil || accessor || site.Construct || site.Restart || site.Forward || site.Arguments || site.Captured != nil || site.Window {
+	if !b.provisional && b.given == nil || accessor || site.Construct || site.Restart || site.Forward || site.Arguments || site.Captured != nil {
 		calls, ok = InlineCalls(site.Program)
 		return calls, nil, ok
 	}
@@ -4288,10 +4313,8 @@ func (b *builder) unmadeAlone() error {
 		// The local it is kept in, the instruction after it: an entry's
 		// load of it is the closure too, made by the interpreter, as
 		// calledClosures has it, and so is its dead zone's marker.
-		p, home := b.root.p, -1
-		if next := p.Code[pc0+1]; (next.Op == ir.Copy || next.Op == ir.StoreLoad) && next.Left.Slot == p.Code[pc0].Dest && next.Dest < b.f.FrameLocals {
-			home = next.Dest
-		}
+		p := b.root.p
+		home := calledHome(p, pc0, b.f.FrameLocals)
 		set, also := map[*Value]bool{}, map[*Value]bool{}
 		var phis []*Value
 		for _, blk := range b.f.Blocks {
@@ -4940,6 +4963,11 @@ func (b *builder) inlineWindowCall(blk *Block, pc int, fr *frame, guard func(Op,
 		object := guard(OpObjectOf, Ptr, ir.HostExit, fn)
 		same := guard(OpSameObject, None, ir.HostExit, object)
 		same.Const = ir.Value{Bits: uint64(site.Callee)}
+	} else if fr.given {
+		// What the call calls, which the build checks is the closure it
+		// was found to (unmadeAlone); a closure the root makes and calls
+		// (calledSite) is that closure, which no check needs.
+		fr.callee = fn
 	}
 	var this *Value
 	if site.Method {
@@ -4980,6 +5008,9 @@ func (b *builder) inlineWindowCall(blk *Block, pc int, fr *frame, guard func(Op,
 	switch {
 	case this != nil:
 		fr.init[1] = this
+	case site.LexThis:
+		// An arrow the root makes: the root's own this, not a receiver.
+		fr.init[1] = b.read(b.root.base+site.LexThisSlot, blk)
 	case site.ThisCell != 0:
 		// A plain call's: the global object or undefined (ThisCell).
 		cell := b.f.newValue(blk, OpConstCell, Source)
@@ -8346,12 +8377,48 @@ func (b *builder) instruction(blk *Block, pc int) {
 			break
 		}
 		if in.Tail && in.Window {
-			// Register code's call in tail position: deep in the stack,
-			// where the interpreter gives the frame to the callee, it
-			// leaves for the interpreter to make (OpTailRoom); shallower,
+			// Register code's call in tail position: shallow in the stack,
 			// the ordinary call, its result the instruction's register.
-			room := guard(OpTailRoom, None, ir.HostExit)
-			room.Index = b.cur.depth
+			// Deeper, where the interpreter gives the frame to the callee
+			// in place (the VM's regTailTo), a call of the closure the frame
+			// runs is a jump to the code's start, as the stack form's
+			// (OpTailSelf): the window's function, receiver and arguments
+			// its registers 0, 1 and on -- the receiver a method call's,
+			// an arrow's the this it captured, its register 1, undefined
+			// otherwise -- undefined in the rest. Any other call there
+			// leaves for the interpreter to make (OpTailRoom's), as does
+			// one in an inlined frame, or in code whose frame holds what
+			// it may not give up: registers a closure captures, the
+			// arguments it keeps.
+			if p := b.root.p; b.cur == b.root && p.TailOwn && p.Captured == nil && !p.FrameArgs {
+				a := in.Left.Slot
+				args := make([]*Value, 0, in.Extra+3)
+				fn := b.read(a, blk)
+				args = append(args, fn, fn)
+				switch {
+				case p.ArrowThis:
+					args = append(args, b.read(1, blk))
+				case in.When:
+					args = append(args, b.read(a+1, blk))
+				default:
+					this := f.newValue(blk, OpConst, Tagged)
+					this.Const = ir.Value{Kind: ir.Undefined}
+					args = append(args, this)
+				}
+				for i := range in.Extra {
+					args = append(args, b.read(a+2+i, blk))
+				}
+				v := guard(OpTailSelf, None, ir.HostExit, args...)
+				v.Index, v.Const = p.ParamBase+p.Params, ir.Value{Bits: uint64(p.Regs)}
+				v.Key = TailWindow
+				if p.Origin != nil && !looped(p, 0) {
+					// The start polls (OpPoll), which the jump goes to.
+					v.Key |= TailPolled
+				}
+			} else {
+				room := guard(OpTailRoom, None, ir.HostExit)
+				room.Index = b.cur.depth
+			}
 		} else if in.Tail {
 			// Deep in the stack the frame is given up, where it holds no
 			// captured local: native code makes a call of the function
@@ -8611,6 +8678,25 @@ func (b *builder) windowCall(blk *Block, pc int, in ir.Instruction, calls []*Cal
 	}
 	f, a := b.f, in.Left.Slot
 	args := make([]*Value, 0, in.Extra+2)
+	if calls[0].Forward {
+		// f.apply(x, arguments) (CallSite's Forward): f, apply and x, its
+		// window's first three registers, as the stack form's operands; the
+		// realm's apply checked, any other the interpreter's.
+		args = append(args, b.read(a, blk), b.read(a+1, blk), b.read(a+2, blk))
+		apply := guard(OpObjectOf, Ptr, ir.HostExit, args[1])
+		same := guard(OpSameObject, None, ir.HostExit, apply)
+		same.Const = ir.Value{Bits: uint64(calls[0].Apply)}
+		call := guard(OpCall, Tagged, ir.HostExit, args...)
+		f.cache(call).Calls, call.Index = calls, b.callKeepAt(pc)
+		cell := f.newValue(blk, OpCallCell, Source, call)
+		r := f.newValue(blk, OpKept, Tagged, cell, call)
+		r.Shadow = cell
+		b.assign(in.Dest, blk, r)
+		if b.hasCells() {
+			b.reloadAfterCall(blk)
+		}
+		return
+	}
 	switch {
 	case calls[0].InstanceOf:
 		args = append(args, b.read(a, blk), b.read(in.Right.Slot, blk))
@@ -8740,9 +8826,9 @@ func (b *builder) nativeCalls(pc int) []*CallSite {
 			// Register code's call: its operands are its window's
 			// registers, not the operand stack's top (windowCall), the
 			// site's shape the instruction's.
-			if site.Argc != in.Extra || site.Method != in.When || site.Super || site.Instr != 0 || site.Forward || site.Accessor != AccessorNone || site.Step || site.ForOf || site.ForIn ||
+			if site.Argc != in.Extra || site.Method != in.When || site.Super || site.Instr != 0 || site.Accessor != AccessorNone || site.Step || site.ForOf || site.ForIn ||
 				site.TypeOf && (in.Extra != 0 || site.Go != GoCall) || site.InstanceOf && (in.Extra != 1 || site.Go != GoCall) || site.Literal || site.Via != 0 ||
-				site.Go == 0 && !site.Push && !site.Pop && !site.Alloc && (site.Window != in.Left.Slot+1 || site.Generic || site.ThisSlot >= 0 || site.FrameArgs || site.Function || site.Tail ||
+				site.Go == 0 && !site.Push && !site.Pop && !site.Alloc && (site.Window != in.Left.Slot+1 || site.ThisSlot >= 0 || site.Function ||
 					site.Pool != 0 && (site.Derived || site.Parent != 0 || site.Method)) {
 				// A native call's callee's window is made from the
 				// instruction's (CallSite's Window), the stack form's

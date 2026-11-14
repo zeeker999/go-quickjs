@@ -71,8 +71,11 @@ type jitRegEntry struct {
 	// levels counts the native calls under way of the code that Go runs
 	// beside (jitRegLevelAt): the cache neither drops it nor compiles it
 	// again while any is.
-	levels  int
-	bytes   int
+	levels int
+	bytes  int
+	// cached says the cache holds e for its function (jitRegCached),
+	// which a level finds through its closure's template (jitRegLevelAt).
+	cached  bool
 	refusal string
 	// retPC and retUndef are where the interpreter ends a frame the code
 	// returned from by on-stack replacement, retReg the register retPC's
@@ -171,7 +174,7 @@ func (r *Runtime) jitRegForAs(cl *closure, c *regCode, callee bool) *jitRegEntry
 	if s.unavailable {
 		return nil
 	}
-	key := r.jitKeyOf(cl.fn)
+	key := r.jitRegKeyOf(cl)
 	if s.regPendingJobs[key] != nil {
 		// Being compiled in the background (jitRegSubmit): installed at
 		// a later check.
@@ -222,7 +225,19 @@ func (r *Runtime) jitRegCached(key jitKey, e *jitRegEntry) {
 		s.dropReg(key, old)
 	}
 	s.regCache[key] = e
+	e.cached = true
 	s.regHeld += e.bytes
+	if life := e.life; life != nil && e.code != nil && life.ssaSerial != 0 {
+		// Compiled again: what it leaves on is counted afresh, and it is
+		// judged afresh, as the stack form's code compiled again is
+		// (jitReoptimize) -- it may have left on what it is compiled for
+		// now -- so Go enters it and native callers call it until the new
+		// code is found not to pay in turn; its backoffs stay.
+		if l := s.regLinks[key]; l != nil {
+			l.in = 0
+		}
+		life.nativeOut, life.notNative, life.nativeRetry, life.entrySlow = 0, false, 0, false
+	}
 	s.regLinkUpdate(key, e)
 	if life := e.life; life != nil && e.code != nil {
 		if life.ssaSerial++; life.ssaSerial == 1 {
@@ -324,6 +339,12 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 	looped := jitRegShape(f, p, cl, c)
 	ssa.Optimize(f)
 	mc, err := mir.CompileWith(&w.MIR, f, jitEncoding, mir.Settings())
+	if errors.Is(err, mir.ErrKeeps) {
+		// More keep cells live at once than the context has, which the
+		// build could not know: built again with no more than that, the
+		// calls past them left to Go, as the stack form's code is.
+		rf, f, looped, mc, err = r.jitRegBuild(w, cl, c, p, abi.MaxKeeps, frameAt)
+	}
 	if err != nil {
 		e.refusal = fmt.Sprintf("%v: %v", jitRefused, err)
 		return e
@@ -405,6 +426,10 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 	// The pools' roots and prototypes escape analysis took, which the
 	// objects it does not make are made with at an exit.
 	rf.fb.keepVirtuals(f.VirtualAsked)
+	// The closures it makes that it only calls (ssa.Func's Called), and its
+	// loops' callbacks, those it does not make among them.
+	rf.fb.called = f.Called
+	rf.fb.callbacks, rf.fb.unmade = f.Callbacks, f.Unmade
 	// What the code reads by address, its feedback's keep; the closure
 	// and the function the feedback asked are not.
 	e.keep = rf.fb.keep()
@@ -471,8 +496,9 @@ func (s *jitState) regAge(now uint64) {
 			delete(s.regLearned, key)
 		}
 	}
-	for key := range s.regLinks {
+	for key, l := range s.regLinks {
 		if key.gone() {
+			s.regUnhint(l)
 			delete(s.regLinks, key)
 		}
 	}
@@ -558,7 +584,7 @@ func (s *jitState) dropReg(key jitKey, e *jitRegEntry) {
 			s.generation++
 		}
 	}
-	e.dropped = true
+	e.dropped, e.cached = true, false
 	s.regClose(e)
 }
 
@@ -649,6 +675,9 @@ func (r *Runtime) jitRegMaterialize(f *frame, e *jitRegEntry, wb int) {
 // same objects as the frame's: one made for each home, which every slot
 // naming it, the frame's and the callees', is given.
 func (r *Runtime) jitRegMaterializeSpans(f *frame, e *jitRegEntry, wb int, spans [][2]int) {
+	if k := e.keep; k != nil && len(k.made) != 0 && f != nil {
+		r.jitRegMadeIn(f, e, wb, spans)
+	}
 	if e.frame == 0 {
 		return
 	}
@@ -704,6 +733,47 @@ func (r *Runtime) jitRegMaterializeSpans(f *frame, e *jitRegEntry, wb int, spans
 		}
 	}
 	r.jit.materialized += uint64(len(objs))
+}
+
+// jitRegMadeIn makes, in the registers of f's window at wb, its scratch
+// slots and frame, and the windows of the callees e's code inlined that an
+// exit inside them wrote (spans), the closures e's code did not make (ssa's
+// calledClosures): one for each template, on f, as closure_w makes it
+// (regClosure) -- its captured registers' cells open on the frame by now
+// (jitRegReopenCells) -- and every slot holding the template given it, as
+// the stack form's exits make them (jitMaterializeIn).
+func (r *Runtime) jitRegMadeIn(f *frame, e *jitRegEntry, wb int, spans [][2]int) {
+	made := e.keep.made
+	c := f.cl.reg
+	objs := make([]*Object, len(made))
+	fix := func(v *Value) {
+		t := v.template()
+		if t == nil {
+			return
+		}
+		i := slices.Index(made, t)
+		if i < 0 {
+			return
+		}
+		if objs[i] == nil {
+			k := slices.IndexFunc(f.cl.consts, func(x Value) bool { return x.template() == t })
+			if c == nil || k < 0 || k >= len(c.rc.Caps) {
+				panic("vm: an unmade closure's template is not its maker's")
+			}
+			objs[i] = r.regClosure(f, c, bytecode.MakeRBC(bytecode.RClosureW, 0, 0, uint32(k)), wb)
+			r.jit.materialized++
+		}
+		*v = Obj(objs[i])
+	}
+	end := min(len(r.stack), wb+e.p.Regs+e.scratch+e.frame)
+	for i := wb; i < end; i++ {
+		fix(&r.stack[i])
+	}
+	for _, sp := range spans {
+		for i := sp[0]; i < min(sp[1], len(r.stack)); i++ {
+			fix(&r.stack[i])
+		}
+	}
 }
 
 // jitRegRun runs f, running c with its window at wb, in e's code from
@@ -876,6 +946,10 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 			w := regAt(c.code, exitPC)
 			if w.Op() == bytecode.RNewW && wb+int(w.A()) < len(r.stack) {
 				callee = r.stack[wb+int(w.A())]
+			} else if w.Op() == bytecode.RApplyArgs && wb+int(w.B())+2 < len(r.stack) {
+				// The function it forwards to, before its register is
+				// written.
+				callee = r.stack[wb+int(w.B())]
 			}
 			// A method call's operands, which may be a loop's built-in's
 			// (jitRegForEachSeen), read before Go runs it.
@@ -989,6 +1063,25 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 		ctx.Cells, ctx.Loop = nil, 0
 	}
 	ctx.Open = uint64(len(f.openUpvalues))
+	if f.cl.fn.HasTailCall {
+		// Its calls of itself in tail position, deep in the stack, give
+		// the frame to the call in place natively where the interpreter
+		// would (ssa.OpTailSelf, regTailTo): its closure, and whether it
+		// would -- a call's frame, or regEnterW's of no construction, that
+		// shares no derived constructor's this and keeps no arguments --
+		// and its receiver's home, which a call with another rewrites.
+		ctx.Closure, ctx.TailFrame, ctx.FrameThis = unsafe.Pointer(f.cl), 0, unsafe.Pointer(&f.this)
+		if (f.regKind == regFrameCall || f.regKind == regFrameEnter && f.newTarget.IsUndefined()) && f.thisRef == nil &&
+			f.args == nil && f.withScopes == nil && f.evalVars == nil && !c.suspends {
+			ctx.TailFrame = 1
+		}
+	}
+	if p.Forwards {
+		// Its f.apply(x, arguments) hands the frame's arguments on natively
+		// (ssa.CallSite's Forward), from its context, as the stack form's
+		// entry gives them (jitForwardEntry).
+		jitForwardEntry(ctx, f.args)
+	}
 	// No frame for Go's calls from the code to read: the stack form's
 	// frame is what they read (jitGoRun), and they leave what needs one
 	// to an exit.
@@ -1082,7 +1175,7 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 		// answered, as a native callee's (regPending).
 		rpc := int(ctx.ExitPC)
 		f.pc = regSrc(c, rpc) + 1
-		if v, uerr, ok := r.jitRegInlined(idx, f.cl, e, rpc, wb); ok {
+		if v, uerr, ok := r.jitRegInlined(idx, f, e, rpc, wb); ok {
 			s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: v, err: uerr}
 		}
 	}
@@ -1092,6 +1185,7 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 	// returned, up to the first context no call ran in.
 	clear(ctx.Keep[:e.keeps])
 	ctx.This, ctx.Upvalues, ctx.Instance = abi.Slot{}, nil, abi.Slot{}
+	ctx.Closure, ctx.FrameThis = nil, nil
 	if n := max(ctx.RecordHigh, s.callRefs); n != 0 {
 		clear(ctx.RecordRef[:n])
 		ctx.RecordHigh = 0
@@ -1391,6 +1485,14 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	}
 	if int(ctx.GoOp>>abi.GoOpArgcShift&0xff) != argc {
 		return false
+	}
+	if idx == len(s.ssaCtxs)-1 && s.bounds.LevelLimit == uint64(len(s.ssaCtxs)) {
+		// A call native code made by Go for want of a context past this
+		// one (mir's native calls): more of them, for the calls after it
+		// to be native, as the stack form's code has them made
+		// (jitGoCallNested) -- a recursion of native calls had gone
+		// through Go every fourth level.
+		r.jitGrowContexts()
 	}
 	top := r.stackTop
 	end := top + 2 + argc
@@ -1843,7 +1945,7 @@ func (r *Runtime) RegNativeCall(fnv Value, args []Value, osr bool) RegNativeResu
 	}
 	cl := fd.closure
 	var compiled bool
-	if r.jit == nil || r.jit.regCache[r.jitKeyOf(cl.fn)] == nil || r.jit.regCache[r.jitKeyOf(cl.fn)].invalid {
+	if r.jit == nil || r.jit.regCache[r.jitRegKeyOf(cl)] == nil || r.jit.regCache[r.jitRegKeyOf(cl)].invalid {
 		compiled = true
 	}
 	// Compiled here, on the spot: the call runs the code it asks for,

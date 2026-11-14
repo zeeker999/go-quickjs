@@ -207,7 +207,7 @@ func (r *Runtime) jitRegAllocLength(f *frame, e *jitRegEntry, rpc int, w bytecod
 			return false
 		}
 	}
-	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	l := r.jit.regLearnedOf(r.jitRegKeyOf(f.cl))
 	for _, x := range l.nativeCalls {
 		if int(x.pc) == rpc && x.cl == nil && !x.forEach && x.pool != nil {
 			return false
@@ -441,7 +441,7 @@ func (r *Runtime) jitRegReadSeen(f *frame, c *regCode, run jitRegRun, rpc int, r
 		return
 	}
 	op.recv = recv
-	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	l := r.jit.regLearnedOf(r.jitRegKeyOf(f.cl))
 	r.jitPolySeenOp(l, rpc, op)
 	if l.polyReopt {
 		l.polyReopt = false
@@ -502,7 +502,7 @@ func (r *Runtime) jitRegGenMakeSeen(f *frame, e *jitRegEntry, rpc int, callee Va
 	if fd := o.fn(); fd == nil || fd.closure == nil || !fd.closure.fn.Generator {
 		return
 	}
-	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	l := r.jit.regLearnedOf(r.jitRegKeyOf(f.cl))
 	for _, x := range l.genMakes {
 		if int(x.pc) == rpc {
 			if x.obj == o && x.pool != nil && x.pool.Count == 0 {

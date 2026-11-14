@@ -1842,7 +1842,7 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 	// registers, none of them the call's to skip.
 	win := site.Window != 0
 	if win {
-		if !generic || gen {
+		if !generic {
 			// Each call Go makes where it does not make it natively: a
 			// callee with no code, a context past the deepest.
 			c.a.Jmp(c.stubLabel(s, exitKind(v.Aux)))
@@ -2071,13 +2071,21 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 		c.a.MovQToX(xScratch2, scratchC)
 		framed = true
 		inC, m := true, 0
-		if site.Method {
-			m = 1
-			c.directOperand(v, v.Args[0], true, vs, &inC)
-		}
-		c.directOperand(v, v.Args[m], true, 0, &inC)
-		for i := range site.Argc {
-			c.directOperand(v, v.Args[m+1+i], true, int32(2+i)*vs, &inC)
+		switch {
+		case site.Forward:
+			// f.apply(x, arguments): f its function, x its receiver; the
+			// arguments the frame's, in its context (windowForward).
+			c.directOperand(v, v.Args[0], true, 0, &inC)
+			c.directOperand(v, v.Args[2], true, vs, &inC)
+		default:
+			if site.Method {
+				m = 1
+				c.directOperand(v, v.Args[0], true, vs, &inC)
+			}
+			c.directOperand(v, v.Args[m], true, 0, &inC)
+			for i := range site.Argc {
+				c.directOperand(v, v.Args[m+1+i], true, int32(2+i)*vs, &inC)
+			}
 		}
 	}
 	if direct {
@@ -2180,7 +2188,24 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 	setup := func(t *ssa.CallSite) {
 		if win {
 			frame()
-			c.windowSetup(t, locals, top, high2)
+			if t.Forward {
+				c.windowForward(t, locals, calleeCtx)
+			} else {
+				c.windowSetup(t, locals, top, high2)
+				if t.FrameArgs {
+					c.windowArgs(t, locals, calleeCtx, top)
+				}
+			}
+			if t.Tail {
+				// Whether its calls in tail position may give its frame up
+				// (abi.Context's TailFrame), as the stack form's call says:
+				// set at every call of such a callee, so that none reads a
+				// flag an earlier frame in the context left -- a
+				// construction's, which no tail call gives up.
+				c.a.Load(calleeCtx, regCtx, abi.OffNext)
+				c.storeImm(calleeCtx, abi.OffTailFrame, b2u(t.TailFrame), top)
+				c.storeImm(calleeCtx, abi.OffFrameThis, 0, top)
+			}
 			if t.Pool != 0 {
 				// A construction's receiver, the pool's last object, its cell
 				// cleared, in the window's register 1 and the callee's
@@ -2404,6 +2429,13 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 		// link says, read from its link at run time.
 		setupGen := func() {
 			frame()
+			if win {
+				// Register code's (genWindowSetup).
+				c.genWindowSetup(site, locals, calleeCtx, top, tmp)
+				c.a.Load(callClosure, regCtx, abi.OffCallClosure)
+				c.a.LeaLabel(callRet, back)
+				return
+			}
 			c.a.Load(calleeCtx, regCtx, abi.OffNext)
 			notail := c.a.NewLabel()
 			c.a.Load(top, callLink, c.enc.LinkFlags)
@@ -2477,9 +2509,17 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 		c.a.Load(callLink, regCtx, abi.OffCallLink)
 		c.a.Load(scratchA, callLink, c.enc.LinkEntry)
 		c.a.Op(amd64.Test, scratchA, scratchA, true)
-		c.a.Jcc(amd64.CondE, none)
-		setupGen()
-		c.a.JmpMem(callLink, c.enc.LinkEntry)
+		if win {
+			// No code: Go's call, from native code, as a site's of a
+			// callee with none is register code's.
+			c.a.Jcc(amd64.CondE, goCall())
+			setupGen()
+			c.a.JmpMem(callLink, c.enc.LinkEntry)
+		} else {
+			c.a.Jcc(amd64.CondE, none)
+			setupGen()
+			c.a.JmpMem(callLink, c.enc.LinkEntry)
+		}
 		c.cold = append(c.cold, func() {
 			c.a.Bind(none)
 			setupGen()
@@ -5021,7 +5061,11 @@ func (c *compiler) goArg(at int32, x *ssa.Value) {
 // where the collector does not see them: while it marks, each pointer is
 // stored through Go's write barrier first (refStore, into the context's
 // Shade), which shades it, whatever of the frame it has scanned as the
-// frame is written. The call polls, as a back-edge does. Any other call
+// frame is written. The call polls, as a back-edge does, but where the
+// code's start, which it jumps to, polls (ssa.TailPolled). Register code's
+// (ssa.TailWindow) writes its window, the function, the receiver and the
+// arguments, to its registers, and the receiver to the VM's frame where Go
+// entered the code with one (abi.Context's FrameThis). Any other call
 // leaves for Go to make.
 func (c *compiler) tailSelf(v *ssa.Value, guard guardTo) {
 	shallow := c.a.NewLabel()
@@ -5041,22 +5085,24 @@ func (c *compiler) tailSelf(v *ssa.Value, guard guardTo) {
 		c.a.Jmp(stub)
 		return
 	}
-	poll, polled := c.a.NewLabel(), c.a.NewLabel()
-	c.a.Load(scratchB, regCtx, abi.OffBackEdges)
-	c.a.DecMem(scratchB, 0)
-	c.a.Jcc(amd64.CondLE, poll)
-	state := v.State
-	c.cold = append(c.cold, func() {
-		c.a.Bind(poll)
-		if c.enc.CallGo != 0 {
-			stub := c.stubLabel(state, abi.ExitPoll)
-			c.goSaving(uint64(ssa.GoPoll), &stub)
-			c.a.Jmp(polled)
-			return
-		}
-		c.exitTo(state, abi.ExitPoll)
-	})
-	c.a.Bind(polled)
+	if v.Key&ssa.TailPolled == 0 {
+		poll, polled := c.a.NewLabel(), c.a.NewLabel()
+		c.a.Load(scratchB, regCtx, abi.OffBackEdges)
+		c.a.DecMem(scratchB, 0)
+		c.a.Jcc(amd64.CondLE, poll)
+		state := v.State
+		c.cold = append(c.cold, func() {
+			c.a.Bind(poll)
+			if c.enc.CallGo != 0 {
+				stub := c.stubLabel(state, abi.ExitPoll)
+				c.goSaving(uint64(ssa.GoPoll), &stub)
+				c.a.Jmp(polled)
+				return
+			}
+			c.exitTo(state, abi.ExitPoll)
+		})
+		c.a.Bind(polled)
+	}
 	c.a.Load(scratchA, regCtx, abi.OffTailFrame)
 	c.a.Op(amd64.Test, scratchA, scratchA, true)
 	guard.jump(amd64.CondE)
@@ -5127,6 +5173,21 @@ func (c *compiler) tailSelf(v *ssa.Value, guard guardTo) {
 		c.a.Jcc(amd64.CondE, none)
 		c.a.Store(scratchC, c.enc.NumOffset, scratchA)
 		c.a.Store(scratchC, c.enc.RefOffset, scratchB)
+		c.a.Bind(none)
+	}
+	if v.Key&ssa.TailWindow != 0 {
+		// Register code's receiver, its register 1, written above: the
+		// VM's frame's too, if Go entered the code with it, which
+		// load_this reads.
+		at := abi.OffGoArgs + size
+		none := c.a.NewLabel()
+		c.a.Load(scratchC, regCtx, abi.OffFrameThis)
+		c.a.Op(amd64.Test, scratchC, scratchC, true)
+		c.a.Jcc(amd64.CondE, none)
+		c.a.Load(scratchA, regCtx, at+c.enc.NumOffset)
+		c.a.Store(scratchC, c.enc.NumOffset, scratchA)
+		c.a.Load(scratchA, regCtx, at+c.enc.RefOffset)
+		c.a.Store(scratchC, c.enc.RefOffset, scratchA)
 		c.a.Bind(none)
 	}
 	c.a.Jmp(c.labels[entry.ID])
@@ -5431,6 +5492,15 @@ func (c *compiler) genericCheck(v *ssa.Value, site *ssa.CallSite, target int, ch
 	c.a.Load(scratchB, regCtx, abi.OffStackEnd)
 	c.a.Op(amd64.Cmp, scratchA, scratchB, true)
 	c.a.Jcc(amd64.CondA, miss)
+	if site.Window != 0 {
+		// And the arguments register code's call writes past the callee's
+		// window, which may be more than its registers (windowSetup).
+		c.a.Load(scratchA, regCtx, abi.OffStackTop)
+		c.a.Load(scratchA, scratchA, 0)
+		c.a.OpImm(amd64.Add, scratchA, int32(2+site.Argc), true)
+		c.a.Op(amd64.Cmp, scratchA, scratchB, true)
+		c.a.Jcc(amd64.CondA, miss)
+	}
 	c.a.StoreImm(regCtx, abi.OffCallTarget, int32(target))
 	c.a.Jmp(checked)
 }
@@ -6218,6 +6288,104 @@ func (c *compiler) windowSetup(t *ssa.CallSite, locals, a, b amd64.Reg) {
 		c.storeImm(locals, vs+c.enc.NumOffset, c.enc.Undefined, a)
 		c.storeImm(locals, vs+c.enc.RefOffset, 0, a)
 	}
+}
+
+// windowForward is windowSetup for register code's f.apply(x, arguments)
+// (ssa.CallSite's Forward and Window), its callee's window at locals, its
+// function and receiver written: its parameters the frame's arguments,
+// which its context holds (abi.Context's Args), undefined past them; and,
+// for a callee that keeps its arguments (FrameArgs), all of them and
+// their count in its context, ctx, as the stack form's forwardArgs gives
+// them, plain stores of what the caller's context holds while the callee
+// runs. An arrow's receiver is the this it captured. It uses RBX, R12,
+// R13, scratchA and scratchC.
+func (c *compiler) windowForward(t *ssa.CallSite, locals, ctx amd64.Reg) {
+	vs := int32(c.enc.ValueSize)
+	c.a.Load(ctx, regCtx, abi.OffNext)
+	c.a.Lea(locals, locals, 2*vs)
+	param := *t
+	param.Params, param.LocalCount = t.Params-2, t.LocalCount-2
+	c.forwardArgs(&param, locals, ctx)
+	c.a.Lea(locals, locals, -2*vs)
+	if t.ArrowThis {
+		const a, b = amd64.R12, amd64.R13
+		c.a.Load(b, regCtx, abi.OffCallThis)
+		c.a.Load(a, b, c.enc.NumOffset)
+		c.a.Store(locals, vs+c.enc.NumOffset, a)
+		c.a.Load(a, b, c.enc.RefOffset)
+		c.a.Store(locals, vs+c.enc.RefOffset, a)
+	}
+}
+
+// windowArgs gives a register callee that keeps its arguments
+// (ssa.CallSite's FrameArgs) all of them and their count in its context,
+// ctx, read from its window at locals, where the call wrote them, as the
+// stack form's call writes them (call's setup): plain stores, the
+// collector marking or not, of what the VM's stack holds as long as the
+// callee runs. It uses a.
+func (c *compiler) windowArgs(t *ssa.CallSite, locals, ctx, a amd64.Reg) {
+	vs := int32(c.enc.ValueSize)
+	num, ref := int32(unsafe.Offsetof(abi.GoArg{}.Num)), int32(unsafe.Offsetof(abi.GoArg{}.Ref))
+	c.a.Load(ctx, regCtx, abi.OffNext)
+	c.storeImm(ctx, abi.OffArgc, uint64(t.Argc), a)
+	for i := range t.Argc {
+		at := abi.OffArgs + int32(i)*int32(unsafe.Sizeof(abi.GoArg{}))
+		c.a.Load(a, locals, int32(2+i)*vs+c.enc.NumOffset)
+		c.a.Store(ctx, at+num, a)
+		c.a.Load(a, locals, int32(2+i)*vs+c.enc.RefOffset)
+		c.a.Store(ctx, at+ref, a)
+	}
+}
+
+// genWindowSetup is windowSetup for a generic call of register code
+// (ssa.CallSite's Generic and Window), its callee's window at locals, its
+// link in callLink: what its link says of the function, read at run time --
+// undefined in its parameters past the arguments, its link's LinkParams
+// counting the window's function and receiver; the this an arrow captured
+// (CallThis, which genericCheck found), or, for a plain call, undefined in
+// its receiver's register (genericCheck leaves a function that coerces it
+// to Go); and whether its calls in tail position may give its frame up
+// (abi.LinkTail, Context's TailFrame). It uses ctx, a and b.
+func (c *compiler) genWindowSetup(site *ssa.CallSite, locals, ctx, a, b amd64.Reg) {
+	vs := int32(c.enc.ValueSize)
+	loop, filled := c.a.NewLabel(), c.a.NewLabel()
+	c.movImm(scratchA, uint64(2+site.Argc))
+	c.a.Bind(loop)
+	c.a.Load(b, callLink, c.enc.LinkParams)
+	c.a.Op(amd64.Cmp, scratchA, b, true)
+	c.a.Jcc(amd64.CondAE, filled)
+	c.a.MovRR(a, scratchA)
+	c.a.ShiftImm(amd64.Shl, a, 4, true)
+	c.a.Op(amd64.Add, a, locals, true)
+	c.storeImm(a, c.enc.NumOffset, c.enc.Undefined, b)
+	c.storeImm(a, c.enc.RefOffset, 0, b)
+	c.a.OpImm(amd64.Add, scratchA, 1, true)
+	c.a.Jmp(loop)
+	c.a.Bind(filled)
+	notail := c.a.NewLabel()
+	c.a.Load(ctx, regCtx, abi.OffNext)
+	c.a.Load(a, callLink, c.enc.LinkFlags)
+	c.a.OpImm(amd64.And, a, abi.LinkTail, true)
+	c.a.Jcc(amd64.CondE, notail)
+	c.storeImm(ctx, abi.OffTailFrame, 1, a)
+	c.storeImm(ctx, abi.OffFrameThis, 0, a)
+	c.a.Bind(notail)
+	arrow, done := c.a.NewLabel(), c.a.NewLabel()
+	c.a.Load(a, callLink, c.enc.LinkFlags)
+	c.a.OpImm(amd64.And, a, abi.LinkArrow, true)
+	c.a.Jcc(amd64.CondNE, arrow)
+	if !site.Method {
+		c.storeImm(locals, vs+c.enc.NumOffset, c.enc.Undefined, a)
+		c.storeImm(locals, vs+c.enc.RefOffset, 0, a)
+	}
+	c.a.Jmp(done)
+	c.a.Bind(arrow)
+	c.a.Load(b, regCtx, abi.OffCallThis)
+	c.a.Load(a, b, c.enc.NumOffset)
+	c.a.Store(locals, vs+c.enc.NumOffset, a)
+	c.a.Load(a, b, c.enc.RefOffset)
+	c.a.Store(locals, vs+c.enc.RefOffset, a)
+	c.a.Bind(done)
 }
 
 // pointerWord leaves in scratchB the pointer word of a value whose number

@@ -136,7 +136,7 @@ func (r *Runtime) jitRegLifeOf(cl *closure) *jitEntry {
 	if e := cl.closureCode.jitReg; e != nil && e.life != nil {
 		return e.life
 	}
-	return r.jitState().regLearnedOf(r.jitKeyOf(cl.fn))
+	return r.jitState().regLearnedOf(r.jitRegKeyOf(cl))
 }
 
 // jitRegNativeCallee compiles cl's function's register code c for the
@@ -186,7 +186,7 @@ func (r *Runtime) jitRegNativeCalleeN(cl *closure, c *regCode, calls int64) {
 // form's: compiled for that alone, a function of host operations is worth
 // its code.
 func (r *Runtime) jitRegCallsNatively(cl *closure, c *regCode) bool {
-	if l := r.jit.regLearned[r.jitKeyOf(cl.fn)]; l != nil && len(l.nativeCalls) != 0 {
+	if l := r.jit.regLearned[r.jitRegKeyOf(cl)]; l != nil && len(l.nativeCalls) != 0 {
 		return true
 	}
 	for _, w := range c.rc.Code {
@@ -448,7 +448,7 @@ func (r *Runtime) jitRegLearnedFor(f *frame, e *jitRegEntry) *jitEntry {
 	if e != nil && e.life != nil && f.cl.reg != nil && e.rc == f.cl.reg.rc && e.key.realm == r.jitRealmKey() {
 		return e.life
 	}
-	return r.jitState().regLearnedOf(r.jitKeyOf(f.cl.fn))
+	return r.jitState().regLearnedOf(r.jitRegKeyOf(f.cl))
 }
 
 // regLearnedOf is what the code of the function whose key is key learned
@@ -506,7 +506,7 @@ func (r *Runtime) jitRegPropOp(f *frame, c *regCode, wb, rpc int) (jitPropOp, bo
 // is compiled for from the first, not learned one exit and one compile at
 // a time.
 func (r *Runtime) jitRegSeenFeedback(cl *closure, c *regCode) {
-	l := r.jitState().regLearnedOf(r.jitKeyOf(cl.fn))
+	l := r.jitState().regLearnedOf(r.jitRegKeyOf(cl))
 	for rpc, w := range c.rc.Code {
 		write := false
 		switch w.Op() {
@@ -559,7 +559,7 @@ func (r *Runtime) jitRegDeoptSeen(f *frame, c *regCode, e *jitRegEntry, wb, rpc 
 // as the stack form's code learns it (failedEntries), the instructions
 // there not made generic for it.
 func (r *Runtime) jitRegEntrySeen(f *frame, rpc int) {
-	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	l := r.jit.regLearnedOf(r.jitRegKeyOf(f.cl))
 	if !slices.Contains(l.failedEntries, uint32(rpc)) {
 		l.failedEntries = append(l.failedEntries, uint32(rpc))
 	}
@@ -609,7 +609,7 @@ func (r *Runtime) jitRegHostSeen(f *frame, c *regCode, wb, rpc int) jitRegWrite 
 		// An element's read or write native code left to Go: what it met,
 		// read or stored natively, or by Go from native code, once
 		// compiled again (jitRegElemSeen).
-		return jitRegWrite{elem: r.jitRegElemSeen(r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn)), c, wb, rpc, true)}
+		return jitRegWrite{elem: r.jitRegElemSeen(r.jit.regLearnedOf(r.jitRegKeyOf(f.cl)), c, wb, rpc, true)}
 	}
 	if op.write {
 		x := jitRegWrite{op: op, write: true}
@@ -619,7 +619,7 @@ func (r *Runtime) jitRegHostSeen(f *frame, c *regCode, wb, rpc int) jitRegWrite 
 		}
 		return x
 	}
-	r.jitPolySeenOp(r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn)), rpc, op)
+	r.jitPolySeenOp(r.jit.regLearnedOf(r.jitRegKeyOf(f.cl)), rpc, op)
 	return jitRegWrite{}
 }
 
@@ -647,7 +647,7 @@ func (r *Runtime) jitRegPrivateSeen(f *frame, c *regCode, e *jitRegEntry, wb, rp
 	if i < 0 || ob.shape == nil || i >= ob.shape.n || int(i) >= int(ob.valn) || ob.shape.keys[i].isAccessor() || ob.vals()[i].IsNumber() {
 		return
 	}
-	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	l := r.jit.regLearnedOf(r.jitRegKeyOf(f.cl))
 	if slices.Contains(l.failed, int32(rpc)) {
 		return
 	}
@@ -692,9 +692,12 @@ func (r *Runtime) jitRegEnter(f *frame, cl *closure, c *regCode, base, start int
 		r.jitDrain()
 		e = cl.closureCode.jitReg
 	}
-	if e != nil && e.life.entrySlow && start == 0 {
+	if e != nil && e.life.entrySlow && start == 0 && !e.life.reopt {
 		// Code that does not pay (jitRegStretchWork): the interpreter runs
-		// the call, until it is retried.
+		// the call, until it is retried. Not code that learned what to be
+		// compiled again for, which, never entered, would never be
+		// compiled for it (below), as the stack form's call skips code
+		// judged slow only then (tryJIT).
 		if r.jitRegRetrySlow(e); e.life.entrySlow {
 			return r.runReg(f, c, start)
 		}
@@ -710,6 +713,24 @@ func (r *Runtime) jitRegEnter(f *frame, cl *closure, c *regCode, base, start int
 		e.life.starts++
 		if e.life.notNative {
 			r.jitRegRetryNative(e)
+		}
+		// Code that learned what to be compiled again for is, once it has
+		// spent a budget (jitRegLearnedDue), at a call as at a sample or
+		// an exit, as the stack form's entry has it (tryJITAt's
+		// jitRecompileLearned): a function called rarely, whose code runs
+		// its loop natively and leaves it nowhere, had never been
+		// compiled for the callbacks it learned at its calls of Go.
+		if e.life.reopt && r.jitRegLearnedDue(cl, e) {
+			if ne := r.jitRegReoptimize(cl, c, e); ne != nil {
+				e = ne
+			}
+		}
+		if e.life.entrySlow {
+			// Judged slow, its compile again not due yet: the
+			// interpreter's, as above.
+			if r.jitRegRetrySlow(e); e.life.entrySlow {
+				return r.runReg(f, c, start)
+			}
 		}
 	} else if ipc := e.ipc(start); e.code != nil && ipc >= 0 && e.code.HasEntry(ipc) {
 		r.jit.regResumes++

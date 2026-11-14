@@ -333,6 +333,12 @@ const (
 	// frame's place, its context the frame's, and goes on in its code,
 	// returning where the frame would have. Key's bit 1 says the last of
 	// Args is the receiver the call gives, bit 2 that the code reads it.
+	// Register code's (TailWindow) has its window in Args past the
+	// function -- the function, the receiver, the arguments -- which are
+	// its registers from 0, Index of them, undefined in the rest to
+	// Const's, and the receiver the VM's frame's too where Go entered the
+	// code with it; TailPolled says the code's start polls, which the jump
+	// goes to, so that the call does not poll as well.
 	OpTailSelf // function, arguments -> none
 	// OpPoll is register code's check at its start, as a back edge's: the
 	// interpreter's back-edge budget (abi.Context's BackEdges) counted
@@ -604,6 +610,14 @@ const (
 	// a function where its target is -- where a call of Go makes it (a
 	// split). It never exits.
 	OpTypeofCell // tagged -> source
+)
+
+// OpTailSelf's Key bits for register code's call (OpTailSelf): its Args
+// its window (TailWindow), and the code's start, which the jump goes to,
+// a poll (TailPolled).
+const (
+	TailWindow = 4
+	TailPolled = 8
 )
 
 // OpNumberIs's Aux: which of Number's predicates.

@@ -123,10 +123,16 @@ func (r *Runtime) jitRegFrameOp(ctx *abi.Context) bool {
 		}
 		return true
 	case ssa.GoArgument:
+		args := f.args
 		if level {
-			return false
+			// A native callee's, which its call gave its context
+			// (ssa.CallSite's FrameArgs).
+			if !c.args {
+				return false
+			}
+			args = unsafe.Slice((*Value)(unsafe.Pointer(&ctx.Args[0])), min(int(ctx.Argc), len(ctx.Args)))
 		}
-		v, ok := jitArgumentOf(ctx, f.args, f.cl.fn)
+		v, ok := jitArgumentOf(ctx, args, f.cl.fn)
 		if ok {
 			keep(v)
 		}

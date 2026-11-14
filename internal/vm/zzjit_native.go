@@ -467,6 +467,9 @@ type jitCodeFields struct {
 	jitRegHot, jitRegDeopts uint8
 	jitRegRefused           bool
 	jitReg                  *jitRegEntry
+	// jitRegKey is the template's function's key in the realm its closures
+	// run in (jitRegKeyOf), made at its first use.
+	jitRegKey jitKey
 	// jitRegCounts are what the feedback dispatcher counted of the
 	// function's register code (zzjit_zregfreq.go): its runs, then the
 	// calls made at each of its call sites; nil until its call sites'
@@ -571,6 +574,24 @@ func (r *Runtime) jitRealmKey() weak.Pointer[Realm] {
 // jitKeyOf is the key of fn's code for the current realm.
 func (r *Runtime) jitKeyOf(fn *bytecode.Function) jitKey {
 	return jitKey{weak.Make(fn), r.jitRealmKey()}
+}
+
+// jitRegKeyOf is jitKeyOf(cl.fn), which register code's every call of Go,
+// exit and level of a native call asks, kept by cl's template
+// (jitCodeFields' jitRegKey) as the stack form's are found by the
+// function's address (entryFor): weak.Make finds or makes the runtime's
+// handle of fn at each call -- a search of its span's specials -- a sixth
+// of AWFY's CD under the register JIT. A closure of another realm than the
+// running one's has its key made.
+func (r *Runtime) jitRegKeyOf(cl *closure) jitKey {
+	cc := cl.closureCode
+	if cc == nil || cl.realm != r.Realm {
+		return r.jitKeyOf(cl.fn)
+	}
+	if cc.jitRegKey.Pointer == (weak.Pointer[bytecode.Function]{}) {
+		cc.jitRegKey = r.jitKeyOf(cl.fn)
+	}
+	return cc.jitRegKey
 }
 
 // jitFnAddr is byFn's key: a jitKey by its function's address.
@@ -967,6 +988,9 @@ type jitLink struct {
 	// The function's frame and flags (abi.LinkCoerce...), for a generic
 	// call (abi.Encoding's Link fields).
 	params, locals, frame, flags uint64
+	// hint is, for a register link (regLinkOf), its slot of the hint
+	// table (regHint), which generic calls find it by; 0 for none.
+	hint uint32
 	// gen is, for a generator's function, its code's generator entry,
 	// where a loop's step that resumes one natively jumps (ssa.CallSite's
 	// Gens), or 0 while there is none it may: 0 whenever entry is, for

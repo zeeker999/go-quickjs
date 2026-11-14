@@ -2886,6 +2886,14 @@ func (c *a64Compiler) genericCheck(v *ssa.Value, site *ssa.CallSite, target int,
 	c.a.Load(a64B, a64Ctx, abi.OffStackEnd)
 	c.a.Cmp(a64A, a64B, true)
 	c.a.BCond(arm64.HI, miss)
+	if site.Window != 0 {
+		// As amd64's: the arguments the call writes past the window.
+		c.a.Load(a64A, a64Ctx, abi.OffStackTop)
+		c.a.Load(a64A, a64A, 0)
+		c.a.AddImm(a64A, a64A, int64(2+site.Argc), true)
+		c.a.Cmp(a64A, a64B, true)
+		c.a.BCond(arm64.HI, miss)
+	}
 	c.movImm(a64B, uint64(target))
 	c.a.Store(a64Ctx, abi.OffCallTarget, a64B)
 	c.a.B(checked)
@@ -4031,7 +4039,7 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 	// find; one Go would make where it does not make it natively leaves.
 	win := site.Window != 0
 	if win {
-		if !generic || gen {
+		if !generic {
 			c.a.B(stub)
 			return
 		}
@@ -4224,13 +4232,20 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 		c.a.Load(a64B, a64Ctx, abi.OffStackBase)
 		c.a.AddLsl(a64D, a64B, a64D, 4)
 		m := 0
-		if site.Method {
-			m = 1
-			c.directOperand(v, v.Args[0], a64D, vs)
-		}
-		c.directOperand(v, v.Args[m], a64D, 0)
-		for i := range site.Argc {
-			c.directOperand(v, v.Args[m+1+i], a64D, int32(2+i)*vs)
+		switch {
+		case site.Forward:
+			// As amd64's: f and its receiver; the arguments the frame's.
+			c.directOperand(v, v.Args[0], a64D, 0)
+			c.directOperand(v, v.Args[2], a64D, vs)
+		default:
+			if site.Method {
+				m = 1
+				c.directOperand(v, v.Args[0], a64D, vs)
+			}
+			c.directOperand(v, v.Args[m], a64D, 0)
+			for i := range site.Argc {
+				c.directOperand(v, v.Args[m+1+i], a64D, int32(2+i)*vs)
+			}
 		}
 	}
 	if direct {
@@ -4301,7 +4316,22 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 	setup := func(t *ssa.CallSite) {
 		if win {
 			frame()
-			c.windowSetup(t, locals, top, high2)
+			if t.Forward {
+				c.windowForward(t, locals, calleeCtx)
+			} else {
+				c.windowSetup(t, locals, top, high2)
+				if t.FrameArgs {
+					c.windowArgs(t, locals, calleeCtx, top)
+				}
+			}
+			if t.Tail {
+				// As amd64's: whether its calls in tail position may give its
+				// frame up, set at every call of it.
+				c.a.Load(calleeCtx, a64Ctx, abi.OffNext)
+				c.movImm(top, b2u(t.TailFrame))
+				c.a.Store(calleeCtx, abi.OffTailFrame, top)
+				c.a.Store(calleeCtx, abi.OffFrameThis, arm64.ZR)
+			}
 			if t.Pool != 0 {
 				// As amd64's: a construction's receiver, the pool's last
 				// object, its cell cleared, in the window's register 1 and
@@ -4526,6 +4556,13 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 		// As amd64's: its frame made as its link says.
 		setupGen := func() {
 			frame()
+			if win {
+				// As amd64's (genWindowSetup).
+				c.genWindowSetup(site, locals, calleeCtx, top, tmp, high2)
+				c.a.Load(a64CallClosure, a64Ctx, abi.OffCallClosure)
+				c.a.Adr(a64CallRet, back)
+				return
+			}
 			c.a.Load(calleeCtx, a64Ctx, abi.OffNext)
 			notail := c.a.NewLabel()
 			c.a.Load(top, a64CallLink, c.enc.LinkFlags)
@@ -4595,7 +4632,12 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 		none := c.a.NewLabel()
 		c.a.Load(a64CallLink, a64Ctx, abi.OffCallLink)
 		c.a.Load(a64D, a64CallLink, c.enc.LinkEntry)
-		c.a.Cbz(a64D, none, true)
+		if win {
+			// As amd64's: no code, Go's call.
+			c.a.Cbz(a64D, goCall(), true)
+		} else {
+			c.a.Cbz(a64D, none, true)
+		}
 		setupGen()
 		c.a.Br(a64D)
 		c.cold = append(c.cold, func() {
@@ -5083,6 +5125,92 @@ func (c *a64Compiler) directOperand(v, x *ssa.Value, base arm64.Reg, disp int32)
 	}
 	c.pointerWord(x, w)
 	c.a.Store(base, disp+c.enc.RefOffset, a64B)
+}
+
+// windowForward is amd64's: register code's f.apply(x, arguments), its
+// callee's parameters the frame's arguments. It uses registers 6 to 8,
+// a64A and a64C.
+func (c *a64Compiler) windowForward(t *ssa.CallSite, locals, ctx arm64.Reg) {
+	vs := int32(c.enc.ValueSize)
+	c.a.Load(ctx, a64Ctx, abi.OffNext)
+	c.a.AddImm(locals, locals, int64(2*vs), true)
+	param := *t
+	param.Params, param.LocalCount = t.Params-2, t.LocalCount-2
+	c.forwardArgs(&param, locals, ctx)
+	c.a.AddImm(locals, locals, int64(-2*vs), true)
+	if t.ArrowThis {
+		a, b := arm64.Reg(7), arm64.Reg(8)
+		c.a.Load(b, a64Ctx, abi.OffCallThis)
+		c.a.Load(a, b, c.enc.NumOffset)
+		c.a.Store(locals, vs+c.enc.NumOffset, a)
+		c.a.Load(a, b, c.enc.RefOffset)
+		c.a.Store(locals, vs+c.enc.RefOffset, a)
+	}
+}
+
+// windowArgs is amd64's: a register callee that keeps its arguments
+// given them in its context, ctx, from its window at locals. It uses a.
+func (c *a64Compiler) windowArgs(t *ssa.CallSite, locals, ctx, a arm64.Reg) {
+	vs := int32(c.enc.ValueSize)
+	num, ref := int32(unsafe.Offsetof(abi.GoArg{}.Num)), int32(unsafe.Offsetof(abi.GoArg{}.Ref))
+	c.a.Load(ctx, a64Ctx, abi.OffNext)
+	c.movImm(a, uint64(t.Argc))
+	c.a.Store(ctx, abi.OffArgc, a)
+	for i := range t.Argc {
+		at := abi.OffArgs + int32(i)*int32(unsafe.Sizeof(abi.GoArg{}))
+		c.a.Load(a, locals, int32(2+i)*vs+c.enc.NumOffset)
+		c.a.Store(ctx, at+num, a)
+		c.a.Load(a, locals, int32(2+i)*vs+c.enc.RefOffset)
+		c.a.Store(ctx, at+ref, a)
+	}
+}
+
+// genWindowSetup is amd64's: a generic call's of register code, its
+// callee's window at locals, its link in a64CallLink. It uses ctx, a, b
+// and u.
+func (c *a64Compiler) genWindowSetup(site *ssa.CallSite, locals, ctx, a, b, u arm64.Reg) {
+	vs := int32(c.enc.ValueSize)
+	loop, filled := c.a.NewLabel(), c.a.NewLabel()
+	c.movImm(a64A, uint64(2+site.Argc))
+	c.movImm(u, c.enc.Undefined)
+	c.a.Bind(loop)
+	c.a.Load(b, a64CallLink, c.enc.LinkParams)
+	c.a.Cmp(a64A, b, true)
+	c.a.BCond(arm64.HS, filled)
+	c.a.ShiftImm(arm64.Lsl, a, a64A, 4, true)
+	c.a.Op(arm64.Add, a, a, locals, true)
+	c.a.Store(a, c.enc.NumOffset, u)
+	c.a.Store(a, c.enc.RefOffset, arm64.ZR)
+	c.a.AddImm(a64A, a64A, 1, true)
+	c.a.B(loop)
+	c.a.Bind(filled)
+	notail := c.a.NewLabel()
+	c.a.Load(ctx, a64Ctx, abi.OffNext)
+	c.a.Load(a, a64CallLink, c.enc.LinkFlags)
+	c.movImm(b, abi.LinkTail)
+	c.a.Tst(a, b, true)
+	c.a.BCond(arm64.EQ, notail)
+	c.movImm(a, 1)
+	c.a.Store(ctx, abi.OffTailFrame, a)
+	c.a.Store(ctx, abi.OffFrameThis, arm64.ZR)
+	c.a.Bind(notail)
+	arrow, done := c.a.NewLabel(), c.a.NewLabel()
+	c.a.Load(a, a64CallLink, c.enc.LinkFlags)
+	c.movImm(b, abi.LinkArrow)
+	c.a.Tst(a, b, true)
+	c.a.BCond(arm64.NE, arrow)
+	if !site.Method {
+		c.a.Store(locals, vs+c.enc.NumOffset, u)
+		c.a.Store(locals, vs+c.enc.RefOffset, arm64.ZR)
+	}
+	c.a.B(done)
+	c.a.Bind(arrow)
+	c.a.Load(b, a64Ctx, abi.OffCallThis)
+	c.a.Load(a, b, c.enc.NumOffset)
+	c.a.Store(locals, vs+c.enc.NumOffset, a)
+	c.a.Load(a, b, c.enc.RefOffset)
+	c.a.Store(locals, vs+c.enc.RefOffset, a)
+	c.a.Bind(done)
 }
 
 // windowSetup is amd64's: what register code's native call of t
@@ -7225,7 +7353,9 @@ func (c *a64Compiler) goArg(at int32, x *ssa.Value) {
 // arguments the frame's parameters; in a native callee's frame, one of a
 // function the call has, a jump to its code, its frame in this one's
 // place (tailJump). While the collector marks, each operand's pointer is
-// shaded first.
+// shaded first. Register code's writes its window to its registers, as
+// amd64's (ssa.TailWindow), and polls only where its start does not
+// (ssa.TailPolled).
 func (c *a64Compiler) tailSelf(v *ssa.Value, guard a64Guard) {
 	shallow := c.a.NewLabel()
 	c.a.Load(a64A, a64Ctx, abi.OffLevel)
@@ -7244,25 +7374,27 @@ func (c *a64Compiler) tailSelf(v *ssa.Value, guard a64Guard) {
 		c.a.B(stub)
 		return
 	}
-	poll, polled := c.a.NewLabel(), c.a.NewLabel()
-	c.a.Load(a64B, a64Ctx, abi.OffBackEdges)
-	c.a.Load(a64A, a64B, 0)
-	c.a.AddImm(a64A, a64A, -1, true)
-	c.a.Store(a64B, 0, a64A)
-	c.a.CmpImm(a64A, 0, true)
-	c.a.BCond(arm64.LE, poll)
-	state := v.State
-	c.cold = append(c.cold, func() {
-		c.a.Bind(poll)
-		if c.enc.CallGo != 0 {
-			stub := c.stubLabel(state, abi.ExitPoll)
-			c.goSaving(uint64(ssa.GoPoll), &stub)
-			c.a.B(polled)
-			return
-		}
-		c.exitTo(state, abi.ExitPoll)
-	})
-	c.a.Bind(polled)
+	if v.Key&ssa.TailPolled == 0 {
+		poll, polled := c.a.NewLabel(), c.a.NewLabel()
+		c.a.Load(a64B, a64Ctx, abi.OffBackEdges)
+		c.a.Load(a64A, a64B, 0)
+		c.a.AddImm(a64A, a64A, -1, true)
+		c.a.Store(a64B, 0, a64A)
+		c.a.CmpImm(a64A, 0, true)
+		c.a.BCond(arm64.LE, poll)
+		state := v.State
+		c.cold = append(c.cold, func() {
+			c.a.Bind(poll)
+			if c.enc.CallGo != 0 {
+				stub := c.stubLabel(state, abi.ExitPoll)
+				c.goSaving(uint64(ssa.GoPoll), &stub)
+				c.a.B(polled)
+				return
+			}
+			c.exitTo(state, abi.ExitPoll)
+		})
+		c.a.Bind(polled)
+	}
 	c.a.Load(a64A, a64Ctx, abi.OffTailFrame)
 	c.a.CmpImm(a64A, 0, true)
 	guard.jump(arm64.EQ)
@@ -7330,6 +7462,19 @@ func (c *a64Compiler) tailSelf(v *ssa.Value, guard a64Guard) {
 		c.a.Cbz(a64C, none, true)
 		c.a.Store(a64C, c.enc.NumOffset, a64A)
 		c.a.Store(a64C, c.enc.RefOffset, a64B)
+		c.a.Bind(none)
+	}
+	if v.Key&ssa.TailWindow != 0 {
+		// Register code's receiver, its register 1: the VM's frame's too,
+		// if Go entered the code with it (amd64's).
+		at := abi.OffGoArgs + size
+		none := c.a.NewLabel()
+		c.a.Load(a64C, a64Ctx, abi.OffFrameThis)
+		c.a.Cbz(a64C, none, true)
+		c.a.Load(a64A, a64Ctx, at+c.enc.NumOffset)
+		c.a.Store(a64C, c.enc.NumOffset, a64A)
+		c.a.Load(a64A, a64Ctx, at+c.enc.RefOffset)
+		c.a.Store(a64C, c.enc.RefOffset, a64A)
 		c.a.Bind(none)
 	}
 	c.a.B(c.labels[entry.ID])

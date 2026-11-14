@@ -187,7 +187,7 @@ func (r *Runtime) jitRegGenSeen(f *frame, e *jitRegEntry, rpc int, it *Object) {
 		!jitRegGenCallable(g.cl) {
 		return
 	}
-	l := r.jit.regLearnedOf(r.jitKeyOf(cl.fn))
+	l := r.jit.regLearnedOf(r.jitRegKeyOf(cl))
 	for i := range l.genSteps {
 		gs := &l.genSteps[i]
 		if int(gs.pc) != rpc {
@@ -290,7 +290,7 @@ func (r *Runtime) jitRegResumed(cl *closure, c *regCode) {
 	if !r.jitEnabled || cc == nil || cc.jitRegRefused {
 		return
 	}
-	l := r.jitState().regLearnedOf(r.jitKeyOf(cl.fn))
+	l := r.jitState().regLearnedOf(r.jitRegKeyOf(cl))
 	if l.coldWork += uint64(len(c.rc.Code)); l.coldWork < jitHotWork {
 		return
 	}

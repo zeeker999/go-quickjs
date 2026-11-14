@@ -27,7 +27,7 @@ import (
 func (r *Runtime) jitRegLower(cl *closure, rc *bytecode.RegCode, kind jitLowerKind) (*ir.Program, error) {
 	var h jitcompile.Hints
 	if s := r.jit; s != nil {
-		if l := s.regLearned[r.jitKeyOf(cl.fn)]; l != nil {
+		if l := s.regLearned[r.jitRegKeyOf(cl)]; l != nil {
 			h = l.regHints
 		}
 	}

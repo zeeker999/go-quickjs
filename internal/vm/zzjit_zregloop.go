@@ -131,6 +131,7 @@ func (f *jitRegFeedback) ForEach(pc int) (ssa.ForEachSite, bool) {
 		fe := ssa.ForEachSite{Fn: uintptr(unsafe.Pointer(x.obj)), Kind: kind, Proto: proto, Callback: site}
 		if in, ok := f.callbackInline(x, site, argc); ok {
 			fe.Inline = &in
+			fe.Made = f.madeCallback(pc, x.cb)
 		}
 		return fe, true
 	}
@@ -142,13 +143,17 @@ func (f *jitRegFeedback) ForEach(pc int) (ssa.ForEachSite, bool) {
 // callback, under the rules a register callee's inlining follows
 // (jitRegFeedback's Inline): the one closure the loop has been given,
 // which the loop checks it is given, its window the loop's call's
-// operands -- not one made anew at each call of its maker, nor an arrow
-// that reads its this, nor one whose inlining at the call left native code
-// too often (jitInlineLeft's notInline), called natively since.
+// operands -- or, one made anew at each call of its maker (byCode), no
+// object, for the builder to inline where the caller makes it just before
+// the call (madeCallback, ssa's madeAt), as the stack form's -- not an
+// arrow that reads its this, which may come from any frame, nor one whose
+// inlining at the call left native code too often (jitInlineLeft's
+// notInline), called natively since.
 func (f *jitRegFeedback) callbackInline(x jitInline, site ssa.CallSite, argc int) (ssa.InlineSite, bool) {
 	cl, o := x.cb, x.cbObj
 	l := f.fb.e
-	if x.byCode || site.ByCode != 0 || site.ArrowThis || cl.fn == f.fb.fn || cl.fn == f.fb.keep().fn || jitNoInline != nil && jitNoInline(cl.fn) ||
+	byCode := x.byCode || site.ByCode != 0
+	if site.ArrowThis || cl.fn == f.fb.fn || cl.fn == f.fb.keep().fn || jitNoInline != nil && jitNoInline(cl.fn) ||
 		l != nil && slices.Contains(l.notInline, x.pc) {
 		return ssa.InlineSite{}, false
 	}
@@ -159,11 +164,18 @@ func (f *jitRegFeedback) callbackInline(x jitInline, site ssa.CallSite, argc int
 	r := f.fb.r
 	r.jitRegSeenFeedback(cl, cl.reg)
 	k := f.fb.keep()
-	callee := &jitRegFeedback{fb: &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitKeyOf(cl.fn)), root: k}, rc: cl.fn.RegCode(), p: p}
+	callee := &jitRegFeedback{fb: &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitRegKeyOf(cl)), root: k}, rc: cl.fn.RegCode(), p: p}
 	in := ssa.InlineSite{
 		Program: p, Feedback: callee, Callee: site.Callee, Closure: site.Closure,
 		Argc: argc, Method: true, Params: 2 + int(cl.reg.params), ThisSlot: -1, Window: true,
 		Coerce: site.Coerce, Upvalues: jitUpvalueCells(cl),
+	}
+	if byCode {
+		// No object, the closure the caller makes: its captured bindings
+		// the caller's own slots (ssa.InlineSite's Captured), the builder's.
+		in.Callee, in.Closure, in.Upvalues = 0, uintptr(unsafe.Pointer(cl)), 0
+		k.inlined = append(k.inlined, cl)
+		return in, true
 	}
 	k.holders = append(k.holders, o)
 	k.inlined = append(k.inlined, cl)
@@ -172,6 +184,48 @@ func (f *jitRegFeedback) callbackInline(x jitInline, site ssa.CallSite, argc int
 		l.inlines = append(l.inlines, jitInline{pc: x.pc, cl: cl, obj: o})
 	}
 	return in, true
+}
+
+// madeCallback is the closure the method call at the program's instruction
+// pc is given, if its code makes it just before the call -- a closure of
+// cl's function, closure_w writing the call's first argument's register,
+// one or two register instructions before it -- which native code inlining
+// the call need not make (ssa.MadeCallback), as the stack form's
+// (jitFeedback's madeCallback): its template, which the code keeps, as the
+// inlined frame's closure an exit names, and what it captures. Not an
+// arrow that reads its maker's new.target or super (jitNeedsMaker). Nothing
+// between its making and the call closes what it captures (ssa's madeAt).
+func (f *jitRegFeedback) madeCallback(pc int, cl *closure) *ssa.MadeCallback {
+	fb := f.fb
+	call := f.p.Code[pc]
+	if fb.cl == nil || !call.Window {
+		return nil
+	}
+	rpc := f.p.Origin[pc]
+	for q := pc - 1; q >= 0 && rpc-f.p.Origin[q] <= 2; q-- {
+		in := f.p.Code[q]
+		if in.Op != ir.Closure || in.Dest != call.Left.Slot+2 {
+			continue
+		}
+		k := int(in.Key)
+		if k >= len(fb.cl.consts) || k >= len(f.rc.Caps) {
+			return nil
+		}
+		c := jitTemplateCell[struct{}](fb, &fb.cl.consts[k])
+		t := c.template()
+		if t == nil || t.fn != cl.fn || jitNeedsMaker(*c) {
+			return nil
+		}
+		caps, ok := f.madeCaptures(t, k)
+		if !ok {
+			return nil
+		}
+		kp := fb.keep()
+		kp.inlined = append(kp.inlined, t)
+		kp.made = append(kp.made, t)
+		return &ssa.MadeCallback{PC: q, Template: uintptr(unsafe.Pointer(c)), Closure: uintptr(unsafe.Pointer(t)), Captures: caps}
+	}
+	return nil
 }
 
 // jitRegLoopLeft is jitRegLeft for e's code, run on f's window at wb, that

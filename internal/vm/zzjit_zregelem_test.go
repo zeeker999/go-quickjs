@@ -47,9 +47,13 @@ func TestJITRegElementKinds(t *testing.T) {
 			}
 			rts := regNativeRuntimes(t, regElemSrc)
 			var got [2]string
+			var before map[string]uint64
 			for i, r := range rts {
 				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("main"))
-				for range 20 {
+				for k := range 20 {
+					if i == 0 && k == 10 {
+						before = r.RegNativeStats().HostOps
+					}
 					v, err := r.Call(fn, Undefined, []Value{Float(3000)})
 					got[i] = regNativeShow(r, v, err)
 				}
@@ -60,10 +64,12 @@ func TestJITRegElementKinds(t *testing.T) {
 			st := rts[0].RegNativeStats()
 			t.Logf("hosts %v, entries %d", st.HostOps, st.Entries)
 			// Of 20 runs of 21,000 accesses each: left to Go only before the
-			// code learned them.
+			// code learned them and was compiled again for them, once it
+			// had spent a budget since it learned them (jitRegLearnedDue):
+			// none in the last ten.
 			for _, op := range []string{"get_index", "set_index", "add_index"} {
-				if n := st.HostOps[op]; n > 50 {
-					t.Errorf("%s left to Go at %d host exits", op, n)
+				if n := st.HostOps[op] - before[op]; n != 0 {
+					t.Errorf("%s left to Go at %d host exits in the last ten runs", op, n)
 				}
 			}
 		})

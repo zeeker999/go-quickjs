@@ -3,6 +3,7 @@
 package vm
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"sync/atomic"
@@ -292,6 +293,13 @@ func (r *Runtime) jitRegInstall(j *jitRegJob) {
 		e.refusal = fmt.Sprintf("%v: %v", jitRefused, j.buildErr)
 	default:
 		j.snap.s.replay()
+	}
+	if e.refusal == "" && errors.Is(j.err, mir.ErrKeeps) {
+		// As on the spot (jitRegCompile): built again here, its keep cells
+		// limited to the context's.
+		s.compileBegin()
+		j.rf, j.f, j.looped, j.mc, j.err = r.jitRegBuild(j.w, j.cl, j.c, j.p, abi.MaxKeeps, 0)
+		s.compileEnd()
 	}
 	if e.refusal == "" {
 		if j.err != nil {
