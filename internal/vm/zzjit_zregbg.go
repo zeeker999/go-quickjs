@@ -73,7 +73,7 @@ type jitRegJob struct {
 // jitRegShape sets f, register code's function built from p, for its
 // native code -- the register frame, its call entry -- and reports the
 // register pcs of the loops' headers it has entries at.
-func jitRegShape(f *ssa.Func, p *ir.Program) map[uint32]bool {
+func jitRegShape(f *ssa.Func, p *ir.Program, cl *closure, c *regCode) map[uint32]bool {
 	// The register frame: its window's registers are its locals, in place
 	// at the context's Locals; its captured bindings past them, in their
 	// cells; its scratch slots past those, which are only values.
@@ -85,10 +85,34 @@ func jitRegShape(f *ssa.Func, p *ir.Program) map[uint32]bool {
 	// Native callers call it (jitRegFeedback's NativeCalls), its window
 	// made past theirs: its call entry makes its frame (mir's callEntry).
 	f.CallEntry = true
+	// A generator's code a loop's step may resume natively: its generator
+	// entry (mir's windowGenEntry).
+	jitRegGenShape(f, p, cl, c)
 	looped := map[uint32]bool{}
+	var headers []bool
+	suspends := slices.ContainsFunc(p.Code, func(in ir.Instruction) bool { return in.Suspend })
 	for _, en := range f.Entries {
 		if en.OSR {
 			looped[p.Origin[en.PC]] = true
+			continue
+		}
+		if suspends {
+			// A generator's code, whose yields suspend it natively where a
+			// step resumed it: the build marks none of its entries OSR's,
+			// none the escape analysis may drop (ssa.Func's GenResumes),
+			// a loop's header's among them, where on-stack replacement
+			// enters it all the same.
+			if headers == nil {
+				headers = make([]bool, len(p.Code)+1)
+				for pc, in := range p.Code {
+					if (in.Op == ir.Jump || in.Op == ir.Branch) && in.Target <= pc {
+						headers[in.Target] = true
+					}
+				}
+			}
+			if en.PC > 0 && headers[en.PC] {
+				looped[p.Origin[en.PC]] = true
+			}
 		}
 	}
 	return looped
@@ -145,7 +169,7 @@ func (j *jitRegJob) workRecovering() {
 		return
 	}
 	j.f = f
-	j.looped = jitRegShape(f, j.p)
+	j.looped = jitRegShape(f, j.p, j.cl, j.c)
 	ssa.Optimize(f)
 	j.mc, j.err = mir.CompileWith(&j.w.MIR, f, j.enc, j.opts)
 }
@@ -233,7 +257,7 @@ func (r *Runtime) jitRegInstall(j *jitRegJob) {
 		if err != nil {
 			e.refusal = fmt.Sprintf("%v: %v", jitRefused, err)
 		} else {
-			j.looped = jitRegShape(f, j.p)
+			j.looped = jitRegShape(f, j.p, j.cl, j.c)
 			ssa.Optimize(f)
 			j.f = f
 			j.mc, j.err = mir.CompileWith(&j.w.MIR, f, j.enc, j.opts)

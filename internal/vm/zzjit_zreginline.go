@@ -160,7 +160,7 @@ func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at, wb
 			// position (regRestartRun).
 			v, err = r.regRestartRun(f)
 		}
-		r.jitRegPopLevel(f, x.wb)
+		r.jitRegPopLevel(f, x.wb, false)
 		if err == errTailCall {
 			v, err = r.regTailRest()
 		}

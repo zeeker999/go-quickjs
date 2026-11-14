@@ -7072,6 +7072,7 @@ func (b *builder) placeAfter(blk *Block, made []*Block, cont *Block) {
 	copy(f.Blocks[at:], made)
 	cont.Kind, cont.Control, cont.Succs, cont.State, cont.ExitKind = blk.Kind, blk.Control, blk.Succs, blk.State, blk.ExitKind
 	cont.Yield, cont.YieldHandlers, blk.Yield, blk.YieldHandlers = blk.Yield, blk.YieldHandlers, false, nil
+	cont.YieldSlot = blk.YieldSlot
 	for _, s := range cont.Succs {
 		for i, p := range s.Preds {
 			if p == blk {
@@ -8523,7 +8524,14 @@ func (b *builder) instruction(blk *Block, pc int) {
 		// A generator's yield, which code a loop's step resumed natively
 		// makes itself (Block's Yield), saving the handlers in force.
 		if in.Suspend && b.cur == b.root {
-			blk.YieldHandlers, blk.Yield = b.handlersAt(pc)
+			if b.p.Origin != nil {
+				// Register code's: its value in its operand's register, its
+				// handlers the code's by register pc, which a resumption
+				// finds again without anything saved.
+				blk.Yield, blk.YieldSlot = true, in.Left.Slot
+			} else {
+				blk.YieldHandlers, blk.Yield = b.handlersAt(pc)
+			}
 		}
 	}
 }

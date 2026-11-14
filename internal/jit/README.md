@@ -387,10 +387,10 @@ speculates nothing: it builds the site generically, or leaves it to Go.
 | a pure body (`bytecode.LeafPure`, the compiler's fact), whose operators take BigInts native code holds as such | `PureBody` |
 | closures and captured registers' cells from pools, an arrow's this its maker's register 1 (`ssa.ClosureSite`'s `LexThisReg`) | `Closure`, `CellsPool` |
 | `instanceof` of the constructor a global or a captured binding read just before holds, the searches, `parseInt`, BigInts' strings, by the built-in its site's cache holds | `InstanceOf`, `IndexOf`, `ParseInt`, `BigString` |
+| generators a loop's step or a call of `next` resumes natively, learned at the calls of Go that stepped them (`jitRegGenSeen`) | `GenSteps` |
 
 | Not answered yet | Methods | So |
 |---|---|---|
-| generators a step resumes natively (a register generator's entry in native code, its yield returning to the step) | `GenSteps` | the step a call of Go, which resumes the generator's native code from Go (regGenRun) |
 | an inlined callee's exits, keeps | `InlineExit`, `KeepLimit` | nothing speculated |
 
 **The feedback dispatcher.** The native handlers come in variants, each a
@@ -538,7 +538,16 @@ a `yield` that a resumption by `next` goes on past, and at the return path
 that jump goes over (`lowerReg`'s entries). The suspensions -- `yield`,
 `await`, `yield*`, the parameters' end, a delegation's step -- and
 `gen_entry`, which reads how the frame resumed, are the interpreter's
-(`regWholeRuns`): native code leaves the frame to it there.
+(`regWholeRuns`): native code Go entered leaves the frame to it there. A
+synchronous generator's code a loop's step or a call of `next` resumed
+natively suspends it at a `yield` itself (see [Control
+flow](#control-flow), "Generators' steps"). A generator's code is compiled
+at its loops' samples, and one of no loop once the resumptions Go made of
+it have done `jitHotWork` of its code, a sample of its hotness at each
+(`jitRegResumed`), as the stack form counts a function's calls' work
+(`jitHotEntry`). Its entries are none OSR's -- none escape analysis may
+drop, for its resumptions' sake -- so its loops' headers are found from
+the program (`jitRegShape`).
 
 **Entering.** The code is entered:
 
@@ -1132,9 +1141,37 @@ operands and handlers as Go's suspension would and returns the value to the
 step (`ssa.Block`'s `Yield`); a return finishes it and returns the step's
 done. Anything else leaves as a native callee does, and Go finishes the
 resumption from the generator. Only a synchronous generator without `yield*`
-whose locals no closure captures is resumed so. Register code compiles no
-generator yet, and its feedback names none a step resumes (`GenSteps`): this
-serves the stack form's path until it does.
+whose locals no closure captures is resumed so.
+
+Register code's generator keeps its frame's window in its values only
+between runs, the registers from `genFrom` (the callee's and this's below
+them made again from the generator); its frame while it runs is a window in
+the VM's stack, which native code addresses, where the stack form's frame
+was the generator's own. So its code's generator entry (`ssa.Func`'s
+`GenWindow`, mir's `windowGenEntry`) makes the window past the VM's stack's
+top, as a call entry makes a native callee's: its registers copied from the
+generator's values, its function object and receiver to registers 0 and 1
+where the values keep neither, and the value sent in to the yield's
+register (`ssa.GenResume`'s `Sent`) -- where the generator's place (its
+register pc, `Place`) has an entry, the resumption by `next` going on at the
+jump's target after the yield, the first past `end_params`. A yield
+(`ssa.Block`'s `YieldSlot`, its value's register) writes the frame as an
+exit does, then copies the window's registers back to the generator's
+values -- their pointer words through `storeRef` while the collector marks,
+the copy's offset kept in the context's `RecordAt` -- and saves its place,
+suspended and begun, as `regGenRun` does; the handlers are the code's, by
+register pc, so nothing of them is saved. A generator resumed so is one
+whose locals no closure captures and that keeps no arguments
+(`jitRegGenCallable`): nothing is open on its window's registers. The step
+learns its generators at the calls of Go that step them (`jitRegGenSeen`,
+from the step's `iter_next` and a `call_method_w` of the realm's `next`).
+A level of such a resumption that leaves native code Go makes the frames
+of as `regGenRun` does -- next's below the generator's, its this, function
+and handlers the generator's (`jitRegPushLevel`) -- and finishes as
+`regGenRun` finishes a resumption (`jitRegGenDone`): suspended, the window
+written back and the place saved, the step's result the value or, for a
+call of `next`, its result object; ended, the generator done and the step's
+cursor too, the step going on at its loop's end (`regFinishCall`).
 
 **Destructuring.** Destructuring from an iterator takes a cursor, as a
 for...of does: Go makes it, called from native code (`abi.GoCallForOf`).
@@ -2505,8 +2542,7 @@ go with it:
 
 The switch-over needs, on register code: the feedback the tables in
 [Feedback](#feedback) list as not answered yet, call frequencies first (from
-the feedback dispatcher), and a loop's steps of a generator resumed natively
-(`GenSteps`).
+the feedback dispatcher).
 Then it removes:
 
 - `compile.LowerSSA`, `LowerSSAHot`, `LowerSSAInline`, `LowerSSAForward` and

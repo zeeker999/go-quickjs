@@ -667,9 +667,12 @@ func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
 		return []ssa.CallSite{site}
 	}
 	site := ssa.CallSite{Go: ssa.GoCall, Argc: argc, Method: method, New: w.Op() == bytecode.RNewW, ThisSlot: -1}
-	// A generator function's call, its generator made natively
-	// (regGenMakeSite).
-	f.regGenMakeSite(rpc, &site)
+	// A call of the realm's next on generators the code resumes natively
+	// (regGenNextSite), or a generator function's call, its generator made
+	// natively (regGenMakeSite).
+	if f.regGenNextSite(rpc, &site); site.Pool == 0 {
+		f.regGenMakeSite(rpc, &site)
+	}
 	return []ssa.CallSite{site}
 }
 
@@ -1201,9 +1204,15 @@ func (f *jitRegFeedback) ArrayProtos() ([2]ssa.Holder, bool) { return f.fb.Array
 // GenNext is ssa.GenStepFeedback's half that is the realm's, jitFeedback's.
 func (f *jitRegFeedback) GenNext() uintptr { return f.fb.GenNext() }
 
-// GenSteps is ssa.GenStepFeedback's other half: no generator is known to
-// a register loop's step yet (jitEntry's genSteps are the stack form's).
-func (f *jitRegFeedback) GenSteps(pc int) []ssa.GenStep { return nil }
+// GenSteps is ssa.GenStepFeedback's other half: the generators the step
+// of the program's instruction pc has met (jitRegGenSeen), which it
+// resumes natively (regGenSteps).
+func (f *jitRegFeedback) GenSteps(pc int) []ssa.GenStep {
+	if pc < 0 || pc >= len(f.p.Code) {
+		return nil
+	}
+	return f.regGenSteps(int(f.p.Origin[pc]))
+}
 
 // HasCache is ssa.HasCacheFeedback's, jitFeedback's.
 func (f *jitRegFeedback) HasCache() uintptr { return f.fb.HasCache() }

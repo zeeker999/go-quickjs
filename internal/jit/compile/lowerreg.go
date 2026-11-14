@@ -1170,8 +1170,11 @@ func (l *regLowering) lower(pc int) {
 		l.emit(ir.Instruction{Op: ir.StringCode, Left: ir.Slot(t), Right: reg(b), Third: ir.Slot(int(w.X())), Dest: int(a)}, false)
 	case bytecode.RYield:
 		// Go's: the interpreter suspends the frame (the VM's regWhole runs
-		// no yield), and its resumption enters the code past it.
-		l.emit(ir.Instruction{Op: ir.Host}, false)
+		// no yield), and its resumption enters the code past it. A
+		// synchronous generator's, in code a loop's step or a call of
+		// next resumed natively, suspends it natively (ir.Instruction's
+		// Suspend), its value R[B].
+		l.emit(ir.Instruction{Op: ir.Host, Suspend: fn.Generator && !fn.Async, Left: reg(b)}, false)
 	case bytecode.RCallWT, bytecode.RCallMWT:
 		// A call in tail position: made as the ordinary call while the
 		// stack is shallow, natively or by Go, as the interpreter's

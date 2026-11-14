@@ -309,6 +309,12 @@ func (r *Runtime) regGenRun(g *generator, c *regCode, start int) (Value, *suspen
 	if r.frameDepth >= r.maxFrames {
 		return Undefined, nil, r.throwRangeError("maximum call stack size exceeded")
 	}
+	if jitBuilt && !r.jitRegHas(g.cl) {
+		// A resumption Go makes of code that has none native: counted
+		// towards compiling it, one of no loop among them
+		// (jitRegResumed).
+		r.jitRegResumed(g.cl, c)
+	}
 	n := int(c.numRegs)
 	base := r.stackTop
 	top := base + n
