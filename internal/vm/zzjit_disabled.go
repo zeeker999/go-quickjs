@@ -41,6 +41,7 @@ func (*Runtime) jitRegSample(*closure, *regCode)  {}
 func (*Runtime) jitRegResumed(*closure, *regCode) {}
 func (*Runtime) jitRegCallSample(*regCallCache)   {}
 func (*Runtime) jitRegHas(*closure) bool          { return false }
+func (*Runtime) jitSamplesEveryCall() bool        { return false }
 func (*Runtime) jitRegEnter(*frame, *closure, *regCode, int, int) (Value, error) {
 	return Undefined, nil
 }

@@ -68,6 +68,13 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 				}
 			}
 		}
+		if in != nil && in.reg == nil {
+			// A template of a closure the owner makes (madeInline), which
+			// no call has run yet where the owner was compiled before the
+			// closure's first call, as at QJS_JIT_STRESS's threshold: its
+			// register code, as a call of it gets it.
+			r.regOf(in)
+		}
 		if in == nil || in.reg == nil {
 			panic("vm: an inlined register callee's closure is not its caller's")
 		}

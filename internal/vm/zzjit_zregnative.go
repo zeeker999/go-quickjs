@@ -766,7 +766,12 @@ func (r *Runtime) jitRegMadeIn(f *frame, e *jitRegEntry, wb int, spans [][2]int)
 			return
 		}
 		if objs[i] == nil {
-			k := slices.IndexFunc(f.cl.consts, func(x Value) bool { return x.template() == t })
+			// The frame's own template of the function: code of a function
+			// is the code of each of its closures, and e's names the
+			// templates of the closure it was compiled for, each closure's
+			// its own (regExtend), as the stack form's exits make a
+			// template's closure whatever closure's it is (makeClosure).
+			k := slices.IndexFunc(f.cl.consts, func(x Value) bool { u := x.template(); return u != nil && u.fn == t.fn })
 			if c == nil || k < 0 || k >= len(c.rc.Caps) {
 				panic("vm: an unmade closure's template is not its maker's")
 			}
@@ -878,7 +883,7 @@ func (r *Runtime) jitRegLeaveTo(f *frame, e *jitRegEntry, rpc int) int {
 		life.ssaStats.ended++
 	}
 	if cc := f.cl.closureCode; !e.invalid && cc != nil && cc.jitReg != nil && cc.jitReg.code != nil && !cc.jitReg.invalid && len(cc.jitReg.loops) != 0 &&
-		!cc.jitReg.life.loopSlow {
+		!cc.jitReg.life.loopSlow && !regEndsFrame(f.cl.reg, rpc) {
 		// Code with a loop to go on at: one with none, the frame's
 		// invocation ends in the interpreter, and the check made due at
 		// once would be its caller's loop's, for nothing -- each of AWFY
@@ -887,6 +892,25 @@ func (r *Runtime) jitRegLeaveTo(f *frame, e *jitRegEntry, rpc int) int {
 		r.backEdges = 1
 	}
 	return rpc
+}
+
+// regEndsFrame reports whether register pc rpc of c is an instruction at
+// which its frame's run in the interpreter ends or suspends -- a return, a
+// yield, an await -- so that no back edge of the frame's comes after it in
+// that run: a check made due at once for the frame (jitRegLeaveTo) would be
+// the next frame's, its caller's or the generator's consumer's, whose
+// budget it spends for no sample (jitRegLoop). A generator's code leaving
+// at each yield had made every back edge of its for...of loop's such a
+// check, the loop's function never sampled, never compiled.
+func regEndsFrame(c *regCode, rpc int) bool {
+	if c == nil || rpc < 0 || rpc >= len(c.rc.Code) {
+		return false
+	}
+	switch regAt(c.code, rpc).Op() {
+	case bytecode.RRet, bytecode.RRetUndef, bytecode.RYield, bytecode.RYieldStar, bytecode.RAwait:
+		return true
+	}
+	return false
 }
 
 // jitRegLeft is what Go makes of the way e's code, run on f's window at wb,
@@ -1097,7 +1121,12 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 	if p.This {
 		// A derived constructor's: its this binding -- its this slot --
 		// and what its super() natively needs, as a native construction's
-		// context has them (ssa.CallSite's Super).
+		// context has them (ssa.CallSite's Super). Code going on where a
+		// native call returns to finds the binding a super() it made
+		// natively bound in the context, which the frame is given first.
+		if resume != 0 {
+			jitBindThis(f, ctx)
+		}
 		jitRegDerivedContext(ctx, f)
 	}
 	if p.Forwards {
@@ -1398,6 +1427,12 @@ type jitRegRun struct {
 // (jitRegFeedback's NativeCalls).
 func (r *Runtime) jitRegGoCall(ctx *abi.Context, idx int) bool {
 	run := &r.jit.regRuns[idx]
+	// A derived constructor's frame's binding, which a super() native
+	// code made bound in the context alone (jitRegDerivedContext): bound
+	// in the frame too before Go reads it, as for a call of Go on a level
+	// (jitRegPushLevel) and an operation on the frame (jitRegFrameRun).
+	// A super.m read Go made after a native super() had found it unbound.
+	jitBindThis(run.f, ctx)
 	if run.osr && run.e != nil && run.e.life != nil && jitRegGoSettled(ctx, run.c, int(ctx.ExitPC)) {
 		r.jitRegRunGoProfit(run.e, run, int(ctx.ExitPC))
 	}
@@ -1586,6 +1621,16 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 		v, err = r.regMarkedCall(f, c, top, 1, rpc, m, uint32(w.C()))
 	} else {
 		v, err = r.regCallSlow(f, c, w, top, rpc)
+		if err == errRegRestart {
+			// The callee's frame, entered by regEnterW, given to a callee
+			// in place by a call in tail position (regTailTo): run again,
+			// the frame past the top as regEnterW left it, as regMissEnd
+			// runs it. Left as an error, it unwound every frame to the
+			// first that runs one again, which ran the callee's code on
+			// its own registers.
+			u := uint(r.frameDepth)
+			v, err = r.regRerun(&r.frames[u/frameBlockSize][u%frameBlockSize], regFrameEnter, r.stackTop)
+		}
 		if err == errTailCall {
 			// The callee's frame ended in a tail call.
 			v, err = r.regTailRest()

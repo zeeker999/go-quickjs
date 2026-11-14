@@ -237,7 +237,10 @@ sets it at every call (`ssa.CallSite`'s `Tail`), not for a construction,
 so that no frame reads a flag an earlier one left in the context. Any other
 call there leaves for the interpreter (`ssa.OpTailRoom`'s, or `OpTailSelf`'s
 exit), so that native code keeps no frame a tail call gives up, and the
-frame ends after it. A `wrap` -- `x op y`, the second argument of
+frame ends after it. A call of Go native code makes (`jitRegGoCallOn`)
+whose callee's frame the interpreter gave to the callee's callee in place
+runs that frame again there (`regRerun`), as the interpreter's own call
+does (`regMissEnd`), never leaving it to a frame further out. A `wrap` -- `x op y`, the second argument of
 the `asUintN` or `asIntN` call right after it, which the interpreter makes
 with the call at once -- is the operator alone, the call made after it as
 any call, which native code makes of the operator's low bits (see
@@ -514,7 +517,9 @@ the budget, its caches' feedback unchanged since -- a change raises what is
 left to `jitICThreshold` invocations' worth (`jitRegWarmUp`), as V8's
 `NotifyICChanged` delays a tier-up -- or at its first sample where the
 runtime compiles at a first call (`QJS_JIT_STRESS`'s threshold, which makes
-every call a sample, `jitRegStressSample`). What outlives a function's
+every call a sample, `jitRegStressSample`: an interrupt check rearms the
+calls' budget to the next call too, whatever path spent it,
+`jitSamplesEveryCall`). What outlives a function's
 compiles -- what its code learned, its budget, its deoptimizations, what its
 runs did -- is its `regLearned` entry (`jitRegEntry`'s `life`); its code is
 kept on its template's `closureCode` (`jitReg`). A callee native callers
@@ -643,6 +648,11 @@ the program (`jitRegShape`).
   once (`regGoOn`, `regForced`) and spending no budget, as the stack form's
   `jitGoOn` and `tryJITLoop` have it: the interpreter runs the rest of that
   iteration, as from V8's deoptimizations, not the rest of the invocation.
+  Not where it left at a `ret`, a `yield` or an `await` (`regEndsFrame`):
+  the frame's run ends or suspends there, and the next back edge is
+  another frame's, whose budget the check would spend for no sample -- a
+  generator's code leaving at each `yield` had kept its for...of loop's
+  function from ever being sampled.
 
 **On-stack replacement.** The build's entries at a loop's header
 (`ssa.Entry`'s `OSR`) are by the instruction its register pc lowers to first

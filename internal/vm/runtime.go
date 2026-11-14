@@ -1326,6 +1326,11 @@ func (r *Runtime) checkInterruptPoll() error {
 // makes it unsuitable for inlining.
 func (r *Runtime) checkInterruptNow() error {
 	r.interruptCounter = interruptCheckInterval
+	if jitBuilt && r.jitSamplesEveryCall() {
+		// Every call a sample of the register tier's, whatever path
+		// spent the budget (jitRegStressSample).
+		r.interruptCounter = 1
+	}
 	if r.stopped != nil {
 		return r.stopped
 	}

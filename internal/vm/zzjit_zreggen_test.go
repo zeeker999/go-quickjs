@@ -314,3 +314,35 @@ func TestJITRegGenStepsCompileForARM64(t *testing.T) {
 		t.Errorf("%d generator entries, %d native steps, %d native cursors compiled for arm64", gens, steps, cursors)
 	}
 }
+
+// A for...of loop over a generator, the frames run by the Go handlers
+// (QJS_NONATIVE, the fallback dispatcher): the generator's code, leaving
+// native code at each yield, had made the next back edge's check due at
+// once (jitRegLeaveTo) -- the consumer's loop's, a check that is no
+// sample -- so that every back edge of forOf's spent its budget for
+// nothing, and forOf, sampled never, was never compiled.
+func TestJITRegGenConsumerSampled(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	was := SetRegNative(false)
+	t.Cleanup(func() { SetRegNative(was) })
+	rts := regNativeRuntimes(t, regGenStepSrc)
+	r := rts[0]
+	var got [2]string
+	for i, rt := range rts {
+		fn, _ := rt.GetProp(Obj(rt.Global()), rt.Intern("forOf"))
+		for range 12 {
+			v, err := rt.Call(fn, Undefined, []Value{Float(500)})
+			got[i] = regNativeShow(rt, v, err)
+		}
+	}
+	if got[0] != got[1] {
+		t.Errorf("forOf: with the JIT %q, without %q", got[0], got[1])
+	}
+	fn, _ := r.GetProp(Obj(r.Global()), r.Intern("forOf"))
+	cl := fn.Object().fn().closure
+	if e := r.jit.regCache[r.jitRegKeyOf(cl)]; e == nil || e.code == nil {
+		t.Error("forOf not compiled: its loop's back edges were not sampled")
+	}
+}

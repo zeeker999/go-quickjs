@@ -227,10 +227,20 @@ func (r *Runtime) jitRegCallsNatively(cl *closure, c *regCode) bool {
 // compiles at a function's first call (QJS_JIT_STRESS's threshold,
 // SetJITWarmUp's 1), so that every call is.
 func (r *Runtime) jitRegStressSample() {
-	if r.jitCallThreshold <= 1 {
+	if r.jitSamplesEveryCall() {
 		r.interruptCounter = 1
 	}
 }
+
+// jitSamplesEveryCall reports whether every call is a sample of the
+// register tier's (jitRegStressSample): an interrupt check that rearms the
+// calls' budget rearms it so too (checkInterruptNow), whatever path spent
+// it -- a call a built-in's loop or the callback path makes, which takes
+// no sample. Rearmed in full there, the next sample came a full budget of
+// calls later, and a function called among them was never compiled: the
+// Go handler table's calls of throwsAt in TestJITRegCalledClosures. A
+// runtime without the JIT takes no sample, whatever its threshold.
+func (r *Runtime) jitSamplesEveryCall() bool { return r.jitEnabled && r.jitCallThreshold <= 1 }
 
 // jitRegCallSample is a sample of a call at the site whose cache is e
 // (rhCallW): its callee's hotness, and the site sent to regCallMiss once
