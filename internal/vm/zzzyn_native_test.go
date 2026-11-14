@@ -988,6 +988,16 @@ func TestRegCallSameTemplate(t *testing.T) {
 	if enters > 210 || calls < 199 {
 		t.Errorf("%d entries of the code and %d calls it made itself, want 210 entries at most and 199 calls or more", enters, calls)
 	}
+	// The native call answers the new closure itself, the cache made
+	// its own, with no exit to Go (call's template check).
+	before := nativeExitOps()[bytecode.RCallW]
+	nativeRunSrc(t, `
+		function maker(k) { var j = k, f = function () { var a = [j]; return a[0] }; return f() }
+		function outer() { var s = 0; for (var k = 0; k < 200; k++) s += maker(k); return s }
+		String(outer())`, true)
+	if n := nativeExitOps()[bytecode.RCallW] - before; n > 10 {
+		t.Errorf("calls of a closure made anew exited to Go %d times in 200, want 10 at most", n)
+	}
 }
 
 // An element's update of a dense array's number, o[k] += v in each of its

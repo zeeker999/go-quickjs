@@ -206,6 +206,8 @@ func (g *nativeGen) ptrTo() {
 func (g *nativeGen) call() {
 	a := g.a
 	ok, noThis, noTop, loop, loopEnd, skip, high := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
+	start, tmpl := a.NewLabel(), a.NewLabel()
+	a.Bind(start)
 
 	// e := &calls[C].
 	a.MovRR(RCX, RAX)
@@ -224,7 +226,7 @@ func (g *nativeGen) call() {
 	a.Jcc(CondNE, g.ex(2))
 	a.Load(R9, RSI, 8)
 	a.CmpMem(R9, RCX, offECallee, true)
-	a.Jcc(CondNE, g.ex(3))
+	a.Jcc(CondNE, tmpl)
 	// A leaf that returns a parameter or a constant first thing: its
 	// answer read from the window or the code, as regCallW reads it,
 	// with no frame.
@@ -503,6 +505,70 @@ func (g *nativeGen) call() {
 	// Run it, counted (made).
 	a.IncMem(RDI, ncMade)
 	g.dispatch()
+
+	// Another closure of the template of the callee the site cached, as
+	// rhCallW's regSameTemplate finds it: a function of the cached one's
+	// closureCode, register code and realm, neither bound nor an arrow
+	// nor with more of its own (extra), at a site whose kind is the
+	// template's. The cache is made the new callee's, the closure stored
+	// with the barrier's routine while the collector marks, and the call
+	// made again, which the cache now answers; anything else exits, before
+	// anything is written. A closure made anew each time its maker runs
+	// is called with no exit.
+	a.Bind(tmpl)
+	a.LoadU8(R8, RCX, offEKind)
+	a.OpImm(And, R8, int32(^(regCallOut|regCallLeaf)&0xff), false)
+	a.OpImm(Cmp, R8, regCallEnter, false)
+	a.Jcc(CondB, g.ex(3))
+	a.OpImm(Cmp, R8, regCallObjThis, false)
+	a.Jcc(CondA, g.ex(3))
+	a.LoadU16(RDX, R9, offObjFlags)
+	a.OpImm(And, RDX, int32(objHasData), false)
+	a.Jcc(CondE, g.ex(3))
+	a.Load(RDX, R9, sizeObj+offExtData)
+	a.CmpMem(RDX, RDI, ncFuncT, true)
+	a.Jcc(CondNE, g.ex(3))
+	a.Load(RDX, R9, sizeObj+offExtData+8)
+	a.LoadU8(R8, RDX, offFDBound)
+	a.Op(Test, R8, R8, false)
+	a.Jcc(CondNE, g.ex(3))
+	a.LoadU8(R8, RDX, off("funcData.arrow"))
+	a.Op(Test, R8, R8, false)
+	a.Jcc(CondNE, g.ex(3))
+	a.Load(R8, RDX, off("funcData.extra"))
+	a.Op(Test, R8, R8, true)
+	a.Jcc(CondNE, g.ex(3))
+	a.Load(RDX, RDX, off("funcData.closure"))
+	a.Op(Test, RDX, RDX, true)
+	a.Jcc(CondE, g.ex(3))
+	a.Load(R8, RCX, offECl)
+	a.Op(Test, R8, R8, true)
+	a.Jcc(CondE, g.ex(3))
+	a.Load(RAX, RDX, offClCode)
+	a.CmpMem(RAX, R8, offClCode, true)
+	a.Jcc(CondNE, g.ex(3))
+	a.Load(RAX, RDX, off("closure.realm"))
+	a.CmpMem(RAX, R8, off("closure.realm"), true)
+	a.Jcc(CondNE, g.ex(3))
+	// Its register code, its closureCode's, the cached one.
+	a.Load(RAX, RDX, offClCode)
+	a.AddMem(RAX, RDI, ncCCBase)
+	a.Load(RAX, RAX, offCCReg)
+	a.Op(Test, RAX, RAX, true)
+	a.Jcc(CondE, g.ex(3))
+	a.CmpMem(RAX, RCX, offERC, true)
+	a.Jcc(CondNE, g.ex(3))
+	a.Store(RDI, scr(sE), RCX)
+	a.Store(RDI, scr(sV0), RDX)
+	a.Lea(RAX, RCX, offECallee)
+	a.MovRR(RCX, R9)
+	g.ptrTo()
+	a.Load(RAX, RDI, scr(sE))
+	a.Lea(RAX, RAX, offECl)
+	a.Load(RCX, RDI, scr(sV0))
+	g.ptrTo()
+	a.Load(RAX, RBX, 0)
+	a.Jmp(start)
 }
 
 // ret is ret and ret_undef of a frame the code entered itself: its

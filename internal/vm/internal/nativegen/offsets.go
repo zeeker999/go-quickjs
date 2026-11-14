@@ -153,6 +153,7 @@ var (
 	offRCCode      int32
 	offRCSrc       int32
 	offRCAux       int32
+	offCCReg       int32
 	offSymAtom     int32
 	offSymAtoms    int32
 	offRtAtoms     int32
@@ -330,6 +331,7 @@ func loadOffsets() {
 	offCCConsts = ccRel(off("closureCode.consts"))
 	offCCRegEpochs = ccRel(off("closureCode.regEpochs"))
 	offCCRegCalls = ccRel(off("closureCode.regCalls"))
+	offCCReg = ccRel(off("closureCode.reg"))
 
 	offRCCode = off("regCode.code")
 	offRCSrc = off("regCode.src")

@@ -188,6 +188,8 @@ func (g *armGen) ptrTo() {
 func (g *armGen) call() {
 	a := g.a
 	ok, noThis, noTop, loop, loopEnd, skip, high := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
+	start, tmpl := a.NewLabel(), a.NewLabel()
+	a.Bind(start)
 
 	// e := &calls[C].
 	a.ShiftImm(Lsr, rC, rW, 48, true)
@@ -204,7 +206,7 @@ func (g *armGen) call() {
 	a.BCond(NE, g.ex(2))
 	a.Load(r9, rS, 8)
 	g.cmpMem(r9, rC, offECallee)
-	a.BCond(NE, g.ex(3))
+	a.BCond(NE, tmpl)
 	// A leaf that returns a parameter or a constant first thing: its
 	// answer read from the window or the code, with no frame.
 	notLeaf, leafStore := a.NewLabel(), a.NewLabel()
@@ -464,6 +466,56 @@ func (g *armGen) call() {
 	// Run it, counted (made).
 	g.incMem(rCtx, ncMade, 1)
 	g.dispatch()
+
+	// Another closure of the cached callee's template, as amd64's: the
+	// cache made the new callee's and the call made again.
+	a.Bind(tmpl)
+	a.LoadU8(r8, rC, offEKind)
+	a.AndImm(r8, r8, uint64(^(regCallOut|regCallLeaf)&0xff), false)
+	a.CmpImm(r8, int64(regCallEnter), false)
+	a.BCond(LO, g.ex(3))
+	a.CmpImm(r8, int64(regCallObjThis), false)
+	a.BCond(HI, g.ex(3))
+	a.LoadU16(rD, r9, offObjFlags)
+	a.TstImm(rD, uint64(objHasData), false)
+	a.BCond(EQ, g.ex(3))
+	a.Load(rD, r9, sizeObj+offExtData)
+	g.cmpMem(rD, rCtx, ncFuncT)
+	a.BCond(NE, g.ex(3))
+	a.Load(rD, r9, sizeObj+offExtData+8)
+	a.LoadU8(r8, rD, offFDBound)
+	a.Cbnz(r8, g.ex(3), false)
+	a.LoadU8(r8, rD, off("funcData.arrow"))
+	a.Cbnz(r8, g.ex(3), false)
+	a.Load(r8, rD, off("funcData.extra"))
+	a.Cbnz(r8, g.ex(3), true)
+	a.Load(rD, rD, off("funcData.closure"))
+	a.Cbz(rD, g.ex(3), true)
+	a.Load(r8, rC, offECl)
+	a.Cbz(r8, g.ex(3), true)
+	a.Load(rJ, rD, offClCode)
+	g.cmpMem(rJ, r8, offClCode)
+	a.BCond(NE, g.ex(3))
+	a.Load(rJ, rD, off("closure.realm"))
+	g.cmpMem(rJ, r8, off("closure.realm"))
+	a.BCond(NE, g.ex(3))
+	a.Load(rJ, rD, offClCode)
+	g.addMem(rJ, rCtx, ncCCBase)
+	a.Load(rJ, rJ, offCCReg)
+	a.Cbz(rJ, g.ex(3), true)
+	g.cmpMem(rJ, rC, offERC)
+	a.BCond(NE, g.ex(3))
+	a.Store(rCtx, scr(sE), rC)
+	a.Store(rCtx, scr(sV0), rD)
+	a.AddImm(rW, rC, int64(offECallee), true)
+	a.MovRR(rC, r9)
+	g.ptrTo()
+	a.Load(rW, rCtx, scr(sE))
+	a.AddImm(rW, rW, int64(offECl), true)
+	a.Load(rC, rCtx, scr(sV0))
+	g.ptrTo()
+	a.Load(rW, rIP, 0)
+	a.B(start)
 }
 
 // ret is ret and ret_undef of a frame the code entered itself, as
