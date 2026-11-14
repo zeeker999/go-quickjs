@@ -247,7 +247,7 @@ function using(n) {
 	return s + ":" + res.count;
 }
 function fillDown(n) {
-	var i, j, a, s = 0, len = 512;
+	var i, j, a, s = 0, len = 4096;
 	for (j = 0; j < n; j += len) {
 		a = [];
 		for (i = len - 1; i >= 0; i--) a[i] = i;
@@ -267,7 +267,7 @@ func TestJITRegLoopsLeaving(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
-	wants := map[string]string{"using": "8386560:4096", "fillDown": "1046528:512"}
+	wants := map[string]string{"using": "33550336:8192", "fillDown": "16773120:4096"}
 	for _, marking := range []bool{false, true} {
 		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
 			if marking {
@@ -282,7 +282,7 @@ func TestJITRegLoopsLeaving(t *testing.T) {
 				for i, r := range rts {
 					fn, _ := r.GetProp(Obj(r.Global()), r.Intern(name))
 					for range 20 {
-						v, err := r.Call(fn, Undefined, []Value{Float(4096)})
+						v, err := r.Call(fn, Undefined, []Value{Float(8192)})
 						got[i] = regNativeShow(r, v, err)
 					}
 				}
@@ -291,15 +291,17 @@ func TestJITRegLoopsLeaving(t *testing.T) {
 				}
 			}
 			st := rts[0].RegNativeStats()
-			t.Logf("hosts %v", st.HostOps)
+			t.Logf("hosts %d %v, entries %d, interpreted %d", st.Hosts, st.HostOps, st.Entries, st.Interpreted)
 			for _, op := range []string{"new_dispose_capability", "add_disposable", "dispose"} {
 				if n := st.HostOps[op]; n > 100 {
 					t.Errorf("%s left to Go %d times", op, n)
 				}
 			}
-			// 20 calls of 8 fills of 512 stores: 81,920 stores, most of them
-			// to a sparse array, which Go makes.
-			if n := st.HostOps["set_index"]; n > 10000 {
+			// 20 calls of 2 fills of 4096 stores, those to a sparse array
+			// Go's: a few runs' worth of them left at before the loop is
+			// judged not to pay, three times as many where the run went on
+			// natively after each.
+			if n := st.HostOps["set_index"]; n > 2048 {
 				t.Errorf("set_index left to Go %d times, the loop going on natively after each", n)
 			}
 		})
