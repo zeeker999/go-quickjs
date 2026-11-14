@@ -472,27 +472,23 @@ on the same side of the inliner's cut (`ssa.MinInliningFrequency`).
 
 ## Tier-up and on-stack replacement
 
-No handler of the register interpreter's dispatchers -- the Go handler
-table's or the native handlers' -- does any work for tier-up
-(`zzjit_zregtier.go`). A function is compiled once the interpreter has
-spent a budget on it, the stack form's (`jitTierBudget`): `jitCallThreshold`
-invocations (400), each the function's length in register instructions
-(`jitRegBudget`). Nothing counts each invocation; the two budgets the
-dispatchers already spend are its samples, each spending the work it
-stands for:
+A function is compiled once the interpreter has spent a budget on it, the
+stack form's (`jitTierBudget`): `jitCallThreshold` invocations (400), each
+the function's length in register instructions (`jitRegBudget`), each
+counted, as the stack form's invocations spend it one by one
+(`jitTierWork`) -- V8's interrupt budget is a function's too
+(`zzjit_zregtier.go`):
 
-- a call that spends the interrupt budget -- `rhCallW`'s and `regEnterW`'s
-  check, which the native call handler leaves to `rhCallW` -- spends its
-  callee's budget by the calls the interrupt budget counted, each the
-  callee's length (`jitRegCallSample`, `jitRegSample`, `jitRegCallWork`),
-  and a call site of the interpreter's whose callee has code is sent to
-  `regEnterW`, which enters it (`regCallJIT`) -- its only way there: a
-  site whose cache was filled before its callee had code enters it in the
-  interpreter until sampled. A sample of a callee that had code already
-  takes the next sooner (`jitRegResample`, 64 calls), so that such sites
-  are, which calls of compiled code had starved -- AWFY's Json's parse had
-  run in the interpreter, read by read through `regEnterW`; the next
-  sample then spends those 64 calls' work (`jitState`'s `callsNext`);
+- a run that returns spends its function's budget by its length: the
+  feedback dispatcher's `ret` and `ret_undef` (nativegen's `feedback.go`;
+  the Go table's `rhRet` and `rhRetUndef`, `regTickRet`) count down the
+  runs left of it (`closureCode`'s `jitRegTick`, armed by `jitRegArm` to
+  what is left over the length), and once none is set the function's
+  `jitEnters`, which every call of it reads: its next call goes to the
+  JIT (`jitRegEnter`), which spends the runs counted since it was armed
+  (`jitRegCallTier`) and compiles it if the budget is spent, or arms the
+  count again. A run that ends in native code, or a throw, counts
+  nothing, as no invocation the stack form's native code makes does;
 - a back edge that spends the back-edge budget -- `regBackEdge`, which every
   dispatcher's jump leaves to its Go slow function -- spends its frame's
   function's by the back edges the budget counted, each the loop's length
@@ -500,12 +496,13 @@ stands for:
   `JumpLoop` spends its bytecodes' distance, the budget varied from one
   expiry to the next (`backEdgeBudget`).
 
-The calls' counter runs out only at calls: a loop's check -- the
-interpreter's at a back edge, native code's poll -- checks for an interrupt
-without rearming it (`checkInterruptPoll`). Rearmed at every thousand back
-edges, it had run out only where calls outnumbered back edges four to one,
-and a program of interpreted callers calling compiled code that polls --
-AWFY's Towers -- had sampled its callers once a second.
+Every call the interpreter makes of a function whose `jitEnters` is set
+goes to the JIT, as the stack form's calls look for their callee's code
+(`tryJITFrame`): `rhCallW`'s hit and `regEnterW`, `regEnterScoped` (a
+host's call), `regEnterFrame`; and the native call handler's, which calls
+Go for it with no exit, as it calls a built-in (`nativeJITCall`, by the
+exit's protocol through `callH`). A site's cache holds a callee with code
+as any other (`nativeCallMiss`, `regCallSlow`); no site is marked for it.
 
 **Compiling.** A function's first sample begins its budget, as the stack
 form's `jitWarmFor` makes its entry warm, and notes its caches' feedback
@@ -513,8 +510,8 @@ form's `jitWarmFor` makes its entry warm, and notes its caches' feedback
 the budget, its caches' feedback unchanged since -- a change raises what is
 left to `jitICThreshold` invocations' worth (`jitRegWarmUp`), as V8's
 `NotifyICChanged` delays a tier-up -- or at its first sample where the
-runtime compiles at a first call (`QJS_JIT_STRESS`'s threshold, which makes
-every call a sample, `jitRegStressSample`). What outlives a function's
+runtime compiles at a first call (`QJS_JIT_STRESS`'s threshold): a call's,
+its second call, the first run's return having counted it. What outlives a function's
 compiles -- what its code learned, its budget, its deoptimizations, what its
 runs did -- is its `regLearned` entry (`jitRegEntry`'s `life`); its code is
 kept on its template's `closureCode` (`jitReg`). A callee native callers

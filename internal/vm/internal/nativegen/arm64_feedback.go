@@ -14,7 +14,7 @@ import (
 // them.
 func feedbackARM64(v *variant) (*block, error) {
 	a := &Asm{}
-	counts := feedbackCounts()
+	counts, tick, enters := feedbackCounts(), feedbackTick(), feedbackEnters()
 	at := map[bytecode.ROp]int{}
 	labels := map[bytecode.ROp]Label{}
 	for _, op := range handlerOps {
@@ -43,6 +43,18 @@ func feedbackARM64(v *variant) (*block, error) {
 		a.AddImm(rS, rS, 1, true)
 		a.Store(r8, 0, rS)
 		a.Bind(skip)
+		if feedbackCountsReturn(op) {
+			// The budget's runs left, and the next call Go's at none, as
+			// amd64's.
+			left := a.NewLabel()
+			a.Load(rS, r9, tick)
+			a.SubsImm(rS, rS, 1, true)
+			a.Store(r9, tick, rS)
+			a.BCond(GT, left)
+			a.MovImm(rD, 1)
+			a.Store8(r9, enters, rD)
+			a.Bind(left)
+		}
 		a.Load(rJ, rTab, 8*int32(v.slotPlain(op)))
 		a.Br(rJ)
 	}

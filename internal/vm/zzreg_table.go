@@ -1883,10 +1883,17 @@ func rsJTypeof(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) in
 // rhRet and rhRetUndef end the frame: runReg reads what ret returns from
 // the instruction it ended at.
 func rhRet(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if jitBuilt {
+		// A run counted toward its function's budget (regTickRet).
+		regTickRet(st.cl.closureCode)
+	}
 	return regDone
 }
 
 func rhRetUndef(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if jitBuilt {
+		regTickRet(st.cl.closureCode)
+	}
 	return regDone
 }
 

@@ -475,17 +475,23 @@ func TestJITRegArrayAllocComputedLength(t *testing.T) {
 	}
 	rts := regNativeRuntimes(t, regStorageSrc)
 	rts[0].SetJITReport(true)
+	var first uint64
 	for i, r := range rts {
 		fn, _ := r.GetProp(Obj(r.Global()), r.Intern("main"))
-		for range 20 {
+		for k := range 20 {
 			v, err := r.Call(fn, Undefined, nil)
 			if got := regNativeShow(r, v, err); got != "5461" {
 				t.Fatalf("runtime %d: %q, want 5461", i, got)
 			}
+			if i == 0 && k == 1 {
+				first = r.RegNativeStats().GoCallOps["new_w->Array"]
+			}
 		}
 	}
-	if n := rts[0].RegNativeStats().GoCallOps["new_w->Array"]; n > 100 {
-		t.Errorf("%d constructions of Array made by Go", n)
+	// Go makes those of the code compiled before it learned the sites,
+	// in the first runs (5,461 constructions each), and none after.
+	if n := rts[0].RegNativeStats().GoCallOps["new_w->Array"]; n > 200 || n != first {
+		t.Errorf("%d constructions of Array made by Go, %d in the first two runs", n, first)
 	}
 }
 

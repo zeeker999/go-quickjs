@@ -112,12 +112,6 @@ func rhCallW(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int 
 					if err := r.checkInterruptNow(); err != nil {
 						return st.done(err)
 					}
-					if jitBuilt {
-						// The interrupt budget's end, a sample of the
-						// calls: the callee's hotness, and the site sent
-						// to regCallMiss once it has native code.
-						r.jitRegCallSample(e)
-					}
 				}
 				saved := r.stackTop
 				if top > saved {
@@ -263,11 +257,6 @@ func (r *Runtime) regEnterW(o *Object, cl *closure, rc *regCode, base, argc int,
 	if r.interruptCounter--; r.interruptCounter <= 0 {
 		if err := r.checkInterruptNow(); err != nil {
 			return Undefined, err
-		}
-		if jitBuilt {
-			// The interrupt budget's end, a sample of the calls: the
-			// callee's hotness (jitRegSample).
-			r.jitRegSample(cl, rc)
 		}
 	}
 	saved := r.stackTop

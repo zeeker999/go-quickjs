@@ -4,7 +4,10 @@ package vm
 
 import (
 	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
 // regBothMarking runs f with the collector idle and then, native code
@@ -61,6 +64,110 @@ function run() { var o = { v: 1 }, t = 0; for (var i = 0; i < 20; i++) t += rec(
 			if strings.HasPrefix(k, "no context") {
 				t.Errorf("%d runs entered past the last context: %s", n, k)
 			}
+		}
+	})
+}
+
+// regBothMarkingNative is regBothMarking with the native handlers storing
+// as while the collector marks too (nativeMarking).
+func regBothMarkingNative(t *testing.T, f func(t *testing.T)) {
+	t.Run("idle", f)
+	t.Run("marking", func(t *testing.T) {
+		jitMarkingForTest(t)
+		nativeMarking(t, true)
+		t.Cleanup(func() { nativeMarking(t, false) })
+		f(t)
+	})
+}
+
+// TestJITRegCountedTierUp calls a function from Go, one call at a time, and
+// checks it is compiled once its runs have spent its budget, counted: not
+// before jitCallThreshold runs, and at the call after the run that spent
+// it, as the stack form's invocations each spend its budget (jitTierWork)
+// -- the first call begins it (jitRegHot's warming), the feedback
+// dispatcher's returns count the rest down (jitRegArm), and the call after
+// the last goes to Go (jitRegCallTier). Before, a sample of the interrupt
+// budget stood for 4,096 calls, and a function called less often than
+// that between two samples was compiled at its second or third sample, or
+// never.
+func TestJITRegCountedTierUp(t *testing.T) {
+	const src = `
+function f(o) { return o[0] + o[1] }
+var o = [1, 2];
+function g() { return f(o) }
+`
+	regBothMarkingNative(t, func(t *testing.T) {
+		rts := regNativeRuntimes(t, src)
+		r := rts[0]
+		r.jitStress = jitStressConfig{}
+		const calls = 50
+		r.SetJITWarmUp(calls, calls)
+		fv, _ := r.GetProp(Obj(r.Global()), r.Intern("f"))
+		ov, _ := r.GetProp(Obj(r.Global()), r.Intern("o"))
+		cc := fv.Object().fn().closure.closureCode
+		at := 0
+		for k := 1; k <= calls+4; k++ {
+			v, err := r.Call(fv, Undefined, []Value{ov})
+			if got := regNativeShow(r, v, err); got != "3" {
+				t.Fatalf("call %d: %q, want 3", k, got)
+			}
+			if at == 0 && cc.jitReg != nil {
+				at = k
+			}
+		}
+		if at != calls+2 {
+			t.Fatalf("compiled at call %d, want %d: its first call begins the budget of %d runs", at, calls+2, calls)
+		}
+		if e := cc.jitReg; e.life.starts == 0 {
+			t.Errorf("never entered: %+v", e.life)
+		}
+	})
+}
+
+// TestJITRegInterpretedCallsEnter compiles a function first, then has a
+// caller the interpreter runs -- the JIT refuses it -- call it in a loop,
+// and checks that every call goes to its code, from the native call
+// handler with no exit (nativeJITCall): the site's cache is filled with
+// the callee that has code (nativeCallMiss, regCallSlow), as with any
+// other, and its calls go to the JIT as the stack form's calls do
+// (tryJITFrame). Before, the site was marked for regCallSlow, every call
+// of it made by the generic call path, and the call handler left a callee
+// with code to rhCallW by an exit.
+func TestJITRegInterpretedCallsEnter(t *testing.T) {
+	const src = `
+function f(o, i) { return o[0] + i }
+function g(n) { var o = [1], s = 0; for (var i = 0; i < n; i++) s += f(o, i); return s }
+`
+	regBothMarkingNative(t, func(t *testing.T) {
+		nativeCounting(t)
+		rts := regNativeRuntimes(t, src)
+		r := rts[0]
+		r.jitStress = jitStressConfig{}
+		fv, _ := r.GetProp(Obj(r.Global()), r.Intern("f"))
+		gv, _ := r.GetProp(Obj(r.Global()), r.Intern("g"))
+		fcl, gcl := fv.Object().fn().closure, gv.Object().fn().closure
+		if fcl.reg == nil {
+			r.regOf(fcl)
+		}
+		e := r.jitRegFor(fcl, fcl.reg)
+		if e == nil || e.code == nil {
+			t.Fatalf("f not compiled: %+v", e)
+		}
+		fcl.closureCode.setJITReg(e)
+		gcl.closureCode.jitRegRefused = true
+		const n = 2000
+		exits := atomic.LoadInt64(&nativeExits[bytecode.RCallW])
+		v, err := r.Call(gv, Undefined, []Value{Float(n)})
+		if got := regNativeShow(r, v, err); got != "2001000" {
+			t.Fatalf("g(%d) = %q, want 2001000", n, got)
+		}
+		if d := atomic.LoadInt64(&nativeExits[bytecode.RCallW]) - exits; d > 2 {
+			t.Errorf("%d of %d calls left the native handlers by an exit", d, n)
+		}
+		// Each call goes to the JIT, which enters the code or, judged
+		// slow, declines it (jitRegStretchWork).
+		if l := fcl.closureCode.jitReg.life; l.starts+l.slowCalls < n {
+			t.Errorf("f's code entered %d times and declined %d for %d calls", l.starts, l.slowCalls, n)
 		}
 	})
 }

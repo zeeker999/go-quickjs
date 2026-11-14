@@ -1304,8 +1304,7 @@ func (r *Runtime) ClearStop() {
 }
 
 // checkInterruptPoll is checkInterruptNow at a back edge's check, which
-// leaves the calls' counter as it is: the register tier's calls sample
-// their callees where it runs out (jitRegSample), and a loop's checks,
+// leaves the calls' counter as it is: a loop's checks,
 // the interpreter's and native code's polls, rearming it every thousand
 // back edges, had it run out only where calls outnumbered back edges four
 // to one -- AWFY's Towers, whose interpreted callers called compiled code

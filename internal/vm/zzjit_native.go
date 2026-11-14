@@ -461,7 +461,7 @@ type jitCodeFields struct {
 	// one of its invocations they counted (jitCountRun, jitCountCallAt).
 	jitCounting bool
 	// jitRegHot counts the samples of the function's runs the register
-	// tier took (jitRegSample), jitRegDeopts its code's deoptimizations,
+	// tier took, jitRegDeopts its code's deoptimizations,
 	// and jitRegRefused says it is not compiled from its register code;
 	// jitReg is its code, nil until compiled (zzjit_zregtier.go).
 	jitRegHot, jitRegDeopts uint8
@@ -475,6 +475,11 @@ type jitCodeFields struct {
 	// calls made at each of its call sites; nil until its call sites'
 	// caches are made, and in a runtime that runs no JIT.
 	jitRegCounts []uint64
+	// jitRegTick counts down the runs of the function's register code
+	// left of its budget, from jitRegTickSet, which the feedback
+	// dispatcher's returns count (jitRegArm): at 0 they mark its calls
+	// for Go (jitEnters), which spends their runs (jitRegCallTier).
+	jitRegTick, jitRegTickSet int64
 }
 
 // hint is the hint of the code of cl's function, its template's closures'
@@ -1210,10 +1215,6 @@ type jitState struct {
 	// edgesNext is the back-edge budget last given, and edgesSpent the one
 	// before it, which the last check found spent (jitTierWork).
 	edgesNext, edgesSpent int
-	// callsNext is the interrupt budget a register sample last gave the
-	// calls when it took the next sooner (jitRegResample), 0 for a full
-	// one: what the next sample's calls spend (jitRegCallWork).
-	callsNext int
 	// charCodeAtKey is the atom jitStringMethod looks charCodeAt up by,
 	// once charCodeAtKnown.
 	charCodeAtKey   Atom
@@ -1439,8 +1440,6 @@ func (r *Runtime) initJIT(enabled bool, memoryLimit int64) {
 	r.jitStress = jitStressDefault
 	if r.jitStress.threshold {
 		r.jitCallThreshold, r.jitICThreshold = 1, 1
-		// Every call a sample of the register tier's (jitRegStressSample).
-		r.interruptCounter = 1
 	}
 }
 

@@ -136,6 +136,9 @@ function leaf(x) { for (var k = 0; k < 4; k++) x.v = (x.v + k) | 0 }
 function rec(d) { if (d == 0) { leaf(o); return } rec(d - 1); rec(d - 1) }
 function run() { rec(13); return o.v }
 `
+	// Called, not inlined: rec's code, compiled first, its runs counted
+	// as leaf's are, would have inlined leaf, compiled never on its own.
+	regNoInline(t)
 	rts := regNativeRuntimes(t, src)
 	r := rts[0]
 	r.jitStress = jitStressConfig{}

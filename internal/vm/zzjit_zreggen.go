@@ -281,8 +281,8 @@ func (r *Runtime) jitRegGenDone(f *frame, l *jitRegLevel, v Value, err error) (V
 // jitRegResumed counts a resumption Go makes of a generator's or an async
 // function's register code c, cl's, which has no native code: its length,
 // as the stack form's jitHotEntry counts a function's calls' work
-// (jitEntry's coldWork), a sample of its hotness (jitRegSample) at each
-// jitHotWork of it. A generator of no loop has no back edge to be sampled
+// (jitEntry's coldWork), spent of its budget (jitRegHot) at each
+// jitHotWork of it, every resumption's counted. A generator of no loop has no back edge to be sampled
 // at, and its resumptions, made by Go from native code whose polls rearm
 // the interrupt budget, spend none of it.
 func (r *Runtime) jitRegResumed(cl *closure, c *regCode) {
@@ -294,6 +294,7 @@ func (r *Runtime) jitRegResumed(cl *closure, c *regCode) {
 	if l.coldWork += uint64(len(c.rc.Code)); l.coldWork < jitHotWork {
 		return
 	}
+	work := int64(l.coldWork)
 	l.coldWork = 0
-	r.jitRegSample(cl, c)
+	r.jitRegHot(cl, c, work)
 }

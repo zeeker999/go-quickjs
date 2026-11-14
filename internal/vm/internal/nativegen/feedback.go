@@ -13,6 +13,9 @@ import (
 // plain's handlers, which a runtime without the JIT runs, have no part of
 // it.
 //
+// A return also counts down the runs left of its function's budget
+// (feedbackTick).
+//
 // The counts are the function's closure's code's jitRegCounts (package
 // vm, zzjit_zregfreq.go), which the top frame's cc reaches: slot 0 its
 // runs, counted at each return its frame makes -- the runs that end so,
@@ -34,6 +37,20 @@ var feedbackOps = []bytecode.ROp{
 // frame's function, not a call at its site.
 func feedbackCountsReturn(op bytecode.ROp) bool {
 	return op == bytecode.RRet || op == bytecode.RRetUndef
+}
+
+// feedbackTick is the offset of the runs left of the function's budget
+// from the context's cc (closureCode's jitRegTick), which a return counts
+// down, and feedbackEnters its jitEnters, which a return sets once none
+// is left, so that the function's next call goes to the JIT's tier-up
+// (package vm's jitRegCallTier), as the stack form's invocations each
+// spend its budget (jitTierWork).
+func feedbackTick() int32 {
+	return ccRel(off("closureCode.jitRegTick"))
+}
+
+func feedbackEnters() int32 {
+	return ccRel(off("closureCode.jitEnters"))
 }
 
 // feedbackCounts is the offset of the counts' slice from the context's

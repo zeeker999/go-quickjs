@@ -4,6 +4,7 @@ package vm
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"unsafe"
 
@@ -16,13 +17,11 @@ import (
 // enters it at its calls and at its loops' headers.
 //
 // The budget is the stack form's (jitTierBudget): jitCallThreshold
-// invocations, each the function's length. No handler of either
-// dispatcher -- the Go handler table's or the native handlers' -- counts
-// for it: the two budgets they already spend are its samples. A call that
-// spends the interrupt budget (rhCallW's and regEnterW's check, which the
-// native call handler leaves to rhCallW) spends its callee's budget by
-// the calls the interrupt budget counted, each the callee's length; a
-// back edge that spends the back-edge budget (regBackEdge, which every
+// invocations, each the function's length, each counted, as the stack
+// form's invocations spend it (jitTierWork): the feedback dispatcher's
+// returns count a function's runs down from what is left of its budget,
+// and send its next call to Go once none is (jitRegCallTier, jitRegArm);
+// a back edge that spends the back-edge budget (regBackEdge, which every
 // dispatcher's jump leaves to its Go slow function) spends its frame's
 // function's by the back edges it counted, each the loop's length
 // (jitRegTierWork), as the stack form's jitTierWork. A function's first
@@ -35,9 +34,11 @@ import (
 // with nothing more learned (jitRegLearnedDue).
 //
 // Its code is entered:
-//   - by a call that makes its frame in Go (regEnterW, jitRegEnter): a
-//     call site is sent there once it is sampled calling a function that
-//     has code (regCallJIT), which no fast path enters;
+//   - by every call of it the interpreter makes, its call handlers', Go's
+//     and the native one's, which calls Go for it with no exit
+//     (nativeJITCall), as the stack form's calls enter it (tryJITFrame):
+//     a function's code is its closures' template's (jitEnters), which
+//     every call reads;
 //   - by on-stack replacement at the loop whose back edge took the sample
 //     (jitRegLoop), in the dispatcher that runs the frame, which goes on
 //     where the code leaves it: at the register pc of a deoptimization or
@@ -47,9 +48,6 @@ import (
 //     has no entry (jitRegGoOnAt), the interpreter's check made due there
 //     at once, as the stack form's jitGoOn has it: the interpreter runs
 //     the rest of that iteration, not the rest of the invocation.
-
-// regCallJITMark is regCallJIT where the JIT is built in (regCallMarks).
-const regCallJITMark = regCallJIT
 
 // jitRegTakes reports whether cl's register code c is compiled: a plain
 // function's, a method's, an arrow's, an accessor's or a class's
@@ -84,58 +82,31 @@ func jitRegCalled(cl *closure, c *regCode) bool {
 }
 
 // setJITReg makes e the template's code, which calls enter (jitEnters),
-// nil for none.
+// nil for none: then the next run's return counts the budget again
+// (jitRegArm), from where the code was let go of.
 func (cc *closureCode) setJITReg(e *jitRegEntry) {
 	cc.jitReg, cc.jitEnters = e, e != nil
+	if e == nil {
+		cc.jitRegTick, cc.jitRegTickSet = 0, 0
+	}
+}
+
+// regTickRet counts a run of cc's function that returned, in the Go
+// table's loop, as the feedback dispatcher's ret and ret_undef count one
+// (nativegen's feedback.go): the budget's runs left, and, once none is,
+// its next call sent to Go (jitRegCallTier).
+func regTickRet(cc *closureCode) {
+	if cc != nil {
+		if cc.jitRegTick--; cc.jitRegTick <= 0 {
+			cc.jitEnters = true
+		}
+	}
 }
 
 // jitRegHas reports whether cl's function has native code made from its
 // register code.
 func (r *Runtime) jitRegHas(cl *closure) bool {
 	return cl.closureCode != nil && cl.closureCode.jitReg != nil
-}
-
-// jitRegSample is a sample of a run of cl's register code c (regEnterW).
-// One of code that had native code already says nothing of what the
-// interpreter runs: the interrupt budget's next sample is taken sooner
-// (jitRegResample), so that a call site of a frame the interpreter runs,
-// which enters a callee compiled after the site's cache was filled in the
-// interpreter, until a sample of the site marks it (jitRegCallSample), is
-// sampled. Calls of compiled code, through Go, had taken the samples -- a
-// parser's character reads, from frames the interpreter ran -- and left
-// whole call trees in the interpreter: AWFY's Json ran its parse there
-// unless a sample happened to fall on its first call site.
-func (r *Runtime) jitRegSample(cl *closure, c *regCode) {
-	if r.jitEnabled && cl.closureCode != nil {
-		had := cl.closureCode.jitReg != nil
-		r.jitRegHot(cl, c, r.jitRegCallWork(c))
-		if had && r.interruptCounter > jitRegResample {
-			r.interruptCounter = jitRegResample
-			r.jitState().callsNext = jitRegResample
-		}
-		r.jitRegStressSample()
-	}
-}
-
-// jitRegResample is how many calls on the interrupt budget's next sample
-// is taken after one of a function that had native code (jitRegSample).
-const jitRegResample = 64
-
-// jitRegCallWork is the work of c's function's budget a sample of its
-// calls spends (jitRegHot): the calls the interrupt budget counted -- a
-// full budget's, or jitRegResample's after a sample that took the next
-// sooner (jitState's callsNext), or every call where every call is a
-// sample (jitRegStressSample) -- each its length, as the stack form's
-// invocations spend it (jitTierWork).
-func (r *Runtime) jitRegCallWork(c *regCode) int64 {
-	calls := int64(interruptCheckInterval)
-	if s := r.jit; s != nil && s.callsNext != 0 {
-		calls, s.callsNext = int64(s.callsNext), 0
-	}
-	if r.jitCallThreshold <= 1 {
-		calls = 1
-	}
-	return calls * int64(max(len(c.rc.Code), 1))
 }
 
 // jitRegTierWork is the work of a function's budget a sample of its
@@ -223,26 +194,45 @@ func (r *Runtime) jitRegCallsNatively(cl *closure, c *regCode) bool {
 	return false
 }
 
-// jitRegStressSample makes the next call a sample too where the runtime
-// compiles at a function's first call (QJS_JIT_STRESS's threshold,
-// SetJITWarmUp's 1), so that every call is.
-func (r *Runtime) jitRegStressSample() {
-	if r.jitCallThreshold <= 1 {
-		r.interruptCounter = 1
+// jitRegCallTier is the tier-up of cl's function, its register code c, at
+// a call Go makes of it while it has no code (jitRegEnter): what its runs
+// since the last spent of its budget, as the stack form's invocations spend
+// it one by one (jitTierWork) -- each its length -- counted by the
+// feedback dispatcher's returns (nativegen's feedback.go, regTickRet),
+// which send its next call here once they have counted the runs the budget
+// had left (jitRegArm). It returns the code compiled, nil where there is
+// none yet.
+func (r *Runtime) jitRegCallTier(cl *closure, c *regCode) *jitRegEntry {
+	cc := cl.closureCode
+	if !r.jitEnabled || cc.jitRegRefused || !jitRegCalled(cl, c) {
+		// Never compiled for its calls: they count nothing more.
+		cc.jitRegTick, cc.jitRegTickSet = math.MaxInt64, math.MaxInt64
+		cc.jitEnters = cc.jitReg != nil
+		return nil
 	}
+	runs := max(cc.jitRegTickSet-cc.jitRegTick, 1)
+	e := r.jitRegHot(cl, c, runs*int64(max(len(c.rc.Code), 1)))
+	if e == nil {
+		r.jitRegArm(cl, c)
+	}
+	return e
 }
 
-// jitRegCallSample is a sample of a call at the site whose cache is e
-// (rhCallW): its callee's hotness, and the site sent to regCallMiss once
-// the callee has code, where regEnterW enters it.
-func (r *Runtime) jitRegCallSample(e *regCallCache) {
-	if !r.jitEnabled || e.cl == nil || e.rc == nil || e.cl.closureCode == nil {
-		return
+// jitRegArm has the feedback dispatcher's returns count the runs of cl's
+// function, its register code c, that are left of its budget, each its
+// length, and its calls go on in their tiers until they have: then they
+// send its next call to Go (jitEnters, jitRegCallTier). Where the budget
+// is not counted yet -- no first call, a refusal of host operations
+// alone -- the next run's return does.
+func (r *Runtime) jitRegArm(cl *closure, c *regCode) {
+	cc := cl.closureCode
+	left := int64(1)
+	if life := r.jitRegLifeOf(cl); life.warming || life.invalid {
+		n := int64(max(len(c.rc.Code), 1))
+		left = max((life.tierBudget+n-1)/n, 1)
 	}
-	if r.jitRegHot(e.cl, e.rc, r.jitRegCallWork(e.rc)) != nil {
-		e.kind |= regCallJIT
-	}
-	r.jitRegStressSample()
+	cc.jitRegTick, cc.jitRegTickSet = left, left
+	cc.jitEnters = cc.jitReg != nil || r.jit.regPendingJobs[r.jitRegKeyOf(cl)] != nil
 }
 
 // jitRegHot spends work of the budget of cl's function, its register code
@@ -721,6 +711,12 @@ func (r *Runtime) jitRegEnter(f *frame, cl *closure, c *regCode, base, start int
 		// entered from this call on.
 		r.jitDrain()
 		e = cl.closureCode.jitReg
+	}
+	if e == nil && start == 0 {
+		// Its calls' runs have spent what was left of its budget: compiled
+		// now if it is spent, counted on otherwise (jitRegCallTier), as
+		// the stack form's call spends it (tryJITAt).
+		e = r.jitRegCallTier(cl, c)
 	}
 	if e != nil && e.life.entrySlow && start == 0 && !e.life.reopt {
 		// Code that does not pay (jitRegStretchWork): the interpreter runs
