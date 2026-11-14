@@ -160,7 +160,15 @@ func rhCallW(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int 
 					nf.newTarget = Undefined
 				}
 				nf.regKind = regFrameCall
-				v, err := r.runReg(nf, rc, 0)
+				var v Value
+				var err error
+				if jitBuilt && cl.jitEnters {
+					// Native code made from its register code, which the
+					// site may have been filled before (jitRegEnter).
+					v, err = r.jitRegEnter(nf, cl, rc, base, 0)
+				} else {
+					v, err = r.runReg(nf, rc, 0)
+				}
 				nf.regKind = 0
 				if rc.ncap != 0 && len(nf.openUpvalues) != 0 {
 					regCloseUpvalues(nf)

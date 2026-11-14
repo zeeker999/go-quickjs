@@ -761,6 +761,12 @@ type closureCode struct {
 	// constructed a second object on such a prototype: its classes are
 	// kept, and freshProtos is not set again.
 	freshProtos, sharedProtos bool
+	// jitEnters says the template's function has native code a call
+	// enters (the JIT's jitReg): rhCallW's hit, and the native call
+	// handler's, which leaves such a call to rhCallW, enter it, as the
+	// stack interpreter's calls look for their callee's code. Never set
+	// in a build without the JIT.
+	jitEnters bool
 	// arrays are this template's empty array literals' sites, in this
 	// realm, by the tree builder's count of them (arrayEmptyNode); nil
 	// where one has not run.

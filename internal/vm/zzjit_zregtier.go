@@ -82,6 +82,12 @@ func jitRegCalled(cl *closure, c *regCode) bool {
 	return jitRegTakes(cl, c) && !c.suspends && !cl.fn.TopLevel && !cl.fn.IsModule
 }
 
+// setJITReg makes e the template's code, which calls enter (jitEnters),
+// nil for none.
+func (cc *closureCode) setJITReg(e *jitRegEntry) {
+	cc.jitReg, cc.jitEnters = e, e != nil
+}
+
 // jitRegHas reports whether cl's function has native code made from its
 // register code.
 func (r *Runtime) jitRegHas(cl *closure) bool {
@@ -169,7 +175,7 @@ func (r *Runtime) jitRegNativeCalleeN(cl *closure, c *regCode, calls int64) {
 	case e.code == nil:
 		cc.jitRegRefused = true
 	default:
-		cc.jitReg = e
+		cc.setJITReg(e)
 	}
 }
 
@@ -239,7 +245,7 @@ func (r *Runtime) jitRegHot(cl *closure, c *regCode, work int64) *jitRegEntry {
 			}
 			return e
 		}
-		cc.jitReg = nil
+		cc.setJITReg(nil)
 	}
 	life := r.jitRegLifeOf(cl)
 	switch {
@@ -276,7 +282,7 @@ func (r *Runtime) jitRegHot(cl *closure, c *regCode, work int64) *jitRegEntry {
 		life.warming = false
 		return nil
 	}
-	cc.jitReg = e
+	cc.setJITReg(e)
 	return e
 }
 
@@ -330,7 +336,7 @@ func (r *Runtime) jitRegInvalidate(cl *closure, e *jitRegEntry) {
 		}
 		s.invalidated++
 		if cc != nil && cc.jitReg == e {
-			cc.jitReg = nil
+			cc.setJITReg(nil)
 		}
 		if c := cl.reg; c != nil {
 			life.invalid, life.warming, life.reopt, life.learning = true, true, false, false
@@ -429,7 +435,7 @@ func (r *Runtime) jitRegReoptimize(cl *closure, c *regCode, e *jitRegEntry) *jit
 		return nil
 	}
 	if cc := cl.closureCode; cc != nil && !cc.jitRegRefused {
-		cc.jitReg = ne
+		cc.setJITReg(ne)
 	}
 	return ne
 }
@@ -669,7 +675,7 @@ func (r *Runtime) jitRegEnter(f *frame, cl *closure, c *regCode, base, start int
 	if e == nil || e.invalid || e.code == nil || !r.jitEnabled {
 		if e != nil && e.code == nil {
 			// Let go of by the cache (regLetGo).
-			cl.closureCode.jitReg = nil
+			cl.closureCode.setJITReg(nil)
 		}
 		return r.runReg(f, c, start)
 	}

@@ -280,7 +280,7 @@ func (r *Runtime) jitRegInstall(j *jitRegJob) {
 		case !cc.jitRegRefused:
 			// The function's code from here, whatever it had: runs of
 			// that go on in this at their next exit (jitRegGoOnAt).
-			cc.jitReg = e
+			cc.setJITReg(e)
 		}
 	}
 }

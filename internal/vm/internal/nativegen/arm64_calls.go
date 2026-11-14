@@ -281,6 +281,13 @@ func (g *armGen) call() {
 	g.cmpMem(r8, rCtx, ncObjBits)
 	a.BCond(NE, g.ex(5))
 	a.Bind(ok)
+	// A callee with native code (closureCode's jitEnters), which the
+	// cache may have been filled before: rhCallW's to enter.
+	a.Load(r8, rC, offECl)
+	a.Load(r8, r8, offClCode)
+	g.addMem(r8, rCtx, ncCCBase)
+	a.LoadU8(rD, r8, offCCJITEnters)
+	a.Cbnz(rD, g.ex(15), false)
 	a.Store(rCtx, scr(sE), rC)
 	a.Store(rCtx, scr(sWin), rS)
 	a.Store(rCtx, scr(sKind), r9)

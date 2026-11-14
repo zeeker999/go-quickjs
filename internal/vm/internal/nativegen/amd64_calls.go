@@ -309,6 +309,14 @@ func (g *nativeGen) call() {
 	a.CmpMem(R8, RDI, ncObjBits, true)
 	a.Jcc(CondNE, g.ex(5))
 	a.Bind(ok)
+	// A callee with native code (closureCode's jitEnters), which the
+	// cache may have been filled before: rhCallW's to enter.
+	a.Load(R8, RCX, offECl)
+	a.Load(R8, R8, offClCode)
+	a.AddMem(R8, RDI, ncCCBase)
+	a.LoadU8(RDX, R8, offCCJITEnters)
+	a.Op(Test, RDX, RDX, false)
+	a.Jcc(CondNE, g.ex(15))
 	a.Store(RDI, scr(sE), RCX)
 	a.Store(RDI, scr(sWin), RSI)
 	a.Store(RDI, scr(sKind), R9)
