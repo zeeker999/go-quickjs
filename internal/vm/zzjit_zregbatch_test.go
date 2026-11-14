@@ -209,3 +209,46 @@ func TestJITRegBatchNative(t *testing.T) {
 		}
 	}
 }
+
+// regUnmadeInlineSrc gives an inlined callee an object literal escape
+// analysis leaves unmade, whose property the callee reads as a number
+// where it is a string now and then: the exit inside the callee writes
+// the word naming the object to the callee's window, which Go makes the
+// object of, as the frame's own registers' (jitRegMaterializeSpans).
+const regUnmadeInlineSrc = `
+function str(o) { return o.x + "!" }
+function callsGo(n) { var s = 0; for (var i = 0; i < n; i++) s += str(i % 3 ? { x: i } : { x: "k" + i }).length; return s }
+`
+
+// TestJITRegUnmadeInInlined runs regUnmadeInlineSrc with the JIT and
+// without, the interpreter's Go handlers filling the caches (as a
+// verifying build's do), the collector idle and marking: the answers
+// equal. The objects in the inlined callee's window had been left unmade:
+// it read a property of undefined.
+func TestJITRegUnmadeInInlined(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	was := regNativeOn
+	regNativeOn = false
+	t.Cleanup(func() { regNativeOn = was })
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regUnmadeInlineSrc)
+			var got [2]string
+			for i, r := range rts {
+				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("callsGo"))
+				for range 8 {
+					v, err := r.Call(fn, Undefined, []Value{Float(600)})
+					got[i] = regNativeShow(r, v, err)
+				}
+			}
+			if got[0] != got[1] {
+				t.Errorf("with the JIT %q, without %q", got[0], got[1])
+			}
+		})
+	}
+}

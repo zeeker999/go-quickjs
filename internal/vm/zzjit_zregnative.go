@@ -401,12 +401,25 @@ func (r *Runtime) jitRegApplyRecords(f *frame, p *ir.Program, wb int, ctx *abi.C
 // form's: a register that holds the word of one gets the object, made of
 // its home past the window, one for each home, the homes cleared after.
 func (r *Runtime) jitRegMaterialize(f *frame, e *jitRegEntry, wb int) {
+	r.jitRegMaterializeSpans(f, e, wb, nil)
+}
+
+// jitRegMaterializeSpans is jitRegMaterialize, the windows of the callees
+// e's code inlined that an exit inside them wrote too -- spans, each its
+// first slot and its end in the VM's stack -- whose registers name the
+// same objects as the frame's: one made for each home, which every slot
+// naming it, the frame's and the callees', is given.
+func (r *Runtime) jitRegMaterializeSpans(f *frame, e *jitRegEntry, wb int, spans [][2]int) {
 	if e.frame == 0 {
 		return
 	}
 	p := e.p
 	end := min(len(r.stack), wb+p.Regs+e.scratch+e.frame)
-	if !namesVirtual(r.stack[wb:end]) {
+	named := namesVirtual(r.stack[wb:end])
+	for _, sp := range spans {
+		named = named || sp[0] < sp[1] && sp[1] <= len(r.stack) && namesVirtual(r.stack[sp[0]:sp[1]])
+	}
+	if !named {
 		return
 	}
 	type made struct {
@@ -440,6 +453,11 @@ func (r *Runtime) jitRegMaterialize(f *frame, e *jitRegEntry, wb int) {
 	}
 	for i := wb; i < end; i++ {
 		fix(&r.stack[i])
+	}
+	for _, sp := range spans {
+		for i := sp[0]; i < min(sp[1], len(r.stack)); i++ {
+			fix(&r.stack[i])
+		}
 	}
 	for _, m := range objs {
 		for k := range abi.VirtualFields + m.fields {
@@ -766,7 +784,7 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 		// answered, as a native callee's (regPending).
 		rpc := int(ctx.ExitPC)
 		f.pc = regSrc(c, rpc) + 1
-		if v, uerr, ok := r.jitRegInlined(idx, f.cl, e, rpc); ok {
+		if v, uerr, ok := r.jitRegInlined(idx, f.cl, e, rpc, wb); ok {
 			s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: v, err: uerr}
 		}
 	}

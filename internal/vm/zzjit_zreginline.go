@@ -43,8 +43,11 @@ type jitRegInlineLevel struct {
 // code of owner, cl's function's entry, run in context idx, wrote in the
 // contexts past it (abi.LiveInline), and returns what the outermost
 // answered, or false where there are none. at is the register pc of the
-// owner's call the outermost is inlined at.
-func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at int) (Value, error, bool) {
+// owner's call the outermost is inlined at, wb the owner's window: the
+// objects its code did not make, which its frame's registers and the
+// callees' windows may name, are made first, once for both
+// (jitRegMaterializeSpans).
+func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at, wb int) (Value, error, bool) {
 	s := r.jit
 	if idx+1 >= len(s.ssaCtxs) || s.ssaCtxs[idx+1].Live != abi.LiveInline {
 		return Undefined, nil, false
@@ -68,6 +71,13 @@ func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at int
 		c.Live, c.ReturnTo = 0, 0
 	}
 	n := len(levels)
+	if owner.frame != 0 {
+		spans := make([][2]int, 0, n)
+		for _, x := range levels {
+			spans = append(spans, [2]int{x.wb, x.wb + int(x.cl.reg.numRegs)})
+		}
+		r.jitRegMaterializeSpans(nil, owner, wb, spans)
+	}
 	s.unwound += uint64(n)
 	saved := r.stackTop
 	var fbuf [4]*frame
