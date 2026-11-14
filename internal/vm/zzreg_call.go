@@ -1274,12 +1274,17 @@ const (
 	// job from the job queue, its this and new.target the frame's
 	// (regColdGen).
 	regFrameAwaitJob
+	// regFrameGenStep is a generator's, a for-of's step the native code
+	// entered itself (the iter_next handler), its this and new.target the
+	// frame's: a yield, a return or a throw ends the step
+	// (nativeGenEnd), not its caller's call.
+	regFrameGenStep
 )
 
 // regFrameThis is the this and new.target of register frame f, for a stack
 // trace.
 func (r *Runtime) regFrameThis(f *frame) (this, newTarget Value) {
-	if f.regKind == regFrameAwaitJob {
+	if f.regKind == regFrameAwaitJob || f.regKind == regFrameGenStep {
 		return f.this, f.newTarget
 	}
 	this = r.stack[f.base+1]

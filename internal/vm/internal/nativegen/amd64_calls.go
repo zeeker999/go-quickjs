@@ -580,10 +580,14 @@ func (g *nativeGen) ret(undef bool) {
 	noCap, base, open := a.NewLabel(), a.NewLabel(), a.NewLabel()
 	a.CmpMemImm8(RDI, ncDepth, 0)
 	a.Jcc(CondE, base)
+	// A generator's step ends in Go (nativeGenEnd).
+	a.Load(RSI, RDI, ncNF)
+	a.LoadU8(R8, RSI, offFRegKind)
+	a.OpImm(Cmp, R8, regFrameGenStep, false)
+	a.Jcc(CondE, g.exit)
 	// Upvalues open on the frame are closed by Go, as nativeEnd closes
 	// them: a frame of captured registers, or an entered one's, whose
 	// arguments object a sloppy body maps onto its parameters.
-	a.Load(RSI, RDI, ncNF)
 	a.Load(RCX, RDI, ncRC)
 	a.LoadS32(R8, RCX, offRCNcap)
 	a.Op(Test, R8, R8, false)

@@ -184,9 +184,10 @@ func (r *Runtime) nativeRun(f *frame, c *regCode, start int) (Value, error) {
 		if nativeCount {
 			atomic.AddInt64(&nativeExits[op], 1)
 		}
-		if ctx.depth == ctx.cap && ctx.cap < nativeMaxDepth && (op == bytecode.RCallW || op == bytecode.RCallMW || op == bytecode.RCallWT || op == bytecode.RCallMWT) {
-			// A call the frame stack has no room for: the stack grown,
-			// the call tried again, nothing of it done.
+		if ctx.depth == ctx.cap && ctx.cap < nativeMaxDepth && (op == bytecode.RCallW || op == bytecode.RCallMW || op == bytecode.RCallWT || op == bytecode.RCallMWT || op == bytecode.RIterNext) {
+			// A call, or a generator's step, the frame stack has no room
+			// for: the stack grown, the call tried again, nothing of it
+			// done.
 			ctx.grow()
 			continue
 		}
@@ -432,6 +433,10 @@ func (r *Runtime) nativeEnd(s *regState, ctx *nativeCtx, pc int, w bytecode.RIns
 		// Frame d is done: its caller goes on, as rhCallW does after
 		// runReg, or meets the throw.
 		rec := ctx.recs[d-1]
+		if s.f.regKind == regFrameGenStep {
+			s, pc, w = r.nativeGenEnd(s, ctx, &rec, v)
+			continue
+		}
 		nf, rc := s.f, s.c
 		kind := nf.regKind
 		nf.regKind = 0
@@ -472,6 +477,79 @@ func (r *Runtime) nativeEnd(s *regState, ctx *nativeCtx, pc int, w bytecode.RIns
 	}
 	ctx.ip = uintptr(s.c.code) + uintptr(pc)*8
 	return Undefined, false
+}
+
+// nativeGenEnd ends s, the frame of a generator the iter_next handler
+// stepped (regFrameGenStep), where Go has ended it -- a suspension it
+// made (a yield with captures open, a yield*), a return with v, a throw
+// -- as regGenRun, regGenNext and regGenStep end a step, and goes on in
+// the caller as regIterNext does with what the step gave: its caller's
+// state, the pc it goes on at, and its iter_next.
+//
+//go:nocheckptr
+func (r *Runtime) nativeGenEnd(s *regState, ctx *nativeCtx, rec *nativeRec, v Value) (*regState, int, bytecode.RInstr) {
+	f, c := s.f, s.c
+	f.regKind = 0
+	err := s.err
+	s.err = nil
+	g := (*generator)(nativePtr(&rec.gen))
+	raw, done := false, false
+	if sig, ok := err.(*suspendSignal); ok {
+		err = nil
+		n, from := int(c.numRegs), int(c.genFrom)
+		g.pc = uint32(f.savedSP)
+		g.saveWith(f.withScopes)
+		saved := g.vals[: n-from : n-from]
+		kept := r.stack[f.base+from : f.base+n]
+		copy(saved, kept)
+		if ups := f.openUpvalues; len(ups) != 0 || g.saved != nil {
+			regMoveUps(ups, kept, saved)
+			g.keep(nil, nil, ups)
+		}
+		g.delegating = sig.delegate
+		g.state = genSuspendedYield
+		v, raw = sig.value, sig.raw
+		sig.value = Undefined
+	} else {
+		for _, u := range f.openUpvalues {
+			u.close()
+		}
+		g.saved = nil
+		g.state = genCompleted
+		done = true
+	}
+	f.savedSP = 0
+	f.args = nil
+	f.detachSuspended()
+	// The generator's frame and next's.
+	r.frameDepth -= 2
+	r.stackTop = int(rec.saved)
+	nativePop(ctx, rec)
+	caller := r.nativeTop(ctx.st, ctx)
+	retPC := int((rec.retIP - rec.codeBase) / 8)
+	w := regAt(caller.c.code, retPC)
+	st := cursorOf(caller.regs[w.B()])
+	caller.kept.pc = retPC + 1
+	if err == nil && raw && v.IsObject() {
+		// A delegate's own result, which a yield* hands out as it is.
+		res := v
+		var d Value
+		if d, err = r.getValueProp(res, atomDone); err == nil {
+			if done = d.Truthy(); !done {
+				v, err = r.getValueProp(res, atomValue)
+			}
+		}
+	}
+	switch {
+	case err != nil:
+		st.done = true
+		return caller, caller.fail(err), w
+	case done:
+		st.done = true
+		return caller, retPC + 1 + int(w.SC()), w
+	}
+	caller.regs[w.A()] = v
+	return caller, retPC + 1, w
 }
 
 // nativeFillPCs writes the pc of each caller on the native frame stack

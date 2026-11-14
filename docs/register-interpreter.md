@@ -640,7 +640,9 @@ the frame, and gives an entered frame's arguments back. Later additions:
 `x--` as `x++`; a string's or a number's method (`get_method_w`), from
 the realm's cache of their prototypes' data properties (`primProps`), as
 `regGetMethod` reads it; for-of's step over a dense array by the
-intrinsic iterator, its end included; `s.charCodeAt(i)`
+intrinsic iterator, its end included, and over a generator of
+register code suspended at a yield (below, "Generators and async
+functions"); `yield` in a frame that step entered; `s.charCodeAt(i)`
 (`char_code_at`) of a flat string, the built-in read from the same cache;
 BigInt64Array's and BigUint64Array's elements read and written, a BigInt
 held in its Value; Uint8ClampedArray's writes, clamped and rounded to
@@ -1009,6 +1011,21 @@ the allocation of 4 rather than 8 (the tree's keeps its 2 locals), and
   past `end_params`. A call site of a generator function or an async
   function makes its object without the generic call's search
   (`regGenCall`), an async function's first step at once.
+  Natively, the step and the yield are the code's own (nativegen's
+  `genStep` and `genYield`): iter_next over a generator of this realm
+  suspended at a yield, with no captures kept, no arguments and nothing
+  rare, pushes next's frame record and the generator's as `regGenStep`
+  and `regGenRun` write them, copies its window to the stack's top, the
+  caller's state on the native frame stack with the generator
+  (`nativeRec.gen`), and goes on at the yield's continuation, the frame
+  of kind `regFrameGenStep`; the yield copies the window back, pops both
+  frames and goes on past iter_next with the value. Anything else is
+  Go's: a first step, a return, a throw, a yield with captures open on
+  the window, `yield*`; a frame of that kind Go ends, `nativeGenEnd`
+  ends as `regGenRun`, `regGenNext` and `regGenStep` end a step. The
+  two exits a step took (iter_next, then the yield, each in a code
+  entry of its own) and Go's bookkeeping were the step's cost:
+  `generator_for_of` went from 42.7 to 28.8 ns.
 - **An await's job continues in place.** An async function its await's
   job resumes from the job queue (`generator.awaitJob`, a frame of kind
   `regFrameAwaitJob`) goes on in place at an await of a value that is not

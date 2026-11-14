@@ -157,7 +157,9 @@ const nativeMaxDepth = 128
 
 // nativeRec is a native frame's record of its caller: the call's
 // instruction, the caller's top-frame state, the stack top to give back
-// and where the value goes (B times 16).
+// and where the value goes (B times 16, or a for-of's step's A); and for a
+// generator's step the code entered (regFrameGenStep), the generator,
+// which the caller's cursor keeps alive.
 type nativeRec struct {
 	retIP    uintptr
 	regs     uintptr
@@ -169,6 +171,7 @@ type nativeRec struct {
 	saved    int64
 	bOff     int64
 	fv       uintptr
+	gen      uintptr
 }
 
 // The Runtime's and a closureCode's fields the code reads are at offsets

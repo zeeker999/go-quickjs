@@ -22,7 +22,7 @@ var (
 
 // Objects' classes and flags, and typed arrays' element types.
 var (
-	ClassObject, ClassArray, ClassTypedArray, ClassCursor Class
+	ClassObject, ClassArray, ClassTypedArray, ClassCursor, ClassGenerator Class
 
 	objExtensible, objHasExt, objHasData, objHasSparseElements, objSharedElems,
 	objPolyProto, objMappedArguments, objArrayLengthWritable, objHTMLDDA objFlags
@@ -37,7 +37,10 @@ var (
 	elemStrCharCodeAt int32
 
 	regCallEnter, regCallThis, regCallObjThis, regCallOut, regCallLeaf, regLeafArg int32
-	regFrameCall, regFrameEnter                                                    int32
+	regFrameCall, regFrameEnter, regFrameGenStep                                   int32
+
+	// A generator's states.
+	genSuspendedYield, genExecuting int32
 
 	tailCallDepth, linearScanLimit int32
 	hasCacheBits                   uint8
@@ -64,7 +67,8 @@ func loadConsts() {
 	for _, c := range []struct {
 		p    *Class
 		name string
-	}{{&ClassObject, "ClassObject"}, {&ClassArray, "ClassArray"}, {&ClassTypedArray, "ClassTypedArray"}, {&ClassCursor, "ClassCursor"}} {
+	}{{&ClassObject, "ClassObject"}, {&ClassArray, "ClassArray"}, {&ClassTypedArray, "ClassTypedArray"}, {&ClassCursor, "ClassCursor"},
+		{&ClassGenerator, "ClassGenerator"}} {
 		*c.p = Class(k(c.name))
 	}
 	for _, c := range []struct {
@@ -91,7 +95,8 @@ func loadConsts() {
 	}{{&elemStrCharCodeAt, "elemStrCharCodeAt"},
 		{&regCallEnter, "regCallEnter"}, {&regCallThis, "regCallThis"}, {&regCallObjThis, "regCallObjThis"},
 		{&regCallOut, "regCallOut"}, {&regCallLeaf, "regCallLeaf"}, {&regLeafArg, "regLeafArg"},
-		{&regFrameCall, "regFrameCall"}, {&regFrameEnter, "regFrameEnter"},
+		{&regFrameCall, "regFrameCall"}, {&regFrameEnter, "regFrameEnter"}, {&regFrameGenStep, "regFrameGenStep"},
+		{&genSuspendedYield, "genSuspendedYield"}, {&genExecuting, "genExecuting"},
 		{&tailCallDepth, "tailCallDepth"}, {&linearScanLimit, "linearScanLimit"}} {
 		*c.p = int32(k(c.name))
 	}

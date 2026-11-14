@@ -499,3 +499,55 @@ func TestRegNativeExitSlow(t *testing.T) {
 		}
 	}
 }
+
+// TestRegNativeGenStep runs for-of loops over generators of register
+// code, whose steps and yields the native handlers make (genStep,
+// genYield): sums, returns, throws caught in the body, past the loop and
+// by the caller, a break that closes the generator, a next of a running
+// generator, captures, this, arguments, yield*, generators nested and
+// recursing past the native frame stack's first room, stack traces from
+// inside a step, and next replaced, which Go steps.
+func TestRegNativeGenStep(t *testing.T) {
+	nativeCheck(t, `
+		var out = []
+		function* count(n) { for (var i = 0; i < n; i++) yield i; return "r" + n }
+		function sum(it) { var s = 0; for (var v of it) s += v; return s }
+		out.push(sum(count(10)), sum(count(0)), sum(count(1)))
+		function* thrower(n) { for (var i = 0; ; i++) { if (i == n) throw new Error("at " + i); yield i } }
+		function caught(n) { var s = 0; try { for (var v of thrower(n)) s += v } catch (e) { return s + " " + e.message } }
+		out.push(caught(0), caught(3))
+		function* inner(n) { for (var i = 0; i < n; i++) { try { if (i == 2) throw i; yield i } catch (e) { yield "c" + e } } }
+		out.push([...inner(4)].join())
+		var closed = []
+		function* fin() { try { yield 1; yield 2; yield 3 } finally { closed.push("fin") } }
+		function brk() { var r = []; for (var v of fin()) { r.push(v); if (v == 2) break } return r.join() + closed.join() }
+		out.push(brk())
+		function running() { var g = count(5), r = ""; try { for (var v of g) { if (v == 2) g.next() } } catch (e) { r = e.constructor.name } return r }
+		out.push(running())
+		function* caps(n) { var fs = []; for (var i = 0; i < n; i++) { let k = i; fs.push(() => k); yield fs.length } yield fs.map(f => f()).join("") }
+		out.push([...caps(3)].join())
+		var o = { base: 7, *gen(n) { for (var i = 0; i < n; i++) yield this.base + i } }
+		out.push(sum(o.gen(3)))
+		function* args() { for (var i = 0; i < arguments.length; i++) yield arguments[i] }
+		out.push(sum(args(1, 2, 3)))
+		function* params(a, b) { yield a; yield b; yield a + b }
+		out.push(sum(params(3, 4)))
+		function* deleg(n) { yield "a"; yield* count(n); yield* ["x", "y"]; yield "b" }
+		out.push([...deleg(3)].join())
+		function* nest(n) { for (var v of count(n)) for (var w of count(v)) yield v * 10 + w }
+		out.push(sum(nest(5)))
+		function* deep(n) { if (n > 0) for (var v of deep(n - 1)) yield v; yield n }
+		out.push(sum(deep(300)))
+		function* where() { yield new Error("x").stack.split("\n").slice(0, 3).join("|") }
+		function trace() { var r = []; for (var i = 0; i < 3; i++) for (var v of where()) r.push(v); return r[2] }
+		out.push(trace())
+		function* stepped() { for (var i = 0; i < 4; i++) yield i }
+		var g2 = stepped(); g2.next = function () { return { done: this.n > 2, value: this.n++ } }; g2.n = 0
+		out.push(sum(g2), sum(stepped()))
+		function* rets() { var r = yield 1; yield r }
+		out.push([...rets()].map(String).join())
+		out.join("\n")`, `
+		function* count(n) { for (var i = 0; i < n; i++) yield i }
+		function sum(n) { var s = 0; for (var v of count(n)) s += v; return s }
+		String(sum(5000))`, bytecode.RIterNext, bytecode.RYield)
+}

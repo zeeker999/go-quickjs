@@ -527,8 +527,12 @@ func (g *armGen) ret(undef bool) {
 	noCap, base, open := a.NewLabel(), a.NewLabel(), a.NewLabel()
 	g.cmpMemImm(rCtx, ncDepth, 0)
 	a.BCond(EQ, base)
-	// Upvalues open on the frame are closed by Go, as amd64's.
+	// A generator's step ends in Go (nativeGenEnd).
 	a.Load(rS, rCtx, ncNF)
+	a.LoadU8(r8, rS, offFRegKind)
+	a.CmpImm(r8, int64(regFrameGenStep), false)
+	a.BCond(EQ, g.exit)
+	// Upvalues open on the frame are closed by Go, as amd64's.
 	a.Load(rC, rCtx, ncRC)
 	a.LoadS32(r8, rC, offRCNcap)
 	a.Cbnz(r8, open, false)

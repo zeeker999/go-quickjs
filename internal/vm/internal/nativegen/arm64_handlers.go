@@ -793,10 +793,12 @@ func armEmit(v *variant) (*block, error) {
 	extra()
 	// What came later goes last, as on amd64.
 	h(bytecode.RPostDec, func() { g.postStep(FSub) })
+	genStep := a.NewLabel()
 	h(bytecode.RIterNext, func() {
 		// A for-of's step over a dense array by the intrinsic iterator
 		// (iterState.arr): its next element but a hole, the cursor's
-		// index stepped. Anything else is Go's.
+		// index stepped; over a generator, genStep's (arm64_gen.go).
+		// Anything else is Go's.
 		g.regB(rS)
 		g.object(rS, rS)
 		a.LoadU8(rC, rS, offObjClass)
@@ -805,7 +807,7 @@ func armEmit(v *variant) (*block, error) {
 		a.LoadU8(rC, rS, offItDone)
 		a.Cbnz(rC, g.exit, false)
 		a.Load(r8, rS, offItArr)
-		a.Cbz(r8, g.exit, true)
+		a.Cbz(r8, genStep, true)
 		a.Load(rC, rS, offItIdx)
 		// Past the end of an array of no sparse elements, its length: the
 		// cursor done and the loop left, as iterNext leaves it.
@@ -1002,6 +1004,13 @@ func armEmit(v *variant) (*block, error) {
 		a.Load(r8, r8, 8)
 		a.MovRR(rW, rD)
 		g.storeValue()
+	})
+	// A generator's yield in a frame iter_next entered, and that step,
+	// after it (arm64_gen.go).
+	h(bytecode.RYield, func() {
+		g.genYield()
+		a.Bind(genStep)
+		g.genStep()
 	})
 
 	for n, l := range g.exits {

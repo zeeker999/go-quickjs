@@ -178,6 +178,34 @@ var (
 	recRetIP int32
 	recSaved int32
 	recBOff  int32
+	recGen   int32
+
+	// A generator's step (genStep, genYield): the cursor's, the
+	// generator's and its frame's fields.
+	offItIter    int32
+	offItNext    int32
+	offItForIn   int32
+	offGen       int32
+	offGCl       int32
+	offGThis     int32
+	offGCallee   int32
+	offGVals     int32
+	offGPC       int32
+	offGNargs    int32
+	offGSaved    int32
+	offGRare     int32
+	offGState    int32
+	offGDeleg    int32
+	offGReg      int32
+	offGAwaitJob int32
+	offClRealm   int32
+	offRCGenFrom int32
+	offRealmNext int32
+	offFDName    int32
+	offFHandlers int32
+	offFSavedSP  int32
+	offFParams   int32
+	offFThis     int32
 )
 
 // nativeTopFields are the record's fields that the top frame's state is
@@ -360,6 +388,32 @@ func loadOffsets() {
 	recRetIP = off("nativeRec.retIP")
 	recSaved = off("nativeRec.saved")
 	recBOff = off("nativeRec.bOff")
+	recGen = off("nativeRec.gen")
+
+	offItIter = off("iterObject.st") + off("iterState.iter")
+	offItNext = off("iterObject.st") + off("iterState.next")
+	offItForIn = off("iterObject.st") + off("iterState.forIn")
+	offGen = off("generatorObject.g")
+	offGCl = off("generator.cl")
+	offGThis = off("generator.this")
+	offGCallee = off("generator.callee")
+	offGVals = off("generator.vals")
+	offGPC = off("generator.pc")
+	offGNargs = off("generator.nargs")
+	offGSaved = off("generator.saved")
+	offGRare = off("generator.rare")
+	offGState = off("generator.state")
+	offGDeleg = off("generator.delegating")
+	offGReg = off("generator.reg")
+	offGAwaitJob = off("generator.awaitJob")
+	offClRealm = off("closure.realm")
+	offRCGenFrom = off("regCode.genFrom")
+	offRealmNext = off("Realm.genNextFn")
+	offFDName = off("funcData.name")
+	offFHandlers = off("frame.handlers")
+	offFSavedSP = off("frame.savedSP")
+	offFParams = off("frame.paramsOnly")
+	offFThis = off("frame.this")
 
 	nativeTopFields = [][2]int32{
 		{off("nativeRec.regs"), ncRegs},

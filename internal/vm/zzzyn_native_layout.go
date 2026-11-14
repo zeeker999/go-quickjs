@@ -47,6 +47,9 @@ func NativeLayout() (offsets, sizes map[string]uintptr, consts map[string]uint64
 		reflect.TypeFor[iterState](),
 		reflect.TypeFor[Symbol](),
 		reflect.TypeFor[propKey](),
+		reflect.TypeFor[generatorObject](),
+		reflect.TypeFor[generator](),
+		reflect.TypeFor[Realm](),
 	} {
 		sizes[t.Name()] = t.Size()
 		depth := map[string]int{}
@@ -98,6 +101,11 @@ func NativeLayout() (offsets, sizes map[string]uintptr, consts map[string]uint64
 		"ClassArray":      uint64(ClassArray),
 		"ClassTypedArray": uint64(ClassTypedArray),
 		"ClassCursor":     uint64(ClassCursor),
+		"ClassGenerator":  uint64(ClassGenerator),
+
+		"genSuspendedYield": uint64(genSuspendedYield),
+		"genExecuting":      uint64(genExecuting),
+		"regFrameGenStep":   uint64(regFrameGenStep),
 
 		"objExtensible":          uint64(objExtensible),
 		"objHasExt":              uint64(objHasExt),

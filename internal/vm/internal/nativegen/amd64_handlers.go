@@ -913,10 +913,12 @@ func nativeEmit(v *variant) (*block, error) {
 	extra()
 	// What came later goes last, so that it moves none of the above.
 	h(bytecode.RPostDec, func() { g.postStep(SubSD) })
+	genStep := a.NewLabel()
 	h(bytecode.RIterNext, func() {
 		// A for-of's step over a dense array by the intrinsic iterator
 		// (iterState.arr): its next element but a hole, the cursor's
-		// index stepped. Anything else is Go's.
+		// index stepped; over a generator, genStep's (amd64_gen.go).
+		// Anything else is Go's.
 		g.decB(RSI)
 		g.object(RSI, RSI)
 		a.LoadU8(RCX, RSI, offObjClass)
@@ -927,7 +929,7 @@ func nativeEmit(v *variant) (*block, error) {
 		a.Jcc(CondNE, g.exit)
 		a.Load(R8, RSI, offItArr)
 		a.Op(Test, R8, R8, true)
-		a.Jcc(CondE, g.exit)
+		a.Jcc(CondE, genStep)
 		a.Load(RCX, RSI, offItIdx)
 		// Past the end of an array of no sparse elements, its length:
 		// the cursor done and the loop left, as iterNext leaves it.
@@ -1148,6 +1150,13 @@ func nativeEmit(v *variant) (*block, error) {
 		a.LoadIdx(R8, R12, R8, 1, 8)
 		a.MovRR(RAX, RDX)
 		g.storeValue()
+	})
+	// A generator's yield in a frame iter_next entered, and that step,
+	// after it (amd64_gen.go).
+	h(bytecode.RYield, func() {
+		g.genYield()
+		a.Bind(genStep)
+		g.genStep()
 	})
 
 	for n, l := range g.exits {
