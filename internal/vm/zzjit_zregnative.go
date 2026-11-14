@@ -967,6 +967,12 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 			}
 		} else {
 			s.noteRegHost(c, exitPC)
+			if r.jitRegStringAddSeen(r.jitRegLearnedFor(f, e), c, wb, exitPC) {
+				// An addition that met a string, Go's from the next
+				// lowering on, as the stack form's host exit learns it
+				// (jitStringAddSeen).
+				r.jitRegReopt(f.cl, e)
+			}
 			seen := r.jitRegHostSeen(f, c, wb, exitPC)
 			r.jitRegPrivateSeen(f, c, e, wb, exitPC)
 			if r.jitRegBigIntExit(f, e, wb, int(int64(ctx.ExitSite))) {

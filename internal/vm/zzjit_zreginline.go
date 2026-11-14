@@ -268,6 +268,13 @@ func (r *Runtime) jitRegInlineLeft(f *frame, x *jitRegInlineLevel, owner *jitReg
 		s.noteRegHost(c, pc)
 		l := s.regLearnedOf(r.jitRegKeyOf(x.cl))
 		before, failed := l.polyReopt, len(l.failed)
+		// An addition that met a string, learned as at the callee's own
+		// host exit (jitRegStringAddSeen), as the stack form's unwinding
+		// of an inlined level learns it (jitStringAddSeen): Go's from the
+		// next lowering on. Not learned, a closure's s += x inlined had
+		// left native code at each call until the call was no longer
+		// inlined.
+		str := r.jitRegStringAddSeen(l, c, x.wb, pc)
 		seen := r.jitRegHostSeen(f, c, x.wb, pc)
 		next, ran, err := r.regWhole(f, c, x.wb, pc)
 		if !ran {
@@ -287,7 +294,7 @@ func (r *Runtime) jitRegInlineLeft(f *frame, x *jitRegInlineLevel, owner *jitReg
 		// compile, jitLearnedMark), and counted so, each exit had the
 		// code inlining it compiled again for what the interpreter's run
 		// of the callee filled.
-		learned = !before && l.polyReopt || len(l.failed) != failed || seen.elem
+		learned = !before && l.polyReopt || len(l.failed) != failed || seen.elem || str
 		if err != nil {
 			x.threw = true
 			return Undefined, err, learned

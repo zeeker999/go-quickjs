@@ -92,6 +92,28 @@ function appends(n) {
 function main(n) { return perTurn(n) + "," + nested(n) + "," + after(n) + "," + arrows(n) + "," + appends(n) }
 `
 
+// regClosRun runs src's main(n) calls times in each of a native runtime
+// and one without the JIT, failing on any answer but want, and returns the
+// native one. counting clears the JIT's stress settings first
+// (QJS_JIT_STRESS), for a test that counts exits.
+func regClosRun(t *testing.T, src string, n float64, calls int, want string, counting bool) *Runtime {
+	t.Helper()
+	rts := regNativeRuntimes(t, src)
+	if counting {
+		rts[0].jitStress = jitStressConfig{}
+	}
+	for i, r := range rts {
+		fn, _ := r.GetProp(Obj(r.Global()), r.Intern("main"))
+		for range calls {
+			v, err := r.Call(fn, Undefined, []Value{Float(n)})
+			if got := regNativeShow(r, v, err); got != want {
+				t.Fatalf("runtime %d (JIT %v): %q, want %q", i, i == 0, got, want)
+			}
+		}
+	}
+	return rts[0]
+}
+
 // TestJITRegClosures runs regClosSrc's main natively and in a runtime
 // without the JIT, with the collector idle and marking, and checks both
 // give its answer: each turn's closures keep their own bindings, an
@@ -107,19 +129,9 @@ func TestJITRegClosures(t *testing.T) {
 			if marking {
 				jitMarkingForTest(t)
 			}
-			rts := regNativeRuntimes(t, regClosSrc)
-			var got [2]string
-			for i, r := range rts {
-				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("main"))
-				for range 30 {
-					v, err := r.Call(fn, Undefined, []Value{Float(1000)})
-					got[i] = regNativeShow(r, v, err)
-					if got[i] != want {
-						t.Fatalf("runtime %d (JIT %v): %q, want %q", i, i == 0, got[i], want)
-					}
-				}
-			}
-			st := rts[0].RegNativeStats()
+			regClosRun(t, regClosSrc, 1000, 10, want, false)
+			r := regClosRun(t, regClosSrc, 1000, 30, want, true)
+			st := r.RegNativeStats()
 			t.Logf("entries %d, hosts %v, calls of Go %d", st.Entries, st.HostOps, st.GoCalls)
 			if n := st.HostOps["close_regs"]; n > 50 {
 				t.Errorf("close_regs left to Go at %d host exits", n)
@@ -171,18 +183,53 @@ func TestJITRegArrowsOfArrowsThis(t *testing.T) {
 			if marking {
 				jitMarkingForTest(t)
 			}
-			rts := regNativeRuntimes(t, regDerivedArrowsSrc)
-			for i, r := range rts {
-				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("main"))
-				for range 10 {
-					v, err := r.Call(fn, Undefined, []Value{Float(2000)})
-					if got := regNativeShow(r, v, err); got != want {
-						t.Fatalf("runtime %d (JIT %v): %q, want %q", i, i == 0, got, want)
-					}
+			regClosRun(t, regDerivedArrowsSrc, 2000, 10, want, false)
+		})
+	}
+}
+
+// regAppendSrc's closures append to the string their maker captured, once
+// and twice a call, made and called by it each call: inlined there, the
+// addition learned to meet a string at its first host exit, as the
+// callee's own exit learns it, rather than leaving native code at each
+// call until the closure was called instead.
+const regAppendSrc = `
+function once(a, x) { var s = a; var add = function (y) { s += y }; add(x); return s }
+function twice(a, x) { var s = a; var add = function (y) { s += y }; add(x); add(x); return s }
+function main(n) {
+	var c = 0, last = "";
+	for (var i = 0; i < n; i++) {
+		c += once("ab", "<" + (i & 7) + ">").length;
+		last = twice("cd", "[" + (i & 3) + "]");
+		c += last.length;
+	}
+	return c + "," + last;
+}
+`
+
+// TestJITRegCapturedAppendInlined runs regAppendSrc natively and without
+// the JIT, with the collector idle and marking: the same answer, and the
+// closures inlined, their additions learned at their host exits, not
+// called once their exits had counted against inlining them.
+func TestJITRegCapturedAppendInlined(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	const want = "130000,cd[3][3]"
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			regClosRun(t, regAppendSrc, 10000, 10, want, false)
+			r := regClosRun(t, regAppendSrc, 10000, 40, want, true)
+			st := r.RegNativeStats()
+			t.Logf("entries %d, hosts %v, calls of Go %d", st.Entries, st.HostOps, st.GoCalls)
+			for _, f := range r.JITReport() {
+				if f.Name == "add [reg]" && f.Native > 20000 {
+					t.Errorf("the closures called natively %d times, not inlined", f.Native)
 				}
 			}
-			st := rts[0].RegNativeStats()
-			t.Logf("entries %d, hosts %v, calls of Go %d %v", st.Entries, st.HostOps, st.GoCalls, st.GoCallOps)
 		})
 	}
 }
