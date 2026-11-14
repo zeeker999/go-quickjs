@@ -265,9 +265,9 @@ func (r *Runtime) jitRegCached(key jitKey, e *jitRegEntry) {
 // compile handed to the background (jitRegSubmit), installed at a later
 // check (jitRegInstall).
 //
-// frameAt, where not 0, is the program's instruction a loop's header
-// lowers to whose entry a frame waits at (ssa.Func's FrameAt): code for
-// on-stack replacement there (jitRegLoopCode), compiled on the spot.
+// frameAt, where not 0, is the register pc of a loop's header whose entry
+// a frame waits at (ssa.Func's FrameAt), as its frame states name it: code
+// for on-stack replacement there (jitRegLoopCode), compiled on the spot.
 func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool, frameAt int) *jitRegEntry {
 	s := r.jit
 	if !jitCompiles(cl.fn, r.jitBudget()) {
@@ -424,11 +424,9 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 		e.at[rpc] = int32(p.At(uint32(rpc)))
 	}
 	e.unresumed = slices.Clone(f.Unresumed)
-	for _, pc := range f.Unentered {
-		if pc >= 0 && pc < len(p.Origin) {
-			e.unentered = append(e.unentered, int(p.Origin[pc]))
-		}
-	}
+	// The headers, register pcs already (a frame state's PC, as
+	// Unresumed's are).
+	e.unentered = slices.Clone(f.Unentered)
 	// The pools' roots and prototypes escape analysis took, which the
 	// objects it does not make are made with at an exit.
 	rf.fb.keepVirtuals(f.VirtualAsked)

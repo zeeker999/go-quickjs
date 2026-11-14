@@ -873,12 +873,14 @@ func (r *Runtime) jitRegLoopCode(f *frame, c *regCode, e *jitRegEntry, target in
 		return nil
 	}
 	e.osrMiss = 0
-	ipc := e.ipc(target)
-	if ipc <= 0 {
+	if ipc := e.ipc(target); ipc <= 0 {
 		return nil
 	}
 	s := r.jit
-	o := r.jitRegCompile(f.cl, c, e.key, false, ipc)
+	// The header as frame states name it, its register pc (ssa.Func's
+	// FrameAt): the program's instruction never matched one, and the
+	// code compiled for the frame had the entry dropped again.
+	o := r.jitRegCompile(f.cl, c, e.key, false, target)
 	if o == nil || o.code == nil {
 		return nil
 	}

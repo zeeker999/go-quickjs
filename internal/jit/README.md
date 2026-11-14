@@ -253,6 +253,23 @@ live past the instruction it is Go's whole. One that does not call is the
 literal and the read, copied to R[A+1] and R[A] last, for the
 `call_method_w` after it, a leaf's call of the realm's `exec` or `test`.
 
+**Loops, one header each.** Register code's loops test at their end: a
+jump to the test, the body, the test and its branch back to the body, one
+branch a turn for the interpreter, whose back edge -- where on-stack
+replacement enters -- is that branch's, to the body's first instruction.
+Lowered as it is, such a loop has two ways in, the jump's into the test and
+the entry's into the body, and no header every turn passes: what it carries
+was merged at the test too, in phis of no loop's header, which no loop pass
+treats as the loop's. So the lowering puts a copy of the test in place of
+the jump (`compile`'s `loopTest`, `lowerLoopTest`), its branch the other way,
+to the loop's end, as compilers rotate a loop: the body's first instruction
+is the one header, its ways in the entry's and the copy's, as the stack
+form's loops have theirs at their head. The copy's instructions keep the
+test's origins, each origin's together after a `Nop` of the jump's, and
+`ir.Program.Starts` maps a register pc to its own lowering, not the copy
+(`At`). A test that suspends, steps an iterator or is in another handler
+than the jump is not copied.
+
 **The atomicity rule.** An exit anywhere in an origin's instructions runs
 the register instruction again from its start, in the interpreter. So
 nothing may leave once something of it has committed (`Program`'s
@@ -658,11 +675,12 @@ entered so. An exception no handler of the frame's takes ends the frame
 (`regDone`).
 
 A loop whose entry escape analysis dropped (`ssa.Func`'s `Unentered`, by
-register pc: `jitRegEntry`'s `unentered`) has a frame found at its header
+register pc, as its header's frame state names it: `jitRegEntry`'s
+`unentered`) has a frame found at its header
 with no entry at two checks in a row -- each a full budget of back edges,
 or the check made due at once after its code left it -- compile the
-function apart with that entry kept (`ssa.Func`'s `FrameAt`, its objects
-made) and go on in that code, kept beside the function's (`osr`, `osrOf`)
+function apart with that entry kept (`ssa.Func`'s `FrameAt`, the header's
+register pc too, its objects made) and go on in that code, kept beside the function's (`osr`, `osrOf`)
 for the frames that wait there next and let go of with it
 (`jitRegLoopCode`), as the stack form's `jitLearnLoopEntry` has it. A run
 in it stays in it at its exits while the function's code is the one it
@@ -769,7 +787,12 @@ met another value by its cell. An entry whose speculation failed
 any use, where the phi merges nothing but numbers and unboxing it speculates
 nothing, as V8's representation selection takes a phi of Float64 inputs --
 its box made where a use outside the loop needs it, or by an exit
-(`unboxPhis`, `sinkLoopBoxes`).
+(`unboxPhis`, `sinkLoopBoxes`). A phi of boxes of float64s, numeric
+constants and entry slots a guard unboxes already, each box used by the phi
+alone, is a float64 with no other evidence: its box is made once where it
+is, not on each way to it -- a register loop ends where the copy of its
+test ends too, and a sum it carries past its end had been boxed at every
+turn for that phi.
 
 **Integers.** The slot IR computes every number as a double, a bitwise
 operator's ToInt32 of its operands and the conversion of its result back

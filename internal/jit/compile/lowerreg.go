@@ -159,6 +159,95 @@ func (l *regLowering) emit(in ir.Instruction, jump bool) {
 	l.patch = append(l.patch, jump)
 }
 
+// loopTest finds the test of the loop the jump at pc enters: register
+// code's loops test at their end -- jmp to the test, the body, the test
+// and its branch back to the body, which the interpreter runs one branch
+// of each turn -- and the interpreter's back edge, where native code is
+// entered by on-stack replacement, is that branch's, at the body's first
+// instruction. As it is, that loop has two ways in, the test's from the
+// jump and the body's from the entry, and no header that every turn
+// passes but the body's, which the jump bypasses: the builder's loop of
+// the body's header (ssa's back edges, by pc) reached back to the
+// function's start, and the values the loop carries were phis of two
+// blocks, the test's not a header's -- not unboxed past the loop, boxed at
+// every turn for a use after it, and no loop pass saw them as the
+// stack form's, whose loops test at their head, has them. So the test is
+// also lowered in place of the jump (lowerLoopTest), its branch the other
+// way, to the loop's end, as compilers rotate a loop: the body's first
+// instruction is then the header of a loop with one way in, the entry's
+// and the copy's, as the stack form's loops have.
+//
+// t is the test's first register pc, b its branch back to pc+1. Every
+// instruction from t to b is reachable, in the jump's handler, goes on to
+// the next and jumps only forward, and none suspends or is a step Go may
+// take elsewhere (an iterator's).
+func (l *regLowering) loopTest(pc int, reach []bool) (t, b int, ok bool) {
+	rc := l.rc
+	w := rc.Code[pc]
+	if w.Op() != bytecode.RJmp {
+		return 0, 0, false
+	}
+	t = regTarget(pc, int32(w.BC()))
+	if t <= pc+1 || t >= len(rc.Code) {
+		return 0, 0, false
+	}
+	h := rc.HandlerAt(pc)
+	for k := t; k < len(rc.Code); k++ {
+		x := rc.Code[k]
+		if !reach[k] || rc.HandlerAt(k) != h || regGoBranches(x) {
+			return 0, 0, false
+		}
+		switch x.Op() {
+		case bytecode.RIterNext, bytecode.RAwait, bytecode.RYield, bytecode.RYieldStar, bytecode.REndParams, bytecode.RGenEntry, bytecode.RIterResume:
+			return 0, 0, false
+		}
+		succ := regSuccessors(rc, k, x)
+		if len(succ) == 2 && succ[0] == k+1 && succ[1] == pc+1 {
+			return t, k, true
+		}
+		if !slices.Contains(succ, k+1) {
+			return 0, 0, false
+		}
+		for _, s := range succ {
+			if s <= k {
+				return 0, 0, false
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+// lowerLoopTest lowers the jump at pc into the loop whose test is t to b
+// (loopTest) as a copy of the test: a Nop of the jump's, then the test's
+// instructions, of their own origins, their jumps inside it to the copy's,
+// and its branch back to the body made the other way, to the loop's end,
+// past b, so that it goes on into the body, which is next. Where the
+// branch's lowering does not end in a branch to the body, nothing is
+// copied and it reports false.
+func (l *regLowering) lowerLoopTest(pc, t, b int) bool {
+	mark, lits := len(l.code), len(l.lits)
+	l.emit(ir.Instruction{Op: ir.Nop}, false)
+	at := make([]int, b-t+1)
+	for k := t; k <= b; k++ {
+		at[k-t] = len(l.code)
+		l.pc, l.used = k, 0
+		l.lower(k)
+	}
+	l.pc, l.used = pc, 0
+	last := len(l.code) - 1
+	if in := &l.code[last]; in.Op != ir.Branch || !l.patch[last] || in.Target != pc+1 || l.origin[last] != uint32(b) {
+		l.code, l.origin, l.patch, l.lits = l.code[:mark], l.origin[:mark], l.patch[:mark], l.lits[:lits]
+		return false
+	}
+	l.code[last].When, l.code[last].Target = !l.code[last].When, b+1
+	for i := mark; i < len(l.code); i++ {
+		if x := l.code[i].Target; l.patch[i] && x > t && x <= b {
+			l.code[i].Target, l.patch[i] = at[x-t], false
+		}
+	}
+	return true
+}
+
 // regexpLit lowers regexp_lit at pc, w, that calls -- /x/.exec(s) or
 // /x/.test(s), RLitCall -- as the stack form's code is lowered: the
 // literal's RegExp from its pool (ObjectLiteral), its method read
@@ -430,6 +519,9 @@ func lowerRegLits(rc *bytecode.RegCode, fn *bytecode.Function, m lowering, litHo
 			l.emit(ir.Instruction{Op: ir.Nop}, false)
 			continue
 		}
+		if t, b, ok := l.loopTest(pc, reach); ok && l.lowerLoopTest(pc, t, b) {
+			continue
+		}
 		l.lower(pc)
 	}
 	start[n] = len(l.code)
@@ -445,7 +537,11 @@ func lowerRegLits(rc *bytecode.RegCode, fn *bytecode.Function, m lowering, litHo
 			l.code[i].Target = start[t]
 		}
 	}
-	p := &ir.Program{Code: l.code, Origin: l.origin, Maps: make([]ir.StateMap, len(l.code)),
+	starts := make([]int32, n+1)
+	for pc, i := range start {
+		starts[pc] = int32(i)
+	}
+	p := &ir.Program{Code: l.code, Origin: l.origin, Starts: starts, Maps: make([]ir.StateMap, len(l.code)),
 		Regs: rc.NumRegs, Locals: l.scratch + l.most, ParamBase: 2, Params: rc.Params,
 		UpvalueBase: rc.NumRegs, Upvalues: len(fn.Upvalues),
 		ArrowThis:        fn.Kind == bytecode.KindArrow && fn.UsesThis,

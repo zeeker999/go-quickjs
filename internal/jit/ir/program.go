@@ -646,7 +646,15 @@ type Program struct {
 	// Commits): those after it are Generic, which Validate checks. A jump
 	// goes only to the first instruction of an origin, and a Host, which
 	// Go runs as the whole register instruction, is alone in its own.
+	// Origins rise through the program, but where a loop's test is also
+	// lowered before its loop (the compile package's loopTest): the copy's
+	// instructions have the test's origins, each origin's together, after
+	// the jump's into the loop.
 	Origin []uint32
+	// Starts is, for register code's program, the first instruction of
+	// each register pc's lowering, by register pc, and its length past the
+	// last: At's answer, which a copy's origins do not change.
+	Starts []int32
 	// Regs is, for register code's program, how many of its first slots
 	// are the frame's registers: what an exit writes, and what Live is
 	// of. The slots after them, to Locals, are the captured bindings'
@@ -824,7 +832,7 @@ func (p *Program) Footprint() int {
 	if p == nil {
 		return 0
 	}
-	return int(unsafe.Sizeof(*p)) + cap(p.Globals)*4 + cap(p.Origin)*4 + cap(p.Code)*int(unsafe.Sizeof(Instruction{})) +
+	return int(unsafe.Sizeof(*p)) + cap(p.Globals)*4 + cap(p.Origin)*4 + cap(p.Starts)*4 + cap(p.Code)*int(unsafe.Sizeof(Instruction{})) +
 		cap(p.Maps)*int(unsafe.Sizeof(StateMap{})) + cap(p.Live)*8 + cap(p.Handlers)*int(unsafe.Sizeof(Handler{})) + cap(p.HandlerAt)*4 + cap(p.Captured) + cap(p.Assigned)
 }
 
@@ -846,11 +854,31 @@ func (p *Program) At(pc uint32) int {
 		}
 		return -1
 	}
+	if p.Starts != nil {
+		if int(pc) >= len(p.Starts)-1 {
+			return -1
+		}
+		return int(p.Starts[pc])
+	}
 	i, ok := slices.BinarySearch(p.Origin, pc)
 	if !ok {
 		return -1
 	}
 	return i
+}
+
+// copied reports whether instruction pc, the first of its origin's own
+// lowering (Starts), comes after a copy of a loop's test: the instruction
+// before it is outside its origin's own.
+func (p *Program) copied(pc int) bool {
+	if p.Starts == nil || pc <= 0 || pc >= len(p.Origin) {
+		return false
+	}
+	o, q := p.Origin[pc-1], p.Origin[pc]
+	if int(o)+1 >= len(p.Starts) || int(q)+1 >= len(p.Starts) {
+		return false
+	}
+	return (pc-1 < int(p.Starts[o]) || pc-1 >= int(p.Starts[o+1])) && int(p.Starts[q]) == pc
 }
 
 // starts reports whether instruction i is the first of its origin's.
