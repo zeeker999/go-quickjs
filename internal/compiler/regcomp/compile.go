@@ -317,6 +317,9 @@ type gen struct {
 	auxes    map[int]uint32
 	literals [][]bytecode.LitElem
 	objKeys  [][]uint32
+	// sole is the locals bytecode.SoleLocals finds, once soleDone.
+	sole     uint64
+	soleDone bool
 	// objKeysHash is each one's hash (RegCode's ObjKeysHash).
 	objKeysHash []uint64
 	// farNames is the index of each name past 16 bits an instruction
@@ -2402,8 +2405,12 @@ func (g *gen) binary(n *ast.Binary, dst int) int {
 // been evaluated already (a compound assignment's target), or -1.
 func (g *gen) operate(text string, op bytecode.Op, left, right ast.Expr, a, dst, pos int) int {
 	mark := g.top
+	var x uint8
 	if a < 0 {
 		a = g.guard(g.expr(left, -1), right)
+		if g.fresh(left, a) {
+			x |= bytecode.RArithFreshB
+		}
 	}
 	if imm, ok := imm16(right); ok {
 		if rop, ok := immOps[text]; ok {
@@ -2414,14 +2421,76 @@ func (g *gen) operate(text string, op bytecode.Op, left, right ast.Expr, a, dst,
 		}
 	}
 	b := g.expr(right, -1)
+	if g.fresh(right, b) {
+		x |= bytecode.RArithFreshC
+	}
 	d := g.result(mark, dst)
 	g.at(pos)
 	if rop, ok := regOps[text]; ok {
-		g.emit(bytecode.MakeR(rop, 0, r16(d), r16(a), r16(b)))
+		if g.soleReg(d) {
+			x |= bytecode.RArithOwnA
+		}
+		g.emit(bytecode.MakeR(rop, x, r16(d), r16(a), r16(b)))
 	} else {
 		g.emit(bytecode.MakeR(bytecode.RBin, uint8(op), r16(d), r16(a), r16(b)))
 	}
 	return d
+}
+
+// soleReg reports whether r is the register of a local that holds its
+// values alone (bytecode.SoleLocals): an operator whose result it takes
+// may give back the BigInt it held (RArithOwnA), as the tree's store of
+// an operator's result to such a local does.
+func (g *gen) soleReg(r int) bool {
+	if !g.isBinding(r) {
+		return false
+	}
+	if !g.soleDone {
+		g.sole, g.soleDone = bytecode.SoleLocals(g.fn), true
+	}
+	if g.sole == 0 {
+		return false
+	}
+	k := g.slotOf(r)
+	return k >= 0 && k < 64 && g.sole&(1<<uint(k)) != 0
+}
+
+// fresh reports whether r, the register e was just evaluated into, holds
+// a result of arithmetic nothing else has: e is an arithmetic or bitwise
+// operator of two operands, or a negation, compiled straight into r, a
+// temporary, by the instruction emitted last. An operator of a BigInt
+// may give the block of such an operand back once it has made its own
+// result (the VM's bigRelease), as the tree's nodes give back what their
+// operand nodes made (treeFreshA). A conditional or anything else whose
+// last instruction is an arithmetic one may leave another value in r.
+func (g *gen) fresh(e ast.Expr, r int) bool {
+	switch n := e.(type) {
+	case *ast.Binary:
+		switch n.Op {
+		case "+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>", ">>>":
+		default:
+			return false
+		}
+	case *ast.Unary:
+		if n.Op != "-" && n.Op != "~" {
+			return false
+		}
+	default:
+		return false
+	}
+	if g.isBinding(r) || r < regParams || len(g.code) == 0 {
+		return false
+	}
+	w := g.code[len(g.code)-1]
+	if int(w.A()) != r {
+		return false
+	}
+	switch w.Op() {
+	case bytecode.RAdd, bytecode.RSub, bytecode.RMul, bytecode.RBin,
+		bytecode.RBitAnd, bytecode.RBitOr, bytecode.RBitXor, bytecode.RShl, bytecode.RShr, bytecode.RUShr, bytecode.RUnary:
+		return true
+	}
+	return false
 }
 
 func (g *gen) logical(n *ast.Logical, dst int) int {

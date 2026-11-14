@@ -41,6 +41,20 @@ type ROp uint8
 // (RAdd).
 const RAddAppend uint8 = 1
 
+// RArithFreshB and RArithFreshC mark, in X of an RAdd, RSub or RMul, an
+// operand register that holds a result of arithmetic nothing else has,
+// made just before (regcomp's fresh): an operator of two BigInts may give
+// its block back once it has made its own result. A tier that ignores the
+// marks leaves the block to the collector, which is always right.
+const (
+	RArithFreshB uint8 = 2
+	RArithFreshC uint8 = 4
+	// RArithOwnA marks register A as a local that holds its values alone
+	// (SoleLocals): the BigInt it held may be given back once the
+	// operator has made its result, which the local holds alone after.
+	RArithOwnA uint8 = 8
+)
+
 // MakeR builds an instruction from its fields.
 func MakeR(op ROp, x uint8, a, b, c uint16) RInstr {
 	return RInstr(uint64(op) | uint64(x)<<8 | uint64(a)<<16 | uint64(b)<<32 | uint64(c)<<48)
