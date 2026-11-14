@@ -158,6 +158,11 @@ func (r *Runtime) jitRegCallSample(e *regCallCache) {
 // returns its code: compiled at the jitRegSamples-th sample, nil before
 // and where it is not compiled.
 func (r *Runtime) jitRegHot(cl *closure, c *regCode) *jitRegEntry {
+	if r.jit != nil && r.jit.inFlight() {
+		// A check: compiles in the background that are done installed
+		// (jitDrain).
+		r.jitDrain()
+	}
 	cc := cl.closureCode
 	if cc.jitRegRefused {
 		return nil

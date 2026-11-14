@@ -56,6 +56,10 @@ func regNativeRuntimes(t *testing.T, src string) [2]*Runtime {
 	for i := range rts {
 		rts[i] = New(Config{JIT: i == 0})
 		t.Cleanup(rts[i].Close)
+		// Compiled on the spot: the tests count native work done once
+		// the code is asked for, as the stack form's do
+		// (jitRuntimeForTest); one of compiles in the background sets it.
+		rts[i].jitStress.background = false
 		if _, err := rts[i].Run(prog); err != nil {
 			t.Fatal(err)
 		}

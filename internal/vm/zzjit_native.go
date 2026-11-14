@@ -1270,6 +1270,14 @@ type jitState struct {
 	// that its exit finishes, as goPending is the stack form's.
 	regRuns    []jitRegRun
 	regPending jitGoPending
+	// regJobs are the register compiles in the background, in the order
+	// they were handed over, and regPendingJobs each by its function's
+	// key (zzjit_zregbg.go).
+	regJobs        []*jitRegJob
+	regPendingJobs map[jitKey]*jitRegJob
+	// regSnapMisses counts the register compiles in the background whose
+	// build asked what their snapshot was not asked, built at the install.
+	regSnapMisses uint64
 	// regResumes counts the suspended frames of register code entered in
 	// their native code where they resumed (jitRegEnter from regGenRun).
 	regResumes uint64

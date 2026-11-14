@@ -121,6 +121,11 @@ func (r *Runtime) jitRegForAs(cl *closure, c *regCode, callee bool) *jitRegEntry
 		return nil
 	}
 	key := r.jitKeyOf(cl.fn)
+	if s.regPendingJobs[key] != nil {
+		// Being compiled in the background (jitRegSubmit): installed at
+		// a later check.
+		return nil
+	}
 	if e := s.regCache[key]; e != nil {
 		if !e.invalid && !e.hostOnly && !e.stale {
 			return e
@@ -136,22 +141,37 @@ func (r *Runtime) jitRegForAs(cl *closure, c *regCode, callee bool) *jitRegEntry
 	if e == nil {
 		return nil
 	}
+	r.jitRegCached(key, e)
+	return e
+}
+
+// jitRegCached keeps e, the code of the function whose key is key, in the
+// cache, its link the code's.
+func (r *Runtime) jitRegCached(key jitKey, e *jitRegEntry) {
+	s := r.jit
 	if s.regCache == nil {
 		s.regCache = map[jitKey]*jitRegEntry{}
 	}
 	s.regCache[key] = e
 	s.regLinkUpdate(key, e)
-	return e
 }
 
 // jitRegCompile is jitRegFor's compile (step A6 of 3a-3): LowerReg, the
 // SSA build with jitRegFeedback, Optimize, the backend, the code placed in
-// the JIT's arena. A refusal is an entry with no code; nil is no room.
+// the JIT's arena. A refusal is an entry with no code; nil is no room, or a
+// compile handed to the background (jitRegSubmit), installed at a later
+// check (jitRegInstall).
 func (r *Runtime) jitRegCompile(cl *closure, c *regCode, callee bool) *jitRegEntry {
 	s := r.jit
 	if !jitCompiles(cl.fn, r.jitBudget()) {
 		// Too large for the JIT's memory, as the stack form's compile
 		// finds it (jitCompiles): no room, at every ask.
+		return nil
+	}
+	background := r.jitInBackground(cl.fn)
+	if background && s.jobsFull() {
+		// As many compiles in the background as there may be: asked again
+		// at a later sample, as the stack form's compile waits.
 		return nil
 	}
 	e := &jitRegEntry{}
@@ -186,6 +206,19 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, callee bool) *jitRegEnt
 	r.jitRegSeenFeedback(cl, c)
 	e.mark = jitFeedbackMark(cl)
 	rf := r.jitRegFeedbackFor(cl, p)
+	if background {
+		// Asked ahead here, built on a worker (zzjit_zregbg.go).
+		snap := jitRegSnapshotOf(rf, p)
+		if !snap.s.bad {
+			j := &jitRegJob{cl: cl, c: c, key: r.jitKeyOf(cl.fn), realm: r.Realm, callee: callee, e: e, p: p, rf: rf, snap: snap,
+				w: jit.GetWorkspace(), enc: jitEncoding, opts: mir.Settings()}
+			r.jitRegSubmit(j)
+			return nil
+		}
+		// What the questions took back cannot be put back: built here,
+		// from the feedback as it is now, its lists as the asking left
+		// them.
+	}
 	w := jit.GetWorkspace()
 	defer jit.PutWorkspace(w)
 	s.compileBegin()
@@ -195,46 +228,43 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, callee bool) *jitRegEnt
 		e.refusal = fmt.Sprintf("%v: %v", jitRefused, err)
 		return e
 	}
-	s.inlined += uint64(len(f.Inlined))
-	// The register frame: its window's registers are its locals, in place
-	// at the context's Locals; its captured bindings past them, in their
-	// cells; its scratch slots past those, which are only values.
-	f.FrameLocals = p.Regs
-	f.Scratch = p.Locals - (p.UpvalueBase + p.Upvalues)
-	e.scratch = f.Scratch
-	f.ThisSlot = -1
-	f.Params, f.StartOnly = p.ParamBase+p.Params, false
-	f.Cells = p.Cells
-	// Native callers call it (jitRegFeedback's NativeCalls), its window
-	// made past theirs: its call entry makes its frame (mir's callEntry).
-	f.CallEntry = true
-	looped := map[uint32]bool{}
-	for _, en := range f.Entries {
-		if en.OSR {
-			looped[p.Origin[en.PC]] = true
-		}
-	}
+	looped := jitRegShape(f, p)
 	ssa.Optimize(f)
 	mc, err := mir.CompileWith(&w.MIR, f, jitEncoding, mir.Settings())
 	if err != nil {
 		e.refusal = fmt.Sprintf("%v: %v", jitRefused, err)
 		return e
 	}
+	if !r.jitRegPlace(e, c, rf, f, mc, looped) {
+		return nil
+	}
+	return e
+}
+
+// jitRegPlace places mc, e's code, the backend's of f, built from c's
+// register code lowered with its feedback rf, in the JIT's arena, and
+// fills e from what the build found; it reports false where the JIT has
+// no room for it now.
+func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f *ssa.Func, mc *mir.Code, looped map[uint32]bool) bool {
+	s := r.jit
+	p := e.p
 	need := jit.CodeFootprint(mc)
 	s.budget = r.jitBudget()
 	if s.regBytes()+need > s.budget/2 || !s.makeRoom(need) {
 		// Half the budget at most, the stack form's code the rest, while
 		// only tests run register code natively.
-		return nil
+		return false
 	}
 	code, err := jit.NewSSACode(s.arena, mc)
 	if err != nil {
 		if errors.Is(err, jit.ErrUnavailable) {
 			s.unavailable = true
 		}
-		return nil
+		return false
 	}
+	s.inlined += uint64(len(f.Inlined))
 	e.code, e.bytes = code, need
+	e.scratch = f.Scratch
 	e.keeps = f.Keeps
 	s.ssaKeeps = max(s.ssaKeeps, f.Keeps)
 	if f.HomesEnd != 0 {
@@ -255,7 +285,7 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, callee bool) *jitRegEnt
 	// and the function the feedback asked are not.
 	e.keep = rf.fb.keep()
 	e.keep.cl, e.keep.fn, e.keep.prog = nil, nil, nil
-	return e
+	return true
 }
 
 // regBytes is what the register code in the cache takes.
@@ -1057,7 +1087,12 @@ func (r *Runtime) RegNativeCall(fnv Value, args []Value, osr bool) RegNativeResu
 	if r.jit == nil || r.jit.regCache[r.jitKeyOf(cl.fn)] == nil || r.jit.regCache[r.jitKeyOf(cl.fn)].invalid {
 		compiled = true
 	}
+	// Compiled here, on the spot: the call runs the code it asks for,
+	// whatever the runtime's compiles in the background.
+	bg, stressBg := r.jitBackground, r.jitStress.background
+	r.jitBackground, r.jitStress.background = false, false
 	e := r.jitRegFor(cl, c)
+	r.jitBackground, r.jitStress.background = bg, stressBg
 	switch {
 	case e == nil:
 		return plain("no room")

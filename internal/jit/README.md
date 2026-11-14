@@ -433,6 +433,29 @@ kept on its template's `closureCode` (`jitReg`). A callee native callers
 call that has no code is compiled at their first call of it through Go
 (`jitRegNativeCallee`): they make no sample of it.
 
+**Compiling in the background.** A runtime made `WithJITBackground`, or
+`QJS_JIT_STRESS`'s `background=K`, compiles register code as the stack
+form's (see [Its tier-up](#its-tier-up)), in three steps
+(`zzjit_zregbg.go`): the runtime's goroutine lowers the code and asks its
+feedback ahead (`jitRegSnapshotOf`) -- every question the build may ask,
+at each instruction the methods the build asks of its op (`jitSnapOps`),
+those asked by a state's PC (`Resumed`, `EntryGeneric`) at each register
+pc, of the function and of the callees it may inline, each a snapshot of
+its own, to `jitSnapDepth` -- into a `jitRegSnapshot`, which has
+`jitRegFeedback`'s methods alone, generated from them (`snapgen`,
+`zzjit_snapshot_gen.go`), so that the build finds the same optional
+interfaces it would; a worker builds, optimizes and compiles from it
+(`jitRegJob`), touching nothing of the runtime's; and the runtime's
+goroutine installs it at a later check -- a sample (`jitRegHot`), at a call
+or a back edge -- putting back what the questions appended to the
+feedback's lists (`replay`) and placing the code as the compile on the spot
+(`jitRegPlace`). A question the snapshot was not asked is a miss
+(`jitSnapMiss`): the compile is built at the install instead
+(`regSnapMisses` counts them). Meanwhile the function runs in the
+interpreter, or in the code the compile replaces, and is not compiled again
+(`regPendingJobs`); its native callers call it through Go. Top-level code is
+compiled on the spot, as the stack form's is.
+
 **Compiling again.** Code is compiled again, in place, when:
 
 - a guard failed: the code is invalidated (`jitRegInvalidate`), its link
@@ -2349,8 +2372,7 @@ go with it:
 The switch-over needs, on register code: the feedback the tables in
 [Feedback](#feedback) list as not answered yet, call frequencies first (from
 the feedback dispatcher), and a loop's steps of a generator resumed natively
-(`GenSteps`); the feedback snapshot, for compiles in the background; the
-`-jitcode` hook.
+(`GenSteps`); the `-jitcode` hook.
 Then it removes:
 
 - `compile.LowerSSA`, `LowerSSAHot`, `LowerSSAInline`, `LowerSSAForward` and
