@@ -124,6 +124,8 @@ func (r *Runtime) JITReport() []JITFunction {
 		switch {
 		case e.code != nil && e.invalid:
 			f.Status = "invalid"
+		case e.code != nil && e.life != nil && e.life.entrySlow:
+			f.Status = "slow"
 		case e.code != nil:
 			f.Status = "native"
 		default:
@@ -139,7 +141,7 @@ func (r *Runtime) JITReport() []JITFunction {
 			if link := s.regLinks[k]; link != nil {
 				f.Native += link.in
 			}
-			f.Hosts, f.Guards, f.Ended = st.hosts, st.guards, st.ended
+			f.Hosts, f.Guards, f.Ended, f.Declined = st.hosts, st.guards, st.ended, l.slowCalls
 			f.GoCalls, f.Work, f.Reopts = st.goCalls, st.work, int(l.reopts)
 		}
 		out = append(out, f)

@@ -5,6 +5,7 @@ package vm
 import (
 	"fmt"
 	"slices"
+	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
@@ -679,6 +680,13 @@ func (r *Runtime) jitRegEnter(f *frame, cl *closure, c *regCode, base, start int
 		r.jitDrain()
 		e = cl.closureCode.jitReg
 	}
+	if e != nil && e.life.entrySlow && start == 0 {
+		// Code that does not pay (jitRegStretchWork): the interpreter runs
+		// the call, until it is retried.
+		if r.jitRegRetrySlow(e); e.life.entrySlow {
+			return r.runReg(f, c, start)
+		}
+	}
 	if e == nil || e.invalid || e.code == nil || !r.jitEnabled {
 		if e != nil && e.code == nil {
 			// Let go of by the cache (regLetGo).
@@ -747,10 +755,11 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 			e.life.osrWork += r.jitRegTierWork(n)
 		}
 	}
-	if e == nil || !e.goesOn {
+	if e == nil || !e.goesOn || e.life.loopSlow {
+		// Or code whose runs begun at a loop do not pay (loopSlow).
 		return target
 	}
-	if _, ok := e.loopEntry(target); !ok {
+	if e = r.jitRegLoopCode(f, c, e, target); e == nil {
 		return target
 	}
 	if forced {
@@ -772,6 +781,56 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 	}
 	// Unreachable: code that returns a value has a return of one.
 	panic("vm: native code returned where its register code has no return")
+}
+
+// jitRegLoopCode is the code f, running c, goes on in at the header of its
+// loop at register pc target, e being its function's: e where it has an
+// entry there; or the code compiled for frames waiting at a loop whose
+// entry escape analysis dropped from e (unentered), as the stack form's
+// jitLearnLoopEntry and osrEntry have it: a frame found there with no
+// entry at two checks in a row -- each a full budget of back edges, or
+// the check made due at once after its code left it -- has the function
+// compiled apart with that loop's entry kept (ssa.Func's FrameAt, its
+// objects made), and goes on in that code, kept beside e (osr) for the
+// frames that wait there next. nil where there is none.
+func (r *Runtime) jitRegLoopCode(f *frame, c *regCode, e *jitRegEntry, target int) *jitRegEntry {
+	if _, ok := e.loopEntry(target); ok {
+		return e
+	}
+	if o := e.osr; o != nil && !o.invalid && o.code != nil {
+		if _, ok := o.loopEntry(target); ok {
+			return o
+		}
+	}
+	if e.invalid || !slices.Contains(e.unentered, target) {
+		return nil
+	}
+	if at := uintptr(unsafe.Pointer(f)); e.osrMiss != at || e.osrMissPC != target {
+		e.osrMiss, e.osrMissPC = at, target
+		return nil
+	}
+	e.osrMiss = 0
+	ipc := e.ipc(target)
+	if ipc <= 0 {
+		return nil
+	}
+	s := r.jit
+	o := r.jitRegCompile(f.cl, c, e.key, false, ipc)
+	if o == nil || o.code == nil {
+		return nil
+	}
+	if old := e.osr; old != nil {
+		s.regHeld -= old.bytes
+		old.dropped = true
+		s.regClose(old)
+	}
+	o.osrOf, e.osr = e, o
+	s.regHeld += o.bytes
+	s.osrLearned++
+	if _, ok := o.loopEntry(target); ok {
+		return o
+	}
+	return nil
 }
 
 // findReturns finds the returns of e's register code rc that a frame the

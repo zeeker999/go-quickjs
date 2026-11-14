@@ -52,7 +52,9 @@ function loop(n) {
 	s := rts[0].jit
 	f, ok := regReportOf(rts[0], "loop")
 	t.Logf("went on %d; loop %+v", s.wentOn, f)
-	if !ok || f.Status != "native" {
+	if !ok || f.Status != "native" && f.Status != "slow" {
+		// Slow: its stretches, half of them a turn and a call of Go, may
+		// not pay (jitRegStretchWork); it went on natively until then.
 		t.Fatalf("loop not compiled: %+v", f)
 	}
 	if s.wentOn == 0 {
@@ -228,5 +230,42 @@ function g(n) { return f(n) }
 	e := cl.closureCode.jitReg
 	if e == nil || e.code == nil || e.life.starts == 0 {
 		t.Fatalf("the call did not install and enter the code: %+v", e)
+	}
+}
+
+// TestJITRegOSRAtDroppedEntry runs osrSetup's sum -- objects escape
+// analysis leaves unmade carried across its loop, which drops the loop's
+// entry -- as the stack form's TestJITLearnsLoopEntry does: called often,
+// its code is compiled without the entry, and a call that leaves the loop
+// at a turn with no entry after must have the frame go on natively all the
+// same: found twice at the header with no entry, the function is compiled
+// apart with the entry kept (jitRegLoopCode), as jitLearnLoopEntry has it.
+// Before, the frame ran the rest of the loop in the interpreter.
+func TestJITRegOSRAtDroppedEntry(t *testing.T) {
+	rts := regNativeRuntimes(t, osrSetup)
+	r := rts[0]
+	r.jitStress = jitStressConfig{}
+	r.SetJITWarmUp(1, 1)
+	for _, round := range osrRounds("sum", "") {
+		var got [2]string
+		for i, rt := range rts {
+			v, err := rt.Run(compileForTest(t, round))
+			got[i] = regNativeShow(rt, v, err)
+		}
+		if got[0] != got[1] {
+			t.Fatalf("%s: with the JIT %q, without %q", round, got[0], got[1])
+		}
+	}
+	fv, _ := r.GetProp(Obj(r.Global()), r.Intern("sum"))
+	e := fv.Object().fn().closure.closureCode.jitReg
+	if e == nil {
+		t.Fatalf("sum not compiled")
+	}
+	t.Logf("unentered %v, loops %v, osr %v, learned %d", e.unentered, e.loops, e.osr != nil, r.jit.osrLearned)
+	if len(e.unentered) == 0 {
+		t.Skipf("sum's code kept every loop's entry")
+	}
+	if e.osr == nil || r.jit.osrLearned == 0 {
+		t.Errorf("a frame at a loop whose entry was dropped never had code with it")
 	}
 }
