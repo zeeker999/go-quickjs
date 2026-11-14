@@ -13,6 +13,7 @@ import (
 // as one made once is. Counted per closure, each was tried and given up on
 // at every call, then made with a frame.
 func TestPureMissPerTemplate(t *testing.T) {
+	t.Parallel()
 	r := New(Config{})
 	defer r.Close()
 	v, err := r.Run(compileForTest(t, `
