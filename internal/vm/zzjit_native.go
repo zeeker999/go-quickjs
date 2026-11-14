@@ -1027,6 +1027,10 @@ type jitState struct {
 	// wholeLeft counts the instructions Go ran whole for native code that
 	// did not go on natively (jitRegWhole), for tests (RegNativeStats').
 	wholeLeft uint64
+	// regGoOps counts register code's calls of Go that may run script by
+	// what they made (jitRegGoCallKey), while the JIT reports
+	// (RegNativeStats' GoCallOps).
+	regGoOps map[jitRegGoKey]uint64
 	// byFn is cache by its functions' addresses (entryFor).
 	byFn map[jitFnAddr]jitFnEntry
 	// links are the functions' links (jitLink), by the same keys.

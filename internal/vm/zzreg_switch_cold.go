@@ -259,7 +259,7 @@ func (r *Runtime) regStepNext(st *iterState) (Value, bool, error) {
 // made at once, x op y of the call's width, as the tree's wrapCall makes
 // it (wrapShort), and the call passed over -- a built-in that has nothing
 // else to do; anything else the operator's value as ever, for the call.
-func (r *Runtime) regColdWrap(c *regCode, k *regKept, w bytecode.RInstr, regs *[1 << 16]Value) error {
+func (r *Runtime) regColdWrap(cl *closure, c *regCode, k *regKept, w bytecode.RInstr, regs *[1 << 16]Value) error {
 	op := regStackOp[bytecode.ROp(regAuxAt(c, k.pc-1))&127]
 	a, b := regs[w.B()], regs[w.C()]
 	if a.isShortBig() && b.isShortBig() {
@@ -270,6 +270,13 @@ func (r *Runtime) regColdWrap(c *regCode, k *regKept, w bytecode.RInstr, regs *[
 					regs[w.A()] = v
 					regs[cw.B()] = v
 					k.pc++
+					if r.jitOn() {
+						// The call it passed over, its site's cache filled
+						// as the call would fill it, for the JIT, which
+						// makes the call natively (jitRegFeedback's
+						// Intrinsic).
+						regCallSiteNative(cl, cw, fv.Object(), fd, r.Realm)
+					}
 					return nil
 				}
 			}
@@ -312,4 +319,15 @@ func regGenCursor(st *iterState) *generator {
 // (the verifier checks each far register an instruction names).
 func regFar(regs *[1 << 16]Value, i uint32) *Value {
 	return (*Value)(unsafe.Add(unsafe.Pointer(regs), uintptr(i)*unsafe.Sizeof(Value{})))
+}
+
+// regCallSiteNative fills the cache of call w's site, of cl, with o, fd its
+// function data, a built-in of realm, as the call path fills it
+// (regCallSlow), where it holds nothing.
+func regCallSiteNative(cl *closure, w bytecode.RInstr, o *Object, fd *funcData, realm *Realm) {
+	calls := cl.regCalls
+	if uint(w.C()) >= uint(len(calls)) || calls[w.C()].callee != nil || fd.native == nil || fd.bound || fd.realm != nil && fd.realm != realm {
+		return
+	}
+	calls[w.C()] = regCallCache{callee: o, kind: regCallNative}
 }

@@ -281,6 +281,9 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 	slices.Sort(e.loops)
 	e.findReturns(c.rc)
 	e.unresumed = slices.Clone(f.Unresumed)
+	// The pools' roots and prototypes escape analysis took, which the
+	// objects it does not make are made with at an exit.
+	rf.fb.keepVirtuals(f.VirtualAsked)
 	// What the code reads by address, its feedback's keep; the closure
 	// and the function the feedback asked are not.
 	e.keep = rf.fb.keep()
@@ -522,6 +525,10 @@ func (r *Runtime) jitRegGoOnAt(f *frame, c *regCode, e *jitRegEntry, wb, rpc, at
 func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *abi.Context, ret Value) (next, pc int, v Value, done bool, err error, native bool) {
 	s := r.jit
 	exitPC := int(ctx.ExitPC)
+	if ctx.Loop != 0 && ctx.ExitKind != abi.ExitReturn && exitPC < len(c.rc.Code) && regAt(c.code, exitPC).Op() == bytecode.RCallMW {
+		// Inside a loop of a built-in's call: Go goes on with it.
+		return r.jitRegLoopLeft(f, c, e, wb, ctx)
+	}
 	switch ctx.ExitKind {
 	case abi.ExitReturn:
 		return 0, 0, ret, true, nil, false
@@ -532,16 +539,21 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 		// again at the next ask, from what the interpreter learns.
 		s.guards++
 		r.jitRegMaterialize(f, e, wb)
+		learned := false
 		if int64(ctx.ExitSite) < 0 {
 			// An entry's speculation, at a loop's header or the start: the
 			// entry's, as the stack form's code learns it (EntryGeneric).
 			r.jitRegEntrySeen(f, exitPC)
-		} else if !r.jitRegBigIntSeen(f, e, wb, int(int64(ctx.ExitSite))) {
+		} else if learned = r.jitRegBigIntSeen(f, e, wb, int(int64(ctx.ExitSite))); !learned {
 			// An operator of BigInts it learned is not generic: the code
 			// compiled again makes it of them (jitBigIntNote).
 			r.jitRegDeoptSeen(f, c, e, wb, exitPC)
 		}
-		r.jitRegInvalidate(f.cl, e)
+		if learned {
+			r.jitRegInvalidateLearned(f.cl, e)
+		} else {
+			r.jitRegInvalidate(f.cl, e)
+		}
 		s.interpreted++
 		return 0, exitPC, Undefined, false, nil, false
 	case abi.ExitHost:
@@ -565,6 +577,7 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 		} else {
 			s.noteRegHost(c, exitPC)
 			seen := r.jitRegHostSeen(f, c, wb, exitPC)
+			r.jitRegPrivateSeen(f, c, e, wb, exitPC)
 			if r.jitRegBigIntExit(f, e, wb, int(int64(ctx.ExitSite))) {
 				// A generic operator that met BigInts, which the code
 				// compiled again calls Go for (ssa.GoArith).
@@ -843,11 +856,21 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	}
 	switch {
 	case op == bytecode.RCallW && kind == 0, op == bytecode.RCallMW && kind == abi.GoCallMethod, op == bytecode.RNewW && kind == abi.GoCallNew:
+	case op == bytecode.RCallWT && kind == 0, op == bytecode.RCallMWT && kind == abi.GoCallMethod:
+		// A call in tail position native code makes while the stack is
+		// shallow, as rhCallWT makes the ordinary call there.
+		if r.frameDepth >= tailCallDepth {
+			return false
+		}
 	case op == bytecode.RLit && kind == abi.GoCallMethod && w.X()&bytecode.RLitCall != 0:
 		// regexp_lit's call, of the method its expansion read, on its
 		// literal's RegExp, of its one argument (compile's regexpLit).
 		argc = 1
-	case op == bytecode.RGetProp && kind == abi.GoCallGet, op == bytecode.RSetProp && kind == abi.GoCallSet:
+	case op == bytecode.RGetProp && kind == abi.GoCallGet, op == bytecode.RSetProp && kind == abi.GoCallSet,
+		(op == bytecode.RGetMethod || op == bytecode.RGetMethodW) && kind == abi.GoCallGet:
+		// get_method's and get_method_w's too, a megamorphic site's miss
+		// (ssa's megamorphic read): its value the expansion's, which puts it
+		// and the receiver in their registers after the call.
 		// A property's read or write whose site found an accessor the code
 		// does not inline nor call natively (ssa.AccessorSite's call of
 		// Go): made as the interpreter makes it, through the site's cache,
@@ -855,6 +878,7 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 		f.pc = regSrc(c, rpc) + 1
 		last, shared := s.ssaCtx, s.ssaSharedGen
 		s.goCalls++
+		r.noteRegGoCall(w, false, Value{})
 		v, err := r.jitRegPropertyMade(f, w, Atom(ctx.GoOp>>abi.GoOpIndexShift), jitGoArg(ctx, 0), jitGoArg(ctx, 1))
 		s.ssaCtx = last
 		if s.ssaSharedGen != shared {
@@ -899,10 +923,11 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	}
 	at := 0
 	this := Undefined
-	if op == bytecode.RCallMW {
+	if op.MethodCall() {
 		this, at = jitGoArg(ctx, 0), 1
 	}
 	callee := jitGoArg(ctx, at)
+	r.noteRegGoCall(w, false, callee)
 	r.stack[top] = callee
 	r.stack[top+1] = this
 	for i := range argc {
@@ -942,8 +967,12 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	}
 	if err == nil && r.stopped == nil {
 		// What the call called, which the code may call natively once
-		// compiled again (jitRegCallSeen).
+		// compiled again (jitRegCallSeen), or make a loop of its own
+		// (jitRegForEachSeen).
 		r.jitRegCallSeen(f, c, run.e, rpc, callee)
+		if op == bytecode.RCallMW {
+			r.jitRegForEachSeen(f, run.e, rpc, callee, this, jitGoArg(ctx, at+1), argc)
+		}
 	}
 	if err != nil || r.stopped != nil || run.e.invalid {
 		s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: v, err: err}
@@ -1022,6 +1051,7 @@ func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int)
 		}
 	}
 	s.goCalls++
+	r.noteRegGoCall(regAt(c.code, rpc), true, Value{})
 	last, shared := s.ssaCtx, s.ssaSharedGen
 	goCallDepth := s.goCallDepth
 	s.goCallDepth = r.frameDepth + 1
@@ -1111,10 +1141,15 @@ func (r *Runtime) regFinishCall(f *frame, c *regCode, wb, rpc int, v Value, err 
 	if err == nil {
 		dest := int(w.B())
 		switch w.Op() {
-		case bytecode.RInstanceOf, bytecode.RTypeof, bytecode.RGetProp:
+		case bytecode.RInstanceOf, bytecode.RTypeof, bytecode.RGetProp, bytecode.RGetMethod:
 			// R[A]'s: a getter's, called for get_prop (an accessor
 			// inlined, jitRegInlined), as typeof's and instanceof's.
 			dest = int(w.A())
+		case bytecode.RGetMethodW:
+			// R[A]'s, and the receiver to R[A+1], as get_method_w puts
+			// them.
+			dest = int(w.A())
+			r.stack[wb+dest+1] = r.stack[wb+int(w.B())]
 		case bytecode.RSetProp:
 			// A setter's result, dropped.
 			return k.pc, true, nil
@@ -1159,6 +1194,12 @@ type RegNativeStats struct {
 	Unwound, Resumed uint64
 	// HostOps is Hosts by the register instruction Go ran whole.
 	HostOps map[string]uint64
+	// GoCallOps is the calls of Go native code made that may run script,
+	// by the register instruction and what it called -- a built-in by its
+	// name, a function as "function" or, where it had code native callers
+	// may call, "function with code" -- counted while the runtime reports
+	// (SetJITReport).
+	GoCallOps map[string]uint64
 	// WholeLeft counts the instructions Go ran whole for native code,
 	// called from it, that it finished at an exit (jitRegWhole).
 	WholeLeft uint64
@@ -1172,7 +1213,67 @@ func (r *Runtime) RegNativeStats() RegNativeStats {
 	}
 	return RegNativeStats{Entries: s.ssaEntries, Hosts: s.hosts, Guards: s.guards, Polls: s.budgets,
 		Interpreted: s.interpreted, Records: s.ssaRecords, Materialized: s.materialized, GoCalls: s.goCalls,
-		Unwound: s.unwound, Resumed: s.resumed, HostOps: maps.Clone(s.regHostOps), WholeLeft: s.wholeLeft}
+		Unwound: s.unwound, Resumed: s.resumed, HostOps: maps.Clone(s.regHostOps), WholeLeft: s.wholeLeft,
+		GoCallOps: s.regGoOpsByName()}
+}
+
+// jitRegGoKey is what a call of Go register code made made
+// (RegNativeStats' GoCallOps): the register instruction and, for a call,
+// what it called.
+type jitRegGoKey struct {
+	op     bytecode.ROp
+	whole  bool
+	callee string
+}
+
+// noteRegGoCall counts, while s reports, a call of Go of register
+// instruction w that made what k says, callee the function a call called.
+func (r *Runtime) noteRegGoCall(w bytecode.RInstr, whole bool, callee Value) {
+	s := r.jit
+	if !s.reporting {
+		return
+	}
+	k := jitRegGoKey{op: w.Op(), whole: whole}
+	if callee.IsObject() {
+		switch fd := callee.Object().fn(); {
+		case fd == nil:
+			k.callee = "object"
+		case fd.native != nil:
+			k.callee = fd.name
+			if k.callee == "" {
+				k.callee = "built-in"
+			}
+		case fd.closure != nil && !fd.bound && r.jitRegHas(fd.closure):
+			k.callee = "function with code"
+		case fd.closure != nil && !fd.bound:
+			k.callee = "function"
+		default:
+			k.callee = "bound"
+		}
+	}
+	if s.regGoOps == nil {
+		s.regGoOps = map[jitRegGoKey]uint64{}
+	}
+	s.regGoOps[k]++
+}
+
+// regGoOpsByName is regGoOps by a name of each key.
+func (s *jitState) regGoOpsByName() map[string]uint64 {
+	if len(s.regGoOps) == 0 {
+		return nil
+	}
+	m := make(map[string]uint64, len(s.regGoOps))
+	for k, n := range s.regGoOps {
+		name := k.op.String()
+		if k.whole {
+			name = "whole " + name
+		}
+		if k.callee != "" {
+			name += "->" + k.callee
+		}
+		m[name] += n
+	}
+	return m
 }
 
 // noteRegHost counts a host exit at register pc rpc of c by its register

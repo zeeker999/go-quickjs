@@ -122,7 +122,7 @@ func (f *jitRegFeedback) regCallTargets(pc int, w bytecode.RInstr, argc int, met
 	}
 	if l != nil {
 		for _, x := range l.nativeCalls {
-			if x.pc == rpc && (x.pool != nil) == newW {
+			if x.pc == rpc && (x.pool != nil) == newW && !x.forEach {
 				add(x.obj, x.cl, x.cl.reg, x.pool, x.byCode)
 			}
 		}
@@ -181,7 +181,7 @@ func (r *Runtime) jitRegCallSeen(f *frame, c *regCode, e *jitRegEntry, rpc int, 
 	var o *Object
 	var cl *closure
 	switch w.Op() {
-	case bytecode.RCallW, bytecode.RCallMW:
+	case bytecode.RCallW, bytecode.RCallMW, bytecode.RCallWT, bytecode.RCallMWT:
 		calls := f.cl.regCalls
 		if uint(w.C()) >= uint(len(calls)) {
 			return false

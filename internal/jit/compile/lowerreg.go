@@ -1058,16 +1058,23 @@ func (l *regLowering) lower(pc int) {
 		// no yield), and its resumption enters the code past it.
 		l.emit(ir.Instruction{Op: ir.Host}, false)
 	case bytecode.RCallWT, bytecode.RCallMWT:
-		// A call in tail position: the interpreter's, which makes it as
-		// the ordinary call while the stack is shallow and gives the frame
-		// to the callee deeper (the VM's rhCallWT), so that native code
-		// keeps no frame a tail call would have given up; the frame is left
-		// to it there (regWhole runs none), and ends after it.
-		host()
-	case bytecode.RGetPrivate, bytecode.RSetPrivate:
-		// A private member's read or write: Go's, native code going on
-		// after it.
-		host()
+		// A call in tail position: made as the ordinary call while the
+		// stack is shallow, natively or by Go, as the interpreter's
+		// rhCallWT makes it, native code going on after it (ir's Tail);
+		// deeper, where the frame is given to the callee, the interpreter's
+		// (regWhole runs none), so that native code keeps no frame a tail
+		// call would have given up, and the frame ends after it.
+		l.emit(ir.Instruction{Op: ir.Host, Extra: int(w.X()), When: op == bytecode.RCallMWT, Window: true, Tail: true, Left: reg(a), Dest: int(b)}, false)
+	case bytecode.RGetPrivate:
+		// A private member's read, R[A] = R[B].#R[C]: a property read of
+		// the key the register holds (ir.Instruction's Private), as the
+		// stack form's get_private, for the shapes its site met; Go's,
+		// native code going on after it, wherever the key or the shape is
+		// another (the VM's privateProperty).
+		l.emit(ir.Instruction{Op: ir.PropertyRead, Left: reg(b), Dest: int(a), Key: l.name(uint16(l.rc.Aux[pc])), Third: reg(w.C()), Private: true}, false)
+	case bytecode.RSetPrivate:
+		// R[A].#R[C] = R[B], a writable field's write, as the read.
+		l.emit(ir.Instruction{Op: ir.PropertyWrite, Left: reg(a), Right: reg(b), Key: l.name(uint16(l.rc.Aux[pc])), Third: reg(w.C()), Private: true}, false)
 	default:
 		if !op.Cold() {
 			panic(fmt.Sprintf("jit: no register lowering for %v", op))
@@ -1166,9 +1173,42 @@ func (l *regLowering) lowerCold(pc int, w bytecode.RInstr) {
 	case bytecode.RRestParam, bytecode.RNewTarget:
 		// Go's, from the frame (ir's Frame).
 		l.emit(ir.Instruction{Op: ir.Host, Frame: true, Dest: int(a)}, false)
+	case bytecode.RWrap:
+		// x op y, the second argument of the asUintN or asIntN call right
+		// after it: the operator alone, the call made after it as any
+		// call, which native code makes of BigInts held in their values
+		// as it makes BigInt.asUintN(w, x op y) of the stack form's code
+		// (ssa/bigint.go) -- the interpreter's wrap's way when the callee
+		// is another, never passing the call over, so that native code
+		// goes on after it.
+		o, ok := regWrapOperator(l.rc, pc)
+		if !ok {
+			l.emit(l.hostAt(pc), false)
+			break
+		}
+		l.emit(ir.Instruction{Op: ir.Binary, Operator: o, Left: reg(b), Right: reg(w.C()), Dest: int(a)}, false)
 	default:
 		l.emit(l.hostAt(pc), false)
 	}
+}
+
+// regWrapOperator is the operator of rc's wrap at pc (its Aux's
+// operation's), or false for one it does not know.
+func regWrapOperator(rc *bytecode.RegCode, pc int) (ir.Operator, bool) {
+	if pc >= len(rc.Aux) {
+		return 0, false
+	}
+	switch op := bytecode.ROp(rc.Aux[pc] & 127); op {
+	case bytecode.RAdd:
+		return ir.Add, true
+	case bytecode.RSub:
+		return ir.Sub, true
+	case bytecode.RMul:
+		return ir.Mul, true
+	case bytecode.RBitAnd, bytecode.RBitOr, bytecode.RBitXor, bytecode.RShl, bytecode.RShr:
+		return ir.BitAnd + ir.Operator(op-bytecode.RBitAnd), true
+	}
+	return 0, false
 }
 
 // hostAt is the Host of the register instruction at pc, which Go runs

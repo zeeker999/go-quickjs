@@ -112,6 +112,25 @@ func (r *Runtime) JITReport() []JITFunction {
 		}
 		out = append(out, f)
 	}
+	for k, e := range s.regCache {
+		// Register code's, its name marked so: what it compiled, what it
+		// refused and why.
+		fn := k.Value()
+		if fn == nil {
+			continue
+		}
+		f := jitFunctionOf(fn)
+		f.Name += " [reg]"
+		switch {
+		case e.code != nil && e.invalid:
+			f.Status, f.Native = "invalid", 1
+		case e.code != nil:
+			f.Status, f.Native = "native", 1
+		default:
+			f.Status, f.Reason = "refused", e.refusal
+		}
+		out = append(out, f)
+	}
 	for k, why := range s.skipped {
 		fn := k.Value()
 		if fn == nil || s.cache[jitKey{k, s.rt.jitRealmKey()}] != nil {

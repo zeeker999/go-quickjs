@@ -157,6 +157,9 @@ func (f *jitRegFeedback) regLitProperty(pc int, w bytecode.RInstr, op ir.Op) (rp
 // cases hold, is megamorphic; a read whose cache never filled searches the
 // receiver's own table (Scan).
 func (f *jitRegFeedback) Property(pc int) (ssa.PropertySite, bool) {
+	if w, op, ok := f.at(pc); ok && (w.Op() == bytecode.RGetPrivate || w.Op() == bytecode.RSetPrivate) && f.p.Code[pc].Private {
+		return f.privateProperty(pc, op)
+	}
 	rpc, key, cache, write, _, plain, ok := f.propertyAt(pc)
 	if !ok {
 		return ssa.PropertySite{}, false
@@ -191,6 +194,70 @@ func (f *jitRegFeedback) Property(pc int) (ssa.PropertySite, bool) {
 		site.Scan = true
 	}
 	return site, true
+}
+
+// privateProperty is Property's site for get_private's or set_private's
+// read or write, the program's instruction pc, lowered to op, as the stack form's (jitFeedback's
+// privateProperty): the property of the key its site's cache (Aux's high
+// 16 bits) met it under -- a symbol each evaluation of the class mints,
+// which the code checks the key's register holds (ssa.PropertySite's
+// Private) -- in the objects of the shapes the cache holds of it, each an
+// own data property, a write's writable: the entry's first, the rest its
+// cases. A cache that holds none -- or whose first is another evaluation's
+// key's -- answers nothing, and the site is Go's, whose read or write
+// fills the cache (regGetPrivate, regSetPrivate) for the code compiled
+// next.
+func (f *jitRegFeedback) privateProperty(pc int, op ir.Op) (ssa.PropertySite, bool) {
+	fb := f.fb
+	rpc := int(f.p.Origin[pc])
+	if fb.cl == nil || rpc >= len(f.rc.Aux) {
+		return ssa.PropertySite{}, false
+	}
+	site := int(f.rc.Aux[rpc] >> 16)
+	if site == 0 || site >= len(fb.cl.ic) {
+		return ssa.PropertySite{}, false
+	}
+	write := op == ir.PropertyWrite
+	var cases []propCache
+	own := func(e *propCache) {
+		sh := e.shape
+		if sh == nil || sh == noShape || sh == dictShape || e.ownShape != sh || e.getter || e.idx < 0 || e.idx >= sh.n || sh.loose {
+			return
+		}
+		if p := sh.keys[e.idx]; p.isAccessor() || p.flags&(propDeleted|propUninit) != 0 || write && p.flags&propWritable == 0 {
+			return
+		}
+		cases = append(cases, propCache{shape: sh, idx: e.idx})
+	}
+	c := &fb.cl.ic[site]
+	own(c)
+	if p := c.poly; p != nil {
+		for i := range p.n {
+			own(&p.entries[i])
+		}
+	}
+	if len(cases) == 0 {
+		return ssa.PropertySite{}, false
+	}
+	atom := cases[0].shape.keys[cases[0].idx].key
+	sym := fb.r.atoms.symbol(atom)
+	if sym == nil {
+		return ssa.PropertySite{}, false
+	}
+	// Of the first's key alone: an object of another evaluation's shape is
+	// Go's, whose brand check throws.
+	cases = slices.DeleteFunc(cases, func(c propCache) bool { return c.shape.keys[c.idx].key != atom })
+	ps := ssa.PropertySite{Key: uint32(atom), Private: uintptr(unsafe.Pointer(sym))}
+	k := fb.keep()
+	for i, c := range cases {
+		k.shapes = append(k.shapes, remember(c.shape))
+		if i == 0 {
+			ps.Shape, ps.Index = uintptr(unsafe.Pointer(c.shape)), c.idx
+			continue
+		}
+		ps.Cases = append(ps.Cases, ssa.PropertyCase{Shape: uintptr(unsafe.Pointer(c.shape)), Index: c.idx})
+	}
+	return ps, true
 }
 
 // StringProperty is ssa.StringPropertyFeedback's: a method's read whose
@@ -576,7 +643,9 @@ func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
 	if rpc < len(f.rc.Marks) && f.rc.Marks[rpc]&bytecode.RMarkTail != 0 {
 		return nil
 	}
-	argc, method := int(w.X()), w.Op() == bytecode.RCallMW
+	// A call in tail position (tail_call_w, tail_call_method_w) is made as
+	// the ordinary call, where the stack is shallow (ir's Tail).
+	argc, method := int(w.X()), w.Op().MethodCall()
 	n := argc + 1
 	if method {
 		n++
@@ -786,11 +855,11 @@ func (f *jitRegFeedback) Leaf(pc int) (uintptr, bool) {
 // before its call, or learns at its calls of Go.
 func (f *jitRegFeedback) methodCall(pc int, method bool) (*Object, int, bool) {
 	w, op, ok := f.at(pc)
-	want := bytecode.RCallW
+	want, tail := bytecode.RCallW, bytecode.RCallWT
 	if method {
-		want = bytecode.RCallMW
+		want, tail = bytecode.RCallMW, bytecode.RCallMWT
 	}
-	if !ok || op != ir.Host || !f.p.Code[pc].Window || w.Op() != want {
+	if !ok || op != ir.Host || !f.p.Code[pc].Window || w.Op() != want && w.Op() != tail {
 		return nil, 0, false
 	}
 	if rpc := int(f.p.Origin[pc]); rpc < len(f.rc.Marks) && f.rc.Marks[rpc]&bytecode.RMarkTail != 0 {
@@ -851,10 +920,83 @@ func (f *jitRegFeedback) Intrinsic(pc int) (ssa.Intrinsic, bool) {
 	if n > jitMathArgs {
 		return ssa.Intrinsic{}, false
 	}
-	if fd := o.fn(); fd == nil || fd.native == nil || fd.mathOp == mathBigInt || fd.mathOp == mathAsIntN || fd.mathOp == mathAsUintN {
+	fd := o.fn()
+	if fd == nil || fd.native == nil {
 		return ssa.Intrinsic{}, false
 	}
+	if fd.mathOp == mathBigInt || fd.mathOp == mathAsIntN || fd.mathOp == mathAsUintN {
+		// BigInt's that native code makes (bigint.go in ssa), as the stack
+		// form's (jitBigIntIntrinsic): BigInt(x) of one argument, plain;
+		// BigInt.asUintN(n, x) or asIntN's whose width n the window's
+		// register is given as a constant from 0 to 64 before the call,
+		// on the way to it alone (regConstOperand).
+		k := ssa.Intrinsic{Callee: uintptr(unsafe.Pointer(o))}
+		switch {
+		case plain:
+			if fd.mathOp != mathBigInt || n != 1 {
+				return ssa.Intrinsic{}, false
+			}
+			k.Op, k.Plain = ssa.OpBigOfF64, true
+		case n == 2 && fd.mathOp != mathBigInt:
+			width, ok := regConstOperand(f.p, pc, f.p.Code[pc].Left.Slot+2)
+			if !ok || width != math.Trunc(width) || width < 0 || width > 64 {
+				return ssa.Intrinsic{}, false
+			}
+			k.Op, k.Fn = ssa.OpZextW, int(width)
+			if fd.mathOp == mathAsIntN {
+				k.Op = ssa.OpSextW
+			}
+		default:
+			return ssa.Intrinsic{}, false
+		}
+		f.fb.keep().holders = append(f.fb.keep().holders, o)
+		return k, true
+	}
 	return f.fb.mathIntrinsic(o, n, plain)
+}
+
+// regConstOperand is the number p's instruction pc, a window's call, finds
+// in slot, its window's register: a constant the program copies there
+// before it, with nothing between that may write the slot -- what writes
+// only its own register, an operation, a call's window or an instruction
+// Go runs whole, writes another -- nor jumps or is jumped to, nor an entry,
+// nor a handler: what every path to the call reads there. It reports
+// whether it is one.
+func regConstOperand(p *ir.Program, pc, slot int) (float64, bool) {
+	q := pc - 1
+	for ; q >= 0; q-- {
+		in := &p.Code[q]
+		switch {
+		case in.Op == ir.Jump, in.Op == ir.Branch, in.Op == ir.IterStep, in.Op == ir.Call,
+			in.Op == ir.Host && !in.Window && !in.Whole:
+			return 0, false
+		}
+		if in.Dest == slot {
+			break
+		}
+	}
+	if q < 0 {
+		return 0, false
+	}
+	in := &p.Code[q]
+	if in.Op != ir.Copy || in.Left.Slot >= 0 || in.Left.Literal.Kind != ir.Number {
+		return 0, false
+	}
+	into := func(t int) bool { return t > q && t <= pc }
+	for k := range p.Code {
+		if t := &p.Code[k]; (t.Op == ir.Jump || t.Op == ir.Branch || t.Op == ir.IterStep) && into(t.Target) {
+			return 0, false
+		}
+	}
+	for _, h := range p.Handlers {
+		if into(int(h.PC)) {
+			return 0, false
+		}
+	}
+	if slices.ContainsFunc(p.Entries, into) {
+		return 0, false
+	}
+	return math.Float64frombits(in.Left.Literal.Bits), true
 }
 
 // Literal is ssa.LiteralFeedback's: the literal the program's instruction

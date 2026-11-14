@@ -263,6 +263,11 @@ func (b *builder) forEachAt(pc int) (ForEachSite, bool) {
 		calls[0].Argc != 1 && calls[0].Argc != 2 || b.fb.Generic(pc) || pc+1 >= len(b.p.Code) || !reachable(b.p, pc+1) {
 		return ForEachSite{}, false
 	}
+	if cs, ok := b.callSlotsOf(pc, calls[0].Argc, true); !ok || b.p.Code[pc].Tail || b.p.IsCaptured(cs.dest) {
+		// Register code's result in a register a closure captures, which
+		// the loop's many writes of it would store through its cell: Go's.
+		return ForEachSite{}, false
+	}
 	f, ok := b.fb.(ForEachFeedback)
 	if !ok {
 		return ForEachSite{}, false
@@ -425,9 +430,11 @@ func (b *builder) forEachCall(blk *Block, pc int, fp forEachPlan) {
 	typed := mark&abi.LoopTyped != 0
 	reduce := kind == abi.LoopReduce
 	argc := b.callsAt(pc)[0].Argc
-	sp := b.p.Locals + b.p.Maps[pc].Depth
-	dest := b.p.Locals + b.p.Maps[pc+1].Depth - 1
-	recv, fn, cb := b.read(sp-argc-2, blk), b.read(sp-argc-1, blk), b.read(sp-argc, blk)
+	// Its operands where the call's form has them: the stack form's on the
+	// operand stack, register code's in its window (callSlots).
+	cs, _ := b.callSlotsOf(pc, argc, true)
+	dest := cs.dest
+	recv, fn, cb := b.read(cs.recv, blk), b.read(cs.fn, blk), b.read(cs.arg, blk)
 	// Constants, made where they are used: constIn puts its constant first
 	// in its block, before the phis an operand's read makes there.
 	constant := func(blk *Block, c ir.Value) *Value {
@@ -545,7 +552,7 @@ func (b *builder) forEachCall(blk *Block, pc int, fp forEachPlan) {
 	third := undefined(blk)
 	switch {
 	case argc == 2:
-		third = b.read(sp-1, blk)
+		third = b.read(cs.arg+1, blk)
 	case reduce:
 		third = element(blk, call, from, true)
 		from = f.newValue(blk, OpConstF64, Float64)
@@ -571,7 +578,7 @@ func (b *builder) forEachCall(blk *Block, pc int, fp forEachPlan) {
 		whole = undefined(blk)
 	}
 	if whole != nil {
-		b.write(dest, blk, whole)
+		b.assign(dest, blk, whole)
 	}
 	loop := f.newValue(blk, OpLoopMark, None)
 	loop.Const = ir.Value{Bits: uint64(mark)<<32 | uint64(base-b.root.p.Locals+1)}
@@ -678,13 +685,13 @@ func (b *builder) forEachCall(blk *Block, pc int, fp forEachPlan) {
 				to := at(yes, st, OpLength, Float64, out)
 				at(yes, st, OpElemStore, None, at(yes, st, OpArrayOf, Ptr, out), to, b.read(base+loopElem, yes)).Index = StoreFresh
 			case abi.LoopSome:
-				b.write(dest, yes, constant(yes, ir.Bool(true)))
+				b.assign(dest, yes, constant(yes, ir.Bool(true)))
 			case abi.LoopEvery:
-				b.write(dest, yes, constant(yes, ir.Bool(false)))
+				b.assign(dest, yes, constant(yes, ir.Bool(false)))
 			case abi.LoopFind:
-				b.write(dest, yes, b.read(base+loopElem, yes))
+				b.assign(dest, yes, b.read(base+loopElem, yes))
 			case abi.LoopFindIndex:
-				b.write(dest, yes, boxF(yes, k))
+				b.assign(dest, yes, boxF(yes, k))
 			}
 		}
 	}
@@ -711,12 +718,12 @@ func (b *builder) forEachCall(blk *Block, pc int, fp forEachPlan) {
 		cell := f.newValue(cont, OpCallCell, Source, mk)
 		made := f.newValue(cont, OpKept, Tagged, cell, mk)
 		made.Shadow = cell
-		b.write(dest, cont, made)
+		b.assign(dest, cont, made)
 	}
 	done := f.newValue(cont, OpLoopMark, None)
 	done.Const = ir.Value{}
 	if reduce {
-		b.write(dest, cont, b.read(base+loopThis, cont))
+		b.assign(dest, cont, b.read(base+loopThis, cont))
 	}
 }
 
@@ -3309,7 +3316,9 @@ func (b *builder) hostOf(pc int) bool {
 			return true
 		}
 		_, ok := b.property(pc)
-		return !ok
+		// Register code's private member Go reads or writes from native
+		// code where native code does not (whole), which goes on after it.
+		return !ok && !(b.p.Code[pc].Private && b.wholeAt(pc))
 	case ir.BindingRead:
 		_, ok := b.global(pc)
 		return !ok
@@ -3347,8 +3356,11 @@ func (b *builder) hostOf(pc int) bool {
 		// of one part.
 		return b.fb != nil && b.fb.Generic(pc) && !b.goCalls()
 	case ir.FieldDefine:
+		// One whose definition is not planned Go makes from native code
+		// (whole), which goes on after it: no exit, whose block would have
+		// no state.
 		_, ok := b.define(pc)
-		return !ok
+		return !ok && !b.wholeAt(pc)
 	case ir.Rethrow:
 		return b.generic(pc)
 	case ir.ArgumentRead:
@@ -3969,6 +3981,11 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 		result := b.cur.base + b.p.Code[pc].Dest
 		if accessor.Setter {
 			result = -1
+		} else if b.p.IsCaptured(b.p.Code[pc].Dest) {
+			// A result to a register a closure captures, which its cell
+			// holds: the inlined frame's return writes the slot, not the
+			// cell, which a call's own result stores (assign).
+			return nil, false
 		}
 		return b.inlineFrame(site, calls, givenCalls, total, result, pc)
 	}
@@ -3978,7 +3995,12 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 		// plain call, a method's or a construction -- its result the
 		// call's register.
 		if !in.Window || !site.Window || isAccessor || site.Argc != in.Extra || site.Method != in.When || site.Restart ||
-			site.Forward || site.Arguments || site.ReadsArguments || site.LexThis || site.Captured != nil || site.ThisSlot >= 0 || site.Params < 2 {
+			site.Forward || site.Arguments || site.ReadsArguments || site.LexThis || site.Captured != nil || site.ThisSlot >= 0 || site.Params < 2 ||
+			b.p.IsCaptured(in.Dest) {
+			// Nor one whose result is to a register a closure captures,
+			// which its cell holds: the inlined frame's return writes the
+			// slot, not the cell, which a call's own result stores
+			// (assign).
 			return nil, false
 		}
 		if site.Construct && (site.Pool == 0 || site.Method || b.f.Keeps >= b.f.keepLimit() || !returnsWindowReceiver(site.Program)) {
@@ -4688,8 +4710,20 @@ func (b *builder) inlineCallback(body *Block, fr *frame, ops []*Value, argSlot i
 		fr.init[s] = undefined
 	}
 	fr.args, fr.argSlot = ops[2:], argSlot
-	for i := 0; i < site.Params && i < len(fr.args); i++ {
-		fr.init[i] = fr.args[i]
+	if site.Window {
+		// A register callee's frame is its window: the function in its
+		// register 0, the receiver in 1, the arguments from 2, as
+		// inlineWindowCall lays a call's out.
+		fr.init[0], fr.init[1] = ops[1], ops[0]
+		for i, a := range fr.args {
+			if 2+i < site.Params && 2+i < len(fr.init) {
+				fr.init[2+i] = a
+			}
+		}
+	} else {
+		for i := 0; i < site.Params && i < len(fr.args); i++ {
+			fr.init[i] = fr.args[i]
+		}
 	}
 	if site.ThisSlot >= 0 && site.LexThis {
 		// An arrow the root makes: the root's own this, not the loop's.
@@ -5742,10 +5776,6 @@ func (b *builder) intrinsic(pc int) (Intrinsic, bool) {
 			return Intrinsic{}, false
 		}
 	default:
-		return Intrinsic{}, false
-	}
-	if b.p.Code[pc].Window && (k.Op == OpZextW || k.Op == OpSextW || k.Op == OpBigOfF64) {
-		// Of the stack form's operands alone.
 		return Intrinsic{}, false
 	}
 	n := k.args()
@@ -7622,6 +7652,12 @@ func (b *builder) instruction(blk *Block, pc int) {
 		}
 		site, ok := b.property(pc)
 		if !ok {
+			if in.Private && b.whole(blk, pc, in, guard) {
+				// Register code's private member Go reads or writes from
+				// native code, which goes on after it: a site whose cache
+				// holds no own field of its key.
+				break
+			}
 			blk.ExitKind = ir.HostExit
 			blk.State = state()
 			blk.State.addUse()
@@ -8273,7 +8309,14 @@ func (b *builder) instruction(blk *Block, pc int) {
 		if in.Op == ir.Host && in.Whole && b.whole(blk, pc, in, guard) {
 			break
 		}
-		if in.Tail {
+		if in.Tail && in.Window {
+			// Register code's call in tail position: deep in the stack,
+			// where the interpreter gives the frame to the callee, it
+			// leaves for the interpreter to make (OpTailRoom); shallower,
+			// the ordinary call, its result the instruction's register.
+			room := guard(OpTailRoom, None, ir.HostExit)
+			room.Index = b.cur.depth
+		} else if in.Tail {
 			// Deep in the stack the frame is given up, where it holds no
 			// captured local: native code makes a call of the function
 			// itself a jump to its start, and, in a native callee's frame,
@@ -8460,15 +8503,11 @@ func (b *builder) instruction(blk *Block, pc int) {
 // leaves at the call, Go finishing it there. It reports whether it made
 // the call.
 func (b *builder) whole(blk *Block, pc int, in ir.Instruction, guard func(Op, Type, ir.ExitKind, ...*Value) *Value) bool {
+	if !b.wholeAt(pc) {
+		return false
+	}
 	p := b.p
-	if b.cur != b.root || !b.goCalls() || p.Origin == nil || pc+1 >= len(p.Code) || p.Origin[pc+1] == p.Origin[pc] ||
-		pc > 0 && p.Origin[pc-1] == p.Origin[pc] {
-		return false
-	}
-	reads, n, dest, ok := in.WholeOperands(p.Regs)
-	if !ok {
-		return false
-	}
+	reads, n, dest, _ := in.WholeOperands(p.Regs)
 	f := b.f
 	args := make([]*Value, n)
 	for i := range args {
@@ -8489,6 +8528,19 @@ func (b *builder) whole(blk *Block, pc int, in ir.Instruction, guard func(Op, Ty
 		b.reloadAfterCall(blk)
 	}
 	return true
+}
+
+// wholeAt reports whether whole makes the instruction at pc a call of Go
+// that runs it whole: at the root, its origin's only instruction, its
+// operands its register instruction's own.
+func (b *builder) wholeAt(pc int) bool {
+	p := b.p
+	if b.cur != b.root || !b.goCalls() || p.Origin == nil || pc+1 >= len(p.Code) || p.Origin[pc+1] == p.Origin[pc] ||
+		pc > 0 && p.Origin[pc-1] == p.Origin[pc] {
+		return false
+	}
+	_, _, _, ok := p.Code[pc].WholeOperands(p.Regs)
+	return ok
 }
 
 // windowCall makes register code's call at pc, in (ir.Instruction's

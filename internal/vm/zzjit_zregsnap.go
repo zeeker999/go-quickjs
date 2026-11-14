@@ -50,7 +50,10 @@ func jitRegSnapshotOf(fb *jitRegFeedback, p *ir.Program) *jitRegSnapshot {
 	s.root = s
 	s.reg = &jitRegSnapshot{s: s, regs: len(fb.rc.Code)}
 	s.askReg(fb, p)
-	fns := map[uintptr]bool{}
+	// The questions of other arguments, of what the answers name, as the
+	// stack form's (jitSnapshotOf): the leaves' kinds, and how Go makes
+	// the pools' objects escape analysis may leave unmade.
+	fns, pools := map[uintptr]bool{}, map[uintptr]bool{}
 	for _, c := range append([]*jitSnapshot{s}, mapValues(s.callees)...) {
 		for k, a := range c.answers {
 			if k.method == snapLeaf {
@@ -58,7 +61,14 @@ func jitRegSnapshotOf(fb *jitRegFeedback, p *ir.Program) *jitRegSnapshot {
 					fns[fn] = true
 				}
 			}
+			for _, x := range a {
+				jitSnapPools(x, pools)
+			}
 		}
+	}
+	for pool := range pools {
+		shape, proto, ok := fb.VirtualRoot(pool)
+		s.put(snapVirtualRoot, int64(pool), shape, proto, ok)
 	}
 	for fn := range fns {
 		k := fb.LeafKind(fn)

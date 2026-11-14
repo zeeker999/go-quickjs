@@ -558,8 +558,8 @@ func (in *Instruction) Writes() (int, int) {
 // one it writes, or -1: a whole Host's (Whole), or those of an operation
 // whose operands are its register instruction's own -- a field's
 // definition, a destructuring's step, an element's or a property's read
-// or write, in, delete -- a literal operand being the instruction's
-// immediate; ok is false for any other, or for a slot past the regs
+// or write, a private member's with its key's register last, in, delete --
+// a literal operand being the instruction's immediate; ok is false for any other, or for a slot past the regs
 // registers.
 func (in *Instruction) WholeOperands(regs int) (reads [3]int, n int, dest int, ok bool) {
 	// The operands' slots, -1 for a literal: no Operand copied, as Go asks
@@ -574,9 +574,14 @@ func (in *Instruction) WholeOperands(regs int) (reads [3]int, n int, dest int, o
 		n, dest = in.Extra, in.Dest
 	case in.Op == FieldDefine, in.Op == PropertyWrite && !in.Private:
 		n = 2
+	case (in.Op == PropertyRead || in.Op == ReferenceRead) && in.Private && !in.When:
+		// A private member's read: its object and its key's register.
+		slots, n, dest = [3]int{in.Left.Slot, in.Third.Slot}, 2, in.Dest
+	case in.Op == PropertyWrite && in.Private:
+		n = 3
 	case in.Op == ArrayWrite:
 		n = 3
-	case in.Op == IterStep && in.When, in.Op == PropertyRead && !in.Private, in.Op == ReferenceRead:
+	case in.Op == IterStep && in.When, in.Op == PropertyRead && !in.Private, in.Op == ReferenceRead && !in.Private:
 		n, dest = 1, in.Dest
 	case in.Op == ArrayRead && !in.Reference, in.Op == HasProperty, in.Op == DeleteProperty:
 		n, dest = 2, in.Dest

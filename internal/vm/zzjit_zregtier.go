@@ -219,6 +219,21 @@ func (r *Runtime) jitRegHot(cl *closure, c *regCode) *jitRegEntry {
 // deoptimization: the function is sampled anew, and compiled again from
 // what the interpreter learns meanwhile, up to jitRegDeoptLimit times.
 func (r *Runtime) jitRegInvalidate(cl *closure, e *jitRegEntry) {
+	r.jitRegInvalidateAs(cl, e, true)
+}
+
+// jitRegInvalidateLearned is jitRegInvalidate after a deoptimization that
+// taught the code what it is compiled for next -- an operator's BigInts, an
+// entry after a call Go went on at -- which no limit counts: what each site
+// can learn so is bounded, a deoptimization at most for each kind it
+// learns. Counted, a loop of seven BigInt operators, each learned at a
+// deoptimization of its own, had its function refused for good before its
+// code knew them all.
+func (r *Runtime) jitRegInvalidateLearned(cl *closure, e *jitRegEntry) {
+	r.jitRegInvalidateAs(cl, e, false)
+}
+
+func (r *Runtime) jitRegInvalidateAs(cl *closure, e *jitRegEntry, counted bool) {
 	if !e.invalid {
 		// Native callers call it no more.
 		e.invalid = true
@@ -235,6 +250,9 @@ func (r *Runtime) jitRegInvalidate(cl *closure, e *jitRegEntry) {
 		cc.jitReg = nil
 	}
 	cc.jitRegHot = 0
+	if !counted {
+		return
+	}
 	if cc.jitRegDeopts++; cc.jitRegDeopts >= jitRegDeoptLimit {
 		cc.jitRegRefused = true
 	}
@@ -390,7 +408,7 @@ func (r *Runtime) jitRegResumeSeen(f *frame, e *jitRegEntry, rpc int) {
 		return
 	}
 	l.resumed = append(l.resumed, uint32(rpc))
-	r.jitRegInvalidate(f.cl, e)
+	r.jitRegInvalidateLearned(f.cl, e)
 }
 
 // jitRegHostSeen learns from a host exit at register pc rpc of c, before
@@ -415,6 +433,38 @@ func (r *Runtime) jitRegHostSeen(f *frame, c *regCode, wb, rpc int) jitRegWrite 
 	}
 	r.jitPolySeenOp(r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn)), rpc, op)
 	return jitRegWrite{}
+}
+
+// jitRegPrivateSeen learns from a host exit of e's code at get_private,
+// register pc rpc of c, before Go runs it, as the stack form's code learns
+// (jitPrivateSeen): a member that is its object's own data but no number --
+// a private method's function -- the read met, which the code compiled
+// again reads as a value (jitNumberMissed), compiled again from here
+// (jitRegReopt). The shapes the read meets the interpreter's run of it
+// adds to its site's cache, which the code compiled again is compiled for.
+func (r *Runtime) jitRegPrivateSeen(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) {
+	if rpc < 0 || rpc >= len(c.rc.Code) {
+		return
+	}
+	w := c.rc.Code[rpc]
+	if w.Op() != bytecode.RGetPrivate || wb+int(w.B()) >= len(r.stack) || wb+int(w.C()) >= len(r.stack) {
+		return
+	}
+	o, k := r.stack[wb+int(w.B())], r.stack[wb+int(w.C())]
+	if !o.IsObject() {
+		return
+	}
+	ob := o.Object()
+	i := ob.findOwn(regPrivateKey(f, k))
+	if i < 0 || ob.shape == nil || i >= ob.shape.n || int(i) >= int(ob.valn) || ob.shape.keys[i].isAccessor() || ob.vals()[i].IsNumber() {
+		return
+	}
+	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	if slices.Contains(l.failed, int32(rpc)) {
+		return
+	}
+	jitNumberMissed(l, rpc)
+	r.jitRegReopt(f.cl, e)
 }
 
 // jitRegWrite is a property write a host exit is about to have Go make

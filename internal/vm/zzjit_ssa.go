@@ -4848,6 +4848,18 @@ func jitHostCall(ctx *abi.Context) bool {
 				return false
 			}
 		}
+		if idx := int(ctx.Level); ctx.Live == 0 && idx < len(s.regRuns) && s.regRuns[idx].f != nil && s.ssaCtxs[idx] == ctx {
+			if e := s.regRuns[idx].e; e != nil && e.stale && !e.invalid {
+				// Register code stale for what it learned (jitRegReopt), at
+				// a call of Go its loop goes on after: the loop leaves at
+				// its header (abi.ExitPoll), where the interpreter goes on
+				// and its next sample compiles the code again (jitRegLeft),
+				// as the stack form's run leaves above. Never leaving, a
+				// loop that runs a whole invocation natively had made each
+				// construction it learned by Go to the end.
+				return false
+			}
+		}
 		old := r.backEdges
 		r.backEdges = s.backEdgeBudget()
 		s.pollCredit += r.backEdges - old
@@ -9175,7 +9187,14 @@ const jitSortLocals = 9
 // past its call meanwhile, as the interpreter's frame is during one, which
 // a stack trace the callback takes shows. The slots keep nothing after.
 func (r *Runtime) jitLoopFinish(f *frame, pc int, loop uint64, after bool, v Value, err error) (Value, error) {
-	at := f.base + int(loop&0xffffffff) - 1
+	return r.jitLoopFinishAt(f, f.base+int(loop&0xffffffff)-1, uint32(pc+1), loop, after, v, err)
+}
+
+// jitLoopFinishAt is jitLoopFinish of the loop whose slots begin at at in
+// the VM's stack, f's pc past its call fpc meanwhile: the stack form's
+// frame's operands' past its base, a register frame's past its window and
+// scratch slots (jitRegLoopFinish).
+func (r *Runtime) jitLoopFinishAt(f *frame, at int, fpc uint32, loop uint64, after bool, v Value, err error) (Value, error) {
 	slots := r.stack[at : at+jitLoopLocals]
 	arr, cb, this, k, n, out, elem, res := slots[0], slots[1], slots[2], slots[3], slots[4], slots[5], slots[6], slots[7]
 	clear(slots)
@@ -9199,7 +9218,7 @@ func (r *Runtime) jitLoopFinish(f *frame, pc int, loop uint64, after bool, v Val
 		clear(r.stack[at+jitLoopLocals : at+jitSortLocals])
 		r.jit.loopsFinished++
 		r.jit.sortsRestarted++
-		f.pc = uint32(pc + 1)
+		f.pc = fpc
 		if err := r.nativeFrame(fe, fe.fn(), arr, []Value{cb}, Undefined); err != nil {
 			return Undefined, err
 		}
@@ -9220,7 +9239,7 @@ func (r *Runtime) jitLoopFinish(f *frame, pc int, loop uint64, after bool, v Val
 	}
 	from := int64(k.Number())
 	r.jit.loopsFinished++
-	f.pc = uint32(pc + 1)
+	f.pc = fpc
 	// The built-in's frame, as Go's has one (nativeFrame), which a stack
 	// trace of what the callback throws shows.
 	if err := r.nativeFrame(fe, fe.fn(), arr, []Value{cb, this}, Undefined); err != nil {

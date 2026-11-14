@@ -1101,6 +1101,17 @@ func init() {
 // The register snapshot's answers: jitRegFeedback's methods, numbered as
 // jitFeedback's of the same names.
 
+func (q *jitRegSnapshot) VirtualRoot(pool uintptr) (r0 uintptr, r1 uintptr, r2 bool) {
+	a := q.get(snapVirtualRoot, int64(pool))
+	if a == nil {
+		return
+	}
+	r0, _ = a[0].(uintptr)
+	r1, _ = a[1].(uintptr)
+	r2, _ = a[2].(bool)
+	return r0, r1, r2
+}
+
 func (q *jitRegSnapshot) BigInt(pc int) (r0 bool) {
 	a := q.get(snapBigInt, int64(pc))
 	if a == nil {
@@ -1463,6 +1474,16 @@ func (q *jitRegSnapshot) Frequency(pc int) (r0 float64, r1 bool) {
 	return r0, r1
 }
 
+func (q *jitRegSnapshot) ForEach(pc int) (r0 ssa.ForEachSite, r1 bool) {
+	a := q.get(snapForEach, int64(pc))
+	if a == nil {
+		return
+	}
+	r0, _ = a[0].(ssa.ForEachSite)
+	r1, _ = a[1].(bool)
+	return r0, r1
+}
+
 // askOnceReg asks fb the questions of no argument.
 func (s *jitSnapshot) askOnceReg(fb *jitRegFeedback) {
 	{
@@ -1773,6 +1794,19 @@ func jitRegSnapAskFrequency(s *jitSnapshot, fb *jitRegFeedback, pc int) {
 	}
 }
 
+func jitRegSnapAskForEach(s *jitSnapshot, fb *jitRegFeedback, pc int) {
+	before := s.begin(fb.fb)
+	r0, r1 := fb.ForEach(pc)
+	s.end(fb.fb, before, snapForEach, int64(pc))
+	if r0.Inline != nil {
+		nested := s.nestReg(*r0.Inline)
+		r0.Inline = &nested
+	}
+	if jitSnapAnswered(r1) {
+		s.put(snapForEach, int64(pc), r0, r1)
+	}
+}
+
 // jitRegSnapAskers are the register askers by method, nil for one the
 // register feedback has not or of another argument.
 var jitRegSnapAskers [len(jitSnapNames)]func(s *jitSnapshot, fb *jitRegFeedback, pc int)
@@ -1780,6 +1814,7 @@ var jitRegSnapAskers [len(jitSnapNames)]func(s *jitSnapshot, fb *jitRegFeedback,
 // jitRegSnapMethods are the methods the register feedback has, a bit
 // for each.
 const jitRegSnapMethods uint64 = 0 |
+	1<<snapVirtualRoot |
 	1<<snapBigInt |
 	1<<snapBigIntWide |
 	1<<snapBigIntFailed |
@@ -1816,7 +1851,8 @@ const jitRegSnapMethods uint64 = 0 |
 	1<<snapTypeofCells |
 	1<<snapWalkedCloseCell |
 	1<<snapTypedKind |
-	1<<snapFrequency
+	1<<snapFrequency |
+	1<<snapForEach
 
 // The register askers are set at init, as jitSnapAskers are.
 func init() {
@@ -1848,5 +1884,6 @@ func init() {
 		snapGenSteps:       jitRegSnapAskGenSteps,
 		snapTypedKind:      jitRegSnapAskTypedKind,
 		snapFrequency:      jitRegSnapAskFrequency,
+		snapForEach:        jitRegSnapAskForEach,
 	}
 }

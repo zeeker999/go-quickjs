@@ -189,25 +189,33 @@ operands. What the lowering leaves to Go whole -- a call, a cold operation
 -- is one `Host`, alone in its origin: Go runs the whole register
 instruction. Where Go can run it on the frame and the registers it reads
 and writes are known (`compile.RegAccess`: up to three read, one written)
--- a private member's read or write, a for...in's or a for...of's cursor,
-an object's or an array's spread, a spread call, a computed key's
-definition -- it is a whole Host (`ir.Instruction`'s `Whole`), its
+-- a for...in's or a for...of's cursor, an object's or an array's spread, a
+spread call, a computed key's definition -- it is a whole Host (`ir.Instruction`'s `Whole`), its
 operands the registers it reads and its result the one it writes, which
 native code calls Go for and goes on after (see [Calls of
 Go](#calls-of-go)). So is what the builder leaves to Go of an operation
 whose operands are its register instruction's own, the only instruction
 of its origin (`ir.Instruction`'s `WholeOperands`): a literal's field
 whose definition the feedback does not plan, a destructuring's step or
-rest. A call, `call_w`'s, `call_method_w`'s or `new_w`'s, and a
-`typeof` are Hosts of their own kind (`ir.Instruction`'s `Window`), which
+rest, a private member's read or write its site's cache holds no own field
+of. A private member's read or write (`get_private`, `set_private`) is a
+property's read or write of the key its register holds (`ir.Instruction`'s
+`Private`), made natively for the shapes its site's cache holds of the key,
+as the stack form's. A call, `call_w`'s, `call_method_w`'s or `new_w`'s, and
+a `typeof` are Hosts of their own kind (`ir.Instruction`'s `Window`), which
 the builder makes natively from what the feedback says (see [Calls of
-Go](#calls-of-go) and [Native calls](#native-calls)). A call in tail
-position (`tail_call_w`, `tail_call_method_w`) is a plain Host: the
-interpreter makes it, as the ordinary call while the stack is shallow and
-giving the frame to the callee deeper (the VM's `rhCallWT`), so that native
-code keeps no frame a tail call gives up; native code leaves the frame to it
-there, and the frame ends after it. A return, a suspension and a throw
-the function does not catch are plain Hosts too.
+Go](#calls-of-go) and [Native calls](#native-calls)). So is a call in tail
+position (`tail_call_w`, `tail_call_method_w`, `ir.Instruction`'s `Tail`):
+made as the ordinary call while the stack is shallow, natively or by Go, as
+the VM's `rhCallWT` makes it, native code going on after it; deeper, where
+the interpreter gives the frame to the callee, the call leaves for it
+(`ssa.OpTailRoom`), so that native code keeps no frame a tail call gives up,
+and the frame ends after it. A `wrap` -- `x op y`, the second argument of
+the `asUintN` or `asIntN` call right after it, which the interpreter makes
+with the call at once -- is the operator alone, the call made after it as
+any call, which native code makes of the operator's low bits (see
+[BigInts](#bigints)). A return, a suspension and a throw the function does
+not catch are plain Hosts.
 
 `regexp_lit` that calls -- `/x/.exec(s)`, `/x/.test(s)` -- is the literal's
 RegExp from its pool, its method read, both in scratch slots, the argument
@@ -347,6 +355,8 @@ speculates nothing: it builds the site generically, or leaves it to Go.
 | property sites, accessors, string receivers | `Property`, `Accessor`, `StringProperty` |
 | globals | `Global` |
 | calls: targets, inlining, calls of Go, leaves, built-ins it makes itself | `CallShape`, `CalledClosure`, `NativeCalls`, `Inline`, `GoCalls`, `Leaf`, `LeafKind`, `Intrinsic`, `CharCode`, `Substring`, `FromCharCode` |
+| array loops | `ForEach` |
+| objects escape analysis leaves unmade | `VirtualRoot` |
 | literals, appends | `Literal`, `Define`, `ArrayProtos` |
 | constants | `StringCell`, `StringContent`, `BigIntCell`, `BigIntSole` |
 | call frequencies | `Frequency` |
@@ -355,12 +365,10 @@ speculates nothing: it builds the site generically, or leaves it to Go.
 
 | Not answered yet | Methods | So |
 |---|---|---|
-| array loops | `ForEach` | the method called |
 | generators a step resumes | `GenSteps` | the step a call of Go |
 | `indexOf`, `parseInt`, `instanceof` | `IndexOf`, `ParseInt`, `InstanceOf` | Go's |
 | elements' kinds learned at exits | `TypedRead`, `TypedBigRead`, `KeyedRead`, `KeyedWrite`, `StringRead`, `UpvalueTyped` | generic element access |
 | closures and cells from pools | `Closure`, `CellsPool` | Go makes them on the register frame |
-| objects escape analysis leaves unmade | `VirtualRoot` | every object made |
 | an inlined callee's exits, keeps, BigInts' strings, pure bodies | `InlineExit`, `KeepLimit`, `BigString`, `PureBody` | nothing speculated |
 
 **The feedback dispatcher.** The native handlers come in variants, each a
@@ -471,13 +479,17 @@ compiled on the spot, as the stack form's is.
 - a guard failed: the code is invalidated (`jitRegInvalidate`), its link
   cleared, the function sampled anew and compiled again from what the
   interpreter learned, up to `jitRegDeoptLimit` (8) times, past which the
-  function stays in the interpreter;
+  function stays in the interpreter -- but a deoptimization that taught
+  the code what it is compiled for next, an operator's BigInts or an entry
+  after a call Go went on at, which no limit counts
+  (`jitRegInvalidateLearned`): what each site learns so is bounded;
 - its exits learned what it is to be compiled for -- a call's target, a
   site's case, a callee to inline: the code is stale (`jitRegReopt`), with
   no deoptimization, as V8 never invalidates code for feedback. Its runs go
   on in it until they leave it -- at an exit the code is compiled again and
-  the run goes on in the new code (`jitRegGoOnAt`); at a loop's poll the
-  interpreter goes on, whose next sample compiles it anew -- and its link
+  the run goes on in the new code (`jitRegGoOnAt`); at a loop's poll,
+  which leaves for it rather than calling Go, the interpreter goes on,
+  whose next sample compiles it anew -- and its link
   holds no entry meanwhile, so that native callers call it through Go,
   where it is sampled: stale code only native callers reach is compiled
   again too;
@@ -581,9 +593,13 @@ has them (`callSlots`), the feedback naming the built-in its site's cache
 last called. A call of a leaf the feedback names (`Leaf`) is checked to call
 that function and made natively where native code makes the leaf itself, a
 call of Go of the leaf (`GoLeaf`) otherwise, its result to the call's
-register (`windowLeaf`, `leafMade`). A call in tail position is not made
-natively: it is a host exit, at which the interpreter makes it in constant
-space.
+register (`windowLeaf`, `leafMade`). `BigInt(x)` and
+`BigInt.asUintN(n, x)` or `asIntN`'s are made natively too (see
+[BigInts](#bigints)), the width the constant the program copies to the
+window's register on the way to the call alone (the VM's
+`regConstOperand`). A call in tail position is made as any call while the
+stack is shallow (`ssa.OpTailRoom` guarding it), and leaves for the
+interpreter deeper, which makes it in constant space.
 
 **Steps.** A loop's step (`iter_next`) writes its register only where the
 loop goes on: the builder assigns the step's value in the block after it
@@ -831,7 +847,9 @@ the function they call and cut `e`'s low bits; where `e` is an operator that
 only such operators and the call take, it is made on its operands' low 64
 bits alone, as V8 truncates them to machine words, its guards and the call's
 exiting to the state before the first of them, which nothing since has
-changed. A loop's BigInts stay in unboxed phis, and a box only frame states
+changed. Register code's operator writes a register no closure captures,
+which what takes it reads last (the program's `Live`); its call's width is
+the constant the window's register is given on the way to it. A loop's BigInts stay in unboxed phis, and a box only frame states
 name is made nowhere but at an exit, which makes the value of the unboxed
 BigInt (`abi.ExitLoc`'s `IsBig`), as V8's deoptimizer materializes one.
 
@@ -936,6 +954,21 @@ Where every closure the code makes is such a callback, a native call's frame
 gives its cells back to their pool as it returns (`ssa.Func`'s `CellsBack`),
 and a scope's end gives it none fresh: nothing else can hold them, as V8's
 escape analysis leaves a context only such closures read unmade.
+
+Register code's loop is a `call_method_w` its code's calls of Go have made
+of such a built-in on an array of the realm's (`jitRegForEachSeen`), the
+code compiled again for it (`jitRegFeedback`'s `ForEach`): its operands
+the call's window's registers (`callSlots`), its result the call's
+register, its slots past the window and the scratch slots, where the
+frame's homes and loops' slots are. Its callback is called natively
+through its link, its window made from the loop's operands
+(`ssa.CallSite`'s `Window`), or, the one closure the loop has been given,
+inlined in the loop, its frame its window (`callbackInline`); one made
+anew at each call is called by its code. A loop that leaves -- a check of
+its own, its poll, a callback with no code to call or that left native
+code -- Go goes on with on the register frame from its index
+(`jitRegLoopLeft`, `jitLoopFinishAt`), the callback's answer first where
+its call was made, and native code after the call.
 
 ### Allocation and escape analysis
 

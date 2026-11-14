@@ -49,6 +49,7 @@ var jitReport struct {
 	flushed, recompiled uint64
 	funcs               map[string]vm.JITFunction
 	hostOps             map[string]uint64
+	goCallOps           map[string]uint64
 }
 
 // reportStart has the runtime's JIT note what it skips, for the report,
@@ -318,6 +319,26 @@ func (r runtimeOf) Report(name string) {
 		fmt.Printf("  jit: register host exits:")
 		for _, o := range ops {
 			fmt.Printf(" %s %d", o.op, o.n)
+		}
+		fmt.Println()
+	}
+	// Its calls of Go that may run script, by the register instruction
+	// and what it called, the most first.
+	ops = ops[:0]
+	for k, n := range rs.GoCallOps {
+		if d := n - jitReport.goCallOps[k]; d != 0 {
+			ops = append(ops, hostOp{k, d})
+		}
+	}
+	jitReport.goCallOps = rs.GoCallOps
+	slices.SortFunc(ops, func(a, b hostOp) int { return cmp.Or(cmp.Compare(b.n, a.n), cmp.Compare(a.op, b.op)) })
+	if len(ops) > 8 {
+		ops = ops[:8]
+	}
+	if len(ops) != 0 {
+		fmt.Printf("  jit: register calls of Go:")
+		for _, o := range ops {
+			fmt.Printf(" %s %d;", o.op, o.n)
 		}
 		fmt.Println()
 	}
