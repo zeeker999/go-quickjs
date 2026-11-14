@@ -384,7 +384,7 @@ speculates nothing: it builds the site generically, or leaves it to Go.
 | what exits taught | `Generic`, `EntryGeneric`, `Resumed` |
 | steps, `in`, `typeof`, scopes' ends, typed arrays' kinds | `GenNext`, `MapNexts`, `KeyAtoms`, `HasCache`, `TypeofCells`, `WalkedCloseCell`, `TypedKind` |
 | elements' kinds learned at exits, captured typed arrays | `TypedRead`, `TypedBigRead`, `KeyedRead`, `KeyedWrite`, `StringRead`, `UpvalueTyped` |
-| closures and captured registers' cells from pools -- not an arrow that reads its this, which its context's This does not hold for register code | `Closure`, `CellsPool` |
+| closures and captured registers' cells from pools, an arrow's this its maker's register 1 (`ssa.ClosureSite`'s `LexThisReg`) | `Closure`, `CellsPool` |
 | `instanceof` of the constructor a global or a captured binding read just before holds, the searches, `parseInt`, BigInts' strings, by the built-in its site's cache holds | `InstanceOf`, `IndexOf`, `ParseInt`, `BigString` |
 
 | Not answered yet | Methods | So |

@@ -5372,12 +5372,13 @@ func (c *a64Compiler) closureTakeMarking(v *ssa.Value, site *ssa.CallSite, slow 
 		c.refStore()
 	}
 	if site.LexThis {
+		base, at := c.lexThisAt(site)
 		data()
 		c.a.Load(a64B, a64C, c.enc.FuncExtra)
-		c.a.Load(a64A, a64Ctx, abi.OffThis+c.enc.NumOffset)
+		c.a.Load(a64A, base, at+c.enc.NumOffset)
 		c.a.Store(a64B, c.enc.ExtraLexThis+c.enc.NumOffset, a64A)
 		c.a.AddImm(a64A, a64B, int64(c.enc.ExtraLexThis+c.enc.RefOffset), true)
-		c.a.Load(a64C, a64Ctx, abi.OffThis+c.enc.RefOffset)
+		c.a.Load(a64C, base, at+c.enc.RefOffset)
 		c.refStore()
 	}
 	c.movImm(a64A, c.enc.Object)
@@ -5412,12 +5413,22 @@ func (c *a64Compiler) closureTake(v *ssa.Value, site *ssa.CallSite, slow arm64.L
 		c.a.Store(a64B, int32(k)*8, a64A)
 	}
 	if site.LexThis {
+		base, at := c.lexThisAt(site)
 		c.a.Load(a64B, a64C, c.enc.FuncExtra)
 		for w := int32(0); w < c.enc.ValueSize; w += 8 {
-			c.a.Load(a64A, a64Ctx, abi.OffThis+w)
+			c.a.Load(a64A, base, at+w)
 			c.a.Store(a64B, c.enc.ExtraLexThis+w, a64A)
 		}
 	}
+}
+
+// lexThisAt is amd64's: the frame's register 1 for register code's
+// (ssa.CallSite's LexThisReg), or the context's This.
+func (c *a64Compiler) lexThisAt(site *ssa.CallSite) (arm64.Reg, int32) {
+	if site.LexThisReg {
+		return a64Locals, c.enc.ValueSize
+	}
+	return a64Ctx, abi.OffThis
 }
 
 // genStep is amd64's, the cursor's state in D: a cursor over a generator

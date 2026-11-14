@@ -3034,12 +3034,23 @@ func (c *compiler) closureTake(v *ssa.Value, site *ssa.CallSite, slow amd64.Labe
 		c.a.Store(scratchB, int32(k)*8, scratchA)
 	}
 	if site.LexThis {
+		base, at := c.lexThisAt(site)
 		c.a.Load(scratchB, scratchC, c.enc.FuncExtra)
 		for w := int32(0); w < c.enc.ValueSize; w += 8 {
-			c.a.Load(scratchA, regCtx, abi.OffThis+w)
+			c.a.Load(scratchA, base, at+w)
 			c.a.Store(scratchB, c.enc.ExtraLexThis+w, scratchA)
 		}
 	}
+}
+
+// lexThisAt is where a closure taken from its pool finds the this its
+// arrow captures (ssa.CallSite's LexThis): the frame's register 1, register
+// code's this (LexThisReg), or the context's This.
+func (c *compiler) lexThisAt(site *ssa.CallSite) (amd64.Reg, int32) {
+	if site.LexThisReg {
+		return regLocals, c.enc.ValueSize
+	}
+	return regCtx, abi.OffThis
 }
 
 // cellsTake makes an entry's cells (ssa.GoCells) natively, as V8's code
@@ -3287,12 +3298,13 @@ func (c *compiler) closureTakeMarking(v *ssa.Value, site *ssa.CallSite, slow amd
 		c.refStore()
 	}
 	if site.LexThis {
+		base, at := c.lexThisAt(site)
 		data()
 		c.a.Load(scratchB, scratchC, c.enc.FuncExtra)
-		c.a.Load(scratchA, regCtx, abi.OffThis+c.enc.NumOffset)
+		c.a.Load(scratchA, base, at+c.enc.NumOffset)
 		c.a.Store(scratchB, c.enc.ExtraLexThis+c.enc.NumOffset, scratchA)
 		c.a.Lea(scratchA, scratchB, c.enc.ExtraLexThis+c.enc.RefOffset)
-		c.a.Load(scratchC, regCtx, abi.OffThis+c.enc.RefOffset)
+		c.a.Load(scratchC, base, at+c.enc.RefOffset)
 		c.refStore()
 	}
 	c.movImm(scratchA, c.enc.Object)

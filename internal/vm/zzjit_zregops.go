@@ -251,11 +251,9 @@ func (f *jitRegFeedback) regAllocSite(rpc int, w bytecode.RInstr, argc int) (ssa
 // the stack form's (jitFeedback's Closure): its captured registers' cells
 // those of the code's (ir.Program's Cells), by their place among the
 // captured registers (jitRegCapturedRegs), its maker's captured bindings'
-// from the closure's own. Not an arrow that reads its this, which native
-// code would write from its context's This, which register code's frame
-// does not hold (its window's register 1 does); nor one that reads its
-// maker's new.target or super; nor in a derived constructor's code, nor an
-// inlined callee's.
+// from the closure's own; an arrow's this its maker's register 1. Not
+// one that reads its maker's new.target or super; nor in a derived
+// constructor's code, nor an inlined callee's.
 func (f *jitRegFeedback) Closure(pc int) (ssa.ClosureSite, bool) {
 	fb := f.fb
 	w, op, ok := f.at(pc)
@@ -268,7 +266,10 @@ func (f *jitRegFeedback) Closure(pc int) (ssa.ClosureSite, bool) {
 		return ssa.ClosureSite{}, false
 	}
 	t := fb.cl.consts[k].template()
-	if t == nil || t.fn.Kind == bytecode.KindArrow && t.fn.UsesThis {
+	if t == nil || t.fn.Kind == bytecode.KindArrow && fb.fn.Kind == bytecode.KindArrow {
+		// An arrow an arrow makes may share a binding of this its maker
+		// shares with a derived constructor (funcExtra's lexThisRef), which
+		// the frame Go makes it on has: Go's.
 		return ssa.ClosureSite{}, false
 	}
 	regs := jitRegCapturedRegs(f.p.Captured)
@@ -292,7 +293,11 @@ func (f *jitRegFeedback) Closure(pc int) (ssa.ClosureSite, bool) {
 		return ssa.ClosureSite{}, false
 	}
 	fb.keep().pools = append(fb.keep().pools, l.pool)
-	return ssa.ClosureSite{Pool: uintptr(unsafe.Pointer(l.pool)), Captures: caps}, true
+	// An arrow's this is the maker's register 1, as closure_w takes it
+	// (regClosure), not the context's This, which register code's frame
+	// does not hold (ssa.ClosureSite's LexThisReg).
+	arrow := t.fn.Kind == bytecode.KindArrow
+	return ssa.ClosureSite{Pool: uintptr(unsafe.Pointer(l.pool)), Captures: caps, LexThis: arrow, LexThisReg: arrow}, true
 }
 
 // jitRegClosureLiteral is the pool of closures of cl's constant k, its

@@ -440,7 +440,7 @@ func TestJITRegOpsCompileForARM64(t *testing.T) {
 	}
 	RecordJITCompiles(true)
 	defer RecordJITCompiles(false)
-	for _, src := range []string{regElemSrc, regOpsSrc, regLoopsSrc, regAllocSrc, regClosureSrc, regClassSrc, regSpreadSrc} {
+	for _, src := range []string{regElemSrc, regOpsSrc, regLoopsSrc, regAllocSrc, regClosureSrc, regClassSrc, regSpreadSrc, regArrowThisSrc, regStorageSrc} {
 		rts := regNativeRuntimes(t, src)
 		r := rts[0]
 		fn, _ := r.GetProp(Obj(r.Global()), r.Intern("main"))
@@ -486,5 +486,51 @@ func TestJITRegArrayAllocComputedLength(t *testing.T) {
 	}
 	if n := rts[0].RegNativeStats().GoCallOps["new_w->Array"]; n > 100 {
 		t.Errorf("%d constructions of Array made by Go", n)
+	}
+}
+
+// regArrowThisSrc's methods and functions make arrows that read their
+// this, from closure pools (jitRegFeedback's Closure, ssa.ClosureSite's
+// LexThisReg): the maker's register 1, a method's receiver, a sloppy
+// function's global object, a strict one's undefined; kept and called
+// later.
+const regArrowThisSrc = `
+class Vec { constructor(x) { this.x = x; this.items = [1, 2, 3] }
+	sum() { var s = 0; this.items.forEach((v) => { s += v * this.x }); return s }
+	mk() { return () => this.x }
+}
+function sloppy() { var f = () => this === globalThis; return f() }
+function strict() { "use strict"; var f = () => this; return f() }
+function main() {
+	var s = 0, fs = [];
+	for (var i = 0; i < 3000; i++) { var v = new Vec(i & 7); s += v.sum(); if (i % 100 == 0) fs.push(v.mk()); s += sloppy() ? 1 : 0; s += strict() === undefined ? 1 : 0 }
+	var t = 0; for (var f of fs) t += f();
+	return s + ":" + t;
+}
+`
+
+// TestJITRegArrowThisPools runs regArrowThisSrc's main natively and in a
+// runtime without the JIT: arrows reading this taken from pools, the
+// collector idle and marking.
+func TestJITRegArrowThisPools(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regArrowThisSrc)
+			for i, r := range rts {
+				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("main"))
+				for range 10 {
+					v, err := r.Call(fn, Undefined, nil)
+					if got := regNativeShow(r, v, err); got != "69000:60" {
+						t.Fatalf("runtime %d: %q, want 69000:60", i, got)
+					}
+				}
+			}
+		})
 	}
 }

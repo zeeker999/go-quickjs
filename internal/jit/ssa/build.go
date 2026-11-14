@@ -2071,6 +2071,11 @@ type CallSite struct {
 	// closes, as V8's code allocates a block's context at each iteration.
 	Captures []int32
 	LexThis  bool
+	// LexThisReg, with LexThis, says the arrow's this is the frame's
+	// register 1, where register code has its this -- as the VM's
+	// closure_w takes it -- not the context's This, which the stack form's
+	// frame has.
+	LexThisReg bool
 	// Leaf, of a leaf's call (GoLeaf), is the address of the function the
 	// call checked it calls (OpSameObject's), which the VM keeps alive with
 	// the code: Go takes the leaf from there (abi.GoCallState's Leaf), and
@@ -2087,11 +2092,13 @@ type CallSite struct {
 
 // ClosureSite is a closure's site that native code makes the closure at
 // (ClosureFeedback): the address of the abi.ObjectPool its closures come
-// from, which the VM keeps alive, and CallSite's Captures and LexThis.
+// from, which the VM keeps alive, and CallSite's Captures, LexThis and
+// LexThisReg.
 type ClosureSite struct {
-	Pool     uintptr
-	Captures []int32
-	LexThis  bool
+	Pool       uintptr
+	Captures   []int32
+	LexThis    bool
+	LexThisReg bool
 }
 
 // ClosureFeedback is Feedback that knows the closures native code may make
@@ -5358,7 +5365,7 @@ func (b *builder) goFrame(blk *Block, pc int, in ir.Instruction, guard func(Op, 
 		// arrow's this, as AWFY Havlak's findSet's arrow does, which Go had
 		// made at every call, 414,000 a run.
 		if cs, ok := fb.Closure(pc); ok && cs.Pool != 0 && (b.p.Cells || !capturesLocals(cs.Captures)) {
-			site.Pool, site.Captures, site.LexThis = cs.Pool, cs.Captures, cs.LexThis
+			site.Pool, site.Captures, site.LexThis, site.LexThisReg = cs.Pool, cs.Captures, cs.LexThis, cs.LexThisReg
 		}
 	}
 	if fb, ok := b.fb.(CellsFeedback); ok && in.Op == ir.CloseUpvalues && b.p.Cells {
