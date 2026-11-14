@@ -654,6 +654,14 @@ func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
 		return nil
 	}
 	if sites := f.regCallSites(pc, w, argc, method); len(sites) != 0 {
+		if l := f.fb.e; w.Op() != bytecode.RNewW && l != nil && jitCountAt(l.nativeCalls, rpc) >= jitCallTargets {
+			// As many as it calls natively: any other function it calls
+			// through its link (ssa.CallSite's Generic), as the stack form's
+			// code does -- where Go had made every call past them, AWFY's
+			// Richards' tasks' functions, which each run makes anew.
+			sites[0].Generic = true
+			sites[0].GenericEnv, sites[0].GenericRealm = uintptr(unsafe.Pointer(f.fb.cl.env)), uintptr(unsafe.Pointer(f.fb.cl.realm))
+		}
 		return sites
 	}
 	if site, ok := f.regBuiltinSite(w, argc, method); ok {

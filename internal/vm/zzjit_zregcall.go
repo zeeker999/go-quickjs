@@ -38,17 +38,88 @@ var jitRegFrameOps = map[ssa.GoOp]bool{ssa.GoHost: true, ssa.GoArgument: true, s
 func (s *jitState) regLinkOf(cl *closure, c *regCode) *jitLink {
 	key := s.rt.jitRegKeyOf(cl)
 	if l := s.regLinks[key]; l != nil {
+		s.regHint(cl, l)
 		return l
 	}
 	if s.regLinks == nil {
 		s.regLinks = map[jitKey]*jitLink{}
 	}
-	l := &jitLink{key: key, params: 2 + uint64(c.params), locals: uint64(c.numRegs), frame: uint64(c.numRegs)}
+	l := &jitLink{key: key, params: 2 + uint64(c.params), locals: uint64(c.numRegs), frame: uint64(c.numRegs),
+		flags: s.rt.jitRegLinkFlags(cl, c)}
 	if e := s.regCache[key]; e != nil && e.code != nil && !e.invalid {
 		l.regSet(e)
 	}
 	s.regLinks[key] = l
+	s.regHint(cl, l)
 	return l
+}
+
+// jitRegLinkFlags are the flags of the link of cl's function, whose
+// register code is c (abi.LinkCoerce...), as jitLinkFlags are the stack
+// form's: what a generic call reads of a function it has no site for
+// (ssa.CallSite's Generic). LinkParams counts the window's function and
+// receiver. A function a generic call may not make is one native callers
+// do not call natively at a call compiled for it either (jitRegCallable):
+// a class's constructor, a getter's, a setter's; one whose call is not its
+// body, a generator's or an async function's; one that keeps its
+// arguments, or runs a direct eval; top-level code; and, under
+// WithNodeQuirks, a sloppy function, whose f.arguments reads arguments
+// past its parameters a native call does not keep.
+func (r *Runtime) jitRegLinkFlags(cl *closure, c *regCode) uint64 {
+	fn := cl.fn
+	var f uint64
+	if c.coerceThis {
+		f |= abi.LinkCoerce
+	}
+	if fn.HasTailCall {
+		f |= abi.LinkTail
+	}
+	if fn.Kind == bytecode.KindArrow {
+		f |= abi.LinkArrow
+	}
+	if fn.Kind != bytecode.KindNormal && fn.Kind != bytecode.KindArrow && fn.Kind != bytecode.KindMethod ||
+		!jitRegCalled(cl, c) || c.args || c.newTarget || fn.HasDirectEval || len(fn.EvalScopes) != 0 || r.nodeQuirks && !fn.Strict {
+		f |= abi.LinkNotGeneric
+	}
+	return f
+}
+
+// regHint gives cl's template a slot of the hint table holding l, its
+// function's link, as the stack form's entries have one (remember): what
+// a generic call finds a function's link by (mir's genericCheck). A link
+// keeps its slot until its function is gone (regBytes, regUnhint).
+func (s *jitState) regHint(cl *closure, l *jitLink) {
+	if l.hint == 0 {
+		var i uint32
+		if n := len(s.hintFree); n != 0 {
+			i, s.hintFree = s.hintFree[n-1], s.hintFree[:n-1]
+		} else {
+			if n := s.hintsCap(); n != cap(s.hints) {
+				s.hints = append(make([]jitHintSlot, 0, n), s.hints...)
+			}
+			if len(s.hints) == 0 {
+				// Slot 0 is no hint.
+				s.hints = append(s.hints, jitHintSlot{})
+			}
+			i = uint32(len(s.hints))
+			s.hints = append(s.hints, jitHintSlot{})
+		}
+		s.hints[i] = jitHintSlot{fn: uintptr(unsafe.Pointer(cl.fn)), link: l}
+		s.hintTable = abi.HintTable{Slots: unsafe.Pointer(unsafe.SliceData(s.hints)), Len: uint64(len(s.hints))}
+		l.hint = i
+	}
+	if cl.hint() != l.hint {
+		cl.setHint(l.hint)
+	}
+}
+
+// regUnhint frees l's slot of the hint table, its function gone.
+func (s *jitState) regUnhint(l *jitLink) {
+	if l.hint != 0 {
+		s.hints[l.hint] = jitHintSlot{}
+		s.hintFree = append(s.hintFree, l.hint)
+		l.hint = 0
+	}
 }
 
 // regSet has native callers call e's code through l: its call entry, and
@@ -97,11 +168,12 @@ func (f *jitRegFeedback) regCallTargets(pc int, w bytecode.RInstr, argc int, met
 	var closures []*closure
 	add := func(o *Object, cl *closure, rc *regCode, pool *abi.ObjectPool, byCode bool) {
 		for i, s := range sites {
-			if s.Callee == uintptr(unsafe.Pointer(o)) || s.ByCode != 0 && jitRegSameCode(s, cl) {
+			if s.ByCode != 0 && jitRegSameCode(s, cl) || s.Callee == uintptr(unsafe.Pointer(o)) && !byCode {
 				return
 			}
 			if byCode && jitRegSameClosureCode(closures[i], cl) {
-				// The same function's, checked by its code from here.
+				// The same function's -- the same object, which the site's
+				// cache holds, among them -- checked by its code from here.
 				sites, objs, closures = slices.Delete(sites, i, i+1), slices.Delete(objs, i, i+1), slices.Delete(closures, i, i+1)
 				break
 			}
@@ -235,6 +307,16 @@ func (r *Runtime) jitRegCallSeen(f *frame, c *regCode, e *jitRegEntry, rpc int, 
 		}
 	}
 	if n >= jitCallTargets {
+		if w.Op() != bytecode.RNewW {
+			// Past the functions it calls natively, one a generic call
+			// calls through its link (ssa.CallSite's Generic), which it
+			// finds by its hint (regHint): given one, and code native
+			// callers may call, as the stack form's generic calls have
+			// their functions compiled (jitCallTarget). Go had made every
+			// call of one no site was compiled for.
+			r.jitState().regLinkOf(cl, cl.reg)
+			r.jitRegNativeCallee(cl, cl.reg)
+		}
 		return false
 	}
 	x := jitInline{pc: int32(rpc), cl: cl, obj: o}

@@ -988,6 +988,9 @@ type jitLink struct {
 	// The function's frame and flags (abi.LinkCoerce...), for a generic
 	// call (abi.Encoding's Link fields).
 	params, locals, frame, flags uint64
+	// hint is, for a register link (regLinkOf), its slot of the hint
+	// table (regHint), which generic calls find it by; 0 for none.
+	hint uint32
 	// gen is, for a generator's function, its code's generator entry,
 	// where a loop's step that resumes one natively jumps (ssa.CallSite's
 	// Gens), or 0 while there is none it may: 0 whenever entry is, for

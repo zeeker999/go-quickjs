@@ -1410,9 +1410,23 @@ of a function the call has called -- by its code (`ssa.CallSite`'s
 the runtime's realm, and its frame is one the call path makes as a call's
 (not a class's constructor, nor one that keeps its arguments or shares a
 derived constructor's this). A call that meets any other function leaves
-native code for Go, which learns there what to call next. A construction
-(`new_w`) of a plain function, a base constructor that does not read
-`new.target`, is made so too, with the constructions its code learned: its
+native code for Go, which learns there what to call next -- a call in tail
+position too, which Go makes at the exit as the interpreter's `tail_call`
+does (`regWholeTail`): the ordinary call while the stack is shallow, the
+frame given to the callee or given up deeper. A call that has met
+`jitCallTargets` functions calls any other through its link, as V8 makes a
+megamorphic call through the code the function points to (`ssa.CallSite`'s
+`Generic`, `mir`'s `genericCheck` and `genWindowSetup`): a closure of the
+caller's environment and realm whose template's hint names its function's
+register link (`regHint`, `abi.HintTable`), whose link's flags let a generic
+call make it (`jitRegLinkFlags`); the window's parameters past the
+arguments, the link's `LinkParams` says how many, made undefined, a plain
+call's receiver undefined, an arrow's its captured this. Such a callee is
+given a link and compiled for native callers at the first call Go makes of
+it past the call's targets; one with no code is Go's call. A construction
+(`new_w`) of a base constructor that does not read `new.target` -- a plain
+function, or a class's constructor with no field to initialize, as the stack
+form's (`jitConstructs`) -- is made so too, with the constructions its code learned: its
 receiver taken from a pool of objects made as `regConstruct` makes one
 (`jitNewPool`, `ssa.CallSite`'s `Pool`), in the callee's register 1 and its
 context's `This`, which the result is where the callee returns no object. A
@@ -1429,7 +1443,7 @@ out, so that a native recursion meets the deadline and the memory limit.
 while native callees are under way, it makes each level's frame as
 `regEnterW` would -- its function, its window, past the call it makes --
 from the context (`Closure`, `Base`) and the level's code, which it finds in
-the cache:
+the cache by the function's key, kept by its template (`jitRegKeyOf`):
 
 - a call of Go a native callee makes (`jitRegGoCallNested`) is made on its
   level's frame, each level below it given its own for the call, as the
@@ -1445,7 +1459,12 @@ the cache:
   exception to the level's handlers (`regPending`), on from there; and the
   run's own code goes on after the call the same way (`jitRegStretch`). A
   frame given to a callee by a call in tail position (`errRegRestart`,
-  `errTailCall`) is finished as `regEnterW` finishes one.
+  `errTailCall`) is finished as `regEnterW` finishes one, in the callee's
+  native code where it has some (`regRestartRun`).
+
+A call of Go from the last context, and an unwinding from it, add contexts
+(`jitGrowContexts`), as the stack form's do: a recursion of native calls is
+native past the contexts the runtime started with.
 
 While Go runs beside them, every level's code is pinned (`jitRegEntry`'s
 `levels`): the cache neither drops it nor compiles the function again until

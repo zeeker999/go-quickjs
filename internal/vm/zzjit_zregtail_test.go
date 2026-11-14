@@ -31,6 +31,26 @@ function tasks(n) {
 	for (var i = 0; i < n; i++) acc += (i & 1 ? t1 : b).run(i);
 	return acc;
 }
+function mk(k) { var o = { n: 0 }; return function (w, d) { o.n += k; return next(w + d + o.n) } }
+function fresh(n) {
+	// Two functions anew at each run, which the code learns up to
+	// jitCallTargets of, and calls the rest of through their links.
+	var a = new Task(mk(1)), b = new Task(mk(2)), acc = 0;
+	for (var i = 0; i < n; i++) acc += (i & 1 ? a : b).run(i);
+	return acc;
+}
+// Seven functions, past the four a call calls natively: the rest called
+// through their links (ssa.CallSite's Generic), an arrow reading its this
+// among them, and one called with more arguments than it has parameters.
+function g0(x) { return x + 1 }
+function g1(x, y) { return x * 2 + (y === undefined) }
+function g2(x) { return x - (this === undefined) }
+function g3(x) { return -x }
+function g4(x) { return x * x }
+var g5 = { v: 7, mk() { return (x) => x + this.v } }.mk();
+function g6(x, y, z) { return x + (z === undefined ? 100 : z) }
+var shapes = [g0, g1, g2, g3, g4, g5, g6];
+function poly(n) { var s = 0; for (var i = 0; i < n; i++) s += shapes[i % 7](i); return s }
 function even(n, acc) { if (n === 0) return acc; return odd(n - 1, acc + 1) }
 function odd(n, acc) { if (n === 0) return -acc; return even(n - 1, acc + 2) }
 function self(n, acc) { if (n === 0) return acc; return self(n - 1, acc + n) }
@@ -57,6 +77,8 @@ func TestJITRegTailCalls(t *testing.T) {
 			if marking {
 				jitMarkingForTest(t)
 			}
+			RecordJITCompiles(true)
+			defer RecordJITCompiles(false)
 			rts := regNativeRuntimes(t, regTailSrc)
 			rts[0].SetJITWarmUp(1, 1)
 			run := func(name string, n float64) {
@@ -85,6 +107,24 @@ func TestJITRegTailCalls(t *testing.T) {
 					t.Errorf("%d exits at %s once the code learned its callees", n, op)
 				}
 			}
+			for _, name := range []string{"fresh", "poly"} {
+				for range 4 {
+					run(name, 2000)
+				}
+				before := r.RegNativeStats()
+				for range 4 {
+					run(name, 2000)
+				}
+				// Past the functions it calls natively, the others called
+				// through their links: none of Go's, nor an exit.
+				after := r.RegNativeStats()
+				if n := after.Hosts - before.Hosts; n != 0 {
+					t.Errorf("%s: %d exits once its calls were learned: %v", name, n, after.HostOps)
+				}
+				if n := after.GoCalls - before.GoCalls; n != 0 {
+					t.Errorf("%s: %d calls of Go once its calls were learned", name, n)
+				}
+			}
 			for range 2 {
 				run("deep", 2000)
 			}
@@ -95,6 +135,11 @@ func TestJITRegTailCalls(t *testing.T) {
 			// its native code.
 			if n := r.RegNativeStats().Entries - entries; n < 2000*8 {
 				t.Errorf("%d entries of native code: the frames given to callees ran in the interpreter", n)
+			}
+			// arm64's backend compiles the same code, its generic calls of
+			// register code among it, on any host.
+			if fns, _, _ := regCompileARM64(t, r); fns == 0 {
+				t.Error("nothing compiled for arm64")
 			}
 		})
 	}

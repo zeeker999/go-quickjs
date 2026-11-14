@@ -8702,7 +8702,7 @@ func (b *builder) nativeCalls(pc int) []*CallSite {
 			// site's shape the instruction's.
 			if site.Argc != in.Extra || site.Method != in.When || site.Super || site.Instr != 0 || site.Forward || site.Accessor != AccessorNone || site.Step || site.ForOf || site.ForIn ||
 				site.TypeOf && (in.Extra != 0 || site.Go != GoCall) || site.InstanceOf && (in.Extra != 1 || site.Go != GoCall) || site.Literal || site.Via != 0 ||
-				site.Go == 0 && !site.Push && !site.Pop && (site.Window != in.Left.Slot+1 || site.Generic || site.ThisSlot >= 0 || site.FrameArgs || site.Function || site.Tail ||
+				site.Go == 0 && !site.Push && !site.Pop && (site.Window != in.Left.Slot+1 || site.ThisSlot >= 0 || site.FrameArgs || site.Function || site.Tail ||
 					site.Pool != 0 && (site.Derived || site.Parent != 0 || site.Method)) {
 				// A native call's callee's window is made from the
 				// instruction's (CallSite's Window), the stack form's

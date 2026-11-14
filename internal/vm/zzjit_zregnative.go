@@ -311,8 +311,9 @@ func (s *jitState) regBytes() int {
 			delete(s.regLearned, key)
 		}
 	}
-	for key := range s.regLinks {
+	for key, l := range s.regLinks {
 		if key.gone() {
+			s.regUnhint(l)
 			delete(s.regLinks, key)
 		}
 	}

@@ -1612,7 +1612,7 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 	// registers, none of them the call's to skip.
 	win := site.Window != 0
 	if win {
-		if !generic || gen {
+		if !generic {
 			// Each call Go makes where it does not make it natively: a
 			// callee with no code, a context past the deepest.
 			c.a.Jmp(c.stubLabel(s, exitKind(v.Aux)))
@@ -2174,6 +2174,13 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 		// link says, read from its link at run time.
 		setupGen := func() {
 			frame()
+			if win {
+				// Register code's (genWindowSetup).
+				c.genWindowSetup(site, locals, calleeCtx, top, tmp)
+				c.a.Load(callClosure, regCtx, abi.OffCallClosure)
+				c.a.LeaLabel(callRet, back)
+				return
+			}
 			c.a.Load(calleeCtx, regCtx, abi.OffNext)
 			notail := c.a.NewLabel()
 			c.a.Load(top, callLink, c.enc.LinkFlags)
@@ -2247,9 +2254,17 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 		c.a.Load(callLink, regCtx, abi.OffCallLink)
 		c.a.Load(scratchA, callLink, c.enc.LinkEntry)
 		c.a.Op(amd64.Test, scratchA, scratchA, true)
-		c.a.Jcc(amd64.CondE, none)
-		setupGen()
-		c.a.JmpMem(callLink, c.enc.LinkEntry)
+		if win {
+			// No code: Go's call, from native code, as a site's of a
+			// callee with none is register code's.
+			c.a.Jcc(amd64.CondE, goCall())
+			setupGen()
+			c.a.JmpMem(callLink, c.enc.LinkEntry)
+		} else {
+			c.a.Jcc(amd64.CondE, none)
+			setupGen()
+			c.a.JmpMem(callLink, c.enc.LinkEntry)
+		}
 		c.cold = append(c.cold, func() {
 			c.a.Bind(none)
 			setupGen()
@@ -5189,6 +5204,15 @@ func (c *compiler) genericCheck(v *ssa.Value, site *ssa.CallSite, target int, ch
 	c.a.Load(scratchB, regCtx, abi.OffStackEnd)
 	c.a.Op(amd64.Cmp, scratchA, scratchB, true)
 	c.a.Jcc(amd64.CondA, miss)
+	if site.Window != 0 {
+		// And the arguments register code's call writes past the callee's
+		// window, which may be more than its registers (windowSetup).
+		c.a.Load(scratchA, regCtx, abi.OffStackTop)
+		c.a.Load(scratchA, scratchA, 0)
+		c.a.OpImm(amd64.Add, scratchA, int32(2+site.Argc), true)
+		c.a.Op(amd64.Cmp, scratchA, scratchB, true)
+		c.a.Jcc(amd64.CondA, miss)
+	}
 	c.a.StoreImm(regCtx, abi.OffCallTarget, int32(target))
 	c.a.Jmp(checked)
 }
@@ -5976,6 +6000,57 @@ func (c *compiler) windowSetup(t *ssa.CallSite, locals, a, b amd64.Reg) {
 		c.storeImm(locals, vs+c.enc.NumOffset, c.enc.Undefined, a)
 		c.storeImm(locals, vs+c.enc.RefOffset, 0, a)
 	}
+}
+
+// genWindowSetup is windowSetup for a generic call of register code
+// (ssa.CallSite's Generic and Window), its callee's window at locals, its
+// link in callLink: what its link says of the function, read at run time --
+// undefined in its parameters past the arguments, its link's LinkParams
+// counting the window's function and receiver; the this an arrow captured
+// (CallThis, which genericCheck found), or, for a plain call, undefined in
+// its receiver's register (genericCheck leaves a function that coerces it
+// to Go); and whether its calls in tail position may give its frame up
+// (abi.LinkTail, Context's TailFrame). It uses ctx, a and b.
+func (c *compiler) genWindowSetup(site *ssa.CallSite, locals, ctx, a, b amd64.Reg) {
+	vs := int32(c.enc.ValueSize)
+	loop, filled := c.a.NewLabel(), c.a.NewLabel()
+	c.movImm(scratchA, uint64(2+site.Argc))
+	c.a.Bind(loop)
+	c.a.Load(b, callLink, c.enc.LinkParams)
+	c.a.Op(amd64.Cmp, scratchA, b, true)
+	c.a.Jcc(amd64.CondAE, filled)
+	c.a.MovRR(a, scratchA)
+	c.a.ShiftImm(amd64.Shl, a, 4, true)
+	c.a.Op(amd64.Add, a, locals, true)
+	c.storeImm(a, c.enc.NumOffset, c.enc.Undefined, b)
+	c.storeImm(a, c.enc.RefOffset, 0, b)
+	c.a.OpImm(amd64.Add, scratchA, 1, true)
+	c.a.Jmp(loop)
+	c.a.Bind(filled)
+	notail := c.a.NewLabel()
+	c.a.Load(ctx, regCtx, abi.OffNext)
+	c.a.Load(a, callLink, c.enc.LinkFlags)
+	c.a.OpImm(amd64.And, a, abi.LinkTail, true)
+	c.a.Jcc(amd64.CondE, notail)
+	c.storeImm(ctx, abi.OffTailFrame, 1, a)
+	c.storeImm(ctx, abi.OffFrameThis, 0, a)
+	c.a.Bind(notail)
+	arrow, done := c.a.NewLabel(), c.a.NewLabel()
+	c.a.Load(a, callLink, c.enc.LinkFlags)
+	c.a.OpImm(amd64.And, a, abi.LinkArrow, true)
+	c.a.Jcc(amd64.CondNE, arrow)
+	if !site.Method {
+		c.storeImm(locals, vs+c.enc.NumOffset, c.enc.Undefined, a)
+		c.storeImm(locals, vs+c.enc.RefOffset, 0, a)
+	}
+	c.a.Jmp(done)
+	c.a.Bind(arrow)
+	c.a.Load(b, regCtx, abi.OffCallThis)
+	c.a.Load(a, b, c.enc.NumOffset)
+	c.a.Store(locals, vs+c.enc.NumOffset, a)
+	c.a.Load(a, b, c.enc.RefOffset)
+	c.a.Store(locals, vs+c.enc.RefOffset, a)
+	c.a.Bind(done)
 }
 
 // pointerWord leaves in scratchB the pointer word of a value whose number

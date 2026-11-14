@@ -2878,6 +2878,14 @@ func (c *a64Compiler) genericCheck(v *ssa.Value, site *ssa.CallSite, target int,
 	c.a.Load(a64B, a64Ctx, abi.OffStackEnd)
 	c.a.Cmp(a64A, a64B, true)
 	c.a.BCond(arm64.HI, miss)
+	if site.Window != 0 {
+		// As amd64's: the arguments the call writes past the window.
+		c.a.Load(a64A, a64Ctx, abi.OffStackTop)
+		c.a.Load(a64A, a64A, 0)
+		c.a.AddImm(a64A, a64A, int64(2+site.Argc), true)
+		c.a.Cmp(a64A, a64B, true)
+		c.a.BCond(arm64.HI, miss)
+	}
 	c.movImm(a64B, uint64(target))
 	c.a.Store(a64Ctx, abi.OffCallTarget, a64B)
 	c.a.B(checked)
@@ -3814,7 +3822,7 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 	// find; one Go would make where it does not make it natively leaves.
 	win := site.Window != 0
 	if win {
-		if !generic || gen {
+		if !generic {
 			c.a.B(stub)
 			return
 		}
@@ -4309,6 +4317,13 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 		// As amd64's: its frame made as its link says.
 		setupGen := func() {
 			frame()
+			if win {
+				// As amd64's (genWindowSetup).
+				c.genWindowSetup(site, locals, calleeCtx, top, tmp, high2)
+				c.a.Load(a64CallClosure, a64Ctx, abi.OffCallClosure)
+				c.a.Adr(a64CallRet, back)
+				return
+			}
 			c.a.Load(calleeCtx, a64Ctx, abi.OffNext)
 			notail := c.a.NewLabel()
 			c.a.Load(top, a64CallLink, c.enc.LinkFlags)
@@ -4378,7 +4393,12 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 		none := c.a.NewLabel()
 		c.a.Load(a64CallLink, a64Ctx, abi.OffCallLink)
 		c.a.Load(a64D, a64CallLink, c.enc.LinkEntry)
-		c.a.Cbz(a64D, none, true)
+		if win {
+			// As amd64's: no code, Go's call.
+			c.a.Cbz(a64D, goCall(), true)
+		} else {
+			c.a.Cbz(a64D, none, true)
+		}
 		setupGen()
 		c.a.Br(a64D)
 		c.cold = append(c.cold, func() {
@@ -4866,6 +4886,54 @@ func (c *a64Compiler) directOperand(v, x *ssa.Value, base arm64.Reg, disp int32)
 	}
 	c.pointerWord(x, w)
 	c.a.Store(base, disp+c.enc.RefOffset, a64B)
+}
+
+// genWindowSetup is amd64's: a generic call's of register code, its
+// callee's window at locals, its link in a64CallLink. It uses ctx, a, b
+// and u.
+func (c *a64Compiler) genWindowSetup(site *ssa.CallSite, locals, ctx, a, b, u arm64.Reg) {
+	vs := int32(c.enc.ValueSize)
+	loop, filled := c.a.NewLabel(), c.a.NewLabel()
+	c.movImm(a64A, uint64(2+site.Argc))
+	c.movImm(u, c.enc.Undefined)
+	c.a.Bind(loop)
+	c.a.Load(b, a64CallLink, c.enc.LinkParams)
+	c.a.Cmp(a64A, b, true)
+	c.a.BCond(arm64.HS, filled)
+	c.a.ShiftImm(arm64.Lsl, a, a64A, 4, true)
+	c.a.Op(arm64.Add, a, a, locals, true)
+	c.a.Store(a, c.enc.NumOffset, u)
+	c.a.Store(a, c.enc.RefOffset, arm64.ZR)
+	c.a.AddImm(a64A, a64A, 1, true)
+	c.a.B(loop)
+	c.a.Bind(filled)
+	notail := c.a.NewLabel()
+	c.a.Load(ctx, a64Ctx, abi.OffNext)
+	c.a.Load(a, a64CallLink, c.enc.LinkFlags)
+	c.movImm(b, abi.LinkTail)
+	c.a.Tst(a, b, true)
+	c.a.BCond(arm64.EQ, notail)
+	c.movImm(a, 1)
+	c.a.Store(ctx, abi.OffTailFrame, a)
+	c.a.Store(ctx, abi.OffFrameThis, arm64.ZR)
+	c.a.Bind(notail)
+	arrow, done := c.a.NewLabel(), c.a.NewLabel()
+	c.a.Load(a, a64CallLink, c.enc.LinkFlags)
+	c.movImm(b, abi.LinkArrow)
+	c.a.Tst(a, b, true)
+	c.a.BCond(arm64.NE, arrow)
+	if !site.Method {
+		c.a.Store(locals, vs+c.enc.NumOffset, u)
+		c.a.Store(locals, vs+c.enc.RefOffset, arm64.ZR)
+	}
+	c.a.B(done)
+	c.a.Bind(arrow)
+	c.a.Load(b, a64Ctx, abi.OffCallThis)
+	c.a.Load(a, b, c.enc.NumOffset)
+	c.a.Store(locals, vs+c.enc.NumOffset, a)
+	c.a.Load(a, b, c.enc.RefOffset)
+	c.a.Store(locals, vs+c.enc.RefOffset, a)
+	c.a.Bind(done)
 }
 
 // windowSetup is amd64's: what register code's native call of t
