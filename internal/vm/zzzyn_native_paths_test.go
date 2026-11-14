@@ -4,6 +4,7 @@ package vm
 
 import (
 	"fmt"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -372,11 +373,13 @@ func TestRegNativeCallHConvention(t *testing.T) {
 		t.Fatalf("%s has a native handler: the test needs an operation that exits", op)
 	}
 	want := nativeGoid()
-	orig := regTable[op]
-	defer func() { regTable[op] = orig }()
+	// The exit stub calls the exit table's function (nativeExitTable),
+	// the operation's Go handler.
+	orig := nativeExitTable[op]
+	defer func() { nativeExitTable[op] = orig }()
 	var calls, viaCallH int
 	var bad []string
-	regTable[op] = func(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	nativeExitTable[op] = func(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
 		calls++
 		pcs := make([]uintptr, 16)
 		frames := runtime.CallersFrames(pcs[:runtime.Callers(1, pcs)])
@@ -443,3 +446,56 @@ var nativeCallRegs = map[string][5]string{
 	"amd64": {"AX", "BX", "CX", "DI", "R14"},
 	"arm64": {"R0", "R1", "R2", "R3", "R28"},
 }[runtime.GOARCH]
+
+// An exit from a native handler that answers all its Go handler's fast
+// path does calls the operation's slow function at once
+// (nativeExitTable), not the Go handler, which would only give back ^pc:
+// every operation of nativeSlowOnMiss has a native handler, and its
+// entry is its slow function; the others' are their Go handlers. The
+// answers of such misses -- strings, BigInts, objects, NaN and numbers
+// past int64 to the arithmetic and the bitwise operators, into registers
+// that held pointers -- are the table's, natively, with the collector
+// marking and not.
+func TestRegNativeExitSlow(t *testing.T) {
+	slow := map[bytecode.ROp]bool{}
+	for _, op := range nativeSlowOnMiss {
+		slow[op] = true
+		if !nativePlain.has[op] {
+			t.Errorf("%s has no native handler", op)
+		}
+	}
+	for op := range nativeExitTable {
+		want := regTable[op]
+		if slow[bytecode.ROp(op)] {
+			want = regSlowTable[op]
+		}
+		if reflect.ValueOf(nativeExitTable[op]).Pointer() != reflect.ValueOf(want).Pointer() {
+			t.Errorf("%s: the exit table's entry is not its %s", bytecode.ROp(op), map[bool]string{true: "slow function", false: "Go handler"}[slow[bytecode.ROp(op)]])
+		}
+	}
+	src := `
+	var vals = [1, 2.5, -0, NaN, 2 ** 70, -(2 ** 40), "12", "x", "", true, null, undefined, 5n, 2n ** 80n,
+		{ valueOf() { return 3 } }, [4], {}];
+	var out = [];
+	for (var i = 0; i < vals.length; i++) {
+		var a = vals[i], o = {};
+		for (var j = 0; j < vals.length; j++) {
+			var b = vals[j], r;
+			try { r = [a + b, a - b, a * b, a & b, a | b, a ^ b, a << b, a >> b, a >>> b].map(String).join(" ") } catch (e) { r = e.name }
+			out.push(r);
+			try { o = a + 1; o = a - 1; o = a | 0; o = a ^ 5; o = a & 6; o = a << 1; o = a >> 1; o = a >>> 1; r = String(o) } catch (e) { r = e.name }
+			out.push(r);
+			var k = a;
+			try { k++; k--; r = String(k++) + String(k--) + String(k) } catch (e) { r = e.name }
+			out.push(r);
+		}
+	}
+	out.join("|")`
+	want := nativeRunSrc(t, src, false)
+	for _, marking := range []bool{false, true} {
+		nativeMarking(t, marking)
+		if got := nativeRunSrc(t, src, true); got != want {
+			t.Errorf("native (marking %v): %s\nwant %s", marking, got, want)
+		}
+	}
+}

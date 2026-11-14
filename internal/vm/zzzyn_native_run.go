@@ -90,6 +90,38 @@ var (
 	nativeMarkFlag atomic.Pointer[uint8]
 )
 
+// nativeExitTable is the Go functions the exit stub calls for an
+// instruction the native code leaves (the context's goTable): regTable's
+// handler, but for the operations whose native handler's fast path does
+// all the Go handler's does (nativeSlowOnMiss), whose slow function it
+// is. Their handler would only find again what the native code found
+// and give back ^pc, a Go call more for each miss -- an addition of a
+// string, a bitwise operator of one -- before the slow function's.
+var nativeExitTable [256]regHandler
+
+// nativeSlowOnMiss are the operations whose native handlers answer every
+// case their Go handlers' fast paths answer, and more: the arithmetic and
+// the bitwise operators, of numbers (by ToInt32 where the Go handler
+// takes int32s alone), into any register, where the Go handler's stores
+// only into one that holds no pointer. A compare-and-branch is not among
+// them: its Go handler counts a back edge's budget as the slow function
+// does not.
+var nativeSlowOnMiss = [...]bytecode.ROp{
+	bytecode.RAdd, bytecode.RSub, bytecode.RMul, bytecode.RAddI, bytecode.RSubI,
+	bytecode.RInc, bytecode.RDec, bytecode.RPostInc, bytecode.RPostDec,
+	bytecode.RAndI, bytecode.ROrI, bytecode.RXorI, bytecode.RShlI, bytecode.RShrI, bytecode.RUShrI,
+	bytecode.RBitAnd, bytecode.RBitOr, bytecode.RBitXor, bytecode.RShl, bytecode.RShr, bytecode.RUShr,
+}
+
+// The exit table, made after regTable (zzreg_table.go's init, which
+// sorts first).
+func init() {
+	nativeExitTable = regTable
+	for _, op := range nativeSlowOnMiss {
+		nativeExitTable[op] = regSlowTable[op]
+	}
+}
+
 // nativeRun runs frame f as register code c, from instruction start, by
 // the native handlers: runReg's work, the instructions the code leaves run
 // by their Go handlers.
@@ -263,7 +295,7 @@ func (r *Runtime) newNativeCtx(st *regState) *nativeCtx {
 	}
 	ctx.typeofs = uintptr(unsafe.Pointer(&r.typeofStrs[0]))
 	ctx.typedEpoch = uintptr(unsafe.Pointer(&r.typedEpoch))
-	ctx.goTable = uintptr(unsafe.Pointer(&regTable[0]))
+	ctx.goTable = uintptr(unsafe.Pointer(&nativeExitTable[0]))
 	ctx.slowTable = uintptr(unsafe.Pointer(&regSlowTable[0]))
 	ctx.callH = nativeCallHAddr()
 	ctx.protoStr = unsafe.Offsetof(Realm{}.proto) + unsafe.Offsetof(intrinsics{}.str)
