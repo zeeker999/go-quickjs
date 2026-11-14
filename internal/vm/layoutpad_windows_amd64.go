@@ -34,13 +34,13 @@ const (
 	layoutPadNJ  = 444
 	layoutPadNGJ = -1
 	layoutPadNMJ = -1
-	layoutPadNQ  = 444
+	layoutPadNQ  = 439
 	layoutPadNGQ = -1
 	layoutPadNMQ = -1
 	layoutPadNW  = 361
 	layoutPadNGW = -1
 	layoutPadNMW = -1
-	layoutPadNZ  = 311
+	layoutPadNZ  = 148
 	layoutPadNGZ = -1
 	layoutPadNMZ = -1
 	layoutPadNCZ = 394

@@ -752,6 +752,18 @@ is not this one, and CI runs it under Go 1.24 and Go 1.27. The call made
 `array_push_args3_single`, whose pushes exit, 19% faster than the return
 and the entry (199 to 162 ns an operation), and `string_indexOf` 13%. There is no second interpreter: what the Go table does, an exit does.
 
+**Call sites of several callees.** A call site's cache holds one
+callee. Where `call_w` or `call_method_w` meets another, its exit
+(`nativeCallMiss`) makes the cache the new callee's and makes the call
+again, which the code then enters itself, rather than Go entering it in
+a code entry of its own -- where the handler would enter it with a
+frame: a leaf, which the miss answers without one, and a frame that
+keeps its arguments stay Go's, each cheaper there than the exit the call
+would come back to (with them, `func_closure_call` was twice as slow
+and the forwarders 20 to 35%). The cache is the same as `regCallMiss`
+would leave it: the last callee. `literal_sites_branch` went from 79.4
+to 68.2 ns (the tree 65.0).
+
 **Calls of Go with no exit.** What Go does that throws nothing and runs
 no code is called through `nativeCallH` with none of an exit's work:
 `closure_w`'s closure (`nativeClosure`), `new_object_lit`'s and
@@ -915,7 +927,12 @@ A built-in calling a callback enters the register code directly: the
 arguments, which are a Go slice, are copied into a window at the top of
 the stack, and `regEnter` runs the callee, with no tree, no `defer` and no
 `recover`. A register function calling a built-in passes it the window's
-arguments as its slice, without copying.
+arguments as its slice, without copying. A callback whose body is pure but longer than a
+register call answers without a frame (`pureByTree`) is evaluated
+without one from Go where it can be (`regDirect`, `pureCall`), as
+`callDirect` evaluates a pure body the tree has no tree for: from Go its
+frame is a code entry of its own (`typed_i64_sort`'s comparator of
+BigInts, 188.6 to 155 ns, the tree 153.7).
 
 Stage 1 keeps the heap frame for what reads it today -- stack traces, the
 debugger, closures' `this`, errors' positions -- and writes only the fields
