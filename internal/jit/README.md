@@ -378,8 +378,10 @@ the function's key:
   `TypedBigRead`, `StringRead`, `KeyedRead`), and a write to an object
   native code does not store to (`KeyedWrite`), the code to be compiled
   again from there (`jitRegReopt`); at a deoptimization, an element read made as a number that met
-  what is none, and an addition that met a string, which every lowering
-  of the function's register code is made with from there (the hints,
+  what is none; and at a deoptimization or a host exit, of the code's own
+  or of a callee inlined in it, an addition that met a string, as the
+  stack form's host exits learn it (`jitStringAddSeen`) -- these every
+  lowering of the function's register code is made with from there (the hints,
   `jitLearned`'s `regHints`, by register pc, `jitRegLower`): the read
   made by its cell (ir's `Reference`), the addition Go's (`StringAdd`),
   the additions of an element read of strings too (`stringConcats`).
