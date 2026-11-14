@@ -2768,6 +2768,9 @@ func (r *Runtime) jitInstall(j *jitJob) (*jit.SSACode, *jitFeedback, error) {
 	// step when the table grows, not a function's bytes (learn).
 	hint := s.hintRoom(e)
 	need += hint
+	// The contexts' room for its spill slots, which they keep (spillsFor).
+	spill := s.spillRoom(mc)
+	need += spill
 	// The lists of native callers its callees keep, which it joins once
 	// placed (setLinks).
 	need += s.callersGrowth(e, fb.links)
@@ -2787,6 +2790,7 @@ func (r *Runtime) jitInstall(j *jitJob) (*jit.SSACode, *jitFeedback, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	s.spillsFor(mc)
 	s.inlined += uint64(len(f.Inlined))
 	s.inlinedCode += uint64(f.InlinedCode)
 	if JITCodeHook != nil {
@@ -2798,7 +2802,7 @@ func (r *Runtime) jitInstall(j *jitJob) (*jit.SSACode, *jitFeedback, error) {
 	// for first, which had come short of all three at a full budget, and
 	// then of the lowering's own bytes -- a compile that met a budget
 	// within them was made and thrown away.
-	s.learn(len(fn.Code), need-hint+p.Footprint()+jitLoweringFixed+jitLinkFixed)
+	s.learn(len(fn.Code), need-hint-spill+p.Footprint()+jitLoweringFixed+jitLinkFixed)
 	return code, fb, nil
 }
 
@@ -12987,7 +12991,7 @@ func (r *Runtime) jitGrowContexts() bool {
 		return false
 	}
 	s.budget = r.jitBudget()
-	if !s.makeRoom(add * jitContextShare) {
+	if !s.makeRoom(add * (jitContextShare + s.spillShare())) {
 		return false
 	}
 	// Each context's places in what is kept by context, made here in the
@@ -13016,6 +13020,7 @@ func (r *Runtime) jitGrowContexts() bool {
 			s.mega = new(abi.MegaCache)
 		}
 		chunk[i].Mega = s.mega
+		chunk[i].GrowSpill(s.ssaSpills)
 		s.ssaCtxs = append(s.ssaCtxs, &chunk[i])
 	}
 	for i := max(old, 1); i < len(s.ssaCtxs); i++ {

@@ -345,7 +345,7 @@ func compileARM64(w *Workspace, f *ssa.Func, enc abi.Encoding, opts Options) (co
 		t.Compiles++
 	}
 	return &Code{Bytes: bytes, Entries: entries, CallEntry: callAt, Resume: resumeAt, GenEntry: genAt, Text: len(bytes), Exits: c.exits,
-		Calls: c.calls, CallRefs: c.callRefs(), GoCalls: c.goCalls, core: c.core}, nil
+		Calls: c.calls, CallRefs: c.callRefs(), Spills: c.spills, GoCalls: c.goCalls, core: c.core}, nil
 }
 
 // slotAddr is the base register and displacement of a frame slot's word.
@@ -391,7 +391,7 @@ func (c *a64Compiler) gpr(v *ssa.Value, scratch arm64.Reg) arm64.Reg {
 	if l.reg >= 0 {
 		return arm64.Reg(l.reg)
 	}
-	c.a.Load(scratch, a64Ctx, c.spillDisp(l.spill))
+	c.spillLoad(scratch, l.spill)
 	return scratch
 }
 
@@ -404,7 +404,7 @@ func (c *a64Compiler) fpr(v *ssa.Value, scratch arm64.FReg) arm64.FReg {
 	if l.reg >= 0 {
 		return arm64.FReg(l.reg)
 	}
-	c.a.LoadF(scratch, a64Ctx, c.spillDisp(l.spill))
+	c.spillLoadF(scratch, l.spill)
 	return scratch
 }
 
@@ -431,7 +431,7 @@ func (c *a64Compiler) gprInto(v *ssa.Value, dst arm64.Reg) {
 		}
 		return
 	}
-	c.a.Load(dst, a64Ctx, c.spillDisp(c.locAt(v).spill))
+	c.spillLoad(dst, c.locAt(v).spill)
 }
 
 func (c *a64Compiler) fdst(v *ssa.Value) arm64.FReg {
@@ -465,7 +465,7 @@ func (c *a64Compiler) setG(v *ssa.Value, src arm64.Reg) {
 		}
 		return
 	}
-	c.a.Store(a64Ctx, c.spillDisp(l.spill), src)
+	c.spillStore(l.spill, src)
 }
 
 // setF stores src into v's location.
@@ -477,7 +477,56 @@ func (c *a64Compiler) setF(v *ssa.Value, src arm64.FReg) {
 		}
 		return
 	}
-	c.a.StoreF(a64Ctx, c.spillDisp(l.spill), src)
+	c.spillStoreF(l.spill, src)
+}
+
+// A spill slot is the context's (abi.Context's Spill), at a displacement
+// from the context register, or past them in its SpillMore, reached
+// through the slice's address, loaded at each access into the encoder's
+// temporary, X27, which holds nothing across instructions where code reads
+// or writes a slot. Code of no more than the context's slots has none of
+// this.
+
+// spillAddr is the base register and displacement of spill slot.
+func (c *a64Compiler) spillAddr(slot int) (arm64.Reg, int32) {
+	off, more := spillMore(slot)
+	if !more {
+		return a64Ctx, c.spillDisp(slot)
+	}
+	c.a.Load(arm64.X27, a64Ctx, abi.OffSpillMore)
+	// Past a scaled load's reach, the rest added to X27 in steps an
+	// immediate holds: a sum through the temporary would overwrite it.
+	rest := int64(off)
+	for rest >= 1<<15 {
+		step := min(rest&^0xFFF, 0xFFF000)
+		c.a.AddImm(arm64.X27, arm64.X27, step, true)
+		rest -= step
+	}
+	return arm64.X27, int32(rest)
+}
+
+// spillLoad loads spill slot's word into dst.
+func (c *a64Compiler) spillLoad(dst arm64.Reg, slot int) {
+	base, d := c.spillAddr(slot)
+	c.a.Load(dst, base, d)
+}
+
+// spillStore stores src to spill slot.
+func (c *a64Compiler) spillStore(slot int, src arm64.Reg) {
+	base, d := c.spillAddr(slot)
+	c.a.Store(base, d, src)
+}
+
+// spillLoadF loads spill slot's double into dst.
+func (c *a64Compiler) spillLoadF(dst arm64.FReg, slot int) {
+	base, d := c.spillAddr(slot)
+	c.a.LoadF(dst, base, d)
+}
+
+// spillStoreF stores src's double to spill slot.
+func (c *a64Compiler) spillStoreF(slot int, src arm64.FReg) {
+	base, d := c.spillAddr(slot)
+	c.a.StoreF(base, d, src)
 }
 
 // materialize computes a lazy value's word into dst.
@@ -1282,9 +1331,9 @@ func (c *a64Compiler) block(b *ssa.Block, next *ssa.Block) {
 		if reg, slot, split := c.split(v); split {
 			// Its slot, which the frame states read (core's split).
 			if isFloat(v) {
-				c.a.StoreF(a64Ctx, c.spillDisp(slot), arm64.FReg(reg))
+				c.spillStoreF(slot, arm64.FReg(reg))
 			} else {
-				c.a.Store(a64Ctx, c.spillDisp(slot), arm64.Reg(reg))
+				c.spillStore(slot, arm64.Reg(reg))
 			}
 		}
 	}
@@ -2487,9 +2536,9 @@ func (c *a64Compiler) goCallingLive(v *ssa.Value, st *abi.GoCallState, stub arm6
 	saves := c.savesOf(v)
 	for _, sv := range saves {
 		if sv.float {
-			c.a.StoreF(a64Ctx, c.spillDisp(sv.slot), arm64.FReg(sv.reg))
+			c.spillStoreF(sv.slot, arm64.FReg(sv.reg))
 		} else {
-			c.a.Store(a64Ctx, c.spillDisp(sv.slot), arm64.Reg(sv.reg))
+			c.spillStore(sv.slot, arm64.Reg(sv.reg))
 		}
 	}
 	back, fail := c.a.NewLabel(), c.a.NewLabel()
@@ -2524,9 +2573,9 @@ func (c *a64Compiler) goCallingLive(v *ssa.Value, st *abi.GoCallState, stub arm6
 			case sv.cold && !refused:
 				// Read after the call by its refusal alone.
 			case sv.float:
-				c.a.LoadF(arm64.FReg(sv.reg), a64Ctx, c.spillDisp(sv.slot))
+				c.spillLoadF(arm64.FReg(sv.reg), sv.slot)
 			default:
-				c.a.Load(arm64.Reg(sv.reg), a64Ctx, c.spillDisp(sv.slot))
+				c.spillLoad(arm64.Reg(sv.reg), sv.slot)
 			}
 		}
 	}
@@ -4292,9 +4341,9 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 		case sv.frame != 0:
 			// As amd64's: what the frame holds throughout, not saved.
 		case sv.float:
-			c.a.StoreF(a64Ctx, c.spillDisp(sv.slot), arm64.FReg(sv.reg))
+			c.spillStoreF(sv.slot, arm64.FReg(sv.reg))
 		default:
-			c.a.Store(a64Ctx, c.spillDisp(sv.slot), arm64.Reg(sv.reg))
+			c.spillStore(sv.slot, arm64.Reg(sv.reg))
 		}
 	}
 	// As amd64's: the callee makes its own frame and context at its call
@@ -4746,9 +4795,9 @@ func (c *a64Compiler) restoreSavesOf(v *ssa.Value, refused bool) {
 			continue
 		}
 		if sv.float {
-			c.a.LoadF(arm64.FReg(sv.reg), a64Ctx, c.spillDisp(sv.slot))
+			c.spillLoadF(arm64.FReg(sv.reg), sv.slot)
 		} else {
-			c.a.Load(arm64.Reg(sv.reg), a64Ctx, c.spillDisp(sv.slot))
+			c.spillLoad(arm64.Reg(sv.reg), sv.slot)
 		}
 	}
 }
@@ -5542,9 +5591,9 @@ func (c *a64Compiler) leafCall(v *ssa.Value, site *ssa.CallSite) {
 		case sv.frame != 0:
 			// Read back from the frame's slot, which holds it.
 		case sv.float:
-			c.a.StoreF(a64Ctx, c.spillDisp(sv.slot), arm64.FReg(sv.reg))
+			c.spillStoreF(sv.slot, arm64.FReg(sv.reg))
 		default:
-			c.a.Store(a64Ctx, c.spillDisp(sv.slot), arm64.Reg(sv.reg))
+			c.spillStore(sv.slot, arm64.Reg(sv.reg))
 		}
 	}
 	back, fail := c.a.NewLabel(), c.a.NewLabel()
@@ -5919,9 +5968,9 @@ func (c *a64Compiler) genCall(v *ssa.Value, t ssa.GenStep, slow, done arm64.Labe
 	saves := c.savesOf(v)
 	for _, sv := range saves {
 		if sv.float {
-			c.a.StoreF(a64Ctx, c.spillDisp(sv.slot), arm64.FReg(sv.reg))
+			c.spillStoreF(sv.slot, arm64.FReg(sv.reg))
 		} else {
-			c.a.Store(a64Ctx, c.spillDisp(sv.slot), arm64.Reg(sv.reg))
+			c.spillStore(sv.slot, arm64.Reg(sv.reg))
 		}
 	}
 	// As amd64's: the cursor's word, where a register holds it, for the
@@ -5934,9 +5983,9 @@ func (c *a64Compiler) genCall(v *ssa.Value, t ssa.GenStep, slow, done arm64.Labe
 	restore := func() {
 		for _, sv := range saves {
 			if sv.float {
-				c.a.LoadF(arm64.FReg(sv.reg), a64Ctx, c.spillDisp(sv.slot))
+				c.spillLoadF(arm64.FReg(sv.reg), sv.slot)
 			} else {
-				c.a.Load(arm64.Reg(sv.reg), a64Ctx, c.spillDisp(sv.slot))
+				c.spillLoad(arm64.Reg(sv.reg), sv.slot)
 			}
 		}
 	}
@@ -6286,17 +6335,17 @@ func (c *a64Compiler) genNextCall(v *ssa.Value, t ssa.GenStep, slow, done arm64.
 	saves := c.savesOf(v)
 	for _, sv := range saves {
 		if sv.float {
-			c.a.StoreF(a64Ctx, c.spillDisp(sv.slot), arm64.FReg(sv.reg))
+			c.spillStoreF(sv.slot, arm64.FReg(sv.reg))
 		} else {
-			c.a.Store(a64Ctx, c.spillDisp(sv.slot), arm64.Reg(sv.reg))
+			c.spillStore(sv.slot, arm64.Reg(sv.reg))
 		}
 	}
 	restore := func() {
 		for _, sv := range saves {
 			if sv.float {
-				c.a.LoadF(arm64.FReg(sv.reg), a64Ctx, c.spillDisp(sv.slot))
+				c.spillLoadF(arm64.FReg(sv.reg), sv.slot)
 			} else {
-				c.a.Load(arm64.Reg(sv.reg), a64Ctx, c.spillDisp(sv.slot))
+				c.spillLoad(arm64.Reg(sv.reg), sv.slot)
 			}
 		}
 	}
@@ -7697,9 +7746,9 @@ func (c *a64Compiler) callGo(v *ssa.Value, op uint64, keep int) {
 	c.a.Store(a64Ctx, abi.OffGoKeep, a64A)
 	for _, sv := range c.savesOf(v) {
 		if sv.float {
-			c.a.StoreF(a64Ctx, c.spillDisp(sv.slot), arm64.FReg(sv.reg))
+			c.spillStoreF(sv.slot, arm64.FReg(sv.reg))
 		} else {
-			c.a.Store(a64Ctx, c.spillDisp(sv.slot), arm64.Reg(sv.reg))
+			c.spillStore(sv.slot, arm64.Reg(sv.reg))
 		}
 	}
 	back := c.a.NewLabel()
@@ -7712,9 +7761,9 @@ func (c *a64Compiler) callGo(v *ssa.Value, op uint64, keep int) {
 	c.a.Load(a64Stack, a64Ctx, abi.OffStack)
 	for _, sv := range c.savesOf(v) {
 		if sv.float {
-			c.a.LoadF(arm64.FReg(sv.reg), a64Ctx, c.spillDisp(sv.slot))
+			c.spillLoadF(arm64.FReg(sv.reg), sv.slot)
 		} else {
-			c.a.Load(arm64.Reg(sv.reg), a64Ctx, c.spillDisp(sv.slot))
+			c.spillLoad(arm64.Reg(sv.reg), sv.slot)
 		}
 	}
 }
@@ -8101,9 +8150,9 @@ func (c *a64Compiler) mathCall(v *ssa.Value) {
 		saves := c.savesOf(v)
 		for _, sv := range saves {
 			if sv.float {
-				c.a.StoreF(a64Ctx, c.spillDisp(sv.slot), arm64.FReg(sv.reg))
+				c.spillStoreF(sv.slot, arm64.FReg(sv.reg))
 			} else {
-				c.a.Store(a64Ctx, c.spillDisp(sv.slot), arm64.Reg(sv.reg))
+				c.spillStore(sv.slot, arm64.Reg(sv.reg))
 			}
 		}
 		reg := c.budgetReg(c.budget)
@@ -8120,9 +8169,9 @@ func (c *a64Compiler) mathCall(v *ssa.Value) {
 		c.a.Load(a64Stack, a64Ctx, abi.OffStack)
 		for _, sv := range saves {
 			if sv.float {
-				c.a.LoadF(arm64.FReg(sv.reg), a64Ctx, c.spillDisp(sv.slot))
+				c.spillLoadF(arm64.FReg(sv.reg), sv.slot)
 			} else {
-				c.a.Load(arm64.Reg(sv.reg), a64Ctx, c.spillDisp(sv.slot))
+				c.spillLoad(arm64.Reg(sv.reg), sv.slot)
 			}
 		}
 		if reg >= 0 {

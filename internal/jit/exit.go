@@ -138,7 +138,7 @@ func (f *exitFrame) word(l abi.ExitLoc) uint64 {
 	case abi.ExitReg:
 		return ctx.Regs[l.N]
 	case abi.ExitSpill:
-		return ctx.Spill[l.N]
+		return *ctx.SpillAt(l.N)
 	case abi.ExitConst:
 		if l.N < 0 {
 			return 0
@@ -147,7 +147,7 @@ func (f *exitFrame) word(l abi.ExitLoc) uint64 {
 	case abi.ExitF64Reg, abi.ExitF64Spill:
 		bits := ctx.XRegs[l.N&31]
 		if l.Kind == abi.ExitF64Spill {
-			bits = ctx.Spill[l.N]
+			bits = *ctx.SpillAt(l.N)
 		}
 		if f := math.Float64frombits(bits); f != f {
 			return enc.CanonicalNaN
@@ -156,13 +156,13 @@ func (f *exitFrame) word(l abi.ExitLoc) uint64 {
 	case abi.ExitI32Reg, abi.ExitI32Spill:
 		w := ctx.Regs[l.N&31]
 		if l.Kind == abi.ExitI32Spill {
-			w = ctx.Spill[l.N]
+			w = *ctx.SpillAt(l.N)
 		}
 		return math.Float64bits(float64(int32(uint32(w))))
 	case abi.ExitBoolReg, abi.ExitBoolSpill:
 		b := ctx.Regs[l.N&31]
 		if l.Kind == abi.ExitBoolSpill {
-			b = ctx.Spill[l.N]
+			b = *ctx.SpillAt(l.N)
 		}
 		if uint32(b) != 0 {
 			return enc.True
@@ -179,7 +179,7 @@ func (f *exitFrame) word(l abi.ExitLoc) uint64 {
 func (f *exitFrame) big(l abi.ExitLoc) (uint64, uint64) {
 	bits := f.ctx.Regs[l.N&31]
 	if l.Kind == abi.ExitI64Spill || l.Kind == abi.ExitU64Spill {
-		bits = f.ctx.Spill[l.N]
+		bits = *f.ctx.SpillAt(l.N)
 	}
 	_, unsigned := l.IsBig()
 	return f.enc.BigWords(bits, unsigned)
@@ -316,7 +316,6 @@ func ExpandGoCall(ctx *abi.Context) int32 {
 	// a load more for every operand, the call's state having been kept
 	// apart from it.
 	enc := st.Enc
-	base := unsafe.Pointer(ctx)
 	for i := range st.Args {
 		a := &st.Args[i]
 		var n uint64
@@ -326,15 +325,15 @@ func ExpandGoCall(ctx *abi.Context) int32 {
 		case abi.GoArgConst:
 			n = a.Word
 		case abi.GoArgWord:
-			n = *(*uint64)(unsafe.Add(base, a.At))
+			n = *(*uint64)(ctx.Word(a.At))
 		case abi.GoArgF64:
-			n = *(*uint64)(unsafe.Add(base, a.At))
+			n = *(*uint64)(ctx.Word(a.At))
 			if f := math.Float64frombits(n); f != f {
 				n = enc.CanonicalNaN
 			}
 		case abi.GoArgBool:
 			n = enc.False
-			if *(*uint32)(unsafe.Add(base, a.At)) != 0 {
+			if *(*uint32)(ctx.Word(a.At)) != 0 {
 				n = enc.True
 			}
 		}
@@ -342,7 +341,7 @@ func ExpandGoCall(ctx *abi.Context) int32 {
 		if a.Ref != abi.GoRefNone && !(a.Number && n < abi.NumberLimit) {
 			switch a.Ref {
 			case abi.GoRefSource:
-				if from := *(*unsafe.Pointer)(unsafe.Add(base, a.From)); from != nil {
+				if from := *(*unsafe.Pointer)(ctx.Word(a.From)); from != nil {
 					r = *(*unsafe.Pointer)(unsafe.Add(from, enc.RefOffset))
 				}
 			case abi.GoRefSlotSource:

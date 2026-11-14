@@ -1352,6 +1352,32 @@ spilled together, the two share the slot and the edge moves nothing.
 Spilled, an interval is in its slot whole: stored where it is made, loaded
 at each use.
 
+**Spill slots.** Nothing bounds how many a function takes: the free slots'
+lists grow, doubling, as the slots taken pass them, and the code says how
+many it uses (`Code`'s `Spills`). The context holds the first
+`abi.SpillSlots` (256) itself (`Spill`), each at a displacement from the
+context register; the rest are in its `SpillMore`, a `[]uint64`, slot n at
+`SpillMore[n-256]`, which the code reaches through the slice's address,
+loaded at each access (`spillLoad`, `spillStore`). arm64 loads it into the
+encoder's temporary, X27, and reads or writes the slot through it, adding
+the offset in steps first where it is past a scaled load's reach. amd64
+has no register to spare: a word loaded into a general register is loaded
+through that register; a store, or a double's load or store, goes through a
+scratch register other than what it stores, kept meanwhile in the
+context's `SpillTemp`, since any register may be live where code reads or
+writes a slot. Code of no more than 256 slots has none of this, its code as
+it was. Go gives every context room for the most slots any code it placed
+uses before that code can run (the VM's `spillsFor`), and a context made
+later the same (`jitGrowContexts`), keeping the words a context's slots
+hold, which native code suspended in a call of Go may have spilled: no
+entry, call or callee checks the room, and native code may call the code at
+any level. The room counts against the JIT's budget, which nothing takes
+back while the runtime lives. An exit's description, a call's state and a
+call of Go's operands name a slot by its number as before (`ExitSpill`,
+`abi.SpillOffset`), and Go reads it where it is (`Context.SpillAt`,
+`Context.Word`). Its words are raw, as `Spill`'s are: a reference spilled
+is kept where the collector sees it too (see [Calls of Go](#calls-of-go)).
+
 An interval whose uses but frame states' are all behind the new interval's
 start, each in its own block, none past a call that saves the registers nor
 by a call that reads its operands again after Go had the registers
@@ -1446,7 +1472,7 @@ field at its offset (`abi.Off*`), never by the VM's types.
 | `Locals`, `Stack`, `Upvalues`, `This`, `Consts` | The frame: its first slot, its first operand past the window, its captured bindings' cells, its receiver, and constants native code compares and loads. |
 | `ExitKind`, `ExitPC`, `ExitDepth`, `ExitSite`, `ExitDesc`, `Ret`, `RetFrom`, `RetValue` | How the code left: the exit's kind and state, or a return's result. |
 | `Records`, `Record`, `RecordRef`, `RecordHigh`, `RecordAt` | An exit's records, room for `abi.MaxRecords` (256). |
-| `Spill`, `Keep`, `Regs`, `XRegs` | Spill slots (`abi.SpillSlots`, 256), the references the code keeps where the collector sees them (`abi.MaxKeeps`, 256), and the registers a shared routine saves. |
+| `Spill`, `SpillMore`, `SpillTemp`, `Keep`, `Regs`, `XRegs` | Spill slots (`abi.SpillSlots`, 256, and those past them, see Spill slots), the references the code keeps where the collector sees them (`abi.MaxKeeps`, 256), and the registers a shared routine saves. |
 | `BackEdges` | The interpreter's back-edge counter, which every back edge decrements. |
 | `GoOp`, `GoArgs` and the call's words | A call of Go: the operation, its arguments' count and kind (see [Calls of Go](#calls-of-go)). |
 | `Next`, `Prev`, `Live`, `Level`, `Base`, `Closure`, `Function`, `NewTarget`, `ReturnTo`, `Args` | Native calls: the callee's context, which runs a call's callee or describes an inlined frame (`LiveCall`, `LiveInline`), its window, closure and function object, where it returns to, the arguments its frame keeps. |
@@ -1948,9 +1974,11 @@ fits: inlined callees' frames, native loops' slots and the homes of objects
 escape analysis leaves unmade all stay below it. A function of more takes
 none of those, and each of its exits and native calls is counted where its
 code is made (mir's `recordRoom`, `callState`), the code refused if one
-would write more. Its spills still have the context's 256
-(`abi.SpillSlots`). Code of 300, 1,000 and 5,000 locals runs natively
-(`TestJITManySlots`).
+would write more. Its spill slots are as many as its allocation takes
+(see Spill slots). Code of 300, 1,000 and 5,000 locals runs natively
+(`TestJITManySlots`), as does code of 1,000 and 5,000 values live at once,
+in some 1,400 and 6,700 spill slots, and one of 10,000 compiles for both
+backends (`TestJITSpillMore`, `TestJITSpillMoreCompiles`).
 
 ## The execution boundary
 
