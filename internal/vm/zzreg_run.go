@@ -74,6 +74,12 @@ type regCode struct {
 	// calls nothing, or one that only reads or writes its this's
 	// properties; read here rather than in the function, a line away.
 	leaf uint8
+	// tailTo says a call in tail position may give its frame to this code
+	// in place once the stack is deep (regTailTo's facts of the callee:
+	// strict, of the form's own layout, keeping no arguments, not
+	// suspending, not a class's constructor), which the native handler
+	// reads; it fills the padding after leaf.
+	tailTo bool
 	// leafArg is the parameter a regLeafArg body returns, and leafVal the
 	// value a regLeafConst body does.
 	leafArg int32

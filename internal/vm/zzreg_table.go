@@ -581,17 +581,17 @@ func regTypedRead(r *Runtime, o *Object, k float64) (float64, bool) {
 // the key's index, and the read as the stack form makes it otherwise.
 func rsGetIndex(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
 	st.kept.pc = pc + 1
-	if regElemMiss(st.c, &st.kept, regs) {
-		return pc + 1
-	}
 	r := st.r
-	st.at(pc)
 	if o, key := regs[w.B()], regs[w.C()]; o.IsObject() && key.IsString() {
+		// A string key is no miss path's: it is looked for first.
 		if x, ok := r.stringKeyRead(o.Object(), key.String()); ok {
 			regs[w.A()] = x
 			return pc + 1
 		}
+	} else if regElemMiss(st.c, &st.kept, regs) {
+		return pc + 1
 	}
+	st.at(pc)
 	v, err := r.getIndexed(regs[w.B()], regs[w.C()])
 	return st.put(regs, w, v, err)
 }

@@ -168,6 +168,7 @@ func regTreeWide(fn *bytecode.Function, rc *bytecode.RegCode) *tree {
 	if len(rc.Aux) > 0 {
 		c.aux = unsafe.Pointer(&rc.Aux[0])
 	}
+	c.tailTo = fn.Strict && !c.args && !c.suspends && !isClassConstructorKind(fn.Kind)
 	c.keep = uint16(rc.Params)
 	if !fn.Strict {
 		if !fn.HasSimpleParams {

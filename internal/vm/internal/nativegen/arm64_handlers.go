@@ -555,13 +555,19 @@ func armEmit(v *variant) (*block, error) {
 		g.typedBigRead()
 	}
 	h(bytecode.RGetIndex, func() {
-		miss := a.NewLabel()
+		// A key string a for-in handed out names its index (keyIndex).
+		miss, str, have := a.NewLabel(), a.NewLabel(), a.NewLabel()
 		g.regB(rS)
 		g.object(rS, rS)
 		g.regC(r8)
-		g.num(0, r8)
+		g.numOr(0, r8, str)
 		g.element(rC, rS, 0, objMappedArguments, miss)
+		a.Bind(have)
 		getElem(miss)
+		a.Bind(str)
+		g.keyIndex(r8)
+		g.dense(rC, rS, objMappedArguments, g.exit)
+		a.B(have)
 	})
 	h(bytecode.RGetIndexI, func() {
 		miss := a.NewLabel()
@@ -839,15 +845,20 @@ func armEmit(v *variant) (*block, error) {
 		g.taken(rC)
 	})
 	// A call in tail position while the stack is shallow is call_w's or
-	// call_method_w's (rhCallWT); deeper, Go's, which gives the frame to
-	// the callee in place.
-	for _, op := range []bytecode.ROp{bytecode.RCallWT, bytecode.RCallMWT} {
+	// call_method_w's (rhCallWT); deeper, the frame given to the callee in
+	// place (tailTo), or Go's.
+	tailIn := a.NewLabel()
+	for i, op := range []bytecode.ROp{bytecode.RCallWT, bytecode.RCallMWT} {
 		h(op, func() {
 			a.Load(r9, rCtx, ncRT)
 			a.Load(rC, r9, offRtFrameDepth)
 			a.CmpImm(rC, int64(tailCallDepth), true)
-			a.BCond(GE, g.exit)
+			a.BCond(GE, tailIn)
 			a.B(label(bytecode.RCallW))
+			if i == 0 {
+				a.Bind(tailIn)
+				g.tailTo()
+			}
 		})
 	}
 	h(bytecode.RCharCodeAt, func() {

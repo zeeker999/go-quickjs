@@ -216,6 +216,18 @@ var (
 	offUpSlot   int32
 	offUpClosed int32
 	offRCLeafUp int32
+	offRCTailTo int32
+
+	offFiKeys      int32
+	offFiObj       int32
+	offFiShape     int32
+	offFiIndexKeys int32
+	offRtKeyAtoms  int32
+	offRtIntStrs   int32
+	offKAS         int32
+	offKAAtom      int32
+	offKANone      int32
+	sizeKA         int32
 
 	// Switches (switchW).
 	offRCSwitches int32
@@ -446,6 +458,17 @@ func loadOffsets() {
 	offUpSlot = off("upvalue.slot")
 	offUpClosed = off("upvalue.closed")
 	offRCLeafUp = off("regCode.leafUp")
+	offRCTailTo = off("regCode.tailTo")
+	offFiKeys = off("forInObject.in") + off("forInState.keys")
+	offFiObj = off("forInObject.in") + off("forInState.obj")
+	offFiShape = off("forInObject.in") + off("forInState.shape")
+	offFiIndexKeys = off("forInObject.in") + off("forInState.indexKeys")
+	offRtKeyAtoms = rtRel(off("Runtime.keyAtoms"))
+	offRtIntStrs = rtRel(off("Runtime.intStrings"))
+	offKAS = off("keyAtom.s")
+	offKAAtom = off("keyAtom.atom")
+	offKANone = off("keyAtom.none")
+	sizeKA = size("keyAtom")
 	offRCSwitches = off("regCode.switches")
 	offSwDense = off("regSwitchTable.dense")
 	offSwLo = off("regSwitchTable.lo")

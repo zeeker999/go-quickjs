@@ -257,6 +257,38 @@ func (r *Runtime) nativeRestart(st *regState, ctx *nativeCtx) bool {
 	return true
 }
 
+// nativeRestartDeep is nativeRestart's of a frame the code entered itself,
+// s the top frame's state, given to a callee in place by Go (regTailTo):
+// where the native tail call left it to Go -- the interrupt due, say --
+// the frame goes on with the callee's code in this code entry, the frame
+// the code's still, as regRestartRun runs it again, rather than ended for
+// regRerun to run it, and every later call of its chain, in a code entry
+// of its own. It reports false where the frame ends instead, with the
+// error in s.
+func (r *Runtime) nativeRestartDeep(s *regState, ctx *nativeCtx) bool {
+	rc := r.regRestart
+	r.regRestart = nil
+	if r.interruptCounter--; r.interruptCounter <= 0 {
+		if err := r.checkInterruptNow(); err != nil {
+			s.err = err
+			return false
+		}
+	}
+	if r.stopped != nil {
+		s.err = r.stopped
+		return false
+	}
+	f := s.f
+	s.err = nil
+	s.c, s.cl = rc, f.cl
+	s.wb = f.base - int(rc.locals)
+	s.regs = regWindow(r.stack, s.wb)
+	nativeSetTop(ctx, uintptr(unsafe.Pointer(s.regs)), f, rc)
+	ctx.ip = uintptr(rc.code)
+	ctx.top, ctx.topOK = s, 1
+	return true
+}
+
 // nativeFinish ends nativeRun with v or st's error. A frame given to
 // callees in place closes the captures of the last one's code, as
 // regRestartRun closes them: its caller closes only the first's.
@@ -439,6 +471,11 @@ func (r *Runtime) nativeEnd(s *regState, ctx *nativeCtx, pc int, w bytecode.RIns
 		d := ctx.depth
 		if d == 0 {
 			return v, true
+		}
+		if s.err == errRegRestart && s.f.regKind == regFrameCall && r.nativeRestartDeep(s, ctx) {
+			// Given to a callee in place by Go (regTailTo): the callee's
+			// code goes on in the frame, which the code entered itself.
+			return Undefined, false
 		}
 		// Frame d is done: its caller goes on, as rhCallW does after
 		// runReg, or meets the throw.

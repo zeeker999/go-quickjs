@@ -428,11 +428,11 @@ func (g *nativeGen) arith(op SSE, operand int) {
 		big = a.NewLabel()
 	}
 	g.decB(RSI)
-	g.numOr(0, RSI, big)
+	g.numMem(0, RSI, big)
 	switch operand {
 	case 0:
 		g.decC(R8)
-		g.numOr(1, R8, big)
+		g.numMem(1, R8, big)
 	case 1:
 		g.immSC(RCX)
 		a.Cvtsi2sd(1, RCX, true)
@@ -756,6 +756,19 @@ func (g *nativeGen) numOr(x XReg, off Reg, miss Label) {
 	a.MovQToX(x, R9)
 }
 
+// numMem is numOr for an operand of arithmetic, whose answer the next
+// instruction often reads: x is loaded from memory, not moved from R9,
+// so that a chain of operations through a register waits on the store's
+// forwarding alone, not on a move between the register files too. R9
+// holds the operand's address, not its bits.
+func (g *nativeGen) numMem(x XReg, off Reg, miss Label) {
+	a := g.a
+	a.LeaIdx(R9, R12, off, 1, 0)
+	a.CmpMem(R10, R9, 0, true)
+	a.Jcc(CondBE, miss)
+	a.LoadSD(x, R9, 0)
+}
+
 // bigShort puts in lo and hi, a 128-bit two's complement integer, the
 // BigInt the window's Value at off holds in itself: one of the int64 range
 // (shortBig), and where wide, one past it, below 2^64 in magnitude
@@ -881,7 +894,7 @@ func (g *nativeGen) bigStoreA() {
 func (g *nativeGen) bitImm(emit func(), unsigned ...bool) {
 	a := g.a
 	g.decB(RSI)
-	g.num(0, RSI)
+	g.numMem(0, RSI, g.exit)
 	g.toInt32(R9, 0)
 	g.immSC(RCX)
 	emit()
@@ -895,9 +908,9 @@ func (g *nativeGen) bitImm(emit func(), unsigned ...bool) {
 func (g *nativeGen) bitReg(emit func(), unsigned ...bool) {
 	a := g.a
 	g.decB(RSI)
-	g.num(0, RSI)
+	g.numMem(0, RSI, g.exit)
 	g.decC(R8)
-	g.num(1, R8)
+	g.numMem(1, R8, g.exit)
 	g.toInt32(RCX, 1)
 	g.toInt32(R9, 0)
 	emit()

@@ -67,9 +67,10 @@ func (g *armGen) genStep() {
 	a.Ubfx(rD, rW, 16, 16)
 	a.ShiftImm(Lsl, rD, rD, 4, true)
 	a.Store(rCtx, scr(sV1), rD)
-	// Not a for-in's, and stepped by the realm's next.
+	// Not a for-in's (forInStep), and stepped by the realm's next.
+	forIn := a.NewLabel()
 	a.LoadU8(rC, rS, offItForIn)
-	a.Cbnz(rC, g.exit, false)
+	a.Cbnz(rC, forIn, false)
 	a.Load(rD, rCtx, ncRT)
 	a.Load(rD, rD, rtRel(0))
 	a.Load(rD, rD, offRealmNext)
@@ -372,6 +373,8 @@ func (g *armGen) genStep() {
 	a.Load(rC, rCtx, scr(sKind))
 	a.AddLsl(rIP, rIP, rC, 3)
 	g.dispatch()
+	a.Bind(forIn)
+	g.forInStep()
 }
 
 // genYield is yield in a generator's frame genStep entered, as amd64's.

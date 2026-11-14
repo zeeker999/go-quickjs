@@ -643,13 +643,19 @@ func nativeEmit(v *variant) (*block, error) {
 		g.typedBigRead()
 	}
 	h(bytecode.RGetIndex, func() {
-		miss := a.NewLabel()
+		// A key string a for-in handed out names its index (keyIndex).
+		miss, str, have := a.NewLabel(), a.NewLabel(), a.NewLabel()
 		g.decB(RSI)
 		g.object(RSI, RSI)
 		g.decC(R8)
-		g.num(0, R8)
+		g.numOr(0, R8, str)
 		g.element(RCX, RSI, 0, objMappedArguments, miss)
+		a.Bind(have)
 		getElem(miss)
+		a.Bind(str)
+		g.keyIndex(R8)
+		g.dense(RCX, RSI, objMappedArguments, g.exit)
+		a.Jmp(have)
 	})
 	h(bytecode.RGetIndexI, func() {
 		miss := a.NewLabel()
@@ -968,15 +974,20 @@ func nativeEmit(v *variant) (*block, error) {
 		g.taken(RCX)
 	})
 	// A call in tail position while the stack is shallow is call_w's or
-	// call_method_w's (rhCallWT); deeper, Go's, which gives the frame to
-	// the callee in place.
-	for _, op := range []bytecode.ROp{bytecode.RCallWT, bytecode.RCallMWT} {
+	// call_method_w's (rhCallWT); deeper, the frame given to the callee in
+	// place (tailTo), or Go's.
+	tailIn := a.NewLabel()
+	for i, op := range []bytecode.ROp{bytecode.RCallWT, bytecode.RCallMWT} {
 		h(op, func() {
 			a.Load(R9, RDI, ncRT)
 			a.Load(RCX, R9, offRtFrameDepth)
 			a.OpImm(Cmp, RCX, tailCallDepth, true)
-			a.Jcc(CondGE, g.exit)
+			a.Jcc(CondGE, tailIn)
 			a.Jmp(label(bytecode.RCallW))
+			if i == 0 {
+				a.Bind(tailIn)
+				g.tailTo()
+			}
 		})
 	}
 	h(bytecode.RCharCodeAt, func() {

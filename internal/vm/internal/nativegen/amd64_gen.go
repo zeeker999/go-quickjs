@@ -82,10 +82,11 @@ func (g *nativeGen) genStep() {
 	// the value goes, sEnt genFrom.
 	g.decA(RDX)
 	a.Store(RDI, scr(sV1), RDX)
-	// Not a for-in's, and stepped by the realm's next.
+	// Not a for-in's (forInStep), and stepped by the realm's next.
+	forIn := a.NewLabel()
 	a.LoadU8(RCX, RSI, offItForIn)
 	a.Op(Test, RCX, RCX, false)
-	a.Jcc(CondNE, g.exit)
+	a.Jcc(CondNE, forIn)
 	a.Load(RDX, RDI, ncRT)
 	a.Load(RDX, RDX, rtRel(0))
 	a.Load(RDX, RDX, offRealmNext)
@@ -407,6 +408,8 @@ func (g *nativeGen) genStep() {
 	a.Load(RCX, RDI, scr(sKind))
 	a.LeaIdx(RBX, RBX, RCX, 8, 0)
 	g.dispatch()
+	a.Bind(forIn)
+	g.forInStep()
 }
 
 // genYield is yield in a generator's frame genStep entered: the frame

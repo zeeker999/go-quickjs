@@ -49,6 +49,9 @@ func NativeLayout() (offsets, sizes map[string]uintptr, consts map[string]uint64
 		reflect.TypeFor[typedArrayData](),
 		reflect.TypeFor[iterObject](),
 		reflect.TypeFor[iterState](),
+		reflect.TypeFor[forInObject](),
+		reflect.TypeFor[forInState](),
+		reflect.TypeFor[keyAtom](),
 		reflect.TypeFor[Symbol](),
 		reflect.TypeFor[propKey](),
 		reflect.TypeFor[generatorObject](),
@@ -156,6 +159,8 @@ func NativeLayout() (offsets, sizes map[string]uintptr, consts map[string]uint64
 		"atomIndexTag":    uint64(atomIndexTag),
 		"hasCacheBits":    uint64(hasCacheBits),
 		"hasCacheMul":     uint64(hasCacheMul),
+		"keySlotMul":      keySlotMul,
+		"intStringsLen":   uint64(len(Runtime{}.intStrings)),
 
 		"sE":     sE,
 		"sWin":   sWin,

@@ -192,6 +192,17 @@ func (g *armGen) numOr(x FReg, addr Reg, miss Label) {
 	a.FMovToF(x, r9)
 }
 
+// numMem is numOr for an operand of arithmetic, as amd64's: x is loaded
+// from memory rather than moved from r9, so that a chain of operations
+// through a register waits on the store's forwarding alone.
+func (g *armGen) numMem(x FReg, addr Reg, miss Label) {
+	a := g.a
+	a.Load(r9, addr, 0)
+	a.Cmp(r9, rTag, true)
+	a.BCond(HS, miss)
+	a.LoadF(x, addr, 0)
+}
+
 // noInt64 exits where r, FCVTZS's answer, is either limit: a number of
 // no int64 (or exactly -2^63, as on amd64), which saturates.
 func (g *armGen) noInt64(r Reg) {
@@ -511,11 +522,11 @@ func (g *armGen) arith(op FOp, operand int) {
 		big = a.NewLabel()
 	}
 	g.regB(rS)
-	g.numOr(0, rS, big)
+	g.numMem(0, rS, big)
 	switch operand {
 	case 0:
 		g.regC(r8)
-		g.numOr(1, r8, big)
+		g.numMem(1, r8, big)
 	case 1:
 		g.immSC(rC)
 		a.Scvtf(1, rC, true)
@@ -918,7 +929,7 @@ func (g *armGen) bigStoreA() {
 // bitImm is R[A] = int32 R[B] op SC, the count of a shift in rC.
 func (g *armGen) bitImm(emit func(), unsigned ...bool) {
 	g.regB(rS)
-	g.num(0, rS)
+	g.numMem(0, rS, g.exit)
 	g.toInt32(r9, 0)
 	g.immSC(rC)
 	emit()
@@ -929,9 +940,9 @@ func (g *armGen) bitImm(emit func(), unsigned ...bool) {
 // bitReg is R[A] = int32 R[B] op int32 R[C], R[C] in rC.
 func (g *armGen) bitReg(emit func(), unsigned ...bool) {
 	g.regB(rS)
-	g.num(0, rS)
+	g.numMem(0, rS, g.exit)
 	g.regC(r8)
-	g.num(1, r8)
+	g.numMem(1, r8, g.exit)
 	g.toInt32(rC, 1)
 	g.toInt32(r9, 0)
 	emit()

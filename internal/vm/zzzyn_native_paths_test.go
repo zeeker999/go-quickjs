@@ -230,6 +230,39 @@ func TestRegNativeTailCalls(t *testing.T) {
 		var t = 0
 		for (var i = 0; i < 50; i++) t += self(20, i)
 		String(t)`, bytecode.RCallWT)
+	// Past tailCallDepth, in frames the code entered itself: the frame
+	// given to the callee in place natively (tailTo) -- self and mutual
+	// recursion, a method's and an arrow's, fewer and more arguments than
+	// parameters, a callee whose bindings are not its parameters -- and
+	// what it leaves to Go: a callee that keeps its arguments, captures
+	// open on the frame. Beside the caches' filling, a call exits where
+	// the native frame stack grows (8 records to 64, three times), and
+	// where the interrupt's count is due, every interruptCheckInterval
+	// calls -- the chains' and the calls under tailCallDepth that start
+	// them, at most as many again -- which Go makes, the frame going on
+	// in place from it (nativeRestartDeep).
+	was := nativeWarmExits
+	nativeWarmExits += 3 + 2*20*(500+300+300+301)/interruptCheckInterval
+	defer func() { nativeWarmExits = was }()
+	nativeCheck(t, `
+		"use strict"
+		var out = []
+		function fewer(n, a, b) { if (n === 0) return String(a) + String(b); return fewer(n - 1, a) }
+		function more(n, a) { if (n === 0) return a; return more(n - 1, a + 1, n, n) }
+		function locals(n, a) { var x = a * 2, y; if (n === 0) return x + String(y); return locals(n - 1, a + 1) }
+		function args(n) { if (n === 0) return arguments.length; return args(n - 1, 1, 2) }
+		function caps(n, f) { if (n === 0) return f(); var k = n; return caps(n - 1, n % 50 ? f : function () { return k }) }
+		out.push(fewer(300, 7, 8), more(300, 0), locals(300, 1), args(300), caps(300, null))
+		out.join("\n")`, `
+		"use strict"
+		function self(n, acc) { if (n === 0) return acc; return self(n - 1, (acc + n) | 0) }
+		var o = { m(n, a) { return n === 0 ? a : this.m(n - 1, a + 1) } }
+		var arrow = (n, a) => n === 0 ? a : arrow(n - 1, a + 2)
+		function even(n) { return n === 0 ? 1 : odd(n - 1) }
+		function odd(n) { return n === 0 ? 0 : even(n - 1) }
+		var t = 0
+		for (var i = 0; i < 20; i++) t += self(500, i) + o.m(300, i) + arrow(300, i) + even(301)
+		String(t)`, bytecode.RCallWT, bytecode.RCallMWT)
 }
 
 // TestRegNativeTypedBigClamped runs the elements of BigInt64Array and
@@ -837,4 +870,49 @@ func TestRegNativeInIndex(t *testing.T) {
 		var a = [1, 2, 3, , 5, 6, 7, 8], s = 0
 		for (var j = 0; j < 1000; j++) { if ((j & 7) in a) s++; if (12 in a) s++ }
 		String(s)`, bytecode.RIn)
+}
+
+// TestRegNativeForIn runs for-in's steps natively -- an array's index
+// keys, walked by index, and an object's snapshot of keys while it keeps
+// its shape -- and the element read by a key string the loop handed out
+// (keyIndex): holes, elements deleted and added while the loop runs,
+// indices past the strings the runtime keeps, keys of the prototype
+// chain, an object whose keys were deleted, keys read from another
+// array, and the same strings read as keys after the loop.
+func TestRegNativeForIn(t *testing.T) {
+	// The first loop over an array makes its keys' strings, a step's exit
+	// each (keyString), which later loops hand out natively. An index key
+	// is read only right after its step hands it out: one read later, or
+	// one of a snapshot, whose keys are remembered at the loop's start, may
+	// find its keyAtoms entry taken by another string's, by their
+	// addresses, which would make the exits differ from run to run.
+	was := nativeWarmExits
+	nativeWarmExits += 8
+	defer func() { nativeWarmExits = was }()
+	nativeCheck(t, `
+		var out = []
+		function sum(a) { var s = "", k; for (k in a) s += k + ":" + a[k] + ","; return s }
+		function keys(a) { var s = "", k; for (k in a) s += k + ","; return s }
+		var holes = [1, , 3, , 5], gone = [1, 2, 3]; delete gone[2]
+		out.push(sum([1, 2, 3]), keys(holes), keys(gone), sum([]))
+		var big = []; for (var i = 0; i < 1100; i++) big[i] = i
+		var t = 0; for (var k in big) t += big[k]; out.push(t)
+		var del = [1, 2, 3, 4, 5], s = ""; for (var k in del) { s += k; if (k == 1) { del.length = 3; delete del[0] } } out.push(s)
+		var add = [1, 2], s2 = ""; for (var k in add) { s2 += k; add.push(9) } out.push(s2, add.length)
+		var other = [10, 20, 30], s3 = 0; for (var k in [1, 2, 3]) s3 += other[k]; out.push(s3)
+		function P() { this.a = 1; this.b = 2 } P.prototype.c = 3
+		var o = new P(), s4 = ""; for (var k in o) s4 += k + o[k]; out.push(s4)
+		var d = { x: 1, y: 2, z: 3 }, s5 = ""; for (var k in d) { s5 += k; delete d.z } out.push(s5)
+		var mixed = [1, 2]; mixed.foo = 7; var s6 = ""; for (var k in mixed) s6 += k; out.push(s6)
+		var str = "abc", s7 = ""; for (var k in str) s7 += str[k]; out.push(s7)
+		var args = (function () { var r = ""; for (var k in arguments) r += arguments[k]; return r })(4, 5, 6); out.push(args)
+		out.join("\n")`, `
+		var r = []; for (var i = 0; i < 8; i++) r[i] = i
+		var objs = []; for (var j = 0; j < 4; j++) objs.push({ a: j, b: 2, c: 3, d: 4 })
+		var sum = 0, c = 0
+		for (var n = 0; n < 200; n++) {
+			for (var k in r) sum += r[k]
+			for (var k2 in objs[n & 3]) c++
+		}
+		String(sum) + " " + String(c)`, bytecode.RIterNext, bytecode.RGetIndex)
 }
