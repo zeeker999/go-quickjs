@@ -187,7 +187,14 @@ where its result goes -- `new_array`'s elements, `concat`'s parts -- they
 are copied to scratch slots first, which the operation reads as a run of
 operands. What the lowering leaves to Go whole -- a call, a cold operation
 -- is one `Host`, alone in its origin: Go runs the whole register
-instruction. A call, `call_w`'s, `call_method_w`'s or `new_w`'s, and a
+instruction. Where Go can run it on the frame and the registers it reads
+and writes are known (`compile.RegAccess`: up to three read, one written)
+-- a private member's read or write, a for...in's or a for...of's cursor,
+an object's or an array's spread, a spread call, a computed key's
+definition -- it is a whole Host (`ir.Instruction`'s `Whole`), its
+operands the registers it reads and its result the one it writes, which
+native code calls Go for and goes on after (see [Calls of
+Go](#calls-of-go)). A call, `call_w`'s, `call_method_w`'s or `new_w`'s, and a
 `typeof` are Hosts of their own kind (`ir.Instruction`'s `Window`), which
 the builder makes natively from what the feedback says (see [Calls of
 Go](#calls-of-go) and [Native calls](#native-calls)). A call in tail
@@ -195,9 +202,8 @@ position (`tail_call_w`, `tail_call_method_w`) is a plain Host: the
 interpreter makes it, as the ordinary call while the stack is shallow and
 giving the frame to the callee deeper (the VM's `rhCallWT`), so that native
 code keeps no frame a tail call gives up; native code leaves the frame to it
-there, and the frame ends after it. A private member's read or write
-(`get_private`, `set_private`) is a Host too, native code going on after
-it.
+there, and the frame ends after it. A return, a suspension and a throw
+the function does not catch are plain Hosts too.
 
 `regexp_lit` that calls -- `/x/.exec(s)`, `/x/.test(s)` -- is the literal's
 RegExp from its pool, its method read, both in scratch slots, the argument
@@ -1275,6 +1281,23 @@ them -- and the frame's pc past the call meanwhile. A call that threw, that
 the runtime stopped in, or after which the code was found invalid, its exit
 finishes (`regPending`, `regFinishCall`): the answer to the call's register,
 or the exception to the frame's handlers, never the call made again.
+
+**Instructions run whole.** A whole Host (`ir.Instruction`'s `Whole`) is
+a call of Go (`ssa.CallSite`'s `Whole`, `abi.GoCallWhole`) that runs the
+register instruction at its PC on the register frame, by the interpreter's
+own handlers (`regWhole`), as V8's code calls a runtime function for what
+it has no code of (`jitRegWhole`): the registers it reads are given the
+values the code passed, its result, the register it writes, goes to the
+call's keep cell, and what it wrote in the frame is put back -- the code
+keeps values in the frame's registers as it found them -- but a captured
+register of the run's own frame, where its cell holds it. On a native
+callee's frame its level's frames are made first, as for any call of Go
+that runs script (`jitRegGoCallNested`). What does not go on at the next
+instruction -- a throw, a handler of the frame's that took one, the
+runtime stopped, the code found invalid -- the exit at the call finishes
+(`regPending`, `regFinishWhole`): the register the instruction wrote, or
+the handler's, written over the exit's records, the instruction never run
+again.
 
 **On the frame's own state.** What reads only its operands and the frame --
 a `new.target`, a rest parameter's array and an unmapped arguments object of

@@ -1987,6 +1987,12 @@ type CallSite struct {
 	// it without a frame where that runs no script, and with the code's
 	// frame where it may.
 	Instr int
+	// Whole, of a call of Go (GoCall), is register code's instruction at
+	// the call's PC that Go runs whole on the register frame (ir's Whole):
+	// its operands the registers the instruction reads, in order, its
+	// result the one it writes, the code going on after it, as V8's code
+	// calls a runtime function for what it has no code of.
+	Whole bool
 	// StringSelf, of an operation Go makes (Instr) of one operand, says its
 	// result is the operand itself where that is a string -- a computed
 	// key's conversion, to_property_key -- which native code tests,
@@ -5379,7 +5385,7 @@ func (b *builder) goConcat(blk *Block, in ir.Instruction, operand func(ir.Operan
 // nativeHost reports whether native code makes the host operation at pc
 // itself: an intrinsic call or instanceof the VM knows.
 func (b *builder) nativeHost(pc int) bool {
-	if b.p.Code[pc].Frame && b.cur == b.root && b.goCalls() {
+	if in := b.p.Code[pc]; (in.Frame || in.Whole) && b.cur == b.root && b.goCalls() {
 		// Go's from native code (GoHost).
 		return true
 	}
@@ -8249,6 +8255,34 @@ func (b *builder) instruction(blk *Block, pc int) {
 				b.assign(in.Dest, blk, r)
 			}
 			// A getter or a setter Go calls may assign a captured binding.
+			if b.hasCells() {
+				b.reloadAfterCall(blk)
+			}
+			break
+		}
+		if in.Op == ir.Host && in.Whole && b.cur == b.root && b.goCalls() {
+			// Go runs it whole on the register frame, called from native
+			// code (CallSite's Whole), and native code goes on after it:
+			// its operands the registers it reads, its result the one it
+			// writes. What Go refuses, or what does not go on to the next
+			// instruction -- a throw, code found invalid -- leaves at the
+			// call, Go finishing it there.
+			ops := []ir.Operand{in.Left, in.Right, in.Third}
+			args := make([]*Value, in.Extra)
+			for i := range args {
+				args[i] = operand(ops[i])
+			}
+			call := guard(OpCall, Tagged, ir.HostExit, args...)
+			b.f.cache(call).Calls, call.Index = []*CallSite{{Go: GoCall, Whole: true, Argc: in.Extra, ThisSlot: -1}}, b.f.Keeps
+			b.f.Keeps++
+			b.f.HostsLeft = append(b.f.HostsLeft, pc)
+			if in.Dest >= 0 {
+				cell := f.newValue(blk, OpCallCell, Source, call)
+				r := f.newValue(blk, OpKept, Tagged, cell, call)
+				r.Shadow = cell
+				b.assign(in.Dest, blk, r)
+			}
+			// What it runs may assign a captured binding.
 			if b.hasCells() {
 				b.reloadAfterCall(blk)
 			}

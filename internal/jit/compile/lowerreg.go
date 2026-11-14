@@ -673,7 +673,7 @@ func (l *regLowering) lower(pc int) {
 	rc, fn := l.rc, l.fn
 	w := rc.Code[pc]
 	a, b, c := w.A(), w.B(), w.C()
-	host := func() { l.emit(ir.Instruction{Op: ir.Host}, false) }
+	host := func() { l.emit(l.hostAt(pc), false) }
 	copyTo := func(dest int, src ir.Operand) { l.emit(ir.Instruction{Op: ir.Copy, Dest: dest, Left: src}, false) }
 	binary := func(op ir.Operator, left, right ir.Operand, strict bool) {
 		l.emit(ir.Instruction{Op: ir.Binary, Operator: op, Left: left, Right: right, Dest: int(a), Strict: strict}, false)
@@ -1167,14 +1167,42 @@ func (l *regLowering) lowerCold(pc int, w bytecode.RInstr) {
 		// Go's, from the frame (ir's Frame).
 		l.emit(ir.Instruction{Op: ir.Host, Frame: true, Dest: int(a)}, false)
 	default:
-		l.emit(ir.Instruction{Op: ir.Host}, false)
+		l.emit(l.hostAt(pc), false)
 	}
+}
+
+// hostAt is the Host of the register instruction at pc, which Go runs
+// whole: called from native code where Go may run it on the frame and the
+// registers it reads and writes are known (RegAccess) -- up to three read,
+// one written -- the code going on after it (ir.Instruction's Whole); left
+// to an exit otherwise. A return, a suspension, a call in tail position
+// and a throw, which end the frame's flow or are the interpreter's alone,
+// leave.
+func (l *regLowering) hostAt(pc int) ir.Instruction {
+	switch l.rc.Code[pc].Op() {
+	case bytecode.RRet, bytecode.RRetUndef, bytecode.RYield, bytecode.RCallWT, bytecode.RCallMWT, bytecode.RAwait,
+		bytecode.RYieldStar, bytecode.REndParams, bytecode.RGenEntry, bytecode.RIterResume, bytecode.RThrow:
+		return ir.Instruction{Op: ir.Host}
+	}
+	reads, writes, all := RegAccess(l.rc, pc)
+	if all || len(reads) > 3 || len(writes) > 1 {
+		return ir.Instruction{Op: ir.Host}
+	}
+	in := ir.Instruction{Op: ir.Host, Whole: true, Extra: len(reads), Dest: -1}
+	ops := []*ir.Operand{&in.Left, &in.Right, &in.Third}
+	for i, r := range reads {
+		*ops[i] = ir.Slot(r)
+	}
+	if len(writes) == 1 {
+		in.Dest = writes[0]
+	}
+	return in
 }
 
 // liveRegs fills p's Live (ir.Program's): for each instruction, the
 // registers the code from there may read before it writes them, a backward
 // dataflow over the program, each Host's registers by its register
-// instruction (regAccess). A throw goes to the handler in force, whatever
+// instruction (RegAccess). A throw goes to the handler in force, whatever
 // the instruction writes; a register a closure captures is live
 // throughout, which the closure may read at any call.
 func liveRegs(p *ir.Program, rc *bytecode.RegCode) {
@@ -1232,7 +1260,7 @@ func liveRegs(p *ir.Program, rc *bytecode.RegCode) {
 				}
 			}
 			if ins.Op == ir.Host {
-				reads, writes, all := regAccess(rc, int(p.Origin[i]))
+				reads, writes, all := RegAccess(rc, int(p.Origin[i]))
 				for _, r := range writes {
 					kill(in, r)
 				}
@@ -1330,9 +1358,10 @@ func irReads(in *ir.Instruction) []int {
 	return out
 }
 
-// regAccess is the registers the register instruction at pc, which Go
-// runs (a Host), reads and writes; all where it may read any.
-func regAccess(rc *bytecode.RegCode, pc int) (reads, writes []int, all bool) {
+// RegAccess is the registers the register instruction at pc, which Go
+// runs (a Host), reads and writes, in the order a whole Host's operands
+// name them (ir.Instruction's Whole); all where it may read any.
+func RegAccess(rc *bytecode.RegCode, pc int) (reads, writes []int, all bool) {
 	w := rc.Code[pc]
 	a, b, c := int(w.A()), int(w.B()), int(w.C())
 	span := func(from, n int) []int {
@@ -1372,8 +1401,17 @@ func regAccess(rc *bytecode.RegCode, pc int) (reads, writes []int, all bool) {
 		return nil, []int{a, a + 1}, false
 	case bytecode.RLoadConst:
 		return nil, []int{a}, false
-	case bytecode.RForOfStart, bytecode.RForInStart:
+	case bytecode.RForOfStart, bytecode.RForInStart, bytecode.RIterRest:
 		return []int{b}, []int{a}, false
+	case bytecode.RObjectRest:
+		return append([]int{b}, span(c, int(rc.Aux[pc]))...), []int{a}, false
+	case bytecode.RCopyDataProps, bytecode.RSetProtoOf, bytecode.RArrayPush, bytecode.RArraySpread, bytecode.RNewClass,
+		bytecode.RSetHomeObject, bytecode.RDefineMethod, bytecode.RSetFieldInit:
+		return []int{a, b}, nil, false
+	case bytecode.RDefineIndex:
+		return []int{a, b, c}, nil, false
+	case bytecode.RCallSpread:
+		return span(a, 3), []int{b}, false
 	case bytecode.RIterCloseThrow:
 		return []int{b}, nil, false
 	case bytecode.RRestParam, bytecode.RNewTarget, bytecode.RTemplateObject, bytecode.RThis:

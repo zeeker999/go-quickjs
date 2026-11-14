@@ -4948,6 +4948,10 @@ type jitGoPending struct {
 	ctx int
 	v   Value
 	err error
+	// whole marks an instruction Go ran whole (jitRegWhole), which goes on
+	// at register pc next, v written to register reg, if not -1.
+	whole     bool
+	next, reg int
 }
 
 // jitRetired is code compiled again or dropped while a call of Go was

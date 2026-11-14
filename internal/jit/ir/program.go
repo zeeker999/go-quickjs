@@ -447,6 +447,11 @@ type Instruction struct {
 	// or a typeof, its operand at Left and no Extra; or an instanceof, its
 	// object at Left, its constructor at Right and Extra 1.
 	Window bool
+	// Whole marks a Host of register code that Go runs whole on the
+	// register frame, called from native code (ssa's GoCall, Whole), which
+	// goes on after it: the registers it reads, Extra of them, at Left,
+	// Right and Third in order, and the one it writes at Dest, or -1.
+	Whole bool
 	// Generic marks a component of a register instruction's expansion
 	// (Program's Origin) that follows one that may have committed: it never
 	// leaves at its own state, which would run the instruction again from
@@ -540,7 +545,7 @@ func (in *Instruction) Writes() (int, int) {
 	case Insert3:
 		return in.Dest, in.Dest + 3
 	case Host:
-		if in.Frame {
+		if in.Frame || in.Whole {
 			return in.Dest, -1
 		}
 	}

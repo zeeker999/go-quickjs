@@ -1024,6 +1024,9 @@ type jitState struct {
 	// regHostOps counts register code's host exits by the register
 	// instruction Go ran whole, for tests (RegNativeStats' HostOps).
 	regHostOps map[string]uint64
+	// wholeLeft counts the instructions Go ran whole for native code that
+	// did not go on natively (jitRegWhole), for tests (RegNativeStats').
+	wholeLeft uint64
 	// byFn is cache by its functions' addresses (entryFor).
 	byFn map[jitFnAddr]jitFnEntry
 	// links are the functions' links (jitLink), by the same keys.

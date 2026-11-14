@@ -557,7 +557,11 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 			// (jitRegUnwind): what it answered goes to the frame, as the
 			// call's register instruction would have it.
 			s.regPending = jitGoPending{}
-			next, ran, err = r.regFinishCall(f, c, wb, exitPC, p.v, p.err)
+			if p.whole {
+				next, ran, err = r.regFinishWhole(wb, p)
+			} else {
+				next, ran, err = r.regFinishCall(f, c, wb, exitPC, p.v, p.err)
+			}
 		} else {
 			s.noteRegHost(c, exitPC)
 			seen := r.jitRegHostSeen(f, c, wb, exitPC)
@@ -827,6 +831,9 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	op := w.Op()
 	argc := int(w.X())
 	kind := ctx.GoOp >> abi.GoOpKindShift & 0xff
+	if kind == abi.GoCallWhole {
+		return r.jitRegWhole(ctx, idx, run, rpc)
+	}
 	if op == bytecode.RTypeof && kind == abi.GoCallTypeOf {
 		// typeof's name, as regTypeof makes it, which runs nothing.
 		*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = Str(r.typeofString(jitGoArg(ctx, 0)))
@@ -944,6 +951,119 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	return true
 }
 
+// jitRegWhole runs, for native code, register code's instruction at
+// register pc rpc whole on run's frame (abi.GoCallWhole, ir's Whole), as
+// an exit there would have Go run it (regWhole), not leaving native code:
+// the registers it reads given the values the code passed (abi.Context's
+// GoArgs), its result, the register it writes, to the call's keep cell.
+// The code keeps values in the frame's registers as it found them, so
+// what the call wrote there is put back -- but a captured register of the
+// run's own frame, which is where its cell holds it. What does not go on
+// at the next instruction -- a throw, a handler that took one, the
+// runtime stopped, the code found invalid -- Go finishes at the exit the
+// code then takes (regPending, regFinishWhole): the register the
+// instruction wrote, or the handler's, written over the exit's records,
+// the instruction not run again. On a native callee's frame (a level),
+// what reads the frame's this is left to the exit.
+func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int) bool {
+	s := r.jit
+	f, c, e, wb := run.f, run.c, run.e, run.wb
+	if e == nil || e.p == nil {
+		return false
+	}
+	ipc := e.p.At(uint32(rpc))
+	if ipc < 0 || ipc+1 >= len(e.p.Code) {
+		return false
+	}
+	in := &e.p.Code[ipc]
+	if in.Op != ir.Host || !in.Whole || int(ctx.GoOp>>abi.GoOpArgcShift&0xff) != in.Extra || wb+e.p.Regs > len(r.stack) {
+		return false
+	}
+	own := ctx.Live == 0
+	if op := regAt(c.code, rpc).Op(); !own && (op == bytecode.RLoadThis || op == bytecode.RThis) {
+		return false
+	}
+	after := int(e.p.Origin[ipc+1])
+	h := c.rc.HandlerAt(rpc)
+	if h != nil && int(h.To) == after {
+		// A handler at the next instruction, where what threw and what did
+		// not would go on alike.
+		return false
+	}
+	ops := [3]ir.Operand{in.Left, in.Right, in.Third}
+	var regs [4]int
+	var saved [4]Value
+	n := 0
+	for i := 0; i <= in.Extra; i++ {
+		reg := in.Dest
+		if i < in.Extra {
+			if reg = ops[i].Slot; reg < 0 {
+				return false
+			}
+		}
+		if reg < 0 || own && e.p.IsCaptured(reg) || slices.Contains(regs[:n], reg) {
+			continue
+		}
+		regs[n], saved[n] = reg, r.stack[wb+reg]
+		n++
+	}
+	for i := 0; i < in.Extra; i++ {
+		if reg := ops[i].Slot; !own || !e.p.IsCaptured(reg) {
+			r.stack[wb+reg] = jitGoArg(ctx, i)
+		}
+	}
+	s.goCalls++
+	last, shared := s.ssaCtx, s.ssaSharedGen
+	goCallDepth := s.goCallDepth
+	s.goCallDepth = r.frameDepth + 1
+	next, _, err := r.regWhole(f, c, wb, rpc)
+	s.goCallDepth = goCallDepth
+	s.ssaCtx = last
+	if s.ssaSharedGen != shared {
+		r.jitShareContexts(idx, f)
+	}
+	var v Value
+	if in.Dest >= 0 {
+		v = r.stack[wb+in.Dest]
+	}
+	if err != nil || next != after || r.stopped != nil || e.invalid {
+		// Left at the call's exit, whose records write the frame as it was
+		// before the instruction: then the register it wrote, or the
+		// handler's that took what it threw.
+		p := jitGoPending{set: true, pc: rpc, ctx: idx, whole: true, next: next, err: err, reg: -1}
+		switch {
+		case err != nil:
+		case h != nil && next == int(h.To):
+			p.reg, p.v = int(h.Reg), r.stack[wb+int(h.Reg)]
+		default:
+			p.reg, p.v = in.Dest, v
+		}
+		s.regPending = p
+		s.wholeLeft++
+		return false
+	}
+	for i := range n {
+		r.stack[wb+regs[i]] = saved[i]
+	}
+	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
+	return true
+}
+
+// regFinishWhole finishes, on the registers of a window at wb, an
+// instruction Go ran whole for native code (jitRegWhole) that did not go
+// on natively, as p says: the register it wrote written over what the
+// exit's records wrote, or its exception, which no handler of the frame's
+// took, thrown. It reports as regWhole does.
+func (r *Runtime) regFinishWhole(wb int, p jitGoPending) (next int, ok bool, _ error) {
+	if p.err != nil {
+		return 0, true, p.err
+	}
+	if p.reg >= 0 {
+		r.stack[wb+p.reg] = p.v
+	}
+	return p.next, true, nil
+}
+
 // jitRegPropertyMade makes, for native code, the property read or write w
 // of f's register code, of key, on obj -- of val, a write -- as the
 // interpreter makes it, through the site's cache: a getter or a setter is
@@ -1030,6 +1150,9 @@ type RegNativeStats struct {
 	Unwound, Resumed uint64
 	// HostOps is Hosts by the register instruction Go ran whole.
 	HostOps map[string]uint64
+	// WholeLeft counts the instructions Go ran whole for native code,
+	// called from it, that it finished at an exit (jitRegWhole).
+	WholeLeft uint64
 }
 
 // RegNativeStats reports r's counts (RegNativeStats); zero before any.
@@ -1040,7 +1163,7 @@ func (r *Runtime) RegNativeStats() RegNativeStats {
 	}
 	return RegNativeStats{Entries: s.ssaEntries, Hosts: s.hosts, Guards: s.guards, Polls: s.budgets,
 		Interpreted: s.interpreted, Records: s.ssaRecords, Materialized: s.materialized, GoCalls: s.goCalls,
-		Unwound: s.unwound, Resumed: s.resumed, HostOps: maps.Clone(s.regHostOps)}
+		Unwound: s.unwound, Resumed: s.resumed, HostOps: maps.Clone(s.regHostOps), WholeLeft: s.wholeLeft}
 }
 
 // noteRegHost counts a host exit at register pc rpc of c by its register
