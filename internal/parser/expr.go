@@ -303,7 +303,7 @@ func (p *parser) parseBinaryFrom(left ast.Expr, minPrec int) ast.Expr {
 			}
 			left = p.nodes.logicalOp(op, left, right)
 		default:
-			left = p.nodes.binaryOp(op, left, right)
+			left = p.binaryOf(op, left, right)
 		}
 	}
 }
@@ -356,7 +356,7 @@ func (p *parser) parseUnary() ast.Expr {
 		if p.isPunct("**") {
 			p.errorf("unary %q before \"**\" requires parentheses", op)
 		}
-		return p.nodes.unaryOp(op, operand, start)
+		return p.unaryOf(op, operand, start)
 
 	case p.isKeyword("typeof"), p.isKeyword("void"), p.isKeyword("delete"):
 		op := p.tok.Value

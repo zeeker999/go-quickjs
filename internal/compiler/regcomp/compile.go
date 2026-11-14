@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-quickjs/go-quickjs/internal/ast"
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+	"github.com/go-quickjs/go-quickjs/internal/fold"
 )
 
 // The register form's frame: r0 the function, r1 its this, the parameters
@@ -352,6 +353,9 @@ type gen struct {
 	// thisBound says a derived constructor's super() has certainly bound
 	// this, which is then register 1.
 	thisBound bool
+	// leaves says the statement just compiled always leaves the list it
+	// is in (fold.Leaves), which is all the list's compile reads of it.
+	leaves bool
 }
 
 type loop struct {
@@ -1084,6 +1088,10 @@ func (g *gen) body() {
 					g.thisBound = true
 				}
 			}
+			if g.leaves && fold.On(fold.Unreachable) {
+				// Nothing after it is reached (list).
+				return
+			}
 		}
 	}
 	if has, async := usingKind(lit.Body); has {
@@ -1209,11 +1217,9 @@ func (g *gen) switchStmt(n *ast.SwitchStmt, label labelSet) {
 	}
 	for i, c := range n.Cases {
 		g.bind(bodies[i])
-		for _, s := range c.Body {
-			if g.err != "" {
-				return
-			}
-			g.stmt(s)
+		g.list(c.Body)
+		if g.err != "" {
+			return
 		}
 	}
 	g.bind(l.brk)
@@ -1384,20 +1390,31 @@ func (g *gen) declared(slot int) bool {
 
 func (g *gen) stmts(list []ast.Stmt) {
 	g.enterBlock(list)
-	run := func() {
-		for _, s := range list {
-			if g.err != "" {
-				return
-			}
-			g.stmt(s)
-		}
-	}
+	run := func() { g.list(list) }
 	if has, async := usingKind(list); has {
 		// The scope's resources are disposed of however it is left.
 		g.usingScope(list[0].Pos(), async, run)
 		return
 	}
 	run()
+}
+
+// list compiles a list's statements in turn, up to one that always leaves
+// the list -- a return, a throw, a break, a continue, as its compile notes
+// (g.leaves, fold.Leaves): nothing reaches those after it, which the stack
+// form compiles for its errors alone and drops (compileDropped), and V8
+// drops. It leaves g.leaves saying whether the list is always left so.
+func (g *gen) list(list []ast.Stmt) {
+	for _, s := range list {
+		if g.err != "" {
+			return
+		}
+		g.stmt(s)
+		if g.leaves && fold.On(fold.Unreachable) {
+			return
+		}
+	}
+	g.leaves = false
 }
 
 // enterBlock puts the lexical bindings a block declares that start in their
@@ -1491,7 +1508,13 @@ func (g *gen) inLoop() bool {
 
 func (g *gen) stmt(s ast.Stmt) {
 	mark := g.top
-	defer func() { g.top = mark }()
+	defer func() {
+		g.top = mark
+		// What its list needs of it once it is compiled: whether it
+		// always leaves the list, which a block's or an if's compile
+		// sets.
+		g.leaves = fold.Leaves(s, g.leaves)
+	}()
 	label := g.label
 	g.label = nil
 	g.debugMark(s.Pos())
@@ -1543,23 +1566,43 @@ func (g *gen) stmt(s ast.Stmt) {
 		g.ret(n.Arg)
 	case *ast.IfStmt:
 		g.resetCompletion()
+		if truthy, ok := fold.Dead(n.Test); ok {
+			// A test that folds runs one branch; the other is never
+			// reached, and not compiled (fold.Dead). The if is always
+			// left where the branch that runs is.
+			g.leaves = false
+			if truthy {
+				g.stmt(n.Cons)
+			} else if n.Alt != nil {
+				g.stmt(n.Alt)
+			}
+			return
+		}
 		els := g.newMark()
 		g.cond(n.Test, false, els)
 		g.stmt(n.Cons)
 		if n.Alt == nil {
 			g.bind(els)
+			g.leaves = false
 			return
 		}
+		// The if is always left where both branches are.
+		leaves := g.leaves
 		end := g.newMark()
 		g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), end, false)
 		g.bind(els)
 		g.stmt(n.Alt)
 		g.bind(end)
+		g.leaves = leaves && g.leaves
 	case *ast.ForStmt:
 		g.resetCompletion()
 		g.forStmt(n, label)
 	case *ast.WhileStmt:
 		g.resetCompletion()
+		if truthy, ok := fold.Dead(n.Test); ok && !truthy {
+			// A loop whose test is false runs nothing (fold.Dead).
+			return
+		}
 		l := g.pushLoop(label)
 		test := g.newMark()
 		body := g.newMark()
@@ -1744,6 +1787,12 @@ func (g *gen) forLoop(n *ast.ForStmt, label labelSet) {
 		default:
 			g.fail("a for loop's head")
 		}
+	}
+	if truthy, ok := fold.Dead(n.Test); ok && !truthy {
+		// A loop whose test is false runs its init clause alone
+		// (fold.Dead).
+		g.popLoop()
+		return
 	}
 	g.top = g.stmtTop()
 	test := g.newMark()
@@ -2221,6 +2270,48 @@ func numberLit(e ast.Expr) (float64, bool) {
 	return 0, false
 }
 
+// constant loads v, a value the compile knows (fold), as the literal of
+// it would be.
+func (g *gen) constant(v fold.Const, dst int) int {
+	if v.Kind == fold.Number {
+		return g.number(v.Num, dst)
+	}
+	d := g.dest(dst)
+	switch v.Kind {
+	case fold.String:
+		if v.Str == "" {
+			g.emit(bytecode.MakeR(bytecode.RLoadEmpty, 0, r16(d), 0, 0))
+		} else {
+			g.emit(bytecode.MakeRBC(bytecode.RLoadConst, 0, r16(d), g.constIdx(bytecode.Constant{Kind: bytecode.ConstString, Str: v.Str})))
+		}
+	case fold.Bool:
+		op := bytecode.RLoadFalse
+		if v.Bool {
+			op = bytecode.RLoadTrue
+		}
+		g.emit(bytecode.MakeR(op, 0, r16(d), 0, 0))
+	case fold.Null:
+		g.emit(bytecode.MakeR(bytecode.RLoadNull, 0, r16(d), 0, 0))
+	case fold.BigInt:
+		g.emit(bytecode.MakeRBC(bytecode.RLoadConst, 0, r16(d), g.constIdx(bytecode.Constant{Kind: bytecode.ConstBigInt, Str: v.Str})))
+	default:
+		g.emit(bytecode.MakeR(bytecode.RLoadUndef, 0, r16(d), 0, 0))
+	}
+	return d
+}
+
+// foldsVoid reports whether void's operand e is a value the compile
+// knows, which runs nothing and is not evaluated: a literal, or an
+// operator that folds (fold), as the stack form's void 0.
+func foldsVoid(e ast.Expr) bool {
+	switch e.(type) {
+	case *ast.NumberLit, *ast.StringLit, *ast.BoolLit, *ast.NullLit, *ast.BigIntLit:
+		return fold.On(fold.Unary)
+	}
+	_, ok := fold.Value(e)
+	return ok
+}
+
 func imm16(e ast.Expr) (int32, bool) {
 	n, ok := numberLit(e)
 	if !ok {
@@ -2442,6 +2533,25 @@ func (g *gen) logical(n *ast.Logical, dst int) int {
 
 func (g *gen) unary(n *ast.Unary, dst int) int {
 	switch n.Op {
+	case "!", "typeof":
+		// Of a value the compile knows -- typeof 1, !void 0; the parser
+		// has folded ! of a literal -- the literal of its value, as the
+		// stack form compiles it too (fold.Value), at the operator's
+		// position, where the operation would have been.
+		if v, ok := fold.Value(n); ok {
+			g.at(n.Start)
+			return g.constant(v, dst)
+		}
+	case "void":
+		if foldsVoid(n.Operand) {
+			// void 0, minifiers' undefined: an operand that folds runs
+			// nothing and is not evaluated.
+			d := g.dest(dst)
+			g.emit(bytecode.MakeR(bytecode.RLoadUndef, 0, r16(d), 0, 0))
+			return d
+		}
+	}
+	switch n.Op {
 	case "-":
 		if v, ok := numberLit(n); ok {
 			return g.number(v, dst)
@@ -2616,6 +2726,15 @@ func (g *gen) unaryOp(op bytecode.Op, operand ast.Expr, dst, pos int) int {
 func (g *gen) cond(e ast.Expr, when bool, target *mark) {
 	mark := g.top
 	defer func() { g.top = mark }()
+	// A constant -- a literal, or an operator that folds, !0 -- is true
+	// or false as the compile knows (fold.Test), as the stack form's test
+	// is.
+	if truthy, ok := fold.Test(e); ok {
+		if truthy == when {
+			g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), target, false)
+		}
+		return
+	}
 	switch n := e.(type) {
 	case *ast.Unary:
 		if n.Op == "!" {

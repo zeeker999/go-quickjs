@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -23,6 +24,9 @@ import (
 type options struct {
 	mutants, mutmax int
 	modes, file     string
+	// perFunc dumps a line for each function of each compile, rather than
+	// one for each file: the fold command's.
+	perFunc bool
 }
 
 var allModes = []string{"script", "strict", "module", "debug", "moddebug", "quirks", "eval"}
@@ -189,6 +193,10 @@ type writer struct {
 	w    io.Writer
 	seen map[uintptr]int
 	res  *result
+	// perFunc, where set, is given each function's own output, by its
+	// path, rather than its being written to w; and a compile's error, and
+	// its script's, as functions "error" and "script".
+	perFunc func(path string, text []byte)
 }
 
 var (
@@ -199,22 +207,51 @@ var (
 
 func (d *writer) result(res result, text string) {
 	if res.fn == nil {
-		fmt.Fprintln(d.w, "error", res.err)
+		d.part("error", func() { fmt.Fprintln(d.w, "error", res.err) })
 		return
 	}
 	d.res = &res
 	d.function("main", res.fn)
-	if res.info != nil {
-		fmt.Fprint(d.w, "module ")
-		d.value(reflect.ValueOf(res.info))
-		fmt.Fprintln(d.w)
+	d.part("script", func() {
+		if res.info != nil {
+			fmt.Fprint(d.w, "module ")
+			d.value(reflect.ValueOf(res.info))
+			fmt.Fprintln(d.w)
+		}
+		d.lineTable(res.fn.Script, text)
+	})
+}
+
+// part writes what write writes, as the output of the function at path
+// where perFunc is set.
+func (d *writer) part(path string, write func()) {
+	if d.perFunc == nil {
+		write()
+		return
 	}
-	d.lineTable(res.fn.Script, text)
+	w := d.w
+	var b bytes.Buffer
+	d.w = &b
+	write()
+	d.w = w
+	d.perFunc(path, b.Bytes())
 }
 
 // function writes all of fn's fields, each on a line, and an instruction
 // or a constant a line each, and then the functions it holds.
 func (d *writer) function(path string, fn *bytecode.Function) {
+	d.part(path, func() { d.fields(path, fn) })
+	n := 0
+	for _, c := range fn.Constants {
+		if c.Fn != nil {
+			d.function(fmt.Sprintf("%s/%d", path, n), c.Fn)
+			n++
+		}
+	}
+}
+
+// fields writes fn's own fields.
+func (d *writer) fields(path string, fn *bytecode.Function) {
 	fmt.Fprintf(d.w, "function %s %s\n", path, fn.Name)
 	v := reflect.ValueOf(fn).Elem()
 	for i := range v.NumField() {
@@ -238,13 +275,6 @@ func (d *writer) function(path string, fn *bytecode.Function) {
 		fmt.Fprint(d.w, f.Name, ": ")
 		d.value(v.Field(i))
 		fmt.Fprintln(d.w)
-	}
-	n := 0
-	for _, c := range fn.Constants {
-		if c.Fn != nil {
-			d.function(fmt.Sprintf("%s/%d", path, n), c.Fn)
-			n++
-		}
 	}
 }
 
@@ -447,12 +477,23 @@ func compileFile(w io.Writer, f source, modes []string, o options, verbose bool)
 	var prev result
 	var prevText string
 	var prevHead string
+	var prevKey string
 	flush := func() {
-		if prevHead != "" {
-			fmt.Fprintln(w, prevHead)
-			d := writer{w: w, seen: map[uintptr]int{}}
-			d.result(prev, prevText)
+		if prevHead == "" {
+			return
 		}
+		if o.perFunc {
+			d := writer{seen: map[uintptr]int{}, perFunc: func(path string, text []byte) {
+				h := fnv.New64a()
+				h.Write(text)
+				fmt.Fprintf(w, "%s\t%s\t%016x\t%s\n", prevKey, path, h.Sum64(), regState(text))
+			}}
+			d.result(prev, prevText)
+			return
+		}
+		fmt.Fprintln(w, prevHead)
+		d := writer{w: w, seen: map[uintptr]int{}}
+		d.result(prev, prevText)
 	}
 	seed := fnv.New64a()
 	seed.Write([]byte(f.name))
@@ -484,6 +525,7 @@ func compileFile(w io.Writer, f source, modes []string, o options, verbose bool)
 			}
 			prev, prevText = res, src
 			prevHead = fmt.Sprintf("=== %s mode %s variant %d", f.name, name, v)
+			prevKey = fmt.Sprintf("%s\t%s %d", f.name, name, v)
 			if verbose && v > 0 {
 				prevHead += fmt.Sprintf(" source %q", src)
 			}
@@ -505,6 +547,7 @@ func dumpAll(out, log io.Writer, roots []string, o options) error {
 	modes := modeList(o)
 	results := make([]summary, len(files))
 	errs := make([]error, len(files))
+	lines := make([][]byte, len(files))
 	next := make(chan int)
 	var wg sync.WaitGroup
 	for range runtime.GOMAXPROCS(0) {
@@ -512,6 +555,12 @@ func dumpAll(out, log io.Writer, roots []string, o options) error {
 		go func() {
 			defer wg.Done()
 			for i := range next {
+				if o.perFunc {
+					var b bytes.Buffer
+					results[i], errs[i] = compileFile(&b, files[i], modes, o, false)
+					lines[i] = b.Bytes()
+					continue
+				}
 				h := fnv.New64a()
 				w := bufio.NewWriterSize(h, 1<<16)
 				s, err := compileFile(w, files[i], modes, o, false)
@@ -533,7 +582,11 @@ func dumpAll(out, log io.Writer, roots []string, o options) error {
 		if errs[i] != nil {
 			return errs[i]
 		}
-		fmt.Fprintf(w, "%s\t%016x\t%d\t%d\t%d\n", files[i].name, s.hash, s.made, s.rejected, s.crash)
+		if o.perFunc {
+			w.Write(lines[i])
+		} else {
+			fmt.Fprintf(w, "%s\t%016x\t%d\t%d\t%d\n", files[i].name, s.hash, s.made, s.rejected, s.crash)
+		}
 		total.made += s.made
 		total.rejected += s.rejected
 		total.crash += s.crash
