@@ -534,3 +534,52 @@ func TestJITRegArrowThisPools(t *testing.T) {
 		})
 	}
 }
+
+// regTypedMethodsSrc reads typed arrays' methods, off their type's
+// prototype and %TypedArray%.prototype, which no cache holds: read
+// natively once learned at a call of Go (jitRegReadSeen) as a read past
+// the prototypes a cache holds (jitDeepReadOf); then a typed array given
+// an own method, and %TypedArray%.prototype's at replaced.
+const regTypedMethodsSrc = `
+function g(n) {
+	var t = new Int32Array(64), u = new Float64Array(8), s = 0;
+	for (var i = 0; i < 64; i++) t[i] = i;
+	for (var j = 0; j < n; j++) s += t.reduce(function (a, x) { return a + x }, 0) + t.subarray(1, 3).length + u.fill(j).length + t.indexOf(5) + t.at(-1) + t["1.5"] === undefined ? 1 : 0;
+	return s;
+}
+function own() { var t = new Int32Array(4); t.at = function () { return 100 }; return t.at(0) }
+function swap() { Object.getPrototypeOf(Int32Array.prototype).at = function () { return -7 } }
+function main(n) { return g(n) + ":" + own() }
+`
+
+// TestJITRegTypedMethods runs regTypedMethodsSrc natively and in a runtime
+// without the JIT, before and after the swap: no method read a call of Go
+// at each turn.
+func TestJITRegTypedMethods(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	rts := regNativeRuntimes(t, regTypedMethodsSrc)
+	rts[0].SetJITReport(true)
+	call := func(name string) {
+		var got [2]string
+		for i, r := range rts {
+			fn, _ := r.GetProp(Obj(r.Global()), r.Intern(name))
+			v, err := r.Call(fn, Undefined, []Value{Float(500)})
+			got[i] = regNativeShow(r, v, err)
+		}
+		if got[0] != got[1] {
+			t.Errorf("%s: with the JIT %q, without %q", name, got[0], got[1])
+		}
+	}
+	for range 20 {
+		call("main")
+	}
+	if n := rts[0].RegNativeStats().GoCallOps["get_method_w"]; n > 100 {
+		t.Errorf("typed arrays' methods read by Go %d times", n)
+	}
+	call("swap")
+	for range 3 {
+		call("main")
+	}
+}

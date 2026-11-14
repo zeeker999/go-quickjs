@@ -918,8 +918,14 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 		last, shared := s.ssaCtx, s.ssaSharedGen
 		s.goCalls++
 		r.noteRegGoCall(w, false, Value{})
-		v, err := r.jitRegPropertyMade(f, w, Atom(ctx.GoOp>>abi.GoOpIndexShift), jitGoArg(ctx, 0), jitGoArg(ctx, 1))
+		recv := jitGoArg(ctx, 0)
+		v, err := r.jitRegPropertyMade(f, w, Atom(ctx.GoOp>>abi.GoOpIndexShift), recv, jitGoArg(ctx, 1))
 		s.ssaCtx = last
+		if err == nil && op != bytecode.RSetProp {
+			// A read native code did not find, learned as at an exit
+			// (jitRegReadSeen).
+			r.jitRegReadSeen(f, c, run, rpc, recv)
+		}
 		if s.ssaSharedGen != shared {
 			r.jitShareContexts(idx, f)
 		}

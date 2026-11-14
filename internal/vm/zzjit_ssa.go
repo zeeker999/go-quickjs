@@ -1135,9 +1135,12 @@ type jitDeepRead struct {
 // it past the two prototypes a cache holds, up to jitAddDepth, with a
 // plain data property, each object on the way of a class with shapes that
 // does not answer the key itself, as fillPropCache requires of a cache's
-// -- or false.
+// -- or false. A typed array, whose reads no cache holds, its key no
+// numeric one, which names its elements, is read so at any depth: its
+// methods, on its type's prototype and %TypedArray%.prototype.
 func (r *Runtime) jitDeepReadOf(o *Object, key Atom) (jitDeepRead, bool) {
-	if key.IsIndex() || o.shape == nil || o.shape == noShape || !shapeClass(o.class) || synthesized(o.class, key) || o.findOwn(key) >= 0 {
+	typed := o.class == ClassTypedArray && r.jitTypedNamed(o, key)
+	if key.IsIndex() || o.shape == nil || o.shape == noShape || !shapeClass(o.class) && !typed || synthesized(o.class, key) || o.findOwn(key) >= 0 {
 		return jitDeepRead{}, false
 	}
 	d := jitDeepRead{shape: o.shape}
@@ -1147,7 +1150,7 @@ func (r *Runtime) jitDeepReadOf(o *Object, key Atom) (jitDeepRead, bool) {
 		}
 		d.up, d.shapes = append(d.up, p), append(d.shapes, p.shape)
 		if i := p.findOwn(key); i >= 0 {
-			if p.shape.keys[i].flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 || len(d.up) <= 2 {
+			if p.shape.keys[i].flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 || len(d.up) <= 2 && !typed {
 				return jitDeepRead{}, false
 			}
 			d.idx = int32(i)
@@ -1159,6 +1162,17 @@ func (r *Runtime) jitDeepReadOf(o *Object, key Atom) (jitDeepRead, bool) {
 		}
 	}
 	return jitDeepRead{}, false
+}
+
+// jitTypedNamed reports whether key names, on o, a typed array, a
+// property its prototypes answer: no canonical numeric string, which
+// names an element or nothing (typedArrayIndex), nor a symbol of its own.
+func (r *Runtime) jitTypedNamed(o *Object, key Atom) bool {
+	if key.IsIndex() || r.typedArrayIndex(o, key).numeric {
+		return false
+	}
+	_, ok := o.dataOf().(*typedArrayData)
+	return ok
 }
 
 // jitNoteDeepRead notes, in c's entries seen, the read of key from o a

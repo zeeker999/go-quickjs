@@ -412,3 +412,27 @@ func (f *jitRegFeedback) regWholeSite(pc int, w bytecode.RInstr) []ssa.CallSite 
 	}
 	return []ssa.CallSite{site}
 }
+
+// jitRegReadSeen learns, after Go made a property's read native code did
+// not find -- a megamorphic site's miss, a receiver no case of the site's
+// is of -- at register pc rpc of run's code, of receiver recv, what the read
+// met, as the stack form's code learns it at its calls of Go
+// (jitPropertySeen, jitPolySeen): the megamorphic cache filled for the
+// receiver's shape, a case its cache cannot hold (a typed array's method,
+// found past the two prototypes its cache holds, or on objects no cache
+// holds), which the code compiled again reads natively, stale from here.
+// Its receiver is the call's operand: the frame's register need not hold
+// it, native code keeping values in the frame's registers as it found them.
+func (r *Runtime) jitRegReadSeen(f *frame, c *regCode, run jitRegRun, rpc int, recv Value) {
+	op, ok := r.jitRegPropOp(f, c, run.wb, rpc)
+	if !ok || op.write || run.e == nil || run.e.invalid {
+		return
+	}
+	op.recv = recv
+	l := r.jit.regLearnedOf(r.jitKeyOf(f.cl.fn))
+	r.jitPolySeenOp(l, rpc, op)
+	if l.polyReopt {
+		l.polyReopt = false
+		r.jitRegReopt(f.cl, run.e)
+	}
+}
