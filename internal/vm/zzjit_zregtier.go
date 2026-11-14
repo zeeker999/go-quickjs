@@ -739,6 +739,12 @@ func (r *Runtime) jitRegEnter(f *frame, cl *closure, c *regCode, base, start int
 		}
 		return r.runReg(f, c, start)
 	}
+	if !r.jitRegContextFree() {
+		// As deep in native code, through Go, as there are contexts: the
+		// interpreter runs the frame, the code neither entered nor judged
+		// for it, as the stack form's runSSA declines it.
+		return r.runReg(f, c, start)
+	}
 	if start == 0 {
 		e.life.starts++
 		if e.life.notNative {
@@ -822,7 +828,8 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 		// Or code whose runs begun at a loop do not pay (loopSlow).
 		return target
 	}
-	if e = r.jitRegLoopCode(f, c, e, target); e == nil {
+	if e = r.jitRegLoopCode(f, c, e, target); e == nil || !r.jitRegContextFree() {
+		// Or as deep in native code as there are contexts (runSSA).
 		return target
 	}
 	if forced {
@@ -894,6 +901,16 @@ func (r *Runtime) jitRegLoopCode(f *frame, c *regCode, e *jitRegEntry, target in
 		return o
 	}
 	return nil
+}
+
+// jitRegContextFree reports whether a run Go begins now has a context to
+// run in, the JIT's contexts grown if it needs more and may have them, as
+// the stack form's runSSA asks before it enters code: past the last, the
+// interpreter runs the frame, which is no run of the code's -- no entry
+// counted, nothing judged, nothing to go on in at its next back edge.
+func (r *Runtime) jitRegContextFree() bool {
+	s := r.jit
+	return s.ctxTop < len(s.ssaCtxs)-1 || r.jitGrowContexts()
 }
 
 // findReturns finds the returns of e's register code rc that a frame the

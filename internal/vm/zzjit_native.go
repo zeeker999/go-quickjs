@@ -1057,6 +1057,12 @@ type jitState struct {
 	// regHostOps counts register code's host exits by the register
 	// instruction Go ran whole, for tests (RegNativeStats' HostOps).
 	regHostOps map[string]uint64
+	// regEnded counts the runs of register code that ended in the
+	// interpreter (interpreted) by why they did, the instruction they
+	// left at and its function, while the JIT reports (RegNativeStats'
+	// Ended); regEndWhy is why jitRegLeft last left a frame to it.
+	regEnded  map[string]uint64
+	regEndWhy string
 	// wholeLeft counts the instructions Go ran whole for native code that
 	// did not go on natively (jitRegWhole), for tests (RegNativeStats').
 	wholeLeft uint64

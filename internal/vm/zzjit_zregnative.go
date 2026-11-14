@@ -841,18 +841,21 @@ func (r *Runtime) jitRegGoOnAt(f *frame, c *regCode, e *jitRegEntry, wb, rpc, at
 					e = ne
 					continue
 				}
-				return r.jitRegLeaveTo(f, e, rpc), Undefined, false, nil
+				if r.jit.reporting {
+					r.jit.regEndWhy = jitRegNoEntryWhy(f, c, e, wb, ipc)
+				}
+				return r.jitRegLeaveTo(f, c, e, rpc), Undefined, false, nil
 			}
 		}
 		ctx, ret, ok := r.jitRegStretch(f, c, e, wb, ipc, at, resume)
 		at, resume = -1, 0
 		if !ok {
-			return r.jitRegLeaveTo(f, e, rpc), Undefined, false, nil
+			return r.jitRegLeaveTo(f, c, e, rpc), Undefined, false, nil
 		}
 		next, pc, v, done, err, native := r.jitRegLeft(f, c, e, wb, ctx, ret)
 		if !native {
 			if !done && err == nil {
-				pc = r.jitRegLeaveTo(f, e, pc)
+				pc = r.jitRegLeaveTo(f, c, e, pc)
 			}
 			return pc, v, done, err
 		}
@@ -870,9 +873,12 @@ func (r *Runtime) jitRegGoOnAt(f *frame, c *regCode, e *jitRegEntry, wb, rpc, at
 // a full back-edge budget later. Code invalidated, a guard of which
 // failed, leaves the interpreter the rest of the invocation, as a
 // deoptimized invocation is run.
-func (r *Runtime) jitRegLeaveTo(f *frame, e *jitRegEntry, rpc int) int {
+func (r *Runtime) jitRegLeaveTo(f *frame, c *regCode, e *jitRegEntry, rpc int) int {
 	s := r.jit
 	s.interpreted++
+	if s.reporting {
+		s.noteRegEnded(c, rpc)
+	}
 	if life := e.life; life != nil {
 		life.goOns++
 		life.ssaStats.ended++
@@ -899,6 +905,7 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 	exitPC := int(ctx.ExitPC)
 	if ctx.Loop != 0 && ctx.ExitKind != abi.ExitReturn && exitPC < len(c.rc.Code) && regAt(c.code, exitPC).Op() == bytecode.RCallMW {
 		// Inside a loop of a built-in's call: Go goes on with it.
+		s.regEndWhy = "built-in's loop left"
 		return r.jitRegLoopLeft(f, c, e, wb, ctx)
 	}
 	switch ctx.ExitKind {
@@ -923,6 +930,7 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 			r.jitRegDeoptSeen(f, c, e, wb, exitPC)
 		}
 		r.jitRegInvalidate(f.cl, e)
+		s.regEndWhy = "guard failed"
 		return 0, exitPC, Undefined, false, nil, false
 	case abi.ExitHost:
 		// Go runs the register instruction whole, then native code goes
@@ -998,6 +1006,7 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 			}
 		}
 		if !ran {
+			s.regEndWhy = "host exit Go does not run whole"
 			return 0, exitPC, Undefined, false, nil, false
 		}
 		if err != nil {
@@ -1028,6 +1037,7 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 			return 0, 0, Undefined, false, err, false
 		}
 		if r.jitStressDeopt(s) {
+			s.regEndWhy = "stress"
 			return 0, exitPC, Undefined, false, nil, false
 		}
 		return exitPC, 0, Undefined, false, nil, true
@@ -1035,7 +1045,26 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 	// No other way out of register code's native code yet: what it left,
 	// the interpreter goes on with from its start.
 	r.jitRegMaterialize(f, e, wb)
+	s.regEndWhy = fmt.Sprintf("exit kind %d", ctx.ExitKind)
 	return 0, exitPC, Undefined, false, nil, false
+}
+
+// jitRegNoEntryWhy is why a run of e's code, which f running c with its
+// window at wb was to go on in at the program's instruction ipc, did not:
+// the reason the -jitreport counts runs ended in the interpreter by
+// (noteRegEnded).
+func jitRegNoEntryWhy(f *frame, c *regCode, e *jitRegEntry, wb, ipc int) string {
+	switch {
+	case e.invalid:
+		return "invalid code"
+	case e.code == nil:
+		return "code closed"
+	case ipc < 0:
+		return "no lowering"
+	case !e.code.HasEntry(ipc):
+		return "no entry"
+	}
+	return "no stack"
 }
 
 // jitRegStretch runs e's code once, from its entry at instruction ipc, on
@@ -1058,6 +1087,7 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 		idx = at
 	}
 	if idx >= len(s.ssaCtxs)-1 && !r.jitGrowContexts() {
+		s.regEndWhy = "no context"
 		return nil, Undefined, false
 	}
 	top := s.ctxTop
@@ -1235,6 +1265,12 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 	// other is: what goes on goes on in its replacement (jitRegGoOnAt).
 	s.regClose(e)
 	if closed || err != nil {
+		if s.reporting {
+			s.regEndWhy = "code closed"
+			if err != nil {
+				s.regEndWhy = err.Error()
+			}
+		}
 		return nil, Undefined, false
 	}
 	return ctx, ret, true
@@ -1933,6 +1969,10 @@ type RegNativeStats struct {
 	// WholeLeft counts the instructions Go ran whole for native code,
 	// called from it, that it finished at an exit (jitRegWhole).
 	WholeLeft uint64
+	// Ended is Interpreted by why the run ended in the interpreter, the
+	// register instruction it left at and its function, counted while
+	// the runtime reports (SetJITReport).
+	Ended map[string]uint64
 }
 
 // RegNativeStats reports r's counts (RegNativeStats); zero before any.
@@ -1944,7 +1984,7 @@ func (r *Runtime) RegNativeStats() RegNativeStats {
 	return RegNativeStats{Entries: s.ssaEntries, Hosts: s.hosts, Guards: s.guards, Polls: s.budgets,
 		Interpreted: s.interpreted, Records: s.ssaRecords, Materialized: s.materialized, GoCalls: s.goCalls,
 		Unwound: s.unwound, Resumed: s.resumed, HostOps: maps.Clone(s.regHostOps), WholeLeft: s.wholeLeft,
-		GoCallOps: s.regGoOpsByName()}
+		GoCallOps: s.regGoOpsByName(), Ended: maps.Clone(s.regEnded)}
 }
 
 // jitRegGoKey is what a call of Go register code made made
@@ -2018,6 +2058,25 @@ func (s *jitState) noteRegHost(c *regCode, rpc int) {
 		s.regHostOps = map[string]uint64{}
 	}
 	s.regHostOps[k]++
+}
+
+// noteRegEnded counts, while s reports, a run of register code c that
+// ended in the interpreter at register pc rpc, for why regEndWhy says.
+func (s *jitState) noteRegEnded(c *regCode, rpc int) {
+	why := s.regEndWhy
+	s.regEndWhy = ""
+	if why == "" {
+		why = "left"
+	}
+	op := "?"
+	if rpc >= 0 && rpc < len(c.rc.Code) {
+		op = regAt(c.code, rpc).Op().String()
+	}
+	k := why + " at " + op + " in " + jitFunctionOf(c.fn).Name
+	if s.regEnded == nil {
+		s.regEnded = map[string]uint64{}
+	}
+	s.regEnded[k]++
 }
 
 // RegNativeCall calls fn, a function of r's, with args, as a call from Go
