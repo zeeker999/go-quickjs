@@ -453,3 +453,38 @@ func TestJITRegOpsCompileForARM64(t *testing.T) {
 		}
 	}
 }
+
+// regStorageSrc is AWFY Storage's tree: new Array(n) of a length native
+// code computes, in a recursive native callee, whose construction Go makes
+// from native code until it is learned -- by its operand, which the
+// frame's register need not hold (jitRegAllocLength).
+const regStorageSrc = `
+class Random { constructor() { this.seed = 74755 } next() { this.seed = ((this.seed * 1309) + 13849) & 65535; return this.seed } }
+class Storage {
+	benchmark() { const random = new Random(); this.count = 0; this.buildTreeDepth(7, random); return this.count }
+	buildTreeDepth(depth, random) { this.count += 1; if (depth === 1) return new Array((random.next() % 10) + 1); const arr = new Array(4); for (let i = 0; i < 4; i += 1) arr[i] = this.buildTreeDepth(depth - 1, random); return arr }
+}
+function main() { return new Storage().benchmark() }
+`
+
+// TestJITRegArrayAllocComputedLength checks Storage's constructions of
+// Array are made from pools, not by Go at each.
+func TestJITRegArrayAllocComputedLength(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	rts := regNativeRuntimes(t, regStorageSrc)
+	rts[0].SetJITReport(true)
+	for i, r := range rts {
+		fn, _ := r.GetProp(Obj(r.Global()), r.Intern("main"))
+		for range 20 {
+			v, err := r.Call(fn, Undefined, nil)
+			if got := regNativeShow(r, v, err); got != "5461" {
+				t.Fatalf("runtime %d: %q, want 5461", i, got)
+			}
+		}
+	}
+	if n := rts[0].RegNativeStats().GoCallOps["new_w->Array"]; n > 100 {
+		t.Errorf("%d constructions of Array made by Go", n)
+	}
+}

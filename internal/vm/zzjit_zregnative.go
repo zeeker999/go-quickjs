@@ -1008,7 +1008,16 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 		// What the call called, which the code may call natively once
 		// compiled again (jitRegCallSeen), or make a loop of its own
 		// (jitRegForEachSeen).
-		r.jitRegCallSeen(f, c, run.e, rpc, callee)
+		if op == bytecode.RNewW && callee.IsObject() && callee.Object() == r.proto.arrayCtor {
+			// new Array(n), its length the call's operand (jitRegAllocLength).
+			n := Undefined
+			if argc == 1 {
+				n = jitGoArg(ctx, at+1)
+			}
+			r.jitRegAllocLength(f, run.e, rpc, w, callee.Object(), n)
+		} else {
+			r.jitRegCallSeen(f, c, run.e, rpc, callee)
+		}
 		if op == bytecode.RCallMW {
 			r.jitRegForEachSeen(f, run.e, rpc, callee, this, jitGoArg(ctx, at+1), argc)
 		}

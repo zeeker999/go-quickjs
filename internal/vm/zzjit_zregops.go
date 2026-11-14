@@ -179,19 +179,26 @@ func (r *Runtime) jitRegPlainSet(ctx *abi.Context, idx int) (*closure, bytecode.
 // form's code learns it (jitAllocates), the code stale from here. It
 // reports whether it learned it.
 func (r *Runtime) jitRegAllocSeen(f *frame, c *regCode, e *jitRegEntry, rpc int, w bytecode.RInstr, o *Object) bool {
+	// The length, in the window's register past the receiver's, the call
+	// having written its result elsewhere: the frame's as an exit wrote it.
+	n := Undefined
+	if a := f.base - int(c.locals) + int(w.A()) + 2; w.X() == 1 && int(w.B()) != int(w.A())+2 && a >= 0 && a < len(r.stack) {
+		n = r.stack[a]
+	}
+	return r.jitRegAllocLength(f, e, rpc, w, o, n)
+}
+
+// jitRegAllocLength is jitRegAllocSeen of the length n the construction was
+// given: at a call of Go native code made, its operand, which the frame's
+// register may not hold, native code keeping values in the frame's
+// registers as it found them.
+func (r *Runtime) jitRegAllocLength(f *frame, e *jitRegEntry, rpc int, w bytecode.RInstr, o *Object, n Value) bool {
 	argc := int(w.X())
 	if argc > 1 {
 		return false
 	}
 	room := 0
 	if argc == 1 {
-		// The length, in the window's register past the receiver's, the
-		// call having written its result elsewhere.
-		a := f.base - int(c.locals) + int(w.A()) + 2
-		if int(w.B()) == int(w.A())+2 || a < 0 || a >= len(r.stack) {
-			return false
-		}
-		n := r.stack[a]
 		if !n.IsNumber() || n.num < 0 || n.num != math.Trunc(n.num) {
 			return false
 		}
