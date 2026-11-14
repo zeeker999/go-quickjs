@@ -4015,13 +4015,20 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 		c.a.Load(a64B, a64Ctx, abi.OffStackBase)
 		c.a.AddLsl(a64D, a64B, a64D, 4)
 		m := 0
-		if site.Method {
-			m = 1
-			c.directOperand(v, v.Args[0], a64D, vs)
-		}
-		c.directOperand(v, v.Args[m], a64D, 0)
-		for i := range site.Argc {
-			c.directOperand(v, v.Args[m+1+i], a64D, int32(2+i)*vs)
+		switch {
+		case site.Forward:
+			// As amd64's: f and its receiver; the arguments the frame's.
+			c.directOperand(v, v.Args[0], a64D, 0)
+			c.directOperand(v, v.Args[2], a64D, vs)
+		default:
+			if site.Method {
+				m = 1
+				c.directOperand(v, v.Args[0], a64D, vs)
+			}
+			c.directOperand(v, v.Args[m], a64D, 0)
+			for i := range site.Argc {
+				c.directOperand(v, v.Args[m+1+i], a64D, int32(2+i)*vs)
+			}
 		}
 	}
 	if direct {
@@ -4092,9 +4099,13 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 	setup := func(t *ssa.CallSite) {
 		if win {
 			frame()
-			c.windowSetup(t, locals, top, high2)
-			if t.FrameArgs {
-				c.windowArgs(t, locals, calleeCtx, top)
+			if t.Forward {
+				c.windowForward(t, locals, calleeCtx)
+			} else {
+				c.windowSetup(t, locals, top, high2)
+				if t.FrameArgs {
+					c.windowArgs(t, locals, calleeCtx, top)
+				}
 			}
 			if t.Pool != 0 {
 				// As amd64's: a construction's receiver, the pool's last
@@ -4889,6 +4900,27 @@ func (c *a64Compiler) directOperand(v, x *ssa.Value, base arm64.Reg, disp int32)
 	}
 	c.pointerWord(x, w)
 	c.a.Store(base, disp+c.enc.RefOffset, a64B)
+}
+
+// windowForward is amd64's: register code's f.apply(x, arguments), its
+// callee's parameters the frame's arguments. It uses registers 6 to 8,
+// a64A and a64C.
+func (c *a64Compiler) windowForward(t *ssa.CallSite, locals, ctx arm64.Reg) {
+	vs := int32(c.enc.ValueSize)
+	c.a.Load(ctx, a64Ctx, abi.OffNext)
+	c.a.AddImm(locals, locals, int64(2*vs), true)
+	param := *t
+	param.Params, param.LocalCount = t.Params-2, t.LocalCount-2
+	c.forwardArgs(&param, locals, ctx)
+	c.a.AddImm(locals, locals, int64(-2*vs), true)
+	if t.ArrowThis {
+		a, b := arm64.Reg(7), arm64.Reg(8)
+		c.a.Load(b, a64Ctx, abi.OffCallThis)
+		c.a.Load(a, b, c.enc.NumOffset)
+		c.a.Store(locals, vs+c.enc.NumOffset, a)
+		c.a.Load(a, b, c.enc.RefOffset)
+		c.a.Store(locals, vs+c.enc.RefOffset, a)
+	}
 }
 
 // windowArgs is amd64's: a register callee that keeps its arguments

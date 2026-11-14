@@ -619,6 +619,10 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 			var callee Value
 			if w := regAt(c.code, exitPC); w.Op() == bytecode.RNewW && wb+int(w.A()) < len(r.stack) {
 				callee = r.stack[wb+int(w.A())]
+			} else if w.Op() == bytecode.RApplyArgs && wb+int(w.B())+2 < len(r.stack) {
+				// The function it forwards to, before its register is
+				// written.
+				callee = r.stack[wb+int(w.B())]
 			}
 			next, ran, err = r.regWhole(f, c, wb, exitPC)
 			if seen.write && err == nil && ran {
@@ -711,6 +715,12 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 		ctx.Cells, ctx.Loop = nil, 0
 	}
 	ctx.Open = uint64(len(f.openUpvalues))
+	if p.Forwards {
+		// Its f.apply(x, arguments) hands the frame's arguments on natively
+		// (ssa.CallSite's Forward), from its context, as the stack form's
+		// entry gives them (jitForwardEntry).
+		jitForwardEntry(ctx, f.args)
+	}
 	// No frame for Go's calls from the code to read: the stack form's
 	// frame is what they read (jitGoRun), and they leave what needs one
 	// to an exit.

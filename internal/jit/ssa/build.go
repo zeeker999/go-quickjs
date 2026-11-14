@@ -8571,6 +8571,25 @@ func (b *builder) windowCall(blk *Block, pc int, in ir.Instruction, calls []*Cal
 	}
 	f, a := b.f, in.Left.Slot
 	args := make([]*Value, 0, in.Extra+2)
+	if calls[0].Forward {
+		// f.apply(x, arguments) (CallSite's Forward): f, apply and x, its
+		// window's first three registers, as the stack form's operands; the
+		// realm's apply checked, any other the interpreter's.
+		args = append(args, b.read(a, blk), b.read(a+1, blk), b.read(a+2, blk))
+		apply := guard(OpObjectOf, Ptr, ir.HostExit, args[1])
+		same := guard(OpSameObject, None, ir.HostExit, apply)
+		same.Const = ir.Value{Bits: uint64(calls[0].Apply)}
+		call := guard(OpCall, Tagged, ir.HostExit, args...)
+		f.cache(call).Calls, call.Index = calls, b.callKeepAt(pc)
+		cell := f.newValue(blk, OpCallCell, Source, call)
+		r := f.newValue(blk, OpKept, Tagged, cell, call)
+		r.Shadow = cell
+		b.assign(in.Dest, blk, r)
+		if b.hasCells() {
+			b.reloadAfterCall(blk)
+		}
+		return
+	}
 	switch {
 	case calls[0].InstanceOf:
 		args = append(args, b.read(a, blk), b.read(in.Right.Slot, blk))
@@ -8700,7 +8719,7 @@ func (b *builder) nativeCalls(pc int) []*CallSite {
 			// Register code's call: its operands are its window's
 			// registers, not the operand stack's top (windowCall), the
 			// site's shape the instruction's.
-			if site.Argc != in.Extra || site.Method != in.When || site.Super || site.Instr != 0 || site.Forward || site.Accessor != AccessorNone || site.Step || site.ForOf || site.ForIn ||
+			if site.Argc != in.Extra || site.Method != in.When || site.Super || site.Instr != 0 || site.Accessor != AccessorNone || site.Step || site.ForOf || site.ForIn ||
 				site.TypeOf && (in.Extra != 0 || site.Go != GoCall) || site.InstanceOf && (in.Extra != 1 || site.Go != GoCall) || site.Literal || site.Via != 0 ||
 				site.Go == 0 && !site.Push && !site.Pop && (site.Window != in.Left.Slot+1 || site.ThisSlot >= 0 || site.Function || site.Tail ||
 					site.Pool != 0 && (site.Derived || site.Parent != 0 || site.Method)) {

@@ -1841,13 +1841,21 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 		c.a.MovQToX(xScratch2, scratchC)
 		framed = true
 		inC, m := true, 0
-		if site.Method {
-			m = 1
-			c.directOperand(v, v.Args[0], true, vs, &inC)
-		}
-		c.directOperand(v, v.Args[m], true, 0, &inC)
-		for i := range site.Argc {
-			c.directOperand(v, v.Args[m+1+i], true, int32(2+i)*vs, &inC)
+		switch {
+		case site.Forward:
+			// f.apply(x, arguments): f its function, x its receiver; the
+			// arguments the frame's, in its context (windowForward).
+			c.directOperand(v, v.Args[0], true, 0, &inC)
+			c.directOperand(v, v.Args[2], true, vs, &inC)
+		default:
+			if site.Method {
+				m = 1
+				c.directOperand(v, v.Args[0], true, vs, &inC)
+			}
+			c.directOperand(v, v.Args[m], true, 0, &inC)
+			for i := range site.Argc {
+				c.directOperand(v, v.Args[m+1+i], true, int32(2+i)*vs, &inC)
+			}
 		}
 	}
 	if direct {
@@ -1950,9 +1958,13 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 	setup := func(t *ssa.CallSite) {
 		if win {
 			frame()
-			c.windowSetup(t, locals, top, high2)
-			if t.FrameArgs {
-				c.windowArgs(t, locals, calleeCtx, top)
+			if t.Forward {
+				c.windowForward(t, locals, calleeCtx)
+			} else {
+				c.windowSetup(t, locals, top, high2)
+				if t.FrameArgs {
+					c.windowArgs(t, locals, calleeCtx, top)
+				}
 			}
 			if t.Pool != 0 {
 				// A construction's receiver, the pool's last object, its cell
@@ -6002,6 +6014,33 @@ func (c *compiler) windowSetup(t *ssa.CallSite, locals, a, b amd64.Reg) {
 	default:
 		c.storeImm(locals, vs+c.enc.NumOffset, c.enc.Undefined, a)
 		c.storeImm(locals, vs+c.enc.RefOffset, 0, a)
+	}
+}
+
+// windowForward is windowSetup for register code's f.apply(x, arguments)
+// (ssa.CallSite's Forward and Window), its callee's window at locals, its
+// function and receiver written: its parameters the frame's arguments,
+// which its context holds (abi.Context's Args), undefined past them; and,
+// for a callee that keeps its arguments (FrameArgs), all of them and
+// their count in its context, ctx, as the stack form's forwardArgs gives
+// them, plain stores of what the caller's context holds while the callee
+// runs. An arrow's receiver is the this it captured. It uses RBX, R12,
+// R13, scratchA and scratchC.
+func (c *compiler) windowForward(t *ssa.CallSite, locals, ctx amd64.Reg) {
+	vs := int32(c.enc.ValueSize)
+	c.a.Load(ctx, regCtx, abi.OffNext)
+	c.a.Lea(locals, locals, 2*vs)
+	param := *t
+	param.Params, param.LocalCount = t.Params-2, t.LocalCount-2
+	c.forwardArgs(&param, locals, ctx)
+	c.a.Lea(locals, locals, -2*vs)
+	if t.ArrowThis {
+		const a, b = amd64.R12, amd64.R13
+		c.a.Load(b, regCtx, abi.OffCallThis)
+		c.a.Load(a, b, c.enc.NumOffset)
+		c.a.Store(locals, vs+c.enc.NumOffset, a)
+		c.a.Load(a, b, c.enc.RefOffset)
+		c.a.Store(locals, vs+c.enc.RefOffset, a)
 	}
 }
 

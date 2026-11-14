@@ -1413,7 +1413,15 @@ this). A callee that keeps its arguments -- reads `arguments`, has a rest
 parameter -- is given them and their count in its context (`ssa.CallSite`'s
 `FrameArgs`, `mir`'s `windowArgs`), as the stack form's call gives them,
 where its reads of them are answered from (`GoArgument`) and the frame Go
-makes of its level is given them (`jitRegPushLevel`); not inlined. A call that meets any other function leaves
+makes of its level is given them (`jitRegPushLevel`); not inlined. A
+forwarding call, `f.apply(x, arguments)` of the realm's `apply`
+(`apply_args`, `ssa.CallSite`'s `Forward`), is made so too, of the
+functions the code learned it forwards to at its exits: the window's
+function and receiver its own, its parameters the frame's arguments from
+its context (`mir`'s `windowForward`), which a function that forwards has
+there -- given at its entry from Go, or by its native caller -- so that
+prototype.js's `Class.create` constructors, as Octane's RayTrace makes
+every object, are constructed natively, their forwarding call native too. A call that meets any other function leaves
 native code for Go, which learns there what to call next -- a call in tail
 position too, which Go makes at the exit as the interpreter's `tail_call`
 does (`regWholeTail`): the ordinary call while the stack is shallow, the

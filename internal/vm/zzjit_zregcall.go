@@ -186,7 +186,7 @@ func (f *jitRegFeedback) regCallTargets(pc int, w bytecode.RInstr, argc int, met
 			}
 		}
 	}
-	if calls := f.fb.cl.regCalls; !newW && uint(w.C()) < uint(len(calls)) {
+	if calls := f.fb.cl.regCalls; !newW && w.Op() != bytecode.RApplyArgs && uint(w.C()) < uint(len(calls)) {
 		if e := &calls[w.C()]; jitRegCallKind(e) {
 			add(e.callee, e.cl, e.rc, nil, false)
 			if len(sites) != 0 && l != nil && !jitRegCallKnown(l, rpc, e.callee) {
@@ -265,6 +265,19 @@ func (r *Runtime) jitRegCallSeen(f *frame, c *regCode, e *jitRegEntry, rpc int, 
 			return false
 		}
 		o, cl = ce.callee, ce.cl
+	case bytecode.RApplyArgs:
+		// The function f.apply(x, arguments) called, which no cache holds:
+		// callee, if apply was the realm's.
+		if !callee.IsObject() || r.applyFn == nil || !r.stack[jitRegWindowOf(f, c)+int(w.B())+1].IsObject() ||
+			r.stack[jitRegWindowOf(f, c)+int(w.B())+1].Object() != r.applyFn {
+			return false
+		}
+		o = callee.Object()
+		fd := o.fn()
+		if fd == nil || fd.closure == nil || !r.jitRegCallable(o, fd.closure, fd.closure.reg, 0) {
+			return false
+		}
+		cl = fd.closure
 	case bytecode.RNewW:
 		// A construction's function, which no cache of the call's holds:
 		// the one it constructed with, callee.
@@ -338,8 +351,10 @@ func (r *Runtime) jitRegCallSeen(f *frame, c *regCode, e *jitRegEntry, rpc int, 
 // natively, of argc arguments (regCallSite's pool): a base constructor --
 // a plain function's object, or a class's of no field to initialize, as
 // the stack form's constructions are made (jitConstructs) -- of register
-// code native callers may call, that does not read new.target and does
-// not hand its arguments on, its prototype its own property, as
+// code native callers may call, that does not read new.target -- one
+// that hands its arguments on, this.initialize.apply(this, arguments),
+// among them, whose forwarding call its code makes natively
+// (ssa.CallSite's Forward) -- its prototype its own property, as
 // regConstruct runs a construction in a register frame. A class's had
 // been constructed by Go at every construction, AWFY's CD, Json and
 // Havlak hundreds of thousands of times a run.
@@ -349,7 +364,7 @@ func (r *Runtime) jitRegConstructable(o *Object, argc int) bool {
 		return false
 	}
 	cl := fd.closure
-	if cl.fn.Kind != bytecode.KindNormal && cl.fn.Kind != bytecode.KindConstructor || cl.fn.Leaf == bytecode.LeafForward || cl.reg == nil || cl.reg.newTarget ||
+	if cl.fn.Kind != bytecode.KindNormal && cl.fn.Kind != bytecode.KindConstructor || cl.reg == nil || cl.reg.newTarget ||
 		o.findOwn(atomPrototype) < 0 {
 		return false
 	}
@@ -402,6 +417,13 @@ func (r *Runtime) jitRegTarget(o *Object, cl *closure, rc *regCode, argc int) bo
 func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode, argc int, method bool, pool *abi.ObjectPool, byCode bool) (ssa.CallSite, bool) {
 	fb := f.fb
 	r := fb.r
+	forward := false
+	if w, _, ok := f.at(pc); ok && w.Op() == bytecode.RApplyArgs {
+		// f.apply(x, arguments) (ssa.CallSite's Forward): f's receiver x,
+		// as a method call's; its arguments the frame's, as many as its
+		// context holds (mir's checks), none known here.
+		forward, method, argc = true, true, 0
+	}
 	if pool == nil && !r.jitRegCallable(o, cl, rc, argc) || pool != nil && (rc != cl.reg || !r.jitRegConstructable(o, argc) || pool.Count == 0) {
 		return ssa.CallSite{}, false
 	}
@@ -427,6 +449,10 @@ func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode
 		// Checked by its code, its environment and its realm, not its
 		// object: the closure is the callee's at run time (mir's byCode).
 		site.ByCode, site.Env, site.Realm = uintptr(unsafe.Pointer(cl.fn)), uintptr(unsafe.Pointer(cl.env)), uintptr(unsafe.Pointer(cl.realm))
+	}
+	if forward {
+		site.Argc, site.Forward, site.Apply = 2, true, uintptr(unsafe.Pointer(r.applyFn))
+		k.holders = append(k.holders, r.applyFn)
 	}
 	if pool != nil {
 		// A construction: its receiver from the pool, made as regConstruct
@@ -458,6 +484,11 @@ func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode
 	case rc.coerceThis:
 		// A receiver to coerce is Go's (regCallObjThis).
 		site.Coerce = true
+	}
+	if forward {
+		// Its receiver the third operand (mir's windowForward), no
+		// method call's.
+		site.Method = false
 	}
 	return site, true
 }
@@ -873,3 +904,6 @@ func (r *Runtime) jitRegBuild(w *jit.Workspace, cl *closure, p *ir.Program, keep
 	mc, err := mir.CompileWith(&w.MIR, f, jitEncoding, mir.Settings())
 	return rf, f, looped, mc, err
 }
+
+// jitRegWindowOf is where the window of f, running c, is in the VM's stack.
+func jitRegWindowOf(f *frame, c *regCode) int { return f.base - int(c.locals) }

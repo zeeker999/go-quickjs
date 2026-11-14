@@ -648,6 +648,15 @@ func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
 	// A call in tail position (tail_call_w, tail_call_method_w) is made as
 	// the ordinary call, where the stack is shallow (ir's Tail).
 	argc, method := int(w.X()), w.Op().MethodCall()
+	if w.Op() == bytecode.RApplyArgs {
+		// f.apply(x, arguments): a native call of the functions its code
+		// learned it forwards to (regCallSite's Forward), or the
+		// interpreter's at a host exit -- no call of Go.
+		if !f.p.Forwards {
+			return nil
+		}
+		return f.regCallSites(pc, w, 2, false)
+	}
 	n := argc + 1
 	if method {
 		n++

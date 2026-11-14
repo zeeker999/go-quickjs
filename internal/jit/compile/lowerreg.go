@@ -660,8 +660,9 @@ func regHostOnly(p *ir.Program, rc *bytecode.RegCode, fn *bytecode.Function, m l
 			// A call in tail position may be the function's own, which
 			// native code makes a jump to its start: a loop.
 			loop = loop || pc < len(rc.Marks) && rc.Marks[pc]&bytecode.RMarkTail != 0
-		case bytecode.RCallWT, bytecode.RCallMWT:
-			// The interpreter's call in tail position: a call all the same.
+		case bytecode.RCallWT, bytecode.RCallMWT, bytecode.RApplyArgs:
+			// The interpreter's call in tail position, a forwarding call:
+			// calls all the same.
 			calls = true
 		}
 	}
@@ -985,7 +986,11 @@ func (l *regLowering) lower(pc int) {
 			host()
 		}
 	case bytecode.RApplyArgs:
-		host()
+		// f.apply(x, arguments): R[B] f, R[B+1] apply, R[B+2] x, a call of
+		// f with the frame's arguments where apply is the realm's, natively
+		// or by Go (ssa.CallSite's Forward), as the stack form's
+		// apply_arguments; anything else the interpreter's.
+		l.emit(ir.Instruction{Op: ir.Host, Extra: 2, Window: true, Left: reg(b), Dest: int(a)}, false)
 	case bytecode.RAddProp, bytecode.RAddPropI:
 		// o.k += v: the read, which may run a getter, so that the addition
 		// and the store after it are Generic.

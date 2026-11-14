@@ -335,3 +335,70 @@ func TestJITRegArgumentsCallees(t *testing.T) {
 		})
 	}
 }
+
+// regForwardSrc's constructors are prototype.js's Class.create's,
+// this.initialize.apply(this, arguments), as Octane's RayTrace makes its
+// objects: constructed natively, their forwarding call native too
+// (ssa.CallSite's Forward); and a forwarding call through another apply,
+// the interpreter's.
+const regForwardSrc = `
+var Class = { create: function () { return function () { this.initialize.apply(this, arguments) } } };
+var Vec = Class.create();
+Vec.prototype = {
+	initialize: function (x, y, z) { this.x = x; this.y = y; this.z = z === undefined ? -1 : z },
+	add: function (o) { return new Vec(this.x + o.x, this.y + o.y, this.z + o.z) },
+};
+var Odd = Class.create();
+Odd.prototype = { initialize: function () { this.n = arguments.length + (arguments[3] | 0) } };
+function fwd(n) {
+	var a = new Vec(0, 0, 0), k = 0;
+	for (var i = 0; i < n; i++) { a = a.add(new Vec(i, 1, 2)); k += new Odd(1, 2, 3, i).n + new Vec(i, 2).z }
+	var f = function () { return [].slice.call(arguments).join() + this.q };
+	f.apply = function (t, args) { return "own " + args.length };
+	var g = function () { return f.apply({ q: 1 }, arguments) };
+	return a.x + a.y + a.z + k + g(1, 2);
+}
+`
+
+// TestJITRegForwardingConstructors runs regForwardSrc's fwd natively and in
+// a runtime with no JIT and compares them: once compiled, no
+// apply_arguments leaves native code.
+func TestJITRegForwardingConstructors(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			RecordJITCompiles(true)
+			defer RecordJITCompiles(false)
+			rts := regNativeRuntimes(t, regForwardSrc)
+			r := rts[0]
+			r.SetJITWarmUp(1, 1)
+			var before uint64
+			for k := range 8 {
+				if k == 4 {
+					before = r.RegNativeStats().HostOps["apply_args"]
+				}
+				var got [2]string
+				for i, r := range rts {
+					fn, _ := r.GetProp(Obj(r.Global()), r.Intern("fwd"))
+					v, err := r.Call(fn, Undefined, []Value{Float(3000)})
+					got[i] = regNativeShow(r, v, err)
+				}
+				if got[0] != got[1] {
+					t.Fatalf("fwd: with the JIT %q, without %q", got[0], got[1])
+				}
+			}
+			// g's own apply, once a run, at most.
+			if n := r.RegNativeStats().HostOps["apply_args"] - before; n > 4 {
+				t.Errorf("%d apply_arguments left native code in 4 runs", n)
+			}
+			if fns, _, _ := regCompileARM64(t, r); fns == 0 {
+				t.Error("nothing compiled for arm64")
+			}
+		})
+	}
+}
