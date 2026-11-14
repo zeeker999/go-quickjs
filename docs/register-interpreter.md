@@ -815,6 +815,15 @@ the context's, and the Runtime's and a closureCode's fields, whose
 offsets the JIT's tag changes, are read relative to a base the context
 gives (`rtBase`, `ccBase`), which the test checks under each tag.
 
+**Rarer paths out of line.** The handlers lie in one block in
+`handlerOps`' order, and what one handler's code grows by moves every
+handler after it: a path an early handler takes rarely -- `get_index`
+by a key string, a call in tail position past `tailCallDepth`, a call
+of a generator's next, a for-in's step -- is laid after the last handler
+(amd64's `nativeGen.late`), reached by a jump. Laid in place, those four
+moved `set_index_i`'s handler and its neighbours, and `typed_u8_write`
+and `typed_i8_write` were 8 to 11% slower at every placement.
+
 **Dispatchers: architectures and variants.** The generator makes several
 native dispatchers, on two axes. The first is the architecture: amd64
 and arm64 now, others later, each with its emitter and its files.
