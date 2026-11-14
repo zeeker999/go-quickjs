@@ -385,7 +385,8 @@ func TestJITRegLiterals(t *testing.T) {
 
 // regKindsSrc runs a class's constructors, a derived one's before and
 // after its super call, its accessors and methods, and an arrow reading
-// its this, in register code.
+// its this, in register code: the setter called by Go too (Reflect.set),
+// which native code that inlines it never calls.
 const regKindsSrc = `
 class P { constructor(x) { this.x = x; this.s = 0; for (let i = 0; i < 2; i++) this.s += i }
 	get dbl() { let d = 0; for (let i = 0; i < 2; i++) d += this.x; return d }
@@ -395,7 +396,7 @@ class C extends P { constructor(x) { let k = 0; for (let i = 0; i < 3; i++) k +=
 function kinds(n) {
 	let t = 0
 	const add = (a) => { let r = 0; for (let i = 0; i < 4; i++) r += a + this.k; return r }
-	for (let i = 0; i < n; i++) { const c = new C(i); c.v = i; t += c.dbl + c.sum(3) + c.s + add(i) }
+	for (let i = 0; i < n; i++) { const c = new C(i); c.v = i; Reflect.set(c, "v", i); t += c.dbl + c.sum(3) + c.s + add(i) }
 	return t
 }
 function drive(n) { return kinds.call({k: 2}, n) }
@@ -424,16 +425,19 @@ func TestJITRegKinds(t *testing.T) {
 	}
 	r := rts[0]
 	kinds := map[bytecode.FuncKind]bool{}
+	why := map[bytecode.FuncKind][]string{}
 	for key, e := range r.jit.regCache {
-		if e.code != nil {
-			if fn := key.Value(); fn != nil {
+		if fn := key.Value(); fn != nil {
+			if e.code != nil {
 				kinds[fn.Kind] = true
+			} else {
+				why[fn.Kind] = append(why[fn.Kind], fn.Name+": "+e.refusal)
 			}
 		}
 	}
 	for _, k := range []bytecode.FuncKind{bytecode.KindArrow, bytecode.KindConstructor, bytecode.KindDerivedConstructor, bytecode.KindGetter, bytecode.KindSetter, bytecode.KindMethod} {
 		if !kinds[k] {
-			t.Errorf("no code of kind %v compiled: %v", k, kinds)
+			t.Errorf("no code of kind %v compiled: %v, refused %q", k, kinds, why[k])
 		}
 	}
 }
