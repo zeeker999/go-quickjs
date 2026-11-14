@@ -1044,12 +1044,6 @@ type jitState struct {
 	regForced bool
 	// regHeld is what the register code in regCache takes (held).
 	regHeld int
-	// regLevelSlab and regFrameSlab hold the levels, and their frames, of
-	// calls of Go from native code deeper than their buffers on the Go
-	// stack take, each call's past those of the calls under way below it
-	// (jitRegGoCallNested).
-	regLevelSlab []jitRegLevel
-	regFrameSlab []*frame
 	// regLearned is what the code made from a function's register code
 	// learned at its exits, by the function's key, kept across its
 	// compiles: an entry holding only what it learned (jitLearned), by
@@ -1210,6 +1204,10 @@ type jitState struct {
 	// edgesNext is the back-edge budget last given, and edgesSpent the one
 	// before it, which the last check found spent (jitTierWork).
 	edgesNext, edgesSpent int
+	// callsNext is the interrupt budget a register sample last gave the
+	// calls when it took the next sooner (jitRegResample), 0 for a full
+	// one: what the next sample's calls spend (jitRegCallWork).
+	callsNext int
 	// charCodeAtKey is the atom jitStringMethod looks charCodeAt up by,
 	// once charCodeAtKnown.
 	charCodeAtKey   Atom
@@ -1316,6 +1314,13 @@ type jitState struct {
 	// that its exit finishes, as goPending is the stack form's.
 	regRuns    []jitRegRun
 	regPending jitGoPending
+	// regNestLevels and regNestFrames hold, as a stack, the levels a call
+	// of Go from a native callee's code under way runs past and the frames
+	// Go made of them (jitRegGoCallNested): such calls nest, script they
+	// run making native calls that call Go, each taking its stretch past
+	// the one it runs in.
+	regNestLevels []jitRegLevel
+	regNestFrames []*frame
 	// regJobs are the register compiles in the background, in the order
 	// they were handed over, and regPendingJobs each by its function's
 	// key (zzjit_zregbg.go).

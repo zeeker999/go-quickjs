@@ -139,6 +139,11 @@ type regLowering struct {
 	// scratch is the first scratch slot, used how many the current
 	// register instruction has taken, most the most any has.
 	scratch, used, most int
+	// this is a derived constructor's this slot, past the captured
+	// bindings, before the scratch slots, or -1 (ir.Program's This); joins
+	// marks, in one, the register pcs more than one way reaches.
+	this  int
+	joins []bool
 	// lits are the regexp_lit calls lowered as the stack form's
 	// (regexpLit), by register pc; litHosts those lowered as Go's whole,
 	// their window's registers live past them.
@@ -408,7 +413,15 @@ func lowerRegLits(rc *bytecode.RegCode, fn *bytecode.Function, m lowering, litHo
 	if err != nil {
 		return nil, err
 	}
-	l := &regLowering{rc: rc, fn: fn, m: m, scratch: rc.NumRegs + len(fn.Upvalues), litHosts: litHosts}
+	l := &regLowering{rc: rc, fn: fn, m: m, scratch: rc.NumRegs + len(fn.Upvalues), this: -1, litHosts: litHosts}
+	derived := fn.Kind == bytecode.KindDerivedConstructor
+	if derived {
+		// A derived constructor's this binding, past the captured
+		// bindings (ir.Program's This): the context's This, which its
+		// super() binds, as the stack form's this slot.
+		l.this, l.scratch = l.scratch, l.scratch+1
+		l.joins = regJoins(rc, reach)
+	}
 	start := make([]int, n+1)
 	for pc := range n {
 		start[pc] = len(l.code)
@@ -439,6 +452,7 @@ func lowerRegLits(rc *bytecode.RegCode, fn *bytecode.Function, m lowering, litHo
 		ClassConstructor: fn.Kind == bytecode.KindConstructor,
 		TailOwn: fn.Strict && (fn.Kind == bytecode.KindNormal || fn.Kind == bytecode.KindMethod || fn.Kind == bytecode.KindArrow ||
 			fn.Kind == bytecode.KindGetter || fn.Kind == bytecode.KindSetter),
+		This: derived, DerivedConstructor: derived,
 	}
 	for i := range p.Maps {
 		p.Maps[i] = ir.StateMap{PC: l.origin[i]}
@@ -626,6 +640,12 @@ func regReachable(rc *bytecode.RegCode) ([]bool, error) {
 	return reach, nil
 }
 
+// RegSuccessors is where rc's code may go on from w, the instruction at
+// pc: its jumps' targets and the next instruction it falls to.
+func RegSuccessors(rc *bytecode.RegCode, pc int, w bytecode.RInstr) []int {
+	return regSuccessors(rc, pc, w)
+}
+
 // regSuccessors is where the code may go on from w, the instruction at pc.
 func regSuccessors(rc *bytecode.RegCode, pc int, w bytecode.RInstr) []int {
 	switch op := w.Op(); op {
@@ -652,6 +672,53 @@ func regSuccessors(rc *bytecode.RegCode, pc int, w bytecode.RInstr) []int {
 		}
 	}
 	return []int{pc + 1}
+}
+
+// regJoins marks the register pcs of rc a jump or a handler reaches: those
+// the instruction before is not the only way to.
+func regJoins(rc *bytecode.RegCode, reach []bool) []bool {
+	joins := make([]bool, len(rc.Code)+1)
+	for pc, w := range rc.Code {
+		if !reach[pc] {
+			continue
+		}
+		for _, t := range regSuccessors(rc, pc, w) {
+			if t != pc+1 && t >= 0 && t < len(joins) {
+				joins[t] = true
+			}
+		}
+	}
+	for _, h := range rc.Handlers {
+		if int(h.To) < len(joins) {
+			joins[h.To] = true
+		}
+	}
+	return joins
+}
+
+// undefinedAt reports whether register r certainly holds undefined at
+// register pc, as the instructions straight before it, which nothing
+// jumps between, leave it: load_undef's, or moved from one.
+func (l *regLowering) undefinedAt(pc, r int) bool {
+	for q := pc - 1; q >= 0 && !l.joins[q+1]; q-- {
+		w := l.rc.Code[q]
+		switch w.Op() {
+		case bytecode.RLoadUndef:
+			if int(w.A()) == r {
+				return true
+			}
+			continue
+		case bytecode.RMove:
+			if int(w.A()) == r {
+				r = int(w.B())
+			}
+			continue
+		case bytecode.RNop:
+			continue
+		}
+		return false
+	}
+	return false
 }
 
 // handlers gives p the code's handlers: rc's, innermost first, in the
@@ -779,6 +846,9 @@ func regHostOnly(p *ir.Program, rc *bytecode.RegCode, fn *bytecode.Function, m l
 			// native code makes a jump to its start deep in the stack
 			// (ssa.OpTailSelf): a loop, as the stack form's.
 			calls, loop = true, true
+		case bytecode.RSuperCall, bytecode.RSuperForward:
+			// A super(): a call all the same.
+			calls = true
 		}
 	}
 	return host && !loop && !indexed && !m.callee && !(m.hot && calls) && !GeneratorResumable(fn)
@@ -1293,6 +1363,41 @@ func (l *regLowering) lowerCold(pc int, w bytecode.RInstr) {
 		}
 		// A constant's assignment, which throws.
 		l.emit(ir.Instruction{Op: ir.Host}, false)
+	case bytecode.RSuperCall:
+		if l.this < 0 {
+			l.emit(l.hostAt(pc), false)
+			break
+		}
+		// A derived constructor's super(...) of the B arguments in the
+		// registers from C: a call of the parent with the instance as its
+		// receiver, natively or by Go (ssa.CallSite's Super), as the stack
+		// form's super_call -- the this slot, then the arguments, from the
+		// window's first register, Left; the this it binds R[A]'s, and
+		// register 1's and the this slot's from here.
+		l.emit(ir.Instruction{Op: ir.Host, Window: true, Extra: int(b), Left: reg(w.C()), Dest: int(a)}, false)
+	case bytecode.RThis, bytecode.RCheckThis:
+		if l.this < 0 {
+			l.emit(l.hostAt(pc), false)
+			break
+		}
+		// A derived constructor's this binding, the this slot: checked
+		// bound, Go's where not, which throws (ssa's this check), as the
+		// stack form's push_this.
+		dest := int(a)
+		if sub == bytecode.RCheckThis {
+			dest = l.temp()
+		}
+		l.emit(ir.Instruction{Op: ir.Copy, Dest: dest, Left: ir.Slot(l.this), Check: true, CheckSlot: l.this}, false)
+	case bytecode.RDerivedRet:
+		if l.this < 0 || !l.undefinedAt(pc, int(a)) {
+			// Anything but undefined returned -- an object, or what the
+			// construction throws for -- is Go's, as the stack form's.
+			l.emit(l.hostAt(pc), false)
+			break
+		}
+		// undefined returned: the this binding, checked bound -- Go's
+		// where not, which throws -- as the stack form's return.
+		l.emit(ir.Instruction{Op: ir.Copy, Dest: int(a), Left: ir.Slot(l.this), Check: true, CheckSlot: l.this}, false)
 	case bytecode.RRestParam, bytecode.RNewTarget:
 		// Go's, from the frame (ir's Frame).
 		l.emit(ir.Instruction{Op: ir.Host, Frame: true, Dest: int(a)}, false)
@@ -1345,7 +1450,7 @@ func (l *regLowering) hostAt(pc int) ir.Instruction {
 	switch l.rc.Code[pc].Op() {
 	case bytecode.RRet, bytecode.RRetUndef, bytecode.RYield, bytecode.RCallWT, bytecode.RCallMWT, bytecode.RAwait,
 		bytecode.RYieldStar, bytecode.REndParams, bytecode.RGenEntry, bytecode.RIterResume, bytecode.RThrow,
-		bytecode.RCheckThis, bytecode.RDeleteSuper:
+		bytecode.RCheckThis, bytecode.RDeleteSuper, bytecode.RSuperCall, bytecode.RSuperForward, bytecode.RSuperSpread, bytecode.RDerivedRet:
 		// Or reads the frame's this binding, which no operand names.
 		return ir.Instruction{Op: ir.Host}
 	}
@@ -1597,6 +1702,10 @@ func RegAccess(rc *bytecode.RegCode, pc int) (reads, writes []int, all bool) {
 		return []int{b}, nil, false
 	case bytecode.RRestParam, bytecode.RNewTarget, bytecode.RTemplateObject, bytecode.RThis:
 		return nil, []int{a}, false
+	case bytecode.RSuperCall:
+		// Register 1 too, in a derived constructor, which it is not
+		// counted as writing: what is live there stays so.
+		return span(c, b), []int{a}, false
 	case bytecode.RToPropertyKey:
 		return []int{a}, []int{a}, false
 	case bytecode.RAssignConst, bytecode.RThrowRef, bytecode.RCheckThis, bytecode.RDeleteSuper, bytecode.RCloseRegs:

@@ -9,6 +9,7 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
+	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
@@ -168,7 +169,7 @@ func (f *jitRegFeedback) regCallTargets(pc int, w bytecode.RInstr, argc int, met
 	var sites []ssa.CallSite
 	var objs []*Object
 	var closures []*closure
-	add := func(o *Object, cl *closure, rc *regCode, pool *abi.ObjectPool, byCode bool) {
+	add := func(o *Object, cl *closure, rc *regCode, pool *abi.ObjectPool, parent *Object, byCode bool) {
 		for i, s := range sites {
 			if s.ByCode != 0 && jitRegSameCode(s, cl) || s.Callee == uintptr(unsafe.Pointer(o)) && !byCode {
 				return
@@ -181,14 +182,14 @@ func (f *jitRegFeedback) regCallTargets(pc int, w bytecode.RInstr, argc int, met
 			}
 		}
 		if len(sites) < jitCallTargets {
-			if site, ok := f.regCallSite(pc, o, cl, rc, argc, method, pool, byCode); ok {
+			if site, ok := f.regCallSite(pc, o, cl, rc, argc, method, pool, parent, byCode); ok {
 				sites, objs, closures = append(sites, site), append(objs, o), append(closures, cl)
 			}
 		}
 	}
 	if calls := f.fb.cl.regCalls; !newW && w.Op() != bytecode.RApplyArgs && uint(w.C()) < uint(len(calls)) {
 		if e := &calls[w.C()]; jitRegCallKind(e) {
-			add(e.callee, e.cl, e.rc, nil, false)
+			add(e.callee, e.cl, e.rc, nil, nil, false)
 			if len(sites) != 0 && l != nil && !jitRegCallKnown(l, rpc, e.callee) {
 				l.nativeCalls = append(l.nativeCalls, jitInline{pc: rpc, cl: e.cl, obj: e.callee})
 			}
@@ -196,8 +197,8 @@ func (f *jitRegFeedback) regCallTargets(pc int, w bytecode.RInstr, argc int, met
 	}
 	if l != nil {
 		for _, x := range l.nativeCalls {
-			if x.pc == rpc && (x.pool != nil) == newW && !x.forEach && x.cl != nil {
-				add(x.obj, x.cl, x.cl.reg, x.pool, x.byCode)
+			if x.pc == rpc && (x.pool != nil) == newW && !x.forEach && x.cl != nil && x.active == nil {
+				add(x.obj, x.cl, x.cl.reg, x.pool, x.parent, x.byCode)
 			}
 		}
 	}
@@ -252,7 +253,7 @@ func (r *Runtime) jitRegCallSeen(f *frame, c *regCode, e *jitRegEntry, rpc int, 
 		return false
 	}
 	w := regAt(c.code, rpc)
-	var o *Object
+	var o, parent *Object
 	var cl *closure
 	switch w.Op() {
 	case bytecode.RCallW, bytecode.RCallMW, bytecode.RCallWT, bytecode.RCallMWT:
@@ -289,10 +290,10 @@ func (r *Runtime) jitRegCallSeen(f *frame, c *regCode, e *jitRegEntry, rpc int, 
 			// new Array() or new Array(n): made from a pool (jitRegAllocSeen).
 			return r.jitRegAllocSeen(f, c, e, rpc, w, o)
 		}
-		if !r.jitRegConstructable(o, int(w.X())) {
+		var ok bool
+		if cl, parent, ok = r.jitRegConstructTarget(o, int(w.X())); !ok {
 			return false
 		}
-		cl = o.fn().closure
 	default:
 		return false
 	}
@@ -345,7 +346,7 @@ func (r *Runtime) jitRegCallSeen(f *frame, c *regCode, e *jitRegEntry, rpc int, 
 		}
 		return false
 	}
-	x := jitInline{pc: int32(rpc), cl: cl, obj: o}
+	x := jitInline{pc: int32(rpc), cl: cl, obj: o, parent: parent}
 	if w.Op() == bytecode.RNewW {
 		// Its objects, made as the construction makes them, from a pool
 		// (ssa.CallSite's Pool).
@@ -359,27 +360,111 @@ func (r *Runtime) jitRegCallSeen(f *frame, c *regCode, e *jitRegEntry, rpc int, 
 }
 
 // jitRegConstructable reports whether native callers may construct with o
-// natively, of argc arguments (regCallSite's pool): a base constructor --
-// a plain function's object, or a class's of no field to initialize, as
-// the stack form's constructions are made (jitConstructs) -- of register
-// code native callers may call, that does not read new.target -- one
-// that hands its arguments on, this.initialize.apply(this, arguments),
-// among them, whose forwarding call its code makes natively
-// (ssa.CallSite's Forward) -- its prototype its own property, as
-// regConstruct runs a construction in a register frame. A class's had
-// been constructed by Go at every construction, AWFY's CD, Json and
-// Havlak hundreds of thousands of times a run.
+// natively, of argc arguments, its own code running (regCallSite's pool):
+// a base constructor -- a plain function's object, or a class's of no
+// field to initialize, as the stack form's constructions are made
+// (jitConstructs) -- or a derived class's own constructor, its instance
+// from the pool, its super() native or Go's, which gives the class's
+// fields (jitConstructsDerived) -- of register code native callers may
+// call, that does not read new.target -- one that hands its arguments on,
+// this.initialize.apply(this, arguments), among them, whose forwarding
+// call its code makes natively (ssa.CallSite's Forward) -- its prototype
+// its own property, as regConstruct runs a construction in a register
+// frame. A class's had been constructed by Go at every construction,
+// AWFY's CD, Json and Havlak hundreds of thousands of times a run, and a
+// derived class's at every construction until now: AWFY's Json and
+// DeltaBlue.
 func (r *Runtime) jitRegConstructable(o *Object, argc int) bool {
 	fd := o.fn()
-	if fd == nil || fd.closure == nil || fd.bound || fd.extra != nil || fd.ctorKind != ctorBase || fd.fieldInit() != nil || proxyOf(o) != nil {
+	if fd == nil || fd.closure == nil || fd.bound || fd.extra != nil || proxyOf(o) != nil {
 		return false
 	}
 	cl := fd.closure
-	if cl.fn.Kind != bytecode.KindNormal && cl.fn.Kind != bytecode.KindConstructor || cl.reg == nil || cl.reg.newTarget ||
-		o.findOwn(atomPrototype) < 0 {
+	switch fd.ctorKind {
+	case ctorBase:
+		if fd.fieldInit() != nil || cl.fn.Kind != bytecode.KindNormal && cl.fn.Kind != bytecode.KindConstructor {
+			return false
+		}
+	case ctorDerived:
+		// A class without a constructor of its own whose parent native
+		// code constructs is constructed with that parent's code
+		// (jitRegDerivedBase).
+		if cl.fn.Kind != bytecode.KindDerivedConstructor || fd.superCtor() != o || o.class != ClassFunction ||
+			jitRegForwardsSuper(cl.reg) && r.jitRegDerivedBase(o, argc) != nil {
+			return false
+		}
+	default:
+		return false
+	}
+	if cl.reg == nil || jitRegReadsNewTarget(cl, cl.reg) || o.findOwn(atomPrototype) < 0 {
 		return false
 	}
 	return r.jitRegTarget(o, cl, cl.reg, argc)
+}
+
+// jitRegReadsNewTarget reports whether cl's register code c reads
+// new.target, which a frame Go makes of a native callee's level has not --
+// but a class's constructor's, only ever constructed, whose construction,
+// or super(), writes its new.target to its context (abi.Context's
+// NewTarget), where the frames Go makes of its level, and the stand-in
+// its new_target is made on, find it (jitRegPushLevel, jitRegFrameRun).
+func jitRegReadsNewTarget(cl *closure, c *regCode) bool {
+	return c.newTarget && !isClassConstructorKind(cl.fn.Kind)
+}
+
+// jitRegConstructTarget is the closure native code constructs o with, of
+// argc arguments: o's own (jitRegConstructable), or, where o's
+// constructor is the one a class without one has, the closure of the
+// class it extends, parent (jitRegDerivedBase); ok false for a
+// construction Go makes.
+func (r *Runtime) jitRegConstructTarget(o *Object, argc int) (cl *closure, parent *Object, ok bool) {
+	if r.jitRegConstructable(o, argc) {
+		return o.fn().closure, nil, true
+	}
+	if p := r.jitRegDerivedBase(o, argc); p != nil {
+		return p.fn().closure, p, true
+	}
+	return nil, nil, false
+}
+
+// jitRegDerivedBase is the class a class o extends, if o's constructor is
+// the one a class without one has, constructor(...args) { super(...args) }
+// (jitRegForwardsSuper), o has no fields to give its instances, and native
+// code constructs with that class (jitRegConstructable); or nil. new o(...)
+// then does what a construction with that class does, its object made as
+// o makes one -- o's prototype, o's root shape and room, as
+// constructWithTarget makes it for super() to hand on -- and its result
+// o's, as the stack form's (jitDerivedBase) and V8, which skips a default
+// derived constructor (FindNonDefaultConstructorOrConstruct). AWFY's Havlak
+// constructs a DictIdEntry, a DictEntry's subclass, for each entry of its
+// dictionaries, and DeltaBlue an EditConstraint, a UnaryConstraint's.
+func (r *Runtime) jitRegDerivedBase(o *Object, argc int) *Object {
+	fd := o.fn()
+	if fd == nil || fd.closure == nil || fd.native != nil || fd.bound || fd.ctorKind != ctorDerived || fd.fieldInit() != nil ||
+		fd.closure.realm != r.Realm || o.class != ClassFunction || o.findOwn(atomPrototype) < 0 || !jitRegForwardsSuper(fd.closure.reg) {
+		return nil
+	}
+	if p := o.proto(); p != nil && r.jitRegConstructable(p, argc) {
+		return p
+	}
+	return nil
+}
+
+// jitRegForwardsSuper reports whether c is the register code of the
+// constructor a derived class without one has: super(...args), then the
+// this it bound returned.
+func jitRegForwardsSuper(c *regCode) bool {
+	if c == nil || len(c.rc.Code) == 0 || c.rc.Code[0].Op() != bytecode.RSuperForward {
+		return false
+	}
+	for _, w := range c.rc.Code[1:] {
+		switch w.Op() {
+		case bytecode.RLoadUndef, bytecode.RMove, bytecode.RDerivedRet, bytecode.RRet, bytecode.RNop:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // jitRegCallable reports whether native callers may call o, cl's function
@@ -425,7 +510,7 @@ func (r *Runtime) jitRegTarget(o *Object, cl *closure, rc *regCode, argc int) bo
 // constructor's, an arrow's sharing a derived constructor's this), one the
 // JIT does not compile, or past the arguments a sloppy callee's frame keeps
 // for f.arguments.
-func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode, argc int, method bool, pool *abi.ObjectPool, byCode bool) (ssa.CallSite, bool) {
+func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode, argc int, method bool, pool *abi.ObjectPool, parent *Object, byCode bool) (ssa.CallSite, bool) {
 	fb := f.fb
 	r := fb.r
 	forward := false
@@ -435,8 +520,13 @@ func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode
 		// context holds (mir's checks), none known here.
 		forward, method, argc = true, true, 0
 	}
-	if pool == nil && !r.jitRegCallable(o, cl, rc, argc) || pool != nil && (rc != cl.reg || !r.jitRegConstructable(o, argc) || pool.Count == 0) {
+	if pool == nil && !r.jitRegCallable(o, cl, rc, argc) {
 		return ssa.CallSite{}, false
+	}
+	if pool != nil {
+		if tc, tp, ok := r.jitRegConstructTarget(o, argc); !ok || tc != cl || tp != parent || rc != cl.reg || pool.Count == 0 {
+			return ssa.CallSite{}, false
+		}
 	}
 	arrow, this := o.fn().arrow, cl.fn.UsesThis
 	l := r.jitState().regLinkOf(cl, rc)
@@ -480,6 +570,16 @@ func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode
 		// the pool's are of (mir's constructGuards).
 		k.pools = append(k.pools, pool)
 		site.Pool, site.ProtoIndex, site.ProtoKey = uintptr(unsafe.Pointer(pool)), int(o.findOwn(atomPrototype)), uint32(atomPrototype)
+		// A derived constructor's code: the pool's object its instance,
+		// its this unbound until its super() binds it (ssa.CallSite's
+		// Derived); a class's with no constructor of its own, run with its
+		// parent's code, while o's prototype is still that parent
+		// (Parent), as the stack form's.
+		site.Derived = cl.fn.Kind == bytecode.KindDerivedConstructor
+		if parent != nil {
+			site.Parent = uintptr(unsafe.Pointer(parent))
+			k.holders = append(k.holders, parent)
+		}
 		return site, true
 	}
 	// A receiver, for a callee that reads one, as the call path gives it --
@@ -513,6 +613,176 @@ func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode
 	return site, true
 }
 
+// regSuperSites are the calls jitRegFeedback's NativeCalls answers for
+// register instruction w, super_call's of B arguments, at the program's
+// instruction pc, of a derived constructor's code: a native call of the
+// parent its code learned the super() constructs with (jitRegSuperSeen) --
+// called as the stack form's is (ssa.CallSite's Super), its window made
+// past the frame's, the instance its receiver -- or Go's call
+// (ssa.GoCall's Super), on the frame, which binds its this, of a class that
+// may make an arrow before a super() (jitRegArrowBeforeSuper), whose
+// binding the arrow shares, or of a parent it learned none of.
+func (f *jitRegFeedback) regSuperSites(pc int, w bytecode.RInstr) []ssa.CallSite {
+	fb := f.fb
+	argc := int(w.B())
+	if fb.fn.Kind != bytecode.KindDerivedConstructor || !f.p.This {
+		return nil
+	}
+	if l, rpc := fb.e, int32(f.p.Origin[pc]); l != nil && !jitRegArrowBeforeSuper(f.rc, fb.fn) {
+		for _, x := range l.nativeCalls {
+			if x.pc != rpc || x.active == nil {
+				continue
+			}
+			if site, ok := f.regSuperSite(pc, x, argc); ok {
+				return []ssa.CallSite{site}
+			}
+			break
+		}
+	}
+	if argc+1 > abi.MaxGoArgs {
+		return nil
+	}
+	return []ssa.CallSite{{Go: ssa.GoCall, Super: true, Argc: argc, ThisSlot: -1}}
+}
+
+// regSuperSite is the native super() at the program's instruction pc of x,
+// a parent the code learned it constructs with (jitRegSuperSeen), of argc
+// arguments: the code of the class whose prototype it is still -- x.obj,
+// or past one with no constructor of its own, x.parent -- called through
+// its link, while the function running is x.active, the one the code was
+// learned for (mir's superGuards); or false where that code is no longer
+// one native callers construct with.
+func (f *jitRegFeedback) regSuperSite(pc int, x jitInline, argc int) (ssa.CallSite, bool) {
+	fb := f.fb
+	r := fb.r
+	p, skip, cl := r.jitRegSuperTarget(x.active, argc)
+	if p != x.obj || skip != x.parent || cl != x.cl || cl == nil {
+		return ssa.CallSite{}, false
+	}
+	rc := cl.reg
+	l := r.jitState().regLinkOf(cl, rc)
+	k := fb.keep()
+	k.links = append(k.links, l)
+	k.holders = append(k.holders, x.obj, x.active)
+	site := ssa.CallSite{
+		Callee: uintptr(unsafe.Pointer(x.obj)), Closure: uintptr(unsafe.Pointer(cl)),
+		Entry: uintptr(unsafe.Pointer(&l.entry)), Count: uintptr(unsafe.Pointer(&l.in)),
+		Argc: argc, Params: 2 + int(rc.params), LocalCount: int(rc.numRegs), ThisSlot: -1,
+		Window: f.p.Code[pc].Left.Slot + 1,
+		Super:  true, Active: uintptr(unsafe.Pointer(x.active)), Derived: cl.fn.Kind == bytecode.KindDerivedConstructor,
+		// A parent that keeps its arguments is given them in its context,
+		// as any native callee (FrameArgs).
+		FrameArgs: rc.args,
+	}
+	if x.parent != nil {
+		site.Parent = uintptr(unsafe.Pointer(x.parent))
+		k.holders = append(k.holders, x.parent)
+	}
+	return site, true
+}
+
+// jitRegSuperTarget is the parent d's super() of argc arguments constructs
+// with natively (ssa.CallSite's Super), and the closure whose code it runs,
+// as the stack form's (jitSuperTarget): d a derived class of no fields --
+// which super() would give the instance -- its prototype p a constructor
+// native callers construct with -- a base one of no fields, or a derived
+// one's own, neither reading new.target, which the frames Go makes of a
+// native callee's level do not have -- or, p a class with no constructor
+// of its own, the code of the one it extends, skip, as V8 skips a default
+// derived constructor. nil where there is none.
+func (r *Runtime) jitRegSuperTarget(d *Object, argc int) (p, skip *Object, cl *closure) {
+	dfd := d.fn()
+	if dfd == nil || dfd.closure == nil || dfd.ctorKind != ctorDerived || dfd.superCtor() != d || dfd.fieldInit() != nil {
+		return nil, nil, nil
+	}
+	code := func(o *Object) *closure {
+		fd := o.fn()
+		if fd == nil || fd.native != nil || o.class != ClassFunction || !r.jitRegConstructable(o, argc) {
+			return nil
+		}
+		return fd.closure
+	}
+	if p = d.proto(); p == nil {
+		return nil, nil, nil
+	}
+	if cl = code(p); cl != nil {
+		return p, nil, cl
+	}
+	if q := r.jitRegDerivedBase(p, argc); q != nil {
+		return p, q, q.fn().closure
+	}
+	return nil, nil, nil
+}
+
+// jitRegArrowBeforeSuper reports whether fn, a derived constructor whose
+// register code is rc, may make an arrow before a super() of its runs, as
+// the stack form's (jitArrowBeforeSuper): an arrow shares the
+// constructor's this binding, which a super() native code makes binds in
+// the context (its This), not in a binding of the VM's an arrow made
+// before shares. No arrow at a pc before a super()'s, and no jump back from
+// one to a super(): every arrow fn makes is made once any super() it runs
+// has run, Go making it then on a binding bound (jitBindThis), or, on a
+// native callee's level, of the this its context holds (jitRegFrameOp).
+func jitRegArrowBeforeSuper(rc *bytecode.RegCode, fn *bytecode.Function) bool {
+	lastSuper, firstArrow := -1, len(rc.Code)
+	consts := fn.Constants
+	if rc.Constants != nil {
+		consts = rc.Constants
+	}
+	for pc, w := range rc.Code {
+		switch w.Op() {
+		case bytecode.RSuperCall, bytecode.RSuperForward, bytecode.RSuperSpread:
+			lastSuper = pc
+		case bytecode.RClosureW:
+			if k := int(w.BC()); k < len(consts) {
+				if c := consts[k]; c.Kind == bytecode.ConstFunction && c.Fn != nil && c.Fn.Kind == bytecode.KindArrow {
+					firstArrow = min(firstArrow, pc)
+				}
+			}
+		}
+	}
+	if firstArrow == len(rc.Code) || lastSuper < 0 {
+		return false
+	}
+	if firstArrow < lastSuper {
+		return true
+	}
+	for pc, w := range rc.Code {
+		for _, t := range jitcompile.RegSuccessors(rc, pc, w) {
+			if pc >= firstArrow && t <= lastSuper {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// jitRegSuperSeen notes the super() at register pc rpc of f's code, e's,
+// that Go made -- at a host exit, or a call of Go native code made -- the
+// parent it constructs with, which native code calls from the next
+// compile on (regSuperSites), as the stack form's (jitSuperSeen).
+func (r *Runtime) jitRegSuperSeen(f *frame, c *regCode, e *jitRegEntry, rpc int) {
+	if e == nil || e.invalid || f.callee == nil || rpc >= len(c.rc.Code) || regAt(c.code, rpc).Op() != bytecode.RSuperCall {
+		return
+	}
+	l := r.jit.regLearnedOf(r.jitRegKeyOf(f.cl))
+	for _, x := range l.nativeCalls {
+		if int(x.pc) == rpc && x.active != nil {
+			// Known: a super() Go made for want of the parent's code,
+			// which native callers call once it has some.
+			r.jitRegNativeCallee(x.cl, x.cl.reg)
+			return
+		}
+	}
+	p, skip, cl := r.jitRegSuperTarget(f.callee, int(regAt(c.code, rpc).B()))
+	if p == nil || cl.reg == nil {
+		return
+	}
+	r.jitRegNativeCallee(cl, cl.reg)
+	l.nativeCalls = append(l.nativeCalls, jitInline{pc: int32(rpc), cl: cl, obj: p, parent: skip, active: f.callee})
+	r.jitRegReopt(f.cl, e)
+}
+
 // jitRegLevel is a native call under way whose callee runs register code,
 // in context ctx: its closure cl, the callee's register code c and its
 // code's entry e, its window at wb; pc the register pc it is at -- the
@@ -527,8 +797,10 @@ type jitRegLevel struct {
 	pc   int
 	back uintptr
 	base uint64
-	// construct marks a construction's callee (its caller's new_w), this
-	// its receiver, which the construction's result is if not an object.
+	// construct marks a construction's callee (its caller's new_w, or a
+	// super()'s parent, super_call's), this its receiver, which the
+	// construction's result is if not an object -- a derived
+	// constructor's, an object always (jitDerivedResult).
 	construct bool
 	this      Value
 	// gen is, for the resumption of a generator a loop's step or a call of
@@ -539,10 +811,14 @@ type jitRegLevel struct {
 }
 
 // jitRegConstructs marks l, the level whose caller's code c makes the call
-// at register pc rpc, a construction's where that is new_w: its receiver
-// the one the call gave its context (abi.Context's This).
+// at register pc rpc, a construction's where that is new_w or super_call:
+// its receiver the one the call gave its context (abi.Context's This).
 func (r *Runtime) jitRegConstructs(l *jitRegLevel, c *regCode, rpc int) {
-	if rpc < len(c.rc.Code) && regAt(c.code, rpc).Op() == bytecode.RNewW {
+	if rpc >= len(c.rc.Code) {
+		return
+	}
+	switch regAt(c.code, rpc).Op() {
+	case bytecode.RNewW, bytecode.RSuperCall:
 		l.construct, l.this = true, *(*Value)(unsafe.Pointer(&r.jit.ssaCtxs[l.ctx].This))
 	}
 }
@@ -612,8 +888,21 @@ func (r *Runtime) jitRegPushLevel(l *jitRegLevel, pc uint32) *frame {
 		regClearFrame(f)
 	}
 	f.newTarget = Undefined
-	if l.construct && f.callee != nil {
-		f.newTarget = Obj(f.callee)
+	if l.construct {
+		// Its new.target, which the construction wrote to its context --
+		// a super()'s, the one it was given (mir's windowSuper) -- and a
+		// derived constructor's frame as runFD makes it: its function,
+		// its instance and its this binding, bound if its super() bound
+		// it (jitDerivedFrame).
+		c := r.jit.ssaCtxs[l.ctx]
+		if c.NewTarget != 0 {
+			f.newTarget = Obj(*(**Object)(unsafe.Pointer(&c.NewTarget)))
+		} else if f.callee != nil {
+			f.newTarget = Obj(f.callee)
+		}
+		if l.cl.fn.Kind == bytecode.KindDerivedConstructor {
+			jitDerivedFrame(f, c)
+		}
 	}
 	if l.c.args {
 		// The arguments its native call gave its context (ssa.CallSite's
@@ -686,23 +975,10 @@ func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 	if idx >= len(s.ssaCtxs) || s.ssaCtxs[idx] != ctx {
 		return false
 	}
-	n := idx - root
-	var buf [8]jitRegLevel
-	levels := buf[:0]
-	if n > len(buf) {
-		// Deep native recursion: from the runtime's slab, past what
-		// calls of Go under way below hold of it, given back after --
-		// made anew at each call, a recursion thirty levels deep that
-		// called Go at every level allocated a gigabyte a run.
-		at := len(s.regLevelSlab)
-		s.regLevelSlab = slices.Grow(s.regLevelSlab, n)
-		levels = s.regLevelSlab[at : at : at+n]
-		defer func() {
-			clear(s.regLevelSlab[at : at+n])
-			s.regLevelSlab = s.regLevelSlab[:at]
-		}()
-		s.regLevelSlab = s.regLevelSlab[:at+n]
-	}
+	// Its levels and their frames on the state's stacks of them, past an
+	// enclosing call's: a call of Go deep in a recursion of native calls,
+	// past eight levels, had allocated both.
+	lbase, fbase := len(s.regNestLevels), len(s.regNestFrames)
 	ok := true
 	for i := root + 1; i <= idx; i++ {
 		l, found := r.jitRegLevelAt(i)
@@ -710,8 +986,9 @@ func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 			ok = false
 			break
 		}
-		levels = append(levels, l)
+		s.regNestLevels = append(s.regNestLevels, l)
 	}
+	levels := s.regNestLevels[lbase:]
 	if ok {
 		run := s.regRuns[root]
 		rpc, _ := jit.CallPC(s.ssaCtxs[root])
@@ -725,18 +1002,6 @@ func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 				caller, at = l.c, int(p)
 			}
 		}
-		var fbuf [8]*frame
-		frames := fbuf[:0]
-		if n > len(fbuf) {
-			at := len(s.regFrameSlab)
-			s.regFrameSlab = slices.Grow(s.regFrameSlab, n)
-			frames = s.regFrameSlab[at : at : at+n]
-			defer func() {
-				clear(s.regFrameSlab[at : at+n])
-				s.regFrameSlab = s.regFrameSlab[:at]
-			}()
-			s.regFrameSlab = s.regFrameSlab[:at+n]
-		}
 		for k := range levels {
 			l := &levels[k]
 			pc := uint32(0)
@@ -744,13 +1009,20 @@ func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 				rpc, _ := jit.CallPC(s.ssaCtxs[l.ctx])
 				pc = regSrc(l.c, int(rpc)) + 1
 			}
-			frames = append(frames, r.jitRegPushLevel(l, pc))
+			s.regNestFrames = append(s.regNestFrames, r.jitRegPushLevel(l, pc))
 		}
+		frames := s.regNestFrames[fbase:]
 		ctxTop := s.ctxTop
 		s.ctxTop = max(ctxTop, idx+1)
 		last := &levels[len(levels)-1]
 		top := r.stackTop
-		ok = r.jitRegGoCallOn(ctx, idx, jitRegRun{f: frames[len(frames)-1], c: last.c, e: last.e, wb: last.wb})
+		own := 0
+		for k := range levels {
+			if levels[k].e == last.e {
+				own++
+			}
+		}
+		ok = r.jitRegGoCallOn(ctx, idx, jitRegRun{f: frames[len(frames)-1], c: last.c, e: last.e, wb: last.wb, own: own})
 		s.ctxTop = ctxTop
 		for k := len(frames) - 1; k >= 0; k-- {
 			r.jitRegPopLevel(frames[k], levels[k].wb, levels[k].gen != nil)
@@ -761,6 +1033,9 @@ func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 		levels[k].e.levels--
 		s.regClose(levels[k].e)
 	}
+	clear(s.regNestLevels[lbase:])
+	clear(s.regNestFrames[fbase:])
+	s.regNestLevels, s.regNestFrames = s.regNestLevels[:lbase], s.regNestFrames[:fbase]
 	return ok
 }
 
@@ -943,12 +1218,24 @@ func (r *Runtime) jitRegUnwind(idx int) (Value, error) {
 		r.jitRegPopLevel(f, l.wb, l.gen != nil)
 		l.e.levels--
 		s.regClose(l.e)
+		if l.e.life != nil && l.e.life.reopt && l.cl.reg == l.c && r.jitRegLearnedDue(l.cl, l.e) {
+			// Due to be compiled again for what it learned -- a call of Go
+			// left for it (jitRegCompileDueNow) -- now that no native call
+			// runs it: compiled here, as the stack form's code is once its
+			// run has left (jitRecompileInRun).
+			r.jitRegReoptimize(l.cl, l.c, l.e)
+		}
 		if err == errTailCall {
 			// Ended in a call in tail position, its frame given up: the
 			// call made here.
 			v, err = r.regTailRest()
 		}
-		if l.construct && err == nil && !v.IsObject() {
+		switch {
+		case l.construct && l.cl.fn.Kind == bytecode.KindDerivedConstructor:
+			// A derived construction's: an object, or what it throws
+			// (jitDerivedResult).
+			v, err = r.jitDerivedResult(v, err)
+		case l.construct && err == nil && !v.IsObject():
 			// A construction's result is its receiver, unless an object.
 			v = l.this
 		}

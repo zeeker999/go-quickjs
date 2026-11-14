@@ -96,19 +96,42 @@ func (r *Runtime) jitRegHas(cl *closure) bool {
 }
 
 // jitRegSample is a sample of a run of cl's register code c (regEnterW).
+// One of code that had native code already says nothing of what the
+// interpreter runs: the interrupt budget's next sample is taken sooner
+// (jitRegResample), so that a call site of a frame the interpreter runs,
+// which enters a callee compiled after the site's cache was filled in the
+// interpreter, until a sample of the site marks it (jitRegCallSample), is
+// sampled. Calls of compiled code, through Go, had taken the samples -- a
+// parser's character reads, from frames the interpreter ran -- and left
+// whole call trees in the interpreter: AWFY's Json ran its parse there
+// unless a sample happened to fall on its first call site.
 func (r *Runtime) jitRegSample(cl *closure, c *regCode) {
 	if r.jitEnabled && cl.closureCode != nil {
+		had := cl.closureCode.jitReg != nil
 		r.jitRegHot(cl, c, r.jitRegCallWork(c))
+		if had && r.interruptCounter > jitRegResample {
+			r.interruptCounter = jitRegResample
+			r.jitState().callsNext = jitRegResample
+		}
 		r.jitRegStressSample()
 	}
 }
 
+// jitRegResample is how many calls on the interrupt budget's next sample
+// is taken after one of a function that had native code (jitRegSample).
+const jitRegResample = 64
+
 // jitRegCallWork is the work of c's function's budget a sample of its
-// calls spends (jitRegHot): the calls the interrupt budget counted --
-// every call where every call is a sample (jitRegStressSample) -- each its
-// length, as the stack form's invocations spend it (jitTierWork).
+// calls spends (jitRegHot): the calls the interrupt budget counted -- a
+// full budget's, or jitRegResample's after a sample that took the next
+// sooner (jitState's callsNext), or every call where every call is a
+// sample (jitRegStressSample) -- each its length, as the stack form's
+// invocations spend it (jitTierWork).
 func (r *Runtime) jitRegCallWork(c *regCode) int64 {
 	calls := int64(interruptCheckInterval)
+	if s := r.jit; s != nil && s.callsNext != 0 {
+		calls, s.callsNext = int64(s.callsNext), 0
+	}
 	if r.jitCallThreshold <= 1 {
 		calls = 1
 	}
@@ -376,8 +399,15 @@ func (r *Runtime) jitRegReopt(cl *closure, e *jitRegEntry) {
 // runs it, which finds its code in the cache (jitRegLevelAt), nor while it
 // is compiled in the background.
 func (r *Runtime) jitRegLearnedDue(cl *closure, e *jitRegEntry) bool {
+	return r.jitRegLearnedDueWith(cl, e, 0)
+}
+
+// jitRegLearnedDueWith is jitRegLearnedDue for a call of Go running own of
+// the native calls that run e's code (jitRegCompileDueNow), whose leaving
+// unwinds them: not while any other runs it.
+func (r *Runtime) jitRegLearnedDueWith(cl *closure, e *jitRegEntry, own int) bool {
 	life := e.life
-	if e.invalid || e.code == nil || life == nil || !life.reopt || e.levels != 0 || r.jit.regPendingJobs[e.key] != nil {
+	if e.invalid || e.code == nil || life == nil || !life.reopt || e.levels != own || r.jit.regPendingJobs[e.key] != nil {
 		return false
 	}
 	c := cl.reg
@@ -425,7 +455,7 @@ func (r *Runtime) jitRegSpent(c *regCode, e *jitRegEntry) int64 {
 // what it has learned so far.
 func (r *Runtime) jitRegReoptimize(cl *closure, c *regCode, e *jitRegEntry) *jitRegEntry {
 	life := e.life
-	ne := r.jitRegCompileFor(cl, c, e.key, false)
+	ne := r.jitRegCompileFor(cl, c, e.key, e.callee)
 	switch {
 	case ne == nil:
 		life.reopt, life.learning = true, false
@@ -890,4 +920,19 @@ func (e *jitRegEntry) findReturns(rc *bytecode.RegCode) {
 		}
 	}
 	e.goesOn = e.retPC >= 0 || !rets && e.retUndef >= 0
+}
+
+// jitRegCompileDueNow reports whether a call of Go that run's code made is
+// to leave the code for it to be compiled again, as the stack form's call
+// of Go does (jitCompileDueNow): due for what it learned
+// (jitRegLearnedDueWith), and compiled again once the run has left -- at
+// its exit, or its caller's after the unwinding (jitRegGoOnAt) -- not
+// while a native call of it in an outer run, which its leaving does not
+// end, runs it. Code that only native callers call, and that learned at
+// its calls of Go -- a derived constructor's super()'s parent -- had
+// otherwise never been compiled again: neither sampled nor entered by Go,
+// nor leaving.
+func (r *Runtime) jitRegCompileDueNow(run *jitRegRun) bool {
+	e := run.e
+	return e != nil && e.life != nil && e.life.reopt && r.jitRegLearnedDueWith(run.f.cl, e, run.own)
 }

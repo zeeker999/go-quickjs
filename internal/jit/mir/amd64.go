@@ -2077,6 +2077,12 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 			// arguments the frame's, in its context (windowForward).
 			c.directOperand(v, v.Args[0], true, 0, &inC)
 			c.directOperand(v, v.Args[2], true, vs, &inC)
+		case site.Super:
+			// super(...): the arguments, past the this slot; the function
+			// and the instance its receiver, in setup (windowSuper).
+			for i := range site.Argc {
+				c.directOperand(v, v.Args[1+i], true, int32(2+i)*vs, &inC)
+			}
 		default:
 			if site.Method {
 				m = 1
@@ -2210,7 +2216,12 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 				// A construction's receiver, the pool's last object, its cell
 				// cleared, in the window's register 1 and the callee's
 				// context's This, which the result is if not an object, and
-				// its new.target there, as the stack form's.
+				// its new.target there, as the stack form's. A derived
+				// constructor's is its instance (abi.Context's Instance),
+				// its this unbound, the function whose code it is its
+				// Function, which its super() reads; a class's with no
+				// constructor of its own, run with its parent's code
+				// (ssa.CallSite's Parent), has that function in register 0.
 				c.a.Load(calleeCtx, regCtx, abi.OffNext)
 				c.movImm(tmp, uint64(t.Pool))
 				c.a.Load(top, tmp, abi.OffPoolCount)
@@ -2220,11 +2231,25 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 				c.a.Op(amd64.Add, top, tmp, true)
 				c.a.Load(high2, top, abi.OffPoolObjects)
 				c.storeImm(top, abi.OffPoolObjects, 0, tmp)
-				c.a.Store(calleeCtx, abi.OffThis+c.enc.RefOffset, high2)
-				c.storeImm(calleeCtx, abi.OffThis+c.enc.NumOffset, c.enc.Object, tmp)
+				if t.Derived {
+					c.a.Store(calleeCtx, abi.OffInstance+c.enc.RefOffset, high2)
+					c.storeImm(calleeCtx, abi.OffInstance+c.enc.NumOffset, c.enc.Object, tmp)
+					c.storeImm(calleeCtx, abi.OffThis+c.enc.RefOffset, 0, tmp)
+					c.storeImm(calleeCtx, abi.OffThis+c.enc.NumOffset, c.enc.Uninitialized, tmp)
+					c.storeImm(calleeCtx, abi.OffFunction, uint64(derivedFunction(t)), tmp)
+				} else {
+					c.a.Store(calleeCtx, abi.OffThis+c.enc.RefOffset, high2)
+					c.storeImm(calleeCtx, abi.OffThis+c.enc.NumOffset, c.enc.Object, tmp)
+				}
 				c.a.Store(locals, vs+c.enc.RefOffset, high2)
 				c.storeImm(locals, vs+c.enc.NumOffset, c.enc.Object, tmp)
 				c.storeImm(calleeCtx, abi.OffNewTarget, uint64(t.Callee), top)
+				if t.Parent != 0 {
+					c.storeImm(locals, c.enc.RefOffset, uint64(t.Parent), tmp)
+				}
+			}
+			if t.Super {
+				c.windowSuper(t, locals, calleeCtx, top, tmp)
 			}
 			if t.ByCode != 0 {
 				c.a.Load(callClosure, regCtx, abi.OffCallClosure)
@@ -6288,6 +6313,37 @@ func (c *compiler) windowSetup(t *ssa.CallSite, locals, a, b amd64.Reg) {
 		c.storeImm(locals, vs+c.enc.NumOffset, c.enc.Undefined, a)
 		c.storeImm(locals, vs+c.enc.RefOffset, 0, a)
 	}
+}
+
+// windowSuper is windowSetup for register code's super(...) (ssa.CallSite's
+// Super and Window), its callee's window at locals: the function whose code
+// runs (derivedFunction) in its register 0, the instance the construction
+// made (abi.Context's Instance) in 1 -- the receiver of a base parent,
+// whose context's This it is; a derived parent's instance, its this
+// unbound -- and new.target handed on and that function in its context,
+// ctx, as the stack form's super() writes them (call's setup). It uses a
+// and b.
+func (c *compiler) windowSuper(t *ssa.CallSite, locals, ctx, a, b amd64.Reg) {
+	vs := int32(c.enc.ValueSize)
+	fn := derivedFunction(t)
+	c.a.Load(ctx, regCtx, abi.OffNext)
+	c.storeImm(locals, c.enc.NumOffset, c.enc.Object, b)
+	c.storeImm(locals, c.enc.RefOffset, uint64(fn), b)
+	c.a.Load(a, regCtx, abi.OffInstance+c.enc.RefOffset)
+	c.a.Store(locals, vs+c.enc.RefOffset, a)
+	c.storeImm(locals, vs+c.enc.NumOffset, c.enc.Object, b)
+	if t.Derived {
+		c.a.Store(ctx, abi.OffInstance+c.enc.RefOffset, a)
+		c.storeImm(ctx, abi.OffInstance+c.enc.NumOffset, c.enc.Object, b)
+		c.storeImm(ctx, abi.OffThis+c.enc.RefOffset, 0, b)
+		c.storeImm(ctx, abi.OffThis+c.enc.NumOffset, c.enc.Uninitialized, b)
+	} else {
+		c.a.Store(ctx, abi.OffThis+c.enc.RefOffset, a)
+		c.storeImm(ctx, abi.OffThis+c.enc.NumOffset, c.enc.Object, b)
+	}
+	c.a.Load(a, regCtx, abi.OffNewTarget)
+	c.a.Store(ctx, abi.OffNewTarget, a)
+	c.storeImm(ctx, abi.OffFunction, uint64(fn), a)
 }
 
 // windowForward is windowSetup for register code's f.apply(x, arguments)

@@ -123,7 +123,7 @@ func (f *jitRegFeedback) ForEach(pc int) (ssa.ForEachSite, bool) {
 		if kind&abi.LoopKindMask == abi.LoopReduce {
 			argc = 4
 		}
-		site, ok := f.regCallSite(pc, x.cbObj, x.cb, x.cb.reg, argc, true, nil, x.byCode)
+		site, ok := f.regCallSite(pc, x.cbObj, x.cb, x.cb.reg, argc, true, nil, nil, x.byCode)
 		if !ok {
 			return ssa.ForEachSite{}, false
 		}
@@ -305,6 +305,6 @@ func (r *Runtime) jitRegLoopFinish(f *frame, c *regCode, e *jitRegEntry, wb, rpc
 // jitRegSlotIndex is where in the VM's stack slot i of p, past its Locals,
 // is in a register frame whose window is at wb (jitRegSlot).
 func jitRegSlotIndex(p *ir.Program, wb, i int) int {
-	scratch := p.Locals - (p.UpvalueBase + p.Upvalues)
+	scratch := p.Locals - jitRegScratchBase(p)
 	return wb + p.Regs + scratch + i - p.Locals
 }

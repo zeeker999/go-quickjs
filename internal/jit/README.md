@@ -376,8 +376,8 @@ the function's key:
   by its cell that met a typed array's, a BigInt typed array's or a
   string's element, or an object's property by its name (`TypedRead`,
   `TypedBigRead`, `StringRead`, `KeyedRead`), and a write to an object
-  native code does not store to (`KeyedWrite`), the code stale from
-  there; at a deoptimization, an element read made as a number that met
+  native code does not store to (`KeyedWrite`), the code to be compiled
+  again from there (`jitRegReopt`); at a deoptimization, an element read made as a number that met
   what is none, and an addition that met a string, which every lowering
   of the function's register code is made with from there (the hints,
   `jitLearned`'s `regHints`, by register pc, `jitRegLower`): the read
@@ -484,7 +484,15 @@ stands for:
 - a call that spends the interrupt budget -- `rhCallW`'s and `regEnterW`'s
   check, which the native call handler leaves to `rhCallW` -- spends its
   callee's budget by the calls the interrupt budget counted, each the
-  callee's length (`jitRegCallSample`, `jitRegSample`, `jitRegCallWork`);
+  callee's length (`jitRegCallSample`, `jitRegSample`, `jitRegCallWork`),
+  and a call site of the interpreter's whose callee has code is sent to
+  `regEnterW`, which enters it (`regCallJIT`) -- its only way there: a
+  site whose cache was filled before its callee had code enters it in the
+  interpreter until sampled. A sample of a callee that had code already
+  takes the next sooner (`jitRegResample`, 64 calls), so that such sites
+  are, which calls of compiled code had starved -- AWFY's Json's parse had
+  run in the interpreter, read by read through `regEnterW`; the next
+  sample then spends those 64 calls' work (`jitState`'s `callsNext`);
 - a back edge that spends the back-edge budget -- `regBackEdge`, which every
   dispatcher's jump leaves to its Go slow function -- spends its frame's
   function's by the back edges the budget counted, each the loop's length
@@ -572,7 +580,12 @@ stack form's is.
   interpreter's in its loops before Go entered them (`jitRegSpent`). It is
   compiled at a call that enters it (`jitRegEnter`, the stack form's
   `tryJITAt`), even judged slow, which would never be entered and never
-  compiled for what it learned otherwise; at a sample, at an exit, or at
+  compiled for what it learned otherwise; at a call of Go it makes, which
+  then leaves for it unless a native call of it in an outer run runs it
+  (`jitRegCompileDueNow`, the stack form's `jitCompileDueNow`) -- a
+  native callee's is compiled once the unwinding has let it go
+  (`jitRegUnwind`), code only native callers call having been compiled
+  again at none of these otherwise; at a sample, at an exit, or at
   a loop's poll, which leaves for it rather than calling Go while it
   learns (`GoPoll`), and a run goes on in the new code (`jitRegGoOnAt`,
   `jitRegReoptimize`, the stack form's `jitRecompileInRun`). Where Go goes on after a call the code was built
@@ -709,7 +722,11 @@ the instruction whole again. A Generic instruction is built as one whose
 speculation failed before (the builder's `generic`) only where what came
 before it in its origin committed as built: after a read built to call
 nothing, `add_prop`'s addition speculates on numbers, as the stack form's
-`add` does, its exit running the instruction again from its start.
+`add` does, its exit running the instruction again from its start. So
+that it may, a read its origin goes on after is never built to call Go
+at a megamorphic site's miss, but leaves for Go there (the builder's
+`originGoesOn`): built to call, its addition would have been Go's, which
+may leave, and the program refused.
 
 **Windows.** A call, `call_w`'s, `call_method_w`'s or `new_w`'s, and a
 `typeof` read their operands from the window's registers, in order -- the
@@ -1656,6 +1673,44 @@ callee native callers call that has no code is compiled at their first call
 of it through Go (`jitRegNativeCallee`): a function of host operations alone
 is lowered for them (`LowerRegInline`).
 
+**Derived constructions.** As the stack form's (`jitConstructsDerived`,
+`jitDerivedBase`, `jitSuperTarget`), a derived class's own constructor is
+constructed natively too, its instance from the class's pool, in the
+callee's register 1 as the interpreter has it, and in its context's
+`Instance`, its `This` the uninitialized value, its `Function` the class
+(`ssa.CallSite`'s `Derived`); a class without a constructor of its own --
+`constructor(...args) { super(...args) }`, register code that starts with
+`super_forward` (`jitRegForwardsSuper`) -- with the code of the class it
+extends, its prototype checked to be still that class (`Parent`), as V8
+skips a default derived constructor. A class's constructor of either kind
+that reads `new.target` is constructed so as well: only ever constructed,
+its new.target is its context's, which the frames Go makes of its level
+and the stand-in of them read (`jitRegReadsNewTarget`). A derived
+constructor's register code has a this slot past its captured bindings
+(`ir.Program`'s `This`, the context's `This`), the binding: `this_bound`,
+`check_this_init` and a `derived_ret` of `undefined` -- what `ret_undef`
+makes it, `load_undef` moved to its register, which the lowering finds
+(`undefinedAt`) -- read it checked, and leave to Go, which throws the
+`ReferenceError`, where it is unbound; `derived_ret` of anything else is
+Go's. Its `super_call` (`ssa.CallSite`'s `Super`, the builder's
+`superCall`) is a window call of the parent the code learned it constructs
+with at its calls of Go and its exits (`jitRegSuperSeen`), checked to be
+the running function's prototype (`mir`'s `superGuards`, of the context's
+`Function`, as the stack form's): the parent's window made with the function
+whose code runs in register 0 and the instance in 1, its context given the
+instance -- a derived parent's to bind, its this unbound -- new.target and
+that function (`mir`'s `windowSuper`), on both backends. The this it binds
+-- the result, or the instance where the parent returns no object -- is
+`super_call`'s register's, register 1's and the this slot's, stored in the
+context's `This` with the barrier while the collector marks. Any other
+super() is a call of Go on the frame (`jitRegSuperMade`), which binds the
+frame's this and the context's: one of a class that may make an arrow before
+a super() (`jitRegArrowBeforeSuper`), whose binding the arrow shares, one of
+a parent of fields or that reads nothing native callers construct. Go gives
+a derived frame it enters the code with that context at each entry
+(`jitRegDerivedContext`), and binds the frame's this from it after
+(`jitBindThis`).
+
 **Polls.** A native call is no interpreter's, which spends the interrupt
 budget: the callee's code spends the back-edge budget at its start
 instead (`ssa.OpPoll`, see [Polls](#polls)), and calls Go when it runs
@@ -1669,7 +1724,13 @@ the cache by the function's key, kept by its template (`jitRegKeyOf`):
 
 - a call of Go a native callee makes (`jitRegGoCallNested`) is made on its
   level's frame, each level below it given its own for the call, as the
-  interpreter's frames are during a call;
+  interpreter's frames are during a call -- the levels and the frames on
+  stacks of the state's (`regNestLevels`), allocated by none; a derived
+  construction's level, and a super()'s parent's, as `runFD` makes a
+  construction's: its new.target, and for a derived constructor its
+  function, instance and this binding from its context (`jitDerivedFrame`);
+  a write a call of Go makes with no frame (`jitGoCallPlain`) by the
+  register instruction at the register pc (`jitRegPlainSet`);
 - a callee that leaves native code -- an exit, a call of Go that threw or
   found its code invalid -- has every native level finished by Go
   (`jitRegUnwind`): the innermost from where it left, as a run of a frame's
@@ -1682,7 +1743,17 @@ the cache by the function's key, kept by its template (`jitRegKeyOf`):
   run's own code goes on after the call the same way (`jitRegStretch`). A
   frame given to a callee by a call in tail position (`errRegRestart`,
   `errTailCall`) is finished as `regEnterW` finishes one, in the callee's
-  native code where it has some (`regRestartRun`).
+  native code where it has some (`regRestartRun`). A derived
+  construction's result is an object, or what it throws (`jitDerivedResult`);
+  a super() whose parent Go finished binds the frame's this to it, or to the
+  instance (`jitSuperBound`);
+- a closure a native callee makes is made on a stand-in of its level --
+  closure, function object, its receiver, or, in a derived constructor, the
+  binding its context holds, an arrow made before it is bound left to the
+  exit -- its captures by value given the level's cells, which hold the
+  values, never assigned once captured, as a copy would; one that reads
+  what its maker's frame has of its
+  own, new.target or the arguments (`ReadsMaker`), is left to the exit.
 
 A call of Go from the last context, and an unwinding from it, add contexts
 (`jitGrowContexts`), as the stack form's do: a recursion of native calls is
@@ -1692,10 +1763,11 @@ While Go runs beside them, every level's code is pinned (`jitRegEntry`'s
 `levels`): the cache neither drops it nor compiles the function again until
 the level is done, so that the code a level runs is its function's in the
 cache for as long as it runs; Go finds it by the level's closure
-(`closureCode`'s `jitReg`), the cache's key only where that is not code of
-this realm (`jitRegLevelAt`). The levels and frames of a call of Go deeper
-than the buffers on Go's stack come from slabs on the JIT's state, each
-call's past those of the calls under way below it. Both backends make such
+(`closureCode`'s `jitReg`) while the cache holds it (`jitRegEntry`'s
+`cached`), the cache's key otherwise or where that is not code of this
+realm (`jitRegLevelAt`). The levels and frames of a call of Go are on
+stacks of the JIT's state (`regNestLevels`), each call's past those of the
+calls under way below it. Both backends make such
 a call natively, the same way (`mir`'s `call`, `windowSetup`).
 
 A callee that leaves native code on more than one in `jitUnwindShare` of

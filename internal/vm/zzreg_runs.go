@@ -320,6 +320,10 @@ func (r *Runtime) regBackEdge(st *regState, pc, target int) int {
 	st.kept.pc = pc + 1
 	r.backEdges = backEdgeCheckInterval
 	f.pc = c.src[pc] + 1
+	// The calls' budget goes on as it was (checkInterruptPoll), which
+	// samples the calls (rhCallW, regEnterW): reset at each back edge's
+	// check, it had never run out in a frame of a loop of calls, nor were
+	// its calls sampled.
 	if err := r.checkInterruptPoll(); err != nil {
 		return st.fail(err)
 	}

@@ -544,3 +544,173 @@ func TestJITRegTailSelf(t *testing.T) {
 		})
 	}
 }
+
+// regDerivedSrc constructs derived classes from register code: super() of
+// arguments, through two levels and past a class without a constructor of
+// its own, fields in a base and a derived class, a derived constructor
+// returning an object and returning undefined, new.target, an arrow made
+// after super() and one before it, a parent whose code leaves native code
+// -- a write its property sites never met, a throw -- and the
+// ReferenceErrors and the TypeError a derived construction throws: this
+// read before super(), a second super(), a number returned. megas' parent
+// writes its fields at sites the subclasses' layouts make megamorphic,
+// which Go writes from a native callee's code with no frame
+// (jitGoCallPlain): read at a register pc as the stack form's, the write
+// had gone to another property -- Bin's direction to v1.
+const regDerivedSrc = `
+"use strict";
+class Base {
+	constructor(x, y) { this.x = x; this.y = y }
+	sum() { return this.x + this.y }
+}
+class Mid extends Base { constructor(x, y, z) { super(x, y); this.z = z } }
+class Leaf extends Mid {
+	constructor(x) { super(x, x + 1, x + 2); this.w = new.target === Leaf ? 1 : 2 }
+}
+class Plain extends Base {}
+class Deep extends Plain { constructor(a) { super(a, -a); this.d = 1 } }
+class Twig extends Deep {}
+class FieldBase { f = 7; constructor(v) { this.v = v } }
+class FieldDerived extends FieldBase { g = 3; constructor(v) { super(v); this.h = this.f + this.g } }
+class Other extends Base { constructor(x) { super(x, 0); return { other: x } } }
+class Undef extends Base { constructor(x) { super(x, 1); return undefined } }
+class Early extends Base { constructor(x) { if (x < 0) this.bad = 1; super(x, 2) } }
+class Twice extends Base { constructor(x) { super(x, 3); if (x === 13) super(x, 4) } }
+class Num extends Base { constructor(x) { super(x, 0); if (x === 5) return 1 } }
+class NT extends Base { constructor(x) { super(x, 5); this.nt = new.target.name } }
+class NTBase { constructor() { this.t = new.target.name } }
+class NTKid extends NTBase {}
+class Arrowed extends Base { constructor(x) { super(x, 6); this.get = () => this.x } }
+class Shifty {
+	constructor(v) {
+		this.v = v;
+		if (typeof v === "string") this.s = v.length;
+		if (v === 999) throw new RangeError("v " + v);
+	}
+}
+class ShiftyKid extends Shifty { constructor(v) { super(v); this.k = 1 } }
+class ArrowFirst extends Base { constructor(x) { const f = () => this.x; super(x, 7); this.f = f() } }
+class Abs { constructor(s) { this.strength = s } }
+class Bin extends Abs { constructor(a, b, s) { super(s); this.v1 = a; this.v2 = b; this.direction = null } }
+class K1 extends Bin { constructor(a, b) { super(a, b, 1); this.k1 = 1 } }
+class K2 extends Bin { constructor(a, b) { super(a, b, 2); this.k2 = 1 } }
+class K3 extends Bin { constructor(a, b) { super(a, b, 3); this.k3 = 1 } }
+class K4 extends Bin { constructor(a, b) { super(a, b, 4); this.k4 = 1 } }
+class K5 extends Bin { constructor(a, b, c, d) { super(a, b, 5); this.c = c; this.d = d } }
+class K6 extends Bin { constructor(a, b) { super(a, b, 6); this.k6 = 1 } }
+function shown(o) { return Object.keys(o).join() + ":" + (o.v1 === null) }
+function megas(n) {
+	var out = "";
+	for (var i = 0; i < n; i++) {
+		var a = { i }, b = { i };
+		var all = [new K1(a, b), new K2(a, b), new K3(a, b), new K4(a, b), new K5(a, b, 1, 2), new K6(a, b)];
+		if (i % 400 === 0) out += all.map(shown).join("|") + ";";
+	}
+	return out;
+}
+function natives(n) {
+	var acc = 0;
+	for (var i = 0; i < n; i++) {
+		var l = new Leaf(i);
+		acc += l.sum() + l.z + l.w;
+		acc += new Plain(i, 1).sum();
+		var d = new Deep(i);
+		acc += d.sum() + d.d + new Twig(i).d;
+		acc += new Undef(i).sum();
+		acc += new ShiftyKid(i).k;
+	}
+	return acc;
+}
+function classes(n) {
+	var acc = 0;
+	for (var i = 0; i < n; i++) {
+		var fd = new FieldDerived(i);
+		acc += fd.h + fd.v + fd.g;
+		acc += new Other(i).other;
+		acc += new NT(i).nt.length + new NTKid().t.length;
+		acc += new Arrowed(i).get() + new ArrowFirst(i).f;
+		var s = new ShiftyKid(i % 50 === 49 ? "str" + i : i);
+		acc += s.k + (s.s || 0);
+	}
+	return acc;
+}
+function checks(n) {
+	var out = [];
+	for (var i = 0; i < n; i++) {
+		if (i % 500 === 0) {
+			try { new Early(-1) } catch (e) { out.push(e.constructor.name) }
+			try { new Twice(13) } catch (e) { out.push(e.constructor.name) }
+			try { new Num(5) } catch (e) { out.push(e.constructor.name) }
+			try { new ShiftyKid(999) } catch (e) { out.push(e.constructor.name + " " + e.message) }
+		}
+		new Early(i).sum();
+		new Twice(i).sum();
+		new Num(i + 6).sum();
+	}
+	return out.join();
+}
+`
+
+// TestJITRegDerivedConstructions runs regDerivedSrc's functions in a
+// runtime whose register code runs natively and in one with no JIT, and
+// compares their answers: derived classes' constructions are native calls,
+// their super()s native calls of the parent with the instance as its
+// receiver, as the stack form's code makes them (ssa.CallSite's Derived and
+// Super) -- where Go had made every construction of a derived class -- and
+// what leaves native code inside them, a parent's exit, a throw, a second
+// super(), Go finishes from the frames it makes of their levels. natives'
+// constructions and super()s are native once learned, the collector idle
+// and marking.
+func TestJITRegDerivedConstructions(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			RecordJITCompiles(true)
+			defer RecordJITCompiles(false)
+			rts := regNativeRuntimes(t, regDerivedSrc)
+			r := rts[0]
+			r.SetJITWarmUp(1, 1)
+			r.jitState().reporting = true
+			goMade := func() (n uint64) {
+				st := r.RegNativeStats()
+				for k, v := range st.GoCallOps {
+					if strings.HasPrefix(k, "new_w") || strings.HasPrefix(k, "super_call") {
+						n += v
+					}
+				}
+				return n + st.HostOps["new_w"] + st.HostOps["super_call"] + st.HostOps["derived_ret"]
+			}
+			var made uint64
+			for k := range 8 {
+				for _, name := range []string{"natives", "classes", "checks", "megas"} {
+					before := goMade()
+					var got [2]string
+					for i, r := range rts {
+						fn, _ := r.GetProp(Obj(r.Global()), r.Intern(name))
+						v, err := r.Call(fn, Undefined, []Value{Float(2000)})
+						got[i] = regNativeShow(r, v, err)
+					}
+					if got[0] != got[1] {
+						t.Fatalf("%s: with the JIT %q, without %q", name, got[0], got[1])
+					}
+					if k >= 4 && name == "natives" {
+						made += goMade() - before
+					}
+				}
+			}
+			// Of 4 runs of 2000 iterations' 7 constructions each, a few
+			// at most, as natives' code is compiled again.
+			if made > 4*20 {
+				t.Errorf("%d constructions and super()s Go made in 4 runs of natives", made)
+			}
+			if fns, _, _ := regCompileARM64(t, r); fns == 0 {
+				t.Error("nothing compiled for arm64")
+			}
+		})
+	}
+}

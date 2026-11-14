@@ -38,6 +38,10 @@ func (r *Runtime) jitRegFrameRun(ctx *abi.Context) (run jitRegRun, level bool, o
 	switch ctx.Live {
 	case 0:
 		if idx < len(s.regRuns) && s.regRuns[idx].f != nil {
+			// A derived constructor's frame's binding, which a super()
+			// native code made bound in the context alone, as a closure
+			// made on it shares it (jitBindThis).
+			jitBindThis(s.regRuns[idx].f, ctx)
 			return s.regRuns[idx], false, true
 		}
 	case abi.LiveCall:
@@ -56,6 +60,11 @@ func (r *Runtime) jitRegFrameRun(ctx *abi.Context) (run jitRegRun, level bool, o
 		f.cl, f.base, f.this, f.newTarget = l.cl, l.wb+int(l.c.locals), r.stack[l.wb+1], Undefined
 		if v := r.stack[l.wb]; v.IsObject() {
 			f.callee = v.Object()
+		}
+		if isClassConstructorKind(l.cl.fn.Kind) && ctx.NewTarget != 0 {
+			// A class's constructor's, only ever constructed: its
+			// new.target, which its construction or super() wrote.
+			f.newTarget = Obj(*(**Object)(unsafe.Pointer(&ctx.NewTarget)))
 		}
 		return jitRegRun{f: f, c: l.c, e: l.e, wb: l.wb}, true, true
 	}
@@ -296,9 +305,26 @@ func (r *Runtime) jitRegCellsClosure(ctx *abi.Context, f *frame, c *regCode, e *
 		return false
 	}
 	// What an arrow captures of this is the window's register 1, as
-	// regClosure has it.
+	// regClosure has it -- but on a native callee's level of a derived
+	// constructor, whose stand-in frame has no binding to share, its
+	// context's This, which a super() bound, an arrow made before one, or
+	// one that reads what its maker's frame has of its own (new.target,
+	// super), left to the frame Go makes of the level at the exit, as the
+	// stack form's (jitCalleeMakes).
 	f.this = r.stack[wb+1]
+	if level && f.cl.fn.Kind == bytecode.KindDerivedConstructor && t.fn.Kind == bytecode.KindArrow {
+		this := *(*Value)(unsafe.Pointer(&ctx.This))
+		if this.IsUninitialized() || jitNeedsMaker(tmpl) {
+			return false
+		}
+		f.this = this
+	}
 	caps := c.rc.Caps[i]
+	if level && jitNeedsMaker(tmpl) {
+		// What it reads of its maker's frame -- new.target, the arguments
+		// -- the stand-in has not: left to the frame Go makes at the exit.
+		return false
+	}
 	if t.fn.CapturesByValue && !level {
 		keepClosure(ctx, Obj(regMadeClosure(newClosureByValue[struct{}](r, f, t, caps, wb))))
 		return true
