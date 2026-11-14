@@ -152,6 +152,10 @@ var (
 
 	offRCCode      int32
 	offRCSrc       int32
+	offRCAux       int32
+	offSymAtom     int32
+	offSymAtoms    int32
+	offRtAtoms     int32
 	offRCNumRegs   int32
 	offRCParams    int32
 	offRCInits     int32
@@ -329,6 +333,10 @@ func loadOffsets() {
 
 	offRCCode = off("regCode.code")
 	offRCSrc = off("regCode.src")
+	offRCAux = off("regCode.aux")
+	offSymAtom = off("Symbol.atom")
+	offSymAtoms = off("Symbol.atoms")
+	offRtAtoms = rtRel(off("Runtime.atoms"))
 	offRCNumRegs = off("regCode.numRegs")
 	offRCParams = off("regCode.params")
 	offRCInits = off("regCode.inits")

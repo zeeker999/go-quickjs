@@ -1085,6 +1085,70 @@ func nativeEmit(v *variant) (*block, error) {
 		g.element(RCX, RSI, 0, elemMask, g.exit)
 		elemAdd()
 	})
+	// A private member read or written by its cache site (Aux's high 16
+	// bits), as regGetPrivate and regSetPrivate read and write it: an
+	// object of the shape the site remembers, its key there the private
+	// name in R[C], a symbol interned in the runtime's atoms. privSlot
+	// puts the slot's address in RDX, the object in RSI; anything else
+	// exits.
+	privSlot := func() {
+		a.Load(R8, RDI, ncRC)
+		a.Load(R8, R8, offRCAux)
+		a.Op(Test, R8, R8, true)
+		a.Jcc(CondE, g.exit)
+		a.MovRR(RCX, RBX)
+		a.Load(R9, RDI, ncCodeBase)
+		a.Op(Sub, RCX, R9, true)
+		a.ShiftImm(Shr, RCX, 1, true)
+		a.Op(Add, R8, RCX, true)
+		a.LoadU32(RCX, R8, 0)
+		a.ShiftImm(Shr, RCX, 16, false)
+		a.Op(Test, RCX, RCX, false)
+		a.Jcc(CondE, g.exit)
+		a.MovImm(R8, uint64(size("propCache")))
+		a.Imul(RCX, R8)
+		a.Op(Add, RCX, R15, true)
+		g.ownSlot(RDX, RSI)
+		g.decC(R8)
+		a.LoadIdx(R9, R12, R8, 1, 0)
+		a.MovImm(RAX, tagBase|uint64(KindSymbol))
+		a.Op(Cmp, R9, RAX, true)
+		a.Jcc(CondNE, g.exit)
+		a.LoadIdx(R9, R12, R8, 1, 8)
+		a.Load(R8, R9, offSymAtoms)
+		a.Load(RAX, RDI, ncRT)
+		a.CmpMem(R8, RAX, offRtAtoms, true)
+		a.Jcc(CondNE, g.exit)
+		a.LoadU32(R8, R9, offSymAtom)
+		a.Load(R9, RSI, off("Object.shape"))
+		a.Load(R9, R9, off("shape.keys"))
+		a.LoadS32(RAX, RCX, off("propCache.idx"))
+		a.LeaIdx(R9, R9, RAX, uint8(size("propKey")), 0)
+		a.LoadU32(RAX, R9, off("propKey.key"))
+		a.Op(Cmp, R8, RAX, false)
+		a.Jcc(CondNE, g.exit)
+		a.Load(RAX, RBX, 0)
+	}
+	h(bytecode.RGetPrivate, func() {
+		g.decB(RSI)
+		g.object(RSI, RSI)
+		privSlot()
+		a.Load(R9, RDX, 0)
+		a.Load(R8, RDX, 8)
+		g.decA(RDX)
+		a.LeaIdx(RAX, R12, RDX, 1, 0)
+		g.storeValue()
+	})
+	h(bytecode.RSetPrivate, func() {
+		g.decA(RSI)
+		g.object(RSI, RSI)
+		privSlot()
+		g.decB(R8)
+		a.LoadIdx(R9, R12, R8, 1, 0)
+		a.LoadIdx(R8, R12, R8, 1, 8)
+		a.MovRR(RAX, RDX)
+		g.storeValue()
+	})
 
 	for n, l := range g.exits {
 		if n == 0 {

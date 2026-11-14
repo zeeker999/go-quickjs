@@ -41,6 +41,7 @@ var handlerOps = []bytecode.ROp{
 	bytecode.RPostDec, bytecode.RIterNext, bytecode.RCallWT, bytecode.RCallMWT,
 	bytecode.RCharCodeAt,
 	bytecode.RAddIndex, bytecode.RAddIndexK, bytecode.RAddIndexI,
+	bytecode.RGetPrivate, bytecode.RSetPrivate,
 }
 
 // handlerOrder checks that order, the operations an emitter laid out

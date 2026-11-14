@@ -1029,3 +1029,61 @@ func TestRegNativeAddIndex(t *testing.T) {
 		}
 	}
 }
+
+// nativePrivateSrc reads and writes private members every way their
+// native handlers meet them: fields of one class read and written in a
+// loop, of instances of two classes with members of one name, of
+// subclasses, static members, private methods and accessors, which no
+// site caches, a read of a member the object does not have and of a
+// non-object, a write of a method, and a field read before it is
+// defined.
+const nativePrivateSrc = `
+	var out = [];
+	class A { #n = 0; #m = "a"; add(k) { for (var i = 0; i < k; i++) this.#n = (this.#n + i) | 0; return this.#n + this.#m }
+		static read(o) { return o.#n } }
+	class B { #n = 5; add(k) { for (var i = 0; i < k; i++) this.#n += 2; return this.#n } }
+	class C extends A { #c = 1; get() { return this.#c + A.read(this) } }
+	class S { static #s = 3; static bump() { S.#s++; return S.#s } }
+	class M { #m() { return 7 } get #g() { return this.#x * 2 } set #g(v) { this.#x = v } #x = 1;
+		run() { this.#g = this.#m(); return this.#g } }
+	class E { #e = 1; static read(o) { return o.#e } static write(o) { o.#e = 2 } static meth(o) { o.#k = 1 } #k() {} }
+	class T { #a = this.#b; #b = 1; }
+	for (var round = 0; round < 3; round++) {
+		var s = [];
+		var a = new A(), b = new B(), c = new C();
+		s.push(a.add(50), b.add(30), c.add(10), c.get(), S.bump(), new M().run());
+		for (var i = 0; i < 4; i++) s.push(A.read(i & 1 ? a : c));
+		try { E.read({}) } catch (e) { s.push(e.constructor.name) }
+		try { E.read(1) } catch (e) { s.push(e.constructor.name) }
+		try { E.write(Object.freeze(new E())); s.push("frozen ok") } catch (e) { s.push(e.constructor.name) }
+		try { E.meth(new E()) } catch (e) { s.push(e.constructor.name) }
+		try { new T() } catch (e) { s.push(e.constructor.name) }
+		out.push(s.join(","));
+	}
+	out.join("|")`
+
+// Private members are the native code's own where a site's cache answers
+// them: the table's answers, marking and not, and a loop of a field's
+// reads and writes that exits to Go only to fill the caches.
+func TestRegNativePrivate(t *testing.T) {
+	want := nativeRunSrc(t, nativePrivateSrc, false)
+	for _, marking := range []bool{false, true} {
+		nativeMarking(t, marking)
+		if got := nativeRunSrc(t, nativePrivateSrc, true); got != want {
+			t.Errorf("native (marking %v):\n%s\nwant\n%s", marking, got, want)
+		}
+	}
+	nativeCounting(t)
+	before := nativeExitOps()
+	if got := nativeRunSrc(t, `
+		class P { #n = 0; add(k) { for (var i = 0; i < k; i++) this.#n = (this.#n + i) | 0; return this.#n } }
+		String(new P().add(1000))`, true); got != "499500" {
+		t.Fatalf("got %s, want 499500", got)
+	}
+	after := nativeExitOps()
+	for _, op := range []bytecode.ROp{bytecode.RGetPrivate, bytecode.RSetPrivate} {
+		if n := after[op] - before[op]; n > 2 {
+			t.Errorf("%v exited to Go %d times in 1,000 turns, want 2 at most", op, n)
+		}
+	}
+}

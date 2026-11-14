@@ -45,6 +45,8 @@ func NativeLayout() (offsets, sizes map[string]uintptr, consts map[string]uint64
 		reflect.TypeFor[typedArrayData](),
 		reflect.TypeFor[iterObject](),
 		reflect.TypeFor[iterState](),
+		reflect.TypeFor[Symbol](),
+		reflect.TypeFor[propKey](),
 	} {
 		sizes[t.Name()] = t.Size()
 		depth := map[string]int{}

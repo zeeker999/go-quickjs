@@ -93,6 +93,10 @@ type regCode struct {
 	// (LocalReg), which a resumption makes again from the generator; 0
 	// otherwise.
 	genFrom int32
+	// aux is the first of rc.Aux, read with no bounds check where the
+	// native code reads an instruction's Aux (get_private's cache site),
+	// or nil where the code has none.
+	aux unsafe.Pointer
 }
 
 // runReg runs frame f as register code c, from instruction start, and
