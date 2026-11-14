@@ -132,6 +132,8 @@ func init() {
 	for _, op := range nativeSlowOnMiss {
 		nativeExitTable[op] = regSlowTable[op]
 	}
+	nativeExitTable[bytecode.RCallW] = nativeCallMiss
+	nativeExitTable[bytecode.RCallMW] = nativeCallMiss
 }
 
 // nativeRun runs frame f as register code c, from instruction start, by
@@ -685,6 +687,40 @@ var nativeBuiltinFn func(*[1 << 16]Value, bytecode.RInstr, int, *regState) int
 // no code.
 func nativeIterRes(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeCtx) {
 	regs[w.B()] = Obj(ctx.st.r.iterResult(regs[w.B()], pc != 0))
+}
+
+// nativeCallMiss is call_w's and call_method_w's exit: where the site's
+// cache holds another callee than the window's, a closure the call handler
+// enters (regCallKind), the cache is made the new callee's and the call
+// made again, which the code then enters itself, rather than Go entering
+// it in a code entry of its own (regCallMiss) -- a site that calls several
+// functions in turn, an array of them or a method of several layouts --
+// where the handler enters the callee with a frame.
+// The cache holds the callee the second time, so that a call the handler
+// leaves to Go anyway is rhCallW's then. Anything else is rhCallW's.
+func nativeCallMiss(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	r, f, c := st.r, st.f, st.c
+	win := regWindow(r.stack, st.wb+int(w.A()))
+	calls := f.cl.regCalls
+	if uint(w.C()) >= uint(len(calls)) || !regIsObject(&win[0]) {
+		return rhCallW(regs, w, pc, st)
+	}
+	e, o := &calls[w.C()], (*Object)(win[0].ref)
+	method := w.Op() == bytecode.RCallMW
+	if e.callee == o || e.kind == regCallGen || e.kind == regCallMarked || method && pc < len(c.rc.Marks) && c.rc.Marks[pc] != 0 {
+		return rhCallW(regs, w, pc, st)
+	}
+	if fd := o.fn(); fd != nil && fd.closure != nil && !fd.bound {
+		// Only a callee the handler enters with a frame: a leaf rhCallW's
+		// miss answers without one (pureCall, leafCall), and a frame that
+		// keeps its arguments is entered by regEnterW, each cheaper than
+		// the exit the call would come back to.
+		if cl, rc, kind, this, enter := r.regCallKind(fd, method); enter && kind != 0 && rc.leaf == regLeafNone && !rc.args && (kind != regCallObjThis || win[1].IsObject()) {
+			regCacheCallee(e, o, cl, rc, this, kind)
+			return pc
+		}
+	}
+	return rhCallW(regs, w, pc, st)
 }
 
 // nativeIterResFn is nativeIterRes's func value, set by init.

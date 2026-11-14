@@ -485,7 +485,8 @@ var nativeCallRegs = map[string][5]string{
 // path does calls the operation's slow function at once
 // (nativeExitTable), not the Go handler, which would only give back ^pc:
 // every operation of nativeSlowOnMiss has a native handler, and its
-// entry is its slow function; the others' are their Go handlers. The
+// entry is its slow function; call_w's and call_method_w's is their miss
+// path (nativeCallMiss); the others' are their Go handlers. The
 // answers of such misses -- strings, BigInts, objects, NaN and numbers
 // past int64 to the arithmetic and the bitwise operators, into registers
 // that held pointers -- are the table's, natively, with the collector
@@ -499,12 +500,15 @@ func TestRegNativeExitSlow(t *testing.T) {
 		}
 	}
 	for op := range nativeExitTable {
-		want := regTable[op]
+		want, what := regTable[op], "Go handler"
 		if slow[bytecode.ROp(op)] {
-			want = regSlowTable[op]
+			want, what = regSlowTable[op], "slow function"
+		}
+		if op := bytecode.ROp(op); op == bytecode.RCallW || op == bytecode.RCallMW {
+			want, what = nativeCallMiss, "miss path, nativeCallMiss"
 		}
 		if reflect.ValueOf(nativeExitTable[op]).Pointer() != reflect.ValueOf(want).Pointer() {
-			t.Errorf("%s: the exit table's entry is not its %s", bytecode.ROp(op), map[bool]string{true: "slow function", false: "Go handler"}[slow[bytecode.ROp(op)]])
+			t.Errorf("%s: the exit table's entry is not its %s", bytecode.ROp(op), what)
 		}
 	}
 	src := `
@@ -994,4 +998,36 @@ func TestRegDirectPureBodies(t *testing.T) {
 		var g = { get v() { return 1 } }, longp = (x) => (x.v < 0 ? -1 : x.v > 0 ? 1 : 0)
 		out.push([g, { v: -2 }, { v: 0 }].map(longp).join())
 		out.join("\n")`, "")
+}
+
+// TestRegNativePolyCalls runs call sites that call several functions in
+// turn: the exit makes the site's cache the new callee's and the call is
+// made again natively (nativeCallMiss) where the handler enters it with a
+// frame -- plain functions, methods of several layouts, arrows with their
+// this, sloppy methods of a primitive receiver -- and Go makes the rest:
+// leaves, functions that keep their arguments, generators, bound
+// functions, built-ins and class constructors, which throw.
+func TestRegNativePolyCalls(t *testing.T) {
+	nativeCheck(t, `
+		var out = []
+		var fs = [
+			function (j) { return { x: j, a: 1 } }, function (j) { var o = { x: j }; o.b = 2; return o },
+			(j) => ({ x: this === undefined ? -j : j }), function (j) { return arguments.length + j },
+			function* (j) { yield j }, function (j) { return j }, Math.abs,
+			function (j) { "use strict"; return { x: typeof this } }.bind(null)
+		]
+		for (var i = 0; i < 64; i++) {
+			var r = fs[i & 7](i)
+			out.push(typeof r === "object" && r !== null ? (r.x === undefined ? r.next().value : r.x) : r)
+		}
+		var ms = [{ m() { return this.k + 1 }, k: 1 }, { k: "s", m() { return this.k + 2 } }, { m: function () { return typeof this } }]
+		for (var i = 0; i < 30; i++) out.push(ms[i % 3].m())
+		String.prototype.sm = function () { return typeof this }
+		Number.prototype.sm = function () { return this + 1 }
+		var prims = ["a", 5]
+		for (var i = 0; i < 10; i++) out.push(prims[i & 1].sm())
+		class C {}
+		var cs = [function () { return 1 }, C]
+		for (var i = 0; i < 4; i++) { try { out.push(cs[i & 1]()) } catch (e) { out.push(e.constructor.name) } }
+		out.join()`, "")
 }
