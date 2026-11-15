@@ -378,7 +378,7 @@ func (g *armGen) enter(mode int, jitCall Label) {
 	a.Store(rCtx, scr(sRC), r8)
 	// The arguments where they lie: none past the parameters it keeps,
 	// and no new.target.
-	if mode == enterSuper || mode == enterThrough {
+	if mode == enterSuper || mode == enterThrough || mode == enterApply {
 		a.Load(rD, rCtx, scr(sArgc))
 	} else {
 		a.Ubfx(rD, rW, 8, 8)
@@ -391,7 +391,7 @@ func (g *armGen) enter(mode int, jitCall Label) {
 	a.Cmp(rD, r9, true)
 	a.BCond(HI, g.ex(6))
 	a.Bind(kept)
-	if mode == enterCall || mode == enterThrough {
+	if mode == enterCall || mode == enterThrough || mode == enterApply {
 		a.LoadU8(r9, r8, offRCNewTarget)
 		a.Cbnz(r9, g.ex(7), false)
 	}
@@ -589,8 +589,9 @@ func (g *armGen) enter(mode int, jitCall Label) {
 	a.Load(rC, rCtx, scr(sSaved))
 	a.Store(rS, recSaved, rC)
 	a.Load(rW, rIP, 0)
-	if mode == enterSuper {
-		// super()'s R[A], which its return writes (superRet).
+	if mode == enterSuper || mode == enterApply {
+		// super()'s R[A], which its return writes (superRet), and
+		// apply_args's.
 		a.Ubfx(rC, rW, 16, 16)
 	} else {
 		a.Ubfx(rC, rW, 32, 16)
@@ -718,6 +719,37 @@ func (g *armGen) through() {
 	a.Bind(miss)
 	g.storeImm(rCtx, ncMiss, 1)
 	a.B(g.exit)
+}
+
+// applyW is apply_args, as amd64's: nativeApply called through callH
+// with no exit, then the target entered.
+func (g *armGen) applyW() {
+	a := g.a
+	after := a.NewLabel()
+	a.Store(rCtx, ncIP, rIP)
+	a.Store(rCtx, ncBudget, rBud)
+	a.Adr(r8, after)
+	a.Store(rCtx, ncAfter, r8)
+	a.MovRR(rC, rW)
+	a.Load(rD, rCtx, ncCodeBase)
+	a.Op(Sub, rD, rIP, rD, true)
+	a.ShiftImm(Lsr, rD, rD, 3, true)
+	a.MovRR(rS, rCtx)
+	a.MovRR(rW, rRegs)
+	a.Load(rFn, rCtx, ncApplyFn)
+	a.Load(rJ, rCtx, ncCallH)
+	a.Br(rJ)
+	a.Bind(after)
+	g.reload()
+	a.Cbz(rW, g.exit, true)
+	a.Load(rW, rIP, 0)
+	a.Load(rC, rCtx, scr(sE))
+	a.Load(rS, rCtx, scr(sWin))
+	a.Load(r8, rC, offERC)
+	a.LoadU8(rD, r8, offRCArgs)
+	a.Store(rCtx, scr(sEnt), rD)
+	a.MovImm(r9, uint64(regCallEnter))
+	g.enter(enterApply, g.exit)
 }
 
 // superW is super_call and super_forward, as amd64's: nativeSuper called

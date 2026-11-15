@@ -500,7 +500,7 @@ func (g *nativeGen) enter(mode int, jitCall Label) {
 	a.Store(RDI, scr(sRC), R8)
 	// The arguments where they lie: none past the parameters it keeps,
 	// and no new.target.
-	if mode == enterSuper || mode == enterThrough {
+	if mode == enterSuper || mode == enterThrough || mode == enterApply {
 		a.Load(RDX, RDI, scr(sArgc))
 	} else {
 		a.MovRR(RDX, RAX)
@@ -515,7 +515,7 @@ func (g *nativeGen) enter(mode int, jitCall Label) {
 	a.Op(Cmp, RDX, R9, true)
 	a.Jcc(CondA, g.ex(6))
 	a.Bind(kept)
-	if mode == enterCall || mode == enterThrough {
+	if mode == enterCall || mode == enterThrough || mode == enterApply {
 		a.LoadU8(R9, R8, offRCNewTarget)
 		a.Op(Test, R9, R9, false)
 		a.Jcc(CondNE, g.ex(7))
@@ -725,8 +725,9 @@ func (g *nativeGen) enter(mode int, jitCall Label) {
 	a.Load(RCX, RDI, scr(sSaved))
 	a.Store(RSI, recSaved, RCX)
 	a.Load(RAX, RBX, 0)
-	if mode == enterSuper {
-		// super()'s R[A], which its return writes (superRet).
+	if mode == enterSuper || mode == enterApply {
+		// super()'s R[A], which its return writes (superRet), and
+		// apply_args's.
 		g.decA(RCX)
 	} else {
 		g.decB(RCX)
@@ -823,7 +824,47 @@ const (
 	// enterThrough is a call's of Function.prototype.call's callee
 	// (through), its argument count in the scratch's sArgc.
 	enterThrough
+	// enterApply is apply_args's of its target (applyW), its argument
+	// count in the scratch's sArgc, its value R[A].
+	enterApply
 )
+
+// applyW is apply_args, f.apply(this, arguments) by the realm's
+// Function.prototype.apply: nativeApply, called through callH with no
+// exit, makes f's window at the stack's top and its entry, which is
+// entered as call_w enters a callee (enter), its value R[A]. Anything
+// nativeApply leaves to Go, and a callee whose calls go to the JIT:
+// rsApplyArgs's, by an exit before anything is written but the stack past
+// the frame's top.
+func (g *nativeGen) applyW() {
+	a := g.a
+	after := a.NewLabel()
+	a.Store(RDI, ncIP, RBX)
+	a.Store(RDI, ncBudget, R11)
+	a.LeaLabel(R8, after)
+	a.Store(RDI, ncAfter, R8)
+	a.MovRR(RBX, RAX)
+	a.Load(RCX, RDI, ncIP)
+	a.Load(RDX, RDI, ncCodeBase)
+	a.Op(Sub, RCX, RDX, true)
+	a.ShiftImm(Shr, RCX, 3, true)
+	a.MovRR(RSI, RDI)
+	a.MovRR(RAX, R12)
+	a.Load(RDX, RDI, ncApplyFn)
+	a.JmpMem(RDI, ncCallH)
+	a.Bind(after)
+	g.reload()
+	a.Op(Test, RAX, RAX, true)
+	a.Jcc(CondE, g.exit)
+	a.Load(RAX, RBX, 0)
+	a.Load(RCX, RDI, scr(sE))
+	a.Load(RSI, RDI, scr(sWin))
+	a.Load(R8, RCX, offERC)
+	a.LoadU8(RDX, R8, offRCArgs)
+	a.Store(RDI, scr(sEnt), RDX)
+	a.MovImm(R9, uint64(regCallEnter))
+	g.enter(enterApply, g.exit)
+}
 
 // superW is super_call and super_forward of a derived class's
 // constructor: nativeSuper, called through callH with no exit, makes the

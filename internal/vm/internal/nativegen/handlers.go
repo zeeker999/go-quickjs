@@ -63,6 +63,8 @@ var handlerOps = []bytecode.ROp{
 	bytecode.RSuperCall, bytecode.RSuperForward,
 	// A derived class's constructor's return value (derivedRet).
 	bytecode.RDerivedRet,
+	// f.apply(this, arguments) entering f (applyW).
+	bytecode.RApplyArgs,
 }
 
 // handlerOrder checks that order, the operations an emitter laid out

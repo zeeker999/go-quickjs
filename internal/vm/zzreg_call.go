@@ -1066,7 +1066,18 @@ func (r *Runtime) regConstruct(calls []regCallCache, site uint16, callee Value, 
 	cl := fd.closure
 	if cl.fn.Leaf == bytecode.LeafForward {
 		// What hands its arguments on, the construction answers without a
-		// frame.
+		// frame (leafForward); the native handler enters it with one,
+		// whose apply_args it makes too, once its objects' room is
+		// settled.
+		if uint(site) < uint(len(calls)) && fd.fieldInit() == nil {
+			if p := o.getOwnVisible(atomPrototype); p.ok() && p.flags()&propAccessor == 0 && p.value().IsObject() {
+				if root := r.shapes.ctorRoot(fd, p.value().Object()); root == nil || root.tracked() {
+					if ecl, rc, ok := r.regCtorEntered(o, fd); ok {
+						calls[site] = regCallCache{callee: o, cl: ecl, rc: rc, kind: regCallConstruct}
+					}
+				}
+			}
+		}
 		return r.construct(callee, args)
 	}
 	rc := cl.reg
@@ -1142,8 +1153,7 @@ func (r *Runtime) regCtorBase(o *Object, fd *funcData) bool {
 // a base one (regCtorBase) or a derived class's, with no with or eval
 // scope, of the form's own layout, neither suspending nor with a direct
 // eval, that gives its objects no fields of its own (no instance
-// initializer to run) and is no forwarder, which the construction answers
-// without a frame. ok is false for anything else.
+// initializer to run). ok is false for anything else.
 func (r *Runtime) regCtorEntered(o *Object, fd *funcData) (cl *closure, rc *regCode, ok bool) {
 	if fd.closure == nil || fd.fieldInit() != nil {
 		return nil, nil, false
@@ -1161,9 +1171,6 @@ func (r *Runtime) regCtorEntered(o *Object, fd *funcData) (cl *closure, rc *regC
 		return nil, nil, false
 	}
 	cl = fd.closure
-	if cl.fn.Leaf == bytecode.LeafForward {
-		return nil, nil, false
-	}
 	if rc = cl.reg; rc == nil {
 		rc = r.regOf(cl)
 	}

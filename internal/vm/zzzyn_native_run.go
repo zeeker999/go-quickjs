@@ -138,6 +138,7 @@ func init() {
 	nativeJITCallFn = nativeJITCall
 	nativeNewFn = nativeNew
 	nativeSuperFn = nativeSuper
+	nativeApplyFn = nativeApply
 	for _, op := range nativeSlowOnMiss {
 		nativeExitTable[op] = regSlowTable[op]
 	}
@@ -422,6 +423,7 @@ func (r *Runtime) newNativeCtx(st *regState) *nativeCtx {
 	ctx.hasInst = unsafe.Offsetof(Realm{}.hasInstanceFn)
 	ctx.superFn = *(*uintptr)(unsafe.Pointer(&nativeSuperFn))
 	ctx.callFn = unsafe.Offsetof(Realm{}.callFn)
+	ctx.applyFn = *(*uintptr)(unsafe.Pointer(&nativeApplyFn))
 	ctx.grow()
 	st.native = ctx
 	return ctx
@@ -967,7 +969,7 @@ func nativeNew(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeCtx) 
 		ctx.scratch[sThisRef] = uint64(uintptr(unsafe.Pointer(ctx.thisRef)))
 		return 1
 	}
-	if leaf := e.cl.fn.Leaf; leaf != bytecode.LeafNone && leaf != bytecode.LeafPure {
+	if leaf := e.cl.fn.Leaf; leaf != bytecode.LeafNone && leaf != bytecode.LeafPure && leaf != bytecode.LeafForward {
 		if _, done := r.leafCall(e.cl, obj, regs[a+2:a+2+int(w.X())]); !done {
 			return 0
 		}
@@ -1030,6 +1032,7 @@ func nativeSuper(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeCtx
 	if wb+2+len(args) > len(r.stack) {
 		return 0
 	}
+	regNextFrameClear(r)
 	win := r.stack[wb : wb+2+len(args) : wb+2+len(args)]
 	win[0], win[1] = Obj(parent), f.this
 	copy(win[2:], args)
@@ -1045,6 +1048,85 @@ func nativeSuper(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeCtx
 	ctx.scratch[sNewTgt] = uint64(uintptr(unsafe.Pointer(f.newTarget.Object())))
 	return 1
 }
+
+// nativeApply is apply_args's entry of its target, f.apply(this,
+// arguments) by the realm's Function.prototype.apply, made for the native
+// handler through callH with no exit: f a function the handler enters as
+// call_w enters the callee its cache holds (regCallKind), its window made
+// at the stack's top -- f, the this, as its kind takes it, and the frame's
+// arguments as regApplyArgs hands them on -- without apply's frame, which
+// a stack trace and a caller pass over. It reports 1 for the handler to
+// enter it, the context's super the entry, and 0 where the call is Go's
+// (rsApplyArgs). It throws nothing and runs no code.
+//
+//go:nocheckptr
+func nativeApply(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeCtx) int {
+	f := (*frame)(nativePtr(&ctx.nf))
+	r := ctx.st.r
+	b := int(w.B())
+	target, apply, this := regs[b], regs[b+1], regs[b+2]
+	if !apply.IsObject() || apply.Object() != r.applyFn || !target.IsObject() {
+		return 0
+	}
+	o := target.Object()
+	fd := o.fn()
+	if fd == nil || fd.closure == nil || fd.bound {
+		return 0
+	}
+	cl, rc, kind, ethis, enter := r.regCallKind(fd, true)
+	switch {
+	case !enter:
+		return 0
+	case kind == regCallThis:
+		this = ethis
+	case kind == regCallObjThis:
+		if !this.IsObject() {
+			return 0
+		}
+	case kind != regCallEnter:
+		return 0
+	}
+	args := f.args
+	if f.cl.fn.MappedArguments {
+		n := min(f.cl.fn.ParamCount, len(args), len(f.locals))
+		for i := 0; i < n; i++ {
+			if !f.locals[i].sameBits(args[i]) {
+				// A parameter has been assigned, which a mapped object
+				// would show: regApplyArgs's.
+				return 0
+			}
+		}
+	}
+	wb := r.stackTop
+	if wb+2+len(args) > len(r.stack) {
+		return 0
+	}
+	regNextFrameClear(r)
+	win := r.stack[wb : wb+2+len(args) : wb+2+len(args)]
+	win[0], win[1] = target, this
+	copy(win[2:], args)
+	ctx.super = regCallCache{callee: o, cl: cl, rc: rc, kind: regCallEnter}
+	ctx.scratch[sE] = uint64(uintptr(unsafe.Pointer(&ctx.super)))
+	ctx.scratch[sWin] = uint64(uintptr(unsafe.Pointer(&win[0])))
+	ctx.scratch[sArgc] = uint64(len(args))
+	return 1
+}
+
+// regNextFrameClear clears what the last user of the frame record a call
+// at the runtime's depth now takes left that a register frame has none of
+// (regClearFrame): Go's call of the same callee, apply's or super()'s,
+// leaves it the built-in's native frame, and the handler, which leaves a
+// record so left to Go, would have left every call after it to Go.
+func regNextFrameClear(r *Runtime) {
+	if off := r.frameDepth - r.frameBase; uint(off) < uint(len(r.cur)) {
+		if nf := &r.cur[off]; nf.thisRef != nil || nf.withScopes != nil || nf.evalVars != nil || nf.native != "" {
+			regClearFrame(nf)
+		}
+	}
+}
+
+// nativeApplyFn is nativeApply's func value, set by init.
+var nativeApplyFn func(*[1 << 16]Value, bytecode.RInstr, int, *nativeCtx) int
 
 // nativeSuperFn is nativeSuper's func value, set by init.
 var nativeSuperFn func(*[1 << 16]Value, bytecode.RInstr, int, *nativeCtx) int

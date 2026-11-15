@@ -195,6 +195,9 @@ type nativeCtx struct {
 	// callFn is where a Realm has its Function.prototype.call (callFn): an
 	// offset from the realm running now, as has is.
 	callFn uintptr
+	// applyFn is the func value of nativeApply, which apply_args's
+	// handler calls through callH with no exit.
+	applyFn uintptr
 }
 
 // nativeMaxDepth is how deep the native frame stack goes.

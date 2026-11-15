@@ -221,3 +221,64 @@ func TestRegNativeThrough(t *testing.T) {
 		for (var i = 0; i < 1000; i++) s += m.call(o, i, 2)
 		String(s)`, bytecode.RCallMW)
 }
+
+// nativeApplySrc forwards arguments by f.apply(this, arguments): to
+// strict and sloppy functions given objects, primitives and nothing, to
+// an arrow, built-ins, a bound function, a class constructor, a function
+// that throws, one that forwards again in a recursion, a sloppy
+// forwarder whose parameter is assigned before (its mapped arguments), a
+// strict one's, apply replaced by a script's function and put back; and
+// constructions of class libraries' forwarding constructors, which hand
+// theirs to the prototype's initialize, with the prototype replaced and an
+// initialize that throws.
+const nativeApplySrc = `
+	var out = []
+	function tgt(a, b) { return (this && this.k) + ":" + a + ":" + b + ":" + arguments.length }
+	function st(a) { "use strict"; return typeof this + a }
+	function sl(a) { return (this === globalThis ? "G" : typeof this) + a }
+	var arrow = (a) => typeof this + a
+	function thr(a) { if (a % 6 == 1) throw new RangeError("r" + a); return a }
+	class K {}
+	var targets = [tgt, st, sl, arrow, thr, Math.max, tgt.bind({ k: "b" }), K]
+	function fwd(f, t) { var g = f; return g.apply(t, arguments) }
+	function fwd2() { return tgt.apply(this, arguments) }
+	function fwdS() { "use strict"; return tgt.apply(this, arguments) }
+	function mapped(a, b) { a = "x" + a; return tgt.apply(this, arguments) }
+	function depth(n) { return n == 0 ? 0 : 1 + depth.apply(this, [n - 1]) }
+	function rec() { return arguments[0] == 0 ? "end" : rec.apply(this, [arguments[0] - 1]) }
+	function cls() { return function () { this.initialize.apply(this, arguments) } }
+	var P = cls(); P.prototype.initialize = function (x, y) { this.x = x; this.y = y }
+	var Q = cls(); Q.prototype.initialize = function (x) { if (x % 9 == 4) throw new Error("q" + x); this.q = x }
+	function at(f) { try { return f() } catch (e) { return e.name + ":" + e.message } }
+	var realApply = Function.prototype.apply
+	for (var j = 0; j < 40; j++) {
+		var o = { k: j }
+		out.push(fwd2.call(o, j, 1), fwd2.call(o), fwdS.call(o, j, 2, 3), fwdS(j), mapped.call(o, j, 5), mapped.call(o))
+		var f = targets[j % targets.length]
+		out.push(at(() => fwd.call(o, f, j)), at(() => fwd.call(7, f, j, 2)))
+		out.push(rec(j % 5), depth(20))
+		var p = new P(j, "y"), q = at(() => new Q(j).q)
+		out.push(p.x, p.y, p instanceof P, q)
+		if (j == 15) P.prototype = { initialize: function (x) { this.x = -x } }
+		if (j == 22) Function.prototype.apply = function (t, a) { return "mine" + a.length }
+		if (j == 26) Function.prototype.apply = realApply
+	}
+	out.join()`
+
+// TestRegNativeApply checks f.apply(this, arguments), which apply_args's
+// handler enters, and constructions with forwarding constructors, which
+// new_w's enters with a frame, against the Go table: the same answers
+// and errors, marking or not, and both made with no exit once settled.
+func TestRegNativeApply(t *testing.T) {
+	was := nativeWarmExits
+	nativeWarmExits = 16
+	defer func() { nativeWarmExits = was }()
+	nativeCheck(t, nativeApplySrc, `
+		function tgt(a, b) { return a + b }
+		function fwd() { return tgt.apply(this, arguments) }
+		var P = function () { this.initialize.apply(this, arguments) }
+		P.prototype.initialize = function (x, y) { this.x = x; this.y = y }
+		var s = 0
+		for (var i = 0; i < 1000; i++) s += fwd(i, 2) + new P(i, 1).y
+		String(s)`, bytecode.RApplyArgs, bytecode.RNewW)
+}
