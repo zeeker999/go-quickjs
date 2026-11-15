@@ -77,17 +77,17 @@ func spillMoreCollect(r *Runtime) {
 		})), propDefault)
 }
 
-// Functions whose values need about 1,400 and 6,700 spill slots compile
-// and run natively from their register code, their slots past the
-// context's 256 in its SpillMore, with the collector idle and marking:
-// references live in those slots across a collection, and a
-// deoptimization with values live in them, the exit reading them. Each
-// answer is an ordinary call's.
+// Functions whose values need about 1,400, 6,700 and 13,000 spill slots
+// compile and run natively from their register code, the last's code past
+// 1 MB, their slots past the context's 256 in its SpillMore, with the
+// collector idle and marking: references live in those slots across a
+// collection, and a deoptimization with values live in them, the exit
+// reading them. Each answer is an ordinary call's.
 func TestJITSpillMore(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
-	sizes := []int{1000, 5000}
+	sizes := []int{1000, 5000, 10000}
 	if testing.Short() {
 		sizes = sizes[:1]
 	}
@@ -141,9 +141,8 @@ func TestJITSpillMore(t *testing.T) {
 
 // A function whose values need some 13,000 spill slots compiles, with
 // amd64's backend and arm64's, on any host: past 4,096 slots beyond the
-// context's own, arm64 adds to SpillMore's address in steps. Its code is
-// past what one placement may have (jit.MaxCodeBytes), so it runs as
-// TestJITSpillMore's do only once that bound is gone.
+// context's own, arm64 adds to SpillMore's address in steps. Its code,
+// past 1 MB, runs natively in TestJITSpillMore.
 func TestJITSpillMoreCompiles(t *testing.T) {
 	if !jitSSABackend || testing.Short() {
 		t.Skip("no SSA backend on this architecture, or short")

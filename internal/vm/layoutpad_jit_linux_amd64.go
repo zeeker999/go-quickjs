@@ -7,7 +7,7 @@ package vm
 // The layout lock's levers for linux/amd64 jit (layoutlock.txt): a pad's byte
 // stores, -1 for a pad left out, or a data lever's variables.
 const (
-	layoutPadNA  = 424
+	layoutPadNA  = 200
 	layoutPadNGA = -1
 	layoutPadNMA = 370
 	layoutPadND  = 360
@@ -34,7 +34,7 @@ const (
 	layoutPadNJ  = 242
 	layoutPadNGJ = -1
 	layoutPadNMJ = -1
-	layoutPadNQ  = 397
+	layoutPadNQ  = 434
 	layoutPadNGQ = -1
 	layoutPadNMQ = -1
 	layoutPadNW  = 365
@@ -45,6 +45,6 @@ const (
 	layoutPadNMZ = -1
 	layoutPadNCZ = 328
 	layoutPadNDH = 4
-	layoutPadNDW = 0
+	layoutPadNDW = 4
 	layoutPadNDG = 0
 )
