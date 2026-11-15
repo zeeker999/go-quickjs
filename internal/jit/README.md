@@ -228,7 +228,9 @@ whose operands are its register instruction's own, the only instruction
 of its origin (`ir.Instruction`'s `WholeOperands`): a literal's field
 whose definition the feedback does not plan, a destructuring's step or
 rest, a private member's read or write its site's cache holds no own field
-of. A private member's read or write (`get_private`, `set_private`) is a
+of, a `get_length` whose guard has failed -- an arguments object's, a
+getter's -- which the stack form's code reads by a call of Go on its frame
+(`ssa.GoHost`). A private member's read or write (`get_private`, `set_private`) is a
 property's read or write of the key its register holds (`ir.Instruction`'s
 `Private`), made natively for the shapes its site's cache holds of the key,
 as the stack form's. A call, `call_w`'s, `call_method_w`'s or `new_w`'s, and

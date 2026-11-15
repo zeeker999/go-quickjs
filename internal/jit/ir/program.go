@@ -562,7 +562,8 @@ func (in *Instruction) Writes() (int, int) {
 // one it writes, or -1: a whole Host's (Whole), or those of an operation
 // whose operands are its register instruction's own -- a field's
 // definition, a destructuring's step, an element's or a property's read
-// or write, a private member's with its key's register last, in, delete --
+// or write, a length's read, a private member's with its key's register
+// last, in, delete --
 // a literal operand being the instruction's immediate; ok is false for any other, or for a slot past the regs
 // registers.
 func (in *Instruction) WholeOperands(regs int) (reads [3]int, n int, dest int, ok bool) {
@@ -585,7 +586,7 @@ func (in *Instruction) WholeOperands(regs int) (reads [3]int, n int, dest int, o
 		n = 3
 	case in.Op == ArrayWrite:
 		n = 3
-	case in.Op == IterStep && in.When, in.Op == PropertyRead && !in.Private, in.Op == ReferenceRead && !in.Private:
+	case in.Op == IterStep && in.When, in.Op == PropertyRead && !in.Private, in.Op == ReferenceRead && !in.Private, in.Op == ArrayLength:
 		n, dest = 1, in.Dest
 	case in.Op == ArrayRead && !in.Reference, in.Op == HasProperty, in.Op == DeleteProperty:
 		n, dest = 2, in.Dest

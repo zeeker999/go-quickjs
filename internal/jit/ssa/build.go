@@ -8240,7 +8240,15 @@ func (b *builder) instruction(blk *Block, pc int) {
 		kind := ir.GuardExit
 		if b.fb != nil && b.fb.Generic(pc) {
 			kind = ir.HostExit
-			if b.cur == b.root && b.goCalls() {
+			if b.p.Origin != nil && b.whole(blk, pc, in, guard) {
+				// Register code's: get_length run whole on the register
+				// frame (CallSite's Whole), as the stack form's GoHost
+				// below runs it on the stack form's frame, which register
+				// code has none of -- an arguments object's, EarleyBoyer's
+				// sc_list's, had left native code at every call.
+				break
+			}
+			if b.cur == b.root && b.goCalls() && b.p.Origin == nil {
 				// Go reads it from native code, on the frame (GoHost), as
 				// the interpreter does: an arguments object's, EarleyBoyer's
 				// sc_list's, had left native code at every call.
