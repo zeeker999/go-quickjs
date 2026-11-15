@@ -755,7 +755,16 @@ for what the code learned made in a run of a function hardly called yet,
 at the loop around where the frame goes on (`regLoopAround`) -- keeps
 that loop's entry the same way (`jitRegFrameAt`, the stack form's
 `jitFrameAt`), unless native callers call the function's code (its
-link's `refs`).
+link's `refs`). Those entries (`ssa.Func`'s `EntryKept`, `jitRegEntry`'s
+`kept`) are for that frame alone: called again `jitKeptStarts` times, the
+function is compiled again without them, its objects unmade for every call
+from then on (`jitRegKeptGone`, judged by all it did, its stats kept), as
+the stack form's `jitKeptGone` -- unless three of those calls in four left
+its code (`jitRegKeptCallsLeave`; a host exit counts in code with kept
+entries, which has an entry after it where the code without them has
+none), which would ask for the entry back. A caller compiled to call it
+natively, whose calls Go does not see, has it compiled so at once
+(`jitRegCalleesKeptNoEntries`).
 
 **Profit.** Each native stretch -- an entry, the code entered again after
 an exit or a poll, a call of Go -- costs what an exit and an entry would
@@ -1810,9 +1819,10 @@ frame Go makes of its level is given them (`jitRegPushLevel`) -- or it is
 inlined (see [Inlining](#inlining)). A forwarding call, `f.apply(x,
 arguments)` of the realm's `apply` (`apply_args`, `ssa.CallSite`'s
 `Forward`), is made so too, of the functions the code learned it forwards
-to at its exits and calls of Go, or, before it learned any, of f as the
-read of it just before finds it now, a global's or a captured binding's
-(`jitRegForwardGuess`): the window's function and receiver its own, its
+to at its calls of Go, settled as the stack form's are (`jitForwardSeen`):
+those met in its first `jitCallsToInline` calls decided together, up to
+`jitCallTargets` (`jitRegForwardSeen`, `jitLearned`'s `callSites` and
+`settling`), the window's function and receiver its own, its
 parameters the frame's arguments from its context (`mir`'s
 `windowForward`), which a function that forwards has there -- given at its
 entry from Go, or by its native caller -- so that prototype.js's
@@ -2095,9 +2105,16 @@ its `apply_args` is the inliner's (`compile`'s `LowerRegForwardWith`, no
 the call of the function it hands them to, inlined with the same arguments
 (`Forward`, `forwardInline`, `windowForwardCall`): for a construction of a
 forwarding constructor, k of `this.k.apply(this, arguments)` found on its
-prototype; else the one function its own code learned, or the read of f
-finds (`jitRegForwardTarget`) -- checked to be f, apply checked to be the
-realm's, x the callee's receiver. No frame is made over again: the frame Go
+prototype; else the one function its own code's forward settled on; else,
+for a construction alone, the function the read of f finds now
+(`jitRegForwardGuess`) -- a plain call is inlined for no guess, as the
+stack form's is not: a forwarder's closures may each hand their arguments
+to a function of their own (`jitRegForwardTarget`) -- checked to be f,
+apply checked to be the realm's, x the callee's receiver. A forward settled
+on one function has the forwarder's native callers (`jitEntry`'s
+`regCallers`, by key, joined as their code is cached: `regJoinCallers`)
+compiled again to inline it (`jitRegCallersReopt`, the stack form's
+`jitCallersReopt`). No frame is made over again: the frame Go
 makes of such a callee's level at an exit inside it is given the arguments
 of its caller's call's window, or of the frame that handed them on
 (`jitRegInlineArgs`). A callee that would leave native code at a call it

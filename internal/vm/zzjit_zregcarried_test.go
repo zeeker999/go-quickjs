@@ -139,3 +139,146 @@ func TestJITRegCarriedFramesLeave(t *testing.T) {
 		})
 	}
 }
+
+// regKeptSrc's long runs a loop carrying an object, a long first call
+// compiling it for the frame waiting at the loop, as microbench's
+// carried_long, after short, its carried_short, ran the same loop; longs
+// calls it from a loop of its own, natively.
+const regKeptSrc = regCarriedExitSrc + `
+function V(x, y) { this.x = x; this.y = y }
+V.prototype.add = function (o) { return new V(this.x + o.x, this.y + o.y) }
+function short(turns) {
+	let s = new V(0, 0)
+	const d = new V(1, 2)
+	for (let i = 0; i < turns; i++) s = s.add(d)
+	return s.x + s.y
+}
+function warm(n) {
+	let t = 0
+	for (let j = 0; j < n; j++) t += short(100)
+	return t
+}
+function long(turns, k) {
+	let s = new V(0, 0)
+	const d = new V(1, 2)
+	for (let i = 0; i < turns; i++) {
+		const o = i === k ? 1 : obj
+		o.a = 1
+		s = s.add(d)
+	}
+	return s.x + s.y
+}
+function longs(n) {
+	let t = 0
+	for (let j = 0; j < n; j++) t += long(j & 63, -1)
+	return t
+}
+`
+
+// regKeptStart has V.prototype.add compiled and its constructions
+// learned, as carried_short has ExtraVec's before carried_long, then long
+// compiled for the frame waiting at its loop, which keeps that loop's
+// entry, its object made there (ssa.Func's EntryKept).
+func regKeptStart(t *testing.T, rts [2]*Runtime) *jitRegEntry {
+	t.Helper()
+	regCarriedCall(t, rts, "6000000", "warm", 20000)
+	for range 2 {
+		regCarriedCall(t, rts, "600000", "long", 200000, -1)
+	}
+	e := regCodeNamed(t, rts[0], "long")
+	if e == nil || e.code == nil || len(e.kept) != 1 {
+		t.Fatalf("long not compiled with the frame's entry kept: %+v", e)
+	}
+	return e
+}
+
+// TestJITRegKeptEntryGoes has a function compiled for a frame waiting at
+// its loop, which keeps that loop's entry, called again and again: it
+// gives the entry up, its object unmade for every call from then on, and
+// at once where a native caller calls it, whose calls Go does not see
+// (jitRegKeptGone, jitRegCalleesKeptNoEntries), as the stack form's code
+// does. Kept, every later call made each turn's object: carried_long ran
+// 3 times as long. The code compiled again only to give up the entry is
+// judged by all it did. Exact answers, idle and marking.
+func TestJITRegKeptEntryGoes(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regKeptSrc)
+			rts[0].jitStress = jitStressConfig{}
+			e := regKeptStart(t, rts)
+			base := e.life.ssaStats.workBase
+			for range jitKeptStarts + 1 {
+				regCarriedCall(t, rts, "150", "long", 50, -1)
+			}
+			if e = regCodeNamed(t, rts[0], "long"); e == nil || e.code == nil || len(e.kept) != 0 || len(e.unentered) != 1 {
+				t.Fatalf("called again, long kept its entry: %+v", e)
+			}
+			if e.life.ssaStats.workBase != base {
+				t.Errorf("compiled again to give up its entry, long is judged from %d, not %d", e.life.ssaStats.workBase, base)
+			}
+
+			rts = regNativeRuntimes(t, regKeptSrc)
+			rts[0].jitStress = jitStressConfig{}
+			regKeptStart(t, rts)
+			regCarriedCall(t, rts, "18900000", "longs", 200000)
+			if e = regCodeNamed(t, rts[0], "long"); e == nil || e.code == nil || len(e.kept) != 0 {
+				t.Fatalf("called natively, long kept its entry: %+v", e)
+			}
+		})
+	}
+}
+
+// regKeptLeaving is regKeptStart for code that has learned its loop's
+// exit: a call leaving at turn 5, a write to a number's property, which
+// fails the code's guard, the code compiled again for the frame waiting
+// at the loop of the next long call, the write left to Go there -- the
+// calls after it the ones its kept entry goes by.
+func regKeptLeaving(t *testing.T, rts [2]*Runtime) *jitRegEntry {
+	t.Helper()
+	regKeptStart(t, rts)
+	regCarriedCall(t, rts, "300", "long", 100, 5)
+	regCarriedCall(t, rts, "600000", "long", 200000, -1)
+	e := regCodeNamed(t, rts[0], "long")
+	if e == nil || e.code == nil || e.invalid || len(e.kept) != 1 {
+		t.Fatalf("long not compiled again with the frame's entry kept: %+v", e)
+	}
+	return e
+}
+
+// TestJITRegKeptEntryStaysForCallsThatLeave has the calls after the one
+// a function was compiled for, kept entry and all, leave its loop anyway:
+// they gain nothing from its object's staying unmade and would ask for
+// the entry back, so it stays (jitRegKeptCallsLeave), as the stack form's
+// does; where one in two leaves, it goes.
+func TestJITRegKeptEntryStaysForCallsThatLeave(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	rts := regNativeRuntimes(t, regKeptSrc)
+	rts[0].jitStress = jitStressConfig{}
+	regKeptLeaving(t, rts)
+	// Two of its looks at its calls, jitKeptStarts calls each: later, what
+	// its exits taught it has it compiled again at a call, with no frame
+	// waiting at its loop.
+	for range 2 * jitKeptStarts {
+		regCarriedCall(t, rts, "300", "long", 100, 5)
+	}
+	if e := regCodeNamed(t, rts[0], "long"); e == nil || e.code == nil || e.invalid || len(e.kept) == 0 || e.osr != nil {
+		t.Fatalf("calls that left gave up the entry: %+v", e)
+	}
+	rts = regNativeRuntimes(t, regKeptSrc)
+	rts[0].jitStress = jitStressConfig{}
+	regKeptLeaving(t, rts)
+	for i := range 2 * jitKeptStarts {
+		regCarriedCall(t, rts, "300", "long", 100, float64(map[bool]int{true: 5, false: -1}[i%2 == 0]))
+	}
+	if e := regCodeNamed(t, rts[0], "long"); e == nil || e.code == nil || e.invalid || len(e.kept) != 0 {
+		t.Fatalf("calls that ran their loop through kept the entry: %+v", e)
+	}
+}

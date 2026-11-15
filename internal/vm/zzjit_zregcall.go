@@ -212,16 +212,6 @@ func (f *jitRegFeedback) regCallTargets(pc int, w bytecode.RInstr, argc int, met
 			}
 		}
 	}
-	if w.Op() == bytecode.RApplyArgs && len(sites) == 0 && f.fb.root == nil && !f.fb.Generic(pc) {
-		// What it forwards to as the read of f finds it now
-		// (jitRegForwardGuess), before its exits learned any: called
-		// natively, the call checking it is f.
-		if t := f.fb.r.jitRegForwardGuess(f.fb.cl, int(rpc)); t != nil {
-			if fd := t.fn(); fd != nil && fd.closure != nil && fd.closure.reg != nil {
-				add(t, fd.closure, fd.closure.reg, nil, nil, false, false)
-			}
-		}
-	}
 	return sites, objs, closures
 }
 
@@ -309,17 +299,19 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 		o, cl = ce.callee, ce.cl
 	case bytecode.RApplyArgs:
 		// The function f.apply(x, arguments) called, which no cache holds:
-		// callee, if apply was the realm's.
+		// callee, if apply was the realm's -- learned once the forwards
+		// settle (jitRegForwardSeen).
 		if !callee.IsObject() || r.applyFn == nil || !applied && (!r.stack[jitRegWindowOf(f, c)+int(w.B())+1].IsObject() ||
 			r.stack[jitRegWindowOf(f, c)+int(w.B())+1].Object() != r.applyFn) {
 			return false
 		}
 		o = callee.Object()
-		fd := o.fn()
-		if fd == nil || fd.closure == nil || !r.jitRegCallable(o, fd.closure, fd.closure.reg, 0) {
-			return false
+		if fd := o.fn(); fd != nil && fd.closure != nil && r.jitRegCallable(o, fd.closure, fd.closure.reg, 0) {
+			cl = fd.closure
 		}
-		cl = fd.closure
+		if learned, done := r.jitRegForwardSeen(f, c, e, rpc, o, cl); done || cl == nil {
+			return learned
+		}
 	case bytecode.RNewW:
 		// A construction's function, which no cache of the call's holds:
 		// the one it constructed with, callee.
@@ -398,6 +390,118 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 	l.nativeCalls = append(l.nativeCalls, x)
 	r.jitRegReopt(f.cl, e)
 	return true
+}
+
+// jitRegForwardSeen is jitRegCallSeen's for the apply_args at register
+// pc rpc of f's code, c, e's, that Go made of o, a function native callers
+// may call, cl's, or one they do not, cl nil: settling, as the stack
+// form's jitForwardSeen has it, the functions it meets in its first
+// jitCallsToInline calls are decided together (jitLearned's callSites and
+// settling), the code compiled again once for them, not once for each,
+// those native callers may call learned as its native calls, up to
+// jitCallTargets. It reports, done, whether the call is settled here --
+// learned saying whether it learned something -- and not, decided before
+// as native, for jitRegCallSeen to learn of o as of any call. Learned one
+// at a time, and guessed before any was, the first target a forwarder met
+// had it inlined in its callers for that target alone
+// (jitRegForwardTarget).
+func (r *Runtime) jitRegForwardSeen(f *frame, c *regCode, e *jitRegEntry, rpc int, o *Object, cl *closure) (learned, done bool) {
+	l := r.jitRegLearnedFor(f, e)
+	if l == nil {
+		return false, true
+	}
+	if len(l.callSites) != len(c.rc.Code) {
+		l.callSites = make([]uint8, len(c.rc.Code))
+	}
+	switch l.callSites[rpc] {
+	case jitCallNative:
+		return false, false
+	case jitCallDone:
+		return false, true
+	}
+	if n := l.callSites[rpc]; n+1 < jitCallsToInline {
+		l.callSites[rpc]++
+		if cl != nil && !slices.ContainsFunc(l.settling, func(x jitInline) bool { return int(x.pc) == rpc && x.obj == o }) {
+			l.settling = append(l.settling, jitInline{pc: int32(rpc), cl: cl, obj: o, forward: true})
+		}
+		return false, true
+	}
+	l.callSites[rpc] = jitCallDone
+	var met []jitInline
+	for i := 0; i < len(l.settling); i++ {
+		if x := l.settling[i]; int(x.pc) == rpc {
+			if x.obj != o {
+				met = append(met, x)
+			}
+			l.settling = slices.Delete(l.settling, i, i+1)
+			i--
+		}
+	}
+	if cl != nil {
+		l.nativeCalls = append(l.nativeCalls, jitInline{pc: int32(rpc), cl: cl, obj: o})
+		l.callSites[rpc] = jitCallNative
+	}
+	for _, x := range met {
+		if l.callSites[rpc] != jitCallNative || jitCountAt(l.nativeCalls, rpc) >= jitCallTargets {
+			break
+		}
+		l.nativeCalls = append(l.nativeCalls, jitInline{pc: int32(rpc), cl: x.cl, obj: x.obj})
+	}
+	if l.callSites[rpc] != jitCallNative {
+		return false, true
+	}
+	r.jitRegReopt(f.cl, e)
+	if jitCountAt(l.nativeCalls, rpc) == 1 && jitRegForwards(f.cl) {
+		// Decided on one function, which a call of the forwarder may be
+		// inlined with now: its callers, compiled to call it, are
+		// compiled again to inline it.
+		r.jitRegCallersReopt(l, jitInlineDepth)
+	}
+	return true, true
+}
+
+// regJoinCallers has the function whose key is key, its register code
+// calling through links, join the native callers of each link's function
+// (jitEntry's regCallers), as the stack form's setLinks has its code join
+// theirs: not its own, nor one there already, nor past jitNativeCallers.
+func (s *jitState) regJoinCallers(key jitKey, links []*jitLink) {
+	for _, l := range links {
+		if l.key == key {
+			continue
+		}
+		ce := s.regLearned[l.key]
+		if ce == nil || len(ce.regCallers) >= jitNativeCallers || slices.Contains(ce.regCallers, key) {
+			continue
+		}
+		ce.regCallers = append(ce.regCallers, key)
+	}
+}
+
+// jitRegCallersReopt has the register code of l's function's native
+// callers (jitEntry's regCallers), depth levels of them, compiled again
+// once it has spent a budget (jitRegReopt), to inline the function now
+// that a call of its is decided -- a forwarder's forward settled on one
+// target (jitRegForwardSeen), which jitRegForwardTarget inlines it with
+// -- as the stack form's jitCallersReopt has its native callers compiled
+// again, each no more than jitInlineReoptimizations times for it: a
+// caller compiled before its callee's calls were decided called it
+// natively, not inlined, for good.
+func (r *Runtime) jitRegCallersReopt(l *jitEntry, depth int) {
+	if depth == 0 || l == nil {
+		return
+	}
+	s := r.jit
+	for _, key := range l.regCallers {
+		ce := s.regCache[key]
+		if ce == nil || ce.code == nil || ce.invalid || ce.life == nil {
+			continue
+		}
+		if ce.life.upgradeReopts < jitInlineReoptimizations {
+			ce.life.upgradeReopts++
+			ce.life.reopt = true
+		}
+		r.jitRegCallersReopt(ce.life, depth-1)
+	}
 }
 
 // jitRegViaSeen learns, after Go made the method call at register pc rpc

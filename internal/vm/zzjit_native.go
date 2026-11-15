@@ -855,6 +855,13 @@ type jitEntry struct {
 	// up to jitNativeCallers: when this code is compiled again to inline
 	// more, they are too, to inline it with its calls (jitInlineNativeCalls).
 	nativeCallers []*jitEntry
+	// regCallers are, for a function's register code (jitState's
+	// regLearned), the keys of the functions whose register code calls it
+	// natively, through its link, up to jitNativeCallers: compiled again
+	// to inline it once its calls are decided (jitRegCallersReopt), as
+	// nativeCallers are the stack form's. Keys, which hold no function
+	// alive: what a caller learned outlives its code.
+	regCallers []jitKey
 	// inlinePending marks calls found to inline since the code was
 	// compiled (jitLearned's callSites), which it is compiled again for
 	// once the calls around them have been seen.
@@ -1055,6 +1062,10 @@ type jitState struct {
 	regGoOn     *frame
 	regGoOnFrom *jitRegEntry
 	regForced   bool
+	// regKeptSeeding marks the compiles of register callees that give up
+	// the entries kept for a frame (jitRegCalleesKeptNoEntries), which ask
+	// for no more of them, as seeding is the stack form's.
+	regKeptSeeding bool
 	// regHeld is what the register code in regCache takes (held).
 	regHeld int
 	// regLearned is what the code made from a function's register code
@@ -1593,7 +1604,7 @@ func jitCompiledBytes(shapes []*shape, holders []*Object, inlinedAt, definesUnfe
 func (e *jitEntry) learnedBytes() int {
 	n := jitCapBytes(e.failed) + jitCapBytes(e.failedEntries) + jitCapBytes(e.resumed) + jitCapBytes(e.bigints) + jitCapBytes(e.bigwide) + jitCapBytes(e.literals) + jitCapBytes(e.poly) + jitCapBytes(e.typedReads) +
 		jitCapBytes(e.stringReads) + jitCapBytes(e.keyedReads) + jitCapBytes(e.keyedWrites) + jitCapBytes(e.strSites) + jitCapBytes(e.bigSites) + jitCapBytes(e.numSites) + jitCapBytes(e.boolSites) + jitCapBytes(e.nativeCalls) + jitCapBytes(e.inlines) + jitCapBytes(e.notInline) +
-		jitCapBytes(e.nativeCallers) + jitCapBytes(e.callSites) + jitCapBytes(e.settling) + e.calls.bytes()
+		jitCapBytes(e.nativeCallers) + jitCapBytes(e.regCallers) + jitCapBytes(e.callSites) + jitCapBytes(e.settling) + e.calls.bytes()
 	for i := range e.poly {
 		p := &e.poly[i]
 		n += jitCapBytes(p.cases) + jitCapBytes(p.reads) + jitCapBytes(p.adds) + jitCapBytes(p.missed)
