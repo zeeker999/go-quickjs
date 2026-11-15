@@ -328,7 +328,11 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 		// at a later sample, as the stack form's compile waits.
 		return nil
 	}
-	e := &jitRegEntry{key: key, life: s.regLearnedOf(key)}
+	// Young from its compile on (jitCodeAge), as the stack form's entry is
+	// made (entryFor): made unused since epoch 0, code compiled when the
+	// budget was full was the first that the next compile's room let go
+	// of, and the compiles that filled it dropped each other's code.
+	e := &jitRegEntry{key: key, life: s.regLearnedOf(key), used: s.epoch()}
 	if e.life.deferred && e.life.generation == s.generation {
 		// No room for it at its last compile, and the cache has let no
 		// code go since (jitRegPlace).
@@ -336,6 +340,14 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 		return nil
 	}
 	p, err := r.jitRegLower(cl, c.rc, jitLowerSSA)
+	if l := s.regLowered[key]; l != nil {
+		// Its programs kept while the compile uses them: the room made for
+		// the code, or for a callee's compiled meanwhile, would let go of
+		// the program the code is compiled from, which the code then held
+		// uncounted (regLoweringSpare).
+		l.busy++
+		defer func() { l.busy-- }()
+	}
 	if err != nil && jitcompile.HostOnly(err) {
 		// Host operations alone, no loop, no element's work: compiled for
 		// its native callers (LowerRegInline), or, hot, where a call it
@@ -632,14 +644,73 @@ func (s *jitState) regUses(e *jitRegEntry) uint64 {
 // background, which replaces it.
 //
 // A native call of it under way is one Go has the level of (regLevelsOf),
-// or, while any run's native code is (ctxTop), one Go knows nothing of
-// until the code leaves: code native callers may call (its link) counts
-// as in use then. The cache's flush, at a back-edge budget Go gave a
-// native callee's loop, had let such code go and closed it under the call,
-// whose level Go then found no code for (jitRegLevelAt).
+// or one whose context says it runs e's function (regCalled), as the stack
+// form's inUse finds its entries' (called): code a native callee's level
+// runs stays while the call does, Go having found its level or not -- the
+// flush, at a back-edge budget Go gave a native callee's loop, had let
+// such code go and closed it under the call, whose level Go then found no
+// code for (jitRegLevelAt). Before, every function native callers call
+// counted as in use while any native code ran, and the flush, which runs
+// under native code, and the cache's room, which compiles asked for from
+// calls of Go made, let none of them go: Octane's Mandreel kept its
+// functions' code, and the budget, full for the benchmarks after it,
+// refused zlib's and Typescript's compiles millions of times.
 func (s *jitState) regInUse(e *jitRegEntry) bool {
-	return e.runs != 0 || s.regPendingJobs[e.key] != nil || s.regLevelsOf(e) != 0 ||
-		s.ctxTop != 0 && s.regLinks[e.key] != nil
+	return s.regRunning(e) || s.regCalled(e)
+}
+
+// regRunning reports whether e's code runs below Go now as Go knows it: a
+// run of it, a level of a native call of it Go found (regLevelsOf), or a
+// compile of its function in the background -- regInUse but for the
+// native calls only their contexts say are under way (regCalled).
+func (s *jitState) regRunning(e *jitRegEntry) bool {
+	return e.runs != 0 || s.regPendingJobs[e.key] != nil || s.regLevelsOf(e) != 0
+}
+
+// regCalled reports whether a native call of e's function has not
+// returned: a context a native call's callee runs in (abi.LiveCall) is
+// its closure's -- native code marks the context, its closure stored,
+// before the call, and clears it as the callee returns -- as called finds
+// the stack form's. None is while no run's native code is (ctxTop).
+func (s *jitState) regCalled(e *jitRegEntry) bool {
+	if s.ctxTop == 0 {
+		return false
+	}
+	fn := e.key.Value()
+	if fn == nil {
+		return false
+	}
+	for _, c := range s.ssaCtxs {
+		if c.Live == abi.LiveCall && c.Closure != nil && (*closure)(c.Closure).fn == fn {
+			return true
+		}
+	}
+	return false
+}
+
+// regCalledFns is the functions native calls under way run (regCalled),
+// found once for a look at all the cache holds; nil while no run's native
+// code is.
+func (s *jitState) regCalledFns() map[*bytecode.Function]bool {
+	if s.ctxTop == 0 {
+		return nil
+	}
+	var fns map[*bytecode.Function]bool
+	for _, c := range s.ssaCtxs {
+		if c.Live == abi.LiveCall && c.Closure != nil {
+			if fns == nil {
+				fns = map[*bytecode.Function]bool{}
+			}
+			fns[(*closure)(c.Closure).fn] = true
+		}
+	}
+	return fns
+}
+
+// regInUseOf is regInUse for a look at all the cache holds, the functions
+// native calls under way run found once (regCalledFns).
+func (s *jitState) regInUseOf(e *jitRegEntry, called map[*bytecode.Function]bool) bool {
+	return s.regRunning(e) || called != nil && called[e.key.Value()]
 }
 
 // regAge notes, at epoch now, which register code was used since the last
@@ -676,18 +747,28 @@ func (s *jitState) regAge(now uint64) {
 }
 
 // regVictims appends to v what of the register code makeRoom may reclaim
-// at epoch now (listVictims): programs lowered for functions the cache has
-// no entry for, refusals, and code not used this epoch or the one before
-// (jitCodeAge), none in use, each with its function's programs, which go
-// with it (regReclaim), as listVictims lists the stack form's.
+// at epoch now (listVictims): the programs lowered for functions
+// (regLoweringSpare), refusals, and code not used this epoch or the one
+// before (jitCodeAge), none in use, each with the program its code was
+// compiled from, which goes with it (regReclaim), as listVictims lists the
+// stack form's.
+//
+// A program kept is the cheapest to reclaim, whatever its function's
+// entry: the next compile that asks for it lowers it again, at a few
+// percent of a compile's cost. Before, a function's programs went only
+// with its entry, and the inlining kind -- a callee's, which its callers'
+// compiles asked for -- stayed with a callee whose code was young or in
+// use: of the 38.5 MB Octane's programs held at its end, 71% were callees'
+// kept for inlining, and the budget, full, refused compiles for them.
 func (s *jitState) regVictims(v []jitVictim, now uint64) []jitVictim {
 	for key, l := range s.regLowered {
-		if s.regCache[key] == nil {
-			v = append(v, jitVictim{key: key, l: l, reg: true, class: jitVictimLowering, used: l.used, bytes: l.bytes})
+		if n := s.regLoweringSpare(key, l); n > 0 {
+			v = append(v, jitVictim{key: key, l: l, reg: true, class: jitVictimLowering, used: l.used, bytes: n})
 		}
 	}
+	called := s.regCalledFns()
 	for key, e := range s.regCache {
-		if s.regInUse(e) {
+		if s.regInUseOf(e, called) {
 			continue
 		}
 		class := uint8(jitVictimRefusal)
@@ -699,11 +780,68 @@ func (s *jitState) regVictims(v []jitVictim, now uint64) []jitVictim {
 		}
 		n := e.bytes
 		if l := s.regLowered[key]; l != nil {
-			n += l.bytes
+			n += l.bytes - s.regLoweringSpare(key, l)
 		}
 		v = append(v, jitVictim{key: key, re: e, class: class, used: e.used, serial: uint64(e.serial), bytes: n})
 	}
 	return v
+}
+
+// regLoweringHeld is the kind of l's program that the code the cache holds
+// for its function, whose key is key, was compiled from (jitRegEntry's p),
+// or -1 for none: that program goes on being held, by the code, whatever
+// l does, and goes with it (regReclaim).
+func (s *jitState) regLoweringHeld(key jitKey, l *jitLowering) int {
+	if e := s.regCache[key]; e != nil && e.code != nil && e.p != nil {
+		for k, p := range l.progs {
+			if p == e.p {
+				return k
+			}
+		}
+	}
+	return -1
+}
+
+// regLoweringSpare is what of l, the register lowering of the function
+// whose key is key, makeRoom and the flush may reclaim (regTrimLowering):
+// its programs but the one its function's code holds (regLoweringHeld) --
+// all of it, with no such program -- or nothing while a compile of the
+// function uses them (jitLowering's busy, a compile in the background).
+func (s *jitState) regLoweringSpare(key jitKey, l *jitLowering) int {
+	if l.busy != 0 || s.regPendingJobs[key] != nil {
+		return 0
+	}
+	held := s.regLoweringHeld(key, l)
+	if held < 0 {
+		return l.bytes
+	}
+	return l.bytes - jitLoweringFixed - l.progs[held].Footprint()
+}
+
+// regTrimLowering lets go of what of l, the register lowering of the
+// function whose key is key, is spare (regLoweringSpare): its programs but
+// the one its function's code holds, or, with none, l itself. A compile
+// that asks for one lowers it again (jitRegLower); what failed to lower
+// stays known, holding nothing.
+func (s *jitState) regTrimLowering(key jitKey, l *jitLowering) {
+	if l.busy != 0 || s.regPendingJobs[key] != nil || s.regLowered[key] != l {
+		return
+	}
+	held := s.regLoweringHeld(key, l)
+	if held < 0 {
+		s.dropRegLowering(key, l)
+		return
+	}
+	for k, p := range l.progs {
+		if k == held || p == nil {
+			continue
+		}
+		n := p.Footprint()
+		l.bytes -= n
+		s.lowerBytes -= n
+		l.done[k], l.progs[k], l.errs[k] = false, nil, nil
+	}
+	s.floorAt = 0
 }
 
 // regReclaim drops x, register code makeRoom listed, if it still is a
@@ -721,8 +859,13 @@ func (s *jitState) regReclaim(x *jitVictim, now uint64) {
 }
 
 // regFlush drops, at the flush's tick, the register code unused since the
-// flush's last look, not young, not in use (flush).
+// flush's last look, not young, not in use (flush); and lets go of the
+// programs no compile asked for since its last look (regTrimLowering), as
+// the flush ages code: a callee's program for inlining, which no caller is
+// compiled with any longer, had been kept for as long as the callee's
+// code, the callee warm or not.
 func (s *jitState) regFlush(tick, now uint64) {
+	called := s.regCalledFns()
 	for key, e := range s.regCache {
 		if e.code == nil {
 			continue
@@ -731,7 +874,7 @@ func (s *jitState) regFlush(tick, now uint64) {
 			e.flushSeen, e.flushAt = u, tick+1
 			continue
 		}
-		if e.used+jitCodeAge > now || s.regInUse(e) {
+		if e.used+jitCodeAge > now || s.regInUseOf(e, called) {
 			continue
 		}
 		s.regLetGo(key, e)
@@ -739,6 +882,18 @@ func (s *jitState) regFlush(tick, now uint64) {
 			s.dropRegLowering(key, l)
 		}
 		s.flushed++
+	}
+	// Programs asked for since the last look were found used then
+	// (jitLowering's used, the cache's age at the ask, regLowering).
+	last := s.regLowerLook
+	s.regLowerLook = s.agedAt
+	if last == 0 {
+		return
+	}
+	for key, l := range s.regLowered {
+		if l.used < last {
+			s.regTrimLowering(key, l)
+		}
 	}
 }
 

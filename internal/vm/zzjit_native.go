@@ -1081,6 +1081,10 @@ type jitState struct {
 	// regLowered are the programs of functions' register code, by the
 	// function's key, as lowered holds the stack form's (jitRegLower).
 	regLowered map[jitKey]*jitLowering
+	// regLowerLook is the cache's age (agedAt) at the flush's last look at
+	// regLowered, before which a program not asked for since is let go of
+	// (regFlush).
+	regLowerLook uint64
 	// regHostOps counts register code's host exits by the register
 	// instruction Go ran whole, for tests (RegNativeStats' HostOps).
 	regHostOps map[string]uint64
@@ -1970,9 +1974,7 @@ func (s *jitState) reclaim(x *jitVictim, now uint64) bool {
 	switch x.class {
 	case jitVictimLowering:
 		if x.reg {
-			if s.regLowered[x.key] == x.l && s.regCache[x.key] == nil {
-				s.dropRegLowering(x.key, x.l)
-			}
+			s.regTrimLowering(x.key, x.l)
 			return true
 		}
 		if l := s.lowered[x.key.Pointer]; l == x.l {

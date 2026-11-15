@@ -461,7 +461,7 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 				if w.Op() != bytecode.RNewW {
 					r.jitState().regLinkOf(cl, cl.reg)
 				}
-				r.jitRegKnownCallee(cl)
+				r.jitRegKnownCallee(cl, f, rpc)
 				return false
 			}
 			x.byCode = true
@@ -481,7 +481,7 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 				if w.Op() != bytecode.RNewW {
 					r.jitState().regLinkOf(cl, cl.reg)
 				}
-				r.jitRegKnownCallee(cl)
+				r.jitRegKnownCallee(cl, f, rpc)
 				return false
 			}
 			n++
@@ -496,7 +496,7 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 			// their functions compiled (jitCallTarget). Go had made every
 			// call of one no site was compiled for.
 			r.jitState().regLinkOf(cl, cl.reg)
-			r.jitRegKnownCallee(cl)
+			r.jitRegKnownCallee(cl, f, rpc)
 		}
 		return false
 	}
@@ -631,19 +631,20 @@ func (r *Runtime) jitRegCallersReopt(l *jitEntry, depth int) {
 // (notNative) counts toward their calling it again (jitRegRetryNative), as
 // the stack form's jitKnownTargetSeen and jitCallTarget count a native
 // caller's call of such a callee, which left for Go; one with no code is
-// compiled for them (jitRegNativeCallee). Counted only where Go entered
+// compiled for them (jitRegNativeCalleeN), unless it is long and its call
+// seldom made (jitRegCalledOften). Counted only where Go entered
 // the callee (jitRegEnter), a callee judged slow as well, which Go does
 // not enter, was never called natively again: CD's Vector, Havlak's
 // Dictionary.at, their native callers' calls made by Go, a million of
 // them, each run by the interpreter.
-func (r *Runtime) jitRegKnownCallee(cl *closure) {
+func (r *Runtime) jitRegKnownCallee(cl *closure, f *frame, rpc int) {
 	if cc := cl.closureCode; cc != nil {
 		if e := cc.jitReg; e != nil && e.life != nil && e.life.notNative && !e.invalid && e.code != nil {
 			r.jitRegRetryNative(e)
 			return
 		}
 	}
-	r.jitRegNativeCallee(cl, cl.reg)
+	r.jitRegNativeCalleeN(cl, cl.reg, 1, f, rpc)
 }
 
 // jitRegViaSeen learns, after Go made the method call at register pc rpc
@@ -672,7 +673,7 @@ func (r *Runtime) jitRegViaSeen(f *frame, e *jitRegEntry, rpc int, callee, recv 
 	for _, x := range l.nativeCalls {
 		if int(x.pc) == rpc {
 			if x.obj == o && x.via {
-				r.jitRegNativeCallee(cl, cl.reg)
+				r.jitRegNativeCalleeN(cl, cl.reg, 1, f, rpc)
 				return false
 			}
 			n++
@@ -682,7 +683,7 @@ func (r *Runtime) jitRegViaSeen(f *frame, e *jitRegEntry, rpc int, callee, recv 
 		return false
 	}
 	l.nativeCalls = append(l.nativeCalls, jitInline{pc: int32(rpc), cl: cl, obj: o, via: true})
-	r.jitRegNativeCallee(cl, cl.reg)
+	r.jitRegNativeCalleeN(cl, cl.reg, 1, f, rpc)
 	r.jitRegReopt(f.cl, e)
 	return true
 }

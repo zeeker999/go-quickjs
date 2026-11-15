@@ -2524,23 +2524,52 @@ construction allocates nothing for the JIT.
 **Register code in the budget.** Register code counts in what the JIT holds
 (`regHeld`, in `held`), against the one budget, and is aged, reclaimed and
 flushed as the stack form's entries are: its uses -- Go's entries, the runs
-it went on in, native callers' calls -- date it (`regAge`); `makeRoom`
-reclaims it with theirs, refusals first, then code unused this epoch and
-the one before, least recently used first (`regVictims`, `regReclaim`),
-each with its function's programs, and before them the programs of functions
-it has no code for; and `flush` drops code unused between two of its looks,
-with its programs (`regFlush`). A compile refused the room for its code
-drops its function's programs too, as the stack form's does. Code let go
-of so has its function warm up anew (`regLetGo`), and compiled again it is
-compiled with all its function learned, which outlives its code
-(`regLearned`). Code a run or a native call is in is never let go of; code
-replaced while one is is closed once the last leaves it (`dropped`,
+it went on in, native callers' calls -- date it (`regAge`), and a compile
+makes it young (`jitRegEntry`'s `used`, its epoch); `makeRoom` reclaims it
+with theirs, refusals first, then code unused this epoch and the one before,
+least recently used first (`regVictims`, `regReclaim`); and `flush` drops
+code unused between two of its looks (`regFlush`). Code let go of so has its
+function warm up anew (`regLetGo`), and compiled again it is compiled with
+all its function learned, which outlives its code (`regLearned`).
+
+Code is in use, and never let go of, while it runs as Go knows it -- a run
+of it, a level of a native call of it Go found, a compile of its function
+in the background (`regRunning`) -- or while a native call of it has not
+returned, which the contexts say: native code marks a callee's context
+(`abi.LiveCall`, its closure stored) before the call and clears it as the
+callee returns, and the cache looks for the function among them
+(`regCalled`, `regCalledFns`), as the stack form's `called` does. So code
+under a native frame that is not running -- a program's functions after the
+program, which native callers call -- is let go of for a compile asked under
+another program's native frame, or flushed there. Code replaced while a run
+or a call is in it is closed once the last leaves it (`dropped`,
 `regClose`).
+
+A function's programs (`regLowered`, one lowering of each kind it was
+asked for) are a cache its compiles are made from, which the budget can
+always reclaim: each is the cheapest victim (`jitVictimLowering`), whatever
+its function's entry, but for the program the function's code was compiled
+from, which that code holds and which goes with it (`regLoweringSpare`,
+`regTrimLowering`); the flush lets go of those no compile asked for since
+its last look (`regLowerLook`); a compile of the function under way keeps
+them (`jitLowering`'s `busy`, a pending job). A compile that asks for one
+let go of lowers it again (`jitRegLower`). A compile refused the room for
+its code drops its function's programs, as the stack form's does.
+
+A callee too long to inline (past `ssa.MaxInline`, counted in the stack
+form's instructions, `jitRegInlineSize`) that is still warming up is not
+compiled at its first call from native code (`jitRegNativeCalleeN`) unless
+the call is made often -- no longer than a function inlines in all, and
+called at the site at least `jitInliningFrequency` hundredths of its
+caller's runs, by the feedback dispatcher's counts (`jitRegCalledOften`) --
+as the stack form's `jitNativeCallee` decides; otherwise it warms up as any
+function does. Compiled at once, Mandreel's functions run once a frame took
+half the budget.
 
 **Making room** (`makeRoom`). A compile asks for room for what its entry
 will hold before its code is placed. The cache reclaims, in this order, each
-least recently used first: lowerings of functions it has no entry for;
-refusals remembered; code not used in the last two epochs (old, as V8
+least recently used first: lowerings (a register function's, but for the
+program its code holds); refusals remembered; code not used in the last two epochs (old, as V8
 flushes code by age); the workspaces. Code used within two epochs, code that
 runs, and an entry being compiled are never reclaimed. If all it may reclaim
 would not make the room, it reclaims nothing and the compile is refused: the
