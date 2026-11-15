@@ -402,3 +402,62 @@ func TestJITRegBuiltinCalls(t *testing.T) {
 		})
 	}
 }
+
+// regWarmLoopsSrc is EarleyBoyer's deriv_trees' loop2 and loop3 in
+// small: a closure made anew at each turn of a loop, whose own loop calls
+// a function and a closure it makes anew at each turn.
+const regWarmLoopsSrc = `
+function deriv(a, b) { return a * 3 + b; }
+function outer(n) {
+	var total = 0;
+	for (var j = 0; j < n; j++) {
+		var loop2 = function (k, acc) {
+			while (true) {
+				if (k < 0) return acc;
+				var t = deriv(k, j);
+				var loop3 = function (m, s) { return m > 0 ? s + m : s; };
+				acc = loop3(t & 7, acc);
+				k--;
+			}
+		};
+		total += loop2(j & 15, 0);
+	}
+	return total;
+}
+`
+
+// TestJITRegMadeAnewCallsSettle runs regWarmLoopsSrc, with the JIT and
+// without, the collector idle and marking: the calls of the closures made
+// anew, whose functions the code learns at its exits, leave at no more
+// than a few host exits once learned (jitRegCallRepeats) -- EarleyBoyer's
+// loop2 had left at 4674 of them, 7316 exits in all, each run ending in
+// the interpreter.
+func TestJITRegMadeAnewCallsSettle(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regWarmLoopsSrc)
+			rts[0].SetJITReport(true)
+			rts[0].jitStress = jitStressConfig{}
+			for i, r := range rts {
+				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("outer"))
+				for k := range 10 {
+					v, err := r.Call(fn, Undefined, []Value{Float(20000)})
+					if got := regNativeShow(r, v, err); got != "570000" {
+						t.Fatalf("runtime %d, call %d: %s, want 570000", i, k, got)
+					}
+				}
+			}
+			st := rts[0].RegNativeStats()
+			if n := st.HostOps["call_w"]; n > 10 {
+				t.Errorf("%d host exits at call_w: %v", n, st.Ended)
+			}
+			t.Logf("hosts %v, ended %v", st.HostOps, st.Ended)
+		})
+	}
+}
