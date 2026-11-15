@@ -24,7 +24,9 @@ import (
 // the function its caller's tail call called -- viaTail's boom, a sloppy
 // function, its receiver the global object in the trace; deep in the stack
 // the tail call gives its frame up, which native code leaves to the
-// interpreter.
+// interpreter. The runtimes start with the contexts every runtime has: the
+// first exit at an inlined frame's check of the contexts past it, too few,
+// has more made, and the calls stay inlined.
 const regTailClosSetup = `
 	class Vec {
 		constructor(n) { this.storage = []; this.firstIdx = 0; this.lastIdx = 0; for (let i = 0; i < n; i++) this.append(i) }
@@ -105,13 +107,6 @@ func TestJITRegTailCalledClosures(t *testing.T) {
 			rts := regNativeRuntimes(t, regTailClosSetup)
 			r := rts[0]
 			r.SetJITWarmUp(1, 1)
-			// Contexts for the levels the inlined frames take, which an
-			// exit for want of them past the last makes more of and one
-			// inside inlined frames does not: left at their room's check
-			// at every call, the code was compiled again with the call
-			// not inlined, and the closure made.
-			r.jitGrowContexts()
-			r.jitGrowContexts()
 			rounds := regTailClosRounds()
 			warm := 60
 			run := func(src string) {
@@ -206,8 +201,6 @@ func TestJITRegTailCalledClosuresPolled(t *testing.T) {
 			rts := regNativeRuntimes(t, regTailClosSetup)
 			r := rts[0]
 			r.SetJITWarmUp(1, 1)
-			r.jitGrowContexts()
-			r.jitGrowContexts()
 			r.jitStress = jitStressConfig{budget: 3, deopt: 7}
 			for _, round := range regTailClosRounds() {
 				compiler.SetRegisterForm(true)

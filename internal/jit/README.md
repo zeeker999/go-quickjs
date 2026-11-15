@@ -1944,7 +1944,11 @@ the cache by the function's key, kept by its template (`jitRegKeyOf`):
 
 A call of Go from the last context, and an unwinding from it, add contexts
 (`jitGrowContexts`), as the stack form's do: a recursion of native calls is
-native past the contexts the runtime started with.
+native past the contexts the runtime started with. So does an exit inside
+inlined frames whose innermost state is in the last context
+(`jitRegInlined`), where an inlined frame's check of the contexts past it
+(`ssa.OpFrameRoom`) found too few: left there at every call, it had had
+the call no longer inlined, and the closures given to the callee made.
 
 While Go runs beside them, every level's code is held: the cache neither
 drops it nor compiles the function again until the level is done, so that
