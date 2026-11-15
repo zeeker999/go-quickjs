@@ -1578,6 +1578,30 @@ the callee's return hands the result's number and pointer words back in
 registers. `verify` checks these rules for every function its corpora
 compile.
 
+**Branch reach.** A function's code may be of any length, and every branch
+in it reaches its target. amd64's jumps take a rel32, which reaches 2 GB
+either way: the assembler shortens those that fit a byte, and refuses code
+past 2 GB, which no budget holds. arm64's reach less: a B 128 MB, a B.cond,
+CBZ or CBNZ 1 MB, an ADR 1 MB. Its assembler keeps them in reach as V8's
+does, by veneer pools (`internal/jit/asm/arm64`'s `pool`). A branch back to
+a bound label past its reach is made of ones that reach: a conditional
+branch is its opposite over a B, a B past 128 MB a jump through X27, the
+target's address made by an ADR and subtractions. A branch forward to a
+label not yet bound joins a queue, its kind's; once the oldest has come
+half its reach, a pool follows the next instruction: a B over it, then a
+veneer -- a B to the label -- for every branch of the queue that has come a
+quarter of its reach, which the branch is pointed at instead, one veneer for
+all of the pool's branches to a label. A veneer is a B in the queue of Bs,
+taken by a later pool once it has come 32 MB. A pool between two of the
+backend's instructions is a jump over it, which changes no register or
+flag; it never comes within a run that must stay together (data, the
+assembler's own sequences), and the backend never jumps by a count of
+instructions nor keeps a value in X27 at a branch's target. A branch whose
+label is bound before a pool takes it stays as it is: code under 256 KB has
+no pool, and is the same as without them. The backend's ADRs are of
+return points a few instructions on, which no pool takes; an ADR past its
+reach is an error of `Finish`.
+
 **Workspaces.** Compiles reuse their workspace's analysis tables and
 assembler storage (`jit.Workspace`, the SSA's and `mir`'s). On arm64, that
 includes the byte buffer the assembler's instruction words are encoded into
@@ -2310,8 +2334,8 @@ was not compiled for, so that nothing in it checks.
 **Refusals.** A refusal is an entry with no code, and marks the template
 refused (`closureCode`'s `jitRegRefused`), so that its samples ask nothing
 more -- but a function of host operations alone, which is lowered again once
-a budget more is spent (`hostOnly`). Code no placement takes, past the size
-one may have, is a refusal too. A compile the budget has no room for leaves
+a budget more is spent (`hostOnly`). Code of any length is placed (see
+Allocation). A compile the budget has no room for leaves
 no entry, and is not compiled again until the cache has let some code go
 (its `life`'s `deferred` and `generation`, as the stack form's compiles are
 deferred): asked again at every sample, a callee of Mandreel's was compiled
@@ -2323,10 +2347,17 @@ memory, the runtime marks the JIT unavailable for good.
 
 **Allocation.**
 
-- A runtime's code lives in its `Arena`: chunks of 64 KiB (a larger function
-  gets a chunk of its own), each function placed after the last at 64-byte
-  alignment, so that a runtime's functions share a few mappings
-  (`TestJITArenaMappings`).
+- A runtime's code lives in its `Arena`: chunks of 64 KiB, each function
+  placed after the last at 64-byte alignment, so that a runtime's functions
+  share a few mappings (`TestJITArenaMappings`). A function longer than a
+  chunk gets a mapping of its own, a whole number of chunks as long as it,
+  which no other code shares, so that releasing it unmaps it at once: shared,
+  its megabytes stayed mapped for the few kilobytes of others placed after
+  it, which no budget counted. The code after it goes on in the shared chunk.
+  So code of any length is placed, its branches in reach across all of it
+  (see [Branch reach](#the-backend)); its footprint, its length among it, is
+  counted against the budget as any code's, and code the budget has no room
+  for is deferred as any compile is (`TestLongCodePlaced`, `TestJITLongCode`).
 - Placing a function makes the pages it touches writable, copies it, and
   seals them read/execute again. Pages are never writable and executable at
   once, and published code is never patched. Other code in those pages does

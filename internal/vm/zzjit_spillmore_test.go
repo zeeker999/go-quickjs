@@ -142,8 +142,10 @@ func TestJITSpillMore(t *testing.T) {
 // A function whose values need some 13,000 spill slots compiles, with
 // amd64's backend and arm64's, on any host: past 4,096 slots beyond the
 // context's own, arm64 adds to SpillMore's address in steps. Its code is
-// past what one placement may have (jit.MaxCodeBytes), so it runs as
-// TestJITSpillMore's do only once that bound is gone.
+// past 1 MB, which is placed as any code is (TestJITLongCode, which runs
+// code of that length); here it is compiled only. Its frame states share
+// their slots (TestJITSpillStatesLinear), so the two builds of it take
+// memory linear in its length.
 func TestJITSpillMoreCompiles(t *testing.T) {
 	if !jitSSABackend || testing.Short() {
 		t.Skip("no SSA backend on this architecture, or short")

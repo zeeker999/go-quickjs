@@ -414,8 +414,7 @@ func regLoopAround(c *regCode, rpc int) int {
 // jitRegPlace places mc, e's code, the backend's of f, built from c's
 // register code lowered with its feedback rf, in the JIT's arena, and
 // fills e from what the build found; it reports false where the JIT has
-// no room for it now. Code no placement takes is a refusal, e with no
-// code.
+// no room for it now, or the host places no code.
 func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f *ssa.Func, mc *mir.Code, looped map[uint32]bool) bool {
 	s := r.jit
 	p := e.p
@@ -432,16 +431,10 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 	e.life.deferred = false
 	code, err := jit.NewSSACode(s.arena, mc)
 	if err != nil {
-		if errors.Is(err, jit.ErrUnavailable) {
-			s.unavailable = true
-			return false
-		}
-		// Code no placement takes -- past the size one may have -- a
-		// refusal, as the stack form's compile makes it: asked again as
-		// no room, a callee of Mandreel's was compiled again at every
-		// call of it Go made, a second and a half of each run.
-		e.refusal = fmt.Sprintf("%v: %v", jitRefused, err)
-		return true
+		// The host places no code (jit.ErrUnavailable), which is the
+		// only failure: code of any length is placed.
+		s.unavailable = true
+		return false
 	}
 	s.spillsFor(mc)
 	s.inlined += uint64(len(f.Inlined))
