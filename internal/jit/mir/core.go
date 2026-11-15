@@ -555,6 +555,9 @@ type Code struct {
 	// generator of the function natively jumps to (ssa.Func's GenEntry),
 	// or -1 for none.
 	GenEntry int
+	// TailEntry is the offset of the entry another function's call in
+	// tail position jumps to (ssa.Func's TailEntry), or -1 for none.
+	TailEntry int
 	// Text is how many of Bytes are instructions: past them are the code's
 	// own constants (amd64's movImm), data.
 	Text int

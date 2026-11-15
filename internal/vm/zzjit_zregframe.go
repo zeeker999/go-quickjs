@@ -109,24 +109,29 @@ func (r *Runtime) jitRegFrameOp(ctx *abi.Context) bool {
 		case bytecode.RNewTarget:
 			keep(f.newTarget)
 		case bytecode.RRestParam:
-			// The frame's arguments past the parameters, which a callee
-			// native callers call has none of: its calls keep none.
-			if level {
+			// The frame's arguments past the parameters -- a native
+			// callee's, those its call wrote to its context (ssa.CallSite's
+			// FrameArgs), as the stack form's (jitGoFrameOp) -- copied.
+			args, ok := jitRegFrameArgs(ctx, f, c, level)
+			if !ok {
 				return false
 			}
 			var rest []Value
-			if i := int(w.B()); i < len(f.args) {
-				rest = f.args[i:]
+			if i := int(w.B()); i < len(args) {
+				rest = args[i:]
 			}
 			keep(Obj(r.newArrayFrom(rest)))
 		case bytecode.RArguments:
-			// An unmapped arguments object, of the arguments the frame
-			// kept; a mapped one aliases the registers, which native code
-			// may hold elsewhere.
-			if level || f.cl.fn.MappedArguments {
+			// The arguments object, of the arguments the frame kept, or a
+			// native callee's call wrote to its context, as the stack
+			// form's: a mapped one's aliases no parameter, as a
+			// function's code that makes one where it would is not
+			// compiled (compile's argumentsOwn).
+			args, ok := jitRegFrameArgs(ctx, f, c, level)
+			if !ok || f.cl.fn.MappedArguments && f.cl.fn.ParamCount > 0 || f.cl.fn.MappedArguments && f.callee == nil {
 				return false
 			}
-			keep(Obj(r.newArgumentsObject(f)))
+			keep(Obj(r.newArgumentsObject(&frame{cl: f.cl, callee: f.callee, args: args})))
 		default:
 			return false
 		}
@@ -171,6 +176,20 @@ func (r *Runtime) jitRegFrameOp(ctx *abi.Context) bool {
 		return r.jitRegCellsClosure(ctx, f, c, run.e, wb, level, int(ctx.GoOp>>abi.GoOpIndexShift))
 	}
 	return false
+}
+
+// jitRegFrameArgs is the arguments of the frame f, of register code c, a
+// call of Go on which ctx makes: its own, or, for a native callee's level,
+// those its call wrote to its context (ssa.CallSite's FrameArgs) -- false
+// for one whose call keeps none.
+func jitRegFrameArgs(ctx *abi.Context, f *frame, c *regCode, level bool) ([]Value, bool) {
+	if !level {
+		return f.args, true
+	}
+	if !c.args || ctx.Argc > uint64(len(ctx.Args)) {
+		return nil, false
+	}
+	return jitContextArgs(ctx), true
 }
 
 // jitRegFrameWhole makes closure_w or close_regs at ctx's register pc on
@@ -418,11 +437,12 @@ func jitArgumentOf(ctx *abi.Context, args []Value, fn *bytecode.Function) (Value
 		return Undefined, false
 	}
 	if i := uint32(k.num); float64(i) == k.num && uint(i) < uint(len(args)) {
-		if n := int(ctx.GoOp>>abi.GoOpArgcShift&0xff) - 2; mapsArgument(fn, int(i)) {
-			if uint(i) < uint(n) {
-				return jitGoArg(ctx, 2+int(i)), true
-			}
-			return Undefined, false
+		if n := int(ctx.GoOp>>abi.GoOpArgcShift&0xff) - 2; uint(i) < uint(n) && mapsArgument(fn, int(i)) {
+			// The parameter the mapped object would alias, as the code
+			// has it now (ir.Program's ArgumentParams): one it, or a
+			// closure, assigned. A parameter neither assigns is its
+			// argument as passed, as the stack form's (jitArgument).
+			return jitGoArg(ctx, 2+int(i)), true
 		}
 		return args[i], true
 	}

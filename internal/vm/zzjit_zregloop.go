@@ -123,7 +123,7 @@ func (f *jitRegFeedback) ForEach(pc int) (ssa.ForEachSite, bool) {
 		if kind&abi.LoopKindMask == abi.LoopReduce {
 			argc = 4
 		}
-		site, ok := f.regCallSite(pc, x.cbObj, x.cb, x.cb.reg, argc, true, nil, nil, x.byCode)
+		site, ok := f.regCallSite(pc, x.cbObj, x.cb, x.cb.reg, argc, true, nil, nil, x.byCode, false)
 		if !ok {
 			return ssa.ForEachSite{}, false
 		}

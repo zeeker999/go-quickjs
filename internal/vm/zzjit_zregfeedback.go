@@ -37,6 +37,10 @@ type jitRegFeedback struct {
 	fb *jitFeedback
 	rc *bytecode.RegCode
 	p  *ir.Program
+	// fwd, for a callee inlined with its call's arguments, which it hands
+	// on (ssa.InlineSite's Arguments), is that call: its apply_args are
+	// the calls inlined with them (forwardInline).
+	fwd *jitForwardFrame
 }
 
 // jitRegFeedbackFor is cl's register code's feedback for p, the program
@@ -667,11 +671,24 @@ func (f *jitRegFeedback) EntryGeneric(pc int) bool {
 // fits, and how deep. An inlined callee's calls are asked so too, of its
 // own caches and what its code learned, as V8 inlines a callee's callees.
 // A call whose inlined callee left native code too often is not inlined
-// again (jitInlineLeft's notInline), as the stack form's.
+// again (jitInlineLeft's notInline), as the stack form's. A callee that
+// keeps its arguments is inlined as the stack form's too: one that reads
+// them, its reads the call's (ReadsArguments); one that hands them on,
+// with them, its apply_args the inlined calls of what it forwards to
+// (Arguments, forwardInline).
 func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 	w, op, ok := f.at(pc)
 	if !ok || op != ir.Host || !f.p.Code[pc].Window {
 		return ssa.InlineSite{}, false
+	}
+	if w.Op() == bytecode.RApplyArgs {
+		// A forwarding call of the frame's own arguments: inlined where
+		// the frame is an inlined callee's given its call's (fwd), called
+		// natively otherwise, as the stack form's (forwardCalls).
+		if f.fwd == nil {
+			return ssa.InlineSite{}, false
+		}
+		return f.forwardInline(pc)
 	}
 	method, construct := w.Op() == bytecode.RCallMW, w.Op() == bytecode.RNewW
 	if w.Op() != bytecode.RCallW && !method && !construct {
@@ -687,16 +704,36 @@ func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 	}
 	argc := int(w.X())
 	sites, objs, cls := f.regCallTargets(pc, w, argc, method)
-	if len(sites) != 1 || sites[0].ByCode != 0 || sites[0].ArrowThis || sites[0].FrameArgs {
-		// A callee that keeps its arguments is called (ssa.CallSite's
-		// FrameArgs): its reads of them inlined would each leave.
+	if len(sites) != 1 || sites[0].ByCode != 0 || sites[0].ArrowThis || sites[0].Via != 0 {
+		// One through Function.prototype.call, G.call(x, ...), is called
+		// natively, never inlined, as the stack form's (jitCalledVia).
 		return ssa.InlineSite{}, false
 	}
 	site, o, cl := sites[0], objs[0], cls[0]
 	if cl.fn == f.fb.fn || cl.fn == f.fb.keep().fn || jitNoInline != nil && jitNoInline(cl.fn) {
 		return ssa.InlineSite{}, false
 	}
-	p, err := f.fb.r.jitRegLower(cl, cl.reg.rc, jitLowerInline)
+	kind, reads, forwards := jitLowerInline, false, false
+	if site.FrameArgs {
+		// A callee that keeps its arguments (ssa.CallSite's FrameArgs),
+		// inlined as the stack form's: one that only reads them, its
+		// reads the call's arguments (ReadsArguments); one that hands
+		// them on, with them, its forwarding calls inlined with them in
+		// turn (Arguments, forwardInline). Any other is called.
+		var ctor *Object
+		if construct {
+			ctor = o
+		}
+		switch {
+		case !construct && jitRegReadsArguments(cl):
+			reads = true
+		case jitRegForwards(cl) && f.fb.r.jitRegForwardsInline(cl, ctor, argc, jitInlineDepth):
+			kind, forwards = jitLowerForward, true
+		default:
+			return ssa.InlineSite{}, false
+		}
+	}
+	p, err := f.fb.r.jitRegLower(cl, cl.reg.rc, kind)
 	if err != nil || p.Validate() != nil {
 		return ssa.InlineSite{}, false
 	}
@@ -709,7 +746,13 @@ func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 	in := ssa.InlineSite{
 		Program: p, Feedback: callee, Callee: site.Callee, Closure: site.Closure,
 		Argc: argc, Method: method, Params: 2 + int(cl.reg.params), ThisSlot: -1, Window: true,
-		Coerce: site.Coerce, Upvalues: jitUpvalueCells(cl),
+		Coerce: site.Coerce, Upvalues: jitUpvalueCells(cl), ReadsArguments: reads, Arguments: forwards,
+	}
+	if forwards {
+		callee.fwd = &jitForwardFrame{argc: argc}
+		if construct {
+			callee.fwd.ctor = o
+		}
 	}
 	if construct {
 		// A construction's (new_w's) of a base constructor, its receiver
@@ -795,12 +838,24 @@ func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
 	argc, method := int(w.X()), w.Op().MethodCall()
 	if w.Op() == bytecode.RApplyArgs {
 		// f.apply(x, arguments): a native call of the functions its code
-		// learned it forwards to (regCallSite's Forward), or the
-		// interpreter's at a host exit -- no call of Go.
-		if !f.p.Forwards {
+		// learned it forwards to (regCallSite's Forward), or else a call
+		// of Go, which makes it from the frame's arguments in the context
+		// -- Array.apply(null, arguments) without a frame (jitForwardPlain)
+		// -- as the stack form's (forwardCalls), the realm's apply
+		// checked by the code.
+		if !f.p.Forwards || f.fb.r.applyFn == nil {
 			return nil
 		}
-		return f.regCallSites(pc, w, 2, false)
+		if sites := f.regCallSites(pc, w, 2, false); len(sites) != 0 {
+			if l := f.fb.e; l != nil && jitCountAt(l.nativeCalls, rpc) >= jitCallTargets {
+				// As many as it calls natively: any other Go's.
+				sites[0].Generic = true
+			}
+			return sites
+		}
+		k := f.fb.keep()
+		k.holders = append(k.holders, f.fb.r.applyFn)
+		return []ssa.CallSite{{Go: ssa.GoCall, Forward: true, Apply: uintptr(unsafe.Pointer(f.fb.r.applyFn)), Argc: 2, ThisSlot: -1}}
 	}
 	n := argc + 1
 	if method {

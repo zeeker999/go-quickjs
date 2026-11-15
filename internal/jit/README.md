@@ -234,13 +234,28 @@ that keeps no arguments and whose registers no closure captures, in a frame
 the interpreter would give up: Go's entry says whether, by the frame's
 kind (`abi.Context`'s `TailFrame`), and a native call of such a function
 sets it at every call (`ssa.CallSite`'s `Tail`), not for a construction,
-so that no frame reads a flag an earlier one left in the context. Any other
-call there leaves for the interpreter (`ssa.OpTailRoom`'s, or `OpTailSelf`'s
-exit), so that native code keeps no frame a tail call gives up, and the
-frame ends after it. A call of Go native code makes (`jitRegGoCallOn`)
-whose callee's frame the interpreter gave to the callee's callee in place
-runs that frame again there (`regRerun`), as the interpreter's own call
-does (`regMissEnd`), never leaving it to a frame further out. A `wrap` -- `x op y`, the second argument of
+so that no frame reads a flag an earlier one left in the context. In a
+native callee's frame, a call there of another of the functions the call
+has (its native call sites, `OpTailSelf`'s `Calls`) is a jump to that
+function's code with its window in this one's place, as the stack form's
+`tailJump`: its registers the call's function, receiver and arguments up to
+its parameters, undefined past them, the context this one -- its closure,
+its captured bindings, `TailFrame` for its own calls -- and the jump goes
+to the callee's tail entry (`ssa.Func`'s `TailEntry`, `mir`'s
+`windowTailJump` and `tailEntry`, its link's body), which makes what its
+call entry would past the window -- its operands' address, the VM's
+stack's top -- and goes on at its start, returning where this frame would
+have: two functions calling each other in tail position run as deep as
+they like in one frame, natively. Not a callee that keeps its arguments,
+an arrow reading its this, a sloppy one given the global object, a generic
+call's, nor a call in a frame Go entered (`abi.Context`'s `ReturnTo`),
+which the interpreter gives up. Any other call there leaves for the
+interpreter (`ssa.OpTailRoom`'s, or `OpTailSelf`'s exit), so that native
+code keeps no frame a tail call gives up, and the frame ends after it. A
+call of Go native code makes (`jitRegGoCallOn`) whose callee's frame the
+interpreter gave to the callee's callee in place runs that frame again
+there (`regRerun`), as the interpreter's own call does (`regMissEnd`),
+never leaving it to a frame further out. A `wrap` -- `x op y`, the second argument of
 the `asUintN` or `asIntN` call right after it, which the interpreter makes
 with the call at once -- is the operator alone, the call made after it as
 any call, which native code makes of the operator's low bits (see
@@ -414,7 +429,7 @@ speculates nothing: it builds the site generically, or leaves it to Go.
 
 | Not answered yet | Methods | So |
 |---|---|---|
-| an inlined callee's exits, keeps | `InlineExit`, `KeepLimit` | nothing speculated |
+| keeps | `KeepLimit` | nothing speculated |
 
 **The feedback dispatcher.** The native handlers come in variants, each a
 dispatch table over the same handlers (`internal/vm/internal/nativegen`,
@@ -1639,16 +1654,32 @@ the runtime's realm, and its frame is one the call path makes as a call's
 this). A callee that keeps its arguments -- reads `arguments`, has a rest
 parameter -- is given them and their count in its context (`ssa.CallSite`'s
 `FrameArgs`, `mir`'s `windowArgs`), as the stack form's call gives them,
-where its reads of them are answered from (`GoArgument`) and the frame Go
-makes of its level is given them (`jitRegPushLevel`); not inlined. A
-forwarding call, `f.apply(x, arguments)` of the realm's `apply`
-(`apply_args`, `ssa.CallSite`'s `Forward`), is made so too, of the
-functions the code learned it forwards to at its exits: the window's
-function and receiver its own, its parameters the frame's arguments from
-its context (`mir`'s `windowForward`), which a function that forwards has
-there -- given at its entry from Go, or by its native caller -- so that
-prototype.js's `Class.create` constructors, as Octane's RayTrace makes
-every object, are constructed natively, their forwarding call native too. A call that meets any other function leaves
+where its reads of them are answered from (`GoArgument`; a sloppy
+function's parameter its object would alias read as the code has it,
+`ArgumentParams`, as the stack form's `jitArgument`), its rest parameter's
+array and its arguments object made from them (`jitRegFrameArgs`), and the
+frame Go makes of its level is given them (`jitRegPushLevel`) -- or it is
+inlined (see [Inlining](#inlining)). A forwarding call, `f.apply(x,
+arguments)` of the realm's `apply` (`apply_args`, `ssa.CallSite`'s
+`Forward`), is made so too, of the functions the code learned it forwards
+to at its exits and calls of Go, or, before it learned any, of f as the
+read of it just before finds it now, a global's or a captured binding's
+(`jitRegForwardGuess`): the window's function and receiver its own, its
+parameters the frame's arguments from its context (`mir`'s
+`windowForward`), which a function that forwards has there -- given at its
+entry from Go, or by its native caller -- so that prototype.js's
+`Class.create` constructors, as Octane's RayTrace makes every object, are
+constructed natively, their forwarding call native too. Any other f is
+Go's from native code (`jitRegForwardMade`), from the arguments in the
+context, as the stack form's `forwardCalls` makes it:
+`Array.apply(null, arguments)` without a frame (`jitForwardPlain`). A
+method call of the realm's `Function.prototype.call`, `G.call(x, ...)` --
+TypeScript's `_super.call(this, ...)` -- calls G natively, as the stack
+form's (`jitCalledVia`): learned at its calls of Go (`jitRegViaSeen`), the
+call checks the method is `call` and its receiver G (`ssa.CallSite`'s
+`Via`) and writes G's window from G, x and the rest; never inlined. A
+receiver to coerce at a register call -- a sloppy G given null -- has Go
+make the call from native code rather than leave. A call that meets any other function leaves
 native code for Go, which learns there what to call next -- a call in tail
 position too, which Go makes at the exit as the interpreter's `tail_call`
 does (`regWholeTail`): the ordinary call while the stack is shallow, the
@@ -1889,6 +1920,31 @@ atomicity rule holds in it as in the root: an exit inside it runs its
 register instruction whole again (`atomicInstruction`, each frame's
 `readCalls`). Its own calls are asked the same way, of its own caches and
 what its code learned, and inlined in it in turn.
+
+A callee that keeps its arguments is inlined as the stack form's
+(`jitFeedback`'s `Inline`, `forwardInline`). One that reads them by index
+and counts them alone, no object made, no parameter aliased
+(`jitRegReadsArguments`, `ssa.InlineSite`'s `ReadsArguments`), reads the
+call's: `arguments[k]` of a constant k below their count is the call's
+argument k, `arguments.length` their count, as V8 eliminates the arguments
+object; any other key deoptimizes, Go's from the next compile on. One that
+hands them on, `f.apply(x, arguments)` (`jitRegForwards`), lowered so that
+its `apply_args` is the inliner's (`compile`'s `LowerRegForwardWith`, no
+`Forwards`), is inlined with them (`Arguments`), each `apply_args` in it
+the call of the function it hands them to, inlined with the same arguments
+(`Forward`, `forwardInline`, `windowForwardCall`): for a construction of a
+forwarding constructor, k of `this.k.apply(this, arguments)` found on its
+prototype; else the one function its own code learned, or the read of f
+finds (`jitRegForwardTarget`) -- checked to be f, apply checked to be the
+realm's, x the callee's receiver. No frame is made over again: the frame Go
+makes of such a callee's level at an exit inside it is given the arguments
+of its caller's call's window, or of the frame that handed them on
+(`jitRegInlineArgs`). A callee that would leave native code at a call it
+has never made -- one its own code leaves to Go and has not been seen to
+make in runs enough to tell, or one whose result it throws -- is inlined
+all the same, the call an exit (`InlineExit`, the stack form's
+`jitInlineExit`, of the calls Go made for its code by register pc,
+`regCallsMade`).
 
 **Its exits.** An exit inside an inlined callee writes the caller's state at
 the call -- a host exit there -- and the callee's window past the caller's

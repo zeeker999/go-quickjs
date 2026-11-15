@@ -97,6 +97,9 @@ func jitRegShape(f *ssa.Func, p *ir.Program, cl *closure, c *regCode) map[uint32
 	// Native callers call it (jitRegFeedback's NativeCalls), its window
 	// made past theirs: its call entry makes its frame (mir's callEntry).
 	f.CallEntry = true
+	// And another function's call in tail position, its frame given up,
+	// jumps to its tail entry (mir's windowTailJump).
+	f.TailEntry = true
 	// A generator's code a loop's step may resume natively: its generator
 	// entry (mir's windowGenEntry).
 	jitRegGenShape(f, p, cl, c)

@@ -393,6 +393,7 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 		return true
 	}
 	s.inlined += uint64(len(f.Inlined))
+	s.inlinedCode += uint64(f.InlinedCode)
 	e.code, e.bytes = code, need
 	e.scratch = f.Scratch
 	e.keeps = f.Keeps
@@ -424,6 +425,17 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 		e.at[rpc] = int32(p.At(uint32(rpc)))
 	}
 	e.unresumed = slices.Clone(f.Unresumed)
+	if life := e.life; life != nil {
+		// The register pcs of the calls it leaves to Go (ssa.Func's
+		// HostsLeft), one of which its code has never made is seldom made
+		// (InlineExit), as the stack form's ssaHostsLeft.
+		life.ssaHostsLeft = life.ssaHostsLeft[:0]
+		for _, pc := range f.HostsLeft {
+			if pc >= 0 && pc < len(p.Origin) {
+				life.ssaHostsLeft = append(life.ssaHostsLeft, int32(p.Origin[pc]))
+			}
+		}
+	}
 	for _, pc := range f.Unentered {
 		if pc >= 0 && pc < len(p.Origin) {
 			e.unentered = append(e.unentered, int(p.Origin[pc]))
@@ -1009,6 +1021,7 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 				r.jitRegCallSeen(f, c, e, exitPC, callee)
 				r.jitRegSuperSeen(f, c, e, exitPC)
 				if mcallee.IsObject() {
+					r.jitRegViaSeen(f, e, exitPC, mcallee, mrecv, int(w.X()))
 					r.jitRegForEachSeen(f, e, exitPC, mcallee, mrecv, mcb, int(w.X()))
 				}
 			}
@@ -1510,6 +1523,9 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	if op == bytecode.RSuperCall && kind == abi.GoCallSuper {
 		return r.jitRegSuperMade(ctx, idx, run, rpc, w)
 	}
+	if op == bytecode.RApplyArgs && kind == abi.GoCallForward {
+		return r.jitRegForwardMade(ctx, idx, run, rpc)
+	}
 	if op == bytecode.RTypeof && kind == abi.GoCallTypeOf {
 		// typeof's name, as regTypeof makes it, which runs nothing.
 		*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = Str(r.typeofString(jitGoArg(ctx, 0)))
@@ -1670,6 +1686,8 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 			}
 		}
 		if op == bytecode.RCallMW {
+			// G.call(x, ...), G native callers may call (jitRegViaSeen).
+			r.jitRegViaSeen(f, run.e, rpc, callee, this, argc)
 			r.jitRegForEachSeen(f, run.e, rpc, callee, this, jitGoArg(ctx, at+1), argc)
 			// A generator's next, which the code may call natively
 			// (jitRegGenCallSeen).
@@ -1909,7 +1927,7 @@ func (r *Runtime) regFinishCall(f *frame, c *regCode, wb, rpc int, v Value, err 
 	if err == nil {
 		dest := int(w.B())
 		switch w.Op() {
-		case bytecode.RInstanceOf, bytecode.RTypeof, bytecode.RGetProp, bytecode.RGetMethod:
+		case bytecode.RInstanceOf, bytecode.RTypeof, bytecode.RGetProp, bytecode.RGetMethod, bytecode.RApplyArgs:
 			// R[A]'s: a getter's, called for get_prop (an accessor
 			// inlined, jitRegInlined), as typeof's and instanceof's.
 			dest = int(w.A())
