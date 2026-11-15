@@ -1137,6 +1137,9 @@ type jitState struct {
 	// themselves to their contexts' RecordRef (jit.SSACode's CallRefs),
 	// which a run's end clears (jitRunDone).
 	callRefs uint64
+	// megaGC is the collector's cycle (jitGCEpoch) the megamorphic cache
+	// was last emptied at (flush).
+	megaGC uint64
 	// resumed counts native calls whose callee Go finished, after which
 	// their callers' code went on natively (runSSA); resumedLevels those
 	// whose caller was itself a level Go was finishing (jitUnwindNative).
@@ -2137,6 +2140,20 @@ func (s *jitState) flushNow() uint64 {
 // (rememberFlushed), and the function is compiled again once it is hot
 // again. It looks at a back-edge check (backEdgeBudget) and before a compile (age).
 func (s *jitState) flush() {
+	if g := jitGCEpoch.Load(); g != s.megaGC {
+		// A collection ended since the last look: the megamorphic cache
+		// (abi.MegaCache) is emptied, as V8 clears its stub caches after
+		// every full collection (heap.cc's ClearStubCaches). An entry
+		// holds its shape, which holds its prototype, and so the
+		// prototype's methods and every binding they capture: kept until
+		// another shape took its place, a finished program's shapes had
+		// kept its whole heap alive -- AWFY DeltaBlue's, 17 MB, through
+		// Havlak, every collection of which marked it again.
+		s.megaGC = g
+		if s.mega != nil {
+			clear(s.mega[:])
+		}
+	}
 	tick := s.flushNow()
 	if tick < s.flushedAt+jitFlushAge {
 		return

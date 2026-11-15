@@ -473,6 +473,13 @@ type weakMapRegistry struct {
 	// holders are the holders of keys' entries made ahead (takeHolder),
 	// to be given out last first.
 	holders []*weakRefsHolder
+
+	// calls is what the register code's call caches let go of at each
+	// turn's end, and what they called, held weakly (releaseRegCalls):
+	// the runtime's other weak bookkeeping, kept here so that the
+	// Runtime's fields, which the interpreter's hot code reads, stay
+	// where they are.
+	calls regCallKeep
 }
 
 // takeHolder is a holder for the entries of an object about to be a key

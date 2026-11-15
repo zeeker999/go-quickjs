@@ -660,7 +660,7 @@ form's closure counts its calls -- and not refused for host operations
 alone (`jitRegLongWarming`), is compiled once its budget is spent, as
 any function -- the interpreter's runs of it that Go makes for its native
 callers count it down -- unless its caller calls it often: no longer than
-a function inlines in all (`ssa.MaxInlineTotal`) and invoked at least 15
+a function inlines in all (`ssa.MaxInlineTotal`) and invoked at least 5
 hundredths as often as the caller, V8's `min_inlining_frequency`, each
 counted by its runs while it had no code (`jitRegInvoked`, the budget's
 ticks) and the caller's since by its entries at its start, its link's
@@ -1152,7 +1152,11 @@ V8's megamorphic loads probe its stub cache: an entry, by the receiver's
 shape and the key, names the receiver's own data property, or a prototype's
 along a chain the code checks object by object and shape by shape
 (`abi.MegaChain`), or that none of the prototypes has it, the read's value
-undefined (`abi.MegaAbsent`). Go fills an entry at a read's exit. A read
+undefined (`abi.MegaAbsent`). Go fills an entry at a read's exit, and
+empties the cache once a collection has ended (`flush`, at the next
+back-edge check), as V8 clears its stub caches after every full
+collection: an entry holds its shape, and the shape its prototype, whose
+methods hold all they capture. A read
 whose receiver's prototypes are no longer its case's -- a method added to
 one -- looks there too. A megamorphic site's write that neither the
 receiver's own table nor the megamorphic cache has -- an addition, a shape
@@ -2434,14 +2438,17 @@ of Are We Fast Yet's functions of unique names, so a register instruction
 counts 20/17 of one (`ssa`'s `inlineSize`), and a register callee takes the
 budget the same code takes in the stack form. How often
 is V8's call frequency where the feedback knows it (`Frequency`): a call
-made less often than `ssa.MinInliningFrequency` (0.15, V8's
-`min_inlining_frequency`) for each invocation of the function compiled is
-not inlined, and is made a native call, unless its callee is small: 10
-instructions or fewer as the bounds count them (`maxInlineSmall`, V8's
-`max_inlined_bytecode_size_small` of 27 bytes; 8 register instructions),
-which V8 inlines however seldom the call is made, its code about the
-call's, and which then inlines no more than a small callee's worth with
-its own callees (`smallCallee`); the most frequent come
+made less often than `ssa.MinInliningFrequency` (0.05, V8's
+`min_inlining_frequency` as V8 runs: the flag's 0.15 is lowered to 0.05
+wherever Maglev is on, as it is by default) for each invocation of the
+function compiled is not inlined, and is made a native call, unless its
+callee is small: 10 instructions or fewer as the bounds count them
+(`maxInlineSmall`, V8's `max_inlined_bytecode_size_small` of 27 bytes; 8
+register instructions), which V8's Turbolev inlines however seldom the
+call is made, its code about the call's, and which then inlines no more
+than a small callee's worth with its own callees (`smallCallee`); the
+frequencies are known once the function has run 59 times
+(`jitCountsEnough`); the most frequent come
 first, a call whose frequency is not known taken as made once outside the
 loops and more often inside one (`ssa`'s `inlineOrder`). Register code's
 frequencies are what the feedback dispatcher counted (see
@@ -2799,7 +2806,20 @@ with theirs, refusals first, then code unused this epoch and the one before,
 least recently used first (`regVictims`, `regReclaim`); and `flush` drops
 code unused between two of its looks (`regFlush`). Code let go of so has its
 function warm up anew (`regLetGo`), and compiled again it is compiled with
-all its function learned, which outlives its code (`regLearned`). The
+what its function learned that holds no object, which outlives its code
+(`regLearned`): the sites whose speculation failed, the reads and the
+arithmetic that met other kinds, where Go went on, the lowerings' hints --
+what the stack form's ghosts keep of an entry its cache dropped. The
+callees its calls met, the closures it inlined, the pools its constructions
+and literals took objects from go (`regForget`): a pool keeps every object
+it handed out, and a closure everything it captured, so kept with a
+function whose bytecode outlived them they had kept a finished program's
+heap alive, which every later collection marked again. A closed entry
+drops what its code read by address and the targets it was compiled for
+(`regClose`); a run's end clears its contexts' records up to what any
+code's native calls write (`callRefs`, which every compile raises) and,
+with no native code running, the stand-in frame of a callee's call of Go
+(`calleeFrame`). The
 cache knows a function by its key, not its templates, so a template's code
 (`jitReg`) is code only while the cache holds it (`jitRegEntry`'s
 `cached`), as the stack form's hint names an entry only while the cache
