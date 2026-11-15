@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
 // regWarmGenSrc has a generator doing work between yields, which its own
@@ -170,5 +172,143 @@ func TestJITRegGenLearnedJudgedAfresh(t *testing.T) {
 	}
 	if v, err := r.Call(fn, Undefined, []Value{Float(2000)}); regNativeShow(r, v, err) != "4000000" {
 		t.Fatalf("pairs: %s", regNativeShow(r, v, err))
+	}
+}
+
+// regWarmCallSrc has a call of eight functions, a table's, by a loop, as
+// literal_sites_read has it; and a call of four that a loop makes only
+// past its first half, its site's cache empty when the loop is compiled.
+const regWarmCallSrc = `
+var fs8 = [
+	function (j) { return { x: j, y: 1 } }, function (j) { return { x: j, y: 2 } },
+	function (j) { return { x: j, y: 3 } }, function (j) { return { x: j, y: 4 } },
+	function (j) { return { x: j, y: 5 } }, function (j) { return { x: j, y: 6 } },
+	function (j) { return { x: j, y: 7 } }, function (j) { return { x: j, y: 8 } },
+];
+function rd(o) { return o.x; }
+function sites(n) {
+	var s = 0;
+	for (var j = 0; j < n; j++) s += rd(fs8[j & 7](j));
+	return s;
+}
+var fs4 = [function (a) { return a + 1 }, function (a) { return a + 2 }, function (a) { return a * 3 }, function (a) { return a - 4 }];
+function late(n) {
+	var s = 0;
+	for (var j = 0; j < n; j++) {
+		if (j >= n / 2) s += fs4[j & 3](j);
+		else s += j & 1;
+	}
+	return s;
+}
+`
+
+// TestJITRegCallRepeatsInvalidates runs a call of eight functions in a
+// loop, with the JIT and without, the collector idle and marking: a call
+// that leaves at a host exit for a function an earlier exit there taught
+// its code, which the code was not compiled for, invalidates it
+// (jitRegCallRepeats), as the stack form's jitCallRepeats has it, the
+// interpreter running the function until it is compiled again with it.
+// Left valid, the code left at every other turn until its loop was judged
+// slow for it, and the interpreter ran the loop for a thousand samples.
+func TestJITRegCallRepeatsInvalidates(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regWarmCallSrc)
+			rts[0].SetJITReport(true)
+			rts[0].jitStress = jitStressConfig{}
+			for i, r := range rts {
+				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("sites"))
+				for k := range 6 {
+					v, err := r.Call(fn, Undefined, []Value{Float(100000)})
+					if got := regNativeShow(r, v, err); got != "4999950000" {
+						t.Fatalf("runtime %d, call %d: %s, want 4999950000", i, k, got)
+					}
+				}
+			}
+			r := rts[0]
+			fn, _ := r.GetProp(Obj(r.Global()), r.Intern("sites"))
+			cl := fn.Object().fn().closure
+			l := r.jit.regLearnedOf(r.jitRegKeyOf(cl))
+			st := r.RegNativeStats()
+			for why, n := range st.Ended {
+				if strings.HasPrefix(why, "slow loop") && strings.HasSuffix(why, " in sites") {
+					t.Errorf("%d runs ended: %s", n, why)
+				}
+			}
+			if l.loopSlow {
+				t.Error("sites' loop judged slow")
+			}
+			if n := st.HostOps["call_method_w"]; n > 20 {
+				t.Errorf("%d host exits at the call", n)
+			}
+			t.Logf("ended %v, hosts %v", st.Ended, st.HostOps)
+		})
+	}
+}
+
+// TestJITRegCallSettlesTogether checks that a call whose code knows none
+// of its functions decides those it meets in its first jitCallsToInline
+// calls of Go together (jitRegCallSettling), as the stack form's
+// jitCallSeen settles a call, the code compiled again once for them all:
+// learned one at a time, each compile again was put off by the next
+// function met.
+func TestJITRegCallSettlesTogether(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	rts := regNativeRuntimes(t, regWarmCallSrc)
+	var got [2]string
+	for i, r := range rts {
+		r.jitStress = jitStressConfig{}
+		fn, _ := r.GetProp(Obj(r.Global()), r.Intern("late"))
+		for range 4 {
+			v, err := r.Call(fn, Undefined, []Value{Float(400000)})
+			got[i] = regNativeShow(r, v, err)
+		}
+	}
+	if got[0] != got[1] || got[1] != "89999950000" {
+		t.Fatalf("late: with the JIT %s, without %s, want 89999950000", got[0], got[1])
+	}
+	r := rts[0]
+	fn, _ := r.GetProp(Obj(r.Global()), r.Intern("late"))
+	cl := fn.Object().fn().closure
+	rpc := -1
+	for pc, w := range cl.reg.rc.Code {
+		if w.Op() == bytecode.RCallMW {
+			rpc = pc
+		}
+	}
+	arr, _ := r.GetProp(Obj(r.Global()), r.Intern("fs4"))
+	var xs []jitInline
+	for k := range 4 {
+		o, _ := r.GetProp(arr, r.Intern(fmt.Sprint(k)))
+		xs = append(xs, jitInline{pc: int32(rpc), cl: o.Object().fn().closure, obj: o.Object()})
+	}
+	l := &jitEntry{jitLearned: &jitLearned{}}
+	// Met twice, the first: the count goes on, kept once.
+	for i, x := range []jitInline{xs[0], xs[0], xs[1]} {
+		if met, settled := r.jitRegCallSettling(l, cl.reg, rpc, x); settled || met != nil {
+			t.Fatalf("call %d settled", i)
+		}
+	}
+	if len(l.settling) != 2 {
+		t.Fatalf("%d settling, want 2", len(l.settling))
+	}
+	met, settled := r.jitRegCallSettling(l, cl.reg, rpc, xs[2])
+	if !settled || len(met) != 2 || met[0].obj != xs[0].obj || met[1].obj != xs[1].obj || len(l.settling) != 0 {
+		t.Fatalf("fourth call: settled %v, met %d, %d left settling", settled, len(met), len(l.settling))
+	}
+	if l.callSites[rpc] != jitCallNative {
+		t.Errorf("call's state %d, want %d", l.callSites[rpc], jitCallNative)
+	}
+	// Settled: later functions are learned as they come.
+	if met, settled := r.jitRegCallSettling(l, cl.reg, rpc, xs[3]); !settled || met != nil {
+		t.Errorf("after settling: settled %v, met %d", settled, len(met))
 	}
 }

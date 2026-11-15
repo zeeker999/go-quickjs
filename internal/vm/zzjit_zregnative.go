@@ -125,6 +125,10 @@ type jitRegEntry struct {
 	// goes on at one, the code is compiled again with the entry
 	// (jitRegResumeSeen).
 	unresumed []int
+	// targets are the calls' targets its function had learned when the
+	// code was placed (jitTargetsOf), which it is compiled for, as the
+	// stack form's entry's ssaTargets (jitRegCallRepeats).
+	targets []jitTarget
 }
 
 // loopEntry is the entry, an instruction of the program, of the loop
@@ -548,6 +552,7 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 	s.inlined += uint64(len(f.Inlined))
 	s.inlinedCode += uint64(f.InlinedCode)
 	e.code, e.bytes = code, need
+	e.targets = jitTargetsOf(e.life)
 	e.scratch = f.Scratch
 	e.keeps = f.Keeps
 	s.ssaKeeps = max(s.ssaKeeps, f.Keeps)
@@ -1332,7 +1337,20 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 				// failed: a callback made anew at each call of its maker,
 				// called by its code from here, as at a call of Go; and a
 				// super()'s parent.
+				repeats := r.jitRegCallRepeats(f, c, e, exitPC, callee)
 				r.jitRegCallSeen(f, c, e, exitPC, callee)
+				if repeats {
+					// What it learned there, it learned at an earlier exit:
+					// invalidated, as the stack form's code is
+					// (jitCallRepeats) and V8's deoptimizes at a call of a
+					// target it was not compiled for, the interpreter
+					// running the function until it is compiled again with
+					// it, rather than leaving at each such call -- a call of
+					// eight functions, four learned one at a time, had
+					// left at every other turn until its loop was judged
+					// slow for it.
+					r.jitRegInvalidate(f.cl, e)
+				}
 				r.jitRegSuperSeen(f, c, e, exitPC)
 				if mcallee.IsObject() {
 					r.jitRegViaSeen(f, e, exitPC, mcallee, mrecv, int(w.X()))
@@ -2222,6 +2240,11 @@ func jitRegCallSettle(e *jitRegEntry, c *regCode, rpc int, callee Value) {
 	l := e.life
 	if len(l.callSites) != len(c.rc.Code) {
 		l.callSites = make([]uint8, len(c.rc.Code))
+	}
+	if l.callSites[rpc] == jitCallNative {
+		// Settled on the functions it calls natively (jitRegCallSettling),
+		// whose learning goes on.
+		return
 	}
 	if l.callSites[rpc]++; l.callSites[rpc] >= jitCallsToInline {
 		l.callSites[rpc] = jitCallDone
