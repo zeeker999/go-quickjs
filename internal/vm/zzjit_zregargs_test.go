@@ -2,11 +2,6 @@
 
 package vm
 
-import (
-	"fmt"
-	"testing"
-)
-
 // regArgsInlineSrc's callees keep their arguments: they read them by
 // index and count them -- sloppy and strict, past the call's count, by a
 // key the build does not know, with a property read in the reader whose

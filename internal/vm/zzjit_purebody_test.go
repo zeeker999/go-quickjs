@@ -2,9 +2,3 @@
 
 package vm
 
-import (
-	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-)
-

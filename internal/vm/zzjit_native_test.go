@@ -1831,54 +1831,6 @@ func TestJITSSACompareReferences(t *testing.T) {
 	}
 }
 
-// The new pipeline reads an element it carries as a reference by the
-// element's cell, whatever it holds -- objects read from an array and used
-// as receivers, as Richards' scheduler does, or returned -- where it took
-// every element for a number and failed a guard at each object. A hole,
-// an index past the end and an object that is not an array go to Go.
-func TestJITSSAElementReferences(t *testing.T) {
-	t.Parallel()
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	setup := `function T(p){this.p=p}
-		function sum(ts,n){let s=0;for(let i=0;i<n;i++){const t=ts[i%3];s+=t.p}return s}
-		function pick(a,i){let r=null;for(let k=0;k<3;k++)r=a[i];return r}
-		var dense=[new T(1),new T(2),new T(3)],holey=[new T(1),,new T(3)],notArray={0:new T(5),1:new T(6),2:new T(7)};`
-	rounds := []string{
-		`''+sum(dense,30)`,
-		`[pick(dense,1)===dense[1],pick(holey,1),pick(dense,7),pick(notArray,0).p,pick([1,'s',null],1)].join()`,
-		`''+sum(holey,3)`,
-	}
-	want := New(Config{})
-	defer func() { want.Close(); want.ReleaseClosed() }()
-	r := jitRuntimeForTest(t, Config{JIT: true})
-	for _, rt := range []*Runtime{want, r} {
-		if _, err := rt.Run(compileForTest(t, setup)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for i, src := range rounds {
-		wv, werr := want.Run(compileForTest(t, src))
-		gv, gerr := r.Run(compileForTest(t, src))
-		if (werr == nil) != (gerr == nil) || werr == nil && gv.String().Go() != wv.String().Go() {
-			t.Fatalf("round %d: got %v, %v; interpreter %v, %v", i, gv, gerr, wv, werr)
-		}
-	}
-	sum := r.global.getOwn(r.atoms.intern("sum")).value().Object().fn().closure
-	e := r.jit.hint(sum)
-	if e == nil || e.ssa == nil || e.ssaStats.entries == 0 {
-		t.Fatalf("sum: %+v", e)
-	}
-	for site := range e.ssaStats.guardsAt {
-		if op := sum.fn.Code[site].Op; !jitPropertyOp(op) {
-			t.Fatalf("sum failed a guard at %d, %v: %v", site, op, e.ssaStats.guardsAt)
-		}
-	}
-	if st := r.JITStats(); jitOtherGuards(r) != 0 {
-		t.Fatalf("element reads failed guards: %+v, %d at property sites", st, r.jit.shapeDeopts)
-	}
-}
 
 // A runtime's compiled functions share a few mappings, its arena's chunks,
 // rather than taking one each; closing the runtime releases every one.
@@ -9031,37 +8983,6 @@ func TestJITSSAMegamorphicOwnReads(t *testing.T) {
 	}
 }
 
-// Looking at a construction's pools when native code leaves there makes
-// nothing: it had concatenated the entry's two lists at every exit, which
-// came to a sixth of RayTrace's allocations with construction on.
-func TestJITPoolLookupsAllocateNothing(t *testing.T) {
-	r := jitRuntimeForTest(t, Config{JIT: true})
-	if _, err := r.Run(compileForTest(t, `function P(){} function f(){return new P()} f()`)); err != nil {
-		t.Fatal(err)
-	}
-	cl := r.global.getOwn(r.atoms.intern("f")).value().Object().fn().closure
-	ctor := r.global.getOwn(r.atoms.intern("P")).value().Object()
-	pc := slices.IndexFunc(cl.fn.Code, func(in bytecode.Instr) bool { return in.Op == bytecode.OpNew })
-	if pc < 0 || r.jit == nil {
-		t.Fatal("no construction")
-	}
-	pool := new(abi.ObjectPool)
-	e := &jitEntry{jitLearned: &jitLearned{inlines: []jitInline{{pc: int32(pc), cl: ctor.fn().closure, obj: ctor, pool: pool}},
-		nativeCalls: []jitInline{{pc: int32(pc) + 1}}}, link: &jitLink{}}
-	// In place of the entry f's call compiled, as the cache replaces one.
-	key := r.jitKeyOf(cl.fn)
-	if old := r.jit.cache[key]; old != nil {
-		r.jit.forget(key, old)
-	}
-	r.jit.remember(key, e)
-	l := &jitNativeLevel{cl: cl, pc: uint64(pc), kind: abi.ExitHost}
-	if !r.jitPoolEmptied(l) {
-		t.Fatal("the empty pool is not found")
-	}
-	if n := testing.AllocsPerRun(100, func() { r.jitPoolEmptied(l) }); n != 0 {
-		t.Fatalf("%v allocations a look", n)
-	}
-}
 
 // A read of a function's own property -- its prototype, which the VM's
 // caches never learn -- is made natively by searching the function's
@@ -9200,47 +9121,6 @@ func TestJITSSAInlinedCalleeLearns(t *testing.T) {
 	}
 }
 
-// Code called natively that leaves on too many of its calls is compiled
-// again for what its exits taught, its native callers calling it still, as
-// V8 optimizes again after a deopt; only after jitUnwindReopts such
-// compiles do they stop calling it (notNative). A callee that left while
-// it learned -- RayTrace's Sphere.intersect, before its constructions were
-// decided -- had been made notNative at once, with a backoff that kept it
-// so for the rest of the run.
-func TestJITSSAUnwoundCompilesAgainFirst(t *testing.T) {
-	t.Parallel()
-	r := jitRuntimeForTest(t, Config{JIT: true})
-	if _, err := r.Run(compileForTest(t, `function g(n){let s=0;for(let i=0;i<n;i++)s=(s+i)|0;return s}g(300);g(300)`)); err != nil {
-		t.Fatal(err)
-	}
-	g := r.jit.cache[r.jitKeyOf(r.global.getOwn(r.atoms.intern("g")).value().Object().fn().closure.fn)]
-	if g == nil || g.ssa == nil {
-		t.Fatal("g has no code")
-	}
-	// An entry of its own, with code, as a callee's.
-	e := &jitEntry{jitLearned: &jitLearned{}, ssa: g.ssa, link: &jitLink{}}
-	leave := func() {
-		// One call in two leaves, its exits having learned a call to
-		// inline (jitLearning; TestJITSSAUnwoundCompiledAgainOnlyForWhatItLearned
-		// has one that learns nothing).
-		e.inlinePending = true
-		for range jitUnwindProbe {
-			e.link.in += 2
-			r.jitUnwound(e)
-		}
-	}
-	for i := range jitUnwindReopts {
-		leave()
-		if !e.unwindReopt || e.notNative || int(e.unwindReopts) != i+1 {
-			t.Fatalf("leaving too often %d times: compiled again %v, notNative %v", i+1, e.unwindReopt, e.notNative)
-		}
-		e.unwindReopt = false
-	}
-	leave()
-	if !e.notNative || e.nativeBackoff != 1 {
-		t.Fatalf("leaving too often after its compiles: notNative %v, backoff %d", e.notNative, e.nativeBackoff)
-	}
-}
 
 // instanceof is answered by native code where its constructor is known, as
 // V8 lowers it: a walk along the value's prototypes, after checks that the

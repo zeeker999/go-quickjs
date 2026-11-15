@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
 // regTailClosSetup's closures reach the loop that calls them through calls

@@ -6,9 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
 // regNativeSrc is the program TestJITRegNative's functions are of: loops,

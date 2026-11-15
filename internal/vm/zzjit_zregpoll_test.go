@@ -8,9 +8,6 @@ import (
 	"fmt"
 	"testing"
 	"time"
-
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
 // regPollSrc recurses natively with no loop: a tree of objects far past

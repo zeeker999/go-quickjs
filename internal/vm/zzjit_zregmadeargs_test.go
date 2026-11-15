@@ -2,11 +2,6 @@
 
 package vm
 
-import (
-	"fmt"
-	"testing"
-)
-
 // regMadeArgsSrc's functions make closures that read their arguments by
 // index and count them -- sloppy and strict, a captured binding read --
 // and call them, the closure made anew each turn: inlined where called and

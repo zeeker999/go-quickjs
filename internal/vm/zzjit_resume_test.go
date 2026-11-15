@@ -8,7 +8,6 @@ import (
 	"testing"
 )
 
-
 // An inlined callee is the code itself: an exit inside it leaves the code
 // there, as the code's own exits do, and Go goes on after the call, so the
 // call keeps its entry from the first compile. AWFY's Queens: placeQueen

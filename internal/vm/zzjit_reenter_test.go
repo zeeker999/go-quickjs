@@ -5,7 +5,6 @@ package vm
 import (
 	"runtime"
 	"runtime/debug"
-	"sync"
 	"testing"
 )
 

@@ -25,15 +25,12 @@ The main areas are:
 - `internal/vm`: JavaScript runtime semantics and built-ins. `Intl`, `Date`'s
   local time and `Temporal` are bindings over
   [go-intl](https://github.com/go-quickjs/go-intl), which holds the locale
-  data, the calendars and the time zones. On amd64 the register interpreter
-  (docs/register-interpreter.md) runs a runtime's code by default, on
-  native handlers; on other architectures, and in a runtime with the JIT,
-  which reads the stack form alone, the stack interpreter and the tree tier
-  run it, as they do in every runtime with `QJS_REG=0`. `QJS_REG=1` turns
-  the register interpreter on anywhere, on the Go handlers where there are
-  no native ones. The default is `bytecode.RegDefault`, an architecture's
-  constant in `internal/bytecode/regdefault_*.go`. `QJS_REG=0` and the old
-  tiers stay until the JIT reads register code; test with both settings.
+  data, the calendars and the time zones. The register interpreter
+  (docs/register-interpreter.md) runs every runtime's code: on native
+  handlers on amd64 and arm64, and on the Go handler table elsewhere and
+  with `QJS_NONATIVE=1`; test with both. The JIT compiles register code.
+  The front end still makes each function's stack form, which the register
+  backend reads, and nothing runs.
 - `internal/regdiff`: tests only, the register interpreter's differential
   tests, over cases of their own and the corpora `internal/v8bench` holds
   for the benchmark runners.
@@ -60,33 +57,24 @@ concurrently.
   bytes, so adding, moving or renaming code there -- even code a benchmark
   never runs -- can move the V8 suite by 5 to 10%. Do not rename or reorder
   its files or move code between them without comparing builds with
-  `internal/cmd/v8bench/placements` (see Validation); the `zcall_*.go` and
-  `ztree_*.go` files sort last on purpose, so that what is added there moves
-  nothing before it.
+  `internal/cmd/v8bench/placements` (see Validation); the `zz*.go` files
+  sort last on purpose, so that what is added there moves nothing before
+  it.
 - What decides the speed is how much of the hot path AMD Zen 2's op cache
   holds: 64 sets of 8 entries, each set taking the code at one offset in
   every 4 KB. Hot code that a change moves onto the same sets -- even by
   moving it, its instructions unchanged -- is decoded again on every pass,
   and a loop can run a quarter slower. So keep the interpreter's hot
-  functions (`executeAt`, `runTree`, `runTreeNested`, `callObject`,
-  `callTree`, `runFD`, `backEdgeCheck`) as they are -- a tree node that
-  needs what one of `executeAt`'s cases does gets its own copy, rather than
-  that case moving into a helper -- and keep the distance between the hot
-  functions and the tree nodes' hot closures: every function comes before
-  every closure, so a function added even in the last file moves every
-  closure. Code the tree tier adds is therefore written in a `ztree_*.go`
-  file as package variables, each assigned a closure in the file's `init`,
-  which is laid out after every closure there was. An opcode `executeAt` must run is a case, which moves
-  all that follows, and even a label added to a case it has reorders that
-  case's registers: what the interpreter can do without is a mark on an
-  instruction it has (`bytecode.AddOwned`), and what it cannot, an operand
-  of one that calls out of line (`bytecode.StrFreezeA`).
+  functions (`runReg`, `rhCallW`, `regRunFD`, `callObject`) as they are,
+  and the native handlers, which `internal/vm/internal/nativegen`
+  generates, the same: an instruction the interpreter must run is a handler
+  of its own in both emitters and the Go table, and a slow path a call out
+  of line.
 - The layout lock keeps the hot code where it measured best whatever a
   change moves around it: generated pads, dead code and data, put the
-  anchors of `internal/vm/layoutlock.txt` -- the built-ins, the tree's
-  builder and slow paths, `executeAt`, the call path, `runTree`,
-  `callTree`, the JIT's leaf calls, the tree's closures and its generic
-  nodes, the DataView leaves, the method values, the regular expression
+  anchors of `internal/vm/layoutlock.txt` -- the built-ins, the call path,
+  `runReg` and `rhCallW`, the JIT's leaf calls, the DataView leaves, the
+  method values, the regular expression
   matcher (a pad of its own in internal/regexp), and the Go runtime's
   `mheap_`, `writeBarrier` and `gcController` -- at fixed offsets modulo
   4 KB and 64 bytes in a `v8bench` build. After a change to package
@@ -164,18 +152,12 @@ Do not manually edit generated files or their binary companions:
   same code; the UTF-8 one is patched where `internal/asciigen` says. After
   changing `exec.go`, run `go generate ./internal/regexp`.
   `TestASCIIMatcherGenerated` fails while either file is out of date.
-- `internal/vm/tree_operand.go`, the tree tier's nodes for an operator over
-  each pairing of a local, an upvalue, a number constant and a tree, written
-  by `internal/vm/internal/treegen`. After changing the generator, run
-  `go generate ./internal/vm`; `TestTreeOperandsGenerated` fails while the
-  file is out of date.
-- `internal/vm/zzjit_snapshot_gen.go` and `zzjit_asked_gen_test.go`, the
-  JIT's snapshot of a build's feedback -- its answer to and its asker of
-  each of `jitFeedback`'s methods -- written by
-  `internal/vm/internal/snapgen` from those methods, which it reads from
-  the package's `zzjit_*.go` files only. After changing a method of
-  `jitFeedback`, run `go generate ./internal/vm`; `TestSnapshotGenerated`
-  fails while either file is out of date.
+- `internal/vm/zzjit_snapshot_gen.go`, the JIT's snapshot of a build's
+  feedback -- its answer to and its asker of each of `jitRegFeedback`'s
+  methods -- written by `internal/vm/internal/snapgen` from those methods,
+  which it reads from the package's `zzjit_*.go` files only. After changing
+  a method of `jitRegFeedback`, run `go generate ./internal/vm`;
+  `TestSnapshotGenerated` fails while the file is out of date.
 - `internal/vm/zzzyn_native_handlers_amd64.s`,
   `zzzyn_native_handlers_arm64.s`, `zzzyn_native_feedback_amd64.s` and
   `zzzyn_native_feedback_arm64.s`, the register interpreter's native
@@ -435,8 +417,8 @@ go run -tags quickjs_jit ./internal/cmd/v8bench -jit -bench octane -dir /tmp/oct
 `microbench_extra.js`, of what it has none of -- generators, async
 functions, try statements, iterators, using declarations, closures
 made and called anew, calls in tail position, method calls with a frame
-and without, loops of a few simple instructions, which with `QJS_NOTREE=1`
-time the interpreter's dispatch, private class members, Math.random, the in operator, a delete of an object's last property,
+and without, loops of a few simple instructions, which time the
+interpreter's dispatch, private class members, Math.random, the in operator, a delete of an object's last property,
 object and array spread, object rest, computed keys and spread calls,
 Array.prototype.forEach, reduce, map, filter and some, and their callbacks
 varied -- made once or anew, a function expression or an arrow, reading
@@ -475,7 +457,7 @@ go run ./internal/cmd/v8bench -mode micro -n 1 -suite empty_loop,func_call
 To compare two builds, use `internal/cmd/v8bench/placements`: one build of
 each side compares where the linker put package vm's hot code as much as
 the code. `build` makes eight builds of the working tree, each placing
-`executeAt`, the call path, `runTree` and the tree's closures differently in
+`runReg`, the call path and the native handlers differently in
 a balanced design, and checks every one with `go tool nm`; `compare` runs two
 labels' placements in turn and reports each side's mean. Build both sides in
 the same checkout, and leave the machine idle while they run.
@@ -578,14 +560,14 @@ to spare showed. QuickJS has no helper threads, so one thread is the fair
 comparison with it.
 
 `internal/cmd/disasm` prints the bytecode a script or module compiles to,
-each function's instructions under the source lines they come from; `-tree`
-says whether the tree tier builds each function and, where it does not,
-why, and `-func` picks functions by name. Look there first when a
-micro-benchmark moves: it shows which instructions and which tier a loop
+each function's register code under the source lines it comes from;
+`-func` picks functions by name, `-stack` adds the stack form the front end
+makes, and `-jit` says whether the JIT lowers each function. Look there
+first when a micro-benchmark moves: it shows which instructions a loop
 runs as.
 
 ```sh
-go run ./internal/cmd/disasm -tree -func global_read bench.js
+go run ./internal/cmd/disasm -func global_read bench.js
 ```
 
 `internal/cmd/compilediff` compares what the front end makes at two

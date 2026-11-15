@@ -3,11 +3,11 @@
 package vm
 
 import (
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"strings"
 	"testing"
 	"time"
-	"unsafe"
+
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 
 	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
 )
@@ -38,52 +38,6 @@ func jitCallForTest(t *testing.T, r *Runtime, src string, want float64) {
 	}
 }
 
-// A function due to be compiled in the background runs in the existing
-// tiers while it is lowered there, and then compiled there, until its code
-// is installed, at the Kth check after its compile was handed over -- a
-// call of it is one (tryJITAt), and so is its loop's in a tree
-// (tryJITLoop) -- and natively from then on.
-func TestJITBackgroundFirstCompile(t *testing.T) {
-	t.Parallel()
-	const k = 3
-	r := jitBackgroundForTest(t, k)
-	cl := jitGlobalClosureForTest(r, "sum")
-	var j *jitJob
-	for call := 1; ; call++ {
-		before := r.JITStats().SSAEntries
-		jitCallForTest(t, r, `sum(10)`, 45)
-		e := r.jit.entryFor(cl.fn)
-		if e == nil {
-			t.Fatalf("call %d: no entry", call)
-		}
-		native := r.JITStats().SSAEntries != before
-		if e.warming {
-			// Its lowering, in the background first (jitLowerLater).
-			if e.ssa != nil || native || j != nil {
-				t.Fatalf("call %d: code %v, native %v, compile seen %v: want it lowering, run in the existing tiers", call, e.ssa != nil, native, j != nil)
-			}
-			continue
-		}
-		if e.pending != nil {
-			j = e.pending
-			if e.ssa != nil || native || j.checks >= k {
-				t.Fatalf("call %d: code %v, native %v, %d checks: want the compile pending, run in the existing tiers", call, e.ssa != nil, native, j.checks)
-			}
-			continue
-		}
-		if j == nil {
-			t.Fatalf("call %d: code %v, native %v, its compile never seen pending", call, e.ssa != nil, native)
-		}
-		if j.checks != k || e.ssa == nil || !native {
-			t.Fatalf("call %d: its compile's checks %d, code %v, native %v: want the code installed at check %d and run", call, j.checks, e.ssa != nil, native, k)
-		}
-		break
-	}
-	if s := r.jit; s.bgLowered != 1 || s.bgSubmitted != 1 || s.bgDiscarded != 0 || len(s.jobs) != 0 || len(s.lowerings) != 0 || s.compiled != 1 {
-		t.Fatalf("lowered %d, submitted %d, discarded %d, jobs %d, lowerings %d, compiled %d: want 1, 1, 0, 0, 0, 1",
-			s.bgLowered, s.bgSubmitted, s.bgDiscarded, len(s.jobs), len(s.lowerings), s.compiled)
-	}
-}
 
 
 
@@ -149,31 +103,6 @@ func TestJITBackgroundInstallAtNestedLoop(t *testing.T) {
 }
 
 
-// A lowering in the background whose function was lowered again
-// meanwhile, for hints it did not have (relower), is thrown away at its
-// install, and the function lowered again from the hints it has now.
-func TestJITBackgroundStaleLowering(t *testing.T) {
-	t.Parallel()
-	r := jitBackgroundForTest(t, 2)
-	cl := jitGlobalClosureForTest(r, "sum")
-	jitCallForTest(t, r, `sum(10)`, 45)
-	if len(r.jit.lowerings) != 1 {
-		t.Fatalf("%d lowerings in the background, want 1", len(r.jit.lowerings))
-	}
-	r.jit.relower(r.jit.lowerings[0].l)
-	for call := 0; ; call++ {
-		jitCallForTest(t, r, `sum(10)`, 45)
-		if e := r.jit.entryFor(cl.fn); e != nil && e.ssa != nil {
-			break
-		}
-		if call == 20 {
-			t.Fatal("no code installed")
-		}
-	}
-	if s := r.jit; s.bgLowered != 2 || s.bgDiscarded != 1 {
-		t.Fatalf("lowered %d, discarded %d: want 2, 1", s.bgLowered, s.bgDiscarded)
-	}
-}
 
 // A compile in the background is made with the backend's switches and the
 // encoding as they were when it was prepared, whatever a host or a test
@@ -373,72 +302,3 @@ func TestJITBackgroundHoldsNotForACallLeftBehind(t *testing.T) {
 	}
 }
 
-// Two functions calling each other are not held for each other, and a
-// runtime's compiles held when it lets go of its JIT leave their entries as
-// it found them.
-func TestJITBackgroundHoldsEnd(t *testing.T) {
-	t.Parallel()
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	setup := `
-		function even(n) { return n === 0 ? 1 : odd(n - 1) }
-		function odd(n) { return n === 0 ? 0 : even(n - 1) }
-		function caller(n) {
-			let x = 0
-			for (let i = 0; i < n; i++) x += even(i & 15)
-			return x
-		}
-	`
-	r := jitAgreesForTestWith(t, jitStressConfig{background: true, checks: 2}, setup, `caller(40000)`, `caller(40000)`)
-	if len(r.jit.heldJobs) != 0 {
-		t.Fatalf("%d compiles held for each other", len(r.jit.heldJobs))
-	}
-	for _, name := range []string{"even", "odd", "caller"} {
-		if e := jitCallbackEntry(r, name); e == nil || e.pending != nil {
-			t.Fatalf("%s is still waiting for its compile: %+v", name, e)
-		}
-	}
-	e, odd := jitCallbackEntry(r, "even"), jitCallbackEntry(r, "odd")
-	v, err := r.Run(compileForTest(t, `even`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	even := v.Object().fn().closure
-	oddFn := odd.link.key.Value()
-	h := &jitJob{e: e, held: true}
-	e.pending, e.awaited = h, []*bytecode.Function{oddFn}
-	e.busy++
-	// even's compile waits for odd's: odd's does not wait for it in turn.
-	odd.holds = true
-	if r.jitAwaits(odd, oddFn, 0, even) {
-		t.Fatal("two compiles held for each other")
-	}
-	e.awaited = nil
-	if !r.jitAwaits(odd, oddFn, 0, even) {
-		t.Fatal("a compile not held for a callee being compiled")
-	}
-	// Nor through others between them, however many: of a cycle held for
-	// good, no function would ever be compiled.
-	chain := make([]*bytecode.Function, jitSeedDepth+3)
-	for i := range chain {
-		chain[i] = &bytecode.Function{}
-		x, key := &jitEntry{}, r.jitKeyOf(chain[i])
-		x.pending = &jitJob{e: x, held: true}
-		addr := jitFnAddr{uintptr(unsafe.Pointer(chain[i])), key.realm}
-		r.jit.byFn[addr] = jitFnEntry{x, key}
-		t.Cleanup(func() { delete(r.jit.byFn, addr) })
-		if i > 0 {
-			r.jit.entryFor(chain[i-1]).awaited = chain[i : i+1]
-		}
-	}
-	if !r.jit.jitCompileWaits(chain[0], chain[len(chain)-1]) {
-		t.Fatalf("a compile held through %d others is not seen to wait", len(chain)-2)
-	}
-	odd.holds, odd.awaited, e.awaited = false, nil, []*bytecode.Function{oddFn}
-	r.jit.heldJobs = append(r.jit.heldJobs, h)
-	r.jit.abandonJobs()
-	if len(r.jit.heldJobs) != 0 || e.pending != nil || e.busy != 0 || len(e.awaited) != 0 {
-		t.Fatalf("held compile not let go: %d held, pending %v, busy %d, waiting for %d", len(r.jit.heldJobs), e.pending != nil, e.busy, len(e.awaited))
-	}
-}

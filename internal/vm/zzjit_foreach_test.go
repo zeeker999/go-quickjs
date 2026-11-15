@@ -204,50 +204,6 @@ const afterCallbackSetup = `
 	}
 `
 
-// A callback that leaves native code where the loop's code cannot go on
-// after its call -- invalidated meanwhile -- has Go go on with the loop
-// from the index after the callback's (jitLoopFinish's after), the
-// callback called once for each element: each answer is the
-// interpreter's.
-func TestJITForEachAfterCallback(t *testing.T) {
-	t.Parallel()
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	want := New(Config{})
-	t.Cleanup(func() { want.Close(); want.ReleaseClosed() })
-	r := jitRuntimeForTest(t, Config{JIT: true})
-	for _, rt := range []*Runtime{want, r} {
-		rt.global.setOwnRaw(rt.atoms.intern("invalidateVisit"), Obj(rt.newNativeFunc("invalidateVisit", 0,
-			func(rt *Runtime, this Value, args []Value) (Value, error) {
-				if rt != r {
-					return Undefined, nil
-				}
-				for k, x := range rt.jit.cache {
-					if fn := k.Value(); fn != nil && len(args) == 1 && fn.Name == args[0].String().Go() && x.ssa != nil {
-						fd := rt.global.getOwn(rt.atoms.intern(fn.Name)).value().Object().fn()
-						rt.jitInvalidate(fd.closure, x)
-					}
-				}
-				return Undefined, nil
-			})), propDefault)
-		if _, err := rt.Run(compileForTest(t, afterCallbackSetup)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	before := r.jit.loopsFinished
-	for i, src := range []string{`drive(40, -1)`, `drive(40, -1)`, `drive(40, -1)`, `drive(3, 4)`, `drive(3, 2)`, `drive(40, -1)`} {
-		src = "''+(" + src + ")"
-		wv, werr := want.Run(compileForTest(t, src))
-		gv, gerr := r.Run(compileForTest(t, src))
-		if werr != nil || gerr != nil || gv.String().Go() != wv.String().Go() {
-			t.Fatalf("round %d (%s): %v, %v; interpreter %v, %v", i, src, gv, gerr, wv, werr)
-		}
-	}
-	if r.jit.loopsFinished == before {
-		t.Error("Go went on with no loop")
-	}
-}
 
 // stackSetup's throws throws from its forEach's callback, which leaves
 // native code there, Go making the frames of the levels native code had

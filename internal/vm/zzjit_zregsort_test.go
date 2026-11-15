@@ -7,8 +7,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
 // Register code's sort of a typed array of a number type, or of an Array

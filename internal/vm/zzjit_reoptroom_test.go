@@ -3,14 +3,9 @@
 package vm
 
 import (
-	"runtime"
 	"slices"
 	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
-
-
 
 // Code Go goes on in the interpreter in, after an exit with no entry to go
 // on natively at, is entered at its start and its loop's header alone, as

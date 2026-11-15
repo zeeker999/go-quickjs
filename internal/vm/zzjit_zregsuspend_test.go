@@ -5,9 +5,6 @@ package vm
 import (
 	"fmt"
 	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
 // regSuspendSrc has a generator, an async function and top-level code,

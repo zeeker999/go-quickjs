@@ -3,7 +3,6 @@
 package vm
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -11,12 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
-
-	"github.com/go-quickjs/go-quickjs/internal/jit"
-	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
-	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
-
 
 // jitSnapPending is a build the oracle is to compare: its snapshot, and
 // its feedback's lists before it.

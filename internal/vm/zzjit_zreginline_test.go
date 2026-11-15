@@ -5,8 +5,6 @@ package vm
 import (
 	"fmt"
 	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
 // regInlineSrc's callers call small register functions that register code

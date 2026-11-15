@@ -2,12 +2,6 @@
 
 package vm
 
-import (
-	"runtime"
-	"runtime/debug"
-	"testing"
-)
-
 // Each function's loop meets, partway through an invocation, what its code
 // was not compiled for -- a string where numbers ran, a BigInt -- and
 // deoptimizes there, or leaves for Go at it: the interpreter runs the frame

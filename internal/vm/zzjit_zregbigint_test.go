@@ -3,16 +3,11 @@
 package vm
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	compilerpkg "github.com/go-quickjs/go-quickjs/internal/compiler"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
-
-
-
 
 // TestRegSoleRegisters pins which registers hold their values alone, of a
 // function of one parameter (r2), four bindings (r3 to r6) and a

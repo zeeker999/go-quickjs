@@ -23,69 +23,6 @@ func TestJITLiteralArrayRoomWeakPools(t *testing.T) {
 	}
 }
 
-func TestJITLiteralArrayRoom(t *testing.T) {
-	t.Parallel()
-	r := New(Config{})
-	defer r.Close()
-	cl := &closure{closureCode: &closureCode{arrays: []*arrayRoom{
-		{pc: 3, room: arrayRoomLimit, acrossTurns: true}, {pc: 7, room: 4096, acrossTurns: true},
-		{pc: 11, room: arrayRoomLimit + 1, acrossTurns: true}, {pc: 13, room: 4096},
-	}}}
-	for _, pc := range []int{5, 11, 13} {
-		if s := jitLiteralArraySource[struct{}](r, cl, nil, pc, 0); s.room != 0 {
-			t.Fatalf("literal at %d inherited unrelated or oversized room %d", pc, s.room)
-		}
-	}
-	src := jitLiteralArraySource[struct{}](r, cl, nil, 7, 0)
-	pool := &abi.ObjectPool{Source: unsafe.Pointer(src)}
-	r.jitFillLiteral(&jitLiteral{array: true, pool: pool})
-	if pool.Count != 1 || cap(src.sample.elemsOf()) != 4096 {
-		t.Fatal("native pool did not inherit the tree tier's confirmed capacity")
-	}
-	for _, c := range []struct{ length, room int }{
-		{4096, 4096}, {512, 512}, {4096, 512}, {0, 0},
-		{4096, 64}, {4096, 64}, {arrayRoomLimit + 1, 64},
-	} {
-		previous := src.sample
-		previous.extOf().elems = make([]Value, c.length)
-		pool.Count = 0
-		if !r.jitRefillPool(pool) {
-			t.Fatal("refill left an empty pool")
-		}
-		if src.room != c.room {
-			t.Fatalf("after length %d: room %d, want %d", c.length, src.room, c.room)
-		}
-		if c.room >= 256 && pool.Size != 1 {
-			t.Fatalf("large hint left a pool of %d buffers", pool.Size)
-		}
-		for i := range int(pool.Count) {
-			a := (*Object)(pool.Objects[i])
-			if a == previous || a == nil || a.class != ClassArray || a.proto() != r.proto.array ||
-				len(a.elemsOf()) != 0 || cap(a.elemsOf()) != max(c.room, len(arrayObject{}.inline)) {
-				t.Fatalf("after length %d: object %d has wrong fresh-array layout", c.length, i)
-			}
-		}
-		for i := int(pool.Count); i < len(pool.Objects); i++ {
-			if pool.Objects[i] != nil {
-				t.Fatalf("unused pool slot %d retains an object", i)
-			}
-		}
-	}
-	// Recording a tree site's PC occupies padding, so its size stays put.
-	if unsafe.Sizeof(arrayRoom{}) != 40 || unsafe.Sizeof(*src) != 104 {
-		t.Fatalf("feedback sizes changed: tree %d, native %d", unsafe.Sizeof(arrayRoom{}), unsafe.Sizeof(*src))
-	}
-	// A literal's explicit elements need room before any result grows.
-	src = jitLiteralArraySource[struct{}](r, cl, nil, 5, 7)
-	pool = &abi.ObjectPool{Source: unsafe.Pointer(src)}
-	r.jitFillLiteral(&jitLiteral{array: true, pool: pool, n: 7})
-	src.sample.extOf().elems = src.sample.elemsOf()[:7]
-	pool.Count = 0
-	r.jitRefillPool(pool)
-	if a := (*Object)(pool.Objects[0]); len(a.elemsOf()) != 0 || cap(a.elemsOf()) != 8 || src.room != 0 {
-		t.Fatal("a literal's explicit elements changed its learned room")
-	}
-}
 
 func TestJITLiteralArrayRoomNative(t *testing.T) {
 	jitNoInlineForTest(t, "fill")

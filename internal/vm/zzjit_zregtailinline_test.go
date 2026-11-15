@@ -2,13 +2,6 @@
 
 package vm
 
-import (
-	"fmt"
-	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
-)
-
 // regTailInlineSrc's callers call register functions whose calls are in
 // tail position (tail_call_w, tail_call_method_w), which register code
 // inlines as the stack form's does, a call in tail position as the

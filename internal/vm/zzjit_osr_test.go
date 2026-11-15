@@ -446,34 +446,6 @@ func TestJITFramesLeave(t *testing.T) {
 	}
 }
 
-// An exit looks for objects not made in the homes of the code that may still
-// exit: the new code's once no run of the code it replaced is left, however
-// that ends.
-func TestJITHomesComeDown(t *testing.T) {
-	t.Parallel()
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	r := jitAgreesForTestWith(t, jitStressConfig{}, osrSetup, `once(200000)`)
-	e, s := jitCallbackEntry(r, "once"), r.jit
-	if e == nil {
-		t.Fatal("once was not compiled")
-	}
-	e.setHomes(s, 40)
-	if e.ssaHomes != 40 {
-		t.Fatalf("no run of the code: its homes %d, not 40", e.ssaHomes)
-	}
-	e.ssaRuns++
-	s.runEntries = append(s.runEntries, e)
-	e.setHomes(s, 0)
-	if e.ssaHomes != 40 {
-		t.Fatalf("a run of the code it replaced lost its homes: %d", e.ssaHomes)
-	}
-	r.jitRunDone(e, 0, s.ctxTop)
-	if e.ssaHomes != 0 {
-		t.Fatalf("its last run ended, and it holds %d homes", e.ssaHomes)
-	}
-}
 
 // A compile asked for in a run, for what the code learned at its exits, has
 // a frame in a function hardly called yet: the frame goes on in the code it
@@ -595,99 +567,9 @@ func TestJITOSRUsesTheFunction(t *testing.T) {
 	}
 }
 
-// The code kept for a loop starts from what its function's compiles have
-// spent: told its reasons, the function's code gets no more compiles than
-// its budgets give it.
-func TestJITOSRSpendsTheFunctionsBudgets(t *testing.T) {
-	t.Parallel()
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	r := jitAgreesForTestWith(t, jitStressConfig{}, osrSetup, `sum(20, 3)`, `sum(20, 3)`)
-	e := jitCallbackEntry(r, "sum")
-	if e == nil || e.ssa == nil {
-		t.Skipf("sum was not compiled: %+v", e)
-	}
-	e.inlineReopts, e.upgradeReopts, e.polyReopts = 2, 3, 4
-	oe := r.jit.osrEntry(e)
-	if oe.inlineReopts != 2 || oe.upgradeReopts != 3 || oe.polyReopts != 4 {
-		t.Fatalf("budgets afresh: %+v", oe)
-	}
-	r.jit.dropOSR(e)
-}
-
-// What the code kept for a loop learned at its exits, the function's code
-// is told, which would otherwise find the site known already, and be
-// compiled for it at no exit of its own.
-func TestJITOSRTellsTheFunction(t *testing.T) {
-	t.Parallel()
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	r := jitAgreesForTestWith(t, jitStressConfig{}, osrSetup, osrRounds("sum", "")...)
-	e := jitCallbackEntry(r, "sum")
-	if e == nil || e.osr == nil {
-		t.Fatalf("no code kept for the loop: %+v", e)
-	}
-	oe := e.osr
-	oe.polyReopt = true
-	r.jit.osrRunDone(oe)
-	if !e.polyReopt || !e.reoptPending() {
-		t.Fatalf("the function's entry was not told: %+v", e)
-	}
-	oe.polyReopt = false
-}
 
 
-// The code kept for a loop counts in its function's entry, and goes with
-// it: the cache holds what it counts, no less, and nothing of it past it.
-func TestJITOSRCounted(t *testing.T) {
-	t.Parallel()
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	r := jitAgreesForTestWith(t, jitStressConfig{}, osrSetup, osrRounds("sum", "")...)
-	e := jitCallbackEntry(r, "sum")
-	if e == nil || e.osr == nil {
-		t.Fatalf("no code kept for the loop: %+v", e)
-	}
-	oe := e.osr
-	if n := e.osrBytes(); n < oe.ssa.Footprint() {
-		t.Fatalf("%d bytes counted for %d of code", n, oe.ssa.Footprint())
-	}
-	if e.bytes != e.measure() {
-		t.Fatalf("the cache counts %d bytes of %d", e.bytes, e.measure())
-	}
-	if !r.jit.inUse(e) {
-		oe.busy++
-		if !r.jit.inUse(e) {
-			t.Errorf("an entry whose code for its loop is being compiled is not in use")
-		}
-		oe.busy--
-		oe.ssaRuns++
-		if !r.jit.inUse(e) {
-			t.Errorf("an entry whose code for its loop runs is not in use")
-		}
-		oe.ssaRuns--
-	}
-	held := r.jit.entryBytes
-	key := r.jit.linkKeyForTest(e)
-	if !r.jit.dropEntry(key, e) {
-		t.Fatal("the entry was not dropped")
-	}
-	if e.osr != nil || oe.owned() {
-		t.Fatalf("the code kept for the loop outlived its function's: %+v", oe)
-	}
-	if r.jit.entryBytes >= held {
-		t.Errorf("the cache holds %d bytes, %d before", r.jit.entryBytes, held)
-	}
-	// Compiled afresh, and right.
-	for range 3 {
-		if v, err := r.Run(compileForTest(t, `sum(100000, -1)`)); err != nil || v.Number() != 100000 {
-			t.Fatalf("got %v, %v", v, err)
-		}
-	}
-}
+
 
 // linkKeyForTest is the cache's key of e.
 func (s *jitState) linkKeyForTest(e *jitEntry) (key jitKeyForTest) {

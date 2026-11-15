@@ -7,8 +7,6 @@ import (
 	"testing"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
-	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
 // regCallSrc's functions call one another natively from register code

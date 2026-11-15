@@ -5,9 +5,6 @@ package vm
 import (
 	"fmt"
 	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
 // regBackgroundSrc has calls, properties, a callee to inline and a loop:

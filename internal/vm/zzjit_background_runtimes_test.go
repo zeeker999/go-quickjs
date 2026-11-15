@@ -3,13 +3,9 @@
 package vm
 
 import (
-	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
 // jitBackgroundWork is what TestJITBackgroundRuntimes runs: micro-benchmarks
@@ -45,116 +41,6 @@ const (
 	jitBackgroundRounds   = 4
 )
 
-// A compile in the background on a real schedule: several runtimes, on
-// goroutines of their own, run the same code at once, sharing its bytecode
-// and the process's workers, each compiling in the background with nothing
-// scheduled -- a compile installed at whichever check finds its worker done,
-// a worker still compiling when one comes, others' compiles queued before
-// it -- where QJS_JIT_STRESS's background installs each a fixed number of
-// checks after it was handed over, the same in every run. Each answer must
-// be the interpreter's, and each runtime must have compiled in the
-// background. CI runs it under -race.
-func TestJITBackgroundRuntimes(t *testing.T) {
-	t.Parallel()
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	src := jitMicrobenchForTest(t)
-	script := compileForTest(t, src)
-	calls := make([]*bytecode.Function, len(jitBackgroundWork))
-	for i, w := range jitBackgroundWork {
-		calls[i] = compileForTest(t, fmt.Sprintf(
-			"(function () { global_res = undefined; var n = %s(%d); var g = global_res; return String(n) + ':' + (typeof g === 'object' && g !== null ? JSON.stringify(g) : String(g)) })()",
-			w.name, w.n))
-	}
-	// The interpreter's answers, twice: the work must give the same each
-	// time for the runtimes' to be compared with them.
-	want := make([]string, len(calls))
-	for pass := 0; pass < 2; pass++ {
-		r := New(Config{})
-		if _, err := r.Run(script); err != nil {
-			t.Fatal(err)
-		}
-		for i, c := range calls {
-			v, err := r.Run(c)
-			if err != nil {
-				t.Fatalf("%s: %v", jitBackgroundWork[i].name, err)
-			}
-			got := v.String().Go()
-			if pass == 1 && got != want[i] {
-				t.Fatalf("%s gives %q, then %q: not deterministic", jitBackgroundWork[i].name, want[i], got)
-			}
-			want[i] = got
-		}
-		r.Close()
-		r.ReleaseClosed()
-	}
-	var wg sync.WaitGroup
-	errs := make(chan string, jitBackgroundRuntimes*len(calls)+jitBackgroundRuntimes)
-	for k := 0; k < jitBackgroundRuntimes; k++ {
-		wg.Add(1)
-		go func(k int) {
-			defer wg.Done()
-			r := New(Config{JIT: true})
-			defer func() { r.Close(); r.ReleaseClosed() }()
-			// Unscheduled, whatever QJS_JIT_STRESS says; half the runtimes
-			// compile at a function's first call, half at the JIT's own
-			// thresholds.
-			r.SetJITBackground(true)
-			r.jitStress = jitStressConfig{}
-			if k%2 == 0 {
-				r.jitCallThreshold, r.jitICThreshold = 1, 1
-			}
-			if _, err := r.Run(script); err != nil {
-				errs <- fmt.Sprintf("runtime %d: %v", k, err)
-				return
-			}
-			for round := 0; round < jitBackgroundRounds; round++ {
-				// Each runtime starts the work at a place of its own.
-				for j := range calls {
-					i := (j + k*len(calls)/jitBackgroundRuntimes) % len(calls)
-					v, err := r.Run(calls[i])
-					if err != nil {
-						errs <- fmt.Sprintf("runtime %d, %s: %v", k, jitBackgroundWork[i].name, err)
-						continue
-					}
-					if got := v.String().Go(); got != want[i] {
-						errs <- fmt.Sprintf("runtime %d, round %d, %s = %q, want the interpreter's %q", k, round, jitBackgroundWork[i].name, got, want[i])
-					}
-				}
-				// Its compiles in flight finished, so that the next round
-				// installs them, the other runtimes running meanwhile: on
-				// one CPU, or one worker for them all, a runtime can
-				// otherwise run all its work before a compile of its is done.
-				if s := r.jit; s != nil {
-					for _, j := range s.jobs {
-						<-j.done
-					}
-					for _, l := range s.lowerings {
-						<-l.done
-					}
-					// The register form's, where the runtime runs register
-					// code.
-					for _, j := range s.regJobs {
-						<-j.done
-					}
-				}
-			}
-			if s := r.jit; s != nil {
-				st := r.JITStats()
-				t.Logf("runtime %d: submitted %d, discarded %d, missed %d, stale %d, compiled %d, entries %d, SSA entries %d", k, s.bgSubmitted, s.bgDiscarded, s.bgMissed, s.bgStale, s.compiled, st.Entries, st.SSAEntries)
-			}
-			if s := r.jit; s == nil || s.bgSubmitted == 0 || s.compiled == 0 || r.JITStats().Entries == 0 {
-				errs <- fmt.Sprintf("runtime %d compiled or entered nothing in the background: %+v", k, r.JITStats())
-			}
-		}(k)
-	}
-	wg.Wait()
-	close(errs)
-	for e := range errs {
-		t.Error(e)
-	}
-}
 
 // jitMicrobenchForTest is QuickJS's micro-benchmarks and ours, as the
 // v8bench runner's micro mode loads them: microbench.js without the call

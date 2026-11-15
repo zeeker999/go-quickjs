@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
 // regLexThisSetup's functions make arrows that read their this, the maker's

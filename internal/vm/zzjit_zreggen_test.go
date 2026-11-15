@@ -5,9 +5,6 @@ package vm
 import (
 	"fmt"
 	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
-	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
 // regGenStepSrc steps register generators every way a program does: by

@@ -2,14 +2,6 @@
 
 package vm
 
-import (
-	"fmt"
-	"math"
-	"strconv"
-	"strings"
-	"testing"
-)
-
 // regMappedArgsSrc is earley-boyer's numeric comparisons, sloppy
 // functions whose mapped arguments object aliases the parameter x they
 // assign while they read the rest by index, and one whose assigned
