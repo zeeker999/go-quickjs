@@ -6,7 +6,6 @@ import (
 	"math"
 	"unsafe"
 
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
@@ -65,38 +64,6 @@ type jitCallCounts struct {
 // with it, so that none wraps and the frequencies stay as they were.
 const jitCountsHalved = 1 << 31
 
-// jitCallCountsOf is fn's counts, none made yet, or nil for a function
-// that makes no call.
-func jitCallCountsOf(fn *bytecode.Function) *jitCallCounts {
-	n := 0
-	for _, in := range fn.Code {
-		if jitCounted(in.Op) {
-			n++
-		}
-	}
-	if n == 0 {
-		return nil
-	}
-	c := &jitCallCounts{code: len(fn.Code), pcs: make([]int32, 0, n), calls: make([]uint32, n)}
-	for pc, in := range fn.Code {
-		if jitCounted(in.Op) {
-			c.pcs = append(c.pcs, int32(pc))
-		}
-	}
-	return c
-}
-
-// jitCounted reports whether a call of op is counted (jitCallCounts): a
-// call, a method call, a construction, one in tail position -- what the
-// JIT inlines.
-func jitCounted(op bytecode.Op) bool {
-	switch jitCallOp(op) {
-	case bytecode.OpCall, bytecode.OpCallMethod, bytecode.OpNew:
-		return true
-	}
-	return false
-}
-
 // at is the index of the call at pc among c's, or -1.
 func (c *jitCallCounts) at(pc int32) int {
 	lo, hi := 0, len(c.pcs)
@@ -132,44 +99,11 @@ func (c *jitCallCounts) bytes() int {
 	return int(unsafe.Sizeof(*c)) + jitCapBytes(c.pcs) + jitCapBytes(c.calls) + jitCapBytes(c.learned)
 }
 
-// jitCountLearned notes that native code made the call at pc of e's
-// function, decided at its exits (jitCallSeen), if the existing tiers have
-// not counted any there: its frequency is not known (jitCallFrequency).
-func jitCountLearned(e *jitEntry, pc int) {
-	c := e.calls
-	if c == nil {
-		return
-	}
-	if i := c.at(int32(pc)); i >= 0 && c.calls[i] == 0 {
-		if c.learned == nil {
-			c.learned = make([]bool, len(c.calls))
-		}
-		c.learned[i] = true
-	}
-}
-
 // jitCounting reports whether the existing tiers count the calls of e's
 // function (jitCallCounts): its entry warms, or its code is invalidated --
 // it is to be compiled.
 func jitCounting(e *jitEntry) bool {
 	return e.calls != nil && (e.warming || e.invalid)
-}
-
-// jitCountRun counts an invocation the existing tiers run of e's
-// function, cl's, if they count its calls (jitCounting), and has the
-// calls of the frames of cl's template counted from then on
-// (jitCodeFields' jitCounting): those of a frame whose invocation they did
-// not count -- one native code left to them, which goes on in the
-// interpreter -- are not, until one of the template's is counted again.
-func jitCountRun(e *jitEntry, cl *closure) {
-	if jitCounting(e) {
-		if e.calls.runs++; e.calls.runs >= jitCountsHalved {
-			e.calls.halve()
-		}
-		if cl.closureCode != nil {
-			cl.jitCounting = true
-		}
-	}
 }
 
 // jitCountsCaller reports whether the frame at depth i, a call's caller,
@@ -246,48 +180,6 @@ func (r *Runtime) jitCountCallAt(d int) {
 	}
 }
 
-// jitGhostCounts is the counts a ghost of fn kept, if they are of a
-// function of fn's length (a ghost is found by its function's address,
-// which a function made since may have), or fn's made afresh.
-func jitGhostCounts(g jitGhost, ok bool, fn *bytecode.Function) *jitCallCounts {
-	if !ok || g.calls == nil || g.calls.code != len(fn.Code) {
-		return jitCallCountsOf(fn)
-	}
-	return g.calls
-}
-
-// jitCallFrequency is how often the call at pc of e's function is made for
-// each invocation of it, as the existing tiers counted them
-// (jitCallCounts) -- V8's call frequency, a site's calls over its
-// function's invocations -- if known: the function run by them enough
-// times to tell (jitCountsEnough), and
-// the call's callees, as its decisions name them, ones each call of which
-// they count (jitFramed), one at least. A call of a built-in is not
-// counted, nor a call they never made but native code did
-// (jitCountLearned): one V8's feedback had none for, where its code
-// deoptimizes, to be compiled again from what its interpreter counts then;
-// native code learns the call at its exits instead, going on.
-func (r *Runtime) jitCallFrequency(e *jitEntry, pc int) (float64, bool) {
-	if e == nil {
-		return 0, false
-	}
-	counted := false
-	for _, list := range [...][]jitInline{e.inlines, e.nativeCalls} {
-		for _, x := range list {
-			if int(x.pc) == pc {
-				if !jitFramed(x) {
-					return 0, false
-				}
-				counted = true
-			}
-		}
-	}
-	if !counted {
-		return 0, false
-	}
-	return jitCallCount(e, pc, jitCountsEnough)
-}
-
 // jitCountsEnough is how many of a function's invocations the existing
 // tiers count before its frequencies are known (jitCallFrequency): the
 // fewest in which a call made at V8's minimum frequency
@@ -299,61 +191,6 @@ func (r *Runtime) jitCallFrequency(e *jitEntry, pc int) (float64, bool) {
 // they were counted (ssa's inlineOrder). V8's optimizing compiler reads
 // its feedback after its tier-up budget, rarely so few.
 var jitCountsEnough = uint32(math.Ceil(math.Log(0.05) / math.Log(1-ssa.MinInliningFrequency)))
-
-// jitFramed reports whether the existing tiers count every call of x's
-// callee they make (jitCallCounts): a function of the script's, called
-// with a frame of its own, through Function.prototype.call too, or a pure
-// body or a forwarding constructor, which the call path answers without
-// one where it can (jitCountPure) -- not another body the call path may
-// answer without one (bytecode.LeafKind).
-func jitFramed(x jitInline) bool {
-	return x.cl != nil && jitCountedCallee(x.cl)
-}
-
-// jitCountedCallee reports whether the existing tiers count every call of
-// cl's function they make (jitFramed).
-func jitCountedCallee(cl *closure) bool {
-	switch cl.fn.Leaf {
-	case bytecode.LeafNone, bytecode.LeafPure, bytecode.LeafForward:
-		return true
-	}
-	return false
-}
-
-// jitCallCount is the call at pc's count over its function's runs, as
-// jitCallFrequency has it, whatever its callees, if they are least.
-func jitCallCount(e *jitEntry, pc int, least uint32) (float64, bool) {
-	if e == nil || e.calls == nil || e.calls.runs == 0 || e.calls.runs < least {
-		return 0, false
-	}
-	c := e.calls
-	i := c.at(int32(pc))
-	if i < 0 || c.calls[i] == 0 && c.learned != nil && c.learned[i] {
-		return 0, false
-	}
-	return float64(c.calls[i]) / float64(c.runs), true
-}
-
-// jitCallCold reports whether the call at pc of e's function, being
-// decided to call cl's, is known to be made too seldom to be inlined
-// (ssa.MinInliningFrequency), as V8's heuristic finds a call below
-// min_inlining_frequency: it is called natively, as any call not inlined
-// is. Its callees, cl's among them, are ones whose calls the existing
-// tiers count, or it is not known (jitCallFrequency).
-func (r *Runtime) jitCallCold(e *jitEntry, pc int, cl *closure) bool {
-	if e == nil || cl == nil || !jitCountedCallee(cl) {
-		return false
-	}
-	for _, list := range [...][]jitInline{e.inlines, e.nativeCalls} {
-		for _, x := range list {
-			if int(x.pc) == pc && !jitFramed(x) {
-				return false
-			}
-		}
-	}
-	f, ok := jitCallCount(e, pc, jitCountsEnough)
-	return ok && f < ssa.MinInliningFrequency
-}
 
 // pureCallCounted is pureCall made at a call site of the script's -- a
 // tree's call node, callRest -- whose call the JIT counts for its inliner,

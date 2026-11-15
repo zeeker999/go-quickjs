@@ -43,17 +43,6 @@ const (
 	typeFunction
 )
 
-// typeofIndex is the index of a type's name in typeofNames, or -1 where s
-// names none.
-func typeofIndex[_ any](s string) int {
-	for i, n := range typeofNames {
-		if n == s {
-			return i
-		}
-	}
-	return -1
-}
-
 // typeofKind is the index in typeofNames of typeof v, as Value.TypeOf
 // answers it.
 func typeofKind[_ any](v Value) int {

@@ -164,21 +164,6 @@ func toInt32(f float64) int32 {
 	return jsnum.ToInt32(f)
 }
 
-// unwindTreeFrames pops the frames above depth that an exception left,
-// trees runTreeNested ran, as callTree would have popped them on return:
-// their open upvalues are closed. depth is frameDepth with runTree's own
-// frame on the stack, so that frame, the depth-th, stays: it is its caller's
-// to pop, which also resets the stack's top.
-func (r *Runtime) unwindTreeFrames(depth int) {
-	for r.frameDepth > depth {
-		f := r.frameAt(r.frameDepth - 1)
-		for _, u := range f.openUpvalues {
-			u.close()
-		}
-		r.frameDepth--
-	}
-}
-
 // callRest is callDirect for a callee that is the object o, whose funcData
 // is fd or nil, once a tree's call node has found it is not one
 // planTreeCall has given a tree: callDirect's other cases. A compiled

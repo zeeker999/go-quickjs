@@ -5,7 +5,6 @@ package vm
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"iter"
 	"math"
 	"math/bits"
@@ -224,24 +223,6 @@ var jitEncoding = abi.Encoding{
 // tree of new kinds of node -- deoptimizes about once a phase.
 const jitMaxDeopts = 64
 
-// jitDeoptimized notes a guard that failed in e's code, at the site
-// ExitSite names, or, for -1, an entry's speculation at the entry the
-// stretch started at: the code, invalidated, is compiled again with the
-// site, or the entry, generic (jitFeedback.Generic), as V8's feedback
-// widens once its speculation has failed. A site the builder has no
-// generic form for is built as before, and its next failure is not new.
-func jitDeoptimized(e *jitEntry, ctx *abi.Context, start int) {
-	if site := int32(int64(ctx.ExitSite)); site >= 0 {
-		if !slices.Contains(e.failed, site) {
-			e.failed = append(e.failed, site)
-			e.reopt = true
-		}
-	} else if !slices.Contains(e.failedEntries, uint32(start)) {
-		e.failedEntries = append(e.failedEntries, uint32(start))
-		e.reopt = true
-	}
-}
-
 // jitPolySite is a read that met objects of shapes the code was not
 // compiled for (jitEntry.poly): where each had the property, as a cache
 // filled for it has it (fillPropCache).
@@ -321,24 +302,6 @@ func (r *Runtime) jitDeepAddFrom(before, next *shape, proto *Object, key Atom) (
 	return a, true
 }
 
-// jitPolyWriteSeen notes, after Go made the write at pc that left native
-// code, what its cache knows of the object it wrote -- an own property, or
-// the transition it was added along -- for the code to be compiled again
-// for it with the shapes the site met before (writeCases), up to
-// jitPropertyCases, as for reads (jitPolySeen). DeltaBlue's Constraint
-// adds strength to the receivers of four constructors, each of a shape of
-// its own; RayTrace writes hitCount to infos of two.
-func (r *Runtime) jitPolyWriteSeen(f *frame, e *jitEntry, pc int, in bytecode.Instr, o *Object, before *shape) {
-	if int(in.B) >= len(f.cl.ic) {
-		return
-	}
-	key, named := Atom(0), int(in.A) < len(f.cl.names)
-	if named {
-		key = f.cl.names[in.A]
-	}
-	r.jitPolyWriteSeenOp(e, pc, &f.cl.ic[in.B], key, named, o, before)
-}
-
 // jitPolyWriteSeenOp is jitPolyWriteSeen's, of either form's code: the
 // write at pc, its site's cache cache, of key where named, to o, of shape
 // before then.
@@ -384,38 +347,9 @@ func (r *Runtime) jitPolyWriteSeenOp(e *jitEntry, pc int, cache *propCache, key 
 	e.polyReopt = true
 }
 
-// jitWriteTarget is the object a set_prop about to be made writes, its
-// operands the two values below sp, and its shape now; nil for another
-// instruction or a primitive.
-func jitWriteTarget(stack []Value, sp int, in bytecode.Instr) (*Object, *shape) {
-	if in.Op != bytecode.OpSetProp || sp < 2 || sp > len(stack) || !stack[sp-2].IsObject() {
-		return nil, nil
-	}
-	o := stack[sp-2].Object()
-	return o, o.shape
-}
-
 // jitPropertyCases is how many shapes a read is compiled for, as V8's
 // polymorphic inline caches keep: one more leaves for Go.
 const jitPropertyCases = 4
-
-// jitPolySeen notes a read native code left to Go at pc, its receiver on top
-// of the frame's operands, up to sp -- a megamorphic site's, whose others
-// deoptimize (jitPropertyDeopt), or an inlined callee's: the megamorphic
-// cache is filled for the receiver's shape, which the read then finds
-// natively; what that cannot hold -- a getter, a read past the prototypes
-// it holds, a string's method -- the code is compiled again for (polyReopt),
-// on the existing tiers' budget, its code invalidated meanwhile.
-func (r *Runtime) jitPolySeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) {
-	op := jitPropOp{recv: r.stack[sp-1], method: in.Op == bytecode.OpGetPropThis, unnamed: int(in.A) >= len(f.cl.names)}
-	if !op.unnamed {
-		op.key = f.cl.names[in.A]
-	}
-	if int(in.B) < len(f.cl.ic) {
-		op.c = &f.cl.ic[in.B]
-	}
-	r.jitPolySeenOp(e, pc, op)
-}
 
 // jitPropOp is a named property's operation as what the JIT learns at its
 // exits sees it, of either form's code: its key, its receiver, its site's
@@ -574,60 +508,6 @@ func (r *Runtime) jitPrimitiveSeen(e *jitEntry, pc int, op *jitPropOp) bool {
 	return true
 }
 
-// jitPropertyOp reports whether op is a named property's read or write,
-// whose site's cache the interpreter fills (propCache).
-func jitPropertyOp(op bytecode.Op) bool {
-	return op == bytecode.OpGetProp || op == bytecode.OpGetPropThis || op == bytecode.OpSetProp || op == bytecode.OpGetPropUnder
-}
-
-// jitPropertyDeopt handles a deoptimization at site of the code owner's
-// entry holds, at pc of f's function, its operands up to sp: if the
-// instruction there is a named property's read or write, its receiver was
-// of a shape the site's cases do not have, or its site knew none
-// (ssa.PropertySite), as V8's map checks fail and its code deoptimizes for
-// insufficient feedback, and it reports true. The interpreter makes the
-// operation from the frame Go wrote, its cache learning the shape -- the
-// feedback the code is compiled again with (jitSeenFeedback), as V8's
-// inline caches gather it -- and the code, which the caller invalidates
-// as any eager deoptimization does, is compiled again for it once the
-// existing tiers have spent their budget (jitTierUp). What a cache cannot
-// hold, e notes (jitDeoptSeen). A site entry's speculation (site -1) is no
-// property's.
-func (r *Runtime) jitPropertyDeopt(f *frame, e, owner *jitEntry, site int32, pc, sp int) bool {
-	if site < 0 || pc >= len(f.cl.fn.Code) || !jitPropertyOp(f.cl.fn.Code[pc].Op) {
-		return false
-	}
-	serial := uint32(0)
-	if owner != nil {
-		serial = owner.ssaSerial
-	}
-	r.jitDeoptSeen(f, e, pc, sp, f.cl.fn.Code[pc], serial)
-	if e != nil {
-		r.jit.account(e)
-	}
-	return true
-}
-
-// jitSiteMegamorphic reports whether the property site at pc of cl's
-// function is megamorphic as its code was compiled (jitFeedback's
-// megamorphic): its cache gave up, or e, the function's entry, found what
-// no case holds.
-func (r *Runtime) jitSiteMegamorphic(cl *closure, e *jitEntry, pc int) bool {
-	if in := cl.fn.Code[pc]; in.Op != bytecode.OpGetPropUnder && int(in.B) < len(cl.ic) && cl.ic[in.B].fills >= maxCacheFills {
-		// An object pattern's read has no cache: its B is how far down its
-		// source is.
-		return true
-	}
-	if e != nil {
-		for i := range e.poly {
-			if p := &e.poly[i]; int(p.pc) == pc && p.mega {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // jitPolyPrim reports whether e's read at pc met a primitive receiver
 // whose read does not throw (jitPolySite's prim).
 func jitPolyPrim(e *jitEntry, pc int) bool {
@@ -637,47 +517,6 @@ func jitPolyPrim(e *jitEntry, pc int) bool {
 		}
 	}
 	return false
-}
-
-// jitDeoptSeen notes in e what the property operation in at pc, which
-// deoptimized, meets that its site's cache cannot hold, its operands up to
-// sp, before the interpreter makes it: a string's method, read
-// off String.prototype by the code compiled again; a getter, or a setter,
-// on the receiver's prototypes (jitAccessorCase); a read the cache cannot
-// hold for its prototypes' depth (jitDeepRead); a read's value that is no
-// number, which the read then takes as a value (jitNumberMissed); and a
-// receiver the cache cannot hold at all -- a primitive, a property nothing
-// has, an object of no shape -- or one the site deoptimized for before, in
-// code compiled before the code that did now (serial), its cache holding
-// what the code cannot use (an object's own accessor, an addition Go
-// makes), or of more shapes than its cases hold,
-// which makes the site megamorphic (jitPolySite's mega), as V8's inline
-// caches go megamorphic for what they have no handler for: the megamorphic
-// cache, filled here, answers what it can natively, and the rest leaves
-// for Go rather than deoptimize again. So each deoptimization at a site
-// teaches its cache a shape, which its fills bound (maxCacheFills), or
-// makes it megamorphic, once. The shapes the site meets, the cache keeps
-// (propCache.seen); a write's cache learns them as the interpreter writes.
-func (r *Runtime) jitDeoptSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr, serial uint32) {
-	if int(in.A) >= len(f.cl.names) {
-		return
-	}
-	op := jitPropOp{key: f.cl.names[in.A], write: in.Op == bytecode.OpSetProp, method: in.Op == bytecode.OpGetPropThis, under: in.Op == bytecode.OpGetPropUnder}
-	at := sp - 1
-	if op.write {
-		at = sp - 2
-	}
-	if op.under {
-		at = sp - 1 - int(in.B)
-	}
-	if at < f.base || at >= len(r.stack) {
-		return
-	}
-	op.recv = r.stack[at]
-	if !op.under && int(in.B) < len(f.cl.ic) {
-		op.c = &f.cl.ic[in.B]
-	}
-	r.jitDeoptSeenOp(e, pc, op, serial)
 }
 
 // jitDeoptSeenOp is jitDeoptSeen's, of either form's code: the operation op
@@ -912,92 +751,6 @@ func (r *Runtime) jitMegaFillProto(o *Object, key Atom) (absent bool) {
 	}
 	s.megaPut(abi.MegaEntry{Shape: unsafe.Pointer(sh), Chain: chain, Key: uint32(key), Index: abi.MegaAbsent})
 	return true
-}
-
-// jitPrivateSeen notes a private member's read or write, or #x in o,
-// native code left to Go at pc, its operands on the frame's up to sp: an
-// object of a shape the site has not met, whose own data the member is --
-// a field, or, but for a write, a method -- joins the site's cases, as a property read's do
-// (jitPolySeen), and the code is compiled again for them. A key in a local,
-// of a class the function itself evaluates, is Go's.
-func (r *Runtime) jitPrivateSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) {
-	if e == nil || in.B&1 == 0 || int(in.B>>1) >= len(f.cl.upvalues) {
-		return
-	}
-	at := sp - 1
-	if in.Op == bytecode.OpSetPrivate {
-		at = sp - 2
-	}
-	if at < 0 || !r.stack[at].IsObject() {
-		return
-	}
-	o := r.stack[at].Object()
-	sh, i := o.shape, o.findOwn(privateKey(f, f.cl, in.B))
-	if sh == nil || sh == noShape || sh.loose || i < 0 || i >= sh.n || int(i) >= int(o.valn) {
-		return
-	}
-	if p := o.shape.keys[i]; p.isAccessor() || in.Op == bytecode.OpSetPrivate && p.flags&propWritable == 0 {
-		return
-	} else if in.Op == bytecode.OpGetPrivate && !o.vals()[i].IsNumber() {
-		// A read that met a value not a number reads it as a value.
-		jitNumberMissed(e, pc)
-	}
-	if jitAddReadCase(jitPolySiteAt(e, pc), propCache{shape: sh, idx: i}, nil) {
-		e.polyReopt = true
-	}
-}
-
-// privateProperty is Property's site for a private member's read or write
-// at pc: the property of the key the closure's binding holds -- a symbol
-// each evaluation of the class mints, which the code checks the binding
-// holds (ssa.PropertySite's Private) -- in the objects of the shapes the
-// site met (jitPrivateSeen), the first its own, the rest its cases. A site
-// that has met none, or whose key is in a local, is Go's.
-func (fb *jitFeedback) privateProperty(pc int, in bytecode.Instr) (ssa.PropertySite, bool) {
-	ref := int(in.B >> 1)
-	if in.B&1 == 0 || ref >= len(fb.cl.upvalues) || fb.cl.upvalues[ref] == nil {
-		return ssa.PropertySite{}, false
-	}
-	key := fb.cl.upvalues[ref].get()
-	e := fb.e
-	if fb.root != nil || e == nil {
-		// An inlined callee's: what its own code met.
-		e = fb.r.jit.entryFor(fb.fn)
-	}
-	if !key.IsSymbol() || e == nil {
-		return ssa.PropertySite{}, false
-	}
-	var cases []propCache
-	for i := range e.poly {
-		if int(e.poly[i].pc) == pc {
-			cases = e.poly[i].cases
-		}
-	}
-	// A case is the shape an object had and where in it the member was,
-	// met under whatever key the binding held then: every evaluation of a
-	// class mints its own, and its closures share the site. One whose
-	// shape holds another key at its index is no case of this key's -- an
-	// object of the other evaluation's, its member read by this one's code
-	// -- and is left out, so that such an object is Go's, whose brand
-	// check throws.
-	atom := fb.r.atoms.internSymbol(key.Symbol())
-	cases = slices.DeleteFunc(slices.Clone(cases), func(c propCache) bool {
-		return c.shape == nil || c.idx < 0 || c.idx >= c.shape.n || c.shape.keys[c.idx].key != atom
-	})
-	if len(cases) == 0 {
-		return ssa.PropertySite{}, false
-	}
-	site := ssa.PropertySite{Key: uint32(atom), Private: uintptr(unsafe.Pointer(key.Symbol()))}
-	k := fb.keep()
-	for i, c := range cases {
-		k.shapes = append(k.shapes, remember(c.shape))
-		if i == 0 {
-			site.Shape, site.Index = uintptr(unsafe.Pointer(c.shape)), c.idx
-			continue
-		}
-		site.Cases = append(site.Cases, ssa.PropertyCase{Shape: uintptr(unsafe.Pointer(c.shape)), Index: c.idx})
-	}
-	return site, true
 }
 
 // jitNumberMissed notes that the read at pc met a value that is not a
@@ -1283,26 +1036,6 @@ func jitNoteSeen(p *propPoly, old, n propCache) *propPoly {
 	return p
 }
 
-// jitSeenFeedback adds to e's sites what cl's caches have seen besides
-// their entries (propCache.poly, propCache.seen): the shapes the interpreter and
-// the tree tier met at each property read and write, which the code is
-// compiled for from the first, as V8's optimizing compiler takes the maps
-// its inline caches met, not learned one exit and one compile at a time.
-// Each is taken as an exit's would be (jitPolySeen, jitPolyWriteSeen).
-func (r *Runtime) jitSeenFeedback(cl *closure, e *jitEntry) {
-	for pc, in := range cl.fn.Code {
-		write := in.Op == bytecode.OpSetProp
-		if !write && in.Op != bytecode.OpGetProp && in.Op != bytecode.OpGetPropThis || int(in.B) >= len(cl.ic) {
-			continue
-		}
-		key, named := Atom(0), int(in.A) < len(cl.names)
-		if named {
-			key = cl.names[in.A]
-		}
-		r.jitSeenSite(e, pc, &cl.ic[in.B], write, key, named)
-	}
-}
-
 // jitSeenSite is jitSeenFeedback's, of either form's code: the site at pc,
 // its cache, a write's or a read's, of key where named.
 func (r *Runtime) jitSeenSite(e *jitEntry, pc int, cache *propCache, write bool, key Atom, named bool) {
@@ -1416,63 +1149,6 @@ type jitLiteral struct {
 // jitLiteralRoom bounds the room learned from one array result. Larger
 // buffers inherit the tree tier's confirmed length (jitLiteralArrayRoom).
 const jitLiteralRoom = 64
-
-// jitLiteralAt is e's literal at pc of cl's function -- e's, or a callee's
-// its code inlines -- made for cl's site if it has none, or nil if the
-// literal's objects have no shape to start from.
-func (r *Runtime) jitLiteralAt(e *jitEntry, cl *closure, pc int) *jitLiteral {
-	for i := range e.literals {
-		if int(e.literals[i].pc) == pc && e.literals[i].fn == cl.fn {
-			return &e.literals[i]
-		}
-	}
-	in := cl.fn.Code[pc]
-	if in.Op == bytecode.OpNewArray && in.A <= ir.MaxArrayLiteral {
-		e.literals = append(e.literals, jitLiteral{pc: int32(pc), pool: new(abi.ObjectPool), array: true, n: int(in.A), fn: cl.fn})
-		l := &e.literals[len(e.literals)-1]
-		if sharedLiteralSite(r, cl, pc) {
-			// A literal of constants its arrays share, whole as Go makes
-			// them: native code writes no element (ssa's LiteralSite's
-			// Shared).
-			l.shared = true
-			l.pool.Source = unsafe.Pointer(&jitPoolSource{array: true, n: l.n, sharedOf: cl, sharedPC: int32(pc)})
-		} else {
-			l.pool.Source = unsafe.Pointer(jitLiteralArraySource[struct{}](r, cl, l.pool, pc, l.n))
-		}
-		r.jitFillLiteral(l)
-		return l
-	}
-	if in.Op == bytecode.OpNewRegExp && int(in.A) < len(cl.fn.Constants) {
-		// Fresh RegExps of the pattern, each with its lastIndex 0, which
-		// nothing sees before the code takes one: what the literal makes
-		// at each evaluation. A pattern that does not compile has Go
-		// throw.
-		lit := &cl.fn.Constants[in.A]
-		if _, err := r.newRegExpLiteral(lit); err != nil {
-			return nil
-		}
-		e.literals = append(e.literals, jitLiteral{pc: int32(pc), pool: new(abi.ObjectPool), lit: lit, fn: cl.fn})
-		l := &e.literals[len(e.literals)-1]
-		l.pool.Source = unsafe.Pointer(&jitPoolSource{lit: lit})
-		r.jitFillLiteral(l)
-		return l
-	}
-	if in.Op == bytecode.OpClosure {
-		if int(in.A) >= len(cl.consts) || cl.consts[in.A].template() == nil {
-			return nil
-		}
-		tmpl := cl.consts[in.A]
-		e.literals = append(e.literals, jitLiteral{pc: int32(pc), pool: new(abi.ObjectPool), fn: cl.fn, tmpl: tmpl, env: cl.env})
-		l := &e.literals[len(e.literals)-1]
-		l.pool.Source = unsafe.Pointer(&jitPoolSource{tmpl: tmpl, fn: cl.fn, env: cl.env})
-		r.jitFillLiteral(l)
-		return l
-	}
-	if in.Op != bytecode.OpNewObject || int(in.B) >= len(cl.ic) {
-		return nil
-	}
-	return r.jitObjectLiteral(e, cl, pc, in.B, int(in.A))
-}
 
 // jitObjectLiteral is the object literal at pc of cl's code, of either
 // form, made in e, its site's cache cl's at site, room for n fields: native
@@ -1596,28 +1272,6 @@ func (r *Runtime) jitFillLiteral(l *jitLiteral) {
 	pool.Count, pool.Proto = pool.Size, unsafe.Pointer(r.proto.array)
 }
 
-// jitDefineSeen notes an exit at a literal's field, pc, that the code was
-// compiled for before its transition was made: Go, defining it, made it,
-// and the code is compiled again for it (polyReopt), as for any feedback it
-// lacked.
-func jitDefineSeen(e *jitEntry, pc int) {
-	if i := slices.Index(e.definesUnfed, int32(pc)); i >= 0 {
-		e.definesUnfed = slices.Delete(e.definesUnfed, i, i+1)
-		e.polyReopt = true
-	}
-}
-
-// jitRefillLiteral fills again, with more objects, the pool of the literal
-// at pc that native code left at, its pool run out.
-func (r *Runtime) jitRefillLiteral(f *frame, e *jitEntry, pc int) {
-	for i := range e.literals {
-		if l := &e.literals[i]; int(l.pc) == pc && l.fn == f.cl.fn && l.pool.Count == 0 {
-			l.pool.Size = min(2*max(l.pool.Size, abi.PoolSize), abi.PoolCapacity)
-			r.jitFillLiteral(l)
-		}
-	}
-}
-
 // TypeofCells is ssa.TypeofFeedback's: the table of the runtime's strings
 // typeof answers (jitState's typeofCells), made the first time a compile
 // asks for it, as typeofString makes each, which the runtime keeps.
@@ -1663,113 +1317,7 @@ func (e *jitEntry) reoptPending() bool {
 	return e.reopt || e.inlineReopt || e.polyReopt || e.upgradeReopt || e.unwindReopt || e.resumeReopt
 }
 
-// native reports whether Go may enter e's code, and go on in it after an
-// exit: code that does not pay (entrySlow) the existing tiers run, as they
-// run code invalidated (jitInvalidate).
-func (e *jitEntry) native() bool { return !e.entrySlow && !e.invalid }
 
-
-
-// jitLearnedDue reports whether e's code, cl's function's, valid, is due
-// to be compiled again for what it learned at its exits (reoptPending):
-// once it has spent a budget (jitTierBudget) since it began to learn, with
-// nothing learned meanwhile (jitLearnedMark), as invalidated code waits
-// for one (jitTierUp). It is not invalidated for it, as V8 never
-// invalidates code for feedback: what it learns at its exits -- a call's
-// target at a call of Go, an element's kind at a host exit -- only it
-// learns, as V8's baseline code gathers feedback, and the existing tiers,
-// whose caches note no such thing, would not learn it in its place. So it
-// runs on until its budget is spent, and is replaced by code compiled for
-// all it learned. Invalidated for it, a function learned a call a
-// compile, each after a budget of the existing tiers: AWFY's CD's recurse
-// ran out of compiles with two of its calls still made by Go, judged
-// slow, its recursion in the tree tier.
-func (r *Runtime) jitLearnedDue(cl *closure, e *jitEntry) bool {
-	if e.invalid || e.ssa == nil || e.pending != nil {
-		return false
-	}
-	if !e.reoptPending() {
-		e.learning = false
-		return false
-	}
-	spent := jitLearnedSpent(cl.fn, e)
-	if !e.learning {
-		e.learning, e.tierBase, e.tierMark = true, spent, jitLearnedMark(cl, e)
-		e.tierBudget = r.jitTierBudget(cl.fn, e)
-		return false
-	}
-	if spent-e.tierBase < e.tierBudget {
-		return false
-	}
-	if m := jitLearnedMark(cl, e); m != e.tierMark {
-		// Learned more meanwhile: what is left raised, as at a change of
-		// the caches' feedback (jitICBudget), for it all.
-		e.tierBudget = max(e.tierBudget-(spent-e.tierBase), r.jitICBudget(cl.fn))
-		e.tierBase, e.tierMark = spent, m
-		return false
-	}
-	return true
-}
-
-// jitCompileDueNow reports whether a call of Go from e's code, cl's
-// function's, in the run whose context is root, is to leave the code for
-// it to be compiled again: due for what it learned (jitLearnedDue), and
-// compiled again once the run has left -- not refused for a native call of
-// it in an outer run, below root, which goes on in it later and which the
-// run's leaving does not end (otherwiseInUse). It would leave at every such
-// call, the rest of each invocation the interpreter's, for a compile made
-// only once those calls return: a recursive closure's, EarleyBoyer's
-// loop3, called natively from deeper in its own recursion, had left at
-// each call of Go some 3,000 times a run. The run's own levels, which its
-// leaving unwinds, do not keep it.
-func (r *Runtime) jitCompileDueNow(cl *closure, e *jitEntry, root int) bool {
-	if !r.jitLearnedDue(cl, e) {
-		return false
-	}
-	s := r.jit
-	if e.link == nil {
-		return true
-	}
-	fn := e.link.key.Value()
-	for i := 0; i < root && i < len(s.ssaCtxs); i++ {
-		if c := s.ssaCtxs[i]; c.Live == abi.LiveCall && c.Closure != nil && (*closure)(c.Closure).fn == fn {
-			return false
-		}
-	}
-	return true
-}
-
-// jitLearnedSpent is the work e's code has done since it was compiled, as
-// the existing tiers' budget counts it (jitTierBudget): its invocations,
-// each fn's length -- Go's entries, native callers' calls, calls of it the
-// existing tiers ran for code Go does not enter -- the work its native
-// stretches did, their loops' included (jitSSAProfit, jitCalleeProfit),
-// and the existing tiers' in its loops before Go entered it at one
-// (osrWork). A function entered only by on-stack replacement, each
-// invocation leaving its code at once for the interpreter to finish --
-// microbench_extra's PrivateCounter's add, at a private read of a shape
-// learned at that exit -- had spent nothing, and was never compiled
-// again for it, as V8's lower tiers spend the budget however a function
-// runs. So too an invocation the interpreter went on with after the code
-// left it (goOns), native code entered again at a loop's header by a check
-// it forced, which spends nothing of the loop's (jitTierWork): Octane
-// Typescript's Symbol.prototype.visible, inlining a method a subclass
-// overrides, left at its call in each such run, and in thousands of them
-// was never compiled again for the call it had learned.
-//
-// It is not monotonic: the native calls in (jitLink's in) it counts are
-// zeroed by jitUnwound and jitRetryNative, as the counts they are judged
-// against are. A compile for what the code learned, pending then, its
-// base (tierBase) taken before, would find its spend below that base and
-// wait as many calls' worth more. Counted across seven workloads -- a
-// React renderer's 160 renders, Octane's Typescript, Box2D and PdfJS, the
-// V8 suite's RayTrace, DeltaBlue and Richards -- it never was: jitUnwound
-// zeroes them as it asks a compile itself, which begins a budget afresh.
-func jitLearnedSpent(fn *bytecode.Function, e *jitEntry) int64 {
-	st := &e.ssaStats
-	calls := e.starts + e.goOns + e.link.in + e.slowCalls
-	return int64(calls)*int64(max(len(fn.Code), 1)) + int64(st.work+st.calleeWork) + e.osrWork
-}
 
 // jitLearnedMark is jitFeedbackMark of cl's caches with what e's code has
 // learned at its exits counted in: a change of either delays the compile
@@ -1784,67 +1332,6 @@ func jitLearnedCount(e *jitEntry) int {
 	return len(e.failed) + len(e.failedEntries) + len(e.resumed) + len(e.bigints) + len(e.bigwide) + len(e.poly) + len(e.typedReads) + len(e.stringReads) +
 		len(e.keyedReads) + len(e.keyedWrites) + len(e.strSites) + len(e.numSites) + len(e.boolSites) + len(e.nativeCalls) + len(e.inlines) + len(e.notInline) +
 		len(e.literals) + len(e.definesUnfed)
-}
-
-// jitInlinedLearned is, for each closure the code inlines, what its
-// function's entry had learned when the code was compiled
-// (jitLearnedCount), appended to to.
-func (s *jitState) jitInlinedLearned(inlined []*closure, to []int32) []int32 {
-	for _, cl := range inlined {
-		n := int32(-1)
-		if e := s.entryFor(cl.fn); e != nil {
-			n = int32(jitLearnedCount(e))
-		}
-		to = append(to, n)
-	}
-	return to
-}
-
-// jitInvalidate invalidates e's code, cl's function's, for an eager
-// deoptimization: Go enters it no more (native), nor do native callers
-// call it, its link cleared, but Go calls the function, as V8's
-// deoptimizer invalidates a
-// function's current code -- "only invalidated code affects tiering
-// decisions" -- its tiering requests reset and its interrupt budget with
-// them. The existing tiers run the function until they have spent a fresh
-// budget (jitTierUp). Runs of the code under way go on in it until they
-// next leave it, as V8's frames of invalidated code deoptimize lazily, at
-// their next return to it.
-func (r *Runtime) jitInvalidate(cl *closure, e *jitEntry) {
-	if e == nil || e.ssa == nil {
-		return
-	}
-	if e.deopts < ^uint16(0) {
-		e.deopts++
-	}
-	if e.invalid {
-		return
-	}
-	e.invalid = true
-	if e.owned() {
-		e.link.clearCode()
-	}
-	e.tierBudget, e.tierMark = r.jitTierBudget(cl.fn, e), jitFeedbackMark(cl)
-	r.jit.invalidated++
-	// What it learned for the compile to come, counted as it grows, as a
-	// compile counts it: the code waits for the budget meanwhile.
-	r.jit.account(e)
-	r.jit.settle()
-}
-
-// jitTierBudget is the work the existing tiers do with fn, e's function,
-// before it is compiled, or compiled again: jitCallThreshold invocations
-// (jitInvocationsForMaglev), each worth its instructions -- as V8's
-// interrupt budget is so many invocations of its bytecode's length.
-func (r *Runtime) jitTierBudget(fn *bytecode.Function, e *jitEntry) int64 {
-	return int64(max(r.jitCallThreshold, 1)) * int64(max(len(fn.Code), 1))
-}
-
-// jitICBudget is what a change of fn's caches' feedback raises what is
-// left of its budget to (jitICThreshold invocations' worth), as
-// TieringManager::NotifyICChanged raises V8's.
-func (r *Runtime) jitICBudget(fn *bytecode.Function) int64 {
-	return int64(max(r.jitICThreshold, 1)) * int64(max(len(fn.Code), 1))
 }
 
 
@@ -1905,41 +1392,11 @@ func jitFeedbackMark(cl *closure) uint64 {
 
 
 
-// jitFrameProgram refuses a program compileSSA does not compile.
-func jitFrameProgram(fn *bytecode.Function, p *ir.Program) error {
-	this := 0
-	if p.This {
-		this = 1
-	}
-	if len(p.Globals) != 0 || p.Locals != fn.LocalCount+len(fn.Upvalues)+this {
-		return fmt.Errorf("%w: a program of globals, or of another frame", jitRefused)
-	}
-	return nil
-}
-
 
 
 // errJITStaleLinks is jitInstall's refusal of a compile whose links are
 // stale (staleLinks), which compileSSAFinish builds again.
 var errJITStaleLinks = errors.New("jit: a link the compile calls through was let go")
-
-// staleLinks reports whether a link fb's code calls through (its links,
-// and its keep's) is not its function's any more: one the runtime let go
-// (unlink) while the code was compiled in the background.
-func (s *jitState) staleLinks(fb *jitFeedback) bool {
-	stale := func(links []*jitLink) bool {
-		for _, l := range links {
-			if s.links[l.key] != l {
-				return true
-			}
-		}
-		return false
-	}
-	if fb == nil {
-		return false
-	}
-	return stale(fb.links) || fb.keep() != fb && stale(fb.keep().links)
-}
 
 // jitFeedbackHook, where a test sets it, is the feedback a build asks in
 // place of fb's: a proxy of it, which notes what the build asks.
@@ -2023,142 +1480,6 @@ type jitJob struct {
 // snapshots of their feedback (jitSnapshot); without it, on the runtime's
 // goroutine, as they are prepared. A switch for comparing the two.
 var jitSnapshots = true
-
-// jitInstall is a compile's last step: what the work found taken into the
-// feedback, and the code placed, if the JIT has the room for all its entry
-// is to hold then (roomFor), its code and what describes it included:
-// jit.ErrCodeBudget otherwise. It gives the job's workspace back.
-func (r *Runtime) jitInstall(j *jitJob) (*jit.SSACode, *jitFeedback, error) {
-	defer func() {
-		jit.PutWorkspace(j.w)
-		j.w = nil
-	}()
-	fn, p, e, fb, f, keepLimit := j.fn, j.p, j.e, j.fb, j.f, j.keepLimit
-	s := r.jit
-	if j.allocErr != nil {
-		// A failed check of the allocation's (mir.CheckAllocations, which
-		// tests set) ends the run as it does a compile on the spot.
-		panic(j.allocErr)
-	}
-	if j.panicked {
-		// A worker's refusal of a panic of the compiler's, whose function
-		// is as the panic left it: a bug, which the tests look for.
-		s.backendPanics++
-		return nil, nil, fmt.Errorf("%w: %v", jitRefused, j.err)
-	}
-	if j.buildErr != nil {
-		// The worker's build refused it, as jitPrepare's would have.
-		return nil, nil, fmt.Errorf("%w: %v", jitRefused, j.buildErr)
-	}
-	if j.snap != nil {
-		// What the questions the worker's build asked appended to the
-		// feedback's lists, as the build from the feedback would have.
-		j.snap.replay()
-	}
-	// The pools' roots and prototypes escape analysis took, which the
-	// objects it does not make are made with at an exit.
-	fb.keepVirtuals(f.VirtualAsked)
-	fb.virtuals, fb.called = f.Virtuals, f.Called
-	// The calls it inlines, of those whose inlining it asked (Inline).
-	fb.inlinedN = len(f.Inlined)
-	fb.inlinedAt = fb.inlinedAt[:0]
-	for _, pc := range f.InlinedAt {
-		fb.inlinedAt = append(fb.inlinedAt, int32(pc))
-	}
-	if f.HomesEnd != 0 {
-		// The homes of the objects it does not make, past its operands,
-		// which its frame takes, as it does its loops' slots: its callees'
-		// frames start past them.
-		fb.homes = f.HomesEnd - p.Locals
-		fb.loopSlots = max(fb.loopSlots, fb.homes)
-	}
-	mc, err := j.mc, j.err
-	if err != nil && strings.Contains(err.Error(), "runtime error") {
-		// A refusal the backend's own panic made: a bug, which the tests
-		// look for (backendPanics).
-		s.backendPanics++
-	}
-	if errors.Is(err, mir.ErrKeeps) && keepLimit == 0 {
-		return nil, nil, err
-	}
-	if err == nil && mc.Spills > abi.SpillSlots {
-		// The stack form, which the register form replaces, keeps the
-		// bound the context's own slots set (abi.Context's SpillMore): its
-		// budget, which a function past it would hold past -- a script's
-		// top level of hundreds of callees, running while its entry grows
-		// -- is not made for one.
-		err = fmt.Errorf("%w: more than %d spill slots", mir.ErrUnsupported, abi.SpillSlots)
-	}
-	if err != nil {
-		return nil, nil, fmt.Errorf("%w: %v", jitRefused, err)
-	}
-	if s.staleLinks(fb) {
-		// Built in the background through a link let go meanwhile: built
-		// again (compileSSAFinish) before room is made for it and it is
-		// placed, to be thrown away.
-		return nil, fb, errJITStaleLinks
-	}
-	// The cells the backend gave the kept values (mir's keep cells).
-	fb.keeps = f.Keeps
-	fb.hostsLeft, fb.unresumed, fb.unentered, fb.kept = nil, nil, nil, nil
-	for _, pc := range f.HostsLeft {
-		fb.hostsLeft = append(fb.hostsLeft, int32(pc))
-	}
-	for _, pc := range f.Unresumed {
-		fb.unresumed = append(fb.unresumed, int32(pc))
-	}
-	for _, pc := range f.Unentered {
-		fb.unentered = append(fb.unentered, int32(pc))
-	}
-	for _, pc := range f.EntryKept {
-		fb.kept = append(fb.kept, int32(pc))
-	}
-	s.ssaKeeps = max(s.ssaKeeps, f.Keeps)
-	need := jitEntryFixed + jit.CodeFootprint(mc) + fb.compiledBytes()
-	if e != nil {
-		need += e.learnedBytes()
-	}
-	// The hint table's slot, which remember takes once it is placed: a
-	// step when the table grows, not a function's bytes (learn).
-	hint := s.hintRoom(e)
-	need += hint
-	// The contexts' room for its spill slots, which they keep (spillsFor).
-	spill := s.spillRoom(mc)
-	need += spill
-	// The lists of native callers its callees keep, which it joins once
-	// placed (setLinks).
-	need += s.callersGrowth(e, fb.links)
-	if !s.roomFor(e, fb.links, need) {
-		// Compiled for nothing: the room it was short of is what a compile
-		// of it again asks for first (jitReoptimize).
-		s.discarded++
-		if e != nil {
-			e.reoptRoom = max(need-e.bytes, 1)
-		}
-		return nil, nil, jit.ErrCodeBudget
-	}
-	if e != nil {
-		e.reoptRoom = 0
-	}
-	code, err := jit.NewSSACode(r.jit.arena, mc)
-	if err != nil {
-		return nil, nil, err
-	}
-	s.spillsFor(mc)
-	s.inlined += uint64(len(f.Inlined))
-	s.inlinedCode += uint64(f.InlinedCode)
-	if JITCodeHook != nil {
-		JITCodeHook(jitFunctionOf(fn), code.Text(), mc)
-	}
-	// What the entry holds, its function's program and the lowering that
-	// holds it (jitLowering, its own bytes too), and its link, which the
-	// entry makes before it is compiled (linkFor): the room a compile asks
-	// for first, which had come short of all three at a full budget, and
-	// then of the lowering's own bytes -- a compile that met a budget
-	// within them was made and thrown away.
-	s.learn(len(fn.Code), need-hint-spill+p.Footprint()+jitLoweringFixed+jitLinkFixed)
-	return code, fb, nil
-}
 
 // jitBuiltHook, where a test sets it, is told each build on the runtime's
 // goroutine as it is made: the snapshot's oracle, which compares it with
@@ -2356,42 +1677,6 @@ func (fb *jitFeedback) mathIntrinsic(o *Object, n int, plain bool) (ssa.Intrinsi
 	return k, true
 }
 
-// jitBigIntIntrinsic makes k the intrinsic of the call at pc of fd, read at
-// q, if it is BigInt's that native code makes (bigint.go in ssa): BigInt(x)
-// of one argument, plain, BigInt.asUintN(n, x) or asIntN's of a width n
-// pushed right after the read, an integer from 0 to 64, as V8 reduces
-// those whose width is a constant; and reports whether it is.
-func (fb *jitFeedback) jitBigIntIntrinsic(k *ssa.Intrinsic, fd *funcData, plain bool, pc, q int) bool {
-	fn := fb.fn
-	switch {
-	case plain:
-		if fd.mathOp != mathBigInt || fn.Code[pc].A != 1 {
-			return false
-		}
-		k.Op, k.Plain = ssa.OpBigOfF64, true
-		return true
-	case fn.Code[pc].A != 2 || q+1 >= pc:
-		return false
-	}
-	w := fn.Code[q+1]
-	if w.Op != bytecode.OpPushInt || int32(w.A) < 0 || int32(w.A) > 64 {
-		return false
-	}
-	// The width stays where it was pushed, the stack above it until the
-	// call: no instruction before it takes it.
-	p, slot := fb.prog, fb.prog.Maps[q+1].Depth
-	for k := q + 2; k <= pc; k++ {
-		if p.Maps[k].Depth < slot+1 {
-			return false
-		}
-	}
-	k.Op, k.Fn = ssa.OpZextW, int(int32(w.A))
-	if fd.mathOp == mathAsIntN {
-		k.Op = ssa.OpSextW
-	}
-	return true
-}
-
 // jitMathArgs is the most arguments a call of Math.max or Math.min is made
 // natively with, as ssa takes them.
 const jitMathArgs = 8
@@ -2482,48 +1767,6 @@ func (fb *jitFeedback) keep() *jitFeedback {
 		return fb.root
 	}
 	return fb
-}
-
-// targetsAt is the calls fb.e's code learned at pc (jitTargets), in their
-// order there: found from a table by PC made once. Each site's question --
-// its native calls, its built-ins' intrinsics, its loop -- had looked
-// through every site's targets, a compile's questions as many as its calls
-// times its targets.
-func (fb *jitFeedback) targetsAt(pc int) []*jitInline {
-	if fb.targetsBy == nil {
-		fb.targetsBy = map[int][]*jitInline{}
-		for _, x := range jitTargets(fb.e) {
-			fb.targetsBy[int(x.pc)] = append(fb.targetsBy[int(x.pc)], x)
-		}
-		fb.targetsOf = [2][]jitInline{fb.e.nativeCalls, fb.e.inlines}
-	}
-	return fb.targetsBy[pc]
-}
-
-// sameList reports whether a and b are one list: the same elements of the
-// same array.
-func sameList(a, b []jitInline) bool {
-	return len(a) == len(b) && (len(a) == 0 || &a[0] == &b[0])
-}
-
-// targetsIn is e's targets at pc, in their order: fb.e's from its table
-// (targetsAt) while its lists are as they were when the table was made,
-// and otherwise -- another entry's, an inlined callee's, or fb.e's since
-// learned -- as jitTargets walks them.
-func (fb *jitFeedback) targetsIn(e *jitEntry, pc int) []*jitInline {
-	if e == fb.e {
-		t := fb.targetsAt(pc)
-		if sameList(fb.targetsOf[0], e.nativeCalls) && sameList(fb.targetsOf[1], e.inlines) {
-			return t
-		}
-	}
-	var t []*jitInline
-	for _, x := range jitTargets(e) {
-		if int(x.pc) == pc {
-			t = append(t, x)
-		}
-	}
-	return t
 }
 
 
@@ -2644,32 +1887,6 @@ func jitTargetsOf(e *jitEntry) []jitTarget {
 		}
 	}
 	return t
-}
-
-// jitCallRepeats reports whether the call in at pc of f's function, its
-// operands on the VM's stack up to sp, which e's code left to Go, calls a
-// target an earlier exit there taught e -- one of its decided native
-// calls or inlines, the call still decided so -- that the code was not
-// compiled for (ssaTargets), while the code waits to be compiled again for
-// what it learned: an exit that teaches nothing, which the code would make
-// at every such call until then.
-func (r *Runtime) jitCallRepeats(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) bool {
-	if e == nil || e.ssa == nil || e.invalid || !e.reoptPending() || e.callSites == nil || pc >= len(e.callSites) {
-		return false
-	}
-	if st := e.callSites[pc]; st != jitCallNative && st != jitCallInlined {
-		return false
-	}
-	o, cl := r.jitCalled(f, sp, in)
-	if o == nil || cl == nil {
-		return false
-	}
-	is := func(p int32, byCode bool, obj *Object, tcl *closure) bool {
-		return int(p) == pc && (obj == o || byCode && tcl != nil && jitSameCode(tcl, cl))
-	}
-	learned := slices.ContainsFunc(e.nativeCalls, func(x jitInline) bool { return is(x.pc, x.byCode, x.obj, x.cl) }) ||
-		slices.ContainsFunc(e.inlines, func(x jitInline) bool { return is(x.pc, x.byCode, x.obj, x.cl) })
-	return learned && !slices.ContainsFunc(e.ssaTargets, func(t jitTarget) bool { return is(t.pc, t.byCode, t.obj, t.cl) })
 }
 
 
@@ -3142,17 +2359,6 @@ func (r *Runtime) jitGoUnpin(idx int) {
 	}
 }
 
-// jitGoRunAt notes that context idx runs e's code for f, in a stretch
-// from pc, with the back-edge counter, net of the polls' budgets, at
-// edges, of a run on-stack replacement began if osr.
-func (r *Runtime) jitGoRunAt(idx int, f *frame, e *jitEntry, pc, edges int, osr bool) {
-	s := r.jit
-	if idx >= len(s.goRuns) {
-		s.goRuns = append(s.goRuns, make([]jitGoRun, idx+1-len(s.goRuns))...)
-	}
-	s.goRuns[idx] = jitGoRun{f: f, e: e, code: e.ssa, inlined: e.ssaInlined, edges: edges, pc: pc, osr: osr}
-}
-
 // jitGoPending is a call Go made from native code and left native code
 // after (jitGoCall): at its exit, Go puts its result, or throws. ctx is the
 // level of the code that made it: a run's own, or a native callee's
@@ -3235,57 +2441,6 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	return false
 }
 
-// jitRunGoProfit accounts for a call of Go that e's code makes at pc in
-// run, a run Go entered at a loop by on-stack replacement, and every
-// jitSSAProbe such calls judges whether they pay, as jitCalleeProfit
-// judges a native callee's: each costs native code what an exit and an
-// entry would (jitSSAMinWork) more than the tree tier's own call of the
-// built-in, against the work the code did natively since the call before
-// -- the back edges taken, at its loops' mean length, or, with none, the
-// distance from that call. Judged at the end of its stretches alone
-// (jitSSAProfit), such a run, whose one stretch is the loop, was judged
-// when the loop was over: a loop of calls of Date.now, of a generator's
-// steps, of Date's methods, ran natively to its end, and so again at each
-// invocation, the tree tier making none of its calls. Code whose calls do
-// not pay is not entered again, at its start nor by on-stack replacement
-// (loopSlow), until it is retried (jitRetrySlow); and it reports so, for
-// the code to leave. A run entered at the function's start is judged at
-// its end, as before: judged at its calls, AWFY's DeltaBlue's callback of
-// Plan.execute, whose call of c.execute() Go made until it was decided,
-// was no longer entered by Go, and DeltaBlue took 31% longer.
-func (r *Runtime) jitRunGoProfit(e *jitEntry, run *jitGoRun, pc int) bool {
-	st := &e.ssaStats
-	if back := run.edges - (r.backEdges - r.jit.pollCredit); back > 0 {
-		st.runWork += uint64(back) * uint64(e.ssaLoop)
-	} else if pc > run.pc {
-		st.runWork += uint64(pc - run.pc)
-	}
-	st.runGoCalls++
-	if st.runGoCalls%jitSSAProbe == 0 && st.runWork < st.runGoCalls*jitSSAMinWork && !jitCallsNatively(e) {
-		e.entrySlow, e.loopSlow = true, true
-	}
-	return e.loopSlow
-}
-
-// jitCallsNatively reports whether e's code calls functions natively: in
-// the existing tiers, its callees would run there too, and their work,
-// which the back edges count only in part, is native while it runs. Its
-// calls of Go are left unjudged: Octane's RegExp's runBlock0, whose calls
-// of string methods Go makes, and whose calls of Exec are native, had run
-// in the tree, Exec with it, and RegExp took 11% longer.
-func jitCallsNatively(e *jitEntry) bool {
-	return len(e.nativeCalls) != 0 || slices.Contains(e.callSites, jitCallNative)
-}
-
-// jitGoStacked is how many of a call of Go's n operands, for in, are the
-// frame's operands: a super()'s first is its this slot, a local.
-func jitGoStacked(in bytecode.Instr, n int) int {
-	if in.Op == bytecode.OpSuperCall {
-		return n - 1
-	}
-	return n
-}
-
 // jitGoPropertyAt reports whether a call of Go, in, may be made at pc of
 // fn: a property's read or write only where fn's instruction there is one
 // (jitPropertyMade), which reads it; any other call anywhere.
@@ -3302,38 +2457,6 @@ func jitGoPropertyAt(fn *bytecode.Function, pc int, in bytecode.Instr) bool {
 		return pc < len(fn.Code) && fn.Code[pc].Op == in.Op
 	}
 	return true
-}
-
-// jitPropertySeen learns, at a call of Go that reads the property at pc
-// of f's function, which native code did not find, what the read met, as
-// at an exit: at a megamorphic site's (jitPolySeen); at an object
-// pattern's, which has no cache, the megamorphic cache filled for the
-// receiver at sp-1, which the next such read finds natively, the
-// property's absence too (jitMegaFillProto).
-func (r *Runtime) jitPropertySeen(f *frame, e *jitEntry, pc, sp int) {
-	switch in := f.cl.fn.Code[pc]; {
-	case in.Op == bytecode.OpGetPropUnder:
-		if recv := r.stack[sp-1]; recv.IsObject() && int(in.A) < len(f.cl.names) {
-			r.jit.megaFill(recv.Object(), f.cl.names[in.A])
-			r.jitMegaFillProto(recv.Object(), f.cl.names[in.A])
-		}
-	case r.jitSiteMegamorphic(f.cl, e, pc):
-		// A megamorphic site's read that native code did not find,
-		// learned as at an exit (jitPolySeen): the megamorphic cache
-		// filled for the receiver's shape, which the next such read
-		// finds natively, as V8's miss handler fills its stub cache.
-		r.jitPolySeen(f, e, pc, sp, in)
-	case in.Op == bytecode.OpGetProp:
-		// Native code did not find it, whatever the interpreter's cache
-		// holds: where that holds the shapes the code's cases do not, the
-		// read hits it, nothing fills, the site never gives up, and each
-		// of those shapes is a call of Go at every read. A loop over
-		// objects of a dozen shapes made 20,000 such calls a cycle, for
-		// as long as it ran.
-		if recv := r.stack[sp-1]; recv.IsObject() && int(in.A) < len(f.cl.names) {
-			r.jit.megaFill(recv.Object(), f.cl.names[in.A])
-		}
-	}
 }
 
 // jitRunFrame is the frame Go entered the code running in ctx with, or
@@ -3580,50 +2703,6 @@ func (r *Runtime) jitCellsClosure(ctx *abi.Context, f *frame, i int) bool {
 	return true
 }
 
-// jitReopenCells gives f, the frame Go made for native code that left it,
-// whose captured locals are in cells of their own (abi.Context's Cells),
-// those cells: each local's value in the frame's slot, the cell open on it,
-// the frame's to close as it is popped -- the closures that captured it
-// see what the interpreter assigns from then on. The context keeps them:
-// resumed after its call (jitUnwindNative), the code goes on with them.
-func jitReopenCells(f *frame, ctx *abi.Context) {
-	cells := jitCellsOf(ctx, f.cl.fn)
-	k := 0
-	for slot, l := range f.cl.fn.Locals {
-		if !l.Captured {
-			continue
-		}
-		if u := cells[k]; u.slot != &f.locals[slot] {
-			f.locals[slot] = *u.slot
-			u.slot = &f.locals[slot]
-			f.openUpvalues = append(f.openUpvalues, u)
-		}
-		k++
-	}
-}
-
-// jitReopenRunCells gives f, the frame Go entered code with whose captured
-// locals are in cells of their own, the cells native code left in ctx, as
-// the interpreter's frame has them: a cell native code gave a local at a
-// scope's end (mir's cellsClose), closed, is open on its slot again,
-// holding what it held, and those it closed, no longer on the slots, are
-// the frame's no more.
-func jitReopenRunCells(f *frame, ctx *abi.Context) {
-	if len(f.locals) != 0 {
-		lo, hi := uintptr(unsafe.Pointer(&f.locals[0])), uintptr(unsafe.Pointer(&f.locals[len(f.locals)-1]))
-		kept := f.openUpvalues[:0]
-		for _, u := range f.openUpvalues {
-			if p := uintptr(unsafe.Pointer(u.slot)); p >= lo && p <= hi {
-				kept = append(kept, u)
-			}
-		}
-		clear(f.openUpvalues[len(kept):])
-		f.openUpvalues = kept
-	}
-	jitReopenCells(f, ctx)
-	ctx.Open = uint64(len(f.openUpvalues))
-}
-
 // jitNeedsMaker reports whether the function template c makes is an arrow
 // that reads, or whose arrows read, its maker's new.target or super, or
 // has a direct eval, which may read either (bytecode.Function's
@@ -3650,17 +2729,6 @@ func jitCalleeMakes(f *frame, c Value) bool {
 	}
 	t := c.template()
 	return t == nil || t.fn.Kind != bytecode.KindArrow || f.cl.fn.Kind != bytecode.KindDerivedConstructor || !f.this.IsUninitialized()
-}
-
-// jitGoPin pins the code the run in context idx runs, until its native code
-// leaves (jitGoUnpin), if it has not been yet.
-func (r *Runtime) jitGoPin(idx int) {
-	s := r.jit
-	if run := &s.goRuns[idx]; !run.pinned {
-		s.pinSerial++
-		run.pinned, run.pinnedAt, run.serial = true, len(s.goPinned), s.pinSerial
-		s.goPinned = append(s.goPinned, run.code)
-	}
 }
 
 // jitEntryOf is the entry of cl's function: the one cl's hint names, or,
@@ -3719,46 +2787,6 @@ type jitGoMark struct {
 	edges  int
 	hint   uint32
 	pc     int
-}
-
-// jitCalleeProfit accounts for a call of Go that e's code makes at pc as a
-// native callee, in the run whose pins serial names, and every jitSSAProbe
-// such calls decides whether its native code pays, as jitSSAProfit decides
-// for code Go enters: each call of Go costs what an exit and an entry
-// would (jitSSAMinWork), against the work the code did natively since the
-// last -- the back edges taken, at its loops' mean length, and the
-// distance from the last call it made, at a later PC in the same run. Called natively,
-// its calls cost it the same as entered from Go, but its native callers
-// pay no entry: called through Go instead (ExitEnter), each call of it
-// would cost one. So it pays while its work makes up for its calls of Go
-// beyond its calls in (its link's in); if not -- a function of loops that only
-// call built-ins, RegExp's run blocks, a call of Go at every few
-// instructions -- Go stops entering it and native callers stop calling it
-// (notNative), and the existing tiers run it, its calls of built-ins the
-// tree tier's own, cheaper than calls of Go from native code.
-func (r *Runtime) jitCalleeProfit(e *jitEntry, serial uint64, pc int) {
-	s := r.jit
-	st := &e.ssaStats
-	// The back edges since the last such call, whatever ran them -- the
-	// tiers share the counter, so the guess errs toward the native code --
-	// and, in the same run, the distance from the call before it.
-	m := &s.goMark
-	if back := m.edges - (r.backEdges - s.pollCredit); m.hint != 0 && back > 0 {
-		st.calleeWork += uint64(back) * uint64(e.ssaLoop)
-	}
-	if m.serial == serial && m.hint == e.hint && pc > m.pc {
-		st.calleeWork += uint64(pc - m.pc)
-	}
-	st.calleeGoCalls++
-	if st.calleeGoCalls%jitSSAProbe != 0 || st.calleeGoCalls <= e.link.in {
-		return
-	}
-	if st.calleeWork < (st.calleeGoCalls-e.link.in)*jitSSAMinWork {
-		e.entrySlow = true
-		e.notNative, e.nativeRetry = true, 0
-		e.link.clearCode()
-		e.nativeBackoff = min(e.nativeBackoff+1, jitNativeBackoffs)
-	}
 }
 
 // jitStoreElem stores v at index n of o as an assignment would, where that
@@ -4249,15 +3277,6 @@ func jitGoCallInstr(op uint64) (bytecode.Instr, int) {
 	return in, n
 }
 
-// jitCallUnsettled reports whether jitCallSeen has anything to note of a
-// call of Go at pc: not, once the call is settled as one Go makes
-// (jitCallDone) and the code has no inlining pending, unless it constructs
-// (a pool to fill). Most calls of Go are such, a built-in's: asked here,
-// they cost no call.
-func jitCallUnsettled(e *jitEntry, pc int, in bytecode.Instr) bool {
-	return in.Op == bytecode.OpNew || e.inlinePending || uint(pc) >= uint(len(e.callSites)) || e.callSites[pc] != jitCallDone
-}
-
 
 // jitClearArgs clears the operands a call of Go put past the VM stack's
 // top, from top to sp, so that they keep nothing: a few, each store's
@@ -4321,31 +3340,6 @@ const jitInlineDepth = 3
 
 
 
-// jitViaRead reports whether op, the read of G before G.call(this, ...),
-// is one whose value now jitChainValue finds: a global's, a property's of
-// what such reads give, or a captured binding's -- the _super a class
-// compiled to ES5 calls its parent's constructor through,
-// _super.call(this, ...), which had been decided, once, from the call's
-// first exit, and left to Go for good where its parent had no code then:
-// Typescript's AST constructor called ASTSpan so through Go at each of
-// some 40,000 constructions a run, its subclasses theirs.
-func jitViaRead(op bytecode.Op) bool {
-	switch op {
-	case bytecode.OpGetProp, bytecode.OpGetGlobal, bytecode.OpGetUpvalue, bytecode.OpGetUpvalueCheck:
-		return true
-	}
-	return false
-}
-
-// jitGoCallFits reports whether native code that calls through a link
-// with no code may have Go make the call in, its operands -- a method's
-// receiver, the function and the arguments -- no more than a call of Go
-// takes (abi.MaxGoArgs), rather than leave native code at it (mir's
-// enterExit).
-func jitGoCallFits(in bytecode.Instr) bool {
-	return int(in.A)+2 <= abi.MaxGoArgs
-}
-
 // jitSeedDepth is how many compiles deep seeding a call's target may
 // start compiles (jitSeedCallee): a callee's calls' targets, theirs, as
 // deep as calls are inlined.
@@ -4369,193 +3363,6 @@ func jitCountAt(calls []jitInline, pc int) int {
 		}
 	}
 	return n
-}
-
-// jitSeenCallees are the other functions a method call at pc has called,
-// besides o, as its method read's cache saw them -- its entry, those it
-// keeps for other shapes (propCache.poly), and those it had before
-// (propCache.seen): of each shape it met, the method a prototype held, as
-// it holds it now -- the call checks its callee -- each a function
-// jitCalled would take. Or none. The poly entries had been left out: a
-// polymorphic method of a few classes, Typescript's Symbol's isType and
-// isMember, which a subclass overrides, was compiled to call one, and
-// learned the other at an exit, one compile later.
-func (r *Runtime) jitSeenCallees(cl *closure, p *ir.Program, pc int, o *Object) []jitCallee {
-	fn := cl.fn
-	if jitCallOp(fn.Code[pc].Op) != bytecode.OpCallMethod {
-		return nil
-	}
-	depth := p.Maps[pc].Depth
-	slot := depth - int(fn.Code[pc].A) - 1
-	if slot < 1 {
-		return nil
-	}
-	read := -1
-	for q := pc - 1; q >= 0; q-- {
-		d := p.Maps[q].Depth
-		if d == slot && fn.Code[q].Op == bytecode.OpGetPropThis {
-			read = q
-			break
-		}
-		if d < slot+1 || d == slot+1 && p.Maps[q+1].Depth < slot+2 {
-			return nil
-		}
-	}
-	if read < 0 {
-		return nil
-	}
-	in := fn.Code[read]
-	if int(in.B) >= len(cl.ic) || int(in.A) >= len(cl.names) {
-		return nil
-	}
-	var out []jitCallee
-	take := func(c *propCache) {
-		h := c.p1
-		if c.p2 != nil {
-			h = c.p2
-		}
-		if c.shape == nil || c.shape == noShape || c.shape == dictShape || c.getter || h == nil || c.idx < 0 || int(c.idx) >= int(h.valn) {
-			return
-		}
-		prop := h.propAt(c.idx)
-		if prop.key != cl.names[in.A] || prop.flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 || !prop.value.IsObject() {
-			return
-		}
-		mo, mc := r.jitCallableClosure(cl, prop.value.Object())
-		if mc == nil || mo == o || slices.ContainsFunc(out, func(x jitCallee) bool { return x.o == mo }) {
-			return
-		}
-		out = append(out, jitCallee{mo, mc})
-	}
-	c := &cl.ic[in.B]
-	take(c)
-	if p := c.poly; p != nil {
-		for i := range p.entries[:p.n] {
-			take(&p.entries[i])
-		}
-	}
-	if seen := c.seenOf(); seen != nil {
-		for i := range seen.entries[:seen.n] {
-			take(&seen.entries[i])
-		}
-	}
-	return out
-}
-
-// jitCalleeAt is the function the call or construction at pc calls as the
-// existing tiers have met it, and its closure: the read of its callee --
-// the nearest before it at the callee's depth, with nothing between but
-// the arguments, above it: a method call's get_prop_this, whose cache
-// found one plain data property on a prototype, or another's get_global,
-// whose cache found the global's, or get_prop of an object so read, a
-// namespace's constructor, new Flog.RayTracer.Vector(...), whose value now
-// is taken as V8 folds a constant's loads (jitChainValue), or a captured
-// binding's read, the function the binding holds now, as V8's code knows
-// a closure its context holds -- a function jitCalled would take. Or nil.
-// The call checks the function it calls.
-func (r *Runtime) jitCalleeAt(cl *closure, p *ir.Program, pc int) (*Object, *closure) {
-	o, _ := r.jitCalleeObjectAt(cl, p, pc)
-	if o == nil {
-		return nil, nil
-	}
-	return r.jitCallableClosure(cl, o)
-}
-
-// jitCalleeObjectAt is the function object jitCalleeAt finds, built-ins'
-// too, and the PC of the method read it was found by, or -1.
-func (r *Runtime) jitCalleeObjectAt(cl *closure, p *ir.Program, pc int) (*Object, int) {
-	fn := cl.fn
-	depth := p.Maps[pc].Depth
-	slot := depth - int(fn.Code[pc].A) - 1
-	op := bytecode.OpGetGlobal
-	if jitCallOp(fn.Code[pc].Op) == bytecode.OpCallMethod {
-		op = bytecode.OpGetPropThis
-	}
-	if depth < 0 || slot < 0 || op == bytecode.OpGetPropThis && slot < 1 {
-		return nil, -1
-	}
-	read := -1
-	for q := pc - 1; q >= 0; q-- {
-		d := p.Maps[q].Depth
-		if d == slot && fn.Code[q].Op == op {
-			read = q
-			break
-		}
-		if d == slot+1 && op == bytecode.OpGetGlobal && fn.Code[q].Op == bytecode.OpGetProp ||
-			d == slot && op == bytecode.OpGetGlobal && (fn.Code[q].Op == bytecode.OpGetUpvalue || fn.Code[q].Op == bytecode.OpGetUpvalueCheck) {
-			// A property of an object read so, its value now; or what a
-			// captured binding holds now: a module's functions, which call
-			// one another through the bindings of the scope they were made
-			// in, RegExp's Exec, called by each of runBlock0's two dozen
-			// loops, had been decided one call, at its exits, at a time,
-			// and the function compiled again for them.
-			v, ok := r.jitChainValue(cl, p, q, jitChainReads)
-			if !ok || !v.IsObject() {
-				return nil, -1
-			}
-			return v.Object(), -1
-		}
-		// Only the arguments' instructions, which leave the callee be: the
-		// first pushes on it, and the rest work above.
-		if d < slot+1 || d == slot+1 && p.Maps[q+1].Depth < slot+2 {
-			return nil, -1
-		}
-	}
-	if read < 0 {
-		return nil, -1
-	}
-	in := fn.Code[read]
-	if int(in.B) >= len(cl.ic) || int(in.A) >= len(cl.names) {
-		return nil, -1
-	}
-	c := &cl.ic[in.B]
-	if op == bytecode.OpGetPropThis && c.p1 == nil {
-		// Not found on a prototype: a method read off an object the reads
-		// before it name, RayTrace's Flog.RayTracer.Vector.prototype.add(...),
-		// its value now (jitChainValue). Calls there had been learned one
-		// exit at a time, and its functions ran out of compiles first.
-		if v, ok := r.jitChainValue(cl, p, read, jitChainReads); ok && v.IsObject() {
-			return v.Object(), read
-		}
-		return nil, -1
-	}
-	h, idx := c.p1, c.idx
-	if op == bytecode.OpGetGlobal {
-		// The global environment, where the read found the name at the
-		// cache's index, as pureGlobalSlow looks: not a name a script's
-		// lexical binding shadows. Or, where the cache has not found it
-		// -- native code reads a global without it, from where the global
-		// object had it when compiled (jitFeedback.Global) -- where the
-		// environment has it now, as that read finds it: a constructor
-		// only native code had read was learned one exit, and one compile,
-		// at a time, every construction of DeltaBlue's. A script's
-		// lexical binding of the name, a class's say, is where the
-		// realm's global scope has it.
-		if h = cl.scope(); r.globalLex.valn != 0 && r.lexShadows(cl.names[in.A]) {
-			if !r.isGlobalScope(h) {
-				return nil, -1
-			}
-			h, idx = r.globalLex, -1
-		}
-		if h != nil && (idx < 0 || int(idx) >= int(h.valn) || h.shape.keys[idx].key != cl.names[in.A]) {
-			idx = h.findOwn(cl.names[in.A])
-		}
-	} else {
-		if c.shape == nil || c.shape == noShape || c.getter {
-			return nil, -1
-		}
-		if c.p2 != nil {
-			h = c.p2
-		}
-	}
-	if h == nil || idx < 0 || int(idx) >= int(h.valn) {
-		return nil, -1
-	}
-	prop := h.propAt(idx)
-	if prop.key != cl.names[in.A] || prop.flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 || !prop.value.IsObject() {
-		return nil, -1
-	}
-	return prop.value.Object(), read
 }
 
 // jitCallableClosure is o and its closure, if a call in cl's code may make
@@ -4588,48 +3395,6 @@ func (r *Runtime) jitNativeTargetOf(fd *funcData, cl *closure, construct bool) b
 // Flog.RayTracer.Vector.prototype.subtract, a method's, with one to spare.
 const jitChainReads = 6
 
-// jitChainValue is the value the read at q of cl's code gives now, if it
-// is a global's read, by its cache, or a data property's of an object a
-// read just before it gives so, at most n reads in all: a guess, which
-// whatever takes it checks.
-func (r *Runtime) jitChainValue(cl *closure, p *ir.Program, q, n int) (Value, bool) {
-	fn := cl.fn
-	if n <= 0 || q < 0 || q >= len(fn.Code) || p.Maps[q].Depth < 0 {
-		return Undefined, false
-	}
-	in := fn.Code[q]
-	if in.Op == bytecode.OpGetUpvalue || in.Op == bytecode.OpGetUpvalueCheck {
-		// A captured binding's value now, as jitKnownReceiver has it: a
-		// constructor a module's closures capture, Box2D's a instanceof S,
-		// which had left native code at every test.
-		if int(in.A) >= len(cl.upvalues) || cl.upvalues[in.A] == nil {
-			return Undefined, false
-		}
-		if v := cl.upvalues[in.A].get(); !v.IsUninitialized() {
-			return v, true
-		}
-		return Undefined, false
-	}
-	if int(in.A) >= len(cl.names) {
-		return Undefined, false
-	}
-	switch in.Op {
-	case bytecode.OpGetGlobal:
-		return r.jitGlobalValue(cl, cl.names[in.A])
-	case bytecode.OpGetProp, bytecode.OpGetPropThis:
-		recv, ok := r.jitChainReceiver(cl, p, q, n)
-		if !ok {
-			return Undefined, false
-		}
-		prop := recv.getOwnVisible(cl.names[in.A])
-		if !prop.ok() || prop.flags()&propAccessor != 0 {
-			return Undefined, false
-		}
-		return prop.value(), true
-	}
-	return Undefined, false
-}
-
 // jitGlobalValue is the value of the global name, as a read of it in cl's
 // code finds it now: the global object's data property of the name -- or
 // the script's lexical binding that shadows it, in the realm's global
@@ -4653,152 +3418,10 @@ func (r *Runtime) jitGlobalValue(cl *closure, name Atom) (Value, bool) {
 	return prop.value(), true
 }
 
-// jitChainReceiver is the object the property read at q of cl's code reads
-// from, if the read just before it gives it so (jitChainValue), at most n
-// reads in all: the value that read left on top.
-func (r *Runtime) jitChainReceiver(cl *closure, p *ir.Program, q, n int) (*Object, bool) {
-	fn := cl.fn
-	if n <= 0 || q <= 0 || q >= len(fn.Code) || p.Maps[q].Depth < 0 || p.Maps[q-1].Depth < 0 {
-		return nil, false
-	}
-	switch prev := fn.Code[q-1].Op; {
-	case (prev == bytecode.OpGetGlobal || prev == bytecode.OpGetUpvalue || prev == bytecode.OpGetUpvalueCheck) && p.Maps[q-1].Depth == p.Maps[q].Depth-1,
-		prev == bytecode.OpGetProp && p.Maps[q-1].Depth == p.Maps[q].Depth:
-	default:
-		return nil, false
-	}
-	recv, ok := r.jitChainValue(cl, p, q-1, n-1)
-	if !ok || !recv.IsObject() {
-		return nil, false
-	}
-	return recv.Object(), true
-}
 
 
 
-// jitCalled is the function object a call at the top of the frame's
-// operands, up to sp, calls, and its closure, if it is one native code may
-// call or inline: one the script made, in the frame's realm and scope.
-func (r *Runtime) jitCalled(f *frame, sp int, in bytecode.Instr) (*Object, *closure) {
-	at := sp - int(in.A) - 1
-	if in.Op == bytecode.OpApplyArguments {
-		// f.apply(x, arguments): f, below the realm's apply and x.
-		if ap := r.stack[sp-2]; !ap.IsObject() || ap.Object() != r.applyFn {
-			return nil, nil
-		}
-		at = sp - 3
-	}
-	callee := r.stack[at]
-	if !callee.IsObject() {
-		return nil, nil
-	}
-	o := callee.Object()
-	if !r.jitNativeTargetOf(o.fn(), f.cl, in.Op == bytecode.OpNew) {
-		return nil, nil
-	}
-	return o, o.fn().closure
-}
 
-// jitKnownTargetSeen is jitCallSeen's at a call decided native
-// (jitCallNative), with no inlining pending, of a function it calls
-// natively already, which has code: jitCallTarget's answers to such a call
-// learn nothing -- no new target, no closure of a known function to call by
-// its code, no callee to compile -- but count the calls of a callee native
-// callers do not call for now (notNative) toward its being called natively
-// again (jitRetryNative). It gives that answer, in jitCallTarget's order,
-// and reports whether it did; any other call is jitCallSeen's to learn
-// from. Such calls are what native code leaves for at each call of a
-// callee it calls through Go while the callee is notNative, or whose code
-// leaves at its start: asked jitCallSeen's every question, each had cost
-// Go a third again of what it costs without them.
-func (r *Runtime) jitKnownTargetSeen(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) bool {
-	if in.Op == bytecode.OpNew || e.inlinePending || uint(pc) >= uint(len(e.callSites)) || e.callSites[pc] != jitCallNative {
-		return false
-	}
-	o, cl := r.jitCalled(f, sp, in)
-	if cl == nil {
-		return false
-	}
-	for i := range e.nativeCalls {
-		x := &e.nativeCalls[i]
-		if int(x.pc) != pc {
-			continue
-		}
-		if x.cl != nil && x.obj != o && !x.byCode && jitSameCode(x.cl, cl) {
-			// Another closure of a function it calls: jitCallTarget's to
-			// call by its code.
-			return false
-		}
-		if x.obj == o || x.cl == nil || x.byCode && jitSameCode(x.cl, cl) {
-			ce := r.jit.entryFor(cl.fn)
-			if (x.obj == o || x.byCode) && ce != nil && ce.notNative {
-				jitRetryNative(ce)
-				return true
-			}
-			// One with no code is jitCallTarget's to compile.
-			return x.cl == nil || ce != nil && ce.ssa != nil
-		}
-	}
-	return false
-}
-
-
-// jitCalleeAwaited reports whether cl's function has no code for native
-// callers only for now: it is being compiled in the background, or would be
-// but for the compiles there already (jitNativeCallee), which is no answer
-// to whether a call may be native.
-func (r *Runtime) jitCalleeAwaited(cl *closure) bool {
-	s := r.jit
-	if s.jitPending(cl.fn) {
-		return true
-	}
-	if ce := s.entryFor(cl.fn); ce != nil && (ce.ssa != nil || ce.calleeRefused) {
-		return false
-	}
-	return r.jitInBackground(cl.fn) && s.jobsFull()
-}
-
-
-
-// jitIndexOperands is the receiver and key of the element read in at an
-// exit, sp past its operands: a[i]'s, its receiver's kept beneath
-// (get_index_this) or not, on the stack; a local's element by a local
-// (get_local_index), in the frame. Each is an ir.ArrayRead, which
-// jitIndexSeen learns: only a[i]'s had been, so a local's typed array's
-// left native code at every invocation -- PDF.js's Huffman tables',
-// lengths[val], the rest of each by the interpreter.
-func (r *Runtime) jitIndexOperands(f *frame, in bytecode.Instr, sp int) (o, k Value, ok bool) {
-	switch in.Op {
-	case bytecode.OpGetIndex, bytecode.OpGetIndexThis:
-		if sp < 2 || sp > len(r.stack) {
-			return Value{}, Value{}, false
-		}
-		return r.stack[sp-2], r.stack[sp-1], true
-	case bytecode.OpGetIndexUnder:
-		// An object pattern's computed key's read, A beneath the top.
-		if d := int(in.A); sp < d+2 || sp > len(r.stack) {
-			return Value{}, Value{}, false
-		}
-		return r.stack[sp-2-int(in.A)], r.stack[sp-1-int(in.A)], true
-	case bytecode.OpGetLocalIndex:
-		if int(in.A) >= len(f.locals) || int(in.B) >= len(f.locals) {
-			return Value{}, Value{}, false
-		}
-		return f.locals[in.A], f.locals[in.B], true
-	}
-	return Value{}, Value{}, false
-}
-
-// jitPolyMega reports whether e's code found the site at pc megamorphic
-// (jitPolySite's mega).
-func jitPolyMega(e *jitEntry, pc int) bool {
-	for i := range e.poly {
-		if p := &e.poly[i]; int(p.pc) == pc {
-			return p.mega
-		}
-	}
-	return false
-}
 
 // jitKeyedClass reports whether o's elements by a number Go reads from
 // native code where an array's are not (ssa.GoIndex, jitKeyedRead): an
@@ -4807,20 +3430,6 @@ func jitPolyMega(e *jitEntry, pc int) bool {
 // left native code at each read.
 func jitKeyedClass(o *Object) bool {
 	return o.class == ClassObject || o.class == ClassArguments && o.flags&objMappedArguments == 0
-}
-
-// ownEntry is the entry whose code met what fb's function's element reads
-// met (jitIndexSeen): the function's own, for an inlined callee too, as an
-// inlined callee's property sites are what its own code found. An inlined
-// callee's had been the root's alone, nothing: Gameboy's memoryReadNormal,
-// parentObj.memory[address] of a typed array, inlined into its callers,
-// read it as an array's, which left native code at each read, though its
-// own code had learned it.
-func (fb *jitFeedback) ownEntry() *jitEntry {
-	if fb.root != nil {
-		return fb.r.jit.entryFor(fb.fn)
-	}
-	return fb.e
 }
 
 // jitKeyedRead is o[k] where reading it runs nothing (ssa.GoIndex): an
@@ -5040,86 +3649,7 @@ func jitAbsentKey(o *Object, a Atom, named bool) bool {
 	return true
 }
 
-// jitSameCode reports whether a and b are closures of one function, in one
-// environment and realm: a call native code makes of either may check the
-// function, and run the closure it finds (ssa.CallSite's ByCode), as each
-// call of their maker makes a new one.
-func jitSameCode(a, b *closure) bool {
-	return a.fn == b.fn && a.env == b.env && a.realm == b.realm
-}
 
-// jitReadsArguments reports whether fn uses its arguments object only to
-// read it by index, arguments[k] (arguments_index): an object made only on
-// demand, never pushed, forwarded to no call (bytecode's
-// ForwardsArguments, no apply_arguments), and aliasing no parameter -- a
-// sloppy function's with parameters would. Inlined, its reads are the
-// call's arguments (ssa.InlineSite's ReadsArguments), as V8 eliminates
-// the arguments object; a function that reads arguments had been called
-// by Go from native code at each call, its code the tree tier's --
-// microbench.js's arguments_test.
-func jitReadsArguments(fn *bytecode.Function) bool {
-	if !fn.UsesArguments || !fn.ForwardsArguments || fn.MappedArguments && fn.ParamCount > 0 || fn.Leaf == bytecode.LeafForward {
-		return false
-	}
-	return !slices.ContainsFunc(fn.Code, func(in bytecode.Instr) bool { return in.Op == bytecode.OpApplyArguments })
-}
-
-
-
-// jitForwardMethod is the function object jitForwardTarget's closure is
-// of, or nil.
-func (r *Runtime) jitForwardMethod(cl *closure, o *Object) *Object {
-	fn := cl.fn
-	if fn.Leaf != bytecode.LeafForward || len(fn.Code) < 2 || fn.Code[1].Op != bytecode.OpGetProp || int(fn.Code[1].A) >= len(cl.names) {
-		return nil
-	}
-	p := o.getOwnVisible(atomPrototype)
-	if !p.ok() || p.flags()&propAccessor != 0 || !p.value().IsObject() {
-		return nil
-	}
-	m := p.value().Object().getOwnVisible(cl.names[fn.Code[1].A])
-	if !m.ok() || m.flags()&propAccessor != 0 || !m.value().IsObject() {
-		return nil
-	}
-	t := m.value().Object()
-	if !r.jitNativeTargetOf(t.fn(), cl, false) {
-		return nil
-	}
-	return t
-}
-
-// forwardProperty is a forwarding constructor's inlined frame's property
-// site (jitForwardFrame), known from its receiver: this.k, at its first
-// read, as a pool's object finds it; k's apply, at its second, as k does.
-func (fb *jitFeedback) forwardProperty(pc int) (ssa.PropertySite, bool) {
-	in := fb.fn.Code[pc]
-	var recv *Object
-	switch {
-	case pc == 1 && in.Op == bytecode.OpGetProp:
-		pool := fb.fwd.pool
-		for i := range pool.Count {
-			if o := (*Object)(pool.Objects[i]); o != nil && o.shape != nil {
-				recv = o
-				break
-			}
-		}
-		if recv == nil {
-			// The pool ran out: an object as the next fill makes, whose
-			// read the code is compiled for -- else the read would be
-			// compiled knowing nothing, and leave every time.
-			recv = fb.r.jitPoolObject(fb.fwd.ctor)
-		}
-	case pc == 2 && in.Op == bytecode.OpGetPropThis:
-		recv = fb.r.jitForwardMethod(fb.cl, fb.fwd.ctor)
-	}
-	site := ssa.PropertySite{Key: uint32(fb.cl.names[in.A])}
-	if recv == nil {
-		return site, true
-	}
-	var c propCache
-	fb.r.fillPropCache(&c, recv, fb.cl.names[in.A], false)
-	return fb.siteFrom(in, &c)
-}
 
 // jitUpvalueCells is the address of cl's captured bindings' cells, which
 // an inlined frame of its reads them from (ssa.InlineSite's Upvalues), or
@@ -5131,305 +3661,9 @@ func jitUpvalueCells(cl *closure) uintptr {
 	return uintptr(unsafe.Pointer(unsafe.SliceData(cl.upvalues)))
 }
 
-// jitWritesUpvalues reports whether cl's code assigns a binding it
-// captured, which an inlined frame of its leaves to Go.
-func jitWritesUpvalues(cl *closure) bool {
-	return len(cl.upvalues) != 0 && slices.ContainsFunc(cl.fn.Code, func(x bytecode.Instr) bool {
-		switch x.Op {
-		case bytecode.OpSetUpvalue, bytecode.OpSetUpvalueCheck, bytecode.OpInitUpvalue:
-			return true
-		}
-		return false
-	})
-}
-
-
-// jitHasRun reports whether cl's code has run, as a cache of its filled
-// says: a function that forwards its arguments is inlined for what its
-// caches learned -- its reads of what it forwards to -- which an inlining
-// decided before it ran would leave native code at, every construction,
-// until its exits gave the inlining up.
-func jitHasRun(cl *closure) bool {
-	for i := range cl.ic {
-		if cl.ic[i].fills != 0 {
-			return true
-		}
-	}
-	return false
-}
-
-
-// jitInlineTarget is the call by in at pc of o, cl's function, to inline:
-// a construction's with its pool.
-func (r *Runtime) jitInlineTarget(pc int32, cl *closure, o *Object, in bytecode.Instr) jitInline {
-	x := jitInline{pc: pc, cl: cl, obj: o}
-	if in.Op == bytecode.OpNew {
-		x.pool = r.jitNewPool(o)
-		x.fwd = r.jitForwardMethod(cl, o)
-	}
-	return x
-}
-
-// jitForwardChanged reports whether the forwarding constructor inlined at
-// pc in e's code, a construction of o, now forwards to a method other than
-// the one the code was compiled for -- its prototype's was replaced -- and
-// notes the new one: the code is compiled again for it, as V8 optimizes
-// again for a call's new target, rather than the exits counted against
-// inlining it (jitInlineLeft).
-func (r *Runtime) jitForwardChanged(e *jitEntry, pc int, o *Object) bool {
-	for i := range e.inlines {
-		x := &e.inlines[i]
-		if int(x.pc) != pc || x.obj != o || x.fwd == nil {
-			continue
-		}
-		if t := r.jitForwardMethod(x.cl, o); t != nil && t != x.fwd {
-			x.fwd = t
-			return true
-		}
-	}
-	return false
-}
-
-func (r *Runtime) jitNativeTarget(pc int32, cl *closure, o *Object, in bytecode.Instr) jitInline {
-	x := jitInline{pc: pc, cl: cl, obj: o, forward: in.Op == bytecode.OpApplyArguments}
-	if in.Op == bytecode.OpNew {
-		x.pool = r.jitNewPool(o)
-		if fd := o.fn(); fd != nil && fd.closure != cl {
-			// A derived class's, constructed with its parent's code
-			// (jitDerivedBase).
-			x.parent = o.proto()
-		}
-	}
-	return x
-}
-
-// jitDerivedBase is the class a class o extends, if o's constructor is the
-// one a class without one has -- constructor(...args) { super(...args) },
-// which hands its arguments on (bytecode.SuperForward) -- o has no fields
-// to give its instances, and native code may construct with the class it
-// extends (jitConstructs); or nil. new o(...) then does what a
-// construction with that class does, its object made as o makes one --
-// o's prototype, o's root shape and room, as constructWithTarget makes it
-// for super() to hand on -- and its result o's, as V8 skips a default
-// derived constructor (FindNonDefaultConstructorOrConstruct). AWFY's
-// Havlak constructs a DictIdEntry, a DictEntry's subclass, for each entry
-// of its dictionaries: each had been a call of Go.
-func (r *Runtime) jitDerivedBase(o *Object) *Object {
-	fd := o.fn()
-	if fd == nil || fd.closure == nil || fd.native != nil || fd.bound || fd.ctorKind != ctorDerived || fd.fieldInit() != nil ||
-		fd.closure.realm != r.Realm || o.class != ClassFunction || o.findOwn(atomPrototype) < 0 || !jitForwardsSuper(fd.closure.fn) {
-		return nil
-	}
-	if p := o.proto(); p != nil && (r.jitConstructs(p) || r.jitConstructsDerived(p)) {
-		return p
-	}
-	return nil
-}
-
-// jitConstructsDerived reports whether native code may construct with o, a
-// derived class whose constructor is its own -- or a class without one
-// whose construction the code of the class it extends cannot make
-// (jitDerivedBase), one with fields, or of a parent native code does not
-// construct -- called natively as a construction (ssa.CallSite's Derived):
-// its instance from a pool made for o, as constructWithTarget makes it
-// before the body runs, its super() Go's, which runs the parent and the
-// class's field initializers -- a class without a constructor's of the
-// call's arguments, which the call writes to its context (jitFrameArgs).
-func (r *Runtime) jitConstructsDerived(o *Object) bool {
-	fd := o.fn()
-	return fd != nil && fd.closure != nil && fd.native == nil && !fd.bound && fd.ctorKind == ctorDerived && fd.superCtor() == o &&
-		fd.closure.realm == r.Realm && o.class == ClassFunction && o.findOwn(atomPrototype) >= 0 &&
-		(!jitForwardsSuper(fd.closure.fn) || r.jitDerivedBase(o) == nil)
-}
-
-// jitForwardsSuper reports whether fn is the constructor a derived class
-// without one has: super(...args), its this then the result.
-func jitForwardsSuper(fn *bytecode.Function) bool {
-	c := fn.Code
-	return len(c) == 3 && c[0].Op == bytecode.OpSuperCall && c[0].A == 0 && c[0].B == bytecode.SuperForward &&
-		c[1].Op == bytecode.OpDrop && c[2].Op == bytecode.OpReturnUndef
-}
-
-// jitCalledVia is the function a method call at the top of the stack
-// calls through Function.prototype.call, the realm's own, G.call(this,
-// ...): G, its receiver, and its closure, if native code may call it, as
-// jitCalled has it; or nil.
-func (r *Runtime) jitCalledVia(f *frame, sp int, in bytecode.Instr) (*Object, *closure) {
-	if in.Op != bytecode.OpCallMethod || in.A == 0 || r.callFn == nil {
-		return nil, nil
-	}
-	callee, recv := r.stack[sp-int(in.A)-1], r.stack[sp-int(in.A)-2]
-	if !callee.IsObject() || callee.Object() != r.callFn || !recv.IsObject() {
-		return nil, nil
-	}
-	o := recv.Object()
-	if !r.jitNativeTargetOf(o.fn(), f.cl, false) {
-		return nil, nil
-	}
-	return o, o.fn().closure
-}
-
-// jitPops is Array.prototype.pop, the realm's own, if a method call at the
-// top of the stack calls it with no argument on an array its fast path
-// pops -- dense, of the realm's prototype -- or nil.
-func (r *Runtime) jitPops(sp int, in bytecode.Instr) *Object {
-	if in.Op != bytecode.OpCallMethod || in.A != 0 {
-		return nil
-	}
-	callee, recv := r.stack[sp-1], r.stack[sp-2]
-	if !callee.IsObject() {
-		return nil
-	}
-	fd := callee.Object().fn()
-	if fd == nil || fd.elemOp != elemPop || fd.realm != r.Realm || r.plainArray(recv) == nil {
-		return nil
-	}
-	return callee.Object()
-}
-
-// jitPushes is Array.prototype.push, the realm's own, if a method call at
-// the top of the stack calls it with one argument on an array its fast
-// path appends to -- dense, of the realm's prototype, which with its own
-// has no element or indexed property (noInheritedIndices) -- or nil.
-func (r *Runtime) jitPushes(sp int, in bytecode.Instr) *Object {
-	if in.Op != bytecode.OpCallMethod || in.A != 1 {
-		return nil
-	}
-	callee, recv := r.stack[sp-2], r.stack[sp-3]
-	if !callee.IsObject() {
-		return nil
-	}
-	fd := callee.Object().fn()
-	if fd == nil || fd.elemOp != elemPush || fd.realm != r.Realm {
-		return nil
-	}
-	if o := r.plainArray(recv); o == nil || !r.noInheritedIndices(o) {
-		return nil
-	}
-	return callee.Object()
-}
-
-// jitCharCodes is String.prototype.charCodeAt, the realm's own, if a
-// method call at the top of the stack calls it with one argument on a
-// string, or nil.
-func (r *Runtime) jitCharCodes(sp int, in bytecode.Instr) *Object {
-	if in.Op != bytecode.OpCallMethod || in.A != 1 || !r.jitCharCodeAt.IsObject() {
-		return nil
-	}
-	callee, recv := r.stack[sp-2], r.stack[sp-3]
-	if !callee.IsObject() || callee.Object() != r.jitCharCodeAt.Object() || !recv.IsString() {
-		return nil
-	}
-	return callee.Object()
-}
-
-// jitForEaches is Array.prototype.forEach, or another of jitLoops, the
-// realm's own, if a method call at the top of the stack calls it on an
-// array with one argument, or two, the first a closure of the realm's, and
-// that closure and its function object; or nil. One of jitTypedLoops on a
-// typed array (jitLoopTyped) is one too, and its prototype the fourth.
-func (r *Runtime) jitForEaches(sp int, in bytecode.Instr) (*Object, *closure, *Object, *Object) {
-	argc := int(in.A)
-	if in.Op != bytecode.OpCallMethod || argc != 1 && argc != 2 {
-		return nil, nil, nil, nil
-	}
-	callee, recv, cb := r.stack[sp-argc-1], r.stack[sp-argc-2], r.stack[sp-argc]
-	if !callee.IsObject() || !cb.IsObject() {
-		return nil, nil, nil, nil
-	}
-	var proto *Object
-	switch kind := r.jitLoopKind(callee.Object()); {
-	case kind == 0:
-		return nil, nil, nil, nil
-	case kind&abi.LoopTyped != 0:
-		t := r.jitLoopTyped(recv)
-		if t == nil {
-			return nil, nil, nil, nil
-		}
-		if base := kind & abi.LoopKindMask; t.info().big && base == abi.LoopSort {
-			// A BigInt typed array's sort compares BigInts, which its
-			// loop does not: Go's.
-			return nil, nil, nil, nil
-		}
-		proto = recv.Object().proto()
-	case r.plainArray(recv) == nil:
-		return nil, nil, nil, nil
-	}
-	fd := cb.Object().fn()
-	if fd == nil || fd.native != nil || fd.bound || fd.closure == nil || fd.closure.realm != r.Realm {
-		return nil, nil, nil, nil
-	}
-	return callee.Object(), fd.closure, cb.Object(), proto
-}
 
 
 
-// lexThisSlot is the slot of the frame of fb's function its receiver is
-// in, which an arrow it makes captures as its this (closureInline), or -1
-// where its code has none (ir.Program's This) or it may not be bound yet:
-// a derived constructor's before super().
-func (fb *jitFeedback) lexThisSlot() int {
-	if fb.prog == nil || !fb.prog.This || fb.fn.Kind == bytecode.KindDerivedConstructor {
-		return -1
-	}
-	return fb.fn.LocalCount + len(fb.fn.Upvalues)
-}
-
-// jitCallShape is in's argument count and whether it is a method's call,
-// if it is a call, not in tail position.
-func jitCallShape(in bytecode.Instr) (int, bool, bool) {
-	switch in.Op {
-	case bytecode.OpCall:
-		return int(in.A), false, true
-	case bytecode.OpCallMethod:
-		return int(in.A), true, true
-	}
-	return 0, false, false
-}
-
-// madeCallback is the closure the method call at pc of fb's function is
-// given, if its code makes it just before the call -- a closure of cl's
-// function, made at the instruction before the call, or before the one
-// that pushes the loop's this -- which native code inlining the call need
-// not make (ssa.MadeCallback): its template, which the code keeps, as the
-// inlined frame's closure an exit names, and what it captures. Not an
-// arrow that reads its maker's new.target or super (jitNeedsMaker).
-func (fb *jitFeedback) madeCallback(pc int, cl *closure) *ssa.MadeCallback {
-	for q := pc - 1; q >= 0 && q >= pc-2; q-- {
-		in := fb.fn.Code[q]
-		if in.Op != bytecode.OpClosure || int(in.A) >= len(fb.cl.consts) {
-			continue
-		}
-		c := jitTemplateCell[struct{}](fb, &fb.cl.consts[in.A])
-		t := c.template()
-		if t == nil || t.fn != cl.fn || jitNeedsMaker(*c) {
-			return nil
-		}
-		caps := make([]int32, len(t.fn.Upvalues))
-		for i, desc := range t.fn.Upvalues {
-			caps[i] = int32(desc.Index) << 1
-			if desc.FromParent {
-				caps[i] |= 1
-			}
-		}
-		k := fb.keep()
-		k.inlined = append(k.inlined, t)
-		k.made = append(k.made, t)
-		return &ssa.MadeCallback{PC: q, Template: uintptr(unsafe.Pointer(c)), Closure: uintptr(unsafe.Pointer(t)), Captures: caps}
-	}
-	return nil
-}
-
-// setLoopSlots notes that e's code for fn holds slots of its loops (ssa's
-// forEachCall) n past its frame's operands' first: its native callers make
-// its frame that big (jitLink's frame), so that the frames of the callees
-// its loops call start past them, as Go's entries do (runSSALoop).
-func (e *jitEntry) setLoopSlots(fn *bytecode.Function, n int) {
-	e.loopSlots = n
-	if l := e.link; l != nil && n > fn.MaxStack {
-		l.frame = max(l.frame, uint64(fn.LocalCount+n))
-	}
-}
 
 // jitGlobalEpochs is the most changes of the global object's bindings
 // (shapeTree's globalEpoch) after which a global's read is still compiled
@@ -5442,175 +3676,12 @@ const jitGlobalEpochs = 64
 // left (jitFinishExit): the frame goes on after the call.
 const jitLoopDone = ^uint64(0)
 
-// jitLoopAt is the loop of a built-in's call native code was making in
-// ctx, f's context, at its exit at pc, if any (abi.Context's Loop), and
-// clears it there: only code that makes such loops (loops, its jitEntry's
-// loops) has one, at a method call, which its entries clear.
-func jitLoopAt(loops bool, ctx *abi.Context, f *frame, pc int) uint64 {
-	loop := jitLoopIn(loops, ctx, f.cl.fn, pc)
-	ctx.Loop = 0
-	return loop
-}
-
-// jitLoopIn is jitLoopAt, the word left as it is: the loop is under way
-// still, a level's whose callee is a frame Go makes.
-func jitLoopIn(loops bool, ctx *abi.Context, fn *bytecode.Function, pc int) uint64 {
-	loop := ctx.Loop
-	if loop == 0 || !loops || pc >= len(fn.Code) || jitCallOp(fn.Code[pc].Op) != bytecode.OpCallMethod {
-		return 0
-	}
-	return loop
-}
-
-// jitPushLoopFrame pushes, past f's, the frame of the built-in whose call
-// f's code makes a loop of (abi.Context's Loop, loop), its callback's
-// caller -- as Go's forEach has a frame while its callback runs
-// (nativeFrame) -- for the frames Go makes of the loop's callees, which a
-// stack trace shows: "at Array.forEach". Its receiver is the loop's array
-// where f holds the loop's slots (written, a level Go finishes), or else
-// Array.prototype, an array all the same, which the trace names the frame
-// by: a level whose call of Go Go makes keeps them in registers, and the
-// loop is only ever an array's.
-func (r *Runtime) jitPushLoopFrame(f *frame, loop uint64, written bool) {
-	kind := int(loop >> 32)
-	fe := r.jitLoopFn(kind)
-	this := Obj(r.proto.array)
-	if t := kind >> abi.LoopTypedShift; kind&abi.LoopTyped != 0 && t < len(r.typedArrayProtos) && r.typedArrayProtos[t] != nil {
-		this = Obj(r.typedArrayProtos[t])
-	}
-	if v := r.stack[f.base+int(loop&0xffffffff)-1]; written && v.IsObject() {
-		this = v
-	}
-	nf := r.pushFrame()
-	nf.cl, nf.native, nf.this, nf.newTarget, nf.callee, nf.args = nil, fe.fn().name, this, Undefined, fe, nil
-	if len(nf.handlers) != 0 {
-		nf.handlers = nf.handlers[:0]
-	}
-	if len(nf.openUpvalues) != 0 {
-		nf.openUpvalues = nf.openUpvalues[:0]
-	}
-}
-
-// jitMaterialize makes, in f, the frame of e's code that an exit left, the
-// closures the code did not make (jitEntry's ssaMade, ssa.MadeCallback):
-// a slot that holds the template of one, where the closure would be, gets
-// the closure, made as the interpreter's closure instruction makes it on
-// the frame -- what it captures the frame's, its cells open on the frame's
-// slots once native code has left it -- one for each template, which
-// every slot naming it shares, as the code would have made one: as V8's
-// deoptimizer materializes the objects escape analysis removed. Go runs
-// nothing of the frame before: the exit has written it, its records and
-// cells.
-func (r *Runtime) jitMaterialize(f *frame, e *jitEntry) {
-	r.jitMaterializeBelow(f, e, len(r.stack))
-}
-
-// jitMaterializeBelow is jitMaterialize for a frame whose slots end at the
-// VM stack's limit: a native caller's level (jitUnwindNative), whose
-// callee's frame begins where its operands end. Past them, its homes and
-// its loops' slots are its callee's slots -- words naming the callee's
-// objects not made, by the callee's homes -- which, read as the caller's,
-// had been made of the caller's homes: objects of a shape that was another
-// object's field, which the callee then read (RayTrace's Color.addScalar
-// under the JIT's stress).
-func (r *Runtime) jitMaterializeBelow(f *frame, e *jitEntry, limit int) {
-	if e == nil || f.cl == nil {
-		return
-	}
-	if e.ssaHomes != 0 {
-		r.jitMaterializeObjects(f, e, limit)
-	}
-	if len(e.ssaMade) == 0 {
-		return
-	}
-	// The closures this exit makes, from here: those it made at an earlier
-	// one are not this one's, though its frame be the same.
-	s := r.jit
-	clear(s.made)
-	s.made = s.made[:0]
-	r.jitMaterializeIn(f, f, e, min(max(f.cl.fn.MaxStack, e.loopSlots), limit-f.base))
-}
-
 // jitMade is a closure Go made at an exit in place of its template, on the
 // frame of the code that did not make it (jitMaterialize).
 type jitMade struct {
 	f *frame
 	t *closure
 	o *Object
-}
-
-// jitMaterializeIn makes, in f's slots, its locals and the stack slots past
-// its base, depth of them, the closures e's code did not make, on the
-// frame maker of e's code -- f, or, where f is a callee e's code inlined,
-// e's own (jitUnwindNative) -- one for each template, the closures this
-// exit made before included (jitState's made): a closure the root gave
-// an inlined callee (ssa's calledClosures) is in the callee's slots and
-// in the root's.
-func (r *Runtime) jitMaterializeIn(f, maker *frame, e *jitEntry, depth int) {
-	s := r.jit
-	fix := func(v *Value) {
-		t := v.template()
-		if t == nil || !slices.Contains(e.ssaMade, t) {
-			return
-		}
-		for _, m := range s.made {
-			if m.f == maker && m.t == t {
-				*v = Obj(m.o)
-				return
-			}
-		}
-		o := r.makeClosure(maker, templateValue(t))
-		s.made = append(s.made, jitMade{f: maker, t: t, o: o})
-		s.materialized++
-		*v = Obj(o)
-	}
-	for i := range f.locals {
-		fix(&f.locals[i])
-	}
-	end := min(len(r.stack), f.base+depth)
-	for i := f.base; i < end; i++ {
-		fix(&r.stack[i])
-	}
-}
-
-// jitLoopCallback is the callback of the loop of a built-in's call native
-// code was making in f (abi.Context's Loop, loop), as its slots hold it --
-// the closure of a callback inlined in it, which Go makes the frame of at
-// an exit inside it: the template's, for one the code did not make
-// (ssa.MadeCallback), which the frame's slot holds made (jitMaterialize).
-func (r *Runtime) jitLoopCallback(f *frame, loop uint64, tmpl *closure) (*closure, *Object) {
-	at := f.base + int(loop&0xffffffff) - 1 + 1
-	if loop == 0 || at >= len(r.stack) || !r.stack[at].IsObject() {
-		panic("jit: an inlined callback's loop has no callback")
-	}
-	o := r.stack[at].Object()
-	fd := o.fn()
-	if fd == nil || fd.closure == nil || fd.closure.fn != tmpl.fn {
-		panic("jit: an inlined callback's loop has another callback")
-	}
-	return fd.closure, o
-}
-
-// jitCalledClosure is the closure f calls at pc, its operands' depth there
-// depth: one of tmpl's function the caller's code made and only calls
-// (ssa's calledClosures), which it did not make, inlined at the call, whose
-// frame Go makes at an exit inside it -- the callee its call's slot holds,
-// made by Go in place of the template (jitMaterialize).
-func (r *Runtime) jitCalledClosure(f *frame, pc, depth int, tmpl *closure) (*closure, *Object) {
-	if pc >= len(f.cl.fn.Code) {
-		panic("jit: an inlined closure's call is past its caller's code")
-	}
-	in := jitCallInstr(f.cl.fn.Code[pc])
-	at := f.base + depth - int(in.A) - 1
-	if in.Op != bytecode.OpCall || at < f.base || at >= len(r.stack) || !r.stack[at].IsObject() {
-		panic("jit: an inlined closure's call has no closure")
-	}
-	o := r.stack[at].Object()
-	fd := o.fn()
-	if fd == nil || fd.closure == nil || fd.closure.fn != tmpl.fn {
-		panic("jit: an inlined closure's call calls another function")
-	}
-	return fd.closure, o
 }
 
 // jitLoopLocals is how many of a loop's slots Go goes on from (ssa's
@@ -5623,23 +3694,6 @@ const jitLoopLocals = 8
 // the array and the comparator, which Go sorts again from, and the merge
 // sort's own, which it clears.
 const jitSortLocals = 9
-
-// jitLoopFinish finishes the loop native code was making of a built-in's
-// call in f, at pc, at an exit there, as V8's builtin continuation frames
-// finish the builtin: loop is the context's Loop word (abi.Context), which says
-// which built-in's and where its slots are past f's operands, and after
-// whether the loop's call of its callback for the index there was made --
-// its callee left native code, and Go finished it, v and err what it
-// returned or threw -- or not; or the loop has its result, an exit after
-// the call. Go goes on from that index, the callback's result first used
-// as the built-in uses it, or from the next one, to the length read as it
-// began, as Go's own does (builtins.go): map and filter into the array
-// the loop made, an Array whose elements up to the index it appended. f is
-// past its call meanwhile, as the interpreter's frame is during one, which
-// a stack trace the callback takes shows. The slots keep nothing after.
-func (r *Runtime) jitLoopFinish(f *frame, pc int, loop uint64, after bool, v Value, err error) (Value, error) {
-	return r.jitLoopFinishAt(f, f.base+int(loop&0xffffffff)-1, uint32(pc+1), loop, after, v, err)
-}
 
 // jitLoopFinishAt is jitLoopFinish of the loop whose slots begin at at in
 // the VM's stack, f's pc past its call fpc meanwhile: the stack form's
@@ -6011,106 +4065,12 @@ func (r *Runtime) jitSortArray(recv Value) *Object {
 	return o
 }
 
-// jitSortComparator reports whether fn, a sort's comparator, is a body
-// native code may call again at will (ssa's sortCall), given numbers: a
-// function, an arrow or a method a call runs the body of (DirectCall) --
-// no class constructor, which a call refuses -- whose every instruction
-// reads a parameter or a constant that is a number, computes with an
-// operator, compares, branches forward, or returns: no local of its own,
-// no call, no property, no global, no captured binding, no store
-// anywhere. Called with numbers, it makes only numbers, booleans,
-// undefined and null, runs nothing and changes nothing.
-func jitSortComparator(fn *bytecode.Function) bool {
-	if fn == nil || !fn.DirectCall || fn.Kind != bytecode.KindNormal && fn.Kind != bytecode.KindArrow && fn.Kind != bytecode.KindMethod ||
-		fn.Generator || fn.Async || fn.HasRest || fn.HasDirectEval || !fn.HasSimpleParams || fn.ParamsAreLexical ||
-		fn.UsesArguments || fn.UsesThis || fn.LocalCount != fn.ParamCount || len(fn.Code) > 64 {
-		return false
-	}
-	param := func(k uint32) bool { return int(k) < fn.ParamCount }
-	operator := func(op bytecode.Op) bool {
-		switch op {
-		case bytecode.OpAdd, bytecode.OpSub, bytecode.OpMul, bytecode.OpDiv, bytecode.OpMod,
-			bytecode.OpBitAnd, bytecode.OpBitOr, bytecode.OpBitXor, bytecode.OpShl, bytecode.OpShr, bytecode.OpUShr,
-			bytecode.OpLt, bytecode.OpLe, bytecode.OpGt, bytecode.OpGe, bytecode.OpEq, bytecode.OpNe, bytecode.OpStrictEq, bytecode.OpStrictNe:
-			return true
-		}
-		return false
-	}
-	for pc, in := range fn.Code {
-		switch in.Op {
-		case bytecode.OpPushInt, bytecode.OpPushTrue, bytecode.OpPushFalse, bytecode.OpPushUndef, bytecode.OpPushNull,
-			bytecode.OpNeg, bytecode.OpNot, bytecode.OpBitNot, bytecode.OpToNumeric, bytecode.OpInc, bytecode.OpDec,
-			bytecode.OpDup, bytecode.OpDrop, bytecode.OpSwap, bytecode.OpNop, bytecode.OpReturn, bytecode.OpReturnUndef:
-		case bytecode.OpPushConst:
-			if int(in.A) >= len(fn.Constants) || fn.Constants[in.A].Kind != bytecode.ConstNumber {
-				return false
-			}
-		case bytecode.OpGetLocal:
-			if !param(in.A) {
-				return false
-			}
-		case bytecode.OpGetLocal2:
-			if !param(in.A) || !param(in.B) {
-				return false
-			}
-		case bytecode.OpBinLocal:
-			if !param(in.A) || !operator(bytecode.Op(in.B)) {
-				return false
-			}
-		case bytecode.OpBinImm:
-			if !operator(bytecode.Op(in.B)) {
-				return false
-			}
-		case bytecode.OpLocalBinImm:
-			if !param(in.A&(1<<24-1)) || !operator(bytecode.Op(in.A>>24)) {
-				return false
-			}
-		case bytecode.OpJump, bytecode.OpJumpIfFalse, bytecode.OpJumpIfTrue, bytecode.OpJumpIfFalseKeep, bytecode.OpJumpIfTrueKeep:
-			if int(in.A) <= pc || int(in.A) > len(fn.Code) {
-				return false
-			}
-		case bytecode.OpJumpIfCmpFalse:
-			if int(in.A) <= pc || int(in.A) > len(fn.Code) || !operator(bytecode.Op(in.B)) {
-				return false
-			}
-		default:
-			if operator(in.Op) {
-				continue
-			}
-			return false
-		}
-	}
-	return true
-}
-
 // jitSearchKind is the kind of o among jitSearches, or -1.
 func (r *Runtime) jitSearchKind(o *Object) int {
 	if o == nil {
 		return -1
 	}
 	return slices.Index(r.jitSearches[:], o)
-}
-
-// jitIndexOfs is one of jitSearches, the realm's own, if a method call at
-// the top of the stack calls it with one argument or two on a string --
-// String.prototype's -- or an array of the realm's, Array.prototype's; or
-// nil.
-func (r *Runtime) jitIndexOfs(sp int, in bytecode.Instr) *Object {
-	argc := int(in.A)
-	if jitCallOp(in.Op) != bytecode.OpCallMethod || argc != 1 && argc != 2 {
-		return nil
-	}
-	callee, recv := r.stack[sp-argc-1], r.stack[sp-argc-2]
-	if !callee.IsObject() {
-		return nil
-	}
-	switch k := r.jitSearchKind(callee.Object()); {
-	case k < 0:
-		return nil
-	case k < jitSearchArrays && !recv.IsString(), k >= jitSearchArrays && r.plainArray(recv) == nil:
-		return nil
-	}
-	return callee.Object()
 }
 
 // LeafKind is ssa.LeafKindFeedback's: which of the leaves native code
@@ -6176,32 +4136,6 @@ func (r *Runtime) jitSearch(kind int, recv Value, args []Value) (Value, bool) {
 	return v, true
 }
 
-// jitParseInts is the realm's parseInt, if a plain call at the top of the
-// stack calls it with one argument, a number; or nil.
-func (r *Runtime) jitParseInts(sp int, in bytecode.Instr) *Object {
-	if jitCallOp(in.Op) != bytecode.OpCall || in.A != 1 || r.jitParseInt == nil || !jitEncoding.Round {
-		return nil
-	}
-	if callee := r.stack[sp-2]; !callee.IsObject() || callee.Object() != r.jitParseInt || !r.stack[sp-1].IsNumber() {
-		return nil
-	}
-	return r.jitParseInt
-}
-
-// jitBigStrings is BigInt.prototype.toString, the realm's own, if a method
-// call at the top of the stack, of no argument or one, calls it on a
-// BigInt; or nil.
-func (r *Runtime) jitBigStrings(sp int, in bytecode.Instr) *Object {
-	argc := int(in.A)
-	if jitCallOp(in.Op) != bytecode.OpCallMethod || argc > 1 || r.jitBigToString == nil {
-		return nil
-	}
-	if callee := r.stack[sp-argc-1]; !callee.IsObject() || callee.Object() != r.jitBigToString || !r.stack[sp-argc-2].IsBigInt() {
-		return nil
-	}
-	return r.jitBigToString
-}
-
 // jitBigString is GoBigString's string of recv, a BigInt, in the radix the
 // call gives, if it gives one: BigInt.prototype.toString's, where it
 // converts with nothing run and nothing thrown -- no radix, undefined, or
@@ -6224,65 +4158,6 @@ func jitBigString(recv Value, args []Value) (Value, bool) {
 		radix = int(n)
 	}
 	return Str(bigString(recv, radix)), true
-}
-
-// jitSubstrings is String.prototype's substring, slice or substr, the
-// realm's own, if a method call at the top of the stack calls it with two
-// arguments, numbers, on a string -- or charAt with one -- or nil.
-func (r *Runtime) jitSubstrings(sp int, in bytecode.Instr) *Object {
-	argc := int(in.A)
-	if in.Op != bytecode.OpCallMethod || argc != 1 && argc != 2 {
-		return nil
-	}
-	callee, recv := r.stack[sp-argc-1], r.stack[sp-argc-2]
-	if !callee.IsObject() || !recv.IsString() || !r.jitIsSubstring(callee.Object(), argc) {
-		return nil
-	}
-	for _, a := range r.stack[sp-argc : sp] {
-		if !a.IsNumber() {
-			return nil
-		}
-	}
-	return callee.Object()
-}
-
-// jitFromCharCodes is String.fromCharCode, the realm's own, if a method
-// call at the top of the stack calls it with one argument, a number, or
-// nil.
-func (r *Runtime) jitFromCharCodes(sp int, in bytecode.Instr) *Object {
-	if in.Op != bytecode.OpCallMethod || in.A != 1 || !r.jitFromCharCode.IsObject() {
-		return nil
-	}
-	callee := r.stack[sp-2]
-	if !callee.IsObject() || callee.Object() != r.jitFromCharCode.Object() || !r.stack[sp-1].IsNumber() {
-		return nil
-	}
-	return callee.Object()
-}
-
-// jitAllocates is the built-in a construction at the top of the stack
-// makes with nothing to run, which native code makes from a pool: `new
-// Array()`, the realm's own, or `new Array(n)` of a length native code
-// makes (jitArrayRoom), and the room its pool's arrays are given for that
-// length; or nil.
-func (r *Runtime) jitAllocates(sp int, in bytecode.Instr) (*Object, int) {
-	if in.Op != bytecode.OpNew || in.A > 1 {
-		return nil, 0
-	}
-	room := 0
-	if in.A == 1 {
-		n := r.stack[sp-1]
-		if !n.IsNumber() || n.Number() < 0 || n.Number() != math.Trunc(n.Number()) {
-			return nil, 0
-		}
-		if room = jitArrayRoom(n.Number()); room == 0 {
-			return nil, 0
-		}
-	}
-	if c := r.stack[sp-1-int(in.A)]; c.IsObject() && c.Object() == r.proto.arrayCtor {
-		return c.Object(), room
-	}
-	return nil, 0
 }
 
 // jitArrayRoom is the room a pooled array of `new Array(n)` is given for a
@@ -6315,16 +4190,6 @@ func (r *Runtime) jitNewArrayPool(o *Object, room int) *abi.ObjectPool {
 	pool := &abi.ObjectPool{Source: unsafe.Pointer(&jitPoolSource{ctor: o}), Room: uint64(room)}
 	r.jitFillPool(pool, o)
 	return pool
-}
-
-// jitConstructs reports whether native code may construct with o, `new
-// o(...)`, as constructWithTarget would: a plain function of this realm,
-// compiled, a base constructor with no fields to give its instances, its
-// prototype its own data property.
-func (r *Runtime) jitConstructs(o *Object) bool {
-	fd := o.fn()
-	return fd != nil && fd.closure != nil && fd.native == nil && !fd.bound && fd.ctorKind == ctorBase && fd.fieldInit() == nil &&
-		fd.closure.realm == r.Realm && o.class == ClassFunction && o.findOwn(atomPrototype) >= 0
 }
 
 // jitFillPool makes pool's objects for constructions with o, as
@@ -6564,18 +4429,6 @@ func (r *Runtime) jitPoolObject(o *Object) *Object {
 	return newShapedLiteral(root.orRoot(ClassObject, proto), ClassObject, props)
 }
 
-// jitRefillPools fills, at a construction that left native code at pc,
-// the pool of the function it constructs with, if native code constructs
-// with it there and the pool is empty, or was made for another prototype;
-// it reports whether it filled an empty one.
-func (r *Runtime) jitRefillPools(f *frame, e *jitEntry, pc, sp int, in bytecode.Instr) (refilled bool) {
-	c := r.stack[sp-int(in.A)-1]
-	if !c.IsObject() {
-		return false
-	}
-	return r.jitRefillPoolsOf(e, pc, c.Object())
-}
-
 // jitRefillPoolsOf is jitRefillPools of the construction at pc of e's code
 // -- its register pc, in register code -- with o.
 func (r *Runtime) jitRefillPoolsOf(e *jitEntry, pc int, o *Object) (refilled bool) {
@@ -6605,86 +4458,9 @@ func (r *Runtime) jitRefillPoolsOf(e *jitEntry, pc int, o *Object) (refilled boo
 // V8's min_inlining_frequency as V8 runs, 0.05 (ssa.MinInliningFrequency).
 const jitInliningFrequency = 5
 
-// jitLongWarming reports whether cl's function is warming up, its budget
-// not spent (jitWarmFor): an entry warming, or none yet where it would be
-// given one to warm, not compiled at once (jitCallThreshold).
-func (r *Runtime) jitLongWarming(cl *closure) bool {
-	if ce := r.jit.entryFor(cl.fn); ce != nil {
-		return ce.warming
-	}
-	return int64(r.jitCallThreshold) > int64(max(cl.jitCalls, 1))
-}
-
-// jitCalledOften reports whether a function too long to inline (past
-// ssa.MaxInline), which has no code yet (jitLongWarming), is compiled for
-// the native caller deciding its call (jitState.deciding) at once rather
-// than once its own budget is spent: where V8 would inline it -- with a
-// feedback vector (an entry: jitFeedbackCalls invocations), no longer than
-// a function inlines in all (ssa.MaxInlineTotal; V8 inlines up to 460
-// bytes of its bytecode), and invoked at least jitInliningFrequency
-// hundredths as often as its caller, as V8's call frequency at the site
-// has it. Our inliner takes no callee past ssa.MaxInline: the compile
-// stands in for it. Compiled whenever met, Typescript's long callees made
-// 911 compiles a run -- 54 of them called fewer than ten times after it --
-// and Mandreel's per-frame functions, called once a frame, were compiled
-// at their callers' compiles, __udivmoddi4's 1,233 instructions among
-// them. Waiting for their budgets, Octane's and the V8 suite's Richards
-// ran HandlerTask.run, called by TaskControlBlock.run 0.37 times a call,
-// and its own callees, in the tree tier for 750 calls.
-func (r *Runtime) jitCalledOften(cl *closure) bool {
-	return r.jitCalledOftenBy(cl, r.jit.deciding)
-}
-
-// jitCalledOftenBy is jitCalledOften for the native caller caller.
-func (r *Runtime) jitCalledOftenBy(cl *closure, caller *jitEntry) bool {
-	ce := r.jit.entryFor(cl.fn)
-	if ce == nil || caller == nil || len(cl.fn.Code) > ssa.MaxInlineTotal {
-		return false
-	}
-	return ce.invoked*100 >= jitInliningFrequency*max(caller.invocations(), 1)
-}
-
-
-// calleeCode is e, if it has code (a compile in the background installed
-// at once, QJS_JIT_STRESS's background=0), or nil.
-func (e *jitEntry) calleeCode() *jitEntry {
-	if e.ssa != nil {
-		return e
-	}
-	return nil
-}
 
 
 
-
-// setSSA gives e the code the new pipeline compiled for fn from p, which
-// native callers call through its link.
-func (e *jitEntry) setSSA(s *jitState, fn *bytecode.Function, p *ir.Program, code *jit.SSACode, fb *jitFeedback) {
-	e.warming = false
-	e.ssa, e.this, e.ssaShapes, e.ssaHolders = code, p.This, fb.shapes, fb.holders
-	e.lexThis, e.loops = fb.lexThis, fb.loops
-	e.setLoopSlots(fn, fb.loopSlots)
-	e.ssaSerial++
-	e.ssaProg = p
-	e.ssaInlinedAt, e.definesUnfed, e.ssaCells, e.ssaHostsLeft, e.ssaUnresumed = fb.inlinedAt, fb.definesUnfed, fb.cells, fb.hostsLeft, fb.unresumed
-	e.ssaUnentered, e.ssaKept, e.keptAt = fb.unentered, fb.kept, e.starts
-	e.ssaTargets = fb.targets
-	e.ssaStrings, e.ssaInlined, e.ssaPools, e.ssaMade = fb.strings, fb.inlined, fb.pools, fb.made
-	e.ssaInlinedLearned = s.jitInlinedLearned(fb.inlined, e.ssaInlinedLearned[:0])
-	e.ssaInlinedN = fb.inlinedN
-	e.ssaVirtuals, e.ssaCalled = fb.virtuals, fb.called
-	e.setHomes(s, fb.homes)
-	e.ssaCallbacks, e.ssaUnmade = fb.callbacks, fb.unmade
-	s.setLinks(e, fb.links)
-	e.ssaKeeps = max(e.ssaKeeps, fb.keeps)
-	e.link.setCode(code)
-	s.callRefs = max(s.callRefs, uint64(code.CallRefs()))
-	e.ssaLoop = jitLoopLength(fn)
-	for _, in := range p.Code {
-		e.ssaStrings = e.ssaStrings || in.Op == ir.StringMethod || in.Op == ir.StringCode
-	}
-	s.account(e)
-}
 
 // jitLowering is a function's programs for the new pipeline, each lowered
 // once, as its kind says (jitLowerKind), and kept by the runtime: a
@@ -6758,38 +4534,6 @@ func (s *jitState) lowering(fn *bytecode.Function) *jitLowering {
 	return l
 }
 
-// jitStringAddSeen notes an exit at pc, an addition in e's code that met a
-// string -- the frame holding its operands as the exit wrote them -- which
-// its function's programs are lowered again for (jitcompile.Hints): Go
-// makes it (ir.StringAdd), and what it adds is read as it is. The code is
-// compiled again at its next invocation, as for an element read learned
-// (jitIndexSeen). PDF.js's font parser builds its tokens a character at a
-// time, token += c, and read each character as a number, which a string
-// left native code at.
-func (r *Runtime) jitStringAddSeen(f *frame, e *jitEntry, pc int) {
-	p := e.ssaProg
-	if p == nil || pc >= len(p.Code) {
-		return
-	}
-	in := p.Code[pc]
-	if in.Op != ir.Binary || in.Operator != ir.Add {
-		return
-	}
-	if a, b := r.jitOperand(f, p, in.Left), r.jitOperand(f, p, in.Right); !a.IsString() && !b.IsString() {
-		return
-	}
-	l := r.jit.lowering(f.cl.fn)
-	if slices.Contains(l.hints.StringAdds, int32(pc)) {
-		return
-	}
-	before := jitCapBytes(l.hints.StringAdds)
-	l.hints.StringAdds = append(l.hints.StringAdds, int32(pc))
-	l.bytes += jitCapBytes(l.hints.StringAdds) - before
-	r.jit.lowerBytes += jitCapBytes(l.hints.StringAdds) - before
-	r.jit.relower(l)
-	e.reopt = true
-}
-
 // relower drops l's programs, which are lowered again with its hints as
 // they are asked for (jitLower): what was compiled from them holds them.
 func (s *jitState) relower(l *jitLowering) {
@@ -6803,27 +4547,6 @@ func (s *jitState) relower(l *jitLowering) {
 	}
 	l.inlinable = 0
 	l.serial++
-}
-
-// jitOperand is the value of an operand of p's instruction in f's frame as
-// an exit wrote it: a literal, a local, or one on the frame's stack.
-func (r *Runtime) jitOperand(f *frame, p *ir.Program, o ir.Operand) Value {
-	switch {
-	case o.Slot < 0:
-		if o.Literal.Kind == ir.String {
-			return Str(emptyString)
-		}
-		return Undefined
-	case o.Slot < p.Locals:
-		if o.Slot < len(f.locals) {
-			return f.locals[o.Slot]
-		}
-		return Undefined
-	}
-	if i := f.base + o.Slot - p.Locals; i >= 0 && i < len(r.stack) {
-		return r.stack[i]
-	}
-	return Undefined
 }
 
 
@@ -7309,113 +5032,6 @@ func (fb *jitFeedback) deepAdd(d jitDeepAdd) *ssa.PropertyAdd {
 	return a
 }
 
-// seenCases are the cases of the property site at pc, as its cache met
-// them before the shape it holds now, compiled for site (propCache.seen):
-// a read's found on the receiver or on a prototype a cache holds, a
-// write's own properties; up to jitPropertyCases. An inlined callee's
-// site is compiled for them, as V8 compiles a site inlined for the maps
-// its inline cache met: at any other shape it deoptimizes. A shape the one
-// the cache holds came from by adding properties takes what room the
-// others leave, as a root's does (jitAddReadCase).
-func (fb *jitFeedback) seenCases(pc int, site ssa.PropertySite) []ssa.PropertyCase {
-	in := fb.fn.Code[pc]
-	if int(in.B) >= len(fb.cl.ic) || fb.cl.ic[in.B].seenOf() == nil || site.Holders[0].Object != 0 && in.Op == bytecode.OpSetProp {
-		return nil
-	}
-	c := &fb.cl.ic[in.B]
-	write := in.Op == bytecode.OpSetProp
-	var cases []ssa.PropertyCase
-	k := fb.keep()
-	// The entries the cache holds shapes of besides its own, then those of
-	// the ones superseded.
-	seen := c.seenOf()
-	entries := seen.entries[:seen.n]
-	for i := range 2 * len(entries) {
-		x := entries[i%len(entries)]
-		if len(cases)+1 >= jitPropertyCases {
-			break
-		}
-		from := uintptr(unsafe.Pointer(x.shape))
-		if x.shape == nil || x.shape == noShape || x.getter || x.idx < 0 || x.next != nil || from == site.Shape ||
-			jitSuperseded(x.shape, c.shape) != (i >= len(entries)) || write && x.p1 != nil {
-			continue
-		}
-		if slices.ContainsFunc(cases, func(p ssa.PropertyCase) bool { return p.Shape == from }) {
-			continue
-		}
-		pcase := ssa.PropertyCase{Shape: from, Index: x.idx}
-		k.shapes = append(k.shapes, remember(x.shape))
-		for i, h := range [2]struct {
-			p *Object
-			s *shape
-		}{{x.p1, x.s1}, {x.p2, x.s2}} {
-			if h.p == nil {
-				break
-			}
-			pcase.Holders[i] = ssa.Holder{Object: uintptr(unsafe.Pointer(h.p)), Shape: uintptr(unsafe.Pointer(h.s))}
-			k.shapes, k.holders = append(k.shapes, remember(h.s)), append(k.holders, h.p)
-		}
-		cases = append(cases, pcase)
-	}
-	return cases
-}
-
-// seenAdds are the additions the property write at pc, an inlined
-// callee's, made as its cache met them besides the one site is compiled for
-// (propCache.seen, poly) -- and those along prototype chains deeper than it
-// holds (propSeen's deep) -- up to jitPropertyCases: an initializer's that a
-// class's subclasses share, as Box2D's static ones are, each class's
-// objects of a shape of their own, whose additions had each been an exit.
-func (fb *jitFeedback) seenAdds(pc int, site ssa.PropertySite) []*ssa.PropertyAdd {
-	in := fb.fn.Code[pc]
-	if int(in.B) >= len(fb.cl.ic) {
-		return nil
-	}
-	c := &fb.cl.ic[in.B]
-	var adds []*ssa.PropertyAdd
-	note := func(x *propCache) {
-		if len(adds)+1 >= jitPropertyCases || x.next == nil || x.shape == nil || x.shape == noShape || x.getter {
-			return
-		}
-		from := uintptr(unsafe.Pointer(x.shape))
-		if from == site.Shape || site.Add != nil && from == site.Add.From ||
-			slices.ContainsFunc(adds, func(a *ssa.PropertyAdd) bool { return a.From == from }) {
-			return
-		}
-		if a := fb.add(x); a != nil {
-			adds = append(adds, a)
-		}
-	}
-	if seen := c.seenOf(); seen != nil {
-		for i := range seen.n {
-			note(&seen.entries[i])
-		}
-	}
-	if c.poly != nil {
-		for i := range c.poly.n {
-			note(&c.poly.entries[i])
-		}
-	}
-	if seen := c.seenOf(); seen != nil && int(in.A) < len(fb.cl.names) {
-		// The additions along chains deeper than a cache holds -- a
-		// subclass's object's, two prototypes below the class whose
-		// initializer adds the property -- as the chain is now.
-		for _, d := range seen.deep {
-			from := uintptr(unsafe.Pointer(d.from))
-			if len(adds)+1 >= jitPropertyCases || from == site.Shape || site.Add != nil && from == site.Add.From ||
-				slices.ContainsFunc(adds, func(a *ssa.PropertyAdd) bool { return a.From == from }) {
-				continue
-			}
-			if da, ok := fb.r.jitDeepAddFrom(d.from, d.next, d.proto, fb.cl.names[in.A]); ok {
-				if a := fb.deepAdd(da); a != nil {
-					adds = append(adds, a)
-				}
-			}
-		}
-	}
-	return adds
-}
-
 // cases are the shapes other than first the read at pc met (jitPolySeen),
 // as ssa.PropertyCase has them: the code keeps them and their holders.
 func (fb *jitFeedback) cases(pc int, first uintptr) []ssa.PropertyCase {
@@ -7469,19 +5085,6 @@ func (fb *jitFeedback) deepCase(d *jitDeepRead) ssa.PropertyCase {
 	return k
 }
 
-// deepCases are the cases of the read at pc, whose cache knew nothing --
-// none it could hold, the property found past its two prototypes -- as
-// e's exits learned them (cases), and as the cache noted them
-// (jitNoteDeepRead), for an inlined callee's site too: up to
-// jitPropertyCases.
-func (fb *jitFeedback) deepCases(pc int) []ssa.PropertyCase {
-	var c *propCache
-	if in := fb.fn.Code[pc]; int(in.B) < len(fb.cl.ic) {
-		c = &fb.cl.ic[in.B]
-	}
-	return fb.deepCasesOf(pc, c)
-}
-
 // deepCasesOf is deepCases', of either form's code: the read at pc, its
 // cache c (nil for none).
 func (fb *jitFeedback) deepCasesOf(pc int, c *propCache) []ssa.PropertyCase {
@@ -7503,44 +5106,6 @@ func (fb *jitFeedback) deepCasesOf(pc int, c *propCache) []ssa.PropertyCase {
 
 
 
-// jitKnownReceiver is the object the property read at q of cl's code
-// reads from, as the instruction just before it gives it: the object a
-// captured binding holds now, or a RegExp a regular expression literal
-// makes, one like those it makes -- a guess, which the read's checks test.
-func (r *Runtime) jitKnownReceiver(cl *closure, p *ir.Program, q int) (*Object, bool) {
-	fn := cl.fn
-	if q <= 0 || q >= len(fn.Code) || p.Maps[q].Depth < 0 || p.Maps[q-1].Depth != p.Maps[q].Depth-1 {
-		return nil, false
-	}
-	var v Value
-	switch prev := fn.Code[q-1]; prev.Op {
-	case bytecode.OpGetUpvalue, bytecode.OpGetUpvalueCheck:
-		if int(prev.A) >= len(cl.upvalues) || cl.upvalues[prev.A] == nil {
-			return nil, false
-		}
-		v = cl.upvalues[prev.A].get()
-	case bytecode.OpNewRegExp:
-		if int(prev.A) >= len(fn.Constants) || fn.Constants[prev.A].Kind != bytecode.ConstRegExp {
-			return nil, false
-		}
-		var err error
-		if v, err = r.newRegExpLiteral(&fn.Constants[prev.A]); err != nil {
-			return nil, false
-		}
-	default:
-		return nil, false
-	}
-	if !v.IsObject() {
-		return nil, false
-	}
-	return v.Object(), true
-}
-
-
-// siteFrom is the site of a property instruction, in, as cache c knows it.
-func (fb *jitFeedback) siteFrom(in bytecode.Instr, c *propCache) (ssa.PropertySite, bool) {
-	return fb.siteOf(fb.cl.names[in.A], in.Op == bytecode.OpSetProp, c)
-}
 
 // siteOf is the site of a read of key, or a write, as cache c knows it.
 func (fb *jitFeedback) siteOf(key Atom, write bool, c *propCache) (ssa.PropertySite, bool) {
@@ -7633,25 +5198,6 @@ func (fb *jitFeedback) add(c *propCache) *ssa.PropertyAdd {
 	return add
 }
 
-// jitSlot is a frame's slot as the JIT numbers them: its locals, its
-// captured bindings, the receiver if the code reads it (this, its
-// program's This: from the context, where Go put it), then its operands.
-func (r *Runtime) jitSlot(f *frame, this bool, i int) *Value {
-	n, u := f.cl.fn.LocalCount, len(f.cl.upvalues)
-	switch {
-	case i < n:
-		return &f.locals[i]
-	case i < n+u:
-		return f.cl.upvalues[i-n].slot
-	case this && i == n+u:
-		return (*Value)(unsafe.Pointer(&r.jit.ssaCtx.This))
-	}
-	if this {
-		u++
-	}
-	return &r.stack[f.base+i-n-u]
-}
-
 // jitStringMethod is String.prototype.charCodeAt for native code: the
 // intrinsic, while the prototype still has it as it was made; and
 // otherwise nothing.
@@ -7686,99 +5232,11 @@ func jitSource(word *uint64) *Value {
 	return *(**Value)(unsafe.Pointer(word))
 }
 
-// jitApplyRecords writes the slots records name (abi.Record): the
-// references moved, and the primitives put where a reference was,
-// numbered as the code that left has them (this, jitSlot's). They are a
-// native call's caller's state, which the call described rather than
-// wrote, made records of (jit.ExpandCall) when its callee left native
-// code. An exit applies its own records natively as it leaves (mir's
-// recordsTail), whether the collector marks or not, or leaves its frame
-// to its description (jit.ApplyExit): at an exit none are left. The slots
-// records read hold their values from entry until the first write, so
-// every one is read first; one record, the usual case, reads its value and
-// writes it.
-func (r *Runtime) jitApplyRecords(f *frame, this bool, ctx *abi.Context) {
-	n := int(ctx.Records)
-	if n == 0 {
-		return
-	}
-	r.jit.ssaRecords += uint64(n)
-	const flags = abi.RecordScalar | abi.RecordMaybe | abi.RecordDirect
-	if n == 1 {
-		rec := &ctx.Record[0]
-		*r.jitSlot(f, this, int(rec.Slot&^flags)) = r.jitRecordValue(f, this, ctx, 0)
-		return
-	}
-	var buf [8]Value
-	src := buf[:0]
-	for i := range ctx.Record[:n] {
-		src = append(src, r.jitRecordValue(f, this, ctx, i))
-	}
-	for i, rec := range ctx.Record[:n] {
-		*r.jitSlot(f, this, int(rec.Slot&^flags)) = src[i]
-	}
-}
-
 // jitLevelSlot is a slot of a level's frame and the word it held before the
 // level's records wrote over it (jitKeepSlots).
 type jitLevelSlot struct {
 	at  *Value
 	old Value
-}
-
-// jitKeepSlots keeps what the records of c, l's context, are to write over
-// in f, l's frame, for its code to find if it goes on after its call
-// (jitRestoreSlots). Native code writes a frame only at an exit, and a value
-// it took from a slot goes on reading its pointer word there, whatever the
-// local has been assigned since: the slot is that value's until it dies, and
-// may be all that keeps its object alive, which what is kept here does in
-// its place. Records give the slot the local's value, for what reads the
-// frame while Go finishes the call. A local of the function's closures, in
-// a cell the frame holds open, code does not read in the slot, and what the
-// callee assigned it stays assigned; a captured binding's cell is no slot of
-// the frame's.
-func (r *Runtime) jitKeepSlots(l *jitNativeLevel, f *frame, this bool, c *abi.Context) {
-	s := r.jit
-	l.slotsFrom = len(s.levelSlots)
-	const flags = abi.RecordScalar | abi.RecordMaybe | abi.RecordDirect
-	fn := f.cl.fn
-	for _, rec := range c.Record[:c.Records] {
-		slot := int(rec.Slot &^ flags)
-		if slot < len(fn.Locals) && fn.Locals[slot].Captured || slot >= fn.LocalCount && slot < fn.LocalCount+len(f.cl.upvalues) {
-			continue
-		}
-		at := r.jitSlot(f, this, slot)
-		s.levelSlots = append(s.levelSlots, jitLevelSlot{at, *at})
-	}
-	l.slotsTo = len(s.levelSlots)
-}
-
-// jitRestoreSlots gives l's frame back what its code left there
-// (jitKeepSlots), last first, as l goes on natively after its call.
-func (r *Runtime) jitRestoreSlots(l *jitNativeLevel) {
-	slots := r.jit.levelSlots[l.slotsFrom:l.slotsTo]
-	for i := len(slots) - 1; i >= 0; i-- {
-		*slots[i].at = slots[i].old
-	}
-}
-
-// jitRecordValue is the value a record writes, read from the frame as the
-// exit left it.
-func (r *Runtime) jitRecordValue(f *frame, this bool, ctx *abi.Context, i int) Value {
-	switch rec := &ctx.Record[i]; {
-	case rec.Slot&abi.RecordDirect != 0:
-		slot := abi.Slot{Num: rec.Word, Ref: ctx.RecordRef[i]}
-		return *(*Value)(unsafe.Pointer(&slot))
-	case rec.Slot&abi.RecordScalar != 0:
-		return Value{num: math.Float64frombits(rec.Word)}
-	case rec.Slot&abi.RecordMaybe != 0:
-		if s := jitSource(&rec.Arg); s != nil && s.ref != nil {
-			return *s
-		}
-		return Value{num: math.Float64frombits(rec.Word)}
-	default:
-		return *r.jitSlot(f, this, int(rec.Arg))
-	}
 }
 
 // jitSSAStats counts what one function's new-pipeline code does. Each
@@ -7828,166 +5286,9 @@ const (
 	jitSSAMinWork = 20
 )
 
-// jitSSAProfit accounts for a native stretch that started at pc, with the
-// back-edge counter at edges, and ended as ctx says; every jitSSAProbe
-// stretches it decides whether the function's native code pays. Code whose
-// stretches do little work before they end -- leaving for Go, a method
-// call at every iteration, or returning, a small method the tree tier calls
-// that calls out again -- costs more there than it saves, and the tree tier
-// runs it from then on. The work is estimated: the distance from the entry
-// to the exit or return (the return's block), in slot IR instructions, and
-// a loop's mean length for each back-edge taken natively.
-//
-// The stretches of a run begun at a loop by on-stack replacement (osr)
-// are judged apart besides. Code judged slow is entered so at a loop that
-// has run a full budget in the existing tiers (tryJITAt), the judgement
-// being of Go's entries at the start, whose stretches are a short call's.
-// But where the run's stretches do too little too -- the loop leaves at
-// each turn, for a using declaration's resources, say -- each entry ran a
-// turn natively and left the frame for the interpreter until the next
-// budget, a loop run in the bytecode interpreter: Go does not enter such
-// code at a loop either (loopSlow), and the tree runs the loop.
-func (r *Runtime) jitSSAProfit(e *jitEntry, f *frame, ctx *abi.Context, start, edges int, osr bool) {
-	st := &e.ssaStats
-	work := uint64(0)
-	if back := edges - (r.backEdges - r.jit.pollCredit); back > 0 {
-		work = uint64(back) * uint64(e.ssaLoop)
-	}
-	if ctx.ExitKind == abi.ExitHost || ctx.ExitKind == abi.ExitDeopt || ctx.ExitKind == abi.ExitReturn {
-		if ctx.ExitKind != abi.ExitReturn {
-			st.ended++
-		}
-		if site := int64(ctx.ExitSite); site > int64(start) {
-			work += uint64(site - int64(start))
-		}
-	}
-	st.work += work
-	if osr {
-		st.osrStretches++
-		st.osrWork += work
-		if st.osrStretches%jitSSAProbe == 0 && st.osrWork < st.osrStretches*jitSSAMinWork {
-			e.entrySlow, e.loopSlow = true, true
-		}
-	}
-	// A call of Go a stretch makes costs it what an exit and an entry
-	// would, which it saves (ssa.GoCall): each counts as a stretch, so a
-	// method whose call Go now makes is judged as it was when it left --
-	// and as often: every jitSSAProbe stretches, its calls of Go among
-	// them. Judged every jitSSAProbe entries, a function entered a few
-	// times, each a loop of a hundred thousand calls of built-ins --
-	// RegExp's run blocks -- was never judged.
-	stretches := st.entries + st.goCalls
-	if stretches-st.judged < jitSSAProbe {
-		return
-	}
-	st.judged = stretches
-	if st.work-st.workBase < (stretches-st.stretchBase)*jitSSAMinWork {
-		// Go stops entering it; native callers, which pay neither, go on
-		// calling it (NativeCalls).
-		e.entrySlow = true
-	}
-}
-
-// jitRetrySlow counts a call the existing tiers made of code Go does not
-// enter (entrySlow), and has Go enter it again after jitNativeRetry calls,
-// doubled each time it was found not to pay, up to jitNativeBackoffs times,
-// judging it by what it does from then on (jitSSAProfit): code judged on its
-// first stretches -- its calls not yet decided, made by Go; its sites
-// without feedback -- may pay once it has learned, as a native callee does
-// (jitRetryNative). Judged once, for good, AWFY's Richards' runTask had
-// every call made by Go after its one call's target was learned. Code
-// compiled for native callers alone (ssaCallee) Go does not enter.
-func jitRetrySlow(e *jitEntry) {
-	if e.ssaCallee || e.ssa == nil || e.slowCalls-e.slowSince < jitNativeRetry<<e.slowBackoff {
-		return
-	}
-	st := &e.ssaStats
-	e.entrySlow, e.loopSlow = false, false
-	e.slowSince, e.slowBackoff = e.slowCalls, min(e.slowBackoff+1, jitNativeBackoffs)
-	st.judged = st.entries + st.goCalls
-	st.workBase, st.stretchBase = st.work, st.judged
-	st.runGoCalls, st.runWork, st.osrStretches, st.osrWork = 0, 0, 0, 0
-}
-
-// jitLoopLength is the mean length of fn's loops, in instructions: the
-// distance each backward branch jumps; 1 for a function with none.
-func jitLoopLength(fn *bytecode.Function) uint32 {
-	total, loops := 0, 0
-	for pc, in := range fn.Code {
-		switch in.Op {
-		case bytecode.OpJump, bytecode.OpJumpIfFalse, bytecode.OpJumpIfTrue, bytecode.OpJumpIfCmpFalse:
-			if int(in.A) <= pc {
-				total += pc - int(in.A) + 1
-				loops++
-			}
-		}
-	}
-	if loops == 0 {
-		return 1
-	}
-	return uint32(total / loops)
-}
-
 // errGoOnNatively ends the interpreter's run of a frame Go goes on in
 // natively, at a loop's header (jitGoOn).
 var errGoOnNatively = errors.New("jit: go on natively")
-
-// jitRunDone ends a run runSSAIn began in context idx, ctxTop top before
-// it. What native code kept (abi.Context.Keep), and the pointer words its
-// native calls recorded (RecordRef), its callees' too, are not kept past
-// it; nor its receiver and captured bindings, nor what its native calls'
-// callees ran with -- closure, receiver, result, keep cells -- in the
-// contexts past it, each a frame gone once it returned, as V8's are: one
-// receiver left there kept a benchmark's whole object graph alive after it
-// ended. The contexts the calls ran in go from the one past it, each given
-// a closure by the call, up to the first without, which no call ran in
-// since Go last cleared it here (a run of Go's there gives it none, and
-// clears those past it itself): none past that is looked at.
-func (r *Runtime) jitRunDone(e *jitEntry, idx, top int) {
-	s := r.jit
-	e.ssaRuns--
-	s.runEntries[len(s.runEntries)-1] = nil
-	s.runEntries = s.runEntries[:len(s.runEntries)-1]
-	s.ctxTop = top
-	if idx < len(s.goRuns) {
-		s.goRuns[idx] = jitGoRun{}
-	}
-	if e.ssaHomes != e.ssaHomesNow {
-		e.setHomes(s, e.ssaHomesNow)
-	}
-	c := s.ssaCtxs[idx]
-	clear(c.Keep[:e.ssaKeeps])
-	if e.osrOf != nil {
-		s.osrRunDone(e)
-	}
-	c.This, c.Upvalues, c.Instance = abi.Slot{}, nil, abi.Slot{}
-	// The frames made for the native levels of this run's calls of Go
-	// (jitLevels), which only its calls share: their closures and
-	// receivers had kept a benchmark's graph alive once it ended.
-	if lv := &s.levels; len(lv.at) != 0 && idx <= lv.root {
-		clear(lv.at)
-		lv.at, lv.serial, lv.n = lv.at[:0], 0, 0
-	}
-	// Past RecordHigh, the pointer words native calls wrote themselves,
-	// which Go did not expand (abi.CallRecord's Ref).
-	if n := max(c.RecordHigh, s.callRefs); n != 0 {
-		clear(c.RecordRef[:n])
-		c.RecordHigh = 0
-	}
-	for i := idx + 1; i < len(s.ssaCtxs); i++ {
-		c := s.ssaCtxs[i]
-		if c.Closure == nil {
-			break
-		}
-		if n := max(c.RecordHigh, s.callRefs); n != 0 {
-			clear(c.RecordRef[:n])
-			c.RecordHigh = 0
-		}
-		clear(c.Keep[:s.ssaKeeps])
-		c.Closure, c.Upvalues, c.Cells = nil, nil, nil
-		c.This, c.RetValue, c.Instance = abi.Slot{}, abi.Slot{}, abi.Slot{}
-	}
-}
 
 // jitShared is what every context native code runs in shares with the one
 // it was called from (abi.Context): where the global names are, the
@@ -8369,92 +5670,6 @@ func jitSuperBound(f *frame, v Value) Value {
 	return v
 }
 
-// jitSuperTarget is the parent d's super() constructs with, natively
-// (ssa.CallSite's Super), and the code it runs: d a derived class of no
-// fields -- which super() would give the instance -- making no arrow
-// before a super() -- whose this its binding is, which native code binds
-// in the context alone (jitArrowBeforeSuper) -- its
-// prototype p a constructor of the realm's script, a base one of no
-// fields, or derived; p a class with no constructor of its own, the code
-// of the one it extends, skip, as V8 skips a default derived constructor
-// (FindNonDefaultConstructorOrConstruct). nil where there is none.
-func (r *Runtime) jitSuperTarget(d *Object) (p, skip *Object, cl *closure) {
-	dfd := d.fn()
-	if dfd == nil || dfd.closure == nil || dfd.ctorKind != ctorDerived || dfd.superCtor() != d || dfd.fieldInit() != nil || jitArrowBeforeSuper(dfd.closure.fn) {
-		return nil, nil, nil
-	}
-	code := func(o *Object) *closure {
-		fd := o.fn()
-		if fd == nil || fd.closure == nil || fd.native != nil || fd.bound || fd.closure.realm != r.Realm || o.class != ClassFunction ||
-			isGeneratorTemplate(fd.closure.fn) || fd.fieldInit() != nil {
-			return nil
-		}
-		switch fd.ctorKind {
-		case ctorBase:
-			return fd.closure
-		case ctorDerived:
-			if fd.superCtor() == o {
-				return fd.closure
-			}
-		}
-		return nil
-	}
-	if p = d.proto(); p == nil {
-		return nil, nil, nil
-	}
-	if cl = code(p); cl == nil {
-		return nil, nil, nil
-	}
-	if cl.fn.Kind == bytecode.KindDerivedConstructor && jitForwardsSuper(cl.fn) {
-		if q := p.proto(); q != nil {
-			if qc := code(q); qc != nil && !(qc.fn.Kind == bytecode.KindDerivedConstructor && jitForwardsSuper(qc.fn)) {
-				return p, q, qc
-			}
-		}
-		return nil, nil, nil
-	}
-	return p, nil, cl
-}
-
-// jitArrowBeforeSuper reports whether fn, a derived constructor, may make
-// an arrow before a super() of its runs: an arrow shares the constructor's
-// this binding, which a super() native code makes binds in the context
-// (its This), not in a binding of the VM's an arrow made before shares. No
-// arrow at a PC before a super()'s, and no loop back from one to a
-// super(), and every arrow fn makes is made once any super() it runs has
-// run: Go makes it then on a binding bound (jitBindThis), or, on a native
-// callee's frame, of the this its context holds (jitCalleeMakes).
-func jitArrowBeforeSuper(fn *bytecode.Function) bool {
-	lastSuper, firstArrow := -1, len(fn.Code)
-	for pc, in := range fn.Code {
-		switch in.Op {
-		case bytecode.OpSuperCall:
-			lastSuper = pc
-		case bytecode.OpClosure:
-			if int(in.A) < len(fn.Constants) {
-				if k := fn.Constants[in.A]; k.Kind == bytecode.ConstFunction && k.Fn != nil && k.Fn.Kind == bytecode.KindArrow {
-					firstArrow = min(firstArrow, pc)
-				}
-			}
-		}
-	}
-	if firstArrow == len(fn.Code) || lastSuper < 0 {
-		return false
-	}
-	if firstArrow < lastSuper {
-		return true
-	}
-	for pc, in := range fn.Code {
-		switch in.Op {
-		case bytecode.OpJump, bytecode.OpJumpIfFalse, bytecode.OpJumpIfTrue, bytecode.OpJumpIfCmpFalse:
-			if pc >= firstArrow && int(in.A) <= lastSuper {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // jitBindThis binds the this of f, a derived constructor's frame Go
 // entered its code with, as a super() native code made bound it (its
 // context's This), where Go has not: as the interpreter's super() binds
@@ -8476,50 +5691,6 @@ func (r *Runtime) jitSuperCall(f *frame, args []Value) error {
 	return r.superCall(f, args)
 }
 
-
-// jitStartLocals makes the locals of a frame a native call made for fn, its
-// code not run (abi.ExitEnter), undefined past its parameters, as fn's
-// code's call entry would have, which the call left to it (mir's
-// callEntry).
-func jitStartLocals(fn *bytecode.Function, locals []Value) {
-	for i := min(fn.ParamCount, len(locals)); i < len(locals); i++ {
-		locals[i] = Undefined
-	}
-}
-
-// jitShapeMiss reports whether level l, an inlined callee's, left native
-// code at a property site for a shape the code was not compiled for, or at
-// a site that knew none, its cache not megamorphic: the code is compiled
-// again for what the cache learns there (jitFinishExit), and the exit is
-// not the callee's leaving native code, which would stop it being inlined
-// (jitInlineLeft) -- a callee inlined before its sites met their shapes
-// left once for each.
-func (r *Runtime) jitShapeMiss(l *jitNativeLevel) bool {
-	if !l.inline || int(l.pc) >= len(l.cl.fn.Code) || !jitPropertyOp(l.cl.fn.Code[l.pc].Op) {
-		return false
-	}
-	return l.kind == abi.ExitDeopt || l.kind == abi.ExitHost && !r.jitSiteMegamorphic(l.cl, r.jit.entryFor(l.cl.fn), int(l.pc))
-}
-
-// jitPoolEmptied reports whether level l left native code at a construction
-// its code makes from a pool, now empty: it left for the pool to be filled
-// again (jitRefillPools).
-func (r *Runtime) jitPoolEmptied(l *jitNativeLevel) bool {
-	fn := l.cl.fn
-	if l.kind != abi.ExitHost || int(l.pc) >= len(fn.Code) || fn.Code[l.pc].Op != bytecode.OpNew {
-		return false
-	}
-	e := r.jitEntryOf(l.cl)
-	if e == nil {
-		return false
-	}
-	for _, x := range jitTargets(e) {
-		if int(x.pc) == int(l.pc) && x.pool != nil && x.pool.Count == 0 {
-			return true
-		}
-	}
-	return false
-}
 
 // jitTargets iterates over the calls e's code makes natively and those it
 // inlines, each list in turn.
@@ -8546,37 +5717,6 @@ const (
 	jitUnwindProbe = 64
 	jitUnwindShare = 4
 )
-
-// jitUnwound counts a native call that left native code inside e's code
-// (nativeOut). Code that leaves on more than one in jitUnwindShare of its
-// calls is compiled again with what its exits taught since (jitCallSeen,
-// jitPolySeen), its native callers calling it still, as V8 deoptimizes
-// code and optimizes it again with the feedback gathered since: leaving
-// while it learned, its calls and constructions not yet decided, is no
-// reason to stop calling it natively. Only once those compiles are spent
-// (jitUnwindReopts), as V8 gives up optimizing a function that deoptimizes
-// too often, do native callers stop calling it and leave for Go at the
-// call instead, which makes it (notNative), until jitRetryNative -- or at
-// once, if its exits taught nothing since it was compiled (jitLearning),
-// for code compiled again would be the same: RayTrace's getReflectionRay,
-// constructing with a forwarding constructor its code leaves to Go, and
-// wrapUp, whose remainder of fractions Go computes, were compiled three
-// times more each for nothing.
-func (r *Runtime) jitUnwound(e *jitEntry) {
-	if e.nativeOut++; e.nativeOut%jitUnwindProbe != 0 || e.nativeOut*jitUnwindShare <= e.link.in {
-		return
-	}
-	if e.ssa != nil && e.unwindReopts < jitUnwindReopts && jitLearning(e) {
-		e.unwindReopts++
-		e.unwindReopt = true
-		e.link.in, e.nativeOut = 0, 0
-		e.ssaStats.calleeGoCalls, e.ssaStats.calleeWork = 0, 0
-		return
-	}
-	e.notNative, e.nativeRetry = true, 0
-	e.link.clearCode()
-	e.nativeBackoff = min(e.nativeBackoff+1, jitNativeBackoffs)
-}
 
 // jitLearning reports whether e's code has met, since it was compiled,
 // what a compile would take that it was not compiled for: what is to be
@@ -8610,217 +5750,6 @@ const (
 	jitNativeRetry    = 1024
 	jitNativeBackoffs = 8
 )
-
-// jitRetryNative counts a call Go makes to e's code, which native callers
-// no longer call (notNative) -- one Go enters it for, or one a native
-// caller left for Go to make (jitCallTarget), which a function Go does not
-// enter, or calls without a frame, has only -- and has them call it again
-// after jitNativeRetry, counting its leaving afresh.
-func jitRetryNative(e *jitEntry) {
-	if !e.owned() || e.invalid {
-		// Dropped by the cache: its code is not its function's link's; or
-		// invalidated, which native callers call again once compiled
-		// again.
-		return
-	}
-	if e.nativeRetry++; e.nativeRetry >= jitNativeRetry<<(e.nativeBackoff-1) {
-		e.notNative, e.link.in, e.nativeOut = false, 0, 0
-		e.ssaStats.calleeGoCalls, e.ssaStats.calleeWork = 0, 0
-		e.link.setCode(e.ssa)
-	}
-}
-
-// jitTailGivesUp reports whether the instruction at pc of the frame Go
-// entered native code with, f, is a call in tail position that gives up the
-// frame, as the interpreter's tail_call decides: deep in the stack, in a
-// frame no construction's, nor an arrow's sharing a derived constructor's
-// this. (The compiler emits none under a handler.)
-func (r *Runtime) jitTailGivesUp(f *frame, pc int) bool {
-	op := f.cl.fn.Code[pc].Op
-	return (op == bytecode.OpTailCall || op == bytecode.OpTailCallMethod) && r.frameDepth >= tailCallDepth &&
-		f.newTarget.IsUndefined() && f.thisRef == nil
-}
-
-// jitCallOp is a call's opcode as native code makes the call: a call in
-// tail position is an ordinary call where the stack is shallow, which is
-// the only place native code makes it (ssa.OpTailRoom); deeper, Go makes
-// it as the interpreter does (jitHost).
-func jitCallOp(op bytecode.Op) bytecode.Op {
-	switch op {
-	case bytecode.OpTailCall:
-		return bytecode.OpCall
-	case bytecode.OpTailCallMethod:
-		return bytecode.OpCallMethod
-	}
-	return op
-}
-
-// jitCallInstr is in with its opcode as native code makes the call
-// (jitCallOp).
-func jitCallInstr(in bytecode.Instr) bytecode.Instr {
-	in.Op = jitCallOp(in.Op)
-	return in
-}
-
-// jitCallResult has a frame whose state at the call at pc, depth operands
-// deep, is in its frame go on after the call, which returned v or threw
-// err: the call's operands go, its result comes, as when Go makes it
-// (jitHost). It returns the operands' top, and false for a throw, which
-// the interpreter takes from there.
-func (r *Runtime) jitCallResult(f *frame, pc, depth int, v Value, err error) (int, bool) {
-	if sp, ok, host := r.jitHostResult(f, pc, depth, v, err); host {
-		// One Go made from native code on the frame (jitGoHost).
-		return sp, ok
-	}
-	in := jitCallInstr(f.cl.fn.Code[pc])
-	if in.Op == bytecode.OpIterStep || in.Op == bytecode.OpIterRest {
-		// A destructuring's step Go made (abi.GoCallFill), or its rest
-		// element's array (abi.GoCallRest): its cursor stays, and the value
-		// goes on top. The rest's array had taken the cursor's place, as a
-		// call's result takes its callee's, and every operand after it was
-		// one below its slot: r.join('') after const [a, ...q] = xs[i] met
-		// a string as its receiver, and undefined as its method.
-		sp := f.base + depth
-		f.pc = uint32(pc + 1)
-		if err != nil {
-			return sp, false
-		}
-		r.stack[sp] = v
-		return sp + 1, true
-	}
-	if in.Op == bytecode.OpIterNextOrJump {
-		// A loop's step Go made (abi.GoCallStep): its cursor stays, and the
-		// next value goes on it; or, done, the loop's end is next.
-		sp := f.base + depth
-		f.pc = uint32(pc + 1)
-		switch {
-		case err != nil:
-			return sp, false
-		case v.IsUninitialized():
-			f.pc = in.A
-			return sp, true
-		}
-		r.stack[sp] = v
-		return sp + 1, true
-	}
-	switch in.Op {
-	case bytecode.OpGetProp, bytecode.OpGetPropThis, bytecode.OpGetPropUnder, bytecode.OpSetProp:
-		// An accessor's read or write, its getter or setter called
-		// (ssa.AccessorSite), or one Go made (abi.GoCallGet): the object
-		// goes but for get_prop_this, which keeps it below the value, and
-		// an object pattern's get_prop_under, whose source stays where it
-		// is; a write's value goes too, and leaves nothing.
-		sp := f.base + depth
-		f.pc = uint32(pc + 1)
-		switch in.Op {
-		case bytecode.OpGetProp:
-			sp--
-		case bytecode.OpSetProp:
-			sp -= 2
-		}
-		if err != nil {
-			return sp, false
-		}
-		if in.Op == bytecode.OpSetProp {
-			return sp, true
-		}
-		r.stack[sp] = v
-		return sp + 1, true
-	}
-	sp := f.base + depth - int(in.A) - 1
-	if jitcompile.GoOperation(in.Op) {
-		// An operation Go made (abi.GoCallOp): its operands go.
-		sp = f.base + depth - jitcompile.GoOperands(in)
-	}
-	switch in.Op {
-	case bytecode.OpTypeOf:
-		// Its operand (abi.GoCallTypeOf).
-		sp = f.base + depth - 1
-	case bytecode.OpInstanceOf:
-		// The object and the constructor (abi.GoCallInstanceOf).
-		sp = f.base + depth - 2
-	case bytecode.OpSuperCall:
-		// Its arguments (abi.GoCallSuper); the this it bound comes.
-		sp = f.base + depth - int(in.A)
-	case bytecode.OpCallMethod:
-		sp--
-	case bytecode.OpApplyArguments:
-		// f, apply and the receiver (a forwarding constructor's inlined
-		// frame, ssa.InlineSite's Forward).
-		sp = f.base + depth - 3
-	}
-	f.pc = uint32(pc + 1)
-	if err != nil {
-		return sp, false
-	}
-	r.stack[sp] = v
-	return sp + 1, true
-}
-
-// jitLevelHost reports whether op, an instruction a native callee's code
-// has Go make from native code (ssa.GoHost), may be made on the frame of
-// its level that Go makes, which has its closure, its receiver, its
-// operands and, where its code reads it, its function object (the call
-// wrote it, jitFrameCallee), but not its locals, which native code holds:
-// a definition's (compile's frameDefinition), a super reference's, a
-// mapped arguments object's of a function of no parameters, which aliases
-// none.
-func jitLevelHost(op bytecode.Op) bool {
-	switch op {
-	case bytecode.OpGetSuperProp, bytecode.OpGetSuperIndex, bytecode.OpSetSuperProp, bytecode.OpSetSuperIndex, bytecode.OpSuperBase,
-		bytecode.OpGetArguments:
-		return true
-	case bytecode.OpGetLength, bytecode.OpNewClass, bytecode.OpSetHomeObject, bytecode.OpSetFieldInit, bytecode.OpDefineMethod,
-		bytecode.OpDefineGetter, bytecode.OpDefineSetter, bytecode.OpSetFuncName,
-		bytecode.OpPrivateName, bytecode.OpNewPrivateMethods, bytecode.OpInstallPrivateMethods,
-		bytecode.OpDefinePrivate, bytecode.OpDefinePrivateMethod, bytecode.OpDefinePrivateGetter,
-		bytecode.OpDefinePrivateSetter, bytecode.OpAddPrivateMethod, bytecode.OpAddPrivateGetter, bytecode.OpAddPrivateSetter:
-		return true
-	}
-	return false
-}
-
-// jitHostResult is jitCallResult for an instruction Go made from native
-// code on the frame (ssa.GoHost), at pc, with depth operands: its operands
-// popped, and its result v, if it pushes one, pushed; false for a throw.
-func (r *Runtime) jitHostResult(f *frame, pc, depth int, v Value, err error) (int, bool, bool) {
-	in := f.cl.fn.Code[pc]
-	pops, pushes := 0, true
-	switch in.Op {
-	case bytecode.OpRestParam, bytecode.OpGetArguments, bytecode.OpGetSuperProp, bytecode.OpSuperBase,
-		bytecode.OpPrivateName, bytecode.OpNewPrivateMethods:
-	case bytecode.OpGetSuperIndex:
-		pops = 2
-	case bytecode.OpGetLength:
-		pops = 1
-	case bytecode.OpSetSuperProp:
-		pops, pushes = 1, false
-	case bytecode.OpSetSuperIndex:
-		pops, pushes = 3, false
-	case bytecode.OpSetHomeObject, bytecode.OpSetFuncName:
-		// What they change stays where it is.
-		pushes = false
-	case bytecode.OpNewClass, bytecode.OpSetFieldInit, bytecode.OpDefineMethod, bytecode.OpDefineGetter, bytecode.OpDefineSetter,
-		bytecode.OpDefinePrivate, bytecode.OpDefinePrivateMethod, bytecode.OpDefinePrivateGetter, bytecode.OpDefinePrivateSetter,
-		bytecode.OpInstallPrivateMethods:
-		// The member, or the parent, popped; the object kept.
-		pops, pushes = 1, false
-	case bytecode.OpAddPrivateMethod, bytecode.OpAddPrivateGetter, bytecode.OpAddPrivateSetter:
-		pops, pushes = 2, false
-	default:
-		return 0, false, false
-	}
-	sp := f.base + depth - pops
-	f.pc = uint32(pc + 1)
-	if err != nil {
-		return sp, false, true
-	}
-	if pushes {
-		r.stack[sp] = v
-		sp++
-	}
-	return sp, true, true
-}
 
 // jitArgument is ssa.GoArgument's answer, for the code ctx runs, a run of
 // a function's own code Go entered with its frame, which has the call's
@@ -8874,29 +5803,6 @@ func (r *Runtime) jitArgument(ctx *abi.Context) (Value, bool) {
 	return Undefined, false
 }
 
-// jitPrologueArgs is the arguments of the call that made a frame of p's
-// code that native code left at pc, depth operands deep, inside its
-// parameter list's prologue (ir.Program's PrologueArgs) -- before the
-// prologue's ParamsDead, the parameters' slots, locals; after it, the
-// operands past depth, from operands on, where the exit's state kept them
-// -- or nil where the frame needs none. A frame Go makes of a native
-// callee's, or of an inlined one's, has no call's arguments of its own, as
-// a frame of the VM's has, which the interpreter, going on in the
-// prologue, binds the parameters still in the dead zone from (OpInitParam,
-// OpParamNeedsDefault).
-func jitPrologueArgs(p *ir.Program, pc, depth int, locals, operands []Value) []Value {
-	n, inSlots, ok := p.PrologueAt(pc)
-	switch {
-	case !ok:
-		return nil
-	case inSlots && n <= len(locals):
-		return slices.Clone(locals[:n])
-	case !inSlots && depth >= 0 && depth+n <= len(operands):
-		return slices.Clone(operands[depth : depth+n])
-	}
-	return nil
-}
-
 
 // jitFrameArgs reports whether fn's code reads its call's arguments past
 // its parameters, from the frame of the VM's: a rest parameter's, the
@@ -8920,88 +5826,12 @@ func jitFrameArgs(fn *bytecode.Function) bool {
 // callee's level, as V8's frame has its function.
 func jitFrameCallee(fn *bytecode.Function) bool { return fn.FrameCallee }
 
-// jitCallArgs is a copy of the arguments a native call of fn wrote to its
-// callee's context, c (abi.Context's Args), for a frame Go makes of the
-// callee's level that outlives what Go does there -- one the interpreter
-// finishes -- or a super() that hands them on: fn's code reads them past
-// its parameters (jitFrameArgs). nil for any other function.
-func jitCallArgs(fn *bytecode.Function, c *abi.Context) []Value {
-	if !jitFrameArgs(fn) {
-		return nil
-	}
-	return slices.Clone(jitContextArgs(c))
-}
-
 // jitContextArgs is the arguments a native call wrote to its callee's
 // context, c (abi.Context's Args), in place: valid while the callee's level
 // runs, its next call writing the next context's.
 func jitContextArgs(c *abi.Context) []Value {
 	n := min(int(c.Argc), len(c.Args))
 	return unsafe.Slice((*Value)(unsafe.Pointer(&c.Args[0])), n)
-}
-
-// jitEnterArgs is the arguments of a native call of fn whose frame Go
-// runs from its start (abi.ExitEnter), where its parameter list has a
-// prologue that binds its parameters from them: the parameters' slots, as
-// the call wrote them; or nil.
-func jitEnterArgs(fn *bytecode.Function, locals []Value) []Value {
-	if !fn.ParamsAreLexical || fn.HasRest || fn.ParamCount > len(locals) {
-		return nil
-	}
-	return slices.Clone(locals[:fn.ParamCount])
-}
-
-// jitHandlers gives f, a frame native code ran p's code in, the exception
-// handlers in force at pc (ir.Program's HandlerAt), as the interpreter's
-// push_catch and pop_catch would have left them there: native code
-// registers none, and a throw Go unwinds the frame from finds them.
-func jitHandlers(f *frame, p *ir.Program, pc int) {
-	if p == nil || p.HandlerAt == nil || pc < 0 || pc >= len(p.HandlerAt) {
-		return
-	}
-	n := 0
-	for k := p.HandlerAt[pc]; k != 0; k = p.Handlers[k-1].Outer {
-		n++
-	}
-	f.handlers = slices.Grow(f.handlers[:0], n)[:n]
-	for k, i := p.HandlerAt[pc], n-1; k != 0; k, i = p.Handlers[k-1].Outer, i-1 {
-		h := p.Handlers[k-1]
-		f.handlers[i] = handler{pc: h.PC, stackDepth: int(h.Depth), isFinally: h.Finally}
-	}
-}
-
-// jitSuspend suspends f, a generator's or an async function's frame, at
-// in, a yield, a yield* or an await native code left it at, with sp its
-// stack's top,
-// as the interpreter's yield does: the value handed out popped, the pc
-// past the instruction, and the depth beneath it kept for the resumption,
-// which enters native code there (jitResume). The suspension is the
-// runtime's own, as the tree tier's is (treeSig).
-func (r *Runtime) jitSuspend(f *frame, in bytecode.Instr, sp int) (Value, error, bool) {
-	sp--
-	f.pc++
-	f.savedSP = sp
-	r.treeSig = suspendSignal{value: r.stack[sp], await: in.Op == bytecode.OpAwait,
-		delegate: in.Op == bytecode.OpYieldStar, raw: in.Op == bytecode.OpYieldStar && in.A == 1}
-	return Undefined, &r.treeSig, true
-}
-
-// jitCatch unwinds f, a frame of e's code, for err, which what Go did at
-// an exit threw with the operands' top at sp, as the interpreter does
-// (unwindToHandler): where a handler of the function catches it and e's
-// code has an entry there -- every handler has one -- native code goes on
-// from it (true), as V8's code goes on at a handler. Otherwise the
-// interpreter takes the frame from what it returns: unwound, with no
-// error, where a handler caught it; as it was where none did.
-func (r *Runtime) jitCatch(f *frame, e *jitEntry, sp int, err error) (int, error, bool) {
-	if err == nil || r.stopped != nil || len(f.handlers) == 0 {
-		return sp, err, false
-	}
-	sp, caught := r.unwindToHandler(f, sp, err)
-	if !caught {
-		return sp, err, false
-	}
-	return sp, nil, !e.entrySlow && e.ssa.HasEntry(int(f.pc))
 }
 
 // jitTypeWord is the type word an interface holding x has (abi.Encoding's

@@ -4,9 +4,7 @@ package vm
 
 import (
 	"cmp"
-	"fmt"
 	"slices"
-	"weak"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
@@ -176,14 +174,4 @@ func jitFunctionOf(fn *bytecode.Function) JITFunction {
 		f.Line = int(line)
 	}
 	return f
-}
-
-// jitSkipped notes, when reporting, that the JIT did not try to compile fn.
-func (r *Runtime) jitSkipped(fn *bytecode.Function, format string, args ...any) {
-	if s := r.jit; s != nil && s.reporting {
-		if s.skipped == nil {
-			s.skipped = map[weak.Pointer[bytecode.Function]]string{}
-		}
-		s.skipped[weak.Make(fn)] = fmt.Sprintf(format, args...)
-	}
 }

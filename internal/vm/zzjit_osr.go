@@ -5,7 +5,6 @@ package vm
 import (
 	"slices"
 
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 )
@@ -159,64 +158,13 @@ type jitLearned struct {
 // new shape at each -- each would compile twice.
 const jitKeptStarts = 4
 
-// setHomes has e's code's homes be homes (jitEntry's ssaHomes), once no run
-// of the code it replaced can exit: until then, the more of the two, and
-// the run's end brings them down (jitRunDone). Left at the most any compile
-// had, one compile with objects unmade had every exit of the code after it,
-// which has none, look through the frame for their words.
-func (e *jitEntry) setHomes(s *jitState, homes int) {
-	e.ssaHomesNow = homes
-	if e.ssaRuns == 0 && !s.called(e) {
-		e.ssaHomes = homes
-	} else {
-		e.ssaHomes = max(e.ssaHomes, homes)
-	}
-}
-
 // jitFramesLeaving is how many calls of a function go on in the code kept
 // for its loops before it is asked whether most of its calls do
 // (jitFramesLeave): past a compile's worth of what leaving costs.
 const jitFramesLeaving = 256
 
-// keptCallsLeave reports whether three in four of e's calls since it last
-// looked left its code (jitKeptStarts), and enough of them to tell: one call
-// that left is no pattern.
-func (e *jitEntry) keptCallsLeave() bool {
-	calls := e.starts - e.keptAt
-	if e.link != nil {
-		calls += e.link.in
-	}
-	return e.keptLeft >= jitKeptStarts*3/4 && e.keptLeft*4 >= calls*3
-}
-
-// jitFrameAt is the loop's header a frame waits at for this compile of fn,
-// e's code (ssa.Func's FrameAt), or 0: there is none, or the compile is of
-// another function, one a run of the frame's got to, or native callers
-// call e's code, whose calls would then make objects it could leave
-// unmade, with no check of Go's to find out that they do.
-func (r *Runtime) jitFrameAt(fn *bytecode.Function, e *jitEntry) int {
-	if r.jitFrameFn != fn || e == nil || e.link != nil && e.link.refs != 0 {
-		return 0
-	}
-	return r.jitFramePC
-}
 
 
-
-
-// osrEntry is e's entry for on-stack replacement, made if need be.
-func (s *jitState) osrEntry(e *jitEntry) *jitEntry {
-	if e.osr != nil {
-		return e.osr
-	}
-	link := &jitLink{key: e.link.key, params: e.link.params, locals: e.link.locals, frame: e.link.frame, flags: e.link.flags}
-	oe := &jitEntry{jitLearned: e.jitLearned, fnAddr: e.fnAddr, link: link, osrOf: e, ssaProg: e.ssaProg, ssaLoop: e.ssaLoop,
-		ssaSerial: e.ssaSerial, ssaCallee: e.ssaCallee, this: e.this, hot: e.hot, invoked: e.invoked, used: e.used, serial: e.serial,
-		reopts: e.reopts, polyReopts: e.polyReopts, inlineReopts: e.inlineReopts, upgradeReopts: e.upgradeReopts, unwindReopts: e.unwindReopts}
-	link.owner = oe
-	e.osr = oe
-	return oe
-}
 
 // osrInUse reports whether what e's entry for on-stack replacement holds
 // may not go: its code runs, or it is being compiled.
@@ -255,51 +203,4 @@ func (s *jitState) dropOSR(e *jitEntry) bool {
 	s.setLinks(oe, nil)
 	e.osr, oe.osrOf = nil, nil
 	return true
-}
-
-// osrReplaced has e's entry for on-stack replacement go, once no run is in
-// it, e's code compiled again: frames in the function's loops from now on
-// are the new code's to learn of, and what it was compiled for is out of
-// date. Kept, it would hold a compile's bytes for frames that may never
-// come back, as V8's cache of such code is emptied once code deoptimizes.
-func (s *jitState) osrReplaced(e *jitEntry) {
-	if e.osr == nil {
-		return
-	}
-	if e.osrInUse() {
-		e.osr.osrSpent = true
-		return
-	}
-	s.dropOSR(e)
-}
-
-// osrTell tells the function's entry what oe, its entry for on-stack
-// replacement, is to be compiled again for: what a code learns only its
-// own exits tell it, and the learned being shared, the function's code,
-// not compiled for it, would find a site noted before and never ask
-// (jitDeoptimized, jitDeoptSeen, jitGoOn).
-func (oe *jitEntry) osrTell() {
-	m := oe.osrOf
-	if m == nil {
-		return
-	}
-	m.reopt = m.reopt || oe.reopt
-	m.polyReopt = m.polyReopt || oe.polyReopt
-	m.inlineReopt = m.inlineReopt || oe.inlineReopt
-	m.inlinePending = m.inlinePending || oe.inlinePending
-	m.upgradeReopt = m.upgradeReopt || oe.upgradeReopt
-	m.unwindReopt = m.unwindReopt || oe.unwindReopt
-	m.resumeReopt = m.resumeReopt || oe.resumeReopt
-}
-
-// osrRunDone ends a run of oe, an entry for on-stack replacement. What it
-// is to be compiled for, its function's code is told, and oe no longer:
-// that compile has oe go (osrReplaced), and a frame that comes back learns
-// the loop for code compiled with all of it.
-func (s *jitState) osrRunDone(oe *jitEntry) {
-	oe.osrTell()
-	oe.reopt, oe.polyReopt, oe.inlineReopt, oe.inlinePending, oe.upgradeReopt, oe.unwindReopt, oe.resumeReopt = false, false, false, false, false, false, false
-	if m := oe.osrOf; m != nil && oe.osrSpent && !m.osrInUse() {
-		s.dropOSR(m)
-	}
 }

@@ -197,13 +197,6 @@ type genRare struct {
 	draining bool
 }
 
-// args is the arguments g was called with, a full slice, so that nothing
-// appended to it runs into the locals.
-func (g *generator) args() []Value { return g.vals[:g.nargs:g.nargs] }
-
-// locals is g's locals.
-func (g *generator) locals() []Value { return g.vals[g.nargs:] }
-
 // rareOf is g's rare part, made if it has none.
 func (g *generator) rareOf() *genRare {
 	if g.rare == nil {
@@ -274,8 +267,6 @@ func (*suspendSignal) Error() string { return "generator suspended" }
 // a finally clause sees it, which is exactly what a return statement at that
 // position would do.
 type returnSignal struct{ value Value }
-
-func (*returnSignal) Error() string { return "generator returned" }
 
 // resumeMode says how a generator is being re-entered.
 type resumeMode uint8

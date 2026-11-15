@@ -3,7 +3,6 @@ package vm
 import (
 	"strings"
 
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/regexp"
 )
 
@@ -63,21 +62,6 @@ import (
 // which the call of it builds into deadExecNode's node where nothing reads
 // its result.
 var ()
-
-// deadResultAt reports whether nothing reads the value the instruction at
-// pc of code leaves but, at most, whether it is truthy: the next one drops
-// it, jumps on its truth -- && 's keeps it only where it is falsy -- or is
-// a not.
-func deadResultAt[_ any](code []bytecode.Instr, pc int) bool {
-	if pc+1 >= len(code) {
-		return false
-	}
-	switch code[pc+1].Op {
-	case bytecode.OpDrop, bytecode.OpJumpIfFalse, bytecode.OpJumpIfTrue, bytecode.OpJumpIfFalseKeep, bytecode.OpNot:
-		return true
-	}
-	return false
-}
 
 // deadCallRest is callRest's call of o, fd its function's data, on recv
 // with args, where nothing reads the result: the function told so first,

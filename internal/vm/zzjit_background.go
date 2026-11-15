@@ -4,17 +4,11 @@ package vm
 
 import (
 	"runtime"
-	"slices"
 	"sync"
 	"sync/atomic"
-	"weak"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/jit"
-	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
-	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
-	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
 // Compiling in the background, as V8's concurrent recompilation does
@@ -65,13 +59,6 @@ func (r *Runtime) jitInBackground(fn *bytecode.Function) bool {
 		mir.Timing == nil && JITCompileRepeat == 0 && jitSSAOptimized == nil
 }
 
-// jitPending reports whether fn's entry is being compiled in the
-// background.
-func (s *jitState) jitPending(fn *bytecode.Function) bool {
-	e := s.entryFor(fn)
-	return e != nil && e.pending != nil
-}
-
 // jobsFull reports whether the runtime has as many compiles in the
 // background as it may.
 func (s *jitState) jobsFull() bool {
@@ -106,66 +93,6 @@ func (s *jitState) inFlight() bool {
 // has left behind (jitFrameLeft): the wait would be the loop's, in the
 // existing tiers, for a call it does not make.
 const jitHoldRounds = 3
-
-// jitAwaits has e's compile, held if any call has it wait (jitHold), wait for
-// cl's function's, if that is what the decision of fn's call at pc hangs on,
-// and reports whether it does: a callee being compiled, or to be, short
-// enough to be inlined once it is, which does not wait for e's function in
-// turn.
-func (r *Runtime) jitAwaits(e *jitEntry, fn *bytecode.Function, pc int, cl *closure) bool {
-	if !e.holds || len(cl.fn.Code) > ssa.MaxInline || r.jitFrameLeft(fn, pc) || !r.jitCalleeAwaited(cl) || r.jit.jitCompileWaits(cl.fn, fn) {
-		return false
-	}
-	if !slices.Contains(e.awaited, cl.fn) {
-		e.awaited = append(e.awaited, cl.fn)
-	}
-	return true
-}
-
-// jitFrameLeft reports whether fn's compile is asked for by a frame waiting
-// at one of its loops, and the call at pc is behind that frame for good:
-// before the loop, in no loop around both. A function run once for its loop,
-// as each of microbench's is, had that loop wait in the existing tiers for
-// the compile of what set it up.
-func (r *Runtime) jitFrameLeft(fn *bytecode.Function, pc int) bool {
-	return r.jitFrameFn == fn && pc < r.jitFramePC && jitLoopAround(fn, pc) == 0
-}
-
-// jitLoopAround is the header of the innermost of fn's loops pc is in: where
-// the first backward jump from pc on to pc or before it goes. 0 if there is
-// none, which no compile takes for a header.
-func jitLoopAround(fn *bytecode.Function, pc int) int {
-	for q := pc; q < len(fn.Code); q++ {
-		switch in := fn.Code[q]; in.Op {
-		case bytecode.OpJump, bytecode.OpJumpIfFalse, bytecode.OpJumpIfTrue, bytecode.OpJumpIfCmpFalse:
-			if int(in.A) <= pc {
-				return int(in.A)
-			}
-		}
-	}
-	return 0
-}
-
-// jitCompileWaits reports whether fn is target, or fn's compile is held for
-// target's, through those it waits for, whatever the number between them:
-// left out, those past it would wait in a cycle for good, their functions
-// compiled never.
-func (s *jitState) jitCompileWaits(fn, target *bytecode.Function) bool {
-	seen := []*bytecode.Function{fn}
-	for i := 0; i < len(seen); i++ {
-		if seen[i] == target {
-			return true
-		}
-		if e := s.entryFor(seen[i]); e != nil && e.pending != nil && e.pending.held {
-			for _, a := range e.awaited {
-				if !slices.Contains(seen, a) {
-					seen = append(seen, a)
-				}
-			}
-		}
-	}
-	return false
-}
 
 
 

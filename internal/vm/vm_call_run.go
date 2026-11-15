@@ -19,23 +19,6 @@ func (r *Runtime) runFD(cl *closure, this Value, args []Value, newTarget Value, 
 	return v, err
 }
 
-// takeTailCall resolves the call a frame ended in. It reports true with the
-// frame to make in its place, or false with the call's result, having made it
-// the ordinary way -- which a callee that is not a compiled function needs.
-func (r *Runtime) takeTailCall() (*closure, Value, []Value, *Object, bool, error) {
-	tc := r.pendingTail
-	r.pendingTail = tailCall{}
-	cl, this, args, callee, ok, err := r.tailTarget(tc)
-	if err != nil {
-		return nil, Undefined, nil, nil, false, err
-	}
-	if !ok {
-		v, err := r.callObject(tc.callee.Object(), tc.this, tc.args, Undefined)
-		return nil, v, nil, nil, false, err
-	}
-	return cl, this, args, callee, true, nil
-}
-
 // tailCall is a call a frame ended in, waiting for run to make it.
 type tailCall struct {
 	callee Value
@@ -192,12 +175,4 @@ func (r *Runtime) popFrameOf(f *frame, base int) {
 	}
 	r.stackTop = base
 	r.frameDepth--
-}
-
-// pushAt stores v at sp and returns the next free slot. It takes and returns
-// sp rather than holding it, so that the interpreter's sp stays a variable the
-// compiler can keep in a register.
-func pushAt(stack []Value, sp int, v Value) int {
-	stack[sp] = v
-	return sp + 1
 }

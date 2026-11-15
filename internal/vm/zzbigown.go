@@ -2,8 +2,6 @@ package vm
 
 import (
 	"math/bits"
-
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
 // A BigInt a local holds alone, given back when the local is assigned the
@@ -31,13 +29,3 @@ import (
 // local holds and nothing else has seen: one of soleLocals', stored there
 // as an operator's result.
 const bigSoleBit = uint(1) << (bits.UintSize - 2)
-
-// soleLocals is the locals of fn, of the first 64, that hold their values
-// alone (bytecode.SoleLocals), on a 64-bit machine, whose BigInts have
-// room in their headers for the mark.
-func soleLocals(fn *bytecode.Function) uint64 {
-	if bits.UintSize != 64 {
-		return 0
-	}
-	return bytecode.SoleLocals(fn)
-}

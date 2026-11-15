@@ -590,24 +590,6 @@ func shortOfTwos(h, l uint64) Value {
 	}
 }
 
-// shortOpOf is shortOp where a machine has it, a 64-bit one's: on another
-// it reports false, for bigOp.
-func shortOpOf(op bytecode.Op, a, b Value) (Value, bool) {
-	if bits.UintSize != 64 {
-		return Undefined, false
-	}
-	return shortOp(op, a, b)
-}
-
-// shortBitsOf is shortBits where a machine has it, a 64-bit one's, and
-// shortBitwise's int64s on another.
-func shortBitsOf(op bytecode.Op, a, b Value) (Value, bool) {
-	if bits.UintSize != 64 {
-		return shortBitwise(op, a, b)
-	}
-	return shortBits(op, a, b)
-}
-
 // bigTwoWords is the BigInt of sign neg and magnitude hi*2^64+lo, hi not
 // zero, on a 64-bit machine: two words on the heap.
 func bigTwoWords(neg bool, lo, hi uint64) Value {

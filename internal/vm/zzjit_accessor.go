@@ -216,26 +216,6 @@ func (fb *jitFeedback) accessorOf(pc int, c *propCache, key Atom, write bool) (s
 	return a, callee, cl, true
 }
 
-// megamorphic reports whether the property site at pc, compiled for site,
-// is megamorphic: it has met more than its cases hold -- as many shapes as
-// they hold, read or written, or so many its cache gave up (maxCacheFills,
-// after which the VM reads and writes through the realm's shared caches)
-// -- or what no case can hold (jitPolySite's mega), which the code's
-// deoptimizations there found (jitPropertyDeopt). Native code then looks
-// in the receiver's own table and the megamorphic cache for any other
-// receiver, and leaves for Go only what neither has (ssa.PropertySite's
-// Megamorphic); anywhere else such a receiver deoptimizes, as V8's map
-// checks do, and the code is compiled again for what the cache learned. An
-// inlined callee's site is as the callee's own code has found it.
-func (fb *jitFeedback) megamorphic(pc int, site ssa.PropertySite) bool {
-	var c *propCache
-	in := fb.fn.Code[pc]
-	if int(in.B) < len(fb.cl.ic) {
-		c = &fb.cl.ic[in.B]
-	}
-	return fb.megamorphicOf(pc, c, in.Op == bytecode.OpSetProp, site)
-}
-
 // megamorphicOf is megamorphic's, of either form's code: the site at pc,
 // its cache c (nil for none), a write's or a read's.
 func (fb *jitFeedback) megamorphicOf(pc int, c *propCache, write bool, site ssa.PropertySite) bool {
@@ -350,54 +330,6 @@ func (r *Runtime) jitLevelCallee(caller *bytecode.Function, pc int, this Value) 
 		return pair.getter
 	}
 	return nil
-}
-
-// jitPropertyMade makes, for native code, the property read or write of
-// the instruction at pc of cl's code, its operands on the VM's stack up to
-// sp (abi.GoCallGet, GoCallSet), as the interpreter makes it, through the
-// site's cache: a getter or a setter is called, with the receiver as its
-// this. A write's result is undefined.
-func (r *Runtime) jitPropertyMade(cl *closure, pc, sp int) (Value, error) {
-	in := cl.fn.Code[pc]
-	key := cl.names[in.A]
-	if in.Op == bytecode.OpSetProp {
-		obj, val := r.stack[sp-2], r.stack[sp-1]
-		if obj.IsObject() && int(in.B) < len(cl.ic) {
-			return Undefined, r.setPropCached(&cl.ic[in.B], obj.Object(), key, val, cl.fn.Strict)
-		}
-		return Undefined, r.setValueProp(obj, key, val, cl.fn.Strict)
-	}
-	obj := r.stack[sp-1]
-	if in.Op == bytecode.OpGetPropUnder {
-		// An object pattern's, whose B is no cache: its source's own
-		// table, or the read.
-		if obj.IsObject() {
-			if v, ok := plainOwn(obj.Object(), key); ok {
-				return v, nil
-			}
-		}
-		return r.getValueProp(obj, key)
-	}
-	if obj.IsObject() && int(in.B) < len(cl.ic) {
-		o := obj.Object()
-		if in.Op == bytecode.OpGetPropThis {
-			// As the interpreter reads a method: through its cache, which
-			// holds no getter (cachedProp), where cachedGet's entry for one
-			// had been taken by the interpreter for the getter's pair as the
-			// property's value, the method an object no call could make.
-			if v, ok := r.cachedProp(&cl.ic[in.B], o, key); ok {
-				return v, nil
-			}
-			return r.getValueProp(obj, key)
-		}
-		if v, ok := plainOwn(o, key); ok {
-			return v, nil
-		}
-		if v, ok, err := r.cachedGet(&cl.ic[in.B], o, key); ok {
-			return v, err
-		}
-	}
-	return r.getValueProp(obj, key)
 }
 
 // jitB2i is 1 for true, 0 for false.

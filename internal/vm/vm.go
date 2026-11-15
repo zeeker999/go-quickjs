@@ -50,41 +50,6 @@ const maxGoRecursion = 12500 << (unsafe.Sizeof(uintptr(0)) / 4)
 // allocation is rare.
 const frameBlockSize = 64
 
-// unwindToHandler transfers control to the innermost catch handler of a frame,
-// reporting false when the frame has none and the exception must propagate.
-//
-// Only a JavaScript exception is catchable. A host interruption -- a cancelled
-// context, or the stack limit being reached -- deliberately is not, so that a
-// script cannot defeat its own sandbox with try/catch.
-func (r *Runtime) unwindToHandler(f *frame, sp int, err error) (int, bool) {
-	if r.debug != nil {
-		r.debugThrow(err)
-	}
-	thrown, ok := err.(*Thrown)
-	if !ok || len(f.handlers) == 0 {
-		return sp, false
-	}
-	h := f.handlers[len(f.handlers)-1]
-	f.handlers = f.handlers[:len(f.handlers)-1]
-
-	// The stack may hold a partly-built expression from the point of the
-	// throw, so it is cut back to the depth the handler was registered at
-	// before the thrown value is pushed for the catch clause to bind.
-	depth := f.base + h.stackDepth
-	r.closeIteratorsIn(depth, sp)
-	sp = depth
-	r.stack[sp] = thrown.Value
-	sp++
-	if h.isFinally {
-		// A finally clause reproduces the original completion after it runs,
-		// so it receives a record rather than a bare value.
-		r.stack[sp] = Float(float64(completionThrow))
-		sp++
-	}
-	f.pc = h.pc
-	return sp, true
-}
-
 // functionNameFromKey derives a method's name from its property key.
 //
 // A symbol-keyed method is named after the symbol's description in brackets,
@@ -264,37 +229,6 @@ func (r *Runtime) tick() error {
 		return r.checkInterruptNow()
 	}
 	return nil
-}
-
-// unwindToFinally transfers control to the innermost finally handler, carrying
-// a return completion.
-//
-// Catch handlers are discarded on the way rather than entered: a return is not
-// an exception, and `try { return } catch {}` does not run its catch.
-func (r *Runtime) unwindToFinally(f *frame, sp int, value Value) (int, bool) {
-	for len(f.handlers) > 0 {
-		h := f.handlers[len(f.handlers)-1]
-		f.handlers = f.handlers[:len(f.handlers)-1]
-		if !h.isFinally {
-			continue
-		}
-		// A for-of the return is leaving is told so, and a failure in its own
-		// return method replaces the return the unwind was carrying: the
-		// finally still runs, but on a throw.
-		kind := completionReturn
-		depth := f.base + h.stackDepth
-		if err := r.closeIteratorsReturning(depth, sp); err != nil {
-			value, kind = thrownValue(err), completionThrow
-		}
-		sp = depth
-		r.stack[sp] = value
-		sp++
-		r.stack[sp] = Float(float64(kind))
-		sp++
-		f.pc = h.pc
-		return sp, true
-	}
-	return sp, false
 }
 
 // closeUpvaluesFrom closes every upvalue pointing at or above a local slot,
@@ -747,36 +681,6 @@ func (r *Runtime) setIndexed(obj, key, val Value, strict bool) error {
 		return err
 	}
 	return r.setValueProp(obj, k, val, strict)
-}
-
-// argumentsIndex is arguments[key] in a function whose arguments object is
-// made only on demand, in local slot. Until it is made, the object would hold
-// the arguments as they were passed, so an index of them is read from them --
-// unless the object would be mapped and the index name a parameter, whose
-// value the object would give. Anything else makes the object and reads it.
-// A slot of bytecode.StrFreezeA is str_freeze: key is what was read.
-func (r *Runtime) argumentsIndex(f *frame, slot uint32, key Value) (Value, error) {
-	if slot == bytecode.StrFreezeA {
-		strFreeze[struct{}](key)
-		return key, nil
-	}
-	if !f.locals[slot].IsObject() {
-		if i := uint32(key.num); key.IsNumber() && float64(i) == key.num && uint(i) < uint(len(f.args)) &&
-			!(f.cl.fn.MappedArguments && uint(i) < uint(f.cl.fn.ParamCount)) {
-			return f.args[i], nil
-		}
-		f.locals[slot] = Obj(r.newArgumentsObject(f))
-	}
-	return r.getIndexed(f.locals[slot], key)
-}
-
-// argumentsLength is arguments.length in such a function: how many arguments
-// were passed, until the object is made and may have been given another.
-func (r *Runtime) argumentsLength(f *frame, slot uint32) (Value, error) {
-	if !f.locals[slot].IsObject() {
-		return Int(len(f.args)), nil
-	}
-	return r.getValueProp(f.locals[slot], atomLength)
 }
 
 // appendElem stores v at index n of an array whose length is n, as an
@@ -1414,33 +1318,6 @@ func (r *Runtime) bitwise(op bytecode.Op, a, b Value) (Value, error) {
 		return v, err
 	}
 	return int32Op(op, na.Number(), nb.Number()), nil
-}
-
-// updateLocal is ++ or -- on a local that does not hold a number, with
-// OpUpdateLocal's flags: it coerces, steps, stores, and returns the old value,
-// coerced, or the new.
-func (r *Runtime) updateLocal(slot *Value, flags uint32) (Value, error) {
-	n, err := r.toNumeric(*slot)
-	if err != nil {
-		return Undefined, err
-	}
-	delta := 1.0
-	if flags&bytecode.UpdateDec != 0 {
-		delta = -1
-	}
-	var next Value
-	if n.IsBigInt() {
-		if next, err = r.arith(bytecode.OpAdd, n, shortBig(int64(delta))); err != nil {
-			return Undefined, err
-		}
-	} else {
-		next = Float(n.Number() + delta)
-	}
-	*slot = next
-	if flags&bytecode.UpdatePostfix != 0 {
-		return n, nil
-	}
-	return next, nil
 }
 
 // binImm is OpBinImm for a left operand that is not a number: what the

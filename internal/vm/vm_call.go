@@ -291,37 +291,6 @@ func (r *Runtime) callThrough(call *Object, f Value, args []Value) (Value, error
 	return v, err
 }
 
-// applyArguments is f.apply(x, arguments) in a function that makes its
-// arguments object only when it has to. The built-in apply given the object
-// would call f with what the object holds -- the arguments as passed, or as
-// the parameters now are for an object that maps them -- so it is given them
-// directly, in apply's frame as ever. Any other apply gets the object, made
-// now and kept in its slot, so that every call is given the same one.
-func (r *Runtime) applyArguments(f *frame, slot uint32, target, apply, this Value) (Value, error) {
-	if !apply.IsObject() || apply.Object() != r.applyFn {
-		o := f.locals[slot]
-		if !o.IsObject() {
-			o = Obj(r.newArgumentsObject(f))
-			f.locals[slot] = o
-		}
-		return r.call(apply, target, []Value{this, o})
-	}
-	args := f.args
-	if f.cl.fn.MappedArguments {
-		n := min(f.cl.fn.ParamCount, len(args), len(f.locals))
-		for i := 0; i < n; i++ {
-			if !f.locals[i].sameBits(args[i]) {
-				// A parameter has been assigned, which a mapped object
-				// would show.
-				args = append([]Value(nil), args...)
-				copy(args, f.locals[:n])
-				break
-			}
-		}
-	}
-	return r.applyCall(target, this, args)
-}
-
 // applyCall is target.apply(this, arguments) by the built-in apply, given
 // the arguments themselves: apply's frame is pushed, as the built-in would
 // have it, and target called with them -- as a call from the interpreter's
