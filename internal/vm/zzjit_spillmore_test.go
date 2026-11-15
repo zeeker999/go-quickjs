@@ -182,3 +182,48 @@ func TestJITSpillMoreCompiles(t *testing.T) {
 		t.Logf("%s: %d spill slots, %d bytes", arch, mc.Spills, len(mc.Bytes))
 	}
 }
+
+// A function's compile takes memory linear in its size, however many
+// values its states name: the states of a function of n values live at
+// once and an exit at each of its instructions share their slots
+// (internal/jit/ssa's slots.go) rather than each name all n, which had
+// made a compile of 13,000 slots take some seven gigabytes. Eight times
+// the values take some eight times the memory, not sixty-four.
+func TestJITSpillStatesLinear(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	alloc := func(n int) uint64 {
+		name := fmt.Sprintf("spill%d", n)
+		rts := regNativeRuntimes(t, spillMoreHelpers+spillMoreSource(name, n, 150))
+		r := rts[0]
+		spillMoreCollect(r)
+		r.jitMemoryLimit = 1 << 36
+		fn, _ := r.GetProp(Obj(r.Global()), r.Intern(name))
+		r.RegNativeCall(fn, []Value{Float(1.25), Float(0.5), Float(7), spillMoreObject(r, 0), Str(NewString("pp")), Float(2)}, false)
+		cl := fn.Object().fn().closure
+		e := r.jit.regCache[r.jitRegKeyOf(cl)]
+		if e == nil || e.p == nil {
+			t.Fatalf("%s: not lowered", name)
+		}
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		before := ms.TotalAlloc
+		f, err := ssa.BuildWith(e.p, r.jitRegFeedbackFor(cl, e.p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		jitRegShape(f, e.p, cl, cl.reg)
+		ssa.Optimize(f)
+		if _, err := mir.CompileAMD64(f, jitEncoding); err != nil {
+			t.Fatal(err)
+		}
+		runtime.ReadMemStats(&ms)
+		return ms.TotalAlloc - before
+	}
+	small, big := alloc(500), alloc(4000)
+	t.Logf("500 values: %.1f MB, 4,000: %.1f MB", float64(small)/(1<<20), float64(big)/(1<<20))
+	if big > 12*small {
+		t.Errorf("eight times the values took %.1f times the memory", float64(big)/float64(small))
+	}
+}

@@ -144,13 +144,13 @@ func (b *builder) calledClosures() (map[int]int, map[string]int) {
 			if in.Left.Slot >= st.Own() {
 				return nil, false
 			}
-			return st.Slots[in.Left.Slot], true
+			return st.Slot(in.Left.Slot), true
 		}
 		at := p.Locals + st.Depth - argc - 1
 		if at < p.Locals || at >= st.Own() {
 			return nil, false
 		}
-		return st.Slots[at], true
+		return st.Slot(at), true
 	}
 	// inLoop reports whether a backward branch's loop holds pc.
 	inLoop := func(pc int) bool {
@@ -181,7 +181,7 @@ func (b *builder) calledClosures() (map[int]int, map[string]int) {
 			// A register callee's: its window's register 0.
 			slot = gs.fr.base + in.Left.Slot
 		}
-		if !ok || method || slot < gs.fr.base || slot >= len(gs.state.Slots) || gs.state.Slots[slot] == nil {
+		if !ok || method || slot < gs.fr.base || gs.state.Slot(slot) == nil {
 			continue
 		}
 		top := gs.fr
@@ -193,7 +193,7 @@ func (b *builder) calledClosures() (map[int]int, map[string]int) {
 			// planned after the closures are (unmakeCalled).
 			continue
 		}
-		givens = append(givens, givenCall{path: givenPath(gs.fr.path, gs.pc), callee: gs.state.Slots[slot], root: top.at})
+		givens = append(givens, givenCall{path: givenPath(gs.fr.path, gs.pc), callee: gs.state.Slot(slot), root: top.at})
 	}
 	called := map[int]int{}
 	var given map[string]int

@@ -2195,7 +2195,7 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 			argc--
 		}
 		for i := 0; i < site.Params && i < site.LocalCount; i++ {
-			if i >= argc || !c.scalar(s.Slots[args+i]) {
+			if i >= argc || !c.scalar(s.Slot(args+i)) {
 				framed = true
 			}
 		}
@@ -2214,10 +2214,10 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 		// From the call's state, as its records are (exitView).
 		back := c.viewExits()
 		for i := 0; i < site.Params && args+i < sp && i < site.LocalCount; i++ {
-			c.directOperand(v, s.Slots[args+i], true, int32(i)*vs, &inC)
+			c.directOperand(v, s.Slot(args+i), true, int32(i)*vs, &inC)
 		}
 		if receiver {
-			c.directOperand(v, s.Slots[this], false, abi.OffThis, &inC)
+			c.directOperand(v, s.Slot(this), false, abi.OffThis, &inC)
 		}
 		back()
 	}
@@ -6709,8 +6709,7 @@ func (c *compiler) exitThen(s *ssa.FrameState, kind uint64, then *amd64.Label) {
 	c.recorded = false
 	c.movImm(scratchC, 0)
 	c.a.Store(regCtx, abi.OffRecords, scratchC)
-	for _, ix := range c.f.Present(s) {
-		i, v := int(ix), s.Slots[ix]
+	for i, v := range s.All() {
 		if v.Op == ssa.OpLoadSlot && v.Aux == i || c.captured(i) {
 			// Unchanged: a captured binding's own value (capturedUnchanged);
 			// or between a caller's slots and an inlined callee's.
