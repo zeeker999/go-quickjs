@@ -6945,7 +6945,7 @@ func (sf *stateFrame) liveEnd(n int) int {
 	if sf.p.Live == nil {
 		return 0
 	}
-	return min(n, sf.p.LiveLocals)
+	return min(n, sf.p.Live.N)
 }
 
 // names reports whether a state at pc, of n slots past the base, names
@@ -6957,30 +6957,25 @@ func (sf *stateFrame) names(pc, n, i int) bool {
 	if i >= n || sf.excluded(i) {
 		return false
 	}
-	p := sf.p
 	if i < sf.liveEnd(n) {
-		return p.Live[pc*p.LiveWords+i/64]&(1<<(i%64)) != 0
+		return sf.p.Live.Has(pc, i)
 	}
 	return true
 }
 
 // slotsAt lists in l, in order, the slots past sf's base that a state at
-// pc, of n slots past it, names. Found from the liveness's words, bit by
-// bit: a state's slots are some three times as many as it names.
+// pc, of n slots past it, names. Found from the liveness's set there,
+// slot by slot: a state's slots are some three times as many as it
+// names.
 func (sf *stateFrame) slotsAt(l []int32, pc, n int) []int32 {
-	p := sf.p
 	liveEnd := sf.liveEnd(n)
 	if liveEnd > 0 {
-		row := p.Live[pc*p.LiveWords:]
-		for w := 0; w*64 < liveEnd; w++ {
-			word := row[w]
-			if left := liveEnd - w*64; left < 64 {
-				word &= 1<<left - 1
+		for i := range sf.p.Live.Slots(pc) {
+			if i >= liveEnd {
+				break
 			}
-			for ; word != 0; word &= word - 1 {
-				if i := w*64 + bits.TrailingZeros64(word); !sf.excluded(i) {
-					l = append(l, int32(i))
-				}
+			if !sf.excluded(i) {
+				l = append(l, int32(i))
 			}
 		}
 	}
@@ -7000,8 +6995,8 @@ func (sf *stateFrame) slotsAt(l []int32, pc, n int) []int32 {
 // slotsChanged lists in l, in order, the slots past sf's base whose
 // value in a state at pc1, of n1 slots past it, may not be what one at
 // pc0, of n0, has: those written since (dirty, by the builder's slot),
-// and those one names and the other may not -- the liveness's words told
-// apart, and the slots between the two's ends.
+// and those one names and the other may not -- the liveness's sets told
+// apart, where their trees differ, and the slots between the two's ends.
 func (sf *stateFrame) slotsChanged(l []int32, pc0, n0, pc1, n1 int, dirty ...[]int32) []int32 {
 	top := max(n0, n1)
 	for _, d := range dirty {
@@ -7011,18 +7006,13 @@ func (sf *stateFrame) slotsChanged(l []int32, pc0, n0, pc1, n1 int, dirty ...[]i
 			}
 		}
 	}
-	p := sf.p
 	le0, le1 := sf.liveEnd(n0), sf.liveEnd(n1)
 	if lo := min(le0, le1); lo > 0 {
-		r0, r1 := p.Live[pc0*p.LiveWords:], p.Live[pc1*p.LiveWords:]
-		for w := 0; w*64 < lo; w++ {
-			word := r0[w] ^ r1[w]
-			if left := lo - w*64; left < 64 {
-				word &= 1<<left - 1
+		for i := range sf.p.Live.Changed(pc0, pc1) {
+			if i >= lo {
+				break
 			}
-			for ; word != 0; word &= word - 1 {
-				l = append(l, int32(w*64+bits.TrailingZeros64(word)))
-			}
+			l = append(l, int32(i))
 		}
 	}
 	for i := min(le0, le1); i < max(le0, le1); i++ {
