@@ -473,7 +473,15 @@ type jitCodeFields struct {
 	// jitReg is its code, nil until compiled (zzjit_zregtier.go).
 	jitRegHot, jitRegDeopts uint8
 	jitRegRefused           bool
-	jitReg                  *jitRegEntry
+	// jitRegHostOnly says the cache held the function's code refused for
+	// host operations alone at the last resumption Go made of it, and
+	// jitRegColdWork is the work its resumptions have done since, which
+	// asks again at jitHotWork (jitRegResumed), as the stack form's entry
+	// counts its coldWork, found by the closure's hint (jitResume,
+	// jitHotEntry): no lookup of the cache at each resumption.
+	jitRegHostOnly bool
+	jitRegColdWork uint16
+	jitReg         *jitRegEntry
 	// jitRegKey is the template's function's key in the realm its closures
 	// run in (jitRegKeyOf), made at its first use.
 	jitRegKey jitKey

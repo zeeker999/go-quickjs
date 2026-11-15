@@ -146,7 +146,6 @@ var jitEncoding = abi.Encoding{
 	ClassGenerator:     uint8(ClassGenerator),
 	GenClosure:         int32(unsafe.Offsetof(generator{}.cl)),
 	GenThis:            int32(unsafe.Offsetof(generator{}.this)),
-	GenCallee:          int32(unsafe.Offsetof(generator{}.callee)),
 	GenVals:            int32(unsafe.Offsetof(generator{}.vals)),
 	GenArgs:            int32(unsafe.Offsetof(generator{}.nargs)),
 	GenPC:              int32(unsafe.Offsetof(generator{}.pc)),
