@@ -174,8 +174,6 @@ func boolsMatch(t *testing.T, fn *bytecode.Function, p *ir.Program) bool {
 // markBools, which goes forward over each block, marks what walking back
 // from each operand did, in both lowerings.
 func TestLiveRegsMatchesDense(t *testing.T) {
-	compiler.SetRegisterForm(true)
-	defer compiler.SetRegisterForm(bytecode.RegDefault())
 	sources := []string{
 		`function f(n){let a=n*2;let s=0;for(let i=0;i<n;i++){s=(s+i)|0;if(i===7)s=(s+a)|0}let b=s+1;return b}`,
 		`function g(o, k){var r=[]; for (var x in o) { try { r.push(o[x] + k) } catch (e) { r.push(e) } finally { k++ } } return r}`,

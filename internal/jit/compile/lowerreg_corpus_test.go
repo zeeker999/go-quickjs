@@ -158,8 +158,6 @@ func TestLowerRegCorpusRefusals(t *testing.T) {
 	if len(dirs) == 0 {
 		t.Skip("QUICKJS_JIT_REG_REFUSALS names no directories of JavaScript files")
 	}
-	compiler.SetRegisterForm(true)
-	defer compiler.SetRegisterForm(bytecode.RegDefault())
 	for _, dir := range dirs {
 		stack, regs := map[string]int{}, map[string]int{}
 		// What the SSA builder makes, without feedback, of the programs

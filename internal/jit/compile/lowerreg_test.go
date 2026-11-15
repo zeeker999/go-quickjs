@@ -16,8 +16,6 @@ import (
 // its functions, each with its register code, by name.
 func regCompiled(t *testing.T, source string) map[string]*bytecode.Function {
 	t.Helper()
-	compiler.SetRegisterForm(true)
-	defer compiler.SetRegisterForm(bytecode.RegDefault())
 	prog, err := parser.Parse(source, parser.Options{})
 	if err != nil {
 		t.Fatal(err)
