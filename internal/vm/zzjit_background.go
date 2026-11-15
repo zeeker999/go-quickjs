@@ -3,7 +3,6 @@
 package vm
 
 import (
-	"fmt"
 	"runtime"
 	"slices"
 	"sync"
@@ -83,22 +82,6 @@ func (s *jitState) jobsFull() bool {
 // background, which a check installs (jitDrain).
 func (s *jitState) inFlight() bool {
 	return len(s.jobs) != 0 || len(s.lowerings) != 0 || len(s.heldJobs) != 0 || len(s.regJobs) != 0
-}
-
-// jitSubmit hands j, e's compile prepared, to the process's workers. e is
-// busy until j is installed or thrown away, so that the cache does not drop
-// it meanwhile, and pending, so that it is not compiled again meanwhile.
-func (r *Runtime) jitSubmit(e *jitEntry, j *jitJob) {
-	s := r.jit
-	e.pending = j
-	e.busy++
-	j.done = make(chan struct{})
-	s.jobs = append(s.jobs, j)
-	s.bgSubmitted++
-	jitWorkers.submit(j)
-	if r.jitStress.background && r.jitStress.checks == 0 {
-		r.jitDrain()
-	}
 }
 
 // A compile on the spot finds its callees' code there, a callee's compile
@@ -218,7 +201,7 @@ func (r *Runtime) jitHeldReady(h *jitJob) bool {
 
 // jitDrain installs the compiles in the background that are done, in the
 // order they were handed over, at a check of the runtime's goroutine: a
-// function's entry (tryJITAt), a loop's back edge (tryJITLoop). An install
+// function's entry, a loop's back edge (jitRegDrainJobs). An install
 // may find it is to wait (a native call of the code it replaces, under
 // way), and is asked again at the next check. Under QJS_JIT_STRESS's
 // background=K, each compile is installed at the Kth check after it was
@@ -234,70 +217,7 @@ func (r *Runtime) jitDrain() {
 	s.draining = true
 	defer func() { s.draining = false }()
 	stress, k := r.jitStress.background, int(r.jitStress.checks)
-	for i := 0; i < len(s.lowerings); {
-		t := s.lowerings[i]
-		if stress {
-			if t.checks++; t.checks < k {
-				i++
-				continue
-			}
-			<-t.done
-		} else if t.state.Load() != jitJobDone {
-			i++
-			continue
-		}
-		s.lowerings = slices.Delete(s.lowerings, i, i+1)
-		r.jitLowered(t)
-	}
-	for i := 0; i < len(s.jobs); {
-		j := s.jobs[i]
-		if stress {
-			if j.checks++; j.checks < k {
-				i++
-				continue
-			}
-			<-j.done
-		} else if j.state.Load() != jitJobDone {
-			i++
-			continue
-		}
-		// A compile's install fills its pools and makes its entry's links
-		// for the realm it was compiled for, whichever is running now.
-		prev := r.Realm
-		r.Realm = j.realm
-		installed := j.install(r, j)
-		r.Realm = prev
-		if !installed {
-			i++
-			continue
-		}
-		if j.w != nil {
-			// Thrown away before its install placed it.
-			jit.PutWorkspace(j.w)
-			j.w = nil
-		}
-		j.e.pending = nil
-		j.e.busy--
-		x := slices.Index(s.jobs, j)
-		s.jobs = slices.Delete(s.jobs, x, x+1)
-	}
 	r.jitRegDrainJobs(stress, k)
-	// Those held for them, whose compiles begin here: one that had others
-	// wait for it, they wait for it as they would for any compile.
-	for i := 0; i < len(s.heldJobs); {
-		h := s.heldJobs[i]
-		// Of the realm it is for, whichever is running now: what it waits
-		// for, and its entry, are that realm's.
-		prev := r.Realm
-		r.Realm = h.realm
-		if r.jitHeldReady(h) {
-			s.heldJobs = slices.Delete(s.heldJobs, i, i+1)
-			r.jitReleaseHeld(h)
-		} else {
-			i++
-		}
-		r.Realm = prev
-	}
 }
 
 // abandonJobs lets the runtime's compiles in the background go, as it
@@ -383,38 +303,11 @@ func (p *jitWorkerPool) work() {
 	}
 }
 
-// run is j's work on a worker: the optimization and the backend, a panic
-// of either a refusal (panicked), which jitInstall counts as the
-// backend's -- on another goroutine, it would end the process. A compile
-// its runtime abandoned meanwhile has its workspace given back here.
-func (j *jitJob) run() {
-	defer close(j.done)
-	if !j.state.CompareAndSwap(jitJobQueued, jitJobWorking) {
-		jit.PutWorkspace(j.w)
-		return
-	}
-	j.workRecovering()
-	if !j.state.CompareAndSwap(jitJobWorking, jitJobDone) {
-		jit.PutWorkspace(j.w)
-	}
-}
 
 // jitWorkerPanics counts the panics the process's workers made refusals
 // of, whatever runtime's: one whose runtime never installs it is counted
 // too, which the tests look for (TestMain).
 var jitWorkerPanics atomic.Int64
-
-// workRecovering is work, a panic its refusal.
-func (j *jitJob) workRecovering() {
-	defer func() {
-		if v := recover(); v != nil {
-			j.mc, j.err, j.panicked = nil, fmt.Errorf("jit: the compiler panicked: %v", v), true
-			j.allocErr, _ = v.(*mir.AllocationError)
-			jitWorkerPanics.Add(1)
-		}
-	}()
-	j.work()
-}
 
 // jitLowerTask is a function's lowering in the background, for its first
 // compile there (jitLowerLater): the function's own program, of its

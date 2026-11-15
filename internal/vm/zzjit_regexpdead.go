@@ -2,8 +2,6 @@
 
 package vm
 
-import "github.com/go-quickjs/go-quickjs/internal/bytecode"
-
 // Native code's calls of exec, and of a string's replace, whose result
 // nothing reads but, at most, whether it is truthy (see
 // zzz_regexpdead.go) tell the function so, as the tree tier's do: a leaf's

@@ -3,7 +3,6 @@
 package vm
 
 import (
-	"slices"
 	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -21,7 +20,6 @@ import (
 // its call wrote them (jitFrameArgs); a frame Go enters the code with has
 // them in the VM's frame, which Go copies to the context at each entry
 // (jitForwardEntry).
-
 
 // slicesHasSite reports whether sites calls in's function object already,
 // or its function by its code.

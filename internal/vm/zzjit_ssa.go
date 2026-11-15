@@ -4340,7 +4340,7 @@ func (r *Runtime) jitInlineLeft(e *jitEntry, pc int) {
 				e.notInline = append(e.notInline, x.pc)
 				if e.callSites != nil {
 					e.callSites[pc] = jitCallDone
-					if r.jitNativeCallee(x.cl) != nil {
+					if x.cl.reg != nil {
 						// A construction's with its pool.
 						e.nativeCalls = append(e.nativeCalls, jitInline{pc: x.pc, cl: x.cl, obj: x.obj, pool: x.pool})
 						e.callSites[pc] = jitCallNative
@@ -5409,32 +5409,6 @@ func (r *Runtime) jitForEaches(sp int, in bytecode.Instr) (*Object, *closure, *O
 }
 
 
-// callbackInline is the InlineSite of x's callback, a loop's (ForEach),
-// for native code to inline in the loop, as V8 inlines a forEach's
-// callback, under the rules any callee's inlining follows (jitInlinable,
-// jitInlinesCalls): the closure the loop has always been given, checked,
-// its captured bindings in its cells -- or, one made anew at each call
-// (byCode), no object, for the builder to inline where the caller makes it
-// (madeCallback) -- called as a method of argc arguments. Not one whose
-// inlining has left native code too often (jitInlineLeft).
-func (fb *jitFeedback) callbackInline(x *jitInline, argc int) (ssa.InlineSite, bool) {
-	if x.cbLeft {
-		return ssa.InlineSite{}, false
-	}
-	site, ok := fb.closureInline(x.cb, argc, false)
-	if !ok {
-		return ssa.InlineSite{}, false
-	}
-	if !x.byCode && x.cbObj != nil {
-		// The one closure: its captured bindings in its cells, as an
-		// inlined call's (jitFeedback's Inline).
-		k := fb.keep()
-		site.Callee, site.Upvalues = uintptr(unsafe.Pointer(x.cbObj)), jitUpvalueCells(x.cb)
-		k.holders = append(k.holders, x.cbObj)
-		k.inlined = append(k.inlined, x.cb)
-	}
-	return site, true
-}
 
 // lexThisSlot is the slot of the frame of fb's function its receiver is
 // in, which an arrow it makes captures as its this (closureInline), or -1
@@ -7587,26 +7561,6 @@ func (fb *jitFeedback) deepCasesOf(pc int, c *propCache) []ssa.PropertyCase {
 	return cases
 }
 
-func (fb *jitFeedback) property(pc int) (ssa.PropertySite, bool) {
-	if fb.cl == nil || pc >= len(fb.fn.Code) {
-		return ssa.PropertySite{}, false
-	}
-	in := fb.fn.Code[pc]
-	if in.Op != bytecode.OpGetProp && in.Op != bytecode.OpGetPropThis && in.Op != bytecode.OpSetProp || int(in.A) >= len(fb.cl.names) {
-		return ssa.PropertySite{}, false
-	}
-	if fb.fwd != nil {
-		return fb.forwardProperty(pc)
-	}
-	if int(in.B) >= len(fb.cl.ic) {
-		return ssa.PropertySite{Key: uint32(fb.cl.names[in.A])}, true
-	}
-	site, ok := fb.siteFrom(in, &fb.cl.ic[in.B])
-	if c := &fb.cl.ic[in.B]; ok && (c.shape == nil || c.shape == noShape) && c.fills == 0 && in.Op != bytecode.OpSetProp {
-		site = fb.chainSite(pc, site)
-	}
-	return site, ok
-}
 
 
 // jitKnownReceiver is the object the property read at q of cl's code
@@ -8577,23 +8531,9 @@ func jitBindThis(f *frame, ctx *abi.Context) {
 }
 
 // jitSuperCall is superCall for a super() Go makes for native code
-// (abi.GoCallSuper): a parent whose code is invalid spends its budget, as
-// a call Go makes does (jitCallAt, jitInvokedFrameless) -- one the
-// existing tiers ran with no frame, a constructor storing its parameters
-// (leafCall), had counted nothing, its code never compiled again, native
-// super()s of it each Go's from then on.
+// (abi.GoCallSuper).
 func (r *Runtime) jitSuperCall(f *frame, args []Value) error {
-	var ce *jitEntry
-	var cl *closure
-	var spends uint32
-	if p := r.parentConstructorOf(f); p != nil {
-		if ce, cl = r.jitInvalidCallee(Obj(p)); ce != nil {
-			spends = ce.tierSpends
-		}
-	}
-	err := r.superCall(f, args)
-	r.jitInvokedFrameless(cl, ce, spends)
-	return err
+	return r.superCall(f, args)
 }
 
 

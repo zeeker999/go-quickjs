@@ -6,9 +6,7 @@ import (
 	"math"
 	"unsafe"
 
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
-	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
 // The element types of the typed arrays an element read or write of a
