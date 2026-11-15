@@ -20,7 +20,7 @@ the source until the last of their users move over (see
 - [Why a register machine](#why-a-register-machine)
 - [Instructions](#instructions)
 - [The compiler](#the-compiler)
-- [The Go handler table](#the-go-handler-table)
+- [The loop](#the-loop)
 - [Native handlers](#native-handlers)
 - [Frames and calls](#frames-and-calls)
 - [Exceptions](#exceptions)
@@ -484,7 +484,7 @@ instruction after it; and every operation an instruction holds has a
 handler. Code that fails is a compiler bug: it is refused
 (`regcomp.Refuse`), never run.
 
-## The Go handler table
+## The loop
 
 The interpreter's portable form is a small fixed loop, `runReg`
 (`zzreg_run.go`), over a table of handlers, a Go function an operation
