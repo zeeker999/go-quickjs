@@ -172,6 +172,9 @@ type regLowering struct {
 	// ins counts, by register pc, the jumps and handlers that reach it,
 	// not the instruction before falling to it (regJumpIns).
 	ins []int
+	// past is the register pc after the loads of the boolean boolBranch
+	// lowered last: those before it are Nops.
+	past int
 }
 
 // regScratch is what a lowering grows its program's instructions in
@@ -319,8 +322,16 @@ func regJumpIns(rc *bytecode.RegCode, reach []bool) []int {
 // as the stack form's lt or strict_eq makes it, it is the comparison,
 // which a branch on it takes as its condition. An exit at the comparison
 // runs the compare-and-branch again, which the interpreter goes on from
-// to the loads. Where the branch's lowering is not a Branch to pc+3 of
-// an operator a Binary has, nothing is lowered and it reports false.
+// to the loads. The loads and the jump are Nops (past), which native code
+// falls through to pc+4, so that the comparison, the register's copies
+// and what reads it are one block, as the stack form's are: an operator
+// of the boolean takes its number natively (ir.Instruction's Bools,
+// markBools), where a jump to pc+4 had begun a block there and the
+// operator, not knowing it a boolean, deoptimized at it -- Emscripten's
+// code ORs and ANDs comparisons, and Octane's zlib's largest function
+// deoptimized at one after another, each compile of it a second's.
+// Where the branch's lowering is not a Branch to pc+3 of an operator a
+// Binary has, nothing is lowered and it reports false.
 func (l *regLowering) boolBranch(pc int, reach []bool) bool {
 	rc := l.rc
 	if pc+4 >= len(rc.Code) {
@@ -369,7 +380,7 @@ func (l *regLowering) boolBranch(pc int, reach []bool) bool {
 			l.code[last] = ir.Instruction{Op: ir.Binary, Operator: in.Operator, Left: in.Left, Right: in.Right, Dest: r, Strict: in.Strict}
 			l.patch[last] = false
 		}
-		l.emit(ir.Instruction{Op: ir.Jump, Target: pc + 4}, true)
+		l.past = pc + 4
 		return true
 	}
 	l.code, l.origin, l.patch, l.lits = l.code[:mark], l.origin[:mark], l.patch[:mark], l.lits[:lits]
@@ -649,7 +660,7 @@ func lowerRegLits(rc *bytecode.RegCode, fn *bytecode.Function, m lowering, litHo
 	for pc := range n {
 		start[pc] = len(l.code)
 		l.pc, l.used = pc, 0
-		if !reach[pc] {
+		if !reach[pc] || pc < l.past {
 			l.emit(ir.Instruction{Op: ir.Nop}, false)
 			continue
 		}
