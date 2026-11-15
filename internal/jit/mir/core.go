@@ -88,10 +88,17 @@ type core struct {
 	exitInlineLast int
 	exitHead       []int32
 	exitNext       []int32
-	// exitLastV and exitLastK are, by slot, the value the last exit to
-	// write it found there and 1 plus its entry's index.
-	exitLastV []*ssa.Value
-	exitLastK []int32
+	// exitNodes are what exitNode found of each node of the states'
+	// slots, by its ID; exitKids its list of a node's entries as it makes
+	// them, and exitCross the slots the leaves' entries name as their
+	// references' sources (exitNodeInfo's).
+	exitNodes []exitNodeInfo
+	exitKids  []uint32
+	exitCross []int32
+	// walk walks the states' slots' nodes (findLazy, allocate): the
+	// workspace's, kept from compile to compile, or the core's own.
+	walk      *ssa.SlotWalk
+	ownWalk   ssa.SlotWalk
 	exitWords map[uint64]int32
 	exitDescs []abi.ExitDescriptor
 	// calls are the descriptions of the native calls' states (callState),
@@ -823,15 +830,35 @@ func (c *core) findLazy() error {
 		ref(b.State)
 		ref(b.Header)
 	}
+	// Each node of the states' slots once, its weight the references of
+	// the states and the nodes that have it, summed from the roots down
+	// (ssa's SlotWalk): read state by state, a function of n values live
+	// at once and an exit at each of its instructions had been read n²
+	// times.
+	weight := c.int32s(f.NumSlotNodes())
 	for _, s := range states {
-		k := refs[s.ID()]
-		for i, v := range s.All() {
+		if root, _ := s.Tree(); root != nil {
+			weight[root.ID()] += refs[s.ID()]
+		}
+	}
+	c.slotWalker().Walk(f, states, func(nd *ssa.SlotNode, h, base int) {
+		k := weight[nd.ID()]
+		if h > 0 {
+			for _, kid := range nd.Kids() {
+				weight[kid.ID()] += k
+			}
+			return
+		}
+		m := nd.Mask()
+		for _, v := range nd.Vals() {
+			i := base + bits.TrailingZeros64(m)
+			m &= m - 1
 			uses[v.ID] += k
-			if !(v.Op == ssa.OpLoadSlot && v.Aux == int(i)) {
+			if !(v.Op == ssa.OpLoadSlot && v.Aux == i) {
 				elsewhere[v.ID] = true
 			}
 		}
-	}
+	})
 	c.keepStates(states)
 	c.lazy = c.bools(n)
 	// An int32's conversion only lazy boxes use is made by none (i32Boxed):
@@ -1214,6 +1241,119 @@ func (c *core) allocate() error {
 		}
 		inState = false
 	}
+	// laterState is useState for a state with no moved header, put off to
+	// the end of its block (useStates): the states of a block share their
+	// slots' nodes, which useStates meets once each, every value as the
+	// states that name it ask -- at the last of their positions, the last
+	// of those Go does not refuse, and the first of their instructions'
+	// own -- where a function of n values live at once and an exit at
+	// each of its instructions had been read n² times. A use does the same
+	// in any order, but for the uses in other blocks it lists, which are
+	// listed by block, as the block's are.
+	var later []laterUse
+	if c.ws != nil {
+		later = c.ws.laterUses[:0]
+	}
+	laterState := func(s *ssa.FrameState, at int) {
+		if s != nil {
+			if root, _ := s.Tree(); root != nil {
+				later = append(later, laterUse{s, int32(at), int32(own), refused})
+			}
+		}
+	}
+	var asks []stateAsk
+	var roots []*ssa.FrameState
+	mark := int32(0)
+	ask := func(id int, end, hot, own int32) {
+		a := &asks[id]
+		if a.mark != mark {
+			*a = stateAsk{mark: mark, end: -1, hot: -1, own: math.MaxInt32}
+		}
+		a.end, a.hot, a.own = max(a.end, end), max(a.hot, hot), min(a.own, own)
+	}
+	// useAsk is use, in a state, of x as a asks.
+	useAsk := func(x *ssa.Value, a *stateAsk) {
+		r := &rec[x.ID]
+		if r.def <= 0 {
+			if r.def == 0 && need(x) {
+				panic(fmt.Sprintf("use of %v defined outside the function", x))
+			}
+			return
+		}
+		r.end = max(r.end, a.end)
+		if a.hot >= 0 {
+			r.hot = max(r.hot, a.hot)
+		}
+		if r.def == int32(cur.ID)+1 && a.own != math.MaxInt32 && r.start >= a.own {
+			// Its own instruction's state, read as it is made.
+			r.slot |= slotFar
+		}
+		if r.def != int32(cur.ID)+1 {
+			if h := r.xhead; h == 0 || xuses[h-1].b != cur {
+				xuses = append(xuses, xuse{cur, h})
+				r.xhead = int32(len(xuses))
+			}
+		}
+	}
+	useStates := func() {
+		if len(later) == 0 {
+			return
+		}
+		if asks == nil {
+			asks = c.stateAsks(c.f.NumSlotNodes())
+		}
+		mark++
+		roots = roots[:0]
+		for _, u := range later {
+			root, _ := u.s.Tree()
+			hot, own := u.at, u.own
+			if u.refused {
+				hot = -1
+			}
+			if own < 0 {
+				own = math.MaxInt32
+			}
+			ask(root.ID(), u.at, hot, own)
+			roots = append(roots, u.s)
+		}
+		later = later[:0]
+		c.slotWalker().Walk(c.f, roots, func(nd *ssa.SlotNode, h, base int) {
+			a := &asks[nd.ID()]
+			if h > 0 {
+				for _, kid := range nd.Kids() {
+					ask(kid.ID(), a.end, a.hot, a.own)
+				}
+				return
+			}
+			for _, v := range nd.Vals() {
+				// As useState's.
+				if rec[v.ID].slot == 0 {
+					useAsk(v, a)
+					continue
+				}
+				if x := bigKept(v); x != nil {
+					useAsk(x, a)
+					if c.isLazy(v) {
+						continue
+					}
+				}
+				if c.isLazy(v) || remat(v) {
+					if x := i32Boxed(v); x != nil {
+						useAsk(x, a)
+						continue
+					}
+					for _, x := range v.Args {
+						useAsk(x, a)
+					}
+					continue
+				}
+				useAsk(v, a)
+				if v.Shadow != nil {
+					useAsk(v.Shadow, a)
+				}
+			}
+		})
+	}
 	// A phi's arguments are used at its block's predecessors' ends, as its
 	// block is met: the phis are walked in order, each argument read once,
 	// and what the groups (below) take of them noted as they are -- the
@@ -1400,7 +1540,7 @@ func (c *core) allocate() error {
 				continue
 			}
 			refused, own = at != p && v.Calls()[0].Go != 0, first
-			useState(v.State, at, nil)
+			laterState(v.State, at)
 			refused, own, first = false, -1, -1
 		}
 		if b.Control != nil {
@@ -1422,9 +1562,9 @@ func (c *core) allocate() error {
 				}
 			}
 		}
-		useState(b.State, end[b.ID], nil)
+		laterState(b.State, end[b.ID])
 		if b.LoopHeader {
-			useState(b.Header, start[b.ID], nil)
+			laterState(b.Header, start[b.ID])
 		}
 		for _, s := range b.Succs {
 			if !s.LoopHeader {
@@ -1441,6 +1581,11 @@ func (c *core) allocate() error {
 				}
 			}
 		}
+		useStates()
+	}
+	clear(later[:cap(later)])
+	if c.ws != nil {
+		c.ws.laterUses = later[:0]
 	}
 	c.keepXuses(xuses)
 	c.lap(PhaseUses)
@@ -3084,121 +3229,34 @@ func (c *core) lap(p Phase) {
 // is a jump. It is a switch for tests to compare the two by.
 var TableExits = true
 
-// exitDescriptor describes the exit to state s of the given kind, its
+// / exitDescriptor describes the exit to state s of the given kind, its
 // frame's locals and operands at the registers localsReg and stackReg, as
 // exitThen's code writes it; or nil where a value is where a description
 // cannot say, and the exit's code writes the frame itself.
+//
+// Its slots are its state's tree's (ssa's SlotNode), each node described
+// once (exitNode) and shared by the descriptions of every state that has
+// it, as the states share it.
 func (c *core) exitDescriptor(s *ssa.FrameState, kind uint64, localsReg, stackReg uint8) *abi.ExitDescriptor {
 	defer c.viewExits()()
 	f := c.exitLayout()
 	d := abi.ExitDescriptor{Kind: uint32(kind), PC: uint32(s.PC), Depth: uint32(s.Depth), Site: int32(s.Site),
-		Frame: f, Start: uint32(len(f.Index)), LocalsReg: localsReg, StackReg: stackReg}
-	written := func(i int, v *ssa.Value) bool {
-		return v != nil && (v.Op != ssa.OpLoadSlot || v.Aux != i) && !c.captured(i)
-	}
-	// What it adds to the frame's, taken back where a slot cannot be
-	// described.
-	index, slots, words := len(f.Index), len(f.Slots), len(f.Words)
-	undo := func() *abi.ExitDescriptor {
-		// Each entry it added unchained from its slot's chain, wherever
-		// it has come to be in it.
-		for i := len(f.Slots) - 1; i >= slots; i-- {
-			at, k := &c.exitHead[exitHash(&f.Slots[i])&uint64(len(c.exitHead)-1)], int32(i+1)
-			for *at != k {
-				at = &c.exitNext[*at-1]
-			}
-			*at = c.exitNext[i]
+		Frame: f, LocalsReg: localsReg, StackReg: stackReg, Direct: true}
+	root, h := s.Tree()
+	if root != nil {
+		if len(c.exitNodes) < c.f.NumSlotNodes() {
+			c.exitNodes = c.exitNodeList(c.f.NumSlotNodes())
 		}
-		c.exitNext = c.exitNext[:slots]
-		for _, w := range f.Words[words:] {
-			delete(c.exitWords, w)
+		x := c.exitNode(root, h, 0)
+		if x.fail {
+			return nil
 		}
-		f.Index, f.Slots, f.Words = f.Index[:index], f.Slots[:slots], f.Words[:words]
-		// The entries it found may be those it added.
-		clear(c.exitLastV)
-		return nil
-	}
-	if len(c.exitLastV) < s.Len() {
-		n := max(s.Len(), 2*len(c.exitLastV))
-		c.exitLastV, c.exitLastK = c.valueList(n), c.int32s(n)
-	}
-	direct := true
-	writes := func(i int32) bool { return int(i) < s.Len() && written(int(i), s.Slot(int(i))) }
-	for i, v := range s.All() {
-		if !written(i, v) {
-			continue
-		}
-		if c.exitLastV[i] == v {
-			// Its entry is the one it had at the last exit that wrote
-			// it: an entry is what the slot's value is and where it
-			// lives, which the code keeps throughout.
-			k := c.exitLastK[i]
-			switch e := &f.Slots[k-1]; {
-			case e.Shadow.Kind == abi.ExitReg || e.Shadow.Kind == abi.ExitSpill,
-				e.Shadow.Kind == abi.ExitSlotAddr && e.Shadow.N != e.Slot && writes(e.Shadow.N),
-				e.Origin >= 0 && e.Origin != e.Slot && writes(e.Origin):
-				direct = false
-			}
-			f.Index = append(f.Index, uint16(k-1))
-			continue
-		}
-		e := abi.ExitSlot{Slot: int32(i), Origin: -1}
-		var ok bool
-		if x := bigKept(v); x != nil {
-			// A BigInt's box, made of the BigInt unboxed, which a state
-			// at a loop's header names before the box is made there.
-			if e.Value, ok = c.exitBig(x); !ok {
-				return undo()
-			}
-		} else if e.Value, ok = c.exitValue(v); !ok {
-			return undo()
-		}
-		if e.Value.Kind == abi.ExitConst {
-			e.Value.N = c.exitWord(c.constWord(v.Const))
-		}
-		if big, _ := e.Value.IsBig(); big {
-			// Its pointer word is made of it too.
-		} else if v.Shadow != nil {
-			if e.Shadow, ok = c.exitSource(v.Shadow); !ok {
-				return undo()
-			}
-		} else if o, has := c.origin.Of(v); has && o >= 0 {
-			e.Origin, e.Load = int32(o), v.Op == ssa.OpLoadSlot
-		}
+		d.Root = x.off
 		// Written one by one if no slot's reference may come from another
 		// slot written here: by its origin, or a source that is one's
 		// address -- a slot's, or one known only at run time.
-		switch {
-		case e.Shadow.Kind == abi.ExitReg || e.Shadow.Kind == abi.ExitSpill,
-			e.Shadow.Kind == abi.ExitSlotAddr && e.Shadow.N != e.Slot && writes(e.Shadow.N),
-			e.Origin >= 0 && e.Origin != e.Slot && writes(e.Origin):
-			direct = false
-		}
-		if len(f.Slots) >= len(c.exitHead) {
-			c.exitRehash(max(64, 2*len(c.exitHead)))
-		}
-		h := exitHash(&e) & uint64(len(c.exitHead)-1)
-		k := c.exitHead[h]
-		for k != 0 && f.Slots[k-1] != e {
-			k = c.exitNext[k-1]
-		}
-		if k == 0 {
-			if len(f.Slots) > math.MaxUint16 {
-				// More than an index names: the exit's code writes it.
-				return undo()
-			}
-			f.Slots = append(f.Slots, e)
-			c.exitNext = append(c.exitNext, c.exitHead[h])
-			k = int32(len(f.Slots))
-			c.exitHead[h] = k
-		}
-		c.exitLastV[i], c.exitLastK[i] = v, k
-		f.Index = append(f.Index, uint16(k-1))
+		d.Direct = !x.indirect && (x.cross == 0 || !c.exitCrossWritten(s, root, h))
 	}
-	if len(f.Index)-index > math.MaxUint16 {
-		return undo()
-	}
-	d.Count, d.Direct = uint16(len(f.Index)-index), direct
 	if s.Inline != nil {
 		// The callees' frames, appended to the frame's, or the run the
 		// description before that wrote them made, if alike: the guards
@@ -3227,6 +3285,185 @@ func (c *core) exitDescriptor(s *ssa.FrameState, kind uint64, localsReg, stackRe
 	}
 	c.exitDescs = append(c.exitDescs, d)
 	return &c.exitDescs[len(c.exitDescs)-1]
+}
+
+// exitNodeInfo is what exitNode found of a state's slots' node, by its
+// ID: its node in the frame's Tree (off, 0 for none), or that a slot under
+// it is where a description cannot say (fail); whether a slot under it
+// has its reference where a description's slots may change it (indirect),
+// and how many slots under it name another slot as their reference's
+// source (cross), which a description that writes that slot is not
+// written one by one for -- a leaf's own, crossN of the core's exitCross
+// from crossAt.
+type exitNodeInfo struct {
+	off             uint32
+	done, fail      bool
+	indirect        bool
+	cross           int32
+	crossAt, crossN int32
+}
+
+// exitNode describes node nd of states' slots, of height h, whose first
+// slot is base: once, the descriptions of every state that has it sharing
+// what it made.
+func (c *core) exitNode(nd *ssa.SlotNode, h, base int) *exitNodeInfo {
+	x := &c.exitNodes[nd.ID()]
+	if x.done {
+		return x
+	}
+	x.done = true
+	f := c.exitFrame
+	at := len(c.exitKids)
+	if h > 0 {
+		m := nd.Mask()
+		var indirect bool
+		var cross int32
+		for _, kid := range nd.Kids() {
+			k := bits.TrailingZeros64(m)
+			m &= m - 1
+			y := c.exitNode(kid, h-1, base+k<<(ssa.SlotShift*h))
+			if y.fail {
+				c.exitKids = c.exitKids[:at]
+				x.fail = true
+				return x
+			}
+			if y.off != 0 {
+				c.exitKids = append(c.exitKids, y.off)
+			}
+			indirect, cross = indirect || y.indirect, cross+y.cross
+		}
+		x.off = c.exitTreeNode(c.exitKids[at:], false)
+		c.exitKids = c.exitKids[:at]
+		x.indirect, x.cross = indirect, cross
+		return x
+	}
+	// A leaf: the slots its values are written to, described.
+	slots, words, crossAt := len(f.Slots), len(f.Words), len(c.exitCross)
+	undo := func() *exitNodeInfo {
+		// Each entry it added unchained from its slot's chain, wherever
+		// it has come to be in it.
+		for i := len(f.Slots) - 1; i >= slots; i-- {
+			at, k := &c.exitHead[exitHash(&f.Slots[i])&uint64(len(c.exitHead)-1)], int32(i+1)
+			for *at != k {
+				at = &c.exitNext[*at-1]
+			}
+			*at = c.exitNext[i]
+		}
+		c.exitNext = c.exitNext[:slots]
+		for _, w := range f.Words[words:] {
+			delete(c.exitWords, w)
+		}
+		f.Slots, f.Words = f.Slots[:slots], f.Words[:words]
+		c.exitKids, c.exitCross = c.exitKids[:at], c.exitCross[:crossAt]
+		x.fail = true
+		return x
+	}
+	m := nd.Mask()
+	for _, v := range nd.Vals() {
+		i := base + bits.TrailingZeros64(m)
+		m &= m - 1
+		if !c.exitWritten(i, v) {
+			continue
+		}
+		e := abi.ExitSlot{Slot: int32(i), Origin: -1}
+		var ok bool
+		if b := bigKept(v); b != nil {
+			// A BigInt's box, made of the BigInt unboxed, which a state
+			// at a loop's header names before the box is made there.
+			if e.Value, ok = c.exitBig(b); !ok {
+				return undo()
+			}
+		} else if e.Value, ok = c.exitValue(v); !ok {
+			return undo()
+		}
+		if e.Value.Kind == abi.ExitConst {
+			e.Value.N = c.exitWord(c.constWord(v.Const))
+		}
+		if big, _ := e.Value.IsBig(); big {
+			// Its pointer word is made of it too.
+		} else if v.Shadow != nil {
+			if e.Shadow, ok = c.exitSource(v.Shadow); !ok {
+				return undo()
+			}
+		} else if o, has := c.origin.Of(v); has && o >= 0 {
+			e.Origin, e.Load = int32(o), v.Op == ssa.OpLoadSlot
+		}
+		switch {
+		case e.Shadow.Kind == abi.ExitReg || e.Shadow.Kind == abi.ExitSpill:
+			x.indirect = true
+		case e.Shadow.Kind == abi.ExitSlotAddr && e.Shadow.N != e.Slot:
+			c.exitCross = append(c.exitCross, e.Shadow.N)
+		}
+		if e.Origin >= 0 && e.Origin != e.Slot {
+			c.exitCross = append(c.exitCross, e.Origin)
+		}
+		if len(f.Slots) >= len(c.exitHead) {
+			c.exitRehash(max(64, 2*len(c.exitHead)))
+		}
+		hh := exitHash(&e) & uint64(len(c.exitHead)-1)
+		k := c.exitHead[hh]
+		for k != 0 && f.Slots[k-1] != e {
+			k = c.exitNext[k-1]
+		}
+		if k == 0 {
+			f.Slots = append(f.Slots, e)
+			c.exitNext = append(c.exitNext, c.exitHead[hh])
+			k = int32(len(f.Slots))
+			c.exitHead[hh] = k
+		}
+		c.exitKids = append(c.exitKids, uint32(k-1))
+	}
+	x.off = c.exitTreeNode(c.exitKids[at:], true)
+	c.exitKids = c.exitKids[:at]
+	x.crossAt, x.crossN = int32(crossAt), int32(len(c.exitCross)-crossAt)
+	x.cross = x.crossN
+	return x
+}
+
+// exitWritten reports whether an exit writes slot i, whose value in its
+// state is v: not a captured binding's, in its cell, nor a slot's own load,
+// which the frame has as it is.
+func (c *core) exitWritten(i int, v *ssa.Value) bool {
+	return v != nil && (v.Op != ssa.OpLoadSlot || v.Aux != i) && !c.captured(i)
+}
+
+// exitTreeNode adds a node of entries to the frame's Tree, a leaf's or an
+// inner node's, and returns its offset; 0, the empty node, for none.
+func (c *core) exitTreeNode(entries []uint32, leaf bool) uint32 {
+	if len(entries) == 0 {
+		return 0
+	}
+	f := c.exitFrame
+	if len(f.Tree) == 0 {
+		f.Tree = append(f.Tree, 0)
+	}
+	off := uint32(len(f.Tree))
+	f.Tree = append(f.Tree, uint32(len(entries))<<1|uint32(b2u(leaf)))
+	f.Tree = append(f.Tree, entries...)
+	return off
+}
+
+// exitCrossWritten reports whether state s's exit writes a slot that one
+// under its slots' node nd, of height h, names as its reference's source.
+func (c *core) exitCrossWritten(s *ssa.FrameState, nd *ssa.SlotNode, h int) bool {
+	x := &c.exitNodes[nd.ID()]
+	if x.cross == 0 {
+		return false
+	}
+	if h == 0 {
+		for _, o := range c.exitCross[x.crossAt : x.crossAt+x.crossN] {
+			if int(o) < s.Len() && c.exitWritten(int(o), s.Slot(int(o))) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, kid := range nd.Kids() {
+		if c.exitCrossWritten(s, kid, h-1) {
+			return true
+		}
+	}
+	return false
 }
 
 // exitHash is where e's chain is among exitHead's: a hash of all its
@@ -3265,7 +3502,8 @@ func (c *core) exitLayout() *abi.ExitFrame {
 			clear(w.exitWords)
 			c.exitWords = w.exitWords
 			c.exitHead, c.exitNext = w.exitHeadBuf[:0], w.exitNextBuf[:0]
-			c.exitFrame.Slots, c.exitFrame.Index, c.exitFrame.Words = w.exitSlotsBuf[:0], w.exitIndexBuf[:0], w.exitWordsBuf[:0]
+			c.exitFrame.Slots, c.exitFrame.Tree, c.exitFrame.Words = w.exitSlotsBuf[:0], w.exitTreeBuf[:0], w.exitWordsBuf[:0]
+			c.exitKids, c.exitCross = w.exitKidsBuf[:0], w.exitCrossBuf[:0]
 			c.exitFrame.Inlines = w.exitInlinesBuf[:0]
 		} else {
 			c.exitWords = map[uint64]int32{}
@@ -3650,11 +3888,12 @@ func (c *core) finishExits() {
 	if f := c.exitFrame; f != nil {
 		if w := c.ws; w != nil {
 			// Its buffers, for the next compile.
-			w.exitSlotsBuf, w.exitIndexBuf, w.exitWordsBuf = f.Slots[:0], f.Index[:0], f.Words[:0]
+			w.exitSlotsBuf, w.exitTreeBuf, w.exitWordsBuf = f.Slots[:0], f.Tree[:0], f.Words[:0]
+			w.exitKidsBuf, w.exitCrossBuf = c.exitKids[:0], c.exitCross[:0]
 			w.exitHeadBuf, w.exitNextBuf = c.exitHead[:0], c.exitNext[:0]
 			w.exitInlinesBuf = f.Inlines[:0]
 		}
-		f.Slots, f.Index, f.Words, f.Inlines = exact(f.Slots), exact(f.Index), exact(f.Words), exact(f.Inlines)
+		f.Slots, f.Tree, f.Words, f.Inlines = exact(f.Slots), exact(f.Tree), exact(f.Words), exact(f.Inlines)
 	}
 }
 
@@ -3950,3 +4189,18 @@ func stepGens(v *ssa.Value, enc abi.Encoding) bool {
 	site := v.Calls()[0]
 	return len(site.Gens) != 0 && site.GenNext != 0
 }
+
+// laterUse is a state allocate's uses meet, put off to its block's end:
+// where, at whose instruction's own, and whether Go refuses the call it
+// is the state of (allocate's laterState).
+type laterUse struct {
+	s       *ssa.FrameState
+	at, own int32
+	refused bool
+}
+
+// stateAsk is what the states allocate meets in a block ask of a node of
+// their slots: the last position, the last that Go does not refuse (-1
+// for none), and the first instruction's own (MaxInt32 for none), the
+// block's mark.
+type stateAsk struct{ mark, end, hot, own int32 }

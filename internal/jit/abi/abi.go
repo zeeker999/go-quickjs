@@ -793,10 +793,9 @@ type ExitDescriptor struct {
 	Kind, PC, Depth uint32
 	Site            int32
 	// Frame is what every description of the code shares: its slots are
-	// Count of Frame's, those Frame.Index lists from Start on (Slot).
+	// those of node Root of Frame's Tree, 0 for none (Slots).
 	Frame *ExitFrame
-	Start uint32
-	Count uint16
+	Root  uint32
 	// The frame's locals are at LocalsReg's address, its operands at
 	// StackReg's (ExitFrame's layout).
 	LocalsReg, StackReg uint8
@@ -822,26 +821,51 @@ func (d *ExitDescriptor) Inlines() []ExitInline {
 	return d.Frame.Inlines[d.InlineAt : d.InlineAt+uint32(d.InlineN)]
 }
 
-// Slot is the description's i'th slot.
-func (d *ExitDescriptor) Slot(i int) *ExitSlot {
-	return &d.Frame.Slots[d.Frame.Index[int(d.Start)+i]]
+// Slots calls fn with each of the description's slots, in order.
+func (d *ExitDescriptor) Slots(fn func(*ExitSlot)) {
+	if d.Root != 0 {
+		d.Frame.each(d.Root, fn)
+	}
+}
+
+// each calls fn with each slot of Tree's node off.
+func (f *ExitFrame) each(off uint32, fn func(*ExitSlot)) {
+	h := f.Tree[off]
+	n := h >> 1
+	for _, k := range f.Tree[off+1 : off+1+n] {
+		if h&1 != 0 {
+			fn(&f.Slots[k])
+		} else {
+			f.each(k, fn)
+		}
+	}
 }
 
 // ExitFrame is what a code's exit descriptions share: the frame's layout
 // -- its locals, from a description's LocalsReg's address; the receiver's
 // slot, in the context; the captured bindings, through their cells; the
 // operands, from its StackReg's address -- and the values' encoding; the
-// slots the descriptions write, each once, which Index lists for each
-// description by its index in Slots; and the constant words their values
-// are (ExitConst), each once. A function's slots repeat from exit to exit,
+// slots the descriptions write, each once; the nodes that list them for
+// the descriptions (Tree); and the constant words their values are
+// (ExitConst), each once. A function's slots repeat from exit to exit,
 // the same slot at the same register or spill, and its descriptions had
 // been as large as its code, each with every slot it writes and every
 // field of the layout: five slots in six were another's.
+//
+// Tree holds the nodes, each a word of its length, n<<1, with 1 for a
+// leaf, and its n entries: a leaf's slots' indices in Slots, in order, an
+// inner node's children's offsets in Tree. They are the nodes of the
+// frame states' slots (ssa's slots.go), which the states share as V8's
+// frame states share their StateValues: a description is its state's
+// tree, and the nodes it has of another's are the other's. A list of each
+// description's every slot had made a function of n values live at once
+// and an exit at each of its n instructions take n² of them. Tree[0] is
+// the empty node.
 type ExitFrame struct {
 	FrameLocals, ThisSlot, Locals int32
 	Enc                           *Encoding
 	Slots                         []ExitSlot
-	Index                         []uint16
+	Tree                          []uint32
 	Words                         []uint64
 	// Inlines are the inlined callees' frames the descriptions write, a
 	// run for each (ExitDescriptor's Inlines), which descriptions alike

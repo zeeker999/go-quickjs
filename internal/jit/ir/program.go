@@ -703,15 +703,13 @@ type Program struct {
 	Globals []uint32
 	Code    []Instruction
 	Maps    []StateMap
-	// Live says, for each instruction, which of the first LiveLocals
-	// slots -- the function's locals -- the code from there on may read
-	// before it writes them: LiveWords words of bits a PC, from Live[pc *
-	// LiveWords]. A local not live there need not be written for the
-	// interpreter to resume at it, as V8's frame states leave out dead
-	// registers. Nil where it is not known.
-	Live       []uint64
-	LiveLocals int
-	LiveWords  int
+	// Live says, for each instruction, which of the first Live.N slots
+	// -- the function's locals -- the code from there on may read before
+	// it writes them, each instruction's set sharing what it has of the
+	// next one's (Liveness). A local not live there need not be written
+	// for the interpreter to resume at it, as V8's frame states leave out
+	// dead registers. Nil where it is not known.
+	Live *Liveness
 	// Upvalues is how many captured bindings the new pipeline reads and
 	// assigns in their cells (UpvalueRead, UpvalueWrite), their slots from
 	// UpvalueBase on.
@@ -841,16 +839,16 @@ func (p *Program) Footprint() int {
 		return 0
 	}
 	return int(unsafe.Sizeof(*p)) + cap(p.Globals)*4 + cap(p.Origin)*4 + cap(p.Starts)*4 + cap(p.Code)*int(unsafe.Sizeof(Instruction{})) +
-		cap(p.Maps)*int(unsafe.Sizeof(StateMap{})) + cap(p.Live)*8 + cap(p.Handlers)*int(unsafe.Sizeof(Handler{})) + cap(p.HandlerAt)*4 + cap(p.Captured) + cap(p.Assigned)
+		cap(p.Maps)*int(unsafe.Sizeof(StateMap{})) + p.Live.Size() + cap(p.Handlers)*int(unsafe.Sizeof(Handler{})) + cap(p.HandlerAt)*4 + cap(p.Captured) + cap(p.Assigned)
 }
 
 // LiveAt reports whether local i may be read from pc on before it is
 // written (Live); true where that is not known.
 func (p *Program) LiveAt(pc, i int) bool {
-	if p.Live == nil || i >= p.LiveLocals {
+	if p.Live == nil || i >= p.Live.N {
 		return true
 	}
-	return p.Live[pc*p.LiveWords+i/64]&(1<<(i%64)) != 0
+	return p.Live.Has(pc, i)
 }
 
 // At is the first instruction of register pc's lowering (Origin), or, in

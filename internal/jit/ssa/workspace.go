@@ -89,7 +89,7 @@ func (w *Workspace) scratchBytes() int {
 		capBytes(s.liveUses) + capBytes(s.liveNodes) + capBytes(s.liveStack) + capBytes(s.subst) + capBytes(s.originPhis) + capBytes(s.states) + capBytes(s.slotOrder) + capBytes(s.slotWalk) + capBytes(s.asked) +
 		capBytes(s.phiIdx) + capBytes(s.phiFill) + capBytes(s.phiUsers) +
 		capBytes(s.upvalueCand) + capBytes(s.keepUsers) + capBytes(s.keepNext) +
-		capBytes(s.incomplete) + capBytes(s.frameOf)
+		capBytes(s.incomplete) + capBytes(s.frameOf) + capBytes(s.defKeys) + capBytes(s.defVals) + capBytes(s.defSpareKeys) + capBytes(s.defSpareVals) + capBytes(s.marks) + capBytes(s.phiArgs) + capBytes(s.dirtyLists) + capBytes(s.mergeDiff)
 	for _, l := range s.live {
 		n += capBytes(l)
 	}
@@ -128,6 +128,14 @@ func (w *Workspace) Rewind() {
 	// workspace is not to keep alive.
 	clear(w.scratch.frameOf[:cap(w.scratch.frameOf)])
 	clear(w.scratch.incomplete[:cap(w.scratch.incomplete)])
+	clear(w.scratch.defVals[:cap(w.scratch.defVals)])
+	clear(w.scratch.defSpareVals[:cap(w.scratch.defSpareVals)])
+	clear(w.scratch.phiArgs[:cap(w.scratch.phiArgs)])
+	for _, m := range w.scratch.marks {
+		// The builder's block it marks with, which the workspace is not
+		// to keep alive.
+		m.Block = nil
+	}
 	// The arenas keep what the recent compiles needed (arena's Rewind);
 	// the scratch tables, grown by value ID, the most any compile has. Once
 	// they hold more than the arenas, a compile bigger than the recent

@@ -3330,9 +3330,22 @@ type builder struct {
 	endOf []int
 
 	// By block ID, which is unique while the builder runs: each block's
-	// definitions by slot, whether it is sealed and filled, and the phis
-	// it made before it was sealed.
-	defs       [][]*Value
+	// definitions by slot (defTable), whether it is sealed and filled, and
+	// the phis it made before it was sealed. translating says the blocks
+	// are being filled.
+	defs        defTable
+	translating bool
+	// marks mark a sealed block's slot whose predecessors' values are
+	// being read (mergeVar), each of the block markBlock, markDepth of
+	// them in use; and phiArgs holds those values, each read's after the
+	// reads it is inside of.
+	marks     []*Value
+	markDepth int
+	phiArgs   []*Value
+	// dirtyLists and mergeDiff are stateSlots' lists of the slots to read
+	// again (mergeFrom).
+	dirtyLists [][]int32
+	mergeDiff  []int32
 	last       []lastState
 	sealed     []bool
 	filled     []bool
@@ -4767,7 +4780,7 @@ func (b *builder) planInline(fr *frame, call, cont *Block) {
 	}
 	newBlock := func(pc, end int) *Block {
 		var blk *Block
-		if b.defs != nil {
+		if b.translating {
 			// Made while the blocks are filled: a loop's callback
 			// (inlineCallback), its IDs past every list's.
 			blk = b.blockAfter(call)
@@ -6688,7 +6701,16 @@ func (b *builder) edge(from, to *Block) {
 func (b *builder) translate() {
 	n := len(b.f.Blocks)
 	b.nextBlock = n
-	b.defs = b.f.refLists(blockRoom * n)[:n]
+	sc0 := b.f.scr()
+	b.defs.reset(sc0.defKeys, sc0.defVals, sc0.defSpareKeys, sc0.defSpareVals, 4*n)
+	b.marks, b.phiArgs, b.dirtyLists, b.mergeDiff = sc0.marks, sc0.phiArgs[:0], sc0.dirtyLists[:0], sc0.mergeDiff[:0]
+	b.translating = true
+	defer func() {
+		sc0.defKeys, sc0.defVals = b.defs.keys, b.defs.vals
+		sc0.defSpareKeys, sc0.defSpareVals = b.defs.spareKeys, b.defs.spareVals
+		clear(b.dirtyLists[:cap(b.dirtyLists)])
+		sc0.marks, sc0.phiArgs, sc0.dirtyLists, sc0.mergeDiff = b.marks, b.phiArgs[:0], b.dirtyLists[:0], b.mergeDiff[:0]
+	}()
 	b.last = b.f.lastStates(blockRoom * n)[:n]
 	b.sealed, b.filled = b.f.bools(blockRoom * n)[:n], b.f.bools(blockRoom * n)[:n]
 	sc := b.f.scr()
@@ -6812,12 +6834,7 @@ func (b *builder) write(slot int, blk *Block, v *Value) {
 // read found already, and one it does not the next state's liveness
 // names apart (stateSlots).
 func (b *builder) found(slot int, blk *Block, v *Value) {
-	d := b.defs[blk.ID]
-	if d == nil {
-		d = b.f.refsOf(b.nslots)
-		b.defs[blk.ID] = d
-	}
-	d[slot] = v
+	b.defs.put(blk.ID, slot, v)
 }
 
 // read is slot's value in blk: a captured binding marked stale there
@@ -6845,8 +6862,24 @@ func (b *builder) read(slot int, blk *Block) *Value {
 // readVar is slot's value in blk, as SSA construction finds it (Braun et
 // al.): a captured binding's stale marker as it is.
 func (b *builder) readVar(slot int, blk *Block) *Value {
-	if d := b.defs[blk.ID]; d != nil && d[slot] != nil {
-		return d[slot]
+	if v := b.defs.get(blk.ID, slot); v != nil {
+		if v.Block == &markBlock {
+			// Reached again while its predecessors are read: a loop's,
+			// whose phi this is, its arguments those reads find.
+			v = b.newPhiID(blk, v.ID)
+			b.found(slot, blk, v)
+		}
+		return v
+	}
+	if ls := &b.last[blk.ID]; ls.s != nil && slot >= ls.fr.base && slot < ls.fr.base+ls.n {
+		// The value the block's last state has, which nothing wrote since
+		// (a write is a definition): a state that shares another's slots
+		// does not read those that cannot have changed (stateSlots), and
+		// its block need not look for them where they were defined.
+		if v := ls.s.Slot(slot); v != nil {
+			b.found(slot, blk, v)
+			return v
+		}
 	}
 	var v *Value
 	switch {
@@ -6866,17 +6899,81 @@ func (b *builder) readVar(slot int, blk *Block) *Value {
 		// total.
 		v = b.constIn(blk, ir.Value{Kind: ir.Undefined})
 	default:
-		v = b.newPhi(blk)
-		b.found(slot, blk, v)
-		b.addPhiOperands(slot, v)
+		v = b.mergeVar(slot, blk)
 	}
 	b.found(slot, blk, v)
 	return v
 }
 
+// markBlock is the block of mergeVar's marks, which no value is of.
+var markBlock Block
+
+// mergeVar is slot's value in blk, sealed, of several predecessors: the
+// value they all have, or a phi of theirs (Braun et al.'s marker
+// algorithm). The block is marked while they are read, and a read that
+// reaches it again, round a loop, makes its phi then; else the phi is
+// made only where they differ. A phi made for every slot a block's first
+// state names, at every block of several predecessors, had made a
+// function of n values live across m branches' ends take n·m phis, nearly
+// all of them one value's, which Optimize took away.
+func (b *builder) mergeVar(slot int, blk *Block) *Value {
+	// The mark holds the ID the phi is given, if it is made: the one it
+	// had when it was made before the reads.
+	if b.markDepth == len(b.marks) {
+		b.marks = append(b.marks, &Value{})
+	}
+	mark := b.marks[b.markDepth]
+	mark.Block = &markBlock
+	b.markDepth++
+	defer func() { b.markDepth-- }()
+	mark.ID = b.f.nextID
+	b.f.nextID++
+	b.found(slot, blk, mark)
+	at := len(b.phiArgs)
+	for _, p := range blk.Preds {
+		a := b.readVar(slot, p)
+		if a.Op == OpUpvalueStale {
+			// The binding as the predecessor leaves it, from its cell.
+			a = b.loadUpvalue(p, a.Index, nil)
+			b.write(slot, p, a)
+		}
+		b.phiArgs = append(b.phiArgs, a)
+	}
+	args := b.phiArgs[at:]
+	phi := b.defs.get(blk.ID, slot)
+	if phi == mark {
+		phi = nil
+		same := true
+		for _, a := range args[1:] {
+			same = same && a == args[0]
+		}
+		if same {
+			v := args[0]
+			b.phiArgs = b.phiArgs[:at]
+			return v
+		}
+		phi = b.newPhiID(blk, mark.ID)
+	}
+	phi.Args = b.f.refsOf(len(args))[:0]
+	for _, a := range args {
+		a.Uses++
+		phi.Args = append(phi.Args, a)
+	}
+	b.phiArgs = b.phiArgs[:at]
+	return phi
+}
+
 func (b *builder) newPhi(blk *Block) *Value {
 	v := b.f.alloc(Value{Op: OpPhi, Type: Tagged, Block: blk})
 	prepend(b.f, blk, v)
+	return v
+}
+
+// newPhiID is newPhi numbered id, an ID taken before (mergeVar).
+func (b *builder) newPhiID(blk *Block, id int) *Value {
+	v := b.newPhi(blk)
+	b.f.nextID--
+	v.ID = id
 	return v
 }
 
@@ -6995,7 +7092,7 @@ func (sf *stateFrame) liveEnd(n int) int {
 	if sf.p.Live == nil {
 		return 0
 	}
-	return min(n, sf.p.LiveLocals)
+	return min(n, sf.p.Live.N)
 }
 
 // names reports whether a state at pc, of n slots past the base, names
@@ -7007,30 +7104,25 @@ func (sf *stateFrame) names(pc, n, i int) bool {
 	if i >= n || sf.excluded(i) {
 		return false
 	}
-	p := sf.p
 	if i < sf.liveEnd(n) {
-		return p.Live[pc*p.LiveWords+i/64]&(1<<(i%64)) != 0
+		return sf.p.Live.Has(pc, i)
 	}
 	return true
 }
 
 // slotsAt lists in l, in order, the slots past sf's base that a state at
-// pc, of n slots past it, names. Found from the liveness's words, bit by
-// bit: a state's slots are some three times as many as it names.
+// pc, of n slots past it, names. Found from the liveness's set there,
+// slot by slot: a state's slots are some three times as many as it
+// names.
 func (sf *stateFrame) slotsAt(l []int32, pc, n int) []int32 {
-	p := sf.p
 	liveEnd := sf.liveEnd(n)
 	if liveEnd > 0 {
-		row := p.Live[pc*p.LiveWords:]
-		for w := 0; w*64 < liveEnd; w++ {
-			word := row[w]
-			if left := liveEnd - w*64; left < 64 {
-				word &= 1<<left - 1
+		for i := range sf.p.Live.Slots(pc) {
+			if i >= liveEnd {
+				break
 			}
-			for ; word != 0; word &= word - 1 {
-				if i := w*64 + bits.TrailingZeros64(word); !sf.excluded(i) {
-					l = append(l, int32(i))
-				}
+			if !sf.excluded(i) {
+				l = append(l, int32(i))
 			}
 		}
 	}
@@ -7050,8 +7142,8 @@ func (sf *stateFrame) slotsAt(l []int32, pc, n int) []int32 {
 // slotsChanged lists in l, in order, the slots past sf's base whose
 // value in a state at pc1, of n1 slots past it, may not be what one at
 // pc0, of n0, has: those written since (dirty, by the builder's slot),
-// and those one names and the other may not -- the liveness's words told
-// apart, and the slots between the two's ends.
+// and those one names and the other may not -- the liveness's sets told
+// apart, where their trees differ, and the slots between the two's ends.
 func (sf *stateFrame) slotsChanged(l []int32, pc0, n0, pc1, n1 int, dirty ...[]int32) []int32 {
 	top := max(n0, n1)
 	for _, d := range dirty {
@@ -7061,18 +7153,13 @@ func (sf *stateFrame) slotsChanged(l []int32, pc0, n0, pc1, n1 int, dirty ...[]i
 			}
 		}
 	}
-	p := sf.p
 	le0, le1 := sf.liveEnd(n0), sf.liveEnd(n1)
 	if lo := min(le0, le1); lo > 0 {
-		r0, r1 := p.Live[pc0*p.LiveWords:], p.Live[pc1*p.LiveWords:]
-		for w := 0; w*64 < lo; w++ {
-			word := r0[w] ^ r1[w]
-			if left := lo - w*64; left < 64 {
-				word &= 1<<left - 1
+		for i := range sf.p.Live.Changed(pc0, pc1) {
+			if i >= lo {
+				break
 			}
-			for ; word != 0; word &= word - 1 {
-				l = append(l, int32(w*64+bits.TrailingZeros64(word)))
-			}
+			l = append(l, int32(i))
 		}
 	}
 	for i := min(le0, le1); i < max(le0, le1); i++ {
@@ -7114,23 +7201,28 @@ func (b *builder) stateSlots(s *FrameState, blk *Block, pc int, sf *stateFrame, 
 	nested := b.stating
 	b.stating = true
 	var from *lastState
-	var dirty [2][]int32
+	dirty := b.dirtyLists[:0]
 	if !nested {
 		ls := &b.last[blk.ID]
 		switch {
 		case ls.s != nil:
 			if ls.fr == b.cur {
-				from, dirty[0] = ls, ls.dirty
+				from, dirty = ls, append(dirty, ls.dirty)
 			}
 		case b.sealed[blk.ID] && len(blk.Preds) == 1:
-			if pl := &b.last[blk.Preds[0].ID]; pl.s != nil && pl.fr == b.cur {
-				from, dirty[0], dirty[1] = pl, pl.dirty, ls.dirty
+			if from, dirty = b.lastOf(blk.Preds[0], dirty); from != nil {
+				dirty = append(dirty, ls.dirty)
+			}
+		case b.sealed[blk.ID]:
+			if from, dirty = b.mergeFrom(blk, dirty); from != nil {
+				dirty = append(dirty, ls.dirty)
 			}
 		}
 		if from != nil && (from.s.Args != 0 || from.s.Virtual != 0) {
 			from = nil
 		}
 	}
+	b.dirtyLists = dirty[:0]
 	// The list is the state's own while it reads, as a state made inside
 	// lists its own.
 	l := b.named[:0]
@@ -7139,7 +7231,7 @@ func (b *builder) stateSlots(s *FrameState, blk *Block, pc int, sf *stateFrame, 
 	if from != nil {
 		s.shareSlots(from.s)
 		pc0, n0 = from.pc, from.n
-		l = sf.slotsChanged(l, pc0, n0, pc, sf.n, dirty[:]...)
+		l = sf.slotsChanged(l, pc0, n0, pc, sf.n, dirty...)
 	} else {
 		if call != nil {
 			s.shareSlots(call)
@@ -7169,6 +7261,57 @@ func (b *builder) stateSlots(s *FrameState, blk *Block, pc int, sf *stateFrame, 
 	if !nested {
 		ls := &b.last[blk.ID]
 		ls.s, ls.fr, ls.pc, ls.n = s, b.cur, pc, sf.n
+	}
+}
+
+// mergeFrom is the state a sealed block of several predecessors makes its
+// first from, and the lists of the slots to read again, after dirty: its
+// first predecessor's last state (lastOf), if each predecessor has one of
+// the frame being translated; and those read again are the slots written
+// in any since its last state and those whose values the last states do
+// not agree on, found where their trees differ. A slot named alike by
+// every one, which none wrote since, has that value in the block, which a
+// read would find again without making anything (mergeVar): a function of
+// n values live across m blocks of several predecessors had read all n at
+// each, n·m reads and as many definitions.
+func (b *builder) mergeFrom(blk *Block, dirty [][]int32) (*lastState, [][]int32) {
+	first, dirty := b.lastOf(blk.Preds[0], dirty)
+	if first == nil {
+		return nil, dirty
+	}
+	diff := b.mergeDiff[:0]
+	for _, p := range blk.Preds[1:] {
+		var pl *lastState
+		if pl, dirty = b.lastOf(p, dirty); pl == nil {
+			return nil, dirty
+		}
+		if pl.s != first.s {
+			diffSlots(first.s, pl.s, func(i int) { diff = append(diff, int32(i)) })
+		}
+	}
+	b.mergeDiff = diff
+	return first, append(dirty, diff)
+}
+
+// lastOf is the last state of the frame being translated that holds at
+// blk's end, blk being filled or sealed, and the lists of the slots written
+// since, after dirty: blk's own last state, or, for a block that made none
+// and has one predecessor, sealed, that predecessor's (a block of a jump
+// alone); nil where there is none, or it is a prologue's or a home's.
+func (b *builder) lastOf(blk *Block, dirty [][]int32) (*lastState, [][]int32) {
+	for {
+		ls := &b.last[blk.ID]
+		if ls.s != nil {
+			if ls.fr != b.cur || ls.s.Args != 0 || ls.s.Virtual != 0 {
+				return nil, dirty
+			}
+			return ls, append(dirty, ls.dirty)
+		}
+		if !b.sealed[blk.ID] || len(blk.Preds) != 1 {
+			return nil, dirty
+		}
+		dirty = append(dirty, ls.dirty)
+		blk = blk.Preds[0]
 	}
 }
 
@@ -7398,9 +7541,6 @@ func (b *builder) blockAfter(blk *Block) *Block {
 	nb.ID = b.nextBlock
 	b.nextBlock++
 	// The block's ID past every list's, which each grows to.
-	for len(b.defs) <= nb.ID {
-		b.defs = append(b.defs, nil)
-	}
 	for len(b.last) <= nb.ID {
 		b.last = append(b.last, lastState{})
 	}
