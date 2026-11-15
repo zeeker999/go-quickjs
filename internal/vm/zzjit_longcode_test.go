@@ -38,6 +38,22 @@ func longCodeSource(name string, n int) string {
 	return b.String()
 }
 
+// longCodeUnchecked has compiles not check their register allocation
+// until the test ends, for a function of 10 MB of code: the check
+// computes liveness again by block sets over every value
+// (mir.CheckAllocations), quadratic in the function's length -- 2.6 GB
+// allocated and a heap of gigabytes for one compile, where the compile
+// itself is linear, a gigabyte of garbage for 10 MB of code. The 3 MB
+// functions are checked.
+func longCodeUnchecked(t *testing.T, size int) {
+	if size < 10 {
+		return
+	}
+	on := mir.CheckAllocations
+	mir.CheckAllocations = false
+	t.Cleanup(func() { mir.CheckAllocations = on })
+}
+
 // longCodeObject is {v, w}, made in r.
 func longCodeObject(r *Runtime, v, w Value) Value {
 	o := Obj(r.NewObject())
@@ -69,6 +85,7 @@ func TestJITLongCode(t *testing.T) {
 				if marking {
 					jitMarkingForTest(t)
 				}
+				longCodeUnchecked(t, size)
 				rts := regNativeRuntimes(t, src)
 				for _, r := range rts {
 					r.jitMemoryLimit = 1 << 36
@@ -143,6 +160,11 @@ func TestJITLongCodeCompilesARM64(t *testing.T) {
 	}
 	for _, size := range []int{3, 10} {
 		name := fmt.Sprintf("long%d", size)
+		if size >= 10 {
+			on := mir.CheckAllocations
+			mir.CheckAllocations = false
+			defer func() { mir.CheckAllocations = on }()
+		}
 		rts := regNativeRuntimes(t, longCodeSource(name, size<<20/160))
 		r := rts[0]
 		r.jitMemoryLimit = 1 << 36
