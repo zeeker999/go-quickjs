@@ -1047,13 +1047,19 @@ func (r *Runtime) jitRegLeaveTo(f *frame, c *regCode, e *jitRegEntry, rpc int) i
 		life.goOns++
 		life.ssaStats.ended++
 	}
-	if cc := f.cl.closureCode; !e.invalid && cc != nil && cc.jitReg != nil && cc.jitReg.code != nil && !cc.jitReg.invalid && len(cc.jitReg.loops) != 0 &&
-		!cc.jitReg.life.loopSlow && !regEndsFrame(f.cl.reg, rpc) {
-		// Code with a loop to go on at: one with none, the frame's
-		// invocation ends in the interpreter, and the check made due at
-		// once would be its caller's loop's, for nothing -- each of AWFY
-		// Richards' runTask's 13 million exits had paid one.
-		s.regGoOn, s.regForced = f, true
+	if cc := f.cl.closureCode; !e.invalid && cc != nil && cc.jitReg != nil && cc.jitReg.code != nil && !cc.jitReg.invalid &&
+		(len(cc.jitReg.loops) != 0 || len(cc.jitReg.unentered) != 0) && !cc.jitReg.life.loopSlow && !regEndsFrame(f.cl.reg, rpc) {
+		// Code with a loop to go on at -- an entry it has, or one escape
+		// analysis dropped (unentered), whose frames go on in the code
+		// kept for them (jitRegLoopCode), as the stack form's jitGoOn
+		// forces the check whatever entries its code has. One with no
+		// loop, the frame's invocation ends in the interpreter, and the
+		// check made due at once would be its caller's loop's, for
+		// nothing -- each of AWFY Richards' runTask's 13 million exits
+		// had paid one. Asked of loops alone, a loop whose object stayed
+		// unmade had every call that left it finish in the interpreter:
+		// carried_exit_500 ran at the interpreter's speed.
+		s.regGoOn, s.regGoOnFrom, s.regForced = f, e, true
 		r.backEdges = 1
 	}
 	return rpc

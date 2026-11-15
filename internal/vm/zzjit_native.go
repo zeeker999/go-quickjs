@@ -1049,9 +1049,12 @@ type jitState struct {
 	// it with no entry, and regForced marks the interpreter's check made
 	// due at once at its next back edge, where Go goes on in its code
 	// (jitRegGoOnAt, jitRegLoop), as goOn and forcedCheck are the stack
-	// form's.
-	regGoOn   *frame
-	regForced bool
+	// form's; regGoOnFrom is the code whose run left it, which a frame
+	// that goes on in it again went on in already (jitRegLoopCode), as
+	// goOnEntry is the stack form's.
+	regGoOn     *frame
+	regGoOnFrom *jitRegEntry
+	regForced   bool
 	// regHeld is what the register code in regCache takes (held).
 	regHeld int
 	// regLearned is what the code made from a function's register code

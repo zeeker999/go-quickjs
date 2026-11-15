@@ -705,7 +705,11 @@ the program (`jitRegShape`).
   once (`regGoOn`, `regForced`) and spending no budget, as the stack form's
   `jitGoOn` and `tryJITLoop` have it: the interpreter runs the rest of that
   iteration, as from V8's deoptimizations, not the rest of the invocation.
-  Not where it left at a `ret`, a `yield` or an `await` (`regEndsFrame`):
+  Code with a loop: an entry at one, or a header whose entry escape
+  analysis dropped (`unentered`), where the frame goes on in the code kept
+  for it (below); code with none, whose frame's invocation ends in the
+  interpreter, does not spend its caller's check. Not where it left at a
+  `ret`, a `yield` or an `await` (`regEndsFrame`):
   the frame's run ends or suspends there, and the next back edge is
   another frame's, whose budget the check would spend for no sample -- a
   generator's code leaving at each `yield` had kept its for...of loop's
@@ -734,7 +738,17 @@ register pc too, its objects made) and go on in that code, kept beside the funct
 for the frames that wait there next and let go of with it
 (`jitRegLoopCode`), as the stack form's `jitLearnLoopEntry` has it. A run
 in it stays in it at its exits while the function's code is the one it
-was compiled beside. `FrameAt` is a header's register pc, the unit escape
+was compiled beside. Each frame that goes on in it from other code is
+counted (`regGoOnFrom` says which code's run left it); past
+`jitFramesLeaving` of them, three calls in four having left, the header is
+learned as one Go goes on at (`jitLearned`'s `resumed`, the feedback's
+`Resumed`) and the function compiled again with that entry, its objects
+made there, the kept code going with the code it was kept beside
+(`jitRegFramesLeave`, the stack form's `jitFramesLeave`): each such call had
+paid the exit's objects and a run of the kept code for the few turns
+before it left. An entry at a loop's header the build did not mark `OSR`
+-- a header learned so, any header of a generator's code -- is a loop entry
+all the same (`jitRegShape`). `FrameAt` is a header's register pc, the unit escape
 analysis compares with its headers' PCs. Any compile a frame waits at a
 loop for -- the check that spends the budget (`jitRegLoop`), a compile
 for what the code learned made in a run of a function hardly called yet,
