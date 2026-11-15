@@ -695,13 +695,14 @@ func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 		return ssa.InlineSite{}, false
 	}
 	argc := int(w.X())
-	sites, objs, cls := f.regCallTargets(pc, w, argc, method)
-	if len(sites) != 1 || sites[0].ByCode != 0 || sites[0].ArrowThis || sites[0].Via != 0 {
+	var t jitRegTargets
+	f.regCallTargets(&t, pc, w, argc, method)
+	if t.n != 1 || t.sites[0].ByCode != 0 || t.sites[0].ArrowThis || t.sites[0].Via != 0 {
 		// One through Function.prototype.call, G.call(x, ...), is called
 		// natively, never inlined, as the stack form's (jitCalledVia).
 		return ssa.InlineSite{}, false
 	}
-	site, o, cl := sites[0], objs[0], cls[0]
+	site, o, cl := t.sites[0], t.objs[0], t.cls[0]
 	if cl.fn == f.fb.fn || cl.fn == f.fb.keep().fn || jitNoInline != nil && jitNoInline(cl.fn) {
 		return ssa.InlineSite{}, false
 	}
