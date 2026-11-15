@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"sync"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
@@ -166,6 +167,21 @@ type regLowering struct {
 	// not the instruction before falling to it (regJumpIns).
 	ins []int
 }
+
+// regScratch is what a lowering grows its program's instructions in
+// (regLowering's code, origin and patch), which the program is given
+// copies of at their lengths: grown an instruction at a time, they had
+// been twice what the program keeps. It is kept from one lowering for the
+// next (regScratchPool); an instruction holds no pointer.
+type regScratch struct {
+	code   []ir.Instruction
+	origin []uint32
+	patch  []bool
+}
+
+// regScratchPool holds the scratch no lowering has. Separate runtimes
+// lower at once, each lowering with one of its own.
+var regScratchPool = sync.Pool{New: func() any { return new(regScratch) }}
 
 // emit appends in, of the current register instruction's origin; a
 // Target it has is a register pc where jump is set.
@@ -609,6 +625,12 @@ func lowerRegLits(rc *bytecode.RegCode, fn *bytecode.Function, m lowering, litHo
 		return nil, err
 	}
 	l := &regLowering{rc: rc, fn: fn, m: m, scratch: rc.NumRegs + len(fn.Upvalues), this: -1, litHosts: litHosts, ins: regJumpIns(rc, reach)}
+	ls := regScratchPool.Get().(*regScratch)
+	l.code, l.origin, l.patch = ls.code[:0], ls.origin[:0], ls.patch[:0]
+	defer func() {
+		ls.code, ls.origin, ls.patch = l.code[:0], l.origin[:0], l.patch[:0]
+		regScratchPool.Put(ls)
+	}()
 	derived := fn.Kind == bytecode.KindDerivedConstructor
 	if derived {
 		// A derived constructor's this binding, past the captured
@@ -650,7 +672,7 @@ func lowerRegLits(rc *bytecode.RegCode, fn *bytecode.Function, m lowering, litHo
 	for pc, i := range start {
 		starts[pc] = int32(i)
 	}
-	p := &ir.Program{Code: l.code, Origin: l.origin, Starts: starts, Maps: make([]ir.StateMap, len(l.code)),
+	p := &ir.Program{Code: slices.Clone(l.code), Origin: slices.Clone(l.origin), Starts: starts, Maps: make([]ir.StateMap, len(l.code)),
 		Regs: rc.NumRegs, Locals: l.scratch + l.most, ParamBase: 2, Params: rc.Params,
 		UpvalueBase: rc.NumRegs, Upvalues: len(fn.Upvalues),
 		ArrowThis:        fn.Kind == bytecode.KindArrow && fn.UsesThis,
