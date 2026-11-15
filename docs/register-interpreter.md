@@ -616,8 +616,9 @@ work to, and every other architecture's interpreter. arm64's are amd64's
 handler for handler, in its instructions (nativegen's `arm64*.go`);
 what follows says amd64's registers, and arm64's where they differ.
 `runReg` hands its frame to `nativeRun` before its loop, whose
-`nativeLoop` enters the code and is what the code returns to (here
-`nativeRun` for short); `QJS_NONATIVE` set in the
+`nativeLoop` enters the code, by its loop `nativeDrive`, which is what
+the code returns to (here `nativeRun` for short; a built-in's callback
+kept ready enters it by `nativeCallbackRun`, below); `QJS_NONATIVE` set in the
 environment (read once, `regNativeOn`) keeps the frames in the Go table's
 loop, to compare the two and as an escape hatch.
 
@@ -790,8 +791,12 @@ no code is called through `nativeCallH` with none of an exit's work:
 `new_array_e`'s literal (`nativeLit`), the instruction and the budget
 kept in the context and the pinned registers put back after. A call of
 the built-in a site cached (`regCallNative`) is made the same way
-(`light`): `nativeBuiltin`, a function of a handler's form, makes
-`rhCallW`'s call of it, `regNative`, and returns to the exit stub's code
+(`light`): `nativeBuiltin`, a function of a handler's form, applies
+one that needs no frame -- Math's functions, push and pop, a native leaf
+whose check passes -- first, with none of an exit's state (the frame's
+pc, the kept pc), since it throws nothing and runs no code (`string_at`
+61.0 to 52.0 ns on a Ryzen 5 3600, `date_now` 42.0 to 38.0), and makes
+anything else as `rhCallW` would, by `regNative`, and returns to the exit stub's code
 after its call (`exitAfter`), which goes on at the pc it gives or ends
 the frame, so that a built-in that throws or calls back is the exit's
 case; what it saves is the exit's work before the call -- no state to
@@ -951,21 +956,39 @@ arguments as its slice, without copying.
 
 A callback a built-in calls many times over -- a sort's comparator, the
 callback of forEach, map, filter, some, every, find, reduce and theirs of
-typed arrays -- is kept ready from one call to the next where it is a
-frame's (`regCallback`): its window reserved at the stack's top once,
-and natively its code entry's state and context kept too, so that each
-call writes the window's registers and the frame record and runs the
-code (`nativeLoop`), with none of `callDirect`'s, `regDirect`'s and
-`regEnterW`'s work or a code entry made anew. The frame record is pushed
-for the call alone: what Go runs between two calls -- a comparator's
-result converted by its `valueOf` -- finds no frame of it. A leaf, which
-`regDirect` answers without a frame, is called as before, but for one
-whose frameless run has given up (`pureMiss`), which `regDirect` enters
-with a frame: a sum of BigInts (`typed_i64_reduce` 26.4 to 17.1 ns, the
-tree 24.3; `typed_u64_forEach` 54.3 to 44.8, the tree 48.3).
-`typed_i64_sort`, whose comparator of BigInts is no leaf, went from 199.7
-to 142.3 ns natively (the tree 153.7) and from 206 to 167 by the Go
-table; `array_reduce_upvalue` from 23.5 to 18.1.
+typed arrays, a replacement function of `replace`, `JSON.parse`'s reviver
+-- is kept ready from one call to the next where it is a frame's
+(`regCallback`): its window reserved at the stack's top once, and
+natively its code entry's state and context kept too. Each call writes
+the window's registers and the frame record and enters the code
+(`nativeCallbackRun`): where the last call returned with no exit, the
+state and the context's top frame are still the frame's, and only the
+first instruction and the budget are given before the entry; a return
+read from the context with nothing else to undo. Anything else -- an
+exit, a throw, a frame given to a callee in place -- goes on as
+`nativeLoop` does (`nativeDrive`), and the next call makes the state
+and the top frame again. The frame record is pushed for the call alone:
+what Go runs between two calls -- a comparator's result converted by its
+`valueOf` -- finds no frame of it. A leaf is entered so with a frame too
+-- `x => x === k`, a body of the stack form's frameless evaluator
+(`pureCallAt`), is cheaper entered natively (`array_some` 50.9 to 42.5
+ns, `typed_find` 52.7 to 44.7) -- but a short straight body of numbers
+and upvalues (`regLeafCode`), `acc + x` or `a - b`, which `regLeafRun`
+runs in the window faster than any entry, and one that returns a
+parameter or a constant, which `callDirect` answers from its arguments.
+A runtime that runs the JIT keeps its leaves on `callDirect`, which
+counts them, and so does the Go table (`QJS_NONATIVE`), whose loop,
+entered for each call, is slower than the frameless evaluators. `array_reduce_upvalue` went from 43.6 to 33.6 ns,
+`array_forEach_this` from 39.4 to 29.4, `typed_sort`, whose comparator
+is `regLeafRun`'s, from 226 to 205 (the Ryzen 5 3600). A dense array's
+element is read in the methods' loops at once (`arrayLike.dense`), with
+no count of a step, which the callback's call makes.
+
+A reviver that cannot see a third argument -- fewer than three
+parameters, none a rest parameter, no arguments object and no direct
+eval, in a runtime with no debugger and not of Node's quirks -- is not
+given the context object, and the parse keeps no records of the source
+text for it (`seesThirdArg`): `json_parse_reviver` 4,667 to 1,524 ns.
 
 Stage 1 keeps the heap frame for what reads it today -- stack traces, the
 debugger, closures' `this`, errors' positions -- and writes only the fields

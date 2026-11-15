@@ -356,6 +356,15 @@ type Runtime struct {
 	// tree tier, as a runtime with the JIT runs it (regOn), for tests of
 	// those tiers.
 	oldTiers bool
+	// keyVictims is keyAtoms' second way, Go's alone: the entry a key
+	// string took a slot from, where two hot keys whose strings share a
+	// slot would otherwise each evict the other at every conversion
+	// (keyRemember). Made at the first eviction. After everything the
+	// interpreter reads, so that none of it moves.
+	keyVictims *[256]keyAtom
+	// caseMemo remembers the case conversions of short ASCII strings by
+	// their text (asciiCaseMemo); made at the first.
+	caseMemo *caseMemo
 	// jitFields is the optional native tier's state, empty in builds
 	// without it. It comes after everything the interpreter reads, so that
 	// a build with the tier moves none of their offsets, and before the last
