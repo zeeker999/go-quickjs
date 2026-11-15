@@ -2799,7 +2799,13 @@ Allocation). A compile the budget has no room for leaves
 no entry, and is not compiled again until the cache has let some code go
 (its `life`'s `deferred` and `generation`, as the stack form's compiles are
 deferred): asked again at every sample, a callee of Mandreel's was compiled
-again at each call Go made of it. A first compile asks for the room its
+again at each call Go made of it. Deferred, the function warms up again --
+its budget begun anew, which its back edges and calls count down
+(`jitRegArmEdges`, `jitRegArm`) -- before it is asked for again, as the
+stack form's deferred entry has its function warm up again (`tryJITAt`), and
+an ask finds the deferral by a lookup (`jitRegForAs`); its budget left
+spent, every check of its loop and every call Go made of it had asked, a
+hundred thousand times for a loop of as many turns. A first compile asks for the room its
 code is likely to hold (`perInstr`) before it lowers anything; a compile
 again of a function whose code the cache holds asks only for the room its
 last compile was short of (`reoptRoom`), as the stack form's

@@ -514,8 +514,20 @@ func (r *Runtime) jitRegHot(cl *closure, c *regCode, work int64) *jitRegEntry {
 	e := r.jitRegFor(cl, c)
 	switch {
 	case e == nil:
-		// No room now, or compiled in the background: asked again at the
-		// next sample, the budget spent.
+		if life.deferred && life.generation == r.jit.generation || !jitCompiles(cl.fn, r.jitBudget()) {
+			// No room for it now: it warms up again, and is asked for
+			// again once it has spent another budget (jitRegArmEdges,
+			// jitRegArm), as the stack form's deferred entry has its
+			// function warm up again before it looks (tryJITAt) -- which
+			// then costs a lookup until the cache lets code go
+			// (jitRegForAs). Its budget left spent, every back edge's
+			// check and every call Go made for it asked again: millions
+			// of asks in a run whose JIT memory was full.
+			life.tierBudget, life.tierMark = jitRegBudget(r.jitCallThreshold, c), jitFeedbackMark(cl)
+			return nil
+		}
+		// Compiled in the background: installed at a later check, asked
+		// again at the next sample, the budget spent.
 		return nil
 	case e.code == nil:
 		// Refused for good, but for host operations alone, asked again once
