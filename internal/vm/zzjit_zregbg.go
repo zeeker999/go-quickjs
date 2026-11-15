@@ -284,13 +284,14 @@ func (r *Runtime) jitRegInstall(j *jitRegJob) {
 	}()
 	e := j.e
 	old := s.regCache[j.key]
-	if j.key.gone() || e.life.deopts != j.deopts || old != nil && s.regLevelsOf(old) != 0 {
+	called := old != nil && s.regCalled(old)
+	if j.key.gone() || e.life.deopts != j.deopts || called {
 		// Gone; or deoptimized since, compiled for what it has learned
 		// once a budget is spent (jitRegInvalidate); or run by a native
 		// call under way, which finds its code in the cache (jitRegLevelAt),
 		// asked again for what it learned once that is due.
 		s.bgDiscarded++
-		if old != nil && s.regLevelsOf(old) != 0 && old.code != nil && !old.invalid {
+		if called && old.code != nil && !old.invalid {
 			r.jitRegReopt(j.cl, old)
 		}
 		return

@@ -223,15 +223,15 @@ func (r *Runtime) jitRegGenLearned(cl *closure, e *jitRegEntry) {
 
 // jitRegSuspend suspends f, a generator's or an async function's frame
 // running c with its window at wb, at register pc rpc, a yield, a yield*,
-// an await or the end of the parameters its native code left at, as the interpreter's yield and
-// regSuspend do: the pc past the instruction kept for the resumption,
-// which enters native code there (regGenRun), and the value handed out.
-// It returns the suspension, the runtime's own, which the frame's run
-// ends in as the interpreter's would, or nil where the interpreter is to
-// run the instruction: an await its job may go on past in place
-// (regSuspend), and any other instruction. Left to the interpreter, each
-// suspension was a run ended there, the frame handed to runReg only to
-// suspend: generator_busy's every yield.
+// an await or the end of the parameters its native code left at, as the
+// interpreter's yield and regSuspend do: the pc past the instruction kept
+// for the resumption, which enters native code there (regGenRun), and the
+// value handed out. It returns the suspension, the runtime's own, which
+// the frame's run ends in as the interpreter's would, or nil where it does
+// not suspend: an await its job goes on past in place (regAwaitsInPlace),
+// which regWhole runs before this is asked, and any other instruction.
+// Left to the interpreter, each suspension was a run ended there, the
+// frame handed to runReg only to suspend: generator_busy's every yield.
 func (r *Runtime) jitRegSuspend(f *frame, c *regCode, wb, rpc int) *suspendSignal {
 	if c == nil || rpc < 0 || rpc >= len(c.rc.Code) {
 		return nil
@@ -245,10 +245,9 @@ func (r *Runtime) jitRegSuspend(f *frame, c *regCode, wb, rpc int) *suspendSigna
 		f.savedSP = rpc + 1
 		return sig
 	case bytecode.RAwait:
-		if f.regKind == regFrameAwaitJob && !r.HasPendingJobs() {
-			if _, ok := r.regSettled(r.stack[wb+int(w.B())]); ok {
-				return nil
-			}
+		if r.regAwaitsInPlace(f, w, wb) {
+			// Gone on from in place: regWhole runs it (jitRegRun).
+			return nil
 		}
 	case bytecode.RYieldStar, bytecode.REndParams:
 	default:

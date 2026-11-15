@@ -416,7 +416,13 @@ the function's key:
   `jitCallUnsettled` asks -- after `jitCallsToInline` calls of built-ins
   (`jitRegCallSettle`) a site is settled as one Go makes (`jitCallDone`),
   and its calls ask nothing more; a construction's, or a call of a
-  function with code, keeps it unsettled;
+  function with code, keeps it unsettled. A construction nothing taught
+  yet, of the function a global's or a captured binding's read before it
+  holds now (`regConstructorNow`), is seeded at a compile
+  (`jitRegSeedConstruct`), in the code's own frame and in a callee
+  inlined, whose own code may never be compiled, as the stack form's
+  compiles seed one (`jitSeedCalls`, `jitCalleeObjectAt`); the
+  construction checks its function;
 - the literals' pools by register pc (`Literal`: `new_object`'s,
   `new_object_lit`'s, `new_array`'s, `new_array_k`'s and `new_regexp`'s,
   made by `jitObjectLiteral`, `jitArrayLiteral`, `jitRegSharedLiteral` and
@@ -717,11 +723,16 @@ that jump goes over (`lowerReg`'s entries). The suspensions -- `yield`,
 whole (`regWholeRuns`). At a `yield`, an `await`, a `yield*` or the
 parameters' end, Go suspends the frame itself (`jitRegSuspend`), as the
 interpreter would and the stack form's `jitSuspend` does: the pc past it
-kept for the resumption, the run not ended in the interpreter -- an `await`
-an await job may go on past in place (`regSuspend`) and a delegation's step
-are left to the interpreter, which goes on with the frame there. Handed to
+kept for the resumption, the run not ended in the interpreter. Handed to
 the interpreter only to suspend, every `yield` of a generator Go resumed
-had been a run ended there. A
+had been a run ended there. An `await` the interpreter would go on from
+in place Go makes at the code's exit instead (`regAwaitsInPlace`), native
+code going on at its next entry: the frame resumed by its await's job,
+the queue's last, the value awaited settled. The register interpreter's
+await goes on in place so where the stack form's suspends; left to it, a
+busy loop's frame ran in the interpreter from its first settled await
+on. A delegation's step is left to the interpreter, which goes on with
+the frame there. A
 synchronous generator's code a loop's step or a call of `next` resumed
 natively suspends it at a `yield` itself (see [Control
 flow](#control-flow), "Generators' steps"). A generator's code is compiled
@@ -1871,11 +1882,16 @@ reads its dense storage or is done (`ssa.CallSite`'s `ForIn`, `ForOf`,
 
 **Loops' steps.** A for...of's or a for...in's step (`iter_next`, an
 `ir.IterStep` native code does not make itself) is a call of Go of the
-step (`ssa.CallSite`'s `Step`) that runs the register instruction on the
-frame as an instruction run whole is (below, `jitRegWhole`): the cursor's
-register given the code's value, the value it steps to the call's result,
-or the uninitialized value where the loop is done, as the stack form's call
-of Go steps its cursor.
+step (`ssa.CallSite`'s `Step`). Of a cursor over an iterator whose `next`
+is no generator's -- the script's, a Map's or a Set's -- Go makes the step
+itself, as the stack form's call of Go does (`jitCallMade`'s `iterNext`):
+the `next` called as register code calls it, its result's `done` and
+`value` read (`regStepNext`), by `jitRegStepMade`. Any other it runs as
+the register instruction on the frame, as an instruction run whole is
+(below, `jitRegWhole`): the cursor's register given the code's value. The
+value it steps to is the call's result, or the uninitialized value where
+the loop is done; what throws, or the runtime stopped, the exit at the
+call finishes (`regPending`, `regFinishCall`).
 
 **Instructions run whole.** A whole Host (`ir.Instruction`'s `Whole`) is
 a call of Go (`ssa.CallSite`'s `Whole`, `abi.GoCallWhole`) that runs the
@@ -2150,15 +2166,24 @@ inlined frames whose innermost state is in the last context
 (`ssa.OpFrameRoom`) found too few: left there at every call, it had had
 the call no longer inlined, and the closures given to the callee made.
 
-While Go runs beside them, every level's code is held: the cache neither
-drops it nor compiles the function again until the level is done, so that
-the code a level runs is its function's in the cache for as long as it
-runs. A level Go found the code of pins it (`jitRegEntry`'s `levels`); one
-a call of Go put off holds it by its context, whose callee returns into it
-(`ReturnTo`, `SSACode.Contains`), which the cache counts only when it asks
--- before it compiles the function again or lets the code go
+While Go runs beside them, every level's code is held: the cache does not
+drop it until the level is done. A level Go found the code of pins it
+(`jitRegEntry`'s `levels`); one a call of Go put off holds it by its
+context, whose callee returns into it (`ReturnTo`, `SSACode.Contains`),
+which the cache counts only when it asks -- before it lets the code go
 (`regLevelsOf`) -- so that a call of Go pins nothing for the levels below
-it. Go finds a level's code by its closure (`closureCode`'s `jitReg`)
+it. The function is not compiled again while a native call of it has not
+returned -- a context a native call runs in (`abi.LiveCall`) is its
+function's (`regCalled`), as the stack form's `called` -- since Go finds
+the code of such a call by its function's. A level Go unwinds is no such
+call: its context is cleared as Go takes it (`jitRegUnwind`), and it goes
+on in the code it holds, natively where its call returns to, kept until it
+is done. So a recursion's function is compiled again while Go finishes
+its levels, as V8 installs new code while older frames run the old: the
+new code's calls through the link enter it, and the levels finish in the
+old. Counted as levels instead, a recursion's outer levels had kept it
+from being compiled again for what it learned for good. Go finds a
+level's code by its closure (`closureCode`'s `jitReg`)
 while the cache holds it (`jitRegEntry`'s `cached`), the cache's key
 otherwise or where that is not code of this realm (`jitRegLevelAt`). The
 code stays the level's after the call of Go too, the level going on in it

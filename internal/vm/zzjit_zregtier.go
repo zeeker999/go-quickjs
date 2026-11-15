@@ -467,19 +467,22 @@ func (r *Runtime) jitRegReopt(cl *closure, e *jitRegEntry) {
 // to be compiled again for what it learned (jitRegReopt), as
 // jitLearnedDue reports the stack form's: once it has spent a budget since
 // it began to learn (jitRegSpent), with nothing learned meanwhile
-// (jitLearnedMark), which raises what is left. Not while a native call
-// runs it, which finds its code in the cache (jitRegLevelAt), nor while it
-// is compiled in the background.
+// (jitLearnedMark), which raises what is left. Not while a native call of
+// it has not returned (regCalled), which finds its code in the cache
+// (jitRegLevelAt), nor while it is compiled in the background; but while
+// Go finishes levels of it, or runs it, which go on in their own code, as
+// V8 installs new code while older frames are in the old.
 func (r *Runtime) jitRegLearnedDue(cl *closure, e *jitRegEntry) bool {
-	return r.jitRegLearnedDueWith(cl, e, 0)
+	return r.jitRegLearnedDueWith(cl, e, len(r.jit.ssaCtxs))
 }
 
-// jitRegLearnedDueWith is jitRegLearnedDue for a call of Go running own of
-// the native calls that run e's code (jitRegCompileDueNow), whose leaving
-// unwinds them: not while any other runs it.
-func (r *Runtime) jitRegLearnedDueWith(cl *closure, e *jitRegEntry, own int) bool {
+// jitRegLearnedDueWith is jitRegLearnedDue for a call of Go whose leaving
+// unwinds the native calls in the contexts from limit on
+// (jitRegCompileDueNow): not while a native call of e's code in one below
+// limit has not returned.
+func (r *Runtime) jitRegLearnedDueWith(cl *closure, e *jitRegEntry, limit int) bool {
 	life := e.life
-	if e.invalid || e.code == nil || life == nil || !life.reopt || r.jit.regPendingJobs[e.key] != nil || r.jit.regLevelsOf(e) != own {
+	if e.invalid || e.code == nil || life == nil || !life.reopt || r.jit.regPendingJobs[e.key] != nil || r.jit.regCalledBelow(e, limit) {
 		return false
 	}
 	c := cl.reg
@@ -701,7 +704,7 @@ func (r *Runtime) jitRegResumeSeen(f *frame, c *regCode, e *jitRegEntry, rpc int
 		return nil
 	}
 	l.resumed = append(l.resumed, uint32(rpc))
-	if r.jit.regPendingJobs[e.key] != nil || r.jit.regLevelsOf(e) != 0 {
+	if r.jit.regPendingJobs[e.key] != nil || r.jit.regCalled(e) {
 		r.jitRegReopt(f.cl, e)
 		return nil
 	}
@@ -1094,7 +1097,7 @@ func (r *Runtime) jitRegFramesLeave(cl *closure, c *regCode, e *jitRegEntry, tar
 		return nil
 	}
 	life.resumed = append(life.resumed, uint32(target))
-	if r.jit.regPendingJobs[e.key] != nil || r.jit.regLevelsOf(e) != 0 {
+	if r.jit.regPendingJobs[e.key] != nil || r.jit.regCalled(e) {
 		// Compiled in the background, or run by native calls under way:
 		// compiled for it once due.
 		r.jitRegReopt(cl, e)
@@ -1133,7 +1136,7 @@ func (r *Runtime) jitRegKeptGone(cl *closure, c *regCode, e *jitRegEntry) *jitRe
 	life := e.life
 	life.keptGone = true
 	s := r.jit
-	if s.regPendingJobs[e.key] != nil || s.regLevelsOf(e) != 0 {
+	if s.regPendingJobs[e.key] != nil || s.regCalled(e) {
 		r.jitRegReopt(cl, e)
 		return nil
 	}
@@ -1222,11 +1225,11 @@ func (r *Runtime) jitRegCompileDueNow(run *jitRegRun, idx int) bool {
 	if e == nil || e.life == nil || !e.life.reopt {
 		return false
 	}
-	own := run.own
-	if own < 0 {
+	limit := idx
+	if run.own < 0 {
 		// A native callee's: the calling level, and those below it of the
-		// call's that run e's code too (jitRegLevelsIn).
-		own = 1 + r.jit.regLevelsIn(e, run.root, idx)
+		// call's, from the run's context on, which its leaving unwinds.
+		limit = run.root
 	}
-	return r.jitRegLearnedDueWith(run.f.cl, e, own)
+	return r.jitRegLearnedDueWith(run.f.cl, e, limit)
 }

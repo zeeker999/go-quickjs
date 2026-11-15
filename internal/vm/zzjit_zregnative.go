@@ -200,7 +200,7 @@ func (r *Runtime) jitRegForAs(cl *closure, c *regCode, callee bool) *jitRegEntry
 		if !e.invalid && !e.hostOnly {
 			return e
 		}
-		if s.regLevelsOf(e) != 0 {
+		if s.regCalled(e) {
 			// Run by native calls under way, which find their code in the
 			// cache (jitRegLevelAt): compiled again once they are done.
 			return nil
@@ -677,27 +677,6 @@ func (s *jitState) regInUse(e *jitRegEntry) bool {
 // native calls only their contexts say are under way (regCalled).
 func (s *jitState) regRunning(e *jitRegEntry) bool {
 	return e.runs != 0 || s.regPendingJobs[e.key] != nil || s.regLevelsOf(e) != 0
-}
-
-// regCalled reports whether a native call of e's function has not
-// returned: a context a native call's callee runs in (abi.LiveCall) is
-// its closure's -- native code marks the context, its closure stored,
-// before the call, and clears it as the callee returns -- as called finds
-// the stack form's. None is while no run's native code is (ctxTop).
-func (s *jitState) regCalled(e *jitRegEntry) bool {
-	if s.ctxTop == 0 {
-		return false
-	}
-	fn := e.key.Value()
-	if fn == nil {
-		return false
-	}
-	for _, c := range s.ssaCtxs {
-		if c.Live == abi.LiveCall && c.Closure != nil && (*closure)(c.Closure).fn == fn {
-			return true
-		}
-	}
-	return false
 }
 
 // regCalledFns is the functions native calls under way run (regCalled),
@@ -2170,6 +2149,10 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 		// A loop's step over a generator native code may resume once
 		// compiled again (jitRegGenStepSeen), its cursor the step's operand.
 		r.jitRegGenStepSeen(f, run.e, rpc, jitGoArg(ctx, 0))
+		if st := cursorOf(jitGoArg(ctx, 0)); st != nil && !st.done && st.arr == nil && !st.forIn &&
+			(r.genNextFn == nil || st.next.ref != unsafe.Pointer(r.genNextFn)) {
+			return r.jitRegStepMade(ctx, idx, run, rpc, st)
+		}
 	}
 	if kind == abi.GoCallWhole || (kind == abi.GoCallRest || kind == abi.GoCallStep) && (op == bytecode.RIterRest || op == bytecode.RIterStep) ||
 		kind == abi.GoCallStep && op == bytecode.RIterNext || kind == abi.GoCallForOf && op == bytecode.RForOfStart ||
@@ -2423,6 +2406,46 @@ func (r *Runtime) jitRegNativeMade(o *Object, fd *funcData, this Value, args []V
 		err = r.chargeResult(v)
 	}
 	return v, err
+}
+
+// jitRegStepMade makes, for native code, the for...of loop's step at
+// register pc rpc of run's code -- its cursor st, of an iterator whose
+// next is no generator's, which the step calls -- as the stack form's
+// call of Go makes a loop's step (jitCallMade's iterNext): the step
+// itself (regStepNext, as iter_next steps such a cursor), the next called
+// as register code calls it, and its value, or, the cursor done, the
+// uninitialized value, to the call's keep cell, which the code takes for
+// the loop's end. Run whole (jitRegWhole) instead, as the interpreter's
+// instruction on the frame, its registers saved and put back around it,
+// each step had cost a third more than the call of next it made: a
+// for...of over an iterator written in script, microbench_extra's
+// iterator_for_of, twice the stack form's time.
+func (r *Runtime) jitRegStepMade(ctx *abi.Context, idx int, run jitRegRun, rpc int, st *iterState) bool {
+	s := r.jit
+	f, c := run.f, run.c
+	w := regAt(c.code, rpc)
+	r.noteRegGoCall(w, false, Value{})
+	s.goCalls++
+	f.pc = regSrc(c, rpc) + 1
+	last, shared := s.ssaCtx, s.ssaSharedGen
+	goCallDepth := s.goCallDepth
+	s.goCallDepth = r.frameDepth + 1
+	v, more, err := r.regStepNext(st)
+	s.goCallDepth = goCallDepth
+	s.ssaCtx = last
+	if s.ssaSharedGen != shared {
+		r.jitShareContexts(idx, f)
+	}
+	if err == nil && !more {
+		// Done: the loop's end (regFinishCall's).
+		v = uninitialized
+	}
+	if err != nil || r.stopped != nil || run.e.invalid || run.leave || r.jitRegCompileDueNow(&run, idx) {
+		s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: v, err: err}
+		return false
+	}
+	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
+	return true
 }
 
 // jitRegCallUnsettled reports whether the learning of a call of Go
