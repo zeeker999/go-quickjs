@@ -338,7 +338,9 @@ func (m *memoryMeter) walk(r *Runtime) int64 {
 	// Everything else the runtime holds: its realms, jobs, modules, atoms.
 	// The host's job queue and the queue of WeakMaps that have gone are
 	// written by other goroutines; the one holds only Go functions, and what
-	// the other's maps hold is on their keys, which are counted there.
+	// the other's maps hold is on their keys, which are counted there; the
+	// call caches' weak list of templates beside them (weakMapRegistry's
+	// calls) is the engine's bookkeeping, none of it the script's.
 	rv := reflect.ValueOf(r).Elem()
 	for i := 0; i < rv.NumField(); i++ {
 		switch rv.Type().Field(i).Name {

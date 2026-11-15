@@ -778,10 +778,10 @@ type Program struct {
 	// ArgumentParams, where not 0, is how many parameters a sloppy
 	// function's mapped arguments object aliases where the code assigns
 	// one, or a closure may, and never makes the object: a read of
-	// arguments[k] (ArgumentRead) gives Go them past its operands, as they
-	// are -- in a cell where a closure captured one -- and Go answers a
-	// key that is one's alias with it, the call's argument otherwise, as
-	// the object would.
+	// arguments[k] (ArgumentRead) gives Go them -- the slots from
+	// ParamBase -- past its operands, as they are -- in a cell where a
+	// closure captured one -- and Go answers a key that is one's alias
+	// with it, the call's argument otherwise, as the object would.
 	ArgumentParams int
 	// Forwards marks code whose apply_arguments -- f.apply(x, arguments),
 	// a Host -- hands on the arguments its frame was given, which it reads
