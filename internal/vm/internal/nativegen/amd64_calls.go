@@ -400,8 +400,11 @@ func (g *nativeGen) call() {
 	a.Jmp(through)
 	a.StoreImm(RDI, ncMiss, 1)
 	g.late = append(g.late, func() {
+		reflect := a.NewLabel()
 		a.Bind(notPush)
-		g.genNext(light)
+		g.genNext(reflect)
+		a.Bind(reflect)
+		g.reflect(light)
 		a.Bind(jitCall)
 		g.light(ncJITCallFn)
 		a.Bind(through)
@@ -500,7 +503,7 @@ func (g *nativeGen) enter(mode int, jitCall Label) {
 	a.Store(RDI, scr(sRC), R8)
 	// The arguments where they lie: none past the parameters it keeps,
 	// and no new.target.
-	if mode == enterSuper || mode == enterThrough || mode == enterApply {
+	if mode == enterSuper || mode == enterThrough || mode == enterApply || mode == enterReflect {
 		a.Load(RDX, RDI, scr(sArgc))
 	} else {
 		a.MovRR(RDX, RAX)
@@ -662,7 +665,7 @@ func (g *nativeGen) enter(mode int, jitCall Label) {
 	a.MovImm(RCX, uint64(regFrameCall))
 	a.Store8(RSI, offFRegKind, RCX)
 	g.frameArgs()
-	if mode == enterNew || mode == enterSuper {
+	if mode == enterNew || mode == enterSuper || mode == enterReflect {
 		// A construction's or a super()'s: its kind, its new.target the
 		// callee or super()'s, and a derived class's this binding, with
 		// the frame's this.
@@ -675,7 +678,7 @@ func (g *nativeGen) enter(mode int, jitCall Label) {
 		a.Store8(RSI, offFRegKind, RCX)
 		a.Load(R8, RDI, ncObjBits)
 		a.Store(RSI, offFNewTgt, R8)
-		if mode == enterSuper {
+		if mode == enterSuper || mode == enterReflect {
 			a.Load(RCX, RDI, scr(sV1))
 		} else {
 			a.Load(RCX, RDI, scr(sE))
@@ -827,7 +830,64 @@ const (
 	// enterApply is apply_args's of its target (applyW), its argument
 	// count in the scratch's sArgc, its value R[A].
 	enterApply
+	// enterReflect is a construction's Reflect.construct makes (reflect),
+	// its argument count in the scratch's sArgc and its new.target in
+	// sV1, nativeReflect's.
+	enterReflect
 )
+
+// reflect is call_w's and call_method_w's call of the realm's
+// Reflect.construct, the built-in its site cached: nativeReflect, called
+// through callH with no exit, makes the construction's object and its
+// window at the stack's top, and the constructor is entered as new_w
+// enters one (enter), its new.target the one given. Another built-in, and
+// a construction nativeReflect leaves to Go: the built-in's call (light).
+func (g *nativeGen) reflect(light Label) {
+	a := g.a
+	after, done := a.NewLabel(), a.NewLabel()
+	a.MovRR(RCX, RAX)
+	a.ShiftImm(Shr, RCX, 48, true)
+	a.Load(R9, RDI, ncCC)
+	a.MovImm(R8, uint64(sizeE))
+	a.Imul(RCX, R8)
+	a.AddMem(RCX, R9, offCCRegCalls)
+	a.Load(R8, RCX, offECallee)
+	a.Load(RDX, RDI, ncRT)
+	a.Load(RDX, RDX, rtRel(0))
+	a.AddMem(RDX, RDI, ncReflect)
+	a.CmpMem(R8, RDX, 0, true)
+	a.Jcc(CondNE, light)
+	a.Store(RDI, ncIP, RBX)
+	a.Store(RDI, ncBudget, R11)
+	a.LeaLabel(R8, after)
+	a.Store(RDI, ncAfter, R8)
+	a.MovRR(RBX, RAX)
+	a.Load(RCX, RDI, ncIP)
+	a.Load(RDX, RDI, ncCodeBase)
+	a.Op(Sub, RCX, RDX, true)
+	a.ShiftImm(Shr, RCX, 3, true)
+	a.MovRR(RSI, RDI)
+	a.MovRR(RAX, R12)
+	a.Load(RDX, RDI, ncReflectFn)
+	a.JmpMem(RDI, ncCallH)
+	a.Bind(after)
+	g.reload()
+	a.MovRR(RCX, RAX)
+	a.Load(RAX, RBX, 0)
+	a.Op(Test, RCX, RCX, true)
+	a.Jcc(CondE, light)
+	a.OpImm(Cmp, RCX, 2, true)
+	a.Jcc(CondE, done)
+	a.Load(RCX, RDI, scr(sE))
+	a.Load(RSI, RDI, scr(sWin))
+	a.Load(R8, RCX, offERC)
+	a.LoadU8(RDX, R8, offRCArgs)
+	a.Store(RDI, scr(sEnt), RDX)
+	a.MovImm(R9, uint64(regCallEnter))
+	g.enter(enterReflect, g.exit)
+	a.Bind(done)
+	g.next()
+}
 
 // applyW is apply_args, f.apply(this, arguments) by the realm's
 // Function.prototype.apply: nativeApply, called through callH with no

@@ -340,3 +340,55 @@ func TestRegNativeLeafInterrupt(t *testing.T) {
 		t.Errorf("call_w exited %d times of 400020 calls", n)
 	}
 }
+
+// nativeReflectSrc constructs by Reflect.construct: a function with
+// alternating new.targets, as Babel's _createSuper does, a class, a
+// derived class, a body that only stores its parameters, arguments of an
+// array with holes and of an array-like object, a new.target that is no
+// constructor, a bound one and a proxy, a prototype replaced and made a
+// primitive, and Reflect.construct replaced by a script's function.
+const nativeReflectSrc = `
+	var out = []
+	function A(x) { this.x = x; this.y = 1; this.t = new.target === A ? "A" : new.target.name }
+	function B() {} function C() {}
+	B.prototype = Object.create(A.prototype); C.prototype = Object.create(A.prototype)
+	class K { constructor(a, b) { this.a = a; this.b = b } }
+	class D extends K { constructor(a) { super(a, 2); this.d = 3 } }
+	function L(p, q) { this.p = p; this.q = q }
+	var bound = A.bind(null), px = new Proxy(function () {}, {})
+	function at(f) { try { return f() } catch (e) { return e.name } }
+	var real = Reflect.construct
+	for (var j = 0; j < 40; j++) {
+		var args = [j]
+		var o = Reflect.construct(A, args, (j & 1) ? B : C)
+		out.push(o.x + o.y, o.t, o instanceof B, at(() => o instanceof C), o instanceof A)
+		var k = Reflect.construct(K, [j, "k"]); out.push(k.a, k.b, k instanceof K)
+		var d = Reflect.construct(D, [j], K); out.push(d.a, d.b, d.d, Object.getPrototypeOf(d) === K.prototype)
+		var l = Reflect.construct(L, [j, 2]); out.push(l.p + l.q)
+		out.push(Reflect.construct(A, [, 2]).x, Reflect.construct(A, { length: 1, 0: "al" }).x)
+		out.push(at(() => Reflect.construct(A, [1], {})), at(() => Reflect.construct(A, [1], bound).x), at(() => Reflect.construct(A, [1], px).x))
+		if (j == 15) C.prototype = { tag: "c2" }
+		if (j == 22) C.prototype = 7
+		out.push(Reflect.construct(A, [j], C).tag)
+		if (j == 30) Reflect.construct = function () { return "mine" }
+		if (j == 35) Reflect.construct = real
+		out.push(String(Reflect.construct(A, [j]).x))
+	}
+	out.join()`
+
+// TestRegNativeReflect checks Reflect.construct's constructions, which
+// the call handler enters, against the Go table: the same answers and
+// errors, marking or not, and a construction with new.targets in turn
+// made with no exit.
+func TestRegNativeReflect(t *testing.T) {
+	was := nativeWarmExits
+	nativeWarmExits = 16
+	defer func() { nativeWarmExits = was }()
+	nativeCheck(t, nativeReflectSrc, `
+		function A(x) { this.x = x; this.y = 1 }
+		function B() {} function C() {}
+		B.prototype = Object.create(A.prototype); C.prototype = Object.create(A.prototype)
+		var s = 0, args = [0]
+		for (var j = 0; j < 1000; j++) { args[0] = j; s += Reflect.construct(A, args, (j & 1) ? B : C).x }
+		String(s)`, bytecode.RCallMW)
+}

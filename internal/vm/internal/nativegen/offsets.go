@@ -222,6 +222,8 @@ var (
 	ncSuperFn    int32
 	ncCallFn     int32
 	ncApplyFn    int32
+	ncReflectFn  int32
+	ncReflect    int32
 	ncMiss       int32
 	offUpSlot    int32
 	offUpClosed  int32
@@ -474,6 +476,8 @@ func loadOffsets() {
 	ncSuperFn = off("nativeCtx.superFn")
 	ncCallFn = off("nativeCtx.callFn")
 	ncApplyFn = off("nativeCtx.applyFn")
+	ncReflectFn = off("nativeCtx.reflectFn")
+	ncReflect = off("nativeCtx.reflect")
 	ncMiss = off("nativeCtx.miss")
 	offUpSlot = off("upvalue.slot")
 	offUpClosed = off("upvalue.closed")

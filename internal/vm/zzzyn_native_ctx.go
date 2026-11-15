@@ -198,6 +198,12 @@ type nativeCtx struct {
 	// applyFn is the func value of nativeApply, which apply_args's
 	// handler calls through callH with no exit.
 	applyFn uintptr
+	// reflectFn is the func value of nativeReflect, which the call
+	// handler calls through callH with no exit for a call of the site's
+	// built-in Reflect.construct, and reflect where a Realm has it
+	// (reflectConstructFn), an offset from the realm running now.
+	reflectFn uintptr
+	reflect   uintptr
 }
 
 // nativeMaxDepth is how deep the native frame stack goes.

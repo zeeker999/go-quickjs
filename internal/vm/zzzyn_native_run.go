@@ -139,6 +139,7 @@ func init() {
 	nativeNewFn = nativeNew
 	nativeSuperFn = nativeSuper
 	nativeApplyFn = nativeApply
+	nativeReflectFn = nativeReflect
 	for _, op := range nativeSlowOnMiss {
 		nativeExitTable[op] = regSlowTable[op]
 	}
@@ -424,6 +425,8 @@ func (r *Runtime) newNativeCtx(st *regState) *nativeCtx {
 	ctx.superFn = *(*uintptr)(unsafe.Pointer(&nativeSuperFn))
 	ctx.callFn = unsafe.Offsetof(Realm{}.callFn)
 	ctx.applyFn = *(*uintptr)(unsafe.Pointer(&nativeApplyFn))
+	ctx.reflectFn = *(*uintptr)(unsafe.Pointer(&nativeReflectFn))
+	ctx.reflect = unsafe.Offsetof(Realm{}.reflectConstructFn)
 	ctx.grow()
 	st.native = ctx
 	return ctx
@@ -1124,6 +1127,98 @@ func regNextFrameClear(r *Runtime) {
 		}
 	}
 }
+
+// nativeReflect is a call of the realm's Reflect.construct, its site's
+// cached built-in, Reflect.construct(F, args, newTarget), made for the
+// call handler through callH with no exit: a construction with F, a
+// constructor new_w's handler enters (regCtorEntered), of a plain array
+// of arguments with no holes, and a new.target, F where none is given, a
+// function whose own prototype is a data property holding an object --
+// its object made as constructWithTarget makes it, of new.target's
+// prototype and of F's root (settled, for a base constructor's), its
+// window made at the stack's top, a derived class's frame given its this
+// binding. It reports 1 for the handler to enter F, the context's super
+// the entry, its new.target the scratch's sNewTgt; 2 where F is a body
+// that only stores its parameters in this, which leafCall has done, R[B]
+// the object; and 0 where the call is Go's (the built-in's). It throws
+// nothing and runs no code.
+//
+//go:nocheckptr
+func nativeReflect(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeCtx) int {
+	r := ctx.st.r
+	a, argc := int(w.A()), int(w.X())
+	if argc < 2 || !regs[a+2].IsObject() || !regs[a+3].IsObject() {
+		return 0
+	}
+	o := regs[a+2].Object()
+	fd := o.fn()
+	if fd == nil {
+		return 0
+	}
+	cl, rc, ok := r.regCtorEntered(o, fd)
+	if !ok {
+		return 0
+	}
+	nt := o
+	if argc > 2 {
+		if !regs[a+4].IsObject() {
+			return 0
+		}
+		nt = regs[a+4].Object()
+	}
+	if nfd := nt.fn(); nfd == nil || nfd.ctorKind == ctorNone || nt.class != ClassFunction {
+		return 0
+	}
+	arr := regs[a+3].Object()
+	if arr.class != ClassArray || arr.flags&objHasSparseElements != 0 {
+		return 0
+	}
+	args := arr.elemsOf()
+	for _, v := range args {
+		if isHole(v) {
+			return 0
+		}
+	}
+	p := nt.getOwnVisible(atomPrototype)
+	if !p.ok() || p.flags()&propAccessor != 0 || !p.value().IsObject() {
+		return 0
+	}
+	proto := p.value().Object()
+	root := r.shapes.ctorRoot(fd, proto)
+	if root != nil && !root.tracked() && fd.ctorKind != ctorDerived {
+		return 0
+	}
+	wb := r.stackTop
+	if wb+2+len(args) > len(r.stack) {
+		return 0
+	}
+	obj := newOrdinary[struct{}](fd, root, proto, root.roomFor(int(cl.fn.ThisProps)))
+	if leaf := cl.fn.Leaf; fd.ctorKind != ctorDerived && leaf != bytecode.LeafNone && leaf != bytecode.LeafPure && leaf != bytecode.LeafForward {
+		if _, done := r.leafCall(cl, obj, args); done {
+			regs[w.B()] = Obj(obj)
+			return 2
+		}
+		return 0
+	}
+	regNextFrameClear(r)
+	win := r.stack[wb : wb+2+len(args) : wb+2+len(args)]
+	win[0], win[1] = Obj(o), Obj(obj)
+	copy(win[2:], args)
+	ctx.scratch[sThisRef] = 0
+	if fd.ctorKind == ctorDerived {
+		ctx.thisRef = r.regThisBinding(rc, Obj(obj))
+		ctx.scratch[sThisRef] = uint64(uintptr(unsafe.Pointer(ctx.thisRef)))
+	}
+	ctx.super = regCallCache{callee: o, cl: cl, rc: rc, kind: regCallEnter}
+	ctx.scratch[sE] = uint64(uintptr(unsafe.Pointer(&ctx.super)))
+	ctx.scratch[sWin] = uint64(uintptr(unsafe.Pointer(&win[0])))
+	ctx.scratch[sArgc] = uint64(len(args))
+	ctx.scratch[sNewTgt] = uint64(uintptr(unsafe.Pointer(nt)))
+	return 1
+}
+
+// nativeReflectFn is nativeReflect's func value, set by init.
+var nativeReflectFn func(*[1 << 16]Value, bytecode.RInstr, int, *nativeCtx) int
 
 // nativeApplyFn is nativeApply's func value, set by init.
 var nativeApplyFn func(*[1 << 16]Value, bytecode.RInstr, int, *nativeCtx) int

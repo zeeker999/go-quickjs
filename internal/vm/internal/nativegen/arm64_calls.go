@@ -342,8 +342,11 @@ func (g *armGen) call() {
 	a.BCond(NE, g.ex(4))
 	notPush := a.NewLabel()
 	g.push(notPush)
+	reflect := a.NewLabel()
 	a.Bind(notPush)
-	g.genNext(light)
+	g.genNext(reflect)
+	a.Bind(reflect)
+	g.reflect(light)
 	a.Bind(light)
 	g.light(ncBuiltinFn)
 	// Another callee than the cache's, of another template: the exit to
@@ -378,7 +381,7 @@ func (g *armGen) enter(mode int, jitCall Label) {
 	a.Store(rCtx, scr(sRC), r8)
 	// The arguments where they lie: none past the parameters it keeps,
 	// and no new.target.
-	if mode == enterSuper || mode == enterThrough || mode == enterApply {
+	if mode == enterSuper || mode == enterThrough || mode == enterApply || mode == enterReflect {
 		a.Load(rD, rCtx, scr(sArgc))
 	} else {
 		a.Ubfx(rD, rW, 8, 8)
@@ -528,7 +531,7 @@ func (g *armGen) enter(mode int, jitCall Label) {
 	a.MovImm(rC, uint64(regFrameCall))
 	a.Store8(rS, offFRegKind, rC)
 	g.frameArgs()
-	if mode == enterNew || mode == enterSuper {
+	if mode == enterNew || mode == enterSuper || mode == enterReflect {
 		// A construction's or a super()'s, as amd64's.
 		kind := regFrameConstruct
 		if mode == enterSuper {
@@ -539,7 +542,7 @@ func (g *armGen) enter(mode int, jitCall Label) {
 		a.Store8(rS, offFRegKind, rC)
 		a.Load(r8, rCtx, ncObjBits)
 		a.Store(rS, offFNewTgt, r8)
-		if mode == enterSuper {
+		if mode == enterSuper || mode == enterReflect {
 			a.Load(rC, rCtx, scr(sV1))
 		} else {
 			a.Load(rC, rCtx, scr(sE))
@@ -719,6 +722,54 @@ func (g *armGen) through() {
 	a.Bind(miss)
 	g.storeImm(rCtx, ncMiss, 1)
 	a.B(g.exit)
+}
+
+// reflect is a call of the realm's Reflect.construct, as amd64's:
+// nativeReflect called through callH with no exit, then the constructor
+// entered; anything else the built-in's call, at light.
+func (g *armGen) reflect(light Label) {
+	a := g.a
+	after, done := a.NewLabel(), a.NewLabel()
+	a.ShiftImm(Lsr, rC, rW, 48, true)
+	a.Load(r9, rCtx, ncCC)
+	a.MovImm(r8, uint64(sizeE))
+	a.Mul(rC, rC, r8)
+	g.addMem(rC, r9, offCCRegCalls)
+	a.Load(r8, rC, offECallee)
+	a.Load(rD, rCtx, ncRT)
+	a.Load(rD, rD, rtRel(0))
+	g.addMem(rD, rCtx, ncReflect)
+	g.cmpMem(r8, rD, 0)
+	a.BCond(NE, light)
+	a.Store(rCtx, ncIP, rIP)
+	a.Store(rCtx, ncBudget, rBud)
+	a.Adr(r8, after)
+	a.Store(rCtx, ncAfter, r8)
+	a.MovRR(rC, rW)
+	a.Load(rD, rCtx, ncCodeBase)
+	a.Op(Sub, rD, rIP, rD, true)
+	a.ShiftImm(Lsr, rD, rD, 3, true)
+	a.MovRR(rS, rCtx)
+	a.MovRR(rW, rRegs)
+	a.Load(rFn, rCtx, ncReflectFn)
+	a.Load(rJ, rCtx, ncCallH)
+	a.Br(rJ)
+	a.Bind(after)
+	g.reload()
+	a.MovRR(rC, rW)
+	a.Load(rW, rIP, 0)
+	a.Cbz(rC, light, true)
+	a.CmpImm(rC, 2, true)
+	a.BCond(EQ, done)
+	a.Load(rC, rCtx, scr(sE))
+	a.Load(rS, rCtx, scr(sWin))
+	a.Load(r8, rC, offERC)
+	a.LoadU8(rD, r8, offRCArgs)
+	a.Store(rCtx, scr(sEnt), rD)
+	a.MovImm(r9, uint64(regCallEnter))
+	g.enter(enterReflect, g.exit)
+	a.Bind(done)
+	g.next()
 }
 
 // applyW is apply_args, as amd64's: nativeApply called through callH

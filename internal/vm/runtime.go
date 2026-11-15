@@ -488,6 +488,9 @@ type Realm struct {
 	// callFn is Function.prototype.call, whose calls callDirect makes
 	// itself; see callThrough.
 	callFn *Object
+	// reflectConstructFn is Reflect.construct, whose calls the call
+	// handler makes constructions it enters itself (nativeReflect).
+	reflectConstructFn *Object
 	// regexpFlagProps is RegExp.prototype's flags getter and the getters it
 	// reads, as the realm made them: see builtinFlags.
 	regexpFlagProps []builtinProp
