@@ -233,6 +233,9 @@ fused tests). The families:
   `add_imm`, `sub_imm`, `mul_imm` with a 16-bit immediate; `inc`, `dec`,
   `neg`, `to_numeric`. Each has a number fast path in its case and calls out
   for anything else.
+- **int32 results:** `add_i32`, `sub_i32` and `add_imm_i32`, a `+` or a
+  `-` and the `| 0` after it in one instruction (`(x + y) | 0`), no
+  intermediate stored.
 - **Bitwise:** `bit_and`, `bit_or`, `bit_xor`, `shl`, `shr`, `ushr`, and
   each with an immediate, and `bit_not`, with an int32 fast path; the
   immediate forms are what Crypto's masks and shifts are.
@@ -242,6 +245,11 @@ fused tests). The families:
   `jseq`, `jsne`, `jeq`, `jne`, `jnullish`, `jundef`, `jtypeof` (a typeof
   compared with a literal): a comparison that decides a jump never makes a
   boolean.
+- **Step-and-branch:** `step_jlt`, `step_jle`, `step_jlt_imm`,
+  `step_jgt_imm`, `step_jge_imm`, `step_jle_upval`: a counter's `++`, `--`,
+  `+= k` or `-= k` and the compare-and-branch after it, its partner, which
+  stays at pc+1 for what the fast path does not make -- a counted loop's
+  bottom test in one dispatch.
 - **Comparisons that produce a value:** `lt`, `le`, `gt`, `ge`, `seq`,
   `sne`, `eq`, `ne`, cold enough to share one generic case.
 - **Jumps:** `jmp`, `jtrue`, `jfalse` (ToBoolean, a boolean's without a
@@ -635,7 +643,10 @@ in the code, and the trampolines' frames, unwind to it.
 **What is native.** The numbers' arithmetic -- `mul_imm`, and the int32
 forms' `(x ± y) | 0` to the ToInt32 of a sum below 2^63 -- increments, `-x`, `+x`,
 the bitwise operators of any number (by ToInt32) and the
-compare-and-branches, of registers, immediates and upvalues; truthiness
+compare-and-branches, of registers, immediates and upvalues, and the
+step-and-branches of a number counter, which leave only for a step of
+what is not one, before they commit it, and go on natively at the
+partner for a bound that is not a number or a spent budget; truthiness
 of a boolean, a number, an object, a string, undefined and null; `==`
 and `!=` of numbers, of one word kind and of undefined or null against
 anything; `===` and `!==` (two strings by identity and length, and two flat ones
@@ -1745,14 +1756,17 @@ primitive, does without. The tree's
   and `cold`, the one value every cold operation shares, took 126 (the
   opcode allocation rule, under "The loop").
 
-#### Loop-kernel instructions (values reserved, 2026-11-15)
+#### Loop-kernel instructions (built, 2026-11-15)
 
 Value-in, Value-out superinstructions for counted loops and `| 0`
 arithmetic, which need no raw registers. Their values follow `RFarInit`
-(231 to 240; `ROpCount` 241), so no value before them changed; until each
-has its Go and native handlers and its lowering, nothing emits it, its
-table entry is `rhInvalid`'s, and the lowering refuses it. The
-step-and-branches have theirs.
+(231 to 240; `ROpCount` 241), so no value before them changed. Each has
+its regcomp pattern, its Go handler and slow function, its amd64 and
+arm64 native handlers and its lowering, so none opened a refusal; the
+native handlers follow every other one in `handlerOps` (the
+step-and-branches, then `mul_imm` and the int32 forms), which moved no
+handler before them, and `runReg`, `nativeLoop`, the dispatch and
+`rhCallW` are the same instructions as before them.
 
 - **Step-and-branch**, one per bottom test a counted loop uses:
   `step_jlt`, `step_jle` (a register bound), `step_jlt_imm`,
@@ -1938,7 +1952,7 @@ proof:
   out: about twenty values. The opcode field is 8 bits (`bytecode.ROp` is
   a `uint8`; the Go table, its slow functions and the native table have
   256 entries each). The operations `RNop` to `RFarInit` take 231 values,
-  so 25 were free; the loop-kernel instructions (above) reserve 10 of them
+  so 25 were free; the loop-kernel instructions (above) take 10 of them
   (`ROpCount` 241), and 15 are left. The cold operations are table
   handlers of their own already, so none can be freed by making them
   sub-operations of one value.
@@ -2057,13 +2071,14 @@ float loop (`IsNumber` 12.5%, `regNum` 5.0% of NavierStokes), and level
 with the tree is not the goal: the tree goes once register mode is level
 or better everywhere, and the aim is the comparison engine. The order:
 generator resumption in place and the forwarder construction path first,
-both measured gaps against the tree, then this, in two stages, each
-timed alone -- the 18 cases of no hot operation made cold sub-operations,
-which frees their opcode values (a compare-and-branch that slows a test
-3% at every placement stays a case), then the region pass, its opcodes,
-the verifier's rules and the differential tests behind a compiler switch,
-made the default only if it earns it over its cost in register-code
-bytes and compile time. The region machinery is shaped for int32 regions
+both measured gaps against the tree, then this: the region pass, its
+opcodes, the verifier's rules and the differential tests behind a
+compiler switch, made the default only if it earns it over its cost in
+register-code bytes and compile time. (A first stage that made the
+switch's 18 cold cases sub-operations to free their values is moot: the
+handler table made each a handler of its own, and the regions' values
+come from those left after the loop-kernel instructions, or from the
+typed code's second table.) The region machinery is shaped for int32 regions
 (`guard_int32`, raw integer and bitwise operations, Crypto's `am3`)
 without building them.
 
@@ -2150,7 +2165,8 @@ leaves are guarded as int32s.
   of its register as an int64's bits. The root is boxed by a separate
   `ibox`, `ibox_z` or `ibox_u` instruction rather than a boxing form of
   each operation: one dispatch more for each region, against a dozen
-  opcode values. About twenty values in all, from those stage 1 frees.
+  opcode values. About twenty values in all, more than the 15 left: they
+  wait for the typed code's second table (below).
 - **The verifier.** The float64 region's rules, and: an int32 interior
   is read only by int32 operations of its region. It recomputes every
   bound and rejects an unchecked operation past 2^53, a product whose
