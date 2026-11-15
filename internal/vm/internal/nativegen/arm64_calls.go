@@ -784,6 +784,18 @@ func (g *armGen) reflect(light Label) {
 func (g *armGen) applyW() {
 	a := g.a
 	after := a.NewLabel()
+	// A target of no closure exits at once, as amd64's.
+	g.regB(rD)
+	g.object(rS, rD)
+	a.LoadU16(rD, rS, offObjFlags)
+	a.TstImm(rD, uint64(objHasData), false)
+	a.BCond(EQ, g.exit)
+	a.Load(rD, rS, sizeObj+offExtData)
+	g.cmpMem(rD, rCtx, ncFuncT)
+	a.BCond(NE, g.exit)
+	a.Load(rD, rS, sizeObj+offExtData+8)
+	a.Load(rT, rD, off("funcData.closure"))
+	a.Cbz(rT, g.exit, true)
 	a.Store(rCtx, ncIP, rIP)
 	a.Store(rCtx, ncBudget, rBud)
 	a.Adr(r8, after)

@@ -906,6 +906,19 @@ func (g *nativeGen) reflect(light Label) {
 func (g *nativeGen) applyW() {
 	a := g.a
 	after := a.NewLabel()
+	// A target of no closure -- a built-in, a bound function -- exits at
+	// once, nativeApply's to refuse.
+	g.decB(RDX)
+	g.object(RSI, RDX)
+	a.LoadU16(RDX, RSI, offObjFlags)
+	a.OpImm(And, RDX, int32(objHasData), false)
+	a.Jcc(CondE, g.exit)
+	a.Load(RDX, RSI, sizeObj+offExtData)
+	a.CmpMem(RDX, RDI, ncFuncT, true)
+	a.Jcc(CondNE, g.exit)
+	a.Load(RDX, RSI, sizeObj+offExtData+8)
+	a.CmpMemImm8(RDX, off("funcData.closure"), 0)
+	a.Jcc(CondE, g.exit)
 	a.Store(RDI, ncIP, RBX)
 	a.Store(RDI, ncBudget, R11)
 	a.LeaLabel(R8, after)
