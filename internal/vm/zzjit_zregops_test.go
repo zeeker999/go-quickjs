@@ -775,3 +775,66 @@ func TestJITRegGenMake(t *testing.T) {
 		})
 	}
 }
+
+// regClassDefsSrc defines classes, methods and object spreads in loops that
+// run natively: a method's home object, a method, a class's field
+// initializer made without the frame (jitRegFrameless), a class linked
+// to its parent and a spread that runs a getter made on the operands
+// (jitRegOpMade), each throwing where the interpreter throws: a parent
+// that is no constructor, a getter that throws.
+const regClassDefsSrc = `
+function classes(n) {
+	var s = 0;
+	for (var j = 0; j < n; j++) {
+		var B = class { constructor(a) { this.a = a } get() { return this.a } static name() { return "B" } };
+		var C = class extends B { f = j & 3; get() { return super.get() + this.f } };
+		var o = new C(j);
+		s += o.get() + B.name().length;
+		try {
+			var P = j % 97 == 5 ? 1 : B;
+			var D = class extends P {};
+			s += new D(1).a;
+		} catch (e) { s += e instanceof TypeError ? 1000 : -1 }
+	}
+	return s;
+}
+function spreads(n) {
+	var ref = { a: 1, get b() { if (this.a > 400) throw new RangeError("b " + this.a); return this.a + 1 }, c: 3 }, s = 0;
+	for (var j = 0; j < n; j++) {
+		ref.a = j;
+		try {
+			var o = { ...ref, k: j, m() { return super.toString === Object.prototype.toString } };
+			s += o.b + o.k + (o.m() ? 1 : 0);
+		} catch (e) { s += e instanceof RangeError ? 7 : -1 }
+	}
+	return s;
+}
+function main(n) { return classes(n) + ":" + spreads(n) }
+`
+
+// TestJITRegClassDefinitions runs regClassDefsSrc's main natively and in a runtime
+// without the JIT, the collector idle and marking.
+func TestJITRegClassDefinitions(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regClassDefsSrc)
+			rts[0].SetJITReport(true)
+			for i, r := range rts {
+				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("main"))
+				for range 10 {
+					v, err := r.Call(fn, Undefined, []Value{Float(500)})
+					if got := regNativeShow(r, v, err); got != "132494:161895" {
+						t.Fatalf("runtime %d: %q, want 132494:161895", i, got)
+					}
+				}
+			}
+			t.Logf("calls of Go %v", rts[0].RegNativeStats().GoCallOps)
+		})
+	}
+}

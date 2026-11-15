@@ -358,12 +358,43 @@ func (f *jitRegFeedback) CellsPool() (uintptr, []int32, bool) {
 // __proto__. Its operands are the instruction's registers (compile's
 // RegAccess), in their order, the stack form's operands'; its result goes
 // to the call's keep cell, which the code reads where the instruction
-// writes a register. It reports whether it made it; what it does not
-// make, the instruction run whole on the frame (jitRegWhole) makes.
-func (r *Runtime) jitRegFrameless(ctx *abi.Context, op bytecode.ROp) bool {
+// writes a register. A class's or a literal's member made -- a method's
+// home object set, a method defined, a class's field initializer given --
+// it makes of cl's names, c its register code, as the stack form's
+// jitGoHostPlain makes them (jitDefinition's cases). It reports whether it
+// made it; what it does not make, Go makes on the frame (jitRegOpMade,
+// jitRegWhole).
+func (r *Runtime) jitRegFrameless(ctx *abi.Context, cl *closure, c *regCode, rpc int, op bytecode.ROp) bool {
 	var in bytecode.Instr
 	n := int(ctx.GoOp >> abi.GoOpArgcShift & 0xff)
 	switch op {
+	case bytecode.RSetHomeObject, bytecode.RSetFieldInit, bytecode.RDefineMethod:
+		if n != 2 || cl == nil {
+			return false
+		}
+		a, b := jitGoArg(ctx, 0), jitGoArg(ctx, 1)
+		switch op {
+		case bytecode.RSetHomeObject:
+			if a.IsObject() && b.IsObject() {
+				if fd := a.Object().fn(); fd != nil {
+					fd.setHomeObject(b.Object())
+				}
+			}
+		case bytecode.RSetFieldInit:
+			if a.IsObject() && b.IsObject() {
+				if fd := a.Object().fn(); fd != nil {
+					fd.setFieldInit(b.Object())
+				}
+			}
+		default:
+			if a.IsObject() {
+				key := regName(cl, c, rpc, regAt(c.code, rpc).C())
+				r.materializeFunctionProp(a.Object(), key)
+				a.Object().setOwnRaw(key, b, propWritable|propConfigurable)
+			}
+		}
+		*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = Undefined
+		return true
 	case bytecode.RCopyDataProps:
 		in.Op = bytecode.OpCopyDataProps
 	case bytecode.RArraySpread:

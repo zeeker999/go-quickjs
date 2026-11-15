@@ -2089,7 +2089,7 @@ func (r *Runtime) jitRegGoCall(ctx *abi.Context, idx int) bool {
 	// (jitRegPushLevel) and an operation on the frame (jitRegFrameRun).
 	// A super.m read Go made after a native super() had found it unbound.
 	jitBindThis(run.f, ctx)
-	if r.jitRegPlainWhole(ctx, run.c) {
+	if r.jitRegPlainWhole(ctx, run.f.cl, run.c) {
 		return true
 	}
 	rpc := int(ctx.ExitPC)
@@ -2111,10 +2111,10 @@ func (r *Runtime) jitRegGoCall(ctx *abi.Context, idx int) bool {
 // jitGoCallPlain makes its operations: ahead of the judgment of a run's
 // calls of Go and their count, which such a call, a native operation's
 // cost, is not, as the stack form's plain calls are not.
-func (r *Runtime) jitRegPlainWhole(ctx *abi.Context, c *regCode) bool {
+func (r *Runtime) jitRegPlainWhole(ctx *abi.Context, cl *closure, c *regCode) bool {
 	rpc := int(ctx.ExitPC)
 	return ctx.GoOp>>abi.GoOpKindShift&0xff == abi.GoCallWhole && c != nil && rpc < len(c.rc.Code) &&
-		r.jitRegFrameless(ctx, regAt(c.code, rpc).Op())
+		r.jitRegFrameless(ctx, cl, c, rpc, regAt(c.code, rpc).Op())
 }
 
 // jitRegGoSettled reports whether the call of Go ctx makes at register pc
@@ -2181,6 +2181,12 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 		// for, or its rest element: made here, as the stack form's
 		// (jitCallMade).
 		return r.jitRegIterMade(ctx, idx, run, rpc, w)
+	}
+	if kind == abi.GoCallWhole && (op == bytecode.RNewClass || op == bytecode.RCopyDataProps) {
+		// A class linked to its parent, an object spread that runs a
+		// getter: made on the operands, as the stack form's (jitOpMade,
+		// jitDefinition's new_class), not run whole.
+		return r.jitRegOpMade(ctx, idx, run, rpc, w)
 	}
 	if kind == abi.GoCallWhole || kind == abi.GoCallStep && op == bytecode.RIterNext || kind == abi.GoCallForOf && op == bytecode.RForOfStart ||
 		kind == abi.GoCallForIn && op == bytecode.RForInStart {
@@ -2840,6 +2846,57 @@ func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int)
 		r.stack[wb+regs[i]] = saved[i]
 	}
 	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
+	return true
+}
+
+// jitRegOpMade makes, for native code, register code's instruction w at
+// register pc rpc on its operands, the values the code passed (abi.Context's
+// GoArgs), with run's frame, as the stack form's operations Go makes are
+// made (jitOpMade, jitDefinition): new_class's link of a class to its
+// parent, which throws for one that is not a constructor, and
+// copy_data_props's spread that jitRegFrameless did not make, which may run
+// a getter. Neither writes a register, so nothing in the frame's registers
+// is saved and put back, as jitRegWhole does. What does not go on at the
+// next instruction Go finishes at the exit native code then takes
+// (regPending): a throw as a call's is (regFinishCall), to the frame's
+// handler; past the instruction where the runtime stopped or the code was
+// found invalid.
+func (r *Runtime) jitRegOpMade(ctx *abi.Context, idx int, run jitRegRun, rpc int, w bytecode.RInstr) bool {
+	s := r.jit
+	f, c := run.f, run.c
+	if run.e == nil || int(ctx.GoOp>>abi.GoOpArgcShift&0xff) != 2 {
+		return false
+	}
+	a, b := jitGoArg(ctx, 0), jitGoArg(ctx, 1)
+	f.pc = regSrc(c, rpc) + 1
+	s.goCalls++
+	r.noteRegGoCall(w, true, Value{})
+	last, shared := s.ssaCtx, s.ssaSharedGen
+	goCallDepth := s.goCallDepth
+	s.goCallDepth = r.frameDepth + 1
+	var err error
+	if w.Op() == bytecode.RNewClass {
+		err = r.linkClass(a, b)
+	} else if a.IsObject() && !b.IsNullish() {
+		err = r.copyDataProps(a.Object(), b)
+	}
+	s.goCallDepth = goCallDepth
+	s.ssaCtx = last
+	if s.ssaSharedGen != shared {
+		r.jitShareContexts(idx, f)
+	}
+	if err != nil {
+		// Thrown: to the frame's handler, as a call's throw goes
+		// (regFinishCall's regCatch).
+		s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, err: err}
+		return false
+	}
+	if r.stopped != nil || run.e.invalid || run.leave {
+		s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, whole: true, next: rpc + 1, reg: -1}
+		s.wholeLeft++
+		return false
+	}
+	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = Undefined
 	return true
 }
 

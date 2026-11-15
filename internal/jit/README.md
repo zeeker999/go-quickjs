@@ -1991,11 +1991,18 @@ that runs nothing, ahead of a run's judgment of its calls of Go and with
 no level's frame made for a native callee's (`jitRegPlainWhole`):
 the stack form's operations (`jitRegFrameless`, `jitOpFrameless`, which
 learns the layouts' copies) -- an object pattern's rest, a computed key
-converted or defined, a literal's `__proto__` -- and a for...in's cursor,
+converted or defined, a literal's `__proto__`; a method's home object set,
+a method defined and a class's field initializer given, of the closure's
+names, as the stack form's `jitGoHostPlain` makes them -- and a for...in's cursor,
 a for...of's cursor of an array and a loop's step over an array where it
 reads its dense storage or is done (`ssa.CallSite`'s `ForIn`, `ForOf`,
 `Step`: `jitGoCallPlain`'s `jitForInPlain`, `jitForOfPlain`,
-`jitStepPlain`); and on the frame otherwise.
+`jitStepPlain`); and on the frame otherwise. A class linked to its parent
+(`new_class`) and an object spread that runs a getter Go makes on the
+operands with the frame, as the stack form's `jitOpMade` and
+`jitDefinition` do (`jitRegOpMade`), not run whole: neither writes a
+register, so nothing is saved and put back; a throw goes to the frame's
+handlers as a call's does (`regFinishCall`).
 
 **Loops' steps.** A for...of's or a for...in's step (`iter_next`, an
 `ir.IterStep` native code does not make itself) is a call of Go of the
