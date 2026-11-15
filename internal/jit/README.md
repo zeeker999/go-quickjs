@@ -447,7 +447,12 @@ the function's key:
   lowering of the function's register code is made with from there (the hints,
   `jitLearned`'s `regHints`, by register pc, `jitRegLower`): the read
   made by its cell (ir's `Reference`), the addition Go's (`StringAdd`),
-  the additions of an element read of strings too (`stringConcats`).
+  the additions of an element read of strings too (`stringConcats`). An
+  addition the compiler marked an append to an upvalue (`add`'s
+  `RAddAppend`, the stack form's `AddOwned` on its `set_upvalue`) is Go's
+  with its result its own (`Owned`, `abi.GoOpOwned`): Go grows the string
+  the binding alone holds in place (`jitStrAppend`), as the interpreter's
+  `add` does, where a closure's `s += x` had made a new string at each.
 
 A guard's failure invalidates the code; anything else learned marks it to
 be compiled again, valid meanwhile, without a deoptimization (see
