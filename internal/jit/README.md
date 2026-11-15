@@ -377,25 +377,31 @@ code's are compiled too, and entered only where they can be (see [Tier-up
 and on-stack replacement](#tier-up-and-on-stack-replacement)).
 
 **Refusals.** `LowerReg` refuses a function kind it does not take, direct
-eval, an arguments object the frame cannot own (`compile`'s `argumentsOwn`),
-an instruction it has no lowering for, a function of host operations alone
-at its entry (`HostOnly`) -- a call in tail position counts as a loop, as
-the stack form's does, since native code may make it a jump to the start --
-and a program past the slot budget: registers,
+eval, an arguments object the frame cannot own (`compile`'s
+`argumentsOwn`), an instruction it has no lowering for, a function of host
+operations alone at its entry (`HostOnly`) -- a call in tail position
+counts as a loop, as the stack form's does, since native code may make it
+a jump to the start -- and a program past the slot budget: registers,
 captured bindings and scratch slots together within what a slot's number
 names (`abi.MaxSlot`). A function of host operations alone is lowered all
 the same for native callers (`LowerRegInline`) or where a call it makes
 would be native (`LowerRegHot`, `jitRegCallsNatively`): compiled for that
-alone, it is worth its code. A register function has no parameter prologue
--- its defaults are ordinary code over its registers -- so none is refused
-for one. A panic in the lowering is a refusal (`lowerRegRecovered`).
-`TestLowerRegCorpusRefusals` counts the refusals by reason over directories
-of code (`QUICKJS_JIT_REG_REFUSALS`, a path list), beside the builder's; and
-`TestJITRefusals` (internal/regdiff) counts, over the micro-benchmarks, the
-V8 suite, Octane, Are We Fast Yet, the bundles and test262, why the JIT
-would not compile each function from its register code -- what the tier
-takes, the lowering's and the build's refusals (`vm.JITRefusals`) -- kind by
-kind, and how many of each the stack form takes: a list that only shrinks.
+alone, it is worth its code. A call is native, as the stack form's
+`jitCallsNatively` judges it, where its callee is the function itself, has
+no code and is not warming (its native callers' first call compiles it),
+or has code native callers call -- not code they call no more
+(`notNative`), whose calls native code Go entered would make through Go. A
+register function has no parameter prologue -- its defaults are ordinary
+code over its registers -- so none is refused for one. A panic in the
+lowering is a refusal (`lowerRegRecovered`). `TestLowerRegCorpusRefusals`
+counts the refusals by reason over directories of code
+(`QUICKJS_JIT_REG_REFUSALS`, a path list), beside the builder's; and
+`TestJITRefusals` (internal/regdiff) counts, over the micro-benchmarks,
+the V8 suite, Octane, Are We Fast Yet, the bundles and test262, why the
+JIT would not compile each function from its register code -- what the
+tier takes, the lowering's and the build's refusals (`vm.JITRefusals`) --
+kind by kind, and how many of each the stack form takes: a list that only
+shrinks.
 
 **The evaluator on a register frame.** `vm.RegLowerCall`
 (`zzjit_zregrunner.go`) runs a call's register frame by the IR's evaluator
@@ -672,7 +678,9 @@ as any other (`nativeCallMiss`, `regCallSlow`); no site is marked for it.
 **Compiling.** A function's first check -- a call's, or its first back
 edge's -- begins its budget, as the stack
 form's `jitWarmFor` makes its entry warm, and notes its caches' feedback
-(`jitFeedbackMark`); it is compiled (`jitRegFor`) at the sample that spends
+(`jitFeedbackMark`), and spends its own work of it at once, as the stack
+form's `tryJITAt` spends it (`jitWarmUp`): a call's first, the run its
+return counted. It is compiled (`jitRegFor`) at the check that spends
 the budget, its caches' feedback unchanged since -- a change raises what is
 left to `jitICThreshold` invocations' worth (`jitRegWarmUp`), as V8's
 `NotifyICChanged` delays a tier-up -- or at its first sample where the
