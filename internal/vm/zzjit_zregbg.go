@@ -112,29 +112,30 @@ func jitRegShape(f *ssa.Func, p *ir.Program, cl *closure, c *regCode) map[uint32
 	jitRegGenShape(f, p, cl, c)
 	looped := map[uint32]bool{}
 	var headers []bool
-	suspends := slices.ContainsFunc(p.Code, func(in ir.Instruction) bool { return in.Suspend })
 	for _, en := range f.Entries {
 		if en.OSR {
 			looped[p.Origin[en.PC]] = true
 			continue
 		}
-		if suspends {
-			// A generator's code, whose yields suspend it natively where a
-			// step resumed it: the build marks none of its entries OSR's,
-			// none the escape analysis may drop (ssa.Func's GenResumes),
-			// a loop's header's among them, where on-stack replacement
-			// enters it all the same.
-			if headers == nil {
-				headers = make([]bool, len(p.Code)+1)
-				for pc, in := range p.Code {
-					if (in.Op == ir.Jump || in.Op == ir.Branch) && in.Target <= pc {
-						headers[in.Target] = true
-					}
+		// An entry at a loop's header the build did not mark OSR's, which
+		// on-stack replacement enters all the same, as the stack form's
+		// enters any entry at a loop's header (tryJITAt): a header Go has
+		// gone on at, whose entry the code keeps, its objects made there
+		// (jitRegFeedback's Resumed, jitRegFramesLeave); and in a
+		// generator's code, whose yields suspend it natively where a step
+		// resumed it, every header: the build marks none of its entries
+		// OSR's, none the escape analysis may drop (ssa.Func's
+		// GenResumes).
+		if headers == nil {
+			headers = make([]bool, len(p.Code)+1)
+			for pc, in := range p.Code {
+				if (in.Op == ir.Jump || in.Op == ir.Branch) && in.Target <= pc {
+					headers[in.Target] = true
 				}
 			}
-			if en.PC > 0 && headers[en.PC] {
-				looped[p.Origin[en.PC]] = true
-			}
+		}
+		if en.PC > 0 && headers[en.PC] {
+			looped[p.Origin[en.PC]] = true
 		}
 	}
 	return looped

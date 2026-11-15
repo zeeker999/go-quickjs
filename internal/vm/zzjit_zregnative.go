@@ -110,8 +110,13 @@ type jitRegEntry struct {
 	// (jitLearnLoopEntry).
 	unentered  []int
 	osr, osrOf *jitRegEntry
-	osrMiss    uintptr
-	osrMissPC  int
+	// kept are the register pcs of the loops' headers it has entries at
+	// only for the frame its compile was asked for at (ssa.Func's
+	// EntryKept), which a function called again gives up (jitRegKeptGone),
+	// as the stack form's jitEntry's ssaKept.
+	kept      []int
+	osrMiss   uintptr
+	osrMissPC int
 	// at is, for each register pc, the program's first instruction of its
 	// lowering, -1 for none (ipc).
 	at []int32
@@ -244,15 +249,31 @@ func (r *Runtime) jitRegCached(key jitKey, e *jitRegEntry) {
 			l.in = 0
 		}
 		life.nativeOut, life.notNative, life.nativeRetry, life.entrySlow = 0, false, 0, false
-		// Judged by what it does from now on, as the stack form's code
-		// compiled again is (its ssaStats begun afresh); what it did stays
-		// counted for its report.
-		st := &life.ssaStats
-		st.judged = st.entries + st.goCalls
-		st.workBase, st.stretchBase = st.work, st.judged
-		st.runGoCalls, st.runWork, st.osrStretches, st.osrWork = 0, 0, 0, 0
+		if !life.keptGone {
+			// Judged by what it does from now on, as the stack form's code
+			// compiled again is (its ssaStats begun afresh); what it did
+			// stays counted for its report. But code compiled again only
+			// to give up the entries kept for a frame (jitRegKeptGone)
+			// does as it did, and is judged by all of it, as the stack
+			// form's (jitReplaceCode).
+			st := &life.ssaStats
+			st.judged = st.entries + st.goCalls
+			st.workBase, st.stretchBase = st.work, st.judged
+			st.runGoCalls, st.runWork, st.osrStretches, st.osrWork = 0, 0, 0, 0
+		}
+	}
+	if life := e.life; life != nil && e.code != nil {
+		// Its calls since, which give up the entries kept for a frame
+		// (jitRegEnter), as the stack form's keptAt.
+		life.keptGone, life.keptAt, life.keptLeft = false, life.starts, 0
 	}
 	s.regLinkUpdate(key, e)
+	if e.code != nil && e.keep != nil {
+		s.regJoinCallers(key, e.keep.links)
+	}
+	if e.code != nil {
+		defer r.jitRegCalleesKeptNoEntries(e)
+	}
 	if life := e.life; life != nil && e.code != nil {
 		if life.ssaSerial++; life.ssaSerial == 1 {
 			s.compiled++
@@ -479,6 +500,7 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 		}
 	}
 	e.unentered = slices.Clone(f.Unentered)
+	e.kept = slices.Clone(f.EntryKept)
 	// The pools' roots and prototypes escape analysis took, which the
 	// objects it does not make are made with at an exit.
 	rf.fb.keepVirtuals(f.VirtualAsked)
@@ -985,6 +1007,9 @@ func (r *Runtime) jitRegGoOnAt(f *frame, c *regCode, e *jitRegEntry, wb, rpc, at
 			}
 			return pc, v, done, err
 		}
+		if ctx.ExitKind == abi.ExitHost && len(e.kept) != 0 && e.life != nil {
+			r.jitRegKeptLeft(e)
+		}
 		if loop && ctx.ExitKind == abi.ExitHost && e.life != nil && e.life.loopSlow {
 			// A loop that leaves at its turns, judged not to pay for its
 			// exits (loopSlow): the interpreter goes on with it after the
@@ -1039,17 +1064,43 @@ func (r *Runtime) jitRegLeaveTo(f *frame, c *regCode, e *jitRegEntry, rpc int) i
 	if life := e.life; life != nil {
 		life.goOns++
 		life.ssaStats.ended++
+		r.jitRegKeptLeft(e)
 	}
-	if cc := f.cl.closureCode; !e.invalid && cc != nil && cc.jitReg != nil && cc.jitReg.code != nil && !cc.jitReg.invalid && len(cc.jitReg.loops) != 0 &&
-		!cc.jitReg.life.loopSlow && !regEndsFrame(f.cl.reg, rpc) {
-		// Code with a loop to go on at: one with none, the frame's
-		// invocation ends in the interpreter, and the check made due at
-		// once would be its caller's loop's, for nothing -- each of AWFY
-		// Richards' runTask's 13 million exits had paid one.
-		s.regGoOn, s.regForced = f, true
+	if cc := f.cl.closureCode; !e.invalid && cc != nil && cc.jitReg != nil && cc.jitReg.code != nil && !cc.jitReg.invalid &&
+		(len(cc.jitReg.loops) != 0 || len(cc.jitReg.unentered) != 0) && !cc.jitReg.life.loopSlow && !regEndsFrame(f.cl.reg, rpc) {
+		// Code with a loop to go on at -- an entry it has, or one escape
+		// analysis dropped (unentered), whose frames go on in the code
+		// kept for them (jitRegLoopCode), as the stack form's jitGoOn
+		// forces the check whatever entries its code has. One with no
+		// loop, the frame's invocation ends in the interpreter, and the
+		// check made due at once would be its caller's loop's, for
+		// nothing -- each of AWFY Richards' runTask's 13 million exits
+		// had paid one. Asked of loops alone, a loop whose object stayed
+		// unmade had every call that left it finish in the interpreter:
+		// carried_exit_500 ran at the interpreter's speed.
+		s.regGoOn, s.regGoOnFrom, s.regForced = f, e, true
 		r.backEdges = 1
 	}
 	return rpc
+}
+
+// jitRegKeptLeft counts a call of e's function that left its code, once
+// however often: code kept for a frame goes by it (jitRegKeptCallsLeave),
+// as the stack form's jitGoOn counts it. A host exit counts in code with
+// entries kept for a frame (jitRegEntry's kept): its objects made, the
+// code has an entry after the exit, where the stack form's code, leaving
+// them unmade, has none and leaves -- as the call would in the code that
+// gives the entries up.
+func (r *Runtime) jitRegKeptLeft(e *jitRegEntry) {
+	life := e.life
+	calls := life.starts
+	if l := r.jit.regLinks[e.key]; l != nil {
+		calls += l.in
+	}
+	if life.keptCall != calls {
+		life.keptCall = calls
+		life.keptLeft++
+	}
 }
 
 // regEndsFrame reports whether register pc rpc of c is an instruction at
