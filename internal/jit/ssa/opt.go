@@ -407,8 +407,21 @@ func unboxPhis(f *Func) bool {
 	// speculate a receiver written to a property is a number, and fail
 	// every call.
 	phis, guarded, unboxes := f.scr().phis[:0], f.scr().work[:0], f.scr().boxes[:0]
+	// The values and controls that use each box, by ID -- not the frame
+	// states, which make a box at an exit alone (mir's lazy): a phi the
+	// boxes of numbers merge, each used by it alone, is unboxed with no
+	// other evidence (below).
+	boxUses := f.ints(n)
 	for _, b := range f.Blocks {
+		if c := b.Control; c != nil && c.Op == OpBoxF64 {
+			boxUses[c.ID]++
+		}
 		for _, v := range b.Values {
+			for _, a := range v.Args {
+				if a.Op == OpBoxF64 {
+					boxUses[a.ID]++
+				}
+			}
 			switch {
 			case v.Op == OpPhi && v.Type == Tagged && !trivialPhi(v):
 				// A trivial phi is the value it carries, which this round
@@ -457,6 +470,41 @@ func unboxPhis(f *Func) bool {
 	loaded := func(a *Value) bool {
 		upvalue := a.Op == OpLoadCell && (a.Args[0].Op == OpUpvalueCell || a.Args[0].Op == OpLocalCell)
 		return upvalue && a.State != nil || (a.Op == OpLoadSlot || upvalue) && a.Block.PC < 0 && !a.Block.Generic
+	}
+	// merged reports whether v merges numbers alone -- the boxes of
+	// float64s, numeric constants, entry slots a guard unboxes already, at
+	// least one box -- each box used by v
+	// alone: unboxed, v's box is made once where it is, in place of one
+	// on each way to it, which speculates on nothing. A loop of register
+	// code whose test is copied before it (the compile package's
+	// loopTest) ends where the copy's test ends too, and a number it
+	// carries past its end, a sum stored once the loop is done, was boxed
+	// at every turn for that phi.
+	merged := func(v *Value) bool {
+		box := false
+		for _, a := range v.Args {
+			switch {
+			case a.Op == OpBoxF64:
+				k := 0
+				for _, b := range v.Args {
+					if b == a {
+						k++
+					}
+				}
+				if a.ID >= n || boxUses[a.ID] != k {
+					return false
+				}
+				box = true
+			case a.Op == OpConst && a.Const.Kind == ir.Number:
+			case loaded(a) && unboxedUse[a.ID]:
+				// An entry's slot already unboxed by a guard, which a
+				// loop's number carried past its end from the entry's
+				// way around it -- a parameter the loop reads -- is.
+			default:
+				return false
+			}
+		}
+		return box
 	}
 	// Each candidate's users among the candidates, listed once, the first
 	// time a reason that does not speculate is asked for (below): a
@@ -515,7 +563,7 @@ func unboxPhis(f *Func) bool {
 		}
 		stack := guarded[:0]
 		for _, v := range live {
-			if cand[v.ID] && unboxedUse[v.ID] {
+			if cand[v.ID] && (unboxedUse[v.ID] || merged(v)) {
 				boxed[v.ID] = true
 				stack = append(stack, v)
 			}

@@ -146,6 +146,7 @@ var jitEncoding = abi.Encoding{
 	ClassGenerator:     uint8(ClassGenerator),
 	GenClosure:         int32(unsafe.Offsetof(generator{}.cl)),
 	GenThis:            int32(unsafe.Offsetof(generator{}.this)),
+	GenCallee:          int32(unsafe.Offsetof(generator{}.callee)),
 	GenVals:            int32(unsafe.Offsetof(generator{}.vals)),
 	GenArgs:            int32(unsafe.Offsetof(generator{}.nargs)),
 	GenPC:              int32(unsafe.Offsetof(generator{}.pc)),
@@ -1135,9 +1136,12 @@ type jitDeepRead struct {
 // it past the two prototypes a cache holds, up to jitAddDepth, with a
 // plain data property, each object on the way of a class with shapes that
 // does not answer the key itself, as fillPropCache requires of a cache's
-// -- or false.
+// -- or false. A typed array, whose reads no cache holds, its key no
+// numeric one, which names its elements, is read so at any depth: its
+// methods, on its type's prototype and %TypedArray%.prototype.
 func (r *Runtime) jitDeepReadOf(o *Object, key Atom) (jitDeepRead, bool) {
-	if key.IsIndex() || o.shape == nil || o.shape == noShape || !shapeClass(o.class) || synthesized(o.class, key) || o.findOwn(key) >= 0 {
+	typed := o.class == ClassTypedArray && r.jitTypedNamed(o, key)
+	if key.IsIndex() || o.shape == nil || o.shape == noShape || !shapeClass(o.class) && !typed || synthesized(o.class, key) || o.findOwn(key) >= 0 {
 		return jitDeepRead{}, false
 	}
 	d := jitDeepRead{shape: o.shape}
@@ -1147,7 +1151,7 @@ func (r *Runtime) jitDeepReadOf(o *Object, key Atom) (jitDeepRead, bool) {
 		}
 		d.up, d.shapes = append(d.up, p), append(d.shapes, p.shape)
 		if i := p.findOwn(key); i >= 0 {
-			if p.shape.keys[i].flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 || len(d.up) <= 2 {
+			if p.shape.keys[i].flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 || len(d.up) <= 2 && !typed {
 				return jitDeepRead{}, false
 			}
 			d.idx = int32(i)
@@ -1159,6 +1163,17 @@ func (r *Runtime) jitDeepReadOf(o *Object, key Atom) (jitDeepRead, bool) {
 		}
 	}
 	return jitDeepRead{}, false
+}
+
+// jitTypedNamed reports whether key names, on o, a typed array, a
+// property its prototypes answer: no canonical numeric string, which
+// names an element or nothing (typedArrayIndex), nor a symbol of its own.
+func (r *Runtime) jitTypedNamed(o *Object, key Atom) bool {
+	if key.IsIndex() || r.typedArrayIndex(o, key).numeric {
+		return false
+	}
+	_, ok := o.dataOf().(*typedArrayData)
+	return ok
 }
 
 // jitNoteDeepRead notes, in c's entries seen, the read of key from o a
@@ -2720,6 +2735,14 @@ func (r *Runtime) jitInstall(j *jitJob) (*jit.SSACode, *jitFeedback, error) {
 	if errors.Is(err, mir.ErrKeeps) && keepLimit == 0 {
 		return nil, nil, err
 	}
+	if err == nil && mc.Spills > abi.SpillSlots {
+		// The stack form, which the register form replaces, keeps the
+		// bound the context's own slots set (abi.Context's SpillMore): its
+		// budget, which a function past it would hold past -- a script's
+		// top level of hundreds of callees, running while its entry grows
+		// -- is not made for one.
+		err = fmt.Errorf("%w: more than %d spill slots", mir.ErrUnsupported, abi.SpillSlots)
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %v", jitRefused, err)
 	}
@@ -2753,6 +2776,9 @@ func (r *Runtime) jitInstall(j *jitJob) (*jit.SSACode, *jitFeedback, error) {
 	// step when the table grows, not a function's bytes (learn).
 	hint := s.hintRoom(e)
 	need += hint
+	// The contexts' room for its spill slots, which they keep (spillsFor).
+	spill := s.spillRoom(mc)
+	need += spill
 	// The lists of native callers its callees keep, which it joins once
 	// placed (setLinks).
 	need += s.callersGrowth(e, fb.links)
@@ -2772,6 +2798,7 @@ func (r *Runtime) jitInstall(j *jitJob) (*jit.SSACode, *jitFeedback, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	s.spillsFor(mc)
 	s.inlined += uint64(len(f.Inlined))
 	s.inlinedCode += uint64(f.InlinedCode)
 	if JITCodeHook != nil {
@@ -2783,7 +2810,7 @@ func (r *Runtime) jitInstall(j *jitJob) (*jit.SSACode, *jitFeedback, error) {
 	// for first, which had come short of all three at a full budget, and
 	// then of the lowering's own bytes -- a compile that met a budget
 	// within them was made and thrown away.
-	s.learn(len(fn.Code), need-hint+p.Footprint()+jitLoweringFixed+jitLinkFixed)
+	s.learn(len(fn.Code), need-hint-spill+p.Footprint()+jitLoweringFixed+jitLinkFixed)
 	return code, fb, nil
 }
 
@@ -3386,7 +3413,13 @@ func (fb *jitFeedback) InstanceOf(pc int) (ssa.InstanceOfSite, bool) {
 	if !ok || !v.IsObject() {
 		return ssa.InstanceOfSite{}, false
 	}
-	ctor := v.Object()
+	return fb.instanceOfSite(v.Object())
+}
+
+// instanceOfSite is InstanceOf's site of an instanceof of the constructor
+// ctor, the value the code reads before it, as either form's code finds it.
+func (fb *jitFeedback) instanceOfSite(ctor *Object) (ssa.InstanceOfSite, bool) {
+	r := fb.r
 	fd := ctor.fn()
 	if fd == nil || fd.bound || proxyOf(ctor) != nil {
 		// A built-in is one too: sc_Vector is Array.
@@ -4849,14 +4882,15 @@ func jitHostCall(ctx *abi.Context) bool {
 			}
 		}
 		if idx := int(ctx.Level); ctx.Live == 0 && idx < len(s.regRuns) && s.regRuns[idx].f != nil && s.ssaCtxs[idx] == ctx {
-			if e := s.regRuns[idx].e; e != nil && e.stale && !e.invalid {
-				// Register code stale for what it learned (jitRegReopt), at
-				// a call of Go its loop goes on after: the loop leaves at
-				// its header (abi.ExitPoll), where the interpreter goes on
-				// and its next sample compiles the code again (jitRegLeft),
-				// as the stack form's run leaves above. Never leaving, a
-				// loop that runs a whole invocation natively had made each
-				// construction it learned by Go to the end.
+			if e := s.regRuns[idx].e; e != nil && e.life != nil && e.life.reopt && !e.invalid {
+				// Register code that learned what to be compiled again for
+				// (jitRegReopt), at a call of Go its loop goes on after: the
+				// loop leaves at its header (abi.ExitPoll), where its work is
+				// counted and the code compiled again once that is due, the
+				// loop going on in the new code (jitRegLeft), as the stack
+				// form's run leaves above. Never leaving, a loop that runs a
+				// whole invocation natively had made each construction it
+				// learned by Go to the end.
 				return false
 			}
 		}
@@ -4864,7 +4898,7 @@ func jitHostCall(ctx *abi.Context) bool {
 		r.backEdges = s.backEdgeBudget()
 		s.pollCredit += r.backEdges - old
 		s.budgets++
-		return r.checkInterruptNow() == nil
+		return r.checkInterruptPoll() == nil
 	case ssa.GoRandom:
 		// Math.random's cache, found empty: filled again, its next number
 		// the result.
@@ -5010,7 +5044,12 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	if ctx.Live == abi.LiveCall {
 		if len(s.regRuns) != 0 {
 			if root := r.jitRegRootOf(idx); root >= 0 {
-				// A native callee's of register code (zzjit_zregcall.go).
+				// A native callee's of register code (zzjit_zregcall.go):
+				// an operation that runs nothing made without the levels'
+				// frames (jitRegPlainWhole).
+				if cl := (*closure)(ctx.Closure); cl != nil && r.jitRegPlainWhole(ctx, cl.reg) {
+					return true
+				}
 				return r.jitRegGoCallNested(ctx, idx, root)
 			}
 		}
@@ -7429,25 +7468,7 @@ func (r *Runtime) jitChainValue(cl *closure, p *ir.Program, q, n int) (Value, bo
 	}
 	switch in.Op {
 	case bytecode.OpGetGlobal:
-		// The global object's data property of the name -- or the
-		// script's lexical binding that shadows it, in the realm's global
-		// scope -- looked up, not through the read's cache, which native
-		// code that reads it never fills.
-		h := cl.scope()
-		if h != nil && r.globalLex.valn != 0 && r.lexShadows(cl.names[in.A]) {
-			if !r.isGlobalScope(h) {
-				return Undefined, false
-			}
-			h = r.globalLex
-		}
-		if h == nil {
-			return Undefined, false
-		}
-		prop := h.getOwnVisible(cl.names[in.A])
-		if !prop.ok() || prop.flags()&propAccessor != 0 || prop.value().IsUninitialized() {
-			return Undefined, false
-		}
-		return prop.value(), true
+		return r.jitGlobalValue(cl, cl.names[in.A])
 	case bytecode.OpGetProp, bytecode.OpGetPropThis:
 		recv, ok := r.jitChainReceiver(cl, p, q, n)
 		if !ok {
@@ -7460,6 +7481,29 @@ func (r *Runtime) jitChainValue(cl *closure, p *ir.Program, q, n int) (Value, bo
 		return prop.value(), true
 	}
 	return Undefined, false
+}
+
+// jitGlobalValue is the value of the global name, as a read of it in cl's
+// code finds it now: the global object's data property of the name -- or
+// the script's lexical binding that shadows it, in the realm's global
+// scope -- looked up, not through the read's cache, which native code
+// that reads it never fills.
+func (r *Runtime) jitGlobalValue(cl *closure, name Atom) (Value, bool) {
+	h := cl.scope()
+	if h != nil && r.globalLex.valn != 0 && r.lexShadows(name) {
+		if !r.isGlobalScope(h) {
+			return Undefined, false
+		}
+		h = r.globalLex
+	}
+	if h == nil {
+		return Undefined, false
+	}
+	prop := h.getOwnVisible(name)
+	if !prop.ok() || prop.flags()&propAccessor != 0 || prop.value().IsUninitialized() {
+		return Undefined, false
+	}
+	return prop.value(), true
 }
 
 // jitChainReceiver is the object the property read at q of cl's code reads
@@ -12419,11 +12463,16 @@ func (r *Runtime) runSSALoop(f *frame, e *jitEntry, pc, depth, idx int, resume u
 			// the frames of the callees they call start past them.
 			r.stackTop, r.stackHigh, raised = need, max(r.stackHigh, need), need
 		}
+		// No register run's native code is the innermost meanwhile
+		// (jitRegRootOf).
+		regRunAt := s.regRunAt
+		s.regRunAt = 0
 		if resume != 0 {
 			err, resume = e.ssa.Resume(resume, s.ssaCtxs[idx+1]), 0
 		} else {
 			err = e.ssa.Run(pc, ctx)
 		}
+		s.regRunAt = regRunAt
 		if r.stackTop == raised {
 			// Back where it was raised, no callee of the code's still
 			// live: the frame's own top again. A callee that left is
@@ -12960,7 +13009,7 @@ func (r *Runtime) jitGrowContexts() bool {
 		return false
 	}
 	s.budget = r.jitBudget()
-	if !s.makeRoom(add * jitContextShare) {
+	if !s.makeRoom(add * (jitContextShare + s.spillShare())) {
 		return false
 	}
 	// Each context's places in what is kept by context, made here in the
@@ -12989,6 +13038,7 @@ func (r *Runtime) jitGrowContexts() bool {
 			s.mega = new(abi.MegaCache)
 		}
 		chunk[i].Mega = s.mega
+		chunk[i].GrowSpill(s.ssaSpills)
 		s.ssaCtxs = append(s.ssaCtxs, &chunk[i])
 	}
 	for i := max(old, 1); i < len(s.ssaCtxs); i++ {

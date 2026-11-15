@@ -461,17 +461,25 @@ type jitCodeFields struct {
 	// one of its invocations they counted (jitCountRun, jitCountCallAt).
 	jitCounting bool
 	// jitRegHot counts the samples of the function's runs the register
-	// tier took (jitRegSample), jitRegDeopts its code's deoptimizations,
+	// tier took, jitRegDeopts its code's deoptimizations,
 	// and jitRegRefused says it is not compiled from its register code;
 	// jitReg is its code, nil until compiled (zzjit_zregtier.go).
 	jitRegHot, jitRegDeopts uint8
 	jitRegRefused           bool
 	jitReg                  *jitRegEntry
+	// jitRegKey is the template's function's key in the realm its closures
+	// run in (jitRegKeyOf), made at its first use.
+	jitRegKey jitKey
 	// jitRegCounts are what the feedback dispatcher counted of the
 	// function's register code (zzjit_zregfreq.go): its runs, then the
 	// calls made at each of its call sites; nil until its call sites'
 	// caches are made, and in a runtime that runs no JIT.
 	jitRegCounts []uint64
+	// jitRegTick counts down the runs of the function's register code
+	// left of its budget, from jitRegTickSet, which the feedback
+	// dispatcher's returns count (jitRegArm): at 0 they mark its calls
+	// for Go (jitEnters), which spends their runs (jitRegCallTier).
+	jitRegTick, jitRegTickSet int64
 }
 
 // hint is the hint of the code of cl's function, its template's closures'
@@ -573,6 +581,24 @@ func (r *Runtime) jitKeyOf(fn *bytecode.Function) jitKey {
 	return jitKey{weak.Make(fn), r.jitRealmKey()}
 }
 
+// jitRegKeyOf is jitKeyOf(cl.fn), which register code's every call of Go,
+// exit and level of a native call asks, kept by cl's template
+// (jitCodeFields' jitRegKey) as the stack form's are found by the
+// function's address (entryFor): weak.Make finds or makes the runtime's
+// handle of fn at each call -- a search of its span's specials -- a sixth
+// of AWFY's CD under the register JIT. A closure of another realm than the
+// running one's has its key made.
+func (r *Runtime) jitRegKeyOf(cl *closure) jitKey {
+	cc := cl.closureCode
+	if cc == nil || cl.realm != r.Realm {
+		return r.jitKeyOf(cl.fn)
+	}
+	if cc.jitRegKey.Pointer == (weak.Pointer[bytecode.Function]{}) {
+		cc.jitRegKey = r.jitKeyOf(cl.fn)
+	}
+	return cc.jitRegKey
+}
+
 // jitFnAddr is byFn's key: a jitKey by its function's address.
 type jitFnAddr struct {
 	fn    uintptr
@@ -657,6 +683,11 @@ type jitEntry struct {
 	// leaves to Go (ssa.Func's HostsLeft): a call there its code has never
 	// been seen to make is one seldom made (jitInlineExit).
 	ssaHostsLeft []int32
+	// regCallsMade counts, of register code's learning, the calls Go made
+	// for its code or at its exits, by register pc (jitRegCallSeen): a call
+	// its code leaves to Go and has never made is seldom made (jitRegFeedback's
+	// InlineExit).
+	regCallsMade []uint8
 	// ssaUnresumed are the PCs after the calls the code makes or inlines
 	// that it has no entry after (ssa.Func's Unresumed), and resumeReopt
 	// marks code to be compiled again with an entry at one Go has gone on
@@ -967,6 +998,9 @@ type jitLink struct {
 	// The function's frame and flags (abi.LinkCoerce...), for a generic
 	// call (abi.Encoding's Link fields).
 	params, locals, frame, flags uint64
+	// hint is, for a register link (regLinkOf), its slot of the hint
+	// table (regHint), which generic calls find it by; 0 for none.
+	hint uint32
 	// gen is, for a generator's function, its code's generator entry,
 	// where a loop's step that resumes one natively jumps (ssa.CallSite's
 	// Gens), or 0 while there is none it may: 0 whenever entry is, for
@@ -1011,6 +1045,15 @@ type jitState struct {
 	// regLinks are the links native callers call functions' register code
 	// through, by the same keys (zzjit_zregcall.go).
 	regLinks map[jitKey]*jitLink
+	// regGoOn is the frame the interpreter runs where register code left
+	// it with no entry, and regForced marks the interpreter's check made
+	// due at once at its next back edge, where Go goes on in its code
+	// (jitRegGoOnAt, jitRegLoop), as goOn and forcedCheck are the stack
+	// form's.
+	regGoOn   *frame
+	regForced bool
+	// regHeld is what the register code in regCache takes (held).
+	regHeld int
 	// regLearned is what the code made from a function's register code
 	// learned at its exits, by the function's key, kept across its
 	// compiles: an entry holding only what it learned (jitLearned), by
@@ -1024,6 +1067,12 @@ type jitState struct {
 	// regHostOps counts register code's host exits by the register
 	// instruction Go ran whole, for tests (RegNativeStats' HostOps).
 	regHostOps map[string]uint64
+	// regEnded counts the runs of register code that ended in the
+	// interpreter (interpreted) by why they did, the instruction they
+	// left at and its function, while the JIT reports (RegNativeStats'
+	// Ended); regEndWhy is why jitRegLeft last left a frame to it.
+	regEnded  map[string]uint64
+	regEndWhy string
 	// wholeLeft counts the instructions Go ran whole for native code that
 	// did not go on natively (jitRegWhole), for tests (RegNativeStats').
 	wholeLeft uint64
@@ -1252,7 +1301,10 @@ type jitState struct {
 	callsDecided uint64
 	pinSerial    uint64
 	goMark       jitGoMark
-	levels       jitLevels
+	// regGoMark is goMark for register code: the last call of Go a native
+	// callee's code made (jitRegCalleeProfit).
+	regGoMark jitRegGoMark
+	levels    jitLevels
 	// lazy are the native levels whose frames calls of Go put off, the
 	// innermost call's last, and lazyTop the depth below which they are
 	// (jitLazyLevels).
@@ -1277,6 +1329,46 @@ type jitState struct {
 	// that its exit finishes, as goPending is the stack form's.
 	regRuns    []jitRegRun
 	regPending jitGoPending
+	// regNestLevels and regNestFrames hold, as a stack, the levels a call
+	// of Go from a native callee's code under way runs past and the frames
+	// Go made of them (jitRegGoCallNested): such calls nest, script they
+	// run making native calls that call Go, each taking its stretch past
+	// the one it runs in.
+	regNestLevels []jitRegLevel
+	regNestFrames []*frame
+	// regRunAt is one past the context of the run of register code whose
+	// native code runs now (jitRegStretch), 0 where none does or a stack
+	// form's run is the innermost: the run a call of Go from a native
+	// callee's code is of (jitRegRootOf), known without a walk down its
+	// levels.
+	regRunAt int
+	// regLazyLevels and regLazyFrames hold, as a stack, the levels of
+	// calls of Go from native callees' code that put them off
+	// (jitLazyLevels' reg) and the frames Go made of them once one was
+	// read (jitRegMakeLazy).
+	regLazyLevels []jitRegLevel
+	regLazyFrames []*frame
+	// regGens says a register function's link has had a generator entry
+	// (jitLink's gen): only then may a native callee's level be a
+	// generator's resumption, which a call of Go makes the frames of at
+	// once (jitRegGensIn).
+	regGens bool
+	// regLevelsFound counts the levels of native calls Go found the code
+	// of and pinned (jitRegLevelAt): the work a call of Go from a native
+	// callee's code does for the levels below it.
+	regLevelsFound uint64
+	// regNestedCalls counts the calls of Go from native callees' code
+	// (jitRegGoCallNested), and regLazyMade the times the levels such a
+	// call put off were made (jitRegMakeLazy), and regLazyLevelsPut the
+	// levels such calls put off.
+	regNestedCalls, regLazyMade, regLazyLevelsPut uint64
+	// regRetired are register entries the cache let go of while their
+	// code was in use -- runs in it, native calls of it Go has the levels
+	// of, or pinned (goPinned): a native call of it under way, which a
+	// call of Go from its level returned to -- where a level running it
+	// finds it (jitRegLevelAt), closed once none is (regClose,
+	// jitRegCloseRetired).
+	regRetired []*jitRegEntry
 	// regJobs are the register compiles in the background, in the order
 	// they were handed over, and regPendingJobs each by its function's
 	// key (zzjit_zregbg.go).
@@ -1311,6 +1403,11 @@ type jitState struct {
 	// ssaKeeps is the most keep cells (abi.Context.Keep) any code compiled
 	// uses: what Go clears in a native callee's context.
 	ssaKeeps int
+	// ssaSpills is the most spill slots any code placed uses (mir's
+	// Code.Spills): every context has room for them (abi.Context's
+	// SpillMore), so that the code may run at any level, entered by Go or
+	// by a native caller (spillsFor).
+	ssaSpills int
 	// exitScratch is what exits that leave their frames to Go are read
 	// into (jit.ExitScratch).
 	exitScratch jit.ExitScratch
@@ -1389,8 +1486,6 @@ func (r *Runtime) initJIT(enabled bool, memoryLimit int64) {
 	r.jitStress = jitStressDefault
 	if r.jitStress.threshold {
 		r.jitCallThreshold, r.jitICThreshold = 1, 1
-		// Every call a sample of the register tier's (jitRegStressSample).
-		r.interruptCounter = 1
 	}
 }
 
@@ -1539,7 +1634,32 @@ func jitPoolBytes(pool *abi.ObjectPool) int {
 // programs it has lowered (jitLower), and what it holds besides
 // (sharedBytes).
 func (s *jitState) held() int {
-	return s.entryBytes + s.lowerBytes + s.sharedBytes()
+	return s.entryBytes + s.lowerBytes + s.sharedBytes() + s.regHeld
+}
+
+// spillShare is what each context holds of spill slots past its own
+// (abi.Context's SpillMore).
+func (s *jitState) spillShare() int { return 8 * max(s.ssaSpills-abi.SpillSlots, 0) }
+
+// spillRoom is what giving every context room for the spill slots of mc
+// adds to what the JIT holds: nothing for code of no more than the most
+// placed so far.
+func (s *jitState) spillRoom(mc *mir.Code) int {
+	return len(s.ssaCtxs) * 8 * max(mc.Spills-max(s.ssaSpills, abi.SpillSlots), 0)
+}
+
+// spillsFor gives every context room for the spill slots of mc, placed:
+// a level reached later is given it as it is made (jitGrowContexts). No
+// code's entry or call checks the room, which nothing takes back while
+// the runtime lives.
+func (s *jitState) spillsFor(mc *mir.Code) {
+	if mc.Spills <= s.ssaSpills {
+		return
+	}
+	s.ssaSpills = mc.Spills
+	for _, c := range s.ssaCtxs {
+		c.GrowSpill(mc.Spills)
+	}
 }
 
 // sharedBytes is what the JIT holds for the runtime apart from its entries
@@ -1558,7 +1678,7 @@ func (s *jitState) sharedBytes() int {
 	n := int(unsafe.Sizeof(*s)) + len(s.ssaCtxs)*jitContextBytes + jitCapBytes(s.ssaCtxs) + jitCapBytes(s.hints) +
 		jitCapBytes(s.hintFree) + len(s.links)*jitLinkFixed + jitCapBytes(s.victims) + jitCapBytes(s.goRuns) +
 		jitCapBytes(s.goPinned) + jitCapBytes(s.retired) + jitCapBytes(s.calleeOpen) + jitCapBytes(s.unwinding) + jitCapBytes(s.unwindingFrames) +
-		jitCapBytes(s.seedingFns) + jitCapBytes(s.arrayRooms)
+		jitCapBytes(s.seedingFns) + jitCapBytes(s.arrayRooms) + len(s.ssaCtxs)*s.spillShare()
 	for _, x := range s.retired {
 		n += x.code.Footprint()
 	}
@@ -1673,6 +1793,7 @@ func (e *jitEntry) makesLoops() bool { return e != nil && e.loops }
 type jitVictim struct {
 	key          jitKey
 	e            *jitEntry
+	re           *jitRegEntry
 	l            *jitLowering
 	class        uint8
 	used, serial uint64
@@ -1781,6 +1902,7 @@ func (s *jitState) listVictims(now uint64, need int) bool {
 		}
 		v = append(v, jitVictim{key: key, e: e, class: class, used: e.used, serial: e.serial, bytes: n})
 	}
+	v = s.regVictims(v, now)
 	for i := range v {
 		reclaimable += v[i].bytes
 	}
@@ -1819,6 +1941,10 @@ func (s *jitState) reclaim(x *jitVictim, now uint64) bool {
 			}
 		}
 	default:
+		if x.re != nil {
+			s.regReclaim(x, now)
+			return true
+		}
 		e := s.cache[x.key]
 		if e != x.e || s.inUse(e) || e.busy != 0 || e.holdsCode() != (x.class == jitVictimCode) ||
 			e.holdsCode() && e.used+jitCodeAge > now {
@@ -1999,6 +2125,7 @@ func (s *jitState) flush() {
 		}
 		s.flushed++
 	}
+	s.regFlush(tick, s.epoch())
 	jitFlushRealms[struct{}](s, used)
 }
 
@@ -2108,6 +2235,7 @@ func (s *jitState) age(now uint64) {
 			s.dropLowering(key, l)
 		}
 	}
+	s.regAge(now)
 	for key, l := range s.links {
 		if l.owner == nil && (l.refs == 0 || key.gone()) {
 			delete(s.links, key)

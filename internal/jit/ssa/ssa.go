@@ -333,6 +333,12 @@ const (
 	// frame's place, its context the frame's, and goes on in its code,
 	// returning where the frame would have. Key's bit 1 says the last of
 	// Args is the receiver the call gives, bit 2 that the code reads it.
+	// Register code's (TailWindow) has its window in Args past the
+	// function -- the function, the receiver, the arguments -- which are
+	// its registers from 0, Index of them, undefined in the rest to
+	// Const's, and the receiver the VM's frame's too where Go entered the
+	// code with it; TailPolled says the code's start polls, which the jump
+	// goes to, so that the call does not poll as well.
 	OpTailSelf // function, arguments -> none
 	// OpPoll is register code's check at its start, as a back edge's: the
 	// interpreter's back-edge budget (abi.Context's BackEdges) counted
@@ -606,6 +612,14 @@ const (
 	OpTypeofCell // tagged -> source
 )
 
+// OpTailSelf's Key bits for register code's call (OpTailSelf): its Args
+// its window (TailWindow), and the code's start, which the jump goes to,
+// a poll (TailPolled).
+const (
+	TailWindow = 4
+	TailPolled = 8
+)
+
 // OpNumberIs's Aux: which of Number's predicates.
 const (
 	NumberIsNaN = iota
@@ -867,6 +881,15 @@ func (f *Func) setProperty(v *Value, holders *HolderChain, cases []PropertyCase,
 
 // cache is v's inline cache, made, from the workspace if there is one,
 // if it has none.
+// InitLocals is the end of the locals past Params the code's entry makes
+// undefined (InitEnd): FrameLocals, or InitEnd below it.
+func (f *Func) InitLocals() int {
+	if f.InitEnd != 0 && f.InitEnd < f.FrameLocals {
+		return f.InitEnd
+	}
+	return f.FrameLocals
+}
+
 func (f *Func) cache(v *Value) *InlineCache {
 	if v.IC == nil {
 		if f.ws != nil {
@@ -1048,6 +1071,10 @@ type Block struct {
 	// (mir's yieldExit); the exit otherwise.
 	Yield         bool
 	YieldHandlers []ir.Handler
+	// YieldSlot is, for register code's yield (Func's GenWindow), the
+	// register its value is in; its handlers are the code's, by register
+	// pc, which nothing saves (YieldHandlers none).
+	YieldSlot int
 }
 
 // Entry is a place native code can be entered: an entry block, which loads
@@ -1081,6 +1108,12 @@ type Entry struct {
 type GenResume struct {
 	PC, Saved int
 	Started   bool
+	// Place and Sent are register code's (Func's GenWindow): the
+	// generator's place, its register pc, that the resumption is of --
+	// past end_params, or a yield's next instruction, where the code goes
+	// on at the entry for PC, the jump's target after it -- and the
+	// register the value sent in goes to, the yield's, or -1.
+	Place, Sent int
 }
 
 // Func is a function in SSA form.
@@ -1099,6 +1132,12 @@ type Func struct {
 	// to it.
 	Params    int
 	StartOnly bool
+	// InitEnd, where not 0, ends the locals past Params the code's entry
+	// makes undefined: register code's bindings (bytecode.RegCode's
+	// Inits), which the interpreter's call makes undefined, before its
+	// temporaries, which the code writes before it reads them. 0 is every
+	// local to FrameLocals, the stack form's.
+	InitEnd int
 	// Cells marks code whose captured locals are in cells of their own
 	// (ir.Program's Cells): its native callers' call clears the context's
 	// (abi.Context's Cells), which its entries' call of Go makes (GoCells).
@@ -1107,6 +1146,13 @@ type Func struct {
 	// makes the frame and the context of a call of the function, once for
 	// all its callers (mir's Code.CallEntry, abi.Context's ReturnTo).
 	CallEntry bool
+	// TailEntry asks, of register code with a call entry, for the entry a
+	// call in tail position of another function's code jumps to, its frame
+	// given up and the callee's window written in its place (mir's
+	// windowTailJump, Code.TailEntry): it makes what the code's frame takes
+	// past its window -- its operands' address, the VM's stack's top -- as
+	// the call entry would, and goes on at the start.
+	TailEntry bool
 	// GenEntry asks, of a synchronous generator's code, for the entry a
 	// loop's step that resumes the generator natively jumps to (CallSite's
 	// Gens, mir's Code.GenEntry): it makes the generator's frame and
@@ -1116,6 +1162,14 @@ type Func struct {
 	// there natively, and its returns finish it.
 	GenEntry   bool
 	GenResumes []GenResume
+	// GenWindow marks register code's generator entry and yields (mir's
+	// windowGenEntry, windowYieldExit): the frame is a window of
+	// FrameLocals registers made in the VM's stack, as a call entry makes
+	// one, from the generator's values, which keep the window's registers
+	// from GenFrom -- the callee's and this's, below it, made from the
+	// generator's callee and receiver -- and a yield writes them back.
+	GenWindow bool
+	GenFrom   int
 	// Loops says the code makes loops of built-ins' calls (OpLoopMark), whose
 	// word it clears at its entries; LoopsEnd is the slot past their slots,
 	// which the frame holds while they run: their callbacks' frames start

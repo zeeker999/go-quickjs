@@ -47,6 +47,8 @@ type core struct {
 	origin ssa.OriginMap
 	// gprs and fprs are the architecture's allocatable registers, by number.
 	gprs, fprs []int
+	// spills counts the spill slots the allocation took (Code's Spills).
+	spills int
 	// used are the registers the allocation gave a value, by number: the
 	// general ones, then the floating-point ones. Only these hold values an
 	// exit or a call of Go must keep (usedRegs).
@@ -555,6 +557,9 @@ type Code struct {
 	// generator of the function natively jumps to (ssa.Func's GenEntry),
 	// or -1 for none.
 	GenEntry int
+	// TailEntry is the offset of the entry another function's call in
+	// tail position jumps to (ssa.Func's TailEntry), or -1 for none.
+	TailEntry int
 	// Text is how many of Bytes are instructions: past them are the code's
 	// own constants (amd64's movImm), data.
 	Text int
@@ -564,6 +569,10 @@ type Code struct {
 	// the context's RecordRef[:CallRefs].
 	Calls    []*abi.CallState
 	CallRefs int
+	// Spills counts the spill slots the code uses: past abi.SpillSlots,
+	// the context it runs in must have the rest in its SpillMore
+	// (abi.Context's GrowSpill) before it runs there.
+	Spills int
 	// GoCalls are the descriptions of its calls of Go, which the calls name
 	// by address (abi.Context's GoState).
 	GoCalls []*abi.GoCallState
@@ -1798,9 +1807,28 @@ func (c *core) allocate() error {
 		// last; fend, by slot, the end of the interval that held it last;
 		// isFree, whether it is in the list. A slot is in it once at most:
 		// freed when its interval ends, taken from it to be used again.
-		fl := c.ints(3 * abi.SpillSlots)
-		fnext, fprev, fend := fl[:abi.SpillSlots], fl[abi.SpillSlots:2*abi.SpillSlots], fl[2*abi.SpillSlots:]
-		isFree := c.bools(abi.SpillSlots)
+		// They have room for the context's own slots at first, or the
+		// slots the first class took, and grow, doubling, as the slots
+		// taken pass it: nothing bounds a function's slots (abi.Context's
+		// SpillMore).
+		room := abi.SpillSlots
+		for room <= spills {
+			room *= 2
+		}
+		fl := c.ints(3 * room)
+		fnext, fprev, fend := fl[:room], fl[room:2*room], fl[2*room:]
+		isFree := c.bools(room)
+		grow := func() {
+			n := 2 * len(fnext)
+			fl := c.ints(3 * n)
+			copy(fl, fnext)
+			copy(fl[n:], fprev)
+			copy(fl[2*n:], fend)
+			fnext, fprev, fend = fl[:n], fl[n:2*n], fl[2*n:]
+			b := c.bools(n)
+			copy(b, isFree)
+			isFree = b
+		}
 		ftail := 0
 		freeSlot := func(s, end int) {
 			fend[s], isFree[s] = end, true
@@ -1901,8 +1929,8 @@ func (c *core) allocate() error {
 					return takeSlot(s - 1), nil
 				}
 			}
-			if spills == abi.SpillSlots {
-				return 0, fmt.Errorf("%w: more than %d spill slots", ErrUnsupported, abi.SpillSlots)
+			if spills == len(fnext) {
+				grow()
 			}
 			spills++
 			return spills - 1, nil
@@ -2208,8 +2236,6 @@ func (c *core) allocate() error {
 					switch {
 					case len(free) != 0:
 						s, free = free[len(free)-1], free[:len(free)-1]
-					case spills == abi.SpillSlots:
-						return fmt.Errorf("%w: more than %d spill slots", ErrUnsupported, abi.SpillSlots)
 					default:
 						s, spills = spills, spills+1
 					}
@@ -2232,6 +2258,7 @@ func (c *core) allocate() error {
 			c.saveAt[2*v.ID+1] = len(c.saves)
 		}
 	}
+	c.spills = spills
 	if c.opts.CheckAllocations {
 		c.checkAllocation(iv, rec, scanSpills)
 	}
@@ -2875,6 +2902,15 @@ type interval struct {
 
 func (c *core) spillDisp(slot int) int32 { return abi.OffSpill + int32(slot)*8 }
 
+// spillMore reports whether slot is past the context's own (abi.Context's
+// SpillMore), and if so its offset into SpillMore.
+func spillMore(slot int) (int32, bool) {
+	if slot < abi.SpillSlots {
+		return 0, false
+	}
+	return int32(slot-abi.SpillSlots) * 8, true
+}
+
 // captured reports whether a slot is past the frame's locals: a captured
 // binding, or the receiver.
 func (c *core) captured(slot int) bool { return slot >= c.f.FrameLocals && slot < c.f.Locals }
@@ -2939,7 +2975,7 @@ func (c *core) phiSchedule(to *ssa.Block, idx int) []phiStep {
 	isParked := func(v *ssa.Value) bool { return slices.Contains(c.sched.parked, v) }
 	// A move waits while a pending move, its source not parked, reads its
 	// destination: counted by location, so that telling takes no search.
-	if n := 2 * (64 + abi.SpillSlots); len(c.sched.readers) < n {
+	if n := 2 * (64 + max(abi.SpillSlots, c.spills)); len(c.sched.readers) < n {
 		c.sched.readers = make([]int32, n)
 	}
 	readers := c.sched.readers
@@ -3447,15 +3483,15 @@ func (c *core) goArgOf(x *ssa.Value) (abi.GoCallArg, bool) {
 	case abi.ExitReg:
 		a.Kind, a.At = abi.GoArgWord, abi.OffRegs+l.N*8
 	case abi.ExitSpill:
-		a.Kind, a.At = abi.GoArgWord, abi.OffSpill+l.N*8
+		a.Kind, a.At = abi.GoArgWord, abi.SpillOffset(l.N)
 	case abi.ExitF64Reg:
 		a.Kind, a.At = abi.GoArgF64, abi.OffXRegs+(l.N&31)*8
 	case abi.ExitF64Spill:
-		a.Kind, a.At = abi.GoArgF64, abi.OffSpill+l.N*8
+		a.Kind, a.At = abi.GoArgF64, abi.SpillOffset(l.N)
 	case abi.ExitBoolReg:
 		a.Kind, a.At = abi.GoArgBool, abi.OffRegs+(l.N&31)*8
 	case abi.ExitBoolSpill:
-		a.Kind, a.At = abi.GoArgBool, abi.OffSpill+l.N*8
+		a.Kind, a.At = abi.GoArgBool, abi.SpillOffset(l.N)
 	default:
 		return a, false
 	}
@@ -3470,7 +3506,7 @@ func (c *core) goArgOf(x *ssa.Value) (abi.GoCallArg, bool) {
 		case src.Kind == abi.ExitReg:
 			a.Ref, a.From = abi.GoRefSource, abi.OffRegs+src.N*8
 		case src.Kind == abi.ExitSpill:
-			a.Ref, a.From = abi.GoRefSource, abi.OffSpill+src.N*8
+			a.Ref, a.From = abi.GoRefSource, abi.SpillOffset(src.N)
 		case src.Kind == abi.ExitSlotAddr:
 			a.Ref = abi.GoRefSlotSource
 			a.Base, a.From = c.slotPlace(int(src.N))
@@ -3727,6 +3763,15 @@ func lengthWrites(site *ssa.CallSite, argc int, enc abi.Encoding) bool {
 		argc == 2 && enc.ValueSize == 16 && enc.WriteBarrier != 0
 }
 
+// closes reports whether a scope's end natively (cellsClose), site, closes
+// the cell of x, one of its Captures: a local from its Argc on, and, where
+// it closes a count of them (ssa.CallSite's Closes, register code's
+// close_regs), before its end.
+func closes(site *ssa.CallSite, x int32) bool {
+	at := int(x >> 1)
+	return at >= site.Argc && (site.Closes == 0 || at < site.Argc+site.Closes)
+}
+
 // goOpWord is the word a call of Go, site, passes Go (abi.Context's GoOp).
 func goOpWord(site *ssa.CallSite) uint64 {
 	op := uint64(site.Go)
@@ -3856,10 +3901,14 @@ func genMakeArgs(v *ssa.Value, enc abi.Encoding, put func(x *ssa.Value, off int3
 	at := 0
 	if site.Method {
 		put(v.Args[0], enc.GenObject+enc.GenThis, false)
+		if site.GenThisAt != 0 {
+			// A register generator's register 1 too (CallSite's GenThisAt).
+			put(v.Args[0], int32(site.GenThisAt-1)*int32(enc.ValueSize), true)
+		}
 		at = 1
 	}
-	for i := 0; i < site.Argc && i < site.Params && i < site.LocalCount; i++ {
-		put(v.Args[at+1+i], int32(i)*int32(enc.ValueSize), true)
+	for i := 0; i < site.Argc && i < site.Params && site.GenArgAt+i < site.LocalCount; i++ {
+		put(v.Args[at+1+i], int32(site.GenArgAt+i)*int32(enc.ValueSize), true)
 	}
 }
 

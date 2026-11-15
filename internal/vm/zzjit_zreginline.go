@@ -3,6 +3,7 @@
 package vm
 
 import (
+	"slices"
 	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -34,20 +35,26 @@ type jitRegInlineLevel struct {
 	// holds: the construction's result where the callee returns no object.
 	construct bool
 	this      Value
+	// callee is the function its caller's call called, where it is one
+	// (the call's window's), for a plain call's receiver.
+	callee Value
 	// threw marks the innermost level whose operation Go made at its host
 	// exit threw (jitRegInlineLeft).
 	threw bool
 }
 
 // jitRegInlined finishes the inlined callees whose frames an exit of the
-// code of owner, cl's function's entry, run in context idx, wrote in the
-// contexts past it (abi.LiveInline), and returns what the outermost
-// answered, or false where there are none. at is the register pc of the
-// owner's call the outermost is inlined at, wb the owner's window: the
-// objects its code did not make, which its frame's registers and the
-// callees' windows may name, are made first, once for both
-// (jitRegMaterializeSpans).
-func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at, wb int) (Value, error, bool) {
+// code of owner, the entry of the function frame f runs, run in context
+// idx, wrote in the contexts past it (abi.LiveInline), and returns what the
+// outermost answered, or false where there are none. at is the register pc
+// of the owner's call the outermost is inlined at, wb the owner's window:
+// the objects and closures its code did not make, which its frame's
+// registers and the callees' windows may name, are made first, once for
+// both (jitRegMaterializeSpans). A callee that is a closure the owner did
+// not make (ssa's calledClosures), named by its template, is the closure
+// made in its place, which its caller's call's window holds.
+func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb int) (Value, error, bool) {
+	cl := f.cl
 	s := r.jit
 	if idx+1 >= len(s.ssaCtxs) || s.ssaCtxs[idx+1].Live != abi.LiveInline {
 		return Undefined, nil, false
@@ -64,6 +71,13 @@ func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at, wb
 				}
 			}
 		}
+		if in != nil && in.reg == nil {
+			// A template of a closure the owner makes (madeInline), which
+			// no call has run yet where the owner was compiled before the
+			// closure's first call, as at QJS_JIT_STRESS's threshold: its
+			// register code, as a call of it gets it.
+			r.regOf(in)
+		}
 		if in == nil || in.reg == nil {
 			panic("vm: an inlined register callee's closure is not its caller's")
 		}
@@ -71,12 +85,46 @@ func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at, wb
 		c.Live, c.ReturnTo = 0, 0
 	}
 	n := len(levels)
-	if owner.frame != 0 {
+	if owner.frame != 0 || owner.keep != nil && len(owner.keep.made) != 0 {
 		spans := make([][2]int, 0, n)
 		for _, x := range levels {
 			spans = append(spans, [2]int{x.wb, x.wb + int(x.cl.reg.numRegs)})
 		}
-		r.jitRegMaterializeSpans(nil, owner, wb, spans)
+		r.jitRegMaterializeSpans(f, owner, wb, spans)
+	}
+	for k := range levels {
+		// The closure its caller's call called, the function in the call's
+		// window: the one made in place of a template.
+		caller, cwb, cpc := cl.reg, wb, at
+		if k > 0 {
+			caller, cwb, cpc = levels[k-1].cl.reg, levels[k-1].wb, levels[k-1].pc
+		}
+		if cpc >= len(caller.rc.Code) {
+			continue
+		}
+		called := Undefined
+		switch w := regAt(caller.code, cpc); w.Op() {
+		case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW:
+			called = r.stack[cwb+int(w.A())]
+		case bytecode.RApplyArgs:
+			// f of f.apply(x, arguments), inlined with the arguments
+			// (ssa.InlineSite's Forward).
+			called = r.stack[cwb+int(w.B())]
+		}
+		if loop := s.ssaCtxs[idx].Loop; k == 0 && loop != 0 {
+			// A loop's callback inlined in it: the loop's callback slot
+			// (jitRegLoopFinish's), which Go goes on calling.
+			called = r.stack[jitRegSlotIndex(owner.p, wb, owner.p.Locals+int(loop&0xffffffff)-1)+1]
+		}
+		if called.IsObject() {
+			if fd := called.Object().fn(); fd != nil && fd.closure != nil && fd.closure.fn == levels[k].cl.fn && fd.closure.reg != nil {
+				levels[k].cl = fd.closure
+			}
+		}
+		levels[k].callee = called
+		if kp := owner.keep; kp != nil && slices.Contains(kp.made, levels[k].cl) {
+			panic("vm: an inlined closure the code did not make is not where its call is")
+		}
 	}
 	s.unwound += uint64(n)
 	saved := r.stackTop
@@ -101,10 +149,26 @@ func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at, wb
 		if k > 0 {
 			caller, at = levels[k-1].cl.reg, levels[k-1].pc
 		}
-		if at < len(caller.rc.Code) && regAt(caller.code, at).Op() == bytecode.RNewW {
-			x.construct, x.this = true, r.stack[x.wb+1]
+		if at < len(caller.rc.Code) {
+			switch regAt(caller.code, at).Op() {
+			case bytecode.RNewW:
+				x.construct, x.this = true, r.stack[x.wb+1]
+			case bytecode.RCallW, bytecode.RCallWT:
+				// A plain call's receiver, for the frame (jitRegPlainReceiver).
+				r.jitRegPlainReceiver(x.callee, x.cl, x.wb)
+			}
 		}
-		lv := jitRegLevel{cl: x.cl, c: rc, wb: x.wb, construct: x.construct}
+		lv := jitRegLevel{cl: x.cl, c: rc, wb: x.wb, construct: x.construct, inline: true}
+		if rc.args {
+			// Its call's arguments, which it keeps (ssa.InlineSite's
+			// ReadsArguments and Arguments): its caller's call's window's,
+			// or those its caller hands on.
+			cwb, cargs := wb, f.args
+			if k > 0 {
+				cwb, cargs = levels[k-1].wb, frames[k-1].args
+			}
+			lv.args = r.jitRegInlineArgs(caller, cwb, at, cargs)
+		}
 		frames = append(frames, r.jitRegPushLevel(&lv, pc))
 	}
 	var v Value
@@ -117,7 +181,7 @@ func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at, wb
 			atSite := r.jitRegLeftAtSite(x)
 			var learned bool
 			v, err, learned = r.jitRegInlineLeft(f, x, owner)
-			l := s.regLearnedOf(r.jitKeyOf(cl.fn))
+			l := s.regLearnedOf(r.jitRegKeyOf(cl))
 			switch {
 			case x.kind == abi.ExitDeopt:
 				// A guard's failure: the owner's code invalid from here,
@@ -128,7 +192,7 @@ func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at, wb
 				// The callee's feedback learned what the owner's code was
 				// not compiled for: compiled again for it (jitRegReopt).
 				r.jitRegReopt(cl, owner)
-			case atSite || x.threw || owner.stale:
+			case atSite || x.threw || owner.life.reopt:
 				// Left at a site of the callee's -- or by code to be
 				// compiled again, which may be what it leaves for -- not
 				// for being inlined, as the stack form's unwinding counts
@@ -160,7 +224,7 @@ func (r *Runtime) jitRegInlined(idx int, cl *closure, owner *jitRegEntry, at, wb
 			// position (regRestartRun).
 			v, err = r.regRestartRun(f)
 		}
-		r.jitRegPopLevel(f, x.wb)
+		r.jitRegPopLevel(f, x.wb, false)
 		if err == errTailCall {
 			v, err = r.regTailRest()
 		}
@@ -188,7 +252,7 @@ func (r *Runtime) jitRegLeftAtSite(x *jitRegInlineLevel) bool {
 		return false
 	}
 	w := rc.Code[x.pc]
-	l := r.jit.regLearnedOf(r.jitKeyOf(x.cl.fn))
+	l := r.jit.regLearnedOf(r.jitRegKeyOf(x.cl))
 	switch w.Op() {
 	case bytecode.RGetProp, bytecode.RGetMethod, bytecode.RGetMethodW, bytecode.RSetProp, bytecode.RAddProp, bytecode.RAddPropI:
 		if site := int(w.C()); site < len(x.cl.ic) && x.cl.ic[site].fills >= maxCacheFills {
@@ -233,8 +297,15 @@ func (r *Runtime) jitRegInlineLeft(f *frame, x *jitRegInlineLevel, owner *jitReg
 		s.hosts++
 		f.pc = regSrc(c, pc) + 1
 		s.noteRegHost(c, pc)
-		l := s.regLearnedOf(r.jitKeyOf(x.cl.fn))
-		before, failed, mark := l.polyReopt, len(l.failed), jitFeedbackMark(x.cl)
+		l := s.regLearnedOf(r.jitRegKeyOf(x.cl))
+		before, failed := l.polyReopt, len(l.failed)
+		// An addition that met a string, learned as at the callee's own
+		// host exit (jitRegStringAddSeen), as the stack form's unwinding
+		// of an inlined level learns it (jitStringAddSeen): Go's from the
+		// next lowering on. Not learned, a closure's s += x inlined had
+		// left native code at each call until the call was no longer
+		// inlined.
+		str := r.jitRegStringAddSeen(l, c, x.wb, pc)
 		seen := r.jitRegHostSeen(f, c, x.wb, pc)
 		next, ran, err := r.regWhole(f, c, x.wb, pc)
 		if !ran {
@@ -249,10 +320,12 @@ func (r *Runtime) jitRegInlineLeft(f *frame, x *jitRegInlineLevel, owner *jitReg
 		// (jitNumberMissed), which a guard of the callee's own code
 		// deoptimizes for but one inlined leaves to Go at, the read
 		// generic once compiled again: str's in callsGo, of a string, had
-		// left at each; or its caches learned it, which the code inlining
-		// it reads, as a function's own code is compiled again for its
-		// caches' changes (jitFeedbackMark).
-		learned = !before && l.polyReopt || len(l.failed) != failed || jitFeedbackMark(x.cl) != mark
+		// left at each. A change of its caches alone is not: the stack
+		// form's code is compiled again for none (its mark only delays a
+		// compile, jitLearnedMark), and counted so, each exit had the
+		// code inlining it compiled again for what the interpreter's run
+		// of the callee filled.
+		learned = !before && l.polyReopt || len(l.failed) != failed || seen.elem || str
 		if err != nil {
 			x.threw = true
 			return Undefined, err, learned
@@ -264,11 +337,15 @@ func (r *Runtime) jitRegInlineLeft(f *frame, x *jitRegInlineLevel, owner *jitReg
 	case abi.ExitPoll:
 		s.budgets++
 		r.backEdges = s.backEdgeBudget()
-		if err := r.checkInterruptNow(); err != nil {
+		if err := r.checkInterruptPoll(); err != nil {
 			return Undefined, err, false
 		}
 	}
 	s.interpreted++
+	if s.reporting {
+		s.regEndWhy = "inlined callee left"
+		s.noteRegEnded(c, pc)
+	}
 	v, err = r.runReg(f, c, pc)
 	return v, err, learned
 }

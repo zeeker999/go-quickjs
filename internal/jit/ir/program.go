@@ -229,8 +229,10 @@ const (
 	// (ssa.GoClosure), and leaves it to Go otherwise.
 	Closure
 	// CloseUpvalues is close_upvalues, a scope's end: what closures
-	// captured of locals Key on is closed, the value kept for them. Go's,
-	// called from native code (ssa.GoClose), or left to it.
+	// captured of locals Key on is closed, the value kept for them --
+	// register code's close_regs, of the Extra registers from Key alone
+	// where Extra is not 0. Native code's or Go's, called from native code
+	// (ssa.GoClose), or left to it.
 	CloseUpvalues
 	// IterClose is iter_close_normal, a for...of's or a destructuring's
 	// end: the cursor at Left closed, which the new pipeline does natively
@@ -445,7 +447,9 @@ type Instruction struct {
 	// result's register at Dest, which the new pipeline makes as the stack
 	// form's call (ssa's CallSite), its operands read from the registers;
 	// or a typeof, its operand at Left and no Extra; or an instanceof, its
-	// object at Left, its constructor at Right and Extra 1.
+	// object at Left, its constructor at Right and Extra 1; or a derived
+	// constructor's super(...), its Extra arguments from Left, the this it
+	// binds to Dest (and register 1 and the this slot, ssa's superCall).
 	Window bool
 	// Whole marks a Host of register code that Go runs whole on the
 	// register frame, called from native code (ssa's GoCall, Whole), which
@@ -644,7 +648,15 @@ type Program struct {
 	// Commits): those after it are Generic, which Validate checks. A jump
 	// goes only to the first instruction of an origin, and a Host, which
 	// Go runs as the whole register instruction, is alone in its own.
+	// Origins rise through the program, but where a loop's test is also
+	// lowered before its loop (the compile package's loopTest): the copy's
+	// instructions have the test's origins, each origin's together, after
+	// the jump's into the loop.
 	Origin []uint32
+	// Starts is, for register code's program, the first instruction of
+	// each register pc's lowering, by register pc, and its length past the
+	// last: At's answer, which a copy's origins do not change.
+	Starts []int32
 	// Regs is, for register code's program, how many of its first slots
 	// are the frame's registers: what an exit writes, and what Live is
 	// of. The slots after them, to Locals, are the captured bindings'
@@ -672,6 +684,14 @@ type Program struct {
 	// new throws on: a call of itself in tail position is made as a call,
 	// for Go to throw, not a jump to its start (ssa's OpTailSelf).
 	ClassConstructor bool
+	// TailOwn marks register code whose frame the VM gives in place to a
+	// call of the function itself in tail position, deep in the stack
+	// (regTailTo), which native code makes a jump to its start (ssa's
+	// OpTailSelf): a strict plain function's, method's, arrow's, getter's
+	// or setter's -- not a sloppy one's, whose f.arguments reads its count
+	// from its caller's instruction and which the call gives a frame of its
+	// own, nor a class's constructor's, which a call throws for.
+	TailOwn bool
 	// DerivedConstructor marks a derived class's constructor, whose this
 	// slot (This) holds the uninitialized value until its super() binds
 	// it, and which returns that this: native code makes a return of
@@ -814,7 +834,7 @@ func (p *Program) Footprint() int {
 	if p == nil {
 		return 0
 	}
-	return int(unsafe.Sizeof(*p)) + cap(p.Globals)*4 + cap(p.Origin)*4 + cap(p.Code)*int(unsafe.Sizeof(Instruction{})) +
+	return int(unsafe.Sizeof(*p)) + cap(p.Globals)*4 + cap(p.Origin)*4 + cap(p.Starts)*4 + cap(p.Code)*int(unsafe.Sizeof(Instruction{})) +
 		cap(p.Maps)*int(unsafe.Sizeof(StateMap{})) + cap(p.Live)*8 + cap(p.Handlers)*int(unsafe.Sizeof(Handler{})) + cap(p.HandlerAt)*4 + cap(p.Captured) + cap(p.Assigned)
 }
 
@@ -836,11 +856,31 @@ func (p *Program) At(pc uint32) int {
 		}
 		return -1
 	}
+	if p.Starts != nil {
+		if int(pc) >= len(p.Starts)-1 {
+			return -1
+		}
+		return int(p.Starts[pc])
+	}
 	i, ok := slices.BinarySearch(p.Origin, pc)
 	if !ok {
 		return -1
 	}
 	return i
+}
+
+// copied reports whether instruction pc, the first of its origin's own
+// lowering (Starts), comes after a copy of a loop's test: the instruction
+// before it is outside its origin's own.
+func (p *Program) copied(pc int) bool {
+	if p.Starts == nil || pc <= 0 || pc >= len(p.Origin) {
+		return false
+	}
+	o, q := p.Origin[pc-1], p.Origin[pc]
+	if int(o)+1 >= len(p.Starts) || int(q)+1 >= len(p.Starts) {
+		return false
+	}
+	return (pc-1 < int(p.Starts[o]) || pc-1 >= int(p.Starts[o+1])) && int(p.Starts[q]) == pc
 }
 
 // starts reports whether instruction i is the first of its origin's.

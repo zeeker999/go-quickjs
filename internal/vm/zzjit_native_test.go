@@ -1679,6 +1679,7 @@ func jitRuntimeForTest(t *testing.T, cfg Config) *Runtime {
 func jitDefaultsForTest(r *Runtime) {
 	r.jitCallThreshold, r.jitICThreshold = jitInvocationsForMaglev, jitInvocationsAfterICUpdate
 	r.jitStress = jitStressConfig{}
+	r.interruptCounter = interruptCheckInterval
 }
 
 // jitOtherGuards is how many guards failed in r's code but the map checks
