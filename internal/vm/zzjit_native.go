@@ -2952,12 +2952,18 @@ func (r *Runtime) jitBackEdge(f *frame, pc uint32, sp int) (Value, error, bool) 
 		return Undefined, err, true
 	}
 	r.sweepStaleSlots(sp)
-	v, err, done := r.tryJITLoop(f, pc, sp, fullBudget)
-	if s := r.jit; !done && s != nil && s.goOnTree == f {
-		// The frame its tree goes on with (jitInterpretAfter), which native
-		// code does not take here: at its loop's header, which begins a
-		// block of its tree, the tree takes it -- the check made as any
-		// other, its budget spent, at its own back edge's turn.
+	if s := r.jit; s != nil && s.goOnTree == f {
+		// The frame its tree goes on with (jitInterpretAfter), a run of
+		// native code that left it waiting on the interpreter below Go: at
+		// its loop's header, which begins a block of its tree, the tree
+		// takes it -- the check made as any other, its budget spent, at its
+		// own back edge's turn -- before native code may. Entered there, a
+		// run of its own nested in the one that left it, each leaving at a
+		// turn of the loop, had nested again at the next, the frame's runs
+		// as deep in Go as the contexts went: 96 of them, when they were
+		// all there were, past which Go declined the entry and the tree
+		// took the frame; 8,192 once the contexts grew to the VM's depth
+		// limit.
 		if o := s.treeOSR; o.f == f && o.pc == int(pc) && o.depth == sp-f.base {
 			// Back at the loop a tree entered native code at: the tree,
 			// whose run of the frame waits on that entry, goes on with
@@ -2970,7 +2976,7 @@ func (r *Runtime) jitBackEdge(f *frame, pc uint32, sp int) (Value, error, bool) 
 			return Undefined, errGoOnTree, true
 		}
 	}
-	return v, err, done
+	return r.tryJITLoop(f, pc, sp, fullBudget)
 }
 
 // backEdgeBudget is the back-edge budget after a check: about
