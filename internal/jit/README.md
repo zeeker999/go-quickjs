@@ -1203,13 +1203,18 @@ Register code's operator writes its register itself, so a result stored
 over a value the register holds alone gives that value's block back
 (`ReleaseOld`, `bigOwner`), and an operand is fresh where an operator wrote
 it earlier in the block, nothing read it since and nothing reads it after
-(`regBigFresh`, the program's `Live`) -- not a register of those that hold
-their values alone, whose old values only their own stores give back. The
-registers that do (`BigIntSole`, `regSoleRegisters`) are those past the
-parameters no closure captures, read only as operators' operands, tests and
-branches: a move, a call's window, a return, a global's store, a property's
-read or a postfix update of one has it hold its value no more, and an
-instruction the analysis does not know has the function none.
+but the operator itself, whose result replaces it (`regBigFresh`, the
+program's `Live`) -- not a register of those that hold their values alone,
+whose old values only their own stores give back. Those that do
+(`BigIntSole`, `regSoleRegisters`) are the bindings, as the stack form's
+locals are -- the registers past the parameters and before the temporaries
+(`RegCode`'s `Inits`) -- that no closure captures, read only as operators'
+operands, appends, tests and branches: a move, a call's window, a return, a
+global's store, a property's read or a postfix update of one has it hold
+its value no more, and an instruction the analysis does not know has the
+function none. The temporaries are fresh as the stack form's operands are:
+`t = t * x` of a temporary gives the old one's block back as the product is
+made.
 
 ### Typed arrays and elements
 
