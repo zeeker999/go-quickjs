@@ -1307,6 +1307,16 @@ code -- Go goes on with on the register frame from its index
 (`jitRegLoopLeft`, `jitLoopFinishAt`), the callback's answer first where
 its call was made, and native code after the call.
 
+A `sort` of a typed array of a number type, or of an `Array` of numbers,
+by a comparator native code may call again at will -- one whose code reads
+only its parameters and constants that are numbers, computes, compares,
+branches forward and returns (`jitSortComparator` over the stack form's
+code, `jitRegSortComparator` over the register form's) -- is a merge sort
+of the code's own, the comparator inlined, over a copy Go makes and writes
+back after the last comparison (`ssa`'s `sortCall`). Any exit inside it has
+Go sort the array again from the first, which nothing the comparator did
+can show; a comparator that cannot be inlined leaves the call to Go.
+
 ### Allocation and escape analysis
 
 **Allocation.** Object, array and regular expression literals, closures and
