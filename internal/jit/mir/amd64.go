@@ -470,6 +470,18 @@ func (c *compiler) movImm(dst amd64.Reg, v uint64) {
 	c.a.MovImm(dst, v)
 }
 
+// intToF64 is d = the integer in src, 64 bits if wide, else 32, as a
+// double: cvtsi2sd, which writes d's low half alone, after an xorpd of d,
+// a zeroing idiom the processor's renaming makes. Without it, every value
+// conversion of a function waited for the one before, which wrote the
+// same scratch register: the conversion of a loop's int32 for its exit's
+// value, made at every turn, held up the next turn's conversion that its
+// arithmetic waits for.
+func (c *compiler) intToF64(d amd64.XReg, src amd64.Reg, wide bool) {
+	c.a.SSEOp(amd64.XorPD, d, d)
+	c.a.Cvtsi2sd(d, src, wide)
+}
+
 // constF64 makes the double whose bits are v in d: 0 by xorpd, any other
 // loaded from the context's constants or the code's own (movImm).
 func (c *compiler) constF64(d amd64.XReg, v uint64) {
@@ -770,7 +782,7 @@ func (c *compiler) materialize(v *ssa.Value, dst amd64.Reg) {
 	case ssa.OpBoxF64:
 		if x := i32Boxed(v); x != nil {
 			// An int32's number, made of the int32 (core's i32Boxed).
-			c.a.Cvtsi2sd(xScratch1, c.gpr(x, dst), false)
+			c.intToF64(xScratch1, c.gpr(x, dst), false)
 			c.boxF64(xScratch1, dst)
 			break
 		}
@@ -11550,7 +11562,7 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.Op(amd64.Sub, scratchA, scratchB, false)
 		c.setG(v, scratchA)
 	case ssa.OpI32ToF64:
-		c.a.Cvtsi2sd(xScratch0, c.gpr(arg(0), scratchA), false)
+		c.intToF64(xScratch0, c.gpr(arg(0), scratchA), false)
 		c.setX(v, xScratch0)
 	case ssa.OpBoolToI32, ssa.OpBoolToF64:
 		// Any word but 0 is true (boxBool): 1 or 0.
@@ -11562,11 +11574,11 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 			c.setG(v, scratchA)
 			break
 		}
-		c.a.Cvtsi2sd(xScratch0, scratchA, false)
+		c.intToF64(xScratch0, scratchA, false)
 		c.setX(v, xScratch0)
 	case ssa.OpU32ToF64:
 		c.a.MovRR32(scratchA, c.gpr(arg(0), scratchA))
-		c.a.Cvtsi2sd(xScratch0, scratchA, true)
+		c.intToF64(xScratch0, scratchA, true)
 		c.setX(v, xScratch0)
 	default:
 		panic("value " + v.Op.String())
