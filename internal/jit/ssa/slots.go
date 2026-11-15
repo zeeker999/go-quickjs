@@ -500,3 +500,88 @@ func diffSlotNodes(x *slotNode, hx int, y *slotNode, hy int, base int, fn func(i
 		}
 	}
 }
+
+// SlotNode is a node of states' slots, which the states share: a pass of
+// another package that does what each slot of a state asks once for each
+// node -- mir's descriptions of exits, which share their nodes as the
+// states do -- walks them (FrameState's Tree).
+type SlotNode = slotNode
+
+// SlotShift is how many bits of a slot's index each height of a tree of
+// SlotNodes takes: a node at height h has 1<<SlotShift entries, each of
+// 1<<(SlotShift*h) slots.
+const SlotShift = slotShift
+
+// Tree is s's slots' root and its height; nil for none.
+func (s *FrameState) Tree() (*SlotNode, int) { return s.slots, s.height }
+
+// ID numbers nd in its Func, below NumSlotNodes.
+func (nd *slotNode) ID() int { return int(nd.id) }
+
+// Mask is which of nd's entries it has.
+func (nd *slotNode) Mask() uint64 { return nd.mask }
+
+// Vals is a leaf's values, one for each bit of its Mask, in order.
+func (nd *slotNode) Vals() []*Value { return nd.vals }
+
+// Kids is an inner node's children, one for each bit of its Mask, in order.
+func (nd *slotNode) Kids() []*SlotNode { return nd.kids }
+
+// SlotWalk walks the nodes of states' slots top down (Walk), keeping its
+// tables from walk to walk.
+type SlotWalk struct {
+	seen         []int32
+	mark         int32
+	order, stack []slotWalkAt
+}
+
+type slotWalkAt struct {
+	nd            *slotNode
+	h, base, next int32
+	// rest is the mask's bits of the children not yet walked.
+	rest uint64
+}
+
+// Walk calls visit with each node of the slots of states, once, after
+// every node of theirs that has it -- its parents -- with its height and
+// its first slot: for a pass that does for each slot of a state what the
+// states asking for its node ask together, as slotWeights sums their
+// weights from the roots down, each node met once however many states
+// share it.
+func (w *SlotWalk) Walk(f *Func, states []*FrameState, visit func(nd *SlotNode, h, base int)) {
+	if n := int(f.nextNode); len(w.seen) < n {
+		w.seen = make([]int32, max(n, 2*len(w.seen)))
+		w.mark = 0
+	}
+	w.mark++
+	order, stack := w.order[:0], w.stack[:0]
+	for _, s := range states {
+		if s.slots == nil || w.seen[s.slots.id] == w.mark {
+			continue
+		}
+		w.seen[s.slots.id] = w.mark
+		stack = append(stack, slotWalkAt{nd: s.slots, h: int32(s.height), rest: s.slots.mask})
+		for len(stack) > 0 {
+			top := &stack[len(stack)-1]
+			if int(top.next) < len(top.nd.kids) {
+				kid := top.nd.kids[top.next]
+				c := int32(bits.TrailingZeros64(top.rest))
+				top.rest &= top.rest - 1
+				top.next++
+				if w.seen[kid.id] != w.mark {
+					w.seen[kid.id] = w.mark
+					stack = append(stack, slotWalkAt{nd: kid, h: top.h - 1, base: top.base + c<<(slotShift*top.h), rest: kid.mask})
+				}
+				continue
+			}
+			order = append(order, *top)
+			stack = stack[:len(stack)-1]
+		}
+	}
+	for k := len(order) - 1; k >= 0; k-- {
+		at := order[k]
+		visit(at.nd, int(at.h), int(at.base))
+	}
+	clear(order)
+	w.order, w.stack = order[:0], stack[:0]
+}
