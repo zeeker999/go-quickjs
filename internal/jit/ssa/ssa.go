@@ -610,6 +610,14 @@ const (
 	// a function where its target is -- where a call of Go makes it (a
 	// split). It never exits.
 	OpTypeofCell // tagged -> source
+	// OpCursorCell is a for...of loop's cursor's iterator's cell, Index 0
+	// -- the value the step calls next on -- where the cursor is one not
+	// done that steps by calling a next, no array's nor a for...in's, and
+	// its next is the function object at Const's address; or none (0)
+	// otherwise. Index 1 is its next's cell, read where Index 0's is some.
+	// It never exits: what is none Go steps (iterStep's split). The cells
+	// are the cursor's, which nothing writes once it is made.
+	OpCursorCell // tagged cursor -> source
 )
 
 // OpTailSelf's Key bits for register code's call (OpTailSelf): its Args
@@ -651,6 +659,7 @@ var opNames = [...]string{
 	OpDivI64: "divi64", OpModI64: "modi64", OpDivU64: "divu64", OpModU64: "modu64", OpBigOfF64: "bigoff", OpPowI64: "powi64",
 	OpHolderCell: "holdercell", OpChainCheck: "chaincheck", OpProtoIs: "protois", OpCodeCharOr: "codecharor",
 	OpStringCodePointOr: "codepointor", OpStringAtOr: "stringator", OpNumberIs: "numberis", OpTypeofCell: "typeofcell",
+	OpCursorCell: "cursorcell",
 }
 
 func (o Op) String() string {
@@ -1110,8 +1119,9 @@ type Func struct {
 	// call in tail position of another function's code jumps to, its frame
 	// given up and the callee's window written in its place (mir's
 	// windowTailJump, Code.TailEntry): it makes what the code's frame takes
-	// past its window -- its operands' address, the VM's stack's top -- as
-	// the call entry would, and goes on at the start.
+	// past its window -- its operands' address, the VM's stack's top and
+	// high water, of its own frame's size -- as the call entry would, and
+	// goes on at the start.
 	TailEntry bool
 	// GenEntry asks, of a synchronous generator's code, for the entry a
 	// loop's step that resumes the generator natively jumps to (CallSite's
@@ -1311,14 +1321,14 @@ type scratch struct {
 	// do not take again: cleared at each Optimize.
 	intPhis []*Value
 	intNo   []bool
-	// intCand, intReason, intTrunc, intWants and intAgainst are intPhis'
-	// and intPhiUses' flags by value ID, intRoot their groups and intOf
-	// their aliases: grown as IDs grow, never cleared whole -- each clears
-	// what it set, every round of a function of thousands of values had
-	// made and zeroed tables of them all.
-	intCand, intReason, intTrunc, intWants, intAgainst []bool
-	intRoot                                            []int
-	intOf                                              []*Value
+	// intCand, intReason, intTrunc, intWants, intAgainst and intCostly are
+	// intPhis' and intPhiUses' flags by value ID, intRoot their groups and
+	// intOf their aliases: grown as IDs grow, never cleared whole -- each
+	// clears what it set, every round of a function of thousands of values
+	// had made and zeroed tables of them all.
+	intCand, intReason, intTrunc, intWants, intAgainst, intCostly []bool
+	intRoot                                                       []int
+	intOf                                                         []*Value
 	// first and last are, by operand ID, Optimize's guards of it: the
 	// indexes past their first and last in guards, 0 for none.
 	first, last []int32

@@ -1824,7 +1824,18 @@ type CallSite struct {
 	// for...of or for...in loop's step (GoCall at an ir.IterStep): its
 	// cursor the one operand, the result the next value or, done, the
 	// uninitialized value.
-	New, Step                    bool
+	New, Step bool
+	// StepResult marks register code's loop's step's answer, of its
+	// cursor and the result of its iterator's next, which native code
+	// called (iterStep's userStep): Go's iterator protocol on it -- an
+	// object, its done, then its value -- but where native code reads it,
+	// a result of ResultShape whose done is false or true, its own data
+	// properties done and value at the positions DoneAt and ValueAt; the
+	// next value, or, done, the uninitialized value, the cursor marked
+	// done.
+	StepResult                   bool
+	ResultShape                  uintptr
+	DoneAt, ValueAt              int
 	Params, LocalCount, MaxStack int
 	ThisSlot                     int
 	Coerce                       bool
@@ -5551,6 +5562,9 @@ func (b *builder) iterStep(blk *Block, pc int, in ir.Instruction, operand func(i
 	if b.p.Origin != nil && !in.When && len(blk.Succs) == 2 {
 		on = blk.Succs[1]
 	}
+	if b.userStep(blk, pc, in, on, operand) {
+		return
+	}
 	call := guard(OpCall, Tagged, ir.HostExit, operand(in.Left))
 	if b.f.Keeps < b.f.keepLimit() && in.Rest {
 		// A rest element's: no step natively, which takes one value.
@@ -5592,6 +5606,109 @@ func (b *builder) iterStep(blk *Block, pc int, in ir.Instruction, operand func(i
 	is.Index = 1
 	blk.Control = is
 	is.Uses++
+}
+
+// stepCalls are the native calls of register code's loop's step at pc,
+// in, of its iterator's next (StepCallFeedback), and the site of its
+// answer's call of Go (CallSite's StepResult), or none.
+func (b *builder) stepCalls(pc int, in ir.Instruction) (calls []*CallSite, result *CallSite) {
+	if b.fb == nil || b.p.Origin == nil || in.When || in.Rest || b.cur != b.root || !b.goCalls() || b.f.Keeps+3 > b.f.keepLimit() {
+		return nil, nil
+	}
+	sites := b.fb.NativeCalls(pc)
+	for i := range sites {
+		switch site := &sites[i]; {
+		case site.Go == GoCall && site.StepResult:
+			result = site
+		case site.Go == 0 && site.Method && site.Argc == 0 && site.Window != 0 && site.Pool == 0 && !site.Super && !site.Forward && site.Via == 0 && len(calls) == 0:
+			calls = append(calls, site)
+		}
+	}
+	if len(calls) == 0 || result == nil {
+		return nil, nil
+	}
+	return calls, result
+}
+
+// userStep makes in, register code's loop's step at pc, whose cursor steps
+// an iterator of a next its feedback knows (stepCalls) -- an iterator
+// written in script, such as a class's [Symbol.iterator] returns -- by a
+// native call of the next, as any native call of a function is made,
+// through its link, its code's where it has some, Go's otherwise; and its
+// answer by the iterator protocol, natively for a result of the shape the
+// feedback knows (CallSite's StepResult), by Go otherwise. A cursor of
+// anything else -- an array, a Map, a generator, an iterator of another
+// next, one done -- Go steps, on a branch of its own (split), as iterStep
+// has it: OpCursorCell's cell is none there. Each step of an iterator
+// written in script had been a call of Go, which called the next in the
+// interpreter. It reports whether it made the step; on, where the loop
+// goes on, is given the step's value (stepOn), and blk's end the branch
+// on it as iterStep's.
+func (b *builder) userStep(blk *Block, pc int, in ir.Instruction, on *Block, operand func(ir.Operand) *Value) bool {
+	calls, result := b.stepCalls(pc, in)
+	if calls == nil || on == nil {
+		return false
+	}
+	f := b.f
+	st := b.state(blk, pc)
+	cursor := operand(in.Left)
+	iterCell := f.newValue(blk, OpCursorCell, Source, cursor)
+	iterCell.Const = ir.Value{Bits: uint64(calls[0].Callee)}
+	none := f.newValue(blk, OpCellNone, Bool, iterCell)
+	gen, nat, cont := b.split(blk, none, true)
+	keep := func() int {
+		k := f.Keeps
+		f.Keeps++
+		return k
+	}
+	made := func(at *Block, args []*Value, sites []*CallSite) (*Value, *Value) {
+		call := f.newValue(at, OpCall, Tagged, args...)
+		f.cache(call).Calls = sites
+		call.Aux, call.State, call.Index = int(ir.HostExit), st, keep()
+		st.addUse()
+		cell := f.newValue(at, OpCallCell, Source, call)
+		r := f.newValue(at, OpKept, Tagged, cell, call)
+		r.Shadow = cell
+		return call, r
+	}
+	// Go's step, as iterStep makes it.
+	gens, next := b.genSteps(pc)
+	_, r0 := made(gen, []*Value{cursor}, []*CallSite{{Go: GoCall, Step: true, ThisSlot: -1, MapNexts: b.mapNexts(), Gens: gens, GenNext: next}})
+	// The next called natively, on the iterator, of no argument: its
+	// window made of the two, its result its answer, whose protocol the
+	// call of Go after it makes but where native code does.
+	iter := f.newValue(nat, OpLoadCell, Tagged, iterCell)
+	iter.Shadow = iterCell
+	nextCell := f.newValue(nat, OpCursorCell, Source, cursor)
+	nextCell.Index = 1
+	fn := f.newValue(nat, OpLoadCell, Tagged, nextCell)
+	fn.Shadow = nextCell
+	call, res := made(nat, []*Value{iter, fn}, calls)
+	// It consumes none of the frame's registers: its window is no one's.
+	call.IC.Consumed = 0
+	_, r1 := made(nat, []*Value{cursor, res}, []*CallSite{result})
+	if b.hasCells() {
+		// The next, or a getter of its result's, may assign a captured
+		// binding, as any callee may.
+		b.reloadAfterCall(nat)
+		b.reloadAfterCall(gen)
+	}
+	// Where both meet, the step's value: the loop's end's test of it, and
+	// its register where the loop goes on (stepOn), as iterStep's.
+	r := f.newValue(cont, OpPhi, Tagged, r0, r1)
+	if b.stepOn == nil {
+		b.stepOn = map[*Block]stepDef{}
+	}
+	b.stepOn[on] = stepDef{in.Dest, r}
+	done := f.newValue(cont, OpConst, Tagged)
+	done.Const = ir.Value{Kind: ir.Uninitialized}
+	// Never left: the constant is no string (OpEqTagged).
+	is := f.newValue(cont, OpEqTagged, Bool, r, done)
+	is.Aux, is.State, is.Index = int(ir.HostExit), st, 1
+	st.addUse()
+	cont.Control = is
+	is.Uses++
+	return true
 }
 
 // goFrame makes in, a closure or the end of a scope that closes what

@@ -931,6 +931,11 @@ func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
 // nativeCalls is NativeCalls' answer, found.
 func (f *jitRegFeedback) nativeCalls(pc int) []ssa.CallSite {
 	w, op, ok := f.at(pc)
+	if ok && op == ir.IterStep && w.Op() == bytecode.RIterNext && !f.p.Code[pc].When && !f.p.Code[pc].Rest {
+		// A loop's step's native call of its iterator's next
+		// (regStepSites).
+		return f.regStepSites(pc)
+	}
 	if ok && (op == ir.Host && f.p.Code[pc].Whole || op == ir.FieldDefine && w.Op() == bytecode.RDefineField) {
 		// An instruction Go runs whole, its fast paths native code's
 		// (regWholeSite).

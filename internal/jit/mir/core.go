@@ -366,7 +366,7 @@ func latency(op ssa.Op) int {
 	switch op {
 	case ssa.OpObjectOf, ssa.OpArrayOf, ssa.OpIndexedOf, ssa.OpElemRead, ssa.OpBigElemRead, ssa.OpElemCell,
 		ssa.OpLength, ssa.OpPropRead, ssa.OpPropCell, ssa.OpLoadCell, ssa.OpStringProp,
-		ssa.OpStringCode, ssa.OpStringChar, ssa.OpCodeChar, ssa.OpCodeCharOr, ssa.OpTypeofCell, ssa.OpSubstringChar, ssa.OpStringCodePointOr, ssa.OpStringAtOr,
+		ssa.OpStringCode, ssa.OpStringChar, ssa.OpCodeChar, ssa.OpCodeCharOr, ssa.OpTypeofCell, ssa.OpSubstringChar, ssa.OpStringCodePointOr, ssa.OpStringAtOr, ssa.OpCursorCell,
 		ssa.OpUpvalueCell, ssa.OpLocalCell, ssa.OpGlobalCell, ssa.OpLexCell, ssa.OpBindingCell, ssa.OpHolderCell:
 		return 4
 	case ssa.OpAddF64, ssa.OpSubF64, ssa.OpMulF64, ssa.OpMaxF64, ssa.OpMinF64, ssa.OpSignF64,
@@ -566,17 +566,11 @@ type Code struct {
 	GenEntry int
 	// TailEntry is the offset of the entry another function's call in
 	// tail position jumps to (ssa.Func's TailEntry), or -1 for none: a
-	// routine that makes the frame's bindings past its parameters
-	// undefined, as the call entry does, or, where it has none, the entry
-	// at the start.
+	// routine that makes what the call entry makes past the frame's window,
+	// of the frame's size -- its operands' address, the VM's stack's top
+	// and high water -- and its bindings past its parameters undefined, as
+	// the call entry does, then goes on at the start.
 	TailEntry int
-	// StackAt is where the frame's operands start past its locals, a
-	// register program's past its scratch slots, and FrameSize how many
-	// slots the frame takes in the VM's stack, the call entry's -- both in
-	// values: what a call in tail position of register code that jumps to
-	// TailEntry makes of them (mir's windowTailJump), read from the
-	// callee's link (abi.Encoding's LinkStack, LinkTop).
-	StackAt, FrameSize int
 	// Text is how many of Bytes are instructions: past them are the code's
 	// own constants (amd64's movImm), data.
 	Text int
@@ -2712,7 +2706,8 @@ func (c *core) entryAt(pc int) *ssa.Block {
 // decoding (sourceAddr) and no test.
 func cellSource(s *ssa.Value) bool {
 	switch s.Op {
-	case ssa.OpPropCell, ssa.OpHolderCell, ssa.OpElemCell, ssa.OpGlobalCell, ssa.OpLexCell, ssa.OpBindingCell, ssa.OpStringMethod, ssa.OpStringChar, ssa.OpCodeChar, ssa.OpCodeCharOr, ssa.OpTypeofCell, ssa.OpSubstringChar, ssa.OpStringAtOr, ssa.OpStringProp, ssa.OpCallCell, ssa.OpBigCell, ssa.OpConstCell, ssa.OpUpvalueCell, ssa.OpLocalCell, ssa.OpKeep:
+	case ssa.OpPropCell, ssa.OpHolderCell, ssa.OpElemCell, ssa.OpGlobalCell, ssa.OpLexCell, ssa.OpBindingCell, ssa.OpStringMethod, ssa.OpStringChar, ssa.OpCodeChar, ssa.OpCodeCharOr, ssa.OpTypeofCell, ssa.OpSubstringChar, ssa.OpStringAtOr, ssa.OpStringProp, ssa.OpCallCell, ssa.OpBigCell, ssa.OpConstCell, ssa.OpUpvalueCell, ssa.OpLocalCell, ssa.OpKeep,
+		ssa.OpCursorCell:
 		return true
 	}
 	return false
@@ -4059,6 +4054,8 @@ func goOpWord(site *ssa.CallSite) uint64 {
 			op |= abi.GoCallFill << abi.GoOpKindShift
 		case site.Step:
 			op |= abi.GoCallStep << abi.GoOpKindShift
+		case site.StepResult:
+			op |= abi.GoCallStepResult << abi.GoOpKindShift
 		case site.TypeOf:
 			op |= abi.GoCallTypeOf << abi.GoOpKindShift
 		case site.InstanceOf:

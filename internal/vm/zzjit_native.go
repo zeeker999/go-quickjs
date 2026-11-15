@@ -1013,12 +1013,6 @@ type jitLink struct {
 	// Gens), or 0 while there is none it may: 0 whenever entry is, for
 	// the same reasons, and for a generator's code entry always is.
 	gen uintptr
-	// tailStack and tailTop are, for register code, where its frame's
-	// operands start past its window, in bytes, and how many slots its
-	// frame takes past its base (abi.Encoding's LinkStack, LinkTop), which
-	// a call in tail position makes before it jumps to body (mir's
-	// windowTailJump).
-	tailStack, tailTop uint64
 }
 
 // setCode has native callers call code through l: its call entry, which
@@ -1387,6 +1381,12 @@ type jitState struct {
 	// generator's resumption, which a call of Go makes the frames of at
 	// once (jitRegGensIn).
 	regGens bool
+	// regRoom is the most slots any register code compiled takes past its
+	// window (jitRegEntry's scratch and frame), which the contexts' StackEnd
+	// leaves below the VM's stack's end (jitStackEnd): a native call of
+	// register code, or a call in tail position, checks the room for the
+	// callee's window alone, a constant, and its code's frame fits past it.
+	regRoom uint64
 	// regLevelsFound counts the levels of native calls Go found the code
 	// of and pinned (jitRegLevelAt): the work a call of Go from a native
 	// callee's code does for the levels below it.

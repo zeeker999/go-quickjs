@@ -263,14 +263,14 @@ function's code with its window in this one's place, as the stack form's
 its parameters, undefined past them, as a native call writes its callee's
 window -- its temporaries, which it writes before it reads them, left as
 they are -- the context this one -- its closure, its captured bindings,
-`TailFrame` for its own calls -- and what its call entry would make past
-the window, its operands' address and the VM's stack's top, of the
-callee's code as its link has them (`abi.Encoding`'s `LinkStack` and
-`LinkTop`, `mir`'s Code's `StackAt` and `FrameSize`); the jump goes to the
-callee's tail entry (`ssa.Func`'s `TailEntry`, `mir`'s `windowTailJump`
-and `tailEntry`, its link's body): its start, or, where it has bindings
-past its parameters, a routine that makes them undefined, as its call
-entry does, then its start, returning where this frame would have: two
+`TailFrame` for its own calls -- its room the callee's window's, a
+constant, as a native call's (below); the jump goes to the callee's tail
+entry (`ssa.Func`'s `TailEntry`, `mir`'s `windowTailJump` and
+`tailEntry`, its link's body), a routine that makes what its call entry
+makes past the window, of its own code's constants -- its operands'
+address, the VM's stack's top and high water -- and its bindings past its
+parameters undefined, as its call entry does, then goes on at its start,
+returning where this frame would have: two
 functions calling each other in tail position run as deep as they like in
 one frame, natively. A call of the function itself writes its bindings
 and leaves its temporaries so too. Not a callee that keeps its arguments,
@@ -511,6 +511,7 @@ speculates nothing: it builds the site generically, or leaves it to Go.
 | closures and captured registers' cells from pools, an arrow's this its maker's register 1 (`ssa.ClosureSite`'s `LexThisReg`) | `Closure`, `CellsPool` |
 | `instanceof` of the constructor a global or a captured binding read just before holds, the searches, `parseInt`, BigInts' strings, by the built-in its site's cache holds | `InstanceOf`, `IndexOf`, `ParseInt`, `BigString` |
 | generators a loop's step or a call of `next` resumes natively, learned at the calls of Go that stepped them (`jitRegGenSeen`) | `GenSteps` |
+| a loop's step's iterator's `next` written in script, called natively, and its results' layout, learned at the calls of Go that stepped it (`jitRegStepNextSeen`) | `NativeCalls` |
 
 | Not answered yet | Methods | So |
 |---|---|---|
@@ -1071,7 +1072,12 @@ want an int32 -- a ToInt32, a comparison, an element's key, truncated
 arithmetic -- and none in its loop wants a double (`intPhiUses`), and its
 loop's budget of five general registers holds it, a phi read after its loop
 counting two, its interval having no holes (`intPhiBudgets`): amd64's code
-has seven general registers for values against thirteen SSE ones. A box of
+has seven general registers for values against thirteen SSE ones. A phi of
+no loop's header whose arguments are all int32s -- conversions, constants,
+others of its group, no entry's number -- is one whatever its uses: as an
+int32 it is converted once after the merge, where its arguments had been in
+each predecessor, register code's loop's test, which a loop's int32 read
+after it reaches the exit from, at every turn. A box of
 an int32's conversion, which a loop header's state names before the
 conversion is made, is made of the int32: an exit reads the int32 and makes
 its number (`abi.ExitI32Reg`, `ExitI32Spill`), and liveness keeps the int32
@@ -1589,6 +1595,29 @@ index, which an element read by it finds again (mir's `forInIndex`,
 or, done, the uninitialized value native code branches on. A step's iterator
 is closed however the loop is left, as the interpreter closes it.
 
+**Iterators written in script.** Register code's step whose cursor has met
+an iterator whose `next` is written in script calls that `next` natively
+(ssa's `userStep`), as any native call of a function is made: the step's
+feedback is a native call site of the `next`, learned at the call of Go
+that stepped it (the VM's `jitRegStepNextSeen`, `regStepSites`), and the
+`next` is compiled for native callers then. The step checks its cursor
+(`ssa.OpCursorCell`: not done, no array's, no for...in's, its `next` that
+function), and on a branch of its own, where it is not, Go steps it as
+above (`split`); where it is, the call is made of the cursor's iterator,
+its receiver, and its `next`, its window no register's (`InlineCache`'s
+`Consumed` none), and its result is answered by a call of Go of the
+iterator protocol (`ssa.CallSite`'s `StepResult`, `abi.GoCallStepResult`),
+which native code makes itself of a result of the layout the step learned
+whose `done` is false or true (mir's `stepResult`): its `value`, or, done,
+the uninitialized value and the cursor's state marked done. A getter, a
+`done` no boolean, a result no object are Go's, which throws as the
+interpreter does. Where the `next` leaves native code, Go finishes it and
+the step from what it returned (`jitGoPending`'s `step`,
+`jitRegStepCalled`), never calling it again: native code where the code
+the call returns to is valid, Go's protocol on the result otherwise; a
+`next` that throws marks the cursor done, so that the loop's handler does
+not close it.
+
 **Generators' steps.** A for...of's or a destructuring's step over a
 generator (`ssa.CallSite`'s `Gens`) resumes it by a native call, as V8's
 code calls a generator's resumption: the step checks the cursor's generator
@@ -2058,10 +2087,18 @@ register too (`jitRegLevelCallee`, `jit.CalledFunction`), where its closure
 is the level's -- past a call in tail position that gave the frame to
 another, whose call wrote it, the register's -- as the stack form's frames
 find their function from the context or the call. It checks
-the room its link says its code takes (`LinkFrame`) -- one check, as the
-stack form's call makes, the link's room never less than the callee's
-registers (`CallSite`'s `LocalCount`), and a second for the arguments only
-where they are more than those. The call's state leaves out the window's
+the room for the callee's window, or for its arguments where they are more
+than its registers (`CallSite`'s `LocalCount`): one check of a constant,
+as the stack form's call checks its callee's locals and operands, the
+VM's stack's top it leaves kept for the window's address where the call
+has one function. What the callee's code takes past its window -- its
+scratch slots, its loops' slots, its objects' homes -- is its compile's,
+no constant of its function as the stack form's frame is, so the
+contexts' `StackEnd` is the VM's stack's length less the most any register
+code compiled takes past its window (the VM's `regRoom`,
+`jitStackRoom`), raised in every context before a code that takes more is
+callable: its frame fits past any window the check found room for. The
+link's room (`LinkFrame`) is what Go's entries and `enterExit` make. The call's state leaves out the window's
 registers the call consumes (`ssa.Value`'s `Consumes`): those the
 interpreter's frame does not read past the call, normally or at a handler
 (`ir.Program`'s `LiveAt`), and the result's, as the stack form's leaves out

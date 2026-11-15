@@ -133,16 +133,48 @@ func (s *jitState) regUnhint(l *jitLink) {
 func (l *jitLink) regSet(s *jitState, e *jitRegEntry) {
 	l.setCode(e.code)
 	if l.entry != 0 {
-		// A call in tail position goes on at the code's tail entry, having
-		// made the frame past its window as the code's call entry would
-		// (mir's windowTailJump).
+		// A call in tail position goes on at the code's tail entry, which
+		// makes the frame past its window as the code's call entry would
+		// (mir's windowTailJump, tailEntry).
 		l.body = e.code.TailEntry()
-		l.tailStack, l.tailTop = uint64(e.code.StackAt())*uint64(unsafe.Sizeof(Value{})), uint64(e.code.FrameSize())
 	}
 	l.frame = max(l.frame, uint64(e.p.Regs+e.scratch+e.frame))
+	if room := uint64(e.scratch + e.frame); room > s.regRoom {
+		// Room for its frame past its window below every context's
+		// StackEnd before any native caller calls it.
+		s.regRoom = room
+		s.rt.jitStackRoom()
+	}
 	if l.gen != 0 {
 		s.regGens = true
 	}
+}
+
+// jitStackRoom writes into every context, and into what they share
+// (jitShared), the end of the VM's stack native code checks a call's room
+// against (abi.Context's StackEnd): its length, less the most any register
+// code takes past its window (jitState's regRoom). A native call of
+// register code then checks the callee's window alone, a constant, as the
+// stack form's call checks its callee's locals and operands -- the
+// register frame's size past its window is no constant of its function,
+// as the stack form's is, but its compile's: its scratch slots, its loops'
+// slots and its objects' homes (mir's frameSize).
+func (r *Runtime) jitStackRoom() {
+	s := r.jit
+	end := r.jitStackEnd()
+	s.ssaShared.stackEnd = end
+	for _, c := range s.ssaCtxs {
+		c.StackEnd = end
+	}
+}
+
+// jitStackEnd is the contexts' StackEnd (jitStackRoom).
+func (r *Runtime) jitStackEnd() uint64 {
+	n := uint64(len(r.stack))
+	if room := r.jit.regRoom; room < n {
+		return n - room
+	}
+	return 0
 }
 
 // regLinkUpdate sets the link of the function whose key is key, if it has
@@ -1973,8 +2005,10 @@ func (r *Runtime) jitRegRetryNative(e *jitRegEntry) {
 // context, spills and keeps as it left them -- or, its call's state written
 // to its window (jit.ExpandCall), by Go, the answer to the call's register
 // or the exception to the level's handlers (regPending), and on from there.
-// Each level's code is pinned until the level is done.
-func (r *Runtime) jitRegUnwind(idx int) (Value, error) {
+// Each level's code is pinned until the level is done. gen says the
+// outermost was a generator's resumption, whose answer is its step's
+// (jitRegGenDone).
+func (r *Runtime) jitRegUnwind(idx int) (_ Value, _ error, gen bool) {
 	s := r.jit
 	var levels []jitRegLevel
 	for i := idx + 1; i < len(s.ssaCtxs) && s.ssaCtxs[i].Live == abi.LiveCall; i++ {
@@ -2075,7 +2109,10 @@ func (r *Runtime) jitRegUnwind(idx int) (Value, error) {
 			}
 		default:
 			jit.ExpandCall(c)
-			s.regPending = jitGoPending{set: true, pc: l.pc, ctx: l.ctx, v: v, err: err}
+			// The callee's answer, its step's where a loop's step called
+			// its iterator's next (jitRegStepCalled), not a generator's,
+			// whose answer is its step's already.
+			s.regPending = jitGoPending{set: true, pc: l.pc, ctx: l.ctx, v: v, err: err, step: levels[k+1].gen == nil}
 			v, err = r.jitRegFinishLevel(f, l, c)
 		}
 		if err == errRegRestart {
@@ -2116,7 +2153,7 @@ func (r *Runtime) jitRegUnwind(idx int) (Value, error) {
 		}
 	}
 	s.ctxTop = ctxTop
-	return v, err
+	return v, err, n != 0 && levels[0].gen != nil
 }
 
 // jitRegFinishLevel finishes level l, whose frame is f, from where its code
