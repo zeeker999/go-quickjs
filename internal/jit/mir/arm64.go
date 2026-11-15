@@ -270,10 +270,15 @@ func compileARM64(w *Workspace, f *ssa.Func, enc abi.Encoding, opts Options) (co
 		resumeAt = c.a.Len()
 		c.resumeCall()
 	}
-	tailAt := -1
+	tailAt, tailStart := -1, false
 	if c.f.TailEntry && c.f.CallEntry && c.entryAt(0) != nil {
-		tailAt = c.a.Len()
-		c.tailEntry()
+		if c.tailInits() {
+			tailAt = c.a.Len()
+			c.tailEntry()
+		} else {
+			// As amd64's: the entry at the start.
+			tailStart = true
+		}
 	}
 	genAt := -1
 	if c.f.GenEntry {
@@ -344,12 +349,15 @@ func compileARM64(w *Workspace, f *ssa.Func, enc abi.Encoding, opts Options) (co
 	if w != nil {
 		w.arm64.code = bytes
 	}
+	if tailStart {
+		tailAt = entries[0]
+	}
 	c.finishExits()
 	c.lap(PhaseEncode)
 	if t := c.opts.Timing; t != nil {
 		t.Compiles++
 	}
-	return &Code{Bytes: bytes, Entries: entries, CallEntry: callAt, Resume: resumeAt, GenEntry: genAt, TailEntry: tailAt, Text: len(bytes), Exits: c.exits,
+	return &Code{Bytes: bytes, Entries: entries, CallEntry: callAt, Resume: resumeAt, GenEntry: genAt, TailEntry: tailAt, StackAt: c.f.FrameLocals + c.f.Scratch, FrameSize: c.frameSize(), Text: len(bytes), Exits: c.exits,
 		Calls: c.calls, CallRefs: c.callRefs(), Spills: c.spills, GoCalls: c.goCalls, core: c.core}, nil
 }
 
@@ -4267,6 +4275,10 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 	st, recs := c.callState(v, s, func(i int) bool {
 		return direct && i >= ops && i < sp || win && v.Consumes(i-(site.Window-1))
 	}, operands)
+	// As amd64's: the function left out of the window where no callee
+	// reads it (windowCallees).
+	callees := windowCallees(site, sites, gen)
+	st.Callees, st.Which = callees, len(sites) > 1 || gen
 	c.callRecords(v, recs)
 	c.movImm(a64A, uint64(uintptr(unsafe.Pointer(st))))
 	c.a.Store(a64Ctx, abi.OffCallState, a64A)
@@ -4316,7 +4328,9 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 				m = 1
 				c.directOperand(v, v.Args[0], a64D, vs)
 			}
-			c.directOperand(v, v.Args[m], a64D, 0)
+			if callees == nil {
+				c.directOperand(v, v.Args[m], a64D, 0)
+			}
 			for i := range site.Argc {
 				c.directOperand(v, v.Args[m+1+i], a64D, int32(2+i)*vs)
 			}
@@ -7573,7 +7587,15 @@ func (c *a64Compiler) tailDeep(v *ssa.Value, guard a64Guard) {
 	c.a.Load(a64A, a64Ctx, abi.OffClosure)
 	c.a.Cmp(a64A, a64B, true)
 	c.a.BCond(arm64.NE, other)
-	for i := range int(v.Const.Bits) {
+	slots := int(v.Const.Bits)
+	if v.Key&ssa.TailWindow != 0 {
+		// Register code's window: its function, receiver, parameters and
+		// bindings, which the interpreter's call makes and its code's
+		// start reads -- not its temporaries, which the code writes before
+		// it reads them, as a native call leaves them (windowSetup).
+		slots = min(slots, c.f.InitLocals())
+	}
+	for i := range slots {
 		nb, nd := c.slotAddr(i, false, a64C)
 		rb, rd := c.slotAddr(i, true, a64C)
 		if i < v.Index && i < len(args) {
@@ -7651,23 +7673,15 @@ func (c *a64Compiler) tailDeep(v *ssa.Value, guard a64Guard) {
 }
 
 // tailEntry is register code's entry for another function's call in tail
-// position (ssa.Func's TailEntry), as amd64's.
+// position (ssa.Func's TailEntry), as amd64's: its bindings past its
+// parameters undefined, then the start.
 func (c *a64Compiler) tailEntry() {
-	const at, top = arm64.Reg(5), arm64.Reg(6)
-	c.a.Load(a64Locals, a64Ctx, abi.OffLocals)
-	c.a.AddImm(a64Stack, a64Locals, int64(c.f.FrameLocals+c.f.Scratch)*int64(c.enc.ValueSize), true)
-	c.a.Store(a64Ctx, abi.OffStack, a64Stack)
-	c.a.Load(at, a64Ctx, abi.OffStackTop)
-	c.a.Load(top, a64Ctx, abi.OffBase)
-	c.a.AddImm(top, top, int64(c.frameSize()), true)
-	c.a.Store(at, 0, top)
-	same := c.a.NewLabel()
-	c.a.Load(at, a64Ctx, abi.OffStackHigh)
-	c.a.Load(a64A, at, 0)
-	c.a.Cmp(top, a64A, true)
-	c.a.BCond(arm64.LS, same)
-	c.a.Store(at, 0, top)
-	c.a.Bind(same)
+	vs := int32(c.enc.ValueSize)
+	c.movImm(a64A, c.enc.Undefined)
+	for i := c.f.Params; i < c.f.InitLocals(); i++ {
+		c.a.Store(a64Locals, int32(i)*vs+c.enc.NumOffset, a64A)
+		c.a.Store(a64Locals, int32(i)*vs+c.enc.RefOffset, arm64.ZR)
+	}
 	c.a.B(c.labels[c.entryAt(0).ID])
 }
 
@@ -7686,9 +7700,10 @@ func (c *a64Compiler) windowTailJump(t *ssa.CallSite, n int, guard a64Guard) {
 	c.a.Load(a64A, a64Ctx, abi.OffStackEnd)
 	c.a.Cmp(a64B, a64A, true)
 	guard.jump(arm64.HI)
-	for i := 0; i < t.LocalCount; i++ {
+	// As amd64's: its function, receiver and parameters alone.
+	for i := 0; i < t.Params && i < t.LocalCount; i++ {
 		at := int32(i) * vs
-		if i < t.Params && i < n {
+		if i < n {
 			g := abi.OffGoArgs + int32(i)*size
 			c.a.Load(a64A, a64Ctx, g+c.enc.NumOffset)
 			c.a.Store(a64Locals, at+c.enc.NumOffset, a64A)
@@ -7726,7 +7741,24 @@ func (c *a64Compiler) windowTailJump(t *ssa.CallSite, n int, guard a64Guard) {
 		c.a.AddImm(a64B, a64B, 1, true)
 		c.a.Store(a64A, 0, a64B)
 	}
+	// As amd64's: what its call entry makes past its window, of its
+	// code's as its link has them.
 	c.movImm(a64A, link)
+	c.a.Load(a64Stack, a64A, c.enc.LinkStack)
+	c.a.Op(arm64.Add, a64Stack, a64Stack, a64Locals, true)
+	c.a.Store(a64Ctx, abi.OffStack, a64Stack)
+	c.a.Load(a64B, a64Ctx, abi.OffBase)
+	c.a.Load(a64C, a64A, c.enc.LinkTop)
+	c.a.Op(arm64.Add, a64B, a64B, a64C, true)
+	c.a.Load(a64C, a64Ctx, abi.OffStackTop)
+	c.a.Store(a64C, 0, a64B)
+	same := c.a.NewLabel()
+	c.a.Load(a64C, a64Ctx, abi.OffStackHigh)
+	c.a.Load(a64D, a64C, 0)
+	c.a.Cmp(a64B, a64D, true)
+	c.a.BCond(arm64.LS, same)
+	c.a.Store(a64C, 0, a64B)
+	c.a.Bind(same)
 	c.a.Load(a64A, a64A, c.enc.LinkBody)
 	c.a.Br(a64A)
 }

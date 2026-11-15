@@ -198,6 +198,8 @@ var jitEncoding = abi.Encoding{
 	LinkFrame:          int32(unsafe.Offsetof(jitLink{}.frame)),
 	LinkFlags:          int32(unsafe.Offsetof(jitLink{}.flags)),
 	LinkGen:            int32(unsafe.Offsetof(jitLink{}.gen)),
+	LinkStack:          int32(unsafe.Offsetof(jitLink{}.tailStack)),
+	LinkTop:            int32(unsafe.Offsetof(jitLink{}.tailTop)),
 	ClassArray:         uint8(ClassArray),
 	ClassTypedArray:    uint8(ClassTypedArray),
 	TypedKind:          int32(unsafe.Offsetof(typedArrayData{}.kind)),
@@ -10520,6 +10522,9 @@ type jitLowering struct {
 	// startOnly is jitcompile.StartOnly's answer for the function, once
 	// asked by a call of it: 1 for no, 2 for yes.
 	startOnly uint8
+	// busy counts the compiles of the function's register code under way,
+	// which keep its programs (regLoweringSpare).
+	busy uint8
 	// typedCells are the cells of its element reads and writes of numbers,
 	// by PC, that learn the element types of their typed arrays
 	// (zzjit_typedkind.go).

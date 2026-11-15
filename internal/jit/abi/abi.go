@@ -295,7 +295,8 @@ type Context struct {
 	// (a *CallState, which the code holds), which the call writes before
 	// it jumps to its callee: for Go to make the frame from if the callee
 	// leaves native code (ExpandCall), what each call had written as
-	// records and an exit's fields. Go clears it as it expands it.
+	// records and an exit's fields. Go clears it as it expands it, keeping
+	// it in CallLast.
 	CallState uintptr
 	// The rest of the exit record. ExitSite is the slot IR PC of the
 	// operation whose guard or exit this was, or -1 (all ones) for a
@@ -580,6 +581,11 @@ type Context struct {
 	// SpillTemp is where amd64's code keeps the scratch register it
 	// reaches SpillMore through while it does (mir's spillMore).
 	SpillTemp uint64
+	// CallLast is the CallState Go expanded last (ExpandCall), which the
+	// native call under way in the context wrote while CallState is 0:
+	// where Go finds its callee (CallState's Callees). Native code never
+	// reads it.
+	CallLast uintptr
 }
 
 // SpillAt is the address of spill slot n: in Spill, or past it in
@@ -691,6 +697,11 @@ type GoCallState struct {
 	// the calls after.
 	Leaf     uintptr
 	LeafForm unsafe.Pointer
+	// Give, for a leaf's call of a RegExp literal's RegExp that nothing
+	// else reaches (ssa.CallSite's Give), is the address of the literal's
+	// ObjectPool, which Go gives the RegExp back to once the leaf has
+	// returned.
+	Give uintptr
 }
 
 // GoCallArg is a GoCallState's operand, the i'th, laid out for Go to read
@@ -742,10 +753,23 @@ const (
 type CallState struct {
 	PC, Depth uint32
 	Site      int32
+	// Which says the call's checks write which of its functions they found
+	// to the context's CallTarget; with one function and no other, they
+	// write none, and it is the first.
+	Which bool
 	// Frame is the frame's layout and the constant words (ExitFrame),
 	// which the code's exit descriptions share.
 	Frame   *ExitFrame
 	Records []CallRecord
+	// Callees is, for register code's native call that leaves its
+	// function out of its callee's window (ssa.CallSite's ReadsFunction),
+	// the function object each of the functions its checks find is, by
+	// CallTarget's numbering -- or 0 for one checked by its code, whose
+	// object they keep in the context's CallCallee -- which the caller's
+	// code keeps alive: what Go gives a frame it makes of the callee's
+	// level, as V8 finds a frame's function where it needs it. Nil where
+	// the call writes the function to the window's register 0.
+	Callees []uintptr
 }
 
 // CallRecord is a CallState's record of one slot, its i'th: its value's
@@ -769,10 +793,9 @@ type ExitDescriptor struct {
 	Kind, PC, Depth uint32
 	Site            int32
 	// Frame is what every description of the code shares: its slots are
-	// Count of Frame's, those Frame.Index lists from Start on (Slot).
+	// those of node Root of Frame's Tree, 0 for none (Slots).
 	Frame *ExitFrame
-	Start uint32
-	Count uint16
+	Root  uint32
 	// The frame's locals are at LocalsReg's address, its operands at
 	// StackReg's (ExitFrame's layout).
 	LocalsReg, StackReg uint8
@@ -798,26 +821,51 @@ func (d *ExitDescriptor) Inlines() []ExitInline {
 	return d.Frame.Inlines[d.InlineAt : d.InlineAt+uint32(d.InlineN)]
 }
 
-// Slot is the description's i'th slot.
-func (d *ExitDescriptor) Slot(i int) *ExitSlot {
-	return &d.Frame.Slots[d.Frame.Index[int(d.Start)+i]]
+// Slots calls fn with each of the description's slots, in order.
+func (d *ExitDescriptor) Slots(fn func(*ExitSlot)) {
+	if d.Root != 0 {
+		d.Frame.each(d.Root, fn)
+	}
+}
+
+// each calls fn with each slot of Tree's node off.
+func (f *ExitFrame) each(off uint32, fn func(*ExitSlot)) {
+	h := f.Tree[off]
+	n := h >> 1
+	for _, k := range f.Tree[off+1 : off+1+n] {
+		if h&1 != 0 {
+			fn(&f.Slots[k])
+		} else {
+			f.each(k, fn)
+		}
+	}
 }
 
 // ExitFrame is what a code's exit descriptions share: the frame's layout
 // -- its locals, from a description's LocalsReg's address; the receiver's
 // slot, in the context; the captured bindings, through their cells; the
 // operands, from its StackReg's address -- and the values' encoding; the
-// slots the descriptions write, each once, which Index lists for each
-// description by its index in Slots; and the constant words their values
-// are (ExitConst), each once. A function's slots repeat from exit to exit,
+// slots the descriptions write, each once; the nodes that list them for
+// the descriptions (Tree); and the constant words their values are
+// (ExitConst), each once. A function's slots repeat from exit to exit,
 // the same slot at the same register or spill, and its descriptions had
 // been as large as its code, each with every slot it writes and every
 // field of the layout: five slots in six were another's.
+//
+// Tree holds the nodes, each a word of its length, n<<1, with 1 for a
+// leaf, and its n entries: a leaf's slots' indices in Slots, in order, an
+// inner node's children's offsets in Tree. They are the nodes of the
+// frame states' slots (ssa's slots.go), which the states share as V8's
+// frame states share their StateValues: a description is its state's
+// tree, and the nodes it has of another's are the other's. A list of each
+// description's every slot had made a function of n values live at once
+// and an exit at each of its n instructions take n² of them. Tree[0] is
+// the empty node.
 type ExitFrame struct {
 	FrameLocals, ThisSlot, Locals int32
 	Enc                           *Encoding
 	Slots                         []ExitSlot
-	Index                         []uint16
+	Tree                          []uint32
 	Words                         []uint64
 	// Inlines are the inlined callees' frames the descriptions write, a
 	// run for each (ExitDescriptor's Inlines), which descriptions alike
@@ -1385,6 +1433,13 @@ type Encoding struct {
 	// for a loop's step that resumes it natively (mir's Code.GenEntry), a
 	// uint64, 0 for none.
 	LinkGen int32
+	// LinkStack and LinkTop are, in register code's link, where its code's
+	// frame's operands start past its window, in bytes, and how many slots
+	// the frame takes past its base (mir's Code.StackAt and FrameSize),
+	// each a uint64: what a call in tail position that jumps to its tail
+	// entry (LinkBody) makes of the context's Stack and the VM's stack's
+	// top, as the code's call entry would.
+	LinkStack, LinkTop int32
 	// Mega says contexts point to a megamorphic cache (Context.Mega).
 	Mega bool
 	// FlagHTMLDDA is the flags byte's bit for Annex B's [[IsHTMLDDA]],

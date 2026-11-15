@@ -166,7 +166,11 @@ func TestJITRegTailCalledClosures(t *testing.T) {
 				if got := regNativeShow(r, v, err); got != "14" {
 					t.Errorf("has(bag, i %% 13) = %q, want 14", got)
 				}
-				if n := after.Mallocs - before.Mallocs; n > 2000 {
+				// Counted where the build allocates as an ordinary one does:
+				// checkptr=2 moves to the heap every variable whose address
+				// becomes an unsafe.Pointer, 8,076 for these calls where an
+				// ordinary build makes under 2,000 (allocsOrdinary).
+				if n := after.Mallocs - before.Mallocs; n > 2000 && allocsOrdinary() {
 					t.Errorf("20,000 calls of contains: %d allocations", n)
 				}
 			}

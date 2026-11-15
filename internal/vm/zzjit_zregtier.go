@@ -9,6 +9,7 @@ import (
 	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
 // Tier-up from the register interpreter (docs/register-interpreter.md,
@@ -138,14 +139,16 @@ func (r *Runtime) jitRegLifeOf(cl *closure) *jitEntry {
 // stack form's native callers have a callee with no code compiled at their
 // first call of it (jitNativeCallee), not once it is hot -- they make no
 // sample of it. Code invalidated is once its calls have spent a fresh
-// budget (jitRegWarmUp).
-func (r *Runtime) jitRegNativeCallee(cl *closure, c *regCode) {
-	r.jitRegNativeCalleeN(cl, c, 1)
+// budget (jitRegWarmUp), and so is a callee too long to inline that is
+// warming up, unless caller, the closure of the native caller whose call Go
+// made, calls it often (jitRegLongWarming, jitRegCalledOften).
+func (r *Runtime) jitRegNativeCallee(cl *closure, c *regCode, caller *closure) {
+	r.jitRegNativeCalleeN(cl, c, 1, caller)
 }
 
 // jitRegNativeCalleeN is jitRegNativeCallee after calls calls of the
-// function Go made for its native callers.
-func (r *Runtime) jitRegNativeCalleeN(cl *closure, c *regCode, calls int64) {
+// function Go made for its native callers, caller's among them.
+func (r *Runtime) jitRegNativeCalleeN(cl *closure, c *regCode, calls int64, caller *closure) {
 	cc := cl.closureCode
 	if cc == nil || cc.jitRegRefused || cc.jitReg != nil || !r.jitEnabled {
 		return
@@ -153,7 +156,8 @@ func (r *Runtime) jitRegNativeCalleeN(cl *closure, c *regCode, calls int64) {
 	if !jitRegCalled(cl, c) {
 		return
 	}
-	if life := r.jitRegLifeOf(cl); life.invalid && c.leaf == regLeafNone && !r.jitRegWarmUp(cl, c, life, calls*int64(max(len(c.rc.Code), 1))) {
+	life := r.jitRegLifeOf(cl)
+	if life.invalid && c.leaf == regLeafNone && !r.jitRegWarmUp(cl, c, life, calls*int64(max(len(c.rc.Code), 1))) {
 		// Invalidated: each call of it Go makes for its native callers an
 		// invocation of the fresh budget it is compiled again after, as
 		// the stack form's calls spend it (jitTierUp), and the
@@ -164,6 +168,21 @@ func (r *Runtime) jitRegNativeCalleeN(cl *closure, c *regCode, calls int64) {
 		// deoptimizations counted all the same (jitMaxDeopts).
 		return
 	}
+	if !life.invalid && c.leaf == regLeafNone && r.jitRegLongWarming(cl, c, life) && !r.jitRegCalledOften(cl, c, life, caller) {
+		// Too long to inline and warming up: compiled once its budget is
+		// spent, as any function is -- the interpreter's runs of it Go
+		// makes for its native callers count it down (jitRegArm) -- unless
+		// the caller calls it often (jitRegCalledOften), as the stack
+		// form's jitNativeCallee leaves such a callee (jitLongWarming,
+		// jitCalledOften). Compiled at its native callers' first call,
+		// Mandreel's set-up -- __mandreel_internal_init,
+		// BenchmarkDemo::initPhysics, the static initializers, each run
+		// once an iteration -- was compiled at every iteration after the
+		// first, 4.8 MB of code for initPhysics alone, which the stack
+		// form never compiles. Not a leaf's, whose runs count nothing
+		// (above).
+		return
+	}
 	e := r.jitRegForAs(cl, c, true)
 	switch {
 	case e == nil:
@@ -172,6 +191,65 @@ func (r *Runtime) jitRegNativeCalleeN(cl *closure, c *regCode, calls int64) {
 	default:
 		cc.setJITReg(e)
 	}
+}
+
+// jitRegInlineSize is the length of c's function in the instructions
+// inlining's bounds count (ssa.MaxInline), the stack form's: register code
+// has 0.85 of the stack form's instructions, and each counts 20/17 of one,
+// as ssa's inlineSize counts a register program's.
+func jitRegInlineSize(c *regCode) int {
+	return (len(c.rc.Code)*20 + 8) / 17
+}
+
+// jitRegLongWarming reports whether cl's function, c its register code and
+// life its state, is too long to inline (jitRegInlineSize past
+// ssa.MaxInline) and warming up, its budget not spent: begun and not spent,
+// or not begun -- nothing compiled or refused for it -- where its first
+// call does not compile it (jitCallThreshold), as the stack form's
+// jitLongWarming asks of a callee native callers called.
+func (r *Runtime) jitRegLongWarming(cl *closure, c *regCode, life *jitEntry) bool {
+	if jitRegInlineSize(c) <= ssa.MaxInline {
+		return false
+	}
+	if life.warming {
+		return life.tierBudget > 0
+	}
+	return r.jitCallThreshold > 1 && r.jit.regCache[r.jitRegKeyOf(cl)] == nil
+}
+
+// jitRegCalledOften reports whether a function too long to inline, warming
+// up (jitRegLongWarming), cl's, c its register code and life its state, is
+// compiled at once for caller, the closure of the native caller whose call
+// of it Go made, as the stack form's jitCalledOften decides it, where V8
+// would inline it: with a budget begun, no longer than a function inlines
+// in all (ssa.MaxInlineTotal), and invoked (jitRegInvoked) at least
+// jitInliningFrequency hundredths as often as caller -- its runs while it
+// had no code, and since Go's entries at its start, native callers' calls
+// through its link and the calls Go made without entering it, as
+// invocations counts the stack form's.
+func (r *Runtime) jitRegCalledOften(cl *closure, c *regCode, life *jitEntry, caller *closure) bool {
+	if caller == nil || caller.closureCode == nil || !life.warming || jitRegInlineSize(c) > ssa.MaxInlineTotal {
+		return false
+	}
+	key := r.jitRegKeyOf(caller)
+	l := r.jitRegLifeOf(caller)
+	n := jitRegInvoked(caller, l) + int64(l.starts+l.slowCalls)
+	if k := r.jit.regLinks[key]; k != nil {
+		n += int64(k.in)
+	}
+	return jitRegInvoked(cl, life)*100 >= jitInliningFrequency*max(n, 1)
+}
+
+// jitRegInvoked is how many times cl's function, life its state, has run
+// while it had no code: the runs its budget counted (jitRegCallTier), and
+// those counted since (jitRegArm's ticks), as the stack form's invoked
+// counts its invocations while it warms.
+func jitRegInvoked(cl *closure, life *jitEntry) int64 {
+	n := life.invoked
+	if cc := cl.closureCode; cc != nil && cc.jitRegTickSet > 0 && cc.jitRegTickSet < math.MaxInt64 && cc.jitRegTick < cc.jitRegTickSet {
+		n += cc.jitRegTickSet - max(cc.jitRegTick, 0)
+	}
+	return n
 }
 
 // jitRegCallsNatively reports whether a call cl's function's register code
@@ -227,7 +305,11 @@ func (r *Runtime) jitRegCallTier(cl *closure, c *regCode) *jitRegEntry {
 func (r *Runtime) jitRegArm(cl *closure, c *regCode) {
 	cc := cl.closureCode
 	left := int64(1)
-	if life := r.jitRegLifeOf(cl); life.warming || life.invalid {
+	life := r.jitRegLifeOf(cl)
+	// The runs counted since the last, kept for the calls of it native
+	// callers make while it warms (jitRegInvoked).
+	life.invoked = jitRegInvoked(cl, life)
+	if life.warming || life.invalid {
 		n := int64(max(len(c.rc.Code), 1))
 		left = max((life.tierBudget+n-1)/n, 1)
 	}
@@ -385,19 +467,22 @@ func (r *Runtime) jitRegReopt(cl *closure, e *jitRegEntry) {
 // to be compiled again for what it learned (jitRegReopt), as
 // jitLearnedDue reports the stack form's: once it has spent a budget since
 // it began to learn (jitRegSpent), with nothing learned meanwhile
-// (jitLearnedMark), which raises what is left. Not while a native call
-// runs it, which finds its code in the cache (jitRegLevelAt), nor while it
-// is compiled in the background.
+// (jitLearnedMark), which raises what is left. Not while a native call of
+// it has not returned (regCalled), which finds its code in the cache
+// (jitRegLevelAt), nor while it is compiled in the background; but while
+// Go finishes levels of it, or runs it, which go on in their own code, as
+// V8 installs new code while older frames are in the old.
 func (r *Runtime) jitRegLearnedDue(cl *closure, e *jitRegEntry) bool {
-	return r.jitRegLearnedDueWith(cl, e, 0)
+	return r.jitRegLearnedDueWith(cl, e, len(r.jit.ssaCtxs))
 }
 
-// jitRegLearnedDueWith is jitRegLearnedDue for a call of Go running own of
-// the native calls that run e's code (jitRegCompileDueNow), whose leaving
-// unwinds them: not while any other runs it.
-func (r *Runtime) jitRegLearnedDueWith(cl *closure, e *jitRegEntry, own int) bool {
+// jitRegLearnedDueWith is jitRegLearnedDue for a call of Go whose leaving
+// unwinds the native calls in the contexts from limit on
+// (jitRegCompileDueNow): not while a native call of e's code in one below
+// limit has not returned.
+func (r *Runtime) jitRegLearnedDueWith(cl *closure, e *jitRegEntry, limit int) bool {
 	life := e.life
-	if e.invalid || e.code == nil || life == nil || !life.reopt || r.jit.regPendingJobs[e.key] != nil || r.jit.regLevelsOf(e) != own {
+	if e.invalid || e.code == nil || life == nil || !life.reopt || r.jit.regPendingJobs[e.key] != nil || r.jit.regCalledBelow(e, limit) {
 		return false
 	}
 	c := cl.reg
@@ -619,7 +704,7 @@ func (r *Runtime) jitRegResumeSeen(f *frame, c *regCode, e *jitRegEntry, rpc int
 		return nil
 	}
 	l.resumed = append(l.resumed, uint32(rpc))
-	if r.jit.regPendingJobs[e.key] != nil || r.jit.regLevelsOf(e) != 0 {
+	if r.jit.regPendingJobs[e.key] != nil || r.jit.regCalled(e) {
 		r.jitRegReopt(f.cl, e)
 		return nil
 	}
@@ -1012,7 +1097,7 @@ func (r *Runtime) jitRegFramesLeave(cl *closure, c *regCode, e *jitRegEntry, tar
 		return nil
 	}
 	life.resumed = append(life.resumed, uint32(target))
-	if r.jit.regPendingJobs[e.key] != nil || r.jit.regLevelsOf(e) != 0 {
+	if r.jit.regPendingJobs[e.key] != nil || r.jit.regCalled(e) {
 		// Compiled in the background, or run by native calls under way:
 		// compiled for it once due.
 		r.jitRegReopt(cl, e)
@@ -1051,7 +1136,7 @@ func (r *Runtime) jitRegKeptGone(cl *closure, c *regCode, e *jitRegEntry) *jitRe
 	life := e.life
 	life.keptGone = true
 	s := r.jit
-	if s.regPendingJobs[e.key] != nil || s.regLevelsOf(e) != 0 {
+	if s.regPendingJobs[e.key] != nil || s.regCalled(e) {
 		r.jitRegReopt(cl, e)
 		return nil
 	}
@@ -1140,11 +1225,11 @@ func (r *Runtime) jitRegCompileDueNow(run *jitRegRun, idx int) bool {
 	if e == nil || e.life == nil || !e.life.reopt {
 		return false
 	}
-	own := run.own
-	if own < 0 {
+	limit := idx
+	if run.own < 0 {
 		// A native callee's: the calling level, and those below it of the
-		// call's that run e's code too (jitRegLevelsIn).
-		own = 1 + r.jit.regLevelsIn(e, run.root, idx)
+		// call's, from the run's context on, which its leaving unwinds.
+		limit = run.root
 	}
-	return r.jitRegLearnedDueWith(run.f.cl, e, own)
+	return r.jitRegLearnedDueWith(run.f.cl, e, limit)
 }

@@ -957,11 +957,14 @@ func (f *jitRegFeedback) nativeCalls(pc int) []ssa.CallSite {
 	if w.Op() == bytecode.RLit {
 		// regexp_lit's call of the method its expansion read, of its one
 		// argument: Go's from native code, as call_method_w's marked to
-		// give the literal back (jitRegGoCall), or the leaf's (Leaf).
+		// give the literal back (jitRegGoCall), or the leaf's (Leaf), its
+		// receiver the literal's RegExp from its pool (regLitPool), which
+		// the leaf gives back to it (ssa.CallSite's Give,
+		// jitRegExpLeafGive).
 		if !f.regLitFed(pc) {
 			return nil
 		}
-		return []ssa.CallSite{{Go: ssa.GoCall, Argc: 1, Method: true, ThisSlot: -1}}
+		return []ssa.CallSite{{Go: ssa.GoCall, Argc: 1, Method: true, ThisSlot: -1, Give: f.regLitPool(pc, w)}}
 	}
 	if rpc < len(f.rc.Marks) && f.rc.Marks[rpc]&bytecode.RMarkTail != 0 {
 		return nil
@@ -1015,6 +1018,11 @@ func (f *jitRegFeedback) nativeCalls(pc int) []ssa.CallSite {
 		return []ssa.CallSite{site}
 	}
 	site := ssa.CallSite{Go: ssa.GoCall, Argc: argc, Method: method, New: w.Op() == bytecode.RNewW, ThisSlot: -1}
+	if method {
+		// A RegExp literal's call, whose RegExp a leaf's call gives back
+		// to the literal's pool (ssa.CallSite's Give).
+		site.Give = f.regLitPool(pc, w)
+	}
 	// A call of the realm's next on generators the code resumes natively
 	// (regGenNextSite), or a generator function's call, its generator made
 	// natively (regGenMakeSite).
@@ -1081,8 +1089,10 @@ func (f *jitRegFeedback) BigIntSole() (uint64, bool) {
 }
 
 // regSoleRegisters is the registers of rc, fn's register code lowered to
-// p, of the first 64, that hold their values alone: past the function,
-// this and the parameters, none a closure captures (ir.Program's
+// p, of the first 64, that hold their values alone: its bindings past the
+// function, this and the parameters -- not its temporaries, whose values
+// an operator's call gives back as it takes them (ssa's regBigFresh), as
+// the stack form's operands on its stack are -- none a closure captures (ir.Program's
 // Captured), each read only as an operand of an operator that makes a
 // value of its own -- arithmetic, bitwise, a comparison, a test, a
 // branch -- in a function that is no generator, no async function, has no
@@ -1099,7 +1109,7 @@ func regSoleRegisters(fn *bytecode.Function, rc *bytecode.RegCode, p *ir.Program
 		return 0
 	}
 	var cand uint64
-	for k := 2 + fn.ParamCount; k < rc.NumRegs && k < 64; k++ {
+	for k := 2 + fn.ParamCount; k < 2+fn.ParamCount+rc.Inits && k < rc.NumRegs && k < 64; k++ {
 		if !p.IsCaptured(k) {
 			cand |= 1 << uint(k)
 		}
@@ -1124,8 +1134,11 @@ func regSoleRegisters(fn *bytecode.Function, rc *bytecode.RegCode, p *ir.Program
 			bytecode.RJLtI, bytecode.RJNLtI, bytecode.RJLeI, bytecode.RJNLeI, bytecode.RJGtI, bytecode.RJNGtI, bytecode.RJGeI, bytecode.RJNGeI,
 			bytecode.RJSEq, bytecode.RJSNe, bytecode.RJSEqI, bytecode.RJSNeI,
 			bytecode.RJEq, bytecode.RJNe, bytecode.RJEqI, bytecode.RJNeI, bytecode.RJNull, bytecode.RJNotNull,
-			bytecode.RRetUndef:
-			// Operands, results of their own, tests and branches.
+			bytecode.RRetUndef, bytecode.RAppend, bytecode.RStrFreeze:
+			// Operands, results of their own, tests and branches; an
+			// append's addition, of a result of its own, and a read of
+			// the string it grows that leaves the value where it is, as
+			// the stack form's add and str_freeze (bytecode.SoleLocals).
 		case bytecode.RMove, bytecode.RPostInc, bytecode.RPostDec, bytecode.RGetLength, bytecode.RGetMethod, bytecode.RGetMethodW, bytecode.RGetProp:
 			// Its value left in another register, or read a property of.
 			escape(b)
@@ -1203,7 +1216,11 @@ func (f *jitRegFeedback) Leaf(pc int) (uintptr, bool) {
 	// literal's (RMarkLitArg), whose call of Go gives the literal its
 	// RegExp back, as the stack form's does.
 	replace := callee == f.fb.r.strReplaceFn && w.Op() == bytecode.RCallMW && w.X() == 2 && marks&bytecode.RMarkLitArg == 0
-	if !jitLeafOp(fd.elemOp) && !regexp && !replace {
+	// Array.prototype.push of other than one value, which the stack form's
+	// code learns a leaf at its calls of Go (jitPlainCall): one value's
+	// push native code appends itself.
+	push := fd.elemOp == elemPush && w.X() != 1
+	if !jitLeafOp(fd.elemOp) && !regexp && !replace && !push {
 		return 0, false
 	}
 	f.fb.keep().holders = append(f.fb.keep().holders, callee)
@@ -1378,6 +1395,63 @@ func (f *jitRegFeedback) Literal(pc int) (ssa.LiteralSite, bool) {
 		k.shapes = append(k.shapes, remember(l.root))
 	}
 	return ssa.LiteralSite{Pool: uintptr(unsafe.Pointer(l.pool)), Shared: l.shared}, true
+}
+
+// regLitPool is the address of the pool of the RegExp literal whose RegExp
+// is the receiver of the call at the program's instruction pc, w's -- a
+// regexp_lit's that calls (compile's regexpLit), or a call_method_w marked
+// to give its receiver back (RMarkLitRecv), the regexp_lit before it that
+// does not call having put the RegExp in its window -- which nothing but
+// the call reaches: the literal literalAt finds or makes for that
+// regexp_lit's ObjectLiteral, by the register pc they share, kept with the
+// code. 0 for any other call, or where it has none.
+func (f *jitRegFeedback) regLitPool(pc int, w bytecode.RInstr) uintptr {
+	e, cl, r := f.fb.e, f.fb.cl, f.fb.r
+	if e == nil || cl == nil || pc >= len(f.p.Origin) {
+		return 0
+	}
+	rpc := int(f.p.Origin[pc])
+	k := int(w.C())
+	switch {
+	case w.Op() == bytecode.RLit && w.X()&bytecode.RLitCall != 0:
+	case w.Op() == bytecode.RCallMW && rpc < len(f.rc.Marks) && f.rc.Marks[rpc]&bytecode.RMarkLitRecv != 0 && rpc < len(f.rc.Aux):
+		// Its literal's regexp_lit, of its window and its constant
+		// (regcomp's regexpLitCall): the instructions between make the
+		// arguments.
+		k = int(f.rc.Aux[rpc])
+		at := -1
+		for q := rpc - 1; q >= 0; q-- {
+			if x := f.rc.Code[q]; x.Op() == bytecode.RLit && x.X()&bytecode.RLitCall == 0 && x.A() == w.A() && int(x.C()) == k {
+				at = q
+				break
+			}
+		}
+		if at < 0 {
+			return 0
+		}
+		rpc = at
+	default:
+		return 0
+	}
+	var l *jitLiteral
+	for i := range e.literals {
+		if int(e.literals[i].pc) == rpc && e.literals[i].fn == cl.fn {
+			l = &e.literals[i]
+			break
+		}
+	}
+	if l == nil {
+		consts := regConsts(cl.fn, f.rc)
+		if k >= len(consts) || consts[k].Kind != bytecode.ConstRegExp {
+			return 0
+		}
+		l = r.jitRegExpLiteral(e, cl, rpc, &consts[k])
+	}
+	if l == nil || l.lit == nil {
+		return 0
+	}
+	f.fb.keep().pools = append(f.fb.keep().pools, l.pool)
+	return uintptr(unsafe.Pointer(l.pool))
 }
 
 // literalAt is the literal of the register instruction of the program's

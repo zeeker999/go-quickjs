@@ -1300,6 +1300,14 @@ func (r *Runtime) ClearStop() {
 		r.stopped = nil
 		clear(r.microtasks)
 		r.microtasks, r.jobHead = r.microtasks[:0], 0
+		// Its turn is over too: what its frames left past the stack's top
+		// and in the frames they returned from goes (endTurn). Left, its
+		// registers outlived it, held for the collector and counted by the
+		// next call's memory limit wherever that call's frames covered the
+		// slots without writing them -- a tree stopped at the limit had
+		// the next call, which allocated almost nothing, stopped there as
+		// well.
+		r.endTurn()
 	}
 }
 

@@ -202,11 +202,69 @@ func (r *Runtime) jitRegGenSeen(f *frame, e *jitRegEntry, rpc int, it *Object) {
 			return
 		}
 		gs.cls = append(gs.cls, g.cl)
-		r.jitRegReopt(cl, e)
+		r.jitRegGenLearned(cl, e)
 		return
 	}
 	l.genSteps = append(l.genSteps, jitGenStep{pc: int32(rpc), cls: []*closure{g.cl}})
+	r.jitRegGenLearned(cl, e)
+}
+
+// jitRegGenLearned asks for e, cl's code, to be compiled again for a
+// generator's step or making it learned (jitRegReopt), marked so that the
+// loops it was judged slow for, whose steps had each been a call of Go,
+// are judged afresh once it is (jitRegCached), as the stack form's
+// genLearned has jitReplaceCode judge them.
+func (r *Runtime) jitRegGenLearned(cl *closure, e *jitRegEntry) {
+	if e.life != nil {
+		e.life.genLearned = true
+	}
 	r.jitRegReopt(cl, e)
+}
+
+// jitRegSuspend suspends f, a generator's or an async function's frame
+// running c with its window at wb, at register pc rpc, a yield, a yield*,
+// an await or the end of the parameters its native code left at, as the
+// interpreter's yield and regSuspend do: the pc past the instruction kept
+// for the resumption, which enters native code there (regGenRun), and the
+// value handed out. It returns the suspension, the runtime's own, which
+// the frame's run ends in as the interpreter's would, or nil where it does
+// not suspend: an await its job goes on past in place (regAwaitsInPlace),
+// which regWhole runs before this is asked, and any other instruction.
+// Left to the interpreter, each suspension was a run ended there, the
+// frame handed to runReg only to suspend: generator_busy's every yield.
+func (r *Runtime) jitRegSuspend(f *frame, c *regCode, wb, rpc int) *suspendSignal {
+	if c == nil || rpc < 0 || rpc >= len(c.rc.Code) {
+		return nil
+	}
+	w := regAt(c.code, rpc)
+	op := w.Op()
+	switch op {
+	case bytecode.RYield:
+		sig := &r.treeSig
+		*sig = suspendSignal{value: r.stack[wb+int(w.B())]}
+		f.savedSP = rpc + 1
+		return sig
+	case bytecode.RAwait:
+		if r.regAwaitsInPlace(f, w, wb) {
+			// Gone on from in place: regWhole runs it (jitRegRun).
+			return nil
+		}
+	case bytecode.RYieldStar, bytecode.REndParams:
+	default:
+		return nil
+	}
+	sig := &r.treeSig
+	*sig = suspendSignal{
+		value:    Undefined,
+		await:    op == bytecode.RAwait,
+		delegate: op == bytecode.RYieldStar,
+		raw:      op == bytecode.RYieldStar && !c.fn.Async,
+	}
+	if op != bytecode.REndParams {
+		sig.value = r.stack[wb+int(w.B())]
+	}
+	f.savedSP = rpc + 1
+	return sig
 }
 
 // jitRegGenLevel marks l, a level of register code, the resumption of a

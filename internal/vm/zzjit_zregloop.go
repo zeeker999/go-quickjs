@@ -14,9 +14,10 @@ import (
 
 // Register code's loops of built-ins' calls (README "Array loops"): a call
 // of Array.prototype's forEach, reduce, map, filter, some, every, find or
-// findIndex, or a typed array's method of those names, that its code's
-// calls of Go have made on an array of the realm's, given a closure of the
-// realm's as its callback, is made a loop of the code's own by the builder
+// findIndex, or a typed array's method of those names -- or a sort, its
+// comparator inlined (ssa's sortCall) -- that its code's calls of Go have
+// made on an array of the realm's, given a closure of the realm's as its
+// callback, is made a loop of the code's own by the builder
 // (ssa.ForEachSite), its callback called natively, as the stack form's is:
 // the call learned at its call of Go (jitRegForEachSeen), answered by
 // jitRegFeedback's ForEach, and a loop that leaves native code finished by
@@ -31,7 +32,10 @@ import (
 // or whose built-in or typed arrays' prototype is another, the call is
 // Go's, as a call of too many targets is; one given a new closure of the
 // same function each time calls it by its code (ssa.CallSite's ByCode). A
-// sort, which native code makes only with its comparator inlined, is Go's.
+// sort, which native code makes only with its comparator inlined (ssa's
+// sortCall), is learned so only of a comparator it may call again at will
+// (jitRegSortComparator), and not of a BigInt typed array's, whose
+// elements its loop does not compare, as the stack form's (jitForEaches).
 func (r *Runtime) jitRegForEachSeen(f *frame, e *jitRegEntry, rpc int, callee, recv, cb Value, argc int) {
 	if argc != 1 && argc != 2 || !callee.IsObject() || !cb.IsObject() || e.invalid {
 		return
@@ -43,12 +47,13 @@ func (r *Runtime) jitRegForEachSeen(f *frame, e *jitRegEntry, rpc int, callee, r
 	// element, which an invalidated callback spends its budget by
 	// (jitRegNativeCalleeN).
 	var calls int64
+	sort := kind&abi.LoopKindMask == abi.LoopSort
 	switch {
-	case kind == 0 || kind&abi.LoopKindMask == abi.LoopSort:
+	case kind == 0:
 		return
 	case kind&abi.LoopTyped != 0:
 		t := r.jitLoopTyped(recv)
-		if t == nil {
+		if t == nil || sort && t.info().big {
 			return
 		}
 		proto = recv.Object().proto()
@@ -64,6 +69,9 @@ func (r *Runtime) jitRegForEachSeen(f *frame, e *jitRegEntry, rpc int, callee, r
 		return
 	}
 	cl := fd.closure
+	if sort && !jitRegSortComparator(cl.fn, cl.reg.rc) {
+		return
+	}
 	l := r.jitRegLearnedFor(f, e)
 	for i := range l.nativeCalls {
 		x := &l.nativeCalls[i]
@@ -77,11 +85,11 @@ func (r *Runtime) jitRegForEachSeen(f *frame, e *jitRegEntry, rpc int, callee, r
 			x.byCode = true
 			r.jitRegReopt(f.cl, e)
 		}
-		r.jitRegNativeCalleeN(cl, cl.reg, calls)
+		r.jitRegNativeCalleeN(cl, cl.reg, calls, f.cl)
 		return
 	}
 	l.nativeCalls = append(l.nativeCalls, jitInline{pc: int32(rpc), obj: o, forEach: true, cb: cl, cbObj: cb.Object(), proto: proto})
-	r.jitRegNativeCalleeN(cl, cl.reg, calls)
+	r.jitRegNativeCalleeN(cl, cl.reg, calls, f.cl)
 	r.jitRegReopt(f.cl, e)
 }
 
@@ -104,7 +112,7 @@ func (f *jitRegFeedback) ForEach(pc int) (ssa.ForEachSite, bool) {
 			continue
 		}
 		kind := r.jitLoopKind(x.obj)
-		if kind == 0 || kind&abi.LoopKindMask == abi.LoopSort {
+		if kind == 0 {
 			return ssa.ForEachSite{}, false
 		}
 		var proto uintptr
@@ -120,8 +128,16 @@ func (f *jitRegFeedback) ForEach(pc int) (ssa.ForEachSite, bool) {
 			k.holders = append(k.holders, x.proto)
 		}
 		argc := 3
-		if kind&abi.LoopKindMask == abi.LoopReduce {
+		switch kind & abi.LoopKindMask {
+		case abi.LoopReduce:
 			argc = 4
+		case abi.LoopSort:
+			// A comparator, called with two elements; native code sorts
+			// only with one it may call again at will.
+			argc = 2
+			if !jitRegSortComparator(x.cb.fn, x.cb.reg.rc) {
+				return ssa.ForEachSite{}, false
+			}
 		}
 		site, ok := f.regCallSite(pc, x.cbObj, x.cb, x.cb.reg, argc, true, nil, nil, x.byCode, false)
 		if !ok {
@@ -136,6 +152,91 @@ func (f *jitRegFeedback) ForEach(pc int) (ssa.ForEachSite, bool) {
 		return fe, true
 	}
 	return ssa.ForEachSite{}, false
+}
+
+// jitRegSortComparator is jitSortComparator over fn's register code rc:
+// whether fn, a sort's comparator, is a body native code may call again
+// at will (ssa's sortCall), given numbers -- a function, an arrow or a
+// method a call runs the body of, of the register form's own frame
+// layout, no binding of its own past its parameters, whose every
+// instruction reads its parameters, the temporaries it wrote, constants
+// that are numbers, computes with an operator, compares, branches
+// forward or returns: no read of its function or its this, no call, no
+// property, no global, no captured binding, no write but of a
+// temporary. Called with numbers, it makes only numbers, booleans,
+// undefined and null, runs nothing and changes nothing.
+func jitRegSortComparator(fn *bytecode.Function, rc *bytecode.RegCode) bool {
+	if fn == nil || rc == nil || !rc.Wide || !fn.DirectCall || fn.Kind != bytecode.KindNormal && fn.Kind != bytecode.KindArrow && fn.Kind != bytecode.KindMethod ||
+		fn.Generator || fn.Async || fn.HasRest || fn.HasDirectEval || !fn.HasSimpleParams || fn.ParamsAreLexical ||
+		fn.UsesArguments || fn.UsesThis || fn.LocalCount != fn.ParamCount || rc.Params != fn.ParamCount || rc.Inits != 0 ||
+		rc.This >= 0 || rc.ThisRef || rc.UsesArguments || rc.ForwardsArguments || rc.KeepsArgs || len(rc.Handlers) != 0 ||
+		rc.LocalReg != nil || len(rc.Code) > 64 {
+		return false
+	}
+	consts := fn.Constants
+	if rc.Constants != nil {
+		consts = rc.Constants
+	}
+	temp := 2 + rc.Params
+	// A register read: a parameter or a temporary; one written: a
+	// temporary.
+	read := func(x uint16) bool { return int(x) >= 2 && int(x) < rc.NumRegs }
+	write := func(x uint16) bool { return int(x) >= temp && int(x) < rc.NumRegs }
+	operator := func(op bytecode.Op) bool {
+		switch op {
+		case bytecode.OpAdd, bytecode.OpSub, bytecode.OpMul, bytecode.OpDiv, bytecode.OpMod,
+			bytecode.OpBitAnd, bytecode.OpBitOr, bytecode.OpBitXor, bytecode.OpShl, bytecode.OpShr, bytecode.OpUShr,
+			bytecode.OpLt, bytecode.OpLe, bytecode.OpGt, bytecode.OpGe, bytecode.OpEq, bytecode.OpNe, bytecode.OpStrictEq, bytecode.OpStrictNe:
+			return true
+		}
+		return false
+	}
+	forward := func(pc int, off int32) bool { return off >= 0 && pc+1+int(off) <= len(rc.Code) }
+	for pc, w := range rc.Code {
+		ok := true
+		switch w.Op() {
+		case bytecode.RNop, bytecode.RRetUndef:
+		case bytecode.RLoadInt, bytecode.RLoadUndef, bytecode.RLoadNull, bytecode.RLoadTrue, bytecode.RLoadFalse:
+			ok = write(w.A())
+		case bytecode.RLoadConst:
+			k := int(w.BC())
+			ok = write(w.A()) && k < len(consts) && consts[k].Kind == bytecode.ConstNumber
+		case bytecode.RMove, bytecode.RInc, bytecode.RDec,
+			bytecode.RAndI, bytecode.ROrI, bytecode.RXorI, bytecode.RShlI, bytecode.RShrI, bytecode.RUShrI, bytecode.RAddI, bytecode.RSubI:
+			ok = write(w.A()) && read(w.B())
+		case bytecode.RUnary:
+			switch bytecode.Op(w.X()) {
+			case bytecode.OpNeg, bytecode.OpPos, bytecode.OpToNumeric, bytecode.OpNot, bytecode.OpBitNot:
+				ok = write(w.A()) && read(w.B())
+			default:
+				ok = false
+			}
+		case bytecode.RAdd:
+			ok = w.X()&bytecode.RAddAppend == 0 && write(w.A()) && read(w.B()) && read(w.C())
+		case bytecode.RSub, bytecode.RMul, bytecode.RBitAnd, bytecode.RBitOr, bytecode.RBitXor, bytecode.RShl, bytecode.RShr, bytecode.RUShr:
+			ok = write(w.A()) && read(w.B()) && read(w.C())
+		case bytecode.RBin:
+			ok = operator(bytecode.Op(w.X())) && write(w.A()) && read(w.B()) && read(w.C())
+		case bytecode.RRet:
+			ok = read(w.A())
+		case bytecode.RJmp:
+			ok = forward(pc, int32(w.BC()))
+		case bytecode.RJmpF, bytecode.RJmpT:
+			ok = read(w.A()) && forward(pc, int32(w.BC()))
+		case bytecode.RJLt, bytecode.RJNLt, bytecode.RJLe, bytecode.RJNLe, bytecode.RJGt, bytecode.RJNGt, bytecode.RJGe, bytecode.RJNGe,
+			bytecode.RJSEq, bytecode.RJSNe, bytecode.RJEq, bytecode.RJNe:
+			ok = read(w.A()) && read(w.B()) && forward(pc, w.SC())
+		case bytecode.RJLtI, bytecode.RJNLtI, bytecode.RJLeI, bytecode.RJNLeI, bytecode.RJGtI, bytecode.RJNGtI, bytecode.RJGeI, bytecode.RJNGeI,
+			bytecode.RJSEqI, bytecode.RJSNeI, bytecode.RJEqI, bytecode.RJNeI, bytecode.RJNull, bytecode.RJNotNull:
+			ok = read(w.A()) && forward(pc, w.SC())
+		default:
+			ok = false
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // callbackInline is the InlineSite of x's callback, a loop's (ForEach),

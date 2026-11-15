@@ -51,17 +51,13 @@ func (s *ExitScratch) Apply(ctx *abi.Context) (refs int) {
 		locals: asPointer(&ctx.Regs[d.LocalsReg]), stack: asPointer(&ctx.Regs[d.StackReg])}
 	if d.Direct {
 		// No slot's reference comes from another written here.
-		for i := range int(d.Count) {
-			if at, n, r, ok := f.value(d.Slot(i)); ok {
-				refs += f.write(at, n, r)
-			}
+		if d.Root != 0 {
+			refs += f.writeNode(d.Root)
 		}
 	} else {
 		writes := s.writes[:0]
-		for i := range int(d.Count) {
-			if at, n, r, ok := f.value(d.Slot(i)); ok {
-				writes = append(writes, exitWrite{at, n, r})
-			}
+		if d.Root != 0 {
+			writes = f.readNode(d.Root, writes)
 		}
 		for _, x := range writes {
 			refs += f.write(x.at, x.num, x.ref)
@@ -84,6 +80,36 @@ func (s *ExitScratch) Apply(ctx *abi.Context) (refs int) {
 	ctx.Records = 0
 	ctx.ExitKind, ctx.ExitPC, ctx.ExitDepth, ctx.ExitSite = uint64(d.Kind), uint64(d.PC), uint64(d.Depth), uint64(int64(d.Site))
 	return refs
+}
+
+// writeNode writes the slots of node off of the frame's Tree
+// (abi.ExitFrame's), one by one, and returns how many held a reference.
+func (f *exitFrame) writeNode(off uint32) (refs int) {
+	t := f.d.Tree
+	h := t[off]
+	for _, k := range t[off+1 : off+1+h>>1] {
+		if h&1 == 0 {
+			refs += f.writeNode(k)
+		} else if at, n, r, ok := f.value(&f.d.Slots[k]); ok {
+			refs += f.write(at, n, r)
+		}
+	}
+	return refs
+}
+
+// readNode appends to writes what the slots of node off of the frame's
+// Tree are to be written with.
+func (f *exitFrame) readNode(off uint32, writes []exitWrite) []exitWrite {
+	t := f.d.Tree
+	h := t[off]
+	for _, k := range t[off+1 : off+1+h>>1] {
+		if h&1 == 0 {
+			writes = f.readNode(k, writes)
+		} else if at, n, r, ok := f.value(&f.d.Slots[k]); ok {
+			writes = append(writes, exitWrite{at, n, r})
+		}
+	}
+	return writes
 }
 
 // exitFrame is the frame an exit leaves, as its description and the
@@ -254,7 +280,7 @@ func ExpandCall(ctx *abi.Context) {
 	// The description, which the code keeps alive (Code.Calls), by its
 	// address.
 	st := (*abi.CallState)(asPointer((*uint64)(unsafe.Pointer(&ctx.CallState))))
-	ctx.CallState = 0
+	ctx.CallLast, ctx.CallState = ctx.CallState, 0
 	f := exitFrame{ctx: ctx, d: st.Frame, enc: st.Frame.Enc, locals: ctx.Locals, stack: ctx.Stack}
 	for i := range st.Records {
 		rec := &st.Records[i]
@@ -288,6 +314,37 @@ func CallPC(ctx *abi.Context) (pc, depth uint64) {
 		return uint64(st.PC), uint64(st.Depth)
 	}
 	return ctx.ExitPC, ctx.ExitDepth
+}
+
+// CalledFunction is the address of the function object that the native
+// call ctx's code is making found its callee to be, where the call left
+// it out of the callee's window (abi.CallState's Callees): its site's, or
+// one checked by its code, which its checks kept (abi.Context's
+// CallCallee). Nil where the call wrote it there, or none was found. The
+// words are read as pointers, which the caller's code keeps alive.
+func CalledFunction(ctx *abi.Context) unsafe.Pointer {
+	at := &ctx.CallState
+	if *at == 0 {
+		at = &ctx.CallLast
+	}
+	if *at == 0 {
+		return nil
+	}
+	st := (*abi.CallState)(asPointer((*uint64)(unsafe.Pointer(at))))
+	if st.Callees == nil {
+		return nil
+	}
+	k := uint64(0)
+	if st.Which {
+		k = ctx.CallTarget
+	}
+	if k >= uint64(len(st.Callees)) {
+		return nil
+	}
+	if st.Callees[k] != 0 {
+		return *(*unsafe.Pointer)(unsafe.Pointer(&st.Callees[k]))
+	}
+	return *(*unsafe.Pointer)(unsafe.Pointer(&ctx.CallCallee))
 }
 
 // ExpandGoCall reads into ctx the call of Go its code is making, if it

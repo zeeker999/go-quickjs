@@ -703,6 +703,10 @@ func lowerRegLits(rc *bytecode.RegCode, fn *bytecode.Function, m lowering, litHo
 			to = append(to, regTarget(pc, w.SC()))
 		case regGoBranches(w):
 			to = append(to, pc+1, pc+2)
+		case w.Op() == bytecode.RGenEntry && pc == 0:
+			// A first run enters past it, which does nothing there (the
+			// VM's regGenRun).
+			to = append(to, pc+1)
 		case w.Op() == bytecode.REndParams && (fn.Async || fn.Generator):
 			// The first resumption enters past the parameters.
 			to = append(to, pc+1)
@@ -1714,116 +1718,267 @@ func (l *regLowering) hostAt(pc int) ir.Instruction {
 // instruction (RegAccess). A throw goes to the handler in force, whatever
 // the instruction writes; a register a closure captures is live
 // throughout, which the closure may read at any call.
+//
+// The dataflow runs over the program's blocks, each block's set at its
+// start found again from its successors' until none changes, and then each
+// instruction's from its block's end: the sets are ir.Liveness's, each the
+// one after it with what the instruction writes taken out and what it
+// reads put in, which shares the rest. A dense row of every register at
+// every instruction had made the liveness of n registers and m
+// instructions n·m bits, and each pass over it as long, whatever the
+// instructions changed.
 func liveRegs(p *ir.Program, rc *bytecode.RegCode) {
-	n := p.Regs
-	words := (n + 63) / 64
-	live := make([]uint64, len(p.Code)*words)
-	at := func(i int) []uint64 { return live[i*words : (i+1)*words] }
-	set := func(s []uint64, r int) {
+	n, m := p.Regs, len(p.Code)
+	lb := ir.NewLiveBuilder(n)
+	captured := func(r int) bool { return r >= 0 && r < len(p.Captured) && p.Captured[r] }
+	var ops []ir.LiveOp
+	for r := range min(n, len(p.Captured)) {
+		if p.Captured[r] {
+			ops = append(ops, ir.LiveOp{Slot: int32(r)})
+		}
+	}
+	always := lb.Apply(lb.Empty(), ops)
+	reach := func(i int) bool { return i >= 0 && i < m && p.Maps[i].Depth >= 0 }
+
+	// Each reachable instruction's changes, in order: the registers it
+	// writes taken out -- but a captured one, which is live throughout --
+	// then those it reads put in; or all of them, where it may read any.
+	opAt := make([]int32, m+1)
+	all := make([]bool, m)
+	ops = ops[:0]
+	kill := func(r int) {
+		if r >= 0 && r < n && !captured(r) {
+			ops = append(ops, ir.LiveOp{Slot: int32(r), Clear: true})
+		}
+	}
+	gen := func(r int) {
 		if r >= 0 && r < n {
-			s[r/64] |= 1 << (r % 64)
+			ops = append(ops, ir.LiveOp{Slot: int32(r)})
 		}
 	}
-	kill := func(s []uint64, r int) {
-		if r >= 0 && r < n {
-			s[r/64] &^= 1 << (r % 64)
+	// The instructions' successors but the next one -- a jump's, and the
+	// handler in force -- and whether each goes on to the next.
+	falls := make([]bool, m)
+	far := make([]int32, 2*m)
+	for i := range m {
+		opAt[i] = int32(len(ops))
+		far[2*i], far[2*i+1] = -1, -1
+		if !reach(i) {
+			continue
+		}
+		ins := &p.Code[i]
+		switch ins.Op {
+		case ir.Jump:
+			far[2*i] = int32(ins.Target)
+		case ir.Return:
+		case ir.Branch, ir.IterStep:
+			falls[i] = true
+			if ins.Op == ir.Branch || !ins.When {
+				far[2*i] = int32(ins.Target)
+			}
+		default:
+			falls[i] = true
+			if ins.Op == ir.Host {
+				if w := rc.Code[p.Origin[i]]; regGoBranches(w) {
+					far[2*i] = int32(p.At(p.Origin[i] + 2))
+				}
+			}
+		}
+		if p.HandlerAt != nil && p.HandlerAt[i] != 0 {
+			far[2*i+1] = int32(p.Handlers[p.HandlerAt[i]-1].PC)
+		}
+		if ins.Op == ir.Host {
+			reads, writes, a := RegAccess(rc, int(p.Origin[i]))
+			for _, r := range writes {
+				kill(r)
+			}
+			if w := rc.Code[p.Origin[i]]; w.Op() == bytecode.RCallW || w.Op() == bytecode.RCallWT {
+				// The receiver the plain call writes (RegAccess).
+				kill(int(w.A()) + 1)
+			}
+			all[i] = a
+			for _, r := range reads {
+				gen(r)
+			}
+		} else {
+			a, b := ins.Writes()
+			if ins.Op == ir.IterStep && !ins.When {
+				// A loop's step writes its value only where it goes on:
+				// at the loop's end the register is what it was.
+				a = -1
+			}
+			kill(a)
+			kill(b)
+			for _, r := range irReads(ins) {
+				gen(r)
+			}
+			if ins.Check {
+				if w := rc.Code[p.Origin[i]]; w.Op() == bytecode.RDerivedRet {
+					// derived_ret's copy of the this binding, its operand
+					// known undefined (lowerReg's undefinedAt), leaves where
+					// the slot is unbound for Go to run the instruction,
+					// which reads the operand: live there, its undefined in
+					// the exit's state. Dead to the copy, the exit had left
+					// the window's stale value, which Go's derived_ret
+					// returned -- a derived constructor whose this an
+					// arrow's super() bound, which native code's this slot
+					// does not see.
+					gen(int(w.A()))
+				}
+			}
 		}
 	}
-	always := make([]uint64, words)
-	for r, c := range p.Captured {
-		if c {
-			set(always, r)
+	opAt[m] = int32(len(ops))
+
+	// The blocks: an instruction that any but the one before goes to starts
+	// one, and one that goes anywhere but to the next ends its own, so that
+	// within a block each instruction goes on to the next, but for the
+	// handler in force.
+	starts := make([]bool, m+1)
+	starts[0], starts[m] = true, true
+	mark := func(j int32) {
+		if j >= 0 && int(j) < m {
+			starts[j] = true
 		}
 	}
-	in := make([]uint64, words)
-	for changed := true; changed; {
-		changed = false
-		for i := len(p.Code) - 1; i >= 0; i-- {
-			if p.Maps[i].Depth < 0 {
+	for i := range m {
+		mark(far[2*i])
+		mark(far[2*i+1])
+		if !falls[i] || far[2*i] >= 0 {
+			starts[i+1] = true
+		}
+	}
+	var blockStart []int32
+	blockOf := make([]int32, m)
+	for i := range m {
+		if starts[i] {
+			blockStart = append(blockStart, int32(i))
+		}
+		blockOf[i] = int32(len(blockStart) - 1)
+	}
+	nb := len(blockStart)
+	blockStart = append(blockStart, int32(m))
+	// Each block's set at its start, from, at a reachable start, every
+	// register a closure captures, which the solution has there.
+	in := make([]ir.LiveSet, nb)
+	for k := range nb {
+		if reach(int(blockStart[k])) {
+			in[k] = always
+		}
+	}
+	at := func(j int32) ir.LiveSet {
+		if !reach(int(j)) {
+			return lb.Empty()
+		}
+		return in[blockOf[j]]
+	}
+	// The blocks whose sets read a block's: those that go to it, and
+	// those with an instruction it is the handler of.
+	predAt := make([]int32, nb+1)
+	edges := func(add func(int, int32)) {
+		for k := range nb {
+			last := int(blockStart[k+1]) - 1
+			if falls[last] && last+1 < m {
+				add(k, blockOf[last+1])
+			}
+			if j := far[2*last]; j >= 0 && int(j) < m {
+				add(k, blockOf[j])
+			}
+			for i := blockStart[k]; i < blockStart[k+1]; i++ {
+				if j := far[2*i+1]; j >= 0 && int(j) < m {
+					add(k, blockOf[j])
+				}
+			}
+		}
+	}
+	edges(func(_ int, to int32) { predAt[to+1]++ })
+	for k := range nb {
+		predAt[k+1] += predAt[k]
+	}
+	preds := make([]int32, predAt[nb])
+	fill := slices.Clone(predAt[:nb])
+	edges(func(from int, to int32) { preds[fill[to]] = int32(from); fill[to]++ })
+
+	// transfer is block k's set at its start, made from its end, each of
+	// its instructions' given to set.
+	// Its sets but the last are its own, which the next one's operations
+	// may change in place, where no instruction's set is kept (set nil),
+	// and else within a register instruction's lowering, whose
+	// instructions' sets are all its first's (below).
+	transfer := func(k int, set func(int, ir.LiveSet)) ir.LiveSet {
+		s, e := int(blockStart[k]), int(blockStart[k+1])
+		cur := lb.Empty()
+		lb.Edit()
+		for i := e - 1; i >= s; i-- {
+			if set != nil && i < e-1 && p.Origin[i] != p.Origin[i+1] {
+				lb.Edit()
+			}
+			if !reach(i) {
+				cur = lb.Empty()
+				if set != nil {
+					set(i, cur)
+				}
 				continue
 			}
-			ins := &p.Code[i]
-			clear(in)
-			succ := func(j int) {
-				if j >= 0 && j < len(p.Code) {
-					for k, x := range at(j) {
-						in[k] |= x
-					}
+			switch {
+			case i == e-1:
+				cur = always
+				if falls[i] {
+					cur = lb.Union(at(int32(i+1)), cur)
 				}
+				cur = lb.Union(cur, at(far[2*i]))
+			case !reach(i + 1):
+				// What a reachable instruction's set has, after one that
+				// is not.
+				cur = always
 			}
-			switch ins.Op {
-			case ir.Jump:
-				succ(ins.Target)
-			case ir.Return:
-			case ir.Branch, ir.IterStep:
-				succ(i + 1)
-				if ins.Op == ir.Branch || !ins.When {
-					succ(ins.Target)
-				}
-			default:
-				succ(i + 1)
-				if ins.Op == ir.Host {
-					if w := rc.Code[p.Origin[i]]; regGoBranches(w) {
-						succ(p.At(p.Origin[i] + 2))
-					}
-				}
-			}
-			if ins.Op == ir.Host {
-				reads, writes, all := RegAccess(rc, int(p.Origin[i]))
-				for _, r := range writes {
-					kill(in, r)
-				}
-				if w := rc.Code[p.Origin[i]]; w.Op() == bytecode.RCallW || w.Op() == bytecode.RCallWT {
-					// The receiver the plain call writes (RegAccess).
-					kill(in, int(w.A())+1)
-				}
-				if all {
-					for k := range in {
-						in[k] = ^uint64(0)
-					}
-				}
-				for _, r := range reads {
-					set(in, r)
-				}
+			if all[i] {
+				cur = lb.Full()
 			} else {
-				a, b := ins.Writes()
-				if ins.Op == ir.IterStep && !ins.When {
-					// A loop's step writes its value only where it goes on:
-					// at the loop's end the register is what it was.
-					a = -1
-				}
-				kill(in, a)
-				kill(in, b)
-				for _, r := range irReads(ins) {
-					set(in, r)
-				}
+				cur = lb.Apply(cur, ops[opAt[i]:opAt[i+1]])
 			}
-			if p.HandlerAt != nil && p.HandlerAt[i] != 0 {
-				succ(int(p.Handlers[p.HandlerAt[i]-1].PC))
-			}
-			for k, x := range always {
-				in[k] |= x
-			}
-			if n%64 != 0 {
-				in[words-1] &= 1<<(n%64) - 1
-			}
-			if s := at(i); !slices.Equal(s, in) {
-				copy(s, in)
-				changed = true
+			cur = lb.Union(cur, at(far[2*i+1]))
+			if set != nil {
+				set(i, cur)
 			}
 		}
+		return cur
+	}
+	dirty := make([]bool, nb)
+	for k := range dirty {
+		dirty[k] = true
+	}
+	for changed := true; changed; {
+		changed = false
+		for k := nb - 1; k >= 0; k-- {
+			if !dirty[k] {
+				continue
+			}
+			dirty[k] = false
+			if s := transfer(k, nil); !lb.Equal(s, in[k]) {
+				in[k] = s
+				changed = true
+				for _, q := range preds[predAt[k]:predAt[k+1]] {
+					dirty[q] = true
+				}
+			}
+		}
+	}
+	roots := make([]ir.LiveSet, m)
+	for k := range nb {
+		transfer(k, func(i int, s ir.LiveSet) { roots[i] = s })
 	}
 	// An exit anywhere in a register instruction's lowering runs it again
 	// from its start (ir.Program's Origin): what is live at each of its
 	// instructions is what is live at its first, which the interpreter
 	// reads -- new_array's elements, copied to scratch slots, are read
 	// there, not where the literal is made.
-	for i := 1; i < len(p.Code); i++ {
+	for i := 1; i < m; i++ {
 		if p.Origin[i] == p.Origin[i-1] {
-			copy(at(i), at(i-1))
+			roots[i] = roots[i-1]
 		}
 	}
-	p.Live, p.LiveLocals, p.LiveWords = live, n, words
+	p.Live = lb.Finish(roots)
 }
 
 // irReads is the slots in reads.

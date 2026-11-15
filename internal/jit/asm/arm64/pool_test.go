@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/rand"
+	"slices"
 	"testing"
 )
 
@@ -31,9 +32,9 @@ type poolBranch struct {
 // follow is where code goes from pc, the branch br's condition holding or
 // not: through every jump, conditional branch, ADR, subtraction and BR the
 // assembler made for it, to the first instruction that is the branch's
-// target or the caller's next (stop), or -1 and why.
-func follow(code []uint32, pc int, br poolBranch, holds bool, stop func(int) bool) (int, int, string) {
-	var x [32]int64
+// target or the caller's next (stop), or -1 and why. x is the registers
+// the ADRs and subtractions wrote.
+func follow(code []uint32, pc int, br poolBranch, holds bool, stop func(int) bool, x *[32]int64) (int, int, string) {
 	sext := func(v uint32, bits uint) int { return int(int32(v<<(32-bits)) >> (32 - bits)) }
 	for step := 0; step < 10000; step++ {
 		if pc < 0 || pc >= len(code) {
@@ -87,9 +88,11 @@ func follow(code []uint32, pc int, br poolBranch, holds bool, stop func(int) boo
 
 // poolProgram is code of n instructions, plain ones and, at random, a
 // branch of every kind to a label bound behind or still to be bound, the
-// labels bound at random, some data among them; each branch goes where
+// labels bound at random, some data among them, an AdrJump and a BR
+// through it, and an Adr of a table, old or new; each branch goes where
 // its label is when taken, and where the caller's next instruction is
-// when not, whatever pools came between.
+// when not, whatever pools came between, and each Adr of a table is its
+// address, where its words are.
 func poolProgram(t *testing.T, seed int64, n, every int) {
 	rng := rand.New(rand.NewSource(seed))
 	var a Asm
@@ -97,9 +100,31 @@ func poolProgram(t *testing.T, seed int64, n, every int) {
 	for i := range labels {
 		labels[i] = a.NewLabel()
 	}
-	var brs []poolBranch
+	var brs, adrs []poolBranch
+	var tables []Label
+	table := func(l Label) []uint32 { return []uint32{0xDA7A0000 | uint32(l), uint32(l) * 7, 0} }
 	for a.Len()/4 < n {
 		switch r := rng.Intn(every); {
+		case r == 3:
+			l := labels[rng.Intn(len(labels))]
+			at := a.Len() / 4
+			a.AdrJump(3, l)
+			a.Br(3)
+			brs = append(brs, poolBranch{at, a.Len() / 4, l, 0x10000003})
+		case r == 4:
+			if len(tables) == 0 || rng.Intn(4) == 0 {
+				var l Label
+				l = a.Table(make([]byte, 12))
+				b := a.tables[l]
+				for i, w := range table(l) {
+					binary.LittleEndian.PutUint32(b[4*i:], w)
+				}
+				tables = append(tables, l)
+			}
+			l := tables[rng.Intn(len(tables))]
+			at := a.Len() / 4
+			a.Adr(3, l)
+			adrs = append(adrs, poolBranch{at, a.Len() / 4, l, 0x10000003})
 		case r == 0:
 			l := labels[rng.Intn(len(labels))]
 			at := a.Len() / 4
@@ -139,6 +164,8 @@ func poolProgram(t *testing.T, seed int64, n, every int) {
 		}
 	}
 	a.MovRR(4, 5)
+	end := a.Len() / 4
+	a.Tables()
 	b, err := a.Finish()
 	if err != nil {
 		t.Fatal(err)
@@ -147,28 +174,46 @@ func poolProgram(t *testing.T, seed int64, n, every int) {
 	for i := range code {
 		code[i] = binary.LittleEndian.Uint32(b[4*i:])
 	}
-	hops := 0
+	hops, pooled, built := 0, 0, 0
 	for _, br := range brs {
 		to := a.labels[br.label]
-		got, steps, why := follow(code, br.at, br, true, func(pc int) bool { return pc == to })
+		var x [32]int64
+		got, steps, why := follow(code, br.at, br, true, func(pc int) bool { return pc == to }, &x)
 		if steps > 1 {
 			hops++
 		}
 		if got != to {
 			t.Fatalf("branch at %d to %d (%#08x): taken, %d: %s", br.at, to, br.word, got, why)
 		}
-		if br.word&0xFC000000 == 0x14000000 {
+		if br.word&0xFC000000 == 0x14000000 || br.word&0x9F000000 == 0x10000000 {
 			continue
 		}
-		got, _, why = follow(code, br.at, br, false, func(pc int) bool { return pc == br.next })
+		got, _, why = follow(code, br.at, br, false, func(pc int) bool { return pc == br.next }, &x)
 		if got != br.next {
 			t.Fatalf("branch at %d to %d (%#08x): not taken, %d, want %d: %s", br.at, to, br.word, got, br.next, why)
 		}
 	}
-	if hops == 0 {
-		t.Fatalf("no branch went through another")
+	for _, adr := range adrs {
+		to := a.labels[adr.label]
+		var x [32]int64
+		got, steps, why := follow(code, adr.at, adr, true, func(pc int) bool { return pc == adr.next }, &x)
+		if got != adr.next {
+			t.Fatalf("adr at %d of table %d: %d, want %d: %s", adr.at, to, got, adr.next, why)
+		}
+		if x[3] != int64(4*to) || !slices.Equal(code[to:to+3], table(adr.label)) {
+			t.Fatalf("adr at %d: %d, want table %d (%#x)", adr.at, x[3], 4*to, code[to:to+3])
+		}
+		if to < end {
+			pooled++
+		}
+		if code[adr.at+1]&0xFFC00000 == 0xD1400000 && steps > 1 {
+			built++
+		}
 	}
-	t.Logf("%d instructions, %d branches, %d through others", n, len(brs), hops)
+	if hops == 0 || pooled == 0 || built == 0 {
+		t.Fatalf("%d branches through others, %d addresses of tables in pools, %d built", hops, pooled, built)
+	}
+	t.Logf("%d instructions, %d branches, %d through others, %d table addresses, %d in pools, %d built", n, len(brs), hops, len(adrs), pooled, built)
 }
 
 // Code longer than every reach: each branch, forward and back, of every
