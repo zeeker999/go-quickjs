@@ -2007,7 +2007,12 @@ calls](#allocation-and-escape-analysis)).
 alone, as V8's JSInliningHeuristic bounds it, never by a count of calls: a
 callee's instructions, a budget of all a function inlines, which the calls
 made most often get first, and past it only small callees (`ssa`'s
-`maxInlineTotal`, `maxInlineSmall`), as deep as `maxInlineDepth`. How often
+`maxInlineTotal`, `maxInlineSmall`), as deep as `maxInlineDepth`. The
+bounds are the stack form's instructions, measured against V8's bytecode;
+register code's lowering has 0.85 of them for the same function, the median
+of Are We Fast Yet's functions of unique names, so a register instruction
+counts 20/17 of one (`ssa`'s `inlineSize`), and a register callee takes the
+budget the same code takes in the stack form. How often
 is V8's call frequency where the feedback knows it (`Frequency`): a call
 made less often than `ssa.MinInliningFrequency` (0.15, V8's
 `min_inlining_frequency`) for each invocation of the function compiled is
