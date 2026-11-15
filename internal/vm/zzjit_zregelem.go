@@ -106,7 +106,10 @@ func jitRegLowerWith(rc *bytecode.RegCode, fn *bytecode.Function, kind jitLowerK
 		p, err = jitcompile.LowerRegWith(rc, fn, h)
 	}
 	if err == nil {
+		// Checked once, here: the lowering is kept, and built again at
+		// each compile and each ask to inline it (ir.Program's Checked).
 		err = p.Validate()
+		p.Checked = err == nil
 	}
 	return p, err
 }

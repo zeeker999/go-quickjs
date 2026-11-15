@@ -377,7 +377,11 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 		// them.
 	}
 	w := jit.GetWorkspace()
-	defer jit.PutWorkspace(w)
+	defer func() {
+		if w != nil {
+			jit.PutWorkspace(w)
+		}
+	}()
 	s.compileBegin()
 	defer s.compileEnd()
 	if t := mir.Timing; t != nil {
@@ -410,6 +414,12 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 		return nil
 	}
 	if JITCompileRepeat > 0 {
+		// In the workspace the compile used, given back, as the stack
+		// form's repeats are made once its compile has given its back: in
+		// another, of its own, they had measured a workspace whose recent
+		// compiles were the repeats alone.
+		jit.PutWorkspace(w)
+		w = nil
 		r.jitRegCompileRepeat(cl, c, p, keepLimit, frameAt)
 	}
 	return e
