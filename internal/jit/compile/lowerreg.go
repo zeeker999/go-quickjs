@@ -1760,9 +1760,13 @@ func liveRegs(p *ir.Program, rc *bytecode.RegCode) {
 	// handler in force -- and whether each goes on to the next.
 	falls := make([]bool, m)
 	far := make([]int32, 2*m)
+	// stepped is the register a loop's step writes where it goes on, the
+	// next instruction, by the step's index; -1 elsewhere.
+	stepped := make([]int32, m)
 	for i := range m {
 		opAt[i] = int32(len(ops))
 		far[2*i], far[2*i+1] = -1, -1
+		stepped[i] = -1
 		if !reach(i) {
 			continue
 		}
@@ -1804,7 +1808,15 @@ func liveRegs(p *ir.Program, rc *bytecode.RegCode) {
 			a, b := ins.Writes()
 			if ins.Op == ir.IterStep && !ins.When {
 				// A loop's step writes its value only where it goes on:
-				// at the loop's end the register is what it was.
+				// at the loop's end the register is what it was. Its
+				// register is taken out of what the next instruction's
+				// set has alone (transfer), as the stack form's put_loc
+				// after its step writes the local on the way in only: a
+				// register no code past the loop reads is not live at the
+				// step, nor kept alive across it for a state there.
+				if a >= 0 && a < n && !captured(a) {
+					stepped[i] = int32(a)
+				}
 				a = -1
 			}
 			kill(a)
@@ -1924,7 +1936,11 @@ func liveRegs(p *ir.Program, rc *bytecode.RegCode) {
 			case i == e-1:
 				cur = always
 				if falls[i] {
-					cur = lb.Union(at(int32(i+1)), cur)
+					next := at(int32(i + 1))
+					if r := stepped[i]; r >= 0 && lb.Has(next, int(r)) {
+						next = lb.Apply(next, []ir.LiveOp{{Slot: r, Clear: true}})
+					}
+					cur = lb.Union(next, cur)
 				}
 				cur = lb.Union(cur, at(far[2*i]))
 			case !reach(i + 1):
