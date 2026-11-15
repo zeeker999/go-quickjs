@@ -1990,7 +1990,9 @@ of Go there rather than have Go finish their levels at each call.
 ## Inlining
 
 **What is offered.** A plain call, a method's or a construction of a base
-constructor (`call_w`, `call_method_w`, `new_w`) of one function -- the one
+constructor (`call_w`, `call_method_w`, `new_w`), or a call in tail position
+(`tail_call_w`, `tail_call_method_w`), offered as the ordinary call, as the
+stack form's (`jitRegCallOp`), of one function -- the one
 its site's cache holds and its code learned it calls, no other, not checked
 by its code -- that runs register code native callers may call, not the
 caller itself, nor an arrow, is offered with its register code lowered for
@@ -2060,7 +2062,12 @@ checked to be the callee, in register 0, a method call's receiver -- an
 object where the callee would coerce it -- or a plain call's undefined or
 global object (`ThisCell`) in 1, the arguments from 2, undefined in the
 rest; its captured bindings read in their cells (`Upvalues`); its result to
-the call's register. An inlined accessor's window is its function, from a
+the call's register -- and, where that is a register a closure captures,
+to its cell too, as a call's own result is stored (`storeCapturedAt`). A
+call in tail position is inlined behind its depth check, the root's
+`ssa.OpTailSelf` or `OpTailRoom`: shallow in the stack the callee runs
+inlined; deeper, where the interpreter gives the frame up to the callee,
+native code leaves for it to. An inlined accessor's window is its function, from a
 cell (`InlineSite`'s `FunctionCell`), the receiver and a setter's value, a
 getter's result the read's register. A construction's receiver is taken from
 the pool of the objects its code learned it makes, kept in a cell, in

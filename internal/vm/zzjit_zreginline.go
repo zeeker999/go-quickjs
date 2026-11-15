@@ -113,7 +113,7 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 			continue
 		}
 		called := Undefined
-		switch w := regAt(caller.code, cpc); w.Op() {
+		switch w := regAt(caller.code, cpc); jitRegCallOp(w.Op()) {
 		case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW:
 			called = r.stack[cwb+int(w.A())]
 		case bytecode.RApplyArgs:
