@@ -1311,14 +1311,14 @@ type scratch struct {
 	// do not take again: cleared at each Optimize.
 	intPhis []*Value
 	intNo   []bool
-	// intCand, intReason, intTrunc, intWants and intAgainst are intPhis'
-	// and intPhiUses' flags by value ID, intRoot their groups and intOf
-	// their aliases: grown as IDs grow, never cleared whole -- each clears
-	// what it set, every round of a function of thousands of values had
-	// made and zeroed tables of them all.
-	intCand, intReason, intTrunc, intWants, intAgainst []bool
-	intRoot                                            []int
-	intOf                                              []*Value
+	// intCand, intReason, intTrunc, intWants, intAgainst and intCostly are
+	// intPhis' and intPhiUses' flags by value ID, intRoot their groups and
+	// intOf their aliases: grown as IDs grow, never cleared whole -- each
+	// clears what it set, every round of a function of thousands of values
+	// had made and zeroed tables of them all.
+	intCand, intReason, intTrunc, intWants, intAgainst, intCostly []bool
+	intRoot                                                       []int
+	intOf                                                         []*Value
 	// first and last are, by operand ID, Optimize's guards of it: the
 	// indexes past their first and last in guards, 0 for none.
 	first, last []int32
