@@ -215,8 +215,13 @@ func (r *Runtime) jitRegForAs(cl *closure, c *regCode, callee bool) *jitRegEntry
 // it replaces go on in it until they next leave it (jitRegGoOnAt), and it
 // is closed once the last is done. nil where there is no room, or the
 // compile went to the background. A refusal replaces no valid code: the
-// function keeps it.
+// function keeps it. Whatever came of it, the JIT holds no more than its
+// budget after (settle), as after the stack form's compiles: the
+// programs of the callees it inlined, lowered as it built, count past the
+// room it asked for, and a compile refused or deferred had left them over
+// the budget.
 func (r *Runtime) jitRegCompileFor(cl *closure, c *regCode, key jitKey, callee bool) *jitRegEntry {
+	defer r.jit.settle()
 	e := r.jitRegCompile(cl, c, key, callee, 0)
 	if e == nil {
 		return nil
