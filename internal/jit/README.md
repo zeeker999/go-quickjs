@@ -429,9 +429,10 @@ the function's key:
   its sites (`regBigOf`, regCode's `bigSeen`, `regBigSeen`): BigInts in
   the int64 range, from 0 to 2^64-1, or others, on the heap, which
   `Generic` answers as the stack form's tree marks are. An addition,
-  subtraction, multiplication or comparison of BigInts in the int64 range
-  the native handlers make themselves, unmarked: its site learns at its
-  first exit;
+  subtraction, multiplication or comparison of two BigInts held in their
+  Values, which the native handlers make themselves, is marked so too: in
+  a runtime that runs the JIT, the feedback dispatcher's handler of it
+  leaves such a site to Go until it has a mark (below);
 - the register pcs after calls Go went on at, which the code had been built
   with no entry at (`Resumed`, `jitRegResumeSeen`);
 - the elements' kinds, as the stack form's code learns them
@@ -507,9 +508,18 @@ optimized code counts nothing; a run that on-stack replacement took into
 native code ends at a return of the interpreter's (`jitRegLoop`), and
 counts. Nor does Go's dispatcher count, where it runs register frames in
 place of the native handlers (`QJS_NONATIVE`, a verifying build): no
-frequency is known there. None ORs the kinds of value it met into the function's feedback slot
-yet (the native context's `fv`, kept in a register no handler uses: amd64's
-R14, arm64's R15).
+frequency is known there. Its additions, subtractions, multiplications and
+compare-and-branches of two registers (`nativegen`'s `feedbackBigOps`),
+which plain's handlers make of two BigInts held in their Values with no
+Go, look at their operands first: two such BigInts at a site with no mark
+of any kind in its register code's `bigSeen` leave the instruction to Go,
+the exit stub through the table, whose handler makes it and marks the site
+by what it met (`regBigOf`); anything else goes on in plain's handler. A
+site is left so once, and the JIT's first compile makes it natively
+(`regBigSeen`), where it had learned at its first exit from native code,
+deoptimizing. Plain's handlers do none of it. None ORs the kinds of value
+it met into the function's feedback slot yet (the native context's `fv`,
+kept in a register no handler uses: amd64's R14, arm64's R15).
 `TestRegNativeFeedbackSelected` checks a runtime picks its table, and
 `TestRegNativePlainSameWithJIT` that a build with the JIT makes plain's as a
 build without does.
