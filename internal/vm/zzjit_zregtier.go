@@ -440,7 +440,7 @@ func (r *Runtime) jitRegHot(cl *closure, c *regCode, work int64) *jitRegEntry {
 	if e := cc.jitReg; e != nil {
 		if !e.invalid && e.code != nil && e.cached {
 			if e.life.reopt && r.jitRegLearnedDue(cl, e) {
-				if ne := r.jitRegReoptimize(cl, c, e); ne != nil {
+				if ne := r.jitRegReoptimize(cl, c, e, -1); ne != nil {
 					return ne
 				}
 			}
@@ -654,12 +654,33 @@ func (r *Runtime) jitRegSpent(c *regCode, e *jitRegEntry) int64 {
 // jitRegReoptimize compiles cl's function's register code c again for what
 // e, its code, learned, and returns the new code, which replaces e in the
 // cache, its link and its closure's (jitRegCached): runs in e go on in it
-// until they next leave it. nil where it was not compiled again: no room,
-// or a compile in the background, after which it is asked again once a
-// budget more is spent; or a refusal, which keeps e, not asked again for
-// what it has learned so far.
-func (r *Runtime) jitRegReoptimize(cl *closure, c *regCode, e *jitRegEntry) *jitRegEntry {
+// until they next leave it -- one Go goes on with now at register pc at,
+// where at is not -1 (jitRegGoOnAt). nil where it was not compiled again:
+// no room, or a compile in the background, after which it is asked again
+// once a budget more is spent; or a refusal, which keeps e, not asked
+// again for what it has learned so far.
+func (r *Runtime) jitRegReoptimize(cl *closure, c *regCode, e *jitRegEntry, at int) *jitRegEntry {
 	life := e.life
+	// The frames that go on in the new code after the calls they are in,
+	// at entries of it, as the stack form's jitReoptimize has its runs'
+	// (resumed), and as V8's compile for a frame is asked with its
+	// bytecode offset: the code is built with no entry after a call until
+	// Go has gone on there (ssa.Func's Unresumed). The one Go goes on with
+	// now, at: wherever that is, as the call it went on after may be one
+	// the new code makes natively, learned for it. Compiled without it, it
+	// was compiled again at once with it (jitRegResumeSeen) -- zlib's loop
+	// of ten thousand instructions twice, in a row, at each compile for
+	// what it learned. And the runs of e's code Go is inside, after their
+	// calls of Go, where e has no entry.
+	if life != nil && at >= 0 && !slices.Contains(life.resumed, uint32(at)) {
+		life.resumed = append(life.resumed, uint32(at))
+	}
+	s := r.jit
+	for k := 0; k < s.ctxTop && k < len(s.regRuns) && k < len(s.ssaCtxs); k++ {
+		if run := &s.regRuns[k]; run.e == e && run.f != nil && s.ssaCtxs[k].Live == 0 {
+			e.resumeAt(int(s.ssaCtxs[k].ExitPC) + 1)
+		}
+	}
 	ne := r.jitRegCompileFor(cl, c, e.key, e.callee)
 	switch {
 	case ne == nil:
@@ -814,6 +835,16 @@ func (r *Runtime) jitRegEntrySeen(f *frame, rpc int) {
 	}
 }
 
+// resumeAt learns that a frame goes on in the function's code at register
+// pc rpc, where e's code, built with no entry after the call before it,
+// has none (unresumed): the function's next code is built with the entry
+// (jitRegFeedback's Resumed).
+func (e *jitRegEntry) resumeAt(rpc int) {
+	if l := e.life; l != nil && rpc >= 0 && slices.Contains(e.unresumed, rpc) && !slices.Contains(l.resumed, uint32(rpc)) {
+		l.resumed = append(l.resumed, uint32(rpc))
+	}
+}
+
 // jitRegResumeSeen learns that Go goes on at register pc rpc of e's code,
 // valid, which has no entry there: where that is after a call the code
 // was built with no entry after (jitRegEntry's unresumed), the function is
@@ -835,7 +866,7 @@ func (r *Runtime) jitRegResumeSeen(f *frame, c *regCode, e *jitRegEntry, rpc int
 		r.jitRegReopt(f.cl, e)
 		return nil
 	}
-	ne := r.jitRegReoptimize(f.cl, c, e)
+	ne := r.jitRegReoptimize(f.cl, c, e, -1)
 	if ne == nil {
 		return nil
 	}
@@ -1022,7 +1053,7 @@ func (r *Runtime) jitRegEnter(f *frame, cl *closure, c *regCode, base, start int
 		// its loop natively and leaves it nowhere, had never been
 		// compiled for the callbacks it learned at its calls of Go.
 		if e.life.reopt && r.jitRegLearnedDue(cl, e) {
-			if ne := r.jitRegReoptimize(cl, c, e); ne != nil {
+			if ne := r.jitRegReoptimize(cl, c, e, -1); ne != nil {
 				e = ne
 			}
 		}
@@ -1322,7 +1353,7 @@ func (r *Runtime) jitRegFramesLeave(cl *closure, c *regCode, e *jitRegEntry, tar
 		r.jitRegReopt(cl, e)
 		return nil
 	}
-	ne := r.jitRegReoptimize(cl, c, e)
+	ne := r.jitRegReoptimize(cl, c, e, -1)
 	if ne == nil {
 		return nil
 	}
@@ -1361,7 +1392,7 @@ func (r *Runtime) jitRegKeptGone(cl *closure, c *regCode, e *jitRegEntry) *jitRe
 	}
 	fn, pc := r.jitFrameFn, r.jitFramePC
 	r.jitFrameFn = nil
-	ne := r.jitRegReoptimize(cl, c, e)
+	ne := r.jitRegReoptimize(cl, c, e, -1)
 	r.jitFrameFn, r.jitFramePC = fn, pc
 	return ne
 }

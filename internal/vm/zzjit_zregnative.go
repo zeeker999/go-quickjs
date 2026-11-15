@@ -60,6 +60,11 @@ type jitRegEntry struct {
 	invalid bool
 	runs    int
 	dropped bool
+	// busy marks code a compile of its function replaces while the compile
+	// makes room for its own (jitRegPlace), which counts this code's room
+	// as given back: the cache does not let go of it meanwhile, as the
+	// stack form's entry being compiled again is busy (roomFor).
+	busy int
 	// key is its function's key in the cache, and life the function's
 	// state that outlives its compiles (jitRegLifeOf): what its code
 	// learned, its budget, its deoptimizations, what its runs did.
@@ -356,11 +361,9 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 		return nil
 	}
 	s.budget = r.jitBudget()
-	if !s.makeRoom(len(cl.fn.Code) * s.perInstr) {
-		// Room for as much as its entry is likely to hold (perInstr), as
-		// the stack form's compile asks before it lowers anything
-		// (jitCompileForIn): none, all the cache holds young or in use, and
-		// it is not compiled -- deferred as one refused room for its code
+	if !s.jitRegRoomAhead(cl, e.life, s.jitRegReplaced(key, osrAt)) {
+		// None, all the cache holds young or in use, and it is not
+		// compiled -- deferred as one refused room for its code
 		// (jitRegPlace) -- rather than compiled and thrown away.
 		e.life.deferred, e.life.generation = true, s.generation
 		return nil
@@ -448,7 +451,7 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 		e.refusal = fmt.Sprintf("%v: %v", jitRefused, err)
 		return e
 	}
-	if !r.jitRegPlace(e, c, rf, f, mc, looped) {
+	if !r.jitRegPlace(e, c, rf, f, mc, looped, s.jitRegReplaced(key, osrAt)) {
 		return nil
 	}
 	if JITCompileRepeat > 0 {
@@ -544,21 +547,94 @@ func regLoopAround(c *regCode, rpc int) int {
 	return 0
 }
 
+// jitRegRoomAhead makes the room a compile of cl's function, life its
+// state, asks for before it lowers anything, and reports whether there is
+// that room, as the stack form's compiles ask: a first compile, room for
+// as much as its code is likely to hold (perInstr, jitCompileForIn); a
+// compile again in place of old, its function's code, only the room its
+// last compile was short of (reoptRoom, jitReoptimize), old's own counted
+// as given back. Asked of the cache's mean, the room asked for code far
+// larger than the mean's -- 1,250 bytes an instruction against 500 -- was
+// short of what it then took.
+func (s *jitState) jitRegRoomAhead(cl *closure, life *jitEntry, old *jitRegEntry) bool {
+	if old == nil {
+		return s.makeRoom(len(cl.fn.Code) * s.perInstr)
+	}
+	if life.reoptRoom == 0 {
+		return true
+	}
+	return s.regRoomFor(old, s.regReplaced(old)+life.reoptRoom)
+}
+
+// jitRegReplaced is the code a compile of the function whose key is key
+// replaces once placed: the cache's code for it, valid or not, which goes
+// with the code kept beside it for a loop (dropReg); or, for a compile of
+// code for a loop, frameAt not 0, the code kept beside the cache's
+// (jitRegLoopCode). nil where there is none.
+func (s *jitState) jitRegReplaced(key jitKey, frameAt int) *jitRegEntry {
+	old := s.regCache[key]
+	if old == nil || frameAt != 0 && old.osr == nil {
+		return nil
+	}
+	if frameAt != 0 {
+		old = old.osr
+	}
+	if old.code == nil {
+		return nil
+	}
+	return old
+}
+
+// regReplaced is what the JIT holds for old, code a compile replaces: its
+// bytes and those of the code kept beside it, which go with it (dropReg).
+func (s *jitState) regReplaced(old *jitRegEntry) int {
+	n := old.bytes
+	if o := old.osr; o != nil {
+		n += o.bytes
+	}
+	return n
+}
+
+// regRoomFor makes room for a compile's code, need bytes, in place of old,
+// the code it replaces once placed, nil for none, and reports whether
+// there is the room, as the stack form's roomFor makes it for code
+// compiled again in place of its entry's: what old holds counts as given
+// back, and old is not let go of meanwhile (busy). Asked of the budget
+// with old's room counted twice, a function compiled again with code as
+// large as half the budget -- an asm.js program's loop of ten thousand
+// instructions -- had its finished compile thrown away.
+func (s *jitState) regRoomFor(old *jitRegEntry, need int) bool {
+	if old == nil {
+		return s.makeRoom(need)
+	}
+	old.busy++
+	ok := s.makeRoom(need - s.regReplaced(old))
+	old.busy--
+	return ok
+}
+
 // jitRegPlace places mc, e's code, the backend's of f, built from c's
 // register code lowered with its feedback rf, in the JIT's arena, and
 // fills e from what the build found; it reports false where the JIT has
-// no room for it now, or the host places no code.
-func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f *ssa.Func, mc *mir.Code, looped map[uint32]bool) bool {
+// no room for it now, or the host places no code. old, where not nil, is
+// the code e replaces once placed (jitRegReplaced).
+func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f *ssa.Func, mc *mir.Code, looped map[uint32]bool, old *jitRegEntry) bool {
 	s := r.jit
 	p := e.p
 	// The contexts' room for its spill slots, which they keep (spillsFor).
 	need, spill := jit.CodeFootprint(mc), s.spillRoom(mc)
 	s.budget = r.jitBudget()
-	if !s.makeRoom(need + spill) {
+	if !s.regRoomFor(old, need+spill) {
 		// No room, all the cache holds young or in use: not compiled again
 		// for want of it until the cache has let some code go
-		// (generation), as the stack form's compile is deferred.
+		// (generation), as the stack form's compile is deferred; and, the
+		// function's code compiled again, not until there is the room it
+		// was short of (reoptRoom), as the stack form's compile again
+		// asks first (jitReoptimize).
 		e.life.deferred, e.life.generation = true, s.generation
+		if old != nil {
+			e.life.reoptRoom = max(need+spill-s.regReplaced(old), 1)
+		}
 		// Nor its programs, which the compile asks for again: they would
 		// take the room it is remembered in, as the stack form's compile
 		// drops its lowering then.
@@ -567,7 +643,7 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 		}
 		return false
 	}
-	e.life.deferred = false
+	e.life.deferred, e.life.reoptRoom = false, 0
 	code, err := jit.NewSSACode(s.arena, mc)
 	if err != nil {
 		// The host places no code (jit.ErrUnavailable), which is the
@@ -700,7 +776,7 @@ func (s *jitState) regInUse(e *jitRegEntry) bool {
 // compile of its function in the background -- regInUse but for the
 // native calls only their contexts say are under way (regCalled).
 func (s *jitState) regRunning(e *jitRegEntry) bool {
-	return e.runs != 0 || s.regPendingJobs[e.key] != nil || s.regLevelsOf(e) != 0
+	return e.runs != 0 || e.busy != 0 || s.regPendingJobs[e.key] != nil || s.regLevelsOf(e) != 0
 }
 
 // regCalledFns is the functions native calls under way run (regCalled),
@@ -1287,7 +1363,7 @@ func (r *Runtime) jitRegGoOnAt(f *frame, c *regCode, e *jitRegEntry, wb, rpc, at
 				if e.life.starts < jitKeptStarts {
 					r.jitFrameFn, r.jitFramePC = f.cl.fn, regLoopAround(c, rpc)
 				}
-				ne := r.jitRegReoptimize(f.cl, c, e)
+				ne := r.jitRegReoptimize(f.cl, c, e, rpc)
 				r.jitFrameFn = nil
 				if ne != nil {
 					e = ne

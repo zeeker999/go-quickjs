@@ -775,9 +775,16 @@ stack form's is.
   again at none of these otherwise; at a sample, at an exit, or at
   a loop's poll, which leaves for it rather than calling Go while it
   learns (`GoPoll`), and a run goes on in the new code (`jitRegGoOnAt`,
-  `jitRegReoptimize`, the stack form's `jitRecompileInRun`). Where Go goes on after a call the code was built
-  with no entry after (`unresumed`), the code is compiled again at once with
-  the entry and goes on in it (`jitRegResumeSeen`), as the stack form's
+  `jitRegReoptimize`, the stack form's `jitRecompileInRun`). The compile is
+  asked with the register pc the frame Go goes on with waits at, and the
+  runs of the code Go is inside after their calls of Go, each learned as
+  resumed first, so that the new code has the entries they go on at, as the
+  stack form's `jitReoptimize` has its runs' and V8's compile for a frame
+  carries its bytecode offset: the call the frame waits after is often the
+  one just learned, which the new code makes natively, with no entry after
+  it. Where Go goes on after a call the code was built with no entry after
+  (`unresumed`) all the same, the code is compiled again at once with the
+  entry and goes on in it (`jitRegResumeSeen`), as the stack form's
   `jitGoOn` does. A recompile refused keeps the code it has.
 
 A change of a function's caches' feedback alone has its code compiled
@@ -2771,7 +2778,16 @@ Allocation). A compile the budget has no room for leaves
 no entry, and is not compiled again until the cache has let some code go
 (its `life`'s `deferred` and `generation`, as the stack form's compiles are
 deferred): asked again at every sample, a callee of Mandreel's was compiled
-again at each call Go made of it. Past `jitMaxDeopts` deoptimizations a
+again at each call Go made of it. A first compile asks for the room its
+code is likely to hold (`perInstr`) before it lowers anything; a compile
+again of a function whose code the cache holds asks only for the room its
+last compile was short of (`reoptRoom`), as the stack form's
+`jitReoptimize`. Placed, the code takes the room of the code it replaces
+-- the cache's, with the code kept beside it for a loop, or that loop's
+code -- as given back, that code held meanwhile (`busy`, `regRoomFor`), as
+the stack form's `roomFor`: counted twice, zlib's loop of ten thousand
+instructions, its code a third of the budget, had its finished compile
+thrown away. Past `jitMaxDeopts` deoptimizations a
 function is refused too. When the OS denies executable
 memory, the runtime marks the JIT unavailable for good.
 
