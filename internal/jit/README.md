@@ -1837,11 +1837,16 @@ reads its dense storage or is done (`ssa.CallSite`'s `ForIn`, `ForOf`,
 
 **Loops' steps.** A for...of's or a for...in's step (`iter_next`, an
 `ir.IterStep` native code does not make itself) is a call of Go of the
-step (`ssa.CallSite`'s `Step`) that runs the register instruction on the
-frame as an instruction run whole is (below, `jitRegWhole`): the cursor's
-register given the code's value, the value it steps to the call's result,
-or the uninitialized value where the loop is done, as the stack form's call
-of Go steps its cursor.
+step (`ssa.CallSite`'s `Step`). Of a cursor over an iterator whose `next`
+is no generator's -- the script's, a Map's or a Set's -- Go makes the step
+itself, as the stack form's call of Go does (`jitCallMade`'s `iterNext`):
+the `next` called as register code calls it, its result's `done` and
+`value` read (`regStepNext`), by `jitRegStepMade`. Any other it runs as
+the register instruction on the frame, as an instruction run whole is
+(below, `jitRegWhole`): the cursor's register given the code's value. The
+value it steps to is the call's result, or the uninitialized value where
+the loop is done; what throws, or the runtime stopped, the exit at the
+call finishes (`regPending`, `regFinishCall`).
 
 **Instructions run whole.** A whole Host (`ir.Instruction`'s `Whole`) is
 a call of Go (`ssa.CallSite`'s `Whole`, `abi.GoCallWhole`) that runs the

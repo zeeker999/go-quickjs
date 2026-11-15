@@ -181,3 +181,82 @@ func TestJITRegSettledAwaitGoesOn(t *testing.T) {
 		}
 	})
 }
+
+// regRangeSrc is microbench_extra's iterator_for_of: a for...of over an
+// iterator whose next is the script's, and loops that break out of one,
+// one whose next throws, and one whose next returns no object.
+const regRangeSrc = `
+function Range(n) { this.i = 0; this.n = n }
+Range.prototype.next = function () {
+	if (this.i < this.n) return { value: this.i++, done: false };
+	return { value: undefined, done: true };
+};
+Range.prototype[Symbol.iterator] = function () { return this };
+var closed = 0;
+Range.prototype.return = function () { closed++; return {} };
+function sum(n) {
+	var s = 0;
+	for (var j = 0; j < n; j++) for (var v of new Range(100)) s += v;
+	return s;
+}
+function early(n) {
+	var s = 0;
+	for (var j = 0; j < n; j++) for (var v of new Range(100)) { if (v == 7) break; s += v }
+	return s + ":" + closed;
+}
+function Bad(k, bad) { this.i = 0; this.k = k; this.bad = bad }
+Bad.prototype.next = function () {
+	if (this.i == this.k) { if (this.bad) return 5; throw new RangeError("at " + this.i) }
+	return { value: this.i++, done: false };
+};
+Bad.prototype[Symbol.iterator] = function () { return this };
+function throws(n) {
+	var s = 0, m = "";
+	for (var j = 0; j < n; j++) {
+		try { for (var v of new Bad(j % 50, j % 3 == 0)) s += v } catch (e) { m = e.constructor.name + " " + e.message }
+	}
+	return s + ":" + m;
+}
+`
+
+// TestJITRegIteratorStepMade runs for...of loops over iterators of script
+// natively, and checks that each step is the stack form's call of Go
+// (jitRegStepMade, jitCallMade's): the step itself, which calls the
+// iterator's next, not the interpreter's instruction run whole on the
+// frame (jitRegWhole) -- and that a break closes the iterator, and what
+// next throws, or a result that is no object, goes to the loop's handler.
+func TestJITRegIteratorStepMade(t *testing.T) {
+	regBothMarking(t, func(t *testing.T) {
+		rts := regNativeRuntimes(t, regRangeSrc)
+		r := rts[0]
+		r.jitStress = jitStressConfig{}
+		r.SetJITWarmUp(2, 2)
+		r.SetJITReport(true)
+		calls := []struct{ name, want string }{
+			{"sum", "990000"},
+			{"early", "4200:2000"},
+			{"throws", "78400:RangeError at 49"},
+		}
+		for _, call := range calls {
+			var got [2]string
+			for i, rt := range rts {
+				fn, _ := rt.GetProp(Obj(rt.Global()), rt.Intern(call.name))
+				for range 10 {
+					v, err := rt.Call(fn, Undefined, []Value{Float(200)})
+					got[i] = regNativeShow(rt, v, err)
+				}
+			}
+			if got[0] != got[1] || got[0] != call.want {
+				t.Fatalf("%s: with the JIT %q, without %q, want %q", call.name, got[0], got[1], call.want)
+			}
+		}
+		ops := r.RegNativeStats().GoCallOps
+		t.Logf("steps %d, whole %d", ops["iter_next"], ops["whole iter_next"])
+		if ops["iter_next"] < 1000 {
+			t.Errorf("native code made %d steps of Go; want each step of the loops", ops["iter_next"])
+		}
+		if n := ops["whole iter_next"]; n != 0 {
+			t.Errorf("%d steps run whole on the frame", n)
+		}
+	})
+}
