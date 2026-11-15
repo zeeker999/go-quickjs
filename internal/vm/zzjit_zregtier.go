@@ -360,17 +360,39 @@ func jitRegInvoked(cl *closure, life *jitEntry) int64 {
 // c makes would be a native call, of a callee its site's cache holds or
 // its code learned (regCallSites), as jitCallsNatively asks of the stack
 // form's: compiled for that alone, a function of host operations is worth
-// its code.
+// its code. A call of a callee is native where the callee is cl's
+// function itself, has no code and is not warming -- the native call
+// compiles it (jitRegNativeCallee) -- or has code that native callers
+// call: not code they call no more (notNative), whose calls native code
+// Go entered would make through Go, as the interpreter makes them itself
+// -- AWFY's Json's readChar, all of whose calls are of read, which leaves
+// for Go at each substring.
 func (r *Runtime) jitRegCallsNatively(cl *closure, c *regCode) bool {
-	if l := r.jit.regLearned[r.jitRegKeyOf(cl)]; l != nil && len(l.nativeCalls) != 0 {
-		return true
+	native := func(callee *closure) bool {
+		if callee == nil || callee.fn == cl.fn {
+			return callee != nil
+		}
+		l := r.jit.regLearned[r.jitRegKeyOf(callee)]
+		if r.jitRegHas(callee) {
+			return l == nil || !l.notNative
+		}
+		return l == nil || !l.warming && !l.invalid
+	}
+	if l := r.jit.regLearned[r.jitRegKeyOf(cl)]; l != nil {
+		for _, x := range l.nativeCalls {
+			// A built-in's made natively (a push, a charCodeAt), or a
+			// function's.
+			if x.cl == nil || native(x.cl) {
+				return true
+			}
+		}
 	}
 	calls := r.regCallsRestored(cl, -1)
 	for _, w := range c.rc.Code {
 		if op := w.Op(); op != bytecode.RCallW && op != bytecode.RCallMW || uint(w.C()) >= uint(len(calls)) {
 			continue
 		}
-		if e := &calls[w.C()]; jitRegCallKind(e) && r.jitRegCallable(e.callee, e.cl, e.rc, int(w.X())) {
+		if e := &calls[w.C()]; jitRegCallKind(e) && r.jitRegCallable(e.callee, e.cl, e.rc, int(w.X())) && native(e.cl) {
 			return true
 		}
 	}
