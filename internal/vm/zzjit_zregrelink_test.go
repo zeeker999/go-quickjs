@@ -120,6 +120,10 @@ func TestJITRegReleasedCalleeRelinked(t *testing.T) {
 			// without its key at host exits and spends (regLinkFor).
 			t.Errorf("short's code compiled again reads link %p, its key's is %p", k, l)
 		}
+		if k := s.regLinkFor(&jitRegEntry{key: key}); k != l {
+			// An entry with no life reads the link by its key.
+			t.Errorf("an entry with no life reads link %p, its key's is %p", k, l)
+		}
 		in, calls := l.in, regCallsOfGo(r)
 		for range 3 {
 			call("driveShort", 200, want)

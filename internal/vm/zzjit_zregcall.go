@@ -67,7 +67,7 @@ func (s *jitState) regLinkFor(e *jitRegEntry) *jitLink {
 	if e.life != nil {
 		return e.life.regLink
 	}
-	return s.regLinkFor(e)
+	return s.regLinks[e.key]
 }
 
 // jitRegLinkFlags are the flags of the link of cl's function, whose
