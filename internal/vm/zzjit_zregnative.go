@@ -350,6 +350,16 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 		s.refusedRoom++
 		return nil
 	}
+	s.budget = r.jitBudget()
+	if !s.makeRoom(len(cl.fn.Code) * s.perInstr) {
+		// Room for as much as its entry is likely to hold (perInstr), as
+		// the stack form's compile asks before it lowers anything
+		// (jitCompileForIn): none, all the cache holds young or in use, and
+		// it is not compiled -- deferred as one refused room for its code
+		// (jitRegPlace) -- rather than compiled and thrown away.
+		e.life.deferred, e.life.generation = true, s.generation
+		return nil
+	}
 	p, err := r.jitRegLower(cl, c.rc, jitLowerSSA)
 	if l := s.regLowered[key]; l != nil {
 		// Its programs kept while the compile uses them: the room made for
@@ -564,6 +574,10 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 	s.inlined += uint64(len(f.Inlined))
 	s.inlinedCode += uint64(f.InlinedCode)
 	e.code, e.bytes = code, need
+	// What the entry and its program hold, by the function's
+	// instructions: the room the next compile asks for first, as the
+	// stack form's compile learns it.
+	s.learn(len(c.fn.Code), need+p.Footprint())
 	e.targets = jitTargetsOf(e.life)
 	e.scratch = f.Scratch
 	e.keeps = f.Keeps

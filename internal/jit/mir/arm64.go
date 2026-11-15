@@ -5103,9 +5103,10 @@ func (c *a64Compiler) viaGuards(t *ssa.CallSite, recv *ssa.Value, guard a64Guard
 }
 
 // lengthGuards checks a `new Array(n)` can take its array from its pool,
-// as amd64's does: n, x, an integer in [0, the pool's Room], or up to
-// abi.PoolRoomLimit once Go has filled the pool again with arrays of more
-// room. It uses A, B, C, F0 and F1.
+// as amd64's does: n, x, an integer in [0, the pool's Room], past
+// abi.PoolSmallRoom more than half of it, or up to abi.PoolRoomLimit once
+// Go has filled the pool again with arrays of n's room. It uses A, B, C,
+// F0 and F1.
 func (c *a64Compiler) lengthGuards(t *ssa.CallSite, x *ssa.Value, guard a64Guard) {
 	var w arm64.Reg
 	if remat(x) {
@@ -5127,8 +5128,25 @@ func (c *a64Compiler) lengthGuards(t *ssa.CallSite, x *ssa.Value, guard a64Guard
 	c.movImm(a64B, uint64(t.Pool))
 	c.a.Load(a64C, a64B, abi.OffPoolRoom)
 	c.a.Cmp(a64A, a64C, true)
-	fits := c.a.NewLabel()
+	fits, past := c.a.NewLabel(), c.a.NewLabel()
+	c.a.BCond(arm64.HI, past)
+	// Within its room: any n of a small room, else one of its class, more
+	// than half of it, as amd64's.
+	c.a.CmpImm(a64C, abi.PoolSmallRoom, true)
 	c.a.BCond(arm64.LS, fits)
+	c.a.ShiftImm(arm64.Lsr, a64C, a64C, 1, true)
+	c.a.Cmp(a64A, a64C, true)
+	c.a.BCond(arm64.HI, fits)
+	v, top := c.callV, c.callTop
+	var grow arm64.Label
+	if v == nil {
+		// No call to make again: Go makes it.
+		guard.jump(arm64.LS)
+	} else {
+		grow = c.a.NewLabel()
+		c.a.B(grow)
+	}
+	c.a.Bind(past)
 	// Past its room: a negative n, unsigned, is past every room. Past
 	// what any pool's arrays have room for, as amd64's: Go's.
 	c.a.CmpImm(a64A, abi.PoolRoomLimit, true)
@@ -5143,18 +5161,17 @@ func (c *a64Compiler) lengthGuards(t *ssa.CallSite, x *ssa.Value, guard a64Guard
 	} else {
 		guard.jump(arm64.HI)
 	}
-	v, top := c.callV, c.callTop
 	if v == nil {
 		// No call to make again: Go makes it. n is at most the limit, as
 		// the flags still say.
 		guard.jump(arm64.LS)
 	} else {
-		grow := c.a.NewLabel()
 		c.a.B(grow)
 		pool := t.Pool
 		stub := c.stubLabel(v.State, exitKind(v.Aux))
 		c.cold = append(c.cold, func() {
 			c.a.Bind(grow)
+			c.a.AddImm(a64A, a64A, 1, true)
 			c.a.Store(a64B, abi.OffPoolWant, a64A)
 			c.movImm(a64A, uint64(pool))
 			c.a.Store(a64Ctx, abi.OffGoArgs+c.enc.RefOffset, a64A)

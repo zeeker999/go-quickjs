@@ -1089,11 +1089,8 @@ func (c *core) allocate() error {
 	// every block where the value is live in or out. The uses are met once,
 	// block by block: each stretches its value's interval to it, and one in
 	// another block than its value's is noted (xuses) for the liveness,
-	// which is then found value by value, backwards from those blocks to
-	// the value's own (liveAround) -- what a value is live in, as many
-	// steps as it is, where block-level sets over all values, iterated
-	// until none grew, had taken a pass over every block and every word of
-	// the sets each time.
+	// a dataflow over the blocks of those values' persistent sets
+	// (blockLiveness).
 	// What the uses read and write of each value is in one record (rec):
 	// its last use's position, its block, the head of its uses in other
 	// blocks, and how a frame state's slot naming it is used. The records
@@ -1592,15 +1589,12 @@ func (c *core) allocate() error {
 	// Block-level liveness, so that values live around a loop stay live for
 	// all of it: a value is live into each block from which a use of it in
 	// another block than its own is reached without passing its own, and
-	// out of each predecessor of such a block -- found from each such use
-	// backwards through the predecessors, a block once for each value
-	// (seen, by block ID, 1 plus the ID of the value it was last found
-	// live into), and the value's interval stretched over each.
+	// out of each predecessor of such a block (blockLiveness), and its
+	// interval is stretched over each.
 	//
 	// Each value's interval is then made, and counted by its start for the
 	// sort (below): first, n and floats.
-	seen := c.ints(nb)
-	stack := c.blockList(nb)[:0]
+	lo, hi := c.blockLiveness(rec, xuses, inOrder, start, end, nb)
 	first := c.ints(count + 1)
 	n, floats := 0, 0
 	for id := range rec {
@@ -1608,32 +1602,10 @@ func (c *core) allocate() error {
 		if r.def <= 0 {
 			continue
 		}
-		it, own, mark := &iv[id], int(r.def)-1, id+1
+		it := &iv[id]
 		it.end = int(r.end)
-		for u := r.xhead; u != 0; u = xuses[u-1].next {
-			b := xuses[u-1].b
-			if seen[b.ID] == mark {
-				continue
-			}
-			seen[b.ID] = mark
-			stack = append(stack[:0], b)
-			for len(stack) > 0 {
-				s := stack[len(stack)-1]
-				stack = stack[:len(stack)-1]
-				// Live into s, out of each of its predecessors.
-				bs := start[s.ID]
-				it.start, it.end = min(it.start, bs), max(it.end, bs)
-				for _, p := range s.Preds {
-					if !inOrder[p.ID] {
-						continue
-					}
-					it.end = max(it.end, end[p.ID])
-					if p.ID != own && seen[p.ID] != mark {
-						seen[p.ID] = mark
-						stack = append(stack, p)
-					}
-				}
-			}
+		if lo[id] >= 0 {
+			it.start, it.end = min(it.start, lo[id]), max(it.end, hi[id])
 		}
 		first[it.start+1]++
 		n++

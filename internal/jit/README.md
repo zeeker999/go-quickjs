@@ -1411,9 +1411,22 @@ can show; a comparator that cannot be inlined leaves the call to Go.
 **Allocation.** Object, array and regular expression literals, closures and
 their captured cells (see Closures), and the receivers of constructions, are
 taken from pools of objects the VM makes ahead (`abi.ObjectPool`), as V8's
-code allocates inline; Go refills a pool that runs out. A pooled array has
-storage for at most `abi.PoolRoomLimit` (16) elements: a `new Array(n)` of a
-longer n is made by Go.
+code allocates inline; Go refills a pool that runs out. `new Array(n)`'s
+pools hold arrays by size class (`abi.ObjectPool`'s `Room`, the VM's
+`jitArrayRoom`): up to `abi.PoolSmallRoom` (16) elements, the sizes an
+array's own allocation has room for, its array taken for any n up to the
+room; past it a power of two, the elements a slice of their own, its array
+taken for an n of more than half the room. An n the pool's room does not
+fit -- longer, or at most half a room past 16 -- has Go fill the pool again
+with arrays of n's class (`Want`, 1 plus n), and the construction is made
+again: a pool's arrays have at most twice the room their lengths need. A
+filling past 16 makes as many arrays as 64 KiB of elements holds, at least
+one, and a pool whose class changes is filled with one array, more as it
+runs out, so that a site whose lengths change class at every call is given
+an array a call, not a filling. Up to `abi.PoolRoomLimit` (65,536)
+elements, the longest the Array constructor makes with its holes in dense
+storage, every `new Array(n)` is taken from a pool; a longer n, whose array
+is its length alone, is Go's construction, called from native code.
 
 **Escape analysis.** As V8's TurboFan does, an object a pool would give the
 code -- an object literal's, the receiver of a construction the code inlines
@@ -1643,7 +1656,15 @@ amd64's and arm64's in the same commit.
 
 **Register allocation.** `mir`'s scan (`allocate`) gives each value an
 interval from its definition to its last use, stretched over every block it
-is live in or out of. A frame state's slot is a use, which keeps the value
+is live in or out of. Which blocks those are is a backward dataflow over the
+blocks of the values used in another block than their own (`blockLiveness`),
+each block's set an `ir.LiveBuilder` persistent set, as the slot liveness's
+are, and an interval's ends are read along the layout, each block's sets
+against the one before: what the sets change from block to block, not what
+they hold. A walk of each value's blocks back from its uses had taken as
+many steps as values are live in each block, summed over the blocks -- n
+values live across a loop of 2n blocks 2n² steps, 40 s of a compile of
+16,000. A frame state's slot is a use, which keeps the value
 live for the exits that read it, but not a read the code makes: a value's
 cost in a spill slot counts only its definition and the uses that read it --
 an operand, a branch's control, a phi's argument at its edge, whose move
@@ -2131,7 +2152,7 @@ generator from a pool, as the stack form's does (`ssa.CallSite`'s
 `GenMake`): the arguments written to the generator's registers from its
 window's register 2 (`GenArgAt`), a method's receiver to its register 1
 too (`GenThisAt`). A construction with the realm's Array, `new Array()` or `new Array(n)` of a
-length a pool's arrays have room for, learned at the call Go made of it
+length up to `abi.PoolRoomLimit`, learned at the call Go made of it
 (`jitRegAllocSeen`), takes its array from a pool (`ssa.CallSite`'s
 `Alloc`), as the stack form's does. A
 callee native callers call that has no code is compiled at their first call
@@ -3241,11 +3262,22 @@ has held at once, its free slots reused.
   cache releases code.
 - Temporary (no budget at all): retried after another warm-up.
 
-What a compile costs, the VM weighs before it asks for one
-(`jitCompileBytes`: a word a slot an instruction, its slots counted as at
-least 256). A compile asks for room for what its entry is likely to hold
-(bytes per bytecode instruction, from the last compiles), then, compiled,
-for exactly what its entry will hold. Top-level code's refusals are not kept
+What a compile will hold, the VM weighs before it asks for one
+(`jitCompileBytes`): 512 bytes an instruction and 64 a slot, of what the
+code, its descriptions and its program take -- 260 bytes an instruction at
+the median of the V8 suite's, Octane's and AWFY's functions, 421 at the
+99th percentile -- and a function whose estimate is past the budget is
+refused. The budget bounds what the JIT holds, not a compile's working
+memory, which is linear in the function's size as what it holds is
+(`TestJITCompileLinear`): some 16,000 instructions are compiled at the
+default budget, 65,000 at 32 MiB, whatever their slots. The estimate had
+been a word a slot an instruction, its slots counted as at least 256 --
+the dense tables the frame states, the liveness and the builder's
+definitions had been -- which refused a function of 4,080 instructions at
+the default budget, and one of 1,000 slots past 1,000. A compile asks for
+room for what its entry is likely to hold (bytes per bytecode instruction,
+from the last compiles, the register code's as the stack form's), before
+it lowers anything, then, compiled, for exactly what its entry will hold. Top-level code's refusals are not kept
 in the cache, which a loop evaluating thousands of scripts would fill.
 
 ### What only it compiles
