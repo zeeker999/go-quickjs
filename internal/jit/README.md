@@ -470,11 +470,22 @@ the function's key:
   and its calls ask nothing more; a construction's, or a call of a
   function with code, keeps it unsettled. A construction nothing taught
   yet, of the function a global's or a captured binding's read before it
-  holds now (`regConstructorNow`), is seeded at a compile
+  holds now, or a data property of an object such reads give --
+  `new NS.A.B(...)`, each read of the register the one before it wrote,
+  followed as the stack form's `jitChainValue` follows them
+  (`regConstructorNow`, `regDefined`) -- is seeded at a compile
   (`jitRegSeedConstruct`), in the code's own frame and in a callee
   inlined, whose own code may never be compiled, as the stack form's
   compiles seed one (`jitSeedCalls`, `jitCalleeObjectAt`); the
-  construction checks its function;
+  construction checks its function. Its site is compiled with its pool
+  whatever the pool holds, the code having Go fill it again when it runs
+  out (`ssa.GoRefill`); a construction Go makes refills it, run out or
+  made for another prototype (`jitRefillPoolsOf`), as at the stack form's
+  exits. A forwarding constructor's construction inlined
+  (`this.k.apply(this, arguments)`, `bytecode.LeafForward`) reads `this.k`
+  and k's `apply` as the construction's object and k find them
+  (`forwardProperty`), not as the forwarder's own caches, which met every
+  class it constructs, do;
 - the literals' pools by register pc (`Literal`: `new_object`'s,
   `new_object_lit`'s, `new_array`'s, `new_array_k`'s and `new_regexp`'s,
   made by `jitObjectLiteral`, `jitArrayLiteral`, `jitRegSharedLiteral` and

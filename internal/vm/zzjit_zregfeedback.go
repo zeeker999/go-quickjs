@@ -171,6 +171,11 @@ func (f *jitRegFeedback) Property(pc int) (ssa.PropertySite, bool) {
 	if !ok {
 		return ssa.PropertySite{}, false
 	}
+	if f.fwd != nil && f.fwd.ctor != nil && !write {
+		if site, ok := f.forwardProperty(rpc, key); ok {
+			return site, true
+		}
+	}
 	if cache == nil {
 		return ssa.PropertySite{Key: uint32(key)}, true
 	}

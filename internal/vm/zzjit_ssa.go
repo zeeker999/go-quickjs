@@ -10253,7 +10253,12 @@ func (r *Runtime) jitRefillPools(f *frame, e *jitEntry, pc, sp int, in bytecode.
 	if !c.IsObject() {
 		return false
 	}
-	o := c.Object()
+	return r.jitRefillPoolsOf(e, pc, c.Object())
+}
+
+// jitRefillPoolsOf is jitRefillPools of the construction at pc of e's code
+// -- its register pc, in register code -- with o.
+func (r *Runtime) jitRefillPoolsOf(e *jitEntry, pc int, o *Object) (refilled bool) {
 	// Both lists, without making one of them: this runs at every exit at
 	// a construction.
 	for _, x := range jitTargets(e) {
