@@ -137,60 +137,6 @@ func jitAccessorLive(a *jitAccessorCase, write bool) bool {
 	return pair.getter == a.fn
 }
 
-// Accessor is ssa.AccessorFeedback's: the getter a read found on the
-// prototypes of its receivers, or the setter a write found -- a class's
-// accessor, or one Object.defineProperty put on a prototype -- as V8's code
-// calls an accessor its feedback knows rather than leave its site. The
-// site's cache's (cachedGet, cachedSetter), those it held before
-// (propCache.seen) and those the code met at its exits (jitPolySeen,
-// jitPolyWriteSeen), each a receiver's shape with the prototypes it was
-// found on, are its cases, up to jitPropertyCases, all of one function:
-// the first's. The callee is inlined where it may be, as a method called
-// there would be (jitInlinesAt); one that is no closure the code may call
-// -- a built-in's, a bound function's -- Go calls, called from native code
-// to make the read or the write. An accessor the receivers have
-// themselves, each its own -- an object literal's get x() -- Go's at an
-// exit, as before.
-func (fb *jitFeedback) Accessor(pc int) (ssa.AccessorSite, bool) {
-	if fb.cl == nil || fb.fwd != nil || pc >= len(fb.fn.Code) {
-		return ssa.AccessorSite{}, false
-	}
-	in := fb.fn.Code[pc]
-	write := in.Op == bytecode.OpSetProp
-	if in.Op != bytecode.OpGetProp && !write || int(in.A) >= len(fb.cl.names) || int(in.B) >= len(fb.cl.ic) {
-		return ssa.AccessorSite{}, false
-	}
-	a, callee, cl, ok := fb.accessorOf(pc, &fb.cl.ic[in.B], fb.cl.names[in.A], write)
-	if !ok || cl == nil {
-		return a, ok
-	}
-	k := fb.keep()
-	if site, ok := fb.accessorCall(cl, callee, write); ok {
-		a.Call = &site
-	}
-	if cl.fn == fb.fn || !fb.r.jitInlinesAt(cl, callee, bytecode.Instr{Op: bytecode.OpCallMethod}) {
-		return a, true
-	}
-	p, err := fb.r.jitLower(cl.fn, jitLowerInline)
-	if err != nil {
-		return a, true
-	}
-	this := -1
-	if p.This {
-		this = cl.fn.LocalCount + len(cl.fn.Upvalues)
-	}
-	a.Inline = &ssa.InlineSite{
-		Program: p, Feedback: &jitFeedback{r: fb.r, fn: cl.fn, cl: cl, root: k},
-		Callee: uintptr(unsafe.Pointer(callee)), Closure: uintptr(unsafe.Pointer(cl)),
-		Argc: jitB2i(write), Method: true, Params: cl.fn.ParamCount, ThisSlot: this, Coerce: cl.fn.CoerceThis,
-		// Its captured bindings in their cells, the closure's: the
-		// accessor's check fixes it.
-		Upvalues: jitUpvalueCells(cl),
-	}
-	k.inlined = append(k.inlined, cl)
-	return a, true
-}
-
 // accessorOf is Accessor's site, of either form's code: the accessor the
 // property site at pc, its cache c, of key, a read or a write, calls, by
 // its cases, its function, and the closure the code may call it as, of the
@@ -373,60 +319,6 @@ func (fb *jitFeedback) dataSeen(pc int, c *propCache) bool {
 	return false
 }
 
-// accessorCall is the native call of an accessor, callee, cl its closure,
-// a read or a write makes, through its function's link (jitLink), as a
-// call the code makes natively is (NativeCalls): the receiver its this, a
-// setter's value its argument. Only the function's own code calls one
-// natively; a callee with no code for native callers yet is compiled
-// after (wanted, linked), and called by Go until it has.
-func (fb *jitFeedback) accessorCall(cl *closure, callee *Object, write bool) (ssa.CallSite, bool) {
-	if fb.root != nil {
-		return ssa.CallSite{}, false
-	}
-	ce := fb.r.jit.entryFor(cl.fn)
-	var link *jitLink
-	switch {
-	case ce != nil && ce.ssa != nil:
-		link = ce.link
-	case ce != nil && (ce.calleeRefused || ce.ssaCallee), !fb.r.jitLinkable(cl):
-		if !slices.Contains(fb.wanted, cl) {
-			fb.wanted = append(fb.wanted, cl)
-		}
-		return ssa.CallSite{}, false
-	default:
-		link = fb.r.jit.linkOf(cl.fn)
-		if !slices.Contains(fb.linked, cl) {
-			fb.linked = append(fb.linked, cl)
-		}
-	}
-	fn := cl.fn
-	this := -1
-	if fn.UsesThis {
-		this = fn.LocalCount + len(fn.Upvalues)
-	}
-	fb.links = append(fb.links, link)
-	site := ssa.CallSite{
-		Callee: uintptr(unsafe.Pointer(callee)), Closure: uintptr(unsafe.Pointer(cl)),
-		Entry: uintptr(unsafe.Pointer(&link.entry)), Count: uintptr(unsafe.Pointer(&link.in)),
-		Argc: jitB2i(write), Method: true,
-		Params: fn.ParamCount, LocalCount: fn.LocalCount, MaxStack: fn.MaxStack, ThisSlot: this, Coerce: fn.CoerceThis,
-		// A setter's value its one argument, a getter none: written to its
-		// context where its code reads them (jitFrameArgs).
-		FrameArgs: jitFrameArgs(fn), Function: jitFrameCallee(fn),
-	}
-	if fn.HasTailCall {
-		// As a method call's: its calls in tail position may give its
-		// frame up.
-		site.Tail, site.TailFrame = true, true
-	}
-	if len(cl.upvalues) != 0 {
-		// Its captured bindings, the closure's of the one function object
-		// the guards found.
-		site.Upvalues = uintptr(unsafe.Pointer(unsafe.SliceData(cl.upvalues)))
-	}
-	site.StartOnly = jitcompile.StartOnly(fn)
-	return site, true
-}
 
 // jitLevelCallee is the function object a level native code made a frame
 // for at the call at pc of caller's code is running, where it is known: an

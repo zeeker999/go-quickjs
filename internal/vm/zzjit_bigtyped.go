@@ -51,17 +51,6 @@ func jitBigReadAt(reads []int32, pc int) int32 {
 	return 0
 }
 
-// TypedBigRead is ssa.BigElementFeedback's: the element read at pc has met
-// a BigInt64Array, or a BigUint64Array (unsigned) (jitIndexSeen).
-func (fb *jitFeedback) TypedBigRead(pc int) (unsigned, ok bool) {
-	e := fb.ownEntry()
-	if e == nil {
-		return false, false
-	}
-	m := jitBigReadAt(e.typedReads, pc)
-	return m&jitBigReadUnsigned != 0, m != 0
-}
-
 // jitStoreBigElem stores BigInt v in element i of o, a BigInt64Array or a
 // BigUint64Array of a fixed length inside its buffer, as setElem stores
 // it -- its low 64 bits -- for native code's store of any value

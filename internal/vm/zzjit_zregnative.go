@@ -408,9 +408,6 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 	e.p = p
 	s.regSerial++
 	e.serial = s.regSerial
-	if jitParityLog.on.Load() {
-		r.jitParityNote(cl)
-	}
 	r.jitRegSeenFeedback(cl, c)
 	rf := r.jitRegFeedbackFor(cl, p)
 	if background {

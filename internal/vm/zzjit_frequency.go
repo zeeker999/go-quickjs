@@ -355,22 +355,6 @@ func (r *Runtime) jitCallCold(e *jitEntry, pc int, cl *closure) bool {
 	return ok && f < ssa.MinInliningFrequency
 }
 
-// Frequency is ssa.FrequencyFeedback's: how often the call at pc is made
-// for each invocation of the frame's function, as the existing tiers
-// counted them (jitCallFrequency) -- its entry's counts; not a leaf's,
-// whose invocations the call path answers without a frame are not
-// counted, nor the calls they make.
-func (fb *jitFeedback) Frequency(pc int) (float64, bool) {
-	if fb.fn.Leaf != bytecode.LeafNone {
-		return 0, false
-	}
-	e := fb.e
-	if fb.root != nil || e == nil {
-		e = fb.r.jit.entryFor(fb.fn)
-	}
-	return fb.r.jitCallFrequency(e, pc)
-}
-
 // pureCallCounted is pureCall made at a call site of the script's -- a
 // tree's call node, callRest -- whose call the JIT counts for its inliner,
 // as a call made with a frame is (jitCountPure): here and in callDirect,

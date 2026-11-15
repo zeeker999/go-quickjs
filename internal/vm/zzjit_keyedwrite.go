@@ -8,12 +8,6 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
 
-// KeyedWrite is ssa.KeyedWriteFeedback's (jitKeyedWriteSeen).
-func (fb *jitFeedback) KeyedWrite(pc int) bool {
-	e := fb.ownEntry()
-	return e != nil && slices.Contains(e.keyedWrites, int32(pc))
-}
-
 // jitKeyedWriteSeen notes a write of an element, set_index at pc, that left
 // e's code with its receiver, key and value on the VM's stack below sp: one
 // to an object native code does not store to that Go would store

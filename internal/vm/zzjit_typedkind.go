@@ -28,49 +28,6 @@ import (
 // and its slot in the lowering's table.
 const jitTypedCellBytes = int(unsafe.Sizeof(Value{})) + jitMapSlot
 
-// TypedKind is ssa.TypedKindFeedback's: the element types the typed arrays
-// the element read or write at pc met, as its cell has them, the cell made
-// if the site has none, which the code keeps alive.
-func (fb *jitFeedback) TypedKind(pc int) (ssa.TypedSite, bool) {
-	s := fb.r.jit
-	if s == nil || pc < 0 || pc >= len(fb.fn.Code) {
-		return ssa.TypedSite{}, false
-	}
-	l := s.lowering(fb.fn)
-	cell := l.typedCells[int32(pc)]
-	if cell == nil {
-		if l.typedCells == nil {
-			l.typedCells = map[int32]*Value{}
-		}
-		cell = new(Value)
-		l.typedCells[int32(pc)] = cell
-		l.bytes += jitTypedCellBytes
-		s.lowerBytes += jitTypedCellBytes
-	}
-	k := fb.keep()
-	k.cells = append(k.cells, cell)
-	return ssa.TypedSite{Kinds: uint16(math.Float64bits(cell.num)), Cell: uintptr(unsafe.Pointer(cell))}, true
-}
-
-// UpvalueTyped is ssa.UpvalueTypedFeedback's: whether the captured binding
-// the instruction at pc reads holds a typed array, in fb's closure as the
-// code is compiled, and its element type plus one -- as a global's site
-// says of its binding (ssa.GlobalSite's Typed and TypedKind).
-func (fb *jitFeedback) UpvalueTyped(pc int) (uint8, bool) {
-	if fb.cl == nil || pc < 0 || pc >= len(fb.fn.Code) {
-		return 0, false
-	}
-	in := fb.fn.Code[pc]
-	if in.Op != bytecode.OpGetUpvalue && in.Op != bytecode.OpGetUpvalueCheck || int(in.A) >= len(fb.cl.upvalues) || fb.cl.upvalues[in.A] == nil {
-		return 0, false
-	}
-	v := fb.cl.upvalues[in.A].get()
-	if !jitTypedArray(v) {
-		return 0, false
-	}
-	return jitTypedKind(true, v), true
-}
-
 // jitTypedSeen is ssa.GoTypedSeen: the typed array in the first operand,
 // the site's cell in the second's pointer word. It sets the bit of the
 // array's element type in the cell, and marks the code the call was made

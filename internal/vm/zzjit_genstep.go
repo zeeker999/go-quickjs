@@ -96,35 +96,6 @@ func jitGenResumes(fn *bytecode.Function, p *ir.Program, f *ssa.Func) []ssa.GenR
 	return out
 }
 
-// GenSteps is ssa.GenStepFeedback's: the generators the step at pc has met
-// (jitGenStepSeen), each of the code's environment and realm, called
-// through its function's link, which the code holds.
-func (fb *jitFeedback) GenSteps(pc int) []ssa.GenStep {
-	e := fb.ownEntry()
-	if e == nil || fb.root != nil || fb.cl == nil {
-		return nil
-	}
-	for _, st := range e.genSteps {
-		if int(st.pc) != pc {
-			continue
-		}
-		var out []ssa.GenStep
-		for _, cl := range st.cls {
-			if cl.env != fb.cl.env || cl.realm != fb.cl.realm {
-				continue
-			}
-			link := fb.r.jit.linkOf(cl.fn)
-			fb.links = append(fb.links, link)
-			out = append(out, ssa.GenStep{
-				Fn: uintptr(unsafe.Pointer(cl.fn)), Env: uintptr(unsafe.Pointer(cl.env)), Realm: uintptr(unsafe.Pointer(cl.realm)),
-				Entry: uintptr(unsafe.Pointer(&link.gen)), Count: uintptr(unsafe.Pointer(&link.in)),
-			})
-		}
-		return out
-	}
-	return nil
-}
-
 // GenNext is ssa.GenStepFeedback's: the realm's %GeneratorPrototype%.next,
 // an object as long-lived as the realm.
 func (fb *jitFeedback) GenNext() uintptr { return uintptr(unsafe.Pointer(fb.r.genNextFn)) }
@@ -231,49 +202,6 @@ func (r *Runtime) jitPushGenNext(g *generator) {
 	f.this, f.newTarget, f.callee, f.args = Obj(g.object()), Undefined, gn, nil
 	f.handlers, f.openUpvalues = f.handlers[:0], f.openUpvalues[:0]
 	f.thisRef, f.withScopes, f.evalVars, f.savedSP = nil, nil, nil, 0
-}
-
-// jitGenFrame makes the frame of l, a level of a generator a step resumed
-// natively (jitGenLevel), which left native code, as the step's resumption
-// would have made it (resumeTree), its next's frame below it: its locals
-// the generator's, its operands at the level's base, its handlers those in
-// force at its exit, or, past, after its call, which a stack trace shows.
-// The records of a native call it was making (jit.ExpandCall) are written
-// to it.
-func (r *Runtime) jitGenFrame(l *jitNativeLevel, c *abi.Context, past bool) *frame {
-	s := r.jit
-	g, fn := l.gen, l.cl.fn
-	l.top = l.base
-	r.jitPushGenNext(g)
-	f := r.pushFrame()
-	f.cl = g.cl
-	f.locals = g.vals[g.nargs:]
-	f.base = l.base
-	f.pc = uint32(l.pc)
-	if past {
-		f.pc++
-	}
-	f.this, f.callee, f.args = g.this, g.callee, g.vals[:g.nargs:g.nargs]
-	f.handlers, f.openUpvalues = g.savedHandlers(), g.savedUpvalues()
-	g.frameRare(f)
-	f.native, f.savedSP, f.paramsOnly = "", 0, false
-	tc := &f.tc
-	tc.r, tc.f, tc.cl, tc.locals = r, f, g.cl, f.locals
-	tc.closureCode = g.cl.closureCode
-	tc.stack = r.stack[l.base : l.base+fn.MaxStack]
-	e := r.jitEntryOf(l.cl)
-	if e != nil && c.Records != 0 {
-		saved := s.ssaCtx
-		s.ssaCtx = c
-		r.jitKeepSlots(l, f, e.this, c)
-		r.jitApplyRecords(f, e.this, c)
-		s.ssaCtx = saved
-	}
-	r.jitMaterialize(f, e)
-	if e != nil {
-		jitHandlers(f, e.ssaProg, int(l.pc))
-	}
-	return f
 }
 
 // jitGenDone ends the frame of l, a generator's level (jitGenFrame), which

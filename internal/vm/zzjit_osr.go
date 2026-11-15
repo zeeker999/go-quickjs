@@ -201,57 +201,8 @@ func (r *Runtime) jitFrameAt(fn *bytecode.Function, e *jitEntry) int {
 	return r.jitFramePC
 }
 
-// jitCalleesKeptNoEntries has the functions e's code calls natively,
-// compiled with entries for a frame that was running when they were
-// (jitEntry's ssaKept), compiled again without them: they are called again
-// now, and Go will not see it, native code calling them.
-func (r *Runtime) jitCalleesKeptNoEntries(e *jitEntry) {
-	for _, x := range e.nativeCalls {
-		if x.cl == nil {
-			continue
-		}
-		if ce := r.jit.entryFor(x.cl.fn); ce != nil && ce != e && len(ce.ssaKept) != 0 && !ce.invalid && !ce.keptCallsLeave() {
-			r.jitKeptGone(x.cl, ce)
-		}
-	}
-}
 
-// jitKeptGone compiles e's code again, cl's function's, without the
-// entries it has for a frame (jitEntry's ssaKept).
-func (r *Runtime) jitKeptGone(cl *closure, e *jitEntry) {
-	e.keptGone = true
-	r.jitReoptimize(cl, e)
-}
 
-// jitFramesLeave counts a call of e's function going on in the code kept for
-// the loop at pc -- once each: where it leaves again, it goes on in that
-// run -- and reports whether e's code has been compiled with that loop's
-// entry because most calls do. Objects left unmade for a call that
-// leaves are made at its exit, and it enters code again for the rest of its
-// loop: each call pays that, for the few turns before it left. So, as three
-// calls in four leave, the entry is learned as one Go goes on at (jitLearned's
-// resumed), the code keeps its objects made there, as if it had never left
-// them unmade, and the code kept goes. carried_exit_100, each call leaving at
-// its sixth turn, had been 10% slower than code that never tried; in
-// carried_exit_mixed, where one call in two runs its loop through, those
-// calls go on gaining more than the others cost.
-func (r *Runtime) jitFramesLeave(cl *closure, e *jitEntry, pc int) bool {
-	if e.osrFrames++; e.osrFrames < jitFramesLeaving {
-		return false
-	}
-	calls := e.starts + e.link.in
-	// Compiling the code counts its calls afresh: then, the count begins.
-	most := calls >= e.osrCalls && (calls-e.osrCalls)*3 <= jitFramesLeaving*4
-	e.osrFrames, e.osrCalls = 0, calls
-	if !most || e.invalid || slices.Contains(e.resumed, uint32(pc)) {
-		return false
-	}
-	e.resumed = append(e.resumed, uint32(pc))
-	e.resumeReopt = true
-	r.jit.account(e)
-	r.jitReoptimize(cl, e)
-	return e.ssa != nil && e.ssa.HasEntry(pc)
-}
 
 // osrEntry is e's entry for on-stack replacement, made if need be.
 func (s *jitState) osrEntry(e *jitEntry) *jitEntry {

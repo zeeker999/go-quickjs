@@ -215,45 +215,6 @@ func (r *Runtime) jitHeldReady(h *jitJob) bool {
 	return true
 }
 
-// jitReleaseHeld prepares h's compile (jitHold), held no longer, or holds
-// it again for callees of those it waited for: calls it left undecided are
-// decided now, and those decided stand.
-func (r *Runtime) jitReleaseHeld(h *jitJob) {
-	s, e := r.jit, h.e
-	defer func() { e.busy-- }()
-	e.pending, e.awaited = nil, nil
-	key := r.jitKeyOf(h.fn)
-	if s.cache[key] != e {
-		s.bgDiscarded++
-		return
-	}
-	e.holds = h.holdRound < jitHoldRounds
-	r.jitSeedCalls(h.cl, e, h.p)
-	e.holds = false
-	if len(e.awaited) != 0 {
-		h.holdRound++
-		e.pending = h
-		e.busy++
-		s.heldJobs = append(s.heldJobs, h)
-		return
-	}
-	// The check it is released at has a frame of its own, whose compile may
-	// be to come.
-	frameFn, framePC := r.jitFrameFn, r.jitFramePC
-	r.jitFrameFn, r.jitFramePC = h.fn, h.frameAt
-	j, err := r.compileSSAPrepare(h.fn, h.cl, h.p, e)
-	r.jitFrameFn, r.jitFramePC = frameFn, framePC
-	if err != nil {
-		if h.nativeCallee {
-			e.calleeRefused = true
-		} else {
-			r.jitFirstCode(key, h.fn, h.cl, h.p, e, nil, nil, err, true)
-		}
-		return
-	}
-	j.install = h.install
-	r.jitSubmit(e, j)
-}
 
 // jitDrain installs the compiles in the background that are done, in the
 // order they were handed over, at a check of the runtime's goroutine: a
@@ -473,49 +434,6 @@ type jitLowerTask struct {
 	state  atomic.Int32
 	done   chan struct{}
 	checks int
-}
-
-// jitLowerLater reports whether fn's first compile in the background waits
-// for its lowering, handing that to the workers if it is not lowered and
-// not being lowered: its program is lowered as the compile's own work is,
-// the function running in the existing tiers meanwhile. A lowering a
-// compile already made, or one the runtime has no room for in the
-// background, is not waited for; nor one the compile would not be made
-// for -- the JIT unavailable, a function the cache dropped asking again
-// too soon (admit), one past the budget's length, no room for its entry --
-// which jitCompileForIn refuses as before, lowering nothing: a lowering
-// made for no compile would hold room the cache had not made.
-func (r *Runtime) jitLowerLater(fn *bytecode.Function) bool {
-	s := r.jit
-	for _, t := range s.lowerings {
-		if t.fn == fn {
-			return true
-		}
-	}
-	if s.unavailable || s.jobsFull() || !s.admits(fn) || !jitCompiles(fn, r.jitBudget()) {
-		return false
-	}
-	if s.loweredSSA(fn) {
-		return false
-	}
-	s.budget = r.jitBudget()
-	s.age(s.epoch())
-	if !s.makeRoom(len(fn.Code)*s.perInstr + s.hintRoom(nil)) {
-		return false
-	}
-	// Made in the room, and past what making it may reclaim.
-	l := s.loweringFresh(fn)
-	h := l.hints
-	t := &jitLowerTask{fn: fn, kind: jitLowerSSA, l: l, serial: l.serial, done: make(chan struct{}),
-		hints: jitcompile.Hints{StringAdds: slices.Clone(h.StringAdds), ElementReads: slices.Clone(h.ElementReads), StringReads: slices.Clone(h.StringReads)}}
-	s.lowerings = append(s.lowerings, t)
-	s.bgLowered++
-	jitWorkers.submit(t)
-	if r.jitStress.background && r.jitStress.checks == 0 {
-		r.jitDrain()
-		return !l.done[jitLowerSSA]
-	}
-	return true
 }
 
 // run is t's lowering on a worker; the lowering recovers a panic of its

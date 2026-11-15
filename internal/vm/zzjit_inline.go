@@ -8,13 +8,6 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
-// InlineExit is ssa.InlineExitFeedback's: of an inlined callee's
-// feedback, whether native code may leave the inlined frame at its
-// operation at pc (jitInlineExit).
-func (fb *jitFeedback) InlineExit(pc int) bool {
-	return fb.root != nil && fb.r.jitInlineExit(fb.fn, pc)
-}
-
 // jitInlineExit reports whether the operation at pc of fn, which native
 // code leaves to Go, may be left so inside a callee inlined with its
 // caller, rather than keep fn from being inlined: one seldom run, at which
