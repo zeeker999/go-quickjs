@@ -796,8 +796,8 @@ func (e *escaper) state(s *FrameState, header bool) {
 	if s == nil {
 		return
 	}
-	for _, i := range e.f.Present(s) {
-		if r, o := e.roleOf(s.Slots[i]); r != roleNone {
+	for _, v := range s.All() {
+		if r, o := e.roleOf(v); r != roleNone {
 			if r != roleObj || header || s.Args != 0 || s.Virtual != 0 {
 				e.escape(o)
 			}
@@ -1584,8 +1584,8 @@ func (e *escaper) indexUses() {
 	}
 	state := func(s *FrameState, b *Block) {
 		if s != nil {
-			for _, i := range f.Present(s) {
-				mark(s.Slots[i], b)
+			for _, v := range s.All() {
+				mark(v, b)
 			}
 		}
 	}
@@ -1788,8 +1788,8 @@ func (e *escaper) record(u escState, cur []*vstate) {
 			}
 		}
 	}
-	for _, i := range e.f.Present(u.s) {
-		if r, o := e.roleOf(u.s.Slots[i]); r == roleObj && !o.escaped {
+	for _, v := range u.s.All() {
+		if r, o := e.roleOf(v); r == roleObj && !o.escaped {
 			add(o)
 		}
 	}
@@ -2201,9 +2201,9 @@ func (e *escaper) rewriteState(s *FrameState, snap []escSnap) *FrameState {
 		}
 	}
 	n := f.newState(*s)
-	n.Slots = f.refsOf(end)
-	copy(n.Slots, s.Slots[:s.Own()])
+	n.slots, n.height, n.n = nil, 0, end
 	n.Virtual = end - s.Own()
+	f.openEdit()
 	named := func(x *Value) *Value {
 		r, o := e.roleOf(x)
 		if r != roleObj || o.escaped {
@@ -2219,9 +2219,9 @@ func (e *escaper) rewriteState(s *FrameState, snap []escSnap) *FrameState {
 		}
 		panic("ssa: an object not made with no state")
 	}
-	for i := range n.Slots[:s.Own()] {
-		if x := n.Slots[i]; x != nil {
-			n.Slots[i] = named(x)
+	for i, x := range s.All() {
+		if i < s.Own() {
+			f.setSlot(n, i, named(x))
 		}
 	}
 	for _, y := range snap {
@@ -2229,9 +2229,9 @@ func (e *escaper) rewriteState(s *FrameState, snap []escSnap) *FrameState {
 		if y.st.real != nil {
 			continue
 		}
-		n.Slots[o.home] = e.word(o, uint64(y.st.shape))
+		f.setSlot(n, o.home, e.word(o, uint64(y.st.shape)))
 		for k, x := range y.st.fields {
-			n.Slots[o.home+abi.VirtualFields+k] = named(x)
+			f.setSlot(n, o.home+abi.VirtualFields+k, named(x))
 		}
 	}
 	return n

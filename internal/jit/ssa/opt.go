@@ -1089,8 +1089,8 @@ func rematerializeUpvalues(f *Func) bool {
 	// binding, is there before the read would be.
 	for _, b := range f.Blocks {
 		if b.Header != nil && b.PC >= 0 {
-			for _, v := range b.Header.Slots {
-				if v != nil && v.Op == OpPhi && v.Block == b {
+			for _, v := range b.Header.All() {
+				if v.Op == OpPhi && v.Block == b {
 					cand[v.ID] = failed
 				}
 			}
@@ -1199,14 +1199,18 @@ func rewriteChain(f *Func, subst []*Value) {
 		}
 		return v
 	}
-	state := func(s *FrameState) {
-		if s == nil {
-			return
+	// A node of states' slots is rewritten once, for every state that has
+	// it (rewriteSlots).
+	seen := f.bools(int(f.nextNode))
+	inSlot := func(v *Value) *Value {
+		if v.ID < len(subst) && subst[v.ID] != nil {
+			return find(v)
 		}
-		for _, i := range f.Present(s) {
-			if v := s.Slots[i]; v.ID < len(subst) && subst[v.ID] != nil {
-				s.Slots[i] = find(v)
-			}
+		return v
+	}
+	state := func(s *FrameState) {
+		if s != nil {
+			rewriteSlots(s, seen, inSlot)
 		}
 	}
 	for _, b := range f.Blocks {
@@ -1242,12 +1246,10 @@ func rewriteChain(f *Func, subst []*Value) {
 
 // rewrite replaces every use of a value with find's answer for it.
 func rewrite(f *Func, find func(*Value) *Value) {
+	seen := f.bools(int(f.nextNode))
 	state := func(s *FrameState) {
-		if s == nil {
-			return
-		}
-		for _, i := range f.Present(s) {
-			s.Slots[i] = find(s.Slots[i])
+		if s != nil {
+			rewriteSlots(s, seen, find)
 		}
 	}
 	for _, b := range f.Blocks {
@@ -1291,16 +1293,21 @@ func removeDead(f *Func) bool {
 			work = append(work, v)
 		}
 	}
-	// A state is marked once: the guards of an instruction share theirs.
+	// A state is marked once: the guards of an instruction share theirs;
+	// and a node of states' slots once, for every state that has it.
 	marked := f.bools(f.nextState)
+	seen := f.bools(int(f.nextNode))
+	markNode := func(nd *slotNode, h int) {
+		for _, v := range nd.vals {
+			mark(v)
+		}
+	}
 	markState := func(s *FrameState) {
 		if s != nil && (s.id >= len(marked) || !marked[s.id]) {
 			if s.id < len(marked) {
 				marked[s.id] = true
 			}
-			for _, i := range f.Present(s) {
-				mark(s.Slots[i])
-			}
+			eachSlotNode(s, seen, markNode)
 		}
 	}
 	for _, b := range f.Blocks {
@@ -1353,23 +1360,18 @@ func recount(f *Func) {
 		}
 	}
 	// A state's slots are uses once for each value and block naming it:
-	// its users are counted (refs, by state ID), and its slots read once,
-	// the states listed the first time each is met -- the guards of an
-	// instruction share its state. A state past the table is read by each.
+	// its users are counted (refs, by state ID), the states listed the
+	// first time each is met -- the guards of an instruction share its
+	// state -- and their slots read once for every state that shares
+	// them (slotWeights).
 	refs := f.ints(f.nextState)
 	states := f.scr().states[:0]
 	state := func(s *FrameState) {
 		if s == nil {
 			return
 		}
-		if s.id < len(refs) {
-			if refs[s.id]++; refs[s.id] == 1 {
-				states = append(states, s)
-			}
-			return
-		}
-		for _, i := range f.Present(s) {
-			s.Slots[i].Uses++
+		if refs[s.id]++; refs[s.id] == 1 {
+			states = append(states, s)
 		}
 	}
 	for _, b := range f.Blocks {
@@ -1383,12 +1385,7 @@ func recount(f *Func) {
 		state(b.State)
 		state(b.Header)
 	}
-	for _, s := range states {
-		k := refs[s.id]
-		for _, i := range f.Present(s) {
-			s.Slots[i].Uses += k
-		}
-	}
+	f.slotWeights(states, refs)
 	clear(states)
 	f.scr().states = states[:0]
 }

@@ -667,8 +667,7 @@ func (c *a64Compiler) exitThen(s *ssa.FrameState, kind uint64, then *arm64.Label
 	c.recordRoom(s)
 	c.recorded = false
 	c.a.Store(a64Ctx, abi.OffRecords, arm64.ZR)
-	for _, ix := range c.f.Present(s) {
-		i, v := int(ix), s.Slots[ix]
+	for i, v := range s.All() {
 		if v.Op == ssa.OpLoadSlot && v.Aux == i || c.captured(i) {
 			continue
 		}
@@ -4329,12 +4328,12 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 		// From the call's state, as its records are (exitView).
 		back := c.viewExits()
 		for i := 0; i < site.Params && args+i < sp && i < site.LocalCount; i++ {
-			c.directOperand(v, s.Slots[args+i], a64D, int32(i)*vs)
+			c.directOperand(v, s.Slot(args+i), a64D, int32(i)*vs)
 		}
 		if receiver {
 			// The callee's context's, the next.
 			c.a.Load(a64D, a64Ctx, abi.OffNext)
-			c.directOperand(v, s.Slots[this], a64D, abi.OffThis)
+			c.directOperand(v, s.Slot(this), a64D, abi.OffThis)
 		}
 		back()
 	}

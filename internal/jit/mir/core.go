@@ -444,7 +444,7 @@ func (c *core) frameResident(x, v *ssa.Value) (int, bool) {
 	if !(o >= 0 && o < c.f.FrameLocals && !c.f.Assigned(o) || o >= 0 && o == c.f.ThisSlot) {
 		return 0, false
 	}
-	if s := v.State; s == nil || o >= len(s.Slots) || s.Slots[o] != nil && s.Slots[o] != y {
+	if s := v.State; s == nil || o >= s.Len() || s.Slot(o) != nil && s.Slot(o) != y {
 		return 0, false
 	}
 	return o, true
@@ -815,8 +815,7 @@ func (c *core) findLazy() error {
 	}
 	for _, s := range states {
 		k := refs[s.ID()]
-		for _, i := range c.f.Present(s) {
-			v := s.Slots[i]
+		for i, v := range s.All() {
 			uses[v.ID] += k
 			if !(v.Op == ssa.OpLoadSlot && v.Aux == int(i)) {
 				elsewhere[v.ID] = true
@@ -1173,8 +1172,7 @@ func (c *core) allocate() error {
 				use(x, at)
 			}
 		}
-		for _, i := range c.f.Present(s) {
-			v := s.Slots[i]
+		for _, v := range s.All() {
 			if moved == nil && rec[v.ID].slot == 0 {
 				// Neither a BigInt's box, nor made where needed, nor with
 				// a shadow: the value itself.
@@ -2543,8 +2541,8 @@ func (c *core) savesOf(v *ssa.Value) []saved {
 // only its own slot holds, and the call writes them where its callee has
 // them (directOperand). A call is never in an entry block, so none is.
 func (c *core) operandsLive(s *ssa.FrameState, ops int) bool {
-	for _, x := range s.Slots[ops : s.Own()-s.Args] {
-		if x == nil || x.Op == ssa.OpLoadSlot && c.isLazy(x) {
+	for i := ops; i < s.Own()-s.Args; i++ {
+		if x := s.Slot(i); x == nil || x.Op == ssa.OpLoadSlot && c.isLazy(x) {
 			return false
 		}
 	}
@@ -3110,14 +3108,13 @@ func (c *core) exitDescriptor(s *ssa.FrameState, kind uint64, localsReg, stackRe
 		clear(c.exitLastV)
 		return nil
 	}
-	if len(c.exitLastV) < len(s.Slots) {
-		n := max(len(s.Slots), 2*len(c.exitLastV))
+	if len(c.exitLastV) < s.Len() {
+		n := max(s.Len(), 2*len(c.exitLastV))
 		c.exitLastV, c.exitLastK = c.valueList(n), c.int32s(n)
 	}
 	direct := true
-	writes := func(i int32) bool { return int(i) < len(s.Slots) && written(int(i), s.Slots[i]) }
-	for _, ix := range c.f.Present(s) {
-		i, v := int(ix), s.Slots[ix]
+	writes := func(i int32) bool { return int(i) < s.Len() && written(int(i), s.Slot(int(i))) }
+	for i, v := range s.All() {
 		if !written(i, v) {
 			continue
 		}
@@ -3306,12 +3303,11 @@ func (c *core) slotsEnd() int32 {
 // state of more slots than that, a function's that nothing else bounds,
 // may have.
 func (c *core) recordRoom(s *ssa.FrameState) {
-	if len(s.Slots) <= abi.MaxRecords {
+	if s.Len() <= abi.MaxRecords {
 		return
 	}
 	n := 0
-	for _, ix := range c.f.Present(s) {
-		i, v := int(ix), s.Slots[ix]
+	for i, v := range s.All() {
 		if !(v.Op == ssa.OpLoadSlot && v.Aux == i || c.captured(i)) {
 			n++
 		}
@@ -3357,8 +3353,7 @@ func (c *core) callState(v *ssa.Value, s *ssa.FrameState, skip func(int) bool, o
 	st := &c.callSlab[len(c.callSlab)-1]
 	cs := c.cs
 	refs, rest, refRecs, restRecs := cs.refs[:0], cs.rest[:0], cs.refRecs[:0], cs.restRecs[:0]
-	for _, ix := range c.f.Present(s) {
-		i, x := int(ix), s.Slots[ix]
+	for i, x := range s.All() {
 		if x.Op == ssa.OpLoadSlot && x.Aux == i || c.captured(i) || skip(i) {
 			continue
 		}

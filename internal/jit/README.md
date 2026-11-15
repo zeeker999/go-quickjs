@@ -802,6 +802,31 @@ function's start, at its loops' headers, and after what Go is sure to run --
 an instruction left to it whole, a call -- as V8's code is entered only at a
 function's start and by on-stack replacement at a loop.
 
+**States share their slots.** A frame state's slots are a persistent
+array, a tree of 64-entry nodes that states share, as V8's frame states
+share their StateValues (`ssa/slots.go`): a node holds a mask of the
+entries it has and one value or child for each, and a change copies only
+the nodes on its path that the edit making the state did not make itself.
+The builder makes a state from the last one its block made, or, for a
+block's first, from the last of its only predecessor (`stateSlots`): it
+reads again only the slots written since -- every write to a block is
+listed for its next state -- and those that the liveness at one PC names
+and at the other does not, its words told apart; a slot both name that
+nothing wrote since has the value it had, which a read would find again
+without making anything, so that what the reads make, and in which order,
+is what reading every live slot made. A function of n values live at once
+and an exit at each of its n instructions had states naming n² slots --
+13,000 slots some seven gigabytes -- where they now take what the
+instructions change. The passes walk a state's set slots in order
+(`FrameState.All`); those that do the same for each value wherever it is
+-- the rewrites of replaced values, dead code's marking -- visit each node
+once, a rewrite changing a shared node in place, as it replaces the value
+in every state that has it; a pass that changes one state's slots alone (a
+loop header's, `keep.go`) copies its path. A state's slots count as their
+values' uses once for each value and block naming the state: `recount`
+weighs each node by the states and nodes that have it, from the roots
+down (`slotWeights`), and the builder counts no state's uses before it.
+
 **The atomicity rule, as built.** What an instruction commits depends on how
 it is built (`atomicInstruction`): a property's read commits only where it
 is built to call -- an accessor the feedback gives, or Go for a megamorphic

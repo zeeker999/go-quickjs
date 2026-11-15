@@ -641,15 +641,13 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 		}
 		// A slot with no value is a local dead there (ir.Program.Live): the
 		// exit leaves it as it was.
-		for i, v := range s.Slots {
-			if v != nil && !traced(v) {
+		for i, v := range s.All() {
+			if !traced(v) {
 				return ir.Exit{}, fmt.Errorf("%w: slot %d's %v at pc %d", ErrOrigin, i, v, s.PC)
 			}
 		}
-		for i, v := range s.Slots {
-			if v != nil {
-				slots[i] = slot(v)
-			}
+		for i, v := range s.All() {
+			slots[i] = slot(v)
 		}
 		return ir.Exit{Kind: kind, State: ir.StateMap{PC: s.PC, Depth: s.Depth}}, nil
 	}
