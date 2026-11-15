@@ -103,9 +103,27 @@ func (r *Runtime) jitRegLinkFlags(cl *closure, c *regCode) uint64 {
 // regHint gives cl's template a slot of the hint table holding l, its
 // function's link, as the stack form's entries have one (remember): what
 // a generic call finds a function's link by (mir's genericCheck). A link
-// keeps its slot until its function is gone (regBytes, regUnhint).
+// keeps its slot until its function is gone (regBytes, regUnhint). A
+// table full is grown once room is made for its growth (hintGrowth), as
+// the stack form's entry is made only in the room for it and its slot
+// (jitWarmFor, jitCompileForIn's hintRoom); where there is none, the
+// link has no slot for now, and a generic call of the function is Go's
+// until a later one finds the room. Grown with no room asked, the table,
+// doubled at a link a compile's callee was given, left the JIT holding
+// past its budget whatever the compiles made room for: 262,148 bytes of
+// 262,144 once a realm's run was done.
 func (s *jitState) regHint(cl *closure, l *jitLink) {
 	if l.hint == 0 {
+		if g := s.hintGrowth(); g != 0 {
+			// The room made may free a slot (regUnhint), taken below.
+			s.budget = s.rt.jitBudget()
+			if !s.makeRoom(g) {
+				if cl.hint() != 0 {
+					cl.setHint(0)
+				}
+				return
+			}
+		}
 		var i uint32
 		if n := len(s.hintFree); n != 0 {
 			i, s.hintFree = s.hintFree[n-1], s.hintFree[:n-1]
