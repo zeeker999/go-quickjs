@@ -4619,6 +4619,7 @@ func (g *gen) finish() *bytecode.RegCode {
 			farNames[pc] = v
 		}
 	}
+	g.fuseSteps()
 	var aux []uint32
 	if len(g.auxes) > 0 {
 		aux = make([]uint32, len(g.code))

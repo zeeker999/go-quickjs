@@ -119,6 +119,9 @@ var nativeSlowOnMiss = [...]bytecode.ROp{
 	bytecode.RBitAnd, bytecode.RBitOr, bytecode.RBitXor, bytecode.RShl, bytecode.RShr, bytecode.RUShr,
 	bytecode.RGetProp, bytecode.RGetMethod, bytecode.RSetProp, bytecode.RGetGlobal, bytecode.RSetGlobal,
 	bytecode.RBin, bytecode.RGetPrivate, bytecode.RSetPrivate, bytecode.RIn,
+	// A step-and-branch leaves native code only for a step its fast path
+	// does not make, before it commits anything: rsStep's.
+	bytecode.RStepJLt, bytecode.RStepJLe, bytecode.RStepJLtI, bytecode.RStepJGtI, bytecode.RStepJGeI, bytecode.RStepJLeU,
 }
 
 // The exit table, made after regTable (zzreg_table.go's and

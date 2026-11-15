@@ -17,11 +17,12 @@ func withCode(rc *bytecode.RegCode, code []bytecode.RInstr, aux []uint32) *bytec
 }
 
 // pairAt is the pc of the first step of op in rc followed by a branch of
-// partner.
+// partner, or of the step-and-branch the compiler fused them to.
 func pairAt(t *testing.T, rc *bytecode.RegCode, op, partner bytecode.ROp) int {
 	t.Helper()
 	for pc := 0; pc+1 < len(rc.Code); pc++ {
-		if rc.Code[pc].Op() == op && rc.Code[pc+1].Op() == partner {
+		fused, ok := rc.Code[pc].Op().StepPartner()
+		if (rc.Code[pc].Op() == op || ok && fused == partner) && rc.Code[pc+1].Op() == partner {
 			return pc
 		}
 	}
@@ -33,7 +34,8 @@ func pairAt(t *testing.T, rc *bytecode.RegCode, op, partner bytecode.ROp) int {
 // with its partner at pc+1, of the same A, B and target, and a step it
 // can make; mul_imm's X 0; the int32 forms' Aux, the | 0's stack
 // instruction, in the stack code; add_imm_i32's X, and its SC where it
-// stands for a subtraction. Nothing the compiler emits holds them yet.
+// stands for a subtraction. Nothing the compiler emits holds them yet but
+// the step-and-branches.
 func TestVerifyReservedOps(t *testing.T) {
 	fns := regFunctions(t, `
 		function up(n) { for (let i = 0; i < n; i++) {} }
@@ -51,7 +53,7 @@ func TestVerifyReservedOps(t *testing.T) {
 	for _, f := range fns {
 		if rc := f.RegCode(); rc != nil {
 			for pc, w := range rc.Code {
-				if w.Op() >= bytecode.RStepJLt && w.Op() < bytecode.ROpCount {
+				if w.Op() >= bytecode.RMulI && w.Op() < bytecode.ROpCount {
 					t.Errorf("%s emits %s at %d", f.Name, w.Op(), pc)
 				}
 			}

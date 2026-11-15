@@ -7,7 +7,8 @@
 //     (inc, dec, add_imm or sub_imm of a register into itself, then
 //     jlt r, ... and its kin), by the branch's kind and the step's: what a
 //     step-and-branch instruction would fuse, and the pairs it could not,
-//     by why;
+//     by why; and the step-and-branches regcomp made of the six kinds it
+//     fuses, which leave the pairs above only the other kinds;
 //   - x * k with k a 16-bit integer literal, right or left (mul_imm);
 //   - (x + y) | 0 and (x - y) | 0 (add_i32, sub_i32), (x + k) | 0 and
 //     (x - k) | 0 (add_imm_i32), the + of a string chain left out; and the
@@ -55,6 +56,8 @@ type tally struct {
 	// reserved is how many instructions are of the operations reserved
 	// for the loop kernels and int32 results, which nothing emits yet.
 	reserved int
+	// fused is the step-and-branches regcomp made, by operation.
+	fused map[string]int
 	// step is the fusable step pairs by the branch's kind, then the
 	// step's: "+1", "-1", "+k", "-k"; back those whose branch jumps back.
 	step map[string]map[string]int
@@ -66,13 +69,16 @@ type tally struct {
 }
 
 func newTally() *tally {
-	return &tally{step: map[string]map[string]int{}, back: map[string]int{}, stepMiss: map[string]int{}, expr: map[string]int{}}
+	return &tally{step: map[string]map[string]int{}, back: map[string]int{}, stepMiss: map[string]int{}, expr: map[string]int{}, fused: map[string]int{}}
 }
 
 func (t *tally) add(o *tally) {
 	t.files += o.files
 	t.evals += o.evals
 	t.reserved += o.reserved
+	for k, n := range o.fused {
+		t.fused[k] += n
+	}
 	t.failed += o.failed
 	t.funcs += o.funcs
 	t.regCode += o.regCode
@@ -237,7 +243,9 @@ func farShaped(code []bytecode.RInstr) bool {
 func (t *tally) countSteps(rc *bytecode.RegCode) {
 	code := rc.Code
 	for _, w := range code {
-		if w.Op() >= bytecode.RStepJLt && w.Op() < bytecode.ROpCount {
+		if _, ok := w.Op().StepPartner(); ok {
+			t.fused[w.Op().String()]++
+		} else if w.Op() >= bytecode.RStepJLt && w.Op() < bytecode.ROpCount {
 			t.reserved++
 		}
 	}
@@ -537,6 +545,7 @@ func (t *tally) report(w io.Writer, dir string) {
 		m := t.step[k]
 		fmt.Fprintf(w, "    %-14s %7d %7d %7d %7d %7d %7d\n", k, sum(m), t.back[k], m["+1"], m["-1"], m["+k"], m["-k"])
 	}
+	printSorted(w, "  step-and-branches made:", t.fused)
 	printSorted(w, "  step pairs, not fusable:", t.stepMiss)
 	printSorted(w, "  operators:", t.expr)
 }

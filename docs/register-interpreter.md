@@ -1750,15 +1750,19 @@ Value-in, Value-out superinstructions for counted loops and `| 0`
 arithmetic, which need no raw registers. Their values follow `RFarInit`
 (231 to 240; `ROpCount` 241), so no value before them changed; until each
 has its Go and native handlers and its lowering, nothing emits it, its
-table entry is `rhInvalid`'s, and the lowering refuses it.
+table entry is `rhInvalid`'s, and the lowering refuses it. The
+step-and-branches have theirs.
 
 - **Step-and-branch**, one per bottom test a counted loop uses:
   `step_jlt`, `step_jle` (a register bound), `step_jlt_imm`,
   `step_jgt_imm`, `step_jge_imm` (the immediate SB) and `step_jle_upval`
   (upvalue B). A is the counter, SC the offset, X the step: its low 7
   bits a signed k (-64 to 63, never 0, `bytecode.StepK`), its high bit
-  `RStepAdd` for `+=`/`-=` of a literal (add_imm's semantics), else an
-  update (`++`/`--`, inc's, k = ±1). It is the step and then the
+  `RStepAdd` for `+=`/`-=` of a literal, else an update (`++`/`--`,
+  inc's, k = ±1). With `RStepAdd`, k's sign is the operator, which differs
+  for what is not a number (`"5" + 1` is `"51"`, `"5" - 1` is 4): add_imm
+  k where k is above 0, sub_imm -k where it is below; an add_imm of a
+  negative literal, or a sub_imm of one, is not fused. It is the step and then the
   compare-and-branch at pc+1, its partner, in one dispatch: R[A] += k,
   then to pc+1+SC where the partner would jump, else to pc+2. The partner
   stays in the code: a step of what is not a number is made by the slow
@@ -1767,6 +1771,15 @@ table entry is `rhInvalid`'s, and the lowering refuses it.
   on at the partner, whose slow path compares and checks the interrupt.
   The step's throws are placed at its SrcPC, the comparison's at the
   partner's. The JIT lowers it as its step alone, falling to the partner.
+  regcomp's `finish` fuses each adjacent pair (`fuseSteps`), loops or not,
+  but in a function whose jumps are far. Compiled for a debugger, a for
+  loop's test has a `debug` of its own after the update, so nothing is
+  fused; a while's or a do-while's `--n >= 0` is one expression, with no
+  place to stop between its step and its compare, and is fused as it is
+  without a debugger. The Go handlers are `zzreg_zztable_step.go`'s, the
+  native ones nativegen's `stepJ`, after `gen_entry`; a native handler
+  exits only before it commits the step, to `rsStep`
+  (`nativeSlowOnMiss`).
 - **`mul_imm`**: R[A] = R[B] * SC, mul's semantics with a Number SC.
 - **`add_i32`, `sub_i32`**: R[A] = ToInt32(R[B] ± R[C]), and
   **`add_imm_i32`**: R[A] = ToInt32(R[B] + SC), X `RAddII32Sub` where the

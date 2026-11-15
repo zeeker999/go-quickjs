@@ -735,6 +735,10 @@ const (
 // RStepAdd is the bit of a step-and-branch's X that says its step is a
 // += or -= of a number literal, as add_imm and sub_imm make it; without
 // it the step is an update, ++ or --, as inc and dec make it, of 1 or -1.
+// With it, k's sign says which: add_imm k where k is above 0, sub_imm -k
+// where it is below, which differ for what is not a number ("5" + 1 is
+// "51", "5" - 1 is 4), so that an add_imm of a negative literal and a
+// sub_imm of one are not fused.
 const RStepAdd = 0x80
 
 // RAddII32Sub is add_imm_i32's X where its source was a subtraction of
@@ -1341,6 +1345,9 @@ func (rc *RegCode) Format(pc int) string {
 // stepForm names a step-and-branch's kind of step, by its X.
 func stepForm(x uint8) string {
 	if x&RStepAdd != 0 {
+		if StepK(x) < 0 {
+			return "sub"
+		}
 		return "add"
 	}
 	return "update"

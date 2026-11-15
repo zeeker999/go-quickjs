@@ -1508,12 +1508,23 @@ func (l *regLowering) lower(pc int) {
 	case bytecode.RStepJLt, bytecode.RStepJLe, bytecode.RStepJLtI, bytecode.RStepJGtI, bytecode.RStepJGeI, bytecode.RStepJLeU:
 		// A step and its partner: lowered as the step alone, which falls
 		// to the partner at pc+1, lowered as the compare it is, so that
-		// the IR is the code's before the two were fused. Reserved: no
-		// lowering yet.
+		// the IR is the code's before the two were fused -- inc's or
+		// dec's update, add_imm's or sub_imm's binary, by X.
 		if !bytecode.StepPaired(rc.Code, pc) {
 			panic(fmt.Sprintf("jit: %v at %d without its partner", op, pc))
 		}
-		panic(fmt.Sprintf("jit: no register lowering for %v", op))
+		switch k := bytecode.StepK(w.X()); {
+		case w.X()&bytecode.RStepAdd == 0:
+			o := ir.Add
+			if k < 0 {
+				o = ir.Sub
+			}
+			l.emit(ir.Instruction{Op: ir.Update, Operator: o, Left: reg(a), Dest: int(a), Extra: -1}, false)
+		case k > 0:
+			binary(ir.Add, reg(a), number(float64(k)), false)
+		default:
+			binary(ir.Sub, reg(a), number(float64(-k)), false)
+		}
 	case bytecode.RAddI32, bytecode.RSubI32, bytecode.RAddII32:
 		// The operator and the ToInt32 of the | 0 whose stack instruction
 		// Aux[pc] is. Reserved: no lowering yet.
