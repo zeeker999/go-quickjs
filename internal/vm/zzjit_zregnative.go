@@ -351,9 +351,6 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 			e.hostOnly = true
 		}
 	}
-	if err == nil {
-		err = p.Validate()
-	}
 	if err != nil {
 		e.refusal = err.Error()
 		return e
@@ -383,6 +380,9 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 	defer jit.PutWorkspace(w)
 	s.compileBegin()
 	defer s.compileEnd()
+	if t := mir.Timing; t != nil {
+		t.Start()
+	}
 	f, err := ssa.BuildIn(&w.SSA, p, rf)
 	if err != nil {
 		e.refusal = fmt.Sprintf("%v: %v", jitRefused, err)
@@ -390,13 +390,17 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 	}
 	f.FrameAt = frameAt
 	looped := jitRegShape(f, p, cl, c)
+	jitRegLap(mir.PhaseBuild)
 	ssa.Optimize(f)
+	jitRegLap(mir.PhaseOptimize)
 	mc, err := mir.CompileWith(&w.MIR, f, jitEncoding, mir.Settings())
+	keepLimit := 0
 	if errors.Is(err, mir.ErrKeeps) {
 		// More keep cells live at once than the context has, which the
 		// build could not know: built again with no more than that, the
 		// calls past them left to Go, as the stack form's code is.
-		rf, f, looped, mc, err = r.jitRegBuild(w, cl, c, p, abi.MaxKeeps, frameAt)
+		keepLimit = abi.MaxKeeps
+		rf, f, looped, mc, err = r.jitRegBuild(w, cl, c, p, keepLimit, frameAt)
 	}
 	if err != nil {
 		e.refusal = fmt.Sprintf("%v: %v", jitRefused, err)
@@ -405,7 +409,57 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 	if !r.jitRegPlace(e, c, rf, f, mc, looped) {
 		return nil
 	}
+	if JITCompileRepeat > 0 {
+		r.jitRegCompileRepeat(cl, c, p, keepLimit, frameAt)
+	}
 	return e
+}
+
+// jitRegLap ends phase ph of a register compile the host times
+// (mir.Timing).
+func jitRegLap(ph mir.Phase) {
+	if t := mir.Timing; t != nil {
+		t.Lap(ph)
+	}
+}
+
+// jitRegCompileRepeat is JITCompileRepeat's compiles of c's register code
+// lowered as p, as jitCompileAgain repeats the stack form's: p built
+// again that many times with fresh feedback, as jitRegBuild builds it with
+// keepLimit, optimized and compiled -- for arm64 where JITCrossHook is set
+// -- all each made thrown away, and what they allocated counted in
+// mir.Timing.
+func (r *Runtime) jitRegCompileRepeat(cl *closure, c *regCode, p *ir.Program, keepLimit, frameAt int) {
+	c0 := jitGCCycles()
+	bytes0, objects0 := jitAllocated()
+	for range JITCompileRepeat {
+		w := jit.GetWorkspace()
+		if t := mir.Timing; t != nil {
+			t.Start()
+		}
+		rf := r.jitRegFeedbackFor(cl, p)
+		rf.fb.keepLimit = keepLimit
+		if f, err := ssa.BuildIn(&w.SSA, p, rf); err == nil {
+			f.FrameAt = frameAt
+			jitRegShape(f, p, cl, c)
+			jitRegLap(mir.PhaseBuild)
+			ssa.Optimize(f)
+			jitRegLap(mir.PhaseOptimize)
+			if JITCrossHook != nil {
+				code, err := mir.CompileARM64(f, jitEncoding)
+				JITCrossHook(jitFunctionOf(c.fn), code, err)
+			} else {
+				mir.CompileWith(&w.MIR, f, jitEncoding, mir.Settings())
+			}
+		}
+		jit.PutWorkspace(w)
+	}
+	jitRepeatCycles.Add(jitGCCycles() - c0)
+	if t := mir.Timing; t != nil {
+		bytes1, objects1 := jitAllocated()
+		t.Bytes += int64(bytes1 - bytes0)
+		t.Objects += int64(objects1 - objects0)
+	}
 }
 
 // jitRegFrameAt is the register pc of the loop's header a frame of cl's
@@ -457,6 +511,12 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 		// for want of it until the cache has let some code go
 		// (generation), as the stack form's compile is deferred.
 		e.life.deferred, e.life.generation = true, s.generation
+		// Nor its programs, which the compile asks for again: they would
+		// take the room it is remembered in, as the stack form's compile
+		// drops its lowering then.
+		if l := s.regLowered[e.key]; l != nil {
+			s.dropRegLowering(e.key, l)
+		}
 		return false
 	}
 	e.life.deferred = false
@@ -521,7 +581,7 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 	// What the code reads by address, its feedback's keep; the closure
 	// and the function the feedback asked are not.
 	e.keep = rf.fb.keep()
-	e.keep.cl, e.keep.fn, e.keep.prog = nil, nil, nil
+	e.keep.cl, e.keep.fn, e.keep.prog, e.keep.regSeen = nil, nil, nil, nil
 	if JITCodeHook != nil {
 		// -jitcode's record of the code, as the stack form's compiles
 		// make it (jitInstall).
@@ -592,6 +652,11 @@ func (s *jitState) regAge(now uint64) {
 			delete(s.regLearned, key)
 		}
 	}
+	for key, l := range s.regLowered {
+		if key.gone() {
+			s.dropRegLowering(key, l)
+		}
+	}
 	for key, l := range s.regLinks {
 		if key.gone() {
 			s.regUnhint(l)
@@ -601,9 +666,16 @@ func (s *jitState) regAge(now uint64) {
 }
 
 // regVictims appends to v what of the register code makeRoom may reclaim
-// at epoch now (listVictims): refusals, and code not used this epoch or the
-// one before (jitCodeAge), none in use.
+// at epoch now (listVictims): programs lowered for functions the cache has
+// no entry for, refusals, and code not used this epoch or the one before
+// (jitCodeAge), none in use, each with its function's programs, which go
+// with it (regReclaim), as listVictims lists the stack form's.
 func (s *jitState) regVictims(v []jitVictim, now uint64) []jitVictim {
+	for key, l := range s.regLowered {
+		if s.regCache[key] == nil {
+			v = append(v, jitVictim{key: key, l: l, reg: true, class: jitVictimLowering, used: l.used, bytes: l.bytes})
+		}
+	}
 	for key, e := range s.regCache {
 		if s.regInUse(e) {
 			continue
@@ -615,7 +687,11 @@ func (s *jitState) regVictims(v []jitVictim, now uint64) []jitVictim {
 			}
 			class = jitVictimCode
 		}
-		v = append(v, jitVictim{key: key, re: e, class: class, used: e.used, serial: uint64(e.serial), bytes: e.bytes})
+		n := e.bytes
+		if l := s.regLowered[key]; l != nil {
+			n += l.bytes
+		}
+		v = append(v, jitVictim{key: key, re: e, class: class, used: e.used, serial: uint64(e.serial), bytes: n})
 	}
 	return v
 }
@@ -628,6 +704,9 @@ func (s *jitState) regReclaim(x *jitVictim, now uint64) {
 		return
 	}
 	s.regLetGo(x.key, e)
+	if l := s.regLowered[x.key]; l != nil {
+		s.dropRegLowering(x.key, l)
+	}
 	s.evicted++
 }
 
@@ -646,6 +725,9 @@ func (s *jitState) regFlush(tick, now uint64) {
 			continue
 		}
 		s.regLetGo(key, e)
+		if l := s.regLowered[key]; l != nil {
+			s.dropRegLowering(key, l)
+		}
 		s.flushed++
 	}
 }

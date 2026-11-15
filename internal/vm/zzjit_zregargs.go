@@ -198,10 +198,10 @@ func (f *jitRegFeedback) forwardInline(pc int) (ssa.InlineSite, bool) {
 		}
 	}
 	p, err := r.jitRegLower(tc, tc.reg.rc, kind)
-	if err != nil || p.Validate() != nil {
+	if err != nil {
 		return ssa.InlineSite{}, false
 	}
-	r.jitRegSeenFeedback(tc, tc.reg)
+	r.jitRegSeenInlined(fb.keep(), tc)
 	k := fb.keep()
 	callee := &jitRegFeedback{fb: &jitFeedback{r: r, fn: tc.fn, cl: tc, e: r.jitState().regLearnedOf(r.jitRegKeyOf(tc)), root: k}, rc: tc.fn.RegCode(), p: p}
 	if forwards {

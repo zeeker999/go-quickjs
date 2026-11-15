@@ -166,41 +166,35 @@ func (s *jitState) regLinkUpdate(key jitKey, e *jitRegEntry) {
 // cache holds is learned too, so that a call of it Go makes, its code not
 // compiled yet, is not taken for news.
 func (f *jitRegFeedback) regCallSites(pc int, w bytecode.RInstr, argc int, method bool) []ssa.CallSite {
-	sites, _, _ := f.regCallTargets(pc, w, argc, method)
-	return sites
+	var t jitRegTargets
+	f.regCallTargets(&t, pc, w, argc, method)
+	if t.n == 0 {
+		return nil
+	}
+	return slices.Clone(t.sites[:t.n])
+}
+
+// jitRegTargets is regCallTargets' answer: up to jitCallTargets native
+// calls, each with its function object and closure, by index, where the
+// asker keeps it. Three lists grown a call at a time, and the closure that
+// grew them, had been a fifth of what a register build allocated.
+type jitRegTargets struct {
+	n     int
+	sites [jitCallTargets]ssa.CallSite
+	objs  [jitCallTargets]*Object
+	cls   [jitCallTargets]*closure
 }
 
 // regCallTargets is regCallSites with each site's function object and
-// closure, by index.
-func (f *jitRegFeedback) regCallTargets(pc int, w bytecode.RInstr, argc int, method bool) ([]ssa.CallSite, []*Object, []*closure) {
+// closure, in t.
+func (f *jitRegFeedback) regCallTargets(t *jitRegTargets, pc int, w bytecode.RInstr, argc int, method bool) {
 	l := f.fb.e
 	rpc := int32(f.p.Origin[pc])
 	newW := w.Op() == bytecode.RNewW
-	var sites []ssa.CallSite
-	var objs []*Object
-	var closures []*closure
-	add := func(o *Object, cl *closure, rc *regCode, pool *abi.ObjectPool, parent *Object, byCode, via bool) {
-		for i, s := range sites {
-			if s.ByCode != 0 && jitRegSameCode(s, cl) || s.Callee == uintptr(unsafe.Pointer(o)) && !byCode || (s.Via != 0) != via {
-				return
-			}
-			if byCode && jitRegSameClosureCode(closures[i], cl) {
-				// The same function's -- the same object, which the site's
-				// cache holds, among them -- checked by its code from here.
-				sites, objs, closures = slices.Delete(sites, i, i+1), slices.Delete(objs, i, i+1), slices.Delete(closures, i, i+1)
-				break
-			}
-		}
-		if len(sites) < jitCallTargets {
-			if site, ok := f.regCallSite(pc, o, cl, rc, argc, method, pool, parent, byCode, via); ok {
-				sites, objs, closures = append(sites, site), append(objs, o), append(closures, cl)
-			}
-		}
-	}
 	if calls := f.fb.cl.regCalls; !newW && w.Op() != bytecode.RApplyArgs && uint(w.C()) < uint(len(calls)) {
 		if e := &calls[w.C()]; jitRegCallKind(e) {
-			add(e.callee, e.cl, e.rc, nil, nil, false, false)
-			if len(sites) != 0 && l != nil && !jitRegCallKnown(l, rpc, e.callee) {
+			f.regAddTarget(t, pc, argc, method, e.callee, e.cl, e.rc, nil, nil, false, false)
+			if t.n != 0 && l != nil && !jitRegCallKnown(l, rpc, e.callee) {
 				l.nativeCalls = append(l.nativeCalls, jitInline{pc: rpc, cl: e.cl, obj: e.callee})
 			}
 		}
@@ -215,25 +209,54 @@ func (f *jitRegFeedback) regCallTargets(pc int, w bytecode.RInstr, argc int, met
 		// compile -- V8's Richards' TaskControlBlock.run, compiled for its
 		// native callers knowing one of its four tasks' run, left native
 		// code at most of its first run's calls.
-		for _, t := range f.fb.r.jitRegSeenCallees(f.fb.cl, f.rc, int(rpc), w) {
-			if t.cl.reg == nil {
+		for _, c := range f.fb.r.jitRegSeenCallees(f.fb.cl, f.rc, int(rpc), w) {
+			if c.cl.reg == nil {
 				continue
 			}
-			n := len(sites)
-			add(t.o, t.cl, t.cl.reg, nil, nil, false, false)
-			if len(sites) > n && !jitRegCallKnown(l, rpc, t.o) {
-				l.nativeCalls = append(l.nativeCalls, jitInline{pc: rpc, cl: t.cl, obj: t.o})
+			n := t.n
+			f.regAddTarget(t, pc, argc, method, c.o, c.cl, c.cl.reg, nil, nil, false, false)
+			if t.n > n && !jitRegCallKnown(l, rpc, c.o) {
+				l.nativeCalls = append(l.nativeCalls, jitInline{pc: rpc, cl: c.cl, obj: c.o})
 			}
 		}
 	}
 	if l != nil {
 		for _, x := range l.nativeCalls {
 			if x.pc == rpc && (x.pool != nil) == newW && !x.forEach && x.cl != nil && x.active == nil {
-				add(x.obj, x.cl, x.cl.reg, x.pool, x.parent, x.byCode && !x.via, x.via)
+				f.regAddTarget(t, pc, argc, method, x.obj, x.cl, x.cl.reg, x.pool, x.parent, x.byCode && !x.via, x.via)
 			}
 		}
 	}
-	return sites, objs, closures
+}
+
+// regAddTarget adds to t the native call of o, cl's, running rc, at the
+// program's instruction pc (regCallSite), unless t has it: the same object
+// called by its object, or the same function's code called by its code, or
+// one called through Function.prototype.call where the other is not (via).
+// A call by code takes the place of one of an object of the same function.
+func (f *jitRegFeedback) regAddTarget(t *jitRegTargets, pc, argc int, method bool, o *Object, cl *closure, rc *regCode, pool *abi.ObjectPool, parent *Object, byCode, via bool) {
+	for i := 0; i < t.n; i++ {
+		s := &t.sites[i]
+		if s.ByCode != 0 && jitRegSameCode(*s, cl) || s.Callee == uintptr(unsafe.Pointer(o)) && !byCode || (s.Via != 0) != via {
+			return
+		}
+		if byCode && jitRegSameClosureCode(t.cls[i], cl) {
+			// The same function's -- the same object, which the site's
+			// cache holds, among them -- checked by its code from here.
+			copy(t.sites[i:t.n], t.sites[i+1:t.n])
+			copy(t.objs[i:t.n], t.objs[i+1:t.n])
+			copy(t.cls[i:t.n], t.cls[i+1:t.n])
+			t.n--
+			t.sites[t.n], t.objs[t.n], t.cls[t.n] = ssa.CallSite{}, nil, nil
+			break
+		}
+	}
+	if t.n < jitCallTargets {
+		if site, ok := f.regCallSite(pc, o, cl, rc, argc, method, pool, parent, byCode, via); ok {
+			t.sites[t.n], t.objs[t.n], t.cls[t.n] = site, o, cl
+			t.n++
+		}
+	}
 }
 
 // jitRegSeenCallees are the functions the method call w at register pc rpc
@@ -1924,13 +1947,18 @@ func (f *jitRegFeedback) KeepLimit() int { return f.fb.keepLimit }
 func (r *Runtime) jitRegBuild(w *jit.Workspace, cl *closure, c *regCode, p *ir.Program, keepLimit, frameAt int) (*jitRegFeedback, *ssa.Func, map[uint32]bool, *mir.Code, error) {
 	rf := r.jitRegFeedbackFor(cl, p)
 	rf.fb.keepLimit = keepLimit
+	if t := mir.Timing; t != nil {
+		t.Start()
+	}
 	f, err := ssa.BuildIn(&w.SSA, p, rf)
 	if err != nil {
 		return rf, nil, nil, nil, err
 	}
 	f.FrameAt = frameAt
 	looped := jitRegShape(f, p, cl, c)
+	jitRegLap(mir.PhaseBuild)
 	ssa.Optimize(f)
+	jitRegLap(mir.PhaseOptimize)
 	mc, err := mir.CompileWith(&w.MIR, f, jitEncoding, mir.Settings())
 	return rf, f, looped, mc, err
 }

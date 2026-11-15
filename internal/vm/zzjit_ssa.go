@@ -1314,40 +1314,21 @@ func (r *Runtime) jitSeenSite(e *jitEntry, pc int, cache *propCache, write bool,
 	// What the site remembers besides its entry (poly), which every
 	// tier's reads and writes fill -- the tree's scans of an object's
 	// own table too, which note nothing in seen -- and what it met
-	// before that (seen). A chain's cell is no entry the code is
-	// compiled for (megamorphic).
-	var met []propCache
+	// before that (seen), in that order. A chain's cell is no entry the
+	// code is compiled for (megamorphic). Taken where they are: copied
+	// into a list of their own, they had been most of what a register
+	// compile's asks of its inlined callees allocated.
 	if seen != nil {
-		met = append(met, seen.entries[:seen.n]...)
+		for _, c := range seen.entries[:seen.n] {
+			jitSeenCase(e, pc, c, write, now)
+		}
 	}
 	if p := cache.poly; p != nil {
 		for _, c := range p.entries[:p.n] {
 			if c.cell == nil {
-				met = append(met, c)
+				jitSeenCase(e, pc, c, write, now)
 			}
 		}
-	}
-	for _, c := range met {
-		if c.shape == nil || c.shape == noShape || c.getter || c.idx < 0 || write && (c.next == setterNext || c.next == nil && c.p1 != nil) {
-			continue
-		}
-		i := slices.IndexFunc(e.poly, func(p jitPolySite) bool { return int(p.pc) == pc })
-		if i < 0 {
-			e.poly = append(e.poly, jitPolySite{pc: uint32(pc)})
-			i = len(e.poly) - 1
-		}
-		p := &e.poly[i]
-		if !write {
-			// What the site's objects were before they took the shape
-			// its cache remembers now (now) is a case while there is
-			// room.
-			jitAddReadCase(p, c, now)
-			continue
-		}
-		if len(p.cases)+len(p.adds) >= jitPropertyCases || slices.ContainsFunc(p.cases, func(k propCache) bool { return k.shape == c.shape }) {
-			continue
-		}
-		p.cases = append(p.cases, c)
 	}
 	if seen == nil {
 		return
@@ -1378,6 +1359,30 @@ func (r *Runtime) jitSeenSite(e *jitEntry, pc int, cache *propCache, write bool,
 			p.adds = append(p.adds, a)
 		}
 	}
+}
+
+// jitSeenCase is jitSeenSite's of c, a case the site at pc met, a write's
+// or a read's, whose cache holds now.
+func jitSeenCase(e *jitEntry, pc int, c propCache, write bool, now *shape) {
+	if c.shape == nil || c.shape == noShape || c.getter || c.idx < 0 || write && (c.next == setterNext || c.next == nil && c.p1 != nil) {
+		return
+	}
+	i := slices.IndexFunc(e.poly, func(p jitPolySite) bool { return int(p.pc) == pc })
+	if i < 0 {
+		e.poly = append(e.poly, jitPolySite{pc: uint32(pc)})
+		i = len(e.poly) - 1
+	}
+	p := &e.poly[i]
+	if !write {
+		// What the site's objects were before they took the shape its
+		// cache remembers now (now) is a case while there is room.
+		jitAddReadCase(p, c, now)
+		return
+	}
+	if len(p.cases)+len(p.adds) >= jitPropertyCases || slices.ContainsFunc(p.cases, func(k propCache) bool { return k.shape == c.shape }) {
+		return
+	}
+	p.cases = append(p.cases, c)
 }
 
 // jitLiteral is an object literal's site, at pc, that native code makes
@@ -2987,7 +2992,10 @@ type jitFeedback struct {
 	// Inlined); pools the object pools its constructions take from.
 	inlined  []*closure
 	inlinedN int
-	pools    []*abi.ObjectPool
+	// regSeen, the root's, are the register callees the compile asked to
+	// inline whose sites' caches it has taken (jitRegSeenInlined).
+	regSeen []*closure
+	pools   []*abi.ObjectPool
 	// made are the templates of the closures the code may not make, the
 	// loops' callbacks inlined where their callers make them (ForEachSite's
 	// Made), which an exit's frame names in their places (jitMaterialize);

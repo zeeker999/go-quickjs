@@ -335,7 +335,7 @@ func (b *builder) planCallback(pc int, fp *forEachPlan, total *int) bool {
 			}
 		}
 	}
-	calls, ok := InlineCalls(s.Program)
+	calls, ok := b.inlineCallsOf(s.Program)
 	if !ok || !inlineFits(*total, inlineSize(s.Program)) {
 		return false
 	}
@@ -3225,6 +3225,9 @@ func makesClosure(p *ir.Program) bool {
 }
 
 type builder struct {
+	// inlineAsked are InlineCalls' answers, each program's once a build
+	// (inlineCallsOf).
+	inlineAsked []inlineAnswer
 	// stepOn is the register a register loop's step writes, by the block
 	// where its loop goes on, which assigns it there (iterStep).
 	stepOn map[*Block]stepDef
@@ -4177,18 +4180,42 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 // nothing a closure could be.
 func (b *builder) inlineCalls(site InlineSite, accessor bool) (calls, given []int, ok bool) {
 	if !b.provisional && b.given == nil || accessor || site.Construct || site.Restart || site.Forward || site.Arguments || site.Captured != nil {
-		calls, ok = InlineCalls(site.Program)
+		calls, ok = b.inlineCallsOf(site.Program)
 		return calls, nil, ok
 	}
 	cf, isCF := site.Feedback.(CalledClosureFeedback)
 	if !isCF {
-		calls, ok = InlineCalls(site.Program)
+		calls, ok = b.inlineCallsOf(site.Program)
 		return calls, nil, ok
 	}
 	return InlineCallsGiven(site.Program, func(pc int) (int, bool) {
 		argc, method, ok := cf.CallShape(pc)
 		return argc, ok && !method
 	})
+}
+
+// inlineAnswer is InlineCalls' answer for p.
+type inlineAnswer struct {
+	p     *ir.Program
+	calls []int
+	ok    bool
+}
+
+// inlineCallsOf is InlineCalls(p), asked once a build for each program,
+// which never changes while it builds: a callee is asked at each of its
+// calls, and each call twice (plan, inlineSiteAt), and each answer checked
+// the whole program (ir.Program's Validate) -- a sixth of the time a
+// register build took to plan its inlining. The callers only read the
+// calls.
+func (b *builder) inlineCallsOf(p *ir.Program) ([]int, bool) {
+	for i := range b.inlineAsked {
+		if a := &b.inlineAsked[i]; a.p == p {
+			return a.calls, a.ok
+		}
+	}
+	calls, ok := InlineCalls(p)
+	b.inlineAsked = append(b.inlineAsked, inlineAnswer{p: p, calls: calls, ok: ok})
+	return calls, ok
 }
 
 // cellsBack has the cells a native call's frame takes at its entries go

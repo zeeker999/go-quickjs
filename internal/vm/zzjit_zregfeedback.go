@@ -309,10 +309,10 @@ func (f *jitRegFeedback) accessorInline(callee *Object, cl *closure, write bool)
 		return ssa.InlineSite{}, false
 	}
 	p, err := f.fb.r.jitRegLower(cl, cl.reg.rc, jitLowerInline)
-	if err != nil || p.Validate() != nil {
+	if err != nil {
 		return ssa.InlineSite{}, false
 	}
-	r.jitRegSeenFeedback(cl, cl.reg)
+	r.jitRegSeenInlined(f.fb.keep(), cl)
 	k := f.fb.keep()
 	cell := new(Value)
 	*cell = Obj(callee)
@@ -492,13 +492,13 @@ func (f *jitRegFeedback) madeInline(t *closure) (ssa.InlineSite, bool) {
 		return ssa.InlineSite{}, false
 	}
 	p, err := r.jitRegLower(t, rc, jitLowerInline)
-	if err != nil || p.Validate() != nil {
+	if err != nil {
 		return ssa.InlineSite{}, false
 	}
 	if t.reg != nil && t.reg.rc == rc {
 		// What its sites' caches have seen besides their entries, as an
 		// inlined callee's (Inline).
-		r.jitRegSeenFeedback(t, t.reg)
+		r.jitRegSeenInlined(fb.keep(), t)
 	}
 	k := fb.keep()
 	in := ssa.InlineSite{
@@ -714,13 +714,14 @@ func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 		return ssa.InlineSite{}, false
 	}
 	argc := int(w.X())
-	sites, objs, cls := f.regCallTargets(pc, w, argc, method)
-	if len(sites) != 1 || sites[0].ByCode != 0 || sites[0].ArrowThis || sites[0].Via != 0 {
+	var t jitRegTargets
+	f.regCallTargets(&t, pc, w, argc, method)
+	if t.n != 1 || t.sites[0].ByCode != 0 || t.sites[0].ArrowThis || t.sites[0].Via != 0 {
 		// One through Function.prototype.call, G.call(x, ...), is called
 		// natively, never inlined, as the stack form's (jitCalledVia).
 		return ssa.InlineSite{}, false
 	}
-	site, o, cl := sites[0], objs[0], cls[0]
+	site, o, cl := t.sites[0], t.objs[0], t.cls[0]
 	if cl.fn == f.fb.fn || cl.fn == f.fb.keep().fn || jitNoInline != nil && jitNoInline(cl.fn) {
 		return ssa.InlineSite{}, false
 	}
@@ -745,13 +746,13 @@ func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 		}
 	}
 	p, err := f.fb.r.jitRegLower(cl, cl.reg.rc, kind)
-	if err != nil || p.Validate() != nil {
+	if err != nil {
 		return ssa.InlineSite{}, false
 	}
 	r := f.fb.r
 	// What its sites' caches have seen besides their entries, as its own
 	// compiles take it (jitRegSeenFeedback).
-	r.jitRegSeenFeedback(cl, cl.reg)
+	r.jitRegSeenInlined(f.fb.keep(), cl)
 	k := f.fb.keep()
 	callee := &jitRegFeedback{fb: &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitRegKeyOf(cl)), root: k}, rc: cl.fn.RegCode(), p: p}
 	in := ssa.InlineSite{

@@ -549,6 +549,20 @@ func (r *Runtime) jitRegSeenFeedback(cl *closure, c *regCode) {
 	}
 }
 
+// jitRegSeenInlined is jitRegSeenFeedback for cl, a callee a compile asks
+// to inline, k the compile's root feedback: once a compile, as no script
+// runs while it builds, which asks an inlined callee's sites at each of
+// its calls and at each of its asks of a call (ssa's plan, inlineSiteAt).
+// Asked again at each, the scans of its code had been a ninth of a
+// register build's time.
+func (r *Runtime) jitRegSeenInlined(k *jitFeedback, cl *closure) {
+	if slices.Contains(k.regSeen, cl) {
+		return
+	}
+	k.regSeen = append(k.regSeen, cl)
+	r.jitRegSeenFeedback(cl, cl.reg)
+}
+
 // jitRegDeoptSeen learns from a deoptimization of e, code made from c, at
 // register pc rpc, the frame's window at wb holding the state at its
 // instruction's start, before the interpreter runs it: a property site's
