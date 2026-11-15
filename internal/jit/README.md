@@ -604,7 +604,20 @@ compiles -- what its code learned, its budget, its deoptimizations, what its
 runs did -- is its `regLearned` entry (`jitRegEntry`'s `life`); its code is
 kept on its template's `closureCode` (`jitReg`). A callee native callers
 call that has no code is compiled at their first call of it through Go
-(`jitRegNativeCallee`): they make no sample of it.
+(`jitRegNativeCallee`): they make no sample of it. But one too long to
+inline (`ssa.MaxInline`, counted in the stack form's instructions,
+`jitRegInlineSize`) that is warming up, its budget begun and not spent or
+not begun (`jitRegLongWarming`), is compiled once its budget is spent, as
+any function -- the interpreter's runs of it that Go makes for its native
+callers count it down -- unless its caller calls it often: no longer than
+a function inlines in all (`ssa.MaxInlineTotal`) and invoked at least 15
+hundredths as often as the caller, V8's `min_inlining_frequency`, each
+counted by its runs while it had no code (`jitRegInvoked`, the budget's
+ticks) and the caller's since by its entries at its start, its link's
+calls and Go's calls of it (`jitRegCalledOften`), as the stack form's
+`jitNativeCallee` decides it (`jitLongWarming`, `jitCalledOften`).
+Mandreel's set-up, run once an iteration, had been compiled at every
+iteration after the first.
 
 **Compiling in the background.** A runtime made `WithJITBackground`, or
 `QJS_JIT_STRESS`'s `background=K`, compiles register code as the stack
