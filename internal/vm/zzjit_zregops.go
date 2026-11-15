@@ -458,27 +458,54 @@ func (f *jitRegFeedback) regWholeSite(pc int, w bytecode.RInstr) []ssa.CallSite 
 }
 
 // jitRegReadSeen learns, after Go made a property's read native code did
-// not find -- a megamorphic site's miss, a receiver no case of the site's
-// is of -- at register pc rpc of run's code, of receiver recv, what the read
-// met, as the stack form's code learns it at its calls of Go
-// (jitPropertySeen, jitPolySeen): the megamorphic cache filled for the
-// receiver's shape, a case its cache cannot hold (a typed array's method,
-// found past the two prototypes its cache holds, or on objects no cache
-// holds), which the code compiled again reads natively, stale from here.
-// Its receiver is the call's operand: the frame's register need not hold
-// it, native code keeping values in the frame's registers as it found them.
+// not find -- a megamorphic site's miss, an accessor's read Go makes -- at
+// register pc rpc of run's code, of receiver recv, what the read met, as
+// the stack form's code learns it at its calls of Go (jitPropertySeen): at
+// a site that is megamorphic (jitRegSiteMegamorphic), as at an exit
+// (jitPolySeenOp): the megamorphic cache filled for the receiver's shape,
+// a case its cache cannot hold (a typed array's method, found past the two
+// prototypes its cache holds, or on objects no cache holds), which the code
+// compiled again reads natively, stale from here; at any other, a plain
+// read's megamorphic cache filled for the receiver, which the next such
+// read finds natively, and nothing else: a read of a getter's that Go
+// calls at each turn had learned the whole site's cases there, a map
+// lookup and a cache filled at every read. Its receiver is the call's
+// operand: the frame's register need not hold it, native code keeping
+// values in the frame's registers as it found them.
 func (r *Runtime) jitRegReadSeen(f *frame, c *regCode, run jitRegRun, rpc int, recv Value) {
 	op, ok := r.jitRegPropOp(f, c, run.wb, rpc)
 	if !ok || op.write || run.e == nil || run.e.invalid {
 		return
 	}
 	op.recv = recv
-	l := r.jit.regLearnedOf(r.jitRegKeyOf(f.cl))
+	l := r.jitRegLearnedFor(f, run.e)
+	if !r.jitRegSiteMegamorphic(f.cl, c, l, rpc) {
+		if op.plain() && recv.IsObject() {
+			r.jit.megaFill(recv.Object(), op.key)
+		}
+		return
+	}
 	r.jitPolySeenOp(l, rpc, op)
 	if l.polyReopt {
 		l.polyReopt = false
 		r.jitRegReopt(f.cl, run.e)
 	}
+}
+
+// jitRegSiteMegamorphic reports whether the property site of the register
+// instruction at rpc of c, cl's code, l what it learned, is megamorphic as
+// the stack form's learning asks it (jitSiteMegamorphic): its cache gave
+// up, or the code met more than its cases hold.
+func (r *Runtime) jitRegSiteMegamorphic(cl *closure, c *regCode, l *jitEntry, rpc int) bool {
+	if site := int(c.rc.Code[rpc].C()); site < len(cl.ic) && cl.ic[site].fills >= maxCacheFills {
+		return true
+	}
+	for i := range l.poly {
+		if p := &l.poly[i]; int(p.pc) == rpc && p.mega {
+			return true
+		}
+	}
+	return false
 }
 
 // PureBody is ssa.PureBodyFeedback's: the function is a pure body
