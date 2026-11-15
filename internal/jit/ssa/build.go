@@ -336,7 +336,7 @@ func (b *builder) planCallback(pc int, fp *forEachPlan, total *int) bool {
 		}
 	}
 	calls, ok := InlineCalls(s.Program)
-	if !ok || !inlineFits(*total, len(s.Program.Code)) {
+	if !ok || !inlineFits(*total, inlineSize(s.Program)) {
 		return false
 	}
 	nslots, before, keeps, inlined := b.nslots, *total, b.f.Keeps, len(b.f.Inlined)
@@ -2623,6 +2623,24 @@ const (
 	maxInlineDepth    = 3
 )
 
+// inlineSize is p's size in the instructions inlining's bounds count,
+// the stack form's, in which they were measured against V8's bytecode
+// above. Register code's program does more in each instruction -- an
+// operation's operands are registers, not the copies to and from the
+// stack the stack form's are -- and has 0.85 of the stack form's
+// instructions, the median of Are We Fast Yet's 284 functions whose names
+// are unique, lowered both ways (LowerRegInline, LowerSSAInline): V8's
+// 2.6 bytes to a stack-form instruction are 3.1 to a register one. So each
+// of its instructions counts 20/17 of one, rounded, and a callee, a
+// function's budget and a small or looping callee take the same code in
+// either form.
+func inlineSize(p *ir.Program) int {
+	if p.Origin != nil {
+		return (len(p.Code)*20 + 8) / 17
+	}
+	return len(p.Code)
+}
+
 // inlineFits reports whether a callee of n instructions may be inlined
 // where a function has inlined total already: within the function's
 // budget, or, if n is small (maxInlineSmall), within the absolute bound.
@@ -2667,7 +2685,7 @@ const maxInlineLoop = 24
 // inlined, at each turn; one outside the loop is refused too, the rule
 // kept to what was measured.
 func smallLoop(p *ir.Program, n int) bool {
-	return n == 0 && len(p.Code) <= maxInlineLoop
+	return n == 0 && inlineSize(p) <= maxInlineLoop
 }
 
 // InlineCalls reports whether a callee may be inlined if the operations it
@@ -2675,7 +2693,7 @@ func smallLoop(p *ir.Program, n int) bool {
 // Inlinable but for those. A callee with a loop is taken only if it is
 // small and leaves nothing to Go (smallLoop).
 func InlineCalls(p *ir.Program) ([]int, bool) {
-	if p == nil || p.Validate() != nil || len(p.Code) > maxInline || len(p.Globals) != 0 || p.Captured != nil || p.DerivedConstructor || len(p.Handlers) != 0 || p.Forwards {
+	if p == nil || p.Validate() != nil || inlineSize(p) > maxInline || len(p.Globals) != 0 || p.Captured != nil || p.DerivedConstructor || len(p.Handlers) != 0 || p.Forwards {
 		// A callee whose locals closures capture: an inlined frame's
 		// slots have no cells, and Go makes no closure on one. A derived
 		// constructor's super() is Go's, on a frame of its own. A callee
@@ -2727,7 +2745,7 @@ func InlineCalls(p *ir.Program) ([]int, bool) {
 // but for one InlineCalls takes, small and leaving nothing to Go
 // (smallLoop).
 func InlineCallsGiven(p *ir.Program, argc func(pc int) (int, bool)) (calls, given []int, ok bool) {
-	if p == nil || p.Validate() != nil || len(p.Code) > maxInline || len(p.Globals) != 0 || p.Captured != nil || p.DerivedConstructor || len(p.Handlers) != 0 {
+	if p == nil || p.Validate() != nil || inlineSize(p) > maxInline || len(p.Globals) != 0 || p.Captured != nil || p.DerivedConstructor || len(p.Handlers) != 0 {
 		return nil, nil, false
 	}
 	// Each loop, by its back edge: from its header to the branch.
@@ -3667,7 +3685,11 @@ func (b *builder) rootState() *FrameState {
 // guards share, not one of its own: a state names every live slot, and a
 // function of many captured locals made one at each assignment.
 func (b *builder) storeCaptured(blk *Block, slot int, v *Value) {
-	st := b.rootState()
+	b.storeCapturedAt(blk, slot, v, b.rootState())
+}
+
+// storeCapturedAt is storeCaptured exiting, if it must, to st.
+func (b *builder) storeCapturedAt(blk *Block, slot int, v *Value, st *FrameState) {
 	w := b.f.newValue(blk, OpPropWrite, None, b.cellOf(blk, slot), v)
 	w.Aux, w.State = int(ir.HostExit), st
 	st.addUse()
@@ -4048,7 +4070,7 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 	if ok {
 		calls, givenCalls, ok = b.inlineCalls(site, isAccessor)
 	}
-	if !ok || !inlineFits(*total, len(site.Program.Code)) ||
+	if !ok || !inlineFits(*total, inlineSize(site.Program)) ||
 		site.Argc < 0 || site.Params < 0 || pc+1 >= len(b.p.Code) || !reachable(b.p, pc+1) {
 		return nil, false
 	}
@@ -4064,11 +4086,6 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 		result := b.cur.base + b.p.Code[pc].Dest
 		if accessor.Setter {
 			result = -1
-		} else if b.p.IsCaptured(b.p.Code[pc].Dest) {
-			// A result to a register a closure captures, which its cell
-			// holds: the inlined frame's return writes the slot, not the
-			// cell, which a call's own result stores (assign).
-			return nil, false
 		}
 		return b.inlineFrame(site, calls, givenCalls, total, result, pc)
 	}
@@ -4078,13 +4095,12 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 		// plain call, a method's or a construction -- its result the
 		// call's register.
 		if !in.Window || !site.Window || isAccessor || site.Restart || site.ThisSlot >= 0 || site.Params < 2 ||
-			site.LexThis && (site.Construct || site.Method || site.Forward || site.LexThisSlot < 0) || b.p.IsCaptured(in.Dest) {
-			// Nor one whose result is to a register a closure captures,
-			// which its cell holds: the inlined frame's return writes the
-			// slot, not the cell, which a call's own result stores
-			// (assign). A closure the root makes (calledSite), what it
-			// captured the root's own slots (Captured), is called plainly,
-			// an arrow's this the root's (LexThis).
+			site.LexThis && (site.Construct || site.Method || site.Forward || site.LexThisSlot < 0) {
+			// A closure the root makes (calledSite), what it captured the
+			// root's own slots (Captured), is called plainly, an arrow's
+			// this the root's (LexThis). One whose result is to a register
+			// a closure captures has its return store it in its cell too
+			// (storeCapturedAt).
 			return nil, false
 		}
 		if site.Forward {
@@ -4465,7 +4481,7 @@ func (b *builder) inlineFrame(site InlineSite, calls, given []int, total *int, r
 		return nil, false
 	}
 	nslots, before, keeps := b.nslots, *total, b.f.Keeps
-	*total += len(site.Program.Code)
+	*total += inlineSize(site.Program)
 	fr := b.f.newFrame()
 	*fr = frame{p: q, fb: site.Feedback, site: site, result: result, base: b.nslots,
 		parent: b.cur, depth: b.cur.depth + 1, nest: b.cur.nest + 1, keep: -1, at: at, givenPC0: -1}
@@ -7772,6 +7788,13 @@ func (b *builder) instruction(blk *Block, pc int) {
 			}
 			if b.cur.result >= 0 {
 				b.assign(b.cur.result, blk, v)
+				if b.cur.parent == b.root && b.root.p.IsCaptured(b.cur.result) {
+					// Register code's call whose result is a register a
+					// closure captures, which its cell holds: stored there
+					// too, as a call's own result is (assign), its exit the
+					// call's state -- no cell's write leaves native code.
+					b.storeCapturedAt(blk, b.cur.result, v, b.cur.call)
+				}
 			}
 			break
 		}

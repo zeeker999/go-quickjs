@@ -1180,7 +1180,8 @@ type Func struct {
 	Inlined []uintptr
 	// InlinedCode is how many instructions the callees the code inlines
 	// have, at every depth, the loops' callbacks among them: what
-	// inlining's budget (maxInlineTotal) is spent in.
+	// inlining's budget (maxInlineTotal) is spent in, counted in the
+	// stack form's instructions, register code's converted (inlineSize).
 	InlinedCode int
 	// HostsLeft are the PCs of the function's own host operations (ir.Host)
 	// the code leaves to Go -- at an exit, or a call Go makes from native

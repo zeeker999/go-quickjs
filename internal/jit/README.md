@@ -2139,7 +2139,9 @@ natively, a generic call finds it by its hint (`regHint`).
 ## Inlining
 
 **What is offered.** A plain call, a method's or a construction of a base
-constructor (`call_w`, `call_method_w`, `new_w`) of one function -- the one
+constructor (`call_w`, `call_method_w`, `new_w`), or a call in tail position
+(`tail_call_w`, `tail_call_method_w`), offered as the ordinary call, as the
+stack form's (`jitRegCallOp`), of one function -- the one
 its site's cache holds and its code learned it calls, no other, not checked
 by its code -- that runs register code native callers may call, not the
 caller itself, nor an arrow, is offered with its register code lowered for
@@ -2158,7 +2160,12 @@ calls](#allocation-and-escape-analysis)).
 alone, as V8's JSInliningHeuristic bounds it, never by a count of calls: a
 callee's instructions, a budget of all a function inlines, which the calls
 made most often get first, and past it only small callees (`ssa`'s
-`maxInlineTotal`, `maxInlineSmall`), as deep as `maxInlineDepth`. How often
+`maxInlineTotal`, `maxInlineSmall`), as deep as `maxInlineDepth`. The
+bounds are the stack form's instructions, measured against V8's bytecode;
+register code's lowering has 0.85 of them for the same function, the median
+of Are We Fast Yet's functions of unique names, so a register instruction
+counts 20/17 of one (`ssa`'s `inlineSize`), and a register callee takes the
+budget the same code takes in the stack form. How often
 is V8's call frequency where the feedback knows it (`Frequency`): a call
 made less often than `ssa.MinInliningFrequency` (0.15, V8's
 `min_inlining_frequency`) for each invocation of the function compiled is
@@ -2209,7 +2216,12 @@ checked to be the callee, in register 0, a method call's receiver -- an
 object where the callee would coerce it -- or a plain call's undefined or
 global object (`ThisCell`) in 1, the arguments from 2, undefined in the
 rest; its captured bindings read in their cells (`Upvalues`); its result to
-the call's register. An inlined accessor's window is its function, from a
+the call's register -- and, where that is a register a closure captures,
+to its cell too, as a call's own result is stored (`storeCapturedAt`). A
+call in tail position is inlined behind its depth check, the root's
+`ssa.OpTailSelf` or `OpTailRoom`: shallow in the stack the callee runs
+inlined; deeper, where the interpreter gives the frame up to the callee,
+native code leaves for it to. An inlined accessor's window is its function, from a
 cell (`InlineSite`'s `FunctionCell`), the receiver and a setter's value, a
 getter's result the read's register. A construction's receiver is taken from
 the pool of the objects its code learned it makes, kept in a cell, in
