@@ -1,5 +1,14 @@
 # Benchmarks
 
+Every figure on this page was measured at the revision its section names,
+all of them before the register interpreter (docs/register-interpreter.md)
+became the default on amd64 and arm64. Their interpreter columns are the
+stack interpreter's and the tree tier's, which still run on other
+architectures and in runtimes with the JIT; the register interpreter's
+figures replace them when the page is next measured. The explanations of
+where time goes in the interpreter, under [Compared with C
+QuickJS](#compared-with-c-quickjs), describe those tiers too.
+
 On an Apple M5 Max with Go 1.27.3 and the native JIT disabled, taking
 per-metric medians of five fresh-process runs at go-quickjs `3fd70f67` on
 2026-10-31, with 30 seconds between runs and AC power throughout:
@@ -239,9 +248,12 @@ average, 0.81 times QuickJS's time, and 0.30 times with the JIT, as
 [the micro-benchmarks](#micro-benchmarks) below show, though a few still
 take about twice as long.
 
-go-quickjs has the same design as QuickJS: a bytecode compiler, a
-stack-based interpreter, NaN-boxed values. Running that design in Go costs
-speed. The JIT, which is experimental and optional, compiles hot functions
+At `acffb1aa`, the revision measured here, go-quickjs had the same design
+as QuickJS: a bytecode compiler, a stack-based interpreter, NaN-boxed
+values. Running that design in Go cost speed, which is what the register
+interpreter that has since replaced it on amd64 and arm64 was built to
+remove (docs/register-interpreter.md, "Why a register machine"); the
+analysis below is of the stack design. The JIT, which is experimental and optional, compiles hot functions
 to native code (see its [design notes](../internal/jit/README.md)). The
 same suite ran on an AMD Ryzen 5 3600 under Windows, with Go 1.27.3,
 go-quickjs `acffb1aa` and QuickJS 2026-06-04. Two runs
