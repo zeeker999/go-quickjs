@@ -1990,15 +1990,12 @@ of Go there rather than have Go finish their levels at each call.
 ## Inlining
 
 **What is offered.** A plain call, a method's or a construction of a base
-constructor (`call_w`, `call_method_w`, `new_w`), or a call in tail position
-(`tail_call_w`, `tail_call_method_w`), inlined as the ordinary call it is
-while the stack is shallow, as the stack form's `tail_call` is (its depth
-check `ssa.OpTailRoom`, or `OpTailSelf` in a frame of its own given up), of
-one function -- the one its site's cache holds and its code learned it
-calls, no other, not checked by its code -- that runs register code native
-callers may call, not the caller itself, nor an arrow, is offered with its
-register code lowered for an inlined frame (`LowerRegInline`,
-`jitRegFeedback`'s `Inline`, `ssa.InlineSite`'s `Window`), asked by its own register feedback, what its
+constructor (`call_w`, `call_method_w`, `new_w`) of one function -- the one
+its site's cache holds and its code learned it calls, no other, not checked
+by its code -- that runs register code native callers may call, not the
+caller itself, nor an arrow, is offered with its register code lowered for
+an inlined frame (`LowerRegInline`, `jitRegFeedback`'s `Inline`,
+`ssa.InlineSite`'s `Window`), asked by its own register feedback, what its
 sites' caches have seen added first (`jitRegSeenFeedback`), the root's keep
 holding what its sites name. A getter or setter a register read or write
 calls (`jitRegFeedback`'s `Accessor`, `accessorOf`) is offered the same way

@@ -114,9 +114,7 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 		}
 		called := Undefined
 		switch w := regAt(caller.code, cpc); w.Op() {
-		case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW, bytecode.RCallWT, bytecode.RCallMWT:
-			// A call in tail position inlined as the ordinary call it is
-			// while the stack is shallow (Inline) too.
+		case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW:
 			called = r.stack[cwb+int(w.A())]
 		case bytecode.RApplyArgs:
 			// f of f.apply(x, arguments), inlined with the arguments
