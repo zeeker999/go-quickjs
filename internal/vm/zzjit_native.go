@@ -2658,21 +2658,41 @@ func (r *Runtime) jitBudget() int {
 }
 
 // jitCompiles reports whether a compile of fn could fit the budget at all:
-// the compiler's transient work -- analysis tables over every slot for each
-// instruction, and the code it emits -- must (jitCompileBytes). It costs a
-// few comparisons and never measures the heap, so a refusal can be cheaply
-// repeated. It is what bounds how large a function is compiled: 4,080
-// instructions of up to 256 slots at the default budget, 16,368 at 32 MiB,
-// and fewer of more.
+// whether what the compile's entry and its lowering will hold -- the code,
+// its entries' and exits' descriptions, the program lowered -- fits it
+// (jitCompileBytes), as the budget bounds what the JIT holds, not a
+// compile's working memory (jitBudget), which is linear in the function's
+// size as what it holds is. It costs a few comparisons and never measures
+// the heap, so a refusal can be cheaply repeated; the compile's code is
+// measured as it is placed (jitRegPlace, makeRoom). It is what bounds how
+// large a function is compiled: some 16,000 instructions at the default
+// budget, 65,000 at 32 MiB, whatever its slots.
 func jitCompiles(fn *bytecode.Function, budget int) bool {
 	return jitCompileBytes(fn) <= int64(budget)
 }
 
-// jitCompileBytes is what a compile of fn may need: a word for each slot
-// at each instruction, its slots counted as no fewer than 256 -- what every
-// function's were, before the lowering took functions of more -- and 32 KiB.
+// What a compile's entry and lowering hold, about, for each instruction of
+// the function and each of its slots (jitCompileBytes): of the functions
+// of the V8 suite, Octane and AWFY, compiled from their register code, an
+// instruction's share of the code, the descriptions and the program is 260
+// bytes at the median, 421 at the 99th percentile and 638 at most, of a
+// function of fifty; pdfjs's wrapper of 107,000 instructions and 17,897
+// slots, 538.
+const (
+	jitCompileInstrBytes = 512
+	jitCompileSlotBytes  = 64
+)
+
+// jitCompileBytes is what a compile of fn will hold, about: its
+// instructions' and slots' shares (jitCompileInstrBytes,
+// jitCompileSlotBytes) and 32 KiB. It had been a word for each slot at
+// each instruction, of no fewer than 256 slots -- the dense tables of
+// slots by instructions that the frame states, the liveness and the
+// builder's definitions had been, linear now -- which refused a function
+// of 4,080 instructions at the default budget, and of 1,000 slots one of
+// 1,000.
 func jitCompileBytes(fn *bytecode.Function) int64 {
-	return int64(len(fn.Code))*int64(max(fn.LocalCount+fn.MaxStack+len(fn.Upvalues), 256))*8 + 32<<10
+	return int64(len(fn.Code))*jitCompileInstrBytes + int64(fn.LocalCount+fn.MaxStack+len(fn.Upvalues))*jitCompileSlotBytes + 32<<10
 }
 
 // jitState is the runtime's JIT state, made at its first use.

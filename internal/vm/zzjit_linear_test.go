@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
@@ -212,6 +213,64 @@ func TestJITCompileLinear(t *testing.T) {
 				if c.big > 16*c.small {
 					t.Errorf("%s: eight times the values took %.1f times the memory", c.what, float64(c.big)/float64(c.small))
 				}
+			}
+		})
+	}
+}
+
+// A function is compiled at the default budget whatever its size, up to
+// what its code and its program hold: the estimate of what a compile will
+// hold (jitCompileBytes) is linear in the function's instructions and
+// slots, and no less than what the compile of each shape below holds,
+// nor more than eight times it. It had been a word for each slot at each
+// instruction, of 256 slots at least, and refused these at the default
+// budget: 3,000 locals of a few instructions each, and a loop of 1,000
+// values in blocks of their own, some 10,000 instructions. Each answer is
+// the interpreter's.
+func TestJITCompileEstimateLinear(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	shapes := []struct {
+		name, src string
+		args      func(r *Runtime) []Value
+	}{
+		{"many3000", manySlotsHelpers + manySlotsSource("many3000", 3000), func(*Runtime) []Value { return []Value{Float(1), Float(1)} }},
+		{"blocks1000", linearBlocksSource("blocks1000", 1000), func(*Runtime) []Value { return []Value{Float(3), Float(2)} }},
+	}
+	old := func(fn *bytecode.Function) int64 {
+		return int64(len(fn.Code))*int64(max(fn.LocalCount+fn.MaxStack+len(fn.Upvalues), 256))*8 + 32<<10
+	}
+	for _, sh := range shapes {
+		t.Run(sh.name, func(t *testing.T) {
+			rts := regNativeRuntimes(t, sh.src)
+			r := rts[0]
+			if r.jitMemoryLimit != 0 || r.meter != nil || r.jitBudget() != jitCacheBytes {
+				t.Fatalf("not the default budget: %d", r.jitBudget())
+			}
+			fn, _ := r.GetProp(Obj(r.Global()), r.Intern(sh.name))
+			cl := fn.Object().fn().closure
+			est := jitCompileBytes(cl.fn)
+			if o := old(cl.fn); o <= int64(jitCacheBytes) {
+				t.Fatalf("%d instructions of %d slots: the old estimate, %d, compiled it already", len(cl.fn.Code), cl.fn.LocalCount, o)
+			}
+			res := r.RegNativeCall(fn, sh.args(r), false)
+			f1, _ := rts[1].GetProp(Obj(rts[1].Global()), rts[1].Intern(sh.name))
+			v, err := rts[1].Call(f1, Undefined, sh.args(rts[1]))
+			if got, want := regNativeShow(r, res.Value, res.Err), regNativeShow(rts[1], v, err); res.Skipped != "" || got != want {
+				t.Fatalf("natively %q (%s), called %q", got, res.Skipped, want)
+			}
+			e := r.jit.regCache[r.jitRegKeyOf(cl)]
+			if e == nil || e.code == nil {
+				t.Fatal("not compiled")
+			}
+			held := int64(e.bytes)
+			if l := r.jit.regLowered[e.key]; l != nil {
+				held += int64(l.bytes)
+			}
+			t.Logf("%d instructions, %d slots: estimate %d KB, held %d KB; the old estimate %d KB", len(cl.fn.Code), cl.fn.LocalCount+cl.fn.MaxStack, est>>10, held>>10, old(cl.fn)>>10)
+			if est < held || est > 8*held {
+				t.Errorf("estimate %d bytes for a compile that holds %d", est, held)
 			}
 		})
 	}

@@ -3250,11 +3250,22 @@ has held at once, its free slots reused.
   cache releases code.
 - Temporary (no budget at all): retried after another warm-up.
 
-What a compile costs, the VM weighs before it asks for one
-(`jitCompileBytes`: a word a slot an instruction, its slots counted as at
-least 256). A compile asks for room for what its entry is likely to hold
-(bytes per bytecode instruction, from the last compiles), then, compiled,
-for exactly what its entry will hold. Top-level code's refusals are not kept
+What a compile will hold, the VM weighs before it asks for one
+(`jitCompileBytes`): 512 bytes an instruction and 64 a slot, of what the
+code, its descriptions and its program take -- 260 bytes an instruction at
+the median of the V8 suite's, Octane's and AWFY's functions, 421 at the
+99th percentile -- and a function whose estimate is past the budget is
+refused. The budget bounds what the JIT holds, not a compile's working
+memory, which is linear in the function's size as what it holds is
+(`TestJITCompileLinear`): some 16,000 instructions are compiled at the
+default budget, 65,000 at 32 MiB, whatever their slots. The estimate had
+been a word a slot an instruction, its slots counted as at least 256 --
+the dense tables the frame states, the liveness and the builder's
+definitions had been -- which refused a function of 4,080 instructions at
+the default budget, and one of 1,000 slots past 1,000. A compile asks for
+room for what its entry is likely to hold (bytes per bytecode instruction,
+from the last compiles, the register code's as the stack form's), before
+it lowers anything, then, compiled, for exactly what its entry will hold. Top-level code's refusals are not kept
 in the cache, which a loop evaluating thousands of scripts would fill.
 
 ### What only it compiles
