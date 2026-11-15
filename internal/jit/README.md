@@ -155,7 +155,9 @@ constants and property sites it adds in its `RegCode`, which the lowering
 reads in place of the function's (`regView`). The VM lowers each kind of a
 function's program once and keeps it (`jitRegLower`, `regLowered`, a
 `jitLowering` by the function's key, as the stack form's are kept), checked
-once as it is lowered (`ir.Program`'s `Validate`): its own compiles and every
+once as it is lowered (`ir.Program`'s `Validate`, which marks it `Checked`:
+the builder checks such a program no more, neither at each build nor at
+each ask to inline it, `InlineCalls`): its own compiles and every
 caller that inlines it take the same program, never changed once lowered,
 until its code learns a hint, whose lengths the lowering compares at each
 ask, and it is lowered anew (`regLowering`, `relower`).
@@ -2002,7 +2004,13 @@ sites' caches have seen added first (`jitRegSeenFeedback`), the root's keep
 holding what its sites name. A getter or setter a register read or write
 calls (`jitRegFeedback`'s `Accessor`, `accessorOf`) is offered the same way
 (`AccessorSite`'s `Inline`), once the receiver and the accessor are checked
-(`accessorOp`). So is a closure the function makes and only calls, or only
+(`accessorOp`). A compile asks each call once: the builder asks the root's
+calls in each of its builds, and a callee's at each call of it it plans,
+and `Inline`'s and `NativeCalls`' answers are kept by the program's
+instruction for the rest (`jitRegFeedback`'s `askedOf`); and every call of
+one callee a compile asks of has one feedback (`jitRegCalleeOf`), but a
+forwarding callee's, whose frame is its call's: its answers are its code's
+and its caches', the same at each. So is a closure the function makes and only calls, or only
 gives to a callee that calls it, unchecked and never made, an arrow reading
 its this among them, its this the maker's (see [Closures the code only
 calls](#allocation-and-escape-analysis)).

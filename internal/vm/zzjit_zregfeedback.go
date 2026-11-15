@@ -41,6 +41,10 @@ type jitRegFeedback struct {
 	// on (ssa.InlineSite's Arguments), is that call: its apply_args are
 	// the calls inlined with them (forwardInline).
 	fwd *jitForwardFrame
+	// asked are the answers Inline and NativeCalls gave, askedAt their
+	// indexes by the program's instruction (askedOf).
+	asked   []jitRegAsked
+	askedAt []int32
 }
 
 // jitRegFeedbackFor is cl's register code's feedback for p, the program
@@ -320,7 +324,7 @@ func (f *jitRegFeedback) accessorInline(callee *Object, cl *closure, write bool)
 	k.holders = append(k.holders, callee)
 	k.inlined = append(k.inlined, cl)
 	return ssa.InlineSite{
-		Program: p, Feedback: &jitRegFeedback{fb: &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitRegKeyOf(cl)), root: k}, rc: cl.fn.RegCode(), p: p},
+		Program: p, Feedback: r.jitRegCalleeOf(k, cl, p),
 		Callee: uintptr(unsafe.Pointer(callee)), Closure: uintptr(unsafe.Pointer(cl)),
 		Argc: argc, Method: true, Params: 2 + int(cl.reg.params), ThisSlot: -1, Window: true,
 		Upvalues: jitUpvalueCells(cl), FunctionCell: uintptr(unsafe.Pointer(cell)),
@@ -668,7 +672,86 @@ func (f *jitRegFeedback) EntryGeneric(pc int) bool {
 // them, its reads the call's (ReadsArguments); one that hands them on,
 // with them, its apply_args the inlined calls of what it forwards to
 // (Arguments, forwardInline).
+//
+// Asked once a compile for each instruction (askedOf): the builder asks it
+// of each of the root's calls in each of its builds, and of each call of a
+// callee it plans to inline, and the answer, a search of the VM's caches
+// and a callee's feedback made, does not change while it builds.
 func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) {
+	a := f.askedOf(pc)
+	if a == nil {
+		return f.inline(pc)
+	}
+	if a.did&askedInline == 0 {
+		// Found before a is written: the finding may grow the answers.
+		site, ok := f.inline(pc)
+		a = f.askedOf(pc)
+		a.did |= askedInline
+		if ok {
+			a.site = &site
+		}
+	}
+	if a.site == nil {
+		return ssa.InlineSite{}, false
+	}
+	return *a.site, true
+}
+
+// jitRegAsked is what a register compile's feedback answered for one of
+// its program's instructions, asked once (jitRegFeedback's askedOf): its
+// Inline's answer, site, nil for none, and its NativeCalls', calls, where
+// did says they were asked.
+type jitRegAsked struct {
+	site  *ssa.InlineSite
+	calls []ssa.CallSite
+	did   uint8
+}
+
+// What a jitRegAsked holds (did).
+const (
+	askedInline uint8 = 1 << iota
+	askedCalls
+)
+
+// askedOf is the answers f gave for its program's instruction pc, made
+// empty at its first ask, or nil past the program. The answers are by
+// index, which askedAt keeps by pc, one past it: most of a program's
+// instructions are no calls.
+func (f *jitRegFeedback) askedOf(pc int) *jitRegAsked {
+	if pc < 0 || pc >= len(f.p.Code) {
+		return nil
+	}
+	if f.askedAt == nil {
+		f.askedAt = make([]int32, len(f.p.Code))
+	}
+	if i := f.askedAt[pc]; i != 0 {
+		return &f.asked[i-1]
+	}
+	f.asked = append(f.asked, jitRegAsked{})
+	f.askedAt[pc] = int32(len(f.asked))
+	return &f.asked[len(f.asked)-1]
+}
+
+// jitRegCalleeOf is the feedback of cl's register code lowered as p for a
+// callee that the compile whose root's feedback is k asks to inline: one
+// for all of its calls the compile asks of (k's regCallees), as its
+// answers are its code's and its caches', the same at each -- but a
+// forwarding callee's, whose frame is its call's (jitRegFeedback's fwd).
+// Made at each ask, they had been most of what the asks allocated, a
+// large function asking of every call it makes, and inlining a few.
+func (r *Runtime) jitRegCalleeOf(k *jitFeedback, cl *closure, p *ir.Program) *jitRegFeedback {
+	for _, c := range k.regCallees {
+		if c.fb.cl == cl && c.p == p {
+			return c
+		}
+	}
+	c := &jitRegFeedback{fb: &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitRegKeyOf(cl)), root: k}, rc: cl.fn.RegCode(), p: p}
+	k.regCallees = append(k.regCallees, c)
+	return c
+}
+
+// inline is Inline's answer, found.
+func (f *jitRegFeedback) inline(pc int) (ssa.InlineSite, bool) {
 	w, op, ok := f.at(pc)
 	if !ok || op != ir.Host || !f.p.Code[pc].Window {
 		return ssa.InlineSite{}, false
@@ -735,7 +818,12 @@ func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 	// compiles take it (jitRegSeenFeedback).
 	r.jitRegSeenInlined(f.fb.keep(), cl)
 	k := f.fb.keep()
-	callee := &jitRegFeedback{fb: &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitRegKeyOf(cl)), root: k}, rc: cl.fn.RegCode(), p: p}
+	var callee *jitRegFeedback
+	if forwards {
+		callee = &jitRegFeedback{fb: &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitRegKeyOf(cl)), root: k}, rc: cl.fn.RegCode(), p: p}
+	} else {
+		callee = r.jitRegCalleeOf(k, cl, p)
+	}
 	in := ssa.InlineSite{
 		Program: p, Feedback: callee, Callee: site.Callee, Closure: site.Closure,
 		Argc: argc, Method: method, Params: 2 + int(cl.reg.params), ThisSlot: -1, Window: true,
@@ -789,7 +877,27 @@ func (f *jitRegFeedback) GoCalls() bool { return true }
 // other is a call of Go (ssa.GoCall), which makes it on the register frame
 // without leaving native code (jitRegGoCall). A call in tail position is
 // neither, which the interpreter makes in constant space at a host exit.
+//
+// Asked once a compile for each instruction, as Inline is.
 func (f *jitRegFeedback) NativeCalls(pc int) []ssa.CallSite {
+	a := f.askedOf(pc)
+	if a == nil {
+		return f.nativeCalls(pc)
+	}
+	if a.did&askedCalls == 0 {
+		// The first ask is given the answer itself, the others copies of
+		// it: the builder changes what it is given only as each ask would
+		// (ssa's nativeCalls), and keeps the first's.
+		calls := f.nativeCalls(pc)
+		a = f.askedOf(pc)
+		a.calls, a.did = calls, a.did|askedCalls
+		return calls
+	}
+	return slices.Clone(a.calls)
+}
+
+// nativeCalls is NativeCalls' answer, found.
+func (f *jitRegFeedback) nativeCalls(pc int) []ssa.CallSite {
 	w, op, ok := f.at(pc)
 	if ok && (op == ir.Host && f.p.Code[pc].Whole || op == ir.FieldDefine && w.Op() == bytecode.RDefineField) {
 		// An instruction Go runs whole, its fast paths native code's

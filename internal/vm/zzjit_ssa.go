@@ -2993,9 +2993,11 @@ type jitFeedback struct {
 	inlined  []*closure
 	inlinedN int
 	// regSeen, the root's, are the register callees the compile asked to
-	// inline whose sites' caches it has taken (jitRegSeenInlined).
-	regSeen []*closure
-	pools   []*abi.ObjectPool
+	// inline whose sites' caches it has taken (jitRegSeenInlined), and
+	// regCallees their feedback (jitRegCalleeOf).
+	regSeen    []*closure
+	regCallees []*jitRegFeedback
+	pools      []*abi.ObjectPool
 	// made are the templates of the closures the code may not make, the
 	// loops' callbacks inlined where their callers make them (ForEachSite's
 	// Made), which an exit's frame names in their places (jitMaterialize);
