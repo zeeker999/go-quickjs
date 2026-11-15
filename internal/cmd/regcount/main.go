@@ -8,7 +8,8 @@
 //     jlt r, ... and its kin), by the branch's kind and the step's: what a
 //     step-and-branch instruction would fuse, and the pairs it could not,
 //     by why; and the step-and-branches regcomp made of the six kinds it
-//     fuses, which leave the pairs above only the other kinds;
+//     fuses, which leave the pairs above only the other kinds, with
+//     every other loop-kernel and int32 instruction it made;
 //   - x * k with k a 16-bit integer literal, right or left (mul_imm);
 //   - (x + y) | 0 and (x - y) | 0 (add_i32, sub_i32), (x + k) | 0 and
 //     (x - k) | 0 (add_imm_i32), the + of a string chain left out; and the
@@ -53,13 +54,12 @@ type tally struct {
 	funcs, regCode int
 	// evals is how many of the files are code a file evals.
 	evals int
-	// reserved is how many instructions are of the operations reserved
-	// for the loop kernels and int32 results, which nothing emits yet.
-	reserved int
-	// fused is the step-and-branches regcomp made, by operation.
-	fused map[string]int
+	// made is the loop-kernel and int32 instructions regcomp made (the
+	// operations from step_jlt on), by operation.
+	made map[string]int
 	// step is the fusable step pairs by the branch's kind, then the
-	// step's: "+1", "-1", "+k", "-k"; back those whose branch jumps back.
+	// step's: "+1", "-1", "+k", "-k"; back those whose branch jumps back,
+	// a step-and-branch's counted by its partner's kind.
 	step map[string]map[string]int
 	back map[string]int
 	// stepMiss is the step pairs no fused instruction takes, by why.
@@ -69,15 +69,14 @@ type tally struct {
 }
 
 func newTally() *tally {
-	return &tally{step: map[string]map[string]int{}, back: map[string]int{}, stepMiss: map[string]int{}, expr: map[string]int{}, fused: map[string]int{}}
+	return &tally{step: map[string]map[string]int{}, back: map[string]int{}, stepMiss: map[string]int{}, expr: map[string]int{}, made: map[string]int{}}
 }
 
 func (t *tally) add(o *tally) {
 	t.files += o.files
 	t.evals += o.evals
-	t.reserved += o.reserved
-	for k, n := range o.fused {
-		t.fused[k] += n
+	for k, n := range o.made {
+		t.made[k] += n
 	}
 	t.failed += o.failed
 	t.funcs += o.funcs
@@ -243,10 +242,11 @@ func farShaped(code []bytecode.RInstr) bool {
 func (t *tally) countSteps(rc *bytecode.RegCode) {
 	code := rc.Code
 	for _, w := range code {
-		if _, ok := w.Op().StepPartner(); ok {
-			t.fused[w.Op().String()]++
-		} else if w.Op() >= bytecode.RStepJLt && w.Op() < bytecode.ROpCount {
-			t.reserved++
+		if w.Op() >= bytecode.RStepJLt && w.Op() < bytecode.ROpCount {
+			t.made[w.Op().String()]++
+		}
+		if partner, ok := w.Op().StepPartner(); ok && w.SC() < 0 {
+			t.back[partner.String()]++
 		}
 	}
 	far := -1
@@ -521,9 +521,6 @@ func (t *tally) assign(n *ast.Assign) {
 func (t *tally) report(w io.Writer, dir string) {
 	fmt.Fprintf(w, "%s: %d files (%d of them evaled code, %d not compiled), %d functions, %d as register code\n",
 		dir, t.files, t.evals, t.failed, t.funcs, t.regCode)
-	if t.reserved != 0 {
-		fmt.Fprintf(w, "  %d instructions of the reserved operations\n", t.reserved)
-	}
 	var kinds []string
 	total := 0
 	for k, m := range t.step {
@@ -545,7 +542,7 @@ func (t *tally) report(w io.Writer, dir string) {
 		m := t.step[k]
 		fmt.Fprintf(w, "    %-14s %7d %7d %7d %7d %7d %7d\n", k, sum(m), t.back[k], m["+1"], m["-1"], m["+k"], m["-k"])
 	}
-	printSorted(w, "  step-and-branches made:", t.fused)
+	printSorted(w, "  loop-kernel and int32 instructions made:", t.made)
 	printSorted(w, "  step pairs, not fusable:", t.stepMiss)
 	printSorted(w, "  operators:", t.expr)
 }

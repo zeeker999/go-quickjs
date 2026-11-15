@@ -92,7 +92,8 @@ func rsAddI32(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int
 	}
 	st.at(pc)
 	v, err := st.r.add(regs[w.B()], regs[w.C()])
-	return regOrZero(regs, w, pc, st, v, err)
+	v, err = regOrZero(st, pc, v, err)
+	return st.put(regs, w, v, err)
 }
 
 func rsSubI32(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
@@ -102,7 +103,8 @@ func rsSubI32(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int
 	}
 	st.at(pc)
 	v, err := st.r.arith(bytecode.OpSub, regs[w.B()], regs[w.C()])
-	return regOrZero(regs, w, pc, st, v, err)
+	v, err = regOrZero(st, pc, v, err)
+	return st.put(regs, w, v, err)
 }
 
 // rsAddII32 is add_imm_i32's slow path: of x - K, SC -K, sub_imm's
@@ -120,22 +122,23 @@ func rsAddII32(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) in
 	} else {
 		v, err = st.r.regBinImm(bytecode.OpAdd, regs[w.B()], w.SC())
 	}
-	return regOrZero(regs, w, pc, st, v, err)
+	v, err = regOrZero(st, pc, v, err)
+	return st.put(regs, w, v, err)
 }
 
-// regOrZero stores v | 0 in R[A], v the result of the operator of the
-// int32 form at pc, or fails with err, that operator's: a Number's
-// ToInt32; a string's number's, whose conversion runs nothing; and a
-// BigInt's TypeError, the |'s, placed at its stack instruction, Aux[pc].
-func regOrZero(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState, v Value, err error) int {
+// regOrZero is v | 0, v the result of the operator of the int32 form at
+// pc, or err, that operator's: a Number's ToInt32; a string's number's,
+// whose conversion runs nothing; and a BigInt's TypeError, the |'s,
+// placed at its stack instruction, Aux[pc]. Its caller has kept the pc
+// (st.at) and stores what it gives (st.put), so that the throws-keep-pc
+// rule (TestRegThrowsKeepPC) sees both in each slow function.
+func regOrZero(st *regState, pc int, v Value, err error) (Value, error) {
 	if err != nil {
-		return st.fail(err)
+		return v, err
 	}
 	if v.IsNumber() {
-		regs[w.A()] = Int32(jsnum.ToInt32(v.Number()))
-		return st.kept.pc
+		return Int32(jsnum.ToInt32(v.Number())), nil
 	}
 	st.f.pc = st.c.rc.Aux[pc] + 1
-	v, err = st.r.regBinImm(bytecode.OpBitOr, v, 0)
-	return st.put(regs, w, v, err)
+	return st.r.regBinImm(bytecode.OpBitOr, v, 0)
 }

@@ -16,14 +16,12 @@ func count(t *testing.T, src string) *tally {
 	if c.failed != 0 {
 		t.Fatalf("%q did not compile", src)
 	}
-	if c.reserved != 0 {
-		t.Errorf("%d instructions of the reserved operations", c.reserved)
-	}
 	return c
 }
 
-// The step pairs of each loop shape, by the branch's kind and the step's,
-// and those no fused instruction takes.
+// The step-and-branches regcomp makes of each loop shape, and the step
+// pairs it leaves, by the branch's kind and the step's: those no fused
+// instruction takes.
 func TestStepPairs(t *testing.T) {
 	c := count(t, `function f(n, a) {
 		for (let i = 0; i < n; i++) {}
@@ -37,12 +35,28 @@ func TestStepPairs(t *testing.T) {
 		return function () { for (var u = 0; u <= a; u++) {} };
 	}
 	f(1, 2)();`)
+	made := map[string]int{
+		"step_jlt":       1,
+		"step_jlt_imm":   1,
+		"step_jge_imm":   1,
+		"step_jgt_imm":   1,
+		"step_jle_upval": 1,
+	}
+	for k, n := range made {
+		if c.made[k] != n {
+			t.Errorf("%s: %d made, want %d", k, c.made[k], n)
+		}
+	}
+	if len(c.made) != len(made) {
+		t.Errorf("made %v, want %v", c.made, made)
+	}
+	// What is fused is no pair; what is left is no kind fused.
 	want := map[string]map[string]int{
-		"jlt":        {"+1": 1},
-		"jlt_imm":    {"+k": 1},
-		"jge_imm":    {"-1": 1},
-		"jgt_imm":    {"-1": 1},
-		"jle_upval":  {"+1": 1},
+		"jlt":        nil,
+		"jlt_imm":    nil,
+		"jge_imm":    nil,
+		"jgt_imm":    nil,
+		"jle_upval":  nil,
 		"jnlt":       nil,
 		"jle_imm":    nil,
 		"jle":        nil,
@@ -59,6 +73,8 @@ func TestStepPairs(t *testing.T) {
 			t.Errorf("%s: %d pairs, want none", k, sum(c.step[k]))
 		}
 	}
+	// Each loop's bottom test jumps back, the step-and-branch's counted by
+	// its partner's kind.
 	for _, k := range []string{"jlt", "jlt_imm", "jge_imm", "jgt_imm", "jle_upval"} {
 		if c.back[k] != 1 {
 			t.Errorf("%s: %d backward, want 1", k, c.back[k])
@@ -115,6 +131,18 @@ func TestOperatorPatterns(t *testing.T) {
 			t.Errorf("%s: %d, want none", k, n)
 		}
 	}
+	// What regcomp makes of them: x * 3, 3 * x.p and r *= 4; (x + y) | 0;
+	// (x - y) | 0 and (x - -32768) | 0, whose -K is past 16 bits; and
+	// (x + 1) | 0 and (x - 4) | 0.
+	made := map[string]int{"mul_imm": 3, "add_i32": 1, "sub_i32": 2, "add_imm_i32": 2}
+	for k, n := range made {
+		if c.made[k] != n {
+			t.Errorf("%s: %d made, want %d", k, c.made[k], n)
+		}
+	}
+	if len(c.made) != len(made) {
+		t.Errorf("made %v, want %v", c.made, made)
+	}
 }
 
 // Code a file evals from a long string literal, as Octane's zlib does, is
@@ -132,7 +160,7 @@ func TestReport(t *testing.T) {
 	c := count(t, `function f(n) { for (let i = 0; i < n; i++) {} return (n + 1) | 0 }`)
 	var sb strings.Builder
 	c.report(&sb, "case")
-	for _, s := range []string{"case: 1 files", "jlt ", "add_imm_i32"} {
+	for _, s := range []string{"case: 1 files", "step_jlt ", "add_imm_i32"} {
 		if !strings.Contains(sb.String(), s) {
 			t.Errorf("report has no %q:\n%s", s, sb.String())
 		}
