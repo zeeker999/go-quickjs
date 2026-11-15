@@ -625,12 +625,34 @@ counted, as the stack form's invocations spend it one by one
   (`jitRegCallTier`) and compiles it if the budget is spent, or arms the
   count again. A run that ends in native code, or a throw, counts
   nothing, as no invocation the stack form's native code makes does;
-- a back edge that spends the back-edge budget -- `regBackEdge`, which every
-  dispatcher's jump leaves to its Go slow function -- spends its frame's
-  function's by the back edges the budget counted, each the loop's length
-  from its header to the jump (`jitRegLoop`, `jitRegTierWork`), as V8's
-  `JumpLoop` spends its bytecodes' distance, the budget varied from one
-  expiry to the next (`backEdgeBudget`).
+- a backward jump spends its function's budget by its distance, as V8's
+  `JumpLoop` spends its bytecodes' distance: the feedback dispatcher's
+  jumps (nativegen's `feedback.go`, `feedbackEdgeAMD64` and
+  `feedbackEdgeARM64`; the Go table's `regJump` and `regJumpSlow`,
+  `regEdgeTick`) count down the work left of it for back edges
+  (`closureCode`'s `jitRegEdges`, armed by `jitRegArmEdges`), and once none
+  is left end the interrupt budget, so that the jump, taken, leaves to its
+  Go slow function's check (`regBackEdge`), which spends the work counted
+  (`jitRegLoop`, `jitRegEdgeWork`) and arms the count again. A check where
+  the interrupt budget ended by itself spends what the count has so far,
+  so that where a loop is compiled is the same whatever the interrupt
+  budget, varied from one expiry to the next (`backEdgeBudget`), did.
+  Counted so, not sampled -- a full interrupt budget times the loop's
+  length, where it ended at the loop's own back edge -- a loop whose turns
+  call native code with loops of their own, Crypto's `bnModPow`, was
+  sampled a few times a run, or none, and compiled in its third run or
+  never in five, as the samples landed. A template's count starts at 0,
+  so that its first back edge's check arms it with V8's interrupt budget
+  for feedback allocation (`jitBudgetForFeedback`, 940, or the budget
+  where that is smaller), whose end begins the budget, as V8's feedback
+  vector, made then, holds it: begun at the first back edge, a function
+  compiled at once was compiled after one turn of its loop, its caches'
+  feedback that turn's. Code that runs counts with no end
+  (`jitRegCounted`): the interpreter's work in its loops counts toward
+  its code's (`jitRegSpent`'s `osrWork`) at the interrupt budget's
+  checks, which alone look at such a frame, as before its compile. A
+  function never compiled counts nothing more, nor does any in a runtime
+  that runs no JIT (`regEdgesOff`).
 
 Every call the interpreter makes of a function whose `jitEnters` is set
 goes to the JIT, as the stack form's calls look for their callee's code
@@ -640,7 +662,8 @@ Go for it with no exit, as it calls a built-in (`nativeJITCall`, by the
 exit's protocol through `callH`). A site's cache holds a callee with code
 as any other (`nativeCallMiss`, `regCallSlow`); no site is marked for it.
 
-**Compiling.** A function's first sample begins its budget, as the stack
+**Compiling.** A function's first check -- a call's, or its first back
+edge's -- begins its budget, as the stack
 form's `jitWarmFor` makes its entry warm, and notes its caches' feedback
 (`jitFeedbackMark`); it is compiled (`jitRegFor`) at the sample that spends
 the budget, its caches' feedback unchanged since -- a change raises what is
@@ -725,7 +748,16 @@ stack form's is.
   length, with the work its native stretches did -- their back edges, each
   its loops' mean length, and the instructions to where they left
   (`jitRegStretchWork`, as `jitSSAProfit` counts it) -- and the
-  interpreter's in its loops before Go entered them (`jitRegSpent`). It is
+  interpreter's in its loops before Go entered them (`jitRegSpent`). A
+  call of Go its native run makes counts the work the run's stretch has
+  done so far (`jitRegRunWork`), as V8's optimized code spends its budget
+  at each `JumpLoop`, not only where the stretch ends -- at an exit, or at
+  a poll the varied interrupt budget makes, which had a loop that learned
+  at its calls of Go compiled again a budget after a poll that came
+  wherever it came. What it learns after its budget began raises what is
+  left to `jitICThreshold` invocations' worth from then, at the next such
+  call (`jitEntry`'s `tierLearned`), as V8's `NotifyICChanged` raises a
+  budget when feedback changes, not from where the budget was spent. It is
   compiled at a call that enters it (`jitRegEnter`, the stack form's
   `tryJITAt`), even judged slow, which would never be entered and never
   compiled for what it learned otherwise; at a call of Go it makes, which

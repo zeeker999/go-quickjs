@@ -215,8 +215,13 @@ func (r *Runtime) jitRegForAs(cl *closure, c *regCode, callee bool) *jitRegEntry
 // it replaces go on in it until they next leave it (jitRegGoOnAt), and it
 // is closed once the last is done. nil where there is no room, or the
 // compile went to the background. A refusal replaces no valid code: the
-// function keeps it.
+// function keeps it. Whatever came of it, the JIT holds no more than its
+// budget after (settle), as after the stack form's compiles: the
+// programs of the callees it inlined, lowered as it built, count past the
+// room it asked for, and a compile refused or deferred had left them over
+// the budget.
 func (r *Runtime) jitRegCompileFor(cl *closure, c *regCode, key jitKey, callee bool) *jitRegEntry {
+	defer r.jit.settle()
 	e := r.jitRegCompile(cl, c, key, callee, 0)
 	if e == nil {
 		return nil
@@ -1732,7 +1737,7 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 	// the loop again after each (jitGoOn): loop, as jitRegGoOnAt judges
 	// it.
 	osr := loop
-	s.regRuns[idx] = jitRegRun{f: f, c: c, e: e, wb: wb, osr: osr, edges: r.backEdges - s.pollCredit, rpc: -1}
+	s.regRuns[idx] = jitRegRun{f: f, c: c, e: e, wb: wb, osr: osr, edges: r.backEdges - s.pollCredit, rpc: -1, stretch: r.backEdges - s.pollCredit}
 	s.regPending = jitGoPending{}
 	s.entries++
 	s.ssaEntries++
@@ -1971,6 +1976,16 @@ func (r *Runtime) jitRegStretchWork(e *jitRegEntry, ctx *abi.Context, ipc, edges
 	}
 }
 
+// jitRegRunWork is the work run's stretch has done natively so far, as
+// its end will count it (jitRegStretchWork): the back edges it has taken,
+// each its code's loops' mean length.
+func (r *Runtime) jitRegRunWork(run *jitRegRun) int64 {
+	if back := run.stretch - (r.backEdges - r.jit.pollCredit); back > 0 && run.e != nil {
+		return int64(back) * int64(run.e.loopMean)
+	}
+	return 0
+}
+
 // jitRegRunGoProfit judges a call of Go e's code makes at register pc rpc
 // in run, a run begun at a loop's header, as jitRunGoProfit does the stack
 // form's: each costs native code what an exit and an entry would
@@ -2117,6 +2132,11 @@ type jitRegRun struct {
 	osr   bool
 	edges int
 	rpc   int
+	// stretch is the back-edge counter, less the polls' credit, when the
+	// run's stretch began, which its end counts the work of
+	// (jitRegStretchWork), and a call of Go during it the work so far
+	// (jitRegRunWork).
+	stretch int
 	// own counts the levels of the call's own that run e's code, which
 	// leaving unwinds (jitRegCompileDueNow): none for the run's own, and,
 	// -1, counted when asked for a call of Go from a native callee's code

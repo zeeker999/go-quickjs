@@ -495,6 +495,16 @@ type jitCodeFields struct {
 	// dispatcher's returns count (jitRegArm): at 0 they mark its calls
 	// for Go (jitEnters), which spends their runs (jitRegCallTier).
 	jitRegTick, jitRegTickSet int64
+	// jitRegEdges counts down the work of the function's budget left for
+	// its frames' back edges in the interpreter, from jitRegEdgesSet: each
+	// backward jump its distance, which the feedback dispatcher's jumps
+	// (nativegen's feedback.go) and the Go table's (regEdgeTick) subtract,
+	// as V8's JumpLoop spends its function's budget. At 0 or less they end
+	// the budget of back edges, so that the jump's check (regBackEdge)
+	// spends the work counted (jitRegLoop) and counts again
+	// (jitRegArmEdges). 0, the template's at first, has its first back
+	// edge's check begin it.
+	jitRegEdges, jitRegEdgesSet int64
 }
 
 // hint is the hint of the code of cl's function, its template's closures'
@@ -766,6 +776,10 @@ type jitEntry struct {
 	// (jitWarmFor), which holds its budget, tierBudget, and its caches'
 	// mark, tierMark, while the existing tiers spend it (jitWarmUp).
 	warming bool
+	// regFed says the back edges of a register function's frames have
+	// spent the work its caches are given before its budget begins
+	// (jitRegLoop's jitRegFeedbackWork).
+	regFed bool
 	// tierSpends counts the invocations jitTierUp was given, which tells a
 	// call Go makes whether the call's frame counted its invocation
 	// (jitInvokedFrameless).
@@ -775,6 +789,10 @@ type jitEntry struct {
 	// tierBase, with tierMark unchanged (jitLearnedDue).
 	learning bool
 	tierBase int64
+	// tierLearned is what a register function's code had learned
+	// (jitLearnedCount) when its budget for it last began, which a call
+	// of Go its native run makes compares (jitRegLearnedDueWith).
+	tierLearned int
 	// starts counts Go's entries at a function's start, not into a loop;
 	// goOns the runs of it the interpreter went on with where its code
 	// left them (jitGoOn).
