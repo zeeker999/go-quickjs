@@ -1240,12 +1240,17 @@ func stackPool(size int) *sync.Pool {
 }
 
 // newStack is a stack of the given size: one a closed runtime gave back,
-// which is clear already, or a new one.
+// which is clear already, or a new one. Its allocation has a slot past
+// its length: a frame that takes the stack to its end has its operands'
+// address there -- register code's past its window and scratch slots
+// where its code takes nothing past them (abi.Context's Stack, which Go
+// and native code make) -- and an unsafe.Pointer one past an allocation
+// is no pointer to it, but to whatever the collector finds after it.
 func newStack(size int) []Value {
 	if p, _ := stackPool(size).Get().(*[]Value); p != nil {
 		return *p
 	}
-	return make([]Value, size)
+	return make([]Value, size, size+1)
 }
 
 // ReleaseClosed lets go of what a closed runtime still holds: its stack, for
