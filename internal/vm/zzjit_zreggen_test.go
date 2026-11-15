@@ -348,3 +348,55 @@ func TestJITRegGenConsumerSampled(t *testing.T) {
 		t.Error("forOf not compiled: its loop's back edges were not sampled")
 	}
 }
+
+// An async function whose loop awaits at every turn: each turn is a
+// resumption Go makes of its register code, and the loops' back edges in
+// all are too few for a sample. Its resumptions are its invocations, each
+// spending its length of its budget (jitRegResumed), as the stack form's
+// are (jitResume): counted only at every jitHotWork of them, as code
+// refused for host operations alone is, af was never compiled, and
+// nothing of the program ran natively.
+func TestJITRegAsyncResumptionsCompile(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	const src = `var out = 0;
+async function af(n) { let total = 0; const add = v => { total += v }; for (let i = 0; i < n; i++) add(await i); return total }
+async function main(m) { for (let k = 0; k < m; k++) out += await af(k) }`
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, src)
+			// Counted: what stress makes of the compiles' order is not.
+			rts[0].jitStress = jitStressConfig{}
+			rts[0].SetJITWarmUp(8, 8)
+			var got [2]string
+			for i, r := range rts {
+				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("main"))
+				// 435 turns of af's loop and 30 of main's: no sample.
+				if _, err := r.Call(fn, Undefined, []Value{Float(30)}); err != nil {
+					t.Fatal(err)
+				}
+				if err := r.DrainJobs(); err != nil {
+					t.Fatal(err)
+				}
+				v, err := r.GetProp(Obj(r.Global()), r.Intern("out"))
+				got[i] = regNativeShow(r, v, err)
+			}
+			if got[0] != got[1] || got[1] != "4060" {
+				t.Fatalf("with the JIT %q, without %q, want 4060", got[0], got[1])
+			}
+			r := rts[0]
+			fn, _ := r.GetProp(Obj(r.Global()), r.Intern("af"))
+			cl := fn.Object().fn().closure
+			if e := r.jit.regCache[r.jitRegKeyOf(cl)]; e == nil || e.code == nil {
+				t.Fatal("af not compiled: its resumptions were not counted")
+			}
+			if st := r.JITStats(); st.SSAEntries == 0 {
+				t.Errorf("nothing ran natively: %+v", st)
+			}
+		})
+	}
+}
