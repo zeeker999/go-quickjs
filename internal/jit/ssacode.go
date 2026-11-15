@@ -25,6 +25,8 @@ type SSACode struct {
 	// callEntry, resume and genEntry are the offsets of the code's call
 	// entry, resume routine and generator entry, or -1 (mir's Code).
 	callEntry, resume, genEntry, tailEntry int32
+	// stackAt and frameSize are mir's Code's StackAt and FrameSize.
+	stackAt, frameSize int32
 	// exits are the descriptions the code's exits name by address, calls
 	// those its native calls do (abi.Context's CallState); callRefs bounds
 	// the pointer words its calls write themselves (mir's Code).
@@ -59,7 +61,7 @@ func NewSSACode(a *Arena, c *mir.Code) (*SSACode, error) {
 		entries[pc] = int32(off)
 	}
 	s := &SSACode{code: code, arena: a, entries: entries, callEntry: int32(c.CallEntry), resume: int32(c.Resume), genEntry: int32(c.GenEntry), tailEntry: int32(c.TailEntry), exits: c.Exits,
-		calls: c.Calls, goCalls: c.GoCalls, callRefs: c.CallRefs}
+		calls: c.Calls, goCalls: c.GoCalls, callRefs: c.CallRefs, stackAt: int32(c.StackAt), frameSize: int32(c.FrameSize)}
 	s.footprint = footprint(len(code), cap(entries), c)
 	runtime.SetFinalizer(s, func(s *SSACode) { _ = s.Close() })
 	return s, nil
@@ -127,6 +129,14 @@ func (s *SSACode) TailEntry() uintptr {
 	}
 	return uintptr(unsafe.Pointer(&s.code[s.tailEntry]))
 }
+
+// StackAt and FrameSize are where the frame's operands start past its
+// locals and how many slots it takes in the VM's stack, in values (mir's
+// Code.StackAt and FrameSize).
+func (s *SSACode) StackAt() int { return int(s.stackAt) }
+
+// FrameSize is mir's Code.FrameSize (StackAt).
+func (s *SSACode) FrameSize() int { return int(s.frameSize) }
 
 // Run enters at a slot IR PC with ctx, which must hold the frame's addresses
 // and the back-edge counter; it returns when native code exits, with the

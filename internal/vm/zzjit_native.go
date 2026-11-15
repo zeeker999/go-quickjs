@@ -1013,6 +1013,12 @@ type jitLink struct {
 	// Gens), or 0 while there is none it may: 0 whenever entry is, for
 	// the same reasons, and for a generator's code entry always is.
 	gen uintptr
+	// tailStack and tailTop are, for register code, where its frame's
+	// operands start past its window, in bytes, and how many slots its
+	// frame takes past its base (abi.Encoding's LinkStack, LinkTop), which
+	// a call in tail position makes before it jumps to body (mir's
+	// windowTailJump).
+	tailStack, tailTop uint64
 }
 
 // setCode has native callers call code through l: its call entry, which

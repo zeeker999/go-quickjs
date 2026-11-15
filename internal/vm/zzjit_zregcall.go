@@ -133,9 +133,11 @@ func (s *jitState) regUnhint(l *jitLink) {
 func (l *jitLink) regSet(s *jitState, e *jitRegEntry) {
 	l.setCode(e.code)
 	if l.entry != 0 {
-		// A call in tail position goes on at the code's tail entry, which
-		// makes the frame past its window (mir's windowTailJump).
+		// A call in tail position goes on at the code's tail entry, having
+		// made the frame past its window as the code's call entry would
+		// (mir's windowTailJump).
 		l.body = e.code.TailEntry()
+		l.tailStack, l.tailTop = uint64(e.code.StackAt())*uint64(unsafe.Sizeof(Value{})), uint64(e.code.FrameSize())
 	}
 	l.frame = max(l.frame, uint64(e.p.Regs+e.scratch+e.frame))
 	if l.gen != 0 {

@@ -334,11 +334,16 @@ func compileAMD64(w *Workspace, f *ssa.Func, enc abi.Encoding, opts Options) (co
 		c.mark("routine resume")
 		c.resumeCall()
 	}
-	tailAt := -1
+	tailAt, tailStart := -1, false
 	if c.f.TailEntry && c.f.CallEntry && c.entryAt(0) != nil {
-		tailAt = c.a.Len()
-		c.mark("routine tailEntry")
-		c.tailEntry()
+		if c.tailInits() {
+			tailAt = c.a.Len()
+			c.mark("routine tailEntry")
+			c.tailEntry()
+		} else {
+			// Nothing to make: the entry at the start.
+			tailStart = true
+		}
 	}
 	genAt := -1
 	if c.f.GenEntry {
@@ -438,13 +443,16 @@ func compileAMD64(w *Workspace, f *ssa.Func, enc abi.Encoding, opts Options) (co
 	if tailAt >= 0 {
 		tailAt = c.a.Moved(tailAt)
 	}
+	if tailStart {
+		tailAt = entries[0]
+	}
 	c.finishExits()
 	marks, listing := c.finishMarks()
 	c.lap(PhaseEncode)
 	if t := c.opts.Timing; t != nil {
 		t.Compiles++
 	}
-	return &Code{Bytes: bytes, Entries: entries, CallEntry: callAt, Resume: resumeAt, GenEntry: genAt, TailEntry: tailAt, Text: c.a.Moved(text), Exits: c.exits,
+	return &Code{Bytes: bytes, Entries: entries, CallEntry: callAt, Resume: resumeAt, GenEntry: genAt, TailEntry: tailAt, StackAt: c.f.FrameLocals + c.f.Scratch, FrameSize: c.frameSize(), Text: c.a.Moved(text), Exits: c.exits,
 		Calls: c.calls, CallRefs: c.callRefs(), Spills: c.spills, GoCalls: c.goCalls, Marks: marks, Listing: listing, core: c.core}, nil
 }
 
@@ -5300,7 +5308,15 @@ func (c *compiler) tailDeep(v *ssa.Value, guard guardTo) {
 	c.a.Load(scratchA, regCtx, abi.OffClosure)
 	c.a.Op(amd64.Cmp, scratchA, scratchB, true)
 	c.a.Jcc(amd64.CondNE, other)
-	for i := range int(v.Const.Bits) {
+	slots := int(v.Const.Bits)
+	if v.Key&ssa.TailWindow != 0 {
+		// Register code's window: its function, receiver, parameters and
+		// bindings, which the interpreter's call makes and its code's
+		// start reads -- not its temporaries, which the code writes before
+		// it reads them, as a native call leaves them (windowSetup).
+		slots = min(slots, c.f.InitLocals())
+	}
+	for i := range slots {
 		nb, nd := c.slotAddr(i, false, scratchC)
 		rb, rd := c.slotAddr(i, true, scratchC)
 		if i < v.Index && i < len(args) {
@@ -5383,28 +5399,26 @@ func (c *compiler) tailDeep(v *ssa.Value, guard guardTo) {
 	c.a.Jmp(stub)
 }
 
+// tailInits reports whether register code's tail entry (tailEntry) has
+// bindings to make: its call entry makes those past its parameters.
+func (c *core) tailInits() bool { return !c.f.StartOnly && c.f.Params < c.f.InitLocals() }
+
 // tailEntry is register code's entry for another function's call in tail
 // position (ssa.Func's TailEntry), which windowTailJump jumps to with the
 // frame's window written in place of the caller's, at the context's
-// Locals, and the context the caller's: what its call entry makes past the
-// window -- its operands' address, the context's Stack, and the VM's
-// stack's top and high water past its frame -- made, it goes on at the
-// start, as Go's entry does.
+// Locals, the context the caller's, and what its call entry makes past the
+// window made: its bindings past its parameters made undefined, as the
+// call entry makes them -- the call wrote its window's parameters alone,
+// as a native call's does (windowSetup) -- it goes on at the start, as
+// Go's entry does. Code with none has its start for its tail entry.
 func (c *compiler) tailEntry() {
-	const at, top = amd64.R9, amd64.R10
-	c.a.Load(regLocals, regCtx, abi.OffLocals)
-	c.a.Lea(regStack, regLocals, int32(c.f.FrameLocals+c.f.Scratch)*int32(c.enc.ValueSize))
-	c.a.Store(regCtx, abi.OffStack, regStack)
-	c.a.Load(at, regCtx, abi.OffStackTop)
-	c.a.Load(top, regCtx, abi.OffBase)
-	c.a.Lea(top, top, int32(c.frameSize()))
-	c.a.Store(at, 0, top)
-	same := c.a.NewLabel()
-	c.a.Load(at, regCtx, abi.OffStackHigh)
-	c.a.CmpMem(top, at, 0, true)
-	c.a.Jcc(amd64.CondBE, same)
-	c.a.Store(at, 0, top)
-	c.a.Bind(same)
+	vs := int32(c.enc.ValueSize)
+	c.movImm(scratchA, c.enc.Undefined)
+	c.movImm(scratchB, 0)
+	for i := c.f.Params; i < c.f.InitLocals(); i++ {
+		c.a.Store(regLocals, int32(i)*vs+c.enc.NumOffset, scratchA)
+		c.a.Store(regLocals, int32(i)*vs+c.enc.RefOffset, scratchB)
+	}
 	c.a.Jmp(c.labels[c.entryAt(0).ID])
 }
 
@@ -5413,10 +5427,14 @@ func (c *compiler) tailEntry() {
 // window's function, receiver and arguments -- in a native callee's frame:
 // t's code, which native callers may call, takes the frame's place, its
 // window the frame's -- its registers the operands up to its parameters,
-// undefined past them -- its context this one, as its call entry would
-// make them, and goes on at its tail entry (Code.TailEntry), which makes
-// the rest, returning where this frame would have. The frame's room is
-// its link's (abi.Encoding's LinkFrame).
+// undefined past them -- its context this one, and what its call entry
+// makes past the window -- its operands' address, the context's Stack, and
+// the VM's stack's top and high water past its frame, of its code's as
+// its link has them (abi.Encoding's LinkStack, LinkTop) -- made, as the
+// stack form's tailJump makes them, and goes on at its tail entry
+// (Code.TailEntry): its start, or what makes its bindings first, returning
+// where this frame would have. The frame's room is its link's
+// (abi.Encoding's LinkFrame).
 func (c *compiler) windowTailJump(t *ssa.CallSite, n int, guard guardTo) {
 	vs, size := int32(c.enc.ValueSize), int32(unsafe.Sizeof(abi.GoArg{}))
 	link := uint64(t.Entry) - uint64(c.enc.LinkEntry)
@@ -5429,9 +5447,13 @@ func (c *compiler) windowTailJump(t *ssa.CallSite, n int, guard guardTo) {
 	c.a.Load(scratchA, regCtx, abi.OffStackEnd)
 	c.a.Op(amd64.Cmp, scratchB, scratchA, true)
 	guard.jump(amd64.CondA)
-	for i := 0; i < t.LocalCount; i++ {
+	// Its window's function, receiver and parameters, undefined past the
+	// operands, as a native call writes them (windowSetup): the rest of its
+	// bindings its tail entry makes, as its call entry does, and its
+	// temporaries it writes before it reads them.
+	for i := 0; i < t.Params && i < t.LocalCount; i++ {
 		at := int32(i) * vs
-		if i < t.Params && i < n {
+		if i < n {
 			g := abi.OffGoArgs + int32(i)*size
 			c.a.Load(scratchA, regCtx, g+c.enc.NumOffset)
 			c.a.Store(regLocals, at+c.enc.NumOffset, scratchA)
@@ -5468,6 +5490,19 @@ func (c *compiler) windowTailJump(t *ssa.CallSite, n int, guard guardTo) {
 		c.a.Store(scratchA, 0, scratchB)
 	}
 	c.movImm(scratchA, link)
+	c.a.Load(regStack, scratchA, c.enc.LinkStack)
+	c.a.Op(amd64.Add, regStack, regLocals, true)
+	c.a.Store(regCtx, abi.OffStack, regStack)
+	c.a.Load(scratchB, regCtx, abi.OffBase)
+	c.a.AddMem(scratchB, scratchA, c.enc.LinkTop)
+	c.a.Load(scratchC, regCtx, abi.OffStackTop)
+	c.a.Store(scratchC, 0, scratchB)
+	same := c.a.NewLabel()
+	c.a.Load(scratchC, regCtx, abi.OffStackHigh)
+	c.a.CmpMem(scratchB, scratchC, 0, true)
+	c.a.Jcc(amd64.CondBE, same)
+	c.a.Store(scratchC, 0, scratchB)
+	c.a.Bind(same)
 	c.a.JmpMem(scratchA, c.enc.LinkBody)
 }
 

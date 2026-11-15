@@ -1385,6 +1385,13 @@ type Encoding struct {
 	// for a loop's step that resumes it natively (mir's Code.GenEntry), a
 	// uint64, 0 for none.
 	LinkGen int32
+	// LinkStack and LinkTop are, in register code's link, where its code's
+	// frame's operands start past its window, in bytes, and how many slots
+	// the frame takes past its base (mir's Code.StackAt and FrameSize),
+	// each a uint64: what a call in tail position that jumps to its tail
+	// entry (LinkBody) makes of the context's Stack and the VM's stack's
+	// top, as the code's call entry would.
+	LinkStack, LinkTop int32
 	// Mega says contexts point to a megamorphic cache (Context.Mega).
 	Mega bool
 	// FlagHTMLDDA is the flags byte's bit for Annex B's [[IsHTMLDDA]],
