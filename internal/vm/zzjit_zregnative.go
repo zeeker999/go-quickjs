@@ -2620,6 +2620,9 @@ func (r *Runtime) jitRegBuiltin(f *frame, c *regCode, w bytecode.RInstr, rpc int
 	}
 	if calls := f.cl.regCalls; uint(w.C()) < uint(len(calls)) {
 		if e := &calls[w.C()]; e.callee != o || e.kind != regCallNative {
+			if !f.cl.regCallsHeld {
+				r.regCallsHold(f.cl.closureCode)
+			}
 			*e = regCallCache{callee: o, kind: regCallNative}
 		}
 	}
