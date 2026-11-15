@@ -453,10 +453,11 @@ func (f *jitRegFeedback) madeCaptures(t *closure, k int) ([]int32, bool) {
 // madeInline is the InlineSite of t's function, a closure the function
 // makes (CalledClosure), to inline as a plain call of it, under the rules
 // a register callee's inlining follows (Inline): register code of the
-// form's own layout a call enters, no arguments kept, not the function's
-// own; its window the call's -- the function, a plain call's receiver,
-// which a callee reading it is given (InlineSite's ThisCell), the
-// arguments -- and no closure object: the builder's to know. An arrow that
+// form's own layout a call enters, its arguments kept only to be read
+// (ReadsArguments), not the function's own; its window the call's -- the
+// function, a plain call's receiver, which a callee reading it is given
+// (InlineSite's ThisCell), the arguments -- and no closure object: the
+// builder's to know. An arrow that
 // reads its this reads the maker's, its register 1, as closure_w gives it
 // the frame's register 1 (InlineSite's LexThis), as V8's inlined arrow
 // reads a context slot of its maker's -- not in a derived constructor,
@@ -471,9 +472,20 @@ func (f *jitRegFeedback) madeInline(t *closure) (ssa.InlineSite, bool) {
 	default:
 		return ssa.InlineSite{}, false
 	}
-	if rc == nil || !rc.Wide || fn.Async || fn.Generator || rc.UsesArguments || rc.ForwardsArguments || rc.KeepsArgs || fn.HasDirectEval ||
+	if rc == nil || !rc.Wide || fn.Async || fn.Generator || fn.HasDirectEval ||
 		fn == fb.fn || fn == fb.keep().fn || jitNoInline != nil && jitNoInline(fn) {
 		return ssa.InlineSite{}, false
+	}
+	// One that keeps its arguments only to read them by index and count
+	// them (jitRegReadsArguments) reads the call's (InlineSite's
+	// ReadsArguments), as Inline's callees and the stack form's made
+	// closures (closureInline); any other that keeps them is called.
+	reads := false
+	if rc.UsesArguments || rc.ForwardsArguments || rc.KeepsArgs {
+		if !jitRegReadsArguments(t) {
+			return ssa.InlineSite{}, false
+		}
+		reads = true
 	}
 	lexThis := fn.Kind == bytecode.KindArrow && fn.UsesThis
 	if lexThis && fb.fn.Kind == bytecode.KindDerivedConstructor {
@@ -491,7 +503,7 @@ func (f *jitRegFeedback) madeInline(t *closure) (ssa.InlineSite, bool) {
 	k := fb.keep()
 	in := ssa.InlineSite{
 		Program: p, Feedback: &jitRegFeedback{fb: &jitFeedback{r: r, fn: fn, cl: t, e: r.jitState().regLearnedOf(r.jitRegKeyOf(t)), root: k}, rc: rc, p: p},
-		Closure: uintptr(unsafe.Pointer(t)), Params: 2 + rc.Params, ThisSlot: -1, Window: true,
+		Closure: uintptr(unsafe.Pointer(t)), Params: 2 + rc.Params, ThisSlot: -1, Window: true, ReadsArguments: reads,
 	}
 	switch {
 	case lexThis:

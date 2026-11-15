@@ -1299,7 +1299,16 @@ Register code's are answered by `closure_w`'s register pc
 the instruction names, what it captures by the register code's `Caps` -- a
 register of the maker's, or one of its own captured bindings -- and its
 function lowered for an inlined frame (`madeInline`), called plainly, its
-window the call's. An arrow that reads its this reads the maker's register
+window the call's. One that keeps its arguments only to read them by index
+and count them (`jitRegReadsArguments`) reads the call's (`InlineSite`'s
+`ReadsArguments`), as an inlined call's callee does and the stack form's
+made closure (`closureInline`); any other that keeps them is made and
+called. An exit inside the inlined closure that teaches nothing counts
+against inlining it at its call, as at an inlined call's (`jitInlineLeft`):
+past `jitInlineExits` the call's shape is no longer given (`CallShape`'s
+`notInline`), and the closure is made and called natively -- one whose
+reads past the call's count are Go's had left native code at every call.
+An arrow that reads its this reads the maker's register
 1, as `closure_w` gives it the frame's (`InlineSite`'s `LexThis`), but in
 a derived constructor, whose this may not be bound yet. A scope's end that
 closes a register it captures (`close_regs`, lowered to `ir.CloseUpvalues`
