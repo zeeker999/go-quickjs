@@ -308,13 +308,19 @@ func (f *jitRegFeedback) Accessor(pc int) (ssa.AccessorSite, bool) {
 // accessorInline is the getter or setter callee, cl's function object, of
 // a register read or write, to inline (AccessorSite's Inline), as a
 // method's call of it is (Inline): register code native callers may call,
-// not the compiled function's, nor an arrow; its window the function, from
-// a cell (InlineSite's FunctionCell), the receiver, a setter's value.
+// not the compiled function's, nor an arrow, nor one that keeps its
+// arguments (regCode's args), as the stack form inlines no accessor that
+// reads them (jitInlinesAt): the builder leaves such a callee's
+// arguments.length and arguments[k] to an exit, whose frame of the
+// inlined level is given the arguments of a call's window alone
+// (jitRegInlineArgs) -- a setter's, inlined, counted none. Its window the
+// function, from a cell (InlineSite's FunctionCell), the receiver, a
+// setter's value.
 func (f *jitRegFeedback) accessorInline(callee *Object, cl *closure, write bool) (ssa.InlineSite, bool) {
 	r := f.fb.r
 	argc := jitB2i(write)
 	if cl.reg == nil || !r.jitRegCallable(callee, cl, cl.reg, argc) || callee.fn().arrow || cl.fn == f.fb.fn || cl.fn == f.fb.keep().fn ||
-		jitNoInline != nil && jitNoInline(cl.fn) {
+		jitNoInline != nil && jitNoInline(cl.fn) || cl.reg.args {
 		return ssa.InlineSite{}, false
 	}
 	p, err := f.fb.r.jitRegLower(cl, cl.reg.rc, jitLowerInline)
