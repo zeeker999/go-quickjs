@@ -730,6 +730,14 @@ general register: a chain of operations through one register waits on
 the store's forwarding alone, a move between the register files a link
 fewer (`try_finally` 12.9 to 10.2 ns, and as fast with no try
 statement: the jump over its handler's copy was never the cost).
+A destructuring's step over an array by the intrinsic iterator
+(`iter_step`), as `iter_next` steps one, undefined once it is done; and a
+cursor's close (`iter_close`): a for-in's marked done, an array's
+released (below, "for-of and for-in loops"), either where nothing is to
+be called -- the cursor done, or nothing up %ArrayIteratorPrototype%'s
+chain with a return method, the realm's `arrayIterCell` valid -- and
+any other done cursor left as it is; laid after the rarer paths, so that
+they move none of them (`local_destruct` 26.9 to 17.9 ns locally).
 A fast path that misses jumps to
 the exit; nothing is written before it does. arm64 answers one case more:
 NaN made an integer -- ToInt32's 0, an integer typed array's element 0
@@ -1063,7 +1071,33 @@ are.
   leaves the loop closes it on the way out as it runs a finally clause
   (`iter_close`, its error thrown), and `iter_next` is outside the
   ranges, so that an iterator whose `next` threw is not closed. A for-in
-  cursor needs no closing. A pattern or a member as the target, a
+  cursor needs no closing, but a break, a continue of an outer loop or a
+  return that leaves the loop marks it done all the same (`iter_close`,
+  a prot of the loop's with no ranges, which a throw passes by), so that
+  the next loop takes it (`newForInObject`) rather than making one: a loop
+  left by a break had made a 160-byte cursor each time (`for_in_break`
+  104 to 44 ns locally). An array's cursor that `iter_close` or
+  `iter_close_throw` closes -- a pattern's end, a for-of left by a break --
+  is released (`iterState.released`), its register read no more, and the
+  next cursor over an array takes it (`arrCursor`): every destructuring
+  of an array had made one. Whether nothing up an object's prototype chain
+  has an enumerable key, which every for-in asks, is kept in the realm by
+  the chain's first object while the chain's validity cell holds
+  (`protosNoEnum`), its prototypes' elements, which the cell does not see,
+  looked at each time: each loop had walked Object.prototype's keys.
+  A dictionary's keys -- a plain object whose layout is its own -- are
+  made once for its layout and kept, the last dictionary's
+  (`dictForIn`), the layout remembered as a cache remembers one, so that
+  a key added, deleted or redefined gives it a new identity: while the
+  object keeps it, its keys are these, and the loop's steps hand them out
+  natively, as a shared layout's, rather than each looked up again by Go
+  (`dict_for_in` 71 to 11 ns locally). A pattern's rest element over an
+  array whose rest is all in its dense storage is copied at once
+  (`regIterRest`), each step having read an element there, running
+  nothing. A step of an iterator of script reads its result's `done` and
+  `value` where they are its own data properties, as Get reads them,
+  without the generic read's walk (`regStepOf`).
+  A pattern or a member as the target, a
   captured lexical binding (each turn's is a new one) and `for await`
   stay the stack form's.
 
@@ -1182,6 +1216,18 @@ the allocation of 4 rather than 8 (the tree's keeps its 2 locals), and
   where no job is waiting: the job the await would queue would be the
   queue's next, and the frame would be resumed with that value. The first
   run of an async function, which its caller's code follows, never does.
+- **An async function's first run is a call.** A call site of an async
+  function that keeps no arguments, has no direct eval and nothing of its
+  surroundings (`funcData.extra`) runs its body in the call's window as a
+  call runs a callee (`regAsyncRun`), with no generator: one that returns
+  or throws before it awaits settles its promise and is done, and one that
+  awaits makes its generator then, from the window as it is -- its
+  registers from `genFrom` copied, its captures moved there -- and the
+  await's job queued as `runAsync`'s first step queues it. What runs, and
+  in what order, is the same (`TestAsyncFirstRunOrder`, Node's order);
+  what is saved is the generator, the copies of the window in and out and
+  a frame for a call that never awaits, and the copy in for one that does
+  (`async_call` 318 to 192 ns locally, `async_chain` 1,691 to 1,425).
 
 ## Closures and upvalues
 

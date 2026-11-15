@@ -53,6 +53,10 @@ type iterState struct {
 	delegation bool
 
 	done bool
+	// released marks an array's cursor whose loop or pattern has closed
+	// it (iter_close), which reads it no more: the next cursor over an
+	// array takes it (arrCursor).
+	released bool
 }
 
 // forInState is what a for-in's cursor walks.
@@ -172,9 +176,11 @@ func (r *Runtime) startForIn(v Value) (Value, error) {
 	// further up adds. When that is the object itself, its own keys are
 	// distinct and none needs remembering.
 	last := o
-	for cur := o.proto(); cur != nil; cur = cur.proto() {
-		if !noEnumerableKeys(cur) {
-			last = cur
+	if !protosNoEnum[struct{}](r, o) {
+		for cur := o.proto(); cur != nil; cur = cur.proto() {
+			if !noEnumerableKeys(cur) {
+				last = cur
+			}
 		}
 	}
 	// A plain object whose keys are all its own, of a layout objects share,
@@ -199,6 +205,10 @@ func (r *Runtime) startForIn(v Value) (Value, error) {
 		// its table's, in order, each asked of its flags where it is,
 		// rather than listed, then each looked up again.
 		if o.class == ClassObject && len(o.elemsOf()) == 0 && proxyOf(o) == nil {
+			if c, s := dictForIn[struct{}](r, o); c != nil {
+				st.keys, st.keyAtoms, st.shape = c.keys, c.atoms, s
+				return r.newForInObject(st, false), nil
+			}
 			if ks, ok := r.tableKeys(o); ok {
 				st.keys, st.keyAtoms = ks.keys, ks.atoms
 				return r.newForInObject(st, false), nil
@@ -343,7 +353,7 @@ func (r *Runtime) startForOf(v Value) (Value, error) {
 		o := v.Object()
 		if o.class == ClassArray && o.flags&objHasSparseElements == 0 &&
 			r.usesIntrinsicArrayIterator(o) {
-			return r.newIterObject(iterState{arr: o}), nil
+			return arrCursor[struct{}](r, o), nil
 		}
 		// A generator whose iterator method and next are the intrinsics,
 		// inherited through ordinary objects, is its own iterator, and

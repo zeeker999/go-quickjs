@@ -1116,6 +1116,9 @@ func armEmit(v *variant) (*block, error) {
 	h(bytecode.RAddI32, func() { g.int32Of(FAdd, false) })
 	h(bytecode.RSubI32, func() { g.int32Of(FSub, false) })
 	h(bytecode.RAddII32, func() { g.int32Of(FAdd, true) })
+	// A cursor's close and a destructuring's step (arm64_cursor.go).
+	h(bytecode.RIterClose, g.iterClose)
+	h(bytecode.RIterStep, g.iterStep)
 
 	for n, l := range g.exits {
 		if n == 0 {

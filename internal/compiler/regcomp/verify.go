@@ -201,6 +201,9 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 			// From x - K, SC is -K, which a K of 16 bits keeps in them.
 			ok = reg(a) && reg(b) && (w.X() == 0 || w.X() == bytecode.RAddII32Sub && w.SC() != -1<<15) &&
 				pc < len(rc.Aux) && int64(rc.Aux[pc]) < int64(len(fn.Code))
+		case bytecode.RIterClose:
+			// X: RIterCloseForIn for a for-in loop's cursor.
+			ok = (w.X() == 0 || w.X() == bytecode.RIterCloseForIn) && coldOK(rc, fn, pc, w, reg, site)
 		default:
 			// The operations of no hot loop, whose X is 0.
 			ok = w.Op().Cold() && w.X() == 0 && coldOK(rc, fn, pc, w, reg, site)
