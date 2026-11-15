@@ -221,6 +221,19 @@ func (r *Runtime) jitRegLifeOf(cl *closure) *jitEntry {
 	return r.jitState().regLearnedOf(r.jitRegKeyOf(cl))
 }
 
+// jitRegLifeIfAny is jitRegLifeOf(cl) where cl's function has that state
+// already, and nil where it has none -- nor the runtime the JIT's state --
+// which it makes none of.
+func (r *Runtime) jitRegLifeIfAny(cl *closure) *jitEntry {
+	if e := cl.closureCode.jitReg; e != nil && e.life != nil {
+		return e.life
+	}
+	if r.jit == nil {
+		return nil
+	}
+	return r.jit.regLearned[r.jitRegKeyOf(cl)]
+}
+
 // jitRegNativeCallee compiles cl's function's register code c for the
 // native callers that call it through its link, which has none yet: as the
 // stack form's native callers have a callee with no code compiled at their
@@ -1152,7 +1165,7 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 		// interrupt budget did.
 		cc := cl.closureCode
 		work := jitRegEdgeWork(cc)
-		if life := r.jitRegLifeOf(cl); !life.regFed && !life.warming && !life.invalid && cc.jitReg == nil {
+		if life := r.jitRegLifeIfAny(cl); (life == nil || !life.regFed && !life.warming && !life.invalid) && cc.jitReg == nil {
 			// Its loops' first work, before its budget begins: V8's
 			// interrupt budget for feedback allocation, whose end makes a
 			// function's feedback vector, which holds its budget, as the
@@ -1175,6 +1188,12 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 				// The interrupt budget's check, before the feedback's work
 				// is done.
 				return target
+			}
+			if life == nil {
+				// Its feedback's work done: its state made now, as the stack
+				// form's entry is made only then (jitWarmFor) -- a runtime
+				// whose loops had done less, a cold one, has none.
+				life = r.jitRegLifeOf(cl)
 			}
 			life.regFed, work = true, 0
 		}
