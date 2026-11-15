@@ -637,7 +637,7 @@ form's closure counts its calls -- and not refused for host operations
 alone (`jitRegLongWarming`), is compiled once its budget is spent, as
 any function -- the interpreter's runs of it that Go makes for its native
 callers count it down -- unless its caller calls it often: no longer than
-a function inlines in all (`ssa.MaxInlineTotal`) and invoked at least 15
+a function inlines in all (`ssa.MaxInlineTotal`) and invoked at least 5
 hundredths as often as the caller, V8's `min_inlining_frequency`, each
 counted by its runs while it had no code (`jitRegInvoked`, the budget's
 ticks) and the caller's since by its entries at its start, its link's
@@ -2398,14 +2398,17 @@ of Are We Fast Yet's functions of unique names, so a register instruction
 counts 20/17 of one (`ssa`'s `inlineSize`), and a register callee takes the
 budget the same code takes in the stack form. How often
 is V8's call frequency where the feedback knows it (`Frequency`): a call
-made less often than `ssa.MinInliningFrequency` (0.15, V8's
-`min_inlining_frequency`) for each invocation of the function compiled is
-not inlined, and is made a native call, unless its callee is small: 10
-instructions or fewer as the bounds count them (`maxInlineSmall`, V8's
-`max_inlined_bytecode_size_small` of 27 bytes; 8 register instructions),
-which V8 inlines however seldom the call is made, its code about the
-call's, and which then inlines no more than a small callee's worth with
-its own callees (`smallCallee`); the most frequent come
+made less often than `ssa.MinInliningFrequency` (0.05, V8's
+`min_inlining_frequency` as V8 runs: the flag's 0.15 is lowered to 0.05
+wherever Maglev is on, as it is by default) for each invocation of the
+function compiled is not inlined, and is made a native call, unless its
+callee is small: 10 instructions or fewer as the bounds count them
+(`maxInlineSmall`, V8's `max_inlined_bytecode_size_small` of 27 bytes; 8
+register instructions), which V8's Turbolev inlines however seldom the
+call is made, its code about the call's, and which then inlines no more
+than a small callee's worth with its own callees (`smallCallee`); the
+frequencies are known once the function has run 59 times
+(`jitCountsEnough`); the most frequent come
 first, a call whose frequency is not known taken as made once outside the
 loops and more often inside one (`ssa`'s `inlineOrder`). Register code's
 frequencies are what the feedback dispatcher counted (see

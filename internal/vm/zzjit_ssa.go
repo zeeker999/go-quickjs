@@ -10278,8 +10278,8 @@ func (r *Runtime) jitRefillPools(f *frame, e *jitEntry, pc, sp int, in bytecode.
 // jitInliningFrequency is, in hundredths, how many calls of a callee too
 // long to inline each invocation of the caller deciding its call must have
 // made for it to be compiled for that caller at once (jitCalledOften):
-// V8's min_inlining_frequency, 0.15.
-const jitInliningFrequency = 15
+// V8's min_inlining_frequency as V8 runs, 0.05 (ssa.MinInliningFrequency).
+const jitInliningFrequency = 5
 
 // jitLongWarming reports whether cl's function is warming up, its budget
 // not spent (jitWarmFor): an entry warming, or none yet where it would be
