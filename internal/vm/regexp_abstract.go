@@ -678,6 +678,13 @@ func (r *Runtime) regExpReplaceIn(rx Value, args []Value, fl regexp.Flags, direc
 			return Undefined, err
 		}
 	}
+	// A function called for each match kept ready for its calls.
+	var ready *regCallback
+	if functional {
+		if ready = r.regCallbackOf(replValue, Undefined); ready != nil {
+			defer ready.end()
+		}
+	}
 	for k := 0; k < count; k++ {
 		if err := sb.check(); err != nil {
 			return Undefined, err
@@ -763,7 +770,13 @@ func (r *Runtime) regExpReplaceIn(rx Value, args []Value, fl regexp.Flags, direc
 			if !named.IsUndefined() {
 				callArgs = append(callArgs, named)
 			}
-			res, err := r.callDirect(replValue, Undefined, callArgs)
+			var res Value
+			var err error
+			if ready != nil {
+				res, err = ready.call(callArgs)
+			} else {
+				res, err = r.callDirect(replValue, Undefined, callArgs)
+			}
 			if err != nil {
 				return Undefined, err
 			}

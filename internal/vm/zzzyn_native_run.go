@@ -181,8 +181,7 @@ func (r *Runtime) nativeCallback(c *regCode) (*regState, *nativeCtx) {
 // nativeLoop is nativeRun's run of frame f, the base frame of st, whose
 // context ctx is, from instruction start: the code entered, and entered
 // again after each instruction it leaves to Go, until the frame returns
-// or throws. A callback's frame kept across calls (regCallback) is run by
-// it each call.
+// or throws (nativeDrive).
 func (r *Runtime) nativeLoop(st *regState, ctx *nativeCtx, f *frame, c *regCode, start int) (Value, error) {
 	ctx.depth, ctx.filled = 0, 0
 	nativeSetTop(ctx, uintptr(unsafe.Pointer(st.regs)), f, c)
@@ -192,16 +191,27 @@ func (r *Runtime) nativeLoop(st *regState, ctx *nativeCtx, f *frame, c *regCode,
 	if nativeCount {
 		ctx.cntExits = uintptr(unsafe.Pointer(&nativeExits[0]))
 	}
+	return r.nativeDrive(st, ctx, false)
+}
+
+// nativeDrive is nativeLoop's loop: the code entered -- but the first
+// time where entered says the caller has entered it -- and entered again
+// after each instruction it leaves to Go, until the base frame of st
+// returns or throws.
+func (r *Runtime) nativeDrive(st *regState, ctx *nativeCtx, entered bool) (Value, error) {
 	// restarted says a tail call has given the frame to its callee in
 	// place and the code goes on with the callee's (nativeRestart).
 	restarted := false
 	for {
-		ctx.budget = int64(r.backEdges)
-		if nativeCount {
-			atomic.AddInt64(&nativeEnters, 1)
+		if !entered {
+			ctx.budget = int64(r.backEdges)
+			if nativeCount {
+				atomic.AddInt64(&nativeEnters, 1)
+			}
+			nativeEnter(nativeBase, unsafe.Pointer(ctx))
+			r.backEdges = int(ctx.budget)
 		}
-		nativeEnter(nativeBase, unsafe.Pointer(ctx))
-		r.backEdges = int(ctx.budget)
+		entered = false
 		if d := ctx.retDone; d != 0 {
 			// The base frame returned, or yielded (2): its value in the
 			// scratch.
@@ -280,6 +290,58 @@ func (r *Runtime) nativeLoop(st *regState, ctx *nativeCtx, f *frame, c *regCode,
 			return r.nativeFinish(st, ctx, v, restarted)
 		}
 	}
+}
+
+// nativeCallbackRun runs a callback's frame f, its registers at regs, in
+// its code entry kept from one call to the next (regCallback): where the
+// last call left the state and the context's top frame made for the same
+// frame record, only the code's first instruction and the budget are
+// given before it is entered, and a return with no exit is read here.
+// Anything else -- an exit, a throw, a frame given to a callee in place --
+// goes on as nativeLoop does (nativeDrive), and the next call makes the
+// state and the top frame again.
+func (r *Runtime) nativeCallbackRun(cb *regCallback, f *frame, regs *[1 << 16]Value) (Value, error) {
+	st, ctx, c := cb.st, cb.ctx, cb.c
+	if cb.set != f {
+		st.f, st.c, st.cl, st.err = f, c, cb.cl, nil
+		st.wb = cb.base
+		st.regs = regs
+		ctx.depth, ctx.filled = 0, 0
+		nativeSetTop(ctx, uintptr(unsafe.Pointer(regs)), f, c)
+		ctx.cntExits = 0
+		if nativeCount {
+			ctx.cntExits = uintptr(unsafe.Pointer(&nativeExits[0]))
+		}
+		cb.set = f
+	}
+	// The base frame the top one: a call the last run made and returned
+	// from natively left the deeper state's.
+	if ctx.top != st {
+		ctx.top = st
+	}
+	ctx.topOK = 1
+	ctx.ip = uintptr(c.code)
+	ctx.budget = int64(r.backEdges)
+	if nativeCount {
+		atomic.AddInt64(&nativeEnters, 1)
+	}
+	nativeEnter(nativeBase, unsafe.Pointer(ctx))
+	r.backEdges = int(ctx.budget)
+	if ctx.retDone == 1 && ctx.used == 0 {
+		// The frame returned with no exit: its value in the scratch.
+		ctx.retDone = 0
+		v := Value{num: math.Float64frombits(ctx.scratch[sV0]), ref: *(*unsafe.Pointer)(unsafe.Pointer(&ctx.scratch[sV1]))}
+		ctx.scratch[sV1] = 0
+		if nativeCount {
+			atomic.AddInt64(&nativeCalls, ctx.made)
+			ctx.made = 0
+		}
+		return v, nil
+	}
+	cb.set = nil
+	v, err := r.nativeDrive(st, ctx, true)
+	nativeReset(ctx)
+	return v, err
 }
 
 // nativeRestart goes on with the base frame given to a callee in place by
@@ -792,7 +854,40 @@ var nativeLitFn func(*[1 << 16]Value, bytecode.RInstr, int, *nativeCtx)
 // the exit's protocol called with no exit (nativegen's light): rhCallW's
 // call of it, regNative, in the top frame's state, which the code has
 // made, without rhCallW's search of the cache the code has searched.
+//
+// A built-in it applies without a frame -- Math's functions, push and pop,
+// the native leaves whose checks pass (regNative's first cases) -- is
+// applied first, with none of the state an exit makes: it throws nothing,
+// runs no code and reads nothing of the frame. Anything else is
+// regNative's, which asks again.
 func nativeBuiltin(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
+	if r := st.r; r.meter == nil {
+		fd := st.cl.regCalls[w.C()].callee.fn()
+		if fd.mathOp != 0 || fd.elemOp != 0 {
+			base := st.wb + int(w.A())
+			args := r.stack[base+2 : base+2+int(w.X())]
+			v, ok := Undefined, false
+			if fd.mathOp != 0 {
+				v, ok = mathCall(fd.mathOp, args)
+			} else {
+				this := Undefined
+				if w.Op().MethodCall() {
+					this = r.stack[base+1]
+				}
+				if op := fd.elemOp; op < elemNativeFirst {
+					v, ok = r.pureElemOp(op, this, args, true)
+				} else if leafChecks[op](r, this, args) {
+					var err error
+					v, err = fd.native(r, this, args)
+					ok = err == nil
+				}
+			}
+			if ok {
+				r.stack[st.wb+int(w.B())] = v
+				return pc + 1
+			}
+		}
+	}
 	st.kept.pc = pc + 1
 	st.f.pc = regSrc(st.c, pc) + 1
 	return st.done(st.r.regNative(st.cl.regCalls[w.C()].callee, w, st.wb))

@@ -455,13 +455,24 @@ func armEmit(v *variant) (*block, error) {
 				a.Bind(notWord)
 			}
 			// Two strings: the same one, of different lengths, or two
-			// flat ones compared by their text (flatEq); any other pair
-			// Go's.
+			// flat ones compared by their text (flatEq); two BigInts held
+			// in their Values, equal only if their words are; any other
+			// pair Go's.
+			nonStr, strs := a.NewLabel(), a.NewLabel()
 			for _, x := range []Reg{r9, r8} {
-				g.tagged(x, g.exit)
+				g.tagged(x, nonStr)
 				a.CmpImm(rC, int64(KindString), false)
-				a.BCond(NE, g.exit)
+				a.BCond(NE, nonStr)
 			}
+			a.B(strs)
+			a.Bind(nonStr)
+			a.MovImm(rC, shortBigBase)
+			a.Cmp(r9, rC, true)
+			a.BCond(LO, g.exit)
+			a.Cmp(r8, rC, true)
+			a.BCond(HS, same)
+			a.B(g.exit)
+			a.Bind(strs)
 			a.Load(rW, rIP, 0)
 			a.Load(r9, rD, 8)
 			a.Load(r8, rS, 8)
