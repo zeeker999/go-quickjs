@@ -753,11 +753,15 @@ on. A delegation's step is left to the interpreter, which goes on with
 the frame there. A
 synchronous generator's code a loop's step or a call of `next` resumed
 natively suspends it at a `yield` itself (see [Control
-flow](#control-flow), "Generators' steps"). A generator's code is compiled
-at its loops' samples, and one of no loop once the resumptions Go made of
-it have done `jitHotWork` of its code, a sample of its hotness at each
-(`jitRegResumed`), as the stack form counts a function's calls' work
-(`jitHotEntry`). Its entries are none OSR's -- none escape analysis may
+flow](#control-flow), "Generators' steps"). A generator's or an async
+function's code is compiled at its loops' samples and by the resumptions
+Go makes of it, each an invocation that spends its length of the budget
+(`jitRegResumed`, `jitRegHot`), as the stack form's resumption does
+(`jitResume`, `tryJITAt`): an async function whose loop awaits at every
+turn is resumed at every turn, and its back edges may be too few for a
+sample. Code refused for host operations alone is asked again once its
+resumptions have done `jitHotWork` of it, as the stack form counts such a
+function's calls' work (`jitHotEntry`). Its entries are none OSR's -- none escape analysis may
 drop, for its resumptions' sake -- so its loops' headers are found from
 the program (`jitRegShape`).
 
