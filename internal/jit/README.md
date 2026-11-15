@@ -1486,8 +1486,8 @@ uses before that code can run (the VM's `spillsFor`), and a context made
 later the same (`jitGrowContexts`), keeping the words a context's slots
 hold, which native code suspended in a call of Go may have spilled: no
 entry, call or callee checks the room, and native code may call the code at
-any level. The room counts against the JIT's budget, which nothing takes
-back while the runtime lives. An exit's description, a call's state and a
+any level. The room of the first chunk's contexts counts against the JIT's
+budget, which nothing takes back while the runtime lives. An exit's description, a call's state and a
 call of Go's operands name a slot by its number as before (`ExitSpill`,
 `abi.SpillOffset`), and Go reads it where it is (`Context.SpillAt`,
 `Context.Word`). Its words are raw, as `Spill`'s are: a reference spilled
@@ -1598,10 +1598,28 @@ field at its offset (`abi.Off*`), never by the VM's types.
 | `Global`, `GlobalLex`, `LexNames`, `GlobalEpoch` | A script's global and lexical bindings, and the count of changes to the global object's table. |
 | `TypedEpoch`, `Mega`, `Hints`, `Loop`, `Shade`, `Bounds`, `TailFrame` | The typed arrays' epoch, the megamorphic cache, the hint table, an array loop's index, the marking's shading cell, the levels' limits (`abi.Bounds`' `LevelLimit`, `TailLevel`), and a frame a tail call gives up. |
 
-The contexts are the runtime's, an array of them, a native call's callee in
-the next: 4 at first, as many more each time a call finds none past its own,
-up to `jitContextsMax` (96), some 17 KB each. A call past the deepest is a
-call of Go.
+The contexts are the runtime's, a native call's callee in the next, as V8's
+optimized frames are on the machine stack: 4 at first, and a chunk of as
+many more as there are each time a call finds none past its own, some 17 KB
+a context. A chunk is allocated apart and linked to the last (`Next`,
+`Prev`), and no context ever moves: native code, its callers' `ReturnTo`
+and `Prev`, and the levels Go pins and puts off hold their addresses. They
+grow as deep as the VM's frames may go (`Config.MaxCallDepth`, the VM's
+`jitContextsMost`), and `Bounds`' `LevelLimit` stops a call at the frames'
+limit as well as at the last context: a call past the last context is a
+call of Go, which grows them for the calls after it, and one past the
+frames' limit is a call of Go too, which throws the interpreter's
+RangeError at the interpreter's depth. The first chunk counts against the
+JIT's budget; the rest are the native levels' stack, which the depth limit
+bounds, as V8's stack is not of its code space. They are given back as Go
+shrinks a goroutine's stack: at each of the cache's flush ticks
+(`jitShrinkContexts`), the chunks past every context in use -- below the
+VM's `ctxTop`, which every run and call of Go moves past the levels it is
+under, or `Live` -- and past every one native code has entered since the
+last tick, which a frame's `Locals` set at its entry marks and the tick
+clears, are dropped. The collector scans them as Go memory: a chunk made
+while it marks is allocated marked, and every pointer stored into it after
+is stored with the write barrier, Go's or native code's.
 
 **The value encoding** (`abi.Encoding`) is given to the backend as data, so
 that `mir` never imports the VM. A VM value is `ValueSize` bytes, a number
