@@ -1683,7 +1683,7 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 	// on after a host exit of one (loop), as the stack form's run is
 	// entered at the loop again after each (jitGoOn).
 	osr := loop || resume == 0 && ipc < len(p.Origin) && e.isLoop(int(p.Origin[ipc]))
-	s.regRuns[idx] = jitRegRun{f: f, c: c, e: e, wb: wb, osr: osr, edges: r.backEdges - s.pollCredit, rpc: -1}
+	s.regRuns[idx] = jitRegRun{f: f, c: c, e: e, wb: wb, osr: osr, edges: r.backEdges - s.pollCredit, rpc: -1, stretch: r.backEdges - s.pollCredit}
 	s.regPending = jitGoPending{}
 	s.entries++
 	s.ssaEntries++
@@ -1916,6 +1916,16 @@ func (r *Runtime) jitRegStretchWork(e *jitRegEntry, ctx *abi.Context, ipc, edges
 	}
 }
 
+// jitRegRunWork is the work run's stretch has done natively so far, as
+// its end will count it (jitRegStretchWork): the back edges it has taken,
+// each its code's loops' mean length.
+func (r *Runtime) jitRegRunWork(run *jitRegRun) int64 {
+	if back := run.stretch - (r.backEdges - r.jit.pollCredit); back > 0 && run.e != nil {
+		return int64(back) * int64(run.e.loopMean)
+	}
+	return 0
+}
+
 // jitRegRunGoProfit judges a call of Go e's code makes at register pc rpc
 // in run, a run begun at a loop's header, as jitRunGoProfit does the stack
 // form's: each costs native code what an exit and an entry would
@@ -2062,6 +2072,11 @@ type jitRegRun struct {
 	osr   bool
 	edges int
 	rpc   int
+	// stretch is the back-edge counter, less the polls' credit, when the
+	// run's stretch began, which its end counts the work of
+	// (jitRegStretchWork), and a call of Go during it the work so far
+	// (jitRegRunWork).
+	stretch int
 	// own counts the levels of the call's own that run e's code, which
 	// leaving unwinds (jitRegCompileDueNow): none for the run's own, and,
 	// -1, counted when asked for a call of Go from a native callee's code

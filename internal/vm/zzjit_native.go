@@ -781,6 +781,10 @@ type jitEntry struct {
 	// tierBase, with tierMark unchanged (jitLearnedDue).
 	learning bool
 	tierBase int64
+	// tierLearned is what a register function's code had learned
+	// (jitLearnedCount) when its budget for it last began, which a call
+	// of Go its native run makes compares (jitRegLearnedDueWith).
+	tierLearned int
 	// starts counts Go's entries at a function's start, not into a loop;
 	// goOns the runs of it the interpreter went on with where its code
 	// left them (jitGoOn).

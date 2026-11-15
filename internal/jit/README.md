@@ -725,7 +725,16 @@ stack form's is.
   length, with the work its native stretches did -- their back edges, each
   its loops' mean length, and the instructions to where they left
   (`jitRegStretchWork`, as `jitSSAProfit` counts it) -- and the
-  interpreter's in its loops before Go entered them (`jitRegSpent`). It is
+  interpreter's in its loops before Go entered them (`jitRegSpent`). A
+  call of Go its native run makes counts the work the run's stretch has
+  done so far (`jitRegRunWork`), as V8's optimized code spends its budget
+  at each `JumpLoop`, not only where the stretch ends -- at an exit, or at
+  a poll the varied interrupt budget makes, which had a loop that learned
+  at its calls of Go compiled again a budget after a poll that came
+  wherever it came. What it learns after its budget began raises what is
+  left to `jitICThreshold` invocations' worth from then, at the next such
+  call (`jitEntry`'s `tierLearned`), as V8's `NotifyICChanged` raises a
+  budget when feedback changes, not from where the budget was spent. It is
   compiled at a call that enters it (`jitRegEnter`, the stack form's
   `tryJITAt`), even judged slow, which would never be entered and never
   compiled for what it learned otherwise; at a call of Go it makes, which

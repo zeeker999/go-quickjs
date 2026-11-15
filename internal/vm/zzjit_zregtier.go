@@ -579,14 +579,22 @@ func (r *Runtime) jitRegReopt(cl *closure, e *jitRegEntry) {
 // Go finishes levels of it, or runs it, which go on in their own code, as
 // V8 installs new code while older frames are in the old.
 func (r *Runtime) jitRegLearnedDue(cl *closure, e *jitRegEntry) bool {
-	return r.jitRegLearnedDueWith(cl, e, len(r.jit.ssaCtxs))
+	return r.jitRegLearnedDueWith(cl, e, len(r.jit.ssaCtxs), 0)
 }
 
 // jitRegLearnedDueWith is jitRegLearnedDue for a call of Go whose leaving
 // unwinds the native calls in the contexts from limit on
 // (jitRegCompileDueNow): not while a native call of e's code in one below
-// limit has not returned.
-func (r *Runtime) jitRegLearnedDueWith(cl *closure, e *jitRegEntry, limit int) bool {
+// limit has not returned. pending is the work the run's stretch under way
+// has done natively, which its end will count (jitRegRunWork): counted at
+// each call of Go, as V8's optimized code spends its function's budget at
+// each JumpLoop, not only where the stretch ends -- at an exit, or at a
+// poll the varied interrupt budget makes -- a loop that learned at its
+// calls of Go and runs on natively was compiled again for it a budget
+// after its first poll or later, wherever that came: Go made 4,237 of a
+// loop's constructions of arrays at one sequence of budgets, 730 at
+// another, before its code was compiled again to make them from pools.
+func (r *Runtime) jitRegLearnedDueWith(cl *closure, e *jitRegEntry, limit int, pending int64) bool {
 	life := e.life
 	if e.invalid || e.code == nil || life == nil || !life.reopt || r.jit.regPendingJobs[e.key] != nil || r.jit.regCalledBelow(e, limit) {
 		return false
@@ -595,10 +603,22 @@ func (r *Runtime) jitRegLearnedDueWith(cl *closure, e *jitRegEntry, limit int) b
 	if c == nil {
 		return false
 	}
-	spent := r.jitRegSpent(c, e)
+	spent := r.jitRegSpent(c, e) + pending
 	if !life.learning {
 		life.learning, life.tierBase, life.tierMark = true, spent, jitLearnedMark(cl, life)
-		life.tierBudget = jitRegBudget(r.jitCallThreshold, c)
+		life.tierBudget, life.tierLearned = jitRegBudget(r.jitCallThreshold, c), jitLearnedCount(life)
+		return false
+	}
+	if n := jitLearnedCount(life); n != life.tierLearned {
+		// Learned more since its budget began: what is left raised to
+		// jitICThreshold invocations' worth from now, as V8's
+		// NotifyICChanged raises a function's budget when its feedback
+		// changes. Noticed only once the budget was spent, the raise
+		// counted from then: a loop that learned its second call of Go a
+		// turn after its first spent a budget, then another, before it
+		// was compiled again for both.
+		life.tierBudget = max(life.tierBudget-(spent-life.tierBase), jitRegBudget(r.jitICThreshold, c))
+		life.tierBase, life.tierMark, life.tierLearned = spent, jitLearnedMark(cl, life), n
 		return false
 	}
 	if spent-life.tierBase < life.tierBudget {
@@ -1383,11 +1403,11 @@ func (r *Runtime) jitRegCompileDueNow(run *jitRegRun, idx int) bool {
 	if e == nil || e.life == nil || !e.life.reopt {
 		return false
 	}
-	limit := idx
+	limit, pending := idx, r.jitRegRunWork(run)
 	if run.own < 0 {
 		// A native callee's: the calling level, and those below it of the
 		// call's, from the run's context on, which its leaving unwinds.
-		limit = run.root
+		limit, pending = run.root, 0
 	}
-	return r.jitRegLearnedDueWith(run.f.cl, e, limit)
+	return r.jitRegLearnedDueWith(run.f.cl, e, limit, pending)
 }
