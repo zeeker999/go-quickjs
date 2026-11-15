@@ -2015,7 +2015,7 @@ func TestSSANativeFromJavaScript(t *testing.T) {
 			if c.Kind != bytecode.ConstFunction {
 				continue
 			}
-			p, err := jitcompile.Lower(c.Fn)
+			p, err := jitcompile.LowerReg(c.Fn.RegCode(), c.Fn)
 			if err != nil {
 				continue
 			}

@@ -44,7 +44,7 @@ func lowerJS(t *testing.T, src string) *Func {
 	}
 	for _, c := range top.Constants {
 		if c.Kind == bytecode.ConstFunction {
-			p, err := jitcompile.Lower(c.Fn)
+			p, err := jitcompile.LowerReg(c.Fn.RegCode(), c.Fn)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -92,7 +92,7 @@ func TestOptimizeKeepsLoopsUnboxed(t *testing.T) {
 // What runs from each entry is still the slot IR's (TestBuildMatchesSlotIR).
 func TestEntriesLoadLiveLocals(t *testing.T) {
 	fn := compiledFunctionForTest(t, `function f(n){let s=0;for(let i=0;i<n;i++)s=(s+i)|0;let b=s+1;return b}`)
-	p, err := jitcompile.LowerSSA(fn)
+	p, err := jitcompile.LowerReg(fn.RegCode(), fn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func (sitesFeedback) NativeCalls(int) []CallSite        { return nil }
 // deoptimizations. A read left to Go whole has one.
 func TestEntriesAfterGuards(t *testing.T) {
 	fn := compiledFunctionForTest(t, `function f(o,n){let s=0;for(let i=0;i<n;i++){s=(s+o.x)|0;g()}return s}`)
-	p, err := jitcompile.LowerSSA(fn)
+	p, err := jitcompile.LowerReg(fn.RegCode(), fn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func (siteFeedback) NativeCalls(int) []CallSite          { return nil }
 // entry after it. None has an entry after it.
 func TestBuildPropertyMissesDeoptimize(t *testing.T) {
 	fn := compiledFunctionForTest(t, `function f(o,n){let s=0;for(let i=0;i<n;i++){s=(s+o.x)|0}return s}`)
-	p, err := jitcompile.LowerSSA(fn)
+	p, err := jitcompile.LowerReg(fn.RegCode(), fn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +361,7 @@ func TestBuildLoadsCapturedBindingsWhereRead(t *testing.T) {
 			fn = c.Fn
 		}
 	}
-	p, err := jitcompile.LowerSSAInline(fn)
+	p, err := jitcompile.LowerRegInline(fn.RegCode(), fn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,7 +424,7 @@ func TestBuildEntriesLeaveCapturedBindingsInCells(t *testing.T) {
 			fn = c.Fn
 		}
 	}
-	p, err := jitcompile.LowerSSAInline(fn)
+	p, err := jitcompile.LowerRegInline(fn.RegCode(), fn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,7 +470,8 @@ func TestOptimizeUnboxesLongPhiChains(t *testing.T) {
 		src.WriteString("g[0]=0;")
 	}
 	src.WriteString("s=s+i}return s}")
-	p, err := jitcompile.LowerSSA(compiledFunctionForTest(t, src.String()))
+	fn := compiledFunctionForTest(t, src.String())
+	p, err := jitcompile.LowerReg(fn.RegCode(), fn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,7 +511,8 @@ func TestOptimizeUnboxesLongPhiChains(t *testing.T) {
 // as any other is.
 func TestBuildNoEntriesAfterCallsOfGo(t *testing.T) {
 	src := "function f(g,n){let s=0;for(let i=0;i<n;i++){g();g();g();g();s=s+i}return s}"
-	p, err := jitcompile.LowerSSA(compiledFunctionForTest(t, src))
+	fn := compiledFunctionForTest(t, src)
+	p, err := jitcompile.LowerReg(fn.RegCode(), fn)
 	if err != nil {
 		t.Fatal(err)
 	}

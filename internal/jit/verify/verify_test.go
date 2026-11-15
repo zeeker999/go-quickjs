@@ -129,7 +129,7 @@ func lowered(t *testing.T, src string) []*ir.Program {
 			if c.Kind != bytecode.ConstFunction {
 				continue
 			}
-			for _, lower := range []func(*bytecode.Function) (*ir.Program, error){jitcompile.Lower, jitcompile.LowerSSA, jitcompile.LowerSSAInline} {
+			for _, lower := range []func(*bytecode.Function) (*ir.Program, error){regLowerForTest, regLowerInlineForTest} {
 				if p, err := lower(c.Fn); err == nil {
 					out = append(out, p)
 				}
@@ -535,7 +535,7 @@ func TestMirEmitted(t *testing.T) {
 			if c.Kind != bytecode.ConstFunction {
 				continue
 			}
-			for _, lower := range []func(*bytecode.Function) (*ir.Program, error){jitcompile.LowerSSA, jitcompile.LowerSSAInline} {
+			for _, lower := range []func(*bytecode.Function) (*ir.Program, error){regLowerForTest, regLowerInlineForTest} {
 				p, err := lower(c.Fn)
 				if err != nil {
 					continue

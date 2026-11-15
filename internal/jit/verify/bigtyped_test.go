@@ -60,7 +60,7 @@ func TestMirBigTypedRead(t *testing.T) {
 			if c.Kind != bytecode.ConstFunction {
 				continue
 			}
-			p, err := jitcompile.LowerSSAWith(c.Fn, jitcompile.Hints{ElementReads: elementReads(c.Fn)})
+			p, err := jitcompile.LowerRegWith(c.Fn.RegCode(), c.Fn, jitcompile.Hints{ElementReads: elementReads(c.Fn)})
 			if err != nil {
 				t.Fatalf("%s: %v", src, err)
 			}

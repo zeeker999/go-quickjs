@@ -46,7 +46,7 @@ func loweredSSA(t *testing.T, src string) []*ir.Program {
 	var out []*ir.Program
 	for _, c := range top.Constants {
 		if c.Kind == bytecode.ConstFunction {
-			p, err := jitcompile.LowerSSA(c.Fn)
+			p, err := jitcompile.LowerReg(c.Fn.RegCode(), c.Fn)
 			if err != nil {
 				t.Fatal(err)
 			}

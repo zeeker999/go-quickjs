@@ -31,7 +31,7 @@ func TestInlineCallsGiven(t *testing.T) {
 		{`function swap(fn, g) { for (let i = 0; i < 3; i++) { fn(i); fn = g } }`, true, 1},
 	} {
 		fn := compiledFunctionForTest(t, c.src)
-		p, err := jitcompile.LowerSSAInline(fn)
+		p, err := jitcompile.LowerRegInline(fn.RegCode(), fn)
 		if err != nil {
 			t.Fatalf("%s: %v", c.src, err)
 		}
@@ -67,7 +67,7 @@ func TestInlineCallsSmallLoop(t *testing.T) {
 		{`function big(a) { var s = 0; for (var i = 0; i < a.length; i++) { s += a[i] * 3 + (a[i] >> 2) - (a[i] & 7) + (a[i] | 1) + (a[i] ^ 5) + (a[i] << 1) + (a[i] % 9); } return s; }`, false},
 	} {
 		fn := compiledFunctionForTest(t, c.src)
-		p, err := jitcompile.LowerSSAInline(fn)
+		p, err := jitcompile.LowerRegInline(fn.RegCode(), fn)
 		if err != nil {
 			t.Fatalf("%s: %v", c.src, err)
 		}

@@ -13,7 +13,6 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/compiler"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
-	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
@@ -86,7 +85,7 @@ func TestMirForwardingCalls(t *testing.T) {
 			if c.Kind != bytecode.ConstFunction {
 				continue
 			}
-			for _, lower := range []func(*bytecode.Function) (*ir.Program, error){jitcompile.LowerSSA, jitcompile.LowerSSAInline} {
+			for _, lower := range []func(*bytecode.Function) (*ir.Program, error){regLowerForTest, regLowerInlineForTest} {
 				p, err := lower(c.Fn)
 				if err != nil {
 					continue
