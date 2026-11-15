@@ -79,3 +79,40 @@ func TestJITRegLowersOnce(t *testing.T) {
 		t.Fatalf("lowerings hold %d bytes, the JIT counts %d", n, s.lowerBytes)
 	}
 }
+
+// A deoptimization at an inlined register callee's write is learned in
+// what the callee's code learned (regLearned), and the code inlining it
+// compiled again reads it there: a write met at more than one shape --
+// here an array's length, the arrays of two shapes -- is megamorphic in
+// the callee's next inlining, as in its own code (megamorphicOf). Looked
+// for in the stack form's cache, which holds nothing of register code, it
+// was compiled for one shape at every compile of its caller, which
+// deoptimized there each time: Typescript's returnResolutionData,
+// rd.actuals.length = 0, inlined, had its caller compiled twelve times.
+func TestJITRegInlinedMegamorphicWrite(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	rts := regNativeRuntimes(t, `function Rd(id){this.actuals=[];this.exact=[];this.id=id}
+		function ret(rd){rd.actuals.length=0;rd.exact.length=0;return rd.id}
+		var rds=[new Rd(1),new Rd(2)];
+		function owner(n){let s=0;for(let i=0;i<n;i++){const rd=rds[i&1];rd.actuals.push(i);rd.exact.push(i,i);s+=ret(rd)}return s+rd2()}
+		function rd2(){return rds[0].actuals.length+rds[1].exact.length}`)
+	r := rts[0]
+	guards := r.jit.guards
+	for i := range 40 {
+		for k, rt := range rts {
+			fn, _ := rt.GetProp(Obj(rt.Global()), rt.Intern("owner"))
+			v, err := rt.Call(fn, Undefined, []Value{Float(500)})
+			if err != nil || !v.IsNumber() || v.Number() != 750 {
+				t.Fatalf("round %d, runtime %d: owner(500) = %v, %v; want 750", i, k, v, err)
+			}
+		}
+	}
+	// Two writes, each deoptimizing at its second shape, then at the shape
+	// it met before once the code is compiled again (jitDeoptSeenOp), as
+	// the stack form's code does.
+	if n := r.jit.guards - guards; n > 4 {
+		t.Errorf("%d guards failed in 40 rounds: the inlined writes deoptimized at every compile", n)
+	}
+}
