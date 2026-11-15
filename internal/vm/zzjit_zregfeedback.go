@@ -541,7 +541,7 @@ func (f *jitRegFeedback) callTarget(pc int) (*Object, *closure, bool) {
 	default:
 		return nil, nil, false
 	}
-	calls := f.fb.cl.regCalls
+	calls := f.fb.r.regCallsRestored(f.fb.cl, int(w.C()))
 	if int(w.C()) >= len(calls) || calls[w.C()].callee == nil {
 		return nil, nil, false
 	}
@@ -1046,7 +1046,7 @@ func (f *jitRegFeedback) nativeCalls(pc int) []ssa.CallSite {
 // in their tables. The call leaves anything else to Go.
 func (f *jitRegFeedback) regBuiltinSite(w bytecode.RInstr, argc int, method bool) (ssa.CallSite, bool) {
 	r := f.fb.r
-	calls := f.fb.cl.regCalls
+	calls := r.regCallsRestored(f.fb.cl, int(w.C()))
 	if !method || uint(w.C()) >= uint(len(calls)) {
 		return ssa.CallSite{}, false
 	}

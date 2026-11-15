@@ -225,7 +225,7 @@ func (f *jitRegFeedback) regCallTargets(t *jitRegTargets, pc int, w bytecode.RIn
 	l := f.fb.e
 	rpc := int32(f.p.Origin[pc])
 	newW := w.Op() == bytecode.RNewW
-	if calls := f.fb.cl.regCalls; !newW && w.Op() != bytecode.RApplyArgs && uint(w.C()) < uint(len(calls)) {
+	if calls := f.fb.r.regCallsRestored(f.fb.cl, int(w.C())); !newW && w.Op() != bytecode.RApplyArgs && uint(w.C()) < uint(len(calls)) {
 		if e := &calls[w.C()]; jitRegCallKind(e) {
 			f.regAddTarget(t, pc, argc, method, e.callee, e.cl, e.rc, nil, nil, false, false)
 			if t.n != 0 && l != nil && !jitRegCallKnown(l, rpc, e.callee) {
@@ -447,7 +447,7 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 	var cl *closure
 	switch w.Op() {
 	case bytecode.RCallW, bytecode.RCallMW, bytecode.RCallWT, bytecode.RCallMWT:
-		calls := f.cl.regCalls
+		calls := r.regCallsRestored(f.cl, int(w.C()))
 		if uint(w.C()) >= uint(len(calls)) {
 			return false
 		}
@@ -604,7 +604,7 @@ func (r *Runtime) jitRegCallRepeats(f *frame, c *regCode, e *jitRegEntry, rpc in
 	var cl *closure
 	switch w := regAt(c.code, rpc); w.Op() {
 	case bytecode.RCallW, bytecode.RCallMW:
-		calls := f.cl.regCalls
+		calls := r.regCallsRestored(f.cl, int(w.C()))
 		if uint(w.C()) >= uint(len(calls)) {
 			return false
 		}
