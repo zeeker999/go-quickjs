@@ -24,23 +24,94 @@ import (
 
 // jitRegLower is cl's register code rc lowered as kind says -- for an entry
 // (jitLowerSSA), hot (jitLowerHot), or for native callers and inlining
-// (jitLowerInline) -- with the hints its code learned at its exits.
+// (jitLowerInline) -- with the hints its code learned at its exits, from
+// the runtime's programs (regLowered), as jitLower is the stack form's:
+// each kind is lowered once for the hints as they are, and again once its
+// code has learned more (jitRegLowering). A compile asks for its
+// function's program and for each callee's it inlines, and a function is
+// compiled again as it learns and inlined into each of its callers:
+// lowered anew at every ask, Octane's Typescript lowered some 0.6 GB of
+// programs a run, half its compiles' time. A program is checked
+// (ir.Program's Validate) once, as it is lowered, its error the
+// lowering's: checked at every ask, the checks of the callees inlined
+// were a sixth of the build's time.
 func (r *Runtime) jitRegLower(cl *closure, rc *bytecode.RegCode, kind jitLowerKind) (*ir.Program, error) {
-	var h jitcompile.Hints
-	if s := r.jit; s != nil {
-		if l := s.regLearned[r.jitRegKeyOf(cl)]; l != nil {
-			h = l.regHints
-		}
+	s := r.jit
+	if s == nil || rc == nil || rc != cl.fn.RegCompiled() {
+		// Before the runtime has any state, which no compile is, or code
+		// not the function's own register code, which no key names.
+		return jitRegLowerWith(rc, cl.fn, kind, jitcompile.Hints{})
 	}
+	l := s.regLowering(r.jitRegKeyOf(cl))
+	if !l.done[kind] {
+		l.progs[kind], l.errs[kind] = jitRegLowerWith(rc, cl.fn, kind, l.hints)
+		l.done[kind] = true
+		n := l.progs[kind].Footprint()
+		l.bytes += n
+		s.lowerBytes += n
+	}
+	return l.progs[kind], l.errs[kind]
+}
+
+// regLowering is the register lowering of the function whose key is key,
+// made if the runtime has none, and found used now: its programs lowered
+// with the hints its code has learned (jitLearned's regHints), dropped
+// (relower) once it has learned more. The hints only grow, each list
+// appended to, so their lengths say whether the programs are of them all.
+func (s *jitState) regLowering(key jitKey) *jitLowering {
+	var h jitcompile.Hints
+	if l := s.regLearned[key]; l != nil {
+		h = l.regHints
+	}
+	l := s.regLowered[key]
+	if l == nil {
+		if s.regLowered == nil {
+			s.regLowered = map[jitKey]*jitLowering{}
+		}
+		l = &jitLowering{bytes: jitLoweringFixed}
+		s.regLowered[key] = l
+		s.lowerBytes += l.bytes
+	} else if len(l.hints.StringAdds) != len(h.StringAdds) || len(l.hints.ElementReads) != len(h.ElementReads) ||
+		len(l.hints.StringReads) != len(h.StringReads) {
+		s.relower(l)
+	}
+	// The learned lists themselves, which their entry owns and counts:
+	// the lowering only reads them.
+	l.hints = h
+	l.used = s.agedAt
+	return l
+}
+
+// dropRegLowering forgets the register lowering l of the function whose key
+// is key, as dropLowering forgets the stack form's.
+func (s *jitState) dropRegLowering(key jitKey, l *jitLowering) {
+	delete(s.regLowered, key)
+	s.lowerBytes -= l.bytes
+	s.floorAt = 0
+}
+
+// jitRegLowerWith is fn's register code rc lowered as kind says, with
+// hints, and checked: a program Validate finds wrong is its error.
+func jitRegLowerWith(rc *bytecode.RegCode, fn *bytecode.Function, kind jitLowerKind, h jitcompile.Hints) (*ir.Program, error) {
+	var p *ir.Program
+	var err error
 	switch kind {
 	case jitLowerInline:
-		return jitcompile.LowerRegInlineWith(rc, cl.fn, h)
+		p, err = jitcompile.LowerRegInlineWith(rc, fn, h)
 	case jitLowerHot:
-		return jitcompile.LowerRegHotWith(rc, cl.fn, h)
+		p, err = jitcompile.LowerRegHotWith(rc, fn, h)
 	case jitLowerForward:
-		return jitcompile.LowerRegForwardWith(rc, cl.fn, h)
+		p, err = jitcompile.LowerRegForwardWith(rc, fn, h)
+	default:
+		p, err = jitcompile.LowerRegWith(rc, fn, h)
 	}
-	return jitcompile.LowerRegWith(rc, cl.fn, h)
+	if err == nil {
+		// Checked once, here: the lowering is kept, and built again at
+		// each compile and each ask to inline it (ir.Program's Checked).
+		err = p.Validate()
+		p.Checked = err == nil
+	}
+	return p, err
 }
 
 // jitRegElemRead is the receiver and the key of the element read of the

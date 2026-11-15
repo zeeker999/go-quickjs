@@ -26,13 +26,18 @@ import (
 // arguments only to read them by index and count them (args_index,
 // args_len): no arguments object made (arguments), none handed on
 // (apply_args), no rest parameter, and no parameter a sloppy function's
-// object would alias -- as the stack form's jitReadsArguments.
+// object would alias -- as the stack form's jitReadsArguments. A closure
+// no call ran yet, a template of one its maker makes (madeInline), is
+// asked by its function's register code, which its first call gets.
 func jitRegReadsArguments(cl *closure) bool {
-	c := cl.reg
-	if c == nil || !c.args || c.rc.KeepsArgs || cl.fn.MappedArguments && cl.fn.ParamCount > 0 {
+	rc := cl.fn.RegCode()
+	if cl.reg != nil {
+		rc = cl.reg.rc
+	}
+	if rc == nil || !(rc.UsesArguments || rc.ForwardsArguments) || rc.KeepsArgs || cl.fn.MappedArguments && cl.fn.ParamCount > 0 {
 		return false
 	}
-	for _, w := range c.rc.Code {
+	for _, w := range rc.Code {
 		switch w.Op() {
 		case bytecode.RArguments, bytecode.RApplyArgs:
 			return false
@@ -70,8 +75,15 @@ func jitRegForwards(cl *closure) bool {
 // them: for a construction of ctor, k of this.k.apply(this, arguments), a
 // data property of ctor's prototype, as the stack form's
 // jitForwardSiteTarget finds it; else the one function cl's own code
-// learned it calls there (jitRegCallSeen), as jitForwardLearned. A
-// function native callers may call, of cl's realm and scope; or nil.
+// learned it calls there, its forwards settled (jitRegForwardSeen), as
+// jitForwardLearned; else, for a construction, f as the read of it finds
+// it now (jitRegForwardGuess), as jitForwardSiteTarget's jitChainValue. A
+// plain call is never inlined for a guess, as the stack form's is not:
+// the forwarder's closures a call meets each hand their arguments to a
+// function of their own -- forward_poly's four -- and inlined for the f
+// of the one the call's cache held, the call left native code at three
+// turns in four. A function native callers may call, of cl's realm and
+// scope; or nil.
 func (r *Runtime) jitRegForwardTarget(cl *closure, ctor *Object, rpc, argc int) *Object {
 	c := cl.reg
 	if c == nil || rpc >= len(c.rc.Code) || c.rc.Code[rpc].Op() != bytecode.RApplyArgs || r.applyFn == nil {
@@ -93,7 +105,7 @@ func (r *Runtime) jitRegForwardTarget(cl *closure, ctor *Object, rpc, argc int) 
 	}
 	if t == nil {
 		var learned []jitInline
-		if l := r.jit.regLearned[r.jitRegKeyOf(cl)]; l != nil {
+		if l := r.jit.regLearned[r.jitRegKeyOf(cl)]; l != nil && rpc < len(l.callSites) && l.callSites[rpc] == jitCallNative {
 			learned = l.nativeCalls
 		}
 		for _, x := range learned {
@@ -106,7 +118,7 @@ func (r *Runtime) jitRegForwardTarget(cl *closure, ctor *Object, rpc, argc int) 
 			t = x.obj
 		}
 	}
-	if t == nil {
+	if t == nil && ctor != nil {
 		t = r.jitRegForwardGuess(cl, rpc)
 	}
 	if t == nil || !r.jitNativeTargetOf(t.fn(), cl, false) {
@@ -186,10 +198,10 @@ func (f *jitRegFeedback) forwardInline(pc int) (ssa.InlineSite, bool) {
 		}
 	}
 	p, err := r.jitRegLower(tc, tc.reg.rc, kind)
-	if err != nil || p.Validate() != nil {
+	if err != nil {
 		return ssa.InlineSite{}, false
 	}
-	r.jitRegSeenFeedback(tc, tc.reg)
+	r.jitRegSeenInlined(fb.keep(), tc)
 	k := fb.keep()
 	callee := &jitRegFeedback{fb: &jitFeedback{r: r, fn: tc.fn, cl: tc, e: r.jitState().regLearnedOf(r.jitRegKeyOf(tc)), root: k}, rc: tc.fn.RegCode(), p: p}
 	if forwards {
@@ -217,7 +229,7 @@ func (r *Runtime) jitRegInlineArgs(c *regCode, cwb, at int, args []Value) []Valu
 	if at >= len(c.rc.Code) {
 		return nil
 	}
-	switch w := regAt(c.code, at); w.Op() {
+	switch w := regAt(c.code, at); jitRegCallOp(w.Op()) {
 	case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW:
 		a := cwb + int(w.A()) + 2
 		return append([]Value(nil), r.stack[a:a+int(w.X())]...)
@@ -231,9 +243,8 @@ func (r *Runtime) jitRegInlineArgs(c *regCode, cwb, at int, args []Value) []Valu
 // code, f.apply(x, arguments), as the read of f just before it finds it
 // now -- a global's, a captured binding's -- as the stack form guesses a
 // forwarding constructor's (jitForwardSiteTarget's jitChainValue): what a
-// forwarder whose code learned nothing yet hands its arguments to, its
-// call native or inlined from the first compile, which checks it is.
-// Or nil.
+// forwarding construction inlined hands its arguments to, its call
+// inlined, which checks it is. Or nil.
 func (r *Runtime) jitRegForwardGuess(cl *closure, rpc int) *Object {
 	rc := cl.reg.rc
 	if rpc < 3 {

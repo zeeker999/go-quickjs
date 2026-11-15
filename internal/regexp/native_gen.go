@@ -106,8 +106,10 @@ func genNative(arch string, prog *program, ncaps int, wide, unicode bool) (nativ
 	if g.bad {
 		return nativeProgram{}, false
 	}
+	// Code of any length is placed; arm64's ADR, which a table's address
+	// and a resume point's are, reaches 1 MB, past which Finish refuses.
 	b, err := g.m.Finish()
-	if err != nil || len(b) > maxNativeBytes {
+	if err != nil {
 		return nativeProgram{}, false
 	}
 	return nativeProgram{bytes: append([]byte(nil), b...), maxPush: maxPush, text: g.m.Offset(g.dataStart)}, true

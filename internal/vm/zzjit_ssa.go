@@ -1314,40 +1314,21 @@ func (r *Runtime) jitSeenSite(e *jitEntry, pc int, cache *propCache, write bool,
 	// What the site remembers besides its entry (poly), which every
 	// tier's reads and writes fill -- the tree's scans of an object's
 	// own table too, which note nothing in seen -- and what it met
-	// before that (seen). A chain's cell is no entry the code is
-	// compiled for (megamorphic).
-	var met []propCache
+	// before that (seen), in that order. A chain's cell is no entry the
+	// code is compiled for (megamorphic). Taken where they are: copied
+	// into a list of their own, they had been most of what a register
+	// compile's asks of its inlined callees allocated.
 	if seen != nil {
-		met = append(met, seen.entries[:seen.n]...)
+		for _, c := range seen.entries[:seen.n] {
+			jitSeenCase(e, pc, c, write, now)
+		}
 	}
 	if p := cache.poly; p != nil {
 		for _, c := range p.entries[:p.n] {
 			if c.cell == nil {
-				met = append(met, c)
+				jitSeenCase(e, pc, c, write, now)
 			}
 		}
-	}
-	for _, c := range met {
-		if c.shape == nil || c.shape == noShape || c.getter || c.idx < 0 || write && (c.next == setterNext || c.next == nil && c.p1 != nil) {
-			continue
-		}
-		i := slices.IndexFunc(e.poly, func(p jitPolySite) bool { return int(p.pc) == pc })
-		if i < 0 {
-			e.poly = append(e.poly, jitPolySite{pc: uint32(pc)})
-			i = len(e.poly) - 1
-		}
-		p := &e.poly[i]
-		if !write {
-			// What the site's objects were before they took the shape
-			// its cache remembers now (now) is a case while there is
-			// room.
-			jitAddReadCase(p, c, now)
-			continue
-		}
-		if len(p.cases)+len(p.adds) >= jitPropertyCases || slices.ContainsFunc(p.cases, func(k propCache) bool { return k.shape == c.shape }) {
-			continue
-		}
-		p.cases = append(p.cases, c)
 	}
 	if seen == nil {
 		return
@@ -1378,6 +1359,30 @@ func (r *Runtime) jitSeenSite(e *jitEntry, pc int, cache *propCache, write bool,
 			p.adds = append(p.adds, a)
 		}
 	}
+}
+
+// jitSeenCase is jitSeenSite's of c, a case the site at pc met, a write's
+// or a read's, whose cache holds now.
+func jitSeenCase(e *jitEntry, pc int, c propCache, write bool, now *shape) {
+	if c.shape == nil || c.shape == noShape || c.getter || c.idx < 0 || write && (c.next == setterNext || c.next == nil && c.p1 != nil) {
+		return
+	}
+	i := slices.IndexFunc(e.poly, func(p jitPolySite) bool { return int(p.pc) == pc })
+	if i < 0 {
+		e.poly = append(e.poly, jitPolySite{pc: uint32(pc)})
+		i = len(e.poly) - 1
+	}
+	p := &e.poly[i]
+	if !write {
+		// What the site's objects were before they took the shape its
+		// cache remembers now (now) is a case while there is room.
+		jitAddReadCase(p, c, now)
+		return
+	}
+	if len(p.cases)+len(p.adds) >= jitPropertyCases || slices.ContainsFunc(p.cases, func(k propCache) bool { return k.shape == c.shape }) {
+		return
+	}
+	p.cases = append(p.cases, c)
 }
 
 // jitLiteral is an object literal's site, at pc, that native code makes
@@ -2987,7 +2992,12 @@ type jitFeedback struct {
 	// Inlined); pools the object pools its constructions take from.
 	inlined  []*closure
 	inlinedN int
-	pools    []*abi.ObjectPool
+	// regSeen, the root's, are the register callees the compile asked to
+	// inline whose sites' caches it has taken (jitRegSeenInlined), and
+	// regCallees their feedback (jitRegCalleeOf).
+	regSeen    []*closure
+	regCallees []*jitRegFeedback
+	pools      []*abi.ObjectPool
 	// made are the templates of the closures the code may not make, the
 	// loops' callbacks inlined where their callers make them (ForEachSite's
 	// Made), which an exit's frame names in their places (jitMaterialize);
@@ -12920,8 +12930,11 @@ type jitShared struct {
 // written once for them all (abi.Bounds).
 func (r *Runtime) jitShareContexts(idx int, f *frame) {
 	s := r.jit
+	// The level past the deepest the VM's frames allow, which the contexts
+	// made so far may limit further: they grow (jitGrowContexts) to it.
+	s.levelBound = uint64(idx + max(0, r.maxFrames-r.frameDepth))
 	bounds := abi.Bounds{
-		LevelLimit: uint64(min(len(s.ssaCtxs), idx+max(0, r.maxFrames-r.frameDepth))),
+		LevelLimit: min(uint64(len(s.ssaCtxs)), s.levelBound),
 		// The level whose frame is tailCallDepth deep, the run's frame at
 		// idx.
 		TailLevel: uint64(idx + max(0, tailCallDepth-r.frameDepth)),
@@ -12973,19 +12986,26 @@ func (r *Runtime) jitShareContexts(idx int, f *frame) {
 }
 
 // jitContexts is how many contexts are made first: one for each runSSA
-// running, each native call another (abi.Context.Level); as many more
-// each time they run out, as a stack grows; and jitContextsMax how many
-// there come to be. A native call past the last exits, and Go finishes
-// every level (jitUnwindNative): with no more than 24, EarleyBoyer's
-// unifier, a recursion deeper than that, finished most of its calls in
-// Go. A context is some 17 KB, of the JIT's budget (jitBudget): 24 made
-// at once had been 400 KB of every runtime that ran native code, however
-// deep its calls, and more than the JIT's eighth of a runtime limited to
-// 3 MB.
-const (
-	jitContexts    = 4
-	jitContextsMax = 96
-)
+// running, each native call another (abi.Context.Level); and as many more
+// as there are each time they run out, as a stack grows, as deep as the
+// VM's frames may go (jitContextsMost). A context is some 17 KB: the first
+// jitContexts are of the JIT's budget (jitBudget), which every runtime
+// that runs native code holds; the rest are the native levels' stack, as
+// V8's optimized frames are on the machine stack and not in its code
+// space, which a recursion takes as it deepens and gives back once it has
+// returned (jitShrinkContexts). With at most 96 of them, AWFY's Havlak,
+// whose depth-first search recurses deeper, ran its deeper levels in the
+// interpreter, and EarleyBoyer's unifier had finished most of its calls in
+// Go with no more than 24.
+const jitContexts = 4
+
+// jitContextsMost is how many contexts the runtime's native levels may
+// take: one for each frame the VM allows (Config.MaxCallDepth), as each
+// level is a frame of the VM's to the depth limit (abi.Bounds'
+// LevelLimit), and one past the deepest, which a run Go begins there
+// needs (runSSA). A call past the limit is Go's, which throws the
+// interpreter's RangeError.
+func (r *Runtime) jitContextsMost() int { return r.maxFrames + 2 }
 
 // jitGrowTo is s with room for n elements, its length as it is.
 func jitGrowTo[T any](s []T, n int) []T {
@@ -12995,22 +13015,27 @@ func jitGrowTo[T any](s []T, n int) []T {
 	return append(make([]T, 0, n), s...)
 }
 
-// jitGrowContexts adds contexts, linked to the last -- jitContexts, or as
-// many as there are -- if there are fewer than jitContextsMax and the
-// JIT's budget has the room, and reports whether it did. The others stay
-// where they are, and native code may be running in them: each one whose
-// calls the contexts limited may go as deep as the new ones allow, and
-// each new one holds what they share (jitShareContexts).
+// jitGrowContexts adds a chunk of contexts, linked to the last --
+// jitContexts, or as many as there are -- if there are fewer than the
+// VM's frames need (jitContextsMost), and reports whether it did: the
+// first chunk if the JIT's budget has the room for it, the others
+// whatever the budget holds, as a deeper recursion needs them. The others
+// stay where they are, and native code may be running in them, its
+// callers' ReturnTo and Prev pointing at them: each one whose calls the
+// contexts limited may go as deep as the new ones allow, and each new one
+// holds what they share (jitShareContexts).
 func (r *Runtime) jitGrowContexts() bool {
 	s := r.jit
 	old := len(s.ssaCtxs)
-	add := min(max(old, jitContexts), jitContextsMax-old)
+	add := min(max(old, jitContexts), r.jitContextsMost()-old)
 	if add <= 0 {
 		return false
 	}
-	s.budget = r.jitBudget()
-	if !s.makeRoom(add * (jitContextShare + s.spillShare())) {
-		return false
+	if old < jitContexts {
+		s.budget = r.jitBudget()
+		if !s.makeRoom(add * (jitContextShare + s.spillShare())) {
+			return false
+		}
 	}
 	// Each context's places in what is kept by context, made here in the
 	// room made for them: grown as runs reach them, they took room no one
@@ -13045,6 +13070,7 @@ func (r *Runtime) jitGrowContexts() bool {
 		c, prev := s.ssaCtxs[i], s.ssaCtxs[i-1]
 		prev.Next, c.Prev = unsafe.Pointer(c), unsafe.Pointer(prev)
 	}
+	s.ctxMost = max(s.ctxMost, len(s.ssaCtxs))
 	if old == 0 {
 		return true
 	}
@@ -13058,12 +13084,90 @@ func (r *Runtime) jitGrowContexts() bool {
 		c.CharCodeAt = last.CharCodeAt
 		c.StringProto, c.StringShape, c.CharCodeAtOffset = last.StringProto, last.StringShape, last.CharCodeAtOffset
 	}
-	if s.bounds.LevelLimit == uint64(old) {
-		// Calls the contexts limited may go as deep as the new ones allow.
-		s.bounds.LevelLimit = n
+	if s.bounds.LevelLimit == uint64(old) && s.levelBound > uint64(old) {
+		// Calls the contexts limited may go as deep as the new ones allow,
+		// to the VM's frames' limit.
+		s.bounds.LevelLimit = min(n, s.levelBound)
 		s.ssaSharedGen++
 	}
 	return true
+}
+
+// jitShrinkContexts gives back the chunks of contexts (jitGrowContexts)
+// past every one native code runs in now and every one it has run in
+// since the last look, a flush's tick before (flush), as Go shrinks a
+// goroutine's stack that has used less than it holds: a recursion that
+// went deep once keeps none of its contexts, one that recurses as deep
+// again within a tick keeps them all. One runs now below ctxTop, which
+// a run Go begins, and a call of Go from native code, moves past every
+// level it is under; or is a native level past it a call has made
+// (abi.Context's Live), which Go has yet to finish or read. One has run
+// since if its frame's locals were set (Locals), which a run's entry and
+// every native call's callee (mir's callEntry) set, and which the look
+// clears in every context past those running, for the next to see. What
+// stays is a chunk's end, one past the deepest kept, for a run begun
+// there; none of what native code runs in moves.
+func (s *jitState) jitShrinkContexts() {
+	n := len(s.ssaCtxs)
+	if n <= jitContexts {
+		return
+	}
+	keep := s.ctxTop + 1
+	for i := s.ctxTop; i < n; i++ {
+		c := s.ssaCtxs[i]
+		if c.Live != 0 {
+			keep = max(keep, i+2)
+			continue
+		}
+		if c.Locals != nil {
+			keep = max(keep, i+2)
+			c.Locals = nil
+		}
+	}
+	// The chunks end at jitContexts doubled, and at the last's end.
+	end := jitContexts
+	for end < keep {
+		end *= 2
+	}
+	if end >= n {
+		return
+	}
+	for i := end; i < n; i++ {
+		s.ssaCtxs[i] = nil
+	}
+	s.ssaCtxs[end-1].Next = nil
+	s.ssaCtxs = append([]*abi.Context(nil), s.ssaCtxs[:end]...)
+	s.goRuns = jitShrinkTo(s.goRuns, end, s.ctxTop == 0)
+	s.regRuns = jitShrinkTo(s.regRuns, end, s.ctxTop == 0)
+	s.calleeOpen = jitShrinkTo(s.calleeOpen, end, s.ctxTop == 0)
+	if s.bounds.LevelLimit > uint64(end) {
+		s.bounds.LevelLimit = uint64(end)
+		s.ssaSharedGen++
+	}
+	if s.ssaSharedFrom > end {
+		s.ssaSharedFrom = end
+	}
+	if c := s.ssaCtx; c != nil && c.Level >= uint64(end) {
+		// The context last entered, a run's that has ended: let go with
+		// its chunk.
+		s.ssaCtx = s.ssaCtxs[0]
+	}
+	s.ctxShrunk++
+}
+
+// jitShrinkTo is s with no more than n elements, what it held past them
+// -- a run's by context, gone with the contexts (jitShrinkContexts) --
+// cleared, in an array of its own if move says no run is under way: a run
+// keeps a pointer to its own element across the calls of Go it makes.
+func jitShrinkTo[T any](s []T, n int, move bool) []T {
+	if len(s) > n {
+		clear(s[n:])
+		s = s[:n]
+	}
+	if !move || cap(s) <= n {
+		return s
+	}
+	return append(make([]T, 0, n), s...)
 }
 
 // jitNativeLevel is a frame a native call made whose callee left native

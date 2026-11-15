@@ -549,6 +549,20 @@ func (r *Runtime) jitRegSeenFeedback(cl *closure, c *regCode) {
 	}
 }
 
+// jitRegSeenInlined is jitRegSeenFeedback for cl, a callee a compile asks
+// to inline, k the compile's root feedback: once a compile, as no script
+// runs while it builds, which asks an inlined callee's sites at each of
+// its calls and at each of its asks of a call (ssa's plan, inlineSiteAt).
+// Asked again at each, the scans of its code had been a ninth of a
+// register build's time.
+func (r *Runtime) jitRegSeenInlined(k *jitFeedback, cl *closure) {
+	if slices.Contains(k.regSeen, cl) {
+		return
+	}
+	k.regSeen = append(k.regSeen, cl)
+	r.jitRegSeenFeedback(cl, cl.reg)
+}
+
 // jitRegDeoptSeen learns from a deoptimization of e, code made from c, at
 // register pc rpc, the frame's window at wb holding the state at its
 // instruction's start, before the interpreter runs it: a property site's
@@ -773,6 +787,20 @@ func (r *Runtime) jitRegEnter(f *frame, cl *closure, c *regCode, base, start int
 		if e.life.notNative {
 			r.jitRegRetryNative(e)
 		}
+		if len(e.kept) != 0 && !e.invalid && e.life.starts-e.life.keptAt >= jitKeptStarts {
+			// Called again and again: objects left unmade pay now, unless
+			// its calls leave the loop anyway, as the stack form's
+			// tryJITAt has it. Kept, a loop compiled for the frame waiting
+			// at it made its objects at every call for good: carried_long
+			// allocated each turn's.
+			leaving := r.jitRegKeptCallsLeave(e)
+			e.life.keptAt, e.life.keptLeft = e.life.starts, 0
+			if !leaving {
+				if ne := r.jitRegKeptGone(cl, c, e); ne != nil {
+					e = ne
+				}
+			}
+		}
 		// Code that learned what to be compiled again for is, once it has
 		// spent a budget (jitRegLearnedDue), at a call as at a sample or
 		// an exit, as the stack form's entry has it (tryJITAt's
@@ -821,6 +849,11 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 	}
 	f, c := st.f, st.c
 	cl := f.cl
+	var from *jitRegEntry
+	if forced {
+		from = s.regGoOnFrom
+		s.regGoOnFrom = nil
+	}
 	if !r.jitEnabled || cl == nil || cl.closureCode == nil || cl.reg != c {
 		if forced {
 			s.regGoOn = nil
@@ -831,6 +864,8 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 	if forced {
 		if s.regGoOn == f {
 			e = cl.closureCode.jitReg
+		} else {
+			from = nil
 		}
 		s.regGoOn = nil
 		if e == nil || e.invalid || e.code == nil {
@@ -862,7 +897,7 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 	if e == nil || !e.goesOn || e.life.loopSlow {
 		return target
 	}
-	if e = r.jitRegLoopCode(f, c, e, target); e == nil || !r.jitRegContextFree() {
+	if e = r.jitRegLoopCode(f, c, e, target, from); e == nil || !r.jitRegContextFree() {
 		// Or as deep in native code as there are contexts (runSSA).
 		return target
 	}
@@ -895,13 +930,22 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 // the check made due at once after its code left it -- has the function
 // compiled apart with that loop's entry kept (ssa.Func's FrameAt, its
 // objects made), and goes on in that code, kept beside e (osr) for the
-// frames that wait there next. nil where there is none.
-func (r *Runtime) jitRegLoopCode(f *frame, c *regCode, e *jitRegEntry, target int) *jitRegEntry {
+// frames that wait there next. nil where there is none. from is the code
+// whose run left the frame to the interpreter, where the check is the one
+// made due at once for it (jitRegLeaveTo), nil at a sample: a frame that
+// goes on in the code kept for it, from other code, is counted as one
+// that needs it (jitRegFramesLeave).
+func (r *Runtime) jitRegLoopCode(f *frame, c *regCode, e *jitRegEntry, target int, from *jitRegEntry) *jitRegEntry {
 	if _, ok := e.loopEntry(target); ok {
 		return e
 	}
 	if o := e.osr; o != nil && !o.invalid && o.code != nil {
 		if _, ok := o.loopEntry(target); ok {
+			if from != o {
+				if ne := r.jitRegFramesLeave(f.cl, c, e, target); ne != nil {
+					return ne
+				}
+			}
 			return o
 		}
 	}
@@ -933,6 +977,116 @@ func (r *Runtime) jitRegLoopCode(f *frame, c *regCode, e *jitRegEntry, target in
 		return o
 	}
 	return nil
+}
+
+// jitRegFramesLeave counts a frame of e's function, cl's, its register
+// code c, going on in the code kept for its loop at register pc target
+// (jitRegLoopCode) -- once each: where it leaves again, it goes on in
+// that code -- and returns e's code compiled again with that loop's entry
+// because most calls do, nil where it is not, as the stack form's
+// jitFramesLeave has it. Objects left unmade for a call that leaves are
+// made at its exit, and it enters other code for the rest of its loop:
+// each call pays that, and a compile of that code once its function's is
+// compiled again, for the few turns before it left. So, as three calls in
+// four leave, the header is learned as an entry Go goes on at (jitLearned's
+// resumed, jitRegFeedback's Resumed), the function's code keeps its
+// objects made there, as if it had never left them unmade, and the code
+// kept goes with the code it was kept beside (dropReg).
+func (r *Runtime) jitRegFramesLeave(cl *closure, c *regCode, e *jitRegEntry, target int) *jitRegEntry {
+	life := e.life
+	if life == nil || e.invalid {
+		return nil
+	}
+	if life.osrFrames++; life.osrFrames < jitFramesLeaving {
+		return nil
+	}
+	calls := life.starts
+	if l := r.jit.regLinks[e.key]; l != nil {
+		calls += l.in
+	}
+	// Compiling the code counts its native callers' calls afresh
+	// (jitRegCached): then, the count begins.
+	most := calls >= life.osrCalls && (calls-life.osrCalls)*3 <= jitFramesLeaving*4
+	life.osrFrames, life.osrCalls = 0, calls
+	if !most || slices.Contains(life.resumed, uint32(target)) {
+		return nil
+	}
+	life.resumed = append(life.resumed, uint32(target))
+	if r.jit.regPendingJobs[e.key] != nil || r.jit.regLevelsOf(e) != 0 {
+		// Compiled in the background, or run by native calls under way:
+		// compiled for it once due.
+		r.jitRegReopt(cl, e)
+		return nil
+	}
+	ne := r.jitRegReoptimize(cl, c, e)
+	if ne == nil {
+		return nil
+	}
+	if _, ok := ne.loopEntry(target); !ok {
+		return nil
+	}
+	return ne
+}
+
+// jitRegKeptCallsLeave reports whether three in four of the calls of e's
+// function since it last looked (jitRegEnter) left its code, and enough
+// of them to tell, as the stack form's keptCallsLeave: its calls Go made
+// and its native callers' through its link.
+func (r *Runtime) jitRegKeptCallsLeave(e *jitRegEntry) bool {
+	life := e.life
+	calls := life.starts - life.keptAt
+	if l := r.jit.regLinks[e.key]; l != nil {
+		calls += l.in
+	}
+	return life.keptLeft >= jitKeptStarts*3/4 && life.keptLeft*4 >= calls*3
+}
+
+// jitRegKeptGone compiles e's code, cl's function's, its register code c,
+// again without the entries it has for a frame (jitRegEntry's kept), as
+// the stack form's jitKeptGone: no frame waits at a loop for this compile.
+// It returns the new code, nil where it was not compiled now -- run by
+// native calls under way, or compiled in the background -- when it is
+// once it has spent a budget (jitRegReopt).
+func (r *Runtime) jitRegKeptGone(cl *closure, c *regCode, e *jitRegEntry) *jitRegEntry {
+	life := e.life
+	life.keptGone = true
+	s := r.jit
+	if s.regPendingJobs[e.key] != nil || s.regLevelsOf(e) != 0 {
+		r.jitRegReopt(cl, e)
+		return nil
+	}
+	fn, pc := r.jitFrameFn, r.jitFramePC
+	r.jitFrameFn = nil
+	ne := r.jitRegReoptimize(cl, c, e)
+	r.jitFrameFn, r.jitFramePC = fn, pc
+	return ne
+}
+
+// jitRegCalleesKeptNoEntries has the functions e's code calls natively,
+// compiled with entries for a frame that was running when they were
+// (jitRegEntry's kept), compiled again without them, as the stack form's
+// jitCalleesKeptNoEntries: they are called again now, and Go will not
+// see it, native code calling them. Not inside a compile of one of them.
+func (r *Runtime) jitRegCalleesKeptNoEntries(e *jitRegEntry) {
+	s := r.jit
+	if e.life == nil || s.regKeptSeeding {
+		return
+	}
+	s.regKeptSeeding = true
+	defer func() { s.regKeptSeeding = false }()
+	for _, x := range e.life.nativeCalls {
+		if x.cl == nil || x.cl.reg == nil || x.cl.realm != r.Realm {
+			continue
+		}
+		key := r.jitRegKeyOf(x.cl)
+		if ce := s.regCache[key]; ce != nil && ce != e && ce.code != nil && len(ce.kept) != 0 && !ce.invalid && !ce.life.keptGone && !r.jitRegKeptCallsLeave(ce) {
+			if ne := r.jitRegKeptGone(x.cl, x.cl.reg, ce); ne != nil {
+				if cc := x.cl.closureCode; cc != nil && cc.jitReg == ce {
+					cc.setJITReg(ne)
+				}
+			}
+		}
+	}
 }
 
 // jitRegContextFree reports whether a run Go begins now has a context to

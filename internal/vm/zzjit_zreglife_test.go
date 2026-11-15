@@ -291,10 +291,10 @@ function sum(n) { var s = { v: n - n }, i = 0; do { s.v = s.v + i; i++ } while (
 		cl.closureCode.setJITReg(e)
 		// A frame found at the header twice with no entry: compiled apart.
 		f := &frame{cl: cl}
-		if o := r.jitRegLoopCode(f, c, e, header); o != nil {
+		if o := r.jitRegLoopCode(f, c, e, header, nil); o != nil {
 			t.Fatalf("compiled at the first check")
 		}
-		o := r.jitRegLoopCode(f, c, e, header)
+		o := r.jitRegLoopCode(f, c, e, header, nil)
 		if o == nil || e.osr != o || r.jit.osrLearned != 1 {
 			t.Fatalf("a frame at a loop whose entry was dropped had no code with it: %v", o)
 		}

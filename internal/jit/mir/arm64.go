@@ -667,8 +667,7 @@ func (c *a64Compiler) exitThen(s *ssa.FrameState, kind uint64, then *arm64.Label
 	c.recordRoom(s)
 	c.recorded = false
 	c.a.Store(a64Ctx, abi.OffRecords, arm64.ZR)
-	for _, ix := range c.f.Present(s) {
-		i, v := int(ix), s.Slots[ix]
+	for i, v := range s.All() {
 		if v.Op == ssa.OpLoadSlot && v.Aux == i || c.captured(i) {
 			continue
 		}
@@ -4184,14 +4183,17 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 		if win {
 			// As amd64's: the callee's window and what its code takes past
 			// it, its link's (abi.Encoding's LinkFrame), and the arguments
-			// the call writes, which may be more than its registers. C
-			// keeps the callee, which a construction's checks read.
-			c.a.Load(a64B, a64Ctx, abi.OffStackTop)
-			c.a.Load(a64B, a64B, 0)
-			c.a.AddImm(a64B, a64B, int64(2+site.Argc), true)
-			c.a.Load(a64A, a64Ctx, abi.OffStackEnd)
-			c.a.Cmp(a64B, a64A, true)
-			guard.jump(arm64.HI)
+			// the call writes where they are more than its registers, which
+			// the link's room never is less than. C keeps the callee, which
+			// a construction's checks read.
+			if 2+site.Argc > t.LocalCount {
+				c.a.Load(a64B, a64Ctx, abi.OffStackTop)
+				c.a.Load(a64B, a64B, 0)
+				c.a.AddImm(a64B, a64B, int64(2+site.Argc), true)
+				c.a.Load(a64A, a64Ctx, abi.OffStackEnd)
+				c.a.Cmp(a64B, a64A, true)
+				guard.jump(arm64.HI)
+			}
 			c.a.Load(a64B, a64Ctx, abi.OffStackTop)
 			c.a.Load(a64B, a64B, 0)
 			c.movImm(a64A, uint64(t.Entry)-uint64(c.enc.LinkEntry))
@@ -4260,7 +4262,11 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 		// As amd64's: f, apply and the receiver, nothing below them.
 		operands = calleeSlot
 	}
-	st, recs := c.callState(v, s, func(i int) bool { return direct && i >= ops && i < sp }, operands)
+	// As amd64's: register code's call leaves out the operands it
+	// consumes (ssa.Value's Consumes).
+	st, recs := c.callState(v, s, func(i int) bool {
+		return direct && i >= ops && i < sp || win && v.Consumes(i-(site.Window-1))
+	}, operands)
 	c.callRecords(v, recs)
 	c.movImm(a64A, uint64(uintptr(unsafe.Pointer(st))))
 	c.a.Store(a64Ctx, abi.OffCallState, a64A)
@@ -4329,12 +4335,12 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 		// From the call's state, as its records are (exitView).
 		back := c.viewExits()
 		for i := 0; i < site.Params && args+i < sp && i < site.LocalCount; i++ {
-			c.directOperand(v, s.Slots[args+i], a64D, int32(i)*vs)
+			c.directOperand(v, s.Slot(args+i), a64D, int32(i)*vs)
 		}
 		if receiver {
 			// The callee's context's, the next.
 			c.a.Load(a64D, a64Ctx, abi.OffNext)
-			c.directOperand(v, s.Slots[this], a64D, abi.OffThis)
+			c.directOperand(v, s.Slot(this), a64D, abi.OffThis)
 		}
 		back()
 	}
@@ -7476,15 +7482,25 @@ func (c *a64Compiler) goArg(at int32, x *ssa.Value) {
 // place (tailJump). While the collector marks, each operand's pointer is
 // shaded first. Register code's writes its window to its registers, as
 // amd64's (ssa.TailWindow), and polls only where its start does not
-// (ssa.TailPolled).
+// (ssa.TailPolled). All but the depth's check is out of line (tailDeep),
+// as amd64's.
 func (c *a64Compiler) tailSelf(v *ssa.Value, guard a64Guard) {
-	shallow := c.a.NewLabel()
+	shallow, deep := c.a.NewLabel(), c.a.NewLabel()
 	c.a.Load(a64A, a64Ctx, abi.OffLevel)
 	c.a.Load(a64B, a64Ctx, abi.OffBounds)
 	c.a.Load(a64B, a64B, abi.OffBoundsTailLevel)
 	c.a.Cmp(a64A, a64B, true)
-	c.a.BCond(arm64.LO, shallow)
-	defer c.a.Bind(shallow)
+	c.a.BCond(arm64.HS, deep)
+	c.cold = append(c.cold, func() {
+		c.a.Bind(deep)
+		c.tailDeep(v, guard)
+		c.a.B(shallow)
+	})
+	c.a.Bind(shallow)
+}
+
+// tailDeep is tailSelf's call deep in the stack, out of line, as amd64's.
+func (c *a64Compiler) tailDeep(v *ssa.Value, guard a64Guard) {
 	args, entry := v.Args[1:], c.entryAt(0)
 	var this *ssa.Value
 	if v.Key&1 != 0 {

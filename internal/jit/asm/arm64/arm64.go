@@ -58,11 +58,68 @@ func (c Cond) Invert() Cond { return c ^ 1 }
 type Label int
 
 // Asm accumulates instructions and resolves labels.
+//
+// A branch reaches as far as its offset field: B, 26 bits of
+// instructions (128 MB either way); B.cond, CBZ and CBNZ, 19 (1 MB); ADR,
+// 21 bits of bytes (1 MB). A function's code may be longer than any of
+// them, so the assembler keeps every branch in reach itself, as V8's
+// arm64 assembler does with its veneer pools. A branch back to a bound
+// label past its reach is made of ones that reach: a conditional one, the
+// opposite condition over a B; a B past 128 MB, the target's address
+// built in the encoder's temporary (farJump). A branch forward to a label
+// not yet bound goes in a queue, oldest first; once the oldest of either
+// kind has come within a margin of its reach, the instruction being
+// emitted is followed by a pool: a B over it, then a veneer for each
+// branch of the queue that has come a quarter of its reach -- a B to its
+// label, which the branch is pointed at instead, one for all of the
+// pool's branches to a label. A veneer is a B, in the queue of Bs, which
+// a later pool takes in turn once it has come 32 MB. A branch whose label
+// is bound before a pool takes it stays as it is: code shorter than a
+// quarter of a conditional branch's reach, 256 KB -- every function's but
+// the largest -- is the same as without pools. An ADR is never pointed at
+// a veneer -- its address is itself the result -- and the backend's are
+// of labels a few instructions on; past its reach Finish refuses it.
+//
+// A pool comes after any instruction but within a run that must stay
+// together, which the assembler blocks pools in (Data's words, its own
+// sequences): between two of the caller's instructions it is a jump over
+// it, which changes no register or flag, and every jump to a label still
+// goes where the label is. So the caller never jumps by a count of
+// instructions, nor keeps a value in the temporary at a branch's target.
 type Asm struct {
 	buf    []uint32
 	labels []int
 	fixups []fixup
+	// near and far are the fixups, by their index, of conditional
+	// branches and of Bs to labels unbound when they were made, oldest
+	// first from nearAt and farAt: what a pool may have to take.
+	near, far     []int
+	nearAt, farAt int
+	// due is the instruction from which the next pool is looked for, or 0
+	// for none; blocked counts the runs pools wait for.
+	due, blocked int
+	// veneers is a pool's veneer of each label it took a branch to.
+	veneers map[Label]Label
 }
+
+// A pool is looked for once the oldest branch of a queue has come nearDue
+// (farDue) instructions, and takes the branches that have come nearVeneer
+// (farVeneer). A branch it leaves has come less than nearVeneer; the next
+// pool comes once that branch, or an older one, has come nearDue, a few
+// instructions more past a run that blocks it, and its veneers are of the
+// branches between nearVeneer and nearDue from it, which it puts first:
+// the branch's veneer is at most 3/4 of the reach from it, a quarter left
+// for runs that block a pool, which are a few hundred instructions at
+// most. Variables only for tests, which narrow the reaches to have pools
+// in small code (narrowReach).
+var (
+	nearReach  = 1 << 18
+	nearDue    = nearReach / 2
+	nearVeneer = nearReach / 4
+	farReach   = 1 << 25
+	farDue     = farReach / 2
+	farVeneer  = farReach / 4
+)
 
 type fixup struct {
 	at    int // instruction index
@@ -82,16 +139,19 @@ func (a *Asm) Len() int { return 4 * len(a.buf) }
 // Reset empties the assembler for the next function, keeping its memory.
 func (a *Asm) Reset() {
 	a.buf, a.labels, a.fixups = a.buf[:0], a.labels[:0], a.fixups[:0]
+	a.near, a.far, a.nearAt, a.farAt, a.due, a.blocked = a.near[:0], a.far[:0], 0, 0, 0, 0
 }
 
 // Bytes is the memory the assembler keeps for the next function.
 func (a *Asm) Bytes() int {
-	return cap(a.buf)*int(unsafe.Sizeof(a.buf[:1][0])) + cap(a.labels)*int(unsafe.Sizeof(0)) + cap(a.fixups)*int(unsafe.Sizeof(fixup{}))
+	return cap(a.buf)*int(unsafe.Sizeof(a.buf[:1][0])) + cap(a.labels)*int(unsafe.Sizeof(0)) + cap(a.fixups)*int(unsafe.Sizeof(fixup{})) +
+		(cap(a.near)+cap(a.far))*int(unsafe.Sizeof(0))
 }
 
 // Used is what of Bytes the last function used: its tables' lengths.
 func (a *Asm) Used() int {
-	return len(a.buf)*int(unsafe.Sizeof(a.buf[:1][0])) + len(a.labels)*int(unsafe.Sizeof(0)) + len(a.fixups)*int(unsafe.Sizeof(fixup{}))
+	return len(a.buf)*int(unsafe.Sizeof(a.buf[:1][0])) + len(a.labels)*int(unsafe.Sizeof(0)) + len(a.fixups)*int(unsafe.Sizeof(fixup{})) +
+		(len(a.near)+len(a.far))*int(unsafe.Sizeof(0))
 }
 
 // NewLabel makes an unbound label.
@@ -127,18 +187,18 @@ func (a *Asm) FinishInto(dst []byte) ([]byte, error) {
 		d := to - f.at
 		switch f.kind {
 		case fixB:
-			if d < -1<<25 || d >= 1<<25 {
+			if d < -farReach || d >= farReach {
 				return nil, fmt.Errorf("arm64: branch out of range")
 			}
 			a.buf[f.at] |= uint32(d) & (1<<26 - 1)
 		case fixCond:
-			if d < -1<<18 || d >= 1<<18 {
+			if d < -nearReach || d >= nearReach {
 				return nil, fmt.Errorf("arm64: conditional branch out of range")
 			}
 			a.buf[f.at] |= (uint32(d) & (1<<19 - 1)) << 5
 		case fixAdr:
 			// d instructions are 4d bytes: immlo is 0, immhi d.
-			if d < -1<<18 || d >= 1<<18 {
+			if d < -nearReach || d >= nearReach {
 				return nil, fmt.Errorf("arm64: address out of range")
 			}
 			a.buf[f.at] |= (uint32(d) & (1<<19 - 1)) << 5
@@ -151,17 +211,163 @@ func (a *Asm) FinishInto(dst []byte) ([]byte, error) {
 	return out, nil
 }
 
-func (a *Asm) emit(w uint32) { a.buf = append(a.buf, w) }
+func (a *Asm) emit(w uint32) {
+	a.buf = append(a.buf, w)
+	if a.due != 0 && len(a.buf) >= a.due && a.blocked == 0 {
+		a.pool()
+	}
+}
+
+// block holds pools off until unblock, for a run of words that must stay
+// together.
+func (a *Asm) block() { a.blocked++ }
+
+// unblock ends block's run, and makes the pool it held off.
+func (a *Asm) unblock() {
+	a.blocked--
+	if a.blocked == 0 && a.due != 0 && len(a.buf) >= a.due {
+		a.pool()
+	}
+}
 
 // Data emits b, a whole number of words, as data among the instructions: a
-// table the code reads (Adr finds it).
+// table the code reads (Adr finds it), which no pool comes into.
 func (a *Asm) Data(b []byte) {
 	if len(b)%4 != 0 {
 		panic("arm64: data not a whole number of words")
 	}
+	a.block()
 	for i := 0; i < len(b); i += 4 {
 		a.emit(binary.LittleEndian.Uint32(b[i:]))
 	}
+	a.unblock()
+}
+
+// branch emits w, a branch of kind to l: noted for Finish, and in its
+// queue while l is unbound; back to a bound label past w's reach, made of
+// branches that reach (farBack).
+func (a *Asm) branch(w uint32, l Label, kind int) {
+	if to := a.labels[l]; to >= 0 {
+		if d := to - len(a.buf); kind == fixB && d < -farReach || kind == fixCond && d < -nearReach {
+			a.farBack(w, l, kind)
+			return
+		}
+	} else if kind != fixAdr {
+		due := len(a.buf) + farDue
+		if kind == fixCond {
+			a.near = append(a.near, len(a.fixups))
+			due = len(a.buf) + nearDue
+		} else {
+			a.far = append(a.far, len(a.fixups))
+		}
+		if a.due == 0 || due < a.due {
+			a.due = due
+		}
+	}
+	a.fixups = append(a.fixups, fixup{len(a.buf), l, kind})
+	a.emit(w)
+}
+
+// farBack emits w, a branch to l, which is bound behind past w's reach: a
+// conditional branch as its opposite over a B, a B past 128 MB as a jump
+// through the temporary (farJump).
+func (a *Asm) farBack(w uint32, l Label, kind int) {
+	a.block()
+	if kind == fixCond {
+		// B.cond's condition is its low four bits; CBZ and CBNZ differ in
+		// bit 24.
+		inv := w ^ 1
+		if w&0x7E000000 == 0x34000000 {
+			inv = w ^ 1<<24
+		}
+		at := len(a.buf)
+		a.emit(inv)
+		if a.labels[l]-len(a.buf) < -farReach {
+			a.farJump(l)
+		} else {
+			a.fixups = append(a.fixups, fixup{len(a.buf), l, fixB})
+			a.emit(0x14000000)
+		}
+		a.buf[at] |= uint32(len(a.buf)-at) << 5
+	} else {
+		a.farJump(l)
+	}
+	a.unblock()
+}
+
+// farJump jumps to l, which is bound behind past a B's reach: its address
+// built in the temporary by an ADR of the part under 4 KiB, then
+// subtractions of multiples of 4 KiB, under 16 MB each, and a BR. No flag
+// is changed.
+func (a *Asm) farJump(l Label) {
+	m := 4 * (len(a.buf) - a.labels[l])
+	a.emit(0x10000000 | (uint32(-(m%4096)/4)&(1<<19-1))<<5 | uint32(tmp))
+	for k := m / 4096; k > 0; {
+		step := min(k, 0xFFF)
+		a.emit(0xD1400000 | uint32(step)<<10 | uint32(tmp)<<5 | uint32(tmp))
+		k -= step
+	}
+	a.Br(tmp)
+}
+
+// pool makes a pool after the last instruction, if a branch of the queues
+// has come far enough to need one, and drops from them the branches whose
+// labels are bound.
+func (a *Asm) pool() {
+	a.blocked++
+	pos, over := len(a.buf), Label(-1)
+	if a.veneers == nil {
+		a.veneers = map[Label]Label{}
+	}
+	clear(a.veneers)
+	take := func(i int) {
+		l := a.fixups[i].label
+		if a.labels[l] >= 0 {
+			return
+		}
+		if over < 0 {
+			over = a.NewLabel()
+			a.fixups = append(a.fixups, fixup{len(a.buf), over, fixB})
+			a.buf = append(a.buf, 0x14000000)
+		}
+		v, ok := a.veneers[l]
+		if !ok {
+			v = a.NewLabel()
+			a.labels[v] = len(a.buf)
+			a.far = append(a.far, len(a.fixups))
+			a.fixups = append(a.fixups, fixup{len(a.buf), l, fixB})
+			a.buf = append(a.buf, 0x14000000)
+			a.veneers[l] = v
+		}
+		a.fixups[i].label = v
+	}
+	for a.nearAt < len(a.near) && pos-a.fixups[a.near[a.nearAt]].at >= nearVeneer {
+		take(a.near[a.nearAt])
+		a.nearAt++
+	}
+	for a.farAt < len(a.far) && pos-a.fixups[a.far[a.farAt]].at >= farVeneer {
+		take(a.far[a.farAt])
+		a.farAt++
+	}
+	if over >= 0 {
+		a.labels[over] = len(a.buf)
+	}
+	for a.nearAt < len(a.near) && a.labels[a.fixups[a.near[a.nearAt]].label] >= 0 {
+		a.nearAt++
+	}
+	for a.farAt < len(a.far) && a.labels[a.fixups[a.far[a.farAt]].label] >= 0 {
+		a.farAt++
+	}
+	a.due = 0
+	if a.nearAt < len(a.near) {
+		a.due = a.fixups[a.near[a.nearAt]].at + nearDue
+	}
+	if a.farAt < len(a.far) {
+		if due := a.fixups[a.far[a.farAt]].at + farDue; a.due == 0 || due < a.due {
+			a.due = due
+		}
+	}
+	a.blocked--
 }
 
 func sf(wide bool) uint32 {
@@ -701,27 +907,19 @@ func (a *Asm) Ucvtf(dst FReg, n Reg, wide bool) {
 // ---------------------------------------------------------------- control
 
 // B jumps to l.
-func (a *Asm) B(l Label) {
-	a.fixups = append(a.fixups, fixup{len(a.buf), l, fixB})
-	a.emit(0x14000000)
-}
+func (a *Asm) B(l Label) { a.branch(0x14000000, l, fixB) }
 
 // BCond jumps to l if c holds.
-func (a *Asm) BCond(c Cond, l Label) {
-	a.fixups = append(a.fixups, fixup{len(a.buf), l, fixCond})
-	a.emit(0x54000000 | uint32(c))
-}
+func (a *Asm) BCond(c Cond, l Label) { a.branch(0x54000000|uint32(c), l, fixCond) }
 
 // Cbz jumps to l if r is zero.
 func (a *Asm) Cbz(r Reg, l Label, wide bool) {
-	a.fixups = append(a.fixups, fixup{len(a.buf), l, fixCond})
-	a.emit(0x34000000 | sf(wide) | uint32(r))
+	a.branch(0x34000000|sf(wide)|uint32(r), l, fixCond)
 }
 
 // Cbnz jumps to l if r is not zero.
 func (a *Asm) Cbnz(r Reg, l Label, wide bool) {
-	a.fixups = append(a.fixups, fixup{len(a.buf), l, fixCond})
-	a.emit(0x35000000 | sf(wide) | uint32(r))
+	a.branch(0x35000000|sf(wide)|uint32(r), l, fixCond)
 }
 
 // Ret returns through X30.
@@ -731,7 +929,4 @@ func (a *Asm) Ret() { a.emit(0xD65F03C0) }
 func (a *Asm) Br(r Reg) { a.emit(0xD61F0000 | uint32(r)<<5) }
 
 // Adr is dst = l's address.
-func (a *Asm) Adr(dst Reg, l Label) {
-	a.fixups = append(a.fixups, fixup{len(a.buf), l, fixAdr})
-	a.emit(0x10000000 | uint32(dst))
-}
+func (a *Asm) Adr(dst Reg, l Label) { a.branch(0x10000000|uint32(dst), l, fixAdr) }

@@ -335,8 +335,8 @@ func (b *builder) planCallback(pc int, fp *forEachPlan, total *int) bool {
 			}
 		}
 	}
-	calls, ok := InlineCalls(s.Program)
-	if !ok || !inlineFits(*total, len(s.Program.Code)) {
+	calls, ok := b.inlineCallsOf(s.Program)
+	if !ok || !inlineFits(*total, inlineSize(s.Program)) {
 		return false
 	}
 	nslots, before, keeps, inlined := b.nslots, *total, b.f.Keeps, len(b.f.Inlined)
@@ -587,16 +587,12 @@ func (b *builder) forEachCall(blk *Block, pc int, fp forEachPlan) {
 	// The state inside the loop: the call's, and the loop's slots, depth of
 	// its operands.
 	state := func(blk *Block, depth int) *FrameState {
-		s := f.newState(FrameState{PC: call.PC, Depth: call.Depth, Site: call.Site, Slots: f.refsOf(base + loopLocals + depth)})
-		for i, v := range call.Slots {
-			if v != nil {
-				s.Slots[i] = v
-				v.Uses++
-			}
-		}
-		for i := base; i < base+loopLocals+depth; i++ {
-			s.Slots[i] = b.read(i, blk)
-			s.Slots[i].Uses++
+		s := f.newState(FrameState{PC: call.PC, Depth: call.Depth, Site: call.Site})
+		s.shareSlots(call)
+		s.n = base + loopLocals + depth
+		f.openEdit()
+		for i := base; i < s.n; i++ {
+			f.setSlot(s, i, b.read(i, blk))
 		}
 		return s
 	}
@@ -853,16 +849,12 @@ func (b *builder) sortCall(blk *Block, pc int, fp forEachPlan) {
 	loop := f.newValue(blk, OpLoopMark, None)
 	loop.Const = ir.Value{Bits: uint64(mark)<<32 | uint64(base-b.root.p.Locals+1)}
 	state := func(blk *Block, depth int) *FrameState {
-		s := f.newState(FrameState{PC: call.PC, Depth: call.Depth, Site: call.Site, Slots: f.refsOf(base + sortLocals + depth)})
-		for i, v := range call.Slots {
-			if v != nil {
-				s.Slots[i] = v
-				v.Uses++
-			}
-		}
-		for i := base; i < base+sortLocals+depth; i++ {
-			s.Slots[i] = b.read(i, blk)
-			s.Slots[i].Uses++
+		s := f.newState(FrameState{PC: call.PC, Depth: call.Depth, Site: call.Site})
+		s.shareSlots(call)
+		s.n = base + sortLocals + depth
+		f.openEdit()
+		for i := base; i < s.n; i++ {
+			f.setSlot(s, i, b.read(i, blk))
 		}
 		return s
 	}
@@ -1210,7 +1202,37 @@ func (b *builder) windowLeaf(blk *Block, pc int, in ir.Instruction, c *CallSite,
 		args = append(args, b.read(a+2+k, blk))
 	}
 	site := &CallSite{Go: GoLeaf, Argc: c.Argc, Method: c.Method, ThisSlot: -1, Leaf: fn}
+	// Nothing reads the result but its truth: exec makes no array, replace
+	// no string (abi.GoCallState's Unused), as the stack form's leaf call
+	// is told (resultUnused).
+	site.Unused = b.windowResultUnused(pc)
 	b.leafMade(blk, pc, fn, c, args, site, guard, func(blk *Block, v *Value) { b.assign(in.Dest, blk, v) })
+}
+
+// windowResultUnused is resultUnused of register code's call at pc, whose
+// result is its register (Dest), which no instruction pops: by the
+// program's liveness (Live), nothing reads the register after the call --
+// a statement's call -- or the instruction after it tests its truth or
+// negates it and nothing reads it after that, but where a branch jumps
+// where it is falsy, which keeps it, as && keeps it. Not a register a
+// closure captures, whose cell its closures read.
+func (b *builder) windowResultUnused(pc int) bool {
+	p := b.p
+	d := p.Code[pc].Dest
+	if d < 0 || p.IsCaptured(d) || pc+2 >= len(p.Code) {
+		return false
+	}
+	dead := func(at int) bool { return at >= 0 && at < len(p.Code) && !p.LiveAt(at, d) }
+	if dead(pc + 1) {
+		return true
+	}
+	switch in := p.Code[pc+1]; in.Op {
+	case ir.Branch:
+		return in.Operator == ir.Truth && in.Left == ir.Slot(d) && dead(pc+2) && (!in.When || dead(in.Target))
+	case ir.Unary:
+		return in.Operator == ir.Not && in.Left == ir.Slot(d) && (in.Dest == d || dead(pc+2))
+	}
+	return false
 }
 
 // resultUnused reports whether nothing reads the result of the call at pc,
@@ -2601,6 +2623,24 @@ const (
 	maxInlineDepth    = 3
 )
 
+// inlineSize is p's size in the instructions inlining's bounds count,
+// the stack form's, in which they were measured against V8's bytecode
+// above. Register code's program does more in each instruction -- an
+// operation's operands are registers, not the copies to and from the
+// stack the stack form's are -- and has 0.85 of the stack form's
+// instructions, the median of Are We Fast Yet's 284 functions whose names
+// are unique, lowered both ways (LowerRegInline, LowerSSAInline): V8's
+// 2.6 bytes to a stack-form instruction are 3.1 to a register one. So each
+// of its instructions counts 20/17 of one, rounded, and a callee, a
+// function's budget and a small or looping callee take the same code in
+// either form.
+func inlineSize(p *ir.Program) int {
+	if p.Origin != nil {
+		return (len(p.Code)*20 + 8) / 17
+	}
+	return len(p.Code)
+}
+
 // inlineFits reports whether a callee of n instructions may be inlined
 // where a function has inlined total already: within the function's
 // budget, or, if n is small (maxInlineSmall), within the absolute bound.
@@ -2645,7 +2685,7 @@ const maxInlineLoop = 24
 // inlined, at each turn; one outside the loop is refused too, the rule
 // kept to what was measured.
 func smallLoop(p *ir.Program, n int) bool {
-	return n == 0 && len(p.Code) <= maxInlineLoop
+	return n == 0 && inlineSize(p) <= maxInlineLoop
 }
 
 // InlineCalls reports whether a callee may be inlined if the operations it
@@ -2653,7 +2693,7 @@ func smallLoop(p *ir.Program, n int) bool {
 // Inlinable but for those. A callee with a loop is taken only if it is
 // small and leaves nothing to Go (smallLoop).
 func InlineCalls(p *ir.Program) ([]int, bool) {
-	if p == nil || p.Validate() != nil || len(p.Code) > maxInline || len(p.Globals) != 0 || p.Captured != nil || p.DerivedConstructor || len(p.Handlers) != 0 || p.Forwards {
+	if p == nil || !p.Checked && p.Validate() != nil || inlineSize(p) > maxInline || len(p.Globals) != 0 || p.Captured != nil || p.DerivedConstructor || len(p.Handlers) != 0 || p.Forwards {
 		// A callee whose locals closures capture: an inlined frame's
 		// slots have no cells, and Go makes no closure on one. A derived
 		// constructor's super() is Go's, on a frame of its own. A callee
@@ -2705,7 +2745,7 @@ func InlineCalls(p *ir.Program) ([]int, bool) {
 // but for one InlineCalls takes, small and leaving nothing to Go
 // (smallLoop).
 func InlineCallsGiven(p *ir.Program, argc func(pc int) (int, bool)) (calls, given []int, ok bool) {
-	if p == nil || p.Validate() != nil || len(p.Code) > maxInline || len(p.Globals) != 0 || p.Captured != nil || p.DerivedConstructor || len(p.Handlers) != 0 {
+	if p == nil || !p.Checked && p.Validate() != nil || inlineSize(p) > maxInline || len(p.Globals) != 0 || p.Captured != nil || p.DerivedConstructor || len(p.Handlers) != 0 {
 		return nil, nil, false
 	}
 	// Each loop, by its back edge: from its header to the branch.
@@ -3075,6 +3115,13 @@ func build(w *Workspace, p *ir.Program, fb Feedback) (*Func, error) {
 
 // buildChosen is build's choice of builds (above).
 func buildChosen(w *Workspace, p *ir.Program, fb Feedback) (*Func, error) {
+	// Checked once for all its builds (buildCalls), which do not change
+	// it, where its maker has not (ir.Program's Checked).
+	if !p.Checked {
+		if err := p.Validate(); err != nil {
+			return nil, err
+		}
+	}
 	f, plan, provisional, err := buildCalls(w, p, fb, nil)
 	if err != nil {
 		return f, err
@@ -3114,11 +3161,8 @@ type calledPlan struct {
 // not made where all their calls are; and, with plan nil, the closures it
 // finds so (calledClosures), and whether it inlined callees whose calls of
 // what they are given it left to exits (provisional), which makes it no
-// code to run.
+// code to run. p is checked (ir.Program's Validate) by its caller.
 func buildCalls(w *Workspace, p *ir.Program, fb Feedback, plan *calledPlan) (*Func, calledPlan, bool, error) {
-	if err := p.Validate(); err != nil {
-		return nil, calledPlan{}, false, err
-	}
 	p = referenceReads(p, fb)
 	f := &Func{Locals: p.Locals, StackSize: p.StackSize, FrameLocals: p.Locals, ThisSlot: -1, ws: w}
 	if kf, ok := fb.(KeepFeedback); ok {
@@ -3185,6 +3229,9 @@ func makesClosure(p *ir.Program) bool {
 }
 
 type builder struct {
+	// inlineAsked are InlineCalls' answers, each program's once a build
+	// (inlineCallsOf).
+	inlineAsked []inlineAnswer
 	// stepOn is the register a register loop's step writes, by the block
 	// where its loop goes on, which assigns it there (iterStep).
 	stepOn map[*Block]stepDef
@@ -3199,8 +3246,10 @@ type builder struct {
 	fb     Feedback
 	f      *Func
 	nslots int
-	// named is where stateSlots lists a state's slots.
-	named []int32
+	// named is where stateSlots lists a state's slots; stating says a
+	// state is being made (stateSlots).
+	named   []int32
+	stating bool
 
 	// root is the function's own frame, cur the one translated now;
 	// inlined are the callees, by the PC of their call; frameOf is each
@@ -3257,6 +3306,7 @@ type builder struct {
 	// definitions by slot, whether it is sealed and filled, and the phis
 	// it made before it was sealed.
 	defs       [][]*Value
+	last       []lastState
 	sealed     []bool
 	filled     []bool
 	incomplete [][]slotPhi
@@ -3642,7 +3692,11 @@ func (b *builder) rootState() *FrameState {
 // guards share, not one of its own: a state names every live slot, and a
 // function of many captured locals made one at each assignment.
 func (b *builder) storeCaptured(blk *Block, slot int, v *Value) {
-	st := b.rootState()
+	b.storeCapturedAt(blk, slot, v, b.rootState())
+}
+
+// storeCapturedAt is storeCaptured exiting, if it must, to st.
+func (b *builder) storeCapturedAt(blk *Block, slot int, v *Value, st *FrameState) {
 	w := b.f.newValue(blk, OpPropWrite, None, b.cellOf(blk, slot), v)
 	w.Aux, w.State = int(ir.HostExit), st
 	st.addUse()
@@ -4023,7 +4077,7 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 	if ok {
 		calls, givenCalls, ok = b.inlineCalls(site, isAccessor)
 	}
-	if !ok || !inlineFits(*total, len(site.Program.Code)) ||
+	if !ok || !inlineFits(*total, inlineSize(site.Program)) ||
 		site.Argc < 0 || site.Params < 0 || pc+1 >= len(b.p.Code) || !reachable(b.p, pc+1) {
 		return nil, false
 	}
@@ -4039,11 +4093,6 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 		result := b.cur.base + b.p.Code[pc].Dest
 		if accessor.Setter {
 			result = -1
-		} else if b.p.IsCaptured(b.p.Code[pc].Dest) {
-			// A result to a register a closure captures, which its cell
-			// holds: the inlined frame's return writes the slot, not the
-			// cell, which a call's own result stores (assign).
-			return nil, false
 		}
 		return b.inlineFrame(site, calls, givenCalls, total, result, pc)
 	}
@@ -4053,13 +4102,12 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 		// plain call, a method's or a construction -- its result the
 		// call's register.
 		if !in.Window || !site.Window || isAccessor || site.Restart || site.ThisSlot >= 0 || site.Params < 2 ||
-			site.LexThis && (site.Construct || site.Method || site.Forward || site.LexThisSlot < 0) || b.p.IsCaptured(in.Dest) {
-			// Nor one whose result is to a register a closure captures,
-			// which its cell holds: the inlined frame's return writes the
-			// slot, not the cell, which a call's own result stores
-			// (assign). A closure the root makes (calledSite), what it
-			// captured the root's own slots (Captured), is called plainly,
-			// an arrow's this the root's (LexThis).
+			site.LexThis && (site.Construct || site.Method || site.Forward || site.LexThisSlot < 0) {
+			// A closure the root makes (calledSite), what it captured the
+			// root's own slots (Captured), is called plainly, an arrow's
+			// this the root's (LexThis). One whose result is to a register
+			// a closure captures has its return store it in its cell too
+			// (storeCapturedAt).
 			return nil, false
 		}
 		if site.Forward {
@@ -4136,18 +4184,42 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 // nothing a closure could be.
 func (b *builder) inlineCalls(site InlineSite, accessor bool) (calls, given []int, ok bool) {
 	if !b.provisional && b.given == nil || accessor || site.Construct || site.Restart || site.Forward || site.Arguments || site.Captured != nil {
-		calls, ok = InlineCalls(site.Program)
+		calls, ok = b.inlineCallsOf(site.Program)
 		return calls, nil, ok
 	}
 	cf, isCF := site.Feedback.(CalledClosureFeedback)
 	if !isCF {
-		calls, ok = InlineCalls(site.Program)
+		calls, ok = b.inlineCallsOf(site.Program)
 		return calls, nil, ok
 	}
 	return InlineCallsGiven(site.Program, func(pc int) (int, bool) {
 		argc, method, ok := cf.CallShape(pc)
 		return argc, ok && !method
 	})
+}
+
+// inlineAnswer is InlineCalls' answer for p.
+type inlineAnswer struct {
+	p     *ir.Program
+	calls []int
+	ok    bool
+}
+
+// inlineCallsOf is InlineCalls(p), asked once a build for each program,
+// which never changes while it builds: a callee is asked at each of its
+// calls, and each call twice (plan, inlineSiteAt), and each answer checked
+// the whole program (ir.Program's Validate) -- a sixth of the time a
+// register build took to plan its inlining. The callers only read the
+// calls.
+func (b *builder) inlineCallsOf(p *ir.Program) ([]int, bool) {
+	for i := range b.inlineAsked {
+		if a := &b.inlineAsked[i]; a.p == p {
+			return a.calls, a.ok
+		}
+	}
+	calls, ok := InlineCalls(p)
+	b.inlineAsked = append(b.inlineAsked, inlineAnswer{p: p, calls: calls, ok: ok})
+	return calls, ok
 }
 
 // cellsBack has the cells a native call's frame takes at its entries go
@@ -4440,7 +4512,7 @@ func (b *builder) inlineFrame(site InlineSite, calls, given []int, total *int, r
 		return nil, false
 	}
 	nslots, before, keeps := b.nslots, *total, b.f.Keeps
-	*total += len(site.Program.Code)
+	*total += inlineSize(site.Program)
 	fr := b.f.newFrame()
 	*fr = frame{p: q, fb: site.Feedback, site: site, result: result, base: b.nslots,
 		parent: b.cur, depth: b.cur.depth + 1, nest: b.cur.nest + 1, keep: -1, at: at, givenPC0: -1}
@@ -6567,6 +6639,7 @@ func (b *builder) translate() {
 	n := len(b.f.Blocks)
 	b.nextBlock = n
 	b.defs = b.f.refLists(blockRoom * n)[:n]
+	b.last = b.f.lastStates(blockRoom * n)[:n]
 	b.sealed, b.filled = b.f.bools(blockRoom * n)[:n], b.f.bools(blockRoom * n)[:n]
 	sc := b.f.scr()
 	b.incomplete = idTable(sc.incomplete, blockRoom*n)[:n]
@@ -6678,6 +6751,17 @@ func (b *builder) assign(slot int, blk *Block, v *Value) {
 }
 
 func (b *builder) write(slot int, blk *Block, v *Value) {
+	b.found(slot, blk, v)
+	// For the block's next state to read again (stateSlots).
+	ls := &b.last[blk.ID]
+	ls.dirty = b.f.appendInt32(ls.dirty, int32(slot))
+}
+
+// found is write without the listing: readVar's record of what it found,
+// the slot's value there as it was -- a slot a state names, the state's
+// read found already, and one it does not the next state's liveness
+// names apart (stateSlots).
+func (b *builder) found(slot int, blk *Block, v *Value) {
 	d := b.defs[blk.ID]
 	if d == nil {
 		d = b.f.refsOf(b.nslots)
@@ -6721,7 +6805,7 @@ func (b *builder) readVar(slot int, blk *Block) *Value {
 		b.incomplete[blk.ID] = append(b.incomplete[blk.ID], slotPhi{slot, v})
 	case len(blk.Preds) == 1:
 		v = b.readVar(slot, blk.Preds[0])
-	case len(blk.Preds) == 0 && blk.PC < 0 && slot < len(blk.Header.Slots):
+	case len(blk.Preds) == 0 && blk.PC < 0 && slot < blk.Header.Len():
 		// A local an entry did not load, as the interpreter's liveness has
 		// it dead there (fill): the frame's, as an entry loads it.
 		v = b.f.newValue(blk, OpLoadSlot, Tagged)
@@ -6733,10 +6817,10 @@ func (b *builder) readVar(slot int, blk *Block) *Value {
 		v = b.constIn(blk, ir.Value{Kind: ir.Undefined})
 	default:
 		v = b.newPhi(blk)
-		b.write(slot, blk, v)
+		b.found(slot, blk, v)
 		b.addPhiOperands(slot, v)
 	}
-	b.write(slot, blk, v)
+	b.found(slot, blk, v)
 	return v
 }
 
@@ -6829,29 +6913,64 @@ func (b *builder) nullish(blk *Block, in ir.Instruction, operand func(ir.Operand
 	return c
 }
 
-// stateSlots are the slots, base plus each of the first n of p's frame,
-// that a state at pc names, in order: those live there (ir.Program's
-// LiveAt) and, for the function's own frame (own), not a captured
-// binding's nor a captured local's, which are in their cells -- after
-// those of before, the slots below base the state names already. They
-// are its present slots (Func.Present), made in the workspace. Found from
-// the liveness's words, bit by bit: a state's slots are some three times
-// as many as it names, each tested for each state where it is dead.
-func (b *builder) stateSlots(p *ir.Program, pc, n, base int, own bool, before []int32) []int32 {
-	l := append(b.named[:0], before...)
-	excluded := func(i int) bool {
-		if p.Origin != nil && i >= p.Regs {
-			// Register code's slots past its registers -- its captured
-			// bindings', in their cells, and its expansions' scratch,
-			// live only inside one register instruction -- which the
-			// register frame has no place for (ir.Program's Regs).
-			return true
-		}
-		return own && (i >= p.UpvalueBase && i < p.UpvalueBase+p.Upvalues || p.IsCaptured(i))
+// stateFrame is what a state at a PC of a frame's code names: of the n
+// slots from base, those live there (ir.Program's LiveAt) and, for the
+// function's own frame (own), not a captured binding's nor a captured
+// local's, which are in their cells; and forced, past base, live or not,
+// or -1.
+type stateFrame struct {
+	p       *ir.Program
+	base, n int
+	own     bool
+	forced  int
+}
+
+// excluded reports whether no state of the frame names slot i past its
+// base.
+func (sf *stateFrame) excluded(i int) bool {
+	p := sf.p
+	if p.Origin != nil && i >= p.Regs {
+		// Register code's slots past its registers -- its captured
+		// bindings', in their cells, and its expansions' scratch, live
+		// only inside one register instruction -- which the register
+		// frame has no place for (ir.Program's Regs).
+		return true
 	}
-	liveEnd := 0
-	if p.Live != nil {
-		liveEnd = min(n, p.LiveLocals)
+	return sf.own && (i >= p.UpvalueBase && i < p.UpvalueBase+p.Upvalues || p.IsCaptured(i))
+}
+
+// liveEnd is how many of n slots the liveness says which of: those past
+// it are live wherever they are.
+func (sf *stateFrame) liveEnd(n int) int {
+	if sf.p.Live == nil {
+		return 0
+	}
+	return min(n, sf.p.LiveLocals)
+}
+
+// names reports whether a state at pc, of n slots past the base, names
+// slot i past it.
+func (sf *stateFrame) names(pc, n, i int) bool {
+	if i == sf.forced {
+		return true
+	}
+	if i >= n || sf.excluded(i) {
+		return false
+	}
+	p := sf.p
+	if i < sf.liveEnd(n) {
+		return p.Live[pc*p.LiveWords+i/64]&(1<<(i%64)) != 0
+	}
+	return true
+}
+
+// slotsAt lists in l, in order, the slots past sf's base that a state at
+// pc, of n slots past it, names. Found from the liveness's words, bit by
+// bit: a state's slots are some three times as many as it names.
+func (sf *stateFrame) slotsAt(l []int32, pc, n int) []int32 {
+	p := sf.p
+	liveEnd := sf.liveEnd(n)
+	if liveEnd > 0 {
 		row := p.Live[pc*p.LiveWords:]
 		for w := 0; w*64 < liveEnd; w++ {
 			word := row[w]
@@ -6859,39 +6978,148 @@ func (b *builder) stateSlots(p *ir.Program, pc, n, base int, own bool, before []
 				word &= 1<<left - 1
 			}
 			for ; word != 0; word &= word - 1 {
-				if i := w*64 + bits.TrailingZeros64(word); !excluded(i) {
-					l = append(l, int32(base+i))
+				if i := w*64 + bits.TrailingZeros64(word); !sf.excluded(i) {
+					l = append(l, int32(i))
 				}
 			}
 		}
 	}
 	for i := liveEnd; i < n; i++ {
-		if !excluded(i) {
-			l = append(l, int32(base+i))
+		if !sf.excluded(i) {
+			l = append(l, int32(i))
 		}
 	}
-	b.named = l[:0]
-	if len(l) == 0 {
-		return noSlots
+	if sf.forced >= 0 {
+		if at, found := slices.BinarySearch(l, int32(sf.forced)); !found {
+			l = slices.Insert(l, at, int32(sf.forced))
+		}
 	}
-	return b.f.presentOf(l)
+	return l
 }
 
-// withSlot is present with slot among its entries from from on, in their
-// order, if it is not one of them already.
-func (b *builder) withSlot(present []int32, from int, slot int32) []int32 {
-	at := from
-	for at < len(present) && present[at] < slot {
-		at++
+// slotsChanged lists in l, in order, the slots past sf's base whose
+// value in a state at pc1, of n1 slots past it, may not be what one at
+// pc0, of n0, has: those written since (dirty, by the builder's slot),
+// and those one names and the other may not -- the liveness's words told
+// apart, and the slots between the two's ends.
+func (sf *stateFrame) slotsChanged(l []int32, pc0, n0, pc1, n1 int, dirty ...[]int32) []int32 {
+	top := max(n0, n1)
+	for _, d := range dirty {
+		for _, x := range d {
+			if i := int(x) - sf.base; i >= 0 && i < top {
+				l = append(l, int32(i))
+			}
+		}
 	}
-	if at < len(present) && present[at] == slot {
-		return present
+	p := sf.p
+	le0, le1 := sf.liveEnd(n0), sf.liveEnd(n1)
+	if lo := min(le0, le1); lo > 0 {
+		r0, r1 := p.Live[pc0*p.LiveWords:], p.Live[pc1*p.LiveWords:]
+		for w := 0; w*64 < lo; w++ {
+			word := r0[w] ^ r1[w]
+			if left := lo - w*64; left < 64 {
+				word &= 1<<left - 1
+			}
+			for ; word != 0; word &= word - 1 {
+				l = append(l, int32(w*64+bits.TrailingZeros64(word)))
+			}
+		}
 	}
-	l := append(b.named[:0], present[:at]...)
-	l = append(l, slot)
-	l = append(l, present[at:]...)
+	for i := min(le0, le1); i < max(le0, le1); i++ {
+		l = append(l, int32(i))
+	}
+	for i := min(n0, n1); i < top; i++ {
+		l = append(l, int32(i))
+	}
+	slices.Sort(l)
+	return slices.Compact(l)
+}
+
+// lastState is the last state frameState made in a block: of frame fr,
+// at pc, of n slots past the frame's base; and dirty, the slots written
+// in the block since, or since it began.
+type lastState struct {
+	s     *FrameState
+	fr    *frame
+	pc, n int
+	dirty []int32
+}
+
+// stateSlots gives s, the state at pc in blk of the frame being
+// translated, the values of the slots sf names, and below sf's base
+// call's: each read, in order, as SSA construction finds it (read). A
+// state is made from the last its block made, or, the block's first,
+// from the last of its only predecessor: it shares their nodes
+// (slots.go), and reads again only the slots written since or named by
+// one and not the other. A slot both name that nothing wrote since has
+// the value it had, which a read finds again and makes nothing for --
+// the last state's read left it in the block, or in the predecessor,
+// where the block's read finds it -- so that what the reads make, and in
+// which order, is what reading every slot made. A state made while
+// another is (read's loads of captured bindings) reads every slot.
+func (b *builder) stateSlots(s *FrameState, blk *Block, pc int, sf *stateFrame, call *FrameState) {
+	f := b.f
+	s.n = sf.base + sf.n
+	f.openEdit()
+	nested := b.stating
+	b.stating = true
+	var from *lastState
+	var dirty [2][]int32
+	if !nested {
+		ls := &b.last[blk.ID]
+		switch {
+		case ls.s != nil:
+			if ls.fr == b.cur {
+				from, dirty[0] = ls, ls.dirty
+			}
+		case b.sealed[blk.ID] && len(blk.Preds) == 1:
+			if pl := &b.last[blk.Preds[0].ID]; pl.s != nil && pl.fr == b.cur {
+				from, dirty[0], dirty[1] = pl, pl.dirty, ls.dirty
+			}
+		}
+		if from != nil && (from.s.Args != 0 || from.s.Virtual != 0) {
+			from = nil
+		}
+	}
+	// The list is the state's own while it reads, as a state made inside
+	// lists its own.
+	l := b.named[:0]
+	b.named = nil
+	var pc0, n0 int
+	if from != nil {
+		s.shareSlots(from.s)
+		pc0, n0 = from.pc, from.n
+		l = sf.slotsChanged(l, pc0, n0, pc, sf.n, dirty[:]...)
+	} else {
+		if call != nil {
+			s.shareSlots(call)
+		}
+		l = sf.slotsAt(l, pc, sf.n)
+	}
+	if !nested {
+		// What is written from here on is the next state's to read.
+		b.last[blk.ID].dirty = b.last[blk.ID].dirty[:0]
+	}
+	for _, ix := range l {
+		i := int(ix)
+		if from != nil && !sf.names(pc, sf.n, i) {
+			f.setSlot(s, sf.base+i, nil)
+			continue
+		}
+		v := b.read(sf.base+i, blk)
+		if sf.own && b.words != nil && b.words[v] != nil {
+			// An operator made on low bits alone (wraps) has no value an
+			// exit could write: its guards exit to the state before it.
+			panic("ssa: a BigInt's low bits in a frame state")
+		}
+		f.setSlot(s, sf.base+i, v)
+	}
 	b.named = l[:0]
-	return b.f.presentOf(l)
+	b.stating = nested
+	if !nested {
+		ls := &b.last[blk.ID]
+		ls.s, ls.fr, ls.pc, ls.n = s, b.cur, pc, sf.n
+	}
 }
 
 // state captures the frame at a PC: every live slot's current value. Inside
@@ -6903,15 +7131,11 @@ func (b *builder) state(blk *Block, pc int) *FrameState {
 	}
 	if fr := b.cur; fr != b.root && fr.site.Restart {
 		// Go makes the call over again (InlineSite's Restart): the
-		// caller's state at it, a copy, as states are not shared.
+		// caller's state at it, a copy, its slots shared.
 		call := fr.call
-		s := b.f.newState(FrameState{PC: call.PC, Depth: call.Depth, Site: call.Site, Slots: b.f.refsOf(len(call.Slots)), Inline: call.Inline, Args: call.Args})
-		for _, i := range b.f.Present(call) {
-			v := call.Slots[i]
-			s.Slots[i] = v
-			v.Uses++
-		}
-		s.present = call.present
+		s := b.f.newState(FrameState{PC: call.PC, Depth: call.Depth, Site: call.Site, Inline: call.Inline, Args: call.Args})
+		s.shareSlots(call)
+		s.n = call.n
 		return s
 	}
 	return b.frameState(blk, pc)
@@ -6920,27 +7144,19 @@ func (b *builder) state(blk *Block, pc int) *FrameState {
 // frameState is the state at pc in the frame being translated, its
 // callers' at their calls below it.
 func (b *builder) frameState(blk *Block, pc int) *FrameState {
+	depth := b.p.Maps[pc].Depth
 	if fr := b.cur; fr != b.root {
-		call, depth := fr.call, b.p.Maps[pc].Depth
-		s := b.f.newState(FrameState{PC: call.PC, Depth: call.Depth, Site: call.Site, Slots: b.f.refsOf(fr.base + b.p.Locals + depth)})
-		callSlots := b.f.Present(call)
-		for _, i := range callSlots {
-			v := call.Slots[i]
-			s.Slots[i] = v
-			v.Uses++
-		}
+		call := fr.call
+		s := b.f.newState(FrameState{PC: call.PC, Depth: call.Depth, Site: call.Site})
 		// The callee's locals live there, as the caller's below.
-		s.present = b.stateSlots(b.p, pc, b.p.Locals+depth, fr.base, false, callSlots)
+		sf := stateFrame{p: b.p, base: fr.base, n: b.p.Locals + depth, forced: -1}
 		if fr.site.Window && fr.site.Construct {
 			// A register construction's receiver, its window's register 1,
 			// live or not: Go makes the construction's result of it where
 			// the callee returns no object.
-			s.present = b.withSlot(s.present, len(callSlots), int32(fr.base+1))
+			sf.forced = 1
 		}
-		for _, i := range s.present[len(callSlots):] {
-			s.Slots[i] = b.read(int(i), blk)
-			s.Slots[i].Uses++
-		}
+		b.stateSlots(s, blk, pc, &sf, call)
 		s.Inline = b.f.inlineState(InlineState{Parent: call.Inline, Closure: fr.site.Closure, Callee: fr.site.Callee, Base: fr.base, Locals: b.p.Locals, ThisSlot: fr.site.ThisSlot,
 			PC: b.p.Maps[pc].PC, Depth: depth, Site: pc})
 		if fr.site.Arguments || fr.site.ReadsArguments {
@@ -6949,23 +7165,13 @@ func (b *builder) frameState(blk *Block, pc int) *FrameState {
 		b.prologueArgs(s, fr, pc)
 		return s
 	}
-	depth := b.p.Maps[pc].Depth
-	s := b.f.newState(FrameState{PC: b.p.Maps[pc].PC, Depth: depth, Slots: b.f.refsOf(b.p.Locals + depth), Site: pc})
-	defer b.prologueArgs(s, b.root, pc)
+	s := b.f.newState(FrameState{PC: b.p.Maps[pc].PC, Depth: depth, Site: pc})
 	// Not a local the interpreter writes before it reads from here: not
 	// written, nor kept alive for the exit, as V8 leaves dead registers out
 	// of a frame state. Nor a captured binding, which is in its cell.
-	s.present = b.stateSlots(b.p, pc, len(s.Slots), 0, true, nil)
-	for _, ix := range s.present {
-		i := int(ix)
-		s.Slots[i] = b.read(i, blk)
-		s.Slots[i].Uses++
-		if b.words != nil && b.words[s.Slots[i]] != nil {
-			// An operator made on low bits alone (wraps) has no value an
-			// exit could write: its guards exit to the state before it.
-			panic("ssa: a BigInt's low bits in a frame state")
-		}
-	}
+	sf := stateFrame{p: b.p, n: b.p.Locals + depth, own: true, forced: -1}
+	b.stateSlots(s, blk, pc, &sf, nil)
+	b.prologueArgs(s, b.root, pc)
 	return s
 }
 
@@ -6980,14 +7186,11 @@ func (b *builder) prologueArgs(s *FrameState, fr *frame, pc int) {
 	if !ok || inSlots || len(fr.paramArgs) != n {
 		return
 	}
-	at := len(s.Slots)
-	slots := b.f.refsOf(at + n)
-	copy(slots, s.Slots)
+	at := s.n
+	s.n, s.Args = at+n, n
 	for i, v := range fr.paramArgs {
-		slots[at+i] = v
-		v.Uses++
+		b.f.setSlot(s, at+i, v)
 	}
-	s.Slots, s.Args, s.present = slots, n, nil
 }
 
 func (b *builder) fill(blk *Block) {
@@ -7000,7 +7203,9 @@ func (b *builder) fill(blk *Block) {
 	}
 	if blk.PC < 0 {
 		e, _ := f.entryForBlock(blk)
-		blk.Header = f.newState(FrameState{PC: b.p.Maps[e.PC].PC, Depth: e.Depth, Slots: f.refsOf(b.p.Locals + e.Depth), Site: -1})
+		h := f.newState(FrameState{PC: b.p.Maps[e.PC].PC, Depth: e.Depth, Site: -1})
+		h.n = b.p.Locals + e.Depth
+		blk.Header = h
 		// A local the interpreter writes before it reads from here is not
 		// loaded, as frame states leave it out: an entry's state names a
 		// slot's own load, which an exit leaves as it is, and the load had
@@ -7011,13 +7216,20 @@ func (b *builder) fill(blk *Block) {
 		// at every entry, a function of many bindings and many calls made
 		// a load of each at each, that the entry's state alone kept:
 		// RegExp's runBlock11, 34,767 of them.
-		blk.Header.present = b.stateSlots(b.p, e.PC, len(blk.Header.Slots), 0, true, nil)
-		for _, ix := range blk.Header.present {
+		sf := stateFrame{p: b.p, n: h.n, own: true, forced: -1}
+		l := sf.slotsAt(b.named[:0], e.PC, h.n)
+		f.openEdit()
+		for _, ix := range l {
 			i := int(ix)
 			v := f.newValue(blk, OpLoadSlot, Tagged)
 			v.Aux = i
 			b.write(i, blk, v)
-			blk.Header.Slots[i] = v
+			f.setSlot(h, i, v)
+		}
+		b.named = l[:0]
+		if b.cur == b.root {
+			// The state the block's next is made from (stateSlots).
+			b.last[blk.ID] = lastState{s: h, fr: b.root, pc: e.PC, n: h.n, dirty: b.last[blk.ID].dirty[:0]}
 		}
 		if b.p.Cells && b.cur == b.root {
 			// Its captured locals' cells, made at each entry (GoCells), as
@@ -7138,6 +7350,9 @@ func (b *builder) blockAfter(blk *Block) *Block {
 	// The block's ID past every list's, which each grows to.
 	for len(b.defs) <= nb.ID {
 		b.defs = append(b.defs, nil)
+	}
+	for len(b.last) <= nb.ID {
+		b.last = append(b.last, lastState{})
 	}
 	for len(b.sealed) <= nb.ID {
 		b.sealed = append(b.sealed, false)
@@ -7604,6 +7819,13 @@ func (b *builder) instruction(blk *Block, pc int) {
 			}
 			if b.cur.result >= 0 {
 				b.assign(b.cur.result, blk, v)
+				if b.cur.parent == b.root && b.root.p.IsCaptured(b.cur.result) {
+					// Register code's call whose result is a register a
+					// closure captures, which its cell holds: stored there
+					// too, as a call's own result is (assign), its exit the
+					// call's state -- no cell's write leaves native code.
+					b.storeCapturedAt(blk, b.cur.result, v, b.cur.call)
+				}
 			}
 			break
 		}
@@ -8861,6 +9083,9 @@ func (b *builder) windowCall(blk *Block, pc int, in ir.Instruction, calls []*Cal
 	}
 	call := guard(OpCall, Tagged, ir.HostExit, args...)
 	f.cache(call).Calls, call.Index = calls, b.callKeepAt(pc)
+	if !calls[0].InstanceOf && !calls[0].TypeOf {
+		call.IC.Consumed = b.windowConsumed(pc, in)
+	}
 	if calls[0].Go == GoCall {
 		// Go makes it, which counts it as an exit's would.
 		f.HostsLeft = append(f.HostsLeft, pc)
@@ -8873,6 +9098,43 @@ func (b *builder) windowCall(blk *Block, pc int, in ir.Instruction, calls []*Cal
 	if b.hasCells() {
 		b.reloadAfterCall(blk)
 	}
+}
+
+// windowConsumed is the slots of the window of register code's call at
+// pc, in, the root's, that the call consumes (InlineCache's Consumed):
+// its function's, its receiver's and its arguments' registers that no
+// instruction reads past the call's register instruction before writing
+// them -- live neither at the next one's start nor at the handler in
+// force -- and the result's, which the call writes. The rest, a register
+// read again past the call, its state describes for Go to write.
+func (b *builder) windowConsumed(pc int, in ir.Instruction) uint64 {
+	p := b.p
+	if p.Origin == nil || p.Live == nil {
+		return 0
+	}
+	next := pc + 1
+	for next < len(p.Code) && p.Origin[next] == p.Origin[pc] {
+		next++
+	}
+	handler := -1
+	if p.HandlerAt != nil && p.HandlerAt[pc] != 0 {
+		handler = int(p.Handlers[p.HandlerAt[pc]-1].PC)
+	}
+	var m uint64
+	for k := range min(2+in.Extra, 64) {
+		slot := in.Left.Slot + k
+		if slot >= p.Regs {
+			continue
+		}
+		dead := slot == in.Dest || next < len(p.Code) && !p.LiveAt(next, slot)
+		if dead && handler >= 0 && handler < len(p.Code) && p.LiveAt(handler, slot) {
+			dead = false
+		}
+		if dead {
+			m |= 1 << k
+		}
+	}
+	return m
 }
 
 // superCall makes register code's super(...) at pc, in, of a derived

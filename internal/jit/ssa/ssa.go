@@ -760,7 +760,9 @@ type Value struct {
 	// has the cell (origin.go).
 	Shadow *Value
 	Block  *Block
-	// Uses counts the values, frame states and controls that use this one.
+	// Uses counts the values, frame states and controls that use this one,
+	// once Optimize is done: its recount counts the states' (slotWeights),
+	// which the builder and the passes before it leave out.
 	Uses int
 }
 
@@ -781,7 +783,14 @@ type InlineCache struct {
 	Add  *PropertyAdd
 	Adds []*PropertyAdd
 	// Calls, for a call, are the functions it may call natively (OpCall).
-	Calls []*CallSite
+	// Consumed, for register code's (CallSite's Window), are the slots of
+	// its window, bit k for its k'th, that the interpreter's frame does
+	// not read past the call, normally or at a handler (ir.Program's
+	// LiveAt), the result's register among them: the operands the call
+	// consumes, as the stack form's call does its operand stack's, whose
+	// words the call's state leaves out (Consumes).
+	Calls    []*CallSite
+	Consumed uint64
 	// Mega, for a read, is its site's Megamorphic (PropertySite); Scan its
 	// Scan. Try, for a megamorphic read's cell (OpPropCell), makes it none
 	// where it finds no property -- the receiver's own table and the
@@ -868,6 +877,16 @@ func (v *Value) Calls() []*CallSite {
 	return v.IC.Calls
 }
 
+// Consumes reports whether call v, register code's (CallSite's Window),
+// consumes the k'th slot of its window (InlineCache's Consumed): a
+// callee that leaves native code Go finishes from its own frame, the
+// caller going on past the call with its result, so that no frame Go
+// makes of the caller reads the slot's value, which the call need not
+// record.
+func (v *Value) Consumes(k int) bool {
+	return v.IC != nil && k >= 0 && k < 64 && v.IC.Consumed&(1<<k) != 0
+}
+
 // setProperty sets what v's property cache saw (InlineCache), making v a
 // cache only if any of it is there: a nil slice stays nil, an empty one
 // empty.
@@ -906,7 +925,12 @@ func (f *Func) cache(v *Value) *InlineCache {
 type FrameState struct {
 	PC    uint32
 	Depth int
-	Slots []*Value
+	// slots are the state's values by slot, shared with other states
+	// (slots.go), as high as height says; n is how many slots it has
+	// (Len), which All, Slot and Count read.
+	slots  *slotNode
+	height int
+	n      int
 	// Site is the slot IR PC of the operation whose guards and exits use
 	// this state, or -1 for a block's entry or loop header (abi.Context's
 	// ExitSite).
@@ -929,76 +953,12 @@ type FrameState struct {
 	Virtual int
 	// id numbers the function's states, for tables by state (newState).
 	id int
-	// present is the indexes of the slots that are not nil, in order,
-	// made the first time a pass asks (Func.Present), nil until then.
-	present []int32
-}
-
-// noSlots is the present slots of a state with none: not nil, which is
-// not yet made.
-var noSlots = make([]int32, 0)
-
-// Present is the indexes of s's slots that are not nil, in order: what a
-// pass that reads a state's values walks, rather than Slots, which is
-// dense over the frame -- its dead locals, its captured bindings, the
-// slots between a caller's and an inlined callee's, all nil -- and so
-// some two thirds nil: Typescript's states had 5.7 slots for each value
-// and 2 of them set. A slot is set or left nil when its state is made,
-// and a pass after that only replaces a value with another (rewrite,
-// reconstruct), so the list, made once, holds for the state's life.
-func (f *Func) Present(s *FrameState) []int32 {
-	if s.present != nil {
-		return s.present
-	}
-	return f.makePresent(s)
-}
-
-// makePresent makes s's present slots (Present).
-func (f *Func) makePresent(s *FrameState) []int32 {
-	n := 0
-	for _, x := range s.Slots {
-		if x != nil {
-			n++
-		}
-	}
-	if n == 0 {
-		s.present = noSlots
-		return noSlots
-	}
-	var p []int32
-	if f.ws != nil {
-		p = f.ws.present.Make(n)
-	} else {
-		p = make([]int32, n)
-	}
-	k := 0
-	for i, x := range s.Slots {
-		if x != nil {
-			p[k] = int32(i)
-			k++
-		}
-	}
-	s.present = p
-	return p
-}
-
-// presentOf is a state's present slots l, copied into the workspace if
-// there is one (builder's stateSlots).
-func (f *Func) presentOf(l []int32) []int32 {
-	var p []int32
-	if f.ws != nil {
-		p = f.ws.present.Make(len(l))
-	} else {
-		p = make([]int32, len(l))
-	}
-	copy(p, l)
-	return p
 }
 
 // Own is how many of s's slots are its frame's own -- the caller's and an
 // inlined callee's, the operands, a prologue's arguments -- not the homes
 // past them (Virtual).
-func (s *FrameState) Own() int { return len(s.Slots) - s.Virtual }
+func (s *FrameState) Own() int { return s.n - s.Virtual }
 
 // InlineState is an inlined callee's frame at an exit inside it, which,
 // as V8's deoptimizer does, makes the frame the callee would have had: the
@@ -1220,7 +1180,8 @@ type Func struct {
 	Inlined []uintptr
 	// InlinedCode is how many instructions the callees the code inlines
 	// have, at every depth, the loops' callbacks among them: what
-	// inlining's budget (maxInlineTotal) is spent in.
+	// inlining's budget (maxInlineTotal) is spent in, counted in the
+	// stack form's instructions, register code's converted (inlineSize).
 	InlinedCode int
 	// HostsLeft are the PCs of the function's own host operations (ir.Host)
 	// the code leaves to Go -- at an exit, or a call Go makes from native
@@ -1322,6 +1283,17 @@ type Func struct {
 	states     []FrameState
 	valueChunk int
 	refChunk   int
+	// nodeSlab, valSlab and kidSlab are the states' slot nodes and their
+	// entries (slots.go), a chunk at a time as values are; nextNode numbers
+	// the nodes, and slotEdit is the edit open (openEdit).
+	nodeSlab  []slotNode
+	valSlab   []*Value
+	kidSlab   []*slotNode
+	nodeChunk int
+	valChunk  int
+	kidChunk  int
+	nextNode  int32
+	slotEdit  int32
 	// own is the passes' scratch for a Func built without a workspace,
 	// made when first wanted (scr).
 	own *scratch
@@ -1389,8 +1361,12 @@ type scratch struct {
 	frameOf    []*frame
 	// originPhis is Origins' list of the phis.
 	originPhis []*Value
-	// states is recount's list of the states it has met.
-	states []*FrameState
+	// states is recount's list of the states it has met; slotOrder and
+	// slotWalk, slotWeights' order of the states' nodes and its walk's
+	// stack.
+	states    []*FrameState
+	slotOrder []slotAt
+	slotWalk  []slotAt
 	// aliases is the store passes' answers (newAliases).
 	aliases aliases
 	// shapes, shapeHeld, shapeEnds, shapeStarts and blockPos are
@@ -1424,8 +1400,7 @@ func (f *Func) scr() *scratch {
 
 // newState returns a new frame state like s, from a slab.
 func (f *Func) newState(s FrameState) *FrameState {
-	// A copy's slots may not be its original's (Present).
-	s.id, s.present = f.nextState, nil
+	s.id = f.nextState
 	f.nextState++
 	if f.ws != nil {
 		p := &f.ws.states.Make(1)[0]
@@ -1555,7 +1530,7 @@ func (f *Func) String() string {
 			b.WriteString(" loop")
 		}
 		if blk.Header != nil {
-			fmt.Fprintf(&b, " state %v", blk.Header.Slots)
+			fmt.Fprintf(&b, " state %v", blk.Header.Dense())
 		}
 		b.WriteString("\n")
 		for _, v := range blk.Values {
