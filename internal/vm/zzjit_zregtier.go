@@ -22,11 +22,12 @@ import (
 // form's invocations spend it (jitTierWork): the feedback dispatcher's
 // returns count a function's runs down from what is left of its budget,
 // and send its next call to Go once none is (jitRegCallTier, jitRegArm);
-// a back edge that spends the back-edge budget (regBackEdge, which every
-// dispatcher's jump leaves to its Go slow function) spends its frame's
-// function's by the back edges it counted, each the loop's length
-// (jitRegTierWork), as the stack form's jitTierWork. A function's first
-// sample begins its budget, as the stack form's jitWarmFor makes an entry
+// the feedback dispatcher's backward jumps count it down by their distance
+// (jitRegEdges), as V8's JumpLoop does, and end the back-edge budget once
+// none is left, so that the jump's check (regBackEdge, which every
+// dispatcher's jump leaves to its Go slow function) spends the work they
+// counted (jitRegLoop). A function's first
+// check begins its budget, as the stack form's jitWarmFor makes an entry
 // warm, and a change of its caches' feedback meanwhile delays the compile
 // (jitRegWarmUp), as V8's NotifyICChanged does. Code a guard of which
 // failed is invalidated and compiled again on a fresh budget, up to
@@ -89,8 +90,82 @@ func (cc *closureCode) setJITReg(e *jitRegEntry) {
 	cc.jitReg, cc.jitEnters = e, e != nil
 	if e == nil {
 		cc.jitRegTick, cc.jitRegTickSet = 0, 0
+		cc.jitRegEdges, cc.jitRegEdgesSet = 0, 0
 	}
 }
+
+// regEdgeTick counts a backward jump by off of st's frame, in the Go
+// table's loop, as the feedback dispatcher's jumps count one (nativegen's
+// feedback.go): its distance of its function's budget's work left for back
+// edges (closureCode's jitRegEdges), and, once none is, the interrupt
+// budget ended, so that the jump's check spends the work counted
+// (regBackEdge, jitRegLoop). Native handlers' jumps leave to the Go table's
+// handlers having counted.
+func regEdgeTick(st *regState, off int32) {
+	if !regNativeOn {
+		cc := st.cl.closureCode
+		if cc.jitRegEdges += int64(off); cc.jitRegEdges <= 0 {
+			st.r.backEdges = 1
+		}
+	}
+}
+
+// regEdgesOff has the back edges of cl's function's frames count nothing
+// more of its budget, in a runtime that runs no JIT, whose Go table's
+// jumps count it all the same (regEdgeTick): its first back edge's check
+// (regBackEdge) has them stop. A check where the JIT runs counts again
+// (jitRegArmEdges).
+func regEdgesOff(cl *closure) {
+	if cc := cl.closureCode; cc != nil {
+		cc.jitRegEdges, cc.jitRegEdgesSet = math.MaxInt64, math.MaxInt64
+	}
+}
+
+// jitRegEdgeWork is the work of back edges cl's function's frames did in
+// the interpreter since its count began (jitRegArmEdges), each its
+// distance, as V8's JumpLoop spends it: 0 where it is not counting.
+func jitRegEdgeWork(cc *closureCode) int64 {
+	if set := cc.jitRegEdgesSet; set > 0 && set < math.MaxInt64 {
+		return set - cc.jitRegEdges
+	}
+	return 0
+}
+
+// jitRegArmEdges has the back edges of cl's function's frames count its
+// budget's work left (jitRegEdges), its register code c, after a check
+// spent what they had counted: what is left of the budget its first
+// compile, or its compile after an invalidation, waits for; or a budget,
+// for a function compiled for host operations alone once a budget more is
+// spent. For code that runs they count with no end (jitRegCounted): what
+// the interpreter did in its loops counts toward its code's work
+// (jitRegSpent's osrWork) at each check the interrupt budget makes, and
+// those checks alone look at the frame -- for its loop's entry, or a
+// retry of a loop judged slow (jitRegRetrySlow) -- as before its compile.
+// A function never compiled counts nothing more.
+func (r *Runtime) jitRegArmEdges(cl *closure, c *regCode) {
+	cc := cl.closureCode
+	left := int64(math.MaxInt64)
+	if r.jitEnabled && !cc.jitRegRefused && jitRegTakes(cl, c) {
+		life := r.jitRegLifeOf(cl)
+		switch {
+		case cc.jitReg != nil && !cc.jitReg.invalid:
+			left = jitRegCounted
+		case life.warming || life.invalid:
+			left = max(life.tierBudget, 1)
+		default:
+			left = jitRegBudget(r.jitCallThreshold, c)
+		}
+	}
+	cc.jitRegEdges, cc.jitRegEdgesSet = left, left
+}
+
+// jitBudgetForFeedback is V8's interrupt_budget_for_feedback_allocation:
+// the work a function's loops do before its budget begins (jitRegLoop).
+const jitBudgetForFeedback = 940
+
+// jitRegCounted is the work a function's back edges count from where its
+// count has no end (jitRegArmEdges): more than any program's back edges.
+const jitRegCounted = 1 << 62
 
 // regTickRet counts a run of cc's function that returned, in the Go
 // table's loop, as the feedback dispatcher's ret and ret_undef count one
@@ -134,20 +209,6 @@ func (r *Runtime) jitRegLetGoOf(cl *closure, e *jitRegEntry) bool {
 	}
 	cl.closureCode.setJITReg(nil)
 	return true
-}
-
-// jitRegTierWork is the work of a function's budget a sample of its
-// loop's back edges spends (jitRegLoop), at a backward jump n instructions
-// from the loop's header to it: as many back edges as the back-edge budget
-// had (jitState's edgesSpent), each n, as V8's JumpLoop spends its
-// bytecodes' distance and the stack form's loops spend theirs
-// (jitTierWork).
-func (r *Runtime) jitRegTierWork(n int) int64 {
-	edges := backEdgeCheckInterval
-	if s := r.jit; s != nil && s.edgesSpent != 0 {
-		edges = s.edgesSpent
-	}
-	return int64(edges) * int64(max(n, 1))
 }
 
 // jitRegLifeOf is the state of cl's function's register code that outlives
@@ -990,6 +1051,16 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 		if forced {
 			s.regGoOn = nil
 		}
+		switch {
+		case cl == nil || cl.closureCode == nil:
+		case !r.jitEnabled:
+			regEdgesOff(cl)
+		default:
+			// Not compiled from this code: its back edges count a budget
+			// before they look again.
+			left := jitRegBudget(r.jitCallThreshold, c)
+			cl.closureCode.jitRegEdges, cl.closureCode.jitRegEdgesSet = left, left
+		}
 		return target
 	}
 	var e *jitRegEntry
@@ -1005,18 +1076,58 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 		}
 	} else {
 		n := int(st.kept.pc) - target
+		// The work its frames' back edges did since the last check, each
+		// its distance (jitRegEdgeWork): counted, not sampled, so that
+		// when a loop is compiled does not hang on where the interrupt
+		// budget ends. Sampled -- a full budget of back edges times the
+		// loop's length where it ended in the loop -- a loop whose turns
+		// call functions with loops of their own, Crypto's bnModPow, was
+		// sampled a few times a run, or none, each sample worth a third of
+		// its budget or more: whether it was compiled in its third run or
+		// its sixth hung on which samples landed. The check is where the
+		// count ran out, its function's budget spent, or where the
+		// interrupt budget did.
+		cc := cl.closureCode
+		work := jitRegEdgeWork(cc)
+		if life := r.jitRegLifeOf(cl); !life.regFed && !life.warming && !life.invalid && cc.jitReg == nil {
+			// Its loops' first work, before its budget begins: V8's
+			// interrupt budget for feedback allocation, whose end makes a
+			// function's feedback vector, which holds its budget, as the
+			// stack form's entry is made once its function has been
+			// invoked jitInvocationsForFeedback times or a sample found a
+			// loop of it (jitWarmFor). Begun at its first back edge, a
+			// function compiled at once (a test's warm-up of one
+			// invocation) was compiled after a turn of its loop, its
+			// caches' feedback that one turn's.
+			if cc.jitRegEdgesSet == 0 {
+				// No more than its budget, for a runtime that compiles a
+				// function at once, as the stack form's entry is made at
+				// fewer invocations where it is compiled at fewer
+				// (jitFeedbackCalls).
+				left := min(int64(jitBudgetForFeedback), jitRegBudget(r.jitCallThreshold, c))
+				cc.jitRegEdges, cc.jitRegEdgesSet = left, left
+				return target
+			}
+			if cc.jitRegEdges > 0 {
+				// The interrupt budget's check, before the feedback's work
+				// is done.
+				return target
+			}
+			life.regFed, work = true, 0
+		}
 		// A compile this check asks for keeps the entry of the loop the
 		// frame waits at (jitRegFrameAt), as the stack form's tryJITLoop
 		// has its compiles keep it (jitFrameAt).
 		r.jitFrameFn, r.jitFramePC = cl.fn, target
-		e = r.jitRegHot(cl, c, r.jitRegTierWork(n))
+		e = r.jitRegHot(cl, c, work)
 		r.jitFrameFn = nil
+		r.jitRegArmEdges(cl, c)
 		if e != nil {
 			e.loopPC, e.loopLen = target, max(n, 1)
 			// The interpreter's work in the loop, which Go enters, counted
 			// toward what the code spends (jitRegSpent), as the stack
 			// form's osrWork.
-			e.life.osrWork += r.jitRegTierWork(n)
+			e.life.osrWork += work
 		}
 	}
 	if e != nil && e.life.loopSlow && !forced {

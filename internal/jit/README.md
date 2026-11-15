@@ -602,12 +602,25 @@ counted, as the stack form's invocations spend it one by one
   (`jitRegCallTier`) and compiles it if the budget is spent, or arms the
   count again. A run that ends in native code, or a throw, counts
   nothing, as no invocation the stack form's native code makes does;
-- a back edge that spends the back-edge budget -- `regBackEdge`, which every
-  dispatcher's jump leaves to its Go slow function -- spends its frame's
-  function's by the back edges the budget counted, each the loop's length
-  from its header to the jump (`jitRegLoop`, `jitRegTierWork`), as V8's
-  `JumpLoop` spends its bytecodes' distance, the budget varied from one
-  expiry to the next (`backEdgeBudget`).
+- a backward jump spends its function's budget by its distance, as V8's
+  `JumpLoop` spends its bytecodes' distance: the feedback dispatcher's
+  jumps (nativegen's `feedback.go`, `feedbackEdgeAMD64` and
+  `feedbackEdgeARM64`; the Go table's `regJump` and `regJumpSlow`,
+  `regEdgeTick`) count down the work left of it for back edges
+  (`closureCode`'s `jitRegEdges`, armed by `jitRegArmEdges`), and once none
+  is left end the interrupt budget, so that the jump, taken, leaves to its
+  Go slow function's check (`regBackEdge`), which spends the work counted
+  (`jitRegLoop`, `jitRegEdgeWork`) and arms the count again. A check where
+  the interrupt budget ended by itself spends what the count has so far,
+  so that where a loop is compiled is the same whatever the interrupt
+  budget, varied from one expiry to the next (`backEdgeBudget`), did.
+  Counted so, not sampled -- a full interrupt budget times the loop's
+  length, where it ended at the loop's own back edge -- a loop whose turns
+  call native code with loops of their own, Crypto's `bnModPow`, was
+  sampled a few times a run, or none, and compiled in its third run or
+  never in five, as the samples landed. A template's count starts at 0,
+  so that its first back edge's check begins it; a function never
+  compiled counts nothing more.
 
 Every call the interpreter makes of a function whose `jitEnters` is set
 goes to the JIT, as the stack form's calls look for their callee's code
@@ -617,7 +630,8 @@ Go for it with no exit, as it calls a built-in (`nativeJITCall`, by the
 exit's protocol through `callH`). A site's cache holds a callee with code
 as any other (`nativeCallMiss`, `regCallSlow`); no site is marked for it.
 
-**Compiling.** A function's first sample begins its budget, as the stack
+**Compiling.** A function's first check -- a call's, or its first back
+edge's -- begins its budget, as the stack
 form's `jitWarmFor` makes its entry warm, and notes its caches' feedback
 (`jitFeedbackMark`); it is compiled (`jitRegFor`) at the sample that spends
 the budget, its caches' feedback unchanged since -- a change raises what is

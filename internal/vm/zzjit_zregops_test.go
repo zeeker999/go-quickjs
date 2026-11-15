@@ -236,7 +236,13 @@ func TestJITRegArrayAlloc(t *testing.T) {
 			}
 			st := rts[0].RegNativeStats()
 			t.Logf("calls of Go %v", st.GoCallOps)
-			if n := st.GoCallOps["new_w->Array"]; n > 3000 {
+			// Go makes lists' constructions until its code, which learned
+			// the pools at its first, is compiled again: once it has spent
+			// a budget since (jitRegLearnedDue), which its native run counts
+			// at its polls (jitRegStretchWork), at the varied interrupt
+			// budget's ends -- 730 at one sequence of them, 4,237 at
+			// another -- of 126,000 that Go would make for want of them.
+			if n := st.GoCallOps["new_w->Array"]; n > 6000 {
 				t.Errorf("%d constructions of Array made by Go", n)
 			}
 			call("swap")

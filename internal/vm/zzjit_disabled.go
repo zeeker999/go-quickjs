@@ -83,3 +83,9 @@ func (r *Runtime) pureCallCounted(fd *funcData, this Value, args []Value) (Value
 
 // regTickRet counts nothing: there is no budget.
 func regTickRet(*closureCode) {}
+
+// regEdgeTick counts nothing: there is no budget.
+func regEdgeTick(*regState, int32) {}
+
+// regEdgesOff counts nothing: there is no budget.
+func regEdgesOff(*closure) {}
