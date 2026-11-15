@@ -421,6 +421,7 @@ func (r *Runtime) newNativeCtx(st *regState) *nativeCtx {
 	ctx.newFn = *(*uintptr)(unsafe.Pointer(&nativeNewFn))
 	ctx.hasInst = unsafe.Offsetof(Realm{}.hasInstanceFn)
 	ctx.superFn = *(*uintptr)(unsafe.Pointer(&nativeSuperFn))
+	ctx.callFn = unsafe.Offsetof(Realm{}.callFn)
 	ctx.grow()
 	st.native = ctx
 	return ctx

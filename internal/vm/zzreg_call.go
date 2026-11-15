@@ -385,6 +385,9 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base, pc 
 		// f.call(t, ...): f called with this t in call's frame, as the
 		// tree's call of it does (callThroughTree), without the generic
 		// call's search for call and then for f.
+		if v, err, ok := r.regCallThrough(f, c, w, base, argc); ok {
+			return v, err
+		}
 		return r.callThrough(r.callFn, r.stack[base+1], r.stack[base+2:base+2+argc])
 	}
 	if calls := f.cl.regCalls; callee.IsObject() && uint(w.C()) < uint(len(calls)) {
@@ -414,6 +417,54 @@ func (r *Runtime) regCallsMake(cl *closure, c *regCode) {
 	if jitBuilt {
 		r.jitRegCountsMake(cl.closureCode, c.rc.CallSites)
 	}
+}
+
+// regCallThrough is call_method_w's call of the realm's
+// Function.prototype.call, f.call(t, ...), its window at base: f, a
+// function the site's cache holds marked regCallThrough, entered in the
+// window one register on -- f its callee, t its this, the arguments after
+// -- as call_w enters the callee its cache holds (regEnterW), without
+// call's frame, which a stack trace and a caller passes over (V8 has
+// none); and the cache made f's where f is one the call handler enters
+// so, the native handler's to enter from then on -- a leaf with a frame,
+// as the handler enters one Go answers frameless otherwise, and one that
+// keeps its arguments as regEnterW enters it. ok is false where the call
+// is callThrough's: no this given, a callee of another kind, a this to
+// coerce.
+func (r *Runtime) regCallThrough(f *frame, c *regCode, w bytecode.RInstr, base, argc int) (Value, error, bool) {
+	calls := f.cl.regCalls
+	if argc < 1 || uint(w.C()) >= uint(len(calls)) || !regIsObject(&r.stack[base+1]) {
+		return Undefined, nil, false
+	}
+	e, o := &calls[w.C()], (*Object)(r.stack[base+1].ref)
+	if e.callee != o || e.kind&regCallThrough == 0 {
+		fd := o.fn()
+		if fd == nil || fd.closure == nil || fd.bound {
+			return Undefined, nil, false
+		}
+		cl, rc, kind, this, enter := r.regCallKind(fd, true)
+		if !enter || kind == 0 {
+			return Undefined, nil, false
+		}
+		e.callee, e.cl, e.rc, e.this, e.kind = o, cl, rc, this, kind|regCallThrough
+	}
+	nb := base + 1
+	switch e.kind &^ regCallThrough {
+	case regCallThis:
+		r.stack[nb+1] = e.this
+	case regCallObjThis:
+		if !r.stack[nb+1].IsObject() {
+			return Undefined, nil, false
+		}
+	}
+	n := argc - 1
+	if n > int(e.rc.keep) {
+		// The arguments past the parameters, which the bindings
+		// overwrite: f.arguments reads them.
+		r.regKeepWindow(nb, int(e.rc.keep), n)
+	}
+	v, err := r.regEnterW(o, e.cl, e.rc, nb, n, r.stack[nb+2:nb+2+n], Undefined)
+	return v, err, true
 }
 
 // regCallCache is a call site's cache: the function it called last, its
@@ -460,6 +511,13 @@ const (
 	// regCallLeaf marks a callee whose body rhCallW may answer without a
 	// frame (leafCall, pureCall).
 	regCallLeaf = 16
+	// regCallThrough marks the cache of a call of the realm's
+	// Function.prototype.call, f.call(t, ...), whose callee, closure, code
+	// and kind are f's, entered in the window one register on
+	// (regCallThrough): no kind's, so that neither rhCallW nor the call
+	// handler's hit takes it for a call of f, nor the JIT's feedback, and
+	// none a turn's end restores (regCallsRestored).
+	regCallThrough = 32
 )
 
 // regCallMarks are the marks of a call cache's kind that say how a call

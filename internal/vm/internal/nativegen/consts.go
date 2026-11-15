@@ -37,7 +37,7 @@ var (
 	elemStrCharCodeAt, elemPush int32
 
 	regCallEnter, regCallThis, regCallObjThis, regCallOut, regCallLeaf, regLeafArg int32
-	regCallNative, regCallConstruct                                                int32
+	regCallNative, regCallConstruct, regCallThrough                                int32
 	regLeafCode                                                                    int32
 	regFrameCall, regFrameEnter, regFrameGenStep, regFrameConstruct, regFrameSuper int32
 
@@ -106,7 +106,7 @@ func loadConsts() {
 	}{{&elemStrCharCodeAt, "elemStrCharCodeAt"}, {&elemPush, "elemPush"}, {&regCallNative, "regCallNative"},
 		{&regCallEnter, "regCallEnter"}, {&regCallThis, "regCallThis"}, {&regCallObjThis, "regCallObjThis"},
 		{&regCallOut, "regCallOut"}, {&regCallLeaf, "regCallLeaf"}, {&regLeafArg, "regLeafArg"}, {&regLeafCode, "regLeafCode"},
-		{&regFrameCall, "regFrameCall"}, {&regFrameEnter, "regFrameEnter"}, {&regFrameGenStep, "regFrameGenStep"}, {&regFrameConstruct, "regFrameConstruct"}, {&regFrameSuper, "regFrameSuper"}, {&regCallConstruct, "regCallConstruct"},
+		{&regFrameCall, "regFrameCall"}, {&regFrameEnter, "regFrameEnter"}, {&regFrameGenStep, "regFrameGenStep"}, {&regFrameConstruct, "regFrameConstruct"}, {&regFrameSuper, "regFrameSuper"}, {&regCallConstruct, "regCallConstruct"}, {&regCallThrough, "regCallThrough"},
 		{&genSuspendedYield, "genSuspendedYield"}, {&genExecuting, "genExecuting"},
 		{&genCompleted, "genCompleted"},
 		{&tailCallDepth, "tailCallDepth"}, {&linearScanLimit, "linearScanLimit"},

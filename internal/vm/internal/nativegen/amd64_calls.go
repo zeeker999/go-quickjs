@@ -391,15 +391,82 @@ func (g *nativeGen) call() {
 	// Go function nativeCallMiss (ncMiss), which makes the cache the
 	// callee's where the code enters it with a frame and has the call made
 	// again.
+	// A call of Function.prototype.call whose callee the cache holds
+	// (through) goes first. The store after the jump is never run: it
+	// keeps the handler the size it was, so that no handler after it
+	// moves.
+	through := a.NewLabel()
 	a.Bind(miss)
+	a.Jmp(through)
 	a.StoreImm(RDI, ncMiss, 1)
-	a.Jmp(g.exit)
 	g.late = append(g.late, func() {
 		a.Bind(notPush)
 		g.genNext(light)
 		a.Bind(jitCall)
 		g.light(ncJITCallFn)
+		a.Bind(through)
+		g.through()
 	})
+}
+
+// through is call_method_w of the realm's Function.prototype.call,
+// f.call(t, ...), of f the site's cache holds marked regCallThrough: f
+// entered in the window one register on, as call_w enters the callee its
+// cache holds -- f its callee, t its this, the arguments after -- with no
+// frame of call's, as regCallThrough enters it. RCX is the site's cache
+// entry and RSI the window. No this given, a callee the cache does not
+// hold, or anything else: the exit to nativeCallMiss, as any other callee
+// the cache does not hold.
+func (g *nativeGen) through() {
+	a := g.a
+	miss, ok := a.NewLabel(), a.NewLabel()
+	a.LoadU8(R8, RCX, offEKind)
+	a.MovRR(R9, R8)
+	a.OpImm(And, R9, regCallThrough, false)
+	a.Jcc(CondE, miss)
+	// The realm running now's call, at the offset the context gives.
+	a.Load(RDX, RDI, ncRT)
+	a.Load(RDX, RDX, rtRel(0))
+	a.AddMem(RDX, RDI, ncCallFn)
+	a.Load(RDX, RDX, 0)
+	a.CmpMem(RDX, RSI, 8, true)
+	a.Jcc(CondNE, miss)
+	a.Load(R9, RSI, 16)
+	a.CmpMem(R9, RDI, ncObjBits, true)
+	a.Jcc(CondNE, miss)
+	a.Load(R9, RSI, 24)
+	a.CmpMem(R9, RCX, offECallee, true)
+	a.Jcc(CondNE, miss)
+	a.Load(RAX, RBX, 0)
+	a.MovRR(RDX, RAX)
+	a.ShiftImm(Shr, RDX, 8, true)
+	a.MovZX8(RDX, RDX)
+	a.OpImm(Sub, RDX, 1, true)
+	a.Jcc(CondL, miss)
+	a.Store(RDI, scr(sArgc), RDX)
+	// Its kind, the marks none: entered as it is, with an object this, or
+	// with the cache's.
+	a.MovRR(R9, R8)
+	a.OpImm(And, R9, ^regCallThrough&0xff, false)
+	a.OpImm(Cmp, R9, regCallEnter, false)
+	a.Jcc(CondE, ok)
+	a.OpImm(Cmp, R9, regCallThis, false)
+	a.Jcc(CondE, ok)
+	a.OpImm(Cmp, R9, regCallObjThis, false)
+	a.Jcc(CondNE, miss)
+	a.Load(R8, RSI, 32)
+	a.CmpMem(R8, RDI, ncObjBits, true)
+	a.Jcc(CondNE, miss)
+	// A callee that keeps its arguments, entered as regEnterW enters it.
+	a.Bind(ok)
+	a.Load(R8, RCX, offERC)
+	a.LoadU8(RDX, R8, offRCArgs)
+	a.Store(RDI, scr(sEnt), RDX)
+	a.Lea(RSI, RSI, 16)
+	g.enter(enterThrough, g.exit)
+	a.Bind(miss)
+	a.StoreImm(RDI, ncMiss, 1)
+	a.Jmp(g.exit)
 }
 
 // enter is the call handler's entry of the callee its site's cache knows,
@@ -433,7 +500,7 @@ func (g *nativeGen) enter(mode int, jitCall Label) {
 	a.Store(RDI, scr(sRC), R8)
 	// The arguments where they lie: none past the parameters it keeps,
 	// and no new.target.
-	if mode == enterSuper {
+	if mode == enterSuper || mode == enterThrough {
 		a.Load(RDX, RDI, scr(sArgc))
 	} else {
 		a.MovRR(RDX, RAX)
@@ -448,7 +515,7 @@ func (g *nativeGen) enter(mode int, jitCall Label) {
 	a.Op(Cmp, RDX, R9, true)
 	a.Jcc(CondA, g.ex(6))
 	a.Bind(kept)
-	if mode == enterCall {
+	if mode == enterCall || mode == enterThrough {
 		a.LoadU8(R9, R8, offRCNewTarget)
 		a.Op(Test, R9, R9, false)
 		a.Jcc(CondNE, g.ex(7))
@@ -595,7 +662,7 @@ func (g *nativeGen) enter(mode int, jitCall Label) {
 	a.MovImm(RCX, uint64(regFrameCall))
 	a.Store8(RSI, offFRegKind, RCX)
 	g.frameArgs()
-	if mode != enterCall {
+	if mode == enterNew || mode == enterSuper {
 		// A construction's or a super()'s: its kind, its new.target the
 		// callee or super()'s, and a derived class's this binding, with
 		// the frame's this.
@@ -753,6 +820,9 @@ const (
 	enterCall = iota
 	enterNew
 	enterSuper
+	// enterThrough is a call's of Function.prototype.call's callee
+	// (through), its argument count in the scratch's sArgc.
+	enterThrough
 )
 
 // superW is super_call and super_forward of a derived class's

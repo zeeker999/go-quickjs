@@ -349,8 +349,7 @@ func (g *armGen) call() {
 	// Another callee than the cache's, of another template: the exit to
 	// nativeCallMiss, as amd64's.
 	a.Bind(miss)
-	g.storeImm(rCtx, ncMiss, 1)
-	a.B(g.exit)
+	g.through()
 	// A callee whose calls go to the JIT, as amd64's: nativeJITCall called
 	// with no exit.
 	a.Bind(jitCall)
@@ -379,7 +378,7 @@ func (g *armGen) enter(mode int, jitCall Label) {
 	a.Store(rCtx, scr(sRC), r8)
 	// The arguments where they lie: none past the parameters it keeps,
 	// and no new.target.
-	if mode == enterSuper {
+	if mode == enterSuper || mode == enterThrough {
 		a.Load(rD, rCtx, scr(sArgc))
 	} else {
 		a.Ubfx(rD, rW, 8, 8)
@@ -392,7 +391,7 @@ func (g *armGen) enter(mode int, jitCall Label) {
 	a.Cmp(rD, r9, true)
 	a.BCond(HI, g.ex(6))
 	a.Bind(kept)
-	if mode == enterCall {
+	if mode == enterCall || mode == enterThrough {
 		a.LoadU8(r9, r8, offRCNewTarget)
 		a.Cbnz(r9, g.ex(7), false)
 	}
@@ -529,7 +528,7 @@ func (g *armGen) enter(mode int, jitCall Label) {
 	a.MovImm(rC, uint64(regFrameCall))
 	a.Store8(rS, offFRegKind, rC)
 	g.frameArgs()
-	if mode != enterCall {
+	if mode == enterNew || mode == enterSuper {
 		// A construction's or a super()'s, as amd64's.
 		kind := regFrameConstruct
 		if mode == enterSuper {
@@ -672,6 +671,53 @@ func (g *armGen) newW() {
 	g.enter(enterNew, g.exit)
 	a.Bind(done)
 	g.next()
+}
+
+// through is call_method_w of the realm's Function.prototype.call whose
+// callee the site's cache holds, as amd64's; anything else the exit to
+// nativeCallMiss.
+func (g *armGen) through() {
+	a := g.a
+	miss, ok := a.NewLabel(), a.NewLabel()
+	a.LoadU8(r8, rC, offEKind)
+	a.TstImm(r8, uint64(regCallThrough), false)
+	a.BCond(EQ, miss)
+	a.Load(rD, rCtx, ncRT)
+	a.Load(rD, rD, rtRel(0))
+	g.addMem(rD, rCtx, ncCallFn)
+	a.Load(rD, rD, 0)
+	g.cmpMem(rD, rS, 8)
+	a.BCond(NE, miss)
+	a.Load(r9, rS, 16)
+	g.cmpMem(r9, rCtx, ncObjBits)
+	a.BCond(NE, miss)
+	a.Load(r9, rS, 24)
+	g.cmpMem(r9, rC, offECallee)
+	a.BCond(NE, miss)
+	a.Load(rW, rIP, 0)
+	a.Ubfx(rD, rW, 8, 8)
+	a.SubsImm(rD, rD, 1, true)
+	a.BCond(MI, miss)
+	a.Store(rCtx, scr(sArgc), rD)
+	a.AndImm(r9, r8, uint64(^regCallThrough&0xff), false)
+	a.CmpImm(r9, int64(regCallEnter), false)
+	a.BCond(EQ, ok)
+	a.CmpImm(r9, int64(regCallThis), false)
+	a.BCond(EQ, ok)
+	a.CmpImm(r9, int64(regCallObjThis), false)
+	a.BCond(NE, miss)
+	a.Load(r8, rS, 32)
+	g.cmpMem(r8, rCtx, ncObjBits)
+	a.BCond(NE, miss)
+	a.Bind(ok)
+	a.Load(r8, rC, offERC)
+	a.LoadU8(rD, r8, offRCArgs)
+	a.Store(rCtx, scr(sEnt), rD)
+	a.AddImm(rS, rS, 16, true)
+	g.enter(enterThrough, g.exit)
+	a.Bind(miss)
+	g.storeImm(rCtx, ncMiss, 1)
+	a.B(g.exit)
 }
 
 // superW is super_call and super_forward, as amd64's: nativeSuper called

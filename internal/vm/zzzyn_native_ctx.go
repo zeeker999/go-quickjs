@@ -192,6 +192,9 @@ type nativeCtx struct {
 	// here too, so that it is made on the heap, as only a pointer the
 	// collector sees can make it, and lives until the frame has it.
 	thisRef *thisBinding
+	// callFn is where a Realm has its Function.prototype.call (callFn): an
+	// offset from the realm running now, as has is.
+	callFn uintptr
 }
 
 // nativeMaxDepth is how deep the native frame stack goes.

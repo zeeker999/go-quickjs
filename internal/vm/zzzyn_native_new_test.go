@@ -174,3 +174,50 @@ func TestRegNativeDerived(t *testing.T) {
 		for (var i = 0; i < 1000; i++) s += new B(i).z + new C(i).y
 		String(s)`, bytecode.RNewW, bytecode.RSuperCall, bytecode.RSuperForward, bytecode.RDerivedRet)
 }
+
+// nativeThroughSrc calls functions through Function.prototype.call: a
+// method of this given, a strict function given primitives and nothing,
+// a sloppy one given a primitive and an object, an arrow, several
+// functions at one site in turn, built-ins, a bound function, one that
+// reads arguments, a leaf, a class constructor, a function that throws,
+// a recursion through call, call called through call, and call replaced
+// by a script's function and put back, a stack trace taken in a callee.
+const nativeThroughSrc = `
+	var out = []
+	function m(a, b) { return this.k + a + (b | 0) }
+	function strict(a) { "use strict"; return typeof this + ":" + this + ":" + a }
+	function sloppy(a) { return (this === globalThis ? "G" : typeof this) + a }
+	var arrow = (a) => typeof this + a
+	function args() { return arguments.length + ":" + arguments[arguments.length - 1] }
+	function leaf(a) { return a }
+	function thrower(a) { if (a % 7 == 3) throw new TypeError("t" + a); return a }
+	function rec(n) { return n == 0 ? 0 : 1 + rec.call(this, n - 1) }
+	function st() { return new Error().stack.split("\n").length }
+	class K { constructor() {} }
+	var fs = [m, strict, sloppy, arrow, args, leaf, thrower, Math.max, m.bind({ k: 9 }), K, st]
+	function at(f) { try { return f() } catch (e) { return e.name + ":" + e.message } }
+	var realCall = Function.prototype.call
+	for (var j = 0; j < 40; j++) {
+		var o = { k: j }
+		out.push(m.call(o, 1, 2), m.call(o, 3), strict.call(5, j), strict.call(undefined, j), at(() => strict.call()))
+		out.push(sloppy.call(4, j), sloppy.call(o, j), sloppy.call(null, j), arrow.call(o, j), args.call(o, 1, 2, j))
+		out.push(leaf.call(o, j), at(() => thrower.call(o, j)), rec.call(o, 140), realCall.call(m, o, 5))
+		var f = fs[j % fs.length]
+		out.push(at(() => f.call(o, j, 1)))
+		if (j == 25) Function.prototype.call = function (t, a) { return "mine" + a }
+		if (j == 30) Function.prototype.call = realCall
+		out.push(at(() => m.call(o, 7)), at(() => st.call(o) > 1))
+	}
+	out.join()`
+
+// TestRegNativeThrough checks calls through Function.prototype.call,
+// which the call handler enters in the window one register on, against
+// the Go table: the same answers and errors, marking or not, and a site of
+// one function called with no exit once its cache holds it.
+func TestRegNativeThrough(t *testing.T) {
+	nativeCheck(t, nativeThroughSrc, `
+		function m(a, b) { return this.k + a + b }
+		var o = { k: 1 }, s = 0
+		for (var i = 0; i < 1000; i++) s += m.call(o, i, 2)
+		String(s)`, bytecode.RCallMW)
+}
