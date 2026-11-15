@@ -399,7 +399,12 @@ from `regSlowTable` where the handler leaves it that), exceptions to the
 frame's handlers by `regCatch`; where the evaluator leaves for good -- a
 return it cannot make, the budget -- `runReg` goes on with the frame from
 that register pc. Inside an expansion it runs the instruction whole only
-where nothing of it has committed. That is what native code's exits do too
+where nothing of it has committed; and where the program's lowering of the
+register pc it goes on at is a lone `Nop` of an instruction another's
+lowering did the work of -- `boolBranch`'s loads and jump, which a
+compare-and-branch run whole goes on to without its value written -- the VM
+runs those too, as the interpreter does, to where the program does its
+instruction's own work. That is what native code's exits do too
 (see [Exits and deoptimization](#exits-and-deoptimization)), so
 `TestRegLowerEvaluate` checks the lowering and the exits' contract without a
 backend.
