@@ -5032,7 +5032,12 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	if ctx.Live == abi.LiveCall {
 		if len(s.regRuns) != 0 {
 			if root := r.jitRegRootOf(idx); root >= 0 {
-				// A native callee's of register code (zzjit_zregcall.go).
+				// A native callee's of register code (zzjit_zregcall.go):
+				// an operation that runs nothing made without the levels'
+				// frames (jitRegPlainWhole).
+				if cl := (*closure)(ctx.Closure); cl != nil && r.jitRegPlainWhole(ctx, cl.reg) {
+					return true
+				}
 				return r.jitRegGoCallNested(ctx, idx, root)
 			}
 		}

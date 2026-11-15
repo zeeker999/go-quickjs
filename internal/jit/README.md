@@ -374,7 +374,12 @@ the function's key:
   as the interpreter makes the operation, and what the cache cannot hold the
   entry notes;
 - the functions a call was seen to call at its calls of Go and at its exits
-  (`jitRegCallSeen`), and the constructions;
+  (`jitRegCallSeen`), and the constructions: asked at a call of Go while
+  its site is unsettled (`jitRegCallUnsettled`), as the stack form's
+  `jitCallUnsettled` asks -- after `jitCallsToInline` calls of built-ins
+  (`jitRegCallSettle`) a site is settled as one Go makes (`jitCallDone`),
+  and its calls ask nothing more; a construction's, or a call of a
+  function with code, keeps it unsettled;
 - the literals' pools by register pc (`Literal`: `new_object`'s,
   `new_object_lit`'s, `new_array`'s, `new_array_k`'s and `new_regexp`'s,
   made by `jitObjectLiteral`, `jitArrayLiteral`, `jitRegSharedLiteral` and
@@ -386,7 +391,18 @@ the function's key:
 - the operators that met BigInts at a guard's failure or a generic one's
   host exit (`BigInt`, `BigIntWide`, `jitRegBigIntSeen`,
   `jitRegBigIntExit`, the stack form's `jitBigIntNote`), which the next
-  compiles make natively or call Go for (see [BigInts](#bigints));
+  compiles make natively or call Go for (see [BigInts](#bigints)); and,
+  for the first compile, those the register interpreter made in Go -- its
+  slow paths', which make every operator on BigInts the native handlers
+  do not: division, remainder, powers, shifts, bitwise operators, those
+  past the int64 range, a wrap's operator (`wrap`), whose passed-over
+  call's site cache it fills -- marked by register pc as the tree marks
+  its sites (`regBigOf`, regCode's `bigSeen`, `regBigSeen`): BigInts in
+  the int64 range, from 0 to 2^64-1, or others, on the heap, which
+  `Generic` answers as the stack form's tree marks are. An addition,
+  subtraction, multiplication or comparison of BigInts in the int64 range
+  the native handlers make themselves, unmarked: its site learns at its
+  first exit;
 - the register pcs after calls Go went on at, which the code had been built
   with no entry at (`Resumed`, `jitRegResumeSeen`);
 - the elements' kinds, as the stack form's code learns them
@@ -697,10 +713,16 @@ was compiled beside.
 exit and an entry would (`jitSSAMinWork`), against the work the stretch did
 (`jitRegStretchWork`). Every `jitSSAProbe` stretches, code whose work does
 not make up for them Go no longer enters (`entrySlow`), native callers
-calling it still; stretches begun at a loop are judged apart (`loopSlow`),
-and so are the settled calls of Go -- not a call of a function it may come
-to call natively -- of a run begun at a loop (`jitRegRunGoProfit`), as the
-stack form's `jitSSAProfit` and `jitRunGoProfit` judge. Go enters such code
+calling it still; stretches begun at a loop are judged apart (`loopSlow`)
+-- and so are a run's stretches after its host exits, where native code
+goes on at once as the stack form's run is entered at the loop again, a
+run that left at a loop judged slow leaving to the interpreter after the
+instruction Go ran -- and so are the settled calls of Go -- not a call of a
+function it may come to call natively -- of a run begun at a loop
+(`jitRegRunGoProfit`), as the stack form's `jitSSAProfit` and
+`jitRunGoProfit` judge: the call of Go after which they are judged not to
+pay is the run's last, the interpreter going on after it (`jitRegRun`'s
+`slow`), as the stack form's run leaves after it. Go enters such code
 again after `jitNativeRetry` calls of it, doubled each time
 (`jitRegRetrySlow`), and compiled again it is judged afresh: entered, and
 called natively, until the new code is found not to pay in turn
@@ -1558,9 +1580,18 @@ makes what the stack form's site of the same operation has it make itself
 object's spread by the layouts Go has copied (`ssa.CallSite`'s `Copies`),
 an array's spread by a dense array's elements (`ArrayIter`), an element
 appended (`Append`), a literal's field along its shape's transition
-(`DefineNext`); what it does not make, Go makes without the frame where
-that runs nothing (`jitRegFrameless`, the stack form's `jitOpFrameless`,
-which learns the layouts' copies), and on it otherwise.
+(`DefineNext`), a computed key that is a string its own (`StringSelf`,
+the builder's `wholeStringSelf`), a for...of's cursor from a generator's
+room (`ForOf`); what it does not make, Go makes without the frame where
+that runs nothing, ahead of a run's judgment of its calls of Go and with
+no level's frame made for a native callee's (`jitRegPlainWhole`):
+the stack form's operations (`jitRegFrameless`, `jitOpFrameless`, which
+learns the layouts' copies) -- an object pattern's rest, a computed key
+converted or defined, a literal's `__proto__` -- and a for...in's cursor,
+a for...of's cursor of an array and a loop's step over an array where it
+reads its dense storage or is done (`ssa.CallSite`'s `ForIn`, `ForOf`,
+`Step`: `jitGoCallPlain`'s `jitForInPlain`, `jitForOfPlain`,
+`jitStepPlain`); and on the frame otherwise.
 
 **Loops' steps.** A for...of's or a for...in's step (`iter_next`, an
 `ir.IterStep` native code does not make itself) is a call of Go of the
@@ -1585,7 +1616,11 @@ instruction -- a throw, a handler of the frame's that took one, the
 runtime stopped, the code found invalid -- the exit at the call finishes
 (`regPending`, `regFinishWhole`): the register the instruction wrote, or
 the handler's, written over the exit's records, the instruction never run
-again.
+again. Which instructions are whole Hosts the registers each reads and
+writes say (compile's `RegAccess`): a using declaration's
+`new_dispose_capability`, `add_disposable` and `dispose` among them,
+whose disposal may run script, which had been host exits at every turn of
+a loop with a using declaration.
 
 **On the frame's own state.** What reads only its operands and the frame --
 a `new.target`, a rest parameter's array and an unmapped arguments object of

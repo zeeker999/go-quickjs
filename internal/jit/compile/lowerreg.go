@@ -1725,6 +1725,18 @@ func RegAccess(rc *bytecode.RegCode, pc int) (reads, writes []int, all bool) {
 		return nil, nil, false
 	case bytecode.RSetUpvalCheck:
 		return []int{a}, nil, false
+	case bytecode.RNewDispose:
+		// A using scope's stack of resources, made; a resource added to
+		// it; its resources disposed of, a throw leaving the scope among
+		// what it reads where C is 1.
+		return nil, []int{a}, false
+	case bytecode.RAddDisposable:
+		return []int{a, b}, nil, false
+	case bytecode.RDispose:
+		if c == 1 {
+			return []int{a, b}, nil, false
+		}
+		return []int{a}, nil, false
 	}
 	return nil, nil, true
 }

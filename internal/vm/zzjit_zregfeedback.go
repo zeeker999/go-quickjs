@@ -633,7 +633,14 @@ func (f *jitRegFeedback) Generic(pc int) bool {
 		// would commit before (regLitFed): fed no more instead.
 		return false
 	}
-	return slices.Contains(f.fb.e.failed, int32(f.p.Origin[pc]))
+	if slices.Contains(f.fb.e.failed, int32(f.p.Origin[pc])) {
+		return true
+	}
+	// Arithmetic the interpreter saw meet or make a BigInt on the heap,
+	// which Go makes from native code (ssa.GoArith), as the stack form's
+	// answer of the tree's marks.
+	_, _, heap := f.regBigSeenAt(int(f.p.Origin[pc]))
+	return heap
 }
 
 // regLitFed reports whether the program's instruction pc, of regexp_lit's

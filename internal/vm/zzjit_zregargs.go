@@ -319,7 +319,7 @@ func (r *Runtime) jitRegForwardMade(ctx *abi.Context, idx int, run jitRegRun, rp
 	if err == nil && r.stopped == nil {
 		r.jitRegCallSeenOf(f, c, run.e, rpc, target, true)
 	}
-	if err != nil || r.stopped != nil || run.e.invalid || r.jitRegCompileDueNow(&run, idx) {
+	if err != nil || r.stopped != nil || run.e.invalid || run.slow || r.jitRegCompileDueNow(&run, idx) {
 		s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: v, err: err}
 		return false
 	}

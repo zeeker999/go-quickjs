@@ -833,6 +833,9 @@ func (r *Runtime) jitRegGoOn(f *frame, c *regCode, e *jitRegEntry, wb, rpc int) 
 // frame's level of a native call Go finished the callee of (jitRegUnwind),
 // the call's result in the next context's RetValue.
 func (r *Runtime) jitRegGoOnAt(f *frame, c *regCode, e *jitRegEntry, wb, rpc, at int, resume uintptr) (pc int, v Value, done bool, err error) {
+	// Whether the run began at a loop's header: its stretches after host
+	// exits are judged as on-stack replacement's (jitRegStretchWork).
+	loop := false
 	for {
 		ipc := 0
 		if resume == 0 && f.cl.reg == c {
@@ -861,7 +864,10 @@ func (r *Runtime) jitRegGoOnAt(f *frame, c *regCode, e *jitRegEntry, wb, rpc, at
 				return r.jitRegLeaveTo(f, e, rpc), Undefined, false, nil
 			}
 		}
-		ctx, ret, ok := r.jitRegStretch(f, c, e, wb, ipc, at, resume)
+		if resume == 0 && ipc < len(e.p.Origin) && e.isLoop(int(e.p.Origin[ipc])) {
+			loop = true
+		}
+		ctx, ret, ok := r.jitRegStretch(f, c, e, wb, ipc, at, resume, loop)
 		at, resume = -1, 0
 		if !ok {
 			return r.jitRegLeaveTo(f, e, rpc), Undefined, false, nil
@@ -872,6 +878,15 @@ func (r *Runtime) jitRegGoOnAt(f *frame, c *regCode, e *jitRegEntry, wb, rpc, at
 				pc = r.jitRegLeaveTo(f, e, pc)
 			}
 			return pc, v, done, err
+		}
+		if loop && ctx.ExitKind == abi.ExitHost && e.life != nil && e.life.loopSlow {
+			// A loop that leaves at its turns, judged not to pay for its
+			// exits (loopSlow): the interpreter goes on with it after the
+			// instruction Go ran, as the stack form's run leaves after a
+			// host exit and Go no longer enters such code at a loop
+			// (jitSSAProfit) -- array_fill_down's stores to a sparse
+			// array had left and gone on natively at each turn.
+			return r.jitRegLeaveTo(f, e, next), Undefined, false, nil
 		}
 		rpc = next
 	}
@@ -1094,7 +1109,7 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 // written to the frame, its exit a host exit at the call, which Go
 // finishes with the callee's answer (regPending). ok is false where it did
 // not run: no context, or the code closed.
-func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, at int, resume uintptr) (ctx *abi.Context, ret Value, ok bool) {
+func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, at int, resume uintptr, loop bool) (ctx *abi.Context, ret Value, ok bool) {
 	s := r.jit
 	idx := s.ctxTop
 	if at >= 0 {
@@ -1160,8 +1175,10 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 		s.regRuns = append(s.regRuns, make([]jitRegRun, idx+1-len(s.regRuns))...)
 	}
 	// A run begun at a loop's header, by on-stack replacement, whose
-	// calls of Go are judged as they come (jitRegRunGoProfit).
-	osr := resume == 0 && ipc < len(p.Origin) && e.isLoop(int(p.Origin[ipc]))
+	// calls of Go are judged as they come (jitRegRunGoProfit) -- or going
+	// on after a host exit of one (loop), as the stack form's run is
+	// entered at the loop again after each (jitGoOn).
+	osr := loop || resume == 0 && ipc < len(p.Origin) && e.isLoop(int(p.Origin[ipc]))
 	s.regRuns[idx] = jitRegRun{f: f, c: c, e: e, wb: wb, osr: osr, edges: r.backEdges - s.pollCredit, rpc: -1}
 	s.regPending = jitGoPending{}
 	s.entries++
@@ -1355,7 +1372,7 @@ func (r *Runtime) jitRegStretchWork(e *jitRegEntry, ctx *abi.Context, ipc, edges
 // it -- and every jitSSAProbe such calls, code whose calls do not pay Go
 // no longer enters (entrySlow, loopSlow), unless it calls functions
 // natively, whose work the back edges count only in part.
-func (r *Runtime) jitRegRunGoProfit(e *jitRegEntry, run *jitRegRun, rpc int) {
+func (r *Runtime) jitRegRunGoProfit(e *jitRegEntry, run *jitRegRun, rpc int) bool {
 	life := e.life
 	st := &life.ssaStats
 	edges := r.backEdges - r.jit.pollCredit
@@ -1369,6 +1386,7 @@ func (r *Runtime) jitRegRunGoProfit(e *jitRegEntry, run *jitRegRun, rpc int) {
 	if st.runGoCalls%jitSSAProbe == 0 && st.runWork < st.runGoCalls*jitSSAMinWork && len(life.nativeCalls) == 0 {
 		life.entrySlow, life.loopSlow = true, true
 	}
+	return life.loopSlow
 }
 
 // jitRegRetrySlow counts a call Go made of e's code without entering it
@@ -1428,6 +1446,11 @@ type jitRegRun struct {
 	// (jitRegGoCallNested), whose run is in context root.
 	own  int
 	root int
+	// slow marks a call of Go after which the code leaves, its calls of
+	// Go judged not to pay (jitRegRunGoProfit), the interpreter running
+	// the rest of the invocation, as the stack form's code leaves
+	// (jitGoCall's slow).
+	slow bool
 }
 
 // jitRegGoCall is a call of Go (ssa.GoCall) native code made from register
@@ -1453,10 +1476,33 @@ func (r *Runtime) jitRegGoCall(ctx *abi.Context, idx int) bool {
 	// (jitRegPushLevel) and an operation on the frame (jitRegFrameRun).
 	// A super.m read Go made after a native super() had found it unbound.
 	jitBindThis(run.f, ctx)
-	if run.osr && run.e != nil && run.e.life != nil && jitRegGoSettled(ctx, run.c, int(ctx.ExitPC)) {
-		r.jitRegRunGoProfit(run.e, run, int(ctx.ExitPC))
+	if r.jitRegPlainWhole(ctx, run.c) {
+		return true
 	}
-	return r.jitRegGoCallOn(ctx, idx, *run)
+	rpc := int(ctx.ExitPC)
+	judged := run.osr && run.e != nil && run.e.life != nil && jitRegGoSettled(ctx, run.c, rpc)
+	on := *run
+	on.slow = judged && r.jitRegRunGoProfit(run.e, run, rpc)
+	ok := r.jitRegGoCallOn(ctx, idx, on)
+	if s := r.jit; judged && idx < len(s.regRuns) {
+		// The work the next call is judged against starts here: what this
+		// one ran, which the interpreter would run alike, is none of it,
+		// as the stack form's (jitGoCall).
+		s.regRuns[idx].edges, s.regRuns[idx].rpc = r.backEdges-s.pollCredit, rpc
+	}
+	return ok
+}
+
+// jitRegPlainWhole makes the call of Go ctx makes of register code c's
+// instruction run whole (abi.GoCallWhole) without a frame where that runs
+// nothing and throws nothing (jitRegFrameless), as the stack form's
+// jitGoCallPlain makes its operations: ahead of the judgment of a run's
+// calls of Go and their count, which such a call, a native operation's
+// cost, is not, as the stack form's plain calls are not.
+func (r *Runtime) jitRegPlainWhole(ctx *abi.Context, c *regCode) bool {
+	rpc := int(ctx.ExitPC)
+	return ctx.GoOp>>abi.GoOpKindShift&0xff == abi.GoCallWhole && c != nil && rpc < len(c.rc.Code) &&
+		r.jitRegFrameless(ctx, regAt(c.code, rpc).Op())
 }
 
 // jitRegGoSettled reports whether the call of Go ctx makes at register pc
@@ -1504,16 +1550,14 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	op := w.Op()
 	argc := int(w.X())
 	kind := ctx.GoOp >> abi.GoOpKindShift & 0xff
-	if kind == abi.GoCallWhole && r.jitRegFrameless(ctx, op) {
-		return true
-	}
 	if kind == abi.GoCallStep && op == bytecode.RIterNext {
 		// A loop's step over a generator native code may resume once
 		// compiled again (jitRegGenStepSeen), its cursor the step's operand.
 		r.jitRegGenStepSeen(f, run.e, rpc, jitGoArg(ctx, 0))
 	}
 	if kind == abi.GoCallWhole || (kind == abi.GoCallRest || kind == abi.GoCallStep) && (op == bytecode.RIterRest || op == bytecode.RIterStep) ||
-		kind == abi.GoCallStep && op == bytecode.RIterNext || kind == abi.GoCallForOf && op == bytecode.RForOfStart {
+		kind == abi.GoCallStep && op == bytecode.RIterNext || kind == abi.GoCallForOf && op == bytecode.RForOfStart ||
+		kind == abi.GoCallForIn && op == bytecode.RForInStart {
 		// A for...of's cursor native code did not take from a generator's
 		// room (regWholeSite's ForOf) too.
 		// Or a destructuring's step or rest, which native code had no
@@ -1567,7 +1611,7 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 		if s.ssaSharedGen != shared {
 			r.jitShareContexts(idx, f)
 		}
-		if err != nil || r.stopped != nil || run.e.invalid {
+		if err != nil || r.stopped != nil || run.e.invalid || run.slow {
 			s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: v, err: err}
 			return false
 		}
@@ -1587,7 +1631,7 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 		if s.ssaSharedGen != shared {
 			r.jitShareContexts(idx, f)
 		}
-		if err != nil || r.stopped != nil || run.e.invalid {
+		if err != nil || r.stopped != nil || run.e.invalid || run.slow {
 			s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: Bool(yes), err: err}
 			return false
 		}
@@ -1666,10 +1710,12 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	if s.ssaSharedGen != shared {
 		r.jitShareContexts(idx, f)
 	}
-	if err == nil && r.stopped == nil {
+	if err == nil && r.stopped == nil && jitRegCallUnsettled(run.e, rpc, op) {
 		// What the call called, which the code may call natively once
 		// compiled again (jitRegCallSeen), or make a loop of its own
-		// (jitRegForEachSeen).
+		// (jitRegForEachSeen): asked while the call is unsettled
+		// (jitRegCallSettle), as the stack form's (jitCallUnsettled).
+		jitRegCallSettle(run.e, c, rpc, callee)
 		if op == bytecode.RNewW && callee.IsObject() && callee.Object() == r.proto.arrayCtor {
 			// new Array(n), its length the call's operand (jitRegAllocLength).
 			n := Undefined
@@ -1694,12 +1740,49 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 			r.jitRegGenCallSeen(f, run.e, rpc, this, callee, argc)
 		}
 	}
-	if err != nil || r.stopped != nil || run.e.invalid || r.jitRegCompileDueNow(&run, idx) {
+	if err != nil || r.stopped != nil || run.e.invalid || run.slow || r.jitRegCompileDueNow(&run, idx) {
 		s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: v, err: err}
 		return false
 	}
 	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
 	return true
+}
+
+// jitRegCallUnsettled reports whether the learning of a call of Go
+// (jitRegCallSeen and the rest) has anything to note of the call op at
+// register pc rpc of e's code: not once the call is settled as one Go
+// makes (jitCallDone, jitRegCallSettle), unless it constructs -- a pool
+// to fill -- as the stack form's jitCallUnsettled asks. Most calls of Go
+// are such, a built-in's: asked here, they cost no learning.
+func jitRegCallUnsettled(e *jitRegEntry, rpc int, op bytecode.ROp) bool {
+	if op == bytecode.RNewW || e == nil || e.life == nil {
+		return true
+	}
+	sites := e.life.callSites
+	return uint(rpc) >= uint(len(sites)) || sites[rpc] != jitCallDone
+}
+
+// jitRegCallSettle counts a call of Go of callee at register pc rpc of
+// c, e's code, toward its settling as one Go makes (jitCallDone), as the
+// stack form's jitCallSeen counts one: after jitCallsToInline calls of
+// built-ins, which the learning has seen each of, it is settled. A call
+// of a function with code keeps it unsettled: the code calls it natively
+// once it has learned it (jitRegCallSeen), and refills its generators'
+// pool there (jitRegGenMakeSeen).
+func jitRegCallSettle(e *jitRegEntry, c *regCode, rpc int, callee Value) {
+	if e == nil || e.life == nil || rpc >= len(c.rc.Code) || !callee.IsObject() {
+		return
+	}
+	if fd := callee.Object().fn(); fd != nil && fd.native == nil {
+		return
+	}
+	l := e.life
+	if len(l.callSites) != len(c.rc.Code) {
+		l.callSites = make([]uint8, len(c.rc.Code))
+	}
+	if l.callSites[rpc]++; l.callSites[rpc] >= jitCallsToInline {
+		l.callSites[rpc] = jitCallDone
+	}
 }
 
 // jitRegWhole runs, for native code, register code's instruction at
@@ -1803,7 +1886,7 @@ func (r *Runtime) jitRegWhole(ctx *abi.Context, idx int, run jitRegRun, rpc int)
 		// Done: the loop's end is next, its register as it was.
 		v, done = uninitialized, true
 	}
-	if err != nil || next != after && !done || r.stopped != nil || e.invalid {
+	if err != nil || next != after && !done || r.stopped != nil || e.invalid || run.slow {
 		// Left at the call's exit, whose records write the frame as it was
 		// before the instruction: then the register it wrote, or the
 		// handler's that took what it threw.
@@ -1865,7 +1948,7 @@ func (r *Runtime) jitRegSuperMade(ctx *abi.Context, idx int, run jitRegRun, rpc 
 		r.jitShareContexts(idx, f)
 	}
 	v := f.this
-	if err != nil || r.stopped != nil || run.e.invalid || r.jitRegCompileDueNow(&run, idx) {
+	if err != nil || r.stopped != nil || run.e.invalid || run.slow || r.jitRegCompileDueNow(&run, idx) {
 		s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: v, err: err}
 		return false
 	}
