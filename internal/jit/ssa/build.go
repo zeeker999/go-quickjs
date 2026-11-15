@@ -8754,9 +8754,12 @@ func (b *builder) instruction(blk *Block, pc int) {
 				args, argc = args[1:], 1
 			} else {
 				// The parameters a mapped object aliases, as they are, for
-				// a key that is one's alias (ir.Program's ArgumentParams).
+				// a key that is one's alias (ir.Program's ArgumentParams),
+				// from the frame's first parameter's slot (ParamBase):
+				// register code's registers 0 and 1 are its function and
+				// its this.
 				for i := range b.p.ArgumentParams {
-					args = append(args, b.read(i, blk))
+					args = append(args, b.read(b.p.ParamBase+i, blk))
 				}
 				argc += b.p.ArgumentParams
 			}

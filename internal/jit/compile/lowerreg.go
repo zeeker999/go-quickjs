@@ -1841,6 +1841,19 @@ func liveRegs(p *ir.Program, rc *bytecode.RegCode) {
 			ops = append(ops, ir.LiveOp{Slot: int32(r)})
 		}
 	}
+	// The parameters a mapped arguments object aliases where the code, or
+	// a closure, assigns them (ArgumentParams), live at each read of the
+	// arguments as at liveLocals' in the stack form: Go's read of
+	// arguments[k] is given them, and the object the interpreter makes at
+	// an exit -- for a key past the arguments -- reads their registers.
+	aliased := func(op bytecode.ROp) {
+		switch op {
+		case bytecode.RArgsIndex, bytecode.RArgsLen, bytecode.RArguments, bytecode.RApplyArgs:
+			for k := range p.ArgumentParams {
+				gen(p.ParamBase + k)
+			}
+		}
+	}
 	// The instructions' successors but the next one -- a jump's, and the
 	// handler in force -- and whether each goes on to the next.
 	falls := make([]bool, m)
@@ -1889,6 +1902,7 @@ func liveRegs(p *ir.Program, rc *bytecode.RegCode) {
 			for _, r := range reads {
 				gen(r)
 			}
+			aliased(rc.Code[p.Origin[i]].Op())
 		} else {
 			a, b := ins.Writes()
 			if ins.Op == ir.IterStep && !ins.When {
@@ -1908,6 +1922,9 @@ func liveRegs(p *ir.Program, rc *bytecode.RegCode) {
 			kill(b)
 			for _, r := range irReads(ins) {
 				gen(r)
+			}
+			if ins.Op == ir.ArgumentRead {
+				aliased(rc.Code[p.Origin[i]].Op())
 			}
 			if ins.Check {
 				if w := rc.Code[p.Origin[i]]; w.Op() == bytecode.RDerivedRet {

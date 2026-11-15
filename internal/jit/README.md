@@ -408,7 +408,12 @@ from `regSlowTable` where the handler leaves it that), exceptions to the
 frame's handlers by `regCatch`; where the evaluator leaves for good -- a
 return it cannot make, the budget -- `runReg` goes on with the frame from
 that register pc. Inside an expansion it runs the instruction whole only
-where nothing of it has committed. That is what native code's exits do too
+where nothing of it has committed; and where the program's lowering of the
+register pc it goes on at is a lone `Nop` of an instruction another's
+lowering did the work of -- `boolBranch`'s loads and jump, which a
+compare-and-branch run whole goes on to without its value written -- the VM
+runs those too, as the interpreter does, to where the program does its
+instruction's own work. That is what native code's exits do too
 (see [Exits and deoptimization](#exits-and-deoptimization)), so
 `TestRegLowerEvaluate` checks the lowering and the exits' contract without a
 backend.
@@ -2219,7 +2224,10 @@ parameter -- is given them and their count in its context (`ssa.CallSite`'s
 `FrameArgs`, `mir`'s `windowArgs`), as the stack form's call gives them,
 where its reads of them are answered from (`GoArgument`; a sloppy
 function's parameter its object would alias read as the code has it,
-`ArgumentParams`, as the stack form's `jitArgument`), its rest parameter's
+`ArgumentParams`, as the stack form's `jitArgument`: the registers from
+`ParamBase`, 2, past the function's and its this, live at each read of the
+arguments as the stack form's `liveLocals` keeps the parameters' slots, for
+the object the interpreter makes at an exit reads them), its rest parameter's
 array and its arguments object made from them (`jitRegFrameArgs`), and the
 frame Go makes of its level is given them (`jitRegPushLevel`) -- or it is
 inlined (see [Inlining](#inlining)). A forwarding call, `f.apply(x,
