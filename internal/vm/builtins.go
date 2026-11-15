@@ -225,7 +225,7 @@ func (r *Runtime) initObjectBuiltins() {
 		default:
 			return Undefined, rt.throwTypeError("Object.create requires an object or null")
 		}
-		o := newObject(proto, ClassObject)
+		o := newCreated(proto)
 		if props := arg(args, 1); !props.IsUndefined() {
 			if err := rt.defineProperties(o, props); err != nil {
 				return Undefined, err
