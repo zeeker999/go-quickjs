@@ -315,3 +315,28 @@ func TestRegNativeArgsIndex(t *testing.T) {
 		for (var i = 0; i < 1000; i++) s += f(i, i, 1) + g(i, 2)
 		String(s)`, bytecode.RArgsIndex)
 }
+
+// TestRegNativeLeafInterrupt pins a register leaf's calls, which the call
+// handler enters with a frame, through the interrupt's checks: a frameless
+// run of the leaf in Go counts no interrupt, and once one was due every
+// later call had been left to Go, the counter never reaching its check.
+// Each check is one exit, not every call after it.
+func TestRegNativeLeafInterrupt(t *testing.T) {
+	nativeCounting(t)
+	src := `
+		function run(n) {
+			function f(a) { sum++ }
+			var j, sum = 0
+			for (j = 0; j < n; j++) { f(j); f(j) }
+			return sum
+		}
+		String(run(10) + run(200000))`
+	before := nativeExitOps()
+	if got := nativeRunSrc(t, src, true); got != "400020" {
+		t.Fatalf("got %s, want 400020", got)
+	}
+	after := nativeExitOps()
+	if n := after[bytecode.RCallW] - before[bytecode.RCallW]; n > 1000 {
+		t.Errorf("call_w exited %d times of 400020 calls", n)
+	}
+}
