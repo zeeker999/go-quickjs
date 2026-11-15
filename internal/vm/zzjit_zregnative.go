@@ -762,7 +762,7 @@ func (s *jitState) regAge(now uint64) {
 // kept for inlining, and the budget, full, refused compiles for them.
 func (s *jitState) regVictims(v []jitVictim, now uint64) []jitVictim {
 	for key, l := range s.regLowered {
-		if n := s.regLoweringSpare(key, l); n != 0 {
+		if n := s.regLoweringSpare(key, l); n > 0 {
 			v = append(v, jitVictim{key: key, l: l, reg: true, class: jitVictimLowering, used: l.used, bytes: n})
 		}
 	}
