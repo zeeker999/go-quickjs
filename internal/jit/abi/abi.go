@@ -1156,10 +1156,11 @@ type ObjectPool struct {
 	Source unsafe.Pointer
 	// Room, for a pool of `new Array(n)`'s arrays, is how many elements
 	// each has storage for, holes all, its length 0: native code takes one
-	// for an n up to Room and makes n its length. Want is an n past Room
-	// that native code asks Go to fill the pool for, at a refill, as V8's
-	// code allocates a holey array of a length it checks; both are 0 in
-	// any other pool.
+	// for an n up to Room -- past PoolSmallRoom, more than half of it --
+	// and makes n its length. Want is 1 plus an n that does not fit, past
+	// Room or at most half a Room past PoolSmallRoom, that native code
+	// asks Go to fill the pool for, at a refill, as V8's code allocates a
+	// holey array of a length it checks; both are 0 in any other pool.
 	Room, Want uint64
 	// Cells, for a pool of a function's cells (ssa.GoCells), is how many
 	// each block has (Encoding's UpvalueSize); 0 in any other pool.
@@ -1186,8 +1187,20 @@ const (
 )
 
 // PoolRoomLimit is the most elements a pooled array has storage for
-// (ObjectPool's Room): a `new Array(n)` of a longer n is made by Go.
-const PoolRoomLimit = 16
+// (ObjectPool's Room): the longest `new Array(n)` the VM makes with its
+// holes in dense storage. A longer n's array is its length alone, which
+// Go makes.
+//
+// A room up to PoolSmallRoom is one of the sizes an array's own
+// allocation has room for, its array taken for any n up to it; a room
+// past it is a power of two, the size class of the n more than half of it,
+// and its array is taken for those alone: a shorter n, as a longer one,
+// has Go fill the pool again with arrays of n's class (Want), so that a
+// pool's arrays have at most twice the room their lengths need.
+const (
+	PoolRoomLimit = 1 << 16
+	PoolSmallRoom = 16
+)
 
 // What a context's Live says: a native call's callee runs in it, or an
 // inlined callee's frame is described in it.

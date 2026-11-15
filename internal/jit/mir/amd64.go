@@ -6394,12 +6394,13 @@ func (c *compiler) poolShade(sites []*ssa.CallSite) {
 
 // lengthGuards checks a `new Array(n)` can take its array from its pool:
 // n, the operand x, a number that is an integer in [0, the pool's Room]
-// (abi.ObjectPool). One past Room, up to abi.PoolRoomLimit, has Go fill
-// the pool again with arrays of more room (Want), and the call is made
-// again from its start, every check again, as an empty pool is
-// (refillOnEmpty); any other n fails the guard: Go makes the array, as
-// V8's code calls the Array constructor past the length it allocates
-// inline. It uses every scratch register.
+// (abi.ObjectPool), and past abi.PoolSmallRoom more than half of it. One
+// past Room, up to abi.PoolRoomLimit, or at most half a room past
+// PoolSmallRoom, has Go fill the pool again with arrays of n's room
+// (Want), and the call is made again from its start, every check again,
+// as an empty pool is (refillOnEmpty); any other n fails the guard: Go
+// makes the array, as V8's code calls the Array constructor past the
+// length it allocates inline. It uses every scratch register.
 func (c *compiler) lengthGuards(t *ssa.CallSite, x *ssa.Value, guard guardTo) {
 	var w amd64.Reg
 	if remat(x) {
@@ -6422,8 +6423,25 @@ func (c *compiler) lengthGuards(t *ssa.CallSite, x *ssa.Value, guard guardTo) {
 	c.movImm(scratchB, uint64(t.Pool))
 	c.a.Load(scratchC, scratchB, abi.OffPoolRoom)
 	c.a.Op(amd64.Cmp, scratchA, scratchC, true)
-	fits := c.a.NewLabel()
+	fits, past := c.a.NewLabel(), c.a.NewLabel()
+	c.a.Jcc(amd64.CondA, past)
+	// Within its room: any n of a small room, else one of its class, more
+	// than half of it.
+	c.a.OpImm(amd64.Cmp, scratchC, abi.PoolSmallRoom, true)
 	c.a.Jcc(amd64.CondBE, fits)
+	c.a.ShiftImm(amd64.Shr, scratchC, 1, true)
+	c.a.Op(amd64.Cmp, scratchA, scratchC, true)
+	c.a.Jcc(amd64.CondA, fits)
+	v, top := c.callV, c.callTop
+	var grow amd64.Label
+	if v == nil {
+		// No call to make again: Go makes it.
+		guard.jump(amd64.CondBE)
+	} else {
+		grow = c.a.NewLabel()
+		c.a.Jmp(grow)
+	}
+	c.a.Bind(past)
 	// Past its room: a negative n, unsigned, is past every room. Past
 	// what any pool's arrays have room for, Go makes the construction,
 	// called from native code, which goes on after it (allocDone) -- a
@@ -6443,17 +6461,18 @@ func (c *compiler) lengthGuards(t *ssa.CallSite, x *ssa.Value, guard guardTo) {
 	} else {
 		guard.jump(amd64.CondA)
 	}
-	v, top := c.callV, c.callTop
 	if v == nil {
 		// No call to make again: Go makes it. n is at most the limit, as
 		// the flags still say.
 		guard.jump(amd64.CondBE)
 	} else {
-		grow := c.a.NewLabel()
 		c.a.Jmp(grow)
 		pool := t.Pool
 		c.cold = append(c.cold, func() {
 			c.a.Bind(grow)
+			// 1 plus n: an n of 0, which a room past abi.PoolSmallRoom
+			// is too large for, is asked for too.
+			c.a.OpImm(amd64.Add, scratchA, 1, true)
 			c.a.Store(scratchB, abi.OffPoolWant, scratchA)
 			c.storeImm(regCtx, abi.OffGoArgs+c.enc.RefOffset, uint64(pool), scratchA)
 			c.callGo(v, uint64(ssa.GoRefill), 0)

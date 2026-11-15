@@ -1409,9 +1409,22 @@ can show; a comparator that cannot be inlined leaves the call to Go.
 **Allocation.** Object, array and regular expression literals, closures and
 their captured cells (see Closures), and the receivers of constructions, are
 taken from pools of objects the VM makes ahead (`abi.ObjectPool`), as V8's
-code allocates inline; Go refills a pool that runs out. A pooled array has
-storage for at most `abi.PoolRoomLimit` (16) elements: a `new Array(n)` of a
-longer n is made by Go.
+code allocates inline; Go refills a pool that runs out. `new Array(n)`'s
+pools hold arrays by size class (`abi.ObjectPool`'s `Room`, the VM's
+`jitArrayRoom`): up to `abi.PoolSmallRoom` (16) elements, the sizes an
+array's own allocation has room for, its array taken for any n up to the
+room; past it a power of two, the elements a slice of their own, its array
+taken for an n of more than half the room. An n the pool's room does not
+fit -- longer, or at most half a room past 16 -- has Go fill the pool again
+with arrays of n's class (`Want`, 1 plus n), and the construction is made
+again: a pool's arrays have at most twice the room their lengths need. A
+filling past 16 makes as many arrays as 64 KiB of elements holds, at least
+one, and a pool whose class changes is filled with one array, more as it
+runs out, so that a site whose lengths change class at every call is given
+an array a call, not a filling. Up to `abi.PoolRoomLimit` (65,536)
+elements, the longest the Array constructor makes with its holes in dense
+storage, every `new Array(n)` is taken from a pool; a longer n, whose array
+is its length alone, is Go's construction, called from native code.
 
 **Escape analysis.** As V8's TurboFan does, an object a pool would give the
 code -- an object literal's, the receiver of a construction the code inlines
@@ -2129,7 +2142,7 @@ generator from a pool, as the stack form's does (`ssa.CallSite`'s
 `GenMake`): the arguments written to the generator's registers from its
 window's register 2 (`GenArgAt`), a method's receiver to its register 1
 too (`GenThisAt`). A construction with the realm's Array, `new Array()` or `new Array(n)` of a
-length a pool's arrays have room for, learned at the call Go made of it
+length up to `abi.PoolRoomLimit`, learned at the call Go made of it
 (`jitRegAllocSeen`), takes its array from a pool (`ssa.CallSite`'s
 `Alloc`), as the stack form's does. A
 callee native callers call that has no code is compiled at their first call
