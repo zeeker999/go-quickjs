@@ -736,6 +736,36 @@ NaN made an integer -- ToInt32's 0, an integer typed array's element 0
 -- where FCVTZS gives 0 and CVTTSD2SI no integer; what has no int64 is
 told by the limits FCVTZS saturates to, and exits as on amd64.
 
+**Constructions and the calls built-ins pass on.** `new_w` has a call
+site of its own, whose cache holds a constructor the handler enters as
+`call_w` enters a callee (`regCallConstruct`): a function's or a base
+class's once its objects' room is settled (its root tracked), a derived
+class's, and a forwarder's (`LeafForward`), none with fields of its own.
+Its object is made by Go with no exit (`nativeNew`, as `nativeLit` is
+called), of the constructor's prototype and root as
+`constructWithTarget` makes it -- a body that only stores its parameters
+answered by `leafCall` there -- and the frame is `regFrameConstruct`,
+its new.target the constructor, a derived class's with its this binding
+(`regThisBinding`); `ret` gives the frame's this where the body returns
+no object, and lets go of the binding. `super_call` and `super_forward`
+in a derived class's constructor enter the parent constructor
+(`nativeSuper` makes its window at the stack's top), `regFrameSuper`,
+whose `ret` binds the caller's this as `superBind` does, `derived_ret`
+answered in place. `instanceof` is `ordinaryHasInstance`'s case natively:
+Symbol.hasInstance the realm's as the site's cache finds it, the
+constructor's own data prototype found in its table, the value's chain
+walked. A call of the realm's `Function.prototype.call` whose callee the
+site's cache holds (`regCallThrough`, filled by Go) enters it in the
+window one register on, and `apply_args` its target in a window made at
+the stack's top (`nativeApply`), neither with the built-in's frame, which
+stack traces and `f.caller` pass over, as V8 has none. `args_index`
+reads an index past the parameters from the frame's kept arguments. A
+script-level `let`, `const` or `class` is read and written by its global
+site in `globalLex` (`regNoteGlobalLex`), at the global epoch as a global
+object's slot is. A register leaf's frameless run (`regLeafRun`) gives up
+while an interrupt is due, which its frame then counts: counting none, it
+had left every call of the leaf after the first due interrupt to Go.
+
 **The exit stub.** An operation of no native handler has the exit stub's
 address in the table, and every miss jumps to it. It writes the
 instruction, its index and the budget to the context, makes the top

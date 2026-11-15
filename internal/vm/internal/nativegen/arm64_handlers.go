@@ -1116,6 +1116,13 @@ func armEmit(v *variant) (*block, error) {
 	h(bytecode.RAddI32, func() { g.int32Of(FAdd, false) })
 	h(bytecode.RSubI32, func() { g.int32Of(FSub, false) })
 	h(bytecode.RAddII32, func() { g.int32Of(FAdd, true) })
+	h(bytecode.RNewW, g.newW)
+	h(bytecode.RInstanceOf, g.instanceOf)
+	h(bytecode.RSuperCall, g.superW)
+	h(bytecode.RSuperForward, g.superW)
+	h(bytecode.RDerivedRet, g.derivedRet)
+	h(bytecode.RApplyArgs, g.applyW)
+	h(bytecode.RArgsIndex, g.argsIndex)
 
 	for n, l := range g.exits {
 		if n == 0 {

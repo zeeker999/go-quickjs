@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"weak"
 
 	intl "github.com/go-quickjs/go-intl"
 	"github.com/go-quickjs/go-intl/date"
@@ -356,6 +357,11 @@ type Runtime struct {
 	// tree tier, as a runtime with the JIT runs it (regOn), for tests of
 	// those tiers.
 	oldTiers bool
+	// strConsts are the strings the program's string constants were made,
+	// by their text, held weakly (constString), and strConstsSweep the
+	// count past which the dead are swept out.
+	strConsts      map[string]weak.Pointer[String]
+	strConstsSweep int
 	// jitFields is the optional native tier's state, empty in builds
 	// without it. It comes after everything the interpreter reads, so that
 	// a build with the tier moves none of their offsets, and before the last
@@ -482,6 +488,9 @@ type Realm struct {
 	// callFn is Function.prototype.call, whose calls callDirect makes
 	// itself; see callThrough.
 	callFn *Object
+	// reflectConstructFn is Reflect.construct, whose calls the call
+	// handler makes constructions it enters itself (nativeReflect).
+	reflectConstructFn *Object
 	// regexpFlagProps is RegExp.prototype's flags getter and the getters it
 	// reads, as the realm made them: see builtinFlags.
 	regexpFlagProps []builtinProp
