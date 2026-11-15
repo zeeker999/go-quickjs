@@ -929,6 +929,8 @@ var regStackOp = [256]bytecode.Op{
 	bytecode.RBitAnd: bytecode.OpBitAnd, bytecode.RBitOr: bytecode.OpBitOr, bytecode.RBitXor: bytecode.OpBitXor,
 	bytecode.RShl: bytecode.OpShl, bytecode.RShr: bytecode.OpShr, bytecode.RUShr: bytecode.OpUShr,
 	bytecode.RAdd: bytecode.OpAdd, bytecode.RSub: bytecode.OpSub, bytecode.RMul: bytecode.OpMul,
+	bytecode.RMulI: bytecode.OpMul, bytecode.RAddI32: bytecode.OpAdd, bytecode.RSubI32: bytecode.OpSub,
+	bytecode.RAddII32: bytecode.OpAdd,
 }
 
 // regJumpCmp is each compare-and-branch operation's comparison: its stack
@@ -951,6 +953,10 @@ var regJumpCmp = [256]struct {
 	bytecode.RJEq: {bytecode.OpEq, false, true, false}, bytecode.RJNe: {bytecode.OpEq, true, true, false},
 	bytecode.RJEqI: {bytecode.OpEq, false, false, false}, bytecode.RJNeI: {bytecode.OpEq, true, false, false},
 	bytecode.RJNull: {bytecode.OpEq, false, false, false}, bytecode.RJNotNull: {bytecode.OpEq, true, false, false},
+	// A step-and-branch's, its partner's.
+	bytecode.RStepJLt: {bytecode.OpLt, false, true, false}, bytecode.RStepJLe: {bytecode.OpLe, false, true, false},
+	bytecode.RStepJLtI: {bytecode.OpLt, false, false, false}, bytecode.RStepJGtI: {bytecode.OpGt, false, false, false},
+	bytecode.RStepJGeI: {bytecode.OpGe, false, false, false}, bytecode.RStepJLeU: {bytecode.OpLe, false, false, true},
 }
 
 // regConstruct is new_w: new callee with the argc arguments of the window

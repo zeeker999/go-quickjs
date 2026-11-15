@@ -1505,6 +1505,22 @@ func (l *regLowering) lower(pc int) {
 	case bytecode.RSetPrivate:
 		// R[A].#R[C] = R[B], a writable field's write, as the read.
 		l.emit(ir.Instruction{Op: ir.PropertyWrite, Left: reg(a), Right: reg(b), Key: l.name(uint16(l.rc.Aux[pc])), Third: reg(w.C()), Private: true}, false)
+	case bytecode.RStepJLt, bytecode.RStepJLe, bytecode.RStepJLtI, bytecode.RStepJGtI, bytecode.RStepJGeI, bytecode.RStepJLeU:
+		// A step and its partner: lowered as the step alone, which falls
+		// to the partner at pc+1, lowered as the compare it is, so that
+		// the IR is the code's before the two were fused. Reserved: no
+		// lowering yet.
+		if !bytecode.StepPaired(rc.Code, pc) {
+			panic(fmt.Sprintf("jit: %v at %d without its partner", op, pc))
+		}
+		panic(fmt.Sprintf("jit: no register lowering for %v", op))
+	case bytecode.RAddI32, bytecode.RSubI32, bytecode.RAddII32:
+		// The operator and the ToInt32 of the | 0 whose stack instruction
+		// Aux[pc] is. Reserved: no lowering yet.
+		if pc >= len(rc.Aux) || int64(rc.Aux[pc]) >= int64(len(fn.Code)) {
+			panic(fmt.Sprintf("jit: %v at %d without its | 0's position", op, pc))
+		}
+		panic(fmt.Sprintf("jit: no register lowering for %v", op))
 	default:
 		if !op.Cold() {
 			panic(fmt.Sprintf("jit: no register lowering for %v", op))
