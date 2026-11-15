@@ -3642,7 +3642,11 @@ func (b *builder) rootState() *FrameState {
 // guards share, not one of its own: a state names every live slot, and a
 // function of many captured locals made one at each assignment.
 func (b *builder) storeCaptured(blk *Block, slot int, v *Value) {
-	st := b.rootState()
+	b.storeCapturedAt(blk, slot, v, b.rootState())
+}
+
+// storeCapturedAt is storeCaptured exiting, if it must, to st.
+func (b *builder) storeCapturedAt(blk *Block, slot int, v *Value, st *FrameState) {
 	w := b.f.newValue(blk, OpPropWrite, None, b.cellOf(blk, slot), v)
 	w.Aux, w.State = int(ir.HostExit), st
 	st.addUse()
@@ -4039,11 +4043,6 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 		result := b.cur.base + b.p.Code[pc].Dest
 		if accessor.Setter {
 			result = -1
-		} else if b.p.IsCaptured(b.p.Code[pc].Dest) {
-			// A result to a register a closure captures, which its cell
-			// holds: the inlined frame's return writes the slot, not the
-			// cell, which a call's own result stores (assign).
-			return nil, false
 		}
 		return b.inlineFrame(site, calls, givenCalls, total, result, pc)
 	}
@@ -4053,13 +4052,12 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 		// plain call, a method's or a construction -- its result the
 		// call's register.
 		if !in.Window || !site.Window || isAccessor || site.Restart || site.ThisSlot >= 0 || site.Params < 2 ||
-			site.LexThis && (site.Construct || site.Method || site.Forward || site.LexThisSlot < 0) || b.p.IsCaptured(in.Dest) {
-			// Nor one whose result is to a register a closure captures,
-			// which its cell holds: the inlined frame's return writes the
-			// slot, not the cell, which a call's own result stores
-			// (assign). A closure the root makes (calledSite), what it
-			// captured the root's own slots (Captured), is called plainly,
-			// an arrow's this the root's (LexThis).
+			site.LexThis && (site.Construct || site.Method || site.Forward || site.LexThisSlot < 0) {
+			// A closure the root makes (calledSite), what it captured the
+			// root's own slots (Captured), is called plainly, an arrow's
+			// this the root's (LexThis). One whose result is to a register
+			// a closure captures has its return store it in its cell too
+			// (storeCapturedAt).
 			return nil, false
 		}
 		if site.Forward {
@@ -7604,6 +7602,13 @@ func (b *builder) instruction(blk *Block, pc int) {
 			}
 			if b.cur.result >= 0 {
 				b.assign(b.cur.result, blk, v)
+				if b.cur.parent == b.root && b.root.p.IsCaptured(b.cur.result) {
+					// Register code's call whose result is a register a
+					// closure captures, which its cell holds: stored there
+					// too, as a call's own result is (assign), its exit the
+					// call's state -- no cell's write leaves native code.
+					b.storeCapturedAt(blk, b.cur.result, v, b.cur.call)
+				}
 			}
 			break
 		}

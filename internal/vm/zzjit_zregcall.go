@@ -1655,7 +1655,7 @@ func (f *jitRegFeedback) InlineExit(pc int) bool {
 	rpc := int(f.p.Origin[pc])
 	l := f.fb.e
 	made := l != nil && rpc < len(l.regCallsMade) && l.regCallsMade[rpc] != 0
-	switch w.Op() {
+	switch jitRegCallOp(w.Op()) {
 	case bytecode.RThrow, bytecode.RThrowRef:
 		return true
 	case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW:

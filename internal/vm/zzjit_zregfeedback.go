@@ -652,7 +652,8 @@ func (f *jitRegFeedback) EntryGeneric(pc int) bool {
 }
 
 // Inline is ssa.Feedback's: a plain call, a method's or a construction of
-// a base constructor -- call_w's, call_method_w's, new_w's -- of one
+// a base constructor -- call_w's, call_method_w's, new_w's, or a call in
+// tail position, tail_call_w's and tail_call_method_w's -- of one
 // function, the one its site's cache holds and its code learned it calls
 // or constructs with (regCallSites), no other, that runs register code
 // native callers may call, not the caller's own nor the compiled
@@ -682,8 +683,14 @@ func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 		}
 		return f.forwardInline(pc)
 	}
-	method, construct := w.Op() == bytecode.RCallMW, w.Op() == bytecode.RNewW
-	if w.Op() != bytecode.RCallW && !method && !construct {
+	// A call in tail position (tail_call_w, tail_call_method_w) is
+	// inlined as the ordinary call, as the stack form's (jitCallInstr):
+	// the builder guards first that the stack is shallow, where the
+	// interpreter makes it as the ordinary call too (ssa.OpTailSelf,
+	// OpTailRoom), and leaves for it to give the frame up otherwise.
+	call := jitRegCallOp(w.Op())
+	method, construct := call == bytecode.RCallMW, call == bytecode.RNewW
+	if call != bytecode.RCallW && !method && !construct {
 		return ssa.InlineSite{}, false
 	}
 	rpc := int32(f.p.Origin[pc])
@@ -772,6 +779,19 @@ func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 		l.inlines = append(l.inlines, jitInline{pc: rpc, cl: cl, obj: o})
 	}
 	return in, true
+}
+
+// jitRegCallOp is op with a call in tail position's opcode as the
+// ordinary call's, as native code makes it where the stack is shallow, as
+// the stack form's jitCallOp.
+func jitRegCallOp(op bytecode.ROp) bytecode.ROp {
+	switch op {
+	case bytecode.RCallWT:
+		return bytecode.RCallW
+	case bytecode.RCallMWT:
+		return bytecode.RCallMW
+	}
+	return op
 }
 
 // GoCalls is ssa.GoFeedback's: native code made from register code calls
