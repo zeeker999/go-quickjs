@@ -44,6 +44,10 @@ func TestMain(m *testing.M) {
 		debug.SetMemoryLimit(regDiffMemoryLimit)
 	}
 	code := m.Run()
+	if err := goldenWrite(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
 	debug.SetMemoryLimit(limit)
 	os.Exit(code)
 }
@@ -220,6 +224,19 @@ func regDiffLocked(t *testing.T, src string, calls []string) int64 {
 	// through their frames (docs/register-interpreter.md, item 13).
 	if n != 0 {
 		t.Errorf("%d fallbacks to the other tiers (QJS_REGFALLTRACE names them):\n%s", n, by)
+	}
+	key := goldenKey(t)
+	if goldenRecording() {
+		answers := make([]*string, len(calls))
+		for i := range calls {
+			if off[i] == again[i] {
+				a := goldenAnswer(off[i])
+				answers[i] = &a
+			}
+		}
+		goldenRecord(key, src, calls, answers)
+	} else {
+		goldenCheck(t, key, src, calls, on)
 	}
 	bad, skipped := 0, 0
 	defer func() {
