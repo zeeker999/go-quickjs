@@ -356,6 +356,10 @@ type Runtime struct {
 	// tree tier, as a runtime with the JIT runs it (regOn), for tests of
 	// those tiers.
 	oldTiers bool
+	// concats is the memo of short concatenations (zzz_concatmemo.go),
+	// made once concatCount of them have been made without it.
+	concats     *concatMemo
+	concatCount uint32
 	// jitFields is the optional native tier's state, empty in builds
 	// without it. It comes after everything the interpreter reads, so that
 	// a build with the tier moves none of their offsets, and before the last
