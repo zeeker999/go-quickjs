@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"runtime"
 	"testing"
+
+	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
 // regUpvalueAppendSrc's methods append to a binding of their maker's,
@@ -36,8 +39,10 @@ function appends(n) {
 // string's learned at its exits (Hints' StringAdds), grows the string the
 // binding alone holds in place (ir's Owned, abi.GoOpOwned), as the
 // interpreter's rsAdd does, rather than making a new string at each:
-// once warm, a run of 64 strings of 1,024 appends each allocates a small
-// share of what one allocation for each append would.
+// once warm, the code's call of Go for it is marked so, and, in a build
+// that allocates as an ordinary one does, a run of 64 strings of 1,024
+// appends each allocates a small share of what one allocation for each
+// append would.
 func TestJITRegUpvalueAppendOwned(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -73,6 +78,30 @@ func TestJITRegUpvalueAppendOwned(t *testing.T) {
 			for range 4 {
 				run()
 			}
+			// The code that ran it, appends' own or push's, called or
+			// inlined, makes the append as one whose string Go may grow in
+			// place (abi.GoOpOwned on its call of Go), in any build.
+			owned := 0
+			for key, e := range r.jit.regCache {
+				if fn := key.Value(); fn == nil || e == nil || e.code == nil || fn.Name != "appends" && fn.Name != "push" {
+					continue
+				}
+				for _, st := range e.code.GoCallStates() {
+					if ssa.GoOp(st.Op&0xff) == ssa.GoAdd && st.Op&abi.GoOpOwned != 0 {
+						owned++
+					}
+				}
+			}
+			if owned == 0 {
+				t.Error("no code of appends' or push's makes the append as one that grows in place")
+			}
+			if r.RegNativeStats().Entries == 0 {
+				t.Error("no native code entered")
+			}
+			// The allocations, where they are the engine's: checkptr=2,
+			// CI's native boundary, moves to the heap every variable whose
+			// address becomes an unsafe.Pointer, six an append here.
+			skipUnlessAllocsOrdinary(t)
 			fn, _ := r.GetProp(Obj(r.Global()), r.Intern("appends"))
 			var before, after runtime.MemStats
 			runtime.ReadMemStats(&before)
@@ -82,9 +111,6 @@ func TestJITRegUpvalueAppendOwned(t *testing.T) {
 			runtime.ReadMemStats(&after)
 			if allocs := after.Mallocs - before.Mallocs; allocs > n/8 {
 				t.Errorf("%d allocations for %d appends: not grown in place", allocs, n)
-			}
-			if r.RegNativeStats().Entries == 0 {
-				t.Error("no native code entered")
 			}
 		})
 	}
