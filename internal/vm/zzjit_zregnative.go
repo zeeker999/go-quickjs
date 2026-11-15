@@ -320,9 +320,6 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 			e.hostOnly = true
 		}
 	}
-	if err == nil {
-		err = p.Validate()
-	}
 	if err != nil {
 		e.refusal = err.Error()
 		return e
@@ -484,6 +481,12 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 		// for want of it until the cache has let some code go
 		// (generation), as the stack form's compile is deferred.
 		e.life.deferred, e.life.generation = true, s.generation
+		// Nor its programs, which the compile asks for again: they would
+		// take the room it is remembered in, as the stack form's compile
+		// drops its lowering then.
+		if l := s.regLowered[e.key]; l != nil {
+			s.dropRegLowering(e.key, l)
+		}
 		return false
 	}
 	e.life.deferred = false
@@ -553,7 +556,7 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 	// What the code reads by address, its feedback's keep; the closure
 	// and the function the feedback asked are not.
 	e.keep = rf.fb.keep()
-	e.keep.cl, e.keep.fn, e.keep.prog = nil, nil, nil
+	e.keep.cl, e.keep.fn, e.keep.prog, e.keep.regSeen = nil, nil, nil, nil
 	if JITCodeHook != nil {
 		// -jitcode's record of the code, as the stack form's compiles
 		// make it (jitInstall).
@@ -624,6 +627,11 @@ func (s *jitState) regAge(now uint64) {
 			delete(s.regLearned, key)
 		}
 	}
+	for key, l := range s.regLowered {
+		if key.gone() {
+			s.dropRegLowering(key, l)
+		}
+	}
 	for key, l := range s.regLinks {
 		if key.gone() {
 			s.regUnhint(l)
@@ -633,9 +641,16 @@ func (s *jitState) regAge(now uint64) {
 }
 
 // regVictims appends to v what of the register code makeRoom may reclaim
-// at epoch now (listVictims): refusals, and code not used this epoch or the
-// one before (jitCodeAge), none in use.
+// at epoch now (listVictims): programs lowered for functions the cache has
+// no entry for, refusals, and code not used this epoch or the one before
+// (jitCodeAge), none in use, each with its function's programs, which go
+// with it (regReclaim), as listVictims lists the stack form's.
 func (s *jitState) regVictims(v []jitVictim, now uint64) []jitVictim {
+	for key, l := range s.regLowered {
+		if s.regCache[key] == nil {
+			v = append(v, jitVictim{key: key, l: l, reg: true, class: jitVictimLowering, used: l.used, bytes: l.bytes})
+		}
+	}
 	for key, e := range s.regCache {
 		if s.regInUse(e) {
 			continue
@@ -647,7 +662,11 @@ func (s *jitState) regVictims(v []jitVictim, now uint64) []jitVictim {
 			}
 			class = jitVictimCode
 		}
-		v = append(v, jitVictim{key: key, re: e, class: class, used: e.used, serial: uint64(e.serial), bytes: e.bytes})
+		n := e.bytes
+		if l := s.regLowered[key]; l != nil {
+			n += l.bytes
+		}
+		v = append(v, jitVictim{key: key, re: e, class: class, used: e.used, serial: uint64(e.serial), bytes: n})
 	}
 	return v
 }
@@ -660,6 +679,9 @@ func (s *jitState) regReclaim(x *jitVictim, now uint64) {
 		return
 	}
 	s.regLetGo(x.key, e)
+	if l := s.regLowered[x.key]; l != nil {
+		s.dropRegLowering(x.key, l)
+	}
 	s.evicted++
 }
 
@@ -678,6 +700,9 @@ func (s *jitState) regFlush(tick, now uint64) {
 			continue
 		}
 		s.regLetGo(key, e)
+		if l := s.regLowered[key]; l != nil {
+			s.dropRegLowering(key, l)
+		}
 		s.flushed++
 	}
 }

@@ -309,10 +309,10 @@ func (f *jitRegFeedback) accessorInline(callee *Object, cl *closure, write bool)
 		return ssa.InlineSite{}, false
 	}
 	p, err := f.fb.r.jitRegLower(cl, cl.reg.rc, jitLowerInline)
-	if err != nil || p.Validate() != nil {
+	if err != nil {
 		return ssa.InlineSite{}, false
 	}
-	r.jitRegSeenFeedback(cl, cl.reg)
+	r.jitRegSeenInlined(f.fb.keep(), cl)
 	k := f.fb.keep()
 	cell := new(Value)
 	*cell = Obj(callee)
@@ -480,13 +480,13 @@ func (f *jitRegFeedback) madeInline(t *closure) (ssa.InlineSite, bool) {
 		return ssa.InlineSite{}, false
 	}
 	p, err := r.jitRegLower(t, rc, jitLowerInline)
-	if err != nil || p.Validate() != nil {
+	if err != nil {
 		return ssa.InlineSite{}, false
 	}
 	if t.reg != nil && t.reg.rc == rc {
 		// What its sites' caches have seen besides their entries, as an
 		// inlined callee's (Inline).
-		r.jitRegSeenFeedback(t, t.reg)
+		r.jitRegSeenInlined(fb.keep(), t)
 	}
 	k := fb.keep()
 	in := ssa.InlineSite{
@@ -726,13 +726,13 @@ func (f *jitRegFeedback) Inline(pc int) (ssa.InlineSite, bool) {
 		}
 	}
 	p, err := f.fb.r.jitRegLower(cl, cl.reg.rc, kind)
-	if err != nil || p.Validate() != nil {
+	if err != nil {
 		return ssa.InlineSite{}, false
 	}
 	r := f.fb.r
 	// What its sites' caches have seen besides their entries, as its own
 	// compiles take it (jitRegSeenFeedback).
-	r.jitRegSeenFeedback(cl, cl.reg)
+	r.jitRegSeenInlined(f.fb.keep(), cl)
 	k := f.fb.keep()
 	callee := &jitRegFeedback{fb: &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitRegKeyOf(cl)), root: k}, rc: cl.fn.RegCode(), p: p}
 	in := ssa.InlineSite{

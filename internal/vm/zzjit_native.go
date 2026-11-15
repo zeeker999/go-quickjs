@@ -1064,6 +1064,9 @@ type jitState struct {
 	// register code's compiles (jitRegEntry's serial).
 	regLearned map[jitKey]*jitEntry
 	regSerial  uint32
+	// regLowered are the programs of functions' register code, by the
+	// function's key, as lowered holds the stack form's (jitRegLower).
+	regLowered map[jitKey]*jitLowering
 	// regHostOps counts register code's host exits by the register
 	// instruction Go ran whole, for tests (RegNativeStats' HostOps).
 	regHostOps map[string]uint64
@@ -1795,6 +1798,7 @@ type jitVictim struct {
 	e            *jitEntry
 	re           *jitRegEntry
 	l            *jitLowering
+	reg          bool
 	class        uint8
 	used, serial uint64
 	bytes        int
@@ -1935,6 +1939,12 @@ func (s *jitState) listVictims(now uint64, need int) bool {
 func (s *jitState) reclaim(x *jitVictim, now uint64) bool {
 	switch x.class {
 	case jitVictimLowering:
+		if x.reg {
+			if s.regLowered[x.key] == x.l && s.regCache[x.key] == nil {
+				s.dropRegLowering(x.key, x.l)
+			}
+			return true
+		}
 		if l := s.lowered[x.key.Pointer]; l == x.l {
 			if k := s.links[jitKey{x.key.Pointer, s.rt.jitRealmKey()}]; k == nil || k.owner == nil {
 				s.dropLowering(x.key.Pointer, x.l)

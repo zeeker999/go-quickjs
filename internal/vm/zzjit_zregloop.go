@@ -158,11 +158,11 @@ func (f *jitRegFeedback) callbackInline(x jitInline, site ssa.CallSite, argc int
 		return ssa.InlineSite{}, false
 	}
 	p, err := f.fb.r.jitRegLower(cl, cl.reg.rc, jitLowerInline)
-	if err != nil || p.Validate() != nil {
+	if err != nil {
 		return ssa.InlineSite{}, false
 	}
 	r := f.fb.r
-	r.jitRegSeenFeedback(cl, cl.reg)
+	r.jitRegSeenInlined(f.fb.keep(), cl)
 	k := f.fb.keep()
 	callee := &jitRegFeedback{fb: &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitRegKeyOf(cl)), root: k}, rc: cl.fn.RegCode(), p: p}
 	in := ssa.InlineSite{

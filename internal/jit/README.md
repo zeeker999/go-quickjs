@@ -152,7 +152,13 @@ has a form with hints (`LowerRegWith`, `Hints` by register pc), what the
 function's code learned at its exits (see [Feedback](#feedback)). Code
 compiled at a function's first call (`bytecode.RegLater`) keeps the names,
 constants and property sites it adds in its `RegCode`, which the lowering
-reads in place of the function's (`regView`).
+reads in place of the function's (`regView`). The VM lowers each kind of a
+function's program once and keeps it (`jitRegLower`, `regLowered`, a
+`jitLowering` by the function's key, as the stack form's are kept), checked
+once as it is lowered (`ir.Program`'s `Validate`): its own compiles and every
+caller that inlines it take the same program, never changed once lowered,
+until its code learns a hint, whose lengths the lowering compares at each
+ask, and it is lowered anew (`regLowering`, `relower`).
 
 **Slots.** A register is a slot: the program's first `Regs` slots are the
 frame's window, register 0 the function, 1 its this and the parameters from
@@ -2329,8 +2335,11 @@ construction allocates nothing for the JIT.
 flushed as the stack form's entries are: its uses -- Go's entries, the runs
 it went on in, native callers' calls -- date it (`regAge`); `makeRoom`
 reclaims it with theirs, refusals first, then code unused this epoch and
-the one before, least recently used first (`regVictims`, `regReclaim`); and
-`flush` drops code unused between two of its looks (`regFlush`). Code let go
+the one before, least recently used first (`regVictims`, `regReclaim`),
+each with its function's programs, and before them the programs of functions
+it has no code for; and `flush` drops code unused between two of its looks,
+with its programs (`regFlush`). A compile refused the room for its code
+drops its function's programs too, as the stack form's does. Code let go
 of so has its function warm up anew (`regLetGo`), and compiled again it is
 compiled with all its function learned, which outlives its code
 (`regLearned`). Code a run or a native call is in is never let go of; code
