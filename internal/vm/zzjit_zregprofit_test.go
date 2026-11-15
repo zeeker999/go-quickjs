@@ -307,3 +307,53 @@ function run(n) { var t = 0; for (var i = 0; i < n; i++) t += mk(i & 7); return 
 		}
 	})
 }
+
+// TestJITRegPolymorphicCallSeeded runs a method call over four classes'
+// objects in the interpreter, then has a hot caller compile the function
+// making it, and checks that its first code calls each class's method
+// natively, the four seeded from what the method read's cache saw
+// (jitRegSeenCallees), as the stack form's first compile seeds them
+// (jitSeenCallees): not one, the site's call cache's, the others learned an
+// exit at a time, a budget waited for each compile -- V8's Richards'
+// TaskControlBlock.run left native code at 344 of its first run's calls.
+func TestJITRegPolymorphicCallSeeded(t *testing.T) {
+	const src = `
+class T1 { run(p) { return p + 1 } }
+class T2 { run(p) { return p + 2 } }
+class T3 { run(p) { return p + 3 } }
+class T4 { run(p) { return p + 4 } }
+var ts = [new T1(), new T2(), new T3(), new T4()];
+function step(t, p) { return t.run(p) }
+function warm() { var s = 0; for (var i = 0; i < 8; i++) s += step(ts[i & 3], i); return s }
+function run(n) { var s = 0; for (var i = 0; i < n; i++) s = (s + step(ts[i & 3], i)) & 65535; return s }
+`
+	regBothMarking(t, func(t *testing.T) {
+		regNoInline(t)
+		rts := regNativeRuntimes(t, src)
+		r := rts[0]
+		r.jitStress = jitStressConfig{}
+		r.SetJITReport(true)
+		// The interpreter's runs first: the method read meets the four
+		// classes before anything is compiled.
+		r.SetJITWarmUp(1<<15, 1<<15)
+		regProfitRun(t, rts, "warm", 1, "48")
+		r.SetJITWarmUp(1, 1)
+		want := ""
+		{
+			fv, _ := rts[1].GetProp(Obj(rts[1].Global()), rts[1].Intern("run"))
+			v, err := rts[1].Call(fv, Undefined, []Value{Float(4000)})
+			want = regNativeShow(rts[1], v, err)
+		}
+		before := r.RegNativeStats().HostOps["call_method_w"]
+		regProfitRun(t, rts, "run", 1, want, Float(4000))
+		_, se := regProfitEntry(t, r, "step")
+		exits := r.RegNativeStats().HostOps["call_method_w"] - before
+		t.Logf("step compiled %d times, %d exits at its call, learned %d targets", se.life.ssaSerial, exits, len(se.life.nativeCalls))
+		if exits > 8 {
+			t.Errorf("step's call of run left native code %d times of 4000", exits)
+		}
+		if se.life.ssaSerial > 1 {
+			t.Errorf("step compiled %d times for its call's targets, not once", se.life.ssaSerial)
+		}
+	})
+}

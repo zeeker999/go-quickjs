@@ -1787,8 +1787,11 @@ the call's keep cell and register.
 
 **Which calls.** The feedback says which functions a call makes natively
 (`jitRegFeedback`'s `NativeCalls`, `regCallSites`): the one its site's cache
-holds (`regCalls`), and those the code learned it calls at its calls of Go
-and at its exits (`jitRegCallSeen`), up to `jitCallTargets` (4), each
+holds (`regCalls`); for a method call, the methods its `get_method_w` read's
+cache saw for the other shapes it met (`jitRegSeenCallees`, the stack form's
+`jitSeenCallees`), learned from the first compile; and those the code
+learned it calls at its calls of Go and at its exits (`jitRegCallSeen`), up
+to `jitCallTargets` (4), each
 checked by its object, or, a closure its maker makes anew -- another object
 of a function the call has called -- by its code (`ssa.CallSite`'s
 `ByCode`), where the function runs register code of the form's own layout of
