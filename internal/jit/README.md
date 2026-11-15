@@ -1786,7 +1786,16 @@ slots and frame (`ssa.CallSite`'s `Window`): the call writes the function to
 its register 0, a method call's receiver to 1 -- or a plain call's undefined
 or global object, an arrow's captured this, for a callee that reads it --
 and the arguments from 2, undefined in its parameters past them, and checks
-the room its link says its code takes (`LinkFrame`). The callee's code makes
+the room its link says its code takes (`LinkFrame`) -- one check, as the
+stack form's call makes, the link's room never less than the callee's
+registers (`CallSite`'s `LocalCount`), and a second for the arguments only
+where they are more than those. The call's state leaves out the window's
+registers the call consumes (`ssa.Value`'s `Consumes`): those the
+interpreter's frame does not read past the call, normally or at a handler
+(`ir.Program`'s `LiveAt`), and the result's, as the stack form's leaves out
+its operands -- a callee that leaves native code is finished from its own
+frame and the caller goes on past the call, so no frame Go makes of the
+caller reads them, and the call stores no record of them. The callee's code makes
 its frame at its call entry: its context the caller's next, its bindings
 past the parameters undefined (`Func`'s `InitEnd`, the register code's
 `Inits`, as the interpreter's call makes them) -- not its temporaries,
@@ -2937,6 +2946,9 @@ its code, returning where this frame would have. A frame Go entered the code
 with is given up by Go (`errTailCall`), as the interpreter gives it up.
 Frames the interpreter keeps for such a call -- a construction's, an arrow's
 sharing a derived constructor's this -- native code keeps too (`TailFrame`).
+The site's code past the depth's check is out of line, with the cold
+paths: where the stack is shallow, as it mostly is, the call costs a
+compare and a branch not taken.
 
 **Parameter lists.** A list with defaults or patterns binds its parameters
 one at a time from the call's arguments, in its prologue (`ir`'s

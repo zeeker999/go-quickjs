@@ -273,3 +273,44 @@ function deep(n) { return n == 0 ? 0 : deep(n - 1) + 1 }
 		}
 	})
 }
+
+// TestJITRegConsumedOperands has native callees leave native code under
+// register code's calls whose states leave out the window registers the
+// calls consume (ssa.Value's Consumes): a guard failing at the bottom of a
+// recursion, the levels above it finished by Go from their states and
+// going on past their calls with what was kept across them (a result of
+// an earlier call, a local the call does not consume), and a throw caught
+// by a handler a level up, which reads its frame's own registers. Each
+// answer is the interpreter's.
+func TestJITRegConsumedOperands(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	const src = `
+function leaf(o) { return o.v }
+function down(n, o) { if (n == 0) return leaf(o); var k = n * 3; var a = down(n - 1, o); return a + down(0, o) + k }
+function guarded(m) { var o = { v: 1 }, s = 0; for (var i = 0; i < m; i++) { if (i == m - 3) o = { w: 0, v: 2.5 }; s += down(20, o) } return s }
+function thrower(n, o) { if (n == 0) { if (o.bad) throw new Error("bad " + o.v); return o.v } return thrower(n - 1, o) + n }
+function catcher(n, o) { var mine = n * 7; try { return thrower(n, o) + mine } catch (e) { return e.message + " " + mine } }
+function throws(m) { var s = ""; for (var i = 0; i < m; i++) s += catcher(15, i % 5 == 4 ? { bad: 1, v: i } : { v: i }) + ","; return s }
+`
+	regBothMarking(t, func(t *testing.T) {
+		regNoInline(t)
+		rts := regNativeRuntimes(t, src)
+		r := rts[0]
+		r.jitStress = jitStressConfig{}
+		r.SetJITWarmUp(1, 1)
+		for range 3 {
+			regDeepCall(t, rts, "guarded", Float(40))
+			regDeepCall(t, rts, "throws", Float(30))
+		}
+		// down(20, o) is 21 o.v + 630: 37 of 651, then 3 of 682.5.
+		if got := regDeepCall(t, rts, "guarded", Float(40)); got != "26134.5" {
+			t.Fatalf("guarded(40) = %s, want 26134.5", got)
+		}
+		regDeepCall(t, rts, "throws", Float(30))
+		if st := r.RegNativeStats(); st.Unwound == 0 {
+			t.Errorf("no callee left native code: %+v", st)
+		}
+	})
+}

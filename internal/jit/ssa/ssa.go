@@ -781,7 +781,14 @@ type InlineCache struct {
 	Add  *PropertyAdd
 	Adds []*PropertyAdd
 	// Calls, for a call, are the functions it may call natively (OpCall).
-	Calls []*CallSite
+	// Consumed, for register code's (CallSite's Window), are the slots of
+	// its window, bit k for its k'th, that the interpreter's frame does
+	// not read past the call, normally or at a handler (ir.Program's
+	// LiveAt), the result's register among them: the operands the call
+	// consumes, as the stack form's call does its operand stack's, whose
+	// words the call's state leaves out (Consumes).
+	Calls    []*CallSite
+	Consumed uint64
 	// Mega, for a read, is its site's Megamorphic (PropertySite); Scan its
 	// Scan. Try, for a megamorphic read's cell (OpPropCell), makes it none
 	// where it finds no property -- the receiver's own table and the
@@ -866,6 +873,16 @@ func (v *Value) Calls() []*CallSite {
 		return nil
 	}
 	return v.IC.Calls
+}
+
+// Consumes reports whether call v, register code's (CallSite's Window),
+// consumes the k'th slot of its window (InlineCache's Consumed): a
+// callee that leaves native code Go finishes from its own frame, the
+// caller going on past the call with its result, so that no frame Go
+// makes of the caller reads the slot's value, which the call need not
+// record.
+func (v *Value) Consumes(k int) bool {
+	return v.IC != nil && k >= 0 && k < 64 && v.IC.Consumed&(1<<k) != 0
 }
 
 // setProperty sets what v's property cache saw (InlineCache), making v a
