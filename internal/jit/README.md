@@ -619,8 +619,17 @@ counted, as the stack form's invocations spend it one by one
   call native code with loops of their own, Crypto's `bnModPow`, was
   sampled a few times a run, or none, and compiled in its third run or
   never in five, as the samples landed. A template's count starts at 0,
-  so that its first back edge's check begins it; a function never
-  compiled counts nothing more.
+  so that its first back edge's check arms it with V8's interrupt budget
+  for feedback allocation (`jitBudgetForFeedback`, 940, or the budget
+  where that is smaller), whose end begins the budget, as V8's feedback
+  vector, made then, holds it: begun at the first back edge, a function
+  compiled at once was compiled after one turn of its loop, its caches'
+  feedback that turn's. Code that runs counts with no end
+  (`jitRegCounted`): the interpreter's work in its loops counts toward
+  its code's (`jitRegSpent`'s `osrWork`) at the interrupt budget's
+  checks, which alone look at such a frame, as before its compile. A
+  function never compiled counts nothing more, nor does any in a runtime
+  that runs no JIT (`regEdgesOff`).
 
 Every call the interpreter makes of a function whose `jitEnters` is set
 goes to the JIT, as the stack form's calls look for their callee's code
