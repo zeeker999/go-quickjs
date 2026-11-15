@@ -2262,6 +2262,9 @@ func (r *Runtime) jitRegBuild(w *jit.Workspace, cl *closure, c *regCode, p *ir.P
 	jitRegLap(mir.PhaseBuild)
 	ssa.Optimize(f)
 	jitRegLap(mir.PhaseOptimize)
+	if jitSSAOptimized != nil {
+		jitSSAOptimized(cl.fn, f)
+	}
 	mc, err := mir.CompileWith(&w.MIR, f, jitEncoding, mir.Settings())
 	return rf, f, looped, mc, err
 }
