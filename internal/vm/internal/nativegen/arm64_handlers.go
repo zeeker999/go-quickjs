@@ -1122,6 +1122,7 @@ func armEmit(v *variant) (*block, error) {
 	h(bytecode.RSuperForward, g.superW)
 	h(bytecode.RDerivedRet, g.derivedRet)
 	h(bytecode.RApplyArgs, g.applyW)
+	h(bytecode.RArgsIndex, g.argsIndex)
 
 	for n, l := range g.exits {
 		if n == 0 {

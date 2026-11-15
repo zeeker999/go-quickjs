@@ -138,3 +138,33 @@ func (g *armGen) derivedRet() {
 	a.Bind(done)
 	g.next()
 }
+
+// argsIndex is args_index, as amd64's.
+func (g *armGen) argsIndex() {
+	a := g.a
+	g.regB(rD)
+	a.Load(r9, rD, 0)
+	g.cmpMem(r9, rCtx, ncObjBits)
+	a.BCond(EQ, g.exit)
+	g.regC(rD)
+	g.num(0, rD)
+	a.Fcvtzs(rC, 0)
+	a.ShiftImm(Lsr, rT, rC, 32, true)
+	a.Cbnz(rT, g.exit, true)
+	a.Scvtf(1, rC, true)
+	a.FCmp(0, 1)
+	a.BCond(NE, g.exit)
+	a.Load(rS, rCtx, ncNF)
+	g.cmpMem(rC, rS, offFArgs+8)
+	a.BCond(HS, g.exit)
+	a.Load(r8, rCtx, ncRC)
+	a.LoadS32(r9, r8, offRCParams)
+	a.Cmp(rC, r9, true)
+	a.BCond(LT, g.exit)
+	a.Load(r8, rS, offFArgs)
+	a.AddLsl(rC, r8, rC, 4)
+	a.Load(r9, rC, 0)
+	a.Load(r8, rC, 8)
+	g.regA(rW)
+	g.storeValue()
+}

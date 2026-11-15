@@ -65,6 +65,8 @@ var handlerOps = []bytecode.ROp{
 	bytecode.RDerivedRet,
 	// f.apply(this, arguments) entering f (applyW).
 	bytecode.RApplyArgs,
+	// arguments[i] of the frame's kept arguments (argsIndex).
+	bytecode.RArgsIndex,
 }
 
 // handlerOrder checks that order, the operations an emitter laid out

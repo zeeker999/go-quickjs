@@ -158,3 +158,39 @@ func (g *nativeGen) derivedRet() {
 	a.Bind(done)
 	g.next()
 }
+
+// argsIndex is args_index: R[A] = arguments[R[C]] in a function that has
+// not made its arguments object (R[B] no object), an integer index below
+// the frame's arguments' count read from its kept arguments, as
+// rsArgsIndex reads them; an index of a parameter, which a mapped object
+// would read from the parameter's register, and anything else, Go's.
+func (g *nativeGen) argsIndex() {
+	a := g.a
+	g.decB(RDX)
+	a.LoadIdx(R9, R12, RDX, 1, 0)
+	a.CmpMem(R9, RDI, ncObjBits, true)
+	a.Jcc(CondE, g.exit)
+	g.decC(RDX)
+	g.num(0, RDX)
+	a.Cvttsd2si(RCX, 0)
+	a.Cvtsi2sd(1, RCX, true)
+	a.SSEOp(UcomiSD, 0, 1)
+	a.Jcc(CondNE, g.exit)
+	a.Jcc(CondP, g.exit)
+	a.Op(Test, RCX, RCX, true)
+	a.Jcc(CondS, g.exit)
+	a.Load(RSI, RDI, ncNF)
+	a.CmpMem(RCX, RSI, offFArgs+8, true)
+	a.Jcc(CondAE, g.exit)
+	a.Load(R8, RDI, ncRC)
+	a.LoadS32(R9, R8, offRCParams)
+	a.Op(Cmp, RCX, R9, true)
+	a.Jcc(CondL, g.exit)
+	a.ShiftImm(Shl, RCX, 4, true)
+	a.AddMem(RCX, RSI, offFArgs)
+	a.Load(R9, RCX, 0)
+	a.Load(R8, RCX, 8)
+	g.decA(RDX)
+	a.LeaIdx(RAX, R12, RDX, 1, 0)
+	g.storeValue()
+}

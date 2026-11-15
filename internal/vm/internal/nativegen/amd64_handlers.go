@@ -1300,6 +1300,7 @@ func nativeEmit(v *variant) (*block, error) {
 	h(bytecode.RSuperForward, g.superW)
 	h(bytecode.RDerivedRet, g.derivedRet)
 	h(bytecode.RApplyArgs, g.applyW)
+	h(bytecode.RArgsIndex, g.argsIndex)
 
 	for i := 0; i < len(g.late); i++ {
 		g.late[i]()

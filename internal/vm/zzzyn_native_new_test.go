@@ -282,3 +282,36 @@ func TestRegNativeApply(t *testing.T) {
 		for (var i = 0; i < 1000; i++) s += fwd(i, 2) + new P(i, 1).y
 		String(s)`, bytecode.RApplyArgs, bytecode.RNewW)
 }
+
+// nativeArgsSrc reads arguments[i] in functions that never make their
+// arguments object: sloppy and strict, of no parameter and of some, an
+// index past the arguments, negative, fractional, NaN, a string, an index
+// of a parameter assigned in a sloppy function (its mapped object's), and
+// after the object is made by a read of arguments as a whole.
+const nativeArgsSrc = `
+	var out = []
+	function a0() { return arguments[0] + ":" + arguments[1] + ":" + arguments[2] }
+	function s0() { "use strict"; return arguments[0] + ":" + arguments[2] }
+	function p2(x, y) { x = "m" + x; return arguments[0] + ":" + arguments[1] + ":" + arguments[2] }
+	function sp2(x, y) { "use strict"; x = "m"; return arguments[0] + ":" + arguments[3] }
+	function keys(k) { return arguments[k] }
+	function whole() { var n = arguments[1]; var o = arguments; return n + ":" + o.length + ":" + arguments[0] }
+	var ks = [0, 1, 2, 5, -1, 0.5, NaN, "1", "x", 1e20, -0]
+	for (var j = 0; j < 30; j++) {
+		out.push(a0(j, "b"), a0(), s0(j, 1, 2), p2(j, 2, 3), sp2(j, 2, 3, 4), whole(j, 9))
+		var k = ks[j % ks.length]
+		out.push(keys(k, "p", "q"), String(keys.apply(null, [k, 7])))
+	}
+	out.join()`
+
+// TestRegNativeArgsIndex checks arguments[i] read natively from a
+// frame's kept arguments against the Go table: the same answers, marking
+// or not, and a forwarder's reads with no exit.
+func TestRegNativeArgsIndex(t *testing.T) {
+	nativeCheck(t, nativeArgsSrc, `
+		function f() { return arguments[0] + arguments[1] + arguments[2] }
+		function g() { "use strict"; return arguments[0] * arguments[1] }
+		var s = 0
+		for (var i = 0; i < 1000; i++) s += f(i, i, 1) + g(i, 2)
+		String(s)`, bytecode.RArgsIndex)
+}
