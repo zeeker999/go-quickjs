@@ -297,10 +297,7 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base, pc 
 	if callee.IsObject() {
 		o := callee.Object()
 		if f.cl.regCalls == nil && c.rc.CallSites > 0 {
-			f.cl.regCalls = r.newRegCalls(f.cl.closureCode, c.rc.CallSites)
-			if jitBuilt {
-				r.jitRegCountsMake(f.cl.closureCode, c.rc.CallSites)
-			}
+			r.regCallsMake(f.cl, c)
 		}
 		var e *regCallCache
 		if calls := f.cl.regCalls; uint(w.C()) < uint(len(calls)) {
@@ -408,6 +405,17 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base, pc 
 	return r.regCall(callee, this, r.stack[base+2:base+2+argc])
 }
 
+// regCallsMake makes the call caches of cl's register code c, at its
+// first call or construction.
+//
+//go:noinline
+func (r *Runtime) regCallsMake(cl *closure, c *regCode) {
+	cl.regCalls = r.newRegCalls(cl.closureCode, c.rc.CallSites)
+	if jitBuilt {
+		r.jitRegCountsMake(cl.closureCode, c.rc.CallSites)
+	}
+}
+
 // regCallCache is a call site's cache: the function it called last, its
 // closure and register code, how it is entered, and the this a call that
 // is not a method's gives it.
@@ -442,6 +450,11 @@ const (
 	// whose Aux marks its value dead or reused, which regMarkedCall
 	// calls: the mark costs the site's other callees nothing.
 	regCallMarked = 6
+	// regCallConstruct is new_w's: a base constructor of this realm with
+	// register code, whose objects' room is settled, and that gives its
+	// objects nothing but what its body stores (regConstruct), its object
+	// made as regCtorThis makes it.
+	regCallConstruct = 7
 
 	regCallOut = 8
 	// regCallLeaf marks a callee whose body rhCallW may answer without a
@@ -964,20 +977,24 @@ var regJumpCmp = [256]struct {
 }
 
 // regConstruct is new_w: new callee with the argc arguments of the window
-// at base. A constructor of this realm with register code of the form's own
-// layout, a base function's, runs in the window as a register frame, its
-// object made as constructWithTarget makes it -- its prototype, its room,
-// the root its objects start from -- and the room it came to need noted.
-// Anything else is constructed as construct constructs it.
-func (r *Runtime) regConstruct(callee Value, base, argc int) (Value, error) {
+// at base, whose site's cache is calls[site] (none where the site is past
+// calls). A base constructor of this realm with register code of the
+// form's own layout -- a function's or a class's -- runs in the window as
+// a register frame, its object made as constructWithTarget makes it -- its
+// prototype, its room, the root its objects start from -- and the room it
+// came to need noted. Once its objects' room is settled (the root
+// tracked), the site's cache is made the constructor's
+// (regCallConstruct), which the native handler enters itself, its object
+// made by Go with no exit (nativeNew). Anything else is constructed as
+// construct constructs it.
+func (r *Runtime) regConstruct(calls []regCallCache, site uint16, callee Value, base, argc int) (Value, error) {
 	args := r.stack[base+2 : base+2+argc : base+2+argc]
 	if !callee.IsObject() {
 		return r.construct(callee, args)
 	}
 	o := callee.Object()
 	fd := o.fn()
-	if fd == nil || fd.closure == nil || fd.bound || fd.extra != nil || fd.ctorKind != ctorBase ||
-		fd.closure.realm != r.Realm || proxyOf(o) != nil {
+	if fd == nil || fd.closure == nil || !r.regCtorBase(o, fd) {
 		return r.construct(callee, args)
 	}
 	cl := fd.closure
@@ -1007,6 +1024,11 @@ func (r *Runtime) regConstruct(callee Value, base, argc int) (Value, error) {
 		return Undefined, err
 	}
 	root := r.shapes.ctorRoot(fd, proto)
+	if (root == nil || root.tracked()) && fd.fieldInit() == nil && uint(site) < uint(len(calls)) {
+		// Its objects' room settled and nothing to give them but what its
+		// body stores: the site's to construct with from now on.
+		calls[site] = regCallCache{callee: o, cl: cl, rc: rc, kind: regCallConstruct}
+	}
 	obj := newOrdinary[struct{}](fd, root, proto, root.roomFor(int(cl.fn.ThisProps)))
 	this := Obj(obj)
 	if err := r.initInstanceElements(o, this); err != nil {
@@ -1030,6 +1052,40 @@ func (r *Runtime) regConstruct(callee Value, base, argc int) (Value, error) {
 		return res, nil
 	}
 	return this, nil
+}
+
+// regCtorBase reports whether o, of funcData fd with a closure, is a base
+// constructor regConstruct runs as a register frame: a function's or a
+// base class's of this realm, neither bound nor a proxy's target, with no
+// with or eval scope of its surroundings to establish, which runFD's frames
+// would have.
+func (r *Runtime) regCtorBase(o *Object, fd *funcData) bool {
+	if fd.bound || fd.ctorKind != ctorBase || fd.closure.realm != r.Realm || proxyOf(o) != nil {
+		return false
+	}
+	if x := fd.extra; x != nil && (fd.arrow || x.lexThisRef != nil || len(x.with()) != 0 || x.evalVars() != nil) {
+		return false
+	}
+	return true
+}
+
+// regCtorThis is the object a construction with o, of funcData fd, a
+// constructor its site's cache holds (regCallConstruct), is made: of o's
+// prototype, its own data property holding an object, and of its root,
+// whose room is settled (tracked), as regConstruct makes it; or nil, the
+// construction then regConstruct's, which reads the prototype however it
+// is and notes the room an object came to need.
+func (r *Runtime) regCtorThis(o *Object, fd *funcData) *Object {
+	p := o.getOwnVisible(atomPrototype)
+	if !p.ok() || p.flags()&propAccessor != 0 || !p.value().IsObject() {
+		return nil
+	}
+	proto := p.value().Object()
+	root := r.shapes.ctorRoot(fd, proto)
+	if root != nil && !root.tracked() {
+		return nil
+	}
+	return newOrdinary[struct{}](fd, root, proto, root.roomFor(int(fd.closure.fn.ThisProps)))
 }
 
 // regAddProp is add_prop's slow path: the property read as get_prop
@@ -1327,6 +1383,11 @@ const (
 	// frame's: a yield, a return or a throw ends the step
 	// (nativeGenEnd), not its caller's call.
 	regFrameGenStep
+	// regFrameConstruct is a construction's the native code entered
+	// itself (new_w's handler): regEnterW's frame, its new.target the
+	// frame's, whose return gives its this, register 1, where it returns
+	// what is not an object.
+	regFrameConstruct
 )
 
 // regFrameThis is the this and new.target of register frame f, for a stack
@@ -1337,7 +1398,7 @@ func (r *Runtime) regFrameThis(f *frame) (this, newTarget Value) {
 	}
 	this = r.stack[f.base+1]
 	newTarget = Undefined
-	if f.regKind == regFrameEnter {
+	if f.regKind == regFrameEnter || f.regKind == regFrameConstruct {
 		newTarget = f.newTarget
 	}
 	return this, newTarget

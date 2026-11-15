@@ -274,7 +274,7 @@ const (
 	// RCallMW is RCallW with this R[A+1]: a method call, its window
 	// R[A] the method and R[A+1] the receiver get_method wrote.
 	RCallMW
-	// RNewW: R[B] = new R[A](R[A+2] ... R[A+1+X]).
+	// RNewW: R[B] = new R[A](R[A+2] ... R[A+1+X]), its call site C.
 	RNewW
 	// RClosureW: R[A] = a closure of Constants[BC], each upvalue it takes
 	// from its maker the register RegCode.Caps[BC] names.

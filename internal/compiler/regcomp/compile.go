@@ -4453,7 +4453,7 @@ func (g *gen) newExpr(n *ast.New, dst int) int {
 		d = w
 	}
 	g.at(n.Start)
-	g.emit(bytecode.MakeR(bytecode.RNewW, uint8(argc), r16(w), r16(d), 0))
+	g.emit(bytecode.MakeR(bytecode.RNewW, uint8(argc), r16(w), r16(d), g.callSite(bytecode.RNewW)))
 	return d
 }
 

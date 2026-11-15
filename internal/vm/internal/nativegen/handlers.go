@@ -54,6 +54,8 @@ var handlerOps = []bytecode.ROp{
 	// A product by an immediate and the int32 results, (x op y) | 0
 	// (docs/register-interpreter.md, "Loop-kernel instructions").
 	bytecode.RMulI, bytecode.RAddI32, bytecode.RSubI32, bytecode.RAddII32,
+	// Constructions entered as calls are (new_w).
+	bytecode.RNewW,
 }
 
 // handlerOrder checks that order, the operations an emitter laid out

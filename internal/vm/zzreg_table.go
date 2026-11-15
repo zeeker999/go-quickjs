@@ -2079,7 +2079,10 @@ func rsNewW(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
 		regCrossOf(regCrossNew, regs[w.A()])
 	}
 	st.at(pc)
-	v, err := st.r.regConstruct(regs[w.A()], st.wb+int(w.A()), int(w.X()))
+	if st.cl.regCalls == nil && st.c.rc.CallSites > 0 {
+		st.r.regCallsMake(st.cl, st.c)
+	}
+	v, err := st.r.regConstruct(st.cl.regCalls, w.C(), regs[w.A()], st.wb+int(w.A()), int(w.X()))
 	if err != nil {
 		return st.fail(err)
 	}

@@ -188,7 +188,7 @@ func (g *armGen) ptrTo() {
 // anything is written.
 func (g *armGen) call() {
 	a := g.a
-	ok, noThis, noTop, loop, loopEnd, skip, high := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
+	ok := a.NewLabel()
 	start, tmpl, builtin, miss := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
 	a.Bind(start)
 
@@ -281,13 +281,96 @@ func (g *armGen) call() {
 	g.cmpMem(r8, rCtx, ncObjBits)
 	a.BCond(NE, g.ex(5))
 	a.Bind(ok)
+	jitCall := a.NewLabel()
+	g.enter(false, jitCall)
+
+	// Another closure of the cached callee's template, as amd64's: the
+	// cache made the new callee's and the call made again.
+	a.Bind(tmpl)
+	a.LoadU8(r8, rC, offEKind)
+	a.AndImm(r8, r8, uint64(^(regCallOut|regCallLeaf)&0xff), false)
+	a.CmpImm(r8, int64(regCallEnter), false)
+	a.BCond(LO, miss)
+	a.CmpImm(r8, int64(regCallObjThis), false)
+	a.BCond(HI, miss)
+	a.LoadU16(rD, r9, offObjFlags)
+	a.TstImm(rD, uint64(objHasData), false)
+	a.BCond(EQ, miss)
+	a.Load(rD, r9, sizeObj+offExtData)
+	g.cmpMem(rD, rCtx, ncFuncT)
+	a.BCond(NE, miss)
+	a.Load(rD, r9, sizeObj+offExtData+8)
+	a.LoadU8(r8, rD, offFDBound)
+	a.Cbnz(r8, miss, false)
+	a.LoadU8(r8, rD, off("funcData.arrow"))
+	a.Cbnz(r8, miss, false)
+	a.Load(r8, rD, off("funcData.extra"))
+	a.Cbnz(r8, miss, true)
+	a.Load(rD, rD, off("funcData.closure"))
+	a.Cbz(rD, miss, true)
+	a.Load(r8, rC, offECl)
+	a.Cbz(r8, miss, true)
+	a.Load(rJ, rD, offClCode)
+	g.cmpMem(rJ, r8, offClCode)
+	a.BCond(NE, miss)
+	a.Load(rJ, rD, off("closure.realm"))
+	g.cmpMem(rJ, r8, off("closure.realm"))
+	a.BCond(NE, miss)
+	a.Load(rJ, rD, offClCode)
+	g.addMem(rJ, rCtx, ncCCBase)
+	a.Load(rJ, rJ, offCCReg)
+	a.Cbz(rJ, miss, true)
+	g.cmpMem(rJ, rC, offERC)
+	a.BCond(NE, miss)
+	a.Store(rCtx, scr(sE), rC)
+	a.Store(rCtx, scr(sV0), rD)
+	a.AddImm(rW, rC, int64(offECallee), true)
+	a.MovRR(rC, r9)
+	g.ptrTo()
+	a.Load(rW, rCtx, scr(sE))
+	a.AddImm(rW, rW, int64(offECl), true)
+	a.Load(rC, rCtx, scr(sV0))
+	g.ptrTo()
+	a.Load(rW, rIP, 0)
+	a.B(start)
+
+	// A built-in the site cached (regCallNative), as amd64's: push of one
+	// argument is the code's own, any other called with no exit.
+	light := a.NewLabel()
+	a.Bind(builtin)
+	a.CmpImm(r9, int64(regCallNative), false)
+	a.BCond(NE, g.ex(4))
+	notPush := a.NewLabel()
+	g.push(notPush)
+	a.Bind(notPush)
+	g.genNext(light)
+	a.Bind(light)
+	g.light(ncBuiltinFn)
+	// Another callee than the cache's, of another template: the exit to
+	// nativeCallMiss, as amd64's.
+	a.Bind(miss)
+	g.storeImm(rCtx, ncMiss, 1)
+	a.B(g.exit)
+	// A callee whose calls go to the JIT, as amd64's: nativeJITCall called
+	// with no exit.
+	a.Bind(jitCall)
+	g.light(ncJITCallFn)
+}
+
+// enter is the call handler's entry of the callee its site's cache knows,
+// rC the cache's entry, rS the window, r9 the kind it is entered as and
+// the scratch's sEnt whether it keeps its arguments, as amd64's; a
+// construction's frame (new_w's) is regFrameConstruct, its new.target the
+// callee.
+func (g *armGen) enter(construct bool, jitCall Label) {
+	a := g.a
+	noThis, noTop, loop, loopEnd, skip, high := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
 	// A callee whose calls go to the JIT (closureCode's jitEnters), as
 	// amd64's: nativeJITCall's, called with no exit.
 	a.Load(r8, rC, offECl)
 	a.Load(r8, r8, offClCode)
 	g.addMem(r8, rCtx, ncCCBase)
 	a.LoadU8(rD, r8, offCCJITEnters)
-	jitCall := a.NewLabel()
 	a.Cbnz(rD, jitCall, false)
 	a.Store(rCtx, scr(sE), rC)
 	a.Store(rCtx, scr(sWin), rS)
@@ -305,8 +388,10 @@ func (g *armGen) call() {
 	a.Cmp(rD, r9, true)
 	a.BCond(HI, g.ex(6))
 	a.Bind(kept)
-	a.LoadU8(r9, r8, offRCNewTarget)
-	a.Cbnz(r9, g.ex(7), false)
+	if !construct {
+		a.LoadU8(r9, r8, offRCNewTarget)
+		a.Cbnz(r9, g.ex(7), false)
+	}
 	// The window's base, and the frame's top, in the stack.
 	a.Load(r9, rCtx, ncRT)
 	a.Load(rC, r9, offRtStack)
@@ -440,6 +525,18 @@ func (g *armGen) call() {
 	a.MovImm(rC, uint64(regFrameCall))
 	a.Store8(rS, offFRegKind, rC)
 	g.frameArgs()
+	if construct {
+		// A construction's: its kind, and its new.target the callee.
+		a.Load(rS, rCtx, scr(sNF))
+		a.MovImm(rC, uint64(regFrameConstruct))
+		a.Store8(rS, offFRegKind, rC)
+		a.Load(r8, rCtx, ncObjBits)
+		a.Store(rS, offFNewTgt, r8)
+		a.Load(rC, rCtx, scr(sE))
+		a.Load(rC, rC, offECallee)
+		a.AddImm(rW, rS, int64(offFNewTgt+8), true)
+		g.ptrTo()
+	}
 	for _, f := range [][2]int32{{offECl, offFCl}, {offECallee, offFCallee}} {
 		same := a.NewLabel()
 		a.Load(rC, rCtx, scr(sE))
@@ -493,78 +590,76 @@ func (g *armGen) call() {
 	// Run it, counted (made).
 	g.incMem(rCtx, ncMade, 1)
 	g.dispatch()
+}
 
-	// Another closure of the cached callee's template, as amd64's: the
-	// cache made the new callee's and the call made again.
-	a.Bind(tmpl)
-	a.LoadU8(r8, rC, offEKind)
-	a.AndImm(r8, r8, uint64(^(regCallOut|regCallLeaf)&0xff), false)
-	a.CmpImm(r8, int64(regCallEnter), false)
-	a.BCond(LO, miss)
-	a.CmpImm(r8, int64(regCallObjThis), false)
-	a.BCond(HI, miss)
-	a.LoadU16(rD, r9, offObjFlags)
-	a.TstImm(rD, uint64(objHasData), false)
-	a.BCond(EQ, miss)
-	a.Load(rD, r9, sizeObj+offExtData)
-	g.cmpMem(rD, rCtx, ncFuncT)
-	a.BCond(NE, miss)
-	a.Load(rD, r9, sizeObj+offExtData+8)
-	a.LoadU8(r8, rD, offFDBound)
-	a.Cbnz(r8, miss, false)
-	a.LoadU8(r8, rD, off("funcData.arrow"))
-	a.Cbnz(r8, miss, false)
-	a.Load(r8, rD, off("funcData.extra"))
-	a.Cbnz(r8, miss, true)
-	a.Load(rD, rD, off("funcData.closure"))
-	a.Cbz(rD, miss, true)
+// newW is new_w of the constructor its site's cache holds, as amd64's:
+// nativeNew called through callH with no exit, then the constructor
+// entered as call_w enters a callee, its frame a construction's.
+func (g *armGen) newW() {
+	a := g.a
+	after, done := a.NewLabel(), a.NewLabel()
+	g.newSite()
+	a.LoadU8(r9, rC, offEKind)
+	a.CmpImm(r9, int64(regCallConstruct), false)
+	a.BCond(NE, g.exit)
 	a.Load(r8, rC, offECl)
-	a.Cbz(r8, miss, true)
-	a.Load(rJ, rD, offClCode)
-	g.cmpMem(rJ, r8, offClCode)
-	a.BCond(NE, miss)
-	a.Load(rJ, rD, off("closure.realm"))
-	g.cmpMem(rJ, r8, off("closure.realm"))
-	a.BCond(NE, miss)
-	a.Load(rJ, rD, offClCode)
-	g.addMem(rJ, rCtx, ncCCBase)
-	a.Load(rJ, rJ, offCCReg)
-	a.Cbz(rJ, miss, true)
-	g.cmpMem(rJ, rC, offERC)
-	a.BCond(NE, miss)
-	a.Store(rCtx, scr(sE), rC)
-	a.Store(rCtx, scr(sV0), rD)
-	a.AddImm(rW, rC, int64(offECallee), true)
-	a.MovRR(rC, r9)
-	g.ptrTo()
-	a.Load(rW, rCtx, scr(sE))
-	a.AddImm(rW, rW, int64(offECl), true)
-	a.Load(rC, rCtx, scr(sV0))
-	g.ptrTo()
+	a.Load(r8, r8, offClCode)
+	g.addMem(r8, rCtx, ncCCBase)
+	a.LoadU8(rD, r8, offCCJITEnters)
+	a.Cbnz(rD, g.exit, false)
+	// nativeNew(regs, w, pc, ctx), as litCall calls nativeLit.
+	a.Store(rCtx, ncIP, rIP)
+	a.Store(rCtx, ncBudget, rBud)
+	a.Adr(r8, after)
+	a.Store(rCtx, ncAfter, r8)
+	a.MovRR(rC, rW)
+	a.Load(rD, rCtx, ncCodeBase)
+	a.Op(Sub, rD, rIP, rD, true)
+	a.ShiftImm(Lsr, rD, rD, 3, true)
+	a.MovRR(rS, rCtx)
+	a.MovRR(rW, rRegs)
+	a.Load(rFn, rCtx, ncNewFn)
+	a.Load(rJ, rCtx, ncCallH)
+	a.Br(rJ)
+	a.Bind(after)
+	g.reload()
+	// 0: Go's; 2: done, a body leafCall answered; 1: entered.
+	a.Cbz(rW, g.exit, true)
+	a.CmpImm(rW, 2, true)
+	a.BCond(EQ, done)
 	a.Load(rW, rIP, 0)
-	a.B(start)
+	g.newSite()
+	plain := a.NewLabel()
+	g.storeImm(rCtx, scr(sEnt), 0)
+	a.Load(r8, rC, offERC)
+	a.LoadU8(rD, r8, offRCArgs)
+	a.Cbz(rD, plain, false)
+	g.storeImm(rCtx, scr(sEnt), 1)
+	a.Bind(plain)
+	a.MovImm(r9, uint64(regCallEnter))
+	g.enter(true, g.exit)
+	a.Bind(done)
+	g.next()
+}
 
-	// A built-in the site cached (regCallNative), as amd64's: push of one
-	// argument is the code's own, any other called with no exit.
-	light := a.NewLabel()
-	a.Bind(builtin)
-	a.CmpImm(r9, int64(regCallNative), false)
-	a.BCond(NE, g.ex(4))
-	notPush := a.NewLabel()
-	g.push(notPush)
-	a.Bind(notPush)
-	g.genNext(light)
-	a.Bind(light)
-	g.light(ncBuiltinFn)
-	// Another callee than the cache's, of another template: the exit to
-	// nativeCallMiss, as amd64's.
-	a.Bind(miss)
-	g.storeImm(rCtx, ncMiss, 1)
-	a.B(g.exit)
-	// A callee whose calls go to the JIT, as amd64's: nativeJITCall called
-	// with no exit.
-	a.Bind(jitCall)
-	g.light(ncJITCallFn)
+// newSite puts in rC new_w's site's cache entry and in rS its window,
+// whose callee is the entry's, or exits.
+func (g *armGen) newSite() {
+	a := g.a
+	a.ShiftImm(Lsr, rC, rW, 48, true)
+	a.Load(r9, rCtx, ncCC)
+	g.cmpMem(rC, r9, offCCRegCalls+8)
+	a.BCond(HS, g.exit)
+	a.MovImm(r8, uint64(sizeE))
+	a.Mul(rC, rC, r8)
+	g.addMem(rC, r9, offCCRegCalls)
+	g.regA(rS)
+	a.Load(r9, rS, 0)
+	g.cmpMem(r9, rCtx, ncObjBits)
+	a.BCond(NE, g.exit)
+	a.Load(r9, rS, 8)
+	g.cmpMem(r9, rC, offECallee)
+	a.BCond(NE, g.exit)
 }
 
 // light is amd64's (amd64_calls.go): nativeBuiltin called through callH
@@ -649,11 +744,13 @@ func (g *armGen) ret(undef bool) {
 	noCap, base, open := a.NewLabel(), a.NewLabel(), a.NewLabel()
 	g.cmpMemImm(rCtx, ncDepth, 0)
 	a.BCond(EQ, base)
-	// A generator's step ends by genReturn.
+	// A generator's step ends by genReturn, and a construction's frame
+	// as constructed (ctorRet): kinds past the others.
+	ctor := a.NewLabel()
 	a.Load(rS, rCtx, ncNF)
 	a.LoadU8(r8, rS, offFRegKind)
 	a.CmpImm(r8, int64(regFrameGenStep), false)
-	a.BCond(EQ, g.genRet)
+	a.BCond(HS, ctor)
 	// Upvalues open on the frame are closed here, as amd64's.
 	a.Load(rC, rCtx, ncRC)
 	a.LoadS32(r8, rC, offRCNcap)
@@ -684,6 +781,8 @@ func (g *armGen) ret(undef bool) {
 		a.Store(rCtx, scr(sV1), r9)
 	}
 	value()
+	valued := a.NewLabel()
+	a.Bind(valued)
 	// The frame closed; an entered frame's arguments given back to the
 	// argument stack, as regEnterW gives them.
 	a.Load(rS, rCtx, ncNF)
@@ -740,6 +839,42 @@ func (g *armGen) ret(undef bool) {
 	value()
 	g.storeImm(rCtx, ncRetDone, 1)
 	a.B(g.exitRet)
+	a.Bind(ctor)
+	a.BCond(EQ, g.genRet)
+	g.ctorRet(undef, valued)
+}
+
+// ctorRet is ret's of a construction's frame (regFrameConstruct), rS its
+// frame record, as amd64's: the upvalues open on it closed, its value what
+// it returns where that is an object, its this where not, and the frame
+// closed as an entered one from valued on.
+func (g *armGen) ctorRet(undef bool, valued Label) {
+	a := g.a
+	noCap, have := a.NewLabel(), a.NewLabel()
+	g.cmpMemImm(rS, offFOpenUp+8, 0)
+	a.BCond(EQ, noCap)
+	a.Store(rCtx, scr(sV0), ZR)
+	a.MovImm(rC, ^uint64(0))
+	a.Store(rCtx, scr(sV1), rC)
+	g.closeUps()
+	a.Load(rW, rIP, 0)
+	a.Bind(noCap)
+	if !undef {
+		g.regA(rD)
+		a.Load(r8, rD, 0)
+		a.Load(r9, rD, 8)
+		g.cmpMem(r8, rCtx, ncObjBits)
+		a.BCond(EQ, have)
+	}
+	a.Load(r8, rRegs, 16)
+	a.Load(r9, rRegs, 24)
+	a.Bind(have)
+	a.Store(rCtx, scr(sV0), r8)
+	a.Store(rCtx, scr(sV1), r9)
+	a.Load(rS, rCtx, ncNF)
+	a.MovImm(rC, uint64(regFrameEnter))
+	a.Store8(rS, offFRegKind, rC)
+	a.B(valued)
 }
 
 // tailTo is tail_call_w's and tail_call_method_w's call once the stack is

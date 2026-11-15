@@ -144,7 +144,7 @@ func Verify(rc *bytecode.RegCode, fn *bytecode.Function) string {
 				ok = reg(b) && int(a)+3 <= n && pc < len(rc.Aux) && int64(rc.Aux[pc]) < int64(len(fn.Code))
 			}
 		case bytecode.RNewW:
-			ok = reg(b) && int(a)+int(w.X())+2 <= n
+			ok = reg(b) && int(a)+int(w.X())+2 <= n && int(c) < rc.CallSites
 		case bytecode.RJmp:
 			ok = in(pc, int64(int32(w.BC())))
 		case bytecode.RIterNext:

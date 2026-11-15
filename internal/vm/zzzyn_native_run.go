@@ -136,6 +136,7 @@ func init() {
 	nativeIterResFn = nativeIterRes
 	nativeCallMissFn = nativeCallMiss
 	nativeJITCallFn = nativeJITCall
+	nativeNewFn = nativeNew
 	for _, op := range nativeSlowOnMiss {
 		nativeExitTable[op] = regSlowTable[op]
 	}
@@ -238,7 +239,7 @@ func (r *Runtime) nativeLoop(st *regState, ctx *nativeCtx, f *frame, c *regCode,
 		if nativeCount {
 			atomic.AddInt64(&nativeExits[op], 1)
 		}
-		if ctx.depth == ctx.cap && ctx.cap < nativeMaxDepth && (op == bytecode.RCallW || op == bytecode.RCallMW || op == bytecode.RCallWT || op == bytecode.RCallMWT || op == bytecode.RIterNext) {
+		if ctx.depth == ctx.cap && ctx.cap < nativeMaxDepth && (op == bytecode.RCallW || op == bytecode.RCallMW || op == bytecode.RCallWT || op == bytecode.RCallMWT || op == bytecode.RIterNext || op == bytecode.RNewW) {
 			// A call, or a generator's step, the frame stack has no room
 			// for: the stack grown, the call tried again, nothing of it
 			// done.
@@ -416,6 +417,7 @@ func (r *Runtime) newNativeCtx(st *regState) *nativeCtx {
 	ctx.iterResFn = *(*uintptr)(unsafe.Pointer(&nativeIterResFn))
 	ctx.callMissFn = *(*uintptr)(unsafe.Pointer(&nativeCallMissFn))
 	ctx.jitCallFn = *(*uintptr)(unsafe.Pointer(&nativeJITCallFn))
+	ctx.newFn = *(*uintptr)(unsafe.Pointer(&nativeNewFn))
 	ctx.grow()
 	st.native = ctx
 	return ctx
@@ -562,6 +564,14 @@ func (r *Runtime) nativeEnd(s *regState, ctx *nativeCtx, pc int, w bytecode.RIns
 		nf, rc := s.f, s.c
 		kind := nf.regKind
 		nf.regKind = 0
+		if kind == regFrameConstruct {
+			// new_w's frame: what is not an object returned gives its this,
+			// and the frame is ended as regEnterW ends one.
+			if s.err == nil && !v.IsObject() {
+				v = r.stack[nf.base+1]
+			}
+			kind = regFrameEnter
+		}
 		if (rc.ncap != 0 || kind == regFrameEnter) && len(nf.openUpvalues) != 0 {
 			regCloseUpvalues(nf)
 		}
@@ -879,6 +889,43 @@ func nativeJITCall(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState
 
 // nativeJITCallFn is nativeJITCall's func value, set by init.
 var nativeJITCallFn func(*[1 << 16]Value, bytecode.RInstr, int, *regState) int
+
+// nativeNew is new_w's object, made for the native handler through callH
+// with no exit, as closure_w's calls nativeClosure: the construction's
+// with the constructor its site's cache holds (regCallConstruct), which
+// the handler has checked is R[A], made as regCtorThis makes it and put
+// in R[A+1], the frame's this. It reports 1 for the handler to enter the
+// constructor with it; 2 where the constructor is a body that only stores
+// its parameters in this, which leafCall has done, R[B] the object; and 0
+// where the construction is Go's (rsNewW): a prototype that is no data
+// property holding an object, a root whose room is not settled, a leaf
+// body leafCall does not answer. It throws
+// nothing and runs no code.
+//
+//go:nocheckptr
+func nativeNew(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeCtx) int {
+	f := (*frame)(nativePtr(&ctx.nf))
+	r := ctx.st.r
+	e := &f.cl.regCalls[w.C()]
+	o := e.callee
+	obj := r.regCtorThis(o, o.fn())
+	if obj == nil {
+		return 0
+	}
+	a := int(w.A())
+	regs[a+1] = Obj(obj)
+	if leaf := e.cl.fn.Leaf; leaf != bytecode.LeafNone && leaf != bytecode.LeafPure {
+		if _, done := r.leafCall(e.cl, obj, regs[a+2:a+2+int(w.X())]); !done {
+			return 0
+		}
+		regs[w.B()] = Obj(obj)
+		return 2
+	}
+	return 1
+}
+
+// nativeNewFn is nativeNew's func value, set by init.
+var nativeNewFn func(*[1 << 16]Value, bytecode.RInstr, int, *nativeCtx) int
 
 // nativeIterResFn is nativeIterRes's func value, set by init.
 var nativeIterResFn func(*[1 << 16]Value, bytecode.RInstr, int, *nativeCtx)

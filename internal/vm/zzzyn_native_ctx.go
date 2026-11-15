@@ -173,6 +173,11 @@ type nativeCtx struct {
 	// that a context whose stack a deep recursion grew costs a callback's
 	// entry no more than one never grown.
 	used int64
+
+	// newFn is the func value of nativeNew, which new_w's handler calls
+	// through callH with no exit for the object it constructs: past the
+	// words the code read before it, which it moves none of.
+	newFn uintptr
 }
 
 // nativeMaxDepth is how deep the native frame stack goes.

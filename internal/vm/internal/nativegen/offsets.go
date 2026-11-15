@@ -217,6 +217,7 @@ var (
 	ncIterResFn  int32
 	ncCallMissFn int32
 	ncJITCallFn  int32
+	ncNewFn      int32
 	ncMiss       int32
 	offUpSlot    int32
 	offUpClosed  int32
@@ -464,6 +465,7 @@ func loadOffsets() {
 	ncIterResFn = off("nativeCtx.iterResFn")
 	ncCallMissFn = off("nativeCtx.callMissFn")
 	ncJITCallFn = off("nativeCtx.jitCallFn")
+	ncNewFn = off("nativeCtx.newFn")
 	ncMiss = off("nativeCtx.miss")
 	offUpSlot = off("upvalue.slot")
 	offUpClosed = off("upvalue.closed")
