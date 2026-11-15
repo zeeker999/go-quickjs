@@ -2759,7 +2759,20 @@ with theirs, refusals first, then code unused this epoch and the one before,
 least recently used first (`regVictims`, `regReclaim`); and `flush` drops
 code unused between two of its looks (`regFlush`). Code let go of so has its
 function warm up anew (`regLetGo`), and compiled again it is compiled with
-all its function learned, which outlives its code (`regLearned`). The
+what its function learned that holds no object, which outlives its code
+(`regLearned`): the sites whose speculation failed, the reads and the
+arithmetic that met other kinds, where Go went on, the lowerings' hints --
+what the stack form's ghosts keep of an entry its cache dropped. The
+callees its calls met, the closures it inlined, the pools its constructions
+and literals took objects from go (`regForget`): a pool keeps every object
+it handed out, and a closure everything it captured, so kept with a
+function whose bytecode outlived them they had kept a finished program's
+heap alive, which every later collection marked again. A closed entry
+drops what its code read by address and the targets it was compiled for
+(`regClose`); a run's end clears its contexts' records up to what any
+code's native calls write (`callRefs`, which every compile raises) and,
+with no native code running, the stand-in frame of a callee's call of Go
+(`calleeFrame`). The
 cache knows a function by its key, not its templates, so a template's code
 (`jitReg`) is code only while the cache holds it (`jitRegEntry`'s
 `cached`), as the stack form's hint names an entry only while the cache

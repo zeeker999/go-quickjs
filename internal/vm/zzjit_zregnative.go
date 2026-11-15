@@ -574,6 +574,11 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 	s.inlined += uint64(len(f.Inlined))
 	s.inlinedCode += uint64(f.InlinedCode)
 	e.code, e.bytes = code, need
+	// The pointer words its native calls write to their contexts' records,
+	// which a run's end clears (jitRegStretch), as the stack form's
+	// compile counts them (jitRunDone): uncounted, a run left them, and
+	// whatever the callees had had in their registers stayed reachable.
+	s.callRefs = max(s.callRefs, uint64(code.CallRefs()))
 	// What the entry and its program hold, by the function's
 	// instructions: the room the next compile asks for first, as the
 	// stack form's compile learns it.
@@ -904,12 +909,40 @@ func (s *jitState) regFlush(tick, now uint64) {
 
 // regLetGo drops e, the code of the function whose key is key, from the
 // cache for room or for going unused: the function warms up anew, and
-// compiled again once it is hot is compiled with what it had learned.
+// compiled again once it is hot is compiled with what it had learned of
+// its sites -- what holds no object (regForget), as the stack form's
+// cache keeps of an entry it drops so (ghost, rememberFlushed).
 func (s *jitState) regLetGo(key jitKey, e *jitRegEntry) {
 	s.dropReg(key, e)
 	if l := e.life; l != nil {
 		l.invalid, l.warming, l.reopt, l.learning = false, false, false, false
+		regForget(l)
 	}
+}
+
+// regForget has l, what a function's register code learned (regLearned),
+// keep only what holds no object, once the cache let its code go: the
+// sites whose speculation failed, the reads and the arithmetic it met
+// others at, where Go went on, and its lowerings' hints, as the stack
+// form's cache keeps of an entry it drops (jitGhost). The rest -- the
+// callees its calls met, the closures it inlined, the pools its
+// constructions and literals took their objects from, the generators its
+// loops met -- holds the objects its code was compiled for, and the pools
+// every object they handed out, the program's: kept with the function,
+// whose bytecode outlives them, they had kept a benchmark's whole heap
+// alive after it ended, which every later collection marked again -- AWFY
+// DeltaBlue's 35 MB through Havlak, whose collections took half as long
+// again. The function relearns them once it runs again, as one the stack
+// form's cache dropped does.
+func regForget(l *jitEntry) {
+	o := l.jitLearned
+	if o == nil {
+		return
+	}
+	l.jitLearned = &jitLearned{reg: o.reg,
+		failed: o.failed, failedEntries: o.failedEntries, bigints: o.bigints, bigwide: o.bigwide, resumed: o.resumed,
+		typedReads: o.typedReads, stringReads: o.stringReads, keyedReads: o.keyedReads, keyedWrites: o.keyedWrites,
+		regHints: o.regHints, calls: o.calls}
 }
 
 // dropReg closes e's code, or, while a run or a native call is in it, has
@@ -953,7 +986,12 @@ func (s *jitState) regClose(e *jitRegEntry) {
 		return
 	}
 	_ = s.closeSSA(e.code, e.keep)
-	e.code = nil
+	// What the code read by address, and the calls' targets it was
+	// compiled for, go with it: the entry stays where its function's
+	// template names it until a call finds it let go of (jitRegLetGoOf),
+	// and a function not called again had kept them -- holders, pools,
+	// closures -- for good.
+	e.code, e.keep, e.targets = nil, nil, nil
 	if len(s.regRetired) != 0 {
 		if i := slices.Index(s.regRetired, e); i >= 0 {
 			s.regRetired = slices.Delete(s.regRetired, i, i+1)
@@ -1804,6 +1842,12 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 	s.goRuns[idx] = jitGoRun{}
 	s.regRuns[idx] = jitRegRun{}
 	s.ctxTop = top
+	if top == 0 {
+		// No native code runs now, nor a call of Go it made: the stand-in
+		// frame such a call of a callee's was made on (jitRegFrameRun),
+		// its closure and receiver a frame gone too.
+		s.calleeFrame = frame{}
+	}
 	if top == 0 && len(s.regRetired) != 0 {
 		// No native code runs now: what the cache let go of while it did
 		// is closed, if nothing else uses it (regClose).
