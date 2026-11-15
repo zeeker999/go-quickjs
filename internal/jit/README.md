@@ -416,7 +416,13 @@ the function's key:
   `jitCallUnsettled` asks -- after `jitCallsToInline` calls of built-ins
   (`jitRegCallSettle`) a site is settled as one Go makes (`jitCallDone`),
   and its calls ask nothing more; a construction's, or a call of a
-  function with code, keeps it unsettled;
+  function with code, keeps it unsettled. A construction nothing taught
+  yet, of the function a global's or a captured binding's read before it
+  holds now (`regConstructorNow`), is seeded at a compile
+  (`jitRegSeedConstruct`), in the code's own frame and in a callee
+  inlined, whose own code may never be compiled, as the stack form's
+  compiles seed one (`jitSeedCalls`, `jitCalleeObjectAt`); the
+  construction checks its function;
 - the literals' pools by register pc (`Literal`: `new_object`'s,
   `new_object_lit`'s, `new_array`'s, `new_array_k`'s and `new_regexp`'s,
   made by `jitObjectLiteral`, `jitArrayLiteral`, `jitRegSharedLiteral` and

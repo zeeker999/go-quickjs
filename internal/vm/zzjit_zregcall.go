@@ -220,6 +220,20 @@ func (f *jitRegFeedback) regCallTargets(t *jitRegTargets, pc int, w bytecode.RIn
 			}
 		}
 	}
+	if newW && l != nil && !slices.ContainsFunc(l.nativeCalls, func(x jitInline) bool { return x.pc == rpc && x.pool != nil }) {
+		// A construction no call of Go has taught the code yet, of the
+		// function the binding read before it holds now, as the stack
+		// form's compiles seed one (jitSeedCalls, jitCalleeObjectAt): its
+		// objects from a pool, from the first compile, the construction
+		// checking its function -- and in a callee inlined, whose own code
+		// may never be compiled, as the stack form's callee compiled for
+		// its native callers is seeded so. Learned only at calls of Go,
+		// a callee inlined from the first made each of its constructions
+		// by Go until one left the code that inlined it.
+		if o := f.regConstructorNow(int(rpc), int(w.A())); o != nil {
+			f.fb.r.jitRegSeedConstruct(l, rpc, o, argc)
+		}
+	}
 	if l != nil {
 		for _, x := range l.nativeCalls {
 			if x.pc == rpc && (x.pool != nil) == newW && !x.forEach && x.cl != nil && x.active == nil {
@@ -511,6 +525,49 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 	l.nativeCalls = append(l.nativeCalls, x)
 	r.jitRegReopt(f.cl, e)
 	return true
+}
+
+// regConstructorNow is the function the construction at register pc rpc,
+// whose function is in register reg, constructs with if the binding read
+// into reg last before it -- a global's, a captured one's -- still holds
+// it, as the stack form's jitCalleeObjectAt finds a call's function past
+// its arguments' instructions: the nearest instruction before rpc that
+// writes reg (its A) is that read (regDefined). nil for any other. What it
+// finds is a guess the construction checks, as the stack form's seed is.
+func (f *jitRegFeedback) regConstructorNow(rpc, reg int) *Object {
+	for q := rpc - 1; q >= 0 && q < len(f.rc.Code); q-- {
+		if int(f.rc.Code[q].A()) != reg {
+			continue
+		}
+		v, ok := f.regDefined(q+1, reg)
+		if !ok || !v.IsObject() {
+			return nil
+		}
+		return v.Object()
+	}
+	return nil
+}
+
+// jitRegSeedConstruct has l, what a function's register code learned,
+// know that its construction at register pc rpc, of argc arguments,
+// constructs with o, its objects from a pool, as a call of Go there would
+// teach it (jitRegCallSeen) and as the stack form's compiles seed a
+// construction (jitSeedCalls): not new Array(), whose arrays native code
+// makes (jitRegAllocSeen), nor a function native code does not construct
+// with (jitRegConstructTarget).
+func (r *Runtime) jitRegSeedConstruct(l *jitEntry, rpc int32, o *Object, argc int) {
+	if o == r.proto.arrayCtor {
+		return
+	}
+	cl, parent, ok := r.jitRegConstructTarget(o, argc)
+	if !ok {
+		return
+	}
+	pool := r.jitNewPool(o)
+	if pool.Count == 0 {
+		return
+	}
+	l.nativeCalls = append(l.nativeCalls, jitInline{pc: rpc, cl: cl, obj: o, parent: parent, pool: pool})
 }
 
 // jitRegForwardSeen is jitRegCallSeen's for the apply_args at register

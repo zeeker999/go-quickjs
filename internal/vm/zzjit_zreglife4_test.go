@@ -260,3 +260,78 @@ func TestJITRegIteratorStepMade(t *testing.T) {
 		}
 	})
 }
+
+// regInlinedCtorSrc constructs in a callee only ever inlined: make is
+// called from run's loop alone, inlined there before its own code is
+// compiled, if ever.
+const regInlinedCtorSrc = `
+function P(x, y) { this.x = x; this.y = y }
+function make(i) { return new P(i, i + 1) }
+function run(n) { var s = 0; for (var i = 0; i < n; i++) { var p = make(i); s += p.x + p.y } return s }
+function Q(x, y) { this.x = -x; this.y = 2 * y }
+function swap() { P = Q }
+`
+
+// TestJITRegInlinedConstructionLearned runs a loop whose callee, inlined
+// in it, constructs with a global's function, and checks that no
+// construction is made by Go: the construction is seeded from the
+// function the global holds when the loop is compiled, in the callee
+// inlined (regConstructorNow, jitRegSeedConstruct), as the stack form's
+// compiles seed one (jitSeedCalls). Before, the construction was learned
+// only at a call of Go from code of the callee's, or of the code inlining
+// it, which then had to be compiled again for it.
+func TestJITRegInlinedConstructionLearned(t *testing.T) {
+	regBothMarking(t, func(t *testing.T) {
+		rts := regNativeRuntimes(t, regInlinedCtorSrc)
+		r := rts[0]
+		r.jitStress = jitStressConfig{}
+		r.SetJITWarmUp(2, 2)
+		r.SetJITReport(true)
+		var got [2]string
+		for i, rt := range rts {
+			fn, _ := rt.GetProp(Obj(rt.Global()), rt.Intern("run"))
+			for range 50 {
+				v, err := rt.Call(fn, Undefined, []Value{Float(1000)})
+				got[i] = regNativeShow(rt, v, err)
+			}
+		}
+		if got[0] != got[1] || got[0] != "1000000" {
+			t.Fatalf("with the JIT %q, without %q, want 1000000", got[0], got[1])
+		}
+		st := r.RegNativeStats()
+		defer func() {
+			// The global's function replaced: the construction checks it.
+			for i, rt := range rts {
+				sw, _ := rt.GetProp(Obj(rt.Global()), rt.Intern("swap"))
+				if _, err := rt.Call(sw, Undefined, nil); err != nil {
+					t.Fatal(err)
+				}
+				fn, _ := rt.GetProp(Obj(rt.Global()), rt.Intern("run"))
+				v, err := rt.Call(fn, Undefined, []Value{Float(1000)})
+				got[i] = regNativeShow(rt, v, err)
+			}
+			if got[0] != got[1] || got[0] != "501500" {
+				t.Errorf("P replaced: with the JIT %q, without %q, want 501500", got[0], got[1])
+			}
+		}()
+		var made uint64
+		for k, n := range st.GoCallOps {
+			t.Logf("call of Go %s %d", k, n)
+			if strings.HasPrefix(k, "new_w") {
+				made += n
+			}
+		}
+		for k, n := range st.HostOps {
+			t.Logf("host exit %s %d", k, n)
+			if k == "new_w" {
+				made += n
+			}
+		}
+		if made != 0 {
+			t.Errorf("Go made %d of the 50,000 constructions; want them native from the first compile", made)
+		}
+		if e := regCodeNamed(t, r, "make"); e != nil && e.code != nil {
+			t.Logf("make has code of its own: %d native calls", r.jit.regLinks[e.key].in)
+		}
+	})
+}
