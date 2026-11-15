@@ -357,6 +357,11 @@ type Runtime struct {
 	// tree tier, as a runtime with the JIT runs it (regOn), for tests of
 	// those tiers.
 	oldTiers bool
+	// strConsts are the strings the program's string constants were made,
+	// by their text, held weakly (constString), and strConstsSweep the
+	// count past which the dead are swept out.
+	strConsts      map[string]weak.Pointer[String]
+	strConstsSweep int
 	// jitFields is the optional native tier's state, empty in builds
 	// without it. It comes after everything the interpreter reads, so that
 	// a build with the tier moves none of their offsets, and before the last
@@ -367,11 +372,6 @@ type Runtime struct {
 	// than each job taken from the front of the slice, which made an append
 	// at its end reallocate it about once a job.
 	jobHead int
-	// strConsts are the strings the program's string constants were made,
-	// by their text, held weakly (constString), and strConstsSweep the
-	// count past which the dead are swept out.
-	strConsts      map[string]weak.Pointer[String]
-	strConstsSweep int
 }
 
 // Realm is a set of intrinsics and the global object that goes with them.
