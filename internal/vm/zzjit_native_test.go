@@ -5206,6 +5206,25 @@ func jitMarkingForTest(t *testing.T) *uint8 {
 	return marking
 }
 
+// jitCollectorHeldForTest holds the collector off until t ends, its
+// cycles' count (jitGCEpoch) settled first: a collection ends with none
+// running, and the count its end makes is waited for. What the JIT does
+// at a collection's end -- emptying the megamorphic cache (flush), which
+// the next megamorphic read at a site fills again from Go, as V8's stub
+// cache misses after ClearStubCaches -- then happens at no time the test
+// counts native code's exits. The collector's marking is not what such a
+// test leaves out: jitMarkingForTest has native code see it marking.
+func jitCollectorHeldForTest(t *testing.T) {
+	t.Helper()
+	jitEpochOnce.Do(jitArmEpoch)
+	gc := debug.SetGCPercent(-1)
+	t.Cleanup(func() { debug.SetGCPercent(gc) })
+	for epoch := jitGCEpoch.Load(); jitGCEpoch.Load() == epoch; {
+		runtime.GC()
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // A small method is inlined at a call the new pipeline has seen call it
 // (jitCallSeen, ssa.InlineSite): the loop then never leaves native code, a
 // missing argument is undefined, and the receiver is the call's. A method
