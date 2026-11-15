@@ -686,7 +686,11 @@ functions"); `yield` in a frame that step entered; `s.charCodeAt(i)`
 (`char_code_at`) of a flat string, the built-in read from the same cache;
 BigInt64Array's and BigUint64Array's elements read and written, a BigInt
 held in its Value; Uint8ClampedArray's writes, clamped and rounded to
-even; the compare-and-branches of two such BigInts, as 128-bit integers;
+even; the compare-and-branches of two such BigInts, as 128-bit integers,
+of two registers and of a register and an upvalue (`jlt_upval` and its
+kin, out of line), and `===` and `!==` of two, equal only if both their
+words are (a BigInt the Value holds is held one way: a callback of a
+BigInt64Array's `every` or `find` had exited at each compare);
 an element written at the length of an array with room for it, as
 `appendElem` appends it, the array's and its prototype chain's index
 keys and elements checked;

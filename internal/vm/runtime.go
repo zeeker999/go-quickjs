@@ -365,6 +365,9 @@ type Runtime struct {
 	// caseMemo remembers the case conversions of short ASCII strings by
 	// their text (asciiCaseMemo); made at the first.
 	caseMemo *caseMemo
+	// cbFree is the built-ins' callbacks not in use, a list by their next
+	// (regCallbackOf).
+	cbFree *regCallback
 	// jitFields is the optional native tier's state, empty in builds
 	// without it. It comes after everything the interpreter reads, so that
 	// a build with the tier moves none of their offsets, and before the last

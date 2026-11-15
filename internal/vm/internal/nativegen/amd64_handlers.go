@@ -535,18 +535,29 @@ func nativeEmit(v *variant) (*block, error) {
 				a.Bind(notWord)
 			}
 			// Two strings: the same one, of different lengths, or two
-			// flat ones compared by their text (flatEq); any other pair
-			// Go's.
+			// flat ones compared by their text (flatEq); two BigInts held
+			// in their Values, equal only if their words are, out of line;
+			// any other pair Go's.
+			nonStr := a.NewLabel()
 			for _, x := range []Reg{R9, R8} {
 				a.MovRR(RCX, x)
 				a.ShiftImm(Shr, RCX, 16, true)
 				a.ShiftImm(Shl, RCX, 16, true)
 				a.Op(Cmp, RCX, R10, true)
-				a.Jcc(CondNE, g.exit)
+				a.Jcc(CondNE, nonStr)
 				a.MovZX8(RCX, x)
 				a.OpImm(Cmp, RCX, int32(KindString), false)
-				a.Jcc(CondNE, g.exit)
+				a.Jcc(CondNE, nonStr)
 			}
+			g.late = append(g.late, func() {
+				a.Bind(nonStr)
+				a.MovImm(RCX, shortBigBase)
+				a.Op(Cmp, R9, RCX, true)
+				a.Jcc(CondB, g.exit)
+				a.Op(Cmp, R8, RCX, true)
+				a.Jcc(CondAE, same)
+				a.Jmp(g.exit)
+			})
 			a.Load(RAX, RBX, 0)
 			a.LoadIdx(R9, R12, RDX, 1, 8)
 			a.LoadIdx(R8, R12, RSI, 1, 8)

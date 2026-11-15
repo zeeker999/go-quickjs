@@ -35,6 +35,8 @@ type regCallback struct {
 	// ownThis says the callee's this is the one a call gives it, where an
 	// arrow's is its own (callWith).
 	ownThis bool
+	// next is the next of the runtime's callbacks not in use (cbFree).
+	next *regCallback
 }
 
 // regCallbackOf is fn, called with this, as a regCallback, or nil where its
@@ -86,7 +88,16 @@ func (r *Runtime) regCallbackOf(fn, this Value) *regCallback {
 	if top > len(r.stack) {
 		return nil
 	}
-	cb := &regCallback{r: r, o: o, cl: fd.closure, c: c, this: this, base: base, saved: base, ownThis: !fd.arrow}
+	// One the runtime keeps from an earlier built-in's call: a built-in
+	// that calls its callback once or twice -- a replacement of one match
+	// -- had allocated it each time.
+	cb := r.cbFree
+	if cb != nil {
+		r.cbFree = cb.next
+	} else {
+		cb = new(regCallback)
+	}
+	*cb = regCallback{r: r, o: o, cl: fd.closure, c: c, this: this, base: base, saved: base, ownThis: !fd.arrow}
 	r.stackTop = top
 	if top > r.stackHigh {
 		r.stackHigh = top
@@ -185,12 +196,15 @@ func (cb *regCallback) callWith(this Value, args []Value) (Value, error) {
 	return cb.call(args)
 }
 
-// end lets go of the callback's window and code entry.
+// end lets go of the callback's window and code entry, and gives it back
+// to the runtime (cbFree), holding nothing.
 func (cb *regCallback) end() {
+	r := cb.r
 	if cb.st != nil {
 		nativeReset(cb.ctx)
-		cb.r.regLeave(cb.st)
-		cb.st, cb.ctx, cb.set = nil, nil, nil
+		r.regLeave(cb.st)
 	}
-	cb.r.stackTop = cb.saved
+	r.stackTop = cb.saved
+	*cb = regCallback{next: r.cbFree}
+	r.cbFree = cb
 }

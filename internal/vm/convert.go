@@ -208,17 +208,22 @@ func (r *Runtime) keyString(k Atom) *String {
 			r.keyStrings[k] = s
 		}
 	}
-	r.keyRemember(&r.keyAtoms[keySlot(s)], keyAtom{s: s, atom: k})
+	// Put in its slot as it is, the entry there forgotten: the keys
+	// handed out -- each index of an array JSON.stringify walks -- would
+	// otherwise each move another into the second way (keyRemember),
+	// work for keys no conversion asks for again.
+	r.keyAtoms[keySlot(s)] = keyAtom{s: s, atom: k}
 	return s
 }
 
-// keyRemember puts k in e, an entry of keyAtoms, the entry it takes the
-// slot from moved to the slot's second way (keyVictims), from which
+// keyRemember puts k in e, an entry of keyAtoms, as a conversion that
+// looked its atom up remembers it (toPropertyName), the entry it takes
+// the slot from moved to the slot's second way (keyVictims), from which
 // keyVictim takes it back: by address, two strings share a slot one time
 // in 256, and two keys a loop converts in turn, o.hasOwnProperty(k) of
 // four keys, had each found the other's there at every conversion and
 // looked its atom up anew. Native code and the JIT's read and write the
-// first way alone.
+// first way alone, and so does keyString.
 func (r *Runtime) keyRemember(e *keyAtom, k keyAtom) {
 	if old := e.s; old != nil && old != k.s {
 		v := r.keyVictims
