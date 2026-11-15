@@ -283,18 +283,29 @@ func (r *Runtime) jitRegMakeCells(ctx *abi.Context, f *frame, e *jitRegEntry, wb
 // jitRegCellsClosure is GoClosure and GoClose for register code whose
 // captured registers are in cells of their own, as jitCellsClosure is the
 // stack form's: closure_w's closure of constant i, capturing the cells, as
-// regClosure makes it; or close_regs from register i on, whose captured
-// registers take fresh cells holding what they hold -- open on the
-// window's registers on the run's own frame, the old ones closed.
+// regClosure makes it; or close_regs of its B registers from register i,
+// whose captured registers take fresh cells holding what they hold --
+// open on the window's registers on the run's own frame, the old ones
+// closed -- as mir's cellsClose takes them natively.
 func (r *Runtime) jitRegCellsClosure(ctx *abi.Context, f *frame, c *regCode, e *jitRegEntry, wb int, level bool, i int) bool {
 	regs := jitRegCapturedRegs(e.p.Captured)
 	cells := unsafe.Slice((**upvalue)(ctx.Cells), len(regs))
 	if ssa.GoOp(ctx.GoOp&0xff) == ssa.GoClose {
+		// Its registers, close_regs's: no other is closed.
+		rpc := int(ctx.ExitPC)
+		if rpc >= len(c.rc.Code) {
+			return false
+		}
+		w := regAt(c.code, rpc)
+		end := i + int(w.B())
+		if w.Op() != bytecode.RCloseRegs || int(w.A()) != i || end > e.p.Regs {
+			return false
+		}
 		if !level && len(f.openUpvalues) != 0 {
-			regCloseRegs(f, regWindow(r.stack, wb), i, e.p.Regs-i)
+			regCloseRegs(f, regWindow(r.stack, wb), i, end-i)
 		}
 		for k, reg := range regs {
-			if reg < i {
+			if reg < i || reg >= end {
 				continue
 			}
 			v := *cells[k].slot

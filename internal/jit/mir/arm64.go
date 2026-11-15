@@ -5653,7 +5653,7 @@ func (c *a64Compiler) cellsClose(site *ssa.CallSite, slow arm64.Label) {
 	c.a.Store(a64B, abi.OffPoolObjects, arm64.ZR)
 	n := int32(len(site.Captures))
 	for k, x := range site.Captures {
-		if int(x>>1) < site.Argc {
+		if !closes(site, x) {
 			continue
 		}
 		at := 8*n + int32(k)*c.enc.UpvalueSize
@@ -5695,7 +5695,7 @@ func (c *a64Compiler) cellsCloseMarking(site *ssa.CallSite, slow arm64.Label) {
 	}
 	n := int32(len(site.Captures))
 	for k, x := range site.Captures {
-		if int(x>>1) < site.Argc {
+		if !closes(site, x) {
 			continue
 		}
 		at := 8*n + int32(k)*c.enc.UpvalueSize

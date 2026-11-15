@@ -146,7 +146,7 @@ func (p *Program) Validate() error {
 				return bad("invalid parameter")
 			}
 		case CloseUpvalues:
-			if int(in.Key) > p.Locals {
+			if int(in.Key) > p.Locals || in.Extra < 0 || int(in.Key)+in.Extra > p.Locals {
 				return bad("invalid local")
 			}
 		case UpvalueRead, UpvalueWrite:

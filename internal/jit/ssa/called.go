@@ -352,7 +352,7 @@ func (b *builder) calledClosures() (map[int]int, map[string]int) {
 				lo, hi = 0, len(p.Code)
 			}
 			for q := lo; q < hi; q++ {
-				if in := p.Code[q]; (in.Op == ir.CloseUpvalues && closesCaptured(int(in.Key), made.Captures) || containsInt(made.Closes, q)) && reachable(p, q) {
+				if in := p.Code[q]; in.Op == ir.CloseUpvalues && closesCaptured(int(in.Key), in.Extra, made.Captures) && reachable(p, q) {
 					return true
 				}
 			}
@@ -397,11 +397,11 @@ func calledHome(p *ir.Program, pc, frameLocals int) int {
 }
 
 // closesCaptured reports whether a scope's end closing the locals from key
-// on closes any of captures (MadeCallback's Captures): a local's,
-// index<<1|1.
-func closesCaptured(key int, captures []int32) bool {
+// on -- n of them, register code's close_regs, where n is not 0 -- closes
+// any of captures (MadeCallback's Captures): a local's, index<<1|1.
+func closesCaptured(key, n int, captures []int32) bool {
 	for _, c := range captures {
-		if c&1 != 0 && int(c>>1) >= key {
+		if at := int(c >> 1); c&1 != 0 && at >= key && (n == 0 || at < key+n) {
 			return true
 		}
 	}

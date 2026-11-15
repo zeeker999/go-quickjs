@@ -1414,6 +1414,12 @@ func (l *regLowering) lowerCold(pc int, w bytecode.RInstr) {
 	case bytecode.RRestParam, bytecode.RNewTarget:
 		// Go's, from the frame (ir's Frame).
 		l.emit(ir.Instruction{Op: ir.Host, Frame: true, Dest: int(a)}, false)
+	case bytecode.RCloseRegs:
+		// A scope's end, closing what closures captured of the B
+		// registers from A, as the stack form's close_upvalues closes its
+		// locals from one on: natively, or by a call of Go on the frame
+		// (ssa.GoClose).
+		l.emit(ir.Instruction{Op: ir.CloseUpvalues, Key: uint32(a), Extra: int(b)}, false)
 	case bytecode.RWrap:
 		// x op y, the second argument of the asUintN or asIntN call right
 		// after it: the operator alone, the call made after it as any
@@ -1722,6 +1728,8 @@ func RegAccess(rc *bytecode.RegCode, pc int) (reads, writes []int, all bool) {
 	case bytecode.RToPropertyKey:
 		return []int{a}, []int{a}, false
 	case bytecode.RAssignConst, bytecode.RThrowRef, bytecode.RCheckThis, bytecode.RDeleteSuper, bytecode.RCloseRegs:
+		// close_regs reads and writes no register's value: what it
+		// changes is what the closures' cells hold.
 		return nil, nil, false
 	case bytecode.RSetUpvalCheck:
 		return []int{a}, nil, false

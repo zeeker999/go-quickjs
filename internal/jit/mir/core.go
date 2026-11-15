@@ -3730,6 +3730,15 @@ func lengthWrites(site *ssa.CallSite, argc int, enc abi.Encoding) bool {
 		argc == 2 && enc.ValueSize == 16 && enc.WriteBarrier != 0
 }
 
+// closes reports whether a scope's end natively (cellsClose), site, closes
+// the cell of x, one of its Captures: a local from its Argc on, and, where
+// it closes a count of them (ssa.CallSite's Closes, register code's
+// close_regs), before its end.
+func closes(site *ssa.CallSite, x int32) bool {
+	at := int(x >> 1)
+	return at >= site.Argc && (site.Closes == 0 || at < site.Argc+site.Closes)
+}
+
 // goOpWord is the word a call of Go, site, passes Go (abi.Context's GoOp).
 func goOpWord(site *ssa.CallSite) uint64 {
 	op := uint64(site.Go)

@@ -3424,7 +3424,8 @@ func (c *compiler) cellsTake(site *ssa.CallSite, slow amd64.Label) {
 // cellsClose ends a scope natively (ssa.GoClose) in code whose captured
 // locals are in cells of their own, as V8's code allocates a block's
 // context at each iteration: where the pool has a block, its next, each
-// local from the call's Argc on gets the block's cell of it, holding what
+// local from the call's Argc on (its Closes of them, where it names a
+// count: closes) gets the block's cell of it, holding what
 // the old cell holds, in the context's Cells, and the old one is closed
 // -- what it held copied into it, its slot pointing there -- as the VM's
 // closeUpvaluesFrom closes it. The closures that captured it keep it; the
@@ -3457,7 +3458,7 @@ func (c *compiler) cellsClose(site *ssa.CallSite, slow amd64.Label) {
 	c.storeImm(scratchB, abi.OffPoolObjects, 0, scratchA)
 	n := int32(len(site.Captures))
 	for k, x := range site.Captures {
-		if int(x>>1) < site.Argc {
+		if !closes(site, x) {
 			continue
 		}
 		at := 8*n + int32(k)*c.enc.UpvalueSize
@@ -3508,7 +3509,7 @@ func (c *compiler) cellsCloseMarking(site *ssa.CallSite, slow amd64.Label) {
 	}
 	n := int32(len(site.Captures))
 	for k, x := range site.Captures {
-		if int(x>>1) < site.Argc {
+		if !closes(site, x) {
 			continue
 		}
 		at := 8*n + int32(k)*c.enc.UpvalueSize

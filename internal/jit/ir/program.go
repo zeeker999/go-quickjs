@@ -229,8 +229,10 @@ const (
 	// (ssa.GoClosure), and leaves it to Go otherwise.
 	Closure
 	// CloseUpvalues is close_upvalues, a scope's end: what closures
-	// captured of locals Key on is closed, the value kept for them. Go's,
-	// called from native code (ssa.GoClose), or left to it.
+	// captured of locals Key on is closed, the value kept for them --
+	// register code's close_regs, of the Extra registers from Key alone
+	// where Extra is not 0. Native code's or Go's, called from native code
+	// (ssa.GoClose), or left to it.
 	CloseUpvalues
 	// IterClose is iter_close_normal, a for...of's or a destructuring's
 	// end: the cursor at Left closed, which the new pipeline does natively

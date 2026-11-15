@@ -429,22 +429,7 @@ func (f *jitRegFeedback) CalledClosure(pc int) (ssa.MadeCallback, ssa.InlineSite
 		k2.inlined = append(k2.inlined, t)
 		k2.made = append(k2.made, t)
 	}
-	made := ssa.MadeCallback{PC: pc, Template: uintptr(unsafe.Pointer(c)), Closure: uintptr(unsafe.Pointer(t)), Captures: caps}
-	for q, in := range f.p.Code {
-		// close_regs closing a register it captures.
-		if in.Op != ir.Host || int(f.p.Origin[q]) >= len(f.rc.Code) {
-			continue
-		}
-		if w := f.rc.Code[f.p.Origin[q]]; w.Op() == bytecode.RCloseRegs {
-			for _, c := range caps {
-				if reg := int(c >> 1); c&1 != 0 && int(w.A()) <= reg && reg < int(w.A())+int(w.B()) {
-					made.Closes = append(made.Closes, q)
-					break
-				}
-			}
-		}
-	}
-	return made, site, true
+	return ssa.MadeCallback{PC: pc, Template: uintptr(unsafe.Pointer(c)), Closure: uintptr(unsafe.Pointer(t)), Captures: caps}, site, true
 }
 
 // madeCaptures are what t, the template of the maker's constant k, captures
