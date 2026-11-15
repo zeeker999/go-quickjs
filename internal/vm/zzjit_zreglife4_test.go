@@ -3,6 +3,7 @@
 package vm
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -92,6 +93,91 @@ func TestJITRegRecursiveRecompiled(t *testing.T) {
 		// past the first compile left the code.
 		if hosts > 100 {
 			t.Errorf("the walk left its code %d times; compiled again for its visitors, it leaves at a few of their first calls", hosts)
+		}
+	})
+}
+
+// regBusyAsyncSrc is microbench_extra's async_busy: an async function
+// doing work between awaits of settled values, its loop's.
+const regBusyAsyncSrc = `
+var out = [];
+async function busy(n) {
+	var i, s = 0;
+	for (i = 0; i < n; i++) {
+		s = (s + i * 3) | 0;
+		if ((i & 255) == 0) s = (s + await (i & 7)) | 0;
+	}
+	return s;
+}
+function drive(n) { busy(n).then(function (v) { out.push(v) }) }
+var order = [];
+async function tick(tag, n) {
+	var s = 0;
+	for (var i = 0; i < n; i++) {
+		s = (s + i) | 0;
+		if ((i & 1023) == 0) { order.push(tag + (i >> 10)); await s }
+	}
+	order.push(tag + "!");
+}
+function interleave() { order = []; tick("a", 5000); tick("b", 3000); Promise.resolve().then(function () { order.push("p") }) }
+`
+
+// TestJITRegSettledAwaitGoesOn runs an async function whose loop awaits a
+// settled value, the job queue otherwise empty, and checks that its
+// native code goes on after each such await: Go makes the await in place
+// at the code's exit, as the interpreter's await would (regAwaitsInPlace),
+// and no run of the code ends in the interpreter there. Before, Go left
+// the await to the interpreter, which went on in place and ran the rest of
+// the frame, every turn of the loop to its end.
+func TestJITRegSettledAwaitGoesOn(t *testing.T) {
+	regBothMarking(t, func(t *testing.T) {
+		rts := regNativeRuntimes(t, regBusyAsyncSrc)
+		r := rts[0]
+		r.jitStress = jitStressConfig{}
+		r.SetJITWarmUp(2, 2)
+		r.SetJITReport(true)
+		var got [2]string
+		for i, rt := range rts {
+			fn, _ := rt.GetProp(Obj(rt.Global()), rt.Intern("drive"))
+			for range 20 {
+				if _, err := rt.Call(fn, Undefined, []Value{Float(20000)}); err != nil {
+					t.Fatal(err)
+				}
+				if err := rt.DrainJobs(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			v, _ := rt.GetProp(Obj(rt.Global()), rt.Intern("out"))
+			s, _ := rt.GetProp(v, rt.Intern("length"))
+			last, _ := rt.GetProp(v, rt.Intern("19"))
+			got[i] = regNativeShow(rt, s, nil) + ":" + regNativeShow(rt, last, nil)
+			// Awaits with other jobs queued suspend, in the order the
+			// queue resumes them.
+			il, _ := rt.GetProp(Obj(rt.Global()), rt.Intern("interleave"))
+			for range 20 {
+				if _, err := rt.Call(il, Undefined, nil); err != nil {
+					t.Fatal(err)
+				}
+				if err := rt.DrainJobs(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			o, _ := rt.GetProp(Obj(rt.Global()), rt.Intern("order"))
+			got[i] += " " + regNativeShow(rt, o, nil)
+		}
+		const want = "20:599970000 a0,b0,a1,b1,p,a2,b2,a3,b!,a4,a!"
+		if got[0] != got[1] || got[0] != want {
+			t.Fatalf("with the JIT %q, without %q, want %q", got[0], got[1], want)
+		}
+		ended := r.RegNativeStats().Ended
+		for k, n := range ended {
+			t.Logf("ended: %s %d", k, n)
+			if strings.Contains(k, "await in busy") {
+				t.Errorf("%d runs ended in the interpreter at a settled await: %s", n, k)
+			}
+		}
+		if hosts := r.RegNativeStats().HostOps["await"]; hosts < 1000 {
+			t.Errorf("native code made %d awaits; want each of the loop's after its first runs", hosts)
 		}
 	})
 }

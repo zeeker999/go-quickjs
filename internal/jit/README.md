@@ -699,7 +699,13 @@ a `yield` that a resumption by `next` goes on past, and at the return path
 that jump goes over (`lowerReg`'s entries). The suspensions -- `yield`,
 `await`, `yield*`, the parameters' end, a delegation's step -- and
 `gen_entry`, which reads how the frame resumed, are the interpreter's
-(`regWholeRuns`): native code Go entered leaves the frame to it there. A
+(`regWholeRuns`): native code Go entered leaves the frame to it there --
+but an `await` the interpreter would go on from in place, which Go makes
+at the code's exit (`regAwaitsInPlace`), native code going on at its next
+entry: the frame resumed by its await's job, the queue's last, the value
+awaited settled. The register interpreter's await goes on in place so
+where the stack form's suspends (`jitSuspend`); left to it, a busy loop's
+frame ran in the interpreter from its first settled await on. A
 synchronous generator's code a loop's step or a call of `next` resumed
 natively suspends it at a `yield` itself (see [Control
 flow](#control-flow), "Generators' steps"). A generator's code is compiled

@@ -141,6 +141,28 @@ func regWholeRuns(w bytecode.RInstr) bool {
 	return true
 }
 
+// regAwaitsInPlace reports whether w, at native code's host exit in f, its
+// window at wb, is an await the interpreter's await (regSuspend) goes on
+// from in place, which regWhole then runs, native code going on after it
+// at its next entry: the frame's resumption is its await's job, the
+// queue's last, and the value awaited settled, so that the queue's next
+// job would resume the frame with what it settled to. Any other await
+// suspends the frame, which only the interpreter does. Left to the
+// interpreter, a settled await had it run the rest of the frame from
+// there, a loop's every turn to its next await that suspends: an async
+// function's busy loop, awaiting a value each 256 turns, ran natively
+// in one resumption of four, as the stack form's suspends at each
+// (jitSuspend) and is entered again at the resumption. The interpreter
+// of register code goes on in place where the stack form's suspends, so
+// native code goes on in place too.
+func (r *Runtime) regAwaitsInPlace(f *frame, w bytecode.RInstr, wb int) bool {
+	if w.Op() != bytecode.RAwait || f.regKind != regFrameAwaitJob || r.HasPendingJobs() || wb+int(w.B()) >= len(r.stack) {
+		return false
+	}
+	_, ok := r.regSettled(r.stack[wb+int(w.B())])
+	return ok
+}
+
 // regWholeTail reports whether w is a call in tail position, which
 // regWhole runs for native code's host exit as the interpreter's
 // tail_call runs it (rhCallWT), as the stack form's exit there has Go make
@@ -171,7 +193,7 @@ func regWholeTail(w bytecode.RInstr) bool {
 // the interpreter does (regWholeTail).
 func (r *Runtime) regWhole(f *frame, c *regCode, wb, rpc int) (next int, ok bool, err error) {
 	w := regAt(c.code, rpc)
-	if !regWholeRuns(w) && !regWholeTail(w) {
+	if !regWholeRuns(w) && !regWholeTail(w) && !r.regAwaitsInPlace(f, w, wb) {
 		return 0, false, nil
 	}
 	st := r.regEnter(f, c)
