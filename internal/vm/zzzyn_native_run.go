@@ -1135,7 +1135,7 @@ func regNextFrameClear(r *Runtime) {
 // of arguments with no holes, and a new.target, F where none is given, a
 // function whose own prototype is a data property holding an object --
 // its object made as constructWithTarget makes it, of new.target's
-// prototype and of F's root (settled, for a base constructor's), its
+// prototype and of F's root, its
 // window made at the stack's top, a derived class's frame given its this
 // binding. It reports 1 for the handler to enter F, the context's super
 // the entry, its new.target the scratch's sNewTgt; 2 where F is a body
@@ -1184,10 +1184,10 @@ func nativeReflect(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeC
 		return 0
 	}
 	proto := p.value().Object()
+	// Its root's room, settled or not: one construction of several
+	// new.targets has a root made for each prototype in turn, which no
+	// count of objects built would settle; the room is the body's count.
 	root := r.shapes.ctorRoot(fd, proto)
-	if root != nil && !root.tracked() && fd.ctorKind != ctorDerived {
-		return 0
-	}
 	wb := r.stackTop
 	if wb+2+len(args) > len(r.stack) {
 		return 0
