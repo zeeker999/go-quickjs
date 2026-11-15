@@ -25,15 +25,22 @@ The main areas are:
 - `internal/vm`: JavaScript runtime semantics and built-ins. `Intl`, `Date`'s
   local time and `Temporal` are bindings over
   [go-intl](https://github.com/go-quickjs/go-intl), which holds the locale
-  data, the calendars and the time zones. On amd64 the register interpreter
-  (docs/register-interpreter.md) runs a runtime's code by default, on
-  native handlers; on other architectures, and in a runtime with the JIT,
-  which reads the stack form alone, the stack interpreter and the tree tier
-  run it, as they do in every runtime with `QJS_REG=0`. `QJS_REG=1` turns
-  the register interpreter on anywhere, on the Go handlers where there are
-  no native ones. The default is `bytecode.RegDefault`, an architecture's
-  constant in `internal/bytecode/regdefault_*.go`. `QJS_REG=0` and the old
-  tiers stay until the JIT reads register code; test with both settings.
+  data, the calendars and the time zones. On amd64 and arm64 the register
+  interpreter (docs/register-interpreter.md) runs a runtime's code by
+  default, on native handlers; on other architectures, and in a runtime
+  with the JIT, the stack interpreter and the tree tier run it, as they do
+  in every runtime with `QJS_REG=0`. `QJS_REG=1` turns the register
+  interpreter on anywhere, on the Go handlers where there are no native
+  ones; `QJS_NONATIVE=1` runs it on the Go handlers on amd64 and arm64
+  too; `QJS_JITREG=1` has a runtime with the JIT run register code and
+  the JIT compile it, which becomes the default at the JIT's switch-over.
+  The default is `bytecode.RegDefault`, an architecture's constant in
+  `internal/bytecode/regdefault_*.go`. `QJS_REG=0` and the old tiers stay
+  until then; test with the settings a change can reach.
+- `internal/compiler/regcomp`: the register backend, which compiles a
+  function's AST to register code over what the stack compiler records of
+  its scopes; `internal/vm/internal/nativegen` generates the register
+  interpreter's native handlers.
 - `internal/regdiff`: tests only, the register interpreter's differential
   tests, over cases of their own and the corpora `internal/v8bench` holds
   for the benchmark runners.
@@ -61,14 +68,33 @@ concurrently.
   never runs -- can move the V8 suite by 5 to 10%. Do not rename or reorder
   its files or move code between them without comparing builds with
   `internal/cmd/v8bench/placements` (see Validation); the `zcall_*.go` and
-  `ztree_*.go` files sort last on purpose, so that what is added there moves
-  nothing before it.
+  `ztree_*.go` files sort after the stack interpreter's, the JIT's
+  `zzjit_*.go` after them and the register interpreter's `zzreg_*.go` and
+  `zzzy*_*.go` last, on purpose, so that what is added in a later group
+  moves nothing of an earlier one.
+- The register interpreter's hot code is its loop, `runReg`, its call path,
+  `rhCallW`, and the native handlers' block. `runReg` is a fixed loop over
+  a table of handlers, the same for every operation (`TestRegLoopIsSmall`):
+  an operation is a handler of its own, never a case added to it. A Go
+  handler added to `zzreg_table.go` moves every handler after it, so a
+  new operation's handlers go in a file that sorts after it
+  (`zzreg_zztable_*.go`) and replace their table entries in its `init`;
+  its value is appended before `bytecode.ROpCount`, never inserted, and its
+  native handler is appended to nativegen's `handlerOps`, with any path its
+  handler takes rarely laid after the last handler, so that no handler
+  before it moves. A new operation lands with its regcomp pattern, its Go
+  handler and slow function, its amd64 and arm64 native handlers and its
+  JIT lowering (`compile.LowerReg`) in one change, so that it opens no
+  refusal. What changes nothing of an instruction's dispatch is a mark or
+  a flag of an operation that exists, not a new one
+  (docs/register-interpreter.md, "Opcode values"). `hotdiff -funcs
+  runReg,rhCallW,regEnterW` shows a change leaves them alone.
 - What decides the speed is how much of the hot path AMD Zen 2's op cache
   holds: 64 sets of 8 entries, each set taking the code at one offset in
   every 4 KB. Hot code that a change moves onto the same sets -- even by
   moving it, its instructions unchanged -- is decoded again on every pass,
-  and a loop can run a quarter slower. So keep the interpreter's hot
-  functions (`executeAt`, `runTree`, `runTreeNested`, `callObject`,
+  and a loop can run a quarter slower. So, while the old tiers remain, keep
+  their hot functions (`executeAt`, `runTree`, `runTreeNested`, `callObject`,
   `callTree`, `runFD`, `backEdgeCheck`) as they are -- a tree node that
   needs what one of `executeAt`'s cases does gets its own copy, rather than
   that case moving into a helper -- and keep the distance between the hot
@@ -85,7 +111,8 @@ concurrently.
   change moves around it: generated pads, dead code and data, put the
   anchors of `internal/vm/layoutlock.txt` -- the built-ins, the tree's
   builder and slow paths, `executeAt`, the call path, `runTree`,
-  `callTree`, the JIT's leaf calls, the tree's closures and its generic
+  `callTree`, the JIT's leaf calls, the register interpreter's loop and
+  call path (`runReg`, `rhCallW`), the tree's closures and its generic
   nodes, the DataView leaves, the method values, the regular expression
   matcher (a pad of its own in internal/regexp), and the Go runtime's
   `mheap_`, `writeBarrier` and `gcController` -- at fixed offsets modulo
@@ -264,7 +291,13 @@ tiers are removed, a change to what they share with the register
 interpreter runs the suite with `QJS_REG=0` as well, and on an architecture without
 native handlers (386, say) with `QJS_REG=1`; where the register
 interpreter is on, the conformance runner fails on any function that falls
-back to the old tiers (`vm.RegFallbacks`, `QJS_REGFALLTRACE` names them). While a change
+back to the old tiers (`vm.RegFallbacks`, `QJS_REGFALLTRACE` names them).
+A change to the register interpreter or its JIT path also runs
+`internal/regdiff`, plain and with `-tags quickjs_jit`, with
+`QUICKJS_V8_DIR` naming the V8 suite (and `QUICKJS_OCTANE_DIR`,
+`QUICKJS_AWFY_DIR` for the feedback parity), the vm package's JIT tests
+with `QJS_JITREG=1`, and on amd64 or arm64 the suite with `QJS_NONATIVE=1`.
+While a change
 is iterated, test the packages it touches and time only the benchmarks it is
 for, at two placements (`compare -k 2 -suite List`, `-micro -suite
 bigint64_fnv1a`); `placements build -k N` makes only the placements a `-k N`
@@ -435,8 +468,9 @@ go run -tags quickjs_jit ./internal/cmd/v8bench -jit -bench octane -dir /tmp/oct
 `microbench_extra.js`, of what it has none of -- generators, async
 functions, try statements, iterators, using declarations, closures
 made and called anew, calls in tail position, method calls with a frame
-and without, loops of a few simple instructions, which with `QJS_NOTREE=1`
-time the interpreter's dispatch, private class members, Math.random, the in operator, a delete of an object's last property,
+and without, loops of a few simple instructions, which time the register
+interpreter's dispatch (the Go table's with `QJS_NONATIVE=1`, the stack
+interpreter's with `QJS_REG=0 QJS_NOTREE=1`), private class members, Math.random, the in operator, a delete of an object's last property,
 object and array spread, object rest, computed keys and spread calls,
 Array.prototype.forEach, reduce, map, filter and some, and their callbacks
 varied -- made once or anew, a function expression or an arrow, reading
@@ -578,15 +612,21 @@ to spare showed. QuickJS has no helper threads, so one thread is the fair
 comparison with it.
 
 `internal/cmd/disasm` prints the bytecode a script or module compiles to,
-each function's instructions under the source lines they come from; `-tree`
-says whether the tree tier builds each function and, where it does not,
-why, and `-func` picks functions by name. Look there first when a
-micro-benchmark moves: it shows which instructions and which tier a loop
-runs as.
+each function's instructions under the source lines they come from; `-reg`
+prints each function's register code beside its stack code, `-tree` says
+whether the tree tier builds each function and, where it does not, why, and
+`-func` picks functions by name. Look there first when a micro-benchmark
+moves: it shows which instructions and which tier a loop runs as.
 
 ```sh
-go run ./internal/cmd/disasm -tree -func global_read bench.js
+go run ./internal/cmd/disasm -reg -func global_read bench.js
 ```
+
+`internal/cmd/regcount` counts, over directories of code, the register
+code's patterns the fused instructions take and those they leave -- a
+step before a compare-and-branch, `x * k`, `(x ± y) | 0` -- the evidence
+an operation's value is spent on; `internal/cmd/regrefusals` counts the
+register backend's refusals by reason.
 
 `internal/cmd/compilediff` compares what the front end makes at two
 revisions, for every `.js` file of the directories it is given, as a script,
