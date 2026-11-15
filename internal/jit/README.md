@@ -322,9 +322,23 @@ test of it -- an inlined callback's result -- branched on again. Where
 nothing else jumps into the loads, the lowering makes the compare-and-branch
 the comparison's `Binary` to the register -- or, where the branch's way
 says to negate it, to a scratch slot and its `Not` to the register, the
-origin's one write last, as the atomicity rule below has it -- and a jump
-past the loads (`boolBranch`), as the stack form's `lt` or `strict_eq` is:
-a branch on the value is a branch on the comparison.
+origin's one write last, as the atomicity rule below has it -- and the
+loads and the jump past them `Nop`s that native code falls through
+(`boolBranch`), as the stack form's `lt` or `strict_eq` is: a branch on
+the value is a branch on the comparison, and the comparison, the moves of
+its register and what reads it are one block, where an arithmetic
+operator takes the boolean as its number natively (`Instruction`'s
+`Bools`, `markBools`), as the stack form's does -- a jump past the loads
+began a block at their end, and Emscripten's `(a < b) | (c < d)`
+deoptimized at the `|`.
+
+**What a call writes.** A register call, and an instruction Go runs whole,
+writes its result to a register, not to the operand stack: the choice of
+the element reads made as numbers (`selectNumericProperties`), backward
+from their uses, takes that register as written there, so that the
+result's uses are not the uses of what the register held before -- a
+function table's element, called and its result ORed with 0 in the same
+register, was read as a number and deoptimized at.
 
 **The atomicity rule.** An exit anywhere in an origin's instructions runs
 the register instruction again from its start, in the interpreter. So

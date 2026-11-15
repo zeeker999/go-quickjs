@@ -1129,6 +1129,15 @@ func selectNumericProperties(p *ir.Program, cells bool) {
 				read(in.Right, number)
 			}
 		case ir.Host:
+			if (in.Window || in.Frame || in.Whole) && in.Dest >= 0 && in.Dest < p.Locals {
+				// Register code's call, or an instruction Go runs whole,
+				// writes its result to a register, below the scratch slots
+				// cleared next: what reads it after reads the result, not
+				// what the register held before -- a function table's
+				// element, called and its result ORed with 0, had been read
+				// as a number, which it is not, and deoptimized at.
+				take(in.Dest)
+			}
 			clear(needed[p.Locals:])
 		case ir.Insert2, ir.Insert3:
 			n, last := in.Dest, 2
