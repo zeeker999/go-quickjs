@@ -296,6 +296,13 @@ func (r *Runtime) jitRegCached(key jitKey, e *jitRegEntry) {
 		// Valid code: no budget to spend before the next compile, nothing
 		// learned pending.
 		life.invalid, life.warming, life.reopt, life.learning = false, false, false, false
+		if life.genLearned {
+			// Its loops' steps over generators resume them natively now,
+			// which each had been a call of Go: the loops it was judged
+			// slow for are judged afresh, as the stack form's code
+			// compiled again for them is (jitReplaceCode).
+			life.genLearned, life.loopSlow = false, false
+		}
 	}
 }
 
@@ -1342,6 +1349,11 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 			}
 		}
 		if !ran {
+			if sig := r.jitRegSuspend(f, c, wb, exitPC); sig != nil {
+				// A yield, a yield* or an await: the frame suspended
+				// here, as the stack form's run suspends it (jitSuspend).
+				return 0, 0, Undefined, false, sig, false
+			}
 			s.regEndWhy = "host exit Go does not run whole"
 			return 0, exitPC, Undefined, false, nil, false
 		}

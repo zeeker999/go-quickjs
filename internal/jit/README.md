@@ -693,13 +693,22 @@ on-stack replacement at its loops, as V8 enters top-level code: its
 declarations before them run in the interpreter. A generator's or an async
 function's frame, which the interpreter suspends at each `yield` and `await`
 and makes again at each resumption (`regGenRun`), is entered at its loops
-and where it resumes (`jitRegEnter` from `regGenRun`): the lowering gives
-the code an entry at each resumption -- past an `await`, past the jump after
-a `yield` that a resumption by `next` goes on past, and at the return path
+and where it resumes (`jitRegEnter` from `regGenRun`), a first run past
+`gen_entry`, which does nothing there, as the stack form's resumption enters
+a first run past the parameters: the lowering gives the code an entry at
+each resumption -- past `gen_entry`, past an `await`, past the jump after a
+`yield` that a resumption by `next` goes on past, and at the return path
 that jump goes over (`lowerReg`'s entries). The suspensions -- `yield`,
 `await`, `yield*`, the parameters' end, a delegation's step -- and
-`gen_entry`, which reads how the frame resumed, are the interpreter's
-(`regWholeRuns`): native code Go entered leaves the frame to it there. A
+`gen_entry`, which reads how the frame resumed, are exits Go does not run
+whole (`regWholeRuns`). At a `yield`, an `await`, a `yield*` or the
+parameters' end, Go suspends the frame itself (`jitRegSuspend`), as the
+interpreter would and the stack form's `jitSuspend` does: the pc past it
+kept for the resumption, the run not ended in the interpreter -- an `await`
+an await job may go on past in place (`regSuspend`) and a delegation's step
+are left to the interpreter, which goes on with the frame there. Handed to
+the interpreter only to suspend, every `yield` of a generator Go resumed
+had been a run ended there. A
 synchronous generator's code a loop's step or a call of `next` resumed
 natively suspends it at a `yield` itself (see [Control
 flow](#control-flow), "Generators' steps"). A generator's code is compiled
@@ -819,7 +828,10 @@ caller makes of it through Go counts, whether Go enters it or not
 `jitKnownTargetSeen` and `jitCallTarget` count them), as do Go's entries
 of it at its start. Compiled again, it is judged afresh: entered, and
 called natively, until the new code is found not to pay in turn
-(`jitRegCached`, as the stack form's `jitReoptimize`); its calls of Go as a
+(`jitRegCached`, as the stack form's `jitReoptimize`) -- at its loops too
+where it was compiled again for a generator's step or making it learned
+(`genLearned`, from `jitRegGenLearned`), the steps that each were a call of
+Go now native, as the stack form's `jitReplaceCode` has it; its calls of Go as a
 native callee are counted afresh with its native callers' calls into it
 (its link's `in`) wherever those are -- compiled again, compiled again for
 leaving (`jitRegUnwound`), called natively again -- as the stack form's
