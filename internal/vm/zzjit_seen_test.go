@@ -49,7 +49,6 @@ func TestJITSSADeepChainsSeenByTheInterpreter(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	cl := r.global.getOwn(r.atoms.intern("deep")).value().Object().fn().closure
 	for i := range 2 {
 		var wv, gv Value
 		for _, src := range []string{src, call} {
@@ -64,14 +63,20 @@ func TestJITSSADeepChainsSeenByTheInterpreter(t *testing.T) {
 		if got, want := gv.String().Go(), wv.String().Go(); got != want {
 			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
 		}
-		e := r.jit.cache[r.jitKeyOf(cl.fn)]
-		if e == nil || e.ssa == nil || e.entrySlow {
+		e := jitCodeForTest(r, "deep")
+		if e == nil || e.entrySlow {
 			t.Fatalf("round %d: deep did not run natively", i)
 		}
+		// The compiles again of top-level code, of either form.
 		top := uint64(0)
 		for k, x := range r.jit.cache {
 			if fn := k.Value(); fn != nil && fn.TopLevel {
 				top += uint64(x.reopts) + uint64(x.inlineReopts) + uint64(x.upgradeReopts)
+			}
+		}
+		for k, x := range r.jit.regCache {
+			if fn := k.Value(); fn != nil && fn.TopLevel && x.life != nil {
+				top += uint64(x.life.reopts)
 			}
 		}
 		if n := r.jit.reoptimized - top; n != 0 {
@@ -196,9 +201,8 @@ func TestJITSSAUnwoundCompiledAgainOnlyForWhatItLearned(t *testing.T) {
 			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
 		}
 	}
-	w := r.global.getOwn(r.atoms.intern("w")).value().Object().fn().closure
-	e := r.jit.cache[r.jitKeyOf(w.fn)]
-	if e == nil || e.ssa == nil {
+	e := jitCodeForTest(r, "w")
+	if e == nil {
 		t.Fatal("w has no code")
 	}
 	if e.nativeBackoff == 0 {

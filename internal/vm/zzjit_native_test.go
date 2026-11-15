@@ -2081,24 +2081,43 @@ func TestJITArenaMappings(t *testing.T) {
 		// the background (QJS_JIT_STRESS's background), whose code comes
 		// checks later.
 		r.jitStress.background = false
+		// Each called twice: the register form's code, at a threshold of
+		// one call, is compiled at its function's second (its first run
+		// counted by its return, regTickRet), the stack form's at its first.
 		var src strings.Builder
 		for i := 0; i < 100; i++ {
-			fmt.Fprintf(&src, "function f%d(n){let s=%d;for(let i=0;i<n;i++)s+=i;return s}\nf%d(3);\n", i, i, i)
+			fmt.Fprintf(&src, "function f%d(n){let s=%d;for(let i=0;i<n;i++)s+=i;return s}\nf%d(3);f%d(3);\n", i, i, i, i)
 		}
 		if _, err := r.Run(compileForTest(t, src.String())); err != nil {
 			t.Fatal(err)
 		}
-		if r.jit == nil || len(r.jit.cache) < 100 {
-			t.Fatalf("ssa %v: compiled too few functions", ssa)
+		if r.jit == nil {
+			t.Fatalf("ssa %v: compiled no function", ssa)
+		}
+		// The code compiled: the stack form's, or the register form's
+		// where the runtime runs register code.
+		var codes []*jit.SSACode
+		for _, e := range r.jit.cache {
+			if e.ssa != nil {
+				codes = append(codes, e.ssa)
+			}
+		}
+		for _, e := range r.jit.regCache {
+			if e.code != nil {
+				codes = append(codes, e.code)
+			}
+		}
+		if len(codes) < 100 {
+			t.Fatalf("ssa %v: compiled too few functions (%d)", ssa, len(codes))
 		}
 		arena, bytes := r.jit.arena, 0
-		for _, e := range r.jit.cache {
-			bytes += e.ssa.Size()
+		for _, c := range codes {
+			bytes += c.Size()
 		}
 		if chunks := arena.Chunks(); chunks == 0 || chunks > bytes/(64<<10)+1 {
-			t.Fatalf("ssa %v: %d functions, %d bytes of code, in %d mappings", ssa, len(r.jit.cache), bytes, chunks)
+			t.Fatalf("ssa %v: %d functions, %d bytes of code, in %d mappings", ssa, len(codes), bytes, chunks)
 		} else {
-			t.Logf("ssa %v: %d functions, %d bytes of code, in %d mappings", ssa, len(r.jit.cache), bytes, chunks)
+			t.Logf("ssa %v: %d functions, %d bytes of code, in %d mappings", ssa, len(codes), bytes, chunks)
 		}
 		r.Close()
 		r.ReleaseClosed()
@@ -3595,7 +3614,7 @@ func TestJITLoopGuardSuppressesReentry(t *testing.T) {
 			o.setOwnRaw(r.atoms.intern("valueOf"), r.NewFunction("valueOf", 0,
 				func(rt *Runtime, _ Value, _ []Value) (Value, error) {
 					count++
-					if rt.jit != nil && len(rt.jit.cache) != 0 {
+					if jitHasCodeForTest(rt) {
 						if released {
 							t.Fatal("invocation recompiled after eviction")
 						}
@@ -7036,7 +7055,6 @@ func TestJITSSASeedsConstructions(t *testing.T) {
 		}
 	}
 	v := r.global.getOwn(r.atoms.intern("V")).value().Object()
-	cl := r.global.getOwn(r.atoms.intern("mk2")).value().Object().fn().closure
 	for i, src := range []string{`String(mk1(20000))`, `String(mk1(20000))`, `String(mk2(20000))`, `String(mk2(20000))`} {
 		wv, err := want.Run(compileForTest(t, src))
 		if err != nil {
@@ -7050,8 +7068,8 @@ func TestJITSSASeedsConstructions(t *testing.T) {
 			t.Fatalf("round %d: got %s, interpreter %s", i, got, want)
 		}
 	}
-	e := r.jit.hint(cl)
-	if e == nil || e.ssa == nil {
+	e := jitCodeForTest(r, "mk2")
+	if e == nil {
 		t.Fatal("mk2 has no code")
 	}
 	if !slices.ContainsFunc(slices.Concat(e.nativeCalls, e.inlines), func(x jitInline) bool { return x.obj == v && x.pool != nil }) {
@@ -7104,8 +7122,7 @@ func TestJITLoopPromotedPastCalleesLoops(t *testing.T) {
 	if got, want := gv.String().Go(), wv.String().Go(); got != want {
 		t.Fatalf("got %s, interpreter %s", got, want)
 	}
-	cl := r.global.getOwn(r.atoms.intern("run")).value().Object().fn().closure
-	if e := r.jit.hint(cl); e == nil || e.ssa == nil {
+	if jitCodeForTest(r, "run") == nil {
 		t.Fatal("run's loop was not promoted in 20000 iterations")
 	}
 	// About the interval, and not the same each time.
