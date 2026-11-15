@@ -352,6 +352,9 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 	defer jit.PutWorkspace(w)
 	s.compileBegin()
 	defer s.compileEnd()
+	if t := mir.Timing; t != nil {
+		t.Start()
+	}
 	f, err := ssa.BuildIn(&w.SSA, p, rf)
 	if err != nil {
 		e.refusal = fmt.Sprintf("%v: %v", jitRefused, err)
@@ -359,13 +362,17 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 	}
 	f.FrameAt = frameAt
 	looped := jitRegShape(f, p, cl, c)
+	jitRegLap(mir.PhaseBuild)
 	ssa.Optimize(f)
+	jitRegLap(mir.PhaseOptimize)
 	mc, err := mir.CompileWith(&w.MIR, f, jitEncoding, mir.Settings())
+	keepLimit := 0
 	if errors.Is(err, mir.ErrKeeps) {
 		// More keep cells live at once than the context has, which the
 		// build could not know: built again with no more than that, the
 		// calls past them left to Go, as the stack form's code is.
-		rf, f, looped, mc, err = r.jitRegBuild(w, cl, c, p, abi.MaxKeeps, frameAt)
+		keepLimit = abi.MaxKeeps
+		rf, f, looped, mc, err = r.jitRegBuild(w, cl, c, p, keepLimit, frameAt)
 	}
 	if err != nil {
 		e.refusal = fmt.Sprintf("%v: %v", jitRefused, err)
@@ -374,7 +381,57 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 	if !r.jitRegPlace(e, c, rf, f, mc, looped) {
 		return nil
 	}
+	if JITCompileRepeat > 0 {
+		r.jitRegCompileRepeat(cl, c, p, keepLimit, frameAt)
+	}
 	return e
+}
+
+// jitRegLap ends phase ph of a register compile the host times
+// (mir.Timing).
+func jitRegLap(ph mir.Phase) {
+	if t := mir.Timing; t != nil {
+		t.Lap(ph)
+	}
+}
+
+// jitRegCompileRepeat is JITCompileRepeat's compiles of c's register code
+// lowered as p, as jitCompileAgain repeats the stack form's: p built
+// again that many times with fresh feedback, as jitRegBuild builds it with
+// keepLimit, optimized and compiled -- for arm64 where JITCrossHook is set
+// -- all each made thrown away, and what they allocated counted in
+// mir.Timing.
+func (r *Runtime) jitRegCompileRepeat(cl *closure, c *regCode, p *ir.Program, keepLimit, frameAt int) {
+	c0 := jitGCCycles()
+	bytes0, objects0 := jitAllocated()
+	for range JITCompileRepeat {
+		w := jit.GetWorkspace()
+		if t := mir.Timing; t != nil {
+			t.Start()
+		}
+		rf := r.jitRegFeedbackFor(cl, p)
+		rf.fb.keepLimit = keepLimit
+		if f, err := ssa.BuildIn(&w.SSA, p, rf); err == nil {
+			f.FrameAt = frameAt
+			jitRegShape(f, p, cl, c)
+			jitRegLap(mir.PhaseBuild)
+			ssa.Optimize(f)
+			jitRegLap(mir.PhaseOptimize)
+			if JITCrossHook != nil {
+				code, err := mir.CompileARM64(f, jitEncoding)
+				JITCrossHook(jitFunctionOf(c.fn), code, err)
+			} else {
+				mir.CompileWith(&w.MIR, f, jitEncoding, mir.Settings())
+			}
+		}
+		jit.PutWorkspace(w)
+	}
+	jitRepeatCycles.Add(jitGCCycles() - c0)
+	if t := mir.Timing; t != nil {
+		bytes1, objects1 := jitAllocated()
+		t.Bytes += int64(bytes1 - bytes0)
+		t.Objects += int64(objects1 - objects0)
+	}
 }
 
 // jitRegFrameAt is the register pc of the loop's header a frame of cl's

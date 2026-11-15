@@ -1699,13 +1699,18 @@ func (f *jitRegFeedback) KeepLimit() int { return f.fb.keepLimit }
 func (r *Runtime) jitRegBuild(w *jit.Workspace, cl *closure, c *regCode, p *ir.Program, keepLimit, frameAt int) (*jitRegFeedback, *ssa.Func, map[uint32]bool, *mir.Code, error) {
 	rf := r.jitRegFeedbackFor(cl, p)
 	rf.fb.keepLimit = keepLimit
+	if t := mir.Timing; t != nil {
+		t.Start()
+	}
 	f, err := ssa.BuildIn(&w.SSA, p, rf)
 	if err != nil {
 		return rf, nil, nil, nil, err
 	}
 	f.FrameAt = frameAt
 	looped := jitRegShape(f, p, cl, c)
+	jitRegLap(mir.PhaseBuild)
 	ssa.Optimize(f)
+	jitRegLap(mir.PhaseOptimize)
 	mc, err := mir.CompileWith(&w.MIR, f, jitEncoding, mir.Settings())
 	return rf, f, looped, mc, err
 }
