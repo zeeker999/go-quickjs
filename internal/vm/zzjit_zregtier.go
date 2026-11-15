@@ -562,7 +562,7 @@ func (r *Runtime) jitRegLearnedDueWith(cl *closure, e *jitRegEntry, limit int) b
 func (r *Runtime) jitRegSpent(c *regCode, e *jitRegEntry) int64 {
 	life := e.life
 	calls := life.starts + life.goOns + life.slowCalls
-	if l := r.jit.regLinks[e.key]; l != nil {
+	if l := r.jit.regLinkFor(e); l != nil {
 		calls += l.in
 	}
 	st := &life.ssaStats
@@ -613,7 +613,7 @@ func (s *jitState) regLearnedOf(key jitKey) *jitEntry {
 	if s.regLearned == nil {
 		s.regLearned = map[jitKey]*jitEntry{}
 	}
-	l := &jitEntry{jitLearned: &jitLearned{reg: true}}
+	l := &jitEntry{jitLearned: &jitLearned{reg: true, regLink: s.regLinks[key]}}
 	s.regLearned[key] = l
 	return l
 }
@@ -993,15 +993,31 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 		return target
 	}
 	var e *jitRegEntry
+	// The run the frame goes on in is judged as the run that left it
+	// (regGoOnOSR, jitRegGoOnAt's regGoOnRun), as the stack form's frame
+	// goes on in that run (jitGoOn); a sample's, as begun at the loop.
+	osr := true
 	if forced {
 		if s.regGoOn == f {
 			e = cl.closureCode.jitReg
+			osr = s.regGoOnOSR
 		} else {
 			from = nil
 		}
 		s.regGoOn = nil
 		if e == nil || e.invalid || e.code == nil {
 			return target
+		}
+		if from != nil && (from == e || from == e.osr) && !from.invalid && from.code != nil && from.goesOn && !jitRunSlow(from.life, osr) {
+			if _, ok := from.loopEntry(target); ok && r.jitRegContextFree() {
+				// The code whose run left the frame, which has an entry at
+				// the loop: gone on in, nothing looked up again, as the stack
+				// form's frame goes on in its run's entry (tryJITLoop's
+				// goOn) -- a frame that goes on in the code kept for it,
+				// from that code, is none jitRegFramesLeave counts.
+				s.wentOn++
+				return r.jitRegLoopGoOn(st, from, target, osr)
+			}
 		}
 	} else {
 		n := int(st.kept.pc) - target
@@ -1026,7 +1042,7 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 		e.life.slowCalls++
 		r.jitRegRetrySlow(e)
 	}
-	if e == nil || !e.goesOn || e.life.loopSlow {
+	if e == nil || !e.goesOn || jitRunSlow(e.life, osr) {
 		return target
 	}
 	if e = r.jitRegLoopCode(f, c, e, target, from); e == nil || !r.jitRegContextFree() {
@@ -1036,7 +1052,31 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 	if forced {
 		s.wentOn++
 	}
-	pc, v, done, err := r.jitRegGoOn(f, c, e, st.wb, target)
+	return r.jitRegLoopGoOn(st, e, target, osr)
+}
+
+// jitRunSlow reports whether code, what its function's code learned
+// being life, does not pay for a run judged as begun at a loop's header
+// (osr) -- found slow for its loops (loopSlow) -- or as begun at its
+// start, where its entries do not pay (entrySlow), as the stack form's
+// frame going on in its run is judged (tryJITLoop's goOn).
+func jitRunSlow(life *jitEntry, osr bool) bool {
+	if osr {
+		return life.loopSlow
+	}
+	return life.entrySlow
+}
+
+// jitRegLoopGoOn goes on in e's code, at the header of the loop at
+// register pc target, with the frame st runs, in a run judged as begun at
+// the loop (osr) or not, and returns the pc the dispatcher goes on at, as
+// jitRegLoop does.
+func (r *Runtime) jitRegLoopGoOn(st *regState, e *jitRegEntry, target int, osr bool) int {
+	r.jit.regGoOnRun = 1
+	if osr {
+		r.jit.regGoOnRun = 2
+	}
+	pc, v, done, err := r.jitRegGoOn(st.f, st.c, e, st.wb, target)
 	switch {
 	case err != nil:
 		st.err = err
@@ -1133,7 +1173,7 @@ func (r *Runtime) jitRegFramesLeave(cl *closure, c *regCode, e *jitRegEntry, tar
 		return nil
 	}
 	calls := life.starts
-	if l := r.jit.regLinks[e.key]; l != nil {
+	if l := r.jit.regLinkFor(e); l != nil {
 		calls += l.in
 	}
 	// Compiling the code counts its native callers' calls afresh
@@ -1167,7 +1207,7 @@ func (r *Runtime) jitRegFramesLeave(cl *closure, c *regCode, e *jitRegEntry, tar
 func (r *Runtime) jitRegKeptCallsLeave(e *jitRegEntry) bool {
 	life := e.life
 	calls := life.starts - life.keptAt
-	if l := r.jit.regLinks[e.key]; l != nil {
+	if l := r.jit.regLinkFor(e); l != nil {
 		calls += l.in
 	}
 	return life.keptLeft >= jitKeptStarts*3/4 && life.keptLeft*4 >= calls*3

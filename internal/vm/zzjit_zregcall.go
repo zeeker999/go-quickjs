@@ -53,8 +53,21 @@ func (s *jitState) regLinkOf(cl *closure, c *regCode) *jitLink {
 		l.regSet(s, e)
 	}
 	s.regLinks[key] = l
+	if life := s.regLearned[key]; life != nil {
+		life.regLink = l
+	}
 	s.regHint(cl, l)
 	return l
+}
+
+// regLinkFor is the link native callers call e's function's code through,
+// nil where none has asked for one (regLinkOf), as regLinks has it by e's
+// key.
+func (s *jitState) regLinkFor(e *jitRegEntry) *jitLink {
+	if e.life != nil {
+		return e.life.regLink
+	}
+	return s.regLinkFor(e)
 }
 
 // jitRegLinkFlags are the flags of the link of cl's function, whose
@@ -1957,7 +1970,7 @@ func (r *Runtime) jitRegUnwound(e *jitRegEntry) {
 	if life == nil || e.invalid {
 		return
 	}
-	l := r.jit.regLinks[e.key]
+	l := r.jit.regLinkFor(e)
 	if l == nil {
 		return
 	}
@@ -1986,7 +1999,7 @@ func (r *Runtime) jitRegRetryNative(e *jitRegEntry) {
 	}
 	life.notNative, life.nativeOut = false, 0
 	life.ssaStats.calleeGoCalls, life.ssaStats.calleeWork = 0, 0
-	if l := r.jit.regLinks[e.key]; l != nil {
+	if l := r.jit.regLinkFor(e); l != nil {
 		l.in = 0
 		if r.jit.regCache[e.key] == e && e.code != nil && !e.invalid {
 			l.regSet(r.jit, e)
