@@ -393,3 +393,24 @@ func TestRegNativeReflect(t *testing.T) {
 		for (var j = 0; j < 1000; j++) { args[0] = j; s += Reflect.construct(A, args, (j & 1) ? B : C).x }
 		String(s)`, bytecode.RCallMW)
 }
+
+// TestRegNativeDeepConstructions recurses past the stack's depth through
+// each entry the handlers make -- a construction, super(), apply,
+// call and Reflect.construct -- each a RangeError, caught, and the
+// runtime fit to go on, natively as by the Go table.
+func TestRegNativeDeepConstructions(t *testing.T) {
+	nativeCheck(t, `
+		var out = []
+		function R(n) { this.c = new R(n + 1) }
+		class A { constructor(n) { this.n = n } }
+		class B extends A { constructor(n) { super(n); this.b = new B(n + 1) } }
+		function f() { return f.apply(this, arguments) }
+		function g(x) { return g.call(this, x + 1) }
+		function h() { return Reflect.construct(H, [1]) } function H() { this.x = h() }
+		for (var k = 0; k < 3; k++)
+			for (var t of [() => new R(0), () => new B(0), () => f(1, 2), () => g(0), () => h()]) {
+				try { t(); out.push("none") } catch (e) { out.push(e.name) }
+			}
+		out.push(new A(5).n)
+		out.join()`, "")
+}
