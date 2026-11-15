@@ -448,9 +448,16 @@ func (g *nativeGen) through() {
 	a.Jcc(CondL, miss)
 	a.Store(RDI, scr(sArgc), RDX)
 	// Its kind, the marks none: entered as it is, with an object this, or
-	// with the cache's.
+	// with the cache's; a built-in called as the site would call it, the
+	// instruction one register on and of one argument fewer (nativeBuiltin).
 	a.MovRR(R9, R8)
 	a.OpImm(And, R9, ^regCallThrough&0xff, false)
+	notNative := a.NewLabel()
+	a.OpImm(Cmp, R9, regCallNative, false)
+	a.Jcc(CondNE, notNative)
+	a.OpImm(Add, RAX, 0x10000-0x100, true)
+	g.lightW(ncBuiltinFn, true)
+	a.Bind(notNative)
 	a.OpImm(Cmp, R9, regCallEnter, false)
 	a.Jcc(CondE, ok)
 	a.OpImm(Cmp, R9, regCallThis, false)
@@ -997,14 +1004,23 @@ func (g *nativeGen) newSite() {
 // before the call -- no state to make, no count, no handler to look up,
 // and no search of the site's cache again in rhCallW. A frame whose
 // state Go has not made yet (topOK) exits.
-func (g *nativeGen) light(fn int32) {
+func (g *nativeGen) light(fn int32) { g.lightW(fn, false) }
+
+// lightW is light, the instruction its Go function is given RAX where
+// given, not the one at RBX: through's of a built-in, one register on.
+func (g *nativeGen) lightW(fn int32, given bool) {
 	a := g.a
 	a.CmpMemImm8(RDI, ncTopOK, 0)
 	a.Jcc(CondE, g.exit)
 	a.Store(RDI, ncIP, RBX)
 	a.Store(RDI, ncBudget, R11)
-	a.Load(RAX, RBX, 0)
-	a.Store(RDI, ncW, RAX)
+	if given {
+		a.Load(R8, RBX, 0)
+		a.Store(RDI, ncW, R8)
+	} else {
+		a.Load(RAX, RBX, 0)
+		a.Store(RDI, ncW, RAX)
+	}
 	a.MovRR(RCX, RBX)
 	a.Load(RDX, RDI, ncCodeBase)
 	a.Op(Sub, RCX, RDX, true)

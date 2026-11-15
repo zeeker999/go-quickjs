@@ -428,9 +428,10 @@ func (r *Runtime) regCallsMake(cl *closure, c *regCode) {
 // none); and the cache made f's where f is one the call handler enters
 // so, the native handler's to enter from then on -- a leaf with a frame,
 // as the handler enters one Go answers frameless otherwise, and one that
-// keeps its arguments as regEnterW enters it. ok is false where the call
-// is callThrough's: no this given, a callee of another kind, a this to
-// coerce.
+// keeps its arguments as regEnterW enters it. A built-in of this realm is
+// called as the site would call it (regNative), one register on. ok is
+// false where the call is callThrough's: no this given, a callee of
+// another kind, a this to coerce.
 func (r *Runtime) regCallThrough(f *frame, c *regCode, w bytecode.RInstr, base, argc int) (Value, error, bool) {
 	calls := f.cl.regCalls
 	if argc < 1 || uint(w.C()) >= uint(len(calls)) || !regIsObject(&r.stack[base+1]) {
@@ -439,14 +440,35 @@ func (r *Runtime) regCallThrough(f *frame, c *regCode, w bytecode.RInstr, base, 
 	e, o := &calls[w.C()], (*Object)(r.stack[base+1].ref)
 	if e.callee != o || e.kind&regCallThrough == 0 {
 		fd := o.fn()
-		if fd == nil || fd.closure == nil || fd.bound {
+		switch {
+		case fd == nil || fd.bound:
 			return Undefined, nil, false
-		}
-		cl, rc, kind, this, enter := r.regCallKind(fd, true)
-		if !enter || kind == 0 {
+		case fd.native != nil:
+			// A built-in of this realm: called as the site would call it
+			// (regNative), one register on.
+			if fd.realm != nil && fd.realm != r.Realm || o == r.callFn {
+				return Undefined, nil, false
+			}
+			*e = regCallCache{callee: o, kind: regCallNative | regCallThrough}
+		case fd.closure == nil:
 			return Undefined, nil, false
+		default:
+			cl, rc, kind, this, enter := r.regCallKind(fd, true)
+			if !enter || kind == 0 {
+				return Undefined, nil, false
+			}
+			e.callee, e.cl, e.rc, e.this, e.kind = o, cl, rc, this, kind|regCallThrough
 		}
-		e.callee, e.cl, e.rc, e.this, e.kind = o, cl, rc, this, kind|regCallThrough
+	}
+	if e.kind == regCallNative|regCallThrough {
+		// The built-in's call of the instruction one register on, the
+		// arguments one fewer (regNative), its value R[B].
+		wb := base - int(w.A())
+		ws := bytecode.MakeR(w.Op(), w.X()-1, w.A()+1, w.B(), w.C())
+		if err := r.regNative(o, ws, wb); err != nil {
+			return Undefined, err, true
+		}
+		return r.stack[wb+int(w.B())], nil, true
 	}
 	nb := base + 1
 	switch e.kind &^ regCallThrough {

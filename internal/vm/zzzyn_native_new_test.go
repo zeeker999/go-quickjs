@@ -194,7 +194,7 @@ const nativeThroughSrc = `
 	function rec(n) { return n == 0 ? 0 : 1 + rec.call(this, n - 1) }
 	function st() { return new Error().stack.split("\n").length }
 	class K { constructor() {} }
-	var fs = [m, strict, sloppy, arrow, args, leaf, thrower, Math.max, m.bind({ k: 9 }), K, st]
+	var fs = [m, strict, sloppy, arrow, args, leaf, thrower, Math.max, m.bind({ k: 9 }), K, st, [].push, Object.prototype.hasOwnProperty]
 	function at(f) { try { return f() } catch (e) { return e.name + ":" + e.message } }
 	var realCall = Function.prototype.call
 	for (var j = 0; j < 40; j++) {
@@ -217,8 +217,9 @@ const nativeThroughSrc = `
 func TestRegNativeThrough(t *testing.T) {
 	nativeCheck(t, nativeThroughSrc, `
 		function m(a, b) { return this.k + a + b }
-		var o = { k: 1 }, s = 0
+		var o = { k: 1 }, s = 0, own = Object.prototype.hasOwnProperty, keys = ["k", "j"]
 		for (var i = 0; i < 1000; i++) s += m.call(o, i, 2)
+		for (var i = 0; i < 1000; i++) s += own.call(o, keys[i & 1]) ? 1 : 0
 		String(s)`, bytecode.RCallMW)
 }
 

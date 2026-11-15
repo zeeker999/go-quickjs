@@ -704,6 +704,13 @@ func (g *armGen) through() {
 	a.BCond(MI, miss)
 	a.Store(rCtx, scr(sArgc), rD)
 	a.AndImm(r9, r8, uint64(^regCallThrough&0xff), false)
+	notNative := a.NewLabel()
+	a.CmpImm(r9, int64(regCallNative), false)
+	a.BCond(NE, notNative)
+	a.MovImm(rT, 0x10000-0x100)
+	a.Op(Add, rW, rW, rT, true)
+	g.lightW(ncBuiltinFn, true)
+	a.Bind(notNative)
 	a.CmpImm(r9, int64(regCallEnter), false)
 	a.BCond(EQ, ok)
 	a.CmpImm(r9, int64(regCallThis), false)
@@ -861,11 +868,21 @@ func (g *armGen) newSite() {
 // light is amd64's (amd64_calls.go): nativeBuiltin called through callH
 // with the exit's protocol, returning to the exit stub's code after its
 // call, its func value in R26.
-func (g *armGen) light(fn int32) {
+func (g *armGen) light(fn int32) { g.lightW(fn, false) }
+
+// lightW is light, the instruction its Go function is given rW where
+// given, as amd64's.
+func (g *armGen) lightW(fn int32, given bool) {
 	a := g.a
 	a.Load(rT, rCtx, ncTopOK)
 	a.Cbz(rT, g.exit, true)
+	if given {
+		a.MovRR(rK, rW)
+	}
 	g.exitState()
+	if given {
+		a.MovRR(rW, rK)
+	}
 	a.Load(rD, rCtx, ncRT)
 	a.Store(rD, offRtBackEdges, rBud)
 	a.Adr(r8, g.exitAfter)
