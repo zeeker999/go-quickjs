@@ -297,6 +297,15 @@ window's registers, R[A] and R[A+1], are not written, and where they are
 live past the instruction it is Go's whole. One that does not call is the
 literal and the read, copied to R[A+1] and R[A] last, for the
 `call_method_w` after it, a leaf's call of the realm's `exec` or `test`.
+A `call_method_w` that makes its first argument a RegExp literal
+(`RMarkLitArg`: `s.replace(/x/g, "")`, `split`, `match`) is lowered the
+same way (`compile`'s `litArgCall`): the literal's RegExp from its pool
+into a scratch slot, as `new_regexp`'s and the stack form's literal before
+its call, the rest of the window copied around it, and the call in that
+window -- a replace's leaf where its template is a string constant, the
+call of Go otherwise -- each giving the RegExp back to the pool where the
+built-in kept nothing of it (`jitRegLitArgMade`, as the stack form's
+`jitRegExpLitDone`).
 
 **Loops, one header each.** Register code's loops test at their end: a
 jump to the test, the body, the test and its branch back to the body, one
@@ -574,8 +583,8 @@ operation with the k-th, where both forms have as many, and a field's
 definition among those of its key, a nested literal's register code making
 the inner literal first. Two shapes of the
 same work are paired and listed apart: a RegExp literal that is a call's
-first argument, which the register call makes in Go (`RMarkLitArg`) where
-the stack form's call of Go is given the literal it made. `BigIntSole`, the
+first argument (`RMarkLitArg`), which the register call's expansion makes
+where the stack form's `new_regexp` does. `BigIntSole`, the
 bindings that hold their values alone, each form numbering its bindings its
 own way, is compared by what the builds make of it -- the source positions
 of the operators that give back their binding's old value -- and only where
@@ -1011,7 +1020,9 @@ reaches the RegExp, and the VM gives it back to the pool once the leaf has
 returned (`jitRegExpLeafGive`), lastIndex 0, where reading the method ran
 nothing, as the call of Go it stands for gives the literal its RegExp back
 -- a loop's `/x/.exec(s)` had a RegExp made at each turn by the pool's
-refills.
+refills. So too a replace's leaf of the RegExp a `call_method_w` marked
+`RMarkLitArg` made its first argument (`jitLeafForm`'s `giveArg`,
+`jitRegExpPoolGive`).
 `BigInt(x)` and
 `BigInt.asUintN(n, x)` or `asIntN`'s are made natively too (see
 [BigInts](#bigints)), the width the constant the program copies to the

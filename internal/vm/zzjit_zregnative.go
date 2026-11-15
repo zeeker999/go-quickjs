@@ -2330,6 +2330,14 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 			m |= bytecode.RMarkDead
 		}
 		v, err = r.regMarkedCall(f, c, top, 1, rpc, m, uint32(w.C()))
+	} else if op == bytecode.RCallMW && rpc < len(c.rc.Marks) && c.rc.Marks[rpc]&bytecode.RMarkLitArg != 0 {
+		// A call that makes its first argument a RegExp literal's
+		// (RMarkLitArg), which native code made from the literal's pool:
+		// called with it, and the RegExp given back to the pool where the
+		// built-in called keeps nothing of it, as the stack form's call of
+		// Go is (jitRegExpLitPool, jitRegExpLitDone) -- not the literal
+		// made again in Go (regMarkedCall).
+		v, err = r.jitRegLitArgMade(f, run.e, rpc, c.rc.Marks[rpc], callee, this, r.stack[top+2:end])
 	} else if o, fd := r.jitRegBuiltin(f, c, w, rpc, callee); fd != nil {
 		// A built-in of this realm, called directly, as the stack form's
 		// jitCallMade calls one and rhCallW's site its own (regNative):
@@ -2397,6 +2405,45 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	}
 	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
 	return true
+}
+
+// jitRegLitArgMade makes, for native code of e, the call at register pc
+// rpc of f's register code, marked m, of callee on this, which makes its
+// first argument, args[0], the RegExp of its literal (RMarkLitArg) --
+// native code took it from the literal's pool (lowerreg's literal before
+// the call) -- as regMarkedCall makes it once it has the literal: a dead
+// replace's told so (regDeadCall); the RegExp given back to the pool where
+// the call was the realm's replace, split or match searching with it
+// directly (regexpArgCall), which keeps nothing of it.
+func (r *Runtime) jitRegLitArgMade(f *frame, e *jitRegEntry, rpc int, m uint8, callee, this Value, args []Value) (Value, error) {
+	if !callee.IsObject() {
+		return r.regCall(callee, this, args)
+	}
+	o := callee.Object()
+	var lit *jitLiteral
+	if len(args) != 0 && e != nil && e.life != nil && r.regexpArgCall(o, this, args) {
+		for i := range e.life.literals {
+			if l := &e.life.literals[i]; int(l.pc) == rpc && l.fn == f.cl.fn && l.lit != nil && l.pool != nil {
+				lit = l
+				break
+			}
+		}
+	}
+	var rx Value
+	if lit != nil {
+		rx = args[0]
+	}
+	var v Value
+	var err error
+	if m&bytecode.RMarkDead != 0 && o == r.strReplaceFn {
+		v, err = r.regDeadCall(o, this, args)
+	} else {
+		v, err = r.regMarkedRest(o, this, args)
+	}
+	if err == nil && lit != nil {
+		r.jitRegExpLitDone(lit, rx)
+	}
+	return v, err
 }
 
 // jitRegBuiltin is the built-in a call of Go of register instruction w at

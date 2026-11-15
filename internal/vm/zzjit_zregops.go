@@ -656,8 +656,22 @@ func (f *jitRegFeedback) regGenMakeSite(rpc int, site *ssa.CallSite) {
 // a loop's /x/.exec(s), the leaf's call each time round, had a RegExp
 // made by every pool's refill of all of its RegExps.
 func (r *Runtime) jitRegExpLeafGive(pool *abi.ObjectPool, test bool, recv Value, args []Value) {
-	if !recv.IsObject() || len(args) > 0 && args[0].IsObject() || pool.Count >= pool.Size || pool.Count >= abi.PoolCapacity ||
-		r.regexpLitMethod(false) == nil || test && r.regexpLitMethod(true) == nil ||
+	if len(args) > 0 && args[0].IsObject() || r.regexpLitMethod(false) == nil || test && r.regexpLitMethod(true) == nil {
+		return
+	}
+	r.jitRegExpPoolGive(pool, recv)
+}
+
+// jitRegExpPoolGive gives pool, a RegExp literal's, back recv, a RegExp
+// nothing but the call that was given it reaches -- the receiver of exec
+// or test (jitRegExpLeafGive), or the first argument of a replace's leaf
+// the call made from the pool (RMarkLitArg, jitLeafForm's giveArg), as
+// jitRegExpLitDone gives the stack form's literal its RegExp back --
+// lastIndex 0 again, as the pool's are made: one of the literal's own, the
+// realm's, with nothing added, RegExp.prototype as the realm built it; the
+// pool not full.
+func (r *Runtime) jitRegExpPoolGive(pool *abi.ObjectPool, recv Value) {
+	if !recv.IsObject() || pool.Count >= pool.Size || pool.Count >= abi.PoolCapacity ||
 		r.regexpProtoShape == nil || r.proto.regexp.shape != r.regexpProtoShape {
 		return
 	}

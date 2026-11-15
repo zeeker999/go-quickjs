@@ -838,3 +838,61 @@ func TestJITRegClassDefinitions(t *testing.T) {
 		})
 	}
 }
+
+// regLitArgSrc gives replace, split and match RegExp literals the calls
+// make (RMarkLitArg), which native code takes from the literals' pools:
+// replace's leaf, a dead replace's, a replace by a function and split's
+// and match's calls of Go give them back; then a RegExp.prototype whose
+// Symbol.split keeps the RegExps it is given, each of which must be one
+// of its own -- none given back while kept.
+const regLitArgSrc = `
+function lits(s, n) {
+	var k = 0, last = "";
+	for (var i = 0; i < n; i++) {
+		last = s.replace(/[aeiou]/g, "_");
+		s.replace(/x/, "y");
+		k += s.replace(/\s/g, function (m) { return "[" + m + "]" }).length;
+		k += s.split(/\s+/).length + (s.match(/[a-z]/g) || []).length;
+	}
+	return last + ":" + k;
+}
+function kept(s, n) {
+	var seen = [], split = RegExp.prototype[Symbol.split];
+	RegExp.prototype[Symbol.split] = function (str, lim) { seen.push(this); return split.call(this, str, lim) };
+	try {
+		for (var i = 0; i < n; i++) s.split(/\s/);
+	} finally {
+		RegExp.prototype[Symbol.split] = split;
+	}
+	return new Set(seen).size;
+}
+function main(n) { return lits("the quick brown fox", n) + ":" + kept("a b", n) }
+`
+
+// TestJITRegLitArg runs regLitArgSrc's main natively and in a runtime
+// without the JIT, the collector idle and marking.
+func TestJITRegLitArg(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regLitArgSrc)
+			rts[0].SetJITReport(true)
+			for i, r := range rts {
+				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("main"))
+				for range 6 {
+					v, err := r.Call(fn, Undefined, []Value{Float(1000)})
+					if got := regNativeShow(r, v, err); got != "th_ q__ck br_wn f_x:45000:1000" {
+						t.Fatalf("runtime %d: %q", i, got)
+					}
+				}
+			}
+			st := rts[0].RegNativeStats()
+			t.Logf("entries %d hosts %v calls of Go %v leaves %d", st.Entries, st.HostOps, st.GoCallOps, rts[0].jit.leafFast)
+		})
+	}
+}
