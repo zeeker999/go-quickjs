@@ -2843,6 +2843,18 @@ func (c *compiler) goCall(v *ssa.Value, site *ssa.CallSite, guard guardTo) {
 		c.setG(v, scratchA)
 		return
 	}
+	if site.StepResult && site.ResultShape != 0 && c.enc.IterState != 0 {
+		// A loop's step's answer native code reads itself (stepResult);
+		// any other Go makes.
+		slow, join := c.a.NewLabel(), c.a.NewLabel()
+		c.stepResult(v, slow, join)
+		c.a.Bind(slow)
+		c.goCallOp(v, goOpWord(site), guard, false)
+		c.a.Bind(join)
+		c.a.Load(scratchA, regCtx, abi.OffKeep+int32(v.Index)*int32(c.enc.ValueSize)+c.enc.NumOffset)
+		c.setG(v, scratchA)
+		return
+	}
 	if site.Step && c.enc.IterState != 0 {
 		// A loop's step over an array native code makes itself; any other
 		// Go makes.
@@ -3730,6 +3742,59 @@ func (c *compiler) closureTakeMarking(v *ssa.Value, site *ssa.CallSite, slow amd
 	}
 	c.movImm(scratchA, c.enc.Object)
 	c.setG(v, scratchA)
+}
+
+// stepResult makes call v, a loop's step's answer (ssa.CallSite's
+// StepResult), of its cursor and the result of its iterator's next, where
+// the result is an object of the site's ResultShape whose done, at
+// DoneAt, is false or true: false, its value, at ValueAt, to the call's
+// keep cell, its pointer word stored with Go's write barrier while the
+// collector marks, as a call's result is; true, the uninitialized value
+// there and the cursor's state marked done, as Go's step marks it. It
+// goes on at join; anything else goes to slow, where Go makes it. It uses
+// every scratch register.
+func (c *compiler) stepResult(v *ssa.Value, slow, join amd64.Label) {
+	site := v.Calls()[0]
+	cur, res := v.Args[0], v.Args[1]
+	vs := int32(c.enc.ValueSize)
+	keep := abi.OffKeep + int32(v.Index)*vs
+	w := c.gpr(res, scratchA)
+	c.cmpWord(w, c.enc.Object)
+	c.a.Jcc(amd64.CondNE, slow)
+	c.pointerWord(res, w)
+	c.a.Load(scratchC, scratchB, c.enc.ObjectShape)
+	c.cmpWord(scratchC, uint64(site.ResultShape))
+	c.a.Jcc(amd64.CondNE, slow)
+	c.a.Load(scratchB, scratchB, c.enc.ObjectProps)
+	c.a.Load(scratchC, scratchB, int32(site.DoneAt)*vs+c.enc.NumOffset)
+	value := c.a.NewLabel()
+	c.cmpWord(scratchC, c.enc.False)
+	c.a.Jcc(amd64.CondE, value)
+	c.cmpWord(scratchC, c.enc.True)
+	c.a.Jcc(amd64.CondNE, slow)
+	// Done: no value, the cursor's state done.
+	c.pointerWord(cur, c.gpr(cur, scratchA))
+	c.movImm(scratchC, 1)
+	c.a.Store8(scratchB, c.enc.IterState+c.enc.IterDone, scratchC)
+	c.storeImm(regCtx, keep+c.enc.NumOffset, c.enc.Uninitialized, scratchA)
+	c.storeImm(regCtx, keep+c.enc.RefOffset, 0, scratchA)
+	c.a.Jmp(join)
+	c.a.Bind(value)
+	c.a.Load(scratchA, scratchB, int32(site.ValueAt)*vs+c.enc.NumOffset)
+	c.a.Load(scratchC, scratchB, int32(site.ValueAt)*vs+c.enc.RefOffset)
+	c.a.Store(regCtx, keep+c.enc.NumOffset, scratchA)
+	marked := c.a.NewLabel()
+	c.movImm(scratchB, c.enc.WriteBarrier)
+	c.a.TestMem8(scratchB, 0, 0xFF)
+	c.a.Jcc(amd64.CondNE, marked)
+	c.a.Store(regCtx, keep+c.enc.RefOffset, scratchC)
+	c.a.Jmp(join)
+	c.cold = append(c.cold, func() {
+		c.a.Bind(marked)
+		c.a.Lea(scratchA, regCtx, keep+c.enc.RefOffset)
+		c.refStore()
+		c.a.Jmp(join)
+	})
 }
 
 // iterStep makes call v, a loop's step (ssa.CallSite's Step), where the
@@ -9780,6 +9845,43 @@ func (c *compiler) stringAtOr(v *ssa.Value) {
 	c.setG(v, scratchA)
 }
 
+// cursorCell is ssa.OpCursorCell into v's register: of a cursor, its
+// state's iterator's cell (Index 0) where the state is not done, walks no
+// array, is no for...in's and its next's pointer word is Const's, 0
+// otherwise; or its next's cell (Index 1). It uses every scratch
+// register.
+func (c *compiler) cursorCell(v *ssa.Value) {
+	x := v.Args[0]
+	none, done := c.a.NewLabel(), c.a.NewLabel()
+	c.pointerWord(x, c.gpr(x, scratchA))
+	if v.Index == 1 {
+		c.a.Lea(scratchA, scratchB, c.enc.IterState+c.enc.IterNext)
+		c.setG(v, scratchA)
+		return
+	}
+	c.a.Op(amd64.Test, scratchB, scratchB, true)
+	c.a.Jcc(amd64.CondE, none)
+	c.objectPart(scratchB, scratchB, scratchC, c.enc.ClassCursor, c.enc.IterState, guardLabel(c, none))
+	c.a.LoadU8(scratchC, scratchB, c.enc.IterDone)
+	c.a.Op(amd64.Test, scratchC, scratchC, false)
+	c.a.Jcc(amd64.CondNE, none)
+	c.a.LoadU8(scratchC, scratchB, c.enc.IterForIn)
+	c.a.Op(amd64.Test, scratchC, scratchC, false)
+	c.a.Jcc(amd64.CondNE, none)
+	c.a.Load(scratchC, scratchB, c.enc.IterArr)
+	c.a.Op(amd64.Test, scratchC, scratchC, true)
+	c.a.Jcc(amd64.CondNE, none)
+	c.a.Load(scratchC, scratchB, c.enc.IterNext+c.enc.RefOffset)
+	c.cmpWord(scratchC, v.Const.Bits)
+	c.a.Jcc(amd64.CondNE, none)
+	c.a.Lea(scratchA, scratchB, c.enc.IterIter)
+	c.a.Jmp(done)
+	c.a.Bind(none)
+	c.movImm(scratchA, 0)
+	c.a.Bind(done)
+	c.setG(v, scratchA)
+}
+
 // typeofCell is typeof x's answer (ssa.OpTypeofCell): the cell of the
 // runtime's string of x's type, in the table at v's Const -- undefined,
 // object, boolean, number, string, symbol, bigint and function's, a value
@@ -11338,6 +11440,8 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.numberIs(v)
 	case ssa.OpTypeofCell:
 		c.typeofCell(v)
+	case ssa.OpCursorCell:
+		c.cursorCell(v)
 	case ssa.OpLoopMark:
 		// A loop of a built-in's call under way, or done (abi.Context's
 		// Loop).

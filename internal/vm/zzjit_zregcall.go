@@ -2005,8 +2005,10 @@ func (r *Runtime) jitRegRetryNative(e *jitRegEntry) {
 // context, spills and keeps as it left them -- or, its call's state written
 // to its window (jit.ExpandCall), by Go, the answer to the call's register
 // or the exception to the level's handlers (regPending), and on from there.
-// Each level's code is pinned until the level is done.
-func (r *Runtime) jitRegUnwind(idx int) (Value, error) {
+// Each level's code is pinned until the level is done. gen says the
+// outermost was a generator's resumption, whose answer is its step's
+// (jitRegGenDone).
+func (r *Runtime) jitRegUnwind(idx int) (_ Value, _ error, gen bool) {
 	s := r.jit
 	var levels []jitRegLevel
 	for i := idx + 1; i < len(s.ssaCtxs) && s.ssaCtxs[i].Live == abi.LiveCall; i++ {
@@ -2107,7 +2109,10 @@ func (r *Runtime) jitRegUnwind(idx int) (Value, error) {
 			}
 		default:
 			jit.ExpandCall(c)
-			s.regPending = jitGoPending{set: true, pc: l.pc, ctx: l.ctx, v: v, err: err}
+			// The callee's answer, its step's where a loop's step called
+			// its iterator's next (jitRegStepCalled), not a generator's,
+			// whose answer is its step's already.
+			s.regPending = jitGoPending{set: true, pc: l.pc, ctx: l.ctx, v: v, err: err, step: levels[k+1].gen == nil}
 			v, err = r.jitRegFinishLevel(f, l, c)
 		}
 		if err == errRegRestart {
@@ -2148,7 +2153,7 @@ func (r *Runtime) jitRegUnwind(idx int) (Value, error) {
 		}
 	}
 	s.ctxTop = ctxTop
-	return v, err
+	return v, err, n != 0 && levels[0].gen != nil
 }
 
 // jitRegFinishLevel finishes level l, whose frame is f, from where its code

@@ -934,7 +934,7 @@ func EvaluateHeap(f *Func, pc int, slots []ir.Value, heap Heap, pollEvery int) (
 					return exit(v.State, ir.ExitKind(v.Aux))
 				}
 				vals[v.ID] = val{cell: &g.Props[i]}
-			case OpConstCell, OpUpvalueCell, OpLocalCell, OpLexCell, OpBindingCell, OpStringProp, OpStringChar, OpCodeChar, OpCodeCharOr, OpTypeofCell, OpSubstringChar, OpStringAtOr:
+			case OpConstCell, OpUpvalueCell, OpLocalCell, OpLexCell, OpBindingCell, OpStringProp, OpStringChar, OpCodeChar, OpCodeCharOr, OpTypeofCell, OpSubstringChar, OpStringAtOr, OpCursorCell:
 				// The heap model has no constants' or captured bindings'
 				// cells.
 				return ir.Exit{}, fmt.Errorf("%w: a constant's or binding's cell", ErrUnsupported)

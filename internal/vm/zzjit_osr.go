@@ -72,6 +72,12 @@ type jitLearned struct {
 	// resume natively (ssa.GenStepFeedback), with the generators' closures,
 	// which keep alive what the code compares their closures with.
 	genSteps []jitGenStep
+	// stepResults are, for register code, the loops' steps that have met
+	// an iterator written in script, whose next the code calls natively
+	// (its nativeCalls at the step, jitRegStepNextSeen), with the layout
+	// its results were of, which the code reads natively
+	// (ssa.CallSite's StepResult).
+	stepResults []jitStepResult
 	// genResults are the pools of the calls of next the code makes
 	// natively (jitGenResultPool); genMakes the calls of generator
 	// functions whose generators it makes natively (jitGenMakeSeen).

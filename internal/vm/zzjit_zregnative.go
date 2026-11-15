@@ -1421,6 +1421,9 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 			// (jitRegUnwind): what it answered goes to the frame, as the
 			// call's register instruction would have it.
 			s.regPending = jitGoPending{}
+			if p.step {
+				p.v, p.err = r.jitRegStepCalled(f, c, wb, exitPC, p.v, p.err)
+			}
 			if p.whole {
 				next, ran, err = r.regFinishWhole(wb, p)
 			} else {
@@ -1699,7 +1702,7 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 		back, base := callee.ReturnTo, callee.Base
 		rpc, _ := jit.CallPC(ctx)
 		f.pc = regSrc(c, int(rpc)) + 1
-		v, uerr := r.jitRegUnwind(idx)
+		v, uerr, gen := r.jitRegUnwind(idx)
 		if uerr == nil && r.stopped == nil && back != 0 && !e.invalid && e.code != nil && e.code.Contains(back) {
 			callee.Base, callee.Live, callee.ReturnTo = base, 0, 0
 			*(*Value)(unsafe.Pointer(&callee.RetValue)) = v
@@ -1712,7 +1715,7 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 		// host exit at it, which Go finishes with what the callee answered
 		// (jitRegLeft).
 		jit.ExpandCall(ctx)
-		s.regPending = jitGoPending{set: true, pc: int(rpc), ctx: idx, v: v, err: uerr}
+		s.regPending = jitGoPending{set: true, pc: int(rpc), ctx: idx, v: v, err: uerr, step: !gen}
 		break
 	}
 	s.regRunAt = runAt
@@ -2145,6 +2148,11 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	op := w.Op()
 	argc := int(w.X())
 	kind := ctx.GoOp >> abi.GoOpKindShift & 0xff
+	if op == bytecode.RIterNext && (kind == abi.GoCallStepResult || kind == abi.GoCallMethod) {
+		// A loop's step that calls its iterator's next natively
+		// (regStepSites): the call of Go of its answer, or of the next.
+		return r.jitRegStepCallMade(ctx, idx, run, rpc, kind)
+	}
 	if kind == abi.GoCallStep && op == bytecode.RIterNext {
 		// A loop's step over a generator native code may resume once
 		// compiled again (jitRegGenStepSeen), its cursor the step's operand.
@@ -2433,7 +2441,20 @@ func (r *Runtime) jitRegStepMade(ctx *abi.Context, idx int, run jitRegRun, rpc i
 	last, shared := s.ssaCtx, s.ssaSharedGen
 	goCallDepth := s.goCallDepth
 	s.goCallDepth = r.frameDepth + 1
-	v, more, err := r.regStepNext(st)
+	var v Value
+	var more bool
+	var err error
+	if jitScriptNext(st) {
+		// A next written in script, which the code calls natively once
+		// compiled again (jitRegStepNextSeen), and its result's layout.
+		res, cerr := r.regCall(st.next, st.iter, nil)
+		if cerr == nil && r.stopped == nil {
+			r.jitRegStepNextSeen(f, run.e, rpc, st, res)
+		}
+		v, more, err = r.regStepOf(st, res, cerr)
+	} else {
+		v, more, err = r.regStepNext(st)
+	}
 	s.goCallDepth = goCallDepth
 	s.ssaCtx = last
 	if s.ssaSharedGen != shared {
@@ -2449,6 +2470,192 @@ func (r *Runtime) jitRegStepMade(ctx *abi.Context, idx int, run jitRegRun, rpc i
 	}
 	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
 	return true
+}
+
+// jitScriptNext reports whether st's iterator's next, which a loop's step
+// calls (regStepNext), is written in script.
+func jitScriptNext(st *iterState) bool {
+	if !st.next.IsObject() {
+		return false
+	}
+	fd := st.next.Object().fn()
+	return fd != nil && fd.closure != nil && fd.native == nil
+}
+
+// jitStepResult is the layout of the results of the iterator's next of a
+// loop's step at register pc pc (jitLearned's stepResults): its shape, and
+// where its own data properties done and value are in it.
+type jitStepResult struct {
+	pc          int32
+	shape       *shape
+	done, value int32
+}
+
+// jitRegStepNextSeen notes the step at register pc rpc of f's code e,
+// which Go made of st, whose iterator's next is written in script and
+// returned res: the next, which the code calls natively once compiled
+// again (regStepSites), as a call learns its callee (jitRegCallSeen), and
+// the layout of res where its done and value are its own data properties,
+// which the code reads natively (ssa.CallSite's StepResult).
+func (r *Runtime) jitRegStepNextSeen(f *frame, e *jitRegEntry, rpc int, st *iterState, res Value) {
+	if e == nil || e.invalid {
+		return
+	}
+	o := st.next.Object()
+	cl := o.fn().closure
+	if cl.reg == nil || !r.jitRegCallable(o, cl, cl.reg, 0) {
+		return
+	}
+	l := r.jitRegLearnedFor(f, e)
+	if l == nil {
+		return
+	}
+	learned := false
+	if !slices.ContainsFunc(l.nativeCalls, func(x jitInline) bool { return int(x.pc) == rpc }) {
+		l.nativeCalls = append(l.nativeCalls, jitInline{pc: int32(rpc), cl: cl, obj: o})
+		r.jitState().regLinkOf(cl, cl.reg)
+		r.jitRegKnownCallee(cl, f.cl)
+		learned = true
+	}
+	if res.IsObject() && !slices.ContainsFunc(l.stepResults, func(x jitStepResult) bool { return int(x.pc) == rpc }) {
+		if p := res.Object(); p.shape != nil && p.class == ClassObject {
+			done, value := p.findOwn(atomDone), p.findOwn(atomValue)
+			if keys := p.keys(); done >= 0 && value >= 0 && keys[done].flags&propAccessor == 0 && keys[value].flags&propAccessor == 0 {
+				l.stepResults = append(l.stepResults, jitStepResult{pc: int32(rpc), shape: remember(p.shape), done: done, value: value})
+				learned = true
+			}
+		}
+	}
+	if learned {
+		r.jitRegReopt(f.cl, e)
+	}
+}
+
+// regStepSites are what NativeCalls answers for a loop's step at the
+// program's instruction pc, iter_next's, that has met an iterator written
+// in script (jitRegStepNextSeen): a native call of its next, of the
+// iterator and no argument, as a method call's is made (regCallSite), and
+// the call of Go of the step's answer (ssa.CallSite's StepResult), which
+// native code makes itself of a result of the layout the step learned --
+// or none, where the step has met none, or the next is no longer one
+// native callers call.
+func (f *jitRegFeedback) regStepSites(pc int) []ssa.CallSite {
+	l := f.fb.e
+	if l == nil {
+		return nil
+	}
+	rpc := int32(f.p.Origin[pc])
+	var sites []ssa.CallSite
+	for _, x := range l.nativeCalls {
+		if x.pc != rpc || x.pool != nil || x.cl == nil || x.cl.reg == nil {
+			continue
+		}
+		if site, ok := f.regCallSite(pc, x.obj, x.cl, x.cl.reg, 0, true, nil, nil, false, false); ok {
+			sites = append(sites, site)
+		}
+		break
+	}
+	if len(sites) == 0 {
+		return nil
+	}
+	res := ssa.CallSite{Go: ssa.GoCall, StepResult: true, ThisSlot: -1}
+	for _, x := range l.stepResults {
+		if x.pc == rpc {
+			res.ResultShape, res.DoneAt, res.ValueAt = uintptr(unsafe.Pointer(x.shape)), int(x.done), int(x.value)
+			k := f.fb.keep()
+			k.shapes = append(k.shapes, x.shape)
+			break
+		}
+	}
+	return append(sites, res)
+}
+
+// jitRegStepCallMade makes, for native code, what a loop's step at
+// register pc rpc of run's code, iter_next's, that calls its iterator's
+// next natively (regStepSites) leaves to Go: the call of the next, of the
+// operands' receiver and function, where native code did not make it (a
+// context past the deepest, a receiver to coerce), its result the call's
+// keep cell's (kind abi.GoCallMethod); or the iterator protocol on the
+// result it made, of the operands' cursor and result (abi.GoCallStepResult,
+// regStepOf), the step's value the keep cell's. Either goes on in native
+// code; what leaves -- a throw, the runtime stopped, the code found
+// invalid -- leaves with the step's answer pending (regPending, a next's
+// result made the answer once the frame is written, jitRegStepCalled), for
+// regFinishCall to finish the step with, the next never called again.
+func (r *Runtime) jitRegStepCallMade(ctx *abi.Context, idx int, run jitRegRun, rpc int, kind uint64) bool {
+	s := r.jit
+	f, c := run.f, run.c
+	w := regAt(c.code, rpc)
+	var st *iterState
+	if kind == abi.GoCallStepResult {
+		if st = cursorOf(jitGoArg(ctx, 0)); st == nil {
+			return false
+		}
+	}
+	r.noteRegGoCall(w, false, Value{})
+	s.goCalls++
+	f.pc = regSrc(c, rpc) + 1
+	last, shared := s.ssaCtx, s.ssaSharedGen
+	goCallDepth := s.goCallDepth
+	s.goCallDepth = r.frameDepth + 1
+	var v Value
+	var err error
+	if st == nil {
+		callee := jitGoArg(ctx, 1)
+		v, err = r.regCall(callee, jitGoArg(ctx, 0), nil)
+		if fd := callee.Object().fn(); err == nil && fd != nil && fd.closure != nil && fd.closure.reg != nil {
+			// A next with no code native callers call: compiled for them
+			// (jitRegKnownCallee), as a call's known callee is.
+			r.jitRegKnownCallee(fd.closure, f.cl)
+		}
+	} else {
+		v, err = r.jitRegStepAnswer(st, jitGoArg(ctx, 1), nil)
+	}
+	s.goCallDepth = goCallDepth
+	s.ssaCtx = last
+	if s.ssaSharedGen != shared {
+		r.jitShareContexts(idx, f)
+	}
+	if err != nil || r.stopped != nil || run.e.invalid || run.leave || r.jitRegCompileDueNow(&run, idx) {
+		s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: v, err: err, step: st == nil}
+		return false
+	}
+	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
+	return true
+}
+
+// jitRegStepAnswer is the value a loop's step of st answers, or what it
+// throws, of res, what its iterator's next native code called returned,
+// or err, what it threw (regStepOf): the uninitialized value once done,
+// which regFinishCall takes for the loop's end.
+func (r *Runtime) jitRegStepAnswer(st *iterState, res Value, err error) (Value, error) {
+	v, more, err := r.regStepOf(st, res, err)
+	if err == nil && !more {
+		v = uninitialized
+	}
+	return v, err
+}
+
+// jitRegStepCalled is v and err, what a native call made at register pc
+// rpc of c, on the frame whose window is at wb, written, returned or
+// threw, as the call's instruction takes it (jitGoPending's step): for a
+// loop's step whose next native code called (regStepSites), the step's
+// answer (jitRegStepAnswer) -- Go finished the next, which left native
+// code, or made it, and finishes the step from it, the iterator's next
+// called no more.
+func (r *Runtime) jitRegStepCalled(f *frame, c *regCode, wb, rpc int, v Value, err error) (Value, error) {
+	if rpc >= len(c.rc.Code) {
+		return v, err
+	}
+	w := regAt(c.code, rpc)
+	if w.Op() != bytecode.RIterNext {
+		return v, err
+	}
+	st := cursorOf(r.stack[wb+int(w.B())])
+	if st == nil {
+		return v, err
+	}
+	return r.jitRegStepAnswer(st, v, err)
 }
 
 // jitRegCallUnsettled reports whether the learning of a call of Go

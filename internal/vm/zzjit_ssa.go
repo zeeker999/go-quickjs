@@ -5008,6 +5008,10 @@ type jitGoPending struct {
 	// at register pc next, v written to register reg, if not -1.
 	whole     bool
 	next, reg int
+	// step marks v and err as what a loop's step's iterator's next, which
+	// native code called (regStepSites), returned or threw: the step's
+	// answer is made of them (jitRegStepCalled) once the frame is written.
+	step bool
 }
 
 // jitRetired is code compiled again or dropped while a call of Go was

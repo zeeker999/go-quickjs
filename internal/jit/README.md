@@ -511,6 +511,7 @@ speculates nothing: it builds the site generically, or leaves it to Go.
 | closures and captured registers' cells from pools, an arrow's this its maker's register 1 (`ssa.ClosureSite`'s `LexThisReg`) | `Closure`, `CellsPool` |
 | `instanceof` of the constructor a global or a captured binding read just before holds, the searches, `parseInt`, BigInts' strings, by the built-in its site's cache holds | `InstanceOf`, `IndexOf`, `ParseInt`, `BigString` |
 | generators a loop's step or a call of `next` resumes natively, learned at the calls of Go that stepped them (`jitRegGenSeen`) | `GenSteps` |
+| a loop's step's iterator's `next` written in script, called natively, and its results' layout, learned at the calls of Go that stepped it (`jitRegStepNextSeen`) | `NativeCalls` |
 
 | Not answered yet | Methods | So |
 |---|---|---|
@@ -1573,6 +1574,29 @@ index, which an element read by it finds again (mir's `forInIndex`,
 `keyedRead`); any other step is a call of Go, which answers the next value
 or, done, the uninitialized value native code branches on. A step's iterator
 is closed however the loop is left, as the interpreter closes it.
+
+**Iterators written in script.** Register code's step whose cursor has met
+an iterator whose `next` is written in script calls that `next` natively
+(ssa's `userStep`), as any native call of a function is made: the step's
+feedback is a native call site of the `next`, learned at the call of Go
+that stepped it (the VM's `jitRegStepNextSeen`, `regStepSites`), and the
+`next` is compiled for native callers then. The step checks its cursor
+(`ssa.OpCursorCell`: not done, no array's, no for...in's, its `next` that
+function), and on a branch of its own, where it is not, Go steps it as
+above (`split`); where it is, the call is made of the cursor's iterator,
+its receiver, and its `next`, its window no register's (`InlineCache`'s
+`Consumed` none), and its result is answered by a call of Go of the
+iterator protocol (`ssa.CallSite`'s `StepResult`, `abi.GoCallStepResult`),
+which native code makes itself of a result of the layout the step learned
+whose `done` is false or true (mir's `stepResult`): its `value`, or, done,
+the uninitialized value and the cursor's state marked done. A getter, a
+`done` no boolean, a result no object are Go's, which throws as the
+interpreter does. Where the `next` leaves native code, Go finishes it and
+the step from what it returned (`jitGoPending`'s `step`,
+`jitRegStepCalled`), never calling it again: native code where the code
+the call returns to is valid, Go's protocol on the result otherwise; a
+`next` that throws marks the cursor done, so that the loop's handler does
+not close it.
 
 **Generators' steps.** A for...of's or a destructuring's step over a
 generator (`ssa.CallSite`'s `Gens`) resumes it by a native call, as V8's

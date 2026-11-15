@@ -5522,6 +5522,17 @@ func (c *a64Compiler) goCall(v *ssa.Value, site *ssa.CallSite, guard a64Guard) {
 		c.setG(v, a64A)
 		return
 	}
+	if site.StepResult && site.ResultShape != 0 && c.enc.IterState != 0 {
+		// As amd64's: a loop's step's answer native code reads itself.
+		slow, join := c.a.NewLabel(), c.a.NewLabel()
+		c.stepResult(v, slow, join)
+		c.a.Bind(slow)
+		c.goCallOp(v, goOpWord(site), false)
+		c.a.Bind(join)
+		c.a.Load(a64A, a64Ctx, abi.OffKeep+int32(v.Index)*int32(c.enc.ValueSize)+c.enc.NumOffset)
+		c.setG(v, a64A)
+		return
+	}
 	if site.Step && c.enc.IterState != 0 {
 		slow, join := c.a.NewLabel(), c.a.NewLabel()
 		c.iterStep(v, slow)
@@ -6480,6 +6491,57 @@ func (c *a64Compiler) genNextCall(v *ssa.Value, t ssa.GenStep, slow, done arm64.
 
 // iterStep is amd64's: a loop's step over an array, made in place. It
 // uses A, B, C and D, F0 and F1, and no other.
+// stepResult is a loop's step's answer read natively, as amd64's. It uses
+// A, B, C and D.
+func (c *a64Compiler) stepResult(v *ssa.Value, slow, join arm64.Label) {
+	site := v.Calls()[0]
+	cur, res := v.Args[0], v.Args[1]
+	vs := int32(c.enc.ValueSize)
+	keep := abi.OffKeep + int32(v.Index)*vs
+	w := c.gpr(res, a64A)
+	c.movImm(a64C, c.enc.Object)
+	c.a.Cmp(w, a64C, true)
+	c.a.BCond(arm64.NE, slow)
+	c.pointerWord(res, w)
+	c.a.Load(a64C, a64B, c.enc.ObjectShape)
+	c.movImm(a64D, uint64(site.ResultShape))
+	c.a.Cmp(a64C, a64D, true)
+	c.a.BCond(arm64.NE, slow)
+	c.a.Load(a64D, a64B, c.enc.ObjectProps)
+	c.a.Load(a64C, a64D, int32(site.DoneAt)*vs+c.enc.NumOffset)
+	value := c.a.NewLabel()
+	c.movImm(a64B, c.enc.False)
+	c.a.Cmp(a64C, a64B, true)
+	c.a.BCond(arm64.EQ, value)
+	c.movImm(a64B, c.enc.True)
+	c.a.Cmp(a64C, a64B, true)
+	c.a.BCond(arm64.NE, slow)
+	// Done: no value, the cursor's state done.
+	c.pointerWord(cur, c.gpr(cur, a64A))
+	c.movImm(a64C, 1)
+	c.a.Store8(a64B, c.enc.IterState+c.enc.IterDone, a64C)
+	c.movImm(a64A, c.enc.Uninitialized)
+	c.a.Store(a64Ctx, keep+c.enc.NumOffset, a64A)
+	c.a.Store(a64Ctx, keep+c.enc.RefOffset, arm64.ZR)
+	c.a.B(join)
+	c.a.Bind(value)
+	c.a.Load(a64A, a64D, int32(site.ValueAt)*vs+c.enc.NumOffset)
+	c.a.Load(a64C, a64D, int32(site.ValueAt)*vs+c.enc.RefOffset)
+	c.a.Store(a64Ctx, keep+c.enc.NumOffset, a64A)
+	marked := c.a.NewLabel()
+	c.movImm(a64B, c.enc.WriteBarrier)
+	c.a.LoadU8(a64B, a64B, 0)
+	c.a.Cbnz(a64B, marked, false)
+	c.a.Store(a64Ctx, keep+c.enc.RefOffset, a64C)
+	c.a.B(join)
+	c.cold = append(c.cold, func() {
+		c.a.Bind(marked)
+		c.a.AddImm(a64A, a64Ctx, int64(keep+c.enc.RefOffset), true)
+		c.refStore()
+		c.a.B(join)
+	})
+}
+
 func (c *a64Compiler) iterStep(v *ssa.Value, slow arm64.Label) {
 	x := v.Args[0]
 	c.pointerWord(x, c.gpr(x, a64A))
@@ -8669,6 +8731,36 @@ func (c *a64Compiler) stringAtOr(v *ssa.Value) {
 	c.setG(v, a64A)
 }
 
+// cursorCell is ssa.OpCursorCell, as amd64's. It uses A, B, C and D.
+func (c *a64Compiler) cursorCell(v *ssa.Value) {
+	x := v.Args[0]
+	none, done := c.a.NewLabel(), c.a.NewLabel()
+	c.pointerWord(x, c.gpr(x, a64A))
+	if v.Index == 1 {
+		c.a.AddImm(a64A, a64B, int64(c.enc.IterState+c.enc.IterNext), true)
+		c.setG(v, a64A)
+		return
+	}
+	c.a.Cbz(a64B, none, true)
+	c.objectPart(a64D, a64B, a64C, c.enc.ClassCursor, c.enc.IterState, a64GuardLabel(c, none))
+	c.a.LoadU8(a64C, a64D, c.enc.IterDone)
+	c.a.Cbnz(a64C, none, false)
+	c.a.LoadU8(a64C, a64D, c.enc.IterForIn)
+	c.a.Cbnz(a64C, none, false)
+	c.a.Load(a64C, a64D, c.enc.IterArr)
+	c.a.Cbnz(a64C, none, true)
+	c.a.Load(a64C, a64D, c.enc.IterNext+c.enc.RefOffset)
+	c.movImm(a64B, v.Const.Bits)
+	c.a.Cmp(a64C, a64B, true)
+	c.a.BCond(arm64.NE, none)
+	c.a.AddImm(a64A, a64D, int64(c.enc.IterIter), true)
+	c.a.B(done)
+	c.a.Bind(none)
+	c.movImm(a64A, 0)
+	c.a.Bind(done)
+	c.setG(v, a64A)
+}
+
 // typeofCell is ssa.OpTypeofCell, as amd64's. It uses A, B and C.
 func (c *a64Compiler) typeofCell(v *ssa.Value) {
 	a := v.Args[0]
@@ -10086,6 +10178,8 @@ func (c *a64Compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.numberIs(v)
 	case ssa.OpTypeofCell:
 		c.typeofCell(v)
+	case ssa.OpCursorCell:
+		c.cursorCell(v)
 	case ssa.OpLoopMark:
 		// As amd64's: abi.Context's Loop.
 		c.movImm(a64A, v.Const.Bits)

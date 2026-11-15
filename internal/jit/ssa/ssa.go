@@ -610,6 +610,14 @@ const (
 	// a function where its target is -- where a call of Go makes it (a
 	// split). It never exits.
 	OpTypeofCell // tagged -> source
+	// OpCursorCell is a for...of loop's cursor's iterator's cell, Index 0
+	// -- the value the step calls next on -- where the cursor is one not
+	// done that steps by calling a next, no array's nor a for...in's, and
+	// its next is the function object at Const's address; or none (0)
+	// otherwise. Index 1 is its next's cell, read where Index 0's is some.
+	// It never exits: what is none Go steps (iterStep's split). The cells
+	// are the cursor's, which nothing writes once it is made.
+	OpCursorCell // tagged cursor -> source
 )
 
 // OpTailSelf's Key bits for register code's call (OpTailSelf): its Args
@@ -651,6 +659,7 @@ var opNames = [...]string{
 	OpDivI64: "divi64", OpModI64: "modi64", OpDivU64: "divu64", OpModU64: "modu64", OpBigOfF64: "bigoff", OpPowI64: "powi64",
 	OpHolderCell: "holdercell", OpChainCheck: "chaincheck", OpProtoIs: "protois", OpCodeCharOr: "codecharor",
 	OpStringCodePointOr: "codepointor", OpStringAtOr: "stringator", OpNumberIs: "numberis", OpTypeofCell: "typeofcell",
+	OpCursorCell: "cursorcell",
 }
 
 func (o Op) String() string {

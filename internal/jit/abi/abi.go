@@ -1639,7 +1639,10 @@ func IsNumber(word uint64) bool { return word < NumberLimit }
 // its three operands, f, apply and x, called with the arguments the frame
 // was given (ssa.CallSite's Forward); or register code's instruction at the
 // call's PC run whole on the register frame (GoCallWhole, ssa.CallSite's
-// Whole), of the registers it reads, its result the one it writes.
+// Whole), of the registers it reads, its result the one it writes; or a
+// loop's step's answer (GoCallStepResult, ssa.CallSite's StepResult), of
+// the cursor and the result of its iterator's next native code called,
+// the iterator protocol on it, the result as GoCallStep's.
 // GoClosurePool is the kind of a closure's (ssa.GoClosure) whose native
 // code takes it from a pool, the pool's address the first operand's
 // pointer word: Go makes it, as it makes any, and fills the pool again if
@@ -1672,6 +1675,7 @@ const (
 	GoCallForIn      = 13
 	GoCallForward    = 14
 	GoCallWhole      = 15
+	GoCallStepResult = 16
 	GoClosurePool    = 1
 )
 
