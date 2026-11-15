@@ -1386,6 +1386,11 @@ type jitState struct {
 	// ssaKeeps is the most keep cells (abi.Context.Keep) any code compiled
 	// uses: what Go clears in a native callee's context.
 	ssaKeeps int
+	// ssaSpills is the most spill slots any code placed uses (mir's
+	// Code.Spills): every context has room for them (abi.Context's
+	// SpillMore), so that the code may run at any level, entered by Go or
+	// by a native caller (spillsFor).
+	ssaSpills int
 	// exitScratch is what exits that leave their frames to Go are read
 	// into (jit.ExitScratch).
 	exitScratch jit.ExitScratch
@@ -1617,6 +1622,31 @@ func (s *jitState) held() int {
 	return s.entryBytes + s.lowerBytes + s.sharedBytes() + s.regHeld
 }
 
+// spillShare is what each context holds of spill slots past its own
+// (abi.Context's SpillMore).
+func (s *jitState) spillShare() int { return 8 * max(s.ssaSpills-abi.SpillSlots, 0) }
+
+// spillRoom is what giving every context room for the spill slots of mc
+// adds to what the JIT holds: nothing for code of no more than the most
+// placed so far.
+func (s *jitState) spillRoom(mc *mir.Code) int {
+	return len(s.ssaCtxs) * 8 * max(mc.Spills-max(s.ssaSpills, abi.SpillSlots), 0)
+}
+
+// spillsFor gives every context room for the spill slots of mc, placed:
+// a level reached later is given it as it is made (jitGrowContexts). No
+// code's entry or call checks the room, which nothing takes back while
+// the runtime lives.
+func (s *jitState) spillsFor(mc *mir.Code) {
+	if mc.Spills <= s.ssaSpills {
+		return
+	}
+	s.ssaSpills = mc.Spills
+	for _, c := range s.ssaCtxs {
+		c.GrowSpill(mc.Spills)
+	}
+}
+
 // sharedBytes is what the JIT holds for the runtime apart from its entries
 // and lowerings: its state; the contexts native code runs in; its hint
 // table and links; and code compiled again or dropped that a call of Go is
@@ -1633,7 +1663,7 @@ func (s *jitState) sharedBytes() int {
 	n := int(unsafe.Sizeof(*s)) + len(s.ssaCtxs)*jitContextBytes + jitCapBytes(s.ssaCtxs) + jitCapBytes(s.hints) +
 		jitCapBytes(s.hintFree) + len(s.links)*jitLinkFixed + jitCapBytes(s.victims) + jitCapBytes(s.goRuns) +
 		jitCapBytes(s.goPinned) + jitCapBytes(s.retired) + jitCapBytes(s.calleeOpen) + jitCapBytes(s.unwinding) + jitCapBytes(s.unwindingFrames) +
-		jitCapBytes(s.seedingFns) + jitCapBytes(s.arrayRooms)
+		jitCapBytes(s.seedingFns) + jitCapBytes(s.arrayRooms) + len(s.ssaCtxs)*s.spillShare()
 	for _, x := range s.retired {
 		n += x.code.Footprint()
 	}

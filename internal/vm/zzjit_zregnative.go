@@ -369,9 +369,10 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f *ssa.Func, mc *mir.Code, looped map[uint32]bool) bool {
 	s := r.jit
 	p := e.p
-	need := jit.CodeFootprint(mc)
+	// The contexts' room for its spill slots, which they keep (spillsFor).
+	need, spill := jit.CodeFootprint(mc), s.spillRoom(mc)
 	s.budget = r.jitBudget()
-	if !s.makeRoom(need) {
+	if !s.makeRoom(need + spill) {
 		// No room, all the cache holds young or in use: not compiled again
 		// for want of it until the cache has let some code go
 		// (generation), as the stack form's compile is deferred.
@@ -392,6 +393,7 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 		e.refusal = fmt.Sprintf("%v: %v", jitRefused, err)
 		return true
 	}
+	s.spillsFor(mc)
 	s.inlined += uint64(len(f.Inlined))
 	s.inlinedCode += uint64(f.InlinedCode)
 	e.code, e.bytes = code, need

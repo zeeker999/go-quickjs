@@ -7,8 +7,11 @@ package abi
 
 import "unsafe"
 
-// SpillSlots bounds the spill area: values the register allocator cannot
-// keep in registers live there, 8 bytes each.
+// SpillSlots is how many spill slots a context holds in itself
+// (Context.Spill): values the register allocator cannot keep in registers
+// live there, 8 bytes each. A function's slots past them are in the
+// context's SpillMore, which Go grows to what the code it places needs
+// (Context.GrowSpill): nothing bounds how many a function has.
 const SpillSlots = 256
 
 // MaxRecords bounds an exit's records, one per slot at most: the room the
@@ -444,7 +447,8 @@ type Context struct {
 	// clears when native code returns.
 	RecordRef  [MaxRecords]unsafe.Pointer
 	RecordHigh uint64
-	// Spill holds what the allocator could not keep in registers.
+	// Spill holds what the allocator could not keep in registers: its
+	// first SpillSlots slots, the rest in SpillMore.
 	Spill [SpillSlots]uint64
 	// Keep holds references copied out of cells a store then overwrites
 	// while slots still hold them (ssa's OpKeep), read from here since: the
@@ -566,6 +570,54 @@ type Context struct {
 	// TypedElems and TypedLength) holds while its epoch is this. At the
 	// end, as GoLast.
 	TypedEpoch *uint64
+	// SpillMore holds the spill slots past Spill's, slot n at
+	// SpillMore[n-SpillSlots], for code whose allocation took more
+	// (mir's Code.Spills): native code reads the slice's address at each
+	// access of one, and Go grows it before any code that needs it can run
+	// in the context (GrowSpill), its words kept. As Spill's, its words are
+	// raw: a reference spilled is kept where the collector sees it too.
+	SpillMore []uint64
+	// SpillTemp is where amd64's code keeps the scratch register it
+	// reaches SpillMore through while it does (mir's spillMore).
+	SpillTemp uint64
+}
+
+// SpillAt is the address of spill slot n: in Spill, or past it in
+// SpillMore.
+func (c *Context) SpillAt(n int32) *uint64 {
+	if n < SpillSlots {
+		return &c.Spill[n]
+	}
+	return &c.SpillMore[n-SpillSlots]
+}
+
+// GrowSpill gives c room for n spill slots, keeping the words its slots
+// hold: native code suspended in a call of Go may have spilled to them.
+func (c *Context) GrowSpill(n int) {
+	if more := n - SpillSlots; more > len(c.SpillMore) {
+		s := make([]uint64, more)
+		copy(s, c.SpillMore)
+		c.SpillMore = s
+	}
+}
+
+// SpillOffset is where spill slot n is as GoCallArg's At and From say: a
+// slot of Spill as its offset into the Context, one of SpillMore as the
+// complement of its offset into SpillMore (Context.Word).
+func SpillOffset(n int32) int32 {
+	if n < SpillSlots {
+		return OffSpill + n*8
+	}
+	return ^((n - SpillSlots) * 8)
+}
+
+// Word is the address of the word at GoCallArg's At or From: off bytes
+// into c, or, for a negative off, ^off bytes into SpillMore (SpillOffset).
+func (c *Context) Word(off int32) unsafe.Pointer {
+	if off >= 0 {
+		return unsafe.Add(unsafe.Pointer(c), off)
+	}
+	return unsafe.Pointer(&c.SpillMore[(^off)/8])
 }
 
 // GoArg is an operand of a call of Go: a slot's two words, its pointer word
@@ -644,7 +696,8 @@ type GoCallState struct {
 // GoCallArg is a GoCallState's operand, the i'th, laid out for Go to read
 // at once. Its number word is, by Kind: GoArgNone, the one the call wrote
 // to GoArgs[i] itself (its pointer word too); GoArgConst, Word; GoArgWord,
-// the word At bytes into the Context (a saved register, a spill slot);
+// the word At bytes into the Context (a saved register, a spill slot;
+// Context.Word, for a slot past Spill's);
 // GoArgF64 and GoArgBool, the double or the boolean there, boxed. Its
 // pointer word, unless Number says a number word below NumberLimit has
 // none, is by Ref: GoRefSource, the reference at the address the word From
@@ -957,6 +1010,8 @@ var (
 	OffRecordRef        = int32(unsafe.Offsetof(Context{}.RecordRef))
 	OffRecordHi         = int32(unsafe.Offsetof(Context{}.RecordHigh))
 	OffSpill            = int32(unsafe.Offsetof(Context{}.Spill))
+	OffSpillMore        = int32(unsafe.Offsetof(Context{}.SpillMore))
+	OffSpillTemp        = int32(unsafe.Offsetof(Context{}.SpillTemp))
 	OffKeep             = int32(unsafe.Offsetof(Context{}.Keep))
 
 	OffReturnTo    = int32(unsafe.Offsetof(Context{}.ReturnTo))

@@ -445,7 +445,7 @@ func compileAMD64(w *Workspace, f *ssa.Func, enc abi.Encoding, opts Options) (co
 		t.Compiles++
 	}
 	return &Code{Bytes: bytes, Entries: entries, CallEntry: callAt, Resume: resumeAt, GenEntry: genAt, TailEntry: tailAt, Text: c.a.Moved(text), Exits: c.exits,
-		Calls: c.calls, CallRefs: c.callRefs(), GoCalls: c.goCalls, Marks: marks, Listing: listing, core: c.core}, nil
+		Calls: c.calls, CallRefs: c.callRefs(), Spills: c.spills, GoCalls: c.goCalls, Marks: marks, Listing: listing, core: c.core}, nil
 }
 
 // movImm sets dst to the word v: a load of the context's copy where v is
@@ -621,7 +621,7 @@ func (c *compiler) gpr(v *ssa.Value, scratch amd64.Reg) amd64.Reg {
 	if l.reg >= 0 {
 		return amd64.Reg(l.reg)
 	}
-	c.a.Load(scratch, regCtx, c.spillDisp(l.spill))
+	c.spillLoad(scratch, l.spill)
 	return scratch
 }
 
@@ -634,7 +634,7 @@ func (c *compiler) xmm(v *ssa.Value, scratch amd64.XReg) amd64.XReg {
 	if l.reg >= 0 {
 		return amd64.XReg(l.reg)
 	}
-	c.a.LoadSD(scratch, regCtx, c.spillDisp(l.spill))
+	c.spillLoadSD(scratch, l.spill)
 	return scratch
 }
 
@@ -660,7 +660,7 @@ func (c *compiler) gprInto(v *ssa.Value, dst amd64.Reg) {
 		}
 		return
 	}
-	c.a.Load(dst, regCtx, c.spillDisp(c.locAt(v).spill))
+	c.spillLoad(dst, c.locAt(v).spill)
 }
 
 // setG stores src into v's location.
@@ -672,7 +672,7 @@ func (c *compiler) setG(v *ssa.Value, src amd64.Reg) {
 		}
 		return
 	}
-	c.a.Store(regCtx, c.spillDisp(l.spill), src)
+	c.spillStore(l.spill, src)
 }
 
 // setX stores src into v's location.
@@ -684,7 +684,76 @@ func (c *compiler) setX(v *ssa.Value, src amd64.XReg) {
 		}
 		return
 	}
-	c.a.StoreSD(regCtx, c.spillDisp(l.spill), src)
+	c.spillStoreSD(l.spill, src)
+}
+
+// A spill slot is the context's (abi.Context's Spill), at a displacement
+// from the context register, or past them in its SpillMore, reached
+// through the slice's address, loaded at each access: a word loaded into
+// a general register is loaded through that register; a store, or a
+// double's load, through a scratch register other than what it stores,
+// kept in the context's SpillTemp meanwhile, since any register may be
+// live where code reads or writes a slot. Code of no more than the
+// context's slots has none of this.
+
+// spillLoad loads spill slot's word into dst.
+func (c *compiler) spillLoad(dst amd64.Reg, slot int) {
+	off, more := spillMore(slot)
+	if !more {
+		c.a.Load(dst, regCtx, c.spillDisp(slot))
+		return
+	}
+	c.a.Load(dst, regCtx, abi.OffSpillMore)
+	c.a.Load(dst, dst, off)
+}
+
+// spillStore stores src to spill slot.
+func (c *compiler) spillStore(slot int, src amd64.Reg) {
+	off, more := spillMore(slot)
+	if !more {
+		c.a.Store(regCtx, c.spillDisp(slot), src)
+		return
+	}
+	t := c.spillBase(src)
+	c.a.Store(t, off, src)
+	c.a.Load(t, regCtx, abi.OffSpillTemp)
+}
+
+// spillLoadSD loads spill slot's double into dst.
+func (c *compiler) spillLoadSD(dst amd64.XReg, slot int) {
+	off, more := spillMore(slot)
+	if !more {
+		c.a.LoadSD(dst, regCtx, c.spillDisp(slot))
+		return
+	}
+	t := c.spillBase(regCtx)
+	c.a.LoadSD(dst, t, off)
+	c.a.Load(t, regCtx, abi.OffSpillTemp)
+}
+
+// spillStoreSD stores src's double to spill slot.
+func (c *compiler) spillStoreSD(slot int, src amd64.XReg) {
+	off, more := spillMore(slot)
+	if !more {
+		c.a.StoreSD(regCtx, c.spillDisp(slot), src)
+		return
+	}
+	t := c.spillBase(regCtx)
+	c.a.StoreSD(t, off, src)
+	c.a.Load(t, regCtx, abi.OffSpillTemp)
+}
+
+// spillBase saves a scratch register other than avoid in SpillTemp and
+// loads SpillMore's address into it, which the caller restores from
+// SpillTemp once it has read or written the slot.
+func (c *compiler) spillBase(avoid amd64.Reg) amd64.Reg {
+	t := scratchA
+	if avoid == t {
+		t = scratchC
+	}
+	c.a.Store(regCtx, abi.OffSpillTemp, t)
+	c.a.Load(t, regCtx, abi.OffSpillMore)
+	return t
 }
 
 // materialize computes a lazy value's word into dst.
@@ -2171,9 +2240,9 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 		switch {
 		case sv.frame != 0:
 		case sv.float:
-			c.a.StoreSD(regCtx, c.spillDisp(sv.slot), amd64.XReg(sv.reg))
+			c.spillStoreSD(sv.slot, amd64.XReg(sv.reg))
 		default:
-			c.a.Store(regCtx, c.spillDisp(sv.slot), amd64.Reg(sv.reg))
+			c.spillStore(sv.slot, amd64.Reg(sv.reg))
 		}
 	}
 	// The callee makes its own frame and context at its call entry
@@ -2655,9 +2724,9 @@ func (c *compiler) restoreSavesOf(v *ssa.Value, refused bool) {
 			continue
 		}
 		if sv.float {
-			c.a.LoadSD(amd64.XReg(sv.reg), regCtx, c.spillDisp(sv.slot))
+			c.spillLoadSD(amd64.XReg(sv.reg), sv.slot)
 		} else {
-			c.a.Load(amd64.Reg(sv.reg), regCtx, c.spillDisp(sv.slot))
+			c.spillLoad(amd64.Reg(sv.reg), sv.slot)
 		}
 	}
 }
@@ -2900,9 +2969,9 @@ func (c *compiler) leafCall(v *ssa.Value, site *ssa.CallSite) {
 		case sv.frame != 0:
 			// Read back from the frame's slot, which holds it.
 		case sv.float:
-			c.a.StoreSD(regCtx, c.spillDisp(sv.slot), amd64.XReg(sv.reg))
+			c.spillStoreSD(sv.slot, amd64.XReg(sv.reg))
 		default:
-			c.a.Store(regCtx, c.spillDisp(sv.slot), amd64.Reg(sv.reg))
+			c.spillStore(sv.slot, amd64.Reg(sv.reg))
 		}
 	}
 	back, fail := c.a.NewLabel(), c.a.NewLabel()
@@ -4051,9 +4120,9 @@ func (c *compiler) genCall(v *ssa.Value, t ssa.GenStep, slow, done amd64.Label) 
 	saves := c.savesOf(v)
 	for _, sv := range saves {
 		if sv.float {
-			c.a.StoreSD(regCtx, c.spillDisp(sv.slot), amd64.XReg(sv.reg))
+			c.spillStoreSD(sv.slot, amd64.XReg(sv.reg))
 		} else {
-			c.a.Store(regCtx, c.spillDisp(sv.slot), amd64.Reg(sv.reg))
+			c.spillStore(sv.slot, amd64.Reg(sv.reg))
 		}
 	}
 	// The cursor's word, where a register holds it, for the miss, which
@@ -4066,9 +4135,9 @@ func (c *compiler) genCall(v *ssa.Value, t ssa.GenStep, slow, done amd64.Label) 
 	restore := func() {
 		for _, sv := range saves {
 			if sv.float {
-				c.a.LoadSD(amd64.XReg(sv.reg), regCtx, c.spillDisp(sv.slot))
+				c.spillLoadSD(amd64.XReg(sv.reg), sv.slot)
 			} else {
-				c.a.Load(amd64.Reg(sv.reg), regCtx, c.spillDisp(sv.slot))
+				c.spillLoad(amd64.Reg(sv.reg), sv.slot)
 			}
 		}
 	}
@@ -4464,17 +4533,17 @@ func (c *compiler) genNextCall(v *ssa.Value, t ssa.GenStep, slow, done amd64.Lab
 	saves := c.savesOf(v)
 	for _, sv := range saves {
 		if sv.float {
-			c.a.StoreSD(regCtx, c.spillDisp(sv.slot), amd64.XReg(sv.reg))
+			c.spillStoreSD(sv.slot, amd64.XReg(sv.reg))
 		} else {
-			c.a.Store(regCtx, c.spillDisp(sv.slot), amd64.Reg(sv.reg))
+			c.spillStore(sv.slot, amd64.Reg(sv.reg))
 		}
 	}
 	restore := func() {
 		for _, sv := range saves {
 			if sv.float {
-				c.a.LoadSD(amd64.XReg(sv.reg), regCtx, c.spillDisp(sv.slot))
+				c.spillLoadSD(amd64.XReg(sv.reg), sv.slot)
 			} else {
-				c.a.Load(amd64.Reg(sv.reg), regCtx, c.spillDisp(sv.slot))
+				c.spillLoad(amd64.Reg(sv.reg), sv.slot)
 			}
 		}
 	}
@@ -5727,9 +5796,9 @@ func (c *compiler) callGo(v *ssa.Value, op uint64, keep int) {
 	c.storeImm(regCtx, abi.OffGoKeep, uint64(keep), scratchA)
 	for _, sv := range c.savesOf(v) {
 		if sv.float {
-			c.a.StoreSD(regCtx, c.spillDisp(sv.slot), amd64.XReg(sv.reg))
+			c.spillStoreSD(sv.slot, amd64.XReg(sv.reg))
 		} else {
-			c.a.Store(regCtx, c.spillDisp(sv.slot), amd64.Reg(sv.reg))
+			c.spillStore(sv.slot, amd64.Reg(sv.reg))
 		}
 	}
 	back := c.a.NewLabel()
@@ -5742,9 +5811,9 @@ func (c *compiler) callGo(v *ssa.Value, op uint64, keep int) {
 	c.a.Load(regStack, regCtx, abi.OffStack)
 	for _, sv := range c.savesOf(v) {
 		if sv.float {
-			c.a.LoadSD(amd64.XReg(sv.reg), regCtx, c.spillDisp(sv.slot))
+			c.spillLoadSD(amd64.XReg(sv.reg), sv.slot)
 		} else {
-			c.a.Load(amd64.Reg(sv.reg), regCtx, c.spillDisp(sv.slot))
+			c.spillLoad(amd64.Reg(sv.reg), sv.slot)
 		}
 	}
 }
@@ -7074,9 +7143,9 @@ func (c *compiler) block(b *ssa.Block, next *ssa.Block) {
 		if reg, slot, split := c.split(v); split {
 			// Its slot, which the frame states read (core's split).
 			if isFloat(v) {
-				c.a.StoreSD(regCtx, c.spillDisp(slot), amd64.XReg(reg))
+				c.spillStoreSD(slot, amd64.XReg(reg))
 			} else {
-				c.a.Store(regCtx, c.spillDisp(slot), amd64.Reg(reg))
+				c.spillStore(slot, amd64.Reg(reg))
 			}
 		}
 		c.tagCold()
@@ -8151,9 +8220,9 @@ func (c *compiler) goCallingLive(v *ssa.Value, st *abi.GoCallState, stub amd64.L
 	saves := c.savesOf(v)
 	for _, sv := range saves {
 		if sv.float {
-			c.a.StoreSD(regCtx, c.spillDisp(sv.slot), amd64.XReg(sv.reg))
+			c.spillStoreSD(sv.slot, amd64.XReg(sv.reg))
 		} else {
-			c.a.Store(regCtx, c.spillDisp(sv.slot), amd64.Reg(sv.reg))
+			c.spillStore(sv.slot, amd64.Reg(sv.reg))
 		}
 	}
 	back, fail := c.a.NewLabel(), c.a.NewLabel()
@@ -8190,9 +8259,9 @@ func (c *compiler) goCallingLive(v *ssa.Value, st *abi.GoCallState, stub amd64.L
 			case sv.cold && !refused:
 				// Read after the call by its refusal alone.
 			case sv.float:
-				c.a.LoadSD(amd64.XReg(sv.reg), regCtx, c.spillDisp(sv.slot))
+				c.spillLoadSD(amd64.XReg(sv.reg), sv.slot)
 			default:
-				c.a.Load(amd64.Reg(sv.reg), regCtx, c.spillDisp(sv.slot))
+				c.spillLoad(amd64.Reg(sv.reg), sv.slot)
 			}
 		}
 	}
@@ -9181,9 +9250,9 @@ func (c *compiler) mathCall(v *ssa.Value) {
 		saves := c.savesOf(v)
 		for _, sv := range saves {
 			if sv.float {
-				c.a.StoreSD(regCtx, c.spillDisp(sv.slot), amd64.XReg(sv.reg))
+				c.spillStoreSD(sv.slot, amd64.XReg(sv.reg))
 			} else {
-				c.a.Store(regCtx, c.spillDisp(sv.slot), amd64.Reg(sv.reg))
+				c.spillStore(sv.slot, amd64.Reg(sv.reg))
 			}
 		}
 		reg := c.budgetReg(c.budget)
@@ -9200,9 +9269,9 @@ func (c *compiler) mathCall(v *ssa.Value) {
 		c.a.Load(regStack, regCtx, abi.OffStack)
 		for _, sv := range saves {
 			if sv.float {
-				c.a.LoadSD(amd64.XReg(sv.reg), regCtx, c.spillDisp(sv.slot))
+				c.spillLoadSD(amd64.XReg(sv.reg), sv.slot)
 			} else {
-				c.a.Load(amd64.Reg(sv.reg), regCtx, c.spillDisp(sv.slot))
+				c.spillLoad(amd64.Reg(sv.reg), sv.slot)
 			}
 		}
 		if reg >= 0 {
@@ -10731,7 +10800,7 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.a.OpImm(amd64.Cmp, scratchA, 0x1FFF, false)
 		guard.jump(amd64.CondE)
 		if l := c.locAt(v); l.reg < 0 {
-			c.a.Store(regCtx, c.spillDisp(l.spill), r)
+			c.spillStore(l.spill, r)
 		} else {
 			c.a.MovQToX(amd64.XReg(l.reg), r)
 		}
