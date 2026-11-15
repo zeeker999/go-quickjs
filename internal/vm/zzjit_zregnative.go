@@ -2603,7 +2603,7 @@ func (r *Runtime) jitRegStepCallMade(ctx *abi.Context, idx int, run jitRegRun, r
 	if st == nil {
 		callee := jitGoArg(ctx, 1)
 		v, err = r.regCall(callee, jitGoArg(ctx, 0), nil)
-		if fd := callee.Object().fn(); err == nil && fd != nil && fd.closure != nil && fd.closure.reg != nil {
+		if fd := jitFnOf(callee); err == nil && fd != nil && fd.closure != nil && fd.closure.reg != nil {
 			// A next with no code native callers call: compiled for them
 			// (jitRegKnownCallee), as a call's known callee is.
 			r.jitRegKnownCallee(fd.closure, f.cl)
@@ -2622,6 +2622,14 @@ func (r *Runtime) jitRegStepCallMade(ctx *abi.Context, idx int, run jitRegRun, r
 	}
 	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
 	return true
+}
+
+// jitFnOf is the function data of v, a function object, or nil.
+func jitFnOf(v Value) *funcData {
+	if !v.IsObject() {
+		return nil
+	}
+	return v.Object().fn()
 }
 
 // jitRegStepAnswer is the value a loop's step of st answers, or what it
