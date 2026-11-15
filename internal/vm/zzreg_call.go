@@ -302,6 +302,9 @@ func (r *Runtime) regCallSlow(f *frame, c *regCode, w bytecode.RInstr, base, pc 
 		var e *regCallCache
 		if calls := f.cl.regCalls; uint(w.C()) < uint(len(calls)) {
 			e = &calls[w.C()]
+			if !f.cl.regCallsHeld {
+				r.regCallsHold(f.cl.closureCode)
+			}
 		}
 		var (
 			cl   *closure

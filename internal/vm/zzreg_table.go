@@ -2082,6 +2082,11 @@ func rsNewW(regs *[1 << 16]Value, w bytecode.RInstr, pc int, st *regState) int {
 	if st.cl.regCalls == nil && st.c.rc.CallSites > 0 {
 		st.r.regCallsMake(st.cl, st.c)
 	}
+	if len(st.cl.regCalls) != 0 && !st.cl.regCallsHeld {
+		// The site's cache the construction may fill, let go of at the
+		// turn's end (releaseRegCalls).
+		st.r.regCallsHold(st.cl.closureCode)
+	}
 	v, err := st.r.regConstruct(st.cl.regCalls, w.C(), regs[w.A()], st.wb+int(w.A()), int(w.X()))
 	if err != nil {
 		return st.fail(err)

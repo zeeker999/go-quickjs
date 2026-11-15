@@ -290,6 +290,9 @@ func (r *Runtime) regColdWrap(cl *closure, c *regCode, k *regKept, w bytecode.RI
 								r.jitRegCountsMake(cl.closureCode, c.rc.CallSites)
 							}
 						}
+						if !cl.regCallsHeld {
+							r.regCallsHold(cl.closureCode)
+						}
 						regCallSiteNative(cl, cw, fv.Object(), fd, r.Realm)
 						if regBigOf != nil && !isBitwise(op) {
 							// The operator's mark, as the tree's wrapSeen
