@@ -1070,7 +1070,12 @@ want an int32 -- a ToInt32, a comparison, an element's key, truncated
 arithmetic -- and none in its loop wants a double (`intPhiUses`), and its
 loop's budget of five general registers holds it, a phi read after its loop
 counting two, its interval having no holes (`intPhiBudgets`): amd64's code
-has seven general registers for values against thirteen SSE ones. A box of
+has seven general registers for values against thirteen SSE ones. A phi of
+no loop's header whose arguments are all int32s -- conversions, constants,
+others of its group, no entry's number -- is one whatever its uses: as an
+int32 it is converted once after the merge, where its arguments had been in
+each predecessor, register code's loop's test, which a loop's int32 read
+after it reaches the exit from, at every turn. A box of
 an int32's conversion, which a loop header's state names before the
 conversion is made, is made of the int32: an exit reads the int32 and makes
 its number (`abi.ExitI32Reg`, `ExitI32Spill`), and liveness keeps the int32
