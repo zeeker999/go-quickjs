@@ -1202,7 +1202,37 @@ func (b *builder) windowLeaf(blk *Block, pc int, in ir.Instruction, c *CallSite,
 		args = append(args, b.read(a+2+k, blk))
 	}
 	site := &CallSite{Go: GoLeaf, Argc: c.Argc, Method: c.Method, ThisSlot: -1, Leaf: fn}
+	// Nothing reads the result but its truth: exec makes no array, replace
+	// no string (abi.GoCallState's Unused), as the stack form's leaf call
+	// is told (resultUnused).
+	site.Unused = b.windowResultUnused(pc)
 	b.leafMade(blk, pc, fn, c, args, site, guard, func(blk *Block, v *Value) { b.assign(in.Dest, blk, v) })
+}
+
+// windowResultUnused is resultUnused of register code's call at pc, whose
+// result is its register (Dest), which no instruction pops: by the
+// program's liveness (Live), nothing reads the register after the call --
+// a statement's call -- or the instruction after it tests its truth or
+// negates it and nothing reads it after that, but where a branch jumps
+// where it is falsy, which keeps it, as && keeps it. Not a register a
+// closure captures, whose cell its closures read.
+func (b *builder) windowResultUnused(pc int) bool {
+	p := b.p
+	d := p.Code[pc].Dest
+	if d < 0 || p.IsCaptured(d) || pc+2 >= len(p.Code) {
+		return false
+	}
+	dead := func(at int) bool { return at >= 0 && at < len(p.Code) && !p.LiveAt(at, d) }
+	if dead(pc + 1) {
+		return true
+	}
+	switch in := p.Code[pc+1]; in.Op {
+	case ir.Branch:
+		return in.Operator == ir.Truth && in.Left == ir.Slot(d) && dead(pc+2) && (!in.When || dead(in.Target))
+	case ir.Unary:
+		return in.Operator == ir.Not && in.Left == ir.Slot(d) && (in.Dest == d || dead(pc+2))
+	}
+	return false
 }
 
 // resultUnused reports whether nothing reads the result of the call at pc,

@@ -205,7 +205,17 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 				// Left with nothing to learn: counted against inlining the
 				// callee at the call, by the stack form's own rule
 				// (jitInlineLeft, jitInlineExits): past it the call is a
-				// native call in the code compiled next.
+				// native call in the code compiled next. A closure the
+				// owner makes, inlined where it calls it and not made
+				// (madeInline), is counted at that call as Inline's
+				// callees are: past the rule it is made and called, its
+				// call's shape no longer given (CallShape's notInline) --
+				// one whose reads of its arguments past the call's count
+				// are Go's had left native code at every call.
+				if k := owner.keep; k != nil && !slices.ContainsFunc(l.inlines, func(y jitInline) bool { return int(y.pc) == at }) &&
+					slices.ContainsFunc(k.made, func(t *closure) bool { return t.fn == levels[0].cl.fn }) {
+					l.inlines = append(l.inlines, jitInline{pc: int32(at), cl: levels[0].cl})
+				}
 				r.jitInlineLeft(l, at)
 				if l.inlineReopt {
 					l.inlineReopt = false

@@ -429,9 +429,10 @@ the function's key:
   its sites (`regBigOf`, regCode's `bigSeen`, `regBigSeen`): BigInts in
   the int64 range, from 0 to 2^64-1, or others, on the heap, which
   `Generic` answers as the stack form's tree marks are. An addition,
-  subtraction, multiplication or comparison of BigInts in the int64 range
-  the native handlers make themselves, unmarked: its site learns at its
-  first exit;
+  subtraction, multiplication or comparison of two BigInts held in their
+  Values, which the native handlers make themselves, is marked so too: in
+  a runtime that runs the JIT, the feedback dispatcher's handler of it
+  leaves such a site to Go until it has a mark (below);
 - the register pcs after calls Go went on at, which the code had been built
   with no entry at (`Resumed`, `jitRegResumeSeen`);
 - the elements' kinds, as the stack form's code learns them
@@ -447,7 +448,12 @@ the function's key:
   lowering of the function's register code is made with from there (the hints,
   `jitLearned`'s `regHints`, by register pc, `jitRegLower`): the read
   made by its cell (ir's `Reference`), the addition Go's (`StringAdd`),
-  the additions of an element read of strings too (`stringConcats`).
+  the additions of an element read of strings too (`stringConcats`). An
+  addition the compiler marked an append to an upvalue (`add`'s
+  `RAddAppend`, the stack form's `AddOwned` on its `set_upvalue`) is Go's
+  with its result its own (`Owned`, `abi.GoOpOwned`): Go grows the string
+  the binding alone holds in place (`jitStrAppend`), as the interpreter's
+  `add` does, where a closure's `s += x` had made a new string at each.
 
 A guard's failure invalidates the code; anything else learned marks it to
 be compiled again, valid meanwhile, without a deoptimization (see
@@ -502,9 +508,18 @@ optimized code counts nothing; a run that on-stack replacement took into
 native code ends at a return of the interpreter's (`jitRegLoop`), and
 counts. Nor does Go's dispatcher count, where it runs register frames in
 place of the native handlers (`QJS_NONATIVE`, a verifying build): no
-frequency is known there. None ORs the kinds of value it met into the function's feedback slot
-yet (the native context's `fv`, kept in a register no handler uses: amd64's
-R14, arm64's R15).
+frequency is known there. Its additions, subtractions, multiplications and
+compare-and-branches of two registers (`nativegen`'s `feedbackBigOps`),
+which plain's handlers make of two BigInts held in their Values with no
+Go, look at their operands first: two such BigInts at a site with no mark
+of any kind in its register code's `bigSeen` leave the instruction to Go,
+the exit stub through the table, whose handler makes it and marks the site
+by what it met (`regBigOf`); anything else goes on in plain's handler. A
+site is left so once, and the JIT's first compile makes it natively
+(`regBigSeen`), where it had learned at its first exit from native code,
+deoptimizing. Plain's handlers do none of it. None ORs the kinds of value
+it met into the function's feedback slot yet (the native context's `fv`,
+kept in a register no handler uses: amd64's R14, arm64's R15).
 `TestRegNativeFeedbackSelected` checks a runtime picks its table, and
 `TestRegNativePlainSameWithJIT` that a build with the JIT makes plain's as a
 build without does.
@@ -860,7 +875,15 @@ has them (`callSlots`), the feedback naming the built-in its site's cache
 last called. A call of a leaf the feedback names (`Leaf`) is checked to call
 that function and made natively where native code makes the leaf itself, a
 call of Go of the leaf (`GoLeaf`) otherwise, its result to the call's
-register (`windowLeaf`, `leafMade`). `BigInt(x)` and
+register (`windowLeaf`, `leafMade`). One whose value nothing reads but its
+truth is told so (`CallSite`'s `Unused`), as the stack form's leaf call is
+from the instruction after it, which pops the result (`resultUnused`): a
+register result no instruction pops, so it is the program's liveness that
+says (`windowResultUnused`) -- the register read by nothing after the call,
+or only by a test of its truth or a not just after it, or kept where a
+branch jumps where it is falsy, as `&&` keeps it. Exec's leaf then gives
+back its dummy rather than making an array, replace's makes no string.
+`BigInt(x)` and
 `BigInt.asUintN(n, x)` or `asIntN`'s are made natively too (see
 [BigInts](#bigints)), the width the constant the program copies to the
 window's register on the way to the call alone (the VM's
@@ -1324,7 +1347,16 @@ Register code's are answered by `closure_w`'s register pc
 the instruction names, what it captures by the register code's `Caps` -- a
 register of the maker's, or one of its own captured bindings -- and its
 function lowered for an inlined frame (`madeInline`), called plainly, its
-window the call's. An arrow that reads its this reads the maker's register
+window the call's. One that keeps its arguments only to read them by index
+and count them (`jitRegReadsArguments`) reads the call's (`InlineSite`'s
+`ReadsArguments`), as an inlined call's callee does and the stack form's
+made closure (`closureInline`); any other that keeps them is made and
+called. An exit inside the inlined closure that teaches nothing counts
+against inlining it at its call, as at an inlined call's (`jitInlineLeft`):
+past `jitInlineExits` the call's shape is no longer given (`CallShape`'s
+`notInline`), and the closure is made and called natively -- one whose
+reads past the call's count are Go's had left native code at every call.
+An arrow that reads its this reads the maker's register
 1, as `closure_w` gives it the frame's (`InlineSite`'s `LexThis`), but in
 a derived constructor, whose this may not be bound yet. A scope's end that
 closes a register it captures (`close_regs`, lowered to `ir.CloseUpvalues`

@@ -26,13 +26,18 @@ import (
 // arguments only to read them by index and count them (args_index,
 // args_len): no arguments object made (arguments), none handed on
 // (apply_args), no rest parameter, and no parameter a sloppy function's
-// object would alias -- as the stack form's jitReadsArguments.
+// object would alias -- as the stack form's jitReadsArguments. A closure
+// no call ran yet, a template of one its maker makes (madeInline), is
+// asked by its function's register code, which its first call gets.
 func jitRegReadsArguments(cl *closure) bool {
-	c := cl.reg
-	if c == nil || !c.args || c.rc.KeepsArgs || cl.fn.MappedArguments && cl.fn.ParamCount > 0 {
+	rc := cl.fn.RegCode()
+	if cl.reg != nil {
+		rc = cl.reg.rc
+	}
+	if rc == nil || !(rc.UsesArguments || rc.ForwardsArguments) || rc.KeepsArgs || cl.fn.MappedArguments && cl.fn.ParamCount > 0 {
 		return false
 	}
-	for _, w := range c.rc.Code {
+	for _, w := range rc.Code {
 		switch w.Op() {
 		case bytecode.RArguments, bytecode.RApplyArgs:
 			return false

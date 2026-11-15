@@ -83,8 +83,12 @@ func regHinted(pcs []int32, rpc uint32) bool { return slices.Contains(pcs, int32
 // them (selectNumericProperties), an element read that met what is no
 // number read as it is (ir's Reference). It returns the program pcs of the
 // element reads that read strings (Hints' StringReads), whose additions
-// stringConcats has Go make.
-func regHints(p *ir.Program, h Hints, after bool) []int32 {
+// stringConcats has Go make. An addition the compiler marked an append to
+// an upvalue (RAdd's RAddAppend, the stack form's AddOwned on its
+// set_upvalue, which hintedStringAdds reads) may grow the string the
+// binding alone holds in place (Owned), as the interpreter's rsAdd does:
+// unmarked, a closure's s += x had made a new string at each call.
+func regHints(rc *bytecode.RegCode, p *ir.Program, h Hints, after bool) []int32 {
 	var strs []int32
 	for pc := range p.Code {
 		in := &p.Code[pc]
@@ -94,7 +98,9 @@ func regHints(p *ir.Program, h Hints, after bool) []int32 {
 		rpc := p.Origin[pc]
 		switch {
 		case !after && in.Op == ir.Binary && in.Operator == ir.Add && regHinted(h.StringAdds, rpc):
-			*in = ir.Instruction{Op: ir.StringAdd, Left: in.Left, Right: in.Right, Dest: in.Dest, Generic: in.Generic}
+			w := rc.Code[rpc]
+			*in = ir.Instruction{Op: ir.StringAdd, Left: in.Left, Right: in.Right, Dest: in.Dest, Generic: in.Generic,
+				Owned: w.Op() == bytecode.RAdd && w.X()&bytecode.RAddAppend != 0}
 		case after && in.Op == ir.ArrayRead && (regHinted(h.ElementReads, rpc) || regHinted(h.StringReads, rpc)):
 			in.Reference = true
 			if regHinted(h.StringReads, rpc) {
@@ -696,9 +702,9 @@ func lowerRegLits(rc *bytecode.RegCode, fn *bytecode.Function, m lowering, litHo
 	if regHostOnly(p, rc, fn, m) {
 		return nil, refuse(-1, hostOnly)
 	}
-	regHints(p, m.hints, false)
+	regHints(rc, p, m.hints, false)
 	selectNumericProperties(p, true)
-	stringConcats(p, regHints(p, m.hints, true))
+	stringConcats(p, regHints(rc, p, m.hints, true))
 	markBools(p)
 	p.FrameArgs = fn.HasRest || fn.UsesArguments || fn.MappedArguments || fn.SuperForwards
 	p.FrameCallee = fn.FrameCallee
