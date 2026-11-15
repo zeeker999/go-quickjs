@@ -228,7 +228,9 @@ whose operands are its register instruction's own, the only instruction
 of its origin (`ir.Instruction`'s `WholeOperands`): a literal's field
 whose definition the feedback does not plan, a destructuring's step or
 rest, a private member's read or write its site's cache holds no own field
-of. A private member's read or write (`get_private`, `set_private`) is a
+of, a `get_length` whose guard has failed -- an arguments object's, a
+getter's -- which the stack form's code reads by a call of Go on its frame
+(`ssa.GoHost`). A private member's read or write (`get_private`, `set_private`) is a
 property's read or write of the key its register holds (`ir.Instruction`'s
 `Private`), made natively for the shapes its site's cache holds of the key,
 as the stack form's. A call, `call_w`'s, `call_method_w`'s or `new_w`'s, and
@@ -470,11 +472,22 @@ the function's key:
   and its calls ask nothing more; a construction's, or a call of a
   function with code, keeps it unsettled. A construction nothing taught
   yet, of the function a global's or a captured binding's read before it
-  holds now (`regConstructorNow`), is seeded at a compile
+  holds now, or a data property of an object such reads give --
+  `new NS.A.B(...)`, each read of the register the one before it wrote,
+  followed as the stack form's `jitChainValue` follows them
+  (`regConstructorNow`, `regDefined`) -- is seeded at a compile
   (`jitRegSeedConstruct`), in the code's own frame and in a callee
   inlined, whose own code may never be compiled, as the stack form's
   compiles seed one (`jitSeedCalls`, `jitCalleeObjectAt`); the
-  construction checks its function;
+  construction checks its function. Its site is compiled with its pool
+  whatever the pool holds, the code having Go fill it again when it runs
+  out (`ssa.GoRefill`); a construction Go makes refills it, run out or
+  made for another prototype (`jitRefillPoolsOf`), as at the stack form's
+  exits. A forwarding constructor's construction inlined
+  (`this.k.apply(this, arguments)`, `bytecode.LeafForward`) reads `this.k`
+  and k's `apply` as the construction's object and k find them
+  (`forwardProperty`), not as the forwarder's own caches, which met every
+  class it constructs, do;
 - the literals' pools by register pc (`Literal`: `new_object`'s,
   `new_object_lit`'s, `new_array`'s, `new_array_k`'s and `new_regexp`'s,
   made by `jitObjectLiteral`, `jitArrayLiteral`, `jitRegSharedLiteral` and
@@ -783,9 +796,16 @@ stack form's is.
   again at none of these otherwise; at a sample, at an exit, or at
   a loop's poll, which leaves for it rather than calling Go while it
   learns (`GoPoll`), and a run goes on in the new code (`jitRegGoOnAt`,
-  `jitRegReoptimize`, the stack form's `jitRecompileInRun`). Where Go goes on after a call the code was built
-  with no entry after (`unresumed`), the code is compiled again at once with
-  the entry and goes on in it (`jitRegResumeSeen`), as the stack form's
+  `jitRegReoptimize`, the stack form's `jitRecompileInRun`). The compile is
+  asked with the register pc the frame Go goes on with waits at, and the
+  runs of the code Go is inside after their calls of Go, each learned as
+  resumed first, so that the new code has the entries they go on at, as the
+  stack form's `jitReoptimize` has its runs' and V8's compile for a frame
+  carries its bytecode offset: the call the frame waits after is often the
+  one just learned, which the new code makes natively, with no entry after
+  it. Where Go goes on after a call the code was built with no entry after
+  (`unresumed`) all the same, the code is compiled again at once with the
+  entry and goes on in it (`jitRegResumeSeen`), as the stack form's
   `jitGoOn` does. A recompile refused keeps the code it has.
 
 A change of a function's caches' feedback alone has its code compiled
@@ -2779,7 +2799,16 @@ Allocation). A compile the budget has no room for leaves
 no entry, and is not compiled again until the cache has let some code go
 (its `life`'s `deferred` and `generation`, as the stack form's compiles are
 deferred): asked again at every sample, a callee of Mandreel's was compiled
-again at each call Go made of it. Past `jitMaxDeopts` deoptimizations a
+again at each call Go made of it. A first compile asks for the room its
+code is likely to hold (`perInstr`) before it lowers anything; a compile
+again of a function whose code the cache holds asks only for the room its
+last compile was short of (`reoptRoom`), as the stack form's
+`jitReoptimize`. Placed, the code takes the room of the code it replaces
+-- the cache's, with the code kept beside it for a loop, or that loop's
+code -- as given back, that code held meanwhile (`busy`, `regRoomFor`), as
+the stack form's `roomFor`: counted twice, zlib's loop of ten thousand
+instructions, its code a third of the budget, had its finished compile
+thrown away. Past `jitMaxDeopts` deoptimizations a
 function is refused too. When the OS denies executable
 memory, the runtime marks the JIT unavailable for good.
 

@@ -166,7 +166,7 @@ func TestJITRegGenLearnedJudgedAfresh(t *testing.T) {
 	if !e.life.genLearned || !e.life.reopt {
 		t.Fatal("the step learned asked for no compile again")
 	}
-	ne := r.jitRegReoptimize(cl, cl.reg, e)
+	ne := r.jitRegReoptimize(cl, cl.reg, e, -1)
 	if ne == nil || ne.code == nil {
 		t.Fatal("not compiled again")
 	}

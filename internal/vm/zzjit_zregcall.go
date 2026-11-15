@@ -513,6 +513,10 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 			// new Array() or new Array(n): made from a pool (jitRegAllocSeen).
 			return r.jitRegAllocSeen(f, c, e, rpc, w, o)
 		}
+		// The pool the code takes its objects from, run out or made for
+		// another prototype, filled again, as at the stack form's exits at
+		// a construction (jitRefillPools).
+		r.jitRefillPoolsOf(r.jitRegLearnedFor(f, e), rpc, o)
 		var ok bool
 		if cl, parent, ok = r.jitRegConstructTarget(o, int(w.X())); !ok {
 			return false
@@ -1137,7 +1141,14 @@ func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode
 		return ssa.CallSite{}, false
 	}
 	if pool != nil {
-		if tc, tp, ok := r.jitRegConstructTarget(o, argc); !ok || tc != cl || tp != parent || rc != cl.reg || pool.Count == 0 {
+		// Its pool empty or not: run out, the code has Go fill it again
+		// (ssa's GoRefill), as the stack form's construction site is
+		// given its pool whatever it holds. Refused a site for a pool its
+		// callers had just run out, a construction was compiled as a call
+		// of Go, which fills no pool, for good: RayTrace's
+		// IntersectionInfo's, by the hundred thousand in a run, at random
+		// runs.
+		if tc, tp, ok := r.jitRegConstructTarget(o, argc); !ok || tc != cl || tp != parent || rc != cl.reg {
 			return ssa.CallSite{}, false
 		}
 	}
@@ -2176,7 +2187,7 @@ func (r *Runtime) jitRegUnwind(idx int) (_ Value, _ error, gen bool) {
 			// compiled here, as the stack form's code is once its run has
 			// left (jitRecompileInRun). The levels of it Go is finishing,
 			// a recursion's, go on in the code they hold.
-			r.jitRegReoptimize(l.cl, l.c, l.e)
+			r.jitRegReoptimize(l.cl, l.c, l.e, -1)
 		}
 		if err == errTailCall {
 			// Ended in a call in tail position, its frame given up: the

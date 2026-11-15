@@ -20,12 +20,22 @@ import (
 // regDefined is the value the register instruction just before register
 // pc rpc leaves in register reg, where that instruction reads a binding --
 // a global's (get_global), a captured one's (get_upval, get_upval_check)
-// -- as it holds it now, as the stack form's jitChainValue finds what the
-// code reads before an operation: what the code compiled for it checks it
-// still reads.
+// -- or a data property of an object a read just before it gives so
+// (get_prop), as it holds it now, as the stack form's jitChainValue finds
+// what the code reads before an operation: what the code compiled for it
+// checks it still reads. A namespace's constructor, new
+// Flog.RayTracer.Vector(...), is three reads, each of the register the
+// one before it wrote; seeded from the global alone, every construction
+// of RayTrace's had been learned at a call of Go, one compile at a time.
 func (f *jitRegFeedback) regDefined(rpc, reg int) (Value, bool) {
+	return f.regChainValue(rpc, reg, jitChainReads)
+}
+
+// regChainValue is regDefined's, following at most n reads in all, as
+// jitChainValue does.
+func (f *jitRegFeedback) regChainValue(rpc, reg, n int) (Value, bool) {
 	cl := f.fb.cl
-	if cl == nil || rpc < 1 || rpc > len(f.rc.Code) {
+	if cl == nil || n <= 0 || rpc < 1 || rpc > len(f.rc.Code) {
 		return Undefined, false
 	}
 	w := f.rc.Code[rpc-1]
@@ -33,6 +43,23 @@ func (f *jitRegFeedback) regDefined(rpc, reg int) (Value, bool) {
 		return Undefined, false
 	}
 	switch w.Op() {
+	case bytecode.RGetProp:
+		// A property of the object the read just before it left in the
+		// register this one reads (jitChainReceiver), its own data
+		// property's value now.
+		site := int(w.C())
+		if site >= len(f.rc.SiteName) || int(f.rc.SiteName[site]) >= len(cl.names) {
+			return Undefined, false
+		}
+		recv, ok := f.regChainValue(rpc-1, int(w.B()), n-1)
+		if !ok || !recv.IsObject() {
+			return Undefined, false
+		}
+		prop := recv.Object().getOwnVisible(cl.names[f.rc.SiteName[site]])
+		if !prop.ok() || prop.flags()&propAccessor != 0 {
+			return Undefined, false
+		}
+		return prop.value(), true
 	case bytecode.RGetGlobal:
 		name, ok := f.name(rpc-1, w.B())
 		if !ok {
