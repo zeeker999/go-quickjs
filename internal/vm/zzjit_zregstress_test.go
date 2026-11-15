@@ -8,9 +8,9 @@ import (
 )
 
 // regStressForTest gives r what CI's stress step gives every runtime
-// (QJS_JIT_STRESS=threshold,budget=3,deopt=7): a function compiled at its
-// first call, every call a sample, a poll every three back edges, and
-// every seventh poll finishing the invocation in the interpreter. The
+// (QJS_JIT_STRESS=threshold,budget=3,deopt=7): a function compiled once
+// it has run, a poll every three back edges, and every seventh poll
+// finishing the invocation in the interpreter. The
 // register tests' runtimes run without it (regNativeRuntimes), their counts
 // not written for it; their answers are checked under it here.
 func regStressForTest(r *Runtime, c jitStressConfig) {
@@ -18,7 +18,6 @@ func regStressForTest(r *Runtime, c jitStressConfig) {
 	c.threshold = true
 	r.jitStress = c
 	r.jitState().stressBudget = int(c.budget)
-	r.interruptCounter = 1
 }
 
 // regStressConfigs are the stresses TestJITRegStressAgrees runs under: CI's,
@@ -122,41 +121,4 @@ function evens(n) { var s = 0; for (var i = 0; i < n; i++) s += even(40 + (i & 7
 			}
 		}
 	})
-}
-
-// Where a function is compiled at its first call, every call is a sample
-// of the register tier's (jitRegStressSample): an interrupt check rearms
-// the calls' budget so too, whatever path spent it. Rearmed in full by a
-// path that takes no sample -- a call a built-in's loop or the callback
-// path makes -- the next sample came a full budget of calls later, and a
-// function called among them, givenSetup's throwsAt under the Go handlers,
-// was never compiled.
-func TestJITRegStressSamplesEveryCall(t *testing.T) {
-	r := New(Config{JIT: true})
-	t.Cleanup(r.Close)
-	regStressForTest(r, jitStressConfig{})
-	if err := r.checkInterruptNow(); err != nil {
-		t.Fatal(err)
-	}
-	if r.interruptCounter != 1 {
-		t.Errorf("the calls' budget rearmed to %d, not to the next call", r.interruptCounter)
-	}
-	jitDefaultsForTest(r)
-	if err := r.checkInterruptNow(); err != nil {
-		t.Fatal(err)
-	}
-	if r.interruptCounter != interruptCheckInterval {
-		t.Errorf("the calls' budget rearmed to %d at the JIT's own thresholds", r.interruptCounter)
-	}
-	// Without the JIT, whatever the threshold: no sample to take, the
-	// native handlers' calls left to Go at every call had they been one.
-	plain := New(Config{})
-	t.Cleanup(plain.Close)
-	plain.jitCallThreshold = 1
-	if err := plain.checkInterruptNow(); err != nil {
-		t.Fatal(err)
-	}
-	if plain.interruptCounter != interruptCheckInterval {
-		t.Errorf("without the JIT, the calls' budget rearmed to %d", plain.interruptCounter)
-	}
 }

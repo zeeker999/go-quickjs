@@ -299,9 +299,11 @@ func TestJITRegLoopsLeaving(t *testing.T) {
 			}
 			// 20 calls of 2 fills of 4096 stores, those to a sparse array
 			// Go's: a few runs' worth of them left at before the loop is
-			// judged not to pay, three times as many where the run went on
-			// natively after each.
-			if n := st.HostOps["set_index"]; n > 2048 {
+			// judged not to pay, and again each time a loop's checks of it
+			// retry it (jitRegRetrySlow, which counts them as calls, as the
+			// stack form's tryJITAt does) -- 2112 -- and 3072 where the run
+			// went on natively after each.
+			if n := st.HostOps["set_index"]; n > 2560 {
 				t.Errorf("set_index left to Go %d times, the loop going on natively after each", n)
 			}
 		})

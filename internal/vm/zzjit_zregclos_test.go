@@ -233,3 +233,40 @@ func TestJITRegCapturedAppendInlined(t *testing.T) {
 		})
 	}
 }
+
+// A closure capturing by value its loop's let, made by Go for native code
+// whose cells pool ran dry (jitRegCellsClosure), took the let's value from
+// its register, where the code does not keep it: the cell native code
+// took at the turn's start (mir's cellsClose) is open on no register until
+// the exit, and the register held the turn before's value. g() answered
+// the k of the turn before at every refill of the pool.
+func TestJITRegByValueFromCells(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	src := `
+function turns(n) { var bad = [], fs = []; for (var i = 0; i < n; i++) { const k = i * 2; var g = () => k; var v = g(); if (v !== i * 2 && bad.length < 6) bad.push(i + "=" + v); if (i % 64 == 0) fs.push(g) } return bad.join(" ") + "|" + fs.length }
+function mixed(n) { var t = 0, fs = []; for (var i = 0; i < n; i++) { const k = i * 2; var g = () => k + t; t = (t + g()) % 1000003; if (i % 64 == 0) fs.push(g) } var u = 0; for (var h of fs) u += h(); return t + ":" + u }
+`
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, src)
+			for _, name := range []string{"turns", "mixed"} {
+				for k := range 20 {
+					var got [2]string
+					for i, r := range rts {
+						fn, _ := r.GetProp(Obj(r.Global()), r.Intern(name))
+						v, err := r.Call(fn, Undefined, []Value{Float(500)})
+						got[i] = regNativeShow(r, v, err)
+					}
+					if got[0] != got[1] {
+						t.Fatalf("%s, call %d: with the JIT %q, without %q", name, k, got[0], got[1])
+					}
+				}
+			}
+		})
+	}
+}

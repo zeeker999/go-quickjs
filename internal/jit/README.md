@@ -508,27 +508,23 @@ on the same side of the inliner's cut (`ssa.MinInliningFrequency`).
 
 ## Tier-up and on-stack replacement
 
-No handler of the register interpreter's dispatchers -- the Go handler
-table's or the native handlers' -- does any work for tier-up
-(`zzjit_zregtier.go`). A function is compiled once the interpreter has
-spent a budget on it, the stack form's (`jitTierBudget`): `jitCallThreshold`
-invocations (400), each the function's length in register instructions
-(`jitRegBudget`). Nothing counts each invocation; the two budgets the
-dispatchers already spend are its samples, each spending the work it
-stands for:
+A function is compiled once the interpreter has spent a budget on it, the
+stack form's (`jitTierBudget`): `jitCallThreshold` invocations (400), each
+the function's length in register instructions (`jitRegBudget`), each
+counted, as the stack form's invocations spend it one by one
+(`jitTierWork`) -- V8's interrupt budget is a function's too
+(`zzjit_zregtier.go`):
 
-- a call that spends the interrupt budget -- `rhCallW`'s and `regEnterW`'s
-  check, which the native call handler leaves to `rhCallW` -- spends its
-  callee's budget by the calls the interrupt budget counted, each the
-  callee's length (`jitRegCallSample`, `jitRegSample`, `jitRegCallWork`),
-  and a call site of the interpreter's whose callee has code is sent to
-  `regEnterW`, which enters it (`regCallJIT`) -- its only way there: a
-  site whose cache was filled before its callee had code enters it in the
-  interpreter until sampled. A sample of a callee that had code already
-  takes the next sooner (`jitRegResample`, 64 calls), so that such sites
-  are, which calls of compiled code had starved -- AWFY's Json's parse had
-  run in the interpreter, read by read through `regEnterW`; the next
-  sample then spends those 64 calls' work (`jitState`'s `callsNext`);
+- a run that returns spends its function's budget by its length: the
+  feedback dispatcher's `ret` and `ret_undef` (nativegen's `feedback.go`;
+  the Go table's `rhRet` and `rhRetUndef`, `regTickRet`) count down the
+  runs left of it (`closureCode`'s `jitRegTick`, armed by `jitRegArm` to
+  what is left over the length), and once none is set the function's
+  `jitEnters`, which every call of it reads: its next call goes to the
+  JIT (`jitRegEnter`), which spends the runs counted since it was armed
+  (`jitRegCallTier`) and compiles it if the budget is spent, or arms the
+  count again. A run that ends in native code, or a throw, counts
+  nothing, as no invocation the stack form's native code makes does;
 - a back edge that spends the back-edge budget -- `regBackEdge`, which every
   dispatcher's jump leaves to its Go slow function -- spends its frame's
   function's by the back edges the budget counted, each the loop's length
@@ -536,12 +532,13 @@ stands for:
   `JumpLoop` spends its bytecodes' distance, the budget varied from one
   expiry to the next (`backEdgeBudget`).
 
-The calls' counter runs out only at calls: a loop's check -- the
-interpreter's at a back edge, native code's poll -- checks for an interrupt
-without rearming it (`checkInterruptPoll`). Rearmed at every thousand back
-edges, it had run out only where calls outnumbered back edges four to one,
-and a program of interpreted callers calling compiled code that polls --
-AWFY's Towers -- had sampled its callers once a second.
+Every call the interpreter makes of a function whose `jitEnters` is set
+goes to the JIT, as the stack form's calls look for their callee's code
+(`tryJITFrame`): `rhCallW`'s hit and `regEnterW`, `regEnterScoped` (a
+host's call), `regEnterFrame`; and the native call handler's, which calls
+Go for it with no exit, as it calls a built-in (`nativeJITCall`, by the
+exit's protocol through `callH`). A site's cache holds a callee with code
+as any other (`nativeCallMiss`, `regCallSlow`); no site is marked for it.
 
 **Compiling.** A function's first sample begins its budget, as the stack
 form's `jitWarmFor` makes its entry warm, and notes its caches' feedback
@@ -549,10 +546,8 @@ form's `jitWarmFor` makes its entry warm, and notes its caches' feedback
 the budget, its caches' feedback unchanged since -- a change raises what is
 left to `jitICThreshold` invocations' worth (`jitRegWarmUp`), as V8's
 `NotifyICChanged` delays a tier-up -- or at its first sample where the
-runtime compiles at a first call (`QJS_JIT_STRESS`'s threshold, which makes
-every call a sample, `jitRegStressSample`: an interrupt check rearms the
-calls' budget to the next call too, whatever path spent it,
-`jitSamplesEveryCall`). What outlives a function's
+runtime compiles at a first call (`QJS_JIT_STRESS`'s threshold): a call's,
+its second call, the first run's return having counted it. What outlives a function's
 compiles -- what its code learned, its budget, its deoptimizations, what its
 runs did -- is its `regLearned` entry (`jitRegEntry`'s `life`); its code is
 kept on its template's `closureCode` (`jitReg`). A callee native callers
@@ -709,27 +704,48 @@ made) and go on in that code, kept beside the function's (`osr`, `osrOf`)
 for the frames that wait there next and let go of with it
 (`jitRegLoopCode`), as the stack form's `jitLearnLoopEntry` has it. A run
 in it stays in it at its exits while the function's code is the one it
-was compiled beside.
+was compiled beside. `FrameAt` is a header's register pc, the unit escape
+analysis compares with its headers' PCs. Any compile a frame waits at a
+loop for -- the check that spends the budget (`jitRegLoop`), a compile
+for what the code learned made in a run of a function hardly called yet,
+at the loop around where the frame goes on (`regLoopAround`) -- keeps
+that loop's entry the same way (`jitRegFrameAt`, the stack form's
+`jitFrameAt`), unless native callers call the function's code (its
+link's `refs`).
 
-**Profit.** Each native stretch -- an entry, a call of Go -- costs what an
-exit and an entry would (`jitSSAMinWork`), against the work the stretch did
-(`jitRegStretchWork`). Every `jitSSAProbe` stretches, code whose work does
-not make up for them Go no longer enters (`entrySlow`), native callers
-calling it still; stretches begun at a loop are judged apart (`loopSlow`)
--- and so are a run's stretches after its host exits, where native code
-goes on at once as the stack form's run is entered at the loop again, a
-run that left at a loop judged slow leaving to the interpreter after the
-instruction Go ran -- and so are the settled calls of Go -- not a call of a
-function it may come to call natively -- of a run begun at a loop
-(`jitRegRunGoProfit`), as the stack form's `jitSSAProfit` and
-`jitRunGoProfit` judge: the call of Go after which they are judged not to
-pay is the run's last, the interpreter going on after it (`jitRegRun`'s
-`slow`), as the stack form's run leaves after it. Go enters such code
-again after `jitNativeRetry` calls of it, doubled each time
-(`jitRegRetrySlow`), and compiled again it is judged afresh: entered, and
-called natively, until the new code is found not to pay in turn
-(`jitRegCached`, as the stack form's `jitReoptimize`). `JITReport` shows it as slow, with the calls the
-interpreter made of it.
+**Profit.** Each native stretch -- an entry, the code entered again after
+an exit or a poll, a call of Go -- costs what an exit and an entry would
+(`jitSSAMinWork`), against the work the stretch did (`jitRegStretchWork`):
+its back edges, at the mean length of the function's loops in the
+program's instructions (`irLoopMean`, the stack form's `jitLoopLength`),
+and the distance to where it left. Every `jitSSAProbe` stretches (the
+stack form's `entries + goCalls`), code whose work does not make up for
+them Go no longer enters (`entrySlow`), native callers calling it still;
+stretches begun at a loop are judged apart (`loopSlow`) -- and so are a
+run's stretches after its host exits, where native code goes on at once as
+the stack form's run is entered at the loop again, a run that left at a
+loop judged slow leaving to the interpreter after the instruction Go ran
+-- and so are the settled calls of Go -- not a call of a function it may come to call
+natively -- of a run begun at a loop (`jitRegRunGoProfit`), unless the code
+calls functions natively (`jitRegCodeCallsNatively`): judged slow there,
+the run leaves once that call is made (`jitRegRun`'s `leave`). A native
+callee's calls of Go are judged too, beyond its native callers' calls in
+(`jitRegCalleeProfit`, the stack form's `jitCalleeProfit`): code that does
+not pay is neither entered nor called natively (`notNative`). This is the
+stack form's `jitSSAProfit`, `jitRunGoProfit` and `jitCalleeProfit`. Go
+enters such code again after `jitNativeRetry` calls of it, doubled each
+time (`jitRegRetrySlow`), a loop's checks of code judged slow at loops
+counting as such calls, as the stack form's `tryJITAt` counts them; and
+compiled again it is judged afresh: entered, and called natively, until the
+new code is found not to pay in turn (`jitRegCached`, as the stack form's
+`jitReoptimize`). What Go declines counts toward the work the function
+spends for a compile for what it learned (`jitRegSpent`'s `slowCalls`), as
+its native callees' work between their calls of Go does (`calleeWork`).
+A resumption of a generator's or an async function's code judged slow is
+declined the same way, and the next `jitSSAProbe` resumptions run in the
+interpreter without a look at the code (`jitResumeSkip`), as the stack
+form's `jitResume` has it. `JITReport` shows it as slow, with the calls
+the interpreter made of it.
 
 ## The SSA build
 

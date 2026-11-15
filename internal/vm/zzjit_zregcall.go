@@ -1152,7 +1152,12 @@ func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 	ctxTop := s.ctxTop
 	s.ctxTop = max(ctxTop, idx+1)
 	top := r.stackTop
+	// A native callee's call of Go, judged as the stack form's
+	// (jitCalleeProfit), the next one's work counted from it.
+	cpc := int(ctx.ExitPC)
+	r.jitRegCalleeProfit(l.e, cpc)
 	ok := r.jitRegGoCallOn(ctx, idx, jitRegRun{f: f, c: l.c, e: l.e, wb: l.wb, own: -1, root: root})
+	s.regGoMark = jitRegGoMark{e: l.e, stretch: s.entries, edges: r.backEdges - s.pollCredit, rpc: cpc}
 	s.ctxTop = ctxTop
 	r.jitRegPopLevel(f, l.wb, false)
 	if lazy != 0 {
@@ -1227,7 +1232,12 @@ func (r *Runtime) jitRegGoCallLevels(ctx *abi.Context, idx, root int) bool {
 		s.ctxTop = max(ctxTop, idx+1)
 		last := &levels[len(levels)-1]
 		top := r.stackTop
+		// A native callee's call of Go, judged as the stack form's
+		// (jitCalleeProfit), the next one's work counted from it.
+		cpc := int(ctx.ExitPC)
+		r.jitRegCalleeProfit(last.e, cpc)
 		ok = r.jitRegGoCallOn(ctx, idx, jitRegRun{f: frames[len(frames)-1], c: last.c, e: last.e, wb: last.wb, own: -1, root: root})
+		s.regGoMark = jitRegGoMark{e: last.e, stretch: s.entries, edges: r.backEdges - s.pollCredit, rpc: cpc}
 		s.ctxTop = ctxTop
 		for k := len(frames) - 1; k >= 0; k-- {
 			r.jitRegPopLevel(frames[k], levels[k].wb, levels[k].gen != nil)

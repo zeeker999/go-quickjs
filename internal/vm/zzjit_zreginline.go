@@ -332,6 +332,10 @@ func (r *Runtime) jitRegInlineLeft(f *frame, x *jitRegInlineLevel, owner *jitReg
 		}
 	}
 	s.interpreted++
+	if s.reporting {
+		s.regEndWhy = "inlined callee left"
+		s.noteRegEnded(c, pc)
+	}
 	v, err = r.runReg(f, c, pc)
 	return v, err, learned
 }

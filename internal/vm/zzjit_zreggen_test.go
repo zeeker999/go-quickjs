@@ -224,6 +224,8 @@ func TestJITRegGenSteps(t *testing.T) {
 			}
 			rts := regNativeRuntimes(t, regGenStepSrc)
 			rts[0].SetJITReport(true)
+			// Counted: what stress makes of the compiles' order is not.
+			rts[0].jitStress = jitStressConfig{}
 			for _, tc := range cases {
 				for range 12 {
 					var got [2]string

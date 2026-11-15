@@ -52,6 +52,7 @@ var jitReport struct {
 	goCallOps           map[string]uint64
 	nested, levels      uint64
 	levelsMade, putOff  uint64
+	ended               map[string]uint64
 }
 
 // reportStart has the runtime's JIT note what it skips, for the report,
@@ -352,6 +353,27 @@ func (r runtimeOf) Report(name string) {
 			n, rs.Levels-jitReport.levels, rs.LevelsPutOff-jitReport.putOff, rs.LevelsMade-jitReport.levelsMade)
 	}
 	jitReport.nested, jitReport.levels, jitReport.levelsMade, jitReport.putOff = rs.NestedGoCalls, rs.Levels, rs.LevelsMade, rs.LevelsPutOff
+	// The runs of register code that finished in the interpreter, by why
+	// they ended there, where they left and in what function, the most
+	// first.
+	ops = ops[:0]
+	for k, n := range rs.Ended {
+		if d := n - jitReport.ended[k]; d != 0 {
+			ops = append(ops, hostOp{k, d})
+		}
+	}
+	jitReport.ended = rs.Ended
+	slices.SortFunc(ops, func(a, b hostOp) int { return cmp.Or(cmp.Compare(b.n, a.n), cmp.Compare(a.op, b.op)) })
+	if len(ops) > 8 {
+		ops = ops[:8]
+	}
+	if len(ops) != 0 {
+		fmt.Printf("  jit: register runs ended in the interpreter:")
+		for _, o := range ops {
+			fmt.Printf(" %s %d;", o.op, o.n)
+		}
+		fmt.Println()
+	}
 	var used, other []vm.JITFunction
 	now := map[string]vm.JITFunction{}
 	for _, f := range v.JITReport() {

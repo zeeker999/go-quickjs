@@ -136,6 +136,9 @@ function leaf(x) { for (var k = 0; k < 4; k++) x.v = (x.v + k) | 0 }
 function rec(d) { if (d == 0) { leaf(o); return } rec(d - 1); rec(d - 1) }
 function run() { rec(13); return o.v }
 `
+	// Called, not inlined: rec's code, compiled first, its runs counted
+	// as leaf's are, would have inlined leaf, compiled never on its own.
+	regNoInline(t)
 	rts := regNativeRuntimes(t, src)
 	r := rts[0]
 	r.jitStress = jitStressConfig{}
@@ -233,39 +236,76 @@ function g(n) { return f(n) }
 	}
 }
 
-// TestJITRegOSRAtDroppedEntry runs osrSetup's sum -- objects escape
-// analysis leaves unmade carried across its loop, which drops the loop's
-// entry -- as the stack form's TestJITLearnsLoopEntry does: called often,
-// its code is compiled without the entry, and a call that leaves the loop
-// at a turn with no entry after must have the frame go on natively all the
-// same: found twice at the header with no entry, the function is compiled
-// apart with the entry kept (jitRegLoopCode), as jitLearnLoopEntry has it.
-// Before, the frame ran the rest of the loop in the interpreter.
+// TestJITRegOSRAtDroppedEntry compiles a function whose loop carries an
+// object escape analysis leaves unmade, which drops the loop's entry
+// (ssa.Func's Unentered, register pcs both), and checks, as the stack
+// form's TestJITLearnsLoopEntry does: that a compile a frame waiting at the
+// loop asks for keeps the entry (jitRegFrameAt, the stack form's
+// jitFrameAt); and that a frame found twice at the loop's header with no
+// entry has the function compiled apart with it (jitRegLoopCode, as
+// jitLearnLoopEntry), the code it goes on in giving what the interpreter
+// gives. Before, the dropped headers were kept as instructions of the
+// program mapped through it as though they were (never matching), the
+// compile for the frame asked an instruction as FrameAt (dropping the
+// entry again), and no other compile asked one at all.
 func TestJITRegOSRAtDroppedEntry(t *testing.T) {
-	rts := regNativeRuntimes(t, osrSetup)
-	r := rts[0]
-	r.jitStress = jitStressConfig{}
-	r.SetJITWarmUp(1, 1)
-	for _, round := range osrRounds("sum", "") {
-		var got [2]string
+	const src = `
+function sum(n) { var s = { v: n - n }, i = 0; do { s.v = s.v + i; i++ } while (i < n); return s.v }
+`
+	regBothMarking(t, func(t *testing.T) {
+		rts := regNativeRuntimes(t, src)
+		r := rts[0]
+		r.jitStress = jitStressConfig{}
+		r.SetJITWarmUp(1000, 1000)
+		fv, _ := r.GetProp(Obj(r.Global()), r.Intern("sum"))
+		for range 4 {
+			// The site's caches filled, nothing compiled.
+			if v, err := r.Call(fv, Undefined, []Value{Float(10)}); regNativeShow(r, v, err) != "45" {
+				t.Fatalf("sum(10) = %q", regNativeShow(r, v, err))
+			}
+		}
+		cl := fv.Object().fn().closure
+		c := cl.reg
+		bl := c.rc.BackLive
+		if len(bl) != 2 {
+			t.Fatalf("sum has %d loops, want 1", len(bl)/2)
+		}
+		q := int(bl[0])
+		header := q + 1 + int(regJumpOff(regAt(c.code, q)))
+		key := r.jitRegKeyOf(cl)
+		e := r.jitRegCompile(cl, c, key, false, 0)
+		if e == nil || e.code == nil {
+			t.Fatalf("sum not compiled: %+v", e)
+		}
+		if len(e.unentered) != 1 || e.unentered[0] != header || e.isLoop(header) {
+			t.Fatalf("entries dropped at %v, loops %v; want the header, register pc %d, dropped", e.unentered, e.loops, header)
+		}
+		// A compile a frame waiting at the loop asks for keeps the entry.
+		r.jitFrameFn, r.jitFramePC = cl.fn, header
+		kept := r.jitRegCompile(cl, c, key, false, 0)
+		r.jitFrameFn = nil
+		if kept == nil || kept.code == nil || !kept.isLoop(header) || len(kept.unentered) != 0 {
+			t.Fatalf("a compile for a frame at the header kept no entry there: %+v", kept)
+		}
+		r.jitRegCached(key, e)
+		cl.closureCode.setJITReg(e)
+		// A frame found at the header twice with no entry: compiled apart.
+		f := &frame{cl: cl}
+		if o := r.jitRegLoopCode(f, c, e, header); o != nil {
+			t.Fatalf("compiled at the first check")
+		}
+		o := r.jitRegLoopCode(f, c, e, header)
+		if o == nil || e.osr != o || r.jit.osrLearned != 1 {
+			t.Fatalf("a frame at a loop whose entry was dropped had no code with it: %v", o)
+		}
+		if _, ok := o.loopEntry(header); !ok {
+			t.Fatalf("the code compiled apart has no entry at the header")
+		}
 		for i, rt := range rts {
-			v, err := rt.Run(compileForTest(t, round))
-			got[i] = regNativeShow(rt, v, err)
+			fn, _ := rt.GetProp(Obj(rt.Global()), rt.Intern("sum"))
+			if v, err := rt.Call(fn, Undefined, []Value{Float(100000)}); regNativeShow(rt, v, err) != "4999950000" {
+				t.Fatalf("runtime %d: sum(100000) = %q, want 4999950000", i, regNativeShow(rt, v, err))
+			}
 		}
-		if got[0] != got[1] {
-			t.Fatalf("%s: with the JIT %q, without %q", round, got[0], got[1])
-		}
-	}
-	fv, _ := r.GetProp(Obj(r.Global()), r.Intern("sum"))
-	e := fv.Object().fn().closure.closureCode.jitReg
-	if e == nil {
-		t.Fatalf("sum not compiled")
-	}
-	t.Logf("unentered %v, loops %v, osr %v, learned %d", e.unentered, e.loops, e.osr != nil, r.jit.osrLearned)
-	if len(e.unentered) == 0 {
-		t.Skipf("sum's code kept every loop's entry")
-	}
-	if e.osr == nil || r.jit.osrLearned == 0 {
-		t.Errorf("a frame at a loop whose entry was dropped never had code with it")
-	}
+	})
 }

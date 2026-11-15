@@ -13,7 +13,7 @@ import (
 // and R9, which plain's handlers set before they read them.
 func feedbackAMD64(v *variant) (*block, error) {
 	a := &Asm{}
-	counts := feedbackCounts()
+	counts, tick, enters := feedbackCounts(), feedbackTick(), feedbackEnters()
 	at := map[bytecode.ROp]int{}
 	labels := map[bytecode.ROp]Label{}
 	for _, op := range handlerOps {
@@ -32,6 +32,13 @@ func feedbackAMD64(v *variant) (*block, error) {
 			a.Jcc(CondE, skip)
 			a.Load(R8, R9, counts)
 			a.IncMem(R8, 0)
+			// The budget's runs left, and the next call Go's at none.
+			a.Bind(skip)
+			skip = a.NewLabel()
+			a.DecMem(R9, tick)
+			a.Jcc(CondG, skip)
+			a.MovImm(R8, 1)
+			a.Store8(R9, enters, R8)
 		} else {
 			// counts[1+C]++, the calls at site C.
 			a.MovRR(RCX, RAX)

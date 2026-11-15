@@ -356,6 +356,14 @@ func (r *Runtime) jitRegCellsClosure(ctx *abi.Context, f *frame, c *regCode, e *
 		return false
 	}
 	if t.fn.CapturesByValue && !level {
+		// Its captured registers' values copied from their cells, where
+		// the code keeps them: a cell native code took at a scope's end
+		// (mir's cellsClose) is open on no register until the exit, the
+		// register holding the turn before's value -- a closure made here
+		// for a pool run dry read it, () => k the k of the turn before.
+		for k, reg := range regs {
+			r.stack[wb+reg] = *cells[k].slot
+		}
 		keepClosure(ctx, Obj(regMadeClosure(newClosureByValue[struct{}](r, f, t, caps, wb))))
 		return true
 	}
