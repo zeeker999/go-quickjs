@@ -37,7 +37,7 @@ func TestPureStoreRefusalIsNotAMiss(t *testing.T) {
 // be answered without a frame, and so the one that should stop trying.
 func TestPureRefusalIsTheCallersMiss(t *testing.T) {
 	t.Parallel()
-	r := newOldTiersForTest(Config{})
+	r := New(Config{})
 	defer r.Close()
 	v, err := r.Run(compileForTest(t, `
 		function T() { this.state = 0; this.list = [] }

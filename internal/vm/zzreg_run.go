@@ -27,9 +27,6 @@ import (
 // they add come after every function there was: the interpreter's hot
 // functions keep their addresses, and only the closures move.
 
-// regTier turns the register interpreter on for functions not yet run.
-var regTier atomic.Bool
-
 // regsBuilt counts the functions given register code.
 var regsBuilt atomic.Int64
 

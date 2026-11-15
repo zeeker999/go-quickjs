@@ -120,18 +120,6 @@ func arraySamplesLetGo[_ any](r *Runtime) {
 	jitLiteralArraysLetGo[struct{}](r)
 }
 
-// arrayEmptyOp builds new_array of no elements at pc, or reports that it
-// did not, for op's node.
-func arrayEmptyOp[_ any](b *tbuilder, pc int) bool {
-	if !b.spill() {
-		return false
-	}
-	n := &arrayEmptyNode[struct{}]{site: b.arraySites, pc: int32(pc)}
-	b.arraySites++
-	b.push(n.make)
-	return true
-}
-
 // arrayEmptyNode is an empty literal in the tree tier: its site's index in
 // closureCode.arrays, the build's count of them, and its instruction.
 type arrayEmptyNode[_ any] struct {
@@ -152,16 +140,16 @@ func arraySiteNew[_ any](cl *closureCode, site int, pc int32) *arrayRoom {
 
 // make is the node: the array, with the site's room, and the sample taken
 // and the last one looked at where the site is sampling.
-func (n *arrayEmptyNode[_]) make(c *tctx) Value {
-	if c.r.meter != nil {
-		return Obj(c.r.newArrayFrom(nil))
+func (n *arrayEmptyNode[_]) make(r *Runtime, cc *closureCode) Value {
+	if r.meter != nil {
+		return Obj(r.newArrayFrom(nil))
 	}
 	var s *arrayRoom
-	if n.site < len(c.arrays) {
-		s = c.arrays[n.site]
+	if n.site < len(cc.arrays) {
+		s = cc.arrays[n.site]
 	}
 	if s == nil {
-		s = arraySiteNew[struct{}](c.closureCode, n.site, n.pc)
+		s = arraySiteNew[struct{}](cc, n.site, n.pc)
 	}
 	track := s.wait == 0
 	if track {
@@ -184,17 +172,17 @@ func (n *arrayEmptyNode[_]) make(c *tctx) Value {
 	if s.room == 0 {
 		// newArrayObject of no room, for what it would ask of n.
 		ao := new(arrayObject)
-		ao.Object = Object{shape: rootFor(ClassArray, c.r.proto.array), class: ClassArray,
+		ao.Object = Object{shape: rootFor(ClassArray, r.proto.array), class: ClassArray,
 			flags: objExtensible | objArrayLengthWritable | objHasExt}
 		ao.side.elems = ao.inline[:0]
 		a = &ao.Object
 	} else {
-		a = newArrayObject(c.r.proto.array, s.room)
+		a = newArrayObject(r.proto.array, s.room)
 		a.extOf().elems = a.elemsOf()[:0]
 	}
 	if track {
 		if !s.listed {
-			c.r.arraySamples = append(c.r.arraySamples, s)
+			r.arraySamples = append(r.arraySamples, s)
 			s.listed = true
 		}
 		s.sample = a

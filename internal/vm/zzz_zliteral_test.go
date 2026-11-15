@@ -72,19 +72,8 @@ const literalTestWant = "a=0,b=1,c=key,d=true,e=null,f=0,g=false,h=end | x=x0,y=
 // side effects, in the tree tier as in the interpreter, as Node does.
 func TestTreeObjectLiterals(t *testing.T) {
 	t.Parallel()
-	for _, c := range compileForTest(t, literalTestSrc).Constants {
-		if c.Kind != bytecode.ConstFunction || c.Fn == nil {
-			continue
-		}
-		switch c.Fn.Name {
-		case "mixed", "order", "dup", "spread", "acc", "proto", "idx", "nested", "big", "grown", "upv", "assign", "cond", "args2":
-			if buildTree(c.Fn) == nil {
-				t.Errorf("%s is not built as a tree", c.Fn.Name)
-			}
-		}
-	}
-	for _, tree := range []bool{true, false} {
-		r := newOldTiersTreeForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, literalTestSrc))
 		r.Close()
 		if err != nil {
@@ -96,7 +85,7 @@ func TestTreeObjectLiterals(t *testing.T) {
 	}
 	// Past the first two objects, the site knows the shape the fields lead
 	// to, which its objects are made with.
-	r := newOldTiersForTest(Config{})
+	r := New(Config{})
 	defer r.Close()
 	v, err := r.Run(compileForTest(t, `function mixed(j) { let _k = 0; return { a: j, b: j + 1, c: "key", d: true, e: null, f: j, g: false, h: "end" } }
 		let o; for (let i = 0; i < 4; i++) o = mixed(i); o`))

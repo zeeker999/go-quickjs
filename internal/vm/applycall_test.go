@@ -2,9 +2,6 @@ package vm
 
 import (
 	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
 // TestApplyArgumentsCallsDirectly pins f.apply(this, arguments) -- and a
@@ -34,8 +31,8 @@ func TestApplyArgumentsCallsDirectly(t *testing.T) {
 		try { fwdClass() } catch (e) { out.push(e instanceof TypeError) }
 		try { fwdThrow() } catch (e) { out.push(/thrower/.test(e.stack), /fwdThrow/.test(e.stack)) }
 		[out.join(), Point.prototype.initialize]`
-	for _, tree := range []bool{false, true} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatalf("tree=%v: %v", tree, err)
@@ -44,7 +41,7 @@ func TestApplyArgumentsCallsDirectly(t *testing.T) {
 		if got, want := res[0].String().Go(), "601,302,object,true,true,true,true"; got != want {
 			t.Errorf("tree=%v: got %s, want %s", tree, got, want)
 		}
-		if fd := res[1].Object().fn(); tree && fd.treeCall == nil {
+		if fd := res[1].Object().fn(); tree && fd.regCall == nil {
 			t.Errorf("initialize, called by apply, was not given its tree's call")
 		}
 		r.Close()
@@ -97,15 +94,9 @@ func TestForwarderMethodsByShape(t *testing.T) {
 		r.join("; ")`
 	const want = "440000; 1; 20; proto3; 1:40; undefined:50; own6; undefined; 8; one1; two2; Error: boom | at Object.initialize | at new <anonymous>"
 	for _, mode := range []string{"stack", "tree", "reg"} {
-		compiler.SetRegisterForm(mode == "reg")
 		fn := compileForTest(t, src)
-		compiler.SetRegisterForm(bytecode.RegDefault())
-		SetTreeTier(mode != "stack")
-		SetRegTier(mode == "reg")
 		r := New(Config{})
 		v, err := r.Run(fn)
-		SetRegTier(bytecode.RegDefault())
-		SetTreeTier(true)
 		if err != nil {
 			t.Fatalf("%s: %v", mode, err)
 		}

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
 // regStepSrc runs the step-and-branches (zzreg_zztable_step.go) on their
@@ -73,9 +72,7 @@ const regStepWant = `0/0 0/1 1/2 45/10 0@0 1@1 4@4 5@5 0@0 1@63 4@252 0@0 1@-63 
 // code, by the Go table and natively: Node's answers, and every kind of
 // step-and-branch in the code.
 func TestRegStepAndBranch(t *testing.T) {
-	compiler.SetRegisterForm(true)
 	fn := compileForTest(t, regStepSrc)
-	compiler.SetRegisterForm(bytecode.RegDefault())
 	kinds := map[bytecode.ROp]int{}
 	var walk func(f *bytecode.Function)
 	walk = func(f *bytecode.Function) {
@@ -147,14 +144,11 @@ func TestRegStepInterrupt(t *testing.T) {
 	const finite = `(function () { var c = 0; for (var i = 0; i < 200000; i++) c++; var j = 200000; while (--j >= 0) c++;
 		var a = 199999; (function () { for (var u = 0; u <= a; u++) c++ })(); return String(c) })()`
 	for _, native := range []bool{false, true} {
-		compiler.SetRegisterForm(true)
 		var fns []*bytecode.Function
 		for _, src := range forever {
 			fns = append(fns, compileForTest(t, src))
 		}
 		fin := compileForTest(t, finite)
-		compiler.SetRegisterForm(bytecode.RegDefault())
-		SetRegTier(true)
 		was := SetRegNative(native)
 		r := New(Config{})
 		for i, fn := range fns {
@@ -176,7 +170,6 @@ func TestRegStepInterrupt(t *testing.T) {
 			}
 		}
 		r.Close()
-		SetRegTier(bytecode.RegDefault())
 		SetRegNative(was)
 	}
 }

@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
-	"sort"
 	"sync"
 	"testing"
 )
@@ -16,9 +14,11 @@ import (
 // calls were run on the stack interpreter and the tree tier, the tiers the
 // register interpreter replaced, and every answer recorded in
 // testdata/golden.json, keyed by the test's name and the comparison's
-// place among its test's. A call whose two runs there answered
-// differently -- a clock, Math.random -- is recorded as null and not
-// compared. QJS_REGDIFF_RECORD=1 records the file anew.
+// place among its test's, with a hash of its program and calls. A call
+// whose two runs there answered differently -- a clock, Math.random -- is
+// recorded as null and not compared. A case changed since is to have its
+// recorded answers changed with it, by hand: the tiers that gave them are
+// gone.
 
 // goldenPath is the recorded answers' file.
 const goldenPath = "testdata/golden.json"
@@ -35,15 +35,12 @@ type goldenCase struct {
 const goldenLong = 160
 
 var (
-	goldenMu      sync.Mutex
-	goldenLoaded  bool
-	goldenCases   map[string]goldenCase
-	goldenSeq     = map[string]int{}
-	goldenRecords = map[string]goldenCase{}
+	goldenOnce  sync.Once
+	goldenCases map[string]goldenCase
+	goldenErr   error
+	goldenMu    sync.Mutex
+	goldenSeq   = map[string]int{}
 )
-
-// goldenRecording reports whether this run records the answers anew.
-func goldenRecording() bool { return os.Getenv("QJS_REGDIFF_RECORD") != "" }
 
 // goldenKey is the key of t's next comparison.
 func goldenKey(t *testing.T) string {
@@ -74,72 +71,27 @@ func goldenAnswer(answer string) string {
 	return fmt.Sprintf("sha256:%s len %d", hex.EncodeToString(sum[:16]), len(answer))
 }
 
-// goldenRecord records a comparison's answers, nil where they vary.
-func goldenRecord(key, src string, calls []string, answers []*string) {
-	goldenMu.Lock()
-	defer goldenMu.Unlock()
-	goldenRecords[key] = goldenCase{Program: goldenProgram(src, calls), Answers: answers}
-}
-
-// goldenWrite writes the answers recorded, where this run records them.
-func goldenWrite() error {
-	if !goldenRecording() {
-		return nil
-	}
-	goldenMu.Lock()
-	defer goldenMu.Unlock()
-	keys := make([]string, 0, len(goldenRecords))
-	for k := range goldenRecords {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	ordered := make([]json.RawMessage, 0, len(keys))
-	for _, k := range keys {
-		b, err := json.Marshal(map[string]goldenCase{k: goldenRecords[k]})
-		if err != nil {
-			return err
-		}
-		ordered = append(ordered, b)
-	}
-	if err := os.MkdirAll(filepath.Dir(goldenPath), 0o755); err != nil {
-		return err
-	}
-	// One case a line, so that a change to a case is a change to its line.
-	var out []byte
-	out = append(out, "{\n"...)
-	for i, b := range ordered {
-		out = append(out, b[1:len(b)-1]...)
-		if i+1 < len(ordered) {
-			out = append(out, ',')
-		}
-		out = append(out, '\n')
-	}
-	out = append(out, "}\n"...)
-	return os.WriteFile(goldenPath, out, 0o644)
-}
-
 // goldenCheck compares the answers on with those recorded for key, and
 // fails where they differ. It returns how many calls it skipped, whose
 // recorded answers varied.
 func goldenCheck(t *testing.T, key, src string, calls, on []string) (skipped int) {
 	t.Helper()
-	goldenMu.Lock()
-	if !goldenLoaded {
-		goldenLoaded = true
-		if b, err := os.ReadFile(goldenPath); err == nil {
-			if err := json.Unmarshal(b, &goldenCases); err != nil {
-				goldenMu.Unlock()
-				t.Fatalf("%s: %v", goldenPath, err)
-			}
+	goldenOnce.Do(func() {
+		b, err := os.ReadFile(goldenPath)
+		if err == nil {
+			err = json.Unmarshal(b, &goldenCases)
 		}
+		goldenErr = err
+	})
+	if goldenErr != nil {
+		t.Fatalf("%s: %v", goldenPath, goldenErr)
 	}
 	c, ok := goldenCases[key]
-	goldenMu.Unlock()
 	if !ok {
-		t.Fatalf("%s has no answers for %s: record them (QJS_REGDIFF_RECORD=1)", goldenPath, key)
+		t.Fatalf("%s has no answers for %s", goldenPath, key)
 	}
 	if c.Program != goldenProgram(src, calls) || len(c.Answers) != len(calls) {
-		t.Fatalf("%s: the case is not the one recorded in %s; its recorded answers are to be updated with it", key, goldenPath)
+		t.Fatalf("%s: the case is not the one recorded in %s; its recorded answers are to be changed with it", key, goldenPath)
 	}
 	bad := 0
 	for i, want := range c.Answers {

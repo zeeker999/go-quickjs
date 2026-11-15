@@ -15,8 +15,6 @@ import (
 // regDeadCompile is src compiled to register code.
 func regDeadCompile(t *testing.T, src string) *bytecode.Function {
 	t.Helper()
-	compiler.SetRegisterForm(true)
-	defer compiler.SetRegisterForm(false)
 	t.Cleanup(func() { compiler.SetRegisterForm(bytecode.RegDefault()) })
 	return compileForTest(t, src)
 }

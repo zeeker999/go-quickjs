@@ -66,17 +66,6 @@ func keysOf[_ any](fn *bytecode.Function, site uint32) uint64 {
 	return ks[i].Keys
 }
 
-// literalRoot starts ic, the cache of lit's site, whose root has no transition
-// yet, from the realm's root for lit's keys, if the compiler said them and the
-// tree has room.
-//
-//go:noinline
-func literalRoot[_ any](c *tctx, lit *litOf, ic *propCache) {
-	if s := ic.shape; s == noShape || s.proto == c.r.proto.object {
-		keyedRoot[struct{}](c.r, lit.keys, ic)
-	}
-}
-
 // keySite is literalRoot for the site of cl's literal, for native code about to
 // make its objects, whose root is the site's for good: what a tree node then
 // asks for is that root.

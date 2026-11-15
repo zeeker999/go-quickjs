@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
 // TestSoleLocals pins which locals soleLocals finds hold their values
@@ -89,9 +88,6 @@ func TestRegBigIntGivenBack(t *testing.T) {
 	if bits.UintSize != 64 {
 		t.Skip("no BigInt is given back on a 32-bit machine")
 	}
-	compiler.SetRegisterForm(true)
-	SetRegTier(true)
-	t.Cleanup(func() { compiler.SetRegisterForm(bytecode.RegDefault()); SetRegTier(bytecode.RegDefault()) })
 	const src = `
 		function arith(n, bits) {
 			var sum = 0n, a = 1n << BigInt(bits), incr = 1n;
@@ -111,7 +107,7 @@ func TestRegBigIntGivenBack(t *testing.T) {
 			}
 			return keep.join(",") + "/" + s + "/" + t;
 		}`
-	ref := newOldTiersForTest(Config{})
+	ref := New(Config{})
 	if _, err := ref.Run(compileForTest(t, src)); err != nil {
 		t.Fatal(err)
 	}

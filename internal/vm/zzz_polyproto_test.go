@@ -138,8 +138,8 @@ const polyProtoWant = `true|1|20|5||y,sv|y,sv|y,sv|{"y":2,"sv":5}|{"y":2,"sv":5}
 
 func TestPolyProtoSemantics(t *testing.T) {
 	t.Parallel()
-	for _, tree := range []bool{false, true} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, polyProtoSemantics))
 		if err != nil {
 			t.Fatal(err)

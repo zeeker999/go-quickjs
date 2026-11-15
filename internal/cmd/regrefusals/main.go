@@ -50,7 +50,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: regrefusals [-top n] [-files] [-list] dir...")
 		os.Exit(2)
 	}
-	compiler.SetRegisterForm(true)
 	refusals := map[*bytecode.Function]string{}
 	regcomp.OnRefuse = func(fn *bytecode.Function, why string) { refusals[fn] = why }
 

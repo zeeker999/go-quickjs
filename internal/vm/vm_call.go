@@ -178,16 +178,13 @@ func (r *Runtime) callDirect(callee, this Value, args []Value) (Value, error) {
 	if callee.IsObject() {
 		o := callee.Object()
 		fd := o.fn()
-		// A function planTreeCall has given a tree is called on it, without
-		// what the rest asks of a call.
-		if fd != nil && fd.treeCall != nil && fd.closure.realm == r.Realm {
+		// A function regPlan has given its register code is called on
+		// it, without what the rest asks of a call.
+		if fd != nil && fd.regCall != nil && fd.closure.realm == r.Realm {
 			if err := r.tick(); err != nil {
 				return Undefined, err
 			}
-			if c := fd.treeCall.reg; c != nil && c.wide {
-				return r.regDirect(o, fd, c, this, args)
-			}
-			return r.callTree(o, fd, this, args, false)
+			return r.regDirect(o, fd, fd.regCall, this, args)
 		}
 		if fd != nil && fd.mathOp != 0 {
 			// Math.floor(x) and its kind, given a number, and Math.max(a, b)
@@ -230,12 +227,12 @@ func (r *Runtime) callDirect(callee, this Value, args []Value) (Value, error) {
 				if fd.arrow {
 					this, newTarget = fd.extra.lexThis, fd.extra.newTarget()
 				}
-				v, err := directRest[struct{}](r, o, fd, this, args, newTarget)
+				v, err := r.runFD(fd.closure, this, args, newTarget, o, fd)
 				if err == errNoSuper {
 					err = r.throwError(errReference, "%s", errNoSuper.Error())
 				}
-				if !fd.treePlanned {
-					planTreeCall(fd)
+				if !fd.planned {
+					planCall(fd)
 				}
 				return v, err
 			}

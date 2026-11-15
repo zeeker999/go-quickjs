@@ -46,8 +46,8 @@ func TestFillHoles(t *testing.T) {
 		}
 		out[0] + '\n' + (out[0] === out[1] && out[1] === out[2])`
 	const want = "0,10,20,30 | ,10,,30/1,3 | 3:0:TypeError | ,,:TypeError | ,:TypeError | 0,,20:3:ok:TypeError | 0,,20 | 0,10,,30:A20 | 0,,20:A20O10 | ro,10:TypeError | 0,10,20\ntrue"
-	for _, tree := range []bool{true, false} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, src))
 		r.Close()
 		if err != nil {

@@ -24,8 +24,8 @@ func sharedElemsForTest(v Value) (bool, unsafe.Pointer) {
 // its own. A literal with anything but constants, or none, has no site.
 func TestSharedArrayLiteral(t *testing.T) {
 	t.Parallel()
-	for _, tree := range []bool{true, false} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, `
 		function lit() { return [1, 2.5, 'x', true, null, undefined, '', -3]; }
 		function notConst(x) { return [1, x]; }
@@ -188,7 +188,7 @@ func TestSharedArrayLiteralWrites(t *testing.T) {
 				run = `(function () { ` + w + `; if (a.length < 0) eval(''); })();`
 			}
 			for k, tree := range []bool{true, false} {
-				r := newTreeTierForTest(tree, Config{})
+				r := New(Config{})
 				v, err := r.Run(compileForTest(t, `
 			var lit = function () { return [1, 2.5, 'x', true, null, undefined, 'z']; };
 			var a = lit();
@@ -373,8 +373,8 @@ func TestSharedArrayLiteralConstants(t *testing.T) {
 		`-0,number:NaN,number:Infinity,number:-1.5,number:-2147483648 | ` +
 		`1200:long,0:,2:é漢,7:tab	 | number:1,hole,number:3 | bigint:1,number:2 | [1:w,number:2],[number:3] | [number:1,number:2],[number:3] | [number:1,number:2],[number:3]`
 	sites := `[nums(), strs(), holes(), bigs(), nested(), nested()[0], negs()]`
-	for _, tree := range []bool{true, false} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatal(err)

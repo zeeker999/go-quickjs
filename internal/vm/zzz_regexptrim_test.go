@@ -41,12 +41,12 @@ const regexpTrimTestWant = `"","<>",2,0,0:0,0,[""] "","< ><>",4,0,0:1,0,[" ",""]
 // and running.
 func TestRegExpTrimReplace(t *testing.T) {
 	for _, idle := range []bool{true, false} {
-		for _, tree := range []bool{true, false} {
+		for _, tree := range []bool{true} {
 			if idle {
 				runtime.GC()
 				debug.SetGCPercent(-1)
 			}
-			r := newTreeTierForTest(tree, Config{})
+			r := New(Config{})
 			v, err := r.Run(compileForTest(t, regexpTrimTestSrc))
 			r.Close()
 			debug.SetGCPercent(100)

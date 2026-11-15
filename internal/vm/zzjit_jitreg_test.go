@@ -12,7 +12,7 @@ import (
 // code, which their JIT compiles (RegTier): QJS_JITREG set, or a test's
 // SetJITRegTier. A runtime that keeps the old tiers (jitRuntimeForTest,
 // newOldTiersForTest) runs the stack form's whatever it says.
-func regJITForTest() bool { return regTier.Load() && jitRegTier.Load() }
+func regJITForTest() bool { return jitRegTier.Load() }
 
 // skipUnderRegJIT skips a test of the stack form's JIT where runtimes run
 // register code: one of a mechanism the register form has no counterpart

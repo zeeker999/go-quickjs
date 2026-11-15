@@ -28,8 +28,8 @@ func TestPureByTree(t *testing.T) {
 			if (i == 150) t.mark();
 		}
 		[n, T.prototype.held, T.prototype.mark, T.prototype.one, T.prototype.viaHeld]`
-	for _, tree := range []bool{false, true} {
-		r := newOldTiersTreeForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatalf("tree=%v: %v", tree, err)
@@ -46,7 +46,7 @@ func TestPureByTree(t *testing.T) {
 				if fd.closure.fn.Leaf != bytecode.LeafPure {
 					t.Fatalf("%s is not a pure body", name)
 				}
-				if got := fd.treeCall != nil; got != want {
+				if got := fd.regCall != nil; got != want {
 					t.Errorf("%s: given its tree's call = %v, want %v", name, got, want)
 				}
 			}

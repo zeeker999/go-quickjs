@@ -299,13 +299,6 @@ type Runtime struct {
 	// arguments out of its frame's window, for a callee that reads them
 	// only as it starts (tailArgsOf).
 	tailArgs []Value
-	// noTree keeps the tree tier off for the code this runtime loads, as
-	// SetTreeTier(false) does for the process: each function it prepares is
-	// given no tree unless one has run it already (noTreeFor). Tests set it,
-	// to compare the tiers in runtimes side by side. It and its padding take
-	// the word the realm's randomFn had, which was the runtime's.
-	noTree bool
-	_      [7]byte
 	// bigFree is the BigInts the tree tier has given back, for bigInPlace
 	// to make results in (bigRelease); nil until one is.
 	bigFree *bigFreeList
@@ -352,10 +345,6 @@ type Runtime struct {
 	// regFree is the register frames' states not in use, a list by their
 	// next (regEnter): a frame's handlers are given its state.
 	regFree *regState
-	// oldTiers runs the runtime's code on the stack interpreter and the
-	// tree tier, as a runtime with the JIT runs it (regOn), for tests of
-	// those tiers.
-	oldTiers bool
 	// jitFields is the optional native tier's state, empty in builds
 	// without it. It comes after everything the interpreter reads, so that
 	// a build with the tier moves none of their offsets, and before the last
@@ -907,10 +896,6 @@ type frame struct {
 	// how a generator binds its parameters when it is called rather than on
 	// its first resumption.
 	paramsOnly bool
-
-	// tc is the tree tier's state for a frame running a tree, kept here so
-	// that a call allocates none.
-	tc tctx
 }
 
 // handler is a registered catch or finally target.

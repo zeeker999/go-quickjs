@@ -135,8 +135,8 @@ log: get b,get b,get b,get b,get b,get b,ownKeys,gopd a,get a,gopd b,get b,ownKe
 // interpreter.
 func TestSpreadByLayout(t *testing.T) {
 	t.Parallel()
-	for _, tree := range []bool{true, false} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		if _, err := r.Run(compileForTest(t, spreadShapeSrc+";run(1)")); err != nil {
 			t.Fatal(err)
 		}
@@ -160,8 +160,8 @@ func TestSpreadByLayout(t *testing.T) {
 // another realm's prototype, is made by the definitions.
 func TestSpreadAdoptsLayout(t *testing.T) {
 	t.Parallel()
-	for _, tree := range []bool{true, false} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, `
 		var src = {a: 1, b: 2, c: 3}
 		var hid = {a: 1, b: 2, c: 3}; Object.defineProperty(hid, 'a', {enumerable: false})

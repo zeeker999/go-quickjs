@@ -36,10 +36,10 @@ func (r *Runtime) regCallbackOf(fn, this Value) *regCallback {
 	}
 	o := fn.Object()
 	fd := o.fn()
-	if fd == nil || fd.treeCall == nil || fd.closure.realm != r.Realm {
+	if fd == nil || fd.regCall == nil || fd.closure.realm != r.Realm {
 		return nil
 	}
-	c := fd.treeCall.reg
+	c := fd.regCall
 	if c == nil || !c.wide || c.args {
 		return nil
 	}

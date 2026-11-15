@@ -54,12 +54,6 @@ const sharedGiveUp = 8
 // address of no other use, which ownElems checks.
 var sharedMark byte
 
-// sharedArrayNode builds new_array's node for a literal of constants (in.B
-// a site): it takes the elements' entries, which it evaluates only to make
-// the site's storage, and pushes the node. It reports false where it does
-// not build one, which leaves new_array to build as any other.
-var sharedArrayNode func(b *tbuilder, in bytecode.Instr) bool
-
 // unshareElems gives o, an array objSharedElems marks, a copy of its
 // elements of its own, counting the copy in the shared storage's count.
 var unshareElems func(o *Object)
@@ -211,29 +205,5 @@ func init() {
 	sharedLiteralArray = func(r *Runtime, cl *closure, pc int) *Object {
 		ic := sharedSite(cl, pc)
 		return sharedShare(r, ic, ic.p1)
-	}
-	sharedArrayNode = func(b *tbuilder, in bytecode.Instr) bool {
-		n, site := int(in.A), in.B
-		if n == 0 || n > b.depth() {
-			return false
-		}
-		vals := make([]tval, n)
-		for i := n - 1; i >= 0; i-- {
-			vals[i] = b.pop().tree()
-		}
-		b.push(func(c *tctx) Value {
-			ic := &c.ic[site]
-			t := ic.p1
-			if t == nil {
-				v := make([]Value, n)
-				for i, f := range vals {
-					v[i] = f(c)
-				}
-				t = sharedMade(c.r, v)
-				ic.p1 = t
-			}
-			return Obj(sharedShare(c.r, ic, t))
-		})
-		return true
 	}
 }

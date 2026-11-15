@@ -18,7 +18,6 @@ import (
 // code's vars going to the function that called eval, and a module's
 // bindings, imports and top-level await.
 func TestTopLevelTrees(t *testing.T) {
-	defer vm.SetTreeTier(true)
 	// Each script runs in turn in one runtime. One marked must build a tree,
 	// which only its top level, or the eval code it runs, has a loop to
 	// build. (Eval code a sloppy function runs directly finds its names
@@ -54,15 +53,14 @@ func TestTopLevelTrees(t *testing.T) {
 		{`typeof later + ' ' + typeof later2`, false},
 	}
 	run := func(tree bool) (string, []int64) {
-		vm.SetTreeTier(tree)
 		rt := quickjs.New()
 		defer rt.Close()
 		var out []string
 		var built []int64
 		for _, s := range scripts {
-			before := vm.TreesBuilt()
+			before := vm.RegsBuilt()
 			v, err := rt.Eval(s.src)
-			built = append(built, vm.TreesBuilt()-before)
+			built = append(built, vm.RegsBuilt()-before)
 			if err != nil {
 				out = append(out, "E "+err.Error())
 				continue
@@ -115,14 +113,12 @@ undefined undefined`
 // a loop that awaits at its top level, and a cycle that reads a binding
 // before its module has initialized it.
 func TestTopLevelModuleTrees(t *testing.T) {
-	defer vm.SetTreeTier(true)
 	modules := map[string]string{
 		"/app/a.mjs": `export let n = 0; for (let i = 0; i < 4; i++) n += i; export function bump() { n++ }`,
 		"/app/b.mjs": `import { c } from "./c.mjs"; export let fromC; for (let i = 0; i < 1; i++) { try { fromC = c } catch (e) { fromC = e.name } } export const late = 1;`,
 		"/app/c.mjs": `import { late } from "./b.mjs"; export let c = 7; export let sawLate; for (let i = 0; i < 1; i++) { try { sawLate = late } catch (e) { sawLate = e.name } }`,
 	}
 	run := func(tree bool) (string, int64) {
-		vm.SetTreeTier(tree)
 		rt := quickjs.New()
 		defer rt.Close()
 		rt.SetModuleLoader(func(specifier, referrer string) (string, string, error) {
@@ -133,7 +129,7 @@ func TestTopLevelModuleTrees(t *testing.T) {
 			}
 			return src, name, nil
 		})
-		before := vm.TreesBuilt()
+		before := vm.RegsBuilt()
 		ns, err := rt.EvalModule("/app/main.mjs", `
 			import { n, bump } from "./a.mjs";
 			import { fromC } from "./b.mjs";
@@ -160,7 +156,7 @@ func TestTopLevelModuleTrees(t *testing.T) {
 			t.Fatalf("tree %v: %v", tree, err)
 		}
 		def, _ := ns.Get("default")
-		return all.String() + " | " + def.String(), vm.TreesBuilt() - before
+		return all.String() + " | " + def.String(), vm.RegsBuilt() - before
 	}
 	want, _ := run(false)
 	got, built := run(true)

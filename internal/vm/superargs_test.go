@@ -41,12 +41,10 @@ func TestSuperArgumentsInPlace(t *testing.T) {
 		}
 		out.slice(0, 5).join(' | ') + ' | same ' + out.slice(5).every((s, i) => s === out[i % 5])`
 	const want = "2,10,14,w;10;14,w;4;6,3,20,35,q,r | 2,3,5;3;12;true | v;1;3 | m!;m;15;true | 3,3,3;3 | same true"
-	for _, tree := range []bool{true, false} {
-		previous := treeTier.Swap(tree)
+	for _, tree := range []bool{true} {
 		r := New(Config{})
 		v, err := r.Run(compileForTest(t, src))
 		r.Close()
-		treeTier.Store(previous)
 		if err != nil {
 			t.Fatalf("tree %v: %v", tree, err)
 		}

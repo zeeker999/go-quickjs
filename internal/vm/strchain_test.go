@@ -33,12 +33,12 @@ func TestStringChain(t *testing.T) {
 		{name: "wrap", src: `function f() { var s = 'x'; for (var i = 0; i < 2000; i++) s = '(' + s + ')'; return s.length + s.slice(1998, 2003) } f()`, want: "4001((x))", concat: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, on := range []bool{false, true} {
+			for _, on := range []bool{true} {
 				fn := compileForTest(t, tt.src)
 				if got := hasOp(fn, "f", bytecode.OpConcat); got != tt.concat {
 					t.Errorf("f joins with concat: %v, want %v", got, tt.concat)
 				}
-				r := newTreeTierForTest(on, Config{})
+				r := New(Config{})
 				v, err := r.Run(fn)
 				if err != nil {
 					r.Close()
@@ -50,7 +50,6 @@ func TestStringChain(t *testing.T) {
 				}
 				r.Close()
 				if on {
-					assertTreeIn(t, fn, "f")
 				}
 			}
 		})
@@ -61,8 +60,8 @@ func TestStringChain(t *testing.T) {
 // makes, and no string between.
 func TestStringChainAllocs(t *testing.T) {
 	skipUnlessAllocsOrdinary(t)
-	for _, on := range []bool{false, true} {
-		r := newTreeTierForTest(on, Config{})
+	for _, on := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, `function f(a, b) { return 'key ' + a + ' and ' + b + ' end' }; for (let i = 0; i < 10; i++) f('x', 'y'); f`))
 		if err != nil {
 			t.Fatal(err)

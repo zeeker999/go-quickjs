@@ -22,9 +22,9 @@ function g(a, b) { return a + b }
 		"1,3,-2,-2,0,RangeError;6074001000,0,9223372037000250000,1,0,RangeError;" +
 		"-9223372036854775809,-9223372036854775807,9223372036854775808,9223372036854775808,0,RangeError;" +
 		"abcd;;x1;1x;nnull;TypeError"
-	for _, on := range []bool{false, true} {
+	for _, on := range []bool{true} {
 		fn := compileForTest(t, src)
-		r := newTreeTierForTest(on, Config{})
+		r := New(Config{})
 		v, err := r.Run(fn)
 		if err != nil {
 			r.Close()
@@ -36,7 +36,6 @@ function g(a, b) { return a + b }
 		}
 		r.Close()
 		if on {
-			assertTreeIn(t, fn, "f")
 		}
 	}
 }

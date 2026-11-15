@@ -47,23 +47,4 @@ type treeBigSeen struct {
 	bigs, wide, heap, recvs []atomic.Uint32
 }
 
-var (
-	// treeStringAdd marks the addition at pc in c's function as one that
-	// met a string, where the JIT may compile it; nil without the JIT.
-	treeStringAdd func(c *tctx, pc int)
-
-	// treeBigInt marks the arithmetic at pc in c's function as one that
-	// met two BigInts, one on the heap or made there if heap (treeBigSeen),
-	// where the JIT may compile it; nil without the JIT.
-	treeBigInt func(c *tctx, pc int, heap bool)
-
-	// treeBigOf marks the operator at pc in c's function, of a and b, two
-	// BigInts held in their values, whose result was v, as treeBigInt does:
-	// as one in the int64 range, one from 0 to 2^64-1, or one on the heap,
-	// as the three were (treeBigSeen); nil without the JIT.
-	treeBigOf func(c *tctx, pc int, a, b, v Value)
-
-	// treeBigRecv marks the method read at pc in c's function as one of a
-	// BigInt's (treeBigSeen's recvs); nil without the JIT.
-	treeBigRecv func(c *tctx, pc int)
-)
+var ()

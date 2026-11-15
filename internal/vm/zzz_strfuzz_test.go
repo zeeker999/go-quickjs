@@ -412,9 +412,9 @@ func TestStrAppendRandom(t *testing.T) {
 			}) {
 				return
 			}
-			for _, tree := range []bool{false, true} {
+			for _, tree := range []bool{true} {
 				t.Run(fmt.Sprintf("tree=%v", tree), func(t *testing.T) {
-					r := newTreeTierForTest(tree, Config{})
+					r := New(Config{})
 					got := strFuzzRun(t, r, src, false)
 					r.Close()
 					if got != want && !t.Failed() {

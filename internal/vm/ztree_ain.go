@@ -80,10 +80,6 @@ var (
 	// names no index, is in o where has says, as hasQuick found it, where
 	// o's layout and its chain's cell can be kept.
 	hasNote func(r *Runtime, key Value, o *Object, has bool)
-
-	// inNode builds in, the in operator, at pc: hasCached's or hasQuick's
-	// answer where it has one, inOperator's otherwise.
-	inNode func(b *tbuilder, pc int)
 )
 
 func init() {
@@ -210,32 +206,5 @@ func init() {
 		}
 		hasNote(r, key, o, false)
 		return false, true
-	}
-	inNode = func(b *tbuilder, pc int) {
-		y, x := b.pop().tree(), b.pop().tree()
-		b.push(func(c *tctx) Value {
-			l := x(c)
-			r := y(c)
-			if r.IsObject() {
-				// An index straight to its walk; a name to the cache,
-				// then to its walk.
-				o := r.object()
-				if i := uint32(l.num); float64(i) == l.num && i < atomIndexTag {
-					if has, ok := hasIndexQuick(o, i); ok {
-						return Bool(has)
-					}
-				} else if has, ok := hasCached(c.r, l, o); ok {
-					return Bool(has)
-				} else if has, ok := hasQuick(c.r, l, o); ok {
-					return Bool(has)
-				}
-			}
-			c.at(pc)
-			v, err := inOperator(c.r, l, r)
-			if err != nil {
-				c.throw(err)
-			}
-			return v
-		})
 	}
 }

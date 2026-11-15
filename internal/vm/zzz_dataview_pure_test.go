@@ -169,8 +169,8 @@ const dataViewPureWant = "Int8:15,15 Uint8:15,15 Int16:15,15 Uint16:15,15 Int32:
 // is Node's, in the tree tier and in the interpreter.
 func TestDataViewSetterInPureBody(t *testing.T) {
 	t.Parallel()
-	for _, tree := range []bool{true, false} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		if _, err := r.Run(compileForTest(t, dataViewPureSrc)); err != nil {
 			t.Fatal(err)
 		}

@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
 // shapeOfNew is the layout of the object src, compiled for this run alone,
@@ -25,7 +24,7 @@ func shapeOfNew(t *testing.T, r *Runtime, src string) *shape {
 // sites of one function.
 func TestLiteralKeysShareALayout(t *testing.T) {
 	t.Parallel()
-	r := newOldTiersForTest(Config{})
+	r := New(Config{})
 	defer r.Close()
 	want := shapeOfNew(t, r, `({a: 1, b: 2})`)
 	if want == nil || want.unique || want.loose || want.n != 2 {
@@ -64,9 +63,6 @@ func TestLiteralKeysShareALayout(t *testing.T) {
 // any function, a closure made anew or two of one function's sites, and
 // one of their own for other keys.
 func TestRegLiteralKeysShareALayout(t *testing.T) {
-	compiler.SetRegisterForm(true)
-	SetRegTier(true)
-	t.Cleanup(func() { compiler.SetRegisterForm(bytecode.RegDefault()); SetRegTier(bytecode.RegDefault()) })
 	for _, native := range []bool{false, true} {
 		was := SetRegNative(native)
 		r := New(Config{})
@@ -100,7 +96,7 @@ func TestRegLiteralKeysShareALayout(t *testing.T) {
 // Each realm has its own, of its own Object.prototype.
 func TestLiteralKeysByRealm(t *testing.T) {
 	t.Parallel()
-	r := newOldTiersForTest(Config{})
+	r := New(Config{})
 	defer r.Close()
 	fn := compileForTest(t, `({a: 1, b: 2})`)
 	run := func(re *Realm) *shape {
@@ -125,7 +121,7 @@ func TestLiteralKeysByRealm(t *testing.T) {
 // nothing a run keeps of it holds the code.
 func TestFreshCodeMakesNoLiteralShapes(t *testing.T) {
 	t.Parallel()
-	r := newOldTiersForTest(Config{})
+	r := New(Config{})
 	defer r.Close()
 	src := func(i int) string {
 		return fmt.Sprintf(`var o = {a: %d, b: {c: 1}}, f = function () { return {d: 1, e: [{f: 2}]} }; f().e[0].f + o.b.c`, i)
@@ -150,7 +146,7 @@ func TestFreshCodeMakesNoLiteralShapes(t *testing.T) {
 // others, however many they have.
 func TestLiteralKeysRoom(t *testing.T) {
 	t.Parallel()
-	r := newOldTiersForTest(Config{})
+	r := New(Config{})
 	defer r.Close()
 	v, err := r.Run(compileForTest(t, `
 		function grown() { var o = {a: 1, b: 2}; o.c = 3; o.d = 4; o.e = 5; o.f = 6; o.g = 7; return o }
@@ -174,7 +170,7 @@ func TestLiteralKeysRoom(t *testing.T) {
 // holds for as long as it lives: past literalShapes it starts again, and what
 // no code has goes, so that the tree has room for what comes after.
 func TestLiteralKeysMadeUp(t *testing.T) {
-	r := newOldTiersForTest(Config{})
+	r := New(Config{})
 	defer r.Close()
 	roots := func() *literalRoots { return r.proto.object.shape.side.programs.roots }
 	if _, err := r.Run(compileForTest(t, `({first: 1})`)); err != nil {
@@ -288,7 +284,7 @@ func TestLiteralKeysAcrossCompiles(t *testing.T) {
 // and, under the JIT's tests, native code.
 func TestLiteralKeysCollision(t *testing.T) {
 	t.Parallel()
-	r := newOldTiersForTest(Config{})
+	r := New(Config{})
 	defer r.Close()
 	testLiteralKeysCollision(t, r)
 }

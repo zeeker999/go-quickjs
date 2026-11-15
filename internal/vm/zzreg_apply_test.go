@@ -2,9 +2,6 @@ package vm
 
 import (
 	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
 // TestRegApplyArgs pins apply_args, f.apply(x, arguments) in a function
@@ -31,15 +28,11 @@ func TestRegApplyArgs(t *testing.T) {
 		[new P(1, 2, 3).s, new P(1).s, new P(1, 2, 3, 4, 5).s, mapped(1, 2, 3), strict(1, 2), fwd(), fwd(1, 2, 3, 4),
 		 fwd2(5, 6), other(4, 5, 6), many()].join(" | ")`
 	const want = "1,2,3,3 | 1,,,1 | 1,2,3,5 | 7,2,3;12 | 3 | 0 | 10 | 22 | object:3:5 | 3025"
-	for _, reg := range []bool{false, true} {
-		compiler.SetRegisterForm(true)
+	for _, reg := range []bool{true} {
 		fn := compileForTest(t, src)
-		compiler.SetRegisterForm(bytecode.RegDefault())
-		SetRegTier(reg)
 		before := RegsBuilt()
 		r := New(Config{})
 		v, err := r.Run(fn)
-		SetRegTier(bytecode.RegDefault())
 		if err != nil {
 			t.Fatalf("reg=%v: %v", reg, err)
 		}

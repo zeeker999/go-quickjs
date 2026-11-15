@@ -116,8 +116,8 @@ func TestStrAppendMentions(t *testing.T) {
 			if strings.HasPrefix(want, "uncaught") {
 				t.Fatalf("the program itself fails: %s", want)
 			}
-			for _, tree := range []bool{false, true} {
-				r := newTreeTierForTest(tree, Config{})
+			for _, tree := range []bool{true} {
+				r := New(Config{})
 				got := strFuzzRun(t, r, src, false)
 				r.Close()
 				if got != want {

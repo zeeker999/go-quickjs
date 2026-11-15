@@ -69,12 +69,12 @@ const regexpMissTestWant = `null,0,false,0,ba, 0:ba:1,0,true,0,ba, null,0,false,
 // tree tier, with the collector idle and running.
 func TestRegExpLeafMisses(t *testing.T) {
 	for _, idle := range []bool{true, false} {
-		for _, tree := range []bool{true, false} {
+		for _, tree := range []bool{true} {
 			if idle {
 				runtime.GC()
 				debug.SetGCPercent(-1)
 			}
-			r := newTreeTierForTest(tree, Config{})
+			r := New(Config{})
 			v, err := r.Run(compileForTest(t, regexpMissTestSrc))
 			r.Close()
 			debug.SetGCPercent(100)

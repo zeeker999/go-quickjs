@@ -70,9 +70,7 @@ func TestJITRegNativeBigIntMarks(t *testing.T) {
 			// marks are the code's, which runtimes running it share.
 			plainRT := New(Config{})
 			t.Cleanup(plainRT.Close)
-			compiler.SetRegisterForm(true)
 			prog := compileForTest(t, regBigMarkSrc)
-			compiler.SetRegisterForm(false)
 			if _, err := plainRT.Run(prog); err != nil {
 				t.Fatal(err)
 			}

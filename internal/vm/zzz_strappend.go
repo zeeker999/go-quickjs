@@ -135,35 +135,6 @@ func strTailGrow[_ any](t *strTail, text string) {
 	t.s = unsafe.String(unsafe.SliceData(t.buf), len(t.buf))
 }
 
-// strFreezeNode is str_freeze in the tree tier: strFreeze in place, as this
-// follows a read of a binding, which a call would cost more than it does.
-func strFreezeNode[_ any](v tval) tval {
-	return func(c *tctx) Value {
-		x := v(c)
-		if x.IsString() {
-			if s := x.String(); s.building {
-				s.building = false
-			}
-		}
-		return x
-	}
-}
-
-// strAppendNode is an add marked bytecode.AddOwned in the tree tier, x its
-// local's value.
-func strAppendNode[_ any](x, y tval, pc int) tval {
-	return func(c *tctx) Value {
-		l := x(c)
-		r := y(c)
-		c.at(pc)
-		v, err := strAppendOp[struct{}](c.r, l, r)
-		if err != nil {
-			c.throw(err)
-		}
-		return v
-	}
-}
-
 // strAppendOp is an add marked bytecode.AddOwned: a + b, a a local's value. A
 // number is made a string here, so that it costs a run of appends nothing; an
 // object's conversion, which runs code, is add's, with what add does for it.

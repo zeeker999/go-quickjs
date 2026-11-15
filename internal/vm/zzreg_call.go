@@ -538,12 +538,11 @@ func (r *Runtime) regClosure(f *frame, c *regCode, w bytecode.RInstr, wb int) *O
 func regMadeClosure(o *Object) *Object {
 	if fd := o.fn(); fd != nil {
 		if fn := fd.closure.fn; fn.Leaf != bytecode.LeafNone && fn.Reg != nil &&
-			atomic.LoadPointer(&fn.VMCode) == nil && regTier.Load() {
-			firstTree(fn)
+			atomic.LoadPointer(&fn.VMCode) == nil {
+			firstReg(fn)
 		}
 		if atomic.LoadPointer(&fd.closure.fn.VMCode) != nil {
-			planTreeCall(fd)
-			regPlan(fd)
+			planCall(fd)
 		}
 	}
 	return o
@@ -905,26 +904,11 @@ func regLeafStore(held []regHeld) {
 // not been run yet, and kept in its template for regCall's next call of it;
 // or nil.
 func (r *Runtime) regOf(cl *closure) *regCode {
-	if !r.regOn() {
-		return nil
+	c := firstReg(cl.fn)
+	if c != nil && cl.reg == nil {
+		r.regExtend(cl, c)
 	}
-	t := (*tree)(atomic.LoadPointer(&cl.fn.VMCode))
-	if t == nil {
-		t = firstTree(cl.fn)
-	}
-	if t.reg != nil && cl.reg == nil {
-		r.regExtend(cl, t.reg)
-	}
-	cl.reg = t.reg
-	return t.reg
-}
-
-// regTctx is f's tree context, made enough of for the tree tier's slow
-// paths the register interpreter shares.
-func regTctx(r *Runtime, f *frame, cl *closure) *tctx {
-	c := &f.tc
-	c.r, c.f, c.cl = r, f, cl
-	c.closureCode = cl.closureCode
+	cl.reg = c
 	return c
 }
 
@@ -1167,7 +1151,7 @@ func (r *Runtime) regThrowDeadZone(f *frame, c *regCode, next int) error {
 // for the loop's check.
 func (r *Runtime) regGetGlobal(f *frame, cl *closure, c *regCode, pc int, w bytecode.RInstr) (Value, error) {
 	in := bytecode.Instr{Op: bytecode.OpGetGlobal, A: regNameIdx(c, pc, w.B()), B: uint32(w.C())}
-	v, err := r.getGlobalAt(regTctx(r, f, cl), in, int(f.pc-1))
+	v, err := r.getGlobalAt(f, cl, in)
 	if err == nil {
 		r.regNoteGlobal(cl, w.C(), cl.names[in.A], false)
 	}

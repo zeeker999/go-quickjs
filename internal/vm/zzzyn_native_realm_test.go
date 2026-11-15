@@ -10,7 +10,6 @@ import (
 	"weak"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
 // The native handlers and realms: a frame's context (nativeCtx) is made
@@ -30,13 +29,10 @@ const nativeInRealmSrc = `
 // and the native handlers on for the test.
 func nativeRealmFn(t *testing.T, src string) *bytecode.Function {
 	t.Helper()
-	compiler.SetRegisterForm(true)
 	fn := compileForTest(t, src)
-	compiler.SetRegisterForm(bytecode.RegDefault())
-	SetRegTier(true)
 	was := regNativeOn
 	regNativeOn = true
-	t.Cleanup(func() { SetRegTier(bytecode.RegDefault()); regNativeOn = was })
+	t.Cleanup(func() { regNativeOn = was })
 	return fn
 }
 

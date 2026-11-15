@@ -52,8 +52,8 @@ func TestDeleteBorrowsIndex(t *testing.T) {
 	const want = `["a!","a!",false,null,false,null,true,"c!","!","a,b,d,e,f,g,h,i,j","a,b,c,d,e,f,g,h,i,j,",` +
 		`1,"a,b,d,e,f,g,h,i,j,c",true,true,"d!",false,false,null,"c!","!",true,"a,c,e,f,g,h,i,j,",` +
 		`"d!",null,false,300,"e!",true,"f!","b,c,d,e,f,g,h,i,j,",null,"b!"]`
-	for _, tree := range []bool{false, true} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, src))
 		if err != nil {
 			t.Fatal(err)

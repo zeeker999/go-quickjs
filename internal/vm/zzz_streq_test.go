@@ -2,8 +2,6 @@ package vm
 
 import (
 	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
 // strEqTestSrc branches on === and !== of a local, a tree, an upvalue and a
@@ -37,18 +35,8 @@ const strEqTestWant = "ab/ab//3,ab/ab//3,b/b/f/3,b/b/f/3,b/b/f/3,bc/bc/f/3,b/b/f
 // own, so that it is run on its tree rather than by pureCall.
 func TestStrictEqualityWithStrings(t *testing.T) {
 	t.Parallel()
-	for _, c := range compileForTest(t, strEqTestSrc).Constants {
-		if c.Kind != bytecode.ConstFunction || c.Fn == nil {
-			continue
-		}
-		if name := c.Fn.Name; len(name) == 1 {
-			if buildTree(c.Fn) == nil {
-				t.Errorf("%s is not built as a tree", name)
-			}
-		}
-	}
-	for _, tree := range []bool{true, false} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, strEqTestSrc))
 		r.Close()
 		if err != nil {

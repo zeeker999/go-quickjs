@@ -68,7 +68,6 @@ func (*Runtime) jitCountPure()                                        {}
 func (*Runtime) jitCountsCaller(int) bool                             { return false }
 func (*Runtime) jitResume(*frame) (Value, error, bool)                { return Value{}, nil, false }
 func (*Runtime) jitBackEdge(*frame, uint32, int) (Value, error, bool) { return Value{}, nil, false }
-func (*Runtime) tryJITTreeLoop(*tctx, int, int, bool)                 {}
 func (*Runtime) jitTreeRecovery(*frame) bool                          { return false }
 func jitTreeResult(any) (Value, error, bool)                          { return Value{}, nil, false }
 func (*Runtime) jitCodeBytes() int64                                  { return 0 }

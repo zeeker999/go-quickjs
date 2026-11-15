@@ -311,9 +311,9 @@ func runGeneratorCases(t *testing.T, mk func() *Runtime, rounds int) {
 // tree tier.
 func TestGeneratorProtocol(t *testing.T) {
 	t.Parallel()
-	for _, on := range []bool{false, true} {
+	for _, on := range []bool{true} {
 		t.Run(map[bool]string{false: "interpreter", true: "tree"}[on], func(t *testing.T) {
-			runGeneratorCases(t, func() *Runtime { return newTreeTierForTest(on, Config{}) }, 3)
+			runGeneratorCases(t, func() *Runtime { return New(Config{}) }, 3)
 		})
 	}
 }

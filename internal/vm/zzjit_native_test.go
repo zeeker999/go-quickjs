@@ -1285,7 +1285,6 @@ func TestJITBitwiseAndReceiver(t *testing.T) {
 			r := jitRuntimeForTest(t, Config{JIT: true})
 			source := `let obj={array:[` + tc.left + `],f:function(a){return this.array[0]` + tc.op + `a[0]}};obj.f([` + tc.right + `])`
 			v, err := r.Run(compileForTest(t, source))
-			treeTier.Store(previous)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1361,7 +1360,6 @@ func TestJITDataProperties(t *testing.T) {
 			previous := treeTier.Swap(trees)
 			r := jitRuntimeForTest(t, Config{JIT: true})
 			v, err := r.Run(compileForTest(t, tc.source))
-			treeTier.Store(previous)
 			if err != nil || !v.IsNumber() || v.Number() != tc.want {
 				t.Fatalf("data properties: %v, %v; want %v", v, err, tc.want)
 			}
@@ -3527,8 +3525,6 @@ func TestJITLoopPromotionFirstCall(t *testing.T) {
 		keyword := tc.keyword
 		t.Run(tc.name, func(t *testing.T) {
 			if !tc.tree {
-				SetTreeTier(false)
-				defer SetTreeTier(true)
 			}
 			r := New(Config{JIT: true})
 			jitDefaultsForTest(r)
@@ -3833,7 +3829,6 @@ func BenchmarkJITDenseKernels(b *testing.B) {
 			}
 			b.Run(tc.name+"/"+mode, func(b *testing.B) {
 				previous := treeTier.Swap(mode != "interpreter")
-				defer treeTier.Store(previous)
 				compile := func(src string) *bytecode.Function {
 					ast, err := parser.Parse(src, parser.Options{})
 					if err != nil {
@@ -3961,7 +3956,6 @@ func BenchmarkJITCryptoWorkload(b *testing.B) {
 	for _, mode := range []string{"interpreter", "existing", "native"} {
 		b.Run(mode, func(b *testing.B) {
 			previous := treeTier.Swap(mode != "interpreter")
-			defer treeTier.Store(previous)
 			// Bytecode caches its first tree decision; each tier needs fresh code.
 			setup := compile(source.String())
 			call := compile(`encrypt();decrypt();true`)
@@ -4014,7 +4008,6 @@ func BenchmarkJITCryptoLimb(b *testing.B) {
 		for _, mode := range []string{"interpreter", "existing", "native"} {
 			b.Run(fmt.Sprintf("n%d/%s", n, mode), func(b *testing.B) {
 				previous := treeTier.Swap(mode != "interpreter")
-				defer treeTier.Store(previous)
 				compile := func(text string) *bytecode.Function {
 					ast, err := parser.Parse(text, parser.Options{})
 					if err != nil {
@@ -4099,7 +4092,6 @@ func BenchmarkJITNumericFields(b *testing.B) {
 		}
 		b.Run(mode, func(b *testing.B) {
 			previous := treeTier.Swap(mode != "interpreter")
-			defer treeTier.Store(previous)
 			compile := func(source string) *bytecode.Function {
 				ast, err := parser.Parse(source, parser.Options{})
 				if err != nil {
@@ -4153,7 +4145,6 @@ func BenchmarkJITNumericGlobals(b *testing.B) {
 	for _, mode := range []string{"interpreter", "existing", "native"} {
 		b.Run(mode, func(b *testing.B) {
 			previous := treeTier.Swap(mode != "interpreter")
-			defer treeTier.Store(previous)
 			compile := func(source string) *bytecode.Function {
 				ast, err := parser.Parse(source, parser.Options{})
 				if err != nil {
@@ -4202,7 +4193,6 @@ func BenchmarkJITReferenceFields(b *testing.B) {
 	for _, mode := range []string{"interpreter", "existing", "native"} {
 		b.Run(mode, func(b *testing.B) {
 			previous := treeTier.Swap(mode != "interpreter")
-			defer treeTier.Store(previous)
 			compile := func(source string) *bytecode.Function {
 				ast, err := parser.Parse(source, parser.Options{})
 				if err != nil {

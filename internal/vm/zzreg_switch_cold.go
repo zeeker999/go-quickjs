@@ -119,7 +119,7 @@ func (r *Runtime) regNewArrayE(f *frame, c *regCode, k *regKept, regs *[1 << 16]
 	pc := k.pc - 1
 	w := regAt(c.code, pc)
 	n := arrayEmptyNode[struct{}]{site: int(w.B()), pc: int32(regSrc(c, pc))}
-	regs[w.A()] = n.make(regTctx(r, f, f.cl))
+	regs[w.A()] = n.make(r, f.cl.closureCode)
 }
 
 // regCharCodeAtSlow is char_code_at as get_method_w and call_method_w make
@@ -170,31 +170,6 @@ func (r *Runtime) regCatch(f *frame, c *regCode, k *regKept, regs *[1 << 16]Valu
 	}
 	regs[h.Reg] = th.Value
 	return int(h.To)
-}
-
-// regIterNextTree is iter_next of a generator's cursor, stepped as the
-// tree steps one (iterNextTree): a generator of tree code resumed in
-// place (stepGenTree), not through its next's call. Its body throws as the
-// tree throws, with a panic, which a function of the tree with a for-of
-// loop catches under its own recover; register code has none, so the
-// step has one, and leaves the frames and the stack as runTreeHandlers
-// does. The frame's tctx is the step's: the tree reads only its runtime.
-func (r *Runtime) regIterNextTree(f *frame, cur Value) (v Value, more bool, err error) {
-	depth, top := r.frameDepth, r.stackTop
-	defer func() {
-		if p := recover(); p != nil {
-			th, ok := p.(treeThrow)
-			if !ok {
-				panic(p)
-			}
-			r.unwindTreeFrames(depth)
-			r.stackTop = top
-			v, more, err = Undefined, false, th.err
-		}
-	}()
-	tc := &f.tc
-	tc.r, tc.f = r, f
-	return iterNextTree(tc, cur)
 }
 
 // regStepNext is iter_next of a cursor neither of an array, a for-in nor

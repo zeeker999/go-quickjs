@@ -2,9 +2,6 @@ package vm
 
 import (
 	"math"
-	"sync/atomic"
-
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
 // Constructions on the tree tier's path. A construction ran its
@@ -35,32 +32,13 @@ import (
 // ztree_aaeq.go): the tree tier's own closures do not move.
 
 var (
-	// planTreeNew decides fd.treeNew, the constructor's constructions made
-	// by constructTree, once its function has run, and records that it has
-	// (newPlanned).
-	planTreeNew func(fd *funcData)
-
-	// constructTree constructs o, whose fd.treeNew is set, with this the
-	// object made for it and newTarget the construction's, once its caller
-	// has made the interrupt check: what runFD would do, on the function's
-	// tree.
-	constructTree func(r *Runtime, o *Object, fd *funcData, this Value, args []Value, newTarget Value) (Value, error)
-
 	// constructRun is constructWithTarget's construction of a compiled
-	// constructor planTreeCall gave no tree's call: constructTree's where
-	// planTreeNew allows it, runFD's otherwise, which it plans after.
-	// constructWithTarget calls it where it had called runFD, and asks
-	// what it asked after, so that it is as long as it was: the code of
-	// the package's functions laid out after it, the hot ones among them,
-	// stays where it was (AGENTS.md).
+	// constructor, with this the object made for it: runFD's.
 	constructRun func(r *Runtime, this Value, args []Value, newTarget Value, o *Object, fd *funcData) (Value, error)
 
 	// superConstruct is super()'s construction of its parent in frame f,
 	// with f's object as this and new.target, after the parent's instance
-	// initializer: constructTree's where planTreeNew allows it,
-	// callObject's otherwise, which it plans after. superCall calls it
-	// where it had called callObject, for the same reason; the frame
-	// rather than its this, which keeps superCall's code as long as it was.
+	// initializer: callObject's.
 	superConstruct func(r *Runtime, parent *Object, f *frame, args []Value, newTarget Value) (Value, error)
 
 	// constructNativeAt is constructWithTarget's construction by a
@@ -128,20 +106,7 @@ func init() {
 	}
 
 	constructRun = func(r *Runtime, this Value, args []Value, newTarget Value, o *Object, fd *funcData) (Value, error) {
-		if fd.closure.fn.Reg != nil {
-			// Register mode's code, entered as its own (regRunFD).
-			if v, err, ok := r.regRunFD(fd.closure, this, args, newTarget, o, fd); ok {
-				return v, err
-			}
-		}
-		if fd.treeNew {
-			return constructTree(r, o, fd, this, args, newTarget)
-		}
-		v, err := r.runFD(fd.closure, this, args, newTarget, o, fd)
-		if !fd.newPlanned {
-			planTreeNew(fd)
-		}
-		return v, err
+		return r.runFD(fd.closure, this, args, newTarget, o, fd)
 	}
 
 	superConstruct = func(r *Runtime, parent *Object, f *frame, args []Value, newTarget Value) (Value, error) {
@@ -156,148 +121,6 @@ func init() {
 			}
 			return Undefined, r.throwError(errReference, "super() has already been called")
 		}
-		pfd, this := parent.fn(), f.this
-		if pfd != nil && pfd.treeNew && pfd.closure.realm == r.Realm {
-			// A compiled constructor of this realm is constructed on its
-			// tree, as a new of it is: nothing else callObject asks applies.
-			if err := r.tick(); err != nil {
-				return Undefined, err
-			}
-			return constructTree(r, parent, pfd, this, args, newTarget)
-		}
-		v, err := r.callObject(parent, this, args, newTarget)
-		if pfd != nil && !pfd.newPlanned && err == nil {
-			planTreeNew(pfd)
-		}
-		return v, err
-	}
-
-	planTreeNew = func(fd *funcData) {
-		cl := fd.closure
-		if cl == nil || fd.native != nil || fd.bound || cl.fn.Reg != nil && !cl.fn.OldTiers() {
-			// Register mode's code is constructed as its own
-			// (constructRun), and super() calls it so (callObject).
-			fd.newPlanned = true
-			return
-		}
-		fn := cl.fn
-		t := (*tree)(atomic.LoadPointer(&fn.VMCode))
-		if t == nil {
-			// Not run yet; the construction that runs it decides.
-			return
-		}
-		fd.newPlanned = true
-		// A function made inside a with body or beside a direct eval has
-		// scopes its frame is given (fd.extra), as one with an eval of its
-		// own makes some; runFD sets both up.
-		if t == noTree || fd.ctorKind == ctorNone || fd.extra != nil || fn.HasDirectEval {
-			return
-		}
-		if fd.ctorKind == ctorDerived {
-			// Its this binding is a cell of the runtime's, reused by the
-			// next frame at its depth: a closure made in the body (an
-			// arrow's lexThisRef) or a direct eval's code would keep it past
-			// the frame.
-			for _, in := range fn.Code {
-				switch in.Op {
-				case bytecode.OpClosure, bytecode.OpDirectEval, bytecode.OpTailDirectEval:
-					return
-				}
-			}
-		}
-		fd.treeNew = true
-	}
-
-	constructTree = func(r *Runtime, o *Object, fd *funcData, this Value, args []Value, newTarget Value) (Value, error) {
-		cl := fd.closure
-		fn := cl.fn
-		t := (*tree)(atomic.LoadPointer(&fn.VMCode))
-		if fd.ctorKind != ctorDerived {
-			return r.callTreeWith(o, fd, t, this, args, newTarget, false)
-		}
-		// callTreeWith, but that the frame's this is a binding, unbound
-		// until super() binds it, as runFD gives a derived constructor's.
-		if r.frameDepth >= r.maxFrames {
-			return Undefined, r.throwRangeError("maximum call stack size exceeded")
-		}
-		base := r.stackTop
-		need := fn.LocalCount + fn.MaxStack
-		if base+need > len(r.stack) {
-			return Undefined, r.throwRangeError("maximum call stack size exceeded")
-		}
-		r.stackTop = base + need
-		locals := r.stack[base : base+fn.LocalCount : base+fn.LocalCount]
-		m := min(fn.ParamCount, len(locals), len(args))
-		for i, a := range args[:m] {
-			locals[i] = a
-		}
-		for i := m; i < len(locals); i++ {
-			locals[i] = Undefined
-		}
-		if r.stackTop > r.stackHigh {
-			r.stackHigh = r.stackTop
-		}
-		// The cell for this depth. A frame below that holds one of an
-		// array this replaces keeps it, as nothing reads a cell but through
-		// its frame's thisRef.
-		d := r.frameDepth
-		if d >= len(r.thisCells) {
-			r.thisCells = make([]thisBinding, d+d/2+16)
-		}
-		cell := &r.thisCells[d]
-		*cell = thisBinding{value: this}
-		off := r.frameDepth - r.frameBase
-		if uint(off) >= uint(len(r.cur)) {
-			r.seekFrameBlock()
-			off = r.frameDepth - r.frameBase
-		}
-		r.frameDepth++
-		if r.frameDepth > r.frameHigh {
-			r.frameHigh = r.frameDepth
-		}
-		f := &r.cur[off]
-		f.cl = cl
-		f.locals = locals
-		f.base = base + fn.LocalCount
-		f.pc = 0
-		f.this = this
-		f.newTarget = newTarget
-		f.callee = o
-		f.args = args
-		if len(f.openUpvalues) != 0 {
-			f.openUpvalues = f.openUpvalues[:0]
-		}
-		f.thisRef = cell
-		if f.withScopes != nil {
-			f.withScopes = nil
-		}
-		if f.evalVars != nil {
-			f.evalVars = nil
-		}
-		if len(f.handlers) != 0 {
-			f.handlers = f.handlers[:0]
-		}
-		if f.native != "" {
-			f.native = ""
-		}
-		if f.savedSP != 0 {
-			f.savedSP = 0
-		}
-		var v Value
-		var err error
-		var native bool
-		if r.jitOn() {
-			v, err, native = r.tryJITFrame(f)
-		}
-		if !native {
-			v, err = r.runTree(f, t)
-		}
-		r.popFrameOf(f, base)
-		// The object is the construction's now, not the cell's to keep.
-		cell.value = Undefined
-		if err == errNoSuper {
-			err = r.throwError(errReference, "%s", errNoSuper.Error())
-		}
-		return v, err
+		return r.callObject(parent, f.this, args, newTarget)
 	}
 }

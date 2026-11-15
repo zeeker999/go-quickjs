@@ -204,8 +204,6 @@ const jitTestWindow = time.Minute
 func jitDifferentialIn(t *testing.T, src string, generated bool) JITStats {
 	t.Helper()
 	run := func(tree, jit bool, c jitStressConfig, within time.Duration) (string, time.Duration, JITStats) {
-		previous := treeTier.Swap(tree)
-		defer treeTier.Store(previous)
 		// A generated program can grow a string without bound -- o.x=s;
 		// s+=o.x doubles it -- which takes every tier seconds and gigabytes
 		// to reach the engine's length limit. The memory limit stops it

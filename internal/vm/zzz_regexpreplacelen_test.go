@@ -88,12 +88,12 @@ const regexpReplaceLenTestWant = `10,0,0,10,0,10,10,28 13,0,0,13,0,13,13,28 19,0
 // replaces of the table made no string.
 func TestRegExpReplaceLen(t *testing.T) {
 	for _, idle := range []bool{true, false} {
-		for _, tree := range []bool{true, false} {
+		for _, tree := range []bool{true} {
 			if idle {
 				runtime.GC()
 				debug.SetGCPercent(-1)
 			}
-			r := newOldTiersTreeForTest(tree, Config{})
+			r := New(Config{})
 			v, err := r.Run(compileForTest(t, regexpReplaceLenTestSrc))
 			r.Close()
 			debug.SetGCPercent(100)
@@ -108,7 +108,7 @@ func TestRegExpReplaceLen(t *testing.T) {
 	// The table's replaces of templates without a $, measured, make no
 	// strings: 'xd1yd1zd1'.replace(/d1/g, '-'), a thousand times, made as
 	// many before.
-	r := newOldTiersForTest(Config{})
+	r := New(Config{})
 	defer r.Close()
 	src := strings.TrimSpace(regexpReplaceLenTestSrc)
 	if _, err := r.Run(compileForTest(t, src[:strings.LastIndex(src, "\n")]+"\ntable(); ''")); err != nil {

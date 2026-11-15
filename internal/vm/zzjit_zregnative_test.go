@@ -50,14 +50,9 @@ function instThrows(n) { var s = 0; try { for (var i = 0; i < n; i++) if (i inst
 // the rest, ran the stack form's JIT in its place.
 func regNativeRuntimes(t *testing.T, src string) [2]*Runtime {
 	t.Helper()
-	compiler.SetRegisterForm(true)
 	prog := compileForTest(t, src)
-	compiler.SetRegisterForm(false)
-	SetRegTier(true)
 	was := SetJITRegTier(true)
 	t.Cleanup(func() {
-		compiler.SetRegisterForm(bytecode.RegDefault())
-		SetRegTier(bytecode.RegDefault())
 		SetJITRegTier(was)
 	})
 	var rts [2]*Runtime

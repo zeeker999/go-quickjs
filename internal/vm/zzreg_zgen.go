@@ -32,9 +32,6 @@ import (
 // read through its binding. The with objects and the eval's variables
 // around it are the frame's (frameRare), kept across a suspension.
 func (r *Runtime) regGenOf(cl *closure, callee *Object) *regCode {
-	if !r.regOn() {
-		return nil
-	}
 	c := cl.reg
 	if c == nil {
 		c = r.regOf(cl)

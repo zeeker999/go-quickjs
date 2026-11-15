@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	quickjs "github.com/go-quickjs/go-quickjs"
-	"github.com/go-quickjs/go-quickjs/internal/vm"
 )
 
 // A read of a const initialized with a literal, which the compiler makes
@@ -38,9 +37,7 @@ func TestConstLiteralReads(t *testing.T) {
 })()`
 	const want = "ReferenceError/1 ; ReferenceError/2 ; 3 ; ReferenceError ; 2,2 ; 1 ; 5,5 ; a0a1a2 ; TypeError7 ; " +
 		"true,true,false,0,1.5,str,true,1e+21,true,object,string,true ; |str|1.5 ; 33"
-	defer vm.SetTreeTier(true)
-	for _, tree := range []bool{true, false} {
-		vm.SetTreeTier(tree)
+	for _, tree := range []bool{true} {
 		rt := quickjs.New()
 		v, err := rt.Eval(src)
 		if err != nil {

@@ -18,8 +18,8 @@ func TestCaptureRoom(t *testing.T) {
 		{name: "duplicate", src: `function f(a) { var b = a; function g() { return a + b + (function () { return a * b })() } return g() } f(3)`, want: "15"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, on := range []bool{false, true} {
-				r := newTreeTierForTest(on, Config{})
+			for _, on := range []bool{true} {
+				r := New(Config{})
 				v, err := r.Run(compileForTest(t, tt.src))
 				if err != nil {
 					r.Close()
@@ -40,8 +40,8 @@ func TestCaptureRoom(t *testing.T) {
 // three bindings.
 func TestCaptureRoomAllocs(t *testing.T) {
 	skipUnlessAllocsOrdinary(t)
-	for _, on := range []bool{false, true} {
-		r := newTreeTierForTest(on, Config{})
+	for _, on := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, `function f(a, b, c) { return function () { return a + b + c } }; for (let i = 0; i < 10; i++) f(1, 2, 3); f`))
 		if err != nil {
 			t.Fatal(err)
@@ -78,8 +78,8 @@ func TestArgumentsRoom(t *testing.T) {
 		{name: "strictCallee", src: `function f() { 'use strict'; return arguments } function g() { var a = f(), b = f(); var d = Object.getOwnPropertyDescriptor(a, 'callee'); var r = (d.get === Object.getOwnPropertyDescriptor(b, 'callee').get) + ',' + d.configurable; try { a.callee } catch (e) { r += ',' + e.name } try { Object.defineProperty(a, 'callee', { get() {} }) } catch (e) { r += ',' + e.name } return r + ',' + (Object.getOwnPropertyDescriptor(b, 'callee').set === d.get) } g()`, want: "true,false,TypeError,TypeError,true"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, on := range []bool{false, true} {
-				r := newTreeTierForTest(on, Config{})
+			for _, on := range []bool{true} {
+				r := New(Config{})
 				v, err := r.Run(compileForTest(t, tt.src))
 				if err != nil {
 					r.Close()
@@ -108,8 +108,8 @@ func TestArgumentsRoomAllocs(t *testing.T) {
 		{`function f() { 'use strict'; return arguments }`, 1},
 		{`function f(a, b, c) { return arguments }`, 4},
 	} {
-		for _, on := range []bool{false, true} {
-			r := newTreeTierForTest(on, Config{})
+		for _, on := range []bool{true} {
+			r := New(Config{})
 			v, err := r.Run(compileForTest(t, tt.src+`; for (let i = 0; i < 10; i++) f(1, 2, 3); f`))
 			if err != nil {
 				t.Fatal(err)

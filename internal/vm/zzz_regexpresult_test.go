@@ -90,13 +90,13 @@ const matchResultTestWant = "2661856178 3081 1410175481 853667658"
 // each answer is Node's, in the tree tier and in the interpreter, with the
 // collector idle and running.
 func TestRegExpMatchResults(t *testing.T) {
-	for _, tree := range []bool{true, false} {
+	for _, tree := range []bool{true} {
 		for _, idle := range []bool{true, false} {
 			gc := debug.SetGCPercent(-1)
 			if !idle {
 				debug.SetGCPercent(1)
 			}
-			r := newTreeTierForTest(tree, Config{})
+			r := New(Config{})
 			v, err := r.Run(compileForTest(t, matchResultTestSrc))
 			r.Close()
 			debug.SetGCPercent(gc)

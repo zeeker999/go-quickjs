@@ -17,9 +17,7 @@ func (c *compiler) compileFunctionLiteral(fn *ast.FuncLit, inferredName string) 
 	trace := c.traceName
 	c.traceName = ""
 	sub := newCompiler(c, c.opts)
-	if registerForm.Load() && !c.opts.NoRegister {
-		sub.reg = regcomp.NewRecord(fn.Idents)
-	}
+	sub.reg = regcomp.NewRecord(fn.Idents)
 	sub.lit = fn
 	sub.fn.Strict = fn.Strict || c.fn.Strict
 	sub.fn.Async = fn.Async

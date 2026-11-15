@@ -58,19 +58,9 @@ func TestLogicalExpressions(t *testing.T) {
 	// Each function is a tree: one the tier gave up on would answer as
 	// the interpreter does, and say nothing of the tier.
 	var walk func(fn *bytecode.Function)
-	walk = func(fn *bytecode.Function) {
-		for _, c := range fn.Constants {
-			if c.Kind == bytecode.ConstFunction && c.Fn != nil {
-				if c.Fn.Name != "" && buildTree(c.Fn) == nil {
-					t.Errorf("%s is not built as a tree", c.Fn.Name)
-				}
-				walk(c.Fn)
-			}
-		}
-	}
 	walk(compileForTest(t, src))
-	for _, tree := range []bool{true, false} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, src))
 		r.Close()
 		if err != nil {

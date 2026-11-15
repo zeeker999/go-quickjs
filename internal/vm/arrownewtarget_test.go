@@ -9,8 +9,8 @@ import "testing"
 // closures, carries no room for it.
 func TestArrowNewTarget(t *testing.T) {
 	t.Parallel()
-	for _, tree := range []bool{false, true} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, `
 			function F() { this.direct = () => new.target; this.nested = () => () => new.target;
 				this.plain = () => 1 }

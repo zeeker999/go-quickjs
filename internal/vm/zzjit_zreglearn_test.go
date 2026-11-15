@@ -117,7 +117,6 @@ func TestJITRegPolymorphicLearned(t *testing.T) {
 		t.Fatalf("no native code entered")
 	}
 	// The stack form's code, run alike.
-	SetRegTier(false)
 	SetJITRegTier(false)
 	sr := New(Config{JIT: true})
 	t.Cleanup(sr.Close)

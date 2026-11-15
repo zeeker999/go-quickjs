@@ -155,12 +155,12 @@ const regexpReuseTestWant = `-384824464 -384824464 -384824464 85/28.23.7.4.16.1.
 // getter left as they were.
 func TestRegExpReuse(t *testing.T) {
 	for _, idle := range []bool{true, false} {
-		for _, tree := range []bool{true, false} {
+		for _, tree := range []bool{true} {
 			if idle {
 				runtime.GC()
 				debug.SetGCPercent(-1)
 			}
-			r := newTreeTierForTest(tree, Config{})
+			r := New(Config{})
 			v, err := r.Run(compileForTest(t, regexpReuseTestSrc))
 			r.Close()
 			debug.SetGCPercent(100)

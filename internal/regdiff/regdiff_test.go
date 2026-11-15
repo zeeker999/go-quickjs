@@ -13,9 +13,6 @@ import (
 	"time"
 
 	quickjs "github.com/go-quickjs/go-quickjs"
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/compiler"
-	"github.com/go-quickjs/go-quickjs/internal/hostaccess"
 	"github.com/go-quickjs/go-quickjs/internal/v8bench"
 	"github.com/go-quickjs/go-quickjs/internal/vm"
 )
@@ -44,39 +41,15 @@ func TestMain(m *testing.M) {
 		debug.SetMemoryLimit(regDiffMemoryLimit)
 	}
 	code := m.Run()
-	if err := goldenWrite(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		code = 1
-	}
 	debug.SetMemoryLimit(limit)
 	os.Exit(code)
 }
 
-// withRegTier runs f with the register backend and tier set to on, and puts
-// back what the environment says after.
-func withRegTier(on bool, f func()) {
-	compiler.SetRegisterForm(on)
-	vm.SetRegTier(on)
-	defer func() {
-		env := bytecode.RegDefault()
-		compiler.SetRegisterForm(env)
-		vm.SetRegTier(env)
-	}()
-	f()
-}
-
 // regDiffRun evaluates src in a new runtime and then each of calls, and
 // returns each call's result as a string, or its error's, or src's error.
-// With old, the runtime has the register tier off for itself
-// (vm.Runtime.SetOldTiers): its host compiles no register form, and it
-// runs the stack interpreter and the tree tier, as every runtime does with
-// the process's switch off.
-func regDiffRun(src string, calls []string, old bool) ([]string, error) {
+func regDiffRun(src string, calls []string) ([]string, error) {
 	rt := quickjs.New()
 	defer rt.Close()
-	if old {
-		hostaccess.VM(rt).SetOldTiers()
-	}
 	if _, err := rt.Eval(src); err != nil {
 		return nil, err
 	}
@@ -92,10 +65,9 @@ func regDiffRun(src string, calls []string, old bool) ([]string, error) {
 	return out, nil
 }
 
-// regDiff runs src and calls with the register tier off, twice, and on, and
-// fails where the tier on answers otherwise. A call whose two answers with
-// the tier off differ -- a clock, Math.random -- is not compared. It
-// returns how many functions the tier gave register code.
+// regDiff runs src and calls and fails where an answer is not the one the
+// stack interpreter and the tree tier gave (testdata/golden.json). It
+// returns how many functions were given register code.
 func regDiff(t *testing.T, src string, calls []string) int64 {
 	t.Helper()
 	regDiffAlone.RLock()
@@ -112,9 +84,8 @@ func regDiffParallel(t *testing.T) {
 	}
 }
 
-// regDiffOn is held by a comparison's run with the register tier on,
-// whose counts of register code and fallbacks are the process's: the
-// runs with it off, in runtimes of old tiers, count neither.
+// regDiffOn is held by a comparison's run, whose count of register code
+// is the process's.
 var regDiffOn sync.Mutex
 
 // regDiffAlone is held by regDiffAll alone, which sets regcomp.OnRefuse
@@ -175,93 +146,23 @@ func regDiffLocked(t *testing.T, src string, calls []string) int64 {
 		regDiffHook(t, src, calls)
 		return 1 << 20
 	}
-	// The three runs, each in a runtime of its own: the two with the tier
-	// off in runtimes of the old tiers, the one with it on counting the
-	// process's register code and fallbacks, which the others do not
-	// touch, one comparison's at a time (regDiffOn). A small program's
-	// are made at once; a heavy comparison's (heavy) one after another,
-	// each runtime closed before the next is made, so that it holds one
-	// runtime of its corpus at a time and not three.
-	var off, again, on []string
-	var errs [3]error
-	var built, n int64
-	var by string
-	runs := [3]func(){
-		func() { off, errs[0] = regDiffRun(src, calls, true) },
-		func() { again, errs[1] = regDiffRun(src, calls, true) },
-		func() {
-			regDiffOn.Lock()
-			defer regDiffOn.Unlock()
-			before := vm.RegsBuilt()
-			vm.ResetRegFallbacks()
-			withRegTier(true, func() { on, errs[2] = regDiffRun(src, calls, false) })
-			built = vm.RegsBuilt() - before
-			n, by = vm.RegFallbacks()
-		},
+	regDiffOn.Lock()
+	before := vm.RegsBuilt()
+	on, err := regDiffRun(src, calls)
+	built := vm.RegsBuilt() - before
+	regDiffOn.Unlock()
+	if err != nil {
+		t.Fatalf("eval: %v", err)
 	}
-	if heavyHolds(t) {
-		for _, run := range runs {
-			run()
-		}
-	} else {
-		var wg sync.WaitGroup
-		wg.Add(len(runs))
-		for _, run := range runs {
-			go func() {
-				defer wg.Done()
-				run()
-			}()
-		}
-		wg.Wait()
-	}
-	for _, err := range errs {
-		if err != nil {
-			t.Fatalf("eval: %v", err)
-		}
-	}
-	// Register mode runs everything as register code, entered as its own:
-	// nothing in the stack interpreter or the tree tier, nothing entered
-	// through their frames (docs/register-interpreter.md, item 13).
-	if n != 0 {
-		t.Errorf("%d fallbacks to the other tiers (QJS_REGFALLTRACE names them):\n%s", n, by)
-	}
-	key := goldenKey(t)
-	if goldenRecording() {
-		answers := make([]*string, len(calls))
+	if os.Getenv("QJS_REGDIFF_SHOW") != "" {
+		// Each answer, to see that a case tests what it says.
 		for i := range calls {
-			if off[i] == again[i] {
-				a := goldenAnswer(off[i])
-				answers[i] = &a
-			}
-		}
-		goldenRecord(key, src, calls, answers)
-	} else {
-		goldenCheck(t, key, src, calls, on)
-	}
-	bad, skipped := 0, 0
-	defer func() {
-		t.Logf("%d calls compared, %d not (their answers vary), %d functions as register code",
-			len(calls)-skipped, skipped, built)
-	}()
-	for i := range calls {
-		if os.Getenv("QJS_REGDIFF_SHOW") != "" {
-			// Each answer, to see that a case tests what it says.
 			t.Logf("%.100s => %.300s", calls[i], on[i])
 		}
-		if off[i] != again[i] {
-			skipped++
-			continue
-		}
-		if off[i] == on[i] {
-			continue
-		}
-		if bad++; bad <= 20 {
-			t.Errorf("%s:\n  register tier off: %.300s\n  register tier on:  %.300s", calls[i], off[i], on[i])
-		}
 	}
-	if bad > 20 {
-		t.Errorf("and %d more", bad-20)
-	}
+	skipped := goldenCheck(t, goldenKey(t), src, calls, on)
+	t.Logf("%d calls compared, %d not (their recorded answers varied), %d functions as register code",
+		len(calls)-skipped, skipped, built)
 	return built
 }
 
@@ -1447,16 +1348,25 @@ function viaCap() { var r = []; for (var i = 0; i < 3; i++) r.push(cap(1), cap(1
 		}
 		return out
 	}
-	var off, on []string
-	withRegTier(false, func() { off = run() })
+	// The answers of the stack interpreter and the tree tier.
+	want := []string{"7", "7", "21",
+		"3:1,2,3:15 1:4:15 0::15 3:1,2,3:15 1:4:15 0::15 3:1,2,3:15 1:4:15 0::15",
+		"5,6,7,8|10 9|18 5,6,7,8|10 9|18 5,6,7,8|10 9|18",
+		"219", "3:9,10,11:15", "3:9,10,11:15",
+		"3:1,2,3:15 2:4,5:15 4:6,7,8,9:15 3:1,2,3:15 3:1,2,3:15 2:4,5:15 4:6,7,8,9:15 3:1,2,3:15 3:1,2,3:15 2:4,5:15 4:6,7,8,9:15 3:1,2,3:15",
+		"4:1,2,3,4:15 0::15",
+		"1:11 1,2,3:11 4:11 8,0,8,9:11/9,1,8,9:11 1 1,2,3 4 1:11 1,2,3:11 4:11 8,0,8,9:11/9,1,8,9:11 1 1,2,3 4 1:11 1,2,3:11 4:11 8,0,8,9:11/9,1,8,9:11 1 1,2,3 4",
+		"1,2:11",
+		"3:1,2,3:15 1:4:15 0::15 3:1,2,3:15 1:4:15 0::15 3:1,2,3:15 1:4:15 0::155,6,7,8|10 9|18 5,6,7,8|10 9|18 5,6,7,8|10 9|18",
+	}
 	before := vm.RegsBuilt()
-	withRegTier(true, func() { on = run() })
+	on := run()
 	if vm.RegsBuilt() == before {
 		t.Error("no function was register code")
 	}
 	for i, c := range calls {
-		if off[i] != on[i] {
-			t.Errorf("%s: %q, register code %q", c, off[i], on[i])
+		if want[i] != on[i] {
+			t.Errorf("%s: %q, register code %q", c, want[i], on[i])
 		}
 	}
 }
@@ -1465,7 +1375,7 @@ function viaCap() { var r = []; for (var i = 0; i < 3; i++) r.push(cap(1), cap(1
 // position, each made in its frame's place (regRestartRun), polls as a
 // loop does: the host's context stops it.
 func TestRegTailCallsStop(t *testing.T) {
-	withRegTier(true, func() {
+	func() {
 		rt := quickjs.New()
 		defer rt.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -1478,7 +1388,7 @@ func TestRegTailCallsStop(t *testing.T) {
 				t.Errorf("%s: an endless loop of calls in tail position ended", src)
 			}
 		}
-	})
+	}()
 }
 
 // TestRegDiffTopLevel compares top-level code as register code: a script's

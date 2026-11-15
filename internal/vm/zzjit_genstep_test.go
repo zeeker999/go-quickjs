@@ -188,12 +188,9 @@ func TestJITGenStepAgreesWithNode(t *testing.T) {
 	// them, and g, compiled again, counts its native resumptions afresh
 	// (link.in), which the case's check reads, from none.
 	jitNoInlineForTest(t, "bad")
-	defer SetTreeTier(true)
-	for _, on := range []bool{false, true} {
-		SetTreeTier(on)
+	for _, on := range []bool{true} {
 		jitGenRounds(t, func() *Runtime { return New(Config{}) }, 2, nil)
 	}
-	SetTreeTier(true)
 	jit := func() *Runtime {
 		r := New(Config{JIT: true})
 		jitDefaultsForTest(r)

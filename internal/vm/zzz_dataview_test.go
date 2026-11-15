@@ -90,8 +90,8 @@ const dataViewTestWant = `255.254.18.52.52.18.251.255.255.255.63.192.0.0.3.0 255
 // is Node's, in the tree tier and in the interpreter, and an immutable
 // buffer's setters still throw.
 func TestDataViewLeaves(t *testing.T) {
-	for _, tree := range []bool{true, false} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, dataViewTestSrc))
 		if err != nil {
 			t.Fatal(err)

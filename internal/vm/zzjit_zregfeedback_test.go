@@ -46,11 +46,7 @@ function work(p, n) {
 var pt = new Point(1, 2);
 for (var k = 0; k < 20; k++) work(pt, 5);
 `
-	compiler.SetRegisterForm(true)
 	prog := compileForTest(t, src)
-	compiler.SetRegisterForm(bytecode.RegDefault())
-	SetRegTier(true)
-	defer SetRegTier(bytecode.RegDefault())
 	defer SetJITRegTier(SetJITRegTier(true))
 	r := New(Config{})
 	defer r.Close()

@@ -110,8 +110,8 @@ const regexpLeafTestWant = `null,1,false,1 null,0,false,0 null,0,false,0 null,1,
 // writes lastIndex: each answer is Node's, in the tree tier and in the
 // interpreter, and the check passes exactly where it says.
 func TestRegExpLeaves(t *testing.T) {
-	for _, tree := range []bool{true, false} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, regexpLeafTestSrc))
 		r.Close()
 		if err != nil {
@@ -314,7 +314,7 @@ func TestRegExpLeafComplexity(t *testing.T) {
 		tree bool
 		call string
 	}{{true, "exec"}, {false, "test"}} {
-		r := newTreeTierForTest(c.tree, Config{})
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, `function f(re) { let _k = 0; try { return String(re.`+c.call+`('a'.repeat(40))) } catch (e) { return e.name + ': ' + e.message } }
 f(/(a+)+b/)`))
 		r.Close()
@@ -344,8 +344,8 @@ for (var how of ['exec', 'test']) {
 }
 out.join('|')`
 	want := "SyntaxError,regular expression is too complex,,0|SyntaxError,regular expression is too complex,,0"
-	for _, tree := range []bool{true, false} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, src))
 		r.Close()
 		if err != nil {
@@ -444,8 +444,8 @@ func TestRegExpLeafSpentOnceNested(t *testing.T) {
 	if testing.Short() {
 		t.Skip("spends the step budget")
 	}
-	for _, tree := range []bool{true, false} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		src := `function f0(re, s) { return re.exec(s) }
 function f1(re, s) { return f0(re, s) }
 function f2(re, s) { return f1(re, s) }

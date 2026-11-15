@@ -35,12 +35,12 @@ func TestGeneratorValues(t *testing.T) {
 		{name: "asyncGeneratorQueue", async: true, src: `async function* f() { yield 1; yield 2 } var g = f(); var p = Promise.all([g.next(), g.next(), g.next(), g.return(9)]).then(r => JSON.stringify(r))`, want: `[{"value":1,"done":false},{"value":2,"done":false},{"done":true},{"value":9,"done":true}]`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, on := range []bool{false, true} {
+			for _, on := range []bool{true} {
 				src := tt.src
 				if tt.async {
 					src = "var out = 'pending'; " + src + "; Promise.resolve(p).then(v => out = String(v), e => out = 'E ' + e)"
 				}
-				r := newTreeTierForTest(on, Config{})
+				r := New(Config{})
 				v, err := r.Run(compileForTest(t, src))
 				if err == nil && tt.async {
 					if err = r.runMicrotasks(); err == nil {
@@ -97,7 +97,6 @@ func TestGeneratorOneAllocation(t *testing.T) {
 // begun again, spread, destructuring, Array.from, yield*, and generators
 // made before the function learned.
 func TestGeneratorLoopRoom(t *testing.T) {
-	defer SetTreeTier(true)
 	r := New(Config{})
 	defer r.Close()
 	fn, err := r.Run(compileForTest(t, `(function () { function* g(a, b) { yield a; yield b }
@@ -124,8 +123,7 @@ func TestGeneratorLoopRoom(t *testing.T) {
 		{`function* g() { yield 1; yield 2 } function* d() { yield* g(); yield* g() } for (var x of d()); [...d()].join()`, "1,2,1,2"},
 		{`function* g() { yield 1; yield 2 } for (var x of g()); var it = g(); it.next(); [...it].join() + '|' + JSON.stringify(it.next())`, `2|{"done":true}`},
 	} {
-		for _, on := range []bool{false, true} {
-			SetTreeTier(on)
+		for _, on := range []bool{true} {
 			v, err := r.Run(compileForTest(t, tt.src))
 			if err != nil {
 				t.Fatalf("%s: %v", tt.src, err)
@@ -174,8 +172,8 @@ func TestGeneratorSavedPart(t *testing.T) {
 		{`(function* () { for (const x of [1, 2]) yield x })`, []bool{true, true, false}, []int{1, 1}},
 		{`(function* (a, f = () => a) { yield f() })`, []bool{true, false}, []int{0}},
 	} {
-		for _, on := range []bool{false, true} {
-			r := newTreeTierForTest(on, Config{})
+		for _, on := range []bool{true} {
+			r := New(Config{})
 			fn, err := r.Run(compileForTest(t, tt.src))
 			if err != nil {
 				t.Fatal(err)
@@ -241,8 +239,8 @@ func TestGeneratorArgsKept(t *testing.T) {
 		{`function* f(a, b = a) { yield a + b }`, `f(2)`, "4", 1, 3},
 		{`function* f([a, b]) { yield a + b }`, `f([1, 2])`, "3", 1, 4},
 	} {
-		for _, on := range []bool{false, true} {
-			r := newTreeTierForTest(on, Config{})
+		for _, on := range []bool{true} {
+			r := New(Config{})
 			v, err := r.Run(compileForTest(t, tt.decl+"; "+tt.call))
 			if err != nil {
 				t.Fatalf("%s: %v", tt.decl, err)

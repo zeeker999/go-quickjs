@@ -8,8 +8,8 @@ import "testing"
 // spread puts them, the literal's own before and after included.
 func TestSpreadReservesRoom(t *testing.T) {
 	t.Parallel()
-	for _, tree := range []bool{false, true} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, `
 		var src = {};
 		for (var n = 0; n < 20; n++) src["k" + n] = n;

@@ -45,7 +45,7 @@ func pureByTree(fn *bytecode.Function) bool {
 // about it and found it none. A short body, the commonest, is answered by
 // the first test.
 func pureFirst(fd *funcData, fn *bytecode.Function) bool {
-	return len(fn.Code) < pureTreeCode || fn.PureCalls || fd.treePlanned
+	return len(fn.Code) < pureTreeCode || fn.PureCalls || fd.planned
 }
 
 // The cases of pureCallAt's switch, which pureCases numbers the

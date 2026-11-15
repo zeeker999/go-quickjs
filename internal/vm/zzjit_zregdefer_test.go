@@ -20,16 +20,12 @@ func TestJITRegDeferredWarmsUpAgain(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
-	compiler.SetRegisterForm(true)
 	fn := compileForTest(t, jitHotProgram(40))
 	call := compileForTest(t, `f39(100000)`)
-	compiler.SetRegisterForm(bytecode.RegDefault())
-	SetRegTier(true)
 	was := SetJITRegTier(true)
 	epoch, flush := jitEpochNow, jitFlushNow
 	t.Cleanup(func() {
 		jitEpochNow, jitFlushNow = epoch, flush
-		SetRegTier(bytecode.RegDefault())
 		SetJITRegTier(was)
 	})
 	// Clocks that do not move: the code compiled first stays young, and

@@ -241,7 +241,7 @@ throw 2: 3 true`
 func TestPrivateMembersAgreeWithNode(t *testing.T) {
 	t.Parallel()
 	for round := range 4 {
-		r := newTreeTierForTest(round < 2, Config{})
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, privateMemberScript))
 		if err != nil {
 			t.Fatal(err)
@@ -281,7 +281,7 @@ func TestPrivateSitesCached(t *testing.T) {
 		t.Fatalf("PrivateSites = %d, want 4", fn.PrivateSites)
 	}
 	want := int(fn.PropSites+fn.PrivateSites) + 1
-	if rc := fn.RegCompiled(); rc != nil && rc.Names != nil && regTier.Load() {
+	if rc := fn.RegCompiled(); rc != nil && rc.Names != nil {
 		// Register code compiled at the function's first call numbers its
 		// own sites past the private members' (bytecode.RegLater).
 		want = int(rc.PropSites) + 1
@@ -301,7 +301,7 @@ func TestPrivateSitesCached(t *testing.T) {
 	for i := range sites {
 		sites[i] = fn.PropSites + 1 + uint32(i)
 	}
-	if rc := fn.RegCode(); rc != nil && regTier.Load() {
+	if rc := fn.RegCode(); rc != nil {
 		sites = sites[:0]
 		for pc, w := range rc.Code {
 			if w.Op() == bytecode.RGetPrivate || w.Op() == bytecode.RSetPrivate {

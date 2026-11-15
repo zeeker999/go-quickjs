@@ -21,11 +21,9 @@ func TestPrivateNamesKeepTheirAtoms(t *testing.T) {
 		out.push(o[s], Object.getOwnPropertySymbols(o).length, a.get())
 		out.join()`
 	const want = "1,5,1,true,false,false,TypeError,s,1,1"
-	for _, tree := range []bool{true, false} {
-		previous := treeTier.Swap(tree)
+	for _, tree := range []bool{true} {
 		r := New(Config{})
 		v, err := r.Run(compileForTest(t, src))
-		treeTier.Store(previous)
 		if err != nil {
 			r.Close()
 			t.Fatalf("tree %v: %v", tree, err)

@@ -2,10 +2,9 @@ package vm
 
 import "github.com/go-quickjs/go-quickjs/internal/bytecode"
 
-// getGlobalAt is get_global for the tree tier: what the interpreter's case
-// does, in the same order.
-func (r *Runtime) getGlobalAt(c *tctx, in bytecode.Instr, pc int) (Value, error) {
-	cl, f := c.cl, c.f
+// getGlobalAt is get_global's slow path, in frame f of closure cl, whose
+// pc is the read's.
+func (r *Runtime) getGlobalAt(f *frame, cl *closure, in bytecode.Instr) (Value, error) {
 	name := cl.names[in.A]
 	env := cl.scope()
 	if f.evalVars != nil {
@@ -16,7 +15,6 @@ func (r *Runtime) getGlobalAt(c *tctx, in bytecode.Instr, pc int) (Value, error)
 	if r.lexShadows(name) {
 		if p := r.globalLexProp(env, name); p.ok() {
 			if p.value().IsUninitialized() {
-				c.at(pc)
 				return Undefined, r.throwReferenceError(
 					"cannot access %q before it is initialized", r.atoms.name(name))
 			}
@@ -48,7 +46,6 @@ func (r *Runtime) getGlobalAt(c *tctx, in bytecode.Instr, pc int) (Value, error)
 			return env.vals()[i], nil
 		}
 	}
-	c.at(pc)
 	if !r.isGlobalScope(env) {
 		if p := r.moduleLexProp(env, name); p.ok() {
 			if p.flags()&propUninit != 0 {
@@ -77,13 +74,6 @@ func (r *Runtime) getGlobalAt(c *tctx, in bytecode.Instr, pc int) (Value, error)
 		return Undefined, r.throwReferenceError("%s is not defined", r.atoms.name(name))
 	}
 	return v, nil
-}
-
-// setGlobalAt is set_global for the tree tier: what the interpreter's case
-// does, in the same order.
-func (r *Runtime) setGlobalAt(c *tctx, in bytecode.Instr, v Value, pc int) error {
-	c.at(pc)
-	return r.setGlobalIn(c.f, c.cl, in, v)
 }
 
 // setGlobalIn stores v to the global name the set_global or

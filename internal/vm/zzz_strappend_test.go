@@ -5,9 +5,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
 // strAppendTestSrc appends to captured bindings every way that could show a
@@ -706,8 +703,8 @@ func TestStrAppend(t *testing.T) {
 	t.Parallel()
 	// Its strings grow to 0.8 GB in each runtime.
 	heavy(t)
-	for _, tree := range []bool{true, false} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, strAppendTestSrc))
 		r.Close()
 		if err != nil {
@@ -736,8 +733,8 @@ result
 
 func TestStrAppendDeclaration(t *testing.T) {
 	t.Parallel()
-	for _, tree := range []bool{true, false} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, strAppendDeclarationSrc))
 		r.Close()
 		if err != nil {
@@ -762,7 +759,7 @@ func firstDifference(got, want string) string {
 
 // A run of appends makes one string and its right side, not a node each.
 func TestStrAppendAllocations(t *testing.T) {
-	r := newOldTiersForTest(Config{})
+	r := New(Config{})
 	defer r.Close()
 	if _, err := r.Run(compileForTest(t, `
 		function appends(n) {
@@ -792,9 +789,6 @@ func TestStrAppendAllocations(t *testing.T) {
 // and its right side, not a node each, natively and by the Go table, and
 // the reads between them see what they read.
 func TestRegStrAppendUpvalue(t *testing.T) {
-	compiler.SetRegisterForm(true)
-	SetRegTier(true)
-	t.Cleanup(func() { compiler.SetRegisterForm(bytecode.RegDefault()); SetRegTier(bytecode.RegDefault()) })
 	for _, native := range []bool{false, true} {
 		was := SetRegNative(native)
 		r := New(Config{})

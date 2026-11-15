@@ -212,7 +212,6 @@ func BenchmarkJITMD5(b *testing.B) {
 	for _, mode := range []string{"interpreter", "existing", "native"} {
 		b.Run(mode, func(b *testing.B) {
 			previous := treeTier.Swap(mode != "interpreter")
-			defer treeTier.Store(previous)
 			r := New(Config{JIT: mode == "native"})
 			defer func() { r.Close(); r.ReleaseClosed() }()
 			if _, err := r.Run(setup); err != nil {

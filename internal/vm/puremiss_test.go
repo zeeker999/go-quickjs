@@ -19,9 +19,8 @@ import (
 // frameless: there the template is tried pureMissLimit times at most.
 func TestPureMissPerTemplate(t *testing.T) {
 	t.Parallel()
-	for _, old := range []bool{true, false} {
+	for _, old := range []bool{false} {
 		r := New(Config{})
-		r.oldTiers = old
 		v, err := r.Run(compileForTest(t, `
 			var last, o = { get g() { return 1; } };
 			function each(f, n) { var s = 0; for (var i = 0; i < n; i++) s += f(i); return s }
@@ -50,7 +49,7 @@ func TestPureMissPerTemplate(t *testing.T) {
 		if n := fd.closure.pureMiss; n < pureMissLimit {
 			t.Errorf("the callback's template missed %d times, want %d", n, pureMissLimit)
 		}
-		if fd.treeCall == nil {
+		if fd.regCall == nil {
 			t.Errorf("the last callback made has no tree's call")
 		}
 	}

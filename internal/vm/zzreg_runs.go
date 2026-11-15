@@ -437,7 +437,7 @@ func (r *Runtime) regIterNext(f *frame, c *regCode, k *regKept, regs *[1 << 16]V
 			if g := regGenCursor(st); g != nil {
 				v, more, err = r.regGenStep(st, g)
 			} else {
-				v, more, err = r.regIterNextTree(f, cur)
+				v, more, err = r.regStepNext(st)
 			}
 			goto stepped
 		} else if !st.forIn {

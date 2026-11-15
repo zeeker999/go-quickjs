@@ -62,12 +62,10 @@ func TestBigIntElements(t *testing.T) {
 		"0,5,4,-9,-9 | -1 | 1 | -9223372036854775808 | " +
 		"9223372036854775810 | -9223372036854775810 | 3,-6,9,-4611686018427387904,-4611686018427387904 | " +
 		"true | true | 2 | true | 2 | TypeError | 18446744073709551616 | 18446744073709551614,2"
-	for _, tree := range []bool{true, false} {
-		previous := treeTier.Swap(tree)
+	for _, tree := range []bool{true} {
 		r := New(Config{})
 		v, err := r.Run(compileForTest(t, src))
 		r.Close()
-		treeTier.Store(previous)
 		if err != nil {
 			t.Fatalf("tree %v: %v", tree, err)
 		}

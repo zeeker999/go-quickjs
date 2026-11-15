@@ -99,8 +99,8 @@ true2000`
 // tree tier and in the interpreter.
 func TestDensify(t *testing.T) {
 	t.Parallel()
-	for _, tree := range []bool{true, false} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		if _, err := r.Run(compileForTest(t, densifySrc)); err != nil {
 			t.Fatal(err)
 		}

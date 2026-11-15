@@ -94,9 +94,7 @@ func testJITRegSortNative(t *testing.T) {
 		return false
 	}
 	run := func(src string) string {
-		compiler.SetRegisterForm(true)
 		prog := compileForTest(t, src)
-		compiler.SetRegisterForm(false)
 		var got [2]string
 		for k, r := range rts {
 			v, err := r.Run(prog)
@@ -167,9 +165,7 @@ func TestJITRegSortRestarts(t *testing.T) {
 			rts := regNativeRuntimes(t, sortSetup+drivers())
 			regStressForTest(rts[0], jitStressConfig{budget: 2, deopt: 3})
 			for _, src := range rounds {
-				compiler.SetRegisterForm(true)
 				prog := compileForTest(t, src)
-				compiler.SetRegisterForm(false)
 				var got [2]string
 				for k, r := range rts {
 					v, err := r.Run(prog)

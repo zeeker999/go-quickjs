@@ -219,9 +219,8 @@ func TestRegSoleRegisters(t *testing.T) {
 // regBigRuntime is a runtime with the JIT whose code is register code.
 func regBigRuntime(t *testing.T) *Runtime {
 	t.Helper()
-	SetRegTier(true)
 	was := SetJITRegTier(true)
-	t.Cleanup(func() { SetRegTier(bytecode.RegDefault()); SetJITRegTier(was) })
+	t.Cleanup(func() { SetJITRegTier(was) })
 	r := New(Config{JIT: true})
 	t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
 	return r

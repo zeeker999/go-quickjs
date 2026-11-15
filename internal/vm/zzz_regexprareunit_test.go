@@ -38,12 +38,12 @@ const regexpRareUnitTestWant = `11374 {"Q":"‰","QQ":"Q\"","x"#,"Qngr":"\/Qngr"
 // collector idle and running.
 func TestRegExpRareUnit(t *testing.T) {
 	for _, idle := range []bool{true, false} {
-		for _, tree := range []bool{true, false} {
+		for _, tree := range []bool{true} {
 			if idle {
 				runtime.GC()
 				debug.SetGCPercent(-1)
 			}
-			r := newTreeTierForTest(tree, Config{})
+			r := New(Config{})
 			v, err := r.Run(compileForTest(t, regexpRareUnitTestSrc+"run() + ' # ' + run()"))
 			r.Close()
 			debug.SetGCPercent(100)

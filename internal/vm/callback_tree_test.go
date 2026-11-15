@@ -67,8 +67,7 @@ func TestCallbackTreeRest(t *testing.T) {
 		"10 3 true 20 3,6,9,12 18 | a1b2 26 10,21,32 a+-b+-c {\"a\":101,\"b\":[102]} 6 | " +
 		"a1b2 26 10,21,32 a+-b+-c {\"a\":101,\"b\":[102]} 6 | 3.75 | function10,function20 | " +
 		"RangeError at 2 | RangeError at 2 | RangeError at 2 | bottom0,bottom0 | outer0,outer0"
-	for _, tree := range []bool{true, false} {
-		previous := treeTier.Swap(tree)
+	for _, tree := range []bool{true} {
 		r := New(Config{})
 		v, err := r.Run(compileForTest(t, src))
 		var planned bool
@@ -77,10 +76,9 @@ func TestCallbackTreeRest(t *testing.T) {
 			if gerr != nil {
 				t.Fatal(gerr)
 			}
-			planned = g.Object().fn().treeRest
+			planned = g.Object().fn().regCall != nil
 		}
 		r.Close()
-		treeTier.Store(previous)
 		if err != nil {
 			t.Fatalf("tree %v: %v", tree, err)
 		}

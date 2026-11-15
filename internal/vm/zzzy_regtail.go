@@ -306,11 +306,11 @@ func (r *Runtime) regTail(f *frame, w bytecode.RInstr, wb int) bool {
 // An arrow's this is the one it captured, which regEnterFrame and
 // regDirect give it.
 func regPlan(fd *funcData) {
-	if fd.treeCall != nil || fd.bound || fd.native != nil || fd.closure == nil {
+	if fd.regCall != nil || fd.bound || fd.native != nil || fd.closure == nil {
 		return
 	}
-	t := (*tree)(atomic.LoadPointer(&fd.closure.fn.VMCode))
-	if t == nil || t.reg == nil || !t.reg.wide || t.reg.suspends {
+	c := (*regCode)(atomic.LoadPointer(&fd.closure.fn.VMCode))
+	if c == nil || !c.wide || c.suspends {
 		return
 	}
 	if fd.closure.fn.HasTailCall {
@@ -332,8 +332,26 @@ func regPlan(fd *funcData) {
 	if x := fd.extra; x != nil && (!fd.arrow || x.lexThisRef != nil || x.rare != nil) {
 		return
 	}
-	regBindPlan(fd, t)
-	fd.treeCall = t
+	regBindPlan(fd, c)
+	fd.regCall = c
+}
+
+// planCall decides, once after a call that has built its function's
+// register code, whether calls of fd's function enter the code at once
+// (regPlan). A pure body is left undecided while pureCall may still
+// answer its calls, which it tries first, unless pureByTree says they go
+// to its code.
+func planCall(fd *funcData) {
+	cl := fd.closure
+	fn := cl.fn
+	if atomic.LoadPointer(&fn.VMCode) == nil {
+		return
+	}
+	if fn.Leaf == bytecode.LeafPure && cl.pureMiss < pureMissLimit && !pureByTree(fn) {
+		return
+	}
+	fd.planned = true
+	regPlan(fd)
 }
 
 // regKeepWindow keeps the arguments from parameter params (regCode.keep)

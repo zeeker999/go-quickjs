@@ -2,9 +2,6 @@ package vm
 
 import (
 	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
 // TestRegBackendRuns is a program compiled by the register backend from
@@ -48,17 +45,13 @@ func TestRegBackendRuns(t *testing.T) {
 		 sw(1) + sw(2) + sw("s") + sw(7), args(1, 2, 3), fwd(4, 5), build()].join(" ")`
 	const want = "610 2432 19 4,8,2,3,4,5,6,7,8,9 45 24 30015 true,true,false,false,true,false true,false,false,false,false,true 0,1,23 true " +
 		"1, true,true,true,false,true k 5 1 abbsd 9,3,3,2 9,2,,5 9,true,true,3,2,,3,true,false,,1,true,,,-2,s/5,true,,,-2,s,4,6,51,NaN"
-	for _, reg := range []bool{false, true} {
+	for _, reg := range []bool{true} {
 		// Each run its own compile: a function keeps the form its first
 		// run gave it.
-		compiler.SetRegisterForm(true)
 		fn := compileForTest(t, src)
-		compiler.SetRegisterForm(bytecode.RegDefault())
-		SetRegTier(reg)
 		before := RegsBuilt()
 		r := New(Config{})
 		v, err := r.Run(fn)
-		SetRegTier(bytecode.RegDefault())
 		if err != nil {
 			t.Fatalf("reg=%v: %v", reg, err)
 		}
@@ -84,10 +77,8 @@ func TestRegFrameErrors(t *testing.T) {
 		try { outer({}) } catch (e) { out.push(e instanceof TypeError, /inner/.test(e.stack), /outer/.test(e.stack)) }
 		try { dead() } catch (e) { out.push(e instanceof ReferenceError) }
 		out.join()`
-	SetRegTier(true)
 	r := New(Config{})
 	v, err := r.Run(compileForTest(t, src))
-	SetRegTier(bytecode.RegDefault())
 	if err != nil {
 		t.Fatal(err)
 	}

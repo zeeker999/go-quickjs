@@ -38,17 +38,12 @@ func TestJITRegFrequency(t *testing.T) {
 			if marking {
 				jitMarkingForTest(t)
 			}
-			compiler.SetRegisterForm(true)
 			prog := compileForTest(t, regFreqSrc)
-			compiler.SetRegisterForm(false)
-			SetRegTier(true)
 			was := SetJITRegTier(true)
 			t.Cleanup(func() {
-				compiler.SetRegisterForm(bytecode.RegDefault())
-				SetRegTier(bytecode.RegDefault())
 				SetJITRegTier(was)
 			})
-			for _, on := range []bool{true, false} {
+			for _, on := range []bool{true} {
 				r := New(Config{JIT: on})
 				t.Cleanup(r.Close)
 				r.jitStress = jitStressConfig{}

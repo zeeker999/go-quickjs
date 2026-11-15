@@ -120,9 +120,9 @@ func regexpExecLeafForTest(r *Runtime) *regexpLeaf[struct{}] {
 // statics and lastIndex as any other: each answer is Node's, in the tree
 // tier and in the interpreter, with the collector idle.
 func TestRegExpDeadExec(t *testing.T) {
-	for _, tree := range []bool{true, false} {
+	for _, tree := range []bool{true} {
 		gc := debug.SetGCPercent(-1)
-		r := newTreeTierForTest(tree, Config{})
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, regexpDeadTestSrc))
 		dummy := regexpExecLeafForTest(r).dummy
 		r.Close()
@@ -185,8 +185,8 @@ func TestRegExpDeadExecKinds(t *testing.T) {
 		{"kAnd('ab', /b/) + ',' + kAnd('ab', /c/)", "3,0"},
 		{"kTernary('ab', /b/) + ',' + kTernary('ab', /c/)", "6,3"},
 	} {
-		for _, tree := range []bool{true, false} {
-			r := newOldTiersTreeForTest(tree, Config{})
+		for _, tree := range []bool{true} {
+			r := New(Config{})
 			if _, err := r.Run(compileForTest(t, regexpDeadKindsSrc)); err != nil {
 				t.Fatal(err)
 			}
@@ -208,7 +208,7 @@ func TestRegExpDeadExecKinds(t *testing.T) {
 
 	// What a loop of them makes: nothing for each call, where an array
 	// and two strings had been made.
-	r := newOldTiersForTest(Config{})
+	r := New(Config{})
 	defer r.Close()
 	if _, err := r.Run(compileForTest(t, regexpDeadKindsSrc)); err != nil {
 		t.Fatal(err)
@@ -253,8 +253,8 @@ for (var re of RES) {
 }
 out.join('|')`
 	fail := "SyntaxError,regular expression is too complex,,0,0"
-	for _, tree := range []bool{true, false} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		// The interpreter, which makes these calls as before, of one.
 		res, want := "var RES = [/(a+)+b/, /(a+)+b/g];", fail+"|"+fail
 		if !tree {
@@ -410,9 +410,9 @@ function rTpl(s, re, n) { for (var i = 0; i < n; i++) s.replace(re, '[$1]') }
 // it would: each answer is Node's, in the tree tier and in the
 // interpreter, with the collector idle.
 func TestRegExpDeadReplace(t *testing.T) {
-	for _, tree := range []bool{true, false} {
+	for _, tree := range []bool{true} {
 		gc := debug.SetGCPercent(-1)
-		r := newTreeTierForTest(tree, Config{})
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, regexpDeadReplaceTestSrc))
 		r.Close()
 		debug.SetGCPercent(gc)
@@ -444,8 +444,8 @@ var regexpDeadReplaceKinds = []struct{ call, want, many string }{
 // in the tree tier a loop of them makes no string for each.
 func TestRegExpDeadReplaceKinds(t *testing.T) {
 	for _, c := range regexpDeadReplaceKinds {
-		for _, tree := range []bool{true, false} {
-			r := newTreeTierForTest(tree, Config{})
+		for _, tree := range []bool{true} {
+			r := New(Config{})
 			if _, err := r.Run(compileForTest(t, regexpDeadReplaceKindsSrc)); err != nil {
 				t.Fatal(err)
 			}
@@ -512,8 +512,8 @@ for (var re of RES) {
   out.push(u === d ? u : u + ' != ' + d);
 }
 out.join('|')`
-	for _, tree := range []bool{true, false} {
-		r := newTreeTierForTest(tree, Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		res, want := "var RES = [/(a+)+b/, /(a+)+b/g];", "SyntaxError,regular expression is too complex,,0,3|SyntaxError,regular expression is too complex,,0,0"
 		if !tree {
 			res, want = "var RES = [/(a+)+b/g];", "SyntaxError,regular expression is too complex,,0,0"
@@ -631,9 +631,9 @@ var regexpDeadTruth = []struct{ call, want string }{
 // the collector idle, each answer is Node's. The subject had stood for the
 // string, and 'a'.replace(/a/g, "") been true.
 func TestRegExpDeadReplaceTruth(t *testing.T) {
-	for _, tree := range []bool{true, false} {
+	for _, tree := range []bool{true} {
 		gc := debug.SetGCPercent(-1)
-		r := newTreeTierForTest(tree, Config{})
+		r := New(Config{})
 		if _, err := r.Run(compileForTest(t, regexpDeadTruthSrc)); err != nil {
 			t.Fatal(err)
 		}

@@ -214,15 +214,6 @@ const (
 	treeOwnRes   = 1 << 28
 )
 
-// treeOwned is the value of the local a pc that treeOwnRes marks names,
-// which the result is about to be stored over.
-func (c *tctx) treeOwned(pc int) Value {
-	if pc&treeOwnRes == 0 {
-		return Undefined
-	}
-	return c.locals[pc>>treeOwnShift&63]
-}
-
 // bigDone is a result made in bigInPlace's room as a value: held in its
 // Value in the int64 range, the BigInt, its length the result's, if one was
 // made, and a BigInt of a copy of it if not.
@@ -716,21 +707,6 @@ func bigFloat(v Value) float64 {
 	return f
 }
 
-// wrapsOperator reports whether a is an operator wrapCall makes
-// BigInt.asUintN's and asIntN's of from its operands, over two that may be
-// BigInts: not a number constant.
-func wrapsOperator(a *arithOf) bool {
-	if a.imm || a.x.number || a.y.number {
-		return false
-	}
-	switch a.op {
-	case bytecode.OpAdd, bytecode.OpSub, bytecode.OpMul,
-		bytecode.OpBitAnd, bytecode.OpBitOr, bytecode.OpBitXor, bytecode.OpShl, bytecode.OpShr:
-		return true
-	}
-	return false
-}
-
 // wrapShort is asIntN, signed, or asUintN of the width w and a op b, two
 // BigInts held in their Values, made of the low 64 bits of their two's
 // complement (wrapLow), as bigAsNCall would make it of a op b. It reports
@@ -804,32 +780,4 @@ func asN64(u uint64, bits uint, signed bool) Value {
 		return shortBig(int64(u<<(64-bits)) >> (64 - bits))
 	}
 	return shortBigMag(false, u)
-}
-
-// wrapOperator is a op b for wrapCall where it is not made of the low bits:
-// the operator's node's, its fast path for two numbers too.
-func (c *tctx) wrapOperator(op bytecode.Op, a, b Value, pc int) Value {
-	bitwise := isBitwise(op)
-	if a.IsNumber() && b.IsNumber() {
-		if bitwise {
-			return int32Op(op, a.num, b.num)
-		}
-		return Float(numericOp(op, a.num, b.num))
-	}
-	if bitwise {
-		return c.bitwiseSlow(op, a, b, pc)
-	}
-	return c.arithSlow(op, a, b, pc)
-}
-
-// wrapSeen is the mark arithSlow would have made for the JIT of the
-// arithmetic a op b, two BigInts held in their Values, that wrapCall made
-// of their low bits instead: one on the heap, or made there, unless both
-// and the result are in the int64 range.
-func wrapSeen(c *tctx, op bytecode.Op, a, b Value, pc int) {
-	if isBitwise(op) {
-		return
-	}
-	_, ok := shortArith(op, a, b)
-	treeBigInt(c, pc&treePCMask, !ok)
 }

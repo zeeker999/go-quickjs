@@ -364,9 +364,6 @@ func init() {
 		if layoutPadND >= 0 {
 			layoutPadD()
 		}
-		if layoutPadNR >= 0 {
-			layoutPadR()
-		}
 		if layoutPadNV >= 0 || layoutPadNGV >= 0 {
 			layoutPadV()
 		}

@@ -122,9 +122,7 @@ func TestJITRegCalledClosures(t *testing.T) {
 				rounds := regCalledRounds(setup.src)
 				warm := len(rounds) * 5 / 8
 				for i, round := range rounds {
-					compiler.SetRegisterForm(true)
 					prog := compileForTest(t, round)
-					compiler.SetRegisterForm(false)
 					var got [2]string
 					for k, r := range rts {
 						v, err := r.Run(prog)
@@ -194,9 +192,7 @@ func TestJITRegCalledClosuresPolled(t *testing.T) {
 				r.SetJITWarmUp(1, 1)
 				r.jitStress = jitStressConfig{budget: 3, deopt: 7}
 				for _, round := range regCalledRounds(setup.src) {
-					compiler.SetRegisterForm(true)
 					prog := compileForTest(t, round)
-					compiler.SetRegisterForm(false)
 					var got [2]string
 					for k, r := range rts {
 						v, err := r.Run(prog)

@@ -38,7 +38,6 @@ const frequencySetup = `
 func frequencyRuntime(t *testing.T, tree bool) *Runtime {
 	t.Helper()
 	was := treeTier.Load()
-	SetTreeTier(tree)
 	t.Cleanup(func() { SetTreeTier(was) })
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	jitDefaultsForTest(r)

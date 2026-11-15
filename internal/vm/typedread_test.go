@@ -31,12 +31,10 @@ func TestTreeTypedArrayReads(t *testing.T) {
 		each(doomed, [1])
 		out.join()`
 	var want string
-	for _, tree := range []bool{false, true} {
-		previous := treeTier.Swap(tree)
+	for _, tree := range []bool{true} {
 		r := New(Config{})
 		v, err := r.Run(compileForTest(t, src))
 		r.Close()
-		treeTier.Store(previous)
 		if err != nil {
 			t.Fatalf("tree %v: %v", tree, err)
 		}
@@ -83,12 +81,10 @@ func TestTreeArrayAppends(t *testing.T) {
 		out.join(' | ')`
 	const want = "0,1,2,3,4,5 | 9,1,2,3 | 2 | TypeError | 1,2 | 2 | TypeError | 1,2 | 7 | 1,,,,,5,6 | " +
 		"2 | 1,2 | 0,1 | 3,3,x | 4 | 0,1,2,y"
-	for _, tree := range []bool{false, true} {
-		previous := treeTier.Swap(tree)
+	for _, tree := range []bool{true} {
 		r := New(Config{})
 		v, err := r.Run(compileForTest(t, src))
 		r.Close()
-		treeTier.Store(previous)
 		if err != nil {
 			t.Fatalf("tree %v: %v", tree, err)
 		}
@@ -123,12 +119,10 @@ func TestTreeTypedArrayWrites(t *testing.T) {
 		for (let r = 0; r < 3; r++) out.push(show(put(doomed, 1, 3)))
 		out.join()`
 	var want string
-	for _, tree := range []bool{false, true} {
-		previous := treeTier.Swap(tree)
+	for _, tree := range []bool{true} {
 		r := New(Config{})
 		v, err := r.Run(compileForTest(t, src))
 		r.Close()
-		treeTier.Store(previous)
 		if err != nil {
 			t.Fatalf("tree %v: %v", tree, err)
 		}
@@ -173,12 +167,10 @@ func TestArrayLengthGrowsWithHoles(t *testing.T) {
 		out.join(' | ')`
 	const want = "0,false,false,,0 | 1,false,false,,0 | 4,false,false,,0 | 10,false,false,,0 | 1000,false,false,,0 | 2000,false,false,,0 | " +
 		"7,false,true,1-2-3----x | 6,false,false,1--3---9 | 1000000,true,false,5 | 1"
-	for _, tree := range []bool{true, false} {
-		previous := treeTier.Swap(tree)
+	for _, tree := range []bool{true} {
 		r := New(Config{})
 		v, err := r.Run(compileForTest(t, src))
 		r.Close()
-		treeTier.Store(previous)
 		if err != nil {
 			t.Fatalf("tree %v: %v", tree, err)
 		}

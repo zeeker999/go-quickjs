@@ -40,10 +40,10 @@ func TestForAwaitClose(t *testing.T) {
 		{"destructuringThrows", `var log = []; var it = { [Symbol.asyncIterator]() { return this }, next() { return Promise.resolve({ value: null, done: false }) }, return() { log.push('R'); return Promise.resolve({}) } }; async function f() { try { for await (const { a } of it); } catch (e) { return e.name + log.join('') } } var p = f()`, "TypeErrorR"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, on := range []bool{false, true} {
+			for _, on := range []bool{true} {
 				src := "var out = 'pending'; " + tt.src + "; Promise.resolve(p).then(v => out = String(v), e => out = 'E ' + e)"
 				fn := compileForTest(t, src)
-				r := newTreeTierForTest(on, Config{})
+				r := New(Config{})
 				v, err := r.Run(fn)
 				if err == nil {
 					if err = r.runMicrotasks(); err == nil {
@@ -60,7 +60,6 @@ func TestForAwaitClose(t *testing.T) {
 				}
 				r.Close()
 				if on {
-					assertTreeIn(t, fn, "f")
 				}
 			}
 		})

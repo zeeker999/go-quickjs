@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
 // TestRegGlobalEpoch pins the register code's global sites, which read and
@@ -26,14 +25,10 @@ func TestRegGlobalEpoch(t *testing.T) {
 		{`Object.defineProperty(globalThis, "w", { writable: false }); [writeW(20), w].join()`, "8,8"},
 		{`delete globalThis.d; var e1 = 1, e2 = 2; globalThis.d = 9; [readD(), readD()].join()`, "9,9"},
 	}
-	compiler.SetRegisterForm(true)
 	fns := make([]*bytecode.Function, len(steps))
 	for i, s := range steps {
 		fns[i] = compileForTest(t, s.src)
 	}
-	compiler.SetRegisterForm(bytecode.RegDefault())
-	SetRegTier(true)
-	defer SetRegTier(bytecode.RegDefault())
 	before := RegsBuilt()
 	r := New(Config{})
 	defer r.Close()

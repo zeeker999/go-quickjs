@@ -518,15 +518,7 @@ func (r *Runtime) stepIter(iter, next Value) (Value, bool, error) {
 				if len(f.openUpvalues) != 0 {
 					f.openUpvalues = f.openUpvalues[:0]
 				}
-				var got resumeResult
-				var err error
-				ran := false
-				if t := g.nextTree(); t != nil {
-					got, ran, err = resumeTree(r, g, t, Undefined)
-				}
-				if !ran {
-					got, err = r.resumeFull(g, Undefined, resumeNext)
-				}
+				got, err := r.resumeFull(g, Undefined, resumeNext)
 				r.frameDepth--
 				if err != nil {
 					return Undefined, false, err

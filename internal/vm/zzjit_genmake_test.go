@@ -131,12 +131,9 @@ func TestJITGenMakeAgreesWithNode(t *testing.T) {
 			r.ReleaseClosed()
 		}
 	}
-	defer SetTreeTier(true)
-	for _, on := range []bool{false, true} {
-		SetTreeTier(on)
+	for _, on := range []bool{true} {
 		rounds(t, func() *Runtime { return New(Config{}) }, 2, nil)
 	}
-	SetTreeTier(true)
 	jit := func() *Runtime {
 		r := New(Config{JIT: true})
 		jitDefaultsForTest(r)

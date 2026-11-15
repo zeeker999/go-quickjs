@@ -37,14 +37,9 @@ func TestJITRegBackground(t *testing.T) {
 			if marking {
 				jitMarkingForTest(t)
 			}
-			compiler.SetRegisterForm(true)
 			prog := compileForTest(t, regBackgroundSrc)
-			compiler.SetRegisterForm(false)
-			SetRegTier(true)
 			was := SetJITRegTier(true)
 			t.Cleanup(func() {
-				compiler.SetRegisterForm(bytecode.RegDefault())
-				SetRegTier(bytecode.RegDefault())
 				SetJITRegTier(was)
 			})
 			var got [2]string

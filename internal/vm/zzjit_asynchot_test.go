@@ -12,8 +12,6 @@ import "testing"
 func jitAsyncAgreesForTest(t *testing.T, setup, src string, rounds int) *Runtime {
 	t.Helper()
 	run := func(r *Runtime, tree bool) string {
-		previous := treeTier.Swap(tree)
-		defer treeTier.Store(previous)
 		if _, err := r.Run(compileForTest(t, setup)); err != nil {
 			t.Fatal(err)
 		}

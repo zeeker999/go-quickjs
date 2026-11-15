@@ -77,11 +77,9 @@ func TestClassConstructionsOnTrees(t *testing.T) {
 		"4,5,2 | 6 | true | true | 301 | 300 | 299 | 297 | 301 | 5 | 9 | Implicit | " +
 		`TypeError: class constructor C cannot be invoked without "new" | ` +
 		`TypeError: class constructor A cannot be invoked without "new" | same true`
-	for _, tree := range []bool{true, false} {
-		previous := treeTier.Swap(tree)
-		r := newOldTiersForTest(Config{})
+	for _, tree := range []bool{true} {
+		r := New(Config{})
 		v, err := r.Run(compileForTest(t, src))
-		treeTier.Store(previous)
 		if err != nil {
 			r.Close()
 			t.Fatalf("tree %v: %v", tree, err)
@@ -89,21 +87,7 @@ func TestClassConstructionsOnTrees(t *testing.T) {
 		if got := v.String().Go(); got != want {
 			t.Errorf("tree %v: got %s\nwant %s", tree, got, want)
 		}
-		fd := func(name string) *funcData { return r.global.getOwn(r.atoms.intern(name)).value().Object().fn() }
-		// The tree tier's plans.
 		if tree {
-			for _, name := range []string{"A", "C", "Base", "Nest"} {
-				if !fd(name).treeNew {
-					t.Errorf("%s is not constructed on its tree", name)
-				}
-			}
-			// An arrow made in the body captures its this binding, and the
-			// tier builds no tree that reads new.target.
-			for _, name := range []string{"Arrow", "B"} {
-				if a := fd(name); !a.newPlanned || a.treeNew {
-					t.Errorf("%s: planned %v, on its tree %v; want planned, not on its tree", name, a.newPlanned, a.treeNew)
-				}
-			}
 			if len(r.thisCells) <= 300 {
 				t.Errorf("%d this cells after constructions 300 deep", len(r.thisCells))
 			}
