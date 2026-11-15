@@ -72,7 +72,10 @@ func (p *Program) Validate() error {
 	// committed says an instruction of the current origin's has committed
 	// (Instruction's Commits): none after it in the origin may leave.
 	committed := false
-	for pc, in := range p.Code {
+	for pc := range p.Code {
+		// By its address: a copy of each instruction had been half of what
+		// the check took.
+		in := &p.Code[pc]
 		if p.starts(pc) {
 			committed = false
 		}

@@ -796,6 +796,12 @@ type Program struct {
 	// InlineCalls), a forwarding function's frame being inlined from its
 	// forwarding lowering (compile's LowerSSAForward), which has none.
 	Forwards bool
+	// Checked says Validate has accepted the program, which its maker
+	// changes no more: kept and compiled again and again, as the VM keeps
+	// a function's lowerings, it is not checked again at each build, nor
+	// at each of a build's asks to inline it (ssa's InlineCalls). A
+	// program made otherwise is checked wherever it is built.
+	Checked bool
 }
 
 // PrologueAt reports whether a frame at pc, its operands depth deep, has

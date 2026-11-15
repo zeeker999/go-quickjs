@@ -2653,7 +2653,7 @@ func smallLoop(p *ir.Program, n int) bool {
 // Inlinable but for those. A callee with a loop is taken only if it is
 // small and leaves nothing to Go (smallLoop).
 func InlineCalls(p *ir.Program) ([]int, bool) {
-	if p == nil || p.Validate() != nil || len(p.Code) > maxInline || len(p.Globals) != 0 || p.Captured != nil || p.DerivedConstructor || len(p.Handlers) != 0 || p.Forwards {
+	if p == nil || !p.Checked && p.Validate() != nil || len(p.Code) > maxInline || len(p.Globals) != 0 || p.Captured != nil || p.DerivedConstructor || len(p.Handlers) != 0 || p.Forwards {
 		// A callee whose locals closures capture: an inlined frame's
 		// slots have no cells, and Go makes no closure on one. A derived
 		// constructor's super() is Go's, on a frame of its own. A callee
@@ -2705,7 +2705,7 @@ func InlineCalls(p *ir.Program) ([]int, bool) {
 // but for one InlineCalls takes, small and leaving nothing to Go
 // (smallLoop).
 func InlineCallsGiven(p *ir.Program, argc func(pc int) (int, bool)) (calls, given []int, ok bool) {
-	if p == nil || p.Validate() != nil || len(p.Code) > maxInline || len(p.Globals) != 0 || p.Captured != nil || p.DerivedConstructor || len(p.Handlers) != 0 {
+	if p == nil || !p.Checked && p.Validate() != nil || len(p.Code) > maxInline || len(p.Globals) != 0 || p.Captured != nil || p.DerivedConstructor || len(p.Handlers) != 0 {
 		return nil, nil, false
 	}
 	// Each loop, by its back edge: from its header to the branch.
@@ -3075,6 +3075,13 @@ func build(w *Workspace, p *ir.Program, fb Feedback) (*Func, error) {
 
 // buildChosen is build's choice of builds (above).
 func buildChosen(w *Workspace, p *ir.Program, fb Feedback) (*Func, error) {
+	// Checked once for all its builds (buildCalls), which do not change
+	// it, where its maker has not (ir.Program's Checked).
+	if !p.Checked {
+		if err := p.Validate(); err != nil {
+			return nil, err
+		}
+	}
 	f, plan, provisional, err := buildCalls(w, p, fb, nil)
 	if err != nil {
 		return f, err
@@ -3114,11 +3121,8 @@ type calledPlan struct {
 // not made where all their calls are; and, with plan nil, the closures it
 // finds so (calledClosures), and whether it inlined callees whose calls of
 // what they are given it left to exits (provisional), which makes it no
-// code to run.
+// code to run. p is checked (ir.Program's Validate) by its caller.
 func buildCalls(w *Workspace, p *ir.Program, fb Feedback, plan *calledPlan) (*Func, calledPlan, bool, error) {
-	if err := p.Validate(); err != nil {
-		return nil, calledPlan{}, false, err
-	}
 	p = referenceReads(p, fb)
 	f := &Func{Locals: p.Locals, StackSize: p.StackSize, FrameLocals: p.Locals, ThisSlot: -1, ws: w}
 	if kf, ok := fb.(KeepFeedback); ok {
