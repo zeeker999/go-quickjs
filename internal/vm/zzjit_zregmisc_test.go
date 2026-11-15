@@ -4,6 +4,7 @@ package vm
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
@@ -291,19 +292,29 @@ func TestJITRegLoopsLeaving(t *testing.T) {
 				}
 			}
 			st := rts[0].RegNativeStats()
-			t.Logf("hosts %d %v, entries %d, interpreted %d", st.Hosts, st.HostOps, st.Entries, st.Interpreted)
+			t.Logf("hosts %d %v, entries %d, interpreted %d, ended %v", st.Hosts, st.HostOps, st.Entries, st.Interpreted, st.Ended)
 			for _, op := range []string{"new_dispose_capability", "add_disposable", "dispose"} {
 				if n := st.HostOps[op]; n > 100 {
 					t.Errorf("%s left to Go %d times", op, n)
 				}
 			}
 			// 20 calls of 2 fills of 4096 stores, those to a sparse array
-			// Go's: a few runs' worth of them left at before the loop is
-			// judged not to pay, and again each time a loop's checks of it
-			// retry it (jitRegRetrySlow, which counts them as calls, as the
-			// stack form's tryJITAt does) -- 2112 -- and 3072 where the run
+			// Go's: a run's worth of them, 64, left at before the loop is
+			// judged not to pay, which the run then leaves (Ended's slow
+			// loop), and as many again each time a loop's checks of the code
+			// retry it (jitRegRetrySlow, counting them as calls, as the
+			// stack form's tryJITAt does): 2624, against 3072 where the run
 			// went on natively after each.
-			if n := st.HostOps["set_index"]; n > 2560 {
+			slow := uint64(0)
+			for k, n := range st.Ended {
+				if strings.HasPrefix(k, "slow loop at ") && strings.HasSuffix(k, " in fillDown") {
+					slow += n
+				}
+			}
+			if slow == 0 {
+				t.Errorf("fillDown's loop never left for the interpreter once judged slow: %v", st.Ended)
+			}
+			if n := st.HostOps["set_index"]; n >= 3072 {
 				t.Errorf("set_index left to Go %d times, the loop going on natively after each", n)
 			}
 		})

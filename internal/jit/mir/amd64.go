@@ -1186,10 +1186,10 @@ func (c *compiler) callEntry() {
 	}
 	c.a.StoreImm(regCtx, abi.OffLive, abi.LiveCall)
 	c.a.IncMem(callLink, c.enc.LinkIn)
-	if !c.f.StartOnly && c.f.Params < c.f.FrameLocals {
+	if !c.f.StartOnly && c.f.Params < c.f.InitLocals() {
 		c.movImm(scratchA, c.enc.Undefined)
 		c.movImm(scratchB, 0)
-		for i := c.f.Params; i < c.f.FrameLocals; i++ {
+		for i := c.f.Params; i < c.f.InitLocals(); i++ {
 			c.a.Store(base, int32(i)*vs+c.enc.NumOffset, scratchA)
 			c.a.Store(base, int32(i)*vs+c.enc.RefOffset, scratchB)
 		}
@@ -7122,13 +7122,13 @@ func (c *compiler) block(b *ssa.Block, next *ssa.Block) {
 			c.a.Load(regLocals, regCtx, abi.OffLocals)
 			c.a.Load(regStack, regCtx, abi.OffStack)
 		}
-		if c.f.StartOnly && c.f.Params < c.f.FrameLocals && b == c.entryAt(0) {
+		if c.f.StartOnly && c.f.Params < c.f.InitLocals() && b == c.entryAt(0) {
 			// The frame's locals past its parameters, undefined, which
 			// native callers leave to the code (ssa.Func's StartOnly).
 			vs := int32(c.enc.ValueSize)
 			c.movImm(scratchA, c.enc.Undefined)
 			c.movImm(scratchB, 0)
-			for i := c.f.Params; i < c.f.FrameLocals; i++ {
+			for i := c.f.Params; i < c.f.InitLocals(); i++ {
 				c.a.Store(regLocals, int32(i)*vs+c.enc.NumOffset, scratchA)
 				c.a.Store(regLocals, int32(i)*vs+c.enc.RefOffset, scratchB)
 			}

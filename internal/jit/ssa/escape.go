@@ -1498,8 +1498,9 @@ func (e *escaper) mergeInputs(m *virtual, b *Block) *vstate {
 // liveAt reports whether object o, merged into m at b, may be used past
 // the merge: whether a use of it, but m's phi, is on a path from b that
 // does not make it again first -- a value's operand, a control, a frame
-// state's slot (useBlocks) -- or an object holds it, whose state names it
-// with no use of its own, wherever that goes.
+// state's slot (useBlocks), another phi's operand at the end of the
+// predecessor it comes from -- or an object holds it, whose state names
+// it with no use of its own, wherever that goes.
 func (e *escaper) liveAt(o, m *virtual, b *Block) bool {
 	if o.held {
 		return true
@@ -1510,8 +1511,18 @@ func (e *escaper) liveAt(o, m *virtual, b *Block) bool {
 		used[id] = true
 	}
 	for _, u := range e.phiUses[o.id] {
-		if u != m.phi {
-			used[u.Block.ID] = true
+		if u == m.phi {
+			continue
+		}
+		// A phi uses o at the end of each predecessor o comes in from,
+		// not in its block: a register loop's end, where the copy of its
+		// test before it ends too (the compile package's loopTest), merges
+		// the object the loop began with, from the way round the loop
+		// that the loop's merge is not on.
+		for j, a := range u.Args {
+			if _, x := e.roleOf(a); x == o && j < len(u.Block.Preds) {
+				used[u.Block.Preds[j].ID] = true
+			}
 		}
 	}
 	def := o.defBlock()

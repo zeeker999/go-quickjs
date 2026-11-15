@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
@@ -287,6 +288,34 @@ func (f *jitRegFeedback) UpvalueTyped(pc int) (uint8, bool) {
 		return 0, false
 	}
 	return jitTypedKind(true, v), true
+}
+
+// jitRegCtxEntry is the register code a call of Go was made from, with
+// ctx, as jitRunEntry finds the stack form's: the run's at its own level,
+// or else, at a native callee's level, its closure's code; nil where ctx
+// runs no register code.
+func (r *Runtime) jitRegCtxEntry(ctx *abi.Context) *jitRegEntry {
+	s := r.jit
+	idx := int(ctx.Level)
+	if idx >= len(s.ssaCtxs) || s.ssaCtxs[idx] != ctx {
+		return nil
+	}
+	if ctx.Live == 0 {
+		if idx < len(s.regRuns) && s.regRuns[idx].f != nil {
+			return s.regRuns[idx].e
+		}
+		return nil
+	}
+	cl := (*closure)(ctx.Closure)
+	if cl == nil || cl.reg == nil {
+		return nil
+	}
+	if cc := cl.closureCode; cc != nil {
+		if e := cc.jitReg; e != nil && e.cached && e.key.realm == r.jitRealmKey() {
+			return e
+		}
+	}
+	return s.regCache[r.jitRegKeyOf(cl)]
 }
 
 var (

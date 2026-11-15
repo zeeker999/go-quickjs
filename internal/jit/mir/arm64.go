@@ -1296,9 +1296,9 @@ func (c *a64Compiler) callEntry() {
 	c.a.Load(at, a64CallLink, c.enc.LinkIn)
 	c.a.AddImm(at, at, 1, true)
 	c.a.Store(a64CallLink, c.enc.LinkIn, at)
-	if !c.f.StartOnly && c.f.Params < c.f.FrameLocals {
+	if !c.f.StartOnly && c.f.Params < c.f.InitLocals() {
 		c.movImm(a64A, c.enc.Undefined)
-		for i := c.f.Params; i < c.f.FrameLocals; i++ {
+		for i := c.f.Params; i < c.f.InitLocals(); i++ {
 			c.a.Store(base, int32(i)*vs+c.enc.NumOffset, a64A)
 			c.a.Store(base, int32(i)*vs+c.enc.RefOffset, arm64.ZR)
 		}
@@ -1318,11 +1318,11 @@ func (c *a64Compiler) block(b *ssa.Block, next *ssa.Block) {
 			c.a.Load(a64Locals, a64Ctx, abi.OffLocals)
 			c.a.Load(a64Stack, a64Ctx, abi.OffStack)
 		}
-		if c.f.StartOnly && c.f.Params < c.f.FrameLocals && b == c.entryAt(0) {
+		if c.f.StartOnly && c.f.Params < c.f.InitLocals() && b == c.entryAt(0) {
 			// As amd64's: the frame's locals past its parameters, undefined.
 			vs := int32(c.enc.ValueSize)
 			c.movImm(a64A, c.enc.Undefined)
-			for i := c.f.Params; i < c.f.FrameLocals; i++ {
+			for i := c.f.Params; i < c.f.InitLocals(); i++ {
 				c.a.Store(a64Locals, int32(i)*vs+c.enc.NumOffset, a64A)
 				c.a.Store(a64Locals, int32(i)*vs+c.enc.RefOffset, arm64.ZR)
 			}

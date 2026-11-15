@@ -195,7 +195,8 @@ primitive, which the concat converts the same, not a call of Go of its own.
 What the lowering leaves to Go whole -- a call, a cold operation
 -- is one `Host`, alone in its origin: Go runs the whole register
 instruction. Where Go can run it on the frame and the registers it reads
-and writes are known (`compile.RegAccess`: up to three read, one written)
+and writes are known (`compile.RegAccess`: up to three read, one written;
+a plain call's receiver register written by the call, not read)
 -- a for...in's or a for...of's cursor, an object's or an array's spread, a
 spread call, a computed key's definition, `#x in o`, super's reads and
 writes by name and super's base (their receiver register 1), a derived
@@ -270,6 +271,32 @@ window's registers, R[A] and R[A+1], are not written, and where they are
 live past the instruction it is Go's whole. One that does not call is the
 literal and the read, copied to R[A+1] and R[A] last, for the
 `call_method_w` after it, a leaf's call of the realm's `exec` or `test`.
+
+**Loops, one header each.** Register code's loops test at their end: a
+jump to the test, the body, the test and its branch back to the body, one
+branch a turn for the interpreter, whose back edge -- where on-stack
+replacement enters -- is that branch's, to the body's first instruction.
+Lowered as it is, such a loop has two ways in, the jump's into the test and
+the entry's into the body, and no header every turn passes: what it carries
+was merged at the test too, in phis of no loop's header, which no loop pass
+treats as the loop's. So the lowering puts a copy of the test in place of
+the jump (`compile`'s `loopTest`, `lowerLoopTest`), its branch the other way,
+to the loop's end, as compilers rotate a loop: the body's first instruction
+is the one header, its ways in the entry's and the copy's, as the stack
+form's loops have theirs at their head. The copy's instructions keep the
+test's origins, each origin's together after a `Nop` of the jump's, and
+`ir.Program.Starts` maps a register pc to its own lowering, not the copy
+(`At`). A test that suspends, steps an iterator or is in another handler
+than the jump is not copied.
+
+**Comparisons' booleans.** Register code makes a comparison's value a
+compare-and-branch to two loads of the booleans, which the interpreter
+runs as one branch; lowered so, the value was a phi of two constants that a
+test of it -- an inlined callback's result -- branched on again. Where
+nothing else jumps into the loads, the lowering makes the compare-and-branch
+the comparison's `Binary` to the register, negated where the branch's way
+says so, and a jump past the loads (`boolBranch`), as the stack form's `lt`
+or `strict_eq` is: a branch on the value is a branch on the comparison.
 
 **The atomicity rule.** An exit anywhere in an origin's instructions runs
 the register instruction again from its start, in the interpreter. So
@@ -696,11 +723,12 @@ entered so. An exception no handler of the frame's takes ends the frame
 (`regDone`).
 
 A loop whose entry escape analysis dropped (`ssa.Func`'s `Unentered`, by
-register pc: `jitRegEntry`'s `unentered`) has a frame found at its header
+register pc, as its header's frame state names it: `jitRegEntry`'s
+`unentered`) has a frame found at its header
 with no entry at two checks in a row -- each a full budget of back edges,
 or the check made due at once after its code left it -- compile the
-function apart with that entry kept (`ssa.Func`'s `FrameAt`, its objects
-made) and go on in that code, kept beside the function's (`osr`, `osrOf`)
+function apart with that entry kept (`ssa.Func`'s `FrameAt`, the header's
+register pc too, its objects made) and go on in that code, kept beside the function's (`osr`, `osrOf`)
 for the frames that wait there next and let go of with it
 (`jitRegLoopCode`), as the stack form's `jitLearnLoopEntry` has it. A run
 in it stays in it at its exits while the function's code is the one it
@@ -834,7 +862,12 @@ met another value by its cell. An entry whose speculation failed
 any use, where the phi merges nothing but numbers and unboxing it speculates
 nothing, as V8's representation selection takes a phi of Float64 inputs --
 its box made where a use outside the loop needs it, or by an exit
-(`unboxPhis`, `sinkLoopBoxes`).
+(`unboxPhis`, `sinkLoopBoxes`). A phi of boxes of float64s, numeric
+constants and entry slots a guard unboxes already, each box used by the phi
+alone, is a float64 with no other evidence: its box is made once where it
+is, not on each way to it -- a register loop ends where the copy of its
+test ends too, and a sum it carries past its end had been boxed at every
+turn for that phi.
 
 **Integers.** The slot IR computes every number as a double, a bitwise
 operator's ToInt32 of its operands and the conversion of its result back
@@ -1214,7 +1247,10 @@ Beyond TurboFan's, as Graal's partial escape analysis has it, a phi merging
 objects not made of one shape at the merge, none of them used past it, is an
 object not made of its own, at a loop's header too, its properties phis: an
 accumulator a loop replaces each turn (`sum = sum.add(v)`) is its properties
-alone. A use that needs an object made -- a call's operand, a store into an
+alone. Another phi's use of one is at the end of the predecessor it comes
+from (`liveAt`): a register loop's end, which the copy of its test before
+the loop reaches too, merges the object the loop began with from that way
+alone, which no turn of the loop is on. A use that needs an object made -- a call's operand, a store into an
 object that is made, a return -- has the code make it there, from its pool,
 its properties defined along the additions that made its state, and it is
 that object past there. An object made on every path anyway is made where it
@@ -1731,8 +1767,10 @@ its register 0, a method call's receiver to 1 -- or a plain call's undefined
 or global object, an arrow's captured this, for a callee that reads it --
 and the arguments from 2, undefined in its parameters past them, and checks
 the room its link says its code takes (`LinkFrame`). The callee's code makes
-its frame at its call entry: its context the caller's next, its registers
-past the parameters undefined, its stack's top past its window, scratch
+its frame at its call entry: its context the caller's next, its bindings
+past the parameters undefined (`Func`'s `InitEnd`, the register code's
+`Inits`, as the interpreter's call makes them) -- not its temporaries,
+which it writes before it reads them -- its stack's top past its window, scratch
 slots and frame (`Func`'s `Scratch`). The result comes back in registers to
 the call's keep cell and register.
 
@@ -2085,7 +2123,9 @@ register pc.
 live at its register pc, in the window, natively as the code leaves (or Go,
 from its description, for an `ExitTable`); then Go makes the objects escape
 analysis left unmade into the registers that name them
-(`jitRegMaterialize`), and goes on by the exit's kind. A frame native code
+(`jitRegMaterialize`) -- at every kind of exit, a loop's poll's included,
+whose loop carrying them has no entry at its header to go on at -- and goes
+on by the exit's kind. A frame native code
 called natively that Go finishes, or one where Go goes on at a register pc
 with no entry, runs in the interpreter to its next back edge, where native
 code goes on at the loop's header (`jitRegLeaveTo`); a frame whose code was

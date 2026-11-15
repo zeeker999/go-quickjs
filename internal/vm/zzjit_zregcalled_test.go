@@ -59,7 +59,11 @@ const regLexThisSetup = `
 // or regLexThisSetup runs: warm ones, then ones whose exits are inside the
 // inlined closures.
 // Their loops run ten times the stack form's tests' turns, which the
-// register tier's samples need to find them hot.
+// register tier's samples need to find them hot -- a driver's loop a
+// hundred times, its back edges what samples it: the interpreter's back
+// edges are counted across the runtime, and those of loops native code
+// runs are not, so the more of the other rounds run natively the later a
+// driver of 300 turns was sampled.
 func regCalledRounds(setup string) []string {
 	var rounds []string
 	switch setup {
@@ -81,7 +85,7 @@ func regCalledRounds(setup string) []string {
 		r = strings.Replace(r, "(40, ", "(400, ", 1)
 		r = strings.Replace(r, "(30, ", "(300, ", 1)
 		r = strings.Replace(r, "(10, ", "(100, ", 1)
-		rounds[i] = strings.Replace(r, "i < 30;", "i < 300;", 1)
+		rounds[i] = strings.Replace(r, "i < 30;", "i < 3000;", 1)
 	}
 	return rounds
 }
@@ -137,7 +141,18 @@ func TestJITRegCalledClosures(t *testing.T) {
 					called := map[string]int{}
 					for key, e := range r.jit.regCache {
 						if fn := key.Value(); fn != nil && e != nil && e.keep != nil {
-							called[fn.Name] += e.keep.called + e.keep.unmade
+							// The function's own code's, and a caller's
+							// that inlines it: a driver's loop, a loop
+							// with one header since its test is copied
+							// before it (the compile package's loopTest),
+							// inlines what it calls.
+							n := e.keep.called + e.keep.unmade
+							called[fn.Name] += n
+							for _, cl := range e.keep.inlined {
+								if cl != nil && cl.fn != nil && cl.fn.Name != fn.Name {
+									called[cl.fn.Name] += n
+								}
+							}
 						}
 					}
 					for _, name := range setup.unmade {

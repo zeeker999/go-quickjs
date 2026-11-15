@@ -1172,13 +1172,17 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 		if err := r.checkInterruptPoll(); err != nil {
 			return 0, 0, Undefined, false, err, false
 		}
+		// The objects and the closures the code did not make, which the
+		// frame names by their homes and templates: made before anything
+		// else reads the frame -- the interpreter, where the code has no
+		// entry at the header, escape analysis having dropped it for them
+		// (ssa.Func's Unentered), or where a stress deoptimization
+		// finishes the invocation there; or code compiled for a frame
+		// waiting there -- as at any other exit. Left unmade, the
+		// interpreter read a home's word as the object, a null, and a
+		// closure only called inlined was its template, "not a function".
+		r.jitRegMaterialize(f, e, wb)
 		if r.jitStressDeopt(s) {
-			// The interpreter goes on from the poll: the objects and the
-			// closures the code did not make, which the frame names by
-			// their homes and templates, made first, as at any exit that
-			// leaves the frame to it -- left out, a closure only called
-			// inlined was its template there, "not a function".
-			r.jitRegMaterialize(f, e, wb)
 			s.regEndWhy = "stress"
 			return 0, exitPC, Undefined, false, nil, false
 		}
