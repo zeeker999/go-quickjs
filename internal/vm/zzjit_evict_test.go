@@ -7,9 +7,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"unsafe"
-
-	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 )
 
 // jitLinksHeld reports a function's link whose entry -- what native callers
@@ -50,99 +47,8 @@ func jitEntriesFound(s *jitState) error {
 	return nil
 }
 
-// A function compiled for native callers is not the room its own compile
-// makes: its entry, a refusal the cache holds, is busy before the cache
-// looks for what to drop. Before, the cache could drop it, and the compile
-// went on for an entry no longer the function's, whose code the function's
-// link then called with nothing to keep it.
-func TestJITNativeCalleeKeepsItsEntry(t *testing.T) {
-	r := jitRuntimeForTest(t, Config{JIT: true})
-	if _, err := r.Run(compileForTest(t, `
-		function g(o) { return o.a * 3 + o.b }
-		function warm(n) { let s = 0; for (let i = 0; i < n; i++) s += i % 7; return s }
-		warm(1000); warm(1000); g({ a: 1, b: 2 })`)); err != nil {
-		t.Fatal(err)
-	}
-	cl := r.global.getOwn(r.atoms.intern("g")).value().Object().fn().closure
-	e := r.jitFor(cl)
-	s := r.jit
-	if e == nil || e.ssa != nil || !e.owned() || s.perInstr == 0 {
-		t.Fatalf("g is not a refusal the cache holds: %+v", e)
-	}
-	// One byte short of the room its compile asks for: the cache must drop
-	// something, and the refusal is all there is to drop.
-	now := jitEpochNow
-	var tick uint64
-	jitEpochNow = func() uint64 { tick += 10; return tick }
-	t.Cleanup(func() { jitEpochNow = now })
-	r.jitMemoryLimit = int64(s.held() + len(cl.fn.Code)*s.perInstr - 1)
-	ce := r.jitNativeCallee(cl)
-	if ce != nil && !ce.owned() {
-		t.Fatal("compiled for an entry the cache dropped")
-	}
-	if err := jitLinksHeld(s); err != nil {
-		t.Fatal(err)
-	}
-}
 
-// The entry a compile returns is the cache's: the room the cache makes
-// after the compile is not made of it. Before, a compile that left the
-// JIT past its budget could drop the very entry it had compiled, to be run
-// as it was returned -- which, once a dropped entry was no longer run,
-// left top-level code trying at every loop and never running natively.
-func TestJITForKeepsWhatItCompiled(t *testing.T) {
-	r := jitRuntimeForTest(t, Config{JIT: true})
-	if _, err := r.Run(compileForTest(t, `
-		function f(n) { let s = 0; for (let i = 0; i < n; i++) s += (i * 7) % 13 + (i * 5) % 11 + (i * 3) % 7; return s }`)); err != nil {
-		t.Fatal(err)
-	}
-	cl := r.global.getOwn(r.atoms.intern("f")).value().Object().fn().closure
-	now := jitEpochNow
-	var tick uint64
-	jitEpochNow = func() uint64 { tick += 10; return tick }
-	t.Cleanup(func() { jitEpochNow = now })
-	// As little as compiling it takes: placed, it leaves the JIT past its
-	// budget, and the room the compile then makes may only be its own.
-	r.jitMemoryLimit = jitCompileBytes(cl.fn)
-	e := r.jitFor(cl)
-	if e == nil || e.ssa == nil {
-		t.Fatalf("not compiled in the budget: %+v", e)
-	}
-	if !e.owned() || r.jit.cache[e.link.key] != e {
-		t.Fatal("the compile dropped the entry it returns")
-	}
-}
 
-// A compile's workspace is the process's (jit.Workspace): given back once
-// its code is placed, the runtime holds none of it, and the next compile,
-// its own or another runtime's, is made in the one given back, not in one
-// made anew. Kept by each runtime, they were as big as its biggest recent
-// compile for as long as it lived -- 12.6 MiB a runtime rendering React,
-// beside the 6.5 its budget counted.
-func TestJITWorkspacesPooled(t *testing.T) {
-	compile := func() JITStats {
-		r := jitRuntimeForTest(t, Config{JIT: true})
-		if _, err := r.Run(compileForTest(t, `
-			function f(n) { let s = 0; for (let i = 0; i < n; i++) s += (i * 7) % 13; return s }`)); err != nil {
-			t.Fatal(err)
-		}
-		cl := r.global.getOwn(r.atoms.intern("f")).value().Object().fn().closure
-		if e := r.jitFor(cl); e == nil || e.ssa == nil {
-			t.Fatalf("f has no code: %+v", e)
-		}
-		return r.JITStats()
-	}
-	// The first may grow the workspace it is given; the ones after need
-	// no more of it.
-	compile()
-	first := compile()
-	if first.Pooled == 0 {
-		t.Fatal("a compile gave back no workspace")
-	}
-	if again := compile(); again.Pooled > first.Pooled {
-		t.Errorf("a compile made a workspace of its own: %d bytes pooled, %d before", again.Pooled, first.Pooled)
-	}
-}
 
 // Runtimes on goroutines of their own compile at once, each in a workspace
 // of the pool's no other compile uses meanwhile: their code computes what
@@ -200,64 +106,7 @@ func TestJITWorkspacesConcurrentRuntimes(t *testing.T) {
 	}
 }
 
-// An entry the cache dropped since Go found it is not run: Go runs the
-// frame in the existing tiers. Before, a compile Go made between finding an
-// entry and running it could drop it, and its code ran though nothing held
-// what it calls through.
-func TestJITRunsNoDroppedEntry(t *testing.T) {
-	t.Parallel()
-	r := jitRuntimeForTest(t, Config{JIT: true})
-	if _, err := r.Run(compileForTest(t, `
-		function f(n) { let s = 0; for (let i = 0; i < n; i++) s += i % 7; return s }
-		f(1000); f(1000)`)); err != nil {
-		t.Fatal(err)
-	}
-	cl := r.global.getOwn(r.atoms.intern("f")).value().Object().fn().closure
-	e := r.jitFor(cl)
-	if e == nil || e.ssa == nil {
-		t.Fatalf("f has no code: %+v", e)
-	}
-	if !r.jit.dropEntry(e.link.key, e) {
-		t.Fatal("the entry was not dropped")
-	}
-	// No frame: a run would read it.
-	if _, _, native := r.runSSAIn(nil, e, 0, 0, 0, 0); native {
-		t.Fatal("ran a dropped entry")
-	}
-}
 
-// While a native call of a function's code has not returned -- its context
-// marked live, its closure the function's -- the cache neither drops the
-// code nor compiles the function again: the call returns into the code,
-// and Go reads its frame by the code it left. Before, only Go's own runs of
-// the code counted.
-func TestJITKeepsCodeANativeCallIsIn(t *testing.T) {
-	t.Parallel()
-	r := jitRuntimeForTest(t, Config{JIT: true})
-	if _, err := r.Run(compileForTest(t, `
-		function f(n) { let s = 0; for (let i = 0; i < n; i++) s += i % 7; return s }
-		f(1000); f(1000)`)); err != nil {
-		t.Fatal(err)
-	}
-	cl := r.global.getOwn(r.atoms.intern("f")).value().Object().fn().closure
-	e := r.jitFor(cl)
-	s := r.jit
-	if e == nil || e.ssa == nil || len(s.ssaCtxs) < 2 {
-		t.Fatalf("f has no code, or no contexts: %+v", e)
-	}
-	c := s.ssaCtxs[1]
-	c.Live, c.Closure = abi.LiveCall, unsafe.Pointer(cl)
-	defer func() { c.Live, c.Closure = 0, nil }()
-	if !s.inUse(e) {
-		t.Error("the cache may drop code a native call is in")
-	}
-	code := e.ssa
-	e.reopt = true
-	r.jitReoptimize(cl, e)
-	if e.ssa != code {
-		t.Error("compiled again while a native call is in its code")
-	}
-}
 
 // Code the cache drops to make room is code nothing runs, calls or returns
 // to: compiled in a budget far too small for a program's hot functions,

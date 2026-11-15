@@ -420,11 +420,9 @@ func TestJITRegRealmsWithinTheBudgetClocked(t *testing.T) {
 		t.Skip("no SSA backend on this architecture")
 	}
 	fn := compileForTest(t, jitHotProgram(40))
-	was := SetJITRegTier(true)
 	epoch, flush := jitEpochNow, jitFlushNow
 	t.Cleanup(func() {
 		jitEpochNow, jitFlushNow = epoch, flush
-		SetJITRegTier(was)
 	})
 	for _, step := range []uint64{0, 1, 2, 3} {
 		for _, limit := range []int64{96 << 10, 256 << 10} {

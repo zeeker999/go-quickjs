@@ -70,7 +70,7 @@ func TestJITClassConstructors(t *testing.T) {
 // returns its this (push_this, return), where a function's constructor
 // returns nothing (ssa's returnsThis).
 func TestJITClassConstructorsNative(t *testing.T) {
-	if !regJITForTest() {
+	if false {
 		// Under the register JIT it sets the process's SSA hook.
 		t.Parallel()
 	}
@@ -83,7 +83,7 @@ func TestJITClassConstructorsNative(t *testing.T) {
 	// which register code's entry does not keep as the stack form's
 	// does (ssaInlined).
 	var inlined []uintptr
-	if r.regOn() {
+	if true {
 		jitSSAOptimized = func(fn *bytecode.Function, f *ssa.Func) {
 			if fn.Name == "chain" {
 				inlined = slices.Clone(f.Inlined)

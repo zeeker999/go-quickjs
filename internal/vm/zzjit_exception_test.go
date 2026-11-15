@@ -205,40 +205,6 @@ func TestJITExceptionHandlers(t *testing.T) {
 	}
 }
 
-// The handlers in force are Go's to know wherever native code leaves a
-// frame: at an exit inside a try, the frame has the try's handlers, and
-// outside it none.
-func TestJITHandlersAtExits(t *testing.T) {
-	t.Parallel()
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	r := jitRuntimeForTest(t, Config{JIT: true})
-	fn := compileForTest(t, `function f(g, n) { let a = 0; for (let i = 0; i < n; i++) { try { a = g(); try { a += g() } finally { a++ } } catch (e) { a = -1 } } return a + g() }`)
-	if _, err := r.Run(fn); err != nil {
-		t.Fatal(err)
-	}
-	cl := r.global.getOwn(r.atoms.intern("f")).value().Object().fn().closure
-	p, err := r.jitLower(cl.fn, jitLowerSSA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(p.Handlers) != 2 || p.HandlerAt == nil {
-		t.Fatalf("handlers %+v", p.Handlers)
-	}
-	depths := map[int]bool{}
-	f := &frame{}
-	for pc := range cl.fn.Code {
-		jitHandlers(f, p, pc)
-		depths[len(f.handlers)] = true
-		if len(f.handlers) == 2 && (f.handlers[0].isFinally || !f.handlers[1].isFinally) {
-			t.Fatalf("pc %d: handlers %+v", pc, f.handlers)
-		}
-	}
-	if !depths[0] || !depths[1] || !depths[2] {
-		t.Fatalf("handler depths seen: %v", depths)
-	}
-}
 
 // A generator's or an async function's body is compiled, and each
 // resumption enters native code at its pc: the first after the

@@ -247,30 +247,6 @@ func TestJITKeptEntryStaysForCallsThatLeave(t *testing.T) {
 	}
 }
 
-// Code compiled again only to give up an entry does as it did, and is
-// judged by all it did: with its record gone, a cache's calls of Go alone
-// were what it was judged by, and code a moment from running natively, a
-// tree ran instead.
-func TestJITKeptGoneKeepsItsRecord(t *testing.T) {
-	t.Parallel()
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	r := jitAgreesForTestWith(t, jitStressConfig{}, osrSetup, `once(200000)`)
-	e := jitCallbackEntry(r, "once")
-	if e == nil || len(e.ssaKept) == 0 {
-		t.Fatalf("no entry kept: %+v", e)
-	}
-	work := e.ssaStats.work
-	if work == 0 {
-		t.Fatal("no work counted")
-	}
-	cl := r.global.getOwn(r.atoms.intern("once")).value().Object().fn().closure
-	r.jitKeptGone(cl, e)
-	if len(e.ssaKept) != 0 || e.ssaStats.work != work {
-		t.Fatalf("kept %v, work %d of %d", e.ssaKept, e.ssaStats.work, work)
-	}
-}
 
 // A frame goes on from the loop it entered the code kept for it at to the
 // function's next, in that code, which needs no entry there, and keeps that
@@ -599,31 +575,6 @@ func TestJITOSRSiteNotMegamorphic(t *testing.T) {
 	}
 }
 
-// Code kept for a loop compiled again -- for a call Go went on after, at
-// once, or for what it learned, in a run -- tells the function's code first,
-// and its learning the loop's entry does not: that would have the code it
-// was compiled apart from compiled again, which lets it go.
-func TestJITOSRTellsBeforeItsCompile(t *testing.T) {
-	t.Parallel()
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	r := jitAgreesForTestWith(t, jitStressConfig{}, osrSetup, osrRounds("sum", "")...)
-	e := jitCallbackEntry(r, "sum")
-	if e == nil || e.osr == nil || e.osr.ssa == nil {
-		t.Fatalf("no code kept for the loop: %+v", e)
-	}
-	if e.reoptPending() {
-		t.Fatalf("learning the loop's entry has the function's code compiled again: %+v", e)
-	}
-	oe := e.osr
-	cl := r.global.getOwn(r.atoms.intern("sum")).value().Object().fn().closure
-	oe.resumeReopt = true
-	r.jitReoptimize(cl, oe)
-	if oe.resumeReopt || !e.resumeReopt {
-		t.Fatalf("not told before its compile: told %v, still set %v", e.resumeReopt, oe.resumeReopt)
-	}
-}
 
 // A long frame in the code kept for its loop uses the function: its
 // entries there count, and the cache does not flush it as unused.
@@ -687,53 +638,6 @@ func TestJITOSRTellsTheFunction(t *testing.T) {
 	oe.polyReopt = false
 }
 
-// The function's code compiled again, the code kept for its loops goes: it
-// is out of date, and holds a compile's bytes for frames that may not come
-// back. A frame that stays in a loop then learns it afresh. Not while a
-// run is in it, which goes on there and lets it go when it ends.
-func TestJITOSRGoesWithTheCode(t *testing.T) {
-	t.Parallel()
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	r := jitAgreesForTestWith(t, jitStressConfig{}, osrSetup, osrRounds("sum", "")...)
-	e := jitCallbackEntry(r, "sum")
-	if e == nil || e.osr == nil {
-		t.Fatalf("no code kept for the loop: %+v", e)
-	}
-	oe := e.osr
-	cl := r.global.getOwn(r.atoms.intern("sum")).value().Object().fn().closure
-	before := e.measure()
-
-	// A run in it.
-	oe.ssaRuns++
-	e.inlineReopt = true
-	r.jitReoptimize(cl, e)
-	if e.osr != oe || !oe.osrSpent {
-		t.Fatalf("let go under a run: %+v", e)
-	}
-	oe.ssaRuns--
-	r.jit.osrRunDone(oe)
-	if e.osr != nil {
-		t.Fatalf("kept once its run ended: %+v", e)
-	}
-	if oe.owned() {
-		t.Fatalf("still its link's")
-	}
-	if e.measure() >= before {
-		t.Errorf("the entry holds %d bytes for %d", e.measure(), before)
-	}
-	r.jit.account(e)
-
-	// A long call now begins in the function's code, and needs none.
-	v, err := r.Run(compileForTest(t, `sum(200000, -1)`))
-	if err != nil || v.Number() != 200000 {
-		t.Fatalf("got %v, %v", v, err)
-	}
-	if e.osr != nil {
-		t.Fatalf("a call begun in the function's code had code kept for its loop: %+v", e.osr)
-	}
-}
 
 // The code kept for a loop counts in its function's entry, and goes with
 // it: the cache holds what it counts, no less, and nothing of it past it.

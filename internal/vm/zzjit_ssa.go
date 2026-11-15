@@ -2165,52 +2165,6 @@ func (r *Runtime) jitInstall(j *jitJob) (*jit.SSACode, *jitFeedback, error) {
 // the build from the snapshot its jitFeedbackHook asked.
 var jitBuiltHook func(fb *jitFeedback, p *ir.Program, f *ssa.Func, err error)
 
-// jitBuildFrom is jitBuildSSA's build of p, asking feedback, fb's or its
-// snapshot (jitSnapshot), and timed in timing, if not nil: a function of the
-// compile's alone, which a worker may run where feedback is a snapshot.
-func jitBuildFrom(w *jit.Workspace, fn *bytecode.Function, p *ir.Program, fb *jitFeedback, feedback ssa.Feedback, timing *mir.Times) (*ssa.Func, error) {
-	f, err := ssa.BuildIn(&w.SSA, p, feedback)
-	if err != nil {
-		return nil, err
-	}
-	f.FrameAt = fb.frameAt
-	if f.Loops {
-		fb.loopSlots = f.LoopsEnd - p.Locals
-	}
-	fb.callbacks, fb.unmade = f.Callbacks, f.Unmade
-	f.FrameLocals = fn.LocalCount
-	f.Params, f.StartOnly = fn.ParamCount, jitcompile.StartOnly(fn)
-	f.Cells = p.Cells
-	// Native callers call a function's code at its call entry, which makes
-	// its frame (mir's callEntry): code a call makes no frame of its own
-	// for -- top-level code's, a generator's, an async function's -- has
-	// none, nor code whose parameter list has a prologue (ir's ParamsDead)
-	// whose states have no room for the call's arguments (ir.Program's
-	// PrologueFrameOnly), which the interpreter goes on with after an exit
-	// there, which only a frame of the VM's has then -- where they have, a
-	// frame Go makes of a native callee's is given them (jitPrologueArgs) --
-	// nor code that pushes its own function object (push_callee), which a
-	// native callee's context does not hold. Go makes their calls. Code
-	// that reads its arguments past its parameters -- a rest parameter's,
-	// an arguments object's, a super() of them -- or its function object
-	// -- a super reference's, push_callee's -- has one: a native call of
-	// it writes them to its context (ssa.CallSite's FrameArgs, Function).
-	f.CallEntry = !fn.TopLevel && !fn.IsModule && !fn.Async && !fn.Generator && !isGeneratorTemplate(fn) && !p.PrologueFrameOnly
-	if jitGenCallable(fn) && !p.Cells {
-		// A generator a loop's step may resume natively: where it resumes
-		// it (mir's genEntry).
-		f.GenResumes = jitGenResumes(fn, p, f)
-		f.GenEntry = len(f.GenResumes) != 0
-	}
-	if p.This {
-		f.ThisSlot = fn.LocalCount + len(fn.Upvalues)
-	}
-	if t := timing; t != nil {
-		t.Lap(mir.PhaseBuild)
-	}
-	return f, nil
-}
-
 // JITCompileRepeat, if not 0, has every compile of the SSA backend that
 // succeeds run that many times more, its build, optimization and backend,
 // what each makes thrown away: for timing the compiler (mir.Timing) over
@@ -6802,20 +6756,6 @@ func (s *jitState) lowering(fn *bytecode.Function) *jitLowering {
 	}
 	l.used = s.agedAt
 	return l
-}
-
-// jitLowerWith is fn's program lowered as kind says, with hints. It reads
-// only fn, which runtimes share, and hints: a worker may run it.
-func jitLowerWith(fn *bytecode.Function, kind jitLowerKind, hints jitcompile.Hints) (*ir.Program, error) {
-	switch kind {
-	case jitLowerInline:
-		return jitcompile.LowerSSAInlineWith(fn, hints)
-	case jitLowerForward:
-		return jitcompile.LowerSSAForwardWith(fn, hints)
-	case jitLowerHot:
-		return jitcompile.LowerSSAHotWith(fn, hints)
-	}
-	return jitcompile.LowerSSAWith(fn, hints)
 }
 
 // jitStringAddSeen notes an exit at pc, an addition in e's code that met a

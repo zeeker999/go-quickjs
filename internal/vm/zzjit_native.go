@@ -1532,10 +1532,6 @@ type jitState struct {
 	jobs                     []*jitJob
 	draining                 bool
 	bgSubmitted, bgDiscarded uint64
-	// lowerings are the lowerings handed to the workers for first compiles
-	// in the background (jitLowerLater), and bgLowered counts them.
-	lowerings []*jitLowerTask
-	bgLowered uint64
 	// bgMissed counts the compiles built on the runtime's goroutine after
 	// all, their builds having asked what their snapshots were not.
 	bgMissed uint64

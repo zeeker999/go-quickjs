@@ -32,14 +32,6 @@ func jitNoInlineForTest(t *testing.T, name string) {
 	t.Cleanup(func() { jitNoInline = nil })
 }
 
-// jitNoLoopInlineForTest keeps every function with a loop out of line
-// while the test runs, as the inliner kept them before it inlined small
-// ones (ssa's maxInlineLoop): the tests of native calls give the callees
-// they call natively a loop of a turn or two for that.
-func jitNoLoopInlineForTest(t *testing.T) {
-	jitNoInline = jumpsBack
-	t.Cleanup(func() { jitNoInline = nil })
-}
 
 // jitClosureForTest is the closure of the function the script's global
 // expression src gives.
@@ -667,42 +659,6 @@ func TestJITInlinesLoopsFirst(t *testing.T) {
 	}
 }
 
-// The JIT's counters say how many callees the code it placed inlines, and
-// how many instructions they have (JITStats' Inlined, InlinedCode), every
-// compile's: walk, compiled once, inlines sq at its two calls, twice sq's
-// instructions.
-func TestJITStatsCountInlined(t *testing.T) {
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	inlined := jitInlinedForTest(t)
-	var code []int
-	jitSSAOptimized = func(fn *bytecode.Function, f *ssa.Func) {
-		inlined[fn.Name] = slices.Clone(f.Inlined)
-		code = append(code, f.InlinedCode)
-	}
-	both := jitBothForTest(t, `
-		function sq(x) { return x * x }
-		function walk(n) { let s = 0; for (let i = 0; i < n; i++) s = (s + sq(i) - sq(i + 1)) | 0; return s }`)
-	both.agree(t, `walk(500)`)
-	r := both.jit
-	sq := r.global.getOwn(r.atoms.intern("sq")).value().Object().fn().closure
-	p, err := r.jitLower(sq.fn, jitLowerInline)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st := r.JITStats()
-	if n := jitCountForTest(inlined["walk"], uintptr(unsafe.Pointer(sq))); n != 2 {
-		t.Fatalf("walk inlines sq %d times, want 2", n)
-	}
-	sum := 0
-	for _, n := range code {
-		sum += n
-	}
-	if st.Inlined != 2 || st.InlinedCode != uint64(2*len(p.Code)) || sum != 2*len(p.Code) {
-		t.Errorf("JITStats count %d callees, %d instructions (the compiles' %d); want 2 and %d", st.Inlined, st.InlinedCode, sum, 2*len(p.Code))
-	}
-}
 
 // A megamorphic site's write inside an inlined callee -- an addition the
 // megamorphic cache does not hold, an array's length -- is Go's from

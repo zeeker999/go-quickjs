@@ -22,11 +22,9 @@ func TestJITRegDeferredWarmsUpAgain(t *testing.T) {
 	}
 	fn := compileForTest(t, jitHotProgram(40))
 	call := compileForTest(t, `f39(100000)`)
-	was := SetJITRegTier(true)
 	epoch, flush := jitEpochNow, jitFlushNow
 	t.Cleanup(func() {
 		jitEpochNow, jitFlushNow = epoch, flush
-		SetJITRegTier(was)
 	})
 	// Clocks that do not move: the code compiled first stays young, and
 	// what comes after it is deferred.

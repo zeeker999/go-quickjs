@@ -75,7 +75,7 @@ func TestJITGenericCallsNative(t *testing.T) {
 	r := New(Config{JIT: true})
 	t.Cleanup(func() { r.Close(); r.ReleaseClosed() })
 	jitFewCallsForTest(r)
-	if r.regOn() {
+	if true {
 		// The register JIT compiles round, which calls f1 to f7
 		// natively, and they inline forEach, its callback with it: no
 		// generic call is left. Without inlining, forEach's own code makes

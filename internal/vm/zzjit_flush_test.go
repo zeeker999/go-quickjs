@@ -4,7 +4,6 @@ package vm
 
 import (
 	"runtime"
-	"slices"
 	"testing"
 	"time"
 	"weak"
@@ -162,52 +161,6 @@ func TestJITFlushKeepsCodeInUse(t *testing.T) {
 	}
 }
 
-// An entry the cache drops is no longer among its callees' native callers:
-// one kept there, its entry gone, kept what it had learned and compiled
-// for alive with it, through a callee whose own code stayed in use.
-func TestJITDroppedCallerLeavesCallees(t *testing.T) {
-	jitNoLoopInlineForTest(t)
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	setEpoch := jitFlushForTest(t)
-	r := jitRuntimeForTest(t, Config{JIT: true})
-	if _, err := r.Run(compileForTest(t, `
-		function h(i) { var t = 0; for (var j = 0; j < 4; j++) t = (t + (i * j) % 7) | 0; return t }
-		function a(n) { var s = 0; for (var i = 0; i < n; i++) s = (s + h(i)) | 0; return s }
-		function b(n) { var s = 0; for (var i = 0; i < n; i++) s = (s + h(i + 1)) | 0; return s }`)); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 300; i++ {
-		if _, err := r.Run(compileForTest(t, `a(100) + b(100)`)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	s := r.jit
-	ea := s.cache[s.rt.jitKeyOf(jitGlobalClosure(r, "a").fn)]
-	eh := s.cache[s.rt.jitKeyOf(jitGlobalClosure(r, "h").fn)]
-	if ea == nil || ea.ssa == nil || eh == nil || !slices.Contains(eh.nativeCallers, ea) {
-		t.Fatalf("a's code does not call h's natively: %+v, %+v", ea, eh)
-	}
-	for k := uint64(1); k <= 2; k++ {
-		setEpoch(1000 + k*jitFlushAge)
-		s.flush()
-		// b, and h through it, stay in use; a does not.
-		for i := 0; i < 20; i++ {
-			if _, err := r.Run(compileForTest(t, `b(100)`)); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	if s.cache[s.rt.jitKeyOf(jitGlobalClosure(r, "a").fn)] != nil {
-		t.Fatal("a's unused code was not flushed")
-	}
-	for _, e := range s.cache {
-		if slices.Contains(e.nativeCallers, ea) {
-			t.Fatal("a callee keeps a's dropped entry among its native callers")
-		}
-	}
-}
 
 // The frames made for a run's native levels at its calls of Go
 // (jitLevels), which only that run's calls share, keep nothing once the

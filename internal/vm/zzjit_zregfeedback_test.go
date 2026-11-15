@@ -47,7 +47,6 @@ var pt = new Point(1, 2);
 for (var k = 0; k < 20; k++) work(pt, 5);
 `
 	prog := compileForTest(t, src)
-	defer SetJITRegTier(SetJITRegTier(true))
 	r := New(Config{})
 	defer r.Close()
 	if _, err := r.Run(prog); err != nil {

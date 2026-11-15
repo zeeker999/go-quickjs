@@ -10,9 +10,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
-	"github.com/go-quickjs/go-quickjs/internal/compiler"
 )
 
 // jitMarkingWork is what one run of a test of the micro-benchmarks did that
@@ -172,7 +169,6 @@ func jitMarkingRegRun(t *testing.T, src string, names []string, marking bool) ma
 		jitMarkingForTest(t)
 	}
 	prog := compileForTest(t, src)
-	defer SetJITRegTier(SetJITRegTier(true))
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	if _, err := r.Run(prog); err != nil {
 		t.Fatal(err)

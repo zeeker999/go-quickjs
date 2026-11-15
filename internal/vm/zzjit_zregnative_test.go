@@ -51,10 +51,6 @@ function instThrows(n) { var s = 0; try { for (var i = 0; i < n; i++) if (i inst
 func regNativeRuntimes(t *testing.T, src string) [2]*Runtime {
 	t.Helper()
 	prog := compileForTest(t, src)
-	was := SetJITRegTier(true)
-	t.Cleanup(func() {
-		SetJITRegTier(was)
-	})
 	var rts [2]*Runtime
 	for i := range rts {
 		rts[i] = New(Config{JIT: i == 0})

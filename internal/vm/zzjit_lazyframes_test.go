@@ -44,74 +44,8 @@ func lazyFramesRounds() []string {
 	return rounds
 }
 
-// The native levels below the one that calls Go have frames made only
-// when one is read (jitLazyLevels): a stack trace, a thrown error's, a
-// function's caller chain see every level as the interpreter does, and
-// code invalidated while the levels are in it is returned into, closed
-// only once they have left. Each answer is the interpreter's.
-func TestJITLazyFrames(t *testing.T) {
-	t.Parallel()
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	jitLazyFramesRan(t, jitLazyFramesAgree(t))
-}
 
-// jitLazyFramesAgree runs lazyFramesRounds in the interpreter and with the
-// JIT, recompile the host's in both, and checks each answer is the
-// interpreter's.
-func jitLazyFramesAgree(t *testing.T) *Runtime {
-	t.Helper()
-	install := func(rt *Runtime) {
-		rt.global.setOwnRaw(rt.atoms.intern("recompile"), rt.NewFunction("recompile", 0,
-			func(rt *Runtime, _ Value, _ []Value) (Value, error) {
-				if rt.jit == nil {
-					return Int(0), nil
-				}
-				cl := rt.global.getOwn(rt.atoms.intern("helper")).value().Object().fn().closure
-				if e := rt.jit.cache[rt.jitKeyOf(cl.fn)]; e != nil && e.ssa != nil {
-					e.reopt = true
-					rt.jitReoptimize(cl, e)
-				}
-				return Int(0), nil
-			}), propDefault)
-	}
-	want := New(Config{})
-	t.Cleanup(func() { want.Close(); want.ReleaseClosed() })
-	r := jitRuntimeForTest(t, Config{JIT: true})
-	for _, rt := range []*Runtime{want, r} {
-		install(rt)
-		if _, err := rt.Run(compileForTest(t, lazyFramesSetup)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for i, src := range lazyFramesRounds() {
-		src = "''+(" + src + ")"
-		wv, werr := want.Run(compileForTest(t, src))
-		gv, gerr := r.Run(compileForTest(t, src))
-		switch {
-		case (werr == nil) != (gerr == nil):
-			t.Fatalf("round %d (%s): error %v, the interpreter's %v", i, src, gerr, werr)
-		case werr != nil:
-			if gerr.Error() != werr.Error() {
-				t.Fatalf("round %d (%s): error %q, the interpreter's %q", i, src, gerr, werr)
-			}
-		case gv.String().Go() != wv.String().Go():
-			t.Fatalf("round %d (%s): got %s, the interpreter's %s", i, src, gv.String().Go(), wv.String().Go())
-		}
-	}
-	return r
-}
 
-// TestJITLazyFramesMarking is TestJITLazyFrames while the collector marks.
-func TestJITLazyFramesMarking(t *testing.T) {
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	jitMarkingForTest(t)
-	jitClobberStoresForTest(t)
-	jitLazyFramesRan(t, jitLazyFramesAgree(t))
-}
 
 func jitLazyFramesRan(t *testing.T, r *Runtime) {
 	t.Helper()

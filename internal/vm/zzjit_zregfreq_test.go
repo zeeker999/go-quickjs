@@ -39,10 +39,6 @@ func TestJITRegFrequency(t *testing.T) {
 				jitMarkingForTest(t)
 			}
 			prog := compileForTest(t, regFreqSrc)
-			was := SetJITRegTier(true)
-			t.Cleanup(func() {
-				SetJITRegTier(was)
-			})
 			for _, on := range []bool{true} {
 				r := New(Config{JIT: on})
 				t.Cleanup(r.Close)

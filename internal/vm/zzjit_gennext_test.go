@@ -74,68 +74,6 @@ var jitGenNextCases = []struct {
 		[]string{`f(3)`, `f(1)`}, []string{`0,1,fin,2`, `0`}, "g"},
 }
 
-// TestJITGenNextAgreesWithNode runs jitGenNextCases in the interpreter, in
-// the tree tier, and with the JIT compiling at the first call, the
-// collector marking, and under QJS_JIT_STRESS's budgets and
-// deoptimizations: each answer is Node's, and, compiled, the calls of next
-// resume each generator the cases name natively.
-func TestJITGenNextAgreesWithNode(t *testing.T) {
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	rounds := func(t *testing.T, mk func() *Runtime, n int, native func(r *Runtime, name, gen string)) {
-		t.Helper()
-		for _, tc := range jitGenNextCases {
-			r := mk()
-			if _, err := r.Run(compileForTest(t, tc.setup)); err != nil {
-				t.Fatalf("%s: %v", tc.name, err)
-			}
-			for round := 0; round < n; round++ {
-				for i, src := range tc.exprs {
-					v, err := r.Run(compileForTest(t, "''+("+src+")"))
-					if err != nil {
-						t.Fatalf("%s round %d: %s: %v", tc.name, round, src, err)
-					}
-					if got := v.String().Go(); got != tc.want[i] {
-						t.Fatalf("%s round %d: %s = %q, want %q", tc.name, round, src, got, tc.want[i])
-					}
-				}
-			}
-			if native != nil {
-				native(r, tc.name, tc.gen)
-			}
-			r.Close()
-			r.ReleaseClosed()
-		}
-	}
-	for _, on := range []bool{true} {
-		rounds(t, func() *Runtime { return New(Config{}) }, 2, nil)
-	}
-	jit := func() *Runtime {
-		r := New(Config{JIT: true})
-		jitDefaultsForTest(r)
-		r.jitCallThreshold, r.jitICThreshold = 1, 1
-		return r
-	}
-	native := func(r *Runtime, name, gen string) {
-		if gen != "" && jitGenInForTest(r, gen) == 0 {
-			t.Errorf("%s: no call of next resumed %s natively", name, gen)
-		}
-	}
-	rounds(t, jit, 8, native)
-	t.Run("marking", func(t *testing.T) {
-		// Native while the collector marks, as when it does not.
-		jitMarkingForTest(t)
-		rounds(t, jit, 6, native)
-	})
-	for _, c := range []jitStressConfig{{threshold: true, budget: 3, deopt: 7}, {threshold: true, budget: 1}} {
-		rounds(t, func() *Runtime {
-			r := jit()
-			r.jitStress = c
-			return r
-		}, 4, nil)
-	}
-}
 
 // A loop of calls of a generator's next, compiled, makes no call of Go at
 // its calls: each resumes the generator natively, its result an object of

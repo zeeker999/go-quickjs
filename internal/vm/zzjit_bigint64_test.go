@@ -2,12 +2,6 @@
 
 package vm
 
-import (
-	"runtime"
-	"sync/atomic"
-	"testing"
-)
-
 // BigInt arithmetic and comparisons whose operands, BigInts in the int64
 // range, a site has met (jitBigIntSeen): native code makes them unboxed,
 // each result boxed in a keep cell, until a speculation fails -- a result
@@ -99,58 +93,3 @@ const bigInt64Setup = `
 	}
 `
 
-func TestJITBigInt64(t *testing.T) {
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	// The collector marks now and then, so that boxes are written through
-	// Go's write barrier too.
-	var stop atomic.Bool
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for !stop.Load() {
-			runtime.GC()
-		}
-	}()
-	defer func() { stop.Store(true); <-done }()
-	var srcs []string
-	for range 40 {
-		srcs = append(srcs, `all(2000, 5000)`)
-	}
-	for _, k := range []string{"5", "700", "1999", "1000"} {
-		srcs = append(srcs, `all(2000, `+k+`)`)
-	}
-	r := jitDefaultRuns(t, bigInt64Setup, srcs...)
-	// Native BigInt sites that held: some of each function's are learned
-	// and none failed since.
-	for _, name := range []string{"squares", "down", "stores"} {
-		cl := r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure
-		e := jitCodeForTest(r, name)
-		if e == nil {
-			t.Fatalf("%s has no code", name)
-		}
-		// Learned at a guard that failed, or from the tree tier -- or,
-		// of register code, from the register interpreter's marks.
-		held := 0
-		if jitRegCodeForTest(r, name) {
-			re := r.jit.regCache[r.jitRegKeyOf(cl)]
-			rf := r.jitRegFeedbackFor(cl, re.p)
-			for pc := range re.p.Code {
-				if rf.BigInt(pc) && !rf.Generic(pc) {
-					held++
-				}
-			}
-		} else {
-			fb := &jitFeedback{r: r, fn: cl.fn, e: e}
-			for pc := range e.ssaProg.Code {
-				if fb.BigInt(pc) && !fb.Generic(pc) {
-					held++
-				}
-			}
-		}
-		if held == 0 {
-			t.Errorf("%s: no native BigInt site held (learned %v, failed %v)", name, e.bigints, e.failed)
-		}
-	}
-}

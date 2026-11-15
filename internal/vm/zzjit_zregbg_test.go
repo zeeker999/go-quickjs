@@ -38,10 +38,6 @@ func TestJITRegBackground(t *testing.T) {
 				jitMarkingForTest(t)
 			}
 			prog := compileForTest(t, regBackgroundSrc)
-			was := SetJITRegTier(true)
-			t.Cleanup(func() {
-				SetJITRegTier(was)
-			})
 			var got [2]string
 			var rts [2]*Runtime
 			for i := range rts {

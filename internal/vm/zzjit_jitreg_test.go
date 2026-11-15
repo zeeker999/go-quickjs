@@ -3,28 +3,8 @@
 package vm
 
 import (
-	"testing"
-
 	"github.com/go-quickjs/go-quickjs/internal/jit"
 )
-
-// regJITForTest reports whether runtimes made with the JIT run register
-// code, which their JIT compiles (RegTier): QJS_JITREG set, or a test's
-// SetJITRegTier. A runtime that keeps the old tiers (jitRuntimeForTest,
-// newOldTiersForTest) runs the stack form's whatever it says.
-func regJITForTest() bool { return jitRegTier.Load() }
-
-// skipUnderRegJIT skips a test of the stack form's JIT where runtimes run
-// register code: one of a mechanism the register form has no counterpart
-// of -- the stack bytecode's shapes, the tree tier's and the stack
-// interpreter's promotion, the stack JIT's own counters -- which goes with
-// the stack form and its tests. why says what the test is of.
-func skipUnderRegJIT(t *testing.T, why string) {
-	t.Helper()
-	if regJITForTest() {
-		t.Skip("the register JIT runs this runtime's code: " + why)
-	}
-}
 
 // jitRegCodeForTest reports whether the global function name runs register
 // code in r, which r's JIT compiles: r runs register code, and its closure
@@ -33,7 +13,7 @@ func skipUnderRegJIT(t *testing.T, why string) {
 // interpreter or the tree tier off -- has the stack form's code, entry
 // and link, whatever r runs.
 func jitRegCodeForTest(r *Runtime, name string) bool {
-	return r.regOn() && r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure.reg != nil
+	return r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure.reg != nil
 }
 
 // jitRegLifeForTest is the state of the global function name's register

@@ -61,10 +61,6 @@ func TestJITRegSuspendedAndTopLevel(t *testing.T) {
 				jitMarkingForTest(t)
 			}
 			prog := compileForTest(t, regSuspendSrc)
-			was := SetJITRegTier(true)
-			t.Cleanup(func() {
-				SetJITRegTier(was)
-			})
 			var got [2]string
 			var rts [2]*Runtime
 			for i := range rts {

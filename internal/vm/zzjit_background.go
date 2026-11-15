@@ -75,13 +75,13 @@ func (s *jitState) jitPending(fn *bytecode.Function) bool {
 // jobsFull reports whether the runtime has as many compiles in the
 // background as it may.
 func (s *jitState) jobsFull() bool {
-	return len(s.jobs)+len(s.lowerings)+len(s.regJobs) >= jitJobsMax
+	return len(s.regJobs) >= jitJobsMax
 }
 
 // inFlight reports whether the runtime has compiles or lowerings in the
 // background, which a check installs (jitDrain).
 func (s *jitState) inFlight() bool {
-	return len(s.jobs) != 0 || len(s.lowerings) != 0 || len(s.heldJobs) != 0 || len(s.regJobs) != 0
+	return len(s.regJobs) != 0
 }
 
 // A compile on the spot finds its callees' code there, a callee's compile
@@ -167,36 +167,7 @@ func (s *jitState) jitCompileWaits(fn, target *bytecode.Function) bool {
 	return false
 }
 
-// jitHold holds e's compile of fn's program p, for its closure cl, until the
-// compiles in e.awaited are done: busy and pending as a compile handed over
-// is (jitSubmit), installed by install once it is. A frame waiting at a loop
-// for it is told of as it would have been (jitFrameAt).
-func (r *Runtime) jitHold(e *jitEntry, fn *bytecode.Function, cl *closure, p *ir.Program, install func(*Runtime, *jitJob) bool) {
-	s := r.jit
-	h := &jitJob{fn: fn, cl: cl, p: p, e: e, realm: r.Realm, install: install, held: true, holdRound: 1}
-	if r.jitFrameFn == fn {
-		h.frameAt = r.jitFramePC
-	}
-	e.pending = h
-	e.busy++
-	s.heldJobs = append(s.heldJobs, h)
-	s.bgHeld++
-}
 
-// jitHeldReady reports whether h's compile may be prepared: the compiles it
-// waited for are done, and there is a place for it.
-func (r *Runtime) jitHeldReady(h *jitJob) bool {
-	s := r.jit
-	if s.jobsFull() {
-		return false
-	}
-	for _, fn := range h.e.awaited {
-		if s.jitPending(fn) {
-			return false
-		}
-	}
-	return true
-}
 
 
 // jitDrain installs the compiles in the background that are done, in the
@@ -225,31 +196,6 @@ func (r *Runtime) jitDrain() {
 // workspace goes back to the process's pool, by the worker if it still
 // has it.
 func (s *jitState) abandonJobs() {
-	for _, j := range s.jobs {
-		for {
-			st := j.state.Load()
-			if st == jitJobDone {
-				jit.PutWorkspace(j.w)
-				j.w = nil
-				break
-			}
-			if j.state.CompareAndSwap(st, jitJobAbandoned) {
-				break
-			}
-		}
-		j.e.pending = nil
-		j.e.busy--
-	}
-	s.jobs = nil
-	for _, h := range s.heldJobs {
-		h.e.pending, h.e.awaited = nil, nil
-		h.e.busy--
-	}
-	s.heldJobs = nil
-	for _, t := range s.lowerings {
-		t.state.Store(jitJobAbandoned)
-	}
-	s.lowerings = nil
 	s.jitRegAbandonJobs()
 }
 
@@ -309,52 +255,5 @@ func (p *jitWorkerPool) work() {
 // too, which the tests look for (TestMain).
 var jitWorkerPanics atomic.Int64
 
-// jitLowerTask is a function's lowering in the background, for its first
-// compile there (jitLowerLater): the function's own program, of its
-// bytecode, which runtimes share, and a copy of its hints, which a worker
-// lowers, and the runtime's goroutine takes into the function's lowering
-// (jitLowered) at a later check, as jitLower would have.
-type jitLowerTask struct {
-	fn    *bytecode.Function
-	kind  jitLowerKind
-	hints jitcompile.Hints
-	// l is the lowering it is for, at serial: one dropped since, or
-	// relowered for other hints, does not take it.
-	l      *jitLowering
-	serial uint32
-	p      *ir.Program
-	err    error
-	state  atomic.Int32
-	done   chan struct{}
-	checks int
-}
 
-// run is t's lowering on a worker; the lowering recovers a panic of its
-// own into a refusal (jitcompile's lowerRecovered).
-func (t *jitLowerTask) run() {
-	defer close(t.done)
-	if !t.state.CompareAndSwap(jitJobQueued, jitJobWorking) {
-		return
-	}
-	t.p, t.err = jitLowerWith(t.fn, t.kind, t.hints)
-	t.state.CompareAndSwap(jitJobWorking, jitJobDone)
-}
 
-// jitLowered takes t's program into its function's lowering, as jitLower
-// would have lowered it there -- unless the lowering went, was relowered,
-// or has the program already.
-func (r *Runtime) jitLowered(t *jitLowerTask) {
-	s := r.jit
-	l := t.l
-	if s.lowered[weak.Make(t.fn)] != l || l.serial != t.serial || l.done[t.kind] {
-		s.bgDiscarded++
-		return
-	}
-	l.progs[t.kind], l.errs[t.kind], l.done[t.kind] = t.p, t.err, true
-	n := t.p.Footprint()
-	l.bytes += n
-	s.lowerBytes += n
-	// In the room made for its compile when it was handed over, which
-	// other compiles may have taken since.
-	s.settle()
-}

@@ -203,11 +203,6 @@ func TestLiveRegsMatchesDense(t *testing.T) {
 					}
 				}
 			}
-			for _, l := range []func(*bytecode.Function) (*ir.Program, error){LowerSSA, LowerSSAHot, LowerSSAInline} {
-				if p, err := l(fn); err == nil && !boolsMatch(t, fn, p) {
-					return
-				}
-			}
 			for _, c := range fn.Constants {
 				if c.Kind == bytecode.ConstFunction && c.Fn != nil {
 					walk(c.Fn)

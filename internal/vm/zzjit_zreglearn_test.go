@@ -65,77 +65,7 @@ func jitRegLearnPlain(r *Runtime) {
 	r.interruptCounter = interruptCheckInterval
 }
 
-// regLearnSite is the Property answer for the first instruction of op in
-// the program the code of the global function name of r's was compiled
-// from: of its register code where reg says, of its stack code otherwise.
-func regLearnSite(t *testing.T, r *Runtime, name string, op ir.Op, reg bool) ssa.PropertySite {
-	t.Helper()
-	v, _ := r.GetProp(Obj(r.Global()), r.Intern(name))
-	cl := v.Object().fn().closure
-	var p *ir.Program
-	var fb interface {
-		Property(int) (ssa.PropertySite, bool)
-	}
-	if reg {
-		e := r.jitRegFor(cl, cl.reg)
-		if e == nil || e.p == nil {
-			t.Fatalf("%s: not compiled: %+v", name, e)
-		}
-		p, fb = e.p, r.jitRegFeedbackFor(cl, e.p)
-	} else {
-		se := r.jit.cache[r.jitKeyOf(cl.fn)]
-		if se == nil || se.ssaProg == nil {
-			t.Fatalf("%s: not compiled", name)
-		}
-		p, fb = se.ssaProg, &jitFeedback{r: r, fn: cl.fn, cl: cl, e: se, prog: se.ssaProg}
-	}
-	for pc, in := range p.Code {
-		if in.Op == op {
-			site, _ := fb.Property(pc)
-			return site
-		}
-	}
-	t.Fatalf("%s: no instruction of op %d", name, op)
-	return ssa.PropertySite{}
-}
 
-// TestJITRegPolymorphicLearned: a read's and a write's sites of register
-// code compiled for one shape, deoptimized at a second, compiled again as
-// the stack form's code is, from what each learned at its exits.
-func TestJITRegPolymorphicLearned(t *testing.T) {
-	rts := regNativeRuntimes(t, regLearnSrc)
-	jitRegLearnPlain(rts[0])
-	var got [2]string
-	for i, r := range rts {
-		got[i] = regLearnRun(r, 3000)
-	}
-	if got[0] != got[1] {
-		t.Fatalf("with the JIT %q, without %q", got[0], got[1])
-	}
-	r := rts[0]
-	if st := r.RegNativeStats(); st.Entries == 0 {
-		t.Fatalf("no native code entered")
-	}
-	// The stack form's code, run alike.
-	SetJITRegTier(false)
-	sr := New(Config{JIT: true})
-	t.Cleanup(sr.Close)
-	jitRegLearnPlain(sr)
-	if _, err := sr.Run(compileForTest(t, regLearnSrc)); err != nil {
-		t.Fatal(err)
-	}
-	regLearnRun(sr, 3000)
-	for _, c := range []struct {
-		name string
-		op   ir.Op
-	}{{"get", ir.PropertyRead}, {"put", ir.PropertyWrite}} {
-		reg, stack := regLearnSite(t, r, c.name, c.op, true), regLearnSite(t, sr, c.name, c.op, false)
-		t.Logf("%s: register %+v, stack %+v", c.name, reg, stack)
-		if reg.Shape == 0 || len(reg.Cases) != len(stack.Cases) || reg.Megamorphic != stack.Megamorphic {
-			t.Errorf("%s: register %+v, stack %+v", c.name, reg, stack)
-		}
-	}
-}
 
 // regLeafSrc calls leaves -- built-ins native code calls without a frame
 // (jitLeafOp) -- from register code: those native code makes itself

@@ -65,30 +65,3 @@ const treeGoOnSetup = `
 	}
 	function all(n, k) { return mixed(n, k) + nested(n, k) * 3 + loops(n, k) * 5 + captured(n, k) * 7 + big(n) * 11 }
 `
-
-// A frame native code gave back for the rest of its invocation goes on in
-// its tree, as it would have run without the JIT, from its loop's header
-// at the interpreter's next back-edge check there: each answer the
-// interpreter's, the frames' locals, their operands, a loop's captured
-// bindings and the loops left by break and continue all as the
-// interpreter has them; and the tree takes frames over. At the default
-// thresholds, the functions run in their trees before they are compiled.
-func TestJITTreeGoesOn(t *testing.T) {
-	skipUnderRegJIT(t, "a frame going on in its tree after native code left it (treeGoneOn), the tree tier's; register code goes on in the register interpreter, as TestJITRegGoesOnAtBackEdge checks")
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	runtime.GC()
-	defer debug.SetGCPercent(debug.SetGCPercent(-1))
-	var srcs []string
-	for range 40 {
-		srcs = append(srcs, `all(3000, 3000)`)
-	}
-	for _, k := range []string{"5", "700", "2999", "1500", "3000", "11"} {
-		srcs = append(srcs, `all(3000, `+k+`)`)
-	}
-	r := jitDefaultRuns(t, treeGoOnSetup, srcs...)
-	if r.jit.treeGoneOn == 0 {
-		t.Fatal("no frame went on in its tree")
-	}
-}

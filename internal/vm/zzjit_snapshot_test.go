@@ -17,25 +17,6 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
-// jitSnapOracle is the snapshot's oracle (QJS_JIT_SNAPCHECK): before each
-// build on the runtime's goroutine, fb's snapshot is asked, as a compile in
-// the background asks it, and the build goes on from fb; once it is made
-// (jitSnapBuilt), p is built from the snapshot, on a copy of fb, as a
-// worker builds it, and the two must be the same, but for the addresses
-// they hold -- a string's cell is made anew at each question -- the
-// snapshot's build asking nothing it was not asked ahead.
-func jitSnapOracle(fb *jitFeedback, p *ir.Program) ssa.Feedback {
-	// Asked of a copy of the feedback as it is before the build, whose
-	// caches its questions fill -- a compile in the background has no
-	// build from fb -- so that the build goes on from fb untouched.
-	asked := *fb
-	before := jitSnapClone(&asked)
-	snap := jitSnapshotOf(&asked, p)
-	jitSnapChecks.mu.Lock()
-	jitSnapChecks.pending[fb] = jitSnapPending{snap, &asked, before}
-	jitSnapChecks.mu.Unlock()
-	return fb
-}
 
 // jitSnapPending is a build the oracle is to compare: its snapshot, and
 // its feedback's lists before it.
@@ -84,89 +65,7 @@ func jitSnapListsDiffer(a, b *jitFeedback) string {
 	return ""
 }
 
-// jitSnapBuilt is the oracle's comparison of a build with its snapshot's.
-func jitSnapBuilt(fb *jitFeedback, p *ir.Program, want *ssa.Func, wantErr error) {
-	jitSnapChecks.mu.Lock()
-	pending, ok := jitSnapChecks.pending[fb]
-	delete(jitSnapChecks.pending, fb)
-	jitSnapChecks.mu.Unlock()
-	if !ok {
-		return
-	}
-	snap := pending.snap
-	w := jit.GetWorkspace()
-	defer jit.PutWorkspace(w)
-	copied := *pending.asked
-	got, gotErr := jitSnapBuild(w, fb, &copied, p, snap)
-	name := fb.fn.Name
-	// Runtimes on goroutines of their own share what the oracle found.
-	jitSnapChecks.mu.Lock()
-	defer jitSnapChecks.mu.Unlock()
-	jitSnapChecks.builds++
-	var miss jitSnapMiss
-	switch {
-	case errors.As(gotErr, &miss):
-		jitSnapChecks.misses[jitSnapNames[miss.method]]++
-		jitSnapChecks.note(fmt.Sprintf("%s: %v", name, miss))
-	case (wantErr == nil) != (gotErr == nil):
-		jitSnapChecks.note(fmt.Sprintf("%s: built %v from the feedback, %v from the snapshot", name, wantErr, gotErr))
-	case wantErr == nil:
-		a, b := jitSnapAddresses.ReplaceAllString(want.String(), "0x?"), jitSnapAddresses.ReplaceAllString(got.String(), "0x?")
-		if a != b {
-			al, bl := strings.Split(a, "\n"), strings.Split(b, "\n")
-			i := 0
-			for i < len(al) && i < len(bl) && al[i] == bl[i] {
-				i++
-			}
-			line := func(l []string) string {
-				if i < len(l) {
-					return l[i]
-				}
-				return "(end)"
-			}
-			jitSnapChecks.note(fmt.Sprintf("%s: line %d: feedback %q, snapshot %q", name, i, line(al), line(bl)))
-			return
-		}
-		// The lists the replay of the build's questions leaves, on the
-		// lists the feedback had before it, against the build's own.
-		replayed := map[*jitFeedback]*jitFeedback{pending.asked: pending.before}
-		for _, u := range snap.uses {
-			e := u.s.effects[u.key]
-			own := replayed[u.s.fb]
-			if own == nil {
-				own = jitSnapClone(u.s.fb)
-				replayed[u.s.fb] = own
-			}
-			e.own.apply(own)
-			if k := u.s.fb.keep(); k != u.s.fb {
-				kept := replayed[k]
-				if kept == nil {
-					kept = jitSnapClone(k)
-					replayed[k] = kept
-				}
-				e.kept.apply(kept)
-			}
-		}
-		if d := jitSnapListsDiffer(fb, pending.before); d != "" {
-			jitSnapChecks.note(fmt.Sprintf("%s: the lists the replay leaves: %s", name, d))
-		}
-	}
-}
 
-// jitSnapBuild builds p from snap, as a worker does, on fb, a copy of the
-// compile's feedback, a miss its error.
-func jitSnapBuild(w *jit.Workspace, real, fb *jitFeedback, p *ir.Program, snap *jitSnapshot) (f *ssa.Func, err error) {
-	defer func() {
-		if v := recover(); v != nil {
-			m, ok := v.(jitSnapMiss)
-			if !ok {
-				panic(v)
-			}
-			f, err = nil, m
-		}
-	}()
-	return jitBuildFrom(w, real.fn, p, fb, snap, nil)
-}
 
 var jitSnapAddresses = regexp.MustCompile(`0x[0-9a-f]+`)
 
