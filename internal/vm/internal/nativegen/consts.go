@@ -22,7 +22,7 @@ var (
 
 // Objects' classes and flags, and typed arrays' element types.
 var (
-	ClassObject, ClassArray, ClassTypedArray, ClassCursor, ClassGenerator Class
+	ClassObject, ClassArray, ClassTypedArray, ClassCursor, ClassGenerator, ClassProxy Class
 
 	objExtensible, objHasExt, objHasData, objHasSparseElements, objSharedElems,
 	objPolyProto, objMappedArguments, objArrayLengthWritable, objHTMLDDA objFlags
@@ -47,8 +47,12 @@ var (
 	tailCallDepth, linearScanLimit int32
 	// atomIndexTag bounds an index an atom holds (hasIndexQuick's).
 	atomIndexTag int32
-	hasCacheBits uint8
-	hasCacheMul  uint64
+	// atomPrototype is the key prototype, and propOddKey the flags of a
+	// property that is no plain data property: an accessor, a private
+	// name, one deleted or not initialized yet.
+	atomPrototype, propOddKey int32
+	hasCacheBits              uint8
+	hasCacheMul               uint64
 	// keySlotMul is keySlot's multiplier, and intStringsLen how many
 	// integers' strings the runtime keeps (intStrings).
 	keySlotMul, intStringsLen uint64
@@ -75,7 +79,7 @@ func loadConsts() {
 		p    *Class
 		name string
 	}{{&ClassObject, "ClassObject"}, {&ClassArray, "ClassArray"}, {&ClassTypedArray, "ClassTypedArray"}, {&ClassCursor, "ClassCursor"},
-		{&ClassGenerator, "ClassGenerator"}} {
+		{&ClassGenerator, "ClassGenerator"}, {&ClassProxy, "ClassProxy"}} {
 		*c.p = Class(k(c.name))
 	}
 	for _, c := range []struct {
@@ -106,7 +110,7 @@ func loadConsts() {
 		{&genSuspendedYield, "genSuspendedYield"}, {&genExecuting, "genExecuting"},
 		{&genCompleted, "genCompleted"},
 		{&tailCallDepth, "tailCallDepth"}, {&linearScanLimit, "linearScanLimit"},
-		{&atomIndexTag, "atomIndexTag"}} {
+		{&atomIndexTag, "atomIndexTag"}, {&atomPrototype, "atomPrototype"}, {&propOddKey, "propOddKey"}} {
 		*c.p = int32(k(c.name))
 	}
 	hasCacheBits, hasCacheMul = uint8(k("hasCacheBits")), k("hasCacheMul")

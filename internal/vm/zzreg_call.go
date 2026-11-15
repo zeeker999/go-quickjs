@@ -1222,7 +1222,11 @@ func (r *Runtime) regGetGlobal(f *frame, cl *closure, c *regCode, pc int, w byte
 	in := bytecode.Instr{Op: bytecode.OpGetGlobal, A: regNameIdx(c, pc, w.B()), B: uint32(w.C())}
 	v, err := r.getGlobalAt(regTctx(r, f, cl), in, int(f.pc-1))
 	if err == nil {
-		r.regNoteGlobal(cl, w.C(), cl.names[in.A], false)
+		if name := cl.names[in.A]; r.lexShadows(name) {
+			r.regNoteGlobalLex(f, cl, w.C(), name, false)
+		} else {
+			r.regNoteGlobal(cl, w.C(), name, false)
+		}
 	}
 	return v, err
 }
@@ -1238,9 +1242,49 @@ func (r *Runtime) regSetGlobal(f *frame, cl *closure, c *regCode, pc int, w byte
 		err = r.setGlobalIn(f, cl, in, v)
 	}
 	if err == nil {
-		r.regNoteGlobal(cl, w.C(), cl.names[in.A], true)
+		if name := cl.names[in.A]; r.lexShadows(name) {
+			r.regNoteGlobalLex(f, cl, w.C(), name, true)
+		} else {
+			r.regNoteGlobal(cl, w.C(), name, true)
+		}
 	}
 	return err
+}
+
+// regNoteGlobalLex is regNoteGlobal's of a name a script-level lexical
+// binding has (lexShadows), which getGlobalAt reads in globalLex: the
+// site's slot the binding's, at the global epoch, where it is
+// initialized -- out of its dead zone for good -- and, for a write, not a
+// constant, in a frame whose scope is the realm's global one with no
+// variables of a direct eval in front of it. globalLex's table is only
+// appended to, and a binding declared bumps the epoch, so that while the
+// epoch is what it was the slot is the binding's, as for the global
+// object's (rhGetGlobal reads either); otherwise the site stays Go's.
+func (r *Runtime) regNoteGlobalLex(f *frame, cl *closure, site uint16, name Atom, write bool) {
+	if cl.regEpochs == nil {
+		cl.regEpochs = make([]uint64, len(cl.ic))
+	}
+	cl.regEpochs[site] = 0
+	lex := r.globalLex
+	if f.evalVars != nil || !r.isGlobalScope(cl.scope()) || lex.shape == nil {
+		return
+	}
+	i := lex.findOwn(name)
+	if i < 0 {
+		return
+	}
+	mask := propAccessor | propPrivate | propDeleted | propUninit
+	want := propFlags(0)
+	if write {
+		mask |= propWritable
+		want = propWritable
+	}
+	if lex.shape.keys[i].flags&mask != want || lex.vals()[i].IsUninitialized() {
+		return
+	}
+	s := &cl.ic[site]
+	s.p1, s.idx = lex, i
+	cl.regEpochs[site] = r.shapes.globalEpoch + 1
 }
 
 // regNoteGlobal remembers, at global site site of cl's code, the global

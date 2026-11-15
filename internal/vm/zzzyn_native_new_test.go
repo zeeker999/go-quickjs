@@ -73,3 +73,41 @@ func TestRegNativeNew(t *testing.T) {
 		for (var i = 0; i < 1000; i++) s += new P(i).y + new K(i).b[0]
 		String(s)`, bytecode.RNewW)
 }
+
+// nativeInstanceOfSrc tests instanceof of functions and classes against
+// objects of their chains and of others, primitives, objects made with no
+// prototype or given one after (objPolyProto), a proxy in the chain, a
+// class with a Symbol.hasInstance of its own, a bound function, an arrow,
+// a constructor whose prototype is replaced by a primitive and one that is
+// no object, every answer and error at one site.
+const nativeInstanceOfSrc = `
+	var out = []
+	function A() {} function B() {} B.prototype = Object.create(A.prototype)
+	class K {} class L extends K {} class M extends L {}
+	class H { static [Symbol.hasInstance](v) { return v === 7 } }
+	var BA = A.bind(null), arrow = () => 1, P = function () {}
+	var poly = Object.setPrototypeOf({}, M.prototype), bare = Object.create(null)
+	var px = new Proxy(new L(), {}), pxIn = Object.create(new Proxy(new K(), {}))
+	function at(v, c) { try { return v instanceof c } catch (e) { return e.name } }
+	var vals = [new A(), new B(), new K(), new L(), new M(), poly, bare, px, pxIn, 7, "s", null, undefined, {}, [], P]
+	var ctors = [A, B, K, L, M, Object, Array, H, BA, Function, P]
+	for (var r = 0; r < 30; r++) {
+		if (r == 10) P.prototype = 3
+		if (r == 20) P.prototype = new M()
+		for (var i = 0; i < vals.length; i++)
+			for (var j = 0; j < ctors.length; j++) out.push(at(vals[i], ctors[j]))
+		out.push(at(vals[r % vals.length], arrow), at(1, 2))
+	}
+	out.join()`
+
+// TestRegNativeInstanceOf checks instanceof's native handler against the
+// Go table: the same answers and errors, marking or not, and a site of
+// one constructor answered with no exit once its cache holds it.
+func TestRegNativeInstanceOf(t *testing.T) {
+	nativeCheck(t, nativeInstanceOfSrc, `
+		class K {} class L extends K {}
+		function F() {}
+		var o = new L(), f = new F(), s = 0
+		for (var i = 0; i < 1000; i++) if (o instanceof K && !(f instanceof K) && f instanceof F && !(i instanceof F)) s++
+		String(s)`, bytecode.RInstanceOf)
+}

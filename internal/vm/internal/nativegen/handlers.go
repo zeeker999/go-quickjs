@@ -56,6 +56,8 @@ var handlerOps = []bytecode.ROp{
 	bytecode.RMulI, bytecode.RAddI32, bytecode.RSubI32, bytecode.RAddII32,
 	// Constructions entered as calls are (new_w).
 	bytecode.RNewW,
+	// instanceof by ordinaryHasInstance (instanceOf).
+	bytecode.RInstanceOf,
 }
 
 // handlerOrder checks that order, the operations an emitter laid out

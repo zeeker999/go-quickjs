@@ -178,6 +178,9 @@ type nativeCtx struct {
 	// through callH with no exit for the object it constructs: past the
 	// words the code read before it, which it moves none of.
 	newFn uintptr
+	// hasInst is where a Realm has its Function.prototype[Symbol.hasInstance]
+	// (hasInstanceFn): an offset from the realm running now, as has is.
+	hasInst uintptr
 }
 
 // nativeMaxDepth is how deep the native frame stack goes.

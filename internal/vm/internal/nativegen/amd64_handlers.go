@@ -1295,6 +1295,7 @@ func nativeEmit(v *variant) (*block, error) {
 	h(bytecode.RSubI32, func() { g.int32Of(SubSD, false) })
 	h(bytecode.RAddII32, func() { g.int32Of(AddSD, true) })
 	h(bytecode.RNewW, g.newW)
+	h(bytecode.RInstanceOf, g.instanceOf)
 
 	for i := 0; i < len(g.late); i++ {
 		g.late[i]()
