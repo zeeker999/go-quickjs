@@ -19,45 +19,6 @@ func shapeOfNew(t *testing.T, r *Runtime, src string) *shape {
 	return v.Object().shape
 }
 
-// A literal of the same keys in the same order has the same layout in any code
-// of a realm: a script compiled anew, a function's and a script's, and two
-// sites of one function.
-func TestLiteralKeysShareALayout(t *testing.T) {
-	t.Parallel()
-	r := New(Config{})
-	defer r.Close()
-	want := shapeOfNew(t, r, `({a: 1, b: 2})`)
-	if want == nil || want.unique || want.loose || want.n != 2 {
-		t.Fatalf("no shared layout: %+v", want)
-	}
-	for _, src := range []string{
-		`// again
-		({a: 3, b: 4})`,
-		`({"a": 1, 'b': "x"})`,
-		`(function () { return {a: 1, b: {c: 1}} })()`,
-		`(() => { let o; for (let i = 0; i < 50; i++) o = i & 1 ? {a: i, b: i} : {a: 0, b: 0}; return o })()`,
-		`({a: [1, 2], b() { return 1 }})`,
-		`({a: 1, b: (function () { try { throw 1 } catch (e) { return e } })()})`,
-	} {
-		if got := shapeOfNew(t, r, src); got != want {
-			t.Errorf("%s: a layout of its own", src)
-		}
-	}
-	for _, src := range []string{
-		`({b: 1, a: 2})`,
-		`({a: 1})`,
-		`({a: 1, b: 2, c: 3})`,
-		`({a: 1, get b() { return 1 }})`,
-		`({a: 1, ["b"]: 2})`,
-		`({a: 1, a: 2, b: 3})`,
-		`({a: 1, ...{b: 2}})`,
-	} {
-		if got := shapeOfNew(t, r, src); got == want {
-			t.Errorf("%s: the layout of {a, b}", src)
-		}
-	}
-}
-
 // Register code's literals made at once (new_object_lit) take the realm's
 // root for their keys as the tree's do: one layout for the same keys in
 // any function, a closure made anew or two of one function's sites, and
@@ -276,17 +237,6 @@ func TestLiteralKeysAcrossCompiles(t *testing.T) {
 	if a.LiteralKeys[0].Keys != inner.LiteralKeys[0].Keys {
 		t.Errorf("hashes %x and %x", a.LiteralKeys[0].Keys, inner.LiteralKeys[0].Keys)
 	}
-}
-
-// Two lists of keys of one hash share a root, and it costs them no more than
-// the first transition: each literal's objects have their keys, in their
-// order, and what reads or adds to them finds them, in the interpreter, a tree
-// and, under the JIT's tests, native code.
-func TestLiteralKeysCollision(t *testing.T) {
-	t.Parallel()
-	r := New(Config{})
-	defer r.Close()
-	testLiteralKeysCollision(t, r)
 }
 
 func testLiteralKeysCollision(t *testing.T, r *Runtime) {

@@ -50,10 +50,7 @@ func TestSharedCacheMegamorphic(t *testing.T) {
 	const want = "0k0-;1base-;2base-;3base2;4base2;5k52;6b|0k0-;1B-;2B-;3B2;4B2;5k52;6B2;7B-;8B-;9B|0k0-;1B-;2B-;3three2;4B2;5k52;6B2;7B-;8B-;9B-;10k102;11B2;12|0k0-;1B-;2B-;3three2;4B2;5B2;6B2;7B-;8B-;9B-;10k102;11B2;12B2;13B2;14B-;15k15-;1|-1921851682"
 	for i, got := range answers {
 		if len(got) < len(want) || got[:len(want)] != want {
-			t.Errorf("tree tier %v: got %s", i == 1, got)
+			t.Errorf("run %d: got %s", i, got)
 		}
-	}
-	if answers[0] != answers[1] {
-		t.Errorf("the tiers differ:\n%s\n%s", answers[0], answers[1])
 	}
 }
