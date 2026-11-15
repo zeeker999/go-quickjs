@@ -9,6 +9,7 @@ import (
 	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
 // Tier-up from the register interpreter (docs/register-interpreter.md,
@@ -140,12 +141,19 @@ func (r *Runtime) jitRegLifeOf(cl *closure) *jitEntry {
 // sample of it. Code invalidated is once its calls have spent a fresh
 // budget (jitRegWarmUp).
 func (r *Runtime) jitRegNativeCallee(cl *closure, c *regCode) {
-	r.jitRegNativeCalleeN(cl, c, 1)
+	r.jitRegNativeCalleeN(cl, c, 1, nil, 0)
 }
 
 // jitRegNativeCalleeN is jitRegNativeCallee after calls calls of the
-// function Go made for its native callers.
-func (r *Runtime) jitRegNativeCalleeN(cl *closure, c *regCode, calls int64) {
+// function Go made for its native callers, the call at register pc rpc of
+// frame from's code where from is not nil. A callee too long to inline
+// warming up (jitRegLongWarming) is compiled at once only where it is
+// called often (jitRegCalledOften), and otherwise warms up as any function
+// does, as the stack form's (jitNativeCallee): compiled at its first call
+// from native code, Octane's Mandreel compiled the functions it runs once a
+// frame -- initPhysics' 4.7 MB of code, debugDrawWorld's 1.5 -- at their
+// callers' second run, and held twice the stack form's code.
+func (r *Runtime) jitRegNativeCalleeN(cl *closure, c *regCode, calls int64, from *frame, rpc int) {
 	cc := cl.closureCode
 	if cc == nil || cc.jitRegRefused || cc.jitReg != nil || !r.jitEnabled {
 		return
@@ -164,6 +172,9 @@ func (r *Runtime) jitRegNativeCalleeN(cl *closure, c *regCode, calls int64) {
 		// deoptimizations counted all the same (jitMaxDeopts).
 		return
 	}
+	if r.jitRegLongWarming(cl, c) && !r.jitRegCalledOften(cl, c, from, rpc) {
+		return
+	}
 	e := r.jitRegForAs(cl, c, true)
 	switch {
 	case e == nil:
@@ -172,6 +183,68 @@ func (r *Runtime) jitRegNativeCalleeN(cl *closure, c *regCode, calls int64) {
 	default:
 		cc.setJITReg(e)
 	}
+}
+
+// jitRegInlineSize is the length of register code c in the stack form's
+// instructions, which the inliner's bounds count (ssa's inlineSize): 20/17
+// of its own.
+func jitRegInlineSize(c *regCode) int {
+	return (len(c.rc.Code)*20 + 8) / 17
+}
+
+// jitRegLongWarming reports whether cl's function, its register code c,
+// is too long to inline (past ssa.MaxInline, jitRegInlineSize) and warming
+// up, its budget not spent -- or not begun, its first sample not taken --
+// as the stack form's jitLongWarming asks: compiled for a native caller's
+// call only where it is called often (jitRegCalledOften). Code invalidated
+// warms up by its calls of Go (jitRegNativeCalleeN).
+func (r *Runtime) jitRegLongWarming(cl *closure, c *regCode) bool {
+	if jitRegInlineSize(c) <= ssa.MaxInline {
+		return false
+	}
+	life := r.jitRegLifeOf(cl)
+	return !life.invalid && (!life.warming || life.tierBudget > 0)
+}
+
+// jitRegCalledOften reports whether a function too long to inline, cl's,
+// its register code c, warming up (jitRegLongWarming), is compiled for the
+// call at register pc rpc of frame from's code at once rather than once
+// its own budget is spent, as the stack form's jitCalledOften decides: no
+// longer than a function inlines in all (ssa.MaxInlineTotal), and called
+// there at least jitInliningFrequency hundredths of the caller's runs, as
+// V8's call frequency at the site has it -- the feedback dispatcher's
+// counts (Frequency). A call whose frequency is not known -- no site, or
+// too few runs counted -- is taken to be often.
+func (r *Runtime) jitRegCalledOften(cl *closure, c *regCode, from *frame, rpc int) bool {
+	if jitRegInlineSize(c) > ssa.MaxInlineTotal {
+		return false
+	}
+	if from == nil || from.cl == nil || from.cl.reg == nil {
+		return true
+	}
+	freq, ok := jitRegSiteFrequency(from.cl, from.cl.reg, rpc)
+	return !ok || freq*100 >= jitInliningFrequency
+}
+
+// jitRegSiteFrequency is how often the call at register pc rpc of cl's
+// register code c is made for each run of its function, from the feedback
+// dispatcher's counts, as Frequency answers the SSA build.
+func jitRegSiteFrequency(cl *closure, c *regCode, rpc int) (float64, bool) {
+	fn := cl.fn
+	if fn.Leaf != bytecode.LeafNone || fn.Generator || fn.Async || cl.closureCode == nil || rpc < 0 || rpc >= len(c.rc.Code) {
+		return 0, false
+	}
+	w := c.rc.Code[rpc]
+	switch w.Op() {
+	case bytecode.RCallW, bytecode.RCallMW, bytecode.RCallWT, bytecode.RCallMWT:
+	default:
+		return 0, false
+	}
+	counts := cl.jitRegCounts
+	if len(counts) == 0 || counts[0] < uint64(jitCountsEnough) || 1+int(w.C()) >= len(counts) {
+		return 0, false
+	}
+	return float64(counts[1+int(w.C())]) / float64(counts[0]), true
 }
 
 // jitRegCallsNatively reports whether a call cl's function's register code
