@@ -450,7 +450,9 @@ func (r *Runtime) regCallThrough(f *frame, c *regCode, w bytecode.RInstr, base, 
 				return Undefined, nil, false
 			}
 			*e = regCallCache{callee: o, kind: regCallNative | regCallThrough}
-		case fd.closure == nil:
+		case fd.closure == nil || r.nodeQuirks:
+			// With Node's quirks, f.arguments reads the arguments as call
+			// passed them (regDirectLegacy): callThrough's.
 			return Undefined, nil, false
 		default:
 			cl, rc, kind, this, enter := r.regCallKind(fd, true)

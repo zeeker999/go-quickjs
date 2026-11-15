@@ -1073,7 +1073,9 @@ func nativeApply(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeCtx
 	}
 	o := target.Object()
 	fd := o.fn()
-	if fd == nil || fd.closure == nil || fd.bound {
+	if fd == nil || fd.closure == nil || fd.bound || r.nodeQuirks {
+		// With Node's quirks, f.arguments reads the arguments as apply
+		// passed them (regDirectLegacy): Go's.
 		return 0
 	}
 	cl, rc, kind, ethis, enter := r.regCallKind(fd, true)
@@ -1156,7 +1158,9 @@ func nativeReflect(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeC
 		return 0
 	}
 	cl, rc, ok := r.regCtorEntered(o, fd)
-	if !ok {
+	if !ok || r.nodeQuirks && !cl.fn.Strict && !rc.args {
+		// With Node's quirks, a sloppy f.arguments reads the arguments as
+		// passed (regScopedLegacy): Go's.
 		return 0
 	}
 	nt := o
