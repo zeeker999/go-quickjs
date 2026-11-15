@@ -3499,6 +3499,18 @@ func TestJITPromotionKeepsFramelessCalls(t *testing.T) {
 		t.Fatalf("frameless calls = %v, %v", v, err)
 	}
 	cl := r.global.getOwn(r.atoms.intern("f")).value().Object().fn().closure
+	if jitRegCodeForTest(r, "f") {
+		// Register code: f's calls, which the interpreter answers without
+		// a frame, give f no budget, nor code. The loop of the script
+		// running them is given its state once its back edges have done
+		// V8's work for feedback allocation (jitBudgetForFeedback), less
+		// than its thousand turns, where the stack form's is given it at
+		// a sample, a full back-edge budget (1,024).
+		if r.jitRegLifeIfAny(cl) != nil || r.jitRegHas(cl) {
+			t.Fatal("frameless calls accumulated framed hotness")
+		}
+		return
+	}
 	if cl.jitCalls != 0 || r.jit != nil {
 		t.Fatal("frameless calls accumulated framed hotness")
 	}
