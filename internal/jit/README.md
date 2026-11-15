@@ -3043,7 +3043,10 @@ TEST262_DIR=/path/to/test262 go test -tags quickjs_jit ./conformance \
   code's samples follow its threshold (`jitRegStressSample`). `background=K`
   added compiles the stack form's code in the background, every JIT runtime,
   and installs each compile exactly K checks after it was handed over: the
-  window between build and install, the same in every run. The differential
+  window between build and install, the same in every run; `miss` with it
+  has every register compile's worker leave its build as one that asked
+  what its snapshot was not asked, built on the runtime's goroutine at its
+  install, from feedback asked anew. The differential
   tests run so among their settings, and the background tests under `-race`
   (`-run 'Background|Differential'`).
 - `compilediff native` compares two builds' compiles, and `jitprof` (in
