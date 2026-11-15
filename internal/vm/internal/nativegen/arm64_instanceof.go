@@ -115,3 +115,26 @@ func (g *armGen) instanceOf() {
 	a.Bind(store)
 	g.storeA(0)
 }
+
+// derivedRet is derived_ret, as amd64's.
+func (g *armGen) derivedRet() {
+	a := g.a
+	done := a.NewLabel()
+	g.regA(rD)
+	a.Load(r9, rD, 0)
+	g.cmpMem(r9, rCtx, ncUndef)
+	a.BCond(NE, done)
+	a.Load(r9, rD, 8)
+	a.Cbnz(r9, done, true)
+	a.Load(rS, rCtx, ncNF)
+	a.Load(rS, rS, offFThisRef)
+	a.Cbz(rS, g.exit, true)
+	a.LoadU8(r9, rS, off("thisBinding.init"))
+	a.Cbz(r9, g.exit, false)
+	a.Load(r9, rS, off("thisBinding.value"))
+	a.Load(r8, rS, off("thisBinding.value")+8)
+	a.MovRR(rW, rD)
+	g.storeValue()
+	a.Bind(done)
+	g.next()
+}

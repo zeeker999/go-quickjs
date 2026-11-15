@@ -34,6 +34,7 @@ func NativeLayout() (offsets, sizes map[string]uintptr, consts map[string]uint64
 		reflect.TypeFor[treeBigSeen](),
 		reflect.TypeFor[regCallCache](),
 		reflect.TypeFor[frame](),
+		reflect.TypeFor[thisBinding](),
 		reflect.TypeFor[closure](),
 		reflect.TypeFor[closureCode](),
 		reflect.TypeFor[funcData](),
@@ -119,6 +120,7 @@ func NativeLayout() (offsets, sizes map[string]uintptr, consts map[string]uint64
 		"genCompleted":      uint64(genCompleted),
 		"regFrameGenStep":   uint64(regFrameGenStep),
 		"regFrameConstruct": uint64(regFrameConstruct),
+		"regFrameSuper":     uint64(regFrameSuper),
 
 		"objExtensible":          uint64(objExtensible),
 		"objHasExt":              uint64(objHasExt),

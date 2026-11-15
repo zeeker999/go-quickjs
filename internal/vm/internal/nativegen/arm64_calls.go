@@ -282,7 +282,7 @@ func (g *armGen) call() {
 	a.BCond(NE, g.ex(5))
 	a.Bind(ok)
 	jitCall := a.NewLabel()
-	g.enter(false, jitCall)
+	g.enter(enterCall, jitCall)
 
 	// Another closure of the cached callee's template, as amd64's: the
 	// cache made the new callee's and the call made again.
@@ -361,8 +361,8 @@ func (g *armGen) call() {
 // rC the cache's entry, rS the window, r9 the kind it is entered as and
 // the scratch's sEnt whether it keeps its arguments, as amd64's; a
 // construction's frame (new_w's) is regFrameConstruct, its new.target the
-// callee.
-func (g *armGen) enter(construct bool, jitCall Label) {
+// callee, and a super()'s regFrameSuper, as amd64's.
+func (g *armGen) enter(mode int, jitCall Label) {
 	a := g.a
 	noThis, noTop, loop, loopEnd, skip, high := a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel(), a.NewLabel()
 	// A callee whose calls go to the JIT (closureCode's jitEnters), as
@@ -379,8 +379,12 @@ func (g *armGen) enter(construct bool, jitCall Label) {
 	a.Store(rCtx, scr(sRC), r8)
 	// The arguments where they lie: none past the parameters it keeps,
 	// and no new.target.
-	a.Ubfx(rD, rW, 8, 8)
-	a.Store(rCtx, scr(sArgc), rD)
+	if mode == enterSuper {
+		a.Load(rD, rCtx, scr(sArgc))
+	} else {
+		a.Ubfx(rD, rW, 8, 8)
+		a.Store(rCtx, scr(sArgc), rD)
+	}
 	kept := a.NewLabel()
 	g.cmpMemImm(rCtx, scr(sEnt), 0)
 	a.BCond(NE, kept)
@@ -388,7 +392,7 @@ func (g *armGen) enter(construct bool, jitCall Label) {
 	a.Cmp(rD, r9, true)
 	a.BCond(HI, g.ex(6))
 	a.Bind(kept)
-	if !construct {
+	if mode == enterCall {
 		a.LoadU8(r9, r8, offRCNewTarget)
 		a.Cbnz(r9, g.ex(7), false)
 	}
@@ -525,17 +529,40 @@ func (g *armGen) enter(construct bool, jitCall Label) {
 	a.MovImm(rC, uint64(regFrameCall))
 	a.Store8(rS, offFRegKind, rC)
 	g.frameArgs()
-	if construct {
-		// A construction's: its kind, and its new.target the callee.
+	if mode != enterCall {
+		// A construction's or a super()'s, as amd64's.
+		kind := regFrameConstruct
+		if mode == enterSuper {
+			kind = regFrameSuper
+		}
 		a.Load(rS, rCtx, scr(sNF))
-		a.MovImm(rC, uint64(regFrameConstruct))
+		a.MovImm(rC, uint64(kind))
 		a.Store8(rS, offFRegKind, rC)
 		a.Load(r8, rCtx, ncObjBits)
 		a.Store(rS, offFNewTgt, r8)
-		a.Load(rC, rCtx, scr(sE))
-		a.Load(rC, rC, offECallee)
+		if mode == enterSuper {
+			a.Load(rC, rCtx, scr(sV1))
+		} else {
+			a.Load(rC, rCtx, scr(sE))
+			a.Load(rC, rC, offECallee)
+		}
 		a.AddImm(rW, rS, int64(offFNewTgt+8), true)
 		g.ptrTo()
+		noRef := a.NewLabel()
+		a.Load(rT, rCtx, scr(sV0))
+		a.Cbz(rT, noRef, true)
+		a.Load(rS, rCtx, scr(sNF))
+		a.Load(rC, rCtx, scr(sV0))
+		a.AddImm(rW, rS, int64(offFThisRef), true)
+		g.ptrStore()
+		a.Load(rS, rCtx, scr(sNF))
+		a.Load(rD, rCtx, scr(sWin))
+		a.Load(r8, rD, 16)
+		a.Store(rS, offFThis, r8)
+		a.Load(rC, rD, 24)
+		a.AddImm(rW, rS, int64(offFThis+8), true)
+		g.ptrTo()
+		a.Bind(noRef)
 	}
 	for _, f := range [][2]int32{{offECl, offFCl}, {offECallee, offFCallee}} {
 		same := a.NewLabel()
@@ -563,7 +590,12 @@ func (g *armGen) enter(construct bool, jitCall Label) {
 	a.Load(rC, rCtx, scr(sSaved))
 	a.Store(rS, recSaved, rC)
 	a.Load(rW, rIP, 0)
-	a.Ubfx(rC, rW, 32, 16)
+	if mode == enterSuper {
+		// super()'s R[A], which its return writes (superRet).
+		a.Ubfx(rC, rW, 16, 16)
+	} else {
+		a.Ubfx(rC, rW, 32, 16)
+	}
 	a.ShiftImm(Lsl, rC, rC, 4, true)
 	a.Store(rS, recBOff, rC)
 	g.incMem(rCtx, ncDepth, 1)
@@ -637,9 +669,44 @@ func (g *armGen) newW() {
 	g.storeImm(rCtx, scr(sEnt), 1)
 	a.Bind(plain)
 	a.MovImm(r9, uint64(regCallEnter))
-	g.enter(true, g.exit)
+	g.enter(enterNew, g.exit)
 	a.Bind(done)
 	g.next()
+}
+
+// superW is super_call and super_forward, as amd64's: nativeSuper called
+// through callH with no exit, then the parent entered, its frame a
+// super()'s.
+func (g *armGen) superW() {
+	a := g.a
+	after, plain := a.NewLabel(), a.NewLabel()
+	a.Store(rCtx, ncIP, rIP)
+	a.Store(rCtx, ncBudget, rBud)
+	a.Adr(r8, after)
+	a.Store(rCtx, ncAfter, r8)
+	a.MovRR(rC, rW)
+	a.Load(rD, rCtx, ncCodeBase)
+	a.Op(Sub, rD, rIP, rD, true)
+	a.ShiftImm(Lsr, rD, rD, 3, true)
+	a.MovRR(rS, rCtx)
+	a.MovRR(rW, rRegs)
+	a.Load(rFn, rCtx, ncSuperFn)
+	a.Load(rJ, rCtx, ncCallH)
+	a.Br(rJ)
+	a.Bind(after)
+	g.reload()
+	a.Cbz(rW, g.exit, true)
+	a.Load(rW, rIP, 0)
+	a.Load(rC, rCtx, scr(sE))
+	a.Load(rS, rCtx, scr(sWin))
+	g.storeImm(rCtx, scr(sEnt), 0)
+	a.Load(r8, rC, offERC)
+	a.LoadU8(rD, r8, offRCArgs)
+	a.Cbz(rD, plain, false)
+	g.storeImm(rCtx, scr(sEnt), 1)
+	a.Bind(plain)
+	a.MovImm(r9, uint64(regCallEnter))
+	g.enter(enterSuper, g.exit)
 }
 
 // newSite puts in rC new_w's site's cache entry and in rS its window,
@@ -783,6 +850,25 @@ func (g *armGen) ret(undef bool) {
 	value()
 	valued := a.NewLabel()
 	a.Bind(valued)
+	g.retPop(nil)
+	// The base frame's return: its value in the scratch, retDone set, and
+	// nativeRun returns it, as runReg would.
+	a.Bind(base)
+	value()
+	g.storeImm(rCtx, ncRetDone, 1)
+	a.B(g.exitRet)
+	superRet := a.NewLabel()
+	a.Bind(ctor)
+	a.BCond(EQ, g.genRet)
+	g.ctorRet(undef, valued, superRet)
+	a.Bind(superRet)
+	g.superRet(undef)
+}
+
+// retPop is ret's end of a frame the code entered, its value in the
+// scratch's sV0 and sV1, and post's code, as amd64's.
+func (g *armGen) retPop(post func()) {
+	a := g.a
 	// The frame closed; an entered frame's arguments given back to the
 	// argument stack, as regEnterW gives them.
 	a.Load(rS, rCtx, ncNF)
@@ -832,25 +918,34 @@ func (g *armGen) ret(undef bool) {
 	a.Bind(same)
 	a.Load(rRegs, rCtx, ncRegs)
 	a.Load(rIC, rCtx, ncIC)
+	if post != nil {
+		post()
+	}
 	g.next()
-	// The base frame's return: its value in the scratch, retDone set, and
-	// nativeRun returns it, as runReg would.
-	a.Bind(base)
-	value()
-	g.storeImm(rCtx, ncRetDone, 1)
-	a.B(g.exitRet)
-	a.Bind(ctor)
-	a.BCond(EQ, g.genRet)
-	g.ctorRet(undef, valued)
 }
 
 // ctorRet is ret's of a construction's frame (regFrameConstruct), rS its
 // frame record, as amd64's: the upvalues open on it closed, its value what
 // it returns where that is an object, its this where not, and the frame
 // closed as an entered one from valued on.
-func (g *armGen) ctorRet(undef bool, valued Label) {
+func (g *armGen) ctorRet(undef bool, valued, superRet Label) {
 	a := g.a
-	noCap, have := a.NewLabel(), a.NewLabel()
+	noCap, have, plain := a.NewLabel(), a.NewLabel(), a.NewLabel()
+	a.CmpImm(r8, int64(regFrameSuper), false)
+	a.BCond(EQ, superRet)
+	// A derived class's, with its this binding: an object returned, or
+	// Go's, as amd64's.
+	a.Load(rT, rS, offFThisRef)
+	a.Cbz(rT, plain, true)
+	if undef {
+		a.B(g.exit)
+	} else {
+		g.regA(rD)
+		a.Load(r8, rD, 0)
+		g.cmpMem(r8, rCtx, ncObjBits)
+		a.BCond(NE, g.exit)
+	}
+	a.Bind(plain)
 	g.cmpMemImm(rS, offFOpenUp+8, 0)
 	a.BCond(EQ, noCap)
 	a.Store(rCtx, scr(sV0), ZR)
@@ -859,6 +954,7 @@ func (g *armGen) ctorRet(undef bool, valued Label) {
 	g.closeUps()
 	a.Load(rW, rIP, 0)
 	a.Bind(noCap)
+	g.endThisRef()
 	if !undef {
 		g.regA(rD)
 		a.Load(r8, rD, 0)
@@ -875,6 +971,108 @@ func (g *armGen) ctorRet(undef bool, valued Label) {
 	a.MovImm(rC, uint64(regFrameEnter))
 	a.Store8(rS, offFRegKind, rC)
 	a.B(valued)
+}
+
+// endThisRef lets go of the top frame's this binding, as amd64's. rW is
+// the instruction after it.
+func (g *armGen) endThisRef() {
+	a := g.a
+	none, noCell := a.NewLabel(), a.NewLabel()
+	a.Load(rS, rCtx, ncNF)
+	a.Load(rT, rS, offFThisRef)
+	a.Cbz(rT, none, true)
+	a.Load(r8, rCtx, ncRC)
+	a.LoadU8(r9, r8, off("regCode.cellThis"))
+	a.Cbz(r9, noCell, false)
+	a.Load(rW, rS, offFThisRef)
+	a.Load(r8, rCtx, ncUndef)
+	a.Store(rW, off("thisBinding.value"), r8)
+	a.AddImm(rW, rW, int64(off("thisBinding.value")+8), true)
+	a.MovImm(rC, 0)
+	g.ptrTo()
+	a.Bind(noCell)
+	a.Load(rS, rCtx, ncNF)
+	a.AddImm(rW, rS, int64(offFThisRef), true)
+	a.MovImm(rC, 0)
+	g.ptrStore()
+	a.Load(rW, rIP, 0)
+	a.Bind(none)
+}
+
+// superRet is ret's of a super()'s frame, as amd64's.
+func (g *armGen) superRet(undef bool) {
+	a := g.a
+	noCap, keep := a.NewLabel(), a.NewLabel()
+	a.Load(r8, rCtx, ncDepth)
+	a.AddImm(r8, r8, -1, true)
+	a.MovImm(rC, uint64(recSize))
+	a.Mul(r8, r8, rC)
+	g.addMem(r8, rCtx, ncFrames)
+	a.Load(r8, r8, recNFOff)
+	a.Load(r8, r8, offFThisRef)
+	a.Cbz(r8, g.exit, true)
+	a.LoadU8(r9, r8, off("thisBinding.init"))
+	a.Cbnz(r9, g.exit, false)
+	g.cmpMemImm(rS, offFOpenUp+8, 0)
+	a.BCond(EQ, noCap)
+	a.Store(rCtx, scr(sV0), ZR)
+	a.MovImm(rC, ^uint64(0))
+	a.Store(rCtx, scr(sV1), rC)
+	g.closeUps()
+	a.Load(rW, rIP, 0)
+	a.Bind(noCap)
+	g.endThisRef()
+	if undef {
+		a.Load(r8, rCtx, ncUndef)
+		a.MovImm(r9, 0)
+	} else {
+		g.regA(rD)
+		a.Load(r8, rD, 0)
+		a.Load(r9, rD, 8)
+	}
+	a.Store(rCtx, scr(sV0), r8)
+	a.Store(rCtx, scr(sV1), r9)
+	a.Load(rS, rCtx, ncNF)
+	a.MovImm(rC, uint64(regFrameEnter))
+	a.Store8(rS, offFRegKind, rC)
+	g.retPop(func() {
+		a.Load(rS, rCtx, ncNF)
+		a.Load(r8, rCtx, scr(sV0))
+		g.cmpMem(r8, rCtx, ncObjBits)
+		a.BCond(NE, keep)
+		a.Load(rC, rCtx, scr(sV1))
+		g.cmpMem(rC, rS, offFThis+8)
+		a.BCond(EQ, keep)
+		a.Store(rS, offFThis, r8)
+		a.AddImm(rW, rS, int64(offFThis+8), true)
+		g.ptrStore()
+		a.Bind(keep)
+		a.Load(rS, rCtx, ncNF)
+		a.Load(rW, rS, offFThisRef)
+		a.Load(r8, rS, offFThis)
+		a.Store(rW, off("thisBinding.value"), r8)
+		a.Load(rC, rS, offFThis+8)
+		a.AddImm(rW, rW, int64(off("thisBinding.value")+8), true)
+		g.ptrTo()
+		a.Load(rS, rCtx, ncNF)
+		a.Load(rW, rS, offFThisRef)
+		a.MovImm(rC, 1)
+		a.Store8(rW, off("thisBinding.init"), rC)
+		for _, dst := range []bool{true, false} {
+			if dst {
+				a.Load(rW, rIP, 0)
+				g.regA(rD)
+			} else {
+				a.AddImm(rD, rRegs, 16, true)
+			}
+			a.Load(rS, rCtx, ncNF)
+			a.Load(r8, rS, offFThis)
+			a.Store(rD, 0, r8)
+			a.Load(rC, rS, offFThis+8)
+			a.AddImm(rW, rD, 8, true)
+			g.ptrTo()
+		}
+	})
 }
 
 // tailTo is tail_call_w's and tail_call_method_w's call once the stack is

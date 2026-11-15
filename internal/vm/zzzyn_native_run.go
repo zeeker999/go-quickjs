@@ -137,6 +137,7 @@ func init() {
 	nativeCallMissFn = nativeCallMiss
 	nativeJITCallFn = nativeJITCall
 	nativeNewFn = nativeNew
+	nativeSuperFn = nativeSuper
 	for _, op := range nativeSlowOnMiss {
 		nativeExitTable[op] = regSlowTable[op]
 	}
@@ -419,6 +420,7 @@ func (r *Runtime) newNativeCtx(st *regState) *nativeCtx {
 	ctx.jitCallFn = *(*uintptr)(unsafe.Pointer(&nativeJITCallFn))
 	ctx.newFn = *(*uintptr)(unsafe.Pointer(&nativeNewFn))
 	ctx.hasInst = unsafe.Offsetof(Realm{}.hasInstanceFn)
+	ctx.superFn = *(*uintptr)(unsafe.Pointer(&nativeSuperFn))
 	ctx.grow()
 	st.native = ctx
 	return ctx
@@ -458,6 +460,8 @@ func nativeReset(ctx *nativeCtx) {
 	}
 	ctx.made = 0
 	ctx.top = nil
+	ctx.super = regCallCache{}
+	ctx.thisRef = nil
 	for _, s := range ctx.states[:ctx.used] {
 		if s != nil {
 			s.f, s.c, s.cl, s.err = nil, nil, nil, nil
@@ -565,12 +569,28 @@ func (r *Runtime) nativeEnd(s *regState, ctx *nativeCtx, pc int, w bytecode.RIns
 		nf, rc := s.f, s.c
 		kind := nf.regKind
 		nf.regKind = 0
-		if kind == regFrameConstruct {
-			// new_w's frame: what is not an object returned gives its this,
-			// and the frame is ended as regEnterW ends one.
-			if s.err == nil && !v.IsObject() {
+		var parent *Object
+		derivedBad := false
+		switch kind {
+		case regFrameConstruct:
+			// new_w's frame, ended as regEnterW ends one: what is not an
+			// object returned gives its this, but a derived class's, whose
+			// this binding is let go of, which throws once the frame is
+			// gone, as constructWithTarget does.
+			if nf.thisRef != nil {
+				regEndThisRef(nf, rc)
+				derivedBad = s.err == nil && !v.IsObject()
+			} else if s.err == nil && !v.IsObject() {
 				v = r.stack[nf.base+1]
 			}
+			kind = regFrameEnter
+		case regFrameSuper:
+			// super()'s call of the parent, whose return binds the
+			// caller's this below.
+			if nf.thisRef != nil {
+				regEndThisRef(nf, rc)
+			}
+			parent = nf.callee
 			kind = regFrameEnter
 		}
 		if (rc.ncap != 0 || kind == regFrameEnter) && len(nf.openUpvalues) != 0 {
@@ -587,7 +607,29 @@ func (r *Runtime) nativeEnd(s *regState, ctx *nativeCtx, pc int, w bytecode.RIns
 		caller := r.nativeTop(ctx.st, ctx)
 		retPC := int((rec.retIP - rec.codeBase) / 8)
 		dst := caller.wb + int(rec.bOff/16)
-		if err := s.err; err == nil {
+		if derivedBad {
+			caller.at(retPC)
+			s.err = r.throwTypeError(errDerivedReturn)
+		} else if s.err == errNoSuper {
+			// A derived class's body that ended before super(): its
+			// ReferenceError, once the frame is gone, as
+			// constructWithTarget and callObject make it.
+			caller.at(retPC)
+			s.err = r.throwError(errReference, "%s", errNoSuper.Error())
+		}
+		bound := false
+		if parent != nil && s.err == nil {
+			// super(): this bound to what the parent's construction gave,
+			// as superCall binds it.
+			caller.at(retPC)
+			if s.err = r.superBind(caller.f, parent, v); s.err == nil {
+				regSuperBound(caller.f, regAt(caller.c.code, retPC), caller.regs)
+				bound = true
+			}
+		}
+		if err := s.err; bound {
+			pc = retPC + 1
+		} else if err == nil {
 			r.stack[dst] = v
 			pc = retPC + 1
 		} else if kind == regFrameEnter {
@@ -915,6 +957,15 @@ func nativeNew(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeCtx) 
 	}
 	a := int(w.A())
 	regs[a+1] = Obj(obj)
+	ctx.scratch[sThisRef] = 0
+	if e.callee.fn().ctorKind == ctorDerived {
+		// A derived class's frame, with its this binding, which the
+		// handler gives the frame, holding the object until super()
+		// binds it, as regRunFD makes one.
+		ctx.thisRef = r.regThisBinding(e.rc, Obj(obj))
+		ctx.scratch[sThisRef] = uint64(uintptr(unsafe.Pointer(ctx.thisRef)))
+		return 1
+	}
 	if leaf := e.cl.fn.Leaf; leaf != bytecode.LeafNone && leaf != bytecode.LeafPure {
 		if _, done := r.leafCall(e.cl, obj, regs[a+2:a+2+int(w.X())]); !done {
 			return 0
@@ -924,6 +975,78 @@ func nativeNew(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeCtx) 
 	}
 	return 1
 }
+
+// nativeSuper is super_call's and super_forward's entry of the parent
+// constructor, made for the native handler through callH with no exit:
+// in a derived class's constructor's own frame whose this super() has
+// not bound yet, of a class with no fields of its own, the parent its
+// constructor's prototype, a constructor the handler enters as a register
+// frame (regCtorEntered), its window made at the stack's top -- the
+// parent, the frame's this and the arguments, the registers' from C or
+// the frame's own -- with its this binding where it is a derived class's,
+// and its new.target the frame's, as superCall makes the call. It reports
+// 1 for the handler to enter it, the context's super the entry, and 0
+// where super() is Go's (rhSuperCall). It throws nothing and runs no
+// code.
+//
+//go:nocheckptr
+func nativeSuper(regs *[1 << 16]Value, w bytecode.RInstr, pc int, ctx *nativeCtx) int {
+	f := (*frame)(nativePtr(&ctx.nf))
+	r := ctx.st.r
+	if f.cl.fn.Kind != bytecode.KindDerivedConstructor || f.thisRef == nil || f.thisRef.init || !f.this.IsObject() ||
+		f.callee == nil || !f.newTarget.IsObject() {
+		return 0
+	}
+	fd := f.callee.fn()
+	if fd == nil || fd.fieldInit() != nil {
+		return 0
+	}
+	if c := fd.superCtor(); c != nil && c != f.callee {
+		if cfd := c.fn(); cfd == nil || cfd.fieldInit() != nil {
+			return 0
+		}
+	}
+	parent := r.parentConstructorOf(f)
+	if parent == nil {
+		return 0
+	}
+	pfd := parent.fn()
+	if pfd == nil {
+		return 0
+	}
+	cl, rc, ok := r.regCtorEntered(parent, pfd)
+	if !ok {
+		return 0
+	}
+	var args []Value
+	if w.Op() == bytecode.RSuperForward {
+		args = f.args
+	} else {
+		lo := int(w.C())
+		args = regs[lo : lo+int(w.B()) : lo+int(w.B())]
+	}
+	wb := r.stackTop
+	if wb+2+len(args) > len(r.stack) {
+		return 0
+	}
+	win := r.stack[wb : wb+2+len(args) : wb+2+len(args)]
+	win[0], win[1] = Obj(parent), f.this
+	copy(win[2:], args)
+	ctx.scratch[sThisRef] = 0
+	if pfd.ctorKind == ctorDerived {
+		ctx.thisRef = r.regThisBinding(rc, f.this)
+		ctx.scratch[sThisRef] = uint64(uintptr(unsafe.Pointer(ctx.thisRef)))
+	}
+	ctx.super = regCallCache{callee: parent, cl: cl, rc: rc, kind: regCallEnter}
+	ctx.scratch[sE] = uint64(uintptr(unsafe.Pointer(&ctx.super)))
+	ctx.scratch[sWin] = uint64(uintptr(unsafe.Pointer(&win[0])))
+	ctx.scratch[sArgc] = uint64(len(args))
+	ctx.scratch[sNewTgt] = uint64(uintptr(unsafe.Pointer(f.newTarget.Object())))
+	return 1
+}
+
+// nativeSuperFn is nativeSuper's func value, set by init.
+var nativeSuperFn func(*[1 << 16]Value, bytecode.RInstr, int, *nativeCtx) int
 
 // nativeNewFn is nativeNew's func value, set by init.
 var nativeNewFn func(*[1 << 16]Value, bytecode.RInstr, int, *nativeCtx) int

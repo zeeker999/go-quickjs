@@ -58,6 +58,11 @@ var handlerOps = []bytecode.ROp{
 	bytecode.RNewW,
 	// instanceof by ordinaryHasInstance (instanceOf).
 	bytecode.RInstanceOf,
+	// super() entering the parent constructor as call_w enters a
+	// callee (superW).
+	bytecode.RSuperCall, bytecode.RSuperForward,
+	// A derived class's constructor's return value (derivedRet).
+	bytecode.RDerivedRet,
 }
 
 // handlerOrder checks that order, the operations an emitter laid out

@@ -995,6 +995,14 @@ func (r *Runtime) regConstruct(calls []regCallCache, site uint16, callee Value, 
 	o := callee.Object()
 	fd := o.fn()
 	if fd == nil || fd.closure == nil || !r.regCtorBase(o, fd) {
+		if fd != nil && fd.ctorKind == ctorDerived && uint(site) < uint(len(calls)) {
+			if cl, rc, ok := r.regCtorEntered(o, fd); ok {
+				// A derived class's, which the native handler enters with
+				// its this binding (nativeNew); its construction here is
+				// construct's, as before.
+				calls[site] = regCallCache{callee: o, cl: cl, rc: rc, kind: regCallConstruct}
+			}
+		}
 		return r.construct(callee, args)
 	}
 	cl := fd.closure
@@ -1069,12 +1077,51 @@ func (r *Runtime) regCtorBase(o *Object, fd *funcData) bool {
 	return true
 }
 
+// regCtorEntered is the closure and register code of o, of funcData fd,
+// where a construction with it, or a super() calling it, is entered as a
+// register frame with nothing to establish but its this, its this binding
+// for a derived class's, and its new.target: a constructor of this realm,
+// a base one (regCtorBase) or a derived class's, with no with or eval
+// scope, of the form's own layout, neither suspending nor with a direct
+// eval, that gives its objects no fields of its own (no instance
+// initializer to run) and is no forwarder, which the construction answers
+// without a frame. ok is false for anything else.
+func (r *Runtime) regCtorEntered(o *Object, fd *funcData) (cl *closure, rc *regCode, ok bool) {
+	if fd.closure == nil || fd.fieldInit() != nil {
+		return nil, nil, false
+	}
+	switch fd.ctorKind {
+	case ctorBase:
+		if !r.regCtorBase(o, fd) {
+			return nil, nil, false
+		}
+	case ctorDerived:
+		if fd.bound || fd.closure.realm != r.Realm || proxyOf(o) != nil || fd.extra != nil {
+			return nil, nil, false
+		}
+	default:
+		return nil, nil, false
+	}
+	cl = fd.closure
+	if cl.fn.Leaf == bytecode.LeafForward {
+		return nil, nil, false
+	}
+	if rc = cl.reg; rc == nil {
+		rc = r.regOf(cl)
+	}
+	if rc == nil || !rc.wide || rc.suspends || cl.fn.HasDirectEval {
+		return nil, nil, false
+	}
+	return cl, rc, true
+}
+
 // regCtorThis is the object a construction with o, of funcData fd, a
 // constructor its site's cache holds (regCallConstruct), is made: of o's
 // prototype, its own data property holding an object, and of its root,
-// whose room is settled (tracked), as regConstruct makes it; or nil, the
-// construction then regConstruct's, which reads the prototype however it
-// is and notes the room an object came to need.
+// whose room is settled (tracked) where it is a base constructor's, as
+// regConstruct and constructWithTarget make it; or nil, the construction
+// then regConstruct's, which reads the prototype however it is and notes
+// the room an object came to need.
 func (r *Runtime) regCtorThis(o *Object, fd *funcData) *Object {
 	p := o.getOwnVisible(atomPrototype)
 	if !p.ok() || p.flags()&propAccessor != 0 || !p.value().IsObject() {
@@ -1082,10 +1129,38 @@ func (r *Runtime) regCtorThis(o *Object, fd *funcData) *Object {
 	}
 	proto := p.value().Object()
 	root := r.shapes.ctorRoot(fd, proto)
-	if root != nil && !root.tracked() {
+	if root != nil && !root.tracked() && fd.ctorKind != ctorDerived {
 		return nil
 	}
 	return newOrdinary[struct{}](fd, root, proto, root.roomFor(int(fd.closure.fn.ThisProps)))
+}
+
+// regThisBinding is the this binding of a derived constructor's frame,
+// cl's with register code rc, that a construction or a super() enters at
+// the runtime's depth now, holding this, as regRunFD makes it: the
+// runtime's cell for the depth where nothing keeps it past the frame
+// (cellThis), which the frame's end clears (regEndThisRef).
+func (r *Runtime) regThisBinding(rc *regCode, this Value) *thisBinding {
+	if !rc.cellThis {
+		return &thisBinding{value: this}
+	}
+	d := r.frameDepth
+	if d >= len(r.thisCells) {
+		r.thisCells = make([]thisBinding, d+d/2+16)
+	}
+	b := &r.thisCells[d]
+	*b = thisBinding{value: this}
+	return b
+}
+
+// regEndThisRef ends the this binding of nf, a derived constructor's frame
+// of register code rc the native code entered, as regRunFD ends one: the
+// runtime's cell lets go of the object, and the frame of the binding.
+func regEndThisRef(nf *frame, rc *regCode) {
+	if rc.cellThis {
+		nf.thisRef.value = Undefined
+	}
+	nf.thisRef = nil
 }
 
 // regAddProp is add_prop's slow path: the property read as get_prop
@@ -1430,8 +1505,14 @@ const (
 	// regFrameConstruct is a construction's the native code entered
 	// itself (new_w's handler): regEnterW's frame, its new.target the
 	// frame's, whose return gives its this, register 1, where it returns
-	// what is not an object.
+	// what is not an object; a derived class's has its this binding too,
+	// which its end lets go of.
 	regFrameConstruct
+	// regFrameSuper is a super()'s call of the parent constructor the
+	// native code entered itself (super_call's handler): a construction's
+	// of the derived constructor's object and new.target, whose return
+	// binds the caller's this (superBind), which Go makes.
+	regFrameSuper
 )
 
 // regFrameThis is the this and new.target of register frame f, for a stack
@@ -1442,7 +1523,7 @@ func (r *Runtime) regFrameThis(f *frame) (this, newTarget Value) {
 	}
 	this = r.stack[f.base+1]
 	newTarget = Undefined
-	if f.regKind == regFrameEnter || f.regKind == regFrameConstruct {
+	if f.regKind == regFrameEnter || f.regKind == regFrameConstruct || f.regKind == regFrameSuper {
 		newTarget = f.newTarget
 	}
 	return this, newTarget

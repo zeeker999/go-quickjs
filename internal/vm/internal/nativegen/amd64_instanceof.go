@@ -128,3 +128,33 @@ func (g *nativeGen) instanceOf() {
 	a.MovQToX(0, R9)
 	g.storeA(0)
 }
+
+// derivedRet is derived_ret: R[A], what a derived class's constructor
+// returns, as derivedResult makes it in the frame with a this binding:
+// an object or a primitive but undefined as it is, and undefined the
+// binding's this once super() has bound it. A frame of no binding, or one
+// not bound yet, which throws: Go's.
+func (g *nativeGen) derivedRet() {
+	a := g.a
+	done := a.NewLabel()
+	g.decA(RDX)
+	a.LoadIdx(R9, R12, RDX, 1, 0)
+	a.CmpMem(R9, RDI, ncUndef, true)
+	a.Jcc(CondNE, done)
+	a.LoadIdx(R9, R12, RDX, 1, 8)
+	a.Op(Test, R9, R9, true)
+	a.Jcc(CondNE, done)
+	a.Load(RSI, RDI, ncNF)
+	a.Load(RSI, RSI, offFThisRef)
+	a.Op(Test, RSI, RSI, true)
+	a.Jcc(CondE, g.exit)
+	a.LoadU8(R9, RSI, off("thisBinding.init"))
+	a.Op(Test, R9, R9, false)
+	a.Jcc(CondE, g.exit)
+	a.Load(R9, RSI, off("thisBinding.value"))
+	a.Load(R8, RSI, off("thisBinding.value")+8)
+	a.LeaIdx(RAX, R12, RDX, 1, 0)
+	g.storeValue()
+	a.Bind(done)
+	g.next()
+}

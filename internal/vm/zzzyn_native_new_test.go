@@ -111,3 +111,66 @@ func TestRegNativeInstanceOf(t *testing.T) {
 		for (var i = 0; i < 1000; i++) if (o instanceof K && !(f instanceof K) && f instanceof F && !(i instanceof F)) s++
 		String(s)`, bytecode.RInstanceOf)
 }
+
+// nativeDerivedSrc constructs derived classes of every kind their
+// constructions and super() calls meet: a super() of arguments and one
+// handing on the frame's (a class with no constructor), chains two and
+// three deep, a parent returning an object of its own, one throwing, one
+// reading new.target, a derived constructor returning an object, a
+// primitive, nothing before super(), super() twice, super() in an arrow,
+// this captured by a closure before and after, fields of the derived
+// class and of the parent, a parent replaced by changing the class's
+// prototype, arguments read, and a stack trace taken in the parent.
+const nativeDerivedSrc = `
+	var out = []
+	class A { constructor(x, y) { this.x = x; this.y = y; this.t = new.target.name } sum() { return this.x + (this.y | 0) } }
+	class B extends A { constructor(x) { super(x, x * 2); this.b = 1 } }
+	class C extends B { constructor(x, z) { super(x); this.c = z } }
+	class D extends C {}
+	class R { constructor(v) { if (v % 4 == 1) return { own: v }; this.r = v } }
+	class RS extends R { constructor(v) { super(v); this.s = 2 } }
+	class T { constructor(v) { if (v % 5 == 2) throw new Error("t" + v); this.v = v } }
+	class TS extends T { constructor(v) { super(v); this.w = 1 } }
+	class Obj extends A { constructor(v) { super(v); return { replaced: v } } }
+	class Prim extends A { constructor(v) { super(v); return v } }
+	class NoSuper extends A { constructor(v) { if (v > 100) super(v) } }
+	class Twice extends A { constructor(v) { super(v); super(v) } }
+	class Arrow extends A { constructor(v) { var f = () => super(v, 1); f(); this.k = this.x } }
+	class Cap extends A { constructor(v) { var g = () => this; super(v, 3); this.g = g } }
+	class F extends A { f = 5; constructor(v) { super(v) } }
+	class PF { p = 7; constructor(v) { this.v = v } }
+	class GF extends PF { constructor(v) { super(v); this.q = this.p + 1 } }
+	class Args extends A { constructor() { super(arguments.length, arguments[1]) } }
+	class St extends A { constructor(v) { super(v); this.n = new Error().stack.split("\n").length > 2 } }
+	class Swap extends A { constructor(v) { super(v) } }
+	function at(f) { try { return f() } catch (e) { return e.name + ":" + e.message } }
+	for (var j = 0; j < 40; j++) {
+		var b = new B(j), c = new C(j, "z"), d = new D(j, "d")
+		out.push(b.sum(), b.b, b.t, c.c, c.t, d.c, d.t, d instanceof A, Object.getPrototypeOf(d) === D.prototype)
+		var rs = new RS(j); out.push(rs.own, rs.r, rs.s, rs instanceof RS)
+		out.push(at(() => new TS(j).w))
+		out.push(at(() => new Obj(j).replaced), at(() => new Prim(j)), at(() => new NoSuper(j)), at(() => new Twice(j).x))
+		out.push(at(() => new Arrow(j).k), at(() => { var o = new Cap(j); return o.g() === o && o.y }))
+		out.push(new F(j).f, new GF(j).q, new Args(j, "a", 3).y, new Args().x, new St(j).n)
+		if (j == 20) Object.setPrototypeOf(Swap, R)
+		out.push(at(() => { var o = new Swap(j); return [o.x, o.r, o.own].join("/") }))
+	}
+	out.join()`
+
+// TestRegNativeDerived checks constructions of derived classes and their
+// super() calls, which the native handlers enter with their this
+// bindings, against the Go table: the same answers and errors, marking
+// or not, and new_w and super_call made with no exit once their caches
+// hold them.
+func TestRegNativeDerived(t *testing.T) {
+	was := nativeWarmExits
+	nativeWarmExits = 16
+	defer func() { nativeWarmExits = was }()
+	nativeCheck(t, nativeDerivedSrc, `
+		class A { constructor(x) { this.x = x; this.y = x + 1 } }
+		class B extends A { constructor(x) { super(x); this.z = 2 } }
+		class C extends B {}
+		var s = 0
+		for (var i = 0; i < 1000; i++) s += new B(i).z + new C(i).y
+		String(s)`, bytecode.RNewW, bytecode.RSuperCall, bytecode.RSuperForward, bytecode.RDerivedRet)
+}
