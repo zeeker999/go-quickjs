@@ -672,7 +672,9 @@ as any other (`nativeCallMiss`, `regCallSlow`); no site is marked for it.
 **Compiling.** A function's first check -- a call's, or its first back
 edge's -- begins its budget, as the stack
 form's `jitWarmFor` makes its entry warm, and notes its caches' feedback
-(`jitFeedbackMark`); it is compiled (`jitRegFor`) at the sample that spends
+(`jitFeedbackMark`), and spends its own work of it at once, as the stack
+form's `tryJITAt` spends it (`jitWarmUp`): a call's first, the run its
+return counted. It is compiled (`jitRegFor`) at the check that spends
 the budget, its caches' feedback unchanged since -- a change raises what is
 left to `jitICThreshold` invocations' worth (`jitRegWarmUp`), as V8's
 `NotifyICChanged` delays a tier-up -- or at its first sample where the

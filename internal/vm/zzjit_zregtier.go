@@ -459,10 +459,14 @@ func (r *Runtime) jitRegHot(cl *closure, c *regCode, work int64) *jitRegEntry {
 		}
 	case !life.warming:
 		// Its first sample: its budget begins, as the stack form's entry
-		// warms (jitWarmFor) -- but where every call compiles.
+		// warms (jitWarmFor), and the sample's work is spent of it at
+		// once, as the stack form's tryJITAt spends it (jitWarmUp) -- but
+		// where every call compiles. Not spent, a call's first sample lost
+		// the run it counted, as a loop's had lost a full budget of back
+		// edges before its back edges were counted (jitRegEdgeWork).
 		life.warming = true
 		life.tierBudget, life.tierMark = jitRegBudget(r.jitCallThreshold, c), jitFeedbackMark(cl)
-		if r.jitCallThreshold > 1 {
+		if r.jitCallThreshold > 1 && !r.jitRegWarmUp(cl, c, life, work) {
 			return nil
 		}
 	case !r.jitRegWarmUp(cl, c, life, work):
@@ -1183,6 +1187,10 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 	}
 	if forced {
 		s.wentOn++
+	} else {
+		// Entered by on-stack replacement, as the stack form's tryJITAt
+		// counts its entries at loops (the state made since s was read).
+		r.jit.osrs++
 	}
 	return r.jitRegLoopGoOn(st, e, target, osr)
 }
