@@ -213,6 +213,63 @@ func NewLiveBuilder(n int) *LiveBuilder {
 	return &LiveBuilder{n: n, height: liveHeight(n), nodes: []uint32{0}, editNode: maxInt, editLeaf: maxInt}
 }
 
+// Reset makes b a builder of sets of n slots again, as NewLiveBuilder's,
+// keeping the room it has: every set made before is gone.
+func (b *LiveBuilder) Reset(n int) {
+	*b = LiveBuilder{n: n, height: liveHeight(n), nodes: append(b.nodes[:0], 0), leaves: b.leaves[:0], kids: b.kids[:0], editNode: maxInt, editLeaf: maxInt}
+}
+
+// Bytes is the memory b holds.
+func (b *LiveBuilder) Bytes() int {
+	return cap(b.nodes)*4 + cap(b.leaves)*8 + cap(b.kids)*4
+}
+
+// Added calls yield with the slots of y that x has not, in order, until it
+// returns false: found where the two sets' trees differ, which they share
+// where nothing changed between them.
+func (b *LiveBuilder) Added(x, y LiveSet, yield func(int) bool) {
+	liveAdded(b.nodes, b.leaves, b.height, uint64(x), uint64(y), 0, yield)
+}
+
+func liveAdded(nodes []uint32, leaves []uint64, h int, a, b uint64, base int, yield func(int) bool) bool {
+	if a == b || b == 0 {
+		return true
+	}
+	if h == 0 {
+		return liveEach(nil, nil, 0, b&^a, base, yield)
+	}
+	var ma uint32
+	if a != 0 {
+		ma = nodes[a]
+	}
+	mb := nodes[b]
+	ka, kb := int(a)+1, int(b)+1
+	for m := ma | mb; m != 0; m &= m - 1 {
+		c := bits.TrailingZeros32(m)
+		bit := uint32(1) << c
+		var x, y uint64
+		if ma&bit != 0 {
+			x = uint64(nodes[ka])
+			ka++
+			if h == 1 {
+				x = leaves[x]
+			}
+		}
+		if mb&bit == 0 {
+			continue
+		}
+		y = uint64(nodes[kb])
+		kb++
+		if h == 1 {
+			y = leaves[y]
+		}
+		if !liveAdded(nodes, leaves, h-1, x, y, base+c<<(6+liveFanShift*(h-1)), yield) {
+			return false
+		}
+	}
+	return true
+}
+
 // Edit begins an edit: the sets made until the next one may share the
 // nodes it makes, which they change in place, and no set made before
 // does. A set made in an edit is one that the edit's next operations may

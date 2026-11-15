@@ -1654,7 +1654,15 @@ amd64's and arm64's in the same commit.
 
 **Register allocation.** `mir`'s scan (`allocate`) gives each value an
 interval from its definition to its last use, stretched over every block it
-is live in or out of. A frame state's slot is a use, which keeps the value
+is live in or out of. Which blocks those are is a backward dataflow over the
+blocks of the values used in another block than their own (`blockLiveness`),
+each block's set an `ir.LiveBuilder` persistent set, as the slot liveness's
+are, and an interval's ends are read along the layout, each block's sets
+against the one before: what the sets change from block to block, not what
+they hold. A walk of each value's blocks back from its uses had taken as
+many steps as values are live in each block, summed over the blocks -- n
+values live across a loop of 2n blocks 2n² steps, 40 s of a compile of
+16,000. A frame state's slot is a use, which keeps the value
 live for the exits that read it, but not a read the code makes: a value's
 cost in a spill slot counts only its definition and the uses that read it --
 an operand, a branch's control, a phi's argument at its edge, whose move

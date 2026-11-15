@@ -56,11 +56,12 @@ func linearGuardsSource(name string, n int) string {
 // linearCompile is what compiling function name of src, from its register
 // code, takes: the bytes allocated and the time of its lowering, its build
 // and Optimize, and its compile for the host, the allocation check off, as
-// production's compiles are; with what the program keeps of its liveness
-// and the code of its exits' descriptions.
+// production's compiles are, and that compile's time alone, the least of
+// three (backend); with what the program keeps of its liveness and the
+// code of its exits' descriptions.
 type linearCompile struct {
 	lower, build, code uint64
-	took               time.Duration
+	took, backend      time.Duration
 	live, exits        int
 }
 
@@ -115,6 +116,15 @@ func linearCompileOf(t *testing.T, src, name string, args func(*Runtime) []Value
 	a3 := alloc()
 	c.took = time.Since(start)
 	c.build, c.code = a2-a1, a3-a2
+	for k := range 3 {
+		t0 := time.Now()
+		if _, err := mir.CompileWith(new(mir.Workspace), f, jitEncoding, opts); err != nil {
+			t.Fatal(err)
+		}
+		if d := time.Since(t0); k == 0 || d < c.backend {
+			c.backend = d
+		}
+	}
 	c.live = p.Live.Size()
 	if len(mc.Exits) > 0 && mc.Exits[0].Frame != nil {
 		x := mc.Exits[0].Frame
@@ -136,6 +146,17 @@ func linearCompileOf(t *testing.T, src, name string, args func(*Runtime) []Value
 // and the code keeps of its exits' descriptions grows as much: up to
 // twice that, where the shared sets' trees take a level more, for each
 // sixteen times the slots (ir.Liveness, ssa's slots.go).
+//
+// And the compile for the host of the blocks' shape takes some eight times
+// the time for eight times the values, not sixty-four: the allocator's
+// liveness of values over blocks had walked each value's blocks back from
+// its uses, as many steps as values are live in each block summed over the
+// blocks -- n values live across 2n blocks 2n² steps, 40 s of a compile
+// of 16,000 -- where its sets now take what changes from block to block
+// (mir's blockLiveness). Measured at 2,000 and 16,000 values, the
+// allocation check off (mir.CheckAllocations), whose liveness computed
+// again is the dense sets' still, and time is noisier than memory: up to
+// three times eight.
 func TestJITCompileLinear(t *testing.T) {
 	if !jitSSABackend || testing.Short() {
 		t.Skip("no SSA backend on this architecture, or short")
@@ -152,6 +173,19 @@ func TestJITCompileLinear(t *testing.T) {
 			return []Value{Float(1.25), Float(0.5), Float(7), spillMoreObject(r, 0), Str(NewString("pp")), Float(2)}
 		}},
 	}
+	t.Run("time", func(t *testing.T) {
+		defer func(on bool) { mir.CheckAllocations = on }(mir.CheckAllocations)
+		mir.CheckAllocations = false
+		var cs [2]linearCompile
+		for k, n := range []int{2000, 16000} {
+			name := fmt.Sprintf("blocks%d", n)
+			cs[k] = linearCompileOf(t, linearBlocksSource(name, n), name, plain)
+			t.Logf("%d values: the compile for the host %v", n, cs[k].backend.Round(time.Millisecond))
+		}
+		if r := float64(cs[1].backend) / float64(cs[0].backend); r > 24 {
+			t.Errorf("the compile for the host: eight times the values took %.1f times the time", r)
+		}
+	})
 	const small, big = 1000, 8000
 	for _, sh := range shapes {
 		t.Run(sh.name, func(t *testing.T) {
@@ -161,10 +195,10 @@ func TestJITCompileLinear(t *testing.T) {
 				cs[k] = linearCompileOf(t, sh.src(name, n), name, sh.args)
 			}
 			s, b := cs[0], cs[1]
-			t.Logf("%d values: lower %.1f MB, build %.1f MB, code %.1f MB, %v, liveness %d bytes, exits %d bytes",
-				small, float64(s.lower)/(1<<20), float64(s.build)/(1<<20), float64(s.code)/(1<<20), s.took.Round(time.Millisecond), s.live, s.exits)
-			t.Logf("%d values: lower %.1f MB, build %.1f MB, code %.1f MB, %v, liveness %d bytes, exits %d bytes",
-				big, float64(b.lower)/(1<<20), float64(b.build)/(1<<20), float64(b.code)/(1<<20), b.took.Round(time.Millisecond), b.live, b.exits)
+			t.Logf("%d values: lower %.1f MB, build %.1f MB, code %.1f MB, %v (backend %v), liveness %d bytes, exits %d bytes",
+				small, float64(s.lower)/(1<<20), float64(s.build)/(1<<20), float64(s.code)/(1<<20), s.took.Round(time.Millisecond), s.backend.Round(time.Millisecond), s.live, s.exits)
+			t.Logf("%d values: lower %.1f MB, build %.1f MB, code %.1f MB, %v (backend %v), liveness %d bytes, exits %d bytes",
+				big, float64(b.lower)/(1<<20), float64(b.build)/(1<<20), float64(b.code)/(1<<20), b.took.Round(time.Millisecond), b.backend.Round(time.Millisecond), b.live, b.exits)
 			for _, c := range []struct {
 				what       string
 				small, big uint64
