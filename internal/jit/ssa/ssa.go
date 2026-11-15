@@ -1359,6 +1359,9 @@ type scratch struct {
 	// incomplete and frameOf are the builder's, by block ID.
 	incomplete [][]slotPhi
 	frameOf    []*frame
+	// defKeys and defVals are the builder's definitions' table (defTable).
+	defKeys []uint64
+	defVals []*Value
 	// originPhis is Origins' list of the phis.
 	originPhis []*Value
 	// states is recount's list of the states it has met; slotOrder and

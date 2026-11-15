@@ -439,3 +439,64 @@ func (s *FrameState) checkSlots() bool {
 	}
 	return ok && (s.slots == nil || check(s.slots, s.height))
 }
+
+// diffSlots calls fn with each slot that a and b do not both have the same
+// value in, in order: found where their trees differ, which they share
+// where nothing changed between them.
+func diffSlots(a, b *FrameState, fn func(int)) {
+	diffSlotNodes(a.slots, a.height, b.slots, b.height, 0, fn)
+}
+
+func diffSlotNodes(x *slotNode, hx int, y *slotNode, hy int, base int, fn func(int)) {
+	all := func(nd *slotNode, h, base int) {
+		if nd != nil {
+			nd.each(h, base, func(i int, _ *Value) bool { fn(i); return true })
+		}
+	}
+	switch {
+	case x == y && hx == hy:
+	case x == nil:
+		all(y, hy, base)
+	case y == nil:
+		all(x, hx, base)
+	case hx != hy:
+		// The lower tree is the higher's first child's, at its height.
+		if hx < hy {
+			x, hx, y, hy = y, hy, x, hx
+		}
+		m := x.mask
+		var first *slotNode
+		if m&1 != 0 {
+			first = x.kids[0]
+		}
+		diffSlotNodes(first, hx-1, y, hy, base, fn)
+		for m &^= 1; m != 0; m &= m - 1 {
+			c := bits.TrailingZeros64(m)
+			all(x.kids[bits.OnesCount64(x.mask&(1<<c-1))], hx-1, base+c<<(slotShift*hx))
+		}
+	case hx == 0:
+		mx, my := x.mask, y.mask
+		for m := mx | my; m != 0; m &= m - 1 {
+			c := bits.TrailingZeros64(m)
+			bit := uint64(1) << c
+			if mx&bit != 0 && my&bit != 0 && x.vals[bits.OnesCount64(mx&(bit-1))] == y.vals[bits.OnesCount64(my&(bit-1))] {
+				continue
+			}
+			fn(base + c)
+		}
+	default:
+		mx, my := x.mask, y.mask
+		for m := mx | my; m != 0; m &= m - 1 {
+			c := bits.TrailingZeros64(m)
+			bit := uint64(1) << c
+			var a, b *slotNode
+			if mx&bit != 0 {
+				a = x.kids[bits.OnesCount64(mx&(bit-1))]
+			}
+			if my&bit != 0 {
+				b = y.kids[bits.OnesCount64(my&(bit-1))]
+			}
+			diffSlotNodes(a, hx-1, b, hy-1, base+c<<(slotShift*hx), fn)
+		}
+	}
+}
