@@ -632,7 +632,8 @@ the encoder's temporary, and never touches `R18` (the platform's), `R28`
 `nativeEnter`'s return to `nativeLoop` throughout, so that a profile taken
 in the code, and the trampolines' frames, unwind to it.
 
-**What is native.** The numbers' arithmetic, increments, `-x`, `+x`,
+**What is native.** The numbers' arithmetic -- `mul_imm`, and the int32
+forms' `(x ± y) | 0` to the ToInt32 of a sum below 2^63 -- increments, `-x`, `+x`,
 the bitwise operators of any number (by ToInt32) and the
 compare-and-branches, of registers, immediates and upvalues; truthiness
 of a boolean, a number, an object, a string, undefined and null; `==`
@@ -1768,11 +1769,35 @@ table entry is `rhInvalid`'s, and the lowering refuses it.
   The step's throws are placed at its SrcPC, the comparison's at the
   partner's. The JIT lowers it as its step alone, falling to the partner.
 - **`mul_imm`**: R[A] = R[B] * SC, mul's semantics with a Number SC.
+  Built: regcomp makes it of `x * k` and of `k * x` (a literal's ToNumeric
+  runs nothing and the product commutes, -0 and NaN alike), k an integer
+  of 16 bits; the Go handler and the native ones are `add_imm`'s with a
+  product, the slow path `regBinImm`'s; the leaf runner runs it
+  (`rlMulK`); the JIT lowers it as mul of a literal.
 - **`add_i32`, `sub_i32`**: R[A] = ToInt32(R[B] ± R[C]), and
   **`add_imm_i32`**: R[A] = ToInt32(R[B] + SC), X `RAddII32Sub` where the
   source was `x - K` (SC = -K; only the slow path reads it). `(x ± y) | 0`
   in one instruction, no intermediate stored; a BigInt result throws the
-  `|`'s TypeError at the stack instruction Aux[pc].
+  `|`'s TypeError at the stack instruction Aux[pc]. Built: regcomp's
+  `orZero` makes them of a `| 0` (or `| -0`) over a `+` or a `-` that is
+  no string chain, the operands evaluated as `operate` evaluates them, the
+  instruction at the operator's position and the `|`'s kept for Aux (the
+  stores' map, as `add_index`'s store). The fast path is two numbers whose
+  result is below 2^63 in magnitude, its truncation's low 32 bits: Go's
+  `int32(int64(s))` into a register that holds no pointer, amd64's
+  `cvttsd2si` (2^63's pattern exits) and a 32-bit `cvtsi2sd`, arm64's
+  `fcvtzs` (a saturated limit exits, a NaN is 0) and a 32-bit `scvtf`.
+  The slow path makes the operator as add, sub, add_imm or sub_imm make
+  it, placed at the instruction, then the `| 0` of its result
+  (`regOrZero`): a number's ToInt32, a string's number's, and a BigInt's
+  TypeError placed at Aux[pc]. The JIT lowers each as the pair it stands
+  for, the operator into a scratch slot and the `| 0`'s ToInt32 (`Unary
+  Int32`) from it; arithmetic commits nothing as it is built, so the
+  ToInt32 may leave as the `or_imm`'s did, the instruction run again.
+  With it, regcomp leaves out a `| 0` whose left is `&`, `|`, `^`, `<<`
+  or `>>` with a number literal or a `>>>` for an operand: its result is
+  an int32 Number or it threw. `loop_int32`'s turn is 12 dispatches, 17
+  before.
 
 The verifier (`regcomp.Verify`) checks: each register below NumRegs, an
 upvalue index below the function's, the target in the code, and the

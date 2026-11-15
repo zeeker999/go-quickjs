@@ -1262,6 +1262,8 @@ func (l *regLowering) lower(pc int) {
 		binary(ir.Add, reg(b), number(float64(w.SC())), false)
 	case bytecode.RSubI:
 		binary(ir.Sub, reg(b), number(float64(w.SC())), false)
+	case bytecode.RMulI:
+		binary(ir.Mul, reg(b), number(float64(w.SC())), false)
 	case bytecode.RInc, bytecode.RDec:
 		o := ir.Add
 		if op == bytecode.RDec {
@@ -1515,12 +1517,29 @@ func (l *regLowering) lower(pc int) {
 		}
 		panic(fmt.Sprintf("jit: no register lowering for %v", op))
 	case bytecode.RAddI32, bytecode.RSubI32, bytecode.RAddII32:
-		// The operator and the ToInt32 of the | 0 whose stack instruction
-		// Aux[pc] is. Reserved: no lowering yet.
+		// (x op y) | 0: the operator into a scratch slot and the ToInt32
+		// of the | 0, whose stack instruction Aux[pc] is, from it -- the
+		// IR of the add, sub, add_imm or sub_imm and the or_imm 0 the
+		// instruction stands for, the sum in a scratch slot rather than a
+		// register. The operator commits nothing, as arithmetic is built
+		// (ssa's commitsBuilt), so the ToInt32 may leave as the or_imm's
+		// does, the instruction run again from its start.
 		if pc >= len(rc.Aux) || int64(rc.Aux[pc]) >= int64(len(fn.Code)) {
 			panic(fmt.Sprintf("jit: %v at %d without its | 0's position", op, pc))
 		}
-		panic(fmt.Sprintf("jit: no register lowering for %v", op))
+		o, right := ir.Add, reg(c)
+		switch {
+		case op == bytecode.RSubI32:
+			o = ir.Sub
+		case op == bytecode.RAddII32 && w.X() == bytecode.RAddII32Sub:
+			// x - K, SC -K: sub_imm's.
+			o, right = ir.Sub, number(float64(-w.SC()))
+		case op == bytecode.RAddII32:
+			right = number(float64(w.SC()))
+		}
+		sum := l.temp()
+		l.emit(ir.Instruction{Op: ir.Binary, Operator: o, Left: reg(b), Right: right, Dest: sum}, false)
+		l.emit(ir.Instruction{Op: ir.Unary, Operator: ir.Int32, Left: ir.Slot(sum), Dest: int(a)}, false)
 	default:
 		if !op.Cold() {
 			panic(fmt.Sprintf("jit: no register lowering for %v", op))
