@@ -401,7 +401,7 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 		snap := jitRegSnapshotOf(rf, p)
 		if !snap.s.bad {
 			j := &jitRegJob{cl: cl, c: c, key: key, realm: r.Realm, callee: callee, e: e, p: p, rf: rf, snap: snap, deopts: e.life.deopts, frameAt: frameAt,
-				w: jit.GetWorkspace(), enc: jitEncoding, opts: mir.Settings()}
+				w: jit.GetWorkspace(), enc: jitEncoding, opts: mir.Settings(), miss: r.jitStress.miss}
 			r.jitRegSubmit(j)
 			return nil
 		}
