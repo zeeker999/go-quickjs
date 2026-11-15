@@ -10,6 +10,12 @@ type defTable struct {
 	vals  []*Value
 	count int
 	shift uint
+	// spareKeys and spareVals are the tables the last growth left, which
+	// the next one takes where they have the room: kept from build to
+	// build, a build's growths allocate nothing once the builds before
+	// have grown them as far.
+	spareKeys []uint64
+	spareVals []*Value
 }
 
 // defKey is the key of block id's slot.
@@ -17,7 +23,8 @@ func defKey(id, slot int) uint64 { return uint64(uint32(id)+1)<<32 | uint64(uint
 
 // reset empties t, keeping room for some n definitions, its tables from
 // keys and vals, which it may take as they are.
-func (t *defTable) reset(keys []uint64, vals []*Value, n int) {
+func (t *defTable) reset(keys []uint64, vals []*Value, spareKeys []uint64, spareVals []*Value, n int) {
+	t.spareKeys, t.spareVals = spareKeys, spareVals
 	size := 64
 	for size < 2*n {
 		size <<= 1
@@ -73,7 +80,13 @@ func (t *defTable) put(id, slot int, v *Value) {
 
 func (t *defTable) grow() {
 	keys, vals := t.keys, t.vals
-	t.keys, t.vals = make([]uint64, 2*len(keys)), make([]*Value, 2*len(vals))
+	if n := 2 * len(keys); cap(t.spareKeys) >= n && cap(t.spareVals) >= n {
+		t.keys, t.vals = t.spareKeys[:n], t.spareVals[:n]
+		clear(t.keys)
+		clear(t.vals)
+	} else {
+		t.keys, t.vals = make([]uint64, n), make([]*Value, n)
+	}
 	t.shift--
 	for i, k := range keys {
 		if k != 0 {
@@ -81,4 +94,6 @@ func (t *defTable) grow() {
 			t.keys[j], t.vals[j] = k, vals[i]
 		}
 	}
+	clear(vals)
+	t.spareKeys, t.spareVals = keys, vals
 }

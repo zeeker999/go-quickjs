@@ -3309,10 +3309,9 @@ type builder struct {
 	defs        defTable
 	translating bool
 	// marks mark a sealed block's slot whose predecessors' values are
-	// being read (mergeVar), each of the block pending, markDepth of them
-	// in use; and phiArgs holds those values, each read's after the reads
-	// it is inside of.
-	pending   Block
+	// being read (mergeVar), each of the block markBlock, markDepth of
+	// them in use; and phiArgs holds those values, each read's after the
+	// reads it is inside of.
 	marks     []*Value
 	markDepth int
 	phiArgs   []*Value
@@ -6653,11 +6652,12 @@ func (b *builder) translate() {
 	n := len(b.f.Blocks)
 	b.nextBlock = n
 	sc0 := b.f.scr()
-	b.defs.reset(sc0.defKeys, sc0.defVals, 4*n)
+	b.defs.reset(sc0.defKeys, sc0.defVals, sc0.defSpareKeys, sc0.defSpareVals, 4*n)
 	b.marks, b.phiArgs, b.dirtyLists, b.mergeDiff = sc0.marks, sc0.phiArgs[:0], sc0.dirtyLists[:0], sc0.mergeDiff[:0]
 	b.translating = true
 	defer func() {
 		sc0.defKeys, sc0.defVals = b.defs.keys, b.defs.vals
+		sc0.defSpareKeys, sc0.defSpareVals = b.defs.spareKeys, b.defs.spareVals
 		clear(b.dirtyLists[:cap(b.dirtyLists)])
 		sc0.marks, sc0.phiArgs, sc0.dirtyLists, sc0.mergeDiff = b.marks, b.phiArgs[:0], b.dirtyLists[:0], b.mergeDiff[:0]
 	}()
@@ -6813,7 +6813,7 @@ func (b *builder) read(slot int, blk *Block) *Value {
 // al.): a captured binding's stale marker as it is.
 func (b *builder) readVar(slot int, blk *Block) *Value {
 	if v := b.defs.get(blk.ID, slot); v != nil {
-		if v.Block == &b.pending {
+		if v.Block == &markBlock {
 			// Reached again while its predecessors are read: a loop's,
 			// whose phi this is, its arguments those reads find.
 			v = b.newPhiID(blk, v.ID)
@@ -6855,6 +6855,9 @@ func (b *builder) readVar(slot int, blk *Block) *Value {
 	return v
 }
 
+// markBlock is the block of mergeVar's marks, which no value is of.
+var markBlock Block
+
 // mergeVar is slot's value in blk, sealed, of several predecessors: the
 // value they all have, or a phi of theirs (Braun et al.'s marker
 // algorithm). The block is marked while they are read, and a read that
@@ -6870,7 +6873,7 @@ func (b *builder) mergeVar(slot int, blk *Block) *Value {
 		b.marks = append(b.marks, &Value{})
 	}
 	mark := b.marks[b.markDepth]
-	mark.Block = &b.pending
+	mark.Block = &markBlock
 	b.markDepth++
 	defer func() { b.markDepth-- }()
 	mark.ID = b.f.nextID

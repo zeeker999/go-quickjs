@@ -34,6 +34,8 @@ type Workspace struct {
 	exitNodes arena.Arena[exitNodeInfo]
 	asks      arena.Arena[stateAsk]
 	slotWalk  ssa.SlotWalk
+	// laterUses is allocate's list of the states a block's uses meet.
+	laterUses []laterUse
 	sched     schedule
 	// core is the compile's analysis, here for the size of it, and calls
 	// the lists its calls' states are built from.

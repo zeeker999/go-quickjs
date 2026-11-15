@@ -89,7 +89,7 @@ func (w *Workspace) scratchBytes() int {
 		capBytes(s.liveUses) + capBytes(s.liveNodes) + capBytes(s.liveStack) + capBytes(s.subst) + capBytes(s.originPhis) + capBytes(s.states) + capBytes(s.slotOrder) + capBytes(s.slotWalk) + capBytes(s.asked) +
 		capBytes(s.phiIdx) + capBytes(s.phiFill) + capBytes(s.phiUsers) +
 		capBytes(s.upvalueCand) + capBytes(s.keepUsers) + capBytes(s.keepNext) +
-		capBytes(s.incomplete) + capBytes(s.frameOf) + capBytes(s.defKeys) + capBytes(s.defVals) + capBytes(s.marks) + capBytes(s.phiArgs) + capBytes(s.dirtyLists) + capBytes(s.mergeDiff)
+		capBytes(s.incomplete) + capBytes(s.frameOf) + capBytes(s.defKeys) + capBytes(s.defVals) + capBytes(s.defSpareKeys) + capBytes(s.defSpareVals) + capBytes(s.marks) + capBytes(s.phiArgs) + capBytes(s.dirtyLists) + capBytes(s.mergeDiff)
 	for _, l := range s.live {
 		n += capBytes(l)
 	}
@@ -129,6 +129,7 @@ func (w *Workspace) Rewind() {
 	clear(w.scratch.frameOf[:cap(w.scratch.frameOf)])
 	clear(w.scratch.incomplete[:cap(w.scratch.incomplete)])
 	clear(w.scratch.defVals[:cap(w.scratch.defVals)])
+	clear(w.scratch.defSpareVals[:cap(w.scratch.defSpareVals)])
 	clear(w.scratch.phiArgs[:cap(w.scratch.phiArgs)])
 	for _, m := range w.scratch.marks {
 		// The builder's block it marks with, which the workspace is not

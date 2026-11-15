@@ -97,10 +97,8 @@ type core struct {
 	exitCross []int32
 	// walk walks the states' slots' nodes (findLazy, allocate): the
 	// workspace's, kept from compile to compile, or the core's own.
-	walk    *ssa.SlotWalk
-	ownWalk ssa.SlotWalk
-	// laterUses is allocate's list of the states a block's uses meet.
-	laterUses []laterUse
+	walk      *ssa.SlotWalk
+	ownWalk   ssa.SlotWalk
 	exitWords map[uint64]int32
 	exitDescs []abi.ExitDescriptor
 	// calls are the descriptions of the native calls' states (callState),
@@ -1242,7 +1240,10 @@ func (c *core) allocate() error {
 	// each of its instructions had been read n² times. A use does the same
 	// in any order, but for the uses in other blocks it lists, which are
 	// listed by block, as the block's are.
-	later := c.laterUses[:0]
+	var later []laterUse
+	if c.ws != nil {
+		later = c.ws.laterUses[:0]
+	}
 	laterState := func(s *ssa.FrameState, at int) {
 		if s != nil {
 			if root, _ := s.Tree(); root != nil {
@@ -1572,7 +1573,10 @@ func (c *core) allocate() error {
 		}
 		useStates()
 	}
-	c.laterUses = later[:0]
+	clear(later[:cap(later)])
+	if c.ws != nil {
+		c.ws.laterUses = later[:0]
+	}
 	c.keepXuses(xuses)
 	c.lap(PhaseUses)
 	// Block-level liveness, so that values live around a loop stay live for

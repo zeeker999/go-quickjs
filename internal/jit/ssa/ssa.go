@@ -1361,12 +1361,14 @@ type scratch struct {
 	frameOf    []*frame
 	// defKeys and defVals are the builder's definitions' table (defTable);
 	// marks, phiArgs, dirtyLists and mergeDiff its lists (builder's).
-	defKeys    []uint64
-	defVals    []*Value
-	marks      []*Value
-	phiArgs    []*Value
-	dirtyLists [][]int32
-	mergeDiff  []int32
+	defKeys      []uint64
+	defVals      []*Value
+	defSpareKeys []uint64
+	defSpareVals []*Value
+	marks        []*Value
+	phiArgs      []*Value
+	dirtyLists   [][]int32
+	mergeDiff    []int32
 	// originPhis is Origins' list of the phis.
 	originPhis []*Value
 	// states is recount's list of the states it has met; slotOrder and
