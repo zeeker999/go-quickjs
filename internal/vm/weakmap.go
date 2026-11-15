@@ -474,11 +474,10 @@ type weakMapRegistry struct {
 	// to be given out last first.
 	holders []*weakRefsHolder
 
-	// calls is what the register code's call caches let go of at each
-	// turn's end, and what they called, held weakly (releaseRegCalls):
-	// the runtime's other weak bookkeeping, kept here so that the
-	// Runtime's fields, which the interpreter's hot code reads, stay
-	// where they are.
+	// calls is the templates whose register call caches the turn's end
+	// lets go (releaseRegCalls): kept here, with the runtime's weak
+	// bookkeeping, so that the Runtime's fields, which the interpreter's
+	// hot code reads, stay where they are.
 	calls regCallKeep
 }
 

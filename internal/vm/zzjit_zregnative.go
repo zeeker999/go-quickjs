@@ -211,6 +211,14 @@ func (r *Runtime) jitRegForAs(cl *closure, c *regCode, callee bool) *jitRegEntry
 			return nil
 		}
 	}
+	if l := s.regLearned[key]; l != nil && l.deferred && l.generation == s.generation {
+		// Deferred for want of room, and the cache has let no code go
+		// since (jitRegPlace): a lookup, as the stack form's deferred
+		// entry answers its asks (jitCompileForIn), not a compile's
+		// preparation and the settling after it.
+		s.refusedRoom++
+		return nil
+	}
 	return r.jitRegCompileFor(cl, c, key, callee)
 }
 
@@ -353,13 +361,14 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 	// made (entryFor): made unused since epoch 0, code compiled when the
 	// budget was full was the first that the next compile's room let go
 	// of, and the compiles that filled it dropped each other's code.
-	e := &jitRegEntry{key: key, life: s.regLearnedOf(key), used: s.epoch()}
-	if e.life.deferred && e.life.generation == s.generation {
+	life := s.regLearnedOf(key)
+	if life.deferred && life.generation == s.generation {
 		// No room for it at its last compile, and the cache has let no
 		// code go since (jitRegPlace).
 		s.refusedRoom++
 		return nil
 	}
+	e := &jitRegEntry{key: key, life: life, used: s.epoch()}
 	s.budget = r.jitBudget()
 	if !s.jitRegRoomAhead(cl, e.life, s.jitRegReplaced(key, osrAt)) {
 		// None, all the cache holds young or in use, and it is not
@@ -2620,6 +2629,9 @@ func (r *Runtime) jitRegBuiltin(f *frame, c *regCode, w bytecode.RInstr, rpc int
 	}
 	if calls := f.cl.regCalls; uint(w.C()) < uint(len(calls)) {
 		if e := &calls[w.C()]; e.callee != o || e.kind != regCallNative {
+			if !f.cl.regCallsHeld {
+				r.regCallsHold(f.cl.closureCode)
+			}
 			*e = regCallCache{callee: o, kind: regCallNative}
 		}
 	}
