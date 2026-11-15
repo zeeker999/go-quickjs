@@ -1283,6 +1283,13 @@ func nativeEmit(v *variant) (*block, error) {
 		a.Bind(zero)
 		g.next()
 	})
+	// The step-and-branches (amd64_step.go), each its partner's compare.
+	h(bytecode.RStepJLt, func() { g.stepJ(stepReg, true, CondA) })
+	h(bytecode.RStepJLe, func() { g.stepJ(stepReg, true, CondAE) })
+	h(bytecode.RStepJLtI, func() { g.stepJ(stepImm, true, CondA) })
+	h(bytecode.RStepJGtI, func() { g.stepJ(stepImm, false, CondA) })
+	h(bytecode.RStepJGeI, func() { g.stepJ(stepImm, false, CondAE) })
+	h(bytecode.RStepJLeU, func() { g.stepJ(stepUpval, true, CondAE) })
 
 	for i := 0; i < len(g.late); i++ {
 		g.late[i]()

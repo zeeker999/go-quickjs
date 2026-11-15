@@ -48,6 +48,9 @@ var handlerOps = []bytecode.ROp{
 	bytecode.RNewObjectLit, bytecode.RNewArrayE, bytecode.RStrFreeze,
 	bytecode.RJTypeof, bytecode.RStrPart,
 	bytecode.RGenEntry,
+	// The step-and-branches.
+	bytecode.RStepJLt, bytecode.RStepJLe, bytecode.RStepJLtI, bytecode.RStepJGtI, bytecode.RStepJGeI,
+	bytecode.RStepJLeU,
 }
 
 // handlerOrder checks that order, the operations an emitter laid out

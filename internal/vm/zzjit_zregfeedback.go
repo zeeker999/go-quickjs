@@ -1139,6 +1139,7 @@ func regSoleRegisters(fn *bytecode.Function, rc *bytecode.RegCode, p *ir.Program
 			bytecode.RJLtI, bytecode.RJNLtI, bytecode.RJLeI, bytecode.RJNLeI, bytecode.RJGtI, bytecode.RJNGtI, bytecode.RJGeI, bytecode.RJNGeI,
 			bytecode.RJSEq, bytecode.RJSNe, bytecode.RJSEqI, bytecode.RJSNeI,
 			bytecode.RJEq, bytecode.RJNe, bytecode.RJEqI, bytecode.RJNeI, bytecode.RJNull, bytecode.RJNotNull,
+			bytecode.RStepJLt, bytecode.RStepJLe, bytecode.RStepJLtI, bytecode.RStepJGtI, bytecode.RStepJGeI,
 			bytecode.RRetUndef, bytecode.RAppend, bytecode.RStrFreeze:
 			// Operands, results of their own, tests and branches; an
 			// append's addition, of a result of its own, and a read of

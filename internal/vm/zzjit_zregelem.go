@@ -291,6 +291,11 @@ func (r *Runtime) jitRegStringAddSeen(l *jitEntry, c *regCode, wb, rpc int) bool
 		if !str(w.B()) {
 			return false
 		}
+	case bytecode.RStepJLt, bytecode.RStepJLe, bytecode.RStepJLtI, bytecode.RStepJGtI, bytecode.RStepJGeI, bytecode.RStepJLeU:
+		// A step-and-branch's step, add_imm's where it adds.
+		if w.X()&bytecode.RStepAdd == 0 || bytecode.StepK(w.X()) < 0 || !str(w.A()) {
+			return false
+		}
 	default:
 		return false
 	}
