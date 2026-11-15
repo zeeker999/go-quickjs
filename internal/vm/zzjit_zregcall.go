@@ -930,6 +930,8 @@ type jitRegLevel struct {
 // jitRegConstructs marks l, the level whose caller's code c makes the call
 // at register pc rpc, a construction's where that is new_w or super_call:
 // its receiver the one the call gave its context (abi.Context's This).
+// A plain call's receiver is written for the frame Go makes of the level
+// (jitRegPlainReceiver).
 func (r *Runtime) jitRegConstructs(l *jitRegLevel, c *regCode, rpc int) {
 	if rpc >= len(c.rc.Code) {
 		return
@@ -937,7 +939,40 @@ func (r *Runtime) jitRegConstructs(l *jitRegLevel, c *regCode, rpc int) {
 	switch regAt(c.code, rpc).Op() {
 	case bytecode.RNewW, bytecode.RSuperCall:
 		l.construct, l.this = true, *(*Value)(unsafe.Pointer(&r.jit.ssaCtxs[l.ctx].This))
+	case bytecode.RCallW, bytecode.RCallWT:
+		if l.wb+1 < len(r.stack) {
+			r.jitRegPlainReceiver(r.stack[l.wb], l.cl, l.wb)
+		}
 	}
+}
+
+// jitRegPlainReceiver writes to register 1 of the window at wb, a frame of
+// closure cl that callee, its function object, is called by a plain call
+// in, the receiver the interpreter's call gives it (regCallKind):
+// undefined, the global object for a sloppy callee, an arrow's captured
+// this. A native call, or a callee inlined, writes it only for a callee
+// that reads it, and the frame Go makes of the level reads it for a
+// stack trace: left as the window held it, the trace named the frame a
+// method of whatever was there, "String.boom".
+func (r *Runtime) jitRegPlainReceiver(callee Value, cl *closure, wb int) {
+	if !callee.IsObject() || cl == nil || cl.reg == nil {
+		return
+	}
+	fd := callee.Object().fn()
+	if fd == nil || fd.closure != cl {
+		return
+	}
+	this := Undefined
+	if fd.arrow {
+		x := fd.extra
+		if x == nil || x.lexThisRef != nil {
+			return
+		}
+		this = x.lexThis
+	} else if cl.reg.coerceThis {
+		this = r.globalThis
+	}
+	r.stack[wb+1] = this
 }
 
 // jitRegLevelAt is the level of the native call running in context i,
@@ -961,6 +996,23 @@ func (r *Runtime) jitRegLevelAt(i int) (jitRegLevel, bool) {
 	}
 	if e == nil || !e.cached || e.key.realm != r.jitRealmKey() {
 		e = s.regCache[r.jitRegKeyOf(cl)]
+	}
+	if (e == nil || e.code == nil || e.p == nil) && len(s.regRetired) != 0 {
+		// Let go of by the cache while the call ran it -- compiled again,
+		// once Go found it invalid at a call of Go from the level -- and
+		// kept for it (regClose): the one its callee returns into, if the
+		// level made a call.
+		key := r.jitRegKeyOf(cl)
+		var ret uintptr
+		if i+1 < len(s.ssaCtxs) && s.ssaCtxs[i+1].Live == abi.LiveCall {
+			ret = s.ssaCtxs[i+1].ReturnTo
+		}
+		e = nil
+		for _, x := range s.regRetired {
+			if x.key == key && x.code != nil && x.p != nil && (e == nil || ret != 0 && x.code.Contains(ret)) {
+				e = x
+			}
+		}
 	}
 	if e == nil || e.code == nil || e.p == nil {
 		return jitRegLevel{}, false
@@ -1165,6 +1217,9 @@ func (r *Runtime) jitRegGoCallNested(ctx *abi.Context, idx, root int) bool {
 	}
 	r.frameDepth = depthBefore
 	r.stackTop = top
+	// Gone on in natively once the call is done, or unwound by Go at the
+	// exit it leaves at.
+	r.jitRegPinLevel(root, l.e)
 	l.e.levels--
 	s.regClose(l.e)
 	return ok
@@ -1245,6 +1300,9 @@ func (r *Runtime) jitRegGoCallLevels(ctx *abi.Context, idx, root int) bool {
 		r.stackTop = top
 	}
 	for k := range levels {
+		// Gone on in natively once the call is done, or unwound by Go at
+		// the exit it leaves at.
+		r.jitRegPinLevel(root, levels[k].e)
 		levels[k].e.levels--
 		s.regClose(levels[k].e)
 	}
@@ -1297,9 +1355,11 @@ func (r *Runtime) jitRegMakeLazy(lz *jitLazyLevels) {
 func (r *Runtime) jitRegLazyDone() {
 	s := r.jit
 	from := len(s.regLazyLevels)
-	if lz := &s.lazy[len(s.lazy)-1]; lz.made {
+	lz := &s.lazy[len(s.lazy)-1]
+	if lz.made {
 		from = lz.from
 	}
+	root := lz.root
 	r.jitLazyDone()
 	for k := from; k < len(s.regLazyLevels); k++ {
 		f := s.regLazyFrames[k]
@@ -1308,12 +1368,18 @@ func (r *Runtime) jitRegLazyDone() {
 			regCloseUpvalues(f)
 		}
 		e := s.regLazyLevels[k].e
+		// Gone on in natively once the call is done.
+		r.jitRegPinLevel(root, e)
 		e.levels--
 		s.regClose(e)
 	}
 	clear(s.regLazyLevels[from:])
 	clear(s.regLazyFrames[from:])
 	s.regLazyLevels, s.regLazyFrames = s.regLazyLevels[:from], s.regLazyFrames[:from]
+	if len(s.regRetired) != 0 {
+		// Code the levels put off ran, let go of meanwhile (regClose).
+		s.jitRegCloseRetired()
+	}
 }
 
 // regLevelsOf is how many native calls under way run e's code that Go

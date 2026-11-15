@@ -1362,6 +1362,13 @@ type jitState struct {
 	// call put off were made (jitRegMakeLazy), and regLazyLevelsPut the
 	// levels such calls put off.
 	regNestedCalls, regLazyMade, regLazyLevelsPut uint64
+	// regRetired are register entries the cache let go of while their
+	// code was in use -- runs in it, native calls of it Go has the levels
+	// of, or pinned (goPinned): a native call of it under way, which a
+	// call of Go from its level returned to -- where a level running it
+	// finds it (jitRegLevelAt), closed once none is (regClose,
+	// jitRegCloseRetired).
+	regRetired []*jitRegEntry
 	// regJobs are the register compiles in the background, in the order
 	// they were handed over, and regPendingJobs each by its function's
 	// key (zzjit_zregbg.go).

@@ -35,6 +35,9 @@ type jitRegInlineLevel struct {
 	// holds: the construction's result where the callee returns no object.
 	construct bool
 	this      Value
+	// callee is the function its caller's call called, where it is one
+	// (the call's window's), for a plain call's receiver.
+	callee Value
 	// threw marks the innermost level whose operation Go made at its host
 	// exit threw (jitRegInlineLeft).
 	threw bool
@@ -118,6 +121,7 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 				levels[k].cl = fd.closure
 			}
 		}
+		levels[k].callee = called
 		if kp := owner.keep; kp != nil && slices.Contains(kp.made, levels[k].cl) {
 			panic("vm: an inlined closure the code did not make is not where its call is")
 		}
@@ -145,8 +149,14 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 		if k > 0 {
 			caller, at = levels[k-1].cl.reg, levels[k-1].pc
 		}
-		if at < len(caller.rc.Code) && regAt(caller.code, at).Op() == bytecode.RNewW {
-			x.construct, x.this = true, r.stack[x.wb+1]
+		if at < len(caller.rc.Code) {
+			switch regAt(caller.code, at).Op() {
+			case bytecode.RNewW:
+				x.construct, x.this = true, r.stack[x.wb+1]
+			case bytecode.RCallW, bytecode.RCallWT:
+				// A plain call's receiver, for the frame (jitRegPlainReceiver).
+				r.jitRegPlainReceiver(x.callee, x.cl, x.wb)
+			}
 		}
 		lv := jitRegLevel{cl: x.cl, c: rc, wb: x.wb, construct: x.construct, inline: true}
 		if rc.args {

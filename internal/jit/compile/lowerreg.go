@@ -333,10 +333,19 @@ func (l *regLowering) boolBranch(pc int, reach []bool) bool {
 	case last < mark || in.Op != ir.Branch || !l.patch[last] || in.Target != pc+3:
 	case in.Operator == ir.Eq || in.Operator == ir.Lt || in.Operator == ir.Le || in.Operator == ir.Gt || in.Operator == ir.Ge:
 		r := int(x.A())
-		l.code[last] = ir.Instruction{Op: ir.Binary, Operator: in.Operator, Left: in.Left, Right: in.Right, Dest: r, Strict: in.Strict}
-		l.patch[last] = false
 		if in.When != (y.Op() == bytecode.RLoadTrue) {
-			l.emit(ir.Instruction{Op: ir.Unary, Operator: ir.Not, Left: ir.Slot(r), Dest: r}, false)
+			// Negated: the comparison to a scratch slot, which commits
+			// nothing, and its negation to the register, the origin's one
+			// write and its last -- the comparison written to the register
+			// first, the Not, which may leave, came after a write the
+			// interpreter would make again (the atomicity rule).
+			t := l.temp()
+			l.code[last] = ir.Instruction{Op: ir.Binary, Operator: in.Operator, Left: in.Left, Right: in.Right, Dest: t, Strict: in.Strict}
+			l.patch[last] = false
+			l.emit(ir.Instruction{Op: ir.Unary, Operator: ir.Not, Left: ir.Slot(t), Dest: r}, false)
+		} else {
+			l.code[last] = ir.Instruction{Op: ir.Binary, Operator: in.Operator, Left: in.Left, Right: in.Right, Dest: r, Strict: in.Strict}
+			l.patch[last] = false
 		}
 		l.emit(ir.Instruction{Op: ir.Jump, Target: pc + 4}, true)
 		return true

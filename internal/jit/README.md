@@ -294,9 +294,11 @@ compare-and-branch to two loads of the booleans, which the interpreter
 runs as one branch; lowered so, the value was a phi of two constants that a
 test of it -- an inlined callback's result -- branched on again. Where
 nothing else jumps into the loads, the lowering makes the compare-and-branch
-the comparison's `Binary` to the register, negated where the branch's way
-says so, and a jump past the loads (`boolBranch`), as the stack form's `lt`
-or `strict_eq` is: a branch on the value is a branch on the comparison.
+the comparison's `Binary` to the register -- or, where the branch's way
+says to negate it, to a scratch slot and its `Not` to the register, the
+origin's one write last, as the atomicity rule below has it -- and a jump
+past the loads (`boolBranch`), as the stack form's `lt` or `strict_eq` is:
+a branch on the value is a branch on the comparison.
 
 **The atomicity rule.** An exit anywhere in an origin's instructions runs
 the register instruction again from its start, in the interpreter. So
@@ -1955,6 +1957,19 @@ a call of Go put off holds it by its context, whose callee returns into it
 it. Go finds a level's code by its closure (`closureCode`'s `jitReg`)
 while the cache holds it (`jitRegEntry`'s `cached`), the cache's key
 otherwise or where that is not code of this realm (`jitRegLevelAt`). The
+code stays the level's after the call of Go too, the level going on in it
+natively or unwound by Go at its exit: the call pins it to the run below
+(`jitRegPinLevel`, `goPinned`, as the stack form's `jitGoCallNested`
+pins its levels' code) until the run's native code leaves. While any run's
+native code runs (`ctxTop`), code native callers may call (its link) is in
+use (`regInUse`), the native calls of it Go knows nothing of until they
+leave: the cache's flush lets it be. Code let go of while in use -- for
+room, compiled again once invalid -- is kept, not closed
+(`regRetired`), where a level running it still finds it, and closed once
+nothing uses it (`jitRegCloseRetired`). A frame Go makes of a level, or of
+an inlined callee, a plain call called, is given the receiver the
+interpreter's call gives it (`jitRegPlainReceiver`), which native code
+writes only for a callee that reads it and a stack trace reads. The
 levels and frames of a call of Go are on stacks of the JIT's state
 (`regNestLevels`, `regLazyLevels`), each call's past those of the calls
 under way below it. Both backends make such a call natively, the same way

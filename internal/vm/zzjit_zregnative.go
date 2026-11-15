@@ -535,8 +535,16 @@ func (s *jitState) regUses(e *jitRegEntry) uint64 {
 // regInUse reports whether e's code runs, or may go on, below Go now: a run
 // of it, a native call of it, or a compile of its function in the
 // background, which replaces it.
+//
+// A native call of it under way is one Go has the level of (regLevelsOf),
+// or, while any run's native code is (ctxTop), one Go knows nothing of
+// until the code leaves: code native callers may call (its link) counts
+// as in use then. The cache's flush, at a back-edge budget Go gave a
+// native callee's loop, had let such code go and closed it under the call,
+// whose level Go then found no code for (jitRegLevelAt).
 func (s *jitState) regInUse(e *jitRegEntry) bool {
-	return e.runs != 0 || s.regPendingJobs[e.key] != nil || s.regLevelsOf(e) != 0
+	return e.runs != 0 || s.regPendingJobs[e.key] != nil || s.regLevelsOf(e) != 0 ||
+		s.ctxTop != 0 && s.regLinks[e.key] != nil
 }
 
 // regAge notes, at epoch now, which register code was used since the last
@@ -654,9 +662,55 @@ func (s *jitState) dropReg(key jitKey, e *jitRegEntry) {
 // regClose closes the code of e, which the cache let go of (dropped), once
 // no run and no native call is in it.
 func (s *jitState) regClose(e *jitRegEntry) {
-	if e.dropped && e.code != nil && e.runs == 0 && s.regLevelsOf(e) == 0 {
-		_ = s.closeSSA(e.code, e.keep)
-		e.code = nil
+	if !e.dropped || e.code == nil {
+		return
+	}
+	if s.regInUse(e) || len(s.goPinned) != 0 && slices.Contains(s.goPinned, e.code) {
+		// In use: kept where a level running it finds it (jitRegLevelAt)
+		// -- a native call of it under way, which a call of Go from its
+		// level returned to (jitRegPinLevel), say -- and closed once the
+		// last use is done (jitRegCloseRetired).
+		if !slices.Contains(s.regRetired, e) {
+			s.regRetired = append(s.regRetired, e)
+		}
+		return
+	}
+	_ = s.closeSSA(e.code, e.keep)
+	e.code = nil
+	if len(s.regRetired) != 0 {
+		if i := slices.Index(s.regRetired, e); i >= 0 {
+			s.regRetired = slices.Delete(s.regRetired, i, i+1)
+		}
+	}
+}
+
+// jitRegPinLevel pins e's code, a native callee's that a call of Go from
+// its level is made in, to the run in context root (goPinned), until the
+// run's native code leaves (jitGoUnpin), as the stack form's
+// jitGoCallNested pins its levels' code: once the call is done, its level
+// goes on in that code, natively, and a drop of its entry meanwhile -- the
+// cache's, for room, or for code compiled again -- had closed the code
+// there (regClose) and left the level with no code to be unwound by.
+func (r *Runtime) jitRegPinLevel(root int, e *jitRegEntry) {
+	s := r.jit
+	if root >= len(s.goRuns) || e.code == nil {
+		return
+	}
+	run := &s.goRuns[root]
+	if !run.pinned {
+		s.pinSerial++
+		run.pinned, run.pinnedAt, run.serial = true, len(s.goPinned), s.pinSerial
+	}
+	if !slices.Contains(s.goPinned[run.pinnedAt:], e.code) {
+		s.goPinned = append(s.goPinned, e.code)
+	}
+}
+
+// jitRegCloseRetired closes the entries dropped while their code was
+// pinned (regRetired) that no run pins any longer.
+func (s *jitState) jitRegCloseRetired() {
+	for _, e := range slices.Clone(s.regRetired) {
+		s.regClose(e)
 	}
 }
 
@@ -1369,6 +1423,9 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 	}
 	if s.goRuns[idx].pinned {
 		r.jitGoUnpin(idx)
+		if len(s.regRetired) != 0 {
+			s.jitRegCloseRetired()
+		}
 	}
 	if err == nil && ctx.ExitKind == abi.ExitTable {
 		s.ssaRecords += uint64(s.exitScratch.Apply(ctx))
@@ -1420,6 +1477,11 @@ func (r *Runtime) jitRegStretch(f *frame, c *regCode, e *jitRegEntry, wb, ipc, a
 	s.goRuns[idx] = jitGoRun{}
 	s.regRuns[idx] = jitRegRun{}
 	s.ctxTop = top
+	if top == 0 && len(s.regRetired) != 0 {
+		// No native code runs now: what the cache let go of while it did
+		// is closed, if nothing else uses it (regClose).
+		s.jitRegCloseRetired()
+	}
 	e.runs--
 	closed := e.code == nil
 	// Code the cache let go of while this run was in it, closed now if no
