@@ -436,6 +436,16 @@ func (r *Runtime) jitLeafCall(ctx *abi.Context) bool {
 	if !ok {
 		return false
 	}
+	if ctx.GoLast != 0 {
+		if st := (*abi.GoCallState)(*(*unsafe.Pointer)(unsafe.Pointer(&ctx.GoLast))); st.Give != 0 && st.Leaf == uintptr(unsafe.Pointer(fn.Object())) && st.Op>>abi.GoOpKindShift&0xff == abi.GoCallMethod &&
+			(fn.Object() == r.regexpExecFn || fn.Object() == r.regexpTestFn) {
+			// A RegExp literal's call: its RegExp back to its pool, as
+			// jitLeafGo gives it back.
+			argc := int(st.Op>>abi.GoOpArgcShift) & 0xff
+			r.jitRegExpLeafGive((*abi.ObjectPool)(*(*unsafe.Pointer)(unsafe.Pointer(&st.Give))), fn.Object() == r.regexpTestFn,
+				jitGoArg(ctx, 1), unsafe.Slice((*Value)(unsafe.Pointer(&ctx.GoArgs[2])), min(argc, abi.MaxGoArgs-2)))
+		}
+	}
 	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
 	return true
 }

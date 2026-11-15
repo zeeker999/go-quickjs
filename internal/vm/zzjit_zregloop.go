@@ -77,11 +77,11 @@ func (r *Runtime) jitRegForEachSeen(f *frame, e *jitRegEntry, rpc int, callee, r
 			x.byCode = true
 			r.jitRegReopt(f.cl, e)
 		}
-		r.jitRegNativeCalleeN(cl, cl.reg, calls, nil, 0)
+		r.jitRegNativeCalleeN(cl, cl.reg, calls, f.cl)
 		return
 	}
 	l.nativeCalls = append(l.nativeCalls, jitInline{pc: int32(rpc), obj: o, forEach: true, cb: cl, cbObj: cb.Object(), proto: proto})
-	r.jitRegNativeCalleeN(cl, cl.reg, calls, nil, 0)
+	r.jitRegNativeCalleeN(cl, cl.reg, calls, f.cl)
 	r.jitRegReopt(f.cl, e)
 }
 

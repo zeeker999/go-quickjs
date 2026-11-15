@@ -604,7 +604,20 @@ compiles -- what its code learned, its budget, its deoptimizations, what its
 runs did -- is its `regLearned` entry (`jitRegEntry`'s `life`); its code is
 kept on its template's `closureCode` (`jitReg`). A callee native callers
 call that has no code is compiled at their first call of it through Go
-(`jitRegNativeCallee`): they make no sample of it.
+(`jitRegNativeCallee`): they make no sample of it. But one too long to
+inline (`ssa.MaxInline`, counted in the stack form's instructions,
+`jitRegInlineSize`) that is warming up, its budget begun and not spent or
+not begun (`jitRegLongWarming`), is compiled once its budget is spent, as
+any function -- the interpreter's runs of it that Go makes for its native
+callers count it down -- unless its caller calls it often: no longer than
+a function inlines in all (`ssa.MaxInlineTotal`) and invoked at least 15
+hundredths as often as the caller, V8's `min_inlining_frequency`, each
+counted by its runs while it had no code (`jitRegInvoked`, the budget's
+ticks) and the caller's since by its entries at its start, its link's
+calls and Go's calls of it (`jitRegCalledOften`), as the stack form's
+`jitNativeCallee` decides it (`jitLongWarming`, `jitCalledOften`).
+Mandreel's set-up, run once an iteration, had been compiled at every
+iteration after the first.
 
 **Compiling in the background.** A runtime made `WithJITBackground`, or
 `QJS_JIT_STRESS`'s `background=K`, compiles register code as the stack
@@ -922,7 +935,16 @@ register result no instruction pops, so it is the program's liveness that
 says (`windowResultUnused`) -- the register read by nothing after the call,
 or only by a test of its truth or a not just after it, or kept where a
 branch jumps where it is falsy, as `&&` keeps it. Exec's leaf then gives
-back its dummy rather than making an array, replace's makes no string.
+back its dummy rather than making an array, replace's makes no string. A
+leaf's call of `exec` or `test` on a RegExp literal's RegExp -- a calling
+`regexp_lit`'s, or a `call_method_w` marked `RMarkLitRecv` after one that
+does not call -- is told the literal's pool (`CallSite`'s `Give`, from the
+feedback's `regLitPool`, `abi.GoCallState`'s `Give`): nothing but the call
+reaches the RegExp, and the VM gives it back to the pool once the leaf has
+returned (`jitRegExpLeafGive`), lastIndex 0, where reading the method ran
+nothing, as the call of Go it stands for gives the literal its RegExp back
+-- a loop's `/x/.exec(s)` had a RegExp made at each turn by the pool's
+refills.
 `BigInt(x)` and
 `BigInt.asUintN(n, x)` or `asIntN`'s are made natively too (see
 [BigInts](#bigints)), the width the constant the program copies to the
@@ -2556,15 +2578,11 @@ them (`jitLowering`'s `busy`, a pending job). A compile that asks for one
 let go of lowers it again (`jitRegLower`). A compile refused the room for
 its code drops its function's programs, as the stack form's does.
 
-A callee too long to inline (past `ssa.MaxInline`, counted in the stack
-form's instructions, `jitRegInlineSize`) that is still warming up is not
-compiled at its first call from native code (`jitRegNativeCalleeN`) unless
-the call is made often -- no longer than a function inlines in all, and
-called at the site at least `jitInliningFrequency` hundredths of its
-caller's runs, by the feedback dispatcher's counts (`jitRegCalledOften`) --
-as the stack form's `jitNativeCallee` decides; otherwise it warms up as any
-function does. Compiled at once, Mandreel's functions run once a frame took
-half the budget.
+A callee too long to inline that is still warming up is not compiled at
+its first call from native code unless its caller calls it often, as
+told under the tier-up above (`jitRegLongWarming`, `jitRegCalledOften`);
+otherwise it warms up as any function does. Compiled at once, Mandreel's
+functions run once a frame took half the budget.
 
 **Making room** (`makeRoom`). A compile asks for room for what its entry
 will hold before its code is placed. The cache reclaims, in this order, each

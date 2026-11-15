@@ -461,7 +461,7 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 				if w.Op() != bytecode.RNewW {
 					r.jitState().regLinkOf(cl, cl.reg)
 				}
-				r.jitRegKnownCallee(cl, f, rpc)
+				r.jitRegKnownCallee(cl, f.cl)
 				return false
 			}
 			x.byCode = true
@@ -481,7 +481,7 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 				if w.Op() != bytecode.RNewW {
 					r.jitState().regLinkOf(cl, cl.reg)
 				}
-				r.jitRegKnownCallee(cl, f, rpc)
+				r.jitRegKnownCallee(cl, f.cl)
 				return false
 			}
 			n++
@@ -496,7 +496,7 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 			// their functions compiled (jitCallTarget). Go had made every
 			// call of one no site was compiled for.
 			r.jitState().regLinkOf(cl, cl.reg)
-			r.jitRegKnownCallee(cl, f, rpc)
+			r.jitRegKnownCallee(cl, f.cl)
 		}
 		return false
 	}
@@ -637,14 +637,14 @@ func (r *Runtime) jitRegCallersReopt(l *jitEntry, depth int) {
 // not enter, was never called natively again: CD's Vector, Havlak's
 // Dictionary.at, their native callers' calls made by Go, a million of
 // them, each run by the interpreter.
-func (r *Runtime) jitRegKnownCallee(cl *closure, f *frame, rpc int) {
+func (r *Runtime) jitRegKnownCallee(cl, caller *closure) {
 	if cc := cl.closureCode; cc != nil {
 		if e := cc.jitReg; e != nil && e.life != nil && e.life.notNative && !e.invalid && e.code != nil {
 			r.jitRegRetryNative(e)
 			return
 		}
 	}
-	r.jitRegNativeCalleeN(cl, cl.reg, 1, f, rpc)
+	r.jitRegNativeCallee(cl, cl.reg, caller)
 }
 
 // jitRegViaSeen learns, after Go made the method call at register pc rpc
@@ -673,7 +673,7 @@ func (r *Runtime) jitRegViaSeen(f *frame, e *jitRegEntry, rpc int, callee, recv 
 	for _, x := range l.nativeCalls {
 		if int(x.pc) == rpc {
 			if x.obj == o && x.via {
-				r.jitRegNativeCalleeN(cl, cl.reg, 1, f, rpc)
+				r.jitRegNativeCallee(cl, cl.reg, f.cl)
 				return false
 			}
 			n++
@@ -683,7 +683,7 @@ func (r *Runtime) jitRegViaSeen(f *frame, e *jitRegEntry, rpc int, callee, recv 
 		return false
 	}
 	l.nativeCalls = append(l.nativeCalls, jitInline{pc: int32(rpc), cl: cl, obj: o, via: true})
-	r.jitRegNativeCalleeN(cl, cl.reg, 1, f, rpc)
+	r.jitRegNativeCallee(cl, cl.reg, f.cl)
 	r.jitRegReopt(f.cl, e)
 	return true
 }
@@ -1129,7 +1129,7 @@ func (r *Runtime) jitRegSuperSeen(f *frame, c *regCode, e *jitRegEntry, rpc int)
 		if int(x.pc) == rpc && x.active != nil {
 			// Known: a super() Go made for want of the parent's code,
 			// which native callers call once it has some.
-			r.jitRegNativeCallee(x.cl, x.cl.reg)
+			r.jitRegNativeCallee(x.cl, x.cl.reg, f.cl)
 			return
 		}
 	}
@@ -1137,7 +1137,7 @@ func (r *Runtime) jitRegSuperSeen(f *frame, c *regCode, e *jitRegEntry, rpc int)
 	if p == nil || cl.reg == nil {
 		return
 	}
-	r.jitRegNativeCallee(cl, cl.reg)
+	r.jitRegNativeCallee(cl, cl.reg, f.cl)
 	l.nativeCalls = append(l.nativeCalls, jitInline{pc: int32(rpc), cl: cl, obj: p, parent: skip, active: f.callee})
 	r.jitRegReopt(f.cl, e)
 }
