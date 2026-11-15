@@ -263,9 +263,11 @@ type Context struct {
 	// and the context's in the array -- for Go to make the VM's frames from
 	// when a callee leaves native code; Level stays below Bounds'
 	// LevelLimit.
-	// StackBase and StackEnd are the VM's stack's first value and length,
-	// StackTop and StackHigh its next free and highest used indices, which
-	// a call moves. TailReturn is where the records' tail goes on, in a
+	// StackBase is the VM's stack's first value and StackEnd the end a
+	// call's room is checked against: its length, less the most any
+	// register code takes past its window, so that a call checks the room
+	// for its callee's window alone. StackTop and StackHigh are its next
+	// free and highest used indices, which a call moves. TailReturn is where the records' tail goes on, in a
 	// caller's code, instead of returning to Go: 0 but during a call, and
 	// no native code sets it now.
 	//
@@ -1433,13 +1435,6 @@ type Encoding struct {
 	// for a loop's step that resumes it natively (mir's Code.GenEntry), a
 	// uint64, 0 for none.
 	LinkGen int32
-	// LinkStack and LinkTop are, in register code's link, where its code's
-	// frame's operands start past its window, in bytes, and how many slots
-	// the frame takes past its base (mir's Code.StackAt and FrameSize),
-	// each a uint64: what a call in tail position that jumps to its tail
-	// entry (LinkBody) makes of the context's Stack and the VM's stack's
-	// top, as the code's call entry would.
-	LinkStack, LinkTop int32
 	// Mega says contexts point to a megamorphic cache (Context.Mega).
 	Mega bool
 	// FlagHTMLDDA is the flags byte's bit for Annex B's [[IsHTMLDDA]],

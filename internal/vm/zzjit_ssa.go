@@ -198,8 +198,6 @@ var jitEncoding = abi.Encoding{
 	LinkFrame:          int32(unsafe.Offsetof(jitLink{}.frame)),
 	LinkFlags:          int32(unsafe.Offsetof(jitLink{}.flags)),
 	LinkGen:            int32(unsafe.Offsetof(jitLink{}.gen)),
-	LinkStack:          int32(unsafe.Offsetof(jitLink{}.tailStack)),
-	LinkTop:            int32(unsafe.Offsetof(jitLink{}.tailTop)),
 	ClassArray:         uint8(ClassArray),
 	ClassTypedArray:    uint8(ClassTypedArray),
 	TypedKind:          int32(unsafe.Offsetof(typedArrayData{}.kind)),
@@ -12950,7 +12948,7 @@ func (r *Runtime) jitShareContexts(idx int, f *frame) {
 	}
 	sh := jitShared{
 		global: unsafe.Pointer(f.cl.scope()), lexNames: unsafe.Pointer(&r.lexNames),
-		stackBase: unsafe.Pointer(unsafe.SliceData(r.stack)), stackEnd: uint64(len(r.stack)),
+		stackBase: unsafe.Pointer(unsafe.SliceData(r.stack)), stackEnd: r.jitStackEnd(),
 	}
 	if r.isGlobalScope(f.cl.scope()) {
 		// The interpreter reads a script's lexical bindings where the

@@ -133,16 +133,48 @@ func (s *jitState) regUnhint(l *jitLink) {
 func (l *jitLink) regSet(s *jitState, e *jitRegEntry) {
 	l.setCode(e.code)
 	if l.entry != 0 {
-		// A call in tail position goes on at the code's tail entry, having
-		// made the frame past its window as the code's call entry would
-		// (mir's windowTailJump).
+		// A call in tail position goes on at the code's tail entry, which
+		// makes the frame past its window as the code's call entry would
+		// (mir's windowTailJump, tailEntry).
 		l.body = e.code.TailEntry()
-		l.tailStack, l.tailTop = uint64(e.code.StackAt())*uint64(unsafe.Sizeof(Value{})), uint64(e.code.FrameSize())
 	}
 	l.frame = max(l.frame, uint64(e.p.Regs+e.scratch+e.frame))
+	if room := uint64(e.scratch + e.frame); room > s.regRoom {
+		// Room for its frame past its window below every context's
+		// StackEnd before any native caller calls it.
+		s.regRoom = room
+		s.rt.jitStackRoom()
+	}
 	if l.gen != 0 {
 		s.regGens = true
 	}
+}
+
+// jitStackRoom writes into every context, and into what they share
+// (jitShared), the end of the VM's stack native code checks a call's room
+// against (abi.Context's StackEnd): its length, less the most any register
+// code takes past its window (jitState's regRoom). A native call of
+// register code then checks the callee's window alone, a constant, as the
+// stack form's call checks its callee's locals and operands -- the
+// register frame's size past its window is no constant of its function,
+// as the stack form's is, but its compile's: its scratch slots, its loops'
+// slots and its objects' homes (mir's frameSize).
+func (r *Runtime) jitStackRoom() {
+	s := r.jit
+	end := r.jitStackEnd()
+	s.ssaShared.stackEnd = end
+	for _, c := range s.ssaCtxs {
+		c.StackEnd = end
+	}
+}
+
+// jitStackEnd is the contexts' StackEnd (jitStackRoom).
+func (r *Runtime) jitStackEnd() uint64 {
+	n := uint64(len(r.stack))
+	if room := r.jit.regRoom; room < n {
+		return n - room
+	}
+	return 0
 }
 
 // regLinkUpdate sets the link of the function whose key is key, if it has

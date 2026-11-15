@@ -263,14 +263,14 @@ function's code with its window in this one's place, as the stack form's
 its parameters, undefined past them, as a native call writes its callee's
 window -- its temporaries, which it writes before it reads them, left as
 they are -- the context this one -- its closure, its captured bindings,
-`TailFrame` for its own calls -- and what its call entry would make past
-the window, its operands' address and the VM's stack's top, of the
-callee's code as its link has them (`abi.Encoding`'s `LinkStack` and
-`LinkTop`, `mir`'s Code's `StackAt` and `FrameSize`); the jump goes to the
-callee's tail entry (`ssa.Func`'s `TailEntry`, `mir`'s `windowTailJump`
-and `tailEntry`, its link's body): its start, or, where it has bindings
-past its parameters, a routine that makes them undefined, as its call
-entry does, then its start, returning where this frame would have: two
+`TailFrame` for its own calls -- its room the callee's window's, a
+constant, as a native call's (below); the jump goes to the callee's tail
+entry (`ssa.Func`'s `TailEntry`, `mir`'s `windowTailJump` and
+`tailEntry`, its link's body), a routine that makes what its call entry
+makes past the window, of its own code's constants -- its operands'
+address, the VM's stack's top and high water -- and its bindings past its
+parameters undefined, as its call entry does, then goes on at its start,
+returning where this frame would have: two
 functions calling each other in tail position run as deep as they like in
 one frame, natively. A call of the function itself writes its bindings
 and leaves its temporaries so too. Not a callee that keeps its arguments,
@@ -2035,10 +2035,18 @@ register too (`jitRegLevelCallee`, `jit.CalledFunction`), where its closure
 is the level's -- past a call in tail position that gave the frame to
 another, whose call wrote it, the register's -- as the stack form's frames
 find their function from the context or the call. It checks
-the room its link says its code takes (`LinkFrame`) -- one check, as the
-stack form's call makes, the link's room never less than the callee's
-registers (`CallSite`'s `LocalCount`), and a second for the arguments only
-where they are more than those. The call's state leaves out the window's
+the room for the callee's window, or for its arguments where they are more
+than its registers (`CallSite`'s `LocalCount`): one check of a constant,
+as the stack form's call checks its callee's locals and operands, the
+VM's stack's top it leaves kept for the window's address where the call
+has one function. What the callee's code takes past its window -- its
+scratch slots, its loops' slots, its objects' homes -- is its compile's,
+no constant of its function as the stack form's frame is, so the
+contexts' `StackEnd` is the VM's stack's length less the most any register
+code compiled takes past its window (the VM's `regRoom`,
+`jitStackRoom`), raised in every context before a code that takes more is
+callable: its frame fits past any window the check found room for. The
+link's room (`LinkFrame`) is what Go's entries and `enterExit` make. The call's state leaves out the window's
 registers the call consumes (`ssa.Value`'s `Consumes`): those the
 interpreter's frame does not read past the call, normally or at a handler
 (`ir.Program`'s `LiveAt`), and the result's, as the stack form's leaves out

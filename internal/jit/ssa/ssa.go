@@ -1110,8 +1110,9 @@ type Func struct {
 	// call in tail position of another function's code jumps to, its frame
 	// given up and the callee's window written in its place (mir's
 	// windowTailJump, Code.TailEntry): it makes what the code's frame takes
-	// past its window -- its operands' address, the VM's stack's top -- as
-	// the call entry would, and goes on at the start.
+	// past its window -- its operands' address, the VM's stack's top and
+	// high water, of its own frame's size -- as the call entry would, and
+	// goes on at the start.
 	TailEntry bool
 	// GenEntry asks, of a synchronous generator's code, for the entry a
 	// loop's step that resumes the generator natively jumps to (CallSite's
