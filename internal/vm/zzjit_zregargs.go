@@ -218,7 +218,7 @@ func (r *Runtime) jitRegInlineArgs(c *regCode, cwb, at int, args []Value) []Valu
 		return nil
 	}
 	switch w := regAt(c.code, at); w.Op() {
-	case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW:
+	case bytecode.RCallW, bytecode.RCallMW, bytecode.RNewW, bytecode.RCallWT, bytecode.RCallMWT:
 		a := cwb + int(w.A()) + 2
 		return append([]Value(nil), r.stack[a:a+int(w.X())]...)
 	case bytecode.RApplyArgs:
