@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"weak"
 
 	intl "github.com/go-quickjs/go-intl"
 	"github.com/go-quickjs/go-intl/date"
@@ -366,6 +367,11 @@ type Runtime struct {
 	// than each job taken from the front of the slice, which made an append
 	// at its end reallocate it about once a job.
 	jobHead int
+	// strConsts are the strings the program's string constants were made,
+	// by their text, held weakly (constString), and strConstsSweep the
+	// count past which the dead are swept out.
+	strConsts      map[string]weak.Pointer[String]
+	strConstsSweep int
 }
 
 // Realm is a set of intrinsics and the global object that goes with them.
