@@ -247,6 +247,95 @@ func TestJITRegArrayAlloc(t *testing.T) {
 	}
 }
 
+// regPooledSrc constructs arrays of lengths past abi.PoolSmallRoom, which
+// pools hold by size class (jitArrayRoom): AWFY Json's new Array(32),
+// Sieve's 5000, the longest made dense, 65,536, and one past it, whose
+// array is its length alone, Go's; a site whose lengths change their
+// class at every call, and pushes past an array's length into its room.
+const regPooledSrc = `
+function json(n) { var s = 0; for (var i = 0; i < n; i++) { var a = new Array(32); a[i & 31] = i; s += a.length + a[i & 31] + (a[(i + 1) & 31] === undefined ? 1 : 0) } return s }
+function sieve(n) { var s = 0; for (var i = 0; i < n; i++) { var a = new Array(5000); a[4999] = i; s += a.length + a[4999] + (a[4998] === undefined ? 1 : 0) } return s }
+function dense(n) { var s = 0; for (var i = 0; i < n; i++) { var a = new Array(65536); a[i] = 1; s += a.length + a[i] + (a[65535] === undefined ? 1 : 0) } return s }
+function sparse(n) { var s = 0; for (var i = 0; i < n; i++) { var a = new Array(65537); s += a.length } return s }
+function varied(n) { var s = 0; for (var i = 0; i < n; i++) { var a = new Array(i % 3 == 0 ? 3 : i % 3 == 1 ? 20 : 40); a[1] = i; s += a.length * 1000 + a[1] + (a[2] === undefined ? 7 : 0) } return s }
+function grows(n) { var a = new Array(40); for (var i = 0; i < n; i++) a.push(i); a[3] = -1; return a.length + "," + a[40] + "," + JSON.stringify(a.slice(1, 5)) + JSON.stringify(a.slice(38, 43)) }
+`
+
+// TestJITRegArrayPooled runs regPooledSrc's functions natively from their
+// first call and without the JIT, the collector idle and marking, and
+// compares their answers, exact: new Array(n) of each length up to
+// abi.PoolRoomLimit is taken from a pool of its size class, where one past
+// 16 had been Go's construction at every call -- AWFY Json's new
+// Array(32) in both JITs.
+func TestJITRegArrayPooled(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	calls := []struct {
+		name string
+		n    float64
+		want string
+	}{
+		{"json", 200, "26500"}, {"sieve", 100, "505050"}, {"dense", 8, "524304"}, {"sparse", 3, "196611"},
+		{"varied", 300, "6346950"}, {"grows", 30, "70,0,[null,null,-1,null][null,null,0,1,2]"},
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regPooledSrc)
+			r := rts[0]
+			r.SetJITReport(true)
+			for _, c := range calls {
+				f0, _ := r.GetProp(Obj(r.Global()), r.Intern(c.name))
+				f1, _ := rts[1].GetProp(Obj(rts[1].Global()), rts[1].Intern(c.name))
+				// Until its code is compiled again with what it learned:
+				// its constructions taken from the site's pool, natively,
+				// none Go's but sparse's, past every room.
+				native := false
+				for round := 0; round < 100 && !native; round++ {
+					b := r.RegNativeStats()
+					res := r.RegNativeCall(f0, []Value{Float(c.n)}, false)
+					st := r.RegNativeStats()
+					v, err := rts[1].Call(f1, Undefined, []Value{Float(c.n)})
+					got, want := regNativeShow(r, res.Value, res.Err), regNativeShow(rts[1], v, err)
+					if res.Skipped != "" || got != want || got != c.want {
+						t.Fatalf("round %d, %s(%v): natively %q (%s), called %q, want %q", round, c.name, c.n, got, res.Skipped, want, c.want)
+					}
+					made := st.GoCallOps["new_w->Array"] - b.GoCallOps["new_w->Array"]
+					switch c.name {
+					case "sparse":
+						native = made == uint64(c.n) && st.Hosts == b.Hosts && round > 0
+					case "grows":
+						native = made == 0
+					default:
+						native = made == 0 && st.Hosts == b.Hosts
+					}
+				}
+				if !native {
+					t.Errorf("%s(%v): its constructions not native after 100 calls", c.name, c.n)
+				}
+			}
+			// Each site's pool, of its length's size class; none for
+			// sparse's, Go's construction.
+			for name, room := range map[string]int{"json": 32, "sieve": 8192, "dense": 1 << 16, "sparse": 0} {
+				fn, _ := r.GetProp(Obj(r.Global()), r.Intern(name))
+				cl := fn.Object().fn().closure
+				got := 0
+				for _, x := range r.jit.regLearnedOf(r.jitRegKeyOf(cl)).nativeCalls {
+					if x.obj == r.proto.arrayCtor && x.pool != nil {
+						got = int(x.pool.Room)
+					}
+				}
+				if got != room {
+					t.Errorf("%s: new Array(n)'s pool has room for %d, want %d", name, got, room)
+				}
+			}
+		})
+	}
+}
+
 // regClosureSrc's functions make closures in loops natively from pools
 // (jitRegFeedback's Closure, CellsPool): of a loop's let, which each
 // iteration's closures capture anew, of a parameter, of a binding they

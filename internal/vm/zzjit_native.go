@@ -118,6 +118,10 @@ type jitFields struct {
 //	           compile in the background (jitSubmit), WithJITBackground or
 //	           not, and install each compile exactly K checks after it was
 //	           handed over (jitDrain), waiting for it if need be: 0 at once
+//	miss       with background, have every register compile's worker leave
+//	           its build, as one that asked what its snapshot was not asked
+//	           (jitSnapMiss), for the runtime's goroutine to build at its
+//	           install, so that the path a miss takes is taken by every one
 //
 // It is read once, as QJS_NOTREE is, and each runtime takes a copy.
 type jitStressConfig struct {
@@ -127,6 +131,7 @@ type jitStressConfig struct {
 	deopt      uint16
 	// checks is background's K.
 	checks uint16
+	miss   bool
 }
 
 var jitStressDefault = parseJITStress(os.Getenv("QJS_JIT_STRESS"))
@@ -147,6 +152,8 @@ func parseJITStress(spec string) jitStressConfig {
 			c.background, c.checks = true, uint16(n)
 		case "check":
 			mir.CheckAllocations = true
+		case "miss":
+			c.miss = true
 		}
 	}
 	return c
@@ -1013,12 +1020,6 @@ type jitLink struct {
 	// Gens), or 0 while there is none it may: 0 whenever entry is, for
 	// the same reasons, and for a generator's code entry always is.
 	gen uintptr
-	// tailStack and tailTop are, for register code, where its frame's
-	// operands start past its window, in bytes, and how many slots its
-	// frame takes past its base (abi.Encoding's LinkStack, LinkTop), which
-	// a call in tail position makes before it jumps to body (mir's
-	// windowTailJump).
-	tailStack, tailTop uint64
 }
 
 // setCode has native callers call code through l: its call entry, which
@@ -1387,6 +1388,12 @@ type jitState struct {
 	// generator's resumption, which a call of Go makes the frames of at
 	// once (jitRegGensIn).
 	regGens bool
+	// regRoom is the most slots any register code compiled takes past its
+	// window (jitRegEntry's scratch and frame), which the contexts' StackEnd
+	// leaves below the VM's stack's end (jitStackEnd): a native call of
+	// register code, or a call in tail position, checks the room for the
+	// callee's window alone, a constant, and its code's frame fits past it.
+	regRoom uint64
 	// regLevelsFound counts the levels of native calls Go found the code
 	// of and pinned (jitRegLevelAt): the work a call of Go from a native
 	// callee's code does for the levels below it.
@@ -2658,21 +2665,41 @@ func (r *Runtime) jitBudget() int {
 }
 
 // jitCompiles reports whether a compile of fn could fit the budget at all:
-// the compiler's transient work -- analysis tables over every slot for each
-// instruction, and the code it emits -- must (jitCompileBytes). It costs a
-// few comparisons and never measures the heap, so a refusal can be cheaply
-// repeated. It is what bounds how large a function is compiled: 4,080
-// instructions of up to 256 slots at the default budget, 16,368 at 32 MiB,
-// and fewer of more.
+// whether what the compile's entry and its lowering will hold -- the code,
+// its entries' and exits' descriptions, the program lowered -- fits it
+// (jitCompileBytes), as the budget bounds what the JIT holds, not a
+// compile's working memory (jitBudget), which is linear in the function's
+// size as what it holds is. It costs a few comparisons and never measures
+// the heap, so a refusal can be cheaply repeated; the compile's code is
+// measured as it is placed (jitRegPlace, makeRoom). It is what bounds how
+// large a function is compiled: some 16,000 instructions at the default
+// budget, 65,000 at 32 MiB, whatever its slots.
 func jitCompiles(fn *bytecode.Function, budget int) bool {
 	return jitCompileBytes(fn) <= int64(budget)
 }
 
-// jitCompileBytes is what a compile of fn may need: a word for each slot
-// at each instruction, its slots counted as no fewer than 256 -- what every
-// function's were, before the lowering took functions of more -- and 32 KiB.
+// What a compile's entry and lowering hold, about, for each instruction of
+// the function and each of its slots (jitCompileBytes): of the functions
+// of the V8 suite, Octane and AWFY, compiled from their register code, an
+// instruction's share of the code, the descriptions and the program is 260
+// bytes at the median, 421 at the 99th percentile and 638 at most, of a
+// function of fifty; pdfjs's wrapper of 107,000 instructions and 17,897
+// slots, 538.
+const (
+	jitCompileInstrBytes = 512
+	jitCompileSlotBytes  = 64
+)
+
+// jitCompileBytes is what a compile of fn will hold, about: its
+// instructions' and slots' shares (jitCompileInstrBytes,
+// jitCompileSlotBytes) and 32 KiB. It had been a word for each slot at
+// each instruction, of no fewer than 256 slots -- the dense tables of
+// slots by instructions that the frame states, the liveness and the
+// builder's definitions had been, linear now -- which refused a function
+// of 4,080 instructions at the default budget, and of 1,000 slots one of
+// 1,000.
 func jitCompileBytes(fn *bytecode.Function) int64 {
-	return int64(len(fn.Code))*int64(max(fn.LocalCount+fn.MaxStack+len(fn.Upvalues), 256))*8 + 32<<10
+	return int64(len(fn.Code))*jitCompileInstrBytes + int64(fn.LocalCount+fn.MaxStack+len(fn.Upvalues))*jitCompileSlotBytes + 32<<10
 }
 
 // jitState is the runtime's JIT state, made at its first use.

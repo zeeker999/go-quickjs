@@ -8,7 +8,8 @@ import (
 
 // A Liveness's sets are what dense rows of the same changes are, at every
 // height of tree: each slot's bit, each set's slots in order, the slots two
-// sets tell apart, and a builder's unions and equality.
+// sets tell apart, and a builder's unions, equality and the slots one set
+// adds to another (Added).
 func TestLivenessSets(t *testing.T) {
 	for _, n := range []int{1, 63, 64, 65, 200, 1024, 1025, 5000, 70000} {
 		rng := rand.New(rand.NewSource(int64(n)))
@@ -78,6 +79,16 @@ func TestLivenessSets(t *testing.T) {
 				if got := slices.Collect(l.Changed(pc, q)); !slices.Equal(got, diff) {
 					t.Fatalf("n %d pcs %d, %d: changed %v, want %v", n, pc, q, got, diff)
 				}
+				var added, got []int
+				for i := range n {
+					if dense(pc, i) && !dense(q, i) {
+						added = append(added, i)
+					}
+				}
+				b.Added(roots[q], roots[pc], func(i int) bool { got = append(got, i); return true })
+				if !slices.Equal(got, added) {
+					t.Fatalf("n %d pcs %d, %d: added %v, want %v", n, pc, q, got, added)
+				}
 				if eq := b.Equal(roots[pc], roots[q]); eq != (len(diff) == 0) {
 					t.Fatalf("n %d pcs %d, %d: equal %v, %d differ", n, pc, q, eq, len(diff))
 				}
@@ -142,5 +153,18 @@ func TestLivenessShares(t *testing.T) {
 	l := b.Finish([]LiveSet{s, s, t2})
 	if l.roots[0] != l.roots[1] {
 		t.Error("two instructions of one set have two")
+	}
+}
+
+// A builder Reset makes sets as a new one does, of the slots it is given.
+func TestLivenessReset(t *testing.T) {
+	b := NewLiveBuilder(5000)
+	b.Apply(b.Empty(), []LiveOp{{Slot: 7}, {Slot: 4000}})
+	b.Reset(100)
+	s := b.Apply(b.Empty(), []LiveOp{{Slot: 3}, {Slot: 99}, {Slot: 4000}})
+	var got []int
+	b.Added(b.Empty(), s, func(i int) bool { got = append(got, i); return true })
+	if !slices.Equal(got, []int{3, 99}) || b.Has(s, 7) || len(b.nodes) > 1+2*(1+liveFan) {
+		t.Errorf("after Reset: %v, %d words of nodes", got, len(b.nodes))
 	}
 }

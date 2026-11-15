@@ -13,7 +13,7 @@ const (
 	layoutPadND  = 357
 	layoutPadNGD = -1
 	layoutPadNMD = -1
-	layoutPadNR  = 424
+	layoutPadNR  = 419
 	layoutPadNGR = -1
 	layoutPadNMR = -1
 	layoutPadNV  = 556
@@ -40,7 +40,7 @@ const (
 	layoutPadNW  = 361
 	layoutPadNGW = -1
 	layoutPadNMW = -1
-	layoutPadNZ  = 460
+	layoutPadNZ  = 442
 	layoutPadNGZ = -1
 	layoutPadNMZ = -1
 	layoutPadNCZ = 284

@@ -263,9 +263,11 @@ type Context struct {
 	// and the context's in the array -- for Go to make the VM's frames from
 	// when a callee leaves native code; Level stays below Bounds'
 	// LevelLimit.
-	// StackBase and StackEnd are the VM's stack's first value and length,
-	// StackTop and StackHigh its next free and highest used indices, which
-	// a call moves. TailReturn is where the records' tail goes on, in a
+	// StackBase is the VM's stack's first value and StackEnd the end a
+	// call's room is checked against: its length, less the most any
+	// register code takes past its window, so that a call checks the room
+	// for its callee's window alone. StackTop and StackHigh are its next
+	// free and highest used indices, which a call moves. TailReturn is where the records' tail goes on, in a
 	// caller's code, instead of returning to Go: 0 but during a call, and
 	// no native code sets it now.
 	//
@@ -1156,10 +1158,11 @@ type ObjectPool struct {
 	Source unsafe.Pointer
 	// Room, for a pool of `new Array(n)`'s arrays, is how many elements
 	// each has storage for, holes all, its length 0: native code takes one
-	// for an n up to Room and makes n its length. Want is an n past Room
-	// that native code asks Go to fill the pool for, at a refill, as V8's
-	// code allocates a holey array of a length it checks; both are 0 in
-	// any other pool.
+	// for an n up to Room -- past PoolSmallRoom, more than half of it --
+	// and makes n its length. Want is 1 plus an n that does not fit, past
+	// Room or at most half a Room past PoolSmallRoom, that native code
+	// asks Go to fill the pool for, at a refill, as V8's code allocates a
+	// holey array of a length it checks; both are 0 in any other pool.
 	Room, Want uint64
 	// Cells, for a pool of a function's cells (ssa.GoCells), is how many
 	// each block has (Encoding's UpvalueSize); 0 in any other pool.
@@ -1186,8 +1189,20 @@ const (
 )
 
 // PoolRoomLimit is the most elements a pooled array has storage for
-// (ObjectPool's Room): a `new Array(n)` of a longer n is made by Go.
-const PoolRoomLimit = 16
+// (ObjectPool's Room): the longest `new Array(n)` the VM makes with its
+// holes in dense storage. A longer n's array is its length alone, which
+// Go makes.
+//
+// A room up to PoolSmallRoom is one of the sizes an array's own
+// allocation has room for, its array taken for any n up to it; a room
+// past it is a power of two, the size class of the n more than half of it,
+// and its array is taken for those alone: a shorter n, as a longer one,
+// has Go fill the pool again with arrays of n's class (Want), so that a
+// pool's arrays have at most twice the room their lengths need.
+const (
+	PoolRoomLimit = 1 << 16
+	PoolSmallRoom = 16
+)
 
 // What a context's Live says: a native call's callee runs in it, or an
 // inlined callee's frame is described in it.
@@ -1433,13 +1448,6 @@ type Encoding struct {
 	// for a loop's step that resumes it natively (mir's Code.GenEntry), a
 	// uint64, 0 for none.
 	LinkGen int32
-	// LinkStack and LinkTop are, in register code's link, where its code's
-	// frame's operands start past its window, in bytes, and how many slots
-	// the frame takes past its base (mir's Code.StackAt and FrameSize),
-	// each a uint64: what a call in tail position that jumps to its tail
-	// entry (LinkBody) makes of the context's Stack and the VM's stack's
-	// top, as the code's call entry would.
-	LinkStack, LinkTop int32
 	// Mega says contexts point to a megamorphic cache (Context.Mega).
 	Mega bool
 	// FlagHTMLDDA is the flags byte's bit for Annex B's [[IsHTMLDDA]],
@@ -1644,7 +1652,10 @@ func IsNumber(word uint64) bool { return word < NumberLimit }
 // its three operands, f, apply and x, called with the arguments the frame
 // was given (ssa.CallSite's Forward); or register code's instruction at the
 // call's PC run whole on the register frame (GoCallWhole, ssa.CallSite's
-// Whole), of the registers it reads, its result the one it writes.
+// Whole), of the registers it reads, its result the one it writes; or a
+// loop's step's answer (GoCallStepResult, ssa.CallSite's StepResult), of
+// the cursor and the result of its iterator's next native code called,
+// the iterator protocol on it, the result as GoCallStep's.
 // GoClosurePool is the kind of a closure's (ssa.GoClosure) whose native
 // code takes it from a pool, the pool's address the first operand's
 // pointer word: Go makes it, as it makes any, and fills the pool again if
@@ -1677,6 +1688,7 @@ const (
 	GoCallForIn      = 13
 	GoCallForward    = 14
 	GoCallWhole      = 15
+	GoCallStepResult = 16
 	GoClosurePool    = 1
 )
 

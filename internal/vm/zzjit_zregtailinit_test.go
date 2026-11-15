@@ -26,12 +26,11 @@ function deepFewer(n, k) { var s; for (var i = 0; i < k; i++) s = fewer(n, 0, 1,
 
 // TestJITRegTailInits: register code's call in tail position of another
 // function's code (mir's windowTailJump) writes the callee's window's
-// function, receiver and parameters, as a native call does, and makes
-// what the callee's call entry makes past it -- the context's Stack, the
-// VM's stack's top -- itself, of the callee's code as its link has them
-// (abi.Encoding's LinkStack, LinkTop), then jumps to the callee's start,
-// or to its tail entry, which makes its bindings past its parameters
-// undefined; and a call of the function itself (tailSelf) writes its
+// function, receiver and parameters, as a native call does, and jumps to
+// the callee's tail entry, which makes what its call entry makes past the
+// window -- the context's Stack, the VM's stack's top and high water, of
+// its own frame's size -- and its bindings past its parameters undefined;
+// and a call of the function itself (tailSelf) writes its
 // window to its bindings, not its temporaries. The calls had written every
 // register, temporaries too, and gone through a tail entry that made the
 // frame again. Each answer is the interpreter's, with the collector idle

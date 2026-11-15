@@ -198,8 +198,6 @@ var jitEncoding = abi.Encoding{
 	LinkFrame:          int32(unsafe.Offsetof(jitLink{}.frame)),
 	LinkFlags:          int32(unsafe.Offsetof(jitLink{}.flags)),
 	LinkGen:            int32(unsafe.Offsetof(jitLink{}.gen)),
-	LinkStack:          int32(unsafe.Offsetof(jitLink{}.tailStack)),
-	LinkTop:            int32(unsafe.Offsetof(jitLink{}.tailTop)),
 	ClassArray:         uint8(ClassArray),
 	ClassTypedArray:    uint8(ClassTypedArray),
 	TypedKind:          int32(unsafe.Offsetof(typedArrayData{}.kind)),
@@ -5010,6 +5008,10 @@ type jitGoPending struct {
 	// at register pc next, v written to register reg, if not -1.
 	whole     bool
 	next, reg int
+	// step marks v and err as what a loop's step's iterator's next, which
+	// native code called (regStepSites), returned or threw: the step's
+	// answer is made of them (jitRegStepCalled) once the frame is written.
+	step bool
 }
 
 // jitRetired is code compiled again or dropped while a call of Go was
@@ -9967,16 +9969,26 @@ func (r *Runtime) jitAllocates(sp int, in bytecode.Instr) (*Object, int) {
 // jitArrayRoom is the room a pooled array of `new Array(n)` is given for a
 // length n (abi.ObjectPool's Room): the least of the sizes newArrayStorage
 // makes an array's elements in its own allocation that n fits, as the
-// existing tiers would make it; or 0 past abi.PoolRoomLimit, an n Go
-// makes.
+// existing tiers would make it; past them, the least power of two n fits
+// (abi.PoolSmallRoom), its elements a slice of their own, as the existing
+// tiers make them; or 0 past abi.PoolRoomLimit, the longest n the Array
+// constructor makes dense, an n Go makes.
 func jitArrayRoom(n float64) int {
-	for _, room := range [...]int{4, 6, 8, 10, 12, 16} {
+	for _, room := range [...]int{4, 6, 8, 10, 12, abi.PoolSmallRoom} {
 		if n <= float64(room) {
-			return min(room, abi.PoolRoomLimit)
+			return room
 		}
 	}
-	return 0
+	if n > abi.PoolRoomLimit {
+		return 0
+	}
+	return 1 << bits.Len(uint(n)-1)
 }
+
+// jitArrayFillBytes bounds the elements' storage one filling of a pool of
+// arrays of more than abi.PoolSmallRoom makes (jitFillPool): a fill of
+// up to abi.PoolCapacity arrays of 32 elements, one of 4,096 or more.
+var jitArrayFillBytes = abi.PoolCapacity * 32 * int(valueSize)
 
 // jitNewArrayPool is jitNewPool's for new Array(n): its arrays with room
 // for room elements (abi.ObjectPool's Room), each a hole.
@@ -10017,6 +10029,12 @@ func (r *Runtime) jitFillPool(pool *abi.ObjectPool, o *Object) {
 		// the existing tiers make one (newArrayObject), its length 0 until
 		// native code makes it n.
 		room := int(pool.Room)
+		if room > abi.PoolSmallRoom {
+			// As many as jitArrayFillBytes holds, at least one, which is
+			// what the pool counts (jitPoolBytes).
+			n = max(1, min(n, jitArrayFillBytes/(room*int(valueSize))))
+			pool.Size = uint64(n)
+		}
 		for i := range n {
 			var a *Object
 			if room == 0 {
@@ -10181,12 +10199,20 @@ type jitPoolSource struct {
 func (r *Runtime) jitRefillPool(pool *abi.ObjectPool) bool {
 	src := (*jitPoolSource)(pool.Source)
 	if want := pool.Want; want != 0 && src != nil && src.ctor != nil {
-		// A new Array(n) of an n past its arrays' room: filled again,
-		// whatever it holds, with arrays of more.
+		// A new Array(n) of an n past its arrays' room, or one less than
+		// half of a room past abi.PoolSmallRoom: filled again, whatever it
+		// holds, with arrays of n's room. One of a room past
+		// abi.PoolSmallRoom, to or from, is filled with one array at first,
+		// and more as it runs out, as a new pool is: a site whose lengths
+		// change their room at each call is given an array a call, not a
+		// pool's filling.
 		pool.Want = 0
-		room := jitArrayRoom(float64(want))
-		if room == 0 || uint64(room) <= pool.Room {
+		room := jitArrayRoom(float64(want - 1))
+		if room == 0 || uint64(room) == pool.Room {
 			return false
+		}
+		if room > abi.PoolSmallRoom || pool.Room > abi.PoolSmallRoom {
+			pool.Size = 1
 		}
 		pool.Room = uint64(room)
 		r.jitFillPool(pool, src.ctor)
@@ -12950,7 +12976,7 @@ func (r *Runtime) jitShareContexts(idx int, f *frame) {
 	}
 	sh := jitShared{
 		global: unsafe.Pointer(f.cl.scope()), lexNames: unsafe.Pointer(&r.lexNames),
-		stackBase: unsafe.Pointer(unsafe.SliceData(r.stack)), stackEnd: uint64(len(r.stack)),
+		stackBase: unsafe.Pointer(unsafe.SliceData(r.stack)), stackEnd: r.jitStackEnd(),
 	}
 	if r.isGlobalScope(f.cl.scope()) {
 		// The interpreter reads a script's lexical bindings where the

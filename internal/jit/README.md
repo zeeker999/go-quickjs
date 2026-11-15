@@ -263,14 +263,14 @@ function's code with its window in this one's place, as the stack form's
 its parameters, undefined past them, as a native call writes its callee's
 window -- its temporaries, which it writes before it reads them, left as
 they are -- the context this one -- its closure, its captured bindings,
-`TailFrame` for its own calls -- and what its call entry would make past
-the window, its operands' address and the VM's stack's top, of the
-callee's code as its link has them (`abi.Encoding`'s `LinkStack` and
-`LinkTop`, `mir`'s Code's `StackAt` and `FrameSize`); the jump goes to the
-callee's tail entry (`ssa.Func`'s `TailEntry`, `mir`'s `windowTailJump`
-and `tailEntry`, its link's body): its start, or, where it has bindings
-past its parameters, a routine that makes them undefined, as its call
-entry does, then its start, returning where this frame would have: two
+`TailFrame` for its own calls -- its room the callee's window's, a
+constant, as a native call's (below); the jump goes to the callee's tail
+entry (`ssa.Func`'s `TailEntry`, `mir`'s `windowTailJump` and
+`tailEntry`, its link's body), a routine that makes what its call entry
+makes past the window, of its own code's constants -- its operands'
+address, the VM's stack's top and high water -- and its bindings past its
+parameters undefined, as its call entry does, then goes on at its start,
+returning where this frame would have: two
 functions calling each other in tail position run as deep as they like in
 one frame, natively. A call of the function itself writes its bindings
 and leaves its temporaries so too. Not a callee that keeps its arguments,
@@ -511,6 +511,7 @@ speculates nothing: it builds the site generically, or leaves it to Go.
 | closures and captured registers' cells from pools, an arrow's this its maker's register 1 (`ssa.ClosureSite`'s `LexThisReg`) | `Closure`, `CellsPool` |
 | `instanceof` of the constructor a global or a captured binding read just before holds, the searches, `parseInt`, BigInts' strings, by the built-in its site's cache holds | `InstanceOf`, `IndexOf`, `ParseInt`, `BigString` |
 | generators a loop's step or a call of `next` resumes natively, learned at the calls of Go that stepped them (`jitRegGenSeen`) | `GenSteps` |
+| a loop's step's iterator's `next` written in script, called natively, and its results' layout, learned at the calls of Go that stepped it (`jitRegStepNextSeen`) | `NativeCalls` |
 
 | Not answered yet | Methods | So |
 |---|---|---|
@@ -631,7 +632,9 @@ call that has no code is compiled at their first call of it through Go
 (`jitRegNativeCallee`): they make no sample of it. But one too long to
 inline (`ssa.MaxInline`, counted in the stack form's instructions,
 `jitRegInlineSize`) that is warming up, its budget begun and not spent or
-not begun (`jitRegLongWarming`), is compiled once its budget is spent, as
+not begun -- run fewer times than its first compile takes, as the stack
+form's closure counts its calls -- and not refused for host operations
+alone (`jitRegLongWarming`), is compiled once its budget is spent, as
 any function -- the interpreter's runs of it that Go makes for its native
 callers count it down -- unless its caller calls it often: no longer than
 a function inlines in all (`ssa.MaxInlineTotal`) and invoked at least 15
@@ -753,11 +756,15 @@ on. A delegation's step is left to the interpreter, which goes on with
 the frame there. A
 synchronous generator's code a loop's step or a call of `next` resumed
 natively suspends it at a `yield` itself (see [Control
-flow](#control-flow), "Generators' steps"). A generator's code is compiled
-at its loops' samples, and one of no loop once the resumptions Go made of
-it have done `jitHotWork` of its code, a sample of its hotness at each
-(`jitRegResumed`), as the stack form counts a function's calls' work
-(`jitHotEntry`). Its entries are none OSR's -- none escape analysis may
+flow](#control-flow), "Generators' steps"). A generator's or an async
+function's code is compiled at its loops' samples and by the resumptions
+Go makes of it, each an invocation that spends its length of the budget
+(`jitRegResumed`, `jitRegHot`), as the stack form's resumption does
+(`jitResume`, `tryJITAt`): an async function whose loop awaits at every
+turn is resumed at every turn, and its back edges may be too few for a
+sample. Code refused for host operations alone is asked again once its
+resumptions have done `jitHotWork` of it, as the stack form counts such a
+function's calls' work (`jitHotEntry`). Its entries are none OSR's -- none escape analysis may
 drop, for its resumptions' sake -- so its loops' headers are found from
 the program (`jitRegShape`).
 
@@ -1069,7 +1076,12 @@ want an int32 -- a ToInt32, a comparison, an element's key, truncated
 arithmetic -- and none in its loop wants a double (`intPhiUses`), and its
 loop's budget of five general registers holds it, a phi read after its loop
 counting two, its interval having no holes (`intPhiBudgets`): amd64's code
-has seven general registers for values against thirteen SSE ones. A box of
+has seven general registers for values against thirteen SSE ones. A phi of
+no loop's header whose arguments are all int32s -- conversions, constants,
+others of its group, no entry's number -- is one whatever its uses: as an
+int32 it is converted once after the merge, where its arguments had been in
+each predecessor, register code's loop's test, which a loop's int32 read
+after it reaches the exit from, at every turn. A box of
 an int32's conversion, which a loop header's state names before the
 conversion is made, is made of the int32: an exit reads the int32 and makes
 its number (`abi.ExitI32Reg`, `ExitI32Spill`), and liveness keeps the int32
@@ -1409,9 +1421,22 @@ can show; a comparator that cannot be inlined leaves the call to Go.
 **Allocation.** Object, array and regular expression literals, closures and
 their captured cells (see Closures), and the receivers of constructions, are
 taken from pools of objects the VM makes ahead (`abi.ObjectPool`), as V8's
-code allocates inline; Go refills a pool that runs out. A pooled array has
-storage for at most `abi.PoolRoomLimit` (16) elements: a `new Array(n)` of a
-longer n is made by Go.
+code allocates inline; Go refills a pool that runs out. `new Array(n)`'s
+pools hold arrays by size class (`abi.ObjectPool`'s `Room`, the VM's
+`jitArrayRoom`): up to `abi.PoolSmallRoom` (16) elements, the sizes an
+array's own allocation has room for, its array taken for any n up to the
+room; past it a power of two, the elements a slice of their own, its array
+taken for an n of more than half the room. An n the pool's room does not
+fit -- longer, or at most half a room past 16 -- has Go fill the pool again
+with arrays of n's class (`Want`, 1 plus n), and the construction is made
+again: a pool's arrays have at most twice the room their lengths need. A
+filling past 16 makes as many arrays as 64 KiB of elements holds, at least
+one, and a pool whose class changes is filled with one array, more as it
+runs out, so that a site whose lengths change class at every call is given
+an array a call, not a filling. Up to `abi.PoolRoomLimit` (65,536)
+elements, the longest the Array constructor makes with its holes in dense
+storage, every `new Array(n)` is taken from a pool; a longer n, whose array
+is its length alone, is Go's construction, called from native code.
 
 **Escape analysis.** As V8's TurboFan does, an object a pool would give the
 code -- an object literal's, the receiver of a construction the code inlines
@@ -1574,6 +1599,29 @@ index, which an element read by it finds again (mir's `forInIndex`,
 or, done, the uninitialized value native code branches on. A step's iterator
 is closed however the loop is left, as the interpreter closes it.
 
+**Iterators written in script.** Register code's step whose cursor has met
+an iterator whose `next` is written in script calls that `next` natively
+(ssa's `userStep`), as any native call of a function is made: the step's
+feedback is a native call site of the `next`, learned at the call of Go
+that stepped it (the VM's `jitRegStepNextSeen`, `regStepSites`), and the
+`next` is compiled for native callers then. The step checks its cursor
+(`ssa.OpCursorCell`: not done, no array's, no for...in's, its `next` that
+function), and on a branch of its own, where it is not, Go steps it as
+above (`split`); where it is, the call is made of the cursor's iterator,
+its receiver, and its `next`, its window no register's (`InlineCache`'s
+`Consumed` none), and its result is answered by a call of Go of the
+iterator protocol (`ssa.CallSite`'s `StepResult`, `abi.GoCallStepResult`),
+which native code makes itself of a result of the layout the step learned
+whose `done` is false or true (mir's `stepResult`): its `value`, or, done,
+the uninitialized value and the cursor's state marked done. A getter, a
+`done` no boolean, a result no object are Go's, which throws as the
+interpreter does. Where the `next` leaves native code, Go finishes it and
+the step from what it returned (`jitGoPending`'s `step`,
+`jitRegStepCalled`), never calling it again: native code where the code
+the call returns to is valid, Go's protocol on the result otherwise; a
+`next` that throws marks the cursor done, so that the loop's handler does
+not close it.
+
 **Generators' steps.** A for...of's or a destructuring's step over a
 generator (`ssa.CallSite`'s `Gens`) resumes it by a native call, as V8's
 code calls a generator's resumption: the step checks the cursor's generator
@@ -1641,7 +1689,15 @@ amd64's and arm64's in the same commit.
 
 **Register allocation.** `mir`'s scan (`allocate`) gives each value an
 interval from its definition to its last use, stretched over every block it
-is live in or out of. A frame state's slot is a use, which keeps the value
+is live in or out of. Which blocks those are is a backward dataflow over the
+blocks of the values used in another block than their own (`blockLiveness`),
+each block's set an `ir.LiveBuilder` persistent set, as the slot liveness's
+are, and an interval's ends are read along the layout, each block's sets
+against the one before: what the sets change from block to block, not what
+they hold. A walk of each value's blocks back from its uses had taken as
+many steps as values are live in each block, summed over the blocks -- n
+values live across a loop of 2n blocks 2n² steps, 40 s of a compile of
+16,000. A frame state's slot is a use, which keeps the value
 live for the exits that read it, but not a read the code makes: a value's
 cost in a spill slot counts only its definition and the uses that read it --
 an operand, a branch's control, a phi's argument at its edge, whose move
@@ -2035,10 +2091,18 @@ register too (`jitRegLevelCallee`, `jit.CalledFunction`), where its closure
 is the level's -- past a call in tail position that gave the frame to
 another, whose call wrote it, the register's -- as the stack form's frames
 find their function from the context or the call. It checks
-the room its link says its code takes (`LinkFrame`) -- one check, as the
-stack form's call makes, the link's room never less than the callee's
-registers (`CallSite`'s `LocalCount`), and a second for the arguments only
-where they are more than those. The call's state leaves out the window's
+the room for the callee's window, or for its arguments where they are more
+than its registers (`CallSite`'s `LocalCount`): one check of a constant,
+as the stack form's call checks its callee's locals and operands, the
+VM's stack's top it leaves kept for the window's address where the call
+has one function. What the callee's code takes past its window -- its
+scratch slots, its loops' slots, its objects' homes -- is its compile's,
+no constant of its function as the stack form's frame is, so the
+contexts' `StackEnd` is the VM's stack's length less the most any register
+code compiled takes past its window (the VM's `regRoom`,
+`jitStackRoom`), raised in every context before a code that takes more is
+callable: its frame fits past any window the check found room for. The
+link's room (`LinkFrame`) is what Go's entries and `enterExit` make. The call's state leaves out the window's
 registers the call consumes (`ssa.Value`'s `Consumes`): those the
 interpreter's frame does not read past the call, normally or at a handler
 (`ir.Program`'s `LiveAt`), and the result's, as the stack form's leaves out
@@ -2129,7 +2193,7 @@ generator from a pool, as the stack form's does (`ssa.CallSite`'s
 `GenMake`): the arguments written to the generator's registers from its
 window's register 2 (`GenArgAt`), a method's receiver to its register 1
 too (`GenThisAt`). A construction with the realm's Array, `new Array()` or `new Array(n)` of a
-length a pool's arrays have room for, learned at the call Go made of it
+length up to `abi.PoolRoomLimit`, learned at the call Go made of it
 (`jitRegAllocSeen`), takes its array from a pool (`ssa.CallSite`'s
 `Alloc`), as the stack form's does. A
 callee native callers call that has no code is compiled at their first call
@@ -2695,7 +2759,17 @@ with theirs, refusals first, then code unused this epoch and the one before,
 least recently used first (`regVictims`, `regReclaim`); and `flush` drops
 code unused between two of its looks (`regFlush`). Code let go of so has its
 function warm up anew (`regLetGo`), and compiled again it is compiled with
-all its function learned, which outlives its code (`regLearned`).
+all its function learned, which outlives its code (`regLearned`). The
+cache knows a function by its key, not its templates, so a template's code
+(`jitReg`) is code only while the cache holds it (`jitRegEntry`'s
+`cached`), as the stack form's hint names an entry only while the cache
+has it: the template's next call, or its native callers' next call of Go,
+finds code let go of and has its closures have none (`jitRegLetGoOf`), the
+runs it had counted kept (`jitRegInvoked`), and the native callers' call
+compiles it for them again (`jitRegNativeCalleeN`). A callee let go of
+had warmed up: one too long to inline is not taken for one warming up
+(below) and is compiled for its native callers at their next call of Go,
+as the stack form's is.
 
 Code is in use, and never let go of, while it runs as Go knows it -- a run
 of it, a level of a native call of it Go found, a compile of its function
@@ -3006,7 +3080,10 @@ TEST262_DIR=/path/to/test262 go test -tags quickjs_jit ./conformance \
   code's samples follow its threshold (`jitRegStressSample`). `background=K`
   added compiles the stack form's code in the background, every JIT runtime,
   and installs each compile exactly K checks after it was handed over: the
-  window between build and install, the same in every run. The differential
+  window between build and install, the same in every run; `miss` with it
+  has every register compile's worker leave its build as one that asked
+  what its snapshot was not asked, built on the runtime's goroutine at its
+  install, from feedback asked anew. The differential
   tests run so among their settings, and the background tests under `-race`
   (`-run 'Background|Differential'`).
 - `compilediff native` compares two builds' compiles, and `jitprof` (in
@@ -3229,11 +3306,22 @@ has held at once, its free slots reused.
   cache releases code.
 - Temporary (no budget at all): retried after another warm-up.
 
-What a compile costs, the VM weighs before it asks for one
-(`jitCompileBytes`: a word a slot an instruction, its slots counted as at
-least 256). A compile asks for room for what its entry is likely to hold
-(bytes per bytecode instruction, from the last compiles), then, compiled,
-for exactly what its entry will hold. Top-level code's refusals are not kept
+What a compile will hold, the VM weighs before it asks for one
+(`jitCompileBytes`): 512 bytes an instruction and 64 a slot, of what the
+code, its descriptions and its program take -- 260 bytes an instruction at
+the median of the V8 suite's, Octane's and AWFY's functions, 421 at the
+99th percentile -- and a function whose estimate is past the budget is
+refused. The budget bounds what the JIT holds, not a compile's working
+memory, which is linear in the function's size as what it holds is
+(`TestJITCompileLinear`): some 16,000 instructions are compiled at the
+default budget, 65,000 at 32 MiB, whatever their slots. The estimate had
+been a word a slot an instruction, its slots counted as at least 256 --
+the dense tables the frame states, the liveness and the builder's
+definitions had been -- which refused a function of 4,080 instructions at
+the default budget, and one of 1,000 slots past 1,000. A compile asks for
+room for what its entry is likely to hold (bytes per bytecode instruction,
+from the last compiles, the register code's as the stack form's), before
+it lowers anything, then, compiled, for exactly what its entry will hold. Top-level code's refusals are not kept
 in the cache, which a loop evaluating thousands of scripts would fill.
 
 ### What only it compiles

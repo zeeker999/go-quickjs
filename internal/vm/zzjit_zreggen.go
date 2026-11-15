@@ -337,22 +337,32 @@ func (r *Runtime) jitRegGenDone(f *frame, l *jitRegLevel, v Value, err error) (V
 }
 
 // jitRegResumed counts a resumption Go makes of a generator's or an async
-// function's register code c, cl's, which has no native code: its length,
-// as the stack form's jitHotEntry counts a function's calls' work
-// (jitEntry's coldWork), spent of its budget (jitRegHot) at each
-// jitHotWork of it, every resumption's counted. A generator of no loop has no back edge to be sampled
-// at, and its resumptions, made by Go from native code whose polls rearm
-// the interrupt budget, spend none of it.
+// function's register code c, cl's, which has no native code, as an
+// invocation, as the stack form's resumption is one (jitResume, tryJITAt):
+// its length spent of its budget (jitRegHot, jitTierWork). Code refused
+// for host operations alone is asked again once its resumptions have done
+// jitHotWork of it, as the stack form's jitHotEntry counts such code's
+// calls (jitEntry's coldWork). A generator of no loop has no back edge to
+// be sampled at, and its resumptions, made by Go from native code whose
+// polls rearm the interrupt budget, spend none of it. Every resumption
+// counted at jitHotWork, an async function whose loop awaits at every
+// turn -- each turn a resumption, too few back edges in all for a sample
+// -- was never compiled.
 func (r *Runtime) jitRegResumed(cl *closure, c *regCode) {
 	cc := cl.closureCode
 	if !r.jitEnabled || cc == nil || cc.jitRegRefused {
 		return
 	}
-	l := r.jitState().regLearnedOf(r.jitRegKeyOf(cl))
-	if l.coldWork += uint64(len(c.rc.Code)); l.coldWork < jitHotWork {
-		return
+	s := r.jitState()
+	key := r.jitRegKeyOf(cl)
+	work := int64(max(len(c.rc.Code), 1))
+	if e := s.regCache[key]; e != nil && e.hostOnly {
+		l := s.regLearnedOf(key)
+		if l.coldWork += uint64(work); l.coldWork < jitHotWork {
+			return
+		}
+		work = int64(l.coldWork)
+		l.coldWork = 0
 	}
-	work := int64(l.coldWork)
-	l.coldWork = 0
 	r.jitRegHot(cl, c, work)
 }

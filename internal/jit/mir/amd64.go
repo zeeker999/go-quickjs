@@ -334,16 +334,11 @@ func compileAMD64(w *Workspace, f *ssa.Func, enc abi.Encoding, opts Options) (co
 		c.mark("routine resume")
 		c.resumeCall()
 	}
-	tailAt, tailStart := -1, false
+	tailAt := -1
 	if c.f.TailEntry && c.f.CallEntry && c.entryAt(0) != nil {
-		if c.tailInits() {
-			tailAt = c.a.Len()
-			c.mark("routine tailEntry")
-			c.tailEntry()
-		} else {
-			// Nothing to make: the entry at the start.
-			tailStart = true
-		}
+		tailAt = c.a.Len()
+		c.mark("routine tailEntry")
+		c.tailEntry()
 	}
 	genAt := -1
 	if c.f.GenEntry {
@@ -443,16 +438,13 @@ func compileAMD64(w *Workspace, f *ssa.Func, enc abi.Encoding, opts Options) (co
 	if tailAt >= 0 {
 		tailAt = c.a.Moved(tailAt)
 	}
-	if tailStart {
-		tailAt = entries[0]
-	}
 	c.finishExits()
 	marks, listing := c.finishMarks()
 	c.lap(PhaseEncode)
 	if t := c.opts.Timing; t != nil {
 		t.Compiles++
 	}
-	return &Code{Bytes: bytes, Entries: entries, CallEntry: callAt, Resume: resumeAt, GenEntry: genAt, TailEntry: tailAt, StackAt: c.f.FrameLocals + c.f.Scratch, FrameSize: c.frameSize(), Text: c.a.Moved(text), Exits: c.exits,
+	return &Code{Bytes: bytes, Entries: entries, CallEntry: callAt, Resume: resumeAt, GenEntry: genAt, TailEntry: tailAt, Text: c.a.Moved(text), Exits: c.exits,
 		Calls: c.calls, CallRefs: c.callRefs(), Spills: c.spills, GoCalls: c.goCalls, Marks: marks, Listing: listing, core: c.core}, nil
 }
 
@@ -1950,8 +1942,9 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 	}
 	// The room check of such a call leaves the VM's stack's top in
 	// scratchC, where nothing after it reads the callee, for the callee's
-	// frame's address to be made of (topInC).
-	keepTop := direct && site.Parent == 0 && site.Pool == 0
+	// frame's address to be made of (topInC): a direct call's, or register
+	// code's of one function.
+	keepTop := (direct || win && len(sites) == 1 && !gen && !site.Push && !site.Pop && !site.Alloc && !site.Receiver) && site.Parent == 0 && site.Pool == 0
 	var stub amd64.Label
 	if !gen {
 		stub = c.stubLabel(s, exitKind(v.Aux))
@@ -2047,25 +2040,24 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 		}
 		// Room in the VM's stack.
 		if win {
-			// The callee's window and what its code takes past it, its
-			// link's (abi.Encoding's LinkFrame), which the code it runs now
-			// sets, and the arguments the call writes, where they are more
-			// than its registers (LocalCount), which the link's room never
-			// is less than: one check, as the stack form's call makes, where
-			// they are not -- a second had been a load and a compare more at
-			// every call. scratchC keeps the callee, which a construction's
-			// checks read.
-			if 2+site.Argc > t.LocalCount {
+			// The callee's window, or the arguments the call writes where
+			// they are more than its registers (LocalCount): what its code
+			// takes past the window, which each compile of it sets, the
+			// context's StackEnd leaves room for below the VM's stack's end
+			// (abi.Context's StackEnd), so that the check is of a constant,
+			// as the stack form's -- the link's room, read at every call,
+			// had been two loads more. scratchC keeps the callee, which a
+			// construction's checks read, or else the stack's top.
+			room := int32(max(t.LocalCount, 2+site.Argc))
+			if keepTop {
+				c.a.Load(scratchC, regCtx, abi.OffStackTop)
+				c.a.Load(scratchC, scratchC, 0)
+				c.a.Lea(scratchB, scratchC, room)
+			} else {
 				c.a.Load(scratchB, regCtx, abi.OffStackTop)
 				c.a.Load(scratchB, scratchB, 0)
-				c.a.OpImm(amd64.Add, scratchB, int32(2+site.Argc), true)
-				c.a.CmpMem(scratchB, regCtx, abi.OffStackEnd, true)
-				guard.jump(amd64.CondA)
+				c.a.OpImm(amd64.Add, scratchB, room, true)
 			}
-			c.a.Load(scratchB, regCtx, abi.OffStackTop)
-			c.a.Load(scratchB, scratchB, 0)
-			c.movImm(scratchA, uint64(t.Entry)-uint64(c.enc.LinkEntry))
-			c.a.AddMem(scratchB, scratchA, c.enc.LinkFrame)
 		} else if keepTop {
 			c.a.Load(scratchC, regCtx, abi.OffStackTop)
 			c.a.Load(scratchC, scratchC, 0)
@@ -2181,9 +2173,13 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 		// call's operands straight from where the code has them, whatever
 		// function the checks found -- the function in its register 0, a
 		// method call's receiver in 1, the arguments from 2 -- and, in
-		// setup, what each callee's own window needs besides.
-		c.a.Load(scratchC, regCtx, abi.OffStackTop)
-		c.a.Load(scratchC, scratchC, 0)
+		// setup, what each callee's own window needs besides. The stack's
+		// top the room check left, if no record was written since
+		// (callRecords uses scratchC).
+		if !keepTop || len(recs) != 0 {
+			c.a.Load(scratchC, regCtx, abi.OffStackTop)
+			c.a.Load(scratchC, scratchC, 0)
+		}
 		c.a.ShiftImm(amd64.Shl, scratchC, 4, true)
 		c.a.AddMem(scratchC, regCtx, abi.OffStackBase)
 		c.a.MovQToX(xScratch2, scratchC)
@@ -2840,6 +2836,18 @@ func (c *compiler) goCall(v *ssa.Value, site *ssa.CallSite, guard guardTo) {
 		// (genNext); any other Go makes.
 		slow, join := c.a.NewLabel(), c.a.NewLabel()
 		c.genNext(v, slow, join)
+		c.a.Bind(slow)
+		c.goCallOp(v, goOpWord(site), guard, false)
+		c.a.Bind(join)
+		c.a.Load(scratchA, regCtx, abi.OffKeep+int32(v.Index)*int32(c.enc.ValueSize)+c.enc.NumOffset)
+		c.setG(v, scratchA)
+		return
+	}
+	if site.StepResult && site.ResultShape != 0 && c.enc.IterState != 0 {
+		// A loop's step's answer native code reads itself (stepResult);
+		// any other Go makes.
+		slow, join := c.a.NewLabel(), c.a.NewLabel()
+		c.stepResult(v, slow, join)
 		c.a.Bind(slow)
 		c.goCallOp(v, goOpWord(site), guard, false)
 		c.a.Bind(join)
@@ -3734,6 +3742,59 @@ func (c *compiler) closureTakeMarking(v *ssa.Value, site *ssa.CallSite, slow amd
 	}
 	c.movImm(scratchA, c.enc.Object)
 	c.setG(v, scratchA)
+}
+
+// stepResult makes call v, a loop's step's answer (ssa.CallSite's
+// StepResult), of its cursor and the result of its iterator's next, where
+// the result is an object of the site's ResultShape whose done, at
+// DoneAt, is false or true: false, its value, at ValueAt, to the call's
+// keep cell, its pointer word stored with Go's write barrier while the
+// collector marks, as a call's result is; true, the uninitialized value
+// there and the cursor's state marked done, as Go's step marks it. It
+// goes on at join; anything else goes to slow, where Go makes it. It uses
+// every scratch register.
+func (c *compiler) stepResult(v *ssa.Value, slow, join amd64.Label) {
+	site := v.Calls()[0]
+	cur, res := v.Args[0], v.Args[1]
+	vs := int32(c.enc.ValueSize)
+	keep := abi.OffKeep + int32(v.Index)*vs
+	w := c.gpr(res, scratchA)
+	c.cmpWord(w, c.enc.Object)
+	c.a.Jcc(amd64.CondNE, slow)
+	c.pointerWord(res, w)
+	c.a.Load(scratchC, scratchB, c.enc.ObjectShape)
+	c.cmpWord(scratchC, uint64(site.ResultShape))
+	c.a.Jcc(amd64.CondNE, slow)
+	c.a.Load(scratchB, scratchB, c.enc.ObjectProps)
+	c.a.Load(scratchC, scratchB, int32(site.DoneAt)*vs+c.enc.NumOffset)
+	value := c.a.NewLabel()
+	c.cmpWord(scratchC, c.enc.False)
+	c.a.Jcc(amd64.CondE, value)
+	c.cmpWord(scratchC, c.enc.True)
+	c.a.Jcc(amd64.CondNE, slow)
+	// Done: no value, the cursor's state done.
+	c.pointerWord(cur, c.gpr(cur, scratchA))
+	c.movImm(scratchC, 1)
+	c.a.Store8(scratchB, c.enc.IterState+c.enc.IterDone, scratchC)
+	c.storeImm(regCtx, keep+c.enc.NumOffset, c.enc.Uninitialized, scratchA)
+	c.storeImm(regCtx, keep+c.enc.RefOffset, 0, scratchA)
+	c.a.Jmp(join)
+	c.a.Bind(value)
+	c.a.Load(scratchA, scratchB, int32(site.ValueAt)*vs+c.enc.NumOffset)
+	c.a.Load(scratchC, scratchB, int32(site.ValueAt)*vs+c.enc.RefOffset)
+	c.a.Store(regCtx, keep+c.enc.NumOffset, scratchA)
+	marked := c.a.NewLabel()
+	c.movImm(scratchB, c.enc.WriteBarrier)
+	c.a.TestMem8(scratchB, 0, 0xFF)
+	c.a.Jcc(amd64.CondNE, marked)
+	c.a.Store(regCtx, keep+c.enc.RefOffset, scratchC)
+	c.a.Jmp(join)
+	c.cold = append(c.cold, func() {
+		c.a.Bind(marked)
+		c.a.Lea(scratchA, regCtx, keep+c.enc.RefOffset)
+		c.refStore()
+		c.a.Jmp(join)
+	})
 }
 
 // iterStep makes call v, a loop's step (ssa.CallSite's Step), where the
@@ -5282,8 +5343,12 @@ func (c *compiler) tailDeep(v *ssa.Value, guard guardTo) {
 	}
 	c.a.Store(regCtx, abi.OffCallCallee, scratchC)
 	size := int32(unsafe.Sizeof(abi.GoArg{}))
+	fnDirect, thisUndef := tailUnstaged(v, args)
+	unstaged := func(i int) bool { return i == 0 && fnDirect || i == 1 && thisUndef }
 	for i, x := range args {
-		c.goArg(abi.OffGoArgs+int32(i)*size, x)
+		if !unstaged(i) {
+			c.goArg(abi.OffGoArgs+int32(i)*size, x)
+		}
 	}
 	if this != nil {
 		c.goArg(abi.OffGoArgs+int32(len(args))*size, this)
@@ -5301,7 +5366,15 @@ func (c *compiler) tailDeep(v *ssa.Value, guard guardTo) {
 		c.a.Bind(marked)
 		for i := range staged {
 			c.a.Lea(scratchA, regCtx, abi.OffShade)
-			c.a.Load(scratchC, regCtx, abi.OffGoArgs+int32(i)*size+c.enc.RefOffset)
+			switch {
+			case i == 0 && fnDirect:
+				// The callee, which the frame's register 0 is given.
+				c.a.Load(scratchC, regCtx, abi.OffCallCallee)
+			case unstaged(i):
+				continue
+			default:
+				c.a.Load(scratchC, regCtx, abi.OffGoArgs+int32(i)*size+c.enc.RefOffset)
+			}
 			c.refStore()
 		}
 		// Shaded, kept no longer (abi.Context's Shade).
@@ -5326,7 +5399,13 @@ func (c *compiler) tailDeep(v *ssa.Value, guard guardTo) {
 	for i := range slots {
 		nb, nd := c.slotAddr(i, false, scratchC)
 		rb, rd := c.slotAddr(i, true, scratchC)
-		if i < v.Index && i < len(args) {
+		if i == 0 && fnDirect {
+			c.storeImm(nb, nd, c.enc.Object, scratchB)
+			c.a.Load(scratchA, regCtx, abi.OffCallCallee)
+			c.a.Store(rb, rd, scratchA)
+			continue
+		}
+		if i < v.Index && i < len(args) && !unstaged(i) {
 			at := abi.OffGoArgs + int32(i)*size
 			c.a.Load(scratchA, regCtx, at+c.enc.NumOffset)
 			c.a.Store(nb, nd, scratchA)
@@ -5363,10 +5442,15 @@ func (c *compiler) tailDeep(v *ssa.Value, guard guardTo) {
 		c.a.Load(scratchC, regCtx, abi.OffFrameThis)
 		c.a.Op(amd64.Test, scratchC, scratchC, true)
 		c.a.Jcc(amd64.CondE, none)
-		c.a.Load(scratchA, regCtx, at+c.enc.NumOffset)
-		c.a.Store(scratchC, c.enc.NumOffset, scratchA)
-		c.a.Load(scratchA, regCtx, at+c.enc.RefOffset)
-		c.a.Store(scratchC, c.enc.RefOffset, scratchA)
+		if thisUndef {
+			c.storeImm(scratchC, c.enc.NumOffset, c.enc.Undefined, scratchA)
+			c.storeImm(scratchC, c.enc.RefOffset, 0, scratchA)
+		} else {
+			c.a.Load(scratchA, regCtx, at+c.enc.NumOffset)
+			c.a.Store(scratchC, c.enc.NumOffset, scratchA)
+			c.a.Load(scratchA, regCtx, at+c.enc.RefOffset)
+			c.a.Store(scratchC, c.enc.RefOffset, scratchA)
+		}
 		c.a.Bind(none)
 	}
 	c.a.Jmp(c.labels[entry.ID])
@@ -5397,7 +5481,7 @@ func (c *compiler) tailDeep(v *ssa.Value, guard guardTo) {
 			c.a.Jcc(amd64.CondNE, next)
 		}
 		if window {
-			c.windowTailJump(t, len(args), guard)
+			c.windowTailJump(t, len(args), fnDirect, thisUndef, guard)
 		} else {
 			c.tailJump(t, len(args), this != nil, guard)
 		}
@@ -5410,21 +5494,55 @@ func (c *compiler) tailDeep(v *ssa.Value, guard guardTo) {
 // bindings to make: its call entry makes those past its parameters.
 func (c *core) tailInits() bool { return !c.f.StartOnly && c.f.Params < c.f.InitLocals() }
 
+// tailUnstaged reports which of register code's window's operands of v, a
+// call in tail position (ssa.OpTailSelf, TailWindow), args, tailDeep
+// writes to the frame without staging them in the context's operands:
+// its function, the callee, whose pointer word the context's CallCallee
+// keeps, and a plain call's receiver, undefined -- as the stack form's
+// call stages neither, its frame having no register of them. Each staged
+// had been four words stored and four loaded more at every call.
+func tailUnstaged(v *ssa.Value, args []*ssa.Value) (fn, this bool) {
+	if v.Key&ssa.TailWindow == 0 {
+		return false, false
+	}
+	fn = len(args) > 0 && args[0] == v.Args[0]
+	this = len(args) > 1 && args[1].Op == ssa.OpConst && args[1].Const.Kind == ir.Undefined
+	return fn, this
+}
+
 // tailEntry is register code's entry for another function's call in tail
 // position (ssa.Func's TailEntry), which windowTailJump jumps to with the
 // frame's window written in place of the caller's, at the context's
-// Locals, the context the caller's, and what its call entry makes past the
-// window made: its bindings past its parameters made undefined, as the
-// call entry makes them -- the call wrote its window's parameters alone,
-// as a native call's does (windowSetup) -- it goes on at the start, as
-// Go's entry does. Code with none has its start for its tail entry.
+// Locals, the context the caller's: it makes what its call entry makes
+// past the window, of its own frame's size -- its operands' address, the
+// context's Stack, and the VM's stack's top and high water past its frame
+// -- and its bindings past its parameters undefined, as the call entry
+// makes them -- the call wrote its window's parameters alone, as a native
+// call's does (windowSetup) -- and goes on at the start, as Go's entry
+// does. Made here, of the code's own constants, they are no loads of its
+// link at every call in tail position (the stack form's tailJump writes
+// its callee's constants, its frame's size a constant of its function).
 func (c *compiler) tailEntry() {
 	vs := int32(c.enc.ValueSize)
-	c.movImm(scratchA, c.enc.Undefined)
-	c.movImm(scratchB, 0)
-	for i := c.f.Params; i < c.f.InitLocals(); i++ {
-		c.a.Store(regLocals, int32(i)*vs+c.enc.NumOffset, scratchA)
-		c.a.Store(regLocals, int32(i)*vs+c.enc.RefOffset, scratchB)
+	c.a.Lea(regStack, regLocals, int32(c.f.FrameLocals+c.f.Scratch)*vs)
+	c.a.Store(regCtx, abi.OffStack, regStack)
+	c.a.Load(scratchB, regCtx, abi.OffBase)
+	c.a.OpImm(amd64.Add, scratchB, int32(c.frameSize()), true)
+	c.a.Load(scratchC, regCtx, abi.OffStackTop)
+	c.a.Store(scratchC, 0, scratchB)
+	same := c.a.NewLabel()
+	c.a.Load(scratchC, regCtx, abi.OffStackHigh)
+	c.a.CmpMem(scratchB, scratchC, 0, true)
+	c.a.Jcc(amd64.CondBE, same)
+	c.a.Store(scratchC, 0, scratchB)
+	c.a.Bind(same)
+	if c.tailInits() {
+		c.movImm(scratchA, c.enc.Undefined)
+		c.movImm(scratchB, 0)
+		for i := c.f.Params; i < c.f.InitLocals(); i++ {
+			c.a.Store(regLocals, int32(i)*vs+c.enc.NumOffset, scratchA)
+			c.a.Store(regLocals, int32(i)*vs+c.enc.RefOffset, scratchB)
+		}
 	}
 	c.a.Jmp(c.labels[c.entryAt(0).ID])
 }
@@ -5434,15 +5552,16 @@ func (c *compiler) tailEntry() {
 // window's function, receiver and arguments -- in a native callee's frame:
 // t's code, which native callers may call, takes the frame's place, its
 // window the frame's -- its registers the operands up to its parameters,
-// undefined past them -- its context this one, and what its call entry
-// makes past the window -- its operands' address, the context's Stack, and
-// the VM's stack's top and high water past its frame, of its code's as
-// its link has them (abi.Encoding's LinkStack, LinkTop) -- made, as the
-// stack form's tailJump makes them, and goes on at its tail entry
-// (Code.TailEntry): its start, or what makes its bindings first, returning
-// where this frame would have. The frame's room is its link's
-// (abi.Encoding's LinkFrame).
-func (c *compiler) windowTailJump(t *ssa.CallSite, n int, guard guardTo) {
+// undefined past them -- its context this one, as the stack form's
+// tailJump makes them, and goes on at its tail entry (Code.TailEntry),
+// which makes what its call entry makes past the window, returning where
+// this frame would have. The room checked is its window's, a constant:
+// what its code takes past the window the context's StackEnd leaves below
+// the VM's stack's end.
+//
+// Its function, where fn, is the callee the context's CallCallee keeps,
+// and its receiver, where this, undefined: neither staged (tailUnstaged).
+func (c *compiler) windowTailJump(t *ssa.CallSite, n int, fn, this bool, guard guardTo) {
 	vs, size := int32(c.enc.ValueSize), int32(unsafe.Sizeof(abi.GoArg{}))
 	link := uint64(t.Entry) - uint64(c.enc.LinkEntry)
 	c.movImm(scratchA, link)
@@ -5450,7 +5569,7 @@ func (c *compiler) windowTailJump(t *ssa.CallSite, n int, guard guardTo) {
 	c.a.Op(amd64.Test, scratchB, scratchB, true)
 	guard.jump(amd64.CondE)
 	c.a.Load(scratchB, regCtx, abi.OffBase)
-	c.a.AddMem(scratchB, scratchA, c.enc.LinkFrame)
+	c.a.OpImm(amd64.Add, scratchB, int32(t.LocalCount), true)
 	c.a.Load(scratchA, regCtx, abi.OffStackEnd)
 	c.a.Op(amd64.Cmp, scratchB, scratchA, true)
 	guard.jump(amd64.CondA)
@@ -5460,16 +5579,21 @@ func (c *compiler) windowTailJump(t *ssa.CallSite, n int, guard guardTo) {
 	// temporaries it writes before it reads them.
 	for i := 0; i < t.Params && i < t.LocalCount; i++ {
 		at := int32(i) * vs
-		if i < n {
+		switch {
+		case i == 0 && fn:
+			c.storeImm(regLocals, at+c.enc.NumOffset, c.enc.Object, scratchA)
+			c.a.Load(scratchA, regCtx, abi.OffCallCallee)
+			c.a.Store(regLocals, at+c.enc.RefOffset, scratchA)
+		case i < n && !(i == 1 && this):
 			g := abi.OffGoArgs + int32(i)*size
 			c.a.Load(scratchA, regCtx, g+c.enc.NumOffset)
 			c.a.Store(regLocals, at+c.enc.NumOffset, scratchA)
 			c.a.Load(scratchA, regCtx, g+c.enc.RefOffset)
 			c.a.Store(regLocals, at+c.enc.RefOffset, scratchA)
-			continue
+		default:
+			c.storeImm(regLocals, at+c.enc.NumOffset, c.enc.Undefined, scratchA)
+			c.storeImm(regLocals, at+c.enc.RefOffset, 0, scratchA)
 		}
-		c.storeImm(regLocals, at+c.enc.NumOffset, c.enc.Undefined, scratchA)
-		c.storeImm(regLocals, at+c.enc.RefOffset, 0, scratchA)
 	}
 	if t.ByCode != 0 {
 		c.a.Load(scratchA, regCtx, abi.OffCallClosure)
@@ -5497,19 +5621,6 @@ func (c *compiler) windowTailJump(t *ssa.CallSite, n int, guard guardTo) {
 		c.a.Store(scratchA, 0, scratchB)
 	}
 	c.movImm(scratchA, link)
-	c.a.Load(regStack, scratchA, c.enc.LinkStack)
-	c.a.Op(amd64.Add, regStack, regLocals, true)
-	c.a.Store(regCtx, abi.OffStack, regStack)
-	c.a.Load(scratchB, regCtx, abi.OffBase)
-	c.a.AddMem(scratchB, scratchA, c.enc.LinkTop)
-	c.a.Load(scratchC, regCtx, abi.OffStackTop)
-	c.a.Store(scratchC, 0, scratchB)
-	same := c.a.NewLabel()
-	c.a.Load(scratchC, regCtx, abi.OffStackHigh)
-	c.a.CmpMem(scratchB, scratchC, 0, true)
-	c.a.Jcc(amd64.CondBE, same)
-	c.a.Store(scratchC, 0, scratchB)
-	c.a.Bind(same)
 	c.a.JmpMem(scratchA, c.enc.LinkBody)
 }
 
@@ -6394,12 +6505,13 @@ func (c *compiler) poolShade(sites []*ssa.CallSite) {
 
 // lengthGuards checks a `new Array(n)` can take its array from its pool:
 // n, the operand x, a number that is an integer in [0, the pool's Room]
-// (abi.ObjectPool). One past Room, up to abi.PoolRoomLimit, has Go fill
-// the pool again with arrays of more room (Want), and the call is made
-// again from its start, every check again, as an empty pool is
-// (refillOnEmpty); any other n fails the guard: Go makes the array, as
-// V8's code calls the Array constructor past the length it allocates
-// inline. It uses every scratch register.
+// (abi.ObjectPool), and past abi.PoolSmallRoom more than half of it. One
+// past Room, up to abi.PoolRoomLimit, or at most half a room past
+// PoolSmallRoom, has Go fill the pool again with arrays of n's room
+// (Want), and the call is made again from its start, every check again,
+// as an empty pool is (refillOnEmpty); any other n fails the guard: Go
+// makes the array, as V8's code calls the Array constructor past the
+// length it allocates inline. It uses every scratch register.
 func (c *compiler) lengthGuards(t *ssa.CallSite, x *ssa.Value, guard guardTo) {
 	var w amd64.Reg
 	if remat(x) {
@@ -6422,8 +6534,25 @@ func (c *compiler) lengthGuards(t *ssa.CallSite, x *ssa.Value, guard guardTo) {
 	c.movImm(scratchB, uint64(t.Pool))
 	c.a.Load(scratchC, scratchB, abi.OffPoolRoom)
 	c.a.Op(amd64.Cmp, scratchA, scratchC, true)
-	fits := c.a.NewLabel()
+	fits, past := c.a.NewLabel(), c.a.NewLabel()
+	c.a.Jcc(amd64.CondA, past)
+	// Within its room: any n of a small room, else one of its class, more
+	// than half of it.
+	c.a.OpImm(amd64.Cmp, scratchC, abi.PoolSmallRoom, true)
 	c.a.Jcc(amd64.CondBE, fits)
+	c.a.ShiftImm(amd64.Shr, scratchC, 1, true)
+	c.a.Op(amd64.Cmp, scratchA, scratchC, true)
+	c.a.Jcc(amd64.CondA, fits)
+	v, top := c.callV, c.callTop
+	var grow amd64.Label
+	if v == nil {
+		// No call to make again: Go makes it.
+		guard.jump(amd64.CondBE)
+	} else {
+		grow = c.a.NewLabel()
+		c.a.Jmp(grow)
+	}
+	c.a.Bind(past)
 	// Past its room: a negative n, unsigned, is past every room. Past
 	// what any pool's arrays have room for, Go makes the construction,
 	// called from native code, which goes on after it (allocDone) -- a
@@ -6443,17 +6572,18 @@ func (c *compiler) lengthGuards(t *ssa.CallSite, x *ssa.Value, guard guardTo) {
 	} else {
 		guard.jump(amd64.CondA)
 	}
-	v, top := c.callV, c.callTop
 	if v == nil {
 		// No call to make again: Go makes it. n is at most the limit, as
 		// the flags still say.
 		guard.jump(amd64.CondBE)
 	} else {
-		grow := c.a.NewLabel()
 		c.a.Jmp(grow)
 		pool := t.Pool
 		c.cold = append(c.cold, func() {
 			c.a.Bind(grow)
+			// 1 plus n: an n of 0, which a room past abi.PoolSmallRoom
+			// is too large for, is asked for too.
+			c.a.OpImm(amd64.Add, scratchA, 1, true)
 			c.a.Store(scratchB, abi.OffPoolWant, scratchA)
 			c.storeImm(regCtx, abi.OffGoArgs+c.enc.RefOffset, uint64(pool), scratchA)
 			c.callGo(v, uint64(ssa.GoRefill), 0)
@@ -9734,6 +9864,43 @@ func (c *compiler) stringAtOr(v *ssa.Value) {
 	c.setG(v, scratchA)
 }
 
+// cursorCell is ssa.OpCursorCell into v's register: of a cursor, its
+// state's iterator's cell (Index 0) where the state is not done, walks no
+// array, is no for...in's and its next's pointer word is Const's, 0
+// otherwise; or its next's cell (Index 1). It uses every scratch
+// register.
+func (c *compiler) cursorCell(v *ssa.Value) {
+	x := v.Args[0]
+	none, done := c.a.NewLabel(), c.a.NewLabel()
+	c.pointerWord(x, c.gpr(x, scratchA))
+	if v.Index == 1 {
+		c.a.Lea(scratchA, scratchB, c.enc.IterState+c.enc.IterNext)
+		c.setG(v, scratchA)
+		return
+	}
+	c.a.Op(amd64.Test, scratchB, scratchB, true)
+	c.a.Jcc(amd64.CondE, none)
+	c.objectPart(scratchB, scratchB, scratchC, c.enc.ClassCursor, c.enc.IterState, guardLabel(c, none))
+	c.a.LoadU8(scratchC, scratchB, c.enc.IterDone)
+	c.a.Op(amd64.Test, scratchC, scratchC, false)
+	c.a.Jcc(amd64.CondNE, none)
+	c.a.LoadU8(scratchC, scratchB, c.enc.IterForIn)
+	c.a.Op(amd64.Test, scratchC, scratchC, false)
+	c.a.Jcc(amd64.CondNE, none)
+	c.a.Load(scratchC, scratchB, c.enc.IterArr)
+	c.a.Op(amd64.Test, scratchC, scratchC, true)
+	c.a.Jcc(amd64.CondNE, none)
+	c.a.Load(scratchC, scratchB, c.enc.IterNext+c.enc.RefOffset)
+	c.cmpWord(scratchC, v.Const.Bits)
+	c.a.Jcc(amd64.CondNE, none)
+	c.a.Lea(scratchA, scratchB, c.enc.IterIter)
+	c.a.Jmp(done)
+	c.a.Bind(none)
+	c.movImm(scratchA, 0)
+	c.a.Bind(done)
+	c.setG(v, scratchA)
+}
+
 // typeofCell is typeof x's answer (ssa.OpTypeofCell): the cell of the
 // runtime's string of x's type, in the table at v's Const -- undefined,
 // object, boolean, number, string, symbol, bigint and function's, a value
@@ -11292,6 +11459,8 @@ func (c *compiler) value(v *ssa.Value, b *ssa.Block) {
 		c.numberIs(v)
 	case ssa.OpTypeofCell:
 		c.typeofCell(v)
+	case ssa.OpCursorCell:
+		c.cursorCell(v)
 	case ssa.OpLoopMark:
 		// A loop of a built-in's call under way, or done (abi.Context's
 		// Loop).
