@@ -780,7 +780,7 @@ func regLeafRunnable(rc *bytecode.RegCode) bool {
 			if w.B() < 2 || w.C() < 2 {
 				return false
 			}
-		case bytecode.RAddI, bytecode.RSubI, bytecode.RInc, bytecode.RDec, bytecode.RMove:
+		case bytecode.RAddI, bytecode.RSubI, bytecode.RMulI, bytecode.RInc, bytecode.RDec, bytecode.RMove:
 			if w.B() < 2 {
 				return false
 			}
@@ -825,6 +825,8 @@ const (
 	// rlAddK adds k: add_imm, sub_imm of the negated immediate (x - y is
 	// x + -y, -0 and NaN alike), inc and dec.
 	rlAddK
+	// rlMulK multiplies by k: mul_imm.
+	rlMulK
 	rlRet
 	rlRetUndef
 )
@@ -858,6 +860,8 @@ func regLeafOps(fn *bytecode.Function, rc *bytecode.RegCode) []regLeafOp {
 			o.op, o.k = rlAddK, Float(float64(w.SC()))
 		case bytecode.RSubI:
 			o.op, o.k = rlAddK, Float(-float64(w.SC()))
+		case bytecode.RMulI:
+			o.op, o.k = rlMulK, Float(float64(w.SC()))
 		case bytecode.RInc:
 			o.op, o.k = rlAddK, Float(1)
 		case bytecode.RDec:
