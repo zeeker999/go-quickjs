@@ -173,7 +173,19 @@ instruction, a register a closure captures live throughout, a handler's live
 registers live at every instruction it guards, a loop's step's register not
 written at the loop's end, and every instruction of a register instruction's
 lowering live as its first, where an exit inside it runs it again -- so an
-exit writes only the registers the interpreter may read.
+exit writes only the registers the interpreter may read. Each instruction's
+set is a persistent bitset (`ir.Liveness`), a tree of 64-slot leaves under
+nodes of 16 that the instructions' sets share: an instruction's set is the
+next one's with what it writes taken out and what it reads put in, which
+copies only the nodes on their paths. The dataflow runs over blocks, each
+block's set at its start found again from its successors' with a worklist
+until none changes, then each instruction's from its block's end
+(`liveRegs`). A program keeps the dense rows instead where they are the
+smaller, as they are for most functions of a few hundred registers or
+fewer; a dense row at every instruction had made the liveness of n
+registers and m instructions n·m bits. The builder asks a set's slots
+(`Liveness.Slots`) and the slots two sets tell apart where their trees
+differ (`Liveness.Changed`).
 
 **One register instruction, one or more IR instructions.** Most register
 instructions are one IR instruction with their operands named: `add r4, r2,
@@ -863,13 +875,26 @@ share their StateValues (`ssa/slots.go`): a node holds a mask of the
 entries it has and one value or child for each, and a change copies only
 the nodes on its path that the edit making the state did not make itself.
 The builder makes a state from the last one its block made, or, for a
-block's first, from the last of its only predecessor (`stateSlots`): it
-reads again only the slots written since -- every write to a block is
-listed for its next state -- and those that the liveness at one PC names
-and at the other does not, its words told apart; a slot both name that
-nothing wrote since has the value it had, which a read would find again
-without making anything, so that what the reads make, and in which order,
-is what reading every live slot made. A function of n values live at once
+block's first, from the last of its only predecessor, through blocks that
+made none (`stateSlots`, `lastOf`): it reads again only the slots written
+since -- every write to a block is listed for its next state -- and those
+that the liveness at one PC names and at the other does not; a slot both
+name that nothing wrote since has the value it had, which a read would find
+again without making anything. A block of several predecessors, sealed,
+makes its first state from its first predecessor's last (`mergeFrom`),
+reading again the slots written in any predecessor since its last state
+and those the predecessors' last states do not agree on, found where their
+trees differ (`diffSlots`). A read finds a slot's value in its block's
+definitions (`defTable`, by block and slot, of what there is), else in the
+block's last state, which names it and which nothing wrote since, and only
+then in the blocks before (`readVar`). In a sealed block of several
+predecessors it marks the block, reads theirs, and makes a phi only where
+they differ or a read came round a loop to the mark (`mergeVar`, Braun et
+al.'s marker algorithm), numbered as it was when the phi was made before
+the reads. A phi had been made for each slot a merge's first state names,
+however alike its arguments: n values live across m ends of branches took
+n·m phis, which Optimize removed, and as many definitions, each block's a
+list of every slot. A function of n values live at once
 and an exit at each of its n instructions had states naming n² slots --
 13,000 slots some seven gigabytes -- where they now take what the
 instructions change. The passes walk a state's set slots in order
@@ -881,6 +906,12 @@ loop header's, `keep.go`) copies its path. A state's slots count as their
 values' uses once for each value and block naming the state: `recount`
 weighs each node by the states and nodes that have it, from the roots
 down (`slotWeights`), and the builder counts no state's uses before it.
+The backend does the same: `findLazy` counts a state's references into its
+values through its nodes (`ssa.SlotWalk`), and `allocate` puts a block's
+states off to its end and meets each node once, every value at the last
+position, the last Go does not refuse and the first instruction's own of
+the states naming it. An exit's description is its state's nodes too
+(Exits and deoptimization).
 
 **The atomicity rule, as built.** What an instruction commits depends on how
 it is built (`atomicInstruction`): a property's read commits only where it
@@ -2323,6 +2354,21 @@ register pc.
 | `ExitReturn` | The code returned. | `Ret` holds the result's number word, or `RetFrom` where the result is. |
 | `ExitEnter` | A native call's callee had no code native callers may call. | Its frame is made, its arguments in it, and Go runs it from its start; its caller's code goes on after the call. |
 | `ExitTable` | The exit left its frame to Go to write. | Go writes it from the exit's description (`abi.ExitDescriptor`, `jit.ApplyExit`) and the registers it saved, then reads the exit's own kind. |
+
+**Descriptions share their states' nodes.** An `ExitTable` exit's
+description (`abi.ExitDescriptor`) is a node of its code's `ExitFrame.Tree`:
+the nodes are those of the frame states' slots (`ssa.SlotNode`), each
+described once (mir's `exitNode`) and shared by every description whose
+state has it, as the states share it -- a leaf lists the entries of the
+slots it writes, each entry, a slot and where its words are, kept once for
+the code (`ExitFrame.Slots`), and an inner node its children. `ApplyExit`
+walks the tree. Whether a description may be written slot by slot
+(`Direct`) is found from what its nodes keep: whether a slot under one has
+its reference in a register, and the slots its entries name as their
+references' sources, checked against the state. A list of each
+description's every slot had made a function of n values live at once and
+an exit at each of its n instructions take n² entries, and a description
+past 65,535 slots had been given up for code that writes the frame.
 
 **Rebuilding the register frame.** An exit's records write the registers
 live at its register pc, in the window, natively as the code leaves (or Go,
