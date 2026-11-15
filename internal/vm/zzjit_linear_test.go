@@ -10,6 +10,7 @@ import (
 	"time"
 
 	jitcompile "github.com/go-quickjs/go-quickjs/internal/jit/compile"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
@@ -81,17 +82,21 @@ func linearCompileOf(t *testing.T, src, name string, args func(*Runtime) []Value
 		runtime.ReadMemStats(&ms)
 		return ms.TotalAlloc
 	}
-	// Lowered once before, so that what the lowering keeps for the next
-	// one (its pools) is this one's, whatever the test lowered before.
-	if _, err := jitcompile.LowerReg(cl.reg.rc, cl.fn); err != nil {
-		t.Fatal(err)
-	}
+	// The least of three lowerings: what the lowering keeps for the next
+	// one (its scratch's pool) is there or not as collections run.
 	var c linearCompile
+	var p *ir.Program
 	start := time.Now()
-	a0 := alloc()
-	p, err := jitcompile.LowerReg(cl.reg.rc, cl.fn)
-	if err != nil {
-		t.Fatal(err)
+	for k := range 3 {
+		a0 := alloc()
+		q, err := jitcompile.LowerReg(cl.reg.rc, cl.fn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a := alloc() - a0; k == 0 || a < c.lower {
+			c.lower = a
+		}
+		p = q
 	}
 	a1 := alloc()
 	f, err := ssa.BuildWith(e.p, r.jitRegFeedbackFor(cl, e.p))
@@ -109,7 +114,7 @@ func linearCompileOf(t *testing.T, src, name string, args func(*Runtime) []Value
 	}
 	a3 := alloc()
 	c.took = time.Since(start)
-	c.lower, c.build, c.code = a1-a0, a2-a1, a3-a2
+	c.build, c.code = a2-a1, a3-a2
 	c.live = p.Live.Size()
 	if len(mc.Exits) > 0 && mc.Exits[0].Frame != nil {
 		x := mc.Exits[0].Frame
