@@ -44,6 +44,9 @@ type jitRegJob struct {
 	// frameAt is the loop's header a frame waits at for the compile
 	// (jitRegFrameAt), whose entry escape analysis keeps.
 	frameAt int
+	// miss has the worker leave the build as a miss (QJS_JIT_STRESS's
+	// miss), built on the runtime's goroutine at the install.
+	miss bool
 	// e is the entry being made, its program p, rf its feedback, which a
 	// build on the runtime's goroutine asks, snap that feedback asked ahead,
 	// which the worker's build asks.
@@ -202,6 +205,11 @@ func (j *jitRegJob) workRecovering() {
 			jitWorkerPanics.Add(1)
 		}
 	}()
+	if j.miss {
+		// Left as a miss (QJS_JIT_STRESS's miss).
+		j.missed = true
+		return
+	}
 	f, err := ssa.BuildIn(&j.w.SSA, j.p, j.snap)
 	if err != nil {
 		j.buildErr = err
@@ -306,9 +314,20 @@ func (r *Runtime) jitRegInstall(j *jitRegJob) {
 		s.backendPanics++
 		e.refusal = fmt.Sprintf("%v: %v", jitRefused, j.err)
 	case j.missed:
-		// Built here, as on the spot.
+		// Built here, as on the spot, from feedback asked anew, as the
+		// stack form's missed compile is (compileSSAFinish): the job's
+		// was the snapshot's, whose questions' effects -- the closures
+		// the code inlines, the objects and shapes it keeps -- the
+		// snapshot took back, to replay those the build asks; asked again,
+		// an instruction's Inline and NativeCalls answer from its cache
+		// (jitRegFeedback's askedOf) without them, and code built from it
+		// had inlined callees its keep did not name, which an exit inside
+		// one could not find (jitRegInlined).
 		s.regSnapMisses++
 		s.compileBegin()
+		limit := j.rf.fb.keepLimit
+		j.rf = r.jitRegFeedbackFor(j.cl, j.p)
+		j.rf.fb.keepLimit = limit
 		f, err := ssa.BuildIn(&j.w.SSA, j.p, j.rf)
 		if err != nil {
 			e.refusal = fmt.Sprintf("%v: %v", jitRefused, err)

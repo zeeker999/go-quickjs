@@ -118,6 +118,10 @@ type jitFields struct {
 //	           compile in the background (jitSubmit), WithJITBackground or
 //	           not, and install each compile exactly K checks after it was
 //	           handed over (jitDrain), waiting for it if need be: 0 at once
+//	miss       with background, have every register compile's worker leave
+//	           its build, as one that asked what its snapshot was not asked
+//	           (jitSnapMiss), for the runtime's goroutine to build at its
+//	           install, so that the path a miss takes is taken by every one
 //
 // It is read once, as QJS_NOTREE is, and each runtime takes a copy.
 type jitStressConfig struct {
@@ -127,6 +131,7 @@ type jitStressConfig struct {
 	deopt      uint16
 	// checks is background's K.
 	checks uint16
+	miss   bool
 }
 
 var jitStressDefault = parseJITStress(os.Getenv("QJS_JIT_STRESS"))
@@ -147,6 +152,8 @@ func parseJITStress(spec string) jitStressConfig {
 			c.background, c.checks = true, uint16(n)
 		case "check":
 			mir.CheckAllocations = true
+		case "miss":
+			c.miss = true
 		}
 	}
 	return c
