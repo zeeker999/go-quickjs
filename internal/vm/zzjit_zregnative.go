@@ -2147,6 +2147,13 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 			m |= bytecode.RMarkDead
 		}
 		v, err = r.regMarkedCall(f, c, top, 1, rpc, m, uint32(w.C()))
+	} else if o, fd := r.jitRegBuiltin(f, c, w, rpc, callee); fd != nil {
+		// A built-in of this realm, called directly, as the stack form's
+		// jitCallMade calls one and rhCallW's site its own (regNative):
+		// regCallSlow's search of the site's cache, its marks, the
+		// closures' and the generic call's, had been most of what such a
+		// call cost -- JSON.parse's, Object.create's.
+		v, err = r.jitRegNativeMade(o, fd, this, r.stack[top+2:end])
 	} else {
 		v, err = r.regCallSlow(f, c, w, top, rpc)
 		if err == errRegRestart {
@@ -2207,6 +2214,60 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	}
 	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
 	return true
+}
+
+// jitRegBuiltin is the built-in a call of Go of register instruction w at
+// register pc rpc of c calls, callee, which jitRegNativeMade calls
+// directly, as the stack form's jitCallMade does: one of the runtime's
+// realm with a native body, neither bound, nor Function.prototype.call,
+// nor one of Math's, which mathCall answers, nor one the call's marks have
+// regMarkedCall make (regMarked). The site's cache learns it as
+// regCallSlow has it learn one (regCallNative), for the interpreter's
+// calls. Otherwise nil.
+func (r *Runtime) jitRegBuiltin(f *frame, c *regCode, w bytecode.RInstr, rpc int, callee Value) (*Object, *funcData) {
+	switch w.Op() {
+	case bytecode.RCallW, bytecode.RCallMW, bytecode.RCallWT, bytecode.RCallMWT:
+	default:
+		return nil, nil
+	}
+	if !callee.IsObject() {
+		return nil, nil
+	}
+	o := callee.Object()
+	fd := o.fn()
+	if fd == nil || fd.native == nil || fd.mathOp != 0 || fd.bound || o == r.callFn || fd.realm != nil && fd.realm != r.Realm {
+		return nil, nil
+	}
+	if w.Op().MethodCall() && rpc < len(c.rc.Marks) {
+		if m := c.rc.Marks[rpc]; m != 0 && r.regMarked(c, o, rpc, m) {
+			return nil, nil
+		}
+	}
+	if calls := f.cl.regCalls; uint(w.C()) < uint(len(calls)) {
+		if e := &calls[w.C()]; e.callee != o || e.kind != regCallNative {
+			*e = regCallCache{callee: o, kind: regCallNative}
+		}
+	}
+	return o, fd
+}
+
+// jitRegNativeMade calls fd, o's native body, on this with args, as
+// jitCallMade calls a built-in for the stack form's code: in a frame of
+// its own (nativeFrame), the interrupt checked, its result charged to the
+// meter.
+func (r *Runtime) jitRegNativeMade(o *Object, fd *funcData, this Value, args []Value) (Value, error) {
+	if err := r.tick(); err != nil {
+		return Undefined, err
+	}
+	if err := r.nativeFrame(o, fd, this, args, Undefined); err != nil {
+		return Undefined, err
+	}
+	v, err := fd.native(r, this, args)
+	r.frameDepth--
+	if r.meter != nil && err == nil {
+		err = r.chargeResult(v)
+	}
+	return v, err
 }
 
 // jitRegCallUnsettled reports whether the learning of a call of Go

@@ -312,3 +312,93 @@ func TestJITRegCallSettlesTogether(t *testing.T) {
 		t.Errorf("after settling: settled %v, met %d", settled, len(met))
 	}
 }
+
+// regWarmBuiltinSrc calls built-ins with frames of their own from native
+// code's calls of Go: JSON.parse with and without a reviver, one that
+// throws, Object.create and Object.setPrototypeOf, a built-in called in
+// tail position, and one whose call reads the caller's frame (a stack
+// trace).
+const regWarmBuiltinSrc = `
+"use strict";
+function parses(n) {
+	let s = 0, bad = 0;
+	for (let j = 0; j < n; j++) {
+		const o = JSON.parse('{"a":' + j + ',"b":[1,2,' + (j & 7) + ']}');
+		s += o.a + o.b[2];
+		if ((j & 15) == 0) s += JSON.parse('[1,2,3]', function (k, v) { return typeof v == "number" ? v * 2 : v })[2];
+		try { JSON.parse(j & 31 ? '1' : '{') } catch (e) { if (e instanceof SyntaxError) bad++ }
+	}
+	return s + ":" + bad;
+}
+function creates(n) {
+	let s = 0;
+	for (let j = 0; j < n; j++) {
+		const a = Object.create({ base: j });
+		a.i = 1;
+		const b = Object.setPrototypeOf({ v: 2 }, a);
+		s += b.base + b.i + b.v;
+	}
+	return s;
+}
+function keys(o) { return Object.keys(o) }
+function tails(n) {
+	let s = 0;
+	for (let j = 0; j < n; j++) s += keys({ a: j, b: 2 }).length;
+	return s;
+}
+function traces(n) {
+	let s = 0;
+	for (let j = 0; j < n; j++) {
+		const e = Reflect.construct(Error, ["x" + (j & 3)]);
+		s += e.message.length + (e.stack.indexOf("traces") >= 0 ? 1 : 0);
+	}
+	return s;
+}
+`
+
+// TestJITRegBuiltinCalls runs calls of built-ins with frames of their own
+// that native code leaves to Go, with the JIT and without, the collector
+// idle and marking: Go calls such a built-in directly (jitRegBuiltin,
+// jitRegNativeMade), as the stack form's jitCallMade does, rather than
+// through regCallSlow's search of the site's cache and the generic call.
+func TestJITRegBuiltinCalls(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regWarmBuiltinSrc)
+			rts[0].SetJITReport(true)
+			rts[0].jitStress = jitStressConfig{}
+			calls := []struct {
+				name string
+				n    float64
+				want string
+			}{
+				{"parses", 3000, "4510128:94"},
+				{"creates", 3000, "4507500"},
+				{"tails", 3000, "6000"},
+				{"traces", 3000, "9000"},
+			}
+			for _, c := range calls {
+				for i, r := range rts {
+					fn, _ := r.GetProp(Obj(r.Global()), r.Intern(c.name))
+					for k := range 6 {
+						v, err := r.Call(fn, Undefined, []Value{Float(c.n)})
+						if got := regNativeShow(r, v, err); got != c.want {
+							t.Fatalf("runtime %d: %s, call %d: %s, want %s", i, c.name, k, got, c.want)
+						}
+					}
+				}
+			}
+			st := rts[0].RegNativeStats()
+			if st.GoCallOps["call_method_w->parse"] == 0 {
+				t.Errorf("JSON.parse not called from native code: %v", st.GoCallOps)
+			}
+			t.Logf("calls of Go: %v", st.GoCallOps)
+		})
+	}
+}

@@ -1817,7 +1817,13 @@ Go makes on the run's register frame (`jitState`'s `regRuns`,
 (`regCallSlow`, `regConstruct`): the function, the receiver and the
 arguments put in a window of their own past the VM's stack's top -- never in
 the frame's, whose registers the code may still hold values in as it found
-them -- and the frame's pc past the call meanwhile. A call that threw, that
+them -- and the frame's pc past the call meanwhile. A built-in of the realm
+with a native body -- not bound, not `Function.prototype.call`, not one of
+Math's, not one the call's marks send to `regMarkedCall` -- is called
+directly in a frame of its own (`jitRegBuiltin`, `jitRegNativeMade`), as the
+stack form's `jitCallMade` calls one: `regCallSlow`'s search of the site's
+cache and the generic call had been most of what a call of `JSON.parse` or
+`Object.create` cost. A call that threw, that
 the runtime stopped in, or after which the code was found invalid, its exit
 finishes (`regPending`, `regFinishCall`): the answer to the call's register,
 or the exception to the frame's handlers, never the call made again.
