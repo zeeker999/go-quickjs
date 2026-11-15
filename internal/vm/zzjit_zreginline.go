@@ -85,6 +85,16 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 		c.Live, c.ReturnTo = 0, 0
 	}
 	n := len(levels)
+	if idx+n == len(s.ssaCtxs)-1 && s.bounds.LevelLimit == uint64(len(s.ssaCtxs)) && levels[n-1].kind == abi.ExitHost {
+		// The innermost level's state in the last context, which the
+		// contexts, not the frames the VM allows, limited: an inlined
+		// frame's room check (ssa.OpFrameRoom) left for want of contexts
+		// past it, as the stack form's unwinding finds it (jitUnwindNative)
+		// and has more made. Left so at every call, the code had been
+		// compiled again with the call not inlined, the closures it gives
+		// the callee made.
+		r.jitGrowContexts()
+	}
 	if owner.frame != 0 || owner.keep != nil && len(owner.keep.made) != 0 {
 		spans := make([][2]int, 0, n)
 		for _, x := range levels {
