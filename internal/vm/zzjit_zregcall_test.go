@@ -210,8 +210,6 @@ func TestJITRegExpLiteralCalls(t *testing.T) {
 	}
 }
 
-
-
 // regNoInline has no function inlined until the test ends (jitNoInline).
 func regNoInline(t *testing.T) {
 	saved := jitNoInline

@@ -247,7 +247,6 @@ func TestJITKeptEntryStaysForCallsThatLeave(t *testing.T) {
 	}
 }
 
-
 // A frame goes on from the loop it entered the code kept for it at to the
 // function's next, in that code, which needs no entry there, and keeps that
 // loop's objects unmade: only the loop a frame stayed in costs them.
@@ -446,7 +445,6 @@ func TestJITFramesLeave(t *testing.T) {
 	}
 }
 
-
 // A compile asked for in a run, for what the code learned at its exits, has
 // a frame in a function hardly called yet: the frame goes on in the code it
 // asks for, at the loop's entry the compile keeps, with no code of its own.
@@ -547,7 +545,6 @@ func TestJITOSRSiteNotMegamorphic(t *testing.T) {
 	}
 }
 
-
 // A long frame in the code kept for its loop uses the function: its
 // entries there count, and the cache does not flush it as unused.
 func TestJITOSRUsesTheFunction(t *testing.T) {
@@ -566,10 +563,6 @@ func TestJITOSRUsesTheFunction(t *testing.T) {
 		t.Fatalf("an entry of the code kept for the loop is no use of the function: %d, %d", u, e.uses())
 	}
 }
-
-
-
-
 
 // linkKeyForTest is the cache's key of e.
 func (s *jitState) linkKeyForTest(e *jitEntry) (key jitKeyForTest) {

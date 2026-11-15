@@ -163,9 +163,6 @@ const jitKeptStarts = 4
 // (jitFramesLeave): past a compile's worth of what leaving costs.
 const jitFramesLeaving = 256
 
-
-
-
 // osrInUse reports whether what e's entry for on-stack replacement holds
 // may not go: its code runs, or it is being compiled.
 func (e *jitEntry) osrInUse() bool {

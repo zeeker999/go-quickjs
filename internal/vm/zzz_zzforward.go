@@ -56,4 +56,3 @@ func (r *Runtime) jitForwardPlain(ctx *abi.Context) bool {
 	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = Obj(r.newArrayFrom(args))
 	return true
 }
-

@@ -204,7 +204,6 @@ const afterCallbackSetup = `
 	}
 `
 
-
 // stackSetup's throws throws from its forEach's callback, which leaves
 // native code there, Go making the frames of the levels native code had
 // (jitUnwindNative); undefinedCall's callback calls a global that is not

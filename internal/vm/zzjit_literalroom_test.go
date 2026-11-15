@@ -23,7 +23,6 @@ func TestJITLiteralArrayRoomWeakPools(t *testing.T) {
 	}
 }
 
-
 func TestJITLiteralArrayRoomNative(t *testing.T) {
 	jitNoInlineForTest(t, "fill")
 	for _, marking := range []bool{false, true} {

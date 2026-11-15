@@ -205,4 +205,3 @@ func BenchmarkJITMD5FirstUse(b *testing.B) {
 		})
 	}
 }
-

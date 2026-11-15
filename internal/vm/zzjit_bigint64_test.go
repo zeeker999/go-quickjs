@@ -92,4 +92,3 @@ const bigInt64Setup = `
 			past(n, k == 1000 ? max + 5n : max - 5n, max - 7n) * 31
 	}
 `
-

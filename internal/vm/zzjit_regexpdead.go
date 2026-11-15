@@ -32,4 +32,3 @@ func jitRegExpDeadNative[_ any](r *Runtime, o *Object, native NativeFunc) Native
 		return native(r, this, args)
 	}
 }
-

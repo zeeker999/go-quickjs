@@ -63,8 +63,6 @@ func jitRegLearnPlain(r *Runtime) {
 	r.interruptCounter = interruptCheckInterval
 }
 
-
-
 // regLeafSrc calls leaves -- built-ins native code calls without a frame
 // (jitLeafOp) -- from register code: those native code makes itself
 // (ssa.LeafKind), a string's codePointAt and at, Number.isNaN, and one Go

@@ -122,7 +122,6 @@ func TestJITOneMissNoEntry(t *testing.T) {
 	}
 }
 
-
 // jitOldStaysUncounted is the entry of old, if any, that stayed held
 // through a refusal without the refusal's floor counting it reclaimable,
 // with its lowering, as listVictims counts it: old code stays only where
@@ -148,7 +147,6 @@ func jitOldStaysUncounted(r *Runtime, old []*jitEntry) *jitEntry {
 func jitHeldButScratch(r *Runtime) int64 {
 	return r.jitHeldBytes() - int64(jitCapBytes(r.jit.victims))
 }
-
 
 // perInstr rises to what entries come to hold, however little more than it
 // that is, and falls toward what they hold less: a step of an eighth,

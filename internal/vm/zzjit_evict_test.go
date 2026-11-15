@@ -47,9 +47,6 @@ func jitEntriesFound(s *jitState) error {
 	return nil
 }
 
-
-
-
 // Runtimes on goroutines of their own compile at once, each in a workspace
 // of the pool's no other compile uses meanwhile: their code computes what
 // the interpreter does.
@@ -105,8 +102,6 @@ func TestJITWorkspacesConcurrentRuntimes(t *testing.T) {
 		}
 	}
 }
-
-
 
 // Code the cache drops to make room is code nothing runs, calls or returns
 // to: compiled in a budget far too small for a program's hot functions,

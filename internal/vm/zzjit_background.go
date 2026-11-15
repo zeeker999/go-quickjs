@@ -94,9 +94,6 @@ func (s *jitState) inFlight() bool {
 // existing tiers, for a call it does not make.
 const jitHoldRounds = 3
 
-
-
-
 // jitDrain installs the compiles in the background that are done, in the
 // order they were handed over, at a check of the runtime's goroutine: a
 // function's entry, a loop's back edge (jitRegDrainJobs). An install
@@ -176,11 +173,7 @@ func (p *jitWorkerPool) work() {
 	}
 }
 
-
 // jitWorkerPanics counts the panics the process's workers made refusals
 // of, whatever runtime's: one whose runtime never installs it is counted
 // too, which the tests look for (TestMain).
 var jitWorkerPanics atomic.Int64
-
-
-

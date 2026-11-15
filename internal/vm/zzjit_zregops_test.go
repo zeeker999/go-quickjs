@@ -527,7 +527,6 @@ func TestJITRegSpreads(t *testing.T) {
 	}
 }
 
-
 // regStorageSrc is AWFY Storage's tree: new Array(n) of a length native
 // code computes, in a recursive native callee, whose construction Go makes
 // from native code until it is learned -- by its operand, which the

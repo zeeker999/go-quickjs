@@ -99,7 +99,6 @@ func TestJITCallLeftToGoDecidedAgain(t *testing.T) {
 	}
 }
 
-
 // A native callee's call of a function native callers no longer call
 // (notNative) is Go's, native code going on after it (mir's call):
 // no native level is unwound, where Go had run the callee from its start

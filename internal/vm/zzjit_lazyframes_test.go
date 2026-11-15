@@ -44,9 +44,6 @@ func lazyFramesRounds() []string {
 	return rounds
 }
 
-
-
-
 func jitLazyFramesRan(t *testing.T, r *Runtime) {
 	t.Helper()
 	if s := r.jit; s.lazyCalls == 0 || s.lazyMade == 0 || s.lazyHeld == 0 || len(s.lazy) != 0 || s.lazyTop != 0 {

@@ -74,7 +74,6 @@ var jitGenNextCases = []struct {
 		[]string{`f(3)`, `f(1)`}, []string{`0,1,fin,2`, `0`}, "g"},
 }
 
-
 // A loop of calls of a generator's next, compiled, makes no call of Go at
 // its calls: each resumes the generator natively, its result an object of
 // its call's pool, a few calls of Go made in all -- the generator's making,

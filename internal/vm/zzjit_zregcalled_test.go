@@ -88,7 +88,6 @@ func regCalledRounds(setup string) []string {
 	return rounds
 }
 
-
 // TestJITRegCalledClosuresPolled runs calledSetup's and regLexThisSetup's
 // rounds with loops polling every 3 back edges and every 7th poll finishing
 // the invocation in the interpreter (QJS_JIT_STRESS's budget and deopt), the

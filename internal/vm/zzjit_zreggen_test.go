@@ -281,7 +281,6 @@ func TestJITRegGenSteps(t *testing.T) {
 	}
 }
 
-
 // A for...of loop over a generator, the frames run by the Go handlers
 // (QJS_NONATIVE, the fallback dispatcher): the generator's code, leaving
 // native code at each yield, had made the next back edge's check due at

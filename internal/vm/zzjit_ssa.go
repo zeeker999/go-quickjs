@@ -1317,8 +1317,6 @@ func (e *jitEntry) reoptPending() bool {
 	return e.reopt || e.inlineReopt || e.polyReopt || e.upgradeReopt || e.unwindReopt || e.resumeReopt
 }
 
-
-
 // jitLearnedMark is jitFeedbackMark of cl's caches with what e's code has
 // learned at its exits counted in: a change of either delays the compile
 // for it (jitLearnedDue), as V8's NotifyICChanged does.
@@ -1333,7 +1331,6 @@ func jitLearnedCount(e *jitEntry) int {
 		len(e.keyedReads) + len(e.keyedWrites) + len(e.strSites) + len(e.numSites) + len(e.boolSites) + len(e.nativeCalls) + len(e.inlines) + len(e.notInline) +
 		len(e.literals) + len(e.definesUnfed)
 }
-
 
 // jitFeedbackMark sums what cl's function's caches hold: each entry a
 // cache holds or held before (propCache.seen), by its shape, prototypes and
@@ -1389,11 +1386,6 @@ func jitFeedbackMark(cl *closure) uint64 {
 	return m
 }
 
-
-
-
-
-
 // errJITStaleLinks is jitInstall's refusal of a compile whose links are
 // stale (staleLinks), which compileSSAFinish builds again.
 var errJITStaleLinks = errors.New("jit: a link the compile calls through was let go")
@@ -1407,7 +1399,6 @@ var jitFeedbackHook func(fb *jitFeedback, p *ir.Program) ssa.Feedback
 // context's (abi.MaxKeeps) limits them: what is made natively past them
 // is left to Go.
 var jitKeepLimit int
-
 
 // jitJob is a compile in its three steps, as V8's concurrent compiles
 // are: prepared on the runtime's goroutine (jitPrepare), which builds the
@@ -1510,7 +1501,6 @@ func jitAllocated() (bytes, objects uint64) {
 	metrics.Read(s)
 	return s[0].Value.Uint64(), s[1].Value.Uint64()
 }
-
 
 // jitRefused is compileSSA's refusal of a program it does not compile:
 // for good, unlike jit.ErrCodeBudget's, which the cache's releasing code
@@ -1628,7 +1618,6 @@ type jitFeedback struct {
 	// where it has no code (jitCalleeInline).
 	seeded bool
 }
-
 
 // mathIntrinsic is the intrinsic a call of o, of n arguments, a plain
 // call's where plain says, makes, of either form's code: the realm's Math
@@ -1769,7 +1758,6 @@ func (fb *jitFeedback) keep() *jitFeedback {
 	return fb
 }
 
-
 // jitInline is a call jitCallSeen has seen call a function it may inline:
 // the call's PC, the function, and how often native code has left the
 // inlined callee for Go there.
@@ -1889,13 +1877,9 @@ func jitTargetsOf(e *jitEntry) []jitTarget {
 	return t
 }
 
-
 // jitNativeCallers is how many callers' entries an entry tells when it
 // inlines more (jitEntry.nativeCallers).
 const jitNativeCallers = 8
-
-
-
 
 func init() {
 	jit.HostCall = jitHostCall
@@ -3277,7 +3261,6 @@ func jitGoCallInstr(op uint64) (bytecode.Instr, int) {
 	return in, n
 }
 
-
 // jitClearArgs clears the operands a call of Go put past the VM stack's
 // top, from top to sp, so that they keep nothing: a few, each store's
 // write barrier tested in line, which clear's call of the runtime costs
@@ -3334,25 +3317,16 @@ var jitNoInline func(fn *bytecode.Function) bool
 // calls it makes, theirs (ssa's maxInlineDepth).
 const jitInlineDepth = 3
 
-
-
-
-
-
-
 // jitSeedDepth is how many compiles deep seeding a call's target may
 // start compiles (jitSeedCallee): a callee's calls' targets, theirs, as
 // deep as calls are inlined.
 const jitSeedDepth = jitInlineDepth
-
-
 
 // jitCallee is a function object a call calls, and its closure.
 type jitCallee struct {
 	o  *Object
 	cl *closure
 }
-
 
 // jitCountAt is how many of calls are at pc.
 func jitCountAt(calls []jitInline, pc int) int {
@@ -3417,11 +3391,6 @@ func (r *Runtime) jitGlobalValue(cl *closure, name Atom) (Value, bool) {
 	}
 	return prop.value(), true
 }
-
-
-
-
-
 
 // jitKeyedClass reports whether o's elements by a number Go reads from
 // native code where an array's are not (ssa.GoIndex, jitKeyedRead): an
@@ -3649,8 +3618,6 @@ func jitAbsentKey(o *Object, a Atom, named bool) bool {
 	return true
 }
 
-
-
 // jitUpvalueCells is the address of cl's captured bindings' cells, which
 // an inlined frame of its reads them from (ssa.InlineSite's Upvalues), or
 // 0 for none.
@@ -3660,10 +3627,6 @@ func jitUpvalueCells(cl *closure) uintptr {
 	}
 	return uintptr(unsafe.Pointer(unsafe.SliceData(cl.upvalues)))
 }
-
-
-
-
 
 // jitGlobalEpochs is the most changes of the global object's bindings
 // (shapeTree's globalEpoch) after which a global's read is still compiled
@@ -4458,10 +4421,6 @@ func (r *Runtime) jitRefillPoolsOf(e *jitEntry, pc int, o *Object) (refilled boo
 // V8's min_inlining_frequency as V8 runs, 0.05 (ssa.MinInliningFrequency).
 const jitInliningFrequency = 5
 
-
-
-
-
 // jitLowering is a function's programs for the new pipeline, each lowered
 // once, as its kind says (jitLowerKind), and kept by the runtime: a
 // compile asks for its function's and for each callee's it inlines, and a
@@ -4548,7 +4507,6 @@ func (s *jitState) relower(l *jitLowering) {
 	l.inlinable = 0
 	l.serial++
 }
-
 
 // jitBigIntNote is jitBigIntSeen's learning, of either form's code: in, the
 // instruction whose guard failed or which is generic, at key -- the stack
@@ -5103,9 +5061,6 @@ func (fb *jitFeedback) deepCasesOf(pc int, c *propCache) []ssa.PropertyCase {
 	}
 	return cases
 }
-
-
-
 
 // siteOf is the site of a read of key, or a write, as cache c knows it.
 func (fb *jitFeedback) siteOf(key Atom, write bool, c *propCache) (ssa.PropertySite, bool) {
@@ -5691,7 +5646,6 @@ func (r *Runtime) jitSuperCall(f *frame, args []Value) error {
 	return r.superCall(f, args)
 }
 
-
 // jitTargets iterates over the calls e's code makes natively and those it
 // inlines, each list in turn.
 func jitTargets(e *jitEntry) iter.Seq2[int, *jitInline] {
@@ -5802,7 +5756,6 @@ func (r *Runtime) jitArgument(ctx *abi.Context) (Value, bool) {
 	}
 	return Undefined, false
 }
-
 
 // jitFrameArgs reports whether fn's code reads its call's arguments past
 // its parameters, from the frame of the VM's: a rest parameter's, the

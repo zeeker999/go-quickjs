@@ -73,4 +73,3 @@ func TestJITLoopEntriesSpendTheBudget(t *testing.T) {
 		t.Errorf("an invocation left native code %d times, %d of them finished by the interpreter", h, i)
 	}
 }
-

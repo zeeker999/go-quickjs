@@ -41,7 +41,6 @@ const (
 	jitBackgroundRounds   = 4
 )
 
-
 // jitMicrobenchForTest is QuickJS's micro-benchmarks and ours, as the
 // v8bench runner's micro mode loads them: microbench.js without the call
 // of its main that ends it, then microbench_extra.js.

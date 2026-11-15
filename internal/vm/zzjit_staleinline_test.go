@@ -23,4 +23,3 @@ const staleInlineSetup = `
 		return s
 	}
 `
-

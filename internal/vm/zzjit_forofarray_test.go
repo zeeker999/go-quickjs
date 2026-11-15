@@ -140,7 +140,6 @@ func TestJITKeyedReadIndexName(t *testing.T) {
 	}
 }
 
-
 // A call whose callee is an arrow reading the this it captured is made
 // natively as any callee's (ssa.CallSite's ArrowThis), the call giving it
 // that this: the builder had left such a site out, so a call the arrow

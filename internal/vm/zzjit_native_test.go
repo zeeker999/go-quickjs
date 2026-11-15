@@ -898,7 +898,6 @@ func TestJITSSAGlobals(t *testing.T) {
 	}
 }
 
-
 // The new pipeline reads a string's length and code units in place, where
 // charCodeAt is still the intrinsic: ASCII strings, strings with code units
 // past ASCII, a rope, an empty string, and, after a script replaces
@@ -1203,7 +1202,6 @@ func TestJITEqualityCoercionRelease(t *testing.T) {
 	}
 }
 
-
 func TestJITReceiverCallbacks(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -1248,7 +1246,6 @@ func TestJITReceiverCallbacks(t *testing.T) {
 		}
 	}
 }
-
 
 func TestJITDataPropertyRootLimit(t *testing.T) {
 	t.Parallel()
@@ -1391,7 +1388,6 @@ func TestJITCryptoCorpus(t *testing.T) {
 	t.Logf("native entries=%d hosts=%d guards=%d budgets=%d am3 code=%d bytes",
 		r.jit.entries, r.jit.hosts, r.jit.guards, r.jit.budgets, entry.ssa.Size())
 }
-
 
 func TestJITHostReleaseAndGC(t *testing.T) {
 	r := jitRuntimeForTest(t, Config{JIT: true})
@@ -1831,7 +1827,6 @@ func TestJITSSACompareReferences(t *testing.T) {
 	}
 }
 
-
 // A runtime's compiled functions share a few mappings, its arena's chunks,
 // rather than taking one each; closing the runtime releases every one.
 func TestJITArenaMappings(t *testing.T) {
@@ -1915,7 +1910,6 @@ func TestJITRuntimeOptIn(t *testing.T) {
 		}
 	}
 }
-
 
 func TestJITNestedTreeOSR(t *testing.T) {
 	t.Parallel()
@@ -2176,9 +2170,6 @@ func TestJITNoHeapWalks(t *testing.T) {
 	}
 }
 
-
-
-
 // jitCopiesForTest makes copies of template, each a function of its own to
 // the cache, kept alive in keep: a collection would drop the code of those
 // already compiled (the cache's keys are weak).
@@ -2190,7 +2181,6 @@ func jitCopiesForTest(template *bytecode.Function, keep *[]*bytecode.Function) f
 		return fn
 	}
 }
-
 
 // The cache's epochs follow the collector's cycles (jitGCEpoch), as V8 ages
 // code by them, once a runtime has run the JIT, and pass every
@@ -2398,7 +2388,6 @@ func benchJITCacheIn(b *testing.B, cfg Config, source, call string) {
 	b.ReportMetric(float64(ms.HeapAlloc), "live-B")
 }
 
-
 // The cache drops the least recently used code to make room, as V8
 // flushes code by its age (makeRoom): code used since -- entered, called
 // natively, or called by the existing tiers that no longer enter it --
@@ -2448,9 +2437,6 @@ func TestJITNoEntryForTopLevelCode(t *testing.T) {
 		t.Fatalf("top-level code kept past its script: %d entries", kept)
 	}
 }
-
-
-
 
 // What the JIT holds is counted, each kind of it, against its budget
 // (jitState.held): each entry's code with what describes its entries and
@@ -2637,7 +2623,6 @@ func TestJITCallersCountedAsTheyJoin(t *testing.T) {
 	}
 }
 
-
 func TestJITSharedTemplateRuntimes(t *testing.T) {
 	t.Parallel()
 	p := compileForTest(t, jitSumSource)
@@ -2800,7 +2785,6 @@ func TestJITPromotionKeepsFramelessCalls(t *testing.T) {
 	}
 }
 
-
 func TestJITLoopPromotionAtEntryPC(t *testing.T) {
 	t.Parallel()
 	r := New(Config{JIT: true})
@@ -2814,7 +2798,6 @@ func TestJITLoopPromotionAtEntryPC(t *testing.T) {
 		t.Fatal("loop targeting entry did not promote")
 	}
 }
-
 
 func TestJITLoopPromotionCancellation(t *testing.T) {
 	for _, keyword := range []string{"var", "let"} {
@@ -2987,13 +2970,6 @@ func jitDenseKernelCases() []struct{ name, body string } {
 	}
 }
 
-
-
-
-
-
-
-
 func BenchmarkJITReferenceFirstUse(b *testing.B) {
 	compile := func(source string) *bytecode.Function {
 		ast, err := parser.Parse(source, parser.Options{})
@@ -3084,10 +3060,6 @@ func BenchmarkJITDenseFirstUse(b *testing.B) {
 	}
 }
 
-
-
-
-
 func TestJITStressParse(t *testing.T) {
 	for _, tc := range []struct {
 		spec string
@@ -3174,8 +3146,6 @@ func TestJITStressDifferential(t *testing.T) {
 		t.Fatalf("stress never reached its paths: %+v", total)
 	}
 }
-
-
 
 // A guard that fails invalidates the code, which is compiled again, with
 // the site generic, once the existing tiers have spent their budget: an
@@ -5154,7 +5124,6 @@ func TestJITSSAPolymorphicReadsSettle(t *testing.T) {
 	}
 }
 
-
 // A method call whose read has met objects of several classes, its cache
 // polymorphic, is decided when its function's code is first compiled to
 // call natively each method the cache found (jitSeenCallees): its entry's,
@@ -5364,7 +5333,6 @@ func TestJITCallsThroughCapturedParents(t *testing.T) {
 	}
 }
 
-
 // A construction the existing tiers have made is decided when a function's
 // code is first compiled, as a call is (jitSeedCalls), once its
 // constructor has code: mk1 learns new V from its exits, which compiles V
@@ -5474,7 +5442,6 @@ func TestJITLoopPromotedPastCalleesLoops(t *testing.T) {
 		t.Fatalf("%d budgets in 64", len(seen))
 	}
 }
-
 
 // Seeding compiles a call's target, but what it compiles does not compile
 // in turn: ping and pong call each other, and each compile of one would
@@ -5754,7 +5721,6 @@ func TestJITSSAResumesEveryLevel(t *testing.T) {
 	}
 }
 
-
 // A small method the tree tier calls, which calls out again and returns,
 // costs more native than in the tree tier: each call is an entry, an exit
 // for its call, an entry after it and a return, around a few instructions.
@@ -5862,9 +5828,6 @@ func TestJITSSAContextsGrow(t *testing.T) {
 	}
 }
 
-
-
-
 // A native call made while the collector marks whose callee throws is
 // left for Go to finish at the call's exit, which writes the frame from
 // the call's state, as when it does not mark; Go had made such calls then
@@ -5907,7 +5870,6 @@ func TestJITSSAMarkingCallThrows(t *testing.T) {
 		}
 	}
 }
-
 
 // The marking loops (jitMarkingSources) under the collector's real marking,
 // its cycles back to back: the objects Go takes and the pointers it stores
@@ -6184,7 +6146,6 @@ func TestJITSSANativeCallTargets(t *testing.T) {
 	}
 }
 
-
 // A native callee with no loop, which Go does not compile (LowerSSA) and
 // only native callers call natively (LowerSSAInline), dropped by the cache,
 // is compiled for them again at the first call Go then makes for them
@@ -6244,7 +6205,6 @@ func TestJITSSALooplessCalleeRecompiledAfterEviction(t *testing.T) {
 		t.Fatalf("useLeaf left native code %d times, called leaf natively %d times of 300", caller.ssaStats.hosts-hosts, e.link.in-in)
 	}
 }
-
 
 // A native call whose callee has no code native callers may call -- one
 // they stopped calling natively for leaving too often (notNative), as the
@@ -7085,7 +7045,6 @@ func TestJITSSAInlineBudgetCallsNatively(t *testing.T) {
 	}
 }
 
-
 // A call Go makes from native code (ssa.GoCall) leaves the frame's operand
 // slots alone: code entered after an exit -- at its first call, under the
 // threshold stress, Infinity's read leaves -- reads t, a value it never
@@ -7855,7 +7814,6 @@ func TestJITSSAGoCallsFromNativeCallees(t *testing.T) {
 	}
 }
 
-
 // A call of Go from a native callee takes the frames the last such call
 // made for the same levels, as they are, but for their PCs (jitLevels): in
 // one native stretch of outer's, fa is called again after a call of Go at
@@ -8151,9 +8109,6 @@ func TestJITSSAKeepCellsReused(t *testing.T) {
 		}
 	}
 }
-
-
-
 
 // A store of a number to an element native code does not make -- into a
 // hole, or at the array's length -- is Go's, called from native code
@@ -8983,7 +8938,6 @@ func TestJITSSAMegamorphicOwnReads(t *testing.T) {
 	}
 }
 
-
 // A read of a function's own property -- its prototype, which the VM's
 // caches never learn -- is made natively by searching the function's
 // table, as RayTrace calls methods through Flog.RayTracer.Vector.prototype:
@@ -9053,7 +9007,6 @@ func TestJITSSAReadsFunctionProperties(t *testing.T) {
 	}
 }
 
-
 // A callee inlined before its property sites' caches knew anything --
 // RayTrace's Ray, a forwarding constructor read as NS.Ray, compiled into
 // its caller before initialize's stores had run in Go -- leaves at each
@@ -9120,7 +9073,6 @@ func TestJITSSAInlinedCalleeLearns(t *testing.T) {
 		t.Fatalf("run compiled again %d times", n)
 	}
 }
-
 
 // instanceof is answered by native code where its constructor is known, as
 // V8 lowers it: a walk along the value's prototypes, after checks that the
@@ -9416,8 +9368,6 @@ func TestJITSSAConcatCallsGo(t *testing.T) {
 		}
 	}
 }
-
-
 
 // jitFramedCallForTest gives rt framedCall(s, x), s's code unit at x as
 // codePointAt has it, and framedRepeat(s, n), s repeated n times, host

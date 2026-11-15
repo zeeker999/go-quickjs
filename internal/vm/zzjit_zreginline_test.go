@@ -84,7 +84,6 @@ function throws2(n) {
 }
 `
 
-
 // regAccessorSrc reads and writes accessors register code does not inline:
 // a class's getter and setter (inlining off), a prototype's getter, a
 // bound function's getter, a built-in's (Map's size); one throws now and

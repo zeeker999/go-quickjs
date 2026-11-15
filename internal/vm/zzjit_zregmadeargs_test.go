@@ -58,4 +58,3 @@ function rests(n) {
 }
 function main(n) { return reads(n) + ";" + past(n) + ";" + keyed(n) + ";" + throws(n) + ";" + rests(n) }
 `
-

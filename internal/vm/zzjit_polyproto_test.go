@@ -108,7 +108,6 @@ func TestJITPolyProto(t *testing.T) {
 	}
 }
 
-
 // Native code's read of a property up the chain compares only the
 // receiver's and the holders' layouts (mir's holder), each of which says
 // the next object's prototype: a receiver given another prototype, or a

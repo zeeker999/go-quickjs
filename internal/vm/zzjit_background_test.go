@@ -38,12 +38,6 @@ func jitCallForTest(t *testing.T, r *Runtime, src string, want float64) {
 	}
 }
 
-
-
-
-
-
-
 // Without the stress's schedule, a compile is installed at the first
 // check after its worker is done: in a while, the answers right
 // meanwhile.
@@ -102,8 +96,6 @@ func TestJITBackgroundInstallAtNestedLoop(t *testing.T) {
 	}
 }
 
-
-
 // A compile in the background is made with the backend's switches and the
 // encoding as they were when it was prepared, whatever a host or a test
 // sets before its worker runs it: the worker reads no variable of theirs.
@@ -132,9 +124,6 @@ func TestJITBackgroundSettingsAtPrepare(t *testing.T) {
 		}
 	}
 }
-
-
-
 
 // jitBackgroundRuntime is jitRuntimeForTest's runtime with the JIT,
 // compiling in the background.
@@ -301,4 +290,3 @@ func TestJITBackgroundHoldsNotForACallLeftBehind(t *testing.T) {
 		t.Fatal("no compile waited for a call its frame comes back to")
 	}
 }
-

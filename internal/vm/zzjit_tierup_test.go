@@ -221,7 +221,6 @@ func TestJITDeoptTiersUpByOSR(t *testing.T) {
 	}
 }
 
-
 // Code that learns at its exits what to be compiled again for is not
 // invalidated, as V8 never invalidates code for feedback: it is the tier
 // that learns it -- the existing tiers' caches note no call's target --
@@ -346,8 +345,6 @@ func TestJITV8Budgets(t *testing.T) {
 	}
 }
 
-
-
 // A function past the 4,096 instructions the JIT had compiled is compiled
 // as any other, where what its compile holds fits the JIT's budget
 // (jitCompiles): zlib's bk, 5,039 instructions and called hundreds of
@@ -376,8 +373,6 @@ func TestJITCompilesLongFunctions(t *testing.T) {
 		}
 	}
 }
-
-
 
 // jitRareCallForTest has h make call, of i, once in twenty-five of its
 // calls: less often than jitInliningFrequency.
@@ -515,7 +510,6 @@ func TestJITFrequentLongCalleeCompiledForCaller(t *testing.T) {
 	}
 }
 
-
 // Code Go does not enter at its start for its short stretches (entrySlow)
 // is still entered by on-stack replacement at a loop that has run a full
 // budget of back edges in the existing tiers, as V8's code is: the
@@ -595,7 +589,6 @@ func TestJITMegamorphicWriteKeeps(t *testing.T) {
 	}
 }
 
-
 // jitSetPropPC is the PC of fn's one set_prop.
 func jitSetPropPC(t *testing.T, fn *bytecode.Function) int {
 	t.Helper()
@@ -608,7 +601,6 @@ func jitSetPropPC(t *testing.T, fn *bytecode.Function) int {
 	return -1
 }
 
-
 // jitGetPropPC is the PC of fn's first get_prop.
 func jitGetPropPC(t *testing.T, fn *bytecode.Function) int {
 	t.Helper()
@@ -620,7 +612,6 @@ func jitGetPropPC(t *testing.T, fn *bytecode.Function) int {
 	t.Fatal("no get_prop")
 	return -1
 }
-
 
 // An inlined callee's array and object literals are made natively, from
 // pools the code inlining it keeps (jitFeedback's Literal), as its own

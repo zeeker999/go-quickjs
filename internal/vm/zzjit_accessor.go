@@ -298,7 +298,6 @@ func (fb *jitFeedback) dataSeen(pc int, c *propCache) bool {
 	return false
 }
 
-
 // jitLevelCallee is the function object a level native code made a frame
 // for at the call at pc of caller's code is running, where it is known: an
 // accessor's, a read's or a write's, whose getter or setter the receiver,

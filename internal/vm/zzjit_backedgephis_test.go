@@ -46,4 +46,3 @@ func jitListWant(rounds int) string {
 	}
 	return b.String()
 }
-

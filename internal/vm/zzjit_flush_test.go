@@ -161,7 +161,6 @@ func TestJITFlushKeepsCodeInUse(t *testing.T) {
 	}
 }
 
-
 // The frames made for a run's native levels at its calls of Go
 // (jitLevels), which only that run's calls share, keep nothing once the
 // run has ended: their closures and receivers had kept a benchmark's graph

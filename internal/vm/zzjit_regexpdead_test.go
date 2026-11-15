@@ -104,7 +104,6 @@ func TestJITRegExpDeadExec(t *testing.T) {
 	}
 }
 
-
 // Native code's replace whose result is tested for truth alone is as
 // truthy as the string it would have made (zzz_regexpdead.go's
 // regexpDeadTruth): each answer is the interpreter's and Node's, with the

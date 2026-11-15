@@ -59,8 +59,6 @@ func jitSnapListsDiffer(a, b *jitFeedback) string {
 	return ""
 }
 
-
-
 var jitSnapAddresses = regexp.MustCompile(`0x[0-9a-f]+`)
 
 // jitSnapChecks is what the oracle found.

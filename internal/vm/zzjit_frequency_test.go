@@ -32,7 +32,6 @@ const frequencySetup = `
 	}
 	var o = {n: 0}`
 
-
 // frequencyCounts is name's function's counts: its runs, and each call's
 // count, in the order of their PCs.
 func frequencyCounts(t *testing.T, r *Runtime, name string) (uint32, []uint32) {
@@ -44,13 +43,8 @@ func frequencyCounts(t *testing.T, r *Runtime, name string) (uint32, []uint32) {
 	return e.calls.runs, slices.Clone(e.calls.calls)
 }
 
-
-
-
-
 // jitFnForTest is the function of the global name.
 func jitFnForTest(t *testing.T, r *Runtime, name string) *bytecode.Function {
 	t.Helper()
 	return r.global.getOwn(r.atoms.intern(name)).value().Object().fn().closure.fn
 }
-

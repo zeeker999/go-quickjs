@@ -205,7 +205,6 @@ func TestJITExceptionHandlers(t *testing.T) {
 	}
 }
 
-
 // A generator's or an async function's body is compiled, and each
 // resumption enters native code at its pc: the first after the
 // parameters, or the one after the yield or the await it was suspended

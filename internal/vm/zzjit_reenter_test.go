@@ -321,8 +321,6 @@ func TestJITRunOutOfCodeInInterpreter(t *testing.T) {
 	}
 }
 
-
-
 // A frame native code made -- a native call's callee -- whose code Go
 // finishes after it left at a PC with no entry (jitFinishExit) goes on in
 // the interpreter only to its loop's next header, and natively from there

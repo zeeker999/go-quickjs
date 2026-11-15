@@ -32,7 +32,6 @@ func jitNoInlineForTest(t *testing.T, name string) {
 	t.Cleanup(func() { jitNoInline = nil })
 }
 
-
 // jitClosureForTest is the closure of the function the script's global
 // expression src gives.
 func jitClosureForTest(t *testing.T, r *Runtime, src string) uintptr {
@@ -658,7 +657,6 @@ func TestJITInlinesLoopsFirst(t *testing.T) {
 		}
 	}
 }
-
 
 // A megamorphic site's write inside an inlined callee -- an addition the
 // megamorphic cache does not hold, an array's length -- is Go's from

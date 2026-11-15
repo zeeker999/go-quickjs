@@ -50,7 +50,3 @@ func jitShapeRunForTest(t *testing.T, setup, name string, rounds ...string) (*Ru
 }
 
 type jitShapeRound struct{ deopts, hosts, compiles uint64 }
-
-
-
-

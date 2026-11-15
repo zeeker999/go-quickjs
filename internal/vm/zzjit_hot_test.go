@@ -150,4 +150,3 @@ func jitHotForTest(r *Runtime, name string) *jitEntry {
 	}
 	return e
 }
-

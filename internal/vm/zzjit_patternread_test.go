@@ -63,4 +63,3 @@ func TestJITPatternReadPending(t *testing.T) {
 		both.agree(t, `ws(300, { x: 2 })`)
 	}
 }
-

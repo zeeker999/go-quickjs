@@ -419,7 +419,6 @@ var typeNames = map[string]int{"number": ir.TypeNumber, "string": ir.TypeString,
 	"undefined": ir.TypeUndefined, "function": ir.TypeFunction, "object": ir.TypeObject, "symbol": ir.TypeSymbol,
 	"bigint": ir.TypeBigInt}
 
-
 // GoOperation reports whether op is one the new pipeline has Go make,
 // called from native code, where its operands are the top of the stack and
 // its one result replaces them: the VM's GoCall of an operation

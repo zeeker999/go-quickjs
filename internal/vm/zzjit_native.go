@@ -2523,12 +2523,6 @@ func (r *Runtime) jitState() *jitState {
 	return r.jit
 }
 
-
-
-
-
-
-
 // jitOn reports whether this runtime runs the JIT. The call path tests it
 // before each hook, so with the JIT off a call pays this flag test and
 // nothing else; without the JIT built in it is the constant false.
@@ -2568,7 +2562,6 @@ func (s *jitState) backEdgeBudget() int {
 	return s.edgesNext
 }
 
-
 // SetJITWarmUp has r compile a function once calls invocations' worth of
 // its budget are spent, and wait afterICUpdate invocations' worth after a
 // change of its caches' feedback, in place of V8's counts
@@ -2602,9 +2595,6 @@ type jitTreeExit struct {
 	value Value
 	err   error
 }
-
-
-
 
 // errGoOnTree ends the interpreter's run of a frame its tree goes on with,
 // at a loop's header (jitInterpretAfter).

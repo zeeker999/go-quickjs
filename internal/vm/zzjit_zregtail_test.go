@@ -57,7 +57,6 @@ function self(n, acc) { if (n === 0) return acc; return self(n - 1, acc + n) }
 function deep(n) { var s = 0; for (var i = 0; i < n; i++) s += even(40 + (i & 7), 0) + self(40 + (i & 7), 0); return s }
 `
 
-
 // regClassConstructSrc constructs classes' objects, of base classes with
 // no field to initialize, from register code's native code: natively, as
 // the stack form's code constructs them (jitConstructs), where Go had
@@ -202,7 +201,6 @@ function args(n) {
 }
 `
 
-
 // regForwardSrc's constructors are prototype.js's Class.create's,
 // this.initialize.apply(this, arguments), as Octane's RayTrace makes its
 // objects: constructed natively, their forwarding call native too
@@ -226,7 +224,6 @@ function fwd(n) {
 	return a.x + a.y + a.z + k + g(1, 2);
 }
 `
-
 
 // regTailSelfSrc's functions call themselves in tail position past
 // tailCallDepth: strict code, whose frame the interpreter gives the call in
@@ -269,7 +266,6 @@ function deepMix(n, k) { var s; for (var i = 0; i < k; i++) s = mix(n, 0); retur
 function sloppy(n, acc) { if (n === 0) return acc + ':' + (this === undefined); return sloppy(n - 1, acc + 1) }
 function deepSloppy(n, k) { var s; for (var i = 0; i < k; i++) s = sloppy(n, 0); return s }
 `
-
 
 // regDerivedSrc constructs derived classes from register code: super() of
 // arguments, through two levels and past a class without a constructor of
@@ -376,4 +372,3 @@ function checks(n) {
 	return out.join();
 }
 `
-

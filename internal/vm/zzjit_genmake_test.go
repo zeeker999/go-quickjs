@@ -93,7 +93,6 @@ var jitGenMakeCases = []struct {
 		[]string{`f(3)`, `f(1)`}, []string{`0;1;2;`, `0;`}, "g"},
 }
 
-
 // A loop making a short generator at each turn and running it, compiled,
 // makes the generator natively, from its call's pool, and takes the loop's
 // cursor from the generator's room, where each had been a call of Go: a

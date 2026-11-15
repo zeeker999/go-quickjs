@@ -168,7 +168,6 @@ func jitGenRounds(t *testing.T, mk func() *Runtime, rounds int, native func(r *R
 	}
 }
 
-
 // A loop over a generator, compiled, makes no call of Go at its steps:
 // each resumes the generator natively and its yields return natively, a
 // few calls of Go made in all -- the generator's making, the loop's
