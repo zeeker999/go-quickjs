@@ -198,6 +198,8 @@ var jitEncoding = abi.Encoding{
 	LinkFrame:          int32(unsafe.Offsetof(jitLink{}.frame)),
 	LinkFlags:          int32(unsafe.Offsetof(jitLink{}.flags)),
 	LinkGen:            int32(unsafe.Offsetof(jitLink{}.gen)),
+	LinkStack:          int32(unsafe.Offsetof(jitLink{}.tailStack)),
+	LinkTop:            int32(unsafe.Offsetof(jitLink{}.tailTop)),
 	ClassArray:         uint8(ClassArray),
 	ClassTypedArray:    uint8(ClassTypedArray),
 	TypedKind:          int32(unsafe.Offsetof(typedArrayData{}.kind)),

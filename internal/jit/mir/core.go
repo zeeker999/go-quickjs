@@ -558,8 +558,18 @@ type Code struct {
 	// or -1 for none.
 	GenEntry int
 	// TailEntry is the offset of the entry another function's call in
-	// tail position jumps to (ssa.Func's TailEntry), or -1 for none.
+	// tail position jumps to (ssa.Func's TailEntry), or -1 for none: a
+	// routine that makes the frame's bindings past its parameters
+	// undefined, as the call entry does, or, where it has none, the entry
+	// at the start.
 	TailEntry int
+	// StackAt is where the frame's operands start past its locals, a
+	// register program's past its scratch slots, and FrameSize how many
+	// slots the frame takes in the VM's stack, the call entry's -- both in
+	// values: what a call in tail position of register code that jumps to
+	// TailEntry makes of them (mir's windowTailJump), read from the
+	// callee's link (abi.Encoding's LinkStack, LinkTop).
+	StackAt, FrameSize int
 	// Text is how many of Bytes are instructions: past them are the code's
 	// own constants (amd64's movImm), data.
 	Text int

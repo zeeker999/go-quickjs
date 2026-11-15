@@ -248,14 +248,20 @@ native callee's frame, a call there of another of the functions the call
 has (its native call sites, `OpTailSelf`'s `Calls`) is a jump to that
 function's code with its window in this one's place, as the stack form's
 `tailJump`: its registers the call's function, receiver and arguments up to
-its parameters, undefined past them, the context this one -- its closure,
-its captured bindings, `TailFrame` for its own calls -- and the jump goes
-to the callee's tail entry (`ssa.Func`'s `TailEntry`, `mir`'s
-`windowTailJump` and `tailEntry`, its link's body), which makes what its
-call entry would past the window -- its operands' address, the VM's
-stack's top -- and goes on at its start, returning where this frame would
-have: two functions calling each other in tail position run as deep as
-they like in one frame, natively. Not a callee that keeps its arguments,
+its parameters, undefined past them, as a native call writes its callee's
+window -- its temporaries, which it writes before it reads them, left as
+they are -- the context this one -- its closure, its captured bindings,
+`TailFrame` for its own calls -- and what its call entry would make past
+the window, its operands' address and the VM's stack's top, of the
+callee's code as its link has them (`abi.Encoding`'s `LinkStack` and
+`LinkTop`, `mir`'s Code's `StackAt` and `FrameSize`); the jump goes to the
+callee's tail entry (`ssa.Func`'s `TailEntry`, `mir`'s `windowTailJump`
+and `tailEntry`, its link's body): its start, or, where it has bindings
+past its parameters, a routine that makes them undefined, as its call
+entry does, then its start, returning where this frame would have: two
+functions calling each other in tail position run as deep as they like in
+one frame, natively. A call of the function itself writes its bindings
+and leaves its temporaries so too. Not a callee that keeps its arguments,
 an arrow reading its this, a sloppy one given the global object, a generic
 call's, nor a call in a frame Go entered (`abi.Context`'s `ReturnTo`),
 which the interpreter gives up. Any other call there leaves for the
@@ -1351,6 +1357,16 @@ its own, its poll, a callback with no code to call or that left native
 code -- Go goes on with on the register frame from its index
 (`jitRegLoopLeft`, `jitLoopFinishAt`), the callback's answer first where
 its call was made, and native code after the call.
+
+A `sort` of a typed array of a number type, or of an `Array` of numbers,
+by a comparator native code may call again at will -- one whose code reads
+only its parameters and constants that are numbers, computes, compares,
+branches forward and returns (`jitSortComparator` over the stack form's
+code, `jitRegSortComparator` over the register form's) -- is a merge sort
+of the code's own, the comparator inlined, over a copy Go makes and writes
+back after the last comparison (`ssa`'s `sortCall`). Any exit inside it has
+Go sort the array again from the first, which nothing the comparator did
+can show; a comparator that cannot be inlined leaves the call to Go.
 
 ### Allocation and escape analysis
 

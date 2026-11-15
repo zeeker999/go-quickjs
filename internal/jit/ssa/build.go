@@ -782,9 +782,10 @@ func (b *builder) sortCall(blk *Block, pc int, fp forEachPlan) {
 	mark := fp.site.Kind
 	typed := mark&abi.LoopTyped != 0
 	argc := b.callsAt(pc)[0].Argc
-	sp := b.p.Locals + b.p.Maps[pc].Depth
-	dest := b.p.Locals + b.p.Maps[pc+1].Depth - 1
-	recv, fn, cb := b.read(sp-argc-2, blk), b.read(sp-argc-1, blk), b.read(sp-argc, blk)
+	// Its operands where the call's form has them, as forEachCall's.
+	cs, _ := b.callSlotsOf(pc, argc, true)
+	dest := cs.dest
+	recv, fn, cb := b.read(cs.recv, blk), b.read(cs.fn, blk), b.read(cs.arg, blk)
 	fr := fp.inline
 	call := b.rootState()
 	at := func(blk *Block, st *FrameState, op Op, t Type, args ...*Value) *Value {
@@ -846,7 +847,7 @@ func (b *builder) sortCall(blk *Block, pc int, fp forEachPlan) {
 		b.write(base+i, blk, v)
 	}
 	// The call's result, the array.
-	b.write(dest, blk, recv)
+	b.assign(dest, blk, recv)
 	loop := f.newValue(blk, OpLoopMark, None)
 	loop.Const = ir.Value{Bits: uint64(mark)<<32 | uint64(base-b.root.p.Locals+1)}
 	state := func(blk *Block, depth int) *FrameState {

@@ -1211,7 +1211,11 @@ func (f *jitRegFeedback) Leaf(pc int) (uintptr, bool) {
 	// literal's (RMarkLitArg), whose call of Go gives the literal its
 	// RegExp back, as the stack form's does.
 	replace := callee == f.fb.r.strReplaceFn && w.Op() == bytecode.RCallMW && w.X() == 2 && marks&bytecode.RMarkLitArg == 0
-	if !jitLeafOp(fd.elemOp) && !regexp && !replace {
+	// Array.prototype.push of other than one value, which the stack form's
+	// code learns a leaf at its calls of Go (jitPlainCall): one value's
+	// push native code appends itself.
+	push := fd.elemOp == elemPush && w.X() != 1
+	if !jitLeafOp(fd.elemOp) && !regexp && !replace && !push {
 		return 0, false
 	}
 	f.fb.keep().holders = append(f.fb.keep().holders, callee)

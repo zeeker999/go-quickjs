@@ -2154,13 +2154,16 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 			return r.jitRegStepMade(ctx, idx, run, rpc, st)
 		}
 	}
-	if kind == abi.GoCallWhole || (kind == abi.GoCallRest || kind == abi.GoCallStep) && (op == bytecode.RIterRest || op == bytecode.RIterStep) ||
-		kind == abi.GoCallStep && op == bytecode.RIterNext || kind == abi.GoCallForOf && op == bytecode.RForOfStart ||
+	if op == bytecode.RIterStep && kind == abi.GoCallFill || op == bytecode.RIterRest && kind == abi.GoCallRest {
+		// A destructuring's step that native code had none of its own
+		// for, or its rest element: made here, as the stack form's
+		// (jitCallMade).
+		return r.jitRegIterMade(ctx, idx, run, rpc, w)
+	}
+	if kind == abi.GoCallWhole || kind == abi.GoCallStep && op == bytecode.RIterNext || kind == abi.GoCallForOf && op == bytecode.RForOfStart ||
 		kind == abi.GoCallForIn && op == bytecode.RForInStart {
 		// A for...of's cursor native code did not take from a generator's
 		// room (regWholeSite's ForOf) too.
-		// Or a destructuring's step or rest, which native code had no
-		// step of its own for: run whole too.
 		return r.jitRegWhole(ctx, idx, run, rpc)
 	}
 	if op == bytecode.RSuperCall && kind == abi.GoCallSuper {
@@ -2699,6 +2702,46 @@ func (r *Runtime) jitRegPropertyMade(f *frame, w bytecode.RInstr, key Atom, obj,
 	return r.getValueProp(obj, key)
 }
 
+// jitRegIterMade makes a destructuring's step or rest element, at register
+// pc rpc of run's frame, of the cursor native code passed, as the stack
+// form's call of Go makes it (jitCallMade's OpIterStep and OpIterRest) and
+// the interpreter's iter_step and iter_rest do (regIterStep, regIterRest):
+// the cursor's next value, undefined once it is done, or the array of what
+// it has left, to the call's keep cell. It had run the instruction whole
+// (jitRegWhole), its registers saved and put back, and a step of a cursor
+// native code makes none of (abi.GoCallFill) had left native code. What
+// the iterator's next throws, and what else does not go on after the
+// call, Go finishes at the call's exit (regPending, regFinishCall), as a
+// getter's.
+func (r *Runtime) jitRegIterMade(ctx *abi.Context, idx int, run jitRegRun, rpc int, w bytecode.RInstr) bool {
+	s := r.jit
+	f, c := run.f, run.c
+	f.pc = regSrc(c, rpc) + 1
+	last, shared := s.ssaCtx, s.ssaSharedGen
+	goCallDepth := s.goCallDepth
+	s.goCallDepth = r.frameDepth + 1
+	s.goCalls++
+	r.noteRegGoCall(w, false, Value{})
+	var v Value
+	var err error
+	if w.Op() == bytecode.RIterRest {
+		v, err = r.iterRest(jitGoArg(ctx, 0))
+	} else {
+		v, err = r.iterStep(jitGoArg(ctx, 0))
+	}
+	s.goCallDepth = goCallDepth
+	s.ssaCtx = last
+	if s.ssaSharedGen != shared {
+		r.jitShareContexts(idx, f)
+	}
+	if err != nil || r.stopped != nil || run.e.invalid || run.leave || r.jitRegCompileDueNow(&run, idx) {
+		s.regPending = jitGoPending{set: true, pc: rpc, ctx: idx, v: v, err: err}
+		return false
+	}
+	*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = v
+	return true
+}
+
 // regFinishCall finishes, on f's registers, a window at wb, the call at
 // register pc rpc of c that Go made for native code (jitRegGoCall) with v
 // or err as its answer, as regCallW finishes one: its value to its
@@ -2710,9 +2753,11 @@ func (r *Runtime) regFinishCall(f *frame, c *regCode, wb, rpc int, v Value, err 
 	if err == nil {
 		dest := int(w.B())
 		switch w.Op() {
-		case bytecode.RInstanceOf, bytecode.RTypeof, bytecode.RGetProp, bytecode.RGetMethod, bytecode.RApplyArgs:
+		case bytecode.RInstanceOf, bytecode.RTypeof, bytecode.RGetProp, bytecode.RGetMethod, bytecode.RApplyArgs,
+			bytecode.RIterStep, bytecode.RIterRest:
 			// R[A]'s: a getter's, called for get_prop (an accessor
-			// inlined, jitRegInlined), as typeof's and instanceof's.
+			// inlined, jitRegInlined), as typeof's and instanceof's, and a
+			// destructuring's step's and rest's (jitRegIterMade).
 			dest = int(w.A())
 		case bytecode.RGetMethodW:
 			// R[A]'s, and the receiver to R[A+1], as get_method_w puts
