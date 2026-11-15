@@ -2029,14 +2029,19 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 		if win {
 			// The callee's window and what its code takes past it, its
 			// link's (abi.Encoding's LinkFrame), which the code it runs now
-			// sets, and the arguments the call writes, which may be more
-			// than its registers. scratchC keeps the callee, which a
-			// construction's checks read.
-			c.a.Load(scratchB, regCtx, abi.OffStackTop)
-			c.a.Load(scratchB, scratchB, 0)
-			c.a.OpImm(amd64.Add, scratchB, int32(2+site.Argc), true)
-			c.a.CmpMem(scratchB, regCtx, abi.OffStackEnd, true)
-			guard.jump(amd64.CondA)
+			// sets, and the arguments the call writes, where they are more
+			// than its registers (LocalCount), which the link's room never
+			// is less than: one check, as the stack form's call makes, where
+			// they are not -- a second had been a load and a compare more at
+			// every call. scratchC keeps the callee, which a construction's
+			// checks read.
+			if 2+site.Argc > t.LocalCount {
+				c.a.Load(scratchB, regCtx, abi.OffStackTop)
+				c.a.Load(scratchB, scratchB, 0)
+				c.a.OpImm(amd64.Add, scratchB, int32(2+site.Argc), true)
+				c.a.CmpMem(scratchB, regCtx, abi.OffStackEnd, true)
+				guard.jump(amd64.CondA)
+			}
 			c.a.Load(scratchB, regCtx, abi.OffStackTop)
 			c.a.Load(scratchB, scratchB, 0)
 			c.movImm(scratchA, uint64(t.Entry)-uint64(c.enc.LinkEntry))
@@ -2117,7 +2122,14 @@ func (c *compiler) call(v *ssa.Value, guard guardTo) {
 		// f, apply and the receiver: nothing below them.
 		operands = calleeSlot
 	}
-	st, recs := c.callState(v, s, func(i int) bool { return direct && i >= ops && i < sp }, operands)
+	// Register code's call leaves out of its state the operands it
+	// consumes, the stack form's way (ssa.Value's Consumes): its window's
+	// registers the frame reads no more, which a callee that leaves is
+	// finished without -- each had been a record's words stored at every
+	// call.
+	st, recs := c.callState(v, s, func(i int) bool {
+		return direct && i >= ops && i < sp || win && v.Consumes(i-(site.Window-1))
+	}, operands)
 	c.callRecords(v, recs)
 	c.movImm(scratchA, uint64(uintptr(unsafe.Pointer(st))))
 	c.a.Store(regCtx, abi.OffCallState, scratchA)
@@ -5182,15 +5194,31 @@ func (c *compiler) goArg(at int32, x *ssa.Value) {
 // (ssa.TailWindow) writes its window, the function, the receiver and the
 // arguments, to its registers, and the receiver to the VM's frame where Go
 // entered the code with one (abi.Context's FrameThis). Any other call
-// leaves for Go to make.
+// leaves for Go to make. All but the depth's check is out of line
+// (tailDeep), as a call's paths that are not its own are: the frame given
+// up only past tailCallDepth frames, a call in tail position is a call
+// where the stack is shallow, whose site had been some 750 bytes of
+// register code's call path -- the jump to another function's code, its
+// window written register by register, among them -- that it jumped over.
 func (c *compiler) tailSelf(v *ssa.Value, guard guardTo) {
-	shallow := c.a.NewLabel()
+	shallow, deep := c.a.NewLabel(), c.a.NewLabel()
 	c.a.Load(scratchA, regCtx, abi.OffLevel)
 	c.a.Load(scratchB, regCtx, abi.OffBounds)
 	c.a.Load(scratchB, scratchB, abi.OffBoundsTailLevel)
 	c.a.Op(amd64.Cmp, scratchA, scratchB, true)
-	c.a.Jcc(amd64.CondB, shallow)
-	defer c.a.Bind(shallow)
+	c.a.Jcc(amd64.CondAE, deep)
+	c.cold = append(c.cold, func() {
+		c.a.Bind(deep)
+		c.tailDeep(v, guard)
+		c.a.Jmp(shallow)
+	})
+	c.a.Bind(shallow)
+}
+
+// tailDeep is tailSelf's call deep in the stack, out of line: it leaves,
+// jumps or exits, or, where it has nothing to make, falls through to the
+// call made after it.
+func (c *compiler) tailDeep(v *ssa.Value, guard guardTo) {
 	args, entry := v.Args[1:], c.entryAt(0)
 	var this *ssa.Value
 	if v.Key&1 != 0 {

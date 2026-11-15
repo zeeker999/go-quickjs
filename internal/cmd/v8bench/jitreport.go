@@ -299,6 +299,7 @@ func (r runtimeOf) Report(name string) {
 	fmt.Printf("  jit: %d dropped to make room, %d compiles refused it, %d of them once compiled; %d flushed unused, %d compiles of code dropped; holds %.1f of %.1f MiB\n",
 		st.Evicted-was.Evicted, st.Refused-was.Refused, st.Discarded-was.Discarded, flushed-jitReport.flushed, recompiled-jitReport.recompiled,
 		float64(st.Held)/(1<<20), float64(st.Budget)/(1<<20))
+	fmt.Printf("  jit: %d contexts, %d at most, given back %d times\n", st.Contexts, st.ContextsMost, st.ContextsShrunk-was.ContextsShrunk)
 	jitReport.stats, jitReport.flushed, jitReport.recompiled = st, flushed, recompiled
 	// Register code's host exits by the register instruction Go ran
 	// whole, the most first.

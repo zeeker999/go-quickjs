@@ -165,7 +165,7 @@ func (r *Runtime) JITStats() JITStats {
 		Hosts: s.hosts, Budgets: s.budgets, Interpreted: s.interpreted, SSAEntries: s.ssaEntries, SSARecords: s.ssaRecords,
 		Held: int64(s.held()), Budget: int64(r.jitBudget()), Evicted: s.evicted, Refused: s.refusedRoom,
 		Discarded: s.discarded, Reoptimized: s.reoptimized, Inlined: s.inlined, InlinedCode: s.inlinedCode,
-		Pooled: jit.PooledWorkspaceBytes()}
+		Pooled: jit.PooledWorkspaceBytes(), Contexts: len(s.ssaCtxs), ContextsMost: s.ctxMost, ContextsShrunk: s.ctxShrunk}
 }
 
 // SetJITBackground has the JIT compile on the process's workers, the
@@ -1116,8 +1116,15 @@ type jitState struct {
 	ssaSharedFrom int
 	ssaSharedGen  uint64
 	// bounds are how deep the contexts' native calls may go, which they
-	// all point to (abi.Bounds), and jitShareContexts writes.
-	bounds abi.Bounds
+	// all point to (abi.Bounds), and jitShareContexts writes; levelBound
+	// the LevelLimit the VM's frames alone would give, which the contexts
+	// grow to (jitGrowContexts).
+	bounds     abi.Bounds
+	levelBound uint64
+	// ctxShrunk counts the times contexts were given back
+	// (jitShrinkContexts), and ctxMost is the most there have been.
+	ctxShrunk uint64
+	ctxMost   int
 	// hintTable is hints for native code (abi.HintTable), which every
 	// context points to, as they do to mega (abi.MegaCache).
 	hintTable abi.HintTable
@@ -1645,8 +1652,14 @@ func (s *jitState) spillShare() int { return 8 * max(s.ssaSpills-abi.SpillSlots,
 // adds to what the JIT holds: nothing for code of no more than the most
 // placed so far.
 func (s *jitState) spillRoom(mc *mir.Code) int {
-	return len(s.ssaCtxs) * 8 * max(mc.Spills-max(s.ssaSpills, abi.SpillSlots), 0)
+	return s.ctxCounted() * 8 * max(mc.Spills-max(s.ssaSpills, abi.SpillSlots), 0)
 }
+
+// ctxCounted is how many of the contexts the budget counts: the first
+// chunk, which a runtime running native code holds whatever its depth --
+// the rest are the native levels' stack, bounded by the VM's depth limit
+// and given back once unused (jitContexts, jitShrinkContexts).
+func (s *jitState) ctxCounted() int { return min(len(s.ssaCtxs), jitContexts) }
 
 // spillsFor gives every context room for the spill slots of mc, placed:
 // a level reached later is given it as it is made (jitGrowContexts). No
@@ -1663,8 +1676,11 @@ func (s *jitState) spillsFor(mc *mir.Code) {
 }
 
 // sharedBytes is what the JIT holds for the runtime apart from its entries
-// and lowerings: its state; the contexts native code runs in; its hint
-// table and links; and code compiled again or dropped that a call of Go is
+// and lowerings: its state; the first chunk of the contexts native code
+// runs in, with their places in what is kept by context (ctxCounted) --
+// not the native levels' stack past it, which the VM's depth limit
+// bounds, as V8's stack is not of its code space; its hint table and
+// links; and code compiled again or dropped that a call of Go is
 // still suspended in (retired). Not the workspace a compile is made in,
 // which is the process's, the runtime's only while it compiles
 // (jit.Workspace), a compile's working memory as V8's compile zones are
@@ -1675,10 +1691,10 @@ func (s *jitState) spillsFor(mc *mir.Code) {
 // megabyte and its biggest forty, allocated twice as much as with them
 // kept, Box2D three times, and dropped dozens of functions' code.
 func (s *jitState) sharedBytes() int {
-	n := int(unsafe.Sizeof(*s)) + len(s.ssaCtxs)*jitContextBytes + jitCapBytes(s.ssaCtxs) + jitCapBytes(s.hints) +
-		jitCapBytes(s.hintFree) + len(s.links)*jitLinkFixed + jitCapBytes(s.victims) + jitCapBytes(s.goRuns) +
-		jitCapBytes(s.goPinned) + jitCapBytes(s.retired) + jitCapBytes(s.calleeOpen) + jitCapBytes(s.unwinding) + jitCapBytes(s.unwindingFrames) +
-		jitCapBytes(s.seedingFns) + jitCapBytes(s.arrayRooms) + len(s.ssaCtxs)*s.spillShare()
+	n := int(unsafe.Sizeof(*s)) + s.ctxCounted()*(jitContextShare+s.spillShare()) + jitCapBytes(s.hints) +
+		jitCapBytes(s.hintFree) + len(s.links)*jitLinkFixed + jitCapBytes(s.victims) +
+		jitCapBytes(s.goPinned) + jitCapBytes(s.retired) + jitCapBytes(s.unwinding) + jitCapBytes(s.unwindingFrames) +
+		jitCapBytes(s.seedingFns) + jitCapBytes(s.arrayRooms)
 	for _, x := range s.retired {
 		n += x.code.Footprint()
 	}
@@ -2069,6 +2085,7 @@ func (s *jitState) flush() {
 		return
 	}
 	s.flushedAt = tick
+	s.jitShrinkContexts()
 	// Used since the last look: code that ran, by its uses, and the
 	// callees of code used -- inlined there, or called natively -- whose
 	// own uses do not count what runs of them there, and whose entries
@@ -2589,8 +2606,10 @@ func (r *Runtime) releaseJIT() {
 
 // jitBudget bounds what the JIT holds (jitState.held): its code and all
 // that describes it, what it has learned, the programs it lowered, the
-// contexts its code runs in -- not its compiles' working memory, which
-// what the recent compiles needed bounds (sharedBytes). The memory meter
+// first contexts its code runs in -- not its compiles' working memory, which
+// what the recent compiles needed bounds, nor the contexts a deeper
+// recursion of native calls takes, which the VM's depth limit bounds
+// (sharedBytes). The memory meter
 // never counts it: a script's memory, and so whether it fails with
 // ErrMemoryLimit, is the same with the JIT on and off. It is the runtime's
 // JIT memory limit (Config.JITMemoryLimit) if it has one; else a runtime
@@ -2933,12 +2952,18 @@ func (r *Runtime) jitBackEdge(f *frame, pc uint32, sp int) (Value, error, bool) 
 		return Undefined, err, true
 	}
 	r.sweepStaleSlots(sp)
-	v, err, done := r.tryJITLoop(f, pc, sp, fullBudget)
-	if s := r.jit; !done && s != nil && s.goOnTree == f {
-		// The frame its tree goes on with (jitInterpretAfter), which native
-		// code does not take here: at its loop's header, which begins a
-		// block of its tree, the tree takes it -- the check made as any
-		// other, its budget spent, at its own back edge's turn.
+	if s := r.jit; s != nil && s.goOnTree == f {
+		// The frame its tree goes on with (jitInterpretAfter), a run of
+		// native code that left it waiting on the interpreter below Go: at
+		// its loop's header, which begins a block of its tree, the tree
+		// takes it -- the check made as any other, its budget spent, at its
+		// own back edge's turn -- before native code may. Entered there, a
+		// run of its own nested in the one that left it, each leaving at a
+		// turn of the loop, had nested again at the next, the frame's runs
+		// as deep in Go as the contexts went: 96 of them, when they were
+		// all there were, past which Go declined the entry and the tree
+		// took the frame; 8,192 once the contexts grew to the VM's depth
+		// limit.
 		if o := s.treeOSR; o.f == f && o.pc == int(pc) && o.depth == sp-f.base {
 			// Back at the loop a tree entered native code at: the tree,
 			// whose run of the frame waits on that entry, goes on with
@@ -2951,7 +2976,7 @@ func (r *Runtime) jitBackEdge(f *frame, pc uint32, sp int) (Value, error, bool) 
 			return Undefined, errGoOnTree, true
 		}
 	}
-	return v, err, done
+	return r.tryJITLoop(f, pc, sp, fullBudget)
 }
 
 // backEdgeBudget is the back-edge budget after a check: about

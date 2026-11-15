@@ -8999,6 +8999,9 @@ func (b *builder) windowCall(blk *Block, pc int, in ir.Instruction, calls []*Cal
 	}
 	call := guard(OpCall, Tagged, ir.HostExit, args...)
 	f.cache(call).Calls, call.Index = calls, b.callKeepAt(pc)
+	if !calls[0].InstanceOf && !calls[0].TypeOf {
+		call.IC.Consumed = b.windowConsumed(pc, in)
+	}
 	if calls[0].Go == GoCall {
 		// Go makes it, which counts it as an exit's would.
 		f.HostsLeft = append(f.HostsLeft, pc)
@@ -9011,6 +9014,43 @@ func (b *builder) windowCall(blk *Block, pc int, in ir.Instruction, calls []*Cal
 	if b.hasCells() {
 		b.reloadAfterCall(blk)
 	}
+}
+
+// windowConsumed is the slots of the window of register code's call at
+// pc, in, the root's, that the call consumes (InlineCache's Consumed):
+// its function's, its receiver's and its arguments' registers that no
+// instruction reads past the call's register instruction before writing
+// them -- live neither at the next one's start nor at the handler in
+// force -- and the result's, which the call writes. The rest, a register
+// read again past the call, its state describes for Go to write.
+func (b *builder) windowConsumed(pc int, in ir.Instruction) uint64 {
+	p := b.p
+	if p.Origin == nil || p.Live == nil {
+		return 0
+	}
+	next := pc + 1
+	for next < len(p.Code) && p.Origin[next] == p.Origin[pc] {
+		next++
+	}
+	handler := -1
+	if p.HandlerAt != nil && p.HandlerAt[pc] != 0 {
+		handler = int(p.Handlers[p.HandlerAt[pc]-1].PC)
+	}
+	var m uint64
+	for k := range min(2+in.Extra, 64) {
+		slot := in.Left.Slot + k
+		if slot >= p.Regs {
+			continue
+		}
+		dead := slot == in.Dest || next < len(p.Code) && !p.LiveAt(next, slot)
+		if dead && handler >= 0 && handler < len(p.Code) && p.LiveAt(handler, slot) {
+			dead = false
+		}
+		if dead {
+			m |= 1 << k
+		}
+	}
+	return m
 }
 
 // superCall makes register code's super(...) at pc, in, of a derived
