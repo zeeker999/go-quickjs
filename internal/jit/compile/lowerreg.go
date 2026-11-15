@@ -1812,6 +1812,20 @@ func liveRegs(p *ir.Program, rc *bytecode.RegCode) {
 			for _, r := range irReads(ins) {
 				gen(r)
 			}
+			if ins.Check {
+				if w := rc.Code[p.Origin[i]]; w.Op() == bytecode.RDerivedRet {
+					// derived_ret's copy of the this binding, its operand
+					// known undefined (lowerReg's undefinedAt), leaves where
+					// the slot is unbound for Go to run the instruction,
+					// which reads the operand: live there, its undefined in
+					// the exit's state. Dead to the copy, the exit had left
+					// the window's stale value, which Go's derived_ret
+					// returned -- a derived constructor whose this an
+					// arrow's super() bound, which native code's this slot
+					// does not see.
+					gen(int(w.A()))
+				}
+			}
 		}
 	}
 	opAt[m] = int32(len(ops))
