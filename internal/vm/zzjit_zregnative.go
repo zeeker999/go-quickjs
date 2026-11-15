@@ -261,6 +261,16 @@ func (r *Runtime) jitRegCached(key jitKey, e *jitRegEntry) {
 			st.workBase, st.stretchBase = st.work, st.judged
 			st.runGoCalls, st.runWork, st.osrStretches, st.osrWork = 0, 0, 0, 0
 		}
+		// Its calls of Go as a native callee too, against its native
+		// callers' calls counted afresh (its link's in, above), as the stack
+		// form's begin anew: counted over its compiles while those were
+		// not, code compiled again was judged at once by calls its native
+		// callers' were never counted against -- CD's putIntoMap, AWFY's
+		// Json's callbacks, judged not to pay on their first look. Reset
+		// with the link's in, which is reset whether or not the code was
+		// compiled again only to give up its kept entries.
+		st := &life.ssaStats
+		st.calleeGoCalls, st.calleeWork = 0, 0
 	}
 	if life := e.life; life != nil && e.code != nil {
 		// Its calls since, which give up the entries kept for a frame

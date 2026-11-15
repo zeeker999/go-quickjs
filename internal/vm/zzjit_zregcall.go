@@ -205,6 +205,27 @@ func (f *jitRegFeedback) regCallTargets(pc int, w bytecode.RInstr, argc int, met
 			}
 		}
 	}
+	if method && l != nil && f.rc != nil {
+		// The other functions the call's method read has met, of the other
+		// shapes its cache saw, each called natively from the first compile
+		// and learned so, as the stack form's code seeds a polymorphic
+		// method call (jitSeenCallees, jitSeedNativeCalls): left to the site's
+		// cache's one, the code knew one function of a call of several,
+		// learned the others an exit at a time and waited a budget for each
+		// compile -- V8's Richards' TaskControlBlock.run, compiled for its
+		// native callers knowing one of its four tasks' run, left native
+		// code at most of its first run's calls.
+		for _, t := range f.fb.r.jitRegSeenCallees(f.fb.cl, f.rc, int(rpc), w) {
+			if t.cl.reg == nil {
+				continue
+			}
+			n := len(sites)
+			add(t.o, t.cl, t.cl.reg, nil, nil, false, false)
+			if len(sites) > n && !jitRegCallKnown(l, rpc, t.o) {
+				l.nativeCalls = append(l.nativeCalls, jitInline{pc: rpc, cl: t.cl, obj: t.o})
+			}
+		}
+	}
 	if l != nil {
 		for _, x := range l.nativeCalls {
 			if x.pc == rpc && (x.pool != nil) == newW && !x.forEach && x.cl != nil && x.active == nil {
@@ -214,6 +235,73 @@ func (f *jitRegFeedback) regCallTargets(pc int, w bytecode.RInstr, argc int, met
 	}
 	return sites, objs, closures
 }
+
+// jitRegSeenCallees are the functions the method call w at register pc rpc
+// of cl's register code rc has called as its method read's cache saw them,
+// as jitSeenCallees finds the stack form's: the read is the get_method_w
+// before the call that puts the method in the call's window's first
+// register, and of each shape its cache met -- its entry, those it keeps
+// for other shapes (propCache.poly) and those it had before (seen) -- the
+// method a prototype holds now, each a function native callers may call.
+// A call checks its callee, so one that turns out wrong costs an exit.
+func (r *Runtime) jitRegSeenCallees(cl *closure, rc *bytecode.RegCode, rpc int, w bytecode.RInstr) []jitCallee {
+	if w.Op() != bytecode.RCallMW && w.Op() != bytecode.RCallMWT || rpc <= 0 || rpc > len(rc.Code) {
+		return nil
+	}
+	fa := int(w.A())
+	read := -1
+	for q := rpc - 1; q >= 0 && q >= rpc-1-jitRegSeenReach; q-- {
+		if x := rc.Code[q]; x.Op() == bytecode.RGetMethodW && int(x.A()) == fa {
+			read = q
+			break
+		}
+	}
+	if read < 0 {
+		return nil
+	}
+	site := int(rc.Code[read].C())
+	if site >= len(cl.ic) || site >= len(rc.SiteName) || int(rc.SiteName[site]) >= len(cl.names) {
+		return nil
+	}
+	key := cl.names[rc.SiteName[site]]
+	var out []jitCallee
+	take := func(c *propCache) {
+		h := c.p1
+		if c.p2 != nil {
+			h = c.p2
+		}
+		if c.shape == nil || c.shape == noShape || c.shape == dictShape || c.getter || h == nil || c.idx < 0 || int(c.idx) >= int(h.valn) {
+			return
+		}
+		prop := h.propAt(c.idx)
+		if prop.key != key || prop.flags&(propAccessor|propPrivate|propDeleted|propUninit) != 0 || !prop.value.IsObject() {
+			return
+		}
+		mo, mc := r.jitCallableClosure(cl, prop.value.Object())
+		if mc == nil || slices.ContainsFunc(out, func(x jitCallee) bool { return x.o == mo }) {
+			return
+		}
+		out = append(out, jitCallee{mo, mc})
+	}
+	c := &cl.ic[site]
+	take(c)
+	if p := c.poly; p != nil {
+		for i := range p.entries[:p.n] {
+			take(&p.entries[i])
+		}
+	}
+	if seen := c.seenOf(); seen != nil {
+		for i := range seen.entries[:seen.n] {
+			take(&seen.entries[i])
+		}
+	}
+	return out
+}
+
+// jitRegSeenReach is how far before a method call jitRegSeenCallees looks
+// for the read of its method: past the instructions that put the call's
+// arguments in its window.
+const jitRegSeenReach = 32
 
 // jitRegSameClosureCode reports whether closures a and b run the same
 // function in the same environment and realm.
@@ -340,7 +428,17 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 			// (ssa.CallSite's ByCode), as the stack form's call learns it
 			// (jitSameCode).
 			if x.byCode {
-				r.jitRegNativeCallee(cl, cl.reg)
+				// Known by its code -- or past the functions the code calls
+				// natively, which a generic call calls through its link,
+				// found by its hint (regHint), given it here as for one
+				// known by its object (below). Without it, a callback made
+				// anew at each call of its maker, the fifth a call made --
+				// AWFY's Havlak's Vector.forEach's of stepD's arrow -- was
+				// made by Go at every call.
+				if w.Op() != bytecode.RNewW {
+					r.jitState().regLinkOf(cl, cl.reg)
+				}
+				r.jitRegKnownCallee(cl)
 				return false
 			}
 			x.byCode = true
@@ -360,7 +458,7 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 				if w.Op() != bytecode.RNewW {
 					r.jitState().regLinkOf(cl, cl.reg)
 				}
-				r.jitRegNativeCallee(cl, cl.reg)
+				r.jitRegKnownCallee(cl)
 				return false
 			}
 			n++
@@ -375,7 +473,7 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 			// their functions compiled (jitCallTarget). Go had made every
 			// call of one no site was compiled for.
 			r.jitState().regLinkOf(cl, cl.reg)
-			r.jitRegNativeCallee(cl, cl.reg)
+			r.jitRegKnownCallee(cl)
 		}
 		return false
 	}
@@ -502,6 +600,27 @@ func (r *Runtime) jitRegCallersReopt(l *jitEntry, depth int) {
 		}
 		r.jitRegCallersReopt(ce.life, depth-1)
 	}
+}
+
+// jitRegKnownCallee answers a call Go made of cl's function for a native
+// caller that calls it natively -- one it was compiled to call, or calls
+// through its link: one whose code native callers no longer call
+// (notNative) counts toward their calling it again (jitRegRetryNative), as
+// the stack form's jitKnownTargetSeen and jitCallTarget count a native
+// caller's call of such a callee, which left for Go; one with no code is
+// compiled for them (jitRegNativeCallee). Counted only where Go entered
+// the callee (jitRegEnter), a callee judged slow as well, which Go does
+// not enter, was never called natively again: CD's Vector, Havlak's
+// Dictionary.at, their native callers' calls made by Go, a million of
+// them, each run by the interpreter.
+func (r *Runtime) jitRegKnownCallee(cl *closure) {
+	if cc := cl.closureCode; cc != nil {
+		if e := cc.jitReg; e != nil && e.life != nil && e.life.notNative && !e.invalid && e.code != nil {
+			r.jitRegRetryNative(e)
+			return
+		}
+	}
+	r.jitRegNativeCallee(cl, cl.reg)
 }
 
 // jitRegViaSeen learns, after Go made the method call at register pc rpc
@@ -1542,6 +1661,7 @@ func (r *Runtime) jitRegUnwound(e *jitRegEntry) {
 	if life.unwindReopts < jitUnwindReopts && jitLearning(life) {
 		life.unwindReopts++
 		l.in, life.nativeOut = 0, 0
+		life.ssaStats.calleeGoCalls, life.ssaStats.calleeWork = 0, 0
 		return
 	}
 	life.notNative, life.nativeRetry = true, 0
@@ -1559,6 +1679,7 @@ func (r *Runtime) jitRegRetryNative(e *jitRegEntry) {
 		return
 	}
 	life.notNative, life.nativeOut = false, 0
+	life.ssaStats.calleeGoCalls, life.ssaStats.calleeWork = 0, 0
 	if l := r.jit.regLinks[e.key]; l != nil {
 		l.in = 0
 		if r.jit.regCache[e.key] == e && e.code != nil && !e.invalid {

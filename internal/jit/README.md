@@ -803,10 +803,19 @@ not pay is neither entered nor called natively (`notNative`). This is the
 stack form's `jitSSAProfit`, `jitRunGoProfit` and `jitCalleeProfit`. Go
 enters such code again after `jitNativeRetry` calls of it, doubled each
 time (`jitRegRetrySlow`), a loop's checks of code judged slow at loops
-counting as such calls, as the stack form's `tryJITAt` counts them; and
-compiled again it is judged afresh: entered, and called natively, until the
-new code is found not to pay in turn (`jitRegCached`, as the stack form's
-`jitReoptimize`). What Go declines counts toward the work the function
+counting as such calls, as the stack form's `tryJITAt` counts them. Native
+callers call it again after `jitNativeRetry` of their calls, doubled each
+time it was found not to pay (`jitRegRetryNative`): each call a native
+caller makes of it through Go counts, whether Go enters it or not
+(`jitRegKnownCallee`, from `jitRegCallSeenOf`, as the stack form's
+`jitKnownTargetSeen` and `jitCallTarget` count them), as do Go's entries
+of it at its start. Compiled again, it is judged afresh: entered, and
+called natively, until the new code is found not to pay in turn
+(`jitRegCached`, as the stack form's `jitReoptimize`); its calls of Go as a
+native callee are counted afresh with its native callers' calls into it
+(its link's `in`) wherever those are -- compiled again, compiled again for
+leaving (`jitRegUnwound`), called natively again -- as the stack form's
+`ssaStats` begin anew. What Go declines counts toward the work the function
 spends for a compile for what it learned (`jitRegSpent`'s `slowCalls`), as
 its native callees' work between their calls of Go does (`calleeWork`).
 A resumption of a generator's or an async function's code judged slow is
@@ -1909,8 +1918,11 @@ the call's keep cell and register.
 
 **Which calls.** The feedback says which functions a call makes natively
 (`jitRegFeedback`'s `NativeCalls`, `regCallSites`): the one its site's cache
-holds (`regCalls`), and those the code learned it calls at its calls of Go
-and at its exits (`jitRegCallSeen`), up to `jitCallTargets` (4), each
+holds (`regCalls`); for a method call, the methods its `get_method_w` read's
+cache saw for the other shapes it met (`jitRegSeenCallees`, the stack form's
+`jitSeenCallees`), learned from the first compile; and those the code
+learned it calls at its calls of Go and at its exits (`jitRegCallSeen`), up
+to `jitCallTargets` (4), each
 checked by its object, or, a closure its maker makes anew -- another object
 of a function the call has called -- by its code (`ssa.CallSite`'s
 `ByCode`), where the function runs register code of the form's own layout of
@@ -2113,7 +2125,16 @@ its native callers' calls is compiled again while it learns, up to
 link cleared) until Go has made `jitNativeRetry` calls of it, doubled each
 time (`jitRegUnwound`, `jitRegRetryNative`), as the stack form's
 `jitUnwound` and `jitRetryNative` have it: its native callers make a call
-of Go there rather than have Go finish their levels at each call.
+of Go there rather than have Go finish their levels at each call. An exit
+inside an inlined callee at a property's read or write whose site is not
+megamorphic is a map check's failure (`jitRegShapeMiss`, the stack form's
+`jitShapeMiss`): the site learns the shape as at a guard of the callee's
+own (`jitRegDeoptSeen`) and the code that inlined it is invalidated,
+compiled again with the site's cases, as the stack form's unwinding has it
+(`jitFinishExit`), rather than leave there at every call. A function a
+call learned by its code (`ssa.CallSite`'s `ByCode`) is given its link
+there, as one learned by its object is: past the functions the call makes
+natively, a generic call finds it by its hint (`regHint`).
 
 ## Inlining
 
