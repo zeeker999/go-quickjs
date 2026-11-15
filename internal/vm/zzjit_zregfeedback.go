@@ -1209,18 +1209,23 @@ func (f *jitRegFeedback) Leaf(pc int) (uintptr, bool) {
 	// (RMarkReuse), which the leaf makes anew, as the stack form's native
 	// code does (zzz_regexpreuse.go): the old array, which only the local
 	// the new one replaces could reach, the interpreter's next call may
-	// make again, its slots' check finding the local holds it no more --
-	// but not where the call makes its first argument (RMarkLitArg),
-	// which the interpreter's call does (regMarkedCall).
-	regexp := (fd.elemOp == elemRegExpExec || fd.elemOp == elemRegExpTest) && marks&bytecode.RMarkLitArg == 0
+	// make again, its slots' check finding the local holds it no more.
+	regexp := fd.elemOp == elemRegExpExec || fd.elemOp == elemRegExpTest
 	// String.prototype.replace of two arguments, s.replace(re, ""), whose
 	// leaf checks at each call that they are a RegExp it replaces with
 	// directly and a string (jitReplaceLeaf), as the stack form's code
 	// learns it at its calls of Go (jitReplaceLeafSeen) or guesses it
-	// (jitReplaceLeafGuess) -- but not where the call makes its RegExp, a
-	// literal's (RMarkLitArg), whose call of Go gives the literal its
-	// RegExp back, as the stack form's does.
-	replace := callee == f.fb.r.strReplaceFn && w.Op() == bytecode.RCallMW && w.X() == 2 && marks&bytecode.RMarkLitArg == 0
+	// (jitReplaceLeafGuess) -- a literal's too, which the call makes its
+	// first argument (RMarkLitArg), natively from the literal's pool
+	// (lowerreg's literal before the call), the leaf giving it back
+	// (ssa.CallSite's Give, jitLeafForm's giveArg), as the stack form's
+	// call of Go gives a literal its RegExp back (jitRegExpLitDone), where
+	// its template is a string constant, as the stack form guesses a
+	// leaf's (jitReplaceLeafGuess): a function's, which the leaf's check
+	// refuses, would leave native code at every call the call of Go makes
+	// now.
+	replace := callee == f.fb.r.strReplaceFn && w.Op() == bytecode.RCallMW && w.X() == 2 &&
+		(marks&bytecode.RMarkLitArg == 0 || f.regStringBefore(int(f.p.Origin[pc]), int(w.A())+3))
 	// Array.prototype.push of other than one value, which the stack form's
 	// code learns a leaf at its calls of Go (jitPlainCall): one value's
 	// push native code appends itself.
@@ -1230,6 +1235,26 @@ func (f *jitRegFeedback) Leaf(pc int) (uintptr, bool) {
 	}
 	f.fb.keep().holders = append(f.fb.keep().holders, callee)
 	return uintptr(unsafe.Pointer(callee)), true
+}
+
+// regStringBefore reports whether the register instruction before
+// register pc rpc loads a string constant into register reg: a call's
+// last argument, made right before it.
+func (f *jitRegFeedback) regStringBefore(rpc, reg int) bool {
+	if rpc < 1 || rpc > len(f.rc.Code) {
+		return false
+	}
+	w := f.rc.Code[rpc-1]
+	switch {
+	case int(w.A()) != reg:
+		return false
+	case w.Op() == bytecode.RLoadEmpty:
+		return true
+	case w.Op() == bytecode.RLoadConst:
+		consts := regConsts(f.fb.fn, f.rc)
+		return int(w.BC()) < len(consts) && consts[w.BC()].Kind == bytecode.ConstString
+	}
+	return false
 }
 
 // methodCall is the built-in the call at the program's instruction pc --
@@ -1406,10 +1431,11 @@ func (f *jitRegFeedback) Literal(pc int) (ssa.LiteralSite, bool) {
 // is the receiver of the call at the program's instruction pc, w's -- a
 // regexp_lit's that calls (compile's regexpLit), or a call_method_w marked
 // to give its receiver back (RMarkLitRecv), the regexp_lit before it that
-// does not call having put the RegExp in its window -- which nothing but
-// the call reaches: the literal literalAt finds or makes for that
-// regexp_lit's ObjectLiteral, by the register pc they share, kept with the
-// code. 0 for any other call, or where it has none.
+// does not call having put the RegExp in its window -- or its first
+// argument, a call_method_w's that makes it (RMarkLitArg), which nothing
+// but the call reaches: the literal literalAt finds or makes for that
+// regexp_lit's ObjectLiteral, or the call's own, by the register pc they
+// share, kept with the code. 0 for any other call, or where it has none.
 func (f *jitRegFeedback) regLitPool(pc int, w bytecode.RInstr) uintptr {
 	e, cl, r := f.fb.e, f.fb.cl, f.fb.r
 	if e == nil || cl == nil || pc >= len(f.p.Origin) {
@@ -1419,6 +1445,8 @@ func (f *jitRegFeedback) regLitPool(pc int, w bytecode.RInstr) uintptr {
 	k := int(w.C())
 	switch {
 	case w.Op() == bytecode.RLit && w.X()&bytecode.RLitCall != 0:
+	case w.Op() == bytecode.RCallMW && rpc < len(f.rc.Marks) && f.rc.Marks[rpc]&bytecode.RMarkLitArg != 0 && rpc < len(f.rc.Aux):
+		k = int(f.rc.Aux[rpc])
 	case w.Op() == bytecode.RCallMW && rpc < len(f.rc.Marks) && f.rc.Marks[rpc]&bytecode.RMarkLitRecv != 0 && rpc < len(f.rc.Aux):
 		// Its literal's regexp_lit, of its window and its constant
 		// (regcomp's regexpLitCall): the instructions between make the
@@ -1517,8 +1545,26 @@ func (f *jitRegFeedback) literalAt(pc int) *jitLiteral {
 		if consts, k := regConsts(cl.fn, f.rc), int(w.C()); f.regLitFed(pc) && k < len(consts) && consts[k].Kind == bytecode.ConstRegExp {
 			return r.jitRegExpLiteral(e, cl, rpc, &consts[k])
 		}
+	case bytecode.RCallMW:
+		// The literal a call makes its first argument (RMarkLitArg), of
+		// its constant Aux (lowerreg's literal before the call).
+		if k, ok := regLitArgConst(f.rc, rpc); ok {
+			if consts := regConsts(cl.fn, f.rc); k < len(consts) && consts[k].Kind == bytecode.ConstRegExp {
+				return r.jitRegExpLiteral(e, cl, rpc, &consts[k])
+			}
+		}
 	}
 	return nil
+}
+
+// regLitArgConst is the constant of the RegExp literal the call_method_w at
+// register pc rpc of rc makes its first argument (RMarkLitArg, its Aux),
+// false where it makes none.
+func regLitArgConst(rc *bytecode.RegCode, rpc int) (int, bool) {
+	if rpc >= len(rc.Marks) || rc.Marks[rpc]&bytecode.RMarkLitArg == 0 || rpc >= len(rc.Aux) || rc.Code[rpc].Op() != bytecode.RCallMW {
+		return 0, false
+	}
+	return int(rc.Aux[rpc]), true
 }
 
 // jitRegSharedLiteral is the literal of new_array_k w at register pc rpc

@@ -431,6 +431,30 @@ func (l *regLowering) regexpLit(pc int, w bytecode.RInstr) bool {
 	return true
 }
 
+// litArgCall lowers call_method_w w, which makes its first argument a
+// RegExp literal (RMarkLitArg), R[A+2], that the register compiler left
+// for the call to make, as regexpLit lowers regexp_lit's call: the
+// literal's RegExp from its pool (ObjectLiteral), as new_regexp's -- the
+// stack form's literal before its call (LowerSSA's new_regexp) -- the
+// window copied past it into scratch slots, the RegExp its first
+// argument, and the call in that window (a Window Host), its value to
+// R[B]: nothing committed before the call, so that an exit anywhere runs
+// the instruction whole again, which makes the literal itself.
+func (l *regLowering) litArgCall(w bytecode.RInstr) {
+	a, n := int(w.A()), 2+int(w.X())
+	win := make([]int, n)
+	for i := range win {
+		win[i] = l.temp()
+	}
+	l.emit(ir.Instruction{Op: ir.ObjectLiteral, Dest: win[2]}, false)
+	for i, t := range win {
+		if i != 2 {
+			l.emit(ir.Instruction{Op: ir.Copy, Dest: t, Left: ir.Slot(a + i)}, false)
+		}
+	}
+	l.emit(ir.Instruction{Op: ir.Host, Extra: int(w.X()), When: true, Window: true, Left: ir.Slot(win[0]), Dest: int(w.B())}, false)
+}
+
 // litsLive are the register pcs of l's regexpLit calls whose window's
 // registers -- R[A] and R[A+1], but the one the value goes to -- are live
 // past them in p, whose instructions of register pc q start at start[q].
@@ -1380,6 +1404,10 @@ func (l *regLowering) lower(pc int) {
 		// Not marked Tail: the new pipeline reads a tail call's operands
 		// from the operand stack's top, which register code has none of;
 		// the register form's tail calls are Stage 3a-3's.
+		if op == bytecode.RCallMW && w.X() >= 1 && pc < len(rc.Marks) && rc.Marks[pc]&bytecode.RMarkLitArg != 0 {
+			l.litArgCall(w)
+			break
+		}
 		l.emit(ir.Instruction{Op: ir.Host, Extra: int(w.X()), When: op == bytecode.RCallMW, Window: true, Left: reg(a), Dest: int(b)}, false)
 	case bytecode.RClosureW:
 		l.emit(ir.Instruction{Op: ir.Closure, Dest: int(a), Key: w.BC()}, false)

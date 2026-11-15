@@ -358,12 +358,43 @@ func (f *jitRegFeedback) CellsPool() (uintptr, []int32, bool) {
 // __proto__. Its operands are the instruction's registers (compile's
 // RegAccess), in their order, the stack form's operands'; its result goes
 // to the call's keep cell, which the code reads where the instruction
-// writes a register. It reports whether it made it; what it does not
-// make, the instruction run whole on the frame (jitRegWhole) makes.
-func (r *Runtime) jitRegFrameless(ctx *abi.Context, op bytecode.ROp) bool {
+// writes a register. A class's or a literal's member made -- a method's
+// home object set, a method defined, a class's field initializer given --
+// it makes of cl's names, c its register code, as the stack form's
+// jitGoHostPlain makes them (jitDefinition's cases). It reports whether it
+// made it; what it does not make, Go makes on the frame (jitRegOpMade,
+// jitRegWhole).
+func (r *Runtime) jitRegFrameless(ctx *abi.Context, cl *closure, c *regCode, rpc int, op bytecode.ROp) bool {
 	var in bytecode.Instr
 	n := int(ctx.GoOp >> abi.GoOpArgcShift & 0xff)
 	switch op {
+	case bytecode.RSetHomeObject, bytecode.RSetFieldInit, bytecode.RDefineMethod:
+		if n != 2 || cl == nil {
+			return false
+		}
+		a, b := jitGoArg(ctx, 0), jitGoArg(ctx, 1)
+		switch op {
+		case bytecode.RSetHomeObject:
+			if a.IsObject() && b.IsObject() {
+				if fd := a.Object().fn(); fd != nil {
+					fd.setHomeObject(b.Object())
+				}
+			}
+		case bytecode.RSetFieldInit:
+			if a.IsObject() && b.IsObject() {
+				if fd := a.Object().fn(); fd != nil {
+					fd.setFieldInit(b.Object())
+				}
+			}
+		default:
+			if a.IsObject() {
+				key := regName(cl, c, rpc, regAt(c.code, rpc).C())
+				r.materializeFunctionProp(a.Object(), key)
+				a.Object().setOwnRaw(key, b, propWritable|propConfigurable)
+			}
+		}
+		*(*Value)(unsafe.Pointer(&ctx.Keep[ctx.GoKeep])) = Undefined
+		return true
 	case bytecode.RCopyDataProps:
 		in.Op = bytecode.OpCopyDataProps
 	case bytecode.RArraySpread:
@@ -458,27 +489,54 @@ func (f *jitRegFeedback) regWholeSite(pc int, w bytecode.RInstr) []ssa.CallSite 
 }
 
 // jitRegReadSeen learns, after Go made a property's read native code did
-// not find -- a megamorphic site's miss, a receiver no case of the site's
-// is of -- at register pc rpc of run's code, of receiver recv, what the read
-// met, as the stack form's code learns it at its calls of Go
-// (jitPropertySeen, jitPolySeen): the megamorphic cache filled for the
-// receiver's shape, a case its cache cannot hold (a typed array's method,
-// found past the two prototypes its cache holds, or on objects no cache
-// holds), which the code compiled again reads natively, stale from here.
-// Its receiver is the call's operand: the frame's register need not hold
-// it, native code keeping values in the frame's registers as it found them.
+// not find -- a megamorphic site's miss, an accessor's read Go makes -- at
+// register pc rpc of run's code, of receiver recv, what the read met, as
+// the stack form's code learns it at its calls of Go (jitPropertySeen): at
+// a site that is megamorphic (jitRegSiteMegamorphic), as at an exit
+// (jitPolySeenOp): the megamorphic cache filled for the receiver's shape,
+// a case its cache cannot hold (a typed array's method, found past the two
+// prototypes its cache holds, or on objects no cache holds), which the code
+// compiled again reads natively, stale from here; at any other, a plain
+// read's megamorphic cache filled for the receiver, which the next such
+// read finds natively, and nothing else: a read of a getter's that Go
+// calls at each turn had learned the whole site's cases there, a map
+// lookup and a cache filled at every read. Its receiver is the call's
+// operand: the frame's register need not hold it, native code keeping
+// values in the frame's registers as it found them.
 func (r *Runtime) jitRegReadSeen(f *frame, c *regCode, run jitRegRun, rpc int, recv Value) {
 	op, ok := r.jitRegPropOp(f, c, run.wb, rpc)
 	if !ok || op.write || run.e == nil || run.e.invalid {
 		return
 	}
 	op.recv = recv
-	l := r.jit.regLearnedOf(r.jitRegKeyOf(f.cl))
+	l := r.jitRegLearnedFor(f, run.e)
+	if !r.jitRegSiteMegamorphic(f.cl, c, l, rpc) {
+		if op.plain() && recv.IsObject() {
+			r.jit.megaFill(recv.Object(), op.key)
+		}
+		return
+	}
 	r.jitPolySeenOp(l, rpc, op)
 	if l.polyReopt {
 		l.polyReopt = false
 		r.jitRegReopt(f.cl, run.e)
 	}
+}
+
+// jitRegSiteMegamorphic reports whether the property site of the register
+// instruction at rpc of c, cl's code, l what it learned, is megamorphic as
+// the stack form's learning asks it (jitSiteMegamorphic): its cache gave
+// up, or the code met more than its cases hold.
+func (r *Runtime) jitRegSiteMegamorphic(cl *closure, c *regCode, l *jitEntry, rpc int) bool {
+	if site := int(c.rc.Code[rpc].C()); site < len(cl.ic) && cl.ic[site].fills >= maxCacheFills {
+		return true
+	}
+	for i := range l.poly {
+		if p := &l.poly[i]; int(p.pc) == rpc && p.mega {
+			return true
+		}
+	}
+	return false
 }
 
 // PureBody is ssa.PureBodyFeedback's: the function is a pure body
@@ -598,8 +656,22 @@ func (f *jitRegFeedback) regGenMakeSite(rpc int, site *ssa.CallSite) {
 // a loop's /x/.exec(s), the leaf's call each time round, had a RegExp
 // made by every pool's refill of all of its RegExps.
 func (r *Runtime) jitRegExpLeafGive(pool *abi.ObjectPool, test bool, recv Value, args []Value) {
-	if !recv.IsObject() || len(args) > 0 && args[0].IsObject() || pool.Count >= pool.Size || pool.Count >= abi.PoolCapacity ||
-		r.regexpLitMethod(false) == nil || test && r.regexpLitMethod(true) == nil ||
+	if len(args) > 0 && args[0].IsObject() || r.regexpLitMethod(false) == nil || test && r.regexpLitMethod(true) == nil {
+		return
+	}
+	r.jitRegExpPoolGive(pool, recv)
+}
+
+// jitRegExpPoolGive gives pool, a RegExp literal's, back recv, a RegExp
+// nothing but the call that was given it reaches -- the receiver of exec
+// or test (jitRegExpLeafGive), or the first argument of a replace's leaf
+// the call made from the pool (RMarkLitArg, jitLeafForm's giveArg), as
+// jitRegExpLitDone gives the stack form's literal its RegExp back --
+// lastIndex 0 again, as the pool's are made: one of the literal's own, the
+// realm's, with nothing added, RegExp.prototype as the realm built it; the
+// pool not full.
+func (r *Runtime) jitRegExpPoolGive(pool *abi.ObjectPool, recv Value) {
+	if !recv.IsObject() || pool.Count >= pool.Size || pool.Count >= abi.PoolCapacity ||
 		r.regexpProtoShape == nil || r.proto.regexp.shape != r.regexpProtoShape {
 		return
 	}

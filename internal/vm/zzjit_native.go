@@ -1073,10 +1073,17 @@ type jitState struct {
 	// (jitRegGoOnAt, jitRegLoop), as goOn and forcedCheck are the stack
 	// form's; regGoOnFrom is the code whose run left it, which a frame
 	// that goes on in it again went on in already (jitRegLoopCode), as
-	// goOnEntry is the stack form's.
+	// goOnEntry is the stack form's. regGoOnOSR says whether that run was
+	// begun at a loop's header, by on-stack replacement (jitRegStretch's
+	// osr), and regGoOnRun hands it to the run that goes on with the
+	// frame (jitRegGoOnAt): 1 for a run begun at the function's start, 2
+	// for one begun at a loop, 0 for a run of its own -- the stack form's
+	// frame goes on in its run itself (jitGoOn), judged as that run.
 	regGoOn     *frame
 	regGoOnFrom *jitRegEntry
 	regForced   bool
+	regGoOnOSR  bool
+	regGoOnRun  uint8
 	// regKeptSeeding marks the compiles of register callees that give up
 	// the entries kept for a frame (jitRegCalleesKeptNoEntries), which ask
 	// for no more of them, as seeding is the stack form's.
@@ -1101,8 +1108,11 @@ type jitState struct {
 	// (regFlush).
 	regLowerLook uint64
 	// regHostOps counts register code's host exits by the register
-	// instruction Go ran whole, for tests (RegNativeStats' HostOps).
-	regHostOps map[string]uint64
+	// instruction Go ran whole, by its operation, for tests
+	// (RegNativeStats' HostOps): an array, not a map of the operation's
+	// name, whose hashing and string had cost each exit more than the
+	// rest of counting it.
+	regHostOps [bytecode.ROpCount]uint64
 	// regEnded counts the runs of register code that ended in the
 	// interpreter (interpreted) by why they did, the instruction they
 	// left at and its function, while the JIT reports (RegNativeStats'
