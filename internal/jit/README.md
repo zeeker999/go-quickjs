@@ -1127,7 +1127,11 @@ V8's megamorphic loads probe its stub cache: an entry, by the receiver's
 shape and the key, names the receiver's own data property, or a prototype's
 along a chain the code checks object by object and shape by shape
 (`abi.MegaChain`), or that none of the prototypes has it, the read's value
-undefined (`abi.MegaAbsent`). Go fills an entry at a read's exit. A read
+undefined (`abi.MegaAbsent`). Go fills an entry at a read's exit, and
+empties the cache once a collection has ended (`flush`, at the next
+back-edge check), as V8 clears its stub caches after every full
+collection: an entry holds its shape, and the shape its prototype, whose
+methods hold all they capture. A read
 whose receiver's prototypes are no longer its case's -- a method added to
 one -- looks there too. A megamorphic site's write that neither the
 receiver's own table nor the megamorphic cache has -- an addition, a shape
