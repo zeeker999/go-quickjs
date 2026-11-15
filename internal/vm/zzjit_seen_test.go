@@ -97,6 +97,7 @@ func TestJITSSADeepChainsSeenByTheInterpreter(t *testing.T) {
 // without it, a compile each, and H's call of G at H's. Each answer is the
 // interpreter's.
 func TestJITSSASeedsBuiltinsAndCalleesCalls(t *testing.T) {
+	skipUnderRegJIT(t, "the stack form's entry's lists of what its first compile was seeded with and decided (inlines, nativeCalls, ssaInlined, callSites, inlineReopts) and its own lowering; register code keeps what it learned in its life's nativeCalls and what it inlines in the build (ssa.Func's Inlined), which zzjit_zregcall_test.go's tests check")
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}

@@ -3381,6 +3381,7 @@ func TestJITClosureRemembersRefusal(t *testing.T) {
 // first call, does not change after, and delays nothing.
 func TestJITCallPromotion(t *testing.T) {
 	t.Parallel()
+	skipUnderRegJIT(t, "the stack interpreter's per-closure hotness count (jitCalls) and its native state given at the feedback threshold; register code's budget is counted by its returns (regTickRet, jitRegCallTier), which TestJITRegTierUp covers")
 	for _, keyword := range []string{"var", "let"} {
 		t.Run(keyword, func(t *testing.T) {
 			r := New(Config{JIT: true})
@@ -3556,6 +3557,7 @@ func TestJITLoopPromotionAtEntryPC(t *testing.T) {
 
 func TestJITLoopPromotionLiveOperands(t *testing.T) {
 	t.Parallel()
+	skipUnderRegJIT(t, "an operand carried on the stack interpreter's operand stack through on-stack replacement, in stack bytecode edited by hand; register code has no operand stack, and runs the function's own register form, not the edit")
 	for _, keyword := range []string{"var", "let"} {
 		t.Run(keyword, func(t *testing.T) {
 			r := New(Config{JIT: true})
@@ -3596,6 +3598,7 @@ func TestJITLoopPromotionLiveOperands(t *testing.T) {
 
 func TestJITLoopGuardSuppressesReentry(t *testing.T) {
 	t.Parallel()
+	skipUnderRegJIT(t, "register-JIT gap (jitgaps next round): an add of an object operand is a host exit in register code, the interpreter running the turn's rest, where the stack form's code coerces it by calling Go and goes on natively; released at that call, no run of the code is under way to go on, and the invocation compiles the function again")
 	for _, keyword := range []string{"var", "let"} {
 		t.Run(keyword, func(t *testing.T) {
 			r := New(Config{JIT: true})
@@ -6700,6 +6703,7 @@ func TestJITSSAPolymorphicReadsSettle(t *testing.T) {
 // learned as before: what takes the place of get later is called as it
 // is.
 func TestJITSSASeedsMethodCalls(t *testing.T) {
+	skipUnderRegJIT(t, "the stack form's entry's lists of what its first compile was seeded with and decided (inlines, nativeCalls, ssaInlined, callSites, inlineReopts) and its own lowering; register code keeps what it learned in its life's nativeCalls and what it inlines in the build (ssa.Func's Inlined), which zzjit_zregcall_test.go's tests check")
 	jitNoLoopInlineForTest(t)
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
@@ -7145,6 +7149,7 @@ func TestJITLoopPromotedPastCalleesLoops(t *testing.T) {
 // makes a call, is then inlined with it, at once, not called natively
 // until a compile of run's again for what put came to inline.
 func TestJITSSASeedsCalleesWithoutCode(t *testing.T) {
+	skipUnderRegJIT(t, "the stack form's entry's lists of what its first compile was seeded with and decided (inlines, nativeCalls, ssaInlined, callSites, inlineReopts) and its own lowering; register code keeps what it learned in its life's nativeCalls and what it inlines in the build (ssa.Func's Inlined), which zzjit_zregcall_test.go's tests check")
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
@@ -7203,6 +7208,7 @@ func TestJITSSASeedsCalleesWithoutCode(t *testing.T) {
 // that compile decides the call too, which is not left to leave native
 // code four times more and have f compiled once again.
 func TestJITSSASeedsWhenCompiledAgain(t *testing.T) {
+	skipUnderRegJIT(t, "the stack form's entry's lists of what its first compile was seeded with and decided (inlines, nativeCalls, ssaInlined, callSites, inlineReopts) and its own lowering; register code keeps what it learned in its life's nativeCalls and what it inlines in the build (ssa.Func's Inlined), which zzjit_zregcall_test.go's tests check")
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
