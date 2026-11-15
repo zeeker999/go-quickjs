@@ -221,6 +221,19 @@ func (r *Runtime) jitRegLifeOf(cl *closure) *jitEntry {
 	return r.jitState().regLearnedOf(r.jitRegKeyOf(cl))
 }
 
+// jitRegLifeIfAny is jitRegLifeOf(cl) where cl's function has that state
+// already, and nil where it has none -- nor the runtime the JIT's state --
+// which it makes none of.
+func (r *Runtime) jitRegLifeIfAny(cl *closure) *jitEntry {
+	if e := cl.closureCode.jitReg; e != nil && e.life != nil {
+		return e.life
+	}
+	if r.jit == nil {
+		return nil
+	}
+	return r.jit.regLearned[r.jitRegKeyOf(cl)]
+}
+
 // jitRegNativeCallee compiles cl's function's register code c for the
 // native callers that call it through its link, which has none yet: as the
 // stack form's native callers have a callee with no code compiled at their
@@ -360,17 +373,39 @@ func jitRegInvoked(cl *closure, life *jitEntry) int64 {
 // c makes would be a native call, of a callee its site's cache holds or
 // its code learned (regCallSites), as jitCallsNatively asks of the stack
 // form's: compiled for that alone, a function of host operations is worth
-// its code.
+// its code. A call of a callee is native where the callee is cl's
+// function itself, has no code and is not warming -- the native call
+// compiles it (jitRegNativeCallee) -- or has code that native callers
+// call: not code they call no more (notNative), whose calls native code
+// Go entered would make through Go, as the interpreter makes them itself
+// -- AWFY's Json's readChar, all of whose calls are of read, which leaves
+// for Go at each substring.
 func (r *Runtime) jitRegCallsNatively(cl *closure, c *regCode) bool {
-	if l := r.jit.regLearned[r.jitRegKeyOf(cl)]; l != nil && len(l.nativeCalls) != 0 {
-		return true
+	native := func(callee *closure) bool {
+		if callee == nil || callee.fn == cl.fn {
+			return callee != nil
+		}
+		l := r.jit.regLearned[r.jitRegKeyOf(callee)]
+		if r.jitRegHas(callee) {
+			return l == nil || !l.notNative
+		}
+		return l == nil || !l.warming && !l.invalid
+	}
+	if l := r.jit.regLearned[r.jitRegKeyOf(cl)]; l != nil {
+		for _, x := range l.nativeCalls {
+			// A built-in's made natively (a push, a charCodeAt), or a
+			// function's.
+			if x.cl == nil || native(x.cl) {
+				return true
+			}
+		}
 	}
 	calls := r.regCallsRestored(cl, -1)
 	for _, w := range c.rc.Code {
 		if op := w.Op(); op != bytecode.RCallW && op != bytecode.RCallMW || uint(w.C()) >= uint(len(calls)) {
 			continue
 		}
-		if e := &calls[w.C()]; jitRegCallKind(e) && r.jitRegCallable(e.callee, e.cl, e.rc, int(w.X())) {
+		if e := &calls[w.C()]; jitRegCallKind(e) && r.jitRegCallable(e.callee, e.cl, e.rc, int(w.X())) && native(e.cl) {
 			return true
 		}
 	}
@@ -459,10 +494,14 @@ func (r *Runtime) jitRegHot(cl *closure, c *regCode, work int64) *jitRegEntry {
 		}
 	case !life.warming:
 		// Its first sample: its budget begins, as the stack form's entry
-		// warms (jitWarmFor) -- but where every call compiles.
+		// warms (jitWarmFor), and the sample's work is spent of it at
+		// once, as the stack form's tryJITAt spends it (jitWarmUp) -- but
+		// where every call compiles. Not spent, a call's first sample lost
+		// the run it counted, as a loop's had lost a full budget of back
+		// edges before its back edges were counted (jitRegEdgeWork).
 		life.warming = true
 		life.tierBudget, life.tierMark = jitRegBudget(r.jitCallThreshold, c), jitFeedbackMark(cl)
-		if r.jitCallThreshold > 1 {
+		if r.jitCallThreshold > 1 && !r.jitRegWarmUp(cl, c, life, work) {
 			return nil
 		}
 	case !r.jitRegWarmUp(cl, c, life, work):
@@ -1157,7 +1196,7 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 		// interrupt budget did.
 		cc := cl.closureCode
 		work := jitRegEdgeWork(cc)
-		if life := r.jitRegLifeOf(cl); !life.regFed && !life.warming && !life.invalid && cc.jitReg == nil {
+		if life := r.jitRegLifeIfAny(cl); (life == nil || !life.regFed && !life.warming && !life.invalid) && cc.jitReg == nil {
 			// Its loops' first work, before its budget begins: V8's
 			// interrupt budget for feedback allocation, whose end makes a
 			// function's feedback vector, which holds its budget, as the
@@ -1180,6 +1219,12 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 				// The interrupt budget's check, before the feedback's work
 				// is done.
 				return target
+			}
+			if life == nil {
+				// Its feedback's work done: its state made now, as the stack
+				// form's entry is made only then (jitWarmFor) -- a runtime
+				// whose loops had done less, a cold one, has none.
+				life = r.jitRegLifeOf(cl)
 			}
 			life.regFed, work = true, 0
 		}
@@ -1214,6 +1259,10 @@ func (r *Runtime) jitRegLoop(st *regState, target int) int {
 	}
 	if forced {
 		s.wentOn++
+	} else {
+		// Entered by on-stack replacement, as the stack form's tryJITAt
+		// counts its entries at loops (the state made since s was read).
+		r.jit.osrs++
 	}
 	return r.jitRegLoopGoOn(st, e, target, osr)
 }
