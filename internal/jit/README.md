@@ -2213,7 +2213,12 @@ budget the same code takes in the stack form. How often
 is V8's call frequency where the feedback knows it (`Frequency`): a call
 made less often than `ssa.MinInliningFrequency` (0.15, V8's
 `min_inlining_frequency`) for each invocation of the function compiled is
-not inlined, small or not, and is made a native call; the most frequent come
+not inlined, and is made a native call, unless its callee is small: 10
+instructions or fewer as the bounds count them (`maxInlineSmall`, V8's
+`max_inlined_bytecode_size_small` of 27 bytes; 8 register instructions),
+which V8 inlines however seldom the call is made, its code about the
+call's, and which then inlines no more than a small callee's worth with
+its own callees (`smallCallee`); the most frequent come
 first, a call whose frequency is not known taken as made once outside the
 loops and more often inside one (`ssa`'s `inlineOrder`). Register code's
 frequencies are what the feedback dispatcher counted (see

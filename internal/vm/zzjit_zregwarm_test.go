@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
 
 // regWarmGenSrc has a generator doing work between yields, which its own
@@ -458,6 +461,93 @@ func TestJITRegMadeAnewCallsSettle(t *testing.T) {
 				t.Errorf("%d host exits at call_w: %v", n, st.Ended)
 			}
 			t.Logf("hosts %v, ended %v", st.HostOps, st.Ended)
+		})
+	}
+}
+
+// regWarmSmallSrc calls a tiny callee and a larger one at calls made in an
+// eighth of a function's runs, past an early return, as AWFY CD's recurse
+// makes its calls; and the larger one at a call made at every run.
+const regWarmSmallSrc = `
+function Pt(x, y) { this.x = x; this.y = y }
+function tiny(o) { return o.a }
+function big(o) { return new Pt(o.a + o.b, o.a - o.b) }
+function rare(o, k) {
+	if (k & 7) return 0;
+	var t = tiny(o);
+	return t + big(o).x;
+}
+function often(o, k) { return big(o).y + k }
+function drive(n) {
+	var s = 0, o = { a: 1, b: 2 };
+	for (var k = 0; k < n; k++) s += rare(o, k) + often(o, k);
+	return s;
+}
+`
+
+// TestJITRegSmallCalleeAtColdCall checks the inliner's small-callee
+// exemption from the call frequency rule (ssa's smallCallee), as V8
+// inlines a callee of max_inlined_bytecode_size_small bytes however
+// seldom its call is made: at a call made in an eighth of its function's
+// runs, below minInliningFrequency, a callee within the small bound in
+// register code's units is inlined, a larger one is not -- though the
+// larger one is inlined where its call is made at every run. Exact
+// answers with the JIT and without, the collector idle and marking.
+func TestJITRegSmallCalleeAtColdCall(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	for _, marking := range []bool{false, true} {
+		t.Run(fmt.Sprintf("marking=%v", marking), func(t *testing.T) {
+			if marking {
+				jitMarkingForTest(t)
+			}
+			rts := regNativeRuntimes(t, regWarmSmallSrc)
+			rts[0].jitStress = jitStressConfig{}
+			for i, r := range rts {
+				fn, _ := r.GetProp(Obj(r.Global()), r.Intern("drive"))
+				for k := range 6 {
+					v, err := r.Call(fn, Undefined, []Value{Float(4000)})
+					if got := regNativeShow(r, v, err); got != "7996000" {
+						t.Fatalf("runtime %d, call %d: %s, want 7996000", i, k, got)
+					}
+				}
+			}
+			r := rts[0]
+			if !regNativeOn {
+				t.Skip("the Go dispatcher counts no calls: no frequency is known")
+			}
+			inlined := func(name string) map[string]bool {
+				fv, _ := r.GetProp(Obj(r.Global()), r.Intern(name))
+				cl := fv.Object().fn().closure
+				e := r.jit.regCache[r.jitRegKeyOf(cl)]
+				if e == nil || e.p == nil {
+					t.Fatalf("%s not compiled", name)
+				}
+				rf := r.jitRegFeedbackFor(cl, e.p)
+				for pc, in := range e.p.Code {
+					if in.Op == ir.Host && in.Window && cl.reg.rc.Code[e.p.Origin[pc]].Op() == bytecode.RCallW {
+						if f, ok := rf.Frequency(pc); name == "rare" && (!ok || f >= ssa.MinInliningFrequency) {
+							t.Fatalf("rare's call at %d: frequency %v (%v), want one below %v", pc, f, ok, ssa.MinInliningFrequency)
+						}
+					}
+				}
+				f, err := ssa.BuildWith(e.p, rf)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got := map[string]bool{}
+				for _, c := range f.Inlined {
+					got[(*closure)(unsafe.Pointer(c)).fn.Name] = true
+				}
+				return got
+			}
+			if got := inlined("rare"); !got["tiny"] || got["big"] {
+				t.Errorf("rare inlined %v, want tiny alone", got)
+			}
+			if got := inlined("often"); !got["big"] {
+				t.Errorf("often inlined %v, want big", got)
+			}
 		})
 	}
 }
