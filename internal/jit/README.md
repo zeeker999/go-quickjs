@@ -2102,15 +2102,24 @@ inlined frames whose innermost state is in the last context
 (`ssa.OpFrameRoom`) found too few: left there at every call, it had had
 the call no longer inlined, and the closures given to the callee made.
 
-While Go runs beside them, every level's code is held: the cache neither
-drops it nor compiles the function again until the level is done, so that
-the code a level runs is its function's in the cache for as long as it
-runs. A level Go found the code of pins it (`jitRegEntry`'s `levels`); one
-a call of Go put off holds it by its context, whose callee returns into it
-(`ReturnTo`, `SSACode.Contains`), which the cache counts only when it asks
--- before it compiles the function again or lets the code go
+While Go runs beside them, every level's code is held: the cache does not
+drop it until the level is done. A level Go found the code of pins it
+(`jitRegEntry`'s `levels`); one a call of Go put off holds it by its
+context, whose callee returns into it (`ReturnTo`, `SSACode.Contains`),
+which the cache counts only when it asks -- before it lets the code go
 (`regLevelsOf`) -- so that a call of Go pins nothing for the levels below
-it. Go finds a level's code by its closure (`closureCode`'s `jitReg`)
+it. The function is not compiled again while a native call of it has not
+returned -- a context a native call runs in (`abi.LiveCall`) is its
+function's (`regCalled`), as the stack form's `called` -- since Go finds
+the code of such a call by its function's. A level Go unwinds is no such
+call: its context is cleared as Go takes it (`jitRegUnwind`), and it goes
+on in the code it holds, natively where its call returns to, kept until it
+is done. So a recursion's function is compiled again while Go finishes
+its levels, as V8 installs new code while older frames run the old: the
+new code's calls through the link enter it, and the levels finish in the
+old. Counted as levels instead, a recursion's outer levels had kept it
+from being compiled again for what it learned for good. Go finds a
+level's code by its closure (`closureCode`'s `jitReg`)
 while the cache holds it (`jitRegEntry`'s `cached`), the cache's key
 otherwise or where that is not code of this realm (`jitRegLevelAt`). The
 code stays the level's after the call of Go too, the level going on in it

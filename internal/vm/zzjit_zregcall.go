@@ -1647,6 +1647,35 @@ func (s *jitState) regLevelsOf(e *jitRegEntry) int {
 	return n
 }
 
+// regCalled reports whether a native call of e's function, in one of the
+// contexts below limit, has not returned, as the stack form's called
+// does: a context a native call runs in (abi.LiveCall) is the function's
+// -- a callee that called Go, or called a function that did, those whose
+// levels a call of Go put off (jitLazyLevels) among them. Go finds the
+// code of such a call by its function's (jitRegLevelAt), which is the
+// code it runs only while the function is not compiled again: the cache
+// compiles it again once none is (jitRegLearnedDueWith). A level Go
+// unwinds is no such call -- its context is cleared as Go takes it
+// (jitRegUnwind), and it goes on in the code it holds, which is kept
+// until it is done (regInUse) -- nor is a run Go entered, which goes on in
+// its own code. Counted as levels instead, every level of a recursion Go
+// was finishing kept its function from being compiled again: Octane
+// Typescript's AstWalker.walk left its code at the visitors it had
+// learned of some 285,000 times a run, never compiled for them.
+func (s *jitState) regCalled(e *jitRegEntry, limit int) bool {
+	limit = min(limit, len(s.ssaCtxs))
+	for i := 0; i < limit; i++ {
+		c := s.ssaCtxs[i]
+		if c.Live != abi.LiveCall || c.Closure == nil {
+			continue
+		}
+		if cl := (*closure)(c.Closure); cl.reg != nil && cl.reg.rc == e.rc {
+			return true
+		}
+	}
+	return false
+}
+
 // regLevelsIn counts the levels of the native calls in the contexts from
 // root+1 to idx-1 that run e's code: those whose callee returns to it.
 func (s *jitState) regLevelsIn(e *jitRegEntry, root, idx int) int {
@@ -1843,8 +1872,10 @@ func (r *Runtime) jitRegUnwind(idx int) (Value, error) {
 		if l.e.life != nil && l.e.life.reopt && l.cl.reg == l.c && r.jitRegLearnedDue(l.cl, l.e) {
 			// Due to be compiled again for what it learned -- a call of Go
 			// left for it (jitRegCompileDueNow) -- now that no native call
-			// runs it: compiled here, as the stack form's code is once its
-			// run has left (jitRecompileInRun).
+			// of it under way finds its code by its function's (regCalled):
+			// compiled here, as the stack form's code is once its run has
+			// left (jitRecompileInRun). The levels of it Go is finishing,
+			// a recursion's, go on in the code they hold.
 			r.jitRegReoptimize(l.cl, l.c, l.e)
 		}
 		if err == errTailCall {

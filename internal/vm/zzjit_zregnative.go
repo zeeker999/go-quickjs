@@ -196,7 +196,7 @@ func (r *Runtime) jitRegForAs(cl *closure, c *regCode, callee bool) *jitRegEntry
 		if !e.invalid && !e.hostOnly {
 			return e
 		}
-		if s.regLevelsOf(e) != 0 {
+		if s.regCalled(e, len(s.ssaCtxs)) {
 			// Run by native calls under way, which find their code in the
 			// cache (jitRegLevelAt): compiled again once they are done.
 			return nil
