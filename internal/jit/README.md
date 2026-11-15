@@ -840,7 +840,15 @@ has them (`callSlots`), the feedback naming the built-in its site's cache
 last called. A call of a leaf the feedback names (`Leaf`) is checked to call
 that function and made natively where native code makes the leaf itself, a
 call of Go of the leaf (`GoLeaf`) otherwise, its result to the call's
-register (`windowLeaf`, `leafMade`). `BigInt(x)` and
+register (`windowLeaf`, `leafMade`). One whose value nothing reads but its
+truth is told so (`CallSite`'s `Unused`), as the stack form's leaf call is
+from the instruction after it, which pops the result (`resultUnused`): a
+register result no instruction pops, so it is the program's liveness that
+says (`windowResultUnused`) -- the register read by nothing after the call,
+or only by a test of its truth or a not just after it, or kept where a
+branch jumps where it is falsy, as `&&` keeps it. Exec's leaf then gives
+back its dummy rather than making an array, replace's makes no string.
+`BigInt(x)` and
 `BigInt.asUintN(n, x)` or `asIntN`'s are made natively too (see
 [BigInts](#bigints)), the width the constant the program copies to the
 window's register on the way to the call alone (the VM's
