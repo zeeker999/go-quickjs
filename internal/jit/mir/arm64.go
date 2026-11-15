@@ -4267,6 +4267,10 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 	st, recs := c.callState(v, s, func(i int) bool {
 		return direct && i >= ops && i < sp || win && v.Consumes(i-(site.Window-1))
 	}, operands)
+	// As amd64's: the function left out of the window where no callee
+	// reads it (windowCallees).
+	callees := windowCallees(site, sites, gen)
+	st.Callees, st.Which = callees, len(sites) > 1 || gen
 	c.callRecords(v, recs)
 	c.movImm(a64A, uint64(uintptr(unsafe.Pointer(st))))
 	c.a.Store(a64Ctx, abi.OffCallState, a64A)
@@ -4316,7 +4320,9 @@ func (c *a64Compiler) call(v *ssa.Value, guard a64Guard) {
 				m = 1
 				c.directOperand(v, v.Args[0], a64D, vs)
 			}
-			c.directOperand(v, v.Args[m], a64D, 0)
+			if callees == nil {
+				c.directOperand(v, v.Args[m], a64D, 0)
+			}
 			for i := range site.Argc {
 				c.directOperand(v, v.Args[m+1+i], a64D, int32(2+i)*vs)
 			}

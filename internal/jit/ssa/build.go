@@ -1869,6 +1869,15 @@ type CallSite struct {
 	// construction's does, where Go finds it for the frames it makes of
 	// the callee's level, as V8's frame has its function.
 	Function bool
+	// ReadsFunction, on register code's native call (Window), says the
+	// callee's code reads its function object -- as Function's, or by its
+	// register 0, a named function expression's own name: the call writes
+	// it to the window's register 0, the register frame's place for it. A
+	// call none of whose functions reads it writes it nowhere, and Go
+	// gives a frame it makes of the callee's level the one its checks
+	// found (abi.CallState's Callees), as the stack form's call writes
+	// Function only for a callee that reads it.
+	ReadsFunction bool
 	// Parent, for a construction with a class whose constructor is the
 	// one a class without one has, is the class it extends, whose
 	// function Closure is: the call checks the callee's prototype is still

@@ -58,9 +58,7 @@ func (r *Runtime) jitRegFrameRun(ctx *abi.Context) (run jitRegRun, level bool, o
 		f := &s.calleeFrame
 		*f = frame{}
 		f.cl, f.base, f.this, f.newTarget = l.cl, l.wb+int(l.c.locals), r.stack[l.wb+1], Undefined
-		if v := r.stack[l.wb]; v.IsObject() {
-			f.callee = v.Object()
-		}
+		f.callee = r.jitRegLevelCallee(&l)
 		if isClassConstructorKind(l.cl.fn.Kind) && ctx.NewTarget != 0 {
 			// A class's constructor's, only ever constructed: its
 			// new.target, which its construction or super() wrote.

@@ -254,7 +254,7 @@ func ExpandCall(ctx *abi.Context) {
 	// The description, which the code keeps alive (Code.Calls), by its
 	// address.
 	st := (*abi.CallState)(asPointer((*uint64)(unsafe.Pointer(&ctx.CallState))))
-	ctx.CallState = 0
+	ctx.CallLast, ctx.CallState = ctx.CallState, 0
 	f := exitFrame{ctx: ctx, d: st.Frame, enc: st.Frame.Enc, locals: ctx.Locals, stack: ctx.Stack}
 	for i := range st.Records {
 		rec := &st.Records[i]
@@ -288,6 +288,36 @@ func CallPC(ctx *abi.Context) (pc, depth uint64) {
 		return uint64(st.PC), uint64(st.Depth)
 	}
 	return ctx.ExitPC, ctx.ExitDepth
+}
+
+// CalledFunction is the address of the function object that the native
+// call ctx's code is making found its callee to be, where the call left
+// it out of the callee's window (abi.CallState's Callees): its site's, or
+// one checked by its code, which its checks kept (abi.Context's
+// CallCallee). 0 where the call wrote it there, or none was found.
+func CalledFunction(ctx *abi.Context) uintptr {
+	at := &ctx.CallState
+	if *at == 0 {
+		at = &ctx.CallLast
+	}
+	if *at == 0 {
+		return 0
+	}
+	st := (*abi.CallState)(asPointer((*uint64)(unsafe.Pointer(at))))
+	if st.Callees == nil {
+		return 0
+	}
+	k := uint64(0)
+	if st.Which {
+		k = ctx.CallTarget
+	}
+	if k >= uint64(len(st.Callees)) {
+		return 0
+	}
+	if o := st.Callees[k]; o != 0 {
+		return o
+	}
+	return ctx.CallCallee
 }
 
 // ExpandGoCall reads into ctx the call of Go its code is making, if it

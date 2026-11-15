@@ -295,7 +295,8 @@ type Context struct {
 	// (a *CallState, which the code holds), which the call writes before
 	// it jumps to its callee: for Go to make the frame from if the callee
 	// leaves native code (ExpandCall), what each call had written as
-	// records and an exit's fields. Go clears it as it expands it.
+	// records and an exit's fields. Go clears it as it expands it, keeping
+	// it in CallLast.
 	CallState uintptr
 	// The rest of the exit record. ExitSite is the slot IR PC of the
 	// operation whose guard or exit this was, or -1 (all ones) for a
@@ -580,6 +581,11 @@ type Context struct {
 	// SpillTemp is where amd64's code keeps the scratch register it
 	// reaches SpillMore through while it does (mir's spillMore).
 	SpillTemp uint64
+	// CallLast is the CallState Go expanded last (ExpandCall), which the
+	// native call under way in the context wrote while CallState is 0:
+	// where Go finds its callee (CallState's Callees). Native code never
+	// reads it.
+	CallLast uintptr
 }
 
 // SpillAt is the address of spill slot n: in Spill, or past it in
@@ -742,10 +748,23 @@ const (
 type CallState struct {
 	PC, Depth uint32
 	Site      int32
+	// Which says the call's checks write which of its functions they found
+	// to the context's CallTarget; with one function and no other, they
+	// write none, and it is the first.
+	Which bool
 	// Frame is the frame's layout and the constant words (ExitFrame),
 	// which the code's exit descriptions share.
 	Frame   *ExitFrame
 	Records []CallRecord
+	// Callees is, for register code's native call that leaves its
+	// function out of its callee's window (ssa.CallSite's ReadsFunction),
+	// the function object each of the functions its checks find is, by
+	// CallTarget's numbering -- or 0 for one checked by its code, whose
+	// object they keep in the context's CallCallee -- which the caller's
+	// code keeps alive: what Go gives a frame it makes of the callee's
+	// level, as V8 finds a frame's function where it needs it. Nil where
+	// the call writes the function to the window's register 0.
+	Callees []uintptr
 }
 
 // CallRecord is a CallState's record of one slot, its i'th: its value's

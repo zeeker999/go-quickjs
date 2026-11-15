@@ -1917,10 +1917,21 @@ code native callers may call -- set as the code is compiled, cleared as it
 is invalidated or dropped -- and, where it holds none, Go makes
 the call from native code (`jitRegGoCall`), as a call of Go. The callee's
 window is made at the VM's stack's top, past the caller's window, scratch
-slots and frame (`ssa.CallSite`'s `Window`): the call writes the function to
-its register 0, a method call's receiver to 1 -- or a plain call's undefined
-or global object, an arrow's captured this, for a callee that reads it --
-and the arguments from 2, undefined in its parameters past them, and checks
+slots and frame (`ssa.CallSite`'s `Window`): the call writes a method call's
+receiver to its register 1 -- or a plain call's undefined or global object,
+an arrow's captured this, for a callee that reads it -- and the arguments
+from 2, undefined in its parameters past them; the function to its register
+0 only where a callee reads it (`ReadsFunction`: its code pushes it, reads
+its home object or names it, the stack form's `Function`), or the call is
+generic, through Function.prototype.call or apply, or a super(). A call that
+leaves it out describes, in its state, the function object each of its
+checks finds (`abi.CallState`'s `Callees`, 0 for a closure checked by its
+code, whose object the checks keep in the context's `CallCallee`), and Go
+gives a frame it makes of the callee's level that one, written to the
+register too (`jitRegLevelCallee`, `jit.CalledFunction`), where its closure
+is the level's -- past a call in tail position that gave the frame to
+another, whose call wrote it, the register's -- as the stack form's frames
+find their function from the context or the call. It checks
 the room its link says its code takes (`LinkFrame`) -- one check, as the
 stack form's call makes, the link's room never less than the callee's
 registers (`CallSite`'s `LocalCount`), and a second for the arguments only

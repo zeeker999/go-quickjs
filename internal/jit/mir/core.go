@@ -3343,6 +3343,29 @@ type callRecord struct {
 // every word of the slots from operands on, if not -1, which the call
 // reads its callee's arguments from. Those whose pointer words it writes
 // come first.
+// windowCallees is, for register code's native call of sites (ssa.CallSite's
+// Window) that leaves its function out of its callee's window, the
+// function object each site's checks find, 0 for one checked by its code
+// (abi.CallState's Callees); nil where the call writes the function to
+// the window's register 0: a callee that reads it (ReadsFunction), any
+// function past the sites (gen), a call through Function.prototype.call or
+// apply, a super().
+func windowCallees(site *ssa.CallSite, sites []*ssa.CallSite, gen bool) []uintptr {
+	if site.Window == 0 || gen || len(sites) == 0 || site.Via != 0 || site.Forward || site.Super {
+		return nil
+	}
+	out := make([]uintptr, len(sites))
+	for i, t := range sites {
+		if t.ReadsFunction || t.Via != 0 || t.Forward || t.Super {
+			return nil
+		}
+		if t.ByCode == 0 {
+			out[i] = t.Callee
+		}
+	}
+	return out
+}
+
 func (c *core) callState(v *ssa.Value, s *ssa.FrameState, skip func(int) bool, operands int) (*abi.CallState, []callRecord) {
 	defer c.viewExits()()
 	saves := c.savesOf(v)
