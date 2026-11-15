@@ -582,3 +582,37 @@ func (f *jitRegFeedback) regGenMakeSite(rpc int, site *ssa.CallSite) {
 		return
 	}
 }
+
+// jitRegExpLeafGive gives pool back recv, the RegExp of its literal, a
+// regexp_lit's leaf's call of exec or test -- of test where test is set --
+// on which, given args, has just returned (abi.GoCallState's Give), as the
+// call of Go the leaf stands for gives the literal its RegExp back
+// (regMarkedCall) and the stack form's gives it its pool's
+// (jitRegExpLitDone): the call ran nothing of the script's and keeps
+// nothing of the RegExp, which only ever was its receiver, where reading
+// the method off it found the built-in and ran nothing -- RegExp.prototype
+// as the realm made it (regexpLitMethod, its layout the realm's) -- and
+// the argument is no object. lastIndex is 0 again, as the pool's RegExps
+// are made (jitFillLiteral). Given back to its pool rather than to the
+// literal's spare (regexpLiteralDone), which a pool's refill takes one of:
+// a loop's /x/.exec(s), the leaf's call each time round, had a RegExp
+// made by every pool's refill of all of its RegExps.
+func (r *Runtime) jitRegExpLeafGive(pool *abi.ObjectPool, test bool, recv Value, args []Value) {
+	if !recv.IsObject() || len(args) > 0 && args[0].IsObject() || pool.Count >= pool.Size || pool.Count >= abi.PoolCapacity ||
+		r.regexpLitMethod(false) == nil || test && r.regexpLitMethod(true) == nil ||
+		r.regexpProtoShape == nil || r.proto.regexp.shape != r.regexpProtoShape {
+		return
+	}
+	src := (*jitPoolSource)(pool.Source)
+	o := recv.Object()
+	if src == nil || src.lit == nil || o.proto() != (*Object)(pool.Proto) || o.class != ClassRegExp || int(o.valn) != 1 {
+		return
+	}
+	ro := (*regexpObject)(unsafe.Pointer(o))
+	if ro.rd.re != &ro.re || ro.rd.realm != r.Realm || ro.side.data != any(&ro.rd) || ro.re.Source() != src.lit.Str {
+		return
+	}
+	o.vals()[0] = Int(0)
+	pool.Objects[pool.Count] = unsafe.Pointer(o)
+	pool.Count++
+}

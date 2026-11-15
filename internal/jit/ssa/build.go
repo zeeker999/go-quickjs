@@ -1206,6 +1206,10 @@ func (b *builder) windowLeaf(blk *Block, pc int, in ir.Instruction, c *CallSite,
 	// no string (abi.GoCallState's Unused), as the stack form's leaf call
 	// is told (resultUnused).
 	site.Unused = b.windowResultUnused(pc)
+	if c.Method {
+		// regexp_lit's: its RegExp, the pool's, given back to it.
+		site.Give = c.Give
+	}
 	b.leafMade(blk, pc, fn, c, args, site, guard, func(blk *Block, v *Value) { b.assign(in.Dest, blk, v) })
 }
 
@@ -2126,6 +2130,14 @@ type CallSite struct {
 	// leaf would make, another object that nothing else can reach
 	// (abi.GoCallState's Unused).
 	Unused bool
+	// Give, of register code's method call of Go at regexp_lit's
+	// expansion (Window), is the address of the abi.ObjectPool of the
+	// literal whose RegExp, the pool's next object, is its receiver, which
+	// nothing but the call reaches: a leaf's call of it (GoLeaf) has Go
+	// give the receiver back to the pool once the leaf has returned, as
+	// its call of Go of the same call gives the literal its RegExp back
+	// (abi.GoCallState's Give).
+	Give uintptr
 }
 
 // ClosureSite is a closure's site that native code makes the closure at

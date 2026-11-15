@@ -691,6 +691,11 @@ type GoCallState struct {
 	// the calls after.
 	Leaf     uintptr
 	LeafForm unsafe.Pointer
+	// Give, for a leaf's call of a RegExp literal's RegExp that nothing
+	// else reaches (ssa.CallSite's Give), is the address of the literal's
+	// ObjectPool, which Go gives the RegExp back to once the leaf has
+	// returned.
+	Give uintptr
 }
 
 // GoCallArg is a GoCallState's operand, the i'th, laid out for Go to read

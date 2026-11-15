@@ -935,7 +935,16 @@ register result no instruction pops, so it is the program's liveness that
 says (`windowResultUnused`) -- the register read by nothing after the call,
 or only by a test of its truth or a not just after it, or kept where a
 branch jumps where it is falsy, as `&&` keeps it. Exec's leaf then gives
-back its dummy rather than making an array, replace's makes no string.
+back its dummy rather than making an array, replace's makes no string. A
+leaf's call of `exec` or `test` on a RegExp literal's RegExp -- a calling
+`regexp_lit`'s, or a `call_method_w` marked `RMarkLitRecv` after one that
+does not call -- is told the literal's pool (`CallSite`'s `Give`, from the
+feedback's `regLitPool`, `abi.GoCallState`'s `Give`): nothing but the call
+reaches the RegExp, and the VM gives it back to the pool once the leaf has
+returned (`jitRegExpLeafGive`), lastIndex 0, where reading the method ran
+nothing, as the call of Go it stands for gives the literal its RegExp back
+-- a loop's `/x/.exec(s)` had a RegExp made at each turn by the pool's
+refills.
 `BigInt(x)` and
 `BigInt.asUintN(n, x)` or `asIntN`'s are made natively too (see
 [BigInts](#bigints)), the width the constant the program copies to the
