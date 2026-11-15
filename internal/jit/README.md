@@ -1670,9 +1670,18 @@ flag; it never comes within a run that must stay together (data, the
 assembler's own sequences), and the backend never jumps by a count of
 instructions nor keeps a value in X27 at a branch's target. A branch whose
 label is bound before a pool takes it stays as it is: code under 256 KB has
-no pool, and is the same as without them. The backend's ADRs are of
-return points a few instructions on, which no pool takes; an ADR past its
-reach is an error of `Finish`.
+no pool, and is the same as without them. An ADR back past its reach is
+an ADR and subtractions, as the far jump's address is. Forward, an `Adr`'s
+address is its result, which a veneer cannot stand for: the backend's are
+of return points a few instructions on, which no pool takes, and one past
+its reach is an error of `Finish`. Two kinds of ADR the regular
+expressions' code generator makes are kept in reach all the same: an
+`AdrJump`, the address of a resume point, which the code only jumps to, is
+pointed at a veneer as a branch is; and an `Adr` of a `Table` -- data the
+assembler places itself, a character class's bitmap -- has the table placed
+in the pool that would have taken it, as V8's constant pools are, or after
+the code (`Tables`) where no pool came first. So a pattern's code of any
+length assembles too.
 
 **Workspaces.** Compiles reuse their workspace's analysis tables and
 assembler storage (`jit.Workspace`, the SSA's and `mir`'s). On arm64, that
