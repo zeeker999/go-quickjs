@@ -1089,8 +1089,10 @@ func (f *jitRegFeedback) BigIntSole() (uint64, bool) {
 }
 
 // regSoleRegisters is the registers of rc, fn's register code lowered to
-// p, of the first 64, that hold their values alone: past the function,
-// this and the parameters, none a closure captures (ir.Program's
+// p, of the first 64, that hold their values alone: its bindings past the
+// function, this and the parameters -- not its temporaries, whose values
+// an operator's call gives back as it takes them (ssa's regBigFresh), as
+// the stack form's operands on its stack are -- none a closure captures (ir.Program's
 // Captured), each read only as an operand of an operator that makes a
 // value of its own -- arithmetic, bitwise, a comparison, a test, a
 // branch -- in a function that is no generator, no async function, has no
@@ -1107,7 +1109,7 @@ func regSoleRegisters(fn *bytecode.Function, rc *bytecode.RegCode, p *ir.Program
 		return 0
 	}
 	var cand uint64
-	for k := 2 + fn.ParamCount; k < rc.NumRegs && k < 64; k++ {
+	for k := 2 + fn.ParamCount; k < 2+fn.ParamCount+rc.Inits && k < rc.NumRegs && k < 64; k++ {
 		if !p.IsCaptured(k) {
 			cand |= 1 << uint(k)
 		}
@@ -1132,8 +1134,11 @@ func regSoleRegisters(fn *bytecode.Function, rc *bytecode.RegCode, p *ir.Program
 			bytecode.RJLtI, bytecode.RJNLtI, bytecode.RJLeI, bytecode.RJNLeI, bytecode.RJGtI, bytecode.RJNGtI, bytecode.RJGeI, bytecode.RJNGeI,
 			bytecode.RJSEq, bytecode.RJSNe, bytecode.RJSEqI, bytecode.RJSNeI,
 			bytecode.RJEq, bytecode.RJNe, bytecode.RJEqI, bytecode.RJNeI, bytecode.RJNull, bytecode.RJNotNull,
-			bytecode.RRetUndef:
-			// Operands, results of their own, tests and branches.
+			bytecode.RRetUndef, bytecode.RAppend, bytecode.RStrFreeze:
+			// Operands, results of their own, tests and branches; an
+			// append's addition, of a result of its own, and a read of
+			// the string it grows that leaves the value where it is, as
+			// the stack form's add and str_freeze (bytecode.SoleLocals).
 		case bytecode.RMove, bytecode.RPostInc, bytecode.RPostDec, bytecode.RGetLength, bytecode.RGetMethod, bytecode.RGetMethodW, bytecode.RGetProp:
 			// Its value left in another register, or read a property of.
 			escape(b)

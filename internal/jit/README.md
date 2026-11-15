@@ -1254,13 +1254,18 @@ Register code's operator writes its register itself, so a result stored
 over a value the register holds alone gives that value's block back
 (`ReleaseOld`, `bigOwner`), and an operand is fresh where an operator wrote
 it earlier in the block, nothing read it since and nothing reads it after
-(`regBigFresh`, the program's `Live`) -- not a register of those that hold
-their values alone, whose old values only their own stores give back. The
-registers that do (`BigIntSole`, `regSoleRegisters`) are those past the
-parameters no closure captures, read only as operators' operands, tests and
-branches: a move, a call's window, a return, a global's store, a property's
-read or a postfix update of one has it hold its value no more, and an
-instruction the analysis does not know has the function none.
+but the operator itself, whose result replaces it (`regBigFresh`, the
+program's `Live`) -- not a register of those that hold their values alone,
+whose old values only their own stores give back. Those that do
+(`BigIntSole`, `regSoleRegisters`) are the bindings, as the stack form's
+locals are -- the registers past the parameters and before the temporaries
+(`RegCode`'s `Inits`) -- that no closure captures, read only as operators'
+operands, appends, tests and branches: a move, a call's window, a return, a
+global's store, a property's read or a postfix update of one has it hold
+its value no more, and an instruction the analysis does not know has the
+function none. The temporaries are fresh as the stack form's operands are:
+`t = t * x` of a temporary gives the old one's block back as the product is
+made.
 
 ### Typed arrays and elements
 
@@ -1731,9 +1736,18 @@ flag; it never comes within a run that must stay together (data, the
 assembler's own sequences), and the backend never jumps by a count of
 instructions nor keeps a value in X27 at a branch's target. A branch whose
 label is bound before a pool takes it stays as it is: code under 256 KB has
-no pool, and is the same as without them. The backend's ADRs are of
-return points a few instructions on, which no pool takes; an ADR past its
-reach is an error of `Finish`.
+no pool, and is the same as without them. An ADR back past its reach is
+an ADR and subtractions, as the far jump's address is. Forward, an `Adr`'s
+address is its result, which a veneer cannot stand for: the backend's are
+of return points a few instructions on, which no pool takes, and one past
+its reach is an error of `Finish`. Two kinds of ADR the regular
+expressions' code generator makes are kept in reach all the same: an
+`AdrJump`, the address of a resume point, which the code only jumps to, is
+pointed at a veneer as a branch is; and an `Adr` of a `Table` -- data the
+assembler places itself, a character class's bitmap -- has the table placed
+in the pool that would have taken it, as V8's constant pools are, or after
+the code (`Tables`) where no pool came first. So a pattern's code of any
+length assembles too.
 
 **Workspaces.** Compiles reuse their workspace's analysis tables and
 assembler storage (`jit.Workspace`, the SSA's and `mir`'s). On arm64, that
@@ -1975,10 +1989,21 @@ code native callers may call -- set as the code is compiled, cleared as it
 is invalidated or dropped -- and, where it holds none, Go makes
 the call from native code (`jitRegGoCall`), as a call of Go. The callee's
 window is made at the VM's stack's top, past the caller's window, scratch
-slots and frame (`ssa.CallSite`'s `Window`): the call writes the function to
-its register 0, a method call's receiver to 1 -- or a plain call's undefined
-or global object, an arrow's captured this, for a callee that reads it --
-and the arguments from 2, undefined in its parameters past them, and checks
+slots and frame (`ssa.CallSite`'s `Window`): the call writes a method call's
+receiver to its register 1 -- or a plain call's undefined or global object,
+an arrow's captured this, for a callee that reads it -- and the arguments
+from 2, undefined in its parameters past them; the function to its register
+0 only where a callee reads it (`ReadsFunction`: its code pushes it, reads
+its home object or names it, the stack form's `Function`), or the call is
+generic, through Function.prototype.call or apply, or a super(). A call that
+leaves it out describes, in its state, the function object each of its
+checks finds (`abi.CallState`'s `Callees`, 0 for a closure checked by its
+code, whose object the checks keep in the context's `CallCallee`), and Go
+gives a frame it makes of the callee's level that one, written to the
+register too (`jitRegLevelCallee`, `jit.CalledFunction`), where its closure
+is the level's -- past a call in tail position that gave the frame to
+another, whose call wrote it, the register's -- as the stack form's frames
+find their function from the context or the call. It checks
 the room its link says its code takes (`LinkFrame`) -- one check, as the
 stack form's call makes, the link's room never less than the callee's
 registers (`CallSite`'s `LocalCount`), and a second for the arguments only

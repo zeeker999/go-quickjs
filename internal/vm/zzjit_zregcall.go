@@ -1085,6 +1085,11 @@ func (f *jitRegFeedback) regCallSite(pc int, o *Object, cl *closure, rc *regCode
 		// (jitRegPushLevel) and its arguments' reads answer from
 		// (jitRegFrameOp's GoArgument).
 		FrameArgs: rc.args,
+		// Its function in its window's register 0 only for one that reads
+		// it, as the stack form's call writes it (jitFrameCallee); Go finds
+		// it for the frames it makes of another's level
+		// (jitRegLevelCallee).
+		ReadsFunction: jitFrameCallee(cl.fn),
 	}
 	if byCode && pool == nil {
 		// Checked by its code, its environment and its realm, not its
@@ -1369,9 +1374,34 @@ func (r *Runtime) jitRegConstructs(l *jitRegLevel, c *regCode, rpc int) {
 		l.construct, l.this = true, *(*Value)(unsafe.Pointer(&r.jit.ssaCtxs[l.ctx].This))
 	case bytecode.RCallW, bytecode.RCallWT:
 		if l.wb+1 < len(r.stack) {
+			r.jitRegLevelCallee(l)
 			r.jitRegPlainReceiver(r.stack[l.wb], l.cl, l.wb)
 		}
 	}
+}
+
+// jitRegLevelCallee is the function object of l's level, a native call's
+// callee, which it writes to its window's register 0 where the call left
+// it out (ssa.CallSite's ReadsFunction): the function its call's checks
+// found (jit.CalledFunction), if its closure is the one running -- not
+// where the callee's own call in tail position gave its frame to another,
+// whose call wrote it -- as the stack form's frames Go makes of a level
+// find theirs from the context or the call (jitLevelFrameFill). Otherwise,
+// or for an inlined callee or a generator's resumption, the window's.
+func (r *Runtime) jitRegLevelCallee(l *jitRegLevel) *Object {
+	if !l.inline && l.gen == nil && l.ctx > 0 && l.ctx-1 < len(r.jit.ssaCtxs) {
+		if p := jit.CalledFunction(r.jit.ssaCtxs[l.ctx-1]); p != nil {
+			o := (*Object)(p)
+			if fd := o.fn(); fd != nil && fd.closure == l.cl {
+				r.stack[l.wb] = Obj(o)
+				return o
+			}
+		}
+	}
+	if v := r.stack[l.wb]; v.IsObject() {
+		return v.Object()
+	}
+	return nil
 }
 
 // jitRegPlainReceiver writes to register 1 of the window at wb, a frame of
@@ -1473,10 +1503,7 @@ func (r *Runtime) jitRegPushLevel(l *jitRegLevel, pc uint32) *frame {
 	}
 	f := &r.cur[off]
 	f.cl = l.cl
-	f.callee = nil
-	if v := r.stack[l.wb]; v.IsObject() {
-		f.callee = v.Object()
-	}
+	f.callee = r.jitRegLevelCallee(l)
 	f.base = l.wb + int(l.c.locals)
 	f.pc = pc
 	if len(f.openUpvalues) != 0 {
