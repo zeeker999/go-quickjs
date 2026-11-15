@@ -2176,7 +2176,7 @@ func (r *Runtime) jitRegUnwind(idx int) (_ Value, _ error, gen bool) {
 			// compiled here, as the stack form's code is once its run has
 			// left (jitRecompileInRun). The levels of it Go is finishing,
 			// a recursion's, go on in the code they hold.
-			r.jitRegReoptimize(l.cl, l.c, l.e)
+			r.jitRegReoptimize(l.cl, l.c, l.e, -1)
 		}
 		if err == errTailCall {
 			// Ended in a call in tail position, its frame given up: the
