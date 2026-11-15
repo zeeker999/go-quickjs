@@ -721,11 +721,21 @@ func (f *jitRegFeedback) regConstructorNow(rpc, reg int) *Object {
 // know that its construction at register pc rpc, of argc arguments,
 // constructs with o, its objects from a pool, as a call of Go there would
 // teach it (jitRegCallSeen) and as the stack form's compiles seed a
-// construction (jitSeedCalls): not new Array(), whose arrays native code
-// makes (jitRegAllocSeen), nor a function native code does not construct
-// with (jitRegConstructTarget).
+// construction (jitSeedCalls): not a function native code does not
+// construct with (jitRegConstructTarget). new Array() is the arrays native
+// code makes from a pool (regAllocSite), as the stack form's compiles seed
+// it (jitSeedBuiltin) and a call of Go would teach it (jitRegAllocSeen):
+// learned only at calls of Go, code compiled in a loop's run made each of
+// its arrays by Go for the rest of that run, until compiled again for
+// them -- 3,694 of the first call's 6,000 in TestJITRegArrayAlloc where
+// the compile came early in the loop. new Array(n)
+// is learned at a call of Go alone, which gives its pool the room of the
+// length it met, or none past what a pool holds (jitRegAllocLength).
 func (r *Runtime) jitRegSeedConstruct(l *jitEntry, rpc int32, o *Object, argc int) {
 	if o == r.proto.arrayCtor {
+		if argc == 0 {
+			l.nativeCalls = append(l.nativeCalls, jitInline{pc: rpc, obj: o, pool: r.jitNewPool(o)})
+		}
 		return
 	}
 	cl, parent, ok := r.jitRegConstructTarget(o, argc)
