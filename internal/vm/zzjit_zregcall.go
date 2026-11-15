@@ -820,7 +820,7 @@ func (r *Runtime) jitRegCallersReopt(l *jitEntry, depth int) {
 // them, each run by the interpreter.
 func (r *Runtime) jitRegKnownCallee(cl, caller *closure) {
 	if cc := cl.closureCode; cc != nil {
-		if e := cc.jitReg; e != nil && e.life != nil && e.life.notNative && !e.invalid && e.code != nil {
+		if e := cc.jitReg; e != nil && e.life != nil && e.life.notNative && !e.invalid && e.code != nil && e.cached {
 			r.jitRegRetryNative(e)
 			return
 		}

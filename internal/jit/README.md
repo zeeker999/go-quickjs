@@ -631,7 +631,9 @@ call that has no code is compiled at their first call of it through Go
 (`jitRegNativeCallee`): they make no sample of it. But one too long to
 inline (`ssa.MaxInline`, counted in the stack form's instructions,
 `jitRegInlineSize`) that is warming up, its budget begun and not spent or
-not begun (`jitRegLongWarming`), is compiled once its budget is spent, as
+not begun -- run fewer times than its first compile takes, as the stack
+form's closure counts its calls -- and not refused for host operations
+alone (`jitRegLongWarming`), is compiled once its budget is spent, as
 any function -- the interpreter's runs of it that Go makes for its native
 callers count it down -- unless its caller calls it often: no longer than
 a function inlines in all (`ssa.MaxInlineTotal`) and invoked at least 15
@@ -2695,7 +2697,17 @@ with theirs, refusals first, then code unused this epoch and the one before,
 least recently used first (`regVictims`, `regReclaim`); and `flush` drops
 code unused between two of its looks (`regFlush`). Code let go of so has its
 function warm up anew (`regLetGo`), and compiled again it is compiled with
-all its function learned, which outlives its code (`regLearned`).
+all its function learned, which outlives its code (`regLearned`). The
+cache knows a function by its key, not its templates, so a template's code
+(`jitReg`) is code only while the cache holds it (`jitRegEntry`'s
+`cached`), as the stack form's hint names an entry only while the cache
+has it: the template's next call, or its native callers' next call of Go,
+finds code let go of and has its closures have none (`jitRegLetGoOf`), the
+runs it had counted kept (`jitRegInvoked`), and the native callers' call
+compiles it for them again (`jitRegNativeCalleeN`). A callee let go of
+had warmed up: one too long to inline is not taken for one warming up
+(below) and is compiled for its native callers at their next call of Go,
+as the stack form's is.
 
 Code is in use, and never let go of, while it runs as Go knows it -- a run
 of it, a level of a native call of it Go found, a compile of its function

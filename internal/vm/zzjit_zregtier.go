@@ -105,9 +105,35 @@ func regTickRet(cc *closureCode) {
 }
 
 // jitRegHas reports whether cl's function has native code made from its
-// register code.
+// register code: the template's, while the cache holds it (jitRegEntry's
+// cached).
 func (r *Runtime) jitRegHas(cl *closure) bool {
-	return cl.closureCode != nil && cl.closureCode.jitReg != nil
+	return cl.closureCode != nil && cl.closureCode.jitReg != nil && cl.closureCode.jitReg.cached
+}
+
+// jitRegLetGoOf reports whether e, the code of cl's template (jitReg), is
+// code the cache has let go of (regLetGo, dropReg), and, if it is, has
+// the template's closures have none: their calls count the budget again
+// from what they had counted (jitRegArm), and their native callers' next
+// call of Go compiles it again for them (jitRegNativeCalleeN), as the
+// stack form's template's hint names no entry once the cache has dropped
+// it (hint). The cache cannot clear the template itself: it knows the
+// function by its key, not its templates. Kept, the template's code had
+// said the function had code: its native callers' calls of Go never
+// compiled it again, and every call -- 4.2 million of AWFY's Havlak's
+// hashFn, let go of during CD -- was Go's, each putting off the levels
+// below it.
+func (r *Runtime) jitRegLetGoOf(cl *closure, e *jitRegEntry) bool {
+	if e == nil || e.cached {
+		return false
+	}
+	if life := e.life; life != nil {
+		// Its runs counted since its last budget, which the template's
+		// counts no longer hold (jitRegInvoked).
+		life.invoked = jitRegInvoked(cl, life)
+	}
+	cl.closureCode.setJITReg(nil)
+	return true
 }
 
 // jitRegTierWork is the work of a function's budget a sample of its
@@ -150,7 +176,10 @@ func (r *Runtime) jitRegNativeCallee(cl *closure, c *regCode, caller *closure) {
 // function Go made for its native callers, caller's among them.
 func (r *Runtime) jitRegNativeCalleeN(cl *closure, c *regCode, calls int64, caller *closure) {
 	cc := cl.closureCode
-	if cc == nil || cc.jitRegRefused || cc.jitReg != nil || !r.jitEnabled {
+	if cc == nil || cc.jitRegRefused || !r.jitEnabled {
+		return
+	}
+	if e := cc.jitReg; e != nil && !r.jitRegLetGoOf(cl, e) {
 		return
 	}
 	if !jitRegCalled(cl, c) {
@@ -204,17 +233,31 @@ func jitRegInlineSize(c *regCode) int {
 // jitRegLongWarming reports whether cl's function, c its register code and
 // life its state, is too long to inline (jitRegInlineSize past
 // ssa.MaxInline) and warming up, its budget not spent: begun and not spent,
-// or not begun -- nothing compiled or refused for it -- where its first
-// call does not compile it (jitCallThreshold), as the stack form's
-// jitLongWarming asks of a callee native callers called.
+// or not begun -- run fewer times than its first compile takes
+// (jitCallThreshold) -- and not refused for host operations alone, as the
+// stack form's jitLongWarming asks of a callee native callers called.
 func (r *Runtime) jitRegLongWarming(cl *closure, c *regCode, life *jitEntry) bool {
 	if jitRegInlineSize(c) <= ssa.MaxInline {
+		return false
+	}
+	if e := r.jit.regCache[r.jitRegKeyOf(cl)]; e != nil && e.code == nil && e.hostOnly {
+		// Refused, at its budget's end, for host operations alone
+		// (jitRegHot): warmed up, as the stack form's entry refused so is
+		// not warming. The budget it warms on since is Go's tier-up's, for
+		// code Go enters (jitRegCompile's LowerRegHot), which, spent, is
+		// refused again: counted as its native callers' warm-up, it had
+		// them call it through Go for good -- CD's isInVoxel, let go of
+		// once, 3.2 million calls.
 		return false
 	}
 	if life.warming {
 		return life.tierBudget > 0
 	}
-	return r.jitCallThreshold > 1 && r.jit.regCache[r.jitRegKeyOf(cl)] == nil
+	// Not begun: run fewer than jitCallThreshold times (jitRegInvoked), as
+	// the stack form's closure counts its calls (jitLongWarming's
+	// jitCalls). Code the cache let go of had warmed up: compiled again at
+	// its native callers' next call of Go, as the stack form's is.
+	return int64(r.jitCallThreshold) > max(jitRegInvoked(cl, life), 1)
 }
 
 // jitRegCalledOften reports whether a function too long to inline, warming
@@ -333,7 +376,7 @@ func (r *Runtime) jitRegHot(cl *closure, c *regCode, work int64) *jitRegEntry {
 		return nil
 	}
 	if e := cc.jitReg; e != nil {
-		if !e.invalid && e.code != nil {
+		if !e.invalid && e.code != nil && e.cached {
 			if e.life.reopt && r.jitRegLearnedDue(cl, e) {
 				if ne := r.jitRegReoptimize(cl, c, e); ne != nil {
 					return ne
@@ -341,7 +384,9 @@ func (r *Runtime) jitRegHot(cl *closure, c *regCode, work int64) *jitRegEntry {
 			}
 			return e
 		}
-		cc.setJITReg(nil)
+		if !r.jitRegLetGoOf(cl, e) {
+			cc.setJITReg(nil)
+		}
 	}
 	life := r.jitRegLifeOf(cl)
 	switch {
@@ -854,9 +899,11 @@ func (r *Runtime) jitRegEnter(f *frame, cl *closure, c *regCode, base, start int
 			return r.runReg(f, c, start)
 		}
 	}
-	if e == nil || e.invalid || e.code == nil || !r.jitEnabled {
-		if e != nil && e.code == nil {
-			// Let go of by the cache (regLetGo).
+	if e == nil || e.invalid || e.code == nil || !e.cached || !r.jitEnabled {
+		if e != nil && !r.jitRegLetGoOf(cl, e) && e.code == nil {
+			// Let go of by the cache (jitRegLetGoOf) -- code kept for a run
+			// or a native call still in it (regClose) among it, which this
+			// call is not -- or no code.
 			cl.closureCode.setJITReg(nil)
 		}
 		return r.runReg(f, c, start)
