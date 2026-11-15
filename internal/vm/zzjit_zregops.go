@@ -545,7 +545,7 @@ func (r *Runtime) jitRegGenMakeSeen(f *frame, e *jitRegEntry, rpc int, callee Va
 	}
 	if r.jitRegGenMakeable(o, f.cl) {
 		l.genMakes = append(l.genMakes, jitGenMake{pc: int32(rpc), obj: o})
-		r.jitRegReopt(f.cl, e)
+		r.jitRegGenLearned(f.cl, e)
 	}
 }
 

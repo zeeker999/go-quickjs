@@ -125,6 +125,10 @@ type jitRegEntry struct {
 	// goes on at one, the code is compiled again with the entry
 	// (jitRegResumeSeen).
 	unresumed []int
+	// targets are the calls' targets its function had learned when the
+	// code was placed (jitTargetsOf), which it is compiled for, as the
+	// stack form's entry's ssaTargets (jitRegCallRepeats).
+	targets []jitTarget
 }
 
 // loopEntry is the entry, an instruction of the program, of the loop
@@ -296,6 +300,13 @@ func (r *Runtime) jitRegCached(key jitKey, e *jitRegEntry) {
 		// Valid code: no budget to spend before the next compile, nothing
 		// learned pending.
 		life.invalid, life.warming, life.reopt, life.learning = false, false, false, false
+		if life.genLearned {
+			// Its loops' steps over generators resume them natively now,
+			// which each had been a call of Go: the loops it was judged
+			// slow for are judged afresh, as the stack form's code
+			// compiled again for them is (jitReplaceCode).
+			life.genLearned, life.loopSlow = false, false
+		}
 	}
 }
 
@@ -553,6 +564,7 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 	s.inlined += uint64(len(f.Inlined))
 	s.inlinedCode += uint64(f.InlinedCode)
 	e.code, e.bytes = code, need
+	e.targets = jitTargetsOf(e.life)
 	e.scratch = f.Scratch
 	e.keeps = f.Keeps
 	s.ssaKeeps = max(s.ssaKeeps, f.Keeps)
@@ -1480,7 +1492,20 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 				// failed: a callback made anew at each call of its maker,
 				// called by its code from here, as at a call of Go; and a
 				// super()'s parent.
+				repeats := r.jitRegCallRepeats(f, c, e, exitPC, callee)
 				r.jitRegCallSeen(f, c, e, exitPC, callee)
+				if repeats {
+					// What it learned there, it learned at an earlier exit:
+					// invalidated, as the stack form's code is
+					// (jitCallRepeats) and V8's deoptimizes at a call of a
+					// target it was not compiled for, the interpreter
+					// running the function until it is compiled again with
+					// it, rather than leaving at each such call -- a call of
+					// eight functions, four learned one at a time, had
+					// left at every other turn until its loop was judged
+					// slow for it.
+					r.jitRegInvalidate(f.cl, e)
+				}
 				r.jitRegSuperSeen(f, c, e, exitPC)
 				if mcallee.IsObject() {
 					r.jitRegViaSeen(f, e, exitPC, mcallee, mrecv, int(w.X()))
@@ -1497,6 +1522,11 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 			}
 		}
 		if !ran {
+			if sig := r.jitRegSuspend(f, c, wb, exitPC); sig != nil {
+				// A yield, a yield* or an await: the frame suspended
+				// here, as the stack form's run suspends it (jitSuspend).
+				return 0, 0, Undefined, false, sig, false
+			}
 			s.regEndWhy = "host exit Go does not run whole"
 			return 0, exitPC, Undefined, false, nil, false
 		}
@@ -2272,6 +2302,13 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 			m |= bytecode.RMarkDead
 		}
 		v, err = r.regMarkedCall(f, c, top, 1, rpc, m, uint32(w.C()))
+	} else if o, fd := r.jitRegBuiltin(f, c, w, rpc, callee); fd != nil {
+		// A built-in of this realm, called directly, as the stack form's
+		// jitCallMade calls one and rhCallW's site its own (regNative):
+		// regCallSlow's search of the site's cache, its marks, the
+		// closures' and the generic call's, had been most of what such a
+		// call cost -- JSON.parse's, Object.create's.
+		v, err = r.jitRegNativeMade(o, fd, this, r.stack[top+2:end])
 	} else {
 		v, err = r.regCallSlow(f, c, w, top, rpc)
 		if err == errRegRestart {
@@ -2334,6 +2371,60 @@ func (r *Runtime) jitRegGoCallOn(ctx *abi.Context, idx int, run jitRegRun) bool 
 	return true
 }
 
+// jitRegBuiltin is the built-in a call of Go of register instruction w at
+// register pc rpc of c calls, callee, which jitRegNativeMade calls
+// directly, as the stack form's jitCallMade does: one of the runtime's
+// realm with a native body, neither bound, nor Function.prototype.call,
+// nor one of Math's, which mathCall answers, nor one the call's marks have
+// regMarkedCall make (regMarked). The site's cache learns it as
+// regCallSlow has it learn one (regCallNative), for the interpreter's
+// calls. Otherwise nil.
+func (r *Runtime) jitRegBuiltin(f *frame, c *regCode, w bytecode.RInstr, rpc int, callee Value) (*Object, *funcData) {
+	switch w.Op() {
+	case bytecode.RCallW, bytecode.RCallMW, bytecode.RCallWT, bytecode.RCallMWT:
+	default:
+		return nil, nil
+	}
+	if !callee.IsObject() {
+		return nil, nil
+	}
+	o := callee.Object()
+	fd := o.fn()
+	if fd == nil || fd.native == nil || fd.mathOp != 0 || fd.bound || o == r.callFn || fd.realm != nil && fd.realm != r.Realm {
+		return nil, nil
+	}
+	if w.Op().MethodCall() && rpc < len(c.rc.Marks) {
+		if m := c.rc.Marks[rpc]; m != 0 && r.regMarked(c, o, rpc, m) {
+			return nil, nil
+		}
+	}
+	if calls := f.cl.regCalls; uint(w.C()) < uint(len(calls)) {
+		if e := &calls[w.C()]; e.callee != o || e.kind != regCallNative {
+			*e = regCallCache{callee: o, kind: regCallNative}
+		}
+	}
+	return o, fd
+}
+
+// jitRegNativeMade calls fd, o's native body, on this with args, as
+// jitCallMade calls a built-in for the stack form's code: in a frame of
+// its own (nativeFrame), the interrupt checked, its result charged to the
+// meter.
+func (r *Runtime) jitRegNativeMade(o *Object, fd *funcData, this Value, args []Value) (Value, error) {
+	if err := r.tick(); err != nil {
+		return Undefined, err
+	}
+	if err := r.nativeFrame(o, fd, this, args, Undefined); err != nil {
+		return Undefined, err
+	}
+	v, err := fd.native(r, this, args)
+	r.frameDepth--
+	if r.meter != nil && err == nil {
+		err = r.chargeResult(v)
+	}
+	return v, err
+}
+
 // jitRegCallUnsettled reports whether the learning of a call of Go
 // (jitRegCallSeen and the rest) has anything to note of the call op at
 // register pc rpc of e's code: not once the call is settled as one Go
@@ -2365,6 +2456,11 @@ func jitRegCallSettle(e *jitRegEntry, c *regCode, rpc int, callee Value) {
 	l := e.life
 	if len(l.callSites) != len(c.rc.Code) {
 		l.callSites = make([]uint8, len(c.rc.Code))
+	}
+	if l.callSites[rpc] == jitCallNative {
+		// Settled on the functions it calls natively (jitRegCallSettling),
+		// whose learning goes on.
+		return
 	}
 	if l.callSites[rpc]++; l.callSites[rpc] >= jitCallsToInline {
 		l.callSites[rpc] = jitCallDone

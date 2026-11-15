@@ -703,6 +703,10 @@ func lowerRegLits(rc *bytecode.RegCode, fn *bytecode.Function, m lowering, litHo
 			to = append(to, regTarget(pc, w.SC()))
 		case regGoBranches(w):
 			to = append(to, pc+1, pc+2)
+		case w.Op() == bytecode.RGenEntry && pc == 0:
+			// A first run enters past it, which does nothing there (the
+			// VM's regGenRun).
+			to = append(to, pc+1)
 		case w.Op() == bytecode.REndParams && (fn.Async || fn.Generator):
 			// The first resumption enters past the parameters.
 			to = append(to, pc+1)

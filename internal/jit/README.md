@@ -706,13 +706,22 @@ on-stack replacement at its loops, as V8 enters top-level code: its
 declarations before them run in the interpreter. A generator's or an async
 function's frame, which the interpreter suspends at each `yield` and `await`
 and makes again at each resumption (`regGenRun`), is entered at its loops
-and where it resumes (`jitRegEnter` from `regGenRun`): the lowering gives
-the code an entry at each resumption -- past an `await`, past the jump after
-a `yield` that a resumption by `next` goes on past, and at the return path
+and where it resumes (`jitRegEnter` from `regGenRun`), a first run past
+`gen_entry`, which does nothing there, as the stack form's resumption enters
+a first run past the parameters: the lowering gives the code an entry at
+each resumption -- past `gen_entry`, past an `await`, past the jump after a
+`yield` that a resumption by `next` goes on past, and at the return path
 that jump goes over (`lowerReg`'s entries). The suspensions -- `yield`,
 `await`, `yield*`, the parameters' end, a delegation's step -- and
-`gen_entry`, which reads how the frame resumed, are the interpreter's
-(`regWholeRuns`): native code Go entered leaves the frame to it there. A
+`gen_entry`, which reads how the frame resumed, are exits Go does not run
+whole (`regWholeRuns`). At a `yield`, an `await`, a `yield*` or the
+parameters' end, Go suspends the frame itself (`jitRegSuspend`), as the
+interpreter would and the stack form's `jitSuspend` does: the pc past it
+kept for the resumption, the run not ended in the interpreter -- an `await`
+an await job may go on past in place (`regSuspend`) and a delegation's step
+are left to the interpreter, which goes on with the frame there. Handed to
+the interpreter only to suspend, every `yield` of a generator Go resumed
+had been a run ended there. A
 synchronous generator's code a loop's step or a call of `next` resumed
 natively suspends it at a `yield` itself (see [Control
 flow](#control-flow), "Generators' steps"). A generator's code is compiled
@@ -832,7 +841,10 @@ caller makes of it through Go counts, whether Go enters it or not
 `jitKnownTargetSeen` and `jitCallTarget` count them), as do Go's entries
 of it at its start. Compiled again, it is judged afresh: entered, and
 called natively, until the new code is found not to pay in turn
-(`jitRegCached`, as the stack form's `jitReoptimize`); its calls of Go as a
+(`jitRegCached`, as the stack form's `jitReoptimize`) -- at its loops too
+where it was compiled again for a generator's step or making it learned
+(`genLearned`, from `jitRegGenLearned`), the steps that each were a call of
+Go now native, as the stack form's `jitReplaceCode` has it; its calls of Go as a
 native callee are counted afresh with its native callers' calls into it
 (its link's `in`) wherever those are -- compiled again, compiled again for
 leaving (`jitRegUnwound`), called natively again -- as the stack form's
@@ -1827,7 +1839,13 @@ Go makes on the run's register frame (`jitState`'s `regRuns`,
 (`regCallSlow`, `regConstruct`): the function, the receiver and the
 arguments put in a window of their own past the VM's stack's top -- never in
 the frame's, whose registers the code may still hold values in as it found
-them -- and the frame's pc past the call meanwhile. A call that threw, that
+them -- and the frame's pc past the call meanwhile. A built-in of the realm
+with a native body -- not bound, not `Function.prototype.call`, not one of
+Math's, not one the call's marks send to `regMarkedCall` -- is called
+directly in a frame of its own (`jitRegBuiltin`, `jitRegNativeMade`), as the
+stack form's `jitCallMade` calls one: `regCallSlow`'s search of the site's
+cache and the generic call had been most of what a call of `JSON.parse` or
+`Object.create` cost. A call that threw, that
 the runtime stopped in, or after which the code was found invalid, its exit
 finishes (`regPending`, `regFinishCall`): the answer to the call's register,
 or the exception to the frame's handlers, never the call made again.
@@ -1952,7 +1970,15 @@ holds (`regCalls`); for a method call, the methods its `get_method_w` read's
 cache saw for the other shapes it met (`jitRegSeenCallees`, the stack form's
 `jitSeenCallees`), learned from the first compile; and those the code
 learned it calls at its calls of Go and at its exits (`jitRegCallSeen`), up
-to `jitCallTargets` (4), each
+to `jitCallTargets` (4) -- a call that knows none of its functions, not a construction, settled as
+the stack form's `jitCallSeen` settles one, those met in its first
+`jitCallsToInline` calls of Go decided together, the code compiled again once
+for them (`jitRegCallSettling`), and a call that leaves at a host exit for a
+function an earlier exit there taught the code, which it was not compiled for
+(its entry's `targets`), invalidating the code, as the stack form's
+`jitCallRepeats` does, the interpreter running the function until it is
+compiled again with it (`jitRegCallRepeats`): left valid, it left at each
+such call until its loop was judged slow for it -- each
 checked by its object, or, a closure its maker makes anew -- another object
 of a function the call has called -- by its code (`ssa.CallSite`'s
 `ByCode`), where the function runs register code of the form's own layout of
@@ -2209,7 +2235,12 @@ budget the same code takes in the stack form. How often
 is V8's call frequency where the feedback knows it (`Frequency`): a call
 made less often than `ssa.MinInliningFrequency` (0.15, V8's
 `min_inlining_frequency`) for each invocation of the function compiled is
-not inlined, small or not, and is made a native call; the most frequent come
+not inlined, and is made a native call, unless its callee is small: 10
+instructions or fewer as the bounds count them (`maxInlineSmall`, V8's
+`max_inlined_bytecode_size_small` of 27 bytes; 8 register instructions),
+which V8 inlines however seldom the call is made, its code about the
+call's, and which then inlines no more than a small callee's worth with
+its own callees (`smallCallee`); the most frequent come
 first, a call whose frequency is not known taken as made once outside the
 loops and more often inside one (`ssa`'s `inlineOrder`). Register code's
 frequencies are what the feedback dispatcher counted (see

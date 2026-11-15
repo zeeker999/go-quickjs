@@ -501,15 +501,137 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 		return false
 	}
 	x := jitInline{pc: int32(rpc), cl: cl, obj: o, parent: parent}
+	if n == 0 && w.Op() != bytecode.RNewW {
+		// A call that has learned no function yet: settling, as the stack
+		// form's jitCallSeen has it, the functions it meets in its first
+		// jitCallsToInline calls of Go are decided together, the code
+		// compiled again once for them, not once for each. A construction
+		// is learned at its first, its objects made from a pool from then
+		// on (jitRegCallTarget): settled, a factory's two constructions a
+		// run had stayed Go's for the runs settling took.
+		met, settled := r.jitRegCallSettling(l, c, rpc, x)
+		if !settled {
+			return false
+		}
+		learned := r.jitRegCallTarget(l, w, x)
+		for _, m := range met {
+			if jitCountAt(l.nativeCalls, rpc) >= jitCallTargets {
+				break
+			}
+			if k := slices.IndexFunc(l.nativeCalls, func(y jitInline) bool {
+				return int(y.pc) == rpc && y.pool == nil && jitRegSameClosureCode(y.cl, m.cl)
+			}); k >= 0 {
+				// Another object of a function it met, called by its code
+				// (ssa.CallSite's ByCode), as below.
+				l.nativeCalls[k].byCode = true
+				continue
+			}
+			learned = r.jitRegCallTarget(l, w, m) || learned
+		}
+		if learned {
+			r.jitRegReopt(f.cl, e)
+		}
+		return learned
+	}
+	if !r.jitRegCallTarget(l, w, x) {
+		return false
+	}
+	r.jitRegReopt(f.cl, e)
+	return true
+}
+
+// jitRegCallRepeats reports whether the call at register pc rpc of c,
+// which e's code left to Go at a host exit, Go having made it -- callee
+// the function a construction constructed with -- calls a target an
+// earlier exit there taught the function (its native calls) that the
+// code was not compiled for (e's targets), while the code waits to be
+// compiled again for what it learned, as the stack form's
+// jitCallRepeats: an exit that teaches nothing, which the code would make
+// at every such call until then.
+func (r *Runtime) jitRegCallRepeats(f *frame, c *regCode, e *jitRegEntry, rpc int, callee Value) bool {
+	if e == nil || e.life == nil || e.invalid || e.code == nil || !e.life.reopt || rpc >= len(c.rc.Code) {
+		return false
+	}
+	var o *Object
+	var cl *closure
+	switch w := regAt(c.code, rpc); w.Op() {
+	case bytecode.RCallW, bytecode.RCallMW:
+		calls := f.cl.regCalls
+		if uint(w.C()) >= uint(len(calls)) {
+			return false
+		}
+		ce := &calls[w.C()]
+		if !jitRegCallKind(ce) {
+			return false
+		}
+		o, cl = ce.callee, ce.cl
+	case bytecode.RNewW:
+		if !callee.IsObject() {
+			return false
+		}
+		o = callee.Object()
+		if fd := o.fn(); fd != nil {
+			cl = fd.closure
+		}
+	default:
+		return false
+	}
+	if o == nil || cl == nil {
+		return false
+	}
+	is := func(p int32, byCode bool, obj *Object, tcl *closure) bool {
+		return int(p) == rpc && (obj == o || byCode && tcl != nil && jitRegSameClosureCode(tcl, cl))
+	}
+	l := r.jitRegLearnedFor(f, e)
+	return l != nil && slices.ContainsFunc(l.nativeCalls, func(x jitInline) bool { return is(x.pc, x.byCode, x.obj, x.cl) }) &&
+		!slices.ContainsFunc(e.targets, func(t jitTarget) bool { return is(t.pc, t.byCode, t.obj, t.cl) })
+}
+
+// jitRegCallSettling counts the call of Go of x's function at register pc
+// rpc of c toward its call's settling (jitLearned's callSites), as the
+// stack form's jitCallSeen counts it: one of the first jitCallsToInline is
+// kept with the others the call met (settling), unsettled; the last
+// settles the call (jitCallNative), and the functions it met before, but
+// x's, are returned, met, to be decided with it. A call decided before has
+// settled.
+func (r *Runtime) jitRegCallSettling(l *jitEntry, c *regCode, rpc int, x jitInline) (met []jitInline, settled bool) {
+	if len(l.callSites) != len(c.rc.Code) {
+		l.callSites = make([]uint8, len(c.rc.Code))
+	}
+	switch n := l.callSites[rpc]; {
+	case n == jitCallNative || n == jitCallDone:
+		return nil, true
+	case n+1 < jitCallsToInline:
+		l.callSites[rpc]++
+		if !slices.ContainsFunc(l.settling, func(y jitInline) bool { return int(y.pc) == rpc && y.obj == x.obj }) {
+			l.settling = append(l.settling, x)
+		}
+		return nil, false
+	}
+	l.callSites[rpc] = jitCallNative
+	for i := 0; i < len(l.settling); i++ {
+		if y := l.settling[i]; int(y.pc) == rpc {
+			if y.obj != x.obj {
+				met = append(met, y)
+			}
+			l.settling = slices.Delete(l.settling, i, i+1)
+			i--
+		}
+	}
+	return met, true
+}
+
+// jitRegCallTarget adds x, a function the call w at x's register pc calls,
+// to l's native calls (regCallSites), a construction's with the pool its
+// objects are made from (ssa.CallSite's Pool). It reports whether it did:
+// not a construction whose pool is empty.
+func (r *Runtime) jitRegCallTarget(l *jitEntry, w bytecode.RInstr, x jitInline) bool {
 	if w.Op() == bytecode.RNewW {
-		// Its objects, made as the construction makes them, from a pool
-		// (ssa.CallSite's Pool).
-		if x.pool = r.jitNewPool(o); x.pool.Count == 0 {
+		if x.pool = r.jitNewPool(x.obj); x.pool.Count == 0 {
 			return false
 		}
 	}
 	l.nativeCalls = append(l.nativeCalls, x)
-	r.jitRegReopt(f.cl, e)
 	return true
 }
 

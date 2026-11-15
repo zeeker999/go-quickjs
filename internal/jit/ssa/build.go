@@ -296,9 +296,10 @@ func (b *builder) planCallback(pc int, fp *forEachPlan, total *int) bool {
 	if fp.site.Inline == nil || fp.site.Inline.Program == nil || b.cur.nest >= maxInlineDepth {
 		return false
 	}
-	if f, ok := b.siteFrequency(pc); ok && f < minInliningFrequency {
+	if f, ok := b.siteFrequency(pc); ok && f < minInliningFrequency && !smallCallee(fp.site.Inline.Program) {
 		// Its call made too seldom, as V8's call reducer gives the
-		// callback's call the frequency of the call of the built-in.
+		// callback's call the frequency of the call of the built-in --
+		// but a small callback (smallCallee).
 		return false
 	}
 	s := *fp.site.Inline
@@ -3241,6 +3242,10 @@ func makesClosure(p *ir.Program) bool {
 }
 
 type builder struct {
+	// coldSmall marks the callee inlineSiteAt is about to inline at a call
+	// made too seldom for any but a small one (smallCallee), for
+	// inlineFrame to keep its inlining within a small callee's.
+	coldSmall bool
 	// inlineAsked are InlineCalls' answers, each program's once a build
 	// (inlineCallsOf).
 	inlineAsked []inlineAnswer
@@ -3812,9 +3817,23 @@ type FrequencyFeedback interface {
 
 // minInliningFrequency is V8's min_inlining_frequency: a call made less
 // often than this for each invocation of the function being compiled is
-// not inlined, as JSInliningHeuristic does not take such a candidate,
-// small or not.
+// not inlined, but a small callee (smallCallee).
 const minInliningFrequency = 0.15
+
+// smallCallee reports whether p is a callee small enough to be inlined
+// however seldom its call is made: maxInlineSmall instructions or fewer,
+// counted as inlining's bounds count them (inlineSize), V8's
+// max_inlined_bytecode_size_small, 27 bytes, which V8 inlines whatever the
+// call site's frequency, its code about the call's it replaces -- 8
+// instructions of register code's program, 10 of the stack form's. A
+// cold call's inlining stays within that, its callee's own callees
+// counted in (inlineFrame). AWFY CD's Vector2D plus and minus, 10
+// register instructions (12 counted) with their constructor's 4 more,
+// are past it, and stay native calls at recurse's calls, made in an
+// eighth of its runs.
+func smallCallee(p *ir.Program) bool {
+	return p != nil && inlineSize(p) <= maxInlineSmall
+}
 
 // MinInliningFrequency is minInliningFrequency, for the VM, which decides
 // a call made less often a native call, not one to inline (its
@@ -4066,11 +4085,13 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 	if b.fb == nil || b.p.Code[pc].Op != ir.Host && !isAccessor || b.cur.nest >= maxInlineDepth || !isAccessor && !given && b.fb.Generic(pc) {
 		return nil, false
 	}
-	if f, ok := b.siteFrequency(pc); ok && f < minInliningFrequency {
-		// Made too seldom to pay for its code, as V8's heuristic finds a
-		// call below min_inlining_frequency.
-		return nil, false
-	}
+	// Made too seldom to pay for its code, as V8's heuristic finds a call
+	// below min_inlining_frequency -- but a small callee (smallCallee).
+	freq, counted := b.siteFrequency(pc)
+	cold := counted && freq < minInliningFrequency
+	// inlineFrame bounds what it inlines for a cold call, nested ones
+	// asking afresh.
+	b.coldSmall = cold
 	var site InlineSite
 	ok := false
 	switch {
@@ -4089,7 +4110,7 @@ func (b *builder) inlineSiteAt(pc int, total *int, known *inlineAsked) (*frame, 
 	if ok {
 		calls, givenCalls, ok = b.inlineCalls(site, isAccessor)
 	}
-	if !ok || !inlineFits(*total, inlineSize(site.Program)) ||
+	if !ok || !inlineFits(*total, inlineSize(site.Program)) || cold && !smallCallee(site.Program) ||
 		site.Argc < 0 || site.Params < 0 || pc+1 >= len(b.p.Code) || !reachable(b.p, pc+1) {
 		return nil, false
 	}
@@ -4524,6 +4545,8 @@ func (b *builder) inlineFrame(site InlineSite, calls, given []int, total *int, r
 		return nil, false
 	}
 	nslots, before, keeps := b.nslots, *total, b.f.Keeps
+	cold := b.coldSmall
+	b.coldSmall = false
 	*total += inlineSize(site.Program)
 	fr := b.f.newFrame()
 	*fr = frame{p: q, fb: site.Feedback, site: site, result: result, base: b.nslots,
@@ -4616,6 +4639,11 @@ func (b *builder) inlineFrame(site InlineSite, calls, given []int, total *int, r
 			return refuse()
 		}
 		b.enter(cur)
+	}
+	if cold && *total-before > maxInlineSmall {
+		// A small callee inlined at a cold call that came to inline more
+		// than a small one's worth.
+		return refuse()
 	}
 	if !inlineFits(before, *total-before) {
 		// Past the function's budget only a small callee is inlined, its
