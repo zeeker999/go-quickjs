@@ -268,8 +268,8 @@ const nativeApplySrc = `
 
 // TestRegNativeApply checks f.apply(this, arguments), which apply_args's
 // handler enters, and constructions with forwarding constructors, which
-// leafForward answers, against the Go table: the same answers and errors,
-// marking or not, and apply_args made with no exit once settled.
+// new_w's enters with a frame, against the Go table: the same answers
+// and errors, marking or not, and both made with no exit once settled.
 func TestRegNativeApply(t *testing.T) {
 	was := nativeWarmExits
 	nativeWarmExits = 16
@@ -281,7 +281,7 @@ func TestRegNativeApply(t *testing.T) {
 		P.prototype.initialize = function (x, y) { this.x = x; this.y = y }
 		var s = 0
 		for (var i = 0; i < 1000; i++) s += fwd(i, 2) + new P(i, 1).y
-		String(s)`, bytecode.RApplyArgs)
+		String(s)`, bytecode.RApplyArgs, bytecode.RNewW)
 }
 
 // nativeArgsSrc reads arguments[i] in functions that never make their
