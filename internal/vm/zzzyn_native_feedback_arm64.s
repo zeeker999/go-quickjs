@@ -4,7 +4,7 @@
 
 #include "textflag.h"
 
-// regNativeFeedbackHandlers is the feedback dispatcher's own handlers, 3524 bytes of
+// regNativeFeedbackHandlers is the feedback dispatcher's own handlers, 3812 bytes of
 // position-independent machine code made by armEmit, which reach the
 // handlers' block through the dispatcher's table. Its handlers, in order:
 //
@@ -51,6 +51,12 @@
 //	 3372  tail_call_w
 //	 3424  tail_call_method_w
 //	 3476  jtypeof
+//	 3524  step_jlt
+//	 3572  step_jle
+//	 3620  step_jlt_imm
+//	 3668  step_jgt_imm
+//	 3716  step_jge_imm
+//	 3764  step_jle_upval
 TEXT ·regNativeFeedbackHandlers(SB), NOSPLIT|NOFRAME, $0-0
 	WORD $0x9370fc01; WORD $0xf100003f; WORD $0x5400010a; WORD $0xf9405b25
 	WORD $0xf85d80a4; WORD $0x8b010084; WORD $0xf81d80a4; WORD $0xf100009f
@@ -272,6 +278,24 @@ TEXT ·regNativeFeedbackHandlers(SB), NOSPLIT|NOFRAME, $0-0
 	WORD $0xd61f0200; WORD $0x9370fc01; WORD $0xf100003f; WORD $0x5400010a
 	WORD $0xf9405b25; WORD $0xf85d80a4; WORD $0x8b010084; WORD $0xf81d80a4
 	WORD $0xf100009f; WORD $0x5400004c; WORD $0xd2800037; WORD $0xf944b2b0
+	WORD $0xd61f0200; WORD $0x9370fc01; WORD $0xf100003f; WORD $0x5400010a
+	WORD $0xf9405b25; WORD $0xf85d80a4; WORD $0x8b010084; WORD $0xf81d80a4
+	WORD $0xf100009f; WORD $0x5400004c; WORD $0xd2800037; WORD $0xf944b6b0
+	WORD $0xd61f0200; WORD $0x9370fc01; WORD $0xf100003f; WORD $0x5400010a
+	WORD $0xf9405b25; WORD $0xf85d80a4; WORD $0x8b010084; WORD $0xf81d80a4
+	WORD $0xf100009f; WORD $0x5400004c; WORD $0xd2800037; WORD $0xf944bab0
+	WORD $0xd61f0200; WORD $0x9370fc01; WORD $0xf100003f; WORD $0x5400010a
+	WORD $0xf9405b25; WORD $0xf85d80a4; WORD $0x8b010084; WORD $0xf81d80a4
+	WORD $0xf100009f; WORD $0x5400004c; WORD $0xd2800037; WORD $0xf944beb0
+	WORD $0xd61f0200; WORD $0x9370fc01; WORD $0xf100003f; WORD $0x5400010a
+	WORD $0xf9405b25; WORD $0xf85d80a4; WORD $0x8b010084; WORD $0xf81d80a4
+	WORD $0xf100009f; WORD $0x5400004c; WORD $0xd2800037; WORD $0xf944c2b0
+	WORD $0xd61f0200; WORD $0x9370fc01; WORD $0xf100003f; WORD $0x5400010a
+	WORD $0xf9405b25; WORD $0xf85d80a4; WORD $0x8b010084; WORD $0xf81d80a4
+	WORD $0xf100009f; WORD $0x5400004c; WORD $0xd2800037; WORD $0xf944c6b0
+	WORD $0xd61f0200; WORD $0x9370fc01; WORD $0xf100003f; WORD $0x5400010a
+	WORD $0xf9405b25; WORD $0xf85d80a4; WORD $0x8b010084; WORD $0xf81d80a4
+	WORD $0xf100009f; WORD $0x5400004c; WORD $0xd2800037; WORD $0xf944cab0
 	WORD $0xd61f0200
 
 // regNativeFeedbackTable is the feedback dispatcher's table: each operation's
@@ -510,12 +534,12 @@ DATA ·regNativeFeedbackTable+1816(SB)/8, $·regNativeHandlers+40(SB)
 DATA ·regNativeFeedbackTable+1824(SB)/8, $·regNativeHandlers+40(SB)
 DATA ·regNativeFeedbackTable+1832(SB)/8, $·regNativeHandlers+40(SB)
 DATA ·regNativeFeedbackTable+1840(SB)/8, $·regNativeHandlers+40(SB)
-DATA ·regNativeFeedbackTable+1848(SB)/8, $·regNativeHandlers+43948(SB)
-DATA ·regNativeFeedbackTable+1856(SB)/8, $·regNativeHandlers+44128(SB)
-DATA ·regNativeFeedbackTable+1864(SB)/8, $·regNativeHandlers+44308(SB)
-DATA ·regNativeFeedbackTable+1872(SB)/8, $·regNativeHandlers+44472(SB)
-DATA ·regNativeFeedbackTable+1880(SB)/8, $·regNativeHandlers+44636(SB)
-DATA ·regNativeFeedbackTable+1888(SB)/8, $·regNativeHandlers+44800(SB)
+DATA ·regNativeFeedbackTable+1848(SB)/8, $·regNativeFeedbackHandlers+3524(SB)
+DATA ·regNativeFeedbackTable+1856(SB)/8, $·regNativeFeedbackHandlers+3572(SB)
+DATA ·regNativeFeedbackTable+1864(SB)/8, $·regNativeFeedbackHandlers+3620(SB)
+DATA ·regNativeFeedbackTable+1872(SB)/8, $·regNativeFeedbackHandlers+3668(SB)
+DATA ·regNativeFeedbackTable+1880(SB)/8, $·regNativeFeedbackHandlers+3716(SB)
+DATA ·regNativeFeedbackTable+1888(SB)/8, $·regNativeFeedbackHandlers+3764(SB)
 DATA ·regNativeFeedbackTable+1896(SB)/8, $·regNativeHandlers+45008(SB)
 DATA ·regNativeFeedbackTable+1904(SB)/8, $·regNativeHandlers+45168(SB)
 DATA ·regNativeFeedbackTable+1912(SB)/8, $·regNativeHandlers+45356(SB)
@@ -580,7 +604,13 @@ DATA ·regNativeFeedbackTable+2376(SB)/8, $·regNativeHandlers+13700(SB)
 DATA ·regNativeFeedbackTable+2384(SB)/8, $·regNativeHandlers+13120(SB)
 DATA ·regNativeFeedbackTable+2392(SB)/8, $·regNativeHandlers+14172(SB)
 DATA ·regNativeFeedbackTable+2400(SB)/8, $·regNativeHandlers+43588(SB)
-GLOBL ·regNativeFeedbackTable(SB), RODATA, $2408
+DATA ·regNativeFeedbackTable+2408(SB)/8, $·regNativeHandlers+43948(SB)
+DATA ·regNativeFeedbackTable+2416(SB)/8, $·regNativeHandlers+44128(SB)
+DATA ·regNativeFeedbackTable+2424(SB)/8, $·regNativeHandlers+44308(SB)
+DATA ·regNativeFeedbackTable+2432(SB)/8, $·regNativeHandlers+44472(SB)
+DATA ·regNativeFeedbackTable+2440(SB)/8, $·regNativeHandlers+44636(SB)
+DATA ·regNativeFeedbackTable+2448(SB)/8, $·regNativeHandlers+44800(SB)
+GLOBL ·regNativeFeedbackTable(SB), RODATA, $2456
 
 // nativeFeedbackTableAddr is the table's address.
 TEXT ·nativeFeedbackTableAddr(SB), NOSPLIT, $0-8

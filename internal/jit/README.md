@@ -627,16 +627,18 @@ counted, as the stack form's invocations spend it one by one
   nothing, as no invocation the stack form's native code makes does;
 - a backward jump spends its function's budget by its distance, as V8's
   `JumpLoop` spends its bytecodes' distance: the feedback dispatcher's
-  jumps (nativegen's `feedback.go`, `feedbackEdgeAMD64` and
-  `feedbackEdgeARM64`; the Go table's `regJump` and `regJumpSlow`,
-  `regEdgeTick`) count down the work left of it for back edges
-  (`closureCode`'s `jitRegEdges`, armed by `jitRegArmEdges`), and once none
-  is left end the interrupt budget, so that the jump, taken, leaves to its
-  Go slow function's check (`regBackEdge`), which spends the work counted
-  (`jitRegLoop`, `jitRegEdgeWork`) and arms the count again. A check where
-  the interrupt budget ended by itself spends what the count has so far,
-  so that where a loop is compiled is the same whatever the interrupt
-  budget, varied from one expiry to the next (`backEdgeBudget`), did.
+  jumps, the step-and-branches' among them, which jump as their partners
+  do (nativegen's `feedback.go`, `feedbackEdgeAMD64` and
+  `feedbackEdgeARM64`; the Go table's `regJump`, `regJumpSlow` and
+  `regStepTaken`, `regEdgeTick`) count down the work left of it for back
+  edges (`closureCode`'s `jitRegEdges`, armed by `jitRegArmEdges`), and
+  once none is left end the interrupt budget, so that the jump, taken,
+  leaves to its Go slow function's check (`regBackEdge`), which spends
+  the work counted (`jitRegLoop`, `jitRegEdgeWork`) and arms the count
+  again. A check where the interrupt budget ended by itself spends what
+  the count has so far, so that where a loop is compiled is the same
+  whatever the interrupt budget, varied from one expiry to the next
+  (`backEdgeBudget`), did.
   Counted so, not sampled -- a full interrupt budget times the loop's
   length, where it ended at the loop's own back edge -- a loop whose turns
   call native code with loops of their own, Crypto's `bnModPow`, was

@@ -65,6 +65,12 @@ var (
 		bytecode.RJNull, bytecode.RJNotNull,
 		bytecode.RJSEq, bytecode.RJSNe, bytecode.RJSEqI, bytecode.RJSNeI,
 		bytecode.RJTypeof,
+		// The step-and-branches jump by SC as their partners do, from
+		// the step's own handler where the partner's comparison holds:
+		// their backward jumps are the loops' back edges as the partners'
+		// are where they are not fused.
+		bytecode.RStepJLt, bytecode.RStepJLe, bytecode.RStepJLtI, bytecode.RStepJGtI,
+		bytecode.RStepJGeI, bytecode.RStepJLeU,
 	}
 	// feedbackOtherJumps are the jumps feedbackOps has for nothing else.
 	feedbackOtherJumps = func() []bytecode.ROp {
