@@ -159,6 +159,13 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 	saved := r.stackTop
 	var fbuf [4]*frame
 	frames := fbuf[:0]
+	// A loop's callback inlined in it (abi.Context's Loop): the loop's
+	// slots, its array, callback and thisArg (jitRegLoopFinish's), and
+	// whether the built-in's frame was made below the callback's.
+	loop, loopSlots, loopFrame := s.ssaCtxs[idx].Loop, 0, false
+	if loop != 0 {
+		loopSlots = jitRegSlotIndex(owner.p, wb, owner.p.Locals+int(loop&0xffffffff)-1)
+	}
 	for k := range levels {
 		x := &levels[k]
 		rc := x.cl.reg
@@ -178,7 +185,23 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 		if k > 0 {
 			caller, at = levels[k-1].cl.reg, levels[k-1].pc
 		}
-		if at < len(caller.rc.Code) {
+		if k == 0 && loop != 0 {
+			// The loop's callback: its receiver the loop's thisArg, as
+			// Go's forEach calls it (jitRegForwardReceiver), an arrow's
+			// the one it captured (jitRegPlainReceiver); and the
+			// built-in's frame below it, as the stack form's unwinding
+			// makes it (jitPushLoopFrame), which a stack trace shows: "at
+			// Array.forEach". Neither had been made, the callback named
+			// "Number.throwAt" by what its window's register 1 held, and
+			// the built-in left out.
+			if x.callee.IsObject() && x.callee.Object().fn() != nil && x.callee.Object().fn().arrow {
+				r.jitRegPlainReceiver(x.callee, x.cl, x.wb)
+			} else {
+				r.jitRegForwardReceiver(x.cl, x.wb, r.stack[loopSlots+2])
+			}
+			r.jitRegPushLoopFrame(loop, r.stack[loopSlots])
+			loopFrame = true
+		} else if at < len(caller.rc.Code) {
 			switch regAt(caller.code, at).Op() {
 			case bytecode.RNewW:
 				x.construct, x.this = true, r.stack[x.wb+1]
@@ -276,6 +299,10 @@ func (r *Runtime) jitRegInlined(idx int, f *frame, owner *jitRegEntry, at, wb in
 			v, err = r.regRestartRun(f)
 		}
 		r.jitRegPopLevel(f, x.wb, false)
+		if k == 0 && loopFrame {
+			// Its callee finished: the built-in's frame goes.
+			r.frameDepth--
+		}
 		if err == errTailCall {
 			v, err = r.regTailRest()
 		}

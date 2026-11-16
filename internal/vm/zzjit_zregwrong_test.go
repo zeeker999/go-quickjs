@@ -173,3 +173,35 @@ func TestJITRegInlinedExitCallerPosition(t *testing.T) {
 				"RangeError: past 3 at 66\n    at Node.check (test:10:46)\n    at Object.walk (test:21:12)\n    at wl (test:49:126)"},
 		})
 }
+
+// A loop's callback, inlined in the loop of a built-in's call or called
+// natively from it, runs with the receiver Go's forEach gives it, and its
+// frames are those Go's make: a sloppy callback that reads its this is
+// not inlined, the loop's undefined coerced to the global object by its
+// call (this === globalThis had been false, TestJITCallbackInlined's
+// sloppyThis gave 0 for 24); and at an exit inside a callback, inlined or
+// a native callee, the built-in's frame is made below the callback's and
+// the callback's receiver is the loop's thisArg -- a stack trace had left
+// "at Array.forEach" out and named the callback "Number.throwAt" by what
+// its window held.
+func TestJITRegLoopCallbackFrames(t *testing.T) {
+	regWrongCheck(t, `var nums = [1, 2, 3, 4, 5], u8 = new Uint8Array([1, 2, 3, 4, 5]), self = { k: 1 }
+	function at(e) { return e.stack.split(String.fromCharCode(10)).slice(1, 4).map(l => l.trim().split(' ')[1]).join() }
+	function sloppy(n) { let s = 0; for (let i = 0; i < n; i++) nums.forEach(function (x) { s += this === globalThis ? 1 : 0 }); return s }
+	function reduced(n) { let s = 0; for (let i = 0; i < n; i++) s += nums.reduce(function (a, x) { return a + (this === globalThis ? 1 : 0) }, 0); return s }
+	function throwAt(x) { if (x === 3) throw new Error('at ' + x) }
+	function strictAt(x) { 'use strict'; if (x === 3) throw new Error('s' + x) }
+	function throws(n) { let s = ''; for (let i = 0; i < n; i++) { try { nums.forEach(throwAt) } catch (e) { s += at(e) + ';' } } return s }
+	function withThis(n) { let s = ''; for (let i = 0; i < n; i++) { try { nums.forEach(throwAt, self) } catch (e) { s += at(e) + ';' } } return s }
+	function strict(n) { let s = ''; for (let i = 0; i < n; i++) { try { nums.forEach(strictAt, 7) } catch (e) { s += at(e) + ';' } } return s }
+	function arrows(n) { let s = ''; for (let i = 0; i < n; i++) { try { nums.forEach((x) => { if (x === 3) throw new Error('a') }) } catch (e) { s += at(e) + ';' } } return s }
+	function typed(n) { let s = ''; for (let i = 0; i < n; i++) { try { u8.forEach(throwAt) } catch (e) { s += at(e) + ';' } } return s }`, []regWrongCase{
+		{"sloppy", []float64{6}, 8, "30"},
+		{"reduced", []float64{6}, 8, "30"},
+		{"throws", []float64{3}, 8, "throwAt,Array.forEach,throws;throwAt,Array.forEach,throws;throwAt,Array.forEach,throws;"},
+		{"withThis", []float64{3}, 8, "Object.throwAt,Array.forEach,withThis;Object.throwAt,Array.forEach,withThis;Object.throwAt,Array.forEach,withThis;"},
+		{"strict", []float64{3}, 8, "Number.strictAt,Array.forEach,strict;Number.strictAt,Array.forEach,strict;Number.strictAt,Array.forEach,strict;"},
+		{"arrows", []float64{3}, 8, "test:10:112,Array.forEach,arrows;test:10:112,Array.forEach,arrows;test:10:112,Array.forEach,arrows;"},
+		{"typed", []float64{3}, 8, "throwAt,Uint8Array.forEach,typed;throwAt,Uint8Array.forEach,typed;throwAt,Uint8Array.forEach,typed;"},
+	})
+}

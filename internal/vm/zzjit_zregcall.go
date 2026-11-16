@@ -301,7 +301,13 @@ func (f *jitRegFeedback) regCallTargets(t *jitRegTargets, pc int, w bytecode.RIn
 	}
 	if l != nil {
 		for _, x := range l.nativeCalls {
-			if x.pc == rpc && (x.pool != nil) == newW && !x.forEach && x.cl != nil && x.active == nil {
+			// Not one of no object: a closure the code made and called,
+			// inlined where it is not made (madeInline), whose inlining
+			// left native code too often (jitInlineLeft) -- made and
+			// called from then on, its call's shape no longer given
+			// (CallShape's notInline). Asked for a native call of a nil
+			// object, the compile had panicked.
+			if x.pc == rpc && (x.pool != nil) == newW && !x.forEach && x.cl != nil && x.obj != nil && x.active == nil {
 				f.regAddTarget(t, pc, argc, method, x.obj, x.cl, x.cl.reg, x.pool, x.parent, x.byCode && !x.via, x.via)
 			}
 		}
@@ -528,7 +534,10 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 	n := 0
 	for i := range l.nativeCalls {
 		x := &l.nativeCalls[i]
-		if int(x.pc) == rpc && x.pool == nil && x.obj != o && jitRegSameClosureCode(x.cl, cl) {
+		// Not a loop's entry (forEach), whose callee is the built-in and
+		// whose closure is its callback's (cb): a call of the loop left to
+		// Go once its callback was not inlined had panicked here.
+		if int(x.pc) == rpc && x.pool == nil && x.cl != nil && x.obj != o && jitRegSameClosureCode(x.cl, cl) {
 			// Another object of a function the call has called, a closure
 			// its maker makes anew: called by its code from here
 			// (ssa.CallSite's ByCode), as the stack form's call learns it
@@ -2138,8 +2147,12 @@ func (r *Runtime) jitRegUnwind(idx int) (_ Value, _ error, gen bool) {
 	ctxTop := s.ctxTop
 	s.ctxTop = max(ctxTop, idx+n+1)
 	frames := make([]*frame, n)
+	// loopFrames marks the levels a loop's built-in's frame was made below
+	// (jitRegLoopCallee).
+	loopFrames := make([]bool, n)
 	for k := range levels {
 		l := &levels[k]
+		loopFrames[k] = r.jitRegLoopCallee(idx, levels, k)
 		pc := regSrc(l.c, l.pc)
 		if k < n-1 || l.ctx+1 < len(s.ssaCtxs) && s.ssaCtxs[l.ctx+1].Live == abi.LiveInline {
 			// Past the call it makes, as the interpreter's frame is during
@@ -2205,6 +2218,10 @@ func (r *Runtime) jitRegUnwind(idx int) (_ Value, _ error, gen bool) {
 			v, err = r.jitRegGenDone(f, l, v, err)
 		}
 		r.jitRegPopLevel(f, l.wb, l.gen != nil)
+		if loopFrames[k] {
+			// Its callee finished: the built-in's frame goes.
+			r.frameDepth--
+		}
 		l.e.levels--
 		s.regClose(l.e)
 		if l.e.life != nil && l.e.life.reopt && l.cl.reg == l.c && r.jitRegLearnedDue(l.cl, l.e) {
@@ -2233,6 +2250,46 @@ func (r *Runtime) jitRegUnwind(idx int) (_ Value, _ error, gen bool) {
 	}
 	s.ctxTop = ctxTop
 	return v, err, n != 0 && levels[0].gen != nil
+}
+
+// jitRegLoopCallee makes, for level k of levels, the native calls under
+// way past the run in context idx, where its caller makes a loop of a
+// built-in's call (abi.Context's Loop) whose callback it is, what the
+// stack form's unwinding makes (jitUnwindNative's jitPushLoopFrame): the
+// built-in's frame below the callback's, which a stack trace shows -- "at
+// Array.forEach" -- and the callback's receiver, the loop's thisArg, in
+// its window's register 1, which its native call writes only for a
+// callee that reads it (jitRegForwardReceiver), an arrow's the one it
+// captured (jitRegPlainReceiver). It reports whether it pushed a frame.
+func (r *Runtime) jitRegLoopCallee(idx int, levels []jitRegLevel, k int) bool {
+	s := r.jit
+	ctx, p, wb := idx, (*ir.Program)(nil), 0
+	var c *regCode
+	var at int
+	if k == 0 {
+		if idx >= len(s.regRuns) || s.regRuns[idx].e == nil {
+			return false
+		}
+		run := &s.regRuns[idx]
+		rpc, _ := jit.CallPC(s.ssaCtxs[idx])
+		c, at, p, wb = run.c, int(rpc), run.e.p, run.wb
+	} else {
+		x := &levels[k-1]
+		ctx, c, at, p, wb = x.ctx, x.c, x.pc, x.e.p, x.wb
+	}
+	loop := s.ssaCtxs[ctx].Loop
+	if loop == 0 || p == nil || c == nil || at >= len(c.rc.Code) || regAt(c.code, at).Op() != bytecode.RCallMW || levels[k].gen != nil {
+		return false
+	}
+	slots := jitRegSlotIndex(p, wb, p.Locals+int(loop&0xffffffff)-1)
+	l := &levels[k]
+	if callee := r.stack[slots+1]; callee.IsObject() && callee.Object().fn() != nil && callee.Object().fn().arrow {
+		r.jitRegPlainReceiver(callee, l.cl, l.wb)
+	} else {
+		r.jitRegForwardReceiver(l.cl, l.wb, r.stack[slots+2])
+	}
+	r.jitRegPushLoopFrame(loop, r.stack[slots])
+	return true
 }
 
 // jitRegFinishLevel finishes level l, whose frame is f, from where its code
