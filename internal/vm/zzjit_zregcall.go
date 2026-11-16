@@ -60,6 +60,20 @@ func (s *jitState) regLinkOf(cl *closure, c *regCode) *jitLink {
 	return l
 }
 
+// regLinkIfCached gives cl's function its link (regLinkOf), and so the
+// slot of the hint table a generic call finds it by, if the cache holds
+// code of it, a refusal or none: as the stack form's entries have their
+// slots (remember). A link of a function the cache holds nothing for,
+// which a generic call would leave to Go all the same, is not made: Go's
+// next call of it, once it has code, gives it one. Made at every such
+// call of Go, the links of a program's stream of functions called once
+// outnumbered the functions the cache held.
+func (s *jitState) regLinkIfCached(cl *closure) {
+	if s.regCache[s.rt.jitRegKeyOf(cl)] != nil {
+		s.regLinkOf(cl, cl.reg)
+	}
+}
+
 // regLinkFor is the link native callers call e's function's code through,
 // nil where none has asked for one (regLinkOf), as regLinks has it by e's
 // key.
@@ -593,10 +607,10 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 				// anew at each call of its maker, the fifth a call made --
 				// AWFY's Havlak's Vector.forEach's of stepD's arrow -- was
 				// made by Go at every call.
-				if w.Op() != bytecode.RNewW {
-					r.jitState().regLinkOf(cl, cl.reg)
-				}
 				r.jitRegKnownCallee(cl, f.cl)
+				if w.Op() != bytecode.RNewW {
+					r.jitState().regLinkIfCached(cl)
+				}
 				return false
 			}
 			x.byCode = true
@@ -613,10 +627,10 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 				// regCallTargets fills with the site's cache's first: a
 				// generic call calls it through its link, which it finds
 				// by its hint (regHint), given it here as below.
-				if w.Op() != bytecode.RNewW {
-					r.jitState().regLinkOf(cl, cl.reg)
-				}
 				r.jitRegKnownCallee(cl, f.cl)
+				if w.Op() != bytecode.RNewW {
+					r.jitState().regLinkIfCached(cl)
+				}
 				return false
 			}
 			n++
@@ -630,8 +644,8 @@ func (r *Runtime) jitRegCallSeenOf(f *frame, c *regCode, e *jitRegEntry, rpc int
 			// callers may call, as the stack form's generic calls have
 			// their functions compiled (jitCallTarget). Go had made every
 			// call of one no site was compiled for.
-			r.jitState().regLinkOf(cl, cl.reg)
 			r.jitRegKnownCallee(cl, f.cl)
+			r.jitState().regLinkIfCached(cl)
 		}
 		return false
 	}

@@ -3072,8 +3072,8 @@ func (r *Runtime) jitRegStepNextSeen(f *frame, e *jitRegEntry, rpc int, st *iter
 	learned := false
 	if !slices.ContainsFunc(l.nativeCalls, func(x jitInline) bool { return int(x.pc) == rpc }) {
 		l.nativeCalls = append(l.nativeCalls, jitInline{pc: int32(rpc), cl: cl, obj: o})
-		r.jitState().regLinkOf(cl, cl.reg)
 		r.jitRegKnownCallee(cl, f.cl)
+		r.jitState().regLinkIfCached(cl)
 		learned = true
 	}
 	if res.IsObject() && !slices.ContainsFunc(l.stepResults, func(x jitStepResult) bool { return int(x.pc) == rpc }) {
