@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -51,10 +52,13 @@ func goldenKey(t *testing.T) string {
 	return fmt.Sprintf("%s#%d", t.Name(), n)
 }
 
-// goldenProgram is the hash of a comparison's program and calls.
+// goldenProgram is the hash of a comparison's program and calls, its
+// source's line ends LF's: a checkout that writes CRLF, as Windows' Git
+// does by default, has the same program, which reads the files the
+// comparisons run (testdata's scripts, the micro-benchmarks) with them.
 func goldenProgram(src string, calls []string) string {
 	h := sha256.New()
-	h.Write([]byte(src))
+	h.Write([]byte(strings.ReplaceAll(src, "\r\n", "\n")))
 	for _, c := range calls {
 		h.Write([]byte{0})
 		h.Write([]byte(c))
