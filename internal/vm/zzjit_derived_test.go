@@ -437,6 +437,7 @@ func TestJITDerivedNativeSuperTwice(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	jitNativeCountsForTest(t)
 	// Counted with the collector off, which the counts are not about.
 	runtime.GC()
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))

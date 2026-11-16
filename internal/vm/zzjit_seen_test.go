@@ -92,6 +92,7 @@ func TestJITSSAUnwoundCompiledAgainOnlyForWhatItLearned(t *testing.T) {
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	jitNativeCountsForTest(t)
 	// While the collector marks, Go makes native calls, which would count
 	// as calls leaving native code.
 	runtime.GC()
