@@ -2922,7 +2922,10 @@ form's entry is made at its function's first call, this at its first
 sample, after its first run, and refused, a loop driving a program's phases
 had had no code once the first phase filled the budget. The state of a
 function the cache holds nothing for is reclaimed with the refusals, least
-recently made first (its `serial`), and so is a refusal's with it; a state
+recently made first (its `serial`, which orders its function's refusal
+and programs among theirs too, `regVictimSerial`: ties left to the cache's
+maps had a full budget's compiles differ from run to run), and so is a
+refusal's with it; a state
 reclaimed when listed leaves the floor as it was, which a stream of
 functions each taking another's room had otherwise made every compile list
 the cache again. Code let go of so has its
