@@ -306,9 +306,9 @@ type gen struct {
 	auxes    map[int]uint32
 	literals [][]bytecode.LitElem
 	objKeys  [][]uint32
-	// sole is the locals bytecode.SoleLocals finds, once soleDone.
-	sole     uint64
-	soleDone bool
+	// ownCands are the operators compiled into a binding's register
+	// (markSole).
+	ownCands []int
 	// objKeysHash is each one's hash (RegCode's ObjKeysHash).
 	objKeysHash []uint64
 	// farNames is the index of each name past 16 bits an instruction
@@ -2545,31 +2545,16 @@ func (g *gen) operate(text string, op bytecode.Op, left, right ast.Expr, a, dst,
 	d := g.result(mark, dst)
 	g.at(pos)
 	if rop, ok := regOps[text]; ok {
-		if g.soleReg(d) {
-			x |= bytecode.RArithOwnA
+		at := g.emit(bytecode.MakeR(rop, x, r16(d), r16(a), r16(b)))
+		if g.isBinding(d) {
+			// Into a binding's register, which may hold its values
+			// alone (markSole).
+			g.ownCands = append(g.ownCands, at)
 		}
-		g.emit(bytecode.MakeR(rop, x, r16(d), r16(a), r16(b)))
 	} else {
 		g.emit(bytecode.MakeR(bytecode.RBin, uint8(op), r16(d), r16(a), r16(b)))
 	}
 	return d
-}
-
-// soleReg reports whether r is the register of a local that holds its
-// values alone (bytecode.SoleLocals): an operator whose result it takes
-// may give back the BigInt it held (RArithOwnA).
-func (g *gen) soleReg(r int) bool {
-	if !g.isBinding(r) {
-		return false
-	}
-	if !g.soleDone {
-		g.sole, g.soleDone = bytecode.SoleLocals(g.fn), true
-	}
-	if g.sole == 0 {
-		return false
-	}
-	k := g.slotOf(r)
-	return k >= 0 && k < 64 && g.sole&(1<<uint(k)) != 0
 }
 
 // fresh reports whether r, the register e was just evaluated into, holds
@@ -4478,6 +4463,7 @@ func (g *gen) closureConst(k, d int) {
 
 func (g *gen) finish() *bytecode.RegCode {
 	g.reuseSites()
+	g.markSole()
 	// Each instruction's position, an entry where it changes; and past the
 	// code, the position of each error an instruction places apart from
 	// its own (storeAt), whose pc its Aux holds.

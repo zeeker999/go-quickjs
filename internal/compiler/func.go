@@ -50,7 +50,6 @@ func (c *compiler) compileFunctionLiteral(fn *ast.FuncLit, inferredName string) 
 	}
 
 	idx := c.addConst(bytecode.Constant{Kind: bytecode.ConstFunction, Fn: compiled})
-	c.emit(bytecode.OpClosure, idx, 0)
 	return idx
 }
 
@@ -192,14 +191,10 @@ func (c *compiler) compileFunctionBody(fn *ast.FuncLit) {
 			return
 		}
 		c.facts.makesArgs = true
-		c.emit(bytecode.OpGetArguments, 0, 0)
-		c.emit(bytecode.OpSetLocal, slot, 0)
 	}, wantArguments)
 	if fn.Generator || fn.Async {
 		// A generator's parameters are bound when it is called, so the
 		// prologue has to be separable from the body.
-		c.emit(bytecode.OpEndParams, 0, 0)
-		c.fn.ParamEnd = uint32(c.here())
 	}
 
 	// Hoist var declarations and nested function declarations to the top of
@@ -217,13 +212,11 @@ func (c *compiler) compileFunctionBody(fn *ast.FuncLit) {
 	c.annexB = annexB
 	for _, n := range varNames {
 		if _, exists := c.resolveLocal(n); !exists {
-			slot := c.declare(n, bindVar, fn.Start)
+			c.declare(n, bindVar, fn.Start)
 			// A hoisted var starts as undefined, which is what the frame a
 			// call makes starts every local as: only a generator's or an
 			// async function's, which their objects keep, is set here.
 			if fn.Generator || fn.Async {
-				c.emit(bytecode.OpPushUndef, 0, 0)
-				c.emit(bytecode.OpSetLocal, slot, 0)
 			}
 		}
 	}
@@ -238,10 +231,7 @@ func (c *compiler) compileFunctionBody(fn *ast.FuncLit) {
 	// derived one's return reads its binding itself, so that one never bound
 	// fails the construction rather than the body, in the caller's realm.
 	if fn.Kind == ast.FuncConstructor {
-		c.emit(bytecode.OpPushThis, 0, 0)
-		c.emit(bytecode.OpReturn, 0, 0)
 	}
-	c.emit(bytecode.OpReturnUndef, 0, 0)
 	c.finish()
 	// The object made for nothing but apply.
 	c.fn.ForwardsArguments = c.lazyArguments && !c.opts.Debug && !c.facts.argsEscape
@@ -281,10 +271,8 @@ func (c *compiler) bindSelfName(fn *ast.FuncLit) {
 	if !referencesName(fn, c.selfName) {
 		return
 	}
-	slot := c.declare(c.selfName, bindFuncSelf, fn.Start)
+	c.declare(c.selfName, bindFuncSelf, fn.Start)
 	c.facts.callee = true
-	c.emit(bytecode.OpPushCallee, 0, 0)
-	c.emit(bytecode.OpInitLocal, slot, 0)
 	c.markInitialized(c.selfName)
 }
 
@@ -360,7 +348,6 @@ func (c *compiler) bindParameters(fn *ast.FuncLit, materialize func(), wantArgs 
 		// The parameters are bound one at a time from here on, so they all
 		// start in the dead zone. An argument that was passed is already
 		// bound; undefined, passed or missing, is what makes a default run.
-		c.emit(bytecode.OpParamsToDeadZone, uint32(len(fn.Params)), 0)
 		for i := range fn.Params {
 			c.noteStore(uint32(i))
 		}
@@ -382,14 +369,12 @@ func (c *compiler) bindParameters(fn *ast.FuncLit, materialize func(), wantArgs 
 	}
 
 	for i, p := range fn.Params {
-		slot := slots[i]
 		switch param := p.(type) {
 		case *ast.Ident:
 			// Nothing is evaluated for it: the argument arrived in the slot,
 			// or the marker is still there and stands for undefined. A list
 			// with no defaults and no patterns never put it there.
 			if c.fn.ParamsAreLexical {
-				c.emit(bytecode.OpInitParam, slot, 0)
 			}
 
 		case *ast.AssignPattern:
@@ -399,16 +384,8 @@ func (c *compiler) bindParameters(fn *ast.FuncLit, materialize func(), wantArgs 
 			if !isIdent(param.Target) {
 				c.declarePatternNames(param.Target)
 			}
-			c.emit(bytecode.OpParamNeedsDefault, slot, 0)
-			passed := c.emitJump(bytecode.OpJumpIfFalse)
 			c.compileExprNamed(param.Default, nameOf(param.Target))
-			c.emit(bytecode.OpSetLocal, slot, 0)
-			done := c.emitJump(bytecode.OpJump)
-			c.patchJump(passed)
-			c.emit(bytecode.OpInitParam, slot, 0)
-			c.patchJump(done)
 			if !isIdent(param.Target) {
-				c.emit(bytecode.OpGetLocal, slot, 0)
 				c.compileDestructuring(param.Target, ast.DeclLet)
 			}
 
@@ -417,20 +394,15 @@ func (c *compiler) bindParameters(fn *ast.FuncLit, materialize func(), wantArgs 
 			// the declared ones, so its slot is filled from the frame's
 			// argument list rather than positionally.
 			c.fn.HasRest = true
-			c.emit(bytecode.OpRestParam, uint32(i), 0)
-			c.emit(bytecode.OpSetLocal, slot, 0)
 			if !isIdent(param.Arg) {
 				c.declarePatternNames(param.Arg)
-				c.emit(bytecode.OpGetLocal, slot, 0)
 				c.compileDestructuring(param.Arg, ast.DeclLet)
 			}
 
 		default:
 			if c.fn.ParamsAreLexical {
-				c.emit(bytecode.OpInitParam, slot, 0)
 			}
 			c.declarePatternNames(p)
-			c.emit(bytecode.OpGetLocal, slot, 0)
 			c.compileDestructuring(p, ast.DeclLet)
 		}
 		if names[i] != "" {
@@ -504,7 +476,6 @@ func (c *compiler) compileDestructuring(target ast.Expr, kind ast.DeclKind) {
 // are references rather than new bindings, and leaves the source value on the
 // stack as the expression's result.
 func (c *compiler) compileDestructuringAssign(target ast.Expr) {
-	c.emit(bytecode.OpDup, 0, 0)
 	switch pat := target.(type) {
 	case *ast.ArrayPattern:
 		c.compileArrayPattern(pat, ast.DeclVar, false)
@@ -526,17 +497,13 @@ func (c *compiler) compileDestructuringAssign(target ast.Expr) {
 // step interleaved with the target that receives it -- which is observable,
 // since evaluating a target can run a getter or a generator's yield.
 func (c *compiler) compileArrayPattern(pat *ast.ArrayPattern, kind ast.DeclKind, declaring bool) {
-	c.emitAt(pat.Start, bytecode.OpForOfStart, 0, 0)
 
 	for _, el := range pat.Elements {
 		if el == nil {
 			// A hole asks for a value and throws it away.
-			c.emit(bytecode.OpIterStep, 0, 0)
-			c.emit(bytecode.OpDrop, 0, 0)
 			continue
 		}
 		ref := c.prepareRef(el, declaring, kind)
-		c.emit(bytecode.OpIterStep, uint32(ref.slots), 0)
 		if ref.def != nil {
 			c.applyDefault(ref.def, nameOf(ref.target))
 		}
@@ -545,14 +512,12 @@ func (c *compiler) compileArrayPattern(pat *ast.ArrayPattern, kind ast.DeclKind,
 
 	if pat.Rest != nil {
 		ref := c.prepareRef(pat.Rest, declaring, kind)
-		c.emit(bytecode.OpIterRest, uint32(ref.slots), 0)
 		c.storeRef(ref, kind, declaring)
 	}
 
 	// The pattern has what it needs, so an iterator it stopped short of is told
 	// so -- and unlike a close during an abrupt completion, a failure there is
 	// the result.
-	c.emit(bytecode.OpIterCloseNormal, 0, 0)
 }
 
 // patternRef is one leaf of a destructuring pattern, with whatever part of its
@@ -629,13 +594,9 @@ func (c *compiler) storeRef(ref patternRef, kind ast.DeclKind, declaring bool) {
 		switch {
 		case ref.private:
 			pn := ref.member.Property.(*ast.PrivateName)
-			name, key := c.privateName(pn, int(ref.member.Start))
-			c.emitAt(int(ref.member.Start), bytecode.OpSetPrivate, name, key)
+			c.privateName(pn, int(ref.member.Start))
 		case ref.member.Computed:
-			c.emitAt(int(ref.member.Start), bytecode.OpSetIndex, 0, 0)
 		default:
-			c.emitAt(int(ref.member.Start), bytecode.OpSetProp,
-				c.nameIdx(propKeyName(ref.member.Property)), 0)
 		}
 		return
 	}
@@ -645,7 +606,6 @@ func (c *compiler) storeRef(ref patternRef, kind ast.DeclKind, declaring bool) {
 			// The reference was settled before the read; the write goes to
 			// whatever it found.
 			c.endWithRef(ref.withRef)
-			c.emit(bytecode.OpDrop, 0, 0)
 			return
 		}
 		if declaring {
@@ -653,11 +613,9 @@ func (c *compiler) storeRef(ref patternRef, kind ast.DeclKind, declaring bool) {
 			return
 		}
 		c.assignTo(l, false)
-		c.emit(bytecode.OpDrop, 0, 0)
 	case *ast.Member:
 		// A super property, which resolves against the home object.
 		c.assignTo(l, false)
-		c.emit(bytecode.OpDrop, 0, 0)
 	case *ast.ArrayPattern:
 		c.compileArrayPattern(l, kind, declaring)
 	case *ast.ObjectPattern:
@@ -676,7 +634,6 @@ func (c *compiler) compileObjectPattern(pat *ast.ObjectPattern, kind ast.DeclKin
 	// The source has to be something properties can be read from, and that is
 	// checked before any of them are -- which is the only thing an empty
 	// pattern does, and why `var {} = null` is an error at all.
-	c.emit(bytecode.OpCheckCoercible, 0, 0)
 	// A computed key is evaluated once: the rest leaves out the key it
 	// converted to, kept in a hidden local.
 	var keySlots []uint32
@@ -688,25 +645,19 @@ func (c *compiler) compileObjectPattern(pat *ast.ObjectPattern, kind ast.DeclKin
 			// The source key is evaluated and converted first, before the
 			// target it will be read into.
 			c.compileExpr(p.Key)
-			c.emit(bytecode.OpToPropertyKey, 0, 0)
 			if keySlots != nil {
 				keySlots[i] = c.declare(fmt.Sprintf("%%rk%d", *c.hiddenCount), bindVar, pat.Start)
 				*c.hiddenCount++
-				c.emit(bytecode.OpDup, 0, 0)
-				c.emit(bytecode.OpSetLocal, keySlots[i], 0)
 			}
 			ref := c.prepareRef(p.Value, declaring, kind)
-			c.emit(bytecode.OpGetIndexUnder, uint32(ref.slots), 0)
 			if ref.def != nil {
 				c.applyDefault(ref.def, nameOf(ref.target))
 			}
 			c.storeRef(ref, kind, declaring)
 			// The key has done its work.
-			c.emit(bytecode.OpDrop, 0, 0)
 			continue
 		}
 		ref := c.prepareRef(p.Value, declaring, kind)
-		c.emit(bytecode.OpGetPropUnder, c.nameIdx(propKeyName(p.Key)), uint32(ref.slots))
 		if ref.def != nil {
 			c.applyDefault(ref.def, nameOf(ref.target))
 		}
@@ -716,18 +667,13 @@ func (c *compiler) compileObjectPattern(pat *ast.ObjectPattern, kind ast.DeclKin
 		// The rest object holds every own enumerable property except the ones
 		// the pattern already bound, so those keys are pushed for the
 		// instruction to exclude.
-		c.emit(bytecode.OpDup, 0, 0)
-		for i, p := range pat.Props {
+		for _, p := range pat.Props {
 			if p.Computed {
-				c.emit(bytecode.OpGetLocal, keySlots[i], 0)
 				continue
 			}
-			c.emit(bytecode.OpPushConst, c.stringConst(propKeyName(p.Key)), 0)
 		}
-		c.emit(bytecode.OpObjectRest, uint32(len(pat.Props)), 0)
 		c.bindPatternLeaf(pat.Rest, kind, declaring)
 	}
-	c.emit(bytecode.OpDrop, 0, 0)
 }
 
 // bindPatternLeaf stores the extracted value into one leaf of a pattern.
@@ -743,10 +689,8 @@ func (c *compiler) bindPatternLeaf(leaf ast.Expr, kind ast.DeclKind, declaring b
 			return
 		}
 		c.assignTo(l, false)
-		c.emit(bytecode.OpDrop, 0, 0)
 	case *ast.Member:
 		c.assignTo(l, false)
-		c.emit(bytecode.OpDrop, 0, 0)
 	case *ast.ArrayPattern:
 		c.compileArrayPattern(l, kind, declaring)
 	case *ast.ObjectPattern:
@@ -759,13 +703,7 @@ func (c *compiler) bindPatternLeaf(leaf ast.Expr, kind ast.DeclKind, declaring b
 // applyDefault replaces the value on the stack with a default when it is
 // undefined.
 func (c *compiler) applyDefault(def ast.Expr, name string) {
-	c.emit(bytecode.OpDup, 0, 0)
-	c.emit(bytecode.OpPushUndef, 0, 0)
-	c.emit(bytecode.OpStrictEq, 0, 0)
-	skip := c.emitJump(bytecode.OpJumpIfFalse)
-	c.emit(bytecode.OpDrop, 0, 0)
 	c.compileExprNamed(def, name)
-	c.patchJump(skip)
 }
 
 // ---------------------------------------------------------------------------
@@ -842,8 +780,6 @@ func (c *compiler) compileClass(cls *ast.ClassLit, inferredName string) {
 	if hasSelf {
 		selfSlot = c.declare(cls.Name.Name, bindConst, cls.Start)
 		cr.Self = int32(selfSlot)
-		c.emit(bytecode.OpPushUninitialized, 0, 0)
-		c.emit(bytecode.OpSetLocal, selfSlot, 0)
 		c.markUninitialized(cls.Name.Name)
 	}
 
@@ -869,8 +805,6 @@ func (c *compiler) compileClass(cls *ast.ClassLit, inferredName string) {
 		// instance finds the methods already there.
 		slot := c.declare(installName, bindConst, cls.Start)
 		cr.Install = int32(slot)
-		c.emit(bytecode.OpNewPrivateMethods, 0, 0)
-		c.emit(bytecode.OpSetLocal, slot, 0)
 		c.markInitialized(installName)
 	}
 
@@ -878,9 +812,7 @@ func (c *compiler) compileClass(cls *ast.ClassLit, inferredName string) {
 	c.traceName = trace
 	cr.Ctor = int32(c.compileFunctionLiteral(ctor, name))
 	if cls.Extends != nil {
-		c.emit(bytecode.OpSwap, 0, 0)
 		// stack: ctor parent
-		c.emitAt(cls.Start, bytecode.OpNewClass, 0, 0)
 	}
 
 	// The class now exists, which is what takes its own name out of the dead
@@ -888,21 +820,13 @@ func (c *compiler) compileClass(cls *ast.ClassLit, inferredName string) {
 	// class before the outer binding is initialized, and it shadows the outer
 	// one rather than being it: assigning to it is a TypeError.
 	if hasSelf {
-		c.emit(bytecode.OpDup, 0, 0)
-		c.emit(bytecode.OpInitLocal, selfSlot, 0)
 		c.markInitialized(cls.Name.Name)
 	}
 
 	if instanceInit != nil {
 		// The initializer's home object is the prototype, so `super.x` in a
 		// field reads from the parent's prototype, as it does in a method.
-		c.emit(bytecode.OpDup, 0, 0)
-		c.emit(bytecode.OpGetProp, c.nameIdx("prototype"), 0)
 		cr.Init = int32(c.compileFunctionLiteral(instanceInit, ""))
-		c.emit(bytecode.OpSetHomeObject, 1, 0)
-		c.emit(bytecode.OpSwap, 0, 0)
-		c.emit(bytecode.OpDrop, 0, 0)
-		c.emit(bytecode.OpSetFieldInit, 0, 0)
 	}
 
 	for i, m := range cls.Members {
@@ -950,7 +874,6 @@ func (c *compiler) compileStaticElements(cls *ast.ClassLit, keyNames []string) [
 
 	var out []regcomp.ClassStatic
 	for _, el := range elements {
-		c.emit(bytecode.OpDup, 0, 0)
 		if el.field < 0 {
 			k := c.compileFunctionLiteral(&ast.FuncLit{
 				Kind:  ast.FuncMethod,
@@ -960,9 +883,6 @@ func (c *compiler) compileStaticElements(cls *ast.ClassLit, keyNames []string) [
 			out = append(out, regcomp.ClassStatic{Const: k, Field: -1})
 			// Its home object is the class, so `super.x` there reads from the
 			// parent class rather than from the parent's prototype.
-			c.emit(bytecode.OpSetHomeObject, 1, 0)
-			c.emit(bytecode.OpCallMethod, 0, 0)
-			c.emit(bytecode.OpDrop, 0, 0)
 			continue
 		}
 		f := cls.Fields[el.field]
@@ -986,9 +906,6 @@ func (c *compiler) compileStaticElements(cls *ast.ClassLit, keyNames []string) [
 			End:   f.Start,
 		}, "")
 		out = append(out, regcomp.ClassStatic{Const: k, Field: int32(el.field)})
-		c.emit(bytecode.OpSetHomeObject, 1, 0)
-		c.emit(bytecode.OpCallMethod, 0, 0)
-		c.emit(bytecode.OpDrop, 0, 0)
 	}
 	return out
 }
@@ -1001,13 +918,12 @@ func (c *compiler) compileClassMember(m ast.Property, fn *ast.FuncLit, installNa
 		key = propKeyName(m.Key)
 	}
 	// An accessor is named after its property with a "get " or "set " prefix.
-	nameKind := uint32(0)
 	methodName := key
 	switch m.Kind {
 	case ast.PropGet:
-		nameKind, methodName = 1, "get "+key
+		methodName = "get " + key
 	case ast.PropSet:
-		nameKind, methodName = 2, "set "+key
+		methodName = "set " + key
 	}
 
 	if pn, private := m.Key.(*ast.PrivateName); private && !m.Static {
@@ -1016,31 +932,22 @@ func (c *compiler) compileClassMember(m ast.Property, fn *ast.FuncLit, installNa
 
 	if m.Static {
 		// The constructor is the target and stays on the stack.
-		c.emit(bytecode.OpDup, 0, 0)
 	} else {
-		c.emit(bytecode.OpDup, 0, 0)
-		c.emit(bytecode.OpGetProp, c.nameIdx("prototype"), 0)
 	}
 	// A computed key is evaluated before the method it names, which is
 	// observable when it has a side effect, and leaves the stack in the
 	// [target, key, value] order the define instructions expect.
-	homeDepth := uint32(1)
 	if m.Computed {
 		c.compileExpr(m.Key)
-		c.emit(bytecode.OpToPropertyKey, 0, 0)
 		// The key now sits between the target and the function.
-		homeDepth = 2
 	}
 	k := c.compileMethodValue(fn, methodName)
 	if m.Computed {
 		// The name is only knowable once the key has been evaluated.
-		c.emit(bytecode.OpSetFuncName, nameKind, 0)
 	}
 	// The home object is what `super` resolves against, so a method has to
 	// remember the object it was defined on.
-	c.emit(bytecode.OpSetHomeObject, homeDepth, 0)
 	c.emitClassMemberDefine(m, key)
-	c.emit(bytecode.OpDrop, 0, 0)
 	return k
 }
 
@@ -1058,11 +965,8 @@ func (c *compiler) emitClassMemberDefine(m ast.Property, key string) {
 		// makes it non-enumerable.
 		switch m.Kind {
 		case ast.PropGet:
-			c.emit(bytecode.OpDefineGetterIndex, classMember, 0)
 		case ast.PropSet:
-			c.emit(bytecode.OpDefineSetterIndex, classMember, 0)
 		default:
-			c.emit(bytecode.OpDefineIndex, classMember, 0)
 		}
 		return
 	}
@@ -1071,24 +975,18 @@ func (c *compiler) emitClassMemberDefine(m ast.Property, key string) {
 	// a static private member reaches here; an instance one belongs to the
 	// instance and is handled above.
 	if pn, private := m.Key.(*ast.PrivateName); private {
-		name, ref := c.privateName(pn, m.Start)
+		c.privateName(pn, m.Start)
 		switch m.Kind {
 		case ast.PropGet:
-			c.emit(bytecode.OpDefinePrivateGetter, name, ref)
 		case ast.PropSet:
-			c.emit(bytecode.OpDefinePrivateSetter, name, ref)
 		default:
-			c.emit(bytecode.OpDefinePrivateMethod, name, ref)
 		}
 		return
 	}
 	switch m.Kind {
 	case ast.PropGet:
-		c.emit(bytecode.OpDefineGetter, c.nameIdx(key), classMember)
 	case ast.PropSet:
-		c.emit(bytecode.OpDefineSetter, c.nameIdx(key), classMember)
 	default:
-		c.emit(bytecode.OpDefineMethod, c.nameIdx(key), 0)
 	}
 }
 
@@ -1101,24 +999,16 @@ func (c *compiler) emitClassMemberDefine(m ast.Property, key string) {
 // so it is built here rather than in the constructor.
 func (c *compiler) compilePrivateMethod(m ast.Property, fn *ast.FuncLit,
 	pn *ast.PrivateName, methodName, installName string) uint32 {
-	name, ref := c.privateName(pn, m.Start)
+	c.privateName(pn, m.Start)
 
 	// `super.x` in the method resolves against the prototype's prototype, so
 	// the prototype is its home object even though it is not defined there.
-	c.emit(bytecode.OpDup, 0, 0)
-	c.emit(bytecode.OpGetProp, c.nameIdx("prototype"), 0)
 	c.compileIdentRead(&ast.Ident{Name: installName, Start: int32(m.Start)})
 	k := c.compileMethodValue(fn, methodName)
-	c.emit(bytecode.OpSetHomeObject, 2, 0)
-	op := bytecode.OpAddPrivateMethod
 	switch m.Kind {
 	case ast.PropGet:
-		op = bytecode.OpAddPrivateGetter
 	case ast.PropSet:
-		op = bytecode.OpAddPrivateSetter
 	}
-	c.emit(op, name, ref)
-	c.emit(bytecode.OpDrop, 0, 0)
 	return k
 }
 
@@ -1134,8 +1024,6 @@ func (c *compiler) evalComputedFieldKeys(cls *ast.ClassLit, keyNames []string, s
 		slot := c.declare(keyNames[i], bindConst, f.Start)
 		slots[i] = int32(slot)
 		c.compileExpr(f.Key)
-		c.emit(bytecode.OpToPropertyKey, 0, 0)
-		c.emit(bytecode.OpSetLocal, slot, 0)
 		c.markInitialized(keyNames[i])
 	}
 }

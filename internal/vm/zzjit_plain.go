@@ -77,21 +77,9 @@ func (r *Runtime) jitGoCallPlain(ctx *abi.Context) bool {
 		if idx >= len(s.ssaCtxs) || s.ssaCtxs[idx] != ctx {
 			return false
 		}
-		if cl, rin, reg := r.jitRegPlainSet(ctx, idx); reg {
-			// Register code's: its set_prop's site and name, at its
-			// register pc, never the stack form's instruction there.
-			if cl == nil || !r.jitPlainWrite(cl, rin, jitGoArg(ctx, 0), jitGoArg(ctx, 1)) {
-				return false
-			}
-			v = Undefined
-			break
-		}
-		if ctx.Live != abi.LiveCall || jitGoInline(ctx) {
-			// A run's own frame, or an inlined callee's: none kept.
-			return false
-		}
-		cl, pc := (*closure)(ctx.Closure), int(ctx.ExitPC)
-		if cl == nil || !jitGoPropertyAt(cl.fn, pc, in) || !r.jitPlainWrite(cl, cl.fn.Code[pc], jitGoArg(ctx, 0), jitGoArg(ctx, 1)) {
+		// Register code's: its set_prop's site and name, at its register pc.
+		cl, rin, reg := r.jitRegPlainSet(ctx, idx)
+		if !reg || cl == nil || !r.jitPlainWrite(cl, rin, jitGoArg(ctx, 0), jitGoArg(ctx, 1)) {
 			return false
 		}
 		v = Undefined

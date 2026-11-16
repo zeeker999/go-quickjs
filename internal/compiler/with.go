@@ -26,7 +26,6 @@ func (c *compiler) compileWith(n *ast.WithStmt) {
 		return
 	}
 	c.compileExpr(n.Object)
-	c.emitAt(n.Start, bytecode.OpWithPush, 0, 0)
 	c.pushExit(exitWith)
 	c.withDepth++
 	c.withStatements++
@@ -41,7 +40,6 @@ func (c *compiler) compileWith(n *ast.WithStmt) {
 	c.withDepth--
 	c.withStatements--
 	c.popExit()
-	c.emit(bytecode.OpWithPop, 0, 0)
 }
 
 // withProbe emits the probe that precedes a name's static instruction, and
@@ -62,11 +60,11 @@ func (c *compiler) withProbe(op bytecode.Op, name string) int {
 	return c.emitProbe(op, name, limit, 0xFFFFFFFF)
 }
 
-// emitProbe emits the probe op of the innermost limit with objects for
-// name, with B b, and notes it for the register form (regWith).
+// emitProbe notes the probe op of the innermost limit with objects for
+// name, for the register form (regWith), and returns 0, a probe's handle.
 func (c *compiler) emitProbe(op bytecode.Op, name string, limit int, b uint32) int {
 	c.probe = regcomp.WithProbe{Op: op, Limit: uint16(limit)}
-	return c.emit(op, c.nameIdx(name)|uint32(limit)<<bytecode.WithLimitShift, b)
+	return 0
 }
 
 // withLimit is how many of the innermost `with` objects a reference to a name
@@ -114,7 +112,6 @@ func (c *compiler) checkGlobalRef(n *ast.Ident) bool {
 	if c.globalLex[n.Name] || c.isModuleLex(n.Name) || c.withLimit(n.Name) > 0 {
 		return false
 	}
-	c.emitAt(int(n.Start), bytecode.OpCheckGlobalRef, c.nameIdx(n.Name), 0)
 	return true
 }
 
@@ -123,7 +120,6 @@ func (c *compiler) patchWithProbe(pc int) {
 	if pc < 0 {
 		return
 	}
-	c.markTarget(len(c.fn.Code))
 	c.fn.Code[pc].B = uint32(len(c.fn.Code))
 }
 
@@ -140,11 +136,9 @@ func (c *compiler) patchWithProbe(pc int) {
 // reads that to decide where the write goes.
 func (c *compiler) beginWithRef(n *ast.Ident) {
 	limit := c.withLimit(n.Name)
-	c.emit(bytecode.OpPushUndef, 0, 0)
 	probe := c.emitProbe(bytecode.OpWithGetUnder, n.Name, limit, 0xFFFFFFFF)
 	c.regWith(n, probe)
 	c.compileIdentReadStatic(n)
-	c.patchWithProbe(probe)
 }
 
 // resolveWithRef settles a reference without reading it, which is what a plain
@@ -152,17 +146,13 @@ func (c *compiler) beginWithRef(n *ast.Ident) {
 // nothing is read from the binding it names.
 func (c *compiler) resolveWithRef(n *ast.Ident) {
 	limit := c.withLimit(n.Name)
-	c.emit(bytecode.OpPushUndef, 0, 0)
 	c.regWith(n, c.emitProbe(bytecode.OpWithResolve, n.Name, limit, 0))
 }
 
 // endWithRef writes the value on top back through the reference beginWithRef
 // resolved, leaving the value and removing the base.
 func (c *compiler) endWithRef(n *ast.Ident) {
-	probe := c.emit(bytecode.OpWithPutUnder, c.nameIdx(n.Name), 0xFFFFFFFF)
 	// The read came from a binding, so the base goes and the static store
 	// stands in for the write.
-	c.emit(bytecode.OpNipUnder, 1, 0)
 	c.assignToIdentStatic(n, false)
-	c.patchWithProbe(probe)
 }

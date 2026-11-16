@@ -149,6 +149,20 @@ func (t *regTables) konst(k uint32) string {
 	return fmt.Sprintf("k{%d %x %q %q}", c.Kind, c.Num, c.Str, c.Flags)
 }
 
+// siteAnon is a cache site as the order of its first use, of a site that
+// answers for no name: a literal's, an instanceof's.
+func (t *regTables) siteAnon(s uint32) string {
+	if s == 0 {
+		return "@-"
+	}
+	n, ok := t.sites[s]
+	if !ok {
+		n = len(t.sites) + 1
+		t.sites[s] = n
+	}
+	return fmt.Sprintf("@%d", n)
+}
+
 // site is a cache site as the order of its first use, and its name.
 func (t *regTables) site(s uint32) string {
 	if s == 0 {
@@ -330,12 +344,12 @@ func regInstr(t *regTables, fn *bytecode.Function, rc *bytecode.RegCode, pc int,
 	case bytecode.RTemplateObject:
 		// The function's Templates, which the walk numbers.
 	case bytecode.RGetProp, bytecode.RGetMethod, bytecode.RGetMethodW, bytecode.RSetProp,
-		bytecode.RNewObject, bytecode.RAddProp, bytecode.RAddPropI, bytecode.RNewArrayK:
+		bytecode.RAddProp, bytecode.RAddPropI:
 		op = fmt.Sprintf("%s a%d b%d x%d", w.Op(), a, b, w.X())
 		extra = append(extra, t.site(c))
-	case bytecode.RNewObjectLit:
+	case bytecode.RNewObject, bytecode.RNewObjectLit, bytecode.RNewArrayK:
 		op = fmt.Sprintf("%s a%d b%d x%d", w.Op(), a, b, w.X())
-		extra = append(extra, t.site(c))
+		extra = append(extra, t.siteAnon(c))
 	case bytecode.RCharCodeAt:
 		op = fmt.Sprintf("%s a%d b%d x%d", w.Op(), a, b, w.X())
 		extra = append(extra, t.site(c), auxPos(fn, rc, aux))
@@ -356,7 +370,7 @@ func regInstr(t *regTables, fn *bytecode.Function, rc *bytecode.RegCode, pc int,
 		extra = append(extra, t.site(aux>>16), t.name(aux&0xffff))
 		auxRaw = false
 	case bytecode.RInstanceOf:
-		extra = append(extra, t.site(aux))
+		extra = append(extra, t.siteAnon(aux))
 		auxRaw = false
 	case bytecode.RLit:
 		op = fmt.Sprintf("%s a%d b%d x%d", w.Op(), a, b, w.X())

@@ -1774,7 +1774,11 @@ const (
 // of 4,080 instructions at the default budget, and of 1,000 slots one of
 // 1,000.
 func jitCompileBytes(fn *bytecode.Function) int64 {
-	return int64(len(fn.Code))*jitCompileInstrBytes + int64(fn.LocalCount+fn.MaxStack+len(fn.Upvalues))*jitCompileSlotBytes + 32<<10
+	rc := fn.RegCompiled()
+	if rc == nil {
+		return 32 << 10
+	}
+	return int64(len(rc.Code))*jitCompileInstrBytes + int64(rc.NumRegs+len(fn.Upvalues))*jitCompileSlotBytes + 32<<10
 }
 
 // jitState is the runtime's JIT state, made at its first use.

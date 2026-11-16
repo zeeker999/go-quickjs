@@ -67,9 +67,7 @@ func (c *compiler) debugMark(pos int, debugger uint32) {
 	c.fn.Debug.Statements = append(c.fn.Debug.Statements, bytecode.Statement{
 		PC: uint32(len(c.fn.Code)), Pos: int32(pos), Scope: c.debugScope(),
 	})
-	c.recordLine(pos)
 	c.reg.NoteDebug(int32(pos), uint32(len(c.fn.Debug.Statements)-1), debugger != 0)
-	c.emit(bytecode.OpDebugStmt, uint32(len(c.fn.Debug.Statements)-1), debugger)
 }
 
 // debugScope records what is in scope at the current position, and returns

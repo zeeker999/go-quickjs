@@ -591,7 +591,11 @@ func (s *jitState) jitRegRoomAhead(cl *closure, life *jitEntry, old *jitRegEntry
 		s.regAccount(life)
 	}
 	if old == nil {
-		return s.makeRoom(len(cl.fn.Code) * s.perInstr)
+		n := 0
+		if c := cl.reg; c != nil {
+			n = len(c.rc.Code)
+		}
+		return s.makeRoom(n * s.perInstr)
 	}
 	if life.reoptRoom == 0 {
 		return true
@@ -701,7 +705,7 @@ func (r *Runtime) jitRegPlace(e *jitRegEntry, c *regCode, rf *jitRegFeedback, f 
 	s.callRefs = max(s.callRefs, uint64(code.CallRefs()))
 	// What the entry and its program hold, by the function's instructions:
 	// the room the next compile asks for first.
-	s.learn(len(c.fn.Code), need+p.Footprint())
+	s.learn(len(c.rc.Code), need+p.Footprint())
 	e.targets = jitTargetsOf(e.life)
 	e.scratch = f.Scratch
 	e.keeps = f.Keeps

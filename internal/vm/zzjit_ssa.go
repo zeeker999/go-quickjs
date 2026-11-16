@@ -2196,24 +2196,6 @@ func (r *Runtime) jitGoCall(ctx *abi.Context) bool {
 	return false
 }
 
-// jitGoPropertyAt reports whether a call of Go, in, may be made at pc of
-// fn: a property's read or write only where fn's instruction there is one
-// (jitRegPropertyMade), which reads it; any other call anywhere.
-func jitGoPropertyAt(fn *bytecode.Function, pc int, in bytecode.Instr) bool {
-	switch in.Op {
-	case bytecode.OpSetProp:
-		return pc < len(fn.Code) && fn.Code[pc].Op == bytecode.OpSetProp
-	case bytecode.OpGetProp:
-		return pc < len(fn.Code) && (fn.Code[pc].Op == bytecode.OpGetProp || fn.Code[pc].Op == bytecode.OpGetPropThis || fn.Code[pc].Op == bytecode.OpGetPropUnder)
-	}
-	if jitcompile.GoOperation(in.Op) {
-		// An operation Go makes (abi.GoCallOp), as the instruction there
-		// says.
-		return pc < len(fn.Code) && fn.Code[pc].Op == in.Op
-	}
-	return true
-}
-
 // jitCalleeFrame is a frame for the native callee running in ctx, which
 // has none of the VM's, to make a closure on or close what closures
 // captured (ssa.GoClosure, GoClose): its closure, its locals where its
@@ -2914,7 +2896,7 @@ func jitGoCallInstr(op uint64) (bytecode.Instr, int) {
 		return bytecode.Instr{Op: bytecode.OpApplyArguments}, 3
 	case abi.GoCallOp:
 		// An operation's opcode and its A, of its operands: the
-		// instruction at the call's PC (jitGoPropertyAt).
+		// instruction at the call's PC.
 		return bytecode.Instr{Op: bytecode.Op(op >> abi.GoOpIndexShift), A: uint32(op >> (abi.GoOpIndexShift + 8))}, int(argc)
 	}
 	return in, n

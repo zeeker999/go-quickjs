@@ -50,26 +50,17 @@ func (c *compiler) compileTailExpr(e ast.Expr) {
 		c.compileExpr(e)
 		c.tailCall = saved
 	case *ast.Conditional:
-		elseJumps := c.emitTestJumpIfFalse(n.Test)
+		c.compileTest(n.Test)
 		c.compileTailExpr(n.Cons)
-		endJump := c.emitJump(bytecode.OpJump)
-		c.patchTestJumps(elseJumps)
-		c.stackDepth--
 		c.compileTailExpr(n.Alt)
-		c.patchJump(endJump)
 	case *ast.Logical:
 		c.compileExpr(n.Left)
-		var jump int
 		switch n.Op {
 		case "&&":
-			jump = c.emitJump(bytecode.OpJumpIfFalseKeep)
 		case "||":
-			jump = c.emitJump(bytecode.OpJumpIfTrueKeep)
 		default: // "??"
-			jump = c.emitJump(bytecode.OpJumpIfNotNullish)
 		}
 		c.compileTailExpr(n.Right)
-		c.patchJump(jump)
 	case *ast.Sequence:
 		for i, x := range n.Exprs {
 			if i < len(n.Exprs)-1 {

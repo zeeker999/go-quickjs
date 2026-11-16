@@ -194,7 +194,7 @@ func (l *localVar) lexical() bool {
 	return false
 }
 
-// loopCtx tracks the jumps a break or continue must patch.
+// loopCtx is a statement a break or a continue may target.
 type loopCtx struct {
 	// labels name the statement, none for an unlabelled loop: `a: b:
 	// while (...)` is the target of a break or a continue naming either.
@@ -206,10 +206,6 @@ type loopCtx struct {
 	// if, a switch's label -- which only a break naming it may target: a
 	// break without a label goes to the innermost loop or switch, past it.
 	labelOnly bool
-	// breaks and continues hold the program counters of jumps awaiting a
-	// target, since the target is not known until the loop is fully compiled.
-	breaks    []int
-	continues []int
 	// scopeDepth is the depth to unwind to when the jump is taken.
 	scopeDepth int
 	// firstSlot is the first slot of the bindings the statement declares:
@@ -526,8 +522,6 @@ func Compile(prog *ast.Program, opts Options) (fn *bytecode.Function, err error)
 	// produces no value.
 	c.completionSlot = int32(c.nextSlot)
 	c.nextSlot++
-	c.emit(bytecode.OpPushUndef, 0, 0)
-	c.emit(bytecode.OpSetLocal, uint32(c.completionSlot), 0)
 	// A script's code as register code too (regcomp.CompileTop).
 	c.reg = regcomp.NewRecord(prog.Idents)
 	c.reg.Completion = c.completionSlot
@@ -547,8 +541,6 @@ func Compile(prog *ast.Program, opts Options) (fn *bytecode.Function, err error)
 	c.hoistGlobals(prog.Body)
 	c.compileStatements(prog.Body)
 
-	c.emit(bytecode.OpGetLocal, uint32(c.completionSlot), 0)
-	c.emit(bytecode.OpReturn, 0, 0)
 	c.finish()
 	rec := c.reg
 	fn = c.done()
@@ -960,179 +952,6 @@ func exact[T any](s []T) []T {
 	return append(make([]T, 0, len(s)), s...)
 }
 
-// isTarget reports whether something jumps to pc.
-func (c *compiler) isTarget(pc int) bool {
-	return pc < len(c.targets) && c.targets[pc]
-}
-
-// ---------------------------------------------------------------------------
-// Emitting
-// ---------------------------------------------------------------------------
-
-// emit appends an instruction and returns its program counter.
-func (c *compiler) emit(op bytecode.Op, a, b uint32) int {
-	if op == bytecode.OpGetLocal && c.lazyArguments && a == c.lazyArgumentsSlot {
-		// Every read of an arguments object made on demand makes it, but for
-		// the one a call of apply fuses with.
-		op = bytecode.OpLazyArguments
-	}
-	if fused, ok := c.fuse(op, a); ok {
-		c.adjustStack(op, a, b)
-		return fused
-	}
-	c.fn.Code = append(c.fn.Code, bytecode.Instr{Op: op, A: a, B: b})
-	c.adjustStack(op, a, b)
-	return len(c.fn.Code) - 1
-}
-
-// fuse makes the instruction about to be emitted part of the last one, where
-// the two are a pair a single instruction does, and reports whether it did.
-// The instruction each pair dispatches is the one a program runs most:
-// fewer of them is less of the loop's own cost.
-//
-// The position the second would have had must be one nothing jumps to. A
-// source position recorded for it is left where it is, for the instruction
-// emitted next, when the second cannot throw -- nothing would ever report
-// it -- and moved onto the pair when it can.
-func (c *compiler) fuse(op bytecode.Op, a uint32) (int, bool) {
-	n := len(c.fn.Code)
-	if n == 0 || c.isTarget(n) {
-		return 0, false
-	}
-	last := &c.fn.Code[n-1]
-	if immediateOp(op) && last.Op == bytecode.OpPushConst {
-		// A negative int32 literal, which compileUnary folds into a
-		// constant, taken by an operator as an immediate as a positive one
-		// is: sp + -8, x & -4. Elsewhere -1 stays the constant it was.
-		if k := c.fn.Constants[last.A]; k.Kind == bytecode.ConstNumber {
-			if i := int32(k.Num); float64(i) == k.Num && !isNegZero(k.Num) {
-				last.Op, last.A = bytecode.OpPushInt, uint32(i)
-			}
-		}
-	}
-	switch {
-	case op == bytecode.OpGetLocal && last.Op == bytecode.OpGetLocal:
-		last.Op, last.B = bytecode.OpGetLocal2, a
-	case op == bytecode.OpGetLocal && last.Op == bytecode.OpSetLocal:
-		last.Op, last.B = bytecode.OpSetLocalGet, a
-	case op == bytecode.OpSetLocal && last.Op == bytecode.OpPushUndef:
-		last.Op, last.A = bytecode.OpClearLocal, a
-	case immediateOp(op) && last.Op == bytecode.OpPushInt && n >= 2 && !c.isTarget(n-1) &&
-		c.fn.Code[n-2].Op == bytecode.OpGetLocal && c.fn.Code[n-2].A < 1<<24:
-		// A local, an integer and the operator: `x & 0xff`.
-		first := &c.fn.Code[n-2]
-		first.Op, first.A, first.B = bytecode.OpLocalBinImm, first.A|uint32(op)<<24, last.A
-		c.fn.Code = c.fn.Code[:n-1]
-		c.collapsePositions(n - 2)
-		return n - 2, true
-	case immediateOp(op) && last.Op == bytecode.OpPushInt:
-		last.Op, last.B = bytecode.OpBinImm, uint32(op)
-		c.movePosition(n)
-	case (op == bytecode.OpAdd || op == bytecode.OpSub || op == bytecode.OpMul) && last.Op == bytecode.OpGetLocal:
-		last.Op, last.B = bytecode.OpBinLocal, uint32(op)
-		c.movePosition(n)
-	case op == bytecode.OpGetIndex && last.Op == bytecode.OpGetLocal2:
-		last.Op = bytecode.OpGetLocalIndex
-		c.movePosition(n)
-	case op == bytecode.OpInitLocal && last.Op == bytecode.OpSetLocal && last.A == a && n >= 2 &&
-		c.fn.Code[n-2].Op == bytecode.OpPushUninitialized && !c.isTarget(n-1):
-		// A binding marked uninitialized and initialized straight after, as
-		// a for-of's is each iteration: nothing can see the mark.
-		first := &c.fn.Code[n-2]
-		first.Op, first.A = bytecode.OpInitLocal, a
-		c.fn.Code = c.fn.Code[:n-1]
-		c.collapsePositions(n - 2)
-		return n - 2, true
-	case op == bytecode.OpCallMethod && a == 2 && last.Op == bytecode.OpLazyArguments:
-		// f.apply(x, arguments), with the arguments object never made.
-		last.Op = bytecode.OpApplyArguments
-		c.movePosition(n)
-	case op == bytecode.OpGetIndex && last.Op == bytecode.OpUpdateLocal && n >= 2 &&
-		c.fn.Code[n-2].Op == bytecode.OpGetLocal && !c.isTarget(n-1) && !c.hasPosition(n) &&
-		last.A < 1<<29:
-		// The update and the read can both throw, and report the same
-		// position, the update's; the read of the object before them cannot.
-		// So the three are one where nothing jumps between them, with the
-		// update's position.
-		first := &c.fn.Code[n-2]
-		first.Op, first.B = bytecode.OpGetLocalIndexUpdate, last.A<<2|last.B
-		c.fn.Code = c.fn.Code[:n-1]
-		c.movePosition(n - 1)
-		return n - 2, true
-	default:
-		return 0, false
-	}
-	return n - 1, true
-}
-
-// collapsePositions gives the instruction at n every source position recorded
-// past it, which instructions fused into it had: the last of them, which is
-// the one that can throw, is the one it keeps.
-func (c *compiler) collapsePositions(n int) {
-	for i := len(c.fn.Lines) - 1; i >= 0 && c.fn.Lines[i].PC > uint32(n); i-- {
-		c.fn.Lines[i].PC = uint32(n)
-	}
-}
-
-// hasPosition reports whether a source position has been recorded for the
-// instruction at n.
-func (c *compiler) hasPosition(n int) bool {
-	l := len(c.fn.Lines)
-	return l > 0 && c.fn.Lines[l-1].PC == uint32(n)
-}
-
-// movePosition gives the instruction before n the source position recorded
-// for n, which a pair fused from the two needs when it is the second of them
-// that can throw.
-func (c *compiler) movePosition(n int) {
-	if l := len(c.fn.Lines); l > 0 && c.fn.Lines[l-1].PC == uint32(n) {
-		c.fn.Lines[l-1].PC = uint32(n - 1)
-	}
-}
-
-// immediateOp reports whether a binary operator has a form taking its right
-// operand as an immediate, OpBinImm.
-func immediateOp(op bytecode.Op) bool {
-	switch op {
-	case bytecode.OpAdd, bytecode.OpSub, bytecode.OpMul, bytecode.OpBitAnd, bytecode.OpBitOr,
-		bytecode.OpBitXor, bytecode.OpShl, bytecode.OpShr, bytecode.OpUShr:
-		return true
-	}
-	return false
-}
-
-// emitAt emits an instruction and records its source line.
-func (c *compiler) emitAt(pos int, op bytecode.Op, a, b uint32) int {
-	c.recordLine(pos)
-	return c.emit(op, a, b)
-}
-
-// recordLine attributes the next instruction emitted to a source position.
-func (c *compiler) recordLine(pos int) {
-	if !c.script.HasText() {
-		return
-	}
-	if p := int32(pos); p != c.lastPos {
-		c.fn.Lines = append(c.fn.Lines, bytecode.SourceLoc{
-			PC: uint32(len(c.fn.Code)), Pos: p,
-		})
-		c.lastPos = p
-	}
-}
-
-// adjustStack tracks the operand stack depth so the frame can be sized.
-func (c *compiler) adjustStack(op bytecode.Op, a, b uint32) {
-	c.stackDepth += stackEffect(op, a, b)
-	if c.stackDepth > c.maxStack {
-		c.maxStack = c.stackDepth
-	}
-	if c.stackDepth < 0 {
-		// A negative depth means the compiler emitted an unbalanced sequence,
-		// which is a bug here rather than in the input.
-		c.stackDepth = 0
-	}
-}
-
 // maxCompileDepth bounds recursion over the syntax tree. A goroutine stack
 // overflow cannot be caught, so deeply nested input is rejected instead.
 const maxCompileDepth = 1000
@@ -1146,48 +965,6 @@ func (c *compiler) enter(pos int) {
 }
 
 func (c *compiler) leave() { c.recursionDepth-- }
-
-// emitJump emits a jump with a placeholder target and returns its program
-// counter so that patchJump can fill it in.
-func (c *compiler) emitJump(op bytecode.Op) int {
-	return c.emit(op, 0xFFFFFFFF, 0)
-}
-
-// emitJumpB is emitJump for an instruction that carries a second operand.
-func (c *compiler) emitJumpB(op bytecode.Op, b uint32) int {
-	return c.emit(op, 0xFFFFFFFF, b)
-}
-
-// patchJump points a previously emitted jump at the current position.
-func (c *compiler) patchJump(pc int) {
-	c.markTarget(len(c.fn.Code))
-	c.fn.Code[pc].A = uint32(len(c.fn.Code))
-}
-
-// patchJumpTo points a jump at a specific position.
-func (c *compiler) patchJumpTo(pc, target int) {
-	c.markTarget(target)
-	c.fn.Code[pc].A = uint32(target)
-}
-
-// here returns the current program counter, for backward jumps.
-func (c *compiler) here() int {
-	c.markTarget(len(c.fn.Code))
-	return len(c.fn.Code)
-}
-
-// markTarget records that something jumps to a position.
-//
-// What this is for is deciding whether the last instruction emitted is the end
-// of one path or the meeting point of several, which is what says whether it
-// may be rewritten -- see compileExprForEffect. Marking a position that nothing
-// actually jumps to only gives up a rewrite, so the callers mark freely.
-func (c *compiler) markTarget(pc int) {
-	for len(c.targets) <= pc {
-		c.targets = append(c.targets, false)
-	}
-	c.targets[pc] = true
-}
 
 // errorf reports a compile error.
 func (c *compiler) errorf(pos int, format string, args ...any) {
@@ -1259,7 +1036,6 @@ func (c *compiler) endScope() {
 		i--
 	}
 	if needsClose {
-		c.emit(bytecode.OpCloseUpvalues, c.locals[i].slot, 0)
 	}
 	// What the interpreter needs to know about a binding is recorded before it
 	// goes out of scope, since the slot outlives the scope and an instruction
@@ -1574,13 +1350,10 @@ func (c *compiler) checkGlobalLexicals(body []ast.Stmt) {
 				names = appendPatternNames(names, d.Target)
 			}
 			for _, name := range names {
-				c.emitAt(n.Start, bytecode.OpCheckGlobalLex, c.nameIdx(name), 0)
 				c.regTop(bytecode.OpCheckGlobalLex, name, 0, nil, n.Start)
 			}
 		case *ast.ClassDecl:
 			if n.Class.Name != nil {
-				c.emitAt(n.Start, bytecode.OpCheckGlobalLex,
-					c.nameIdx(n.Class.Name.Name), 0)
 				c.regTop(bytecode.OpCheckGlobalLex, n.Class.Name.Name, 0, nil, n.Start)
 			}
 		}
@@ -1597,7 +1370,6 @@ func (c *compiler) checkGlobalVars(body []ast.Stmt) {
 	for _, s := range body {
 		if _, name, ok := hoistableFunction(s); ok {
 			funcs[name] = true
-			c.emit(bytecode.OpCheckGlobalVar, c.nameIdx(name), 1)
 			c.regTop(bytecode.OpCheckGlobalVar, name, 1, nil, s.Pos())
 		}
 	}
@@ -1605,7 +1377,6 @@ func (c *compiler) checkGlobalVars(body []ast.Stmt) {
 		if funcs[n] {
 			continue
 		}
-		c.emit(bytecode.OpCheckGlobalVar, c.nameIdx(n), 0)
 		c.regTop(bytecode.OpCheckGlobalVar, n, 0, nil, -1)
 	}
 }
@@ -1674,7 +1445,6 @@ func (c *compiler) hoistGlobals(body []ast.Stmt) {
 		}
 		// A var declared by eval is configurable, unlike one a script declares,
 		// because the evaluated code could have declared it anywhere.
-		c.emit(bytecode.OpDefineGlobalVar, c.nameIdx(n), boolBit(c.opts.EvalConfigurable))
 		c.regTop(bytecode.OpDefineGlobalVar, n, boolBit(c.opts.EvalConfigurable), nil, -1)
 	}
 }

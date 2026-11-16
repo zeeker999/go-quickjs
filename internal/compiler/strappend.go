@@ -102,7 +102,6 @@ func (c *compiler) compiledRead(l *localVar, n *ast.Ident) {
 	l.read = true
 	if l.appended {
 		c.reg.NoteFreeze(n)
-		c.emit(bytecode.OpArgumentsIndex, bytecode.StrFreezeA, 0)
 	}
 }
 
@@ -242,14 +241,10 @@ func (c *compiler) compileLocalAppend(n *ast.Assign) {
 	c.reg.NoteRead(n.Target.(*ast.Ident), regcomp.Res{Kind: regcomp.ResLocal, Index: l.slot})
 	c.noteWrite(n.Target.(*ast.Ident), regcomp.Res{Kind: regcomp.ResLocal, Index: l.slot})
 	c.reg.NoteAppend(n)
-	c.emit(bytecode.OpGetLocal, l.slot, 0)
 	c.compileExpr(n.Value)
 	// Not by emit, which would fuse it with a local or a constant before it,
 	// into an instruction with no room for the mark.
-	c.recordLine(int(n.Start))
 	c.fn.Code = append(c.fn.Code, bytecode.Instr{Op: bytecode.OpAdd, B: bytecode.AddOwned})
-	c.adjustStack(bytecode.OpAdd, 0, bytecode.AddOwned)
-	c.emit(bytecode.OpSetLocal, l.slot, 0)
 }
 
 // compileOwnedAppend compiles an addition ownedAppend took.
@@ -258,8 +253,5 @@ func (c *compiler) compileOwnedAppend(n *ast.Assign) {
 	c.reg.NoteRead(n.Target.(*ast.Ident), regcomp.Res{Kind: regcomp.ResUpval, Index: idx})
 	c.noteWrite(n.Target.(*ast.Ident), regcomp.Res{Kind: regcomp.ResUpval, Index: idx})
 	c.reg.NoteAppend(n)
-	c.emit(bytecode.OpGetUpvalue, idx, 0)
 	c.compileExpr(n.Value)
-	c.emitAt(int(n.Start), compoundOpcode(n.Op), 0, 0)
-	c.emit(bytecode.OpSetUpvalue, idx, 1)
 }
