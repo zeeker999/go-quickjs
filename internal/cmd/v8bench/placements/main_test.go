@@ -40,9 +40,9 @@ func TestPadFunctionsOccupy32Bytes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// The closures' pad's functions are its init's closures,
-			// main.init.N.funcM, numbered from 1 as assigned.
-			closures := regexp.MustCompile(`^main\.init\.\d+\.func(\d+)$`)
+			// The closures' pad's functions are its array's literals,
+			// main.init.funcM, numbered from 1 in order.
+			closures := regexp.MustCompile(`^main\.init\.func(\d+)$`)
 			found := 0
 			var addresses [nPads][4]uint64
 			for _, line := range strings.Split(string(output), "\n") {

@@ -28,8 +28,8 @@
 // native dispatcher's Go side; and the last the assembly after the
 // closures -- the JIT's leaf stubs and the native dispatcher's entry, its
 // exit's call of Go and its handlers, regNativeHandlers. The assembly is
-// laid out after the package's closures, so its pad is closures, assigned
-// in the last file's init, which are laid out after every other closure.
+// laid out after the package's closures, so its pad is closures, function
+// literals of the last file's, laid out after every other closure.
 // regRunFD and regCallSlow (zzreg_call.go) move with jitLeafGo's pad.
 //
 // A pad moves what follows it by exactly 32*m bytes. For each placement a
@@ -418,8 +418,8 @@ func targetAddrs(nm []byte) ([nPads]uint64, error) {
 // padFile is pad p with m functions. The first holds the one init, which
 // keeps every pad's functions reachable, and the data's pad: it is before
 // the first target, where its size is the same in every placement. The
-// closures' pad (closurePad) is m closures assigned in its own init, laid
-// out after every other closure of the package and before its assembly.
+// closures' pad (closurePad) is m function literals, closures laid out
+// after every other closure of the package and before its assembly.
 func padFile(p, m, data int) []byte {
 	var b strings.Builder
 	b.WriteString("package vm\n\n")
@@ -438,14 +438,16 @@ func padFile(p, m, data int) []byte {
 			strings.Join(all, ", "))
 	}
 	if p == closurePad {
-		// An array of padSlots whatever m is, as below, its closures
-		// assigned in init, which runs after the first pad's: what keeps
-		// them is the array, which that init reads.
-		fmt.Fprintf(&b, "var padFuncs%d [%d]func() int\n\nfunc init() {\n", p, padSlots)
+		// Function literals in the array's initializer, as below an array
+		// of padSlots whatever m is: data, which no init's code makes,
+		// so that what grows with m is the closures alone, laid out
+		// after every other closure. Assigned in an init, the init had
+		// grown with them, and moved the assembly by more than 32*m.
+		lits := make([]string, m)
 		for i := range m {
-			fmt.Fprintf(&b, "\tpadFuncs%d[%d] = func() int { return padSink*3 + %d }\n", p, i, i+1)
+			lits[i] = fmt.Sprintf("func() int { return padSink*3 + %d }", i+1)
 		}
-		b.WriteString("}\n")
+		fmt.Fprintf(&b, "var padFuncs%d = [%d]func() int{%s}\n", p, padSlots, strings.Join(lits, ", "))
 		return []byte(b.String())
 	}
 	names := make([]string, m)

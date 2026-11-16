@@ -3,16 +3,15 @@
 go-quickjs runs JavaScript as register code: each function is compiled from
 its syntax tree to instructions that name registers as their operands, as
 V8's Ignition and Lua's VM do, and run by an interpreter whose handlers are
-machine code generated for each architecture. The same instructions are what
-the JIT compiles, on the same frames. This document is the tier's design: how
-it works, why it was built this way, and the evidence for each choice where
-it was measured.
+machine code generated for amd64 and arm64, and Go functions elsewhere. The
+same instructions are what the JIT compiles, on the same frames. This
+document is the tier's design: how it works, why it was built this way, and
+the evidence for each choice where it was measured.
 
-The interpreter replaced two tiers: a stack-bytecode interpreter after
-QuickJS's (`executeAt`) and a tier that ran most functions as trees of Go
-closures built from that bytecode (the tree tier, `runTree`). Both remain in
-the source until the last of their users move over (see
-[Where it runs](#where-it-runs)), and are not described here.
+The interpreter replaced two tiers, a stack-bytecode interpreter after
+QuickJS's and a tier that ran most functions as trees of Go closures built
+from that bytecode, which [Why a register machine](#why-a-register-machine)
+measures it against. Nothing runs them now.
 
 ## Contents
 
@@ -38,34 +37,29 @@ the source until the last of their users move over (see
 
 ## Where it runs
 
-- **amd64 and arm64, without the JIT.** The default. Every function is
-  compiled to register code and run by the native handlers
-  (`internal/vm/zzzyn_native_*`); nothing falls back to the old tiers.
-- **Other architectures.** The old tiers by default. Register code runs
-  there on the Go handler table (`zzreg_table*.go`), which is the portable
-  form of the same interpreter but slower than the tiers it would replace;
-  an architecture moves over when its native handlers land. The default is
-  one constant an architecture, `regArch` in
-  `internal/bytecode/regdefault_*.go`, read through `bytecode.RegDefault`.
-- **A runtime with the JIT.** The old tiers by default, with the JIT
-  compiling their stack bytecode; its host compiles code with no register
-  form (`compiler.Options.NoRegister`), and a `Program` keeps a form for
-  each kind of runtime. With `QJS_JITREG` set (or `vm.SetJITRegTier`),
-  such a runtime runs register code and the JIT compiles that instead
-  (internal/jit/README.md). The switch-over makes this the default, once
-  the register path's native code is at least as fast as the stack path's
-  on every suite.
+Every function of every runtime is compiled to register code and run by
+the register interpreter; there is no other tier to fall back to, and a
+function with no register code is an internal error.
 
-The switches: `QJS_REG=0` runs the old tiers everywhere and `QJS_REG=1`
-the register interpreter everywhere (how an architecture without native
-handlers is tested); `QJS_NONATIVE=1` runs register code on the Go table on
-amd64 and arm64 too, to compare the two and as an escape hatch; `QJS_JITREG`
-as above. `QJS_REG=0` and the old tiers go when the JIT's register path is
-the default. [Tools and switches](#tools-and-switches) lists the rest.
+- **amd64 and arm64.** The native handlers run it
+  (`internal/vm/zzzyn_native_*`).
+- **Other architectures.** The Go handler table runs it
+  (`zzreg_table*.go`), the portable form of the same interpreter, slower
+  than the native handlers; an architecture that needs the speed gets
+  native handlers of its own.
+- **A runtime with the JIT.** The same, and the JIT compiles the hot
+  functions' register code (internal/jit/README.md).
 
-The front end is shared until then: the stack compiler still compiles every
-function, and the register backend reads what it records (see
-[The compiler](#the-compiler)), its positions included.
+`QJS_NONATIVE=1` runs register code on the Go table on amd64 and arm64
+too, to compare the two and as an escape hatch. [Tools and
+switches](#tools-and-switches) lists the rest.
+
+The front end still compiles every function to stack bytecode first, and
+the register backend reads it and what the front end records as its input
+(see [The compiler](#the-compiler)): positions, cache sites, facts about
+the function and which functions are leaves. Nothing interprets it but
+the evaluators of leaf functions (`pureCall`, `leafCall`), and `Program`
+keeps one compiled form for standard mode and one for `WithNodeQuirks`.
 
 ## Why a register machine
 
@@ -184,8 +178,8 @@ At `a151c7c9`, against main's old tiers at `440db6bd`, over four
 placements: the micro-benchmarks' geometric mean was 0.82 with the native
 handlers (44 tests still slower at every placement) and 0.995 on the Go
 table (99 slower), and the V8 suite, Octane and Are We Fast Yet level or
-faster. That is why the default is per architecture: the native handlers
-make the tier pay, and the Go table alone does not.
+faster. The native handlers made the tier pay, and the Go table alone did
+not.
 
 ## Instructions
 
@@ -801,7 +795,7 @@ skipped another's check.
 (`regCallNative`), called with the window's arguments as its slice, without
 a copy. A built-in calling a callback enters the register code directly
 (`regDirect`): its arguments copied into a window at the top of the stack,
-no tree, no `defer`, no `recover`. A callback a built-in calls many times
+no `defer`, no `recover`. A callback a built-in calls many times
 -- a sort's comparator, the callbacks of forEach, map, filter, some, every,
 find, reduce and the typed arrays' -- is kept ready from one call to the
 next (`regCallback`): its window reserved once, and natively its code
@@ -924,8 +918,8 @@ resumptions share a binding.
   steps is stepped directly, with no result object at any level of a chain
   of delegations.
 - **The drivers** -- next, return and throw, an async function's steps, an
-  async generator's queue -- are shared with the old tiers and hand a
-  register generator's resumption to `regGenResume`. A call site of a
+  async generator's queue -- hand a generator's resumption to
+  `regGenResume`. A call site of a
   generator function or an async function makes its object without the
   generic call's search (`regGenCall`).
 - **Natively**, a for-of step over a generator of the realm suspended at a
@@ -1072,8 +1066,8 @@ the stack code.
 
 ## Tiering to the JIT
 
-With the JIT on and register code running (`QJS_JITREG`), the JIT compiles
-register code; internal/jit/README.md is its design. What the interpreter
+With the JIT on, the JIT compiles register code; internal/jit/README.md is
+its design. What the interpreter
 gives it:
 
 - **Input.** `compile.LowerReg` (internal/jit/compile/lowerreg.go) lowers a
@@ -1126,9 +1120,9 @@ what changes moves as little as possible, and the layout lock holds the
 rest.
 
 - **The files sort late.** The register interpreter's Go code is in
-  `zzreg_*.go` and `zzzy*_*.go`, after the old tiers' files and the JIT's
+  `zzreg_*.go` and `zzzy*_*.go`, after the built-ins' files and the JIT's
   (`zzjit_*.go`): functions are laid out in file-name order, so nothing
-  added there moves the old tiers' hot functions.
+  added there moves the functions before them.
 - **No case lock.** `runReg` is a fixed loop with no cases, so there is no
   golden file of case offsets and no lever inside it, as the switch it
   replaced needed; an operation added changes no instruction of it.
@@ -1160,9 +1154,12 @@ rest.
 
 After any change to package vm, `go generate ./internal/vm` regenerates the
 native handlers and then the pads; `TestLayoutLock` fails until it has run.
-`hotdiff -funcs` compares chosen functions, `runReg` and `rhCallW` among
-them, instruction by instruction between two builds; the native handlers
-are pinned by their generated files' staleness tests.
+`hotdiff` compares the interpreter's hot functions instruction by
+instruction between two builds: `runReg`, the calls (`rhCallW`,
+`regEnterW`, `regCallSlow`, `regRunFD`, `callObject`), the native
+dispatcher's Go side (`nativeRun`, `nativeLoop`) and its assembly, the
+handler blocks included; the native handlers are also pinned by their
+generated files' staleness tests.
 
 ## Correctness
 
@@ -1170,17 +1167,15 @@ are pinned by their generated files' staleness tests.
   function as it is compiled ([The verifier](#the-verifier)).
 - **Differential tests.** `internal/regdiff` runs programs -- cases of its
   own for each mechanism and the edges of each fused instruction, the
-  micro-benchmarks and the V8 suite -- with the register tier off and on,
-  and compares every answer, stack trace and error position
-  (`TestRegDiff*`). `TestRegNativeCaches` runs the corpus natively and on
-  the Go table and compares the caches the JIT reads (`RegCacheDigest`):
-  the native fast paths and the Go handlers must fill them alike. With the
-  JIT, `TestRegLowerEvaluate` lowers each function's register code and
-  runs it by the IR's evaluator against the interpreter;
-  `TestJITFeedbackParity` asks the register form's feedback and the stack
-  form's every question the JIT's builder asks over the corpora, and lists
-  where they differ; `TestJITRefusals` counts why the JIT would not compile
-  each function, a list that only shrinks.
+  micro-benchmarks and the V8 suite -- and compares every answer, stack
+  trace and error position with golden answers the stack interpreter and
+  the tree tier gave before they were removed
+  (`testdata/golden.json`, `TestRegDiff*`). `TestRegNativeCaches` runs the
+  corpus natively and on the Go table and compares the caches the JIT reads
+  (`RegCacheDigest`): the native fast paths and the Go handlers must fill
+  them alike. With the JIT, `TestRegLowerEvaluate` lowers each function's
+  register code and runs it by the IR's evaluator against the
+  interpreter.
 - **Native against Go.** The native kernel, fast-path and call tests run
   each case natively and by the Go table, with the write-barrier flag set
   and clear, and compare answers and exit counts.
@@ -1188,12 +1183,8 @@ are pinned by their generated files' staleness tests.
   must do exactly what other code does, which test262 checks with every
   runtime made `WithDebugger` (`-conformance.debugger`).
 - **test262** passes what the default build passes in every mode: plain,
-  with the JIT (`-conformance.jit`, under `QJS_JITREG` too and under
-  `QJS_JIT_STRESS`), with the debugger, on the Go table (`QJS_NONATIVE=1`),
-  and with `QJS_REG=1` on an architecture without native handlers. Where
-  the register interpreter is on, the runner fails on any function that
-  falls back to the old tiers (`vm.RegFallbacks`, named by
-  `QJS_REGFALLTRACE`).
+  with the JIT (`-conformance.jit`, and under `QJS_JIT_STRESS`), with the
+  debugger, and on the Go table (`QJS_NONATIVE=1`).
 - **compilediff** compares register code between two revisions of the
   backend, every field of each function's `RegCode`, or the refusal or
   panic that left it none, compiled as its first call would.
@@ -1203,44 +1194,34 @@ are pinned by their generated files' staleness tests.
 
 | | |
 |---|---|
-| `QJS_REG=0` / `=1` | the old tiers everywhere / the register interpreter everywhere |
 | `QJS_NONATIVE=1` | register code on the Go table on amd64 and arm64 |
-| `QJS_JITREG=1` | a runtime with the JIT runs register code and the JIT compiles it |
-| `QJS_REGFALLTRACE` | name each function that falls back to the old tiers |
-| `QJS_REGREPORT` | at a runtime's close, the crossings between register code and the old tiers, and why the backend left each function |
+| `QJS_REGREPORT` | at a runtime's close, the calls into and out of register code, by kind and by callee |
 | `QJS_REGTRACE` | print why a function has no register code |
 | `QJS_REGDUMP` | print each function's register code as it is made |
-| `disasm -reg` | each function's register code beside its stack code |
+| `disasm` | each function's register code; `-stack` adds the front end's stack form, `-jit` whether `LowerReg` lowers it, and its exit maps |
 | `regrefusals` | compile directories of code and count the backend's refusals by reason |
 | `regcount` | static counts of the patterns fused and int32 instructions take, and of those they leave |
 | `compilediff` | the register code two revisions make, compared |
-| `hotdiff -funcs runReg,rhCallW` | two builds' functions compared instruction by instruction |
+| `hotdiff` | two builds' hot functions compared instruction by instruction (`-funcs` names others) |
 | `bigfunc` (`BIGFUNC_ALL`) | Go's inlining size of the loop and its handlers |
 
 ## Known limits and open work
 
-- **The JIT's switch-over.** Runtimes with the JIT run the old tiers by
-  default until the register path's native code is level with or faster
-  than the stack path's on every suite; then `QJS_JITREG` becomes the
-  default and the JIT's stack front end goes (internal/jit/README.md, "The
-  stack form's path").
-- **The old tiers' removal.** After the switch-over: the stack
-  interpreter, the tree tier, `QJS_REG=0`, their layout-lock anchors and
-  the rules AGENTS.md keeps for them. The stack compiler stays as the front
-  end until the register backend has its own scope resolution and position
-  tables (`SrcPC` reads the stack form's) and the JIT's size estimates stop
-  reading the stack form's length. The regdiff tests that use the old tiers
-  as their reference are first recorded as golden answers.
-- **Other architectures** need native handlers before the tier is their
-  default; until then they run the old tiers, and the Go table is their
-  register interpreter under `QJS_REG=1`. The portable fallback's dispatch
-  -- a generated switch over the Go handlers against the table -- is to be
-  measured, and is never layout-tuned.
+- **The stack form.** The front end still compiles every function to stack
+  bytecode, and a program is compiled twice: the register backend reads
+  the stack form's positions (`SrcPC`), sites and facts, the leaf
+  evaluators interpret it, and the JIT's size estimates read its length.
+  It goes once the register backend has its own scope resolution, position
+  tables and facts, and the leaf evaluators read register code.
+- **Other architectures** run the Go table, slower than the native
+  handlers. The portable fallback's dispatch -- a generated switch over the
+  Go handlers against the table -- is to be measured, and is never
+  layout-tuned.
 - **The JIT's refusals of register code:** direct eval, `with`, the
   debugger's code, an arguments object the frame cannot own, and far
   registers past what an exit's records name (`abi.MaxSlot`).
 - **Raw registers.** Index-heavy and asm.js code pays a float conversion
-  at every element access and every `| 0`, where the tree tier kept an
+  at every element access and every `| 0`, where the tree tier had kept an
   int32 in a Go variable. Designed and not built: raw float64 temporaries
   within an expression behind one guard, and raw int32 regions with
   statically bounded exactness, each with a verifier of kinds. Their
