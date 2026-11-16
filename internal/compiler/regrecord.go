@@ -37,14 +37,14 @@ func (c *compiler) regNoteUpvalueWrite(t *ast.Ident, initializing bool) {
 	}
 }
 
-// regTop records one of top-level code's declarations, op of the name with
-// index name and flag, as the stack form has just emitted it, for the
-// register form to make in the same order (regcomp.Record.Top).
-func (c *compiler) regTop(op bytecode.Op, name, flag uint32, fn *ast.FuncLit) {
+// regTop records one of top-level code's declarations, op of the name and
+// flag, at pos, -1 for none, for the register form to make in the order
+// the declaration instantiation makes them (regcomp.Record.Top).
+func (c *compiler) regTop(op bytecode.Op, name string, flag uint32, fn *ast.FuncLit, pos int) {
 	if c.reg == nil || c.parent != nil {
 		return
 	}
-	c.reg.NoteTop(regcomp.TopOp{Op: op, Name: c.fn.Names[name], Flag: flag, Pos: c.lastPos, Fn: fn})
+	c.reg.NoteTop(regcomp.TopOp{Op: op, Name: name, Flag: flag, Pos: int32(pos), Fn: fn})
 }
 
 // regTopCode gives fn, top-level code of statements body whose resolution

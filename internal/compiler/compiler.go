@@ -1575,13 +1575,13 @@ func (c *compiler) checkGlobalLexicals(body []ast.Stmt) {
 			}
 			for _, name := range names {
 				c.emitAt(n.Start, bytecode.OpCheckGlobalLex, c.nameIdx(name), 0)
-				c.regTop(bytecode.OpCheckGlobalLex, c.nameIdx(name), 0, nil)
+				c.regTop(bytecode.OpCheckGlobalLex, name, 0, nil, n.Start)
 			}
 		case *ast.ClassDecl:
 			if n.Class.Name != nil {
 				c.emitAt(n.Start, bytecode.OpCheckGlobalLex,
 					c.nameIdx(n.Class.Name.Name), 0)
-				c.regTop(bytecode.OpCheckGlobalLex, c.nameIdx(n.Class.Name.Name), 0, nil)
+				c.regTop(bytecode.OpCheckGlobalLex, n.Class.Name.Name, 0, nil, n.Start)
 			}
 		}
 	}
@@ -1598,7 +1598,7 @@ func (c *compiler) checkGlobalVars(body []ast.Stmt) {
 		if _, name, ok := hoistableFunction(s); ok {
 			funcs[name] = true
 			c.emit(bytecode.OpCheckGlobalVar, c.nameIdx(name), 1)
-			c.regTop(bytecode.OpCheckGlobalVar, c.nameIdx(name), 1, nil)
+			c.regTop(bytecode.OpCheckGlobalVar, name, 1, nil, s.Pos())
 		}
 	}
 	for _, n := range c.varNames(body) {
@@ -1606,7 +1606,7 @@ func (c *compiler) checkGlobalVars(body []ast.Stmt) {
 			continue
 		}
 		c.emit(bytecode.OpCheckGlobalVar, c.nameIdx(n), 0)
-		c.regTop(bytecode.OpCheckGlobalVar, c.nameIdx(n), 0, nil)
+		c.regTop(bytecode.OpCheckGlobalVar, n, 0, nil, -1)
 	}
 }
 
@@ -1675,7 +1675,7 @@ func (c *compiler) hoistGlobals(body []ast.Stmt) {
 		// A var declared by eval is configurable, unlike one a script declares,
 		// because the evaluated code could have declared it anywhere.
 		c.emit(bytecode.OpDefineGlobalVar, c.nameIdx(n), boolBit(c.opts.EvalConfigurable))
-		c.regTop(bytecode.OpDefineGlobalVar, c.nameIdx(n), boolBit(c.opts.EvalConfigurable), nil)
+		c.regTop(bytecode.OpDefineGlobalVar, n, boolBit(c.opts.EvalConfigurable), nil, -1)
 	}
 }
 

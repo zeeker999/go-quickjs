@@ -214,13 +214,13 @@ func (c *compiler) predeclareFunction(h hoistedFunc) {
 			c.storeVar(h.name)
 			c.regIdent = saved
 			if c.reg != nil && c.parent == nil {
-				c.reg.NoteTop(regcomp.TopOp{Op: bytecode.OpSetUpvalue, Name: h.name, Pos: c.lastPos, Fn: h.fd.Fn, Id: id})
+				c.reg.NoteTop(regcomp.TopOp{Op: bytecode.OpSetUpvalue, Name: h.name, Pos: int32(h.fd.Start), Fn: h.fd.Fn, Id: id})
 			}
 			return
 		}
 		c.emit(bytecode.OpDefineGlobalFunc, c.nameIdx(h.name),
 			boolBit(c.opts.EvalConfigurable))
-		c.regTop(bytecode.OpDefineGlobalFunc, c.nameIdx(h.name), boolBit(c.opts.EvalConfigurable), h.fd.Fn)
+		c.regTop(bytecode.OpDefineGlobalFunc, h.name, boolBit(c.opts.EvalConfigurable), h.fd.Fn, h.fd.Start)
 		return
 	}
 
@@ -318,7 +318,7 @@ func (c *compiler) declareLexicalNameMarked(name string, kind bindKind, pos int,
 			mutable = 1
 		}
 		c.emitAt(pos, bytecode.OpDeclareGlobalLex, c.nameIdx(name), mutable)
-		c.regTop(bytecode.OpDeclareGlobalLex, c.nameIdx(name), mutable, nil)
+		c.regTop(bytecode.OpDeclareGlobalLex, name, mutable, nil, pos)
 		return
 	}
 	slot := c.declare(name, kind, pos)

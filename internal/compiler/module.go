@@ -278,7 +278,7 @@ func (c *compiler) hoistModuleBindings(body []ast.Stmt) {
 	collectVarNamesIn(body, &names, true)
 	for _, n := range names {
 		c.emit(bytecode.OpDefineGlobalVar, c.nameIdx(n), 0)
-		c.regTop(bytecode.OpDefineGlobalVar, c.nameIdx(n), 0, nil)
+		c.regTop(bytecode.OpDefineGlobalVar, n, 0, nil, -1)
 	}
 
 	c.collectModuleLex(body)
@@ -288,7 +288,7 @@ func (c *compiler) hoistModuleBindings(body []ast.Stmt) {
 			mutable = 0
 		}
 		c.emit(bytecode.OpDeclareModuleLex, c.nameIdx(l.name), mutable)
-		c.regTop(bytecode.OpDeclareModuleLex, c.nameIdx(l.name), mutable, nil)
+		c.regTop(bytecode.OpDeclareModuleLex, l.name, mutable, nil, -1)
 	}
 }
 
