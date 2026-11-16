@@ -240,7 +240,7 @@ func (c *compiler) localAppend(e ast.Expr) bool {
 func (c *compiler) compileLocalAppend(n *ast.Assign) {
 	l, _ := c.resolveLocal(n.Target.(*ast.Ident).Name)
 	c.reg.NoteRead(n.Target.(*ast.Ident), regcomp.Res{Kind: regcomp.ResLocal, Index: l.slot})
-	c.reg.NoteWrite(n.Target.(*ast.Ident), regcomp.Res{Kind: regcomp.ResLocal, Index: l.slot})
+	c.noteWrite(n.Target.(*ast.Ident), regcomp.Res{Kind: regcomp.ResLocal, Index: l.slot})
 	c.reg.NoteAppend(n)
 	c.emit(bytecode.OpGetLocal, l.slot, 0)
 	c.compileExpr(n.Value)
@@ -256,7 +256,7 @@ func (c *compiler) compileLocalAppend(n *ast.Assign) {
 func (c *compiler) compileOwnedAppend(n *ast.Assign) {
 	idx, _ := c.resolveUpvalue(n.Target.(*ast.Ident).Name)
 	c.reg.NoteRead(n.Target.(*ast.Ident), regcomp.Res{Kind: regcomp.ResUpval, Index: idx})
-	c.reg.NoteWrite(n.Target.(*ast.Ident), regcomp.Res{Kind: regcomp.ResUpval, Index: idx})
+	c.noteWrite(n.Target.(*ast.Ident), regcomp.Res{Kind: regcomp.ResUpval, Index: idx})
 	c.reg.NoteAppend(n)
 	c.emit(bytecode.OpGetUpvalue, idx, 0)
 	c.compileExpr(n.Value)

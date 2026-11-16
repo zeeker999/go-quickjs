@@ -351,6 +351,7 @@ func (c *compiler) compileExprNamed(e ast.Expr, name string) {
 			c.emit(bytecode.OpPushUndef, 0, 0)
 			break
 		}
+		c.facts.reads = true
 		c.emit(bytecode.OpNewTarget, 0, 0)
 
 	case *ast.ImportMeta:
@@ -538,6 +539,9 @@ func (c *compiler) compileIdentReadStatic(n *ast.Ident) {
 	if l, ok := c.resolveLocal(n.Name); ok {
 		if l.initialized {
 			c.reg.NoteRead(n, regcomp.Res{Kind: regcomp.ResLocal, Index: l.slot})
+			if c.lazyArguments && l.slot == c.lazyArgumentsSlot {
+				c.noteLazyArguments(n)
+			}
 			c.emit(bytecode.OpGetLocal, l.slot, 0)
 		} else {
 			c.reg.NoteRead(n, regcomp.Res{Kind: regcomp.ResLocalCheck, Index: l.slot})
@@ -563,6 +567,7 @@ func (c *compiler) compileIdentReadStatic(n *ast.Ident) {
 	// A named function expression's own name refers to the running closure.
 	if n.Name == c.selfName {
 		c.reg.NoteRead(n, regcomp.Res{Kind: regcomp.ResCallee})
+		c.facts.callee = true
 		c.emit(bytecode.OpPushCallee, 0, 0)
 		return
 	}
@@ -1203,7 +1208,7 @@ func (c *compiler) updatableLocal(n *ast.Update) (*localVar, bool) {
 		return nil, false
 	}
 	c.reg.NoteRead(id, regcomp.Res{Kind: regcomp.ResLocal, Index: l.slot})
-	c.reg.NoteWrite(id, regcomp.Res{Kind: regcomp.ResLocal, Index: l.slot})
+	c.noteWrite(id, regcomp.Res{Kind: regcomp.ResLocal, Index: l.slot})
 	return l, true
 }
 
@@ -1271,6 +1276,7 @@ func (c *compiler) compileUpdateKeep(n *ast.Update, keep bool) {
 
 	case *ast.Member:
 		if _, isSuper := target.Object.(*ast.Super); isSuper {
+			c.noteSuper()
 			// A super reference has no object on the stack: the read starts at
 			// the home object's prototype and the write lands on `this`.
 			// The key, when there is one, stays beneath the value for the
@@ -1560,6 +1566,7 @@ func (c *compiler) compileMemberRead(n *ast.Member) {
 			return
 		}
 		if propKeyName(n.Property) == "length" {
+			c.facts.argsEscape = true
 			c.emitAt(n.Property.Pos(), bytecode.OpArgumentsLength, c.lazyArgumentsSlot, 0)
 			return
 		}
@@ -1606,7 +1613,9 @@ func (c *compiler) compileCall(n *ast.Call) {
 	}
 	// super(...) invokes the parent constructor with the current `this`.
 	if _, isSuper := n.Callee.(*ast.Super); isSuper {
+		c.facts.reads = true
 		if n.Forward {
+			c.facts.superForwards = true
 			c.emitAt(callPos(n), bytecode.OpSuperCall, 0, bytecode.SuperForward)
 			return
 		}
@@ -1660,7 +1669,12 @@ func (c *compiler) compileCall(n *ast.Call) {
 		} else {
 			c.emitAt(m.Property.Pos(), bytecode.OpGetPropThis, c.nameIdx(propKeyName(m.Property)), 0)
 		}
+		saved := c.facts.applyArgs
+		if c.lazyArguments && c.withDepth == 0 && c.tailCall != n && isApplyOfArguments(n) {
+			c.facts.applyArgs = n.Args[1].(*ast.Ident)
+		}
 		argc := c.compileArguments(n.Args)
+		c.facts.applyArgs = saved
 		c.emitAt(callPos(n), c.callOp(n, bytecode.OpCallMethod), uint32(argc), 0)
 		return
 	}
@@ -2126,7 +2140,7 @@ func (c *compiler) compileAssign(n *ast.Assign) {
 			value(nameOf(n.Target))
 			if c.foldGlobalCheck(check, id) {
 				if c.reg != nil {
-					c.reg.NoteWrite(id, regcomp.Res{Kind: regcomp.ResGlobal})
+					c.noteWrite(id, regcomp.Res{Kind: regcomp.ResGlobal})
 				}
 				return
 			}
@@ -2202,6 +2216,7 @@ func (c *compiler) compileAssign(n *ast.Assign) {
 // is one instruction and the drop that follows it another.
 func (c *compiler) compileMemberUpdate(m *ast.Member, op string, emitValue func(), pos int, keep bool) {
 	if _, isSuper := m.Object.(*ast.Super); isSuper {
+		c.noteSuper()
 		// A super reference has no object on the stack: the read starts at the
 		// home object's prototype and the write lands on `this`.
 		if m.Computed {
@@ -2320,9 +2335,9 @@ func (c *compiler) assignToIdentStatic(t *ast.Ident, initializing bool) {
 			// assigning to it outside strict mode is quietly discarded rather
 			// than refused.
 			if c.fn.Strict {
-				c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResConstAssign})
+				c.noteWrite(t, regcomp.Res{Kind: regcomp.ResConstAssign})
 			} else {
-				c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResIgnore})
+				c.noteWrite(t, regcomp.Res{Kind: regcomp.ResIgnore})
 			}
 			if c.fn.Strict {
 				c.emitAt(int(t.Start), bytecode.OpAssignConst, c.nameIdx(t.Name), 0)
@@ -2332,7 +2347,7 @@ func (c *compiler) assignToIdentStatic(t *ast.Ident, initializing bool) {
 		if !initializing && l.kind == bindConst && l.initialized {
 			// A runtime error rather than an early one: the assignment may
 			// sit in a function that is never called.
-			c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResConstAssign})
+			c.noteWrite(t, regcomp.Res{Kind: regcomp.ResConstAssign})
 			c.emitAt(int(t.Start), bytecode.OpAssignConst, c.nameIdx(t.Name), 0)
 			return
 		}
@@ -2341,10 +2356,10 @@ func (c *compiler) assignToIdentStatic(t *ast.Ident, initializing bool) {
 			if initializing {
 				kind = regcomp.ResLocalInit
 			}
-			c.reg.NoteWrite(t, regcomp.Res{Kind: kind, Index: l.slot})
+			c.noteWrite(t, regcomp.Res{Kind: kind, Index: l.slot})
 			c.emit(bytecode.OpPutLocal, l.slot, 0)
 		} else {
-			c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResLocalCheck, Index: l.slot})
+			c.noteWrite(t, regcomp.Res{Kind: regcomp.ResLocalCheck, Index: l.slot})
 			c.emit(bytecode.OpDup, 0, 0)
 			c.emitAt(int(t.Start), bytecode.OpSetLocalCheck, l.slot, 0)
 		}
@@ -2386,20 +2401,20 @@ func (c *compiler) assignToIdentStatic(t *ast.Ident, initializing bool) {
 	if initializing && c.globalLex[t.Name] {
 		// The binding is the script-level lexical one, and this is what takes
 		// it out of its dead zone.
-		c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResGlobalLexInit})
+		c.noteWrite(t, regcomp.Res{Kind: regcomp.ResGlobalLexInit})
 		c.emit(bytecode.OpDup, 0, 0)
 		c.emit(bytecode.OpInitGlobalLex, c.nameIdx(t.Name), 0)
 		return
 	}
 	if initializing && c.isModuleLex(t.Name) {
 		// The same, for a module's top-level binding.
-		c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResModuleLexInit})
+		c.noteWrite(t, regcomp.Res{Kind: regcomp.ResModuleLexInit})
 		c.emit(bytecode.OpDup, 0, 0)
 		c.emit(bytecode.OpInitModuleLex, c.nameIdx(t.Name), 0)
 		return
 	}
 	if c.reg != nil && !initializing {
-		c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResGlobal})
+		c.noteWrite(t, regcomp.Res{Kind: regcomp.ResGlobal})
 	}
 	c.emit(bytecode.OpDup, 0, 0)
 	c.emit(bytecode.OpSetGlobal, c.nameIdx(t.Name), 0)
@@ -2544,6 +2559,7 @@ func compoundOpcode(op string) bytecode.Op {
 // and so is the drop that would discard it.
 func (c *compiler) compileMemberStore(m *ast.Member, emitValue func(), keep bool) {
 	if _, isSuper := m.Object.(*ast.Super); isSuper {
+		c.noteSuper()
 		// A super reference has no object on the stack: the lookup starts at
 		// the home object's prototype, and the receiver is `this`.
 		if m.Computed {
@@ -2603,6 +2619,7 @@ func (c *compiler) compileMemberStore(m *ast.Member, emitValue func(), keep bool
 // a member target, which is what a compound assignment needs after combining.
 func (c *compiler) compileMemberStoreFromValue(m *ast.Member) {
 	if _, isSuper := m.Object.(*ast.Super); isSuper {
+		c.noteSuper()
 		// The value is on top and the key, if computed, has to go under it.
 		if m.Computed {
 			// The value is already on the stack, so the base and the key go
@@ -2649,6 +2666,7 @@ func (c *compiler) compileMemberStoreFromValue(m *ast.Member) {
 // compileSuperMemberGet reads a property through super, which looks it up on
 // the home object's prototype rather than on the receiver.
 func (c *compiler) compileSuperMemberGet(m *ast.Member) {
+	c.noteSuper()
 	if m.Computed {
 		// The base is resolved before the key expression runs, so a derived
 		// constructor that has not called super() fails before anything the
@@ -2727,6 +2745,7 @@ func (c *compiler) compileYield(n *ast.Yield) {
 		raw = 1
 	}
 	exit := c.emitJumpB(bytecode.OpIterUnpackDelegate, kindSlot<<1|raw)
+	c.facts.yieldStar = true
 	c.emit(bytecode.OpYieldStar, raw, 0)
 	c.emit(bytecode.OpJump, uint32(start), 0)
 

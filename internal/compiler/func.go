@@ -2,7 +2,6 @@ package compiler
 
 import (
 	"fmt"
-	"slices"
 	"sort"
 
 	"github.com/go-quickjs/go-quickjs/internal/ast"
@@ -192,6 +191,7 @@ func (c *compiler) compileFunctionBody(fn *ast.FuncLit) {
 			c.lazyArguments, c.lazyArgumentsSlot = true, slot
 			return
 		}
+		c.facts.makesArgs = true
 		c.emit(bytecode.OpGetArguments, 0, 0)
 		c.emit(bytecode.OpSetLocal, slot, 0)
 	}, wantArguments)
@@ -243,10 +243,8 @@ func (c *compiler) compileFunctionBody(fn *ast.FuncLit) {
 	}
 	c.emit(bytecode.OpReturnUndef, 0, 0)
 	c.finish()
-	c.fn.ForwardsArguments = c.lazyArguments && !c.opts.Debug && !slices.ContainsFunc(c.fn.Code, func(in bytecode.Instr) bool {
-		// The object made for anything but apply.
-		return in.Op == bytecode.OpLazyArguments || in.Op == bytecode.OpArgumentsLength
-	})
+	// The object made for nothing but apply.
+	c.fn.ForwardsArguments = c.lazyArguments && !c.opts.Debug && !c.facts.argsEscape
 	// What a call asks of the function every time, asked once here.
 	c.fn.CoerceThis = c.fn.UsesThis && !c.fn.Strict && c.fn.Kind != bytecode.KindArrow
 	c.fn.DirectCall = !c.fn.Generator && !c.fn.Async &&
@@ -284,6 +282,7 @@ func (c *compiler) bindSelfName(fn *ast.FuncLit) {
 		return
 	}
 	slot := c.declare(c.selfName, bindFuncSelf, fn.Start)
+	c.facts.callee = true
 	c.emit(bytecode.OpPushCallee, 0, 0)
 	c.emit(bytecode.OpInitLocal, slot, 0)
 	c.markInitialized(c.selfName)
@@ -362,6 +361,9 @@ func (c *compiler) bindParameters(fn *ast.FuncLit, materialize func(), wantArgs 
 		// start in the dead zone. An argument that was passed is already
 		// bound; undefined, passed or missing, is what makes a default run.
 		c.emit(bytecode.OpParamsToDeadZone, uint32(len(fn.Params)), 0)
+		for i := range fn.Params {
+			c.noteStore(uint32(i))
+		}
 	}
 
 	// The arguments object is created before the parameters are initialized,

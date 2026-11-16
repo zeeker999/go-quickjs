@@ -363,6 +363,8 @@ type compiler struct {
 	// reads (regcomp), where it is on, and regIdent the declaration whose
 	// store storeVar is making, for the record.
 	reg *regcomp.Record
+	// facts is what the walk has noted of the function for recordFacts.
+	facts walkFacts
 	// probe is the with probe emitProbe made last (regWith).
 	probe    regcomp.WithProbe
 	regIdent *ast.Ident
@@ -714,132 +716,106 @@ func (c *compiler) finish() {
 	}
 }
 
-// codeFacts is what recordFacts found of a function's finished code that
-// settleParamCaptures asks: the slots of its first 64 locals an
-// instruction stores to (bytecode.WrittenLocals), those a closure it makes
-// may assign (UpvalueDesc's Assigned), and whether it has a direct eval.
+// codeFacts is what recordFacts found of a function that
+// settleParamCaptures asks: the slots of its first 64 locals the code
+// stores to, those a closure it makes may assign (UpvalueDesc's Assigned),
+// and whether it has a direct eval.
 type codeFacts struct {
 	written, closures uint64
 	eval              bool
 }
 
-// What recordFacts notes of an instruction, by its opcode (opFacts): one
-// of these, and, for an opcode whose instruction stores to a local
-// (bytecode.WrittenLocals), factStoresA, for a store to the slot in A
-// alone, or factStores.
-const (
-	factPrivate    = 1 + iota // a private member's read or write, which has a cache
-	factSuperRef              // a super reference, through the home object
-	factPushCallee            // the function object pushed
-	factSuperCall             // super(), which constructs with new.target
-	factNewTarget             // new.target
-	factSetUpvalue            // a store to an upvalue
-	factEval                  // a direct eval
-	factArguments             // the arguments object made, or handed to apply
-	factYieldStar             // a yield*
-
-	factStores  = 0x40
-	factStoresA = 0x80
-)
-
-// opFacts is what recordFacts notes of an instruction of each opcode, 0
-// for nothing, as most are, for which a load is all the walk costs: a
-// switch of each instruction's opcode, and WrittenLocals' of each, had
-// made compiling Three.js's and Babel's bundles 2.2% and 3.6% slower.
-var opFacts = [256]uint8{
-	bytecode.OpGetPrivate:      factPrivate,
-	bytecode.OpSetPrivate:      factPrivate,
-	bytecode.OpGetSuperProp:    factSuperRef,
-	bytecode.OpGetSuperIndex:   factSuperRef,
-	bytecode.OpSetSuperProp:    factSuperRef,
-	bytecode.OpSetSuperIndex:   factSuperRef,
-	bytecode.OpSuperBase:       factSuperRef,
-	bytecode.OpPushCallee:      factPushCallee,
-	bytecode.OpSuperCall:       factSuperCall,
-	bytecode.OpNewTarget:       factNewTarget,
-	bytecode.OpSetUpvalue:      factSetUpvalue,
-	bytecode.OpSetUpvalueCheck: factSetUpvalue,
-	bytecode.OpInitUpvalue:     factSetUpvalue,
-	bytecode.OpDirectEval:      factEval,
-	bytecode.OpTailDirectEval:  factEval,
-	bytecode.OpGetArguments:    factArguments,
-	bytecode.OpLazyArguments:   factArguments | factStoresA,
-	bytecode.OpApplyArguments:  factArguments | factStoresA,
-	bytecode.OpYieldStar:       factYieldStar,
-
-	bytecode.OpSetLocal:            factStoresA,
-	bytecode.OpPutLocal:            factStoresA,
-	bytecode.OpSetLocalCheck:       factStoresA,
-	bytecode.OpInitLocal:           factStoresA,
-	bytecode.OpClearLocal:          factStoresA,
-	bytecode.OpSetLocalGet:         factStoresA,
-	bytecode.OpIncLocal:            factStoresA,
-	bytecode.OpDecLocal:            factStoresA,
-	bytecode.OpUpdateLocal:         factStoresA,
-	bytecode.OpInitParam:           factStoresA,
-	bytecode.OpArgumentsIndex:      factStoresA,
-	bytecode.OpGetLocalIndexUpdate: factStores,
-	bytecode.OpParamsToDeadZone:    factStores,
+// walkFacts is what the walk notes of a function as it compiles it, for
+// recordFacts: the slots, of the first 64, its code stores to (written),
+// and the lowest of all it does (lowest, where stored); whether it reads its
+// function object (callee) -- its own name's binding, or a super
+// reference's home object -- and what a frame keeps for an arrow made in
+// it (reads): new.target, super(); whether it has a direct eval, makes
+// its arguments object or hands it on (makesArgs, argsEscape for a use
+// but apply's of a function whose object is made on demand), has a
+// yield*, or a super(...) of the call's own arguments.
+type walkFacts struct {
+	written               uint64
+	lowest                uint32
+	stored, callee, reads bool
+	eval, makesArgs       bool
+	argsEscape, yieldStar bool
+	superForwards         bool
+	// applyArgs is the arguments of the call of apply being compiled,
+	// f.apply(x, arguments), whose object is made for nothing else.
+	applyArgs *ast.Ident
 }
 
-// recordFacts records, in one walk of the function's finished code and
-// one of its closures', what the JIT and the VM's native calls ask of it
-// (bytecode.Function's FrameCallee, ReadsMaker, AssignsParams,
+// noteStore notes a store to local slot, a parameter's where it is below
+// the function's ParamCount, which the parameters' prologue settles last.
+func (c *compiler) noteStore(slot uint32) {
+	if slot < 64 {
+		c.facts.written |= 1 << slot
+	}
+	if slot < c.facts.lowest || !c.facts.stored {
+		c.facts.lowest, c.facts.stored = slot, true
+	}
+}
+
+// noteWrite records id's write, res, for the register form, and notes the
+// store it makes to a local or an upvalue (walkFacts, UpvalueDesc's
+// Assigned).
+func (c *compiler) noteWrite(id *ast.Ident, res regcomp.Res) {
+	c.reg.NoteWrite(id, res)
+	switch res.Kind {
+	case regcomp.ResLocal, regcomp.ResLocalCheck, regcomp.ResLocalInit:
+		c.noteStore(res.Index)
+	case regcomp.ResUpval, regcomp.ResUpvalCheck:
+		c.noteUpvalueStore(res.Index)
+	}
+}
+
+// noteUpvalueStore notes a store to upvalue idx.
+func (c *compiler) noteUpvalueStore(idx uint32) {
+	if int(idx) < len(c.fn.Upvalues) {
+		c.fn.Upvalues[idx].Assigned = true
+	}
+}
+
+// noteSuper notes a super reference, which reads the home object through
+// the function object.
+func (c *compiler) noteSuper() {
+	c.facts.callee, c.facts.reads = true, true
+}
+
+// noteLazyArguments notes a read of id, the arguments object made on
+// demand: made, and handed on but where it is apply's.
+func (c *compiler) noteLazyArguments(id *ast.Ident) {
+	c.facts.makesArgs = true
+	if id != c.facts.applyArgs {
+		c.facts.argsEscape = true
+	}
+}
+
+// recordFacts records what the JIT and the VM's native calls ask of the
+// function, from what the walk noted of it (walkFacts) and of its
+// closures: bytecode.Function's FrameCallee, ReadsMaker, AssignsParams,
 // MakesArguments, SuperForwards and HasYieldStar, and its upvalues'
-// Assigned), and counts its private members' caches: each read and write
-// of one has a cache of its own, as a property's has. Its closures' were
-// recorded as their compiles ended, before its own.
+// Assigned. Its closures' were recorded as their compiles ended, before
+// its own.
 func (c *compiler) recordFacts() (f codeFacts) {
 	fn := c.fn
+	w := &c.facts
 	arrow := fn.Kind == bytecode.KindArrow
-	callee := fn.MappedArguments || arrow && fn.UsesNewTarget
-	reads := fn.UsesNewTarget
-	// No parameter for a store to be to, and no closure's capture of one
-	// to settle: what the code stores to is not asked.
-	stores := fn.ParamCount != 0 || len(c.paramCaptures) != 0
-	params, written := uint32(fn.ParamCount), uint64(0)
-	assigns := false
-	for _, in := range fn.Code {
-		k := opFacts[in.Op]
-		if k == 0 {
-			continue
-		}
-		switch {
-		case !stores:
-		case k&factStoresA != 0:
-			assigns = assigns || in.A < params
-			written |= 1 << in.A // none for a slot past 63
-		case k&factStores != 0:
-			lo, hi := bytecode.WrittenLocals(in)
-			assigns = assigns || lo < hi && lo < fn.ParamCount
-			for s := lo; s < hi && s < 64; s++ {
-				written |= 1 << s
-			}
-		}
-		switch k &^ (factStores | factStoresA) {
-		case factPrivate:
-		case factSuperRef:
-			callee, reads = true, true
-		case factPushCallee:
-			callee = true
-		case factSuperCall:
-			reads = true
-			fn.SuperForwards = fn.SuperForwards || in.B == bytecode.SuperForward
-		case factNewTarget:
-			reads = true
-		case factSetUpvalue:
-			if int(in.A) < len(fn.Upvalues) {
-				fn.Upvalues[in.A].Assigned = true
-			}
-		case factEval:
-			f.eval = true
-		case factArguments:
-			fn.MakesArguments = true
-		case factYieldStar:
-			fn.HasYieldStar = true
-		}
+	callee := fn.MappedArguments || arrow && fn.UsesNewTarget || w.callee
+	reads := fn.UsesNewTarget || w.reads
+	if w.makesArgs {
+		fn.MakesArguments = true
 	}
-	fn.AssignsParams, f.written = assigns, written
+	if w.yieldStar {
+		fn.HasYieldStar = true
+	}
+	if w.superForwards {
+		fn.SuperForwards = true
+	}
+	f.eval = w.eval
+	fn.AssignsParams = w.stored && int(w.lowest) < fn.ParamCount
+	f.written = w.written
 	if f.eval || fn.HasDirectEval {
 		// A direct eval may assign any binding in scope, a strict one's
 		// too, which declares nothing in it but assigns what is there.

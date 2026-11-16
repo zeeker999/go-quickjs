@@ -225,6 +225,7 @@ func (c *compiler) predeclareFunction(h hoistedFunc) {
 	}
 
 	c.reg.NoteFunc(h.fd, h.slot)
+	c.noteStore(h.slot)
 	c.emit(bytecode.OpSetLocal, h.slot, 0)
 }
 
@@ -243,7 +244,7 @@ func (c *compiler) emitAnnexBFunctionAlias(id *ast.Ident) {
 		if l.name != name || l.depth >= c.depth || !l.varScoped() {
 			continue
 		}
-		c.reg.NoteWrite(id, regcomp.Res{Kind: regcomp.ResLocal, Index: l.slot})
+		c.noteWrite(id, regcomp.Res{Kind: regcomp.ResLocal, Index: l.slot})
 		c.emit(bytecode.OpDup, 0, 0)
 		c.emit(bytecode.OpSetLocal, l.slot, 0)
 		return
@@ -259,11 +260,11 @@ func (c *compiler) emitAnnexBFunctionAlias(id *ast.Ident) {
 	c.emit(bytecode.OpDup, 0, 0)
 	if b, known := c.callerBinding(name); known && b.VarScoped && !c.evalOwnVars[name] {
 		idx, _ := c.resolveUpvalue(name)
-		c.reg.NoteWrite(id, regcomp.Res{Kind: regcomp.ResUpval, Index: idx})
+		c.noteWrite(id, regcomp.Res{Kind: regcomp.ResUpval, Index: idx})
 		c.emit(bytecode.OpSetUpvalue, idx, 0)
 		return
 	}
-	c.reg.NoteWrite(id, regcomp.Res{Kind: regcomp.ResGlobalVar})
+	c.noteWrite(id, regcomp.Res{Kind: regcomp.ResGlobalVar})
 	c.emit(bytecode.OpSetGlobal, c.nameIdx(name), 0)
 }
 
@@ -639,7 +640,7 @@ func (c *compiler) initBinding(target ast.Expr, kind ast.DeclKind) {
 		// A lexical binding is initialized rather than assigned, which also
 		// clears its dead zone.
 		if l, ok := c.resolveLocal(id.Name); ok {
-			c.reg.NoteWrite(id, regcomp.Res{Kind: regcomp.ResLocalInit, Index: l.slot})
+			c.noteWrite(id, regcomp.Res{Kind: regcomp.ResLocalInit, Index: l.slot})
 			c.emit(bytecode.OpInitLocal, l.slot, 0)
 			c.markInitialized(id.Name)
 			return
@@ -647,12 +648,12 @@ func (c *compiler) initBinding(target ast.Expr, kind ast.DeclKind) {
 		// A block of its own would have declared a local, so reaching here
 		// means the binding is the top-level one.
 		if c.globalLex[id.Name] {
-			c.reg.NoteWrite(id, regcomp.Res{Kind: regcomp.ResGlobalLexInit})
+			c.noteWrite(id, regcomp.Res{Kind: regcomp.ResGlobalLexInit})
 			c.emit(bytecode.OpInitGlobalLex, c.nameIdx(id.Name), 0)
 			return
 		}
 		if c.isModuleLex(id.Name) {
-			c.reg.NoteWrite(id, regcomp.Res{Kind: regcomp.ResModuleLexInit})
+			c.noteWrite(id, regcomp.Res{Kind: regcomp.ResModuleLexInit})
 			c.emit(bytecode.OpInitModuleLex, c.nameIdx(id.Name), 0)
 			return
 		}
@@ -729,7 +730,7 @@ func (c *compiler) storeVar(name string) {
 
 	if l, ok := c.resolveLocal(name); ok {
 		if c.regIdent != nil {
-			c.reg.NoteWrite(c.regIdent, regcomp.Res{Kind: regcomp.ResLocalInit, Index: l.slot})
+			c.noteWrite(c.regIdent, regcomp.Res{Kind: regcomp.ResLocalInit, Index: l.slot})
 		}
 		c.emit(bytecode.OpSetLocal, l.slot, 0)
 		return
@@ -740,7 +741,7 @@ func (c *compiler) storeVar(name string) {
 			if c.fn.Upvalues[idx].TDZ {
 				res = regcomp.Res{}
 			}
-			c.reg.NoteWrite(c.regIdent, res)
+			c.noteWrite(c.regIdent, res)
 		}
 		if c.fn.Upvalues[idx].TDZ {
 			c.emit(bytecode.OpSetUpvalueCheck, idx, 0)
@@ -750,7 +751,7 @@ func (c *compiler) storeVar(name string) {
 		return
 	}
 	if c.regIdent != nil {
-		c.reg.NoteWrite(c.regIdent, regcomp.Res{Kind: regcomp.ResGlobalVar})
+		c.noteWrite(c.regIdent, regcomp.Res{Kind: regcomp.ResGlobalVar})
 	}
 	c.emit(bytecode.OpSetGlobal, c.nameIdx(name), 0)
 }

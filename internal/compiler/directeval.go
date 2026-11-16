@@ -38,6 +38,7 @@ func isDirectEval(n *ast.Call) bool {
 func (c *compiler) compileDirectEval(n *ast.Call) {
 	idx := c.evalScopeIdx()
 	c.reg.NoteEval(n, idx)
+	c.facts.eval = true
 	// A receiver is pushed beneath the callee, which is undefined for the
 	// ordinary resolution and the object for one a `with` answered: inside a
 	// `with` body the name may be the object's own eval, and calling that is

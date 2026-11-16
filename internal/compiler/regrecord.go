@@ -13,9 +13,9 @@ func (c *compiler) regNoteUpvalueWrite(t *ast.Ident, initializing bool) {
 	if !ok {
 		if !initializing && t.Name == c.selfName {
 			if c.fn.Strict {
-				c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResConstAssign})
+				c.noteWrite(t, regcomp.Res{Kind: regcomp.ResConstAssign})
 			} else {
-				c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResIgnore})
+				c.noteWrite(t, regcomp.Res{Kind: regcomp.ResIgnore})
 			}
 		}
 		return
@@ -23,17 +23,17 @@ func (c *compiler) regNoteUpvalueWrite(t *ast.Ident, initializing bool) {
 	u := c.fn.Upvalues[idx]
 	switch {
 	case u.TDZ && !initializing:
-		c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResUpvalCheck, Index: idx})
+		c.noteWrite(t, regcomp.Res{Kind: regcomp.ResUpvalCheck, Index: idx})
 	case u.FuncSelf && !initializing:
 		if c.fn.Strict {
-			c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResConstAssign})
+			c.noteWrite(t, regcomp.Res{Kind: regcomp.ResConstAssign})
 		} else {
-			c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResIgnore})
+			c.noteWrite(t, regcomp.Res{Kind: regcomp.ResIgnore})
 		}
 	case !u.Mutable && !initializing:
-		c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResConstAssign})
+		c.noteWrite(t, regcomp.Res{Kind: regcomp.ResConstAssign})
 	default:
-		c.reg.NoteWrite(t, regcomp.Res{Kind: regcomp.ResUpval, Index: idx})
+		c.noteWrite(t, regcomp.Res{Kind: regcomp.ResUpval, Index: idx})
 	}
 }
 
