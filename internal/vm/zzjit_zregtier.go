@@ -767,17 +767,22 @@ func (s *jitState) regLearnedOf(key jitKey) *jitEntry {
 	if s.regLearned == nil {
 		s.regLearned = map[jitKey]*jitEntry{}
 	}
-	// Kept in the room for it, as the stack form's entry is made only in
-	// the room for it (jitWarmFor), the cache letting go of what it may
-	// (makeRoom), other functions' state among it. Where there is none, a
-	// state the JIT does not keep: the function warms up, and learns, in
-	// vain, and runs in the existing tiers until some code is old, as one
-	// the stack form made no entry for does.
+	// Kept in the room for it, as the stack form's entry is made in the
+	// room for it (jitWarmFor), the cache letting go of what it may
+	// (makeRoom), other functions' state among it. Where there is none --
+	// all the cache holds young code, say -- it is kept all the same,
+	// counted once its function is compiled, which asks for its room, or at
+	// the cache's next look (regAge), whose room it is then made among:
+	// the stack form's entry is made at its function's first call, this at
+	// the function's first sample, after its first run, and a loop driving
+	// a program's phases had none made for it, and so no code, once the
+	// first phase had filled the budget.
 	s.budget = s.rt.jitBudget()
-	if !s.makeRoom(jitEntryFixed) {
-		return &jitEntry{jitLearned: &jitLearned{reg: true, regLink: s.regLinks[key]}, used: s.epoch()}
-	}
-	l := &jitEntry{jitLearned: &jitLearned{reg: true, regLink: s.regLinks[key]}, used: s.epoch(), regCounted: true}
+	room := s.makeRoom(jitEntryFixed)
+	// Numbered as the stack form's entries are (serial), which makeRoom
+	// takes the least recently made of first among those of an epoch.
+	s.serial++
+	l := &jitEntry{jitLearned: &jitLearned{reg: true, regLink: s.regLinks[key]}, used: s.epoch(), serial: s.serial, regCounted: room}
 	s.regLearned[key] = l
 	s.regAccount(l)
 	return l

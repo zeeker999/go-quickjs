@@ -377,13 +377,6 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 	// budget was full was the first that the next compile's room let go
 	// of, and the compiles that filled it dropped each other's code.
 	life := s.regLearnedOf(key)
-	if !life.regCounted {
-		// No room for the JIT to keep its state in (regLearnedOf), nor so
-		// for its code, as the stack form compiles nothing it made no entry
-		// for.
-		s.refusedRoom++
-		return nil
-	}
 	if life.deferred && life.generation == s.generation {
 		// No room for it at its last compile, and the cache has let no
 		// code go since (jitRegPlace).
@@ -594,6 +587,16 @@ func regLoopAround(c *regCode, rpc int) int {
 // larger than the mean's -- 1,250 bytes an instruction against 500 -- was
 // short of what it then took.
 func (s *jitState) jitRegRoomAhead(cl *closure, life *jitEntry, old *jitRegEntry) bool {
+	if !life.regCounted {
+		// Its state, kept with no room for it (regLearnedOf), counted from
+		// now on, in the room its compile asks for besides.
+		if !s.makeRoom(len(cl.fn.Code)*s.perInstr + jitEntryFixed + life.learnedBytes()) {
+			return false
+		}
+		life.regCounted = true
+		s.regAccount(life)
+		return true
+	}
 	if old == nil {
 		return s.makeRoom(len(cl.fn.Code) * s.perInstr)
 	}
@@ -877,6 +880,9 @@ func (s *jitState) regAge(now uint64) {
 		if u := regLifeUses(l); u != l.seen {
 			l.seen, l.used = u, now
 		}
+		// One kept with no room for it (regLearnedOf) counted from now
+		// on, the room made among it (makeRoom).
+		l.regCounted = true
 		s.regAccount(l)
 	}
 	for key, l := range s.regLowered {
@@ -1106,7 +1112,7 @@ func (s *jitState) regVictims(v []jitVictim, now uint64) []jitVictim {
 		if s.regCache[key] != nil || !l.regCounted || !s.regLifeSpare(key, l, called) {
 			continue
 		}
-		v = append(v, jitVictim{key: key, e: l, reg: true, class: jitVictimRefusal, used: l.used, bytes: l.bytes})
+		v = append(v, jitVictim{key: key, e: l, reg: true, class: jitVictimRefusal, used: l.used, serial: l.serial, bytes: l.bytes})
 	}
 	return v
 }
@@ -1175,7 +1181,13 @@ func (s *jitState) regReclaim(x *jitVictim, now uint64) {
 	if e == nil {
 		// A function's state alone (regVictims).
 		if l := x.e; s.regLearned[x.key] == l && s.regCache[x.key] == nil && s.regLifeSpare(x.key, l, s.regCalledFns()) {
+			// Reclaimable when listed, it was not of the floor (listVictims),
+			// which stays: reset, a stream of functions each taking the room
+			// of another's state had the next compile refused room list all
+			// the cache holds again, at every function.
+			floorAt := s.floorAt
 			s.regLetGoLife(x.key, l)
+			s.floorAt = floorAt
 			s.evicted++
 		}
 		return
