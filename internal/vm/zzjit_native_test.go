@@ -7929,6 +7929,15 @@ func TestJITSSAProfitReturns(t *testing.T) {
 		t.Fatalf("step kept running natively: %+v", e)
 	}
 	heavy := r.global.getOwn(r.atoms.intern("heavy")).value().Object().fn().closure
+	if regJITForTest() && slices.Contains(jitInlinedNamesForTest(r, "drive"), "heavy") {
+		// Register code seeds drive's call of heavy from the binding
+		// (regCallTargets) and inlines it, loop and all: heavy runs in
+		// drive's code, which must not be the one given up.
+		if e := jitPortCode(r, jitGlobalClosureForTest(r, "drive")); e == nil || e.entrySlow {
+			t.Fatalf("drive, which inlines heavy, left native code: %+v", e)
+		}
+		return
+	}
 	if e := jitPortCode(r, heavy); e == nil || e.entrySlow {
 		t.Fatalf("heavy left native code: %+v", e)
 	}

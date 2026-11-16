@@ -839,13 +839,6 @@ func (f *jitRegFeedback) inline(pc int) (ssa.InlineSite, bool) {
 	if cl.fn == f.fb.fn || cl.fn == f.fb.keep().fn || jitNoInline != nil && jitNoInline(cl.fn) {
 		return ssa.InlineSite{}, false
 	}
-	if f.regCallCold(pc, rpc, cl) {
-		// One made too seldom to be inlined is called natively, as the
-		// stack form's (jitCallCold): V8's heuristic, which the builder
-		// applies only past its small callees, refuses it whatever its
-		// size.
-		return ssa.InlineSite{}, false
-	}
 	if site.Parent != 0 {
 		// A construction with a class that has no constructor of its own,
 		// run with its parent's code while the class's prototype is still
@@ -928,29 +921,6 @@ func (f *jitRegFeedback) inline(pc int) (ssa.InlineSite, bool) {
 		l.inlines = append(l.inlines, jitInline{pc: rpc, cl: cl, obj: o})
 	}
 	return in, true
-}
-
-// regCallCold is the stack form's jitCallCold for register code: whether
-// the call at the program's instruction pc, register pc rpc, of cl's
-// function, which the existing tiers count every call of, is made too
-// seldom for each invocation of the frame's function to be inlined
-// (ssa.MinInliningFrequency) -- not where the code learned a call there
-// they do not count.
-func (f *jitRegFeedback) regCallCold(pc int, rpc int32, cl *closure) bool {
-	if cl == nil || !jitCountedCallee(cl) {
-		return false
-	}
-	if l := f.fb.e; l != nil {
-		for _, list := range [...][]jitInline{l.inlines, l.nativeCalls} {
-			for _, x := range list {
-				if x.pc == rpc && !jitFramed(x) {
-					return false
-				}
-			}
-		}
-	}
-	fr, ok := f.Frequency(pc)
-	return ok && fr < ssa.MinInliningFrequency
 }
 
 // jitRegCallOp is op with a call in tail position's opcode as the

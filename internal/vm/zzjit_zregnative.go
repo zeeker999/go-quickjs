@@ -311,10 +311,7 @@ func (r *Runtime) jitRegCached(key jitKey, e *jitRegEntry) {
 			s.compiled++
 		} else {
 			s.reoptimized++
-			// A compile asked for what the code learned (jitRegReopt), as
-			// the stack form counts one (jitInstallSSA's e.reopt): not a
-			// deoptimization's, which its deoptimizations count.
-			if life.reopt && life.reopts < ^uint8(0) {
+			if life.reopts < ^uint8(0) {
 				life.reopts++
 			}
 		}
@@ -1602,7 +1599,7 @@ func (r *Runtime) jitRegLeft(f *frame, c *regCode, e *jitRegEntry, wb int, ctx *
 			}
 			seen := r.jitRegHostSeen(f, c, wb, exitPC)
 			r.jitRegPrivateSeen(f, c, e, wb, exitPC)
-			r.jitRegParseIntSeen(f, c, e, wb, exitPC)
+			r.jitRegCallMissed(f, c, e, wb, exitPC)
 			if r.jitRegBigIntExit(f, e, wb, int(int64(ctx.ExitSite))) {
 				// A generic operator that met BigInts, which the code
 				// compiled again calls Go for (ssa.GoArith).

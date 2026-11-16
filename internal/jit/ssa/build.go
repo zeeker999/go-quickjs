@@ -5929,6 +5929,29 @@ func (b *builder) typeofCall(blk *Block, pc int, cells uintptr) {
 	b.write(slot, miss, r)
 }
 
+// windowTypeof is typeofCall for register code's typeof at pc, in (its
+// Window): its operand the window's register, its result in.Dest's.
+func (b *builder) windowTypeof(blk *Block, pc int, in ir.Instruction, cells uintptr) {
+	f := b.f
+	x := b.read(in.Left.Slot, blk)
+	cell := f.newValue(blk, OpTypeofCell, Source, x)
+	cell.Const = ir.Value{Bits: uint64(cells)}
+	none := f.newValue(blk, OpCellNone, Bool, cell)
+	st := b.state(blk, pc)
+	miss, hit, _ := b.split(blk, none, true)
+	v := f.newValue(hit, OpLoadCell, Tagged, cell)
+	v.Shadow = cell
+	b.assign(in.Dest, hit, v)
+	call := f.newValue(miss, OpCall, Tagged, x)
+	f.cache(call).Calls = b.callsAt(pc)
+	call.Aux, call.State, call.Index = int(ir.HostExit), st, b.callKeepAt(pc)
+	st.addUse()
+	kept := f.newValue(miss, OpCallCell, Source, call)
+	r := f.newValue(miss, OpKept, Tagged, kept, call)
+	r.Shadow = kept
+	b.assign(in.Dest, miss, r)
+}
+
 // substring is the address of String.prototype.substring, slice, substr
 // or charAt if the method call at pc, of two arguments -- one, charAt's --
 // in the function's own code, calls it (SubstringFeedback) and Go makes it
@@ -9398,6 +9421,16 @@ func (b *builder) windowCall(blk *Block, pc int, in ir.Instruction, calls []*Cal
 	case calls[0].InstanceOf:
 		args = append(args, b.read(a, blk), b.read(in.Right.Slot, blk))
 	case calls[0].TypeOf:
+		if tf, ok := b.fb.(TypeofFeedback); ok && b.goCalls() {
+			if cells, ok := tf.TypeofCells(); ok && cells != 0 {
+				// Its name loaded from the runtime's table, Go's for what
+				// native code cannot tell, as the stack form's
+				// (typeofCall): a call of Go at each had been register
+				// code's.
+				b.windowTypeof(blk, pc, in, cells)
+				return
+			}
+		}
 		args = append(args, b.read(a, blk))
 	}
 	if calls[0].Method {
