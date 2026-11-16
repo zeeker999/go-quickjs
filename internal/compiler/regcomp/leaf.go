@@ -87,8 +87,10 @@ func siteIs(fn *bytecode.Function, rc *bytecode.RegCode, s uint16, name string) 
 	return int(s) < len(rc.SiteName) && int(rc.SiteName[s]) < len(names) && names[rc.SiteName[s]] == name
 }
 
-// pureCode is the most instructions a pure body has.
-const pureCode = 64
+// pureCode is the most instructions a pure body has: 64 of the stack
+// form's had been, which a chain of comparisons, each of whose values the
+// register code makes with a branch, takes 71 of (AWFY Json's isDigit).
+const pureCode = 80
 
 // pureBody marks rc's code LeafPure where it is a body the VM's frameless
 // evaluator takes (pureCallAt): no binding but its parameters, which it

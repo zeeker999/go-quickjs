@@ -448,8 +448,7 @@ func (r *Runtime) regExtrasLetGo() {
 // regLegacyArgs is the arguments f.arguments reads of register frame f, at
 // depth i, made by regCallW or regEnterW, which keep no slice of them: the
 // count from its caller's call instruction -- the one call of the caller's
-// register code at the stack form's instruction its pc names, which is
-// where a call sets it -- the parameters from the window, as they are now,
+// register code its pc is past, which is where a call sets it -- the parameters from the window, as they are now,
 // and the arguments past them from what regKeepWindow kept. A frame
 // regDirectLegacy entered has every argument kept, its parameters read
 // from the window as well. It reports false where the caller runs no

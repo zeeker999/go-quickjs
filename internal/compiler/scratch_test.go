@@ -2,7 +2,6 @@ package compiler
 
 import (
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/go-quickjs/go-quickjs/internal/ast"
@@ -56,7 +55,6 @@ func TestCompilerStateReuse(t *testing.T) {
 				}
 				upvalues = exact(captured.Upvalues)
 				copy := *fn
-				copy.Code, copy.Lines = exact(fn.Code), exact(fn.Lines)
 				copy.Names, copy.Constants = exact(fn.Names), exact(fn.Constants)
 				copy.Locals, copy.Upvalues = exact(fn.Locals), exact(fn.Upvalues)
 				snapshot = &copy
@@ -72,30 +70,6 @@ func TestCompilerStateReuse(t *testing.T) {
 		if fn == nil || !reflect.DeepEqual(first, snapshot) || !reflect.DeepEqual(captured.Upvalues, upvalues) {
 			t.Fatal("returning the pool changed a returned function")
 		}
-	}
-}
-
-// The size a function's tables are given comes from its own source: the
-// wrapper of a bundle spans the bundle, and has little code of its own.
-func TestReserveLeavesNestedFunctionsOut(t *testing.T) {
-	body := strings.Repeat("x = x + 1;\n", 2000)
-	src := "(function wrapper() {\n" +
-		"function inner() {" + body + "}\n" +
-		"var arrow = () => {" + body + "};\n" +
-		"class C { m() {" + body + "} }\n" +
-		"})"
-	prog, err := parser.Parse(src, parser.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	wrapper := prog.Body[0].(*ast.ExprStmt).X.(*ast.FuncLit)
-	own := wrapper.End - wrapper.Start - scanFunction(wrapper, false).innerBytes
-	if own >= reserveMin {
-		t.Errorf("the wrapper's own source is %d of its %d bytes", own, wrapper.End-wrapper.Start)
-	}
-	inner := wrapper.Body[0].(*ast.FuncDecl).Fn
-	if got := scanFunction(inner, false).innerBytes; got != 0 {
-		t.Errorf("a function with none written in it has %d bytes of them", got)
 	}
 }
 

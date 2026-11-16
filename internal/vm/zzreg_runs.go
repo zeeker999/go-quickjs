@@ -459,7 +459,7 @@ stepped:
 // built-in, unread, where reading it would find it running nothing to
 // find it (regexpLitMethod), and read
 // otherwise, at the instruction's position or, for one that calls, at the
-// stack form's instruction of the literal (Aux) -- and, with RLitCall,
+// position of the pc Aux (Lines) -- and, with RLitCall,
 // the method called with the window's one argument as a call_method_w
 // marked RMarkLitRecv calls it.
 //

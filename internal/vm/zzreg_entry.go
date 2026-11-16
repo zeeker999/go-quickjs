@@ -62,7 +62,10 @@ func (r *Runtime) regExtend(cl *closure, c *regCode) {
 		names := make([]Atom, n)
 		copy(names, cl.names)
 		for i := len(cl.names); i < n; i++ {
-			names[i] = r.atoms.intern(rc.Names[i])
+			// The compiler's names and strings are slices of the source,
+			// which under a limit a value made of them must not hold
+			// (ownEvaluator).
+			names[i] = r.atoms.intern(r.ownText(rc.Names[i]))
 		}
 		cl.names = names
 	}
@@ -70,7 +73,9 @@ func (r *Runtime) regExtend(cl *closure, c *regCode) {
 		consts := make([]Value, n)
 		copy(consts, cl.consts)
 		for i := len(cl.consts); i < n; i++ {
-			consts[i] = r.materialize(rc.Constants[i])
+			k := rc.Constants[i]
+			k.Str, k.Flags = r.ownText(k.Str), r.ownText(k.Flags)
+			consts[i] = r.materialize(k)
 		}
 		cl.consts = consts
 	}

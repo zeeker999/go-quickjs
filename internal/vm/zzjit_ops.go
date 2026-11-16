@@ -21,7 +21,7 @@ func (r *Runtime) jitOpPlain(ctx *abi.Context) bool {
 	// (jitGoCallInstr): the code's closure and its bytecode, three loads
 	// one after another, are read only for what needs them.
 	in, n := jitGoCallInstr(ctx.GoOp)
-	if n > abi.MaxGoArgs || n != jitcompile.GoOperands(in) {
+	if n > abi.MaxGoArgs || n != jitcompile.GoOperands(in.Op, in.A) {
 		return false
 	}
 	if in.Op == bytecode.OpTemplateObject {
@@ -46,7 +46,7 @@ func (r *Runtime) jitOpPlain(ctx *abi.Context) bool {
 // that is a primitive, converted, or defined on an ordinary object; a
 // tagged template's strings. It reports false for the rest, having
 // changed nothing.
-func (r *Runtime) jitOpFrameless(cl *closure, in bytecode.Instr, args []Value) (Value, bool) {
+func (r *Runtime) jitOpFrameless(cl *closure, in jitInstr, args []Value) (Value, bool) {
 	if r.meter != nil {
 		// What they allocate is charged to the memory limit, which may
 		// throw.

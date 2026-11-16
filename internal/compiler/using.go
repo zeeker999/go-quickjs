@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/go-quickjs/go-quickjs/internal/ast"
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
 // Using declarations.
@@ -65,10 +64,6 @@ func (c *compiler) compileDispose(n *ast.DisposeStmt) {
 	if !ok {
 		c.errorf(n.Start, "internal error: no resources to dispose of")
 		return
-	}
-	flags := uint32(0)
-	if c.finallyRecord {
-		flags |= bytecode.DisposeRecord
 	}
 	if !n.Async {
 		return

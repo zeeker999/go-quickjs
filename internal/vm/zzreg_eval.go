@@ -2,7 +2,7 @@ package vm
 
 import "github.com/go-quickjs/go-quickjs/internal/bytecode"
 
-// regDirectEval is direct_eval, the stack form's direct_eval: a call
+// regDirectEval is direct_eval: a call
 // written eval(...), whose window holds the callee, its receiver and the
 // arguments, or an array of them. Where the callee is the realm's eval and
 // the first argument a string, the code runs in the frame's scope
@@ -127,9 +127,9 @@ func (r *Runtime) evalLinked(caller *frame, cl *closure) (Value, error) {
 }
 
 // The with statement's operations and the probes of a name a with
-// object or an eval's variable may answer, as the stack form's with_push,
-// with_pop, with_get, with_get_this, with_delete, with_set, with_resolve,
-// with_get_under and with_put_under do them.
+// object or an eval's variable may answer: with_push, with_pop, with_get,
+// with_get_this, with_delete, with_set, with_resolve, and with_read and
+// with_write of a reference read and then written back.
 
 // regWithPush is with_push.
 func (r *Runtime) regWithPush(f *frame, c *regCode, pc int, w bytecode.RInstr, regs *[1 << 16]Value) error {

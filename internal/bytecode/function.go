@@ -2,21 +2,8 @@ package bytecode
 
 import (
 	"fmt"
-	"strings"
 	"unsafe"
 )
-
-// Instr is a single instruction. Op selects the operation; A and B carry
-// operands whose meaning depends on the opcode, documented alongside each in
-// op.go.
-type Instr struct {
-	Op Op
-	A  uint32
-	B  uint32
-}
-
-// StrFreeze reports whether in is str_freeze (StrFreezeA).
-func (in Instr) StrFreeze() bool { return in.Op == OpArgumentsIndex && in.A == StrFreezeA }
 
 // ConstKind tags the entries of a function's constant pool.
 //
@@ -40,7 +27,7 @@ type Constant struct {
 	Num  float64
 	Str  string
 	// Fn is set for ConstFunction: a nested function's compiled template,
-	// which OpClosure turns into a closure.
+	// which closure_w turns into a closure.
 	Fn *Function
 	// Flags carries a regular expression's flags for ConstRegExp.
 	Flags string
@@ -80,8 +67,8 @@ type UpvalueDesc struct {
 	ByValue bool
 	// Assigned says the closure, or one it makes, or one that closure
 	// makes in turn, may assign the binding: an instruction of the
-	// closure's stores to it (OpSetUpvalue, OpSetUpvalueCheck,
-	// OpInitUpvalue), a nested function's upvalue forwarding it is
+	// closure's stores to it (set_upval and its checked forms), a nested
+	// function's upvalue forwarding it is
 	// Assigned, or the closure has a direct eval, which may assign any, a
 	// strict one's too. The compiler records it as the closure's compile
 	// ends, its nested functions' before. In what was padding after
@@ -252,10 +239,8 @@ type FunctionDebug struct {
 }
 
 // Statement is where a statement begins in code compiled for a debugger: a
-// place it can stop.
+// place it can stop, its register code's debug instruction of its index.
 type Statement struct {
-	// PC is the statement's OpDebugStmt.
-	PC uint32
 	// Pos is the byte offset in the script's text the statement starts at.
 	Pos int32
 	// Scope is the index in EvalScopes of what is in scope there, the
@@ -263,7 +248,8 @@ type Statement struct {
 	Scope uint32
 }
 
-// SourceLoc attributes instructions to a source position, for stack traces.
+// SourceLoc attributes register instructions to a source position, for
+// stack traces (RegCode.Lines).
 type SourceLoc struct {
 	// PC is the index of the first instruction covered by this entry.
 	PC uint32
@@ -308,12 +294,6 @@ func HashLiteralKeys(keys []string) uint64 {
 }
 
 type Function struct {
-	// ParamEnd is the pc just past the parameter prologue, which is where a
-	// generator's body proper begins. A generator binds its parameters when it
-	// is called and resumes from here, so that a destructuring error in a
-	// parameter throws at the call rather than at the first next().
-	ParamEnd uint32
-
 	Name string
 	// ParamCount is how many arguments the interpreter copies positionally into
 	// the frame's slots. It excludes a rest parameter, which is filled from the
@@ -327,12 +307,7 @@ type Function struct {
 	// LocalCount is the size of the frame's local slice, covering parameters,
 	// declared variables and compiler temporaries.
 	LocalCount int
-	// MaxStack is the deepest the operand stack gets, so a frame can be
-	// allocated once at the right size.
-	MaxStack int
-
-	Code      []Instr
-	Constants []Constant
+	Constants  []Constant
 	// Names holds the property and variable names referenced by instructions
 	// that take a name operand, kept separate from Constants so that the VM can
 	// pre-intern them all into atoms at load time.
@@ -413,9 +388,9 @@ type Function struct {
 	// own return does: a construction's result is its receiver whichever
 	// return it takes, as one that inlines it may take it.
 	ReturnsReceiver bool
-	// HasTailCall says the body has a call in tail position, OpTailCall,
-	// OpTailCallMethod or OpTailDirectEval, which can end its frame for the
-	// callee's.
+	// HasTailCall says the body has a call in tail position (RCallWT,
+	// RCallMWT, or a direct eval marked RMarkTail), which can end its frame
+	// for the callee's.
 	HasTailCall bool
 	// IsExprBody marks a concise arrow body, which affects nothing at runtime
 	// but is useful when printing a function's source.
@@ -448,19 +423,18 @@ type Function struct {
 	// FrameCallee is, as are the two below.
 	AssignsParams bool
 	// MakesArguments says the code makes the arguments object, or hands
-	// the call's arguments on to apply: an OpGetArguments, an
-	// OpLazyArguments or an OpApplyArguments. Reads by index and the count
-	// alone (OpArgumentsIndex, OpArgumentsLength) make none.
+	// the call's arguments on to apply: a read of the object, or its
+	// apply. Reads by index and the count alone make none.
 	MakesArguments bool
 	// SuperForwards says the code has a super(...) of the call's own
-	// arguments (OpSuperCall's SuperForward), as a derived class's default
-	// constructor has, which hands them on.
+	// arguments, as a derived class's default constructor has, which hands
+	// them on.
 	SuperForwards bool
 	// Script is the source text the function was compiled from, which its
-	// Lines are positions in, and Start is where in it the function begins.
+	// register code's Lines are positions in, and Start is where in it the
+	// function begins.
 	Script *Script
 	Start  int32
-	Lines  []SourceLoc
 	// Debug is what code compiled for a debugger has of its own, and nil
 	// for any other code, which pays one pointer for it. Such code is
 	// compiled for the one runtime that runs it, so it is not shared as
@@ -502,7 +476,7 @@ type Function struct {
 	// reference or call, new.target, or a direct eval, which may read
 	// either (UsesNewTarget). False for any other function.
 	ReadsMaker bool
-	// HasYieldStar says the code has a yield* (OpYieldStar).
+	// HasYieldStar says the code has a yield*.
 	HasYieldStar bool
 	// Reg is the code's register code (docs/register-interpreter.md),
 	// read with RegCode: a function's, compiled when it is first asked
@@ -545,134 +519,6 @@ func (f *Function) String() string {
 		return "<anonymous>"
 	}
 	return f.Name
-}
-
-// Disassemble renders a function's code in a readable form. It exists for
-// debugging the compiler and is not used at runtime.
-func (f *Function) Disassemble() string {
-	var sb strings.Builder
-	f.disassembleTo(&sb, "")
-	return sb.String()
-}
-
-func (f *Function) disassembleTo(sb *strings.Builder, indent string) {
-	fmt.Fprintf(sb, "%sfunction %s (params=%d locals=%d stack=%d)\n",
-		indent, f, f.ParamCount, f.LocalCount, f.MaxStack)
-
-	for pc := range f.Code {
-		fmt.Fprintf(sb, "%s  %4d  %s\n", indent, pc, f.FormatInstr(pc))
-	}
-
-	// Nested functions follow their parent, indented.
-	for _, c := range f.Constants {
-		if c.Kind == ConstFunction && c.Fn != nil {
-			sb.WriteByte('\n')
-			c.Fn.disassembleTo(sb, indent+"    ")
-		}
-	}
-}
-
-// FormatInstr renders the instruction at pc as Disassemble does: its
-// operation, its operands, and what an operand names -- a constant, a name, a
-// local or an upvalue -- after a semicolon.
-func (f *Function) FormatInstr(pc int) string {
-	in := f.Code[pc]
-	if in.StrFreeze() {
-		return "str_freeze"
-	}
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "%-20s", in.Op)
-	switch in.Op {
-	case OpPushConst, OpClosure, OpNewRegExp:
-		fmt.Fprintf(&sb, " %d", in.A)
-		if int(in.A) < len(f.Constants) {
-			fmt.Fprintf(&sb, " ; %s", f.Constants[in.A])
-		}
-	case OpGetProp, OpSetProp, OpGetPropThis, OpDefineField,
-		OpGetGlobal, OpGetGlobalOpt, OpSetGlobal, OpDefineGlobalVar,
-		OpDefineGlobalFunc, OpSetName, OpGetSuperProp, OpSetSuperProp,
-		OpCheckGlobalRef, OpAssertResolved,
-		OpGetPrivate, OpSetPrivate, OpDefinePrivate, OpPrivateIn,
-		OpDefinePrivateMethod,
-		OpGetPrivateMethod, OpDefineGetter, OpDefineSetter:
-		fmt.Fprintf(&sb, " %d", in.A)
-		if int(in.A) < len(f.Names) {
-			fmt.Fprintf(&sb, " ; %q", f.Names[in.A])
-		}
-	case OpGetLocal, OpSetLocal, OpPutLocal, OpGetLocalCheck,
-		OpSetLocalCheck, OpInitLocal, OpCloseUpvalues:
-		fmt.Fprintf(&sb, " %d", in.A)
-		if int(in.A) < len(f.Locals) {
-			fmt.Fprintf(&sb, " ; %q", f.Locals[in.A].Name)
-		}
-	case OpGetUpvalue, OpSetUpvalue, OpGetUpvalueCheck, OpSetUpvalueCheck,
-		OpInitUpvalue:
-		fmt.Fprintf(&sb, " %d", in.A)
-		if int(in.A) < len(f.Upvalues) {
-			fmt.Fprintf(&sb, " ; %q", f.Upvalues[in.A].Name)
-		}
-	case OpJump, OpJumpIfFalse, OpJumpIfTrue, OpJumpIfFalseKeep,
-		OpJumpIfTrueKeep, OpJumpIfNullish, OpJumpIfNotNullish,
-		OpPushCatch, OpPushFinally, OpIterNextOrJump:
-		fmt.Fprintf(&sb, " -> %d", in.A)
-	case OpAsyncIterClose:
-		switch in.B {
-		case 0:
-			fmt.Fprintf(&sb, " -> %d", in.A)
-		case 1:
-			sb.WriteString(" check")
-		default:
-			sb.WriteString(" done")
-		}
-	case OpJumpIfCmpFalse:
-		fmt.Fprintf(&sb, " %s -> %d", Op(in.B), in.A)
-	case OpPushInt:
-		fmt.Fprintf(&sb, " %d", int32(in.A))
-	case OpClearLocal, OpIncLocal, OpDecLocal, OpLazyArguments:
-		fmt.Fprintf(&sb, " %d ; %s", in.A, f.localName(in.A))
-	case OpGetLocal2, OpSetLocalGet, OpGetLocalIndex:
-		fmt.Fprintf(&sb, " %d %d ; %s %s", in.A, in.B, f.localName(in.A), f.localName(in.B))
-	case OpUpdateLocal:
-		fmt.Fprintf(&sb, " %d %s ; %s", in.A, updateString(in.B), f.localName(in.A))
-	case OpGetLocalIndexUpdate:
-		fmt.Fprintf(&sb, " %d %d %s ; %s %s", in.A, in.B>>2, updateString(in.B&3), f.localName(in.A), f.localName(in.B>>2))
-	case OpBinImm:
-		fmt.Fprintf(&sb, " %s %d", Op(in.B), int32(in.A))
-	case OpBinLocal:
-		fmt.Fprintf(&sb, " %s %d ; %s", Op(in.B), in.A, f.localName(in.A))
-	case OpLocalBinImm:
-		k := in.A & (1<<24 - 1)
-		fmt.Fprintf(&sb, " %d %s %d ; %s", k, Op(in.A>>24), int32(in.B), f.localName(k))
-	default:
-		if in.A != 0 || in.B != 0 {
-			fmt.Fprintf(&sb, " %d", in.A)
-			if in.B != 0 {
-				fmt.Fprintf(&sb, " %d", in.B)
-			}
-		}
-	}
-	return strings.TrimRight(sb.String(), " ")
-}
-
-// localName is local k's name, quoted, for a disassembly.
-func (f *Function) localName(k uint32) string {
-	if int(k) < len(f.Locals) {
-		return fmt.Sprintf("%q", f.Locals[k].Name)
-	}
-	return "?"
-}
-
-// updateString is an update_local's flags as the operator they make: ++x,
-// x++, --x or x--.
-func updateString(flags uint32) string {
-	op := "++"
-	if flags&UpdateDec != 0 {
-		op = "--"
-	}
-	if flags&UpdatePostfix != 0 {
-		return "x" + op
-	}
-	return op + "x"
 }
 
 func (c Constant) String() string {

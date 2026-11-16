@@ -2,7 +2,6 @@ package compiler
 
 import (
 	"github.com/go-quickjs/go-quickjs/internal/ast"
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/compiler/regcomp"
 )
 
@@ -242,9 +241,6 @@ func (c *compiler) compileLocalAppend(n *ast.Assign) {
 	c.noteWrite(n.Target.(*ast.Ident), regcomp.Res{Kind: regcomp.ResLocal, Index: l.slot})
 	c.reg.NoteAppend(n)
 	c.compileExpr(n.Value)
-	// Not by emit, which would fuse it with a local or a constant before it,
-	// into an instruction with no room for the mark.
-	c.fn.Code = append(c.fn.Code, bytecode.Instr{Op: bytecode.OpAdd, B: bytecode.AddOwned})
 }
 
 // compileOwnedAppend compiles an addition ownedAppend took.

@@ -1013,8 +1013,8 @@ func (r *Runtime) regOf(cl *closure) *regCode {
 	return c
 }
 
-// regStackOp is the stack form's operator of each specialised operation,
-// whose slow path is the stack form's.
+// regStackOp is the operator of each specialised operation, whose slow
+// path is the operator's.
 var regStackOp = [256]bytecode.Op{
 	bytecode.RAndI: bytecode.OpBitAnd, bytecode.ROrI: bytecode.OpBitOr, bytecode.RXorI: bytecode.OpBitXor,
 	bytecode.RShlI: bytecode.OpShl, bytecode.RShrI: bytecode.OpShr, bytecode.RUShrI: bytecode.OpUShr,

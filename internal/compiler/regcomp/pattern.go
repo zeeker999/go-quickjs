@@ -86,7 +86,7 @@ func (g *gen) prepareLeaf(el ast.Expr, declaring bool) leaf {
 	}
 	if id, ok := l.target.(*ast.Ident); ok && g.withs[id] != nil && g.withs[id].probe.Op == bytecode.OpWithResolve {
 		// The name is resolved before the value it receives is read,
-		// as the stack form's prepareRef resolves it.
+		// as the walk's prepareRef resolves it.
 		g.withResolve(id)
 		return l
 	}
@@ -133,8 +133,8 @@ func (g *gen) storeRef(l leaf, v int, declaring bool) {
 	g.pattern(l.target, v, declaring)
 }
 
-// storeLeaf stores v into the binding id names, as the record resolved the
-// stack form's store of it.
+// storeLeaf stores v into the binding id names, as the record resolved its
+// store.
 func (g *gen) storeLeaf(id *ast.Ident, v int, declaring bool) {
 	res, ok := g.rec.WriteOf(id)
 	if !ok {
@@ -315,7 +315,7 @@ func patternNames(target ast.Expr, out []*ast.Ident) []*ast.Ident {
 
 // paramsAside moves the argument of each parameter a read checks or a
 // closure may see to a register of its own, where it waits while the
-// parameter is in its dead zone (the stack form's params_to_dead_zone);
+// parameter is in its dead zone;
 // -1 for the others, whose arguments stay in place.
 func (g *gen) paramsAside() []int {
 	args := make([]int, len(g.lit.Params))
@@ -334,7 +334,7 @@ func (g *gen) paramsAside() []int {
 }
 
 // params binds a list of parameters with a default, a pattern or a rest,
-// one at a time, in order, as the stack form's bindParameters: each from
+// one at a time, in order, as the walk's bindParameters walks them: each from
 // its argument, args[i] where paramsAside took it aside, a default where it
 // is undefined, the rest an array of the arguments from its place, and a
 // pattern unpacked.

@@ -111,8 +111,8 @@ func (r *Runtime) regNewObjectLit(f *frame, c *regCode, k *regKept, regs *[1 << 
 }
 
 // regNewArrayE is new_array_empty: the literal's arrayEmptyNode, made
-// here, its site in the closure's arrays, named to native code by the
-// stack form's pc. Making an array throws nothing, so the frame's pc is
+// here, its site in the closure's arrays, named to native code by its
+// pc. Making an array throws nothing, so the frame's pc is
 // left as it is.
 func (r *Runtime) regNewArrayE(f *frame, c *regCode, k *regKept, regs *[1 << 16]Value) {
 	pc := k.pc - 1

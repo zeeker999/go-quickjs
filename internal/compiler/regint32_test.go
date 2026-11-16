@@ -10,9 +10,9 @@ import (
 // The patterns regcomp makes mul_imm and the int32 forms of, and those it
 // leaves alone: x * k and k * x of a 16-bit k, not a k past it;
 // (x + y) | 0, (x - y) | 0, (x + k) | 0 and (x - k) | 0, the last with X
-// RAddII32Sub and SC -k, and its Aux the stack instruction of the | 0,
-// at the position the + or the - has; not a + of a string, a | 1, a product's
-// | 0, nor x - -32768, whose -k is past 16 bits. A bitwise operator's
+// RAddII32Sub and SC -k, its Aux a pc past the code's with the | 0's
+// position, the instruction at the position the + or the - has; not a + of
+// a string, a | 1, a product's | 0, nor x - -32768, whose -k is past 16 bits. A bitwise operator's
 // | 0 is left out where an operand is a number literal or a >>>, never
 // of two unknown operands.
 func TestRegInt32Forms(t *testing.T) {

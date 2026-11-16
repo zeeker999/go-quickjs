@@ -441,12 +441,6 @@ func (c *compiler) compileStatement(s ast.Stmt) {
 			} else {
 				c.compileExpr(n.Arg)
 			}
-			if c.fn.Async && c.fn.Generator {
-				// An async generator awaits what it returns, which takes a
-				// turn: `return undefined` and `return` differ by exactly that
-				// turn, and a program watching the queue can tell.
-			}
-		} else {
 		}
 		c.emitReturnValue(n.Start)
 
@@ -471,7 +465,7 @@ func (c *compiler) compileStatement(s ast.Stmt) {
 		c.compileLabeled(n)
 
 	case *ast.DebuggerStmt:
-		// Only code compiled for a debugger stops here, at the OpDebugStmt
+		// Only code compiled for a debugger stops here, at the debug instruction
 		// debugStatement gave it; anything else runs on.
 
 	case *ast.ImportDecl:
@@ -634,8 +628,6 @@ func (c *compiler) emitReturnValue(pos int) {
 			}
 			c.unwindExits(len(c.exits), ctx.exits)
 		}
-		for d := c.handlerDepth; d >= ctx.handlers; d-- {
-		}
 		c.handlerDepth = savedDepth
 		return
 	}
@@ -678,9 +670,6 @@ func (c *compiler) storeVar(name string) {
 				res = regcomp.Res{}
 			}
 			c.noteWrite(c.regIdent, res)
-		}
-		if c.fn.Upvalues[idx].TDZ {
-		} else {
 		}
 		return
 	}
@@ -839,13 +828,6 @@ func (c *compiler) compileFor(n *ast.ForStmt) {
 
 // compileForLoop compiles a three-clause for once its init clause has run.
 func (c *compiler) compileForLoop(n *ast.ForStmt, firstSlot uint32, perIteration bool) {
-
-	if perIteration {
-		// The first iteration gets its own copy too, before the test runs: a
-		// closure made in the init clause keeps what the init left there,
-		// rather than following what the loop goes on to do with it.
-	}
-
 	c.pushLoop(nil, true)
 
 	if n.Test != nil {
@@ -854,11 +836,6 @@ func (c *compiler) compileForLoop(n *ast.ForStmt, firstSlot uint32, perIteration
 	}
 	c.compileStatement(n.Body)
 
-	if perIteration {
-		// Snapshot the loop variable into any closure that captured it, before
-		// the update clause changes it. This runs on the `continue` path too,
-		// because that is also the end of an iteration.
-	}
 	if n.Update != nil {
 		c.debugExpr(n.Update)
 		c.compileExprForEffect(n.Update)
@@ -978,7 +955,6 @@ func (c *compiler) compileForAwaitBody(left ast.Node, body ast.Stmt, pos int) {
 	c.finallys = c.finallys[:len(c.finallys)-1]
 	c.emitAsyncClose(cur, busy, true)
 	c.emitAsyncClose(cur, busy, false)
-
 }
 
 // emitAsyncClose emits a for await's AsyncIteratorClose of the cursor in
@@ -1166,7 +1142,6 @@ func (c *compiler) compileTryFinally(pos int, body func(), finally []ast.Stmt) {
 	// The handler jumps here, having pushed its own record, and so do any
 	// returns that were routed through the clause.
 	c.compileFinallyClause(pos, finally, true)
-
 }
 
 // compileFinallyClause compiles a finally clause's statements, with the
@@ -1174,16 +1149,12 @@ func (c *compiler) compileTryFinally(pos int, body func(), finally []ast.Stmt) {
 // none, inlined after the try's normal completion.
 func (c *compiler) compileFinallyClause(pos int, finally []ast.Stmt, record bool) {
 	// What the finally clause produces is not the statement's value: the try
-	// block's is, so `try { 1 } finally { 2 }` is 1.
-	save := int32(-1)
+	// block's is, so `try { 1 } finally { 2 }` is 1, which a binding of its
+	// own keeps across the clause.
 	if c.completionSlot >= 0 {
 		name := fmt.Sprintf("%%cv%d", *c.hiddenCount)
 		*c.hiddenCount++
-		save = int32(c.declare(name, bindVar, pos))
-		// The clause starts with no value of its own. It matters only when it
-		// leaves abruptly -- a break or a continue written inside it carries
-		// what the clause itself produced, and undefined when it produced
-		// nothing, rather than what the try block had produced.
+		c.declare(name, bindVar, pos)
 	}
 	// The completion record sits beneath the clause's own operands, so a break
 	// or continue leaving the clause has to drop it: what it jumps to is not
@@ -1203,8 +1174,6 @@ func (c *compiler) compileFinallyClause(pos int, finally []ast.Stmt, record bool
 	if record {
 		c.popExit()
 	}
-	if save >= 0 {
-	}
 }
 
 // compileTryCatch compiles a try statement that has no finally clause.
@@ -1216,7 +1185,6 @@ func (c *compiler) compileTryCatch(n *ast.TryStmt) {
 		return
 	}
 	c.handlerDepth++
-	first := c.nextSlot
 	c.beginScope()
 	c.compileStatements(n.Block)
 	c.endScope()
@@ -1224,16 +1192,9 @@ func (c *compiler) compileTryCatch(n *ast.TryStmt) {
 	// and the code after the statement after it was popped.
 	c.handlerDepth--
 
-	// A throw leaves the block's scopes without the close at their ends:
-	// a binding a closure captured is closed here, or the block run again,
-	// in a loop, would share it with that closure.
-	if c.capturedFrom(first) {
-	}
 	c.beginScope()
 	if n.Catch.Param != nil {
-		// The thrown value is on the stack when the handler runs.
 		c.bindCatchParam(n.Catch, n.Catch.Param)
-	} else {
 	}
 	c.compileStatements(n.Catch.Body)
 	c.endScope()
@@ -1328,19 +1289,8 @@ func (c *compiler) unwindExits(top, down int) int {
 		for c.handlerDepth > c.exitHandlers[i] {
 			c.handlerDepth--
 		}
-		c.emitExit(c.exits[i])
 	}
 	return min(top, down)
-}
-
-// emitExit undoes one exit.
-func (c *compiler) emitExit(e pendingExit) {
-	switch e {
-	case exitCursor:
-	case exitDrop:
-	case exitWith:
-	case exitCompletion:
-	}
 }
 
 // unwindTo emits what a break or continue owes on its way to target: the
@@ -1398,9 +1348,8 @@ func (c *compiler) unwindTo(target *loopCtx) {
 		// What the clause produces is not the jump's value, as for the
 		// clause compileFinallyClause compiles: the try block's is, unless
 		// the clause itself leaves abruptly.
-		cv := int32(-1)
 		if c.completionSlot >= 0 {
-			cv = int32(c.declare(fmt.Sprintf("%%cv%d", *c.hiddenCount), bindVar, 0))
+			c.declare(fmt.Sprintf("%%cv%d", *c.hiddenCount), bindVar, 0)
 			*c.hiddenCount++
 		}
 		end := c.reg.BeginFinally(saved[i].body)
@@ -1411,8 +1360,6 @@ func (c *compiler) unwindTo(target *loopCtx) {
 		c.finallyRecord = savedRecord
 		c.endScope()
 		end()
-		if cv >= 0 {
-		}
 		c.exits, c.exitHandlers = savedExits, savedExitHandlers
 	}
 	// What is left is the handler of a catch clause the jump leaves without
@@ -1492,10 +1439,6 @@ func (c *compiler) compileFieldInit(n *ast.FieldInit) {
 	}
 	c.compileExpr(n.Key)
 	c.compileExpr(n.Value)
-	// A field named by a computed key names its initializer too, but only once
-	// the key is known.
-	if isAnonymousFnDef(n.Value) {
-	}
 }
 
 // compileIterationBody binds a for-in/of head to the value on the stack and

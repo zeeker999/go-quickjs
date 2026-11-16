@@ -207,8 +207,8 @@ func (r *Runtime) regLeave(st *regState) {
 	r.regFree = st
 }
 
-// at sets the frame's pc to the stack form's instruction of pc, which a
-// stack trace or an error's position reads, and keeps the pc past it, for
+// at sets the frame's pc past the instruction at pc, which a stack trace or
+// an error's position reads (RegCode.Lines), and keeps that pc, for
 // an instruction that may throw or run code; it returns the frame.
 func (st *regState) at(pc int) *frame {
 	st.kept.pc = pc + 1

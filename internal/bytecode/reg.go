@@ -14,8 +14,9 @@ import (
 // 0 is the function called, register 1 its this, and the parameters follow
 // from register 2, in order; then the function's bindings that live in
 // registers, and then the temporaries (docs/register-interpreter.md, "The
-// frame"). Where a reader needs a local by its stack-form slot -- a direct
-// eval, the debugger -- RegCode.LocalReg maps each local to its register.
+// frame"). Where a reader needs a local by its slot in the function's
+// Locals -- a direct eval, the debugger -- RegCode.LocalReg maps each local
+// to its register.
 //
 // An instruction is one 64-bit word, read as a struct of an operation and
 // four operands:
@@ -108,8 +109,8 @@ func (w RInstr) WithA(a uint16) RInstr {
 
 // The register operations. R[n] is register n of the frame; an offset is
 // relative to the instruction after the jump. Each operation that reads a
-// property, a global or a name keeps the stack form's cache site, so that
-// the two forms of a function share its caches.
+// property, a global or a name names its cache site, one of the function's
+// PropSites, which the closures of its template in a runtime share.
 const (
 	RNop ROp = iota
 	// RMove: R[A] = R[B].
@@ -163,15 +164,14 @@ const (
 	// each turn.
 	RIterNext
 	// RAdd, RSub, RMul: R[A] = R[B] op R[C]. An RAdd whose X is
-	// RAddAppend is an append to an upvalue the stack compiler made one
-	// (AddOwned's mark on its set_upvalue): R[B] the binding's string,
+	// RAddAppend is an append to an upvalue the walk found one (Record's
+	// Appends): R[B] the binding's string,
 	// which the VM may grow in place (its strAppend); a tier that ignores
 	// the mark adds, which is always right.
 	RAdd
 	RSub
 	RMul
-	// RBin: R[A] = R[B] op R[C], where X is the stack form's Op of the
-	// operator: a division, a remainder, a power, a bitwise operator or a
+	// RBin: R[A] = R[B] op R[C], where X is the Op of the operator: a division, a remainder, a power, a bitwise operator or a
 	// shift, an equality or a relational comparison.
 	RBin
 	// RLit is a RegExp literal's exec or test, a per-turn step of the
@@ -179,8 +179,8 @@ const (
 	// given back, and R[A] its method, exec or test (RLitTest), not read
 	// where it is the realm's built-in,
 	// which reading runs nothing to find, and read otherwise -- at the
-	// instruction's position, or with RLitCall at the stack form's
-	// instruction Aux. With RLitCall the method is then called with the
+	// instruction's position, or with RLitCall at the position of the pc
+	// Aux (Lines). With RLitCall the method is then called with the
 	// window's one argument, R[A+2], which nothing can change by the read,
 	// R[B] = its value, the literal given back as RMarkLitRecv's call
 	// gives it; RLitDead says nothing reads the value but its truth.
@@ -190,16 +190,16 @@ const (
 	// RInc and RDec: R[A] = ToNumeric(R[B]) + 1 or - 1.
 	RInc
 	RDec
-	// RUnary: R[A] = op R[B], where X is the stack form's Op: neg, pos,
-	// not, bit_not or typeof.
+	// RUnary: R[A] = op R[B], where X is the Op: neg, pos, not, bit_not,
+	// typeof, to_number or to_numeric.
 	RUnary
 	// RJmp: jump by int32(BC).
 	RJmp
 	// RJmpF and RJmpT: jump by int32(BC) if R[A] is falsy or truthy.
 	RJmpF
 	RJmpT
-	// RCallWT and RCallMWT are RCallW and RCallMW in tail position, as the
-	// stack form makes tail_call: once the stack is deep, the frame is
+	// RCallWT and RCallMWT are RCallW and RCallMW in tail position (Record's
+	// Tails): once the stack is deep, the frame is
 	// given to the callee in place or given up. Ops of their own, so that the ordinary call checks nothing
 	// of it.
 	RCallWT
@@ -343,7 +343,7 @@ const (
 	RArgsIndex
 	// RConcat: R[A] = the string of R[B] ... R[B+C-1] joined, each a
 	// string or a number, or converted by ToString: a chain of + after a
-	// string literal (the stack form's concat), one string made rather than
+	// string literal, one string made rather than
 	// one an addition.
 	RConcat
 	// RStrPart: R[A] = "" + R[A] where R[A] is neither a string nor a
@@ -395,15 +395,15 @@ const (
 	// anything else added as RAdd adds it. Its value is the local's.
 	RAppend
 	// RStrFreeze: R[A], a read of a binding an append grows, is no longer
-	// the binding's alone (the stack form's str_freeze, StrFreezeA).
+	// the binding's alone (Record's Freezes).
 	RStrFreeze
 	// RCharCodeAt: R[A] = R[B].charCodeAt(R[X]), the method read at site
 	// C and called with the argument in register X, a local no one else
 	// writes: a string's code unit read where the method is the built-in
 	// and the argument a number, anything else the read and the call
 	// get_method_w and call_method_w make. It is placed at the call; Aux
-	// is the stack instruction of the read, where the read's errors are
-	// placed.
+	// is the pc past the code's whose position the read's errors take
+	// (Lines).
 	RCharCodeAt
 	// The operations that run per turn of no hot loop the suites have:
 	// declarations, classes, destructuring, generators, with, eval. Each is
@@ -424,8 +424,8 @@ const (
 	// it marks the cursor done, so that the next loop may take it.
 	RIterClose
 	RIterCloseThrow
-	// Top-level code's declarations, each what the stack form's instruction
-	// of the same name does, of the name Names[B] and the flag C:
+	// Top-level code's declarations, each what the Op of the same name
+	// says, of the name Names[B] and the flag C:
 	// check_global_lex, check_global_var, define_global_var,
 	// declare_global_lex, and define_global_func of the function R[A].
 	// RInitGlobalLex initializes the script's lexical binding Names[B]
@@ -501,8 +501,7 @@ const (
 	// ReferenceError of Names[B] where R[A] says it did not (assert_resolved).
 	RCheckGlobalRef
 	RAssertResolved
-	// Classes' (each what the stack form's instruction of the same name
-	// does): RNewClass makes R[A] the constructor of a class extending
+	// Classes': RNewClass makes R[A] the constructor of a class extending
 	// R[B] (new_class); RSetFieldInit gives constructor R[A] the
 	// instances' field initializer R[B] (set_field_init); RDefineMethod
 	// defines R[A]'s method Names[C] = R[B], not enumerable (define_method);
@@ -624,11 +623,10 @@ const (
 	RDeleteVar
 	// RImport: R[A] = import(R[B]), import.defer or import.source by
 	// the phase C>>2 (an Import constant), with the options R[B+1] where C&3
-	// is 2 (the stack form's import). RImportMeta: R[A] = import.meta.
+	// is 2. RImportMeta: R[A] = import.meta.
 	RImport
 	RImportMeta
-	// A scope with using declarations (the stack form's
-	// new_dispose_capability, add_disposable and dispose):
+	// A scope with using declarations:
 	// RNewDispose: R[A] = a new stack of resources; RAddDisposable
 	// adds R[B] to R[A]'s, an await using's where C is 1;
 	// RDispose disposes of R[A]'s, a throw of R[B] leaving the scope
@@ -641,8 +639,7 @@ const (
 	RAddDisposable
 	RDispose
 	RDisposeStep
-	// RDirectEval is a call written eval(...) (the stack form's
-	// direct_eval): the callee R[A], its receiver R[A+1] and C arguments
+	// RDirectEval is a call written eval(...): the callee R[A], its receiver R[A+1] and C arguments
 	// from R[A+2], or, where Aux has RDirectEvalSpread, an array of them
 	// in R[A+2]; R[B] = what it gives. Where the callee is the realm's
 	// eval and the first argument a string, the code runs in the
@@ -674,8 +671,8 @@ const (
 	// (throw_reference_error): sloppy code's assignment to a call, made
 	// once the call has been.
 	RThrowRef
-	// RDebug is a place code compiled for a debugger can stop (the
-	// stack form's debug_stmt): its index in the function's
+	// RDebug is a place code compiled for a debugger can stop: its index
+	// in the function's
 	// Debug.Statements in Aux, and B 1 for a debugger statement. It does
 	// nothing unless a debugger has asked to stop somewhere, or B is 1
 	// and one is listening.
@@ -722,7 +719,7 @@ const (
 	// intermediate stored. RAddII32: R[A] = ToInt32(R[B] + SC), with X
 	// RAddII32Sub where the source was R[B] - K (SC holds -K), which only
 	// the slow path reads: "5" - 1 is not "5" + -1. A BigInt result
-	// throws the | 's TypeError at the stack instruction Aux[pc]; every
+	// throws the | 's TypeError at the position of the pc Aux[pc]; every
 	// other throw is the + 's or the - 's, at the instruction's position.
 	RAddI32
 	RSubI32
@@ -819,8 +816,8 @@ const (
 	// of exec or replace is told so, to make no array or string.
 	RMarkDead = 1 << iota
 	// RMarkReuse marks a call of exec whose value goes to the local of
-	// register B, its Aux the stack form's call (execReuseOf): the array
-	// of a match may be made again in the memory of the last.
+	// register B, its Aux the bindings it stores to (MakeReuseAux): the
+	// array of a match may be made again in the memory of the last.
 	RMarkReuse
 	// RMarkLitRecv: the receiver is the RegExp lit_exec or lit_test made
 	// of the literal of constant Aux, given back to the literal where the
@@ -833,8 +830,8 @@ const (
 	// String.prototype's replace, split or match searching with it
 	// directly (regexpArgCall).
 	RMarkLitArg
-	// RMarkTail marks a direct eval in tail position, as the stack form
-	// makes it (tail_call): where it is an ordinary call and the stack is
+	// RMarkTail marks a direct eval in tail position (Record's Tails):
+	// where it is an ordinary call and the stack is
 	// deep, its frame is given up. The calls of the loop have ops of their
 	// own for it (RCallWT, RCallMWT).
 	RMarkTail
@@ -911,8 +908,8 @@ type RegCode struct {
 	CallSites int
 	// Aux is, for an instruction that needs one more operand than its word
 	// holds, that operand, by its pc: instanceof's cache site. Nil where no
-	// instruction needs one; for add_index, the stack instruction of its
-	// store, where the store's errors are placed.
+	// instruction needs one; for add_index, the pc past the code's whose
+	// position the store's errors take (Lines).
 	Aux []uint32
 	// Marks is each call's marks (RMarkDead, ...), by its pc; nil where no
 	// call has any.
@@ -926,7 +923,7 @@ type RegCode struct {
 	// (RNewObjectLit), each an index of the function's names, and
 	// ObjKeysHash each one's hash (HashLiteralKeys), 0 for more than
 	// MaxLiteralKeys: what the VM finds the realm's root for literals of
-	// those keys by, as the stack form's LiteralKeys.
+	// those keys by.
 	ObjKeys     [][]uint32
 	ObjKeysHash []uint64
 	// FarNames is, for an instruction whose name operand is RNameFar,

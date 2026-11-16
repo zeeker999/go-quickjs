@@ -2847,13 +2847,21 @@ func (fb *jitFeedback) WalkedCloseCell() uintptr {
 // (WalkedCloseCell).
 var _ [0]struct{} = [unsafe.Offsetof(protoCell{}.valid)]struct{}{}
 
+// jitInstr is an operation a call of Go makes (jitGoCallInstr): an
+// opcode of the shared vocabulary and its operands, as op.go documents
+// them for the opcode.
+type jitInstr struct {
+	Op bytecode.Op
+	A  uint32
+	B  uint32
+}
+
 // jitGoCallInstr is the call a call of Go makes (abi.Context's GoOp, which
-// native code writes): its instruction, as the bytecode has it at the
-// call, and how many operands it takes from the stack. Read from the
-// bytecode, it was three loads, one after another, at every call.
-func jitGoCallInstr(op uint64) (bytecode.Instr, int) {
+// native code writes): its operation, and how many operands it takes from
+// the stack.
+func jitGoCallInstr(op uint64) (jitInstr, int) {
 	argc := uint32(op>>abi.GoOpArgcShift) & 0xff
-	in := bytecode.Instr{Op: bytecode.OpCall, A: argc}
+	in := jitInstr{Op: bytecode.OpCall, A: argc}
 	n := int(argc) + 1
 	switch op >> abi.GoOpKindShift & 0xff {
 	case abi.GoCallMethod:
@@ -2863,41 +2871,41 @@ func jitGoCallInstr(op uint64) (bytecode.Instr, int) {
 		in.Op = bytecode.OpNew
 	case abi.GoCallStep:
 		// A loop's step, its cursor the one operand.
-		return bytecode.Instr{Op: bytecode.OpIterNextOrJump}, 1
+		return jitInstr{Op: bytecode.OpIterNextOrJump}, 1
 	case abi.GoCallFill:
 		// A destructuring's step, its cursor the one operand.
-		return bytecode.Instr{Op: bytecode.OpIterStep}, 1
+		return jitInstr{Op: bytecode.OpIterStep}, 1
 	case abi.GoCallForOf:
 		// A cursor made, of the iterable, the one operand.
-		return bytecode.Instr{Op: bytecode.OpForOfStart}, 1
+		return jitInstr{Op: bytecode.OpForOfStart}, 1
 	case abi.GoCallForIn:
 		// A for...in's cursor made, of the object, the one operand.
-		return bytecode.Instr{Op: bytecode.OpForInStart}, 1
+		return jitInstr{Op: bytecode.OpForInStart}, 1
 	case abi.GoCallRest:
 		// A destructuring's rest element, of the cursor, the one operand.
-		return bytecode.Instr{Op: bytecode.OpIterRest}, 1
+		return jitInstr{Op: bytecode.OpIterRest}, 1
 	case abi.GoCallGet:
 		// A property's read, of the object, which the instruction at the
 		// call's PC says (jitRegPropertyMade).
-		return bytecode.Instr{Op: bytecode.OpGetProp, A: uint32(op >> abi.GoOpIndexShift)}, 1
+		return jitInstr{Op: bytecode.OpGetProp, A: uint32(op >> abi.GoOpIndexShift)}, 1
 	case abi.GoCallSet:
 		// A property's write, of the object and the value.
-		return bytecode.Instr{Op: bytecode.OpSetProp, A: uint32(op >> abi.GoOpIndexShift)}, 2
+		return jitInstr{Op: bytecode.OpSetProp, A: uint32(op >> abi.GoOpIndexShift)}, 2
 	case abi.GoCallTypeOf:
-		return bytecode.Instr{Op: bytecode.OpTypeOf}, 1
+		return jitInstr{Op: bytecode.OpTypeOf}, 1
 	case abi.GoCallInstanceOf:
-		return bytecode.Instr{Op: bytecode.OpInstanceOf}, 2
+		return jitInstr{Op: bytecode.OpInstanceOf}, 2
 	case abi.GoCallSuper:
 		// The frame's this slot, then the arguments.
-		return bytecode.Instr{Op: bytecode.OpSuperCall, A: argc}, int(argc) + 1
+		return jitInstr{Op: bytecode.OpSuperCall, A: argc}, int(argc) + 1
 	case abi.GoCallForward:
 		// f.apply(x, arguments), of f, apply and x (ssa.CallSite's
 		// Forward): the frame's arguments are f's.
-		return bytecode.Instr{Op: bytecode.OpApplyArguments}, 3
+		return jitInstr{Op: bytecode.OpApplyArguments}, 3
 	case abi.GoCallOp:
 		// An operation's opcode and its A, of its operands: the
 		// instruction at the call's PC.
-		return bytecode.Instr{Op: bytecode.Op(op >> abi.GoOpIndexShift), A: uint32(op >> (abi.GoOpIndexShift + 8))}, int(argc)
+		return jitInstr{Op: bytecode.Op(op >> abi.GoOpIndexShift), A: uint32(op >> (abi.GoOpIndexShift + 8))}, int(argc)
 	}
 	return in, n
 }

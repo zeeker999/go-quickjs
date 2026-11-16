@@ -111,7 +111,6 @@ func (c *compiler) compileFunctionBody(fn *ast.FuncLit) {
 		constructible = true
 	}
 	facts := scanFunction(fn, constructible)
-	c.reserve(fn.End - fn.Start - facts.innerBytes)
 
 	// Parameters must occupy slots 0..n-1, because the interpreter copies
 	// arguments into those slots positionally. Nothing may be declared before
@@ -192,10 +191,6 @@ func (c *compiler) compileFunctionBody(fn *ast.FuncLit) {
 		}
 		c.facts.makesArgs = true
 	}, wantArguments)
-	if fn.Generator || fn.Async {
-		// A generator's parameters are bound when it is called, so the
-		// prologue has to be separable from the body.
-	}
 
 	// Hoist var declarations and nested function declarations to the top of
 	// the function, as their scope requires.
@@ -213,25 +208,12 @@ func (c *compiler) compileFunctionBody(fn *ast.FuncLit) {
 	for _, n := range varNames {
 		if _, exists := c.resolveLocal(n); !exists {
 			c.declare(n, bindVar, fn.Start)
-			// A hoisted var starts as undefined, which is what the frame a
-			// call makes starts every local as: only a generator's or an
-			// async function's, which their objects keep, is set here.
-			if fn.Generator || fn.Async {
-			}
 		}
 	}
 
 	// Until a return statement of the body returns anything but this.
 	c.fn.ReturnsReceiver = true
 	c.compileStatements(fn.Body)
-	// A constructor returns its `this` rather than undefined. That matters
-	// for a derived class, where super() may replace `this` with the object
-	// the base constructor built -- which is how `class E extends Error` ends
-	// up with a real Error, and `class A extends Array` with a real array. A
-	// derived one's return reads its binding itself, so that one never bound
-	// fails the construction rather than the body, in the caller's realm.
-	if fn.Kind == ast.FuncConstructor {
-	}
 	c.finish()
 	// The object made for nothing but apply.
 	c.fn.ForwardsArguments = c.lazyArguments && !c.opts.Debug && !c.facts.argsEscape
@@ -371,11 +353,6 @@ func (c *compiler) bindParameters(fn *ast.FuncLit, materialize func(), wantArgs 
 	for i, p := range fn.Params {
 		switch param := p.(type) {
 		case *ast.Ident:
-			// Nothing is evaluated for it: the argument arrived in the slot,
-			// or the marker is still there and stands for undefined. A list
-			// with no defaults and no patterns never put it there.
-			if c.fn.ParamsAreLexical {
-			}
 
 		case *ast.AssignPattern:
 			// A parameter slot always exists; the default only applies when
@@ -400,8 +377,6 @@ func (c *compiler) bindParameters(fn *ast.FuncLit, materialize func(), wantArgs 
 			}
 
 		default:
-			if c.fn.ParamsAreLexical {
-			}
 			c.declarePatternNames(p)
 			c.compileDestructuring(p, ast.DeclLet)
 		}
@@ -497,7 +472,6 @@ func (c *compiler) compileDestructuringAssign(target ast.Expr) {
 // step interleaved with the target that receives it -- which is observable,
 // since evaluating a target can run a getter or a generator's yield.
 func (c *compiler) compileArrayPattern(pat *ast.ArrayPattern, kind ast.DeclKind, declaring bool) {
-
 	for _, el := range pat.Elements {
 		if el == nil {
 			// A hole asks for a value and throws it away.
@@ -811,9 +785,6 @@ func (c *compiler) compileClass(cls *ast.ClassLit, inferredName string) {
 	c.evalComputedFieldKeys(cls, keyNames, cr.Keys)
 	c.traceName = trace
 	cr.Ctor = int32(c.compileFunctionLiteral(ctor, name))
-	if cls.Extends != nil {
-		// stack: ctor parent
-	}
 
 	// The class now exists, which is what takes its own name out of the dead
 	// zone. That binding is what lets a static block or a method refer to the
@@ -930,10 +901,6 @@ func (c *compiler) compileClassMember(m ast.Property, fn *ast.FuncLit, installNa
 		return c.compilePrivateMethod(m, fn, pn, methodName, installName)
 	}
 
-	if m.Static {
-		// The constructor is the target and stays on the stack.
-	} else {
-	}
 	// A computed key is evaluated before the method it names, which is
 	// observable when it has a side effect, and leaves the stack in the
 	// [target, key, value] order the define instructions expect.
@@ -942,32 +909,16 @@ func (c *compiler) compileClassMember(m ast.Property, fn *ast.FuncLit, installNa
 		// The key now sits between the target and the function.
 	}
 	k := c.compileMethodValue(fn, methodName)
-	if m.Computed {
-		// The name is only knowable once the key has been evaluated.
-	}
 	// The home object is what `super` resolves against, so a method has to
 	// remember the object it was defined on.
 	c.emitClassMemberDefine(m, key)
 	return k
 }
 
-// classMember marks a define instruction as a class's, which the interpreter
-// reads as "not enumerable". An object literal's members are enumerable and a
-// class's are not, and the two share these instructions.
-const classMember = 1
-
 // emitClassMemberDefine installs a member whose value is on the stack above
 // its target.
 func (c *compiler) emitClassMemberDefine(m ast.Property, key string) {
 	if m.Computed {
-		// The key is already on the stack, beneath the value. The operand marks
-		// the member as a class's rather than an object literal's, which is what
-		// makes it non-enumerable.
-		switch m.Kind {
-		case ast.PropGet:
-		case ast.PropSet:
-		default:
-		}
 		return
 	}
 	// A class method is not enumerable, unlike an object literal's, and a
@@ -976,17 +927,7 @@ func (c *compiler) emitClassMemberDefine(m ast.Property, key string) {
 	// instance and is handled above.
 	if pn, private := m.Key.(*ast.PrivateName); private {
 		c.privateName(pn, m.Start)
-		switch m.Kind {
-		case ast.PropGet:
-		case ast.PropSet:
-		default:
-		}
 		return
-	}
-	switch m.Kind {
-	case ast.PropGet:
-	case ast.PropSet:
-	default:
 	}
 }
 
@@ -1005,10 +946,6 @@ func (c *compiler) compilePrivateMethod(m ast.Property, fn *ast.FuncLit,
 	// the prototype is its home object even though it is not defined there.
 	c.compileIdentRead(&ast.Ident{Name: installName, Start: int32(m.Start)})
 	k := c.compileMethodValue(fn, methodName)
-	switch m.Kind {
-	case ast.PropGet:
-	case ast.PropSet:
-	}
 	return k
 }
 

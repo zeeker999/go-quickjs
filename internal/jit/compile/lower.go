@@ -437,14 +437,14 @@ func GoOperation(op bytecode.Op) bool {
 }
 
 // GoOperands is how many operands an operation Go makes (GoOperation)
-// takes from the top of the stack, whose one result replaces them.
-func GoOperands(in bytecode.Instr) int {
-	switch in.Op {
+// takes, op and its operand a, whose one result replaces them.
+func GoOperands(op bytecode.Op, a uint32) int {
+	switch op {
 	case bytecode.OpCopyDataProps, bytecode.OpArraySpread, bytecode.OpSpreadIter, bytecode.OpArrayPush, bytecode.OpSetProtoOf,
 		bytecode.OpNewSpread, bytecode.OpDefineField:
 		return 2
 	case bytecode.OpObjectRest:
-		return int(in.A) + 1
+		return int(a) + 1
 	case bytecode.OpCallSpread, bytecode.OpDefineIndex:
 		return 3
 	case bytecode.OpToPropertyKey:

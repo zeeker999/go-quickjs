@@ -62,11 +62,9 @@ func findArrow(fn *bytecode.Function) *bytecode.Function {
 	return nil
 }
 
-// TestLiteralStatementsEmitNothing pins that a statement that is only a
-// literal -- a directive such as "use strict" among them -- compiles to
-// nothing, rather than a push and a drop, while the directive still makes
-// the function strict.
-func TestLiteralStatementsEmitNothing(t *testing.T) {
+// TestDirectiveAmongLiteralStatements pins that a directive among
+// statements that are only literals still makes the function strict.
+func TestDirectiveAmongLiteralStatements(t *testing.T) {
 	prog, err := parser.Parse(`function f() { "use strict"; 1; 2n; true; null; "x"; return 3 }`, parser.Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -86,12 +84,6 @@ func TestLiteralStatementsEmitNothing(t *testing.T) {
 	}
 	if !f.Strict {
 		t.Error("the directive no longer makes the function strict")
-	}
-	for _, in := range f.Code {
-		if in.Op == bytecode.OpDrop {
-			t.Errorf("a literal statement left a drop: %v", f.Code)
-			break
-		}
 	}
 }
 

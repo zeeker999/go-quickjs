@@ -66,7 +66,7 @@ func TestOutputIsWhole(t *testing.T) {
 	}
 	for _, want := range []string{
 		"=== root/a.js mode script variant 0\n", "=== root/a.js mode debug variant 0\n",
-		"function main/0 sum\n", "debug_stmt", " @", "const ", "lines 0:0 1:1 2:1 3:1 ",
+		"function main/0 sum\n", " debug r0", " @", "const ", "lines 0:0 1:1 2:1 3:1 ",
 		"Debug: & {",
 		// The register code of the arrow, compiled as its first call
 		// would, an instruction a line.

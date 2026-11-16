@@ -37,9 +37,10 @@ const farReg = 1 << 30
 // (nearCap).
 const errRegs = "more than 65,536 registers"
 
-// Compile compiles lit, whose stack form is fn and whose identifiers' resolution
-// is rec, into register code. It returns nil where the function has anything
-// the backend does not compile yet; the function then runs as before.
+// Compile compiles lit, whose tables the walk made in fn and whose
+// identifiers' resolution is rec, into register code. It returns nil where
+// the function has anything the backend does not compile, which the runtime
+// reports as an internal error.
 func Compile(lit *ast.FuncLit, fn *bytecode.Function, rec *Record) *bytecode.RegCode {
 	if w := why(fn); w != "" && !(w == "arguments" && simpleArguments(fn)) {
 		Refuse(fn, w)
@@ -109,7 +110,7 @@ func compile(lit *ast.FuncLit, fn *bytecode.Function, rec *Record, orig *bytecod
 
 // scratch is what compiling a function grows as it goes, which finish
 // copies out at its size or reads and drops: the code, each instruction's
-// position, and the table of the stack form's positions; and the gen
+// position, and the table of positions; and the gen
 // itself, and the view of a function compiled at its first call (Later).
 // It is kept from one compile for the next (scratchPool), so that each
 // does not grow its buffers from nothing, nor make a gen anew.
@@ -262,7 +263,7 @@ type gen struct {
 	// of, and which holds the gen.
 	s *scratch
 
-	// slotReg is the register of each stack slot the function's bindings
+	// slotReg is the register of each slot the function's bindings
 	// are in, or -1.
 	slotReg []int32
 	// dead is the call whose value the expression being compiled leaves
@@ -319,7 +320,7 @@ type gen struct {
 	// that learns its arrays' room.
 	arrays int
 	// stores is, for an instruction that reads and then stores, the
-	// position of its store, whose stack instruction goes to Aux.
+	// position of its store, which a pc past the code's has, in Aux.
 	stores map[int]int32
 	// switches is each switch instruction's table, its cases' bodies by
 	// their marks, bound by the end.
@@ -959,7 +960,7 @@ func (g *gen) body() {
 			named = true
 			// A binding nothing reads has no register, and no object is
 			// made for it: a function that names eval without calling it
-			// has one, which the stack form fills for an eval that never
+			// has one, which the walk declares for an eval that never
 			// comes.
 			if g.slotReg[slot] >= 0 {
 				g.emit(bytecode.MakeR(bytecode.RArguments, 0, r16(int(g.slotReg[slot])), 0, 0))
@@ -1027,7 +1028,7 @@ func (g *gen) body() {
 
 // simpleArguments reports whether fn's use of arguments is the one the
 // backend compiles: an object made as the function starts, in the binding
-// the stack form gives it, of a function with simple parameters.
+// the walk gives it, of a function with simple parameters.
 func simpleArguments(fn *bytecode.Function) bool {
 	// A function whose arguments object is only handed on to apply
 	// (ForwardsArguments) has no object made: each such call is an
@@ -1365,7 +1366,7 @@ func (g *gen) enterBlock(list []ast.Stmt) {
 			if g.tdz[slot] || g.fn.Locals[slot].Captured && !(g.fn.Debug != nil && g.rec.Unmarked[uint32(slot)]) {
 				// A closure may read it before its declaration runs. In a
 				// debugger's code, which captures every binding, a closure
-				// may where the stack form says one may (Record.Unmarked).
+				// may where the walk says one may (Record.Unmarked).
 				g.emit(bytecode.MakeR(bytecode.RLoadUninit, 0, r16(int(g.slotReg[slot])), 0, 0))
 			}
 		}
@@ -1375,8 +1376,8 @@ func (g *gen) enterBlock(list []ast.Stmt) {
 		return
 	}
 	// A block's function declarations, made as it is entered, after its
-	// lexical bindings, as the stack form's hoistBlockDeclarations makes
-	// them. In a loop each entry's bindings are new ones: the captures of
+	// lexical bindings, as the walk hoists them
+	// (hoistBlockDeclarations). In a loop each entry's bindings are new ones: the captures of
 	// the turn before are closed first, all of them, since one function
 	// may capture another's binding, which is made after it.
 	var funcs []*ast.FuncDecl
@@ -1402,7 +1403,7 @@ func (g *gen) enterBlock(list []ast.Stmt) {
 }
 
 // hoistable is the function declaration s is, through its labels, or nil:
-// the stack form's hoistableFunction but for an export.
+// the walk's hoistableFunction but for an export.
 func hoistable(s ast.Stmt) *ast.FuncDecl {
 	for {
 		switch n := s.(type) {
@@ -1451,8 +1452,8 @@ func (g *gen) stmt(s ast.Stmt) {
 	case *ast.FuncDecl:
 		// Made as its list is entered. Annex B: a sloppy block's function
 		// is also assigned to its var as the declaration is evaluated, what
-		// the block's binding holds then, where the stack form recorded
-		// the var's store (emitAnnexBFunctionAlias).
+		// the block's binding holds then, where the walk recorded the
+		// var's store (emitAnnexBFunctionAlias).
 		if _, ok := g.rec.WriteOf(n.Fn.Name); ok {
 			g.storeIdent(n.Fn.Name, n.Fn.Name, false)
 		}
@@ -1807,8 +1808,7 @@ func (g *gen) varDecl(n *ast.VarDecl) {
 			if res, ok := g.rec.WriteOf(id); ok && (res.Kind == ResLocal || res.Kind == ResLocalInit) && g.slotReg[res.Index] >= 0 && g.farOf(res.Index) < 0 {
 				// A function nothing can tell from the one the last
 				// iteration made, which the var holds then: made the
-				// first time, and left after that, as the stack form
-				// makes it.
+				// first time, and left after that (Record.Reused).
 				skip := g.newMark()
 				g.jump(bytecode.MakeR(bytecode.RJmpT, 0, r16(int(g.slotReg[res.Index])), 0, 0), skip, false)
 				g.storeIdent(id, d.Init, true)
@@ -1861,9 +1861,8 @@ func (g *gen) discard(e ast.Expr) {
 		}
 		return
 	case *ast.Logical:
-		// A short circuit around an append whose value nothing uses, as
-		// the stack form compiles it: the append stores, and leaves
-		// nothing.
+		// A short circuit around an append whose value nothing uses:
+		// the append stores, and leaves nothing.
 		if a, ok := n.Right.(*ast.Assign); ok && n.Op != "??" && g.rec.Appends[a] {
 			skip := g.newMark()
 			g.cond(n.Left, n.Op == "||", skip)
@@ -1879,7 +1878,7 @@ func (g *gen) discard(e ast.Expr) {
 // temporary.
 func (g *gen) isBinding(r int) bool { return r >= regParams && r < g.topAfterBindings() }
 
-// slotOf is the stack slot whose register is r, or -1.
+// slotOf is the slot whose register is r, or -1.
 func (g *gen) slotOf(r int) int {
 	for slot, reg := range g.slotReg {
 		if int(reg) == r {
@@ -2223,7 +2222,7 @@ func (g *gen) constant(v fold.Const, dst int) int {
 
 // foldsVoid reports whether void's operand e is a value the compile
 // knows, which runs nothing and is not evaluated: a literal, or an
-// operator that folds (fold), as the stack form's void 0.
+// operator that folds (fold).
 func foldsVoid(e ast.Expr) bool {
 	switch e.(type) {
 	case *ast.NumberLit, *ast.StringLit, *ast.BoolLit, *ast.NullLit, *ast.BigIntLit:
@@ -2309,8 +2308,8 @@ func (g *gen) ident(n *ast.Ident, dst int) int {
 }
 
 // typeofOperand compiles typeof's operand e: a name that resolves nowhere,
-// which the record does not resolve, as the stack form's get_global_opt,
-// which does not throw for an undeclared global.
+// which the record does not resolve, read as get_global_opt, which does
+// not throw for an undeclared global.
 func (g *gen) typeofOperand(e ast.Expr) int {
 	id, ok := e.(*ast.Ident)
 	if !ok {
@@ -2423,7 +2422,7 @@ func (g *gen) binary(n *ast.Binary, dst int) int {
 //     (x + k) | 0 and (x - k) | 0, k of 16 bits, one add_imm_i32: the
 //     operands evaluated as operate evaluates them, the instruction placed
 //     at the + or the -, whose errors are its own, and the |'s position
-//     kept for its stack instruction (Aux), where a BigInt sum's TypeError
+//     kept for a pc past the code's (Aux), where a BigInt sum's TypeError
 //     is placed. A + of a string chain, which is a string, is left alone;
 //   - x | 0 whose x is a bitwise operator of which an operand is a number
 //     literal or a >>> -- (b ^ (a >>> 7)) | 0, (x & 255) | 0 -- is x: such
@@ -2499,8 +2498,8 @@ func hasStringPart(e ast.Expr) bool {
 	return false
 }
 
-// storeAt keeps pos for the instruction at pc, whose stack instruction
-// goes to its Aux (finish): where an error of a second operator the
+// storeAt keeps pos for the instruction at pc, for a pc past the code's
+// that finish gives its Aux: where an error of a second operator the
 // instruction makes, a store's or a | 0's, is placed.
 func (g *gen) storeAt(pc, pos int) {
 	if g.stores == nil {
@@ -2616,8 +2615,8 @@ func (g *gen) unary(n *ast.Unary, dst int) int {
 	switch n.Op {
 	case "!", "typeof":
 		// Of a value the compile knows -- typeof 1, !void 0; the parser
-		// has folded ! of a literal -- the literal of its value, as the
-		// stack form compiles it too (fold.Value), at the operator's
+		// has folded ! of a literal -- the literal of its value
+		// (fold.Value), at the operator's
 		// position, where the operation would have been.
 		if v, ok := fold.Value(n); ok {
 			g.at(n.Start)
@@ -2679,7 +2678,7 @@ func (g *gen) unary(n *ast.Unary, dst int) int {
 
 // importPhase reports whether n is import(...), import.defer(...) or
 // import.source(...), and which: the parser writes each as a call of a
-// name no script can write (the stack form's importPhase).
+// name no script can write (the walk's importPhase).
 func importPhase(n *ast.Call) (int, bool) {
 	id, ok := n.Callee.(*ast.Ident)
 	if !ok {
@@ -2698,7 +2697,7 @@ func importPhase(n *ast.Call) (int, bool) {
 
 // importCall compiles an import call: its specifier and options in a
 // window, the promise of the module made by import (cold), at the call's
-// position, as the stack form's import.
+// position.
 func (g *gen) importCall(n *ast.Call, phase, dst int) int {
 	argc := len(n.Args)
 	if argc < 1 || argc > 2 || hasSpread(n.Args) {
@@ -2770,7 +2769,7 @@ func (g *gen) deleteChain(n *ast.Unary, m *ast.Member, dst int) int {
 
 // deleteName compiles delete of a name, which sloppy code alone has:
 // false for a binding, and for a global what deleting the property gives
-// (delete_var), as the stack form resolved it.
+// (delete_var), as the record resolves it.
 func (g *gen) deleteName(n *ast.Unary, id *ast.Ident, dst int) int {
 	res, ok := g.rec.ReadOf(id)
 	if !ok {
@@ -2808,8 +2807,7 @@ func (g *gen) cond(e ast.Expr, when bool, target *mark) {
 	mark := g.top
 	defer func() { g.top = mark }()
 	// A constant -- a literal, or an operator that folds, !0 -- is true
-	// or false as the compile knows (fold.Test), as the stack form's test
-	// is.
+	// or false as the compile knows (fold.Test).
 	if truthy, ok := fold.Test(e); ok {
 		if truthy == when {
 			g.jump(bytecode.MakeR(bytecode.RJmp, 0, 0, 0, 0), target, false)
@@ -3030,12 +3028,12 @@ func (g *gen) storeIdent(id *ast.Ident, value ast.Expr, init bool) int {
 		var strict uint8
 		if g.fn.Strict {
 			// Whether the name resolves is settled before the value is
-			// evaluated, which the stack form's checks do: a value that
+			// evaluated: a value that
 			// runs no code cannot change the answer, and the store asks it
 			// (set_global_strict's folding, foldGlobalCheck).
 			if !g.runsNoCode(value) {
-				// Settled before the value runs, reported after it, as
-				// the stack form's check_global_ref and assert_resolved.
+				// Settled before the value runs, reported after it
+				// (check_global_ref and assert_resolved).
 				ok := g.alloc()
 				g.at(int(id.Start))
 				name := g.name16(id.Name)
@@ -3054,7 +3052,7 @@ func (g *gen) storeIdent(id *ast.Ident, value ast.Expr, init bool) int {
 		return v
 	case ResGlobalVar:
 		// A var's store: the var exists, and the store is set_global's
-		// whatever the code's strictness, as the stack form's.
+		// whatever the code's strictness.
 		v := g.expr(value, -1)
 		g.at(int(id.Start))
 		g.far(g.emit(bytecode.MakeR(bytecode.RSetGlobal, 0, r16(v), g.name16(id.Name), g.globalSite("RSetGlobal", id.Name))), id.Name)
@@ -3074,8 +3072,8 @@ func (g *gen) storeIdent(id *ast.Ident, value ast.Expr, init bool) int {
 	return 0
 }
 
-// freeze emits str_freeze of r, the read n, where the stack form follows
-// that read by one: the binding is one an append grows, and what reads it
+// freeze emits str_freeze of r, the read n, where the walk marks the read
+// (Record.Freezes): the binding is one an append grows, and what reads it
 // here may keep what it read. A read the register form makes no value of
 // -- a compare's operand, a step -- keeps nothing and is not frozen.
 func (g *gen) freeze(n *ast.Ident, r int) {
@@ -3181,8 +3179,8 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 		old := g.guard(g.readForWrite(t, -1), n.Value)
 		v := g.operate(text, op, nil, n.Value, old, -1, int(n.Start))
 		if res.Kind == ResUpval && !keep && dst < 0 && n.Op == "+=" && g.rec.Appends[n] {
-			// An append to an upvalue the stack compiler made one
-			// (ownedAppend): the add marked, which grows the string the
+			// An append to an upvalue the walk found one (Record.Appends):
+			// the add marked, which grows the string the
 			// binding alone holds in place.
 			if last := len(g.code) - 1; g.code[last].Op() == bytecode.RAdd && g.code[last].A() == uint16(v) {
 				w := g.code[last]
@@ -3224,8 +3222,7 @@ func (g *gen) assign(n *ast.Assign, dst int, keep bool) int {
 }
 
 // callTarget compiles call, which sloppy code assigned to, updated or
-// named as a for-in or for-of head's target, as the stack form's
-// compileCallTarget: the call is made, and then the assignment is a
+// named as a for-in or for-of head's target: the call is made, and then the assignment is a
 // ReferenceError, at position pos. The call's value, in the register it
 // returns, stands for the expression's on the path nothing reaches.
 func (g *gen) callTarget(call *ast.Call, pos int) int {
@@ -3354,8 +3351,8 @@ func (g *gen) readStore(m *ast.Member, pos int, w bytecode.RInstr) {
 }
 
 // readForWrite reads the binding a compound assignment or an update of
-// id names, which the stack form may have read with the store's own
-// resolution rather than a read of its own.
+// id names, which the record may give the store's own resolution rather
+// than a read of its own.
 func (g *gen) readForWrite(id *ast.Ident, dst int) int {
 	if w := g.withs[id]; w != nil && g.rec.writeRes(id).Kind == ResWith {
 		g.withRefFor(id)
@@ -3630,7 +3627,8 @@ func (g *gen) member(n *ast.Member, dst int) int {
 	return d
 }
 
-// directEval compiles a call the stack form made a direct eval: the
+// directEval compiles a call the walk recorded as a direct eval
+// (Record.Evals): the
 // callee, undefined as its receiver and the arguments -- or an array of
 // them, where one is a spread -- in a window, and direct_eval (cold) at
 // the call's position, its scope's index in Aux.
@@ -3766,7 +3764,7 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	case *ast.Ident:
 		if g.withs[c] != nil && g.withs[c].probe.Op == bytecode.OpWithGetThis {
 			// Through the object that has the name, which is the call's
-			// receiver, as the stack form's with_get_this.
+			// receiver (with_get_this).
 			g.probed(c, bytecode.RWithGetThis, w, func() {
 				g.into(c, w)
 				g.emit(bytecode.MakeR(bytecode.RLoadUndef, 0, r16(w+1), 0, 0))
@@ -3807,7 +3805,7 @@ func (g *gen) call(n *ast.Call, dst int) int {
 	dead = dead && (mname == "exec" || mname == "replace")
 	if g.rec.Tails[n] && !argLit {
 		// A call in tail position, whose frame is given up once the
-		// stack is deep, as the stack form's tail_call gives it up.
+		// stack is deep (Record.Tails).
 		op = tailOp(op)
 	}
 	at := g.emit(bytecode.MakeR(op, uint8(argc), r16(w), r16(d), g.callSite(op)))
@@ -3873,6 +3871,9 @@ func (g *gen) regexpLitCall(n *ast.Call, dst int, dead bool) (int, bool) {
 	if k >= limit16 {
 		return 0, false
 	}
+	// The method's name among the function's, which the JIT reads it by
+	// (lowerreg's regexpLit).
+	g.nameIdx(name)
 	if len(n.Args) == 1 && g.unchanging(n.Args[0]) {
 		// One argument that the method's read cannot change, put in the
 		// window first: the literal made, its method read and called by
@@ -3997,7 +3998,7 @@ func (g *gen) charCodeAt(n *ast.Call, dst int) (int, bool) {
 
 // key is the register of the key k of t, a computed member read and then
 // written, converted once to a property key with its object o checked
-// first (key_of_base), as the stack form's to_property_key_of_base: the
+// first (key_of_base): the
 // read and the write would otherwise each convert an object's key, and
 // run its toString twice. A literal key needs nothing; a binding's value
 // is converted into a temporary, the binding left as it is. A key that an
@@ -4018,20 +4019,20 @@ func (g *gen) key(t *ast.Member, k, o int) int {
 	return d
 }
 
-// maxChainParts is the most parts stringChain joins in one concat, as the
-// stack form's compileStringChain: a longer chain is joined a run at a
-// time, each run's string the first part of the next.
+// maxChainParts is the most parts stringChain joins in one concat: a longer
+// chain is joined a run at a time, each run's string the first part of the
+// next.
 const maxChainParts = 32
 
 // stringChain compiles a + b + c + ..., once a string literal among its
 // operands has made every addition from there on a concatenation, as one
-// concat of the parts in consecutive registers, as the stack form's
-// compileStringChain does and with its conversions where it makes them:
+// concat of the parts in consecutive registers, with each conversion
+// where the additions would make it:
 // the operands before the literal added as they were and their sum
 // converted where the literal was added to it, each operand after it
 // converted as soon as it is evaluated (str_part), but a literal or a
 // number, which concat writes out itself. It reports false, having emitted
-// nothing, where the stack form makes the additions.
+// nothing, where the additions are compiled as additions.
 func (g *gen) stringChain(n *ast.Binary, dst int) (int, bool) {
 	var adds []*ast.Binary
 	for b := n; ; {
@@ -4059,8 +4060,8 @@ func (g *gen) stringChain(n *ast.Binary, dst int) (int, bool) {
 			break
 		}
 		if _, ok := operand(i).(*ast.TemplateLit); ok && i == 0 {
-			// The stack form's chain starts at a template, which this
-			// backend leaves to it.
+			// A chain that starts at a template is compiled as
+			// additions.
 			return 0, false
 		}
 	}
@@ -4185,7 +4186,7 @@ func (g *gen) applyArgs(n *ast.Call, m *ast.Member, dst int) int {
 
 // aux gives the instruction at pc its extra operand (RegCode.Aux).
 // debugMark is the cold debug of a place code compiled for a debugger can
-// stop at pos, where the stack form made one (Record.Debugs): at each
+// stop at pos, where the walk recorded one (Record.Debugs): at each
 // statement, loop test and update, and for-in and for-of head.
 func (g *gen) debugMark(pos int) {
 	m, ok := g.rec.Debugs[int32(pos)]
@@ -4322,7 +4323,7 @@ func (g *gen) objectAtOnce(n *ast.ObjectLit, dst int) int {
 	}
 	g.objKeys = append(g.objKeys, keys)
 	// The hash the realm's root for literals of these keys is found by,
-	// as the stack form's LiteralKeys says it.
+	// (bytecode.HashLiteralKeys).
 	var h uint64
 	if len(strs) <= bytecode.MaxLiteralKeys {
 		h = bytecode.HashLiteralKeys(strs)
@@ -4338,7 +4339,7 @@ func (g *gen) objectAtOnce(n *ast.ObjectLit, dst int) int {
 func (g *gen) array(n *ast.ArrayLit, dst int) int {
 	if elems, ok := g.constantElements(n.Elements); ok {
 		// A literal of constants: its arrays share them until one is
-		// written, as the stack form's do.
+		// written.
 		g.literals = append(g.literals, elems)
 		d := g.dest(dst)
 		// B is the count, or 0 past 16 bits: the literal's.
@@ -4429,7 +4430,7 @@ func (g *gen) closure(lit *ast.FuncLit, d int) {
 		}
 	}
 	if k < 0 {
-		g.fail("a function the stack form has no template of")
+		g.fail("a function the walk made no template of")
 		return
 	}
 	g.closureConst(k, d)
@@ -4439,7 +4440,7 @@ func (g *gen) closure(lit *ast.FuncLit, d int) {
 // register d.
 func (g *gen) closureConst(k, d int) {
 	if k < 0 || k >= len(g.fn.Constants) || g.fn.Constants[k].Kind != bytecode.ConstFunction || g.fn.Constants[k].Fn == nil {
-		g.fail("a function the stack form has no template of")
+		g.fail("a function the walk made no template of")
 		return
 	}
 	tmpl := g.fn.Constants[k].Fn

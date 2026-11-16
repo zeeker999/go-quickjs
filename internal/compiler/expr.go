@@ -95,9 +95,9 @@ func (c *compiler) compileExprForEffect(e ast.Expr) {
 				// read rather than one it stored, so something still has to
 				// discard it.
 			default:
-				c.compileMemberUpdate(m, n.Op, func() {
+				c.compileMemberUpdate(m, func() {
 					c.compileExpr(n.Value)
-				}, int(n.Start), false)
+				})
 				return
 			}
 		}
@@ -183,23 +183,12 @@ func (c *compiler) compileExprNamed(e ast.Expr, name string) {
 		c.compileNumber(n.Value)
 
 	case *ast.StringLit:
-		if n.Value == "" {
-		} else {
-		}
 
 	case *ast.BoolLit:
-		if n.Value {
-		} else {
-		}
 
 	case *ast.NullLit:
 
 	case *ast.This:
-		if c.thisIsValue() {
-		} else {
-			// A derived constructor's this, which super() binds: a read
-			// before it throws, at the read.
-		}
 
 	case *ast.NewTarget:
 		if c.inClassFieldInit() {
@@ -325,13 +314,7 @@ func (c *compiler) compileConst(v fold.Const) {
 	case fold.Number:
 		c.compileNumber(v.Num)
 	case fold.String:
-		if v.Str == "" {
-		} else {
-		}
 	case fold.Bool:
-		if v.Bool {
-		} else {
-		}
 	case fold.Null:
 	case fold.BigInt:
 	default:
@@ -440,8 +423,6 @@ func (c *compiler) compileTemplate(n *ast.TemplateLit) {
 	}
 	if parts == 0 {
 		return
-	}
-	if parts > 1 {
 	}
 }
 
@@ -552,8 +533,6 @@ func (c *compiler) compileStringChain(n *ast.Binary) bool {
 			c.compileExpr(e)
 		}
 		part()
-	}
-	if parts > 1 {
 	}
 	return true
 }
@@ -742,15 +721,6 @@ func (c *compiler) compileObjectLit(n *ast.ObjectLit) {
 		if p.Computed {
 			c.compileExpr(p.Key)
 			c.compileExpr(p.Value)
-			// The name comes from the key, which is only known now. A value
-			// that is not an anonymous definition keeps whatever name it has:
-			// `{[k]: f}` must not rename f.
-			if p.Method || isAnonymousFnDef(p.Value) {
-			}
-			if p.Method {
-				// A shorthand method may use super, which resolves against the
-				// literal it is defined in.
-			}
 			continue
 		}
 		key := propKeyName(p.Key)
@@ -760,27 +730,7 @@ func (c *compiler) compileObjectLit(n *ast.ObjectLit) {
 			}
 		}
 		c.compileExprNamed(p.Value, key)
-		if p.Method {
-			// A shorthand method may use super, which resolves against the
-			// literal it is defined in. A plain `k: function(){}` may not, and
-			// deliberately does not get a home object.
-		}
 	}
-}
-
-// isAnonymousFnDef reports whether an expression is an AnonymousFunctionDefinition,
-// which is what decides whether the surrounding syntax gets to name it.
-//
-// A named function keeps its own name, and an expression that merely evaluates
-// to a function is not a definition at all -- `{[k]: f}` leaves f alone.
-func isAnonymousFnDef(e ast.Expr) bool {
-	switch n := e.(type) {
-	case *ast.FuncLit:
-		return n.Name == nil
-	case *ast.ClassLit:
-		return n.Name == nil
-	}
-	return false
 }
 
 // propKeyName returns the string form of a non-computed property key.
@@ -966,44 +916,23 @@ func (c *compiler) compileUpdateKeep(n *ast.Update, keep bool) {
 	}
 	if _, ok := c.updatableLocal(n); ok {
 		// An update of a local whose value is read is one instruction.
-		var flags uint32
-		if n.Op == "--" {
-			flags |= bytecode.UpdateDec
-		}
-		if !n.Prefix {
-			flags |= bytecode.UpdatePostfix
-		}
 		return
 	}
 
 	switch target := n.Operand.(type) {
 	case *ast.Ident:
 		// Inside a `with` body the name is resolved once, by the read, and
-		// written back to whatever that found. The base it leaves under the
-		// value is why the postfix copy goes beneath it rather than on top.
+		// written back to whatever that found.
 		withRef := c.withLimit(target.Name) > 0
 		if withRef {
 			c.beginWithRef(target)
 		} else {
 			c.compileIdentRead(target)
 		}
-		// The postfix form yields the operand coerced, so that `x = "1"; x++`
-		// leaves a number behind rather than the original string: to a
-		// numeric, not a number, since a BigInt increments as a BigInt. The
-		// prefix form yields the increment's result, and the increment
-		// converts its operand itself.
-		if !n.Prefix {
-			if withRef {
-			} else {
-			}
-		}
 		if withRef {
 			c.endWithRef(target)
 		} else {
 			c.assignTo(target, false)
-		}
-		if !n.Prefix {
-			// Discard the updated value, leaving the original as the result.
 		}
 
 	case *ast.Member:
@@ -1019,15 +948,6 @@ func (c *compiler) compileUpdateKeep(n *ast.Update, keep bool) {
 			} else {
 				c.compileSuperMemberGet(target)
 			}
-			// Postfix yields the old value, converted, so it is copied down
-			// before the increment; prefix yields the new one, so the copy
-			// comes after.
-			if !n.Prefix {
-			} else {
-			}
-			if target.Computed {
-			} else {
-			}
 			return
 		}
 		c.compileExpr(target.Object)
@@ -1035,30 +955,11 @@ func (c *compiler) compileUpdateKeep(n *ast.Update, keep bool) {
 			// A private member is reached through its own accessors, which do
 			// not consult the prototype chain the way a property does.
 			c.privateName(pn, int(target.Start))
-			if !n.Prefix {
-			} else {
-			}
 			return
 		}
 		if target.Computed {
 			c.compileIndexForUpdate(target)
-			// Postfix yields the old value, converted, so it is copied down
-			// before the increment; prefix yields the new one, so the copy
-			// comes after; for effect there is no copy.
-			switch {
-			case !keep:
-			case !n.Prefix:
-			default:
-			}
 			return
-		}
-		// Placed at the member, as the computed read is: a read of null's
-		// property had the position of whatever came before it.
-		switch {
-		case !keep:
-			// Only the store is wanted, and the increment converts.
-		case !n.Prefix:
-		default:
 		}
 
 	default:
@@ -1198,9 +1099,6 @@ func (c *compiler) compileMemberRead(n *ast.Member) {
 		return
 	}
 }
-
-// callPos is where a call is in a stack trace (ast.Call.TracePos).
-func callPos(n *ast.Call) int { return n.TracePos() }
 
 func (c *compiler) compileCall(n *ast.Call) {
 	if phase, ok := importPhase(n); ok {
@@ -1384,7 +1282,6 @@ func (c *compiler) compileSpreadCall(n *ast.Call) {
 		c.compileExpr(m.Object)
 		if m.Computed {
 			c.compileExpr(m.Property)
-		} else {
 		}
 		c.compileSpreadArguments(n.Args)
 		return
@@ -1594,34 +1491,28 @@ func (c *compiler) compileAssign(n *ast.Assign) {
 
 	case "&&=", "||=", "??=":
 		if m, ok := n.Target.(*ast.Member); ok {
-			c.compileMemberUpdate(m, n.Op, func() {
+			c.compileMemberUpdate(m, func() {
 				value(nameOf(n.Target))
-			}, int(n.Start), true)
+			})
 			return
 		}
 		if id, ok := n.Target.(*ast.Ident); ok && c.withLimit(id.Name) > 0 {
 			// Inside a `with` body the name is resolved once, by the read, and
 			// written back to whatever that found.
 			c.beginWithRef(id)
-			c.finishUpdate(n.Op, func() {
-				value(id.Name)
-			}, int(n.Start), 1, func() { c.endWithRef(id) })
+			value(id.Name)
+			c.endWithRef(id)
 			return
 		}
 		// A logical assignment only stores when the short circuit does not
 		// take, so the read comes first and the store is inside the branch.
 		c.compileReadTarget(n.Target)
-		switch n.Op {
-		case "&&=":
-		case "||=":
-		default:
-		}
 		value(nameOf(n.Target))
 		c.assignTo(n.Target, false)
 
 	default:
 		if m, ok := n.Target.(*ast.Member); ok {
-			c.compileMemberUpdate(m, n.Op, func() { c.compileExpr(n.Value) }, int(n.Start), true)
+			c.compileMemberUpdate(m, func() { c.compileExpr(n.Value) })
 			return
 		}
 		if id, ok := n.Target.(*ast.Ident); ok && c.withLimit(id.Name) > 0 {
@@ -1637,85 +1528,34 @@ func (c *compiler) compileAssign(n *ast.Assign) {
 	}
 }
 
-// compileMemberUpdate compiles `obj.k op= value` and its logical relatives.
-//
-// The object and the key are evaluated once and kept on the stack, because they
-// are expressions: `base[prop] *= f()` must call prop.toString once, and
-// reading the property and writing it back have to address the same place even
-// if the read changed what is there.
-// compileMemberUpdate compiles a compound or logical assignment to a property.
-//
-// keep says whether the value has to be left behind as the expression's
-// result; in effect position it does not, and the copy that would carry it out
-// is one instruction and the drop that follows it another.
-func (c *compiler) compileMemberUpdate(m *ast.Member, op string, emitValue func(), pos int, keep bool) {
+// compileMemberUpdate walks `obj.k op= value` and its logical relatives:
+// the object and the key, evaluated once, then the value, which emitValue
+// walks.
+func (c *compiler) compileMemberUpdate(m *ast.Member, emitValue func()) {
 	if _, isSuper := m.Object.(*ast.Super); isSuper {
 		c.noteSuper()
-		// A super reference has no object on the stack: the read starts at the
-		// home object's prototype and the write lands on `this`.
+		// The read starts at the home object's prototype and the write
+		// lands on `this`.
 		if m.Computed {
 			c.compileExpr(m.Property)
-			c.finishUpdate(op, emitValue, pos, 2, func() {
-				if keep {
-				}
-			})
-			return
+		} else {
+			c.compileSuperMemberGet(m)
 		}
-		c.compileSuperMemberGet(m)
-		c.finishUpdate(op, emitValue, pos, 0, func() {
-			if keep {
-			}
-		})
+		emitValue()
 		return
 	}
 	if pn, private := m.Property.(*ast.PrivateName); private {
-		// A private name is not an expression, so there is nothing to evaluate
-		// twice; only the object is kept.
+		// A private name is not an expression: only the object is kept.
 		c.privateName(pn, int(m.Start))
 		c.compileExpr(m.Object)
-		c.finishUpdate(op, emitValue, pos, 1, func() {
-			if keep {
-			}
-		})
+		emitValue()
 		return
 	}
-
 	c.compileExpr(m.Object)
 	if m.Computed {
 		c.compileIndexForUpdate(m)
-		c.finishUpdate(op, emitValue, pos, 2, func() {
-			if keep {
-			}
-		})
-		return
 	}
-	c.finishUpdate(op, emitValue, pos, 1, func() {
-		if keep {
-		}
-	})
-}
-
-// finishUpdate combines the read value with the new one and stores it.
-//
-// A logical assignment stores only when the short circuit does not take, and
-// leaves the read value as the result when it does -- so the base and key
-// beneath it have to be dropped on that path.
-func (c *compiler) finishUpdate(op string, emitValue func(), pos, under int, store func()) {
-	switch op {
-	case "&&=", "||=", "??=":
-		switch op {
-		case "&&=":
-		case "||=":
-		default:
-		}
-		emitValue()
-		store()
-		// The short circuit leaves the read value on top of the base and key,
-		// which have to go.
-	default:
-		emitValue()
-		store()
-	}
+	emitValue()
 }
 
 // compileReadTarget pushes the current value of an assignment target.
@@ -1742,8 +1582,6 @@ func (c *compiler) assignToIdentStatic(t *ast.Ident, initializing bool) {
 				c.noteWrite(t, regcomp.Res{Kind: regcomp.ResConstAssign})
 			} else {
 				c.noteWrite(t, regcomp.Res{Kind: regcomp.ResIgnore})
-			}
-			if c.fn.Strict {
 			}
 			return
 		}
@@ -1774,8 +1612,6 @@ func (c *compiler) assignToIdentStatic(t *ast.Ident, initializing bool) {
 			return
 		}
 		if c.fn.Upvalues[idx].FuncSelf && !initializing {
-			if c.fn.Strict {
-			}
 			return
 		}
 		if !c.fn.Upvalues[idx].Mutable && !initializing {
@@ -1784,10 +1620,6 @@ func (c *compiler) assignToIdentStatic(t *ast.Ident, initializing bool) {
 		return
 	}
 	if !initializing && t.Name == c.selfName {
-		// The name has no slot, so nothing nested refers to it: the assignment
-		// still has to be refused in strict mode and discarded otherwise.
-		if c.fn.Strict {
-		}
 		return
 	}
 	if initializing && c.globalLex[t.Name] {
@@ -1870,64 +1702,6 @@ func isPattern(e ast.Expr) bool {
 	return false
 }
 
-// binaryOpcode maps a binary operator to its instruction.
-func binaryOpcode(op string) bytecode.Op {
-	switch op {
-	case "+":
-		return bytecode.OpAdd
-	case "-":
-		return bytecode.OpSub
-	case "*":
-		return bytecode.OpMul
-	case "/":
-		return bytecode.OpDiv
-	case "%":
-		return bytecode.OpMod
-	case "**":
-		return bytecode.OpPow
-	case "&":
-		return bytecode.OpBitAnd
-	case "|":
-		return bytecode.OpBitOr
-	case "^":
-		return bytecode.OpBitXor
-	case "<<":
-		return bytecode.OpShl
-	case ">>":
-		return bytecode.OpShr
-	case ">>>":
-		return bytecode.OpUShr
-	case "==":
-		return bytecode.OpEq
-	case "!=":
-		return bytecode.OpNe
-	case "===":
-		return bytecode.OpStrictEq
-	case "!==":
-		return bytecode.OpStrictNe
-	case "<":
-		return bytecode.OpLt
-	case "<=":
-		return bytecode.OpLe
-	case ">":
-		return bytecode.OpGt
-	case ">=":
-		return bytecode.OpGe
-	case "in":
-		return bytecode.OpIn
-	case "instanceof":
-		return bytecode.OpInstanceOf
-	}
-	return bytecode.OpNop
-}
-
-// compoundOpcode maps a compound assignment operator to the binary instruction
-// that computes its value.
-func compoundOpcode(op string) bytecode.Op {
-	// Strip the trailing '=' and reuse the binary table.
-	return binaryOpcode(op[:len(op)-1])
-}
-
 // compileMemberStore compiles `obj.p = value` and `obj[k] = value`, evaluating
 // the object, then the key, then the value, and leaving the assigned value on
 // the stack as the expression's result.
@@ -1946,42 +1720,27 @@ func (c *compiler) compileMemberStore(m *ast.Member, emitValue func(), keep bool
 		if m.Computed {
 			c.compileExpr(m.Property)
 			emitValue()
-			// base key value -> value base key value, so the store consumes
-			// three and the result is left behind.
-			if keep {
-			}
 			return
 		}
 		emitValue()
-		if keep {
-		}
 		return
 	}
 	if pn, ok := m.Property.(*ast.PrivateName); ok {
 		c.privateName(pn, int(m.Start))
 		c.compileExpr(m.Object)
 		emitValue()
-		if keep {
-		}
 		return
 	}
 	c.compileExpr(m.Object)
 	if m.Computed {
 		// The key stays as it was written: `a[k] = v` converts it to a property
 		// key only when the assignment happens, which is after the right-hand
-		// side has run. OpSetIndex does that, and checks the base first.
+		// side has run.
 		c.compileExpr(m.Property)
 		emitValue()
-		// obj key value -> value obj key value, so the store consumes three
-		// and the result is left behind.
-		if keep {
-		}
 		return
 	}
 	emitValue()
-	// obj value -> value obj value
-	if keep {
-	}
 }
 
 // compileMemberStoreFromValue stores a value that is already on the stack into
@@ -2036,7 +1795,6 @@ func (c *compiler) compileYield(n *ast.Yield) {
 	if !n.Delegate {
 		if n.Arg != nil {
 			c.compileExpr(n.Arg)
-		} else {
 		}
 		return
 	}
@@ -2056,9 +1814,6 @@ func (c *compiler) compileYield(n *ast.Yield) {
 	// Symbol.iterator after an asyncIterator getter has thrown is observable.
 	async := c.fn.Async
 	c.compileExpr(n.Arg)
-	if async {
-	} else {
-	}
 	// The first next receives undefined; after that it receives whatever the
 	// caller sent to the outer generator, and the kind says which of the three
 	// methods to send it to.

@@ -211,13 +211,3 @@ func TestLocalAppendFunctionDeclarations(t *testing.T) {
 		}
 	}
 }
-
-// walkFunctions calls see on fn and every function in it.
-func walkFunctions(fn *bytecode.Function, see func(*bytecode.Function)) {
-	see(fn)
-	for _, k := range fn.Constants {
-		if k.Kind == bytecode.ConstFunction && k.Fn != nil {
-			walkFunctions(k.Fn, see)
-		}
-	}
-}

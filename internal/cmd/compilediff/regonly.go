@@ -332,6 +332,10 @@ func regInstr(t *regTables, fn *bytecode.Function, rc *bytecode.RegCode, pc int,
 	// Aux, where it is not an operand written below, as it is.
 	auxRaw := hasAux
 	switch w.Op() {
+	case bytecode.RBin, bytecode.RUnary:
+		// X is an operator, by its name: the opcodes' numbers are not the
+		// code's.
+		op = fmt.Sprintf("%s.%s a%d b%d c%d", w.Op(), bytecode.Op(w.X()), a, b, c)
 	case bytecode.RGetGlobal, bytecode.RSetGlobal:
 		extra = append(extra, name(b), t.site(c))
 		op = fmt.Sprintf("%s a%d x%d", w.Op(), a, w.X())

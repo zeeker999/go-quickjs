@@ -55,11 +55,6 @@ func (c *compiler) compileTailExpr(e ast.Expr) {
 		c.compileTailExpr(n.Alt)
 	case *ast.Logical:
 		c.compileExpr(n.Left)
-		switch n.Op {
-		case "&&":
-		case "||":
-		default: // "??"
-		}
 		c.compileTailExpr(n.Right)
 	case *ast.Sequence:
 		for i, x := range n.Exprs {

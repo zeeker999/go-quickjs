@@ -4,7 +4,7 @@ import "github.com/go-quickjs/go-quickjs/internal/bytecode"
 
 // The register form's classes, private names, super and this
 // (docs/register-interpreter.md, "The operations"): cold operations, each
-// what the stack form's instruction of the same name stands for, made with
+// what its name says, made with
 // the runtime's shared functions.
 
 // regNewClass is new_class.

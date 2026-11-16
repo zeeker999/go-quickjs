@@ -115,14 +115,6 @@ func (c *compiler) checkGlobalRef(n *ast.Ident) bool {
 	return true
 }
 
-// patchWithProbe points a probe past the static instruction it guards.
-func (c *compiler) patchWithProbe(pc int) {
-	if pc < 0 {
-		return
-	}
-	c.fn.Code[pc].B = uint32(len(c.fn.Code))
-}
-
 // beginWithRef starts a reference that will be read and then written back, for
 // a name an enclosing `with` object may answer.
 //
