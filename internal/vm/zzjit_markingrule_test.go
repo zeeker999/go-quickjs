@@ -53,12 +53,12 @@ func TestJITSameWorkWhileMarking(t *testing.T) {
 	regMarking, regMarkingCache := jitMarkingRegRun(t, src, names, true)
 	for _, c := range [][2]jitMarkingCache{{plainCache, markingCache}, {regPlainCache, regMarkingCache}} {
 		switch p, m := c[0], c[1]; {
-		case p != m:
+		case p.evicted != m.evicted || p.refused != m.refused || p.flushed != m.flushed:
 			t.Errorf("the JIT's cache differs from run to run (%s): %+v, and while marking %+v: a run's work depends on more than the marking", p.form, p, m)
 		case p.evicted != 0 || p.refused != 0:
 			t.Errorf("the JIT's cache ran out of room (%s): %+v; jitMarkingBudget is to hold all the runs compile", p.form, p)
 		default:
-			t.Logf("the JIT's cache, %s, in both runs: %+v", p.form, p)
+			t.Logf("the JIT's cache, %s: %+v, and while marking %+v", p.form, p, m)
 		}
 	}
 	all := names
@@ -274,9 +274,17 @@ func jitMarkingHeldForTest() (restore func()) {
 const jitMarkingBudget = 256 << 20
 
 // jitMarkingCache is what a run's JIT cache did that decides what it
-// compiled: what it held at the end, the code it reclaimed for room and
-// the compiles it found none for, and the code it flushed. Two runs that
-// differ in it do not differ in the marking alone.
+// compiled: the code it reclaimed for room and the compiles it found none
+// for, and the code it flushed. Two runs that differ in it do not differ
+// in the marking alone. What it held at the end is noted, not compared:
+// jitMarkingForTest has native code read a flag on the heap in place of
+// the runtime's, in its static data, and an address's encoding depends on
+// its value: amd64 makes one below 4 GB an immediate and one above a
+// constant of the code's pool, and arm64 takes an instruction for each
+// 16 bits that are not zero. Where the binary's data lies low -- Linux,
+// Go 1.24's Windows binaries -- the stack form's code held 2,880 bytes
+// less while marking, and on arm64 either form's differed by tens of
+// bytes, the work the same in every test.
 type jitMarkingCache struct {
 	form                      string
 	held                      int64
