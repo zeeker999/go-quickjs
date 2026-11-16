@@ -32,6 +32,11 @@ func compiledFunctionForTest(t *testing.T, src string) *bytecode.Function {
 	return nil
 }
 
+// paramSlot is the slot of a register program's first parameter: its
+// registers 0 and 1 are the function and its this (ir.Program's
+// ParamBase).
+const paramSlot = 2
+
 func lowerJS(t *testing.T, src string) *Func {
 	t.Helper()
 	prog, err := parser.Parse(src, parser.Options{})
@@ -103,11 +108,17 @@ func TestEntriesLoadLiveLocals(t *testing.T) {
 	if err := Check(f); err != nil {
 		t.Fatal(err)
 	}
+	// b's register: the one the function returns (ret), as the register
+	// code keeps no map of its locals (RegCode's LocalReg) where nothing
+	// reads one by it.
 	b := -1
-	for i, l := range fn.Locals {
-		if l.Name == "b" {
-			b = i
+	for _, w := range fn.RegCode().Code {
+		if w.Op() == bytecode.RRet {
+			b = int(w.A())
 		}
+	}
+	if b < 0 {
+		t.Fatal("no return of b")
 	}
 	loops := 0
 	for _, e := range f.Entries {
@@ -220,6 +231,9 @@ func TestBuildPropertyMissesDeoptimize(t *testing.T) {
 	if read < 0 {
 		t.Fatal("no read")
 	}
+	// A state's PC is the read's register pc (ir.Program's Origin), and
+	// what follows it starts the next register instruction's lowering.
+	readPC, after := int(p.Origin[read]), p.At(p.Origin[read]+1)
 	for _, c := range []struct {
 		site PropertySite
 		kind ir.ExitKind
@@ -250,7 +264,7 @@ func TestBuildPropertyMissesDeoptimize(t *testing.T) {
 					}
 				}
 			}
-			if b.Kind == BlockExit && b.State != nil && int(b.State.PC) == read {
+			if b.Kind == BlockExit && b.State != nil && int(b.State.PC) == readPC {
 				ended = true
 				if b.ExitKind != c.kind {
 					t.Errorf("%+v: the read's block exits as %v, want %v", c.site, b.ExitKind, c.kind)
@@ -261,7 +275,7 @@ func TestBuildPropertyMissesDeoptimize(t *testing.T) {
 			t.Errorf("%+v: read made natively %v, its block ended %v at %d:\n%s", c.site, made, ended, read, f)
 		}
 		for _, e := range f.Entries {
-			if e.PC == read+1 {
+			if e.PC == read+1 || e.PC == after {
 				t.Errorf("%+v: an entry after the read", c.site)
 			}
 		}
@@ -306,8 +320,12 @@ func TestShadowsMadeOnce(t *testing.T) {
 
 // Optimize unboxes phis at the start of a round, so that the boxes it
 // makes cancel in the same round's walk: a function is mostly done in two
-// rounds, the second finding nothing, not three. The corpus takes 25
-// rounds, 34 the other way.
+// rounds, the second finding nothing, not three. A loop of register code
+// tests at its foot, its test copied before it, so the number it carries
+// out meets the way around it in a phi after it, whose box the header's
+// phi uses too: that phi is unboxed a round after the header's, once the
+// box is its alone (unboxPhis' merged), and eight of the corpus's ten
+// loops take three rounds. The corpus takes 30 rounds.
 func TestOptimizeRounds(t *testing.T) {
 	rounds := 0
 	for _, src := range jsCorpus {
@@ -315,7 +333,7 @@ func TestOptimizeRounds(t *testing.T) {
 		Optimize(f)
 		rounds += f.rounds
 	}
-	if rounds > 2*len(jsCorpus)+2 {
+	if rounds > 30 {
 		t.Errorf("%d rounds for %d functions", rounds, len(jsCorpus))
 	}
 }

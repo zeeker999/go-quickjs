@@ -5886,8 +5886,16 @@ func (b *builder) fromCharCodeCall(blk *Block, pc int, fn uintptr, guard func(Op
 // answers (TypeofFeedback) if pc, in the function's own code, is a typeof
 // Go makes otherwise (a GoCall site of TypeOf), which typeofCall makes.
 func (b *builder) typeofAt(pc int) (uintptr, bool) {
-	if b.fb == nil || b.cur != b.root || b.p.Code[pc].Op != ir.Host || pc+1 >= len(b.p.Code) || !reachable(b.p, pc+1) ||
-		b.p.Maps[pc].Depth < 1 || b.p.Maps[pc+1].Depth != b.p.Maps[pc].Depth || !b.goCalls() {
+	if b.fb == nil || b.cur != b.root || b.p.Code[pc].Op != ir.Host || pc+1 >= len(b.p.Code) || !reachable(b.p, pc+1) || !b.goCalls() {
+		return 0, false
+	}
+	if in := &b.p.Code[pc]; in.Window {
+		// Register code's, its operand and its result its registers
+		// (typeofCall).
+		if in.Left.Slot < 0 || in.Dest < 0 {
+			return 0, false
+		}
+	} else if b.p.Maps[pc].Depth < 1 || b.p.Maps[pc+1].Depth != b.p.Maps[pc].Depth {
 		return 0, false
 	}
 	if calls := b.callsAt(pc); len(calls) != 1 || calls[0].Go != GoCall || !calls[0].TypeOf {
@@ -5902,15 +5910,20 @@ func (b *builder) typeofAt(pc int) (uintptr, bool) {
 }
 
 // typeofCall makes the typeof at pc, its operand and its result the top
-// of the stack: the runtime's string of the type, loaded from its cell in
-// the table at cells (OpTypeofCell), with nothing made or called, as V8's
-// code loads a type's name from its roots; what native code cannot tell,
-// a proxy's, a call of Go (the site's GoCall) makes, on a branch of its
-// own (split), native code going on after either.
+// of the stack in the stack form's code, its registers in register code's:
+// the runtime's string of the type, loaded from its cell in the table at
+// cells (OpTypeofCell), with nothing made or called, as V8's code loads a
+// type's name from its roots; what native code cannot tell, a proxy's, a
+// call of Go (the site's GoCall) makes, on a branch of its own (split),
+// native code going on after either.
 func (b *builder) typeofCall(blk *Block, pc int, cells uintptr) {
 	f := b.f
-	slot := b.p.Locals + b.p.Maps[pc].Depth - 1
-	x := b.read(slot, blk)
+	src := b.p.Locals + b.p.Maps[pc].Depth - 1
+	slot := src
+	if in := &b.p.Code[pc]; in.Window {
+		src, slot = in.Left.Slot, in.Dest
+	}
+	x := b.read(src, blk)
 	cell := f.newValue(blk, OpTypeofCell, Source, x)
 	cell.Const = ir.Value{Bits: uint64(cells)}
 	none := f.newValue(blk, OpCellNone, Bool, cell)

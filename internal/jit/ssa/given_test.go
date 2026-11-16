@@ -35,9 +35,13 @@ func TestInlineCallsGiven(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", c.src, err)
 		}
+		// A plain call's count, from the register instruction the
+		// program's instruction comes from, as the VM's feedback answers
+		// (CallShape); not a method's.
+		rc := fn.RegCode()
 		_, given, ok := InlineCallsGiven(p, func(pc int) (int, bool) {
-			if in := fn.Code[pc]; in.Op == bytecode.OpCall {
-				return int(in.A), true
+			if w := rc.Code[p.Origin[pc]]; w.Op() == bytecode.RCallW {
+				return int(w.X()), true
 			}
 			return 0, false
 		})
