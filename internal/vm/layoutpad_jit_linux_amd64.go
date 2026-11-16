@@ -5,7 +5,8 @@
 package vm
 
 // The layout lock's levers for linux/amd64 jit (layoutlock.txt): a pad's byte
-// stores, -1 for a pad left out, or a data lever's variables.
+// stores (the assembly pad's 32-byte slots), -1 for a pad left out, or a
+// data lever's variables.
 const (
 	layoutPadNA  = 548
 	layoutPadNGA = -1
@@ -43,8 +44,13 @@ const (
 	layoutPadNZ  = 324
 	layoutPadNGZ = -1
 	layoutPadNMZ = -1
-	layoutPadNCZ = 511
+	layoutPadNCZ = 22
+	layoutPadNH  = 107
 	layoutPadNDH = 4
 	layoutPadNDW = 0
 	layoutPadNDG = 0
 )
+
+// layoutPadH is the assembly pad, in
+// zzzyn_native_a_layoutpad_jit_linux_amd64.s. It is never called.
+func layoutPadH()
