@@ -4,6 +4,9 @@ package vm
 
 import (
 	"testing"
+
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
 )
 
 // Native code reads the prototype of an object that keeps it in its table
@@ -91,20 +94,104 @@ func TestJITPolyProto(t *testing.T) {
 		}
 	}
 	fn := r.global.getOwn(r.atoms.intern("isF")).value().Object().fn().closure
-	e := r.jit.hint(fn)
-	if e == nil || e.ssa == nil {
-		t.Fatalf("isF was not compiled: %+v", e)
+	cv, ok := jitViewForTest(r, fn)
+	if !ok {
+		t.Fatalf("isF was not compiled: %+v", cv.e)
 	}
+	e := cv.e
 	before := e.ssaStats
 	if v, err := r.Run(compileForTest(t, `isF(xs, 6400)`)); err != nil || v.Number() != 3200 {
 		t.Fatal(v, err)
 	}
 	st := e.ssaStats
-	if r.jit.hint(fn) != e || st.work-before.work < 6400 {
+	if !cv.same(r, fn) || st.work-before.work < 6400 {
 		t.Fatalf("isF(xs, 6400) did not run natively: %+v, before %+v", st, before)
 	}
 	if left := st.hosts - before.hosts; left != 0 {
 		t.Errorf("isF(xs, 6400) left native code %d times", left)
+	}
+}
+
+// The in operator asked in a loop of an object made by Object.create of a
+// prototype made for it, which keeps the prototype in its table, is
+// answered natively after its first turns: the Go call native code makes
+// for an answer its probe of hasCache does not find (jitHas) gives such an
+// object a layout of its own when asked again, as the tree's in node does,
+// and the entry then made for it is native code's. It had called Go at
+// every turn, each run of the loop making the object anew (prop_in, five
+// times main's time over ten runs); and the additions it makes to the
+// object before the loop are compiled to write, not to deoptimize.
+func TestJITPolyProtoIn(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	if _, err := r.Run(compileForTest(t, `function probe(n) {
+			var proto = {inherited: 1}, obj = Object.create(proto), s = 0
+			obj.a = 1
+			obj.b = 2
+			obj.c = 3
+			for (var j = 0; j < n; j++) {
+				if ("a" in obj) s++
+				if ("z" in obj) s += 10
+				if ("inherited" in obj) s += 100
+				if ("toString" in obj) s += 1000
+			}
+			return s
+		}`)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if v, err := r.Run(compileForTest(t, `probe(2000)`)); err != nil || v.Number() != 2000*1101 {
+			t.Fatal(v, err)
+		}
+	}
+	v, calls := jitCountGoCalls(t, r, `probe(20000)`)
+	if v.Number() != 20000*1101 {
+		t.Fatalf("probe(20000) = %v", v)
+	}
+	if calls > 100 {
+		t.Errorf("probe(20000) called Go %d times", calls)
+	}
+	// Nor are its writes before the loop, additions to such an object,
+	// which no cache remembers, sites that know nothing, which the code
+	// deoptimizes at (ssa's unfedSite) -- each run, the loop then run on from
+	// the interpreter -- but megamorphic ones (jitFeedback.megamorphic),
+	// which Go makes from native code.
+	fn := r.global.getOwn(r.atoms.intern("probe")).value().Object().fn().closure
+	cv, ok := jitViewForTest(r, fn)
+	if !ok {
+		t.Fatalf("probe was not compiled: %+v", cv.e)
+	}
+	writes := 0
+	if cv.reg != nil {
+		// The register form's sites are its program's, by register pc,
+		// answered by its feedback (jitRegFeedbackFor).
+		p := cv.reg.p
+		fb := r.jitRegFeedbackFor(fn, p)
+		for pc, in := range p.Code {
+			if in.Op != ir.PropertyWrite {
+				continue
+			}
+			writes++
+			if site, ok := fb.Property(pc); !ok || !site.Megamorphic {
+				t.Errorf("write at %d: %+v, ok %v; want a megamorphic site", pc, site, ok)
+			}
+		}
+	} else {
+		fb := &jitFeedback{r: r, fn: fn.fn, cl: fn, e: cv.e}
+		for pc, in := range fn.fn.Code {
+			if in.Op != bytecode.OpSetProp {
+				continue
+			}
+			writes++
+			if site, ok := fb.Property(pc); !ok || !site.Megamorphic {
+				t.Errorf("write at %d: %+v, ok %v; want a megamorphic site", pc, site, ok)
+			}
+		}
+	}
+	if writes != 3 {
+		t.Fatalf("%d writes, want 3", writes)
 	}
 }
 
@@ -144,7 +231,7 @@ func TestJITHolderLayoutSaysPrototype(t *testing.T) {
 		}
 	}
 	fn := r.global.getOwn(r.atoms.intern("sum")).value().Object().fn().closure
-	if e := r.jit.hint(fn); e == nil || e.ssa == nil {
-		t.Fatalf("sum was not compiled: %+v", e)
+	if cv, ok := jitViewForTest(r, fn); !ok {
+		t.Fatalf("sum was not compiled: %+v", cv.e)
 	}
 }

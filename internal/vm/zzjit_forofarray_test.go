@@ -3,12 +3,14 @@
 package vm
 
 import (
-	"runtime"
-	"runtime/debug"
-	"testing"
-
+	"fmt"
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
+	"github.com/go-quickjs/go-quickjs/internal/jit/ir"
+	"runtime"
+	"runtime/debug"
+	"strings"
+	"testing"
 )
 
 // A for...of loop over an array runs natively from its start to its end,
@@ -140,6 +142,84 @@ func TestJITKeyedReadIndexName(t *testing.T) {
 	}
 }
 
+// An inlined callee's element reads are compiled for what its own code met
+// (jitFeedback's ownEntry), as its property sites are: a typed array's
+// element read natively in the callers it is inlined into, once it has
+// met one. Before, an inlined callee's were the root's alone, none, and
+// read as an array's: Gameboy's memoryReadNormal, parentObj.memory[address],
+// left native code at each read in every caller (inlined there into
+// memoryRead, itself a native callee: what the test checks is the
+// feedback the callee is inlined with, and that callers reading through
+// it, inlining it or calling it, never leave). Each answer is the
+// interpreter's.
+func TestJITInlinedTypedRead(t *testing.T) {
+	t.Parallel()
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	setup := `
+		function GB(k) { this.mem = new Uint8Array(256); for (var i = 0; i < 256; i++) this.mem[i] = i ^ k }
+		var gbs = [new GB(1), new GB(2)], gb = gbs[0]
+		function rd(o, a) { return o.mem[a] }
+		function rdHigh(o, a) { return o.mem[a | 128] }
+		var readers = []; for (var i = 0; i < 256; i++) readers.push(i & 64 ? rdHigh : rd)
+		function sum(n) { let s = 0; for (let i = 0; i < n; i++) s = (s + rd(gbs[i & 1], i & 255)) | 0; return s }
+		function sum2(n) { let s = 0; for (let i = 0; i < n; i++) { const a = (i * 7) & 255; s = (s ^ readers[a](gbs[i & 1], a)) | 0 } return s }
+	`
+	// rd called on its own first, from scripts without a loop, which the
+	// interpreter runs, until its own code has met a typed array; then
+	// the loops that inline it.
+	var calls []string
+	for i := range 64 {
+		calls = append(calls, fmt.Sprintf("rd(gbs[%d], %d)", i&1, i*3))
+	}
+	rounds := []string{}
+	for range 16 {
+		rounds = append(rounds, strings.Join(calls, " + "))
+	}
+	for range 8 {
+		rounds = append(rounds, `sum(2000)`, `sum2(2000)`)
+	}
+	r := jitAgreesForTest(t, setup, rounds...)
+	rdCl := globalObject(r, "rd").fn().closure
+	own := jitHintForTest(r, rdCl)
+	if own == nil || len(own.typedReads) == 0 {
+		t.Fatalf("rd's own code met no typed array: %+v", own)
+	}
+	// The feedback rd is inlined with, a caller's (root), answers what its
+	// own code met.
+	// The register form's: the callee's feedback a compile asks
+	// (jitRegCalleeOf), of its program lowered for inlining, whose
+	// element read at the register pc its code met.
+	p, err := r.jitRegLower(rdCl, rdCl.reg.rc, jitLowerInline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inlined := r.jitRegCalleeOf(&jitFeedback{r: r}, rdCl, p)
+	rpc, found := own.typedReads[0], false
+	for pc := range p.Code {
+		if p.Code[pc].Op == ir.ArrayRead && int32(p.Origin[pc]) == rpc {
+			found = true
+			if !inlined.TypedRead(pc) {
+				t.Errorf("rd inlined reads its element at %d as an array's, though its own code met a typed array there", rpc)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("rd's program has no element read at %d", rpc)
+	}
+	for _, name := range []string{"sum", "sum2"} {
+		e := jitNativeForTest(t, r, name)
+		hosts, guards := e.ssaStats.hosts, e.ssaStats.guards
+		if _, err := r.Run(compileForTest(t, name+`(2000)`)); err != nil {
+			t.Fatal(err)
+		}
+		if h, g := e.ssaStats.hosts-hosts, e.ssaStats.guards-guards; h != 0 || g != 0 {
+			t.Errorf("%s left native code %d times for Go and failed %d guards", name, h, g)
+		}
+	}
+}
+
 // A call whose callee is an arrow reading the this it captured is made
 // natively as any callee's (ssa.CallSite's ArrowThis), the call giving it
 // that this: the builder had left such a site out, so a call the arrow
@@ -165,15 +245,11 @@ func TestJITArrowThisCallee(t *testing.T) {
 		rounds = append(rounds, `run(20)`)
 	}
 	r := jitAgreesForTest(t, setup, rounds...)
-	var e *jitEntry
-	for k, x := range r.jit.cache {
-		if fn := k.Value(); fn != nil && fn.Name == "forEach" {
-			e = x
-		}
-	}
-	if e == nil || e.ssa == nil {
+	c := jitCallbackCodeForTest(r, "forEach")
+	if !c.code {
 		t.Fatal("forEach was not compiled")
 	}
+	e := c.e
 	hosts, guards := e.ssaStats.hosts, e.ssaStats.guards
 	if _, err := r.Run(compileForTest(t, `run(20)`)); err != nil {
 		t.Fatal(err)
@@ -312,7 +388,7 @@ func TestJITGoTypeOfInstanceOf(t *testing.T) {
 // constructor returning an object or a primitive answers as the
 // interpreter's, and class fields are initialized by super() as there.
 // Before, a derived class's constructor was never compiled: each `new` of
-// one ran it in the interpreter -- AWFY DeltaBlue's constraints, a quarter
+// one ran it in the tree tier -- AWFY DeltaBlue's constraints, a quarter
 // of its time with the JIT -- a quarter that is the construction's
 // machinery, not the constructors' own: compiled, those with only a store
 // after their super() saved nothing measured, and are left to the tree
@@ -350,7 +426,33 @@ func TestJITDerivedConstructor(t *testing.T) {
 	for range 3 {
 		rounds = append(rounds, `err(Early)`, `err(Twice)`, `err(RetObj)`, `err(RetPrim)`)
 	}
-	r := jitAgreesForTest(t, setup, rounds...)
+	r, want := jitAgreesPairForTest(t, setup, rounds...)
+	// The register code's counts (its life's) go on over its
+	// compiles, where the stack form's entry's begin afresh at each:
+	// what the code compiled last does is counted over a round more,
+	// its answer the interpreter's.
+	lives := map[string]*jitEntry{}
+	before := map[string]jitSSAStats{}
+	for _, name := range []string{"B", "C", "G"} {
+		e := jitDerivedForTest(t, r, name)
+		if !jitEntryCodeForTest(r, e) || e.ssaStats.entries == 0 {
+			t.Fatalf("%s never ran natively: %+v", name, e)
+		}
+		lives[name], before[name] = e, e.ssaStats
+	}
+	jitAgreeRoundsForTest(t, r, want, `make(500)`)
+	for _, name := range []string{"B", "C", "G"} {
+		st, b := lives[name].ssaStats, before[name]
+		if h, g := st.hosts-b.hosts, st.guards-b.guards; h+g != 0 {
+			t.Errorf("%s left native code %d times for Go and failed %d guards", name, h, g)
+		}
+	}
+	for k, x := range r.jit.regCache {
+		if fn := k.Value(); fn != nil && fn.Name == "Imp" && x.code != nil {
+			t.Errorf("Imp, an implicit constructor, was compiled: it left native code %d times", x.life.ssaStats.hosts)
+		}
+	}
+	return
 	for _, name := range []string{"B", "C", "G"} {
 		// A class is a lexical binding, not the global object's: its
 		// constructor's entry, by its name.
@@ -368,7 +470,7 @@ func TestJITDerivedConstructor(t *testing.T) {
 		}
 	}
 	// An implicit constructor, super(...arguments) alone, which native
-	// code would only leave for at its super(), is left to the interpreter
+	// code would only leave for at its super(), is left to the tree tier
 	// as any function of host operations alone is (jitcompile's hostOnly).
 	for k, x := range r.jit.cache {
 		if fn := k.Value(); fn != nil && fn.Name == "Imp" && x.ssa != nil {
@@ -498,7 +600,7 @@ func TestJITKeyedReadTableIndex(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		e := r.jit.entryFor(v.Object().fn().closure.fn)
+		e := jitHintForTest(r, v.Object().fn().closure)
 		if e == nil || len(e.keyedReads) == 0 {
 			t.Errorf("%s's read of its cache is not Go's from native code", name)
 		}
@@ -546,6 +648,19 @@ func TestJITCapturedLocalCallees(t *testing.T) {
 	}
 	r := jitAgreesForTest(t, setup, rounds...)
 	for _, name := range []string{"inputsKnown", "counter", "maker", "exits", "blocks", "addr"} {
+		// Register code is one for Go and native callers alike, its
+		// captured locals in cells of their own wherever closures
+		// capture them (ir.Program's Cells): no lowering of its own
+		// for native callers alone (the stack form's ssaCallee).
+		e := regEntryNamedForTest(r, name)
+		if e == nil || e.life.calleeRefused || regLinkInForTest(r, e) == 0 {
+			t.Errorf("%s has no code for native callers: %+v", name, e)
+			continue
+		}
+		if e.p == nil || !e.p.Cells {
+			t.Errorf("%s's code has its captured locals in its frame", name)
+		}
+		continue
 		var e *jitEntry
 		for k, x := range r.jit.cache {
 			if fn := k.Value(); fn != nil && fn.Name == name {
@@ -587,13 +702,10 @@ func TestJITCapturedLocalCellsResumed(t *testing.T) {
 	runtime.GC()
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	r := jitAgreesForTest(t, setup, rounds...)
-	var e *jitEntry
-	for k, x := range r.jit.cache {
-		if fn := k.Value(); fn != nil && fn.Name == "mid" {
-			e = x
-		}
-	}
-	if e == nil || e.ssa == nil || !e.ssaCallee || e.ssaProg == nil || !e.ssaProg.Cells {
+	// Register code is one for Go and native callers alike (no
+	// ssaCallee): called natively, its captured locals in cells.
+	e := regEntryNamedForTest(r, "mid")
+	if e == nil || regLinkInForTest(r, e) == 0 || e.p == nil || !e.p.Cells {
 		t.Fatalf("mid has no code for native callers with cells of its own: %+v", e)
 	}
 	if r.jit.resumedLevels == 0 {
@@ -641,15 +753,13 @@ func TestJITClosuresFromPools(t *testing.T) {
 	// at the iteration's end (GoClose), which no frame has open.
 	for _, name := range []string{"maker", "addr", "mk", "arrow", "blocks", "lets"} {
 		var e *jitEntry
-		for k, x := range r.jit.cache {
-			if fn := k.Value(); fn != nil && fn.Name == name {
-				e = x
-			}
-		}
-		if e == nil || e.ssa == nil || e.ssaProg == nil || !e.ssaProg.Cells {
-			t.Errorf("%s has no code with cells of its own: %+v", name, e)
+		// The register code's literals are its life's.
+		re := regEntryNamedForTest(r, name)
+		if re == nil || re.p == nil || !re.p.Cells {
+			t.Errorf("%s has no code with cells of its own: %+v", name, re)
 			continue
 		}
+		e = re.life
 		pools := 0
 		for _, l := range e.literals {
 			if l.tmpl.template() == nil {

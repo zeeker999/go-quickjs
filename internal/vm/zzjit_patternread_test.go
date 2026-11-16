@@ -5,6 +5,8 @@ package vm
 import (
 	"runtime/debug"
 	"testing"
+
+	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
 // An object pattern's read (get_prop_under), which has no cache of its
@@ -28,11 +30,23 @@ func TestJITPatternReadsAbsent(t *testing.T) {
 		var inherits = Object.create(proto); inherits.x = 1
 		var proxy = new Proxy({ x: 3 }, { get(t, k) { return k === 'z' ? 'zz' : t[k] } })
 		var getter = { get x() { return 5 }, get y() { return 6 } }`
+	inlined := jitRegInlinedForTest(t)
 	both := jitBothForTest(t, setup)
 	both.agree(t, `run(300, { x: 1 })`, `run(300, { x: 1 })`)
-	e := jitNativeOrCalleeForTest(t, both.jit, "opts")
-	if e.deopts > 2 || e.invalid || e.link.in+e.ssaStats.entries < 300 {
-		t.Errorf("opts deoptimized %d times, invalid %v, called natively %d times, entered %d", e.deopts, e.invalid, e.link.in, e.ssaStats.entries)
+	if jitRegInlinesForTest(t, both.jit, inlined, "run", "opts") {
+		// The register form inlines opts in run, whose native code runs
+		// its 300 calls: opts' own code is never compiled, and its
+		// learning, its deoptimizations among it, is its life's.
+		jitNativeForTest(t, both.jit, "run")
+		if l := both.jit.jitRegLifeIfAny(jitGlobalClosureForTest(both.jit, "opts")); l != nil && l.deopts > 2 {
+			t.Errorf("opts deoptimized %d times", l.deopts)
+		}
+	} else {
+		v := jitNativeOrCalleeCodeForTest(t, both.jit, "opts")
+		e, in := v.e, jitLinkInForTest(both.jit, jitGlobalClosureForTest(both.jit, "opts"))
+		if e.deopts > 2 || v.invalid() || in+e.ssaStats.entries < 300 {
+			t.Errorf("opts deoptimized %d times, invalid %v, called natively %d times, entered %d", e.deopts, v.invalid(), in, e.ssaStats.entries)
+		}
 	}
 	for _, src := range []string{`{ x: 1, y: 3 }`, `inherits`, `proxy`, `getter`, `{ x: 2, z: 'abc' }`, `{ x: 1 }`} {
 		both.agree(t, `run(100, `+src+`)`)
@@ -61,5 +75,50 @@ func TestJITPatternReadPending(t *testing.T) {
 		}`)
 	for range 3 {
 		both.agree(t, `ws(300, { x: 2 })`)
+	}
+}
+
+// An object pattern's read is compiled to search its source's own table
+// alone until it misses there: its first miss deoptimizes, once, and the
+// site looks in the megamorphic cache from then on, Go reading what that
+// has not (jitDeoptSeen, jitFeedback's Property). A read that never misses
+// has no branch for Go -- microbench's local_destruct, compiled with one
+// at each of its eight reads, had taken 9% longer.
+func TestJITPatternReadsLearnTheirMisses(t *testing.T) {
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	both := jitBothForTest(t, `
+		function hits(o) { let s = 0; for (let i = 0; i < 4; i++) { const { a, b } = o; s += a + b } return s }
+		function misses(o) { let s = 0; for (let i = 0; i < 4; i++) { const { a, b = 2 } = o; s += a + b } return s }
+		function run(n) { let s = 0; for (let i = 0; i < n; i++) s += hits({ a: i, b: 1 }) + misses({ a: i }); return s }`)
+	for range 3 {
+		both.agree(t, `run(300)`)
+	}
+	r := both.jit
+	for _, c := range []struct {
+		name string
+		mega bool
+	}{{"hits", false}, {"misses", true}} {
+		e := jitCodeNamedForTest(t, r, c.name).e
+		fn := r.global.getOwn(r.atoms.intern(c.name)).value().Object().fn().closure.fn
+		mega := false
+		if jitRegCodeForTest(r, c.name) {
+			// The register form's sites are by register pc: the pattern's
+			// reads are the only property reads of hits and misses.
+			for i := range e.poly {
+				mega = mega || e.poly[i].mega
+			}
+		} else {
+			for pc, in := range fn.Code {
+				if in.Op == bytecode.OpGetPropUnder && jitPolyMega(e, pc) {
+					mega = true
+				}
+			}
+		}
+		if mega != c.mega || e.deopts > 2 {
+			t.Errorf("%s: a pattern read megamorphic %v, want %v; %d deoptimizations (run inlines %v; sites %+v)", c.name, mega, c.mega, e.deopts, jitInlinedNamesForTest(r, "run"), e.poly)
+		}
 	}
 }

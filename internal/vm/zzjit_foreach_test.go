@@ -87,7 +87,7 @@ const forEachSetup = `
 
 // A forEach on an array is a loop of the caller's native code (ssa's
 // forEachCall), its callback called natively, where Go had made every
-// forEach and run its callbacks in the interpreter; what the loop's checks
+// forEach and run its callbacks in the tree tier; what the loop's checks
 // find -- a hole, an element past the array's end now, a callback that
 // leaves -- Go goes on with from that index (jitLoopFinish), as V8's
 // builtin continuation frames do. Each answer is the interpreter's, and
@@ -110,9 +110,32 @@ func TestJITForEachLoop(t *testing.T) {
 			`drive_leaves(30, `+[]string{"9", "3"}[i/6]+`)`, `drive_withThis(30, 2)`, `drive_sloppyThis(30)`, `drive_strictThis(30)`,
 			`drive_arrowOver(30, [1, 2, 3, 4])`)
 	}
-	rounds = append(rounds, `notFunction(x => x, [1, 2])`, `notFunction(5, [1, 2])`, `notFunction(5, [])`, `notFunction(null, bodies)`,
-		`drive_arrowOver(30, [])`, `(Array.prototype.forEach = function (f) { f(100) }, drive_arrowOver(30, [1, 2]))`)
-	r := jitAgreesForTest(t, forEachSetup+drivers, rounds...)
+	// The rounds of forEach given what is no function, and of forEach
+	// replaced, last, after the counts.
+	last := []string{`notFunction(x => x, [1, 2])`, `notFunction(5, [1, 2])`, `notFunction(5, [])`, `notFunction(null, bodies)`,
+		`drive_arrowOver(30, [])`, `(Array.prototype.forEach = function (f) { f(100) }, drive_arrowOver(30, [1, 2]))`}
+	r, want := jitAgreesPairForTest(t, forEachSetup+drivers, rounds...)
+	// The register code's counts (its life's) go on over its
+	// compiles, where the stack form's entry's begin afresh at each:
+	// what the code compiled last does is counted over rounds more,
+	// their answers the interpreter's.
+	e := regEntryNamedForTest(r, "sums")
+	if !regMakesLoopsForTest(r, e) {
+		t.Fatalf("sums makes no loop of its forEach: %+v", e)
+	}
+	b := e.life.ssaStats
+	jitAgreeRoundsForTest(t, r, want, `drive_sums(30, 0.01)`, `drive_sums(30, 0.01)`)
+	if e := regEntryNamedForTest(r, "sums"); !regMakesLoopsForTest(r, e) {
+		t.Errorf("sums makes no loop of its forEach: %+v", e)
+	} else if st := e.life.ssaStats; st.goCalls != b.goCalls || st.hosts != b.hosts {
+		t.Errorf("sums called Go %d times, left its code %d times", st.goCalls-b.goCalls, st.hosts-b.hosts)
+	}
+	jitAgreeRoundsForTest(t, r, want, last...)
+	if r.jit.loopsFinished == 0 {
+		t.Error("Go went on with no loop")
+	}
+	return
+	jitAgreeRoundsForTest(t, r, want, last...)
 	var e *jitEntry
 	for k, x := range r.jit.cache {
 		if fn := k.Value(); fn != nil && fn.Name == "sums" {
@@ -128,6 +151,62 @@ func TestJITForEachLoop(t *testing.T) {
 	// The holes, the lengths changed, the callbacks that left: Go went on
 	// with those loops.
 	if r.jit.loopsFinished == 0 {
+		t.Error("Go went on with no loop")
+	}
+}
+
+// A callback that leaves native code where the loop's code cannot go on
+// after its call -- invalidated meanwhile -- has Go go on with the loop
+// from the index after the callback's (jitLoopFinish's after), the
+// callback called once for each element: each answer is the
+// interpreter's.
+func TestJITForEachAfterCallback(t *testing.T) {
+	t.Parallel()
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	want := New(Config{})
+	t.Cleanup(func() { want.Close(); want.ReleaseClosed() })
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	for _, rt := range []*Runtime{want, r} {
+		rt.global.setOwnRaw(rt.atoms.intern("invalidateVisit"), Obj(rt.newNativeFunc("invalidateVisit", 0,
+			func(rt *Runtime, this Value, args []Value) (Value, error) {
+				if rt != r || rt.jit == nil {
+					return Undefined, nil
+				}
+				for k, x := range rt.jit.regCache {
+					if fn := k.Value(); fn != nil && len(args) == 1 && fn.Name == args[0].String().Go() && x.code != nil {
+						fd := rt.global.getOwn(rt.atoms.intern(fn.Name)).value().Object().fn()
+						rt.jitRegInvalidate(fd.closure, x)
+					}
+				}
+				for k, x := range rt.jit.cache {
+					if fn := k.Value(); fn != nil && len(args) == 1 && fn.Name == args[0].String().Go() && x.ssa != nil {
+						fd := rt.global.getOwn(rt.atoms.intern(fn.Name)).value().Object().fn()
+						rt.jitInvalidate(fd.closure, x)
+					}
+				}
+				return Undefined, nil
+			})), propDefault)
+		if _, err := rt.Run(compileForTest(t, afterCallbackSetup)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Runtimes running register code make their JIT's state at its
+	// first use.
+	before := uint64(0)
+	if r.jit != nil {
+		before = r.jit.loopsFinished
+	}
+	for i, src := range []string{`drive(40, -1)`, `drive(40, -1)`, `drive(40, -1)`, `drive(3, 4)`, `drive(3, 2)`, `drive(40, -1)`} {
+		src = "''+(" + src + ")"
+		wv, werr := want.Run(compileForTest(t, src))
+		gv, gerr := r.Run(compileForTest(t, src))
+		if werr != nil || gerr != nil || gv.String().Go() != wv.String().Go() {
+			t.Fatalf("round %d (%s): %v, %v; interpreter %v, %v", i, src, gv, gerr, wv, werr)
+		}
+	}
+	if r.jit.loopsFinished == before {
 		t.Error("Go went on with no loop")
 	}
 }
@@ -174,6 +253,10 @@ func TestJITForEachStackTrace(t *testing.T) {
 	}
 	r := jitAgreesForTest(t, stackSetup, rounds...)
 	for _, name := range []string{"throws", "undefinedCall", "reduces", "maps", "finds", "holeStack"} {
+		if !regMakesLoopsForTest(r, regEntryNamedForTest(r, name)) {
+			t.Errorf("%s makes no loop of its forEach", name)
+		}
+		continue
 		var e *jitEntry
 		for k, x := range r.jit.cache {
 			if fn := k.Value(); fn != nil && fn.Name == name {
@@ -237,8 +320,28 @@ func TestJITReduceLoop(t *testing.T) {
 			`drive_shorten(30, 5)`, `drive_throws(30, 6)`, `drive_throws(30, 99)`, `drive_stringy(30, `+[]string{"99", "4"}[i/6]+`)`,
 			`drive_sloppyThis(30)`, `drive_empty(30, true)`, `drive_empty(30, false)`, `drive_arrowOver(30, [1, 2, 3])`)
 	}
-	rounds = append(rounds, `drive_arrowOver(30, [])`, `(Array.prototype.reduce = function (f, a) { return f(a, 100) }, drive_arrowOver(30, [1, 2]))`)
-	r := jitAgreesForTest(t, reduceSetup+drivers, rounds...)
+	// The rounds of reduce replaced last, after the counts.
+	last := []string{`drive_arrowOver(30, [])`, `(Array.prototype.reduce = function (f, a) { return f(a, 100) }, drive_arrowOver(30, [1, 2]))`}
+	r, want := jitAgreesPairForTest(t, reduceSetup+drivers, rounds...)
+	// The register code's counts go on over its compiles: what the
+	// code compiled last does is counted over rounds more.
+	e := regEntryNamedForTest(r, "sumInit")
+	if !regMakesLoopsForTest(r, e) {
+		t.Fatalf("sumInit makes no loop of its reduce: %+v", e)
+	}
+	b := e.life.ssaStats
+	jitAgreeRoundsForTest(t, r, want, `drive_sumInit(30, 2)`, `drive_sumInit(30, 2)`)
+	if e := regEntryNamedForTest(r, "sumInit"); !regMakesLoopsForTest(r, e) {
+		t.Errorf("sumInit makes no loop of its reduce: %+v", e)
+	} else if st := e.life.ssaStats; st.goCalls != b.goCalls || st.hosts != b.hosts {
+		t.Errorf("sumInit called Go %d times, left its code %d times", st.goCalls-b.goCalls, st.hosts-b.hosts)
+	}
+	jitAgreeRoundsForTest(t, r, want, last...)
+	if r.jit.loopsFinished == 0 {
+		t.Error("Go went on with no loop")
+	}
+	return
+	jitAgreeRoundsForTest(t, r, want, last...)
 	var e *jitEntry
 	for k, x := range r.jit.cache {
 		if fn := k.Value(); fn != nil && fn.Name == "sumInit" {

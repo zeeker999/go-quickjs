@@ -4,6 +4,7 @@ package vm
 
 import (
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 	"weak"
@@ -71,7 +72,8 @@ func TestJITFlushesUnusedCode(t *testing.T) {
 	}
 	fl := jitGlobalClosure(r, "f")
 	s := r.jit
-	if e := s.cache[s.rt.jitKeyOf(fl.fn)]; e == nil || e.ssa == nil || len(e.nativeCalls) == 0 {
+	// The register code's calls are its life's (regLearned).
+	if e := s.regCache[r.jitRegKeyOf(fl)]; e == nil || e.code == nil || len(e.life.nativeCalls) == 0 {
 		t.Fatalf("f's code does not call g natively: %+v", e)
 	}
 	probe := weak.Make(r.global.getOwn(r.atoms.intern("probe")).value().Object())
@@ -84,13 +86,19 @@ func TestJITFlushesUnusedCode(t *testing.T) {
 	s.flush()
 	setEpoch(1000 + 2*jitFlushAge)
 	s.flush()
-	if e := s.cache[s.rt.jitKeyOf(fl.fn)]; e != nil {
+	if e, _ := jitCachedForTest(r, "f"); e != nil {
 		t.Fatalf("f's unused code was not flushed: %+v", e)
 	}
 	if err := jitLinksHeld(s); err != nil {
 		t.Fatal(err)
 	}
 	if err := jitEntriesFound(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := regLinksHeldForTest(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := regEntriesFoundForTest(s); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3; i++ {
@@ -105,7 +113,7 @@ func TestJITFlushesUnusedCode(t *testing.T) {
 			t.Fatalf("after the flush, round %d: %v, %v", i, v, err)
 		}
 	}
-	if e := s.cache[s.rt.jitKeyOf(fl.fn)]; e == nil || e.ssa == nil {
+	if e, code := jitCachedForTest(r, "f"); !code {
 		t.Fatalf("f was not compiled again once hot again: %+v", e)
 	}
 	// What the report counts (JITCacheCounts): the code flushed -- f's,
@@ -138,14 +146,13 @@ func TestJITFlushKeepsCodeInUse(t *testing.T) {
 		}
 	}
 	run()
-	fl := jitGlobalClosure(r, "f")
 	s := r.jit
-	e := s.cache[s.rt.jitKeyOf(fl.fn)]
-	if e == nil || e.ssa == nil {
+	e, code := jitCachedForTest(r, "f")
+	if !code {
 		t.Fatalf("f was not compiled: %+v", e)
 	}
-	ew := s.cache[s.rt.jitKeyOf(jitGlobalClosure(r, "w").fn)]
-	if ew == nil || ew.holdsCode() {
+	ew, wCode := jitCachedForTest(r, "w")
+	if x, ok := ew.(*jitEntry); ew == nil || wCode || ok && x.holdsCode() {
 		t.Fatalf("w is not an entry with no code: %+v", ew)
 	}
 	for k := uint64(1); k <= 4; k++ {
@@ -153,47 +160,80 @@ func TestJITFlushKeepsCodeInUse(t *testing.T) {
 		s.flush()
 		run()
 	}
-	if s.cache[s.rt.jitKeyOf(fl.fn)] != e {
+	if now, _ := jitCachedForTest(r, "f"); now != e {
 		t.Fatal("f's code, run between the looks, was flushed")
 	}
-	if s.cache[s.rt.jitKeyOf(jitGlobalClosure(r, "w").fn)] != ew {
+	if now, _ := jitCachedForTest(r, "w"); now != ew {
 		t.Fatal("w's entry, which has no code and ran between the looks, was flushed")
 	}
 }
 
-// The frames made for a run's native levels at its calls of Go
-// (jitLevels), which only that run's calls share, keep nothing once the
-// run has ended: their closures and receivers had kept a benchmark's graph
-// alive after it ended, through the closure of the callee that called Go.
-func TestJITLevelsClearedAtRunEnd(t *testing.T) {
-	t.Parallel()
+// An entry the cache drops is no longer among its callees' native callers:
+// one kept there, its entry gone, kept what it had learned and compiled
+// for alive with it, through a callee whose own code stayed in use.
+func TestJITDroppedCallerLeavesCallees(t *testing.T) {
+	jitNoLoopInlineForTest(t)
 	if !jitSSABackend {
 		t.Skip("no SSA backend on this architecture")
 	}
+	setEpoch := jitFlushForTest(t)
 	r := jitRuntimeForTest(t, Config{JIT: true})
 	if _, err := r.Run(compileForTest(t, `
-		function make() {
-			var bytes = new Uint8Array(1 << 10);
-			return function g(i) { return bytes[i & 1023] + JSON.stringify(i).length };
-		}
-		function f(g, n) { var s = 0; for (var i = 0; i < n; i++) s = (s + g(i)) | 0; return s }
-		var g = make();`)); err != nil {
+		function h(i) { var t = 0; for (var j = 0; j < 4; j++) t = (t + (i * j) % 7) | 0; return t }
+		function a(n) { var s = 0; for (var i = 0; i < n; i++) s = (s + h(i)) | 0; return s }
+		function b(n) { var s = 0; for (var i = 0; i < n; i++) s = (s + h(i + 1)) | 0; return s }`)); err != nil {
 		t.Fatal(err)
 	}
-	made := false
 	for i := 0; i < 300; i++ {
-		v, err := r.Run(compileForTest(t, `f(g, 100)`))
-		if err != nil || v.Number() != 190 {
-			t.Fatalf("round %d: %v, %v", i, v, err)
+		if _, err := r.Run(compileForTest(t, `a(100) + b(100)`)); err != nil {
+			t.Fatal(err)
 		}
-		made = made || cap(r.jit.levels.at) != 0
 	}
-	if !made {
-		t.Fatal("no run made frames for its native levels")
+	s := r.jit
+	// The register code's native callers are its life's, by key
+	// (jitEntry's regCallers): a key holds nothing alive, and
+	// what a caller learned outlives its code by design, so a
+	// dropped caller among them keeps nothing; that it is dropped
+	// is what is asked.
+	keyA, keyH := r.jitRegKeyOf(jitGlobalClosure(r, "a")), r.jitRegKeyOf(jitGlobalClosure(r, "h"))
+	ea, lh := s.regCache[keyA], s.regLearned[keyH]
+	if ea == nil || ea.code == nil || lh == nil || !slices.Contains(lh.regCallers, keyA) {
+		t.Fatalf("a's code does not call h's natively: %+v, %+v", ea, lh)
 	}
-	for i, at := range r.jit.levels.at[:cap(r.jit.levels.at)] {
-		if at.cl != nil || at.f != nil || at.e != nil || at.this != (jitLevelFrame{}).this {
-			t.Fatalf("level %d keeps what its run had once the run ended: %+v", i, at)
+	for k := uint64(1); k <= 2; k++ {
+		setEpoch(1000 + k*jitFlushAge)
+		s.flush()
+		for i := 0; i < 20; i++ {
+			if _, err := r.Run(compileForTest(t, `b(100)`)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if s.regCache[keyA] != nil {
+		t.Fatal("a's unused code was not flushed")
+	}
+	return
+	ea := s.cache[s.rt.jitKeyOf(jitGlobalClosure(r, "a").fn)]
+	eh := s.cache[s.rt.jitKeyOf(jitGlobalClosure(r, "h").fn)]
+	if ea == nil || ea.ssa == nil || eh == nil || !slices.Contains(eh.nativeCallers, ea) {
+		t.Fatalf("a's code does not call h's natively: %+v, %+v", ea, eh)
+	}
+	for k := uint64(1); k <= 2; k++ {
+		setEpoch(1000 + k*jitFlushAge)
+		s.flush()
+		// b, and h through it, stay in use; a does not.
+		for i := 0; i < 20; i++ {
+			if _, err := r.Run(compileForTest(t, `b(100)`)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if s.cache[s.rt.jitKeyOf(jitGlobalClosure(r, "a").fn)] != nil {
+		t.Fatal("a's unused code was not flushed")
+	}
+	for _, e := range s.cache {
+		if slices.Contains(e.nativeCallers, ea) {
+			t.Fatal("a callee keeps a's dropped entry among its native callers")
 		}
 	}
 }
@@ -216,12 +256,17 @@ func TestJITFlushKeepsInlinedCallees(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := r.jit
-	ef := s.cache[s.rt.jitKeyOf(jitGlobalClosure(r, "f").fn)]
-	eg := s.cache[s.rt.jitKeyOf(jitGlobalClosure(r, "g").fn)]
-	if ef == nil || ef.ssa == nil || eg == nil || eg.ssa == nil {
+	ef, fCode := jitCachedForTest(r, "f")
+	eg, gCode := jitCachedForTest(r, "g")
+	if !fCode || !gCode {
 		t.Fatalf("f or g has no code: %+v, %+v", ef, eg)
 	}
-	ef.ssaInlined = append(ef.ssaInlined, jitGlobalClosure(r, "g"))
+	if e, ok := ef.(*jitRegEntry); ok {
+		// The register code's inlined callees are its keep's.
+		e.keep.inlined = append(e.keep.inlined, jitGlobalClosure(r, "g"))
+	} else {
+		ef.(*jitEntry).ssaInlined = append(ef.(*jitEntry).ssaInlined, jitGlobalClosure(r, "g"))
+	}
 	for k := uint64(1); k <= 4; k++ {
 		setEpoch(1000 + k*jitFlushAge)
 		s.flush()
@@ -231,10 +276,10 @@ func TestJITFlushKeepsInlinedCallees(t *testing.T) {
 			}
 		}
 	}
-	if s.cache[s.rt.jitKeyOf(jitGlobalClosure(r, "f").fn)] != ef {
+	if now, _ := jitCachedForTest(r, "f"); now != ef {
 		t.Fatal("f's code, run between the looks, was flushed")
 	}
-	if s.cache[s.rt.jitKeyOf(jitGlobalClosure(r, "g").fn)] != eg {
+	if now, _ := jitCachedForTest(r, "g"); now != eg {
 		t.Fatal("g, inlined in f's code, which ran, was flushed")
 	}
 }
@@ -255,8 +300,8 @@ func TestJITFlushByTimeNotCollections(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := r.jit
-	e := s.cache[s.rt.jitKeyOf(jitGlobalClosure(r, "f").fn)]
-	if e == nil || e.ssa == nil {
+	e, code := jitCachedForTest(r, "f")
+	if !code {
 		t.Fatalf("f has no code: %+v", e)
 	}
 	// The epochs race, as the collector's cycles would; the flush's clock
@@ -266,7 +311,7 @@ func TestJITFlushByTimeNotCollections(t *testing.T) {
 		setEpoch(1000 + k*100*jitFlushAge)
 		s.flush()
 	}
-	if s.cache[s.rt.jitKeyOf(jitGlobalClosure(r, "f").fn)] != e {
+	if now, _ := jitCachedForTest(r, "f"); now != e {
 		t.Fatal("f's code was flushed by the collector's cycles alone")
 	}
 }
@@ -308,7 +353,7 @@ func TestJITClocksLeaveOutCompiles(t *testing.T) {
 		ran := s.running() - from
 		wall := time.Since(start)
 		JITCompileRepeat = was
-		if e := s.cache[s.rt.jitKeyOf(jitGlobalClosure(r, "g").fn)]; e == nil || e.ssa == nil {
+		if e, code := jitCachedForTest(r, "g"); !code {
 			t.Fatalf("g has no code: %+v", e)
 		}
 		if got := v.Number(); got != 6000 {

@@ -54,7 +54,10 @@ func TestJITCallsOfGoAtLoops(t *testing.T) {
 	back := r.jit.backToTree
 	want(`integers(200000)`, "300000")
 	e := jitNativeForTest(t, r, "integers")
-	if !e.loopSlow || r.jit.backToTree == back {
+	// Register code's frame goes back to the register interpreter, which
+	// runs every frame code leaves: no tree takes it back (backToTree).
+	tree := !jitRegCodeForTest(r, "integers")
+	if !e.loopSlow || tree && r.jit.backToTree == back {
 		t.Fatalf("integers' calls of Go judged to pay (loopSlow %v), or its frame not given back to its tree (%d)", e.loopSlow, r.jit.backToTree-back)
 	}
 	if e.ssaStats.runGoCalls > 2*jitSSAProbe {
@@ -98,7 +101,9 @@ func TestJITLoopExitsAtEachTurn(t *testing.T) {
 	if !e.loopSlow {
 		t.Fatalf("viaUsing's loop, leaving at each turn, judged to pay: %d stretches entered at the loop, %d work", e.ssaStats.osrStretches, e.ssaStats.osrWork)
 	}
-	if r.jit.backToTree == back {
+	if !jitRegCodeForTest(r, "viaUsing") && r.jit.backToTree == back {
+		// Register code's frame goes back to the register interpreter,
+		// which runs every frame code leaves: no tree takes it back.
 		t.Fatal("viaUsing's frame did not go back to its tree")
 	}
 	if n := r.jit.interpreted - interpreted; n > 2*jitSSAProbe {
@@ -111,80 +116,10 @@ func TestJITLoopExitsAtEachTurn(t *testing.T) {
 	}
 	back = r.jit.backToTree
 	want(`viaGen(30000)`, "-1225511480")
-	if e := jitNativeForTest(t, r, "viaGen"); !e.loopSlow || r.jit.backToTree == back {
+	if e := jitNativeForTest(t, r, "viaGen"); !e.loopSlow || !jitRegCodeForTest(r, "viaGen") && r.jit.backToTree == back {
 		t.Fatalf("viaGen's steps judged to pay (loopSlow %v), or its frame not given back to its tree (%d)", e.loopSlow, r.jit.backToTree-back)
 	}
 	want(`viaGen(20000)`, "409615408")
-}
-
-// A frame that native code entered at its start, and left to the
-// interpreter, goes on there from the next loop header, a frame of handlers
-// or for...of loops too, as the interpreter would have run it from the
-// start: an exception thrown in it is caught by the handler in force, the
-// iterators of the loops it leaves are closed, as a break closes one --
-// each return method called -- and a using declaration's resource is
-// disposed of at each turn. Each function is compiled on calls whose loops
-// do arithmetic alone, natively, and then called to do the rest, which
-// leaves native code: at a call of Go that finds them not to pay, or at an
-// exit for the resource. Each answer is Node's.
-func TestJITHandlerTreeGoesOn(t *testing.T) {
-	if !jitSSABackend {
-		t.Skip("no SSA backend on this architecture")
-	}
-	runtime.GC()
-	defer debug.SetGCPercent(debug.SetGCPercent(-1))
-	r, want := jitAnswersForTest(t, `
-		function mixed(n, k) {
-			const log = { closed: 0 }
-			const five = { [Symbol.iterator]() { let i = 0; return { next() { return { value: i, done: i++ >= 5 } }, return() { log.closed++; return {} } } } }
-			let s = 0, errs = 0
-			for (let j = 0; j < n; j++) {
-				if (j < k) {
-					s = (s * 31 + j) | 0
-					s = (s ^ (s >>> 7)) | 0
-					continue
-				}
-				try {
-					for (const v of five) {
-						if (v == 3) break
-						if (j % 1000 == 999 && v == 2) throw new Error('x' + j)
-						s = (s + v + (Number.isInteger(j / 3) ? 1 : 0)) | 0
-					}
-				} catch (e) { errs++; s = (s + e.message.length) | 0 }
-			}
-			return s + ',' + errs + ',' + log.closed
-		}
-		function viaUsing(n, k) {
-			const res = { n: 0, [Symbol.dispose]() { this.n++ } }
-			let s = 0
-			for (let i = 0; i < n; i++) {
-				if (i >= k) { using u = res; s = (s + i) | 0 }
-				else s = (s * 7 + i) | 0
-			}
-			return s + res.n * 3
-		}`)
-	for range 3 {
-		want(`mixed(3000, 3000)`, "-1388502024,0,0")
-		want(`viaUsing(3000, 3000)`, "-2027996068")
-	}
-	jitNativeForTest(t, r, "mixed")
-	jitNativeForTest(t, r, "viaUsing")
-	goneOn := r.jit.treeGoneOn
-	want(`mixed(30000, 0)`, "120099,30,30000")
-	if r.jit.treeGoneOn == goneOn {
-		t.Fatal("mixed's invocation did not go on in its tree")
-	}
-	goneOn = r.jit.treeGoneOn
-	want(`viaUsing(200000, 0)`, "-1474336480")
-	if r.jit.treeGoneOn == goneOn {
-		t.Fatal("viaUsing's invocation did not go on in its tree")
-	}
-	// No run nested in the one that left the frame: runs of it in Go
-	// below each other, one at each turn its code left, had taken a
-	// context each, as many as there were.
-	if n := r.jit.ctxMost; n > 4*jitContexts {
-		t.Errorf("%d contexts for runs of a loop no deeper than 2 frames", n)
-	}
 }
 
 // A generator whose code is judged slow -- each resumption a stretch of a

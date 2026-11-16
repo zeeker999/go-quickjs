@@ -2,6 +2,12 @@
 
 package vm
 
+import (
+	"testing"
+
+	"github.com/go-quickjs/go-quickjs/internal/jit"
+)
+
 // staleInlineSetup's run inlines get and calls step natively, whose
 // forEach -- a call of Go -- calls replaceRun at the run's 30th object and
 // its 50th, which acts on the second, native code going on after it; the

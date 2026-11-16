@@ -2,4 +2,110 @@
 
 package vm
 
-import ()
+import (
+	"fmt"
+	"runtime"
+	"slices"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	"github.com/go-quickjs/go-quickjs/internal/jit/mir"
+)
+
+// A loop's back edge polls after its phi moves, so its header's phis are
+// not used at the edge's end (mir's useState): each lives only as long as
+// the loop's body reads it, and the arguments the edge moves into them take
+// registers of their own. Used there, the four phis of AWFY List's
+// isShorterThan, live to the end of the loop's body beside the three
+// values it made, took all seven registers, and the second property read's
+// cell address went to a spill slot, stored and loaded back each time
+// round. The loop's code is now spilled nowhere; and the values polls read
+// at the back edge -- every back edge, under a budget of one, each an exit
+// -- are the loop's next ones, collector running or not, the loop in its
+// own code or inlined in its caller's.
+func TestJITBackEdgePhisNotSpilled(t *testing.T) {
+	jitNoLoopInlineForTest(t)
+	if !jitSSABackend {
+		t.Skip("no SSA backend on this architecture")
+	}
+	var listing, last string
+	mir.Annotate = true
+	JITCodeHook = func(f JITFunction, _ []byte, c *mir.Code) {
+		if f.Name == "isShorterThan" {
+			listing, last = c.Listing, c.Locations()
+		}
+	}
+	defer func() { JITCodeHook, mir.Annotate = nil, false }()
+	r := jitRuntimeForTest(t, Config{JIT: true})
+	if _, err := r.Run(compileForTest(t, jitListSource)); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		v, err := r.Run(compileForTest(t, `run(20)`))
+		if err != nil || !v.IsString() || v.String().Go() != jitListWant(20) {
+			t.Fatalf("run(20) = %v, %v", v, err)
+		}
+	}
+	if !strings.Contains(listing, "propcell") || !strings.Contains(listing, "loadcell") {
+		t.Fatalf("isShorterThan not compiled with its property reads:\n%s", listing)
+	}
+	if strings.Contains(last, "spill") {
+		t.Errorf("isShorterThan's values spilled: %s", last)
+	}
+	for _, budget := range []uint16{1, 2, 3} {
+		for _, inlined := range []bool{false, true} {
+			for _, gc := range []bool{false, true} {
+				t.Run(fmt.Sprintf("budget %d inlined %v gc %v", budget, inlined, gc), func(t *testing.T) {
+					if inlined {
+						// isShorterThan inlined in run (ssa's maxInlineLoop):
+						// its loop's back edges exit from run's code, inside
+						// the inlined frame.
+						saved := jitNoInline
+						jitNoInline = nil
+						defer func() { jitNoInline = saved }()
+					}
+					if gc {
+						// The collector marks now and then, native code running.
+						var stop atomic.Bool
+						done := make(chan struct{})
+						go func() {
+							defer close(done)
+							for !stop.Load() {
+								runtime.GC()
+							}
+						}()
+						defer func() { stop.Store(true); <-done }()
+					}
+					r := jitRuntimeForTest(t, Config{JIT: true})
+					r.jitStress = jitStressConfig{threshold: true, budget: budget}
+					if _, err := r.Run(compileForTest(t, jitListSource)); err != nil {
+						t.Fatal(err)
+					}
+					for range 3 {
+						v, err := r.Run(compileForTest(t, `run(4)`))
+						if err != nil || !v.IsString() || v.String().Go() != jitListWant(4) {
+							t.Fatalf("run(4) = %v, %v", v, err)
+						}
+					}
+					if st := r.JITStats(); st.Budgets == 0 {
+						t.Fatalf("no loop left native code at its budget's end: %+v", st)
+					}
+					// Inlined, until its exits made the call one native code
+					// makes (jitInlineExits).
+					run := jitGlobalClosureForTest(r, "run")
+					e := r.jit.hint(run)
+					// Its register code's learning, which outlives its
+					// compiles, and its code's.
+					e = nil
+					if jitRegEntryOfForTest(r, run) != nil {
+						e = r.jit.regLearnedOf(r.jitRegKeyOf(run))
+					}
+					if inlined && (e == nil || len(e.notInline) == 0 && !slices.Contains(jitInlinedOfForTest(r, run), jitGlobalClosureForTest(r, "isShorterThan"))) {
+						t.Fatal("run's code never inlined isShorterThan")
+					}
+				})
+			}
+		}
+	}
+}
