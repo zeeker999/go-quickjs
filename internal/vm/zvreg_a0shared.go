@@ -56,16 +56,6 @@ var sharedMark byte
 // elements of its own, counting the copy in the shared storage's count.
 var unshareElems func(o *Object)
 
-// sharedLiteralSite reports whether the array literal at pc of cl's
-// function shares its constants: a literal of constants (OpNewArray's B)
-// that has not given sharing up, its storage made here from the constants
-// the code pushes before it where the interpreter has not made it --
-// native code may be compiled for a literal before the interpreter has
-// run it. Native
-// code is compiled to take such a literal's arrays as Go makes them
-// (sharedLiteralArray).
-var sharedLiteralSite func(r *Runtime, cl *closure, pc int) bool
-
 // sharedLiteralArray is an array of the literal at pc of cl's function, one
 // sharedLiteralSite reported shares its constants: over its storage, or, a
 // site that has given sharing up since, with a copy of its own -- whole
@@ -99,10 +89,6 @@ var sharedShare func(r *Runtime, ic *propCache, t *Object) *Object
 // sharedSite is the cache entry of the array literal at pc of cl's
 // function, if it is a literal of constants.
 var sharedSite func(cl *closure, pc int) *propCache
-
-// sharedConstants are the values the n instructions before pc push, each
-// a constant's push, as the interpreter pushes them.
-var sharedConstants func(cl *closure, pc, n int) ([]Value, bool)
 
 func init() {
 	sharedCount = func(e []Value) *Value {
@@ -152,54 +138,6 @@ func init() {
 			return nil
 		}
 		return &cl.ic[in.B]
-	}
-	sharedConstants = func(cl *closure, pc, n int) ([]Value, bool) {
-		if n == 0 || pc < n {
-			return nil, false
-		}
-		vals := make([]Value, n)
-		for i, in := range cl.fn.Code[pc-n : pc] {
-			switch in.Op {
-			case bytecode.OpPushInt:
-				vals[i] = Int32(int32(in.A))
-			case bytecode.OpPushConst:
-				if int(in.A) >= len(cl.consts) {
-					return nil, false
-				}
-				if v := cl.consts[in.A]; v.IsNumber() || v.IsString() {
-					vals[i] = v
-				} else {
-					return nil, false
-				}
-			case bytecode.OpPushTrue:
-				vals[i] = True
-			case bytecode.OpPushFalse:
-				vals[i] = False
-			case bytecode.OpPushNull:
-				vals[i] = Null
-			case bytecode.OpPushUndef:
-				vals[i] = Undefined
-			case bytecode.OpPushEmptyString:
-				vals[i] = Str(emptyString)
-			default:
-				return nil, false
-			}
-		}
-		return vals, true
-	}
-	sharedLiteralSite = func(r *Runtime, cl *closure, pc int) bool {
-		ic := sharedSite(cl, pc)
-		if ic == nil {
-			return false
-		}
-		if ic.p1 == nil {
-			vals, ok := sharedConstants(cl, pc, int(cl.fn.Code[pc].A))
-			if !ok {
-				return false
-			}
-			ic.p1 = sharedMade(r, vals)
-		}
-		return ic.idx >= 0 && sharedCount(ic.p1.extAt().elems).num < sharedGiveUp
 	}
 	sharedLiteralArray = func(r *Runtime, cl *closure, pc int) *Object {
 		ic := sharedSite(cl, pc)

@@ -98,10 +98,9 @@ type jitSnapKey struct {
 // closure, its function, the forwarding frames it is inlined at, and the
 // feedback it keeps what it holds in.
 type jitSnapCallee struct {
-	cl           *closure
-	fn           any
-	fwd, fwdArgs *jitForwardFrame
-	root         *jitFeedback
+	cl   *closure
+	fn   any
+	root *jitFeedback
 }
 
 // jitSnapDepth is how deep in callees the snapshot asks: past ssa's
@@ -279,15 +278,6 @@ func (s *jitSnapshot) replay() {
 // jitSnapCopy is a slice an answer holds, copied: jitFeedback makes its
 // answers anew at each question, and a build may change what it is given.
 func jitSnapCopy[T any](s []T) []T { return slices.Clone(s) }
-
-// jitSnapSparse are the methods asked at every PC (jitSnapAsks) whose
-// answer is false but at the few PCs a list of the function's entry, or
-// the interpreter's marks, name: Generic, EntryGeneric and Resumed. They are
-// asked at those alone (askSparse), each other PC answering its zero value
-// as a PC asked that answered nothing does. Asked at every PC, they were
-// half the questions a snapshot asked, three answering in 10,000 in the
-// SSR benchmark's first render.
-const jitSnapSparse = 1<<snapGeneric | 1<<snapEntryGeneric | 1<<snapResumed
 
 // jitSnapOps are the ops the build asks each method of a PC at, as the
 // VM's tests and the ssr and V8 workloads have it ask them, plain and

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 	"github.com/go-quickjs/go-quickjs/internal/jit/abi"
 	"github.com/go-quickjs/go-quickjs/internal/jit/ssa"
 )
@@ -587,30 +586,6 @@ func TestJITMegamorphicWriteKeeps(t *testing.T) {
 	if got, w := gv.String().Go(), wv.String().Go(); got != w {
 		t.Fatalf("got %s, interpreter %s", got, w)
 	}
-}
-
-// jitSetPropPC is the PC of fn's one set_prop.
-func jitSetPropPC(t *testing.T, fn *bytecode.Function) int {
-	t.Helper()
-	for pc, in := range fn.Code {
-		if in.Op == bytecode.OpSetProp {
-			return pc
-		}
-	}
-	t.Fatal("no set_prop")
-	return -1
-}
-
-// jitGetPropPC is the PC of fn's first get_prop.
-func jitGetPropPC(t *testing.T, fn *bytecode.Function) int {
-	t.Helper()
-	for pc, in := range fn.Code {
-		if in.Op == bytecode.OpGetProp {
-			return pc
-		}
-	}
-	t.Fatal("no get_prop")
-	return -1
 }
 
 // An inlined callee's array and object literals are made natively, from

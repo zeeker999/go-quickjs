@@ -86,16 +86,3 @@ func jitNativeUsesForTest(r *Runtime, name string) uint64 {
 	}
 	return n
 }
-
-// jitHasCodeForTest reports whether r's JIT holds code of either form.
-func jitHasCodeForTest(r *Runtime) bool {
-	if r.jit == nil {
-		return false
-	}
-	for _, e := range r.jit.regCache {
-		if e.code != nil {
-			return true
-		}
-	}
-	return len(r.jit.cache) != 0
-}

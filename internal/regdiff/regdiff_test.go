@@ -131,12 +131,6 @@ func heavy(t *testing.T) {
 	})
 }
 
-// heavyHolds reports whether t holds a slot of heavySlots.
-func heavyHolds(t *testing.T) bool {
-	_, ok := heavyHeld.Load(t)
-	return ok
-}
-
 // regDiffLocked is regDiff, its caller holding regDiffAlone.
 func regDiffLocked(t *testing.T, src string, calls []string) int64 {
 	t.Helper()

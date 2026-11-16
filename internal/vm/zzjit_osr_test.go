@@ -563,16 +563,3 @@ func TestJITOSRUsesTheFunction(t *testing.T) {
 		t.Fatalf("an entry of the code kept for the loop is no use of the function: %d, %d", u, e.uses())
 	}
 }
-
-// linkKeyForTest is the cache's key of e.
-func (s *jitState) linkKeyForTest(e *jitEntry) (key jitKeyForTest) {
-	for k, x := range s.cache {
-		if x == e {
-			return k
-		}
-	}
-	return key
-}
-
-// jitKeyForTest is the cache's key.
-type jitKeyForTest = jitKey

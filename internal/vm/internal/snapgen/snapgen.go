@@ -253,19 +253,6 @@ func results(m method) string {
 	return strings.Join(rs, ", ")
 }
 
-// nests writes, for each of m's results that is an inline site or holds
-// one, its callee's feedback made a snapshot (nest).
-func nests(b *bytes.Buffer, m method, indent string) {
-	for i, t := range m.results {
-		switch t {
-		case "ssa.InlineSite":
-			fmt.Fprintf(b, "%sr%d = s.nest(r%d)\n", indent, i, i)
-		case "ssa.AccessorSite", "ssa.ForEachSite":
-			fmt.Fprintf(b, "%sif r%d.Inline != nil {\n%s\tnested := s.nest(*r%d.Inline)\n%s\tr%d.Inline = &nested\n%s}\n", indent, i, indent, i, indent, i, indent)
-		}
-	}
-}
-
 // Write writes zzjit_snapshot_gen.go into dir.
 func Write(dir string) error {
 	snapshot, err := Generate(dir)

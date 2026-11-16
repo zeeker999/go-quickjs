@@ -434,7 +434,7 @@ func (r *Runtime) jitRegCompile(cl *closure, c *regCode, key jitKey, callee bool
 		jitSSAOptimized(cl.fn, f)
 	}
 	mc, err := mir.CompileWith(&w.MIR, f, jitEncoding, mir.Settings())
-	keepLimit := 0
+	keepLimit := rf.fb.keepLimit
 	if errors.Is(err, mir.ErrKeeps) {
 		// More keep cells live at once than the context has, which the
 		// build could not know: built again with no more than that, the

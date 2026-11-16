@@ -107,10 +107,6 @@ type jitGenMake struct {
 	pool *abi.ObjectPool
 }
 
-// jitGenMakes bounds the generator functions a call makes the generators
-// of natively: one, as most calls of one call no other.
-const jitGenMakes = 1
-
 // jitGenMakePool is the pool of e's call at pc of the generator function
 // o, made and filled if it has none, or nil where native code no longer
 // makes them: the function's prototype is not what it was made with.

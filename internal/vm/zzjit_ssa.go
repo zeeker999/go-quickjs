@@ -1384,20 +1384,6 @@ func jitFeedbackMark(cl *closure) uint64 {
 	return m
 }
 
-// errJITStaleLinks is jitInstall's refusal of a compile whose links are
-// stale (staleLinks), which compileSSAFinish builds again.
-var errJITStaleLinks = errors.New("jit: a link the compile calls through was let go")
-
-// jitFeedbackHook, where a test sets it, is the feedback a build asks in
-// place of fb's: a proxy of it, which notes what the build asks.
-var jitFeedbackHook func(fb *jitFeedback, p *ir.Program) ssa.Feedback
-
-// jitKeepLimit, where a test sets it, limits the keep cells of every
-// compile's build (ssa.KeepFeedback), as a compile again past the
-// context's (abi.MaxKeeps) limits them: what is made natively past them
-// is left to Go.
-var jitKeepLimit int
-
 // jitJob is a compile in its three steps, as V8's concurrent compiles
 // are: prepared on the runtime's goroutine (jitPrepare), which builds the
 // function from what the runtime knows; worked (work), the optimization
@@ -1405,51 +1391,16 @@ var jitKeepLimit int
 // runtime's; installed on the runtime's goroutine again (jitRegInstall),
 // which takes what the work found into the feedback and places the code.
 type jitJob struct {
-	fn *bytecode.Function
 	cl *closure
 	// realm is the realm the compile is for, the current one where it was
 	// handed over, which its install runs in (jitDrain).
-	realm     *Realm
-	p         *ir.Program
-	e         *jitEntry
-	fb        *jitFeedback
-	keepLimit int
+	realm *Realm
 	// w is the compile's workspace, the process's, given back once its
 	// code is placed (nil then), and f the function built in it.
-	w *jit.Workspace
-	f *ssa.Func
-	// enc and opts are the encoding and the backend's switches the compile
-	// is made with, and timing and optimized the timing (mir.Timing) and the
-	// hook (jitSSAOptimized) it reports to, as they were when it was
-	// prepared: a worker reads no variable a test or a host may set
-	// meanwhile.
-	enc       abi.Encoding
-	opts      mir.Options
-	timing    *mir.Times
-	optimized func(*bytecode.Function, *ssa.Func)
-	// snap is the compile's feedback asked ahead, which the worker builds
-	// from (work), or nil for a compile built as it was prepared; buildErr
-	// is that build's refusal, and missed marks a build that asked what
-	// snap was not asked (jitSnapMiss), built on the runtime's goroutine
-	// at its install instead.
-	snap     *jitSnapshot
-	buildErr error
-	missed   bool
-	// mc is the backend's code, or err its refusal; panicked marks a
-	// refusal a worker made of a panic (jitJob.run), and allocErr is the
-	// panic, where it was a failed check of the register allocation's.
-	mc       *mir.Code
-	err      error
-	panicked bool
-	allocErr *mir.AllocationError
-	// held marks a compile held for its callees' (jitHold), which is no
-	// job's yet and will be another's: holdRound is how many times it has
-	// been, nativeCallee marks a compile for native callers
-	// (jitRegNativeCallee), and frameAt is what a frame waits at for it
-	// (jitRegFrameAt).
-	held, nativeCallee bool
-	holdRound          int
-	frameAt            int
+	w    *jit.Workspace
+	f    *ssa.Func
+	opts mir.Options
+	err  error
 	// What a compile in the background (jitRegSubmit) needs besides: its
 	// state, which the worker and the runtime's goroutine hand it over by,
 	// and done, closed once the worker is finished with it; how many
@@ -1458,23 +1409,9 @@ type jitJob struct {
 	// (jitCompiled, jitReoptimized); and, for a compile again, the
 	// entry's deoptimizations when it was built and whether it has
 	// decided calls (jitRegReoptimize's learned).
-	state   atomic.Int32
-	done    chan struct{}
-	checks  int
-	install func(*Runtime, *jitJob) bool
-	deopts  uint16
-	learned bool
+	state atomic.Int32
+	done  chan struct{}
 }
-
-// jitSnapshots has compiles in the background built on their workers, from
-// snapshots of their feedback (jitSnapshot); without it, on the runtime's
-// goroutine, as they are prepared. A switch for comparing the two.
-var jitSnapshots = true
-
-// jitBuiltHook, where a test sets it, is told each build on the runtime's
-// goroutine as it is made: the snapshot's oracle, which compares it with
-// the build from the snapshot its jitFeedbackHook asked.
-var jitBuiltHook func(fb *jitFeedback, p *ir.Program, f *ssa.Func, err error)
 
 // JITCompileRepeat, if not 0, has every compile of the SSA backend that
 // succeeds run that many times more, its build, optimization and backend,
@@ -1516,48 +1453,24 @@ var jitRefused = errors.New("jit: the program is refused")
 // of none -- the VM gives a small object a shape only when a cache asks --
 // are searched for the key.
 type jitFeedback struct {
-	// targets are the calls' targets the compile was given (jitTargetsOf),
-	// which its entry's code is compiled for (jitEntry's ssaTargets).
-	targets []jitTarget
-	// lexThis says the code makes an arrow from a pool (Closure), whose
-	// this native code writes from the context's This; loops that it makes
-	// a loop of a forEach (ForEach), and loopSlots how far past the frame's
-	// operands' first their slots go.
-	lexThis, loops bool
-	loopSlots      int
-	r              *Runtime
-	fn             *bytecode.Function
-	cl             *closure
-	shapes         []*shape
+	r      *Runtime
+	fn     *bytecode.Function
+	cl     *closure
+	shapes []*shape
 	// holders are the prototypes the code compares receivers' with
 	// (ssa.Holder), held by address, which the entry keeps alive.
 	holders []*Object
-	// definesUnfed, the root's, are the literals' fields it compiled before
-	// their transitions were made; cells the string constants' it reads.
-	definesUnfed []int32
-	cells        []*Value
-	// inlinedAt, the root's, are the calls of its own it inlines, and
-	// hostsLeft its host operations it leaves to Go (ssa.Func's HostsLeft),
-	// and unresumed the PCs after its calls it has no entry after (ssa.Func's
-	// Unresumed).
-	inlinedAt, hostsLeft, unresumed []int32
-	// unentered are the loops' headers whose entries escape analysis
-	// dropped (ssa.Func's Unentered); kept those it kept for the frame
-	// waiting at frameAt (ssa.Func's FrameAt, EntryKept).
-	unentered, kept []int32
-	frameAt         int
+	cells   []*Value
 	// root is the function's feedback for an inlined callee's, which keeps
 	// what the callee's sites hold for the code; nil for the function's
 	// own. strings marks an inlined callee that calls charCodeAt. links
 	// are those of the functions the code calls natively (jitLink).
-	root    *jitFeedback
-	strings bool
-	links   []*jitLink
+	root  *jitFeedback
+	links []*jitLink
 	// inlined are the closures of the callees the code inlines, or that
 	// its compile asked to inline, inlinedN how many it inlines (ssa.Func's
 	// Inlined); pools the object pools its constructions take from.
-	inlined  []*closure
-	inlinedN int
+	inlined []*closure
 	// regSeen, the root's, are the register callees the compile asked to
 	// inline whose sites' caches it has taken (jitRegSeenInlined), and
 	// regCallees their feedback (jitRegCalleeOf).
@@ -1571,10 +1484,6 @@ type jitFeedback struct {
 	// (ssa.Func's Callbacks and Unmade).
 	made              []*closure
 	callbacks, unmade int
-	// homes is how far past the frame's operands' first the homes of the
-	// objects the code does not make end (ssa.Func's HomesEnd), or 0, and
-	// virtuals how many objects it does not make (ssa.Func's Virtuals).
-	homes, virtuals int
 	// called is how many closures the code makes that it only calls and
 	// does not make (ssa.Func's Called).
 	called int
@@ -1587,35 +1496,16 @@ type jitFeedback struct {
 	wanted, linked []*closure
 	// keeps is how many keep cells the code uses (ssa.Func.Keeps), and
 	// keepLimit how many the build may number (ssa.KeepFeedback), or 0.
-	keeps, keepLimit int
+	keepLimit int
 	// e is the entry being compiled again, whose failed speculations
 	// (jitEntry.failed) are built generic; nil for a first compile.
 	e *jitEntry
-	// fwd, for a forwarding constructor's inlined frame, is the
-	// construction it is inlined at, whose receiver the frame's sites are
-	// known from (jitForwardFrame). fwdArgs, for a frame of a function that
-	// only forwards its arguments (bytecode's ForwardsArguments), whose
-	// code ran and filled its caches, is the construction whose receiver
-	// its apply_arguments calls are made with (jitForwardSiteTarget).
-	fwd, fwdArgs *jitForwardFrame
 	// prog is the function lowered for inlining, its stack depths what
 	// Intrinsic reads, made on first use.
 	prog *ir.Program
-	// targetsBy are the calls e's code learned (jitTargets), by PC, once
-	// asked (targetsAt), and targetsOf its lists as they were then.
-	targetsBy map[int][]*jitInline
-	targetsOf [2][]jitInline
-	// selfCalls are the PCs of the function's calls of itself among them,
-	// once Resumed asks (selfKnown).
-	selfCalls []int32
-	selfKnown bool
 	// virtualRoots are VirtualRoot's answers, by pool, held until the
 	// compile keeps those escape analysis took (keepVirtuals).
 	virtualRoots map[uintptr]jitVirtualRoot
-	// seeded marks a closure's feedback, inlined where the function makes
-	// it (closureInline): its own calls are those the existing tiers met
-	// where it has no code (jitCalleeInline).
-	seeded bool
 }
 
 // mathIntrinsic is the intrinsic a call of o, of n arguments, a plain
@@ -1744,7 +1634,6 @@ func (fb *jitFeedback) instanceOfSite(ctor *Object) (ssa.InstanceOfSite, bool) {
 // arguments.
 type jitForwardFrame struct {
 	ctor *Object
-	pool *abi.ObjectPool
 	argc int
 }
 
@@ -1775,7 +1664,7 @@ type jitInline struct {
 	// String.prototype.charCodeAt (jitCharCodes), fromChar one of
 	// String.fromCharCode (jitFromCharCodes), substring one of
 	// String.prototype's substring, slice, substr or charAt (jitSubstrings).
-	push, pop, charCode, fromChar, substring bool
+	push, pop bool
 	// forEach marks a call of Array.prototype.forEach, or another of
 	// jitLoops, on an array (jitRegForEachSeen), cb the closure of the callback
 	// it was given and cbObj its function object.
@@ -1793,7 +1682,7 @@ type jitInline struct {
 	// jitSearches (jitIndexOfs), bigString a BigInt's call of
 	// BigInt.prototype.toString (jitBigStrings), leaf a call of a leaf
 	// native code made without a frame (jitLeafSeen).
-	parseInt, indexOf, bigString, leaf bool
+	leaf bool
 	// byCode marks a function the call met two objects of, closures its
 	// maker makes anew at each call: called by its code (jitRegSameCode).
 	byCode bool
@@ -1802,10 +1691,6 @@ type jitInline struct {
 	// called natively with the frame's arguments, as many as there are at
 	// run time, never inlined there, where they are not known.
 	forward bool
-	// fwd, for an inlined forwarding constructor's construction
-	// (bytecode.LeafForward), is the method it forwards to, as the code was
-	// last compiled for (jitForwardMethod).
-	fwd *Object
 	// parent, for a construction with a class whose constructor is the
 	// one a class without one has (jitRegDerivedBase), is the class it
 	// extends, whose constructor cl is: the call checks obj's prototype is
@@ -2325,8 +2210,7 @@ type jitGoRun struct {
 	// budgets, and the PC -- the start of the work its next call of Go
 	// is judged against (jitGoCall), in a run on-stack replacement began
 	// (osr).
-	edges, pc int
-	osr       bool
+	pc int
 }
 
 // jitGoUnpin ends what calls of Go the run in context idx made: its code,
@@ -2741,9 +2625,9 @@ func (r *Runtime) jitEntryOf(cl *closure) *jitEntry {
 // levels: limited to four, every call of AWFY's Json's parser, its
 // readValue native, made a frame for each of its six to twelve levels.
 type jitLevels struct {
-	serial         uint64
-	root, depth, n int
-	at             []jitLevelFrame
+	serial   uint64
+	depth, n int
+	at       []jitLevelFrame
 }
 
 // jitLevelFrame is a level's frame and entry, and the closure, stack base
@@ -2754,21 +2638,6 @@ type jitLevelFrame struct {
 	cl   unsafe.Pointer
 	base uint64
 	this abi.Slot
-	// instance is a derived construction's (abi.Context's Instance),
-	// which its frame's this is until its super() binds it: each
-	// construction's its own, its This the same unbound value.
-	instance abi.Slot
-}
-
-// jitGoMark is where the last call of Go a native callee made returned
-// (jitRegGoCallNested): in which run's pins (serial), the back-edge counter
-// then, net of the polls' budgets, and its entry's hint -- which names it
-// without keeping it -- and PC. hint 0 is none yet.
-type jitGoMark struct {
-	serial uint64
-	edges  int
-	hint   uint32
-	pc     int
 }
 
 // jitStoreElem stores v at index n of o as an assignment would, where that
@@ -3315,11 +3184,6 @@ var jitNoInline func(fn *bytecode.Function) bool
 // calls it makes, theirs (ssa's maxInlineDepth).
 const jitInlineDepth = 3
 
-// jitSeedDepth is how many compiles deep seeding a call's target may
-// start compiles (jitSeedCallee): a callee's calls' targets, theirs, as
-// deep as calls are inlined.
-const jitSeedDepth = jitInlineDepth
-
 // jitCallee is a function object a call calls, and its closure.
 type jitCallee struct {
 	o  *Object
@@ -3632,18 +3496,6 @@ func jitUpvalueCells(cl *closure) uintptr {
 // declaring lexical bindings has each such read check the binding itself,
 // rather than leave its code at every change.
 const jitGlobalEpochs = 64
-
-// jitLoopDone stands for an exit kind once Go has finished the loop it
-// left (jitFinishExit): the frame goes on after the call.
-const jitLoopDone = ^uint64(0)
-
-// jitMade is a closure Go made at an exit in place of its template, on the
-// frame of the code that did not make it (jitRegMaterialize).
-type jitMade struct {
-	f *frame
-	t *closure
-	o *Object
-}
 
 // jitLoopLocals is how many of a loop's slots Go goes on from (ssa's
 // loopLocals): the array, the callback, this -- reduce's accumulator --
@@ -4442,14 +4294,10 @@ type jitLowering struct {
 	// bytecode does not say (jitcompile.Hints): its programs are lowered
 	// with them. treeAdds is how many additions its tree had marked
 	// (treeSeen) when they were last taken into hints.
-	hints    jitcompile.Hints
-	treeAdds int32
+	hints jitcompile.Hints
 	// serial counts its relowerings (relower): a lowering made in the
 	// background from hints a later relowering replaced is stale.
 	serial uint32
-	// startOnly is jitcompile.StartOnly's answer for the function, once
-	// asked by a call of it: 1 for no, 2 for yes.
-	startOnly uint8
 	// busy counts the compiles of the function's register code under way,
 	// which keep its programs (regLoweringSpare).
 	busy uint8
@@ -5183,20 +5031,13 @@ func jitSource(word *uint64) *Value {
 	return *(**Value)(unsafe.Pointer(word))
 }
 
-// jitLevelSlot is a slot of a level's frame and the word it held before the
-// level's records wrote over it (jitKeepSlots).
-type jitLevelSlot struct {
-	at  *Value
-	old Value
-}
-
 // jitSSAStats counts what one function's new-pipeline code does. Each
 // entry starts a native stretch, which ends in a return, an exit to Go or
 // a failed guard (ended counts those two), or a poll; work estimates, in
 // slot IR instructions, what the stretches did natively.
 type jitSSAStats struct {
-	entries, hosts, guards, polls, records uint64
-	ended, work                            uint64
+	entries, hosts, guards, polls uint64
+	ended, work                   uint64
 	// goCalls counts the calls native code had Go make (jitGoCall).
 	goCalls uint64
 	// calleeGoCalls counts those it made as a native callee
@@ -5237,10 +5078,6 @@ const (
 	jitSSAProbe   = 64
 	jitSSAMinWork = 20
 )
-
-// errGoOnNatively ends the interpreter's run of a frame Go goes on in
-// natively, at a loop's header (jitRegGoOn).
-var errGoOnNatively = errors.New("jit: go on natively")
 
 // jitShared is what every context native code runs in shares with the one
 // it was called from (abi.Context): where the global names are, the
@@ -5519,55 +5356,24 @@ func jitShrinkTo[T any](s []T, n int, move bool) []T {
 // callee's has its program's locals and its receiver's slot plus one
 // (abi.Context's Inline fields), and top, the stack's top before it.
 type jitNativeLevel struct {
-	cl                    *closure
-	base                  int
-	this                  Value
-	kind, pc, depth, site uint64
-	inline                bool
-	locals, thisSlot, top int
+	cl              *closure
+	base            int
+	this            Value
+	kind, pc, depth uint64
+	locals, top     int
 	// args, for an inlined callee's that keeps its call's arguments
 	// (abi.Context's InlineArgs), says where they are; 0 for none.
-	args uint64
-	// prologue, for an inlined callee's that left inside its parameter
-	// list's prologue, is its call's arguments, which its frame is given
-	// (jitPrologueArgs).
-	prologue []Value
-	// construct marks a callee a construction called, whose result, if not
-	// an object, is its receiver, and newTarget is then the function the
-	// construction called, the frame's new.target.
-	construct bool
+	args      uint64
 	newTarget Value
 	// callee, for an inlined callee's, is its function object
 	// (abi.Context's InlineCallee), the frame's, as a stack trace names it
 	// by; nil for a native call's.
 	callee *Object
-	// ctx is the level's context's index.
-	ctx int
-	// returnTo is where its native caller goes on after the call
-	// (abi.Context.ReturnTo), and code the caller's code then: the caller
-	// is resumed there once Go has finished this level (jitUnwindNative).
-	returnTo uintptr
-	code     *jit.SSACode
-	// owner, for an inlined callee's level, is the entry whose code
-	// inlined it, the code its exit left, and ownerCl a
-	// closure of its function's.
-	owner   *jitEntry
-	ownerCl *closure
-	// loop is the loop of a built-in's call the level's code was making at
-	// its call or exit (abi.Context's Loop), which Go goes on with there;
-	// loopFrame says Go made the built-in's frame past the level's
-	// (jitPushLoopFrame), its callee's caller.
-	loop      uint64
-	loopFrame bool
-	// slotsFrom and slotsTo are the words its records wrote over, in
-	// jitState's levelSlots (jitKeepSlots).
-	slotsFrom, slotsTo int
+	code   *jit.SSACode
 	// gen, for a generator a loop's step resumed natively (jitGenLevel),
 	// is the generator, and cursor the step's cursor; fill marks a
 	// destructuring's step, whose done is undefined (jitRegGenDone).
-	gen    *generator
-	cursor *iterState
-	fill   bool
+	gen *generator
 }
 
 // jitDerivedResult is a derived construction's result, from what its

@@ -128,12 +128,6 @@ func cursorOf(v Value) *iterState {
 	return nil
 }
 
-// doneMark is what iterStateOf finds: nothing is one.
-type doneMark struct {
-	_    [59]byte
-	done bool
-}
-
 // startForIn snapshots the enumerable string keys of a value.
 //
 // The prototype chain is included, and a key shadowed by a nearer object is

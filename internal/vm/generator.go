@@ -103,22 +103,10 @@ type genSaved struct {
 	stackRoom    [2]Value
 }
 
-// noneSaved is the saved part of a generator that has none, which
-// nothing writes.
-var noneSaved genSaved
-
 // savedStack is the operands g's last suspension left.
 func (g *generator) savedStack() []Value {
 	if s := g.saved; s != nil {
 		return s.stack
-	}
-	return nil
-}
-
-// savedHandlers is the handlers in force where g last suspended.
-func (g *generator) savedHandlers() []handler {
-	if s := g.saved; s != nil {
-		return s.handlers
 	}
 	return nil
 }
@@ -255,15 +243,6 @@ type suspendSignal struct {
 }
 
 func (*suspendSignal) Error() string { return "generator suspended" }
-
-// returnSignal is a forced return injected at a generator's suspension point by
-// generator.return().
-//
-// Like suspendSignal it travels as an error to reuse the return path, and like
-// it is deliberately not a *Thrown, so a catch inside the body ignores it. Only
-// a finally clause sees it, which is exactly what a return statement at that
-// position would do.
-type returnSignal struct{ value Value }
 
 // resumeMode says how a generator is being re-entered.
 type resumeMode uint8

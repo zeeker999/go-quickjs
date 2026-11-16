@@ -44,7 +44,3 @@ const (
 	litConst
 	litLocal
 )
-
-// maxLitFields is the most fields a literal's node takes: past it, the
-// define_fields are statements of their own.
-const maxLitFields = 64

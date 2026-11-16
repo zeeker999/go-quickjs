@@ -49,9 +49,15 @@ func (r *Runtime) jitRegFeedbackFor(cl *closure, p *ir.Program) *jitRegFeedback 
 	if cl == nil || cl.fn == nil || cl.fn.RegCode() == nil || p == nil || p.Origin == nil {
 		return nil
 	}
-	fb := &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitRegKeyOf(cl))}
+	fb := &jitFeedback{r: r, fn: cl.fn, cl: cl, e: r.jitState().regLearnedOf(r.jitRegKeyOf(cl)), keepLimit: jitKeepLimit}
 	return &jitRegFeedback{fb: fb, rc: cl.fn.RegCode(), p: p}
 }
+
+// jitKeepLimit, where a test sets it, limits the keep cells of every
+// compile's build (ssa.KeepFeedback), as a compile again past the
+// context's (abi.MaxKeeps) limits them: what is made natively past them
+// is left to Go.
+var jitKeepLimit int
 
 // at is the register instruction of the program's instruction pc, and what
 // that instruction is.

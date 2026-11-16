@@ -89,8 +89,8 @@ type Hints struct {
 // lowering is how a function is lowered: for which entry points, and for
 // which pipeline.
 type lowering struct {
-	calls, callee, ssa, forward, hot bool
-	hints                            Hints
+	callee, ssa, forward, hot bool
+	hints                     Hints
 }
 
 // argumentsOwn reports whether fn's own code may read its arguments and

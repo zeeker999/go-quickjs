@@ -2169,18 +2169,6 @@ func TestJITNoHeapWalks(t *testing.T) {
 	}
 }
 
-// jitCopiesForTest makes copies of template, each a function of its own to
-// the cache, kept alive in keep: a collection would drop the code of those
-// already compiled (the cache's keys are weak).
-func jitCopiesForTest(template *bytecode.Function, keep *[]*bytecode.Function) func() *bytecode.Function {
-	return func() *bytecode.Function {
-		fn := new(bytecode.Function)
-		*fn = *template
-		*keep = append(*keep, fn)
-		return fn
-	}
-}
-
 // The cache's epochs follow the collector's cycles (jitGCEpoch), as V8 ages
 // code by them, once a runtime has run the JIT, and pass every
 // jitEpochTime besides, for a program that allocates little.
@@ -2949,14 +2937,6 @@ func BenchmarkJITCallPromotion(b *testing.B) {
 				})
 			}
 		}
-	}
-}
-
-func jitNumericKernelCases() []struct{ name, body string } {
-	return []struct{ name, body string }{
-		{"logistic", `VAR x=0.123; for(VAR i=0;i<n;i++) x=3.99*x*(1-x); return x`},
-		{"newton", `VAR x=1,s=0; for(VAR i=0;i<n;i++) { x=(x+2/x)*0.5; s+=x } return s`},
-		{"particle", `VAR x=0,y=0,vx=0.2,vy=0.3,s=0; for(VAR i=0;i<n;i++) { vx-=x*0.001; vy-=y*0.001; x+=vx; y+=vy; if(x>10||x< -10) vx=-vx; if(y>10||y< -10) vy=-vy; s+=x*x+y*y } return s`},
 	}
 }
 

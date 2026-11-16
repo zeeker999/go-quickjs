@@ -19,25 +19,6 @@ package vm
 // asked (see zzz_typeof.go) and its name stored where the discriminant
 // goes.
 
-// switchCase is a case of a run switchStart looks up: its selector, a
-// literal, and the instruction its body begins at.
-type switchCase struct {
-	lit Value
-	// str is the selector of a string's case, k its constant, or -1 for
-	// the empty string push_empty_string pushes.
-	str string
-	k   int64
-	to  int
-}
-
-// switchStr is a string case of a lookup: the selector's WTF-8, its
-// constant, -1 for none, and the block its body begins.
-type switchStr struct {
-	str string
-	k   int64
-	to  int
-}
-
 // switchDense is the most integers' range an array of their blocks is
 // made for.
 const switchDense = 256

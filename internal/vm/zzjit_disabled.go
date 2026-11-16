@@ -62,12 +62,11 @@ func (*Runtime) SetJITBackground(bool) {}
 // JITBackground is false: there is no JIT to compile in the background.
 func (*Runtime) JITBackground() bool { return false }
 
-func (*Runtime) initJIT(bool, int64)                                  {}
-func (*Runtime) jitCountPure()                                        {}
-func (*Runtime) jitCountsCaller(int) bool                             { return false }
-func (*Runtime) jitBackEdge(*frame, uint32, int) (Value, error, bool) { return Value{}, nil, false }
-func (*Runtime) jitCodeBytes() int64                                  { return 0 }
-func (*Runtime) releaseJIT()                                          {}
+func (*Runtime) initJIT(bool, int64)      {}
+func (*Runtime) jitCountPure()            {}
+func (*Runtime) jitCountsCaller(int) bool { return false }
+func (*Runtime) jitCodeBytes() int64      { return 0 }
+func (*Runtime) releaseJIT()              {}
 
 // jitFramesDue makes no frames: no native code puts one off.
 func (r *Runtime) jitFramesDue(i int) {}

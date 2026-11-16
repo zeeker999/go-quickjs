@@ -69,29 +69,6 @@ func (s *jitState) inFlight() bool {
 	return len(s.regJobs) != 0
 }
 
-// A compile on the spot finds its callees' code there, a callee's compile
-// being made within its caller's, and inlines those it may; in the
-// background it would find them being compiled, call them natively, and
-// be compiled again only for what an exit teaches it, which a call
-// made natively, from a caller made natively, never does. So a function's
-// first compile that met a callee small enough to inline, being compiled,
-// is held (jitHold): it asks nothing yet, the function running in the
-// existing tiers, as it does while it compiles, and is prepared once its
-// callees have their code (jitDrain), its calls decided then as a compile on
-// the spot decides them. A held compile holds no place in the background
-// (jitJobsMax) and no workspace.
-//
-// Compiles may wait for each other, of functions calling each other: one
-// that would wait for a compile that waits for it, however many others are
-// between them, does not (jitCompileWaits), so that those held wait for no
-// cycle and each is prepared in the end. jitHoldRounds bounds how often one
-// is held, its callees' callees each new to it.
-//
-// A compile a frame waits for at a loop does not wait for a call the frame
-// has left behind (jitFrameLeft): the wait would be the loop's, in the
-// existing tiers, for a call it does not make.
-const jitHoldRounds = 3
-
 // jitDrain installs the compiles in the background that are done, in the
 // order they were handed over, at a check of the runtime's goroutine: a
 // function's entry, a loop's back edge (jitRegDrainJobs). An install

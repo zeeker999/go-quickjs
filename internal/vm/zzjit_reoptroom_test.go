@@ -122,32 +122,6 @@ func TestJITOneMissNoEntry(t *testing.T) {
 	}
 }
 
-// jitOldStaysUncounted is the entry of old, if any, that stayed held
-// through a refusal without the refusal's floor counting it reclaimable,
-// with its lowering, as listVictims counts it: old code stays only where
-// reclaiming it too would not make the room.
-func jitOldStaysUncounted(r *Runtime, old []*jitEntry) *jitEntry {
-	for _, e := range old {
-		if e.hint == 0 {
-			continue
-		}
-		n := e.bytes
-		if l := r.jit.lowered[e.link.key.Pointer]; l != nil {
-			n += l.bytes
-		}
-		if int64(r.jit.floor) > jitHeldButScratch(r)-int64(n) {
-			return e
-		}
-	}
-	return nil
-}
-
-// jitHeldButScratch is what r's JIT holds but makeRoom's list of what it
-// may reclaim, which a look for room lets go of, reclaiming nothing.
-func jitHeldButScratch(r *Runtime) int64 {
-	return r.jitHeldBytes() - int64(jitCapBytes(r.jit.victims))
-}
-
 // perInstr rises to what entries come to hold, however little more than it
 // that is, and falls toward what they hold less: a step of an eighth,
 // truncated, had left it short by up to 7 bytes an instruction for good, a

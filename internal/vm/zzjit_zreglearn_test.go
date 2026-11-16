@@ -10,58 +10,6 @@ import (
 	"github.com/go-quickjs/go-quickjs/internal/bytecode"
 )
 
-// regLearnSrc reads and writes properties of objects of two shapes: a
-// function compiled for the first deoptimizes at the second, and what its
-// code learned at its exits (jitRegDeoptSeen) has its next compile take
-// both. Go calls the functions, so that no caller's code inlines them.
-const regLearnSrc = `
-function A(x) { this.x = x; this.y = 1 }
-function B(x) { this.w = 0; this.x = x; this.y = 2 }
-function get(o, n) { var s = 0; for (var j = 0; j < n; j++) s += o.x + o.y; return s }
-function put(o, v, n) { for (var j = 0; j < n; j++) o.x = v + j; return o.x }
-var a = new A(1), b = new B(2)
-`
-
-// regLearnRun calls get and put of regLearnSrc in r: k times with a, then
-// k times with a and b in turn, twice.
-func regLearnRun(r *Runtime, k int) string {
-	global := func(name string) Value { v, _ := r.GetProp(Obj(r.Global()), r.Intern(name)); return v }
-	get, put, a, b := global("get"), global("put"), global("a"), global("b")
-	s := 0.0
-	for round := range 3 {
-		for i := range k {
-			o := a
-			if round > 0 && i%2 != 0 {
-				o = b
-			}
-			v, err := r.Call(get, Undefined, []Value{o, Float(3)})
-			if err != nil {
-				return regNativeShow(r, v, err)
-			}
-			w, err := r.Call(put, Undefined, []Value{o, Float(float64(i)), Float(3)})
-			if err != nil {
-				return regNativeShow(r, w, err)
-			}
-			s += v.Number() + w.Number()
-		}
-	}
-	return regNativeShow(r, Float(s), nil)
-}
-
-// jitRegLearnPlain has r tier up as it does with no QJS_JIT_STRESS, which
-// the learning TestJITRegPolymorphicLearned compares is written for: each
-// form's code compiled once its sites' caches know the first shape, then
-// left at the second's. Under the stress each form's first code is
-// compiled at its first call, a scan before any cache knew a shape, and
-// what each then learns depends on when its compiles happen -- in the
-// background or at once, at which check installed -- not on what its
-// exits teach it.
-func jitRegLearnPlain(r *Runtime) {
-	r.jitStress = jitStressConfig{}
-	r.jitCallThreshold, r.jitICThreshold = jitInvocationsForMaglev, jitInvocationsAfterICUpdate
-	r.interruptCounter = interruptCheckInterval
-}
-
 // regLeafSrc calls leaves -- built-ins native code calls without a frame
 // (jitLeafOp) -- from register code: those native code makes itself
 // (ssa.LeafKind), a string's codePointAt and at, Number.isNaN, and one Go

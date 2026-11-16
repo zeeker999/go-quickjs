@@ -14,7 +14,3 @@ func regStressForTest(r *Runtime, c jitStressConfig) {
 	r.jitStress = c
 	r.jitState().stressBudget = int(c.budget)
 }
-
-// regStressConfigs are the stresses TestJITRegStressAgrees runs under: CI's,
-// compiling at the first call alone, and polls more often.
-var regStressConfigs = []jitStressConfig{{budget: 3, deopt: 7}, {}, {budget: 1, deopt: 2}, {budget: 2, deopt: 3}, {budget: 1, deopt: 3}, {budget: 3, deopt: 5}}

@@ -29,11 +29,6 @@ import (
 // again until the level is done: the code each level runs is its function's
 // in the cache for as long as it runs.
 
-// jitRegFrameOps are the calls of Go on the frame (ssa.GoHost,
-// GoArgument, GoCells, GoClosure, GoClose) that Go makes for native code
-// of a register frame (jitRegFrameOp); it leaves the others to an exit.
-var jitRegFrameOps = map[ssa.GoOp]bool{ssa.GoHost: true, ssa.GoArgument: true, ssa.GoCells: true, ssa.GoClosure: true, ssa.GoClose: true}
-
 // regLinkOf is the link native callers call cl's function's register code c
 // through (ssa.CallSite's Entry): its code's call entry while it has code
 // they may call (regSet), none otherwise -- a call of it then Go's, from
