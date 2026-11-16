@@ -1134,6 +1134,9 @@ func armEmit(v *variant) (*block, error) {
 	h(bytecode.RDerivedRet, g.derivedRet)
 	h(bytecode.RApplyArgs, g.applyW)
 	h(bytecode.RArgsIndex, g.argsIndex)
+	// A cursor's close and a destructuring's step (arm64_cursor.go).
+	h(bytecode.RIterClose, g.iterClose)
+	h(bytecode.RIterStep, g.iterStep)
 
 	for n, l := range g.exits {
 		if n == 0 {

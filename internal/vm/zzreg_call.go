@@ -169,6 +169,15 @@ func (r *Runtime) regGenCall(o *Object, cl *closure, method bool, base, argc int
 		}
 	}
 	async := cl.fn.Async
+	if async && !cl.fn.Generator && !cl.fn.HasDirectEval {
+		// Its first run made as a call, the generator made only where it
+		// suspends (regAsyncRun).
+		if c := r.regGenOf(cl, o); c != nil && !c.args {
+			if fd := o.fn(); fd != nil && fd.extra == nil {
+				return r.regAsyncRun(o, cl, c, this, base, argc), nil
+			}
+		}
+	}
 	gen, err := r.newGenerator(cl, this, r.stack[base+2:base+2+argc], o, async, Undefined)
 	if err != nil {
 		if async {

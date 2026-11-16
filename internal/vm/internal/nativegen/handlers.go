@@ -67,6 +67,8 @@ var handlerOps = []bytecode.ROp{
 	bytecode.RApplyArgs,
 	// arguments[i] of the frame's kept arguments (argsIndex).
 	bytecode.RArgsIndex,
+	// A cursor's close and a destructuring's step.
+	bytecode.RIterClose, bytecode.RIterStep,
 }
 
 // handlerOrder checks that order, the operations an emitter laid out

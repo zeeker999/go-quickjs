@@ -1316,6 +1316,10 @@ func nativeEmit(v *variant) (*block, error) {
 	for i := 0; i < len(g.late); i++ {
 		g.late[i]()
 	}
+	// A cursor's close and a destructuring's step (amd64_cursor.go),
+	// after the rarer paths, so that they move none of them.
+	h(bytecode.RIterClose, g.iterClose)
+	h(bytecode.RIterStep, g.iterStep)
 	for n, l := range g.exits {
 		if n == 0 {
 			continue
