@@ -1480,6 +1480,13 @@ func (s *jitState) dropReg(key jitKey, e *jitRegEntry) {
 			// (jitRegPlace), as the stack form's dropEntry has them.
 			s.generation++
 		}
+		// What the floor noted as held for good has gone, and its
+		// function's state, which its code had kept, is the cache's to
+		// reclaim now (regLifeSpare): looked for again, as the stack
+		// form's dropEntry has it. Kept, the floor had a full budget
+		// refuse room with a hundred kilobytes of such states reclaimable,
+		// the JIT holding past its budget until the epoch's end.
+		s.floorAt = 0
 	}
 	e.dropped, e.cached = true, false
 	s.regClose(e)
